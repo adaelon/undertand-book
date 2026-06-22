@@ -21,6 +21,9 @@ crates/base-schema/fixtures/sample-base.json
 # Pass1 smoke 临时抽取结果(一次性,勿提交)
 tmp-smoke-*.json
 
+# 预构建产物基座(生成物,按需重建)
+.understand-book/
+
 # OS / editor cruft
 .DS_Store
 Thumbs.db

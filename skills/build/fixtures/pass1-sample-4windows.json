@@ -1,0 +1,93 @@
+[
+  {
+    "nodes": [
+      {"id": "entity:command_pattern", "type": "entity", "name": "命令模式", "occurrences": ["11.18.2", "11.18.4", "11.18.5", "11.18.10", "11.19.2"], "source_lid": null},
+      {"id": "concept:closure", "type": "concept", "name": "闭包", "occurrences": ["11.18.3", "11.18.4", "11.18.5", "11.18.10"], "source_lid": null},
+      {"id": "concept:first_class_function", "type": "concept", "name": "头等函数", "occurrences": ["11.18.2", "11.18.3"], "source_lid": null},
+      {"id": "concept:functional_programming", "type": "concept", "name": "函数式编程", "occurrences": ["11.18.2", "11.18.10"], "source_lid": null},
+      {"id": "entity:undo", "type": "entity", "name": "撤销", "occurrences": ["11.18.5", "11.18.8", "11.18.9"], "source_lid": null},
+      {"id": "entity:flyweight_pattern", "type": "entity", "name": "享元模式", "occurrences": ["11.19.5"], "source_lid": null},
+      {"id": "entity:chain_of_responsibility", "type": "entity", "name": "责任链模式", "occurrences": ["11.19.3"], "source_lid": null},
+      {"id": "entity:singleton_pattern", "type": "entity", "name": "单例模式", "occurrences": ["11.19.4"], "source_lid": null},
+      {"id": "entity:subclass_sandbox", "type": "entity", "name": "子类沙盒", "occurrences": ["11.19.2"], "source_lid": null},
+      {"id": "claim:11.18.3:cpp-limited-first-class-support", "type": "claim", "name": "C++ 对头等函数的支持非常有限", "occurrences": [], "source_lid": "11.18.3"},
+      {"id": "claim:11.18.4:command-simulates-closure", "type": "claim", "name": "命令模式是无闭包语言模拟闭包的一种方式", "occurrences": [], "source_lid": "11.18.4"},
+      {"id": "claim:11.18.5:class-better-for-multiop-command", "type": "claim", "name": "多操作命令(如可撤销)用类比单一函数更合适", "occurrences": [], "source_lid": "11.18.5"},
+      {"id": "claim:11.19.5:flyweight-solves-command-waste", "type": "claim", "name": "享元模式解决无状态命令实例的内存浪费", "occurrences": [], "source_lid": "11.19.5"}
+    ],
+    "edges": [
+      {"source": "claim:11.18.4:command-simulates-closure", "target": "entity:command_pattern", "type": "about", "direction": "directed", "scope": "local", "weight": 0.85},
+      {"source": "claim:11.18.4:command-simulates-closure", "target": "concept:closure", "type": "about", "direction": "directed", "scope": "local", "weight": 0.85},
+      {"source": "entity:command_pattern", "target": "concept:closure", "type": "related_to", "direction": "undirected", "scope": "local", "weight": 0.7},
+      {"source": "entity:command_pattern", "target": "concept:functional_programming", "type": "related_to", "direction": "undirected", "scope": "local", "weight": 0.6},
+      {"source": "claim:11.18.3:cpp-limited-first-class-support", "target": "concept:first_class_function", "type": "about", "direction": "directed", "scope": "local", "weight": 0.75},
+      {"source": "claim:11.18.5:class-better-for-multiop-command", "target": "entity:command_pattern", "type": "about", "direction": "directed", "scope": "local", "weight": 0.7},
+      {"source": "entity:command_pattern", "target": "entity:undo", "type": "related_to", "direction": "undirected", "scope": "local", "weight": 0.6},
+      {"source": "claim:11.19.5:flyweight-solves-command-waste", "target": "entity:flyweight_pattern", "type": "exemplifies", "direction": "directed", "scope": "local", "weight": 0.8}
+    ]
+  },
+  {
+    "nodes": [
+      {"id": "concept:simplicity", "type": "concept", "name": "简单性", "occurrences": ["9.9.1", "9.9.2", "9.9.3", "9.9.6"], "source_lid": null},
+      {"id": "concept:elegance", "type": "concept", "name": "优雅性", "occurrences": ["9.9.9", "9.9.10"], "source_lid": null},
+      {"id": "concept:abstraction", "type": "concept", "name": "抽象", "occurrences": ["9.10.3"], "source_lid": null},
+      {"id": "concept:decoupling", "type": "concept", "name": "解耦", "occurrences": ["9.10.3"], "source_lid": null},
+      {"id": "concept:optimization", "type": "concept", "name": "优化", "occurrences": ["9.10.4"], "source_lid": null},
+      {"id": "claim:9.9.3:simplicity-reduces-code", "type": "claim", "name": "保持简单性则代码量变少、心智负担更小", "occurrences": [], "source_lid": "9.9.3"},
+      {"id": "claim:9.9.6:good-solution-is-distillation", "type": "claim", "name": "好的解决方案不是更少代码量而是对代码的升华", "occurrences": [], "source_lid": "9.9.6"},
+      {"id": "claim:9.9.9:elegance-over-conditionals", "type": "claim", "name": "一小块逻辑正确处理一大片用例胜过堆条件", "occurrences": [], "source_lid": "9.9.9"},
+      {"id": "claim:9.10.3:abstract-only-when-needed", "type": "claim", "name": "除非确信代码需要灵活性否则别急于抽象解耦", "occurrences": [], "source_lid": "9.10.3"},
+      {"id": "claim:9.10.4:defer-low-level-optimization", "type": "claim", "name": "推迟降低灵活性的底层优化、能晚则晚", "occurrences": [], "source_lid": "9.10.4"}
+    ],
+    "edges": [
+      {"source": "claim:9.9.3:simplicity-reduces-code", "target": "concept:simplicity", "type": "about", "direction": "directed", "scope": "local", "weight": 0.85},
+      {"source": "claim:9.9.6:good-solution-is-distillation", "target": "concept:simplicity", "type": "about", "direction": "directed", "scope": "local", "weight": 0.7},
+      {"source": "concept:elegance", "target": "concept:simplicity", "type": "related_to", "direction": "undirected", "scope": "local", "weight": 0.6},
+      {"source": "concept:abstraction", "target": "concept:decoupling", "type": "related_to", "direction": "undirected", "scope": "local", "weight": 0.7},
+      {"source": "claim:9.10.3:abstract-only-when-needed", "target": "concept:abstraction", "type": "about", "direction": "directed", "scope": "local", "weight": 0.7},
+      {"source": "claim:9.10.4:defer-low-level-optimization", "target": "concept:optimization", "type": "about", "direction": "directed", "scope": "local", "weight": 0.7}
+    ]
+  },
+  {
+    "nodes": [
+      {"id": "entity:flyweight_pattern", "type": "entity", "name": "享元模式", "occurrences": ["12.10.2", "12.10.3", "12.10.5"], "source_lid": null},
+      {"id": "entity:factory_method", "type": "entity", "name": "工厂方法", "occurrences": ["12.10.4"], "source_lid": null},
+      {"id": "entity:object_pool", "type": "entity", "name": "对象池模式", "occurrences": ["12.10.5"], "source_lid": null},
+      {"id": "entity:state_pattern", "type": "entity", "name": "状态模式", "occurrences": ["12.10.6"], "source_lid": null},
+      {"id": "concept:shared_instance", "type": "concept", "name": "共享实例", "occurrences": ["12.10.2", "12.10.3"], "source_lid": null},
+      {"id": "claim:12.10.3:create-on-demand-when-unpredictable", "type": "claim", "name": "无法预测需要哪些享元时最好按需创建", "occurrences": [], "source_lid": "12.10.3"},
+      {"id": "claim:12.10.4:hide-constructor-is-factory-method", "type": "claim", "name": "隐藏构造函数的一个例子是工厂方法模式", "occurrences": [], "source_lid": "12.10.4"},
+      {"id": "claim:12.10.5:object-pool-stores-flyweights", "type": "claim", "name": "对象池模式适合存储已实例化的享元", "occurrences": [], "source_lid": "12.10.5"},
+      {"id": "claim:12.10.6:stateless-state-objects-shareable", "type": "claim", "name": "无字段状态对象可在多个状态机间共享重用", "occurrences": [], "source_lid": "12.10.6"}
+    ],
+    "edges": [
+      {"source": "claim:12.10.4:hide-constructor-is-factory-method", "target": "entity:factory_method", "type": "exemplifies", "direction": "directed", "scope": "local", "weight": 0.8},
+      {"source": "claim:12.10.5:object-pool-stores-flyweights", "target": "entity:object_pool", "type": "exemplifies", "direction": "directed", "scope": "local", "weight": 0.8},
+      {"source": "claim:12.10.5:object-pool-stores-flyweights", "target": "entity:flyweight_pattern", "type": "about", "direction": "directed", "scope": "local", "weight": 0.7},
+      {"source": "claim:12.10.6:stateless-state-objects-shareable", "target": "entity:state_pattern", "type": "about", "direction": "directed", "scope": "local", "weight": 0.7},
+      {"source": "entity:flyweight_pattern", "target": "concept:shared_instance", "type": "related_to", "direction": "undirected", "scope": "local", "weight": 0.75},
+      {"source": "claim:12.10.3:create-on-demand-when-unpredictable", "target": "entity:flyweight_pattern", "type": "about", "direction": "directed", "scope": "local", "weight": 0.7}
+    ]
+  },
+  {
+    "nodes": [
+      {"id": "entity:observer_pattern", "type": "entity", "name": "观察者模式", "occurrences": ["13.12.1", "13.12.2", "13.12.9"], "source_lid": null},
+      {"id": "entity:data_binding", "type": "entity", "name": "数据绑定", "occurrences": ["13.12.6", "13.12.7", "13.12.8"], "source_lid": null},
+      {"id": "concept:dataflow_programming", "type": "concept", "name": "数据流编程", "occurrences": ["13.12.5"], "source_lid": null},
+      {"id": "concept:functional_reactive_programming", "type": "concept", "name": "函数响应式编程", "occurrences": ["13.12.5"], "source_lid": null},
+      {"id": "concept:declarative_system", "type": "concept", "name": "声明式系统", "occurrences": ["13.12.8"], "source_lid": null},
+      {"id": "claim:13.12.2:observer-has-boilerplate", "type": "claim", "name": "大型应用里观察者代码出现大量重复样板", "occurrences": [], "source_lid": "13.12.2"},
+      {"id": "claim:13.12.7:data-binding-automates-tedium", "type": "claim", "name": "数据绑定自动化繁琐工作而不消除命令式代码", "occurrences": [], "source_lid": "13.12.7"},
+      {"id": "claim:13.12.8:declarative-can-be-slow", "type": "claim", "name": "声明式系统可能较慢且难集成进引擎核心", "occurrences": [], "source_lid": "13.12.8"},
+      {"id": "claim:13.12.9:observer-simple-and-works", "type": "claim", "name": "观察者模式简单且运转良好", "occurrences": [], "source_lid": "13.12.9"}
+    ],
+    "edges": [
+      {"source": "claim:13.12.2:observer-has-boilerplate", "target": "entity:observer_pattern", "type": "about", "direction": "directed", "scope": "local", "weight": 0.8},
+      {"source": "entity:data_binding", "target": "entity:observer_pattern", "type": "related_to", "direction": "undirected", "scope": "local", "weight": 0.6},
+      {"source": "claim:13.12.7:data-binding-automates-tedium", "target": "entity:data_binding", "type": "about", "direction": "directed", "scope": "local", "weight": 0.8},
+      {"source": "claim:13.12.8:declarative-can-be-slow", "target": "concept:declarative_system", "type": "about", "direction": "directed", "scope": "local", "weight": 0.7},
+      {"source": "claim:13.12.9:observer-simple-and-works", "target": "entity:observer_pattern", "type": "about", "direction": "directed", "scope": "local", "weight": 0.7},
+      {"source": "concept:dataflow_programming", "target": "concept:functional_reactive_programming", "type": "related_to", "direction": "undirected", "scope": "local", "weight": 0.6}
+    ]
+  }
+]
