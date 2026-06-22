@@ -30,10 +30,13 @@ export const GraphNodeZ = z.object({
 
 export const EdgeScopeZ = z.enum(["local", "long_range"]);
 
+export const DirectionZ = z.enum(["directed", "undirected"]);
+
 export const GraphEdgeZ = z.object({
   source: z.string(),
   target: z.string(),
   type: z.string(),
+  direction: DirectionZ,
   scope: EdgeScopeZ,
   weight: z.number(),
 });

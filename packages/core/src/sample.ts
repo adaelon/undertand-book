@@ -24,6 +24,7 @@ export function buildSampleBase(): ReadOnlyBase {
         source: "claim:1.1:cmd-is-reified-call",
         target: "entity:command",
         type: "exemplifies",
+        direction: "directed",
         scope: "local",
         weight: 0.8,
       },

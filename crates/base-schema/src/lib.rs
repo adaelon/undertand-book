@@ -72,7 +72,20 @@ pub enum EdgeScope {
     LongRange,
 }
 
+/// 边方向 `[ADR-0010/0011/0023]`。directed = source→target 有序(如 builds_on/cites);
+/// undirected = 两端对称(如 contradicts),merge 去重时规范化端点顺序后比对。
+/// 是 merge 去重键 (source,target,type,direction) 的成员 `[ADR-0011 决策4]`。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "../../../packages/core/src/generated/")]
+pub enum Direction {
+    Directed,
+    Undirected,
+}
+
 /// 语义边。source/target = 节点 id(非 LID)`[ADR-0010]`。
+/// 切片0 字段 = source/target/type/direction/scope/weight;
+/// **不含 description**(读时边只作召回路标、不进推理 [ADR-0011];merge 亦不用)`[ADR-0023]`。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS, JsonSchema)]
 #[ts(export, export_to = "../../../packages/core/src/generated/")]
 pub struct GraphEdge {
@@ -80,6 +93,7 @@ pub struct GraphEdge {
     pub target: String,
     #[serde(rename = "type")]
     pub edge_type: String,
+    pub direction: Direction,
     pub scope: EdgeScope,
     pub weight: f32,
 }
@@ -134,6 +148,7 @@ pub fn sample_base() -> ReadOnlyBase {
             source: "claim:1.1:cmd-is-reified-call".into(),
             target: "entity:command".into(),
             edge_type: "exemplifies".into(),
+            direction: Direction::Directed,
             scope: EdgeScope::Local,
             weight: 0.8,
         }],
