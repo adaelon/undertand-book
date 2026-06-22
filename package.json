@@ -1,0 +1,16 @@
+{
+  "name": "understand-book",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Local Claude Code plugin: turn a book into a read-only knowledge-graph base + read-time book agent.",
+  "scripts": {
+    "test": "pnpm -r test",
+    "gen-schema": "cargo test -p base-schema export_bindings"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0",
+    "vitest": "^3.1.0",
+    "@types/node": "^22.0.0"
+  }
+}

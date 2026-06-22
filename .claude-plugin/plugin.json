@@ -1,0 +1,13 @@
+{
+  "name": "understand-book",
+  "description": "Turn a book (epub/md) into a read-only knowledge-graph base, then read it with an anchored-reasoning book agent — local plugin, no hosted service.",
+  "version": "0.0.0",
+  "license": "MIT",
+  "keywords": [
+    "book",
+    "knowledge-graph",
+    "reading",
+    "anchored-reasoning",
+    "LID"
+  ]
+}
