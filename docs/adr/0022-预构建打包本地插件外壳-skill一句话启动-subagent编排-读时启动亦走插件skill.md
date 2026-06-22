@@ -8,15 +8,15 @@
 ## 决策
 1. **预构建 = 本地 Claude Code 插件外壳,U-A 同构**:
    - `.claude-plugin/plugin.json` = 插件清单(name `understand-book`)。
-   - `skills/understand-book/SKILL.md` = **一句话入口**:frontmatter `name: understand-book` → slash `/understand-book [epub|md] [opts]`;正文编排预构建管线(导入→LID 切分→窗口→Pass1/Pass2→merge+闸→产基座)。
+   - `skills/build/SKILL.md` = **预构建入口**。插件 skill **强制命名空间** `/<插件名>:<skill文件夹名>` ⇒ 命令 **`/understand-book:build [epub|md] [opts]`**(裸名 `/understand-book` 是 `.claude/` 标准配置才有,插件形态无);正文编排预构建管线(导入→LID 切分→窗口→Pass1/Pass2→merge+闸→产基座)。
    - `agents/{pass1-local-extractor,pass2-longrange-linker}.md` = LLM subagent(harness 供 LLM,[[ADR-0010]])。
    - skill 内确定性脚本(LID 切分/窗口/merge/闸/产基座,TS `*.mjs`)= S1–S3 落点。
 2. **「官方」无关,无注册门槛**:本地插件目录 Claude Code 直接加载(本地路径,或 marketplace 指向本仓库),slash 命令即用。`plugin.json` 的 homepage/repo/license 纯元数据,非加载前提。
-3. **读时启动亦走插件 skill**(类 U-A `/understand-dashboard` 拉 Vite):`skills/understand-book-read/` 起 Rust localhost 服务 + 阅读器。**但 skill 仅作启动器**——服务拉起即独立存活,读时产品本体与 harness 脱钩([[ADR-0003]])。
+3. **读时启动亦走插件 skill**(类 U-A `/understand-dashboard` 拉 Vite):`skills/read/SKILL.md` ⇒ `/understand-book:read` 起 Rust localhost 服务 + 阅读器(留 S7)。**但 skill 仅作启动器**——服务拉起即独立存活,读时产品本体与 harness 脱钩([[ADR-0003]])。
 4. **repo = 单 monorepo,三面并置**(承 [[ADR-0021]]):插件面(`.claude-plugin/` + `skills/` + `agents/`)+ pnpm workspace(`packages/`,TS 预构建)+ cargo workspace(`crates/`,Rust 读时),schema crate 经 ts-rs 桥接。
 
 ## 命门
-- **一句话 = SKILL.md frontmatter `name`**,不是额外注册;harness 读 SKILL.md 后编排 subagent + 跑确定性脚本。
+- **一句话 = `/<插件名>:<skill文件夹名>`**(插件强制命名空间,由 `plugin.json` 的 name + skill 文件夹名共同决定),非额外注册;harness 读 SKILL.md 后编排 subagent + 跑确定性脚本。开发期 `claude --plugin-dir <repo>` 即加载,无需 marketplace。
 - **预构建 LLM 来自 harness([[ADR-0003]])⇒ 必须是插件 skill(在 harness 内跑)**,不能是脱离 harness 的独立 CLI(那需自带 provider key,直破 [[ADR-0003]] 预构建绑 harness)。
 - **读时 skill 仅启动器**:拉起 Rust 服务即退场,读时产品不依赖 harness 活着([[ADR-0003]] 脱钩);区别于预构建 skill(全程在 harness 内编排)。
 
@@ -30,7 +30,7 @@
 - 插件本地加载的具体安装方式(marketplace 配置 vs 本地路径 vs hook)→ 切片0 S0 实测定。
 
 ## 影响
-- **回填切片方案 S0**:S0 从「纯 schema 链路」扩为「monorepo 骨架 + 插件外壳 + schema 链路」,新增插件外壳建立步 + `/understand-book` 入口占位。
+- **回填切片方案 S0**:S0 从「纯 schema 链路」扩为「monorepo 骨架 + 插件外壳 + schema 链路」,新增插件外壳建立步 + `/understand-book:build` 入口占位(`skills/build/`)。
 - **回填架构蓝图 §6**:加「打包形态 = 本地插件外壳」一句。
 - **承** [[ADR-0001]](本地 plugin 形态、无托管)/[[ADR-0003]](预构建绑 harness、读时脱钩)/[[ADR-0010]](Pass1/Pass2 subagent)/[[ADR-0021]](单 monorepo、ts-rs 桥接);参照 U-A 插件目录结构(`.claude-plugin/plugin.json` + `skills/*/SKILL.md` + `agents/*.md` + skill 内确定性脚本)。
 - **不回填 CONTEXT**:打包形态是实现细节,守 [[ADR-0021]] CONTEXT 纯术语表纪律。
