@@ -21,7 +21,7 @@ harness 供 LLM)`[ADR-0003]`;读时是独立产品,启动走 `/understand-book:r
 - `$ARGUMENTS`:书路径(epub / markdown)。`--full` = 忽略已有基座强制全量重建。
 
 ## 编排骨架(7 段管线 · S1–S3 逐段填实)
-1. **导入 + LID 段级切分**(确定性,`skills/build/split-lid.mjs` · S1 `[ADR-0008]`)
+1. **导入 + LID 段级切分**(确定性,`skills/build/split-lid.ts`,经 tsx 运行 · S1 `[ADR-0008]`)
 2. **窗口切分**(LID 子树 + 双约束预算,`compute-windows.mjs` · S2 `[ADR-0009]`)
 3. **Pass1 局部抽取**(subagent `pass1-local-extractor`,5 并发 · S3 `[ADR-0010]`)
 4. **merge + 确定性图谱闸**(`merge-graph.mjs` · S3 `[ADR-0011]`)
