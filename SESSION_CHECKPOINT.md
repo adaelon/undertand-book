@@ -1,13 +1,13 @@
-# SESSION_CHECKPOINT — 2026-06-23(S4 完成:读时 Rust 叶子工具;待 commit)
+# SESSION_CHECKPOINT — 2026-06-23(S4 完成并 push;下一步 S5)
 
 ## 新鲜度自检
 - git 仓库,remote `https://github.com/adaelon/undertand-book.git`,默认分支 main。
-- 写入时最新 commit:`5c44a50`(show-base 基座查看器)。**本次工作 = S4(read-tools crate)+ ADR-0024 + 图谱/LID 导读文档,尚未 commit**;读入时对比 `git log -3`,以 git log 为准。
+- 写入时最新 commit:`bea8b21`(S4 读时 Rust 叶子工具 + ADR-0024,已 push)。读入时对比 `git log -3`,以 git log 为准。
 
 ## 当前在做什么
-切片0:**S0–S3.5 + S4 完成**。S4 读时 Rust 确定性叶子工具(headless 库+CLI)落地:`book.manifest/text/context(near)/concept` 消费小基座 + 旁路原文。下一步起 **S5**(book.query 内层 mini-loop + NativeAdapter)。
+切片0:**S0–S3.5 + S4 完成并 push**。S4 读时 Rust 确定性叶子工具(headless 库+CLI)已落地:`book.manifest/text/context(near)/concept` 消费小基座 + 旁路原文。下一步起 **S5**(book.query 内层 mini-loop + NativeAdapter)。
 
-## 已完成(本会话新增 S4,三子刀)
+## 已完成(S4,三子刀)
 - **S4a**:`pass1-batch.ts` 同固化 `source.txt`(原文旁路);修 `lib.rs` Span 注释口径(UTF-16 非字节)`[ADR-0024]`。
 - **S4b**:新 crate `crates/read-tools`(库+CLI)。`book.manifest`(tree+stats_by_lid)/`book.text`(按 UTF-16 span 切真原文)。`text 11.18.4` 逐字 == TS 预览(跨语言一致)。
 - **S4c**:`book.context(near)`(树邻接+local边,自指跳过,weight 降序,top-K)/`book.concept`(全量 occurrences+related_entities)。`ToolError` 信封禁降级。
@@ -19,7 +19,7 @@
 3. 先定 `ModelAdapter` trait:`complete(messages, tools?, schema?) → ParsedResponse`;NativeAdapter 对接推荐后端(Claude),provider key 留本地。
 
 ## 未提交 / 未完成
-- 待 commit:`crates/read-tools/`、`docs/adr/0024-*`、`docs/导读-知识图谱与LID的关系.md`、改动(`pass1-batch.ts`/`base-schema/lib.rs`/`generated/Span.ts`/`Cargo.lock`)。
+- 无未提交(S4 已 commit+push 至 `bea8b21`)。
 - `source.txt` 已 gitignore(`.understand-book/` 生成物,pass1-batch 重建)。
 - near 默认 K=10 占位(待 S8 金标准集定);context mid/far + book.query + ReActAdapter 留 S5+/切片1+。
 - 全书 64 窗 Pass1 锚定率定量仍留(需 harness)。
