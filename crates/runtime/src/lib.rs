@@ -6,6 +6,7 @@ use read_tools::{Book, ToolError};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+pub mod goldset;
 pub mod orchestrator;
 
 /// scope 档(切片0 两档;cross_chapter/global 留切片1+)`[ADR-0016/0025]`。

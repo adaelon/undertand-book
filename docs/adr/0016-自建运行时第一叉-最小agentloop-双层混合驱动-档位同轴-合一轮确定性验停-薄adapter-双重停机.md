@@ -37,6 +37,11 @@
 - **议题7 第二叉**定 `book.query/synthesize` 精确签名与分工(synthesize 与自含外扩的 query 若无法清晰分工 → 评估并入 query,承 [[ADR-0014]] 何时回头)。
 - 若实测 ReActAdapter 在某弱后端结构化解析失败率过高 → 评估更强约束 prompt / 重试,**不回退到两套独立 loop**。
 
+## S8 真跑回填(2026-06-23,glm-5.1,金标准集 12 条经内层 `book.query`)
+- **内层 scope 档行为**:12 条锚定问答**全部 local 档收口**(scope_used=local、incomplete=0),chapter 档与外扩未触发——锚点单小节问答 local 证据(anchor∪context_near)即足。chapter/cross_chapter/global 档真基座行为待更复杂多跳问题观察(切片1+)。
+- **内层各 scope 档检索体积上限**:local 档(anchor + 树邻接 + local 边)证据量稳定可控,切片0 未触体积上限;具体上限待大基座 + chapter 档实测。
+- **外层 max_turns(12)/token_budget(120k)**:S8 走内层 query 不经外层 loop,沿用 S6c/S7 真跑观察(单次 10/2 轮、tokens 远低于 budget);更大规模观察续切片1+。
+
 ## 影响
 - **回填 V3**:§5.2(自建最小运行时 → 双层 loop 形态展开)、§4.1 `book.query`(内层 loop 机制 + scope 同轴)。
 - **新增 CONTEXT 术语**:最小 agent loop(双层运行时)、ModelAdapter(provider 适配 / 原生·ReAct 分轨)、scope-granularity 同轴半径。

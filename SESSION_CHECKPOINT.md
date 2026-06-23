@@ -1,33 +1,36 @@
-# SESSION_CHECKPOINT — 2026-06-23(S7 已 push,下一步 S8)
+# SESSION_CHECKPOINT — 2026-06-23(S8 真跑结构红线 100%,未提交;下一步=人工试读+契约冻结=切片0 收尾)
 
 ## 新鲜度自检
 - git 仓库,remote `https://github.com/adaelon/undertand-book.git`,默认分支 main。
-- 写入时最新 commit:`4b150e2`(S7:reader.* 闭环四动作 + memory 抽独立 crate + ADR-0027)。本 checkpoint 是其后的刷新 commit;读入时对比 `git log -3`,以 git log 为准。
+- 写入时最新 commit:`1f868c9`(刷新 checkpoint:S7 已 push)。**S8 改动尚未 commit**(见「未提交」)。
+- 读入时对比 `git log -3`,以 git log 为准。
 
 ## 当前在做什么
-切片0:**S0–S7 完成并 push**。S7=命令优先阅读器 + 闭环四动作(三子切片全绿 + 真跑兑现闭环判据):
-- **S7a** memory 从 runtime 抽独立 crate `crates/memory`(纯重构;拆 `runtime↔reader` 循环依赖 + 兑现记忆层独立地位)。
-- **S7b** 新 crate `crates/reader`:gotoLid/scroll/highlight/note/state 返 effect、**叶序滑动窗口** viewport、note/highlight 委托 memory.save、render 读 memory.recall 画标注(**标注单源=记忆层**)。
-- **S7c** reader 五工具接进外层 orchestrator + book.manifest 移出(token 炸弹)+ prompt 强化;FakeAdapter 脚本化闭环测 + 真实 glm-5.1 端到端验。
-下一步 **S8**(金标准集 + 验收闸,切片0 收尾)。
+切片0 **S8 金标准集 + 验收闸**(切片0 收尾),针对**内层 `book.query`**做主度量。
+**已完成**:harness 落地(47 测全绿 + clippy 净)+ **glm-5.1 真跑达标**:
+- **结构红线 100.0%(12/12,0 悬空)** ⇒ 切片0 总判据①兑现、ADR-0004 结构红线真后端验证。
+- 语义信号:mean_recall 1.00 / mean_precision 0.75 / incomplete 0 / errored 0;12 条全 local 档收口;answer 抽查贴原文。
+**未做**:人工试读最终认可 + 命令面契约冻结(切片0 完成充要的最后两步)。
 
 ## 下一步(可直接接手)
-1. 起 **S8**:建小而稳人工金标准集(问→期望 citation LID)+ 结构红线闸(确定性校验 citations 全真 LID,无悬空)+ 语义质量人工评 + 人工试读。读 `docs/切片方案-切片0样板间.md` S8 + `docs/adr/0004`(引用红线分层)+ 体检 §11。
-2. 选址:金标准集 + 闸放 `crates/runtime` 新 bin/test 或独立脚本;消费 `runtime::orchestrator::run`(外层)或 `runtime::query`(内层)对真基座 `.understand-book/game-programming-patterns` 跑。
-3. 跑完回填实测数字 → 各 ADR「何时回头」:语义质量阈值/金标准集规模(0004)、max_turns/token_budget(0016)、DEFAULT_RADIUS 叶序窗口(0027);**命令面契约冻结为基线**(V3 §6,切片0 完成充要)。
+1. **人工试读认可**(用户拍板语义质量):重看 goldset 报告 12 条 answer/citation(`cargo run -p runtime -- .understand-book/game-programming-patterns goldset crates/runtime/goldset/game-programming-patterns.json`)。
+2. **冻结命令面契约为基线**(V3 §6,切片0 完成充要):在 `需求文档-V3.md` §6 标注「§4.1–4.4 命令面契约 + base-schema 自切片0 验证通过冻结为基线」,起一条收尾 ADR 或在 V3 §6 落冻结声明。
+3. **commit + push**:S8 代码(goldset.rs/goldset/json/lib.rs/main.rs)+ 回填的 ADR-0004/0016 + 代码链路 + 契约冻结 + checkpoint。建议拆 2 commit:① S8 harness+真跑回填 ② 契约冻结(切片0 收尾)。
+4. 切片0 收尾后 → 切片1+(句级 LID / Pass2 长程边 / synthesize 深路径 / reader 全集 / memory consolidation,见切片方案 §4)。
 
 ## 未提交 / 未完成
-- 无(S7 代码 5 crate + ADR-0027 + 代码链路 + 架构 + 本 checkpoint 已 push 至 `4b150e2` 及其后刷新 commit)。
-- 真跑副产临时 memory 隔离在 scratchpad(非 repo);`UB_TRACE=1` 开外层 loop 诊断 trace。
-- 占位待 S8 回填:DEFAULT_RADIUS=3 / max_turns=12 / token_budget=120k;不给明确 LID 时定位语义(book.query/concept 探索收敛)与 reader 闭环正交。
+- **未 commit**(已测+真跑达标):`crates/runtime/src/goldset.rs`(新)、`crates/runtime/goldset/game-programming-patterns.json`(新)、`crates/runtime/src/{lib.rs,main.rs}`(改)、`docs/adr/{0004,0016}.md`(S8 回填)、`docs/代码链路.md`(S8 条)。
+- 切片0 总判据未达项仅剩:人工试读认可 + 契约冻结(均在「下一步」)。结构红线/语义信号/闭环(S7)已达。
 
 ## 冷启动读序
 1. `docs/技术方案-架构蓝图.md` — 架构全景 + §6 crate 依赖拓扑。
-2. `docs/切片方案-切片0样板间.md` — S8=金标准集+验收闸(下一刀,切片0 收尾)+ §5 总判据。
-3. `docs/代码链路.md` — S0–S7 改动账本(末条 S7)。
-4. `docs/adr/` — `0027`(reader 落地+memory 拆 crate+viewport)、`0026`(外层 loop)、`0016`(双层 loop)、`0015`(reader/memory/error 命令面)、`0004`(引用红线,S8 用)。
-5. `crates/{reader/src/lib.rs, runtime/src/orchestrator.rs, memory/src/lib.rs, runtime/src/lib.rs}` — reader core / 外层 loop+reader 接入 / 记忆层 / 内层 query。
-6. `需求文档-V3.md` §4.2(reader.*)+ §6(切片0 总判据 + 契约冻结基线)。
+2. `docs/切片方案-切片0样板间.md` — §5 总判据(切片0 完成充要)+ §3 实测数字清单。
+3. `docs/代码链路.md` — S0–S8 改动账本(末条 S8 真跑达标)。
+4. `docs/adr/0004`(引用红线 + S8 真跑回填)、`0016`(双层 loop + S8 scope 回填)、`0027/0026`(reader/外层 loop)。
+5. `crates/runtime/src/{goldset.rs, lib.rs}` — 金标准闸 / 内层 query。
+6. `需求文档-V3.md` §6(切片0 总判据 + 契约冻结基线)+ §7.1(引用红线)。
 
 ## 本会话决策摘要
-- **ADR-0027**(S7 落地):reader 落独立 crate + memory 从 runtime 抽独立 crate(拆 `runtime↔reader` 循环依赖,crate 强制 DAG)+ viewport=叶序滑动窗口 + reader.note/highlight 委托 memory·render 读 recall(标注单源)+ 真跑回填(book.manifest 移出外层=token 炸弹防护 / prompt 强化引导调 reader)。已 glm-5.1 真跑兑现闭环判据(turn1 highlight+note → turn2 终答,锚回真 LID 11.18.2)。
+- **S8 选址**:金标准集针对内层 `book.query`(非外层 E loop)——结构红线度量干净/可复现/省 token;外层闭环已 S7 兑现。(落 `docs/代码链路.md` S8 条)
+- **结构红线 vs 语义质量分工**(承 ADR-0004):自动验收只到结构红线(确定性、判据 100% 已达);语义 recall/precision 作人工评客观信号(建议 recall≥0.9 阈,precision 不设硬阈——额外真实引用不判负),最终人工试读认可由用户裁。(回填 ADR-0004「S8 真跑回填」)
+- **runner 逐条容错**:provider 偶发空响应重试一次+errored 单列,不静默降级(ADR-0015 精神)。

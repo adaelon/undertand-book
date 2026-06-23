@@ -1,0 +1,74 @@
+[
+  {
+    "id": "cmd-closure",
+    "q": "命令模式如何在没有闭包的语言里模拟闭包?",
+    "anchor_lid": "11.18.4",
+    "expect_cite": ["11.18.4"]
+  },
+  {
+    "id": "cmd-undo-class",
+    "q": "为什么可撤销这类多操作的命令,用类来实现比用单一函数更合适?",
+    "anchor_lid": "11.18.5",
+    "expect_cite": ["11.18.5"]
+  },
+  {
+    "id": "cpp-first-class",
+    "q": "C++ 对头等函数的支持情况如何?",
+    "anchor_lid": "11.18.3",
+    "expect_cite": ["11.18.3"]
+  },
+  {
+    "id": "flyweight-memory",
+    "q": "享元模式怎样缓解无状态命令实例带来的内存浪费?",
+    "anchor_lid": "11.19.5",
+    "expect_cite": ["11.19.5"]
+  },
+  {
+    "id": "flyweight-on-demand",
+    "q": "当无法预测会用到哪些享元时,应该怎么创建它们?",
+    "anchor_lid": "12.10.3",
+    "expect_cite": ["12.10.3"]
+  },
+  {
+    "id": "hide-constructor",
+    "q": "隐藏构造函数的一个典型做法是什么?",
+    "anchor_lid": "12.10.4",
+    "expect_cite": ["12.10.4"]
+  },
+  {
+    "id": "object-pool",
+    "q": "对象池模式适合用来存储什么?",
+    "anchor_lid": "12.10.5",
+    "expect_cite": ["12.10.5"]
+  },
+  {
+    "id": "stateless-state",
+    "q": "无字段的状态对象能不能在多个状态机之间共享?",
+    "anchor_lid": "12.10.6",
+    "expect_cite": ["12.10.6"]
+  },
+  {
+    "id": "simplicity-less-code",
+    "q": "保持简单性会对代码量和心智负担产生什么影响?",
+    "anchor_lid": "9.9.3",
+    "expect_cite": ["9.9.3"]
+  },
+  {
+    "id": "when-abstract",
+    "q": "什么时候才应该为了灵活性去抽象和解耦?",
+    "anchor_lid": "9.10.3",
+    "expect_cite": ["9.10.3"]
+  },
+  {
+    "id": "observer-boilerplate",
+    "q": "在大型应用里观察者模式会暴露出什么问题?",
+    "anchor_lid": "13.12.2",
+    "expect_cite": ["13.12.2"]
+  },
+  {
+    "id": "data-binding-imperative",
+    "q": "数据绑定能否消除命令式代码?",
+    "anchor_lid": "13.12.7",
+    "expect_cite": ["13.12.7"]
+  }
+]
