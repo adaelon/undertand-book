@@ -6,6 +6,9 @@ use read_tools::{Book, ToolError};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+pub mod memory;
+pub mod orchestrator;
+
 /// scope 档(切片0 两档;cross_chapter/global 留切片1+)`[ADR-0016/0025]`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scope {
@@ -58,9 +61,98 @@ pub struct AdapterError {
     pub message: String,
 }
 
-/// loop 与后端之间的薄层 `[ADR-0016]`;loop 控制 provider 无关,只经此触模型。
+/// 外层 loop 会话消息角色(OpenAI-兼容)`[ADR-0026]`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    System,
+    User,
+    Assistant,
+    Tool,
+}
+
+/// 外层 loop 的一条会话消息 `[ADR-0026]`。
+#[derive(Debug, Clone)]
+pub struct Message {
+    pub role: Role,
+    pub content: Option<String>,
+    /// assistant 回合请求的工具调用(其余角色为空)。
+    pub tool_calls: Vec<ToolCall>,
+    /// tool 角色:配对的 assistant tool_call id。
+    pub tool_call_id: Option<String>,
+}
+
+impl Message {
+    pub fn system(content: impl Into<String>) -> Message {
+        Message { role: Role::System, content: Some(content.into()), tool_calls: vec![], tool_call_id: None }
+    }
+    pub fn user(content: impl Into<String>) -> Message {
+        Message { role: Role::User, content: Some(content.into()), tool_calls: vec![], tool_call_id: None }
+    }
+}
+
+/// 模型请求的一次工具调用(arguments = OpenAI 风格的 JSON 字符串)`[ADR-0026]`。
+#[derive(Debug, Clone)]
+pub struct ToolCall {
+    pub id: String,
+    pub name: String,
+    pub arguments: String,
+}
+
+/// 暴露给模型的工具规格(name + 描述 + JSON-Schema 参数)`[ADR-0026]`。
+#[derive(Debug, Clone)]
+pub struct ToolSpec {
+    pub name: String,
+    pub description: String,
+    pub parameters: serde_json::Value,
+}
+
+/// 外层 chat 回合的归一化产出 `[ADR-0026]`:文本(终答)或工具调用,二选一/可并存;usage 供停机口径。
+#[derive(Debug, Clone)]
+pub struct AssistantTurn {
+    pub text: Option<String>,
+    pub tool_calls: Vec<ToolCall>,
+    pub usage_total_tokens: Option<u32>,
+}
+
+/// loop 与后端之间的薄层 `[ADR-0016/0026]`;loop 控制 provider 无关,只经此触模型。
+/// `complete` = 内层 query 合一轮(JSON 契约);`chat` = 外层多轮 tool-calling。
 pub trait ModelAdapter {
     fn complete(&self, req: CompletionRequest) -> Result<ParsedResponse, AdapterError>;
+    fn chat(&self, messages: &[Message], tools: &[ToolSpec]) -> Result<AssistantTurn, AdapterError>;
+}
+
+/// Message → OpenAI 请求体 JSON(assistant tool_calls / tool 结果按 OpenAI 形拼)。
+fn message_to_json(m: &Message) -> serde_json::Value {
+    let role = match m.role {
+        Role::System => "system",
+        Role::User => "user",
+        Role::Assistant => "assistant",
+        Role::Tool => "tool",
+    };
+    let mut o = serde_json::json!({ "role": role });
+    match &m.content {
+        Some(c) => o["content"] = serde_json::json!(c),
+        None if m.role == Role::Assistant => o["content"] = serde_json::Value::Null,
+        None => {}
+    }
+    if !m.tool_calls.is_empty() {
+        o["tool_calls"] = serde_json::Value::Array(
+            m.tool_calls
+                .iter()
+                .map(|tc| {
+                    serde_json::json!({
+                        "id": tc.id,
+                        "type": "function",
+                        "function": { "name": tc.name, "arguments": tc.arguments },
+                    })
+                })
+                .collect(),
+        );
+    }
+    if let Some(id) = &m.tool_call_id {
+        o["tool_call_id"] = serde_json::json!(id);
+    }
+    o
 }
 
 /// `book.query` 对外响应(符 V3 §4.1 核心子集)。citations 已过确定性验停 ⇒ lid 全真。
@@ -368,6 +460,62 @@ impl ModelAdapter for NativeAdapter {
                 .collect(),
         })
     }
+
+    /// 外层多轮 tool-calling:带 `tools` schema 请求,解析 `assistant.tool_calls` + `usage` `[ADR-0026]`。
+    fn chat(&self, messages: &[Message], tools: &[ToolSpec]) -> Result<AssistantTurn, AdapterError> {
+        let msgs: Vec<serde_json::Value> = messages.iter().map(message_to_json).collect();
+        let tool_specs: Vec<serde_json::Value> = tools
+            .iter()
+            .map(|t| {
+                serde_json::json!({
+                    "type": "function",
+                    "function": {
+                        "name": t.name,
+                        "description": t.description,
+                        "parameters": t.parameters,
+                    },
+                })
+            })
+            .collect();
+        let body = serde_json::json!({
+            "model": self.model,
+            "messages": msgs,
+            "tools": tool_specs,
+            "temperature": 0,
+        });
+        let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
+        let resp = ureq::post(&url)
+            .set("Authorization", &format!("Bearer {}", self.api_key))
+            .set("Content-Type", "application/json")
+            .send_json(body)
+            .map_err(|e| AdapterError {
+                message: format!("HTTP 请求失败: {e}"),
+            })?;
+        let v: serde_json::Value = resp.into_json().map_err(|e| AdapterError {
+            message: format!("响应非 JSON: {e}"),
+        })?;
+        let msg = &v["choices"][0]["message"];
+        let text = msg["content"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
+        let mut tool_calls = Vec::new();
+        if let Some(arr) = msg["tool_calls"].as_array() {
+            for tc in arr {
+                tool_calls.push(ToolCall {
+                    id: tc["id"].as_str().unwrap_or("").to_string(),
+                    name: tc["function"]["name"].as_str().unwrap_or("").to_string(),
+                    arguments: tc["function"]["arguments"].as_str().unwrap_or("{}").to_string(),
+                });
+            }
+        }
+        let usage_total_tokens = v["usage"]["total_tokens"].as_u64().map(|u| u as u32);
+        Ok(AssistantTurn {
+            text,
+            tool_calls,
+            usage_total_tokens,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -396,6 +544,9 @@ mod tests {
                 .ok_or_else(|| AdapterError {
                     message: "fake 脚本耗尽".into(),
                 })
+        }
+        fn chat(&self, _: &[Message], _: &[ToolSpec]) -> Result<AssistantTurn, AdapterError> {
+            unimplemented!("query 内层测的 FakeAdapter 不涉及外层 chat")
         }
     }
 
