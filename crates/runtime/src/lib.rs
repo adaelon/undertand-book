@@ -410,6 +410,46 @@ fn strip_fence(s: &str) -> &str {
     t.strip_suffix("```").unwrap_or(t).trim()
 }
 
+/// 鲁棒 JSON 对象抽取(S9 `[ADR-0016 决策5 / ADR-0004]`):从可能含 markdown 围栏 /
+/// 前后散文杂质的内容里,抽出**第一个平衡 `{}` 对象子串**(跳过字符串字面量内的括号与
+/// `\` 转义,故引号内的 `{`/`}` 不计深度)。抽不到返回 `None`,由调用方诚实报错,
+/// **不静默降级**(守 `[ADR-0015]`)。本函数只负责「形状」抽取,值的正确性仍由内层
+/// `query` 的确定性交叉验停(`citations⊆证据集`)再校验一遍 `[ADR-0004]`。
+/// 仅扫描 `{`/`}`/`"`/`\` 等 ASCII 字节,返回的子串始终落在 char 边界(多字节 UTF-8 续字节 ≥0x80,
+/// 不与这些 ASCII 冲突),`&t[start..=i]` 切片安全。
+fn extract_json_object(s: &str) -> Option<&str> {
+    let t = strip_fence(s);
+    let bytes = t.as_bytes();
+    let start = bytes.iter().position(|&b| b == b'{')?;
+    let mut depth = 0usize;
+    let mut in_str = false;
+    let mut escaped = false;
+    for (i, &c) in bytes.iter().enumerate().skip(start) {
+        if in_str {
+            if escaped {
+                escaped = false;
+            } else if c == b'\\' {
+                escaped = true;
+            } else if c == b'"' {
+                in_str = false;
+            }
+            continue;
+        }
+        match c {
+            b'"' => in_str = true,
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(&t[start..=i]);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 impl ModelAdapter for NativeAdapter {
     fn complete(&self, req: CompletionRequest) -> Result<ParsedResponse, AdapterError> {
         let system = format!("{}\n\n{}", req.system, OUTPUT_CONTRACT);
@@ -438,7 +478,11 @@ impl ModelAdapter for NativeAdapter {
             .ok_or_else(|| AdapterError {
                 message: format!("响应缺 choices[0].message.content: {v}"),
             })?;
-        let out: LlmOut = serde_json::from_str(strip_fence(content)).map_err(|e| AdapterError {
+        // S9:抽不到平衡 JSON 对象(空响应 / 纯散文)→ 显式报错,不静默成功(守禁宽松降级 `[ADR-0015]`)。
+        let json = extract_json_object(content).ok_or_else(|| AdapterError {
+            message: format!("模型输出抽不到合法 JSON 对象;原文={content}"),
+        })?;
+        let out: LlmOut = serde_json::from_str(json).map_err(|e| AdapterError {
             message: format!("模型输出非合法 JSON: {e};原文={content}"),
         })?;
         Ok(ParsedResponse {
@@ -618,5 +662,46 @@ mod tests {
         let ev = retrieve(&b, "1.1", Scope::Local).unwrap();
         assert!(ev.contains_key("1.1"));
         assert_eq!(ev["1.1"], "X".repeat(100));
+    }
+
+    // S9 判据①:纯 JSON / 带围栏 / 前后包散文 三形态都抽对。
+    #[test]
+    fn extract_json_three_forms() {
+        // 纯 JSON
+        let pure = r#"{"sufficient": true, "answer": "x"}"#;
+        assert_eq!(extract_json_object(pure), Some(pure));
+        // markdown ```json 围栏
+        assert_eq!(
+            extract_json_object("```json\n{\"a\": 1}\n```"),
+            Some("{\"a\": 1}")
+        );
+        // 前后包散文(模型啰嗦)
+        assert_eq!(
+            extract_json_object("好的,结果如下:{\"a\": 1} 希望有帮助。"),
+            Some("{\"a\": 1}")
+        );
+    }
+
+    // S9:跳过字符串字面量内的括号与转义 → 不被引号内的 } / { 提前截断。
+    #[test]
+    fn extract_json_skips_braces_in_strings() {
+        let s = r#"前缀 {"text": "含 } 和 { 的引文", "n": 1} 后缀"#;
+        assert_eq!(
+            extract_json_object(s),
+            Some(r#"{"text": "含 } 和 { 的引文", "n": 1}"#)
+        );
+        // 转义引号不误判字符串结束
+        let esc = r#"{"text": "他说 \"x}\" 完"}"#;
+        assert_eq!(extract_json_object(esc), Some(esc));
+    }
+
+    // S9 判据②前提:空内容 / 纯散文(无对象)→ None → 调用方报 PROVIDER_ERROR 不静默成功。
+    #[test]
+    fn extract_json_none_when_no_object() {
+        assert_eq!(extract_json_object(""), None);
+        assert_eq!(extract_json_object("   "), None);
+        assert_eq!(extract_json_object("纯散文,没有任何 JSON 对象"), None);
+        // 不平衡(只开不闭)→ 扫到末尾 depth>0 → None,不返回半截
+        assert_eq!(extract_json_object(r#"{"a": 1"#), None);
     }
 }
