@@ -34,6 +34,11 @@ grill 中需求方立**最高原则**(落 memory `quality-over-speed-correct-con
 
 ## 何时回头
 - 切片0 实测填:`book.context` 各档概览默认 K 值(承 [[ADR-0013]]);`book.text` 区间取原文的体积上限。
+
+**S4 实测回填(2026-06-23,`crates/read-tools` 落地 near 档 + 4 工具,详见 `docs/代码链路.md` S4 条):**
+- `book.context` **near 档默认 K = 10 占位**(`DEFAULT_NEAR_K`);near = 树邻接(parent/child/prev·next sibling)+ scope=local 边,自指边(两端同锚 anchor)跳过、按 weight 降序、同 LID 去重后 top-K。真实 K 待 S8 金标准集 + 人工试读定。
+- `book.text` **切片0 未设区间体积硬上限**(`range` = LID 区间,体积由调用方圈定的 LID 跨度控);若 S5 内层检索捞回体积失控再设。span 口径 = UTF-16 code unit,跨 TS/Rust 逐字一致(见 [[ADR-0024]])。
+- `book.manifest` `leaf_count` 当前 O(n²) 前缀扫(3399 节点亚秒级);大书慢则改子树聚合,不改语义。
 - **议题7** 设计自建运行时时定 `book.query/synthesize` 精确签名与分工;若届时发现 `synthesize`(跨 LID 综合)与自含外扩的 `query` 无法清晰分工 → 评估砍 synthesize 全归 query(本 ADR 暂留 V3 §4.1 的 synthesize 条,不在议题6 定型)。
 - 若某档 context 读时现算超毫秒级(稠密大图)→ 按 [[ADR-0012]]/[[ADR-0013]] 何时回头,把该档预算成确定性索引(局部优化),不复活物化胶囊。
 

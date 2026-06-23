@@ -6,7 +6,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-/// 内容字节区间(半开 [start, end)),映射回源文。
+/// 内容区间(半开 [start, end)),映射回源文。
+/// 切片0 = **UTF-16 code unit 下标**(TS segment 用 JS 串下标);字节精确化留后 `[ADR-0024]`。
+/// ⇒ Rust book.text 须按 UTF-16 语义切原文(encode_utf16 索引),勿按 UTF-8 字节直切(中文会错位)。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS, JsonSchema)]
 #[ts(export, export_to = "../../../packages/core/src/generated/")]
 pub struct Span {

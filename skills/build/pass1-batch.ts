@@ -47,6 +47,7 @@ ReadOnlyBaseZ.parse(base); // 产出前自检(字段失配抛错)
 const dir = `.understand-book/${bookId}`;
 mkdirSync(dir, { recursive: true });
 writeFileSync(`${dir}/base.json`, JSON.stringify(base, null, 2), "utf8");
+writeFileSync(`${dir}/source.txt`, source, "utf8"); // 原文旁路:book.text 取真原文用,按 LID.span(UTF-16)切 `[ADR-0024]`
 
 console.log(`[pass1-batch] ${book}`);
 console.log(`  窗口=${windows.length}  已抽=${idxs.length}(#${idxs.join(",#")})  全书叶子=${lidNodes.filter((n) => n.children.length === 0).length}`);
