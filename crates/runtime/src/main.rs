@@ -1,8 +1,8 @@
 //! runtime CLI(headless 驱动自建运行时,读 `.env` 的 OpenAI-兼容后端)`[ADR-0025/0026]`。
 //!   runtime <book_dir> query <anchor_lid> <question...>   内层 book.query mini-loop(S5b)
 //!   runtime <book_dir> chat  <question...>                外层 E 编排 loop(S6c)
+use memory::MemoryStore;
 use read_tools::Book;
-use runtime::memory::MemoryStore;
 use runtime::orchestrator::{run, OuterConfig};
 use runtime::{query, NativeAdapter};
 use std::process::exit;

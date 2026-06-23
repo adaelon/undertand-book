@@ -248,6 +248,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "88904434abc2901f197fe8cc55f0445e7ded921dba5911dad2e2b39b48e663c4"
 
 [[package]]
+name = "memory"
+version = "0.0.0"
+dependencies = [
+ "read-tools",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "miniz_oxide"
 version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -306,6 +315,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "reader"
+version = "0.0.0"
+dependencies = [
+ "base-schema",
+ "memory",
+ "read-tools",
+ "serde",
+]
+
+[[package]]
 name = "ring"
 version = "0.17.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -325,7 +344,9 @@ version = "0.0.0"
 dependencies = [
  "base-schema",
  "dotenvy",
+ "memory",
  "read-tools",
+ "reader",
  "serde",
  "serde_json",
  "ureq",

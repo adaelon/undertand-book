@@ -2,6 +2,7 @@
 //! 单 JSON 落盘;`save`=内容寻址 mem_id upsert + citation 自动派生;`recall`=线性过滤。
 //! 切片0 type=note/highlight/position;consolidation / 跨书 concept recall 留议题7 `[ADR-0018]`。
 //! 时间戳与落盘路径由调用方注入(确定性可测,守 A2)。
+//! S7a 从 runtime 抽成独立 crate(拆 runtime↔reader 循环依赖,reader/runtime 共同依赖它)`[ADR-0027]`。
 use read_tools::ToolError;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;

@@ -1,15 +1,13 @@
 [package]
-name = "runtime"
+name = "reader"
 version = "0.0.0"
 edition = "2021"
 publish = false
 
 [dependencies]
-base-schema = { path = "../base-schema" }
 read-tools = { path = "../read-tools" }
 memory = { path = "../memory" }
-reader = { path = "../reader" }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-ureq = { version = "2", features = ["json"] }
-dotenvy = "0.15"
+
+[dev-dependencies]
+base-schema = { path = "../base-schema" }
