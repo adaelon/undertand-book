@@ -5,6 +5,7 @@ use base_schema::{GraphNodeType, LidNode, NodeKind};
 use read_tools::{Book, ToolError};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use ts_rs::TS;
 
 pub mod goldset;
 pub mod orchestrator;
@@ -156,7 +157,8 @@ fn message_to_json(m: &Message) -> serde_json::Value {
 }
 
 /// `book.query` 对外响应(符 V3 §4.1 核心子集)。citations 已过确定性验停 ⇒ lid 全真。
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
 pub struct QueryResponse {
     pub answer: Option<String>,
     pub citations: Vec<Citation>,
@@ -167,14 +169,16 @@ pub struct QueryResponse {
     pub warning: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
 pub struct Citation {
     pub lid: String,
     pub text: String,
     pub role: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
 pub struct SupplementOut {
     pub text: String,
     pub source: String,

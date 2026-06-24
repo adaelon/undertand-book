@@ -4,6 +4,10 @@
 use base_schema::{Direction, EdgeScope, GraphNodeType, LidNode, ReadOnlyBase, Span};
 use serde::Serialize;
 use std::collections::HashMap;
+use ts_rs::TS;
+
+// API DTO 的 ts-rs 导出目标(相对本 crate src/):前端类型契约单一真相源 `[ADR-0028 决策6]`。
+// 与 base-schema(导出到 packages/core)分置:DTO 落 packages/web,跨指的 base 类型由 ts-rs 算相对 import。
 
 /// 加载后的书:基座 + 原文(UTF-16 code unit 序列,span 即此口径 `[ADR-0024]`)+ lid 索引。
 pub struct Book {
@@ -17,7 +21,8 @@ pub struct Book {
 pub const DEFAULT_NEAR_K: usize = 10;
 
 /// 统一错误信封(子集)`[ADR-0015]`;禁宽松降级——找不到即报错,不静默返最近邻。
-#[derive(Debug, Serialize, PartialEq)]
+#[derive(Debug, Serialize, PartialEq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
 pub struct ToolError {
     pub error_code: String,
     pub category: String,
@@ -25,7 +30,8 @@ pub struct ToolError {
 }
 
 /// book.manifest 树节点(确定性拓扑)`[ADR-0014]`。
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
 pub struct ManifestNode {
     pub lid: String,
     pub children: Vec<String>,
@@ -33,7 +39,8 @@ pub struct ManifestNode {
 }
 
 /// 每 LID 的确定性统计。
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
 pub struct LidStats {
     pub child_count: usize,
     pub leaf_count: usize,
@@ -41,7 +48,8 @@ pub struct LidStats {
 }
 
 /// book.manifest() 返回结构(符 V3 §4.1)。
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
 pub struct Manifest {
     pub tree: Vec<ManifestNode>,
     pub stats_by_lid: HashMap<String, LidStats>,
@@ -49,8 +57,9 @@ pub struct Manifest {
 
 /// context item 的确定性接入来源 + 排序键(判别联合)`[ADR-0014]`。
 /// 切片0 near 档只产 Tree / Edge;Concept(经概念二跳)留 mid 档(切片1+)。
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, TS)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
 pub enum Via {
     Tree {
         rel: String,
@@ -65,7 +74,8 @@ pub enum Via {
 }
 
 /// book.context 的一个指针项(纯坐标,不带原文)`[ADR-0014]`。
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
 pub struct ContextItem {
     pub lid: String,
     pub layer: String,
@@ -73,14 +83,16 @@ pub struct ContextItem {
 }
 
 /// book.context() 返回结构(符 V3 §4.1)。
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
 pub struct Context {
     pub anchor: String,
     pub items: Vec<ContextItem>,
 }
 
 /// book.concept() 返回结构(全量 occurrences 不截断)`[ADR-0014]`。
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
 pub struct Concept {
     pub name: String,
     pub occurrences: Vec<String>,
