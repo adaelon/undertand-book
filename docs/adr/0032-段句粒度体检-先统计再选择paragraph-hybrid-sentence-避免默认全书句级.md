@@ -5,10 +5,10 @@
 ## 背景
 ADR-0008 允许切片1+ 长出句级 LID,但全书默认句级会把节点数、manifest、图谱抽取候选和读时上下文都放大。句级提高引用精度,却不总是值得:如果一本书多数段落只有 1-3 句,全句级只是制造坐标噪声;如果大量段落很长,段级又会让引用和高亮过粗。
 
-asset 刀会修复代码块/表/图进入 LID 链路的问题,同时会触碰 ingestion 和分区不变式。此时应顺手加入导入前的粒度体检,让用户基于书本统计选择构建粒度,而不是让实现默认全书句级。
+asset 刀会修复代码块/表/图/公式进入 LID 链路的问题,同时会触碰 ingestion 和分区不变式。此时应顺手加入导入前的粒度体检,让用户基于书本统计选择构建粒度,而不是让实现默认全书句级。
 
 ## 决策
-1. **正式构建前先产 `GranularityProfile`**:统计 `paragraph_count`、`sentence_count_estimate`、每段句数 avg/p50/p90/max、长段数(`>5` 句、`>10` 句、`>800` 字符)、三档预计 LID 数与膨胀比。
+1. **正式构建前先产 `GranularityProfile`**:统计 `paragraph_count`、`sentence_count_estimate`、每段句数 avg/p50/p90/max、长段数(`>5` 句、`>10` 句、`>800` 字符)、asset 候选数(code/table/image/formula)、三档预计 LID 数与膨胀比。
 2. **粒度档位为三档**:`paragraph`=只到段;`hybrid`=所有段保留段级 LID,仅长段展开句级子 LID;`sentence`=所有段展开句级子 LID。
 3. **默认推荐偏 `hybrid` 而非全句级**:当 p90 每段句数较高或长段占比明显时推荐 hybrid;只有用户明确偏精确引用/逐句讲解,且 LID 膨胀可接受时才推荐 sentence。
 4. **用户确认后再构建**:体检报告是构建前置闸。未确认粒度时,不进入 LID/图谱正式构建。
@@ -28,7 +28,7 @@ asset 刀会修复代码块/表/图进入 LID 链路的问题,同时会触碰 in
 ## 何时回头
 - 真书统计显示 hybrid 阈值不稳定时,把阈值从经验值改为配置项。
 - 全文句级 LID 数仍可接受且用户强依赖逐句引用时,允许 sentence 成为用户选择。
-- 如果 asset/code 块显著拉高句切误判,对 Code/Table/Image 叶子固定不做句级展开。
+- 如果 asset/code/formula 块显著拉高句切误判,对 Code/Table/Image/Formula 叶子固定不做句级展开;公式不得被句切拆碎。
 
 ## 影响
 - **改 asset 切片方案**:新增 SA0 粒度体检报告,作为 SA1–SA5 前置。
