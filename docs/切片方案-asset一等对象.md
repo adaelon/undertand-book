@@ -1,6 +1,6 @@
 # 切片方案 · Asset 一等对象(代码块/表/图 进入文档世界状态)
 
-> **定位**:切片1+ 独立刀,**与「切片1 前端阅读器」并列、互不混入**。源 `参考.md` 文档世界状态对照,§0.5 领域对齐见 `docs/adr/0029`。
+> **定位**:切片1+ 独立刀,**与「切片1 前端阅读器」并列、互不混入**。源 `参考.md` 文档世界状态对照,§0.5 领域对齐见 `docs/adr/0029`;段/句粒度体检见 `docs/adr/0032`。
 > **被消费的冻结契约**:`需求文档-V3.md §3.1`(NodeKind)+ `§4.1`(`book.manifest`);术语见 `CONTEXT.md`(asset 叶子)。
 > **状态**:**已规划落档,未开工**。
 
@@ -13,12 +13,13 @@
 3. **读时可见** = `ManifestNode` 投影 `kind`,零新命令;`inspect_asset`=`book.text`+前端渲染(③)。
 4. **类型闭集** = `{Code,Table,Image}`,长尾留实测。
 5. **图谱层一视同仁**,确定性图谱闸不改。
+6. **段/句粒度先体检再选择**:导入前统计段落句数、长段占比、预计 LID 膨胀比,给出 `paragraph / hybrid / sentence` 三档建议,由用户确认粒度后再正式构建(见 ADR-0032)。
 
 ---
 
 ## 1. A1 切片总声明
 
-- **做**:让 code/table/image 三类 asset 从 ingestion 入口起成为带类型的一等 LID 叶子——`NodeKind` 扩 + `ManifestNode` 暴露 `kind`(ts-rs 重生成);md/epub adapter **忠实识别并序列化** asset(修三 bug:epub `<img>` 消失 / `<table>` 丢失 / `<pre>` 被 norm 拍平);分区不变式自检仍绿;真书重建后 `book.manifest` 看得到 asset 叶子。
+- **做**:先跑段/句粒度体检报告,让用户在 `paragraph / hybrid / sentence` 中确认构建粒度;再让 code/table/image 三类 asset 从 ingestion 入口起成为带类型的一等 LID 叶子——`NodeKind` 扩 + `ManifestNode` 暴露 `kind`(ts-rs 重生成);md/epub adapter **忠实识别并序列化** asset(修三 bug:epub `<img>` 消失 / `<table>` 丢失 / `<pre>` 被 norm 拍平);分区不变式自检仍绿;真书重建后 `book.manifest` 看得到 asset 叶子。
 - **不做**(明确排除):
   - ❌ 多模态图描述(切片1+,走"标注来源"旁路、不进只读基座)
   - ❌ `formula/footnote/figure-caption` 等长尾类型(实测驱动再加)
@@ -26,13 +27,22 @@
   - ❌ 前端 asset 渲染(属「切片1 前端」刀 + 优化项③)
   - ❌ table 子结构 LID(先存表文本,按行列检索留后)
   - ❌ 旧基座自动迁移(重建获得 asset,承 ADR-0019)
-- **完成判据**:① `NodeKind`/`ManifestNode` schema 扩 + ts-rs 生成含新枚举;② md/epub adapter 把 code/table/image 识别成对应 kind 叶子、原文=源标记序列化、`partition.ts` 分区不变式测仍绿;③ `book.manifest` 节点带 `kind`;④ 一本真书重建后 manifest 见 asset 叶子、`book.text` 取出源标记(**B2 真跑验**)。
+  - ❌ 默认全书句级展开(必须经体检报告 + 用户确认;默认建议可为 hybrid)
+- **完成判据**:① 粒度体检报告输出段/句统计、预计 LID 膨胀比与三档建议,用户确认构建粒度;② `NodeKind`/`ManifestNode` schema 扩 + ts-rs 生成含新枚举;③ md/epub adapter 把 code/table/image 识别成对应 kind 叶子、原文=源标记序列化、`partition.ts` 分区不变式测仍绿;④ `book.manifest` 节点带 `kind`;⑤ 一本真书重建后 manifest 见 asset 叶子、`book.text` 取出源标记(**B2 真跑验**)。
 
 ---
 
 ## 2. A4 子切片(每步独立可验,依赖文件状态非会话内存)
 
-> 语言归属:SA1=**Rust**(base-schema/read-tools);SA2–SA4=**TS**(packages/core);SA5 跨段(真书重建)。
+> 语言归属:SA0=**TS**(packages/core 导入前体检);SA1=**Rust**(base-schema/read-tools);SA2–SA4=**TS**(packages/core);SA5 跨段(真书重建)。
+
+
+### SA0 · 段/句粒度体检报告:统计后再让用户选粒度 `[TS]`
+- **做**:在正式构建 LID 前,对源书先跑确定性体检:统计段落数、估算句子数、每段句数分布(avg/p50/p90/max)、长段数量(如 >5 句、>10 句、>800 字符)、`paragraph / hybrid / sentence` 三档预计 LID 数与膨胀比。输出 `GranularityProfile` 报告和推荐档位;用户确认后再进入 SA1–SA5。
+- **不做**:不让 LLM 判断粒度;不默认全书句级;不把 hybrid 的阈值写死成不可改契约(阈值由实测回填)。
+- **判据**:给一本真书能产出可读报告;报告能说明推荐 `paragraph / hybrid / sentence` 的理由;同一输入多次运行结果一致;用户未确认粒度时不进入正式构建。
+- **触达**:`[ADR-0032/0008/0009/0029]`
+- **实测落点**:本书 paragraph_count / sentence_count_estimate / p90 句数 / 预计 LID 膨胀比 / 最终用户选择。
 
 ### SA1 · schema 扩:NodeKind 增三值 + ManifestNode 暴露 kind `[Rust]`
 - **做**:`base-schema::NodeKind` 增 `Code/Table/Image`(serde snake_case)。`read-tools::ManifestNode` 加 `kind` 字段(投影 `LidNode.kind`)。ts-rs 重生成 `NodeKind.ts` + 新增 `ManifestNode` 导出(若未导出)。
@@ -73,7 +83,8 @@
 ## 3. 完成判据复述
 
 ```
-NodeKind 扩 Code/Table/Image + ManifestNode 暴露 kind(ts-rs 生成)
+粒度体检报告产出 + 用户确认构建粒度
+  ∧ NodeKind 扩 Code/Table/Image + ManifestNode 暴露 kind(ts-rs 生成)
   ∧ md/epub adapter 忠实识别+序列化 asset(修 img/table/pre 三 bug)
   ∧ 原文 = 源标记确定性序列化(book.text 可取、可锚)
   ∧ 分区不变式自检仍 100%
@@ -84,6 +95,9 @@ NodeKind 扩 Code/Table/Image + ManifestNode 暴露 kind(ts-rs 生成)
 
 | 数字 | 回填 |
 | --- | --- |
+| 段落数 / 估算句子数 / p90 每段句数 | ADR-0032 |
+| paragraph/hybrid/sentence 预计 LID 膨胀比 | ADR-0032 |
+| 用户最终选择的构建粒度 | ADR-0032 |
 | SourceBlock 携带 asset 类型的方式 | ADR-0029 |
 | epub table 序列化目标格式 | ADR-0029 |
 | 代码块不腰斩后对窗口预算影响 | ADR-0009 |
