@@ -493,6 +493,7 @@ dependencies = [
  "memory",
  "read-tools",
  "reader",
+ "runtime",
  "serde",
  "serde_json",
  "tiny_http",

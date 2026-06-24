@@ -1,22 +1,28 @@
 //! 读时 localhost 服务:把冻结命令面投影成 REST `[ADR-0028]`。
 //! S10a:`book.*` 四只读叶子 → GET。S10b:`reader.*`/`memory.*` 可变命令 → POST(JSON body),
 //! reader.* 返 effect、highlight/note 委托 memory.save(标注单源 `[ADR-0015/0006]`)、非法 LID 透传不降级。
+//! S10c:`book.query` 是 LLM 命令(秒级,非确定性叶子)→ **POST**(body `{q, anchor_lid?}`),
+//! 直调内层 `runtime::query`(provider 经注入的 `ModelAdapter`)→ 返 `QueryResponse`,结构红线由
+//! 内层确定性交叉验停守(citations⊆证据集);anchor 缺省取 reader 当前 anchor(读模式起点)。
 //! 路由是**纯函数 `route(&mut AppState, Req) -> Reply`**(脱 socket 可单测,守 A2);
-//! socket 绑定 / worker 线程 / Mutex 锁 / 时间戳生成在 `main.rs`。
-//! query(S10c)、agent(S10f)、静态资源(S10e)留后续子切片。
+//! socket 绑定 / worker 线程 / Mutex 锁 / 时间戳生成 / adapter 装配在 `main.rs`。
+//! synthesize、外层 E agent(S10f)、静态资源(S10e)留后续子切片。
 use memory::{Anchor, MemoryStore, RecallQuery, SaveInput};
 use read_tools::{Book, ToolError};
 use reader::Reader;
+use runtime::{AdapterError, AssistantTurn, CompletionRequest, Message, ModelAdapter, ParsedResponse, ToolSpec};
 use serde::Serialize;
 use serde_json::json;
 use std::collections::HashMap;
 
 /// 服务的单会话共享状态(切片0 单用户单书)`[ADR-0028 决策2]`。
 /// S10b:持只读 `Book` + 会话态 `Reader` + 用户私有 `MemoryStore`(物理隔离 `[ADR-0006]`)。
+/// S10c:持 LLM `adapter`(`book.query` 经它触模型;`+ Send` 供 `Arc<Mutex<_>>` 跨 worker 线程)。
 pub struct AppState {
     pub book: Book,
     pub reader: Reader,
     pub store: MemoryStore,
+    pub adapter: Box<dyn ModelAdapter + Send>,
 }
 
 /// 一次请求的传输无关输入:方法 + 原始 url(含 query)+ JSON body(GET 为空)+ 时间戳。
@@ -39,6 +45,14 @@ pub struct Reply {
 /// `reader.*`/`memory.*`→POST 可变),端点名 = 命令名,错误原样透传 §4.4 信封。
 pub fn route(state: &mut AppState, req: Req) -> Reply {
     let (path, q) = parse_query(req.url);
+    // book.query:`book.*` 命名空间但 LLM 命令(秒级、非确定性叶子)→ POST,
+    // 单列于 GET-only `route_book` 之前(决策3 的方法分派对它例外)`[ADR-0014/0028]`。
+    if path == "/book/query" {
+        if req.method != "POST" {
+            return query_method_not_allowed();
+        }
+        return route_query(state, req.body);
+    }
     if let Some(p) = path.strip_prefix("/book/") {
         if req.method != "GET" {
             return method_not_allowed();
@@ -178,6 +192,29 @@ fn route_mut(state: &mut AppState, path: &str, body: &str, now: &str) -> Reply {
     }
 }
 
+/// `book.query` → POST(S10c)。直调内层 `runtime::query`:确定性档位检索 + LLM 合一轮判停 +
+/// 确定性交叉验停(citations⊆证据集 = 结构红线 `[ADR-0004/0016]`)。anchor 缺省取 reader 当前
+/// anchor(读模式起点 `[ADR-0028]`);`scope` 入参暂不接(内层切片0 固定 local→chapter auto 阶梯,
+/// 无 scope 旋钮,留切片1+)。provider 错经 `runtime::query` 映射 `PROVIDER_ERROR` 透传不降级。
+fn route_query(state: &mut AppState, body: &str) -> Reply {
+    let v = match body_value(body) {
+        Ok(v) => v,
+        Err(reply) => return reply,
+    };
+    let Some(q) = v.get("q").and_then(|x| x.as_str()) else {
+        return validation("INVALID_RANGE", "book.query 需 q(问题文本)");
+    };
+    // anchor:显式给则用,否则取 reader 当前视口 anchor(读到哪问到哪)。
+    let anchor = match v.get("anchor_lid").and_then(|x| x.as_str()) {
+        Some(a) => a.to_string(),
+        None => state.reader.state().viewport.anchor_lid,
+    };
+    match runtime::query(&state.book, q, &anchor, state.adapter.as_ref()) {
+        Ok(resp) => ok_json(&resp),
+        Err(e) => err_reply(&e),
+    }
+}
+
 /// url → (path, query map);query 值经 percent 解码(支持 CJK 概念名 / 空格)。
 fn parse_query(url: &str) -> (String, HashMap<String, String>) {
     let (path, qs) = match url.split_once('?') {
@@ -285,6 +322,18 @@ fn method_not_allowed() -> Reply {
     }
 }
 
+/// book.query 是 book.* 里唯一只收 POST 的端点(LLM 命令),405 文案单列以免误导。
+fn query_method_not_allowed() -> Reply {
+    Reply {
+        status: 405,
+        body: to_body(&ToolError {
+            error_code: "METHOD_NOT_ALLOWED".into(),
+            category: "validation".into(),
+            message: "book.query 是 LLM 命令,只支持 POST(body {q, anchor_lid?})".into(),
+        }),
+    }
+}
+
 fn to_body<T: Serialize>(v: &T) -> String {
     serde_json::to_string(v).unwrap_or_else(|e| {
         format!("{{\"error_code\":\"INTERNAL_ERROR\",\"category\":\"internal\",\"message\":\"序列化失败: {e}\"}}")
@@ -303,11 +352,30 @@ fn status_for(category: &str) -> u16 {
     }
 }
 
+/// `.env` 缺失时的兜底 adapter:book/reader/memory 浏览不被 LLM 配置阻塞,
+/// 仅 `book.query` 触模型时诚实报 provider 错(经 `runtime::query` 映射 `PROVIDER_ERROR`,
+/// category=provider ⇒ HTTP 502,守禁宽松降级 `[ADR-0015]`)。
+pub struct UnconfiguredAdapter;
+
+impl ModelAdapter for UnconfiguredAdapter {
+    fn complete(&self, _req: CompletionRequest) -> Result<ParsedResponse, AdapterError> {
+        Err(AdapterError {
+            message: "未配置 LLM 后端:缺 .env(OPENCODE_API_KEY / OPENCODE_BASE_URL / FLUID_LLM_MODEL)".into(),
+        })
+    }
+    fn chat(&self, _: &[Message], _: &[ToolSpec]) -> Result<AssistantTurn, AdapterError> {
+        Err(AdapterError {
+            message: "未配置 LLM 后端:缺 .env(OPENCODE_API_KEY / OPENCODE_BASE_URL / FLUID_LLM_MODEL)".into(),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use base_schema::sample_base;
     use reader::DEFAULT_RADIUS;
+    use runtime::RawCitation;
     use std::path::PathBuf;
 
     fn tmp(name: &str) -> PathBuf {
@@ -316,13 +384,38 @@ mod tests {
         p
     }
 
+    /// 确定性 LLM 替身:首轮即 sufficient + 引用给定 LID(落在证据集内 ⇒ 过内层交叉验停)。
+    /// 让 book.query 的 HTTP 路由层脱离真 LLM 可测(守 A2);真跑端到端走 B2 人工。
+    struct StubAdapter {
+        lid: String,
+    }
+    impl ModelAdapter for StubAdapter {
+        fn complete(&self, _req: CompletionRequest) -> Result<ParsedResponse, AdapterError> {
+            Ok(ParsedResponse {
+                sufficient: true,
+                answer: Some("桩答案".into()),
+                citations: vec![RawCitation {
+                    lid: self.lid.clone(),
+                    text: "片段".into(),
+                    role: "support".into(),
+                }],
+                model_supplement: vec![],
+            })
+        }
+        fn chat(&self, _: &[Message], _: &[ToolSpec]) -> Result<AssistantTurn, AdapterError> {
+            unimplemented!("server 测不走外层 chat(S10f)")
+        }
+    }
+
     fn state_named(mem: &str) -> AppState {
         // sample_base:容器 "1" + 叶 "1.1";entity:command occ=["1.1"]、claim source=1.1。
         let src = "X".repeat(100) + "尾巴";
         let book = Book::new(sample_base(), &src);
         let reader = Reader::new(&book, DEFAULT_RADIUS);
         let store = MemoryStore::open(tmp(mem)).unwrap();
-        AppState { book, reader, store }
+        // 默认桩引用首叶 "1.1"(book.query 缺省 anchor = reader 首叶,落证据集)。
+        let adapter = Box::new(StubAdapter { lid: "1.1".into() });
+        AppState { book, reader, store, adapter }
     }
 
     fn get(s: &mut AppState, url: &str) -> Reply {
@@ -461,5 +554,52 @@ mod tests {
         let r = post(&mut s, "/reader/goto", "{not json");
         assert_eq!(r.status, 400);
         assert!(r.body.contains("INVALID_RANGE"));
+    }
+
+    // ── S10c book.query POST ────────────────────────────────
+    #[test]
+    fn book_query_returns_query_response() {
+        let mut s = state_named("query");
+        // 缺省 anchor = reader 首叶 "1.1";桩引用 "1.1" 落证据集 → 过交叉验停。
+        let r = post(&mut s, "/book/query", r#"{"q":"什么是命令模式"}"#);
+        assert_eq!(r.status, 200);
+        assert!(r.body.contains("\"scope_used\":\"local\""));
+        assert!(r.body.contains("\"incomplete\":false"));
+        assert!(r.body.contains("\"lid\":\"1.1\"")); // citation 全真 LID
+        assert!(r.body.contains("桩答案"));
+    }
+
+    #[test]
+    fn book_query_explicit_anchor() {
+        let mut s = state_named("query-anchor");
+        let r = post(&mut s, "/book/query", r#"{"q":"问","anchor_lid":"1.1"}"#);
+        assert_eq!(r.status, 200);
+        assert!(r.body.contains("\"citations\""));
+    }
+
+    #[test]
+    fn book_query_missing_q_400() {
+        let mut s = state_named("query-missing");
+        let r = post(&mut s, "/book/query", "{}");
+        assert_eq!(r.status, 400);
+        assert!(r.body.contains("INVALID_RANGE"));
+    }
+
+    #[test]
+    fn book_query_get_405() {
+        let mut s = state_named("query-get");
+        let r = get(&mut s, "/book/query");
+        assert_eq!(r.status, 405);
+        assert!(r.body.contains("METHOD_NOT_ALLOWED"));
+    }
+
+    // provider 错(.env 缺/后端挂)经 runtime::query 映射 PROVIDER_ERROR → 502,透传不降级。
+    #[test]
+    fn book_query_provider_error_502() {
+        let mut s = state_named("query-err");
+        s.adapter = Box::new(UnconfiguredAdapter);
+        let r = post(&mut s, "/book/query", r#"{"q":"x"}"#);
+        assert_eq!(r.status, 502);
+        assert!(r.body.contains("PROVIDER_ERROR"));
     }
 }

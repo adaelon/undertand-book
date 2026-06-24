@@ -5,7 +5,8 @@
 use memory::MemoryStore;
 use read_tools::Book;
 use reader::{Reader, DEFAULT_RADIUS};
-use server::{route, AppState, Req};
+use runtime::{ModelAdapter, NativeAdapter};
+use server::{route, AppState, Req, UnconfiguredAdapter};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -34,8 +35,17 @@ fn main() {
         }
     };
     let reader = Reader::new(&book, DEFAULT_RADIUS);
+    // book.query 的 LLM 后端:读 .env;缺配置则兜底 UnconfiguredAdapter
+    // (book/reader/memory 浏览照常,仅 query 触模型时报 PROVIDER_ERROR)`[ADR-0028]`。
+    let adapter: Box<dyn ModelAdapter + Send> = match NativeAdapter::from_env() {
+        Ok(a) => Box::new(a),
+        Err(e) => {
+            eprintln!("⚠ 未配置 LLM 后端({});book.query 将返 PROVIDER_ERROR,其余命令正常", e.message);
+            Box::new(UnconfiguredAdapter)
+        }
+    };
     let addr = std::env::var("UNDERSTAND_BOOK_ADDR").unwrap_or_else(|_| "127.0.0.1:8787".into());
-    let state = Arc::new(Mutex::new(AppState { book, reader, store }));
+    let state = Arc::new(Mutex::new(AppState { book, reader, store, adapter }));
     let server = match Server::http(&addr) {
         Ok(s) => Arc::new(s),
         Err(e) => {
