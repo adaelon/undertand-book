@@ -30,17 +30,55 @@ const progressPct = computed(() => {
   return Math.round(((idx + 1) / leafOrder.value.length) * 100);
 });
 
-// 标注查询:某 lid 上是否有 highlight / 取其全部 note 记录(可多条)。
+// ── 标注:高亮(整段 / 段内 range)+ 笔记 ──
+// 整段高亮(range 缺省)→ <p> 背景;段内 range 高亮 → <mark>(见 renderSeg)`[ADR-0031]`。
 function isHighlighted(lid: string): boolean {
-  return annotations.value.some((r) => r.anchor.lid === lid && r.type === "highlight");
+  return annotations.value.some((r) => r.anchor.lid === lid && r.type === "highlight" && !r.range);
 }
 function notesOf(lid: string): MemoryRecord[] {
   return annotations.value.filter((r) => r.anchor.lid === lid && r.type === "note");
 }
+function highlightsOf(lid: string): MemoryRecord[] {
+  return annotations.value.filter((r) => r.anchor.lid === lid && r.type === "highlight");
+}
 
-// 笔记删除:memory.delete + 刷新标注。
-async function deleteNote(rec: MemoryRecord) {
-  if (!window.confirm("删除这条笔记?")) return;
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+// 段正文渲染:把段内 range 高亮包成 <mark>(合并重叠区间),其余文本转义防 XSS `[ADR-0031]`。
+function renderSeg(seg: { lid: string; text: string }): string {
+  const hls = highlightsOf(seg.lid).filter((h) => h.range);
+  if (hls.length === 0) return escapeHtml(seg.text);
+  const ranges = hls
+    .map((h) => [h.range!.start, h.range!.end] as [number, number])
+    .sort((a, b) => a[0] - b[0]);
+  const merged: [number, number][] = [];
+  for (const [s, e] of ranges) {
+    const last = merged[merged.length - 1];
+    if (last && s <= last[1]) last[1] = Math.max(last[1], e);
+    else merged.push([s, e]);
+  }
+  const t = seg.text;
+  let html = "";
+  let cur = 0;
+  for (const [s, e] of merged) {
+    html += escapeHtml(t.slice(cur, s)) + `<mark class="hl-mark">${escapeHtml(t.slice(s, e))}</mark>`;
+    cur = e;
+  }
+  return html + escapeHtml(t.slice(cur));
+}
+function hlExcerpt(rec: MemoryRecord): string {
+  const c = rec.content.replace(/\s+/g, " ").trim();
+  if (!rec.range) return "(整段)";
+  return c.length > 40 ? c.slice(0, 40) + "…" : c;
+}
+
+// 高亮删除 / 修改(=移除后重新框选;高亮无可编辑正文,改 = 改范围 `[ADR-0031]`)。
+async function deleteHighlight(rec: MemoryRecord) {
   try {
     banner.value = "";
     await api.delete(rec.mem_id);
@@ -49,20 +87,45 @@ async function deleteNote(rec: MemoryRecord) {
     fail(e);
   }
 }
+async function modifyHighlight(rec: MemoryRecord) {
+  await deleteHighlight(rec);
+  if (!banner.value) banner.value = "已移除该高亮——重新框选文字再点「🖍 高亮选区」即可改范围。";
+}
 
-// 笔记更新:mem_id 内容寻址 ⇒ 改内容 = 删旧 + 存新(同 anchor/type/layer)`[ADR-0026]`。
-async function editNote(rec: MemoryRecord) {
-  const next = window.prompt("编辑笔记(支持 Markdown / $公式$):", rec.content);
-  if (next === null || next.trim() === "" || next === rec.content) return;
+// ── 笔记编辑器(内联模态 + 实时 MD/LaTeX 预览)替换 window.prompt ──
+const noteEditor = ref<{ lid: string; memId: string | null; layer: string; content: string } | null>(null);
+const notePreview = computed(() => renderMarkdown(noteEditor.value?.content ?? ""));
+function openNewNote() {
+  if (!selectedLid.value) return;
+  noteEditor.value = { lid: selectedLid.value, memId: null, layer: "long_term", content: "" };
+}
+function openEditNote(rec: MemoryRecord) {
+  noteEditor.value = { lid: rec.anchor.lid ?? "", memId: rec.mem_id, layer: rec.layer, content: rec.content };
+}
+function cancelNote() {
+  noteEditor.value = null;
+}
+// 保存:新建直接 save;编辑 = 删旧 + 存新(mem_id 内容寻址 `[ADR-0026]`)。
+async function saveNote() {
+  const ed = noteEditor.value;
+  if (!ed) return;
+  const content = ed.content.trim();
+  if (!content) return;
+  try {
+    banner.value = "";
+    if (ed.memId) await api.delete(ed.memId);
+    await api.save({ type: "note", anchor_lid: ed.lid, content, layer: ed.layer });
+    noteEditor.value = null;
+    await refreshAnnotations();
+  } catch (e) {
+    fail(e);
+  }
+}
+async function deleteNote(rec: MemoryRecord) {
+  if (!window.confirm("删除这条笔记?")) return;
   try {
     banner.value = "";
     await api.delete(rec.mem_id);
-    await api.save({
-      type: "note",
-      anchor_lid: rec.anchor.lid ?? "",
-      content: next,
-      layer: rec.layer,
-    });
     await refreshAnnotations();
   } catch (e) {
     fail(e);
@@ -131,6 +194,7 @@ async function doGoto(lid: string) {
     fail(e);
   }
 }
+// 工具栏 🖍:整段高亮当前选中段(range 缺省);段内自由高亮走下面的选区 popover。
 async function doHighlight() {
   if (!selectedLid.value) return;
   try {
@@ -141,13 +205,55 @@ async function doHighlight() {
     fail(e);
   }
 }
-async function doNote() {
-  if (!selectedLid.value) return;
-  const text = window.prompt(`给 ${selectedLid.value} 记笔记:`);
-  if (!text) return;
+function doNote() {
+  openNewNote();
+}
+
+// ── 段内自由高亮:选区捕获 → 浮动按钮 → 精确 UTF-16 区间高亮 `[ADR-0031]` ──
+const hlPopover = ref<{ x: number; y: number; lid: string; start: number; end: number } | null>(null);
+function onProseMouseUp() {
+  const sel = window.getSelection();
+  if (!sel || sel.rangeCount === 0 || sel.isCollapsed) {
+    hlPopover.value = null;
+    return;
+  }
+  const range = sel.getRangeAt(0);
+  const pOf = (n: Node | null): HTMLElement | null => {
+    const el = n && n.nodeType === 3 ? n.parentElement : (n as HTMLElement | null);
+    return el ? el.closest("p[data-lid]") : null;
+  };
+  const startP = pOf(range.startContainer);
+  // 仅支持单段内选区(跨段留后);两端须同一 <p data-lid>。
+  if (!startP || startP !== pOf(range.endContainer)) {
+    hlPopover.value = null;
+    return;
+  }
+  const lid = startP.getAttribute("data-lid");
+  if (!lid) {
+    hlPopover.value = null;
+    return;
+  }
+  // 段内 UTF-16 偏移 = 选区起点前的文本长度(toString().length 即 UTF-16 code unit 数)。
+  const pre = document.createRange();
+  pre.selectNodeContents(startP);
+  pre.setEnd(range.startContainer, range.startOffset);
+  const start = pre.toString().length;
+  const end = start + range.toString().length;
+  if (end <= start) {
+    hlPopover.value = null;
+    return;
+  }
+  const rect = range.getBoundingClientRect();
+  hlPopover.value = { x: rect.left + rect.width / 2, y: rect.top, lid, start, end };
+}
+async function confirmHighlight() {
+  const p = hlPopover.value;
+  if (!p) return;
   try {
     banner.value = "";
-    await api.note(selectedLid.value, text);
+    await api.highlight(p.lid, { start: p.start, end: p.end });
+    hlPopover.value = null;
+    window.getSelection()?.removeAllRanges();
     await refreshAnnotations();
   } catch (e) {
     fail(e);
@@ -301,8 +407,9 @@ async function newChat() {
           <button :disabled="!selectedLid" @click="doNote">📝 笔记</button>
         </div>
 
-        <article class="prose">
+        <article class="prose" @mouseup="onProseMouseUp">
           <div v-for="seg in segments" :key="seg.lid" class="seg">
+            <!-- 段内 range 高亮渲染成 <mark>(renderSeg);整段高亮走 .hl 背景。 -->
             <p
               :data-lid="seg.lid"
               :class="{
@@ -311,14 +418,21 @@ async function newChat() {
                 hl: isHighlighted(seg.lid),
               }"
               @click="selectedLid = seg.lid"
-            >
-              {{ seg.text }}
-            </p>
+              v-html="renderSeg(seg)"
+            ></p>
+            <!-- 高亮卡:该段全部高亮,删除 / 改范围(移除后重选)。 -->
+            <div v-for="h in highlightsOf(seg.lid)" :key="h.mem_id" class="hl-card">
+              <span class="hl-ex">🖍 {{ hlExcerpt(h) }}</span>
+              <span class="hl-actions">
+                <button class="note-btn" title="改范围(移除后重选)" @click="modifyHighlight(h)">✎ 改</button>
+                <button class="note-btn del" title="删除高亮" @click="deleteHighlight(h)">🗑</button>
+              </span>
+            </div>
             <!-- 笔记卡:渲染 Markdown + LaTeX,带编辑/删除。 -->
             <div v-for="note in notesOf(seg.lid)" :key="note.mem_id" class="note-card">
               <div class="note-md md" v-html="renderMarkdown(note.content)"></div>
               <div class="note-actions">
-                <button class="note-btn" title="编辑" @click="editNote(note)">✎ 编辑</button>
+                <button class="note-btn" title="编辑" @click="openEditNote(note)">✎ 编辑</button>
                 <button class="note-btn del" title="删除" @click="deleteNote(note)">🗑 删除</button>
               </div>
             </div>
@@ -412,6 +526,41 @@ async function newChat() {
           </button>
         </div>
       </aside>
+    </div>
+
+    <!-- 段内自由高亮:选区浮动按钮(mousedown.prevent 防点击前清掉选区) -->
+    <div
+      v-if="hlPopover"
+      class="hl-popover"
+      :style="{ left: hlPopover.x + 'px', top: hlPopover.y - 40 + 'px' }"
+    >
+      <button @mousedown.prevent="confirmHighlight">🖍 高亮选区</button>
+    </div>
+
+    <!-- 笔记编辑器(模态 + 实时 MD/LaTeX 预览) -->
+    <div v-if="noteEditor" class="note-modal" @click.self="cancelNote">
+      <div class="note-dialog">
+        <div class="nd-head">
+          <span>{{ noteEditor.memId ? "✎ 编辑笔记" : "📝 新建笔记" }} · {{ noteEditor.lid }}</span>
+          <button class="nd-close" title="关闭" @click="cancelNote">✕</button>
+        </div>
+        <div class="nd-body">
+          <textarea
+            v-model="noteEditor.content"
+            class="nd-input"
+            placeholder="支持 Markdown 与 LaTeX：**粗体**、- 列表、$E=mc^2$、$$\int$$ …"
+            @keydown.ctrl.enter="saveNote"
+          ></textarea>
+          <div class="nd-preview md" v-html="notePreview"></div>
+        </div>
+        <div class="nd-foot">
+          <span class="nd-hint">Ctrl+Enter 保存 · Markdown/LaTeX 实时预览</span>
+          <span class="nd-actions">
+            <button @click="cancelNote">取消</button>
+            <button class="primary" :disabled="!noteEditor.content.trim()" @click="saveNote">保存</button>
+          </span>
+        </div>
+      </div>
     </div>
   </div>
 </template>
@@ -523,5 +672,99 @@ async function newChat() {
 .agent-input textarea {
   width: 100%;
   box-sizing: border-box;
+}
+
+/* 段内高亮的选区浮动按钮 */
+.hl-popover {
+  position: fixed;
+  transform: translateX(-50%);
+  z-index: 50;
+}
+.hl-popover button {
+  background: #1a1a1a;
+  color: #fff;
+  border: none;
+  border-radius: 5px;
+  padding: 0.3rem 0.7rem;
+  font-size: 0.85rem;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+  cursor: pointer;
+}
+
+/* 笔记编辑器模态 */
+.note-modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.35);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 60;
+}
+.note-dialog {
+  width: min(46rem, 92vw);
+  max-height: 86vh;
+  background: #fff;
+  border-radius: 10px;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.25);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.nd-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.7rem 1rem;
+  border-bottom: 1px solid var(--line);
+  font-weight: 600;
+}
+.nd-close {
+  border: none;
+  background: none;
+  font-size: 1rem;
+  cursor: pointer;
+  color: var(--muted);
+}
+.nd-body {
+  display: flex;
+  gap: 0;
+  flex: 1;
+  min-height: 16rem;
+}
+.nd-input {
+  flex: 1;
+  border: none;
+  border-right: 1px solid var(--line);
+  padding: 1rem;
+  font: inherit;
+  resize: none;
+  outline: none;
+}
+.nd-preview {
+  flex: 1;
+  padding: 1rem;
+  overflow-y: auto;
+  background: #fcfcfd;
+}
+.nd-foot {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.6rem 1rem;
+  border-top: 1px solid var(--line);
+}
+.nd-hint {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+.nd-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+.nd-actions .primary {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
 }
 </style>

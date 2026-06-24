@@ -299,6 +299,7 @@ fn dispatch(
                 book_id: book.base.book_id.clone(),
                 anchor: Anchor { lid: Some(anchor.into()), concept: None },
                 content: content.into(),
+                range: None,
                 citations: None,
                 source_session_id: None,
             };
@@ -338,8 +339,8 @@ fn dispatch(
             let Some(lid) = sget("lid") else {
                 return (err_json("INVALID_RANGE", "validation", "reader.highlight 需 lid"), None);
             };
-            // agent 标注 = 提议态,落 session 层 `[ADR-0030 决策4]`。
-            match reader.highlight(book, store, lid, "session", now) {
+            // agent 标注 = 提议态,落 session 层 `[ADR-0030 决策4]`;agent 高亮整段(range=None `[ADR-0031]`)。
+            match reader.highlight(book, store, lid, None, "session", now) {
                 Ok(e) => {
                     let eff = AgentEffect::Highlight { mem_id: e.highlight_id.clone(), lid: lid.to_string() };
                     (to_json(&e), Some(eff))

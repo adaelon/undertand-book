@@ -17,6 +17,9 @@ pub struct Record {
     pub book_id: String,
     pub anchor: Anchor,
     pub content: String,
+    /// 高亮的段内字符区间(UTF-16,相对 LID 文本)`[ADR-0031]`;note/整段高亮为 None。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub range: Option<TextRange>,
     #[serde(default)]
     pub citations: Vec<MemCitation>,
     pub usage: Usage,
@@ -32,6 +35,15 @@ pub struct Anchor {
     pub lid: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub concept: Option<String>,
+}
+
+/// 高亮的段内字符区间 `[start, end)` `[ADR-0031]`:**UTF-16 code unit 偏移,相对该 LID 自身文本**
+/// (非全书 source 绝对偏移)。与 DOM 选区偏移 / JS `string.slice` / Rust `encode_utf16` 同口径(承 [ADR-0024]),
+/// 前端捕获↔后端切片↔前端重绘零换算。整段高亮(agent / 无选区)= range 缺省 None。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TextRange {
+    pub start: u32,
+    pub end: u32,
 }
 
 /// 记忆引用锚定(`[ADR-0015]`,引用红线延伸 `[ADR-0004]`):recall 可验证、可跳原文。
@@ -59,6 +71,8 @@ pub struct SaveInput {
     pub book_id: String,
     pub anchor: Anchor,
     pub content: String,
+    /// 段内字符区间(高亮选区)`[ADR-0031]`;缺省 None = 整段/note。
+    pub range: Option<TextRange>,
     pub citations: Option<Vec<MemCitation>>,
     pub source_session_id: Option<String>,
 }
@@ -83,17 +97,27 @@ fn fnv1a(s: &str) -> u64 {
     h
 }
 
-/// 内容寻址 mem_id `[ADR-0026]`:同 (book_id|type|anchor|content) 两存 = 同 id = 幂等去重。
-fn content_mem_id(book_id: &str, mem_type: &str, anchor: &Anchor, content: &str) -> String {
+/// 内容寻址 mem_id `[ADR-0026]`:同 (book_id|type|anchor|content[|range]) 两存 = 同 id = 幂等去重。
+/// range 段**仅当 Some 时追加** `[ADR-0031]`:None 时哈希与旧版逐字节相同 ⇒ 老 note 的 mem_id 不变;
+/// 同段同子串不同位置(两个「the」)靠 range 入址区分成两条高亮。
+fn content_mem_id(
+    book_id: &str,
+    mem_type: &str,
+    anchor: &Anchor,
+    content: &str,
+    range: Option<&TextRange>,
+) -> String {
     let a = anchor
         .lid
         .as_deref()
         .or(anchor.concept.as_deref())
         .unwrap_or("");
-    format!(
-        "mem_{:016x}",
-        fnv1a(&format!("{book_id}|{mem_type}|{a}|{content}"))
-    )
+    let base = format!("{book_id}|{mem_type}|{a}|{content}");
+    let key = match range {
+        Some(r) => format!("{base}|{}:{}", r.start, r.end),
+        None => base,
+    };
+    format!("mem_{:016x}", fnv1a(&key))
 }
 
 /// 用户私有 memory 库:与只读基座物理隔离的独立 JSON 文件 `[ADR-0006/0026]`。
@@ -143,7 +167,13 @@ impl MemoryStore {
     /// `now` = generated_at/last_used 时间戳(调用方注入,不进 mem_id ⇒ id 时间无关)。
     pub fn save(&mut self, input: SaveInput, now: &str) -> Result<Record, ToolError> {
         let mem_id = input.mem_id.clone().unwrap_or_else(|| {
-            content_mem_id(&input.book_id, &input.mem_type, &input.anchor, &input.content)
+            content_mem_id(
+                &input.book_id,
+                &input.mem_type,
+                &input.anchor,
+                &input.content,
+                input.range.as_ref(),
+            )
         });
         // citation 自动派生:note/highlight 未给 citations 且 anchor 有 lid → 锚回自身 LID。
         let citations = match input.citations {
@@ -177,6 +207,7 @@ impl MemoryStore {
             book_id: input.book_id,
             anchor: input.anchor,
             content: input.content,
+            range: input.range,
             citations,
             usage: Usage {
                 count: prev_count + 1,
@@ -256,6 +287,21 @@ mod tests {
                 concept: None,
             },
             content: content.into(),
+            range: None,
+            citations: None,
+            source_session_id: None,
+        }
+    }
+
+    fn hl_input(book: &str, lid: &str, content: &str, start: u32, end: u32) -> SaveInput {
+        SaveInput {
+            mem_id: None,
+            mem_type: "highlight".into(),
+            layer: "long_term".into(),
+            book_id: book.into(),
+            anchor: Anchor { lid: Some(lid.into()), concept: None },
+            content: content.into(),
+            range: Some(TextRange { start, end }),
             citations: None,
             source_session_id: None,
         }
@@ -346,6 +392,25 @@ mod tests {
         let e = s.delete("mem_nope").unwrap_err();
         assert_eq!(e.error_code, "MEMORY_NOT_FOUND");
         assert_eq!(e.category, "not_found");
+    }
+
+    // 高亮 range:save 存 range + 同段同子串不同 range = 两条不同 mem_id`[ADR-0031]`;range=None 的 note 哈希不变(向后兼容)。
+    #[test]
+    fn highlight_range_persists_and_distinguishes_by_position() {
+        let path = tmp("hlrange");
+        let mut s = MemoryStore::open(&path).unwrap();
+        let a = s.save(hl_input("bookA", "1.1", "the", 0, 3), "t0").unwrap();
+        let b = s.save(hl_input("bookA", "1.1", "the", 20, 23), "t0").unwrap();
+        // 同 book|type|lid|content="the" 但 range 不同 ⇒ 两条不同高亮(range 入址)。
+        assert_ne!(a.mem_id, b.mem_id);
+        assert_eq!(a.range, Some(TextRange { start: 0, end: 3 }));
+        assert_eq!(b.range, Some(TextRange { start: 20, end: 23 }));
+        assert_eq!(s.recall(&RecallQuery::default()).len(), 2);
+        // range=None 的 note 内容寻址与扩 range 字段前一致(向后兼容:不破老 note 幂等)。
+        let n1 = s.save(note_input("bookA", "1.1", "笔记"), "t0").unwrap();
+        let n2 = s.save(note_input("bookA", "1.1", "笔记"), "t1").unwrap();
+        assert_eq!(n1.mem_id, n2.mem_id);
+        assert!(n1.range.is_none());
     }
 
     // 落盘隔离 + 持久化:写入后重开同路径,记录仍在(独立文件,不碰只读基座)。

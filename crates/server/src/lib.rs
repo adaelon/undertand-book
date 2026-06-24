@@ -157,7 +157,13 @@ fn route_mut(state: &mut AppState, path: &str, body: &str, now: &str) -> Reply {
             let Some(lid) = sget("lid") else {
                 return validation("INVALID_RANGE", "reader.highlight 需 lid");
             };
-            match state.reader.highlight(&state.book, &mut state.store, lid, "long_term", now) {
+            // 段内自由高亮:body 可带 range {start,end}(UTF-16 偏移);缺省=整段高亮 `[ADR-0031]`。
+            let range = v.get("range").and_then(|r| {
+                let s = r.get("start").and_then(|x| x.as_u64())?;
+                let e = r.get("end").and_then(|x| x.as_u64())?;
+                Some((s as u32, e as u32))
+            });
+            match state.reader.highlight(&state.book, &mut state.store, lid, range, "long_term", now) {
                 Ok(e) => ok_json(&e),
                 Err(e) => err_reply(&e),
             }
@@ -187,6 +193,7 @@ fn route_mut(state: &mut AppState, path: &str, body: &str, now: &str) -> Reply {
                 book_id: state.book.base.book_id.clone(),
                 anchor: Anchor { lid: Some(anchor.into()), concept: None },
                 content: content.into(),
+                range: None, // memory.save 直存(note / agent 高亮保留)无段内 range;人段内高亮走 reader.highlight `[ADR-0031]`
                 citations: None,
                 source_session_id: None,
             };
@@ -603,6 +610,24 @@ mod tests {
         assert!(rc.body.contains("命令=对象化调用"));
         assert!(rc.body.contains("\"type\":\"highlight\""));
         assert!(rc.body.contains("\"type\":\"note\""));
+    }
+
+    // H1:段内自由高亮 range → 切子串作 content + 存 range(recall 回显);越界 → 400 `[ADR-0031]`。
+    #[test]
+    fn reader_highlight_with_range_stores_substring() {
+        let mut s = state_named("hlrange");
+        // 叶 "1.1" 原文前 100 字符为 'X';range [0,5) → "XXXXX"。
+        let hl = post(&mut s, "/reader/highlight", r#"{"lid":"1.1","range":{"start":0,"end":5}}"#);
+        assert_eq!(hl.status, 200);
+        let rc = post(&mut s, "/memory/recall", r#"{"lid":"1.1","type":"highlight"}"#);
+        assert_eq!(rc.status, 200);
+        assert!(rc.body.contains("\"range\""));
+        assert!(rc.body.contains("\"start\":0"));
+        assert!(rc.body.contains("\"content\":\"XXXXX\""));
+        // 越界 → 400 INVALID_RANGE 不降级。
+        let oob = post(&mut s, "/reader/highlight", r#"{"lid":"1.1","range":{"start":0,"end":9999}}"#);
+        assert_eq!(oob.status, 400);
+        assert!(oob.body.contains("INVALID_RANGE"));
     }
 
     #[test]

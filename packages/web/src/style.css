@@ -102,6 +102,37 @@ body {
   color: var(--muted);
 }
 
+/* 段内自由高亮:正文里的 <mark>(renderSeg 注入)。 */
+.hl-mark {
+  background: var(--hl);
+  border-radius: 2px;
+  padding: 0 0.05em;
+}
+/* 高亮卡:正文段下方列出该段高亮,删除 / 改范围。 */
+.hl-card {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0.15rem 0 0.4rem;
+  padding: 0.2rem 0.5rem;
+  background: #fffdf2;
+  border: 1px solid #fde68a;
+  border-radius: 5px;
+  font-size: 0.85rem;
+}
+.hl-ex {
+  flex: 1;
+  color: #555;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.hl-actions {
+  display: flex;
+  gap: 0.3rem;
+  flex-shrink: 0;
+}
+
 /* 笔记卡:正文段下方,渲染 Markdown/公式 + 编辑/删除。 */
 .note-card {
   margin: 0.2rem 0 1rem;

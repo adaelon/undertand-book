@@ -5,7 +5,7 @@
 //! viewport = **叶序滑动窗口**(anchor 所在叶为中心,按全书叶 LID 顺序取前后 radius 个;scroll 沿叶序移动)。
 //! 切片0 不做 openPanel/closePanel 面板系统、真 GUI、段内字符 range(停 LID 粒度)。
 //! 时间戳由调用方注入(确定性可测,守 A2);错误复用 `ToolError` 信封,禁宽松降级 `[ADR-0015]`。
-use memory::{Anchor, MemoryStore, RecallQuery, SaveInput};
+use memory::{Anchor, MemoryStore, RecallQuery, SaveInput, TextRange};
 use read_tools::{Book, ToolError};
 use serde::Serialize;
 
@@ -141,18 +141,36 @@ impl Reader {
         }
     }
 
-    /// `reader.highlight(lid)`:薄入口,持久化**委托 memory.save**(type=highlight)。
-    /// content = 该 LID 原文片段(经 book.text 顺带校验 LID 真实);返回的 highlight_id = 记忆层 mem_id。
-    /// `layer`:人走命令面默认 `long_term`、agent 提议态传 `session`(可撤销提议 `[ADR-0030]`,人机对称无特供)。
+    /// `reader.highlight(lid, range?)`:薄入口,持久化**委托 memory.save**(type=highlight)。
+    /// `range=Some(s,e)`:段内自由高亮——按 **UTF-16 偏移**切该段子串作 content + 存 range `[ADR-0031]`;
+    /// 越界 → `INVALID_RANGE` 不降级。`range=None`:整段高亮(向后兼容 / agent 走此路)。
+    /// 返回的 highlight_id = 记忆层 mem_id;`layer`:人默认 `long_term`、agent 提议态 `session` `[ADR-0030]`。
     pub fn highlight(
         &mut self,
         book: &Book,
         store: &mut MemoryStore,
         lid: &str,
+        range: Option<(u32, u32)>,
         layer: &str,
         now: &str,
     ) -> Result<HighlightEffect, ToolError> {
-        let frag = book.text(lid, None)?; // LID 不存在 → ToolError 透传,不降级
+        let full = book.text(lid, None)?; // LID 不存在 → ToolError 透传,不降级
+        let (frag, range_rec) = match range {
+            Some((s, e)) => {
+                // 段内 UTF-16 code unit 切片(与前端 DOM 选区偏移 / JS string.slice 同口径 `[ADR-0024/0031]`)。
+                let units: Vec<u16> = full.encode_utf16().collect();
+                let (su, eu) = (s as usize, e as usize);
+                if su > eu || eu > units.len() {
+                    return Err(ToolError {
+                        error_code: "INVALID_RANGE".into(),
+                        category: "validation".into(),
+                        message: format!("高亮区间越界: [{s},{e}) 超出该段 {} 个 UTF-16 单位", units.len()),
+                    });
+                }
+                (String::from_utf16_lossy(&units[su..eu]), Some(TextRange { start: s, end: e }))
+            }
+            None => (full, None),
+        };
         let saved = store.save(
             SaveInput {
                 mem_id: None,
@@ -164,6 +182,7 @@ impl Reader {
                     concept: None,
                 },
                 content: frag,
+                range: range_rec,
                 citations: None, // memory 自动派生锚回 lid 的 citation
                 source_session_id: None,
             },
@@ -200,6 +219,7 @@ impl Reader {
                     concept: None,
                 },
                 content: text.to_string(),
+                range: None,
                 citations: None,
                 source_session_id: None,
             },
@@ -381,7 +401,7 @@ mod tests {
         let b = book_n_leaves(5);
         let mut store = MemoryStore::open(tmp("hl")).unwrap();
         let mut r = Reader::new(&b, 2);
-        let eff = r.highlight(&b, &mut store, "1.3", "long_term", "t0").unwrap();
+        let eff = r.highlight(&b, &mut store, "1.3", None, "long_term", "t0").unwrap();
         let got = store.recall(&RecallQuery {
             lid: Some("1.3".into()),
             mem_type: Some("highlight".into()),
@@ -389,7 +409,25 @@ mod tests {
         });
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].mem_id, eff.highlight_id);
-        assert_eq!(got[0].content, "X".repeat(10)); // 1.3 的原文片段
+        assert_eq!(got[0].content, "X".repeat(10)); // 整段高亮:1.3 全文
+        assert!(got[0].range.is_none());
+    }
+
+    // 段内自由高亮:range=Some 按 UTF-16 切子串作 content + 存 range;越界 → INVALID_RANGE `[ADR-0031]`。
+    #[test]
+    fn highlight_range_slices_substring_and_rejects_oob() {
+        let b = book_n_leaves(5); // 每叶 10 个 'X'
+        let mut store = MemoryStore::open(tmp("hlrange")).unwrap();
+        let mut r = Reader::new(&b, 2);
+        let eff = r.highlight(&b, &mut store, "1.2", Some((2, 5)), "long_term", "t0").unwrap();
+        let got = store.recall(&RecallQuery { lid: Some("1.2".into()), ..Default::default() });
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].mem_id, eff.highlight_id);
+        assert_eq!(got[0].content, "XXX"); // [2,5) = 3 个字符
+        assert_eq!(got[0].range, Some(memory::TextRange { start: 2, end: 5 }));
+        // 越界:end 超过段长(10)→ INVALID_RANGE 不降级。
+        let e = r.highlight(&b, &mut store, "1.2", Some((8, 99)), "long_term", "t0").unwrap_err();
+        assert_eq!(e.error_code, "INVALID_RANGE");
     }
 
     // highlight 不存在的 LID:经 book.text 透传 LID_NOT_FOUND(不降级)。
@@ -398,7 +436,7 @@ mod tests {
         let b = book_n_leaves(5);
         let mut store = MemoryStore::open(tmp("hlmiss")).unwrap();
         let mut r = Reader::new(&b, 2);
-        let e = r.highlight(&b, &mut store, "9.9", "long_term", "t0").unwrap_err();
+        let e = r.highlight(&b, &mut store, "9.9", None, "long_term", "t0").unwrap_err();
         assert_eq!(e.error_code, "LID_NOT_FOUND");
     }
 

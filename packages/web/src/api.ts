@@ -33,6 +33,11 @@ export interface NoteEffect {
   ok: boolean;
   note_id: string;
 }
+/** 段内字符区间(高亮选区,UTF-16 偏移,相对该 LID 文本)`[ADR-0031]`。 */
+export interface TextRange {
+  start: number;
+  end: number;
+}
 /** memory 记录(符 V3 §4.3;JSON 字段 `type` = Rust mem_type 的 serde rename)。 */
 export interface MemoryRecord {
   mem_id: string;
@@ -41,6 +46,7 @@ export interface MemoryRecord {
   book_id: string;
   anchor: { lid?: string | null; concept?: string | null };
   content: string;
+  range?: TextRange | null; // 高亮段内区间;note / 整段高亮为空 `[ADR-0031]`
 }
 export interface BookText {
   lid: string;
@@ -101,7 +107,9 @@ export const api = {
   // ── reader.*(可变 POST,返 effect)──
   goto: (lid: string) => http<ViewportEffect>("POST", "/reader/goto", { lid }),
   scroll: (delta: number) => http<ViewportEffect>("POST", "/reader/scroll", { delta }),
-  highlight: (lid: string) => http<HighlightEffect>("POST", "/reader/highlight", { lid }),
+  // range?:段内自由高亮 {start,end}(UTF-16 偏移);缺省=整段高亮 `[ADR-0031]`。
+  highlight: (lid: string, range?: TextRange) =>
+    http<HighlightEffect>("POST", "/reader/highlight", { lid, range }),
   note: (lid: string, text: string) => http<NoteEffect>("POST", "/reader/note", { lid, text }),
   state: () => http<ReaderState>("POST", "/reader/state", {}),
 
