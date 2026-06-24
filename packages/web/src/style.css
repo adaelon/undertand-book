@@ -98,17 +98,77 @@ body {
 .prose p.hl {
   background: var(--hl);
 }
-.prose .note {
-  display: inline-block;
-  margin-left: 0.4rem;
-  padding: 0 0.3rem;
-  font-size: 0.85rem;
-  color: var(--muted);
-  border: 1px dashed var(--line);
-  border-radius: 3px;
-}
 .prose .empty {
   color: var(--muted);
+}
+
+/* 笔记卡:正文段下方,渲染 Markdown/公式 + 编辑/删除。 */
+.note-card {
+  margin: 0.2rem 0 1rem;
+  padding: 0.5rem 0.7rem;
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+  border-radius: 5px;
+  font-size: 0.92rem;
+}
+.note-card::before {
+  content: "📝 笔记";
+  display: block;
+  font-size: 0.75rem;
+  color: var(--muted);
+  margin-bottom: 0.2rem;
+}
+.note-actions {
+  margin-top: 0.4rem;
+  display: flex;
+  gap: 0.4rem;
+}
+.note-btn {
+  font-size: 0.8rem;
+  padding: 0.15rem 0.5rem;
+}
+.note-btn.del {
+  color: #b91c1c;
+}
+
+/* Markdown 渲染排版(全局:供 agent 答案 + 笔记的 v-html 内容统一生效)。 */
+.md > :first-child {
+  margin-top: 0;
+}
+.md > :last-child {
+  margin-bottom: 0;
+}
+.md p {
+  margin: 0.5em 0;
+}
+.md ul,
+.md ol {
+  margin: 0.5em 0;
+  padding-left: 1.4em;
+}
+.md pre {
+  background: #eceef1;
+  padding: 0.5em 0.7em;
+  border-radius: 4px;
+  overflow-x: auto;
+}
+.md code {
+  background: #eceef1;
+  padding: 0.1em 0.3em;
+  border-radius: 3px;
+  font-size: 0.9em;
+}
+.md pre code {
+  background: none;
+  padding: 0;
+}
+.md a {
+  color: var(--accent);
+}
+/* KaTeX 独立公式过宽时横向滚动,不撑破容器。 */
+.md .katex-display {
+  overflow-x: auto;
+  overflow-y: hidden;
 }
 
 .qa {

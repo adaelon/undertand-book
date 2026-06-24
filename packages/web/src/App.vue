@@ -2,6 +2,7 @@
 import { computed, onMounted, ref } from "vue";
 import { api, ApiError } from "./api";
 import type { AgentEffect, MemoryRecord, OuterOutcome, Viewport } from "./api";
+import { renderMarkdown } from "./md";
 
 // ── 阅读区会话态 ──
 const leafOrder = ref<string[]>([]); // 全书叶 LID 序(读位感分母 + 进度)
@@ -29,13 +30,43 @@ const progressPct = computed(() => {
   return Math.round(((idx + 1) / leafOrder.value.length) * 100);
 });
 
-// 标注查询:某 lid 上是否有 highlight / 取其 note 文本。
+// 标注查询:某 lid 上是否有 highlight / 取其全部 note 记录(可多条)。
 function isHighlighted(lid: string): boolean {
   return annotations.value.some((r) => r.anchor.lid === lid && r.type === "highlight");
 }
-function noteOf(lid: string): string | null {
-  const n = annotations.value.find((r) => r.anchor.lid === lid && r.type === "note");
-  return n ? n.content : null;
+function notesOf(lid: string): MemoryRecord[] {
+  return annotations.value.filter((r) => r.anchor.lid === lid && r.type === "note");
+}
+
+// 笔记删除:memory.delete + 刷新标注。
+async function deleteNote(rec: MemoryRecord) {
+  if (!window.confirm("删除这条笔记?")) return;
+  try {
+    banner.value = "";
+    await api.delete(rec.mem_id);
+    await refreshAnnotations();
+  } catch (e) {
+    fail(e);
+  }
+}
+
+// 笔记更新:mem_id 内容寻址 ⇒ 改内容 = 删旧 + 存新(同 anchor/type/layer)`[ADR-0026]`。
+async function editNote(rec: MemoryRecord) {
+  const next = window.prompt("编辑笔记(支持 Markdown / $公式$):", rec.content);
+  if (next === null || next.trim() === "" || next === rec.content) return;
+  try {
+    banner.value = "";
+    await api.delete(rec.mem_id);
+    await api.save({
+      type: "note",
+      anchor_lid: rec.anchor.lid ?? "",
+      content: next,
+      layer: rec.layer,
+    });
+    await refreshAnnotations();
+  } catch (e) {
+    fail(e);
+  }
 }
 
 async function refreshAnnotations() {
@@ -271,20 +302,27 @@ async function newChat() {
         </div>
 
         <article class="prose">
-          <p
-            v-for="seg in segments"
-            :key="seg.lid"
-            :data-lid="seg.lid"
-            :class="{
-              anchor: seg.lid === viewport?.anchor_lid,
-              selected: seg.lid === selectedLid,
-              hl: isHighlighted(seg.lid),
-            }"
-            @click="selectedLid = seg.lid"
-          >
-            {{ seg.text }}
-            <span v-if="noteOf(seg.lid)" class="note">📝 {{ noteOf(seg.lid) }}</span>
-          </p>
+          <div v-for="seg in segments" :key="seg.lid" class="seg">
+            <p
+              :data-lid="seg.lid"
+              :class="{
+                anchor: seg.lid === viewport?.anchor_lid,
+                selected: seg.lid === selectedLid,
+                hl: isHighlighted(seg.lid),
+              }"
+              @click="selectedLid = seg.lid"
+            >
+              {{ seg.text }}
+            </p>
+            <!-- 笔记卡:渲染 Markdown + LaTeX,带编辑/删除。 -->
+            <div v-for="note in notesOf(seg.lid)" :key="note.mem_id" class="note-card">
+              <div class="note-md md" v-html="renderMarkdown(note.content)"></div>
+              <div class="note-actions">
+                <button class="note-btn" title="编辑" @click="editNote(note)">✎ 编辑</button>
+                <button class="note-btn del" title="删除" @click="deleteNote(note)">🗑 删除</button>
+              </div>
+            </div>
+          </div>
           <p v-if="segments.length === 0" class="empty">
             （无内容——确认 server 已加载真书目录并在 8787 监听）
           </p>
@@ -306,7 +344,13 @@ async function newChat() {
             <p v-else-if="turn.error" class="incomplete">{{ turn.error }}</p>
 
             <div v-else-if="turn.outcome" class="a-msg">
-              <p class="ans-text">{{ turn.outcome.answer ?? "(无回答)" }}</p>
+              <!-- agent 答案渲染 Markdown + LaTeX(v-html 安全:renderMarkdown 经 markdown-it html:false 转义)。 -->
+              <div
+                v-if="turn.outcome.answer"
+                class="ans-text md"
+                v-html="renderMarkdown(turn.outcome.answer)"
+              ></div>
+              <p v-else class="ans-text">(无回答)</p>
               <p v-if="turn.outcome.incomplete" class="incomplete">
                 ⚠ 未尽({{ turn.outcome.warning ?? "incomplete" }})
               </p>
@@ -374,10 +418,15 @@ async function newChat() {
 
 <style scoped>
 .agent {
+  /* 固定宽侧栏:flex 0 0 不随内容增长。修 S10g 回归——面板 class 从 .qa 改 .agent 时丢了 width,
+     默认 flex:0 1 auto 让右栏被长答案/trace 内容撑满全屏、挤垮分屏与按钮。 */
+  flex: 0 0 24rem;
   display: flex;
   flex-direction: column;
-  border-left: 1px solid #ddd;
+  border-left: 1px solid var(--line);
   min-width: 0;
+  padding: 1rem;
+  overflow-y: auto;
 }
 .agent-head {
   display: flex;
@@ -390,6 +439,9 @@ async function newChat() {
 .transcript {
   flex: 1;
   overflow-y: auto;
+  /* 长答案/无空格长串(trace digest、JSON args)在固定宽侧栏内换行,不横向撑破。 */
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 .turn {
   margin-bottom: 1.2em;
@@ -402,6 +454,7 @@ async function newChat() {
   border-radius: 6px;
   padding: 0.6em 0.8em;
 }
+/* `.md` 渲染排版移到全局 style.css —— scoped 样式够不到 v-html 注入的子节点。 */
 .pending {
   color: #888;
 }
