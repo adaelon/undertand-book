@@ -1,0 +1,178 @@
+:root {
+  --fg: #1a1a1a;
+  --muted: #6b7280;
+  --line: #e5e7eb;
+  --accent: #2563eb;
+  --hl: #fff3bf;
+}
+
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+  color: var(--fg);
+  font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  line-height: 1.7;
+}
+
+.app {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.topbar {
+  display: flex;
+  align-items: baseline;
+  gap: 1rem;
+  padding: 0.6rem 1rem;
+  border-bottom: 1px solid var(--line);
+}
+.topbar .title {
+  font-weight: 600;
+}
+.topbar .progress {
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+.topbar .pos {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.banner {
+  margin: 0;
+  padding: 0.5rem 1rem;
+  background: #fef2f2;
+  color: #b91c1c;
+  font-size: 0.9rem;
+}
+
+.body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+.reader {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.controls {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 1rem;
+  border-bottom: 1px solid var(--line);
+  flex-wrap: wrap;
+}
+.controls .sel {
+  color: var(--muted);
+  font-size: 0.85rem;
+  margin-left: auto;
+}
+
+/* 连续正文:段落自然流动,无框/无分隔/无 LID 标号(LID 隐形)。 */
+.prose {
+  overflow-y: auto;
+  padding: 1.5rem max(2rem, 8vw);
+  max-width: 48rem;
+  margin: 0 auto;
+}
+.prose p {
+  margin: 0 0 1rem;
+  cursor: pointer;
+}
+.prose p.anchor {
+  /* 当前锚点叶:极淡左缘提示,不打断阅读。 */
+  border-left: 2px solid var(--accent);
+  padding-left: 0.6rem;
+  margin-left: -0.6rem;
+}
+.prose p.selected {
+  background: #eff6ff;
+}
+.prose p.hl {
+  background: var(--hl);
+}
+.prose .note {
+  display: inline-block;
+  margin-left: 0.4rem;
+  padding: 0 0.3rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+  border: 1px dashed var(--line);
+  border-radius: 3px;
+}
+.prose .empty {
+  color: var(--muted);
+}
+
+.qa {
+  width: 22rem;
+  border-left: 1px solid var(--line);
+  padding: 1rem;
+  overflow-y: auto;
+}
+.qa h3 {
+  margin-top: 0;
+}
+.qa textarea {
+  width: 100%;
+  font: inherit;
+  padding: 0.5rem;
+}
+.qa button {
+  margin-top: 0.5rem;
+}
+.answer {
+  margin-top: 1rem;
+  font-size: 0.92rem;
+}
+.answer .ans-text {
+  white-space: pre-wrap;
+}
+.answer .incomplete {
+  color: #b45309;
+}
+.cites ul {
+  padding-left: 1rem;
+}
+.cites a {
+  color: var(--accent);
+  text-decoration: none;
+}
+.cites .role {
+  color: var(--muted);
+  font-size: 0.8rem;
+  margin-right: 0.3rem;
+}
+.supp {
+  color: var(--muted);
+}
+.scope {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+button {
+  font: inherit;
+  padding: 0.3rem 0.7rem;
+  border: 1px solid var(--line);
+  background: #fff;
+  border-radius: 4px;
+  cursor: pointer;
+}
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+input {
+  font: inherit;
+  padding: 0.3rem 0.5rem;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}
