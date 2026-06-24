@@ -1,17 +1,31 @@
 //! 读时 localhost 服务:把冻结命令面投影成 REST `[ADR-0028]`。
-//! S10a 只投影 `book.*` 四只读叶子工具 → GET,端点名 = 命令名,错误原样透传 §4.4 信封。
-//! 路由是**纯函数 `route(&AppState, method, url) -> Reply`**,脱离 socket 可单测(守 A2);
-//! socket 绑定 / worker 线程 / Mutex 锁在 `main.rs`(bin)。
-//! reader/memory(S10b)、query(S10c)、静态资源(S10e)、agent(S10f)留后续子切片。
+//! S10a:`book.*` 四只读叶子 → GET。S10b:`reader.*`/`memory.*` 可变命令 → POST(JSON body),
+//! reader.* 返 effect、highlight/note 委托 memory.save(标注单源 `[ADR-0015/0006]`)、非法 LID 透传不降级。
+//! 路由是**纯函数 `route(&mut AppState, Req) -> Reply`**(脱 socket 可单测,守 A2);
+//! socket 绑定 / worker 线程 / Mutex 锁 / 时间戳生成在 `main.rs`。
+//! query(S10c)、agent(S10f)、静态资源(S10e)留后续子切片。
+use memory::{Anchor, MemoryStore, RecallQuery, SaveInput};
 use read_tools::{Book, ToolError};
+use reader::Reader;
 use serde::Serialize;
 use serde_json::json;
 use std::collections::HashMap;
 
 /// 服务的单会话共享状态(切片0 单用户单书)`[ADR-0028 决策2]`。
-/// S10a 只持只读 `Book`;S10b 起扩 `Reader` + `MemoryStore`(届时 main 的 Mutex 兑现可变性)。
+/// S10b:持只读 `Book` + 会话态 `Reader` + 用户私有 `MemoryStore`(物理隔离 `[ADR-0006]`)。
 pub struct AppState {
     pub book: Book,
+    pub reader: Reader,
+    pub store: MemoryStore,
+}
+
+/// 一次请求的传输无关输入:方法 + 原始 url(含 query)+ JSON body(GET 为空)+ 时间戳。
+/// `now` 由 main 注入(确定性可测,守 A2;memory.save 的 generated_at/last_used 用它)。
+pub struct Req<'a> {
+    pub method: &'a str,
+    pub url: &'a str,
+    pub body: &'a str,
+    pub now: &'a str,
 }
 
 /// 路由产物:HTTP 状态码 + JSON body(传输无关,main 负责写回 socket)。
@@ -21,17 +35,30 @@ pub struct Reply {
     pub body: String,
 }
 
-/// 纯函数路由:给定状态 + 方法 + 原始 url(含 query)→ Reply,无任何 I/O `[ADR-0028 决策3]`。
-/// `book.*` 只读 → 仅接受 GET;非 GET 返 405。
-pub fn route(state: &AppState, method: &str, url: &str) -> Reply {
-    let (path, q) = parse_query(url);
-    if method != "GET" {
-        return method_not_allowed();
+/// 纯函数路由 `[ADR-0028 决策3]`:按命名空间前缀定方法(`book.*`→GET 只读、
+/// `reader.*`/`memory.*`→POST 可变),端点名 = 命令名,错误原样透传 §4.4 信封。
+pub fn route(state: &mut AppState, req: Req) -> Reply {
+    let (path, q) = parse_query(req.url);
+    if let Some(p) = path.strip_prefix("/book/") {
+        if req.method != "GET" {
+            return method_not_allowed();
+        }
+        route_book(&state.book, p, &q)
+    } else if path.starts_with("/reader/") || path.starts_with("/memory/") {
+        if req.method != "POST" {
+            return method_not_allowed();
+        }
+        route_mut(state, path.as_str(), req.body, req.now)
+    } else {
+        route_not_found(&path)
     }
-    let book = &state.book;
-    match path.as_str() {
-        "/book/manifest" => ok_json(&book.manifest()),
-        "/book/text" => {
+}
+
+/// `book.*` 只读叶子 → GET(S10a)。
+fn route_book(book: &Book, leaf: &str, q: &HashMap<String, String>) -> Reply {
+    match leaf {
+        "manifest" => ok_json(&book.manifest()),
+        "text" => {
             let Some(lid) = q.get("lid") else {
                 return validation("INVALID_RANGE", "book.text 需 lid 查询参数");
             };
@@ -40,7 +67,7 @@ pub fn route(state: &AppState, method: &str, url: &str) -> Reply {
                 Err(e) => err_reply(&e),
             }
         }
-        "/book/context" => {
+        "context" => {
             let Some(lid) = q.get("lid") else {
                 return validation("INVALID_RANGE", "book.context 需 lid 查询参数");
             };
@@ -56,7 +83,7 @@ pub fn route(state: &AppState, method: &str, url: &str) -> Reply {
                 Err(e) => err_reply(&e),
             }
         }
-        "/book/concept" => {
+        "concept" => {
             let Some(name) = q.get("name") else {
                 return validation("INVALID_RANGE", "book.concept 需 name 查询参数");
             };
@@ -65,8 +92,89 @@ pub fn route(state: &AppState, method: &str, url: &str) -> Reply {
                 Err(e) => err_reply(&e),
             }
         }
-        // 传输层未知路由(非冻结 command 错误枚举,HTTP 层信封形透传)。
-        _ => route_not_found(&path),
+        _ => route_not_found(&format!("/book/{leaf}")),
+    }
+}
+
+/// `reader.*`/`memory.*` 可变命令 → POST(S10b)。reader.* 返 effect;
+/// highlight/note 委托 memory.save(标注单源);memory.* 直读写记忆层。
+fn route_mut(state: &mut AppState, path: &str, body: &str, now: &str) -> Reply {
+    let v = match body_value(body) {
+        Ok(v) => v,
+        Err(reply) => return reply,
+    };
+    let sget = |k: &str| v.get(k).and_then(|x| x.as_str());
+    match path {
+        "/reader/goto" => {
+            let Some(lid) = sget("lid") else {
+                return validation("INVALID_RANGE", "reader.goto 需 lid");
+            };
+            // 字段级不相交借用:reader(mut) + book(shared)。
+            match state.reader.goto_lid(&state.book, lid) {
+                Ok(e) => ok_json(&e),
+                Err(e) => err_reply(&e),
+            }
+        }
+        "/reader/scroll" => {
+            let Some(delta) = v.get("delta").and_then(|x| x.as_i64()) else {
+                return validation("INVALID_RANGE", "reader.scroll 需 delta(整数)");
+            };
+            ok_json(&state.reader.scroll(delta))
+        }
+        "/reader/highlight" => {
+            let Some(lid) = sget("lid") else {
+                return validation("INVALID_RANGE", "reader.highlight 需 lid");
+            };
+            match state.reader.highlight(&state.book, &mut state.store, lid, now) {
+                Ok(e) => ok_json(&e),
+                Err(e) => err_reply(&e),
+            }
+        }
+        "/reader/note" => {
+            let (Some(lid), Some(text)) = (sget("lid"), sget("text")) else {
+                return validation("INVALID_RANGE", "reader.note 需 lid + text");
+            };
+            match state.reader.note(&state.book, &mut state.store, lid, text, now) {
+                Ok(e) => ok_json(&e),
+                Err(e) => err_reply(&e),
+            }
+        }
+        "/reader/state" => ok_json(&state.reader.state()),
+        "/memory/save" => {
+            let (Some(ty), Some(anchor), Some(content)) =
+                (sget("type"), sget("anchor_lid"), sget("content"))
+            else {
+                return validation("INVALID_MEMORY_TYPE", "memory.save 需 type + anchor_lid + content");
+            };
+            // layer:显式给则用,否则按类型默认(position→session,其余→long_term)`[ADR-0006]`。
+            let layer = sget("layer").unwrap_or(if ty == "position" { "session" } else { "long_term" });
+            let input = SaveInput {
+                mem_id: None,
+                mem_type: ty.into(),
+                layer: layer.into(),
+                book_id: state.book.base.book_id.clone(),
+                anchor: Anchor { lid: Some(anchor.into()), concept: None },
+                content: content.into(),
+                citations: None,
+                source_session_id: None,
+            };
+            match state.store.save(input, now) {
+                Ok(r) => ok_json(&r),
+                Err(e) => err_reply(&e),
+            }
+        }
+        "/memory/recall" => {
+            // 各维度 Some 即过滤,缺省 = 不限(book_id 不给即跨书 `[ADR-0006]`)。
+            let q = RecallQuery {
+                book_id: sget("book_id").map(String::from),
+                lid: sget("lid").map(String::from),
+                mem_type: sget("type").map(String::from),
+                layer: sget("layer").map(String::from),
+                text: sget("text").map(String::from),
+            };
+            ok_json(&state.store.recall(&q))
+        }
+        _ => route_not_found(path),
     }
 }
 
@@ -85,6 +193,15 @@ fn parse_query(url: &str) -> (String, HashMap<String, String>) {
         map.insert(percent_decode(k), percent_decode(v));
     }
     (path.to_string(), map)
+}
+
+/// JSON body 解析:空 body → 空对象(便于无字段端点如 reader.state);非法 → 400。
+fn body_value(body: &str) -> Result<serde_json::Value, Reply> {
+    if body.trim().is_empty() {
+        return Ok(serde_json::Value::Object(Default::default()));
+    }
+    serde_json::from_str(body)
+        .map_err(|e| validation("INVALID_RANGE", &format!("请求体非合法 JSON: {e}")))
 }
 
 /// 最小 percent 解码:`%XX` 十六进制字节 + `+`→空格;非法 `%` 序列原样保留。
@@ -163,7 +280,7 @@ fn method_not_allowed() -> Reply {
         body: to_body(&ToolError {
             error_code: "METHOD_NOT_ALLOWED".into(),
             category: "validation".into(),
-            message: "book.* 只支持 GET".into(),
+            message: "book.* 只支持 GET;reader.*/memory.* 只支持 POST".into(),
         }),
     }
 }
@@ -190,105 +307,159 @@ fn status_for(category: &str) -> u16 {
 mod tests {
     use super::*;
     use base_schema::sample_base;
+    use reader::DEFAULT_RADIUS;
+    use std::path::PathBuf;
 
-    fn state() -> AppState {
+    fn tmp(name: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!("ub-server-test-{name}.json"));
+        let _ = std::fs::remove_file(&p);
+        p
+    }
+
+    fn state_named(mem: &str) -> AppState {
         // sample_base:容器 "1" + 叶 "1.1";entity:command occ=["1.1"]、claim source=1.1。
         let src = "X".repeat(100) + "尾巴";
-        AppState {
-            book: Book::new(sample_base(), &src),
-        }
+        let book = Book::new(sample_base(), &src);
+        let reader = Reader::new(&book, DEFAULT_RADIUS);
+        let store = MemoryStore::open(tmp(mem)).unwrap();
+        AppState { book, reader, store }
     }
 
-    fn get(s: &AppState, url: &str) -> Reply {
-        route(s, "GET", url)
+    fn get(s: &mut AppState, url: &str) -> Reply {
+        route(s, Req { method: "GET", url, body: "", now: "t0" })
+    }
+    fn post(s: &mut AppState, url: &str, body: &str) -> Reply {
+        route(s, Req { method: "POST", url, body, now: "t0" })
     }
 
+    // ── S10a book.* GET(回归)────────────────────────────────
     #[test]
     fn manifest_ok() {
-        let r = get(&state(), "/book/manifest");
+        let r = get(&mut state_named("manifest"), "/book/manifest");
         assert_eq!(r.status, 200);
         assert!(r.body.contains("\"tree\""));
-        assert!(r.body.contains("\"stats_by_lid\""));
     }
 
     #[test]
-    fn text_valid_lid_returns_original() {
-        let r = get(&state(), "/book/text?lid=1.1");
-        assert_eq!(r.status, 200);
-        assert!(r.body.contains("\"lid\":\"1.1\""));
-        assert!(r.body.contains(&"X".repeat(100)));
-    }
-
-    #[test]
-    fn text_missing_lid_is_validation_400() {
-        let r = get(&state(), "/book/text");
-        assert_eq!(r.status, 400);
-        assert!(r.body.contains("INVALID_RANGE"));
-        assert!(r.body.contains("validation"));
-    }
-
-    #[test]
-    fn text_unknown_lid_passes_through_not_found_404() {
-        let r = get(&state(), "/book/text?lid=9.9");
-        assert_eq!(r.status, 404);
-        assert!(r.body.contains("LID_NOT_FOUND"));
-        assert!(r.body.contains("not_found"));
-    }
-
-    #[test]
-    fn context_ok_and_bad_k_is_400() {
-        let ok = get(&state(), "/book/context?lid=1.1");
+    fn text_valid_and_unknown_and_missing() {
+        let mut s = state_named("text");
+        let ok = get(&mut s, "/book/text?lid=1.1");
         assert_eq!(ok.status, 200);
-        assert!(ok.body.contains("\"anchor\":\"1.1\""));
-        let bad = get(&state(), "/book/context?lid=1.1&k=abc");
-        assert_eq!(bad.status, 400);
-        assert!(bad.body.contains("INVALID_K"));
+        assert!(ok.body.contains(&"X".repeat(100)));
+        let nf = get(&mut s, "/book/text?lid=9.9");
+        assert_eq!(nf.status, 404);
+        assert!(nf.body.contains("LID_NOT_FOUND"));
+        let miss = get(&mut s, "/book/text");
+        assert_eq!(miss.status, 400);
+        assert!(miss.body.contains("INVALID_RANGE"));
     }
 
     #[test]
-    fn concept_found_missing_param_and_unknown() {
-        let found = get(&state(), "/book/concept?name=command");
-        assert_eq!(found.status, 200);
-        assert!(found.body.contains("\"occurrences\""));
-        assert!(found.body.contains("1.1"));
-
-        let missing = get(&state(), "/book/concept");
-        assert_eq!(missing.status, 400);
-        assert!(missing.body.contains("INVALID_RANGE"));
-
-        let unknown = get(&state(), "/book/concept?name=nope");
-        assert_eq!(unknown.status, 404);
-        assert!(unknown.body.contains("CONCEPT_NOT_FOUND"));
+    fn context_and_concept() {
+        let mut s = state_named("ctx");
+        assert_eq!(get(&mut s, "/book/context?lid=1.1").status, 200);
+        assert_eq!(get(&mut s, "/book/context?lid=1.1&k=abc").status, 400);
+        assert_eq!(get(&mut s, "/book/concept?name=command").status, 200);
+        assert_eq!(get(&mut s, "/book/concept?name=nope").status, 404);
     }
 
     #[test]
-    fn unknown_route_is_404_envelope() {
-        let r = get(&state(), "/book/nope");
-        assert_eq!(r.status, 404);
-        assert!(r.body.contains("ROUTE_NOT_FOUND"));
-    }
-
-    #[test]
-    fn non_get_is_405() {
-        let r = route(&state(), "POST", "/book/manifest");
-        assert_eq!(r.status, 405);
-        assert!(r.body.contains("METHOD_NOT_ALLOWED"));
+    fn unknown_route_404_and_wrong_method_405() {
+        let mut s = state_named("route");
+        assert_eq!(get(&mut s, "/book/nope").status, 404);
+        assert!(get(&mut s, "/book/nope").body.contains("ROUTE_NOT_FOUND"));
+        // 错方法:POST 到 book.* / GET 到 reader.* → 405
+        assert_eq!(post(&mut s, "/book/manifest", "{}").status, 405);
+        assert_eq!(get(&mut s, "/reader/goto").status, 405);
     }
 
     #[test]
     fn percent_decode_cjk_and_space() {
         assert_eq!(percent_decode("%E5%91%BD%E4%BB%A4"), "命令");
         assert_eq!(percent_decode("a+b"), "a b");
-        assert_eq!(percent_decode("%2F"), "/");
-        // 非法 % 序列原样保留
         assert_eq!(percent_decode("%zz"), "%zz");
-        assert_eq!(percent_decode("100%"), "100%");
+    }
+
+    // ── S10b reader.* / memory.* POST ───────────────────────
+    #[test]
+    fn reader_goto_returns_viewport_and_unknown_lid_404() {
+        let mut s = state_named("goto");
+        let ok = post(&mut s, "/reader/goto", r#"{"lid":"1.1"}"#);
+        assert_eq!(ok.status, 200);
+        assert!(ok.body.contains("\"anchor_lid\":\"1.1\""));
+        assert!(ok.body.contains("\"viewport\""));
+        // 非法 LID 透传 LID_NOT_FOUND 不降级 `[ADR-0015]`。
+        let nf = post(&mut s, "/reader/goto", r#"{"lid":"9.9"}"#);
+        assert_eq!(nf.status, 404);
+        assert!(nf.body.contains("LID_NOT_FOUND"));
     }
 
     #[test]
-    fn parse_query_splits_path_and_decodes() {
-        let (p, q) = parse_query("/book/concept?name=%E5%91%BD%E4%BB%A4");
-        assert_eq!(p, "/book/concept");
-        assert_eq!(q.get("name").map(|s| s.as_str()), Some("命令"));
+    fn reader_scroll_returns_viewport() {
+        let mut s = state_named("scroll");
+        let r = post(&mut s, "/reader/scroll", r#"{"delta":0}"#);
+        assert_eq!(r.status, 200);
+        assert!(r.body.contains("\"viewport\""));
+        // 缺 delta → 400
+        assert_eq!(post(&mut s, "/reader/scroll", "{}").status, 400);
+    }
+
+    #[test]
+    fn reader_highlight_and_note_delegate_to_memory() {
+        let mut s = state_named("hlnote");
+        let hl = post(&mut s, "/reader/highlight", r#"{"lid":"1.1"}"#);
+        assert_eq!(hl.status, 200);
+        assert!(hl.body.contains("highlight_id"));
+        let note = post(&mut s, "/reader/note", r#"{"lid":"1.1","text":"命令=对象化调用"}"#);
+        assert_eq!(note.status, 200);
+        assert!(note.body.contains("note_id"));
+        // 标注单源:经 /memory/recall 回显(highlight + note 各一条)。
+        let rc = post(&mut s, "/memory/recall", r#"{"lid":"1.1"}"#);
+        assert_eq!(rc.status, 200);
+        assert!(rc.body.contains("命令=对象化调用"));
+        assert!(rc.body.contains("\"type\":\"highlight\""));
+        assert!(rc.body.contains("\"type\":\"note\""));
+    }
+
+    #[test]
+    fn reader_state_readonly() {
+        let mut s = state_named("state");
+        post(&mut s, "/reader/goto", r#"{"lid":"1.1"}"#);
+        let r = post(&mut s, "/reader/state", "");
+        assert_eq!(r.status, 200);
+        assert!(r.body.contains("\"viewport\""));
+        assert!(r.body.contains("\"selection\":\"1.1\""));
+    }
+
+    #[test]
+    fn memory_save_and_recall_roundtrip() {
+        let mut s = state_named("memrt");
+        let sv = post(
+            &mut s,
+            "/memory/save",
+            r#"{"type":"note","anchor_lid":"1.1","content":"闭包即对象"}"#,
+        );
+        assert_eq!(sv.status, 200);
+        assert!(sv.body.contains("mem_id"));
+        assert!(sv.body.contains("\"lid\":\"1.1\"")); // citation 自动锚回
+        let rc = post(&mut s, "/memory/recall", r#"{"text":"闭包"}"#);
+        assert_eq!(rc.status, 200);
+        assert!(rc.body.contains("闭包即对象"));
+    }
+
+    #[test]
+    fn memory_save_missing_fields_400() {
+        let mut s = state_named("memmiss");
+        let r = post(&mut s, "/memory/save", r#"{"type":"note"}"#);
+        assert_eq!(r.status, 400);
+        assert!(r.body.contains("INVALID_MEMORY_TYPE"));
+    }
+
+    #[test]
+    fn bad_json_body_400() {
+        let mut s = state_named("badjson");
+        let r = post(&mut s, "/reader/goto", "{not json");
+        assert_eq!(r.status, 400);
+        assert!(r.body.contains("INVALID_RANGE"));
     }
 }

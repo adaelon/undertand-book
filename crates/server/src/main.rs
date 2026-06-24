@@ -1,10 +1,14 @@
 //! understand-book localhost 服务入口 `[ADR-0028]`:tiny_http 同步、worker 线程每连接,
 //! 共享 `Arc<Mutex<AppState>>`(单会话单书)。单用户 localhost 并发近零,不上 tokio `[ADR-0024]`。
 //! 用法:`server <book_dir>`(或设 `UNDERSTAND_BOOK_DIR`);可选 `UNDERSTAND_BOOK_ADDR`(默认 127.0.0.1:8787)。
+//! memory 库走 `MemoryStore::default_path()`(用户私有、与只读基座物理隔离 `[ADR-0006]`)。
+use memory::MemoryStore;
 use read_tools::Book;
-use server::{route, AppState};
+use reader::{Reader, DEFAULT_RADIUS};
+use server::{route, AppState, Req};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tiny_http::{Header, Response, Server};
 
 fn main() {
@@ -22,8 +26,16 @@ fn main() {
             std::process::exit(1);
         }
     };
+    let store = match MemoryStore::open(MemoryStore::default_path()) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("打开记忆库失败: {}", e.message);
+            std::process::exit(1);
+        }
+    };
+    let reader = Reader::new(&book, DEFAULT_RADIUS);
     let addr = std::env::var("UNDERSTAND_BOOK_ADDR").unwrap_or_else(|_| "127.0.0.1:8787".into());
-    let state = Arc::new(Mutex::new(AppState { book }));
+    let state = Arc::new(Mutex::new(AppState { book, reader, store }));
     let server = match Server::http(&addr) {
         Ok(s) => Arc::new(s),
         Err(e) => {
@@ -38,15 +50,22 @@ fn main() {
         let s = server.clone();
         let st = state.clone();
         handles.push(thread::spawn(move || loop {
-            let rq = match s.recv() {
+            let mut rq = match s.recv() {
                 Ok(r) => r,
                 Err(_) => break,
             };
             let method = rq.method().to_string();
+            let url = rq.url().to_string();
+            let mut body = String::new();
+            let _ = rq.as_reader().read_to_string(&mut body); // GET 无 body,读空即可
+            let now = now_ts();
             // 锁只在路由这一刻持有(纯函数,无阻塞 I/O)。
             let reply = {
-                let guard = st.lock().unwrap_or_else(|p| p.into_inner());
-                route(&guard, &method, rq.url())
+                let mut guard = st.lock().unwrap_or_else(|p| p.into_inner());
+                route(
+                    &mut guard,
+                    Req { method: &method, url: &url, body: &body, now: &now },
+                )
             };
             let header = Header::from_bytes(
                 &b"Content-Type"[..],
@@ -62,4 +81,13 @@ fn main() {
     for h in handles {
         let _ = h.join();
     }
+}
+
+/// memory.save 的 generated_at/last_used 时间戳(epoch 毫秒串;ISO 格式化留后)。
+fn now_ts() -> String {
+    let ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    ms.to_string()
 }
