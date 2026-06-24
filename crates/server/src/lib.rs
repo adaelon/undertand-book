@@ -10,6 +10,7 @@
 use memory::{Anchor, MemoryStore, RecallQuery, SaveInput};
 use read_tools::{Book, ToolError};
 use reader::Reader;
+use runtime::orchestrator::{new_session, run, OuterConfig};
 use runtime::{AdapterError, AssistantTurn, CompletionRequest, Message, ModelAdapter, ParsedResponse, ToolSpec};
 use serde::Serialize;
 use serde_json::json;
@@ -23,6 +24,9 @@ pub struct AppState {
     pub reader: Reader,
     pub store: MemoryStore,
     pub adapter: Box<dyn ModelAdapter + Send>,
+    /// 外层 E agent 的会话 messages(S10f `[ADR-0030]`)。`/agent/chat` 跨回合累积、`/agent/new` 重置;
+    /// 会话边界 = 用户「新对话」(不自动 idle 判定)。
+    pub messages: Vec<Message>,
 }
 
 /// 一次请求的传输无关输入:方法 + 原始 url(含 query)+ JSON body(GET 为空)+ 时间戳。
@@ -52,6 +56,20 @@ pub fn route(state: &mut AppState, req: Req) -> Reply {
             return query_method_not_allowed();
         }
         return route_query(state, req.body);
+    }
+    // agent.*(S10f):外层 E agent 编排,POST(会话命令)`[ADR-0030]`。
+    if path == "/agent/chat" {
+        if req.method != "POST" {
+            return agent_method_not_allowed();
+        }
+        return route_agent_chat(state, req.body, req.now);
+    }
+    if path == "/agent/new" {
+        if req.method != "POST" {
+            return agent_method_not_allowed();
+        }
+        state.messages = new_session();
+        return ok_json(&json!({ "ok": true }));
     }
     if let Some(p) = path.strip_prefix("/book/") {
         if req.method != "GET" {
@@ -139,7 +157,7 @@ fn route_mut(state: &mut AppState, path: &str, body: &str, now: &str) -> Reply {
             let Some(lid) = sget("lid") else {
                 return validation("INVALID_RANGE", "reader.highlight 需 lid");
             };
-            match state.reader.highlight(&state.book, &mut state.store, lid, now) {
+            match state.reader.highlight(&state.book, &mut state.store, lid, "long_term", now) {
                 Ok(e) => ok_json(&e),
                 Err(e) => err_reply(&e),
             }
@@ -148,7 +166,7 @@ fn route_mut(state: &mut AppState, path: &str, body: &str, now: &str) -> Reply {
             let (Some(lid), Some(text)) = (sget("lid"), sget("text")) else {
                 return validation("INVALID_RANGE", "reader.note 需 lid + text");
             };
-            match state.reader.note(&state.book, &mut state.store, lid, text, now) {
+            match state.reader.note(&state.book, &mut state.store, lid, text, "long_term", now) {
                 Ok(e) => ok_json(&e),
                 Err(e) => err_reply(&e),
             }
@@ -211,6 +229,34 @@ fn route_query(state: &mut AppState, body: &str) -> Reply {
     };
     match runtime::query(&state.book, q, &anchor, state.adapter.as_ref()) {
         Ok(resp) => ok_json(&resp),
+        Err(e) => err_reply(&e),
+    }
+}
+
+/// `POST /agent/chat`(S10f)`[ADR-0030]`:外层 E agent 编排 loop,注入同一
+/// `book/store/reader/messages/adapter`(与前端共享视口、跨回合 messages)。body `{message}` →
+/// `OuterOutcome{answer, incomplete, effects, trace, ...}`;agent 动作即时驱动共享 reader 视口,
+/// effects 供前端可撤销提议、trace 供查询踪迹展示。provider 错经 run 映射 `PROVIDER_ERROR` 透传不降级。
+fn route_agent_chat(state: &mut AppState, body: &str, now: &str) -> Reply {
+    let v = match body_value(body) {
+        Ok(v) => v,
+        Err(reply) => return reply,
+    };
+    let Some(msg) = v.get("message").and_then(|x| x.as_str()) else {
+        return validation("INVALID_RANGE", "agent.chat 需 message(用户消息文本)");
+    };
+    // 字段级不相交借用:book(shared)+ store/reader/messages(mut)+ adapter(shared)。
+    match run(
+        &state.book,
+        &mut state.store,
+        &mut state.reader,
+        state.adapter.as_ref(),
+        &mut state.messages,
+        msg,
+        now,
+        OuterConfig::default(),
+    ) {
+        Ok(out) => ok_json(&out),
         Err(e) => err_reply(&e),
     }
 }
@@ -322,6 +368,18 @@ fn method_not_allowed() -> Reply {
     }
 }
 
+/// agent.chat / agent.new 是会话命令(外层 E agent),只收 POST(S10f `[ADR-0030]`)。
+fn agent_method_not_allowed() -> Reply {
+    Reply {
+        status: 405,
+        body: to_body(&ToolError {
+            error_code: "METHOD_NOT_ALLOWED".into(),
+            category: "validation".into(),
+            message: "agent.chat / agent.new 是会话命令,只支持 POST".into(),
+        }),
+    }
+}
+
 /// book.query 是 book.* 里唯一只收 POST 的端点(LLM 命令),405 文案单列以免误导。
 fn query_method_not_allowed() -> Reply {
     Reply {
@@ -375,7 +433,9 @@ mod tests {
     use super::*;
     use base_schema::sample_base;
     use reader::DEFAULT_RADIUS;
-    use runtime::RawCitation;
+    use runtime::{RawCitation, ToolCall};
+    use std::cell::RefCell;
+    use std::collections::VecDeque;
     use std::path::PathBuf;
 
     fn tmp(name: &str) -> PathBuf {
@@ -415,7 +475,28 @@ mod tests {
         let store = MemoryStore::open(tmp(mem)).unwrap();
         // 默认桩引用首叶 "1.1"(book.query 缺省 anchor = reader 首叶,落证据集)。
         let adapter = Box::new(StubAdapter { lid: "1.1".into() });
-        AppState { book, reader, store, adapter }
+        AppState { book, reader, store, adapter, messages: new_session() }
+    }
+
+    /// 脚本化外层 chat 替身(S10f):按序吐 AssistantTurn,driv 外层 loop 脱真 LLM 可测(守 A2)。
+    /// `complete` 不走(内层 book.query 在 agent 测里不触发)。
+    struct ChatStubAdapter {
+        turns: RefCell<VecDeque<AssistantTurn>>,
+    }
+    impl ChatStubAdapter {
+        fn scripted(turns: Vec<AssistantTurn>) -> Self {
+            ChatStubAdapter { turns: RefCell::new(turns.into()) }
+        }
+    }
+    impl ModelAdapter for ChatStubAdapter {
+        fn complete(&self, _req: CompletionRequest) -> Result<ParsedResponse, AdapterError> {
+            unimplemented!("agent 测不走内层 complete")
+        }
+        fn chat(&self, _: &[Message], _: &[ToolSpec]) -> Result<AssistantTurn, AdapterError> {
+            self.turns.borrow_mut().pop_front().ok_or_else(|| AdapterError {
+                message: "chat 脚本耗尽".into(),
+            })
+        }
     }
 
     fn get(s: &mut AppState, url: &str) -> Reply {
@@ -601,5 +682,66 @@ mod tests {
         let r = post(&mut s, "/book/query", r#"{"q":"x"}"#);
         assert_eq!(r.status, 502);
         assert!(r.body.contains("PROVIDER_ERROR"));
+    }
+
+    // ── S10f /agent/chat + /agent/new ───────────────────────
+    // /agent/chat:外层 E agent 驱动共享 reader,返 OuterOutcome 含 effects(可撤销提议)。
+    #[test]
+    fn agent_chat_drives_shared_reader_and_returns_effects() {
+        let mut s = state_named("agent");
+        // 脚本:turn1 调 reader.highlight(1.1)→ turn2 终答(脱真 LLM,守 A2)。
+        s.adapter = Box::new(ChatStubAdapter::scripted(vec![
+            AssistantTurn {
+                text: None,
+                tool_calls: vec![ToolCall {
+                    id: "t1".into(),
+                    name: "reader.highlight".into(),
+                    arguments: r#"{"lid":"1.1"}"#.into(),
+                }],
+                usage_total_tokens: Some(5),
+            },
+            AssistantTurn { text: Some("已高亮第一段".into()), tool_calls: vec![], usage_total_tokens: Some(5) },
+        ]));
+        let r = post(&mut s, "/agent/chat", r#"{"message":"高亮第一段"}"#);
+        assert_eq!(r.status, 200);
+        assert!(r.body.contains("\"incomplete\":false"));
+        assert!(r.body.contains("已高亮第一段"));
+        // effects 含 Highlight 提议(tagged enum kind);trace 记录 tool call。
+        assert!(r.body.contains("\"kind\":\"Highlight\""));
+        assert!(r.body.contains("reader.highlight"));
+        // agent 标注落 session 层(提议态)→ recall(layer=session)查得到,真驱动了共享 store。
+        let rc = post(&mut s, "/memory/recall", r#"{"layer":"session"}"#);
+        assert_eq!(rc.status, 200);
+        assert!(rc.body.contains("\"type\":\"highlight\""));
+    }
+
+    // /agent/new:清空 messages 回到仅 system(会话边界 = 用户「新对话」)。
+    #[test]
+    fn agent_new_resets_messages() {
+        let mut s = state_named("agentnew");
+        s.messages.push(Message::user("hi"));
+        assert!(s.messages.len() > 1);
+        let r = post(&mut s, "/agent/new", "{}");
+        assert_eq!(r.status, 200);
+        assert!(r.body.contains("\"ok\":true"));
+        assert_eq!(s.messages.len(), 1); // 仅 system
+    }
+
+    // agent.* 只支持 POST:GET → 405。
+    #[test]
+    fn agent_chat_get_405() {
+        let mut s = state_named("agentget");
+        let r = get(&mut s, "/agent/chat");
+        assert_eq!(r.status, 405);
+        assert!(r.body.contains("METHOD_NOT_ALLOWED"));
+    }
+
+    // 缺 message → 400。
+    #[test]
+    fn agent_chat_missing_message_400() {
+        let mut s = state_named("agentmiss");
+        let r = post(&mut s, "/agent/chat", "{}");
+        assert_eq!(r.status, 400);
+        assert!(r.body.contains("INVALID_RANGE"));
     }
 }

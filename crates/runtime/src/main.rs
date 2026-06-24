@@ -4,8 +4,9 @@
 //!   runtime <book_dir> goldset <file.json>                金标准集 + 验收闸(S8)`[ADR-0004]`
 use memory::MemoryStore;
 use read_tools::Book;
+use reader::{Reader, DEFAULT_RADIUS};
 use runtime::goldset::{run_goldset, GoldItem};
-use runtime::orchestrator::{run, OuterConfig};
+use runtime::orchestrator::{new_session, run, OuterConfig};
 use runtime::{query, NativeAdapter};
 use std::process::exit;
 
@@ -74,7 +75,9 @@ fn main() {
                     exit(1);
                 }
             };
-            match run(&book, &mut store, &adapter, &question, &now_ts(), OuterConfig::default()) {
+            let mut reader = Reader::new(&book, DEFAULT_RADIUS);
+            let mut messages = new_session();
+            match run(&book, &mut store, &mut reader, &adapter, &mut messages, &question, &now_ts(), OuterConfig::default()) {
                 Ok(out) => println!("{}", serde_json::to_string_pretty(&out).unwrap()),
                 Err(e) => {
                     eprintln!("chat 失败: [{}/{}] {}", e.category, e.error_code, e.message);

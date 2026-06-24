@@ -143,11 +143,13 @@ impl Reader {
 
     /// `reader.highlight(lid)`:薄入口,持久化**委托 memory.save**(type=highlight)。
     /// content = 该 LID 原文片段(经 book.text 顺带校验 LID 真实);返回的 highlight_id = 记忆层 mem_id。
+    /// `layer`:人走命令面默认 `long_term`、agent 提议态传 `session`(可撤销提议 `[ADR-0030]`,人机对称无特供)。
     pub fn highlight(
         &mut self,
         book: &Book,
         store: &mut MemoryStore,
         lid: &str,
+        layer: &str,
         now: &str,
     ) -> Result<HighlightEffect, ToolError> {
         let frag = book.text(lid, None)?; // LID 不存在 → ToolError 透传,不降级
@@ -155,7 +157,7 @@ impl Reader {
             SaveInput {
                 mem_id: None,
                 mem_type: "highlight".into(),
-                layer: "long_term".into(),
+                layer: layer.into(),
                 book_id: book.base.book_id.clone(),
                 anchor: Anchor {
                     lid: Some(lid.to_string()),
@@ -176,12 +178,14 @@ impl Reader {
 
     /// `reader.note(lid, text)`:薄入口,持久化**委托 memory.save**(type=note,content=text)。
     /// 返回的 note_id = 记忆层 mem_id(标注单源=记忆层)。
+    /// `layer`:人默认 `long_term`、agent 提议态传 `session`(同 highlight `[ADR-0030]`)。
     pub fn note(
         &mut self,
         book: &Book,
         store: &mut MemoryStore,
         lid: &str,
         text: &str,
+        layer: &str,
         now: &str,
     ) -> Result<NoteEffect, ToolError> {
         book.text(lid, None)?; // 仅校验 LID 真实存在(锚定红线),不取原文
@@ -189,7 +193,7 @@ impl Reader {
             SaveInput {
                 mem_id: None,
                 mem_type: "note".into(),
-                layer: "long_term".into(),
+                layer: layer.into(),
                 book_id: book.base.book_id.clone(),
                 anchor: Anchor {
                     lid: Some(lid.to_string()),
@@ -357,7 +361,7 @@ mod tests {
         let b = book_n_leaves(5);
         let mut store = MemoryStore::open(tmp("note")).unwrap();
         let mut r = Reader::new(&b, 2);
-        let eff = r.note(&b, &mut store, "1.2", "命令=对象化调用", "t0").unwrap();
+        let eff = r.note(&b, &mut store, "1.2", "命令=对象化调用", "long_term", "t0").unwrap();
         assert!(eff.ok);
         // 标注单源=记忆层:recall 查得到,content/citation 对
         let got = store.recall(&RecallQuery {
@@ -377,7 +381,7 @@ mod tests {
         let b = book_n_leaves(5);
         let mut store = MemoryStore::open(tmp("hl")).unwrap();
         let mut r = Reader::new(&b, 2);
-        let eff = r.highlight(&b, &mut store, "1.3", "t0").unwrap();
+        let eff = r.highlight(&b, &mut store, "1.3", "long_term", "t0").unwrap();
         let got = store.recall(&RecallQuery {
             lid: Some("1.3".into()),
             mem_type: Some("highlight".into()),
@@ -394,7 +398,7 @@ mod tests {
         let b = book_n_leaves(5);
         let mut store = MemoryStore::open(tmp("hlmiss")).unwrap();
         let mut r = Reader::new(&b, 2);
-        let e = r.highlight(&b, &mut store, "9.9", "t0").unwrap_err();
+        let e = r.highlight(&b, &mut store, "9.9", "long_term", "t0").unwrap_err();
         assert_eq!(e.error_code, "LID_NOT_FOUND");
     }
 
@@ -405,7 +409,7 @@ mod tests {
         let mut store = MemoryStore::open(tmp("render")).unwrap();
         let mut r = Reader::new(&b, 2);
         r.goto_lid(&b, "1.2").unwrap();
-        r.note(&b, &mut store, "1.2", "我的笔记", "t0").unwrap();
+        r.note(&b, &mut store, "1.2", "我的笔记", "long_term", "t0").unwrap();
         let out = r.render(&b, &store);
         assert!(out.contains("[1.2]▶")); // 锚点标记
         assert!(out.contains("我的笔记")); // 标注从记忆层读出
@@ -419,7 +423,7 @@ mod tests {
         let mut store = MemoryStore::open(tmp("single-source")).unwrap();
         {
             let mut r1 = Reader::new(&b, 2);
-            r1.note(&b, &mut store, "1.1", "跨实例可见", "t0").unwrap();
+            r1.note(&b, &mut store, "1.1", "跨实例可见", "long_term", "t0").unwrap();
         }
         let r2 = Reader::new(&b, 2); // 全新实例,无任何 note 记录
         let out = r2.render(&b, &store);

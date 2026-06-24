@@ -7,9 +7,10 @@
 //! 内层 book.query 复用 `crate::query`(同一 adapter 触 `complete`)`[ADR-0025]`。
 use crate::{query, AssistantTurn, Message, ModelAdapter, Role, ToolSpec};
 use memory::{Anchor, MemoryStore, RecallQuery, SaveInput};
-use reader::{Reader, DEFAULT_RADIUS};
+use reader::Reader;
 use read_tools::{Book, ToolError};
 use serde::Serialize;
+use ts_rs::TS;
 
 /// 外层停机预算(切片0 占位,实测回填 `[ADR-0016]`)。
 #[derive(Debug, Clone, Copy)]
@@ -28,7 +29,10 @@ impl Default for OuterConfig {
 }
 
 /// 外层 loop 终局 `[ADR-0026]`。incomplete=true ⇒ 触顶诚实标,answer 可能是部分答/缺。
-#[derive(Debug, Serialize)]
+/// `effects`/`trace`:本回合(一次 `/agent/chat`)的可撤销副作用清单 + 查询踪迹 `[ADR-0030]`,
+/// runtime 内部结构(非冻结命令面),前端据此渲提议卡 / 折叠踪迹。
+#[derive(Debug, Serialize, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
 pub struct OuterOutcome {
     pub answer: Option<String>,
     pub incomplete: bool,
@@ -36,6 +40,32 @@ pub struct OuterOutcome {
     pub warning: Option<String>,
     pub turns: usize,
     pub tokens_spent: u32,
+    pub effects: Vec<AgentEffect>,
+    pub trace: Vec<TraceStep>,
+}
+
+/// 一次对话回合的**可撤销副作用** `[ADR-0030 决策3]`:前端据此做反向命令 undo。
+/// 提议单元 = 一次对话回合(事务性):视口变更跨回合合并成单条 `Goto`(undo=goto(before));
+/// highlight/note 每次一条(undo=memory.delete(mem_id))。agent 标注落 session 层,用户「保留」才升 long_term。
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+#[serde(tag = "kind")]
+pub enum AgentEffect {
+    /// 视口跳转(goto/scroll 合并);undo = `reader.goto(before_anchor)`。
+    Goto { before_anchor: String, after_anchor: String },
+    /// 高亮提议(session 层);undo = `memory.delete(mem_id)`。
+    Highlight { mem_id: String, lid: String },
+    /// 笔记提议(session 层);undo = `memory.delete(mem_id)`。
+    Note { mem_id: String, lid: String, text: String },
+}
+
+/// 查询踪迹一步 `[ADR-0030 决策5]`:tool_calls 序列摘要,对用户可见(book.query 的检索范围 + citations 链在 `result_digest` 里)。
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct TraceStep {
+    pub tool: String,
+    pub args: String,
+    pub result_digest: String,
 }
 
 /// 确定性近似 token(CJK=1,其余=0.25,ceil);仅在后端不返 usage 时兜底 `[ADR-0026]`。
@@ -192,8 +222,10 @@ const SYSTEM_PROMPT: &str = "你是这本书的阅读 agent。事实性回答经
 流程:先用 book.concept/context 定位到目标 LID,一旦定位到就立即调用 reader 工具完成操作,然后给简短终答,不要反复读原文。\
 证据不足时诚实说明,不要编造 LID。准备好最终答案时直接用自然语言回复(不再调用工具)。";
 
-/// 执行一次工具调用,返回喂回模型的结果 JSON 字符串。
-/// 错误**不降级**:把 ToolError 信封原样回喂,模型据 recovery 自纠 `[ADR-0015/0026]`。
+/// 执行一次工具调用,返回 `(喂回模型的结果 JSON, 可选可撤销 effect)` `[ADR-0015/0026/0030]`。
+/// 错误**不降级**:把 ToolError 信封原样回喂,模型据 recovery 自纠。
+/// agent 的 highlight/note 落 `session` 层(提议态,用户「保留」才升 long_term `[ADR-0030]`)。
+/// 视口变更(goto/scroll)不在此产 effect:由 `run` 按回合首尾 anchor 合并成单条 `Goto`(事务性 undo)。
 #[allow(clippy::too_many_arguments)]
 fn dispatch(
     name: &str,
@@ -203,57 +235,61 @@ fn dispatch(
     reader: &mut Reader,
     adapter: &dyn ModelAdapter,
     now: &str,
-) -> String {
+) -> (String, Option<AgentEffect>) {
     let args: serde_json::Value = match serde_json::from_str(arguments) {
         Ok(v) => v,
-        Err(e) => return err_json("INVALID_RANGE", "validation", &format!("工具参数非合法 JSON: {e}")),
+        Err(e) => return (err_json("INVALID_RANGE", "validation", &format!("工具参数非合法 JSON: {e}")), None),
     };
     let sget = |k: &str| args.get(k).and_then(|v| v.as_str());
 
     match name {
         "book.query" => {
             let (Some(q), Some(anchor)) = (sget("query"), sget("anchor_lid")) else {
-                return err_json("INVALID_RANGE", "validation", "book.query 需 query + anchor_lid");
+                return (err_json("INVALID_RANGE", "validation", "book.query 需 query + anchor_lid"), None);
             };
-            match query(book, q, anchor, adapter) {
+            let body = match query(book, q, anchor, adapter) {
                 Ok(resp) => to_json(&resp),
                 Err(e) => to_json(&e),
-            }
+            };
+            (body, None)
         }
         "book.text" => {
             let Some(lid) = sget("lid") else {
-                return err_json("INVALID_RANGE", "validation", "book.text 需 lid");
+                return (err_json("INVALID_RANGE", "validation", "book.text 需 lid"), None);
             };
-            match book.text(lid, sget("end_lid")) {
+            let body = match book.text(lid, sget("end_lid")) {
                 Ok(t) => to_json(&serde_json::json!({ "lid": lid, "text": t })),
                 Err(e) => to_json(&e),
-            }
+            };
+            (body, None)
         }
         "book.context" => {
             let Some(lid) = sget("lid") else {
-                return err_json("INVALID_RANGE", "validation", "book.context 需 lid");
+                return (err_json("INVALID_RANGE", "validation", "book.context 需 lid"), None);
             };
             let k = args.get("k").and_then(|v| v.as_u64()).map(|u| u as usize);
-            match book.context_near(lid, k) {
+            let body = match book.context_near(lid, k) {
                 Ok(c) => to_json(&c),
                 Err(e) => to_json(&e),
-            }
+            };
+            (body, None)
         }
         "book.concept" => {
             let Some(n) = sget("name") else {
-                return err_json("INVALID_RANGE", "validation", "book.concept 需 name");
+                return (err_json("INVALID_RANGE", "validation", "book.concept 需 name"), None);
             };
-            match book.concept(n) {
+            let body = match book.concept(n) {
                 Ok(c) => to_json(&c),
                 Err(e) => to_json(&e),
-            }
+            };
+            (body, None)
         }
-        "book.manifest" => to_json(&book.manifest()),
+        "book.manifest" => (to_json(&book.manifest()), None),
         "memory.save" => {
             let (Some(ty), Some(anchor), Some(content)) =
                 (sget("type"), sget("anchor_lid"), sget("content"))
             else {
-                return err_json("INVALID_MEMORY_TYPE", "validation", "memory.save 需 type + anchor_lid + content");
+                return (err_json("INVALID_MEMORY_TYPE", "validation", "memory.save 需 type + anchor_lid + content"), None);
             };
             let layer = if ty == "position" { "session" } else { "long_term" };
             let input = SaveInput {
@@ -266,10 +302,11 @@ fn dispatch(
                 citations: None,
                 source_session_id: None,
             };
-            match store.save(input, now) {
+            let body = match store.save(input, now) {
                 Ok(r) => to_json(&r),
                 Err(e) => to_json(&e),
-            }
+            };
+            (body, None)
         }
         "memory.recall" => {
             let q = RecallQuery {
@@ -279,44 +316,69 @@ fn dispatch(
                 layer: sget("layer").map(String::from),
                 text: sget("text").map(String::from),
             };
-            to_json(&store.recall(&q))
+            (to_json(&store.recall(&q)), None)
         }
         "reader.gotoLid" => {
             let Some(lid) = sget("lid") else {
-                return err_json("INVALID_RANGE", "validation", "reader.gotoLid 需 lid");
+                return (err_json("INVALID_RANGE", "validation", "reader.gotoLid 需 lid"), None);
             };
-            match reader.goto_lid(book, lid) {
+            let body = match reader.goto_lid(book, lid) {
                 Ok(e) => to_json(&e),
                 Err(e) => to_json(&e),
-            }
+            };
+            (body, None)
         }
         "reader.scroll" => {
             let Some(delta) = args.get("delta").and_then(|v| v.as_i64()) else {
-                return err_json("INVALID_RANGE", "validation", "reader.scroll 需 delta(整数)");
+                return (err_json("INVALID_RANGE", "validation", "reader.scroll 需 delta(整数)"), None);
             };
-            to_json(&reader.scroll(delta))
+            (to_json(&reader.scroll(delta)), None)
         }
         "reader.highlight" => {
             let Some(lid) = sget("lid") else {
-                return err_json("INVALID_RANGE", "validation", "reader.highlight 需 lid");
+                return (err_json("INVALID_RANGE", "validation", "reader.highlight 需 lid"), None);
             };
-            match reader.highlight(book, store, lid, now) {
-                Ok(e) => to_json(&e),
-                Err(e) => to_json(&e),
+            // agent 标注 = 提议态,落 session 层 `[ADR-0030 决策4]`。
+            match reader.highlight(book, store, lid, "session", now) {
+                Ok(e) => {
+                    let eff = AgentEffect::Highlight { mem_id: e.highlight_id.clone(), lid: lid.to_string() };
+                    (to_json(&e), Some(eff))
+                }
+                Err(e) => (to_json(&e), None),
             }
         }
         "reader.note" => {
             let (Some(lid), Some(text)) = (sget("lid"), sget("text")) else {
-                return err_json("INVALID_RANGE", "validation", "reader.note 需 lid + text");
+                return (err_json("INVALID_RANGE", "validation", "reader.note 需 lid + text"), None);
             };
-            match reader.note(book, store, lid, text, now) {
-                Ok(e) => to_json(&e),
-                Err(e) => to_json(&e),
+            match reader.note(book, store, lid, text, "session", now) {
+                Ok(e) => {
+                    let eff = AgentEffect::Note { mem_id: e.note_id.clone(), lid: lid.to_string(), text: text.to_string() };
+                    (to_json(&e), Some(eff))
+                }
+                Err(e) => (to_json(&e), None),
             }
         }
-        "reader.state" => to_json(&reader.state()),
-        other => err_json("INVALID_RANGE", "validation", &format!("未知工具: {other}")),
+        "reader.state" => (to_json(&reader.state()), None),
+        other => (err_json("INVALID_RANGE", "validation", &format!("未知工具: {other}")), None),
     }
+}
+
+/// 踪迹结果摘要:截断到 200 字(book.query 的 citations 链落在此,对用户可见 `[ADR-0030]`)。
+fn digest(s: &str) -> String {
+    s.chars().take(200).collect()
+}
+
+/// 回合收尾:视口若较回合前 anchor 变了,合并成单条 `Goto` effect(事务性 undo `[ADR-0030]`)。
+fn with_goto(reader: &Reader, before: &str, mut effects: Vec<AgentEffect>) -> Vec<AgentEffect> {
+    let after = reader.state().viewport.anchor_lid;
+    if after != before {
+        effects.push(AgentEffect::Goto {
+            before_anchor: before.to_string(),
+            after_anchor: after,
+        });
+    }
+    effects
 }
 
 fn to_json<T: Serialize>(v: &T) -> String {
@@ -331,34 +393,47 @@ fn err_json(error_code: &str, category: &str, message: &str) -> String {
     })
 }
 
-/// 外层 E 编排 loop `[ADR-0026/0016]`:LLM 自主多轮调工具,双重停机诚实标 incomplete。
+/// 新建一个对话会话的初始 `messages`(仅 system)`[ADR-0030]`:供 server `/agent/new` 重置、
+/// CLI/测试起会话。messages 由调用方(server `AppState`)跨回合持有,run 不再自建。
+pub fn new_session() -> Vec<Message> {
+    vec![Message::system(SYSTEM_PROMPT)]
+}
+
+/// 外层 E 编排 loop `[ADR-0026/0016/0030]`:LLM 自主多轮调工具,双重停机诚实标 incomplete。
+/// `reader`/`messages` 由调用方注入(与前端共享同一会话态视口 + 跨回合 messages `[ADR-0030 决策2]`);
+/// 本回合(一次调用)的可撤销 `effects` + 查询 `trace` 随 `OuterOutcome` 返回。
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     book: &Book,
     store: &mut MemoryStore,
+    reader: &mut Reader,
     adapter: &dyn ModelAdapter,
+    messages: &mut Vec<Message>,
     question: &str,
     now: &str,
     cfg: OuterConfig,
 ) -> Result<OuterOutcome, ToolError> {
     let tools = tool_specs();
-    let mut messages = vec![Message::system(SYSTEM_PROMPT), Message::user(question)];
-    let mut reader = Reader::new(book, DEFAULT_RADIUS); // 会话态阅读器,贯穿本次 loop
-    let trace = std::env::var("UB_TRACE").is_ok(); // 诊断:打印每轮 tool_calls + 结果(env-gated)
+    messages.push(Message::user(question)); // system 由 new_session 注入;messages 跨回合保留
+    let before_anchor = reader.state().viewport.anchor_lid; // 回合前视口锚(viewport undo 基准)
+    let mut effects: Vec<AgentEffect> = Vec::new();
+    let mut trace: Vec<TraceStep> = Vec::new();
+    let trace_dbg = std::env::var("UB_TRACE").is_ok(); // 诊断:打印每轮 tool_calls + 结果(env-gated)
     let mut spent: u32 = 0;
     let mut turns: usize = 0;
 
     loop {
         turns += 1;
-        let turn: AssistantTurn = adapter.chat(&messages, &tools).map_err(|e| ToolError {
+        let turn: AssistantTurn = adapter.chat(messages.as_slice(), &tools).map_err(|e| ToolError {
             error_code: "PROVIDER_ERROR".into(),
             category: "provider".into(),
             message: e.message,
         })?;
         spent += turn
             .usage_total_tokens
-            .unwrap_or_else(|| messages_estimate(&messages));
+            .unwrap_or_else(|| messages_estimate(messages.as_slice()));
 
-        if trace {
+        if trace_dbg {
             eprintln!(
                 "── turn {turns}: text={:?} tool_calls={:?}",
                 turn.text.as_deref().map(|t| t.chars().take(60).collect::<String>()),
@@ -366,18 +441,26 @@ pub fn run(
             );
         }
 
-        // 正常停:无工具请求 = LLM 给最终答。
+        // 正常停:无工具请求 = LLM 给最终答。终答入 messages(跨回合保留,下一回合可见上轮回答)。
         if turn.tool_calls.is_empty() {
+            messages.push(Message {
+                role: Role::Assistant,
+                content: turn.text.clone(),
+                tool_calls: vec![],
+                tool_call_id: None,
+            });
             return Ok(OuterOutcome {
                 answer: turn.text,
                 incomplete: false,
                 warning: None,
                 turns,
                 tokens_spent: spent,
+                effects: with_goto(reader, &before_anchor, effects),
+                trace,
             });
         }
 
-        // 追加 assistant 回合(含 tool_calls),再逐个执行工具、回填 tool 结果。
+        // 追加 assistant 回合(含 tool_calls),再逐个执行工具、回填 tool 结果 + 攒 effects/trace。
         messages.push(Message {
             role: Role::Assistant,
             content: turn.text.clone(),
@@ -385,9 +468,17 @@ pub fn run(
             tool_call_id: None,
         });
         for tc in &turn.tool_calls {
-            let result = dispatch(&tc.name, &tc.arguments, book, store, &mut reader, adapter, now);
-            if trace {
+            let (result, effect) = dispatch(&tc.name, &tc.arguments, book, store, reader, adapter, now);
+            if trace_dbg {
                 eprintln!("   ↳ {} => {}", tc.name, result.chars().take(180).collect::<String>());
+            }
+            trace.push(TraceStep {
+                tool: tc.name.clone(),
+                args: tc.arguments.clone(),
+                result_digest: digest(&result),
+            });
+            if let Some(e) = effect {
+                effects.push(e);
             }
             messages.push(Message {
                 role: Role::Tool,
@@ -405,6 +496,8 @@ pub fn run(
                 warning: Some("CONTEXT_BUDGET_EXCEEDED".into()),
                 turns,
                 tokens_spent: spent,
+                effects: with_goto(reader, &before_anchor, effects),
+                trace,
             });
         }
     }
@@ -414,7 +507,8 @@ pub fn run(
 mod tests {
     use super::*;
     use crate::{AdapterError, CompletionRequest, ParsedResponse, RawCitation, ToolCall};
-    use base_schema::sample_base;
+    use base_schema::{sample_base, GraphEdge, GraphNode, LidNode, NodeKind, ReadOnlyBase, Span};
+    use reader::DEFAULT_RADIUS;
     use std::cell::RefCell;
     use std::collections::VecDeque;
     use std::path::PathBuf;
@@ -448,6 +542,34 @@ mod tests {
     fn book() -> Book {
         let src = "X".repeat(100) + "尾巴";
         Book::new(sample_base(), &src)
+    }
+    /// 容器 "1" 下挂 n 个叶 "1.1".."1.n"(各 10 字符),供视口跳转/合并测试(首叶 "1.1")。
+    fn book_leaves(n: usize) -> Book {
+        let mut lid_nodes = vec![LidNode {
+            lid: "1".into(),
+            path: vec![1],
+            kind: NodeKind::Chapter,
+            span: Span { start: 0, end: n * 10 },
+            children: (1..=n).map(|i| format!("1.{i}")).collect(),
+        }];
+        for i in 1..=n {
+            lid_nodes.push(LidNode {
+                lid: format!("1.{i}"),
+                path: vec![1, i as u32],
+                kind: NodeKind::Paragraph,
+                span: Span { start: (i - 1) * 10, end: i * 10 },
+                children: vec![],
+            });
+        }
+        Book::new(
+            ReadOnlyBase {
+                book_id: "bookL".into(),
+                lid_nodes,
+                graph_nodes: Vec::<GraphNode>::new(),
+                graph_edges: Vec::<GraphEdge>::new(),
+            },
+            &"X".repeat(n * 10),
+        )
     }
     fn tmp(name: &str) -> PathBuf {
         let p = std::env::temp_dir().join(format!("ub-orch-test-{name}.json"));
@@ -483,7 +605,9 @@ mod tests {
                 model_supplement: vec![],
             }],
         );
-        let out = run(&b, &mut store, &fake, "命令模式是什么", "t0", OuterConfig::default()).unwrap();
+        let mut reader = Reader::new(&b, DEFAULT_RADIUS);
+        let mut messages = new_session();
+        let out = run(&b, &mut store, &mut reader, &fake, &mut messages, "命令模式是什么", "t0", OuterConfig::default()).unwrap();
         assert!(!out.incomplete);
         assert_eq!(out.answer.as_deref(), Some("命令模式把请求封装成对象。"));
         assert_eq!(out.turns, 3);
@@ -506,7 +630,9 @@ mod tests {
         ];
         let fake = FakeAdapter::new(chats, vec![]);
         let cfg = OuterConfig { max_turns: 2, token_budget: 1_000_000 };
-        let out = run(&b, &mut store, &fake, "绕圈", "t0", cfg).unwrap();
+        let mut reader = Reader::new(&b, DEFAULT_RADIUS);
+        let mut messages = new_session();
+        let out = run(&b, &mut store, &mut reader, &fake, &mut messages, "绕圈", "t0", cfg).unwrap();
         assert!(out.incomplete);
         assert_eq!(out.warning.as_deref(), Some("CONTEXT_BUDGET_EXCEEDED"));
         assert_eq!(out.turns, 2);
@@ -519,9 +645,10 @@ mod tests {
         let mut store = MemoryStore::open(tmp("err")).unwrap();
         let fake = FakeAdapter::new(vec![], vec![]);
         let mut reader = Reader::new(&b, DEFAULT_RADIUS);
-        let out = dispatch("book.text", r#"{"lid":"9.9"}"#, &b, &mut store, &mut reader, &fake, "t0");
+        let (out, eff) = dispatch("book.text", r#"{"lid":"9.9"}"#, &b, &mut store, &mut reader, &fake, "t0");
         assert!(out.contains("LID_NOT_FOUND"));
         assert!(out.contains("not_found"));
+        assert!(eff.is_none()); // 报错不产 effect
     }
 
     // 闭环验收:agent 经外层 loop 命令面跑通「问→跳转→高亮→记笔记」一次闭环 `[ADR-0007/0015]`。
@@ -545,9 +672,21 @@ mod tests {
                 model_supplement: vec![],
             }],
         );
-        let out = run(&b, &mut store, &fake, "讲讲命令模式并高亮记笔记", "t0", OuterConfig::default()).unwrap();
+        let mut reader = Reader::new(&b, DEFAULT_RADIUS);
+        let mut messages = new_session();
+        let out = run(&b, &mut store, &mut reader, &fake, &mut messages, "讲讲命令模式并高亮记笔记", "t0", OuterConfig::default()).unwrap();
         assert!(!out.incomplete);
         assert_eq!(out.turns, 5); // 问→跳转→高亮→记笔记→终答
+        // S10f effects:agent 标注产 Highlight + Note(undo 材料);首叶=1.1 视口未变,无 Goto。
+        assert_eq!(out.effects.len(), 2);
+        assert!(matches!(&out.effects[0], AgentEffect::Highlight { lid, .. } if lid == "1.1"));
+        assert!(matches!(&out.effects[1], AgentEffect::Note { lid, text, .. } if lid == "1.1" && text == "命令=对象化调用"));
+        // trace 记录每个 tool call(问→跳转→高亮→记笔记 = 4 步),book.query 居首。
+        assert_eq!(out.trace.len(), 4);
+        assert_eq!(out.trace[0].tool, "book.query");
+        // agent 标注落 session 层(提议态,用户「保留」才升 long_term):highlight + note 两条都在 session。
+        let sess = store.recall(&RecallQuery { layer: Some("session".into()), ..Default::default() });
+        assert_eq!(sess.len(), 2);
         // 跳转→高亮→记笔记 的标注真落记忆层(单源),anchor/citation 锚回真 LID 1.1
         let hl = store.recall(&RecallQuery { mem_type: Some("highlight".into()), ..Default::default() });
         assert_eq!(hl.len(), 1);
@@ -570,9 +709,62 @@ mod tests {
             ],
             vec![],
         );
-        let out = run(&b, &mut store, &fake, "取 9.9", "t0", OuterConfig::default()).unwrap();
+        let mut reader = Reader::new(&b, DEFAULT_RADIUS);
+        let mut messages = new_session();
+        let out = run(&b, &mut store, &mut reader, &fake, &mut messages, "取 9.9", "t0", OuterConfig::default()).unwrap();
         assert!(!out.incomplete);
         assert_eq!(out.turns, 2);
         assert!(out.answer.unwrap().contains("不存在"));
+    }
+
+    // S10f:agent 视口跳转(scroll/goto)按回合合并成**单条 Goto** effect(事务性 undo),trace 记录踪迹。
+    #[test]
+    fn agent_viewport_change_merges_into_single_goto_effect() {
+        let b = book_leaves(10); // 首叶 1.1
+        let mut store = MemoryStore::open(tmp("goto-merge")).unwrap();
+        let fake = FakeAdapter::new(
+            vec![
+                turn_calls(vec![call("c1", "reader.scroll", r#"{"delta":5}"#)]), // 1.1 → 1.6
+                turn_calls(vec![call("c2", "reader.gotoLid", r#"{"lid":"1.8"}"#)]), // 1.6 → 1.8
+                turn_final("已翻到目标位置。"),
+            ],
+            vec![],
+        );
+        let mut reader = Reader::new(&b, DEFAULT_RADIUS);
+        let mut messages = new_session();
+        let out = run(&b, &mut store, &mut reader, &fake, &mut messages, "翻到 1.8", "t0", OuterConfig::default()).unwrap();
+        assert!(!out.incomplete);
+        // 两次视口变更(scroll + goto)合并成一条 Goto:before=回合前首叶 1.1,after=最终 1.8。
+        assert_eq!(out.effects.len(), 1);
+        assert!(matches!(&out.effects[0], AgentEffect::Goto { before_anchor, after_anchor }
+            if before_anchor == "1.1" && after_anchor == "1.8"));
+        // 共享 reader 的视口真被 agent 改到 1.8(双向共享 `[ADR-0030 决策2]`)。
+        assert_eq!(reader.state().viewport.anchor_lid, "1.8");
+        // trace 记录两步视口工具调用。
+        assert_eq!(out.trace.len(), 2);
+        assert_eq!(out.trace[0].tool, "reader.scroll");
+        assert_eq!(out.trace[1].tool, "reader.gotoLid");
+    }
+
+    // S10f:messages 跨回合保留 + new_session 重置(承载会话边界 = 用户「新对话」`[ADR-0030 决策6]`)。
+    #[test]
+    fn messages_persist_across_turns_and_reset() {
+        let b = book();
+        let mut store = MemoryStore::open(tmp("messages")).unwrap();
+        let mut reader = Reader::new(&b, DEFAULT_RADIUS);
+        let mut messages = new_session();
+        assert_eq!(messages.len(), 1); // 仅 system
+        // 第一回合:终答即停 → messages 累积 system + user + assistant。
+        let fake = FakeAdapter::new(vec![turn_final("答1")], vec![]);
+        run(&b, &mut store, &mut reader, &fake, &mut messages, "问1", "t0", OuterConfig::default()).unwrap();
+        let after_first = messages.len();
+        assert!(after_first > 1);
+        // 第二回合:复用同一 messages → 继续累积(跨回合保留)。
+        let fake2 = FakeAdapter::new(vec![turn_final("答2")], vec![]);
+        run(&b, &mut store, &mut reader, &fake2, &mut messages, "问2", "t0", OuterConfig::default()).unwrap();
+        assert!(messages.len() > after_first);
+        // 「新对话」:重置回仅 system。
+        messages = new_session();
+        assert_eq!(messages.len(), 1);
     }
 }

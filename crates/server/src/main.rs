@@ -5,6 +5,7 @@
 use memory::MemoryStore;
 use read_tools::Book;
 use reader::{Reader, DEFAULT_RADIUS};
+use runtime::orchestrator::new_session;
 use runtime::{ModelAdapter, NativeAdapter};
 use server::{route, AppState, Req, UnconfiguredAdapter};
 use std::sync::{Arc, Mutex};
@@ -45,7 +46,8 @@ fn main() {
         }
     };
     let addr = std::env::var("UNDERSTAND_BOOK_ADDR").unwrap_or_else(|_| "127.0.0.1:8787".into());
-    let state = Arc::new(Mutex::new(AppState { book, reader, store, adapter }));
+    let messages = new_session(); // 外层 E agent 会话 messages(/agent/new 重置)`[ADR-0030]`
+    let state = Arc::new(Mutex::new(AppState { book, reader, store, adapter, messages }));
     let server = match Server::http(&addr) {
         Ok(s) => Arc::new(s),
         Err(e) => {

@@ -38,3 +38,10 @@
 - **关联优化项③**(`docs/参考对照-文档世界状态-优化登记.md` §B):查询踪迹可见 = ③ 的 agent 维度落地。
 - **切片归属**:并入「切片1 前端阅读器」刀(补 S10f 后端 / S10g 前端),非独立刀。
 - **承**:[[ADR-0028]](前端架构,本 ADR 补其 agent 形态)/ [[ADR-0007]](人机对称)/ [[ADR-0015]](effect 返回·标注单源·错误信封)/ [[ADR-0016]]·[[ADR-0026]](双层 loop·orchestrator)/ [[ADR-0005]]·[[ADR-0006]](E agent·memory 两层)/ [[ADR-0018]](consolidation·idle·四层产物)/ [[ADR-0011]](边作召回路标)/ V3 §5 + §6.1(契约冻结)。
+
+## S10f 落地回填(2026-06-24,决策2/3/4/5 实现定型)
+- **session 层落点(决策4)**:`reader.{highlight,note}` 加 `layer:&str` 入参——人默认 `long_term`、agent 传 `session`,**走同一命令面**(守人机对称,§0.5 选 A 否决「orchestrator 绕过 reader 直写 memory」=破对称 + 重复取片段逻辑)。
+- **AgentEffect 字段定型(决策3)**:tagged enum `kind` —— `Goto{before_anchor,after_anchor}` / `Highlight{mem_id,lid}` / `Note{mem_id,lid,text}`,undo 材料即反向命令入参。**视口 undo 粒度 = 按回合合并单条 Goto**(`run` 比对回合首尾 anchor;事务性,合「提议单元=一次对话回合」);highlight/note 每次一条。
+- **TraceStep 字段(决策5)**:`{tool,args,result_digest}`,`result_digest` 截 200 字承载 book.query 的 citations 链。
+- **reader/messages 注入(决策2/6)**:`run` 签名删内部 `Reader::new`、改注入 `reader:&mut Reader` + `messages:&mut Vec<Message>`;server `AppState` 持二者,`/agent/chat` 注入、`/agent/new` 经 `new_session()` 重置;终答入 messages(下一回合可见上轮回答)。
+- **未决留实测(何时回头)**:messages 累积上限/截断、idle 软提示、提议确认逐条 vs 整回合 UX、agent 翻页视觉明示——S10g 前端 + 真跑后定。
