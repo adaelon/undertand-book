@@ -206,6 +206,16 @@ fn route_mut(state: &mut AppState, path: &str, body: &str, now: &str) -> Reply {
             };
             ok_json(&state.store.recall(&q))
         }
+        "/memory/delete" => {
+            // 用户显式删(S10g agent 提议「撤销」走它);找不到 → MEMORY_NOT_FOUND 不降级 `[ADR-0015]`。
+            let Some(mem_id) = sget("mem_id") else {
+                return validation("INVALID_RANGE", "memory.delete 需 mem_id");
+            };
+            match state.store.delete(mem_id) {
+                Ok(()) => ok_json(&json!({ "ok": true })),
+                Err(e) => err_reply(&e),
+            }
+        }
         _ => route_not_found(path),
     }
 }
@@ -627,6 +637,24 @@ mod tests {
         let r = post(&mut s, "/memory/save", r#"{"type":"note"}"#);
         assert_eq!(r.status, 400);
         assert!(r.body.contains("INVALID_MEMORY_TYPE"));
+    }
+
+    // S10g-pre:memory.delete 删一条后 recall 不再返;删不存在 → 404 MEMORY_NOT_FOUND 不降级。
+    #[test]
+    fn memory_delete_removes_and_missing_404() {
+        let mut s = state_named("memdel");
+        let sv = post(&mut s, "/memory/save", r#"{"type":"note","anchor_lid":"1.1","content":"删我"}"#);
+        assert_eq!(sv.status, 200);
+        let v: serde_json::Value = serde_json::from_str(&sv.body).unwrap();
+        let mem_id = v["mem_id"].as_str().unwrap();
+        let del = post(&mut s, "/memory/delete", &format!(r#"{{"mem_id":"{mem_id}"}}"#));
+        assert_eq!(del.status, 200);
+        assert!(del.body.contains("\"ok\":true"));
+        let rc = post(&mut s, "/memory/recall", r#"{"lid":"1.1"}"#);
+        assert!(!rc.body.contains("删我"));
+        let nf = post(&mut s, "/memory/delete", r#"{"mem_id":"mem_nope"}"#);
+        assert_eq!(nf.status, 404);
+        assert!(nf.body.contains("MEMORY_NOT_FOUND"));
     }
 
     #[test]

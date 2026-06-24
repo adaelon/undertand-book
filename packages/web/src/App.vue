@@ -1,20 +1,15 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
 import { api, ApiError } from "./api";
-import type { MemoryRecord, QueryResponse, Viewport } from "./api";
+import type { AgentEffect, MemoryRecord, OuterOutcome, Viewport } from "./api";
 
-// ── 会话态 ──
+// ── 阅读区会话态 ──
 const leafOrder = ref<string[]>([]); // 全书叶 LID 序(读位感分母 + 进度)
 const viewport = ref<Viewport | null>(null);
 const segments = ref<{ lid: string; text: string }[]>([]); // 视口内连续正文(LID 隐形)
 const annotations = ref<MemoryRecord[]>([]); // 当前书全部标注(客户端按 lid 过滤)
 const selectedLid = ref<string | null>(null);
 const chapterTitle = ref<string>("");
-
-// 问答态
-const qInput = ref("");
-const answer = ref<QueryResponse | null>(null);
-const querying = ref(false);
 
 // goto 输入 + 错误条
 const gotoInput = ref("");
@@ -43,14 +38,24 @@ function noteOf(lid: string): string | null {
   return n ? n.content : null;
 }
 
+async function refreshAnnotations() {
+  annotations.value = await api.recall({}); // 单书:取全部,客户端按 lid 过滤
+}
+
 // 视口加载:逐 visible_lid 取真原文(连续正文),并刷新标注。
 async function loadWindow(vp: Viewport) {
   viewport.value = vp;
   selectedLid.value = vp.anchor_lid;
   const texts = await Promise.all(vp.visible_lids.map((lid) => api.text(lid)));
   segments.value = texts.map((t) => ({ lid: t.lid, text: t.text }));
-  annotations.value = await api.recall({}); // 单书:取全部,客户端按 lid 过滤
+  await refreshAnnotations();
   await loadChapter(vp.anchor_lid);
+}
+
+// 阅读区与服务端 reader 同步(agent 可能改了视口 → 重新拉 state 渲染)。
+async function syncViewport() {
+  const st = await api.state();
+  await loadWindow(st.viewport);
 }
 
 // 章节标题:取 anchor 顶层段(LID 首段)原文首行作标签(读位感「第N章…」)。
@@ -100,7 +105,7 @@ async function doHighlight() {
   try {
     banner.value = "";
     await api.highlight(selectedLid.value);
-    annotations.value = await api.recall({}); // 回显标注(单源 = 记忆层)
+    await refreshAnnotations();
   } catch (e) {
     fail(e);
   }
@@ -112,25 +117,128 @@ async function doNote() {
   try {
     banner.value = "";
     await api.note(selectedLid.value, text);
-    annotations.value = await api.recall({});
+    await refreshAnnotations();
   } catch (e) {
     fail(e);
   }
 }
 
-// ── 问答 ──
-async function doQuery() {
-  const q = qInput.value.trim();
-  if (!q) return;
-  querying.value = true;
+// ── agent 对话区(外层 E agent 主入口)`[ADR-0030]` ──
+interface ChatTurn {
+  user: string;
+  outcome: OuterOutcome | null;
+  pending: boolean;
+  error?: string;
+  distilled?: boolean;
+}
+const chat = ref<ChatTurn[]>([]);
+const agentInput = ref("");
+const sending = ref(false);
+const showTrace = ref<Record<string, boolean>>({});
+// 提议处置态:key=`${turnIdx}:${effIdx}` → "已保留" | "已撤销"。
+const handled = ref<Record<string, string>>({});
+function effKey(ti: number, ei: number) {
+  return `${ti}:${ei}`;
+}
+function effState(ti: number, ei: number): string | undefined {
+  return handled.value[effKey(ti, ei)];
+}
+
+// AgentEffect 判别(在 TS 里 narrow,避开模板里的联合类型收窄)。
+function isGoto(e: AgentEffect): boolean {
+  return e.kind === "Goto";
+}
+function effLabel(e: AgentEffect): string {
+  if (e.kind === "Goto") return `📖 翻到 ${e.after_anchor}`;
+  if (e.kind === "Highlight") return `🖍 高亮 ${e.lid}`;
+  return `📝 笔记 ${e.lid}`;
+}
+function gotoBack(e: AgentEffect): string {
+  return e.kind === "Goto" ? e.before_anchor : "";
+}
+
+async function sendAgent() {
+  const msg = agentInput.value.trim();
+  if (!msg) return;
+  const turn: ChatTurn = { user: msg, outcome: null, pending: true };
+  chat.value.push(turn);
+  agentInput.value = "";
+  sending.value = true;
   banner.value = "";
   try {
-    // 读到哪问到哪:anchor 默认当前选区/视口锚(服务端缺省也会取 reader anchor)。
-    answer.value = await api.query(q, selectedLid.value ?? viewport.value?.anchor_lid);
+    turn.outcome = await api.agentChat(msg);
+    // agent 可能驱动了共享 reader 视口 / 落了 session 标注 → 同步阅读区。
+    await syncViewport();
+  } catch (e) {
+    turn.error = e instanceof ApiError ? `[${e.category}] ${e.errorCode}: ${e.message}` : String(e);
+  } finally {
+    turn.pending = false;
+    sending.value = false;
+  }
+}
+
+// 提议「撤销」:Goto→ 返回回合前 anchor;Highlight/Note→ memory.delete(mem_id)。
+async function undoEffect(ti: number, ei: number, e: AgentEffect) {
+  try {
+    banner.value = "";
+    if (e.kind === "Goto") {
+      await api.goto(e.before_anchor);
+      await syncViewport();
+    } else {
+      await api.delete(e.mem_id);
+      await refreshAnnotations();
+    }
+    handled.value[effKey(ti, ei)] = "已撤销";
+  } catch (err) {
+    fail(err);
+  }
+}
+
+// 提议「保留」(Highlight/Note):同内容以 long_term 再 save → 同 mem_id upsert 升级层。
+async function keepEffect(ti: number, ei: number, e: AgentEffect) {
+  if (e.kind === "Goto") return;
+  try {
+    banner.value = "";
+    let content = e.kind === "Note" ? e.text : "";
+    if (e.kind === "Highlight") {
+      const recs = await api.recall({ layer: "session" });
+      content = recs.find((r) => r.mem_id === e.mem_id)?.content ?? "";
+    }
+    await api.save({
+      type: e.kind === "Highlight" ? "highlight" : "note",
+      anchor_lid: e.lid,
+      content,
+      layer: "long_term",
+    });
+    await refreshAnnotations();
+    handled.value[effKey(ti, ei)] = "已保留";
+  } catch (err) {
+    fail(err);
+  }
+}
+
+// 对话末「凝练成笔记」:把 answer 存为 note(锚当前视口 anchor),long_term。
+async function distill(turn: ChatTurn) {
+  const ans = turn.outcome?.answer;
+  const anchor = viewport.value?.anchor_lid;
+  if (!ans || !anchor) return;
+  try {
+    banner.value = "";
+    await api.save({ type: "note", anchor_lid: anchor, content: ans, layer: "long_term" });
+    turn.distilled = true;
+    await refreshAnnotations();
   } catch (e) {
     fail(e);
-  } finally {
-    querying.value = false;
+  }
+}
+
+async function newChat() {
+  try {
+    await api.agentNew();
+    chat.value = [];
+    handled.value = {};
+  } catch (e) {
+    fail(e);
   }
 }
 </script>
@@ -183,35 +291,184 @@ async function doQuery() {
         </article>
       </main>
 
-      <!-- 问答区 -->
-      <aside class="qa">
-        <h3>问这本书</h3>
-        <textarea v-model="qInput" rows="3" placeholder="基于当前阅读位置提问…" />
-        <button :disabled="querying || !qInput.trim()" @click="doQuery">
-          {{ querying ? "检索中…" : "提问" }}
-        </button>
+      <!-- agent 对话区(分屏右半)-->
+      <aside class="agent">
+        <div class="agent-head">
+          <h3>📚 书 agent</h3>
+          <button class="new-chat" @click="newChat">＋ 新对话</button>
+        </div>
 
-        <div v-if="answer" class="answer">
-          <p class="ans-text">{{ answer.answer ?? "(无法作答)" }}</p>
-          <p v-if="answer.incomplete" class="incomplete">
-            ⚠ 证据不足({{ answer.warning ?? "incomplete" }})
-          </p>
-          <div v-if="answer.citations.length" class="cites">
-            <p class="cites-h">引用(点击跳原文):</p>
-            <ul>
-              <li v-for="c in answer.citations" :key="c.lid">
-                <a href="#" @click.prevent="doGoto(c.lid)">[{{ c.lid }}]</a>
-                <span class="role">{{ c.role }}</span> {{ c.text }}
-              </li>
-            </ul>
+        <div class="transcript">
+          <div v-for="(turn, ti) in chat" :key="ti" class="turn">
+            <p class="u-msg">🧑 {{ turn.user }}</p>
+
+            <p v-if="turn.pending" class="pending">⏳ agent 思考中…</p>
+            <p v-else-if="turn.error" class="incomplete">{{ turn.error }}</p>
+
+            <div v-else-if="turn.outcome" class="a-msg">
+              <p class="ans-text">{{ turn.outcome.answer ?? "(无回答)" }}</p>
+              <p v-if="turn.outcome.incomplete" class="incomplete">
+                ⚠ 未尽({{ turn.outcome.warning ?? "incomplete" }})
+              </p>
+
+              <!-- 可撤销提议卡 -->
+              <div v-if="turn.outcome.effects.length" class="proposals">
+                <p class="prop-h">本回合改动(可撤销):</p>
+                <div v-for="(eff, ei) in turn.outcome.effects" :key="ei" class="proposal">
+                  <span class="prop-label">{{ effLabel(eff) }}</span>
+                  <template v-if="effState(ti, ei)">
+                    <span class="done">{{ effState(ti, ei) }}</span>
+                  </template>
+                  <template v-else>
+                    <button v-if="isGoto(eff)" @click="undoEffect(ti, ei, eff)">
+                      ↩ 返回 {{ gotoBack(eff) }}
+                    </button>
+                    <template v-else>
+                      <button @click="keepEffect(ti, ei, eff)">保留</button>
+                      <button class="undo" @click="undoEffect(ti, ei, eff)">撤销</button>
+                    </template>
+                  </template>
+                </div>
+              </div>
+
+              <!-- 查询踪迹(可折叠)-->
+              <div v-if="turn.outcome.trace.length" class="trace">
+                <button class="trace-toggle" @click="showTrace[ti] = !showTrace[ti]">
+                  🔍 查询踪迹（{{ turn.outcome.trace.length }} 步）{{ showTrace[ti] ? "▲" : "▼" }}
+                </button>
+                <ol v-if="showTrace[ti]">
+                  <li v-for="(t, i) in turn.outcome.trace" :key="i">
+                    <code>{{ t.tool }}</code>
+                    <span class="t-args">{{ t.args }}</span>
+                    <span class="t-res">→ {{ t.result_digest }}</span>
+                  </li>
+                </ol>
+              </div>
+
+              <!-- 凝练成笔记 / 丢弃 -->
+              <div class="distill" v-if="turn.outcome.answer">
+                <button v-if="!turn.distilled" @click="distill(turn)">✍ 凝练成笔记</button>
+                <span v-else class="done">已存为笔记</span>
+              </div>
+            </div>
           </div>
-          <div v-if="answer.model_supplement.length" class="supp">
-            <p class="supp-h">模型补充(无原文锚):</p>
-            <p v-for="(s, i) in answer.model_supplement" :key="i">{{ s.text }}</p>
-          </div>
-          <p class="scope">检索范围: {{ answer.scope_used }}</p>
+
+          <p v-if="chat.length === 0" class="empty">问这本书任何问题——agent 会检索、翻页、标注,所有动作可撤销。</p>
+        </div>
+
+        <div class="agent-input">
+          <textarea
+            v-model="agentInput"
+            rows="3"
+            placeholder="基于当前阅读位置问 agent…"
+            @keydown.ctrl.enter="sendAgent"
+          />
+          <button :disabled="sending || !agentInput.trim()" @click="sendAgent">
+            {{ sending ? "…" : "发送 (Ctrl+Enter)" }}
+          </button>
         </div>
       </aside>
     </div>
   </div>
 </template>
+
+<style scoped>
+.agent {
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid #ddd;
+  min-width: 0;
+}
+.agent-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.new-chat {
+  font-size: 0.85em;
+}
+.transcript {
+  flex: 1;
+  overflow-y: auto;
+}
+.turn {
+  margin-bottom: 1.2em;
+}
+.u-msg {
+  font-weight: 600;
+}
+.a-msg {
+  background: #f7f7f9;
+  border-radius: 6px;
+  padding: 0.6em 0.8em;
+}
+.pending {
+  color: #888;
+}
+.incomplete {
+  color: #b35;
+}
+.proposals {
+  margin-top: 0.6em;
+  border-top: 1px dashed #ccc;
+  padding-top: 0.4em;
+}
+.prop-h {
+  font-size: 0.8em;
+  color: #666;
+}
+.proposal {
+  display: flex;
+  align-items: center;
+  gap: 0.5em;
+  margin: 0.25em 0;
+  font-size: 0.9em;
+}
+.prop-label {
+  flex: 1;
+}
+.proposal button.undo {
+  color: #b35;
+}
+.done {
+  color: #393;
+  font-size: 0.85em;
+}
+.trace {
+  margin-top: 0.5em;
+}
+.trace-toggle {
+  font-size: 0.8em;
+  background: none;
+  border: none;
+  color: #57a;
+  cursor: pointer;
+  padding: 0;
+}
+.trace ol {
+  font-size: 0.8em;
+  color: #555;
+  margin: 0.3em 0 0;
+  padding-left: 1.4em;
+}
+.trace .t-args {
+  color: #777;
+}
+.trace .t-res {
+  color: #999;
+}
+.distill {
+  margin-top: 0.5em;
+}
+.agent-input {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4em;
+  border-top: 1px solid #ddd;
+  padding-top: 0.5em;
+}
+.agent-input textarea {
+  width: 100%;
+  box-sizing: border-box;
+}
+</style>

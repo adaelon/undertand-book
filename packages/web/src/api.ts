@@ -3,8 +3,11 @@
 import type { Manifest } from "./generated/Manifest";
 import type { QueryResponse } from "./generated/QueryResponse";
 import type { ToolError } from "./generated/ToolError";
+import type { OuterOutcome } from "./generated/OuterOutcome";
+import type { AgentEffect } from "./generated/AgentEffect";
+import type { TraceStep } from "./generated/TraceStep";
 
-export type { Manifest, QueryResponse };
+export type { Manifest, QueryResponse, OuterOutcome, AgentEffect, TraceStep };
 
 const BASE = "/api";
 
@@ -105,4 +108,11 @@ export const api = {
   // ── memory.*(POST)──
   recall: (q: { book_id?: string; lid?: string; type?: string; layer?: string; text?: string } = {}) =>
     http<MemoryRecord[]>("POST", "/memory/recall", q),
+  save: (r: { type: string; anchor_lid: string; content: string; layer?: string }) =>
+    http<MemoryRecord>("POST", "/memory/save", r),
+  delete: (mem_id: string) => http<{ ok: boolean }>("POST", "/memory/delete", { mem_id }),
+
+  // ── agent.*(外层 E agent,POST)`[ADR-0030]` ──
+  agentChat: (message: string) => http<OuterOutcome>("POST", "/agent/chat", { message }),
+  agentNew: () => http<{ ok: boolean }>("POST", "/agent/new", {}),
 };

@@ -194,6 +194,21 @@ impl MemoryStore {
         Ok(record)
     }
 
+    /// `memory.delete(mem_id)`:用户**显式删**一条(区别于议题7 后台 usage 遗忘 `[ADR-0018]`)`[V3 §4.3]`。
+    /// 找不到 → `MEMORY_NOT_FOUND`(禁静默降级,守 `[ADR-0015]`)。S10g:agent 提议「撤销」走它。
+    pub fn delete(&mut self, mem_id: &str) -> Result<(), ToolError> {
+        let before = self.records.len();
+        self.records.retain(|r| r.mem_id != mem_id);
+        if self.records.len() == before {
+            return Err(ToolError {
+                error_code: "MEMORY_NOT_FOUND".into(),
+                category: "not_found".into(),
+                message: format!("memory 记录不存在: {mem_id}"),
+            });
+        }
+        self.persist()
+    }
+
     /// `memory.recall`:线性过滤(每 Some 维度合取;lid 比 anchor.lid;text 子串)`[ADR-0026]`。
     /// 切片0 不实现 concept 维度(跨书概念对齐留切片1+)。结果按 mem_id 排序(确定性)。
     pub fn recall(&self, q: &RecallQuery) -> Vec<Record> {
@@ -313,6 +328,24 @@ mod tests {
         );
         assert_eq!(s.recall(&RecallQuery { text: Some("beta".into()), ..Default::default() }).len(), 1);
         assert_eq!(s.recall(&RecallQuery { mem_type: Some("highlight".into()), ..Default::default() }).len(), 0);
+    }
+
+    // delete:显式删一条后 recall 不再返;删不存在的 mem_id → MEMORY_NOT_FOUND(不静默)。
+    #[test]
+    fn delete_removes_and_missing_errors() {
+        let path = tmp("delete");
+        let mut s = MemoryStore::open(&path).unwrap();
+        let r = s.save(note_input("bookA", "1.1", "待删"), "t0").unwrap();
+        assert_eq!(s.recall(&RecallQuery::default()).len(), 1);
+        s.delete(&r.mem_id).unwrap();
+        assert_eq!(s.recall(&RecallQuery::default()).len(), 0);
+        // 删后落盘:重开同路径已无该条。
+        let s2 = MemoryStore::open(&path).unwrap();
+        assert_eq!(s2.recall(&RecallQuery::default()).len(), 0);
+        // 删不存在 → MEMORY_NOT_FOUND,禁静默。
+        let e = s.delete("mem_nope").unwrap_err();
+        assert_eq!(e.error_code, "MEMORY_NOT_FOUND");
+        assert_eq!(e.category, "not_found");
     }
 
     // 落盘隔离 + 持久化:写入后重开同路径,记录仍在(独立文件,不碰只读基座)。
