@@ -123,11 +123,12 @@ pub fn tool_specs() -> Vec<ToolSpec> {
         ),
         s(
             "book.context",
-            "取某 LID 的近邻上下文指针(树邻接 + 局部图谱边),不带原文,用 book.text 取内容。",
+            "取某 LID 的上下文指针:near=树邻接+local 边,mid=near+概念/实体其他 occurrences,far=mid+long_range 边;不带原文,用 book.text 取内容。",
             json!({
                 "type": "object",
                 "properties": {
                     "lid": {"type": "string"},
+                    "granularity": {"type": "string", "enum": ["near", "mid", "far"], "description": "默认 near"},
                     "k": {"type": "integer", "description": "可选 top-K"}
                 },
                 "required": ["lid"]
@@ -268,7 +269,8 @@ fn dispatch(
                 return (err_json("INVALID_RANGE", "validation", "book.context 需 lid"), None);
             };
             let k = args.get("k").and_then(|v| v.as_u64()).map(|u| u as usize);
-            let body = match book.context_near(lid, k) {
+            let granularity = args.get("granularity").and_then(|v| v.as_str());
+            let body = match book.context(lid, granularity, k) {
                 Ok(c) => to_json(&c),
                 Err(e) => to_json(&e),
             };

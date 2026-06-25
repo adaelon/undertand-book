@@ -17,7 +17,7 @@ pub struct Book {
     node_idx: HashMap<String, usize>,
 }
 
-/// near 档默认 top-K(占位,S4d 实测回填 ADR-0013/0014「何时回头」)。
+/// context 默认 top-K(占位,待 P1 实测回填 ADR-0013/0016「何时回头」)。
 pub const DEFAULT_NEAR_K: usize = 10;
 
 /// 统一错误信封(子集)`[ADR-0015]`;禁宽松降级——找不到即报错,不静默返最近邻。
@@ -57,13 +57,17 @@ pub struct Manifest {
 }
 
 /// context item 的确定性接入来源 + 排序键(判别联合)`[ADR-0014]`。
-/// 切片0 near 档只产 Tree / Edge;Concept(经概念二跳)留 mid 档(切片1+)。
+/// P1 覆盖 Tree / Concept(mid 二跳) / Edge(local 与 long_range 召回路标)。
 #[derive(Debug, Serialize, TS)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[ts(export, export_to = "../../../packages/web/src/generated/")]
 pub enum Via {
     Tree {
         rel: String,
+    },
+    Concept {
+        name: String,
+        shared_count: usize,
     },
     Edge {
         scope: String,
@@ -248,76 +252,150 @@ impl Book {
         }
     }
 
-    /// book.context(lid, granularity=near, k?):纯指针 `[ADR-0013/0014]`。
-    /// 切片0 只做 **near** 档 = 树邻接(parent/child/prev·next sibling)+ scope=local 边;
-    /// mid(概念二跳)/ far(long_range 边)留切片1+。items 不带原文,消费方走 book.text 取。
-    /// 排序:树邻接(距离最近)保序在前,local 边按 weight 降序;同 LID 去重;top-K 截断。
-    pub fn context_near(&self, lid: &str, k: Option<usize>) -> Result<Context, ToolError> {
-        let anchor = self.node(lid)?;
-        let mut tree_items: Vec<ContextItem> = Vec::new();
-        if let Some(p) = parent_lid(lid) {
-            if let Some(&pi) = self.lid_idx.get(&p) {
-                tree_items.push(self.tree_item(&p, "parent"));
-                let sibs = &self.base.lid_nodes[pi].children;
-                if let Some(pos) = sibs.iter().position(|c| c == lid) {
-                    if pos > 0 {
-                        tree_items.push(self.tree_item(&sibs[pos - 1], "prev_sibling"));
-                    }
-                    if pos + 1 < sibs.len() {
-                        tree_items.push(self.tree_item(&sibs[pos + 1], "next_sibling"));
-                    }
+    fn edge_item(&self, lid: &str, layer: &str, e: &base_schema::GraphEdge) -> ContextItem {
+        ContextItem {
+            lid: lid.to_string(),
+            layer: layer.into(),
+            via: Via::Edge {
+                scope: match &e.scope {
+                    EdgeScope::Local => "local",
+                    EdgeScope::LongRange => "long_range",
                 }
-            }
+                .into(),
+                edge_type: e.edge_type.clone(),
+                weight: e.weight,
+                direction: match e.direction {
+                    Direction::Directed => "directed",
+                    Direction::Undirected => "undirected",
+                }
+                .into(),
+            },
         }
-        for c in &anchor.children {
-            tree_items.push(self.tree_item(c, "child"));
-        }
-        // scope=local 边:经锚在 lid 的图谱节点跳到对端节点的 LID
-        let anchored_ids = self.nodes_anchored_at(lid);
-        let mut edge_items: Vec<(f32, ContextItem)> = Vec::new();
+    }
+
+    fn edge_context_items(
+        &self,
+        lid: &str,
+        anchored_ids: &[&str],
+        scope: &EdgeScope,
+        layer: &str,
+    ) -> Vec<(f32, ContextItem)> {
+        let mut out = Vec::new();
         for e in &self.base.graph_edges {
-            if !matches!(e.scope, EdgeScope::Local) {
+            if &e.scope != scope {
                 continue;
             }
             let src_at = anchored_ids.iter().any(|id| *id == e.source);
             let tgt_at = anchored_ids.iter().any(|id| *id == e.target);
             if src_at == tgt_at {
-                continue; // 恰一端锚在 anchor 才是向外的召回路标
+                continue;
             }
             let other = if src_at { &e.target } else { &e.source };
             for l in self.lids_of_node(other) {
                 if l != lid {
-                    edge_items.push((
-                        e.weight,
-                        ContextItem {
-                            lid: l.to_string(),
-                            layer: "near".into(),
-                            via: Via::Edge {
-                                scope: "local".into(),
-                                edge_type: e.edge_type.clone(),
-                                weight: e.weight,
-                                direction: match e.direction {
-                                    Direction::Directed => "directed",
-                                    Direction::Undirected => "undirected",
-                                }
-                                .into(),
-                            },
-                        },
-                    ));
+                    out.push((e.weight, self.edge_item(l, layer, e)));
                 }
             }
         }
-        edge_items.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-        let mut seen = std::collections::HashSet::new();
+        out.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        out
+    }
+
+    /// book.context(lid, granularity=near|mid|far, k?):纯指针 `[ADR-0013/0014/0033]`。
+    /// near = 树邻接 + local 边; mid = near + anchor 概念/实体其他 occurrences;
+    /// far = near + mid + long_range 边。items 不带原文,消费方走 book.text 取。
+    pub fn context(
+        &self,
+        lid: &str,
+        granularity: Option<&str>,
+        k: Option<usize>,
+    ) -> Result<Context, ToolError> {
+        let anchor = self.node(lid)?;
+        let granularity = granularity.unwrap_or("near");
+        if !matches!(granularity, "near" | "mid" | "far") {
+            return Err(ToolError {
+                error_code: "INVALID_GRANULARITY".into(),
+                category: "validation".into(),
+                message: format!("book.context granularity 不支持: {granularity}"),
+            });
+        }
+
         let mut items: Vec<ContextItem> = Vec::new();
-        for it in tree_items
-            .into_iter()
-            .chain(edge_items.into_iter().map(|(_, it)| it))
-        {
+        let mut seen = std::collections::HashSet::new();
+
+        let push = |it: ContextItem,
+                    items: &mut Vec<ContextItem>,
+                    seen: &mut std::collections::HashSet<String>| {
             if seen.insert(it.lid.clone()) {
                 items.push(it);
             }
+        };
+
+        if let Some(p) = parent_lid(lid) {
+            if let Some(&pi) = self.lid_idx.get(&p) {
+                push(self.tree_item(&p, "parent"), &mut items, &mut seen);
+                let sibs = &self.base.lid_nodes[pi].children;
+                if let Some(pos) = sibs.iter().position(|c| c == lid) {
+                    if pos > 0 {
+                        push(
+                            self.tree_item(&sibs[pos - 1], "prev_sibling"),
+                            &mut items,
+                            &mut seen,
+                        );
+                    }
+                    if pos + 1 < sibs.len() {
+                        push(
+                            self.tree_item(&sibs[pos + 1], "next_sibling"),
+                            &mut items,
+                            &mut seen,
+                        );
+                    }
+                }
+            }
         }
+        for c in &anchor.children {
+            push(self.tree_item(c, "child"), &mut items, &mut seen);
+        }
+
+        let anchored_ids = self.nodes_anchored_at(lid);
+        for (_, it) in self.edge_context_items(lid, &anchored_ids, &EdgeScope::Local, "near") {
+            push(it, &mut items, &mut seen);
+        }
+
+        if matches!(granularity, "mid" | "far") {
+            let mut mid: Vec<ContextItem> = Vec::new();
+            for id in &anchored_ids {
+                if let Some(&i) = self.node_idx.get(*id) {
+                    let n = &self.base.graph_nodes[i];
+                    if matches!(n.node_type, GraphNodeType::Entity | GraphNodeType::Concept) {
+                        for l in &n.occurrences {
+                            if l != lid {
+                                mid.push(ContextItem {
+                                    lid: l.clone(),
+                                    layer: "mid".into(),
+                                    via: Via::Concept {
+                                        name: n.name.clone(),
+                                        shared_count: 1,
+                                    },
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+            mid.sort_by(|a, b| a.lid.cmp(&b.lid));
+            for it in mid {
+                push(it, &mut items, &mut seen);
+            }
+        }
+
+        if granularity == "far" {
+            for (_, it) in self.edge_context_items(lid, &anchored_ids, &EdgeScope::LongRange, "far")
+            {
+                push(it, &mut items, &mut seen);
+            }
+        }
+
         items.truncate(k.unwrap_or(DEFAULT_NEAR_K));
         Ok(Context {
             anchor: lid.to_string(),
@@ -325,6 +403,10 @@ impl Book {
         })
     }
 
+    /// Backward-compatible near wrapper used by older call sites.
+    pub fn context_near(&self, lid: &str, k: Option<usize>) -> Result<Context, ToolError> {
+        self.context(lid, Some("near"), k)
+    }
     /// book.concept(name):按名找 concept/entity 节点,返全量 occurrences + 关联实体 `[ADR-0014]`。
     /// 找不到 → CONCEPT_NOT_FOUND(不静默降级 `[ADR-0015]`)。
     pub fn concept(&self, name: &str) -> Result<Concept, ToolError> {
@@ -376,8 +458,86 @@ fn parent_lid(lid: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base_schema::sample_base;
+    use base_schema::{
+        sample_base, Direction, EdgeScope, GraphEdge, GraphNode, GraphNodeType, LidNode, NodeKind,
+        ReadOnlyBase, Span,
+    };
 
+    fn book_with_far_edge() -> Book {
+        let src = "A".repeat(10) + &"B".repeat(10) + &"C".repeat(10) + &"D".repeat(10);
+        let base = ReadOnlyBase {
+            book_id: "far-book".into(),
+            lid_nodes: vec![
+                LidNode {
+                    lid: "1".into(),
+                    path: vec![1],
+                    kind: NodeKind::Chapter,
+                    span: Span { start: 0, end: 20 },
+                    children: vec!["1.1".into(), "1.2".into()],
+                },
+                LidNode {
+                    lid: "1.1".into(),
+                    path: vec![1, 1],
+                    kind: NodeKind::Paragraph,
+                    span: Span { start: 0, end: 10 },
+                    children: vec![],
+                },
+                LidNode {
+                    lid: "1.2".into(),
+                    path: vec![1, 2],
+                    kind: NodeKind::Paragraph,
+                    span: Span { start: 10, end: 20 },
+                    children: vec![],
+                },
+                LidNode {
+                    lid: "2".into(),
+                    path: vec![2],
+                    kind: NodeKind::Chapter,
+                    span: Span { start: 20, end: 40 },
+                    children: vec!["2.1".into(), "2.2".into()],
+                },
+                LidNode {
+                    lid: "2.1".into(),
+                    path: vec![2, 1],
+                    kind: NodeKind::Paragraph,
+                    span: Span { start: 20, end: 30 },
+                    children: vec![],
+                },
+                LidNode {
+                    lid: "2.2".into(),
+                    path: vec![2, 2],
+                    kind: NodeKind::Paragraph,
+                    span: Span { start: 30, end: 40 },
+                    children: vec![],
+                },
+            ],
+            graph_nodes: vec![
+                GraphNode {
+                    id: "entity:a".into(),
+                    node_type: GraphNodeType::Entity,
+                    name: "A".into(),
+                    occurrences: vec!["1.1".into(), "1.2".into(), "2.2".into()],
+                    source_lid: None,
+                },
+                GraphNode {
+                    id: "entity:b".into(),
+                    node_type: GraphNodeType::Entity,
+                    name: "B".into(),
+                    occurrences: vec!["2.1".into()],
+                    source_lid: None,
+                },
+            ],
+            graph_edges: vec![GraphEdge {
+                source: "entity:a".into(),
+                target: "entity:b".into(),
+                edge_type: "builds_on".into(),
+                direction: Direction::Directed,
+                scope: EdgeScope::LongRange,
+                weight: 0.9,
+            }],
+        };
+        Book::new(base, &src)
+    }
     fn book() -> Book {
         // sample_base: lid "1"(span 0..100,容器)+ "1.1"(span 0..100,叶);entity:command occ=["1.1"]、claim source=1.1。
         let src = "X".repeat(100) + "尾巴";
@@ -437,6 +597,27 @@ mod tests {
         );
     }
 
+    #[test]
+    fn context_far_accumulates_near_mid_and_long_range() {
+        let b = book_with_far_edge();
+        let ctx = b.context("1.1", Some("far"), Some(10)).unwrap();
+        assert!(ctx.items.iter().any(|i| i.lid == "1" && i.layer == "near"));
+        assert!(ctx
+            .items
+            .iter()
+            .any(|i| i.lid == "2.2" && i.layer == "mid" && matches!(i.via, Via::Concept { .. })));
+        assert!(ctx.items.iter().any(|i| i.lid == "2.1"
+            && i.layer == "far"
+            && matches!(i.via, Via::Edge { ref scope, .. } if scope == "long_range")));
+    }
+
+    #[test]
+    fn context_rejects_unknown_granularity() {
+        let b = book();
+        let err = b.context("1.1", Some("wide"), None).unwrap_err();
+        assert_eq!(err.error_code, "INVALID_GRANULARITY");
+        assert_eq!(err.category, "validation");
+    }
     #[test]
     fn concept_found_and_missing() {
         let b = book();

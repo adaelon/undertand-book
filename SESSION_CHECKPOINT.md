@@ -1,4 +1,4 @@
-﻿# SESSION_CHECKPOINT - 2026-06-25 18:10
+# SESSION_CHECKPOINT - 2026-06-25 18:10
 
 ## Freshness check
 - Commit at write time: 296b77a feat: gate formula semantics evidence
@@ -14,6 +14,7 @@ ADR-0033 Core/Profile/Reader 解耦与 `technical_learning` profile 深路径方
 4. Keep SA6 asset true-book validation separate unless the user explicitly merges the tracks.
 
 ## Uncommitted / unfinished
+- 当前 Windows sandbox 的 apply_patch 写入会触发 codex-windows-sandbox-setup.exe 模块错误;本会话后续写文件改用 PowerShell 写入。
 - ADR-0033 docs and code-trail entry are pending commit.
 - `参考2.md` is user-provided source material and remains untracked unless the user asks to version it.
 - SA6 remains unstarted.

@@ -10,11 +10,13 @@ use ts_rs::TS;
 pub mod goldset;
 pub mod orchestrator;
 
-/// scope 档(切片0 两档;cross_chapter/global 留切片1+)`[ADR-0016/0025]`。
+/// scope 档(P1 扩到 local/chapter/cross_chapter/global)`[ADR-0016/0033]`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scope {
     Local,
     Chapter,
+    CrossChapter,
+    Global,
 }
 
 impl Scope {
@@ -22,6 +24,8 @@ impl Scope {
         match self {
             Scope::Local => "local",
             Scope::Chapter => "chapter",
+            Scope::CrossChapter => "cross_chapter",
+            Scope::Global => "global",
         }
     }
 }
@@ -84,10 +88,20 @@ pub struct Message {
 
 impl Message {
     pub fn system(content: impl Into<String>) -> Message {
-        Message { role: Role::System, content: Some(content.into()), tool_calls: vec![], tool_call_id: None }
+        Message {
+            role: Role::System,
+            content: Some(content.into()),
+            tool_calls: vec![],
+            tool_call_id: None,
+        }
     }
     pub fn user(content: impl Into<String>) -> Message {
-        Message { role: Role::User, content: Some(content.into()), tool_calls: vec![], tool_call_id: None }
+        Message {
+            role: Role::User,
+            content: Some(content.into()),
+            tool_calls: vec![],
+            tool_call_id: None,
+        }
     }
 }
 
@@ -119,7 +133,8 @@ pub struct AssistantTurn {
 /// `complete` = 内层 query 合一轮(JSON 契约);`chat` = 外层多轮 tool-calling。
 pub trait ModelAdapter {
     fn complete(&self, req: CompletionRequest) -> Result<ParsedResponse, AdapterError>;
-    fn chat(&self, messages: &[Message], tools: &[ToolSpec]) -> Result<AssistantTurn, AdapterError>;
+    fn chat(&self, messages: &[Message], tools: &[ToolSpec])
+        -> Result<AssistantTurn, AdapterError>;
 }
 
 /// Message → OpenAI 请求体 JSON(assistant tool_calls / tool 结果按 OpenAI 形拼)。
@@ -219,7 +234,9 @@ fn anchored_leaves_under(book: &Book, root: &str) -> Vec<String> {
         };
         for l in lids {
             let in_tree = l == root || l.starts_with(&prefix);
-            let is_leaf = lid_node(book, l).map(|nd| nd.children.is_empty()).unwrap_or(false);
+            let is_leaf = lid_node(book, l)
+                .map(|nd| nd.children.is_empty())
+                .unwrap_or(false);
             if in_tree && is_leaf && !out.iter().any(|x| x == l) {
                 out.push(l.to_string());
             }
@@ -229,19 +246,42 @@ fn anchored_leaves_under(book: &Book, root: &str) -> Vec<String> {
     out
 }
 
-/// 确定性档位检索:沿图谱/树捞 LID + 真原文成证据集 `[ADR-0016/0025]`。
-/// local = anchor ∪ context_near(树邻接+local边);chapter = local ∪ 章内 anchored 叶。
+/// 全书所有 anchored 叶 LID,供 global scope 使用。
+fn anchored_leaves_all(book: &Book) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for n in &book.base.graph_nodes {
+        let lids: Vec<&str> = match n.node_type {
+            GraphNodeType::Claim => n.source_lid.as_deref().into_iter().collect(),
+            _ => n.occurrences.iter().map(|s| s.as_str()).collect(),
+        };
+        for l in lids {
+            let is_leaf = lid_node(book, l)
+                .map(|nd| nd.children.is_empty())
+                .unwrap_or(false);
+            if is_leaf && !out.iter().any(|x| x == l) {
+                out.push(l.to_string());
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// 确定性档位检索:沿图谱/树捞 LID + 真原文成证据集 `[ADR-0016/0033]`。
+/// local = anchor ∪ context(near);chapter = local ∪ 章内 anchored 叶;
+/// cross_chapter = chapter ∪ context(far);global = cross_chapter ∪ 全书 anchored 叶。
 fn retrieve(book: &Book, anchor: &str, scope: Scope) -> Result<EvidenceSet, ToolError> {
     let mut ev: EvidenceSet = BTreeMap::new();
     ev.insert(anchor.to_string(), book.text(anchor, None)?);
-    // local:树邻接 + scope=local 边(全量,不截断 top-K)
-    let ctx = book.context_near(anchor, Some(usize::MAX))?;
+
+    let ctx = book.context(anchor, Some("near"), Some(usize::MAX))?;
     for it in ctx.items {
         if !ev.contains_key(&it.lid) {
             ev.insert(it.lid.clone(), book.text(&it.lid, None)?);
         }
     }
-    if scope == Scope::Chapter {
+
+    if matches!(scope, Scope::Chapter | Scope::CrossChapter | Scope::Global) {
         let root = chapter_root(book, anchor);
         for l in anchored_leaves_under(book, &root) {
             if !ev.contains_key(&l) {
@@ -249,9 +289,26 @@ fn retrieve(book: &Book, anchor: &str, scope: Scope) -> Result<EvidenceSet, Tool
             }
         }
     }
+
+    if matches!(scope, Scope::CrossChapter | Scope::Global) {
+        let ctx = book.context(anchor, Some("far"), Some(usize::MAX))?;
+        for it in ctx.items {
+            if !ev.contains_key(&it.lid) {
+                ev.insert(it.lid.clone(), book.text(&it.lid, None)?);
+            }
+        }
+    }
+
+    if scope == Scope::Global {
+        for l in anchored_leaves_all(book) {
+            if !ev.contains_key(&l) {
+                ev.insert(l.clone(), book.text(&l, None)?);
+            }
+        }
+    }
+
     Ok(ev)
 }
-
 /// 合一轮提示:问题 + 证据集(每段前缀 `[LID]`,红线物理前提 `[ADR-0004]`)。
 fn build_prompt(q: &str, ev: &EvidenceSet) -> CompletionRequest {
     let mut user = String::from("问题:\n");
@@ -301,21 +358,28 @@ fn build_response(
 
 /// `book.query` 内层无状态 mini-loop `[ADR-0016/0025]`。
 /// 混合驱动:确定性档位骨架捞证据 → LLM 合一轮判停作答 → 确定性交叉验停(citations⊆证据集)。
-/// 不足或零有效 citation → 外扩(local→chapter);chapter 仍不足 → 触顶诚实标 incomplete。
+/// 不足或零有效 citation → 外扩(local→chapter→cross_chapter→global);global 仍不足 → 触顶诚实标 incomplete。
 pub fn query(
     book: &Book,
     q: &str,
     anchor: &str,
     adapter: &dyn ModelAdapter,
 ) -> Result<QueryResponse, ToolError> {
-    let ladder = [Scope::Local, Scope::Chapter];
+    let ladder = [
+        Scope::Local,
+        Scope::Chapter,
+        Scope::CrossChapter,
+        Scope::Global,
+    ];
     for (i, &scope) in ladder.iter().enumerate() {
         let ev = retrieve(book, anchor, scope)?;
-        let resp = adapter.complete(build_prompt(q, &ev)).map_err(|e| ToolError {
-            error_code: "PROVIDER_ERROR".into(),
-            category: "provider".into(),
-            message: e.message,
-        })?;
+        let resp = adapter
+            .complete(build_prompt(q, &ev))
+            .map_err(|e| ToolError {
+                error_code: "PROVIDER_ERROR".into(),
+                category: "provider".into(),
+                message: e.message,
+            })?;
         // 确定性交叉验停:只留落在证据集 LID 全集内的 citation(悬空滤净 = 结构红线)。
         let valid: Vec<RawCitation> = resp
             .citations
@@ -328,7 +392,7 @@ pub fn query(
             return Ok(build_response(resp, valid, scope, false, None));
         }
         if is_top {
-            // 触顶兜底:chapter 仍不足/零有效 → 诚实标 incomplete,不假装完整。
+            // 触顶兜底:global 仍不足/零有效 → 诚实标 incomplete,不假装完整。
             return Ok(build_response(
                 resp,
                 valid,
@@ -410,7 +474,10 @@ struct LlmSupp {
 /// 剥可能的 markdown ```json fence(json 解析容错,非 LID 降级)。
 fn strip_fence(s: &str) -> &str {
     let t = s.trim();
-    let t = t.strip_prefix("```json").or_else(|| t.strip_prefix("```")).unwrap_or(t);
+    let t = t
+        .strip_prefix("```json")
+        .or_else(|| t.strip_prefix("```"))
+        .unwrap_or(t);
     t.strip_suffix("```").unwrap_or(t).trim()
 }
 
@@ -510,7 +577,11 @@ impl ModelAdapter for NativeAdapter {
     }
 
     /// 外层多轮 tool-calling:带 `tools` schema 请求,解析 `assistant.tool_calls` + `usage` `[ADR-0026]`。
-    fn chat(&self, messages: &[Message], tools: &[ToolSpec]) -> Result<AssistantTurn, AdapterError> {
+    fn chat(
+        &self,
+        messages: &[Message],
+        tools: &[ToolSpec],
+    ) -> Result<AssistantTurn, AdapterError> {
         let msgs: Vec<serde_json::Value> = messages.iter().map(message_to_json).collect();
         let tool_specs: Vec<serde_json::Value> = tools
             .iter()
@@ -553,7 +624,10 @@ impl ModelAdapter for NativeAdapter {
                 tool_calls.push(ToolCall {
                     id: tc["id"].as_str().unwrap_or("").to_string(),
                     name: tc["function"]["name"].as_str().unwrap_or("").to_string(),
-                    arguments: tc["function"]["arguments"].as_str().unwrap_or("{}").to_string(),
+                    arguments: tc["function"]["arguments"]
+                        .as_str()
+                        .unwrap_or("{}")
+                        .to_string(),
                 });
             }
         }
@@ -615,7 +689,11 @@ mod tests {
     fn resp(sufficient: bool, cites: Vec<RawCitation>) -> ParsedResponse {
         ParsedResponse {
             sufficient,
-            answer: if sufficient { Some("答案".into()) } else { None },
+            answer: if sufficient {
+                Some("答案".into())
+            } else {
+                None
+            },
             citations: cites,
             model_supplement: vec![],
         }
@@ -648,13 +726,18 @@ mod tests {
         assert!(out.citations.iter().all(|c| c.lid == "1.1")); // 悬空 9.9 不出现
     }
 
-    // 路径③:两档都不足 → 触顶诚实标 incomplete + CONTEXT_BUDGET_EXCEEDED。
+    // 路径③:四档都不足 → 触顶诚实标 incomplete + CONTEXT_BUDGET_EXCEEDED。
     #[test]
     fn exhausting_ladder_marks_incomplete() {
         let b = book();
-        let fake = FakeAdapter::new(vec![resp(false, vec![]), resp(false, vec![])]);
+        let fake = FakeAdapter::new(vec![
+            resp(false, vec![]),
+            resp(false, vec![]),
+            resp(false, vec![]),
+            resp(false, vec![]),
+        ]);
         let out = query(&b, "问", "1.1", &fake).unwrap();
-        assert_eq!(out.scope_used, "chapter");
+        assert_eq!(out.scope_used, "global");
         assert!(out.incomplete);
         assert_eq!(out.warning.as_deref(), Some("CONTEXT_BUDGET_EXCEEDED"));
     }

@@ -110,7 +110,8 @@ fn route_book(book: &Book, leaf: &str, q: &HashMap<String, String>) -> Reply {
                     Err(_) => return validation("INVALID_K", "k 须为非负整数"),
                 },
             };
-            match book.context_near(lid, k) {
+            let granularity = q.get("granularity").map(|s| s.as_str());
+            match book.context(lid, granularity, k) {
                 Ok(c) => ok_json(&c),
                 Err(e) => err_reply(&e),
             }

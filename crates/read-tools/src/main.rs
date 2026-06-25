@@ -1,7 +1,7 @@
 //! read-tools CLI:headless 驱动 4 个确定性叶子工具(切片0:manifest/text)`[ADR-0024]`。
 //!   read-tools <book_dir> manifest [lid]       # 无 lid=总览;有 lid=该 LID node+stats
 //!   read-tools <book_dir> text <lid> [end_lid] # 取真原文(单 LID 或 LID 区间)
-//!   read-tools <book_dir> context <lid> [k]    # near 档纯指针(k=数字|all,默认 DEFAULT_NEAR_K)
+//!   read-tools <book_dir> context <lid> [near|mid|far] [k] # context 纯指针(k=数字|all,默认 DEFAULT_NEAR_K)
 //!   read-tools <book_dir> concept <name>       # 概念/实体全量 occurrences + 关联实体
 use read_tools::Book;
 use std::process::exit;
@@ -9,7 +9,7 @@ use std::process::exit;
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
-        eprintln!("usage: read-tools <book_dir> manifest [lid] | text <lid> [end_lid] | context <lid> [k] | concept <name>");
+        eprintln!("usage: read-tools <book_dir> manifest [lid] | text <lid> [end_lid] | context <lid> [near|mid|far] [k] | concept <name>");
         exit(2);
     }
     let (dir, cmd) = (&args[1], args[2].as_str());
@@ -37,16 +37,17 @@ fn main() {
                 }
                 None => {
                     let tops: Vec<_> = m.tree.iter().filter(|n| !n.lid.contains('.')).collect();
-                    println!(
-                        "tree 节点数={}  顶层={}",
-                        m.tree.len(),
-                        tops.len()
-                    );
+                    println!("tree 节点数={}  顶层={}", m.tree.len(), tops.len());
                     for n in tops.iter().take(5) {
                         let s = &m.stats_by_lid[&n.lid];
                         println!(
                             "  {}  child={} leaf={} anchored={} span=[{},{})",
-                            n.lid, s.child_count, s.leaf_count, s.anchored_nodes, n.span.start, n.span.end
+                            n.lid,
+                            s.child_count,
+                            s.leaf_count,
+                            s.anchored_nodes,
+                            n.span.start,
+                            n.span.end
                         );
                     }
                 }

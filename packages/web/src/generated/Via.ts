@@ -2,6 +2,6 @@
 
 /**
  * context item 的确定性接入来源 + 排序键(判别联合)`[ADR-0014]`。
- * 切片0 near 档只产 Tree / Edge;Concept(经概念二跳)留 mid 档(切片1+)。
+ * P1 覆盖 Tree / Concept(mid 二跳) / Edge(local 与 long_range 召回路标)。
  */
-export type Via = { "kind": "tree", rel: string, } | { "kind": "edge", scope: string, type: string, weight: number, direction: string, };
+export type Via = { "kind": "tree", rel: string, } | { "kind": "concept", name: string, shared_count: number, } | { "kind": "edge", scope: string, type: string, weight: number, direction: string, };

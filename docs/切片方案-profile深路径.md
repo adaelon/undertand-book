@@ -1,4 +1,4 @@
-﻿# 切片方案 · Profile 深路径(Core/Profile/Reader 解耦后的书中心能力补齐)
+# 切片方案 · Profile 深路径(Core/Profile/Reader 解耦后的书中心能力补齐)
 
 > **定位**:切片1+ 阶段方案,承 ADR-0033。目标不是先做通用 profile registry,而是在保持 Core 稳定的前提下,把当前 `technical_learning` profile 接入长程边、综合、记忆 consolidation、provider、增量构建和 reader 策略。
 > **状态**:Grill 已对齐,未开工。当前不改代码;后续每个 P 刀单独 A1 声明、单独验证。
@@ -31,6 +31,347 @@
 
 ---
 
+## 1.5 technical_learning v0 artifact contracts
+
+> 这些是 P1+ 的输入/输出契约草案。现在先作为 profile sidecar / optional artifact 形状冻结,不要求立即进入 `ReadOnlyBase` 必填字段。
+
+### 1.5.1 ProfileArtifactHeader
+
+所有 `technical_learning` profile artifact 必须带同一版本头,供增量构建和迁移使用。
+
+```ts
+interface ProfileArtifactHeader {
+  book_id: string;
+  book_version: string;
+  profile_id: "technical_learning";
+  profile_version: string;
+  core_schema_version: string;
+  generated_at: string;
+}
+```
+
+迁移规则:
+
+```text
+Core LID map 能映射 -> 改写到新 LID / 新 book_version。
+Core LID map 不能映射 -> 标 orphaned,不得静默删除。
+artifact 自身可重建时优先重建,但旧 artifact 的 orphaned 状态仍要可审计。
+```
+
+### 1.5.2 TechnicalLearningDiscourseIndex v0
+
+`discourse_index` 是 `technical_learning` 的 profile artifact,不是 Core graph_edges,也不是全局 schema。它先作为独立 LID 级索引存在;后续 `book.context near/far` 可把它投影为 `via.kind="discourse"`。
+
+```ts
+type DiscourseMode =
+  | "informative"
+  | "argumentative"
+  | "procedural"
+  | "descriptive"
+  | "meta";
+
+type LocalFunction =
+  | "definition"
+  | "description"
+  | "classification"
+  | "explanation"
+  | "cause"
+  | "effect"
+  | "example"
+  | "counterexample"
+  | "comparison"
+  | "contrast"
+  | "procedure_step"
+  | "application"
+  | "warning"
+  | "limitation"
+  | "question"
+  | "answer"
+  | "summary"
+  | "transition";
+
+type RhetoricalMove =
+  | "chapter_setup"
+  | "problem_framing"
+  | "prerequisite"
+  | "main_point"
+  | "concept_elaboration"
+  | "worked_example"
+  | "case_analysis"
+  | "argument_support"
+  | "objection"
+  | "resolution"
+  | "recap"
+  | "bridge_to_next";
+
+type DiscourseRelationType =
+  | "elaborates"
+  | "exemplifies"
+  | "explains"
+  | "causes"
+  | "results_in"
+  | "contrasts"
+  | "concedes"
+  | "supports"
+  | "rebuts"
+  | "summarizes"
+  | "restates"
+  | "prepares"
+  | "continues"
+  | "answers"
+  | "depends_on";
+
+type DiscourseRelationFamily =
+  | "temporal"
+  | "contingency"
+  | "comparison"
+  | "expansion";
+
+interface TechnicalLearningDiscourseRelation {
+  target_lid: string;
+  type: DiscourseRelationType;
+  family?: DiscourseRelationFamily;
+  direction: "backward" | "forward" | "lateral";
+  confidence: number;
+  evidence_lids: string[];
+}
+
+interface TechnicalLearningDiscourseItem {
+  lid: string;
+  mode: DiscourseMode;
+  local_function?: LocalFunction;
+  rhetorical_move?: RhetoricalMove;
+  local_summary?: string;
+  relations: TechnicalLearningDiscourseRelation[];
+}
+
+interface TechnicalLearningDiscourseIndex {
+  header: ProfileArtifactHeader;
+  items: TechnicalLearningDiscourseItem[];
+}
+```
+
+抽取与闸规则:
+
+```text
+不确定就不标;coverage 可以低,precision 优先。
+确定性闸只校验 lid / target_lid / evidence_lids 存在、枚举合法、confidence 在 [0,1]。
+确定性闸不判断标签语义是否正确;标签质量靠 gold fixture / 人工验。
+relation 可局部也可长程,但必须带 evidence_lids;是否进入 near/far 由投影层根据距离和 scope 决定。
+```
+
+### 1.5.3 TechnicalLearningPass2Output v1
+
+Pass2 是 `technical_learning.pass2_longrange_v1`,输出 profile-aware 候选;通过 Core gate 后可降成现有 `GraphEdge(scope="long_range")`。
+
+```ts
+interface TechnicalLearningPass2Input {
+  header: ProfileArtifactHeader;
+  catalog: CatalogEntry[];
+  graph_nodes: GraphNode[];
+  discourse_index?: TechnicalLearningDiscourseIndex;
+  formula_semantics?: FormulaSemantics[];
+  windows_or_chapters: Array<{
+    lid: string;
+    title?: string;
+    summary?: string;
+    key_lids: string[];
+  }>;
+}
+
+type TechnicalLearningLongRangeEdgeType =
+  | "builds_on"
+  | "contradicts"
+  | "exemplifies"
+  | "prerequisite"
+  | "refines"
+  | "applies"
+  | "analogous_to"
+  | "contrasts";
+
+interface TechnicalLearningLongRangeEdgeCandidate {
+  source: string;
+  target: string;
+  type: TechnicalLearningLongRangeEdgeType;
+  direction: "directed" | "undirected";
+  scope: "long_range";
+  weight: number;
+  evidence_lids: string[];
+  rationale: string;
+}
+
+interface TechnicalLearningPass2Output {
+  header: ProfileArtifactHeader;
+  edges: TechnicalLearningLongRangeEdgeCandidate[];
+}
+```
+
+降级写入规则:
+
+```text
+GraphEdge 只接 source / target / type / direction / scope / weight。
+profile_id / evidence_lids / rationale 保留在 Pass2 audit sidecar。
+source/target 不存在或 evidence_lids 悬空 -> candidate 丢弃,不得 LLM 重建。
+```
+
+### 1.5.4 ReaderProfile v0
+
+`reader_profile` 是 memory consolidation 的 Layer 3 读时投影,不是 `technical_learning` book artifact。它影响解释路径和检索计划,不写入 book base,不作为 citation。
+
+```ts
+type ReaderEvidenceKind =
+  | "self_declared"
+  | "quiz_result"
+  | "question_pattern"
+  | "note_highlight"
+  | "reading_behavior";
+
+interface ReaderProfileEvidence {
+  kind: ReaderEvidenceKind;
+  memory_id?: string;
+  session_id?: string;
+  lid?: string;
+  source_book_version?: string;
+  content?: string;
+}
+
+interface ReaderDomainBackground {
+  domain: string;
+  level: "novice" | "beginner" | "intermediate" | "advanced" | "expert";
+  confidence: number;
+  evidence: ReaderProfileEvidence[];
+}
+
+interface ReaderGoal {
+  scope: "current_book" | "domain";
+  goal: "understand" | "exam" | "work_application" | "research" | "skim";
+  confidence: number;
+  evidence: ReaderProfileEvidence[];
+}
+
+interface ReaderPreference {
+  analogy?: boolean;
+  math_detail?: "low" | "medium" | "high";
+  examples?: "fewer" | "normal" | "more";
+  answer_length?: "concise" | "normal" | "detailed";
+}
+
+interface ReaderStickingPoint {
+  concept: string;
+  description: string;
+  confidence: number;
+  evidence: ReaderProfileEvidence[];
+}
+
+interface ReaderKnownConcept {
+  concept: string;
+  level: "basic" | "working" | "strong";
+  confidence: number;
+  evidence: ReaderProfileEvidence[];
+}
+
+interface ReaderProfile {
+  profile_id: "reader_profile_v0";
+  updated_at: string;
+  domain_background: ReaderDomainBackground[];
+  goals: ReaderGoal[];
+  preferences: ReaderPreference;
+  sticking_points: ReaderStickingPoint[];
+  known_concepts: ReaderKnownConcept[];
+}
+```
+
+优先级与红线:
+
+```text
+用户显式声明 > 小测结果 > 行为推断。
+所有推断字段必须带 confidence + evidence。
+reader_profile 可被用户查看 / 修改 / 删除。
+reader_profile 只影响 retrieval planning / answer style / exercise difficulty。
+reader_profile 不得作为书中事实 citation。
+```
+
+### 1.5.5 SynthesizePolicy v0
+
+`book.synthesize` 是 Core 命令;policy 决定如何组织输入 LID,但不得扩大证据范围。
+
+```ts
+interface SynthesizePolicy {
+  book_profile: "technical_learning";
+  reader_profile?: ReaderProfile;
+  mode:
+    | "compare"
+    | "explain"
+    | "summarize"
+    | "derive"
+    | "teach"
+    | "answer_question";
+  citation_policy: "citations_subset_of_input_lids";
+  formula_policy?: "include_formula_semantics_when_formula_lid_present";
+  discourse_policy?: "use_discourse_relations_as_structure_hints";
+}
+```
+
+执行规则:
+
+```text
+按输入 LID 和章节顺序组织证据。
+可用 discourse_index 判断定义/解释/例子/反驳/总结层次。
+input 中包含 formula_lid 时,可附 FormulaSemantics。
+reader_profile 只调解释深度、类比方式、术语密度、前置知识补全。
+所有 citations 必须属于 input lids。
+```
+
+### 1.5.6 TechnicalLearningAgentPolicy v0
+
+reader 命令属于 Core;`technical_learning` 只定义 agent 何时建议使用这些命令。
+
+```ts
+interface TechnicalLearningAgentPolicy {
+  reader_actions: {
+    suggest_goto_when: Array<
+      | "answer_requires_prerequisite_lid"
+      | "user_confused_about_current_lid"
+      | "long_range_edge_has_high_weight"
+      | "formula_semantics_needed"
+    >;
+    suggest_highlight_when: Array<
+      | "local_function_definition"
+      | "local_function_warning"
+      | "formula_semantics_composition_present"
+      | "main_point"
+    >;
+    suggest_note_when: Array<
+      | "user_asked_summary"
+      | "reader_profile_sticking_point_resolved"
+      | "worked_example_completed"
+    >;
+  };
+}
+```
+
+约束:
+
+```text
+不新增 profile 专属 reader 命令。
+agent 动作仍是真执行 + 可撤销提议。
+agent 标注默认 session 层,用户保留才升 long_term。
+```
+### 1.5.7 Contract consumption matrix
+
+| 切片 | 主要消费契约 | 消费方式 | 产出 |
+| --- | --- | --- | --- |
+| P1 `technical_learning.pass2_longrange_v1` | `ProfileArtifactHeader`; `TechnicalLearningPass2Input/Output`; 可选 `TechnicalLearningDiscourseIndex`; 可选 `FormulaSemantics` | Pass2 输入材料与输出审计 sidecar; discourse/formula 作为长程关系判断上下文 | `GraphEdge(scope="long_range")` + Pass2 audit sidecar |
+| P2 `book.synthesize` 深路径 | `SynthesizePolicy`; `TechnicalLearningDiscourseIndex`; `FormulaSemantics`; 可选 `ReaderProfile` | 用 discourse 组织输入 LID 的定义/解释/例子/反驳/总结层次;公式 LID 附 FormulaSemantics;reader_profile 调整讲法 | citations ⊆ input lids 的综合回答 |
+| P2a `book.context` discourse projection | `TechnicalLearningDiscourseIndex`; `ProfileArtifactHeader` | 把 `relations[]` 投影成 `ContextItem.via.kind="discourse"`;local relation 进 near,long_range relation 进 far;仍不带原文 | `book.context` 可见 discourse via 指针 |
+| P3 reader.* 全集 + agent policy | `TechnicalLearningAgentPolicy`; 可选 `TechnicalLearningDiscourseIndex`; 可选 `ReaderProfile` | policy 决定何时建议 goto/highlight/note/回看 prerequisite/展示公式语义 | Core reader 命令调用策略,非新命令 |
+| P4 memory consolidation | `ReaderProfile`; `ReaderProfileEvidence` | consolidation Layer 3 产 reader_profile;Layer 1/2/4 作为 evidence 来源 | memory 层 reader_profile 投影 |
+| P5 ReActAdapter + provider registry | 不消费 profile artifact;只消费 Runtime 统一 tool/message 契约 | provider 归一到 AssistantTurn;profile 只提供 prompt/policy 给 orchestrator | 多 provider runtime 能力 |
+| P6 增量构建 + 迁移 | `ProfileArtifactHeader`; `TechnicalLearningDiscourseIndex`; `TechnicalLearningPass2Output`; `ReaderProfileEvidence` | 按 Core LID map 迁移 profile artifacts 和 memory evidence;失败标 orphaned | 可迁移/可审计的 profile + memory 状态 |
+
+P2a 是显式补刀:它不新增新基础命令,只让既有 `book.context` 消费 `TechnicalLearningDiscourseIndex`。P2 可以先直接读 sidecar 做 synthesize;P2a 则把同一份 discourse relation 变成通用 context 指针,供 agent 和 UI 复用。
+---
+
 ## 2. A4 子切片
 
 ### P0 · ADR-0033 + profile artifact 契约落档 `[docs]`
@@ -53,6 +394,11 @@
 - **触达**:`[ADR-0017/0029/0033]`
 - **实测落点**:批大小、归并质量、公式上下文对回答帮助、novice/expert 表达差异。
 
+### P2a · `book.context` discourse projection `[Rust]`
+- **做**:让既有 `book.context` 消费 `TechnicalLearningDiscourseIndex`,把 `relations[]` 投影成 `ContextItem.via.kind="discourse"`。local relation 进入 near;长程 relation 进入 far;items 仍只返回 LID 指针,原文继续走 `book.text`。
+- **不做**:不新增 `book.discourse` 命令;不把 discourse relation 塞进 Core graph_edges;不让 context item 携带原文。
+- **判据**:给定 discourse_index fixture,`book.context` 能返回 discourse via;悬空 target/evidence 已在 artifact gate 阶段被拒;near/far 分层可解释。
+- **触达**:`[ADR-0013/0014/0033]`
 ### P3 · reader.* 全集 + technical_learning agent policy `[Rust/Vue]`
 - **做**:补齐冻结命令面里尚未实现的 reader 命令;保持 Core 单一命令面。新增 technical_learning agent policy:何时建议 goto/highlight/note、何时回看 prerequisite、何时展示 FormulaSemantics、何时生成练习。agent 动作仍为可撤销提议。
 - **不做**:不新增 profile 专属 reader 命令;不绕过 reader/memory 直接写;不把 agent 提议默认落 long_term。
