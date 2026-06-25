@@ -1,34 +1,34 @@
-# SESSION_CHECKPOINT — 2026-06-25 00:00
+﻿# SESSION_CHECKPOINT - 2026-06-25 18:10
 
 ## Freshness check
-- Commit at write time: ef0b085 feat: serve packaged reader and promote formula assets
+- Commit at write time: 296b77a feat: gate formula semantics evidence
 - On read, compare with `git log -3`; if different, trust git log.
 
 ## What's in progress
-S10e packaged reader server/startup and the Formula asset contract are committed. No asset implementation code has started.
+ADR-0033 Core/Profile/Reader 解耦与 `technical_learning` profile 深路径方案已落档待提交;下一刀建议从 `docs/切片方案-profile深路径.md` 的 P1 `technical_learning.pass2_longrange_v1` 开始 Grill/实现。
 
 ## Next steps (ready to hand off)
-1. If implementing asset work, open `docs/切片方案-asset一等对象.md` and start at SA0 `GranularityProfile`; do not jump directly to schema/adapter changes.
-2. SA0 must count code/table/image/formula candidates and report formula_count plus paragraph/hybrid/sentence LID estimates.
-3. SA1 then adds `NodeKind::Formula`, `ManifestNode.kind`, and FormulaSemantics schema/TS export.
-4. For full manual product acceptance unrelated to asset, run `start.bat .understand-book\game-programming-patterns`, then verify browser UI + agent with `.env`.
+1. Commit and push `docs/adr/0033-*`, `docs/切片方案-profile深路径.md`, `docs/代码链路.md`, and this checkpoint.
+2. For implementation, open `docs/切片方案-profile深路径.md` and start P1 scope declaration before editing code.
+3. Cross-check P1 against `docs/adr/0010-*`, `docs/adr/0011-*`, `docs/adr/0013-*`, and `docs/adr/0016-*`.
+4. Keep SA6 asset true-book validation separate unless the user explicitly merges the tracks.
 
 ## Uncommitted / unfinished
-- `SESSION_CHECKPOINT.md`: refreshed after commit `ef0b085`; pending checkpoint commit only.
-- Asset implementation code remains unstarted.
-- S10h/S10i/S10j remain unstarted.
+- ADR-0033 docs and code-trail entry are pending commit.
+- `参考2.md` is user-provided source material and remains untracked unless the user asks to version it.
+- SA6 remains unstarted.
 
 ## Cold-start reading sequence
-1. `docs/切片方案-asset一等对象.md` — authoritative next asset implementation plan; FormulaSemantics included.
-2. `docs/adr/0029-asset一等对象-带类型lid叶子-image原文源标记序列化-manifest暴露kind-图谱层一视同仁.md` — revised asset decision with Formula.
-3. `CONTEXT.md` — glossary terms `asset 叶子` and `公式语义剖面`.
-4. `docs/adr/0032-段句粒度体检-先统计再选择paragraph-hybrid-sentence-避免默认全书句级.md` — required SA0 gate.
-5. `docs/切片方案-切片1前端阅读器.md` §6 — S10j frontend consumption after asset work.
-6. `docs/代码链路.md` — latest touched-symbol ledger.
+1. `docs/adr/0033-core-schema-book-profile-reader-profile解耦-technical-learning作为当前profile.md` - Core/Profile/Reader boundaries.
+2. `docs/切片方案-profile深路径.md` - P0-P6 execution plan; P1 is the next implementation candidate.
+3. `docs/adr/0010-语义边两遍抽取-双agent-硬屏障-全量目录优先-确定性投影-锚定基数分裂.md` - Pass2 original contract.
+4. `docs/adr/0011-确定性图谱闸-纯确定性收口-悬空丢不重建-最小连坐-按类型合并-边作召回路标.md` - Core gate rules.
+5. `docs/adr/0017-query-synthesize签名分工-输入形态分工-synthesize确定性分批归并-复用query响应骨架.md` - synthesize deep path contract.
+6. `docs/代码链路.md` - latest touched-symbol ledger.
 
 ## Decisions made this session
-- S10e packaged server serves Vue `dist` and API on one tiny_http port; packaged SPA uses `/api/*`, and `main.rs` strips `/api` before frozen command-surface dispatch.
-- `start.bat` is now the packaged product launcher; Vite dev mode is no longer the default double-process path.
-- Formula is no longer a long-tail asset; `NodeKind` target set is `{Code,Table,Image,Formula}`.
-- Formula requires FormulaSemantics: parameters, composition, and context links with real LID evidence.
-- Formula leaves must not be sentence-split; they remain atomic asset leaves for span/partition purposes.
+- Core owns LID/citation/book.* /reader.* /memory.* invariants; profile cannot alter them.
+- Current Book Profile is `technical_learning`; GraphNode envelope migration is deferred.
+- Pass2 is now designed as `technical_learning.pass2_longrange_v1` with audit sidecar.
+- `book.synthesize` stays a Core command but consumes technical_learning policy and optional reader_profile style.
+- reader_profile is Layer 3 of memory consolidation, not a book-base field or citation source.
