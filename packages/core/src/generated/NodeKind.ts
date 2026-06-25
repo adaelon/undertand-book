@@ -2,5 +2,6 @@
 
 /**
  * LID 节点类型。切片0 停在段(Paragraph),句留切片1+。
+ * Asset 一等对象切片只增不改:Code/Table/Image/Formula 是带类型 LID 叶子 `[ADR-0029]`。
  */
-export type NodeKind = "chapter" | "section" | "paragraph";
+export type NodeKind = "chapter" | "section" | "paragraph" | "code" | "table" | "image" | "formula";

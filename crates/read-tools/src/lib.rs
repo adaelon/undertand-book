@@ -1,7 +1,7 @@
 //! 读时确定性叶子工具(切片0:manifest/text;context/concept 见 S4c)`[ADR-0014]`。
 //! 消费冻结只读基座 `base.json` + 旁路原文 `source.txt`(UTF-16 span 口径 `[ADR-0024]`)。
 //! 纯函数库,无 LLM、provider 无关;HTTP 暴露推 S7。
-use base_schema::{Direction, EdgeScope, GraphNodeType, LidNode, ReadOnlyBase, Span};
+use base_schema::{Direction, EdgeScope, GraphNodeType, LidNode, NodeKind, ReadOnlyBase, Span};
 use serde::Serialize;
 use std::collections::HashMap;
 use ts_rs::TS;
@@ -36,6 +36,7 @@ pub struct ManifestNode {
     pub lid: String,
     pub children: Vec<String>,
     pub span: Span,
+    pub kind: NodeKind,
 }
 
 /// 每 LID 的确定性统计。
@@ -182,6 +183,7 @@ impl Book {
                 lid: n.lid.clone(),
                 children: n.children.clone(),
                 span: n.span.clone(),
+                kind: n.kind.clone(),
             })
             .collect();
         let stats_by_lid = self
@@ -331,10 +333,8 @@ impl Book {
             .graph_nodes
             .iter()
             .find(|n| {
-                matches!(
-                    n.node_type,
-                    GraphNodeType::Concept | GraphNodeType::Entity
-                ) && n.name == name
+                matches!(n.node_type, GraphNodeType::Concept | GraphNodeType::Entity)
+                    && n.name == name
             })
             .ok_or_else(|| ToolError {
                 error_code: "CONCEPT_NOT_FOUND".into(),
@@ -353,7 +353,8 @@ impl Book {
             if let Some(o) = other {
                 if let Some(&i) = self.node_idx.get(o) {
                     let on = &self.base.graph_nodes[i];
-                    if matches!(on.node_type, GraphNodeType::Entity) && !related.contains(&on.name) {
+                    if matches!(on.node_type, GraphNodeType::Entity) && !related.contains(&on.name)
+                    {
                         related.push(on.name.clone());
                     }
                 }
@@ -402,6 +403,10 @@ mod tests {
         let b = book();
         let m = b.manifest();
         assert_eq!(m.tree.len(), 2);
+        assert!(m
+            .tree
+            .iter()
+            .any(|n| n.lid == "1.1" && n.kind == NodeKind::Paragraph));
         let s1 = &m.stats_by_lid["1"];
         assert_eq!(s1.child_count, 1);
         assert_eq!(s1.leaf_count, 1); // 仅 1.1 是叶

@@ -1,4 +1,4 @@
-// 预构建产出前的运行时自检 schema（zod），镜像 crates/base-schema 的 Rust 权威定义。
+﻿// 预构建产出前的运行时自检 schema（zod），镜像 crates/base-schema 的 Rust 权威定义。
 // 字段失配在 .parse() 处抛错（非静默）——兑现 S0 判据① + ADR-0021「zod 产出前自检」。
 // 注:本文件是手写镜像;Rust 权威类型见 src/generated/*（ts-rs 生成）。
 import { z } from "zod";
@@ -8,7 +8,7 @@ export const SpanZ = z.object({
   end: z.number().int().nonnegative(),
 });
 
-export const NodeKindZ = z.enum(["chapter", "section", "paragraph"]);
+export const NodeKindZ = z.enum(["chapter", "section", "paragraph", "code", "table", "image", "formula"]);
 
 export const LidNodeZ = z.object({
   lid: z.string(),
@@ -41,6 +41,36 @@ export const GraphEdgeZ = z.object({
   weight: z.number(),
 });
 
+
+export const FormulaParameterZ = z.object({
+  symbol: z.string(),
+  label: z.string().nullable(),
+  meaning: z.string(),
+  unit: z.string().nullable(),
+  domain: z.string().nullable(),
+  evidence_lids: z.array(z.string()),
+});
+
+export const FormulaCompositionZ = z.object({
+  source_lid: z.string(),
+  meaning: z.string(),
+  terms: z.array(z.string()),
+  evidence_lids: z.array(z.string()),
+});
+
+export const FormulaContextLinkZ = z.object({
+  target_lid: z.string(),
+  relation: z.string(),
+  description: z.string(),
+  evidence_lids: z.array(z.string()),
+});
+
+export const FormulaSemanticsZ = z.object({
+  formula_lid: z.string(),
+  parameters: z.array(FormulaParameterZ),
+  composition: FormulaCompositionZ,
+  context_links: z.array(FormulaContextLinkZ),
+});
 export const ReadOnlyBaseZ = z.object({
   book_id: z.string(),
   lid_nodes: z.array(LidNodeZ),

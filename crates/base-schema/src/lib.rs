@@ -17,6 +17,7 @@ pub struct Span {
 }
 
 /// LID 节点类型。切片0 停在段(Paragraph),句留切片1+。
+/// Asset 一等对象切片只增不改:Code/Table/Image/Formula 是带类型 LID 叶子 `[ADR-0029]`。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 #[ts(export, export_to = "../../../packages/core/src/generated/")]
@@ -24,6 +25,10 @@ pub enum NodeKind {
     Chapter,
     Section,
     Paragraph,
+    Code,
+    Table,
+    Image,
+    Formula,
 }
 
 /// 一个 LID 树节点(切分产物),物化路径寻址。
@@ -100,6 +105,48 @@ pub struct GraphEdge {
     pub weight: f32,
 }
 
+/// 公式参数解释。每条解释必须带真实 LID 证据 `[ADR-0029]`。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(export, export_to = "../../../packages/core/src/generated/")]
+pub struct FormulaParameter {
+    pub symbol: String,
+    pub label: Option<String>,
+    pub meaning: String,
+    pub unit: Option<String>,
+    pub domain: Option<String>,
+    pub evidence_lids: Vec<String>,
+}
+
+/// 公式整体组合含义。source_lid 指向公式叶子本身, evidence_lids 指向上下文证据。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(export, export_to = "../../../packages/core/src/generated/")]
+pub struct FormulaComposition {
+    pub source_lid: String,
+    pub meaning: String,
+    pub terms: Vec<String>,
+    pub evidence_lids: Vec<String>,
+}
+
+/// 公式与上下文段落 / 概念 / 断言 / asset 的关系。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(export, export_to = "../../../packages/core/src/generated/")]
+pub struct FormulaContextLink {
+    pub target_lid: String,
+    pub relation: String,
+    pub description: String,
+    pub evidence_lids: Vec<String>,
+}
+
+/// Formula 叶子的高优先级读时语义剖面 `[ADR-0029]`。
+/// 本类型先作为独立 schema 导出;SA5 再决定实际存储/索引位置,避免本刀破坏旧 base.json。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(export, export_to = "../../../packages/core/src/generated/")]
+pub struct FormulaSemantics {
+    pub formula_lid: String,
+    pub parameters: Vec<FormulaParameter>,
+    pub composition: FormulaComposition,
+    pub context_links: Vec<FormulaContextLink>,
+}
 /// 冻结只读基座(切片0 最小子集:LID 表 + 知识图谱)。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS, JsonSchema)]
 #[ts(export, export_to = "../../../packages/core/src/generated/")]
