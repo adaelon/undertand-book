@@ -1,40 +1,71 @@
-// epub → 忠实块映射 SourceBlock[] + 规范化 source `[ADR-0008]`。
-// 解 zip(fflate)→ 读 container.xml 定位 content.opf → 按 spine 顺序解析各 xhtml
-// (node-html-parser),块级标记忠实成块:h1-6=heading(带 level)、p/li/blockquote/pre=leaf。
-// 嵌套块(blockquote 内 p、ul 内 li)只取外层一块,不重复下钻。
-// source = 各块文本按顺序拼接(块间 "\n\n" 分隔=空白 gap),block.span 索引进 source。
+// epub -> faithful SourceBlock[] + normalized source [ADR-0008/0029].
+// Parse zip(fflate) -> container.xml -> content.opf -> spine xhtml.
+// Block extraction preserves asset leaves for SA3 while segment() keeps current paragraph behavior until SA4.
 import { unzipSync, strFromU8 } from "fflate";
 import { parse, HTMLElement } from "node-html-parser";
-import type { SourceBlock } from "./segment";
+import type { AssetKind, SourceBlock } from "./segment";
 
 const HEADING = new Set(["h1", "h2", "h3", "h4", "h5", "h6"]);
-const LEAF = new Set(["p", "li", "blockquote", "pre"]);
+const LEAF = new Set(["p", "li", "blockquote"]);
 const SKIP = new Set(["script", "style", "head", "title"]);
 
 interface RawBlock {
   kind: "heading" | "leaf";
   level?: number;
+  assetKind?: AssetKind;
   text: string;
 }
 
 const norm = (s: string): string => s.replace(/\s+/g, " ").trim();
+const rawText = (e: HTMLElement): string => e.text.replace(/^\s+|\s+$/g, "");
+
+function imageMarkdown(e: HTMLElement): string | null {
+  const src = e.getAttribute("src")?.trim();
+  if (!src) return null;
+  const alt = e.getAttribute("alt") ?? "";
+  return `![${alt}](${src})`;
+}
+
+function tableText(e: HTMLElement): string {
+  const rows: string[] = [];
+  for (const row of e.querySelectorAll("tr")) {
+    const cells = row.querySelectorAll("th,td").map((cell) => norm(cell.text));
+    if (cells.length) rows.push(`| ${cells.join(" | ")} |`);
+  }
+  return rows.join("\n");
+}
+
+function mathSource(e: HTMLElement): string {
+  return e.toString().trim();
+}
 
 function walk(el: HTMLElement, acc: RawBlock[]): void {
   for (const child of el.childNodes) {
-    if (child.nodeType !== 1) continue; // 仅元素节点
+    if (child.nodeType !== 1) continue;
     const e = child as HTMLElement;
     const tag = (e.rawTagName ?? "").toLowerCase();
     if (!tag || SKIP.has(tag)) continue;
+
     if (HEADING.has(tag)) {
       const text = norm(e.text);
       if (text) acc.push({ kind: "heading", level: Number(tag[1]), text });
-      // 不下钻
+    } else if (tag === "pre") {
+      const text = rawText(e);
+      if (text) acc.push({ kind: "leaf", assetKind: "code", text });
+    } else if (tag === "table") {
+      const text = tableText(e);
+      if (text) acc.push({ kind: "leaf", assetKind: "table", text });
+    } else if (tag === "img") {
+      const text = imageMarkdown(e);
+      if (text) acc.push({ kind: "leaf", assetKind: "image", text });
+    } else if (tag === "math") {
+      const text = mathSource(e);
+      if (text) acc.push({ kind: "leaf", assetKind: "formula", text });
     } else if (LEAF.has(tag)) {
       const text = norm(e.text);
       if (text) acc.push({ kind: "leaf", text });
-      // 不下钻(嵌套块只算外层一块)
     } else {
-      walk(e, acc); // 容器(div/ul/section/body…)继续下钻
+      walk(e, acc);
     }
   }
 }
@@ -61,7 +92,6 @@ export function epubToSource(zip: Uint8Array): EpubSource {
   const opf = strFromU8(files[opfPath]);
   const opfDir = opfPath.includes("/") ? opfPath.slice(0, opfPath.lastIndexOf("/") + 1) : "";
 
-  // manifest: id -> href(属性顺序无关)
   const manifest = new Map<string, string>();
   for (const m of opf.matchAll(/<item\s[^>]*>/g)) {
     const tag = m[0];
@@ -69,7 +99,7 @@ export function epubToSource(zip: Uint8Array): EpubSource {
     const href = /\bhref="([^"]+)"/.exec(tag)?.[1];
     if (id && href) manifest.set(id, href);
   }
-  // spine 顺序
+
   const spine: string[] = [];
   for (const m of opf.matchAll(/<itemref\s[^>]*\bidref="([^"]+)"/g)) spine.push(m[1]);
 
@@ -88,8 +118,8 @@ export function epubToSource(zip: Uint8Array): EpubSource {
   for (const rb of raw) {
     const start = source.length;
     source += rb.text;
-    blocks.push({ kind: rb.kind, level: rb.level, text: rb.text, span: { start, end: source.length } });
-    source += "\n\n"; // 块间分隔(空白 gap)
+    blocks.push({ kind: rb.kind, level: rb.level, assetKind: rb.assetKind, text: rb.text, span: { start, end: source.length } });
+    source += "\n\n";
   }
   return { source, blocks };
 }

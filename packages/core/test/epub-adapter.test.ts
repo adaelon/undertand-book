@@ -4,34 +4,56 @@ import { xhtmlToBlocks, epubToSource } from "../src/epub-adapter";
 import { segment } from "../src/segment";
 import { checkPartitionInvariant } from "../src/partition";
 
-describe("epub xhtml 块抽取(忠实块映射)", () => {
+describe("SA3 epub xhtml asset block recognition", () => {
   const html = `<?xml version="1.0"?><html><body>
-    <h1>第2章 命令模式</h1>
-    <p class="zw">命令模式是我最喜爱的模式之一。</p>
-    <blockquote class="引用"><p>Reify 出自拉丁文 res。</p></blockquote>
-    <h2>2.1 配置输入</h2>
-    <pre>void code() {}</pre>
+    <h1>Command Pattern</h1>
+    <p class="body">Commands are reified calls.</p>
+    <blockquote><p>Nested blockquote paragraph.</p></blockquote>
+    <h2>Examples</h2>
+    <pre>function demo() {
+  return 1;
+}</pre>
+    <table><tr><th>A</th><th>B</th></tr><tr><td>1</td><td>2</td></tr></table>
+    <img alt="diagram" src="images/diagram.png" />
+    <math xmlns="http://www.w3.org/1998/Math/MathML"><mi>E</mi><mo>=</mo><mi>m</mi><msup><mi>c</mi><mn>2</mn></msup></math>
   </body></html>`;
+
   const blocks = xhtmlToBlocks(html);
 
-  it("heading 带 level;blockquote 作一个 leaf,内嵌 p 不重复算", () => {
-    expect(blocks.map((b) => [b.kind, b.level, b.text])).toEqual([
-      ["heading", 1, "第2章 命令模式"],
-      ["leaf", undefined, "命令模式是我最喜爱的模式之一。"],
-      ["leaf", undefined, "Reify 出自拉丁文 res。"],
-      ["heading", 2, "2.1 配置输入"],
-      ["leaf", undefined, "void code() {}"],
+  it("keeps headings and ordinary leaves while marking pre/table/img/math assets", () => {
+    expect(blocks.map((b) => [b.kind, b.level, b.assetKind, b.text])).toEqual([
+      ["heading", 1, undefined, "Command Pattern"],
+      ["leaf", undefined, undefined, "Commands are reified calls."],
+      ["leaf", undefined, undefined, "Nested blockquote paragraph."],
+      ["heading", 2, undefined, "Examples"],
+      ["leaf", undefined, "code", "function demo() {\n  return 1;\n}"],
+      ["leaf", undefined, "table", "| A | B |\n| 1 | 2 |"],
+      ["leaf", undefined, "image", "![diagram](images/diagram.png)"],
+      [
+        "leaf",
+        undefined,
+        "formula",
+        '<math xmlns="http://www.w3.org/1998/Math/MathML"><mi>E</mi><mo>=</mo><mi>m</mi><msup><mi>c</mi><mn>2</mn></msup></math>',
+      ],
     ]);
   });
 });
 
-describe("epubToSource 全链路(合成 epub)", () => {
+describe("SA3 epubToSource full chain with assets", () => {
   function makeEpub(): Uint8Array {
     const container = `<?xml version="1.0"?><container><rootfiles><rootfile full-path="OEBPS/content.opf"/></rootfiles></container>`;
     const opf = `<package><manifest>
       <item id="c1" href="Text/ch1.xhtml" media-type="application/xhtml+xml"/>
     </manifest><spine><itemref idref="c1"/></spine></package>`;
-    const ch1 = `<html><body><h1>第1章 引言</h1><p>第一段。</p><p>第二段。</p></body></html>`;
+    const ch1 = `<html><body>
+      <h1>Intro</h1>
+      <p>First paragraph.</p>
+      <pre>line 1
+  line 2</pre>
+      <table><tr><td>x</td><td>y</td></tr></table>
+      <img alt="cover" src="cover.png" />
+      <math><mi>a</mi><mo>+</mo><mi>b</mi></math>
+    </body></html>`;
     return zipSync({
       "META-INF/container.xml": strToU8(container),
       "OEBPS/content.opf": strToU8(opf),
@@ -42,13 +64,24 @@ describe("epubToSource 全链路(合成 epub)", () => {
   const { source, blocks } = epubToSource(makeEpub());
   const nodes = segment(blocks);
 
-  it("spine→blocks→segment→分区不变式,覆盖率 100%", () => {
-    expect(blocks.map((b) => b.kind)).toEqual(["heading", "leaf", "leaf"]);
+  it("carries assetKind through SourceBlock without changing current segment behavior", () => {
+    expect(blocks.map((b) => b.assetKind).filter(Boolean)).toEqual(["code", "table", "image", "formula"]);
+    expect(source).toContain("line 1\n  line 2");
+    expect(source).toContain("| x | y |");
+    expect(source).toContain("![cover](cover.png)");
+    expect(source).toContain("<math><mi>a</mi><mo>+</mo><mi>b</mi></math>");
+
+    for (const b of blocks.filter((block) => block.assetKind)) {
+      const node = nodes.find((n) => n.children.length === 0 && n.span.start === b.span.start && n.span.end === b.span.end);
+      expect(node?.kind).toBe("paragraph");
+    }
+  });
+
+  it("preserves the partition invariant", () => {
     const report = checkPartitionInvariant(nodes, source);
     expect(report.violations).toEqual([]);
     expect(report.coverage).toBe(1);
-    // Model A:章容器 "1" + 标题叶 1.1 + 段 1.2/1.3
     expect(nodes.find((n) => n.lid === "1")?.kind).toBe("chapter");
-    expect(nodes.filter((n) => n.children.length === 0)).toHaveLength(3);
+    expect(nodes.filter((n) => n.children.length === 0)).toHaveLength(6);
   });
 });
