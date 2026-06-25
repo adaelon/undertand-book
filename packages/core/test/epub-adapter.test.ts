@@ -64,17 +64,17 @@ describe("SA3 epubToSource full chain with assets", () => {
   const { source, blocks } = epubToSource(makeEpub());
   const nodes = segment(blocks);
 
-  it("carries assetKind through SourceBlock without changing current segment behavior", () => {
+  it("passes assetKind through segment", () => {
     expect(blocks.map((b) => b.assetKind).filter(Boolean)).toEqual(["code", "table", "image", "formula"]);
     expect(source).toContain("line 1\n  line 2");
     expect(source).toContain("| x | y |");
     expect(source).toContain("![cover](cover.png)");
     expect(source).toContain("<math><mi>a</mi><mo>+</mo><mi>b</mi></math>");
 
-    for (const b of blocks.filter((block) => block.assetKind)) {
-      const node = nodes.find((n) => n.children.length === 0 && n.span.start === b.span.start && n.span.end === b.span.end);
-      expect(node?.kind).toBe("paragraph");
-    }
+    const assetNodes = blocks
+      .filter((block) => block.assetKind)
+      .map((b) => nodes.find((n) => n.children.length === 0 && n.span.start === b.span.start && n.span.end === b.span.end)?.kind);
+    expect(assetNodes).toEqual(["code", "table", "image", "formula"]);
   });
 
   it("preserves the partition invariant", () => {

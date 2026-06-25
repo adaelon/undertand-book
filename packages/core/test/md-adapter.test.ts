@@ -1,4 +1,4 @@
-﻿import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { markdownToBlocks } from "../src/md-adapter";
 import { segment } from "../src/segment";
 import { checkPartitionInvariant } from "../src/partition";
@@ -41,15 +41,15 @@ describe("SA2 markdown asset block recognition", () => {
     expect(assets[4].text).toBe("$a+b$");
   });
 
-  it("keeps current segment behavior and partition invariant until SA4", () => {
+  it("passes assetKind through segment while preserving the partition invariant", () => {
     const blocks = markdownToBlocks(src);
     const nodes = segment(blocks);
     const report = checkPartitionInvariant(nodes, src);
     expect(report.ok).toBe(true);
     expect(report.coverage).toBe(1);
-    for (const b of blocks.filter((block) => block.assetKind)) {
-      const node = nodes.find((n) => n.children.length === 0 && n.span.start === b.span.start && n.span.end === b.span.end);
-      expect(node?.kind).toBe("paragraph");
-    }
+    const assetNodes = blocks
+      .filter((block) => block.assetKind)
+      .map((b) => nodes.find((n) => n.children.length === 0 && n.span.start === b.span.start && n.span.end === b.span.end)?.kind);
+    expect(assetNodes).toEqual(["code", "table", "image", "formula", "formula"]);
   });
 });
