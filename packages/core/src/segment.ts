@@ -1,20 +1,24 @@
-// 段级 LID 切分器(Model A `[ADR-0008]`)。
+﻿// 段级 LID 切分器(Model A `[ADR-0008]`)。
 // 输入 = 忠实块映射的源块序列(SourceBlock[]);输出 = LidNode[](物化路径树,深度可变)。
 // Model A:章/节 = 纯结构容器(span=子并集、不独占内容);标题文字 = 容器的首个叶子段。
 // ⇒ 叶子(标题段 + 正文段)构成对全文的划分;容器不进叶子覆盖。
 import type { LidNode } from "./generated/LidNode";
 import type { NodeKind } from "./generated/NodeKind";
 
+export type AssetKind = Extract<NodeKind, "code" | "table" | "image" | "formula">;
+
 export interface Span {
   start: number;
   end: number;
 }
 
-/** 忠实块映射的一个源块。heading 定义层级;leaf = 段(段落/引用块/代码块/列表项)。 */
+/** 忠实块映射的一个源块。heading 定义层级;leaf = 段(段落/引用块/代码块/列表项/asset)。 */
 export interface SourceBlock {
   kind: "heading" | "leaf";
   /** heading 层级:1=章,≥2=节;leaf 时 undefined */
   level?: number;
+  /** code/table/image/formula asset 叶子类型。SA4 前 segment 暂不消费该字段。 */
+  assetKind?: AssetKind;
   /** 规范化后的展示文本(标题已去 marker) */
   text: string;
   /** 源区间(含 marker,保证无未分类非内容字节);切片0 用 JS 串下标(UTF-16),字节精确化留后 */
