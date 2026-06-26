@@ -5,6 +5,7 @@ import type { FormulaContextLink } from "./generated/FormulaContextLink";
 import type { FormulaParameter } from "./generated/FormulaParameter";
 import type { FormulaSemantics } from "./generated/FormulaSemantics";
 import type { LidNode } from "./generated/LidNode";
+import type { ProfileArtifactHeader } from "./profile-artifact";
 
 export type FormulaPendingKind = "parameter" | "composition" | "context_link";
 
@@ -29,6 +30,20 @@ export interface FormulaSemanticsGateOptions {
 
 export interface FormulaSemanticsGateResult {
   semantics: FormulaSemantics | null;
+  pending: FormulaPendingItem[];
+}
+
+export interface FormulaSemanticsSidecar {
+  header: ProfileArtifactHeader;
+  items: FormulaSemantics[];
+}
+
+export interface FormulaSemanticsBuildCandidate extends FormulaSemanticsCandidate {
+  context_lids?: string[];
+}
+
+export interface FormulaSemanticsSidecarResult {
+  sidecar: FormulaSemanticsSidecar;
   pending: FormulaPendingItem[];
 }
 
@@ -128,6 +143,22 @@ export function gateFormulaSemanticsCandidate(
   };
 }
 
+export function buildFormulaSemanticsSidecar(
+  header: ProfileArtifactHeader,
+  candidates: FormulaSemanticsBuildCandidate[],
+  nodes: LidNode[],
+): FormulaSemanticsSidecarResult {
+  const items: FormulaSemantics[] = [];
+  const pending: FormulaPendingItem[] = [];
+  for (const candidate of candidates) {
+    const result = gateFormulaSemanticsCandidate(candidate, nodes, {
+      contextLids: candidate.context_lids,
+    });
+    if (result.semantics) items.push(result.semantics);
+    pending.push(...result.pending);
+  }
+  return { sidecar: { header, items }, pending };
+}
 export function formatFormulaSemanticsForPrompt(semantics: FormulaSemantics): string {
   const lines = [`Formula ${semantics.formula_lid}`];
   lines.push(`Composition: ${semantics.composition.meaning}`);

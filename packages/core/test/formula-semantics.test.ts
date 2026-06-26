@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { FormulaSemanticsZ } from "../src/zod";
-import { formatFormulaSemanticsForPrompt, gateFormulaSemanticsCandidate } from "../src/formula-semantics";
+import { FormulaSemanticsSidecarZ, FormulaSemanticsZ } from "../src/zod";
+import { buildFormulaSemanticsSidecar, formatFormulaSemanticsForPrompt, gateFormulaSemanticsCandidate } from "../src/formula-semantics";
 import type { FormulaSemanticsCandidate } from "../src/formula-semantics";
 import type { LidNode } from "../src/generated/LidNode";
 
@@ -108,5 +108,25 @@ describe("SA5 FormulaSemantics evidence gate", () => {
     const result = gateFormulaSemanticsCandidate(candidate, nodes, { contextLids: ["1.3"] });
     expect(result.semantics).toBeNull();
     expect(result.pending[0].reason).toBe("formula_lid is not a formula node: 1.1");
+  });
+
+  it("materializes a headered formula semantics sidecar from gated candidates", () => {
+    const header = {
+      book_id: "book-a",
+      book_version: "v1",
+      profile_id: "technical_learning" as const,
+      profile_version: "technical_learning_v0",
+      core_schema_version: "core_v0",
+      generated_at: "2026-06-26T00:00:00.000Z",
+    };
+    const rejected = { ...validCandidate(), formula_lid: "1.1", context_lids: ["1.3"] };
+    const accepted = { ...validCandidate(), context_lids: ["1.1", "1.3"] };
+
+    const result = buildFormulaSemanticsSidecar(header, [accepted, rejected], nodes);
+
+    FormulaSemanticsSidecarZ.parse(result.sidecar);
+    expect(result.sidecar.header).toEqual(header);
+    expect(result.sidecar.items.map((item) => item.formula_lid)).toEqual(["1.2"]);
+    expect(result.pending.map((p) => p.reason)).toContain("formula_lid is not a formula node: 1.1");
   });
 });

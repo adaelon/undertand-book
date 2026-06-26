@@ -148,6 +148,22 @@ pub struct Concept {
     pub related_entities: Vec<String>,
 }
 
+fn parse_formula_semantics_sidecar(s: &str) -> Result<Vec<FormulaSemantics>, serde_json::Error> {
+    let value: serde_json::Value = serde_json::from_str(s)?;
+    if value.is_array() {
+        return serde_json::from_value(value);
+    }
+
+    #[derive(Deserialize)]
+    struct HeaderedFormulaSemanticsSidecar {
+        #[allow(dead_code)]
+        header: serde_json::Value,
+        items: Vec<FormulaSemantics>,
+    }
+
+    let sidecar: HeaderedFormulaSemanticsSidecar = serde_json::from_value(value)?;
+    Ok(sidecar.items)
+}
 impl Book {
     /// 从书目录(含 base.json + source.txt)加载。
     pub fn load(dir: &str) -> Result<Book, String> {
@@ -159,7 +175,7 @@ impl Book {
             .map_err(|e| format!("读 source.txt 失败(原文旁路缺失,book.text 不可用): {e}"))?;
         let formula_semantics_path = format!("{dir}/formula_semantics.json");
         let formula_semantics = match std::fs::read_to_string(&formula_semantics_path) {
-            Ok(s) => serde_json::from_str(&s)
+            Ok(s) => parse_formula_semantics_sidecar(&s)
                 .map_err(|e| format!("解析 formula_semantics.json 失败: {e}"))?,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
             Err(e) => return Err(format!("读 formula_semantics.json 失败: {e}")),
@@ -888,6 +904,39 @@ mod tests {
         assert_eq!(
             book.formula_semantics("1.1").unwrap().composition.meaning,
             "线性关系"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    #[test]
+    fn load_reads_headered_formula_semantics_sidecar() {
+        let dir = std::env::temp_dir().join("ub-read-tools-formula-headered-sidecar");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut base = sample_base();
+        base.lid_nodes[1].kind = NodeKind::Formula;
+        std::fs::write(dir.join("base.json"), serde_json::to_string(&base).unwrap()).unwrap();
+        std::fs::write(dir.join("source.txt"), "X".repeat(100)).unwrap();
+        let sidecar = serde_json::json!({
+            "header": {
+                "book_id": "sample-book",
+                "book_version": "v1",
+                "profile_id": "technical_learning",
+                "profile_version": "technical_learning_v0",
+                "core_schema_version": "core_v0",
+                "generated_at": "2026-06-26T00:00:00.000Z"
+            },
+            "items": [formula_semantics()]
+        });
+        std::fs::write(
+            dir.join("formula_semantics.json"),
+            serde_json::to_string(&sidecar).unwrap(),
+        )
+        .unwrap();
+
+        let book = Book::load(dir.to_str().unwrap()).unwrap();
+        assert_eq!(
+            book.formula_semantics("1.1").unwrap().parameters[0].symbol,
+            "x"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

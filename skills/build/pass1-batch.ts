@@ -9,12 +9,13 @@ import { epubToSource } from "../../packages/core/src/epub-adapter";
 import { splitWindows } from "../../packages/core/src/window";
 import { mergeAndGate, type Pass1Output } from "../../packages/core/src/merge";
 import { projectCatalog } from "../../packages/core/src/catalog";
-import { ReadOnlyBaseZ } from "../../packages/core/src/zod";
+import { FormulaSemanticsSidecarZ, ReadOnlyBaseZ } from "../../packages/core/src/zod";
 import { buildProfileArtifactHeader, buildProfileMetadata } from "../../packages/core/src/profile-artifact";
+import { buildFormulaSemanticsSidecar, type FormulaSemanticsBuildCandidate } from "../../packages/core/src/formula-semantics";
 
-const [book, outputsPath, idxList] = process.argv.slice(2);
+const [book, outputsPath, idxList, formulaCandidatesPath] = process.argv.slice(2);
 if (!book || !outputsPath || !idxList) {
-  console.error("usage: tsx pass1-batch.ts <book> <outputs.json> <idx,idx,...>");
+  console.error("usage: tsx pass1-batch.ts <book> <outputs.json> <idx,idx,...> [formula-candidates.json]");
   process.exit(2);
 }
 
@@ -47,11 +48,22 @@ const base = { book_id: bookId, lid_nodes: lidNodes, graph_nodes: nodes, graph_e
 const parsedBase = ReadOnlyBaseZ.parse(base); // 产出前自检(字段失配抛错)
 const profileHeader = buildProfileArtifactHeader({ book_id: parsedBase.book_id });
 const profileMetadata = buildProfileMetadata(profileHeader);
+const formulaSidecar = formulaCandidatesPath
+  ? buildFormulaSemanticsSidecar(
+      profileHeader,
+      JSON.parse(readFileSync(formulaCandidatesPath, "utf8")) as FormulaSemanticsBuildCandidate[],
+      lidNodes,
+    )
+  : null;
+if (formulaSidecar) FormulaSemanticsSidecarZ.parse(formulaSidecar.sidecar);
 const dir = `.understand-book/${bookId}`;
 mkdirSync(dir, { recursive: true });
 writeFileSync(`${dir}/base.json`, JSON.stringify(base, null, 2), "utf8");
 writeFileSync(`${dir}/source.txt`, source, "utf8"); // 原文旁路:book.text 取真原文用,按 LID.span(UTF-16)切 `[ADR-0024]`
 writeFileSync(`${dir}/profile_metadata.json`, JSON.stringify(profileMetadata, null, 2), "utf8");
+if (formulaSidecar) {
+  writeFileSync(`${dir}/formula_semantics.json`, JSON.stringify(formulaSidecar.sidecar, null, 2), "utf8");
+}
 
 console.log(`[pass1-batch] ${book}`);
 console.log(`  窗口=${windows.length}  已抽=${idxs.length}(#${idxs.join(",#")})  全书叶子=${lidNodes.filter((n) => n.children.length === 0).length}`);
@@ -63,3 +75,8 @@ console.log(`  锚定率(全书分母)=${(report.anchorRate * 100).toFixed(4)}%`
 console.log(`  锚定率(已抽窗口分母,${sampledAnchored}/${sampledLeaves.size})=${(sampledRate * 100).toFixed(2)}%`);
 console.log(`  基座固化: ${dir}/base.json  (zod 校验通过)`);
 console.log(`  profile metadata: ${dir}/profile_metadata.json`);
+if (formulaSidecar) {
+  console.log(
+    `  formula semantics: ${dir}/formula_semantics.json items=${formulaSidecar.sidecar.items.length} pending=${formulaSidecar.pending.length}`,
+  );
+}

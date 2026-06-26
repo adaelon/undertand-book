@@ -1,8 +1,16 @@
-﻿// 预构建产出前的运行时自检 schema（zod），镜像 crates/base-schema 的 Rust 权威定义。
+// 预构建产出前的运行时自检 schema（zod），镜像 crates/base-schema 的 Rust 权威定义。
 // 字段失配在 .parse() 处抛错（非静默）——兑现 S0 判据① + ADR-0021「zod 产出前自检」。
 // 注:本文件是手写镜像;Rust 权威类型见 src/generated/*（ts-rs 生成）。
 import { z } from "zod";
 
+export const ProfileArtifactHeaderZ = z.object({
+  book_id: z.string().min(1),
+  book_version: z.string().min(1),
+  profile_id: z.literal("technical_learning"),
+  profile_version: z.string().min(1),
+  core_schema_version: z.string().min(1),
+  generated_at: z.string().min(1),
+});
 export const SpanZ = z.object({
   start: z.number().int().nonnegative(),
   end: z.number().int().nonnegative(),
@@ -70,6 +78,10 @@ export const FormulaSemanticsZ = z.object({
   parameters: z.array(FormulaParameterZ),
   composition: FormulaCompositionZ,
   context_links: z.array(FormulaContextLinkZ),
+});
+export const FormulaSemanticsSidecarZ = z.object({
+  header: ProfileArtifactHeaderZ,
+  items: z.array(FormulaSemanticsZ),
 });
 export const ReadOnlyBaseZ = z.object({
   book_id: z.string(),
