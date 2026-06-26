@@ -1,35 +1,32 @@
-# SESSION_CHECKPOINT - 2026-06-25 18:10
+# SESSION_CHECKPOINT - 2026-06-26 10:20
 
 ## Freshness check
-- Commit at write time: 296b77a feat: gate formula semantics evidence
+- Commit at write time: 7666460 feat: project discourse relations into context
 - On read, compare with `git log -3`; if different, trust git log.
 
 ## What's in progress
-ADR-0033 Core/Profile/Reader 解耦与 `technical_learning` profile 深路径方案已落档待提交;下一刀建议从 `docs/切片方案-profile深路径.md` 的 P1 `technical_learning.pass2_longrange_v1` 开始 Grill/实现。
+Profile deep path P2 and P2a are complete, committed, and pushed: `book.synthesize` consumes FormulaSemantics/discourse sidecars, and `book.context` now projects discourse relations as `via.kind="discourse"` pointers.
 
 ## Next steps (ready to hand off)
-1. Commit and push `docs/adr/0033-*`, `docs/切片方案-profile深路径.md`, `docs/代码链路.md`, and this checkpoint.
-2. For implementation, open `docs/切片方案-profile深路径.md` and start P1 scope declaration before editing code.
-3. Cross-check P1 against `docs/adr/0010-*`, `docs/adr/0011-*`, `docs/adr/0013-*`, and `docs/adr/0016-*`.
-4. Keep SA6 asset true-book validation separate unless the user explicitly merges the tracks.
+1. Inspect `docs/切片方案-profile深路径.md` section `P3 reader.* 全集 + technical_learning agent policy` before starting the next implementation slice.
+2. If continuing with P3, read `docs/adr/0007-阅读器命令优先-agent可驱动.md`, `docs/adr/0015-reader-memory-error命令面定型-reader返effect-标注单源memory-Codex式记忆引用锚定-错误分类recovery.md`, and `docs/adr/0030-e-agent阅读器形态-外层入口-reader双向共享-可撤销提议-session层提议-idle会话边界-精炼上下文.md`.
+3. Declare a new A1 slice before editing code; do not mix P3 reader command completion with memory consolidation P4.
+4. Leave `参考2.md` untracked unless the user explicitly asks to version it.
 
 ## Uncommitted / unfinished
-- 当前 Windows sandbox 的 apply_patch 写入会触发 codex-windows-sandbox-setup.exe 模块错误;本会话后续写文件改用 PowerShell 写入。
-- ADR-0033 docs and code-trail entry are pending commit.
-- `参考2.md` is user-provided source material and remains untracked unless the user asks to version it.
-- SA6 remains unstarted.
+- `参考2.md`: user-provided source material, still untracked.
+- No code changes are pending after P2/P2a.
 
 ## Cold-start reading sequence
-1. `docs/adr/0033-core-schema-book-profile-reader-profile解耦-technical-learning作为当前profile.md` - Core/Profile/Reader boundaries.
-2. `docs/切片方案-profile深路径.md` - P0-P6 execution plan; P1 is the next implementation candidate.
-3. `docs/adr/0010-语义边两遍抽取-双agent-硬屏障-全量目录优先-确定性投影-锚定基数分裂.md` - Pass2 original contract.
-4. `docs/adr/0011-确定性图谱闸-纯确定性收口-悬空丢不重建-最小连坐-按类型合并-边作召回路标.md` - Core gate rules.
-5. `docs/adr/0017-query-synthesize签名分工-输入形态分工-synthesize确定性分批归并-复用query响应骨架.md` - synthesize deep path contract.
-6. `docs/代码链路.md` - latest touched-symbol ledger.
+1. `docs/切片方案-profile深路径.md` - P2/P2a completed boundary and next P3/P4/P5/P6 plan.
+2. `docs/adr/0033-core-schema-book-profile-reader-profile解耦-technical-learning作为当前profile.md` - Core/Profile/Reader boundary rules.
+3. `docs/代码链路.md` - latest touched-symbol ledger for P2 and P2a.
+4. `crates/read-tools/src/lib.rs` - current context/discourse sidecar projection implementation.
+5. `packages/web/src/generated/Via.ts` - generated `Via` union including `discourse`.
 
 ## Decisions made this session
-- Core owns LID/citation/book.* /reader.* /memory.* invariants; profile cannot alter them.
-- Current Book Profile is `technical_learning`; GraphNode envelope migration is deferred.
-- Pass2 is now designed as `technical_learning.pass2_longrange_v1` with audit sidecar.
-- `book.synthesize` stays a Core command but consumes technical_learning policy and optional reader_profile style.
-- reader_profile is Layer 3 of memory consolidation, not a book-base field or citation source.
+- P2 committed as `8c9feab feat: add book synthesize deep path` and pushed to `main`.
+- P2a committed as `7666460 feat: project discourse relations into context` and pushed to `main`.
+- P2a infers discourse local vs long-range projection by LID parent: same parent -> near, different parent -> far.
+- P2a filters discourse relations with missing target/evidence LIDs before projecting them into `book.context`.
+- Verified commands: `cargo test --workspace`; `pnpm -C packages/web typecheck`.
