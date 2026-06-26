@@ -19,12 +19,14 @@
 9. **profile artifacts 从第一天带版本头**:`book_id/book_version/profile_id/profile_version/core_schema_version/generated_at` 是所有 `technical_learning` artifact 的固定头。增量构建时按 Core LID map 迁移;迁不了标 `orphaned`,不得静默删除。
 10. **`reader.*` 属于 Core,profile 只定义使用策略**:`technical_learning` 可规定何时建议 goto/highlight/note/回看 prerequisite/展示公式语义/生成练习,但不定义新 reader 命令或特供通道。agent 动作仍遵守 ADR-0030:真执行、可撤销提议、默认 session 层、用户保留才升 long_term。
 11. **ModelAdapter / ReActAdapter / provider 与 profile 正交**:Adapter 只把不同 provider 归一到 Message/ToolSpec/ToolCall/AssistantTurn。profile 影响 prompt fragments、extraction policy、answer policy、tool-use policy;工具执行和 citation gate 仍由 Runtime/Core 控制。
+12. **Book MCP 只暴露只读书工具面**:一本预构建书可以作为 MCP server 暴露 `book.manifest/text/context/concept/query/synthesize`。MCP 不继承 reader 当前视口,`book.query` 必须显式传 `anchor_lid`;MCP 不暴露 `reader.*`、`memory.save/delete` 或共享 `/agent/chat` 会话态。
 
 ## 命门
 - **LID 与 citation 是宪法**:profile 是解释语法,不是新地基。
 - **当前就在解耦,但不大爆炸重写**:`technical_learning` 不是全局真理,只是第一个内置 profile。
 - **读者上下文决定讲法,不决定事实**:同一本书同一组 LID 可以有不同解释路径,但 citation 只能来自 textual context。
 - **sidecar 是过渡层,不是垃圾桶**:所有 profile artifact 必须有版本头、LID 证据和 orphaned 处理规则。
+- **Book MCP 是只读知识源**:外部 agent 通过显式 LID 工具访问书,不得隐式绑定人的 reader/session 状态。
 
 ## 否决
 - 一套 `entity/concept/claim/discourse_role` 打天下:会把工具书规则误升为全局 schema。
@@ -32,14 +34,17 @@
 - 现在立刻迁移 GraphNode envelope:切片过大,会阻塞 SA6 和深路径补齐。
 - 把 reader_profile 写入 book base:污染只读基座,同一本书无法共享。
 - 让 provider 自己声称工具调用成功:工具执行必须由 Runtime/Core 完成并校验。
+- 把 `reader.*` 或 memory 写入命令塞进 Book MCP v1:会把外部 agent 访问书和人的阅读会话混在一起,需要等 session 隔离另开切片。
 
 ## 何时回头
 - `technical_learning` 的 sidecar 数量变多且迁移稳定后,启动 GraphNode typed envelope 迁移切片。
 - 文学/历史 profile 开始设计时,抽取 policy 与 discourse vocabulary 另开 ADR,不得扩污染 `technical_learning`。
 - Pass2 / synthesize / consolidation 实测显示 profile policy 需要进入 ReadOnlyBase 必填字段时,单独评估 schema 升级与迁移成本。
+- 需要外部 agent 直接驱动人的阅读器或写入记忆时,先设计 reader/session 隔离,不得扩展只读 Book MCP。
 
 ## 影响
 - **新增阶段方案**:`docs/切片方案-profile深路径.md` 作为 ADR-0033 的执行计划。
 - **2026-06-26 执行补记**:预构建层需补 PB0-PB4 独立切片,分别落地 profile metadata/header、FormulaSemantics sidecar、TechnicalLearningDiscourseIndex sidecar、Pass2 audit sidecar、profile sidecar build smoke;这些切片不改变 Core/Profile/Reader 边界,只是把本 ADR 已接受的 sidecar 规则从读时 fixture 补齐为正式构建产物。
+- **2026-06-26 MCP 补记**:Book MCP 是预构建书的只读工具投影,不是 reader/session 远程控制面;外部 agent 必须显式定位 LID。
 - **承**:[[ADR-0010]](Pass2 长程边)/ [[ADR-0017]](`book.synthesize`)/ [[ADR-0018]](memory consolidation)/ [[ADR-0019]](增量构建)/ [[ADR-0020]](记忆迁移)/ [[ADR-0029]](FormulaSemantics)/ [[ADR-0030]](agent 阅读器形态)。
 - **不改冻结命令面**:本 ADR 定边界和后续切片,不新增运行时代码接口。

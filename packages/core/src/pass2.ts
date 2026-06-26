@@ -6,18 +6,12 @@ import type { GraphEdge } from "./generated/GraphEdge";
 import type { GraphNode } from "./generated/GraphNode";
 import type { LidNode } from "./generated/LidNode";
 import type { CatalogEntry } from "./catalog";
+import type { ProfileArtifactHeader } from "./profile-artifact";
+export type { ProfileArtifactHeader };
 
 export const TECHNICAL_LEARNING_PASS2_PROFILE_ID = "technical_learning";
 export const TECHNICAL_LEARNING_PASS2_PROFILE_VERSION = "pass2_longrange_v1";
 
-export interface ProfileArtifactHeader {
-  book_id: string;
-  book_version: string;
-  profile_id: "technical_learning";
-  profile_version: string;
-  core_schema_version: string;
-  generated_at: string;
-}
 
 export type DiscourseMode = "informative" | "argumentative" | "procedural" | "descriptive" | "meta";
 export type LocalFunction =

@@ -376,6 +376,30 @@ agent 标注默认 session 层,用户保留才升 long_term。
 
 P2a 是显式补刀:它不新增新基础命令,只让既有 `book.context` 消费 `TechnicalLearningDiscourseIndex`。P2 可以先直接读 sidecar 做 synthesize;P2a 则把同一份 discourse relation 变成通用 context 指针,供 agent 和 UI 复用。
 
+
+### 1.5.8 Book MCP readonly boundary
+
+`Book MCP` 是把一本已预构建书暴露给外部 agent 的只读工具面,不是 reader 会话远程控制面。它只投影 Core 只读命令:
+
+```ts
+interface BookMcpTools {
+  book_manifest(): Manifest;
+  book_text(args: { lid: string; end_lid?: string }): { lid: string; text: string };
+  book_context(args: { lid: string; granularity?: "near" | "mid" | "far"; k?: number }): Context;
+  book_concept(args: { name: string }): Concept;
+  book_query(args: { q: string; anchor_lid: string }): QueryResponse;
+  book_synthesize(args: { lids: string[]; task?: string }): SynthesizeResponse;
+}
+```
+
+红线:
+
+```text
+MCP v1 不暴露 reader.*。
+MCP v1 不暴露 memory.save / memory.delete。
+MCP v1 不共享 /agent/chat messages 或 reader 当前视口。
+book_query 必须显式传 anchor_lid;外部 agent 需先用 manifest/concept/context 定位。
+```
 ### 1.6 预构建缺口盘点
 
 ADR-0033 已把 `discourse_index`、`FormulaSemantics`、Pass2 audit、profile metadata 定义为 `technical_learning` profile artifacts,且要求 sidecar 带版本头、LID 证据和 orphaned 处理规则。当前已完成的是读时消费路径:P2/P2a 能读取可选 `formula_semantics.json` / `discourse_index.json` 并用于 `book.synthesize` / `book.context`。缺失的是预构建实际产出层:build pipeline 仍只稳定写 `base.json` 与 `source.txt`,没有统一 header、没有 discourse artifact gate/write、没有 FormulaSemantics sidecar write、没有 Pass2 audit sidecar write,也没有 profile sidecar 的 build smoke。
@@ -464,6 +488,11 @@ ADR-0033 已把 `discourse_index`、`FormulaSemantics`、Pass2 audit、profile m
 - **判据**:v1/v2 fixture 下 base 可重建;profile artifact 可迁移/标 orphaned;memory recall@v2 可显示 old evidence 的投影或 orphaned 状态。
 - **触达**:`[ADR-0019/0020/0033]`
 
+### P7 · Book MCP 只读工具面 `[Rust/MCP]`
+- **做**:把一个已预构建 book 目录投影成 MCP server,只暴露 `book_manifest`、`book_text`、`book_context`、`book_concept`、`book_query`、`book_synthesize`;复用 `read-tools::Book` 与 runtime `query/synthesize` 的 citation gate。
+- **不做**:不暴露 `reader.*`;不写 `memory.*`;不共享 localhost reader 当前视口、`/agent/chat` messages 或用户 session;不新增 profile 专属 MCP 命令。
+- **判据**:外部 agent 能通过 manifest/concept/context 定位 LID,再显式 `anchor_lid` 调 `book_query`;所有回答 citation 仍满足 Core 红线;缺 `anchor_lid` 的 `book_query` 直接 validation error。
+- **触达**:`[ADR-0033 决策12]`
 ---
 
 ## 3. 完成判据复述
