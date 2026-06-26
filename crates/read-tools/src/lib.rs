@@ -90,7 +90,8 @@ pub struct Manifest {
 }
 
 /// context item 的确定性接入来源 + 排序键(判别联合)`[ADR-0014]`。
-/// P1 覆盖 Tree / Concept(mid 二跳) / Edge(local 与 long_range 召回路标)。
+/// P1 覆盖 Tree / Concept(mid 二跳) / Edge(local 与 long_range 召回路标);
+/// P2a 覆盖 technical_learning discourse sidecar 投影 `[ADR-0033]`。
 #[derive(Debug, Serialize, TS)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[ts(export, export_to = "../../../packages/web/src/generated/")]
@@ -108,6 +109,16 @@ pub enum Via {
         edge_type: String,
         weight: f32,
         direction: String,
+    },
+    Discourse {
+        source_lid: String,
+        target_lid: String,
+        #[serde(rename = "type")]
+        relation_type: String,
+        family: Option<String>,
+        direction: String,
+        confidence: f32,
+        evidence_lids: Vec<String>,
     },
 }
 
@@ -378,6 +389,67 @@ impl Book {
         out
     }
 
+    fn discourse_layer(&self, source_lid: &str, target_lid: &str) -> &'static str {
+        if parent_lid(source_lid) == parent_lid(target_lid) {
+            "near"
+        } else {
+            "far"
+        }
+    }
+
+    fn discourse_relation_valid(&self, r: &TechnicalLearningDiscourseRelation) -> bool {
+        self.lid_idx.contains_key(&r.target_lid)
+            && r.evidence_lids
+                .iter()
+                .all(|evidence| self.lid_idx.contains_key(evidence))
+    }
+
+    fn discourse_context_items(&self, anchor_lid: &str) -> Vec<(f32, ContextItem)> {
+        let mut out = Vec::new();
+        for item in &self.discourse_index {
+            if !self.lid_idx.contains_key(&item.lid) {
+                continue;
+            }
+            for r in &item.relations {
+                if !self.discourse_relation_valid(r) {
+                    continue;
+                }
+                let other_lid = if item.lid == anchor_lid {
+                    r.target_lid.as_str()
+                } else if r.target_lid == anchor_lid {
+                    item.lid.as_str()
+                } else {
+                    continue;
+                };
+                if other_lid == anchor_lid {
+                    continue;
+                }
+                let layer = self.discourse_layer(&item.lid, &r.target_lid);
+                out.push((
+                    r.confidence,
+                    ContextItem {
+                        lid: other_lid.to_string(),
+                        layer: layer.into(),
+                        via: Via::Discourse {
+                            source_lid: item.lid.clone(),
+                            target_lid: r.target_lid.clone(),
+                            relation_type: r.relation_type.clone(),
+                            family: r.family.clone(),
+                            direction: r.direction.clone(),
+                            confidence: r.confidence,
+                            evidence_lids: r.evidence_lids.clone(),
+                        },
+                    },
+                ));
+            }
+        }
+        out.sort_by(|a, b| {
+            b.0.partial_cmp(&a.0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.1.lid.cmp(&b.1.lid))
+        });
+        out
+    }
     /// book.context(lid, granularity=near|mid|far, k?):纯指针 `[ADR-0013/0014/0033]`。
     /// near = 树邻接 + local 边; mid = near + anchor 概念/实体其他 occurrences;
     /// far = near + mid + long_range 边。items 不带原文,消费方走 book.text 取。
@@ -403,7 +475,8 @@ impl Book {
         let push = |it: ContextItem,
                     items: &mut Vec<ContextItem>,
                     seen: &mut std::collections::HashSet<String>| {
-            if seen.insert(it.lid.clone()) {
+            let key = context_item_key(&it);
+            if seen.insert(key) {
                 items.push(it);
             }
         };
@@ -438,6 +511,11 @@ impl Book {
         for (_, it) in self.edge_context_items(lid, &anchored_ids, &EdgeScope::Local, "near") {
             push(it, &mut items, &mut seen);
         }
+        for (_, it) in self.discourse_context_items(lid) {
+            if it.layer == "near" {
+                push(it, &mut items, &mut seen);
+            }
+        }
 
         if matches!(granularity, "mid" | "far") {
             let mut mid: Vec<ContextItem> = Vec::new();
@@ -470,6 +548,11 @@ impl Book {
             for (_, it) in self.edge_context_items(lid, &anchored_ids, &EdgeScope::LongRange, "far")
             {
                 push(it, &mut items, &mut seen);
+            }
+            for (_, it) in self.discourse_context_items(lid) {
+                if it.layer == "far" {
+                    push(it, &mut items, &mut seen);
+                }
             }
         }
 
@@ -532,6 +615,28 @@ fn parent_lid(lid: &str) -> Option<String> {
     lid.rfind('.').map(|i| lid[..i].to_string())
 }
 
+fn context_item_key(it: &ContextItem) -> String {
+    match &it.via {
+        Via::Tree { rel } => format!("{}|tree|{rel}", it.lid),
+        Via::Concept { name, .. } => format!("{}|concept|{name}", it.lid),
+        Via::Edge {
+            scope,
+            edge_type,
+            direction,
+            ..
+        } => format!("{}|edge|{scope}|{edge_type}|{direction}", it.lid),
+        Via::Discourse {
+            source_lid,
+            target_lid,
+            relation_type,
+            direction,
+            ..
+        } => format!(
+            "{}|discourse|{}|{}|{}|{}",
+            it.lid, source_lid, target_lid, relation_type, direction
+        ),
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -621,6 +726,98 @@ mod tests {
         Book::new(sample_base(), &src)
     }
 
+    fn book_with_discourse_projection() -> Book {
+        let source = "AAAABBBBCCCCDDDDEEEE";
+        let base = ReadOnlyBase {
+            book_id: "discourse-projection-book".into(),
+            lid_nodes: vec![
+                LidNode {
+                    lid: "1".into(),
+                    path: vec![1],
+                    kind: NodeKind::Chapter,
+                    span: Span { start: 0, end: 12 },
+                    children: vec!["1.1".into(), "1.2".into(), "1.3".into()],
+                },
+                LidNode {
+                    lid: "1.1".into(),
+                    path: vec![1, 1],
+                    kind: NodeKind::Paragraph,
+                    span: Span { start: 0, end: 4 },
+                    children: vec![],
+                },
+                LidNode {
+                    lid: "1.2".into(),
+                    path: vec![1, 2],
+                    kind: NodeKind::Paragraph,
+                    span: Span { start: 4, end: 8 },
+                    children: vec![],
+                },
+                LidNode {
+                    lid: "1.3".into(),
+                    path: vec![1, 3],
+                    kind: NodeKind::Paragraph,
+                    span: Span { start: 8, end: 12 },
+                    children: vec![],
+                },
+                LidNode {
+                    lid: "2".into(),
+                    path: vec![2],
+                    kind: NodeKind::Chapter,
+                    span: Span { start: 12, end: 20 },
+                    children: vec!["2.1".into(), "2.2".into()],
+                },
+                LidNode {
+                    lid: "2.1".into(),
+                    path: vec![2, 1],
+                    kind: NodeKind::Paragraph,
+                    span: Span { start: 12, end: 16 },
+                    children: vec![],
+                },
+                LidNode {
+                    lid: "2.2".into(),
+                    path: vec![2, 2],
+                    kind: NodeKind::Paragraph,
+                    span: Span { start: 16, end: 20 },
+                    children: vec![],
+                },
+            ],
+            graph_nodes: vec![],
+            graph_edges: vec![],
+        };
+        Book::new(base, source).with_discourse_items(vec![TechnicalLearningDiscourseItem {
+            lid: "1.1".into(),
+            mode: "informative".into(),
+            local_function: Some("definition".into()),
+            rhetorical_move: Some("main_point".into()),
+            local_summary: Some("定义核心概念".into()),
+            relations: vec![
+                TechnicalLearningDiscourseRelation {
+                    target_lid: "1.3".into(),
+                    relation_type: "elaborates".into(),
+                    family: Some("expansion".into()),
+                    direction: "forward".into(),
+                    confidence: 0.9,
+                    evidence_lids: vec!["1.1".into(), "1.3".into()],
+                },
+                TechnicalLearningDiscourseRelation {
+                    target_lid: "2.1".into(),
+                    relation_type: "depends_on".into(),
+                    family: None,
+                    direction: "forward".into(),
+                    confidence: 0.8,
+                    evidence_lids: vec!["1.1".into(), "2.1".into()],
+                },
+                TechnicalLearningDiscourseRelation {
+                    target_lid: "9.9".into(),
+                    relation_type: "supports".into(),
+                    family: None,
+                    direction: "forward".into(),
+                    confidence: 0.7,
+                    evidence_lids: vec!["1.1".into(), "9.9".into()],
+                },
+            ],
+        }])
+    }
     fn formula_semantics() -> FormulaSemantics {
         FormulaSemantics {
             formula_lid: "1.1".into(),
@@ -761,6 +958,26 @@ mod tests {
             && matches!(i.via, Via::Edge { ref scope, .. } if scope == "long_range")));
     }
 
+    #[test]
+    fn context_projects_discourse_relations_to_near_and_far() {
+        let b = book_with_discourse_projection();
+        let near = b.context("1.1", Some("near"), Some(20)).unwrap();
+        assert!(near.items.iter().any(|i| i.lid == "1.3"
+            && i.layer == "near"
+            && matches!(i.via, Via::Discourse { ref relation_type, ref target_lid, .. }
+                if relation_type == "elaborates" && target_lid == "1.3")));
+        assert!(!near
+            .items
+            .iter()
+            .any(|i| i.lid == "2.1" && matches!(i.via, Via::Discourse { .. })));
+        assert!(!near.items.iter().any(|i| i.lid == "9.9"));
+
+        let far = b.context("1.1", Some("far"), Some(20)).unwrap();
+        assert!(far.items.iter().any(|i| i.lid == "2.1"
+            && i.layer == "far"
+            && matches!(i.via, Via::Discourse { ref relation_type, ref target_lid, .. }
+                if relation_type == "depends_on" && target_lid == "2.1")));
+    }
     #[test]
     fn context_rejects_unknown_granularity() {
         let b = book();
