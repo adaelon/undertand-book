@@ -83,6 +83,80 @@ export const FormulaSemanticsSidecarZ = z.object({
   header: ProfileArtifactHeaderZ,
   items: z.array(FormulaSemanticsZ),
 });
+export const DiscourseModeZ = z.enum(["informative", "argumentative", "procedural", "descriptive", "meta"]);
+export const LocalFunctionZ = z.enum([
+  "definition",
+  "description",
+  "classification",
+  "explanation",
+  "cause",
+  "effect",
+  "example",
+  "counterexample",
+  "comparison",
+  "contrast",
+  "procedure_step",
+  "application",
+  "warning",
+  "limitation",
+  "question",
+  "answer",
+  "summary",
+  "transition",
+]);
+export const RhetoricalMoveZ = z.enum([
+  "chapter_setup",
+  "problem_framing",
+  "prerequisite",
+  "main_point",
+  "concept_elaboration",
+  "worked_example",
+  "case_analysis",
+  "argument_support",
+  "objection",
+  "resolution",
+  "recap",
+  "bridge_to_next",
+]);
+export const DiscourseRelationTypeZ = z.enum([
+  "elaborates",
+  "exemplifies",
+  "explains",
+  "causes",
+  "results_in",
+  "contrasts",
+  "concedes",
+  "supports",
+  "rebuts",
+  "summarizes",
+  "restates",
+  "prepares",
+  "continues",
+  "answers",
+  "depends_on",
+]);
+export const DiscourseRelationFamilyZ = z.enum(["temporal", "contingency", "comparison", "expansion"]);
+export const DiscourseDirectionZ = z.enum(["backward", "forward", "lateral"]);
+export const TechnicalLearningDiscourseRelationZ = z.object({
+  target_lid: z.string(),
+  type: DiscourseRelationTypeZ,
+  family: DiscourseRelationFamilyZ.optional(),
+  direction: DiscourseDirectionZ,
+  confidence: z.number().min(0).max(1),
+  evidence_lids: z.array(z.string()).min(1),
+});
+export const TechnicalLearningDiscourseItemZ = z.object({
+  lid: z.string(),
+  mode: DiscourseModeZ,
+  local_function: LocalFunctionZ.optional(),
+  rhetorical_move: RhetoricalMoveZ.optional(),
+  local_summary: z.string().optional(),
+  relations: z.array(TechnicalLearningDiscourseRelationZ),
+});
+export const TechnicalLearningDiscourseIndexZ = z.object({
+  header: ProfileArtifactHeaderZ,
+  items: z.array(TechnicalLearningDiscourseItemZ),
+});
 export const ReadOnlyBaseZ = z.object({
   book_id: z.string(),
   lid_nodes: z.array(LidNodeZ),

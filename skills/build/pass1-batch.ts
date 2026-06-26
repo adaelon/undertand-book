@@ -9,13 +9,14 @@ import { epubToSource } from "../../packages/core/src/epub-adapter";
 import { splitWindows } from "../../packages/core/src/window";
 import { mergeAndGate, type Pass1Output } from "../../packages/core/src/merge";
 import { projectCatalog } from "../../packages/core/src/catalog";
-import { FormulaSemanticsSidecarZ, ReadOnlyBaseZ } from "../../packages/core/src/zod";
+import { FormulaSemanticsSidecarZ, ReadOnlyBaseZ, TechnicalLearningDiscourseIndexZ } from "../../packages/core/src/zod";
 import { buildProfileArtifactHeader, buildProfileMetadata } from "../../packages/core/src/profile-artifact";
 import { buildFormulaSemanticsSidecar, type FormulaSemanticsBuildCandidate } from "../../packages/core/src/formula-semantics";
+import { buildTechnicalLearningDiscourseIndex, type TechnicalLearningDiscourseItem } from "../../packages/core/src/discourse-index";
 
-const [book, outputsPath, idxList, formulaCandidatesPath] = process.argv.slice(2);
+const [book, outputsPath, idxList, formulaCandidatesPath, discourseCandidatesPath] = process.argv.slice(2);
 if (!book || !outputsPath || !idxList) {
-  console.error("usage: tsx pass1-batch.ts <book> <outputs.json> <idx,idx,...> [formula-candidates.json]");
+  console.error("usage: tsx pass1-batch.ts <book> <outputs.json> <idx,idx,...> [formula-candidates.json] [discourse-candidates.json]");
   process.exit(2);
 }
 
@@ -56,6 +57,14 @@ const formulaSidecar = formulaCandidatesPath
     )
   : null;
 if (formulaSidecar) FormulaSemanticsSidecarZ.parse(formulaSidecar.sidecar);
+const discourseSidecar = discourseCandidatesPath
+  ? buildTechnicalLearningDiscourseIndex(
+      profileHeader,
+      JSON.parse(readFileSync(discourseCandidatesPath, "utf8")) as TechnicalLearningDiscourseItem[],
+      lidNodes,
+    )
+  : null;
+if (discourseSidecar) TechnicalLearningDiscourseIndexZ.parse(discourseSidecar.sidecar);
 const dir = `.understand-book/${bookId}`;
 mkdirSync(dir, { recursive: true });
 writeFileSync(`${dir}/base.json`, JSON.stringify(base, null, 2), "utf8");
@@ -63,6 +72,9 @@ writeFileSync(`${dir}/source.txt`, source, "utf8"); // 原文旁路:book.text �
 writeFileSync(`${dir}/profile_metadata.json`, JSON.stringify(profileMetadata, null, 2), "utf8");
 if (formulaSidecar) {
   writeFileSync(`${dir}/formula_semantics.json`, JSON.stringify(formulaSidecar.sidecar, null, 2), "utf8");
+}
+if (discourseSidecar) {
+  writeFileSync(`${dir}/discourse_index.json`, JSON.stringify(discourseSidecar.sidecar, null, 2), "utf8");
 }
 
 console.log(`[pass1-batch] ${book}`);
@@ -78,5 +90,10 @@ console.log(`  profile metadata: ${dir}/profile_metadata.json`);
 if (formulaSidecar) {
   console.log(
     `  formula semantics: ${dir}/formula_semantics.json items=${formulaSidecar.sidecar.items.length} pending=${formulaSidecar.pending.length}`,
+  );
+}
+if (discourseSidecar) {
+  console.log(
+    `  discourse index: ${dir}/discourse_index.json items=${discourseSidecar.sidecar.items.length} dropped=${discourseSidecar.dropped.length}`,
   );
 }
