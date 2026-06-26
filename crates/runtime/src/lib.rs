@@ -199,6 +199,20 @@ pub struct SupplementOut {
     pub source: String,
 }
 
+/// `book.synthesize` 对外响应:复用 query 的 answer/citations/model_supplement 骨架,
+/// 但 echo 输入 `source_lids` 并标记是否走分批归并 `[ADR-0017/0033]`。
+#[derive(Debug, Serialize, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct SynthesizeResponse {
+    pub answer: Option<String>,
+    pub citations: Vec<Citation>,
+    pub model_supplement: Vec<SupplementOut>,
+    pub source_lids: Vec<String>,
+    pub batched: bool,
+    pub evidence_chain: Vec<String>,
+    pub related_concepts: Vec<String>,
+    pub suggested_probing: Vec<String>,
+}
 /// 物化路径父 LID:"11.18.4" → Some("11.18");"1" → None。
 fn parent_of(lid: &str) -> Option<String> {
     lid.rfind('.').map(|i| lid[..i].to_string())
@@ -356,6 +370,456 @@ fn build_response(
     }
 }
 
+const SYNTHESIZE_BATCH_TOKEN_LIMIT: usize = 80;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SynthesizeMode {
+    Compare,
+    Explain,
+    Summarize,
+    Derive,
+    Teach,
+    AnswerQuestion,
+}
+
+impl SynthesizeMode {
+    fn from_task(task: Option<&str>) -> SynthesizeMode {
+        let Some(task) = task else {
+            return SynthesizeMode::Summarize;
+        };
+        let lower = task.to_ascii_lowercase();
+        if task.contains("比较") || task.contains("对比") || lower.contains("compare") {
+            SynthesizeMode::Compare
+        } else if task.contains("推导") || task.contains("证明") || lower.contains("derive") || lower.contains("prove") {
+            SynthesizeMode::Derive
+        } else if task.contains("教") || task.contains("讲给") || lower.contains("teach") {
+            SynthesizeMode::Teach
+        } else if task.contains("解释") || task.contains("说明") || lower.contains("explain") {
+            SynthesizeMode::Explain
+        } else if task.contains("回答") || task.contains("问题") || lower.contains("answer") || lower.contains("question") {
+            SynthesizeMode::AnswerQuestion
+        } else {
+            SynthesizeMode::Summarize
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            SynthesizeMode::Compare => "compare",
+            SynthesizeMode::Explain => "explain",
+            SynthesizeMode::Summarize => "summarize",
+            SynthesizeMode::Derive => "derive",
+            SynthesizeMode::Teach => "teach",
+            SynthesizeMode::AnswerQuestion => "answer_question",
+        }
+    }
+
+    fn instruction(self) -> &'static str {
+        match self {
+            SynthesizeMode::Compare => "组织为相同点/差异点/适用边界,不要引入输入 LID 之外的证据。",
+            SynthesizeMode::Explain => "优先给定义、机制、例子和限制,证据必须来自输入 LID。",
+            SynthesizeMode::Summarize => "按章节/LID 顺序压缩主旨,保留关键限定条件。",
+            SynthesizeMode::Derive => "按原文证据给出逐步推导链,缺失步骤必须标为 model_supplement。",
+            SynthesizeMode::Teach => "用教学顺序组织解释,可补前置知识但不得把补充当 citation。",
+            SynthesizeMode::AnswerQuestion => "直接回答问题,再列支撑证据和必要补充。",
+        }
+    }
+}
+
+fn estimate_tokens(s: &str) -> usize {
+    let mut t = 0.0f32;
+    for ch in s.chars() {
+        t += if ('\u{4e00}'..='\u{9fff}').contains(&ch) {
+            1.0
+        } else {
+            0.25
+        };
+    }
+    t.ceil() as usize
+}
+
+fn formula_semantics_hint(book: &Book, lid: &str) -> Option<String> {
+    let node = lid_node(book, lid)?;
+    if !matches!(node.kind, NodeKind::Formula) {
+        return None;
+    }
+    let Some(semantics) = book.formula_semantics(lid) else {
+        return Some(format!(
+            "[FormulaSemantics] formula_lid={lid}; optional_sidecar=not_attached; use formula text and surrounding supplied evidence only."
+        ));
+    };
+
+    let mut lines = vec![format!("Formula {}", semantics.formula_lid)];
+    lines.push(format!("Composition: {}", semantics.composition.meaning));
+    if !semantics.composition.terms.is_empty() {
+        lines.push(format!("Terms: {}", semantics.composition.terms.join("; ")));
+    }
+    if !semantics.parameters.is_empty() {
+        lines.push("Parameters:".into());
+        for p in &semantics.parameters {
+            let label = p
+                .label
+                .as_ref()
+                .map(|label| format!("{} ({label})", p.symbol))
+                .unwrap_or_else(|| p.symbol.clone());
+            let unit = p
+                .unit
+                .as_ref()
+                .map(|u| format!(" unit={u}"))
+                .unwrap_or_default();
+            let domain = p
+                .domain
+                .as_ref()
+                .map(|d| format!(" domain={d}"))
+                .unwrap_or_default();
+            lines.push(format!(
+                "- {label}: {meaning}{unit}{domain} [{evidence}]",
+                meaning = p.meaning,
+                evidence = p.evidence_lids.join(", ")
+            ));
+        }
+    }
+    if !semantics.context_links.is_empty() {
+        lines.push("Context links:".into());
+        for link in &semantics.context_links {
+            lines.push(format!(
+                "- {relation} {target}: {description} [{evidence}]",
+                relation = link.relation,
+                target = link.target_lid,
+                description = link.description,
+                evidence = link.evidence_lids.join(", ")
+            ));
+        }
+    }
+    Some(lines.join("\n"))
+}
+
+fn discourse_hints(book: &Book, ev: &EvidenceSet) -> Vec<String> {
+    let allowed: std::collections::BTreeSet<&str> = ev.keys().map(|lid| lid.as_str()).collect();
+    let mut hints = Vec::new();
+    for lid in ev.keys() {
+        let Some(item) = book.discourse_item(lid) else {
+            continue;
+        };
+        let mut lines = vec![format!("Discourse {}: mode={}", item.lid, item.mode)];
+        if let Some(local_function) = &item.local_function {
+            lines.push(format!("local_function={local_function}"));
+        }
+        if let Some(rhetorical_move) = &item.rhetorical_move {
+            lines.push(format!("rhetorical_move={rhetorical_move}"));
+        }
+        if let Some(summary) = &item.local_summary {
+            lines.push(format!("summary={summary}"));
+        }
+        let mut relation_lines = Vec::new();
+        for r in &item.relations {
+            let target_in_input = allowed.contains(r.target_lid.as_str());
+            let evidence_in_input = r.evidence_lids.iter().all(|l| allowed.contains(l.as_str()));
+            if target_in_input && evidence_in_input {
+                relation_lines.push(format!(
+                    "- {ty} -> {target} direction={direction} confidence={confidence:.2} evidence=[{evidence}]",
+                    ty = r.relation_type,
+                    target = r.target_lid,
+                    direction = r.direction,
+                    confidence = r.confidence,
+                    evidence = r.evidence_lids.join(", ")
+                ));
+            }
+        }
+        if !relation_lines.is_empty() {
+            lines.push("relations:".into());
+            lines.extend(relation_lines);
+        }
+        hints.push(lines.join("\n"));
+    }
+    hints
+}
+fn build_synthesize_prompt(
+    task: Option<&str>,
+    mode: SynthesizeMode,
+    ev: &EvidenceSet,
+    formula_hints: &[String],
+    discourse_hints: &[String],
+    partials: &[String],
+) -> CompletionRequest {
+    let mut user = String::from("任务:\n");
+    user.push_str(task.unwrap_or("综合这些 LID 的内容"));
+    user.push_str("\n\nSynthesizePolicy:\n");
+    user.push_str("- book_profile=technical_learning\n");
+    user.push_str(&format!("- mode={}\n", mode.as_str()));
+    user.push_str("- citation_policy=citations_subset_of_input_lids\n");
+    user.push_str("- formula_policy=include_formula_semantics_when_formula_lid_present\n");
+    user.push_str("- discourse_policy=use_discourse_relations_as_structure_hints\n");
+    user.push_str("- reader_profile=not_attached\n");
+    user.push_str(&format!("- mode_instruction={}\n", mode.instruction()));
+    user.push_str("\n\n输入 LID 范围(只允许引用这些 LID):\n");
+    for lid in ev.keys() {
+        user.push_str(&format!("- {lid}\n"));
+    }
+    if !formula_hints.is_empty() {
+        user.push_str("\n公式语义上下文(仅作结构提示,不新增 citation):\n");
+        for h in formula_hints {
+            user.push_str(h);
+            user.push('\n');
+        }
+    }
+    if !discourse_hints.is_empty() {
+        user.push_str("\n语篇结构提示(仅限输入 LID 范围,不新增 citation):\n");
+        for h in discourse_hints {
+            user.push_str(h);
+            user.push('\n');
+        }
+    }
+    if !partials.is_empty() {
+        user.push_str("\n分批局部综合结果(归并时仍只能引用输入 LID):\n");
+        for (i, p) in partials.iter().enumerate() {
+            user.push_str(&format!("[batch:{}] {p}\n", i + 1));
+        }
+    }
+    user.push_str("\n证据(每条前缀 [LID],citations 只能引用这里出现的 LID):\n");
+    for (lid, text) in ev {
+        user.push_str(&format!("[{lid}] {text}\n"));
+    }
+    CompletionRequest {
+        system: "你是书内综合器。只依据调用方给定的 LID 范围综合;不得外扩检索。\
+                 citations 只能引用输入 LID;原文未覆盖的世界知识补充放 model_supplement(无 LID)。"
+            .into(),
+        user,
+    }
+}
+
+fn valid_citations(resp: &ParsedResponse, ev: &EvidenceSet) -> Vec<RawCitation> {
+    resp.citations
+        .iter()
+        .filter(|c| ev.contains_key(&c.lid))
+        .cloned()
+        .collect()
+}
+
+
+fn related_concepts(book: &Book, source_lids: &[String]) -> Vec<String> {
+    let source: std::collections::BTreeSet<&str> = source_lids.iter().map(|s| s.as_str()).collect();
+    let mut names = std::collections::BTreeSet::new();
+    for node in &book.base.graph_nodes {
+        let anchored = match node.node_type {
+            GraphNodeType::Claim => node
+                .source_lid
+                .as_deref()
+                .is_some_and(|lid| source.contains(lid)),
+            GraphNodeType::Entity | GraphNodeType::Concept => node
+                .occurrences
+                .iter()
+                .any(|lid| source.contains(lid.as_str())),
+        };
+        if anchored && matches!(node.node_type, GraphNodeType::Entity | GraphNodeType::Concept) {
+            names.insert(node.name.clone());
+        }
+    }
+    names.into_iter().collect()
+}
+
+fn suggested_probing(book: &Book, source_lids: &[String]) -> Vec<String> {
+    let source: std::collections::BTreeSet<&str> = source_lids.iter().map(|s| s.as_str()).collect();
+    let mut suggestions = std::collections::BTreeSet::new();
+    for lid in source_lids {
+        if book.formula_semantics(lid).is_some() {
+            suggestions.insert(format!("解释公式 {lid} 的参数、组合含义和适用条件"));
+        }
+        if let Some(item) = book.discourse_item(lid) {
+            if let Some(local_function) = &item.local_function {
+                suggestions.insert(format!("围绕 {lid} 的 {local_function} 功能继续追问"));
+            }
+            for rel in &item.relations {
+                let target_in_input = source.contains(rel.target_lid.as_str());
+                let evidence_in_input = rel.evidence_lids.iter().all(|l| source.contains(l.as_str()));
+                if target_in_input && evidence_in_input {
+                    suggestions.insert(format!(
+                        "追问 {lid} 如何通过 {} 关系连接 {}",
+                        rel.relation_type, rel.target_lid
+                    ));
+                }
+            }
+        }
+    }
+    suggestions.into_iter().collect()
+}
+fn synth_response(
+    resp: ParsedResponse,
+    valid: Vec<RawCitation>,
+    source_lids: Vec<String>,
+    batched: bool,
+    evidence_chain: Vec<String>,
+    related_concepts: Vec<String>,
+    suggested_probing: Vec<String>,
+) -> SynthesizeResponse {
+    SynthesizeResponse {
+        answer: resp.answer,
+        citations: valid
+            .into_iter()
+            .map(|c| Citation {
+                lid: c.lid,
+                text: c.text,
+                role: c.role,
+            })
+            .collect(),
+        model_supplement: resp
+            .model_supplement
+            .into_iter()
+            .map(|s| SupplementOut {
+                text: s.text,
+                source: "model".into(),
+            })
+            .collect(),
+        source_lids,
+        batched,
+        evidence_chain,
+        related_concepts,
+        suggested_probing,
+    }
+}
+
+/// `book.synthesize(lids, task?)` 深路径 `[ADR-0017/0033]`。
+/// 调用方显式给定离散 LID 集;系统不外扩,并确定性过滤 citations ⊆ input lids。
+pub fn synthesize(
+    book: &Book,
+    lids: &[String],
+    task: Option<&str>,
+    adapter: &dyn ModelAdapter,
+) -> Result<SynthesizeResponse, ToolError> {
+    if lids.is_empty() {
+        return Err(ToolError {
+            error_code: "INVALID_RANGE".into(),
+            category: "validation".into(),
+            message: "book.synthesize 需至少一个 LID".into(),
+        });
+    }
+    let mode = SynthesizeMode::from_task(task);
+    let mut ev: EvidenceSet = BTreeMap::new();
+    let mut formula_hints = Vec::new();
+    for lid in lids {
+        if !ev.contains_key(lid) {
+            ev.insert(lid.clone(), book.text(lid, None)?);
+            if let Some(h) = formula_semantics_hint(book, lid) {
+                formula_hints.push(h);
+            }
+        }
+    }
+    let source_lids: Vec<String> = ev.keys().cloned().collect();
+    let total_tokens: usize = ev
+        .iter()
+        .map(|(lid, text)| estimate_tokens(lid) + estimate_tokens(text))
+        .sum();
+    if total_tokens <= SYNTHESIZE_BATCH_TOKEN_LIMIT {
+        let resp = adapter
+            .complete(build_synthesize_prompt(
+                task,
+                mode,
+                &ev,
+                &formula_hints,
+                &discourse_hints(book, &ev),
+                &[],
+            ))
+            .map_err(|e| ToolError {
+                error_code: "PROVIDER_ERROR".into(),
+                category: "provider".into(),
+                message: e.message,
+            })?;
+        let valid = valid_citations(&resp, &ev);
+        return Ok(synth_response(
+            resp,
+            valid,
+            source_lids.clone(),
+            false,
+            source_lids.clone(),
+            related_concepts(book, &source_lids),
+            suggested_probing(book, &source_lids),
+        ));
+    }
+
+    let mut batches: Vec<EvidenceSet> = Vec::new();
+    let mut cur: EvidenceSet = BTreeMap::new();
+    let mut cur_tokens = 0usize;
+    for (lid, text) in &ev {
+        let cost = estimate_tokens(lid) + estimate_tokens(text);
+        if !cur.is_empty() && cur_tokens + cost > SYNTHESIZE_BATCH_TOKEN_LIMIT {
+            batches.push(cur);
+            cur = BTreeMap::new();
+            cur_tokens = 0;
+        }
+        cur.insert(lid.clone(), text.clone());
+        cur_tokens += cost;
+    }
+    if !cur.is_empty() {
+        batches.push(cur);
+    }
+
+    let mut partials = Vec::new();
+    let mut cited_lids = Vec::new();
+    for batch in &batches {
+        let batch_hints: Vec<String> = batch
+            .keys()
+            .filter_map(|lid| formula_semantics_hint(book, lid))
+            .collect();
+        let resp = adapter
+            .complete(build_synthesize_prompt(
+                task,
+                mode,
+                batch,
+                &batch_hints,
+                &discourse_hints(book, batch),
+                &[],
+            ))
+            .map_err(|e| ToolError {
+                error_code: "PROVIDER_ERROR".into(),
+                category: "provider".into(),
+                message: e.message,
+            })?;
+        for c in valid_citations(&resp, batch) {
+            if !cited_lids.iter().any(|l: &String| l == &c.lid) {
+                cited_lids.push(c.lid);
+            }
+        }
+        if let Some(answer) = resp.answer {
+            partials.push(answer);
+        }
+    }
+
+    let mut merge_ev: EvidenceSet = BTreeMap::new();
+    if cited_lids.is_empty() {
+        for lid in &source_lids {
+            merge_ev.insert(lid.clone(), ev[lid].clone());
+        }
+    } else {
+        cited_lids.sort();
+        for lid in &cited_lids {
+            merge_ev.insert(lid.clone(), ev[lid].clone());
+        }
+    }
+    let merge_chain: Vec<String> = merge_ev.keys().cloned().collect();
+    let resp = adapter
+        .complete(build_synthesize_prompt(
+            task,
+            mode,
+            &merge_ev,
+            &formula_hints,
+            &discourse_hints(book, &merge_ev),
+            &partials,
+        ))
+        .map_err(|e| ToolError {
+            error_code: "PROVIDER_ERROR".into(),
+            category: "provider".into(),
+            message: e.message,
+        })?;
+    let valid = valid_citations(&resp, &merge_ev);
+    Ok(synth_response(
+        resp,
+        valid,
+        source_lids.clone(),
+        true,
+        merge_chain,
+        related_concepts(book, &source_lids),
+        suggested_probing(book, &source_lids),
+    ))
+}
 /// `book.query` 内层无状态 mini-loop `[ADR-0016/0025]`。
 /// 混合驱动:确定性档位骨架捞证据 → LLM 合一轮判停作答 → 确定性交叉验停(citations⊆证据集)。
 /// 不足或零有效 citation → 外扩(local→chapter→cross_chapter→global);global 仍不足 → 触顶诚实标 incomplete。
@@ -643,13 +1107,22 @@ impl ModelAdapter for NativeAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base_schema::sample_base;
+    use base_schema::{
+        sample_base, FormulaComposition, FormulaParameter, FormulaSemantics, GraphEdge, GraphNode,
+        ReadOnlyBase, Span,
+    };
+    use read_tools::{TechnicalLearningDiscourseItem, TechnicalLearningDiscourseRelation};
     use std::cell::RefCell;
     use std::collections::VecDeque;
 
     /// 确定性测试替身:按调用次序吐脚本化 ParsedResponse(loop 每轮调一次 complete)。
     struct FakeAdapter {
         scripted: RefCell<VecDeque<ParsedResponse>>,
+    }
+
+    struct RecordingAdapter {
+        scripted: RefCell<VecDeque<ParsedResponse>>,
+        users: RefCell<Vec<String>>,
     }
     impl FakeAdapter {
         fn new(rs: Vec<ParsedResponse>) -> Self {
@@ -672,10 +1145,192 @@ mod tests {
         }
     }
 
+    impl RecordingAdapter {
+        fn new(rs: Vec<ParsedResponse>) -> Self {
+            RecordingAdapter {
+                scripted: RefCell::new(rs.into()),
+                users: RefCell::new(vec![]),
+            }
+        }
+    }
+    impl ModelAdapter for RecordingAdapter {
+        fn complete(&self, req: CompletionRequest) -> Result<ParsedResponse, AdapterError> {
+            self.users.borrow_mut().push(req.user);
+            self.scripted
+                .borrow_mut()
+                .pop_front()
+                .ok_or_else(|| AdapterError {
+                    message: "recording fake 脚本耗尽".into(),
+                })
+        }
+        fn chat(&self, _: &[Message], _: &[ToolSpec]) -> Result<AssistantTurn, AdapterError> {
+            unimplemented!("synthesize 测不涉及外层 chat")
+        }
+    }
+
     fn book() -> Book {
         // sample_base: "1"(容器)+ "1.1"(叶);entity:command occ=["1.1"]、claim source=1.1。
         let src = "X".repeat(100) + "尾巴";
         Book::new(sample_base(), &src)
+    }
+
+    fn book_with_cjk_leaves(n: usize) -> Book {
+        let leaf_units = 100usize;
+        let mut source = String::new();
+        let mut children = Vec::new();
+        let mut lid_nodes = Vec::new();
+        for i in 1..=n {
+            children.push(format!("1.{i}"));
+            lid_nodes.push(LidNode {
+                lid: format!("1.{i}"),
+                path: vec![1, i as u32],
+                kind: NodeKind::Paragraph,
+                span: Span {
+                    start: (i - 1) * leaf_units,
+                    end: i * leaf_units,
+                },
+                children: vec![],
+            });
+            source.push_str(&"汉".repeat(leaf_units));
+        }
+        lid_nodes.insert(
+            0,
+            LidNode {
+                lid: "1".into(),
+                path: vec![1],
+                kind: NodeKind::Chapter,
+                span: Span {
+                    start: 0,
+                    end: n * leaf_units,
+                },
+                children,
+            },
+        );
+        Book::new(
+            ReadOnlyBase {
+                book_id: "book-cjk".into(),
+                lid_nodes,
+                graph_nodes: Vec::<GraphNode>::new(),
+                graph_edges: Vec::<GraphEdge>::new(),
+            },
+            &source,
+        )
+    }
+    fn formula_semantics() -> FormulaSemantics {
+        FormulaSemantics {
+            formula_lid: "1.2".into(),
+            parameters: vec![FormulaParameter {
+                symbol: "r".into(),
+                label: Some("radius".into()),
+                meaning: "圆的半径".into(),
+                unit: Some("m".into()),
+                domain: None,
+                evidence_lids: vec!["1.1".into()],
+            }],
+            composition: FormulaComposition {
+                source_lid: "1.2".into(),
+                meaning: "圆面积由半径平方和常数 pi 相乘得到".into(),
+                terms: vec!["pi".into(), "r^2".into()],
+                evidence_lids: vec!["1.1".into()],
+            },
+            context_links: vec![],
+        }
+    }
+
+    fn book_with_discourse_index() -> Book {
+        let source = "AAAABBBBCCCC";
+        let base = ReadOnlyBase {
+            book_id: "discourse-book".into(),
+            lid_nodes: vec![
+                LidNode {
+                    lid: "1".into(),
+                    path: vec![1],
+                    kind: NodeKind::Chapter,
+                    span: Span { start: 0, end: 8 },
+                    children: vec!["1.1".into(), "1.2".into()],
+                },
+                LidNode {
+                    lid: "1.1".into(),
+                    path: vec![1, 1],
+                    kind: NodeKind::Paragraph,
+                    span: Span { start: 0, end: 4 },
+                    children: vec![],
+                },
+                LidNode {
+                    lid: "1.2".into(),
+                    path: vec![1, 2],
+                    kind: NodeKind::Paragraph,
+                    span: Span { start: 4, end: 8 },
+                    children: vec![],
+                },
+                LidNode {
+                    lid: "2.1".into(),
+                    path: vec![2, 1],
+                    kind: NodeKind::Paragraph,
+                    span: Span { start: 8, end: 12 },
+                    children: vec![],
+                },
+            ],
+            graph_nodes: Vec::<GraphNode>::new(),
+            graph_edges: Vec::<GraphEdge>::new(),
+        };
+        Book::new(base, source).with_discourse_items(vec![TechnicalLearningDiscourseItem {
+            lid: "1.1".into(),
+            mode: "informative".into(),
+            local_function: Some("definition".into()),
+            rhetorical_move: Some("main_point".into()),
+            local_summary: Some("定义核心概念".into()),
+            relations: vec![
+                TechnicalLearningDiscourseRelation {
+                    target_lid: "1.2".into(),
+                    relation_type: "elaborates".into(),
+                    family: Some("expansion".into()),
+                    direction: "forward".into(),
+                    confidence: 0.9,
+                    evidence_lids: vec!["1.1".into(), "1.2".into()],
+                },
+                TechnicalLearningDiscourseRelation {
+                    target_lid: "2.1".into(),
+                    relation_type: "depends_on".into(),
+                    family: None,
+                    direction: "forward".into(),
+                    confidence: 0.8,
+                    evidence_lids: vec!["1.1".into(), "2.1".into()],
+                },
+            ],
+        }])
+    }
+    fn book_with_formula_semantics() -> Book {
+        let source = "AAAAAAAAAAAABBBBBBBBBBBBBBB";
+        let base = ReadOnlyBase {
+            book_id: "formula-book".into(),
+            lid_nodes: vec![
+                LidNode {
+                    lid: "1".into(),
+                    path: vec![1],
+                    kind: NodeKind::Chapter,
+                    span: Span { start: 0, end: 27 },
+                    children: vec!["1.1".into(), "1.2".into()],
+                },
+                LidNode {
+                    lid: "1.1".into(),
+                    path: vec![1, 1],
+                    kind: NodeKind::Paragraph,
+                    span: Span { start: 0, end: 12 },
+                    children: vec![],
+                },
+                LidNode {
+                    lid: "1.2".into(),
+                    path: vec![1, 2],
+                    kind: NodeKind::Formula,
+                    span: Span { start: 12, end: 27 },
+                    children: vec![],
+                },
+            ],
+            graph_nodes: Vec::<GraphNode>::new(),
+            graph_edges: Vec::<GraphEdge>::new(),
+        };
+        Book::new(base, source).with_formula_semantics(vec![formula_semantics()])
     }
 
     fn cite(lid: &str) -> RawCitation {
@@ -699,6 +1354,102 @@ mod tests {
         }
     }
 
+    #[test]
+    fn synthesize_includes_only_input_scoped_discourse_hints() {
+        let b = book_with_discourse_index();
+        let fake = RecordingAdapter::new(vec![resp(true, vec![cite("1.1")])]);
+        let out = synthesize(&b, &["1.1".into(), "1.2".into()], Some("综合结构"), &fake).unwrap();
+        assert_eq!(out.citations[0].lid, "1.1");
+        let prompts = fake.users.borrow();
+        assert_eq!(prompts.len(), 1);
+        assert!(prompts[0].contains("Discourse 1.1: mode=informative"));
+        assert!(prompts[0].contains("local_function=definition"));
+        assert!(prompts[0].contains("summary=定义核心概念"));
+        assert!(prompts[0]
+            .contains("- elaborates -> 1.2 direction=forward confidence=0.90 evidence=[1.1, 1.2]"));
+        assert!(!prompts[0].contains("depends_on -> 2.1"));
+        assert!(!prompts[0].contains("2.1 direction"));
+    }
+    #[test]
+    fn synthesize_includes_formula_semantics_sidecar_in_prompt() {
+        let b = book_with_formula_semantics();
+        let fake = RecordingAdapter::new(vec![resp(true, vec![cite("1.2")])]);
+        let out = synthesize(&b, &["1.2".into()], Some("解释公式"), &fake).unwrap();
+        assert_eq!(out.citations[0].lid, "1.2");
+        let prompts = fake.users.borrow();
+        assert_eq!(prompts.len(), 1);
+        assert!(prompts[0].contains("Composition: 圆面积由半径平方和常数 pi 相乘得到"));
+        assert!(prompts[0].contains("- r (radius): 圆的半径 unit=m [1.1]"));
+        assert!(!prompts[0].contains("optional_sidecar=not_attached"));
+        assert!(out
+            .suggested_probing
+            .contains(&"解释公式 1.2 的参数、组合含义和适用条件".to_string()));
+    }
+    #[test]
+    fn synthesize_filters_citations_outside_input_lids() {
+        let b = book();
+        let fake = FakeAdapter::new(vec![resp(true, vec![cite("1.1"), cite("9.9")])]);
+        let out = synthesize(&b, &["1.1".into()], Some("总结"), &fake).unwrap();
+        assert!(!out.batched);
+        assert_eq!(out.source_lids, vec!["1.1"]);
+        assert_eq!(out.evidence_chain, vec!["1.1"]);
+        assert_eq!(out.citations.len(), 1);
+        assert_eq!(out.citations[0].lid, "1.1");
+    }
+
+    #[test]
+    fn synthesize_rejects_empty_or_unknown_lids() {
+        let b = book();
+        let fake = FakeAdapter::new(vec![]);
+        let empty = synthesize(&b, &[], None, &fake).unwrap_err();
+        assert_eq!(empty.error_code, "INVALID_RANGE");
+        let missing = synthesize(&b, &["9.9".into()], None, &fake).unwrap_err();
+        assert_eq!(missing.error_code, "LID_NOT_FOUND");
+    }
+
+    #[test]
+    fn synthesize_batches_by_lid_order_and_filters_merge_citations() {
+        let b = book_with_cjk_leaves(3);
+        let fake = FakeAdapter::new(vec![
+            ParsedResponse {
+                sufficient: true,
+                answer: Some("part 1".into()),
+                citations: vec![cite("1.1")],
+                model_supplement: vec![],
+            },
+            ParsedResponse {
+                sufficient: true,
+                answer: Some("part 2".into()),
+                citations: vec![cite("1.2")],
+                model_supplement: vec![],
+            },
+            ParsedResponse {
+                sufficient: true,
+                answer: Some("part 3".into()),
+                citations: vec![cite("1.3")],
+                model_supplement: vec![],
+            },
+            ParsedResponse {
+                sufficient: true,
+                answer: Some("merged".into()),
+                citations: vec![cite("1.2"), cite("9.9")],
+                model_supplement: vec![],
+            },
+        ]);
+        let out = synthesize(
+            &b,
+            &["1.1".into(), "1.2".into(), "1.3".into()],
+            Some("综合"),
+            &fake,
+        )
+        .unwrap();
+        assert!(out.batched);
+        assert_eq!(out.answer.as_deref(), Some("merged"));
+        assert_eq!(out.source_lids, vec!["1.1", "1.2", "1.3"]);
+        assert_eq!(out.evidence_chain, vec!["1.1", "1.2", "1.3"]);
+        assert_eq!(out.citations.len(), 1);
+        assert_eq!(out.citations[0].lid, "1.2");
+    }
     // 路径①:首轮 sufficient + 有效 citation → local 收口,非 incomplete。
     #[test]
     fn sufficient_with_valid_citation_stops_at_local() {

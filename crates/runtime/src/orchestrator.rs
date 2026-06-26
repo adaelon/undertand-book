@@ -5,10 +5,10 @@
 //! dispatch 仍保留 manifest 防御分支。reader.* 是会话态阅读器(S7 接入):agent 经命令面驱动
 //! 「问→跳转→高亮→记笔记」闭环 `[ADR-0007/0015]`。
 //! 内层 book.query 复用 `crate::query`(同一 adapter 触 `complete`)`[ADR-0025]`。
-use crate::{query, AssistantTurn, Message, ModelAdapter, Role, ToolSpec};
+use crate::{query, synthesize, AssistantTurn, Message, ModelAdapter, Role, ToolSpec};
 use memory::{Anchor, MemoryStore, RecallQuery, SaveInput};
-use reader::Reader;
 use read_tools::{Book, ToolError};
+use reader::Reader;
 use serde::Serialize;
 use ts_rs::TS;
 
@@ -52,11 +52,18 @@ pub struct OuterOutcome {
 #[serde(tag = "kind")]
 pub enum AgentEffect {
     /// 视口跳转(goto/scroll 合并);undo = `reader.goto(before_anchor)`。
-    Goto { before_anchor: String, after_anchor: String },
+    Goto {
+        before_anchor: String,
+        after_anchor: String,
+    },
     /// 高亮提议(session 层);undo = `memory.delete(mem_id)`。
     Highlight { mem_id: String, lid: String },
     /// 笔记提议(session 层);undo = `memory.delete(mem_id)`。
-    Note { mem_id: String, lid: String, text: String },
+    Note {
+        mem_id: String,
+        lid: String,
+        text: String,
+    },
 }
 
 /// 查询踪迹一步 `[ADR-0030 决策5]`:tool_calls 序列摘要,对用户可见(book.query 的检索范围 + citations 链在 `result_digest` 里)。
@@ -107,6 +114,18 @@ pub fn tool_specs() -> Vec<ToolSpec> {
                     "anchor_lid": {"type": "string", "description": "锚点 LID(从 manifest/context 获得)"}
                 },
                 "required": ["query", "anchor_lid"]
+            }),
+        ),
+        s(
+            "book.synthesize",
+            "对调用方给定的离散 LID 集做综合;不外扩检索,返回 citations ⊆ 输入 lids 的综合回答。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "lids": {"type": "array", "items": {"type": "string"}, "description": "要综合的 LID 列表"},
+                    "task": {"type": "string", "description": "可选综合任务"}
+                },
+                "required": ["lids"]
             }),
         ),
         s(
@@ -239,14 +258,30 @@ fn dispatch(
 ) -> (String, Option<AgentEffect>) {
     let args: serde_json::Value = match serde_json::from_str(arguments) {
         Ok(v) => v,
-        Err(e) => return (err_json("INVALID_RANGE", "validation", &format!("工具参数非合法 JSON: {e}")), None),
+        Err(e) => {
+            return (
+                err_json(
+                    "INVALID_RANGE",
+                    "validation",
+                    &format!("工具参数非合法 JSON: {e}"),
+                ),
+                None,
+            )
+        }
     };
     let sget = |k: &str| args.get(k).and_then(|v| v.as_str());
 
     match name {
         "book.query" => {
             let (Some(q), Some(anchor)) = (sget("query"), sget("anchor_lid")) else {
-                return (err_json("INVALID_RANGE", "validation", "book.query 需 query + anchor_lid"), None);
+                return (
+                    err_json(
+                        "INVALID_RANGE",
+                        "validation",
+                        "book.query 需 query + anchor_lid",
+                    ),
+                    None,
+                );
             };
             let body = match query(book, q, anchor, adapter) {
                 Ok(resp) => to_json(&resp),
@@ -254,9 +289,40 @@ fn dispatch(
             };
             (body, None)
         }
+        "book.synthesize" => {
+            let Some(arr) = args.get("lids").and_then(|v| v.as_array()) else {
+                return (
+                    err_json("INVALID_RANGE", "validation", "book.synthesize 需 lids"),
+                    None,
+                );
+            };
+            let lids: Vec<String> = arr
+                .iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect();
+            if lids.len() != arr.len() {
+                return (
+                    err_json(
+                        "INVALID_RANGE",
+                        "validation",
+                        "book.synthesize lids 必须全是字符串",
+                    ),
+                    None,
+                );
+            }
+            let task = args.get("task").and_then(|v| v.as_str());
+            let body = match synthesize(book, &lids, task, adapter) {
+                Ok(resp) => to_json(&resp),
+                Err(e) => to_json(&e),
+            };
+            (body, None)
+        }
         "book.text" => {
             let Some(lid) = sget("lid") else {
-                return (err_json("INVALID_RANGE", "validation", "book.text 需 lid"), None);
+                return (
+                    err_json("INVALID_RANGE", "validation", "book.text 需 lid"),
+                    None,
+                );
             };
             let body = match book.text(lid, sget("end_lid")) {
                 Ok(t) => to_json(&serde_json::json!({ "lid": lid, "text": t })),
@@ -266,7 +332,10 @@ fn dispatch(
         }
         "book.context" => {
             let Some(lid) = sget("lid") else {
-                return (err_json("INVALID_RANGE", "validation", "book.context 需 lid"), None);
+                return (
+                    err_json("INVALID_RANGE", "validation", "book.context 需 lid"),
+                    None,
+                );
             };
             let k = args.get("k").and_then(|v| v.as_u64()).map(|u| u as usize);
             let granularity = args.get("granularity").and_then(|v| v.as_str());
@@ -278,7 +347,10 @@ fn dispatch(
         }
         "book.concept" => {
             let Some(n) = sget("name") else {
-                return (err_json("INVALID_RANGE", "validation", "book.concept 需 name"), None);
+                return (
+                    err_json("INVALID_RANGE", "validation", "book.concept 需 name"),
+                    None,
+                );
             };
             let body = match book.concept(n) {
                 Ok(c) => to_json(&c),
@@ -291,15 +363,29 @@ fn dispatch(
             let (Some(ty), Some(anchor), Some(content)) =
                 (sget("type"), sget("anchor_lid"), sget("content"))
             else {
-                return (err_json("INVALID_MEMORY_TYPE", "validation", "memory.save 需 type + anchor_lid + content"), None);
+                return (
+                    err_json(
+                        "INVALID_MEMORY_TYPE",
+                        "validation",
+                        "memory.save 需 type + anchor_lid + content",
+                    ),
+                    None,
+                );
             };
-            let layer = if ty == "position" { "session" } else { "long_term" };
+            let layer = if ty == "position" {
+                "session"
+            } else {
+                "long_term"
+            };
             let input = SaveInput {
                 mem_id: None,
                 mem_type: ty.into(),
                 layer: layer.into(),
                 book_id: book.base.book_id.clone(),
-                anchor: Anchor { lid: Some(anchor.into()), concept: None },
+                anchor: Anchor {
+                    lid: Some(anchor.into()),
+                    concept: None,
+                },
                 content: content.into(),
                 range: None,
                 citations: None,
@@ -323,7 +409,10 @@ fn dispatch(
         }
         "reader.gotoLid" => {
             let Some(lid) = sget("lid") else {
-                return (err_json("INVALID_RANGE", "validation", "reader.gotoLid 需 lid"), None);
+                return (
+                    err_json("INVALID_RANGE", "validation", "reader.gotoLid 需 lid"),
+                    None,
+                );
             };
             let body = match reader.goto_lid(book, lid) {
                 Ok(e) => to_json(&e),
@@ -333,18 +422,31 @@ fn dispatch(
         }
         "reader.scroll" => {
             let Some(delta) = args.get("delta").and_then(|v| v.as_i64()) else {
-                return (err_json("INVALID_RANGE", "validation", "reader.scroll 需 delta(整数)"), None);
+                return (
+                    err_json(
+                        "INVALID_RANGE",
+                        "validation",
+                        "reader.scroll 需 delta(整数)",
+                    ),
+                    None,
+                );
             };
             (to_json(&reader.scroll(delta)), None)
         }
         "reader.highlight" => {
             let Some(lid) = sget("lid") else {
-                return (err_json("INVALID_RANGE", "validation", "reader.highlight 需 lid"), None);
+                return (
+                    err_json("INVALID_RANGE", "validation", "reader.highlight 需 lid"),
+                    None,
+                );
             };
             // agent 标注 = 提议态,落 session 层 `[ADR-0030 决策4]`;agent 高亮整段(range=None `[ADR-0031]`)。
             match reader.highlight(book, store, lid, None, "session", now) {
                 Ok(e) => {
-                    let eff = AgentEffect::Highlight { mem_id: e.highlight_id.clone(), lid: lid.to_string() };
+                    let eff = AgentEffect::Highlight {
+                        mem_id: e.highlight_id.clone(),
+                        lid: lid.to_string(),
+                    };
                     (to_json(&e), Some(eff))
                 }
                 Err(e) => (to_json(&e), None),
@@ -352,18 +454,28 @@ fn dispatch(
         }
         "reader.note" => {
             let (Some(lid), Some(text)) = (sget("lid"), sget("text")) else {
-                return (err_json("INVALID_RANGE", "validation", "reader.note 需 lid + text"), None);
+                return (
+                    err_json("INVALID_RANGE", "validation", "reader.note 需 lid + text"),
+                    None,
+                );
             };
             match reader.note(book, store, lid, text, "session", now) {
                 Ok(e) => {
-                    let eff = AgentEffect::Note { mem_id: e.note_id.clone(), lid: lid.to_string(), text: text.to_string() };
+                    let eff = AgentEffect::Note {
+                        mem_id: e.note_id.clone(),
+                        lid: lid.to_string(),
+                        text: text.to_string(),
+                    };
                     (to_json(&e), Some(eff))
                 }
                 Err(e) => (to_json(&e), None),
             }
         }
         "reader.state" => (to_json(&reader.state()), None),
-        other => (err_json("INVALID_RANGE", "validation", &format!("未知工具: {other}")), None),
+        other => (
+            err_json("INVALID_RANGE", "validation", &format!("未知工具: {other}")),
+            None,
+        ),
     }
 }
 
@@ -385,7 +497,13 @@ fn with_goto(reader: &Reader, before: &str, mut effects: Vec<AgentEffect>) -> Ve
 }
 
 fn to_json<T: Serialize>(v: &T) -> String {
-    serde_json::to_string(v).unwrap_or_else(|e| err_json("INTERNAL_ERROR", "internal", &format!("结果序列化失败: {e}")))
+    serde_json::to_string(v).unwrap_or_else(|e| {
+        err_json(
+            "INTERNAL_ERROR",
+            "internal",
+            &format!("结果序列化失败: {e}"),
+        )
+    })
 }
 
 fn err_json(error_code: &str, category: &str, message: &str) -> String {
@@ -427,11 +545,14 @@ pub fn run(
 
     loop {
         turns += 1;
-        let turn: AssistantTurn = adapter.chat(messages.as_slice(), &tools).map_err(|e| ToolError {
-            error_code: "PROVIDER_ERROR".into(),
-            category: "provider".into(),
-            message: e.message,
-        })?;
+        let turn: AssistantTurn =
+            adapter
+                .chat(messages.as_slice(), &tools)
+                .map_err(|e| ToolError {
+                    error_code: "PROVIDER_ERROR".into(),
+                    category: "provider".into(),
+                    message: e.message,
+                })?;
         spent += turn
             .usage_total_tokens
             .unwrap_or_else(|| messages_estimate(messages.as_slice()));
@@ -439,8 +560,13 @@ pub fn run(
         if trace_dbg {
             eprintln!(
                 "── turn {turns}: text={:?} tool_calls={:?}",
-                turn.text.as_deref().map(|t| t.chars().take(60).collect::<String>()),
-                turn.tool_calls.iter().map(|t| format!("{}({})", t.name, t.arguments)).collect::<Vec<_>>()
+                turn.text
+                    .as_deref()
+                    .map(|t| t.chars().take(60).collect::<String>()),
+                turn.tool_calls
+                    .iter()
+                    .map(|t| format!("{}({})", t.name, t.arguments))
+                    .collect::<Vec<_>>()
             );
         }
 
@@ -471,9 +597,14 @@ pub fn run(
             tool_call_id: None,
         });
         for tc in &turn.tool_calls {
-            let (result, effect) = dispatch(&tc.name, &tc.arguments, book, store, reader, adapter, now);
+            let (result, effect) =
+                dispatch(&tc.name, &tc.arguments, book, store, reader, adapter, now);
             if trace_dbg {
-                eprintln!("   ↳ {} => {}", tc.name, result.chars().take(180).collect::<String>());
+                eprintln!(
+                    "   ↳ {} => {}",
+                    tc.name,
+                    result.chars().take(180).collect::<String>()
+                );
             }
             trace.push(TraceStep {
                 tool: tc.name.clone(),
@@ -531,14 +662,20 @@ mod tests {
     }
     impl ModelAdapter for FakeAdapter {
         fn complete(&self, _req: CompletionRequest) -> Result<ParsedResponse, AdapterError> {
-            self.completes.borrow_mut().pop_front().ok_or_else(|| AdapterError {
-                message: "fake complete 脚本耗尽".into(),
-            })
+            self.completes
+                .borrow_mut()
+                .pop_front()
+                .ok_or_else(|| AdapterError {
+                    message: "fake complete 脚本耗尽".into(),
+                })
         }
         fn chat(&self, _: &[Message], _: &[ToolSpec]) -> Result<AssistantTurn, AdapterError> {
-            self.chats.borrow_mut().pop_front().ok_or_else(|| AdapterError {
-                message: "fake chat 脚本耗尽".into(),
-            })
+            self.chats
+                .borrow_mut()
+                .pop_front()
+                .ok_or_else(|| AdapterError {
+                    message: "fake chat 脚本耗尽".into(),
+                })
         }
     }
 
@@ -552,7 +689,10 @@ mod tests {
             lid: "1".into(),
             path: vec![1],
             kind: NodeKind::Chapter,
-            span: Span { start: 0, end: n * 10 },
+            span: Span {
+                start: 0,
+                end: n * 10,
+            },
             children: (1..=n).map(|i| format!("1.{i}")).collect(),
         }];
         for i in 1..=n {
@@ -560,7 +700,10 @@ mod tests {
                 lid: format!("1.{i}"),
                 path: vec![1, i as u32],
                 kind: NodeKind::Paragraph,
-                span: Span { start: (i - 1) * 10, end: i * 10 },
+                span: Span {
+                    start: (i - 1) * 10,
+                    end: i * 10,
+                },
                 children: vec![],
             });
         }
@@ -580,13 +723,25 @@ mod tests {
         p
     }
     fn call(id: &str, name: &str, args: &str) -> ToolCall {
-        ToolCall { id: id.into(), name: name.into(), arguments: args.into() }
+        ToolCall {
+            id: id.into(),
+            name: name.into(),
+            arguments: args.into(),
+        }
     }
     fn turn_calls(calls: Vec<ToolCall>) -> AssistantTurn {
-        AssistantTurn { text: None, tool_calls: calls, usage_total_tokens: Some(10) }
+        AssistantTurn {
+            text: None,
+            tool_calls: calls,
+            usage_total_tokens: Some(10),
+        }
     }
     fn turn_final(text: &str) -> AssistantTurn {
-        AssistantTurn { text: Some(text.into()), tool_calls: vec![], usage_total_tokens: Some(10) }
+        AssistantTurn {
+            text: Some(text.into()),
+            tool_calls: vec![],
+            usage_total_tokens: Some(10),
+        }
     }
 
     // 多跳收敛:chat 调 book.query(触发内层 complete)→ chat 调 memory.save → chat 终答。
@@ -596,21 +751,43 @@ mod tests {
         let mut store = MemoryStore::open(tmp("multihop")).unwrap();
         let fake = FakeAdapter::new(
             vec![
-                turn_calls(vec![call("c1", "book.query", r#"{"query":"命令模式?","anchor_lid":"1.1"}"#)]),
-                turn_calls(vec![call("c2", "memory.save", r#"{"type":"note","anchor_lid":"1.1","content":"命令=对象化的调用"}"#)]),
+                turn_calls(vec![call(
+                    "c1",
+                    "book.query",
+                    r#"{"query":"命令模式?","anchor_lid":"1.1"}"#,
+                )]),
+                turn_calls(vec![call(
+                    "c2",
+                    "memory.save",
+                    r#"{"type":"note","anchor_lid":"1.1","content":"命令=对象化的调用"}"#,
+                )]),
                 turn_final("命令模式把请求封装成对象。"),
             ],
             // 内层 book.query 的合一轮:充分 + 真 LID citation
             vec![ParsedResponse {
                 sufficient: true,
                 answer: Some("命令模式".into()),
-                citations: vec![RawCitation { lid: "1.1".into(), text: "片段".into(), role: "support".into() }],
+                citations: vec![RawCitation {
+                    lid: "1.1".into(),
+                    text: "片段".into(),
+                    role: "support".into(),
+                }],
                 model_supplement: vec![],
             }],
         );
         let mut reader = Reader::new(&b, DEFAULT_RADIUS);
         let mut messages = new_session();
-        let out = run(&b, &mut store, &mut reader, &fake, &mut messages, "命令模式是什么", "t0", OuterConfig::default()).unwrap();
+        let out = run(
+            &b,
+            &mut store,
+            &mut reader,
+            &fake,
+            &mut messages,
+            "命令模式是什么",
+            "t0",
+            OuterConfig::default(),
+        )
+        .unwrap();
         assert!(!out.incomplete);
         assert_eq!(out.answer.as_deref(), Some("命令模式把请求封装成对象。"));
         assert_eq!(out.turns, 3);
@@ -632,10 +809,23 @@ mod tests {
             turn_calls(vec![call("c", "book.manifest", "{}")]),
         ];
         let fake = FakeAdapter::new(chats, vec![]);
-        let cfg = OuterConfig { max_turns: 2, token_budget: 1_000_000 };
+        let cfg = OuterConfig {
+            max_turns: 2,
+            token_budget: 1_000_000,
+        };
         let mut reader = Reader::new(&b, DEFAULT_RADIUS);
         let mut messages = new_session();
-        let out = run(&b, &mut store, &mut reader, &fake, &mut messages, "绕圈", "t0", cfg).unwrap();
+        let out = run(
+            &b,
+            &mut store,
+            &mut reader,
+            &fake,
+            &mut messages,
+            "绕圈",
+            "t0",
+            cfg,
+        )
+        .unwrap();
         assert!(out.incomplete);
         assert_eq!(out.warning.as_deref(), Some("CONTEXT_BUDGET_EXCEEDED"));
         assert_eq!(out.turns, 2);
@@ -648,7 +838,15 @@ mod tests {
         let mut store = MemoryStore::open(tmp("err")).unwrap();
         let fake = FakeAdapter::new(vec![], vec![]);
         let mut reader = Reader::new(&b, DEFAULT_RADIUS);
-        let (out, eff) = dispatch("book.text", r#"{"lid":"9.9"}"#, &b, &mut store, &mut reader, &fake, "t0");
+        let (out, eff) = dispatch(
+            "book.text",
+            r#"{"lid":"9.9"}"#,
+            &b,
+            &mut store,
+            &mut reader,
+            &fake,
+            "t0",
+        );
         assert!(out.contains("LID_NOT_FOUND"));
         assert!(out.contains("not_found"));
         assert!(eff.is_none()); // 报错不产 effect
@@ -662,39 +860,72 @@ mod tests {
         let mut store = MemoryStore::open(tmp("closeloop")).unwrap();
         let fake = FakeAdapter::new(
             vec![
-                turn_calls(vec![call("c1", "book.query", r#"{"query":"命令模式?","anchor_lid":"1.1"}"#)]),
+                turn_calls(vec![call(
+                    "c1",
+                    "book.query",
+                    r#"{"query":"命令模式?","anchor_lid":"1.1"}"#,
+                )]),
                 turn_calls(vec![call("c2", "reader.gotoLid", r#"{"lid":"1.1"}"#)]),
                 turn_calls(vec![call("c3", "reader.highlight", r#"{"lid":"1.1"}"#)]),
-                turn_calls(vec![call("c4", "reader.note", r#"{"lid":"1.1","text":"命令=对象化调用"}"#)]),
+                turn_calls(vec![call(
+                    "c4",
+                    "reader.note",
+                    r#"{"lid":"1.1","text":"命令=对象化调用"}"#,
+                )]),
                 turn_final("命令模式把请求封装成对象,已跳转、高亮并记笔记。"),
             ],
             vec![ParsedResponse {
                 sufficient: true,
                 answer: Some("命令模式".into()),
-                citations: vec![RawCitation { lid: "1.1".into(), text: "片段".into(), role: "support".into() }],
+                citations: vec![RawCitation {
+                    lid: "1.1".into(),
+                    text: "片段".into(),
+                    role: "support".into(),
+                }],
                 model_supplement: vec![],
             }],
         );
         let mut reader = Reader::new(&b, DEFAULT_RADIUS);
         let mut messages = new_session();
-        let out = run(&b, &mut store, &mut reader, &fake, &mut messages, "讲讲命令模式并高亮记笔记", "t0", OuterConfig::default()).unwrap();
+        let out = run(
+            &b,
+            &mut store,
+            &mut reader,
+            &fake,
+            &mut messages,
+            "讲讲命令模式并高亮记笔记",
+            "t0",
+            OuterConfig::default(),
+        )
+        .unwrap();
         assert!(!out.incomplete);
         assert_eq!(out.turns, 5); // 问→跳转→高亮→记笔记→终答
-        // S10f effects:agent 标注产 Highlight + Note(undo 材料);首叶=1.1 视口未变,无 Goto。
+                                  // S10f effects:agent 标注产 Highlight + Note(undo 材料);首叶=1.1 视口未变,无 Goto。
         assert_eq!(out.effects.len(), 2);
         assert!(matches!(&out.effects[0], AgentEffect::Highlight { lid, .. } if lid == "1.1"));
-        assert!(matches!(&out.effects[1], AgentEffect::Note { lid, text, .. } if lid == "1.1" && text == "命令=对象化调用"));
+        assert!(
+            matches!(&out.effects[1], AgentEffect::Note { lid, text, .. } if lid == "1.1" && text == "命令=对象化调用")
+        );
         // trace 记录每个 tool call(问→跳转→高亮→记笔记 = 4 步),book.query 居首。
         assert_eq!(out.trace.len(), 4);
         assert_eq!(out.trace[0].tool, "book.query");
         // agent 标注落 session 层(提议态,用户「保留」才升 long_term):highlight + note 两条都在 session。
-        let sess = store.recall(&RecallQuery { layer: Some("session".into()), ..Default::default() });
+        let sess = store.recall(&RecallQuery {
+            layer: Some("session".into()),
+            ..Default::default()
+        });
         assert_eq!(sess.len(), 2);
         // 跳转→高亮→记笔记 的标注真落记忆层(单源),anchor/citation 锚回真 LID 1.1
-        let hl = store.recall(&RecallQuery { mem_type: Some("highlight".into()), ..Default::default() });
+        let hl = store.recall(&RecallQuery {
+            mem_type: Some("highlight".into()),
+            ..Default::default()
+        });
         assert_eq!(hl.len(), 1);
         assert_eq!(hl[0].anchor.lid.as_deref(), Some("1.1"));
-        let note = store.recall(&RecallQuery { mem_type: Some("note".into()), ..Default::default() });
+        let note = store.recall(&RecallQuery {
+            mem_type: Some("note".into()),
+            ..Default::default()
+        });
         assert_eq!(note.len(), 1);
         assert_eq!(note[0].content, "命令=对象化调用");
         assert_eq!(note[0].citations[0].lid, "1.1");
@@ -714,7 +945,17 @@ mod tests {
         );
         let mut reader = Reader::new(&b, DEFAULT_RADIUS);
         let mut messages = new_session();
-        let out = run(&b, &mut store, &mut reader, &fake, &mut messages, "取 9.9", "t0", OuterConfig::default()).unwrap();
+        let out = run(
+            &b,
+            &mut store,
+            &mut reader,
+            &fake,
+            &mut messages,
+            "取 9.9",
+            "t0",
+            OuterConfig::default(),
+        )
+        .unwrap();
         assert!(!out.incomplete);
         assert_eq!(out.turns, 2);
         assert!(out.answer.unwrap().contains("不存在"));
@@ -735,12 +976,24 @@ mod tests {
         );
         let mut reader = Reader::new(&b, DEFAULT_RADIUS);
         let mut messages = new_session();
-        let out = run(&b, &mut store, &mut reader, &fake, &mut messages, "翻到 1.8", "t0", OuterConfig::default()).unwrap();
+        let out = run(
+            &b,
+            &mut store,
+            &mut reader,
+            &fake,
+            &mut messages,
+            "翻到 1.8",
+            "t0",
+            OuterConfig::default(),
+        )
+        .unwrap();
         assert!(!out.incomplete);
         // 两次视口变更(scroll + goto)合并成一条 Goto:before=回合前首叶 1.1,after=最终 1.8。
         assert_eq!(out.effects.len(), 1);
-        assert!(matches!(&out.effects[0], AgentEffect::Goto { before_anchor, after_anchor }
-            if before_anchor == "1.1" && after_anchor == "1.8"));
+        assert!(
+            matches!(&out.effects[0], AgentEffect::Goto { before_anchor, after_anchor }
+            if before_anchor == "1.1" && after_anchor == "1.8")
+        );
         // 共享 reader 的视口真被 agent 改到 1.8(双向共享 `[ADR-0030 决策2]`)。
         assert_eq!(reader.state().viewport.anchor_lid, "1.8");
         // trace 记录两步视口工具调用。
@@ -757,14 +1010,34 @@ mod tests {
         let mut reader = Reader::new(&b, DEFAULT_RADIUS);
         let mut messages = new_session();
         assert_eq!(messages.len(), 1); // 仅 system
-        // 第一回合:终答即停 → messages 累积 system + user + assistant。
+                                       // 第一回合:终答即停 → messages 累积 system + user + assistant。
         let fake = FakeAdapter::new(vec![turn_final("答1")], vec![]);
-        run(&b, &mut store, &mut reader, &fake, &mut messages, "问1", "t0", OuterConfig::default()).unwrap();
+        run(
+            &b,
+            &mut store,
+            &mut reader,
+            &fake,
+            &mut messages,
+            "问1",
+            "t0",
+            OuterConfig::default(),
+        )
+        .unwrap();
         let after_first = messages.len();
         assert!(after_first > 1);
         // 第二回合:复用同一 messages → 继续累积(跨回合保留)。
         let fake2 = FakeAdapter::new(vec![turn_final("答2")], vec![]);
-        run(&b, &mut store, &mut reader, &fake2, &mut messages, "问2", "t0", OuterConfig::default()).unwrap();
+        run(
+            &b,
+            &mut store,
+            &mut reader,
+            &fake2,
+            &mut messages,
+            "问2",
+            "t0",
+            OuterConfig::default(),
+        )
+        .unwrap();
         assert!(messages.len() > after_first);
         // 「新对话」:重置回仅 system。
         messages = new_session();

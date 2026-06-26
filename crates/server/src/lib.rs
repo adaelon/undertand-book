@@ -6,12 +6,15 @@
 //! 内层确定性交叉验停守(citations⊆证据集);anchor 缺省取 reader 当前 anchor(读模式起点)。
 //! 路由是**纯函数 `route(&mut AppState, Req) -> Reply`**(脱 socket 可单测,守 A2);
 //! socket 绑定 / worker 线程 / Mutex 锁 / 时间戳生成 / adapter 装配在 `main.rs`。
-//! synthesize、外层 E agent(S10f)、静态资源(S10e)留后续子切片。
+//! 外层 E agent(S10f)、静态资源(S10e)留后续子切片。
 use memory::{Anchor, MemoryStore, RecallQuery, SaveInput};
 use read_tools::{Book, ToolError};
 use reader::Reader;
 use runtime::orchestrator::{new_session, run, OuterConfig};
-use runtime::{AdapterError, AssistantTurn, CompletionRequest, Message, ModelAdapter, ParsedResponse, ToolSpec};
+use runtime::{
+    synthesize, AdapterError, AssistantTurn, CompletionRequest, Message, ModelAdapter,
+    ParsedResponse, ToolSpec,
+};
 use serde::Serialize;
 use serde_json::json;
 use std::collections::HashMap;
@@ -56,6 +59,12 @@ pub fn route(state: &mut AppState, req: Req) -> Reply {
             return query_method_not_allowed();
         }
         return route_query(state, req.body);
+    }
+    if path == "/book/synthesize" {
+        if req.method != "POST" {
+            return synthesize_method_not_allowed();
+        }
+        return route_synthesize(state, req.body);
     }
     // agent.*(S10f):外层 E agent 编排,POST(会话命令)`[ADR-0030]`。
     if path == "/agent/chat" {
@@ -164,7 +173,14 @@ fn route_mut(state: &mut AppState, path: &str, body: &str, now: &str) -> Reply {
                 let e = r.get("end").and_then(|x| x.as_u64())?;
                 Some((s as u32, e as u32))
             });
-            match state.reader.highlight(&state.book, &mut state.store, lid, range, "long_term", now) {
+            match state.reader.highlight(
+                &state.book,
+                &mut state.store,
+                lid,
+                range,
+                "long_term",
+                now,
+            ) {
                 Ok(e) => ok_json(&e),
                 Err(e) => err_reply(&e),
             }
@@ -173,7 +189,10 @@ fn route_mut(state: &mut AppState, path: &str, body: &str, now: &str) -> Reply {
             let (Some(lid), Some(text)) = (sget("lid"), sget("text")) else {
                 return validation("INVALID_RANGE", "reader.note 需 lid + text");
             };
-            match state.reader.note(&state.book, &mut state.store, lid, text, "long_term", now) {
+            match state
+                .reader
+                .note(&state.book, &mut state.store, lid, text, "long_term", now)
+            {
                 Ok(e) => ok_json(&e),
                 Err(e) => err_reply(&e),
             }
@@ -183,16 +202,26 @@ fn route_mut(state: &mut AppState, path: &str, body: &str, now: &str) -> Reply {
             let (Some(ty), Some(anchor), Some(content)) =
                 (sget("type"), sget("anchor_lid"), sget("content"))
             else {
-                return validation("INVALID_MEMORY_TYPE", "memory.save 需 type + anchor_lid + content");
+                return validation(
+                    "INVALID_MEMORY_TYPE",
+                    "memory.save 需 type + anchor_lid + content",
+                );
             };
             // layer:显式给则用,否则按类型默认(position→session,其余→long_term)`[ADR-0006]`。
-            let layer = sget("layer").unwrap_or(if ty == "position" { "session" } else { "long_term" });
+            let layer = sget("layer").unwrap_or(if ty == "position" {
+                "session"
+            } else {
+                "long_term"
+            });
             let input = SaveInput {
                 mem_id: None,
                 mem_type: ty.into(),
                 layer: layer.into(),
                 book_id: state.book.base.book_id.clone(),
-                anchor: Anchor { lid: Some(anchor.into()), concept: None },
+                anchor: Anchor {
+                    lid: Some(anchor.into()),
+                    concept: None,
+                },
                 content: content.into(),
                 range: None, // memory.save 直存(note / agent 高亮保留)无段内 range;人段内高亮走 reader.highlight `[ADR-0031]`
                 citations: None,
@@ -246,6 +275,28 @@ fn route_query(state: &mut AppState, body: &str) -> Reply {
         None => state.reader.state().viewport.anchor_lid,
     };
     match runtime::query(&state.book, q, &anchor, state.adapter.as_ref()) {
+        Ok(resp) => ok_json(&resp),
+        Err(e) => err_reply(&e),
+    }
+}
+/// `book.synthesize` → POST(P2)。输入显式 LID 集,不做 scope 外扩;citations 由 runtime 过滤为输入子集。
+fn route_synthesize(state: &mut AppState, body: &str) -> Reply {
+    let v = match body_value(body) {
+        Ok(v) => v,
+        Err(reply) => return reply,
+    };
+    let Some(arr) = v.get("lids").and_then(|x| x.as_array()) else {
+        return validation("INVALID_RANGE", "book.synthesize 需 lids 数组");
+    };
+    let lids: Vec<String> = arr
+        .iter()
+        .filter_map(|x| x.as_str().map(String::from))
+        .collect();
+    if lids.len() != arr.len() {
+        return validation("INVALID_RANGE", "book.synthesize lids 必须全是字符串");
+    }
+    let task = v.get("task").and_then(|x| x.as_str());
+    match synthesize(&state.book, &lids, task, state.adapter.as_ref()) {
         Ok(resp) => ok_json(&resp),
         Err(e) => err_reply(&e),
     }
@@ -399,6 +450,17 @@ fn agent_method_not_allowed() -> Reply {
 }
 
 /// book.query 是 book.* 里唯一只收 POST 的端点(LLM 命令),405 文案单列以免误导。
+fn synthesize_method_not_allowed() -> Reply {
+    Reply {
+        status: 405,
+        body: to_body(&ToolError {
+            error_code: "METHOD_NOT_ALLOWED".into(),
+            category: "validation".into(),
+            message: "book.synthesize 是 LLM 命令,只支持 POST(body {lids, task?})".into(),
+        }),
+    }
+}
+
 fn query_method_not_allowed() -> Reply {
     Reply {
         status: 405,
@@ -436,12 +498,16 @@ pub struct UnconfiguredAdapter;
 impl ModelAdapter for UnconfiguredAdapter {
     fn complete(&self, _req: CompletionRequest) -> Result<ParsedResponse, AdapterError> {
         Err(AdapterError {
-            message: "未配置 LLM 后端:缺 .env(OPENCODE_API_KEY / OPENCODE_BASE_URL / FLUID_LLM_MODEL)".into(),
+            message:
+                "未配置 LLM 后端:缺 .env(OPENCODE_API_KEY / OPENCODE_BASE_URL / FLUID_LLM_MODEL)"
+                    .into(),
         })
     }
     fn chat(&self, _: &[Message], _: &[ToolSpec]) -> Result<AssistantTurn, AdapterError> {
         Err(AdapterError {
-            message: "未配置 LLM 后端:缺 .env(OPENCODE_API_KEY / OPENCODE_BASE_URL / FLUID_LLM_MODEL)".into(),
+            message:
+                "未配置 LLM 后端:缺 .env(OPENCODE_API_KEY / OPENCODE_BASE_URL / FLUID_LLM_MODEL)"
+                    .into(),
         })
     }
 }
@@ -449,10 +515,13 @@ impl ModelAdapter for UnconfiguredAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base_schema::sample_base;
+    use base_schema::{
+        sample_base, FormulaComposition, FormulaParameter, FormulaSemantics, NodeKind,
+    };
     use reader::DEFAULT_RADIUS;
     use runtime::{RawCitation, ToolCall};
     use std::cell::RefCell;
+    use std::sync::{Arc, Mutex};
     use std::collections::VecDeque;
     use std::path::PathBuf;
 
@@ -485,6 +554,29 @@ mod tests {
         }
     }
 
+    struct RecordingAdapter {
+        lid: String,
+        users: Arc<Mutex<Vec<String>>>,
+    }
+    impl ModelAdapter for RecordingAdapter {
+        fn complete(&self, req: CompletionRequest) -> Result<ParsedResponse, AdapterError> {
+            self.users.lock().unwrap().push(req.user);
+            Ok(ParsedResponse {
+                sufficient: true,
+                answer: Some("桩答案".into()),
+                citations: vec![RawCitation {
+                    lid: self.lid.clone(),
+                    text: "片段".into(),
+                    role: "support".into(),
+                }],
+                model_supplement: vec![],
+            })
+        }
+        fn chat(&self, _: &[Message], _: &[ToolSpec]) -> Result<AssistantTurn, AdapterError> {
+            unimplemented!("server synthesize sidecar smoke 不走外层 chat")
+        }
+    }
+
     fn state_named(mem: &str) -> AppState {
         // sample_base:容器 "1" + 叶 "1.1";entity:command occ=["1.1"]、claim source=1.1。
         let src = "X".repeat(100) + "尾巴";
@@ -493,7 +585,13 @@ mod tests {
         let store = MemoryStore::open(tmp(mem)).unwrap();
         // 默认桩引用首叶 "1.1"(book.query 缺省 anchor = reader 首叶,落证据集)。
         let adapter = Box::new(StubAdapter { lid: "1.1".into() });
-        AppState { book, reader, store, adapter, messages: new_session() }
+        AppState {
+            book,
+            reader,
+            store,
+            adapter,
+            messages: new_session(),
+        }
     }
 
     /// 脚本化外层 chat 替身(S10f):按序吐 AssistantTurn,driv 外层 loop 脱真 LLM 可测(守 A2)。
@@ -503,7 +601,9 @@ mod tests {
     }
     impl ChatStubAdapter {
         fn scripted(turns: Vec<AssistantTurn>) -> Self {
-            ChatStubAdapter { turns: RefCell::new(turns.into()) }
+            ChatStubAdapter {
+                turns: RefCell::new(turns.into()),
+            }
         }
     }
     impl ModelAdapter for ChatStubAdapter {
@@ -511,17 +611,36 @@ mod tests {
             unimplemented!("agent 测不走内层 complete")
         }
         fn chat(&self, _: &[Message], _: &[ToolSpec]) -> Result<AssistantTurn, AdapterError> {
-            self.turns.borrow_mut().pop_front().ok_or_else(|| AdapterError {
-                message: "chat 脚本耗尽".into(),
-            })
+            self.turns
+                .borrow_mut()
+                .pop_front()
+                .ok_or_else(|| AdapterError {
+                    message: "chat 脚本耗尽".into(),
+                })
         }
     }
 
     fn get(s: &mut AppState, url: &str) -> Reply {
-        route(s, Req { method: "GET", url, body: "", now: "t0" })
+        route(
+            s,
+            Req {
+                method: "GET",
+                url,
+                body: "",
+                now: "t0",
+            },
+        )
     }
     fn post(s: &mut AppState, url: &str, body: &str) -> Reply {
-        route(s, Req { method: "POST", url, body, now: "t0" })
+        route(
+            s,
+            Req {
+                method: "POST",
+                url,
+                body,
+                now: "t0",
+            },
+        )
     }
 
     // ── S10a book.* GET(回归)────────────────────────────────
@@ -602,7 +721,11 @@ mod tests {
         let hl = post(&mut s, "/reader/highlight", r#"{"lid":"1.1"}"#);
         assert_eq!(hl.status, 200);
         assert!(hl.body.contains("highlight_id"));
-        let note = post(&mut s, "/reader/note", r#"{"lid":"1.1","text":"命令=对象化调用"}"#);
+        let note = post(
+            &mut s,
+            "/reader/note",
+            r#"{"lid":"1.1","text":"命令=对象化调用"}"#,
+        );
         assert_eq!(note.status, 200);
         assert!(note.body.contains("note_id"));
         // 标注单源:经 /memory/recall 回显(highlight + note 各一条)。
@@ -618,15 +741,27 @@ mod tests {
     fn reader_highlight_with_range_stores_substring() {
         let mut s = state_named("hlrange");
         // 叶 "1.1" 原文前 100 字符为 'X';range [0,5) → "XXXXX"。
-        let hl = post(&mut s, "/reader/highlight", r#"{"lid":"1.1","range":{"start":0,"end":5}}"#);
+        let hl = post(
+            &mut s,
+            "/reader/highlight",
+            r#"{"lid":"1.1","range":{"start":0,"end":5}}"#,
+        );
         assert_eq!(hl.status, 200);
-        let rc = post(&mut s, "/memory/recall", r#"{"lid":"1.1","type":"highlight"}"#);
+        let rc = post(
+            &mut s,
+            "/memory/recall",
+            r#"{"lid":"1.1","type":"highlight"}"#,
+        );
         assert_eq!(rc.status, 200);
         assert!(rc.body.contains("\"range\""));
         assert!(rc.body.contains("\"start\":0"));
         assert!(rc.body.contains("\"content\":\"XXXXX\""));
         // 越界 → 400 INVALID_RANGE 不降级。
-        let oob = post(&mut s, "/reader/highlight", r#"{"lid":"1.1","range":{"start":0,"end":9999}}"#);
+        let oob = post(
+            &mut s,
+            "/reader/highlight",
+            r#"{"lid":"1.1","range":{"start":0,"end":9999}}"#,
+        );
         assert_eq!(oob.status, 400);
         assert!(oob.body.contains("INVALID_RANGE"));
     }
@@ -669,11 +804,19 @@ mod tests {
     #[test]
     fn memory_delete_removes_and_missing_404() {
         let mut s = state_named("memdel");
-        let sv = post(&mut s, "/memory/save", r#"{"type":"note","anchor_lid":"1.1","content":"删我"}"#);
+        let sv = post(
+            &mut s,
+            "/memory/save",
+            r#"{"type":"note","anchor_lid":"1.1","content":"删我"}"#,
+        );
         assert_eq!(sv.status, 200);
         let v: serde_json::Value = serde_json::from_str(&sv.body).unwrap();
         let mem_id = v["mem_id"].as_str().unwrap();
-        let del = post(&mut s, "/memory/delete", &format!(r#"{{"mem_id":"{mem_id}"}}"#));
+        let del = post(
+            &mut s,
+            "/memory/delete",
+            &format!(r#"{{"mem_id":"{mem_id}"}}"#),
+        );
         assert_eq!(del.status, 200);
         assert!(del.body.contains("\"ok\":true"));
         let rc = post(&mut s, "/memory/recall", r#"{"lid":"1.1"}"#);
@@ -738,6 +881,104 @@ mod tests {
         assert!(r.body.contains("PROVIDER_ERROR"));
     }
 
+    #[test]
+    fn book_synthesize_returns_response() {
+        let mut s = state_named("synth");
+        let r = post(
+            &mut s,
+            "/book/synthesize",
+            r#"{"lids":["1.1"],"task":"总结"}"#,
+        );
+        assert_eq!(r.status, 200);
+        assert!(r.body.contains("\"source_lids\":[\"1.1\"]"));
+        assert!(r.body.contains("\"batched\":false"));
+        assert!(r.body.contains("桩答案"));
+    }
+
+    #[test]
+    fn book_synthesize_loads_formula_and_discourse_sidecars() {
+        let dir = std::env::temp_dir().join("ub-server-synth-sidecars");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut base = sample_base();
+        base.lid_nodes[1].kind = NodeKind::Formula;
+        std::fs::write(dir.join("base.json"), serde_json::to_string(&base).unwrap()).unwrap();
+        std::fs::write(dir.join("source.txt"), "X".repeat(100)).unwrap();
+        let semantics = vec![FormulaSemantics {
+            formula_lid: "1.1".into(),
+            parameters: vec![FormulaParameter {
+                symbol: "x".into(),
+                label: Some("input".into()),
+                meaning: "输入变量".into(),
+                unit: None,
+                domain: None,
+                evidence_lids: vec!["1.1".into()],
+            }],
+            composition: FormulaComposition {
+                source_lid: "1.1".into(),
+                meaning: "公式表达输入变量的关系".into(),
+                terms: vec!["x".into()],
+                evidence_lids: vec!["1.1".into()],
+            },
+            context_links: vec![],
+        }];
+        std::fs::write(
+            dir.join("formula_semantics.json"),
+            serde_json::to_string(&semantics).unwrap(),
+        )
+        .unwrap();
+        let discourse = serde_json::json!({
+            "items": [{
+                "lid": "1.1",
+                "mode": "informative",
+                "local_function": "definition",
+                "rhetorical_move": "main_point",
+                "local_summary": "定义核心公式",
+                "relations": []
+            }]
+        });
+        std::fs::write(dir.join("discourse_index.json"), discourse.to_string()).unwrap();
+
+        let book = Book::load(dir.to_str().unwrap()).unwrap();
+        let reader = Reader::new(&book, DEFAULT_RADIUS);
+        let store = MemoryStore::open(tmp("synth-sidecars")).unwrap();
+        let users = Arc::new(Mutex::new(Vec::new()));
+        let adapter = Box::new(RecordingAdapter {
+            lid: "1.1".into(),
+            users: Arc::clone(&users),
+        });
+        let mut s = AppState {
+            book,
+            reader,
+            store,
+            adapter,
+            messages: new_session(),
+        };
+
+        let r = post(
+            &mut s,
+            "/book/synthesize",
+            r#"{"lids":["1.1"],"task":"解释公式"}"#,
+        );
+        assert_eq!(r.status, 200);
+        assert!(r.body.contains("\"source_lids\":[\"1.1\"]"));
+        let prompts = users.lock().unwrap();
+        assert_eq!(prompts.len(), 1);
+        assert!(prompts[0].contains("Composition: 公式表达输入变量的关系"));
+        assert!(prompts[0].contains("- x (input): 输入变量 [1.1]"));
+        assert!(prompts[0].contains("Discourse 1.1: mode=informative"));
+        assert!(prompts[0].contains("local_function=definition"));
+        assert!(prompts[0].contains("summary=定义核心公式"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    #[test]
+    fn book_synthesize_missing_lids_400_and_get_405() {
+        let mut s = state_named("synth-missing");
+        assert_eq!(post(&mut s, "/book/synthesize", "{}").status, 400);
+        assert_eq!(get(&mut s, "/book/synthesize").status, 405);
+    }
     // ── S10f /agent/chat + /agent/new ───────────────────────
     // /agent/chat:外层 E agent 驱动共享 reader,返 OuterOutcome 含 effects(可撤销提议)。
     #[test]
@@ -754,7 +995,11 @@ mod tests {
                 }],
                 usage_total_tokens: Some(5),
             },
-            AssistantTurn { text: Some("已高亮第一段".into()), tool_calls: vec![], usage_total_tokens: Some(5) },
+            AssistantTurn {
+                text: Some("已高亮第一段".into()),
+                tool_calls: vec![],
+                usage_total_tokens: Some(5),
+            },
         ]));
         let r = post(&mut s, "/agent/chat", r#"{"message":"高亮第一段"}"#);
         assert_eq!(r.status, 200);

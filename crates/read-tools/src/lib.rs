@@ -1,8 +1,10 @@
 //! 读时确定性叶子工具(切片0:manifest/text;context/concept 见 S4c)`[ADR-0014]`。
 //! 消费冻结只读基座 `base.json` + 旁路原文 `source.txt`(UTF-16 span 口径 `[ADR-0024]`)。
 //! 纯函数库,无 LLM、provider 无关;HTTP 暴露推 S7。
-use base_schema::{Direction, EdgeScope, GraphNodeType, LidNode, NodeKind, ReadOnlyBase, Span};
-use serde::Serialize;
+use base_schema::{
+    Direction, EdgeScope, FormulaSemantics, GraphNodeType, LidNode, NodeKind, ReadOnlyBase, Span,
+};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use ts_rs::TS;
 
@@ -15,8 +17,39 @@ pub struct Book {
     source_u16: Vec<u16>,
     lid_idx: HashMap<String, usize>,
     node_idx: HashMap<String, usize>,
+    formula_semantics: Vec<FormulaSemantics>,
+    discourse_index: Vec<TechnicalLearningDiscourseItem>,
 }
 
+/// technical_learning discourse sidecar item(P2/P2a 契约的 Rust 读时载体)。
+/// 这里不进入 ReadOnlyBase,只供 synthesize/context 等读时路径消费。
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct TechnicalLearningDiscourseIndex {
+    pub items: Vec<TechnicalLearningDiscourseItem>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct TechnicalLearningDiscourseItem {
+    pub lid: String,
+    pub mode: String,
+    pub local_function: Option<String>,
+    pub rhetorical_move: Option<String>,
+    pub local_summary: Option<String>,
+    #[serde(default)]
+    pub relations: Vec<TechnicalLearningDiscourseRelation>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct TechnicalLearningDiscourseRelation {
+    pub target_lid: String,
+    #[serde(rename = "type")]
+    pub relation_type: String,
+    pub family: Option<String>,
+    pub direction: String,
+    pub confidence: f32,
+    #[serde(default)]
+    pub evidence_lids: Vec<String>,
+}
 /// context 默认 top-K(占位,待 P1 实测回填 ADR-0013/0016「何时回头」)。
 pub const DEFAULT_NEAR_K: usize = 10;
 
@@ -113,7 +146,26 @@ impl Book {
             serde_json::from_str(&base_s).map_err(|e| format!("解析 base.json 失败: {e}"))?;
         let source = std::fs::read_to_string(format!("{dir}/source.txt"))
             .map_err(|e| format!("读 source.txt 失败(原文旁路缺失,book.text 不可用): {e}"))?;
-        Ok(Book::new(base, &source))
+        let formula_semantics_path = format!("{dir}/formula_semantics.json");
+        let formula_semantics = match std::fs::read_to_string(&formula_semantics_path) {
+            Ok(s) => serde_json::from_str(&s)
+                .map_err(|e| format!("解析 formula_semantics.json 失败: {e}"))?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(e) => return Err(format!("读 formula_semantics.json 失败: {e}")),
+        };
+        let discourse_index_path = format!("{dir}/discourse_index.json");
+        let discourse_items = match std::fs::read_to_string(&discourse_index_path) {
+            Ok(s) => {
+                let index: TechnicalLearningDiscourseIndex = serde_json::from_str(&s)
+                    .map_err(|e| format!("解析 discourse_index.json 失败: {e}"))?;
+                index.items
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(e) => return Err(format!("读 discourse_index.json 失败: {e}")),
+        };
+        Ok(Book::new(base, &source)
+            .with_formula_semantics(formula_semantics)
+            .with_discourse_items(discourse_items))
     }
 
     pub fn new(base: ReadOnlyBase, source: &str) -> Book {
@@ -135,7 +187,32 @@ impl Book {
             source_u16,
             lid_idx,
             node_idx,
+            formula_semantics: Vec::new(),
+            discourse_index: Vec::new(),
         }
+    }
+
+    pub fn with_formula_semantics(mut self, formula_semantics: Vec<FormulaSemantics>) -> Book {
+        self.formula_semantics = formula_semantics;
+        self
+    }
+
+    pub fn formula_semantics(&self, formula_lid: &str) -> Option<&FormulaSemantics> {
+        self.formula_semantics
+            .iter()
+            .find(|s| s.formula_lid == formula_lid)
+    }
+
+    pub fn with_discourse_items(
+        mut self,
+        discourse_items: Vec<TechnicalLearningDiscourseItem>,
+    ) -> Book {
+        self.discourse_index = discourse_items;
+        self
+    }
+
+    pub fn discourse_item(&self, lid: &str) -> Option<&TechnicalLearningDiscourseItem> {
+        self.discourse_index.iter().find(|item| item.lid == lid)
     }
 
     fn node(&self, lid: &str) -> Result<&LidNode, ToolError> {
@@ -459,8 +536,8 @@ fn parent_lid(lid: &str) -> Option<String> {
 mod tests {
     use super::*;
     use base_schema::{
-        sample_base, Direction, EdgeScope, GraphEdge, GraphNode, GraphNodeType, LidNode, NodeKind,
-        ReadOnlyBase, Span,
+        sample_base, Direction, EdgeScope, FormulaComposition, FormulaParameter, FormulaSemantics,
+        GraphEdge, GraphNode, GraphNodeType, LidNode, NodeKind, ReadOnlyBase, Span,
     };
 
     fn book_with_far_edge() -> Book {
@@ -544,6 +621,79 @@ mod tests {
         Book::new(sample_base(), &src)
     }
 
+    fn formula_semantics() -> FormulaSemantics {
+        FormulaSemantics {
+            formula_lid: "1.1".into(),
+            parameters: vec![FormulaParameter {
+                symbol: "x".into(),
+                label: None,
+                meaning: "输入变量".into(),
+                unit: None,
+                domain: None,
+                evidence_lids: vec!["1.1".into()],
+            }],
+            composition: FormulaComposition {
+                source_lid: "1.1".into(),
+                meaning: "线性关系".into(),
+                terms: vec!["x".into()],
+                evidence_lids: vec!["1.1".into()],
+            },
+            context_links: vec![],
+        }
+    }
+    #[test]
+    fn load_reads_optional_discourse_index_sidecar() {
+        let dir = std::env::temp_dir().join("ub-read-tools-discourse-sidecar");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let base = sample_base();
+        std::fs::write(dir.join("base.json"), serde_json::to_string(&base).unwrap()).unwrap();
+        std::fs::write(dir.join("source.txt"), "X".repeat(100)).unwrap();
+        let index = TechnicalLearningDiscourseIndex {
+            items: vec![TechnicalLearningDiscourseItem {
+                lid: "1.1".into(),
+                mode: "informative".into(),
+                local_function: Some("definition".into()),
+                rhetorical_move: None,
+                local_summary: Some("定义命令模式".into()),
+                relations: vec![],
+            }],
+        };
+        std::fs::write(
+            dir.join("discourse_index.json"),
+            serde_json::to_string(&index).unwrap(),
+        )
+        .unwrap();
+
+        let book = Book::load(dir.to_str().unwrap()).unwrap();
+        assert_eq!(
+            book.discourse_item("1.1").unwrap().local_summary.as_deref(),
+            Some("定义命令模式")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    #[test]
+    fn load_reads_optional_formula_semantics_sidecar() {
+        let dir = std::env::temp_dir().join("ub-read-tools-formula-sidecar");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut base = sample_base();
+        base.lid_nodes[1].kind = NodeKind::Formula;
+        std::fs::write(dir.join("base.json"), serde_json::to_string(&base).unwrap()).unwrap();
+        std::fs::write(dir.join("source.txt"), "X".repeat(100)).unwrap();
+        std::fs::write(
+            dir.join("formula_semantics.json"),
+            serde_json::to_string(&vec![formula_semantics()]).unwrap(),
+        )
+        .unwrap();
+
+        let book = Book::load(dir.to_str().unwrap()).unwrap();
+        assert_eq!(
+            book.formula_semantics("1.1").unwrap().composition.meaning,
+            "线性关系"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
     #[test]
     fn text_by_single_lid() {
         let b = book();
