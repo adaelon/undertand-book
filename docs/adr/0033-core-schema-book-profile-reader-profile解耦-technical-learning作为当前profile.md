@@ -40,5 +40,6 @@
 
 ## 影响
 - **新增阶段方案**:`docs/切片方案-profile深路径.md` 作为 ADR-0033 的执行计划。
+- **2026-06-26 执行补记**:预构建层需补 PB0-PB4 独立切片,分别落地 profile metadata/header、FormulaSemantics sidecar、TechnicalLearningDiscourseIndex sidecar、Pass2 audit sidecar、profile sidecar build smoke;这些切片不改变 Core/Profile/Reader 边界,只是把本 ADR 已接受的 sidecar 规则从读时 fixture 补齐为正式构建产物。
 - **承**:[[ADR-0010]](Pass2 长程边)/ [[ADR-0017]](`book.synthesize`)/ [[ADR-0018]](memory consolidation)/ [[ADR-0019]](增量构建)/ [[ADR-0020]](记忆迁移)/ [[ADR-0029]](FormulaSemantics)/ [[ADR-0030]](agent 阅读器形态)。
 - **不改冻结命令面**:本 ADR 定边界和后续切片,不新增运行时代码接口。
