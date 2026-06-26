@@ -13,6 +13,9 @@ Profile deep path P2/P2a are complete and pushed. A documentation audit found mi
 3. Keep PB0-PB4 separate from P3/P4/P5; do not mix prebuild sidecar output with reader command policy or memory consolidation.
 4. Leave `参考2.md` and `.fluid/` untracked unless the user explicitly asks to version them.
 
+## Working rules
+- Commit messages must be `切片名称 + 实现功能`; example: `PB0 profile metadata: add header writer`.
+
 ## Uncommitted / unfinished
 - `参考2.md`: user-provided source material, still untracked.
 - `.fluid/`: untracked local/runtime directory, not part of this slice.
