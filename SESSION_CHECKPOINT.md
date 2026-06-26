@@ -14,7 +14,7 @@ Profile deep path P2/P2a are complete and pushed. A documentation audit found mi
 4. Leave `参考2.md` and `.fluid/` untracked unless the user explicitly asks to version them.
 
 ## Working rules
-- Commit messages must be `切片名称 + 实现功能`; example: `PB0 profile metadata: add header writer`.
+- Commit messages must start with the concrete slice id from the plan (`P0`, `P1`, `P2a`, `PB0`, `PB1`, etc.) followed by the implemented function; examples: `PB0 profile metadata: add header writer`, `P2a book.context discourse projection: add discourse via`. Do not use a loose label like `Checkpoint rules` as the slice name.
 
 ## Uncommitted / unfinished
 - `参考2.md`: user-provided source material, still untracked.
