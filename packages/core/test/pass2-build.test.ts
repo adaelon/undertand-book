@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { TECHNICAL_LEARNING_LONG_RANGE_EDGE_TYPES } from "../src/pass2";
-import { buildLidToWindowIndex, buildLongRangeCandidates, gatePass2BuildOutput, isCrossWindow } from "../src/pass2-build";
+import { buildLidToWindowIndex, buildLongRangeCandidates, EDGE_TYPE_CONTRACTS, gatePass2BuildOutput, isCrossWindow } from "../src/pass2-build";
 import type { Pass2GateDropReason, TechnicalLearningAcceptedEdge } from "../src/pass2-build";
 import type { GraphNode } from "../src/generated/GraphNode";
 import type { LidNode } from "../src/generated/LidNode";
@@ -32,6 +32,25 @@ describe("PB3-1 edge type vocabulary", () => {
   it("does not include the forbidden types", () => {
     for (const t of ["related_to", "same_problem", "reuses_formula"]) {
       expect(TECHNICAL_LEARNING_LONG_RANGE_EDGE_TYPES).not.toContain(t);
+    }
+  });
+});
+
+describe("PB3-4 edge type contracts", () => {
+  it("covers every edge type with a self-consistent contract", () => {
+    expect(Object.keys(EDGE_TYPE_CONTRACTS).sort()).toEqual([...TECHNICAL_LEARNING_LONG_RANGE_EDGE_TYPES].sort());
+    for (const [key, contract] of Object.entries(EDGE_TYPE_CONTRACTS)) {
+      expect(contract.type).toBe(key);
+      expect(contract.when.length).toBeGreaterThan(0);
+      expect(contract.when_not.length).toBeGreaterThan(0);
+      expect(contract.evidence.length).toBeGreaterThan(0);
+      expect(contract.roles.length).toBeGreaterThan(0);
+    }
+  });
+
+  it("marks only analogous_to undirected (grill §6 direction policy)", () => {
+    for (const contract of Object.values(EDGE_TYPE_CONTRACTS)) {
+      expect(contract.direction).toBe(contract.type === "analogous_to" ? "undirected" : "directed");
     }
   });
 });

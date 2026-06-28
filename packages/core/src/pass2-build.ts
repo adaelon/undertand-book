@@ -6,7 +6,7 @@ import type { FormulaSemantics } from "./generated/FormulaSemantics";
 import type { GraphEdge } from "./generated/GraphEdge";
 import type { GraphNode } from "./generated/GraphNode";
 import type { LidNode } from "./generated/LidNode";
-import type { LocalFunction, RhetoricalMove, TechnicalLearningDiscourseIndex } from "./discourse-index";
+import type { LocalFunction, RhetoricalMove, TechnicalLearningDiscourseIndex, TechnicalLearningDiscourseItem } from "./discourse-index";
 import type { ProfileArtifactHeader } from "./profile-artifact";
 import { TECHNICAL_LEARNING_LONG_RANGE_EDGE_TYPES, type TechnicalLearningLongRangeEdgeType } from "./pass2";
 import type { Window } from "./window";
@@ -343,6 +343,139 @@ export interface Pass2BuildAuditSidecar {
 export interface Pass2BuildResult {
   edges: GraphEdge[];
   audit: Pass2BuildAuditSidecar;
+}
+
+// ---------------------------------------------------------------------------
+// PB3-4 work packet + edge type contracts (grill §5 / §6 / §10).
+// The contracts are the per-edge-type rubric the Pass2 prompt must apply; the
+// work packet is the per-source-window unit the LLM classifies. Both are build-only.
+// ---------------------------------------------------------------------------
+
+export interface EdgeTypeContract {
+  type: TechnicalLearningLongRangeEdgeType;
+  direction: "directed" | "undirected";
+  when: string;
+  when_not: string;
+  evidence: string;
+  roles: string;
+}
+
+// grill §5 (per-type when/when-not/evidence/roles) + §6 (direction policy).
+// directed roles read "source <type> target". analogous_to is undirected; contrasts
+// defaults to directed and may be undirected only for pure symmetric comparison.
+export const EDGE_TYPE_CONTRACTS: Record<TechnicalLearningLongRangeEdgeType, EdgeTypeContract> = {
+  builds_on: {
+    type: "builds_on",
+    direction: "directed",
+    when: "source extends or depends on target's mechanism, adding new capability on top of it.",
+    when_not: "mere topical overlap, or source only restates/summarizes target (use restates/summarizes).",
+    evidence: "source text shows it reuses or extends the target concept introduced elsewhere.",
+    roles: "source is the later/dependent idea; target is the foundation it builds on.",
+  },
+  prerequisite: {
+    type: "prerequisite",
+    direction: "directed",
+    when: "target cannot be understood without first understanding source (pedagogical ordering).",
+    when_not: "source merely extends target's mechanism (that is builds_on, not prerequisite).",
+    evidence: "target text relies on a concept whose definition/derivation lives at source.",
+    roles: "source is the prerequisite; target is what needs it first.",
+  },
+  applies: {
+    type: "applies",
+    direction: "directed",
+    when: "source puts target's concept/formula to use in a concrete setting.",
+    when_not: "source only names target without using it (topical overlap), or just defines it.",
+    evidence: "source text performs/uses the target idea on a concrete case.",
+    roles: "source is the application; target is the concept/formula being applied.",
+  },
+  exemplifies: {
+    type: "exemplifies",
+    direction: "directed",
+    when: "source is a concrete example/instance of target's general concept.",
+    when_not: "source uses the concept operationally without being an illustrative example (use applies).",
+    evidence: "source text is presented as an example of the target concept.",
+    roles: "source is the example; target is the general concept.",
+  },
+  refines: {
+    type: "refines",
+    direction: "directed",
+    when: "source narrows, corrects, or makes more precise the target's claim/definition.",
+    when_not: "source replaces/denies target (contradicts) or merely repeats it (restates).",
+    evidence: "source text revises or tightens the target statement.",
+    roles: "source is the refinement; target is the coarser prior statement.",
+  },
+  supports: {
+    type: "supports",
+    direction: "directed",
+    when: "source provides evidence/argument that strengthens target's claim.",
+    when_not: "source builds new capability on target (builds_on) rather than evidencing it.",
+    evidence: "source text argues for or backs the target claim.",
+    roles: "source is the supporting evidence; target is the claim supported.",
+  },
+  rebuts: {
+    type: "rebuts",
+    direction: "directed",
+    when: "source argues against target's claim, weakening or refuting it.",
+    when_not: "source merely differs in scope/setting without opposing it (contrasts).",
+    evidence: "source text presents a counter-argument to the target claim.",
+    roles: "source is the rebuttal; target is the claim being rebutted.",
+  },
+  contradicts: {
+    type: "contradicts",
+    direction: "directed",
+    when: "source states something that cannot both be true with target.",
+    when_not: "source argues against target with reasoning (rebuts), or merely differs (contrasts).",
+    evidence: "both statements are explicit and logically incompatible.",
+    roles: "source is the conflicting statement; target is the contradicted one.",
+  },
+  summarizes: {
+    type: "summarizes",
+    direction: "directed",
+    when: "source condenses target's content into a shorter recap.",
+    when_not: "source adds new capability (builds_on) or new precision (refines).",
+    evidence: "source text recaps the target material.",
+    roles: "source is the summary; target is the summarized material.",
+  },
+  analogous_to: {
+    type: "analogous_to",
+    direction: "undirected",
+    when: "two ideas share a structural parallel without one depending on the other.",
+    when_not: "one idea depends on or extends the other (builds_on/prerequisite).",
+    evidence: "both texts show the same structure applied to different subjects.",
+    roles: "symmetric: neither endpoint is primary.",
+  },
+  contrasts: {
+    type: "contrasts",
+    direction: "directed",
+    when: "source is compared against target to highlight differences (not a logical conflict).",
+    when_not: "source denies target (contradicts) or argues against it (rebuts).",
+    evidence: "source text explicitly compares/differentiates itself from target.",
+    roles: "default directed (source contrasted against target); undirected only for pure symmetric comparison.",
+  },
+};
+
+export interface CandidateNodeSnapshot {
+  id: string;
+  type: string;
+  name: string;
+  lids: string[];
+}
+
+// grill §10: the per-source-window unit the Pass2 LLM classifies. Chapter is used
+// only for grouping/coverage/audit, not as the minimal classification unit.
+export interface Pass2WorkPacket {
+  packet_id: string;
+  source_window: {
+    index: number;
+    leaf_lids: string[];
+    title_path: string[];
+    text: Array<{ lid: string; text: string }>;
+  };
+  source_nodes: CandidateNodeSnapshot[];
+  source_discourse: TechnicalLearningDiscourseItem[];
+  source_formula_semantics: FormulaSemantics[];
+  candidate_targets: LongRangeCandidate[];
+  edge_type_contracts: Record<string, EdgeTypeContract>;
 }
 
 export interface Pass2GateOptions {

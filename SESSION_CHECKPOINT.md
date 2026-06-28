@@ -7,17 +7,22 @@
 - On read, compare with `git log -3`; if different, trust git log.
 
 ## What's in progress
-PB3(Pass2 预构建编排 + audit sidecar)。已完成 PB3-1(契约+edge type 11 类+cross-window)、PB3-2a/2b(确定性候选生成,grill §11 四信号全)、PB3-3(PB3 gate:split evidence/support_level/跨窗口硬校验)。PB3-1+2a 已 commit(a1713e0);**PB3-2b + PB3-3 未 commit**。
+PB3(Pass2 预构建编排 + audit sidecar)。已完成 PB3-1/2a/2b/3/4(契约+候选生成 grill §11 四信号+PB3 gate+work packet/edge contracts/prompt 重写)。已 commit 到 e294806(含 PB3-1/2a/2b/3);**PB3-4 未 commit**。仅剩 PB3-5 编排接线。
 
 ## Next steps (ready to hand off)
-1. (可选)commit PB3-2b+PB3-3(信息以 `PB3-2b+PB3-3` 开头)。
-2. PB3-4 work packet(grill §10 `Pass2WorkPacket`)+ 新 Pass2 prompt `agents/pass2-longrange-linker.md` 重写:默认拒绝姿态(grill §13)、每 edge type 的 when/when-not/evidence/direction contract(grill §5)、输出 accepted/pending/rejected(grill §3)。
-3. PB3-5 `pass1-batch` 编排:`buildLongRangeCandidates` → 写 build-only `long_range_candidates.json` → (subagent)→ `gatePass2BuildOutput` → 写回 `base.json` long_range 边 + `pass2_audit.json`(grill §2/§3)。CLI smoke。
-4. 不混 reader.*/memory./PB4 smoke/P7 MCP。
+1. (可选)commit PB3-4(信息以 `PB3-4` 开头)。
+2. PB3-5 `pass1-batch.ts` 编排(最后一刀):
+   a. 装配 `Pass2WorkPacket`(注入源窗口正文/title_path,用 `EDGE_TYPE_CONTRACTS`);
+   b. `buildLongRangeCandidates(...)` → 写 build-only `long_range_candidates.json`(不被 Book::load 读);
+   c. 读 Pass2 subagent 输出(像 pass1 那样用 fixture/手抽)→ `gatePass2BuildOutput` → 把 accepted 的 `GraphEdge(scope=long_range)` 合并进 `base.json.graph_edges` + 写 `pass2_audit.json`;
+   d. zod 自检新 sidecar(`Pass2BuildAuditSidecarZ`、`LongRangeCandidateIndexZ` 视需要补 zod.ts);
+   e. CLI smoke + C2/C4。
+3. 不混 reader.*/memory./PB4 smoke/P7 MCP。
 
 ## Uncommitted / unfinished
-- `packages/core/src/pass2-build.ts`:`buildLongRangeCandidates` signal 3 formula 桥(PB3-2b)+ `gatePass2BuildOutput` PB3 gate(PB3-3),未 commit。
-- `packages/core/test/pass2-build.test.ts`:15 测(PB3-1 6 + PB3-2a 5 + PB3-2b 2 + PB3-3 2,已绿,未 commit)。
+- `packages/core/src/pass2-build.ts`:`EDGE_TYPE_CONTRACTS` + `Pass2WorkPacket`/`CandidateNodeSnapshot`(PB3-4),未 commit。
+- `agents/pass2-longrange-linker.md`:重写为 PB3 candidate-driven prompt(PB3-4),未 commit。
+- `packages/core/test/pass2-build.test.ts`:17 测(+PB3-4 2,已绿,未 commit)。
 - `docs/代码链路.md`、`SESSION_CHECKPOINT.md`:已更新(未 commit)。
 - 保持 untracked:`参考2.md`、`参考_discourse_prompt.md`、`参考pass2.md`、`agent交互书.md`、`docs/预购建流程.md`、`.fluid/`。
 - `.understand-book/`:gitignore 生成物(PB2b smoke 覆写成 sample.md 小基座,需真书时重建)。
