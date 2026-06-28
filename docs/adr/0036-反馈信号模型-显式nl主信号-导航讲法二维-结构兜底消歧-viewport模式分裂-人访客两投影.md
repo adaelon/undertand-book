@@ -57,6 +57,7 @@ route 内核**全程零 LLM**:LLM 只把 NL 提问识别成 `{轴+类别+target}
 ## 影响
 
 - **P3**(人带读)判据加:消费 NL 提问→`{轴+类别}`、裸信号走结构兜底(`route_from.back ∩ 未读前置`)、viewport 静默 re-sync;"未读前置"的历史过滤在带读 loop/policy 层消费 ②,route 只给 back 组。
+  - **实现排期**:P3 经 A4 拆 P3-1..P3-4(详见切片方案 P3 拆分)。**裸"没懂"兜底依赖 P4 真 reading journey 历史源,P3-1/P3-2 不做、推迟 P4 之后**(否决了 memory 已交互 LID 近似 / visited 留空占位,二者「已读」判定失真违质量优先)。P3-2 实做范围 = NL→`{轴+类别}` + viewport re-sync(均 prompt)。
 - **P7**(访客向导)判据加:访客反馈用 ③ 历史(`cursor.last_frontier`)、讲法轴塌缩为中立重述、访客自身终裁(无可撤销提议环节)。
 - **P8**(route Core)不变:`route_from.back` 组本就在 5 类里;"未读"过滤不进 route 内核(消费历史在上层),route 零 LLM 不破。
 - 不改 ADR-0034/0035 正文;本 ADR 是其"反馈维"的延伸。

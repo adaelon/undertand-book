@@ -176,3 +176,6 @@ memory 层的后台 LLM 流水线,参照 Codex `codex-rs/memories` 落地 `[ADR-
 
 ## 导航轴 / 讲法轴 (navigation axis / explanation axis)
 反馈意图的两个正交轴 `[ADR-0036]`:**导航轴**(去哪)落 `route_from` 的 5 类导航类别;**讲法轴**(怎么讲/多细/重讲)落 technical_learning policy 讲法层(复用 `book.synthesize` + reader_profile),不动 route。agent 据 NL 提问语义把信号定到 `{轴, route 类别, 可能的 target}`;裸"没懂"歧义靠结构兜底(`route_from(at).back ∩ 未读前置`)+ 可撤销提议 + 二次信号升级消解,不靠 LLM 神判。状态:NEW(详见 [docs/adr/0036])。
+
+## TechnicalLearningAgentPolicy(带读教学整形)
+technical_learning profile 对 `route_from` 5 类前沿的**确定性教学整形** `[ADR-0034 决策4/0037]`,与 `book.synthesize`「Core+policy」同构([docs/adr/0033] 决策5)。**reorder** = 按教学优先序重排 5 类分组(组间序;无 reader_profile 时取中性默认 `continue>back>concretize>forward>cross`,占位常量待实测/profile 回填);**过滤** = 剔空组。零 LLM、确定性可单测。落 **runtime**(非 read-tools Core,守 Core/Profile 分离;profile 偏见绝不渗进 route 内核,[docs/adr/0034] 否决);经新工具 `book.guided_route_from(at, k?)` 暴露(= route_from + 整形;裸 `book.route_from` 仍在,给访客/高级)。返回有序分组 `GuidedFrontier`(保分组导航语义,不平铺)。reader_profile 个性化(新手 back 置顶 / 已懂跳过)留 P4。状态:NEW(详见 [docs/adr/0037])。

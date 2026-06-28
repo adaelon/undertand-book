@@ -2,7 +2,7 @@
 //! 确定性档位检索(复用 `read-tools` 的 `Book`)+ ModelAdapter 合一轮判停 + 确定性交叉验停。
 //! 切片0:scope 两档(local/chapter)+ FakeAdapter(确定性测);NativeAdapter 见 S5b。
 use base_schema::{GraphNodeType, LidNode, NodeKind};
-use read_tools::{Book, ToolError};
+use read_tools::{Book, Frontier, NavCategory, RankedStep, ToolError};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use ts_rs::TS;
@@ -1104,6 +1104,62 @@ impl ModelAdapter for NativeAdapter {
     }
 }
 
+/// technical_learning 教学整形后的有序前沿分组 `[ADR-0037]`。
+/// = route_from 5 类前沿按教学序重排 + 剔空组;保分组导航语义(不平铺)。
+#[derive(Debug, Serialize, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct GuidedGroup {
+    pub category: NavCategory,
+    pub steps: Vec<RankedStep>,
+}
+
+/// 无 reader_profile 时的中性默认教学序 `[ADR-0037 决策4]`:主线推进优先,不假设新手。
+/// 占位常量,实测 / reader_profile(P4)回填(ADR-0037 何时回头)。
+const TEACHING_ORDER: [NavCategory; 5] = [
+    NavCategory::Continue,
+    NavCategory::Back,
+    NavCategory::Concretize,
+    NavCategory::Forward,
+    NavCategory::Cross,
+];
+
+/// technical_learning 教学整形 `[ADR-0037 决策2]`:按 `TEACHING_ORDER` 重排 5 类分组 + 剔空组。
+/// 零 LLM、确定性可单测;与 `book.synthesize`「Core+policy」同构(profile policy 在 runtime,不进 Core)。
+fn technical_learning_reorder(f: Frontier) -> Vec<GuidedGroup> {
+    let Frontier {
+        back,
+        forward,
+        concretize,
+        cross,
+        continue_,
+    } = f;
+    let mut buckets: Vec<(NavCategory, Vec<RankedStep>)> = vec![
+        (NavCategory::Back, back),
+        (NavCategory::Forward, forward),
+        (NavCategory::Concretize, concretize),
+        (NavCategory::Cross, cross),
+        (NavCategory::Continue, continue_),
+    ];
+    TEACHING_ORDER
+        .iter()
+        .filter_map(|cat| {
+            let pos = buckets.iter().position(|(c, _)| c == cat)?;
+            let (category, steps) = buckets.remove(pos);
+            (!steps.is_empty()).then_some(GuidedGroup { category, steps })
+        })
+        .collect()
+}
+
+/// `book.guided_route_from(at, k?)` `[ADR-0037 决策1]`:route_from(Core)+ technical_learning 教学整形。
+/// 裸 `book.route_from` 仍在(访客/高级);住户带读优先用本工具拿整形过的 route。
+pub fn guided_route_from(
+    book: &Book,
+    at: &str,
+    k: Option<usize>,
+) -> Result<Vec<GuidedGroup>, ToolError> {
+    Ok(technical_learning_reorder(book.route_from(at, k)?))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1114,6 +1170,51 @@ mod tests {
     use read_tools::{TechnicalLearningDiscourseItem, TechnicalLearningDiscourseRelation};
     use std::cell::RefCell;
     use std::collections::VecDeque;
+
+    fn rstep(lid: &str) -> RankedStep {
+        RankedStep {
+            lid: lid.into(),
+            edge_type: "x".into(),
+            why: String::new(),
+            evidence_lids: vec![],
+            score: 1.0,
+        }
+    }
+
+    // P3-3 教学整形:中性序 continue>back>concretize>forward>cross + 剔空组,确定性。
+    #[test]
+    fn technical_learning_reorder_neutral_order_and_drops_empty() {
+        let f = Frontier {
+            back: vec![rstep("1.0")],
+            forward: vec![],
+            concretize: vec![],
+            cross: vec![rstep("9.9")],
+            continue_: vec![rstep("1.2")],
+        };
+        let g = technical_learning_reorder(f);
+        let cats: Vec<NavCategory> = g.iter().map(|x| x.category).collect();
+        // 中性序剔空组后 = [Continue, Back, Cross]
+        assert_eq!(
+            cats,
+            vec![NavCategory::Continue, NavCategory::Back, NavCategory::Cross]
+        );
+        assert_eq!(g[0].steps[0].lid, "1.2"); // continue
+        assert_eq!(g[1].steps[0].lid, "1.0"); // back
+        assert_eq!(g[2].steps[0].lid, "9.9"); // cross
+    }
+
+    // 全空前沿 → 无分组(非 error)。
+    #[test]
+    fn technical_learning_reorder_empty_frontier_yields_no_groups() {
+        let f = Frontier {
+            back: vec![],
+            forward: vec![],
+            concretize: vec![],
+            cross: vec![],
+            continue_: vec![],
+        };
+        assert!(technical_learning_reorder(f).is_empty());
+    }
 
     /// 确定性测试替身:按调用次序吐脚本化 ParsedResponse(loop 每轮调一次 complete)。
     struct FakeAdapter {

@@ -12,8 +12,8 @@ use read_tools::{Book, ToolError};
 use reader::Reader;
 use runtime::orchestrator::{new_session, run, OuterConfig};
 use runtime::{
-    synthesize, AdapterError, AssistantTurn, CompletionRequest, Message, ModelAdapter,
-    ParsedResponse, ToolSpec,
+    guided_route_from, synthesize, AdapterError, AssistantTurn, CompletionRequest, Message,
+    ModelAdapter, ParsedResponse, ToolSpec,
 };
 use serde::Serialize;
 use serde_json::json;
@@ -147,6 +147,22 @@ fn route_book(book: &Book, leaf: &str, q: &HashMap<String, String>) -> Reply {
             };
             match book.route_from(at, k) {
                 Ok(f) => ok_json(&f),
+                Err(e) => err_reply(&e),
+            }
+        }
+        "guided_route_from" => {
+            let Some(at) = q.get("at") else {
+                return validation("INVALID_RANGE", "book.guided_route_from 需 at 查询参数");
+            };
+            let k = match q.get("k") {
+                None => None,
+                Some(s) => match s.parse::<usize>() {
+                    Ok(n) => Some(n),
+                    Err(_) => return validation("INVALID_K", "k 须为非负整数"),
+                },
+            };
+            match guided_route_from(book, at, k) {
+                Ok(g) => ok_json(&json!({ "at": at, "groups": g })),
                 Err(e) => err_reply(&e),
             }
         }
@@ -724,6 +740,14 @@ mod tests {
         // 缺 target → 400;invalid 端点 → 404。
         assert_eq!(get(&mut s, "/book/route_to?from=1.1").status, 400);
         assert_eq!(get(&mut s, "/book/route_to?from=1.1&target=9.9").status, 404);
+        // guided_route_from(P3-3):200 + {at, groups}(教学整形,空组已剔)。
+        let gf = get(&mut s, "/book/guided_route_from?at=1.1");
+        assert_eq!(gf.status, 200);
+        assert!(gf.body.contains("\"groups\"") && gf.body.contains("\"at\""));
+        // 缺 at → 400;非法 k → 400;invalid at → 404。
+        assert_eq!(get(&mut s, "/book/guided_route_from").status, 400);
+        assert_eq!(get(&mut s, "/book/guided_route_from?at=1.1&k=abc").status, 400);
+        assert_eq!(get(&mut s, "/book/guided_route_from?at=9.9").status, 404);
     }
 
     #[test]

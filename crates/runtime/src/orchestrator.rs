@@ -175,6 +175,18 @@ pub fn tool_specs() -> Vec<ToolSpec> {
             }),
         ),
         s(
+            "book.guided_route_from",
+            "从某 LID 出发的【教学整形】导航前沿:= route_from + technical_learning 教学排序(按教学优先序重排 5 类分组、剔空组),返回有序分组 [{category, steps}]。带读/引导优先用本工具(裸 route_from 给底层/访客)。零 LLM,全真 LID+真边。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "at": {"type": "string", "description": "出发 LID"},
+                    "k": {"type": "integer", "description": "可选,每类前沿 top-K"}
+                },
+                "required": ["at"]
+            }),
+        ),
+        s(
             "book.route_to",
             "在导航图上求 from→target 的确定性路径(BFS,返回导航步序列,全真 LID+真边)。target 须为已解析 LID(先用 book.concept/context 定位)。",
             json!({
@@ -265,6 +277,14 @@ const SYSTEM_PROMPT: &str = "你是这本书的阅读 agent。事实性回答经
 特别注意——当用户要求操作阅读器时,必须真的调用对应 reader 工具来执行,不能只靠读原文代替:\
 要求『翻到/跳转』调 reader.gotoLid(lid);要求『高亮』调 reader.highlight(lid);要求『记笔记/记录』调 reader.note(lid,text)。\
 流程:先用 book.concept/context 定位到目标 LID,一旦定位到就立即调用 reader 工具完成操作,然后给简短终答,不要反复读原文。\
+主动带读——当用户请求『带我读/一步步讲/引导我看这章/接着讲』时,进入逐停靠点带读:\
+①先 reader.state() 拿当前 anchor(用户可能自己翻动过);\
+②book.guided_route_from(anchor) 看【教学整形】后的 5 类导航前沿(有序分组 [{category, steps}],按教学优先序排好、已剔空组;category∈back 前置/forward 深入/concretize 例证/cross 关联/continue 顺读);\
+③按用户意图从前沿挑一个下一停靠点(无特别意图就顺教学序取靠前的;想回看前置挑 back、想深入挑 forward、要例子挑 concretize、问关联挑 cross),停靠点 LID 只能取自 guided_route_from 返回,不可编造;\
+④reader.gotoLid(停靠点) 真翻过去;\
+⑤book.synthesize([上一停靠点, 新停靠点]) 取带 citation 的解释;\
+⑥讲完就停:终答=简短讲解 + 一句『继续顺读,还是想回看/深入/要例子?』,然后等用户下一句。\
+一个回合只前进一个停靠点,不要一次连读整章。\
 证据不足时诚实说明,不要编造 LID。准备好最终答案时直接用自然语言回复(不再调用工具)。";
 
 /// 执行一次工具调用,返回 `(喂回模型的结果 JSON, 可选可撤销 effect)` `[ADR-0015/0026/0030]`。
@@ -393,6 +413,24 @@ fn dispatch(
             let k = args.get("k").and_then(|v| v.as_u64()).map(|u| u as usize);
             let body = match book.route_from(at, k) {
                 Ok(f) => to_json(&f),
+                Err(e) => to_json(&e),
+            };
+            (body, None)
+        }
+        "book.guided_route_from" => {
+            let Some(at) = sget("at") else {
+                return (
+                    err_json(
+                        "INVALID_RANGE",
+                        "validation",
+                        "book.guided_route_from 需 at",
+                    ),
+                    None,
+                );
+            };
+            let k = args.get("k").and_then(|v| v.as_u64()).map(|u| u as usize);
+            let body = match crate::guided_route_from(book, at, k) {
+                Ok(g) => to_json(&serde_json::json!({ "at": at, "groups": g })),
                 Err(e) => to_json(&e),
             };
             (body, None)
@@ -850,6 +888,87 @@ mod tests {
         assert_eq!(recalled[0].citations[0].lid, "1.1");
     }
 
+    // P3-1 带读骨架:一个停靠点回合走通 reader.state → book.route_from → reader.gotoLid → book.synthesize → 终答。
+    // 测的是带读管道串得通(确定性、回归保护),非 prompt 智能(后者靠真 LLM 手动验)。
+    #[test]
+    fn guided_read_one_stop_pipeline() {
+        let b = book_leaves(3);
+        let mut store = MemoryStore::open(tmp("guided")).unwrap();
+        let fake = FakeAdapter::new(
+            vec![
+                turn_calls(vec![call("c1", "reader.state", "{}")]),
+                turn_calls(vec![call("c2", "book.route_from", r#"{"at":"1.1"}"#)]),
+                turn_calls(vec![call("c3", "reader.gotoLid", r#"{"lid":"1.2"}"#)]),
+                turn_calls(vec![call(
+                    "c4",
+                    "book.synthesize",
+                    r#"{"lids":["1.1","1.2"]}"#,
+                )]),
+                turn_final("这一段承接上一段。继续顺读,还是想回看/深入/要例子?"),
+            ],
+            // synthesize 单批一次 complete:citations 全在输入 lids 内
+            vec![ParsedResponse {
+                sufficient: true,
+                answer: Some("两段的综合".into()),
+                citations: vec![
+                    RawCitation {
+                        lid: "1.1".into(),
+                        text: "片段a".into(),
+                        role: "support".into(),
+                    },
+                    RawCitation {
+                        lid: "1.2".into(),
+                        text: "片段b".into(),
+                        role: "support".into(),
+                    },
+                ],
+                model_supplement: vec![],
+            }],
+        );
+        let mut reader = Reader::new(&b, DEFAULT_RADIUS);
+        let mut messages = new_session();
+        let out = run(
+            &b,
+            &mut store,
+            &mut reader,
+            &fake,
+            &mut messages,
+            "带我读这一章",
+            "t0",
+            OuterConfig::default(),
+        )
+        .unwrap();
+        assert!(!out.incomplete);
+        assert_eq!(out.turns, 5);
+        assert_eq!(
+            out.answer.as_deref(),
+            Some("这一段承接上一段。继续顺读,还是想回看/深入/要例子?")
+        );
+        // 视口跳转按回合首尾合并成单条 Goto(1.1 → 1.2),可撤销
+        assert_eq!(out.effects.len(), 1);
+        match &out.effects[0] {
+            AgentEffect::Goto {
+                before_anchor,
+                after_anchor,
+            } => {
+                assert_eq!(before_anchor, "1.1");
+                assert_eq!(after_anchor, "1.2");
+            }
+            other => panic!("期望 Goto,得到 {other:?}"),
+        }
+        // 带读管道工具序列:state → route_from → gotoLid → synthesize
+        let tools: Vec<&str> = out.trace.iter().map(|t| t.tool.as_str()).collect();
+        assert_eq!(
+            tools,
+            vec![
+                "reader.state",
+                "book.route_from",
+                "reader.gotoLid",
+                "book.synthesize"
+            ]
+        );
+    }
+
     // 双重停机:max_turns 触顶,每轮都请求工具 → 诚实标 incomplete + CONTEXT_BUDGET_EXCEEDED。
     #[test]
     fn halts_at_max_turns_marks_incomplete() {
@@ -911,6 +1030,7 @@ mod tests {
         let names: Vec<String> = tool_specs().into_iter().map(|s| s.name).collect();
         assert!(names.iter().any(|n| n == "book.route_from"));
         assert!(names.iter().any(|n| n == "book.route_to"));
+        assert!(names.iter().any(|n| n == "book.guided_route_from"));
     }
 
     #[test]
@@ -965,6 +1085,40 @@ mod tests {
         let (bad, _) = dispatch(
             "book.route_to",
             r#"{"from":"1.1"}"#,
+            &b,
+            &mut store,
+            &mut reader,
+            &fake,
+            "t0",
+        );
+        assert!(bad.contains("INVALID_RANGE") && bad.contains("validation"));
+    }
+
+    // P3-3 教学整形命令面:guided_route_from 返 {at, groups}(有序分组+剔空),缺 at→validation,只读不产 effect。
+    #[test]
+    fn dispatch_guided_route_from_returns_ordered_groups_and_validates() {
+        let b = book_leaves(3);
+        let mut store = MemoryStore::open(tmp("guided-route")).unwrap();
+        let fake = FakeAdapter::new(vec![], vec![]);
+        let mut reader = Reader::new(&b, DEFAULT_RADIUS);
+        let (ok, eff) = dispatch(
+            "book.guided_route_from",
+            r#"{"at":"1.1"}"#,
+            &b,
+            &mut store,
+            &mut reader,
+            &fake,
+            "t0",
+        );
+        // 1.1 仅 continue(next_sibling 1.2)非空 → 剔空后仅 continue 组;{at, groups} 信封。
+        assert!(ok.contains("\"groups\"") && ok.contains("\"at\""));
+        assert!(ok.contains("\"category\":\"continue\"") && ok.contains("1.2"));
+        assert!(!ok.contains("\"category\":\"forward\"")); // 空组已剔
+        assert!(eff.is_none());
+        // 缺 at → validation 信封。
+        let (bad, _) = dispatch(
+            "book.guided_route_from",
+            "{}",
             &b,
             &mut store,
             &mut reader,
