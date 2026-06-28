@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { TECHNICAL_LEARNING_LONG_RANGE_EDGE_TYPES } from "../src/pass2";
-import { buildLidToWindowIndex, buildLongRangeCandidates, isCrossWindow } from "../src/pass2-build";
+import { buildLidToWindowIndex, buildLongRangeCandidates, gatePass2BuildOutput, isCrossWindow } from "../src/pass2-build";
+import type { Pass2GateDropReason, TechnicalLearningAcceptedEdge } from "../src/pass2-build";
 import type { GraphNode } from "../src/generated/GraphNode";
+import type { LidNode } from "../src/generated/LidNode";
+import type { FormulaSemantics } from "../src/generated/FormulaSemantics";
+import type { TechnicalLearningLongRangeEdgeType } from "../src/pass2";
 import type { TechnicalLearningDiscourseIndex, TechnicalLearningDiscourseItem } from "../src/discourse-index";
 
 const header = {
@@ -144,5 +148,123 @@ describe("PB3-2a candidate builder (shared-node bridge)", () => {
     expect(forward).toBeDefined();
     expect(forward!.source_lids).toEqual(["1.1"]);
     expect(forward!.target_lids).toEqual(["3.2", "4.2"]);
+  });
+});
+
+describe("PB3-2b candidate builder (formula bridge, signal 3)", () => {
+  const idx = buildLidToWindowIndex([{ leafLids: ["1.1"] }, { leafLids: ["2.1"] }, { leafLids: ["3.1"] }, { leafLids: ["4.1"] }]);
+  const formula = (formulaLid: string, targetLid: string): FormulaSemantics => ({
+    formula_lid: formulaLid,
+    parameters: [],
+    composition: { source_lid: formulaLid, meaning: "m", terms: [], evidence_lids: [formulaLid] },
+    context_links: [{ target_lid: targetLid, relation: "applied_in", description: "d", evidence_lids: [targetLid] }],
+  });
+
+  it("bridges the nodes at a formula LID and its cross-window context link", () => {
+    const result = buildLongRangeCandidates({
+      graphNodes: [concept("concept:formula_x", ["2.1"]), concept("concept:applied", ["4.1"])],
+      lidToWindowIndex: idx,
+      formulaSemantics: [formula("2.1", "4.1")],
+    });
+
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({
+      candidate_id: "cand:concept:formula_x->concept:applied",
+      source_lids: ["2.1"],
+      target_lids: ["4.1"],
+      relation_hints: ["applies", "builds_on"],
+    });
+    expect(result[0].seed_reasons).toContain("signal3_formula_bridge:2.1");
+    expect(result[0].seed_score).toBeCloseTo(0.7);
+  });
+
+  it("does not bridge when the formula link stays inside one window", () => {
+    const sameWindowIdx = buildLidToWindowIndex([{ leafLids: ["2.1", "2.2"] }]);
+    const result = buildLongRangeCandidates({
+      graphNodes: [concept("concept:formula_x", ["2.1"]), concept("concept:applied", ["2.2"])],
+      lidToWindowIndex: sameWindowIdx,
+      formulaSemantics: [formula("2.1", "2.2")],
+    });
+
+    expect(result).toEqual([]);
+  });
+});
+
+describe("PB3-3 PB3 gate", () => {
+  const leaf = (lid: string): LidNode => ({ lid, path: lid.split(".").map(Number), kind: "paragraph", span: { start: 0, end: 1 }, children: [] });
+  const gateNodes = [concept("entity:a", []), concept("entity:b", [])];
+  const gateLids = [leaf("1.1"), leaf("3.1")];
+  const idx = buildLidToWindowIndex([{ leafLids: ["1.1"] }, { leafLids: ["2.1"] }, { leafLids: ["3.1"] }]);
+
+  const baseEdge = (over: Partial<TechnicalLearningAcceptedEdge> = {}): TechnicalLearningAcceptedEdge => ({
+    candidate_id: "c1",
+    source: "entity:a",
+    target: "entity:b",
+    type: "builds_on",
+    direction: "directed",
+    scope: "long_range",
+    weight: 0.8,
+    source_evidence_lids: ["1.1"],
+    target_evidence_lids: ["3.1"],
+    evidence_lids: ["1.1", "3.1"],
+    support_level: "explicit",
+    rationale: "r",
+    ...over,
+  });
+
+  it("lowers a valid accepted edge and routes pending/rejected to audit only", () => {
+    const result = gatePass2BuildOutput(
+      {
+        accepted_edges: [baseEdge()],
+        pending_edges: [baseEdge({ candidate_id: "p1", support_level: "weak_inference" })],
+        rejected_candidates: [{ candidate_id: "r1", reason: "topical_overlap_only" }],
+      },
+      header,
+      gateNodes,
+      gateLids,
+      idx,
+    );
+
+    expect(result.edges).toEqual([
+      { source: "entity:a", target: "entity:b", type: "builds_on", direction: "directed", scope: "long_range", weight: 0.8 },
+    ]);
+    expect(result.audit.accepted).toHaveLength(1);
+    expect(result.audit.accepted[0]).toMatchObject({
+      candidate_id: "c1",
+      source_evidence_lids: ["1.1"],
+      target_evidence_lids: ["3.1"],
+      support_level: "explicit",
+    });
+    expect(result.audit.pending.map((p) => p.candidate_id)).toEqual(["p1"]);
+    expect(result.audit.rejected).toEqual([{ candidate_id: "r1", reason: "topical_overlap_only" }]);
+    expect(result.audit.gate_dropped).toEqual([]);
+  });
+
+  it("hard-drops accepted edges that violate the gate, with the right reason", () => {
+    const cases: Array<[Partial<TechnicalLearningAcceptedEdge>, Pass2GateDropReason]> = [
+      [{ type: "related_to" as TechnicalLearningLongRangeEdgeType }, "invalid_type"],
+      [{ scope: "local" as "long_range" }, "invalid_scope"],
+      [{ source: "entity:ghost" }, "missing_source"],
+      [{ target: "entity:ghost" }, "missing_target"],
+      [{ source_evidence_lids: [] }, "empty_source_evidence"],
+      [{ target_evidence_lids: [] }, "empty_target_evidence"],
+      [{ evidence_lids: ["1.1"] }, "evidence_not_covering"],
+      [{ evidence_lids: ["1.1", "3.1", "9.9"] }, "dangling_evidence"],
+      [{ support_level: "weak_inference" }, "weak_inference"],
+      [{ weight: 0.3 }, "below_weight_threshold"],
+      [{ source_evidence_lids: ["1.1"], target_evidence_lids: ["1.1"], evidence_lids: ["1.1"] }, "not_cross_window"],
+    ];
+
+    for (const [over, reason] of cases) {
+      const result = gatePass2BuildOutput(
+        { accepted_edges: [baseEdge(over)], pending_edges: [], rejected_candidates: [] },
+        header,
+        gateNodes,
+        gateLids,
+        idx,
+      );
+      expect(result.edges).toEqual([]);
+      expect(result.audit.gate_dropped).toEqual([{ candidate_id: "c1", reason }]);
+    }
   });
 });

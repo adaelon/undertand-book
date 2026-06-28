@@ -7,19 +7,17 @@
 - On read, compare with `git log -3`; if different, trust git log.
 
 ## What's in progress
-PB3(Pass2 预构建编排 + audit sidecar)。已完成 PB3-1(候选契约 + edge type 扩 11 类 + cross-window helper)、PB3-2a(确定性候选生成 shared-node bridge,signal 4+1+2)。均**未 commit**。join 算法已与用户确认:shared-node 路线,不加语义桥(读时 scope 外扩兜底)。
+PB3(Pass2 预构建编排 + audit sidecar)。已完成 PB3-1(契约+edge type 11 类+cross-window)、PB3-2a/2b(确定性候选生成,grill §11 四信号全)、PB3-3(PB3 gate:split evidence/support_level/跨窗口硬校验)。PB3-1+2a 已 commit(a1713e0);**PB3-2b + PB3-3 未 commit**。
 
 ## Next steps (ready to hand off)
-1. PB3-2b:signal 3 formula 桥(FormulaSemantics 定义/使用跨窗口)→ 补进 `buildLongRangeCandidates` 或独立函数;走 formula_semantics.context_links,不与节点 occurrence 混。
-2. PB3-3 PB3 gate(split evidence、support_level≠weak_inference、cross-window 硬校验)+ audit 类型(grill §7/§8/§9);现有 `pass2.ts:gateTechnicalLearningPass2LongRange` 是 P1 简版,需扩/新建。
-3. PB3-4 work packet(grill §10)+ Pass2 prompt 更新(默认拒绝 + edge type contract,grill §5/§13)。
-4. PB3-5 `pass1-batch` 编排:写回 base long_range 边 + `pass2_audit.json` + build-only `long_range_candidates.json`(grill §2/§3)。
-5. 不混 reader.*/memory./PB4 smoke/P7 MCP。
+1. (可选)commit PB3-2b+PB3-3(信息以 `PB3-2b+PB3-3` 开头)。
+2. PB3-4 work packet(grill §10 `Pass2WorkPacket`)+ 新 Pass2 prompt `agents/pass2-longrange-linker.md` 重写:默认拒绝姿态(grill §13)、每 edge type 的 when/when-not/evidence/direction contract(grill §5)、输出 accepted/pending/rejected(grill §3)。
+3. PB3-5 `pass1-batch` 编排:`buildLongRangeCandidates` → 写 build-only `long_range_candidates.json` → (subagent)→ `gatePass2BuildOutput` → 写回 `base.json` long_range 边 + `pass2_audit.json`(grill §2/§3)。CLI smoke。
+4. 不混 reader.*/memory./PB4 smoke/P7 MCP。
 
 ## Uncommitted / unfinished
-- `packages/core/src/pass2.ts`:edge type 扩 11 类 + 导出列表(PB3-1,未 commit)。
-- `packages/core/src/pass2-build.ts`:候选契约 + cross-window helper(PB3-1)+ `buildLongRangeCandidates`(PB3-2a),未 commit。
-- `packages/core/test/pass2-build.test.ts`:11 测(PB3-1 6 + PB3-2a 5,已绿,未 commit)。
+- `packages/core/src/pass2-build.ts`:`buildLongRangeCandidates` signal 3 formula 桥(PB3-2b)+ `gatePass2BuildOutput` PB3 gate(PB3-3),未 commit。
+- `packages/core/test/pass2-build.test.ts`:15 测(PB3-1 6 + PB3-2a 5 + PB3-2b 2 + PB3-3 2,已绿,未 commit)。
 - `docs/代码链路.md`、`SESSION_CHECKPOINT.md`:已更新(未 commit)。
 - 保持 untracked:`参考2.md`、`参考_discourse_prompt.md`、`参考pass2.md`、`agent交互书.md`、`docs/预购建流程.md`、`.fluid/`。
 - `.understand-book/`:gitignore 生成物(PB2b smoke 覆写成 sample.md 小基座,需真书时重建)。
