@@ -157,6 +157,68 @@ export const TechnicalLearningDiscourseIndexZ = z.object({
   header: ProfileArtifactHeaderZ,
   items: z.array(TechnicalLearningDiscourseItemZ),
 });
+// PB3 Pass2 build audit sidecar self-check (mirrors pass2-build.ts).
+export const TechnicalLearningLongRangeEdgeTypeZ = z.enum([
+  "builds_on",
+  "contradicts",
+  "exemplifies",
+  "prerequisite",
+  "refines",
+  "applies",
+  "analogous_to",
+  "contrasts",
+  "supports",
+  "rebuts",
+  "summarizes",
+]);
+export const SupportLevelZ = z.enum(["explicit", "strong_inference", "weak_inference"]);
+export const Pass2AuditEdgeZ = z.object({
+  candidate_id: z.string(),
+  source: z.string(),
+  target: z.string(),
+  type: TechnicalLearningLongRangeEdgeTypeZ,
+  source_evidence_lids: z.array(z.string()),
+  target_evidence_lids: z.array(z.string()),
+  evidence_lids: z.array(z.string()),
+  support_level: SupportLevelZ,
+  rationale: z.string(),
+  failure_risk: z.string().optional(),
+});
+export const RejectedCandidateZ = z.object({
+  candidate_id: z.string(),
+  reason: z.enum([
+    "topical_overlap_only",
+    "missing_source_evidence",
+    "missing_target_evidence",
+    "relation_contract_not_met",
+    "direction_unclear",
+    "weak_retrieval_value",
+    "duplicate_or_local_relation",
+  ]),
+});
+export const Pass2GateDropZ = z.object({
+  candidate_id: z.string(),
+  reason: z.enum([
+    "invalid_type",
+    "invalid_scope",
+    "missing_source",
+    "missing_target",
+    "empty_source_evidence",
+    "empty_target_evidence",
+    "evidence_not_covering",
+    "dangling_evidence",
+    "weak_inference",
+    "below_weight_threshold",
+    "not_cross_window",
+  ]),
+});
+export const Pass2BuildAuditSidecarZ = z.object({
+  header: ProfileArtifactHeaderZ,
+  accepted: z.array(Pass2AuditEdgeZ),
+  pending: z.array(Pass2AuditEdgeZ),
+  rejected: z.array(RejectedCandidateZ),
+  gate_dropped: z.array(Pass2GateDropZ),
+});
 export const ReadOnlyBaseZ = z.object({
   book_id: z.string(),
   lid_nodes: z.array(LidNodeZ),

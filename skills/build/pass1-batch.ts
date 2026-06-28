@@ -9,14 +9,15 @@ import { epubToSource } from "../../packages/core/src/epub-adapter";
 import { splitWindows } from "../../packages/core/src/window";
 import { mergeAndGate, type Pass1Output } from "../../packages/core/src/merge";
 import { projectCatalog } from "../../packages/core/src/catalog";
-import { FormulaSemanticsSidecarZ, ReadOnlyBaseZ, TechnicalLearningDiscourseIndexZ } from "../../packages/core/src/zod";
+import { FormulaSemanticsSidecarZ, Pass2BuildAuditSidecarZ, ReadOnlyBaseZ, TechnicalLearningDiscourseIndexZ } from "../../packages/core/src/zod";
 import { buildProfileArtifactHeader, buildProfileMetadata } from "../../packages/core/src/profile-artifact";
 import { buildFormulaSemanticsSidecar, type FormulaSemanticsBuildCandidate } from "../../packages/core/src/formula-semantics";
 import { buildTechnicalLearningDiscourseIndex, type TechnicalLearningDiscourseItem } from "../../packages/core/src/discourse-index";
+import { buildLidToWindowIndex, buildLongRangeCandidates, gatePass2BuildOutput, type Pass2LlmOutput } from "../../packages/core/src/pass2-build";
 
-const [book, outputsPath, idxList, formulaCandidatesPath, discourseCandidatesPath] = process.argv.slice(2);
+const [book, outputsPath, idxList, formulaCandidatesPath, discourseCandidatesPath, pass2OutputPath] = process.argv.slice(2);
 if (!book || !outputsPath || !idxList) {
-  console.error("usage: tsx pass1-batch.ts <book> <outputs.json> <idx,idx,...> [formula-candidates.json] [discourse-candidates.json]");
+  console.error("usage: tsx pass1-batch.ts <book> <outputs.json> <idx,idx,...> [formula-candidates.json] [discourse-candidates.json] [pass2-output.json]");
   process.exit(2);
 }
 
@@ -45,9 +46,7 @@ const sampledRate = sampledLeaves.size ? sampledAnchored / sampledLeaves.size : 
 
 // 固化小基座 + zod 校验
 const bookId = "game-programming-patterns";
-const base = { book_id: bookId, lid_nodes: lidNodes, graph_nodes: nodes, graph_edges: edges };
-const parsedBase = ReadOnlyBaseZ.parse(base); // 产出前自检(字段失配抛错)
-const profileHeader = buildProfileArtifactHeader({ book_id: parsedBase.book_id });
+const profileHeader = buildProfileArtifactHeader({ book_id: bookId });
 const profileMetadata = buildProfileMetadata(profileHeader);
 const formulaSidecar = formulaCandidatesPath
   ? buildFormulaSemanticsSidecar(
@@ -65,16 +64,47 @@ const discourseSidecar = discourseCandidatesPath
     )
   : null;
 if (discourseSidecar) TechnicalLearningDiscourseIndexZ.parse(discourseSidecar.sidecar);
+
+// PB3-5: Pass2 长程边 —— 确定性候选(build-only)+ 可选 subagent 输出过 gate 写回
+const lidToWindowIndex = buildLidToWindowIndex(windows);
+const candidateIndex = {
+  candidates: buildLongRangeCandidates({
+    graphNodes: nodes,
+    lidToWindowIndex,
+    discourseIndex: discourseSidecar?.sidecar,
+    formulaSemantics: formulaSidecar?.sidecar.items,
+  }),
+};
+const pass2Gated = pass2OutputPath
+  ? gatePass2BuildOutput(
+      JSON.parse(readFileSync(pass2OutputPath, "utf8")) as Pass2LlmOutput,
+      profileHeader,
+      nodes,
+      lidNodes,
+      lidToWindowIndex,
+    )
+  : null;
+if (pass2Gated) Pass2BuildAuditSidecarZ.parse(pass2Gated.audit); // 产出前自检
+const longRangeEdges = pass2Gated?.edges ?? [];
+
+// long_range 边合并进 base 后统一固化(local + long_range)
+const base = { book_id: bookId, lid_nodes: lidNodes, graph_nodes: nodes, graph_edges: [...edges, ...longRangeEdges] };
+ReadOnlyBaseZ.parse(base); // 产出前自检(字段失配抛错)
 const dir = `.understand-book/${bookId}`;
 mkdirSync(dir, { recursive: true });
 writeFileSync(`${dir}/base.json`, JSON.stringify(base, null, 2), "utf8");
 writeFileSync(`${dir}/source.txt`, source, "utf8"); // 原文旁路:book.text 取真原文用,按 LID.span(UTF-16)切 `[ADR-0024]`
 writeFileSync(`${dir}/profile_metadata.json`, JSON.stringify(profileMetadata, null, 2), "utf8");
+// build-only:不被 Book::load 读,供 Pass2 prompt 输入 + 覆盖/审计调试 `[PB3 grill §2]`
+writeFileSync(`${dir}/long_range_candidates.json`, JSON.stringify(candidateIndex, null, 2), "utf8");
 if (formulaSidecar) {
   writeFileSync(`${dir}/formula_semantics.json`, JSON.stringify(formulaSidecar.sidecar, null, 2), "utf8");
 }
 if (discourseSidecar) {
   writeFileSync(`${dir}/discourse_index.json`, JSON.stringify(discourseSidecar.sidecar, null, 2), "utf8");
+}
+if (pass2Gated) {
+  writeFileSync(`${dir}/pass2_audit.json`, JSON.stringify(pass2Gated.audit, null, 2), "utf8");
 }
 
 console.log(`[pass1-batch] ${book}`);
@@ -95,5 +125,11 @@ if (formulaSidecar) {
 if (discourseSidecar) {
   console.log(
     `  discourse index: ${dir}/discourse_index.json items=${discourseSidecar.sidecar.items.length} dropped=${discourseSidecar.dropped.length}`,
+  );
+}
+console.log(`  long_range candidates: ${dir}/long_range_candidates.json candidates=${candidateIndex.candidates.length}`);
+if (pass2Gated) {
+  console.log(
+    `  pass2 audit: ${dir}/pass2_audit.json long_range_edges=${pass2Gated.edges.length} accepted=${pass2Gated.audit.accepted.length} pending=${pass2Gated.audit.pending.length} rejected=${pass2Gated.audit.rejected.length} gate_dropped=${pass2Gated.audit.gate_dropped.length}`,
   );
 }

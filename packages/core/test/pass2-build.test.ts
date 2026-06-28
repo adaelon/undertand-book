@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { TECHNICAL_LEARNING_LONG_RANGE_EDGE_TYPES } from "../src/pass2";
 import { buildLidToWindowIndex, buildLongRangeCandidates, EDGE_TYPE_CONTRACTS, gatePass2BuildOutput, isCrossWindow } from "../src/pass2-build";
 import type { Pass2GateDropReason, TechnicalLearningAcceptedEdge } from "../src/pass2-build";
+import { Pass2BuildAuditSidecarZ } from "../src/zod";
 import type { GraphNode } from "../src/generated/GraphNode";
 import type { LidNode } from "../src/generated/LidNode";
 import type { FormulaSemantics } from "../src/generated/FormulaSemantics";
@@ -18,6 +19,8 @@ const header = {
 };
 
 const concept = (id: string, occurrences: string[]): GraphNode => ({ id, type: "concept", name: id, occurrences, source_lid: null });
+
+const leaf = (lid: string): LidNode => ({ lid, path: lid.split(".").map(Number), kind: "paragraph", span: { start: 0, end: 1 }, children: [] });
 
 const discourse = (items: TechnicalLearningDiscourseItem[]): TechnicalLearningDiscourseIndex => ({ header, items });
 
@@ -210,7 +213,6 @@ describe("PB3-2b candidate builder (formula bridge, signal 3)", () => {
 });
 
 describe("PB3-3 PB3 gate", () => {
-  const leaf = (lid: string): LidNode => ({ lid, path: lid.split(".").map(Number), kind: "paragraph", span: { start: 0, end: 1 }, children: [] });
   const gateNodes = [concept("entity:a", []), concept("entity:b", [])];
   const gateLids = [leaf("1.1"), leaf("3.1")];
   const idx = buildLidToWindowIndex([{ leafLids: ["1.1"] }, { leafLids: ["2.1"] }, { leafLids: ["3.1"] }]);
@@ -285,5 +287,45 @@ describe("PB3-3 PB3 gate", () => {
       expect(result.edges).toEqual([]);
       expect(result.audit.gate_dropped).toEqual([{ candidate_id: "c1", reason }]);
     }
+  });
+});
+
+describe("PB3-5 candidate -> gate integration", () => {
+  it("builds candidates, gates a hand Pass2 output, and the audit passes zod", () => {
+    const idx = buildLidToWindowIndex([{ leafLids: ["1.1"] }, { leafLids: ["2.1"] }, { leafLids: ["3.1"] }]);
+    const nodes = [concept("concept:command", ["1.1", "3.1"]), concept("concept:undo", ["3.1"])];
+    const lidNodes = [leaf("1.1"), leaf("3.1")];
+
+    const candidates = buildLongRangeCandidates({ graphNodes: nodes, lidToWindowIndex: idx });
+    expect(candidates.length).toBeGreaterThan(0);
+
+    const output = {
+      accepted_edges: [
+        {
+          candidate_id: candidates[0].candidate_id,
+          source: "concept:command",
+          target: "concept:undo",
+          type: "applies" as const,
+          direction: "directed" as const,
+          scope: "long_range" as const,
+          weight: 0.8,
+          source_evidence_lids: ["1.1"],
+          target_evidence_lids: ["3.1"],
+          evidence_lids: ["1.1", "3.1"],
+          support_level: "strong_inference" as const,
+          rationale: "command (ch1) is applied by undo (ch3)",
+        },
+      ],
+      pending_edges: [],
+      rejected_candidates: [],
+    };
+
+    const result = gatePass2BuildOutput(output, header, nodes, lidNodes, idx);
+
+    expect(result.edges).toEqual([
+      { source: "concept:command", target: "concept:undo", type: "applies", direction: "directed", scope: "long_range", weight: 0.8 },
+    ]);
+    expect(() => Pass2BuildAuditSidecarZ.parse(result.audit)).not.toThrow();
+    expect(result.audit.accepted[0].support_level).toBe("strong_inference");
   });
 });

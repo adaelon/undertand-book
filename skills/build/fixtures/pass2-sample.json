@@ -1,0 +1,35 @@
+{
+  "accepted_edges": [
+    {
+      "candidate_id": "c1",
+      "source": "concept:command",
+      "target": "concept:undo",
+      "type": "applies",
+      "direction": "directed",
+      "scope": "long_range",
+      "weight": 0.8,
+      "source_evidence_lids": ["1.2"],
+      "target_evidence_lids": ["1.5.2"],
+      "evidence_lids": ["1.2", "1.5.2"],
+      "support_level": "strong_inference",
+      "rationale": "demo accepted edge (gate drops it on sample base: nodes absent)"
+    }
+  ],
+  "pending_edges": [
+    {
+      "candidate_id": "c2",
+      "source": "concept:command",
+      "target": "concept:undo",
+      "type": "applies",
+      "direction": "directed",
+      "scope": "long_range",
+      "weight": 0.5,
+      "source_evidence_lids": ["1.2"],
+      "target_evidence_lids": ["1.5.2"],
+      "evidence_lids": ["1.2", "1.5.2"],
+      "support_level": "weak_inference",
+      "rationale": "weak inference -> pending, never base"
+    }
+  ],
+  "rejected_candidates": [{ "candidate_id": "c3", "reason": "topical_overlap_only" }]
+}
