@@ -364,6 +364,7 @@ agent 标注默认 session 层,用户保留才升 long_term。
 | PB0 profile artifact header/metadata | `ProfileArtifactHeader` | 生成统一 profile header 与 `profile_metadata.json`;后续 sidecar 复用同一 book/profile/core 版本 | 所有 profile sidecar 的版本锚点 |
 | PB1 FormulaSemantics sidecar materialization | `FormulaSemantics`; `ProfileArtifactHeader` | 将 SA5 gate 产物固化为带 header 的 profile sidecar,并让读时 loader 兼容完整格式 | `formula_semantics.json` |
 | PB2 `TechnicalLearningDiscourseIndex` artifact | `TechnicalLearningDiscourseIndex`; `ProfileArtifactHeader` | 抽取/闸/固化 discourse item 与 relation;只校验 LID/evidence/enum/confidence,不判断语义质量 | `discourse_index.json` |
+| PB2b discourse extractor two-stage prompt | `TechnicalLearningDiscourseIndex`; LID-prefixed window | 先逐 LID 分类,再基于分类连局部 discourse relation;prompt 只产候选,gate 决定能否落 sidecar | `agents/discourse-index-extractor.md` + prompt fixtures |
 | PB3 Pass2 build orchestration + audit sidecar | `TechnicalLearningPass2Input/Output`; `TechnicalLearningDiscourseIndex`; `FormulaSemantics` | 预构建期调用 pass2 subagent,过确定性 gate,写回 base long_range 边与 audit sidecar | `GraphEdge(scope="long_range")` + `pass2_audit.json` |
 | PB4 profile artifact build smoke | PB0-PB3 outputs | 用最小 fixture 从构建输出目录加载 base/source/profile sidecars,验证 read-tools/runtime 能消费 | 预构建到读时的端到端 smoke |
 | P1 `technical_learning.pass2_longrange_v1` | `ProfileArtifactHeader`; `TechnicalLearningPass2Input/Output`; 可选 `TechnicalLearningDiscourseIndex`; 可选 `FormulaSemantics` | 读时 context/query 消费 long_range 边;Pass2 gate 能降级候选 | `book.context far` / `book.query cross_chapter/global` 可见长程证据 |
@@ -433,11 +434,28 @@ ADR-0033 已把 `discourse_index`、`FormulaSemantics`、Pass2 audit、profile m
 - **判据**:合法 fixture 写出 `TechnicalLearningDiscourseIndex`;悬空 target/evidence、非法 enum、越界 confidence 被丢弃并可观测;P2/P2a 不再需要手写 discourse fixture。
 - **触达**:`[ADR-0033 决策3/4/9]`
 
+### PB2b · discourse extractor 两阶段 prompt `[docs/subagent]`
+- **做**:新增 `technical_learning.discourse_index_extractor` prompt,把 discourse 候选抽取拆成两轮:Step A 逐 LID 分类,只产 `mode/local_function/rhetorical_move/local_summary`;Step B 基于 Step A 分类结果连局部 `relations[]`,再交给 `buildTechnicalLearningDiscourseIndex` gate。
+- **不做**:不扩 `discourse_index.json` 正式 schema;不加入 `secondary_functions/mentioned_nodes/claim_ids/warnings/signal` 等 prompt trace 字段;不抽 long_range relation;不产 graph node/claim/formula;不把 relation 直接写 Core `graph_edges`;不混入 PB3 Pass2 编排。
+- **原则**:
+  - LLM 只做可校验的语篇标注,不是深度阅读理解或问答。
+  - prompt 必须显式给当前闭集 enum;输出枚举值不得自造。
+  - 只为输入窗口中的真实 LID 产 item;`target_lid/evidence_lids` 只能回填输入窗口或明确 boundary LID。
+  - `local_function` 表示"这段在做什么",不是主题词;topic 不得塞进 function。
+  - 关系少而准;相邻 LID 不自动构成 `continues`。
+  - 每条 relation 的 `evidence_lids` 至少包含 source LID 和 target LID;证据弱就不连。
+  - `local_summary` 是局部功能摘要,不引入书外知识或扩写解释。
+  - `confidence` 校准后使用;低于阈值的 relation 进 dropped/report,不进 sidecar。
+- **建议 gate 收紧**:在现有 LID/enum/confidence/evidence 校验之外,增加 evidence 包含 source+target、relation 低置信丢弃、`local_summary` 长度限制;窗口边界限制可在 build 输入具备 `allowedTargetLids` 后再加。
+- **判据**:仓库有两阶段 prompt 文件和最小 fixture;fixture 覆盖"定义+解释"、"例子"、"相邻但不连";`rg` 可找到"two-stage"/"少连边"/"evidence_lids 包含 source LID 和 target LID";正式 sidecar schema 保持不变。
+- **触达**:`[ADR-0033 决策3/4/9]`
+
 ### PB3 · Pass2 预构建编排 + audit sidecar 写盘 `[TS/subagent]`
-- **做**:把 `pass2-longrange-linker` 接入正式 build pipeline,输入 PB1/PB2 sidecars 与 catalog/graph_nodes/window summaries;调用 `gateTechnicalLearningPass2LongRange`,将通过的 long_range 边写回 `base.json`,同时写带 header 的 `pass2_audit.json` 和 dropped report。
-- **不做**:不让 Pass2 产新节点;不让 LLM 重建悬空 LID;不把 rationale/evidence_lids 塞进 Core `GraphEdge`。
-- **判据**:fixture 可从 Pass2 output 生成 `GraphEdge(scope="long_range")` 与 audit sidecar;悬空端点/空证据/悬空证据被确定性丢弃;`book.context far` 能读到写回后的 long_range 边。
-- **触达**:`[ADR-0010/0011/0033]`
+- **做**:按 `docs/PB3-pass2-prompt-grill.md` 的已确认设计,把 Pass2 从开放式抽边改成 deterministic `long_range_candidates.json` → LLM candidate classification → profile-aware gate → `base.json` long_range 写回 + `pass2_audit.json`;输入 PB1/PB2 sidecars、catalog/graph_nodes、source-window work packets。
+- **不做**:不让 LLM 自由发现全书所有长程边;不让 Pass2 产新节点;不让 LLM 重建悬空 LID;不把 rationale/source_evidence_lids/target_evidence_lids 塞进 Core `GraphEdge`;不做 PB4 read-time smoke;不加 `related_to/same_problem/reuses_formula`。
+- **实现前必读**:`docs/PB3-pass2-prompt-grill.md` 是 PB3 prompt、candidate builder、gate、audit 的冻结输入;若实现与该文件冲突,必须先回到 Grill/ADR 更新,不得在代码里悄悄改边界。
+- **判据**:fixture 可生成 `long_range_candidates.json`;Pass2 prompt 对候选输出 accepted/pending/rejected;accepted 且过 gate 的候选生成 `GraphEdge(scope="long_range")`;`pass2_audit.json` 保留 split evidence、support_level、rejected summary;悬空端点/空证据/单侧证据/weak_inference/同窗口关系被确定性挡住;`book.context far` 能读到写回后的 long_range 边。
+- **触达**:`[ADR-0010/0011/0033]`;`docs/PB3-pass2-prompt-grill.md`
 
 ### PB4 · profile sidecar build smoke `[TS/Rust]`
 - **做**:增加预构建到读时的 smoke:构建输出目录同时含 `base.json/source.txt/profile_metadata.json/formula_semantics.json/discourse_index.json/pass2_audit.json`,Rust `Book::load` 与 runtime `book.synthesize/context` 能消费其中必要 sidecar。
