@@ -505,7 +505,7 @@ fn dispatch(
                     None,
                 );
             };
-            let body = match reader.goto_lid(book, lid) {
+            let body = match reader.goto_lid(book, store, lid, now) {
                 Ok(e) => to_json(&e),
                 Err(e) => to_json(&e),
             };
@@ -522,7 +522,11 @@ fn dispatch(
                     None,
                 );
             };
-            (to_json(&reader.scroll(delta)), None)
+            let body = match reader.scroll(book, store, delta, now) {
+                Ok(e) => to_json(&e),
+                Err(e) => to_json(&e),
+            };
+            (body, None)
         }
         "reader.highlight" => {
             let Some(lid) = sget("lid") else {

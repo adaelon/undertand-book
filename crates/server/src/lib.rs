@@ -199,8 +199,8 @@ fn route_mut(state: &mut AppState, path: &str, body: &str, now: &str) -> Reply {
             let Some(lid) = sget("lid") else {
                 return validation("INVALID_RANGE", "reader.goto 需 lid");
             };
-            // 字段级不相交借用:reader(mut) + book(shared)。
-            match state.reader.goto_lid(&state.book, lid) {
+            // 字段级不相交借用:reader(mut) + book(shared) + store(mut,记账)。
+            match state.reader.goto_lid(&state.book, &mut state.store, lid, now) {
                 Ok(e) => ok_json(&e),
                 Err(e) => err_reply(&e),
             }
@@ -209,7 +209,11 @@ fn route_mut(state: &mut AppState, path: &str, body: &str, now: &str) -> Reply {
             let Some(delta) = v.get("delta").and_then(|x| x.as_i64()) else {
                 return validation("INVALID_RANGE", "reader.scroll 需 delta(整数)");
             };
-            ok_json(&state.reader.scroll(delta))
+            // scroll 落点记入已读账本 `[ADR-0038]` ⇒ 返 Result(持久写失败诚实透传)。
+            match state.reader.scroll(&state.book, &mut state.store, delta, now) {
+                Ok(e) => ok_json(&e),
+                Err(e) => err_reply(&e),
+            }
         }
         "/reader/highlight" => {
             let Some(lid) = sget("lid") else {

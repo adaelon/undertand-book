@@ -256,6 +256,44 @@ impl MemoryStore {
         out.sort_by(|a, b| a.mem_id.cmp(&b.mem_id));
         out
     }
+
+    /// 确定性已读账本记账 `[ADR-0038]`(① 确定性账本,无 LLM):reader 翻到的 anchor LID
+    /// 记入「真读过的 LID 历史」。复用 Record(`type="read"`,内容寻址天然去重)——同 LID 重复触达
+    /// = 同 mem_id = upsert(`usage.count` 记触达次数,`generated_at` 刷新为最近触达)。
+    /// **区别于 `type="position"`**(③ 会话临时·当前位置,不持久):`read` 是 ① 持久账本。
+    /// content 空(已读 = 存在性,无散文);非 note/highlight ⇒ 不自动派生 citation(anchor.lid 本身即位置事实)。
+    pub fn mark_read(&mut self, book_id: &str, lid: &str, now: &str) -> Result<Record, ToolError> {
+        self.save(
+            SaveInput {
+                mem_id: None,
+                mem_type: "read".into(),
+                layer: "long_term".into(),
+                book_id: book_id.into(),
+                anchor: Anchor {
+                    lid: Some(lid.into()),
+                    concept: None,
+                },
+                content: String::new(),
+                range: None,
+                citations: None,
+                source_session_id: None,
+            },
+            now,
+        )
+    }
+
+    /// 已读集 / reading journey `[ADR-0038]`:某书真读过的 LID 历史,按 `generated_at` 触达序
+    /// (tie-break `mem_id`)确定性排序、内容寻址去重。**解锁 P3-2 裸兜底真历史源**——
+    /// `未读前置 = back ∩ (全集 \ 已读集)`(消费方在 P3-2,本刀不写)。
+    pub fn read_lids(&self, book_id: &str) -> Vec<String> {
+        let mut recs = self.recall(&RecallQuery {
+            book_id: Some(book_id.into()),
+            mem_type: Some("read".into()),
+            ..Default::default()
+        });
+        recs.sort_by(|a, b| a.generated_at.cmp(&b.generated_at).then(a.mem_id.cmp(&b.mem_id)));
+        recs.into_iter().filter_map(|r| r.anchor.lid).collect()
+    }
 }
 
 fn internal(message: String) -> ToolError {
@@ -424,5 +462,40 @@ mod tests {
         assert!(path.exists());
         let s2 = MemoryStore::open(&path).unwrap();
         assert_eq!(s2.recall(&RecallQuery::default()).len(), 1);
+    }
+
+    // 已读账本 `[ADR-0038]`:mark_read 后 read_lids 含该 LID(读过 vs 没读过确定性可分);
+    // 重读同 LID 去重 + count 累加;按 generated_at 触达序;跨书隔离;read 不派生 citation。
+    #[test]
+    fn read_ledger_marks_and_lists_deterministically() {
+        let path = tmp("readledger");
+        let mut s = MemoryStore::open(&path).unwrap();
+        // 没读过:空。
+        assert!(s.read_lids("bookA").is_empty());
+        // 读三处(触达序 1.3 → 1.1 → 1.2),再重读 1.1。
+        let r = s.mark_read("bookA", "1.3", "t0").unwrap();
+        assert_eq!(r.mem_type, "read");
+        assert!(r.citations.is_empty()); // read 不派生 citation
+        s.mark_read("bookA", "1.1", "t1").unwrap();
+        s.mark_read("bookA", "1.2", "t2").unwrap();
+        let again = s.mark_read("bookA", "1.1", "t3").unwrap();
+        assert_eq!(again.usage.count, 2); // 重读 = 同 mem_id upsert,count 累加
+        // 已读集去重 + 按 generated_at 序(1.1 刷新到 t3 ⇒ 排末):[1.3(t0), 1.2(t2), 1.1(t3)]。
+        assert_eq!(s.read_lids("bookA"), vec!["1.3", "1.2", "1.1"]);
+        // 跨书隔离:bookB 未读。
+        assert!(s.read_lids("bookB").is_empty());
+    }
+
+    // 已读账本落盘持久(跨会话累积,区别于 ephemeral viewport):重开同库 read_lids 仍在。
+    #[test]
+    fn read_ledger_persists_across_reopen() {
+        let path = tmp("readpersist");
+        {
+            let mut s = MemoryStore::open(&path).unwrap();
+            s.mark_read("bookA", "1.1", "t0").unwrap();
+            s.mark_read("bookA", "1.2", "t1").unwrap();
+        }
+        let s2 = MemoryStore::open(&path).unwrap();
+        assert_eq!(s2.read_lids("bookA"), vec!["1.1", "1.2"]);
     }
 }

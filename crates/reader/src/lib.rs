@@ -97,7 +97,13 @@ impl Reader {
 
     /// `reader.gotoLid(lid)`:翻到某 LID。叶 → 锚到该叶;容器 → 锚到子树第一个叶;
     /// 不存在 → `LID_NOT_FOUND`(禁宽松降级,不静默返最近邻 `[ADR-0015]`)。
-    pub fn goto_lid(&mut self, book: &Book, lid: &str) -> Result<ViewportEffect, ToolError> {
+    pub fn goto_lid(
+        &mut self,
+        book: &Book,
+        store: &mut MemoryStore,
+        lid: &str,
+        now: &str,
+    ) -> Result<ViewportEffect, ToolError> {
         // 校验 LID 真实存在(锚定红线:不存在即报错)。
         if !book.base.lid_nodes.iter().any(|n| n.lid == lid) {
             return Err(lid_not_found(lid));
@@ -113,6 +119,9 @@ impl Reader {
             Some(i) => {
                 self.anchor_idx = i;
                 self.selection = Some(lid.to_string());
+                // 记账:翻到的 anchor **真叶**记入已读账本 `[ADR-0038]`(goto 容器→记子树首叶,
+                // 非传入容器 lid;selection 仍记传入 lid)。持久写,失败诚实传播不静默。
+                store.mark_read(&book.base.book_id, &self.leaf_lids[i], now)?;
                 Ok(ViewportEffect {
                     ok: true,
                     viewport: self.viewport(),
@@ -128,17 +137,25 @@ impl Reader {
     }
 
     /// `reader.scroll(delta)`:沿叶序移动锚点(clamp 到 [0, len-1]),返变更后视口。
-    pub fn scroll(&mut self, delta: i64) -> ViewportEffect {
+    /// 落点 anchor 记入已读账本 `[ADR-0038]`;记账=持久写 ⇒ 返 `Result`(失败诚实传播,不静默降级)。
+    pub fn scroll(
+        &mut self,
+        book: &Book,
+        store: &mut MemoryStore,
+        delta: i64,
+        now: &str,
+    ) -> Result<ViewportEffect, ToolError> {
         if !self.leaf_lids.is_empty() {
             let last = (self.leaf_lids.len() - 1) as i64;
             let next = (self.anchor_idx as i64 + delta).clamp(0, last);
             self.anchor_idx = next as usize;
             self.selection = Some(self.leaf_lids[self.anchor_idx].clone());
+            store.mark_read(&book.base.book_id, &self.leaf_lids[self.anchor_idx], now)?;
         }
-        ViewportEffect {
+        Ok(ViewportEffect {
             ok: true,
             viewport: self.viewport(),
-        }
+        })
     }
 
     /// `reader.highlight(lid, range?)`:薄入口,持久化**委托 memory.save**(type=highlight)。
@@ -334,20 +351,22 @@ mod tests {
     #[test]
     fn scroll_moves_anchor_clamped() {
         let b = book_n_leaves(10);
+        let mut store = MemoryStore::open(tmp("scroll")).unwrap();
         let mut r = Reader::new(&b, 2);
-        assert_eq!(r.scroll(5).viewport.anchor_lid, "1.6");
+        assert_eq!(r.scroll(&b, &mut store, 5, "t0").unwrap().viewport.anchor_lid, "1.6");
         // 居中窗口:1.6 ± 2 → [1.4..1.8]
         assert_eq!(r.viewport().visible_lids, vec!["1.4", "1.5", "1.6", "1.7", "1.8"]);
-        assert_eq!(r.scroll(100).viewport.anchor_lid, "1.10"); // clamp 到末叶
-        assert_eq!(r.scroll(-100).viewport.anchor_lid, "1.1"); // clamp 到首叶
+        assert_eq!(r.scroll(&b, &mut store, 100, "t1").unwrap().viewport.anchor_lid, "1.10"); // clamp 到末叶
+        assert_eq!(r.scroll(&b, &mut store, -100, "t2").unwrap().viewport.anchor_lid, "1.1"); // clamp 到首叶
     }
 
     // goto 叶:锚到该叶 + 选区设为该 lid。
     #[test]
     fn goto_leaf_anchors_and_selects() {
         let b = book_n_leaves(10);
+        let mut store = MemoryStore::open(tmp("gotoleaf")).unwrap();
         let mut r = Reader::new(&b, 1);
-        let eff = r.goto_lid(&b, "1.5").unwrap();
+        let eff = r.goto_lid(&b, &mut store, "1.5", "t0").unwrap();
         assert!(eff.ok);
         assert_eq!(eff.viewport.anchor_lid, "1.5");
         assert_eq!(eff.viewport.visible_lids, vec!["1.4", "1.5", "1.6"]);
@@ -358,9 +377,10 @@ mod tests {
     #[test]
     fn goto_container_lands_first_leaf() {
         let b = book_n_leaves(10);
+        let mut store = MemoryStore::open(tmp("gotocontainer")).unwrap();
         let mut r = Reader::new(&b, 1);
-        r.scroll(5); // 先移开
-        let eff = r.goto_lid(&b, "1").unwrap();
+        r.scroll(&b, &mut store, 5, "t0").unwrap(); // 先移开
+        let eff = r.goto_lid(&b, &mut store, "1", "t1").unwrap();
         assert_eq!(eff.viewport.anchor_lid, "1.1");
         assert_eq!(r.state().selection.as_deref(), Some("1")); // 选区记容器 lid
     }
@@ -369,8 +389,9 @@ mod tests {
     #[test]
     fn goto_missing_lid_errors_not_silent() {
         let b = book_n_leaves(5);
+        let mut store = MemoryStore::open(tmp("gotomiss")).unwrap();
         let mut r = Reader::new(&b, 2);
-        let e = r.goto_lid(&b, "9.9").unwrap_err();
+        let e = r.goto_lid(&b, &mut store, "9.9", "t0").unwrap_err();
         assert_eq!(e.error_code, "LID_NOT_FOUND");
         assert_eq!(e.category, "not_found");
     }
@@ -446,7 +467,7 @@ mod tests {
         let b = book_n_leaves(5);
         let mut store = MemoryStore::open(tmp("render")).unwrap();
         let mut r = Reader::new(&b, 2);
-        r.goto_lid(&b, "1.2").unwrap();
+        r.goto_lid(&b, &mut store, "1.2", "t0").unwrap();
         r.note(&b, &mut store, "1.2", "我的笔记", "long_term", "t0").unwrap();
         let out = r.render(&b, &store);
         assert!(out.contains("[1.2]▶")); // 锚点标记
@@ -466,5 +487,23 @@ mod tests {
         let r2 = Reader::new(&b, 2); // 全新实例,无任何 note 记录
         let out = r2.render(&b, &store);
         assert!(out.contains("跨实例可见"));
+    }
+
+    // 已读账本接线 `[ADR-0038]`:goto/scroll 落点 anchor 真叶记入已读账本;
+    // goto 容器记子树首叶(非传入容器 lid);未翻到的 LID 不在已读集。
+    #[test]
+    fn goto_scroll_record_read_ledger() {
+        let b = book_n_leaves(10);
+        let mut store = MemoryStore::open(tmp("ledger")).unwrap();
+        let mut r = Reader::new(&b, 2);
+        r.goto_lid(&b, &mut store, "1.5", "t0").unwrap(); // 读 1.5
+        r.scroll(&b, &mut store, 2, "t1").unwrap(); // 落点 1.7
+        r.goto_lid(&b, &mut store, "1", "t2").unwrap(); // 容器 → 记真叶 1.1
+        let read = store.read_lids("bookR");
+        // 触达序:1.5(t0) → 1.7(t1) → 1.1(t2)。
+        assert_eq!(read, vec!["1.5", "1.7", "1.1"]);
+        // 没翻到的不在已读集;记的是真叶,非传入容器 "1"。
+        assert!(!read.contains(&"1.9".to_string()));
+        assert!(!read.contains(&"1".to_string()));
     }
 }
