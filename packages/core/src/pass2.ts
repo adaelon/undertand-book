@@ -100,6 +100,8 @@ export interface TechnicalLearningPass2Input {
   }>;
 }
 
+// PB3 grill §4: extend the long-range edge closed set with supports/rebuts/summarizes.
+// PB3 must NOT add related_to / same_problem / reuses_formula.
 export type TechnicalLearningLongRangeEdgeType =
   | "builds_on"
   | "contradicts"
@@ -108,9 +110,12 @@ export type TechnicalLearningLongRangeEdgeType =
   | "refines"
   | "applies"
   | "analogous_to"
-  | "contrasts";
+  | "contrasts"
+  | "supports"
+  | "rebuts"
+  | "summarizes";
 
-const LONG_RANGE_EDGE_TYPES: ReadonlySet<string> = new Set<TechnicalLearningLongRangeEdgeType>([
+export const TECHNICAL_LEARNING_LONG_RANGE_EDGE_TYPES = [
   "builds_on",
   "contradicts",
   "exemplifies",
@@ -119,7 +124,12 @@ const LONG_RANGE_EDGE_TYPES: ReadonlySet<string> = new Set<TechnicalLearningLong
   "applies",
   "analogous_to",
   "contrasts",
-]);
+  "supports",
+  "rebuts",
+  "summarizes",
+] as const satisfies readonly TechnicalLearningLongRangeEdgeType[];
+
+const LONG_RANGE_EDGE_TYPES: ReadonlySet<string> = new Set<string>(TECHNICAL_LEARNING_LONG_RANGE_EDGE_TYPES);
 
 export interface TechnicalLearningLongRangeEdgeCandidate {
   source: string;
