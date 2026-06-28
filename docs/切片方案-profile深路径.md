@@ -419,11 +419,12 @@ interface RankedStep {
   score: number;          // 结构排序 = weight × 距离(Core)
 }
 
-// 前沿式内核(Core,架在 book.context 上,只做结构排序)
-function route_from(at: string): Record<NavCategory, RankedStep[]>;
+// 前沿式内核(Core,架在 book.context 上,只做结构排序)。命令面 = book.route_from
+// k? 沿用 book.context 截断惯例;永远返全 5 类,无 category 过滤参(OPEN② / ADR-0034 影响段)
+function route_from(at: string, k?: number): Record<NavCategory, RankedStep[]>;
 
-// 路径式 = 同批边上 BFS 的确定性组合(派生)
-function route_to(from: string, target: string): RankedStep[];
+// 路径式 = 同批边上 BFS 的确定性组合(派生)。命令面 = book.route_to;target 先经 book.concept 解析
+function route_to(from: string, target: string, k?: number): RankedStep[];
 ```
 
 访客会话(P7 投影):
@@ -443,7 +444,7 @@ interface VisitorSession {
 route 内核零 LLM;NL 意图→入口节点 解析放在 route 之外(复用 book.concept / book.query)。
 route_from = Core 结构排序;教学 reorder/过滤 = technical_learning policy + reader_profile。
 人投影:agent 主动带读,默认逐停靠点确认(真 reader.goto 可撤销 + citation-gated 解释),自动巡航 opt-in。
-访客投影:外部 agent = 临时住户 lite;连接式访客会话(握手/挥手)+ 临时游标;③ ephemeral 绝不碰 ② 读者私人记忆。
+访客投影:外部 agent = 临时住户 lite;暴露分两层(ADR-0035 决策7)——Tier 1 无状态只读(不建会话)/ Tier 2 book_guide 带会话(握手/挥手 + 临时游标);③ ephemeral 绝不碰 ② 读者私人记忆;裸 route 不给访客(v1,只给 curate 的 book_guide)。
 世界模型可借(route / book_guide),读者私人层(reader_profile / memory / viewport)不可借。
 反馈信号(ADR-0036):唯一主信号=开放 NL 提问;反馈意图二维(导航轴→route 5 类 / 讲法轴→policy),agent 据语义定 {轴+类别+target},裸信号走结构兜底;LLM 不产路/不产 LID,route 零 LLM。
 ```
@@ -534,7 +535,7 @@ ADR-0033 已把 `discourse_index`、`FormulaSemantics`、Pass2 audit、profile m
 - **不做**:不新增 profile 专属 reader 命令;不绕过 reader/memory 直接写;不把 agent 提议默认落 long_term;**不让 route 内核带 LLM 或 profile 偏见**(route_from 是 Core 结构,教学整形只在 policy 层);**不默认自动巡航**。
 - **判据**:人和 agent 走同一命令;agent 主动带读逐停靠点可撤销;route_from 结构排序确定性可单测,policy 教学排序作用在分组上;policy 只影响何时/怎么用命令,不改变命令语义;**带读消费 NL 提问→`{轴+类别}`、裸信号结构兜底确定性可测、viewport 偏离触发静默 re-sync 而非自动改路(ADR-0036)**。
 - **触达**:`[ADR-0007/0015/0030/0033/0034/0036]`
-- **依赖**:route Core 原语(P8);route 命令面落点/命名实现前 A1 定(OPEN)。
+- **依赖**:route Core 原语(P8);route 命令面落点/命名**已定**(ADR-0034 影响段:`book.route_from(at,k?)` / `book.route_to(from,target,k?)`,详见 P8)。
 
 ### P4 · memory 两阶段 consolidation + 四层产物 + reader_profile `[Rust]`
 - **做**:实现 consolidation:Layer 1 Session Digest、Layer 2 Reading Journey、Layer 3 Knowledge State / Reader Profile、Layer 4 Durable Notes / Highlights。reader_profile 每个推断带 confidence + evidence;用户显式声明优先于小测和行为推断。reader_profile 是**三类记忆的 ②(读者私人记忆)**,供 P3 route **教学整形**(ADR-0034 决策4),**绝不外借访客**(ADR-0035)。
@@ -556,18 +557,18 @@ ADR-0033 已把 `discourse_index`、`FormulaSemantics`、Pass2 audit、profile m
 
 ### P7 · Book MCP 访客向导面(连接式访客会话) `[Rust/MCP]`
 > **本刀修订 ADR-0033 决策12 / §1.5.8 的"无状态"假设**,改为连接式(ADR-0035)。
-- **做**:把已预构建 book 目录投影成 MCP server,暴露只读工具 `book_manifest/text/context/concept/query/synthesize` + **`book_guide(intent, anchor?)`**(返路线:意图→入口→route 路线含每步理由+证据 LID,是 book_query 的姊妹)。**连接式访客会话**(TCP 式握手/挥手):握手发 `session_id`、传输期支持"不对"refine、挥手即焚 + 超时 GC;会话含 `transcript` + 临时游标 `cursor{at_lid,last_frontier}`(访客自己的位置,≠ 读者 viewport)。复用 `read-tools::Book` + runtime citation gate + route(P8)。**访客反馈(ADR-0036)**:与人同一消歧骨架,但换两插槽——历史来源用 ③(`cursor.last_frontier`+transcript,非 ② viewport/memory)、讲法整形为空(中立重述,讲法轴近塌缩)、终裁者=访客自身("不对"即指令,直接换前沿分支,无可撤销提议环节)。
-- **不做**:不暴露 `reader.*`;不写 `memory.*`;不共享 localhost reader 当前视口 / `/agent/chat` messages / 读者 session;不新增 profile 专属 MCP 命令;**不把 ③ 访客会话写入 ② durable store**;**不暴露对话式住户 agent**(模糊住户/访客界、泄漏私人房间)。
-- **判据**:外部 agent 经 `book_guide` / route 拿到全真 LID 的路线并可跨调用 refine("不对"→换前沿分支);所有回答 citation 满足 Core 红线且可独立验证;挥手后 ③ 被 GC;并发访客各自会话隔离、读者私人层零泄漏;超时会话被 GC(承重墙)。
+- **做**:把已预构建 book 目录投影成 MCP server,暴露只读工具 `book_manifest/text/context/concept/query/synthesize` + **`book_guide(intent, anchor?)`**(返路线:意图→入口→route 路线含每步理由+证据 LID,是 book_query 的姊妹)。**连接式访客会话**(TCP 式握手/挥手):握手发 `session_id`、传输期支持"不对"refine、挥手即焚 + 超时 GC;会话含 `transcript` + 临时游标 `cursor{at_lid,last_frontier}`(访客自己的位置,≠ 读者 viewport)。复用 `read-tools::Book` + runtime citation gate + route(P8)。**暴露分两层(ADR-0035 决策7)**:Tier 1 无连接无状态只读(`book_manifest/text/context/concept/query/synthesize`,不建会话)/ Tier 2 带会话 `book_guide`(握手/挥手/GC 只压此层)。**crate 落点**:route_* 在 read-tools Core(P8,共享)、`book_guide` 在 runtime(lite LLM 命令、book_query 姊妹、不复用住户 `run()`)、VisitorSession 在 server `AppState`。**访客反馈(ADR-0036)**:与人同一消歧骨架,但换两插槽——历史来源用 ③(`cursor.last_frontier`+transcript,非 ② viewport/memory)、讲法整形为空(中立重述,讲法轴近塌缩)、终裁者=访客自身("不对"即指令,直接换前沿分支,无可撤销提议环节)。
+- **不做**:不暴露 `reader.*`;不写 `memory.*`;不共享 localhost reader 当前视口 / `/agent/chat` messages / 读者 session;不新增 profile 专属 MCP 命令;**不把 ③ 访客会话写入 ② durable store**;**不暴露对话式住户 agent**(模糊住户/访客界、泄漏私人房间);**不给访客裸 `route_from/route_to`(v1,只给 curate 的 book_guide)**;**红线靠访客 MCP dispatch 物理无 reader/memory 分支,非运行时权限判**;**不为 Tier 1 只读建会话**;**不把 book_guide 逻辑塞进 server(LLM 命令在 runtime)**。
+- **判据**:外部 agent 经 `book_guide` / route 拿到全真 LID 的路线并可跨调用 refine("不对"→换前沿分支);所有回答 citation 满足 Core 红线且可独立验证;挥手后 ③ 被 GC;并发访客各自会话隔离、读者私人层零泄漏;超时会话被 GC(承重墙);**Tier 1 只读调用不建会话(可测)**;**访客面 dispatch 物理不含 reader/memory 分支(构造 reader.goto 无路可达,可测)**。
 - **触达**:`[ADR-0033 决策12(修订)/0034/0035/0036]`
 - **依赖**:route Core 原语(P8);server AppState 从单会话扩为 住户1+访客N(会话表)。
 
 ### P8 · route Core 导航原语(前沿式 + 路径式 BFS) `[Rust]`
 > P3 人投影带读 + P7 访客向导的**共享底座**;承 ADR-0034。
-- **做**:实现 Core `route_from(at)`(前沿式,架在 `book.context` 上,返回 5 类导航分组 `back/forward/concretize/cross/continue`,`edge_type→类别` 固定映射表,组内 weight×距离 结构排序)+ `route_to(from,target)`(同批边 BFS 派生)。零 LLM、纯确定性、可单测。
-- **不做**:不在 route 内核放 LLM 或 profile 偏见(教学整形留 P3 policy 层);不让 route 吃 NL(意图→入口解析复用 book.concept/query);不新增 reader/memory 写;不碰访客会话(P7)。
-- **判据**:给定基座 fixture,`route_from` 确定性产出 5 类分组前沿、全是真 LID/真边、`edge_type→类别` 覆盖全边类型;`route_to` BFS 路径全真且与前沿同批边;cargo test 确定性覆盖(像 isCrossWindow/gate 那样)。
-- **触达**:`[ADR-0013/0034]`
+- **做**:实现 Core `Book::route_from(at, k?)`(前沿式,架在 `book.context` 上——吃 `context(at,"far")` 的边按 `edge_type→NavCategory` 重组,返回 5 类导航分组 `back/forward/concretize/cross/continue`,`edge_type→类别` 固定映射表,组内 weight×距离 结构排序,k 沿用 context 截断惯例)+ `Book::route_to(from, target, k?)`(同批边 BFS 派生)。**命令面落点(ADR-0034 影响段已定)**:`book.route_from`/`book.route_to` 两命令均经 `orchestrator::tool_specs()` + dispatch 暴露给外层 LLM(bounded,非 manifest token 炸弹),REST 自动 GET;参数最小、route_from 永远返全 5 类(不给 category 过滤参,挑类是上层);错误信封遵循 ADR-0015。零 LLM、纯确定性、可单测。
+- **不做**:不在 route 内核放 LLM 或 profile 偏见(教学整形留 P3 policy 层);不让 route 吃 NL(意图→入口解析复用 book.concept/query);不给 route_from 加 category 过滤参(挑类是 agent/policy 关切,渗进 Core 即层违规);不新增 reader/memory 写;不碰访客会话(P7)。
+- **判据**:给定基座 fixture,`route_from` 确定性产出全 5 类分组前沿、全是真 LID/真边、`edge_type→类别` 覆盖全边类型;`route_to` BFS 路径全真且与前沿同批边;`book.route_from/route_to` 在 tool_specs 暴露且 dispatch 可调,invalid at 返 not_found+nearest_valid_lid、叶子无边返空 5 类非 error;cargo test 确定性覆盖(像 isCrossWindow/gate 那样)。
+- **触达**:`[ADR-0007/0013/0014/0028/0034]`
 - **实测落点**:5 类是否够用(有无落不进的边)、weight×距离 权重、前沿规模上限。
 ---
 

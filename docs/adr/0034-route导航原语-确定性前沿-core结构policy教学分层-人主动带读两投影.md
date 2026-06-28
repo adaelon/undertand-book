@@ -47,7 +47,7 @@ route 必须**零 LLM** 才守得住"确定性 LID"。一旦让 route 自己吃 
 
 ## 影响
 
-- `route` 是**新 Core 导航原语**;具体命令面落点(`book.route`? 还是 runtime 内部)与命名 **OPEN**,实现前 A1 再定。
+- `route` 是**新 Core 导航原语**,落点已定(原 OPEN 关闭):归 `book.*` **一等叶子命令**(确定性、零 LLM、只读、毫秒级,符 ADR-0014 叶子工具 + ADR-0007 人机对称),命名 **`book.route_from(at, k?)`**(返全 5 类分组,无 category 过滤参——挑类是上层 policy/agent 的事)+ **`book.route_to(from, target, k?)`**(BFS 派生;target 先由 `book.concept` 解析,在 route 之外)。三段落点:Core 实现 `read_tools::Book::route_{from,to}`(架在 `Book::context` 上,吃 `context(at,"far")` 的边按 `edge_type→NavCategory` 重组)/ 命令面 `orchestrator::tool_specs()` + dispatch(两命令均暴露给外层 LLM,bounded 非 manifest 式 token 炸弹)/ REST 自动 GET(ADR-0028)。错误信封遵循 ADR-0015(invalid at→not_found+nearest_valid_lid;叶子无边→返回空 5 类非 error)。
 - 人投影"主动带读"在切片 **P3** 消费它(本 ADR 触达 P3)。
 - 外部 agent 投影 → **P7 访客面**,详见 **ADR-0035**(连接式访客会话)。
 - 不改 ADR-0033 正文;本 ADR 是其 mechanism/policy 分离在"导航"维度的延伸。
