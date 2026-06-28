@@ -555,11 +555,19 @@ ADR-0033 已把 `discourse_index`、`FormulaSemantics`、Pass2 audit、profile m
 **命门**:「未读」判错 → agent 提议回看已读 / 漏真未读前置,污染 agent 上下文,踩最高原则;须用 P4 真 reading journey 历史,不用近似。
 **何时回头**:P4 reader_profile / journey 历史落地后捡起裸兜底(ADR-0036 决策3)。
 
-### P4 · memory 两阶段 consolidation + 四层产物 + reader_profile `[Rust]`
-- **做**:实现 consolidation:Layer 1 Session Digest、Layer 2 Reading Journey、Layer 3 Knowledge State / Reader Profile、Layer 4 Durable Notes / Highlights。reader_profile 每个推断带 confidence + evidence;用户显式声明优先于小测和行为推断。reader_profile 是**三类记忆的 ②(读者私人记忆)**,供 P3 route **教学整形**(ADR-0034 决策4),**绝不外借访客**(ADR-0035)。
-- **不做**:不写 book base;不把 reader_profile 作为 citation;不把四层都塞进 reader_profile;**不把 ② 读者私人记忆经任何 MCP/访客面泄漏**(访客只拿 ③ ephemeral 会话,见 P7)。
-- **判据**:consolidation 能从 session/memory 产四层;reader_profile evidence 可追溯;删除/修改用户画像不会影响 book base;回答时同证据可不同讲法。
-- **触达**:`[ADR-0006/0018/0033/0034/0035]`
+### P4 · memory:确定性账本 + 用户主动 LLM 记忆 + 四层派生(reader_profile)`[Rust]`
+> **ADR-0038 重定位**(修正 ADR-0018 Codex 自动 consolidation 根基):Claude Code 式透明 memory——记**确定事实 / 用户真说的话**,砍后台自动抽推断。回收 P3-2 裸兜底 + P3-3 个性化的 P4 依赖。原"Layer 1-4(Session Digest/Reading Journey/Knowledge State/Durable Notes)"措辞作废,四层以 ADR-0038/CONTEXT 为准。
+
+- **做**:① 确定性已读账本(真读 LID 历史 → 已读集 + reading journey)② reader_profile 确定性派生(已读集 + note/highlight/qa 的 LID)③ 用户主动 LLM 记忆(显式「记下 X」/ 跨轮反复提及,读时 `memory.save` + 认知诚实标注 + citation 闸)④ 四层透明文件产物(reader-profile/阅读手册/session 详档/raw)。reader_profile 是三类记忆的 ②(读者私人),供 **P3-2 裸兜底真历史源 + P3-3 已读降权整形**,绝不外借访客(ADR-0035)。
+- **不做**:不写 book base;不把 reader_profile 作 citation;**不做 Codex 式后台自动抽推断**(interest/sticking_point/journey 凭空猜);不做 Phase1/2 后台流水线 / 锁 / watermark / git diff;**reader_profile 不推断认知水平**(novice/expert 是猜,改已读降权确定性规则);不把 ② 经 MCP/访客面泄漏(访客只拿 ③,见 P7)。
+- **判据**:已读账本确定性可单测(读过 vs 没读过);reader_profile 从确定性产物派生、evidence 可追溯真 LID;用户主动 LLM 记忆带 citation 过确定性闸 + 认知诚实标注;四层文件可 grep/手编/删;删改画像不影响 book base。
+- **触达**:`[ADR-0006/0015/0030/0038(修正0018)/0034-0037]`
+
+#### P4 · A4 子刀拆分(实现期)
+- **P4-1 确定性已读账本**:reader 记真读 LID(位置历史)→ 已读集 + 进度(reading journey)。纯确定性可单测、无 LLM。**解锁 P3-2 裸兜底真历史源**。
+- **P4-2 reader_profile 确定性派生 + P3 接口**:已读集 + note/highlight/qa 的 LID 聚合 → reader_profile;喂 P3-3 已读降权整形 / P3-2 兜底。无 LLM。**解锁 P3-3 个性化**。
+- **P4-3 用户主动 LLM 记忆**:agent 读时(显式记 / 反复提及)→ `memory.save` + 认知诚实标注 + citation 闸。LLM 限定用户信号、非后台扫描。
+- **P4-4 四层文件产物**:账本 / 记忆派生成透明 grep 文件(reader-profile.md / 阅读手册)+ 可选表达层摘要(不产事实)。
 
 ### P5 · ReActAdapter + provider registry `[Rust]`
 - **做**:在现有 ModelAdapter 之上加 provider registry;支持原生 tool calling provider 和 ReActAdapter fallback。所有 provider 输出归一为 `AssistantTurn`;工具执行仍由 Runtime 完成。
