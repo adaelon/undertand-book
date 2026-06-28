@@ -401,6 +401,53 @@ MCP v1 不暴露 memory.save / memory.delete。
 MCP v1 不共享 /agent/chat messages 或 reader 当前视口。
 book_query 必须显式传 anchor_lid;外部 agent 需先用 manifest/concept/context 定位。
 ```
+
+### 1.5.9 navigation contracts(route + 人/访客两投影)
+
+> route 是 ADR-0034/0035 的输入契约草案。本节**修订 §1.5.8 的"无状态"假设**:P7 由无状态只读改为连接式访客会话。实现前每刀仍按切片重新 A1 声明。
+
+`route` = 图谱上的确定性多跳导航原语(零 LLM,保证 LID/边真实)。
+
+```ts
+type NavCategory = "back" | "forward" | "concretize" | "cross" | "continue";
+
+interface RankedStep {
+  lid: string;            // 真实 LID
+  edge_type: string;      // 真实边类型(local / long_range / discourse / cooccurrence)
+  why: string;            // 来自哪条边的导航理由
+  evidence_lids: string[];
+  score: number;          // 结构排序 = weight × 距离(Core)
+}
+
+// 前沿式内核(Core,架在 book.context 上,只做结构排序)
+function route_from(at: string): Record<NavCategory, RankedStep[]>;
+
+// 路径式 = 同批边上 BFS 的确定性组合(派生)
+function route_to(from: string, target: string): RankedStep[];
+```
+
+访客会话(P7 投影):
+
+```ts
+interface VisitorSession {
+  session_id: string; book_id: string; declared_intent?: string;
+  transcript: Exchange[];                              // query + 返回路线/答案 + "不对"反馈
+  cursor?: { at_lid: string; last_frontier: RankedStep[] };  // 访客自己的位置,≠ 读者 viewport
+  opened_at: string; last_active_at: string;           // 超时 GC 用
+}
+```
+
+红线(承 ADR-0034/0035):
+
+```text
+route 内核零 LLM;NL 意图→入口节点 解析放在 route 之外(复用 book.concept / book.query)。
+route_from = Core 结构排序;教学 reorder/过滤 = technical_learning policy + reader_profile。
+人投影:agent 主动带读,默认逐停靠点确认(真 reader.goto 可撤销 + citation-gated 解释),自动巡航 opt-in。
+访客投影:外部 agent = 临时住户 lite;连接式访客会话(握手/挥手)+ 临时游标;③ ephemeral 绝不碰 ② 读者私人记忆。
+世界模型可借(route / book_guide),读者私人层(reader_profile / memory / viewport)不可借。
+反馈信号(ADR-0036):唯一主信号=开放 NL 提问;反馈意图二维(导航轴→route 5 类 / 讲法轴→policy),agent 据语义定 {轴+类别+target},裸信号走结构兜底;LLM 不产路/不产 LID,route 零 LLM。
+```
+
 ### 1.6 预构建缺口盘点
 
 ADR-0033 已把 `discourse_index`、`FormulaSemantics`、Pass2 audit、profile metadata 定义为 `technical_learning` profile artifacts,且要求 sidecar 带版本头、LID 证据和 orphaned 处理规则。当前已完成的是读时消费路径:P2/P2a 能读取可选 `formula_semantics.json` / `discourse_index.json` 并用于 `book.synthesize` / `book.context`。缺失的是预构建实际产出层:build pipeline 仍只稳定写 `base.json` 与 `source.txt`,没有统一 header、没有 discourse artifact gate/write、没有 FormulaSemantics sidecar write、没有 Pass2 audit sidecar write,也没有 profile sidecar 的 build smoke。
@@ -482,17 +529,18 @@ ADR-0033 已把 `discourse_index`、`FormulaSemantics`、Pass2 audit、profile m
 - **不做**:不新增 `book.discourse` 命令;不把 discourse relation 塞进 Core graph_edges;不让 context item 携带原文。
 - **判据**:给定 discourse_index fixture,`book.context` 能返回 discourse via;悬空 target/evidence 已在 artifact gate 阶段被拒;near/far 分层可解释。
 - **触达**:`[ADR-0013/0014/0033]`
-### P3 · reader.* 全集 + technical_learning agent policy `[Rust/Vue]`
-- **做**:补齐冻结命令面里尚未实现的 reader 命令;保持 Core 单一命令面。新增 technical_learning agent policy:何时建议 goto/highlight/note、何时回看 prerequisite、何时展示 FormulaSemantics、何时生成练习。agent 动作仍为可撤销提议。
-- **不做**:不新增 profile 专属 reader 命令;不绕过 reader/memory 直接写;不把 agent 提议默认落 long_term。
-- **判据**:人和 agent 走同一命令;agent side effects 可撤销;policy 只影响何时调用命令,不改变命令语义。
-- **触达**:`[ADR-0007/0015/0030/0033]`
+### P3 · reader.* 全集 + technical_learning agent policy + agent 主动带读 `[Rust/Vue]`
+- **做**:补齐冻结命令面里尚未实现的 reader 命令;保持 Core 单一命令面。**人投影"主动带读"**(ADR-0034):agent 消费 `route_from` 的分组前沿,默认**逐停靠点确认**——挑下一停靠点 → 真 `reader.goto`(可撤销提议)→ citation-gated 解释 → 停下等人(继续/换路/退回/没懂),自动巡航 opt-in。technical_learning policy 在 route 的 5 类前沿上做**教学 reorder/过滤**(新手 back 置顶、reader_profile 已懂的跳过),并定 何时建议 goto/highlight/note、何时回看 prerequisite、何时展示 FormulaSemantics、何时生成练习。agent 动作仍为可撤销提议。**反馈信号(ADR-0036)**:停下等人收到的是**开放 NL 提问**(唯一主信号),agent 据语义定 `{轴, route 类别, target?}`——导航轴落 route 5 类、讲法轴落 policy 讲法层(`book.synthesize` 调表达);裸"没懂"走结构兜底(`route_from(at).back ∩ 未读前置`→ 空则讲法轴/有则可撤销提议/二次升级)。每回合开头读 `reader.state()` 做 viewport 静默 re-sync(`at=viewport.anchor_lid`,跟随用户已做的导航,不主动问;"问"仅在 opt-in 巡航被滚动打断时)。
+- **不做**:不新增 profile 专属 reader 命令;不绕过 reader/memory 直接写;不把 agent 提议默认落 long_term;**不让 route 内核带 LLM 或 profile 偏见**(route_from 是 Core 结构,教学整形只在 policy 层);**不默认自动巡航**。
+- **判据**:人和 agent 走同一命令;agent 主动带读逐停靠点可撤销;route_from 结构排序确定性可单测,policy 教学排序作用在分组上;policy 只影响何时/怎么用命令,不改变命令语义;**带读消费 NL 提问→`{轴+类别}`、裸信号结构兜底确定性可测、viewport 偏离触发静默 re-sync 而非自动改路(ADR-0036)**。
+- **触达**:`[ADR-0007/0015/0030/0033/0034/0036]`
+- **依赖**:route Core 原语(P8);route 命令面落点/命名实现前 A1 定(OPEN)。
 
 ### P4 · memory 两阶段 consolidation + 四层产物 + reader_profile `[Rust]`
-- **做**:实现 consolidation:Layer 1 Session Digest、Layer 2 Reading Journey、Layer 3 Knowledge State / Reader Profile、Layer 4 Durable Notes / Highlights。reader_profile 每个推断带 confidence + evidence;用户显式声明优先于小测和行为推断。
-- **不做**:不写 book base;不把 reader_profile 作为 citation;不把四层都塞进 reader_profile。
+- **做**:实现 consolidation:Layer 1 Session Digest、Layer 2 Reading Journey、Layer 3 Knowledge State / Reader Profile、Layer 4 Durable Notes / Highlights。reader_profile 每个推断带 confidence + evidence;用户显式声明优先于小测和行为推断。reader_profile 是**三类记忆的 ②(读者私人记忆)**,供 P3 route **教学整形**(ADR-0034 决策4),**绝不外借访客**(ADR-0035)。
+- **不做**:不写 book base;不把 reader_profile 作为 citation;不把四层都塞进 reader_profile;**不把 ② 读者私人记忆经任何 MCP/访客面泄漏**(访客只拿 ③ ephemeral 会话,见 P7)。
 - **判据**:consolidation 能从 session/memory 产四层;reader_profile evidence 可追溯;删除/修改用户画像不会影响 book base;回答时同证据可不同讲法。
-- **触达**:`[ADR-0006/0018/0033]`
+- **触达**:`[ADR-0006/0018/0033/0034/0035]`
 
 ### P5 · ReActAdapter + provider registry `[Rust]`
 - **做**:在现有 ModelAdapter 之上加 provider registry;支持原生 tool calling provider 和 ReActAdapter fallback。所有 provider 输出归一为 `AssistantTurn`;工具执行仍由 Runtime 完成。
@@ -506,11 +554,21 @@ ADR-0033 已把 `discourse_index`、`FormulaSemantics`、Pass2 audit、profile m
 - **判据**:v1/v2 fixture 下 base 可重建;profile artifact 可迁移/标 orphaned;memory recall@v2 可显示 old evidence 的投影或 orphaned 状态。
 - **触达**:`[ADR-0019/0020/0033]`
 
-### P7 · Book MCP 只读工具面 `[Rust/MCP]`
-- **做**:把一个已预构建 book 目录投影成 MCP server,只暴露 `book_manifest`、`book_text`、`book_context`、`book_concept`、`book_query`、`book_synthesize`;复用 `read-tools::Book` 与 runtime `query/synthesize` 的 citation gate。
-- **不做**:不暴露 `reader.*`;不写 `memory.*`;不共享 localhost reader 当前视口、`/agent/chat` messages 或用户 session;不新增 profile 专属 MCP 命令。
-- **判据**:外部 agent 能通过 manifest/concept/context 定位 LID,再显式 `anchor_lid` 调 `book_query`;所有回答 citation 仍满足 Core 红线;缺 `anchor_lid` 的 `book_query` 直接 validation error。
-- **触达**:`[ADR-0033 决策12]`
+### P7 · Book MCP 访客向导面(连接式访客会话) `[Rust/MCP]`
+> **本刀修订 ADR-0033 决策12 / §1.5.8 的"无状态"假设**,改为连接式(ADR-0035)。
+- **做**:把已预构建 book 目录投影成 MCP server,暴露只读工具 `book_manifest/text/context/concept/query/synthesize` + **`book_guide(intent, anchor?)`**(返路线:意图→入口→route 路线含每步理由+证据 LID,是 book_query 的姊妹)。**连接式访客会话**(TCP 式握手/挥手):握手发 `session_id`、传输期支持"不对"refine、挥手即焚 + 超时 GC;会话含 `transcript` + 临时游标 `cursor{at_lid,last_frontier}`(访客自己的位置,≠ 读者 viewport)。复用 `read-tools::Book` + runtime citation gate + route(P8)。**访客反馈(ADR-0036)**:与人同一消歧骨架,但换两插槽——历史来源用 ③(`cursor.last_frontier`+transcript,非 ② viewport/memory)、讲法整形为空(中立重述,讲法轴近塌缩)、终裁者=访客自身("不对"即指令,直接换前沿分支,无可撤销提议环节)。
+- **不做**:不暴露 `reader.*`;不写 `memory.*`;不共享 localhost reader 当前视口 / `/agent/chat` messages / 读者 session;不新增 profile 专属 MCP 命令;**不把 ③ 访客会话写入 ② durable store**;**不暴露对话式住户 agent**(模糊住户/访客界、泄漏私人房间)。
+- **判据**:外部 agent 经 `book_guide` / route 拿到全真 LID 的路线并可跨调用 refine("不对"→换前沿分支);所有回答 citation 满足 Core 红线且可独立验证;挥手后 ③ 被 GC;并发访客各自会话隔离、读者私人层零泄漏;超时会话被 GC(承重墙)。
+- **触达**:`[ADR-0033 决策12(修订)/0034/0035/0036]`
+- **依赖**:route Core 原语(P8);server AppState 从单会话扩为 住户1+访客N(会话表)。
+
+### P8 · route Core 导航原语(前沿式 + 路径式 BFS) `[Rust]`
+> P3 人投影带读 + P7 访客向导的**共享底座**;承 ADR-0034。
+- **做**:实现 Core `route_from(at)`(前沿式,架在 `book.context` 上,返回 5 类导航分组 `back/forward/concretize/cross/continue`,`edge_type→类别` 固定映射表,组内 weight×距离 结构排序)+ `route_to(from,target)`(同批边 BFS 派生)。零 LLM、纯确定性、可单测。
+- **不做**:不在 route 内核放 LLM 或 profile 偏见(教学整形留 P3 policy 层);不让 route 吃 NL(意图→入口解析复用 book.concept/query);不新增 reader/memory 写;不碰访客会话(P7)。
+- **判据**:给定基座 fixture,`route_from` 确定性产出 5 类分组前沿、全是真 LID/真边、`edge_type→类别` 覆盖全边类型;`route_to` BFS 路径全真且与前沿同批边;cargo test 确定性覆盖(像 isCrossWindow/gate 那样)。
+- **触达**:`[ADR-0013/0034]`
+- **实测落点**:5 类是否够用(有无落不进的边)、weight×距离 权重、前沿规模上限。
 ---
 
 ## 3. 完成判据复述
@@ -524,6 +582,7 @@ ADR-0033 落档
   ∧ memory consolidation 产 reader_profile 且不写 book base
   ∧ provider adapter 与 profile 正交
   ∧ 增量构建能迁移/标 orphaned profile artifacts 与 memory evidence
+  ∧ route Core 导航原语支撑 agent 主动带读(人投影)与 book_guide 访客向导(外部 agent 投影),读者私人层零泄漏
 ```
 
 ## 4. 实测数字回填清单

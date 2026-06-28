@@ -1,36 +1,36 @@
-# SESSION_CHECKPOINT - 2026-06-28 11:40
+# SESSION_CHECKPOINT — 2026-06-28 (反馈信号 grill 收敛 + ADR-0036 落档)
 
-## Freshness check
-- 最新 commit(写入时):a8fb858 PB3-5 Pass2 build orchestration + audit/candidate writeback(已 push origin/main)
-- PB3 全切片已提交并推送。下一阶段切片是 PB4(未开工)。
-- On read, compare with `git log -3`; if different, trust git log.
+## 新鲜度自检
+- 写入时最新 commit: f56b541 C4 checkpoint: PB3 complete, next is PB4
+- 本会话**未 commit**:改动全在工作区(下方「未提交」)。读入时对比 `git log -1`,不一致以 git 为准。
 
-## What's in progress
-PB3(Pass2 预构建编排 + audit sidecar)**已全部完成并 push**:PB3-1(契约+edge type 11 类)、PB3-2a/2b(候选生成 grill §11 四信号)、PB3-3(PB3 gate)、PB3-4(work packet+contracts+prompt)、PB3-5(pass1-batch 编排+写盘)。下一阶段切片是 PB4。
+## 当前在做什么
+设计线:把 route 两投影带读补全。本会话 grill 关闭 **OPEN①「反馈信号」** 并落档 **ADR-0036**(显式 NL 主信号 / 导航·讲法二维 / 结构兜底消歧 / 人访客两投影 / viewport 模式分裂)。设计仅落档,**零代码**。
 
-## Next steps (ready to hand off)
-1. (可选)commit PB3-5(信息以 `PB3-5` 开头)。
-2. **PB4 profile sidecar build smoke**(`docs/切片方案-profile深路径.md` PB4):构建输出目录同含 base.json/source.txt/profile_metadata/formula_semantics/discourse_index/pass2_audit;Rust `Book::load` + runtime `book.synthesize/context` 能消费;`book.context far` 能读到写回的 long_range 边;`cargo test` 侧加载同一 fixture 验证。这是预构建→读时端到端 smoke(PB3 判据里被 PB3「不做」推给 PB4 的那条 read-time 验证就在这)。
-3. 评估 P1 旧 gate `pass2.ts:gateTechnicalLearningPass2LongRange` 是否退役(PB3 gate 已是更全的 `pass2-build.ts:gatePass2BuildOutput`)。
-4. 不混 reader.*/memory./P7 MCP。
+## 下一步(可直接接手)
+1. **(设计)续 grill OPEN②**:route 命令面落点 + 命名(`book.route`? 还是 runtime 内部不暴露?)。照 §0.5 一次一问 + 带推荐答案。
+2. **(设计)续 grill OPEN③**:route_to / book_guide / 访客会话 归 P7/P8 的精确边界(谁在 Core、谁在 server、谁在 policy)。
+3. **(代码,设计稳后可起)**从 **P8 route Core** 起:在 `crates/read-tools/src/lib.rs:Book::context`(L472)之上加 `route_from(at)`,返 5 类导航分组 `back/forward/concretize/cross/continue`,`edge_type→类别` 固定映射表,组内 weight×距离 排序,cargo test 确定性覆盖。再 P3 人带读 / P7 访客向导。
+4. **(正交代码)PB4** profile sidecar build smoke 仍是独立未做 CODE 刀,与本设计线正交。
 
-## Uncommitted / unfinished
-- 无(PB3 全部已 commit + push;本 checkpoint 刷新随后单独提交)。
-- 保持 untracked:`参考2.md`、`参考_discourse_prompt.md`、`参考pass2.md`、`agent交互书.md`、`docs/预购建流程.md`、`.fluid/`。
-- `.understand-book/`:gitignore 生成物(PB3-5 smoke 覆写成 sample.md 小基座 + 全套 sidecar;需真书时用真 epub 重建)。
+## 未提交 / 未完成
+- 新增:`docs/adr/0034-*.md`、`docs/adr/0035-*.md`、`docs/adr/0036-*.md`(本会话新增 0036)。
+- 已改:`CONTEXT.md`(+反馈信号/导航轴·讲法轴)、`docs/切片方案-profile深路径.md`(§1.5.9+P3+P7)、`docs/代码链路.md`(+ADR-0036 条目)、本 checkpoint。
+- 保持 untracked:`参考*.md`、`agent交互书.md`、`docs/预购建流程.md`、`.fluid/`。
+- 全部待 commit。**零代码改动**(未跑 cargo/pnpm)。
 
-## Cold-start reading sequence
-1. `docs/PB3-pass2-prompt-grill.md` - PB3 冻结设计(实现已对齐)。
-2. `docs/切片方案-profile深路径.md` - PB0-PB4 + P1-P7 计划;PB4 是下一刀。
-3. `docs/adr/0033-...technical-learning作为当前profile.md` - Core/Profile/Reader 边界。
-4. `docs/代码链路.md` - 改动账本(含 PB2b、PB3-1..3-5)。
-5. `packages/core/src/pass2-build.ts` - PB3 全部:候选生成 + gate + work packet + contracts。
-6. `skills/build/pass1-batch.ts` - 预构建写盘全链(base/源/metadata/formula/discourse/candidates/pass2_audit)。
-7. `packages/core/src/zod.ts` - 产出前自检 schema(含 PB3 audit)。
-8. `crates/read-tools/src/lib.rs` - 读时 Book::load + context far(PB4 要让它消费新 sidecar)。
+## 冷启动读序
+按序读可还原本设计线全局:
+1. `docs/adr/0034-route导航原语-...md` — route 机制 + 两投影(6 决策)。
+2. `docs/adr/0035-book-mcp访客会话-...md` — 住户/访客 + 三类记忆 + 连接式会话。
+3. `docs/adr/0036-反馈信号模型-...md` — 反馈信号 5 决策(本会话新增)。
+4. `docs/切片方案-profile深路径.md` §1.5.9 + P3/P4/P7/P8 — 契约 + 切片落点。
+5. `docs/代码链路.md` 末两条(ADR-0034/0035、ADR-0036 落档)— 含余下 OPEN②③。
+6. (代码接手才需)`crates/read-tools/src/lib.rs:Book::context`(L472)— route_from 架在它上。
 
-## 本会话决策摘要
-- PB2b commit 0973b69;PB3-1..3-4 commit a1713e0/e294806/24f1d23。
-- PB3-2 候选 join 算法 = shared-node 路线(grill §11 四信号),不加语义桥(读时 scope 外扩兜底)。
-- PB3 长程边写盘:accepted 过 gate 才进 base.graph_edges;split evidence/support_level/rationale + pending/rejected/gate_dropped 仅进 pass2_audit.json。
-- 阈值占位:`MIN_RELATION_CONFIDENCE=0.5`、`MAX_LOCAL_SUMMARY_LEN=200`(PB2b)、`MIN_LONG_RANGE_WEIGHT=0.5`(PB3),均待实测回填。
+## 本会话决策摘要(ADR-0036 五条)
+- D1 显式 NL 提问=唯一主信号(viewport 弱旁路 / memory 慢先验 / quiz 留后)。
+- D2 反馈意图二维:导航轴→route 5 类 / 讲法轴→policy;开放 NL 不立闭集词表,agent 据语义定 `{轴+类别+target}`。
+- D3 裸"没懂"消歧=`route_from.back ∩ 未读前置` 结构收窄 + 可撤销提议 + 二次信号升级,不靠 LLM 神判。
+- D4 人/访客同骨架两插槽(历史来源 ②/③、讲法整形 reader_profile/无)+ 终裁者不同。
+- D5 viewport 偏离随模式分裂:默认 turn-based=静默 re-sync(rebase `at`,不问)/ 巡航 opt-in=中断信号(停+问)。

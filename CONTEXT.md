@@ -152,3 +152,27 @@ memory 层的后台 LLM 流水线,参照 Codex `codex-rs/memories` 落地 `[ADR-
 
 ## 读时会话边界 (reading session boundary)
 对话会话的切分 = **用户显式控制** `[ADR-0030]`:用户点「新对话」手动清空 `messages`,**不按 idle 时间戳自动判定**(简化设计)。与 [docs/adr/0018] Phase1 的记忆抽取边界(idle/关书/退出)**解耦**——对话会话是用户交互意图,记忆抽取是后台流水线,各自独立。新会话**冷启动上下文 = memory.recall 兜底**(note/highlight/position,精炼 state 而非全量 messages,记大局不被细节淹没);完整轨迹摘要/reader-profile 常驻留 consolidation 刀。状态:NEW(详见 [docs/adr/0030])。
+
+## route(导航原语)
+图谱上的**确定性多跳导航原语** `[ADR-0034]`,零 LLM,只保证返回的 LID/边真实("确定性 LID 由 route 保证")。两形态:`route_from(at)` = **前沿式内核**(站在当前 LID 返回可走的下一步);`route_to(from, target)` = 同批边上跑 BFS 的确定性组合(派生)。区别于 `book.context`(单跳"相关点"):route 是把 context 链起来 + 按边语义排序成"可导航下一步"的多跳找路。route 内核是 Core(架在 book.context 上);教学性排序/过滤属 technical_learning policy。状态:NEW(详见 [docs/adr/0034])。
+
+## 前沿 (frontier) / 导航类别 (navigation category)
+`route_from` 的返回形状 `[ADR-0034]`:不是一条平铺 ranked list,而是按导航语义分的 **5 个类别**——`back`(前置/背景)/ `forward`(深入/承接)/ `concretize`(例证/具体)/ `cross`(关联/跨章)/ `continue`(顺读)。`edge_type → 类别` 是固定确定性映射表(Core),组内按 weight×距离 排序。意图直接落到类别("没懂"→back,"给例子"→concretize)。状态:NEW(详见 [docs/adr/0034])。
+
+## 住户 / 访客 (resident / visitor)
+读时两类 agent 的本质区别 `[ADR-0034][ADR-0035]`:**住户** = 我们的 agent,住在世界模型里,携带当前位置 + **这个读者的记忆**(reader_profile/memory),与读者有持续关系;**访客** = 外部 agent,只带自己的外来意图进来,对本书零记忆、无所有权。**能共享的不构成区别**(route/世界模型可借给访客);不可让渡的是 ②读者私人记忆。访客 = 临时住户 lite(拿临时会话+游标,够不到读者私人房间)。状态:NEW(详见 [docs/adr/0034/0035])。
+
+## 三类记忆 (three memory classes)
+读时记忆按可见性分三类 `[ADR-0035]`:**① 世界模型**(公共,可借:route/book.text/citation gate)/ **② 读者私人记忆**(durable + 读者所有 + 绝不外借:reader_profile/memory/viewport)/ **③ 访客会话记忆**(ephemeral + 访客交互所有:它问了啥、我们返了啥、它的"不对")。③ ≠ ②——给访客 session 记忆不破"私人房间不外借"。状态:NEW(详见 [docs/adr/0035])。
+
+## 访客会话 (visitor session)
+外部 agent 经 MCP 连接我们时的 ephemeral 会话 `[ADR-0035]`,**TCP 式握手/挥手**维护:握手发 `session_id`、传输期迭代引导(支持"不对"refine)、挥手即焚 + 超时 GC。内容 = `transcript`(交互记录)+ 临时**游标** `cursor{at_lid, last_frontier}`(访客自己的位置,≠ 读者 viewport)。绝不写入 ② 的 durable store。修订了 P7 原"无状态"假设(见 [docs/adr/0035])。状态:NEW(详见 [docs/adr/0035])。
+
+## book_guide(访客向导命令)
+外部 agent 投影的只读 LLM 命令 `[ADR-0035]`:`book_guide(intent, anchor?)` 返回 `意图→入口节点→route 路线(每步理由+证据 LID)`。是 `book_query` 的姊妹——**query 返答案,guide 返路线**。配访客会话态可跨调用 refine。返回全是真 LID/真边,外部可独立验证。状态:NEW(详见 [docs/adr/0035])。
+
+## 反馈信号 (feedback signal)
+带读 loop 中调整下一步的转向输入 `[ADR-0036]`。**唯一主信号 = 用户在停靠点的开放 NL 提问**(非闭集 token);viewport 偏离仅作弱旁路、memory/reader_profile 作慢先验、quiz 留后。区别于"agent 主动观测 viewport 行为推断"(已否决:弱代理误读违用户终裁)。状态:NEW(详见 [docs/adr/0036])。
+
+## 导航轴 / 讲法轴 (navigation axis / explanation axis)
+反馈意图的两个正交轴 `[ADR-0036]`:**导航轴**(去哪)落 `route_from` 的 5 类导航类别;**讲法轴**(怎么讲/多细/重讲)落 technical_learning policy 讲法层(复用 `book.synthesize` + reader_profile),不动 route。agent 据 NL 提问语义把信号定到 `{轴, route 类别, 可能的 target}`;裸"没懂"歧义靠结构兜底(`route_from(at).back ∩ 未读前置`)+ 可撤销提议 + 二次信号升级消解,不靠 LLM 神判。状态:NEW(详见 [docs/adr/0036])。
