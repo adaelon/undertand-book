@@ -163,6 +163,31 @@ pub fn tool_specs() -> Vec<ToolSpec> {
             }),
         ),
         s(
+            "book.route_from",
+            "从某 LID 出发的确定性导航前沿:按导航语义返回 5 类分组(back 前置/forward 深入/concretize 例证/cross 关联/continue 顺读),每步是真 LID+真边。零 LLM,用于决定『下一步去哪』。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "at": {"type": "string", "description": "出发 LID"},
+                    "k": {"type": "integer", "description": "可选,每类前沿 top-K"}
+                },
+                "required": ["at"]
+            }),
+        ),
+        s(
+            "book.route_to",
+            "在导航图上求 from→target 的确定性路径(BFS,返回导航步序列,全真 LID+真边)。target 须为已解析 LID(先用 book.concept/context 定位)。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "from": {"type": "string", "description": "出发 LID"},
+                    "target": {"type": "string", "description": "目标 LID(已解析)"},
+                    "k": {"type": "integer", "description": "可选,跳数预算"}
+                },
+                "required": ["from", "target"]
+            }),
+        ),
+        s(
             "memory.save",
             "保存一条记忆(note/highlight/position),自动锚回 LID citation。",
             json!({
@@ -354,6 +379,34 @@ fn dispatch(
             };
             let body = match book.concept(n) {
                 Ok(c) => to_json(&c),
+                Err(e) => to_json(&e),
+            };
+            (body, None)
+        }
+        "book.route_from" => {
+            let Some(at) = sget("at") else {
+                return (
+                    err_json("INVALID_RANGE", "validation", "book.route_from 需 at"),
+                    None,
+                );
+            };
+            let k = args.get("k").and_then(|v| v.as_u64()).map(|u| u as usize);
+            let body = match book.route_from(at, k) {
+                Ok(f) => to_json(&f),
+                Err(e) => to_json(&e),
+            };
+            (body, None)
+        }
+        "book.route_to" => {
+            let (Some(from), Some(target)) = (sget("from"), sget("target")) else {
+                return (
+                    err_json("INVALID_RANGE", "validation", "book.route_to 需 from + target"),
+                    None,
+                );
+            };
+            let k = args.get("k").and_then(|v| v.as_u64()).map(|u| u as usize);
+            let body = match book.route_to(from, target, k) {
+                Ok(p) => to_json(&serde_json::json!({ "from": from, "target": target, "path": p })),
                 Err(e) => to_json(&e),
             };
             (body, None)
@@ -850,6 +903,75 @@ mod tests {
         assert!(out.contains("LID_NOT_FOUND"));
         assert!(out.contains("not_found"));
         assert!(eff.is_none()); // 报错不产 effect
+    }
+
+    // ---- P8-3 route 命令面暴露 ----
+    #[test]
+    fn tool_specs_exposes_route_commands() {
+        let names: Vec<String> = tool_specs().into_iter().map(|s| s.name).collect();
+        assert!(names.iter().any(|n| n == "book.route_from"));
+        assert!(names.iter().any(|n| n == "book.route_to"));
+    }
+
+    #[test]
+    fn dispatch_route_from_returns_frontier_and_invalid_at_not_found() {
+        let b = book();
+        let mut store = MemoryStore::open(tmp("route-from")).unwrap();
+        let fake = FakeAdapter::new(vec![], vec![]);
+        let mut reader = Reader::new(&b, DEFAULT_RADIUS);
+        let (ok, eff) = dispatch(
+            "book.route_from",
+            r#"{"at":"1.1"}"#,
+            &b,
+            &mut store,
+            &mut reader,
+            &fake,
+            "t0",
+        );
+        // Frontier 总序列化全 5 类键;纯只读不产 effect。
+        assert!(ok.contains("\"forward\"") && ok.contains("\"continue\""));
+        assert!(eff.is_none());
+        let (nf, _) = dispatch(
+            "book.route_from",
+            r#"{"at":"9.9"}"#,
+            &b,
+            &mut store,
+            &mut reader,
+            &fake,
+            "t0",
+        );
+        assert!(nf.contains("LID_NOT_FOUND") && nf.contains("not_found"));
+    }
+
+    #[test]
+    fn dispatch_route_to_wraps_path_and_validates_args() {
+        let b = book();
+        let mut store = MemoryStore::open(tmp("route-to")).unwrap();
+        let fake = FakeAdapter::new(vec![], vec![]);
+        let mut reader = Reader::new(&b, DEFAULT_RADIUS);
+        let (ok, eff) = dispatch(
+            "book.route_to",
+            r#"{"from":"1.1","target":"1.1"}"#,
+            &b,
+            &mut store,
+            &mut reader,
+            &fake,
+            "t0",
+        );
+        // 同端点 → 空路径,但 {from,target,path} 信封仍在;只读不产 effect。
+        assert!(ok.contains("\"path\"") && ok.contains("\"from\""));
+        assert!(eff.is_none());
+        // 缺 target → validation 信封。
+        let (bad, _) = dispatch(
+            "book.route_to",
+            r#"{"from":"1.1"}"#,
+            &b,
+            &mut store,
+            &mut reader,
+            &fake,
+            "t0",
+        );
+        assert!(bad.contains("INVALID_RANGE") && bad.contains("validation"));
     }
 
     // 闭环验收:agent 经外层 loop 命令面跑通「问→跳转→高亮→记笔记」一次闭环 `[ADR-0007/0015]`。

@@ -134,6 +134,38 @@ fn route_book(book: &Book, leaf: &str, q: &HashMap<String, String>) -> Reply {
                 Err(e) => err_reply(&e),
             }
         }
+        "route_from" => {
+            let Some(at) = q.get("at") else {
+                return validation("INVALID_RANGE", "book.route_from 需 at 查询参数");
+            };
+            let k = match q.get("k") {
+                None => None,
+                Some(s) => match s.parse::<usize>() {
+                    Ok(n) => Some(n),
+                    Err(_) => return validation("INVALID_K", "k 须为非负整数"),
+                },
+            };
+            match book.route_from(at, k) {
+                Ok(f) => ok_json(&f),
+                Err(e) => err_reply(&e),
+            }
+        }
+        "route_to" => {
+            let (Some(from), Some(target)) = (q.get("from"), q.get("target")) else {
+                return validation("INVALID_RANGE", "book.route_to 需 from + target 查询参数");
+            };
+            let k = match q.get("k") {
+                None => None,
+                Some(s) => match s.parse::<usize>() {
+                    Ok(n) => Some(n),
+                    Err(_) => return validation("INVALID_K", "k 须为非负整数"),
+                },
+            };
+            match book.route_to(from, target, k) {
+                Ok(p) => ok_json(&json!({ "from": from, "target": target, "path": p })),
+                Err(e) => err_reply(&e),
+            }
+        }
         _ => route_not_found(&format!("/book/{leaf}")),
     }
 }
@@ -672,6 +704,26 @@ mod tests {
         assert_eq!(get(&mut s, "/book/context?lid=1.1&k=abc").status, 400);
         assert_eq!(get(&mut s, "/book/concept?name=command").status, 200);
         assert_eq!(get(&mut s, "/book/concept?name=nope").status, 404);
+    }
+
+    #[test]
+    fn route_from_and_route_to_get() {
+        let mut s = state_named("route_nav");
+        // route_from:200 + 返 5 类前沿(Frontier 总含全 5 键)。
+        let rf = get(&mut s, "/book/route_from?at=1.1");
+        assert_eq!(rf.status, 200);
+        assert!(rf.body.contains("\"forward\"") && rf.body.contains("\"continue\""));
+        // 缺 at → 400;非法 k → 400;invalid at → 404。
+        assert_eq!(get(&mut s, "/book/route_from").status, 400);
+        assert_eq!(get(&mut s, "/book/route_from?at=1.1&k=abc").status, 400);
+        assert_eq!(get(&mut s, "/book/route_from?at=9.9").status, 404);
+        // route_to:200 + 含 path 字段(同端点空路径非 error)。
+        let rt = get(&mut s, "/book/route_to?from=1.1&target=1.1");
+        assert_eq!(rt.status, 200);
+        assert!(rt.body.contains("\"path\""));
+        // 缺 target → 400;invalid 端点 → 404。
+        assert_eq!(get(&mut s, "/book/route_to?from=1.1").status, 400);
+        assert_eq!(get(&mut s, "/book/route_to?from=1.1&target=9.9").status, 404);
     }
 
     #[test]
