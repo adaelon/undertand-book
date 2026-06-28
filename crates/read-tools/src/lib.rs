@@ -52,6 +52,12 @@ pub struct TechnicalLearningDiscourseRelation {
 }
 /// context 默认 top-K(占位,待 P1 实测回填 ADR-0013/0016「何时回头」)。
 pub const DEFAULT_NEAR_K: usize = 10;
+/// route_from 每类前沿默认 top-K(沿用 context 截断惯例 `[ADR-0034 影响段]`)。
+pub const DEFAULT_ROUTE_K: usize = DEFAULT_NEAR_K;
+/// route_to BFS 默认跳数预算(占位,实测回填 `[ADR-0034 决策3 路径式预算全程]`)。
+pub const DEFAULT_ROUTE_HOPS: usize = 8;
+/// 概念共现步的占位权重(Via::Concept 无 weight;实测回填 `[ADR-0034 何时回头]`)。
+const CONCEPT_COOCCURRENCE_WEIGHT: f32 = 0.5;
 
 /// 统一错误信封(子集)`[ADR-0015]`;禁宽松降级——找不到即报错,不静默返最近邻。
 #[derive(Debug, Serialize, PartialEq, TS)]
@@ -137,6 +143,52 @@ pub struct ContextItem {
 pub struct Context {
     pub anchor: String,
     pub items: Vec<ContextItem>,
+}
+
+/// route 导航类别(ADR-0034 决策5):`edge_type` 经固定确定性映射归入这 5 类之一 `[ADR-0034]`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub enum NavCategory {
+    /// 前置/背景:prerequisite, depends_on
+    Back,
+    /// 深入/承接:builds_on, refines, elaborates, explains, prepares, causes, results_in
+    Forward,
+    /// 例证/具体:exemplifies, applies, answers
+    Concretize,
+    /// 关联/跨章:long_range(analogous/contrasts/supports…)+ 概念共现 + 未知 local 兜底
+    Cross,
+    /// 顺读:next_sibling(阅读序)、discourse continues
+    Continue,
+}
+
+/// route_from 前沿的一个排序步:纯坐标 + 结构排序分,不带原文(消费方走 `book.text`)`[ADR-0034]`。
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct RankedStep {
+    /// 真实 LID。
+    pub lid: String,
+    /// 真实边类型(local / long_range edge_type、discourse relation_type、co_occurrence、next_sibling)。
+    pub edge_type: String,
+    /// 来自哪条边的导航理由(人可读)。
+    pub why: String,
+    /// 证据 LID(discourse 取 relation.evidence_lids;其余取 [anchor, step] 两端真 LID)。
+    pub evidence_lids: Vec<String>,
+    /// 结构排序分 = weight /(1 + 树距)(占位口径,实测回填 `[ADR-0034 何时回头]`)。
+    pub score: f32,
+}
+
+/// book.route_from 返回:按导航语义分的 5 类前沿(永远返全 5 类,无 category 过滤)`[ADR-0034 决策5]`。
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct Frontier {
+    pub back: Vec<RankedStep>,
+    pub forward: Vec<RankedStep>,
+    pub concretize: Vec<RankedStep>,
+    pub cross: Vec<RankedStep>,
+    #[serde(rename = "continue")]
+    #[ts(rename = "continue")]
+    pub continue_: Vec<RankedStep>,
 }
 
 /// book.concept() 返回结构(全量 occurrences 不截断)`[ADR-0014]`。
@@ -583,6 +635,195 @@ impl Book {
     pub fn context_near(&self, lid: &str, k: Option<usize>) -> Result<Context, ToolError> {
         self.context(lid, Some("near"), k)
     }
+
+    /// 两个 LID 在物化路径树上的距离(公共前缀外的层数之和)。占位口径,实测回填。
+    fn lid_tree_distance(&self, a: &str, b: &str) -> usize {
+        let pa = self.lid_idx.get(a).map(|&i| &self.base.lid_nodes[i].path);
+        let pb = self.lid_idx.get(b).map(|&i| &self.base.lid_nodes[i].path);
+        match (pa, pb) {
+            (Some(pa), Some(pb)) => {
+                let common = pa.iter().zip(pb.iter()).take_while(|(x, y)| x == y).count();
+                (pa.len() - common) + (pb.len() - common)
+            }
+            _ => 0,
+        }
+    }
+
+    /// 把一个 context far 投影项转成 (NavCategory, RankedStep)。
+    /// Tree 仅取 next_sibling(→continue);parent/prev_sibling/child 是结构上下文,不进前沿(v1)。
+    fn route_step(&self, at: &str, it: &ContextItem) -> Option<(NavCategory, RankedStep)> {
+        let (edge_type, weight, evidence_lids, why, cat) = match &it.via {
+            Via::Tree { rel } => {
+                if rel != "next_sibling" {
+                    return None;
+                }
+                (
+                    "next_sibling".to_string(),
+                    1.0_f32,
+                    vec![at.to_string(), it.lid.clone()],
+                    "reading order: next sibling".to_string(),
+                    NavCategory::Continue,
+                )
+            }
+            Via::Edge {
+                scope,
+                edge_type,
+                weight,
+                ..
+            } => (
+                edge_type.clone(),
+                *weight,
+                vec![at.to_string(), it.lid.clone()],
+                format!("{scope} edge: {edge_type}"),
+                nav_category_of(edge_type),
+            ),
+            Via::Concept { name, .. } => (
+                "co_occurrence".to_string(),
+                CONCEPT_COOCCURRENCE_WEIGHT,
+                vec![at.to_string(), it.lid.clone()],
+                format!("co-occurs via concept: {name}"),
+                NavCategory::Cross,
+            ),
+            Via::Discourse {
+                relation_type,
+                confidence,
+                evidence_lids,
+                ..
+            } => (
+                relation_type.clone(),
+                *confidence,
+                evidence_lids.clone(),
+                format!("discourse: {relation_type}"),
+                nav_category_of(relation_type),
+            ),
+        };
+        let dist = self.lid_tree_distance(at, &it.lid);
+        let score = weight / (1.0 + dist as f32);
+        Some((
+            cat,
+            RankedStep {
+                lid: it.lid.clone(),
+                edge_type,
+                why,
+                evidence_lids,
+                score,
+            },
+        ))
+    }
+
+    /// book.route_from(at, k?):前沿式确定性导航原语 `[ADR-0034]`。
+    /// 架在 `book.context` 上——吃 `context(at,"far")` 已投影好的全部 边/概念/结构邻接,
+    /// 按 `edge_type→NavCategory` 固定映射重组为 5 类,组内 weight/(1+树距) 排序,各类 top-K。
+    /// 零 LLM、纯结构;invalid at → context 抛 LID_NOT_FOUND(not_found);叶子无边 → 空 5 类非 error。
+    pub fn route_from(&self, at: &str, k: Option<usize>) -> Result<Frontier, ToolError> {
+        // 不截断(k=MAX),拿全部投影项,分组后每类各自 top-K(故传 usize::MAX 给 context)。
+        let ctx = self.context(at, Some("far"), Some(usize::MAX))?;
+        let mut f = Frontier {
+            back: Vec::new(),
+            forward: Vec::new(),
+            concretize: Vec::new(),
+            cross: Vec::new(),
+            continue_: Vec::new(),
+        };
+        for it in &ctx.items {
+            if let Some((cat, step)) = self.route_step(at, it) {
+                match cat {
+                    NavCategory::Back => f.back.push(step),
+                    NavCategory::Forward => f.forward.push(step),
+                    NavCategory::Concretize => f.concretize.push(step),
+                    NavCategory::Cross => f.cross.push(step),
+                    NavCategory::Continue => f.continue_.push(step),
+                }
+            }
+        }
+        let limit = k.unwrap_or(DEFAULT_ROUTE_K);
+        let cmp = |a: &RankedStep, b: &RankedStep| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.lid.cmp(&b.lid))
+                .then_with(|| a.edge_type.cmp(&b.edge_type))
+        };
+        for group in [
+            &mut f.back,
+            &mut f.forward,
+            &mut f.concretize,
+            &mut f.cross,
+            &mut f.continue_,
+        ] {
+            group.sort_by(cmp);
+            group.truncate(limit);
+        }
+        Ok(f)
+    }
+
+    /// 某 LID 的导航邻居:route_from 的 5 类前沿按 (back,forward,concretize,cross,continue)
+    /// 顺序展平、按 lid 去重(保留首现=最高优先类/分)。BFS 用全量前沿(k=MAX)避免截断藏路。
+    fn route_neighbors(&self, lid: &str) -> Result<Vec<RankedStep>, ToolError> {
+        let f = self.route_from(lid, Some(usize::MAX))?;
+        let mut out = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for group in [&f.back, &f.forward, &f.concretize, &f.cross, &f.continue_] {
+            for s in group {
+                if seen.insert(s.lid.clone()) {
+                    out.push(s.clone());
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// book.route_to(from, target, k?):路径式确定性导航(route_from 的派生)`[ADR-0034 决策3]`。
+    /// 在 route_from 同批边上跑 BFS,返 `from→target` 的导航步路径(全真 LID/真边)。
+    /// `target` 须为已解析 LID(NL→入口在 route 之外,复用 `book.concept`)。`k` = 跳数预算。
+    /// from/target 非真 → not_found;from==target 或 预算内不可达 → 空路径非 error。
+    pub fn route_to(
+        &self,
+        from: &str,
+        target: &str,
+        k: Option<usize>,
+    ) -> Result<Vec<RankedStep>, ToolError> {
+        self.node(from)?;
+        self.node(target)?;
+        if from == target {
+            return Ok(Vec::new());
+        }
+        let max_hops = k.unwrap_or(DEFAULT_ROUTE_HOPS);
+        // BFS:prev 记 到达每个 lid 的 (前驱 lid, 该步),用于回溯;visited 防环。
+        let mut prev: HashMap<String, (String, RankedStep)> = HashMap::new();
+        let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
+        visited.insert(from.to_string());
+        let mut queue: std::collections::VecDeque<(String, usize)> =
+            std::collections::VecDeque::new();
+        queue.push_back((from.to_string(), 0));
+        while let Some((lid, depth)) = queue.pop_front() {
+            if depth >= max_hops {
+                continue;
+            }
+            for step in self.route_neighbors(&lid)? {
+                if !visited.insert(step.lid.clone()) {
+                    continue;
+                }
+                let next_lid = step.lid.clone();
+                let reached_target = next_lid == target;
+                prev.insert(next_lid.clone(), (lid.clone(), step));
+                if reached_target {
+                    // 回溯:target → from,再反转成 from → target。
+                    let mut path = Vec::new();
+                    let mut cur = target.to_string();
+                    while cur != from {
+                        let (p, s) = &prev[&cur];
+                        path.push(s.clone());
+                        cur = p.clone();
+                    }
+                    path.reverse();
+                    return Ok(path);
+                }
+                queue.push_back((next_lid, depth + 1));
+            }
+        }
+        Ok(Vec::new())
+    }
     /// book.concept(name):按名找 concept/entity 节点,返全量 occurrences + 关联实体 `[ADR-0014]`。
     /// 找不到 → CONCEPT_NOT_FOUND(不静默降级 `[ADR-0015]`)。
     pub fn concept(&self, name: &str) -> Result<Concept, ToolError> {
@@ -629,6 +870,22 @@ impl Book {
 /// 物化路径父 LID:"11.18.4" → Some("11.18");"1" → None。
 fn parent_lid(lid: &str) -> Option<String> {
     lid.rfind('.').map(|i| lid[..i].to_string())
+}
+
+/// `edge_type → NavCategory` 固定确定性映射(Core,零 LLM)`[ADR-0034 决策5]`。
+/// 未知 local 边类型 → Cross(关联兜底):Pass1 local edge_type 是开放集,
+/// 以兜底保证「覆盖全边类型、不丢边」,代价是关联类可能略宽(实测回填「何时回头」)。
+fn nav_category_of(edge_type: &str) -> NavCategory {
+    match edge_type {
+        "prerequisite" | "depends_on" => NavCategory::Back,
+        "builds_on" | "refines" | "elaborates" | "explains" | "prepares" | "causes"
+        | "results_in" => NavCategory::Forward,
+        "exemplifies" | "applies" | "answers" => NavCategory::Concretize,
+        "next_sibling" | "continues" => NavCategory::Continue,
+        // analogous_to / contrasts / contradicts / supports / rebuts / summarizes /
+        // restates / concedes / co_occurrence / 未知 local → 关联兜底
+        _ => NavCategory::Cross,
+    }
 }
 
 fn context_item_key(it: &ContextItem) -> String {
@@ -833,6 +1090,108 @@ mod tests {
                 },
             ],
         }])
+    }
+    fn book_isolated_leaf() -> Book {
+        let base = ReadOnlyBase {
+            book_id: "iso".into(),
+            lid_nodes: vec![
+                LidNode {
+                    lid: "1".into(),
+                    path: vec![1],
+                    kind: NodeKind::Chapter,
+                    span: Span { start: 0, end: 4 },
+                    children: vec!["1.1".into()],
+                },
+                LidNode {
+                    lid: "1.1".into(),
+                    path: vec![1, 1],
+                    kind: NodeKind::Paragraph,
+                    span: Span { start: 0, end: 4 },
+                    children: vec![],
+                },
+            ],
+            graph_nodes: vec![],
+            graph_edges: vec![],
+        };
+        Book::new(base, "AAAA")
+    }
+    fn book_chain() -> Book {
+        // 三叶 1.1/1.2/1.3,长程链 ea(1.1)→eb(1.2)→ec(1.3),无 1.1→1.3 直边。
+        let base = ReadOnlyBase {
+            book_id: "chain".into(),
+            lid_nodes: vec![
+                LidNode {
+                    lid: "1".into(),
+                    path: vec![1],
+                    kind: NodeKind::Chapter,
+                    span: Span { start: 0, end: 12 },
+                    children: vec!["1.1".into(), "1.2".into(), "1.3".into()],
+                },
+                LidNode {
+                    lid: "1.1".into(),
+                    path: vec![1, 1],
+                    kind: NodeKind::Paragraph,
+                    span: Span { start: 0, end: 4 },
+                    children: vec![],
+                },
+                LidNode {
+                    lid: "1.2".into(),
+                    path: vec![1, 2],
+                    kind: NodeKind::Paragraph,
+                    span: Span { start: 4, end: 8 },
+                    children: vec![],
+                },
+                LidNode {
+                    lid: "1.3".into(),
+                    path: vec![1, 3],
+                    kind: NodeKind::Paragraph,
+                    span: Span { start: 8, end: 12 },
+                    children: vec![],
+                },
+            ],
+            graph_nodes: vec![
+                GraphNode {
+                    id: "entity:ea".into(),
+                    node_type: GraphNodeType::Entity,
+                    name: "EA".into(),
+                    occurrences: vec!["1.1".into()],
+                    source_lid: None,
+                },
+                GraphNode {
+                    id: "entity:eb".into(),
+                    node_type: GraphNodeType::Entity,
+                    name: "EB".into(),
+                    occurrences: vec!["1.2".into()],
+                    source_lid: None,
+                },
+                GraphNode {
+                    id: "entity:ec".into(),
+                    node_type: GraphNodeType::Entity,
+                    name: "EC".into(),
+                    occurrences: vec!["1.3".into()],
+                    source_lid: None,
+                },
+            ],
+            graph_edges: vec![
+                GraphEdge {
+                    source: "entity:ea".into(),
+                    target: "entity:eb".into(),
+                    edge_type: "builds_on".into(),
+                    direction: Direction::Directed,
+                    scope: EdgeScope::LongRange,
+                    weight: 0.9,
+                },
+                GraphEdge {
+                    source: "entity:eb".into(),
+                    target: "entity:ec".into(),
+                    edge_type: "builds_on".into(),
+                    direction: Direction::Directed,
+                    scope: EdgeScope::LongRange,
+                    weight: 0.9,
+                },
+            ],
+        };
+        Book::new(base, "AAAABBBBCCCC")
     }
     fn formula_semantics() -> FormulaSemantics {
         FormulaSemantics {
@@ -1043,5 +1402,149 @@ mod tests {
             b.concept("不存在").unwrap_err().error_code,
             "CONCEPT_NOT_FOUND"
         );
+    }
+
+    // ---- P8-1 route_from ----
+    #[test]
+    fn nav_category_of_maps_each_bucket_and_unknown_to_cross() {
+        assert_eq!(nav_category_of("prerequisite"), NavCategory::Back);
+        assert_eq!(nav_category_of("depends_on"), NavCategory::Back);
+        assert_eq!(nav_category_of("builds_on"), NavCategory::Forward);
+        assert_eq!(nav_category_of("elaborates"), NavCategory::Forward);
+        assert_eq!(nav_category_of("exemplifies"), NavCategory::Concretize);
+        assert_eq!(nav_category_of("applies"), NavCategory::Concretize);
+        assert_eq!(nav_category_of("answers"), NavCategory::Concretize);
+        assert_eq!(nav_category_of("analogous_to"), NavCategory::Cross);
+        assert_eq!(nav_category_of("contradicts"), NavCategory::Cross);
+        assert_eq!(nav_category_of("next_sibling"), NavCategory::Continue);
+        assert_eq!(nav_category_of("continues"), NavCategory::Continue);
+        // 未知 local 边 → cross 兜底(保证覆盖全边类型、不丢边)
+        assert_eq!(nav_category_of("cites"), NavCategory::Cross);
+        assert_eq!(nav_category_of("totally_made_up"), NavCategory::Cross);
+    }
+
+    #[test]
+    fn route_from_groups_far_edge_concept_and_sibling() {
+        let b = book_with_far_edge();
+        let f = b.route_from("1.1", None).unwrap();
+        // builds_on long_range → forward
+        assert_eq!(f.forward.len(), 1);
+        assert_eq!(f.forward[0].lid, "2.1");
+        assert_eq!(f.forward[0].edge_type, "builds_on");
+        // next_sibling → continue
+        assert_eq!(f.continue_.len(), 1);
+        assert_eq!(f.continue_[0].lid, "1.2");
+        assert_eq!(f.continue_[0].edge_type, "next_sibling");
+        // 概念共现(entity:a 其余 occurrences)→ cross
+        let mut cross_lids: Vec<&str> = f.cross.iter().map(|s| s.lid.as_str()).collect();
+        cross_lids.sort();
+        assert_eq!(cross_lids, vec!["1.2", "2.2"]);
+        assert!(f.cross.iter().all(|s| s.edge_type == "co_occurrence"));
+        // 无 back/concretize
+        assert!(f.back.is_empty());
+        assert!(f.concretize.is_empty());
+    }
+
+    #[test]
+    fn route_from_leaf_no_edges_returns_empty_groups_not_error() {
+        let b = book_isolated_leaf();
+        let f = b.route_from("1.1", None).unwrap();
+        assert!(
+            f.back.is_empty()
+                && f.forward.is_empty()
+                && f.concretize.is_empty()
+                && f.cross.is_empty()
+                && f.continue_.is_empty()
+        );
+    }
+
+    #[test]
+    fn route_from_invalid_at_returns_not_found() {
+        let b = book_with_far_edge();
+        let err = b.route_from("9.9", None).unwrap_err();
+        assert_eq!(err.error_code, "LID_NOT_FOUND");
+        assert_eq!(err.category, "not_found");
+    }
+
+    #[test]
+    fn route_from_consumes_discourse_relations_via_mapping() {
+        let b = book_with_discourse_projection();
+        let f = b.route_from("1.1", None).unwrap();
+        // depends_on → back
+        assert!(f
+            .back
+            .iter()
+            .any(|s| s.lid == "2.1" && s.edge_type == "depends_on"));
+        // elaborates → forward
+        assert!(f
+            .forward
+            .iter()
+            .any(|s| s.lid == "1.3" && s.edge_type == "elaborates"));
+        // next_sibling → continue
+        assert!(f
+            .continue_
+            .iter()
+            .any(|s| s.lid == "1.2" && s.edge_type == "next_sibling"));
+        // supports→9.9 悬空 target 在 discourse gate 已丢弃,不进任何组
+        assert!(f.cross.iter().all(|s| s.lid != "9.9"));
+    }
+
+    #[test]
+    fn route_from_truncates_each_group_to_k() {
+        let b = book_with_far_edge();
+        // cross 原有 2 项(1.2,2.2)→ k=1 截断,保留 score 高者(1.2,树距更近)
+        let f = b.route_from("1.1", Some(1)).unwrap();
+        assert_eq!(f.cross.len(), 1);
+        assert_eq!(f.cross[0].lid, "1.2");
+    }
+
+    // ---- P8-2 route_to ----
+    #[test]
+    fn route_to_finds_direct_path() {
+        let b = book_with_far_edge();
+        // 1.1 -builds_on-> 2.1 是 1 跳直达。
+        let path = b.route_to("1.1", "2.1", None).unwrap();
+        assert_eq!(path.len(), 1);
+        assert_eq!(path[0].lid, "2.1");
+        assert_eq!(path[0].edge_type, "builds_on");
+    }
+
+    #[test]
+    fn route_to_finds_multi_hop_path() {
+        let b = book_chain();
+        // 1.1 → 1.2 → 1.3(无 1.1→1.3 直边),2 跳。
+        let path = b.route_to("1.1", "1.3", None).unwrap();
+        let lids: Vec<&str> = path.iter().map(|s| s.lid.as_str()).collect();
+        assert_eq!(lids, vec!["1.2", "1.3"]);
+    }
+
+    #[test]
+    fn route_to_same_endpoint_returns_empty_not_error() {
+        let b = book_with_far_edge();
+        assert!(b.route_to("1.1", "1.1", None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn route_to_unreachable_returns_empty_not_error() {
+        let b = book_with_far_edge();
+        // 章节 LID "2" 是真实 LID,但从不作为导航步出现(parent/child 不进前沿)→ 不可达。
+        assert!(b.route_to("1.1", "2", None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn route_to_invalid_endpoint_returns_not_found() {
+        let b = book_with_far_edge();
+        let e1 = b.route_to("1.1", "9.9", None).unwrap_err();
+        assert_eq!(e1.error_code, "LID_NOT_FOUND");
+        assert_eq!(e1.category, "not_found");
+        let e2 = b.route_to("9.9", "1.1", None).unwrap_err();
+        assert_eq!(e2.error_code, "LID_NOT_FOUND");
+    }
+
+    #[test]
+    fn route_to_respects_hop_budget() {
+        let b = book_chain();
+        // 目标需 2 跳,预算 k=1 → 够不到 → 空路径非 error。
+        assert!(b.route_to("1.1", "1.3", Some(1)).unwrap().is_empty());
     }
 }
