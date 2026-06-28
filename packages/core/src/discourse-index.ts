@@ -81,13 +81,22 @@ export type DroppedDiscourseCandidateReason =
   | "invalid_mode"
   | "invalid_local_function"
   | "invalid_rhetorical_move"
+  | "summary_too_long"
   | "missing_target"
   | "dangling_evidence"
   | "empty_evidence"
+  | "evidence_missing_source"
+  | "evidence_missing_target"
   | "invalid_relation_type"
   | "invalid_family"
   | "invalid_direction"
-  | "invalid_confidence";
+  | "invalid_confidence"
+  | "low_confidence";
+
+// PB2b gate 收紧:prompt 写的硬线由确定性 gate 兜底,不靠 LLM 自觉 (B2)。
+// 阈值/上限为占位默认,实测后回填(何时回头:discourse 真跑标注质量观测后调)。
+export const MIN_RELATION_CONFIDENCE = 0.5;
+export const MAX_LOCAL_SUMMARY_LEN = 200;
 
 export interface DroppedDiscourseCandidate {
   lid: string;
@@ -181,17 +190,29 @@ function validItemShape(item: TechnicalLearningDiscourseItem, lids: Set<string>,
     dropped.push(drop(item.lid, "invalid_rhetorical_move", item.rhetorical_move));
     return false;
   }
+  if (item.local_summary !== undefined && item.local_summary.length > MAX_LOCAL_SUMMARY_LEN) {
+    dropped.push(drop(item.lid, "summary_too_long", `${item.local_summary.length}>${MAX_LOCAL_SUMMARY_LEN}`));
+    return false;
+  }
   return true;
 }
 
-function relationError(relation: TechnicalLearningDiscourseRelation, lids: Set<string>): DroppedDiscourseCandidateReason | null {
+function relationError(
+  relation: TechnicalLearningDiscourseRelation,
+  sourceLid: string,
+  lids: Set<string>,
+): DroppedDiscourseCandidateReason | null {
   if (!RELATION_TYPES.has(relation.type)) return "invalid_relation_type";
   if (relation.family !== undefined && !RELATION_FAMILIES.has(relation.family)) return "invalid_family";
   if (!DIRECTIONS.has(relation.direction)) return "invalid_direction";
   if (!Number.isFinite(relation.confidence) || relation.confidence < 0 || relation.confidence > 1) return "invalid_confidence";
+  if (relation.confidence < MIN_RELATION_CONFIDENCE) return "low_confidence";
   if (!lids.has(relation.target_lid)) return "missing_target";
   if (relation.evidence_lids.length === 0) return "empty_evidence";
   if (relation.evidence_lids.some((lid) => !lids.has(lid))) return "dangling_evidence";
+  // 每条 relation 的 evidence 必须同时含 source(item.lid)与 target_lid;证据弱就不连。
+  if (!relation.evidence_lids.includes(sourceLid)) return "evidence_missing_source";
+  if (!relation.evidence_lids.includes(relation.target_lid)) return "evidence_missing_target";
   return null;
 }
 
@@ -208,7 +229,7 @@ export function buildTechnicalLearningDiscourseIndex(
     if (!validItemShape(candidate, lids, dropped)) continue;
     const relations: TechnicalLearningDiscourseRelation[] = [];
     for (const [index, relation] of candidate.relations.entries()) {
-      const reason = relationError(relation, lids);
+      const reason = relationError(relation, candidate.lid, lids);
       if (reason) {
         dropped.push(drop(candidate.lid, reason, JSON.stringify(relation), index));
       } else {

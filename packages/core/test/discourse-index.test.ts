@@ -81,3 +81,44 @@ describe("PB2 TechnicalLearningDiscourseIndex gate", () => {
     expect(result.dropped.map((d) => d.reason)).toEqual(["missing_lid", "invalid_mode"]);
   });
 });
+
+describe("PB2b gate 收紧", () => {
+  it("drops low-confidence relations below the threshold", () => {
+    const item = validItem();
+    item.relations = [{ ...item.relations[0], confidence: 0.3 }];
+
+    const result = buildTechnicalLearningDiscourseIndex(header, [item], nodes);
+
+    expect(result.sidecar.items[0].relations).toHaveLength(0);
+    expect(result.dropped.map((d) => d.reason)).toEqual(["low_confidence"]);
+  });
+
+  it("requires evidence_lids to contain both the source and target LID", () => {
+    const item = validItem();
+    item.relations = [
+      { ...item.relations[0], evidence_lids: ["1.2"] }, // missing source 1.1
+      { ...item.relations[0], evidence_lids: ["1.1"] }, // missing target 1.2
+    ];
+
+    const result = buildTechnicalLearningDiscourseIndex(header, [item], nodes);
+
+    expect(result.sidecar.items[0].relations).toHaveLength(0);
+    expect(result.dropped.map((d) => d.reason)).toEqual(["evidence_missing_source", "evidence_missing_target"]);
+  });
+
+  it("drops the whole item when local_summary exceeds the length cap", () => {
+    const item = { ...validItem(), local_summary: "x".repeat(201) };
+
+    const result = buildTechnicalLearningDiscourseIndex(header, [item], nodes);
+
+    expect(result.sidecar.items).toEqual([]);
+    expect(result.dropped.map((d) => d.reason)).toEqual(["summary_too_long"]);
+  });
+
+  it("keeps a relation whose evidence covers source and target", () => {
+    const result = buildTechnicalLearningDiscourseIndex(header, [validItem()], nodes);
+
+    expect(result.dropped).toEqual([]);
+    expect(result.sidecar.items[0].relations).toHaveLength(1);
+  });
+});
