@@ -429,7 +429,9 @@ fn dispatch(
                 );
             };
             let k = args.get("k").and_then(|v| v.as_u64()).map(|u| u as usize);
-            let body = match crate::guided_route_from(book, at, k) {
+            // reader_profile 已读降权 `[ADR-0038]`:从持久账本派生读者画像传入整形。
+            let profile = store.derive_reader_profile(&book.base.book_id);
+            let body = match crate::guided_route_from(book, at, k, &profile) {
                 Ok(g) => to_json(&serde_json::json!({ "at": at, "groups": g })),
                 Err(e) => to_json(&e),
             };

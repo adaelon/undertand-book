@@ -84,7 +84,7 @@ pub fn route(state: &mut AppState, req: Req) -> Reply {
         if req.method != "GET" {
             return method_not_allowed();
         }
-        route_book(&state.book, p, &q)
+        route_book(&state.book, &state.store, p, &q)
     } else if path.starts_with("/reader/") || path.starts_with("/memory/") {
         if req.method != "POST" {
             return method_not_allowed();
@@ -95,8 +95,8 @@ pub fn route(state: &mut AppState, req: Req) -> Reply {
     }
 }
 
-/// `book.*` 只读叶子 → GET(S10a)。
-fn route_book(book: &Book, leaf: &str, q: &HashMap<String, String>) -> Reply {
+/// `book.*` 只读叶子 → GET(S10a)。`store` 仅 `guided_route_from` 用(派生 reader_profile 已读降权)。
+fn route_book(book: &Book, store: &MemoryStore, leaf: &str, q: &HashMap<String, String>) -> Reply {
     match leaf {
         "manifest" => ok_json(&book.manifest()),
         "text" => {
@@ -161,7 +161,9 @@ fn route_book(book: &Book, leaf: &str, q: &HashMap<String, String>) -> Reply {
                     Err(_) => return validation("INVALID_K", "k 须为非负整数"),
                 },
             };
-            match guided_route_from(book, at, k) {
+            // reader_profile 已读降权 `[ADR-0038]`:派生读者画像传入(住户读自己的整形 route)。
+            let profile = store.derive_reader_profile(&book.base.book_id);
+            match guided_route_from(book, at, k, &profile) {
                 Ok(g) => ok_json(&json!({ "at": at, "groups": g })),
                 Err(e) => err_reply(&e),
             }

@@ -2,9 +2,10 @@
 //! 确定性档位检索(复用 `read-tools` 的 `Book`)+ ModelAdapter 合一轮判停 + 确定性交叉验停。
 //! 切片0:scope 两档(local/chapter)+ FakeAdapter(确定性测);NativeAdapter 见 S5b。
 use base_schema::{GraphNodeType, LidNode, NodeKind};
+use memory::ReaderProfile;
 use read_tools::{Book, Frontier, NavCategory, RankedStep, ToolError};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use ts_rs::TS;
 
 pub mod goldset;
@@ -1123,9 +1124,11 @@ const TEACHING_ORDER: [NavCategory; 5] = [
     NavCategory::Cross,
 ];
 
-/// technical_learning 教学整形 `[ADR-0037 决策2]`:按 `TEACHING_ORDER` 重排 5 类分组 + 剔空组。
-/// 零 LLM、确定性可单测;与 `book.synthesize`「Core+policy」同构(profile policy 在 runtime,不进 Core)。
-fn technical_learning_reorder(f: Frontier) -> Vec<GuidedGroup> {
+/// technical_learning 教学整形 `[ADR-0037 决策2 / ADR-0038 已读降权]`:按 `TEACHING_ORDER` 重排 5 类分组
+/// + 剔空组 + **reader_profile 组内已读降权**。零 LLM、确定性可单测;与 `book.synthesize`「Core+policy」同构。
+/// 已读降权 = 组内**稳定排序**未读在前、已读沉底(保留组内原 weight×距离 次序;**保留回看入口,不剔除**)。
+/// `read_set` 空(无 reader_profile / 全未读)⇒ 退化为纯 TEACHING_ORDER 重排(向后兼容)。
+fn technical_learning_reorder(f: Frontier, read_set: &HashSet<String>) -> Vec<GuidedGroup> {
     let Frontier {
         back,
         forward,
@@ -1140,6 +1143,10 @@ fn technical_learning_reorder(f: Frontier) -> Vec<GuidedGroup> {
         (NavCategory::Cross, cross),
         (NavCategory::Continue, continue_),
     ];
+    // 组内已读降权:false(未读)< true(已读),稳定排序保组内原次序。
+    for (_, steps) in buckets.iter_mut() {
+        steps.sort_by_key(|s| read_set.contains(&s.lid));
+    }
     TEACHING_ORDER
         .iter()
         .filter_map(|cat| {
@@ -1150,14 +1157,17 @@ fn technical_learning_reorder(f: Frontier) -> Vec<GuidedGroup> {
         .collect()
 }
 
-/// `book.guided_route_from(at, k?)` `[ADR-0037 决策1]`:route_from(Core)+ technical_learning 教学整形。
-/// 裸 `book.route_from` 仍在(访客/高级);住户带读优先用本工具拿整形过的 route。
+/// `book.guided_route_from(at, k?)` `[ADR-0037 决策1 / ADR-0038]`:route_from(Core)+ technical_learning
+/// 教学整形 + reader_profile 个性化(已读降权)。裸 `book.route_from` 仍在(访客/高级);住户带读优先用本工具。
+/// `profile` 是读者私人画像(② 绝不外借访客);仅消费 `read_lids` 做降权(focus/puzzle 留后续)。
 pub fn guided_route_from(
     book: &Book,
     at: &str,
     k: Option<usize>,
+    profile: &ReaderProfile,
 ) -> Result<Vec<GuidedGroup>, ToolError> {
-    Ok(technical_learning_reorder(book.route_from(at, k)?))
+    let read_set: HashSet<String> = profile.read_lids.iter().cloned().collect();
+    Ok(technical_learning_reorder(book.route_from(at, k)?, &read_set))
 }
 
 #[cfg(test)]
@@ -1191,7 +1201,7 @@ mod tests {
             cross: vec![rstep("9.9")],
             continue_: vec![rstep("1.2")],
         };
-        let g = technical_learning_reorder(f);
+        let g = technical_learning_reorder(f, &HashSet::new());
         let cats: Vec<NavCategory> = g.iter().map(|x| x.category).collect();
         // 中性序剔空组后 = [Continue, Back, Cross]
         assert_eq!(
@@ -1213,7 +1223,27 @@ mod tests {
             cross: vec![],
             continue_: vec![],
         };
-        assert!(technical_learning_reorder(f).is_empty());
+        assert!(technical_learning_reorder(f, &HashSet::new()).is_empty());
+    }
+
+    // reader_profile 已读降权 `[ADR-0038]`:组内未读在前、已读沉底(稳定排序保原次序);不剔除。
+    #[test]
+    fn technical_learning_reorder_demotes_read_within_group() {
+        let f = Frontier {
+            back: vec![rstep("1.0"), rstep("1.1"), rstep("1.2")], // 1.0/1.2 已读、1.1 未读
+            forward: vec![rstep("2.0")],                          // 全未读,不变
+            concretize: vec![],
+            cross: vec![],
+            continue_: vec![],
+        };
+        let read: HashSet<String> = ["1.0", "1.2"].iter().map(|s| s.to_string()).collect();
+        let g = technical_learning_reorder(f, &read);
+        let back = g.iter().find(|x| x.category == NavCategory::Back).unwrap();
+        let lids: Vec<&str> = back.steps.iter().map(|s| s.lid.as_str()).collect();
+        assert_eq!(lids, vec!["1.1", "1.0", "1.2"]); // 未读升首,已读沉底保原序
+        assert_eq!(back.steps.len(), 3); // 已读不剔除(保留回看入口)
+        let fwd = g.iter().find(|x| x.category == NavCategory::Forward).unwrap();
+        assert_eq!(fwd.steps[0].lid, "2.0"); // 全未读不变
     }
 
     /// 确定性测试替身:按调用次序吐脚本化 ParsedResponse(loop 每轮调一次 complete)。

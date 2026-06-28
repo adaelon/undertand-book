@@ -294,6 +294,44 @@ impl MemoryStore {
         recs.sort_by(|a, b| a.generated_at.cmp(&b.generated_at).then(a.mem_id.cmp(&b.mem_id)));
         recs.into_iter().filter_map(|r| r.anchor.lid).collect()
     }
+
+    /// 某书某类型记忆锚定的 LID 集(去重 + LID 序确定性)。reader_profile 关注点/疑惑点派生用。
+    fn anchor_lids_of_type(&self, book_id: &str, types: &[&str]) -> Vec<String> {
+        let mut lids: Vec<String> = self
+            .records
+            .iter()
+            .filter(|r| r.book_id == book_id && types.contains(&r.mem_type.as_str()))
+            .filter_map(|r| r.anchor.lid.clone())
+            .collect();
+        lids.sort();
+        lids.dedup();
+        lids
+    }
+
+    /// reader_profile 确定性派生 `[ADR-0038 决策3]`:从 ①② 确定性聚合,**无 LLM、不推断认知水平**。
+    /// evidence 全是真 LID(来自已落账本/标注),可追溯。读时投影、**不物化落盘**(承 ADR-0012/0020)。
+    /// 供 P3-3 已读降权 / P3-2 兜底。`qa` 类型未落地 ⇒ 疑惑点暂空(诚实,不假装)。
+    pub fn derive_reader_profile(&self, book_id: &str) -> ReaderProfile {
+        ReaderProfile {
+            book_id: book_id.into(),
+            read_lids: self.read_lids(book_id),
+            focus_lids: self.anchor_lids_of_type(book_id, &["note", "highlight"]),
+            puzzle_lids: self.anchor_lids_of_type(book_id, &["qa"]),
+        }
+    }
+}
+
+/// reader_profile 确定性派生产物 `[ADR-0038 决策3]`:读者私人画像(② 读者私有,绝不外借访客)。
+/// 三维全是确定性聚合 + 真 LID evidence,**不含认知水平推断**(novice/expert 是猜,ADR-0038 否决)。
+#[derive(Debug, Clone, Serialize, PartialEq, Default)]
+pub struct ReaderProfile {
+    pub book_id: String,
+    /// 已读集 / reading journey(`read_lids`,触达序)。
+    pub read_lids: Vec<String>,
+    /// 关注点:note/highlight 锚定的 LID(去重,LID 序)。
+    pub focus_lids: Vec<String>,
+    /// 疑惑点:qa 锚定的 LID。**qa 类型未落地 ⇒ 现为空**,待 E loop 问答 save qa 后填充。
+    pub puzzle_lids: Vec<String>,
 }
 
 fn internal(message: String) -> ToolError {
@@ -497,5 +535,24 @@ mod tests {
         }
         let s2 = MemoryStore::open(&path).unwrap();
         assert_eq!(s2.read_lids("bookA"), vec!["1.1", "1.2"]);
+    }
+
+    // reader_profile 派生 `[ADR-0038]`:已读集(触达序)+ 关注点(note/highlight 去重·LID 序)
+    // + 疑惑点(qa 暂空,诚实);跨书隔离;evidence 全真 LID。
+    #[test]
+    fn derive_reader_profile_aggregates_deterministically() {
+        let path = tmp("profile");
+        let mut s = MemoryStore::open(&path).unwrap();
+        s.mark_read("bookA", "1.1", "t0").unwrap();
+        s.mark_read("bookA", "1.2", "t1").unwrap();
+        s.save(note_input("bookA", "2.1", "笔记"), "t2").unwrap();
+        s.save(hl_input("bookA", "2.1", "X", 0, 1), "t3").unwrap(); // 同 LID 关注点去重
+        s.save(hl_input("bookA", "2.3", "Y", 0, 1), "t4").unwrap();
+        s.mark_read("bookB", "9.9", "t5").unwrap(); // 别书噪声
+        let p = s.derive_reader_profile("bookA");
+        assert_eq!(p.book_id, "bookA");
+        assert_eq!(p.read_lids, vec!["1.1", "1.2"]); // 触达序
+        assert_eq!(p.focus_lids, vec!["2.1", "2.3"]); // note+highlight 去重·LID 序(read 不计入)
+        assert!(p.puzzle_lids.is_empty()); // qa 未落地 → 诚实空
     }
 }
