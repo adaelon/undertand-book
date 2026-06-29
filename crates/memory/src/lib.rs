@@ -5,6 +5,7 @@
 //! S7a 从 runtime 抽成独立 crate(拆 runtime↔reader 循环依赖,reader/runtime 共同依赖它)`[ADR-0027]`。
 use read_tools::ToolError;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 /// 记忆记录(符 V3 §4.3 / `[ADR-0015]`)。`type` 是 Rust 保留词 ⇒ serde rename。
@@ -321,8 +322,39 @@ impl MemoryStore {
             book_id: book_id.into(),
             read_lids: self.read_lids(book_id),
             focus_lids: self.anchor_lids_of_type(book_id, &["note", "highlight"]),
-            puzzle_lids: self.anchor_lids_of_type(book_id, &["qa"]),
+            puzzle_heat: self.qa_heat(book_id),
         }
+    }
+
+    /// qa 提问热度 `[ADR-0041]`:某书 qa 记录按 `anchor.lid` 聚合的条数(lid→问了几个不同问题)。
+    /// 每条 qa record(内容寻址:不同问题=不同 record)计 1;heat = 该 LID 的卡点强度信号。
+    /// 纯确定性聚合、无 LLM、无认知水平推断。读者私人 ②,供 back 组卡点升权 / 透明展示。
+    fn qa_heat(&self, book_id: &str) -> BTreeMap<String, u32> {
+        let mut heat: BTreeMap<String, u32> = BTreeMap::new();
+        for r in &self.records {
+            if r.book_id == book_id && r.mem_type == "qa" {
+                if let Some(lid) = &r.anchor.lid {
+                    *heat.entry(lid.clone()).or_insert(0) += 1;
+                }
+            }
+        }
+        heat
+    }
+
+    /// 某书某 LID 的 qa 提问文本 `[ADR-0041]`,按 `generated_at` 序(tie `mem_id`),供透明展示。
+    /// 区别于 `qa_heat`(只数条数):此处取真实问题文本,让 reader-profile.md 卡点段可读"问了什么"。
+    fn qa_questions(&self, book_id: &str, lid: &str) -> Vec<&str> {
+        let mut recs: Vec<&Record> = self
+            .records
+            .iter()
+            .filter(|r| {
+                r.book_id == book_id
+                    && r.mem_type == "qa"
+                    && r.anchor.lid.as_deref() == Some(lid)
+            })
+            .collect();
+        recs.sort_by(|a, b| a.generated_at.cmp(&b.generated_at).then(a.mem_id.cmp(&b.mem_id)));
+        recs.into_iter().map(|r| r.content.as_str()).collect()
     }
 
     // ===== P4-4 四层产物物化(只读派生 .md · 单向覆写 · 真相源唯一 memory.json)`[ADR-0040]` =====
@@ -367,12 +399,17 @@ impl MemoryStore {
             } else {
                 p.focus_lids.iter().map(|l| format!("- {l}\n")).collect::<String>()
             });
-            s.push_str("### 卡点 (qa)\n");
-            s.push_str(&if p.puzzle_lids.is_empty() {
-                "(暂空)\n".into()
+            s.push_str("### 卡点 (qa · 提问热度)\n");
+            if p.puzzle_heat.is_empty() {
+                s.push_str("(暂空)\n");
             } else {
-                p.puzzle_lids.iter().map(|l| format!("- {l}\n")).collect::<String>()
-            });
+                for (lid, count) in &p.puzzle_heat {
+                    s.push_str(&format!("- {lid} (×{count})\n"));
+                    for q in self.qa_questions(&book_id, lid) {
+                        s.push_str(&format!("  - {q}\n"));
+                    }
+                }
+            }
             s.push_str("### agent 记的上下文 (context · 成长时间线)\n");
             let timeline = self.context_timeline(&book_id);
             if timeline.is_empty() {
@@ -409,7 +446,7 @@ impl MemoryStore {
                 "- **{book_id}** — 读到 {} 叶 / 关注 {} / 卡点 {} / context {}\n",
                 p.read_lids.len(),
                 p.focus_lids.len(),
-                p.puzzle_lids.len(),
+                p.puzzle_heat.len(),
                 ctx,
             ));
         }
@@ -451,8 +488,9 @@ pub struct ReaderProfile {
     pub read_lids: Vec<String>,
     /// 关注点:note/highlight 锚定的 LID(去重,LID 序)。
     pub focus_lids: Vec<String>,
-    /// 疑惑点:qa 锚定的 LID。**qa 类型未落地 ⇒ 现为空**,待 E loop 问答 save qa 后填充。
-    pub puzzle_lids: Vec<String>,
+    /// 提问热度 / 卡点:qa 记录按 `anchor.lid` 聚合的条数(lid→问了几个不同问题)`[ADR-0041]`。
+    /// 替代旧 `puzzle_lids` 去重平表——保留次数即"价值热度"信号,供 back 组卡点升权 / 透明展示。
+    pub puzzle_heat: BTreeMap<String, u32>,
 }
 
 fn internal(message: String) -> ToolError {
@@ -674,7 +712,69 @@ mod tests {
         assert_eq!(p.book_id, "bookA");
         assert_eq!(p.read_lids, vec!["1.1", "1.2"]); // 触达序
         assert_eq!(p.focus_lids, vec!["2.1", "2.3"]); // note+highlight 去重·LID 序(read 不计入)
-        assert!(p.puzzle_lids.is_empty()); // qa 未落地 → 诚实空
+        assert!(p.puzzle_heat.is_empty()); // 无 qa → 卡点热度空
+    }
+
+    // qa 提问热度派生 `[ADR-0041]`:qa 记录按 anchor.lid 聚合条数(不同问题=不同条目);
+    // 重复同问题 upsert 不增条数;跨书隔离;read/note 锚同 lid 也不计入 puzzle_heat(维度隔离)。
+    #[test]
+    fn derive_reader_profile_qa_heat_aggregates() {
+        let path = tmp("qaheat");
+        let mut s = MemoryStore::open(&path).unwrap();
+        let qa = |lid: &str, q: &str| SaveInput {
+            mem_id: None,
+            mem_type: "qa".into(),
+            layer: "long_term".into(),
+            book_id: "bookA".into(),
+            anchor: Anchor { lid: Some(lid.into()), concept: None },
+            content: q.into(),
+            range: None,
+            citations: None,
+            source_session_id: None,
+        };
+        s.save(qa("3.2", "所有权怎么传递"), "t0").unwrap();
+        s.save(qa("3.2", "借用和所有权区别"), "t1").unwrap();
+        s.save(qa("3.2", "move 语义"), "t2").unwrap();
+        s.save(qa("3.2", "所有权怎么传递"), "t3").unwrap(); // 重复同问题 = upsert,不增条数
+        s.save(qa("1.1", "这章讲啥"), "t4").unwrap();
+        s.mark_read("bookA", "3.2", "t5").unwrap(); // read 不计入 puzzle_heat
+        s.save(note_input("bookA", "3.2", "笔记"), "t6").unwrap(); // note 不计入
+        let mut qb = qa("5.5", "B书问题");
+        qb.book_id = "bookB".into();
+        s.save(qb, "t7").unwrap(); // 跨书
+
+        let p = s.derive_reader_profile("bookA");
+        assert_eq!(p.puzzle_heat.get("3.2"), Some(&3)); // 3 个不同问题(重复不增)
+        assert_eq!(p.puzzle_heat.get("1.1"), Some(&1));
+        assert!(!p.puzzle_heat.contains_key("5.5")); // 跨书隔离
+        assert_eq!(p.puzzle_heat.len(), 2); // 仅 3.2 / 1.1
+        // 维度隔离:3.2 同时被 read + note,但 puzzle_heat 只数 qa。
+        assert_eq!(p.read_lids, vec!["3.2"]);
+        assert_eq!(p.focus_lids, vec!["3.2"]);
+    }
+
+    // qa-2 透明展示 `[ADR-0041]`:reader-profile.md 卡点段渲染 `lid (×count)` + 嵌套真实问题文本(generated_at 序)。
+    #[test]
+    fn reader_profile_md_renders_qa_questions() {
+        let path = tmp("qa-render");
+        let mut s = MemoryStore::open(&path).unwrap();
+        let qa = |lid: &str, q: &str| SaveInput {
+            mem_id: None,
+            mem_type: "qa".into(),
+            layer: "long_term".into(),
+            book_id: "bookA".into(),
+            anchor: Anchor { lid: Some(lid.into()), concept: None },
+            content: q.into(),
+            range: None,
+            citations: None,
+            source_session_id: None,
+        };
+        s.save(qa("3.2", "所有权怎么传递"), "t0").unwrap();
+        s.save(qa("3.2", "move 语义"), "t1").unwrap();
+        let md = s.render_reader_profile_md();
+        assert!(md.contains("3.2 (×2)")); // lid + 提问热度
+        assert!(md.contains("- 所有权怎么传递")); // 真实问题文本(嵌套渲染)
+        assert!(md.contains("- move 语义"));
     }
 
     // P4-4 四层产物物化 `[ADR-0040]`:save/delete 后确定性派生 reader-profile.md + reading-handbook.md

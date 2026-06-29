@@ -211,12 +211,13 @@ pub fn tool_specs() -> Vec<ToolSpec> {
         s(
             "memory.save",
             "保存一条记忆:note/highlight/position(用户逐字便签 / 位置),\
+qa(用户对书内容的提问:你用 book.query 答完后存,anchor_lid=问题所在 LID、content=用户原问题),\
 或 context(主动构建的用户上下文:对该读者背景/偏好/关注/卡点的理解,用认知诚实措辞)。\
 note/highlight 自动锚回 anchor 的 LID;context 可经 citations 锚回支撑该理解的真 LID。",
             json!({
                 "type": "object",
                 "properties": {
-                    "type": {"type": "string", "enum": ["note", "highlight", "position", "context"]},
+                    "type": {"type": "string", "enum": ["note", "highlight", "position", "qa", "context"]},
                     "anchor_lid": {"type": "string"},
                     "content": {"type": "string"},
                     "citations": {
@@ -313,6 +314,12 @@ const SYSTEM_PROMPT: &str = "你是这本书的阅读 agent。事实性回答经
 ①认知诚实——content 写成带证据的理解(如『在 §3.2 反复追问所有权,像是卡在这』),不伪装成铁事实、不凭空臆断;\
 ②citations 锚到支撑该理解的真 LID(取自你读过的 book 工具返回;无具体证据的纯偏好可不带 citations);\
 ③只记真正值得跨会话复用的,别把每句话都记成 context。记错无妨——记忆透明可见、用户随时可删。\
+记录提问点(qa)——每当你用 book.query 回答了用户关于书内容的提问,紧接着调 \
+memory.save(type='qa', anchor_lid=<你刚才传给 book.query 的那个 anchor>, content=<用户的原问题>) \
+把这个提问点记下来,锚到问题所在的真 LID。这是事实记录(用户在此问过什么),不判断对错、不判断是否卡住。\
+只记针对书内容的实质提问;翻页/高亮/记笔记等操作指令、闲聊、对你的元提问都不记。\
+带读到某 LID、或要回答关于某 LID 的问题时,可先 memory.recall(lid=<该 LID>, type='qa') \
+看读者之前在这里问过什么,据此把解释贴合他关心的点(卡过的地方多讲一点)。\
 证据不足时诚实说明,不要编造 LID。准备好最终答案时直接用自然语言回复(不再调用工具)。";
 
 /// 执行一次工具调用,返回 `(喂回模型的结果 JSON, 可选可撤销 effect)` `[ADR-0015/0026/0030]`。
@@ -1285,6 +1292,50 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(got.len(), 3);
+    }
+
+    // P4-5 qa-1 生产 `[ADR-0041]`:dispatch memory.save type=qa → 落 long_term + anchor 设 +
+    // 不产可撤销 effect;recall(type=qa) 取回;derive_reader_profile.puzzle_heat 按 lid 聚合条数。
+    // judgment「是不是实质问题」靠真 LLM 手动验(B2);本测只钉确定性存储 + 派生。
+    #[test]
+    fn dispatch_memory_save_qa_lands_longterm_and_feeds_heat() {
+        let b = book_leaves(3); // 真 LID: 1, 1.1, 1.2, 1.3
+        let mut store = MemoryStore::open(tmp("qa-save")).unwrap();
+        let fake = FakeAdapter::new(vec![], vec![]);
+        let mut reader = Reader::new(&b, DEFAULT_RADIUS);
+
+        let (ok, eff) = dispatch(
+            "memory.save",
+            r#"{"type":"qa","anchor_lid":"1.2","content":"这段在讲什么"}"#,
+            &b,
+            &mut store,
+            &mut reader,
+            &fake,
+            "t0",
+        );
+        assert!(ok.contains("\"type\":\"qa\""));
+        assert!(ok.contains("\"layer\":\"long_term\"")); // qa 直接 long_term(非 position)
+        assert!(ok.contains("\"lid\":\"1.2\"")); // anchor 设
+        assert!(eff.is_none()); // qa 不产可撤销 effect
+
+        // 同 lid 再问不同问题 → heat=2(内容寻址,两条独立 record)。
+        let _ = dispatch(
+            "memory.save",
+            r#"{"type":"qa","anchor_lid":"1.2","content":"和上一段啥关系"}"#,
+            &b,
+            &mut store,
+            &mut reader,
+            &fake,
+            "t1",
+        );
+        let got = store.recall(&RecallQuery {
+            book_id: Some("bookL".into()),
+            mem_type: Some("qa".into()),
+            ..Default::default()
+        });
+        assert_eq!(got.len(), 2);
+        let p = store.derive_reader_profile("bookL");
+        assert_eq!(p.puzzle_heat.get("1.2"), Some(&2));
     }
 
     // 闭环验收:agent 经外层 loop 命令面跑通「问→跳转→高亮→记笔记」一次闭环 `[ADR-0007/0015]`。

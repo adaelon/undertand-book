@@ -1124,11 +1124,19 @@ const TEACHING_ORDER: [NavCategory; 5] = [
     NavCategory::Cross,
 ];
 
-/// technical_learning 教学整形 `[ADR-0037 决策2 / ADR-0038 已读降权]`:按 `TEACHING_ORDER` 重排 5 类分组
-/// + 剔空组 + **reader_profile 组内已读降权**。零 LLM、确定性可单测;与 `book.synthesize`「Core+policy」同构。
-/// 已读降权 = 组内**稳定排序**未读在前、已读沉底(保留组内原 weight×距离 次序;**保留回看入口,不剔除**)。
-/// `read_set` 空(无 reader_profile / 全未读)⇒ 退化为纯 TEACHING_ORDER 重排(向后兼容)。
-fn technical_learning_reorder(f: Frontier, read_set: &HashSet<String>) -> Vec<GuidedGroup> {
+/// technical_learning 教学整形 `[ADR-0037 决策2 / ADR-0038 已读降权 / ADR-0041 qa 卡点升权]`:
+/// 按 `TEACHING_ORDER` 重排 5 类分组 + 剔空组 + **组内信号整形**。零 LLM、确定性可单测;与 `book.synthesize`「Core+policy」同构。
+/// 组内整形分两套:
+/// - **非 back 组**:仅已读降权——稳定排序未读在前、已读沉底(保组内原 weight×距离 次序,不剔除)。
+/// - **back 组(qa 卡点升权,压已读)**`[ADR-0041 决策5/6/7]`:Tier A 问过(`puzzle_heat`>0,按 heat 降序)/
+///   Tier B 未读+没问过 / Tier C 读过+没问过(沉底)。卡点=读过+问过 落 Tier A 冒顶(升权压已读);
+///   tiebreak 用 route_from 的 score 序(稳定排序)。
+/// `read_set` / `puzzle_heat` 空 ⇒ 退化为纯 TEACHING_ORDER 重排(向后兼容)。
+fn technical_learning_reorder(
+    f: Frontier,
+    read_set: &HashSet<String>,
+    puzzle_heat: &BTreeMap<String, u32>,
+) -> Vec<GuidedGroup> {
     let Frontier {
         back,
         forward,
@@ -1143,9 +1151,26 @@ fn technical_learning_reorder(f: Frontier, read_set: &HashSet<String>) -> Vec<Gu
         (NavCategory::Cross, cross),
         (NavCategory::Continue, continue_),
     ];
-    // 组内已读降权:false(未读)< true(已读),稳定排序保组内原次序。
-    for (_, steps) in buckets.iter_mut() {
-        steps.sort_by_key(|s| read_set.contains(&s.lid));
+    for (cat, steps) in buckets.iter_mut() {
+        if matches!(cat, NavCategory::Back) {
+            // back 组 qa 卡点升权(压已读):Tier A 问过(heat 降序)/ B 未读 / C 读过沉底;
+            // tiebreak 保 route_from score 序(稳定排序)`[ADR-0041]`。
+            steps.sort_by_key(|s| {
+                let heat = *puzzle_heat.get(&s.lid).unwrap_or(&0);
+                let read = read_set.contains(&s.lid);
+                let tier: u8 = if heat > 0 {
+                    0
+                } else if !read {
+                    1
+                } else {
+                    2
+                };
+                (tier, std::cmp::Reverse(heat))
+            });
+        } else {
+            // 其余组:仅已读降权(未读在前、已读沉底,稳定排序保组内原次序)。
+            steps.sort_by_key(|s| read_set.contains(&s.lid));
+        }
     }
     TEACHING_ORDER
         .iter()
@@ -1158,8 +1183,9 @@ fn technical_learning_reorder(f: Frontier, read_set: &HashSet<String>) -> Vec<Gu
 }
 
 /// `book.guided_route_from(at, k?)` `[ADR-0037 决策1 / ADR-0038]`:route_from(Core)+ technical_learning
-/// 教学整形 + reader_profile 个性化(已读降权)。裸 `book.route_from` 仍在(访客/高级);住户带读优先用本工具。
-/// `profile` 是读者私人画像(② 绝不外借访客);仅消费 `read_lids` 做降权(focus/puzzle 留后续)。
+/// 教学整形 + reader_profile 个性化(已读降权 + back 组 qa 卡点升权 `[ADR-0041]`)。裸 `book.route_from` 仍在
+/// (访客/高级);住户带读优先用本工具。`profile` 是读者私人画像(② 绝不外借访客);消费 `read_lids`(降权)
+/// + `puzzle_heat`(back 组卡点升权);focus 留后续。
 pub fn guided_route_from(
     book: &Book,
     at: &str,
@@ -1167,7 +1193,11 @@ pub fn guided_route_from(
     profile: &ReaderProfile,
 ) -> Result<Vec<GuidedGroup>, ToolError> {
     let read_set: HashSet<String> = profile.read_lids.iter().cloned().collect();
-    Ok(technical_learning_reorder(book.route_from(at, k)?, &read_set))
+    Ok(technical_learning_reorder(
+        book.route_from(at, k)?,
+        &read_set,
+        &profile.puzzle_heat,
+    ))
 }
 
 /// `book.unvisited_back(at)` `[ADR-0036 决策3]`:裸「没懂」(无 locus)结构兜底的确定性原语。
@@ -1217,7 +1247,7 @@ mod tests {
             cross: vec![rstep("9.9")],
             continue_: vec![rstep("1.2")],
         };
-        let g = technical_learning_reorder(f, &HashSet::new());
+        let g = technical_learning_reorder(f, &HashSet::new(), &BTreeMap::new());
         let cats: Vec<NavCategory> = g.iter().map(|x| x.category).collect();
         // 中性序剔空组后 = [Continue, Back, Cross]
         assert_eq!(
@@ -1239,7 +1269,7 @@ mod tests {
             cross: vec![],
             continue_: vec![],
         };
-        assert!(technical_learning_reorder(f, &HashSet::new()).is_empty());
+        assert!(technical_learning_reorder(f, &HashSet::new(), &BTreeMap::new()).is_empty());
     }
 
     // reader_profile 已读降权 `[ADR-0038]`:组内未读在前、已读沉底(稳定排序保原次序);不剔除。
@@ -1253,13 +1283,43 @@ mod tests {
             continue_: vec![],
         };
         let read: HashSet<String> = ["1.0", "1.2"].iter().map(|s| s.to_string()).collect();
-        let g = technical_learning_reorder(f, &read);
+        let g = technical_learning_reorder(f, &read, &BTreeMap::new());
         let back = g.iter().find(|x| x.category == NavCategory::Back).unwrap();
         let lids: Vec<&str> = back.steps.iter().map(|s| s.lid.as_str()).collect();
         assert_eq!(lids, vec!["1.1", "1.0", "1.2"]); // 未读升首,已读沉底保原序
         assert_eq!(back.steps.len(), 3); // 已读不剔除(保留回看入口)
         let fwd = g.iter().find(|x| x.category == NavCategory::Forward).unwrap();
         assert_eq!(fwd.steps[0].lid, "2.0"); // 全未读不变
+    }
+
+    // qa-2 back 组卡点升权 `[ADR-0041 决策5/6/7]`:Tier A 问过(heat 降序)/ B 未读 / C 读过沉底;
+    // 升权压已读(卡点=读过+问过冒顶);仅 back 组受 heat 影响,其余组不变。
+    #[test]
+    fn technical_learning_reorder_back_promotes_qa_heat_over_read() {
+        let f = Frontier {
+            // back:2.1 读过+问1 / 2.2 读过+问3(卡点最重) / 2.3 未读没问 / 2.4 读过没问
+            back: vec![rstep("2.1"), rstep("2.2"), rstep("2.3"), rstep("2.4")],
+            forward: vec![rstep("3.1"), rstep("3.2")], // 3.1 问过 ×5,但 forward 不升权
+            concretize: vec![],
+            cross: vec![],
+            continue_: vec![],
+        };
+        let read: HashSet<String> = ["2.1", "2.2", "2.4"].iter().map(|s| s.to_string()).collect();
+        let heat: BTreeMap<String, u32> = [("2.2", 3u32), ("2.1", 1u32), ("3.1", 5u32)]
+            .iter()
+            .map(|(l, c)| (l.to_string(), *c))
+            .collect();
+        let g = technical_learning_reorder(f, &read, &heat);
+        let back = g.iter().find(|x| x.category == NavCategory::Back).unwrap();
+        let lids: Vec<&str> = back.steps.iter().map(|s| s.lid.as_str()).collect();
+        // Tier A 问过按 heat 降序:2.2(×3) > 2.1(×1,卡点压已读冒上 Tier A);Tier B 未读:2.3;Tier C 读过没问:2.4。
+        assert_eq!(lids, vec!["2.2", "2.1", "2.3", "2.4"]);
+        // forward 不受 heat 影响:3.1 问过 ×5 也不升,保 route_from 原序(都未读)。
+        let fwd = g.iter().find(|x| x.category == NavCategory::Forward).unwrap();
+        assert_eq!(
+            fwd.steps.iter().map(|s| s.lid.as_str()).collect::<Vec<_>>(),
+            vec!["3.1", "3.2"]
+        );
     }
 
     /// at="1.1" 经两条 depends_on 长程边指向前置 2.1/2.2(→ route_from(1.1).back=[2.1,2.2])。
@@ -1301,7 +1361,7 @@ mod tests {
             book_id: "back-book".into(),
             read_lids: read.iter().map(|s| s.to_string()).collect(),
             focus_lids: vec![],
-            puzzle_lids: vec![],
+            puzzle_heat: BTreeMap::new(),
         }
     }
 

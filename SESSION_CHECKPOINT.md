@@ -1,36 +1,32 @@
-# SESSION_CHECKPOINT — 2026-06-29 (P3-2 裸兜底已实现+测试绿+落档,待 commit)
+# SESSION_CHECKPOINT — 2026-06-29 (P4-5 qa 落地完成,未提交;下一步 commit 或选向 P5/P3-4)
 
 ## 新鲜度自检
-- 写入时最新 commit: `7bf7aae` feat(memory,runtime): P4-3 context 主动记忆+citation闸 / P4-4 四层产物物化。
-- **有未提交代码(P3-2 实现)+ 文档(代码链路/切片方案/CONTEXT/本 checkpoint),待 commit;无未提交 ADR(P3-2 复用 ADR-0036,无新 ADR)**。读入以 `git log -1` 为准。
+- 写入时最新 commit: `41fc38c` feat(runtime,server): P3-2 裸没懂结构兜底 book.unvisited_back。
+- **有未提交改动**(P4-5 qa 落地 qa-1+qa-2,全绿未 commit)。读入以 `git log -1` + `git status` 为准。
 - 注:推送走代理 `git -c http.proxy=http://127.0.0.1:7897 -c https.proxy=... push`(代理服务需在跑)。
 
 ## 当前在做什么
-**P3-2 裸「没懂」结构兜底 已实现**(ADR-0036 决策3,P4 真历史源就位后捡起)。新确定性命令 `book.unvisited_back(at)` = `route_from(at).back ∩ (全集 \ read_lids)` + SYSTEM_PROMPT 编排引导。`cargo test --workspace` 全绿(runtime 43 / server 27 / memory 12 / read-tools 35 / base-schema 13)+ 落档完。**待 commit**。
+**P4-5 qa 落地已完成**(qa-1 生产 + qa-2 消费,§0.5 grill 全程)。qa = LID 价值/提问热度信号(读者私人 ②),回收 P4-2 `puzzle_lids` 恒空缺口。三消费方全锚 `anchor.lid`:确定性 back 升权 / LID-local recall / 透明渲染。**改动全绿未提交**。
 
-## 下一步(可直接接手)
-1. **commit**:`git add -u; git add docs/...`(全已跟踪改动:crates/runtime/src/{lib.rs,orchestrator.rs}、crates/server/src/lib.rs、docs/代码链路.md、docs/切片方案-profile深路径.md、CONTEXT.md、SESSION_CHECKPOINT.md;无新文件)。消息建议 `feat(runtime,server): P3-2 裸没懂结构兜底 book.unvisited_back(确定性 back∩未读, ADR-0036)`;push 走代理。
-2. **接下来挑一条**(P4 全完、P3-2 已闭;解锁项):
-   - **qa 类型落地**:E loop 问答 save `type=qa` → 填 reader_profile/profile.md 卡点维度(现恒空)。
-   - **P5 ReActAdapter + provider registry**(切片方案 L572)。
-   - **P3-4 Vue 带读 UI**(前端停靠点呈现 + 继续/换路/退回)。
-   - **LLM 表达层摘要**(P4-4 何时回头):把 .md 聚合讲成人话(不产事实)。
+## 下一步(可直接接手,挑一条)
+1. **commit P4-5 qa 落地**:`git add` ADR-0041 + CONTEXT + 切片方案 + 代码链路 + crates(memory/runtime)+ 本 checkpoint;消息 `feat(memory,runtime): P4-5 qa 落地 = LID 价值热度信号(qa-1 生产 + qa-2 back 卡点升权/recall/渲染)`,然后 push(代理)。
+2. **P5 ReActAdapter + provider registry**(切片方案 L597):provider registry + ReActAdapter fallback,归一 AssistantTurn;含 NEW,实现前走 §0.5。
+3. **P3-4 Vue 带读 UI**(切片方案 L572):前端停靠点呈现 + 继续/换路/退回(`packages/web`)。
+4. **LLM 表达层摘要**(P4-4 何时回头):四层 .md 聚合讲成人话(不产事实,可选层)。
 
 ## 未提交 / 未完成
-- **P3-2 代码**:`crates/runtime/src/lib.rs`(unvisited_back 函数 + 单测 + fixture)、`crates/runtime/src/orchestrator.rs`(tool_spec + dispatch 分支 + SYSTEM_PROMPT 裸没懂引导 + dispatch 测试)、`crates/server/src/lib.rs`(GET 投影 + import + 测试断言)。
-- **文档**:代码链路 P3-2 条、切片方案 P3-2 标✅、CONTEXT 导航轴术语补命令名。
+- **P4-5 qa 落地全部改动未提交**(测试全绿):`crates/memory/src/lib.rs`(puzzle_heat/qa_heat/qa_questions/render)、`crates/runtime/src/lib.rs`(reorder 加 puzzle_heat/back 升权)、`crates/runtime/src/orchestrator.rs`(qa enum/save+recall prompt)、`docs/adr/0041`、`CONTEXT.md`、`docs/切片方案-profile深路径.md`(P4-5)、`docs/代码链路.md`(qa-1/qa-2)。
 - 保持 untracked:`参考*.md`、`agent交互书.md`、`docs/预购建流程.md`、`.fluid/`。
-- 待办(非阻塞):qa 未落地⇒卡点维度恒空;二次「没懂」升级前要不要插反问(ADR-0036 何时回头);viewport re-sync 偏离判定留实测;synthesize `reader_profile=not_attached` prompt 未接;承 P8 三项。
+- 待办(非阻塞,ADR-0041 何时回头):count 噪声(3vs2)实测;re-ask usage.count 是否加权 heat;concretize/cross 升权(back 不够时);跨读者书内在价值(多读者场景);reader-profile.md 体积裁剪(承 ADR-0040,不复活计数器)。承前:二次「没懂」插反问、viewport re-sync 判定、synthesize reader_profile prompt、承 P8 三项。
 
 ## 冷启动读序
-1. `docs/adr/0036-反馈信号模型-...md` — P3-2 裸兜底机制根(决策3 + 命门)。**先读这条**。
-2. `docs/代码链路.md` 末尾 P3-2 条 — 改动账本 + 测试 + B2 边界。
-3. `crates/runtime/src/lib.rs:unvisited_back`(guided_route_from 姊妹)+ `技术整形 technical_learning_reorder`。
-4. `crates/runtime/src/orchestrator.rs` — book.unvisited_back tool_spec/dispatch/SYSTEM_PROMPT 裸没懂引导。
-5. `docs/切片方案-profile深路径.md` P3 拆分(P3-1✅/P3-2✅/P3-3✅/P3-4 待做)+ P4(P4-1~4✅)。
-6. `crates/memory/src/lib.rs` — read_lids/derive_reader_profile(P3-2 消费的真历史源)/render_*_md(P4-4)。
+1. `docs/切片方案-profile深路径.md` — 总骨架 + A4 子刀状态(P3-1~4✅ / P4-1~5✅ / P5~P8 待做)。**先读这条**。
+2. `docs/代码链路.md` 末尾两条(P4-5 qa-1 / qa-2)— 本会话改动账本 + 测试 + B2 边界。
+3. `docs/adr/0041-qa落地-...md` — qa = LID 价值热度信号 7 决策 + 三消费方 + 升权压已读(命门:count 读时排序非写闸,区别 ADR-0039)。
+4. `crates/runtime/src/lib.rs` — `technical_learning_reorder`(back 组 qa 升权)/ `guided_route_from` / `unvisited_back`。
+5. `crates/memory/src/lib.rs` — `ReaderProfile.puzzle_heat` / `qa_heat` / `qa_questions` / `derive_reader_profile` / `render_*_md`。
+6. `crates/runtime/src/orchestrator.rs` — SYSTEM_PROMPT(带读+裸没懂+主动记忆+qa 记录/recall)/ tool_specs(memory.save type qa)/ dispatch。
+7. `CONTEXT.md` — 术语表(记忆 consolidation / qa 提问热度 / 四层产物 / 导航讲法轴)。
 
 ## 本会话决策摘要
-- **P4-3**(commit 7bf7aae):context 主动记忆 + citation 闸(type=context / 无效丢弃零有效仍存)。
-- **P4-4**(commit 7bf7aae):四层产物物化只读派生 .md + 单向覆写(ADR-0040)。
-- **P3-2 §0.5(本轮,无新 ADR,承 ADR-0036)**:裸「没懂」兜底载体 = 新独立确定性命令 `book.unvisited_back`(否决扩 guided 标 read 让 agent 心算交集,违命门)。
+- **ADR-0041**(待 commit):qa 落地 = LID 价值/提问热度信号(读者私人 ②)。触发=agent 用 book.query 答完存 qa(锚 query anchor+问题原文);三消费方全锚 anchor.lid(lid→count back 升权 / lid→问题文本 LID-local recall + 透明渲染);升权压已读(卡点=读过+问过冒顶);back-only;count 分层(非 blend);派生 puzzle_lids→puzzle_heat。修正 P4-2 puzzle 恒空。

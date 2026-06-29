@@ -568,6 +568,11 @@ ADR-0033 已把 `discourse_index`、`FormulaSemantics`、Pass2 audit、profile m
 - **P4-3 用户主动 LLM 记忆**(一条线,不拆 `[ADR-0039 修正 ADR-0038]`)**✅ 实现(2026-06-29)**:**触发 = agent 读时 judgment ∨ 用户显式「记下 X」**(**砍确定性计数器** / 反复提及独立机制);**记什么 = 构建用户上下文(含对用户理解/推断)+ 三护栏**(透明落可见文件 / 用户可改可删 / 认知诚实标注+citation 锚真 LID);**直接 `long_term` + 可删兜底**(非提议态,事后纠正 > 事前批准);每条带 `generated_at` = 成长时间线。落地 = SYSTEM_PROMPT judgment 引导 + `memory.save` 扩 `citations` 参数 + dispatch citation 闸(⊆ 真 LID,无效丢弃不阻断)+ type `context`。**两 PENDING 落定**:type=`context`、citation 闸=无效丢弃·零有效仍存。详见 `docs/代码链路.md` P4-3 条。
 - **P4-4 四层文件产物**:账本 / 记忆派生成透明 grep 文件(reader-profile.md / 阅读手册)+ 可选表达层摘要(不产事实)。
 
+#### P4-5 · qa 落地(回收 P4-2 `puzzle_lids` 恒空缺口)`[ADR-0041]`
+> §0.5 grill 收敛:qa = LID 价值/提问热度信号(读者私人 ②),非问答 dump;三消费方全锚 `anchor.lid`。A4 拆生产/消费两刀,各自独立可验。
+- **qa-1 生产**:`orchestrator` SYSTEM_PROMPT 引导(用 `book.query` 答书内问题后 `memory.save(type=qa, anchor_lid=<query anchor>, content=<用户原问题>)`)+ `memory.save` type enum 加 `qa` + `ReaderProfile.puzzle_lids:Vec<String>` → `puzzle_heat:BTreeMap<lid,u32>` + `derive_reader_profile` 按 `anchor.lid` 聚合 qa 记录条数。**判据**:dispatch qa 落 long_term·anchor 设;derive 出 lid→count 确定性可单测;qa 不污染 read/note/highlight 维度。
+- **qa-2 消费**:`technical_learning_reorder` **仅 back 组**按 heat 升权(Tier A 问过 count 降序 / Tier B 未读 / Tier C 读过沉底,**升权压已读**,tiebreak weight×距离)+ `guided_route_from` 传 `puzzle_heat` + `reader-profile.md` 卡点段渲染真实问题+count + SYSTEM_PROMPT LID-local recall 引导(到/答某 LID 时 `memory.recall(lid,type=qa)`)。**判据**:back 组卡点冒顶(问过升顶/卡点压已读/没问过不动)cargo test;reader-profile.md 渲染问题文本+count;recall(lid,qa) 取回。**不做**:组间 TEACHING_ORDER 不碰;concretize/cross/forward/continue 不升权;不 blend 权重;不跨读者聚合;不做全量冷启动 dump;不改 route Core。
+
 ### P5 · ReActAdapter + provider registry `[Rust]`
 - **做**:在现有 ModelAdapter 之上加 provider registry;支持原生 tool calling provider 和 ReActAdapter fallback。所有 provider 输出归一为 `AssistantTurn`;工具执行仍由 Runtime 完成。
 - **不做**:不让 provider 自称工具结果;不让 Adapter 理解 technical_learning 或 reader_profile;不绕过错误信封。
