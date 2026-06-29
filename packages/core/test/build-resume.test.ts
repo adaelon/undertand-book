@@ -3,7 +3,13 @@ import { markdownToBlocks } from "../src/md-adapter";
 import { segment } from "../src/segment";
 import { splitWindows, type WindowBudget } from "../src/window";
 import { buildPass1Input } from "../src/pass1-input";
-import { computeBuildStatus, pass1ContentHash, type Pass1ArtifactMeta } from "../src/build-resume";
+import {
+  computeBuildStatus,
+  pass1ContentHash,
+  buildPass1Artifact,
+  type Pass1ArtifactMeta,
+} from "../src/build-resume";
+import type { Pass1Output } from "../src/merge";
 
 // 多章多段 → 至少 2 窗(小预算逼分窗,便于测部分抽 / 失配)
 const md =
@@ -58,5 +64,20 @@ describe("PB5-2 computeBuildStatus 续建视图 [ADR-0042]", () => {
     expect(pass1ContentHash(inp)).toBe(pass1ContentHash(inp)); // 同输入同 hash
     const mutated = { ...inp, text: inp.text + " x" };
     expect(pass1ContentHash(mutated)).not.toBe(pass1ContentHash(inp)); // 正文变 hash 变
+  });
+
+  it("buildPass1Artifact:content_hash 从窗口重算(= 状态 done 判据)、nodes/edges 原样挂", () => {
+    const w = windows[0];
+    const output: Pass1Output = {
+      nodes: [{ id: "entity:x", type: "entity", name: "X", occurrences: [w.leafLids[0]], source_lid: null }],
+      edges: [],
+    };
+    const art = buildPass1Artifact(w, byLid, md, output);
+    // content_hash 与续建视图重算一致 → 写出的产物 computeBuildStatus 必判 done
+    expect(art.content_hash).toBe(pass1ContentHash(buildPass1Input(w, byLid, md)));
+    expect(art.nodes).toEqual(output.nodes); // 抽取结果原样
+    expect(art.edges).toEqual(output.edges);
+    const status = computeBuildStatus([w], byLid, md, new Map([[w.id, art]]));
+    expect(status.done).toEqual([w.id]);
   });
 });

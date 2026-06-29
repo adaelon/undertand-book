@@ -8,10 +8,31 @@ import { createHash } from "node:crypto";
 import type { LidNode } from "./generated/LidNode";
 import type { Window } from "./window";
 import { buildPass1Input, type Pass1Input } from "./pass1-input";
+import type { Pass1Output } from "./merge";
 
-/** Pass1 抽取产物落盘形状(`.build/pass1/<id>.json`);本视图只读 content_hash 判新鲜度。 */
+/** Pass1 抽取产物落盘形状(`.build/pass1/<id>.json`)的 meta;续建视图只读 content_hash 判新鲜度。 */
 export interface Pass1ArtifactMeta {
   content_hash: string;
+}
+
+/** `.build/pass1/<id>.json` 全形:content_hash(新鲜度锚)+ subagent 抽取的 nodes/edges。 */
+export type Pass1Artifact = Pass1ArtifactMeta & Pass1Output;
+
+/**
+ * 组装单窗 Pass1 落盘产物:**content_hash 从窗口正文 TS 重算**(命门:不信调用方/agent 手算),
+ * 挂上 subagent 抽取的 {nodes, edges}。纯函数。逐窗原子写前由此产出。
+ */
+export function buildPass1Artifact(
+  window: Window,
+  byLid: Map<string, LidNode>,
+  source: string,
+  output: Pass1Output,
+): Pass1Artifact {
+  return {
+    content_hash: pass1ContentHash(buildPass1Input(window, byLid, source)),
+    nodes: output.nodes,
+    edges: output.edges,
+  };
 }
 
 /** 抽取输入正文的 content hash(sha256 hex)= 跨会话新鲜度锚。算自 buildPass1Input(window).text。 */
