@@ -12,7 +12,7 @@ use read_tools::{Book, ToolError};
 use reader::Reader;
 use runtime::orchestrator::{new_session, run, OuterConfig};
 use runtime::{
-    guided_route_from, synthesize, AdapterError, AssistantTurn, CompletionRequest, Message,
+    guided_route_from, synthesize, unvisited_back, AdapterError, AssistantTurn, CompletionRequest, Message,
     ModelAdapter, ParsedResponse, ToolSpec,
 };
 use serde::Serialize;
@@ -165,6 +165,17 @@ fn route_book(book: &Book, store: &MemoryStore, leaf: &str, q: &HashMap<String, 
             let profile = store.derive_reader_profile(&book.base.book_id);
             match guided_route_from(book, at, k, &profile) {
                 Ok(g) => ok_json(&json!({ "at": at, "groups": g })),
+                Err(e) => err_reply(&e),
+            }
+        }
+        "unvisited_back" => {
+            let Some(at) = q.get("at") else {
+                return validation("INVALID_RANGE", "book.unvisited_back 需 at 查询参数");
+            };
+            // 裸「没懂」兜底 `[ADR-0036 决策3]`:派生 reader_profile,确定性 back ∩ 未读前置。
+            let profile = store.derive_reader_profile(&book.base.book_id);
+            match unvisited_back(book, at, &profile) {
+                Ok(steps) => ok_json(&json!({ "at": at, "unvisited_back": steps })),
                 Err(e) => err_reply(&e),
             }
         }
@@ -754,6 +765,12 @@ mod tests {
         assert_eq!(get(&mut s, "/book/guided_route_from").status, 400);
         assert_eq!(get(&mut s, "/book/guided_route_from?at=1.1&k=abc").status, 400);
         assert_eq!(get(&mut s, "/book/guided_route_from?at=9.9").status, 404);
+        // unvisited_back(P3-2 裸「没懂」兜底):200 + {at, unvisited_back};缺 at→400;invalid at→404。
+        let ub = get(&mut s, "/book/unvisited_back?at=1.1");
+        assert_eq!(ub.status, 200);
+        assert!(ub.body.contains("\"unvisited_back\"") && ub.body.contains("\"at\""));
+        assert_eq!(get(&mut s, "/book/unvisited_back").status, 400);
+        assert_eq!(get(&mut s, "/book/unvisited_back?at=9.9").status, 404);
     }
 
     #[test]

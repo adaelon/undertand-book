@@ -542,18 +542,17 @@ ADR-0033 已把 `discourse_index`、`FormulaSemantics`、Pass2 audit、profile m
 > P3 大切片 A4 拆 4 子刀,刀刀独立验。架构方向(§0 用户拍板):带读 = 复用 `runtime::run()` + SYSTEM_PROMPT 驱动,`route_from` 是确定性 Core,带读策略 = LLM policy(prompt),Rust 只加确定性兜底;守 ADR-0034 决策2 mechanism/policy 分离。
 
 - **P3-1 带读骨架**(✅ 完成):SYSTEM_PROMPT 逐停靠点引导(reader.state→route_from 挑停靠点→gotoLid→synthesize 解释→停等人)+ 管道回归测试。详见 `docs/代码链路.md` P3-1 条。
-- **P3-2 反馈消歧**:NL→`{轴+类别}` 识别(prompt 强化,ADR-0036 决策2)+ viewport 静默 re-sync(prompt,决策5);**裸「没懂」结构兜底推迟**(见下决策)。
+- **P3-2 反馈消歧**:NL→`{轴+类别}` 识别(prompt 强化,ADR-0036 决策2)+ viewport 静默 re-sync(prompt,决策5)已随 P3-1/P3-3 SYSTEM_PROMPT 落;**裸「没懂」结构兜底 ✅ 完成(2026-06-29,P4 真历史源就位后捡起)**:新确定性命令 `book.unvisited_back(at)` = `route_from(at).back ∩ (全集 \ read_lids)` + SYSTEM_PROMPT 编排(空→讲法轴重讲/非空→可撤销提议回看/二次升级)。详见 `docs/代码链路.md` P3-2 条。
 - **P3-3 technical_learning policy**:`TechnicalLearningAgentPolicy` 教学 reorder/过滤 5 类前沿 + 何时建议 goto/highlight/note/回看/展示公式;含 NEW 术语,实现前走 §0.5。
 - **P3-4 Vue 带读 UI**:前端带读交互(停靠点呈现 + 继续/换路/退回)。
 
-**决策**:裸「没懂」结构兜底(`route_from(at).back ∩ 未读前置`)推迟 P4 之后,P3-2 不做。
+**决策(已兑现)**:裸「没懂」结构兜底(`route_from(at).back ∩ 未读前置`)曾推迟 P4 之后;**P4-1 真 read_lids 就位后已捡起**,落 `book.unvisited_back` 确定性命令(载体经 §0.5 拍板=新独立命令,否决扩 guided 标 read 让 agent 心算)。
 
 **否决**:
 - A `memory` 已交互 LID 近似:「已读」判定失真(交互过≠读过),违质量优先·上下文必须完全正确。
 - B `visited` 留空占位:全部 back 恒算未读,兜底语义失真。
 
-**命门**:「未读」判错 → agent 提议回看已读 / 漏真未读前置,污染 agent 上下文,踩最高原则;须用 P4 真 reading journey 历史,不用近似。
-**何时回头**:P4 reader_profile / journey 历史落地后捡起裸兜底(ADR-0036 决策3)。
+**命门(已守)**:「未读」判错 → agent 提议回看已读 / 漏真未读前置,污染上下文,踩最高原则;故用 P4 真 read_lids、**确定性命令算交集不靠 agent 心算**(ADR-0036 命门)。
 
 ### P4 · memory:确定性账本 + 用户主动 LLM 记忆 + 四层派生(reader_profile)`[Rust]`
 > **ADR-0038 重定位**(修正 ADR-0018 Codex 自动 consolidation 根基):Claude Code 式透明 memory——记**确定事实 / 用户真说的话**,砍后台自动抽推断。回收 P3-2 裸兜底 + P3-3 个性化的 P4 依赖。原"Layer 1-4(Session Digest/Reading Journey/Knowledge State/Durable Notes)"措辞作废,四层以 ADR-0038/CONTEXT 为准。

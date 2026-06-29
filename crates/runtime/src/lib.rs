@@ -1170,12 +1170,28 @@ pub fn guided_route_from(
     Ok(technical_learning_reorder(book.route_from(at, k)?, &read_set))
 }
 
+/// `book.unvisited_back(at)` `[ADR-0036 决策3]`:裸「没懂」(无 locus)结构兜底的确定性原语。
+/// 返回 `route_from(at).back ∩ (全集 \ read_lids)` = **未读前置**(back 类别里读者还没读过的)。
+/// 未读过滤在 runtime policy 层消费 ②(reader_profile),route Core 零 LLM 不破(承 guided_route_from)。
+/// agent 据返回**空/非空**走分支(空→讲法轴原地重讲 / 非空→可撤销提议「先回看 首项」),
+/// **不让 agent 心算 back ∩ 未读 交集**(守 ADR-0036 命门 + 质量优先:未读判定确定性)。
+/// 组内保持 route_from 的 weight×距离 序(首项 = 最该回看的未读前置)。
+pub fn unvisited_back(
+    book: &Book,
+    at: &str,
+    profile: &ReaderProfile,
+) -> Result<Vec<RankedStep>, ToolError> {
+    let read_set: HashSet<String> = profile.read_lids.iter().cloned().collect();
+    let back = book.route_from(at, None)?.back;
+    Ok(back.into_iter().filter(|s| !read_set.contains(&s.lid)).collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use base_schema::{
-        sample_base, FormulaComposition, FormulaParameter, FormulaSemantics, GraphEdge, GraphNode,
-        ReadOnlyBase, Span,
+        sample_base, Direction, EdgeScope, FormulaComposition, FormulaParameter, FormulaSemantics,
+        GraphEdge, GraphNode, GraphNodeType, LidNode, NodeKind, ReadOnlyBase, Span,
     };
     use read_tools::{TechnicalLearningDiscourseItem, TechnicalLearningDiscourseRelation};
     use std::cell::RefCell;
@@ -1244,6 +1260,70 @@ mod tests {
         assert_eq!(back.steps.len(), 3); // 已读不剔除(保留回看入口)
         let fwd = g.iter().find(|x| x.category == NavCategory::Forward).unwrap();
         assert_eq!(fwd.steps[0].lid, "2.0"); // 全未读不变
+    }
+
+    /// at="1.1" 经两条 depends_on 长程边指向前置 2.1/2.2(→ route_from(1.1).back=[2.1,2.2])。
+    /// entity 各单 occurrence ⇒ 无 co_occurrence cross 噪声;结构邻接不产 back(承 read-tools far-edge fixture)。
+    fn book_with_back_prereqs() -> Book {
+        let src = "A".repeat(40);
+        let para = |lid: &str, p: Vec<u32>, s: usize, e: usize| LidNode {
+            lid: lid.into(),
+            path: p,
+            kind: NodeKind::Paragraph,
+            span: Span { start: s, end: e },
+            children: vec![],
+        };
+        let base = ReadOnlyBase {
+            book_id: "back-book".into(),
+            lid_nodes: vec![
+                LidNode { lid: "1".into(), path: vec![1], kind: NodeKind::Chapter, span: Span { start: 0, end: 20 }, children: vec!["1.1".into(), "1.2".into()] },
+                para("1.1", vec![1, 1], 0, 10),
+                para("1.2", vec![1, 2], 10, 20),
+                LidNode { lid: "2".into(), path: vec![2], kind: NodeKind::Chapter, span: Span { start: 20, end: 40 }, children: vec!["2.1".into(), "2.2".into()] },
+                para("2.1", vec![2, 1], 20, 30),
+                para("2.2", vec![2, 2], 30, 40),
+            ],
+            graph_nodes: vec![
+                GraphNode { id: "entity:a".into(), node_type: GraphNodeType::Entity, name: "A".into(), occurrences: vec!["1.1".into()], source_lid: None },
+                GraphNode { id: "entity:p1".into(), node_type: GraphNodeType::Entity, name: "P1".into(), occurrences: vec!["2.1".into()], source_lid: None },
+                GraphNode { id: "entity:p2".into(), node_type: GraphNodeType::Entity, name: "P2".into(), occurrences: vec!["2.2".into()], source_lid: None },
+            ],
+            graph_edges: vec![
+                GraphEdge { source: "entity:a".into(), target: "entity:p1".into(), edge_type: "depends_on".into(), direction: Direction::Directed, scope: EdgeScope::LongRange, weight: 0.9 },
+                GraphEdge { source: "entity:a".into(), target: "entity:p2".into(), edge_type: "depends_on".into(), direction: Direction::Directed, scope: EdgeScope::LongRange, weight: 0.8 },
+            ],
+        };
+        Book::new(base, &src)
+    }
+
+    fn profile_read(read: &[&str]) -> ReaderProfile {
+        ReaderProfile {
+            book_id: "back-book".into(),
+            read_lids: read.iter().map(|s| s.to_string()).collect(),
+            focus_lids: vec![],
+            puzzle_lids: vec![],
+        }
+    }
+
+    // P3-2 裸「没懂」兜底 `[ADR-0036 决策3]`:unvisited_back = route_from(at).back ∩ 未读,确定性。
+    // 全未读→两前置都返;读过 2.1→只剩 2.2;两前置都读过→空(agent 走讲法轴);invalid at→not_found。
+    #[test]
+    fn unvisited_back_filters_read_prereqs_deterministically() {
+        let b = book_with_back_prereqs();
+        // 全未读:back 两前置都在(确认 fixture 真产 back)。
+        let all = unvisited_back(&b, "1.1", &profile_read(&[])).unwrap();
+        let mut lids: Vec<&str> = all.iter().map(|s| s.lid.as_str()).collect();
+        lids.sort();
+        assert_eq!(lids, vec!["2.1", "2.2"]);
+        // 读过 2.1:确定性过滤剩未读 2.2(不靠 agent 心算交集)。
+        let un = unvisited_back(&b, "1.1", &profile_read(&["2.1"])).unwrap();
+        assert_eq!(un.iter().map(|s| s.lid.as_str()).collect::<Vec<_>>(), vec!["2.2"]);
+        // 两前置都读过:空 → agent 走讲法轴原地重讲。
+        assert!(unvisited_back(&b, "1.1", &profile_read(&["2.1", "2.2"])).unwrap().is_empty());
+        // invalid at → not_found(承 route_from,不静默)。
+        let err = unvisited_back(&b, "9.9", &profile_read(&[])).unwrap_err();
+        assert_eq!(err.error_code, "LID_NOT_FOUND");
+        assert_eq!(err.category, "not_found");
     }
 
     /// 确定性测试替身:按调用次序吐脚本化 ParsedResponse(loop 每轮调一次 complete)。

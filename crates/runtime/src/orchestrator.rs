@@ -187,6 +187,15 @@ pub fn tool_specs() -> Vec<ToolSpec> {
             }),
         ),
         s(
+            "book.unvisited_back",
+            "裸『没懂』结构兜底:返回当前 LID 的【未读前置】= route_from(at).back 里读者还没读过的(确定性 back ∩ 未读)。当用户只说『没懂/看不明白』且无具体指向(没说要例子/关联/回看哪)时调它——返回非空则首项是建议回看的未读前置,空则该回看的前置都读过了(改走原地重讲)。零 LLM,全真 LID。",
+            json!({
+                "type": "object",
+                "properties": {"at": {"type": "string", "description": "当前 LID"}},
+                "required": ["at"]
+            }),
+        ),
+        s(
             "book.route_to",
             "在导航图上求 from→target 的确定性路径(BFS,返回导航步序列,全真 LID+真边)。target 须为已解析 LID(先用 book.concept/context 定位)。",
             json!({
@@ -292,6 +301,12 @@ const SYSTEM_PROMPT: &str = "你是这本书的阅读 agent。事实性回答经
 ⑤book.synthesize([上一停靠点, 新停靠点]) 取带 citation 的解释;\
 ⑥讲完就停:终答=简短讲解 + 一句『继续顺读,还是想回看/深入/要例子?』,然后等用户下一句。\
 一个回合只前进一个停靠点,不要一次连读整章。\
+裸『没懂』兜底——当用户只说『没懂/看不明白』这类无具体指向的反馈(没说要例子/要关联/要回看哪),不要凭两字猜方向:\
+①调 book.unvisited_back(当前 anchor) 拿确定性的未读前置;\
+②返回空 → 该回看的前置都读过了,歧义落在讲法:调 book.synthesize([当前停靠点]) 换个讲法原地重讲一遍(不跳走),不要反问;\
+③返回非空 → 可能缺前置:先重讲一遍 + 提议一句『要不要先回看 {首项 LID}(前置)再继续?』,然后等用户定(可撤销——用户说不用就留在原地);\
+④若重讲后用户再次『没懂』 → 升级:reader.gotoLid({unvisited_back 首项}) 真带去回看前置。\
+未读前置只能取自 book.unvisited_back 返回,不可自己判断哪个读过没读过。\
 主动构建用户上下文——当用户显式说『记住/记下 X』,或你在交互中判断某点值得构建进对这个读者的长期理解\
 (其背景/偏好/关注/卡点,例如反复追问某主题、明确表达学习目标或卡点)时,\
 调 memory.save(type='context', anchor_lid, content, citations?) 把它记下来,免去用户日后重复交代。守三条:\
@@ -446,6 +461,21 @@ fn dispatch(
             let profile = store.derive_reader_profile(&book.base.book_id);
             let body = match crate::guided_route_from(book, at, k, &profile) {
                 Ok(g) => to_json(&serde_json::json!({ "at": at, "groups": g })),
+                Err(e) => to_json(&e),
+            };
+            (body, None)
+        }
+        "book.unvisited_back" => {
+            let Some(at) = sget("at") else {
+                return (
+                    err_json("INVALID_RANGE", "validation", "book.unvisited_back 需 at"),
+                    None,
+                );
+            };
+            // 裸「没懂」兜底 `[ADR-0036 决策3]`:确定性 back ∩ 未读前置,未读过滤消费 ② reader_profile。
+            let profile = store.derive_reader_profile(&book.base.book_id);
+            let body = match crate::unvisited_back(book, at, &profile) {
+                Ok(steps) => to_json(&serde_json::json!({ "at": at, "unvisited_back": steps })),
                 Err(e) => to_json(&e),
             };
             (body, None)
@@ -1160,6 +1190,41 @@ mod tests {
             "t0",
         );
         assert!(bad.contains("INVALID_RANGE") && bad.contains("validation"));
+    }
+
+    // P3-2 裸「没懂」兜底命令面 `[ADR-0036]`:unvisited_back 返 {at, unvisited_back};缺 at→validation;
+    // invalid at→not_found(承 route_from);只读不产 effect。(过滤语义的确定性由 lib.rs 单测覆盖)
+    #[test]
+    fn dispatch_unvisited_back_returns_envelope_and_validates() {
+        let b = book_leaves(3); // 无图边 ⇒ back 空 ⇒ unvisited_back=[](信封仍在)
+        let mut store = MemoryStore::open(tmp("unvisited")).unwrap();
+        let fake = FakeAdapter::new(vec![], vec![]);
+        let mut reader = Reader::new(&b, DEFAULT_RADIUS);
+        let (ok, eff) = dispatch(
+            "book.unvisited_back",
+            r#"{"at":"1.1"}"#,
+            &b,
+            &mut store,
+            &mut reader,
+            &fake,
+            "t0",
+        );
+        assert!(ok.contains("\"unvisited_back\"") && ok.contains("\"at\":\"1.1\""));
+        assert!(eff.is_none());
+        // 缺 at → validation。
+        let (bad, _) = dispatch("book.unvisited_back", "{}", &b, &mut store, &mut reader, &fake, "t0");
+        assert!(bad.contains("INVALID_RANGE") && bad.contains("validation"));
+        // invalid at → not_found(不静默)。
+        let (nf, _) = dispatch(
+            "book.unvisited_back",
+            r#"{"at":"9.9"}"#,
+            &b,
+            &mut store,
+            &mut reader,
+            &fake,
+            "t0",
+        );
+        assert!(nf.contains("LID_NOT_FOUND") && nf.contains("not_found"));
     }
 
     // P4-3 citation 确定性闸 `[ADR-0039]`:context 记忆带 citations,有效 LID 保留、无效丢弃、
