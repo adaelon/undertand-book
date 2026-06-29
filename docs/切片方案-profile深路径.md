@@ -511,6 +511,19 @@ ADR-0033 已把 `discourse_index`、`FormulaSemantics`、Pass2 audit、profile m
 - **判据**:`pnpm` 侧构建 fixture 通过 schema/gate;`cargo test` 侧加载同一 fixture 并验证 `book.synthesize` 可见 Formula/discourse hints、`book.context` 可见 discourse via、far 可见 long_range 边。
 - **触达**:`[ADR-0033 命门 sidecar 是过渡层]`
 
+### PB5 · 构建工作区 + 跨会话续建 + bookId 通用化 `[TS]` `[ADR-0042]`
+> 解锁**真书端到端预构建**:build 是 Claude 在环驱动,真书数十窗 Pass1 抽取**一个会话跑不完**——token/上下文耗尽是常态,需新会话靠中间产物接着建(承软工准则 A4 防上下文断裂)。承 ADR-0042(§0.5 二次 grill 重定性为跨会话 agent 续建)。本刀**零 LLM**(subagent 抽取在环不变),= 包在抽取外的确定性脚手架 + agent 冷启动契约。回收"预构建无中间产物落盘 / 无续建 / `pass1-batch` 硬编码 bookId"缺口。
+- **做**:① `deriveBookId(bookPath, override?)` 纯函数(文件名 basename slug 化 ASCII-safe + `--book-id` 覆盖 + 非 ASCII fail-fast),去 `pass1-batch.ts` 硬编码 bookId。② `status <book>`:重算窗口 + 扫 `.build/pass1/<id>.json` + content-hash 校验 → 报 done/pending ids(冷启动续建视图)。③ `emit-input <book> <id>`:现算单窗 Pass1 输入正文(`buildPass1Input`)喂 subagent,**不落盘**。④ `pass1-batch <book>` 改造:消费 `.build/pass1/*.json` 累积(hash 校验,陈旧/缺失判 pending),pending 默认**拒绝收口**(`--allow-partial` 兜底)。⑤ `skills/build/SKILL.md` 补「跨会话续建 loop」(冷启动契约:status→逐窗 emit-input+抽取+原子写→全 done 收口)。
+- **不做**:不在 TS 调 LLM(抽取仍 subagent);不落 `windows.json` / 输入正文(派生可重算,ADR-0012);不引状态位/watermark/lock(ADR-0038/0039);不做内容寻址复用(书改了也复用,ADR-0042 何时回头)+ 跨版本增量(ADR-0019);本刀只续 Pass1(Pass2/discourse 留后)。
+- **判据**:`deriveBookId` 纯函数 vitest(slug/覆盖/非 ASCII 报错);`status` 对"全缺/部分抽/hash 失配"确定性报 pending(夹具删某窗 json / 改 source 验失配→pending);`pass1-batch` 从 `.build/pass1/` 累积产 base、bookId=派生值、pending 时拒绝收口;**逐窗原子写**(抽一窗落一文件,会话可停);SKILL.md 有冷启动续建 loop,新会话能纯靠 `.build/` + status 接手。
+- **触达**:`[ADR-0042/0012/0003]`;`skills/build/pass1-batch.ts` / 新 `skills/build/{build-id,build-status,emit-input}.ts`(或合并)/ `skills/build/SKILL.md` / vitest。
+- **唯一落盘中间产物**:`.understand-book/<bookId>/.build/pass1/<id>.json` = `{content_hash, nodes, edges}`(一窗一文件、抽完即原子写)。
+
+#### PB5 · A4 子刀拆分(实现期)
+- **PB5-1 bookId 通用化**:`deriveBookId` 纯函数 + 去 `pass1-batch` 硬编码 + vitest。纯确定性,无文件 IO 依赖。
+- **PB5-2 续建视图 `status`**:重算窗口 + content-hash 校验 + 报 done/pending(夹具单测:删窗 json / 改 source 失配)。
+- **PB5-3 `emit-input` + `pass1-batch` 改造 + SKILL.md 续建 loop**:现算喂抽取 + 逐窗原子写 + 消费 `.build/pass1/*.json` + hash 校验 + pending 拒绝收口(`--allow-partial`)+ 冷启动契约写进 SKILL.md。
+
 ### P1 · `technical_learning.pass2_longrange_v1` + 全量 scope 自适应 `[TS/Rust]`
 - **做**:把 Pass2 设计为 profile-aware long-range linker。输入包含 catalog、现有 graph_nodes、可选 discourse_index、FormulaSemantics、章节/窗口摘要;输出 long_range 边候选和审计 sidecar。Core gate 校验边端/evidence_lids,通过后降成现有 `GraphEdge(scope=long_range)`。补齐 `book.context far` / `book.query cross_chapter/global` 的实测自适应。
 - **不做**:不迁移 GraphNode envelope;不让 Pass2 产新节点;不让 LLM 重建悬空 LID。

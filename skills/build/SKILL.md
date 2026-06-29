@@ -31,6 +31,31 @@ harness 供 LLM)`[ADR-0003]`;读时是独立产品,启动走 `/understand-book:r
 6. ~~Pass2 长程边~~(subagent `pass2-longrange-linker`)— **切片0 砍,留切片1+**
 7. **自检闸 + 固化只读基座**(分区不变式 + 锚定率 ≥90%,产 `.understand-book/` · 下一刀)
 
+## 跨会话续建(冷启动契约)`[ADR-0042 · PB5]`
+
+> **状态:本节是 PB5 续建契约设计(ADR-0042);CLI(`build-status` / `emit-input` + `pass1-batch` 续建改造)PB5 实现期落地。**
+>
+> build 由 Claude 在环驱动,真书数十窗 Pass1 抽取**一个会话跑不完**(token/上下文耗尽是常态,非异常)。任一**新会话零上下文**,纯靠 `.understand-book/<bookId>/.build/` 中间产物接手。下面是冷启动续建 loop,与 SESSION_CHECKPOINT(C4/C5 会话热启动)同招——只是冷启的是"构建状态"。
+
+```
+0. bookId = deriveBookId(<book>)              # 文件名 slug;非 ASCII 用 --book-id,否则报错
+1. tsx skills/build/build-status.ts <book>
+   → pending 窗口 id 列表(= 重算窗口 ∩ 缺失/hash 失配的 pass1/<id>.json)
+2. 对每个 pending 窗口 id:
+   a. tsx skills/build/emit-input.ts <book> <id>      # 现算该窗 [LID] 前缀正文(不落盘)
+   b. 交 subagent pass1-local-extractor 抽 {nodes, edges(local)}
+   c. 原子写 .build/pass1/<id>.json = {content_hash, nodes, edges}    # 抽一窗落一窗
+   # token 快耗尽就停:已写的全部幸存,下个会话从 status 接着来
+3. status 全 done → tsx skills/build/pass1-batch.ts <book>           # merge/gate/固化 base + sidecar
+   # 仍有 pending → 拒绝收口并报 pending(--allow-partial 显式兜底)
+```
+
+铁律:
+- **逐窗原子写**:每抽完一窗立刻写其 `pass1/<id>.json`,绝不攒到末尾批量写(会话死=半成品全丢)。
+- **冷启动只信磁盘**:新会话不依赖上个会话上下文里的任何东西;窗口确定性重算、`status` 给真相。
+- **content_hash 锚新鲜度**:书/切分变了 → 受影响窗口 hash 失配 → `status` 判 pending 重抽,绝不静默复用陈旧抽取。
+- `.build/` 是 build-only,`Book::load` 不读。
+
 ## 基座 schema(单一真相源)
 基座类型由 Rust 权威定义(`crates/base-schema`,serde+ts-rs+schemars),ts-rs
 生成 TS 给预构建用 `[ADR-0021]`。S0 先打通该生成链路(本仓库 `crates/base-schema`
