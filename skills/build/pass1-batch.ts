@@ -14,6 +14,7 @@ import { buildProfileArtifactHeader, buildProfileMetadata } from "../../packages
 import { buildFormulaSemanticsSidecar, type FormulaSemanticsBuildCandidate } from "../../packages/core/src/formula-semantics";
 import { buildTechnicalLearningDiscourseIndex, type TechnicalLearningDiscourseItem } from "../../packages/core/src/discourse-index";
 import { buildLidToWindowIndex, buildLongRangeCandidates, gatePass2BuildOutput, type Pass2LlmOutput } from "../../packages/core/src/pass2-build";
+import { deriveBookId } from "../../packages/core/src/book-id";
 
 const [book, outputsPath, idxList, formulaCandidatesPath, discourseCandidatesPath, pass2OutputPath] = process.argv.slice(2);
 if (!book || !outputsPath || !idxList) {
@@ -45,7 +46,7 @@ const sampledAnchored = [...sampledLeaves].filter((l) => anchored.has(l)).length
 const sampledRate = sampledLeaves.size ? sampledAnchored / sampledLeaves.size : 0;
 
 // 固化小基座 + zod 校验
-const bookId = "game-programming-patterns";
+const bookId = deriveBookId(book); // PB5-1 去硬编码:从书路径文件名 slug 派生 [ADR-0042]
 const profileHeader = buildProfileArtifactHeader({ book_id: bookId });
 const profileMetadata = buildProfileMetadata(profileHeader);
 const formulaSidecar = formulaCandidatesPath
