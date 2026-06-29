@@ -66,14 +66,15 @@ fn main() {
         }
         "context" => {
             let lid = args.get(3).map(String::as_str).unwrap_or("");
-            let k = args.get(4).map(|s| {
+            let granularity = args.get(4).map(String::as_str);
+            let k = args.get(5).map(|s| {
                 if s == "all" {
                     usize::MAX
                 } else {
                     s.parse().unwrap_or(read_tools::DEFAULT_NEAR_K)
                 }
             });
-            match book.context_near(lid, k) {
+            match book.context(lid, granularity, k) {
                 Ok(c) => println!("{}", serde_json::to_string_pretty(&c).unwrap()),
                 Err(e) => {
                     println!("{}", serde_json::to_string_pretty(&e).unwrap());
