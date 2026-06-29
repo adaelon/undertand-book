@@ -1,6 +1,6 @@
 # ADR-0039 memory ② 用户主动记忆:agent judgment 触发 + 构建用户上下文 + 三护栏 + 直接 long_term(修正 ADR-0038 决策2 计数器与认知诚实否决)
 
-状态:已接受(2026-06-28,P4-3 §0.5 grill;落地实现留后续会话)
+状态:已接受(2026-06-28 §0.5 grill 落档;2026-06-29 实现落地,type=`context`、citation 闸=无效丢弃·零有效仍存)
 
 ## 背景
 
@@ -34,11 +34,11 @@
 - **提议态(session,用户保留才升 long_term)**:逐条把关违「免重复提示」。
 - **后台自动抽推断**([[ADR-0038]] 已否,仍否):agent judgment 是**前台读时**,非后台全量扫描。
 
-## 何时回头(落地形态 PENDING,实现期定)
+## 何时回头
 
-- **② 的 memory type 名**:候选 `insight` / `context` / `understanding`(区别于 `note`=用户逐字便签)。
-- **citation 闸严格度**:推荐「无效 LID 确定性丢弃(承 [[ADR-0011]] 最小连坐)、不阻断整条、零有效 citation 仍可存」(content 是用户上下文,不像 book 答案必须有证据);待实现期确认是否要更严。
-- agent judgment 记得太多 / 太碎 → 加 prompt 约束或 recall 时按 usage / 时间裁剪(**不复活计数器做触发**)。
+- **② 的 memory type 名(已定 `context`,2026-06-29 实现期)**:取 `context`(最贴「构建用户上下文」、语义中性),否决 `insight`/`understanding`。落 `memory.save` type enum + SYSTEM_PROMPT。
+- **citation 闸严格度(已定,2026-06-29 实现期)**:取「无效 LID 确定性丢弃(承 [[ADR-0011]] 最小连坐)、不阻断整条、零有效 citation 仍可存」;否决「必须 ≥1 有效 citation」(纯偏好类理解无具体 LID 也要能记)。落 dispatch `memory.save` citation 闸。
+- agent judgment 记得太多 / 太碎 → 加 prompt 约束或 recall 时按 usage / 时间裁剪(**不复活计数器做触发**)。仍 PENDING,留实测。
 
 ## 影响
 
@@ -46,4 +46,4 @@
 - 修 **CONTEXT「记忆 consolidation」**(② 触发 + 放宽 + 直接 long_term)。
 - 重写**切片方案 P4-3**:**一条线**(不拆 a/b,计数器砍);落地形态 PENDING。
 - 承 [[ADR-0015]](记录模型 + citation)/[[ADR-0030]](可撤销 + 会话边界)/[[ADR-0038]](memory 重定位)。
-- **落地实现留后续会话**(本轮只落档)。
+- **已实现(2026-06-29)**:`orchestrator.rs` 的 `memory.save` 加 `context` type + `citations` 参数 + dispatch citation 闸 + SYSTEM_PROMPT judgment 引导;`cargo test -p runtime` 41 绿(详见 `docs/代码链路.md` P4-3 条)。

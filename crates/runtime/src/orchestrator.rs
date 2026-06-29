@@ -6,7 +6,7 @@
 //! 「问→跳转→高亮→记笔记」闭环 `[ADR-0007/0015]`。
 //! 内层 book.query 复用 `crate::query`(同一 adapter 触 `complete`)`[ADR-0025]`。
 use crate::{query, synthesize, AssistantTurn, Message, ModelAdapter, Role, ToolSpec};
-use memory::{Anchor, MemoryStore, RecallQuery, SaveInput};
+use memory::{Anchor, MemCitation, MemoryStore, RecallQuery, SaveInput};
 use read_tools::{Book, ToolError};
 use reader::Reader;
 use serde::Serialize;
@@ -201,13 +201,20 @@ pub fn tool_specs() -> Vec<ToolSpec> {
         ),
         s(
             "memory.save",
-            "保存一条记忆(note/highlight/position),自动锚回 LID citation。",
+            "保存一条记忆:note/highlight/position(用户逐字便签 / 位置),\
+或 context(主动构建的用户上下文:对该读者背景/偏好/关注/卡点的理解,用认知诚实措辞)。\
+note/highlight 自动锚回 anchor 的 LID;context 可经 citations 锚回支撑该理解的真 LID。",
             json!({
                 "type": "object",
                 "properties": {
-                    "type": {"type": "string", "enum": ["note", "highlight", "position"]},
+                    "type": {"type": "string", "enum": ["note", "highlight", "position", "context"]},
                     "anchor_lid": {"type": "string"},
-                    "content": {"type": "string"}
+                    "content": {"type": "string"},
+                    "citations": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "可选,支撑该记忆的真 LID 列表(主要供 context 用);无效 LID 自动丢弃,可为空"
+                    }
                 },
                 "required": ["type", "anchor_lid", "content"]
             }),
@@ -285,6 +292,12 @@ const SYSTEM_PROMPT: &str = "你是这本书的阅读 agent。事实性回答经
 ⑤book.synthesize([上一停靠点, 新停靠点]) 取带 citation 的解释;\
 ⑥讲完就停:终答=简短讲解 + 一句『继续顺读,还是想回看/深入/要例子?』,然后等用户下一句。\
 一个回合只前进一个停靠点,不要一次连读整章。\
+主动构建用户上下文——当用户显式说『记住/记下 X』,或你在交互中判断某点值得构建进对这个读者的长期理解\
+(其背景/偏好/关注/卡点,例如反复追问某主题、明确表达学习目标或卡点)时,\
+调 memory.save(type='context', anchor_lid, content, citations?) 把它记下来,免去用户日后重复交代。守三条:\
+①认知诚实——content 写成带证据的理解(如『在 §3.2 反复追问所有权,像是卡在这』),不伪装成铁事实、不凭空臆断;\
+②citations 锚到支撑该理解的真 LID(取自你读过的 book 工具返回;无具体证据的纯偏好可不带 citations);\
+③只记真正值得跨会话复用的,别把每句话都记成 context。记错无妨——记忆透明可见、用户随时可删。\
 证据不足时诚实说明,不要编造 LID。准备好最终答案时直接用自然语言回复(不再调用工具)。";
 
 /// 执行一次工具调用,返回 `(喂回模型的结果 JSON, 可选可撤销 effect)` `[ADR-0015/0026/0030]`。
@@ -470,6 +483,21 @@ fn dispatch(
             } else {
                 "long_term"
             };
+            // citation 确定性闸 `[ADR-0039]`(承 reader.gotoLid 同款 LID 校验):
+            // 每个 cite_lid 校验 ∈ 真 LID 全集,无效**确定性丢弃、不阻断整条**,
+            // 零有效 citation 仍可存(content 是用户上下文,非 book 答案,不强制有证据)。
+            // 仅当 LLM 显式传 citations 时进闸:不传 → None(承 memory crate note/highlight 自动派生)。
+            let citations = args.get("citations").and_then(|v| v.as_array()).map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str())
+                    .filter(|lid| book.base.lid_nodes.iter().any(|n| n.lid == *lid))
+                    .map(|lid| MemCitation {
+                        lid: lid.to_string(),
+                        book_id: book.base.book_id.clone(),
+                        note: None,
+                    })
+                    .collect::<Vec<_>>()
+            });
             let input = SaveInput {
                 mem_id: None,
                 mem_type: ty.into(),
@@ -481,7 +509,7 @@ fn dispatch(
                 },
                 content: content.into(),
                 range: None,
-                citations: None,
+                citations,
                 source_session_id: None,
             };
             let body = match store.save(input, now) {
@@ -1132,6 +1160,66 @@ mod tests {
             "t0",
         );
         assert!(bad.contains("INVALID_RANGE") && bad.contains("validation"));
+    }
+
+    // P4-3 citation 确定性闸 `[ADR-0039]`:context 记忆带 citations,有效 LID 保留、无效丢弃、
+    // 零有效仍可存;context 直接落 long_term。承 reader.gotoLid 同款 LID 校验。judgment 智能靠真 LLM 手动验(B2)。
+    #[test]
+    fn dispatch_memory_save_context_gates_citations() {
+        let b = book_leaves(3); // 真 LID: 1, 1.1, 1.2, 1.3
+        let mut store = MemoryStore::open(tmp("ctx-cite")).unwrap();
+        let fake = FakeAdapter::new(vec![], vec![]);
+        let mut reader = Reader::new(&b, DEFAULT_RADIUS);
+
+        // 混入有效 1.1 + 无效 9.9:无效确定性丢弃、有效保留;context 落 long_term;不产可撤销 effect。
+        let (ok, eff) = dispatch(
+            "memory.save",
+            r#"{"type":"context","anchor_lid":"1.1","content":"读者反复追问所有权,像卡在这","citations":["1.1","9.9"]}"#,
+            &b,
+            &mut store,
+            &mut reader,
+            &fake,
+            "t0",
+        );
+        assert!(ok.contains("\"type\":\"context\""));
+        assert!(ok.contains("\"layer\":\"long_term\"")); // context 直接 long_term
+        assert!(ok.contains("\"lid\":\"1.1\"")); // 有效 citation 保留
+        assert!(!ok.contains("9.9")); // 无效 citation 确定性丢弃、不阻断整条
+        assert!(eff.is_none()); // memory.save 不产可撤销 effect(撤销走 memory.delete)
+
+        // 零有效 citation(全无效):仍可存(不阻断),citations 为空数组。
+        let (ok2, _) = dispatch(
+            "memory.save",
+            r#"{"type":"context","anchor_lid":"1.2","content":"用户是 Rust 背景(纯偏好,无具体 LID 证据)","citations":["9.9","8.8"]}"#,
+            &b,
+            &mut store,
+            &mut reader,
+            &fake,
+            "t1",
+        );
+        assert!(ok2.contains("\"type\":\"context\""));
+        assert!(ok2.contains("\"citations\":[]")); // 零有效 → 空,仍存
+        assert!(!ok2.contains("error_code")); // 不报错
+
+        // 不传 citations 的 context:None → 不自动派生(context 非 note/highlight),空 citations 仍存。
+        let (ok3, _) = dispatch(
+            "memory.save",
+            r#"{"type":"context","anchor_lid":"1.3","content":"读者偏好先看例子再看定义"}"#,
+            &b,
+            &mut store,
+            &mut reader,
+            &fake,
+            "t2",
+        );
+        assert!(ok3.contains("\"citations\":[]"));
+
+        // 落盘可见:recall 取回三条 context(透明账本,用户可见可删)。
+        let got = store.recall(&RecallQuery {
+            book_id: Some("bookL".into()),
+            mem_type: Some("context".into()),
+            ..Default::default()
+        });
+        assert_eq!(got.len(), 3);
     }
 
     // 闭环验收:agent 经外层 loop 命令面跑通「问→跳转→高亮→记笔记」一次闭环 `[ADR-0007/0015]`。

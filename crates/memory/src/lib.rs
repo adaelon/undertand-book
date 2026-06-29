@@ -222,6 +222,8 @@ impl MemoryStore {
             None => self.records.push(record.clone()),
         }
         self.persist()?;
+        // P4-4:账本变更后重派生只读 .md 视图(best-effort,不阻断真相源)`[ADR-0040]`。
+        let _ = self.write_profile_files();
         Ok(record)
     }
 
@@ -237,7 +239,10 @@ impl MemoryStore {
                 message: format!("memory 记录不存在: {mem_id}"),
             });
         }
-        self.persist()
+        self.persist()?;
+        // P4-4:删后重派生只读 .md 视图,旧条目从文件消失(单向覆写)`[ADR-0040]`。
+        let _ = self.write_profile_files();
+        Ok(())
     }
 
     /// `memory.recall`:线性过滤(每 Some 维度合取;lid 比 anchor.lid;text 子串)`[ADR-0026]`。
@@ -318,6 +323,122 @@ impl MemoryStore {
             focus_lids: self.anchor_lids_of_type(book_id, &["note", "highlight"]),
             puzzle_lids: self.anchor_lids_of_type(book_id, &["qa"]),
         }
+    }
+
+    // ===== P4-4 四层产物物化(只读派生 .md · 单向覆写 · 真相源唯一 memory.json)`[ADR-0040]` =====
+
+    /// 出现过的全部 book_id(distinct·排序,确定性)。
+    fn all_book_ids(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self.records.iter().map(|r| r.book_id.clone()).collect();
+        ids.sort();
+        ids.dedup();
+        ids
+    }
+
+    /// 某书 context 记忆按成长时间线序(`generated_at`,tie `mem_id`)`[ADR-0039/0040]`。
+    fn context_timeline(&self, book_id: &str) -> Vec<&Record> {
+        let mut recs: Vec<&Record> = self
+            .records
+            .iter()
+            .filter(|r| r.book_id == book_id && r.mem_type == "context")
+            .collect();
+        recs.sort_by(|a, b| a.generated_at.cmp(&b.generated_at).then(a.mem_id.cmp(&b.mem_id)));
+        recs
+    }
+
+    /// 渲染 `reader-profile.md`(单书常驻画像,所有书分段)`[ADR-0040]`。纯确定性、无 LLM。
+    pub fn render_reader_profile_md(&self) -> String {
+        let mut s = String::from(
+            "# 读者画像 (reader-profile)\n\n\
+             > 自动派生只读快照 · 真相源 = memory.json · 改动走 memory.delete / 编 json `[ADR-0040]`\n",
+        );
+        for book_id in self.all_book_ids() {
+            let p = self.derive_reader_profile(&book_id);
+            s.push_str(&format!("\n## {book_id}\n"));
+            s.push_str(&format!("### 已读 ({} 叶)\n", p.read_lids.len()));
+            s.push_str(&if p.read_lids.is_empty() {
+                "(暂无)\n".into()
+            } else {
+                format!("{}\n", p.read_lids.join(" "))
+            });
+            s.push_str("### 关注点 (note/highlight)\n");
+            s.push_str(&if p.focus_lids.is_empty() {
+                "(暂无)\n".into()
+            } else {
+                p.focus_lids.iter().map(|l| format!("- {l}\n")).collect::<String>()
+            });
+            s.push_str("### 卡点 (qa)\n");
+            s.push_str(&if p.puzzle_lids.is_empty() {
+                "(暂空)\n".into()
+            } else {
+                p.puzzle_lids.iter().map(|l| format!("- {l}\n")).collect::<String>()
+            });
+            s.push_str("### agent 记的上下文 (context · 成长时间线)\n");
+            let timeline = self.context_timeline(&book_id);
+            if timeline.is_empty() {
+                s.push_str("(暂无)\n");
+            } else {
+                for r in timeline {
+                    let cites = if r.citations.is_empty() {
+                        String::new()
+                    } else {
+                        let lids: Vec<&str> = r.citations.iter().map(|c| c.lid.as_str()).collect();
+                        format!(" [cite: {}]", lids.join(" "))
+                    };
+                    s.push_str(&format!("- {} {}{}\n", r.generated_at, r.content, cites));
+                }
+            }
+        }
+        s
+    }
+
+    /// 渲染阅读手册 `reading-handbook.md`(per-book × cross-book 双维)`[ADR-0040]`。纯确定性、无 LLM。
+    pub fn render_handbook_md(&self) -> String {
+        let books = self.all_book_ids();
+        let mut s = String::from(
+            "# 阅读手册 (memory)\n\n\
+             > 自动派生只读快照 `[ADR-0040]`\n\n## per-book\n",
+        );
+        if books.is_empty() {
+            s.push_str("(暂无)\n");
+        }
+        for book_id in &books {
+            let p = self.derive_reader_profile(book_id);
+            let ctx = self.context_timeline(book_id).len();
+            s.push_str(&format!(
+                "- **{book_id}** — 读到 {} 叶 / 关注 {} / 卡点 {} / context {}\n",
+                p.read_lids.len(),
+                p.focus_lids.len(),
+                p.puzzle_lids.len(),
+                ctx,
+            ));
+        }
+        s.push_str("\n## cross-book\n");
+        if books.is_empty() {
+            s.push_str("(暂无)\n");
+        } else {
+            s.push_str(&format!("- 读过的书:{}\n", books.join(", ")));
+            for book_id in &books {
+                let ctx = self.context_timeline(book_id).len();
+                s.push_str(&format!("- {book_id}: context {ctx} 条\n"));
+            }
+        }
+        s.push_str("\n> 概念对齐(同名概念跨书)留 `[ADR-0006]`,v1 不做。\n");
+        s
+    }
+
+    /// 物化两层产物到 memory.json 同目录(只读派生·单向覆写)`[ADR-0040]`。
+    /// **best-effort 视图**:写失败不阻断账本(调用方 save/delete 忽略其 Err,真相源已 persist)。
+    pub fn write_profile_files(&self) -> Result<(), ToolError> {
+        let Some(dir) = self.path.parent() else {
+            return Ok(());
+        };
+        std::fs::create_dir_all(dir).map_err(|e| internal(format!("建 profile 目录失败: {e}")))?;
+        std::fs::write(dir.join("reader-profile.md"), self.render_reader_profile_md())
+            .map_err(|e| internal(format!("写 reader-profile.md 失败: {e}")))?;
+        std::fs::write(dir.join("reading-handbook.md"), self.render_handbook_md())
+            .map_err(|e| internal(format!("写 reading-handbook.md 失败: {e}")))?;
+        Ok(())
     }
 }
 
@@ -554,5 +675,54 @@ mod tests {
         assert_eq!(p.read_lids, vec!["1.1", "1.2"]); // 触达序
         assert_eq!(p.focus_lids, vec!["2.1", "2.3"]); // note+highlight 去重·LID 序(read 不计入)
         assert!(p.puzzle_lids.is_empty()); // qa 未落地 → 诚实空
+    }
+
+    // P4-4 四层产物物化 `[ADR-0040]`:save/delete 后确定性派生 reader-profile.md + reading-handbook.md
+    // 落 memory.json 同目录;含已读/关注/context 时间线+cite/qa 暂空/cross-book;delete 后单向覆写不再含旧条目。
+    #[test]
+    fn profile_files_materialize_and_overwrite_on_delete() {
+        // 专属子目录隔离(parent 唯一,避与其他测试共享 temp_dir 根踩 .md)。
+        let dir = std::env::temp_dir().join("ub-mem-p4-4-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("memory.json");
+        let mut s = MemoryStore::open(&path).unwrap();
+
+        s.mark_read("bookA", "1.1", "t0").unwrap();
+        s.mark_read("bookA", "1.2", "t1").unwrap();
+        s.save(note_input("bookA", "2.1", "命令封装请求"), "t2").unwrap();
+        // context 记忆带 citation + 时间线。
+        let mut ctx = note_input("bookA", "3.2", "读者反复追问所有权,像卡在这");
+        ctx.mem_type = "context".into();
+        ctx.citations = Some(vec![MemCitation {
+            lid: "3.2".into(),
+            book_id: "bookA".into(),
+            note: None,
+        }]);
+        s.save(ctx, "t3").unwrap();
+
+        let profile = std::fs::read_to_string(dir.join("reader-profile.md")).unwrap();
+        let handbook = std::fs::read_to_string(dir.join("reading-handbook.md")).unwrap();
+        // reader-profile:已读/关注/context 时间线+cite/qa 诚实空/只读快照标注。
+        assert!(profile.contains("已读 (2 叶)") && profile.contains("1.1 1.2"));
+        assert!(profile.contains("2.1")); // 关注点
+        assert!(profile.contains("读者反复追问所有权") && profile.contains("[cite: 3.2]")); // context + cite
+        assert!(profile.contains("ADR-0040")); // 只读快照护栏标注
+        assert!(profile.contains("(暂空)")); // qa 诚实空
+        // 阅读手册:per-book + cross-book。
+        assert!(handbook.contains("**bookA**") && handbook.contains("context 1"));
+        assert!(handbook.contains("cross-book") && handbook.contains("读过的书:bookA"));
+
+        // 单向覆写:delete context 后重派生,文件不再含该 context。
+        let recs = s.recall(&RecallQuery {
+            book_id: Some("bookA".into()),
+            mem_type: Some("context".into()),
+            ..Default::default()
+        });
+        assert_eq!(recs.len(), 1);
+        s.delete(&recs[0].mem_id).unwrap();
+        let profile2 = std::fs::read_to_string(dir.join("reader-profile.md")).unwrap();
+        assert!(!profile2.contains("读者反复追问所有权")); // 覆写后旧 context 消失
+        assert!(profile2.contains("已读 (2 叶)")); // 已读账本仍在
     }
 }
