@@ -1,33 +1,36 @@
-# SESSION_CHECKPOINT — 2026-06-28 (P4-2 reader_profile+已读降权完成·未 commit,下一步 commit→P4-3/P4-4 或捡 P3-2)
+# SESSION_CHECKPOINT — 2026-06-28 (P4-3 设计落档 ADR-0039·未实现,下一步 commit→实现 P4-3)
 
 ## 新鲜度自检
-- 写入时最新 commit: `878913a` feat(memory,reader): P4-1 确定性已读账本。
-- **有未提交代码(P4-2 全刀),待 commit;无其他在途**。读入时以 `git log -1` 为准。
-- 注:推送走代理 `git -c http.proxy=http://127.0.0.1:7897 -c https.proxy=... push`(默认 :10809 不通)。
+- 写入时最新 commit: `597b3f0` feat(memory,runtime): P4-2 reader_profile 派生 + guided 已读降权。
+- **有未提交落档(ADR-0039 + CONTEXT + 切片方案 P4-3 + 本 checkpoint),待 commit;无未提交代码**。读入时以 `git log -1` 为准。
+- 注:推送走代理 `git -c http.proxy=http://127.0.0.1:7897 -c https.proxy=... push`(代理服务需在跑;P4-2 时一度断,重试或换端口)。
 
 ## 当前在做什么
-P4 memory(ADR-0038 重定位:Claude 式透明账本)。**P4-2 reader_profile 确定性派生 + 已读降权已完成**:memory `derive_reader_profile(book_id)`→`ReaderProfile{read_lids,focus_lids(note/highlight),puzzle_lids(qa 暂空)}`;runtime `guided_route_from` 吃 profile 做**组内稳定已读降权**(未读升首·已读沉底·不剔除);dispatch+server GET 接线。全 workspace 全绿。**P3-3 已读个性化现已通**。
+P4 memory。**P4-3 用户主动 LLM 记忆:§0.5 grill 完成 + 设计落档(ADR-0039),代码未写**(用户要求本轮只落档)。方向重定位:**砍确定性计数器**,改 agent 读时 judgment 主动记;memory 本质 = 构建用户上下文(让用户不必每次重复交代);记什么放宽到「含对用户的理解」+ 三护栏;直接 long_term + 可删兜底;每条带 generated_at = 成长时间线。
 
 ## 下一步(可直接接手)
-1. **commit P4-2**:`git add crates/memory/src/lib.rs crates/runtime/src/lib.rs crates/runtime/src/orchestrator.rs crates/server/src/lib.rs "docs/代码链路.md" SESSION_CHECKPOINT.md`;消息 `feat(memory,runtime): P4-2 reader_profile 确定性派生 + guided 已读降权(解锁 P3-3)`;push 走代理。
-2. **P4-3 用户主动 LLM 记忆**(ADR-0038 决策2):agent 在 E loop 读时判断该记什么(用户显式「记下 X」/ 跨轮反复提及)→ `memory.save` + 认知诚实标注「用户多次提到 X」+ citation 锚真 LID 过确定性闸。**LLM 限定用户主动信号、非后台扫描**。先走 §0/§0.5(含 NEW 行为,可能要 ADR)。
-3. **或 P4-4 四层透明文件产物**(reader-profile.md/阅读手册,确定性派生 + 可选 LLM 表达层摘要、不产事实)。
-4. **或捡回收点**:P3-2 裸兜底(`back ∩ (全集\read_lids)`,read_lids 已是真历史源)。
+1. **commit 落档**:`git add docs/adr/0039-*.md CONTEXT.md "docs/切片方案-profile深路径.md" SESSION_CHECKPOINT.md`;消息 `docs(adr-0039): P4-3 memory 主动记忆改 agent judgment 触发 + 构建用户上下文三护栏,修正 ADR-0038 计数器`;push 走代理。
+2. **实现 P4-3**(一条线,先走 A1 声明):
+   - `crates/runtime/src/orchestrator.rs:tool_specs()` — `memory.save` type enum 加新值 + 加可选 `citations:[lid]` 参数。
+   - `crates/runtime/src/orchestrator.rs:dispatch()` `memory.save` 分支 — citation 闸:每个 cite_lid 校验 ∈ `book.base.lid_nodes`(承 goto_lid 同款),无效丢弃不阻断;传 `citations` 进 `SaveInput`(现 dispatch 硬编码 None)。
+   - `crates/runtime/src/orchestrator.rs:SYSTEM_PROMPT` — 加 judgment 主动记引导(显式「记住/记下」∨ judgment 值得构建进读者理解 → memory.save 新type + 认知诚实措辞 + citations,直接 long_term)。
+   - 判据:citation 闸确定性可单测(⊆真LID、无效丢弃);新type记忆带citation落long_term可单测;judgment智能靠真LLM手动验(B2)。
 
 ## 未提交 / 未完成
-- **P4-2 代码(本轮,未 commit)**:`crates/memory/src/lib.rs`(+ReaderProfile/derive_reader_profile/anchor_lids_of_type +1测试)、`crates/runtime/src/lib.rs`(reorder 加 read_set 降权 + guided 加 profile 参数 + import +1测试,2 现有测试随签名改)、`crates/runtime/src/orchestrator.rs`(dispatch 派生 profile)、`crates/server/src/lib.rs`(route_book 加 store 参数 + guided 派生)、`docs/代码链路.md`(P4-2 条)。
+- **本轮落档**:`docs/adr/0039-...修正adr0038.md`(新)、`CONTEXT.md`(记忆 consolidation ② 条改)、`docs/切片方案-profile深路径.md`(P4-3 子刀改)、本 checkpoint。
 - 保持 untracked:`参考*.md`、`agent交互书.md`、`docs/预购建流程.md`、`.fluid/`。
-- 待办(非阻塞):① **qa 类型未落地**(E loop 问答 save type=qa)⇒ reader_profile 疑惑点维度暂空;② synthesize `reader_profile=not_attached` prompt 表达层未接;③ 承 P8:ADR-0034 REST 措辞 / nearest_valid_lid 增强 / route 权重实测;④ ADR-0038「反复提及」阈值(P4-3 用)。
+- **P4-3 落地形态 PENDING(实现期定)**:① 新 type 名(候选 `insight`/`context`/`understanding`);② citation 闸严格度(推荐:无效 LID 确定性丢弃、不阻断、零有效 citation 仍可存)。
+- 待办(非阻塞):qa 类型未落地(疑惑点暂空);synthesize `reader_profile=not_attached` prompt 未接;承 P8 三项(REST 措辞/nearest_valid_lid/route 权重)。
 
 ## 冷启动读序
-按顺序读这些还原全局上下文:
-1. `docs/adr/0038-memory重定位-...md` — P4 现行根基(修正 ADR-0018),Claude 式透明 + LLM 限定用户主动信号。
-2. `docs/切片方案-profile深路径.md` P4(L558)+ A4 拆分(P4-1✅/P4-2✅/P4-3/P4-4)。
-3. `docs/代码链路.md` P4-1·P4-2 条 — 改动账本。
-4. `crates/memory/src/lib.rs` — mark_read/read_lids/derive_reader_profile(ReaderProfile);`crates/runtime/src/lib.rs` — technical_learning_reorder(已读降权)/guided_route_from。
-5. `CONTEXT.md`「记忆 consolidation」(ADR-0038)+「记忆层」。
+1. **`docs/adr/0039-memory主动记忆-...修正adr0038.md`** — P4-3 现行设计(修正 ADR-0038 决策2)。**先读这条**。
+2. `docs/adr/0038-memory重定位-...md` — 被修正的上层(来源三分、四层产物、citation 锚定仍有效)。
+3. `docs/切片方案-profile深路径.md` P4(L558)+ A4 拆分(P4-1✅/P4-2✅/P4-3 设计就绪待实现/P4-4)。
+4. `crates/runtime/src/orchestrator.rs` — memory.save tool_spec(203)/dispatch(455,citations=None 待扩)/SYSTEM_PROMPT(275)/run()(624)。
+5. `crates/memory/src/lib.rs` — Record(已有 generated_at/citations 字段)/save。
+6. `CONTEXT.md`「记忆 consolidation」(② 条已改)。
 
 ## 本会话决策摘要
-- **P4-1 已读账本**:复用 Record `type="read"` 内容寻址去重(§0 拍板);reader goto/scroll 落点真叶记账,scroll 升 Result。已 commit `878913a`+push。
-- **P4-2 已读降权语义(§0 拍板)**:**组内稳定降权排后**(未读升首·已读沉底·保原 weight 次序·**不剔除**,保留回看入口);否决「直接剔除已读」(丢回看 + back 类可能被剔空)。
-- **P4-2 接口**:`guided_route_from` 吃 `&ReaderProfile`(消费 P4-2a 派生),v1 仅用 read_lids 降权,focus/puzzle 留后续;reader_profile 派生落 memory(贴数据源)、runtime 消费。
+- **P4-1 已读账本**(commit 878913a):复用 Record type=read 内容寻址去重;goto/scroll 落点真叶记账。
+- **P4-2 reader_profile 派生 + 已读降权**(commit 597b3f0):组内稳定降权(未读升首·已读沉底·不剔除)。
+- **P4-3 设计(ADR-0039,本轮落档未实现)**:触发砍计数器改 agent judgment + 显式;memory=构建用户上下文,记什么放宽到含对用户理解,守三护栏(透明/可删/认知诚实+citation);直接 long_term;每条带时间戳=成长线。落地形态 PENDING。

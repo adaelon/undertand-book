@@ -566,7 +566,7 @@ ADR-0033 已把 `discourse_index`、`FormulaSemantics`、Pass2 audit、profile m
 #### P4 · A4 子刀拆分(实现期)
 - **P4-1 确定性已读账本**:reader 记真读 LID(位置历史)→ 已读集 + 进度(reading journey)。纯确定性可单测、无 LLM。**解锁 P3-2 裸兜底真历史源**。
 - **P4-2 reader_profile 确定性派生 + P3 接口**:已读集 + note/highlight/qa 的 LID 聚合 → reader_profile;喂 P3-3 已读降权整形 / P3-2 兜底。无 LLM。**解锁 P3-3 个性化**。
-- **P4-3 用户主动 LLM 记忆**:agent 读时(显式记 / 反复提及)→ `memory.save` + 认知诚实标注 + citation 闸。LLM 限定用户信号、非后台扫描。
+- **P4-3 用户主动 LLM 记忆**(一条线,不拆 `[ADR-0039 修正 ADR-0038]`):**触发 = agent 读时 judgment ∨ 用户显式「记下 X」**(**砍确定性计数器** / 反复提及独立机制);**记什么 = 构建用户上下文(含对用户理解/推断)+ 三护栏**(透明落可见文件 / 用户可改可删 / 认知诚实标注+citation 锚真 LID);**直接 `long_term` + 可删兜底**(非提议态,事后纠正 > 事前批准);每条带 `generated_at` = 成长时间线。落地 = SYSTEM_PROMPT judgment 引导 + `memory.save` 扩 `citations` 参数 + dispatch citation 闸(⊆ 真 LID,无效丢弃不阻断)+ 新 type。**落地形态 PENDING(实现期定)**:type 名(`insight`/`context`/`understanding`)、citation 闸严格度。
 - **P4-4 四层文件产物**:账本 / 记忆派生成透明 grep 文件(reader-profile.md / 阅读手册)+ 可选表达层摘要(不产事实)。
 
 ### P5 · ReActAdapter + provider registry `[Rust]`
