@@ -10,9 +10,10 @@ argument-hint: ["<path-to-epub-or-md> [--full]"]
 > `understand-book`(`.claude-plugin/plugin.json`)+ skill 文件夹 `build` ⇒ 命令
 > **`/understand-book:build`**。读时启动是另一个 skill `/understand-book:read`(留 S7)。
 
-> **状态:S1–S3 确定性骨架已实现。** 段切分(S1)/ 窗口(S2)/ Pass1 输入组装·merge+闸·
-> 目录投影(S3)已落 `packages/core` 且单测全绿;Pass1 subagent prompt 已填实。
-> 余:全书真实 LLM Pass1 抽取联调 + 自检闸固化 `.understand-book/`(下一刀)。
+> **状态:S1–S3 确定性骨架 + PB5 跨会话续建已实现。** 段切分(S1)/ 窗口(S2)/ Pass1 输入组装·
+> merge+闸·目录投影(S3)落 `packages/core` 单测全绿;Pass1 subagent prompt 已填实;PB5 续建脚手架
+> (build-status / emit-input / pass1-write / pass1-batch 消费 `.build/`,见下「跨会话续建」)落地。
+> 余:**真书 + 真 LLM 端到端试跑**(数十窗跨会话抽取 → 固化 `.understand-book/` → 自检闸实测)。
 
 把一本书(`$ARGUMENTS` 指向的 epub/md)预构建成只读知识图谱基座,产物落
 `.understand-book/`。预构建期绑当前 agent harness(本 skill 在 harness 内跑,
@@ -33,27 +34,29 @@ harness 供 LLM)`[ADR-0003]`;读时是独立产品,启动走 `/understand-book:r
 
 ## 跨会话续建(冷启动契约)`[ADR-0042 · PB5]`
 
-> **状态:本节是 PB5 续建契约设计(ADR-0042);CLI(`build-status` / `emit-input` + `pass1-batch` 续建改造)PB5 实现期落地。**
+> **状态:PB5 已实现(ADR-0042)。** CLI `build-status` / `emit-input` / `pass1-write` / `pass1-batch`(续建改造)+ core `build-resume.ts`(`pass1ContentHash` / `computeBuildStatus` / `buildPass1Artifact`)+ `book-id.ts`(`deriveBookId`)落地且单测绿。
 >
 > build 由 Claude 在环驱动,真书数十窗 Pass1 抽取**一个会话跑不完**(token/上下文耗尽是常态,非异常)。任一**新会话零上下文**,纯靠 `.understand-book/<bookId>/.build/` 中间产物接手。下面是冷启动续建 loop,与 SESSION_CHECKPOINT(C4/C5 会话热启动)同招——只是冷启的是"构建状态"。
 
 ```
-0. bookId = deriveBookId(<book>)              # 文件名 slug;非 ASCII 用 --book-id,否则报错
-1. tsx skills/build/build-status.ts <book>
-   → pending 窗口 id 列表(= 重算窗口 ∩ 缺失/hash 失配的 pass1/<id>.json)
+1. tsx skills/build/build-status.ts <book> [--book-id <id>]
+   → done/pending 窗口 id(= 重算窗口逐窗 content-hash 校验 .build/pass1/<id>.json)
+   # bookId = deriveBookId(<book>):文件名 slug;非 ASCII 主导报错,用 --book-id 显式指定
 2. 对每个 pending 窗口 id:
-   a. tsx skills/build/emit-input.ts <book> <id>      # 现算该窗 [LID] 前缀正文(不落盘)
-   b. 交 subagent pass1-local-extractor 抽 {nodes, edges(local)}
-   c. 原子写 .build/pass1/<id>.json = {content_hash, nodes, edges}    # 抽一窗落一窗
-   # token 快耗尽就停:已写的全部幸存,下个会话从 status 接着来
-3. status 全 done → tsx skills/build/pass1-batch.ts <book>           # merge/gate/固化 base + sidecar
-   # 仍有 pending → 拒绝收口并报 pending(--allow-partial 显式兜底)
+   a. tsx skills/build/emit-input.ts <book> <id>            # 现算该窗 [LID] 前缀正文到 stdout(不落盘)
+   b. 交 subagent pass1-local-extractor 抽 {nodes, edges(local)} → 存临时 out.json
+   c. tsx skills/build/pass1-write.ts <book> <id> out.json   # 重算 hash + 原子写 .build/pass1/<id>.json
+   # token 快耗尽就停:已写的全部幸存,下个会话从 build-status 接着来
+3. 全 done → tsx skills/build/pass1-batch.ts <book>          # 消费 .build/pass1/* → merge/gate/固化 base + sidecar
+   # 仍有 pending → 拒绝收口并报 pending ids(--allow-partial 显式兜底,只收 done 窗)
 ```
+
+> **命门**:`pass1-write` 的 content_hash 由 TS 从窗口正文重算(`buildPass1Artifact`),agent 绝不手算 hash——书/切分变了则受影响窗口 hash 失配、`build-status` 判 pending 重抽,杜绝陈旧静默复用。
 
 铁律:
 - **逐窗原子写**:每抽完一窗立刻写其 `pass1/<id>.json`,绝不攒到末尾批量写(会话死=半成品全丢)。
-- **冷启动只信磁盘**:新会话不依赖上个会话上下文里的任何东西;窗口确定性重算、`status` 给真相。
-- **content_hash 锚新鲜度**:书/切分变了 → 受影响窗口 hash 失配 → `status` 判 pending 重抽,绝不静默复用陈旧抽取。
+- **冷启动只信磁盘**:新会话不依赖上个会话上下文里的任何东西;窗口确定性重算、`build-status` 给真相。
+- **content_hash 锚新鲜度**:书/切分变了 → 受影响窗口 hash 失配 → `build-status` 判 pending 重抽,绝不静默复用陈旧抽取。
 - `.build/` 是 build-only,`Book::load` 不读。
 
 ## 基座 schema(单一真相源)
