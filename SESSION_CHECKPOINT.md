@@ -1,32 +1,32 @@
-# SESSION_CHECKPOINT — 2026-06-29 (P4-5 qa 落地完成,未提交;下一步 commit 或选向 P5/P3-4)
+# SESSION_CHECKPOINT — 2026-06-29 (PB5 跨会话续建已落档+commit;下一步 PB5-1 实现 或 真书试跑)
 
 ## 新鲜度自检
-- 写入时最新 commit: `41fc38c` feat(runtime,server): P3-2 裸没懂结构兜底 book.unvisited_back。
-- **有未提交改动**(P4-5 qa 落地 qa-1+qa-2,全绿未 commit)。读入以 `git log -1` + `git status` 为准。
-- 注:推送走代理 `git -c http.proxy=http://127.0.0.1:7897 -c https.proxy=... push`(代理服务需在跑)。
+- 写入时最新 commit: `2f19d43` docs(adr-0042,build): PB5 预构建跨会话续建落档。
+- 本 checkpoint 是其后唯一未跟踪改动;读入以 `git log -1` 为准。
+- push 走代理:`git -c http.proxy=http://127.0.0.1:7897 -c https.proxy=http://127.0.0.1:7897 push`(代理需在跑)。
 
 ## 当前在做什么
-**P4-5 qa 落地已完成**(qa-1 生产 + qa-2 消费,§0.5 grill 全程)。qa = LID 价值/提问热度信号(读者私人 ②),回收 P4-2 `puzzle_lids` 恒空缺口。三消费方全锚 `anchor.lid`:确定性 back 升权 / LID-local recall / 透明渲染。**改动全绿未提交**。
+**转向「先打磨核心、暂缓对外基建」**(见 memory [[prebuild-polish-before-external-infra]]):P5(多 provider)/ P7(MCP 访客)经讨论暂缓——系统从没在真书+真 LLM 端到端跑过(唯一产物是 13 行玩具)。本会话 §0.5 grill + 落档了 **PB5 预构建跨会话续建**(ADR-0042),**未写代码**。
 
 ## 下一步(可直接接手,挑一条)
-1. **commit P4-5 qa 落地**:`git add` ADR-0041 + CONTEXT + 切片方案 + 代码链路 + crates(memory/runtime)+ 本 checkpoint;消息 `feat(memory,runtime): P4-5 qa 落地 = LID 价值热度信号(qa-1 生产 + qa-2 back 卡点升权/recall/渲染)`,然后 push(代理)。
-2. **P5 ReActAdapter + provider registry**(切片方案 L597):provider registry + ReActAdapter fallback,归一 AssistantTurn;含 NEW,实现前走 §0.5。
-3. **P3-4 Vue 带读 UI**(切片方案 L572):前端停靠点呈现 + 继续/换路/退回(`packages/web`)。
-4. **LLM 表达层摘要**(P4-4 何时回头):四层 .md 聚合讲成人话(不产事实,可选层)。
+1. **PB5-1 实现**(最小独立一刀):`skills/build/` 加 `deriveBookId(bookPath, override?)` 纯函数(文件名 slug ASCII-safe + `--book-id` 覆盖 + 非 ASCII fail-fast)+ 去 `pass1-batch.ts:48` 硬编码 `bookId="game-programming-patterns"` + vitest(slug/覆盖/报错)。
+2. **PB5-2**:`skills/build/build-status.ts` 续建视图(重算窗口 + content-hash 校验 + 报 done/pending;夹具单测删窗 json / 改 source 失配)。
+3. **PB5-3**:`emit-input.ts` + `pass1-batch.ts` 改造消费 `.build/pass1/*.json` + 逐窗原子写 + pending 拒绝收口 + SKILL.md 续建 loop(已写设计)。
+4. **真书试跑**(零 LLM 先看):`npx tsx skills/build/window-cli.ts <真书.md|epub>` 看切分/窗口规模,再回来做 PB5。
 
 ## 未提交 / 未完成
-- **P4-5 qa 落地全部改动未提交**(测试全绿):`crates/memory/src/lib.rs`(puzzle_heat/qa_heat/qa_questions/render)、`crates/runtime/src/lib.rs`(reorder 加 puzzle_heat/back 升权)、`crates/runtime/src/orchestrator.rs`(qa enum/save+recall prompt)、`docs/adr/0041`、`CONTEXT.md`、`docs/切片方案-profile深路径.md`(P4-5)、`docs/代码链路.md`(qa-1/qa-2)。
+- 无未提交代码(PB5 仅落档,已 commit 2f19d43)。
 - 保持 untracked:`参考*.md`、`agent交互书.md`、`docs/预购建流程.md`、`.fluid/`。
-- 待办(非阻塞,ADR-0041 何时回头):count 噪声(3vs2)实测;re-ask usage.count 是否加权 heat;concretize/cross 升权(back 不够时);跨读者书内在价值(多读者场景);reader-profile.md 体积裁剪(承 ADR-0040,不复活计数器)。承前:二次「没懂」插反问、viewport re-sync 判定、synthesize reader_profile prompt、承 P8 三项。
+- PB5 全 4 子刀(含本 checkpoint 列的实现)待写代码;ADR-0042「何时回头」:内容寻址续建/跨版本增量/Pass2 续建/真书实测。
 
 ## 冷启动读序
-1. `docs/切片方案-profile深路径.md` — 总骨架 + A4 子刀状态(P3-1~4✅ / P4-1~5✅ / P5~P8 待做)。**先读这条**。
-2. `docs/代码链路.md` 末尾两条(P4-5 qa-1 / qa-2)— 本会话改动账本 + 测试 + B2 边界。
-3. `docs/adr/0041-qa落地-...md` — qa = LID 价值热度信号 7 决策 + 三消费方 + 升权压已读(命门:count 读时排序非写闸,区别 ADR-0039)。
-4. `crates/runtime/src/lib.rs` — `technical_learning_reorder`(back 组 qa 升权)/ `guided_route_from` / `unvisited_back`。
-5. `crates/memory/src/lib.rs` — `ReaderProfile.puzzle_heat` / `qa_heat` / `qa_questions` / `derive_reader_profile` / `render_*_md`。
-6. `crates/runtime/src/orchestrator.rs` — SYSTEM_PROMPT(带读+裸没懂+主动记忆+qa 记录/recall)/ tool_specs(memory.save type qa)/ dispatch。
-7. `CONTEXT.md` — 术语表(记忆 consolidation / qa 提问热度 / 四层产物 / 导航讲法轴)。
+1. `docs/adr/0042-预构建断点续跑-...md` — PB5 设计真相源(跨会话续建 8 决策)。**先读这条**。
+2. `skills/build/SKILL.md` 末「跨会话续建(冷启动契约)」段 — agent 续建 loop + 铁律。
+3. `docs/切片方案-profile深路径.md` PB5 段 + A4 三子刀 — 总骨架(PB0-3✅ / P1-4✅ / P8✅ / PB5、P5、P7 待做)。
+4. `skills/build/pass1-batch.ts` — 现状(硬编码 bookId:48 / 末尾一次写,PB5 要改)+ `packages/core/src/{window,pass1-input,merge}.ts`。
+5. `CONTEXT.md`「构建工作区」「跨会话续建」术语。
+6. memory: [[prebuild-polish-before-external-infra]](优先级)/ [[grill-via-prose-not-multiplechoice]](协作)/ [[windows-cjk-path-tooling]]。
 
 ## 本会话决策摘要
-- **ADR-0041**(待 commit):qa 落地 = LID 价值/提问热度信号(读者私人 ②)。触发=agent 用 book.query 答完存 qa(锚 query anchor+问题原文);三消费方全锚 anchor.lid(lid→count back 升权 / lid→问题文本 LID-local recall + 透明渲染);升权压已读(卡点=读过+问过冒顶);back-only;count 分层(非 blend);派生 puzzle_lids→puzzle_heat。修正 P4-2 puzzle 恒空。
+- **ADR-0042**(commit 2f19d43):预构建跨会话续建 = 逐窗原子落盘(命根)+ 存在性+content-hash 校验(位置 id 键·无状态位)+ agent 冷启动契约(SKILL.md loop)+ bookId slug 派生(非 ASCII fail-fast)+ pending 拒绝收口。收回内容寻址。承 A4 防上下文断裂 / ADR-0012 不物化派生 / ADR-0038-39 砍过度工程。
+- **优先级转向**:暂缓 P5/P7,先在真书上打磨预构建/工具/agent(memory 已存)。
