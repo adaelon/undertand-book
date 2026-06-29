@@ -1,12 +1,9 @@
-// S3.5 小规模 Pass1 实测:消费多窗口抽取结果 → merge+闸 → 锚定率 → 固化小基座。
-//   tsx pass1-batch.ts <book> <outputs.json> <windowIdxList逗号分隔>
-// outputs.json = Pass1Output[](各窗口抽取);windowIdxList = 已抽窗口索引(算局部锚定率分母)。
-// 全书 64 窗口实测仍留后;本步验证 merge/闸/合并 + 产 S4 可用真实基座。
-import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
-import { segment, type SourceBlock } from "../../packages/core/src/segment";
-import { markdownToBlocks } from "../../packages/core/src/md-adapter";
-import { epubToSource } from "../../packages/core/src/epub-adapter";
-import { splitWindows } from "../../packages/core/src/window";
+// PB5-3c 跨会话续建收口 [ADR-0042]:消费 `.build/pass1/*.json` 累积(content-hash 校验)→
+// merge+闸 → 锚定率 → 固化只读基座。pending(缺窗 / hash 失配)默认**拒绝收口**(缺窗=缺节点=
+// 图不完整),`--allow-partial` 显式兜底。本脚本零 LLM,是续建 loop 的末步(全 done 后收口)。
+//   tsx pass1-batch.ts <book.md|epub> [--book-id <id>] [--allow-partial]
+//     [--formula-candidates <p>] [--discourse-candidates <p>] [--pass2-output <p>]
+import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { mergeAndGate, type Pass1Output } from "../../packages/core/src/merge";
 import { projectCatalog } from "../../packages/core/src/catalog";
 import { FormulaSemanticsSidecarZ, Pass2BuildAuditSidecarZ, ReadOnlyBaseZ, TechnicalLearningDiscourseIndexZ } from "../../packages/core/src/zod";
@@ -15,28 +12,61 @@ import { buildFormulaSemanticsSidecar, type FormulaSemanticsBuildCandidate } fro
 import { buildTechnicalLearningDiscourseIndex, type TechnicalLearningDiscourseItem } from "../../packages/core/src/discourse-index";
 import { buildLidToWindowIndex, buildLongRangeCandidates, gatePass2BuildOutput, type Pass2LlmOutput } from "../../packages/core/src/pass2-build";
 import { deriveBookId } from "../../packages/core/src/book-id";
+import { computeBuildStatus, type Pass1Artifact } from "../../packages/core/src/build-resume";
+import { loadBookWindows, windowById } from "./load-book";
 
-const [book, outputsPath, idxList, formulaCandidatesPath, discourseCandidatesPath, pass2OutputPath] = process.argv.slice(2);
-if (!book || !outputsPath || !idxList) {
-  console.error("usage: tsx pass1-batch.ts <book> <outputs.json> <idx,idx,...> [formula-candidates.json] [discourse-candidates.json] [pass2-output.json]");
+const argv = process.argv.slice(2);
+const VALUE_FLAGS = new Set(["--book-id", "--formula-candidates", "--discourse-candidates", "--pass2-output"]);
+const opts: Record<string, string | undefined> = {};
+let allowPartial = false;
+const positional: string[] = [];
+for (let i = 0; i < argv.length; i++) {
+  const a = argv[i];
+  if (a === "--allow-partial") allowPartial = true;
+  else if (VALUE_FLAGS.has(a)) opts[a] = argv[++i];
+  else if (a.startsWith("--")) { console.error(`未知选项 ${a}`); process.exit(2); }
+  else positional.push(a);
+}
+const book = positional[0];
+if (!book) {
+  console.error("usage: tsx pass1-batch.ts <book.md|epub> [--book-id <id>] [--allow-partial] [--formula-candidates <p>] [--discourse-candidates <p>] [--pass2-output <p>]");
   process.exit(2);
 }
+const formulaCandidatesPath = opts["--formula-candidates"];
+const discourseCandidatesPath = opts["--discourse-candidates"];
+const pass2OutputPath = opts["--pass2-output"];
 
-let source: string;
-let blocks: SourceBlock[];
-if (/\.epub$/i.test(book)) ({ source, blocks } = epubToSource(new Uint8Array(readFileSync(book))));
-else { source = readFileSync(book, "utf8"); blocks = markdownToBlocks(source); }
+const { source, lidNodes, byLid, windows } = loadBookWindows(book);
+const bookId = deriveBookId(book, opts["--book-id"]);
 
-const lidNodes = segment(blocks);
-const windows = splitWindows(lidNodes, source);
-const outputs: Pass1Output[] = JSON.parse(readFileSync(outputsPath, "utf8"));
+// 消费 `.build/pass1/<id>.json`:逐窗读已落产物(缺文件=不入 map)
+const pass1Dir = `.understand-book/${bookId}/.build/pass1`;
+const artifacts = new Map<number, Pass1Artifact>();
+for (const w of windows) {
+  const f = `${pass1Dir}/${w.id}.json`;
+  if (existsSync(f)) artifacts.set(w.id, JSON.parse(readFileSync(f, "utf8")) as Pass1Artifact);
+}
+// 续建判定:存在性 + content-hash 校验(陈旧/缺失=pending)
+const { done, pending } = computeBuildStatus(windows, byLid, source, artifacts);
+if (pending.length && !allowPartial) {
+  console.error(`[pass1-batch] 拒绝收口:${pending.length}/${windows.length} 窗 pending(缺窗=缺节点=图不完整)`);
+  console.error(`  pending ids: ${pending.join(",")}`);
+  console.error(`  续建: build-status 看待抽窗 → 逐窗 emit-input+抽取+pass1-write;全 done 后重跑。强行收口加 --allow-partial`);
+  process.exit(1);
+}
+
+// 只把 done 窗口的抽取产物喂 merge(--allow-partial 下 pending 窗口跳过,基座局部)
+const outputs: Pass1Output[] = done.map((id) => {
+  const a = artifacts.get(id)!;
+  return { nodes: a.nodes, edges: a.edges };
+});
 
 const { nodes, edges, report } = mergeAndGate(outputs, lidNodes);
 const catalog = projectCatalog(nodes);
 
-// 局部锚定率:分母 = 已抽窗口的叶子并集
-const idxs = idxList.split(",").map(Number);
-const sampledLeaves = new Set(idxs.flatMap((i) => windows[i].leafLids));
+// 局部锚定率:分母 = done 窗口叶子并集
+const idxs = done;
+const sampledLeaves = new Set(idxs.flatMap((id) => windowById(windows, id).leafLids));
 const anchored = new Set<string>();
 for (const n of nodes) {
   if (n.type === "claim") { if (n.source_lid) anchored.add(n.source_lid); }
@@ -45,8 +75,7 @@ for (const n of nodes) {
 const sampledAnchored = [...sampledLeaves].filter((l) => anchored.has(l)).length;
 const sampledRate = sampledLeaves.size ? sampledAnchored / sampledLeaves.size : 0;
 
-// 固化小基座 + zod 校验
-const bookId = deriveBookId(book); // PB5-1 去硬编码:从书路径文件名 slug 派生 [ADR-0042]
+// 固化小基座 + zod 校验(bookId 已在头部派生)
 const profileHeader = buildProfileArtifactHeader({ book_id: bookId });
 const profileMetadata = buildProfileMetadata(profileHeader);
 const formulaSidecar = formulaCandidatesPath
@@ -108,8 +137,8 @@ if (pass2Gated) {
   writeFileSync(`${dir}/pass2_audit.json`, JSON.stringify(pass2Gated.audit, null, 2), "utf8");
 }
 
-console.log(`[pass1-batch] ${book}`);
-console.log(`  窗口=${windows.length}  已抽=${idxs.length}(#${idxs.join(",#")})  全书叶子=${lidNodes.filter((n) => n.children.length === 0).length}`);
+console.log(`[pass1-batch] ${book}  bookId=${bookId}${allowPartial && pending.length ? "  [--allow-partial]" : ""}`);
+console.log(`  窗口=${windows.length}  done=${done.length}  pending=${pending.length}  全书叶子=${lidNodes.filter((n) => n.children.length === 0).length}`);
 console.log(`  抽取输入: nodes=${outputs.reduce((s, o) => s + o.nodes.length, 0)} edges=${outputs.reduce((s, o) => s + o.edges.length, 0)}`);
 console.log(`  merge 合并: 节点合并=${report.nodesMerged} 边去重=${report.edgesDeduped}`);
 console.log(`  闸后: nodes=${report.nodesOut} edges=${report.edgesOut} 目录=${catalog.length}`);
