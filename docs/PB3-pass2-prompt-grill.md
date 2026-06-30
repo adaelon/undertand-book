@@ -1,4 +1,4 @@
-# PB3 Pass2 Prompt Grill
+﻿# PB3 Pass2 Prompt Grill
 
 > Status: accepted design notes for PB3 prompt/build orchestration.
 > Scope: this file records the agreed Pass2 prompt and build-shape decisions. It is an implementation input, not executable code.
@@ -9,14 +9,24 @@ PB3 must move Pass2 away from open-ended LLM edge discovery.
 
 ```text
 Pass1 merge / catalog / graph_nodes
-  + PB1 formula_semantics
-  + PB2 discourse_index
+  + PB6 profile-sidecar-batch outputs:
+      - discourse_index.json
+      - formula_semantics.json
   -> deterministic long_range candidate generation
   -> LLM candidate classification
   -> profile-aware deterministic gate
   -> base.json GraphEdge(scope="long_range") + pass2_audit.json
 ```
 
+Pass2 must run after the profile-sidecar pass has closed. The source of `discourse_index` and `FormulaSemantics` for Pass2 is the formal sidecar files written by `profile-sidecar-batch`, not Pass1 artifacts and not ad-hoc candidate JSON passed through `pass1-batch`.
+
+Build order:
+
+```text
+Pass1 all done -> pass1-batch writes base/source/catalog-derived artifacts
+PB6 all done -> profile-sidecar-batch writes discourse_index/formula_semantics
+Pass2 -> loads those sidecars for candidate generation and work packets
+```
 The design principle is:
 
 ```text
@@ -271,6 +281,9 @@ interface Pass2WorkPacket {
 }
 ```
 
+`source_discourse` and `source_formula_semantics` are projections from the closed PB6 sidecar files:
+- `source_discourse`: items from `discourse_index.json` whose `lid` is in the source window.
+- `source_formula_semantics`: items from `formula_semantics.json` whose `formula_lid` is in the source window.
 Chapter is used for grouping, coverage, and audit summaries, not as the minimal LLM classification unit.
 
 ## 11. Candidate Builder V1 Signals

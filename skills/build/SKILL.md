@@ -1,4 +1,4 @@
----
+﻿---
 name: build
 description: Turn a book (epub/md) into a read-only knowledge-graph base for anchored-reasoning reading. Deterministic LID segmentation + LLM semantic-edge extraction, gated.
 argument-hint: ["<path-to-epub-or-md> [--full]"]
@@ -63,3 +63,49 @@ harness 供 LLM)`[ADR-0003]`;读时是独立产品,启动走 `/understand-book:r
 基座类型由 Rust 权威定义(`crates/base-schema`,serde+ts-rs+schemars),ts-rs
 生成 TS 给预构建用 `[ADR-0021]`。S0 先打通该生成链路(本仓库 `crates/base-schema`
 → `packages/core/src/generated/`)。
+## profile-sidecar 独立抽取趟 `[PB6]`
+
+> `discourse_index.json` 与 `formula_semantics.json` 不属于 Pass1 收口;不要把它们塞进 `pass1-batch`。PB6 是第二条独立 profile artifact 抽取趟:复用同一 window/input/hash,但读写 `.build/profile-sidecar/`。
+
+```text
+1. tsx skills/build/profile-sidecar-status.ts <book> [--book-id <id>]
+   -> 查看 `.build/profile-sidecar/<id>.json` 的 done/pending(content_hash 校验)
+2. 对每个 pending window id:
+   a. tsx skills/build/profile-sidecar-input.ts <book> <id>
+      -> 输出 visible_lids + formula_lids + `[LID]` 正文
+   b. 交给 subagent profile-sidecar-extractor
+      -> 只产 {discourse_items, formula_semantics}
+   c. tsx skills/build/profile-sidecar-write.ts <book> <id> out.json
+      -> 原子写 `.build/profile-sidecar/<id>.json`
+3. 全 done -> tsx skills/build/profile-sidecar-batch.ts <book>
+   -> 只写 `discourse_index.json` / `formula_semantics.json`
+```
+
+铁律:
+- profile-sidecar batch 不改 `base.json` / `source.txt` / `profile_metadata.json` / `long_range_candidates.json`。
+- `formula_lids` 由 `LidNode.kind === "formula"` 确定性注入,LLM 不判断哪些 LID 是公式。
+- pending 默认拒绝收口;`--allow-partial` 只用于 smoke/救急。
+
+## Pass2 长程边编排 `[PB3 + PB6]`
+
+> Pass2 必须在 Pass1 `pass1-batch` 与 PB6 `profile-sidecar-batch` 都收口后运行。它从正式 `base.json`、`discourse_index.json`、`formula_semantics.json` 装配 work packet,不再从临时 candidate JSON 读取 discourse/formula。
+
+```text
+1. tsx skills/build/pass2-status.ts <book> [--book-id <id>]
+   -> 生成确定性 long_range 候选视图,按 source-window packet hash 检查 `.build/pass2/<id>.json`
+   -> pending = 有候选且缺少/过期 LLM 分类的窗口; skipped = 无候选窗口
+2. 对每个 pending window id:
+   a. tsx skills/build/pass2-input.ts <book> <id> [--book-id <id>]
+      -> 输出 Pass2WorkPacket(source text + source_nodes + PB6 discourse/formula 投影 + candidate_targets)
+   b. 交给 subagent pass2-longrange-linker
+      -> 只分类 candidate_targets 为 {accepted_edges,pending_edges,rejected_candidates}
+   c. tsx skills/build/pass2-write.ts <book> <id> out.json [--book-id <id>]
+      -> 用 packet hash 原子写 `.build/pass2/<id>.json`
+3. 全 candidate windows done -> tsx skills/build/pass2-batch.ts <book> [--book-id <id>]
+   -> 写 `long_range_candidates.json`;用 PB3 gate 替换 `base.json` 中的 long_range 边;写 `pass2_audit.json`
+```
+
+铁律:
+- `pass2-longrange-linker` 只分类给定候选,不得新增候选、节点或 local 边。
+- `pass2-batch` 默认拒绝 pending;`--allow-partial` 只用于 smoke/救急。
+- `pass2-batch` 替换旧 long_range 边,保留 local 边;不要手工编辑 `base.json`。

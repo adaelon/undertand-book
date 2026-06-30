@@ -1,4 +1,4 @@
-# 切片方案 · Profile 深路径(Core/Profile/Reader 解耦后的书中心能力补齐)
+﻿# 切片方案 · Profile 深路径(Core/Profile/Reader 解耦后的书中心能力补齐)
 
 > **定位**:切片1+ 阶段方案,承 ADR-0033。目标不是先做通用 profile registry,而是在保持 Core 稳定的前提下,把当前 `technical_learning` profile 接入长程边、综合、记忆 consolidation、provider、增量构建和 reader 策略。
 > **状态**:Grill 已对齐,未开工。当前不改代码;后续每个 P 刀单独 A1 声明、单独验证。
@@ -524,6 +524,15 @@ ADR-0033 已把 `discourse_index`、`FormulaSemantics`、Pass2 audit、profile m
 - **PB5-2 续建视图 `status`**:重算窗口 + content-hash 校验 + 报 done/pending(夹具单测:删窗 json / 改 source 失配)。
 - **PB5-3 `emit-input` + `pass1-batch` 改造 + SKILL.md 续建 loop**:现算喂抽取 + 逐窗原子写 + 消费 `.build/pass1/*.json` + hash 校验 + pending 拒绝收口(`--allow-partial`)+ 冷启动契约写进 SKILL.md。
 
+### PB6 · profile-sidecar 独立抽取趟(discourse + formula 合并一趟) `[TS/subagent]`
+> 2026-06-30 grill 定稿:sidecar 不是 Pass1 漏做项,也不折回 Pass1。它是独立于 Pass1 的 profile artifact 抽取趟;复用同一 LID/window 输入与 content_hash 口径,但有自己的 status/write/batch 与收口边界。
+- **做**:新增 `profile-sidecar-input/status/write/batch` 四个构建期命令。`profile-sidecar-input <book> <windowId>` 复用 Pass1 window id 与 `[LID]` 正文,额外确定性输出 `visible_lids` 与 `formula_lids`(`LidNode.kind === "formula"`)。`profile-sidecar-extractor` 一趟读取同一窗口正文,Step A 逐 LID 做 discourse classification,Step B 基于分类连局部 discourse relation,Step C 只对 `formula_lids` 产 `FormulaSemanticsBuildCandidate`。`profile-sidecar-write` 将规范化候选原子写到 `.understand-book/<bookId>/.build/profile-sidecar/<id>.json`。`profile-sidecar-batch` 汇总所有窗口候选,分别调用 `buildTechnicalLearningDiscourseIndex` 与 `buildFormulaSemanticsSidecar`,只写 `discourse_index.json` / `formula_semantics.json`。
+- **不做**:不改 Pass1、不改 `pass1-batch` 职责、不把 sidecar 写入 `ReadOnlyBase`、不重写 `base.json/source.txt/profile_metadata.json/long_range_candidates.json`、不保存 raw LLM 输出、不让 LLM 判断哪些 LID 是 formula、不抽 Pass2 long_range、不产 graph node/claim/formula 以外的额外 trace 字段。
+- **落盘形状**:`.build/profile-sidecar/<id>.json = { content_hash, discourse_items, formula_semantics }`;`content_hash = sha256(buildPass1Input(window).text)`。状态判定沿 ADR-0042 的存在性 + content-hash 校验,但目录和命令独立于 `pass1/`。
+- **收口规则**:pending 窗口默认拒绝写正式 sidecar;`--allow-partial` 仅作显式 smoke/救急兜底。即使 partial,也只影响 `discourse_index.json` / `formula_semantics.json`,不触碰 Core 产物。
+- **判据**:给定 fixture book 与规范化 subagent 输出,`profile-sidecar-write` 能逐窗原子落盘;`profile-sidecar-status` 能区分 done/pending/hash 失配;`profile-sidecar-batch` 在全 done 时写出 headered `discourse_index.json` 与 `formula_semantics.json`,pending 默认 exit1;prompt 明确 Step A/B/C、`formula_lids` 来源、enum 红线、LID/evidence 约束。
+- **触达**:`[ADR-0033/0042/0029]`;`agents/profile-sidecar-extractor.md`;`skills/build/profile-sidecar-{input,status,write,batch}.ts`;profile-sidecar build helper;vitest + CLI smoke。
+- **Pass2 前置关系**:Pass2/PB3 不从 Pass1 或临时 candidate JSON 读取 discourse/formula;必须在 PB6 profile-sidecar-batch 收口后,从正式 `discourse_index.json` / `formula_semantics.json` 投影 `source_discourse` 与 `source_formula_semantics`。
 ### P1 · `technical_learning.pass2_longrange_v1` + 全量 scope 自适应 `[TS/Rust]`
 - **做**:把 Pass2 设计为 profile-aware long-range linker。输入包含 catalog、现有 graph_nodes、可选 discourse_index、FormulaSemantics、章节/窗口摘要;输出 long_range 边候选和审计 sidecar。Core gate 校验边端/evidence_lids,通过后降成现有 `GraphEdge(scope=long_range)`。补齐 `book.context far` / `book.query cross_chapter/global` 的实测自适应。
 - **不做**:不迁移 GraphNode envelope;不让 Pass2 产新节点;不让 LLM 重建悬空 LID。
