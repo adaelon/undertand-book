@@ -102,6 +102,118 @@ body {
   color: var(--muted);
 }
 
+.prose .asset-block {
+  margin: 0 0 1.25rem;
+  border: 1px solid var(--line);
+  border-left: 3px solid #64748b;
+  border-radius: 6px;
+  background: #fafafa;
+  overflow: hidden;
+  cursor: pointer;
+}
+
+.prose .asset-block.anchor {
+  border-left-color: var(--accent);
+}
+
+.prose .asset-block.selected {
+  box-shadow: 0 0 0 2px #bfdbfe inset;
+}
+
+.prose .asset-block.hl {
+  background: var(--hl);
+}
+.asset-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.35rem 0.6rem;
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0;
+}
+.asset-jump {
+  padding: 0.1rem 0.45rem;
+  font-size: 0.78rem;
+}
+.asset-source {
+  margin: 0;
+  padding: 0.75rem 0.85rem;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+  font-size: 0.9rem;
+  line-height: 1.55;
+}
+.asset-code {
+  background: #f1f5f9;
+}
+.asset-table {
+  white-space: pre;
+}
+.asset-image-figure {
+  margin: 0;
+}
+.image-preview {
+  display: grid;
+  gap: 0.2rem;
+  padding: 0.8rem;
+  background: #eef2ff;
+}
+.image-preview span {
+  color: var(--muted);
+  font-size: 0.78rem;
+  text-transform: uppercase;
+}
+.image-preview code {
+  overflow-wrap: anywhere;
+}
+.asset-image-figure figcaption {
+  padding: 0.4rem 0.8rem 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+.formula-source {
+  background: #f8fafc;
+}
+.formula-profile {
+  padding: 0.75rem 0.85rem;
+  border-top: 1px solid var(--line);
+  background: #fff;
+}
+.formula-meaning {
+  margin: 0 0 0.6rem;
+  font-weight: 600;
+}
+.formula-section h4 {
+  margin: 0.65rem 0 0.25rem;
+  font-size: 0.86rem;
+}
+.formula-section dl {
+  margin: 0;
+}
+.formula-section dt {
+  font-weight: 600;
+}
+.formula-section dd {
+  margin: 0 0 0.35rem 1rem;
+  color: #374151;
+}
+.formula-section ul {
+  margin: 0;
+  padding-left: 1.2rem;
+}
+.formula-empty {
+  margin: 0;
+  padding: 0.65rem 0.85rem;
+  color: var(--muted);
+}
+
+
 /* 段内自由高亮:正文里的 <mark>(renderSeg 注入)。 */
 .hl-mark {
   background: var(--hl);

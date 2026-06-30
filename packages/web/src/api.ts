@@ -52,6 +52,32 @@ export interface BookText {
   lid: string;
   text: string;
 }
+export interface FormulaParameter {
+  symbol: string;
+  label: string | null;
+  meaning: string;
+  unit: string | null;
+  domain: string | null;
+  evidence_lids: string[];
+}
+export interface FormulaComposition {
+  source_lid: string;
+  meaning: string;
+  terms: string[];
+  evidence_lids: string[];
+}
+export interface FormulaContextLink {
+  target_lid: string;
+  relation: string;
+  description: string;
+  evidence_lids: string[];
+}
+export interface FormulaSemantics {
+  formula_lid: string;
+  parameters: FormulaParameter[];
+  composition: FormulaComposition;
+  context_links: FormulaContextLink[];
+}
 
 /** 携带 §4.4 分类信封的错误(category/error_code 供 UI 分流瞬时 vs 永久)。 */
 export class ApiError extends Error {
@@ -99,6 +125,8 @@ export const api = {
   manifest: () => http<Manifest>("GET", "/book/manifest"),
   text: (lid: string, end?: string) =>
     http<BookText>("GET", `/book/text${qs({ lid, end })}`),
+  formulaSemantics: (lid: string) =>
+    http<FormulaSemantics>("GET", `/book/formula_semantics${qs({ lid })}`),
 
   // ── book.query(LLM 命令,POST)──
   query: (q: string, anchor_lid?: string) =>

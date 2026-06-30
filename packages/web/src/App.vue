@@ -1,13 +1,22 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
 import { api, ApiError } from "./api";
-import type { AgentEffect, MemoryRecord, OuterOutcome, Viewport } from "./api";
+import type { AgentEffect, FormulaSemantics, MemoryRecord, OuterOutcome, Viewport } from "./api";
 import { renderMarkdown } from "./md";
+
+type NodeKind = import("./api").Manifest["tree"][number]["kind"];
 
 // ── 阅读区会话态 ──
 const leafOrder = ref<string[]>([]); // 全书叶 LID 序(读位感分母 + 进度)
+const kindByLid = ref<Map<string, NodeKind>>(new Map());
 const viewport = ref<Viewport | null>(null);
-const segments = ref<{ lid: string; text: string }[]>([]); // 视口内连续正文(LID 隐形)
+interface Segment {
+  lid: string;
+  text: string;
+  kind: NodeKind;
+  formula: FormulaSemantics | null;
+}
+const segments = ref<Segment[]>([]); // 视口内连续正文(LID 隐形)
 const annotations = ref<MemoryRecord[]>([]); // 当前书全部标注(客户端按 lid 过滤)
 const selectedLid = ref<string | null>(null);
 const chapterTitle = ref<string>("");
@@ -132,6 +141,25 @@ async function deleteNote(rec: MemoryRecord) {
   }
 }
 
+function kindOf(lid: string): NodeKind {
+  return kindByLid.value.get(lid) ?? "paragraph";
+}
+function isAsset(seg: Segment): boolean {
+  return seg.kind === "code" || seg.kind === "table" || seg.kind === "image" || seg.kind === "formula";
+}
+function imageMeta(text: string): { alt: string; src: string } | null {
+  const m = text.trim().match(/^!\[([^\]]*)\]\(([^)]+)\)$/);
+  return m ? { alt: m[1], src: m[2] } : null;
+}
+async function formulaFor(lid: string, kind: NodeKind): Promise<FormulaSemantics | null> {
+  if (kind !== "formula") return null;
+  try {
+    return await api.formulaSemantics(lid);
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 404) return null;
+    throw e;
+  }
+}
 async function refreshAnnotations() {
   annotations.value = await api.recall({}); // 单书:取全部,客户端按 lid 过滤
 }
@@ -141,7 +169,13 @@ async function loadWindow(vp: Viewport) {
   viewport.value = vp;
   selectedLid.value = vp.anchor_lid;
   const texts = await Promise.all(vp.visible_lids.map((lid) => api.text(lid)));
-  segments.value = texts.map((t) => ({ lid: t.lid, text: t.text }));
+  const next = await Promise.all(
+    texts.map(async (t) => {
+      const kind = kindOf(t.lid);
+      return { lid: t.lid, text: t.text, kind, formula: await formulaFor(t.lid, kind) };
+    }),
+  );
+  segments.value = next;
   await refreshAnnotations();
   await loadChapter(vp.anchor_lid);
 }
@@ -166,6 +200,7 @@ async function loadChapter(anchorLid: string) {
 async function init() {
   try {
     const m = await api.manifest();
+    kindByLid.value = new Map(m.tree.map((n) => [n.lid, n.kind]));
     leafOrder.value = m.tree.filter((n) => n.children.length === 0).map((n) => n.lid);
     const st = await api.state();
     await loadWindow(st.viewport);
@@ -220,10 +255,10 @@ function onProseMouseUp() {
   const range = sel.getRangeAt(0);
   const pOf = (n: Node | null): HTMLElement | null => {
     const el = n && n.nodeType === 3 ? n.parentElement : (n as HTMLElement | null);
-    return el ? el.closest("p[data-lid]") : null;
+    return el ? el.closest("[data-lid]") : null;
   };
   const startP = pOf(range.startContainer);
-  // 仅支持单段内选区(跨段留后);两端须同一 <p data-lid>。
+  // 仅支持单个 LID 内选区(跨 LID 留后);两端须同一 data-lid 容器。
   if (!startP || startP !== pOf(range.endContainer)) {
     hlPopover.value = null;
     return;
@@ -409,8 +444,9 @@ async function newChat() {
 
         <article class="prose" @mouseup="onProseMouseUp">
           <div v-for="seg in segments" :key="seg.lid" class="seg">
-            <!-- 段内 range 高亮渲染成 <mark>(renderSeg);整段高亮走 .hl 背景。 -->
+            <!-- 普通段落连续渲染;asset 叶子按 ManifestNode.kind 分派,仍保留 data-lid 隐形锚。 -->
             <p
+              v-if="!isAsset(seg)"
               :data-lid="seg.lid"
               :class="{
                 anchor: seg.lid === viewport?.anchor_lid,
@@ -420,6 +456,61 @@ async function newChat() {
               @click="selectedLid = seg.lid"
               v-html="renderSeg(seg)"
             ></p>
+            <section
+              v-else
+              :data-lid="seg.lid"
+              class="asset-block"
+              :class="[`asset-${seg.kind}`, {
+                anchor: seg.lid === viewport?.anchor_lid,
+                selected: seg.lid === selectedLid,
+                hl: isHighlighted(seg.lid),
+              }]"
+              @click="selectedLid = seg.lid"
+            >
+              <div class="asset-head">
+                <span>{{ seg.kind }}</span>
+                <button class="asset-jump" title="选中该 LID" @click.stop="selectedLid = seg.lid">定位</button>
+              </div>
+              <pre v-if="seg.kind === 'code'" class="asset-source asset-code"><code v-html="renderSeg(seg)"></code></pre>
+              <pre v-else-if="seg.kind === 'table'" class="asset-source asset-table" v-html="renderSeg(seg)"></pre>
+              <figure v-else-if="seg.kind === 'image'" class="asset-image-figure">
+                <div class="image-preview">
+                  <span>image</span>
+                  <strong>{{ imageMeta(seg.text)?.alt || '未命名图片' }}</strong>
+                  <code>{{ imageMeta(seg.text)?.src || 'src unavailable' }}</code>
+                </div>
+                <figcaption>原文</figcaption>
+                <pre class="asset-source" v-html="renderSeg(seg)"></pre>
+              </figure>
+              <div v-else-if="seg.kind === 'formula'" class="asset-formula-body">
+                <pre class="asset-source formula-source" v-html="renderSeg(seg)"></pre>
+                <div v-if="seg.formula" class="formula-profile">
+                  <p class="formula-meaning">{{ seg.formula.composition.meaning }}</p>
+                  <div v-if="seg.formula.parameters.length" class="formula-section">
+                    <h4>参数</h4>
+                    <dl>
+                      <template v-for="p in seg.formula.parameters" :key="p.symbol">
+                        <dt>{{ p.symbol }}<span v-if="p.label"> · {{ p.label }}</span></dt>
+                        <dd>
+                          {{ p.meaning }}
+                          <span v-if="p.unit"> · unit: {{ p.unit }}</span>
+                          <span v-if="p.domain"> · domain: {{ p.domain }}</span>
+                        </dd>
+                      </template>
+                    </dl>
+                  </div>
+                  <div v-if="seg.formula.context_links.length" class="formula-section">
+                    <h4>上下文关系</h4>
+                    <ul>
+                      <li v-for="link in seg.formula.context_links" :key="`${link.target_lid}:${link.relation}`">
+                        <strong>{{ link.relation }}</strong> {{ link.description }}
+                      </li>
+                    </ul>
+                  </div>
+                </div>
+                <p v-else class="formula-empty">未找到公式语义剖面。</p>
+              </div>
+            </section>
             <!-- 高亮卡:该段全部高亮,删除 / 改范围(移除后重选)。 -->
             <div v-for="h in highlightsOf(seg.lid)" :key="h.mem_id" class="hl-card">
               <span class="hl-ex">🖍 {{ hlExcerpt(h) }}</span>

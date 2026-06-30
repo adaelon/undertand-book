@@ -12,8 +12,8 @@ use read_tools::{Book, ToolError};
 use reader::Reader;
 use runtime::orchestrator::{new_session, run, OuterConfig};
 use runtime::{
-    guided_route_from, synthesize, unvisited_back, AdapterError, AssistantTurn, CompletionRequest, Message,
-    ModelAdapter, ParsedResponse, ToolSpec,
+    guided_route_from, synthesize, unvisited_back, AdapterError, AssistantTurn, CompletionRequest,
+    Message, ModelAdapter, ParsedResponse, ToolSpec,
 };
 use serde::Serialize;
 use serde_json::json;
@@ -134,6 +134,19 @@ fn route_book(book: &Book, store: &MemoryStore, leaf: &str, q: &HashMap<String, 
                 Err(e) => err_reply(&e),
             }
         }
+        "formula_semantics" => {
+            let Some(lid) = q.get("lid") else {
+                return validation("INVALID_RANGE", "book.formula_semantics 需 lid 查询参数");
+            };
+            match book.formula_semantics(lid) {
+                Some(s) => ok_json(s),
+                None => err_reply(&ToolError {
+                    error_code: "FORMULA_SEMANTICS_NOT_FOUND".into(),
+                    category: "not_found".into(),
+                    message: format!("未找到公式语义剖面: {lid}"),
+                }),
+            }
+        }
         "route_from" => {
             let Some(at) = q.get("at") else {
                 return validation("INVALID_RANGE", "book.route_from 需 at 查询参数");
@@ -213,7 +226,10 @@ fn route_mut(state: &mut AppState, path: &str, body: &str, now: &str) -> Reply {
                 return validation("INVALID_RANGE", "reader.goto 需 lid");
             };
             // 字段级不相交借用:reader(mut) + book(shared) + store(mut,记账)。
-            match state.reader.goto_lid(&state.book, &mut state.store, lid, now) {
+            match state
+                .reader
+                .goto_lid(&state.book, &mut state.store, lid, now)
+            {
                 Ok(e) => ok_json(&e),
                 Err(e) => err_reply(&e),
             }
@@ -223,7 +239,10 @@ fn route_mut(state: &mut AppState, path: &str, body: &str, now: &str) -> Reply {
                 return validation("INVALID_RANGE", "reader.scroll 需 delta(整数)");
             };
             // scroll 落点记入已读账本 `[ADR-0038]` ⇒ 返 Result(持久写失败诚实透传)。
-            match state.reader.scroll(&state.book, &mut state.store, delta, now) {
+            match state
+                .reader
+                .scroll(&state.book, &mut state.store, delta, now)
+            {
                 Ok(e) => ok_json(&e),
                 Err(e) => err_reply(&e),
             }
@@ -586,9 +605,9 @@ mod tests {
     use reader::DEFAULT_RADIUS;
     use runtime::{RawCitation, ToolCall};
     use std::cell::RefCell;
-    use std::sync::{Arc, Mutex};
     use std::collections::VecDeque;
     use std::path::PathBuf;
+    use std::sync::{Arc, Mutex};
 
     fn tmp(name: &str) -> PathBuf {
         let p = std::env::temp_dir().join(format!("ub-server-test-{name}.json"));
@@ -740,6 +759,48 @@ mod tests {
     }
 
     #[test]
+    fn formula_semantics_get_returns_profile() {
+        let src = "X".repeat(100) + "尾巴";
+        let mut base = sample_base();
+        base.lid_nodes[1].kind = NodeKind::Formula;
+        let semantics = FormulaSemantics {
+            formula_lid: "1.1".into(),
+            parameters: vec![FormulaParameter {
+                symbol: "x".into(),
+                label: Some("input".into()),
+                meaning: "输入变量".into(),
+                unit: None,
+                domain: None,
+                evidence_lids: vec!["1.1".into()],
+            }],
+            composition: FormulaComposition {
+                source_lid: "1.1".into(),
+                meaning: "公式表达输入变量的关系".into(),
+                terms: vec!["x".into()],
+                evidence_lids: vec!["1.1".into()],
+            },
+            context_links: vec![],
+        };
+        let book = Book::new(base, &src).with_formula_semantics(vec![semantics]);
+        let reader = Reader::new(&book, DEFAULT_RADIUS);
+        let store = MemoryStore::open(tmp("formula-semantics-get")).unwrap();
+        let adapter = Box::new(StubAdapter { lid: "1.1".into() });
+        let mut s = AppState {
+            book,
+            reader,
+            store,
+            adapter,
+            messages: new_session(),
+        };
+
+        let ok = get(&mut s, "/book/formula_semantics?lid=1.1");
+        assert_eq!(ok.status, 200);
+        assert!(ok.body.contains("\"formula_lid\":\"1.1\""));
+        assert!(ok.body.contains("输入变量"));
+        assert_eq!(get(&mut s, "/book/formula_semantics?lid=9.9").status, 404);
+        assert_eq!(get(&mut s, "/book/formula_semantics").status, 400);
+    }
+    #[test]
     fn route_from_and_route_to_get() {
         let mut s = state_named("route_nav");
         // route_from:200 + 返 5 类前沿(Frontier 总含全 5 键)。
@@ -756,14 +817,20 @@ mod tests {
         assert!(rt.body.contains("\"path\""));
         // 缺 target → 400;invalid 端点 → 404。
         assert_eq!(get(&mut s, "/book/route_to?from=1.1").status, 400);
-        assert_eq!(get(&mut s, "/book/route_to?from=1.1&target=9.9").status, 404);
+        assert_eq!(
+            get(&mut s, "/book/route_to?from=1.1&target=9.9").status,
+            404
+        );
         // guided_route_from(P3-3):200 + {at, groups}(教学整形,空组已剔)。
         let gf = get(&mut s, "/book/guided_route_from?at=1.1");
         assert_eq!(gf.status, 200);
         assert!(gf.body.contains("\"groups\"") && gf.body.contains("\"at\""));
         // 缺 at → 400;非法 k → 400;invalid at → 404。
         assert_eq!(get(&mut s, "/book/guided_route_from").status, 400);
-        assert_eq!(get(&mut s, "/book/guided_route_from?at=1.1&k=abc").status, 400);
+        assert_eq!(
+            get(&mut s, "/book/guided_route_from?at=1.1&k=abc").status,
+            400
+        );
         assert_eq!(get(&mut s, "/book/guided_route_from?at=9.9").status, 404);
         // unvisited_back(P3-2 裸「没懂」兜底):200 + {at, unvisited_back};缺 at→400;invalid at→404。
         let ub = get(&mut s, "/book/unvisited_back?at=1.1");
