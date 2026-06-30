@@ -1,8 +1,12 @@
-<script setup lang="ts">
+﻿<script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
 import { api, ApiError } from "./api";
 import type { AgentEffect, FormulaSemantics, MemoryRecord, OuterOutcome, Viewport } from "./api";
 import { renderMarkdown } from "./md";
+import TopBar from "./components/TopBar.vue";
+import LeftRail from "./components/LeftRail.vue";
+import ReaderPane from "./components/ReaderPane.vue";
+import RightRail from "./components/RightRail.vue";
 
 type NodeKind = import("./api").Manifest["tree"][number]["kind"];
 
@@ -24,6 +28,7 @@ const chapterTitle = ref<string>("");
 // goto 输入 + 错误条
 const gotoInput = ref("");
 const banner = ref<string>("");
+const debugOpen = ref(false);
 
 function fail(e: unknown) {
   if (e instanceof ApiError) banner.value = `[${e.category}] ${e.errorCode}: ${e.message}`;
@@ -315,6 +320,9 @@ function effKey(ti: number, ei: number) {
 function effState(ti: number, ei: number): string | undefined {
   return handled.value[effKey(ti, ei)];
 }
+function toggleTrace(ti: number) {
+  showTrace.value[ti] = !showTrace.value[ti];
+}
 
 // AgentEffect 判别(在 TS 里 narrow,避开模板里的联合类型收窄)。
 function isGoto(e: AgentEffect): boolean {
@@ -417,245 +425,105 @@ async function newChat() {
 
 <template>
   <div class="app">
-    <header class="topbar">
-      <span class="title">📖 {{ chapterTitle || "understand-book" }}</span>
-      <span class="progress">{{ progressPct }}%</span>
-      <span class="pos" v-if="viewport">@ {{ viewport.anchor_lid }}</span>
-    </header>
+    <TopBar
+      :chapter-title="chapterTitle"
+      :progress-pct="progressPct"
+      :anchor-lid="viewport?.anchor_lid ?? null"
+      :selected-lid="selectedLid"
+      :debug-open="debugOpen"
+      @scroll="doScroll"
+      @highlight="doHighlight"
+      @note="doNote"
+      @new-chat="newChat"
+      @toggle-debug="debugOpen = !debugOpen"
+    />
 
     <p v-if="banner" class="banner">{{ banner }}</p>
 
-    <div class="body">
-      <!-- 阅读区:连续正文(LID 隐形,段落承 data-lid 作隐形锚) -->
-      <main class="reader">
-        <div class="controls">
-          <button @click="doScroll(-3)">▲ 上翻</button>
-          <button @click="doScroll(3)">▼ 下翻</button>
-          <input
-            v-model="gotoInput"
-            placeholder="跳转 LID(如 11.18.4)"
-            @keyup.enter="doGoto(gotoInput)"
-          />
-          <button @click="doGoto(gotoInput)">跳转</button>
-          <span class="sel">选中: {{ selectedLid ?? "—" }}</span>
-          <button :disabled="!selectedLid" @click="doHighlight">🖍 高亮</button>
-          <button :disabled="!selectedLid" @click="doNote">📝 笔记</button>
-        </div>
+    <div class="workspace-grid">
+      <LeftRail
+        v-model:goto-input="gotoInput"
+        :progress-pct="progressPct"
+        :anchor-lid="viewport?.anchor_lid ?? null"
+        :selected-lid="selectedLid"
+        :leaf-count="leafOrder.length"
+        :debug-open="debugOpen"
+        @goto="doGoto"
+      />
 
-        <article class="prose" @mouseup="onProseMouseUp">
-          <div v-for="seg in segments" :key="seg.lid" class="seg">
-            <!-- 普通段落连续渲染;asset 叶子按 ManifestNode.kind 分派,仍保留 data-lid 隐形锚。 -->
-            <p
-              v-if="!isAsset(seg)"
-              :data-lid="seg.lid"
-              :class="{
-                anchor: seg.lid === viewport?.anchor_lid,
-                selected: seg.lid === selectedLid,
-                hl: isHighlighted(seg.lid),
-              }"
-              @click="selectedLid = seg.lid"
-              v-html="renderSeg(seg)"
-            ></p>
-            <section
-              v-else
-              :data-lid="seg.lid"
-              class="asset-block"
-              :class="[`asset-${seg.kind}`, {
-                anchor: seg.lid === viewport?.anchor_lid,
-                selected: seg.lid === selectedLid,
-                hl: isHighlighted(seg.lid),
-              }]"
-              @click="selectedLid = seg.lid"
-            >
-              <div class="asset-head">
-                <span>{{ seg.kind }}</span>
-                <button class="asset-jump" title="选中该 LID" @click.stop="selectedLid = seg.lid">定位</button>
-              </div>
-              <pre v-if="seg.kind === 'code'" class="asset-source asset-code"><code v-html="renderSeg(seg)"></code></pre>
-              <pre v-else-if="seg.kind === 'table'" class="asset-source asset-table" v-html="renderSeg(seg)"></pre>
-              <figure v-else-if="seg.kind === 'image'" class="asset-image-figure">
-                <div class="image-preview">
-                  <span>image</span>
-                  <strong>{{ imageMeta(seg.text)?.alt || '未命名图片' }}</strong>
-                  <code>{{ imageMeta(seg.text)?.src || 'src unavailable' }}</code>
-                </div>
-                <figcaption>原文</figcaption>
-                <pre class="asset-source" v-html="renderSeg(seg)"></pre>
-              </figure>
-              <div v-else-if="seg.kind === 'formula'" class="asset-formula-body">
-                <pre class="asset-source formula-source" v-html="renderSeg(seg)"></pre>
-                <div v-if="seg.formula" class="formula-profile">
-                  <p class="formula-meaning">{{ seg.formula.composition.meaning }}</p>
-                  <div v-if="seg.formula.parameters.length" class="formula-section">
-                    <h4>参数</h4>
-                    <dl>
-                      <template v-for="p in seg.formula.parameters" :key="p.symbol">
-                        <dt>{{ p.symbol }}<span v-if="p.label"> · {{ p.label }}</span></dt>
-                        <dd>
-                          {{ p.meaning }}
-                          <span v-if="p.unit"> · unit: {{ p.unit }}</span>
-                          <span v-if="p.domain"> · domain: {{ p.domain }}</span>
-                        </dd>
-                      </template>
-                    </dl>
-                  </div>
-                  <div v-if="seg.formula.context_links.length" class="formula-section">
-                    <h4>上下文关系</h4>
-                    <ul>
-                      <li v-for="link in seg.formula.context_links" :key="`${link.target_lid}:${link.relation}`">
-                        <strong>{{ link.relation }}</strong> {{ link.description }}
-                      </li>
-                    </ul>
-                  </div>
-                </div>
-                <p v-else class="formula-empty">未找到公式语义剖面。</p>
-              </div>
-            </section>
-            <!-- 高亮卡:该段全部高亮,删除 / 改范围(移除后重选)。 -->
-            <div v-for="h in highlightsOf(seg.lid)" :key="h.mem_id" class="hl-card">
-              <span class="hl-ex">🖍 {{ hlExcerpt(h) }}</span>
-              <span class="hl-actions">
-                <button class="note-btn" title="改范围(移除后重选)" @click="modifyHighlight(h)">✎ 改</button>
-                <button class="note-btn del" title="删除高亮" @click="deleteHighlight(h)">🗑</button>
-              </span>
-            </div>
-            <!-- 笔记卡:渲染 Markdown + LaTeX,带编辑/删除。 -->
-            <div v-for="note in notesOf(seg.lid)" :key="note.mem_id" class="note-card">
-              <div class="note-md md" v-html="renderMarkdown(note.content)"></div>
-              <div class="note-actions">
-                <button class="note-btn" title="编辑" @click="openEditNote(note)">✎ 编辑</button>
-                <button class="note-btn del" title="删除" @click="deleteNote(note)">🗑 删除</button>
-              </div>
-            </div>
-          </div>
-          <p v-if="segments.length === 0" class="empty">
-            （无内容——确认 server 已加载真书目录并在 8787 监听）
-          </p>
-        </article>
-      </main>
+      <ReaderPane
+        :segments="segments"
+        :viewport-anchor="viewport?.anchor_lid ?? null"
+        :selected-lid="selectedLid"
+        :render-seg="renderSeg"
+        :render-markdown="renderMarkdown"
+        :is-asset="isAsset"
+        :is-highlighted="isHighlighted"
+        :highlights-of="highlightsOf"
+        :notes-of="notesOf"
+        :hl-excerpt="hlExcerpt"
+        :image-meta="imageMeta"
+        @select="selectedLid = $event"
+        @prose-mouse-up="onProseMouseUp"
+        @modify-highlight="modifyHighlight"
+        @delete-highlight="deleteHighlight"
+        @edit-note="openEditNote"
+        @delete-note="deleteNote"
+      />
 
-      <!-- agent 对话区(分屏右半)-->
-      <aside class="agent">
-        <div class="agent-head">
-          <h3>📚 书 agent</h3>
-          <button class="new-chat" @click="newChat">＋ 新对话</button>
-        </div>
-
-        <div class="transcript">
-          <div v-for="(turn, ti) in chat" :key="ti" class="turn">
-            <p class="u-msg">🧑 {{ turn.user }}</p>
-
-            <p v-if="turn.pending" class="pending">⏳ agent 思考中…</p>
-            <p v-else-if="turn.error" class="incomplete">{{ turn.error }}</p>
-
-            <div v-else-if="turn.outcome" class="a-msg">
-              <!-- agent 答案渲染 Markdown + LaTeX(v-html 安全:renderMarkdown 经 markdown-it html:false 转义)。 -->
-              <div
-                v-if="turn.outcome.answer"
-                class="ans-text md"
-                v-html="renderMarkdown(turn.outcome.answer)"
-              ></div>
-              <p v-else class="ans-text">(无回答)</p>
-              <p v-if="turn.outcome.incomplete" class="incomplete">
-                ⚠ 未尽({{ turn.outcome.warning ?? "incomplete" }})
-              </p>
-
-              <!-- 可撤销提议卡 -->
-              <div v-if="turn.outcome.effects.length" class="proposals">
-                <p class="prop-h">本回合改动(可撤销):</p>
-                <div v-for="(eff, ei) in turn.outcome.effects" :key="ei" class="proposal">
-                  <span class="prop-label">{{ effLabel(eff) }}</span>
-                  <template v-if="effState(ti, ei)">
-                    <span class="done">{{ effState(ti, ei) }}</span>
-                  </template>
-                  <template v-else>
-                    <button v-if="isGoto(eff)" @click="undoEffect(ti, ei, eff)">
-                      ↩ 返回 {{ gotoBack(eff) }}
-                    </button>
-                    <template v-else>
-                      <button @click="keepEffect(ti, ei, eff)">保留</button>
-                      <button class="undo" @click="undoEffect(ti, ei, eff)">撤销</button>
-                    </template>
-                  </template>
-                </div>
-              </div>
-
-              <!-- 查询踪迹(可折叠)-->
-              <div v-if="turn.outcome.trace.length" class="trace">
-                <button class="trace-toggle" @click="showTrace[ti] = !showTrace[ti]">
-                  🔍 查询踪迹（{{ turn.outcome.trace.length }} 步）{{ showTrace[ti] ? "▲" : "▼" }}
-                </button>
-                <ol v-if="showTrace[ti]">
-                  <li v-for="(t, i) in turn.outcome.trace" :key="i">
-                    <code>{{ t.tool }}</code>
-                    <span class="t-args">{{ t.args }}</span>
-                    <span class="t-res">→ {{ t.result_digest }}</span>
-                  </li>
-                </ol>
-              </div>
-
-              <!-- 凝练成笔记 / 丢弃 -->
-              <div class="distill" v-if="turn.outcome.answer">
-                <button v-if="!turn.distilled" @click="distill(turn)">✍ 凝练成笔记</button>
-                <span v-else class="done">已存为笔记</span>
-              </div>
-            </div>
-          </div>
-
-          <p v-if="chat.length === 0" class="empty">问这本书任何问题——agent 会检索、翻页、标注,所有动作可撤销。</p>
-        </div>
-
-        <div class="agent-input">
-          <textarea
-            v-model="agentInput"
-            rows="3"
-            placeholder="基于当前阅读位置问 agent…"
-            @keydown.ctrl.enter="sendAgent"
-          />
-          <button :disabled="sending || !agentInput.trim()" @click="sendAgent">
-            {{ sending ? "…" : "发送 (Ctrl+Enter)" }}
-          </button>
-        </div>
-      </aside>
+      <RightRail
+        v-model:agent-input="agentInput"
+        :chat="chat"
+        :sending="sending"
+        :show-trace="showTrace"
+        :render-markdown="renderMarkdown"
+        :eff-label="effLabel"
+        :eff-state="effState"
+        :is-goto="isGoto"
+        :goto-back="gotoBack"
+        @send-agent="sendAgent"
+        @new-chat="newChat"
+        @toggle-trace="toggleTrace"
+        @undo-effect="undoEffect"
+        @keep-effect="keepEffect"
+        @distill="distill"
+      />
     </div>
 
-    <!-- 段内自由高亮:选区浮动按钮(mousedown.prevent 防点击前清掉选区) -->
     <div
       v-if="hlPopover"
       class="hl-popover"
       :style="{ left: hlPopover.x + 'px', top: hlPopover.y - 40 + 'px' }"
     >
-      <button @mousedown.prevent="confirmHighlight">🖍 高亮选区</button>
+      <button @mousedown.prevent="confirmHighlight">Highlight selection</button>
     </div>
 
-    <!-- 笔记编辑器(模态 + 实时 MD/LaTeX 预览) -->
     <div v-if="noteEditor" class="note-modal" @click.self="cancelNote">
       <div class="note-dialog">
         <div class="nd-head">
-          <span>{{ noteEditor.memId ? "✎ 编辑笔记" : "📝 新建笔记" }} · {{ noteEditor.lid }}</span>
-          <button class="nd-close" title="关闭" @click="cancelNote">✕</button>
+          <span>{{ noteEditor.memId ? "Edit note" : "New note" }} · {{ noteEditor.lid }}</span>
+          <button class="nd-close" title="关闭" @click="cancelNote">×</button>
         </div>
         <div class="nd-body">
           <textarea
             v-model="noteEditor.content"
             class="nd-input"
-            placeholder="支持 Markdown 与 LaTeX：**粗体**、- 列表、$E=mc^2$、$$\int$$ …"
+            placeholder="Markdown and LaTeX supported: **bold**, - lists, $E=mc^2$ …"
             @keydown.ctrl.enter="saveNote"
           ></textarea>
           <div class="nd-preview md" v-html="notePreview"></div>
         </div>
         <div class="nd-foot">
-          <span class="nd-hint">Ctrl+Enter 保存 · Markdown/LaTeX 实时预览</span>
+          <span class="nd-hint">Ctrl+Enter saves · Markdown/LaTeX preview</span>
           <span class="nd-actions">
-            <button @click="cancelNote">取消</button>
-            <button class="primary" :disabled="!noteEditor.content.trim()" @click="saveNote">保存</button>
+            <button @click="cancelNote">Cancel</button>
+            <button class="primary" :disabled="!noteEditor.content.trim()" @click="saveNote">Save</button>
           </span>
         </div>
       </div>
     </div>
   </div>
 </template>
-
 <style scoped>
 .agent {
   /* 固定宽侧栏:flex 0 0 不随内容增长。修 S10g 回归——面板 class 从 .qa 改 .agent 时丢了 width,
@@ -859,3 +727,5 @@ async function newChat() {
   border-color: var(--accent);
 }
 </style>
+
+
