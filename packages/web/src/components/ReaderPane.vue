@@ -1,4 +1,4 @@
-﻿<script setup lang="ts">
+<script setup lang="ts">
 import type { FormulaSemantics, MemoryRecord } from "../api";
 import type { Manifest } from "../api";
 
@@ -14,7 +14,7 @@ const props = defineProps<{
   segments: Segment[];
   viewportAnchor: string | null;
   selectedLid: string | null;
-  renderSeg: (seg: { lid: string; text: string }) => string;
+  renderSeg: (seg: Segment) => string;
   renderMarkdown: (source: string) => string;
   isAsset: (seg: Segment) => boolean;
   isHighlighted: (lid: string) => boolean;
@@ -46,6 +46,7 @@ const emit = defineEmits<{
               anchor: seg.lid === props.viewportAnchor,
               selected: seg.lid === props.selectedLid,
               hl: props.isHighlighted(seg.lid),
+              ['heading-' + seg.kind]: seg.kind === 'chapter' || seg.kind === 'section',
             }"
             @click="emit('select', seg.lid)"
             v-html="props.renderSeg(seg)"

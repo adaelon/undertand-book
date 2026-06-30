@@ -1,4 +1,4 @@
-﻿<script setup lang="ts">
+<script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
 import { api, ApiError } from "./api";
 import type { AgentEffect, FormulaSemantics, MemoryRecord, OuterOutcome, TraceStep, Viewport } from "./api";
@@ -91,12 +91,36 @@ function escapeHtml(s: string): string {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
 }
+
+function stripMarkdownHeadingLine(line: string): string {
+  return line.replace(/^\s{0,3}#{1,6}[ \t]+(.+?)\s*#*\s*$/, "$1");
+}
+
+function displayText(seg: { text: string; kind?: NodeKind }): { text: string; offset: number } {
+  if (seg.kind !== "chapter" && seg.kind !== "section") return { text: seg.text, offset: 0 };
+  const match = /^(\s{0,3})(#{1,6})([ \t]+)([\s\S]*)$/.exec(seg.text);
+  if (!match) return { text: seg.text, offset: 0 };
+  const offset = match[1].length + match[2].length + match[3].length;
+  return { text: match[4].replace(/[ \t]+#+\s*$/, "").trimEnd(), offset };
+}
+
+function clampRange(n: number, max: number): number {
+  return Math.max(0, Math.min(max, n));
+}
+
 // 段正文渲染:把段内 range 高亮包成 <mark>(合并重叠区间),其余文本转义防 XSS `[ADR-0031]`。
-function renderSeg(seg: { lid: string; text: string }): string {
+// chapter/section 的 Markdown 标题符号只在显示层剥掉,不改 book.text 原文与 LID 锚点。
+function renderSeg(seg: Segment): string {
+  const display = displayText(seg);
   const hls = highlightsOf(seg.lid).filter((h) => h.range);
-  if (hls.length === 0) return escapeHtml(seg.text);
+  if (hls.length === 0) return escapeHtml(display.text);
   const ranges = hls
-    .map((h) => [h.range!.start, h.range!.end] as [number, number])
+    .map((h) => {
+      const start = clampRange(h.range!.start - display.offset, display.text.length);
+      const end = clampRange(h.range!.end - display.offset, display.text.length);
+      return [start, end] as [number, number];
+    })
+    .filter(([start, end]) => end > start)
     .sort((a, b) => a[0] - b[0]);
   const merged: [number, number][] = [];
   for (const [s, e] of ranges) {
@@ -104,7 +128,7 @@ function renderSeg(seg: { lid: string; text: string }): string {
     if (last && s <= last[1]) last[1] = Math.max(last[1], e);
     else merged.push([s, e]);
   }
-  const t = seg.text;
+  const t = display.text;
   let html = "";
   let cur = 0;
   for (const [s, e] of merged) {
@@ -188,7 +212,7 @@ function firstTitleLine(text: string, lid: string): string {
     .split("\n")
     .map((s) => s.trim())
     .find(Boolean);
-  return (line ?? lid).slice(0, 80);
+  return (line ? stripMarkdownHeadingLine(line) : lid).slice(0, 80);
 }
 function buildOutline(tree: ManifestNode[]): OutlineItem[] {
   return tree
@@ -825,4 +849,3 @@ async function newChat() {
   border-color: var(--accent);
 }
 </style>
-
