@@ -136,25 +136,59 @@ body {
   border-radius: 8px;
   font-size: 0.86rem;
 }
-.outline-placeholder {
-  display: flex;
+.outline-search {
+  width: 100%;
+}
+.outline-section {
+  min-height: 0;
+}
+.outline-list {
+  display: grid;
+  gap: 0.1rem;
+  max-height: min(58vh, 38rem);
+  overflow-y: auto;
+  padding-right: 0.2rem;
+}
+.outline-item {
+  width: 100%;
+  min-height: 32px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
   align-items: center;
   gap: 0.45rem;
-  min-height: 32px;
-  padding: 0.35rem 0.5rem;
+  padding: 0.35rem 0.45rem;
+  border: 0;
   border-radius: 6px;
+  background: transparent;
+  color: var(--steel);
+  text-align: left;
+  font-size: 0.84rem;
+}
+.outline-item.active {
   color: var(--ink);
   background: var(--surface);
-  font-size: 0.88rem;
+  font-weight: 600;
 }
-.dot {
+.outline-item.active::before {
+  content: "";
   width: 7px;
   height: 7px;
   border-radius: 999px;
-  background: var(--muted);
-}
-.dot.active {
   background: var(--brand-green);
+}
+.outline-item:not(.active)::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+}
+.outline-kind {
+  display: none;
+}
+.outline-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .rail-muted {
   margin: 0.45rem 0 0;
@@ -502,11 +536,161 @@ input:focus {
   border-color: var(--brand-green);
 }
 
-@media (max-width: 1100px) {
+
+.prose .seg {
+  position: relative;
+}
+.block-actions {
+  display: flex;
+  gap: 0.4rem;
+  margin: -0.45rem 0 0.9rem;
+  padding-left: 0.15rem;
+}
+.block-actions button {
+  padding: 0.18rem 0.55rem;
+  color: var(--steel);
+  background: var(--canvas);
+  border-color: var(--hairline-soft);
+  font-size: 0.78rem;
+}
+.asset-actions {
+  margin: 0;
+  padding: 0.5rem 0.7rem;
+  border-top: 1px solid var(--hairline-soft);
+  background: var(--surface-soft);
+}
+@media (max-width: 1023px) {
+  .app {
+    height: auto;
+    min-height: 100vh;
+  }
+  .topbar {
+    position: sticky;
+    top: 0;
+    z-index: 20;
+  }
   .workspace-grid {
-    grid-template-columns: 220px minmax(0, 1fr) 320px;
+    min-height: auto;
+    grid-template-columns: 240px minmax(0, 1fr);
+    grid-template-areas:
+      "left reader"
+      "right right";
+  }
+  .left-rail {
+    grid-area: left;
+    max-height: calc(100vh - 56px);
+    position: sticky;
+    top: 56px;
+  }
+  .reader-pane {
+    grid-area: reader;
+    min-height: calc(100vh - 56px);
+  }
+  .right-rail {
+    grid-area: right;
+    min-height: 28rem;
+    max-height: none;
+    border-left: 0;
+    border-top: 1px solid var(--hairline);
+  }
+  .prose {
+    width: min(720px, calc(100% - 2.5rem));
+    padding-top: 1.75rem;
   }
   .topbar-actions .ghost-pill:not(.active) {
     display: none;
   }
 }
+
+@media (max-width: 767px) {
+  body {
+    overflow-x: hidden;
+  }
+  .topbar {
+    height: auto;
+    min-height: 56px;
+    align-items: flex-start;
+    flex-wrap: wrap;
+    padding: 0.55rem 0.75rem;
+  }
+  .topbar-brand {
+    width: 100%;
+  }
+  .topbar-actions {
+    width: 100%;
+    justify-content: space-between;
+  }
+  .icon-pill {
+    width: 44px;
+    height: 44px;
+  }
+  button {
+    min-height: 40px;
+  }
+  input,
+  textarea {
+    min-height: 44px;
+  }
+  .workspace-grid {
+    display: block;
+  }
+  .left-rail {
+    position: static;
+    max-height: none;
+    border-right: 0;
+    border-bottom: 1px solid var(--hairline);
+    padding: 0.8rem 0.75rem;
+  }
+  .outline-list {
+    max-height: 14rem;
+  }
+  .outline-item {
+    min-height: 44px;
+  }
+  .rail-section {
+    margin-bottom: 0.9rem;
+  }
+  .reader-pane {
+    min-height: auto;
+  }
+  .prose {
+    width: calc(100% - 1.5rem);
+    padding: 1.25rem 0 2.5rem;
+    font-size: 1rem;
+  }
+  .prose p.anchor {
+    margin-left: -0.55rem;
+    padding-left: 0.5rem;
+  }
+  .asset-source,
+  .md pre {
+    font-size: 0.82rem;
+  }
+  .hl-card {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .hl-ex {
+    width: 100%;
+    white-space: normal;
+  }
+  .block-actions {
+    flex-wrap: wrap;
+    margin-top: -0.25rem;
+  }
+  .right-rail {
+    min-height: 32rem;
+    border-top: 1px solid var(--hairline);
+  }
+  .context-tabs {
+    position: sticky;
+    top: 0;
+    z-index: 5;
+    background: var(--canvas);
+  }
+  .tab {
+    min-height: 44px;
+    font-size: 0.78rem;
+  }
+}
+

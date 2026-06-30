@@ -26,6 +26,8 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: "select", lid: string): void;
   (e: "prose-mouse-up"): void;
+  (e: "highlight-block", lid: string): void;
+  (e: "note-block", lid: string): void;
   (e: "modify-highlight", rec: MemoryRecord): void;
   (e: "delete-highlight", rec: MemoryRecord): void;
   (e: "edit-note", rec: MemoryRecord): void;
@@ -37,17 +39,23 @@ const emit = defineEmits<{
   <main class="reader-pane">
     <article class="prose" @mouseup="emit('prose-mouse-up')">
       <div v-for="seg in props.segments" :key="seg.lid" class="seg">
-        <p
-          v-if="!props.isAsset(seg)"
-          :data-lid="seg.lid"
-          :class="{
-            anchor: seg.lid === props.viewportAnchor,
-            selected: seg.lid === props.selectedLid,
-            hl: props.isHighlighted(seg.lid),
-          }"
-          @click="emit('select', seg.lid)"
-          v-html="props.renderSeg(seg)"
-        ></p>
+        <template v-if="!props.isAsset(seg)">
+          <p
+            :data-lid="seg.lid"
+            :class="{
+              anchor: seg.lid === props.viewportAnchor,
+              selected: seg.lid === props.selectedLid,
+              hl: props.isHighlighted(seg.lid),
+            }"
+            @click="emit('select', seg.lid)"
+            v-html="props.renderSeg(seg)"
+          ></p>
+          <div v-if="seg.lid === props.selectedLid" class="block-actions">
+            <button @click="emit('highlight-block', seg.lid)">Highlight block</button>
+            <button @click="emit('note-block', seg.lid)">Note</button>
+          </div>
+        </template>
+
         <section
           v-else
           :data-lid="seg.lid"
@@ -101,6 +109,10 @@ const emit = defineEmits<{
               </div>
             </div>
             <p v-else class="formula-empty">No formula profile found.</p>
+          </div>
+          <div v-if="seg.lid === props.selectedLid" class="block-actions asset-actions">
+            <button @click.stop="emit('highlight-block', seg.lid)">Highlight block</button>
+            <button @click.stop="emit('note-block', seg.lid)">Note</button>
           </div>
         </section>
 

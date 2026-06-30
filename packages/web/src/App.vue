@@ -1,7 +1,7 @@
 ﻿<script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
 import { api, ApiError } from "./api";
-import type { AgentEffect, FormulaSemantics, MemoryRecord, OuterOutcome, Viewport } from "./api";
+import type { AgentEffect, FormulaSemantics, MemoryRecord, OuterOutcome, TraceStep, Viewport } from "./api";
 import { renderMarkdown } from "./md";
 import TopBar from "./components/TopBar.vue";
 import LeftRail from "./components/LeftRail.vue";
@@ -9,10 +9,19 @@ import ReaderPane from "./components/ReaderPane.vue";
 import RightRail from "./components/RightRail.vue";
 
 type NodeKind = import("./api").Manifest["tree"][number]["kind"];
+type ManifestNode = import("./api").Manifest["tree"][number];
 
+export interface OutlineItem {
+  lid: string;
+  kind: NodeKind;
+  depth: number;
+  title: string;
+}
 // ── 阅读区会话态 ──
 const leafOrder = ref<string[]>([]); // 全书叶 LID 序(读位感分母 + 进度)
 const kindByLid = ref<Map<string, NodeKind>>(new Map());
+const outlineItems = ref<OutlineItem[]>([]);
+const titleByLid = ref<Map<string, string>>(new Map());
 const viewport = ref<Viewport | null>(null);
 interface Segment {
   lid: string;
@@ -27,6 +36,7 @@ const chapterTitle = ref<string>("");
 
 // goto 输入 + 错误条
 const gotoInput = ref("");
+const outlineSearch = ref("");
 const banner = ref<string>("");
 const debugOpen = ref(false);
 
@@ -43,6 +53,24 @@ const progressPct = computed(() => {
   if (idx < 0) return 0;
   return Math.round(((idx + 1) / leafOrder.value.length) * 100);
 });
+const selectedSegment = computed(() => segments.value.find((seg) => seg.lid === selectedLid.value) ?? null);
+const selectedFormula = computed(() => selectedSegment.value?.formula ?? null);
+const contextRecords = computed(() => {
+  const selected = selectedLid.value;
+  const visible = new Set(viewport.value?.visible_lids ?? []);
+  return annotations.value
+    .filter((r) => {
+      const lid = r.anchor.lid;
+      return !!lid && (lid === selected || visible.has(lid));
+    })
+    .sort((a, b) => {
+      const aSelected = a.anchor.lid === selected ? 0 : 1;
+      const bSelected = b.anchor.lid === selected ? 0 : 1;
+      return aSelected - bSelected || (a.anchor.lid ?? "").localeCompare(b.anchor.lid ?? "");
+    });
+});
+const contextNotes = computed(() => contextRecords.value.filter((r) => r.type === "note"));
+const contextHighlights = computed(() => contextRecords.value.filter((r) => r.type === "highlight"));
 
 // ── 标注:高亮(整段 / 段内 range)+ 笔记 ──
 // 整段高亮(range 缺省)→ <p> 背景;段内 range 高亮 → <mark>(见 renderSeg)`[ADR-0031]`。
@@ -109,9 +137,9 @@ async function modifyHighlight(rec: MemoryRecord) {
 // ── 笔记编辑器(内联模态 + 实时 MD/LaTeX 预览)替换 window.prompt ──
 const noteEditor = ref<{ lid: string; memId: string | null; layer: string; content: string } | null>(null);
 const notePreview = computed(() => renderMarkdown(noteEditor.value?.content ?? ""));
-function openNewNote() {
-  if (!selectedLid.value) return;
-  noteEditor.value = { lid: selectedLid.value, memId: null, layer: "long_term", content: "" };
+function openNewNote(lid = selectedLid.value, content = "") {
+  if (!lid) return;
+  noteEditor.value = { lid, memId: null, layer: "long_term", content };
 }
 function openEditNote(rec: MemoryRecord) {
   noteEditor.value = { lid: rec.anchor.lid ?? "", memId: rec.mem_id, layer: rec.layer, content: rec.content };
@@ -148,6 +176,44 @@ async function deleteNote(rec: MemoryRecord) {
 
 function kindOf(lid: string): NodeKind {
   return kindByLid.value.get(lid) ?? "paragraph";
+}
+function lidDepth(lid: string): number {
+  return lid.split(".").length - 1;
+}
+function fallbackTitle(lid: string): string {
+  return titleByLid.value.get(lid) ?? lid;
+}
+function firstTitleLine(text: string, lid: string): string {
+  const line = text
+    .split("\n")
+    .map((s) => s.trim())
+    .find(Boolean);
+  return (line ?? lid).slice(0, 80);
+}
+function buildOutline(tree: ManifestNode[]): OutlineItem[] {
+  return tree
+    .filter((n) => n.children.length > 0 || n.kind === "chapter" || n.kind === "section")
+    .map((n) => ({
+      lid: n.lid,
+      kind: n.kind,
+      depth: Math.min(lidDepth(n.lid), 4),
+      title: fallbackTitle(n.lid),
+    }));
+}
+async function loadOutlineTitles(tree: ManifestNode[]) {
+  const outline = buildOutline(tree);
+  outlineItems.value = outline;
+  await Promise.all(
+    outline.map(async (item) => {
+      try {
+        const t = await api.text(item.lid);
+        titleByLid.value.set(item.lid, firstTitleLine(t.text, item.lid));
+      } catch {
+        titleByLid.value.set(item.lid, item.lid);
+      }
+    }),
+  );
+  outlineItems.value = buildOutline(tree);
 }
 function isAsset(seg: Segment): boolean {
   return seg.kind === "code" || seg.kind === "table" || seg.kind === "image" || seg.kind === "formula";
@@ -207,6 +273,7 @@ async function init() {
     const m = await api.manifest();
     kindByLid.value = new Map(m.tree.map((n) => [n.lid, n.kind]));
     leafOrder.value = m.tree.filter((n) => n.children.length === 0).map((n) => n.lid);
+    void loadOutlineTitles(m.tree);
     const st = await api.state();
     await loadWindow(st.viewport);
   } catch (e) {
@@ -234,23 +301,24 @@ async function doGoto(lid: string) {
     fail(e);
   }
 }
-// 工具栏 🖍:整段高亮当前选中段(range 缺省);段内自由高亮走下面的选区 popover。
-async function doHighlight() {
-  if (!selectedLid.value) return;
+// block actions:整段/asset 高亮和笔记;段内自由高亮走下面的选区 toolbar。
+async function highlightBlock(lid: string) {
   try {
     banner.value = "";
-    await api.highlight(selectedLid.value);
+    selectedLid.value = lid;
+    await api.highlight(lid);
     await refreshAnnotations();
   } catch (e) {
     fail(e);
   }
 }
-function doNote() {
-  openNewNote();
+function noteBlock(lid: string) {
+  selectedLid.value = lid;
+  openNewNote(lid);
 }
 
 // ── 段内自由高亮:选区捕获 → 浮动按钮 → 精确 UTF-16 区间高亮 `[ADR-0031]` ──
-const hlPopover = ref<{ x: number; y: number; lid: string; start: number; end: number } | null>(null);
+const hlPopover = ref<{ x: number; y: number; lid: string; start: number; end: number; text: string } | null>(null);
 function onProseMouseUp() {
   const sel = window.getSelection();
   if (!sel || sel.rangeCount === 0 || sel.isCollapsed) {
@@ -284,7 +352,7 @@ function onProseMouseUp() {
     return;
   }
   const rect = range.getBoundingClientRect();
-  hlPopover.value = { x: rect.left + rect.width / 2, y: rect.top, lid, start, end };
+  hlPopover.value = { x: rect.left + rect.width / 2, y: rect.top, lid, start, end, text: range.toString() };
 }
 async function confirmHighlight() {
   const p = hlPopover.value;
@@ -299,6 +367,14 @@ async function confirmHighlight() {
     fail(e);
   }
 }
+function noteSelection() {
+  const p = hlPopover.value;
+  if (!p) return;
+  const quote = p.text.replace(/\s+/g, " ").trim();
+  hlPopover.value = null;
+  window.getSelection()?.removeAllRanges();
+  openNewNote(p.lid, quote ? `> ${quote}` : "");
+}
 
 // ── agent 对话区(外层 E agent 主入口)`[ADR-0030]` ──
 interface ChatTurn {
@@ -312,6 +388,13 @@ const chat = ref<ChatTurn[]>([]);
 const agentInput = ref("");
 const sending = ref(false);
 const showTrace = ref<Record<string, boolean>>({});
+const latestTrace = computed<TraceStep[]>(() => {
+  for (let i = chat.value.length - 1; i >= 0; i -= 1) {
+    const trace = chat.value[i].outcome?.trace;
+    if (trace?.length) return trace;
+  }
+  return [];
+});
 // 提议处置态:key=`${turnIdx}:${effIdx}` → "已保留" | "已撤销"。
 const handled = ref<Record<string, string>>({});
 function effKey(ti: number, ei: number) {
@@ -429,11 +512,8 @@ async function newChat() {
       :chapter-title="chapterTitle"
       :progress-pct="progressPct"
       :anchor-lid="viewport?.anchor_lid ?? null"
-      :selected-lid="selectedLid"
       :debug-open="debugOpen"
       @scroll="doScroll"
-      @highlight="doHighlight"
-      @note="doNote"
       @new-chat="newChat"
       @toggle-debug="debugOpen = !debugOpen"
     />
@@ -443,6 +523,8 @@ async function newChat() {
     <div class="workspace-grid">
       <LeftRail
         v-model:goto-input="gotoInput"
+        v-model:search-query="outlineSearch"
+        :outline-items="outlineItems"
         :progress-pct="progressPct"
         :anchor-lid="viewport?.anchor_lid ?? null"
         :selected-lid="selectedLid"
@@ -465,6 +547,8 @@ async function newChat() {
         :image-meta="imageMeta"
         @select="selectedLid = $event"
         @prose-mouse-up="onProseMouseUp"
+        @highlight-block="highlightBlock"
+        @note-block="noteBlock"
         @modify-highlight="modifyHighlight"
         @delete-highlight="deleteHighlight"
         @edit-note="openEditNote"
@@ -476,6 +560,11 @@ async function newChat() {
         :chat="chat"
         :sending="sending"
         :show-trace="showTrace"
+        :latest-trace="latestTrace"
+        :selected-lid="selectedLid"
+        :selected-formula="selectedFormula"
+        :context-notes="contextNotes"
+        :context-highlights="contextHighlights"
         :render-markdown="renderMarkdown"
         :eff-label="effLabel"
         :eff-state="effState"
@@ -495,7 +584,8 @@ async function newChat() {
       class="hl-popover"
       :style="{ left: hlPopover.x + 'px', top: hlPopover.y - 40 + 'px' }"
     >
-      <button @mousedown.prevent="confirmHighlight">Highlight selection</button>
+      <button @mousedown.prevent="confirmHighlight">Highlight</button>
+      <button @mousedown.prevent="noteSelection">Note</button>
     </div>
 
     <div v-if="noteEditor" class="note-modal" @click.self="cancelNote">
@@ -633,21 +723,29 @@ async function newChat() {
   box-sizing: border-box;
 }
 
-/* 段内高亮的选区浮动按钮 */
+/* 段内选区浮动工具条 */
 .hl-popover {
   position: fixed;
   transform: translateX(-50%);
   z-index: 50;
+  display: flex;
+  gap: 0.25rem;
+  padding: 0.25rem;
+  border-radius: 999px;
+  background: #1a1a1a;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
 }
 .hl-popover button {
-  background: #1a1a1a;
+  background: transparent;
   color: #fff;
   border: none;
-  border-radius: 5px;
-  padding: 0.3rem 0.7rem;
-  font-size: 0.85rem;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+  border-radius: 999px;
+  padding: 0.28rem 0.65rem;
+  font-size: 0.82rem;
   cursor: pointer;
+}
+.hl-popover button:hover {
+  background: rgba(255, 255, 255, 0.12);
 }
 
 /* 笔记编辑器模态 */
@@ -727,5 +825,4 @@ async function newChat() {
   border-color: var(--accent);
 }
 </style>
-
 
