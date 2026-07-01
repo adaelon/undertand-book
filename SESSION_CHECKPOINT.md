@@ -1,36 +1,33 @@
-﻿# SESSION_CHECKPOINT — 2026-06-30 21:44
+# SESSION_CHECKPOINT — 2026-07-01 00:00
 
 ## 新鲜度自检
-- 写入时最新 commit: `91b0c16` feat(web): complete Mintlify reader workspace
+- 写入时最新 commit: `e65aa64` feat(web): add open book switcher
 - 读入时请对比 `git log -3`,若不一致以 git log 为准。
 
 ## 当前在做什么
-S11 前端阅读器 Mintlify docs 工作台化已完成并提交: outline、context tabs、selection actions、responsive polish。
+S11 前端阅读器 Mintlify docs 工作台已完成;本轮补了 Markdown 标题清洗和当前会话切换书入口。
 
 ## 下一步(可直接接手)
-1. 浏览器打开 `http://127.0.0.1:8787/`,人工 smoke desktop/tablet/mobile 视口。
-2. 如继续前端 polish,从真实浏览器反馈建立新 A1 切片。
-3. 若进入下一阶段,先读 `docs/切片方案-切片1前端阅读器.md` 确认 S11 后续边界。
-4. 开始新代码切片前跑一次 `git status --short`,区分 untracked 参考文件与新改动。
-5. 提交前跑对应 deterministic 验证命令。
+1. 浏览器打开 `http://127.0.0.1:8787/`,smoke 当前书阅读区/outline 不显示 Markdown `#` 标题符号。
+2. 点击 TopBar `Open book`,输入 `.understand-book/quantification-essence`,确认 manifest/state 重载且 agent 对话被清空。
+3. 若继续前端 polish,先从真实浏览器反馈建立新 A1 切片。
+4. 提交前跑 `git status --short`,避免把 untracked 参考文件带入。
+5. 涉及前端跑 `pnpm -C packages/web build`;涉及 server 跑 `cargo test -p server`。
 
 ## 未提交 / 未完成
 - `SESSION_CHECKPOINT.md`: 本次刷新待提交。
-- 后台 server 正在运行: `http://127.0.0.1:8787/`。
-- in-app browser 不可用,未做真实浏览器自动化 smoke;S11 已做 typecheck/build 与 HTTP/API smoke。
-- 既有无关 untracked 保留未动: `.fluid/`, `agent交互书.md`, `docs/预购建流程.md`, `参考2.md`, `参考_discourse_prompt.md`, `参考_硅基天启：灭世之技术推演.md`, `参考pass2.md`。
+- 既有无关 untracked 保留未动: `.fluid/`, `agent交互书.md`, `docs/预购建流程.md`, `todo.md`, `参考2.md`, `参考_discourse_prompt.md`, `参考_硅基天启：灭世之技术推演.md`, `参考pass2.md`。
+- 未做真实浏览器自动化 smoke;已做 deterministic 验证。
 
 ## 冷启动读序
 按顺序读这些文件能还原当前上下文:
 1. `docs/切片方案-切片1前端阅读器.md` — §7 S11 方案与 S11a-S11e 顺序。
-2. `docs/代码链路.md` — 最新 S11b/S11c/S11d/S11e 账本。
+2. `docs/代码链路.md` — 最新 S11f/S11g 账本。
 3. `DESIGN-mintlify.md` — Mintlify tokens/组件/布局参考。
-4. `packages/web/src/App.vue` — 当前 S11 shell 状态与业务状态容器。
+4. `packages/web/src/App.vue` — 当前 reader shell 状态、标题清洗、切书入口。
 5. `packages/web/src/components/TopBar.vue`, `LeftRail.vue`, `ReaderPane.vue`, `RightRail.vue` — 当前组件边界。
-6. `packages/web/src/style.css` — Mintlify baseline、rail、actions、responsive 样式。
+6. `crates/server/src/lib.rs` — `/book/open` 切书端点与 server 路由状态。
 
 ## 本会话决策摘要
-- S11b outline 标题: manifest 无 title 字段,前端后台调用 `book.text(container_lid)` 取首个非空行缓存。
-- S11c tabs 数据源: RightRail 只持有 active tab UI 状态,Trace/Formula/Notes 均由 App 从现有 reader/agent/memory 状态派生。
-- S11d note selection: 后端 note 不引入 range,选中文本只作为预填引用内容,锚仍落在该 LID。
-- S11e responsive: <1024px 取消三栏,右 rail 下置;<768px 单列堆叠并放大触控目标。
+- S11f 标题显示:仅在前端显示层剥离 chapter/section Markdown `#` 前缀,不改 `book.text` 原文、LID 或 range 锚点。
+- S11g 切书入口:采用 `POST /book/open {dir}` 重新加载当前 server 会话的 Book,重建 Reader 并重置 agent messages;不做书库扫描、多书并发或系统文件选择器。
