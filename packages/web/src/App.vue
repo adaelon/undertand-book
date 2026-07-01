@@ -473,9 +473,16 @@ function selectionRanges(range: Range): SelectedRange[] {
     .filter((r) => r.lid && r.end > r.start);
 }
 
+function onSelectSeg(lid: string) {
+  selectedLid.value = lid;
+  sourceFocus.value = null;
+}
+
+
 function onProseMouseUp() {
   const sel = window.getSelection();
   if (!sel || sel.rangeCount === 0 || sel.isCollapsed) {
+    sourceFocus.value = null;
     hlPopover.value = null;
     return;
   }
@@ -756,7 +763,7 @@ async function openBook() {
         :image-meta="imageMeta"
         :scroll-restore-id="scrollRestoreId"
         :scroll-restore-direction="scrollRestoreDirection"
-        @select="selectedLid = $event"
+        @select="onSelectSeg"
         @prose-mouse-up="onProseMouseUp"
         @scroll-edge="onScrollEdge"
         @highlight-block="highlightBlock"
