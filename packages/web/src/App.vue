@@ -79,7 +79,7 @@ function fail(e: unknown) {
 
 // 读位感:anchor 在叶序中的位置 → 进度%;章节 = anchor 顶层段(LID 首段)。
 const progressPct = computed(() => {
-  const a = viewport.value?.anchor_lid;
+  const a = viewport.value?.top_lid;
   if (!a || leafOrder.value.length === 0) return 0;
   const idx = leafOrder.value.indexOf(a);
   if (idx < 0) return 0;
@@ -324,7 +324,7 @@ async function refreshAnnotations() {
 // 视口加载:逐 visible_lid 取真原文(连续正文),并刷新标注。
 async function loadWindow(vp: Viewport) {
   viewport.value = vp;
-  selectedLid.value = vp.anchor_lid;
+  selectedLid.value = vp.top_lid;
   const texts = await Promise.all(vp.visible_lids.map((lid) => api.text(lid)));
   const next = await Promise.all(
     texts.map(async (t) => {
@@ -334,7 +334,7 @@ async function loadWindow(vp: Viewport) {
   );
   segments.value = next;
   await refreshAnnotations();
-  await loadChapter(vp.anchor_lid);
+  await loadChapter(vp.top_lid);
 }
 
 // 阅读区与服务端 reader 同步(agent 可能改了视口 → 重新拉 state 渲染)。
@@ -570,7 +570,7 @@ async function sendAgent() {
   const msg = agentInput.value.trim();
   if (!msg) return;
   const draft = askDraft.value;
-  const questionAnchorLid = draft?.lid ?? viewport.value?.anchor_lid ?? null;
+  const questionAnchorLid = draft?.lid ?? viewport.value?.top_lid ?? null;
   const outbound = draft
     ? `引用原文 [LID: ${draft.lid}]:\n「${draft.quote}」\n\n我的问题:\n${msg}`
     : msg;
@@ -688,7 +688,7 @@ async function openBook() {
     <TopBar
       :chapter-title="chapterTitle"
       :progress-pct="progressPct"
-      :anchor-lid="viewport?.anchor_lid ?? null"
+      :anchor-lid="viewport?.top_lid ?? null"
       :debug-open="debugOpen"
       :left-rail-open="leftRailOpen"
       @scroll="doScroll"
@@ -707,7 +707,7 @@ async function openBook() {
         v-model:search-query="outlineSearch"
         :outline-items="outlineItems"
         :progress-pct="progressPct"
-        :anchor-lid="viewport?.anchor_lid ?? null"
+        :anchor-lid="viewport?.top_lid ?? null"
         :selected-lid="selectedLid"
         :leaf-count="leafOrder.length"
         :debug-open="debugOpen"

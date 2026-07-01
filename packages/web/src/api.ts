@@ -14,6 +14,9 @@ const BASE = "/api";
 /** reader.* 会话态(符 V3 §4.2),与 Rust `Viewport`/`ReaderState` 对齐(memory 类型未走 ts-rs,在此手定)。 */
 export interface Viewport {
   anchor_lid: string;
+  top_lid: string;
+  bottom_lid: string;
+  width: number;
   visible_lids: string[];
 }
 export interface ViewportEffect {
