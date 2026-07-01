@@ -10,12 +10,16 @@ use read_tools::{Book, ToolError};
 use serde::Serialize;
 
 /// 叶序滑动窗口半径(占位,实测回填 V3 §4.2「何时回头」):窗口 = anchor ± radius,最多 2*radius+1 叶。
-pub const DEFAULT_RADIUS: usize = 3;
+pub const DEFAULT_WIDTH: usize = 20;
+pub const DEFAULT_RADIUS: usize = DEFAULT_WIDTH;
 
 /// 视口(符 V3 §4.2 `{anchor_lid, visible_lids}`)。headless 下 = 叶序滑动窗口。
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct Viewport {
     pub anchor_lid: String,
+    pub top_lid: String,
+    pub bottom_lid: String,
+    pub width: usize,
     pub visible_lids: Vec<String>,
 }
 
@@ -54,16 +58,16 @@ pub struct Reader {
     /// 全书叶 LID,按物化路径序(lid_nodes 已是排序数组 `[ADR-0008]`)。
     leaf_lids: Vec<String>,
     /// 当前锚点在 leaf_lids 的下标。
-    anchor_idx: usize,
+    top_idx: usize,
     /// 滑动窗口半径。
-    radius: usize,
+    width: usize,
     /// 当前选区(最近 goto/note/highlight 的目标 LID)。
     selection: Option<String>,
 }
 
 impl Reader {
     /// 建阅读器:算叶序、锚点落书首(idx 0)。
-    pub fn new(book: &Book, radius: usize) -> Reader {
+    pub fn new(book: &Book, width: usize) -> Reader {
         let leaf_lids = book
             .base
             .lid_nodes
@@ -73,8 +77,8 @@ impl Reader {
             .collect();
         Reader {
             leaf_lids,
-            anchor_idx: 0,
-            radius,
+            top_idx: 0,
+            width: width.max(1),
             selection: None,
         }
     }
@@ -84,15 +88,38 @@ impl Reader {
         if self.leaf_lids.is_empty() {
             return Viewport {
                 anchor_lid: String::new(),
+                top_lid: String::new(),
+                bottom_lid: String::new(),
+                width: self.width,
                 visible_lids: Vec::new(),
             };
         }
-        let lo = self.anchor_idx.saturating_sub(self.radius);
-        let hi = (self.anchor_idx + self.radius + 1).min(self.leaf_lids.len());
+        let lo = self.top_idx.min(self.leaf_lids.len() - 1);
+        let hi = (lo + self.width).min(self.leaf_lids.len());
+        let anchor_idx = lo + (hi - lo - 1) / 2;
         Viewport {
-            anchor_lid: self.leaf_lids[self.anchor_idx].clone(),
+            anchor_lid: self.leaf_lids[anchor_idx].clone(),
+            top_lid: self.leaf_lids[lo].clone(),
+            bottom_lid: self.leaf_lids[hi - 1].clone(),
+            width: self.width,
             visible_lids: self.leaf_lids[lo..hi].to_vec(),
         }
+    }
+
+    fn max_top_idx(&self) -> usize {
+        self.leaf_lids.len().saturating_sub(self.width)
+    }
+
+    fn mark_visible_read(
+        &self,
+        book: &Book,
+        store: &mut MemoryStore,
+        now: &str,
+    ) -> Result<(), ToolError> {
+        for lid in &self.viewport().visible_lids {
+            store.mark_read(&book.base.book_id, lid, now)?;
+        }
+        Ok(())
     }
 
     /// `reader.gotoLid(lid)`:翻到某 LID。叶 → 锚到该叶;容器 → 锚到子树第一个叶;
@@ -117,11 +144,9 @@ impl Reader {
             .or_else(|| self.leaf_lids.iter().position(|l| l.starts_with(&prefix)));
         match idx {
             Some(i) => {
-                self.anchor_idx = i;
+                self.top_idx = i.min(self.max_top_idx());
                 self.selection = Some(lid.to_string());
-                // 记账:翻到的 anchor **真叶**记入已读账本 `[ADR-0038]`(goto 容器→记子树首叶,
-                // 非传入容器 lid;selection 仍记传入 lid)。持久写,失败诚实传播不静默。
-                store.mark_read(&book.base.book_id, &self.leaf_lids[i], now)?;
+                self.mark_visible_read(book, store, now)?;
                 Ok(ViewportEffect {
                     ok: true,
                     viewport: self.viewport(),
@@ -146,11 +171,11 @@ impl Reader {
         now: &str,
     ) -> Result<ViewportEffect, ToolError> {
         if !self.leaf_lids.is_empty() {
-            let last = (self.leaf_lids.len() - 1) as i64;
-            let next = (self.anchor_idx as i64 + delta).clamp(0, last);
-            self.anchor_idx = next as usize;
-            self.selection = Some(self.leaf_lids[self.anchor_idx].clone());
-            store.mark_read(&book.base.book_id, &self.leaf_lids[self.anchor_idx], now)?;
+            let last = self.max_top_idx() as i64;
+            let next = (self.top_idx as i64 + delta).clamp(0, last);
+            self.top_idx = next as usize;
+            self.selection = Some(self.leaf_lids[self.top_idx].clone());
+            self.mark_visible_read(book, store, now)?;
         }
         Ok(ViewportEffect {
             ok: true,
@@ -342,9 +367,11 @@ mod tests {
         let b = book_n_leaves(10);
         let r = Reader::new(&b, 3);
         let vp = r.viewport();
-        assert_eq!(vp.anchor_lid, "1.1");
-        // anchor idx 0,左 saturate,右取 3 → [1.1,1.2,1.3,1.4]
-        assert_eq!(vp.visible_lids, vec!["1.1", "1.2", "1.3", "1.4"]);
+        assert_eq!(vp.top_lid, "1.1");
+        assert_eq!(vp.bottom_lid, "1.3");
+        assert_eq!(vp.anchor_lid, "1.2");
+        assert_eq!(vp.width, 3);
+        assert_eq!(vp.visible_lids, vec!["1.1", "1.2", "1.3"]);
     }
 
     // scroll:沿叶序移动锚点,两端 clamp。
@@ -352,12 +379,18 @@ mod tests {
     fn scroll_moves_anchor_clamped() {
         let b = book_n_leaves(10);
         let mut store = MemoryStore::open(tmp("scroll")).unwrap();
-        let mut r = Reader::new(&b, 2);
-        assert_eq!(r.scroll(&b, &mut store, 5, "t0").unwrap().viewport.anchor_lid, "1.6");
-        // 居中窗口:1.6 ± 2 → [1.4..1.8]
-        assert_eq!(r.viewport().visible_lids, vec!["1.4", "1.5", "1.6", "1.7", "1.8"]);
-        assert_eq!(r.scroll(&b, &mut store, 100, "t1").unwrap().viewport.anchor_lid, "1.10"); // clamp 到末叶
-        assert_eq!(r.scroll(&b, &mut store, -100, "t2").unwrap().viewport.anchor_lid, "1.1"); // clamp 到首叶
+        let mut r = Reader::new(&b, 3);
+        let moved = r.scroll(&b, &mut store, 5, "t0").unwrap().viewport;
+        assert_eq!(moved.top_lid, "1.6");
+        assert_eq!(moved.anchor_lid, "1.7");
+        assert_eq!(moved.bottom_lid, "1.8");
+        assert_eq!(moved.visible_lids, vec!["1.6", "1.7", "1.8"]);
+        let end = r.scroll(&b, &mut store, 100, "t1").unwrap().viewport;
+        assert_eq!(end.top_lid, "1.8");
+        assert_eq!(end.bottom_lid, "1.10");
+        let start = r.scroll(&b, &mut store, -100, "t2").unwrap().viewport;
+        assert_eq!(start.top_lid, "1.1");
+        assert_eq!(start.bottom_lid, "1.3");
     }
 
     // goto 叶:锚到该叶 + 选区设为该 lid。
@@ -368,8 +401,10 @@ mod tests {
         let mut r = Reader::new(&b, 1);
         let eff = r.goto_lid(&b, &mut store, "1.5", "t0").unwrap();
         assert!(eff.ok);
+        assert_eq!(eff.viewport.top_lid, "1.5");
         assert_eq!(eff.viewport.anchor_lid, "1.5");
-        assert_eq!(eff.viewport.visible_lids, vec!["1.4", "1.5", "1.6"]);
+        assert_eq!(eff.viewport.bottom_lid, "1.5");
+        assert_eq!(eff.viewport.visible_lids, vec!["1.5"]);
         assert_eq!(r.state().selection.as_deref(), Some("1.5"));
     }
 
@@ -381,6 +416,7 @@ mod tests {
         let mut r = Reader::new(&b, 1);
         r.scroll(&b, &mut store, 5, "t0").unwrap(); // 先移开
         let eff = r.goto_lid(&b, &mut store, "1", "t1").unwrap();
+        assert_eq!(eff.viewport.top_lid, "1.1");
         assert_eq!(eff.viewport.anchor_lid, "1.1");
         assert_eq!(r.state().selection.as_deref(), Some("1")); // 选区记容器 lid
     }
@@ -495,15 +531,13 @@ mod tests {
     fn goto_scroll_record_read_ledger() {
         let b = book_n_leaves(10);
         let mut store = MemoryStore::open(tmp("ledger")).unwrap();
-        let mut r = Reader::new(&b, 2);
+        let mut r = Reader::new(&b, 3);
         r.goto_lid(&b, &mut store, "1.5", "t0").unwrap(); // 读 1.5
         r.scroll(&b, &mut store, 2, "t1").unwrap(); // 落点 1.7
         r.goto_lid(&b, &mut store, "1", "t2").unwrap(); // 容器 → 记真叶 1.1
         let read = store.read_lids("bookR");
-        // 触达序:1.5(t0) → 1.7(t1) → 1.1(t2)。
-        assert_eq!(read, vec!["1.5", "1.7", "1.1"]);
-        // 没翻到的不在已读集;记的是真叶,非传入容器 "1"。
-        assert!(!read.contains(&"1.9".to_string()));
+        assert_eq!(read, vec!["1.5", "1.6", "1.7", "1.9", "1.8", "1.1", "1.3", "1.2"]);
+        assert!(!read.contains(&"1.10".to_string()));
         assert!(!read.contains(&"1".to_string()));
     }
 }
