@@ -1,37 +1,32 @@
-# SESSION_CHECKPOINT - 2026-07-01 00:00
+# SESSION_CHECKPOINT - 2026-07-01 21:05
 
 ## Freshness check
-- Commit at write time: `eeebc0a` feat(web): improve agent tool use and reader selection
+- Commit at write time: `27ebe84` docs: record continuous reader model plan
 - On read, compare with `git log -3`; if different, trust git log.
 
 ## What's in progress
-S11 front-end reader polish is in progress; latest slice S11q adds note source jump with temporary quote-or-block highlight.
+S12 continuous reader model is planned and ready to implement; next slice is S12a reader viewport interval semantics in `crates/reader`.
 
 ## Next steps (ready to hand off)
-1. Run `git diff -- packages/web/src/App.vue packages/web/src/components/ReaderPane.vue packages/web/src/components/RightRail.vue packages/web/src/style.css docs/代码链路.md SESSION_CHECKPOINT.md`.
-2. Browser-smoke note source buttons in ReaderPane and RightRail Notes tab: click source, confirm reader jumps to the source LID.
-3. In that smoke, confirm notes with leading Markdown blockquote highlight the quote, and notes without a quote highlight the whole source block.
-4. Before committing, run `git status --short` and stage only the S11q/checkpoint files, excluding unrelated untracked reference files.
-5. If more front-end polish is requested, open a new A1 slice from browser feedback before editing.
+1. Open `crates/reader/src/lib.rs` and change `Viewport` to include `top_lid`, `bottom_lid`, `width`, `visible_lids`, and `anchor_lid`.
+2. Replace `Reader { anchor_idx, radius }` with `top_idx` plus `width`, deriving `anchor_lid` from the interval midpoint.
+3. Rewrite `Reader::scroll` so `delta` moves `top_idx`, clamps to the leaf range, and marks every new `visible_lids` leaf as read.
+4. Rewrite `Reader::goto_lid` so a leaf or resolved container first leaf becomes `top_lid`.
+5. Update reader tests, then run `cargo test -p reader` and `cargo test -p server`.
 
 ## Uncommitted / unfinished
-- `SESSION_CHECKPOINT.md`: refreshed in this slice, uncommitted.
-- `docs/代码链路.md`: includes existing S11n-S11p entries plus new S11q entry, uncommitted.
-- `packages/web/src/App.vue`: S11q sourceFocus/focusSource path, uncommitted.
-- `packages/web/src/components/ReaderPane.vue`: note source emits `{lid, quote}`, uncommitted.
-- `packages/web/src/components/RightRail.vue`: Notes tab source emits `{lid, quote}`, uncommitted.
-- `packages/web/src/style.css`: `.source-focus-mark`, uncommitted.
-- Unrelated untracked files left untouched: `.fluid/`, `agent交互书.md`, `docs/预购建流程.md`, `packages/web/vite-dev.log`, `todo.md`, `参考2.md`, `参考_discourse_prompt.md`, `参考_硅基天启：灭世之技术推演.md`, `参考pass2.md`.
+- `SESSION_CHECKPOINT.md`: refreshed after S12 docs commit; pending checkpoint commit.
+- Unrelated untracked files left untouched: `.fluid/`, `agent交互书.md`, `docs/预购建流程.md`, `grill.md`, `packages/web/vite-dev.log`, `todo.md`, `参考2.md`, `参考_discourse_prompt.md`, `参考_硅基天启：灭世之技术推演.md`, `参考pass2.md`.
 
 ## Cold-start reading sequence
-1. `docs/切片方案-切片1前端阅读器.md` - S11 Mintlify docs workspace direction and S11a-S11e plan.
-2. `docs/代码链路.md` - latest S11h-S11q change trail.
-3. `DESIGN-mintlify.md` - Mintlify tokens/components/layout reference.
-4. `packages/web/src/App.vue` - reader shell, sourceFocus, note saving, selection and agent wiring.
-5. `packages/web/src/components/ReaderPane.vue` - reader note cards and source button boundary.
-6. `packages/web/src/components/RightRail.vue` - Agent/Trace/Formula/Notes tabs and note source boundary.
-7. `packages/web/src/style.css` - reader/note/source-focus styles.
+1. `docs/adr/0043-reader连续滚动视口-后端区间窗口-前端虚拟流-note-overlay.md` - frozen continuous reader decisions.
+2. `docs/切片方案-S12连续滚动阅读模型.md` - S12a-S12e implementation slices.
+3. `docs/代码链路.md` - current project change trail including S12 docs entry.
+4. `crates/reader/src/lib.rs` - current center-window reader implementation to replace in S12a.
+5. `crates/server/src/lib.rs` - server projection of reader state and scroll/goto endpoints.
+6. `packages/web/src/api.ts` - frontend Viewport DTO to update in S12b.
+7. `packages/web/src/App.vue` and `packages/web/src/components/TopBar.vue` - current progress and page-button wiring.
 
 ## Decisions made this session
-- S11q source focus: note source buttons carry `{lid, quote}`; App jumps via existing `reader.goto`, then temporarily highlights the quote if found, otherwise the source block.
-- S11q verification: `pnpm -C packages/web typecheck`, `pnpm -C packages/web build`, and `git diff --check` passed; only LF/CRLF warnings appeared.
+- ADR-0043 continuous reader model: viewport becomes a top..bottom interval, scroll moves top, goto lands target at top, progress uses top, notes move toward overlay, and TopBar page buttons are removed.
+- S12 implementation plan: S12a reader interval semantics, S12b DTO/progress, S12c virtual buffer, S12d note overlay, S12e remove page buttons plus keyboard fallback.
