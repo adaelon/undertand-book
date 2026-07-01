@@ -33,6 +33,7 @@ const segments = ref<Segment[]>([]); // 视口内连续正文(LID 隐形)
 const annotations = ref<MemoryRecord[]>([]); // 当前书全部标注(客户端按 lid 过滤)
 const selectedLid = ref<string | null>(null);
 const chapterTitle = ref<string>("");
+const sourceFocus = ref<{ lid: string; quote: string | null } | null>(null);
 
 // goto 输入 + 错误条
 const gotoInput = ref("");
@@ -143,20 +144,45 @@ function clampRange(n: number, max: number): number {
   return Math.max(0, Math.min(max, n));
 }
 
+function leadingQuote(content: string): string | null {
+  const quoteLines: string[] = [];
+  for (const line of content.split("\\n")) {
+    if (line.startsWith(">")) quoteLines.push(line.replace(/^>\\s?/, ""));
+    else if (quoteLines.length > 0 && line.trim() === "") break;
+    else if (quoteLines.length > 0) break;
+  }
+  const quote = quoteLines.join(" ").replace(/\\s+/g, " ").trim();
+  return quote || null;
+}
+
+function sourceFocusRange(text: string, focus: { lid: string; quote: string | null } | null, lid: string): [number, number] | null {
+  if (!focus || focus.lid !== lid) return null;
+  if (!focus.quote) return [0, text.length];
+  const exact = text.indexOf(focus.quote);
+  if (exact >= 0) return [exact, exact + focus.quote.length];
+  const normalizedQuote = focus.quote.replace(/\s+/g, " ").trim();
+  const compact = text.replace(/\s+/g, " ");
+  const approx = compact.indexOf(normalizedQuote);
+  if (approx < 0) return [0, text.length];
+  return [0, text.length];
+}
+
 // 段正文渲染:把段内 range 高亮包成 <mark>(合并重叠区间),其余文本转义防 XSS `[ADR-0031]`。
 // chapter/section 的 Markdown 标题符号只在显示层剥掉,不改 book.text 原文与 LID 锚点。
 function renderSeg(seg: Segment): string {
   const display = displayText(seg);
   const hls = highlightsOf(seg.lid).filter((h) => h.range);
-  if (hls.length === 0) return renderInlineText(display.text);
+  const focusRange = sourceFocusRange(display.text, sourceFocus.value, seg.lid);
+  if (hls.length === 0 && !focusRange) return renderInlineText(display.text);
   const ranges = hls
     .map((h) => {
       const start = clampRange(h.range!.start - display.offset, display.text.length);
       const end = clampRange(h.range!.end - display.offset, display.text.length);
       return [start, end] as [number, number];
     })
-    .filter(([start, end]) => end > start)
-    .sort((a, b) => a[0] - b[0]);
+    .filter(([start, end]) => end > start);
+  if (focusRange) ranges.push(focusRange);
+  ranges.sort((a, b) => a[0] - b[0]);
   const merged: [number, number][] = [];
   for (const [s, e] of ranges) {
     const last = merged[merged.length - 1];
@@ -167,7 +193,8 @@ function renderSeg(seg: Segment): string {
   let html = "";
   let cur = 0;
   for (const [s, e] of merged) {
-    html += renderInlineText(t.slice(cur, s)) + `<mark class="hl-mark">${renderInlineText(t.slice(s, e))}</mark>`;
+    const cls = focusRange && s === focusRange[0] && e === focusRange[1] ? "hl-mark source-focus-mark" : "hl-mark";
+    html += renderInlineText(t.slice(cur, s)) + `<mark class="${cls}">${renderInlineText(t.slice(s, e))}</mark>`;
     cur = e;
   }
   return html + renderInlineText(t.slice(cur));
@@ -345,20 +372,25 @@ onMounted(init);
 async function doScroll(delta: number) {
   try {
     banner.value = "";
+    sourceFocus.value = null;
     await loadWindow((await api.scroll(delta)).viewport);
   } catch (e) {
     fail(e);
   }
 }
-async function doGoto(lid: string) {
+async function doGoto(lid: string, focusQuote?: string | null) {
   if (!lid) return;
   try {
     banner.value = "";
+    sourceFocus.value = focusQuote === undefined ? null : { lid, quote: focusQuote };
     await loadWindow((await api.goto(lid)).viewport);
     gotoInput.value = "";
   } catch (e) {
     fail(e);
   }
+}
+async function focusSource(source: { lid: string; quote: string | null }) {
+  await doGoto(source.lid, source.quote);
 }
 // block actions:整段/asset 高亮和笔记;段内自由高亮走下面的选区 toolbar。
 async function highlightBlock(lid: string) {
@@ -604,9 +636,11 @@ async function saveAgentSelection(turn: ChatTurn, text: string) {
   const anchor = turn.questionAnchorLid;
   const content = text.trim();
   if (!content || !anchor) return;
+  const sourceQuote = turn.questionQuote?.quote.replace(/\s+/g, " ").trim();
+  const noteContent = sourceQuote ? `> ${sourceQuote}\n\n${content}` : content;
   try {
     banner.value = "";
-    await api.save({ type: "note", anchor_lid: anchor, content, layer: "long_term" });
+    await api.save({ type: "note", anchor_lid: anchor, content: noteContent, layer: "long_term" });
     await refreshAnnotations();
   } catch (e) {
     fail(e);
@@ -704,6 +738,8 @@ async function openBook() {
         @prose-mouse-up="onProseMouseUp"
         @highlight-block="highlightBlock"
         @note-block="noteBlock"
+        @goto="doGoto"
+        @focus-source="focusSource"
         @modify-highlight="modifyHighlight"
         @delete-highlight="deleteHighlight"
         @edit-note="openEditNote"
@@ -737,6 +773,8 @@ async function openBook() {
         @send-agent="sendAgent"
         @new-chat="newChat"
         @clear-ask="clearAskDraft"
+        @goto="doGoto"
+        @focus-source="focusSource"
         @toggle-trace="toggleTrace"
         @undo-effect="undoEffect"
         @keep-effect="keepEffect"

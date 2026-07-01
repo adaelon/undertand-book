@@ -23,6 +23,32 @@ const props = defineProps<{
   hlExcerpt: (rec: MemoryRecord) => string;
   imageMeta: (text: string) => { alt: string; src: string } | null;
 }>();
+
+function compactText(value: string, max = 96): string {
+  const text = value.replace(/\s+/g, " ").trim();
+  return text.length > max ? `${text.slice(0, max)}...` : text;
+}
+function leadingQuote(content: string): string | null {
+  const lines = content.split("\n");
+  const quoteLines: string[] = [];
+  for (const line of lines) {
+    if (line.startsWith(">")) quoteLines.push(line.replace(/^>\s?/, ""));
+    else if (quoteLines.length > 0 && line.trim() === "") break;
+    else if (quoteLines.length > 0) break;
+  }
+  return quoteLines.length ? compactText(quoteLines.join(" ")) : null;
+}
+function notePreview(note: MemoryRecord): string {
+  return compactText(note.content.replace(/^>.*(\n>.*)*\n*/m, ""), 180);
+}
+function noteSourceLabel(note: MemoryRecord): string {
+  const quote = leadingQuote(note.content);
+  if (quote) return "Quote source";
+  return note.anchor.lid ? "Go to source" : "No source";
+}
+function isLongNote(note: MemoryRecord): boolean {
+  return note.content.length > 360 || note.content.split("\n").length > 8;
+}
 const emit = defineEmits<{
   (e: "select", lid: string): void;
   (e: "prose-mouse-up"): void;
@@ -32,6 +58,8 @@ const emit = defineEmits<{
   (e: "delete-highlight", rec: MemoryRecord): void;
   (e: "edit-note", rec: MemoryRecord): void;
   (e: "delete-note", rec: MemoryRecord): void;
+  (e: "goto", lid: string): void;
+  (e: "focus-source", source: { lid: string; quote: string | null }): void;
 }>();
 </script>
 
@@ -124,13 +152,26 @@ const emit = defineEmits<{
             <button class="note-btn del" title="删除高亮" @click="emit('delete-highlight', h)">Delete</button>
           </span>
         </div>
-        <div v-for="note in props.notesOf(seg.lid)" :key="note.mem_id" class="note-card">
+        <details v-for="note in props.notesOf(seg.lid)" :key="note.mem_id" class="note-card" :open="!isLongNote(note)">
+          <summary class="note-summary">
+            <span class="note-kind">Note</span>
+            <button
+              v-if="note.anchor.lid"
+              class="note-source"
+              @click.prevent.stop="emit('focus-source', { lid: note.anchor.lid, quote: leadingQuote(note.content) })"
+            >
+              {{ noteSourceLabel(note) }}
+            </button>
+            <span v-else class="note-source">No source</span>
+            <span v-if="isLongNote(note)" class="note-fold">Toggle</span>
+          </summary>
+          <p v-if="isLongNote(note)" class="note-preview">{{ notePreview(note) }}</p>
           <div class="note-md md" v-html="props.renderMarkdown(note.content)"></div>
           <div class="note-actions">
             <button class="note-btn" title="编辑" @click="emit('edit-note', note)">Edit</button>
             <button class="note-btn del" title="删除" @click="emit('delete-note', note)">Delete</button>
           </div>
-        </div>
+        </details>
       </div>
       <p v-if="props.segments.length === 0" class="empty">No content. Confirm the server loaded a book and is listening.</p>
     </article>

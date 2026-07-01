@@ -1,33 +1,37 @@
-# SESSION_CHECKPOINT — 2026-07-01 00:00
+# SESSION_CHECKPOINT - 2026-07-01 00:00
 
-## 新鲜度自检
-- 写入时最新 commit: `e65aa64` feat(web): add open book switcher
-- 读入时请对比 `git log -3`,若不一致以 git log 为准。
+## Freshness check
+- Commit at write time: `eeebc0a` feat(web): improve agent tool use and reader selection
+- On read, compare with `git log -3`; if different, trust git log.
 
-## 当前在做什么
-S11 前端阅读器 Mintlify docs 工作台已完成;本轮补了 Markdown 标题清洗和当前会话切换书入口。
+## What's in progress
+S11 front-end reader polish is in progress; latest slice S11q adds note source jump with temporary quote-or-block highlight.
 
-## 下一步(可直接接手)
-1. 浏览器打开 `http://127.0.0.1:8787/`,smoke 当前书阅读区/outline 不显示 Markdown `#` 标题符号。
-2. 点击 TopBar `Open book`,输入 `.understand-book/quantification-essence`,确认 manifest/state 重载且 agent 对话被清空。
-3. 若继续前端 polish,先从真实浏览器反馈建立新 A1 切片。
-4. 提交前跑 `git status --short`,避免把 untracked 参考文件带入。
-5. 涉及前端跑 `pnpm -C packages/web build`;涉及 server 跑 `cargo test -p server`。
+## Next steps (ready to hand off)
+1. Run `git diff -- packages/web/src/App.vue packages/web/src/components/ReaderPane.vue packages/web/src/components/RightRail.vue packages/web/src/style.css docs/代码链路.md SESSION_CHECKPOINT.md`.
+2. Browser-smoke note source buttons in ReaderPane and RightRail Notes tab: click source, confirm reader jumps to the source LID.
+3. In that smoke, confirm notes with leading Markdown blockquote highlight the quote, and notes without a quote highlight the whole source block.
+4. Before committing, run `git status --short` and stage only the S11q/checkpoint files, excluding unrelated untracked reference files.
+5. If more front-end polish is requested, open a new A1 slice from browser feedback before editing.
 
-## 未提交 / 未完成
-- `SESSION_CHECKPOINT.md`: 本次刷新待提交。
-- 既有无关 untracked 保留未动: `.fluid/`, `agent交互书.md`, `docs/预购建流程.md`, `todo.md`, `参考2.md`, `参考_discourse_prompt.md`, `参考_硅基天启：灭世之技术推演.md`, `参考pass2.md`。
-- 未做真实浏览器自动化 smoke;已做 deterministic 验证。
+## Uncommitted / unfinished
+- `SESSION_CHECKPOINT.md`: refreshed in this slice, uncommitted.
+- `docs/代码链路.md`: includes existing S11n-S11p entries plus new S11q entry, uncommitted.
+- `packages/web/src/App.vue`: S11q sourceFocus/focusSource path, uncommitted.
+- `packages/web/src/components/ReaderPane.vue`: note source emits `{lid, quote}`, uncommitted.
+- `packages/web/src/components/RightRail.vue`: Notes tab source emits `{lid, quote}`, uncommitted.
+- `packages/web/src/style.css`: `.source-focus-mark`, uncommitted.
+- Unrelated untracked files left untouched: `.fluid/`, `agent交互书.md`, `docs/预购建流程.md`, `packages/web/vite-dev.log`, `todo.md`, `参考2.md`, `参考_discourse_prompt.md`, `参考_硅基天启：灭世之技术推演.md`, `参考pass2.md`.
 
-## 冷启动读序
-按顺序读这些文件能还原当前上下文:
-1. `docs/切片方案-切片1前端阅读器.md` — §7 S11 方案与 S11a-S11e 顺序。
-2. `docs/代码链路.md` — 最新 S11f/S11g 账本。
-3. `DESIGN-mintlify.md` — Mintlify tokens/组件/布局参考。
-4. `packages/web/src/App.vue` — 当前 reader shell 状态、标题清洗、切书入口。
-5. `packages/web/src/components/TopBar.vue`, `LeftRail.vue`, `ReaderPane.vue`, `RightRail.vue` — 当前组件边界。
-6. `crates/server/src/lib.rs` — `/book/open` 切书端点与 server 路由状态。
+## Cold-start reading sequence
+1. `docs/切片方案-切片1前端阅读器.md` - S11 Mintlify docs workspace direction and S11a-S11e plan.
+2. `docs/代码链路.md` - latest S11h-S11q change trail.
+3. `DESIGN-mintlify.md` - Mintlify tokens/components/layout reference.
+4. `packages/web/src/App.vue` - reader shell, sourceFocus, note saving, selection and agent wiring.
+5. `packages/web/src/components/ReaderPane.vue` - reader note cards and source button boundary.
+6. `packages/web/src/components/RightRail.vue` - Agent/Trace/Formula/Notes tabs and note source boundary.
+7. `packages/web/src/style.css` - reader/note/source-focus styles.
 
-## 本会话决策摘要
-- S11f 标题显示:仅在前端显示层剥离 chapter/section Markdown `#` 前缀,不改 `book.text` 原文、LID 或 range 锚点。
-- S11g 切书入口:采用 `POST /book/open {dir}` 重新加载当前 server 会话的 Book,重建 Reader 并重置 agent messages;不做书库扫描、多书并发或系统文件选择器。
+## Decisions made this session
+- S11q source focus: note source buttons carry `{lid, quote}`; App jumps via existing `reader.goto`, then temporarily highlights the quote if found, otherwise the source block.
+- S11q verification: `pnpm -C packages/web typecheck`, `pnpm -C packages/web build`, and `git diff --check` passed; only LF/CRLF warnings appeared.

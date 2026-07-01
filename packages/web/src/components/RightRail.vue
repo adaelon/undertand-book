@@ -43,6 +43,8 @@ const emit = defineEmits<{
   (e: "undo-effect", turnIndex: number, effectIndex: number, effect: AgentEffect): void;
   (e: "keep-effect", turnIndex: number, effectIndex: number, effect: AgentEffect): void;
   (e: "save-answer-selection", turn: ChatTurn, text: string): void;
+  (e: "goto", lid: string): void;
+  (e: "focus-source", source: { lid: string; quote: string | null }): void;
 }>();
 
 const activeTab = ref<ContextTab>("agent");
@@ -59,6 +61,17 @@ watch(() => props.askDraft, (draft) => {
 
 const answerSelection = ref<{ x: number; y: number; text: string; turn: ChatTurn } | null>(null);
 
+function markdownTextFromRange(range: Range): string {
+  const fragment = range.cloneContents();
+  fragment.querySelectorAll<HTMLElement>(".katex").forEach((katexEl) => {
+    const tex = katexEl.querySelector('annotation[encoding="application/x-tex"]')?.textContent?.trim();
+    if (!tex) return;
+    const display = !!katexEl.closest(".katex-display");
+    const markdown = display ? `$$${tex}$$` : `$${tex}$`;
+    katexEl.replaceWith(document.createTextNode(markdown));
+  });
+  return (fragment.textContent ?? "").replace(/\s+/g, " ").trim();
+}
 function onAnswerMouseUp(turn: ChatTurn) {
   const sel = window.getSelection();
   if (!sel || sel.rangeCount === 0 || sel.isCollapsed) {
@@ -73,7 +86,7 @@ function onAnswerMouseUp(turn: ChatTurn) {
     answerSelection.value = null;
     return;
   }
-  const text = range.toString().replace(/\s+/g, " ").trim();
+  const text = markdownTextFromRange(range);
   if (!text) {
     answerSelection.value = null;
     return;
@@ -87,6 +100,31 @@ function saveAnswerSelection(turn: ChatTurn) {
   emit("save-answer-selection", turn, selected.text);
   answerSelection.value = null;
   window.getSelection()?.removeAllRanges();
+}
+function compactText(value: string, max = 96): string {
+  const text = value.replace(/\s+/g, " ").trim();
+  return text.length > max ? `${text.slice(0, max)}...` : text;
+}
+function leadingQuote(content: string): string | null {
+  const lines = content.split("\n");
+  const quoteLines: string[] = [];
+  for (const line of lines) {
+    if (line.startsWith(">")) quoteLines.push(line.replace(/^>\s?/, ""));
+    else if (quoteLines.length > 0 && line.trim() === "") break;
+    else if (quoteLines.length > 0) break;
+  }
+  return quoteLines.length ? compactText(quoteLines.join(" ")) : null;
+}
+function notePreview(note: MemoryRecord): string {
+  return compactText(note.content.replace(/^>.*(\n>.*)*\n*/m, ""), 180);
+}
+function noteSourceLabel(note: MemoryRecord): string {
+  const quote = leadingQuote(note.content);
+  if (quote) return "Quote source";
+  return note.anchor.lid ? "Go to source" : "No source";
+}
+function isLongNote(note: MemoryRecord): boolean {
+  return note.content.length > 360 || note.content.split("\n").length > 8;
 }
 function excerpt(rec: MemoryRecord): string {
   const c = rec.content.replace(/\s+/g, " ").trim();
@@ -246,10 +284,22 @@ function excerpt(rec: MemoryRecord): string {
         <h3>{{ noteCount }} items</h3>
       </div>
       <div v-if="noteCount" class="memory-list">
-        <article v-for="note in props.contextNotes" :key="note.mem_id" class="memory-card">
-          <div class="memory-meta"><span>Note</span><code>{{ note.anchor.lid }}</code></div>
+        <details v-for="note in props.contextNotes" :key="note.mem_id" class="memory-card note-memory-card" :open="!isLongNote(note)">
+          <summary class="memory-meta note-memory-summary">
+            <span>Note</span>
+            <button
+              v-if="note.anchor.lid"
+              class="note-source-button"
+              @click.prevent.stop="emit('focus-source', { lid: note.anchor.lid, quote: leadingQuote(note.content) })"
+            >
+              {{ noteSourceLabel(note) }}
+            </button>
+            <code v-else>No source</code>
+            <em v-if="isLongNote(note)">Toggle</em>
+          </summary>
+          <p v-if="isLongNote(note)" class="note-preview">{{ notePreview(note) }}</p>
           <div class="md" v-html="props.renderMarkdown(note.content)"></div>
-        </article>
+        </details>
         <article v-for="hl in props.contextHighlights" :key="hl.mem_id" class="memory-card highlight-card">
           <div class="memory-meta"><span>Highlight</span><code>{{ hl.anchor.lid }}</code></div>
           <p>{{ excerpt(hl) }}</p>
@@ -563,6 +613,57 @@ function excerpt(rec: MemoryRecord): string {
   color: var(--steel);
   font-size: 0.75rem;
   font-weight: 600;
+  text-transform: uppercase;
+}
+.note-memory-card[open] .note-preview {
+  display: none;
+}
+.note-preview {
+  margin: 0.45rem 0 0;
+  color: var(--slate);
+  font-size: 0.84rem;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+}
+.note-source-button {
+  min-width: 0;
+  flex: 1;
+  border: 0;
+  border-radius: 6px;
+  padding: 0;
+  color: var(--stone);
+  background: transparent;
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-transform: none;
+}
+.note-source-button:hover {
+  color: var(--ink);
+}
+.note-memory-summary {
+  cursor: pointer;
+  list-style: none;
+}
+.note-memory-summary::-webkit-details-marker {
+  display: none;
+}
+.note-memory-summary code {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-transform: none;
+}
+.note-memory-summary em {
+  color: var(--stone);
+  font-style: normal;
   text-transform: uppercase;
 }
 .highlight-card {
