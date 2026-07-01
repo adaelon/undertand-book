@@ -23,6 +23,9 @@ const kindByLid = ref<Map<string, NodeKind>>(new Map());
 const outlineItems = ref<OutlineItem[]>([]);
 const titleByLid = ref<Map<string, string>>(new Map());
 const viewport = ref<Viewport | null>(null);
+const edgeLoading = ref(false);
+const scrollRestoreId = ref(0);
+const scrollRestoreDirection = ref<"up" | "down" | null>(null);
 interface Segment {
   lid: string;
   text: string;
@@ -376,6 +379,26 @@ async function doScroll(delta: number) {
     await loadWindow((await api.scroll(delta)).viewport);
   } catch (e) {
     fail(e);
+  }
+}
+async function onScrollEdge(direction: "up" | "down") {
+  if (edgeLoading.value || !viewport.value) return;
+  const step = Math.max(1, Math.floor(viewport.value.width / 2));
+  edgeLoading.value = true;
+  try {
+    banner.value = "";
+    sourceFocus.value = null;
+    const before = viewport.value.top_lid;
+    const next = (await api.scroll(direction === "down" ? step : -step)).viewport;
+    await loadWindow(next);
+    if (next.top_lid !== before) {
+      scrollRestoreDirection.value = direction;
+      scrollRestoreId.value += 1;
+    }
+  } catch (e) {
+    fail(e);
+  } finally {
+    edgeLoading.value = false;
   }
 }
 async function doGoto(lid: string, focusQuote?: string | null) {
@@ -734,8 +757,11 @@ async function openBook() {
         :notes-of="notesOf"
         :hl-excerpt="hlExcerpt"
         :image-meta="imageMeta"
+        :scroll-restore-id="scrollRestoreId"
+        :scroll-restore-direction="scrollRestoreDirection"
         @select="selectedLid = $event"
         @prose-mouse-up="onProseMouseUp"
+        @scroll-edge="onScrollEdge"
         @highlight-block="highlightBlock"
         @note-block="noteBlock"
         @goto="doGoto"

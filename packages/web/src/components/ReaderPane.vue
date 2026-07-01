@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { nextTick, ref, watch } from "vue";
 import type { FormulaSemantics, MemoryRecord } from "../api";
 import type { Manifest } from "../api";
 
@@ -22,6 +23,8 @@ const props = defineProps<{
   notesOf: (lid: string) => MemoryRecord[];
   hlExcerpt: (rec: MemoryRecord) => string;
   imageMeta: (text: string) => { alt: string; src: string } | null;
+  scrollRestoreId: number;
+  scrollRestoreDirection: "up" | "down" | null;
 }>();
 
 function compactText(value: string, max = 96): string {
@@ -60,11 +63,36 @@ const emit = defineEmits<{
   (e: "delete-note", rec: MemoryRecord): void;
   (e: "goto", lid: string): void;
   (e: "focus-source", source: { lid: string; quote: string | null }): void;
+  (e: "scroll-edge", direction: "up" | "down"): void;
 }>();
+
+const pane = ref<HTMLElement | null>(null);
+const edgePx = 180;
+
+function onScroll() {
+  const el = pane.value;
+  if (!el) return;
+  if (el.scrollTop <= edgePx) emit("scroll-edge", "up");
+  else if (el.scrollHeight - el.scrollTop - el.clientHeight <= edgePx) emit("scroll-edge", "down");
+}
+
+watch(
+  () => props.scrollRestoreId,
+  async () => {
+    await nextTick();
+    const el = pane.value;
+    if (!el || !props.scrollRestoreDirection) return;
+    if (props.scrollRestoreDirection === "down") {
+      el.scrollTop = Math.max(edgePx + 1, Math.floor(el.clientHeight * 0.35));
+    } else {
+      el.scrollTop = Math.max(0, el.scrollHeight - el.clientHeight - Math.floor(el.clientHeight * 0.35));
+    }
+  },
+);
 </script>
 
 <template>
-  <main class="reader-pane">
+  <main ref="pane" class="reader-pane" @scroll.passive="onScroll">
     <article class="prose" @mouseup="emit('prose-mouse-up')">
       <div v-for="seg in props.segments" :key="seg.lid" class="seg">
         <template v-if="!props.isAsset(seg)">
