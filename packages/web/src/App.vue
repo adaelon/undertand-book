@@ -376,8 +376,50 @@ function noteBlock(lid: string) {
   openNewNote(lid);
 }
 
-// ── 段内自由高亮:选区捕获 → 浮动按钮 → 精确 UTF-16 区间高亮 `[ADR-0031]` ──
-const hlPopover = ref<{ x: number; y: number; lid: string; start: number; end: number; text: string } | null>(null);
+// ── 自由选区:可跨多个 LID,高亮按 LID 拆 range;Note/Ask AI 锚到起点 LID `[ADR-0031]` ──
+interface SelectedRange {
+  lid: string;
+  start: number;
+  end: number;
+}
+const hlPopover = ref<{ x: number; y: number; anchorLid: string; ranges: SelectedRange[]; text: string } | null>(null);
+
+function lidElementOf(node: Node | null): HTMLElement | null {
+  const el = node && node.nodeType === 3 ? node.parentElement : (node as HTMLElement | null);
+  return el ? el.closest("[data-lid]") : null;
+}
+
+function selectionRanges(range: Range): SelectedRange[] {
+  const startEl = lidElementOf(range.startContainer);
+  const endEl = lidElementOf(range.endContainer);
+  if (!startEl || !endEl) return [];
+  const root = startEl.closest(".prose");
+  if (!root || !root.contains(endEl)) return [];
+
+  return Array.from(root.querySelectorAll<HTMLElement>("[data-lid]"))
+    .filter((el) => range.intersectsNode(el))
+    .map((el) => {
+      const lid = el.getAttribute("data-lid") ?? "";
+      const textLen = el.textContent?.length ?? 0;
+      let start = 0;
+      let end = textLen;
+      if (el === startEl) {
+        const pre = document.createRange();
+        pre.selectNodeContents(el);
+        pre.setEnd(range.startContainer, range.startOffset);
+        start = pre.toString().length;
+      }
+      if (el === endEl) {
+        const pre = document.createRange();
+        pre.selectNodeContents(el);
+        pre.setEnd(range.endContainer, range.endOffset);
+        end = pre.toString().length;
+      }
+      return { lid, start, end };
+    })
+    .filter((r) => r.lid && r.end > r.start);
+}
+
 function onProseMouseUp() {
   const sel = window.getSelection();
   if (!sel || sel.rangeCount === 0 || sel.isCollapsed) {
@@ -385,40 +427,32 @@ function onProseMouseUp() {
     return;
   }
   const range = sel.getRangeAt(0);
-  const pOf = (n: Node | null): HTMLElement | null => {
-    const el = n && n.nodeType === 3 ? n.parentElement : (n as HTMLElement | null);
-    return el ? el.closest("[data-lid]") : null;
-  };
-  const startP = pOf(range.startContainer);
-  // 仅支持单个 LID 内选区(跨 LID 留后);两端须同一 data-lid 容器。
-  if (!startP || startP !== pOf(range.endContainer)) {
+  const ranges = selectionRanges(range);
+  if (ranges.length === 0) {
     hlPopover.value = null;
     return;
   }
-  const lid = startP.getAttribute("data-lid");
-  if (!lid) {
-    hlPopover.value = null;
-    return;
-  }
-  // 段内 UTF-16 偏移 = 选区起点前的文本长度(toString().length 即 UTF-16 code unit 数)。
-  const pre = document.createRange();
-  pre.selectNodeContents(startP);
-  pre.setEnd(range.startContainer, range.startOffset);
-  const start = pre.toString().length;
-  const end = start + range.toString().length;
-  if (end <= start) {
+  const quote = range.toString();
+  if (!quote.trim()) {
     hlPopover.value = null;
     return;
   }
   const rect = range.getBoundingClientRect();
-  hlPopover.value = { x: rect.left + rect.width / 2, y: rect.top, lid, start, end, text: range.toString() };
+  hlPopover.value = {
+    x: rect.left + rect.width / 2,
+    y: rect.top,
+    anchorLid: ranges[0].lid,
+    ranges,
+    text: quote,
+  };
 }
 async function confirmHighlight() {
   const p = hlPopover.value;
   if (!p) return;
   try {
     banner.value = "";
-    await api.highlight(p.lid, { start: p.start, end: p.end });
+    await Promise.all(p.ranges.map((r) => api.highlight(r.lid, { start: r.start, end: r.end })));
+    selectedLid.value = p.anchorLid;
     hlPopover.value = null;
     window.getSelection()?.removeAllRanges();
     await refreshAnnotations();
@@ -430,17 +464,18 @@ function noteSelection() {
   const p = hlPopover.value;
   if (!p) return;
   const quote = p.text.replace(/\s+/g, " ").trim();
+  selectedLid.value = p.anchorLid;
   hlPopover.value = null;
   window.getSelection()?.removeAllRanges();
-  openNewNote(p.lid, quote ? `> ${quote}` : "");
+  openNewNote(p.anchorLid, quote ? `> ${quote}` : "");
 }
 function askSelection() {
   const p = hlPopover.value;
   if (!p) return;
   const quote = p.text.replace(/\s+/g, " ").trim();
   if (!quote) return;
-  askDraft.value = { lid: p.lid, quote };
-  selectedLid.value = p.lid;
+  askDraft.value = { lid: p.anchorLid, quote };
+  selectedLid.value = p.anchorLid;
   agentInput.value = "";
   hlPopover.value = null;
   window.getSelection()?.removeAllRanges();
