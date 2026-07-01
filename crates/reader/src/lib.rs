@@ -122,6 +122,14 @@ impl Reader {
         Ok(())
     }
 
+
+    /// 持久化恢复:把 top_idx 设到目标 lid(必须存在于 leaf_lids),不做已读记账。
+    /// 供 server 启动时从 session.json 恢复阅读位置。lid 不存在则静默忽略(书可能变了)。
+    pub fn restore_top_lid(&mut self, _book: &Book, lid: &str) {
+        if let Some(i) = self.leaf_lids.iter().position(|l| l == lid) {
+            self.top_idx = i.min(self.max_top_idx());
+        }
+    }
     /// `reader.gotoLid(lid)`:翻到某 LID。叶 → 锚到该叶;容器 → 锚到子树第一个叶;
     /// 不存在 → `LID_NOT_FOUND`(禁宽松降级,不静默返最近邻 `[ADR-0015]`)。
     pub fn goto_lid(

@@ -18,6 +18,7 @@ use runtime::{
 use serde::Serialize;
 use serde_json::json;
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 /// 服务的单会话共享状态(切片0 单用户单书)`[ADR-0028 决策2]`。
 /// S10b:持只读 `Book` + 会话态 `Reader` + 用户私有 `MemoryStore`(物理隔离 `[ADR-0006]`)。
@@ -30,6 +31,8 @@ pub struct AppState {
     /// 外层 E agent 的会话 messages(S10f `[ADR-0030]`)。`/agent/chat` 跨回合累积、`/agent/new` 重置;
     /// 会话边界 = 用户「新对话」(不自动 idle 判定)。
     pub messages: Vec<Message>,
+    /// 阅读位置持久化文件路径(~/.understand-book/session.json);None 则不持久化。
+    pub session_path: Option<PathBuf>,
 }
 
 /// 一次请求的传输无关输入:方法 + 原始 url(含 query)+ JSON body(GET 为空)+ 时间戳。
@@ -125,6 +128,7 @@ fn route_open_book(state: &mut AppState, body: &str) -> Reply {
     state.reader = Reader::new(&book, DEFAULT_RADIUS);
     state.messages = new_session();
     state.book = book;
+    let _ = save_session(state, Some(dir));
     ok_json(&json!({ "ok": true, "book_id": state.book.base.book_id }))
 }
 /// `book.*` 只读叶子 → GET(S10a)。`store` 仅 `guided_route_from` 用(派生 reader_profile 已读降权)。
@@ -262,7 +266,10 @@ fn route_mut(state: &mut AppState, path: &str, body: &str, now: &str) -> Reply {
                 .reader
                 .goto_lid(&state.book, &mut state.store, lid, now)
             {
-                Ok(e) => ok_json(&e),
+                Ok(e) => {
+                    let _ = save_session(state, None);
+                    ok_json(&e)
+                }
                 Err(e) => err_reply(&e),
             }
         }
@@ -275,7 +282,10 @@ fn route_mut(state: &mut AppState, path: &str, body: &str, now: &str) -> Reply {
                 .reader
                 .scroll(&state.book, &mut state.store, delta, now)
             {
-                Ok(e) => ok_json(&e),
+                Ok(e) => {
+                    let _ = save_session(state, None);
+                    ok_json(&e)
+                }
                 Err(e) => err_reply(&e),
             }
         }
@@ -638,6 +648,47 @@ impl ModelAdapter for UnconfiguredAdapter {
     }
 }
 
+// ── 阅读位置持久化(S13d)──
+/// session.json 结构:记录上次打开的 book_dir 和阅读位置 top_lid。
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct SessionState {
+    pub book_dir: String,
+    pub top_lid: String,
+}
+
+/// 把 AppState 当前书目录和阅读位置写入 session.json。dir=Some 覆盖书目录(开新书);None 沿用旧值。
+pub fn save_session(state: &AppState, dir: Option<&str>) {
+    let Some(path) = &state.session_path else { return; };
+    let book_dir = match dir {
+        Some(d) => d.to_string(),
+        None => match path.parent() {
+            _ => {
+                // 沿用现有 session.json 的 book_dir;若读不到则跳过(未持久化过)。
+                match std::fs::read_to_string(path) {
+                    Ok(raw) => match serde_json::from_str::<SessionState>(&raw) {
+                        Ok(s) => s.book_dir,
+                        Err(_) => return,
+                    },
+                    Err(_) => return,
+                }
+            }
+        },
+    };
+    let top_lid = state.reader.viewport().top_lid;
+    let session = SessionState { book_dir, top_lid };
+    if let Ok(json) = serde_json::to_string_pretty(&session) {
+        let _ = std::fs::write(path, json);
+    }
+}
+
+/// 从 session.json 读回上次打开的书目录和阅读位置。文件缺失或解析失败返回 None(静默,启服务冷启动)。
+pub fn load_session(path: &Option<PathBuf>) -> Option<SessionState> {
+    let p = path.as_ref()?;
+    let raw = std::fs::read_to_string(p).ok()?;
+    serde_json::from_str::<SessionState>(&raw).ok()
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -717,6 +768,7 @@ mod tests {
             store,
             adapter,
             messages: new_session(),
+            session_path: None,
         }
     }
 
@@ -833,6 +885,7 @@ mod tests {
             store,
             adapter,
             messages: new_session(),
+            session_path: None,
         };
 
         let ok = get(&mut s, "/book/formula_semantics?lid=1.1");
@@ -1162,6 +1215,7 @@ mod tests {
             store,
             adapter,
             messages: new_session(),
+            session_path: None,
         };
 
         let r = post(

@@ -9,7 +9,7 @@ use read_tools::Book;
 use reader::{Reader, DEFAULT_RADIUS};
 use runtime::orchestrator::new_session;
 use runtime::{ModelAdapter, NativeAdapter};
-use server::{route, AppState, Req, UnconfiguredAdapter};
+use server::{route, AppState, Req, UnconfiguredAdapter, load_session, save_session};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -24,6 +24,16 @@ fn main() {
             eprintln!("用法: server <book_dir>  (或设 UNDERSTAND_BOOK_DIR 环境变量)");
             std::process::exit(2);
         });
+    // S13d: 阅读位置/上次打开的书持久化。
+    let session_path = MemoryStore::default_path()
+        .parent()
+        .map(|p| p.join("session.json"));
+    // 若 session.json 存在且 book_dir 不同、且该目录可加载,则改用 session 的 book_dir。
+    let (dir, saved_top) = match load_session(&session_path) {
+        Some(s) if s.book_dir != dir && Book::load(&s.book_dir).is_ok() => (s.book_dir, Some(s.top_lid)),
+        Some(s) if s.book_dir == dir => (dir, Some(s.top_lid)),
+        _ => (dir, None),
+    };
     let book = match Book::load(&dir) {
         Ok(b) => b,
         Err(e) => {
@@ -38,7 +48,10 @@ fn main() {
             std::process::exit(1);
         }
     };
-    let reader = Reader::new(&book, DEFAULT_RADIUS);
+    let mut reader = Reader::new(&book, DEFAULT_RADIUS);
+    if let Some(top) = saved_top {
+        reader.restore_top_lid(&book, &top);
+    }
     // book.query 的 LLM 后端:读 .env;缺配置则兜底 UnconfiguredAdapter
     // (book/reader/memory 浏览照常,仅 query 触模型时报 PROVIDER_ERROR)`[ADR-0028]`。
     let adapter: Box<dyn ModelAdapter + Send> = match NativeAdapter::from_env() {
@@ -59,7 +72,14 @@ fn main() {
         store,
         adapter,
         messages,
+        session_path,
     }));
+    // 启动时立即写入 session.json(book_dir + 当前 top_lid),否则后续 goto/scroll
+    // 的 save_session(None) 因读不到旧 book_dir 而永远不写,重启即丢位置。
+    {
+        let guard = state.lock().unwrap_or_else(|p| p.into_inner());
+        let _ = save_session(&guard, Some(dir.as_str()));
+    }
     let web_dist = web_dist_dir();
     let server = match Server::http(&addr) {
         Ok(s) => Arc::new(s),
