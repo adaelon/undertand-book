@@ -9,7 +9,7 @@
 //! 外层 E agent(S10f)、静态资源(S10e)留后续子切片。
 use memory::{Anchor, MemoryStore, RecallQuery, SaveInput};
 use read_tools::{Book, ToolError};
-use reader::Reader;
+use reader::{Reader, DEFAULT_RADIUS};
 use runtime::orchestrator::{new_session, run, OuterConfig};
 use runtime::{
     guided_route_from, synthesize, unvisited_back, AdapterError, AssistantTurn, CompletionRequest,
@@ -54,6 +54,12 @@ pub fn route(state: &mut AppState, req: Req) -> Reply {
     let (path, q) = parse_query(req.url);
     // book.query:`book.*` 命名空间但 LLM 命令(秒级、非确定性叶子)→ POST,
     // 单列于 GET-only `route_book` 之前(决策3 的方法分派对它例外)`[ADR-0014/0028]`。
+    if path == "/book/open" {
+        if req.method != "POST" {
+            return book_open_method_not_allowed();
+        }
+        return route_open_book(state, req.body);
+    }
     if path == "/book/query" {
         if req.method != "POST" {
             return query_method_not_allowed();
@@ -95,6 +101,32 @@ pub fn route(state: &mut AppState, req: Req) -> Reply {
     }
 }
 
+fn route_open_book(state: &mut AppState, body: &str) -> Reply {
+    let v = match body_value(body) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let Some(dir) = v.get("dir").and_then(|x| x.as_str()).map(str::trim) else {
+        return validation("INVALID_RANGE", "book.open 需 dir 字段");
+    };
+    if dir.is_empty() {
+        return validation("INVALID_RANGE", "book.open 的 dir 不能为空");
+    }
+    let book = match Book::load(dir) {
+        Ok(book) => book,
+        Err(e) => {
+            return err_reply(&ToolError {
+                error_code: "BOOK_LOAD_FAILED".into(),
+                category: "validation".into(),
+                message: format!("加载书失败({dir}): {e}"),
+            });
+        }
+    };
+    state.reader = Reader::new(&book, DEFAULT_RADIUS);
+    state.messages = new_session();
+    state.book = book;
+    ok_json(&json!({ "ok": true, "book_id": state.book.base.book_id }))
+}
 /// `book.*` 只读叶子 → GET(S10a)。`store` 仅 `guided_route_from` 用(派生 reader_profile 已读降权)。
 fn route_book(book: &Book, store: &MemoryStore, leaf: &str, q: &HashMap<String, String>) -> Reply {
     match leaf {
@@ -521,6 +553,16 @@ fn method_not_allowed() -> Reply {
     }
 }
 
+fn book_open_method_not_allowed() -> Reply {
+    Reply {
+        status: 405,
+        body: to_body(&ToolError {
+            error_code: "METHOD_NOT_ALLOWED".into(),
+            category: "validation".into(),
+            message: "book.open 是切换当前书的会话命令,只支持 POST(body {dir})".into(),
+        }),
+    }
+}
 /// agent.chat / agent.new 是会话命令(外层 E agent),只收 POST(S10f `[ADR-0030]`)。
 fn agent_method_not_allowed() -> Reply {
     Reply {
@@ -1144,6 +1186,33 @@ mod tests {
         let mut s = state_named("synth-missing");
         assert_eq!(post(&mut s, "/book/synthesize", "{}").status, 400);
         assert_eq!(get(&mut s, "/book/synthesize").status, 405);
+    }
+    #[test]
+    fn book_open_reloads_book_and_resets_session_state() {
+        let dir = tmp("open-book-dir");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut base = sample_base();
+        base.book_id = "opened-book".into();
+        std::fs::write(dir.join("base.json"), serde_json::to_string(&base).unwrap()).unwrap();
+        std::fs::write(dir.join("source.txt"), "Y".repeat(100)).unwrap();
+
+        let mut s = state_named("open-book");
+        s.messages.push(Message::user("old conversation"));
+        let body = format!(
+            r#"{{"dir":{}}}"#,
+            serde_json::to_string(dir.to_str().unwrap()).unwrap()
+        );
+        let r = post(&mut s, "/book/open", &body);
+        assert_eq!(r.status, 200);
+        assert!(r.body.contains("opened-book"));
+        assert_eq!(s.book.base.book_id, "opened-book");
+        assert_eq!(s.reader.state().viewport.anchor_lid, "1.1");
+        assert_eq!(s.messages.len(), 1);
+
+        assert_eq!(post(&mut s, "/book/open", "{}").status, 400);
+        assert_eq!(get(&mut s, "/book/open").status, 405);
+        let _ = std::fs::remove_dir_all(&dir);
     }
     // ── S10f /agent/chat + /agent/new ───────────────────────
     // /agent/chat:外层 E agent 驱动共享 reader,返 OuterOutcome 含 effects(可撤销提议)。

@@ -297,7 +297,7 @@ async function init() {
     const m = await api.manifest();
     kindByLid.value = new Map(m.tree.map((n) => [n.lid, n.kind]));
     leafOrder.value = m.tree.filter((n) => n.children.length === 0).map((n) => n.lid);
-    void loadOutlineTitles(m.tree);
+    await loadOutlineTitles(m.tree);
     const st = await api.state();
     await loadWindow(st.viewport);
   } catch (e) {
@@ -528,6 +528,31 @@ async function newChat() {
     fail(e);
   }
 }
+async function openBook() {
+  const dir = window.prompt("Book directory", ".understand-book/quantification-essence");
+  if (!dir?.trim()) return;
+  try {
+    banner.value = "";
+    await api.openBook(dir.trim());
+    leafOrder.value = [];
+    kindByLid.value = new Map();
+    outlineItems.value = [];
+    titleByLid.value = new Map();
+    viewport.value = null;
+    segments.value = [];
+    annotations.value = [];
+    selectedLid.value = null;
+    chapterTitle.value = "";
+    gotoInput.value = "";
+    outlineSearch.value = "";
+    chat.value = [];
+    handled.value = {};
+    showTrace.value = {};
+    await init();
+  } catch (e) {
+    fail(e);
+  }
+}
 </script>
 
 <template>
@@ -539,6 +564,7 @@ async function newChat() {
       :debug-open="debugOpen"
       @scroll="doScroll"
       @new-chat="newChat"
+      @open-book="openBook"
       @toggle-debug="debugOpen = !debugOpen"
     />
 
@@ -596,6 +622,7 @@ async function newChat() {
         :goto-back="gotoBack"
         @send-agent="sendAgent"
         @new-chat="newChat"
+      @open-book="openBook"
         @toggle-trace="toggleTrace"
         @undo-effect="undoEffect"
         @keep-effect="keepEffect"

@@ -127,6 +127,7 @@ export const api = {
     http<BookText>("GET", `/book/text${qs({ lid, end })}`),
   formulaSemantics: (lid: string) =>
     http<FormulaSemantics>("GET", `/book/formula_semantics${qs({ lid })}`),
+  openBook: (dir: string) => http<{ ok: boolean; book_id: string }>("POST", "/book/open", { dir }),
 
   // ── book.query(LLM 命令,POST)──
   query: (q: string, anchor_lid?: string) =>
