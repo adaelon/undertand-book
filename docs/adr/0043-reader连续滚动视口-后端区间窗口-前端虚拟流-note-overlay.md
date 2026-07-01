@@ -20,7 +20,7 @@
 
 6. **前端使用原生滚动驱动的虚拟流**:前端持有大于可见区的叶缓冲,通过浏览器原生滚动条/滚轮滚动。滚到缓冲边缘时调用 `reader.scroll(+/-N)` 拉取下一段并追加/回收,避免整窗替换和 CSS 假滑动。
 
-7. **highlight 仍嵌入正文,note 卡独立 overlay**:段内 highlight 继续在 `renderSeg` 里渲染 `<mark>`;note 是段外卡,从正文 seg 循环中拆出到独立 overlay 层,按可见 LID 集过滤并锚定到对应 `data-lid` DOM,避免虚拟列表回收导致 note 卡闪烁或影响段高估算。
+7. **highlight 仍嵌入正文,note 卡回到正文 seg 循环**(S13a 回退):段内 highlight 继续在 `renderSeg` 里渲染 `<mark>`;note 卡在每段后按 LID 渲染,与 highlight 卡同类位置。S12d 曾把 note 拆到独立 overlay 层以隔离虚拟列表回收,但其造成的阅读割裂感高于回收闪烁的收益,故 S13a 回退为段内渲染;note 内容仍来自 memory,按可见 LID 集过滤。
 
 8. **移除 TopBar 翻页按钮**:连续流不再提供显式上/下翻页按钮。桌面无滚轮场景以键盘方向键/PageUp/PageDown 作为兜底,不占用 TopBar 空间。
 
@@ -29,7 +29,7 @@
 - `scroll(delta)` 的 delta 是区间 top 平移量,不是"锚点移动量"。实现若仍用 anchor 中心化计算,会复发整屏替换。
 - `goto(lid)` 必须让目标叶成为 top,否则目录和 note source 的"从这里读"语义会被上下文挤偏。
 - 进度必须使用 `top_idx`,已读必须覆盖新可见区间;否则连续流下账本和用户体感会脱节。
-- note overlay 不应成为新的真相源;note 内容仍来自 memory,overlay 只负责当前可见区间的定位和展示。
+- note 内容仍来自 memory(单一真相源),seg 循环只负责按 LID 过滤和定位展示。
 
 ## 否决
 
@@ -37,7 +37,7 @@
 - **整窗替换 + CSS 过渡**:快滚和长书下仍会闪烁,只是用动画掩盖 DOM 重建。
 - **前端回传 anchor**:扩出前端到后端的写回路径,破坏现有命令优先边界。
 - **后端固定 7 叶 + 前端并发预取**:请求倍增,快滚时容易堆积,且仍受旧 viewport 宽度约束。
-- **note 卡继续嵌入正文 seg 循环**:虚拟列表回收时 note 卡会跟随段落消失/重建,并污染段高估算。
+- **note 卡回到嵌入正文 seg 循环**(原 S12d 拆出 overlay 的理由):隔离虚拟列表回收的收益不足以抵消阅读割裂;S13a 接受段高估算含 note 的轻微偏差。
 - **保留翻页按钮改为一屏或一叶**:连续流主入口已是滚动;按钮会保留旧翻页心智。
 - **agent chat 附带前端 top_lid 改契约**:扩 HTTP/orchestrator 契约换取的精度有限;Ask AI 选区已覆盖精确锚定场景。
 

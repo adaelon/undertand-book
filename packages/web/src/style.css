@@ -525,22 +525,7 @@ body {
   gap: 0.35rem;
   flex-shrink: 0;
 }
-.note-overlay {
-  position: sticky;
-  bottom: 1rem;
-  z-index: 8;
-  display: grid;
-  gap: 0.45rem;
-  width: min(320px, calc(100% - 2rem));
-  max-height: 34vh;
-  margin: -2rem 1rem 1rem auto;
-  overflow-y: auto;
-  pointer-events: auto;
-}
-.note-overlay .note-card {
-  margin: 0;
-  box-shadow: 0 12px 32px rgba(25, 31, 36, 0.12);
-}
+
 .note-card {
   padding: 0.55rem 0.7rem;
 }
