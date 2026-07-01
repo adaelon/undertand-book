@@ -62,7 +62,7 @@ const emit = defineEmits<{
   (e: "edit-note", rec: MemoryRecord): void;
   (e: "delete-note", rec: MemoryRecord): void;
   (e: "goto", lid: string): void;
-  (e: "focus-source", source: { lid: string; quote: string | null }): void;
+  (e: "focus-source-local", source: { lid: string; quote: string | null }): void;
   (e: "scroll-edge", direction: "up" | "down"): void;
 }>();
 
@@ -227,7 +227,7 @@ watch(
             <button
               v-if="note.anchor.lid"
               class="note-source"
-              @click.prevent.stop="emit('focus-source', { lid: note.anchor.lid, quote: leadingQuote(note.content) })"
+              @click.prevent.stop="emit('focus-source-local', { lid: note.anchor.lid, quote: leadingQuote(note.content) })"
             >
               {{ noteSourceLabel(note) }}
             </button>

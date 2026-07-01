@@ -410,6 +410,9 @@ async function doGoto(lid: string, focusQuote?: string | null) {
 async function focusSource(source: { lid: string; quote: string | null }) {
   await doGoto(source.lid, source.quote);
 }
+function focusLocalSource(source: { lid: string; quote: string | null }) {
+  sourceFocus.value = source.quote ? { ...source } : null;
+}
 // block actions:整段/asset 高亮和笔记;段内自由高亮走下面的选区 toolbar。
 async function highlightBlock(lid: string) {
   try {
@@ -759,7 +762,7 @@ async function openBook() {
         @highlight-block="highlightBlock"
         @note-block="noteBlock"
         @goto="doGoto"
-        @focus-source="focusSource"
+        @focus-source-local="focusLocalSource"
         @modify-highlight="modifyHighlight"
         @delete-highlight="deleteHighlight"
         @edit-note="openEditNote"
