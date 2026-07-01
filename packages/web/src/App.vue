@@ -106,14 +106,18 @@ const contextRecords = computed(() => {
 });
 const contextNotes = computed(() => contextRecords.value.filter((r) => r.type === "note"));
 const contextHighlights = computed(() => contextRecords.value.filter((r) => r.type === "highlight"));
+const visibleNotes = computed(() => {
+  const visible = viewport.value?.visible_lids ?? [];
+  const order = new Map(visible.map((lid, idx) => [lid, idx]));
+  return annotations.value
+    .filter((r) => r.type === "note" && !!r.anchor.lid && order.has(r.anchor.lid))
+    .sort((a, b) => (order.get(a.anchor.lid ?? "") ?? 0) - (order.get(b.anchor.lid ?? "") ?? 0));
+});
 
 // ── 标注:高亮(整段 / 段内 range)+ 笔记 ──
 // 整段高亮(range 缺省)→ <p> 背景;段内 range 高亮 → <mark>(见 renderSeg)`[ADR-0031]`。
 function isHighlighted(lid: string): boolean {
   return annotations.value.some((r) => r.anchor.lid === lid && r.type === "highlight" && !r.range);
-}
-function notesOf(lid: string): MemoryRecord[] {
-  return annotations.value.filter((r) => r.anchor.lid === lid && r.type === "note");
 }
 function highlightsOf(lid: string): MemoryRecord[] {
   return annotations.value.filter((r) => r.anchor.lid === lid && r.type === "highlight");
@@ -754,7 +758,7 @@ async function openBook() {
         :is-asset="isAsset"
         :is-highlighted="isHighlighted"
         :highlights-of="highlightsOf"
-        :notes-of="notesOf"
+        :visible-notes="visibleNotes"
         :hl-excerpt="hlExcerpt"
         :image-meta="imageMeta"
         :scroll-restore-id="scrollRestoreId"
