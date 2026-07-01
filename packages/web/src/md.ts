@@ -15,3 +15,7 @@ md.use(katex, { throwOnError: false });
 export function renderMarkdown(src: string | null | undefined): string {
   return md.render(src ?? "");
 }
+/** 渲染行内 Markdown/LaTeX,不包外层 <p>;用于 reader 段落正文。 */
+export function renderInlineMarkdown(src: string | null | undefined): string {
+  return md.renderInline(src ?? "");
+}

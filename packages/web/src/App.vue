@@ -2,7 +2,7 @@
 import { computed, onMounted, ref } from "vue";
 import { api, ApiError } from "./api";
 import type { AgentEffect, FormulaSemantics, MemoryRecord, OuterOutcome, TraceStep, Viewport } from "./api";
-import { renderMarkdown } from "./md";
+import { renderInlineMarkdown, renderMarkdown } from "./md";
 import TopBar from "./components/TopBar.vue";
 import LeftRail from "./components/LeftRail.vue";
 import ReaderPane from "./components/ReaderPane.vue";
@@ -115,6 +115,10 @@ function highlightsOf(lid: string): MemoryRecord[] {
   return annotations.value.filter((r) => r.anchor.lid === lid && r.type === "highlight");
 }
 
+function renderInlineText(s: string): string {
+  return renderInlineMarkdown(s);
+}
+
 function escapeHtml(s: string): string {
   return s
     .replace(/&/g, "&amp;")
@@ -144,7 +148,7 @@ function clampRange(n: number, max: number): number {
 function renderSeg(seg: Segment): string {
   const display = displayText(seg);
   const hls = highlightsOf(seg.lid).filter((h) => h.range);
-  if (hls.length === 0) return escapeHtml(display.text);
+  if (hls.length === 0) return renderInlineText(display.text);
   const ranges = hls
     .map((h) => {
       const start = clampRange(h.range!.start - display.offset, display.text.length);
@@ -163,10 +167,10 @@ function renderSeg(seg: Segment): string {
   let html = "";
   let cur = 0;
   for (const [s, e] of merged) {
-    html += escapeHtml(t.slice(cur, s)) + `<mark class="hl-mark">${escapeHtml(t.slice(s, e))}</mark>`;
+    html += renderInlineText(t.slice(cur, s)) + `<mark class="hl-mark">${renderInlineText(t.slice(s, e))}</mark>`;
     cur = e;
   }
-  return html + escapeHtml(t.slice(cur));
+  return html + renderInlineText(t.slice(cur));
 }
 function hlExcerpt(rec: MemoryRecord): string {
   const c = rec.content.replace(/\s+/g, " ").trim();
