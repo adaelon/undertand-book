@@ -39,6 +39,37 @@ const gotoInput = ref("");
 const outlineSearch = ref("");
 const banner = ref<string>("");
 const debugOpen = ref(false);
+const leftRailOpen = ref(true);
+const leftRailWidth = ref(240);
+const rightRailWidth = ref(384);
+const workspaceStyle = computed(() => ({
+  "--left-rail-width": leftRailOpen.value ? `${leftRailWidth.value}px` : "0px",
+  "--left-resizer-width": leftRailOpen.value ? "6px" : "0px",
+  "--right-rail-width": `${rightRailWidth.value}px`,
+}));
+
+function clampLayoutWidth(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
+}
+function startResize(which: "left" | "right", event: MouseEvent) {
+  if (window.innerWidth < 1024) return;
+  event.preventDefault();
+  const startX = event.clientX;
+  const startWidth = which === "left" ? leftRailWidth.value : rightRailWidth.value;
+  const onMove = (move: MouseEvent) => {
+    const delta = move.clientX - startX;
+    if (which === "left") leftRailWidth.value = clampLayoutWidth(startWidth + delta, 180, 420);
+    else rightRailWidth.value = clampLayoutWidth(startWidth - delta, 280, 560);
+  };
+  const onUp = () => {
+    document.body.classList.remove("is-resizing-layout");
+    window.removeEventListener("mousemove", onMove);
+    window.removeEventListener("mouseup", onUp);
+  };
+  document.body.classList.add("is-resizing-layout");
+  window.addEventListener("mousemove", onMove);
+  window.addEventListener("mouseup", onUp, { once: true });
+}
 
 function fail(e: unknown) {
   if (e instanceof ApiError) banner.value = `[${e.category}] ${e.errorCode}: ${e.message}`;
@@ -562,16 +593,19 @@ async function openBook() {
       :progress-pct="progressPct"
       :anchor-lid="viewport?.anchor_lid ?? null"
       :debug-open="debugOpen"
+      :left-rail-open="leftRailOpen"
       @scroll="doScroll"
       @new-chat="newChat"
       @open-book="openBook"
+      @toggle-left-rail="leftRailOpen = !leftRailOpen"
       @toggle-debug="debugOpen = !debugOpen"
     />
 
     <p v-if="banner" class="banner">{{ banner }}</p>
 
-    <div class="workspace-grid">
+    <div class="workspace-grid" :class="{ 'left-collapsed': !leftRailOpen }" :style="workspaceStyle">
       <LeftRail
+        v-show="leftRailOpen"
         v-model:goto-input="gotoInput"
         v-model:search-query="outlineSearch"
         :outline-items="outlineItems"
@@ -582,6 +616,14 @@ async function openBook() {
         :debug-open="debugOpen"
         @goto="doGoto"
       />
+
+      <div
+        class="resize-handle resize-handle-left"
+        role="separator"
+        aria-orientation="vertical"
+        title="Resize outline"
+        @mousedown="startResize('left', $event)"
+      ></div>
 
       <ReaderPane
         :segments="segments"
@@ -605,6 +647,14 @@ async function openBook() {
         @delete-note="deleteNote"
       />
 
+      <div
+        class="resize-handle resize-handle-right"
+        role="separator"
+        aria-orientation="vertical"
+        title="Resize context rail"
+        @mousedown="startResize('right', $event)"
+      ></div>
+
       <RightRail
         v-model:agent-input="agentInput"
         :chat="chat"
@@ -622,7 +672,6 @@ async function openBook() {
         :goto-back="gotoBack"
         @send-agent="sendAgent"
         @new-chat="newChat"
-      @open-book="openBook"
         @toggle-trace="toggleTrace"
         @undo-effect="undoEffect"
         @keep-effect="keepEffect"

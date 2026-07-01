@@ -101,11 +101,12 @@ body {
   flex: 1;
   min-height: 0;
   display: grid;
-  grid-template-columns: 240px minmax(0, 1fr) minmax(320px, 24rem);
+  grid-template-columns: var(--left-rail-width, 240px) var(--left-resizer-width, 6px) minmax(360px, 1fr) 6px var(--right-rail-width, 24rem);
   background: var(--canvas);
 }
 
 .left-rail {
+  grid-column: 1;
   min-width: 0;
   border-right: 1px solid var(--hairline);
   background: var(--canvas);
@@ -253,7 +254,51 @@ body {
   flex: 1;
 }
 
+
+.workspace-grid.left-collapsed .left-rail {
+  display: none;
+}
+.resize-handle {
+  min-width: 0;
+  background: transparent;
+  cursor: col-resize;
+  position: relative;
+}
+.resize-handle::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 1px;
+  transform: translateX(-50%);
+  background: var(--hairline-soft);
+}
+.resize-handle:hover::before,
+.is-resizing-layout .resize-handle::before {
+  width: 2px;
+  background: var(--brand-green);
+}
+.resize-handle-left {
+  grid-column: 2;
+  width: var(--left-resizer-width, 6px);
+}
+.workspace-grid.left-collapsed .resize-handle-left {
+  cursor: default;
+}
+.workspace-grid.left-collapsed .resize-handle-left::before {
+  display: none;
+}
+.resize-handle-right {
+  grid-column: 4;
+  width: 6px;
+}
+.is-resizing-layout {
+  cursor: col-resize;
+  user-select: none;
+}
 .reader-pane {
+  grid-column: 3;
   min-width: 0;
   overflow-y: auto;
   background: var(--canvas);
@@ -573,6 +618,10 @@ input:focus {
   border-top: 1px solid var(--hairline-soft);
   background: var(--surface-soft);
 }
+.right-rail {
+  grid-column: 5;
+}
+
 @media (max-width: 1023px) {
   .app {
     height: auto;
@@ -590,17 +639,29 @@ input:focus {
       "left reader"
       "right right";
   }
+  .workspace-grid.left-collapsed {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas:
+      "reader"
+      "right";
+  }
+  .resize-handle {
+    display: none;
+  }
   .left-rail {
+    grid-column: auto;
     grid-area: left;
     max-height: calc(100vh - 56px);
     position: sticky;
     top: 56px;
   }
   .reader-pane {
+    grid-column: auto;
     grid-area: reader;
     min-height: calc(100vh - 56px);
   }
   .right-rail {
+    grid-column: auto;
     grid-area: right;
     min-height: 28rem;
     max-height: none;
@@ -610,9 +671,6 @@ input:focus {
   .prose {
     width: min(720px, calc(100% - 2.5rem));
     padding-top: 1.75rem;
-  }
-  .topbar-actions .ghost-pill:not(.active) {
-    display: none;
   }
 }
 
@@ -645,7 +703,8 @@ input:focus {
   textarea {
     min-height: 44px;
   }
-  .workspace-grid {
+  .workspace-grid,
+  .workspace-grid.left-collapsed {
     display: block;
   }
   .left-rail {
