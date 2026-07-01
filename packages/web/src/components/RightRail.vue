@@ -1,15 +1,20 @@
-﻿<script setup lang="ts">
-import { computed, ref } from "vue";
+<script setup lang="ts">
+import { computed, ref, watch } from "vue";
 import type { AgentEffect, FormulaSemantics, MemoryRecord, OuterOutcome, TraceStep } from "../api";
 
 type ContextTab = "agent" | "trace" | "formula" | "notes";
 
+interface AskDraft {
+  lid: string;
+  quote: string;
+}
 interface ChatTurn {
   user: string;
   outcome: OuterOutcome | null;
   pending: boolean;
   error?: string;
-  distilled?: boolean;
+  questionAnchorLid: string | null;
+  questionQuote: AskDraft | null;
 }
 
 const props = defineProps<{
@@ -27,15 +32,17 @@ const props = defineProps<{
   effState: (turnIndex: number, effectIndex: number) => string | undefined;
   isGoto: (effect: AgentEffect) => boolean;
   gotoBack: (effect: AgentEffect) => string;
+  askDraft: AskDraft | null;
 }>();
 const emit = defineEmits<{
   (e: "update:agentInput", value: string): void;
   (e: "send-agent"): void;
   (e: "new-chat"): void;
+  (e: "clear-ask"): void;
   (e: "toggle-trace", turnIndex: number): void;
   (e: "undo-effect", turnIndex: number, effectIndex: number, effect: AgentEffect): void;
   (e: "keep-effect", turnIndex: number, effectIndex: number, effect: AgentEffect): void;
-  (e: "distill", turn: ChatTurn): void;
+  (e: "save-answer-selection", turn: ChatTurn, text: string): void;
 }>();
 
 const activeTab = ref<ContextTab>("agent");
@@ -46,7 +53,41 @@ const tabs: { id: ContextTab; label: string }[] = [
   { id: "notes", label: "Notes" },
 ];
 const noteCount = computed(() => props.contextNotes.length + props.contextHighlights.length);
+watch(() => props.askDraft, (draft) => {
+  if (draft) activeTab.value = "agent";
+});
 
+const answerSelection = ref<{ x: number; y: number; text: string; turn: ChatTurn } | null>(null);
+
+function onAnswerMouseUp(turn: ChatTurn) {
+  const sel = window.getSelection();
+  if (!sel || sel.rangeCount === 0 || sel.isCollapsed) {
+    answerSelection.value = null;
+    return;
+  }
+  const range = sel.getRangeAt(0);
+  const start = range.startContainer.nodeType === 3 ? range.startContainer.parentElement : (range.startContainer as HTMLElement);
+  const end = range.endContainer.nodeType === 3 ? range.endContainer.parentElement : (range.endContainer as HTMLElement);
+  const startAnswer = start?.closest?.(".ans-text");
+  if (!startAnswer || startAnswer !== end?.closest?.(".ans-text")) {
+    answerSelection.value = null;
+    return;
+  }
+  const text = range.toString().replace(/\s+/g, " ").trim();
+  if (!text) {
+    answerSelection.value = null;
+    return;
+  }
+  const rect = range.getBoundingClientRect();
+  answerSelection.value = { x: rect.left + rect.width / 2, y: rect.top, text, turn };
+}
+function saveAnswerSelection(turn: ChatTurn) {
+  const selected = answerSelection.value;
+  if (!selected) return;
+  emit("save-answer-selection", turn, selected.text);
+  answerSelection.value = null;
+  window.getSelection()?.removeAllRanges();
+}
 function excerpt(rec: MemoryRecord): string {
   const c = rec.content.replace(/\s+/g, " ").trim();
   return c.length > 120 ? `${c.slice(0, 120)}…` : c;
@@ -78,12 +119,19 @@ function excerpt(rec: MemoryRecord): string {
 
       <div class="transcript">
         <div v-for="(turn, ti) in props.chat" :key="ti" class="turn">
+          <div v-if="turn.questionQuote" class="turn-quote">
+            <div class="turn-quote-head">
+              <span>Quoted source</span>
+              <code>{{ turn.questionQuote.lid }}</code>
+            </div>
+            <blockquote>{{ turn.questionQuote.quote }}</blockquote>
+          </div>
           <p class="u-msg">{{ turn.user }}</p>
           <p v-if="turn.pending" class="pending">Agent is thinking…</p>
           <p v-else-if="turn.error" class="incomplete">{{ turn.error }}</p>
 
           <div v-else-if="turn.outcome" class="a-msg">
-            <div v-if="turn.outcome.answer" class="ans-text md" v-html="props.renderMarkdown(turn.outcome.answer)"></div>
+            <div v-if="turn.outcome.answer" class="ans-text md" @mouseup="onAnswerMouseUp(turn)" v-html="props.renderMarkdown(turn.outcome.answer)"></div>
             <p v-else class="ans-text">No answer.</p>
             <p v-if="turn.outcome.incomplete" class="incomplete">Incomplete: {{ turn.outcome.warning ?? "incomplete" }}</p>
 
@@ -117,20 +165,25 @@ function excerpt(rec: MemoryRecord): string {
               </ol>
             </div>
 
-            <div class="distill" v-if="turn.outcome.answer">
-              <button v-if="!turn.distilled" @click="emit('distill', turn)">Save as note</button>
-              <span v-else class="done">Saved as note</span>
-            </div>
+
           </div>
         </div>
         <p v-if="props.chat.length === 0" class="empty">Ask questions, inspect traces, and keep useful notes from the right rail.</p>
       </div>
 
       <div class="agent-input">
+        <div v-if="props.askDraft" class="ask-draft">
+          <div class="ask-draft-head">
+            <span>Quoted source</span>
+            <code>{{ props.askDraft.lid }}</code>
+            <button title="Clear quoted source" @click="emit('clear-ask')">×</button>
+          </div>
+          <blockquote>{{ props.askDraft.quote }}</blockquote>
+        </div>
         <textarea
           :value="props.agentInput"
           rows="3"
-          placeholder="Ask from the current reading position…"
+          :placeholder="props.askDraft ? 'Ask about the quoted source…' : 'Ask from the current reading position…'"
           @input="emit('update:agentInput', ($event.target as HTMLTextAreaElement).value)"
           @keydown.ctrl.enter="emit('send-agent')"
         />
@@ -204,6 +257,14 @@ function excerpt(rec: MemoryRecord): string {
       </div>
       <p v-else class="empty panel-empty">No notes or highlights near the current viewport.</p>
     </section>
+    <div
+      v-if="answerSelection"
+      class="answer-popover"
+      :style="{ left: answerSelection.x + 'px', top: answerSelection.y - 40 + 'px' }"
+    >
+      <button @mousedown.prevent="saveAnswerSelection(answerSelection.turn)">Note</button>
+    </div>
+
   </aside>
 </template>
 
@@ -287,6 +348,33 @@ function excerpt(rec: MemoryRecord): string {
 }
 .turn {
   margin-bottom: 1rem;
+}
+.turn-quote {
+  margin: 0 0 0.45rem;
+  border: 1px solid var(--hairline-soft);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  padding: 0.55rem 0.65rem;
+}
+.turn-quote-head {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 0.35rem;
+  color: var(--steel);
+  font-size: 0.72rem;
+  font-weight: 650;
+  text-transform: uppercase;
+}
+.turn-quote-head code {
+  margin-left: auto;
+  font-family: var(--mono);
+  text-transform: none;
+}
+.turn-quote blockquote {
+  margin: 0;
+  color: var(--slate);
+  font-size: 0.84rem;
+  overflow-wrap: anywhere;
 }
 .u-msg {
   margin: 0 0 0.35rem;
@@ -376,8 +464,56 @@ function excerpt(rec: MemoryRecord): string {
 .memory-card p {
   overflow-wrap: anywhere;
 }
-.distill {
-  margin-top: 0.6rem;
+.answer-popover {
+  position: fixed;
+  transform: translateX(-50%);
+  z-index: 70;
+  display: flex;
+  gap: 0.25rem;
+  padding: 0.25rem;
+  border-radius: 999px;
+  background: var(--ink);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.24);
+}
+.answer-popover button {
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: #fff;
+  padding: 0.28rem 0.65rem;
+  font-size: 0.82rem;
+}
+.ask-draft {
+  border: 1px solid var(--hairline-soft);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  padding: 0.65rem 0.75rem;
+}
+.ask-draft-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.45rem;
+  color: var(--steel);
+  font-size: 0.74rem;
+  font-weight: 650;
+  text-transform: uppercase;
+}
+.ask-draft-head code {
+  margin-left: auto;
+  font-family: var(--mono);
+  text-transform: none;
+}
+.ask-draft-head button {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+}
+.ask-draft blockquote {
+  margin: 0;
+  color: var(--slate);
+  font-size: 0.84rem;
+  overflow-wrap: anywhere;
 }
 .agent-input {
   border-top: 1px solid var(--hairline);

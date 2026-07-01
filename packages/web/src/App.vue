@@ -430,6 +430,20 @@ function noteSelection() {
   window.getSelection()?.removeAllRanges();
   openNewNote(p.lid, quote ? `> ${quote}` : "");
 }
+function askSelection() {
+  const p = hlPopover.value;
+  if (!p) return;
+  const quote = p.text.replace(/\s+/g, " ").trim();
+  if (!quote) return;
+  askDraft.value = { lid: p.lid, quote };
+  selectedLid.value = p.lid;
+  agentInput.value = "";
+  hlPopover.value = null;
+  window.getSelection()?.removeAllRanges();
+}
+function clearAskDraft() {
+  askDraft.value = null;
+}
 
 // ── agent 对话区(外层 E agent 主入口)`[ADR-0030]` ──
 interface ChatTurn {
@@ -437,10 +451,16 @@ interface ChatTurn {
   outcome: OuterOutcome | null;
   pending: boolean;
   error?: string;
-  distilled?: boolean;
+  questionAnchorLid: string | null;
+  questionQuote: AskDraft | null;
+}
+interface AskDraft {
+  lid: string;
+  quote: string;
 }
 const chat = ref<ChatTurn[]>([]);
 const agentInput = ref("");
+const askDraft = ref<AskDraft | null>(null);
 const sending = ref(false);
 const showTrace = ref<Record<string, boolean>>({});
 const latestTrace = computed<TraceStep[]>(() => {
@@ -478,14 +498,20 @@ function gotoBack(e: AgentEffect): string {
 async function sendAgent() {
   const msg = agentInput.value.trim();
   if (!msg) return;
-  const turn: ChatTurn = { user: msg, outcome: null, pending: true };
+  const draft = askDraft.value;
+  const questionAnchorLid = draft?.lid ?? viewport.value?.anchor_lid ?? null;
+  const outbound = draft
+    ? `引用原文 [LID: ${draft.lid}]:\n「${draft.quote}」\n\n我的问题:\n${msg}`
+    : msg;
+  const turn: ChatTurn = { user: msg, outcome: null, pending: true, questionAnchorLid, questionQuote: draft ? { ...draft } : null };
   chat.value.push(turn);
   agentInput.value = "";
   sending.value = true;
   banner.value = "";
   try {
-    turn.outcome = await api.agentChat(msg);
+    turn.outcome = await api.agentChat(outbound);
     // agent 可能驱动了共享 reader 视口 / 落了 session 标注 → 同步阅读区。
+    askDraft.value = null;
     await syncViewport();
   } catch (e) {
     turn.error = e instanceof ApiError ? `[${e.category}] ${e.errorCode}: ${e.message}` : String(e);
@@ -535,15 +561,13 @@ async function keepEffect(ti: number, ei: number, e: AgentEffect) {
   }
 }
 
-// 对话末「凝练成笔记」:把 answer 存为 note(锚当前视口 anchor),long_term。
-async function distill(turn: ChatTurn) {
-  const ans = turn.outcome?.answer;
-  const anchor = viewport.value?.anchor_lid;
-  if (!ans || !anchor) return;
+async function saveAgentSelection(turn: ChatTurn, text: string) {
+  const anchor = turn.questionAnchorLid;
+  const content = text.trim();
+  if (!content || !anchor) return;
   try {
     banner.value = "";
-    await api.save({ type: "note", anchor_lid: anchor, content: ans, layer: "long_term" });
-    turn.distilled = true;
+    await api.save({ type: "note", anchor_lid: anchor, content, layer: "long_term" });
     await refreshAnnotations();
   } catch (e) {
     fail(e);
@@ -670,12 +694,14 @@ async function openBook() {
         :eff-state="effState"
         :is-goto="isGoto"
         :goto-back="gotoBack"
+        :ask-draft="askDraft"
         @send-agent="sendAgent"
         @new-chat="newChat"
+        @clear-ask="clearAskDraft"
         @toggle-trace="toggleTrace"
         @undo-effect="undoEffect"
         @keep-effect="keepEffect"
-        @distill="distill"
+        @save-answer-selection="saveAgentSelection"
       />
     </div>
 
@@ -686,6 +712,7 @@ async function openBook() {
     >
       <button @mousedown.prevent="confirmHighlight">Highlight</button>
       <button @mousedown.prevent="noteSelection">Note</button>
+      <button @mousedown.prevent="askSelection">Ask AI</button>
     </div>
 
     <div v-if="noteEditor" class="note-modal" @click.self="cancelNote">
@@ -807,9 +834,6 @@ async function openBook() {
 }
 .trace .t-res {
   color: #999;
-}
-.distill {
-  margin-top: 0.5em;
 }
 .agent-input {
   display: flex;
