@@ -304,6 +304,10 @@ body {
   overflow-y: auto;
   background: var(--canvas);
 }
+.reader-pane:focus {
+  outline: 2px solid rgba(0, 120, 210, 0.22);
+  outline-offset: -2px;
+}
 .prose {
   width: min(760px, calc(100% - 4rem));
   margin: 0 auto;
@@ -697,11 +701,6 @@ button.primary {
   background: var(--brand-green);
   color: var(--ink);
 }
-.icon-pill {
-  width: 32px;
-  height: 32px;
-  padding: 0;
-}
 input,
 textarea {
   font: inherit;
@@ -813,10 +812,6 @@ input:focus {
   .topbar-actions {
     width: 100%;
     justify-content: space-between;
-  }
-  .icon-pill {
-    width: 44px;
-    height: 44px;
   }
   button {
     min-height: 40px;

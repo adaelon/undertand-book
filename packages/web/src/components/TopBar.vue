@@ -7,7 +7,6 @@ defineProps<{
   leftRailOpen: boolean;
 }>();
 const emit = defineEmits<{
-  (e: "scroll", delta: number): void;
   (e: "new-chat"): void;
   (e: "open-book"): void;
   (e: "toggle-left-rail"): void;
@@ -23,8 +22,6 @@ const emit = defineEmits<{
     </div>
     <div class="topbar-actions">
       <span class="progress">{{ progressPct }}%</span>
-      <button class="icon-pill" title="上翻" @click="emit('scroll', -3)">↑</button>
-      <button class="icon-pill" title="下翻" @click="emit('scroll', 3)">↓</button>
       <button class="ghost-pill" :class="{ active: leftRailOpen }" @click="emit('toggle-left-rail')">Outline</button>
       <button class="ghost-pill" @click="emit('new-chat')">New chat</button>
       <button class="ghost-pill" @click="emit('open-book')">Open book</button>

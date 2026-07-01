@@ -76,6 +76,27 @@ function onScroll() {
   else if (el.scrollHeight - el.scrollTop - el.clientHeight <= edgePx) emit("scroll-edge", "down");
 }
 
+function isEditableTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  const tag = target.tagName.toLowerCase();
+  return tag === "input" || tag === "textarea" || tag === "select" || target.isContentEditable;
+}
+
+function onKeydown(event: KeyboardEvent) {
+  const el = pane.value;
+  if (!el || isEditableTarget(event.target)) return;
+  const line = 72;
+  const page = Math.max(line, Math.floor(el.clientHeight * 0.82));
+  let delta = 0;
+  if (event.key === "ArrowDown") delta = line;
+  else if (event.key === "ArrowUp") delta = -line;
+  else if (event.key === "PageDown") delta = page;
+  else if (event.key === "PageUp") delta = -page;
+  else return;
+  event.preventDefault();
+  el.scrollBy({ top: delta, behavior: "smooth" });
+}
+
 watch(
   () => props.scrollRestoreId,
   async () => {
@@ -92,7 +113,7 @@ watch(
 </script>
 
 <template>
-  <main ref="pane" class="reader-pane" @scroll.passive="onScroll">
+  <main ref="pane" class="reader-pane" tabindex="0" @scroll.passive="onScroll" @keydown="onKeydown">
     <article class="prose" @mouseup="emit('prose-mouse-up')">
       <div v-for="seg in props.segments" :key="seg.lid" class="seg">
         <template v-if="!props.isAsset(seg)">

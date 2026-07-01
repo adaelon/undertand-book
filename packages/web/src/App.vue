@@ -376,15 +376,6 @@ async function init() {
 onMounted(init);
 
 // ── 四动作 ──
-async function doScroll(delta: number) {
-  try {
-    banner.value = "";
-    sourceFocus.value = null;
-    await loadWindow((await api.scroll(delta)).viewport);
-  } catch (e) {
-    fail(e);
-  }
-}
 async function onScrollEdge(direction: "up" | "down") {
   if (edgeLoading.value || !viewport.value) return;
   const step = Math.max(1, Math.floor(viewport.value.width / 2));
@@ -718,7 +709,6 @@ async function openBook() {
       :anchor-lid="viewport?.top_lid ?? null"
       :debug-open="debugOpen"
       :left-rail-open="leftRailOpen"
-      @scroll="doScroll"
       @new-chat="newChat"
       @open-book="openBook"
       @toggle-left-rail="leftRailOpen = !leftRailOpen"
