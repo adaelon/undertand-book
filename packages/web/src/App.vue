@@ -3,6 +3,7 @@ import { computed, onMounted, ref } from "vue";
 import { api, ApiError } from "./api";
 import type { AgentEffect, FormulaSemantics, MemoryRecord, OuterOutcome, TraceStep, Viewport } from "./api";
 import { renderInlineMarkdown, renderMarkdown } from "./md";
+import { rangeToMarkdown } from "./selection";
 import TopBar from "./components/TopBar.vue";
 import LeftRail from "./components/LeftRail.vue";
 import ReaderPane from "./components/ReaderPane.vue";
@@ -492,7 +493,7 @@ function onProseMouseUp() {
     hlPopover.value = null;
     return;
   }
-  const quote = range.toString();
+  const quote = rangeToMarkdown(range);
   if (!quote.trim()) {
     hlPopover.value = null;
     return;
