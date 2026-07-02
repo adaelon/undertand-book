@@ -214,6 +214,38 @@ pub struct SynthesizeResponse {
     pub related_concepts: Vec<String>,
     pub suggested_probing: Vec<String>,
 }
+/// P7 `book_guide`: visitor-facing route guide input. The caller owns session
+/// lifecycle and injects the ephemeral session context explicitly.
+#[derive(Debug, Clone)]
+pub struct BookGuideRequest {
+    pub intent: String,
+    pub anchor_lid: Option<String>,
+}
+
+/// Ephemeral visitor session projection consumed by `book_guide`.
+/// This deliberately contains no reader viewport, no memory store, and no
+/// reader_profile.
+#[derive(Debug, Clone, Default)]
+pub struct BookGuideSessionContext {
+    pub cursor_at_lid: Option<String>,
+    pub last_frontier: Vec<RankedStep>,
+    pub transcript_tail: Vec<String>,
+}
+
+/// `book_guide` response: route first, prose second. Every route step is a
+/// true `RankedStep` from Core route primitives; prose citations are filtered
+/// against the supplied route evidence.
+#[derive(Debug, Serialize)]
+pub struct BookGuideResponse {
+    pub intent: String,
+    pub entry_lid: String,
+    pub refined: bool,
+    pub route: Vec<RankedStep>,
+    pub frontier: Vec<RankedStep>,
+    pub answer: Option<String>,
+    pub citations: Vec<Citation>,
+    pub model_supplement: Vec<SupplementOut>,
+}
 /// 物化路径父 LID:"11.18.4" → Some("11.18");"1" → None。
 fn parent_of(lid: &str) -> Option<String> {
     lid.rfind('.').map(|i| lid[..i].to_string())
@@ -869,6 +901,263 @@ pub fn query(
         // 否则外扩到下一档(早停防护:声称 sufficient 但零有效 citation 也外扩)。
     }
     unreachable!("ladder 非空,必在循环内 return")
+}
+
+fn first_leaf_lid(book: &Book) -> Result<String, ToolError> {
+    book.base
+        .lid_nodes
+        .iter()
+        .find(|n| n.children.is_empty())
+        .or_else(|| book.base.lid_nodes.first())
+        .map(|n| n.lid.clone())
+        .ok_or_else(|| ToolError {
+            error_code: "LID_NOT_FOUND".into(),
+            category: "not_found".into(),
+            message: "书内没有可导航 LID".into(),
+        })
+}
+
+fn graph_node_lid(book: &Book, idx: usize) -> Option<String> {
+    let node = &book.base.graph_nodes[idx];
+    match node.node_type {
+        GraphNodeType::Claim => node.source_lid.clone(),
+        GraphNodeType::Entity | GraphNodeType::Concept => node.occurrences.first().cloned(),
+    }
+}
+
+fn guide_entry_lid(book: &Book, intent: &str, anchor_lid: Option<&str>) -> Result<String, ToolError> {
+    if let Some(anchor) = anchor_lid {
+        book.text(anchor, None)?;
+        return Ok(anchor.to_string());
+    }
+
+    let intent_lower = intent.to_lowercase();
+    for (idx, node) in book.base.graph_nodes.iter().enumerate() {
+        let name = node.name.trim();
+        if !name.is_empty() && intent_lower.contains(&name.to_lowercase()) {
+            if let Some(lid) = graph_node_lid(book, idx) {
+                book.text(&lid, None)?;
+                return Ok(lid);
+            }
+        }
+    }
+
+    first_leaf_lid(book)
+}
+
+fn guide_rejects_previous(intent: &str) -> bool {
+    let lower = intent.to_lowercase();
+    intent.contains("不对")
+        || intent.contains("不對")
+        || intent.contains("不是")
+        || intent.contains("换一个")
+        || lower.contains("wrong")
+        || lower.contains("not that")
+        || lower.contains("try another")
+}
+
+fn next_frontier_branch(ctx: &BookGuideSessionContext) -> Option<RankedStep> {
+    if ctx.last_frontier.is_empty() {
+        return None;
+    }
+    if let Some(current) = &ctx.cursor_at_lid {
+        if let Some(i) = ctx.last_frontier.iter().position(|s| &s.lid == current) {
+            return ctx
+                .last_frontier
+                .get(i + 1)
+                .or_else(|| ctx.last_frontier.first())
+                .cloned();
+        }
+    }
+    ctx.last_frontier.first().cloned()
+}
+
+fn flatten_frontier(f: Frontier) -> Vec<RankedStep> {
+    let Frontier {
+        back,
+        forward,
+        concretize,
+        cross,
+        continue_,
+    } = f;
+    let mut out = Vec::new();
+    out.extend(continue_);
+    out.extend(back);
+    out.extend(concretize);
+    out.extend(forward);
+    out.extend(cross);
+    out
+}
+
+fn insert_guide_evidence(
+    book: &Book,
+    ev: &mut EvidenceSet,
+    lid: &str,
+) -> Result<(), ToolError> {
+    if !ev.contains_key(lid) {
+        ev.insert(lid.to_string(), book.text(lid, None)?);
+    }
+    Ok(())
+}
+
+fn guide_evidence(
+    book: &Book,
+    entry_lid: &str,
+    route: &[RankedStep],
+) -> Result<EvidenceSet, ToolError> {
+    let mut ev = EvidenceSet::new();
+    insert_guide_evidence(book, &mut ev, entry_lid)?;
+    for step in route {
+        insert_guide_evidence(book, &mut ev, &step.lid)?;
+        for lid in &step.evidence_lids {
+            insert_guide_evidence(book, &mut ev, lid)?;
+        }
+    }
+    Ok(ev)
+}
+
+fn build_book_guide_prompt(
+    intent: &str,
+    entry_lid: &str,
+    refined: bool,
+    route: &[RankedStep],
+    ev: &EvidenceSet,
+    transcript_tail: &[String],
+) -> CompletionRequest {
+    let mut user = String::from("访客意图:\n");
+    user.push_str(intent);
+    user.push_str("\n\n入口 LID:\n");
+    user.push_str(entry_lid);
+    user.push_str("\n\n本轮状态:\n");
+    user.push_str(if refined {
+        "访客否定了上一条路线,请中立换到另一条结构分支。\n"
+    } else {
+        "首次或继续引导,请给出可验证路线。\n"
+    });
+    if !transcript_tail.is_empty() {
+        user.push_str("\n访客会话摘要(仅临时③,不可当书中事实):\n");
+        for item in transcript_tail {
+            user.push_str("- ");
+            user.push_str(item);
+            user.push('\n');
+        }
+    }
+    user.push_str("\n路线步骤(每步都是真 LID/真边):\n");
+    if route.is_empty() {
+        user.push_str("- 当前入口暂无可继续展开的 route 前沿,请围绕入口说明下一步如何核查。\n");
+    } else {
+        for (idx, step) in route.iter().enumerate() {
+            user.push_str(&format!(
+                "{}. {} via {}: {} evidence=[{}]\n",
+                idx + 1,
+                step.lid,
+                step.edge_type,
+                step.why,
+                step.evidence_lids.join(", ")
+            ));
+        }
+    }
+    user.push_str("\n证据(每条前缀 [LID],citations 只能引用这里出现的 LID):\n");
+    for (lid, text) in ev {
+        user.push_str(&format!("[{lid}] {text}\n"));
+    }
+    CompletionRequest {
+        system: "你是书内路线向导。只给访客可独立验证的阅读路线,不使用读者私人记忆、reader viewport 或 memory。\
+                 answer 用中立语气说明入口和下一步;citations 只能引用证据 LID。"
+            .into(),
+        user,
+    }
+}
+
+/// P7 `book_guide(intent, anchor?, session_ctx?)`: `book.query`'s route sibling.
+/// It is a lite LLM command over the read-only book plus explicit visitor
+/// session context, and never calls the resident orchestrator `run()`.
+pub fn book_guide(
+    book: &Book,
+    req: BookGuideRequest,
+    session_ctx: Option<&BookGuideSessionContext>,
+    adapter: &dyn ModelAdapter,
+) -> Result<BookGuideResponse, ToolError> {
+    let intent = req.intent.trim();
+    if intent.is_empty() {
+        return Err(ToolError {
+            error_code: "INVALID_RANGE".into(),
+            category: "validation".into(),
+            message: "book_guide 需 intent".into(),
+        });
+    }
+
+    let refined = session_ctx
+        .map(|ctx| guide_rejects_previous(intent) && !ctx.last_frontier.is_empty())
+        .unwrap_or(false);
+    let previous_branch = if refined {
+        session_ctx.and_then(next_frontier_branch)
+    } else {
+        None
+    };
+    let entry_lid = match &previous_branch {
+        Some(step) => {
+            book.text(&step.lid, None)?;
+            step.lid.clone()
+        }
+        None => guide_entry_lid(book, intent, req.anchor_lid.as_deref())?,
+    };
+
+    let frontier = flatten_frontier(book.route_from(&entry_lid, None)?);
+    let mut route = Vec::new();
+    if let Some(step) = previous_branch {
+        route.push(step);
+    }
+    for step in frontier.iter().take(3) {
+        if route.iter().all(|s: &RankedStep| s.lid != step.lid) {
+            route.push(step.clone());
+        }
+    }
+
+    let ev = guide_evidence(book, &entry_lid, &route)?;
+    let transcript_tail: Vec<String> = session_ctx
+        .map(|ctx| ctx.transcript_tail.iter().rev().take(4).cloned().collect())
+        .unwrap_or_default();
+    let resp = adapter
+        .complete(build_book_guide_prompt(
+            intent,
+            &entry_lid,
+            refined,
+            &route,
+            &ev,
+            &transcript_tail,
+        ))
+        .map_err(|e| ToolError {
+            error_code: "PROVIDER_ERROR".into(),
+            category: "provider".into(),
+            message: e.message,
+        })?;
+    let valid = valid_citations(&resp, &ev);
+
+    Ok(BookGuideResponse {
+        intent: intent.to_string(),
+        entry_lid,
+        refined,
+        route,
+        frontier,
+        answer: resp.answer,
+        citations: valid
+            .into_iter()
+            .map(|c| Citation {
+                lid: c.lid,
+                text: c.text,
+                role: c.role,
+            })
+            .collect(),
+        model_supplement: resp
+            .model_supplement
+            .into_iter()
+            .map(|s| SupplementOut {
+                text: s.text,
+                source: "model".into(),
+            })
+            .collect(),
+    })
 }
 
 // ─────────────────────────── NativeAdapter(S5b)───────────────────────────

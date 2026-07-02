@@ -20,6 +20,8 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+pub mod mcp;
+
 /// 服务的单会话共享状态(切片0 单用户单书)`[ADR-0028 决策2]`。
 /// S10b:持只读 `Book` + 会话态 `Reader` + 用户私有 `MemoryStore`(物理隔离 `[ADR-0006]`)。
 /// S10c:持 LLM `adapter`(`book.query` 经它触模型;`+ Send` 供 `Arc<Mutex<_>>` 跨 worker 线程)。
@@ -33,6 +35,8 @@ pub struct AppState {
     pub messages: Vec<Message>,
     /// 阅读位置持久化文件路径(~/.understand-book/session.json);None 则不持久化。
     pub session_path: Option<PathBuf>,
+    /// P7 访客向导会话表:ephemeral ③,只给 MCP `book_guide` 使用,不写 durable memory。
+    pub visitor_sessions: mcp::VisitorSessions,
 }
 
 /// 一次请求的传输无关输入:方法 + 原始 url(含 query)+ JSON body(GET 为空)+ 时间戳。
@@ -769,6 +773,7 @@ mod tests {
             adapter,
             messages: new_session(),
             session_path: None,
+            visitor_sessions: mcp::VisitorSessions::default(),
         }
     }
 
@@ -886,6 +891,7 @@ mod tests {
             adapter,
             messages: new_session(),
             session_path: None,
+            visitor_sessions: mcp::VisitorSessions::default(),
         };
 
         let ok = get(&mut s, "/book/formula_semantics?lid=1.1");
@@ -1216,6 +1222,7 @@ mod tests {
             adapter,
             messages: new_session(),
             session_path: None,
+            visitor_sessions: mcp::VisitorSessions::default(),
         };
 
         let r = post(

@@ -9,7 +9,9 @@ use read_tools::Book;
 use reader::{Reader, DEFAULT_RADIUS};
 use runtime::orchestrator::new_session;
 use runtime::{ModelAdapter, NativeAdapter};
-use server::{route, AppState, Req, UnconfiguredAdapter, load_session, save_session};
+use server::{
+    load_session, mcp::VisitorSessions, route, save_session, AppState, Req, UnconfiguredAdapter,
+};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -73,6 +75,7 @@ fn main() {
         adapter,
         messages,
         session_path,
+        visitor_sessions: VisitorSessions::default(),
     }));
     // 启动时立即写入 session.json(book_dir + 当前 top_lid),否则后续 goto/scroll
     // 的 save_session(None) 因读不到旧 book_dir 而永远不写,重启即丢位置。
