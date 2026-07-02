@@ -424,6 +424,8 @@ function excerpt(rec: MemoryRecord): string {
   margin: 0;
   color: var(--slate);
   font-size: 0.84rem;
+  max-height: 8rem;
+  overflow-y: auto;
   overflow-wrap: anywhere;
 }
 .u-msg {
@@ -563,6 +565,8 @@ function excerpt(rec: MemoryRecord): string {
   margin: 0;
   color: var(--slate);
   font-size: 0.84rem;
+  max-height: 6rem;
+  overflow-y: auto;
   overflow-wrap: anywhere;
 }
 .agent-input {
