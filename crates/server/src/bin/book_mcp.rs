@@ -2,7 +2,7 @@ use memory::MemoryStore;
 use read_tools::Book;
 use reader::{Reader, DEFAULT_RADIUS};
 use runtime::orchestrator::new_session;
-use runtime::{ModelAdapter, NativeAdapter};
+use runtime::{ModelAdapter, ProviderRegistry};
 use server::mcp::{handle_jsonrpc_message, VisitorSessions};
 use server::{AppState, UnconfiguredAdapter};
 use std::io::{BufRead, Write};
@@ -31,8 +31,8 @@ fn main() {
             std::process::exit(1);
         }
     };
-    let adapter: Box<dyn ModelAdapter + Send> = match NativeAdapter::from_env() {
-        Ok(adapter) => Box::new(adapter),
+    let adapter: Box<dyn ModelAdapter + Send> = match ProviderRegistry::adapter_from_env() {
+        Ok(adapter) => adapter,
         Err(_) => Box::new(UnconfiguredAdapter),
     };
     let mut state = AppState {

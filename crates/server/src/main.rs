@@ -8,7 +8,7 @@ use memory::MemoryStore;
 use read_tools::Book;
 use reader::{Reader, DEFAULT_RADIUS};
 use runtime::orchestrator::new_session;
-use runtime::{ModelAdapter, NativeAdapter};
+use runtime::{ModelAdapter, ProviderRegistry};
 use server::{
     load_session, mcp::VisitorSessions, route, save_session, AppState, Req, UnconfiguredAdapter,
 };
@@ -32,7 +32,9 @@ fn main() {
         .map(|p| p.join("session.json"));
     // 若 session.json 存在且 book_dir 不同、且该目录可加载,则改用 session 的 book_dir。
     let (dir, saved_top) = match load_session(&session_path) {
-        Some(s) if s.book_dir != dir && Book::load(&s.book_dir).is_ok() => (s.book_dir, Some(s.top_lid)),
+        Some(s) if s.book_dir != dir && Book::load(&s.book_dir).is_ok() => {
+            (s.book_dir, Some(s.top_lid))
+        }
         Some(s) if s.book_dir == dir => (dir, Some(s.top_lid)),
         _ => (dir, None),
     };
@@ -56,8 +58,8 @@ fn main() {
     }
     // book.query 的 LLM 后端:读 .env;缺配置则兜底 UnconfiguredAdapter
     // (book/reader/memory 浏览照常,仅 query 触模型时报 PROVIDER_ERROR)`[ADR-0028]`。
-    let adapter: Box<dyn ModelAdapter + Send> = match NativeAdapter::from_env() {
-        Ok(a) => Box::new(a),
+    let adapter: Box<dyn ModelAdapter + Send> = match ProviderRegistry::adapter_from_env() {
+        Ok(a) => a,
         Err(e) => {
             eprintln!(
                 "⚠ 未配置 LLM 后端({});book.query 将返 PROVIDER_ERROR,其余命令正常",

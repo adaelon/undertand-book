@@ -7,7 +7,7 @@ use read_tools::Book;
 use reader::{Reader, DEFAULT_RADIUS};
 use runtime::goldset::{run_goldset, GoldItem};
 use runtime::orchestrator::{new_session, run, OuterConfig};
-use runtime::{query, NativeAdapter};
+use runtime::{query, ProviderRegistry};
 use std::process::exit;
 
 fn usage() -> ! {
@@ -40,7 +40,7 @@ fn main() {
             exit(1);
         }
     };
-    let adapter = match NativeAdapter::from_env() {
+    let adapter = match ProviderRegistry::adapter_from_env() {
         Ok(a) => a,
         Err(e) => {
             eprintln!("adapter 初始化失败: {}", e.message);
@@ -55,10 +55,13 @@ fn main() {
             }
             let anchor = &args[3];
             let question = args[4..].join(" ");
-            match query(&book, &question, anchor, &adapter) {
+            match query(&book, &question, anchor, adapter.as_ref()) {
                 Ok(out) => println!("{}", serde_json::to_string_pretty(&out).unwrap()),
                 Err(e) => {
-                    eprintln!("query 失败: [{}/{}] {}", e.category, e.error_code, e.message);
+                    eprintln!(
+                        "query 失败: [{}/{}] {}",
+                        e.category, e.error_code, e.message
+                    );
                     exit(1);
                 }
             }
@@ -71,13 +74,25 @@ fn main() {
             let mut store = match MemoryStore::open(MemoryStore::default_path()) {
                 Ok(s) => s,
                 Err(e) => {
-                    eprintln!("memory 打开失败: [{}/{}] {}", e.category, e.error_code, e.message);
+                    eprintln!(
+                        "memory 打开失败: [{}/{}] {}",
+                        e.category, e.error_code, e.message
+                    );
                     exit(1);
                 }
             };
             let mut reader = Reader::new(&book, DEFAULT_RADIUS);
             let mut messages = new_session();
-            match run(&book, &mut store, &mut reader, &adapter, &mut messages, &question, &now_ts(), OuterConfig::default()) {
+            match run(
+                &book,
+                &mut store,
+                &mut reader,
+                adapter.as_ref(),
+                &mut messages,
+                &question,
+                &now_ts(),
+                OuterConfig::default(),
+            ) {
                 Ok(out) => println!("{}", serde_json::to_string_pretty(&out).unwrap()),
                 Err(e) => {
                     eprintln!("chat 失败: [{}/{}] {}", e.category, e.error_code, e.message);
@@ -104,7 +119,7 @@ fn main() {
                     exit(1);
                 }
             };
-            match run_goldset(&book, &adapter, &items) {
+            match run_goldset(&book, adapter.as_ref(), &items) {
                 Ok(rep) => {
                     println!("{}", serde_json::to_string_pretty(&rep).unwrap());
                     // 一行汇总到 stderr(结构红线判据 = 100%)。
@@ -115,7 +130,10 @@ fn main() {
                         rep.mean_recall, rep.mean_precision, rep.incomplete_count, rep.errored, rep.total
                     );
                     if rep.errored > 0 {
-                        eprintln!("!! {} 条 query 失败(provider 偶发,重试后仍失败)——见报告 items[].error", rep.errored);
+                        eprintln!(
+                            "!! {} 条 query 失败(provider 偶发,重试后仍失败)——见报告 items[].error",
+                            rep.errored
+                        );
                     }
                     if rep.structural_redline_pct < 100.0 {
                         eprintln!("!! 结构红线未达 100%:存在悬空 citation,违 [ADR-0004]");
@@ -123,7 +141,10 @@ fn main() {
                     }
                 }
                 Err(e) => {
-                    eprintln!("goldset 失败: [{}/{}] {}", e.category, e.error_code, e.message);
+                    eprintln!(
+                        "goldset 失败: [{}/{}] {}",
+                        e.category, e.error_code, e.message
+                    );
                     exit(1);
                 }
             }

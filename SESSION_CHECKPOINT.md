@@ -1,27 +1,32 @@
-# SESSION_CHECKPOINT - 2026-07-02 10:30
+# SESSION_CHECKPOINT - 2026-07-03 00:04
 
 ## Freshness check
-- Commit at write time: `6113893` feat(web): S13a move notes back into seg loop, revert S12d overlay
-- On read, compare with `git log -3`; if different, trust git log.
+- Commit at write time: 071b044 fix: stabilize startup and folded note previews
+- On read, compare with `git log --oneline -3`; if different, trust git log.
 
 ## What's in progress
-S13a note-in-seg is implemented and committed; note cards render inside the prose seg loop per LID instead of a separate overlay. No active slice.
+P5 ReActAdapter + provider registry is implemented and tested, but not committed.
 
 ## Next steps (ready to hand off)
-1. Optional browser smoke: start server + web dev, confirm notes appear after each segment, scroll-edge still works, keyboard fallback intact.
-2. If smoke reveals roughness, create a new S13b slice; do not fold into S13a.
-3. Consider cleaning duplicate `.note-source` / `.note-actions` style rules in style.css (pre-existing tech debt from S11n/S11p/S12d accumulation).
+1. Review `git diff -- crates/runtime/src/lib.rs crates/runtime/src/orchestrator.rs crates/runtime/src/main.rs crates/server/src/main.rs crates/server/src/bin/book_mcp.rs docs/代码链路.md SESSION_CHECKPOINT.md`.
+2. Decide whether to commit P5 now or first fix the known runtime viewport failures.
+3. If committing, stage only P5 files plus docs/checkpoint and run `git status --short`.
+4. Optional follow-up: investigate `reader.gotoLid`/viewport anchor staying at `1.5` in the two existing runtime failures.
 
 ## Uncommitted / unfinished
-- None for tracked S13a files.
-- Unrelated untracked files left untouched: `.fluid/`, `agent交互书.md`, `docs/预购建流程.md`, `grill.md`, `packages/web/vite-dev.log`, `todo.md`, `参考2.md`, `参考_discourse_prompt.md`, `参考_硅基天启：灭世之技术推演.md`, `参考pass2.md`.
+- P5 changed: `crates/runtime/src/lib.rs`, `crates/runtime/src/orchestrator.rs`, `crates/runtime/src/main.rs`, `crates/server/src/main.rs`, `crates/server/src/bin/book_mcp.rs`, `docs/代码链路.md`, `SESSION_CHECKPOINT.md`.
+- Verification: `cargo test -p server` passed.
+- Verification: `cargo test -p runtime` = 48 passed, 2 failed; failed tests are known pre-P5 viewport failures: `orchestrator::tests::guided_read_one_stop_pipeline` and `orchestrator::tests::agent_viewport_change_merges_into_single_goto_effect`.
+- P5-specific tests passed: `react_parser*`, `provider_config_defaults_native_and_selects_react`, `native_and_react_adapters_converge_on_runtime_tool_results`, `react_protocol_error_maps_to_provider_error`.
+- Unrelated untracked files remain intentionally untouched: `.fluid/`, `agent交互书.md`, `docs/预购建流程.md`, `grill.md`, `packages/web/vite-dev.log`, `server-stdout.log`, `server-stderr.log`, `todo.md`, `参考*.md`.
 
 ## Cold-start reading sequence
-1. `docs/adr/0043-reader连续滚动视口-后端区间窗口-前端虚拟流-note-overlay.md` - S12 decisions (decision 7 revised by S13a).
-2. `docs/代码链路.md` - S12a-S12e + S13a implementation trail.
-3. `crates/reader/src/lib.rs` - interval viewport backend semantics.
-4. `packages/web/src/api.ts` and `packages/web/src/App.vue` - viewport DTO, progress, buffer loading.
-5. `packages/web/src/components/ReaderPane.vue`, `packages/web/src/components/TopBar.vue`, and `packages/web/src/style.css` - native scroll buffer, note-in-seg, keyboard fallback, no page buttons.
+1. `docs/切片方案-profile深路径.md` - P5 scope and P4/P6 boundaries.
+2. `docs/代码链路.md` - latest P5 entry plus S5/S6 adapter history.
+3. `crates/runtime/src/lib.rs` - ProviderRegistry, ReActAdapter, NativeAdapter, ModelAdapter contracts.
+4. `crates/runtime/src/orchestrator.rs` - Runtime-owned tool_specs/dispatch/run and P5 tests.
+5. `crates/runtime/src/main.rs`, `crates/server/src/main.rs`, `crates/server/src/bin/book_mcp.rs` - registry construction paths.
 
 ## Decisions made this session
-- S13a: note cards reverted from independent overlay (S12d) to in-seg-loop rendering per LID; ADR-0043 decision 7 revised; verification passed `pnpm typecheck` + `pnpm build`.
+- P5 provider selection uses `UNDERSTAND_BOOK_PROVIDER=native|react`, default `native`, reusing existing OpenAI-compatible endpoint env vars.
+- ReAct fallback only parses provider text into `AssistantTurn`; tool execution and ToolError envelopes stay in Runtime dispatch.

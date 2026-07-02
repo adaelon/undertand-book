@@ -67,6 +67,75 @@ pub struct AdapterError {
     pub message: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderMode {
+    Native,
+    ReAct,
+}
+
+impl ProviderMode {
+    fn parse(s: &str) -> Result<ProviderMode, AdapterError> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "" | "native" | "openai" | "openai-native" => Ok(ProviderMode::Native),
+            "react" | "react-adapter" | "openai-react" => Ok(ProviderMode::ReAct),
+            other => Err(AdapterError {
+                message: format!("未知 UNDERSTAND_BOOK_PROVIDER={other};支持 native / react"),
+            }),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ProviderConfig {
+    pub mode: ProviderMode,
+    pub api_key: String,
+    pub base_url: String,
+    pub model: String,
+}
+
+impl ProviderConfig {
+    fn from_getter<F>(mut get: F) -> Result<ProviderConfig, AdapterError>
+    where
+        F: FnMut(&str) -> Option<String>,
+    {
+        let required = |k: &str, get: &mut F| {
+            get(k).ok_or_else(|| AdapterError {
+                message: format!("缺少环境变量 {k}(填 .env 或 export)"),
+            })
+        };
+        let mode = ProviderMode::parse(
+            &get("UNDERSTAND_BOOK_PROVIDER").unwrap_or_else(|| "native".into()),
+        )?;
+        Ok(ProviderConfig {
+            mode,
+            api_key: required("OPENCODE_API_KEY", &mut get)?,
+            base_url: required("OPENCODE_BASE_URL", &mut get)?,
+            model: required("FLUID_LLM_MODEL", &mut get)?,
+        })
+    }
+
+    pub fn from_env() -> Result<ProviderConfig, AdapterError> {
+        dotenvy::dotenv().ok();
+        ProviderConfig::from_getter(|k| std::env::var(k).ok())
+    }
+}
+
+pub struct ProviderRegistry;
+
+impl ProviderRegistry {
+    pub fn adapter_from_env() -> Result<Box<dyn ModelAdapter + Send>, AdapterError> {
+        let cfg = ProviderConfig::from_env()?;
+        Ok(Self::adapter_from_config(cfg))
+    }
+
+    pub fn adapter_from_config(cfg: ProviderConfig) -> Box<dyn ModelAdapter + Send> {
+        match cfg.mode {
+            ProviderMode::Native => Box::new(NativeAdapter::from_config(cfg)),
+            ProviderMode::ReAct => Box::new(ReActAdapter::from_config(cfg)),
+        }
+    }
+}
+
 /// 外层 loop 会话消息角色(OpenAI-兼容)`[ADR-0026]`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
@@ -422,13 +491,21 @@ impl SynthesizeMode {
         let lower = task.to_ascii_lowercase();
         if task.contains("比较") || task.contains("对比") || lower.contains("compare") {
             SynthesizeMode::Compare
-        } else if task.contains("推导") || task.contains("证明") || lower.contains("derive") || lower.contains("prove") {
+        } else if task.contains("推导")
+            || task.contains("证明")
+            || lower.contains("derive")
+            || lower.contains("prove")
+        {
             SynthesizeMode::Derive
         } else if task.contains("教") || task.contains("讲给") || lower.contains("teach") {
             SynthesizeMode::Teach
         } else if task.contains("解释") || task.contains("说明") || lower.contains("explain") {
             SynthesizeMode::Explain
-        } else if task.contains("回答") || task.contains("问题") || lower.contains("answer") || lower.contains("question") {
+        } else if task.contains("回答")
+            || task.contains("问题")
+            || lower.contains("answer")
+            || lower.contains("question")
+        {
             SynthesizeMode::AnswerQuestion
         } else {
             SynthesizeMode::Summarize
@@ -451,7 +528,9 @@ impl SynthesizeMode {
             SynthesizeMode::Compare => "组织为相同点/差异点/适用边界,不要引入输入 LID 之外的证据。",
             SynthesizeMode::Explain => "优先给定义、机制、例子和限制,证据必须来自输入 LID。",
             SynthesizeMode::Summarize => "按章节/LID 顺序压缩主旨,保留关键限定条件。",
-            SynthesizeMode::Derive => "按原文证据给出逐步推导链,缺失步骤必须标为 model_supplement。",
+            SynthesizeMode::Derive => {
+                "按原文证据给出逐步推导链,缺失步骤必须标为 model_supplement。"
+            }
             SynthesizeMode::Teach => "用教学顺序组织解释,可补前置知识但不得把补充当 citation。",
             SynthesizeMode::AnswerQuestion => "直接回答问题,再列支撑证据和必要补充。",
         }
@@ -628,7 +707,6 @@ fn valid_citations(resp: &ParsedResponse, ev: &EvidenceSet) -> Vec<RawCitation> 
         .collect()
 }
 
-
 fn related_concepts(book: &Book, source_lids: &[String]) -> Vec<String> {
     let source: std::collections::BTreeSet<&str> = source_lids.iter().map(|s| s.as_str()).collect();
     let mut names = std::collections::BTreeSet::new();
@@ -643,7 +721,12 @@ fn related_concepts(book: &Book, source_lids: &[String]) -> Vec<String> {
                 .iter()
                 .any(|lid| source.contains(lid.as_str())),
         };
-        if anchored && matches!(node.node_type, GraphNodeType::Entity | GraphNodeType::Concept) {
+        if anchored
+            && matches!(
+                node.node_type,
+                GraphNodeType::Entity | GraphNodeType::Concept
+            )
+        {
             names.insert(node.name.clone());
         }
     }
@@ -663,7 +746,10 @@ fn suggested_probing(book: &Book, source_lids: &[String]) -> Vec<String> {
             }
             for rel in &item.relations {
                 let target_in_input = source.contains(rel.target_lid.as_str());
-                let evidence_in_input = rel.evidence_lids.iter().all(|l| source.contains(l.as_str()));
+                let evidence_in_input = rel
+                    .evidence_lids
+                    .iter()
+                    .all(|l| source.contains(l.as_str()));
                 if target_in_input && evidence_in_input {
                     suggestions.insert(format!(
                         "追问 {lid} 如何通过 {} 关系连接 {}",
@@ -925,7 +1011,11 @@ fn graph_node_lid(book: &Book, idx: usize) -> Option<String> {
     }
 }
 
-fn guide_entry_lid(book: &Book, intent: &str, anchor_lid: Option<&str>) -> Result<String, ToolError> {
+fn guide_entry_lid(
+    book: &Book,
+    intent: &str,
+    anchor_lid: Option<&str>,
+) -> Result<String, ToolError> {
     if let Some(anchor) = anchor_lid {
         book.text(anchor, None)?;
         return Ok(anchor.to_string());
@@ -989,11 +1079,7 @@ fn flatten_frontier(f: Frontier) -> Vec<RankedStep> {
     out
 }
 
-fn insert_guide_evidence(
-    book: &Book,
-    ev: &mut EvidenceSet,
-    lid: &str,
-) -> Result<(), ToolError> {
+fn insert_guide_evidence(book: &Book, ev: &mut EvidenceSet, lid: &str) -> Result<(), ToolError> {
     if !ev.contains_key(lid) {
         ev.insert(lid.to_string(), book.text(lid, None)?);
     }
@@ -1184,18 +1270,35 @@ pub struct NativeAdapter {
 }
 
 impl NativeAdapter {
+    pub fn from_config(cfg: ProviderConfig) -> NativeAdapter {
+        NativeAdapter {
+            api_key: cfg.api_key,
+            base_url: cfg.base_url,
+            model: cfg.model,
+        }
+    }
+
     /// 从 `.env` / 进程环境读配置(`OPENCODE_API_KEY` / `OPENCODE_BASE_URL` / `FLUID_LLM_MODEL`)。
     pub fn from_env() -> Result<NativeAdapter, AdapterError> {
-        dotenvy::dotenv().ok(); // .env 可选;缺则退回进程环境变量
-        let get = |k: &str| {
-            std::env::var(k).map_err(|_| AdapterError {
-                message: format!("缺少环境变量 {k}(填 .env 或 export)"),
-            })
-        };
-        Ok(NativeAdapter {
-            api_key: get("OPENCODE_API_KEY")?,
-            base_url: get("OPENCODE_BASE_URL")?,
-            model: get("FLUID_LLM_MODEL")?,
+        let mut cfg = ProviderConfig::from_env()?;
+        cfg.mode = ProviderMode::Native;
+        Ok(NativeAdapter::from_config(cfg))
+    }
+
+    fn post_chat_completions(
+        &self,
+        body: serde_json::Value,
+    ) -> Result<serde_json::Value, AdapterError> {
+        let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
+        let resp = ureq::post(&url)
+            .set("Authorization", &format!("Bearer {}", self.api_key))
+            .set("Content-Type", "application/json")
+            .send_json(body)
+            .map_err(|e| AdapterError {
+                message: format!("HTTP 请求失败: {e}"),
+            })?;
+        resp.into_json().map_err(|e| AdapterError {
+            message: format!("响应非 JSON: {e}"),
         })
     }
 }
@@ -1275,6 +1378,180 @@ fn extract_json_object(s: &str) -> Option<&str> {
     None
 }
 
+fn response_message_content(v: &serde_json::Value) -> Result<&str, AdapterError> {
+    v["choices"][0]["message"]["content"]
+        .as_str()
+        .ok_or_else(|| AdapterError {
+            message: format!("响应缺 choices[0].message.content: {v}"),
+        })
+}
+
+fn parsed_response_from_content(content: &str) -> Result<ParsedResponse, AdapterError> {
+    // S9:抽不到平衡 JSON 对象(空响应 / 纯散文)→ 显式报错,不静默成功(守禁宽松降级 `[ADR-0015]`)。
+    let json = extract_json_object(content).ok_or_else(|| AdapterError {
+        message: format!("模型输出抽不到合法 JSON 对象;原文={content}"),
+    })?;
+    let out: LlmOut = serde_json::from_str(json).map_err(|e| AdapterError {
+        message: format!("模型输出非合法 JSON: {e};原文={content}"),
+    })?;
+    Ok(ParsedResponse {
+        sufficient: out.sufficient,
+        answer: out.answer,
+        citations: out
+            .citations
+            .into_iter()
+            .map(|c| RawCitation {
+                lid: c.lid,
+                text: c.text,
+                role: c.role,
+            })
+            .collect(),
+        model_supplement: out
+            .model_supplement
+            .into_iter()
+            .map(|s| Supplement { text: s.text })
+            .collect(),
+    })
+}
+
+#[derive(Deserialize)]
+struct ReActOut {
+    #[serde(default, rename = "final", alias = "answer")]
+    final_text: Option<String>,
+    #[serde(default)]
+    tool_calls: Vec<ReActCall>,
+    #[serde(default)]
+    tool_call: Option<ReActCall>,
+    #[serde(default)]
+    usage_total_tokens: Option<u32>,
+}
+
+#[derive(Deserialize)]
+struct ReActCall {
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    arguments: serde_json::Value,
+}
+
+pub fn parse_react_assistant_turn(content: &str) -> Result<AssistantTurn, AdapterError> {
+    let json = extract_json_object(content).ok_or_else(|| AdapterError {
+        message: format!("ReAct 输出抽不到合法 JSON 对象;原文={content}"),
+    })?;
+    let mut out: ReActOut = serde_json::from_str(json).map_err(|e| AdapterError {
+        message: format!("ReAct 输出非合法 JSON: {e};原文={content}"),
+    })?;
+    if let Some(call) = out.tool_call.take() {
+        out.tool_calls.push(call);
+    }
+    let mut calls = Vec::with_capacity(out.tool_calls.len());
+    for (idx, c) in out.tool_calls.into_iter().enumerate() {
+        let Some(name) = c.name.filter(|name| !name.trim().is_empty()) else {
+            return Err(AdapterError {
+                message: format!("ReAct tool_calls[{idx}] 缺 name"),
+            });
+        };
+        let arguments = match c.arguments {
+            serde_json::Value::Null => "{}".to_string(),
+            serde_json::Value::String(s) => s,
+            v => serde_json::to_string(&v).map_err(|e| AdapterError {
+                message: format!("ReAct tool_calls[{idx}].arguments 序列化失败: {e}"),
+            })?,
+        };
+        calls.push(ToolCall {
+            id: c.id.unwrap_or_else(|| format!("react_{}", idx + 1)),
+            name,
+            arguments,
+        });
+    }
+    if calls.is_empty() && out.final_text.as_deref().unwrap_or("").trim().is_empty() {
+        return Err(AdapterError {
+            message: "ReAct 输出既无 final/answer,也无 tool_calls".into(),
+        });
+    }
+    Ok(AssistantTurn {
+        text: out.final_text,
+        tool_calls: calls,
+        usage_total_tokens: out.usage_total_tokens,
+    })
+}
+
+fn react_message_to_json(m: &Message) -> serde_json::Value {
+    match m.role {
+        Role::System | Role::User => message_to_json(m),
+        Role::Assistant => {
+            let mut content = m.content.clone().unwrap_or_default();
+            if !m.tool_calls.is_empty() {
+                let calls: Vec<serde_json::Value> = m
+                    .tool_calls
+                    .iter()
+                    .map(|tc| {
+                        serde_json::json!({
+                            "id": tc.id,
+                            "name": tc.name,
+                            "arguments": tc.arguments,
+                        })
+                    })
+                    .collect();
+                if !content.is_empty() {
+                    content.push_str("\n\n");
+                }
+                content.push_str("已请求工具:");
+                content.push_str(&serde_json::to_string(&calls).unwrap_or_else(|_| "[]".into()));
+            }
+            serde_json::json!({ "role": "assistant", "content": content })
+        }
+        Role::Tool => serde_json::json!({
+            "role": "user",
+            "content": format!(
+                "工具结果 tool_call_id={}:\n{}",
+                m.tool_call_id.as_deref().unwrap_or(""),
+                m.content.as_deref().unwrap_or("")
+            )
+        }),
+    }
+}
+
+fn build_react_system(tools: &[ToolSpec]) -> String {
+    let tool_list: Vec<serde_json::Value> = tools
+        .iter()
+        .map(|t| {
+            serde_json::json!({
+                "name": t.name,
+                "description": t.description,
+                "parameters": t.parameters,
+            })
+        })
+        .collect();
+    format!(
+        "你所在的 provider 没有原生 tool-calling。你必须每回合只输出一个 JSON 对象,不要 markdown。\n\
+         若要调用工具,输出: {{\"tool_calls\":[{{\"name\":\"book.text\",\"arguments\":{{\"lid\":\"1.1\"}}}}]}}\n\
+         若要最终回答,输出: {{\"final\":\"回答文本\"}}\n\
+         工具只能从以下列表选择,arguments 必须符合对应 JSON Schema:\n{}",
+        serde_json::to_string_pretty(&tool_list).unwrap_or_else(|_| "[]".into())
+    )
+}
+
+pub struct ReActAdapter {
+    native: NativeAdapter,
+}
+
+impl ReActAdapter {
+    pub fn from_config(cfg: ProviderConfig) -> ReActAdapter {
+        ReActAdapter {
+            native: NativeAdapter::from_config(cfg),
+        }
+    }
+
+    pub fn from_env() -> Result<ReActAdapter, AdapterError> {
+        let mut cfg = ProviderConfig::from_env()?;
+        cfg.mode = ProviderMode::ReAct;
+        Ok(ReActAdapter::from_config(cfg))
+    }
+}
+
 impl ModelAdapter for NativeAdapter {
     fn complete(&self, req: CompletionRequest) -> Result<ParsedResponse, AdapterError> {
         let system = format!("{}\n\n{}", req.system, OUTPUT_CONTRACT);
@@ -1287,47 +1564,8 @@ impl ModelAdapter for NativeAdapter {
             "response_format": {"type": "json_object"},
             "temperature": 0,
         });
-        let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
-        let resp = ureq::post(&url)
-            .set("Authorization", &format!("Bearer {}", self.api_key))
-            .set("Content-Type", "application/json")
-            .send_json(body)
-            .map_err(|e| AdapterError {
-                message: format!("HTTP 请求失败: {e}"),
-            })?;
-        let v: serde_json::Value = resp.into_json().map_err(|e| AdapterError {
-            message: format!("响应非 JSON: {e}"),
-        })?;
-        let content = v["choices"][0]["message"]["content"]
-            .as_str()
-            .ok_or_else(|| AdapterError {
-                message: format!("响应缺 choices[0].message.content: {v}"),
-            })?;
-        // S9:抽不到平衡 JSON 对象(空响应 / 纯散文)→ 显式报错,不静默成功(守禁宽松降级 `[ADR-0015]`)。
-        let json = extract_json_object(content).ok_or_else(|| AdapterError {
-            message: format!("模型输出抽不到合法 JSON 对象;原文={content}"),
-        })?;
-        let out: LlmOut = serde_json::from_str(json).map_err(|e| AdapterError {
-            message: format!("模型输出非合法 JSON: {e};原文={content}"),
-        })?;
-        Ok(ParsedResponse {
-            sufficient: out.sufficient,
-            answer: out.answer,
-            citations: out
-                .citations
-                .into_iter()
-                .map(|c| RawCitation {
-                    lid: c.lid,
-                    text: c.text,
-                    role: c.role,
-                })
-                .collect(),
-            model_supplement: out
-                .model_supplement
-                .into_iter()
-                .map(|s| Supplement { text: s.text })
-                .collect(),
-        })
+        let v = self.post_chat_completions(body)?;
+        parsed_response_from_content(response_message_content(&v)?)
     }
 
     /// 外层多轮 tool-calling:带 `tools` schema 请求,解析 `assistant.tool_calls` + `usage` `[ADR-0026]`。
@@ -1356,17 +1594,7 @@ impl ModelAdapter for NativeAdapter {
             "tools": tool_specs,
             "temperature": 0,
         });
-        let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
-        let resp = ureq::post(&url)
-            .set("Authorization", &format!("Bearer {}", self.api_key))
-            .set("Content-Type", "application/json")
-            .send_json(body)
-            .map_err(|e| AdapterError {
-                message: format!("HTTP 请求失败: {e}"),
-            })?;
-        let v: serde_json::Value = resp.into_json().map_err(|e| AdapterError {
-            message: format!("响应非 JSON: {e}"),
-        })?;
+        let v = self.post_chat_completions(body)?;
         let msg = &v["choices"][0]["message"];
         let text = msg["content"]
             .as_str()
@@ -1391,6 +1619,42 @@ impl ModelAdapter for NativeAdapter {
             tool_calls,
             usage_total_tokens,
         })
+    }
+}
+
+impl ModelAdapter for ReActAdapter {
+    fn complete(&self, req: CompletionRequest) -> Result<ParsedResponse, AdapterError> {
+        let system = format!("{}\n\n{}", req.system, OUTPUT_CONTRACT);
+        let body = serde_json::json!({
+            "model": self.native.model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": req.user},
+            ],
+            "temperature": 0,
+        });
+        let v = self.native.post_chat_completions(body)?;
+        parsed_response_from_content(response_message_content(&v)?)
+    }
+
+    fn chat(
+        &self,
+        messages: &[Message],
+        tools: &[ToolSpec],
+    ) -> Result<AssistantTurn, AdapterError> {
+        let mut msgs = Vec::with_capacity(messages.len() + 1);
+        msgs.push(serde_json::json!({
+            "role": "system",
+            "content": build_react_system(tools),
+        }));
+        msgs.extend(messages.iter().map(react_message_to_json));
+        let body = serde_json::json!({
+            "model": self.native.model,
+            "messages": msgs,
+            "temperature": 0,
+        });
+        let v = self.native.post_chat_completions(body)?;
+        parse_react_assistant_turn(response_message_content(&v)?)
     }
 }
 
@@ -1502,7 +1766,10 @@ pub fn unvisited_back(
 ) -> Result<Vec<RankedStep>, ToolError> {
     let read_set: HashSet<String> = profile.read_lids.iter().cloned().collect();
     let back = book.route_from(at, None)?.back;
-    Ok(back.into_iter().filter(|s| !read_set.contains(&s.lid)).collect())
+    Ok(back
+        .into_iter()
+        .filter(|s| !read_set.contains(&s.lid))
+        .collect())
 }
 
 #[cfg(test)]
@@ -1577,7 +1844,10 @@ mod tests {
         let lids: Vec<&str> = back.steps.iter().map(|s| s.lid.as_str()).collect();
         assert_eq!(lids, vec!["1.1", "1.0", "1.2"]); // 未读升首,已读沉底保原序
         assert_eq!(back.steps.len(), 3); // 已读不剔除(保留回看入口)
-        let fwd = g.iter().find(|x| x.category == NavCategory::Forward).unwrap();
+        let fwd = g
+            .iter()
+            .find(|x| x.category == NavCategory::Forward)
+            .unwrap();
         assert_eq!(fwd.steps[0].lid, "2.0"); // 全未读不变
     }
 
@@ -1593,7 +1863,10 @@ mod tests {
             cross: vec![],
             continue_: vec![],
         };
-        let read: HashSet<String> = ["2.1", "2.2", "2.4"].iter().map(|s| s.to_string()).collect();
+        let read: HashSet<String> = ["2.1", "2.2", "2.4"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         let heat: BTreeMap<String, u32> = [("2.2", 3u32), ("2.1", 1u32), ("3.1", 5u32)]
             .iter()
             .map(|(l, c)| (l.to_string(), *c))
@@ -1604,7 +1877,10 @@ mod tests {
         // Tier A 问过按 heat 降序:2.2(×3) > 2.1(×1,卡点压已读冒上 Tier A);Tier B 未读:2.3;Tier C 读过没问:2.4。
         assert_eq!(lids, vec!["2.2", "2.1", "2.3", "2.4"]);
         // forward 不受 heat 影响:3.1 问过 ×5 也不升,保 route_from 原序(都未读)。
-        let fwd = g.iter().find(|x| x.category == NavCategory::Forward).unwrap();
+        let fwd = g
+            .iter()
+            .find(|x| x.category == NavCategory::Forward)
+            .unwrap();
         assert_eq!(
             fwd.steps.iter().map(|s| s.lid.as_str()).collect::<Vec<_>>(),
             vec!["3.1", "3.2"]
@@ -1625,21 +1901,65 @@ mod tests {
         let base = ReadOnlyBase {
             book_id: "back-book".into(),
             lid_nodes: vec![
-                LidNode { lid: "1".into(), path: vec![1], kind: NodeKind::Chapter, span: Span { start: 0, end: 20 }, children: vec!["1.1".into(), "1.2".into()] },
+                LidNode {
+                    lid: "1".into(),
+                    path: vec![1],
+                    kind: NodeKind::Chapter,
+                    span: Span { start: 0, end: 20 },
+                    children: vec!["1.1".into(), "1.2".into()],
+                },
                 para("1.1", vec![1, 1], 0, 10),
                 para("1.2", vec![1, 2], 10, 20),
-                LidNode { lid: "2".into(), path: vec![2], kind: NodeKind::Chapter, span: Span { start: 20, end: 40 }, children: vec!["2.1".into(), "2.2".into()] },
+                LidNode {
+                    lid: "2".into(),
+                    path: vec![2],
+                    kind: NodeKind::Chapter,
+                    span: Span { start: 20, end: 40 },
+                    children: vec!["2.1".into(), "2.2".into()],
+                },
                 para("2.1", vec![2, 1], 20, 30),
                 para("2.2", vec![2, 2], 30, 40),
             ],
             graph_nodes: vec![
-                GraphNode { id: "entity:a".into(), node_type: GraphNodeType::Entity, name: "A".into(), occurrences: vec!["1.1".into()], source_lid: None },
-                GraphNode { id: "entity:p1".into(), node_type: GraphNodeType::Entity, name: "P1".into(), occurrences: vec!["2.1".into()], source_lid: None },
-                GraphNode { id: "entity:p2".into(), node_type: GraphNodeType::Entity, name: "P2".into(), occurrences: vec!["2.2".into()], source_lid: None },
+                GraphNode {
+                    id: "entity:a".into(),
+                    node_type: GraphNodeType::Entity,
+                    name: "A".into(),
+                    occurrences: vec!["1.1".into()],
+                    source_lid: None,
+                },
+                GraphNode {
+                    id: "entity:p1".into(),
+                    node_type: GraphNodeType::Entity,
+                    name: "P1".into(),
+                    occurrences: vec!["2.1".into()],
+                    source_lid: None,
+                },
+                GraphNode {
+                    id: "entity:p2".into(),
+                    node_type: GraphNodeType::Entity,
+                    name: "P2".into(),
+                    occurrences: vec!["2.2".into()],
+                    source_lid: None,
+                },
             ],
             graph_edges: vec![
-                GraphEdge { source: "entity:a".into(), target: "entity:p1".into(), edge_type: "depends_on".into(), direction: Direction::Directed, scope: EdgeScope::LongRange, weight: 0.9 },
-                GraphEdge { source: "entity:a".into(), target: "entity:p2".into(), edge_type: "depends_on".into(), direction: Direction::Directed, scope: EdgeScope::LongRange, weight: 0.8 },
+                GraphEdge {
+                    source: "entity:a".into(),
+                    target: "entity:p1".into(),
+                    edge_type: "depends_on".into(),
+                    direction: Direction::Directed,
+                    scope: EdgeScope::LongRange,
+                    weight: 0.9,
+                },
+                GraphEdge {
+                    source: "entity:a".into(),
+                    target: "entity:p2".into(),
+                    edge_type: "depends_on".into(),
+                    direction: Direction::Directed,
+                    scope: EdgeScope::LongRange,
+                    weight: 0.8,
+                },
             ],
         };
         Book::new(base, &src)
@@ -1666,9 +1986,14 @@ mod tests {
         assert_eq!(lids, vec!["2.1", "2.2"]);
         // 读过 2.1:确定性过滤剩未读 2.2(不靠 agent 心算交集)。
         let un = unvisited_back(&b, "1.1", &profile_read(&["2.1"])).unwrap();
-        assert_eq!(un.iter().map(|s| s.lid.as_str()).collect::<Vec<_>>(), vec!["2.2"]);
+        assert_eq!(
+            un.iter().map(|s| s.lid.as_str()).collect::<Vec<_>>(),
+            vec!["2.2"]
+        );
         // 两前置都读过:空 → agent 走讲法轴原地重讲。
-        assert!(unvisited_back(&b, "1.1", &profile_read(&["2.1", "2.2"])).unwrap().is_empty());
+        assert!(unvisited_back(&b, "1.1", &profile_read(&["2.1", "2.2"]))
+            .unwrap()
+            .is_empty());
         // invalid at → not_found(承 route_from,不静默)。
         let err = unvisited_back(&b, "9.9", &profile_read(&[])).unwrap_err();
         assert_eq!(err.error_code, "LID_NOT_FOUND");
@@ -2101,5 +2426,54 @@ mod tests {
         assert_eq!(extract_json_object("纯散文,没有任何 JSON 对象"), None);
         // 不平衡(只开不闭)→ 扫到末尾 depth>0 → None,不返回半截
         assert_eq!(extract_json_object(r#"{"a": 1"#), None);
+    }
+
+    #[test]
+    fn provider_config_defaults_native_and_selects_react() {
+        let native = ProviderConfig::from_getter(|k| match k {
+            "OPENCODE_API_KEY" => Some("key".into()),
+            "OPENCODE_BASE_URL" => Some("http://localhost:1234".into()),
+            "FLUID_LLM_MODEL" => Some("model".into()),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(native.mode, ProviderMode::Native);
+
+        let react = ProviderConfig::from_getter(|k| match k {
+            "UNDERSTAND_BOOK_PROVIDER" => Some("react".into()),
+            "OPENCODE_API_KEY" => Some("key".into()),
+            "OPENCODE_BASE_URL" => Some("http://localhost:1234".into()),
+            "FLUID_LLM_MODEL" => Some("model".into()),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(react.mode, ProviderMode::ReAct);
+    }
+
+    #[test]
+    fn react_parser_normalizes_tool_calls_and_final_answer() {
+        let turn = parse_react_assistant_turn(
+            r#"```json
+{"tool_calls":[{"name":"book.text","arguments":{"lid":"1.1"}}],"usage_total_tokens":7}
+```"#,
+        )
+        .unwrap();
+        assert_eq!(turn.usage_total_tokens, Some(7));
+        assert_eq!(turn.tool_calls.len(), 1);
+        assert_eq!(turn.tool_calls[0].id, "react_1");
+        assert_eq!(turn.tool_calls[0].name, "book.text");
+        assert_eq!(turn.tool_calls[0].arguments, r#"{"lid":"1.1"}"#);
+
+        let final_turn = parse_react_assistant_turn(r#"{"final":"读完了"}"#).unwrap();
+        assert_eq!(final_turn.text.as_deref(), Some("读完了"));
+        assert!(final_turn.tool_calls.is_empty());
+    }
+
+    #[test]
+    fn react_parser_rejects_malformed_provider_output() {
+        let err = parse_react_assistant_turn("我想调用 book.text").unwrap_err();
+        assert!(err.message.contains("ReAct 输出抽不到合法 JSON 对象"));
+        let err = parse_react_assistant_turn(r#"{"tool_calls":[{"arguments":{}}]}"#).unwrap_err();
+        assert!(err.message.contains("缺 name"));
     }
 }

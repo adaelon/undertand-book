@@ -499,7 +499,11 @@ fn dispatch(
         "book.route_to" => {
             let (Some(from), Some(target)) = (sget("from"), sget("target")) else {
                 return (
-                    err_json("INVALID_RANGE", "validation", "book.route_to 需 from + target"),
+                    err_json(
+                        "INVALID_RANGE",
+                        "validation",
+                        "book.route_to 需 from + target",
+                    ),
                     None,
                 );
             };
@@ -811,7 +815,10 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AdapterError, CompletionRequest, ParsedResponse, RawCitation, ToolCall};
+    use crate::{
+        parse_react_assistant_turn, AdapterError, CompletionRequest, ParsedResponse, RawCitation,
+        ToolCall,
+    };
     use base_schema::{sample_base, GraphEdge, GraphNode, LidNode, NodeKind, ReadOnlyBase, Span};
     use reader::DEFAULT_RADIUS;
     use std::cell::RefCell;
@@ -821,6 +828,10 @@ mod tests {
     /// 双队列脚本替身:chat 回合 + (内层 book.query 触发的)complete 回合各一队,按序吐。
     struct FakeAdapter {
         chats: RefCell<VecDeque<AssistantTurn>>,
+        completes: RefCell<VecDeque<ParsedResponse>>,
+    }
+    struct ScriptedReActAdapter {
+        chats: RefCell<VecDeque<String>>,
         completes: RefCell<VecDeque<ParsedResponse>>,
     }
     impl FakeAdapter {
@@ -847,6 +858,34 @@ mod tests {
                 .ok_or_else(|| AdapterError {
                     message: "fake chat 脚本耗尽".into(),
                 })
+        }
+    }
+    impl ScriptedReActAdapter {
+        fn new(chats: Vec<&str>, completes: Vec<ParsedResponse>) -> Self {
+            ScriptedReActAdapter {
+                chats: RefCell::new(chats.into_iter().map(String::from).collect()),
+                completes: RefCell::new(completes.into()),
+            }
+        }
+    }
+    impl ModelAdapter for ScriptedReActAdapter {
+        fn complete(&self, _req: CompletionRequest) -> Result<ParsedResponse, AdapterError> {
+            self.completes
+                .borrow_mut()
+                .pop_front()
+                .ok_or_else(|| AdapterError {
+                    message: "react fake complete 脚本耗尽".into(),
+                })
+        }
+        fn chat(&self, _: &[Message], _: &[ToolSpec]) -> Result<AssistantTurn, AdapterError> {
+            let raw = self
+                .chats
+                .borrow_mut()
+                .pop_front()
+                .ok_or_else(|| AdapterError {
+                    message: "react fake chat 脚本耗尽".into(),
+                })?;
+            parse_react_assistant_turn(&raw)
         }
     }
 
@@ -966,6 +1005,75 @@ mod tests {
         let recalled = store.recall(&RecallQuery::default());
         assert_eq!(recalled.len(), 1);
         assert_eq!(recalled[0].citations[0].lid, "1.1");
+    }
+
+    #[test]
+    fn native_and_react_adapters_converge_on_runtime_tool_results() {
+        let b = book();
+        let run_once = |adapter: &dyn ModelAdapter, suffix: &str| {
+            let mut store = MemoryStore::open(tmp(&format!("provider-converge-{suffix}"))).unwrap();
+            let mut reader = Reader::new(&b, DEFAULT_RADIUS);
+            let mut messages = new_session();
+            run(
+                &b,
+                &mut store,
+                &mut reader,
+                adapter,
+                &mut messages,
+                "读 1.1",
+                "t0",
+                OuterConfig::default(),
+            )
+            .unwrap()
+        };
+
+        let native = FakeAdapter::new(
+            vec![
+                turn_calls(vec![call("c1", "book.text", r#"{"lid":"1.1"}"#)]),
+                turn_final("已读取 1.1"),
+            ],
+            vec![],
+        );
+        let react = ScriptedReActAdapter::new(
+            vec![
+                r#"{"tool_calls":[{"name":"book.text","arguments":{"lid":"1.1"}}]}"#,
+                r#"{"final":"已读取 1.1"}"#,
+            ],
+            vec![],
+        );
+
+        let native_out = run_once(&native, "native");
+        let react_out = run_once(&react, "react");
+        assert_eq!(native_out.answer, react_out.answer);
+        assert_eq!(native_out.trace.len(), 1);
+        assert_eq!(react_out.trace.len(), 1);
+        assert_eq!(native_out.trace[0].tool, "book.text");
+        assert_eq!(react_out.trace[0].tool, "book.text");
+        assert!(native_out.trace[0].result_digest.contains(r#""lid":"1.1""#));
+        assert!(react_out.trace[0].result_digest.contains(r#""lid":"1.1""#));
+    }
+
+    #[test]
+    fn react_protocol_error_maps_to_provider_error() {
+        let b = book();
+        let mut store = MemoryStore::open(tmp("react-provider-error")).unwrap();
+        let mut reader = Reader::new(&b, DEFAULT_RADIUS);
+        let mut messages = new_session();
+        let react = ScriptedReActAdapter::new(vec!["我要调用 book.text"], vec![]);
+        let err = run(
+            &b,
+            &mut store,
+            &mut reader,
+            &react,
+            &mut messages,
+            "读 1.1",
+            "t0",
+            OuterConfig::default(),
+        )
+        .unwrap_err();
+        assert_eq!(err.category, "provider");
+        assert_eq!(err.error_code, "PROVIDER_ERROR");
+        assert!(err.message.contains("ReAct 输出抽不到合法 JSON 对象"));
     }
 
     // P3-1 带读骨架:一个停靠点回合走通 reader.state → book.route_from → reader.gotoLid → book.synthesize → 终答。
@@ -1228,7 +1336,15 @@ mod tests {
         assert!(ok.contains("\"unvisited_back\"") && ok.contains("\"at\":\"1.1\""));
         assert!(eff.is_none());
         // 缺 at → validation。
-        let (bad, _) = dispatch("book.unvisited_back", "{}", &b, &mut store, &mut reader, &fake, "t0");
+        let (bad, _) = dispatch(
+            "book.unvisited_back",
+            "{}",
+            &b,
+            &mut store,
+            &mut reader,
+            &fake,
+            "t0",
+        );
         assert!(bad.contains("INVALID_RANGE") && bad.contains("validation"));
         // invalid at → not_found(不静默)。
         let (nf, _) = dispatch(
