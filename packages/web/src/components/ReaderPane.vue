@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from "vue";
+import { computed, nextTick, ref } from "vue";
 import type { FormulaSemantics, MemoryRecord } from "../api";
 import type { Manifest } from "../api";
 
@@ -23,8 +23,6 @@ const props = defineProps<{
   visibleNotes: MemoryRecord[];
   hlExcerpt: (rec: MemoryRecord) => string;
   imageMeta: (text: string) => { alt: string; src: string } | null;
-  scrollRestoreId: number;
-  scrollRestoreDirection: "up" | "down" | null;
 }>();
 
 function compactText(value: string, max = 96): string {
@@ -84,6 +82,11 @@ function notesOf(lid: string): MemoryRecord[] {
 const pane = ref<HTMLElement | null>(null);
 const edgePx = 180;
 
+interface ScrollAnchor {
+  lid: string;
+  top: number;
+}
+
 function onScroll() {
   const el = pane.value;
   if (!el) return;
@@ -112,19 +115,41 @@ function onKeydown(event: KeyboardEvent) {
   el.scrollBy({ top: delta, behavior: "smooth" });
 }
 
-watch(
-  () => props.scrollRestoreId,
-  async () => {
-    await nextTick();
-    const el = pane.value;
-    if (!el || !props.scrollRestoreDirection) return;
-    if (props.scrollRestoreDirection === "down") {
-      el.scrollTop = Math.max(edgePx + 1, Math.floor(el.clientHeight * 0.35));
-    } else {
-      el.scrollTop = Math.max(0, el.scrollHeight - el.clientHeight - Math.floor(el.clientHeight * 0.35));
-    }
-  },
-);
+function lidElement(lid: string): HTMLElement | null {
+  const el = pane.value;
+  if (!el) return null;
+  return Array.from(el.querySelectorAll<HTMLElement>("[data-lid]")).find((node) => node.dataset.lid === lid) ?? null;
+}
+
+function captureScrollAnchor(candidateLids: string[]): ScrollAnchor | null {
+  const el = pane.value;
+  if (!el) return null;
+  const paneRect = el.getBoundingClientRect();
+  let best: { lid: string; top: number; score: number } | null = null;
+  for (const lid of candidateLids) {
+    const node = lidElement(lid);
+    if (!node) continue;
+    const rect = node.getBoundingClientRect();
+    const top = rect.top - paneRect.top;
+    const visible = rect.bottom >= paneRect.top && rect.top <= paneRect.bottom;
+    const score = (visible ? 0 : 100_000) + Math.abs(top);
+    if (!best || score < best.score) best = { lid, top, score };
+  }
+  return best ? { lid: best.lid, top: best.top } : null;
+}
+
+async function restoreScrollAnchor(anchor: ScrollAnchor | null) {
+  if (!anchor) return;
+  await nextTick();
+  const el = pane.value;
+  const node = lidElement(anchor.lid);
+  if (!el || !node) return;
+  const paneRect = el.getBoundingClientRect();
+  const currentTop = node.getBoundingClientRect().top - paneRect.top;
+  el.scrollTop += currentTop - anchor.top;
+}
+
+defineExpose({ captureScrollAnchor, restoreScrollAnchor });
 </script>
 
 <template>

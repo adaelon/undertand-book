@@ -12,6 +12,11 @@ import RightRail from "./components/RightRail.vue";
 type NodeKind = import("./api").Manifest["tree"][number]["kind"];
 type ManifestNode = import("./api").Manifest["tree"][number];
 
+interface ScrollAnchor {
+  lid: string;
+  top: number;
+}
+
 export interface OutlineItem {
   lid: string;
   kind: NodeKind;
@@ -25,8 +30,10 @@ const outlineItems = ref<OutlineItem[]>([]);
 const titleByLid = ref<Map<string, string>>(new Map());
 const viewport = ref<Viewport | null>(null);
 const edgeLoading = ref(false);
-const scrollRestoreId = ref(0);
-const scrollRestoreDirection = ref<"up" | "down" | null>(null);
+const readerPaneRef = ref<{
+  captureScrollAnchor: (candidateLids: string[]) => ScrollAnchor | null;
+  restoreScrollAnchor: (anchor: ScrollAnchor | null) => Promise<void>;
+} | null>(null);
 interface Segment {
   lid: string;
   text: string;
@@ -384,13 +391,13 @@ async function onScrollEdge(direction: "up" | "down") {
   try {
     banner.value = "";
     sourceFocus.value = null;
-    const before = viewport.value.top_lid;
+    const before = viewport.value;
     const next = (await api.scroll(direction === "down" ? step : -step)).viewport;
+    const nextLids = new Set(next.visible_lids);
+    const overlap = before.visible_lids.filter((lid) => nextLids.has(lid));
+    const anchor = readerPaneRef.value?.captureScrollAnchor(overlap) ?? null;
     await loadWindow(next);
-    if (next.top_lid !== before) {
-      scrollRestoreDirection.value = direction;
-      scrollRestoreId.value += 1;
-    }
+    if (next.top_lid !== before.top_lid) await readerPaneRef.value?.restoreScrollAnchor(anchor);
   } catch (e) {
     fail(e);
   } finally {
@@ -755,6 +762,7 @@ async function openBook() {
       ></div>
 
       <ReaderPane
+        ref="readerPaneRef"
         :segments="segments"
         :viewport-anchor="viewport?.anchor_lid ?? null"
         :selected-lid="selectedLid"
@@ -766,8 +774,6 @@ async function openBook() {
         :visible-notes="visibleNotes"
         :hl-excerpt="hlExcerpt"
         :image-meta="imageMeta"
-        :scroll-restore-id="scrollRestoreId"
-        :scroll-restore-direction="scrollRestoreDirection"
         @select="onSelectSeg"
         @prose-mouse-up="onProseMouseUp"
         @scroll-edge="onScrollEdge"
