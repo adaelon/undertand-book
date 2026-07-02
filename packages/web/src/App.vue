@@ -170,6 +170,103 @@ function leadingQuote(content: string): string | null {
   return quote || null;
 }
 
+interface FocusCharRef {
+  lid: string;
+  offset: number;
+}
+interface FocusStream {
+  text: string;
+  refs: Array<FocusCharRef | null>;
+}
+
+function appendNormalizedText(stream: FocusStream, lid: string, text: string) {
+  let inSpace = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (/\s/.test(ch)) {
+      if (!inSpace) {
+        stream.text += " ";
+        stream.refs.push({ lid, offset: i });
+        inSpace = true;
+      }
+      continue;
+    }
+    stream.text += ch;
+    stream.refs.push({ lid, offset: i });
+    inSpace = false;
+  }
+}
+
+function sourceFocusStream(focus: { lid: string; quote: string | null }): FocusStream | null {
+  const start = segments.value.findIndex((seg) => seg.lid === focus.lid);
+  if (start < 0) return null;
+  const stream: FocusStream = { text: "", refs: [] };
+  for (const seg of segments.value.slice(start)) {
+    if (stream.text && !stream.text.endsWith(" ")) {
+      stream.text += " ";
+      stream.refs.push(null);
+    }
+    appendNormalizedText(stream, seg.lid, displayText(seg).text);
+  }
+  return stream;
+}
+
+function commonPrefixLen(a: string, b: string): number {
+  const n = Math.min(a.length, b.length);
+  let i = 0;
+  while (i < n && a[i] === b[i]) i++;
+  return i;
+}
+
+function sourceFocusRanges(focus: { lid: string; quote: string | null } | null): Map<string, [number, number]> {
+  const out = new Map<string, [number, number]>();
+  if (!focus) return out;
+  if (!focus.quote) {
+    const seg = segments.value.find((s) => s.lid === focus.lid);
+    if (seg) out.set(focus.lid, [0, displayText(seg).text.length]);
+    return out;
+  }
+  const quote = focus.quote.replace(/\s+/g, " ").trim();
+  if (!quote) return out;
+  const stream = sourceFocusStream(focus);
+  if (!stream) return out;
+
+  let start = stream.text.indexOf(quote);
+  let len = quote.length;
+  if (start < 0) {
+    let bestStart = -1;
+    let bestLen = 0;
+    for (let i = 0; i < stream.text.length; i++) {
+      const n = commonPrefixLen(stream.text.slice(i), quote);
+      if (n > bestLen) {
+        bestLen = n;
+        bestStart = i;
+      }
+    }
+    const minUseful = Math.min(8, quote.length, stream.text.length);
+    if (bestLen < minUseful) {
+      const seg = segments.value.find((s) => s.lid === focus.lid);
+      if (seg) out.set(focus.lid, [0, displayText(seg).text.length]);
+      return out;
+    }
+    start = bestStart;
+    len = bestLen;
+  }
+
+  for (let i = start; i < start + len && i < stream.refs.length; i++) {
+    const ref = stream.refs[i];
+    if (!ref) continue;
+    const current = out.get(ref.lid);
+    if (current) {
+      current[0] = Math.min(current[0], ref.offset);
+      current[1] = Math.max(current[1], ref.offset + 1);
+    } else {
+      out.set(ref.lid, [ref.offset, ref.offset + 1]);
+    }
+  }
+  return out;
+}
+
 function sourceFocusRange(text: string, focus: { lid: string; quote: string | null } | null, lid: string): [number, number] | null {
   if (!focus || focus.lid !== lid) return null;
   if (!focus.quote) return [0, text.length];
@@ -187,7 +284,7 @@ function sourceFocusRange(text: string, focus: { lid: string; quote: string | nu
 function renderSeg(seg: Segment): string {
   const display = displayText(seg);
   const hls = highlightsOf(seg.lid).filter((h) => h.range);
-  const focusRange = sourceFocusRange(display.text, sourceFocus.value, seg.lid);
+  const focusRange = sourceFocusRanges(sourceFocus.value).get(seg.lid) ?? sourceFocusRange(display.text, sourceFocus.value, seg.lid);
   if (hls.length === 0 && !focusRange) return renderInlineText(display.text);
   const ranges = hls
     .map((h) => {
