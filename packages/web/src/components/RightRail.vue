@@ -92,7 +92,7 @@ function onAnswerMouseUp(turn: ChatTurn) {
     return;
   }
   const rect = range.getBoundingClientRect();
-  answerSelection.value = { x: rect.left + rect.width / 2, y: rect.top, text, turn };
+  answerSelection.value = { x: rect.left + rect.width / 2, y: Math.max(40, rect.top), text, turn };
 }
 function saveAnswerSelection(turn: ChatTurn) {
   const selected = answerSelection.value;

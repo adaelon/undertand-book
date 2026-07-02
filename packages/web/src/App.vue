@@ -599,7 +599,7 @@ async function sendAgent() {
   const msg = agentInput.value.trim();
   if (!msg) return;
   const draft = askDraft.value;
-  const questionAnchorLid = draft?.lid ?? viewport.value?.top_lid ?? null;
+  const questionAnchorLid = draft?.lid ?? selectedLid.value ?? viewport.value?.top_lid ?? null;
   const outbound = draft
     ? `引用原文 [LID: ${draft.lid}]:\n「${draft.quote}」\n\n我的问题:\n${msg}`
     : msg;
