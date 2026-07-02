@@ -670,7 +670,11 @@ async function saveAgentSelection(turn: ChatTurn, text: string) {
   try {
     banner.value = "";
     await api.save({ type: "note", anchor_lid: anchor, content: noteContent, layer: "long_term" });
-    await refreshAnnotations();
+    if (viewport.value?.visible_lids.includes(anchor)) {
+      await refreshAnnotations();
+    } else {
+      await loadWindow((await api.goto(anchor)).viewport);
+    }
   } catch (e) {
     fail(e);
   }
