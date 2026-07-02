@@ -510,6 +510,22 @@ body {
   -webkit-line-clamp: 3;
   -webkit-box-orient: vertical;
 }
+.note-summary-preview {
+  grid-column: 1 / -1;
+  max-height: 4.5em;
+  white-space: normal;
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 500;
+  line-height: 1.5;
+}
+.note-summary-preview.md > * {
+  margin-top: 0;
+  margin-bottom: 0;
+}
+.note-summary-preview.md > * + * {
+  margin-top: 0.25em;
+}
 .note-source {
   border: 0;
   border-radius: 6px;

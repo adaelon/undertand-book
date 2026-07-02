@@ -40,7 +40,9 @@ function leadingQuote(content: string): string | null {
   return quoteLines.length ? compactText(quoteLines.join(" ")) : null;
 }
 function notePreview(note: MemoryRecord): string {
-  return compactText(note.content.replace(/^>.*(\n>.*)*\n*/m, ""), 180);
+  const content = note.content.replace(/^>.*(\n>.*)*\n*/m, "").trim();
+  if (content.length <= 260) return content;
+  return `${content.slice(0, 260).trimEnd()}...`;
 }
 function noteSourceLabel(note: MemoryRecord): string {
   const quote = leadingQuote(note.content);
@@ -258,8 +260,12 @@ defineExpose({ captureScrollAnchor, restoreScrollAnchor });
             </button>
             <span v-else class="note-source">No source</span>
             <span v-if="isLongNote(note)" class="note-fold">Toggle</span>
+            <div
+              v-if="isLongNote(note)"
+              class="note-preview note-summary-preview md"
+              v-html="props.renderMarkdown(notePreview(note))"
+            ></div>
           </summary>
-          <p v-if="isLongNote(note)" class="note-preview">{{ notePreview(note) }}</p>
           <div class="note-md md" v-html="props.renderMarkdown(note.content)"></div>
           <div class="note-actions">
             <button class="note-btn" title="编辑" @click="emit('edit-note', note)">Edit</button>

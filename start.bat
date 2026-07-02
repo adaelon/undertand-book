@@ -12,6 +12,9 @@ rem ============================================================
 
 cd /d "%~dp0"
 
+set "SERVER_EXE=%CD%\target\debug\server.exe"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$target=[System.IO.Path]::GetFullPath($env:SERVER_EXE); foreach ($p in Get-Process -ErrorAction SilentlyContinue) { try { if ($p.Path -and ([System.IO.Path]::GetFullPath($p.Path) -ieq $target)) { Stop-Process -Id $p.Id -Force } } catch {} }"
+
 set "BOOK=%~1"
 if "%BOOK%"=="" set "BOOK=.understand-book\game-programming-patterns"
 
@@ -74,7 +77,7 @@ echo   url  = %URL%
 echo.
 echo Close the server window to stop understand-book.
 
-start "understand-book server" cmd /k cargo run -p server -- "%BOOK%"
+start "understand-book server" cmd /k cargo run -p server --bin server -- "%BOOK%"
 timeout /t 2 /nobreak >nul
 start "" "%URL%"
 
