@@ -14,7 +14,7 @@
 
 ## 决策(§0.5 五问共识,含 2026-06-25 公式修订)
 1. **asset = 带类型的 LID 叶子**。`NodeKind` 增 `Code/Table/Image/Formula`;asset 仍是 LID 树叶子、**占 span、进分区不变式划分**、用 **LID 单一寻址**。否决"旁挂 asset_type 属性"(类型与 kind 语义重叠、检索查两字段)、否决"独立 asset 注册表 + asset_id"(引第二套寻址,违"一切基础是 LID 树、不叠派生抽象层";单书 asset 就在树某位置,LID 已足够)。
-2. **asset 叶子原文 = 源标记的确定性序列化**。image=`![alt](src)`(md 原样 / epub 从 `<img alt src>` 合成同形);code 保留换行缩进;table 保留表文本;formula 保留源公式标记(md `$...$`/`$$...$$`,epub MathML 或源 LaTeX 可逆文本)。`book.text(asset_lid)` 返回该原文,**确定性 + 忠实**;分区不变式天然满足(asset 在 source 占 span)。修掉现状 img 丢失 / table 丢失 / code 被 norm 拍平,并新增 formula 不被段落拍平或句切拆碎。
+2. **asset 叶子原文 = 源标记的确定性序列化**。image=`![alt](src)`(md 原样 / epub 从 `<img alt src>` 合成同形);code 保留换行缩进;table 保留表文本;formula 保留源公式标记(md `$...$`/`$$...$$`,epub MathML 或源 LaTeX 可逆文本)。`book.text(asset_lid)` 返回该原文,**确定性 + 忠实**;分区不变式天然满足(asset 在 source 占 span)。修掉现状 img 丢失 / table 丢失 / code 被 norm 拍平,并新增 formula 不被段落拍平或句切拆碎。**2026-07-03 执行回填**:段内 `$...$` / 单行 `$$...$$` 与 EPUB 段内 MathML 也拆成真实 `Formula` LID,不走段内 occurrence/span sidecar。
 3. **读时可见性 = `ManifestNode.kind` + 既有 `book.text/context/concept/query` 组合,零新基础命令**。agent/UI 过滤 `kind` 定位 asset、用现有 `book.text`/`context` 取用;"列全书图/表/公式"= 拿 manifest 自行过滤 kind(确定性派生)。文章的 `inspect_asset` = `book.text(asset_lid)` + 前端渲染;公式的 `inspect_formula` = `book.text(formula_lid)` + 公式语义剖面(见决策4)。否决本轮新增 `book.assets(kind?)` 命令——实测证明跨章找 asset 高频且 manifest 全表过滤过重时再加。
 4. **公式高于普通 asset:必须产出 FormulaSemantics 语义剖面**。每个 `Formula` 叶子除原文外,构建期还要抽取/固化一个可验证语义剖面:`parameters[]`(符号、读法/含义、单位/取值域若原文给出、定义来源 LID)、`composition`(公式整体在表达什么、各项如何组合)、`context_links[]`(与前后段、概念、断言、图/表/代码的关系)。该剖面是 agent 读公式时的高优先级上下文,但必须带 `source_lid`/`evidence_lids`;不允许无证据地把模型世界知识写进只读原文。
 5. **类型闭集 = `{Code, Table, Image, Formula}`**。`Footnote/figure-caption` 等长尾留实测驱动再加(加值=只增不改)。Formula 已从长尾升格为核心类型,不再放在"何时回头"。
@@ -39,6 +39,10 @@
 - **image 多模态描述**:切片1+ 落地,走 model_supplement 诚实标注、不进只读基座。
 - **table 结构化**:切片0+ 先存表文本;若需按行列检索,再评估 table 子结构 LID(承 [[ADR-0008]] 句级下探同款渐进)。
 - **FormulaSemantics schema**:真书实测后若参数解释需要单位、维度、符号同名消歧等字段,按只增不改扩展。
+
+## 执行回填(2026-07-03)
+- 行内公式策略定型:拆成真实 `NodeKind=Formula` LID,公式前后文本保留为相邻 paragraph LID。
+- `FormulaSemantics` 自然语言解释字段使用中文;闭集 enum、LID、数学符号保持原样。
 
 ## 影响
 - **解优化项①**(`docs/参考对照-文档世界状态-优化登记.md` §C),关联已采纳的②冲突暴露 / ③证据路径可视化。

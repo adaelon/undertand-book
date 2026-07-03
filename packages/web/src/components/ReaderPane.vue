@@ -207,20 +207,20 @@ defineExpose({ captureScrollAnchor, restoreScrollAnchor });
             <div v-if="seg.formula" class="formula-profile">
               <p class="formula-meaning">{{ seg.formula.composition.meaning }}</p>
               <div v-if="seg.formula.parameters.length" class="formula-section">
-                <h4>Parameters</h4>
+                <h4>参数</h4>
                 <dl>
                   <template v-for="p in seg.formula.parameters" :key="p.symbol">
                     <dt>{{ p.symbol }}<span v-if="p.label"> · {{ p.label }}</span></dt>
                     <dd>
                       {{ p.meaning }}
-                      <span v-if="p.unit"> · unit: {{ p.unit }}</span>
-                      <span v-if="p.domain"> · domain: {{ p.domain }}</span>
+                      <span v-if="p.unit"> · 单位: {{ p.unit }}</span>
+                      <span v-if="p.domain"> · 取值域: {{ p.domain }}</span>
                     </dd>
                   </template>
                 </dl>
               </div>
               <div v-if="seg.formula.context_links.length" class="formula-section">
-                <h4>Context links</h4>
+                <h4>上下文关系</h4>
                 <ul>
                   <li v-for="link in seg.formula.context_links" :key="`${link.target_lid}:${link.relation}`">
                     <strong>{{ link.relation }}</strong> {{ link.description }}
@@ -228,7 +228,7 @@ defineExpose({ captureScrollAnchor, restoreScrollAnchor });
                 </ul>
               </div>
             </div>
-            <p v-else class="formula-empty">No formula profile found.</p>
+            <p v-else class="formula-empty">未找到公式语义剖面。</p>
           </div>
           <div v-if="seg.lid === props.selectedLid" class="block-actions asset-actions">
             <button @click.stop="emit('highlight-block', seg.lid)">Highlight block</button>

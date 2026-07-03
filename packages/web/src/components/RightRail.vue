@@ -289,26 +289,26 @@ function deleteHistorySession(sessionId: string) {
 
     <section v-show="activeTab === 'formula'" class="tab-panel context-panel">
       <div class="panel-head">
-        <p class="rail-kicker">Formula profile</p>
-        <h3>{{ props.selectedFormula?.formula_lid ?? props.selectedLid ?? "No selection" }}</h3>
+        <p class="rail-kicker">公式剖面</p>
+        <h3>{{ props.selectedFormula?.formula_lid ?? props.selectedLid ?? "未选择" }}</h3>
       </div>
       <div v-if="props.selectedFormula" class="formula-card">
         <p class="formula-meaning">{{ props.selectedFormula.composition.meaning }}</p>
         <div v-if="props.selectedFormula.parameters.length" class="context-block">
-          <h4>Parameters</h4>
+          <h4>参数</h4>
           <dl>
             <template v-for="p in props.selectedFormula.parameters" :key="p.symbol">
               <dt>{{ p.symbol }}<span v-if="p.label"> · {{ p.label }}</span></dt>
               <dd>
                 {{ p.meaning }}
-                <span v-if="p.unit"> · unit: {{ p.unit }}</span>
-                <span v-if="p.domain"> · domain: {{ p.domain }}</span>
+                <span v-if="p.unit"> · 单位: {{ p.unit }}</span>
+                <span v-if="p.domain"> · 取值域: {{ p.domain }}</span>
               </dd>
             </template>
           </dl>
         </div>
         <div v-if="props.selectedFormula.context_links.length" class="context-block">
-          <h4>Context links</h4>
+          <h4>上下文关系</h4>
           <ul>
             <li v-for="link in props.selectedFormula.context_links" :key="`${link.target_lid}:${link.relation}`">
               <strong>{{ link.relation }}</strong> {{ link.description }}
@@ -316,7 +316,7 @@ function deleteHistorySession(sessionId: string) {
           </ul>
         </div>
       </div>
-      <p v-else class="empty panel-empty">Select a formula block in the reader to inspect its profile.</p>
+      <p v-else class="empty panel-empty">在阅读区选择公式后查看预构建剖面。</p>
     </section>
 
     <section v-show="activeTab === 'notes'" class="tab-panel context-panel">

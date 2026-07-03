@@ -85,6 +85,9 @@ E 的记忆所在。**独立于只读基座、用户私有、可变、跨书**�
 ## asset 叶子 (asset leaf)
 代码块 / 表 / 图 / 公式四类**带类型的一等 LID 叶子** `[ADR-0029]`(`NodeKind ∈ {Code,Table,Image,Formula}`,闭集可扩展)。仍是 LID 树叶子:**占 source span、进分区不变式划分、用 LID 单一寻址**(不引第二套 asset_id)。**原文 = 源标记的确定性序列化**(image=`![alt](src)`、code 保留换行缩进、table 保留表文本、formula 保留 LaTeX/MathML 源标记),`book.text(asset_lid)` 返回它,确定性+忠实;`book.manifest` 节点带 `kind` 暴露可见性(零新基础命令,agent 过滤 kind 定位)。Code/Table/Image 作为普通可锚 LID 进入图谱;Formula 额外要求公式语义剖面(见下),让 agent 交互时能拿到参数、组合含义和上下文关系。多模态图理解(描述图)留切片1+、走"标注来源"旁路、**不进只读基座**。源自 `参考.md` 文档世界状态「让图/表/代码不从链路消失」并扩展到技术/数学书的公式状态。状态:NEW(详见 [docs/adr/0029])。
 
+## 行内公式 LID (inline formula LID)
+源段落内部的 `$...$` 或 EPUB 段内 MathML 公式也是 Formula 叶子 `[ADR-0029 执行回填]`:预构建切分时将其从所在文本段拆出为独立 `NodeKind=Formula` LID,公式前后的文字保留为相邻 paragraph LID。它不是段内 occurrence/span sidecar,不引入第二套公式 id;`book.text(formula_lid)` 返回公式源标记,PB6 `formula_lids`、`formula_semantics.json`、前端点击/Formula tab 均复用真实 formula LID 路径。状态:BOUNDARY_CHANGE(2026-07-03)。
+
 ## 公式语义剖面 (FormulaSemantics)
 Formula 叶子的高优先级读时语义对象 `[ADR-0029]`。除 `book.text(formula_lid)` 返回公式原文外,构建期还要固化 `parameters[]`(每个符号/参数的名称、含义、单位或取值域若原文给出、定义来源 LID)、`composition`(公式整体表达什么、各项如何组合)、`context_links[]`(公式与前后段落、概念、断言、图/表/代码的关系)。每条解释必须带 `source_lid` 或 `evidence_lids`,且这些 LID 由确定性闸校验真实存在。agent 解释公式、回答公式相关问题、生成追问时应优先把 FormulaSemantics 连同公式原文放入上下文;无证据的模型常识只能作为 model_supplement,不得伪装成书内事实。状态:NEW(详见 [docs/adr/0029])。
 

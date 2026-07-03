@@ -52,11 +52,11 @@
 - **实测落点**:ManifestNode 是否已 `#[derive(TS)]` 导出;前端 `switch(kind)` 穷举更新点清单;FormulaSemantics 字段是否需要单位/维度扩展。
 
 ### SA2 · md-adapter:识别 fenced code / table / image / formula `[TS]`
-- **做**:`markdownToBlocks` 识别 ` ``` ` 围栏代码块(**整块为一个 leaf,内部空行不腰斩**,保留换行缩进)、markdown 表(`| … |` 连续行成 table 块)、独立 image 行(`![alt](src)`)、块级公式(`$$...$$`)与行内公式所在段的公式叶策略(优先块级公式独立 leaf;行内公式是否拆 leaf 由实测回填)→ 带 asset kind 的 `SourceBlock`;其余仍 paragraph。`SourceBlock` 扩携带 asset 类型。
+- **做**:`markdownToBlocks` 识别 ` ``` ` 围栏代码块(**整块为一个 leaf,内部空行不腰斩**,保留换行缩进)、markdown 表(`| … |` 连续行成 table 块)、独立 image 行(`![alt](src)`)、块级公式(`$$...$$`)与行内公式(`$...$` / 单行 `$$...$$`)。行内公式拆成真实 formula leaf,前后文字保留为相邻 paragraph leaf → 带 asset kind 的 `SourceBlock`;其余仍 paragraph。`SourceBlock` 扩携带 asset 类型。
 - **不做**:不让句切拆公式;不把公式归普通 paragraph 后再靠 LLM 猜;不接 epub(SA3)。
 - **判据**:`vitest` 覆盖 code/table/image/formula 四类识别 + 原文=源标记 + `partition.ts` 分区不变式仍绿(全覆盖无重叠)。
 - **触达**:`[ADR-0029/0008]`
-- **实测落点**:`SourceBlock` 如何携带 asset 类型(扩 `kind` 联合 vs 加 `assetKind?` 字段);围栏语言标签是否进 span;行内公式独立 leaf 还是段内 formula span。
+- **实测落点**:`SourceBlock` 用 `assetKind?` 携带 asset 类型;围栏语言标签进 span;行内公式定型为独立 formula leaf。
 
 ### SA3 · epub-adapter:pre/table/img/math 忠实序列化(修四 bug)`[TS]`
 - **做**:`<pre>`→code(**不 norm**、保留文本换行);`<table>`→table(序列化成确定性表文本,如保留单元格分隔);`<img>`→image(从 `alt`+`src` 合成 `![alt](src)`,进 source 占 span);MathML/公式节点→formula(保留 MathML 或可逆 LaTeX 源标记,不 norm)。LEAF/walk 逻辑相应扩展。

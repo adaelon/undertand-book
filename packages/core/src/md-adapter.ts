@@ -44,6 +44,40 @@ function standaloneInlineFormula(line: string): boolean {
   return /^\$[^$\n]+\$$/.test(line.trim());
 }
 
+function isEscaped(s: string, index: number): boolean {
+  let slashCount = 0;
+  for (let i = index - 1; i >= 0 && s[i] === "\\"; i -= 1) slashCount += 1;
+  return slashCount % 2 === 1;
+}
+
+function inlineFormulaRanges(line: string): { start: number; end: number }[] {
+  const ranges: { start: number; end: number }[] = [];
+  let i = 0;
+  while (i < line.length) {
+    if (line.startsWith("$$", i) && !isEscaped(line, i)) {
+      const end = line.indexOf("$$", i + 2);
+      if (end >= 0) {
+        ranges.push({ start: i, end: end + 2 });
+        i = end + 2;
+        continue;
+      }
+    }
+    if (line[i] === "$" && line[i + 1] !== "$" && !isEscaped(line, i)) {
+      for (let j = i + 1; j < line.length; j += 1) {
+        if (line[j] === "$" && line[j + 1] !== "$" && line[j - 1] !== "$" && !isEscaped(line, j)) {
+          if (j > i + 1) ranges.push({ start: i, end: j + 1 });
+          i = j + 1;
+          break;
+        }
+        if (j === line.length - 1) i += 1;
+      }
+      continue;
+    }
+    i += 1;
+  }
+  return ranges;
+}
+
 export function markdownToBlocks(src: string): SourceBlock[] {
   const blocks: SourceBlock[] = [];
   let para: { start: number; end: number; text: string } | null = null;
@@ -56,6 +90,17 @@ export function markdownToBlocks(src: string): SourceBlock[] {
 
   const pushAsset = (assetKind: AssetKind, start: number, end: number) => {
     blocks.push({ kind: "leaf", assetKind, text: src.slice(start, end), span: { start, end } });
+  };
+
+  const appendPara = (start: number, end: number) => {
+    if (end <= start) return;
+    const text = src.slice(start, end);
+    if (!text.trim()) return;
+    if (!para) para = { start, end, text };
+    else {
+      para.end = end;
+      para.text += "\n" + text;
+    }
   };
 
   for (let i = 0; i < lines.length; i += 1) {
@@ -136,10 +181,18 @@ export function markdownToBlocks(src: string): SourceBlock[] {
       continue;
     }
 
-    if (!para) para = { start: cs.start, end: cs.end, text: lineContent };
-    else {
-      para.end = cs.end;
-      para.text += "\n" + lineContent;
+    const inlineFormulas = inlineFormulaRanges(lineContent);
+    if (inlineFormulas.length) {
+      let cursor = 0;
+      for (const range of inlineFormulas) {
+        appendPara(cs.start + cursor, cs.start + range.start);
+        flush();
+        pushAsset("formula", cs.start + range.start, cs.start + range.end);
+        cursor = range.end;
+      }
+      appendPara(cs.start + cursor, cs.end);
+    } else {
+      appendPara(cs.start, cs.end);
     }
   }
   flush();

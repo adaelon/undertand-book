@@ -14,6 +14,7 @@ const md = [
   "# Chapter",
   "",
   "Definition paragraph.",
+  "Inline formula $F=ma$ inside text.",
   "",
   "$$ E = mc^2 $$",
   "",
@@ -31,6 +32,7 @@ describe("PB6 profile-sidecar build helpers", () => {
     expect(input.visible_lids).toEqual(formulaWindow!.leafLids);
     expect(input.formula_lids).toEqual(formulaWindow!.leafLids.filter((lid) => byLid.get(lid)?.kind === "formula"));
     expect(input.text).toContain(`[${input.formula_lids[0]}]`);
+    expect(nodes.filter((n) => n.kind === "formula")).toHaveLength(2);
   });
 
   it("builds a normalized artifact with the same content_hash口径 as Pass1 input", () => {

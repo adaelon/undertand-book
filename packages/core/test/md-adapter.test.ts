@@ -52,4 +52,21 @@ describe("SA2 markdown asset block recognition", () => {
       .map((b) => nodes.find((n) => n.children.length === 0 && n.span.start === b.span.start && n.span.end === b.span.end)?.kind);
     expect(assetNodes).toEqual(["code", "table", "image", "formula", "formula"]);
   });
+
+  it("splits inline formulas inside paragraphs into formula leaves", () => {
+    const inline = "Before $a+b$ after and $$c=d$$ done.";
+    const blocks = markdownToBlocks(inline);
+    expect(blocks.map((b) => ({ text: b.text, assetKind: b.assetKind ?? "paragraph" }))).toEqual([
+      { text: "Before ", assetKind: "paragraph" },
+      { text: "$a+b$", assetKind: "formula" },
+      { text: " after and ", assetKind: "paragraph" },
+      { text: "$$c=d$$", assetKind: "formula" },
+      { text: " done.", assetKind: "paragraph" },
+    ]);
+
+    const nodes = segment(blocks);
+    const report = checkPartitionInvariant(nodes, inline);
+    expect(report.ok).toBe(true);
+    expect(nodes.filter((n) => n.kind === "formula")).toHaveLength(2);
+  });
 });

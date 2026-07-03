@@ -85,6 +85,11 @@ direction: backward | forward | lateral
 
 For each LID in `formula_lids`, propose a `FormulaSemanticsBuildCandidate` only if the visible text grounds it.
 
+Language contract:
+- FormulaSemantics user-facing explanations must be Simplified Chinese.
+- Use Chinese for `parameters[].label`, `parameters[].meaning`, `parameters[].unit`, `parameters[].domain`, `composition.meaning`, and `context_links[].description` whenever these fields are present.
+- Keep math symbols, variable names, formula source text, LIDs, and closed enum values unchanged.
+
 Shape:
 
 ```json
@@ -94,8 +99,8 @@ Shape:
   "parameters": [
     {
       "symbol": "E",
-      "label": "energy",
-      "meaning": "energy in the formula",
+      "label": "能量",
+      "meaning": "公式中的能量项",
       "unit": null,
       "domain": null,
       "evidence_lids": ["3.2.4", "3.2.5"]
@@ -103,7 +108,7 @@ Shape:
   ],
   "composition": {
     "source_lid": "3.2.4",
-    "meaning": "The formula relates energy to mass and the speed of light.",
+    "meaning": "这个公式表达能量与质量、光速之间的关系。",
     "terms": ["E", "m", "c"],
     "evidence_lids": ["3.2.4"]
   },
@@ -111,7 +116,7 @@ Shape:
     {
       "target_lid": "3.2.5",
       "relation": "explained_by",
-      "description": "The following paragraph explains the symbols.",
+      "description": "后一段解释了公式中的符号含义。",
       "evidence_lids": ["3.2.4", "3.2.5"]
     }
   ]
@@ -125,6 +130,7 @@ Formula rules:
 - Evidence must stay inside `formula_lid + context_lids`.
 - If composition cannot be grounded, omit the formula candidate.
 - Do not use outside math knowledge as book evidence.
+- Do not write English prose in FormulaSemantics explanations unless the source itself is an English technical term that should remain untranslated.
 
 ## Output
 

@@ -8,6 +8,7 @@ describe("SA3 epub xhtml asset block recognition", () => {
   const html = `<?xml version="1.0"?><html><body>
     <h1>Command Pattern</h1>
     <p class="body">Commands are reified calls.</p>
+    <p>Inline math <math><mi>F</mi><mo>=</mo><mi>m</mi><mi>a</mi></math> stays clickable.</p>
     <blockquote><p>Nested blockquote paragraph.</p></blockquote>
     <h2>Examples</h2>
     <pre>function demo() {
@@ -24,6 +25,9 @@ describe("SA3 epub xhtml asset block recognition", () => {
     expect(blocks.map((b) => [b.kind, b.level, b.assetKind, b.text])).toEqual([
       ["heading", 1, undefined, "Command Pattern"],
       ["leaf", undefined, undefined, "Commands are reified calls."],
+      ["leaf", undefined, undefined, "Inline math"],
+      ["leaf", undefined, "formula", "<math><mi>F</mi><mo>=</mo><mi>m</mi><mi>a</mi></math>"],
+      ["leaf", undefined, undefined, "stays clickable."],
       ["leaf", undefined, undefined, "Nested blockquote paragraph."],
       ["heading", 2, undefined, "Examples"],
       ["leaf", undefined, "code", "function demo() {\n  return 1;\n}"],
@@ -48,6 +52,7 @@ describe("SA3 epubToSource full chain with assets", () => {
     const ch1 = `<html><body>
       <h1>Intro</h1>
       <p>First paragraph.</p>
+      <p>Use <math><mi>F</mi><mo>=</mo><mi>m</mi><mi>a</mi></math> here.</p>
       <pre>line 1
   line 2</pre>
       <table><tr><td>x</td><td>y</td></tr></table>
@@ -65,16 +70,17 @@ describe("SA3 epubToSource full chain with assets", () => {
   const nodes = segment(blocks);
 
   it("passes assetKind through segment", () => {
-    expect(blocks.map((b) => b.assetKind).filter(Boolean)).toEqual(["code", "table", "image", "formula"]);
+    expect(blocks.map((b) => b.assetKind).filter(Boolean)).toEqual(["formula", "code", "table", "image", "formula"]);
     expect(source).toContain("line 1\n  line 2");
     expect(source).toContain("| x | y |");
     expect(source).toContain("![cover](cover.png)");
+    expect(source).toContain("<math><mi>F</mi><mo>=</mo><mi>m</mi><mi>a</mi></math>");
     expect(source).toContain("<math><mi>a</mi><mo>+</mo><mi>b</mi></math>");
 
     const assetNodes = blocks
       .filter((block) => block.assetKind)
       .map((b) => nodes.find((n) => n.children.length === 0 && n.span.start === b.span.start && n.span.end === b.span.end)?.kind);
-    expect(assetNodes).toEqual(["code", "table", "image", "formula"]);
+    expect(assetNodes).toEqual(["formula", "code", "table", "image", "formula"]);
   });
 
   it("preserves the partition invariant", () => {
@@ -82,6 +88,6 @@ describe("SA3 epubToSource full chain with assets", () => {
     expect(report.violations).toEqual([]);
     expect(report.coverage).toBe(1);
     expect(nodes.find((n) => n.lid === "1")?.kind).toBe("chapter");
-    expect(nodes.filter((n) => n.children.length === 0)).toHaveLength(6);
+    expect(nodes.filter((n) => n.children.length === 0)).toHaveLength(9);
   });
 });

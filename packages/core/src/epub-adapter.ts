@@ -39,6 +39,37 @@ function mathSource(e: HTMLElement): string {
   return e.toString().trim();
 }
 
+function leafBlocks(e: HTMLElement): RawBlock[] {
+  const blocks: RawBlock[] = [];
+  let text = "";
+  const flushText = () => {
+    const t = norm(text);
+    if (t) blocks.push({ kind: "leaf", text: t });
+    text = "";
+  };
+
+  for (const child of e.childNodes) {
+    if (child.nodeType !== 1) {
+      text += child.text;
+      continue;
+    }
+    const el = child as HTMLElement;
+    const tag = (el.rawTagName ?? "").toLowerCase();
+    if (SKIP.has(tag)) continue;
+    if (tag === "math") {
+      flushText();
+      const formula = mathSource(el);
+      if (formula) blocks.push({ kind: "leaf", assetKind: "formula", text: formula });
+    } else if (tag === "br") {
+      text += "\n";
+    } else {
+      text += el.text;
+    }
+  }
+  flushText();
+  return blocks;
+}
+
 function walk(el: HTMLElement, acc: RawBlock[]): void {
   for (const child of el.childNodes) {
     if (child.nodeType !== 1) continue;
@@ -62,8 +93,7 @@ function walk(el: HTMLElement, acc: RawBlock[]): void {
       const text = mathSource(e);
       if (text) acc.push({ kind: "leaf", assetKind: "formula", text });
     } else if (LEAF.has(tag)) {
-      const text = norm(e.text);
-      if (text) acc.push({ kind: "leaf", text });
+      acc.push(...leafBlocks(e));
     } else {
       walk(e, acc);
     }
