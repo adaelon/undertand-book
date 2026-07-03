@@ -16,9 +16,24 @@ interface ChatTurn {
   questionAnchorLid: string | null;
   questionQuote: AskDraft | null;
 }
+interface ChatSessionSummary {
+  id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+  turn_count: number;
+  turns: ChatSessionTurnSummary[];
+}
+interface ChatSessionTurnSummary {
+  user: string;
+  question_anchor_lid: string | null;
+  question_quote: AskDraft | null;
+}
 
 const props = defineProps<{
   chat: ChatTurn[];
+  chatSessions: ChatSessionSummary[];
+  activeChatSessionId: string;
   agentInput: string;
   sending: boolean;
   showTrace: Record<string, boolean>;
@@ -38,6 +53,8 @@ const emit = defineEmits<{
   (e: "update:agentInput", value: string): void;
   (e: "send-agent"): void;
   (e: "new-chat"): void;
+  (e: "select-chat", sessionId: string): void;
+  (e: "delete-chat", sessionId: string): void;
   (e: "clear-ask"): void;
   (e: "toggle-trace", turnIndex: number): void;
   (e: "undo-effect", turnIndex: number, effectIndex: number, effect: AgentEffect): void;
@@ -48,6 +65,7 @@ const emit = defineEmits<{
 }>();
 
 const activeTab = ref<ContextTab>("agent");
+const historyOpen = ref(false);
 const tabs: { id: ContextTab; label: string }[] = [
   { id: "agent", label: "Agent" },
   { id: "trace", label: "Trace" },
@@ -130,6 +148,23 @@ function excerpt(rec: MemoryRecord): string {
   const c = rec.content.replace(/\s+/g, " ").trim();
   return c.length > 120 ? `${c.slice(0, 120)}…` : c;
 }
+function turnAnchor(turn: ChatSessionTurnSummary): string | null {
+  return turn.question_anchor_lid ?? turn.question_quote?.lid ?? null;
+}
+function openHistorySession(sessionId: string) {
+  if (!sessionId) return;
+  emit("select-chat", sessionId);
+  historyOpen.value = false;
+}
+function gotoHistoryAnchor(lid: string | null) {
+  if (!lid) return;
+  emit("goto", lid);
+  historyOpen.value = false;
+}
+function deleteHistorySession(sessionId: string) {
+  if (!sessionId) return;
+  emit("delete-chat", sessionId);
+}
 </script>
 
 <template>
@@ -152,7 +187,13 @@ function excerpt(rec: MemoryRecord): string {
           <p class="rail-kicker">Reading agent</p>
           <h3>Ask this book</h3>
         </div>
-        <button class="new-chat" @click="emit('new-chat')">New</button>
+        <div class="chat-actions">
+          <button class="history-button" title="Open chat history" @click="historyOpen = true">
+            History
+            <span>{{ props.chatSessions.length }}</span>
+          </button>
+          <button class="new-chat" title="New chat" @click="emit('new-chat')">New</button>
+        </div>
       </div>
 
       <div class="transcript">
@@ -315,6 +356,64 @@ function excerpt(rec: MemoryRecord): string {
       <button @mousedown.prevent="saveAnswerSelection(answerSelection.turn)">Note</button>
     </div>
 
+    <div v-if="historyOpen" class="history-backdrop" @click.self="historyOpen = false">
+      <section class="history-dialog" role="dialog" aria-modal="true" aria-labelledby="history-title">
+        <header class="history-dialog-head">
+          <div>
+            <p class="rail-kicker">Agent history</p>
+            <h3 id="history-title">Chat history</h3>
+          </div>
+          <button class="history-close" title="Close history" aria-label="Close history" @click="historyOpen = false">×</button>
+        </header>
+        <div class="history-list">
+          <article
+            v-for="session in props.chatSessions"
+            :key="session.id"
+            class="history-card"
+            :class="{ active: session.id === props.activeChatSessionId }"
+          >
+            <div class="history-card-head">
+              <div>
+                <h4>{{ compactText(session.title, 72) }}</h4>
+                <p>{{ session.turn_count }} questions</p>
+              </div>
+              <span v-if="session.id === props.activeChatSessionId" class="active-badge">Active</span>
+            </div>
+
+            <ol v-if="session.turns.length" class="history-turns">
+              <li v-for="(turn, i) in session.turns" :key="`${session.id}:${i}`">
+                <p class="history-question">{{ compactText(turn.user, 180) }}</p>
+                <div class="history-anchor-row">
+                  <span>Anchor</span>
+                  <code>{{ turnAnchor(turn) ?? "None" }}</code>
+                  <button
+                    v-if="turnAnchor(turn)"
+                    class="history-goto"
+                    @click="gotoHistoryAnchor(turnAnchor(turn))"
+                  >
+                    Goto
+                  </button>
+                </div>
+              </li>
+            </ol>
+            <p v-else class="empty history-empty">No questions yet.</p>
+
+            <div class="history-card-actions">
+              <button
+                class="history-open"
+                :disabled="session.id === props.activeChatSessionId"
+                @click="openHistorySession(session.id)"
+              >
+                Open chat
+              </button>
+              <button class="history-delete" @click="deleteHistorySession(session.id)">Delete</button>
+            </div>
+          </article>
+          <p v-if="props.chatSessions.length === 0" class="empty history-empty">No saved chat history.</p>
+        </div>
+      </section>
+    </div>
+
   </aside>
 </template>
 
@@ -322,7 +421,9 @@ function excerpt(rec: MemoryRecord): string {
 .right-rail {
   min-width: 0;
   border-left: 1px solid var(--hairline);
-  background: var(--canvas);
+  background: rgba(255, 255, 255, 0.9);
+  backdrop-filter: saturate(160%) blur(18px);
+  -webkit-backdrop-filter: saturate(160%) blur(18px);
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -335,6 +436,7 @@ function excerpt(rec: MemoryRecord): string {
   padding: 0.75rem 0.75rem 0;
 }
 .tab {
+  min-height: 40px;
   border: 0;
   border-bottom: 2px solid transparent;
   border-radius: 0;
@@ -342,6 +444,7 @@ function excerpt(rec: MemoryRecord): string {
   background: transparent;
   padding: 0.55rem 0.25rem;
   font-size: 0.82rem;
+  transition: color 160ms ease, border-color 160ms ease, transform 160ms ease;
 }
 .tab.active {
   color: var(--ink);
@@ -370,6 +473,45 @@ function excerpt(rec: MemoryRecord): string {
 .agent-head {
   padding: 1rem 1rem 0.7rem;
 }
+.chat-actions {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 0.4rem;
+}
+.chat-actions button,
+.history-card-actions button,
+.history-goto {
+  white-space: nowrap;
+}
+.history-button,
+.new-chat,
+.history-open {
+  min-height: 40px;
+  border: 1px solid var(--ink);
+  border-radius: 999px;
+  background: var(--ink);
+  color: #fff;
+  padding: 0.5rem 0.95rem;
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+.history-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  border-color: var(--hairline);
+  background: var(--canvas);
+  color: var(--ink);
+}
+.history-button span {
+  min-width: 1.35rem;
+  padding: 0.05rem 0.35rem;
+  border-radius: 999px;
+  color: var(--ink);
+  background: var(--brand-green);
+  font-size: 0.72rem;
+  text-align: center;
+}
 .panel-head {
   margin-bottom: 0.8rem;
 }
@@ -379,7 +521,7 @@ function excerpt(rec: MemoryRecord): string {
   font-size: 0.72rem;
   font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.04em;
+  letter-spacing: 0;
 }
 .agent-head h3,
 .panel-head h3 {
@@ -388,6 +530,166 @@ function excerpt(rec: MemoryRecord): string {
 }
 .new-chat {
   flex: 0 0 auto;
+}
+.history-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  display: grid;
+  place-items: center;
+  padding: 1.5rem;
+  background: rgba(10, 10, 10, 0.28);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+.history-dialog {
+  width: min(760px, calc(100vw - 2rem));
+  max-height: min(78vh, 780px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--hairline);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: none;
+}
+.history-dialog-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1rem 1.1rem;
+  border-bottom: 1px solid var(--hairline-soft);
+}
+.history-dialog-head h3 {
+  margin: 0;
+  font-size: 1.05rem;
+}
+.history-close {
+  width: 44px;
+  height: 44px;
+  min-height: 44px;
+  flex: 0 0 auto;
+  border: 1px solid var(--hairline);
+  border-radius: 999px;
+  background: var(--canvas);
+  color: var(--ink);
+  padding: 0;
+  font-size: 1.05rem;
+  line-height: 1;
+}
+.history-list {
+  min-height: 0;
+  display: grid;
+  gap: 0.75rem;
+  overflow-y: auto;
+  padding: 0.85rem;
+  background: var(--canvas-parchment);
+}
+.history-card {
+  border: 1px solid var(--hairline);
+  border-radius: 12px;
+  background: var(--canvas);
+  padding: 0.9rem;
+}
+.history-card.active {
+  border-color: var(--brand-green);
+  box-shadow: inset 0 0 0 1px rgba(0, 212, 164, 0.18);
+}
+.history-card-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.65rem;
+}
+.history-card-head h4 {
+  margin: 0 0 0.15rem;
+  color: var(--ink);
+  font-size: 0.95rem;
+  font-weight: 650;
+}
+.history-card-head p {
+  margin: 0;
+  color: var(--steel);
+  font-size: 0.78rem;
+}
+.active-badge {
+  align-self: flex-start;
+  border-radius: 999px;
+  background: var(--brand-green);
+  color: var(--ink);
+  padding: 0.18rem 0.55rem;
+  font-size: 0.72rem;
+  font-weight: 650;
+}
+.history-turns {
+  display: grid;
+  gap: 0.55rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.history-turns li {
+  border-top: 1px solid var(--hairline-soft);
+  padding-top: 0.55rem;
+}
+.history-question {
+  margin: 0 0 0.4rem;
+  color: var(--charcoal);
+  font-size: 0.88rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+.history-anchor-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: var(--steel);
+  font-size: 0.76rem;
+}
+.history-anchor-row code {
+  border: 1px solid var(--hairline);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--charcoal);
+  padding: 0.12rem 0.38rem;
+  font-family: var(--mono);
+  font-size: 0.74rem;
+}
+.history-goto {
+  margin-left: auto;
+  border: 1px solid var(--hairline);
+  border-radius: 999px;
+  background: var(--canvas);
+  color: var(--ink);
+  min-height: 36px;
+  padding: 0.36rem 0.78rem;
+  font-size: 0.76rem;
+  font-weight: 600;
+}
+.history-card-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.45rem;
+  margin-top: 0.8rem;
+}
+.history-card-actions button:disabled {
+  border-color: var(--hairline);
+  background: var(--hairline);
+  color: var(--muted);
+}
+.history-delete {
+  border: 1px solid var(--hairline);
+  border-radius: 999px;
+  background: var(--canvas);
+  color: var(--brand-error);
+  padding: 0.48rem 0.8rem;
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+.history-empty {
+  margin: 0;
 }
 .transcript {
   flex: 1;
@@ -403,7 +705,7 @@ function excerpt(rec: MemoryRecord): string {
   margin: 0 0 0.45rem;
   border: 1px solid var(--hairline-soft);
   border-radius: 8px;
-  background: var(--surface-soft);
+  background: var(--canvas);
   padding: 0.55rem 0.65rem;
 }
 .turn-quote-head {
@@ -436,7 +738,7 @@ function excerpt(rec: MemoryRecord): string {
 .trace-card,
 .formula-card,
 .memory-card {
-  background: var(--surface-soft);
+  background: var(--canvas);
   border: 1px solid var(--hairline-soft);
   border-radius: 8px;
   padding: 0.7rem 0.8rem;
@@ -482,6 +784,7 @@ function excerpt(rec: MemoryRecord): string {
   margin-top: 0.6rem;
 }
 .trace-toggle {
+  min-height: auto;
   border: 0;
   background: transparent;
   color: var(--ink);
@@ -538,7 +841,7 @@ function excerpt(rec: MemoryRecord): string {
 .ask-draft {
   border: 1px solid var(--hairline-soft);
   border-radius: 8px;
-  background: var(--surface-soft);
+  background: var(--canvas);
   padding: 0.65rem 0.75rem;
 }
 .ask-draft-head {
@@ -559,6 +862,7 @@ function excerpt(rec: MemoryRecord): string {
 .ask-draft-head button {
   width: 24px;
   height: 24px;
+  min-height: 24px;
   padding: 0;
 }
 .ask-draft blockquote {

@@ -7,10 +7,10 @@
 use memory::MemoryStore;
 use read_tools::Book;
 use reader::{Reader, DEFAULT_RADIUS};
-use runtime::orchestrator::new_session;
 use runtime::{ModelAdapter, ProviderRegistry};
 use server::{
-    load_session, mcp::VisitorSessions, route, save_session, AppState, Req, UnconfiguredAdapter,
+    ensure_agent_history_for_book, load_agent_history, load_session, mcp::VisitorSessions, route,
+    save_session, AppState, Req, UnconfiguredAdapter,
 };
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -30,6 +30,9 @@ fn main() {
     let session_path = MemoryStore::default_path()
         .parent()
         .map(|p| p.join("session.json"));
+    let history_path = MemoryStore::default_path()
+        .parent()
+        .map(|p| p.join("agent-history.json"));
     // 若 session.json 存在且 book_dir 不同、且该目录可加载,则改用 session 的 book_dir。
     let (dir, saved_top) = match load_session(&session_path) {
         Some(s) if s.book_dir != dir && Book::load(&s.book_dir).is_ok() => {
@@ -69,7 +72,9 @@ fn main() {
         }
     };
     let addr = std::env::var("UNDERSTAND_BOOK_ADDR").unwrap_or_else(|_| "127.0.0.1:8787".into());
-    let messages = new_session(); // 外层 E agent 会话 messages(/agent/new 重置)`[ADR-0030]`
+    let mut agent_history = load_agent_history(&history_path);
+    let messages =
+        ensure_agent_history_for_book(&mut agent_history, &book.base.book_id, "server-start");
     let state = Arc::new(Mutex::new(AppState {
         book,
         reader,
@@ -77,6 +82,8 @@ fn main() {
         adapter,
         messages,
         session_path,
+        history_path,
+        agent_history,
         visitor_sessions: VisitorSessions::default(),
     }));
     // 启动时立即写入 session.json(book_dir + 当前 top_lid),否则后续 goto/scroll

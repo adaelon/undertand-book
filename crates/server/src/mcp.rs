@@ -744,6 +744,8 @@ mod tests {
             adapter: Box::new(StubAdapter),
             messages: new_session(),
             session_path: None,
+            history_path: None,
+            agent_history: crate::AgentHistory::default(),
             visitor_sessions: timeout_ms
                 .map(VisitorSessions::with_timeout_ms)
                 .unwrap_or_default(),

@@ -1,7 +1,17 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
 import { api, ApiError } from "./api";
-import type { AgentEffect, FormulaSemantics, MemoryRecord, OuterOutcome, TraceStep, Viewport } from "./api";
+import type {
+  AgentChatSessionSummary,
+  AgentChatTurn as StoredAgentChatTurn,
+  AgentEffect,
+  AgentHistoryResponse,
+  FormulaSemantics,
+  MemoryRecord,
+  OuterOutcome,
+  TraceStep,
+  Viewport,
+} from "./api";
 import { renderInlineMarkdown, renderMarkdown } from "./md";
 import { rangeToMarkdown } from "./selection";
 import TopBar from "./components/TopBar.vue";
@@ -474,6 +484,7 @@ async function init() {
     await loadOutlineTitles(m.tree);
     const st = await api.state();
     await loadWindow(st.viewport);
+    await refreshAgentHistory();
   } catch (e) {
     fail(e);
   }
@@ -663,6 +674,8 @@ interface AskDraft {
   quote: string;
 }
 const chat = ref<ChatTurn[]>([]);
+const chatSessions = ref<AgentChatSessionSummary[]>([]);
+const activeChatSessionId = ref("");
 const agentInput = ref("");
 const askDraft = ref<AskDraft | null>(null);
 const sending = ref(false);
@@ -684,6 +697,28 @@ function effState(ti: number, ei: number): string | undefined {
 }
 function toggleTrace(ti: number) {
   showTrace.value[ti] = !showTrace.value[ti];
+}
+
+function chatTurnFromHistory(turn: StoredAgentChatTurn): ChatTurn {
+  return {
+    user: turn.user,
+    outcome: turn.outcome,
+    pending: false,
+    questionAnchorLid: turn.question_anchor_lid,
+    questionQuote: turn.question_quote ? { ...turn.question_quote } : null,
+  };
+}
+
+function applyAgentHistory(history: AgentHistoryResponse) {
+  activeChatSessionId.value = history.active_session_id;
+  chatSessions.value = history.sessions;
+  chat.value = history.current.turns.map(chatTurnFromHistory);
+  handled.value = {};
+  showTrace.value = {};
+}
+
+async function refreshAgentHistory() {
+  applyAgentHistory(await api.agentHistory());
 }
 
 // AgentEffect 判别(在 TS 里 narrow,避开模板里的联合类型收窄)。
@@ -713,10 +748,15 @@ async function sendAgent() {
   sending.value = true;
   banner.value = "";
   try {
-    turn.outcome = await api.agentChat(outbound);
+    turn.outcome = await api.agentChat(outbound, {
+      display_user: msg,
+      question_anchor_lid: questionAnchorLid,
+      question_quote: draft ? { ...draft } : null,
+    });
     // agent 可能驱动了共享 reader 视口 / 落了 session 标注 → 同步阅读区。
     askDraft.value = null;
     await syncViewport();
+    await refreshAgentHistory();
   } catch (e) {
     turn.error = e instanceof ApiError ? `[${e.category}] ${e.errorCode}: ${e.message}` : String(e);
   } finally {
@@ -786,9 +826,31 @@ async function saveAgentSelection(turn: ChatTurn, text: string) {
 
 async function newChat() {
   try {
-    await api.agentNew();
-    chat.value = [];
-    handled.value = {};
+    const response = await api.agentNew();
+    applyAgentHistory(response.history);
+    askDraft.value = null;
+    agentInput.value = "";
+  } catch (e) {
+    fail(e);
+  }
+}
+async function selectChat(sessionId: string) {
+  if (!sessionId || sessionId === activeChatSessionId.value) return;
+  try {
+    applyAgentHistory(await api.agentHistorySelect(sessionId));
+    askDraft.value = null;
+    agentInput.value = "";
+  } catch (e) {
+    fail(e);
+  }
+}
+async function deleteChat(sessionId: string) {
+  if (!sessionId) return;
+  if (!window.confirm("删除这个对话历史?")) return;
+  try {
+    applyAgentHistory(await api.agentHistoryDelete(sessionId));
+    askDraft.value = null;
+    agentInput.value = "";
   } catch (e) {
     fail(e);
   }
@@ -811,6 +873,8 @@ async function openBook() {
     gotoInput.value = "";
     outlineSearch.value = "";
     chat.value = [];
+    chatSessions.value = [];
+    activeChatSessionId.value = "";
     handled.value = {};
     showTrace.value = {};
     await init();
@@ -895,6 +959,8 @@ async function openBook() {
       <RightRail
         v-model:agent-input="agentInput"
         :chat="chat"
+        :chat-sessions="chatSessions"
+        :active-chat-session-id="activeChatSessionId"
         :sending="sending"
         :show-trace="showTrace"
         :latest-trace="latestTrace"
@@ -910,6 +976,8 @@ async function openBook() {
         :ask-draft="askDraft"
         @send-agent="sendAgent"
         @new-chat="newChat"
+        @select-chat="selectChat"
+        @delete-chat="deleteChat"
         @clear-ask="clearAskDraft"
         @goto="doGoto"
         @focus-source="focusSource"
@@ -1031,6 +1099,7 @@ async function openBook() {
   margin-top: 0.5em;
 }
 .trace-toggle {
+  min-height: auto;
   font-size: 0.8em;
   background: none;
   border: none;
@@ -1071,8 +1140,8 @@ async function openBook() {
   gap: 0.25rem;
   padding: 0.25rem;
   border-radius: 999px;
-  background: #1a1a1a;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+  background: var(--ink);
+  box-shadow: none;
 }
 .hl-popover button {
   background: transparent;
@@ -1081,6 +1150,7 @@ async function openBook() {
   border-radius: 999px;
   padding: 0.28rem 0.65rem;
   font-size: 0.82rem;
+  min-height: 36px;
   cursor: pointer;
 }
 .hl-popover button:hover {
@@ -1091,18 +1161,22 @@ async function openBook() {
 .note-modal {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.35);
+  background: rgba(10, 10, 10, 0.28);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
   display: flex;
   align-items: center;
   justify-content: center;
+  padding: 1.5rem;
   z-index: 60;
 }
 .note-dialog {
   width: min(46rem, 92vw);
   max-height: 86vh;
-  background: #fff;
-  border-radius: 10px;
-  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.25);
+  background: rgba(255, 255, 255, 0.96);
+  border: 1px solid var(--hairline);
+  border-radius: 12px;
+  box-shadow: none;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -1116,11 +1190,16 @@ async function openBook() {
   font-weight: 600;
 }
 .nd-close {
-  border: none;
-  background: none;
+  width: 44px;
+  height: 44px;
+  min-height: 44px;
+  border: 1px solid var(--hairline);
+  border-radius: 999px;
+  background: var(--canvas);
   font-size: 1rem;
   cursor: pointer;
   color: var(--muted);
+  padding: 0;
 }
 .nd-body {
   display: flex;
@@ -1132,6 +1211,7 @@ async function openBook() {
   flex: 1;
   border: none;
   border-right: 1px solid var(--line);
+  border-radius: 0;
   padding: 1rem;
   font: inherit;
   resize: none;
@@ -1141,7 +1221,7 @@ async function openBook() {
   flex: 1;
   padding: 1rem;
   overflow-y: auto;
-  background: #fcfcfd;
+  background: var(--canvas-parchment);
 }
 .nd-foot {
   display: flex;

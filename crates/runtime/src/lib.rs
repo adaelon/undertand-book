@@ -137,7 +137,7 @@ impl ProviderRegistry {
 }
 
 /// 外层 loop 会话消息角色(OpenAI-兼容)`[ADR-0026]`。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Role {
     System,
     User,
@@ -146,7 +146,7 @@ pub enum Role {
 }
 
 /// 外层 loop 的一条会话消息 `[ADR-0026]`。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub role: Role,
     pub content: Option<String>,
@@ -176,7 +176,7 @@ impl Message {
 }
 
 /// 模型请求的一次工具调用(arguments = OpenAI 风格的 JSON 字符串)`[ADR-0026]`。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCall {
     pub id: String,
     pub name: String,

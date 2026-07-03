@@ -42,6 +42,8 @@ fn main() {
         adapter,
         messages: new_session(),
         session_path: None,
+        history_path: None,
+        agent_history: server::AgentHistory::default(),
         visitor_sessions: VisitorSessions::default(),
     };
 

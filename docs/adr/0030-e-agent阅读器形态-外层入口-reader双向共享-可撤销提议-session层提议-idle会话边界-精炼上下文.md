@@ -45,3 +45,13 @@
 - **TraceStep 字段(决策5)**:`{tool,args,result_digest}`,`result_digest` 截 200 字承载 book.query 的 citations 链。
 - **reader/messages 注入(决策2/6)**:`run` 签名删内部 `Reader::new`、改注入 `reader:&mut Reader` + `messages:&mut Vec<Message>`;server `AppState` 持二者,`/agent/chat` 注入、`/agent/new` 经 `new_session()` 重置;终答入 messages(下一回合可见上轮回答)。
 - **未决留实测(何时回头)**:messages 累积上限/截断、idle 软提示、提议确认逐条 vs 整回合 UX、agent 翻页视觉明示——S10g 前端 + 真跑后定。
+
+## S13l 落地回填(2026-07-03,对话历史)
+**决策**:新对话保留旧会话。
+
+**否决**:
+- 仅刷新当前会话:旧 transcript/messages 无法恢复。
+- 写入 memory:把 UI 对话误当长期知识。
+
+**命门**:历史只恢复住户 agent transcript/messages,不进 reader_profile/MCP visitor。
+**何时回头**:需要多用户/跨设备同步时。

@@ -9,7 +9,7 @@ use crate::{query, synthesize, AssistantTurn, Message, ModelAdapter, Role, ToolS
 use memory::{Anchor, MemCitation, MemoryStore, RecallQuery, SaveInput};
 use read_tools::{Book, ToolError};
 use reader::Reader;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 /// 外层停机预算(切片0 占位,实测回填 `[ADR-0016]`)。
@@ -31,7 +31,7 @@ impl Default for OuterConfig {
 /// 外层 loop 终局 `[ADR-0026]`。incomplete=true ⇒ 触顶诚实标,answer 可能是部分答/缺。
 /// `effects`/`trace`:本回合(一次 `/agent/chat`)的可撤销副作用清单 + 查询踪迹 `[ADR-0030]`,
 /// runtime 内部结构(非冻结命令面),前端据此渲提议卡 / 折叠踪迹。
-#[derive(Debug, Serialize, TS)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../../packages/web/src/generated/")]
 pub struct OuterOutcome {
     pub answer: Option<String>,
@@ -47,7 +47,7 @@ pub struct OuterOutcome {
 /// 一次对话回合的**可撤销副作用** `[ADR-0030 决策3]`:前端据此做反向命令 undo。
 /// 提议单元 = 一次对话回合(事务性):视口变更跨回合合并成单条 `Goto`(undo=goto(before));
 /// highlight/note 每次一条(undo=memory.delete(mem_id))。agent 标注落 session 层,用户「保留」才升 long_term。
-#[derive(Debug, Clone, Serialize, TS)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../../packages/web/src/generated/")]
 #[serde(tag = "kind")]
 pub enum AgentEffect {
@@ -67,7 +67,7 @@ pub enum AgentEffect {
 }
 
 /// 查询踪迹一步 `[ADR-0030 决策5]`:tool_calls 序列摘要,对用户可见(book.query 的检索范围 + citations 链在 `result_digest` 里)。
-#[derive(Debug, Clone, Serialize, TS)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../../packages/web/src/generated/")]
 pub struct TraceStep {
     pub tool: String,

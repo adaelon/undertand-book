@@ -81,6 +81,47 @@ export interface FormulaSemantics {
   composition: FormulaComposition;
   context_links: FormulaContextLink[];
 }
+export interface AskQuote {
+  lid: string;
+  quote: string;
+}
+export interface AgentChatTurn {
+  user: string;
+  outcome: OuterOutcome;
+  question_anchor_lid: string | null;
+  question_quote: AskQuote | null;
+}
+export interface AgentChatTurnSummary {
+  user: string;
+  question_anchor_lid: string | null;
+  question_quote: AskQuote | null;
+}
+export interface AgentChatSessionSummary {
+  id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+  turn_count: number;
+  turns: AgentChatTurnSummary[];
+}
+export interface AgentChatSession {
+  id: string;
+  book_id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+  turns: AgentChatTurn[];
+}
+export interface AgentHistoryResponse {
+  active_session_id: string;
+  sessions: AgentChatSessionSummary[];
+  current: AgentChatSession;
+}
+export interface AgentChatMeta {
+  display_user?: string;
+  question_anchor_lid?: string | null;
+  question_quote?: AskQuote | null;
+}
 
 /** 携带 §4.4 分类信封的错误(category/error_code 供 UI 分流瞬时 vs 永久)。 */
 export class ApiError extends Error {
@@ -153,6 +194,12 @@ export const api = {
   delete: (mem_id: string) => http<{ ok: boolean }>("POST", "/memory/delete", { mem_id }),
 
   // ── agent.*(外层 E agent,POST)`[ADR-0030]` ──
-  agentChat: (message: string) => http<OuterOutcome>("POST", "/agent/chat", { message }),
-  agentNew: () => http<{ ok: boolean }>("POST", "/agent/new", {}),
+  agentChat: (message: string, meta: AgentChatMeta = {}) =>
+    http<OuterOutcome>("POST", "/agent/chat", { message, ...meta }),
+  agentNew: () => http<{ ok: boolean; history: AgentHistoryResponse }>("POST", "/agent/new", {}),
+  agentHistory: () => http<AgentHistoryResponse>("GET", "/agent/history"),
+  agentHistorySelect: (session_id: string) =>
+    http<AgentHistoryResponse>("POST", "/agent/history/select", { session_id }),
+  agentHistoryDelete: (session_id: string) =>
+    http<AgentHistoryResponse>("POST", "/agent/history/delete", { session_id }),
 };

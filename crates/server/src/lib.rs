@@ -17,7 +17,7 @@ use runtime::{
 };
 use serde::Serialize;
 use serde_json::json;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
 pub mod mcp;
@@ -30,13 +30,236 @@ pub struct AppState {
     pub reader: Reader,
     pub store: MemoryStore,
     pub adapter: Box<dyn ModelAdapter + Send>,
-    /// 外层 E agent 的会话 messages(S10f `[ADR-0030]`)。`/agent/chat` 跨回合累积、`/agent/new` 重置;
-    /// 会话边界 = 用户「新对话」(不自动 idle 判定)。
+    /// 外层 E agent 的当前会话 messages(S10f `[ADR-0030]`)。`/agent/chat` 跨回合累积;
+    /// `/agent/new`/history select 会切换到另一份可恢复 session。
     pub messages: Vec<Message>,
     /// 阅读位置持久化文件路径(~/.understand-book/session.json);None 则不持久化。
     pub session_path: Option<PathBuf>,
+    /// resident agent 对话历史文件路径(~/.understand-book/memory/agent-history.json);None 则只保存在本进程。
+    pub history_path: Option<PathBuf>,
+    /// resident agent 的可恢复历史会话。只服务当前人类读者,不写 memory,不开放给访客。
+    pub agent_history: AgentHistory,
     /// P7 访客向导会话表:ephemeral ③,只给 MCP `book_guide` 使用,不写 durable memory。
     pub visitor_sessions: mcp::VisitorSessions,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct AskQuote {
+    pub lid: String,
+    pub quote: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AgentChatTurn {
+    pub user: String,
+    pub outcome: runtime::orchestrator::OuterOutcome,
+    pub question_anchor_lid: Option<String>,
+    pub question_quote: Option<AskQuote>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AgentChatSession {
+    pub id: String,
+    pub book_id: String,
+    pub title: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub turns: Vec<AgentChatTurn>,
+    pub messages: Vec<Message>,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct AgentHistory {
+    #[serde(default)]
+    pub active_by_book: BTreeMap<String, String>,
+    #[serde(default)]
+    pub sessions: Vec<AgentChatSession>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct AgentChatTurnSummary {
+    pub user: String,
+    pub question_anchor_lid: Option<String>,
+    pub question_quote: Option<AskQuote>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct AgentChatSessionSummary {
+    pub id: String,
+    pub title: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub turn_count: usize,
+    pub turns: Vec<AgentChatTurnSummary>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct AgentChatSessionView {
+    pub id: String,
+    pub book_id: String,
+    pub title: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub turns: Vec<AgentChatTurn>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct AgentHistoryResponse {
+    pub active_session_id: String,
+    pub sessions: Vec<AgentChatSessionSummary>,
+    pub current: AgentChatSessionView,
+}
+
+fn compact_title(text: &str) -> String {
+    let t = text.replace(char::is_whitespace, " ").trim().to_string();
+    if t.is_empty() {
+        "New chat".into()
+    } else if t.chars().count() > 40 {
+        format!("{}...", t.chars().take(40).collect::<String>())
+    } else {
+        t
+    }
+}
+
+fn new_agent_session(book_id: &str, now: &str, ordinal: usize) -> AgentChatSession {
+    AgentChatSession {
+        id: format!("chat_{now}_{ordinal}"),
+        book_id: book_id.into(),
+        title: "New chat".into(),
+        created_at: now.into(),
+        updated_at: now.into(),
+        turns: vec![],
+        messages: new_session(),
+    }
+}
+
+pub fn load_agent_history(path: &Option<PathBuf>) -> AgentHistory {
+    let Some(p) = path.as_ref() else {
+        return AgentHistory::default();
+    };
+    let Ok(raw) = std::fs::read_to_string(p) else {
+        return AgentHistory::default();
+    };
+    serde_json::from_str::<AgentHistory>(&raw).unwrap_or_default()
+}
+
+fn save_agent_history_path(
+    path: &Option<PathBuf>,
+    history: &AgentHistory,
+) -> Result<(), ToolError> {
+    let Some(path) = path else {
+        return Ok(());
+    };
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| ToolError {
+            error_code: "INTERNAL_ERROR".into(),
+            category: "internal".into(),
+            message: format!("建 agent history 目录失败: {e}"),
+        })?;
+    }
+    let body = serde_json::to_string_pretty(history).map_err(|e| ToolError {
+        error_code: "INTERNAL_ERROR".into(),
+        category: "internal".into(),
+        message: format!("序列化 agent history 失败: {e}"),
+    })?;
+    std::fs::write(path, body).map_err(|e| ToolError {
+        error_code: "INTERNAL_ERROR".into(),
+        category: "internal".into(),
+        message: format!("写 agent history 失败: {e}"),
+    })
+}
+
+fn save_agent_history(state: &AppState) -> Result<(), ToolError> {
+    save_agent_history_path(&state.history_path, &state.agent_history)
+}
+
+fn ensure_active_agent_session(history: &mut AgentHistory, book_id: &str, now: &str) -> usize {
+    if let Some(active_id) = history.active_by_book.get(book_id) {
+        if let Some(i) = history
+            .sessions
+            .iter()
+            .position(|s| s.book_id == book_id && &s.id == active_id)
+        {
+            return i;
+        }
+    }
+    if let Some(i) = history.sessions.iter().rposition(|s| s.book_id == book_id) {
+        let id = history.sessions[i].id.clone();
+        history.active_by_book.insert(book_id.into(), id);
+        return i;
+    }
+    let i = history.sessions.len();
+    let session = new_agent_session(book_id, now, i);
+    history
+        .active_by_book
+        .insert(book_id.into(), session.id.clone());
+    history.sessions.push(session);
+    i
+}
+
+pub fn ensure_agent_history_for_book(
+    history: &mut AgentHistory,
+    book_id: &str,
+    now: &str,
+) -> Vec<Message> {
+    let i = ensure_active_agent_session(history, book_id, now);
+    history.sessions[i].messages.clone()
+}
+
+fn session_view(s: &AgentChatSession) -> AgentChatSessionView {
+    AgentChatSessionView {
+        id: s.id.clone(),
+        book_id: s.book_id.clone(),
+        title: s.title.clone(),
+        created_at: s.created_at.clone(),
+        updated_at: s.updated_at.clone(),
+        turns: s.turns.clone(),
+    }
+}
+
+fn session_summary(s: &AgentChatSession) -> AgentChatSessionSummary {
+    AgentChatSessionSummary {
+        id: s.id.clone(),
+        title: s.title.clone(),
+        created_at: s.created_at.clone(),
+        updated_at: s.updated_at.clone(),
+        turn_count: s.turns.len(),
+        turns: s
+            .turns
+            .iter()
+            .map(|t| AgentChatTurnSummary {
+                user: t.user.clone(),
+                question_anchor_lid: t.question_anchor_lid.clone(),
+                question_quote: t.question_quote.clone(),
+            })
+            .collect(),
+    }
+}
+
+fn agent_history_response(state: &mut AppState, now: &str) -> AgentHistoryResponse {
+    let book_id = state.book.base.book_id.clone();
+    let i = ensure_active_agent_session(&mut state.agent_history, &book_id, now);
+    state.messages = state.agent_history.sessions[i].messages.clone();
+    let active_session_id = state.agent_history.sessions[i].id.clone();
+    let current = session_view(&state.agent_history.sessions[i]);
+    let mut sessions: Vec<AgentChatSessionSummary> = state
+        .agent_history
+        .sessions
+        .iter()
+        .filter(|s| s.book_id == book_id)
+        .map(session_summary)
+        .collect();
+    sessions.sort_by(|a, b| {
+        b.updated_at
+            .cmp(&a.updated_at)
+            .then_with(|| b.created_at.cmp(&a.created_at))
+            .then_with(|| b.id.cmp(&a.id))
+    });
+    AgentHistoryResponse {
+        active_session_id,
+        sessions,
+        current,
+    }
 }
 
 /// 一次请求的传输无关输入:方法 + 原始 url(含 query)+ JSON body(GET 为空)+ 时间戳。
@@ -65,7 +288,7 @@ pub fn route(state: &mut AppState, req: Req) -> Reply {
         if req.method != "POST" {
             return book_open_method_not_allowed();
         }
-        return route_open_book(state, req.body);
+        return route_open_book(state, req.body, req.now);
     }
     if path == "/book/query" {
         if req.method != "POST" {
@@ -80,6 +303,28 @@ pub fn route(state: &mut AppState, req: Req) -> Reply {
         return route_synthesize(state, req.body);
     }
     // agent.*(S10f):外层 E agent 编排,POST(会话命令)`[ADR-0030]`。
+    if path == "/agent/history" {
+        if req.method != "GET" {
+            return agent_history_method_not_allowed();
+        }
+        let response = agent_history_response(state, req.now);
+        if let Err(e) = save_agent_history(state) {
+            return err_reply(&e);
+        }
+        return ok_json(&response);
+    }
+    if path == "/agent/history/select" {
+        if req.method != "POST" {
+            return agent_method_not_allowed();
+        }
+        return route_agent_history_select(state, req.body, req.now);
+    }
+    if path == "/agent/history/delete" {
+        if req.method != "POST" {
+            return agent_method_not_allowed();
+        }
+        return route_agent_history_delete(state, req.body, req.now);
+    }
     if path == "/agent/chat" {
         if req.method != "POST" {
             return agent_method_not_allowed();
@@ -90,8 +335,7 @@ pub fn route(state: &mut AppState, req: Req) -> Reply {
         if req.method != "POST" {
             return agent_method_not_allowed();
         }
-        state.messages = new_session();
-        return ok_json(&json!({ "ok": true }));
+        return route_agent_new(state, req.now);
     }
     if let Some(p) = path.strip_prefix("/book/") {
         if req.method != "GET" {
@@ -108,7 +352,7 @@ pub fn route(state: &mut AppState, req: Req) -> Reply {
     }
 }
 
-fn route_open_book(state: &mut AppState, body: &str) -> Reply {
+fn route_open_book(state: &mut AppState, body: &str, now: &str) -> Reply {
     let v = match body_value(body) {
         Ok(v) => v,
         Err(r) => return r,
@@ -130,8 +374,12 @@ fn route_open_book(state: &mut AppState, body: &str) -> Reply {
         }
     };
     state.reader = Reader::new(&book, DEFAULT_RADIUS);
-    state.messages = new_session();
     state.book = book;
+    state.messages =
+        ensure_agent_history_for_book(&mut state.agent_history, &state.book.base.book_id, now);
+    if let Err(e) = save_agent_history(state) {
+        return err_reply(&e);
+    }
     let _ = save_session(state, Some(dir));
     ok_json(&json!({ "ok": true, "book_id": state.book.base.book_id }))
 }
@@ -432,6 +680,25 @@ fn route_synthesize(state: &mut AppState, body: &str) -> Reply {
     }
 }
 
+fn parse_question_quote(v: &serde_json::Value) -> Result<Option<AskQuote>, Reply> {
+    let Some(q) = v.get("question_quote") else {
+        return Ok(None);
+    };
+    if q.is_null() {
+        return Ok(None);
+    }
+    let Some(lid) = q.get("lid").and_then(|x| x.as_str()) else {
+        return Err(validation("INVALID_RANGE", "question_quote 需 lid"));
+    };
+    let Some(quote) = q.get("quote").and_then(|x| x.as_str()) else {
+        return Err(validation("INVALID_RANGE", "question_quote 需 quote"));
+    };
+    Ok(Some(AskQuote {
+        lid: lid.into(),
+        quote: quote.into(),
+    }))
+}
+
 /// `POST /agent/chat`(S10f)`[ADR-0030]`:外层 E agent 编排 loop,注入同一
 /// `book/store/reader/messages/adapter`(与前端共享视口、跨回合 messages)。body `{message}` →
 /// `OuterOutcome{answer, incomplete, effects, trace, ...}`;agent 动作即时驱动共享 reader 视口,
@@ -444,6 +711,21 @@ fn route_agent_chat(state: &mut AppState, body: &str, now: &str) -> Reply {
     let Some(msg) = v.get("message").and_then(|x| x.as_str()) else {
         return validation("INVALID_RANGE", "agent.chat 需 message(用户消息文本)");
     };
+    let display_user = v
+        .get("display_user")
+        .and_then(|x| x.as_str())
+        .unwrap_or(msg)
+        .to_string();
+    let question_anchor_lid = v
+        .get("question_anchor_lid")
+        .and_then(|x| x.as_str())
+        .map(str::to_string);
+    let question_quote = match parse_question_quote(&v) {
+        Ok(q) => q,
+        Err(reply) => return reply,
+    };
+    let current_book_id = state.book.base.book_id.clone();
+    ensure_active_agent_session(&mut state.agent_history, &current_book_id, now);
     // 字段级不相交借用:book(shared)+ store/reader/messages(mut)+ adapter(shared)。
     match run(
         &state.book,
@@ -455,9 +737,114 @@ fn route_agent_chat(state: &mut AppState, body: &str, now: &str) -> Reply {
         now,
         OuterConfig::default(),
     ) {
-        Ok(out) => ok_json(&out),
+        Ok(out) => {
+            let book_id = state.book.base.book_id.clone();
+            let idx = ensure_active_agent_session(&mut state.agent_history, &book_id, now);
+            let session = &mut state.agent_history.sessions[idx];
+            if session.turns.is_empty() {
+                session.title = compact_title(&display_user);
+            }
+            session.updated_at = now.into();
+            session.messages = state.messages.clone();
+            session.turns.push(AgentChatTurn {
+                user: display_user,
+                outcome: out.clone(),
+                question_anchor_lid,
+                question_quote,
+            });
+            if let Err(e) = save_agent_history(state) {
+                return err_reply(&e);
+            }
+            ok_json(&out)
+        }
         Err(e) => err_reply(&e),
     }
+}
+
+fn route_agent_new(state: &mut AppState, now: &str) -> Reply {
+    let book_id = state.book.base.book_id.clone();
+    let ordinal = state.agent_history.sessions.len();
+    let session = new_agent_session(&book_id, now, ordinal);
+    state
+        .agent_history
+        .active_by_book
+        .insert(book_id, session.id.clone());
+    state.messages = session.messages.clone();
+    state.agent_history.sessions.push(session);
+    let response = agent_history_response(state, now);
+    if let Err(e) = save_agent_history(state) {
+        return err_reply(&e);
+    }
+    ok_json(&json!({ "ok": true, "history": response }))
+}
+
+fn route_agent_history_select(state: &mut AppState, body: &str, now: &str) -> Reply {
+    let v = match body_value(body) {
+        Ok(v) => v,
+        Err(reply) => return reply,
+    };
+    let Some(session_id) = v.get("session_id").and_then(|x| x.as_str()) else {
+        return validation("INVALID_RANGE", "agent.history.select 需 session_id");
+    };
+    let book_id = state.book.base.book_id.clone();
+    let Some(idx) = state
+        .agent_history
+        .sessions
+        .iter()
+        .position(|s| s.book_id == book_id && s.id == session_id)
+    else {
+        return validation(
+            "INVALID_RANGE",
+            "agent history session 不属于当前 book 或不存在",
+        );
+    };
+    state
+        .agent_history
+        .active_by_book
+        .insert(book_id, session_id.into());
+    state.messages = state.agent_history.sessions[idx].messages.clone();
+    let response = agent_history_response(state, now);
+    if let Err(e) = save_agent_history(state) {
+        return err_reply(&e);
+    }
+    ok_json(&response)
+}
+
+fn route_agent_history_delete(state: &mut AppState, body: &str, now: &str) -> Reply {
+    let v = match body_value(body) {
+        Ok(v) => v,
+        Err(reply) => return reply,
+    };
+    let Some(session_id) = v.get("session_id").and_then(|x| x.as_str()) else {
+        return validation("INVALID_RANGE", "agent.history.delete 需 session_id");
+    };
+    let book_id = state.book.base.book_id.clone();
+    let before = state.agent_history.sessions.len();
+    state
+        .agent_history
+        .sessions
+        .retain(|s| !(s.book_id == book_id && s.id == session_id));
+    if state.agent_history.sessions.len() == before {
+        return validation(
+            "INVALID_RANGE",
+            "agent history session 不属于当前 book 或不存在",
+        );
+    }
+    if state
+        .agent_history
+        .active_by_book
+        .get(&book_id)
+        .is_some_and(|id| id == session_id)
+    {
+        state.agent_history.active_by_book.remove(&book_id);
+    }
+    let idx = ensure_active_agent_session(&mut state.agent_history, &book_id, now);
+    state.messages = state.agent_history.sessions[idx].messages.clone();
+    let response = agent_history_response(state, now);
+    if let Err(e) = save_agent_history(state) {
+        return err_reply(&e);
+    }
+    ok_json(&response)
 }
 
 /// url → (path, query map);query 值经 percent 解码(支持 CJK 概念名 / 空格)。
@@ -589,6 +976,18 @@ fn agent_method_not_allowed() -> Reply {
     }
 }
 
+/// agent.history 是历史读取端点,只收 GET;选择/删除仍走 POST 子端点。
+fn agent_history_method_not_allowed() -> Reply {
+    Reply {
+        status: 405,
+        body: to_body(&ToolError {
+            error_code: "METHOD_NOT_ALLOWED".into(),
+            category: "validation".into(),
+            message: "agent.history 只支持 GET;select/delete 子端点只支持 POST".into(),
+        }),
+    }
+}
+
 /// book.query 是 book.* 里唯一只收 POST 的端点(LLM 命令),405 文案单列以免误导。
 fn synthesize_method_not_allowed() -> Reply {
     Reply {
@@ -662,7 +1061,9 @@ pub struct SessionState {
 
 /// 把 AppState 当前书目录和阅读位置写入 session.json。dir=Some 覆盖书目录(开新书);None 沿用旧值。
 pub fn save_session(state: &AppState, dir: Option<&str>) {
-    let Some(path) = &state.session_path else { return; };
+    let Some(path) = &state.session_path else {
+        return;
+    };
     let book_dir = match dir {
         Some(d) => d.to_string(),
         None => match path.parent() {
@@ -691,7 +1092,6 @@ pub fn load_session(path: &Option<PathBuf>) -> Option<SessionState> {
     let raw = std::fs::read_to_string(p).ok()?;
     serde_json::from_str::<SessionState>(&raw).ok()
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -773,6 +1173,8 @@ mod tests {
             adapter,
             messages: new_session(),
             session_path: None,
+            history_path: None,
+            agent_history: AgentHistory::default(),
             visitor_sessions: mcp::VisitorSessions::default(),
         }
     }
@@ -891,6 +1293,8 @@ mod tests {
             adapter,
             messages: new_session(),
             session_path: None,
+            history_path: None,
+            agent_history: AgentHistory::default(),
             visitor_sessions: mcp::VisitorSessions::default(),
         };
 
@@ -1222,6 +1626,8 @@ mod tests {
             adapter,
             messages: new_session(),
             session_path: None,
+            history_path: None,
+            agent_history: AgentHistory::default(),
             visitor_sessions: mcp::VisitorSessions::default(),
         };
 
@@ -1310,6 +1716,64 @@ mod tests {
         assert!(rc.body.contains("\"type\":\"highlight\""));
     }
 
+    #[test]
+    fn agent_history_new_select_delete_preserves_transcript_and_messages() {
+        let mut s = state_named("agent-history");
+        s.adapter = Box::new(ChatStubAdapter::scripted(vec![AssistantTurn {
+            text: Some("答案一".into()),
+            tool_calls: vec![],
+            usage_total_tokens: Some(3),
+        }]));
+        let chat = post(
+            &mut s,
+            "/agent/chat",
+            r#"{"message":"内部提示","display_user":"用户看到的问题","question_anchor_lid":"1.1","question_quote":{"lid":"1.1","quote":"引用"}} "#,
+        );
+        assert_eq!(chat.status, 200);
+        assert!(s.messages.len() > 1);
+
+        let history = get(&mut s, "/agent/history");
+        assert_eq!(history.status, 200);
+        let history: serde_json::Value = serde_json::from_str(&history.body).unwrap();
+        let old_id = history["active_session_id"].as_str().unwrap().to_string();
+        assert_eq!(history["sessions"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            history["sessions"][0]["turns"][0]["question_anchor_lid"],
+            "1.1"
+        );
+        assert_eq!(history["current"]["turns"][0]["user"], "用户看到的问题");
+        assert_eq!(
+            history["current"]["turns"][0]["question_quote"]["quote"],
+            "引用"
+        );
+
+        let new_chat = post(&mut s, "/agent/new", "{}");
+        assert_eq!(new_chat.status, 200);
+        assert_eq!(s.messages.len(), 1);
+        let new_chat: serde_json::Value = serde_json::from_str(&new_chat.body).unwrap();
+        let new_id = new_chat["history"]["active_session_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_ne!(old_id, new_id);
+        assert_eq!(new_chat["history"]["sessions"].as_array().unwrap().len(), 2);
+
+        let select_body = format!(r#"{{"session_id":"{old_id}"}}"#);
+        let selected = post(&mut s, "/agent/history/select", &select_body);
+        assert_eq!(selected.status, 200);
+        assert!(s.messages.len() > 1);
+        let selected: serde_json::Value = serde_json::from_str(&selected.body).unwrap();
+        assert_eq!(selected["active_session_id"], old_id);
+        assert_eq!(selected["current"]["turns"][0]["user"], "用户看到的问题");
+
+        let deleted = post(&mut s, "/agent/history/delete", &select_body);
+        assert_eq!(deleted.status, 200);
+        assert_eq!(s.messages.len(), 1);
+        let deleted: serde_json::Value = serde_json::from_str(&deleted.body).unwrap();
+        assert_eq!(deleted["active_session_id"], new_id);
+        assert_eq!(deleted["sessions"].as_array().unwrap().len(), 1);
+    }
+
     // /agent/new:清空 messages 回到仅 system(会话边界 = 用户「新对话」)。
     #[test]
     fn agent_new_resets_messages() {
@@ -1327,6 +1791,9 @@ mod tests {
     fn agent_chat_get_405() {
         let mut s = state_named("agentget");
         let r = get(&mut s, "/agent/chat");
+        assert_eq!(r.status, 405);
+        assert!(r.body.contains("METHOD_NOT_ALLOWED"));
+        let r = post(&mut s, "/agent/history", "{}");
         assert_eq!(r.status, 405);
         assert!(r.body.contains("METHOD_NOT_ALLOWED"));
     }

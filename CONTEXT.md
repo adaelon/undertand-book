@@ -160,7 +160,10 @@ memory 层产物的生成机制 `[ADR-0038 修正 ADR-0018]`(命令面记录模�
 读时 E agent 在阅读器中对视图/标注的修改**是可撤销的提议、用户终裁** `[ADR-0030]`。agent **真执行**命令(守人机对称 [docs/adr/0007],命令面无特供),可撤销落**前端交互层**:用 effect 返回([docs/adr/0015])的反向命令 undo(goto 回原 anchor / `memory.delete(id)`)。**提议单元 = 一次对话回合**(`/agent/chat` 一次调用的全部副作用)= 事务性 undo。**agent 提议态 = 标注落 `layer=session`(临时),用户「保留」才升 `long_term`**(复用 memory 两层,零新字段;未处置走人则不污染长期记忆)。`orchestrator` 的 `OuterOutcome` 加 `effects[]`(副作用清单)+ `trace[]`(查询踪迹,对用户可见)承载之。状态:NEW(详见 [docs/adr/0030])。
 
 ## 读时会话边界 (reading session boundary)
-对话会话的切分 = **用户显式控制** `[ADR-0030]`:用户点「新对话」手动清空 `messages`,**不按 idle 时间戳自动判定**(简化设计)。与 [docs/adr/0018] Phase1 的记忆抽取边界(idle/关书/退出)**解耦**——对话会话是用户交互意图,记忆抽取是后台流水线,各自独立。新会话**冷启动上下文 = memory.recall 兜底**(note/highlight/position,精炼 state 而非全量 messages,记大局不被细节淹没);完整轨迹摘要/reader-profile 常驻留 consolidation 刀。状态:NEW(详见 [docs/adr/0030])。
+对话会话的切分 = **用户显式控制** `[ADR-0030]`:用户点「新对话」创建新的 active 对话会话并使用 fresh messages,**不按 idle 时间戳自动判定**。与 [docs/adr/0018] Phase1 的记忆抽取边界(idle/关书/退出)**解耦**——对话会话是用户交互意图,记忆抽取是后台流水线,各自独立。新会话**冷启动上下文 = memory.recall 兜底**(note/highlight/position,精炼 state 而非全量 messages,记大局不被细节淹没);完整轨迹摘要/reader-profile 常驻留 consolidation 刀。状态:NEW(详见 [docs/adr/0030])。
+
+## agent 对话历史 (agent chat history)
+住户 agent 的本地、读者私有、按 `book_id` 分组的可恢复对话会话列表 `[ADR-0030]`:每个历史会话保留人类可见 transcript 与该会话的 agent messages;选择历史会话会恢复二者,删除只删除该历史会话。它不是 memory 记录,不派生 citation,不进入 reader_profile,也不暴露给 visitor/MCP。状态:NEW(详见 [docs/adr/0030])。
 
 ## route(导航原语)
 图谱上的**确定性多跳导航原语** `[ADR-0034]`,零 LLM,只保证返回的 LID/边真实("确定性 LID 由 route 保证")。两形态:`route_from(at)` = **前沿式内核**(站在当前 LID 返回可走的下一步);`route_to(from, target)` = 同批边上跑 BFS 的确定性组合(派生)。区别于 `book.context`(单跳"相关点"):route 是把 context 链起来 + 按边语义排序成"可导航下一步"的多跳找路。route 内核是 Core(架在 book.context 上);教学性排序/过滤属 technical_learning policy。状态:NEW(详见 [docs/adr/0034])。
