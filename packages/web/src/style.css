@@ -318,8 +318,10 @@ body {
 .reader-pane {
   grid-column: 3;
   min-width: 0;
+  min-height: 0;
   position: relative;
   overflow-y: auto;
+  overscroll-behavior-y: contain;
   background: var(--canvas);
 }
 .reader-pane:focus {
@@ -340,18 +342,31 @@ body {
   cursor: pointer;
 }
 .prose p.heading-chapter,
-.prose p.heading-section {
+.prose p.heading-section,
+.prose p.heading-markdown {
   color: var(--ink);
   font-weight: 600;
   line-height: 1.3;
 }
-.prose p.heading-chapter {
+.prose p.heading-chapter,
+.prose p.heading-markdown-1 {
   margin: 0 0 1.25rem;
   font-size: 1.52rem;
 }
-.prose p.heading-section {
+.prose p.heading-section,
+.prose p.heading-markdown-2 {
   margin: 1.55rem 0 0.85rem;
   font-size: 1.18rem;
+}
+.prose p.heading-markdown-3 {
+  margin: 1.25rem 0 0.7rem;
+  font-size: 1.05rem;
+}
+.prose p.heading-markdown-4,
+.prose p.heading-markdown-5,
+.prose p.heading-markdown-6 {
+  margin: 1rem 0 0.6rem;
+  font-size: 1rem;
 }
 .prose p.anchor {
   border-left: 3px solid var(--brand-green);
@@ -364,6 +379,28 @@ body {
   box-shadow: -0.45rem 0 0 var(--surface), 0.45rem 0 0 var(--surface);
 }
 .prose p.hl {
+  background: var(--hl);
+}
+.flow-paragraph {
+  cursor: text;
+}
+.flow-text {
+  cursor: pointer;
+}
+.flow-text.anchor,
+.formula-open.anchor,
+.formula-inline-source.anchor {
+  box-shadow: inset 0 -2px 0 var(--brand-green);
+}
+.flow-text.selected,
+.formula-open.selected,
+.formula-inline-source.selected {
+  background: var(--surface);
+  border-radius: 6px;
+}
+.flow-text.hl,
+.formula-open.hl,
+.formula-inline-source.hl {
   background: var(--hl);
 }
 .prose .empty {
@@ -444,40 +481,58 @@ body {
   color: var(--steel);
   font-size: 0.78rem;
 }
+.formula-inline-source {
+  display: inline;
+  border: 1px solid var(--hairline-soft);
+  border-radius: 6px;
+  background: var(--surface-soft);
+  padding: 0.04em 0.26em;
+  font-family: var(--mono);
+  font-size: 0.92em;
+}
 .formula-source {
+  border: 1px solid var(--hairline-soft);
+  border-radius: 12px;
   background: var(--surface-soft);
 }
-.formula-profile {
-  padding: 0.85rem;
-  border-top: 1px solid var(--hairline-soft);
+.formula-open {
+  min-height: 0;
+  display: inline-block;
+  max-width: 100%;
+  vertical-align: baseline;
+  border: 1px solid rgba(0, 102, 204, 0.22);
+  border-radius: 6px;
   background: var(--canvas);
+  color: var(--ink);
+  margin: 0 0.14em;
+  padding: 0.03em 0.3em 0.04em;
+  text-align: left;
+  font-size: 1em;
+  line-height: inherit;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
-.formula-meaning {
-  margin: 0 0 0.65rem;
-  font-weight: 600;
+.formula-open:hover {
+  background: rgba(0, 102, 204, 0.05);
+  border-color: rgba(0, 102, 204, 0.4);
 }
-.formula-section h4 {
-  margin: 0.7rem 0 0.3rem;
-  font-size: 0.86rem;
+.formula-open-source {
+  min-width: 0;
+  overflow-x: visible;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  font-family: var(--mono);
+  font-size: 0.92em;
+  line-height: inherit;
 }
-.formula-section dl {
+.formula-open .katex-display,
+.formula-inline-source .katex-display {
+  display: inline-block;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
   margin: 0;
-}
-.formula-section dt {
-  font-weight: 600;
-}
-.formula-section dd {
-  margin: 0 0 0.4rem 1rem;
-  color: var(--slate);
-}
-.formula-section ul {
-  margin: 0;
-  padding-left: 1.2rem;
-}
-.formula-empty {
-  margin: 0;
-  padding: 0.75rem 0.85rem;
-  color: var(--steel);
+  vertical-align: middle;
 }
 
 .hl-mark {

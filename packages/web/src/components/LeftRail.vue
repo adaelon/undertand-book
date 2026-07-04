@@ -1,5 +1,5 @@
 ﻿<script setup lang="ts">
-import { computed } from "vue";
+import { computed, nextTick, onMounted, ref, watch } from "vue";
 import type { OutlineItem } from "../App.vue";
 
 const props = defineProps<{
@@ -18,6 +18,7 @@ const emit = defineEmits<{
   (e: "goto", lid: string): void;
 }>();
 
+const outlineList = ref<HTMLElement | null>(null);
 const normalizedQuery = computed(() => props.searchQuery.trim().toLowerCase());
 const filteredOutline = computed(() => {
   const q = normalizedQuery.value;
@@ -34,9 +35,22 @@ const activeOutlineLid = computed(() => {
     .sort((a, b) => b.lid.length - a.lid.length)[0]?.lid ?? null;
 });
 
+async function scrollActiveOutlineIntoView() {
+  await nextTick();
+  const active = outlineList.value?.querySelector<HTMLElement>(".outline-item.active");
+  active?.scrollIntoView({ block: "nearest" });
+}
+
 function gotoOutline(lid: string) {
   emit("goto", lid);
 }
+
+onMounted(() => {
+  void scrollActiveOutlineIntoView();
+});
+watch(activeOutlineLid, () => {
+  void scrollActiveOutlineIntoView();
+});
 </script>
 
 <template>
@@ -54,7 +68,7 @@ function gotoOutline(lid: string) {
 
     <div class="rail-section outline-section">
       <div class="rail-heading">Outline</div>
-      <nav class="outline-list" aria-label="Book outline">
+      <nav ref="outlineList" class="outline-list" aria-label="Book outline">
         <button
           v-for="item in filteredOutline"
           :key="item.lid"

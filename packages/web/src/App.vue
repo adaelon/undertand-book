@@ -53,6 +53,8 @@ interface Segment {
 const segments = ref<Segment[]>([]); // 视口内连续正文(LID 隐形)
 const annotations = ref<MemoryRecord[]>([]); // 当前书全部标注(客户端按 lid 过滤)
 const selectedLid = ref<string | null>(null);
+const currentReadingLid = ref<string | null>(null);
+const formulaDialog = ref<Segment | null>(null);
 const chapterTitle = ref<string>("");
 const sourceFocus = ref<{ lid: string; quote: string | null } | null>(null);
 
@@ -99,8 +101,17 @@ function fail(e: unknown) {
 }
 
 // 读位感:anchor 在叶序中的位置 → 进度%;章节 = anchor 顶层段(LID 首段)。
+const readingAnchorLid = computed(() => currentReadingLid.value ?? viewport.value?.top_lid ?? null);
+const activeOutlineItem = computed(() => {
+  const anchor = readingAnchorLid.value;
+  if (!anchor) return null;
+  return outlineItems.value
+    .filter((item) => anchor === item.lid || anchor.startsWith(`${item.lid}.`))
+    .sort((a, b) => b.lid.length - a.lid.length)[0] ?? null;
+});
+const activeChapterTitle = computed(() => activeOutlineItem.value?.title ?? chapterTitle.value);
 const progressPct = computed(() => {
-  const a = viewport.value?.top_lid;
+  const a = readingAnchorLid.value;
   if (!a || leafOrder.value.length === 0) return 0;
   const idx = leafOrder.value.indexOf(a);
   if (idx < 0) return 0;
@@ -125,7 +136,7 @@ const contextRecords = computed(() => {
 const contextNotes = computed(() => contextRecords.value.filter((r) => r.type === "note"));
 const contextHighlights = computed(() => contextRecords.value.filter((r) => r.type === "highlight"));
 const visibleNotes = computed(() => {
-  const visible = viewport.value?.visible_lids ?? [];
+  const visible = segments.value.map((seg) => seg.lid);
   const order = new Map(visible.map((lid, idx) => [lid, idx]));
   return annotations.value
     .filter((r) => r.type === "note" && !!r.anchor.lid && order.has(r.anchor.lid))
@@ -153,16 +164,35 @@ function escapeHtml(s: string): string {
     .replace(/"/g, "&quot;");
 }
 
+interface MarkdownHeadingDisplay {
+  level: number;
+  text: string;
+  offset: number;
+}
+
+function markdownHeadingDisplay(text: string): MarkdownHeadingDisplay | null {
+  const match = /^(\s{0,3})(#{1,6})([ \t]+)([^\r\n]*?)([ \t]+#+)?[ \t]*(?:\r?\n)?$/.exec(text);
+  if (!match || !match[4].trim()) return null;
+  return {
+    level: match[2].length,
+    text: match[4].trimEnd(),
+    offset: match[1].length + match[2].length + match[3].length,
+  };
+}
+
+function markdownHeadingLevel(seg: { text: string; kind?: NodeKind }): number | null {
+  if (seg.kind !== "chapter" && seg.kind !== "section" && seg.kind !== "paragraph") return null;
+  return markdownHeadingDisplay(seg.text)?.level ?? null;
+}
+
 function stripMarkdownHeadingLine(line: string): string {
-  return line.replace(/^\s{0,3}#{1,6}[ \t]+(.+?)\s*#*\s*$/, "$1");
+  return markdownHeadingDisplay(line)?.text ?? line;
 }
 
 function displayText(seg: { text: string; kind?: NodeKind }): { text: string; offset: number } {
-  if (seg.kind !== "chapter" && seg.kind !== "section") return { text: seg.text, offset: 0 };
-  const match = /^(\s{0,3})(#{1,6})([ \t]+)([\s\S]*)$/.exec(seg.text);
-  if (!match) return { text: seg.text, offset: 0 };
-  const offset = match[1].length + match[2].length + match[3].length;
-  return { text: match[4].replace(/[ \t]+#+\s*$/, "").trimEnd(), offset };
+  const heading = markdownHeadingLevel(seg) ? markdownHeadingDisplay(seg.text) : null;
+  if (heading) return { text: heading.text, offset: heading.offset };
+  return { text: seg.text, offset: 0 };
 }
 
 function clampRange(n: number, max: number): number {
@@ -443,18 +473,34 @@ async function refreshAnnotations() {
   annotations.value = await api.recall({}); // 单书:取全部,客户端按 lid 过滤
 }
 
-// 视口加载:逐 visible_lid 取真原文(连续正文),并刷新标注。
-async function loadWindow(vp: Viewport) {
-  viewport.value = vp;
-  selectedLid.value = vp.top_lid;
-  const texts = await Promise.all(vp.visible_lids.map((lid) => api.text(lid)));
-  const next = await Promise.all(
+type SegmentLoadMode = "replace" | "append" | "prepend";
+
+async function hydrateSegments(lids: string[]): Promise<Segment[]> {
+  const texts = await Promise.all(lids.map((lid) => api.text(lid)));
+  return Promise.all(
     texts.map(async (t) => {
       const kind = kindOf(t.lid);
       return { lid: t.lid, text: t.text, kind, formula: await formulaFor(t.lid, kind) };
     }),
   );
-  segments.value = next;
+}
+
+function mergeSegments(current: Segment[], incoming: Segment[], mode: SegmentLoadMode): Segment[] {
+  if (mode === "replace") return incoming;
+  const seen = new Set(current.map((seg) => seg.lid));
+  const unique = incoming.filter((seg) => !seen.has(seg.lid));
+  return mode === "append" ? [...current, ...unique] : [...unique, ...current];
+}
+
+// 视口加载:逐 visible_lid 取真原文。replace 用于 goto/sync;append/prepend 用于正文连续滚动缓冲。
+async function loadWindow(vp: Viewport, mode: SegmentLoadMode = "replace") {
+  viewport.value = vp;
+  if (mode === "replace") {
+    selectedLid.value = vp.top_lid;
+    currentReadingLid.value = vp.top_lid;
+  }
+  const next = await hydrateSegments(vp.visible_lids);
+  segments.value = mergeSegments(segments.value, next, mode);
   await refreshAnnotations();
   await loadChapter(vp.top_lid);
 }
@@ -494,18 +540,26 @@ onMounted(init);
 // ── 四动作 ──
 async function onScrollEdge(direction: "up" | "down") {
   if (edgeLoading.value || !viewport.value) return;
-  const step = Math.max(1, Math.floor(viewport.value.width / 2));
+  const loaded = segments.value;
+  if (!loaded.length || !leafOrder.value.length) return;
+  const firstIdx = leafOrder.value.indexOf(loaded[0].lid);
+  const lastIdx = leafOrder.value.indexOf(loaded[loaded.length - 1].lid);
+  if (firstIdx < 0 || lastIdx < 0) return;
+  const count = Math.max(1, viewport.value.width);
+  const nextLids = direction === "down"
+    ? leafOrder.value.slice(lastIdx + 1, Math.min(lastIdx + 1 + count, leafOrder.value.length))
+    : leafOrder.value.slice(Math.max(0, firstIdx - count), firstIdx);
+  if (!nextLids.length) return;
+  const anchor = direction === "up"
+    ? readerPaneRef.value?.captureScrollAnchor(loaded.map((seg) => seg.lid)) ?? null
+    : null;
   edgeLoading.value = true;
   try {
     banner.value = "";
     sourceFocus.value = null;
-    const before = viewport.value;
-    const next = (await api.scroll(direction === "down" ? step : -step)).viewport;
-    const nextLids = new Set(next.visible_lids);
-    const overlap = before.visible_lids.filter((lid) => nextLids.has(lid));
-    const anchor = readerPaneRef.value?.captureScrollAnchor(overlap) ?? null;
-    await loadWindow(next);
-    if (next.top_lid !== before.top_lid) await readerPaneRef.value?.restoreScrollAnchor(anchor);
+    const next = await hydrateSegments(nextLids);
+    segments.value = mergeSegments(segments.value, next, direction === "down" ? "append" : "prepend");
+    if (direction === "up") await readerPaneRef.value?.restoreScrollAnchor(anchor);
   } catch (e) {
     fail(e);
   } finally {
@@ -591,7 +645,24 @@ function selectionRanges(range: Range): SelectedRange[] {
 
 function onSelectSeg(lid: string) {
   selectedLid.value = lid;
+  currentReadingLid.value = lid;
   sourceFocus.value = null;
+}
+
+function onCurrentLid(lid: string) {
+  currentReadingLid.value = lid;
+}
+
+function openFormulaDialog(seg: Segment) {
+  if (!seg.formula) return;
+  selectedLid.value = seg.lid;
+  currentReadingLid.value = seg.lid;
+  sourceFocus.value = null;
+  formulaDialog.value = seg;
+}
+
+function closeFormulaDialog() {
+  formulaDialog.value = null;
 }
 
 
@@ -869,6 +940,8 @@ async function openBook() {
     segments.value = [];
     annotations.value = [];
     selectedLid.value = null;
+    currentReadingLid.value = null;
+    formulaDialog.value = null;
     chapterTitle.value = "";
     gotoInput.value = "";
     outlineSearch.value = "";
@@ -887,9 +960,9 @@ async function openBook() {
 <template>
   <div class="app">
     <TopBar
-      :chapter-title="chapterTitle"
+      :chapter-title="activeChapterTitle"
       :progress-pct="progressPct"
-      :anchor-lid="viewport?.top_lid ?? null"
+      :anchor-lid="readingAnchorLid"
       :debug-open="debugOpen"
       :left-rail-open="leftRailOpen"
       @new-chat="newChat"
@@ -907,7 +980,7 @@ async function openBook() {
         v-model:search-query="outlineSearch"
         :outline-items="outlineItems"
         :progress-pct="progressPct"
-        :anchor-lid="viewport?.top_lid ?? null"
+        :anchor-lid="readingAnchorLid"
         :selected-lid="selectedLid"
         :leaf-count="leafOrder.length"
         :debug-open="debugOpen"
@@ -925,10 +998,11 @@ async function openBook() {
       <ReaderPane
         ref="readerPaneRef"
         :segments="segments"
-        :viewport-anchor="viewport?.anchor_lid ?? null"
+        :viewport-anchor="readingAnchorLid"
         :selected-lid="selectedLid"
         :render-seg="renderSeg"
         :render-markdown="renderMarkdown"
+        :markdown-heading-level="markdownHeadingLevel"
         :is-asset="isAsset"
         :is-highlighted="isHighlighted"
         :highlights-of="highlightsOf"
@@ -937,11 +1011,13 @@ async function openBook() {
         :image-meta="imageMeta"
         @select="onSelectSeg"
         @prose-mouse-up="onProseMouseUp"
+        @current-lid="onCurrentLid"
         @scroll-edge="onScrollEdge"
         @highlight-block="highlightBlock"
         @note-block="noteBlock"
         @goto="doGoto"
         @focus-source-local="focusLocalSource"
+        @open-formula="openFormulaDialog"
         @modify-highlight="modifyHighlight"
         @delete-highlight="deleteHighlight"
         @edit-note="openEditNote"
@@ -996,6 +1072,50 @@ async function openBook() {
       <button @mousedown.prevent="confirmHighlight">Highlight</button>
       <button @mousedown.prevent="noteSelection">Note</button>
       <button @mousedown.prevent="askSelection">Ask AI</button>
+    </div>
+
+    <div v-if="formulaDialog" class="formula-modal" @click.self="closeFormulaDialog">
+      <section
+        class="formula-dialog"
+        role="dialog"
+        aria-modal="true"
+        :aria-labelledby="`formula-dialog-title-${formulaDialog.lid}`"
+      >
+        <header class="formula-dialog-head">
+          <div>
+            <p class="formula-dialog-kicker">Formula sidecar</p>
+            <h3 :id="`formula-dialog-title-${formulaDialog.lid}`">{{ formulaDialog.lid }}</h3>
+          </div>
+          <button class="formula-dialog-close" title="关闭" aria-label="关闭公式剖面" @click="closeFormulaDialog">×</button>
+        </header>
+        <div class="formula-dialog-body">
+          <pre class="formula-dialog-source" v-html="renderSeg(formulaDialog)"></pre>
+          <div v-if="formulaDialog.formula" class="formula-dialog-profile">
+            <p class="formula-dialog-meaning">{{ formulaDialog.formula.composition.meaning }}</p>
+            <div v-if="formulaDialog.formula.parameters.length" class="formula-dialog-section">
+              <h4>参数</h4>
+              <dl>
+                <template v-for="p in formulaDialog.formula.parameters" :key="p.symbol">
+                  <dt>{{ p.symbol }}<span v-if="p.label"> · {{ p.label }}</span></dt>
+                  <dd>
+                    {{ p.meaning }}
+                    <span v-if="p.unit"> · 单位: {{ p.unit }}</span>
+                    <span v-if="p.domain"> · 取值域: {{ p.domain }}</span>
+                  </dd>
+                </template>
+              </dl>
+            </div>
+            <div v-if="formulaDialog.formula.context_links.length" class="formula-dialog-section">
+              <h4>上下文关系</h4>
+              <ul>
+                <li v-for="link in formulaDialog.formula.context_links" :key="`${link.target_lid}:${link.relation}`">
+                  <strong>{{ link.relation }}</strong> {{ link.description }}
+                </li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </section>
     </div>
 
     <div v-if="noteEditor" class="note-modal" @click.self="cancelNote">
@@ -1155,6 +1275,117 @@ async function openBook() {
 }
 .hl-popover button:hover {
   background: rgba(255, 255, 255, 0.12);
+}
+
+/* 公式 sidecar 查看弹窗 */
+.formula-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem;
+  background: rgba(10, 10, 10, 0.28);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+.formula-dialog {
+  width: min(52rem, 94vw);
+  max-height: 86vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--hairline);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: none;
+}
+.formula-dialog-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.85rem 1rem;
+  border-bottom: 1px solid var(--line);
+}
+.formula-dialog-kicker {
+  margin: 0 0 0.15rem;
+  color: var(--steel);
+  font-size: 0.72rem;
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0;
+}
+.formula-dialog-head h3 {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 1rem;
+}
+.formula-dialog-close {
+  width: 44px;
+  height: 44px;
+  min-height: 44px;
+  flex: 0 0 auto;
+  border: 1px solid var(--hairline);
+  border-radius: 999px;
+  background: var(--canvas);
+  color: var(--muted);
+  padding: 0;
+  font-size: 1rem;
+}
+.formula-dialog-body {
+  min-height: 0;
+  overflow-y: auto;
+  padding: 1rem;
+}
+.formula-dialog-source {
+  margin: 0 0 1rem;
+  border: 1px solid var(--hairline-soft);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  padding: 0.85rem;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: var(--mono);
+  font-size: 0.9rem;
+  line-height: 1.55;
+}
+.formula-dialog-profile {
+  display: grid;
+  gap: 0.9rem;
+}
+.formula-dialog-meaning {
+  margin: 0;
+  color: var(--ink);
+  font-weight: 650;
+  line-height: 1.55;
+}
+.formula-dialog-section {
+  border-top: 1px solid var(--hairline-soft);
+  padding-top: 0.8rem;
+}
+.formula-dialog-section h4 {
+  margin: 0 0 0.45rem;
+  font-size: 0.9rem;
+}
+.formula-dialog-section dl {
+  margin: 0;
+}
+.formula-dialog-section dt {
+  font-weight: 650;
+}
+.formula-dialog-section dd {
+  margin: 0 0 0.55rem 1rem;
+  color: var(--slate);
+  line-height: 1.5;
+}
+.formula-dialog-section ul {
+  margin: 0;
+  padding-left: 1.2rem;
+  color: var(--slate);
+  line-height: 1.5;
 }
 
 /* 笔记编辑器模态 */
