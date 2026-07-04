@@ -219,6 +219,39 @@ export const Pass2BuildAuditSidecarZ = z.object({
   rejected: z.array(RejectedCandidateZ),
   gate_dropped: z.array(Pass2GateDropZ),
 });
+export const AnchoredTextZ = z.object({
+  text: z.string().min(1),
+  evidence_lids: z.array(z.string()).min(1),
+});
+export const BookStructureSpineRoleZ = z.enum(["setup", "foundation", "method", "application", "case", "synthesis"]);
+export const BookStructureKeyStopTypeZ = z.enum(["definition", "formula", "claim", "example", "turning_point", "warning", "summary"]);
+export const BookStructureKeyStopZ = z.object({
+  id: z.string().min(1),
+  lid: z.string().min(1),
+  type: BookStructureKeyStopTypeZ,
+  title: z.string().optional(),
+  reason: AnchoredTextZ,
+});
+export const BookStructureSpineUnitZ = z.object({
+  lid: z.string().min(1),
+  role: BookStructureSpineRoleZ,
+  summary: AnchoredTextZ,
+  key_stop_ids: z.array(z.string()),
+  depends_on: z.array(z.string()),
+});
+export const BookStructureThroughlineZ = z.object({
+  id: z.string().min(1),
+  name: z.string().min(1),
+  summary: AnchoredTextZ,
+  lids: z.array(z.string()).min(1),
+  key_stop_ids: z.array(z.string()),
+});
+export const BookStructureSidecarZ = z.object({
+  header: ProfileArtifactHeaderZ,
+  spine: z.array(BookStructureSpineUnitZ),
+  throughlines: z.array(BookStructureThroughlineZ),
+  key_stops: z.array(BookStructureKeyStopZ),
+});
 export const ReadOnlyBaseZ = z.object({
   book_id: z.string(),
   lid_nodes: z.array(LidNodeZ),

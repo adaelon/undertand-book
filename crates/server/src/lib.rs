@@ -435,6 +435,14 @@ fn route_book(book: &Book, store: &MemoryStore, leaf: &str, q: &HashMap<String, 
                 }),
             }
         }
+        "structure" => match book.structure(q.get("at").map(|s| s.as_str())) {
+            Ok(p) => ok_json(&p),
+            Err(e) => err_reply(&e),
+        },
+        "guide_path" => match book.guide_path(q.get("at").map(|s| s.as_str())) {
+            Ok(p) => ok_json(&p),
+            Err(e) => err_reply(&e),
+        },
         "route_from" => {
             let Some(at) = q.get("at") else {
                 return validation("INVALID_RANGE", "book.route_from 需 at 查询参数");
@@ -1308,6 +1316,16 @@ mod tests {
     #[test]
     fn route_from_and_route_to_get() {
         let mut s = state_named("route_nav");
+        // BookStructure P8:无 sidecar 时只读工具显式 unavailable,不阻塞服务启动。
+        let structure = get(&mut s, "/book/structure?at=1.1");
+        assert_eq!(structure.status, 200);
+        assert!(structure.body.contains("\"available\":false"));
+        let guide = get(&mut s, "/book/guide_path?at=1.1");
+        assert_eq!(guide.status, 200);
+        assert!(guide.body.contains("\"segments\":[]"));
+        assert_eq!(get(&mut s, "/book/structure?at=9.9").status, 404);
+        assert_eq!(get(&mut s, "/book/guide_path?at=9.9").status, 404);
+
         // route_from:200 + 返 5 类前沿(Frontier 总含全 5 键)。
         let rf = get(&mut s, "/book/route_from?at=1.1");
         assert_eq!(rf.status, 200);

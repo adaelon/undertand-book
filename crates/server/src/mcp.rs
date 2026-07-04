@@ -14,6 +14,8 @@ pub const TOOL_NAMES: &[&str] = &[
     "book_text",
     "book_context",
     "book_concept",
+    "book_structure",
+    "book_guide_path",
     "book_query",
     "book_synthesize",
     "book_guide",
@@ -135,6 +137,12 @@ pub fn tools_list_result() -> Value {
             tool_schema("book_concept", "Return occurrences and related entities for a concept.", json!({
                 "name": {"type": "string"}
             })),
+            tool_schema("book_structure", "Return the public BookStructure projection for a LID.", json!({
+                "at": {"type": "string"}
+            })),
+            tool_schema("book_guide_path", "Return the public BookStructure guide path.", json!({
+                "at": {"type": "string"}
+            })),
             tool_schema("book_query", "Answer a question using explicit book evidence near anchor_lid.", json!({
                 "q": {"type": "string"},
                 "anchor_lid": {"type": "string"}
@@ -175,6 +183,8 @@ pub fn dispatch_mcp_tool(state: &mut AppState, name: &str, arguments: Value, now
         "book_text" => route_book_text(state, &arguments),
         "book_context" => route_book_context(state, &arguments),
         "book_concept" => route_book_concept(state, &arguments),
+        "book_structure" => route_book_structure(state, &arguments),
+        "book_guide_path" => route_book_guide_path(state, &arguments),
         "book_query" => route_book_query(state, &arguments),
         "book_synthesize" => route_book_synthesize(state, &arguments),
         "book_guide" => route_book_guide(state, &arguments, now_ms),
@@ -223,6 +233,28 @@ fn route_book_concept(state: &AppState, args: &Value) -> Reply {
     };
     match state.book.concept(&name) {
         Ok(concept) => ok_json(&concept),
+        Err(e) => err_reply(&e),
+    }
+}
+
+fn route_book_structure(state: &AppState, args: &Value) -> Reply {
+    let at = match optional_str(args, "at") {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    match state.book.structure(at.as_deref()) {
+        Ok(projection) => ok_json(&projection),
+        Err(e) => err_reply(&e),
+    }
+}
+
+fn route_book_guide_path(state: &AppState, args: &Value) -> Reply {
+    let at = match optional_str(args, "at") {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    match state.book.guide_path(at.as_deref()) {
+        Ok(path) => ok_json(&path),
         Err(e) => err_reply(&e),
     }
 }
@@ -761,6 +793,8 @@ mod tests {
             .map(|t| t["name"].as_str().unwrap().to_string())
             .collect();
         assert!(names.contains(&"book_guide".to_string()));
+        assert!(names.contains(&"book_structure".to_string()));
+        assert!(names.contains(&"book_guide_path".to_string()));
         assert!(!names.iter().any(|n| n.starts_with("reader")));
         assert!(!names.iter().any(|n| n.starts_with("memory")));
         assert!(!names.contains(&"book_route_from".to_string()));
@@ -777,11 +811,21 @@ mod tests {
         );
         assert_eq!(s.visitor_sessions.len(), 0);
         assert_eq!(
+            dispatch_mcp_tool(&mut s, "book_structure", json!({"at":"1.1"}), "1001").status,
+            200
+        );
+        assert_eq!(s.visitor_sessions.len(), 0);
+        assert_eq!(
+            dispatch_mcp_tool(&mut s, "book_guide_path", json!({"at":"1.1"}), "1002").status,
+            200
+        );
+        assert_eq!(s.visitor_sessions.len(), 0);
+        assert_eq!(
             dispatch_mcp_tool(
                 &mut s,
                 "book_query",
                 json!({"q":"alpha 是什么", "anchor_lid":"1.1"}),
-                "1001"
+                "1003"
             )
             .status,
             200

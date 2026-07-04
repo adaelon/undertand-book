@@ -10,10 +10,10 @@ argument-hint: ["<path-to-epub-or-md> [--full]"]
 > `understand-book`(`.claude-plugin/plugin.json`)+ skill 文件夹 `build` ⇒ 命令
 > **`/understand-book:build`**。读时启动是另一个 skill `/understand-book:read`(留 S7)。
 
-> **状态:S1–S3 确定性骨架 + PB5 跨会话续建已实现。** 段切分(S1)/ 窗口(S2)/ Pass1 输入组装·
-> merge+闸·目录投影(S3)落 `packages/core` 单测全绿;Pass1 subagent prompt 已填实;PB5 续建脚手架
-> (build-status / emit-input / pass1-write / pass1-batch 消费 `.build/`,见下「跨会话续建」)落地。
-> 余:**真书 + 真 LLM 端到端试跑**(数十窗跨会话抽取 → 固化 `.understand-book/` → 自检闸实测)。
+> **状态:S1–S3 确定性骨架 + PB5/PB6/PB3 跨会话续建脚手架已实现。** 段切分(S1)/
+> 窗口(S2)/ Pass1 输入组装·merge+闸·目录投影(S3)落 `packages/core` 单测全绿;Pass1、
+> profile-sidecar、Pass2 的 status/input/write/batch 流程均落 `.build/`。
+> 余:**真书 + 真 LLM 语义质量试跑**(专门子代理逐窗抽取/分类 → 固化 `.understand-book/` → 自检闸实测)。
 
 把一本书(`$ARGUMENTS` 指向的 epub/md)预构建成只读知识图谱基座,产物落
 `.understand-book/`。预构建期绑当前 agent harness(本 skill 在 harness 内跑,
@@ -22,6 +22,21 @@ harness 供 LLM)`[ADR-0003]`;读时是独立产品,启动走 `/understand-book:r
 ## 参数
 - `$ARGUMENTS`:书路径(epub / markdown)。`--full` = 忽略已有基座强制全量重建。
 
+## 构建期子代理授权与质量优先级
+
+用户已授权预构建期**直接调用专门子代理**完成贵语义步骤:
+`pass1-local-extractor`、`profile-sidecar-extractor`、`pass2-longrange-linker`、`book-structure-extractor`。这些子代理是
+build-time harness 能力的一部分;TS 脚本只负责状态、输入、写盘、hash、gate 和 batch 收口。
+
+质量优先级:
+- **sidecar 语义质量优先于 token 节省**。`discourse_index.json` 与 `formula_semantics.json`
+  直接影响读时解释、公式理解和后续 Pass2 packet 质量,不得用低信息量通用填充换取快速 done。
+- 禁止把“schema 合法”当作“语义完成”。确定性 gate 只能验证 LID/enum/shape,不能替 LLM 判断
+  `local_function`、`relations`、公式参数含义是否读对。
+- 如果专门子代理不可用、窗口无法真实抽取、或 classifier 无法逐候选判断,**停止并报告阻塞**;
+  不得改用 deterministic generic sidecar、空泛 formula 解释、或 Pass2 reject-all 作为常规完成路径。
+- `--allow-partial` 只允许 smoke/救急且需用户显式要求;不得用它绕过语义抽取质量。
+
 ## 编排骨架(8 段管线)
 0. **段/句粒度体检**(确定性,`skills/build/granularity-profile.ts` 经 tsx · SA0 ✓ `[ADR-0032]`):输出 `GranularityProfile`,用户确认 `paragraph/hybrid/sentence` 后才进入正式构建。
 1. **导入 + LID 段级切分**(确定性,`skills/build/split-lid.ts` 经 tsx · S1 ✓ `[ADR-0008]`)
@@ -29,8 +44,9 @@ harness 供 LLM)`[ADR-0003]`;读时是独立产品,启动走 `/understand-book:r
 3. **Pass1 局部抽取**:`packages/core/src/pass1-input.ts` 把每窗口组装成带 LID 标注的正文 → subagent `pass1-local-extractor`(5 并发,见 `agents/`)逐窗口出 `{nodes, edges(local)}` · S3 ✓骨架 `[ADR-0010]`
 4. **merge + 确定性图谱闸**(`packages/core/src/merge.ts:mergeAndGate`;按类型合并 occurrences + 悬空丢不重建 + 最小连坐 + 可观测报告 · S3 ✓ `[ADR-0011]`)
 5. **全局目录确定性投影**(`packages/core/src/catalog.ts:projectCatalog` · S3 ✓ `[ADR-0010]`)
-6. ~~Pass2 长程边~~(subagent `pass2-longrange-linker`)— **切片0 砍,留切片1+**
-7. **自检闸 + 固化只读基座**(分区不变式 + 锚定率 ≥90%,产 `.understand-book/` · 下一刀)
+6. **PB6 profile sidecar + Pass2 长程边**:subagent `profile-sidecar-extractor` 产 `discourse_index.json` / `formula_semantics.json`;subagent `pass2-longrange-linker` 逐候选分类 long_range 边。
+7. **PB7 BookStructure 结构地图**:subagent `book-structure-extractor` 先逐结构单元产 unit cards,再 stitching 出 `spine + throughlines + key_stops`,经 gate 固化 `book_structure.json`。
+8. **自检闸 + 固化只读基座**(分区不变式 + 锚定率 ≥90%,产 `.understand-book/` · 下一刀)
 
 ## 跨会话续建(冷启动契约)`[ADR-0042 · PB5]`
 
@@ -84,6 +100,9 @@ harness 供 LLM)`[ADR-0003]`;读时是独立产品,启动走 `/understand-book:r
 铁律:
 - profile-sidecar batch 不改 `base.json` / `source.txt` / `profile_metadata.json` / `long_range_candidates.json`。
 - `formula_lids` 由 `LidNode.kind === "formula"` 确定性注入,LLM 不判断哪些 LID 是公式。
+- 每个 pending window 必须交 `profile-sidecar-extractor` 做真实语义抽取;不得用模板化 discourse item
+  或“以相邻原文为准”这类通用 formula 解释填满 sidecar。
+- 对公式语义,宁可让无证据公式保持 pending/omit 后暴露质量缺口,也不要编造参数、单位或组合含义。
 - pending 默认拒绝收口;`--allow-partial` 只用于 smoke/救急。
 
 ## Pass2 长程边编排 `[PB3 + PB6]`
@@ -107,5 +126,39 @@ harness 供 LLM)`[ADR-0003]`;读时是独立产品,启动走 `/understand-book:r
 
 铁律:
 - `pass2-longrange-linker` 只分类给定候选,不得新增候选、节点或 local 边。
+- 每个 pending candidate window 必须交 `pass2-longrange-linker` 逐候选分类;不得用“全部 rejected”
+  作为省 token 的默认策略。批量拒绝只允许在每条候选都真实读证据后自然发生。
 - `pass2-batch` 默认拒绝 pending;`--allow-partial` 只用于 smoke/救急。
 - `pass2-batch` 替换旧 long_range 边,保留 local 边;不要手工编辑 `base.json`。
+
+## BookStructure 结构地图编排 `[PB7]`
+
+> BookStructure 必须在 `profile-sidecar-batch` 与 `pass2-batch` 都收口后运行。它只从公共书基座与 profile artifacts 装配输入,不读取 reader_profile / memory / note / highlight / 当前用户问题。
+
+```text
+1. tsx skills/build/book-structure-status.ts <book> [--book-id <id>]
+   -> 根据 `base.json` / `discourse_index.json` / `formula_semantics.json` / `pass2_audit.json`
+      重算结构单元 unit jobs,按 content hash 检查 `.build/book-structure/units/<lid>.json`
+2. 对每个 pending unit job:
+   a. tsx skills/build/book-structure-input.ts <book> unit:<lid> [--book-id <id>]
+      -> 输出 BookStructureUnitSource(public artifacts + LID excerpts)
+   b. 交给 subagent book-structure-extractor
+      -> 只产 `{unit_card}`
+   c. tsx skills/build/book-structure-write.ts <book> unit:<lid> out.json [--book-id <id>]
+      -> 用 unit input hash 原子写 `.build/book-structure/units/<lid>.json`
+3. 全 unit done:
+   a. tsx skills/build/book-structure-input.ts <book> stitch [--book-id <id>]
+      -> 输出全书 unit_cards + long_range_edges stitching packet
+   b. 交给 subagent book-structure-extractor
+      -> 只产 `{spine, throughlines, key_stops}`
+   c. tsx skills/build/book-structure-write.ts <book> stitch out.json [--book-id <id>]
+      -> 原子写 `.build/book-structure/stitch.json`
+4. stitch done -> tsx skills/build/book-structure-batch.ts <book> [--book-id <id>]
+   -> gate LID/evidence/enum/reference shape,写 `book_structure.json`
+```
+
+铁律:
+- BookStructure batch 不改 `base.json` / `source.txt` / `discourse_index.json` / `formula_semantics.json` / `pass2_audit.json`。
+- unit card 与 stitch 都必须交 `book-structure-extractor` 做真实结构判断;不得用章节标题模板或自由导读文章代替。
+- 每个 summary / reason / throughline 都必须有真 LID evidence;悬空 LID/reference 由 deterministic gate 丢弃。
+- pending 默认拒绝收口;读时 Rust loader / guided-reading projection 只能在 `book_structure.json` 能生成并过 gate 后再做。

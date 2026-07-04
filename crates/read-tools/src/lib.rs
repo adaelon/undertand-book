@@ -5,7 +5,7 @@ use base_schema::{
     Direction, EdgeScope, FormulaSemantics, GraphNodeType, LidNode, NodeKind, ReadOnlyBase, Span,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use ts_rs::TS;
 
 // API DTO 的 ts-rs 导出目标(相对本 crate src/):前端类型契约单一真相源 `[ADR-0028 决策6]`。
@@ -19,6 +19,7 @@ pub struct Book {
     node_idx: HashMap<String, usize>,
     formula_semantics: Vec<FormulaSemantics>,
     discourse_index: Vec<TechnicalLearningDiscourseItem>,
+    book_structure: Option<BookStructureSidecar>,
 }
 
 /// technical_learning discourse sidecar item(P2/P2a 契约的 Rust 读时载体)。
@@ -50,6 +51,120 @@ pub struct TechnicalLearningDiscourseRelation {
     #[serde(default)]
     pub evidence_lids: Vec<String>,
 }
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct ProfileArtifactHeader {
+    pub book_id: String,
+    pub book_version: String,
+    pub profile_id: String,
+    pub profile_version: String,
+    pub core_schema_version: String,
+    pub generated_at: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct AnchoredText {
+    pub text: String,
+    pub evidence_lids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub enum BookStructureSpineRole {
+    Setup,
+    Foundation,
+    Method,
+    Application,
+    Case,
+    Synthesis,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub enum BookStructureKeyStopType {
+    Definition,
+    Formula,
+    Claim,
+    Example,
+    TurningPoint,
+    Warning,
+    Summary,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct BookStructureKeyStop {
+    pub id: String,
+    pub lid: String,
+    #[serde(rename = "type")]
+    pub stop_type: BookStructureKeyStopType,
+    pub title: Option<String>,
+    pub reason: AnchoredText,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct BookStructureSpineUnit {
+    pub lid: String,
+    pub role: BookStructureSpineRole,
+    pub summary: AnchoredText,
+    pub key_stop_ids: Vec<String>,
+    pub depends_on: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct BookStructureThroughline {
+    pub id: String,
+    pub name: String,
+    pub summary: AnchoredText,
+    pub lids: Vec<String>,
+    pub key_stop_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct BookStructureSidecar {
+    pub header: ProfileArtifactHeader,
+    pub spine: Vec<BookStructureSpineUnit>,
+    pub throughlines: Vec<BookStructureThroughline>,
+    pub key_stops: Vec<BookStructureKeyStop>,
+}
+
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct StructureProjection {
+    pub available: bool,
+    pub at: Option<String>,
+    pub spine_index: Option<usize>,
+    pub spine_unit: Option<BookStructureSpineUnit>,
+    pub key_stops: Vec<BookStructureKeyStop>,
+    pub throughlines: Vec<BookStructureThroughline>,
+    pub warning: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct GuidePathSegment {
+    pub spine_index: usize,
+    pub spine_unit: BookStructureSpineUnit,
+    pub key_stops: Vec<BookStructureKeyStop>,
+}
+
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct GuidePath {
+    pub available: bool,
+    pub at: Option<String>,
+    pub current_segment_index: Option<usize>,
+    pub segments: Vec<GuidePathSegment>,
+    pub warning: Option<String>,
+}
+
 /// context 默认 top-K(占位,待 P1 实测回填 ADR-0013/0016「何时回头」)。
 pub const DEFAULT_NEAR_K: usize = 10;
 /// route_from 每类前沿默认 top-K(沿用 context 截断惯例 `[ADR-0034 影响段]`)。
@@ -216,6 +331,139 @@ fn parse_formula_semantics_sidecar(s: &str) -> Result<Vec<FormulaSemantics>, ser
     let sidecar: HeaderedFormulaSemanticsSidecar = serde_json::from_value(value)?;
     Ok(sidecar.items)
 }
+
+fn parse_book_structure_sidecar(
+    s: &str,
+    base: &ReadOnlyBase,
+) -> Result<BookStructureSidecar, String> {
+    let sidecar: BookStructureSidecar =
+        serde_json::from_str(s).map_err(|e| format!("解析 book_structure.json 失败: {e}"))?;
+    validate_book_structure_sidecar(&sidecar, base)?;
+    Ok(sidecar)
+}
+
+fn validate_anchored_text(
+    owner: &str,
+    text: &AnchoredText,
+    lids: &HashSet<String>,
+) -> Result<(), String> {
+    if text.text.trim().is_empty() {
+        return Err(format!("{owner} 文本为空"));
+    }
+    if text.evidence_lids.is_empty() {
+        return Err(format!("{owner} 缺 evidence_lids"));
+    }
+    for lid in &text.evidence_lids {
+        if !lids.contains(lid) {
+            return Err(format!("{owner} evidence_lids 含不存在 LID: {lid}"));
+        }
+    }
+    Ok(())
+}
+
+fn validate_book_structure_sidecar(
+    sidecar: &BookStructureSidecar,
+    base: &ReadOnlyBase,
+) -> Result<(), String> {
+    let lids: HashSet<String> = base.lid_nodes.iter().map(|n| n.lid.clone()).collect();
+    let mut key_stop_ids = HashSet::new();
+    for stop in &sidecar.key_stops {
+        if stop.id.trim().is_empty() {
+            return Err("book_structure key_stop id 为空".into());
+        }
+        if !key_stop_ids.insert(stop.id.clone()) {
+            return Err(format!("book_structure key_stop id 重复: {}", stop.id));
+        }
+        if !lids.contains(&stop.lid) {
+            return Err(format!(
+                "book_structure key_stop {} 指向不存在 LID: {}",
+                stop.id, stop.lid
+            ));
+        }
+        validate_anchored_text(
+            &format!("book_structure key_stop {}", stop.id),
+            &stop.reason,
+            &lids,
+        )?;
+    }
+
+    for unit in &sidecar.spine {
+        if !lids.contains(&unit.lid) {
+            return Err(format!("book_structure spine 指向不存在 LID: {}", unit.lid));
+        }
+        validate_anchored_text(
+            &format!("book_structure spine {}", unit.lid),
+            &unit.summary,
+            &lids,
+        )?;
+        for id in &unit.key_stop_ids {
+            if !key_stop_ids.contains(id) {
+                return Err(format!(
+                    "book_structure spine {} 引用不存在 key_stop: {id}",
+                    unit.lid
+                ));
+            }
+        }
+        for lid in &unit.depends_on {
+            if !lids.contains(lid) {
+                return Err(format!(
+                    "book_structure spine {} depends_on 不存在 LID: {lid}",
+                    unit.lid
+                ));
+            }
+        }
+    }
+
+    let mut thread_ids = HashSet::new();
+    for thread in &sidecar.throughlines {
+        if thread.id.trim().is_empty() {
+            return Err("book_structure throughline id 为空".into());
+        }
+        if !thread_ids.insert(thread.id.clone()) {
+            return Err(format!("book_structure throughline id 重复: {}", thread.id));
+        }
+        if thread.name.trim().is_empty() {
+            return Err(format!(
+                "book_structure throughline {} name 为空",
+                thread.id
+            ));
+        }
+        validate_anchored_text(
+            &format!("book_structure throughline {}", thread.id),
+            &thread.summary,
+            &lids,
+        )?;
+        if thread.lids.is_empty() {
+            return Err(format!("book_structure throughline {} 缺 lids", thread.id));
+        }
+        for lid in &thread.lids {
+            if !lids.contains(lid) {
+                return Err(format!(
+                    "book_structure throughline {} 引用不存在 LID: {lid}",
+                    thread.id
+                ));
+            }
+        }
+        for id in &thread.key_stop_ids {
+            if !key_stop_ids.contains(id) {
+                return Err(format!(
+                    "book_structure throughline {} 引用不存在 key_stop: {id}",
+                    thread.id
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn lid_contains(container: &str, lid: &str) -> bool {
+    lid == container || lid.starts_with(&format!("{container}."))
+}
+
+fn lid_related(a: &str, b: &str) -> bool {
+    lid_contains(a, b) || lid_contains(b, a)
+}
+
 impl Book {
     /// 从书目录(含 base.json + source.txt)加载。
     pub fn load(dir: &str) -> Result<Book, String> {
@@ -242,9 +490,16 @@ impl Book {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
             Err(e) => return Err(format!("读 discourse_index.json 失败: {e}")),
         };
+        let book_structure_path = format!("{dir}/book_structure.json");
+        let book_structure = match std::fs::read_to_string(&book_structure_path) {
+            Ok(s) => Some(parse_book_structure_sidecar(&s, &base)?),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(format!("读 book_structure.json 失败: {e}")),
+        };
         Ok(Book::new(base, &source)
             .with_formula_semantics(formula_semantics)
-            .with_discourse_items(discourse_items))
+            .with_discourse_items(discourse_items)
+            .with_book_structure(book_structure))
     }
 
     pub fn new(base: ReadOnlyBase, source: &str) -> Book {
@@ -268,6 +523,7 @@ impl Book {
             node_idx,
             formula_semantics: Vec::new(),
             discourse_index: Vec::new(),
+            book_structure: None,
         }
     }
 
@@ -292,6 +548,145 @@ impl Book {
 
     pub fn discourse_item(&self, lid: &str) -> Option<&TechnicalLearningDiscourseItem> {
         self.discourse_index.iter().find(|item| item.lid == lid)
+    }
+
+    pub fn with_book_structure(mut self, book_structure: Option<BookStructureSidecar>) -> Book {
+        self.book_structure = book_structure;
+        self
+    }
+
+    pub fn book_structure(&self) -> Option<&BookStructureSidecar> {
+        self.book_structure.as_ref()
+    }
+
+    fn key_stop_map(
+        &self,
+        sidecar: &BookStructureSidecar,
+    ) -> HashMap<String, BookStructureKeyStop> {
+        sidecar
+            .key_stops
+            .iter()
+            .map(|s| (s.id.clone(), s.clone()))
+            .collect()
+    }
+
+    fn matching_spine_index(&self, sidecar: &BookStructureSidecar, at: &str) -> Option<usize> {
+        sidecar
+            .spine
+            .iter()
+            .position(|unit| lid_contains(&unit.lid, at))
+            .or_else(|| {
+                sidecar
+                    .spine
+                    .iter()
+                    .position(|unit| lid_contains(at, &unit.lid))
+            })
+    }
+
+    fn stops_by_ids(
+        &self,
+        ids: &[String],
+        stops: &HashMap<String, BookStructureKeyStop>,
+    ) -> Vec<BookStructureKeyStop> {
+        ids.iter().filter_map(|id| stops.get(id).cloned()).collect()
+    }
+
+    /// `book.structure(at?)`:BookStructure 在某 LID 周围的只读结构投影 `[ADR-0045]`。
+    /// 缺 sidecar 时显式 unavailable;传入 at 时仍先校验 LID 真实存在。
+    pub fn structure(&self, at: Option<&str>) -> Result<StructureProjection, ToolError> {
+        if let Some(lid) = at {
+            self.node(lid)?;
+        }
+        let Some(sidecar) = &self.book_structure else {
+            return Ok(StructureProjection {
+                available: false,
+                at: at.map(String::from),
+                spine_index: None,
+                spine_unit: None,
+                key_stops: Vec::new(),
+                throughlines: Vec::new(),
+                warning: Some("book_structure.json not attached".into()),
+            });
+        };
+
+        let stops = self.key_stop_map(sidecar);
+        let (spine_index, spine_unit, key_stops, throughlines) = match at {
+            Some(lid) => {
+                let spine_index = self.matching_spine_index(sidecar, lid);
+                let spine_unit = spine_index.map(|i| sidecar.spine[i].clone());
+                let mut key_stop_ids = Vec::new();
+                if let Some(unit) = &spine_unit {
+                    key_stop_ids.extend(unit.key_stop_ids.iter().cloned());
+                }
+                for stop in &sidecar.key_stops {
+                    if lid_related(&stop.lid, lid) && !key_stop_ids.iter().any(|id| id == &stop.id)
+                    {
+                        key_stop_ids.push(stop.id.clone());
+                    }
+                }
+                let key_stops = self.stops_by_ids(&key_stop_ids, &stops);
+                let throughlines = sidecar
+                    .throughlines
+                    .iter()
+                    .filter(|thread| {
+                        thread.lids.iter().any(|l| lid_related(l, lid))
+                            || thread
+                                .key_stop_ids
+                                .iter()
+                                .any(|id| key_stop_ids.iter().any(|own| own == id))
+                    })
+                    .cloned()
+                    .collect();
+                (spine_index, spine_unit, key_stops, throughlines)
+            }
+            None => (None, None, Vec::new(), sidecar.throughlines.clone()),
+        };
+
+        Ok(StructureProjection {
+            available: true,
+            at: at.map(String::from),
+            spine_index,
+            spine_unit,
+            key_stops,
+            throughlines,
+            warning: None,
+        })
+    }
+
+    /// `book.guide_path(at?)`:全书级宏观带读路线,按 spine 分段展开 key_stops `[ADR-0045]`。
+    /// 不理解自然语言、不读取 reader_profile/memory/viewport。
+    pub fn guide_path(&self, at: Option<&str>) -> Result<GuidePath, ToolError> {
+        if let Some(lid) = at {
+            self.node(lid)?;
+        }
+        let Some(sidecar) = &self.book_structure else {
+            return Ok(GuidePath {
+                available: false,
+                at: at.map(String::from),
+                current_segment_index: None,
+                segments: Vec::new(),
+                warning: Some("book_structure.json not attached".into()),
+            });
+        };
+
+        let stops = self.key_stop_map(sidecar);
+        let segments = sidecar
+            .spine
+            .iter()
+            .enumerate()
+            .map(|(i, unit)| GuidePathSegment {
+                spine_index: i,
+                spine_unit: unit.clone(),
+                key_stops: self.stops_by_ids(&unit.key_stop_ids, &stops),
+            })
+            .collect();
+        Ok(GuidePath {
+            available: true,
+            at: at.map(String::from),
+            current_segment_index: at.and_then(|lid| self.matching_spine_index(sidecar, lid)),
+            segments,
+            warning: None,
+        })
     }
 
     fn node(&self, lid: &str) -> Result<&LidNode, ToolError> {
@@ -1213,6 +1608,107 @@ mod tests {
             context_links: vec![],
         }
     }
+
+    fn structure_base() -> ReadOnlyBase {
+        ReadOnlyBase {
+            book_id: "structure-book".into(),
+            lid_nodes: vec![
+                LidNode {
+                    lid: "1".into(),
+                    path: vec![1],
+                    kind: NodeKind::Chapter,
+                    span: Span { start: 0, end: 8 },
+                    children: vec!["1.1".into()],
+                },
+                LidNode {
+                    lid: "1.1".into(),
+                    path: vec![1, 1],
+                    kind: NodeKind::Paragraph,
+                    span: Span { start: 0, end: 8 },
+                    children: vec![],
+                },
+                LidNode {
+                    lid: "2".into(),
+                    path: vec![2],
+                    kind: NodeKind::Chapter,
+                    span: Span { start: 8, end: 16 },
+                    children: vec!["2.1".into()],
+                },
+                LidNode {
+                    lid: "2.1".into(),
+                    path: vec![2, 1],
+                    kind: NodeKind::Paragraph,
+                    span: Span { start: 8, end: 16 },
+                    children: vec![],
+                },
+            ],
+            graph_nodes: Vec::new(),
+            graph_edges: Vec::new(),
+        }
+    }
+
+    fn write_book_dir(name: &str, base: &ReadOnlyBase) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(name);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("base.json"), serde_json::to_string(base).unwrap()).unwrap();
+        std::fs::write(dir.join("source.txt"), "AAAABBBBCCCCDDDD").unwrap();
+        dir
+    }
+
+    fn book_structure_json() -> serde_json::Value {
+        serde_json::json!({
+            "header": {
+                "book_id": "structure-book",
+                "book_version": "v1",
+                "profile_id": "technical_learning",
+                "profile_version": "technical_learning_v0",
+                "core_schema_version": "core_v0",
+                "generated_at": "2026-07-04T00:00:00.000Z"
+            },
+            "spine": [
+                {
+                    "lid": "1",
+                    "role": "foundation",
+                    "summary": {"text": "Builds the foundation.", "evidence_lids": ["1.1"]},
+                    "key_stop_ids": ["ks:def"],
+                    "depends_on": []
+                },
+                {
+                    "lid": "2",
+                    "role": "application",
+                    "summary": {"text": "Applies the foundation.", "evidence_lids": ["2.1"]},
+                    "key_stop_ids": ["ks:app"],
+                    "depends_on": ["1"]
+                }
+            ],
+            "throughlines": [
+                {
+                    "id": "thread:alpha",
+                    "name": "Alpha line",
+                    "summary": {"text": "Connects foundation and application.", "evidence_lids": ["1.1", "2.1"]},
+                    "lids": ["1", "2"],
+                    "key_stop_ids": ["ks:def", "ks:app"]
+                }
+            ],
+            "key_stops": [
+                {
+                    "id": "ks:def",
+                    "lid": "1.1",
+                    "type": "definition",
+                    "title": "Definition",
+                    "reason": {"text": "Defines the core idea.", "evidence_lids": ["1.1"]}
+                },
+                {
+                    "id": "ks:app",
+                    "lid": "2.1",
+                    "type": "example",
+                    "reason": {"text": "Shows the idea in use.", "evidence_lids": ["2.1"]}
+                }
+            ]
+        })
+    }
+
     #[test]
     fn load_reads_optional_discourse_index_sidecar() {
         let dir = std::env::temp_dir().join("ub-read-tools-discourse-sidecar");
@@ -1299,6 +1795,79 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn load_missing_book_structure_sidecar_degrades_explicitly() {
+        let base = structure_base();
+        let dir = write_book_dir("ub-read-tools-book-structure-missing", &base);
+
+        let book = Book::load(dir.to_str().unwrap()).unwrap();
+        assert!(book.book_structure().is_none());
+        let projection = book.structure(Some("1.1")).unwrap();
+        assert!(!projection.available);
+        assert_eq!(projection.at.as_deref(), Some("1.1"));
+        assert!(projection.key_stops.is_empty());
+        assert!(projection.warning.unwrap().contains("not attached"));
+
+        let guide = book.guide_path(None).unwrap();
+        assert!(!guide.available);
+        assert!(guide.segments.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_bad_book_structure_sidecar_fails_fast() {
+        let base = structure_base();
+        let dir = write_book_dir("ub-read-tools-book-structure-bad", &base);
+        let mut sidecar = book_structure_json();
+        sidecar["key_stops"][0]["reason"]["evidence_lids"] = serde_json::json!(["9.9"]);
+        std::fs::write(dir.join("book_structure.json"), sidecar.to_string()).unwrap();
+
+        let err = match Book::load(dir.to_str().unwrap()) {
+            Ok(_) => panic!("expected bad book_structure.json to fail"),
+            Err(e) => e,
+        };
+        assert!(err.contains("book_structure"));
+        assert!(err.contains("不存在 LID"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_valid_book_structure_projects_structure_and_guide_path() {
+        let base = structure_base();
+        let dir = write_book_dir("ub-read-tools-book-structure-valid", &base);
+        std::fs::write(
+            dir.join("book_structure.json"),
+            book_structure_json().to_string(),
+        )
+        .unwrap();
+
+        let book = Book::load(dir.to_str().unwrap()).unwrap();
+        assert!(book.book_structure().is_some());
+
+        let projection = book.structure(Some("1.1")).unwrap();
+        assert!(projection.available);
+        assert_eq!(projection.spine_index, Some(0));
+        assert_eq!(projection.spine_unit.unwrap().lid, "1");
+        assert_eq!(projection.key_stops.len(), 1);
+        assert_eq!(projection.key_stops[0].id, "ks:def");
+        assert_eq!(projection.throughlines.len(), 1);
+        assert_eq!(projection.throughlines[0].id, "thread:alpha");
+
+        let guide = book.guide_path(Some("2.1")).unwrap();
+        assert!(guide.available);
+        assert_eq!(guide.current_segment_index, Some(1));
+        assert_eq!(guide.segments.len(), 2);
+        assert_eq!(guide.segments[0].spine_unit.lid, "1");
+        assert_eq!(guide.segments[0].key_stops[0].id, "ks:def");
+        assert_eq!(guide.segments[1].spine_unit.lid, "2");
+        assert_eq!(guide.segments[1].key_stops[0].id, "ks:app");
+
+        let err = book.structure(Some("9.9")).unwrap_err();
+        assert_eq!(err.error_code, "LID_NOT_FOUND");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn text_by_single_lid() {
         let b = book();

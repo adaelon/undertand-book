@@ -367,13 +367,17 @@ agent 标注默认 session 层,用户保留才升 long_term。
 | PB2b discourse extractor two-stage prompt | `TechnicalLearningDiscourseIndex`; LID-prefixed window | 先逐 LID 分类,再基于分类连局部 discourse relation;prompt 只产候选,gate 决定能否落 sidecar | `agents/discourse-index-extractor.md` + prompt fixtures |
 | PB3 Pass2 build orchestration + audit sidecar | `TechnicalLearningPass2Input/Output`; `TechnicalLearningDiscourseIndex`; `FormulaSemantics` | 预构建期调用 pass2 subagent,过确定性 gate,写回 base long_range 边与 audit sidecar | `GraphEdge(scope="long_range")` + `pass2_audit.json` |
 | PB4 profile artifact build smoke | PB0-PB3 outputs | 用最小 fixture 从构建输出目录加载 base/source/profile sidecars,验证 read-tools/runtime 能消费 | 预构建到读时的端到端 smoke |
+| PB7 BookStructure sidecar | `BookStructure`; `TechnicalLearningDiscourseIndex`; `FormulaSemantics`; `pass2_audit` | 从公共书基座/profile artifacts 生成 spine/throughlines/key_stops | `book_structure.json` |
 | P1 `technical_learning.pass2_longrange_v1` | `ProfileArtifactHeader`; `TechnicalLearningPass2Input/Output`; 可选 `TechnicalLearningDiscourseIndex`; 可选 `FormulaSemantics` | 读时 context/query 消费 long_range 边;Pass2 gate 能降级候选 | `book.context far` / `book.query cross_chapter/global` 可见长程证据 |
 | P2 `book.synthesize` 深路径 | `SynthesizePolicy`; `TechnicalLearningDiscourseIndex`; `FormulaSemantics`; 可选 `ReaderProfile` | 用 discourse 组织输入 LID 的定义/解释/例子/反驳/总结层次;公式 LID 附 FormulaSemantics;reader_profile 调整讲法 | citations ⊆ input lids 的综合回答 |
 | P2a `book.context` discourse projection | `TechnicalLearningDiscourseIndex`; `ProfileArtifactHeader` | 把 `relations[]` 投影成 `ContextItem.via.kind="discourse"`;local relation 进 near,long_range relation 进 far;仍不带原文 | `book.context` 可见 discourse via 指针 |
-| P3 reader.* 全集 + agent policy | `TechnicalLearningAgentPolicy`; 可选 `TechnicalLearningDiscourseIndex`; 可选 `ReaderProfile` | policy 决定何时建议 goto/highlight/note/回看 prerequisite/展示公式语义 | Core reader 命令调用策略,非新命令 |
+| P3 reader.* 全集 + agent policy | `TechnicalLearningAgentPolicy`; 可选 `TechnicalLearningDiscourseIndex`; 可选 `ReaderProfile`; P8 guide projection | policy 消费 P8 的 guide path / structure projection,再决定何时建议 goto/highlight/note/回看 prerequisite/展示公式语义 | Core reader 命令调用策略,非新命令 |
 | P4 memory consolidation | `ReaderProfile`; `ReaderProfileEvidence` | consolidation Layer 3 产 reader_profile;Layer 1/2/4 作为 evidence 来源 | memory 层 reader_profile 投影 |
 | P5 ReActAdapter + provider registry | 不消费 profile artifact;只消费 Runtime 统一 tool/message 契约 | provider 归一到 AssistantTurn;profile 只提供 prompt/policy 给 orchestrator | 多 provider runtime 能力 |
 | P6 增量构建 + 迁移 | `ProfileArtifactHeader`; `TechnicalLearningDiscourseIndex`; `TechnicalLearningPass2Output`; `ReaderProfileEvidence` | 按 Core LID map 迁移 profile artifacts 和 memory evidence;失败标 orphaned | 可迁移/可审计的 profile + memory 状态 |
+| P7 Book MCP 访客向导面 | `BookMcpTools`; `VisitorSession`; P8 guide projection | 把预构建 book 投影成 MCP server;Tier 1 只读无会话,Tier 2 `book_guide` 带访客会话 | 外部 agent 只读访问与临时访客路线 |
+| P8 BookStructure 读时消费 + 带读路线投影 | `BookStructure`; P9 route Core; `book.text/context` | `read-tools::Book` 加载 sidecar,提供 `book.structure` / `book.guide_path`,并定义人/访客共用的带读目标自检流程 | 住户带读与 MCP guide 共用的宏观路线层 |
+| P9 route Core 导航原语 | `book.context`; Core graph edges | 纯确定性 `route_from` / `route_to`,给 P8/P3/P7 复用 | 全真 LID 的导航前沿与路径 |
 
 P2a 是显式补刀:它不新增新基础命令,只让既有 `book.context` 消费 `TechnicalLearningDiscourseIndex`。P2 可以先直接读 sidecar 做 synthesize;P2a 则把同一份 discourse relation 变成通用 context 指针,供 agent 和 UI 复用。
 
@@ -388,6 +392,8 @@ interface BookMcpTools {
   book_text(args: { lid: string; end_lid?: string }): { lid: string; text: string };
   book_context(args: { lid: string; granularity?: "near" | "mid" | "far"; k?: number }): Context;
   book_concept(args: { name: string }): Concept;
+  book_structure(args: { at?: string }): StructureProjection;
+  book_guide_path(args: { at?: string }): GuidePath;
   book_query(args: { q: string; anchor_lid: string }): QueryResponse;
   book_synthesize(args: { lids: string[]; task?: string }): SynthesizeResponse;
 }
@@ -400,11 +406,12 @@ MCP v1 不暴露 reader.*。
 MCP v1 不暴露 memory.save / memory.delete。
 MCP v1 不共享 /agent/chat messages 或 reader 当前视口。
 book_query 必须显式传 anchor_lid;外部 agent 需先用 manifest/concept/context 定位。
+book_structure / book_guide_path 是 P8 公共投影,只暴露公共 BookStructure,不得读取 reader_profile/memory/viewport。
 ```
 
-### 1.5.9 navigation contracts(route + 人/访客两投影)
+### 1.5.9 navigation contracts(route + guide projection hooks)
 
-> route 是 ADR-0034/0035 的输入契约草案。本节**修订 §1.5.8 的"无状态"假设**:P7 由无状态只读改为连接式访客会话。实现前每刀仍按切片重新 A1 声明。
+> route 是 ADR-0034/0035 的输入契约草案。BookStructure guide projection 的完整实现切片是 P8;P7 只承载 MCP 访客会话边界。实现前每刀仍按切片重新 A1 声明。
 
 `route` = 图谱上的确定性多跳导航原语(零 LLM,保证 LID/边真实)。
 
@@ -533,6 +540,13 @@ ADR-0033 已把 `discourse_index`、`FormulaSemantics`、Pass2 audit、profile m
 - **判据**:给定 fixture book 与规范化 subagent 输出,`profile-sidecar-write` 能逐窗原子落盘;`profile-sidecar-status` 能区分 done/pending/hash 失配;`profile-sidecar-batch` 在全 done 时写出 headered `discourse_index.json` 与 `formula_semantics.json`,pending 默认 exit1;prompt 明确 Step A/B/C、`formula_lids` 来源、enum 红线、LID/evidence 约束。
 - **触达**:`[ADR-0033/0042/0029]`;`agents/profile-sidecar-extractor.md`;`skills/build/profile-sidecar-{input,status,write,batch}.ts`;profile-sidecar build helper;vitest + CLI smoke。
 - **Pass2 前置关系**:Pass2/PB3 不从 Pass1 或临时 candidate JSON 读取 discourse/formula;必须在 PB6 profile-sidecar-batch 收口后,从正式 `discourse_index.json` / `formula_semantics.json` 投影 `source_discourse` 与 `source_formula_semantics`。
+
+### PB7 · BookStructure sidecar(结构地图 + 带读前置总览) `[TS/subagent]` `[ADR-0044]`
+- **做**:新增 BookStructure 预构建趟,产 `book_structure.json`。输入只来自公共书基座与 profile artifacts:`lid_tree/source_text/title_path/base graph/discourse_index/formula_semantics/pass2_audit/profile_metadata`。构建分两阶段:①按章/节等 structure unit 生成 unit cards(role/summary/candidate_key_stops/depends_on/evidence_lids);②用全书 unit cards + long_range/pass2 evidence stitching 出 `spine + throughlines + key_stops`。
+- **不做**:不把 reader_profile/memory/note/highlight/用户当前问题输入预构建;不把 BookStructure 写成一篇自由导读文章;不重新喂完整 `source.txt` 给 LLM 做全书总结;不逐叶子再跑一遍结构抽取。
+- **判据**:sidecar schema/gate 能拒绝悬空 LID/evidence、非法 role/thread/key_stop type;构建工具有 status/input/write/batch 续建路径;产物 fixture 可交给 P8 读时消费验证;本刀不承载读时工具面。
+- **触达**:`CONTEXT.md`;`docs/adr/0044`;`skills/build/SKILL.md`;后续新增 `agents/book-structure-extractor.md`。
+
 ### P1 · `technical_learning.pass2_longrange_v1` + 全量 scope 自适应 `[TS/Rust]`
 - **做**:把 Pass2 设计为 profile-aware long-range linker。输入包含 catalog、现有 graph_nodes、可选 discourse_index、FormulaSemantics、章节/窗口摘要;输出 long_range 边候选和审计 sidecar。Core gate 校验边端/evidence_lids,通过后降成现有 `GraphEdge(scope=long_range)`。补齐 `book.context far` / `book.query cross_chapter/global` 的实测自适应。
 - **不做**:不迁移 GraphNode envelope;不让 Pass2 产新节点;不让 LLM 重建悬空 LID。
@@ -553,11 +567,11 @@ ADR-0033 已把 `discourse_index`、`FormulaSemantics`、Pass2 audit、profile m
 - **判据**:给定 discourse_index fixture,`book.context` 能返回 discourse via;悬空 target/evidence 已在 artifact gate 阶段被拒;near/far 分层可解释。
 - **触达**:`[ADR-0013/0014/0033]`
 ### P3 · reader.* 全集 + technical_learning agent policy + agent 主动带读 `[Rust/Vue]`
-- **做**:补齐冻结命令面里尚未实现的 reader 命令;保持 Core 单一命令面。**人投影"主动带读"**(ADR-0034):agent 消费 `route_from` 的分组前沿,默认**逐停靠点确认**——挑下一停靠点 → 真 `reader.goto`(可撤销提议)→ citation-gated 解释 → 停下等人(继续/换路/退回/没懂),自动巡航 opt-in。technical_learning policy 在 route 的 5 类前沿上做**教学 reorder/过滤**(新手 back 置顶、reader_profile 已懂的跳过),并定 何时建议 goto/highlight/note、何时回看 prerequisite、何时展示 FormulaSemantics、何时生成练习。agent 动作仍为可撤销提议。**反馈信号(ADR-0036)**:停下等人收到的是**开放 NL 提问**(唯一主信号),agent 据语义定 `{轴, route 类别, target?}`——导航轴落 route 5 类、讲法轴落 policy 讲法层(`book.synthesize` 调表达);裸"没懂"走结构兜底(`route_from(at).back ∩ 未读前置`→ 空则讲法轴/有则可撤销提议/二次升级)。每回合开头读 `reader.state()` 做 viewport 静默 re-sync(`at=viewport.anchor_lid`,跟随用户已做的导航,不主动问;"问"仅在 opt-in 巡航被滚动打断时)。
-- **不做**:不新增 profile 专属 reader 命令;不绕过 reader/memory 直接写;不把 agent 提议默认落 long_term;**不让 route 内核带 LLM 或 profile 偏见**(route_from 是 Core 结构,教学整形只在 policy 层);**不默认自动巡航**。
-- **判据**:人和 agent 走同一命令;agent 主动带读逐停靠点可撤销;route_from 结构排序确定性可单测,policy 教学排序作用在分组上;policy 只影响何时/怎么用命令,不改变命令语义;**带读消费 NL 提问→`{轴+类别}`、裸信号结构兜底确定性可测、viewport 偏离触发静默 re-sync 而非自动改路(ADR-0036)**。
-- **触达**:`[ADR-0007/0015/0030/0033/0034/0036]`
-- **依赖**:route Core 原语(P8);route 命令面落点/命名**已定**(ADR-0034 影响段:`book.route_from(at,k?)` / `book.route_to(from,target,k?)`,详见 P8)。
+- **做**:补齐冻结命令面里尚未实现的 reader 命令;保持 Core 单一命令面。**人投影"主动带读"**不在 P3 内部重新发明路线,而是消费 P8 的 `book.structure(at)` / `book.guide_path(at)` 和 P9 的 `book.route_from/route_to`。停靠执行仍是真 `reader.gotoLid`(可撤销提议)→ citation-gated `book.synthesize` 解释 → 停下等人(继续/换路/退回/没懂),自动巡航 opt-in。technical_learning policy 在 route 的 5 类前沿上做教学 reorder/过滤,并定何时建议 goto/highlight/note/回看 prerequisite/展示 FormulaSemantics/生成练习。每回合开头读 `reader.state()` 做 viewport 静默 re-sync。
+- **不做**:不新增 profile 专属 reader 命令;不绕过 reader/memory 直接写;不把 agent 提议默认落 long_term;**不承载 BookStructure 读时投影/guide_path/目标自检的规则**(归 P8);**不让 route 内核带 LLM 或 profile 偏见**(route_from 是 Core 结构,教学整形只在 policy 层);**不默认自动巡航**。
+- **判据**:人和 agent 走同一 reader 命令;P3 调用 P8 提供的 guide workflow 后才执行可撤销 `reader.gotoLid`;route_from 结构排序确定性可单测,policy 教学排序作用在分组上;viewport 偏离触发静默 re-sync 而非自动改路。
+- **触达**:`[ADR-0007/0015/0030/0033/0034/0036/0044/0045]`
+- **依赖**:BookStructure guide projection(P8);route Core 原语(P9);route 命令面落点/命名**已定**(ADR-0034 影响段:`book.route_from(at,k?)` / `book.route_to(from,target,k?)`,详见 P9)。
 
 #### P3 · A4 子刀拆分(实现期)
 
@@ -609,16 +623,24 @@ ADR-0033 已把 `discourse_index`、`FormulaSemantics`、Pass2 audit、profile m
 
 ### P7 · Book MCP 访客向导面(连接式访客会话) `[Rust/MCP]`
 > **本刀修订 ADR-0033 决策12 / §1.5.8 的"无状态"假设**,改为连接式(ADR-0035)。
-- **做**:把已预构建 book 目录投影成 MCP server,暴露只读工具 `book_manifest/text/context/concept/query/synthesize` + **`book_guide(intent, anchor?)`**(返路线:意图→入口→route 路线含每步理由+证据 LID,是 book_query 的姊妹)。**连接式访客会话**(TCP 式握手/挥手):握手发 `session_id`、传输期支持"不对"refine、挥手即焚 + 超时 GC;会话含 `transcript` + 临时游标 `cursor{at_lid,last_frontier}`(访客自己的位置,≠ 读者 viewport)。复用 `read-tools::Book` + runtime citation gate + route(P8)。**暴露分两层(ADR-0035 决策7)**:Tier 1 无连接无状态只读(`book_manifest/text/context/concept/query/synthesize`,不建会话)/ Tier 2 带会话 `book_guide`(握手/挥手/GC 只压此层)。**crate 落点**:route_* 在 read-tools Core(P8,共享)、`book_guide` 在 runtime(lite LLM 命令、book_query 姊妹、不复用住户 `run()`)、VisitorSession 在 server `AppState`。**访客反馈(ADR-0036)**:与人同一消歧骨架,但换两插槽——历史来源用 ③(`cursor.last_frontier`+transcript,非 ② viewport/memory)、讲法整形为空(中立重述,讲法轴近塌缩)、终裁者=访客自身("不对"即指令,直接换前沿分支,无可撤销提议环节)。
-- **不做**:不暴露 `reader.*`;不写 `memory.*`;不共享 localhost reader 当前视口 / `/agent/chat` messages / 读者 session;不新增 profile 专属 MCP 命令;**不把 ③ 访客会话写入 ② durable store**;**不暴露对话式住户 agent**(模糊住户/访客界、泄漏私人房间);**不给访客裸 `route_from/route_to`(v1,只给 curate 的 book_guide)**;**红线靠访客 MCP dispatch 物理无 reader/memory 分支,非运行时权限判**;**不为 Tier 1 只读建会话**;**不把 book_guide 逻辑塞进 server(LLM 命令在 runtime)**。
-- **判据**:外部 agent 经 `book_guide` / route 拿到全真 LID 的路线并可跨调用 refine("不对"→换前沿分支);所有回答 citation 满足 Core 红线且可独立验证;挥手后 ③ 被 GC;并发访客各自会话隔离、读者私人层零泄漏;超时会话被 GC(承重墙);**Tier 1 只读调用不建会话(可测)**;**访客面 dispatch 物理不含 reader/memory 分支(构造 reader.goto 无路可达,可测)**。
-- **触达**:`[ADR-0033 决策12(修订)/0034/0035/0036]`
-- **依赖**:route Core 原语(P8);server AppState 从单会话扩为 住户1+访客N(会话表)。
+- **做**:把已预构建 book 目录投影成 MCP server,暴露只读工具 `book_manifest/text/context/concept/structure/guide_path/query/synthesize` + **`book_guide(intent, anchor?)`**。P7 只承载 MCP transport/dispatch/session 边界:`book_structure` / `book_guide_path` / `book_guide` 的路线语义来自 P8,route 原语来自 P9。**连接式访客会话**(TCP 式握手/挥手):握手发 `session_id`、传输期支持"不对"refine、挥手即焚 + 超时 GC;会话含 `transcript` + 临时游标 `cursor{at_lid,last_frontier}`(访客自己的位置,≠ 读者 viewport)。**暴露分两层(ADR-0035 决策7/ADR-0045)**:Tier 1 无连接无状态只读(`book_manifest/text/context/concept/structure/guide_path/query/synthesize`,不建会话)/ Tier 2 带会话 `book_guide`(握手/挥手/GC 只压此层,复用 P8 guide workflow)。**crate 落点**:`book_guide` 在 runtime(lite LLM 命令、book_query 姊妹、不复用住户 `run()`)、VisitorSession 在 server `AppState`。
+- **不做**:不暴露 `reader.*`;不写 `memory.*`;不共享 localhost reader 当前视口 / `/agent/chat` messages / 读者 session;不新增 profile 专属 MCP 命令;**不把 ③ 访客会话写入 ② durable store**;**不暴露对话式住户 agent**(模糊住户/访客界、泄漏私人房间);**不给访客裸 `route_from/route_to`(v1,只给 curate 的 book_guide)**;**红线靠访客 MCP dispatch 物理无 reader/memory 分支,非运行时权限判**;**不为 Tier 1 只读建会话**;**不把 guide_path/目标自检规则塞进 server**(归 P8)。
+- **判据**:外部 agent 经 `book_guide` 拿到 P8/P9 生成的全真 LID 路线并可跨调用 refine("不对"→换前沿分支);所有回答 citation 满足 Core 红线且可独立验证;挥手后 ③ 被 GC;并发访客各自会话隔离、读者私人层零泄漏;超时会话被 GC(承重墙);**Tier 1 只读调用不建会话(可测)**;**访客面 dispatch 物理不含 reader/memory 分支(构造 reader.goto 无路可达,可测)**。
+- **触达**:`[ADR-0033 决策12(修订)/0034/0035/0036/0045]`
+- **依赖**:BookStructure guide projection(P8);route Core 原语(P9);server AppState 从单会话扩为 住户1+访客N(会话表)。
 
-### P8 · route Core 导航原语(前沿式 + 路径式 BFS) `[Rust]`
-> P3 人投影带读 + P7 访客向导的**共享底座**;承 ADR-0034。
+### P8 · BookStructure 读时消费 + 带读路线投影(人/访客共用) `[Rust]` `[ADR-0045]`
+> 这一刀收口 BookStructure 从 sidecar 到读时带读的完整消费链;P3/P7 只作为人/访客投影消费者。
+- **做**:`read-tools::Book` 加载可选 `book_structure.json`:缺失可降级,存在但 malformed/schema-invalid fail-fast。提供只读 `Book::structure(at?)` / `Book::guide_path(at?)`,并经住户工具面暴露为 `book.structure` / `book.guide_path`,经 MCP Tier 1 暴露为 `book_structure` / `book_guide_path`。`book.structure(at)` 只解释当前位置的结构意义;`book.guide_path(at)` 返回全书级宏观带读路线(按 spine 分段展开 key_stops),不理解自然语言。机械导航(继续/下一段/跳过本段)可沿 guide_path 确定性推进;非机械目标跳转(如"去实验部分/只看结论")由 LLM 选候选 LID,但必须先 `book.text(candidate)` + `book.context(candidate,near)` 自检,通过后才交给人投影执行 `reader.gotoLid`,访客投影只返回路线/解释。局部绕路/卡住/回看仍复用 P9 route frontiers。
+- **不做**:不生成 `book_structure.json`(归 PB7);不实现 route Core(P9);不把 `book.structure(at)` 做成带读路线;不让 `book.guide_path` 自己理解自然语言或读 reader_profile/memory/viewport;不把 chapter/thread scope 放进 v1;不让 MCP 执行 `reader.goto`。
+- **判据**:无 sidecar 时 read-tools 可启动且 guide 工具返回显式 unavailable/empty 降级;坏 sidecar fail-fast;合法 sidecar 下 `book.structure(at)` 能解释当前 LID 所在 unit/spine/key_stop 意义,`book.guide_path(at)` 能返回全书 spine segment + key_stops 且 LID 全真;住户非机械跳转工具序列可测为 `guide_path -> text/context -> gotoLid`;MCP Tier 1 `book_structure` / `book_guide_path` 不建会话且不触碰 reader/memory;MCP `book_guide` 复用同一自检链但只返回 route/explanation。
+- **触达**:`[ADR-0034/0035/0036/0044/0045]`
+- **依赖**:BookStructure sidecar(PB7);route Core 原语(P9);P3 负责 reader 执行,P7 负责 MCP transport/session。
+
+### P9 · route Core 导航原语(前沿式 + 路径式 BFS) `[Rust]`
+> P3 人投影带读 + P8 guide projection + P7 访客向导的**共享底座**;承 ADR-0034。
 - **做**:实现 Core `Book::route_from(at, k?)`(前沿式,架在 `book.context` 上——吃 `context(at,"far")` 的边按 `edge_type→NavCategory` 重组,返回 5 类导航分组 `back/forward/concretize/cross/continue`,`edge_type→类别` 固定映射表,组内 weight×距离 结构排序,k 沿用 context 截断惯例)+ `Book::route_to(from, target, k?)`(同批边 BFS 派生)。**命令面落点(ADR-0034 影响段已定)**:`book.route_from`/`book.route_to` 两命令均经 `orchestrator::tool_specs()` + dispatch 暴露给外层 LLM(bounded,非 manifest token 炸弹),REST 自动 GET;参数最小、route_from 永远返全 5 类(不给 category 过滤参,挑类是上层);错误信封遵循 ADR-0015。零 LLM、纯确定性、可单测。
-- **不做**:不在 route 内核放 LLM 或 profile 偏见(教学整形留 P3 policy 层);不让 route 吃 NL(意图→入口解析复用 book.concept/query);不给 route_from 加 category 过滤参(挑类是 agent/policy 关切,渗进 Core 即层违规);不新增 reader/memory 写;不碰访客会话(P7)。
+- **不做**:不在 route 内核放 LLM 或 profile 偏见(教学整形留 P3 policy 层);不让 route 吃 NL(意图→入口解析复用 book.concept/query);不给 route_from 加 category 过滤参(挑类是 agent/policy 关切,渗进 Core 即层违规);不新增 reader/memory 写;不碰 BookStructure guide projection(P8)或访客会话(P7)。
 - **判据**:给定基座 fixture,`route_from` 确定性产出全 5 类分组前沿、全是真 LID/真边、`edge_type→类别` 覆盖全边类型;`route_to` BFS 路径全真且与前沿同批边;`book.route_from/route_to` 在 tool_specs 暴露且 dispatch 可调,invalid at 返 not_found+nearest_valid_lid、叶子无边返空 5 类非 error;cargo test 确定性覆盖(像 isCrossWindow/gate 那样)。
 - **触达**:`[ADR-0007/0013/0014/0028/0034]`
 - **实测落点**:5 类是否够用(有无落不进的边)、weight×距离 权重、前沿规模上限。
@@ -635,7 +657,8 @@ ADR-0033 落档
   ∧ memory consolidation 产 reader_profile 且不写 book base
   ∧ provider adapter 与 profile 正交
   ∧ 增量构建能迁移/标 orphaned profile artifacts 与 memory evidence
-  ∧ route Core 导航原语支撑 agent 主动带读(人投影)与 book_guide 访客向导(外部 agent 投影),读者私人层零泄漏
+  ∧ BookStructure P8 读时投影支撑 guide_path / 目标自检 / 人与访客两投影,读者私人层零泄漏
+  ∧ route Core(P9) 导航原语支撑 P8 局部绕路与 P3/P7 消费
 ```
 
 ## 4. 实测数字回填清单

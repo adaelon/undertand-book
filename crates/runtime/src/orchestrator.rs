@@ -163,6 +163,26 @@ pub fn tool_specs() -> Vec<ToolSpec> {
             }),
         ),
         s(
+            "book.structure",
+            "BookStructure 结构投影:说明某 LID 在全书 spine/throughline/key_stop 中的结构意义。缺 at 时返回全书结构概览;缺 sidecar 时显式 unavailable。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "at": {"type": "string", "description": "可选,当前位置或候选 LID"}
+                }
+            }),
+        ),
+        s(
+            "book.guide_path",
+            "BookStructure 宏观带读路线:按 spine 分段展开 key_stops,不理解自然语言、不读取 reader/memory。缺 sidecar 时显式 unavailable。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "at": {"type": "string", "description": "可选,用于标记当前所在 spine 段"}
+                }
+            }),
+        ),
+        s(
             "book.route_from",
             "从某 LID 出发的确定性导航前沿:按导航语义返回 5 类分组(back 前置/forward 深入/concretize 例证/cross 关联/continue 顺读),每步是真 LID+真边。零 LLM,用于决定『下一步去哪』。",
             json!({
@@ -303,13 +323,14 @@ book.route_from/guided_route_from/route_to/unvisited_back 只用于导航、带�
 特别注意——当用户要求操作阅读器时,必须真的调用对应 reader 工具来执行,不能只靠读原文代替:\
 要求『翻到/跳转』调 reader.gotoLid(lid);要求『高亮』调 reader.highlight(lid);要求『记笔记/记录』调 reader.note(lid,text)。\
 流程:先用 book.concept/context 定位到目标 LID,一旦定位到就立即调用 reader 工具完成操作,然后给简短终答,不要反复读原文。\
-主动带读——当用户请求『带我读/一步步讲/引导我看这章/接着讲』时,进入逐停靠点带读:\
+主动带读——当用户请求『带我读/一步步讲/引导我看这章/接着讲』时,先结构地图、再逐停靠点:\
 ①先 reader.state() 拿当前 anchor(用户可能自己翻动过);\
-②book.guided_route_from(anchor) 看【教学整形】后的 5 类导航前沿(有序分组 [{category, steps}],按教学优先序排好、已剔空组;category∈back 前置/forward 深入/concretize 例证/cross 关联/continue 顺读);\
-③按用户意图从前沿挑一个下一停靠点(无特别意图就顺教学序取靠前的;想回看前置挑 back、想深入挑 forward、要例子挑 concretize、问关联挑 cross),停靠点 LID 只能取自 guided_route_from 返回,不可编造;\
-④reader.gotoLid(停靠点) 真翻过去;\
-⑤book.synthesize([上一停靠点, 新停靠点]) 取带 citation 的解释;\
-⑥讲完就停:终答=简短讲解 + 一句『继续顺读,还是想回看/深入/要例子?』,然后等用户下一句。\
+②book.structure(anchor) 看当前位置在全书 spine/throughline/key_stop 中的意义;book.guide_path(anchor) 看全书级宏观路线(若 unavailable,诚实降级到局部前沿);\
+③book.guided_route_from(anchor) 看【教学整形】后的 5 类导航前沿(有序分组 [{category, steps}],按教学优先序排好、已剔空组;category∈back 前置/forward 深入/concretize 例证/cross 关联/continue 顺读);\
+④按用户意图从 guide_path/key_stops 或前沿挑一个下一停靠点(无特别意图就先顺 guide_path 当前段 key_stop,否则顺教学序取靠前的;想回看前置挑 back、想深入挑 forward、要例子挑 concretize、问关联挑 cross),局部前沿停靠点只能取自 guided_route_from 返回,不可编造;\
+⑤reader.gotoLid(停靠点) 真翻过去;\
+⑥book.synthesize([上一停靠点, 新停靠点]) 取带 citation 的解释;\
+⑦讲完就停:终答=结构位置一句 + 简短讲解 + 一句『继续顺读,还是想回看/深入/要例子?』,然后等用户下一句。\
 一个回合只前进一个停靠点,不要一次连读整章。\
 裸『没懂』兜底——当用户只说『没懂/看不明白』这类无具体指向的反馈(没说要例子/要关联/要回看哪),不要凭两字猜方向:\
 ①调 book.unvisited_back(当前 anchor) 拿确定性的未读前置;\
@@ -443,6 +464,20 @@ fn dispatch(
             };
             let body = match book.concept(n) {
                 Ok(c) => to_json(&c),
+                Err(e) => to_json(&e),
+            };
+            (body, None)
+        }
+        "book.structure" => {
+            let body = match book.structure(sget("at")) {
+                Ok(p) => to_json(&p),
+                Err(e) => to_json(&e),
+            };
+            (body, None)
+        }
+        "book.guide_path" => {
+            let body = match book.guide_path(sget("at")) {
+                Ok(p) => to_json(&p),
                 Err(e) => to_json(&e),
             };
             (body, None)
@@ -1113,7 +1148,7 @@ mod tests {
                 model_supplement: vec![],
             }],
         );
-        let mut reader = Reader::new(&b, DEFAULT_RADIUS);
+        let mut reader = Reader::new(&b, 1);
         let mut messages = new_session();
         let out = run(
             &b,
@@ -1216,9 +1251,56 @@ mod tests {
     #[test]
     fn tool_specs_exposes_route_commands() {
         let names: Vec<String> = tool_specs().into_iter().map(|s| s.name).collect();
+        assert!(names.iter().any(|n| n == "book.structure"));
+        assert!(names.iter().any(|n| n == "book.guide_path"));
         assert!(names.iter().any(|n| n == "book.route_from"));
         assert!(names.iter().any(|n| n == "book.route_to"));
         assert!(names.iter().any(|n| n == "book.guided_route_from"));
+    }
+
+    #[test]
+    fn dispatch_structure_and_guide_path_return_projection_or_tool_error() {
+        let b = book();
+        let mut store = MemoryStore::open(tmp("structure-tools")).unwrap();
+        let fake = FakeAdapter::new(vec![], vec![]);
+        let mut reader = Reader::new(&b, DEFAULT_RADIUS);
+
+        let (structure, eff) = dispatch(
+            "book.structure",
+            r#"{"at":"1.1"}"#,
+            &b,
+            &mut store,
+            &mut reader,
+            &fake,
+            "t0",
+        );
+        assert!(structure.contains("\"available\":false"));
+        assert!(structure.contains("book_structure.json not attached"));
+        assert!(eff.is_none());
+
+        let (guide, eff) = dispatch(
+            "book.guide_path",
+            r#"{"at":"1.1"}"#,
+            &b,
+            &mut store,
+            &mut reader,
+            &fake,
+            "t0",
+        );
+        assert!(guide.contains("\"segments\":[]"));
+        assert!(guide.contains("\"available\":false"));
+        assert!(eff.is_none());
+
+        let (bad, _) = dispatch(
+            "book.structure",
+            r#"{"at":"9.9"}"#,
+            &b,
+            &mut store,
+            &mut reader,
+            &fake,
+            "t0",
+        );
+        assert!(bad.contains("LID_NOT_FOUND") && bad.contains("not_found"));
     }
 
     #[test]
@@ -1585,7 +1667,7 @@ mod tests {
             ],
             vec![],
         );
-        let mut reader = Reader::new(&b, DEFAULT_RADIUS);
+        let mut reader = Reader::new(&b, 1);
         let mut messages = new_session();
         let out = run(
             &b,

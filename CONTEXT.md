@@ -195,6 +195,27 @@ memory 层产物的生成机制 `[ADR-0038 修正 ADR-0018]`(命令面记录模�
 ## TechnicalLearningAgentPolicy(带读教学整形)
 technical_learning profile 对 `route_from` 5 类前沿的**确定性教学整形** `[ADR-0034 决策4/0037]`,与 `book.synthesize`「Core+policy」同构([docs/adr/0033] 决策5)。**reorder** = 按教学优先序重排 5 类分组(组间序;无 reader_profile 时取中性默认 `continue>back>concretize>forward>cross`,占位常量待实测/profile 回填);**过滤** = 剔空组。零 LLM、确定性可单测。落 **runtime**(非 read-tools Core,守 Core/Profile 分离;profile 偏见绝不渗进 route 内核,[docs/adr/0034] 否决);经新工具 `book.guided_route_from(at, k?)` 暴露(= route_from + 整形;裸 `book.route_from` 仍在,给访客/高级)。返回有序分组 `GuidedFrontier`(保分组导航语义,不平铺)。reader_profile 个性化(新手 back 置顶 / 已懂跳过)留 P4。状态:NEW(详见 [docs/adr/0037])。
 
+## BookStructure(书籍结构地图)
+technical_learning profile 的预构建结构 sidecar `[ADR-0044]`:描述一本书的公共结构理解,用于“带我读”先讲总体框架/当前位置意义,再进入逐停靠点 route。它不是读时临时摘要、不是 reader_profile、不是 memory;输入只来自公共书基座与 profile artifacts(`lid_tree/source_text/graph/discourse/formula/pass2_audit`),不得混入用户私人层。核心形状 = `spine + throughlines + key_stops`,所有判断必须锚定真 LID/evidence_lids。状态:NEW(详见 [docs/adr/0044])。
+
+## spine / throughline / key_stop
+BookStructure 的三层骨架 `[ADR-0044]`:
+- **spine**:书的教学展开主干,按结构单元表达“这本书如何展开”(如 setup/foundation/method/application/synthesis),保留阅读顺序和依赖。
+- **throughline**:贯穿多个章节/单元的主题线,表达“一个问题如何跨书发展”,由 graph long_range、discourse、formula/pass2 evidence 支撑。
+- **key_stop**:带读时值得停下讲的锚点(定义、核心公式、反直觉论断、转折、例子、总结段等),可被 spine 和 throughline 共同引用。状态:NEW(详见 [docs/adr/0044])。
+
+## structure unit card
+BookStructure 构建期的压缩中间卡片 `[ADR-0044]`:按章/节等结构单元从 LID tree、source excerpts、discourse summaries、graph claims/concepts、formula semantics 投影而来,记录单元 role、summary、candidate_key_stops、depends_on 和 evidence_lids。它是 stitching 全书 spine/throughlines 的输入,不是最终读时展示文案。状态:NEW(详见 [docs/adr/0044])。
+
+## 结构投影 (structure projection)
+BookStructure 在读时围绕某个 LID 投影出的结构解释 `[ADR-0045]`:回答“当前位置在全书/当前 spine/throughline/key_stop 中意味着什么”。它只消费公共 BookStructure sidecar 与真实 LID,不消费 reader_profile、memory 或读者 viewport。状态:NEW(详见 [docs/adr/0045])。
+
+## 宏观带读路线 (guide path)
+BookStructure 在读时提供的全书级带读路线 `[ADR-0045]`:按 spine 分段展开 key_stops,用于“先把这本书的重要地方过一遍”。它区别于 `guided_route_from`:guide path 是宏观路线,`guided_route_from` 是站在当前 LID 的局部转向前沿。状态:NEW(详见 [docs/adr/0045])。
+
+## 带读目标自检 (guide target self-check)
+非机械带读跳转的证据校验步骤 `[ADR-0045]`:LLM 可根据用户反馈选择候选 LID,但必须先读取该 LID 的真实原文与近邻上下文,判断是否满足目标,通过后才执行跳转。机械“继续/下一段”不触发此术语。状态:NEW(详见 [docs/adr/0045])。
+
 ## 构建工作区 (build workspace)
 预构建期**单次构建**的中间产物目录 `[ADR-0042]`:`.understand-book/<bookId>/.build/`,build-only、`Book::load` 绝不读(区别于同级读时产物 base.json/source.txt/sidecar)。**只物化"贵且不可重算"的 LLM 输出**:唯一内容 = `pass1/<id>.json`(`{content_hash, nodes, edges}`,**一窗一文件、抽完即原子写**——会话可停在任意窗、已抽幸存);LID 树 / 窗口 / 输入正文等确定性派生一律用时从原书重算、不落盘(承 [docs/adr/0012] 不物化派生)。`<bookId>` 由 `deriveBookId(bookPath, override?)` 文件名 slug 派生(ASCII-safe,非 ASCII fail-fast 要 `--book-id`)。状态:NEW(详见 [docs/adr/0042])。
 
