@@ -66,6 +66,7 @@ const emit = defineEmits<{
 
 const activeTab = ref<ContextTab>("agent");
 const historyOpen = ref(false);
+const notesExpanded = ref(false);
 const tabs: { id: ContextTab; label: string }[] = [
   { id: "agent", label: "Agent" },
   { id: "trace", label: "Trace" },
@@ -131,7 +132,8 @@ function leadingQuote(content: string): string | null {
     else if (quoteLines.length > 0 && line.trim() === "") break;
     else if (quoteLines.length > 0) break;
   }
-  return quoteLines.length ? compactText(quoteLines.join(" ")) : null;
+  const quote = quoteLines.join(" ").replace(/\s+/g, " ").trim();
+  return quote || null;
 }
 function notePreview(note: MemoryRecord): string {
   return compactText(note.content.replace(/^>.*(\n>.*)*\n*/m, ""), 180);
@@ -321,11 +323,15 @@ function deleteHistorySession(sessionId: string) {
 
     <section v-show="activeTab === 'notes'" class="tab-panel context-panel">
       <div class="panel-head">
-        <p class="rail-kicker">Nearby notes</p>
+        <p class="rail-kicker">All notes</p>
         <h3>{{ noteCount }} items</h3>
+        <div v-if="noteCount" class="note-fold-controls">
+          <button @click="notesExpanded = true">Expand</button>
+          <button @click="notesExpanded = false">Collapse</button>
+        </div>
       </div>
       <div v-if="noteCount" class="memory-list">
-        <details v-for="note in props.contextNotes" :key="note.mem_id" class="memory-card note-memory-card" :open="!isLongNote(note)">
+        <details v-for="note in props.contextNotes" :key="note.mem_id" class="memory-card note-memory-card" :open="notesExpanded">
           <summary class="memory-meta note-memory-summary">
             <span>Note</span>
             <button
@@ -336,9 +342,10 @@ function deleteHistorySession(sessionId: string) {
               {{ noteSourceLabel(note) }}
             </button>
             <code v-else>No source</code>
-            <em v-if="isLongNote(note)">Toggle</em>
+            <em>Toggle</em>
+            <span class="note-summary-text">{{ notePreview(note) }}</span>
           </summary>
-          <p v-if="isLongNote(note)" class="note-preview">{{ notePreview(note) }}</p>
+          <p class="note-preview">{{ notePreview(note) }}</p>
           <div class="md" v-html="props.renderMarkdown(note.content)"></div>
         </details>
         <article v-for="hl in props.contextHighlights" :key="hl.mem_id" class="memory-card highlight-card">
@@ -346,7 +353,7 @@ function deleteHistorySession(sessionId: string) {
           <p>{{ excerpt(hl) }}</p>
         </article>
       </div>
-      <p v-else class="empty panel-empty">No notes or highlights near the current viewport.</p>
+      <p v-else class="empty panel-empty">No notes or highlights yet.</p>
     </section>
     <div
       v-if="answerSelection"
@@ -514,6 +521,19 @@ function deleteHistorySession(sessionId: string) {
 }
 .panel-head {
   margin-bottom: 0.8rem;
+}
+.note-fold-controls {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 0.35rem;
+}
+.note-fold-controls button {
+  min-height: 32px;
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background: var(--canvas);
+  color: var(--ink);
+  font-size: 0.75rem;
 }
 .rail-kicker {
   margin: 0 0 0.15rem;
@@ -957,6 +977,10 @@ function deleteHistorySession(sessionId: string) {
 .note-memory-summary {
   cursor: pointer;
   list-style: none;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.35rem 0.5rem;
 }
 .note-memory-summary::-webkit-details-marker {
   display: none;
@@ -973,6 +997,21 @@ function deleteHistorySession(sessionId: string) {
   color: var(--stone);
   font-style: normal;
   text-transform: uppercase;
+}
+.note-summary-text {
+  grid-column: 1 / -1;
+  color: var(--slate);
+  font-size: 0.82rem;
+  font-weight: 400;
+  line-height: 1.4;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  text-transform: none;
+}
+.note-memory-card[open] .note-summary-text {
+  display: none;
 }
 .highlight-card {
   background: #fffdf0;

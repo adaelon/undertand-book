@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, nextTick, onMounted, ref } from "vue";
 import { api, ApiError } from "./api";
 import type {
   AgentChatSessionSummary,
@@ -56,7 +56,19 @@ const selectedLid = ref<string | null>(null);
 const currentReadingLid = ref<string | null>(null);
 const formulaDialog = ref<Segment | null>(null);
 const chapterTitle = ref<string>("");
-const sourceFocus = ref<{ lid: string; quote: string | null } | null>(null);
+interface SourceFocus {
+  lid: string;
+  quote: string | null;
+}
+interface SourcePreview {
+  focus: SourceFocus;
+  segments: Segment[];
+  loading: boolean;
+  error: string | null;
+}
+const sourceFocus = ref<SourceFocus | null>(null);
+const sourcePreview = ref<SourcePreview | null>(null);
+const sourcePreviewBodyRef = ref<HTMLElement | null>(null);
 
 // goto 输入 + 错误条
 const gotoInput = ref("");
@@ -120,22 +132,20 @@ const progressPct = computed(() => {
 const selectedSegment = computed(() => segments.value.find((seg) => seg.lid === selectedLid.value) ?? null);
 const selectedFormula = computed(() => selectedSegment.value?.formula ?? null);
 const segmentByLid = computed(() => new Map(segments.value.map((seg) => [seg.lid, seg])));
-const contextRecords = computed(() => {
-  const selected = selectedLid.value;
-  const visible = new Set(viewport.value?.visible_lids ?? []);
-  return annotations.value
-    .filter((r) => {
-      const lid = r.anchor.lid;
-      return !!lid && (lid === selected || visible.has(lid));
-    })
-    .sort((a, b) => {
-      const aSelected = a.anchor.lid === selected ? 0 : 1;
-      const bSelected = b.anchor.lid === selected ? 0 : 1;
-      return aSelected - bSelected || (a.anchor.lid ?? "").localeCompare(b.anchor.lid ?? "");
-    });
-});
-const contextNotes = computed(() => contextRecords.value.filter((r) => r.type === "note"));
-const contextHighlights = computed(() => contextRecords.value.filter((r) => r.type === "highlight"));
+function lidOrderIndex(lid: string | null | undefined): number {
+  if (!lid) return Number.MAX_SAFE_INTEGER;
+  const idx = leafOrder.value.indexOf(lid);
+  if (idx >= 0) return idx;
+  const childIdx = leafOrder.value.findIndex((leaf) => leaf.startsWith(`${lid}.`));
+  return childIdx >= 0 ? childIdx : Number.MAX_SAFE_INTEGER;
+}
+function sortMemoryByBookOrder(a: MemoryRecord, b: MemoryRecord): number {
+  return lidOrderIndex(a.anchor.lid) - lidOrderIndex(b.anchor.lid)
+    || (a.anchor.lid ?? "").localeCompare(b.anchor.lid ?? "")
+    || a.mem_id.localeCompare(b.mem_id);
+}
+const allNotes = computed(() => annotations.value.filter((r) => r.type === "note").sort(sortMemoryByBookOrder));
+const allHighlights = computed(() => annotations.value.filter((r) => r.type === "highlight").sort(sortMemoryByBookOrder));
 const visibleNotes = computed(() => {
   const visible = segments.value.map((seg) => seg.lid);
   const order = new Map(visible.map((lid, idx) => [lid, idx]));
@@ -273,12 +283,12 @@ function joinsInlineFlow(prev: Segment, next: Segment): boolean {
   return prev.kind === "formula" || next.kind === "formula";
 }
 
-function sourceFocusStream(focus: { lid: string; quote: string | null }): FocusStream | null {
-  const start = segments.value.findIndex((seg) => seg.lid === focus.lid);
+function sourceFocusStreamIn(sourceSegments: Segment[], focus: SourceFocus): FocusStream | null {
+  const start = sourceSegments.findIndex((seg) => seg.lid === focus.lid);
   if (start < 0) return null;
   const stream: FocusStream = { text: "", refs: [] };
   let prev: Segment | null = null;
-  for (const seg of segments.value.slice(start)) {
+  for (const seg of sourceSegments.slice(start)) {
     if (prev && !joinsInlineFlow(prev, seg) && stream.text && !stream.text.endsWith(" ")) {
       stream.text += " ";
       stream.refs.push(null);
@@ -296,17 +306,17 @@ function commonPrefixLen(a: string, b: string): number {
   return i;
 }
 
-function sourceFocusRanges(focus: { lid: string; quote: string | null } | null): Map<string, [number, number]> {
+function sourceFocusRangesIn(sourceSegments: Segment[], focus: SourceFocus | null): Map<string, [number, number]> {
   const out = new Map<string, [number, number]>();
   if (!focus) return out;
   if (!focus.quote) {
-    const seg = segments.value.find((s) => s.lid === focus.lid);
+    const seg = sourceSegments.find((s) => s.lid === focus.lid);
     if (seg) out.set(focus.lid, [0, displayText(seg).text.length]);
     return out;
   }
   const quote = normalizeSourceMatchText(focus.quote);
   if (!quote) return out;
-  const stream = sourceFocusStream(focus);
+  const stream = sourceFocusStreamIn(sourceSegments, focus);
   if (!stream) return out;
 
   let start = stream.text.indexOf(quote);
@@ -323,7 +333,7 @@ function sourceFocusRanges(focus: { lid: string; quote: string | null } | null):
     }
     const minUseful = Math.min(8, quote.length, stream.text.length);
     if (bestLen < minUseful) {
-      const seg = segments.value.find((s) => s.lid === focus.lid);
+      const seg = sourceSegments.find((s) => s.lid === focus.lid);
       if (seg) out.set(focus.lid, [0, displayText(seg).text.length]);
       return out;
     }
@@ -345,7 +355,7 @@ function sourceFocusRanges(focus: { lid: string; quote: string | null } | null):
   return out;
 }
 
-function sourceFocusRange(text: string, focus: { lid: string; quote: string | null } | null, lid: string): [number, number] | null {
+function sourceFocusRange(text: string, focus: SourceFocus | null, lid: string): [number, number] | null {
   if (!focus || focus.lid !== lid) return null;
   if (!focus.quote) return [0, text.length];
   const exact = text.indexOf(focus.quote);
@@ -359,10 +369,10 @@ function sourceFocusRange(text: string, focus: { lid: string; quote: string | nu
 
 // 段正文渲染:把段内 range 高亮包成 <mark>(合并重叠区间),其余文本转义防 XSS `[ADR-0031]`。
 // chapter/section 的 Markdown 标题符号只在显示层剥掉,不改 book.text 原文与 LID 锚点。
-function renderSeg(seg: Segment): string {
+function renderSegWithFocus(seg: Segment, focus: SourceFocus | null, sourceSegments: Segment[], includeStoredHighlights: boolean): string {
   const display = displayText(seg);
-  const hls = highlightsOf(seg.lid).filter((h) => h.range);
-  const focusRange = sourceFocusRanges(sourceFocus.value).get(seg.lid) ?? sourceFocusRange(display.text, sourceFocus.value, seg.lid);
+  const hls = includeStoredHighlights ? highlightsOf(seg.lid).filter((h) => h.range) : [];
+  const focusRange = sourceFocusRangesIn(sourceSegments, focus).get(seg.lid) ?? sourceFocusRange(display.text, focus, seg.lid);
   if (hls.length === 0 && !focusRange) return renderInlineText(display.text);
   const ranges = hls
     .map((h) => {
@@ -388,6 +398,12 @@ function renderSeg(seg: Segment): string {
     cur = e;
   }
   return html + renderInlineText(t.slice(cur));
+}
+function renderSeg(seg: Segment): string {
+  return renderSegWithFocus(seg, sourceFocus.value, segments.value, true);
+}
+function renderSourcePreviewSeg(seg: Segment): string {
+  return renderSegWithFocus(seg, sourcePreview.value?.focus ?? null, sourcePreview.value?.segments ?? [], false);
 }
 function hlExcerpt(rec: MemoryRecord): string {
   const c = rec.content.replace(/\s+/g, " ").trim();
@@ -616,10 +632,53 @@ async function doGoto(lid: string, focusQuote?: string | null) {
   }
 }
 async function focusSource(source: { lid: string; quote: string | null }) {
-  await doGoto(source.lid, source.quote);
+  await openSourcePreview(source);
 }
 function focusLocalSource(source: { lid: string; quote: string | null }) {
-  sourceFocus.value = source.quote === undefined ? null : { lid: source.lid, quote: source.quote };
+  void openSourcePreview(source);
+}
+function sourcePreviewCenterLid(lid: string): string {
+  if (leafOrder.value.includes(lid)) return lid;
+  return leafOrder.value.find((leaf) => leaf.startsWith(`${lid}.`)) ?? lid;
+}
+function sourcePreviewLids(centerLid: string): string[] {
+  const idx = leafOrder.value.indexOf(centerLid);
+  if (idx < 0) return [centerLid];
+  const before = 3;
+  const after = 3;
+  return leafOrder.value.slice(Math.max(0, idx - before), Math.min(leafOrder.value.length, idx + after + 1));
+}
+function errorMessage(e: unknown): string {
+  if (e instanceof ApiError) return `[${e.category}] ${e.errorCode}: ${e.message}`;
+  return String(e);
+}
+async function centerSourcePreview() {
+  await nextTick();
+  const body = sourcePreviewBodyRef.value;
+  const target = body?.querySelector<HTMLElement>(".source-preview-segment.source-center");
+  target?.scrollIntoView({ block: "center" });
+}
+async function openSourcePreview(source: SourceFocus) {
+  const centerLid = sourcePreviewCenterLid(source.lid);
+  const focus: SourceFocus = { lid: centerLid, quote: source.quote };
+  sourcePreview.value = { focus, segments: [], loading: true, error: null };
+  try {
+    banner.value = "";
+    const previewSegments = await hydrateSegments(sourcePreviewLids(centerLid));
+    sourcePreview.value = { focus, segments: previewSegments, loading: false, error: null };
+    await centerSourcePreview();
+  } catch (e) {
+    sourcePreview.value = { focus, segments: [], loading: false, error: errorMessage(e) };
+  }
+}
+function closeSourcePreview() {
+  sourcePreview.value = null;
+}
+async function openSourceInReader() {
+  const focus = sourcePreview.value?.focus;
+  if (!focus) return;
+  closeSourcePreview();
+  await doGoto(focus.lid, focus.quote);
 }
 // block actions:整段/asset 高亮和笔记;段内自由高亮走下面的选区 toolbar。
 async function highlightBlock(lid: string) {
@@ -1091,8 +1150,8 @@ async function openBook() {
         :latest-trace="latestTrace"
         :selected-lid="selectedLid"
         :selected-formula="selectedFormula"
-        :context-notes="contextNotes"
-        :context-highlights="contextHighlights"
+        :context-notes="allNotes"
+        :context-highlights="allHighlights"
         :render-markdown="renderMarkdown"
         :eff-label="effLabel"
         :eff-state="effState"
@@ -1163,6 +1222,45 @@ async function openBook() {
               </ul>
             </div>
           </div>
+        </div>
+      </section>
+    </div>
+
+    <div v-if="sourcePreview" class="source-preview-modal" @click.self="closeSourcePreview">
+      <section
+        class="source-preview-dialog"
+        role="dialog"
+        aria-modal="true"
+        :aria-labelledby="`source-preview-title-${sourcePreview.focus.lid}`"
+      >
+        <header class="source-preview-head">
+          <div>
+            <p class="formula-dialog-kicker">Source preview</p>
+            <h3 :id="`source-preview-title-${sourcePreview.focus.lid}`">{{ sourcePreview.focus.lid }}</h3>
+          </div>
+          <div class="source-preview-actions">
+            <button title="在主阅读区打开" @click="openSourceInReader">Open in reader</button>
+            <button class="formula-dialog-close" title="关闭" aria-label="关闭来源预览" @click="closeSourcePreview">×</button>
+          </div>
+        </header>
+        <div ref="sourcePreviewBodyRef" class="source-preview-body">
+          <p v-if="sourcePreview.loading" class="source-preview-state">Loading source…</p>
+          <p v-else-if="sourcePreview.error" class="source-preview-state error">{{ sourcePreview.error }}</p>
+          <template v-else>
+            <article
+              v-for="seg in sourcePreview.segments"
+              :key="seg.lid"
+              class="source-preview-segment"
+              :class="{ 'source-center': seg.lid === sourcePreview.focus.lid }"
+              :data-lid="seg.lid"
+            >
+              <div class="source-preview-meta">
+                <code>{{ seg.lid }}</code>
+                <span>{{ seg.kind }}</span>
+              </div>
+              <div class="source-preview-text md" v-html="renderSourcePreviewSeg(seg)"></div>
+            </article>
+          </template>
         </div>
       </section>
     </div>
@@ -1435,6 +1533,106 @@ async function openBook() {
   padding-left: 1.2rem;
   color: var(--slate);
   line-height: 1.5;
+}
+
+/* Source 临时阅读区 */
+.source-preview-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 65;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem;
+  background: rgba(10, 10, 10, 0.32);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+.source-preview-dialog {
+  width: min(58rem, 94vw);
+  max-height: 88vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--hairline);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.97);
+  box-shadow: none;
+}
+.source-preview-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.85rem 1rem;
+  border-bottom: 1px solid var(--line);
+}
+.source-preview-head h3 {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 1rem;
+}
+.source-preview-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.source-preview-actions button:not(.formula-dialog-close) {
+  min-height: 44px;
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background: var(--canvas);
+  color: var(--ink);
+  font-size: 0.84rem;
+}
+.source-preview-body {
+  min-height: 0;
+  overflow-y: auto;
+  scroll-padding: 30vh 0;
+  padding: 1.1rem;
+  display: grid;
+  gap: 0.85rem;
+}
+.source-preview-state {
+  margin: 0;
+  padding: 1rem;
+  border: 1px solid var(--hairline-soft);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  color: var(--slate);
+}
+.source-preview-state.error {
+  color: #8f1f1f;
+}
+.source-preview-segment {
+  border: 1px solid var(--hairline-soft);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 0.85rem;
+}
+.source-preview-segment.source-center {
+  border-color: rgba(37, 99, 235, 0.42);
+  background: #f8fbff;
+}
+.source-preview-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 0.55rem;
+  color: var(--steel);
+  font-size: 0.74rem;
+  font-weight: 650;
+  text-transform: uppercase;
+}
+.source-preview-meta code {
+  font-family: var(--mono);
+  color: var(--ink);
+  text-transform: none;
+}
+.source-preview-text {
+  line-height: 1.75;
+  color: var(--ink);
 }
 
 /* 笔记编辑器模态 */
