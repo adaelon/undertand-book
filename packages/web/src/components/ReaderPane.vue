@@ -30,10 +30,6 @@ type ReaderItem =
   | { type: "flow"; segments: Segment[] }
   | { type: "single"; segment: Segment };
 
-function compactText(value: string, max = 96): string {
-  const text = value.replace(/\s+/g, " ").trim();
-  return text.length > max ? `${text.slice(0, max)}...` : text;
-}
 function leadingQuote(content: string): string | null {
   const lines = content.split("\n");
   const quoteLines: string[] = [];
@@ -42,7 +38,8 @@ function leadingQuote(content: string): string | null {
     else if (quoteLines.length > 0 && line.trim() === "") break;
     else if (quoteLines.length > 0) break;
   }
-  return quoteLines.length ? compactText(quoteLines.join(" ")) : null;
+  const quote = quoteLines.join(" ").replace(/\s+/g, " ").trim();
+  return quote || null;
 }
 function notePreview(note: MemoryRecord): string {
   const content = note.content.replace(/^>.*(\n>.*)*\n*/m, "").trim();

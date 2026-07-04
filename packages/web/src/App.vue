@@ -119,6 +119,7 @@ const progressPct = computed(() => {
 });
 const selectedSegment = computed(() => segments.value.find((seg) => seg.lid === selectedLid.value) ?? null);
 const selectedFormula = computed(() => selectedSegment.value?.formula ?? null);
+const segmentByLid = computed(() => new Map(segments.value.map((seg) => [seg.lid, seg])));
 const contextRecords = computed(() => {
   const selected = selectedLid.value;
   const visible = new Set(viewport.value?.visible_lids ?? []);
@@ -219,34 +220,71 @@ interface FocusStream {
   refs: Array<FocusCharRef | null>;
 }
 
-function appendNormalizedText(stream: FocusStream, lid: string, text: string) {
+const markdownEscapedPunctuation = /[\\`*_[\]{}()#+\-.!|>%]/;
+
+function escapedMarkdownLiteral(text: string, index: number): { ch: string; offset: number } | null {
+  if (text[index] !== "\\" || index + 1 >= text.length) return null;
+  const next = text[index + 1];
+  return markdownEscapedPunctuation.test(next) ? { ch: next, offset: index + 1 } : null;
+}
+
+function normalizeSourceMatchText(text: string): string {
+  let out = "";
   let inSpace = false;
   for (let i = 0; i < text.length; i++) {
-    const ch = text[i];
+    const escaped = escapedMarkdownLiteral(text, i);
+    const ch = escaped?.ch ?? text[i];
+    if (escaped) i = escaped.offset;
+    if (/\s/.test(ch)) {
+      if (!inSpace) {
+        out += " ";
+        inSpace = true;
+      }
+      continue;
+    }
+    out += ch;
+    inSpace = false;
+  }
+  return out.trim();
+}
+
+function appendNormalizedText(stream: FocusStream, lid: string, text: string) {
+  let inSpace = stream.text.endsWith(" ");
+  for (let i = 0; i < text.length; i++) {
+    const escaped = escapedMarkdownLiteral(text, i);
+    const ch = escaped?.ch ?? text[i];
+    const offset = escaped?.offset ?? i;
+    if (escaped) i = escaped.offset;
     if (/\s/.test(ch)) {
       if (!inSpace) {
         stream.text += " ";
-        stream.refs.push({ lid, offset: i });
+        stream.refs.push({ lid, offset });
         inSpace = true;
       }
       continue;
     }
     stream.text += ch;
-    stream.refs.push({ lid, offset: i });
+    stream.refs.push({ lid, offset });
     inSpace = false;
   }
+}
+
+function joinsInlineFlow(prev: Segment, next: Segment): boolean {
+  return prev.kind === "formula" || next.kind === "formula";
 }
 
 function sourceFocusStream(focus: { lid: string; quote: string | null }): FocusStream | null {
   const start = segments.value.findIndex((seg) => seg.lid === focus.lid);
   if (start < 0) return null;
   const stream: FocusStream = { text: "", refs: [] };
+  let prev: Segment | null = null;
   for (const seg of segments.value.slice(start)) {
-    if (stream.text && !stream.text.endsWith(" ")) {
+    if (prev && !joinsInlineFlow(prev, seg) && stream.text && !stream.text.endsWith(" ")) {
       stream.text += " ";
       stream.refs.push(null);
     }
     appendNormalizedText(stream, seg.lid, displayText(seg).text);
+    prev = seg;
   }
   return stream;
 }
@@ -266,7 +304,7 @@ function sourceFocusRanges(focus: { lid: string; quote: string | null } | null):
     if (seg) out.set(focus.lid, [0, displayText(seg).text.length]);
     return out;
   }
-  const quote = focus.quote.replace(/\s+/g, " ").trim();
+  const quote = normalizeSourceMatchText(focus.quote);
   if (!quote) return out;
   const stream = sourceFocusStream(focus);
   if (!stream) return out;
@@ -612,6 +650,35 @@ function lidElementOf(node: Node | null): HTMLElement | null {
   return el ? el.closest("[data-lid]") : null;
 }
 
+function domTextOffset(el: HTMLElement, container: Node, offset: number): number {
+  const pre = document.createRange();
+  pre.selectNodeContents(el);
+  pre.setEnd(container, offset);
+  return pre.toString().length;
+}
+
+function selectedRangeForElement(el: HTMLElement, range: Range, startEl: HTMLElement, endEl: HTMLElement): SelectedRange | null {
+  const lid = el.getAttribute("data-lid") ?? "";
+  const seg = lid ? segmentByLid.value.get(lid) : null;
+  if (!lid || !seg) return null;
+
+  if (seg.kind === "formula") {
+    return seg.text.length > 0 ? { lid, start: 0, end: seg.text.length } : null;
+  }
+
+  const display = displayText(seg);
+  let start = 0;
+  let end = display.text.length;
+  if (el === startEl) start = clampRange(domTextOffset(el, range.startContainer, range.startOffset), display.text.length);
+  if (el === endEl) end = clampRange(domTextOffset(el, range.endContainer, range.endOffset), display.text.length);
+  if (end <= start) return null;
+  return {
+    lid,
+    start: clampRange(display.offset + start, seg.text.length),
+    end: clampRange(display.offset + end, seg.text.length),
+  };
+}
+
 function selectionRanges(range: Range): SelectedRange[] {
   const startEl = lidElementOf(range.startContainer);
   const endEl = lidElementOf(range.endContainer);
@@ -621,26 +688,8 @@ function selectionRanges(range: Range): SelectedRange[] {
 
   return Array.from(root.querySelectorAll<HTMLElement>("[data-lid]"))
     .filter((el) => range.intersectsNode(el))
-    .map((el) => {
-      const lid = el.getAttribute("data-lid") ?? "";
-      const textLen = el.textContent?.length ?? 0;
-      let start = 0;
-      let end = textLen;
-      if (el === startEl) {
-        const pre = document.createRange();
-        pre.selectNodeContents(el);
-        pre.setEnd(range.startContainer, range.startOffset);
-        start = pre.toString().length;
-      }
-      if (el === endEl) {
-        const pre = document.createRange();
-        pre.selectNodeContents(el);
-        pre.setEnd(range.endContainer, range.endOffset);
-        end = pre.toString().length;
-      }
-      return { lid, start, end };
-    })
-    .filter((r) => r.lid && r.end > r.start);
+    .map((el) => selectedRangeForElement(el, range, startEl, endEl))
+    .filter((r): r is SelectedRange => r !== null && r.end > r.start);
 }
 
 function onSelectSeg(lid: string) {

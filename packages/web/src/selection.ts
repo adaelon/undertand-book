@@ -6,8 +6,8 @@
 // 这里 cloneContents 拿到边界已裁剪好的选区片段,递归遍历遇 .katex 原子取回 LaTeX 包 $...$,其余
 // 取文本——让 quote 从源头带 $...$,后续 renderMarkdown 自然能渲染出公式。
 //
-// 不在本切片处理(同根因的另一表现,留后续):正文段内自由高亮 selectionRanges 用 DOM 文本偏移
-// 算 start/end 送给后端 book.text UTF-16 切片,含公式段因渲染后文本长度变化会错位。
+// 注意:高亮 range 的 LID/offset 映射在 App.selectionRanges 里完成。公式已是独立 LID,
+// 那边会把公式按原子 leaf 处理,不再用 KaTeX DOM textContent 当 book.text 偏移。
 export function rangeToMarkdown(range: Range): string {
   return fragmentToMarkdown(range.cloneContents()).replace(/\u00a0/g, " ").trim();
 }
