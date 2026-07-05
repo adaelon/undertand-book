@@ -3,7 +3,8 @@
 // Block extraction preserves asset leaves for SA3 while segment() keeps current paragraph behavior until SA4.
 import { unzipSync, strFromU8 } from "fflate";
 import { parse, HTMLElement } from "node-html-parser";
-import type { AssetKind, SourceBlock } from "./segment";
+import { posix as pathPosix } from "node:path";
+import type { AssetKind, SourceBlock, SourceImageRef } from "./segment";
 
 const HEADING = new Set(["h1", "h2", "h3", "h4", "h5", "h6"]);
 const LEAF = new Set(["p", "li", "blockquote"]);
@@ -14,16 +15,34 @@ interface RawBlock {
   level?: number;
   assetKind?: AssetKind;
   text: string;
+  image?: SourceImageRef;
 }
 
 const norm = (s: string): string => s.replace(/\s+/g, " ").trim();
 const rawText = (e: HTMLElement): string => e.text.replace(/^\s+|\s+$/g, "");
 
-function imageMarkdown(e: HTMLElement): string | null {
+function resolveEpubImagePath(xhtmlPath: string | undefined, src: string): string | undefined {
+  if (!xhtmlPath || /^[a-z][a-z0-9+.-]*:/i.test(src) || src.startsWith("#")) return undefined;
+  const clean = src.split("#")[0].split("?")[0];
+  if (!clean) return undefined;
+  const base = xhtmlPath.includes("/") ? xhtmlPath.slice(0, xhtmlPath.lastIndexOf("/") + 1) : "";
+  let decoded = clean;
+  try {
+    decoded = decodeURIComponent(clean);
+  } catch {
+    // Keep the original path if EPUB used invalid percent escaping.
+  }
+  return pathPosix.normalize(base + decoded).replace(/^\/+/, "");
+}
+
+function imageMarkdown(e: HTMLElement, xhtmlPath?: string): { text: string; image: SourceImageRef } | null {
   const src = e.getAttribute("src")?.trim();
   if (!src) return null;
   const alt = e.getAttribute("alt") ?? "";
-  return `![${alt}](${src})`;
+  return {
+    text: `![${alt}](${src})`,
+    image: { alt, src, epubPath: resolveEpubImagePath(xhtmlPath, src) },
+  };
 }
 
 function tableText(e: HTMLElement): string {
@@ -39,7 +58,7 @@ function mathSource(e: HTMLElement): string {
   return e.toString().trim();
 }
 
-function leafBlocks(e: HTMLElement): RawBlock[] {
+function leafBlocks(e: HTMLElement, xhtmlPath?: string): RawBlock[] {
   const blocks: RawBlock[] = [];
   let text = "";
   const flushText = () => {
@@ -60,6 +79,10 @@ function leafBlocks(e: HTMLElement): RawBlock[] {
       flushText();
       const formula = mathSource(el);
       if (formula) blocks.push({ kind: "leaf", assetKind: "formula", text: formula });
+    } else if (tag === "img") {
+      flushText();
+      const image = imageMarkdown(el, xhtmlPath);
+      if (image) blocks.push({ kind: "leaf", assetKind: "image", text: image.text, image: image.image });
     } else if (tag === "br") {
       text += "\n";
     } else {
@@ -70,7 +93,7 @@ function leafBlocks(e: HTMLElement): RawBlock[] {
   return blocks;
 }
 
-function walk(el: HTMLElement, acc: RawBlock[]): void {
+function walk(el: HTMLElement, acc: RawBlock[], xhtmlPath?: string): void {
   for (const child of el.childNodes) {
     if (child.nodeType !== 1) continue;
     const e = child as HTMLElement;
@@ -87,24 +110,24 @@ function walk(el: HTMLElement, acc: RawBlock[]): void {
       const text = tableText(e);
       if (text) acc.push({ kind: "leaf", assetKind: "table", text });
     } else if (tag === "img") {
-      const text = imageMarkdown(e);
-      if (text) acc.push({ kind: "leaf", assetKind: "image", text });
+      const image = imageMarkdown(e, xhtmlPath);
+      if (image) acc.push({ kind: "leaf", assetKind: "image", text: image.text, image: image.image });
     } else if (tag === "math") {
       const text = mathSource(e);
       if (text) acc.push({ kind: "leaf", assetKind: "formula", text });
     } else if (LEAF.has(tag)) {
-      acc.push(...leafBlocks(e));
+      acc.push(...leafBlocks(e, xhtmlPath));
     } else {
-      walk(e, acc);
+      walk(e, acc, xhtmlPath);
     }
   }
 }
 
-export function xhtmlToBlocks(html: string): RawBlock[] {
+export function xhtmlToBlocks(html: string, xhtmlPath?: string): RawBlock[] {
   const root = parse(html);
   const body = root.querySelector("body") ?? root;
   const acc: RawBlock[] = [];
-  walk(body, acc);
+  walk(body, acc, xhtmlPath);
   return acc;
 }
 
@@ -140,7 +163,7 @@ export function epubToSource(zip: Uint8Array): EpubSource {
     const path = opfDir + decodeURIComponent(href);
     const data = files[path];
     if (!data) continue;
-    raw.push(...xhtmlToBlocks(strFromU8(data)));
+    raw.push(...xhtmlToBlocks(strFromU8(data), path));
   }
 
   let source = "";
@@ -148,7 +171,7 @@ export function epubToSource(zip: Uint8Array): EpubSource {
   for (const rb of raw) {
     const start = source.length;
     source += rb.text;
-    blocks.push({ kind: rb.kind, level: rb.level, assetKind: rb.assetKind, text: rb.text, span: { start, end: source.length } });
+    blocks.push({ kind: rb.kind, level: rb.level, assetKind: rb.assetKind, text: rb.text, image: rb.image, span: { start, end: source.length } });
     source += "\n\n";
   }
   return { source, blocks };

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from "vue";
-import type { FormulaSemantics, MemoryRecord } from "../api";
+import type { FormulaSemantics, ImageAssetManifestEntry, MemoryRecord } from "../api";
 import type { Manifest } from "../api";
 
 type NodeKind = Manifest["tree"][number]["kind"];
@@ -9,6 +9,7 @@ export interface Segment {
   text: string;
   kind: NodeKind;
   formula: FormulaSemantics | null;
+  imageAsset: ImageAssetManifestEntry | null;
 }
 
 const props = defineProps<{
@@ -25,6 +26,7 @@ const props = defineProps<{
   visibleNotes: MemoryRecord[];
   hlExcerpt: (rec: MemoryRecord) => string;
   imageMeta: (text: string) => { alt: string; src: string } | null;
+  imageAsset: (lid: string) => ImageAssetManifestEntry | null;
 }>();
 
 type ReaderItem =
@@ -443,11 +445,22 @@ watch(
           <pre v-if="item.segment.kind === 'code'" class="asset-source asset-code"><code v-html="props.renderSeg(item.segment)"></code></pre>
           <pre v-else-if="item.segment.kind === 'table'" class="asset-source asset-table" v-html="props.renderSeg(item.segment)"></pre>
           <figure v-else-if="item.segment.kind === 'image'" class="asset-image-figure">
-            <div class="image-preview">
+            <img
+              v-if="props.imageAsset(item.segment.lid)?.url_path"
+              class="image-rendered"
+              :src="props.imageAsset(item.segment.lid)?.url_path || ''"
+              :alt="props.imageAsset(item.segment.lid)?.alt || props.imageMeta(item.segment.text)?.alt || 'Image'"
+              loading="lazy"
+              decoding="async"
+            />
+            <div v-else class="image-preview">
               <span>image</span>
               <strong>{{ props.imageMeta(item.segment.text)?.alt || 'Untitled image' }}</strong>
               <code>{{ props.imageMeta(item.segment.text)?.src || 'src unavailable' }}</code>
             </div>
+            <p v-if="props.imageAsset(item.segment.lid)?.warning" class="image-warning">
+              {{ props.imageAsset(item.segment.lid)?.warning }}
+            </p>
             <figcaption>Source</figcaption>
             <pre class="asset-source" v-html="props.renderSeg(item.segment)"></pre>
           </figure>

@@ -2,7 +2,7 @@
 // 规则:`#{1,6} ` 行 = heading(span 含 marker,保证无未分类字节);
 // fenced code / table / image / formula = 带 assetKind 的 leaf;其余非空行聚成普通 leaf 段。
 // span 用 JS 串下标(UTF-16 code unit),与 partition 检查同源、自洽。
-import type { AssetKind, SourceBlock } from "./segment";
+import type { AssetKind, SourceBlock, SourceImageRef } from "./segment";
 
 interface Line {
   text: string;
@@ -36,8 +36,9 @@ function lineLooksLikeTable(line: string): boolean {
   return (t.match(/\|/g) ?? []).length >= 3;
 }
 
-function imageLine(line: string): boolean {
-  return /^!\[[^\]]*]\([^)]+\)$/.test(line.trim());
+function parseImageLine(line: string): SourceImageRef | null {
+  const m = /^!\[([^\]]*)]\(([^)]+)\)$/.exec(line.trim());
+  return m ? { alt: m[1], src: m[2].trim() } : null;
 }
 
 function standaloneInlineFormula(line: string): boolean {
@@ -92,8 +93,8 @@ export function markdownToBlocks(src: string): SourceBlock[] {
     para = null;
   };
 
-  const pushAsset = (assetKind: AssetKind, start: number, end: number) => {
-    blocks.push({ kind: "leaf", assetKind, text: src.slice(start, end), span: { start, end } });
+  const pushAsset = (assetKind: AssetKind, start: number, end: number, image?: SourceImageRef) => {
+    blocks.push({ kind: "leaf", assetKind, text: src.slice(start, end), image, span: { start, end } });
   };
 
   const appendPara = (start: number, end: number) => {
@@ -183,9 +184,10 @@ export function markdownToBlocks(src: string): SourceBlock[] {
       continue;
     }
 
-    if (imageLine(lineContent)) {
+    const image = parseImageLine(lineContent);
+    if (image) {
       flush();
-      pushAsset("image", cs.start, cs.end);
+      pushAsset("image", cs.start, cs.end, image);
       continue;
     }
 

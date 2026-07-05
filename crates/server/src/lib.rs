@@ -18,7 +18,7 @@ use runtime::{
 use serde::Serialize;
 use serde_json::json;
 use std::collections::{BTreeMap, HashMap};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub mod mcp;
 
@@ -26,6 +26,7 @@ pub mod mcp;
 /// S10b:持只读 `Book` + 会话态 `Reader` + 用户私有 `MemoryStore`(物理隔离 `[ADR-0006]`)。
 /// S10c:持 LLM `adapter`(`book.query` 经它触模型;`+ Send` 供 `Arc<Mutex<_>>` 跨 worker 线程)。
 pub struct AppState {
+    pub book_dir: PathBuf,
     pub book: Book,
     pub reader: Reader,
     pub store: MemoryStore,
@@ -278,6 +279,20 @@ pub struct Reply {
     pub body: String,
 }
 
+#[derive(Debug, PartialEq)]
+pub struct BinaryReply {
+    pub status: u16,
+    pub content_type: String,
+    pub body: Vec<u8>,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+struct BookLibraryEntry {
+    name: String,
+    book_id: String,
+    dir: String,
+}
+
 /// 纯函数路由 `[ADR-0028 决策3]`:按命名空间前缀定方法(`book.*`→GET 只读、
 /// `reader.*`/`memory.*`→POST 可变),端点名 = 命令名,错误原样透传 §4.4 信封。
 pub fn route(state: &mut AppState, req: Req) -> Reply {
@@ -347,7 +362,7 @@ pub fn route(state: &mut AppState, req: Req) -> Reply {
         if req.method != "GET" {
             return method_not_allowed();
         }
-        route_book(&state.book, &state.store, p, &q)
+        route_book(&state.book, &state.book_dir, &state.store, p, &q)
     } else if path.starts_with("/reader/") || path.starts_with("/memory/") {
         if req.method != "POST" {
             return method_not_allowed();
@@ -379,7 +394,14 @@ fn route_open_book(state: &mut AppState, body: &str, now: &str) -> Reply {
             });
         }
     };
-    state.reader = Reader::new(&book, DEFAULT_RADIUS);
+    let saved_top = load_session(&state.session_path)
+        .and_then(|session| session.top_lid_for_dir(dir).map(str::to_string));
+    let mut reader = Reader::new(&book, DEFAULT_RADIUS);
+    if let Some(top) = saved_top {
+        reader.restore_top_lid(&book, &top);
+    }
+    state.reader = reader;
+    state.book_dir = PathBuf::from(dir);
     state.book = book;
     state.messages =
         ensure_agent_history_for_book(&mut state.agent_history, &state.book.base.book_id, now);
@@ -397,6 +419,75 @@ fn route_profile_manifest(book: &Book, q: &HashMap<String, String>) -> Reply {
     }
 }
 
+fn route_book_library(book_dir: &Path) -> Reply {
+    let root = book_library_root(book_dir);
+    let books = list_book_library(&root);
+    ok_json(&json!({
+        "root": path_string(&root),
+        "books": books,
+    }))
+}
+
+fn book_library_root(book_dir: &Path) -> PathBuf {
+    if let Some(parent) = book_dir.parent() {
+        if parent.file_name().and_then(|s| s.to_str()) == Some(".understand-book") {
+            return parent.to_path_buf();
+        }
+    }
+    std::env::current_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join(".understand-book")
+}
+
+fn list_book_library(root: &Path) -> Vec<BookLibraryEntry> {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut books = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let file_type = entry.file_type().ok()?;
+            if !file_type.is_dir() {
+                return None;
+            }
+            let path = entry.path();
+            let base_path = path.join("base.json");
+            if !base_path.is_file() {
+                return None;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            let book_id = read_book_id_from_base(&base_path).unwrap_or_else(|| name.clone());
+            Some(BookLibraryEntry {
+                name,
+                book_id,
+                dir: path_string(&path),
+            })
+        })
+        .collect::<Vec<_>>();
+    books.sort_by(|a, b| {
+        a.book_id
+            .cmp(&b.book_id)
+            .then_with(|| a.name.cmp(&b.name))
+            .then_with(|| a.dir.cmp(&b.dir))
+    });
+    books
+}
+
+fn read_book_id_from_base(path: &Path) -> Option<String> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    value
+        .get("book_id")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+fn path_string(path: &Path) -> String {
+    path.to_string_lossy().to_string()
+}
+
 fn reader_state_response(book: &Book, reader: &Reader) -> serde_json::Value {
     let state = reader.state();
     json!({
@@ -409,9 +500,17 @@ fn reader_state_response(book: &Book, reader: &Reader) -> serde_json::Value {
 }
 
 /// `book.*` 只读叶子 → GET(S10a)。`store` 仅 `guided_route_from` 用(派生 reader_profile 已读降权)。
-fn route_book(book: &Book, store: &MemoryStore, leaf: &str, q: &HashMap<String, String>) -> Reply {
+fn route_book(
+    book: &Book,
+    book_dir: &Path,
+    store: &MemoryStore,
+    leaf: &str,
+    q: &HashMap<String, String>,
+) -> Reply {
     match leaf {
         "manifest" => ok_json(&book.manifest()),
+        "library" => route_book_library(book_dir),
+        "asset_manifest" => route_asset_manifest(book, book_dir),
         "text" => {
             let Some(lid) = q.get("lid") else {
                 return validation("INVALID_RANGE", "book.text 需 lid 查询参数");
@@ -539,6 +638,74 @@ fn route_book(book: &Book, store: &MemoryStore, leaf: &str, q: &HashMap<String, 
             }
         }
         _ => route_not_found(&format!("/book/{leaf}")),
+    }
+}
+
+fn route_asset_manifest(book: &Book, book_dir: &Path) -> Reply {
+    let path = book_dir.join("asset_manifest.json");
+    match std::fs::read_to_string(&path) {
+        Ok(raw) => match serde_json::from_str::<serde_json::Value>(&raw) {
+            Ok(value) => ok_json(&value),
+            Err(e) => err_reply(&ToolError {
+                error_code: "ASSET_MANIFEST_INVALID".into(),
+                category: "internal".into(),
+                message: format!("asset_manifest.json 非合法 JSON: {e}"),
+            }),
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => ok_json(&json!({
+            "version": "asset_manifest.v1",
+            "book_id": book.base.book_id,
+            "images": [],
+        })),
+        Err(e) => err_reply(&ToolError {
+            error_code: "ASSET_MANIFEST_READ_FAILED".into(),
+            category: "internal".into(),
+            message: format!("读取 asset_manifest.json 失败: {e}"),
+        }),
+    }
+}
+
+pub fn route_book_asset_file(book_dir: &Path, path: &str) -> Option<BinaryReply> {
+    let rel = path.strip_prefix("/book/assets/")?;
+    let mut file = book_dir.join("assets");
+    for seg in rel.split('/') {
+        if seg.is_empty() || seg == "." || seg == ".." || seg.contains('\\') || seg.contains(':') {
+            return Some(BinaryReply {
+                status: 400,
+                content_type: "text/plain; charset=utf-8".into(),
+                body: b"invalid asset path".to_vec(),
+            });
+        }
+        file.push(seg);
+    }
+    match std::fs::read(&file) {
+        Ok(body) => Some(BinaryReply {
+            status: 200,
+            content_type: mime_for_asset(&file).into(),
+            body,
+        }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(BinaryReply {
+            status: 404,
+            content_type: "text/plain; charset=utf-8".into(),
+            body: b"asset not found".to_vec(),
+        }),
+        Err(e) => Some(BinaryReply {
+            status: 500,
+            content_type: "text/plain; charset=utf-8".into(),
+            body: format!("asset read failed: {e}").into_bytes(),
+        }),
+    }
+}
+
+fn mime_for_asset(path: &Path) -> &'static str {
+    match path.extension().and_then(|s| s.to_str()).unwrap_or("") {
+        "avif" => "image/avif",
+        "gif" => "image/gif",
+        "jpg" | "jpeg" => "image/jpeg",
+        "png" => "image/png",
+        "svg" => "image/svg+xml",
+        "webp" => "image/webp",
+        _ => "application/octet-stream",
     }
 }
 
@@ -1140,52 +1307,141 @@ impl ModelAdapter for UnconfiguredAdapter {
 }
 
 // ── 阅读位置持久化(S13d)──
-/// session.json 结构:记录上次打开的 book_dir 和阅读位置 top_lid。
-#[derive(serde::Serialize, serde::Deserialize)]
-pub struct SessionState {
-    pub book_dir: String,
+/// 单本书的阅读位置。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SessionBookProgress {
     pub top_lid: String,
 }
 
-/// 把 AppState 当前书目录和阅读位置写入 session.json。dir=Some 覆盖书目录(开新书);None 沿用旧值。
+/// session.json 结构:记录最后打开的书,并为每本打开过的书分别保存阅读位置。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SessionState {
+    pub current_book_dir: String,
+    #[serde(default)]
+    pub books: BTreeMap<String, SessionBookProgress>,
+}
+
+#[derive(serde::Deserialize)]
+struct LegacySessionState {
+    book_dir: String,
+    top_lid: String,
+}
+
+impl SessionState {
+    pub fn top_lid_for_dir(&self, dir: &str) -> Option<&str> {
+        let key = session_dir_key(dir);
+        self.books
+            .get(&key)
+            .or_else(|| self.books.get(dir))
+            .map(|p| p.top_lid.as_str())
+    }
+
+    pub fn current_top_lid(&self) -> Option<&str> {
+        self.top_lid_for_dir(&self.current_book_dir)
+    }
+
+    fn from_legacy(legacy: LegacySessionState) -> Self {
+        let dir = session_dir_key(&legacy.book_dir);
+        let mut books = BTreeMap::new();
+        books.insert(
+            dir.clone(),
+            SessionBookProgress {
+                top_lid: legacy.top_lid,
+            },
+        );
+        SessionState {
+            current_book_dir: dir,
+            books,
+        }
+    }
+}
+
+fn session_dir_key(dir: &str) -> String {
+    let path = std::fs::canonicalize(dir)
+        .unwrap_or_else(|_| PathBuf::from(dir))
+        .to_string_lossy()
+        .to_string();
+    normalize_session_path_string(path)
+}
+
+fn normalize_session_path_string(path: String) -> String {
+    if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
+        format!("\\\\{rest}")
+    } else if let Some(rest) = path.strip_prefix(r"\\?\") {
+        rest.to_string()
+    } else {
+        path
+    }
+}
+
+/// 启动时选择要打开的书:优先恢复 session 中最后打开且仍可加载的书,否则使用请求目录。
+pub fn select_start_book(
+    requested_dir: String,
+    session: Option<&SessionState>,
+) -> (String, Option<String>) {
+    let Some(session) = session else {
+        return (requested_dir, None);
+    };
+    let requested_key = session_dir_key(&requested_dir);
+    let current_key = session_dir_key(&session.current_book_dir);
+    if current_key != requested_key
+        && !session.current_book_dir.trim().is_empty()
+        && Book::load(&session.current_book_dir).is_ok()
+    {
+        return (
+            session.current_book_dir.clone(),
+            session.current_top_lid().map(str::to_string),
+        );
+    }
+    let top = session.top_lid_for_dir(&requested_dir).map(str::to_string);
+    (requested_dir, top)
+}
+
+/// 把 AppState 当前书目录和阅读位置写入 session.json。dir=Some 覆盖当前书(开新书);None 使用 AppState 当前书。
 pub fn save_session(state: &AppState, dir: Option<&str>) {
     let Some(path) = &state.session_path else {
         return;
     };
-    let book_dir = match dir {
-        Some(d) => d.to_string(),
-        None => match path.parent() {
-            _ => {
-                // 沿用现有 session.json 的 book_dir;若读不到则跳过(未持久化过)。
-                match std::fs::read_to_string(path) {
-                    Ok(raw) => match serde_json::from_str::<SessionState>(&raw) {
-                        Ok(s) => s.book_dir,
-                        Err(_) => return,
-                    },
-                    Err(_) => return,
-                }
-            }
-        },
-    };
+    let book_dir = dir
+        .map(str::to_string)
+        .unwrap_or_else(|| path_string(&state.book_dir));
+    if book_dir.trim().is_empty() {
+        return;
+    }
+    let key = session_dir_key(&book_dir);
     let top_lid = state.reader.viewport().top_lid;
-    let session = SessionState { book_dir, top_lid };
+    let mut session = load_session(&state.session_path).unwrap_or_else(|| SessionState {
+        current_book_dir: key.clone(),
+        books: BTreeMap::new(),
+    });
+    session.current_book_dir = key.clone();
+    session
+        .books
+        .insert(key, SessionBookProgress { top_lid });
     if let Ok(json) = serde_json::to_string_pretty(&session) {
         let _ = std::fs::write(path, json);
     }
 }
 
-/// 从 session.json 读回上次打开的书目录和阅读位置。文件缺失或解析失败返回 None(静默,启服务冷启动)。
+/// 从 session.json 读回上次打开的书目录和各书阅读位置。文件缺失或解析失败返回 None(静默,启服务冷启动)。
 pub fn load_session(path: &Option<PathBuf>) -> Option<SessionState> {
     let p = path.as_ref()?;
     let raw = std::fs::read_to_string(p).ok()?;
-    serde_json::from_str::<SessionState>(&raw).ok()
+    serde_json::from_str::<SessionState>(&raw)
+        .ok()
+        .or_else(|| {
+            serde_json::from_str::<LegacySessionState>(&raw)
+                .ok()
+                .map(SessionState::from_legacy)
+        })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use base_schema::{
-        sample_base, FormulaComposition, FormulaParameter, FormulaSemantics, NodeKind,
+        sample_base, FormulaComposition, FormulaParameter, FormulaSemantics, LidNode, NodeKind,
+        ReadOnlyBase, Span,
     };
     use reader::DEFAULT_RADIUS;
     use runtime::{RawCitation, ToolCall};
@@ -1198,6 +1454,53 @@ mod tests {
         let p = std::env::temp_dir().join(format!("ub-server-test-{name}.json"));
         let _ = std::fs::remove_file(&p);
         p
+    }
+
+    fn tmp_dir(name: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!("ub-server-test-{name}"));
+        let _ = std::fs::remove_dir_all(&p);
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    fn multi_leaf_base(book_id: &str, leaves: usize) -> ReadOnlyBase {
+        let mut base = sample_base();
+        base.book_id = book_id.into();
+        base.graph_nodes.clear();
+        base.graph_edges.clear();
+        let children = (1..=leaves)
+            .map(|i| format!("1.{i}"))
+            .collect::<Vec<_>>();
+        let mut nodes = vec![LidNode {
+            lid: "1".into(),
+            path: vec![1],
+            kind: NodeKind::Chapter,
+            span: Span {
+                start: 0,
+                end: leaves * 10,
+            },
+            children,
+        }];
+        nodes.extend((1..=leaves).map(|i| LidNode {
+            lid: format!("1.{i}"),
+            path: vec![1, i as u32],
+            kind: NodeKind::Paragraph,
+            span: Span {
+                start: (i - 1) * 10,
+                end: i * 10,
+            },
+            children: Vec::new(),
+        }));
+        base.lid_nodes = nodes;
+        base
+    }
+
+    fn write_multi_leaf_book(name: &str, book_id: &str, leaves: usize) -> PathBuf {
+        let dir = tmp_dir(name);
+        let base = multi_leaf_base(book_id, leaves);
+        std::fs::write(dir.join("base.json"), serde_json::to_string(&base).unwrap()).unwrap();
+        std::fs::write(dir.join("source.txt"), "X".repeat(leaves * 10)).unwrap();
+        dir
     }
 
     /// 确定性 LLM 替身:首轮即 sufficient + 引用给定 LID(落在证据集内 ⇒ 过内层交叉验停)。
@@ -1255,6 +1558,7 @@ mod tests {
         // 默认桩引用首叶 "1.1"(book.query 缺省 anchor = reader 首叶,落证据集)。
         let adapter = Box::new(StubAdapter { lid: "1.1".into() });
         AppState {
+            book_dir: tmp_dir(&format!("book-dir-{mem}")),
             book,
             reader,
             store,
@@ -1322,6 +1626,71 @@ mod tests {
         let r = get(&mut state_named("manifest"), "/book/manifest");
         assert_eq!(r.status, 200);
         assert!(r.body.contains("\"tree\""));
+    }
+
+    #[test]
+    fn asset_manifest_missing_defaults_to_empty_images() {
+        let mut s = state_named("asset-manifest-empty");
+        let r = get(&mut s, "/book/asset_manifest");
+        assert_eq!(r.status, 200);
+        assert!(r.body.contains("\"version\":\"asset_manifest.v1\""));
+        assert!(r.body.contains("\"images\":[]"));
+    }
+
+    #[test]
+    fn asset_manifest_reads_book_dir_json() {
+        let mut s = state_named("asset-manifest-json");
+        std::fs::write(
+            s.book_dir.join("asset_manifest.json"),
+            r#"{"version":"asset_manifest.v1","book_id":"sample","images":[{"lid":"1.1"}]}"#,
+        )
+        .unwrap();
+        let r = get(&mut s, "/book/asset_manifest");
+        assert_eq!(r.status, 200);
+        assert!(r.body.contains("\"lid\":\"1.1\""));
+    }
+
+    #[test]
+    fn book_library_lists_build_dirs_from_current_book_parent() {
+        let mut s = state_named("book-library");
+        let base = tmp_dir("book-library-root");
+        let root = base.join(".understand-book");
+        let alpha = root.join("alpha");
+        let draft = root.join("draft");
+        std::fs::create_dir_all(&alpha).unwrap();
+        std::fs::create_dir_all(&draft).unwrap();
+        std::fs::write(alpha.join("base.json"), r#"{"book_id":"alpha-book"}"#).unwrap();
+        std::fs::write(draft.join("source.txt"), "not built yet").unwrap();
+        s.book_dir = alpha.clone();
+
+        let r = get(&mut s, "/book/library");
+        assert_eq!(r.status, 200);
+        let body: serde_json::Value = serde_json::from_str(&r.body).unwrap();
+        let books = body["books"].as_array().unwrap();
+        assert_eq!(books.len(), 1);
+        assert_eq!(books[0]["name"], "alpha");
+        assert_eq!(books[0]["book_id"], "alpha-book");
+        assert_eq!(books[0]["dir"], path_string(&alpha));
+        assert_eq!(body["root"], path_string(&root));
+    }
+
+    #[test]
+    fn book_asset_file_serves_assets_under_book_dir_only() {
+        let dir = tmp_dir("asset-file");
+        let image_dir = dir.join("assets").join("images");
+        std::fs::create_dir_all(&image_dir).unwrap();
+        std::fs::write(image_dir.join("x.png"), [137_u8, 80, 78, 71]).unwrap();
+
+        let ok = route_book_asset_file(&dir, "/book/assets/images/x.png").unwrap();
+        assert_eq!(ok.status, 200);
+        assert_eq!(ok.content_type, "image/png");
+        assert_eq!(ok.body, vec![137_u8, 80, 78, 71]);
+
+        let bad = route_book_asset_file(&dir, "/book/assets/../base.json").unwrap();
+        assert_eq!(bad.status, 400);
+        let missing = route_book_asset_file(&dir, "/book/assets/images/missing.png").unwrap();
+        assert_eq!(missing.status, 404);
+        assert!(route_book_asset_file(&dir, "/book/text?lid=1.1").is_none());
     }
 
     #[test]
@@ -1398,6 +1767,7 @@ mod tests {
         let store = MemoryStore::open(tmp("formula-semantics-get")).unwrap();
         let adapter = Box::new(StubAdapter { lid: "1.1".into() });
         let mut s = AppState {
+            book_dir: tmp_dir("formula-semantics-book-dir"),
             book,
             reader,
             store,
@@ -1832,6 +2202,7 @@ mod tests {
             users: Arc::clone(&users),
         });
         let mut s = AppState {
+            book_dir: dir.clone(),
             book,
             reader,
             store,
@@ -1866,6 +2237,93 @@ mod tests {
         assert_eq!(post(&mut s, "/book/synthesize", "{}").status, 400);
         assert_eq!(get(&mut s, "/book/synthesize").status, 405);
     }
+    #[test]
+    fn session_loads_legacy_single_book_format() {
+        let dir = write_multi_leaf_book("session-legacy-book", "legacy-book", 30);
+        let session_path = tmp("session-legacy");
+        std::fs::write(
+            &session_path,
+            serde_json::json!({
+                "book_dir": path_string(&dir),
+                "top_lid": "1.6"
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let session = load_session(&Some(session_path)).unwrap();
+        assert_eq!(session.current_book_dir, session_dir_key(&path_string(&dir)));
+        assert_eq!(session.top_lid_for_dir(&path_string(&dir)), Some("1.6"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn session_start_prefers_last_open_book_and_its_saved_top() {
+        let requested = write_multi_leaf_book("session-start-requested", "requested-book", 30);
+        let current = write_multi_leaf_book("session-start-current", "current-book", 30);
+        let current_key = session_dir_key(&path_string(&current));
+        let mut books = BTreeMap::new();
+        books.insert(
+            session_dir_key(&path_string(&requested)),
+            SessionBookProgress {
+                top_lid: "1.3".into(),
+            },
+        );
+        books.insert(
+            current_key.clone(),
+            SessionBookProgress {
+                top_lid: "1.9".into(),
+            },
+        );
+        let session = SessionState {
+            current_book_dir: current_key.clone(),
+            books,
+        };
+
+        let (dir, top) = select_start_book(path_string(&requested), Some(&session));
+        assert_eq!(dir, current_key);
+        assert_eq!(top.as_deref(), Some("1.9"));
+        let _ = std::fs::remove_dir_all(&requested);
+        let _ = std::fs::remove_dir_all(&current);
+    }
+
+    #[test]
+    fn book_open_restores_progress_per_book() {
+        let dir_a = write_multi_leaf_book("session-book-a", "book-a", 30);
+        let dir_b = write_multi_leaf_book("session-book-b", "book-b", 30);
+        let session_path = tmp("session-per-book");
+        let mut s = state_named("session-per-book-store");
+        s.session_path = Some(session_path.clone());
+
+        let body_a = format!(
+            r#"{{"dir":{}}}"#,
+            serde_json::to_string(&path_string(&dir_a)).unwrap()
+        );
+        let body_b = format!(
+            r#"{{"dir":{}}}"#,
+            serde_json::to_string(&path_string(&dir_b)).unwrap()
+        );
+
+        assert_eq!(post(&mut s, "/book/open", &body_a).status, 200);
+        assert_eq!(post(&mut s, "/reader/goto", r#"{"lid":"1.11"}"#).status, 200);
+        assert_eq!(s.reader.viewport().top_lid, "1.11");
+
+        assert_eq!(post(&mut s, "/book/open", &body_b).status, 200);
+        assert_eq!(post(&mut s, "/reader/goto", r#"{"lid":"1.6"}"#).status, 200);
+        assert_eq!(s.reader.viewport().top_lid, "1.6");
+
+        assert_eq!(post(&mut s, "/book/open", &body_a).status, 200);
+        assert_eq!(s.reader.viewport().top_lid, "1.11");
+        assert_eq!(post(&mut s, "/book/open", &body_b).status, 200);
+        assert_eq!(s.reader.viewport().top_lid, "1.6");
+
+        let session = load_session(&Some(session_path)).unwrap();
+        assert_eq!(session.top_lid_for_dir(&path_string(&dir_a)), Some("1.11"));
+        assert_eq!(session.top_lid_for_dir(&path_string(&dir_b)), Some("1.6"));
+        let _ = std::fs::remove_dir_all(&dir_a);
+        let _ = std::fs::remove_dir_all(&dir_b);
+    }
+
     #[test]
     fn book_open_reloads_book_and_resets_session_state() {
         let dir = tmp("open-book-dir");

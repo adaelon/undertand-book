@@ -808,6 +808,7 @@ mod tests {
         let book = book();
         let reader = Reader::new(&book, DEFAULT_RADIUS);
         AppState {
+            book_dir: std::env::temp_dir(),
             book,
             reader,
             store: MemoryStore::open(tmp("memory")).unwrap(),

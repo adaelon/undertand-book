@@ -88,6 +88,34 @@ export interface BookText {
   lid: string;
   text: string;
 }
+export interface ImageAssetManifestEntry {
+  kind: "image";
+  lid: string;
+  alt: string;
+  original_src: string;
+  source: "markdown" | "epub" | "data_uri";
+  status: "available" | "missing" | "external" | "unsupported";
+  stored_path: string | null;
+  url_path: string | null;
+  mime: string | null;
+  sha256: string | null;
+  size_bytes: number | null;
+  warning: string | null;
+}
+export interface AssetManifest {
+  version: "asset_manifest.v1";
+  book_id: string;
+  images: ImageAssetManifestEntry[];
+}
+export interface BookLibraryEntry {
+  name: string;
+  book_id: string;
+  dir: string;
+}
+export interface BookLibraryResponse {
+  root: string;
+  books: BookLibraryEntry[];
+}
 export interface FormulaParameter {
   symbol: string;
   label: string | null;
@@ -200,6 +228,8 @@ function qs(params: Record<string, string | undefined>): string {
 export const api = {
   // ── book.*(只读 GET)──
   manifest: () => http<Manifest>("GET", "/book/manifest"),
+  bookLibrary: () => http<BookLibraryResponse>("GET", "/book/library"),
+  assetManifest: () => http<AssetManifest>("GET", "/book/asset_manifest"),
   profileManifest: (profile_id?: "technical_learning" | "paper") =>
     http<ProfileManifest>("GET", `/profile/manifest${qs({ profile_id })}`),
   text: (lid: string, end?: string) =>

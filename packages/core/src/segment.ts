@@ -12,6 +12,13 @@ export interface Span {
   end: number;
 }
 
+export interface SourceImageRef {
+  alt: string;
+  src: string;
+  /** EPUB 内部 zip 路径;Markdown 图片没有该字段。 */
+  epubPath?: string;
+}
+
 /** 忠实块映射的一个源块。heading 定义层级;leaf = 段(段落/引用块/代码块/列表项/asset)。 */
 export interface SourceBlock {
   kind: "heading" | "leaf";
@@ -21,6 +28,8 @@ export interface SourceBlock {
   assetKind?: AssetKind;
   /** 规范化后的展示文本(标题已去 marker) */
   text: string;
+  /** image asset 的原始引用元数据;source.txt 仍只保存 text。 */
+  image?: SourceImageRef;
   /** 源区间(含 marker,保证无未分类非内容字节);切片0 用 JS 串下标(UTF-16),字节精确化留后 */
   span: Span;
 }

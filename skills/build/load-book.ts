@@ -9,6 +9,7 @@ import type { LidNode } from "../../packages/core/src/generated/LidNode";
 
 export interface LoadedBook {
   source: string;
+  blocks: SourceBlock[];
   lidNodes: LidNode[];
   byLid: Map<string, LidNode>;
   windows: Window[];
@@ -23,7 +24,7 @@ export function loadBookWindows(book: string): LoadedBook {
   const lidNodes = segment(blocks);
   const byLid = new Map(lidNodes.map((n) => [n.lid, n]));
   const windows = splitWindows(lidNodes, source);
-  return { source, lidNodes, byLid, windows };
+  return { source, blocks, lidNodes, byLid, windows };
 }
 
 /** 按 id 取窗口;不存在则报错列出合法 id 范围。 */

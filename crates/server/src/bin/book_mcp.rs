@@ -36,6 +36,7 @@ fn main() {
         Err(_) => Box::new(UnconfiguredAdapter),
     };
     let mut state = AppState {
+        book_dir: std::path::PathBuf::from(&dir),
         book,
         reader,
         store,

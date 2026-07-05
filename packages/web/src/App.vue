@@ -6,7 +6,9 @@ import type {
   AgentChatTurn as StoredAgentChatTurn,
   AgentEffect,
   AgentHistoryResponse,
+  BookLibraryEntry,
   FormulaSemantics,
+  ImageAssetManifestEntry,
   MemoryRecord,
   OuterOutcome,
   PaperLexiconProjection,
@@ -65,6 +67,7 @@ export interface OutlineItem {
 // ── 阅读区会话态 ──
 const leafOrder = ref<string[]>([]); // 全书叶 LID 序(读位感分母 + 进度)
 const kindByLid = ref<Map<string, NodeKind>>(new Map());
+const imageAssetByLid = ref<Map<string, ImageAssetManifestEntry>>(new Map());
 const outlineItems = ref<OutlineItem[]>([]);
 const titleByLid = ref<Map<string, string>>(new Map());
 const viewport = ref<Viewport | null>(null);
@@ -78,6 +81,7 @@ interface Segment {
   text: string;
   kind: NodeKind;
   formula: FormulaSemantics | null;
+  imageAsset: ImageAssetManifestEntry | null;
 }
 const segments = ref<Segment[]>([]); // 视口内连续正文(LID 隐形)
 const annotations = ref<MemoryRecord[]>([]); // 当前书全部标注(客户端按 lid 过滤)
@@ -116,6 +120,13 @@ let paperProjectionSeq = 0;
 const gotoInput = ref("");
 const outlineSearch = ref("");
 const banner = ref<string>("");
+const bookPickerOpen = ref(false);
+const bookPickerLoading = ref(false);
+const bookPickerError = ref<string | null>(null);
+const bookPickerRoot = ref("");
+const bookPickerBooks = ref<BookLibraryEntry[]>([]);
+const bookPickerDir = ref("");
+const openingBook = ref(false);
 const debugOpen = ref(false);
 const leftRailOpen = ref(true);
 const leftRailWidth = ref(240);
@@ -744,7 +755,12 @@ function sourcePreviewSingleHtml(seg: Segment): string {
   if (seg.kind === "table") return `<pre class="source-preview-asset source-preview-table">${renderSourcePreviewSeg(seg)}</pre>`;
   if (seg.kind === "image") {
     const meta = imageMeta(seg.text);
-    return `<figure class="source-preview-asset source-preview-image"><strong>${escapeHtml(meta?.alt || "Image")}</strong><code>${escapeHtml(meta?.src || "source unavailable")}</code><pre>${renderSourcePreviewSeg(seg)}</pre></figure>`;
+    const asset = seg.imageAsset;
+    const image = asset?.url_path
+      ? `<img class="source-preview-rendered-image" src="${escapeHtml(asset.url_path)}" alt="${escapeHtml(asset.alt || meta?.alt || "Image")}" loading="lazy" decoding="async">`
+      : "";
+    const warning = asset?.warning ? `<em>${escapeHtml(asset.warning)}</em>` : "";
+    return `<figure class="source-preview-asset source-preview-image">${image}<strong>${escapeHtml(meta?.alt || asset?.alt || "Image")}</strong><code>${escapeHtml(meta?.src || asset?.original_src || "source unavailable")}</code>${warning}<pre>${renderSourcePreviewSeg(seg)}</pre></figure>`;
   }
   return `<p class="source-preview-paragraph">${renderSourcePreviewSeg(seg)}</p>`;
 }
@@ -881,6 +897,9 @@ function imageMeta(text: string): { alt: string; src: string } | null {
   const m = text.trim().match(/^!\[([^\]]*)\]\(([^)]+)\)$/);
   return m ? { alt: m[1], src: m[2] } : null;
 }
+function imageAssetFor(lid: string): ImageAssetManifestEntry | null {
+  return imageAssetByLid.value.get(lid) ?? null;
+}
 async function formulaFor(lid: string, kind: NodeKind): Promise<FormulaSemantics | null> {
   if (kind !== "formula") return null;
   try {
@@ -901,7 +920,13 @@ async function hydrateSegments(lids: string[]): Promise<Segment[]> {
   return Promise.all(
     texts.map(async (t) => {
       const kind = kindOf(t.lid);
-      return { lid: t.lid, text: t.text, kind, formula: await formulaFor(t.lid, kind) };
+      return {
+        lid: t.lid,
+        text: t.text,
+        kind,
+        formula: await formulaFor(t.lid, kind),
+        imageAsset: kind === "image" ? imageAssetFor(t.lid) : null,
+      };
     }),
   );
 }
@@ -958,7 +983,9 @@ async function loadChapter(anchorLid: string) {
 async function init() {
   try {
     const m = await api.manifest();
+    const assets = await api.assetManifest();
     kindByLid.value = new Map(m.tree.map((n) => [n.lid, n.kind]));
+    imageAssetByLid.value = new Map(assets.images.map((img) => [img.lid, img]));
     leafOrder.value = m.tree.filter((n) => n.children.length === 0).map((n) => n.lid);
     await loadOutlineTitles(m.tree);
     const st = await api.state();
@@ -1478,38 +1505,81 @@ async function deleteChat(sessionId: string) {
     fail(e);
   }
 }
-async function openBook() {
-  const dir = window.prompt("Book directory", ".understand-book/quantification-essence");
-  if (!dir?.trim()) return;
+async function loadBookLibrary() {
+  bookPickerLoading.value = true;
+  bookPickerError.value = null;
   try {
-    banner.value = "";
-    await api.openBook(dir.trim());
-    leafOrder.value = [];
-    kindByLid.value = new Map();
-    outlineItems.value = [];
-    titleByLid.value = new Map();
-    viewport.value = null;
-    segments.value = [];
-    annotations.value = [];
-    selectedLid.value = null;
-    currentReadingLid.value = null;
-    formulaDialog.value = null;
-    profileSummary.value = null;
-    profileManifest.value = null;
-    readerLayout.value = null;
-    pendingLayoutProposal.value = null;
-    resetPaperProjectionData();
-    chapterTitle.value = "";
-    gotoInput.value = "";
-    outlineSearch.value = "";
-    chat.value = [];
-    chatSessions.value = [];
-    activeChatSessionId.value = "";
-    handled.value = {};
-    showTrace.value = {};
-    await init();
+    const library = await api.bookLibrary();
+    bookPickerRoot.value = library.root;
+    bookPickerBooks.value = library.books;
+    if (!bookPickerDir.value.trim() && library.books.length > 0) {
+      bookPickerDir.value = library.books[0].dir;
+    }
   } catch (e) {
+    bookPickerError.value = e instanceof Error ? e.message : String(e);
+  } finally {
+    bookPickerLoading.value = false;
+  }
+}
+
+async function openBook() {
+  bookPickerOpen.value = true;
+  if (bookPickerBooks.value.length === 0) {
+    await loadBookLibrary();
+  }
+}
+
+function closeBookPicker() {
+  if (openingBook.value) return;
+  bookPickerOpen.value = false;
+}
+
+function resetBookSessionUi() {
+  leafOrder.value = [];
+  kindByLid.value = new Map();
+  imageAssetByLid.value = new Map();
+  outlineItems.value = [];
+  titleByLid.value = new Map();
+  viewport.value = null;
+  segments.value = [];
+  annotations.value = [];
+  selectedLid.value = null;
+  currentReadingLid.value = null;
+  formulaDialog.value = null;
+  profileSummary.value = null;
+  profileManifest.value = null;
+  readerLayout.value = null;
+  pendingLayoutProposal.value = null;
+  resetPaperProjectionData();
+  chapterTitle.value = "";
+  gotoInput.value = "";
+  outlineSearch.value = "";
+  chat.value = [];
+  chatSessions.value = [];
+  activeChatSessionId.value = "";
+  handled.value = {};
+  showTrace.value = {};
+}
+
+async function submitOpenBook(dir = bookPickerDir.value) {
+  const target = dir.trim();
+  if (!target) {
+    bookPickerError.value = "Choose a book directory or enter one manually.";
+    return;
+  }
+  try {
+    openingBook.value = true;
+    banner.value = "";
+    bookPickerError.value = null;
+    await api.openBook(target);
+    resetBookSessionUi();
+    await init();
+    bookPickerOpen.value = false;
+  } catch (e) {
+    bookPickerError.value = e instanceof Error ? e.message : String(e);
     fail(e);
+  } finally {
+    openingBook.value = false;
   }
 }
 </script>
@@ -1529,6 +1599,62 @@ async function openBook() {
     />
 
     <p v-if="banner" class="banner">{{ banner }}</p>
+
+    <div v-if="bookPickerOpen" class="book-picker-modal" @click.self="closeBookPicker">
+      <section class="book-picker-dialog" role="dialog" aria-modal="true" aria-labelledby="book-picker-title">
+        <header class="book-picker-head">
+          <div>
+            <p class="formula-dialog-kicker">Book library</p>
+            <h3 id="book-picker-title">Open book</h3>
+          </div>
+          <button class="formula-dialog-close" title="Close" aria-label="Close book picker" @click="closeBookPicker">×</button>
+        </header>
+
+        <div class="book-picker-body">
+          <div class="book-picker-input-row">
+            <label>
+              <span>Directory</span>
+              <input
+                v-model="bookPickerDir"
+                :disabled="openingBook"
+                placeholder=".understand-book/book-id"
+                @keydown.enter.prevent="submitOpenBook()"
+              />
+            </label>
+            <button :disabled="bookPickerLoading || openingBook" @click="loadBookLibrary">
+              {{ bookPickerLoading ? "Loading" : "Refresh" }}
+            </button>
+          </div>
+
+          <p v-if="bookPickerRoot" class="book-picker-root">{{ bookPickerRoot }}</p>
+          <p v-if="bookPickerError" class="book-picker-error">{{ bookPickerError }}</p>
+          <p v-if="bookPickerLoading" class="book-picker-state">Scanning .understand-book…</p>
+          <p v-else-if="bookPickerBooks.length === 0" class="book-picker-state">No built books found.</p>
+
+          <div v-else class="book-picker-list">
+            <button
+              v-for="book in bookPickerBooks"
+              :key="book.dir"
+              class="book-picker-card"
+              :class="{ active: bookPickerDir === book.dir }"
+              :disabled="openingBook"
+              @click="bookPickerDir = book.dir"
+              @dblclick="submitOpenBook(book.dir)"
+            >
+              <strong>{{ book.book_id || book.name }}</strong>
+              <span>{{ book.dir }}</span>
+            </button>
+          </div>
+        </div>
+
+        <footer class="book-picker-actions">
+          <button :disabled="openingBook" @click="closeBookPicker">Cancel</button>
+          <button class="primary-action" :disabled="openingBook || !bookPickerDir.trim()" @click="submitOpenBook()">
+            {{ openingBook ? "Opening" : "Open" }}
+          </button>
+        </footer>
+      </section>
+    </div>
 
     <section v-if="isPaperProfile && profileManifest && readerLayout" class="profile-shell" aria-label="Profile workspace">
       <header class="profile-shell-head">
@@ -1724,6 +1850,7 @@ async function openBook() {
         :visible-notes="visibleNotes"
         :hl-excerpt="hlExcerpt"
         :image-meta="imageMeta"
+        :image-asset="imageAssetFor"
         @select="onSelectSeg"
         @prose-mouse-up="onProseMouseUp"
         @current-lid="onCurrentLid"
@@ -2081,6 +2208,136 @@ async function openBook() {
   padding: 0;
   font-size: 1rem;
 }
+.book-picker-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem;
+  background: rgba(10, 10, 10, 0.28);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+.book-picker-dialog {
+  width: min(42rem, 94vw);
+  max-height: 84vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--hairline);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.97);
+  box-shadow: none;
+}
+.book-picker-head,
+.book-picker-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.85rem 1rem;
+  border-bottom: 1px solid var(--line);
+}
+.book-picker-head h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+.book-picker-body {
+  min-height: 0;
+  overflow-y: auto;
+  padding: 1rem;
+}
+.book-picker-input-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.75rem;
+  align-items: end;
+}
+.book-picker-input-row label {
+  display: grid;
+  gap: 0.32rem;
+  color: var(--steel);
+  font-size: 0.78rem;
+  font-weight: 650;
+}
+.book-picker-input-row input {
+  width: 100%;
+  min-height: 42px;
+  box-sizing: border-box;
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--ink);
+  padding: 0.55rem 0.7rem;
+  font-family: var(--mono);
+  font-size: 0.84rem;
+}
+.book-picker-input-row button,
+.book-picker-actions button {
+  min-height: 42px;
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background: var(--canvas);
+  color: var(--ink);
+  padding: 0 0.9rem;
+}
+.book-picker-root {
+  margin: 0.75rem 0 0;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  overflow-wrap: anywhere;
+}
+.book-picker-error,
+.book-picker-state {
+  margin: 0.85rem 0 0;
+  color: var(--muted);
+  font-size: 0.86rem;
+}
+.book-picker-error {
+  color: #9f2d2d;
+}
+.book-picker-list {
+  display: grid;
+  gap: 0.55rem;
+  margin-top: 0.9rem;
+}
+.book-picker-card {
+  display: grid;
+  gap: 0.22rem;
+  width: 100%;
+  min-height: 58px;
+  border: 1px solid var(--hairline-soft);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--ink);
+  padding: 0.65rem 0.75rem;
+  text-align: left;
+}
+.book-picker-card:hover,
+.book-picker-card.active {
+  border-color: var(--accent);
+  background: #fff;
+}
+.book-picker-card strong {
+  font-size: 0.92rem;
+}
+.book-picker-card span {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 0.74rem;
+  overflow-wrap: anywhere;
+}
+.book-picker-actions {
+  border-top: 1px solid var(--line);
+  border-bottom: none;
+}
+.book-picker-actions .primary-action {
+  background: var(--ink);
+  color: #fff;
+}
 .formula-dialog-body {
   min-height: 0;
   overflow-y: auto;
@@ -2266,6 +2523,15 @@ async function openBook() {
   display: grid;
   gap: 0.45rem;
   white-space: normal;
+}
+.source-preview-rendered-image {
+  display: block;
+  max-width: 100%;
+  max-height: 62vh;
+  object-fit: contain;
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background: var(--surface-soft);
 }
 .source-preview-image code,
 .source-preview-image pre {

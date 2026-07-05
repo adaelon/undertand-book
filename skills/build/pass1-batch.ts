@@ -6,9 +6,10 @@
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { mergeAndGate, type Pass1Output } from "../../packages/core/src/merge";
 import { projectCatalog } from "../../packages/core/src/catalog";
-import { FormulaSemanticsSidecarZ, Pass2BuildAuditSidecarZ, ReadOnlyBaseZ, SourceManifestZ, TechnicalLearningDiscourseIndexZ } from "../../packages/core/src/zod";
+import { AssetManifestZ, FormulaSemanticsSidecarZ, Pass2BuildAuditSidecarZ, ReadOnlyBaseZ, SourceManifestZ, TechnicalLearningDiscourseIndexZ } from "../../packages/core/src/zod";
 import { buildProfileArtifactHeader, buildProfileMetadata } from "../../packages/core/src/profile-artifact";
 import { buildSourceManifest } from "../../packages/core/src/source-manifest";
+import { buildAssetManifest } from "../../packages/core/src/asset-manifest";
 import { buildFormulaSemanticsSidecar, type FormulaSemanticsBuildCandidate } from "../../packages/core/src/formula-semantics";
 import { buildTechnicalLearningDiscourseIndex, type TechnicalLearningDiscourseItem } from "../../packages/core/src/discourse-index";
 import { buildLidToWindowIndex, buildLongRangeCandidates, gatePass2BuildOutput, type Pass2LlmOutput } from "../../packages/core/src/pass2-build";
@@ -48,7 +49,7 @@ const pass2OutputPath = opts["--pass2-output"];
 const originalPdfPath = opts["--original-pdf"];
 const pdfSourceMapPath = opts["--pdf-source-map"];
 
-const { source, lidNodes, byLid, windows } = loadBookWindows(book);
+const { source, blocks, lidNodes, byLid, windows } = loadBookWindows(book);
 const bookId = deriveBookId(book, opts["--book-id"]);
 
 // 消费 `.build/pass1/<id>.json`:逐窗读已落产物(缺文件=不入 map)
@@ -141,10 +142,19 @@ const base = { book_id: bookId, lid_nodes: lidNodes, graph_nodes: nodes, graph_e
 ReadOnlyBaseZ.parse(base); // 产出前自检(字段失配抛错)
 const dir = `.understand-book/${bookId}`;
 mkdirSync(dir, { recursive: true });
+const assetManifest = buildAssetManifest({
+  book_id: bookId,
+  book_path: book,
+  output_dir: dir,
+  source_blocks: blocks,
+  lid_nodes: lidNodes,
+});
+AssetManifestZ.parse(assetManifest);
 writeFileSync(`${dir}/base.json`, JSON.stringify(base, null, 2), "utf8");
 writeFileSync(`${dir}/source.txt`, source, "utf8"); // 原文旁路:book.text 取真原文用,按 LID.span(UTF-16)切 `[ADR-0024]`
 writeFileSync(`${dir}/profile_metadata.json`, JSON.stringify(profileMetadata, null, 2), "utf8");
 writeFileSync(`${dir}/source_manifest.json`, JSON.stringify(sourceManifest, null, 2), "utf8");
+writeFileSync(`${dir}/asset_manifest.json`, JSON.stringify(assetManifest, null, 2), "utf8");
 // build-only:不被 Book::load 读,供 Pass2 prompt 输入 + 覆盖/审计调试 `[PB3 grill §2]`
 writeFileSync(`${dir}/long_range_candidates.json`, JSON.stringify(candidateIndex, null, 2), "utf8");
 if (formulaSidecar) {
@@ -169,6 +179,9 @@ console.log(`  基座固化: ${dir}/base.json  (zod 校验通过)`);
 console.log(`  profile metadata: ${dir}/profile_metadata.json`);
 console.log(
   `  source manifest: ${dir}/source_manifest.json canonical=${sourceManifest.canonical_source.kind} pdf_attachments=${sourceManifest.attachments.length}`,
+);
+console.log(
+  `  asset manifest: ${dir}/asset_manifest.json images=${assetManifest.images.length} available=${assetManifest.images.filter((img) => img.status === "available").length}`,
 );
 if (formulaSidecar) {
   console.log(

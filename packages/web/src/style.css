@@ -684,6 +684,15 @@ body {
 .asset-image-figure {
   margin: 0;
 }
+.image-rendered {
+  display: block;
+  max-width: 100%;
+  max-height: min(70vh, 720px);
+  object-fit: contain;
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
 .image-preview {
   display: grid;
   gap: 0.25rem;
@@ -698,6 +707,11 @@ body {
 }
 .image-preview code {
   overflow-wrap: anywhere;
+}
+.image-warning {
+  margin: 0.5rem 0 0;
+  color: var(--steel);
+  font-size: 0.82rem;
 }
 .asset-image-figure figcaption {
   padding: 0.45rem 0.85rem 0;

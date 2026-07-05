@@ -10,7 +10,7 @@ use reader::{Reader, DEFAULT_RADIUS};
 use runtime::{ModelAdapter, ProviderRegistry};
 use server::{
     ensure_agent_history_for_book, load_agent_history, load_session, mcp::VisitorSessions, route,
-    save_session, AppState, Req, UnconfiguredAdapter,
+    route_book_asset_file, save_session, select_start_book, AppState, Req, UnconfiguredAdapter,
 };
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -33,14 +33,9 @@ fn main() {
     let history_path = MemoryStore::default_path()
         .parent()
         .map(|p| p.join("agent-history.json"));
-    // 若 session.json 存在且 book_dir 不同、且该目录可加载,则改用 session 的 book_dir。
-    let (dir, saved_top) = match load_session(&session_path) {
-        Some(s) if s.book_dir != dir && Book::load(&s.book_dir).is_ok() => {
-            (s.book_dir, Some(s.top_lid))
-        }
-        Some(s) if s.book_dir == dir => (dir, Some(s.top_lid)),
-        _ => (dir, None),
-    };
+    // 若 session.json 存在且最后打开的书仍可加载,则改用最后打开的书;否则使用请求目录。
+    let session = load_session(&session_path);
+    let (dir, saved_top) = select_start_book(dir, session.as_ref());
     let book = match Book::load(&dir) {
         Ok(b) => b,
         Err(e) => {
@@ -76,6 +71,7 @@ fn main() {
     let messages =
         ensure_agent_history_for_book(&mut agent_history, &book.base.book_id, "server-start");
     let state = Arc::new(Mutex::new(AppState {
+        book_dir: PathBuf::from(&dir),
         book,
         reader,
         store,
@@ -125,6 +121,16 @@ fn main() {
                 None => {
                     // 锁只在 API 路由这一刻持有;静态文件 I/O 不占 AppState 锁。
                     let api_url = normalize_api_url(&url);
+                    if method == "GET" {
+                        let asset = {
+                            let guard = st.lock().unwrap_or_else(|p| p.into_inner());
+                            route_book_asset_file(&guard.book_dir, &api_url)
+                        };
+                        if let Some(reply) = asset {
+                            let _ = rq.respond(response_from_binary(reply));
+                            continue;
+                        }
+                    }
                     let reply = {
                         let mut guard = st.lock().unwrap_or_else(|p| p.into_inner());
                         route(
@@ -272,6 +278,14 @@ fn response_from_json(status: u16, body: String) -> Response<std::io::Cursor<Vec
 fn response_from_static(reply: StaticReply) -> Response<std::io::Cursor<Vec<u8>>> {
     let header = Header::from_bytes(&b"Content-Type"[..], reply.content_type.as_bytes())
         .expect("静态 header 合法");
+    Response::from_data(reply.body)
+        .with_status_code(reply.status)
+        .with_header(header)
+}
+
+fn response_from_binary(reply: server::BinaryReply) -> Response<std::io::Cursor<Vec<u8>>> {
+    let header = Header::from_bytes(&b"Content-Type"[..], reply.content_type.as_bytes())
+        .expect("valid content-type header");
     Response::from_data(reply.body)
         .with_status_code(reply.status)
         .with_header(header)

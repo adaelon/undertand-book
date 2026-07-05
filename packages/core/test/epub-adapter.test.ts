@@ -8,6 +8,7 @@ describe("SA3 epub xhtml asset block recognition", () => {
   const html = `<?xml version="1.0"?><html><body>
     <h1>Command Pattern</h1>
     <p class="body">Commands are reified calls.</p>
+    <p>See <img alt="inline" src="figures/inline.png" /> now.</p>
     <p>Inline math <math><mi>F</mi><mo>=</mo><mi>m</mi><mi>a</mi></math> stays clickable.</p>
     <blockquote><p>Nested blockquote paragraph.</p></blockquote>
     <h2>Examples</h2>
@@ -25,6 +26,9 @@ describe("SA3 epub xhtml asset block recognition", () => {
     expect(blocks.map((b) => [b.kind, b.level, b.assetKind, b.text])).toEqual([
       ["heading", 1, undefined, "Command Pattern"],
       ["leaf", undefined, undefined, "Commands are reified calls."],
+      ["leaf", undefined, undefined, "See"],
+      ["leaf", undefined, "image", "![inline](figures/inline.png)"],
+      ["leaf", undefined, undefined, "now."],
       ["leaf", undefined, undefined, "Inline math"],
       ["leaf", undefined, "formula", "<math><mi>F</mi><mo>=</mo><mi>m</mi><mi>a</mi></math>"],
       ["leaf", undefined, undefined, "stays clickable."],

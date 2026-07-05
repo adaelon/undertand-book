@@ -60,10 +60,10 @@
 
 ### SA3 · epub-adapter:pre/table/img/math 忠实序列化(修四 bug)`[TS]`
 - **做**:`<pre>`→code(**不 norm**、保留文本换行);`<table>`→table(序列化成确定性表文本,如保留单元格分隔);`<img>`→image(从 `alt`+`src` 合成 `![alt](src)`,进 source 占 span);MathML/公式节点→formula(保留 MathML 或可逆 LaTeX 源标记,不 norm)。LEAF/walk 逻辑相应扩展。
-- **不做**:不做图片二进制提取(只留引用);不解析复杂嵌套表跨页;不把 MathML 转换错误静默吞掉。
+- **不做**:不做图片语义描述;不把图片二进制写入 `source.txt`;不解析复杂嵌套表跨页;不把 MathML 转换错误静默吞掉。
 - **判据**:`vitest` 覆盖四类(尤其 `<img>` 不再消失、`<pre>` 格式保留、MathML 不被 norm 拍平)+ 分区不变式绿。
 - **触达**:`[ADR-0029/0008/0024]`
-- **实测落点**:epub table 序列化目标格式(HTML 保留 / 转 md table / 纯文本);img 的 src 路径是否规范化;MathML 保留格式还是转 LaTeX。
+- **实测落点**:epub table 序列化目标格式(HTML 保留 / 转 md table / 纯文本);img 的 src 路径是否规范化;MathML 保留格式还是转 LaTeX。2026-07-06 回填:图片二进制作为 render asset bundle 写入 `assets/images/` + `asset_manifest.json`,不改变 LID/source citation truth。
 
 ### SA4 · segment:SourceBlock.kind 透传到 LidNode.kind `[TS]`
 - **做**:`segment()` 把 asset 块映射为对应 `NodeKind`(Code/Table/Image/Formula)而非统一 `paragraph`;heading/正文段不变。公式/代码/表/图固定为不可句切叶子。

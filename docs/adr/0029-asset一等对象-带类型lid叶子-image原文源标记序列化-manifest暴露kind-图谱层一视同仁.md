@@ -44,6 +44,10 @@
 - 行内公式策略定型:拆成真实 `NodeKind=Formula` LID,公式前后文本保留为相邻 paragraph LID。
 - `FormulaSemantics` 自然语言解释字段使用中文;闭集 enum、LID、数学符号保持原样。
 
+## 执行回填(2026-07-06)
+- 图片渲染资产定型:构建期可复制 Markdown/EPUB/data-uri 图片到 `.understand-book/<bookId>/assets/images/`,并写 `asset_manifest.json` 映射 image LID 到本地 URL。
+- `source.txt` 仍只保存源标记 `![alt](src)`,LID 仍是唯一 citation anchor;图片文件只作为阅读器渲染载荷,不成为第二套证据锚。
+
 ## 影响
 - **解优化项①**(`docs/参考对照-文档世界状态-优化登记.md` §C),关联已采纳的②冲突暴露 / ③证据路径可视化。
 - **改 schema**:`base-schema` `NodeKind` 增 Code/Table/Image/Formula、`read-tools::ManifestNode` 加 `kind`;公式语义剖面新增 schema/导出到 `packages/core` 与(切片1)`packages/web`。

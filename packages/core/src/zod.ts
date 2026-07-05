@@ -113,6 +113,27 @@ export const SourceManifestZ = z.object({
   attachments: z.array(OriginalPdfAttachmentManifestEntryZ),
 });
 
+export const ImageAssetManifestEntryZ = z.object({
+  kind: z.literal("image"),
+  lid: z.string().min(1),
+  alt: z.string(),
+  original_src: z.string().min(1),
+  source: z.enum(["markdown", "epub", "data_uri"]),
+  status: z.enum(["available", "missing", "external", "unsupported"]),
+  stored_path: z.string().min(1).nullable(),
+  url_path: z.string().min(1).nullable(),
+  mime: z.string().min(1).nullable(),
+  sha256: z.string().min(1).nullable(),
+  size_bytes: z.number().int().nonnegative().nullable(),
+  warning: z.string().min(1).nullable(),
+});
+
+export const AssetManifestZ = z.object({
+  version: z.literal("asset_manifest.v1"),
+  book_id: z.string().min(1),
+  images: z.array(ImageAssetManifestEntryZ),
+});
+
 export const MetadataSourceZ = z.enum(["front_matter", "paper_text", "user_supplied", "filename", "external_resolver"]);
 export const MetadataFieldZ = <T extends z.ZodTypeAny>(value: T) =>
   z.object({
