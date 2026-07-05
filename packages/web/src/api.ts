@@ -6,8 +6,38 @@ import type { ToolError } from "./generated/ToolError";
 import type { OuterOutcome } from "./generated/OuterOutcome";
 import type { AgentEffect } from "./generated/AgentEffect";
 import type { TraceStep } from "./generated/TraceStep";
+import type { ProfileManifest } from "./generated/ProfileManifest";
+import type { ProfileSummary } from "./generated/ProfileSummary";
+import type { ReaderLayoutAction } from "./generated/ReaderLayoutAction";
+import type { ReaderLayoutApplyOutcome } from "./generated/ReaderLayoutApplyOutcome";
+import type { ReaderLayoutProposal } from "./generated/ReaderLayoutProposal";
+import type { ReaderLayoutState } from "./generated/ReaderLayoutState";
+import type { PaperReadingGuide } from "./generated/PaperReadingGuide";
+import type { PaperReadingMode } from "./generated/PaperReadingMode";
+import type { PaperReadingStage } from "./generated/PaperReadingStage";
+import type { PaperMetadataProjection } from "./generated/PaperMetadataProjection";
+import type { PaperLexiconProjection } from "./generated/PaperLexiconProjection";
+import type { StructureProjection } from "./generated/StructureProjection";
 
-export type { Manifest, QueryResponse, OuterOutcome, AgentEffect, TraceStep };
+export type {
+  Manifest,
+  QueryResponse,
+  OuterOutcome,
+  AgentEffect,
+  TraceStep,
+  ProfileManifest,
+  ProfileSummary,
+  ReaderLayoutAction,
+  ReaderLayoutApplyOutcome,
+  ReaderLayoutProposal,
+  ReaderLayoutState,
+  PaperReadingGuide,
+  PaperReadingMode,
+  PaperReadingStage,
+  PaperMetadataProjection,
+  PaperLexiconProjection,
+  StructureProjection,
+};
 
 const BASE = "/api";
 
@@ -27,6 +57,8 @@ export interface ReaderState {
   viewport: Viewport;
   open_panels: string[];
   selection: string | null;
+  layout: ReaderLayoutState;
+  profile: ProfileSummary;
 }
 export interface HighlightEffect {
   ok: boolean;
@@ -50,6 +82,7 @@ export interface MemoryRecord {
   anchor: { lid?: string | null; concept?: string | null };
   content: string;
   range?: TextRange | null; // 高亮段内区间;note / 整段高亮为空 `[ADR-0031]`
+  source_session_id?: string | null;
 }
 export interface BookText {
   lid: string;
@@ -167,8 +200,15 @@ function qs(params: Record<string, string | undefined>): string {
 export const api = {
   // ── book.*(只读 GET)──
   manifest: () => http<Manifest>("GET", "/book/manifest"),
+  profileManifest: (profile_id?: "technical_learning" | "paper") =>
+    http<ProfileManifest>("GET", `/profile/manifest${qs({ profile_id })}`),
   text: (lid: string, end?: string) =>
     http<BookText>("GET", `/book/text${qs({ lid, end })}`),
+  structure: (at?: string) => http<StructureProjection>("GET", `/book/structure${qs({ at })}`),
+  paperReadingGuide: (mode?: PaperReadingMode, stage?: PaperReadingStage) =>
+    http<PaperReadingGuide>("GET", `/book/paper_reading_guide${qs({ mode, stage })}`),
+  paperMetadata: () => http<PaperMetadataProjection>("GET", "/book/paper_metadata"),
+  paperLexicon: () => http<PaperLexiconProjection>("GET", "/book/paper_lexicon"),
   formulaSemantics: (lid: string) =>
     http<FormulaSemantics>("GET", `/book/formula_semantics${qs({ lid })}`),
   openBook: (dir: string) => http<{ ok: boolean; book_id: string }>("POST", "/book/open", { dir }),
@@ -181,9 +221,14 @@ export const api = {
   goto: (lid: string) => http<ViewportEffect>("POST", "/reader/goto", { lid }),
   scroll: (delta: number) => http<ViewportEffect>("POST", "/reader/scroll", { delta }),
   // range?:段内自由高亮 {start,end}(UTF-16 偏移);缺省=整段高亮 `[ADR-0031]`。
-  highlight: (lid: string, range?: TextRange) =>
-    http<HighlightEffect>("POST", "/reader/highlight", { lid, range }),
+  highlight: (lid: string, range?: TextRange, sourceSessionId?: string) =>
+    http<HighlightEffect>("POST", "/reader/highlight", { lid, range, source_session_id: sourceSessionId }),
   note: (lid: string, text: string) => http<NoteEffect>("POST", "/reader/note", { lid, text }),
+  layoutApply: (body: {
+    actions?: ReaderLayoutAction[];
+    proposal_id?: string;
+    base_layout_rev?: number;
+  }) => http<ReaderLayoutApplyOutcome>("POST", "/reader/layout.apply", body),
   state: () => http<ReaderState>("POST", "/reader/state", {}),
 
   // ── memory.*(POST)──

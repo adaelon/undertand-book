@@ -181,6 +181,7 @@ fn is_api_url(url: &str) -> bool {
         || p.starts_with("/reader/")
         || p.starts_with("/memory/")
         || p.starts_with("/agent/")
+        || p.starts_with("/profile/")
 }
 
 /// 非 API 的 GET 请求服务 SPA 静态文件;找不到具体文件时 fallback 到 `index.html`。
@@ -295,6 +296,7 @@ mod tests {
     #[test]
     fn api_paths_are_not_static_fallback_candidates() {
         assert!(is_api_url("/api/book/manifest"));
+        assert!(is_api_url("/api/profile/manifest"));
         assert!(is_api_url("/reader/state"));
         assert!(!is_api_url("/assets/index.js"));
         assert!(!is_api_url("/chapter/one"));

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref } from "vue";
+import { computed, nextTick, onMounted, ref, watch } from "vue";
 import { api, ApiError } from "./api";
 import type {
   AgentChatSessionSummary,
@@ -9,6 +9,17 @@ import type {
   FormulaSemantics,
   MemoryRecord,
   OuterOutcome,
+  PaperLexiconProjection,
+  PaperMetadataProjection,
+  PaperReadingGuide,
+  PaperReadingMode,
+  PaperReadingStage,
+  ProfileManifest,
+  ProfileSummary,
+  ReaderLayoutAction,
+  ReaderLayoutProposal,
+  ReaderLayoutState,
+  StructureProjection,
   TraceStep,
   Viewport,
 } from "./api";
@@ -21,10 +32,28 @@ import RightRail from "./components/RightRail.vue";
 
 type NodeKind = import("./api").Manifest["tree"][number]["kind"];
 type ManifestNode = import("./api").Manifest["tree"][number];
+type UiSlotSpec = ProfileManifest["ui_slots"][number];
+type LayoutPresetSpec = ProfileManifest["layout_presets"][number];
+type PaperCodebookTerm = PaperReadingGuide["codebook"]["terms"][number];
 
 interface ScrollAnchor {
   lid: string;
   top: number;
+}
+
+interface PaperEvidenceRow {
+  id: string;
+  lid: string;
+  title: string;
+  summary: string;
+  evidence_lids: string[];
+}
+
+interface PaperMetadataRow {
+  id: string;
+  label: string;
+  value: string;
+  evidence_lids: string[];
 }
 
 export interface OutlineItem {
@@ -52,6 +81,7 @@ interface Segment {
 }
 const segments = ref<Segment[]>([]); // 视口内连续正文(LID 隐形)
 const annotations = ref<MemoryRecord[]>([]); // 当前书全部标注(客户端按 lid 过滤)
+const HIGHLIGHT_GROUP_PREFIX = "highlight-group:";
 const selectedLid = ref<string | null>(null);
 const currentReadingLid = ref<string | null>(null);
 const formulaDialog = ref<Segment | null>(null);
@@ -69,6 +99,18 @@ interface SourcePreview {
 const sourceFocus = ref<SourceFocus | null>(null);
 const sourcePreview = ref<SourcePreview | null>(null);
 const sourcePreviewBodyRef = ref<HTMLElement | null>(null);
+const profileSummary = ref<ProfileSummary | null>(null);
+const profileManifest = ref<ProfileManifest | null>(null);
+const readerLayout = ref<ReaderLayoutState | null>(null);
+const pendingLayoutProposal = ref<ReaderLayoutProposal | null>(null);
+const paperGuide = ref<PaperReadingGuide | null>(null);
+const paperMetadata = ref<PaperMetadataProjection | null>(null);
+const paperLexicon = ref<PaperLexiconProjection | null>(null);
+const structureProjection = ref<StructureProjection | null>(null);
+const paperProjectionLoading = ref(false);
+const paperProjectionError = ref<string | null>(null);
+const paperProjectionKey = ref("");
+let paperProjectionSeq = 0;
 
 // goto 输入 + 错误条
 const gotoInput = ref("");
@@ -145,7 +187,11 @@ function sortMemoryByBookOrder(a: MemoryRecord, b: MemoryRecord): number {
     || a.mem_id.localeCompare(b.mem_id);
 }
 const allNotes = computed(() => annotations.value.filter((r) => r.type === "note").sort(sortMemoryByBookOrder));
-const allHighlights = computed(() => annotations.value.filter((r) => r.type === "highlight").sort(sortMemoryByBookOrder));
+const allHighlights = computed(() =>
+  annotations.value
+    .filter((r) => r.type === "highlight" && isHighlightCardRepresentative(r))
+    .sort(sortMemoryByBookOrder),
+);
 const visibleNotes = computed(() => {
   const visible = segments.value.map((seg) => seg.lid);
   const order = new Map(visible.map((lid, idx) => [lid, idx]));
@@ -153,6 +199,227 @@ const visibleNotes = computed(() => {
     .filter((r) => r.type === "note" && !!r.anchor.lid && order.has(r.anchor.lid))
     .sort((a, b) => (order.get(a.anchor.lid ?? "") ?? 0) - (order.get(b.anchor.lid ?? "") ?? 0));
 });
+const slotSpecById = computed(() => new Map((profileManifest.value?.ui_slots ?? []).map((slot) => [slot.id, slot])));
+const presetById = computed(() => new Map((profileManifest.value?.layout_presets ?? []).map((preset) => [preset.id, preset])));
+const orderedOpenSlotIds = computed(() => {
+  const layout = readerLayout.value;
+  if (!layout) return [];
+  const ordered: string[] = [];
+  for (const region of ["left", "center", "right", "bottom", "overlay"]) {
+    for (const slotId of layout.slot_order[region] ?? []) {
+      if (layout.open_slots.includes(slotId) && !ordered.includes(slotId)) ordered.push(slotId);
+    }
+  }
+  for (const slotId of layout.open_slots) {
+    if (!ordered.includes(slotId)) ordered.push(slotId);
+  }
+  return ordered;
+});
+const visibleLayoutSlots = computed(() =>
+  orderedOpenSlotIds.value
+    .map((slotId) => slotSpecById.value.get(slotId))
+    .filter((slot): slot is UiSlotSpec => !!slot),
+);
+const closedLayoutSlots = computed(() =>
+  (profileManifest.value?.ui_slots ?? []).filter((slot) => !(readerLayout.value?.open_slots ?? []).includes(slot.id)),
+);
+const activeLayoutPreset = computed<LayoutPresetSpec | null>(() => {
+  const id = readerLayout.value?.active_preset;
+  return id ? presetById.value.get(id) ?? null : null;
+});
+function layoutRevNumber(value: number | bigint): number {
+  return Number(value);
+}
+function slotRegion(slotId: string): string {
+  const order = readerLayout.value?.slot_order ?? {};
+  for (const [region, slots] of Object.entries(order)) {
+    if (slots?.includes(slotId)) return region;
+  }
+  return slotSpecById.value.get(slotId)?.default_region ?? "center";
+}
+function slotSizeLabel(slotId: string): string {
+  const size = readerLayout.value?.panel_sizes[slotId];
+  if (!size) return "";
+  return `${size.value}${size.kind === "percent" ? "%" : size.kind}`;
+}
+const isPaperProfile = computed(() => profileSummary.value?.profile_id === "paper");
+const paperModeStage = computed<{ mode: PaperReadingMode; stage: PaperReadingStage }>(() => {
+  switch (readerLayout.value?.active_preset) {
+    case "paper_skim":
+      return { mode: "skim", stage: "passive" };
+    case "paper_deep_read":
+      return { mode: "deep", stage: "critical" };
+    case "paper_abstract":
+      return { mode: "close", stage: "active" };
+    default:
+      return { mode: "close", stage: "active" };
+  }
+});
+function resetPaperProjectionData() {
+  paperProjectionSeq += 1;
+  paperGuide.value = null;
+  paperMetadata.value = null;
+  paperLexicon.value = null;
+  structureProjection.value = null;
+  paperProjectionLoading.value = false;
+  paperProjectionError.value = null;
+  paperProjectionKey.value = "";
+}
+async function loadPaperProjectionData(force = false) {
+  if (!isPaperProfile.value) {
+    resetPaperProjectionData();
+    return;
+  }
+  const { mode, stage } = paperModeStage.value;
+  const key = `${profileSummary.value?.profile_id}:${profileSummary.value?.profile_version}:${readingAnchorLid.value ?? ""}:${mode}:${stage}`;
+  if (!force && paperProjectionKey.value === key) return;
+  const seq = ++paperProjectionSeq;
+  paperProjectionLoading.value = true;
+  paperProjectionError.value = null;
+  try {
+    const at = readingAnchorLid.value ?? undefined;
+    const [guide, metadata, lexicon, structure] = await Promise.all([
+      api.paperReadingGuide(mode, stage),
+      api.paperMetadata(),
+      api.paperLexicon(),
+      api.structure(at),
+    ]);
+    if (seq !== paperProjectionSeq) return;
+    paperGuide.value = guide;
+    paperMetadata.value = metadata;
+    paperLexicon.value = lexicon;
+    structureProjection.value = structure;
+    paperProjectionKey.value = key;
+  } catch (e) {
+    if (seq !== paperProjectionSeq) return;
+    paperProjectionError.value = errorMessage(e);
+  } finally {
+    if (seq === paperProjectionSeq) paperProjectionLoading.value = false;
+  }
+}
+watch(
+  () => [
+    profileSummary.value?.profile_id,
+    profileSummary.value?.profile_version,
+    readingAnchorLid.value,
+    readerLayout.value?.active_preset,
+  ] as const,
+  () => { void loadPaperProjectionData(); },
+);
+
+function readableKind(value: string): string {
+  return value.replace(/_/g, " ");
+}
+function evidenceLids(lids: readonly string[] | null | undefined, limit = 4): string[] {
+  return [...new Set((lids ?? []).filter((lid) => !!lid.trim()))].slice(0, limit);
+}
+function pushPaperMetadataRow(rows: PaperMetadataRow[], id: string, label: string, value: string | null | undefined, lids?: string[]) {
+  const trimmed = value?.trim();
+  if (!trimmed) return;
+  rows.push({ id, label, value: trimmed, evidence_lids: evidenceLids(lids, 3) });
+}
+const paperWarnings = computed(() => {
+  const warnings = [
+    ...(paperGuide.value?.warnings ?? []),
+    ...(paperGuide.value?.codebook.warnings ?? []),
+    paperGuide.value?.abstract_aid.warning,
+    paperMetadata.value?.warning,
+    paperLexicon.value?.warning,
+    structureProjection.value?.warning,
+  ].filter((warning): warning is string => !!warning);
+  return [...new Set(warnings)];
+});
+const paperMetadataRows = computed<PaperMetadataRow[]>(() => {
+  const rows: PaperMetadataRow[] = [];
+  const meta = paperMetadata.value;
+  const codebookMeta = paperGuide.value?.codebook.metadata;
+  pushPaperMetadataRow(rows, "title", "Title", meta?.title?.value ?? codebookMeta?.title, meta?.title?.evidence_lids ?? codebookMeta?.evidence_lids);
+  pushPaperMetadataRow(
+    rows,
+    "authors",
+    "Authors",
+    meta?.authors?.value.map((author) => author.name).join(", ") ?? codebookMeta?.authors.join(", "),
+    meta?.authors?.evidence_lids ?? codebookMeta?.evidence_lids,
+  );
+  pushPaperMetadataRow(rows, "venue", "Venue", meta?.venue?.value ?? codebookMeta?.venue, meta?.venue?.evidence_lids ?? codebookMeta?.evidence_lids);
+  pushPaperMetadataRow(rows, "year", "Year", meta?.year ? String(meta.year.value) : codebookMeta?.year ? String(codebookMeta.year) : null, meta?.year?.evidence_lids ?? codebookMeta?.evidence_lids);
+  pushPaperMetadataRow(rows, "doi", "DOI", meta?.identifiers?.doi?.value ?? codebookMeta?.doi, meta?.identifiers?.doi?.evidence_lids ?? codebookMeta?.evidence_lids);
+  pushPaperMetadataRow(rows, "arxiv", "arXiv", meta?.identifiers?.arxiv?.value ?? codebookMeta?.arxiv, meta?.identifiers?.arxiv?.evidence_lids ?? codebookMeta?.evidence_lids);
+  pushPaperMetadataRow(rows, "datasets", "Datasets", meta?.datasets?.value.join(", ") ?? codebookMeta?.datasets.join(", "), meta?.datasets?.evidence_lids ?? codebookMeta?.evidence_lids);
+  pushPaperMetadataRow(rows, "code", "Code", meta?.code_links?.value.join(", ") ?? codebookMeta?.code_links.join(", "), meta?.code_links?.evidence_lids ?? codebookMeta?.evidence_lids);
+  return rows.slice(0, 8);
+});
+const paperStructureRows = computed<PaperEvidenceRow[]>(() => {
+  const rows: PaperEvidenceRow[] = [];
+  const structure = structureProjection.value;
+  if (structure?.spine_unit) {
+    rows.push({
+      id: `spine:${structure.spine_unit.lid}`,
+      lid: structure.spine_unit.lid,
+      title: `Spine · ${readableKind(String(structure.spine_unit.role))}`,
+      summary: structure.spine_unit.summary.text,
+      evidence_lids: evidenceLids(structure.spine_unit.summary.evidence_lids.length ? structure.spine_unit.summary.evidence_lids : [structure.spine_unit.lid]),
+    });
+  }
+  for (const stop of structure?.key_stops ?? []) {
+    rows.push({
+      id: `key:${stop.id}`,
+      lid: stop.lid,
+      title: stop.title ?? readableKind(String(stop.type)),
+      summary: stop.reason.text,
+      evidence_lids: evidenceLids(stop.reason.evidence_lids.length ? stop.reason.evidence_lids : [stop.lid]),
+    });
+  }
+  for (const line of structure?.throughlines ?? []) {
+    rows.push({
+      id: `through:${line.id}`,
+      lid: line.lids[0] ?? readingAnchorLid.value ?? "",
+      title: line.name,
+      summary: line.summary.text,
+      evidence_lids: evidenceLids(line.summary.evidence_lids.length ? line.summary.evidence_lids : line.lids),
+    });
+  }
+  if (!rows.length && paperGuide.value?.codebook.available) {
+    for (const item of [...paperGuide.value.codebook.key_stops, ...paperGuide.value.codebook.throughlines]) {
+      rows.push({
+        id: item.id,
+        lid: item.lid,
+        title: item.title ?? item.id,
+        summary: item.summary,
+        evidence_lids: evidenceLids(item.evidence_lids.length ? item.evidence_lids : [item.lid]),
+      });
+    }
+  }
+  return rows.filter((row) => !!row.lid).slice(0, 7);
+});
+const paperQuestions = computed(() => (paperGuide.value?.questions ?? []).slice(0, 6));
+const paperCodebookTerms = computed<PaperCodebookTerm[]>(() => {
+  const guideTerms = paperGuide.value?.codebook.available ? paperGuide.value.codebook.terms : [];
+  const terms = guideTerms.length ? guideTerms : paperLexicon.value?.entries ?? [];
+  const seen = new Set<string>();
+  return terms.filter((term) => {
+    const key = term.term.toLocaleLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  }).slice(0, 8);
+});
+const paperAbstractExcerpts = computed(() => (paperGuide.value?.abstract_aid.excerpts ?? []).slice(0, 3));
+const paperAbstractTerms = computed(() => (paperGuide.value?.abstract_aid.key_terms ?? []).slice(0, 5));
+const paperAbstractChecks = computed(() => (paperGuide.value?.abstract_aid.comprehension_checks ?? []).slice(0, 4));
+const paperPinnedEvidence = computed(() =>
+  (readerLayout.value?.pinned_evidence ?? []).filter((pin) => pin.slot_id.startsWith("paper.")),
+);
+function termSubtitle(term: PaperCodebookTerm): string {
+  const parts = [readableKind(term.term_type)];
+  if (term.acronym_expansion) parts.push(term.acronym_expansion);
+  if (term.aliases.length) parts.push(term.aliases.join(", "));
+  if (term.chinese_gloss) parts.push(term.chinese_gloss);
+  return parts.join(" · ");
+}
+async function pinPaperEvidence(lid: string, reason: string | null = null) {
+  await applyLayoutActions([{ kind: "pin_evidence", slot_id: "paper.evidence", lid, reason }]);
+}
 
 // ── 标注:高亮(整段 / 段内 range)+ 笔记 ──
 // 整段高亮(range 缺省)→ <p> 背景;段内 range 高亮 → <mark>(见 renderSeg)`[ADR-0031]`。
@@ -163,8 +430,55 @@ function highlightsOf(lid: string): MemoryRecord[] {
   return annotations.value.filter((r) => r.anchor.lid === lid && r.type === "highlight");
 }
 
+function newHighlightGroupId(): string {
+  const id = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  return `${HIGHLIGHT_GROUP_PREFIX}${id}`;
+}
+
+function highlightGroupId(rec: MemoryRecord): string | null {
+  const id = rec.source_session_id?.trim();
+  return id?.startsWith(HIGHLIGHT_GROUP_PREFIX) ? id : null;
+}
+
+function highlightGroupMembers(rec: MemoryRecord): MemoryRecord[] {
+  const groupId = highlightGroupId(rec);
+  if (!groupId) return [rec];
+  return annotations.value
+    .filter((r) => r.type === "highlight" && highlightGroupId(r) === groupId)
+    .sort(sortMemoryByBookOrder);
+}
+
+function highlightGroupRepresentative(rec: MemoryRecord): MemoryRecord {
+  const members = highlightGroupMembers(rec);
+  const visibleOrder = new Map(segments.value.map((seg, idx) => [seg.lid, idx]));
+  const visibleMembers = members
+    .filter((m) => visibleOrder.has(m.anchor.lid ?? ""))
+    .sort((a, b) => (visibleOrder.get(a.anchor.lid ?? "") ?? Number.MAX_SAFE_INTEGER) - (visibleOrder.get(b.anchor.lid ?? "") ?? Number.MAX_SAFE_INTEGER));
+  return visibleMembers[0] ?? members[0] ?? rec;
+}
+
+function isHighlightCardRepresentative(rec: MemoryRecord): boolean {
+  return highlightGroupRepresentative(rec).mem_id === rec.mem_id;
+}
+
+function highlightCardsOf(lid: string): MemoryRecord[] {
+  return highlightsOf(lid).filter(isHighlightCardRepresentative);
+}
+
 function renderInlineText(s: string): string {
   return renderInlineMarkdown(s);
+}
+function inlineMathSource(symbol: string): string {
+  const trimmed = symbol.trim();
+  if (!trimmed) return "";
+  const dollar = /^\$(.*)\$$/.exec(trimmed);
+  if (dollar) return `$${dollar[1]}$`;
+  const paren = /^\\\((.*)\\\)$/.exec(trimmed);
+  if (paren) return `$${paren[1]}$`;
+  return `$${trimmed.replace(/\$/g, "\\$")}$`;
+}
+function renderFormulaSymbol(symbol: string): string {
+  return renderInlineMarkdown(inlineMathSource(symbol));
 }
 
 function escapeHtml(s: string): string {
@@ -173,6 +487,14 @@ function escapeHtml(s: string): string {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
+}
+
+function isRawAssetSegment(seg: { kind?: NodeKind }): boolean {
+  return seg.kind === "code" || seg.kind === "table" || seg.kind === "image";
+}
+
+function renderSegmentText(seg: { kind?: NodeKind }, text: string): string {
+  return isRawAssetSegment(seg) ? escapeHtml(text) : renderInlineText(text);
 }
 
 interface MarkdownHeadingDisplay {
@@ -370,10 +692,10 @@ function sourceFocusRange(text: string, focus: SourceFocus | null, lid: string):
 // 段正文渲染:把段内 range 高亮包成 <mark>(合并重叠区间),其余文本转义防 XSS `[ADR-0031]`。
 // chapter/section 的 Markdown 标题符号只在显示层剥掉,不改 book.text 原文与 LID 锚点。
 function renderSegWithFocus(seg: Segment, focus: SourceFocus | null, sourceSegments: Segment[], includeStoredHighlights: boolean): string {
-  const display = displayText(seg);
+  const display = isRawAssetSegment(seg) ? { text: seg.text, offset: 0 } : displayText(seg);
   const hls = includeStoredHighlights ? highlightsOf(seg.lid).filter((h) => h.range) : [];
   const focusRange = sourceFocusRangesIn(sourceSegments, focus).get(seg.lid) ?? sourceFocusRange(display.text, focus, seg.lid);
-  if (hls.length === 0 && !focusRange) return renderInlineText(display.text);
+  if (hls.length === 0 && !focusRange) return renderSegmentText(seg, display.text);
   const ranges = hls
     .map((h) => {
       const start = clampRange(h.range!.start - display.offset, display.text.length);
@@ -394,10 +716,10 @@ function renderSegWithFocus(seg: Segment, focus: SourceFocus | null, sourceSegme
   let cur = 0;
   for (const [s, e] of merged) {
     const cls = focusRange && s === focusRange[0] && e === focusRange[1] ? "hl-mark source-focus-mark" : "hl-mark";
-    html += renderInlineText(t.slice(cur, s)) + `<mark class="${cls}">${renderInlineText(t.slice(s, e))}</mark>`;
+    html += renderSegmentText(seg, t.slice(cur, s)) + `<mark class="${cls}">${renderSegmentText(seg, t.slice(s, e))}</mark>`;
     cur = e;
   }
-  return html + renderInlineText(t.slice(cur));
+  return html + renderSegmentText(seg, t.slice(cur));
 }
 function renderSeg(seg: Segment): string {
   return renderSegWithFocus(seg, sourceFocus.value, segments.value, true);
@@ -405,9 +727,54 @@ function renderSeg(seg: Segment): string {
 function renderSourcePreviewSeg(seg: Segment): string {
   return renderSegWithFocus(seg, sourcePreview.value?.focus ?? null, sourcePreview.value?.segments ?? [], false);
 }
+function isSourcePreviewFlowSegment(seg: Segment): boolean {
+  if (seg.kind === "paragraph" && markdownHeadingLevel(seg) !== null) return false;
+  return seg.kind === "paragraph" || seg.kind === "formula";
+}
+function sourcePreviewFlowHtml(flow: Segment[]): string {
+  const body = flow
+    .map((seg) => `<span class="source-preview-inline-${seg.kind === "formula" ? "formula" : "text"}">${renderSourcePreviewSeg(seg)}</span>`)
+    .join("");
+  return `<p class="source-preview-paragraph">${body}</p>`;
+}
+function sourcePreviewSingleHtml(seg: Segment): string {
+  const level = markdownHeadingLevel(seg);
+  if (level) return `<h${level} class="source-preview-heading">${renderSourcePreviewSeg(seg)}</h${level}>`;
+  if (seg.kind === "code") return `<pre class="source-preview-asset source-preview-code"><code>${renderSourcePreviewSeg(seg)}</code></pre>`;
+  if (seg.kind === "table") return `<pre class="source-preview-asset source-preview-table">${renderSourcePreviewSeg(seg)}</pre>`;
+  if (seg.kind === "image") {
+    const meta = imageMeta(seg.text);
+    return `<figure class="source-preview-asset source-preview-image"><strong>${escapeHtml(meta?.alt || "Image")}</strong><code>${escapeHtml(meta?.src || "source unavailable")}</code><pre>${renderSourcePreviewSeg(seg)}</pre></figure>`;
+  }
+  return `<p class="source-preview-paragraph">${renderSourcePreviewSeg(seg)}</p>`;
+}
+const sourcePreviewHtml = computed(() => {
+  const preview = sourcePreview.value;
+  if (!preview || preview.loading || preview.error) return "";
+  const parts: string[] = [];
+  let flow: Segment[] = [];
+  const flush = () => {
+    if (!flow.length) return;
+    parts.push(sourcePreviewFlowHtml(flow));
+    flow = [];
+  };
+  for (const seg of preview.segments) {
+    if (isSourcePreviewFlowSegment(seg)) {
+      const last = flow[flow.length - 1];
+      if (last && !joinsInlineFlow(last, seg)) flush();
+      flow.push(seg);
+    } else {
+      flush();
+      parts.push(sourcePreviewSingleHtml(seg));
+    }
+  }
+  flush();
+  return parts.join("\n");
+});
 function hlExcerpt(rec: MemoryRecord): string {
-  const c = rec.content.replace(/\s+/g, " ").trim();
-  if (!rec.range) return "(整段)";
+  const members = highlightGroupMembers(rec);
+  const c = members.map((m) => m.content).join(" ").replace(/\s+/g, " ").trim();
+  if (!rec.range && members.length === 1) return "(整段)";
   return c.length > 40 ? c.slice(0, 40) + "…" : c;
 }
 
@@ -415,7 +782,7 @@ function hlExcerpt(rec: MemoryRecord): string {
 async function deleteHighlight(rec: MemoryRecord) {
   try {
     banner.value = "";
-    await api.delete(rec.mem_id);
+    await Promise.all(highlightGroupMembers(rec).map((h) => api.delete(h.mem_id)));
     await refreshAnnotations();
   } catch (e) {
     fail(e);
@@ -560,9 +927,21 @@ async function loadWindow(vp: Viewport, mode: SegmentLoadMode = "replace") {
 }
 
 // 阅读区与服务端 reader 同步(agent 可能改了视口 → 重新拉 state 渲染)。
+async function ensureProfileManifest(summary: ProfileSummary) {
+  const current = profileManifest.value;
+  if (current?.profile_id === summary.profile_id && current.profile_version === summary.profile_version) return;
+  profileManifest.value = await api.profileManifest(summary.profile_id);
+}
+async function applyReaderState(st: Awaited<ReturnType<typeof api.state>>) {
+  profileSummary.value = st.profile;
+  readerLayout.value = st.layout;
+  await ensureProfileManifest(st.profile);
+}
 async function syncViewport() {
   const st = await api.state();
+  await applyReaderState(st);
   await loadWindow(st.viewport);
+  await loadPaperProjectionData();
 }
 
 // 章节标题:取 anchor 顶层段(LID 首段)原文首行作标签(读位感「第N章…」)。
@@ -583,7 +962,9 @@ async function init() {
     leafOrder.value = m.tree.filter((n) => n.children.length === 0).map((n) => n.lid);
     await loadOutlineTitles(m.tree);
     const st = await api.state();
+    await applyReaderState(st);
     await loadWindow(st.viewport);
+    await loadPaperProjectionData();
     await refreshAgentHistory();
   } catch (e) {
     fail(e);
@@ -626,6 +1007,7 @@ async function doGoto(lid: string, focusQuote?: string | null) {
     banner.value = "";
     sourceFocus.value = focusQuote === undefined ? null : { lid, quote: focusQuote };
     await loadWindow((await api.goto(lid)).viewport);
+    await loadPaperProjectionData();
     gotoInput.value = "";
   } catch (e) {
     fail(e);
@@ -655,7 +1037,9 @@ function errorMessage(e: unknown): string {
 async function centerSourcePreview() {
   await nextTick();
   const body = sourcePreviewBodyRef.value;
-  const target = body?.querySelector<HTMLElement>(".source-preview-segment.source-center");
+  const target =
+    body?.querySelector<HTMLElement>(".source-focus-mark") ??
+    body?.querySelector<HTMLElement>(".source-preview-text");
   target?.scrollIntoView({ block: "center" });
 }
 async function openSourcePreview(source: SourceFocus) {
@@ -806,7 +1190,8 @@ async function confirmHighlight() {
   if (!p) return;
   try {
     banner.value = "";
-    await Promise.all(p.ranges.map((r) => api.highlight(r.lid, { start: r.start, end: r.end })));
+    const groupId = p.ranges.length > 1 ? newHighlightGroupId() : undefined;
+    await Promise.all(p.ranges.map((r) => api.highlight(r.lid, { start: r.start, end: r.end }, groupId)));
     selectedLid.value = p.anchorLid;
     hlPopover.value = null;
     window.getSelection()?.removeAllRanges();
@@ -907,10 +1292,60 @@ function isGoto(e: AgentEffect): boolean {
 function effLabel(e: AgentEffect): string {
   if (e.kind === "Goto") return `📖 翻到 ${e.after_anchor}`;
   if (e.kind === "Highlight") return `🖍 高亮 ${e.lid}`;
-  return `📝 笔记 ${e.lid}`;
+  if (e.kind === "Note") return `📝 笔记 ${e.lid}`;
+  if (e.kind === "Layout") return `Layout rev ${e.effect.before.rev} -> ${e.effect.after.rev}`;
+  return `Layout proposal · ${e.proposal.actions.length} actions`;
 }
 function gotoBack(e: AgentEffect): string {
   return e.kind === "Goto" ? e.before_anchor : "";
+}
+function effectPrimaryLabel(e: AgentEffect): string {
+  if (e.kind === "LayoutProposal") return "Apply";
+  if (e.kind === "Highlight" || e.kind === "Note") return "Keep";
+  return "";
+}
+function effectSecondaryLabel(e: AgentEffect): string {
+  if (e.kind === "LayoutProposal") return "Dismiss";
+  if (e.kind === "Highlight" || e.kind === "Note") return "Undo";
+  return "";
+}
+function showEffectPrimary(e: AgentEffect): boolean {
+  return e.kind === "Highlight" || e.kind === "Note" || e.kind === "LayoutProposal";
+}
+function showEffectSecondary(e: AgentEffect): boolean {
+  return e.kind === "Highlight" || e.kind === "Note" || e.kind === "LayoutProposal";
+}
+async function applyLayoutActions(actions: ReaderLayoutAction[]) {
+  const outcome = await api.layoutApply({ actions });
+  if (outcome.kind === "proposal") {
+    pendingLayoutProposal.value = outcome.proposal;
+  } else {
+    pendingLayoutProposal.value = null;
+  }
+  const st = await api.state();
+  await applyReaderState(st);
+}
+async function applyPendingLayoutProposal(proposal = pendingLayoutProposal.value) {
+  if (!proposal) return;
+  const outcome = await api.layoutApply({
+    proposal_id: proposal.proposal_id,
+    base_layout_rev: layoutRevNumber(proposal.base_layout_rev),
+  });
+  pendingLayoutProposal.value = outcome.kind === "proposal" ? outcome.proposal : null;
+  const st = await api.state();
+  await applyReaderState(st);
+}
+function dismissPendingLayoutProposal() {
+  pendingLayoutProposal.value = null;
+}
+async function focusLayoutSlot(slotId: string) {
+  await applyLayoutActions([{ kind: "focus_slot", slot_id: slotId }]);
+}
+async function openLayoutSlot(slotId: string) {
+  await applyLayoutActions([{ kind: "open_slot", slot_id: slotId, region: null }]);
+}
+async function requestLayoutPreset(presetId: string) {
+  await applyLayoutActions([{ kind: "set_layout_preset", preset_id: presetId }]);
 }
 
 async function sendAgent() {
@@ -924,6 +1359,7 @@ async function sendAgent() {
   const turn: ChatTurn = { user: msg, outcome: null, pending: true, questionAnchorLid, questionQuote: draft ? { ...draft } : null };
   chat.value.push(turn);
   agentInput.value = "";
+  askDraft.value = null;
   sending.value = true;
   banner.value = "";
   try {
@@ -932,8 +1368,9 @@ async function sendAgent() {
       question_anchor_lid: questionAnchorLid,
       question_quote: draft ? { ...draft } : null,
     });
+    const proposalEffect = turn.outcome.effects.find((effect) => effect.kind === "LayoutProposal");
+    if (proposalEffect?.kind === "LayoutProposal") pendingLayoutProposal.value = proposalEffect.proposal;
     // agent 可能驱动了共享 reader 视口 / 落了 session 标注 → 同步阅读区。
-    askDraft.value = null;
     await syncViewport();
     await refreshAgentHistory();
   } catch (e) {
@@ -951,11 +1388,13 @@ async function undoEffect(ti: number, ei: number, e: AgentEffect) {
     if (e.kind === "Goto") {
       await api.goto(e.before_anchor);
       await syncViewport();
-    } else {
+    } else if (e.kind === "Highlight" || e.kind === "Note") {
       await api.delete(e.mem_id);
       await refreshAnnotations();
+    } else if (e.kind === "LayoutProposal") {
+      if (pendingLayoutProposal.value?.proposal_id === e.proposal.proposal_id) pendingLayoutProposal.value = null;
     }
-    handled.value[effKey(ti, ei)] = "已撤销";
+    handled.value[effKey(ti, ei)] = e.kind === "LayoutProposal" ? "已忽略" : "已撤销";
   } catch (err) {
     fail(err);
   }
@@ -963,9 +1402,14 @@ async function undoEffect(ti: number, ei: number, e: AgentEffect) {
 
 // 提议「保留」(Highlight/Note):同内容以 long_term 再 save → 同 mem_id upsert 升级层。
 async function keepEffect(ti: number, ei: number, e: AgentEffect) {
-  if (e.kind === "Goto") return;
+  if (e.kind === "Goto" || e.kind === "Layout") return;
   try {
     banner.value = "";
+    if (e.kind === "LayoutProposal") {
+      await applyPendingLayoutProposal(e.proposal);
+      handled.value[effKey(ti, ei)] = "已应用";
+      return;
+    }
     let content = e.kind === "Note" ? e.text : "";
     if (e.kind === "Highlight") {
       const recs = await api.recall({ layer: "session" });
@@ -1050,6 +1494,11 @@ async function openBook() {
     selectedLid.value = null;
     currentReadingLid.value = null;
     formulaDialog.value = null;
+    profileSummary.value = null;
+    profileManifest.value = null;
+    readerLayout.value = null;
+    pendingLayoutProposal.value = null;
+    resetPaperProjectionData();
     chapterTitle.value = "";
     gotoInput.value = "";
     outlineSearch.value = "";
@@ -1080,6 +1529,163 @@ async function openBook() {
     />
 
     <p v-if="banner" class="banner">{{ banner }}</p>
+
+    <section v-if="isPaperProfile && profileManifest && readerLayout" class="profile-shell" aria-label="Profile workspace">
+      <header class="profile-shell-head">
+        <div>
+          <p class="profile-kicker">{{ profileManifest.profile_id }}</p>
+          <h2>{{ activeLayoutPreset?.title ?? profileSummary?.profile_version ?? "Workspace" }}</h2>
+        </div>
+        <div class="profile-meta">
+          <span>{{ profileManifest.profile_version }}</span>
+          <span>rev {{ readerLayout.rev }}</span>
+        </div>
+      </header>
+
+      <div v-if="profileManifest.layout_presets.length" class="layout-presets" aria-label="Layout presets">
+        <button
+          v-for="preset in profileManifest.layout_presets"
+          :key="preset.id"
+          :class="{ active: readerLayout.active_preset === preset.id }"
+          :title="preset.description"
+          @click="requestLayoutPreset(preset.id)"
+        >
+          {{ preset.title }}
+        </button>
+      </div>
+
+      <div class="slot-shell">
+        <article
+          v-for="slot in visibleLayoutSlots"
+          :key="slot.id"
+          class="slot-card"
+          :class="{ focused: readerLayout.focused_slot === slot.id }"
+        >
+          <div class="slot-card-head">
+            <div>
+              <h3>{{ slot.title }}</h3>
+              <p>{{ slotRegion(slot.id) }}<span v-if="slotSizeLabel(slot.id)"> · {{ slotSizeLabel(slot.id) }}</span></p>
+            </div>
+            <button :disabled="readerLayout.focused_slot === slot.id" @click="focusLayoutSlot(slot.id)">Focus</button>
+          </div>
+          <p class="slot-projection">{{ slot.primary_projection ?? slot.kind }}</p>
+          <div v-if="slot.id.startsWith('paper.')" class="paper-slot-body">
+            <p v-if="paperProjectionLoading" class="slot-empty">Loading projections...</p>
+            <p v-else-if="paperProjectionError" class="slot-empty">{{ paperProjectionError }}</p>
+            <template v-else>
+              <p v-if="paperWarnings.length" class="slot-warning">{{ paperWarnings[0] }}</p>
+
+              <template v-if="slot.id === 'paper.structure_map'">
+                <ul v-if="paperStructureRows.length" class="paper-list">
+                  <li v-for="row in paperStructureRows" :key="row.id">
+                    <button class="paper-row-title" @click="doGoto(row.lid)">{{ row.title }}</button>
+                    <p>{{ row.summary }}</p>
+                    <div v-if="evidenceLids(row.evidence_lids).length" class="evidence-strip">
+                      <button v-for="lid in evidenceLids(row.evidence_lids)" :key="lid" @click="doGoto(lid)">{{ lid }}</button>
+                      <button class="ghost-mini" @click="pinPaperEvidence(evidenceLids(row.evidence_lids)[0], row.title)">Pin</button>
+                    </div>
+                  </li>
+                </ul>
+                <p v-else class="slot-empty">{{ structureProjection?.warning ?? "Structure unavailable" }}</p>
+              </template>
+
+              <template v-else-if="slot.id === 'paper.codebook'">
+                <ul v-if="paperCodebookTerms.length" class="paper-list">
+                  <li v-for="term in paperCodebookTerms" :key="term.term">
+                    <strong>{{ term.term }}</strong>
+                    <p>{{ termSubtitle(term) }}</p>
+                    <div v-if="evidenceLids(term.evidence_lids).length" class="evidence-strip">
+                      <button v-for="lid in evidenceLids(term.evidence_lids)" :key="lid" @click="doGoto(lid)">{{ lid }}</button>
+                      <button class="ghost-mini" @click="pinPaperEvidence(evidenceLids(term.evidence_lids)[0], term.term)">Pin</button>
+                    </div>
+                  </li>
+                </ul>
+                <p v-else class="slot-empty">{{ paperLexicon?.warning ?? "Codebook unavailable" }}</p>
+              </template>
+
+              <template v-else-if="slot.id === 'paper.abstract_aid'">
+                <div v-if="paperAbstractExcerpts.length || paperAbstractTerms.length || paperAbstractChecks.length" class="paper-stack">
+                  <div v-for="excerpt in paperAbstractExcerpts" :key="excerpt.lid" class="paper-block">
+                    <button class="paper-row-title" @click="doGoto(excerpt.lid)">{{ excerpt.lid }}</button>
+                    <p>{{ excerpt.text }}</p>
+                    <div v-if="evidenceLids(excerpt.evidence_lids).length" class="evidence-strip">
+                      <button v-for="lid in evidenceLids(excerpt.evidence_lids)" :key="lid" @click="doGoto(lid)">{{ lid }}</button>
+                    </div>
+                  </div>
+                  <ul v-if="paperAbstractTerms.length" class="paper-chip-list">
+                    <li v-for="term in paperAbstractTerms" :key="term.term">{{ term.term }}</li>
+                  </ul>
+                  <ul v-if="paperAbstractChecks.length" class="paper-list compact">
+                    <li v-for="check in paperAbstractChecks" :key="check.id">
+                      <strong>{{ check.prompt }}</strong>
+                      <div v-if="evidenceLids(check.evidence_lids).length" class="evidence-strip">
+                        <button v-for="lid in evidenceLids(check.evidence_lids)" :key="lid" @click="doGoto(lid)">{{ lid }}</button>
+                      </div>
+                    </li>
+                  </ul>
+                </div>
+                <p v-else class="slot-empty">{{ paperGuide?.abstract_aid.warning ?? "Abstract aid unavailable" }}</p>
+              </template>
+
+              <template v-else-if="slot.id === 'paper.ten_questions'">
+                <ul v-if="paperQuestions.length" class="paper-list">
+                  <li v-for="question in paperQuestions" :key="question.id">
+                    <strong>{{ question.id }} · {{ question.question }}</strong>
+                    <p>{{ question.focus }}</p>
+                    <div v-if="evidenceLids(question.evidence_lids).length" class="evidence-strip">
+                      <button v-for="lid in evidenceLids(question.evidence_lids)" :key="lid" @click="doGoto(lid)">{{ lid }}</button>
+                      <button class="ghost-mini" @click="pinPaperEvidence(evidenceLids(question.evidence_lids)[0], question.id)">Pin</button>
+                    </div>
+                  </li>
+                </ul>
+                <p v-else class="slot-empty">{{ paperWarnings[0] ?? "Questions unavailable" }}</p>
+              </template>
+
+              <template v-else-if="slot.id === 'paper.evidence'">
+                <ul v-if="paperPinnedEvidence.length" class="paper-list compact">
+                  <li v-for="pin in paperPinnedEvidence" :key="`${pin.slot_id}:${pin.lid}`">
+                    <button class="paper-row-title" @click="doGoto(pin.lid)">{{ pin.lid }}</button>
+                    <p>{{ pin.reason ?? slotSpecById.get(pin.slot_id)?.title ?? pin.slot_id }}</p>
+                  </li>
+                </ul>
+                <p v-else class="slot-empty">No pinned evidence</p>
+              </template>
+
+              <template v-else-if="slot.id === 'paper.agent'">
+                <div class="paper-facts">
+                  <span>{{ paperModeStage.mode }}</span>
+                  <span>{{ paperModeStage.stage }}</span>
+                  <span v-if="paperGuide?.available">guide ready</span>
+                </div>
+                <ul v-if="paperMetadataRows.length" class="paper-list compact">
+                  <li v-for="row in paperMetadataRows.slice(0, 4)" :key="row.id">
+                    <strong>{{ row.label }}</strong>
+                    <p>{{ row.value }}</p>
+                    <div v-if="row.evidence_lids.length" class="evidence-strip">
+                      <button v-for="lid in row.evidence_lids" :key="lid" @click="doGoto(lid)">{{ lid }}</button>
+                    </div>
+                  </li>
+                </ul>
+              </template>
+
+              <p v-else class="slot-empty">{{ slot.primary_projection ?? "Paper projection unavailable" }}</p>
+            </template>
+          </div>
+        </article>
+
+        <div v-if="closedLayoutSlots.length" class="closed-slots">
+          <button v-for="slot in closedLayoutSlots" :key="slot.id" @click="openLayoutSlot(slot.id)">
+            + {{ slot.title }}
+          </button>
+        </div>
+      </div>
+
+      <div v-if="pendingLayoutProposal" class="layout-proposal">
+        <span>{{ pendingLayoutProposal.summary }}</span>
+        <button @click="applyPendingLayoutProposal()">Apply</button>
+        <button class="ghost" @click="dismissPendingLayoutProposal">Dismiss</button>
+      </div>
+    </section>
 
     <div class="workspace-grid" :class="{ 'left-collapsed': !leftRailOpen }" :style="workspaceStyle">
       <LeftRail
@@ -1114,6 +1720,7 @@ async function openBook() {
         :is-asset="isAsset"
         :is-highlighted="isHighlighted"
         :highlights-of="highlightsOf"
+        :highlight-cards-of="highlightCardsOf"
         :visible-notes="visibleNotes"
         :hl-excerpt="hlExcerpt"
         :image-meta="imageMeta"
@@ -1156,6 +1763,10 @@ async function openBook() {
         :eff-label="effLabel"
         :eff-state="effState"
         :is-goto="isGoto"
+        :show-effect-primary="showEffectPrimary"
+        :show-effect-secondary="showEffectSecondary"
+        :effect-primary-label="effectPrimaryLabel"
+        :effect-secondary-label="effectSecondaryLabel"
         :goto-back="gotoBack"
         :ask-draft="askDraft"
         @send-agent="sendAgent"
@@ -1204,7 +1815,10 @@ async function openBook() {
               <h4>参数</h4>
               <dl>
                 <template v-for="p in formulaDialog.formula.parameters" :key="p.symbol">
-                  <dt>{{ p.symbol }}<span v-if="p.label"> · {{ p.label }}</span></dt>
+                  <dt>
+                    <span class="formula-param-symbol" v-html="renderFormulaSymbol(p.symbol)"></span>
+                    <span v-if="p.label" class="formula-param-label"> · {{ p.label }}</span>
+                  </dt>
                   <dd>
                     {{ p.meaning }}
                     <span v-if="p.unit"> · 单位: {{ p.unit }}</span>
@@ -1231,12 +1845,12 @@ async function openBook() {
         class="source-preview-dialog"
         role="dialog"
         aria-modal="true"
-        :aria-labelledby="`source-preview-title-${sourcePreview.focus.lid}`"
+        aria-labelledby="source-preview-title"
       >
         <header class="source-preview-head">
           <div>
             <p class="formula-dialog-kicker">Source preview</p>
-            <h3 :id="`source-preview-title-${sourcePreview.focus.lid}`">{{ sourcePreview.focus.lid }}</h3>
+            <h3 id="source-preview-title">Quote source</h3>
           </div>
           <div class="source-preview-actions">
             <button title="在主阅读区打开" @click="openSourceInReader">Open in reader</button>
@@ -1246,21 +1860,7 @@ async function openBook() {
         <div ref="sourcePreviewBodyRef" class="source-preview-body">
           <p v-if="sourcePreview.loading" class="source-preview-state">Loading source…</p>
           <p v-else-if="sourcePreview.error" class="source-preview-state error">{{ sourcePreview.error }}</p>
-          <template v-else>
-            <article
-              v-for="seg in sourcePreview.segments"
-              :key="seg.lid"
-              class="source-preview-segment"
-              :class="{ 'source-center': seg.lid === sourcePreview.focus.lid }"
-              :data-lid="seg.lid"
-            >
-              <div class="source-preview-meta">
-                <code>{{ seg.lid }}</code>
-                <span>{{ seg.kind }}</span>
-              </div>
-              <div class="source-preview-text md" v-html="renderSourcePreviewSeg(seg)"></div>
-            </article>
-          </template>
+          <div v-else class="source-preview-text md" v-html="sourcePreviewHtml"></div>
         </div>
       </section>
     </div>
@@ -1521,7 +2121,17 @@ async function openBook() {
   margin: 0;
 }
 .formula-dialog-section dt {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.1rem;
   font-weight: 650;
+}
+.formula-param-symbol {
+  min-width: 0;
+}
+.formula-param-label {
+  color: var(--ink);
 }
 .formula-dialog-section dd {
   margin: 0 0 0.55rem 1rem;
@@ -1569,7 +2179,6 @@ async function openBook() {
 }
 .source-preview-head h3 {
   margin: 0;
-  font-family: var(--mono);
   font-size: 1rem;
 }
 .source-preview-actions {
@@ -1589,9 +2198,7 @@ async function openBook() {
   min-height: 0;
   overflow-y: auto;
   scroll-padding: 30vh 0;
-  padding: 1.1rem;
-  display: grid;
-  gap: 0.85rem;
+  padding: 1.2rem;
 }
 .source-preview-state {
   margin: 0;
@@ -1604,35 +2211,66 @@ async function openBook() {
 .source-preview-state.error {
   color: #8f1f1f;
 }
-.source-preview-segment {
-  border: 1px solid var(--hairline-soft);
-  border-radius: 8px;
-  background: var(--surface);
-  padding: 0.85rem;
-}
-.source-preview-segment.source-center {
-  border-color: rgba(37, 99, 235, 0.42);
-  background: #f8fbff;
-}
-.source-preview-meta {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 1rem;
-  margin-bottom: 0.55rem;
-  color: var(--steel);
-  font-size: 0.74rem;
-  font-weight: 650;
-  text-transform: uppercase;
-}
-.source-preview-meta code {
-  font-family: var(--mono);
-  color: var(--ink);
-  text-transform: none;
-}
 .source-preview-text {
+  max-width: 46rem;
+  margin: 0 auto;
   line-height: 1.75;
   color: var(--ink);
+}
+.source-preview-text > *:first-child {
+  margin-top: 0;
+}
+.source-preview-text > *:last-child {
+  margin-bottom: 0;
+}
+.source-preview-paragraph {
+  margin: 0 0 1rem;
+}
+.source-preview-heading {
+  margin: 1.2rem 0 0.65rem;
+  color: var(--ink);
+  line-height: 1.3;
+}
+.source-preview-inline-formula {
+  display: inline;
+}
+.source-preview-asset {
+  margin: 1rem 0;
+  border: 1px solid var(--hairline-soft);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  padding: 0.85rem;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.source-preview-code {
+  background:
+    linear-gradient(90deg, rgba(204, 120, 92, 0.08), rgba(204, 120, 92, 0) 3.5rem),
+    var(--surface-code);
+  color: var(--code-ink);
+  border-color: var(--code-border);
+  font-family: var(--mono);
+  font-size: 0.88rem;
+  line-height: 1.55;
+  white-space: pre;
+  overflow-wrap: normal;
+  tab-size: 2;
+}
+.source-preview-code code {
+  background: transparent;
+  color: inherit;
+  padding: 0;
+}
+.source-preview-image {
+  display: grid;
+  gap: 0.45rem;
+  white-space: normal;
+}
+.source-preview-image code,
+.source-preview-image pre {
+  margin: 0;
+  overflow-wrap: anywhere;
 }
 
 /* 笔记编辑器模态 */

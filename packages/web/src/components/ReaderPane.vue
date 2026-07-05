@@ -21,6 +21,7 @@ const props = defineProps<{
   isAsset: (seg: Segment) => boolean;
   isHighlighted: (lid: string) => boolean;
   highlightsOf: (lid: string) => MemoryRecord[];
+  highlightCardsOf: (lid: string) => MemoryRecord[];
   visibleNotes: MemoryRecord[];
   hlExcerpt: (rec: MemoryRecord) => string;
   imageMeta: (text: string) => { alt: string; src: string } | null;
@@ -366,7 +367,7 @@ watch(
               <button @click="emit('highlight-block', seg.lid)">Highlight block</button>
               <button @click="emit('note-block', seg.lid)">Note</button>
             </div>
-            <div v-for="h in props.highlightsOf(seg.lid)" :key="h.mem_id" class="hl-card">
+            <div v-for="h in props.highlightCardsOf(seg.lid)" :key="h.mem_id" class="hl-card">
               <span class="hl-ex">{{ props.hlExcerpt(h) }}</span>
               <span class="hl-actions">
                 <button class="note-btn" title="改范围(移除后重选)" @click="emit('modify-highlight', h)">Edit</button>
@@ -457,7 +458,7 @@ watch(
         </section>
 
         <template v-if="item.type === 'single'">
-          <div v-for="h in props.highlightsOf(item.segment.lid)" :key="h.mem_id" class="hl-card">
+          <div v-for="h in props.highlightCardsOf(item.segment.lid)" :key="h.mem_id" class="hl-card">
             <span class="hl-ex">{{ props.hlExcerpt(h) }}</span>
             <span class="hl-actions">
               <button class="note-btn" title="改范围(移除后重选)" @click="emit('modify-highlight', h)">Edit</button>

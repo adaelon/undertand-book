@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, nextTick, ref, watch } from "vue";
 import type { AgentEffect, FormulaSemantics, MemoryRecord, OuterOutcome, TraceStep } from "../api";
+import { rangeToMarkdown } from "../selection";
 
 type ContextTab = "agent" | "trace" | "formula" | "notes";
 
@@ -46,6 +47,10 @@ const props = defineProps<{
   effLabel: (effect: AgentEffect) => string;
   effState: (turnIndex: number, effectIndex: number) => string | undefined;
   isGoto: (effect: AgentEffect) => boolean;
+  showEffectPrimary: (effect: AgentEffect) => boolean;
+  showEffectSecondary: (effect: AgentEffect) => boolean;
+  effectPrimaryLabel: (effect: AgentEffect) => string;
+  effectSecondaryLabel: (effect: AgentEffect) => string;
   gotoBack: (effect: AgentEffect) => string;
   askDraft: AskDraft | null;
 }>();
@@ -67,6 +72,7 @@ const emit = defineEmits<{
 const activeTab = ref<ContextTab>("agent");
 const historyOpen = ref(false);
 const notesExpanded = ref(false);
+const transcriptRef = ref<HTMLElement | null>(null);
 const tabs: { id: ContextTab; label: string }[] = [
   { id: "agent", label: "Agent" },
   { id: "trace", label: "Trace" },
@@ -78,19 +84,28 @@ watch(() => props.askDraft, (draft) => {
   if (draft) activeTab.value = "agent";
 });
 
+async function scrollTranscriptToBottom() {
+  await nextTick();
+  const el = transcriptRef.value;
+  if (!el) return;
+  el.scrollTop = el.scrollHeight;
+}
+watch(
+  () => {
+    const last = props.chat[props.chat.length - 1];
+    return [
+      props.chat.length,
+      last?.pending ? 1 : 0,
+      last?.outcome?.answer?.length ?? 0,
+      props.askDraft ? 1 : 0,
+    ].join(":");
+  },
+  () => { void scrollTranscriptToBottom(); },
+  { flush: "post" },
+);
+
 const answerSelection = ref<{ x: number; y: number; text: string; turn: ChatTurn } | null>(null);
 
-function markdownTextFromRange(range: Range): string {
-  const fragment = range.cloneContents();
-  fragment.querySelectorAll<HTMLElement>(".katex").forEach((katexEl) => {
-    const tex = katexEl.querySelector('annotation[encoding="application/x-tex"]')?.textContent?.trim();
-    if (!tex) return;
-    const display = !!katexEl.closest(".katex-display");
-    const markdown = display ? `$$${tex}$$` : `$${tex}$`;
-    katexEl.replaceWith(document.createTextNode(markdown));
-  });
-  return (fragment.textContent ?? "").replace(/\s+/g, " ").trim();
-}
 function onAnswerMouseUp(turn: ChatTurn) {
   const sel = window.getSelection();
   if (!sel || sel.rangeCount === 0 || sel.isCollapsed) {
@@ -105,13 +120,15 @@ function onAnswerMouseUp(turn: ChatTurn) {
     answerSelection.value = null;
     return;
   }
-  const text = markdownTextFromRange(range);
+  const text = rangeToMarkdown(range);
   if (!text) {
     answerSelection.value = null;
     return;
   }
   const rect = range.getBoundingClientRect();
-  answerSelection.value = { x: rect.left + rect.width / 2, y: Math.max(40, rect.top), text, turn };
+  const x = Math.min(Math.max(rect.left + rect.width / 2, 54), window.innerWidth - 54);
+  const y = Math.max(46, rect.top);
+  answerSelection.value = { x, y, text, turn };
 }
 function saveAnswerSelection(turn: ChatTurn) {
   const selected = answerSelection.value;
@@ -135,8 +152,9 @@ function leadingQuote(content: string): string | null {
   const quote = quoteLines.join(" ").replace(/\s+/g, " ").trim();
   return quote || null;
 }
-function notePreview(note: MemoryRecord): string {
-  return compactText(note.content.replace(/^>.*(\n>.*)*\n*/m, ""), 180);
+function notePreviewMarkdown(note: MemoryRecord): string {
+  const body = note.content.replace(/^>.*(\n>.*)*\n*/m, "").trim();
+  return body || note.content.trim();
 }
 function noteSourceLabel(note: MemoryRecord): string {
   const quote = leadingQuote(note.content);
@@ -154,9 +172,15 @@ function turnAnchor(turn: ChatSessionTurnSummary): string | null {
   return turn.question_anchor_lid ?? turn.question_quote?.lid ?? null;
 }
 function openHistorySession(sessionId: string) {
-  if (!sessionId) return;
+  if (!sessionId || sessionId === props.activeChatSessionId) return;
   emit("select-chat", sessionId);
   historyOpen.value = false;
+}
+function openHistorySessionFromCard(sessionId: string, event: MouseEvent | KeyboardEvent) {
+  const target = event.target instanceof HTMLElement ? event.target : null;
+  if (target?.closest("button,a,input,textarea,select")) return;
+  if (event instanceof KeyboardEvent) event.preventDefault();
+  openHistorySession(sessionId);
 }
 function gotoHistoryAnchor(lid: string | null) {
   if (!lid) return;
@@ -198,7 +222,7 @@ function deleteHistorySession(sessionId: string) {
         </div>
       </div>
 
-      <div class="transcript">
+      <div ref="transcriptRef" class="transcript">
         <div v-for="(turn, ti) in props.chat" :key="ti" class="turn">
           <div v-if="turn.questionQuote" class="turn-quote">
             <div class="turn-quote-head">
@@ -226,8 +250,12 @@ function deleteHistorySession(sessionId: string) {
                 <template v-else>
                   <button v-if="props.isGoto(eff)" @click="emit('undo-effect', ti, ei, eff)">Back {{ props.gotoBack(eff) }}</button>
                   <template v-else>
-                    <button @click="emit('keep-effect', ti, ei, eff)">Keep</button>
-                    <button class="undo" @click="emit('undo-effect', ti, ei, eff)">Undo</button>
+                    <button v-if="props.showEffectPrimary(eff)" @click="emit('keep-effect', ti, ei, eff)">
+                      {{ props.effectPrimaryLabel(eff) }}
+                    </button>
+                    <button v-if="props.showEffectSecondary(eff)" class="undo" @click="emit('undo-effect', ti, ei, eff)">
+                      {{ props.effectSecondaryLabel(eff) }}
+                    </button>
                   </template>
                 </template>
               </div>
@@ -343,9 +371,8 @@ function deleteHistorySession(sessionId: string) {
             </button>
             <code v-else>No source</code>
             <em>Toggle</em>
-            <span class="note-summary-text">{{ notePreview(note) }}</span>
+            <div class="note-preview md" v-html="props.renderMarkdown(notePreviewMarkdown(note))"></div>
           </summary>
-          <p class="note-preview">{{ notePreview(note) }}</p>
           <div class="md" v-html="props.renderMarkdown(note.content)"></div>
         </details>
         <article v-for="hl in props.contextHighlights" :key="hl.mem_id" class="memory-card highlight-card">
@@ -355,71 +382,80 @@ function deleteHistorySession(sessionId: string) {
       </div>
       <p v-else class="empty panel-empty">No notes or highlights yet.</p>
     </section>
-    <div
-      v-if="answerSelection"
-      class="answer-popover"
-      :style="{ left: answerSelection.x + 'px', top: answerSelection.y - 40 + 'px' }"
-    >
-      <button @mousedown.prevent="saveAnswerSelection(answerSelection.turn)">Note</button>
-    </div>
+    <Teleport to="body">
+      <div
+        v-if="answerSelection"
+        class="answer-popover"
+        :style="{ left: answerSelection.x + 'px', top: answerSelection.y - 40 + 'px' }"
+      >
+        <button @mousedown.prevent="saveAnswerSelection(answerSelection.turn)">Note</button>
+      </div>
+    </Teleport>
 
-    <div v-if="historyOpen" class="history-backdrop" @click.self="historyOpen = false">
-      <section class="history-dialog" role="dialog" aria-modal="true" aria-labelledby="history-title">
-        <header class="history-dialog-head">
-          <div>
-            <p class="rail-kicker">Agent history</p>
-            <h3 id="history-title">Chat history</h3>
-          </div>
-          <button class="history-close" title="Close history" aria-label="Close history" @click="historyOpen = false">×</button>
-        </header>
-        <div class="history-list">
-          <article
-            v-for="session in props.chatSessions"
-            :key="session.id"
-            class="history-card"
-            :class="{ active: session.id === props.activeChatSessionId }"
-          >
-            <div class="history-card-head">
-              <div>
-                <h4>{{ compactText(session.title, 72) }}</h4>
-                <p>{{ session.turn_count }} questions</p>
-              </div>
-              <span v-if="session.id === props.activeChatSessionId" class="active-badge">Active</span>
+    <Teleport to="body">
+      <div v-if="historyOpen" class="history-backdrop" @click.self="historyOpen = false">
+        <section class="history-dialog" role="dialog" aria-modal="true" aria-labelledby="history-title">
+          <header class="history-dialog-head">
+            <div>
+              <p class="rail-kicker">Agent history</p>
+              <h3 id="history-title">Chat history</h3>
             </div>
-
-            <ol v-if="session.turns.length" class="history-turns">
-              <li v-for="(turn, i) in session.turns" :key="`${session.id}:${i}`">
-                <p class="history-question">{{ compactText(turn.user, 180) }}</p>
-                <div class="history-anchor-row">
-                  <span>Anchor</span>
-                  <code>{{ turnAnchor(turn) ?? "None" }}</code>
-                  <button
-                    v-if="turnAnchor(turn)"
-                    class="history-goto"
-                    @click="gotoHistoryAnchor(turnAnchor(turn))"
-                  >
-                    Goto
-                  </button>
+            <button class="history-close" title="Close history" aria-label="Close history" @click="historyOpen = false">×</button>
+          </header>
+          <div class="history-list">
+            <article
+              v-for="session in props.chatSessions"
+              :key="session.id"
+              class="history-card"
+              :class="{ active: session.id === props.activeChatSessionId }"
+              :role="session.id === props.activeChatSessionId ? undefined : 'button'"
+              :tabindex="session.id === props.activeChatSessionId ? -1 : 0"
+              @click="openHistorySessionFromCard(session.id, $event)"
+              @keydown.enter="openHistorySessionFromCard(session.id, $event)"
+              @keydown.space="openHistorySessionFromCard(session.id, $event)"
+            >
+              <div class="history-card-head">
+                <div>
+                  <h4>{{ compactText(session.title, 72) }}</h4>
+                  <p>{{ session.turn_count }} questions</p>
                 </div>
-              </li>
-            </ol>
-            <p v-else class="empty history-empty">No questions yet.</p>
+                <span v-if="session.id === props.activeChatSessionId" class="active-badge">Active</span>
+              </div>
 
-            <div class="history-card-actions">
-              <button
-                class="history-open"
-                :disabled="session.id === props.activeChatSessionId"
-                @click="openHistorySession(session.id)"
-              >
-                Open chat
-              </button>
-              <button class="history-delete" @click="deleteHistorySession(session.id)">Delete</button>
-            </div>
-          </article>
-          <p v-if="props.chatSessions.length === 0" class="empty history-empty">No saved chat history.</p>
-        </div>
-      </section>
-    </div>
+              <ol v-if="session.turns.length" class="history-turns">
+                <li v-for="(turn, i) in session.turns" :key="`${session.id}:${i}`">
+                  <p class="history-question">{{ compactText(turn.user, 180) }}</p>
+                  <div class="history-anchor-row">
+                    <span>Anchor</span>
+                    <code>{{ turnAnchor(turn) ?? "None" }}</code>
+                    <button
+                      v-if="turnAnchor(turn)"
+                      class="history-goto"
+                      @click.stop="gotoHistoryAnchor(turnAnchor(turn))"
+                    >
+                      Goto
+                    </button>
+                  </div>
+                </li>
+              </ol>
+              <p v-else class="empty history-empty">No questions yet.</p>
+
+              <div class="history-card-actions">
+                <button
+                  class="history-open"
+                  :disabled="session.id === props.activeChatSessionId"
+                  @click.stop="openHistorySession(session.id)"
+                >
+                  Open chat
+                </button>
+                <button class="history-delete" @click.stop="deleteHistorySession(session.id)">Delete</button>
+              </div>
+            </article>
+            <p v-if="props.chatSessions.length === 0" class="empty history-empty">No saved chat history.</p>
+          </div>
+        </section>
+      </div>
+    </Teleport>
 
   </aside>
 </template>
@@ -554,13 +590,14 @@ function deleteHistorySession(sessionId: string) {
 .history-backdrop {
   position: fixed;
   inset: 0;
-  z-index: 90;
+  z-index: 1000;
   display: grid;
   place-items: center;
   padding: 1.5rem;
   background: rgba(10, 10, 10, 0.28);
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
+  pointer-events: auto;
 }
 .history-dialog {
   width: min(760px, calc(100vw - 2rem));
@@ -572,6 +609,7 @@ function deleteHistorySession(sessionId: string) {
   border-radius: 12px;
   background: rgba(255, 255, 255, 0.96);
   box-shadow: none;
+  pointer-events: auto;
 }
 .history-dialog-head {
   flex: 0 0 auto;
@@ -612,10 +650,19 @@ function deleteHistorySession(sessionId: string) {
   border-radius: 12px;
   background: var(--canvas);
   padding: 0.9rem;
+  cursor: pointer;
 }
 .history-card.active {
   border-color: var(--brand-green);
   box-shadow: inset 0 0 0 1px rgba(0, 212, 164, 0.18);
+  cursor: default;
+}
+.history-card:not(.active):hover {
+  border-color: var(--ink);
+}
+.history-card:focus-visible {
+  outline: 2px solid var(--brand-green);
+  outline-offset: 2px;
 }
 .history-card-head {
   display: flex;
@@ -842,7 +889,7 @@ function deleteHistorySession(sessionId: string) {
 .answer-popover {
   position: fixed;
   transform: translateX(-50%);
-  z-index: 70;
+  z-index: 1100;
   display: flex;
   gap: 0.25rem;
   padding: 0.25rem;
@@ -947,13 +994,39 @@ function deleteHistorySession(sessionId: string) {
   display: none;
 }
 .note-preview {
+  grid-column: 1 / -1;
   margin: 0.45rem 0 0;
   color: var(--slate);
   font-size: 0.84rem;
-  overflow: hidden;
-  display: -webkit-box;
-  -webkit-line-clamp: 3;
-  -webkit-box-orient: vertical;
+  line-height: 1.45;
+  max-height: 7.5rem;
+  overflow: auto;
+  text-transform: none;
+}
+.note-preview :deep(h1),
+.note-preview :deep(h2),
+.note-preview :deep(h3),
+.note-preview :deep(h4),
+.note-preview :deep(h5),
+.note-preview :deep(h6) {
+  margin: 0.35em 0 0.25em;
+  font-size: 0.9rem;
+  line-height: 1.25;
+}
+.note-preview :deep(table) {
+  min-width: 100%;
+  font-size: 0.78rem;
+}
+.note-preview :deep(th),
+.note-preview :deep(td) {
+  padding: 0.25em 0.35em;
+}
+.note-preview :deep(ul),
+.note-preview :deep(ol) {
+  padding-left: 1.25em;
+}
+.note-preview :deep(.katex-display) {
+  margin: 0.35em 0;
 }
 .note-source-button {
   min-width: 0;
@@ -997,21 +1070,6 @@ function deleteHistorySession(sessionId: string) {
   color: var(--stone);
   font-style: normal;
   text-transform: uppercase;
-}
-.note-summary-text {
-  grid-column: 1 / -1;
-  color: var(--slate);
-  font-size: 0.82rem;
-  font-weight: 400;
-  line-height: 1.4;
-  overflow: hidden;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  text-transform: none;
-}
-.note-memory-card[open] .note-summary-text {
-  display: none;
 }
 .highlight-card {
   background: #fffdf0;

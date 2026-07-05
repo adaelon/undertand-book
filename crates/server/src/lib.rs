@@ -8,7 +8,7 @@
 //! socket 绑定 / worker 线程 / Mutex 锁 / 时间戳生成 / adapter 装配在 `main.rs`。
 //! 外层 E agent(S10f)、静态资源(S10e)留后续子切片。
 use memory::{Anchor, MemoryStore, RecallQuery, SaveInput};
-use read_tools::{Book, ToolError};
+use read_tools::{Book, ReaderLayoutAction, ToolError};
 use reader::{Reader, DEFAULT_RADIUS};
 use runtime::orchestrator::{new_session, run, OuterConfig};
 use runtime::{
@@ -337,6 +337,12 @@ pub fn route(state: &mut AppState, req: Req) -> Reply {
         }
         return route_agent_new(state, req.now);
     }
+    if path == "/profile/manifest" {
+        if req.method != "GET" {
+            return method_not_allowed();
+        }
+        return route_profile_manifest(&state.book, &q);
+    }
     if let Some(p) = path.strip_prefix("/book/") {
         if req.method != "GET" {
             return method_not_allowed();
@@ -383,6 +389,25 @@ fn route_open_book(state: &mut AppState, body: &str, now: &str) -> Reply {
     let _ = save_session(state, Some(dir));
     ok_json(&json!({ "ok": true, "book_id": state.book.base.book_id }))
 }
+
+fn route_profile_manifest(book: &Book, q: &HashMap<String, String>) -> Reply {
+    match book.profile_manifest_by_id(q.get("profile_id").map(|s| s.as_str())) {
+        Ok(manifest) => ok_json(&manifest),
+        Err(e) => err_reply(&e),
+    }
+}
+
+fn reader_state_response(book: &Book, reader: &Reader) -> serde_json::Value {
+    let state = reader.state();
+    json!({
+        "viewport": state.viewport,
+        "open_panels": state.open_panels,
+        "selection": state.selection,
+        "layout": state.layout,
+        "profile": book.profile_summary(),
+    })
+}
+
 /// `book.*` 只读叶子 → GET(S10a)。`store` 仅 `guided_route_from` 用(派生 reader_profile 已读降权)。
 fn route_book(book: &Book, store: &MemoryStore, leaf: &str, q: &HashMap<String, String>) -> Reply {
     match leaf {
@@ -568,11 +593,17 @@ fn route_mut(state: &mut AppState, path: &str, body: &str, now: &str) -> Reply {
                 let e = r.get("end").and_then(|x| x.as_u64())?;
                 Some((s as u32, e as u32))
             });
+            let source_session_id = v
+                .get("source_session_id")
+                .and_then(|x| x.as_str())
+                .filter(|s| !s.trim().is_empty())
+                .map(|s| s.to_string());
             match state.reader.highlight(
                 &state.book,
                 &mut state.store,
                 lid,
                 range,
+                source_session_id,
                 "long_term",
                 now,
             ) {
@@ -592,7 +623,47 @@ fn route_mut(state: &mut AppState, path: &str, body: &str, now: &str) -> Reply {
                 Err(e) => err_reply(&e),
             }
         }
-        "/reader/state" => ok_json(&state.reader.state()),
+        "/reader/state" => ok_json(&reader_state_response(&state.book, &state.reader)),
+        "/reader/layout.apply" => {
+            if let Some(proposal_id) = sget("proposal_id") {
+                let Some(base_layout_rev) = v.get("base_layout_rev").and_then(|x| x.as_u64())
+                else {
+                    return validation(
+                        "INVALID_LAYOUT_ACTION",
+                        "reader.layout.apply proposal 需 base_layout_rev",
+                    );
+                };
+                match state
+                    .reader
+                    .apply_layout_proposal(&state.book, proposal_id, base_layout_rev)
+                {
+                    Ok(effect) => ok_json(&json!({ "kind": "effect", "effect": effect })),
+                    Err(e) => err_reply(&e),
+                }
+            } else {
+                let Some(actions_value) = v.get("actions") else {
+                    return validation(
+                        "INVALID_LAYOUT_ACTION",
+                        "reader.layout.apply 需 actions 或 proposal_id",
+                    );
+                };
+                let actions = match serde_json::from_value::<Vec<ReaderLayoutAction>>(
+                    actions_value.clone(),
+                ) {
+                    Ok(actions) => actions,
+                    Err(e) => {
+                        return validation(
+                            "INVALID_LAYOUT_ACTION",
+                            &format!("reader.layout.apply actions 非法: {e}"),
+                        );
+                    }
+                };
+                match state.reader.apply_layout_actions(&state.book, actions) {
+                    Ok(outcome) => ok_json(&outcome),
+                    Err(e) => err_reply(&e),
+                }
+            }
+        }
         "/memory/save" => {
             let (Some(ty), Some(anchor), Some(content)) =
                 (sget("type"), sget("anchor_lid"), sget("content"))
@@ -1254,6 +1325,29 @@ mod tests {
     }
 
     #[test]
+    fn profile_manifest_endpoint_returns_current_and_explicit_profiles() {
+        let mut s = state_named("profile-manifest");
+        let current = get(&mut s, "/profile/manifest");
+        assert_eq!(current.status, 200);
+        assert!(current
+            .body
+            .contains("\"profile_id\":\"technical_learning\""));
+        assert!(current.body.contains("technical.structure_map"));
+
+        let paper = get(&mut s, "/profile/manifest?profile_id=paper");
+        assert_eq!(paper.status, 200);
+        assert!(paper.body.contains("\"profile_id\":\"paper\""));
+        assert!(paper.body.contains("paper.structure_map"));
+        assert!(paper.body.contains("book.paper_reading_guide"));
+
+        let missing = get(&mut s, "/profile/manifest?profile_id=nope");
+        assert_eq!(missing.status, 404);
+        assert!(missing.body.contains("PROFILE_NOT_FOUND"));
+
+        assert_eq!(post(&mut s, "/profile/manifest", "{}").status, 405);
+    }
+
+    #[test]
     fn text_valid_and_unknown_and_missing() {
         let mut s = state_named("text");
         let ok = get(&mut s, "/book/text?lid=1.1");
@@ -1456,7 +1550,7 @@ mod tests {
         let hl = post(
             &mut s,
             "/reader/highlight",
-            r#"{"lid":"1.1","range":{"start":0,"end":5}}"#,
+            r#"{"lid":"1.1","range":{"start":0,"end":5},"source_session_id":"highlight-group:test"}"#,
         );
         assert_eq!(hl.status, 200);
         let rc = post(
@@ -1468,6 +1562,7 @@ mod tests {
         assert!(rc.body.contains("\"range\""));
         assert!(rc.body.contains("\"start\":0"));
         assert!(rc.body.contains("\"content\":\"XXXXX\""));
+        assert!(rc.body.contains("\"source_session_id\":\"highlight-group:test\""));
         // 越界 → 400 INVALID_RANGE 不降级。
         let oob = post(
             &mut s,
@@ -1486,6 +1581,82 @@ mod tests {
         assert_eq!(r.status, 200);
         assert!(r.body.contains("\"viewport\""));
         assert!(r.body.contains("\"selection\":\"1.1\""));
+        assert!(r.body.contains("\"layout\""));
+        assert!(r.body.contains("\"active_preset\":\"technical_read\""));
+        assert!(r.body.contains("\"profile\""));
+        assert!(r.body.contains("\"profile_id\":\"technical_learning\""));
+        assert!(r.body.contains("\"allowed_layout_actions\""));
+    }
+
+    #[test]
+    fn reader_layout_apply_direct_proposal_and_stale() {
+        let mut s = state_named("layout");
+        let direct = post(
+            &mut s,
+            "/reader/layout.apply",
+            r#"{"actions":[
+                {"kind":"open_slot","slot_id":"technical.evidence","region":"right"},
+                {"kind":"focus_slot","slot_id":"technical.evidence"}
+            ]}"#,
+        );
+        assert_eq!(direct.status, 200);
+        assert!(direct.body.contains("\"kind\":\"effect\""));
+        assert_eq!(s.reader.layout_state().rev, 1);
+        assert_eq!(
+            s.reader.layout_state().focused_slot.as_deref(),
+            Some("technical.evidence")
+        );
+
+        let proposal = post(
+            &mut s,
+            "/reader/layout.apply",
+            r#"{"actions":[{"kind":"close_slot","slot_id":"technical.agent"}]}"#,
+        );
+        assert_eq!(proposal.status, 200);
+        assert!(proposal.body.contains("\"kind\":\"proposal\""));
+        assert!(s
+            .reader
+            .layout_state()
+            .open_slots
+            .iter()
+            .any(|slot| slot == "technical.agent"));
+        let value: serde_json::Value = serde_json::from_str(&proposal.body).unwrap();
+        let proposal_id = value["proposal"]["proposal_id"].as_str().unwrap();
+        let base_layout_rev = value["proposal"]["base_layout_rev"].as_u64().unwrap();
+        let apply = post(
+            &mut s,
+            "/reader/layout.apply",
+            &format!(r#"{{"proposal_id":"{proposal_id}","base_layout_rev":{base_layout_rev}}}"#),
+        );
+        assert_eq!(apply.status, 200);
+        assert!(!s
+            .reader
+            .layout_state()
+            .open_slots
+            .iter()
+            .any(|slot| slot == "technical.agent"));
+
+        let stale = post(
+            &mut s,
+            "/reader/layout.apply",
+            r#"{"actions":[{"kind":"reset_layout"}]}"#,
+        );
+        assert_eq!(stale.status, 200);
+        let stale_value: serde_json::Value = serde_json::from_str(&stale.body).unwrap();
+        let stale_id = stale_value["proposal"]["proposal_id"].as_str().unwrap();
+        let stale_rev = stale_value["proposal"]["base_layout_rev"].as_u64().unwrap();
+        post(
+            &mut s,
+            "/reader/layout.apply",
+            r#"{"actions":[{"kind":"open_slot","slot_id":"technical.evidence"}]}"#,
+        );
+        let rejected = post(
+            &mut s,
+            "/reader/layout.apply",
+            &format!(r#"{{"proposal_id":"{stale_id}","base_layout_rev":{stale_rev}}}"#),
+        );
+        assert_eq!(rejected.status, 400);
+        assert!(rejected.body.contains("LAYOUT_PROPOSAL_STALE"));
     }
 
     #[test]

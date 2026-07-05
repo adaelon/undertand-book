@@ -7,7 +7,10 @@
 //! 内层 book.query 复用 `crate::query`(同一 adapter 触 `complete`)`[ADR-0025]`。
 use crate::{query, synthesize, AssistantTurn, Message, ModelAdapter, Role, ToolSpec};
 use memory::{Anchor, MemCitation, MemoryStore, RecallQuery, SaveInput};
-use read_tools::{Book, ToolError};
+use read_tools::{
+    Book, ReaderLayoutAction, ReaderLayoutApplyOutcome, ReaderLayoutEffect, ReaderLayoutProposal,
+    ToolError,
+};
 use reader::Reader;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -64,6 +67,10 @@ pub enum AgentEffect {
         lid: String,
         text: String,
     },
+    /// 布局直执变更;undo = restore `effect.before` when current rev still matches `effect.after.rev`.
+    Layout { effect: ReaderLayoutEffect },
+    /// 高风险布局变更提议;Apply 时以后端 `proposal_id` + `base_layout_rev` 复验。
+    LayoutProposal { proposal: ReaderLayoutProposal },
 }
 
 /// 查询踪迹一步 `[ADR-0030 决策5]`:tool_calls 序列摘要,对用户可见(book.query 的检索范围 + citations 链在 `result_digest` 里)。
@@ -210,6 +217,16 @@ pub fn tool_specs() -> Vec<ToolSpec> {
             }),
         ),
         s(
+            "profile.manifest",
+            "返回当前 book 的 ProfileManifest;可选 profile_id=technical_learning|paper 读取 registry 中的显式 manifest。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "profile_id": {"type": "string", "enum": ["technical_learning", "paper"], "description": "可选;缺省为当前 book profile"}
+                }
+            }),
+        ),
+        s(
             "book.route_from",
             "从某 LID 出发的确定性导航前沿:按导航语义返回 5 类分组(back 前置/forward 深入/concretize 例证/cross 关联/continue 顺读),每步是真 LID+真边。零 LLM,用于决定『下一步去哪』。",
             json!({
@@ -329,8 +346,22 @@ note/highlight 自动锚回 anchor 的 LID;context 可经 citations 锚回支撑
             }),
         ),
         s(
+            "reader.layout.apply",
+            "通过后端 reducer 应用 typed ReaderLayoutAction[]。低风险 action 直执并返回 layout effect;close/reorder/preset/reset 等高风险 action 返回 proposal,等待用户确认。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "actions": {
+                        "type": "array",
+                        "items": {"type": "object"}
+                    }
+                },
+                "required": ["actions"]
+            }),
+        ),
+        s(
             "reader.state",
-            "取阅读器当前会话态 {viewport, open_panels, selection},供中途接入/手动操作后 re-sync。",
+            "取阅读器当前会话态 {viewport, open_panels, selection, layout, profile},供中途接入/手动操作后 re-sync。",
             json!({"type": "object", "properties": {}}),
         ),
     ]
@@ -347,9 +378,11 @@ const SYSTEM_PROMPT: &str = "你是这本书的阅读 agent。事实性回答经
 当用户问开放解释/综合问题且没有给引用或已知 LID 时,用 book.query(query,anchor_lid) 做锚定问答;答完书内实质问题再记录 qa。\
 当用户问『这和前后文/别处什么关系』且已有 LID 时,先 book.context(lid,near/mid/far) 取指针,再对少量相关 LID 调 book.text 或 book.synthesize。\
 book.route_from/guided_route_from/route_to/unvisited_back 只用于导航、带读、找前置和找路径,不是普通解释工具。\
+reader.state 会返回当前 layout 与 profile summary;若需要完整 slots/presets/projections/tool policy,调 profile.manifest。\
 读论文时若用户要『元数据/作者/年份/数据集/术语/缩写/怎么读这篇/十问/Codebook/摘要辅助』,先调 book.paper_metadata、book.paper_lexicon 或 book.paper_reading_guide(mode,stage),再按其中 LID 证据读取原文。\
 特别注意——当用户要求操作阅读器时,必须真的调用对应 reader 工具来执行,不能只靠读原文代替:\
 要求『翻到/跳转』调 reader.gotoLid(lid);要求『高亮』调 reader.highlight(lid);要求『记笔记/记录』调 reader.note(lid,text)。\
+要求『打开/聚焦/固定证据/调整布局/切换论文工作台』调 reader.layout.apply({actions:[...]})。layout action 必须使用 manifest 里的 slot_id 和 snake_case kind;open_slot/focus_slot/pin_evidence/set_panel_size 可直执,close_slot/reorder_slot/set_layout_preset/reset_layout 会返回 proposal,等待用户确认,不要绕过 reducer。\
 流程:先用 book.concept/context 定位到目标 LID,一旦定位到就立即调用 reader 工具完成操作,然后给简短终答,不要反复读原文。\
 主动带读——当用户请求『带我读/一步步讲/引导我看这章/接着讲』时,先结构地图、再逐停靠点:\
 ①先 reader.state() 拿当前 anchor(用户可能自己翻动过);\
@@ -379,6 +412,17 @@ memory.save(type='qa', anchor_lid=<你刚才传给 book.query 的那个 anchor>,
 带读到某 LID、或要回答关于某 LID 的问题时,可先 memory.recall(lid=<该 LID>, type='qa') \
 看读者之前在这里问过什么,据此把解释贴合他关心的点(卡过的地方多讲一点)。\
 证据不足时诚实说明,不要编造 LID。准备好最终答案时直接用自然语言回复(不再调用工具)。";
+
+fn reader_state_value(book: &Book, reader: &Reader) -> serde_json::Value {
+    let state = reader.state();
+    serde_json::json!({
+        "viewport": state.viewport,
+        "open_panels": state.open_panels,
+        "selection": state.selection,
+        "layout": state.layout,
+        "profile": book.profile_summary(),
+    })
+}
 
 /// 执行一次工具调用,返回 `(喂回模型的结果 JSON, 可选可撤销 effect)` `[ADR-0015/0026/0030]`。
 /// 错误**不降级**:把 ToolError 信封原样回喂,模型据 recovery 自纠。
@@ -519,6 +563,13 @@ fn dispatch(
         }
         "book.paper_metadata" => (to_json(&book.paper_metadata_projection()), None),
         "book.paper_lexicon" => (to_json(&book.paper_lexicon_projection()), None),
+        "profile.manifest" => {
+            let body = match book.profile_manifest_by_id(sget("profile_id")) {
+                Ok(manifest) => to_json(&manifest),
+                Err(e) => to_json(&e),
+            };
+            (body, None)
+        }
         "book.route_from" => {
             let Some(at) = sget("at") else {
                 return (
@@ -688,7 +739,7 @@ fn dispatch(
                 );
             };
             // agent 标注 = 提议态,落 session 层 `[ADR-0030 决策4]`;agent 高亮整段(range=None `[ADR-0031]`)。
-            match reader.highlight(book, store, lid, None, "session", now) {
+            match reader.highlight(book, store, lid, None, None, "session", now) {
                 Ok(e) => {
                     let eff = AgentEffect::Highlight {
                         mem_id: e.highlight_id.clone(),
@@ -718,7 +769,48 @@ fn dispatch(
                 Err(e) => (to_json(&e), None),
             }
         }
-        "reader.state" => (to_json(&reader.state()), None),
+        "reader.layout.apply" => {
+            let Some(actions_value) = args.get("actions") else {
+                return (
+                    err_json(
+                        "INVALID_LAYOUT_ACTION",
+                        "validation",
+                        "reader.layout.apply 需 actions",
+                    ),
+                    None,
+                );
+            };
+            let actions =
+                match serde_json::from_value::<Vec<ReaderLayoutAction>>(actions_value.clone()) {
+                    Ok(actions) => actions,
+                    Err(e) => {
+                        return (
+                            err_json(
+                                "INVALID_LAYOUT_ACTION",
+                                "validation",
+                                &format!("reader.layout.apply actions 非法: {e}"),
+                            ),
+                            None,
+                        )
+                    }
+                };
+            match reader.apply_layout_actions(book, actions) {
+                Ok(ReaderLayoutApplyOutcome::Effect { effect }) => {
+                    let body = to_json(&ReaderLayoutApplyOutcome::Effect {
+                        effect: effect.clone(),
+                    });
+                    (body, Some(AgentEffect::Layout { effect }))
+                }
+                Ok(ReaderLayoutApplyOutcome::Proposal { proposal }) => {
+                    let body = to_json(&ReaderLayoutApplyOutcome::Proposal {
+                        proposal: proposal.clone(),
+                    });
+                    (body, Some(AgentEffect::LayoutProposal { proposal }))
+                }
+                Err(e) => (to_json(&e), None),
+            }
+        }
+        "reader.state" => (to_json(&reader_state_value(book, reader)), None),
         other => (
             err_json("INVALID_RANGE", "validation", &format!("未知工具: {other}")),
             None,
@@ -892,9 +984,13 @@ mod tests {
         ToolCall,
     };
     use base_schema::{sample_base, GraphEdge, GraphNode, LidNode, NodeKind, ReadOnlyBase, Span};
+    use read_tools::{
+        LayoutRegion, LayoutSize, LayoutSizeKind, ReaderLayoutAction, ReaderLayoutEffect,
+        ReaderLayoutState,
+    };
     use reader::DEFAULT_RADIUS;
     use std::cell::RefCell;
-    use std::collections::VecDeque;
+    use std::collections::{HashMap, VecDeque};
     use std::path::PathBuf;
 
     /// 双队列脚本替身:chat 回合 + (内层 book.query 触发的)complete 回合各一队,按序吐。
@@ -1293,6 +1389,8 @@ mod tests {
         assert!(names.iter().any(|n| n == "book.paper_reading_guide"));
         assert!(names.iter().any(|n| n == "book.paper_metadata"));
         assert!(names.iter().any(|n| n == "book.paper_lexicon"));
+        assert!(names.iter().any(|n| n == "profile.manifest"));
+        assert!(names.iter().any(|n| n == "reader.layout.apply"));
         assert!(names.iter().any(|n| n == "book.route_from"));
         assert!(names.iter().any(|n| n == "book.route_to"));
         assert!(names.iter().any(|n| n == "book.guided_route_from"));
@@ -1370,6 +1468,34 @@ mod tests {
         assert!(lexicon.contains("paper_lexicon.json not attached"));
         assert!(eff.is_none());
 
+        let (manifest, eff) = dispatch(
+            "profile.manifest",
+            r#"{"profile_id":"paper"}"#,
+            &b,
+            &mut store,
+            &mut reader,
+            &fake,
+            "t0",
+        );
+        assert!(manifest.contains("\"profile_id\":\"paper\""));
+        assert!(manifest.contains("paper.structure_map"));
+        assert!(eff.is_none());
+
+        let (state, eff) = dispatch(
+            "reader.state",
+            r#"{}"#,
+            &b,
+            &mut store,
+            &mut reader,
+            &fake,
+            "t0",
+        );
+        assert!(state.contains("\"profile_id\":\"technical_learning\""));
+        assert!(state.contains("\"allowed_layout_actions\""));
+        assert!(state.contains("\"layout\""));
+        assert!(state.contains("\"active_preset\":\"technical_read\""));
+        assert!(eff.is_none());
+
         let (bad, _) = dispatch(
             "book.structure",
             r#"{"at":"9.9"}"#,
@@ -1380,6 +1506,101 @@ mod tests {
             "t0",
         );
         assert!(bad.contains("LID_NOT_FOUND") && bad.contains("not_found"));
+    }
+
+    #[test]
+    fn dispatch_reader_layout_apply_returns_effect_or_proposal() {
+        let b = book();
+        let mut store = MemoryStore::open(tmp("layout-dispatch")).unwrap();
+        let fake = FakeAdapter::new(vec![], vec![]);
+        let mut reader = Reader::new(&b, DEFAULT_RADIUS);
+
+        let (direct, eff) = dispatch(
+            "reader.layout.apply",
+            r#"{"actions":[
+                {"kind":"open_slot","slot_id":"technical.evidence","region":"right"},
+                {"kind":"focus_slot","slot_id":"technical.evidence"},
+                {"kind":"pin_evidence","slot_id":"technical.evidence","lid":"1.1","reason":"cite"}
+            ]}"#,
+            &b,
+            &mut store,
+            &mut reader,
+            &fake,
+            "t0",
+        );
+        assert!(direct.contains("\"kind\":\"effect\""));
+        match eff {
+            Some(AgentEffect::Layout { effect }) => {
+                assert_eq!(effect.before.rev, 0);
+                assert_eq!(effect.after.rev, 1);
+                assert!(effect
+                    .after
+                    .open_slots
+                    .iter()
+                    .any(|slot| slot == "technical.evidence"));
+                assert_eq!(effect.after.pinned_evidence[0].lid, "1.1");
+            }
+            other => panic!("expected layout effect, got {other:?}"),
+        }
+
+        let (proposal, eff) = dispatch(
+            "reader.layout.apply",
+            r#"{"actions":[{"kind":"close_slot","slot_id":"technical.agent"}]}"#,
+            &b,
+            &mut store,
+            &mut reader,
+            &fake,
+            "t0",
+        );
+        assert!(proposal.contains("\"kind\":\"proposal\""));
+        match eff {
+            Some(AgentEffect::LayoutProposal { proposal }) => {
+                assert_eq!(proposal.base_layout_rev, 1);
+                assert!(matches!(
+                    proposal.actions[0],
+                    ReaderLayoutAction::CloseSlot { .. }
+                ));
+            }
+            other => panic!("expected layout proposal, got {other:?}"),
+        }
+        assert!(reader
+            .layout_state()
+            .open_slots
+            .iter()
+            .any(|slot| slot == "technical.agent"));
+    }
+
+    #[test]
+    fn agent_effect_layout_contract_serializes() {
+        let before = ReaderLayoutState {
+            rev: 1,
+            active_preset: Some("paper_skim".into()),
+            open_slots: vec!["paper.structure_map".into()],
+            focused_slot: Some("paper.structure_map".into()),
+            pinned_evidence: vec![],
+            panel_sizes: HashMap::from([(
+                "paper.structure_map".into(),
+                LayoutSize {
+                    kind: LayoutSizeKind::Percent,
+                    value: 30.0,
+                },
+            )]),
+            slot_order: HashMap::new(),
+        };
+        let effect = AgentEffect::Layout {
+            effect: ReaderLayoutEffect {
+                before: before.clone(),
+                after: ReaderLayoutState { rev: 2, ..before },
+                actions: vec![ReaderLayoutAction::OpenSlot {
+                    slot_id: "paper.evidence".into(),
+                    region: Some(LayoutRegion::Right),
+                }],
+            },
+        };
+        let value = serde_json::to_value(effect).unwrap();
+        assert_eq!(value["kind"], "Layout");
+        assert_eq!(value["effect"]["actions"][0]["kind"], "open_slot");
+        assert_eq!(value["effect"]["after"]["rev"], 2);
     }
 
     #[test]
@@ -1701,6 +1922,61 @@ mod tests {
         assert_eq!(note.len(), 1);
         assert_eq!(note[0].content, "命令=对象化调用");
         assert_eq!(note[0].citations[0].lid, "1.1");
+    }
+
+    #[test]
+    fn agent_loop_layout_apply_emits_direct_and_proposal_effects() {
+        let b = book();
+        let mut store = MemoryStore::open(tmp("layout-loop")).unwrap();
+        let fake = FakeAdapter::new(
+            vec![
+                turn_calls(vec![call(
+                    "l1",
+                    "reader.layout.apply",
+                    r#"{"actions":[
+                        {"kind":"open_slot","slot_id":"technical.evidence","region":"right"},
+                        {"kind":"focus_slot","slot_id":"technical.evidence"},
+                        {"kind":"pin_evidence","slot_id":"technical.evidence","lid":"1.1","reason":"explain this"}
+                    ]}"#,
+                )]),
+                turn_calls(vec![call(
+                    "l2",
+                    "reader.layout.apply",
+                    r#"{"actions":[{"kind":"close_slot","slot_id":"technical.agent"}]}"#,
+                )]),
+                turn_final("已打开证据面板并提交关闭 agent 面板的确认提议。"),
+            ],
+            vec![],
+        );
+        let mut reader = Reader::new(&b, DEFAULT_RADIUS);
+        let mut messages = new_session();
+        let out = run(
+            &b,
+            &mut store,
+            &mut reader,
+            &fake,
+            &mut messages,
+            "打开证据面板,再关闭 agent 面板",
+            "t0",
+            OuterConfig::default(),
+        )
+        .unwrap();
+        assert!(!out.incomplete);
+        assert_eq!(out.turns, 3);
+        assert_eq!(out.effects.len(), 2);
+        assert!(matches!(out.effects[0], AgentEffect::Layout { .. }));
+        assert!(matches!(out.effects[1], AgentEffect::LayoutProposal { .. }));
+        assert_eq!(out.trace[0].tool, "reader.layout.apply");
+        assert_eq!(out.trace[1].tool, "reader.layout.apply");
+        assert_eq!(
+            reader.layout_state().focused_slot.as_deref(),
+            Some("technical.evidence")
+        );
+        assert!(reader
+            .layout_state()
+            .open_slots
+            .iter()
+            .any(|slot| slot == "technical.agent"));
     }
 
     // loop 在工具报错后仍继续、并能收敛(错误回喂 → 模型读到后终答)。

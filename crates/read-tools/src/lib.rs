@@ -452,6 +452,657 @@ pub struct PaperLexiconProjection {
     pub warning: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub enum ContentProfileId {
+    TechnicalLearning,
+    Paper,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub enum ProjectionKind {
+    ReadingGuide,
+    Metadata,
+    Lexicon,
+    Structure,
+    Route,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct ProjectionSpec {
+    pub id: String,
+    pub kind: ProjectionKind,
+    pub endpoint: String,
+    pub runtime_tool: Option<String>,
+    pub mcp_tool: Option<String>,
+    pub ts_type: String,
+    pub required: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub enum UiSlotKind {
+    Map,
+    Agent,
+    Evidence,
+    Codebook,
+    Aid,
+    Questions,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub enum LayoutRegion {
+    Left,
+    Center,
+    Right,
+    Bottom,
+    Overlay,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub enum ReaderLayoutActionKind {
+    OpenSlot,
+    CloseSlot,
+    FocusSlot,
+    SetActiveTab,
+    PinEvidence,
+    UnpinEvidence,
+    SetPanelSize,
+    ReorderSlot,
+    SetLayoutPreset,
+    ResetLayout,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct UiSlotSpec {
+    pub id: String,
+    pub title: String,
+    pub kind: UiSlotKind,
+    pub primary_projection: Option<String>,
+    pub secondary_projections: Vec<String>,
+    pub allowed_actions: Vec<ReaderLayoutActionKind>,
+    pub default_region: LayoutRegion,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub enum LayoutSizeKind {
+    Px,
+    Fr,
+    Percent,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct LayoutSize {
+    pub kind: LayoutSizeKind,
+    pub value: f32,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct LayoutPresetSlot {
+    pub slot_id: String,
+    pub region: LayoutRegion,
+    pub order: u32,
+    pub size: Option<LayoutSize>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct LayoutPresetSpec {
+    pub id: String,
+    pub title: String,
+    pub description: String,
+    pub slots: Vec<LayoutPresetSlot>,
+    pub focused_slot: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct AgentToolSpec {
+    pub name: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct GuidedReadingPolicySpec {
+    pub route_tool: String,
+    pub default_mode: Option<String>,
+    pub default_stage: Option<String>,
+    pub preferred_slot_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct ProfileDefaults {
+    pub layout_preset: Option<String>,
+    pub open_slots: Vec<String>,
+    pub focused_slot: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct ProfileManifest {
+    pub profile_id: ContentProfileId,
+    pub profile_version: String,
+    pub projections: Vec<ProjectionSpec>,
+    pub ui_slots: Vec<UiSlotSpec>,
+    pub layout_presets: Vec<LayoutPresetSpec>,
+    pub allowed_layout_actions: Vec<ReaderLayoutActionKind>,
+    pub agent_tools: Vec<AgentToolSpec>,
+    pub guided_reading_policy: GuidedReadingPolicySpec,
+    pub defaults: ProfileDefaults,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct ProfileSummary {
+    pub profile_id: ContentProfileId,
+    pub profile_version: String,
+    pub ui_slots: Vec<String>,
+    pub layout_presets: Vec<String>,
+    pub allowed_layout_actions: Vec<ReaderLayoutActionKind>,
+    pub agent_tools: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct PinnedEvidence {
+    pub slot_id: String,
+    pub lid: String,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct ReaderLayoutState {
+    pub rev: u64,
+    pub active_preset: Option<String>,
+    pub open_slots: Vec<String>,
+    pub focused_slot: Option<String>,
+    pub pinned_evidence: Vec<PinnedEvidence>,
+    pub panel_sizes: HashMap<String, LayoutSize>,
+    pub slot_order: HashMap<String, Vec<String>>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, TS)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub enum ReaderLayoutAction {
+    OpenSlot {
+        slot_id: String,
+        region: Option<LayoutRegion>,
+    },
+    CloseSlot {
+        slot_id: String,
+    },
+    FocusSlot {
+        slot_id: String,
+    },
+    SetActiveTab {
+        slot_id: String,
+        tab_id: String,
+    },
+    PinEvidence {
+        slot_id: String,
+        lid: String,
+        reason: Option<String>,
+    },
+    UnpinEvidence {
+        slot_id: String,
+        lid: String,
+    },
+    SetPanelSize {
+        slot_id: String,
+        size: LayoutSize,
+    },
+    ReorderSlot {
+        region: LayoutRegion,
+        slot_ids: Vec<String>,
+    },
+    SetLayoutPreset {
+        preset_id: String,
+    },
+    ResetLayout {},
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct ReaderLayoutEffect {
+    pub before: ReaderLayoutState,
+    pub after: ReaderLayoutState,
+    pub actions: Vec<ReaderLayoutAction>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct ReaderLayoutProposal {
+    pub proposal_id: String,
+    pub base_layout_rev: u64,
+    pub actions: Vec<ReaderLayoutAction>,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, TS)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub enum ReaderLayoutApplyOutcome {
+    Effect { effect: ReaderLayoutEffect },
+    Proposal { proposal: ReaderLayoutProposal },
+}
+
+pub const TECHNICAL_LEARNING_PROFILE_VERSION: &str = "technical_learning_v0";
+pub const PAPER_PROFILE_VERSION: &str = "paper_v0";
+
+fn all_layout_actions() -> Vec<ReaderLayoutActionKind> {
+    vec![
+        ReaderLayoutActionKind::OpenSlot,
+        ReaderLayoutActionKind::CloseSlot,
+        ReaderLayoutActionKind::FocusSlot,
+        ReaderLayoutActionKind::SetActiveTab,
+        ReaderLayoutActionKind::PinEvidence,
+        ReaderLayoutActionKind::UnpinEvidence,
+        ReaderLayoutActionKind::SetPanelSize,
+        ReaderLayoutActionKind::ReorderSlot,
+        ReaderLayoutActionKind::SetLayoutPreset,
+        ReaderLayoutActionKind::ResetLayout,
+    ]
+}
+
+fn low_risk_layout_actions() -> Vec<ReaderLayoutActionKind> {
+    vec![
+        ReaderLayoutActionKind::OpenSlot,
+        ReaderLayoutActionKind::FocusSlot,
+        ReaderLayoutActionKind::SetActiveTab,
+        ReaderLayoutActionKind::PinEvidence,
+        ReaderLayoutActionKind::UnpinEvidence,
+        ReaderLayoutActionKind::SetPanelSize,
+    ]
+}
+
+fn profile_summary(manifest: &ProfileManifest) -> ProfileSummary {
+    ProfileSummary {
+        profile_id: manifest.profile_id.clone(),
+        profile_version: manifest.profile_version.clone(),
+        ui_slots: manifest
+            .ui_slots
+            .iter()
+            .map(|slot| slot.id.clone())
+            .collect(),
+        layout_presets: manifest
+            .layout_presets
+            .iter()
+            .map(|preset| preset.id.clone())
+            .collect(),
+        allowed_layout_actions: manifest.allowed_layout_actions.clone(),
+        agent_tools: manifest
+            .agent_tools
+            .iter()
+            .map(|tool| tool.name.clone())
+            .collect(),
+    }
+}
+
+pub fn technical_learning_profile_manifest() -> ProfileManifest {
+    let allowed = all_layout_actions();
+    ProfileManifest {
+        profile_id: ContentProfileId::TechnicalLearning,
+        profile_version: TECHNICAL_LEARNING_PROFILE_VERSION.into(),
+        projections: vec![
+            ProjectionSpec {
+                id: "book.structure".into(),
+                kind: ProjectionKind::Structure,
+                endpoint: "/book/structure".into(),
+                runtime_tool: Some("book.structure".into()),
+                mcp_tool: Some("book_structure".into()),
+                ts_type: "StructureProjection".into(),
+                required: false,
+            },
+            ProjectionSpec {
+                id: "book.guide_path".into(),
+                kind: ProjectionKind::Route,
+                endpoint: "/book/guide_path".into(),
+                runtime_tool: Some("book.guide_path".into()),
+                mcp_tool: Some("book_guide_path".into()),
+                ts_type: "GuidePath".into(),
+                required: false,
+            },
+        ],
+        ui_slots: vec![
+            UiSlotSpec {
+                id: "technical.structure_map".into(),
+                title: "Structure map".into(),
+                kind: UiSlotKind::Map,
+                primary_projection: Some("book.structure".into()),
+                secondary_projections: vec!["book.guide_path".into()],
+                allowed_actions: low_risk_layout_actions(),
+                default_region: LayoutRegion::Left,
+            },
+            UiSlotSpec {
+                id: "technical.agent".into(),
+                title: "Agent".into(),
+                kind: UiSlotKind::Agent,
+                primary_projection: None,
+                secondary_projections: vec![],
+                allowed_actions: low_risk_layout_actions(),
+                default_region: LayoutRegion::Right,
+            },
+            UiSlotSpec {
+                id: "technical.evidence".into(),
+                title: "Evidence".into(),
+                kind: UiSlotKind::Evidence,
+                primary_projection: None,
+                secondary_projections: vec![],
+                allowed_actions: low_risk_layout_actions(),
+                default_region: LayoutRegion::Right,
+            },
+        ],
+        layout_presets: vec![LayoutPresetSpec {
+            id: "technical_read".into(),
+            title: "Technical read".into(),
+            description: "Default technical reading workspace.".into(),
+            slots: vec![
+                LayoutPresetSlot {
+                    slot_id: "technical.structure_map".into(),
+                    region: LayoutRegion::Left,
+                    order: 0,
+                    size: Some(LayoutSize {
+                        kind: LayoutSizeKind::Percent,
+                        value: 24.0,
+                    }),
+                },
+                LayoutPresetSlot {
+                    slot_id: "technical.agent".into(),
+                    region: LayoutRegion::Right,
+                    order: 0,
+                    size: Some(LayoutSize {
+                        kind: LayoutSizeKind::Percent,
+                        value: 30.0,
+                    }),
+                },
+            ],
+            focused_slot: Some("technical.agent".into()),
+        }],
+        allowed_layout_actions: allowed,
+        agent_tools: vec![AgentToolSpec {
+            name: "reader.layout.apply".into(),
+            description: "Apply validated reader layout actions.".into(),
+        }],
+        guided_reading_policy: GuidedReadingPolicySpec {
+            route_tool: "book.guided_route_from".into(),
+            default_mode: None,
+            default_stage: None,
+            preferred_slot_ids: vec!["technical.structure_map".into(), "technical.agent".into()],
+        },
+        defaults: ProfileDefaults {
+            layout_preset: Some("technical_read".into()),
+            open_slots: vec!["technical.structure_map".into(), "technical.agent".into()],
+            focused_slot: Some("technical.agent".into()),
+        },
+    }
+}
+
+pub fn paper_profile_manifest() -> ProfileManifest {
+    let allowed = all_layout_actions();
+    ProfileManifest {
+        profile_id: ContentProfileId::Paper,
+        profile_version: PAPER_PROFILE_VERSION.into(),
+        projections: vec![
+            ProjectionSpec {
+                id: "paper.reading_guide".into(),
+                kind: ProjectionKind::ReadingGuide,
+                endpoint: "/book/paper_reading_guide".into(),
+                runtime_tool: Some("book.paper_reading_guide".into()),
+                mcp_tool: Some("book_paper_reading_guide".into()),
+                ts_type: "PaperReadingGuide".into(),
+                required: false,
+            },
+            ProjectionSpec {
+                id: "paper.metadata".into(),
+                kind: ProjectionKind::Metadata,
+                endpoint: "/book/paper_metadata".into(),
+                runtime_tool: Some("book.paper_metadata".into()),
+                mcp_tool: Some("book_paper_metadata".into()),
+                ts_type: "PaperMetadataProjection".into(),
+                required: false,
+            },
+            ProjectionSpec {
+                id: "paper.lexicon".into(),
+                kind: ProjectionKind::Lexicon,
+                endpoint: "/book/paper_lexicon".into(),
+                runtime_tool: Some("book.paper_lexicon".into()),
+                mcp_tool: Some("book_paper_lexicon".into()),
+                ts_type: "PaperLexiconProjection".into(),
+                required: false,
+            },
+            ProjectionSpec {
+                id: "book.structure".into(),
+                kind: ProjectionKind::Structure,
+                endpoint: "/book/structure".into(),
+                runtime_tool: Some("book.structure".into()),
+                mcp_tool: Some("book_structure".into()),
+                ts_type: "StructureProjection".into(),
+                required: false,
+            },
+        ],
+        ui_slots: vec![
+            UiSlotSpec {
+                id: "paper.structure_map".into(),
+                title: "Paper structure map".into(),
+                kind: UiSlotKind::Map,
+                primary_projection: Some("paper.reading_guide".into()),
+                secondary_projections: vec!["book.structure".into()],
+                allowed_actions: low_risk_layout_actions(),
+                default_region: LayoutRegion::Left,
+            },
+            UiSlotSpec {
+                id: "paper.agent".into(),
+                title: "Paper agent".into(),
+                kind: UiSlotKind::Agent,
+                primary_projection: Some("paper.reading_guide".into()),
+                secondary_projections: vec![],
+                allowed_actions: low_risk_layout_actions(),
+                default_region: LayoutRegion::Right,
+            },
+            UiSlotSpec {
+                id: "paper.evidence".into(),
+                title: "Evidence".into(),
+                kind: UiSlotKind::Evidence,
+                primary_projection: None,
+                secondary_projections: vec!["paper.reading_guide".into()],
+                allowed_actions: low_risk_layout_actions(),
+                default_region: LayoutRegion::Right,
+            },
+            UiSlotSpec {
+                id: "paper.codebook".into(),
+                title: "Codebook".into(),
+                kind: UiSlotKind::Codebook,
+                primary_projection: Some("paper.lexicon".into()),
+                secondary_projections: vec!["paper.metadata".into(), "paper.reading_guide".into()],
+                allowed_actions: low_risk_layout_actions(),
+                default_region: LayoutRegion::Bottom,
+            },
+            UiSlotSpec {
+                id: "paper.abstract_aid".into(),
+                title: "Abstract aid".into(),
+                kind: UiSlotKind::Aid,
+                primary_projection: Some("paper.reading_guide".into()),
+                secondary_projections: vec!["paper.lexicon".into()],
+                allowed_actions: low_risk_layout_actions(),
+                default_region: LayoutRegion::Bottom,
+            },
+            UiSlotSpec {
+                id: "paper.ten_questions".into(),
+                title: "Ten questions".into(),
+                kind: UiSlotKind::Questions,
+                primary_projection: Some("paper.reading_guide".into()),
+                secondary_projections: vec!["paper.metadata".into(), "paper.lexicon".into()],
+                allowed_actions: low_risk_layout_actions(),
+                default_region: LayoutRegion::Right,
+            },
+        ],
+        layout_presets: vec![
+            LayoutPresetSpec {
+                id: "paper_skim".into(),
+                title: "Paper skim".into(),
+                description: "Open structure, agent, and evidence for first-pass reading.".into(),
+                slots: vec![
+                    LayoutPresetSlot {
+                        slot_id: "paper.structure_map".into(),
+                        region: LayoutRegion::Left,
+                        order: 0,
+                        size: Some(LayoutSize {
+                            kind: LayoutSizeKind::Percent,
+                            value: 26.0,
+                        }),
+                    },
+                    LayoutPresetSlot {
+                        slot_id: "paper.agent".into(),
+                        region: LayoutRegion::Right,
+                        order: 0,
+                        size: Some(LayoutSize {
+                            kind: LayoutSizeKind::Percent,
+                            value: 30.0,
+                        }),
+                    },
+                ],
+                focused_slot: Some("paper.structure_map".into()),
+            },
+            LayoutPresetSpec {
+                id: "paper_abstract".into(),
+                title: "Paper abstract".into(),
+                description: "Focus the abstract aid and codebook.".into(),
+                slots: vec![
+                    LayoutPresetSlot {
+                        slot_id: "paper.abstract_aid".into(),
+                        region: LayoutRegion::Bottom,
+                        order: 0,
+                        size: Some(LayoutSize {
+                            kind: LayoutSizeKind::Percent,
+                            value: 34.0,
+                        }),
+                    },
+                    LayoutPresetSlot {
+                        slot_id: "paper.codebook".into(),
+                        region: LayoutRegion::Right,
+                        order: 0,
+                        size: Some(LayoutSize {
+                            kind: LayoutSizeKind::Percent,
+                            value: 28.0,
+                        }),
+                    },
+                ],
+                focused_slot: Some("paper.abstract_aid".into()),
+            },
+            LayoutPresetSpec {
+                id: "paper_deep_read".into(),
+                title: "Paper deep read".into(),
+                description: "Open structure, questions, evidence, and codebook.".into(),
+                slots: vec![
+                    LayoutPresetSlot {
+                        slot_id: "paper.structure_map".into(),
+                        region: LayoutRegion::Left,
+                        order: 0,
+                        size: Some(LayoutSize {
+                            kind: LayoutSizeKind::Percent,
+                            value: 24.0,
+                        }),
+                    },
+                    LayoutPresetSlot {
+                        slot_id: "paper.ten_questions".into(),
+                        region: LayoutRegion::Right,
+                        order: 0,
+                        size: Some(LayoutSize {
+                            kind: LayoutSizeKind::Percent,
+                            value: 32.0,
+                        }),
+                    },
+                    LayoutPresetSlot {
+                        slot_id: "paper.codebook".into(),
+                        region: LayoutRegion::Bottom,
+                        order: 0,
+                        size: Some(LayoutSize {
+                            kind: LayoutSizeKind::Percent,
+                            value: 30.0,
+                        }),
+                    },
+                ],
+                focused_slot: Some("paper.ten_questions".into()),
+            },
+        ],
+        allowed_layout_actions: allowed,
+        agent_tools: vec![
+            AgentToolSpec {
+                name: "reader.layout.apply".into(),
+                description: "Apply validated reader layout actions.".into(),
+            },
+            AgentToolSpec {
+                name: "book.paper_reading_guide".into(),
+                description: "Read the paper guide projection.".into(),
+            },
+            AgentToolSpec {
+                name: "book.paper_metadata".into(),
+                description: "Read the single-paper metadata projection.".into(),
+            },
+            AgentToolSpec {
+                name: "book.paper_lexicon".into(),
+                description: "Read the single-paper lexicon projection.".into(),
+            },
+        ],
+        guided_reading_policy: GuidedReadingPolicySpec {
+            route_tool: "book.guided_route_from".into(),
+            default_mode: Some("skim".into()),
+            default_stage: Some("passive".into()),
+            preferred_slot_ids: vec![
+                "paper.structure_map".into(),
+                "paper.agent".into(),
+                "paper.evidence".into(),
+            ],
+        },
+        defaults: ProfileDefaults {
+            layout_preset: Some("paper_skim".into()),
+            open_slots: vec![
+                "paper.structure_map".into(),
+                "paper.agent".into(),
+                "paper.evidence".into(),
+            ],
+            focused_slot: Some("paper.structure_map".into()),
+        },
+    }
+}
+
+pub fn profile_manifest_for_id(profile_id: ContentProfileId) -> ProfileManifest {
+    match profile_id {
+        ContentProfileId::TechnicalLearning => technical_learning_profile_manifest(),
+        ContentProfileId::Paper => paper_profile_manifest(),
+    }
+}
+
+pub fn parse_content_profile_id(raw: &str) -> Result<ContentProfileId, ToolError> {
+    match raw {
+        "technical_learning" => Ok(ContentProfileId::TechnicalLearning),
+        "paper" => Ok(ContentProfileId::Paper),
+        other => Err(ToolError {
+            error_code: "PROFILE_NOT_FOUND".into(),
+            category: "not_found".into(),
+            message: format!("未知 content profile: {other}"),
+        }),
+    }
+}
+
 /// context 默认 top-K(占位,待 P1 实测回填 ADR-0013/0016「何时回头」)。
 pub const DEFAULT_NEAR_K: usize = 10;
 /// route_from 每类前沿默认 top-K(沿用 context 截断惯例 `[ADR-0034 影响段]`)。
@@ -1071,6 +1722,32 @@ impl Book {
 
     pub fn paper_lexicon(&self) -> Option<&PaperLexiconSidecar> {
         self.paper_lexicon.as_ref()
+    }
+
+    pub fn content_profile_id(&self) -> ContentProfileId {
+        if self.paper_profile_attached() {
+            ContentProfileId::Paper
+        } else {
+            ContentProfileId::TechnicalLearning
+        }
+    }
+
+    pub fn profile_manifest(&self) -> ProfileManifest {
+        profile_manifest_for_id(self.content_profile_id())
+    }
+
+    pub fn profile_manifest_by_id(
+        &self,
+        profile_id: Option<&str>,
+    ) -> Result<ProfileManifest, ToolError> {
+        profile_id
+            .map(parse_content_profile_id)
+            .transpose()
+            .map(|id| profile_manifest_for_id(id.unwrap_or_else(|| self.content_profile_id())))
+    }
+
+    pub fn profile_summary(&self) -> ProfileSummary {
+        profile_summary(&self.profile_manifest())
     }
 
     fn metadata_string_field(
@@ -3322,6 +3999,159 @@ mod tests {
         let err = book.structure(Some("9.9")).unwrap_err();
         assert_eq!(err.error_code, "LID_NOT_FOUND");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn profile_manifest_contract_covers_paper_slots_and_actions() {
+        let manifest = ProfileManifest {
+            profile_id: ContentProfileId::Paper,
+            profile_version: "paper_v0".into(),
+            projections: vec![ProjectionSpec {
+                id: "paper.reading_guide".into(),
+                kind: ProjectionKind::ReadingGuide,
+                endpoint: "/book/paper_reading_guide".into(),
+                runtime_tool: Some("book.paper_reading_guide".into()),
+                mcp_tool: Some("book_paper_reading_guide".into()),
+                ts_type: "PaperReadingGuide".into(),
+                required: false,
+            }],
+            ui_slots: vec![UiSlotSpec {
+                id: "paper.structure_map".into(),
+                title: "Structure map".into(),
+                kind: UiSlotKind::Map,
+                primary_projection: Some("paper.reading_guide".into()),
+                secondary_projections: vec!["paper.metadata".into()],
+                allowed_actions: vec![
+                    ReaderLayoutActionKind::OpenSlot,
+                    ReaderLayoutActionKind::FocusSlot,
+                    ReaderLayoutActionKind::PinEvidence,
+                ],
+                default_region: LayoutRegion::Left,
+            }],
+            layout_presets: vec![LayoutPresetSpec {
+                id: "paper_skim".into(),
+                title: "Skim".into(),
+                description: "Open the paper structure map and agent slot.".into(),
+                slots: vec![LayoutPresetSlot {
+                    slot_id: "paper.structure_map".into(),
+                    region: LayoutRegion::Left,
+                    order: 0,
+                    size: Some(LayoutSize {
+                        kind: LayoutSizeKind::Percent,
+                        value: 28.0,
+                    }),
+                }],
+                focused_slot: Some("paper.structure_map".into()),
+            }],
+            allowed_layout_actions: vec![
+                ReaderLayoutActionKind::OpenSlot,
+                ReaderLayoutActionKind::SetLayoutPreset,
+            ],
+            agent_tools: vec![AgentToolSpec {
+                name: "reader.layout.apply".into(),
+                description: "Apply validated reader layout actions.".into(),
+            }],
+            guided_reading_policy: GuidedReadingPolicySpec {
+                route_tool: "book.guided_route_from".into(),
+                default_mode: Some("skim".into()),
+                default_stage: Some("passive".into()),
+                preferred_slot_ids: vec!["paper.structure_map".into()],
+            },
+            defaults: ProfileDefaults {
+                layout_preset: Some("paper_skim".into()),
+                open_slots: vec!["paper.structure_map".into()],
+                focused_slot: Some("paper.structure_map".into()),
+            },
+        };
+
+        let value = serde_json::to_value(&manifest).unwrap();
+        assert_eq!(value["profile_id"], "paper");
+        assert_eq!(
+            value["projections"][0]["runtime_tool"],
+            "book.paper_reading_guide"
+        );
+        assert_eq!(value["ui_slots"][0]["default_region"], "left");
+        assert_eq!(value["allowed_layout_actions"][1], "set_layout_preset");
+    }
+
+    #[test]
+    fn reader_layout_action_contract_uses_closed_snake_case_tags() {
+        let action = ReaderLayoutAction::PinEvidence {
+            slot_id: "paper.evidence".into(),
+            lid: "1.2".into(),
+            reason: Some("supports the main claim".into()),
+        };
+        let value = serde_json::to_value(&action).unwrap();
+        assert_eq!(value["kind"], "pin_evidence");
+        assert_eq!(value["slot_id"], "paper.evidence");
+
+        let state = ReaderLayoutState {
+            rev: 7,
+            active_preset: Some("paper_skim".into()),
+            open_slots: vec!["paper.evidence".into()],
+            focused_slot: Some("paper.evidence".into()),
+            pinned_evidence: vec![PinnedEvidence {
+                slot_id: "paper.evidence".into(),
+                lid: "1.2".into(),
+                reason: None,
+            }],
+            panel_sizes: HashMap::from([(
+                "paper.evidence".into(),
+                LayoutSize {
+                    kind: LayoutSizeKind::Px,
+                    value: 360.0,
+                },
+            )]),
+            slot_order: HashMap::from([("right".into(), vec!["paper.evidence".into()])]),
+        };
+        let effect = ReaderLayoutEffect {
+            before: state.clone(),
+            after: ReaderLayoutState { rev: 8, ..state },
+            actions: vec![action],
+        };
+        assert_eq!(effect.after.rev, effect.before.rev + 1);
+    }
+
+    #[test]
+    fn profile_registry_returns_current_and_explicit_manifests() {
+        let default_book = book();
+        assert_eq!(
+            default_book.content_profile_id(),
+            ContentProfileId::TechnicalLearning
+        );
+        let current = default_book.profile_manifest();
+        assert_eq!(current.profile_id, ContentProfileId::TechnicalLearning);
+        assert_eq!(current.profile_version, TECHNICAL_LEARNING_PROFILE_VERSION);
+        assert!(current
+            .ui_slots
+            .iter()
+            .any(|slot| slot.id == "technical.structure_map"));
+
+        let explicit_paper = default_book
+            .profile_manifest_by_id(Some("paper"))
+            .expect("paper manifest must be registered");
+        assert_eq!(explicit_paper.profile_id, ContentProfileId::Paper);
+        assert_eq!(explicit_paper.profile_version, PAPER_PROFILE_VERSION);
+        assert!(explicit_paper
+            .ui_slots
+            .iter()
+            .any(|slot| slot.id == "paper.ten_questions"));
+
+        let base = structure_base();
+        let paper_sidecar =
+            parse_book_structure_sidecar(&paper_book_structure_json().to_string(), &base).unwrap();
+        let paper_book = Book::new(base, &"AAAABBBBCCCCDDDD".to_string())
+            .with_book_structure(Some(paper_sidecar));
+        assert_eq!(paper_book.content_profile_id(), ContentProfileId::Paper);
+        let summary = paper_book.profile_summary();
+        assert_eq!(summary.profile_id, ContentProfileId::Paper);
+        assert!(summary.ui_slots.iter().any(|slot| slot == "paper.evidence"));
+        assert!(summary
+            .allowed_layout_actions
+            .contains(&ReaderLayoutActionKind::SetLayoutPreset));
+
+        let err = paper_book.profile_manifest_by_id(Some("nope")).unwrap_err();
+        assert_eq!(err.error_code, "PROFILE_NOT_FOUND");
     }
 
     #[test]
