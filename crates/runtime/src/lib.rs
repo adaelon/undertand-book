@@ -1290,17 +1290,167 @@ impl NativeAdapter {
         body: serde_json::Value,
     ) -> Result<serde_json::Value, AdapterError> {
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
-        let resp = ureq::post(&url)
-            .set("Authorization", &format!("Bearer {}", self.api_key))
-            .set("Content-Type", "application/json")
-            .send_json(body)
-            .map_err(|e| AdapterError {
-                message: format!("HTTP 请求失败: {e}"),
-            })?;
+        let mut retried = false;
+        let resp = loop {
+            match self.send_chat_completions_once(&url, &body) {
+                Ok(resp) => break resp,
+                Err(e) if !retried && is_retriable_chat_completion_error(&e) => {
+                    retried = true;
+                    std::thread::sleep(chat_completion_retry_delay());
+                }
+                Err(e) => {
+                    let prefix = if retried {
+                        "HTTP 请求失败(重试一次后仍失败)"
+                    } else {
+                        "HTTP 请求失败"
+                    };
+                    return Err(AdapterError {
+                        message: adapter_http_error_message(prefix, e),
+                    });
+                }
+            }
+        };
         resp.into_json().map_err(|e| AdapterError {
             message: format!("响应非 JSON: {e}"),
         })
     }
+
+    fn send_chat_completions_once(
+        &self,
+        url: &str,
+        body: &serde_json::Value,
+    ) -> Result<ureq::Response, ureq::Error> {
+        ureq::post(url)
+            .set("Authorization", &format!("Bearer {}", self.api_key))
+            .set("Content-Type", "application/json")
+            .send_json(body)
+    }
+}
+
+const PROVIDER_ERROR_BODY_LIMIT: usize = 4096;
+
+fn adapter_http_error_message(prefix: &str, err: ureq::Error) -> String {
+    match err {
+        ureq::Error::Status(status, response) => {
+            let url = response.get_url().to_string();
+            let body = response
+                .into_string()
+                .map(|s| truncate_provider_error_body(&s))
+                .unwrap_or_else(|e| format!("<读取错误响应失败: {e}>"));
+            if body.trim().is_empty() {
+                format!("{prefix}: {url}: status code {status}")
+            } else {
+                format!("{prefix}: {url}: status code {status}; body: {body}")
+            }
+        }
+        e => format!("{prefix}: {e}"),
+    }
+}
+
+fn truncate_provider_error_body(body: &str) -> String {
+    let mut out = String::new();
+    for (idx, ch) in body.chars().enumerate() {
+        if idx >= PROVIDER_ERROR_BODY_LIMIT {
+            out.push_str("...");
+            break;
+        }
+        out.push(ch);
+    }
+    out
+}
+
+fn is_retriable_chat_completion_error(err: &ureq::Error) -> bool {
+    let ureq::Error::Transport(transport) = err else {
+        return false;
+    };
+    matches!(
+        transport.kind(),
+        ureq::ErrorKind::Dns
+            | ureq::ErrorKind::ConnectionFailed
+            | ureq::ErrorKind::BadStatus
+            | ureq::ErrorKind::Io
+            | ureq::ErrorKind::ProxyConnect
+    )
+}
+
+#[cfg(test)]
+fn chat_completion_retry_delay() -> std::time::Duration {
+    std::time::Duration::from_millis(1)
+}
+
+#[cfg(not(test))]
+fn chat_completion_retry_delay() -> std::time::Duration {
+    std::time::Duration::from_millis(250)
+}
+
+fn provider_tool_name(original: &str, idx: usize, used: &mut HashSet<String>) -> String {
+    let mut base: String = original
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if base.is_empty() || !base.chars().any(|c| c.is_ascii_alphanumeric()) {
+        base = format!("tool_{}", idx + 1);
+    }
+    if base.len() > 64 {
+        base.truncate(64);
+    }
+
+    let mut candidate = base.clone();
+    let mut suffix_idx = 2;
+    while used.contains(&candidate) {
+        let suffix = format!("_{suffix_idx}");
+        let keep = 64_usize.saturating_sub(suffix.len()).min(base.len());
+        candidate = format!("{}{}", &base[..keep], suffix);
+        suffix_idx += 1;
+    }
+    used.insert(candidate.clone());
+    candidate
+}
+
+fn native_message_to_json(
+    m: &Message,
+    internal_to_provider: &BTreeMap<String, String>,
+) -> serde_json::Value {
+    let role = match m.role {
+        Role::System => "system",
+        Role::User => "user",
+        Role::Assistant => "assistant",
+        Role::Tool => "tool",
+    };
+    let mut o = serde_json::json!({ "role": role });
+    match &m.content {
+        Some(c) => o["content"] = serde_json::json!(c),
+        None if m.role == Role::Assistant => o["content"] = serde_json::Value::Null,
+        None => {}
+    }
+    if !m.tool_calls.is_empty() {
+        o["tool_calls"] = serde_json::Value::Array(
+            m.tool_calls
+                .iter()
+                .map(|tc| {
+                    let provider_name = internal_to_provider
+                        .get(&tc.name)
+                        .map(String::as_str)
+                        .unwrap_or(&tc.name);
+                    serde_json::json!({
+                        "id": tc.id,
+                        "type": "function",
+                        "function": { "name": provider_name, "arguments": tc.arguments },
+                    })
+                })
+                .collect(),
+        );
+    }
+    if let Some(id) = &m.tool_call_id {
+        o["tool_call_id"] = serde_json::json!(id);
+    }
+    o
 }
 
 /// 后端 JSON 输出的中间解析形(宽松:缺字段给默认,不静默改 lid)。
@@ -1574,19 +1724,29 @@ impl ModelAdapter for NativeAdapter {
         messages: &[Message],
         tools: &[ToolSpec],
     ) -> Result<AssistantTurn, AdapterError> {
-        let msgs: Vec<serde_json::Value> = messages.iter().map(message_to_json).collect();
+        let mut used_tool_names = HashSet::new();
+        let mut provider_to_internal = BTreeMap::new();
+        let mut internal_to_provider = BTreeMap::new();
         let tool_specs: Vec<serde_json::Value> = tools
             .iter()
-            .map(|t| {
+            .enumerate()
+            .map(|(idx, t)| {
+                let provider_name = provider_tool_name(&t.name, idx, &mut used_tool_names);
+                provider_to_internal.insert(provider_name.clone(), t.name.clone());
+                internal_to_provider.insert(t.name.clone(), provider_name.clone());
                 serde_json::json!({
                     "type": "function",
                     "function": {
-                        "name": t.name,
+                        "name": provider_name,
                         "description": t.description,
                         "parameters": t.parameters,
                     },
                 })
             })
+            .collect();
+        let msgs: Vec<serde_json::Value> = messages
+            .iter()
+            .map(|m| native_message_to_json(m, &internal_to_provider))
             .collect();
         let body = serde_json::json!({
             "model": self.model,
@@ -1603,9 +1763,14 @@ impl ModelAdapter for NativeAdapter {
         let mut tool_calls = Vec::new();
         if let Some(arr) = msg["tool_calls"].as_array() {
             for tc in arr {
+                let provider_name = tc["function"]["name"].as_str().unwrap_or("").to_string();
+                let name = provider_to_internal
+                    .get(&provider_name)
+                    .cloned()
+                    .unwrap_or(provider_name);
                 tool_calls.push(ToolCall {
                     id: tc["id"].as_str().unwrap_or("").to_string(),
-                    name: tc["function"]["name"].as_str().unwrap_or("").to_string(),
+                    name,
                     arguments: tc["function"]["arguments"]
                         .as_str()
                         .unwrap_or("{}")
@@ -1782,6 +1947,13 @@ mod tests {
     use read_tools::{TechnicalLearningDiscourseItem, TechnicalLearningDiscourseRelation};
     use std::cell::RefCell;
     use std::collections::VecDeque;
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    use std::time::{Duration, Instant};
 
     fn rstep(lid: &str) -> RankedStep {
         RankedStep {
@@ -2448,6 +2620,234 @@ mod tests {
         })
         .unwrap();
         assert_eq!(react.mode, ProviderMode::ReAct);
+    }
+
+    #[test]
+    fn provider_tool_name_sanitizes_dotted_names_and_collisions() {
+        let mut used = std::collections::HashSet::new();
+        assert_eq!(
+            provider_tool_name("book.text", 0, &mut used),
+            "book_text"
+        );
+        assert_eq!(
+            provider_tool_name("book_text", 1, &mut used),
+            "book_text_2"
+        );
+        assert_eq!(provider_tool_name("工具", 2, &mut used), "tool_3");
+        assert!(provider_tool_name(&"a".repeat(80), 3, &mut used).len() <= 64);
+    }
+
+    fn accept_with_timeout(listener: &TcpListener) -> TcpStream {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            match listener.accept() {
+                Ok((stream, _)) => return stream,
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(e) => panic!("accept failed: {e}"),
+            }
+        }
+    }
+
+    fn read_http_request(stream: &mut TcpStream) -> String {
+        stream
+            .set_read_timeout(Some(Duration::from_millis(500)))
+            .unwrap();
+        let mut bytes = Vec::new();
+        let mut buf = [0_u8; 1024];
+        loop {
+            match stream.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    bytes.extend_from_slice(&buf[..n]);
+                    if http_request_complete(&bytes) {
+                        break;
+                    }
+                }
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::TimedOut
+                        || e.kind() == std::io::ErrorKind::WouldBlock =>
+                {
+                    break;
+                }
+                Err(_) => break,
+            }
+        }
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    fn http_request_complete(bytes: &[u8]) -> bool {
+        let Some(header_end) = bytes.windows(4).position(|w| w == b"\r\n\r\n") else {
+            return false;
+        };
+        let headers = String::from_utf8_lossy(&bytes[..header_end + 4]);
+        let content_length = headers
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                if name.eq_ignore_ascii_case("content-length") {
+                    value.trim().parse::<usize>().ok()
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(0);
+        bytes.len() >= header_end + 4 + content_length
+    }
+
+    #[test]
+    fn native_adapter_retries_once_after_transport_disconnect() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let server_hits = Arc::clone(&hits);
+
+        let handle = std::thread::spawn(move || {
+            let mut first = accept_with_timeout(&listener);
+            server_hits.fetch_add(1, Ordering::SeqCst);
+            let _ = read_http_request(&mut first);
+            drop(first);
+
+            let mut second = accept_with_timeout(&listener);
+            server_hits.fetch_add(1, Ordering::SeqCst);
+            let _ = read_http_request(&mut second);
+            let content = r#"{"choices":[{"message":{"content":"{\"sufficient\":true,\"answer\":\"ok\",\"citations\":[],\"model_supplement\":[]}"}}]}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                content.len(),
+                content
+            );
+            second.write_all(response.as_bytes()).unwrap();
+        });
+
+        let adapter = NativeAdapter::from_config(ProviderConfig {
+            mode: ProviderMode::Native,
+            api_key: "test-key".into(),
+            base_url: format!("http://{addr}"),
+            model: "test-model".into(),
+        });
+        let out = adapter
+            .complete(CompletionRequest {
+                system: "system".into(),
+                user: "user".into(),
+            })
+            .unwrap();
+
+        handle.join().unwrap();
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+        assert!(out.sufficient);
+        assert_eq!(out.answer.as_deref(), Some("ok"));
+    }
+
+    #[test]
+    fn native_adapter_does_not_retry_http_status_error() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let server_hits = Arc::clone(&hits);
+
+        let handle = std::thread::spawn(move || {
+            let mut stream = accept_with_timeout(&listener);
+            server_hits.fetch_add(1, Ordering::SeqCst);
+            let _ = read_http_request(&mut stream);
+            let content = r#"{"error":{"message":"bad tools"}}"#;
+            let response = format!(
+                "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                content.len(),
+                content
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        let adapter = NativeAdapter::from_config(ProviderConfig {
+            mode: ProviderMode::Native,
+            api_key: "test-key".into(),
+            base_url: format!("http://{addr}"),
+            model: "test-model".into(),
+        });
+        let err = adapter
+            .complete(CompletionRequest {
+                system: "system".into(),
+                user: "user".into(),
+            })
+            .unwrap_err();
+
+        handle.join().unwrap();
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        assert!(err.message.contains("HTTP 请求失败"));
+        assert!(err.message.contains("bad tools"));
+        assert!(!err.message.contains("重试一次"));
+    }
+
+    #[test]
+    fn native_adapter_maps_provider_safe_tool_names_back_to_runtime_names() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let handle = std::thread::spawn(move || {
+            let mut stream = accept_with_timeout(&listener);
+            let request = read_http_request(&mut stream);
+            assert!(request.contains(r#""name":"book_text""#), "{request}");
+            assert!(!request.contains(r#""name":"book.text""#), "{request}");
+            let content = r#"{"choices":[{"message":{"content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"book_text","arguments":"{\"lid\":\"1.1\"}"}}]}}],"usage":{"total_tokens":3}}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                content.len(),
+                content
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        let adapter = NativeAdapter::from_config(ProviderConfig {
+            mode: ProviderMode::Native,
+            api_key: "test-key".into(),
+            base_url: format!("http://{addr}"),
+            model: "test-model".into(),
+        });
+        let out = adapter
+            .chat(
+                &[
+                    Message::user("show text"),
+                    Message {
+                        role: Role::Assistant,
+                        content: None,
+                        tool_calls: vec![ToolCall {
+                            id: "call_prev".into(),
+                            name: "book.text".into(),
+                            arguments: "{}".into(),
+                        }],
+                        tool_call_id: None,
+                    },
+                    Message {
+                        role: Role::Tool,
+                        content: Some("previous result".into()),
+                        tool_calls: vec![],
+                        tool_call_id: Some("call_prev".into()),
+                    },
+                ],
+                &[ToolSpec {
+                    name: "book.text".into(),
+                    description: "Read text by lid".into(),
+                    parameters: serde_json::json!({
+                        "type": "object",
+                        "properties": {"lid": {"type": "string"}},
+                        "required": ["lid"],
+                    }),
+                }],
+            )
+            .unwrap();
+
+        handle.join().unwrap();
+        assert_eq!(out.tool_calls.len(), 1);
+        assert_eq!(out.tool_calls[0].name, "book.text");
+        assert_eq!(out.tool_calls[0].arguments, r#"{"lid":"1.1"}"#);
+        assert_eq!(out.usage_total_tokens, Some(3));
     }
 
     #[test]
