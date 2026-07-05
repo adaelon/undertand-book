@@ -1,5 +1,5 @@
 ﻿// PB6 profile-sidecar batch: close the independent sidecar pass only.
-//   tsx skills/build/profile-sidecar-batch.ts <book.md|epub> [--book-id <id>] [--allow-partial]
+//   tsx skills/build/profile-sidecar-batch.ts <book.md|epub> [--book-id <id>] [--allow-partial] [--content-profile technical_learning]
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { deriveBookId } from "../../packages/core/src/book-id";
 import { buildProfileArtifactHeader } from "../../packages/core/src/profile-artifact";
@@ -11,15 +11,17 @@ import {
   type ProfileSidecarArtifact,
 } from "../../packages/core/src/profile-sidecar-build";
 import type { Pass1ArtifactMeta } from "../../packages/core/src/build-resume";
+import { contentProfileUsage, parseContentProfileArgsOrExit } from "./content-profile-options";
 import { loadBookWindows } from "./load-book";
 
-const argv = process.argv.slice(2);
+const parsedProfile = parseContentProfileArgsOrExit(process.argv.slice(2), { allowPaperExecution: true });
+const argv = parsedProfile.argv;
 const book = argv.find((a) => !a.startsWith("--"));
 const bookIdIdx = argv.indexOf("--book-id");
 const override = bookIdIdx >= 0 ? argv[bookIdIdx + 1] : undefined;
 const allowPartial = argv.includes("--allow-partial");
 if (!book) {
-  console.error("usage: tsx profile-sidecar-batch.ts <book.md|epub> [--book-id <id>] [--allow-partial]");
+  console.error(`usage: tsx profile-sidecar-batch.ts <book.md|epub> [--book-id <id>] [--allow-partial] ${contentProfileUsage()}`);
   process.exit(2);
 }
 
@@ -36,7 +38,7 @@ for (const w of windows) {
   if (typeof artifact?.content_hash === "string") existing.set(w.id, { content_hash: artifact.content_hash });
 }
 
-const { done, pending } = computeProfileSidecarStatus(windows, byLid, source, existing);
+const { done, pending } = computeProfileSidecarStatus(windows, byLid, source, existing, parsedProfile.contentProfile);
 if (pending.length && !allowPartial) {
   console.error(`[profile-sidecar-batch] refusing close: ${pending.length}/${windows.length} windows pending`);
   console.error(`  pending ids: ${pending.join(",")}`);
@@ -52,7 +54,7 @@ for (const id of done) {
   formulaCandidates.push(...(artifact.formula_semantics ?? []));
 }
 
-const header = buildProfileArtifactHeader({ book_id: bookId });
+const header = buildProfileArtifactHeader({ book_id: bookId, content_profile: parsedProfile.contentProfile.id });
 const discourse = buildTechnicalLearningDiscourseIndex(header, discourseItems, lidNodes);
 const formula = buildFormulaSemanticsSidecar(header, formulaCandidates, lidNodes);
 TechnicalLearningDiscourseIndexZ.parse(discourse.sidecar);
@@ -63,7 +65,7 @@ mkdirSync(outDir, { recursive: true });
 writeFileSync(`${outDir}/discourse_index.json`, JSON.stringify(discourse.sidecar, null, 2), "utf8");
 writeFileSync(`${outDir}/formula_semantics.json`, JSON.stringify(formula.sidecar, null, 2), "utf8");
 
-console.log(`[profile-sidecar-batch] ${book}  bookId=${bookId}${allowPartial && pending.length ? "  [--allow-partial]" : ""}`);
+console.log(`[profile-sidecar-batch] ${book}  bookId=${bookId}  content_profile=${parsedProfile.contentProfile.id}${allowPartial && pending.length ? "  [--allow-partial]" : ""}`);
 console.log(`  windows=${windows.length} done=${done.length} pending=${pending.length}`);
 console.log(`  discourse_index.json items=${discourse.sidecar.items.length} dropped=${discourse.dropped.length}`);
 console.log(`  formula_semantics.json items=${formula.sidecar.items.length} pending=${formula.pending.length}`);

@@ -25,9 +25,19 @@ const leaf = (lid: string): LidNode => ({ lid, path: lid.split(".").map(Number),
 const discourse = (items: TechnicalLearningDiscourseItem[]): TechnicalLearningDiscourseIndex => ({ header, items });
 
 describe("PB3-1 edge type vocabulary", () => {
-  it("extends the closed set to 11 types including supports/rebuts/summarizes", () => {
-    expect(TECHNICAL_LEARNING_LONG_RANGE_EDGE_TYPES).toHaveLength(11);
-    for (const t of ["supports", "rebuts", "summarizes"]) {
+  it("includes technical and paper long-range edge types in the closed set", () => {
+    expect(TECHNICAL_LEARNING_LONG_RANGE_EDGE_TYPES).toHaveLength(17);
+    for (const t of [
+      "supports",
+      "rebuts",
+      "summarizes",
+      "claim_supported_by_evidence",
+      "method_supports_result",
+      "hypothesis_tested_by_experiment",
+      "related_work_contrasts",
+      "related_work_builds_on",
+      "limitation_motivates_future_work",
+    ]) {
       expect(TECHNICAL_LEARNING_LONG_RANGE_EDGE_TYPES).toContain(t);
     }
   });
@@ -140,6 +150,28 @@ describe("PB3-2a candidate builder (shared-node bridge)", () => {
 
     expect(result[0].relation_hints).toEqual(["builds_on", "prerequisite"]);
     expect(result[0].seed_reasons).toContain("signal2_prerequisite_to_elaboration");
+  });
+
+  it("sets paper method-to-result hints from paper discourse functions", () => {
+    const paperIdx = buildLidToWindowIndex([{ leafLids: ["1.1"] }, { leafLids: ["2.1", "2.2"] }]);
+    const result = buildLongRangeCandidates({
+      graphNodes: [concept("concept:method", ["1.1", "2.1"]), concept("claim:result", ["2.2"])],
+      lidToWindowIndex: paperIdx,
+      discourseIndex: discourse([
+        { lid: "1.1", mode: "informative", local_function: "method_description", relations: [] },
+        { lid: "2.2", mode: "argumentative", local_function: "result_interpretation", relations: [] },
+      ]),
+    });
+
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({
+      candidate_id: "cand:concept:method->claim:result",
+      source_lids: ["1.1"],
+      target_lids: ["2.2"],
+      relation_hints: ["method_supports_result"],
+    });
+    expect(result[0].seed_reasons).toContain("paper_signal_method_to_result");
+    expect(result[0].seed_score).toBeCloseTo(0.7);
   });
 
   it("produces nothing when no node recurs across distinct windows", () => {
@@ -259,6 +291,21 @@ describe("PB3-3 PB3 gate", () => {
     expect(result.audit.pending.map((p) => p.candidate_id)).toEqual(["p1"]);
     expect(result.audit.rejected).toEqual([{ candidate_id: "r1", reason: "topical_overlap_only" }]);
     expect(result.audit.gate_dropped).toEqual([]);
+  });
+
+  it("lowers a valid paper-specific edge type and the audit passes zod", () => {
+    const result = gatePass2BuildOutput(
+      { accepted_edges: [baseEdge({ type: "method_supports_result" })], pending_edges: [], rejected_candidates: [] },
+      header,
+      gateNodes,
+      gateLids,
+      idx,
+    );
+
+    expect(result.edges).toEqual([
+      { source: "entity:a", target: "entity:b", type: "method_supports_result", direction: "directed", scope: "long_range", weight: 0.8 },
+    ]);
+    expect(() => Pass2BuildAuditSidecarZ.parse(result.audit)).not.toThrow();
   });
 
   it("hard-drops accepted edges that violate the gate, with the right reason", () => {

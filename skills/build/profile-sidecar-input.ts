@@ -1,13 +1,15 @@
 ﻿// PB6 profile-sidecar input: same window text as Pass1, plus deterministic formula_lids.
-//   tsx skills/build/profile-sidecar-input.ts <book.md|epub> <windowId> [--book-id <id>]
+//   tsx skills/build/profile-sidecar-input.ts <book.md|epub> <windowId> [--book-id <id>] [--content-profile technical_learning]
 import { buildProfileSidecarWindowInput } from "../../packages/core/src/profile-sidecar-build";
+import { contentProfileUsage, parseContentProfileArgsOrExit } from "./content-profile-options";
 import { loadBookWindows, windowById } from "./load-book";
 
-const argv = process.argv.slice(2);
+const parsedProfile = parseContentProfileArgsOrExit(process.argv.slice(2), { allowPaperExecution: true });
+const argv = parsedProfile.argv;
 const positional = argv.filter((a) => !a.startsWith("--"));
 const [book, idStr] = positional;
 if (!book || idStr === undefined) {
-  console.error("usage: tsx profile-sidecar-input.ts <book.md|epub> <windowId> [--book-id <id>]");
+  console.error(`usage: tsx profile-sidecar-input.ts <book.md|epub> <windowId> [--book-id <id>] ${contentProfileUsage()}`);
   process.exit(2);
 }
 const id = Number(idStr);
@@ -18,7 +20,7 @@ if (!Number.isInteger(id)) {
 
 const { source, byLid, windows } = loadBookWindows(book);
 const w = windowById(windows, id);
-const input = buildProfileSidecarWindowInput(w, byLid, source);
+const input = buildProfileSidecarWindowInput(w, byLid, source, parsedProfile.contentProfile);
 
 console.log("PROFILE_SIDECAR_WINDOW");
 console.log(`window_id: ${input.window_id}`);
@@ -27,4 +29,4 @@ console.log(`formula_lids: ${JSON.stringify(input.formula_lids)}`);
 console.log("");
 console.log("TEXT");
 console.log(input.text);
-process.stderr.write(`[profile-sidecar-input] window ${id}: lids=${input.visible_lids.length} formulas=${input.formula_lids.length}\n`);
+process.stderr.write(`[profile-sidecar-input] window ${id}: content_profile=${parsedProfile.contentProfile.id} lids=${input.visible_lids.length} formulas=${input.formula_lids.length}\n`);

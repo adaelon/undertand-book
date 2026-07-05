@@ -2,21 +2,31 @@
 // merge+闸 → 锚定率 → 固化只读基座。pending(缺窗 / hash 失配)默认**拒绝收口**(缺窗=缺节点=
 // 图不完整),`--allow-partial` 显式兜底。本脚本零 LLM,是续建 loop 的末步(全 done 后收口)。
 //   tsx pass1-batch.ts <book.md|epub> [--book-id <id>] [--allow-partial]
-//     [--formula-candidates <p>] [--discourse-candidates <p>] [--pass2-output <p>]
+//     [--content-profile technical_learning] [--formula-candidates <p>] [--discourse-candidates <p>] [--pass2-output <p>]
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { mergeAndGate, type Pass1Output } from "../../packages/core/src/merge";
 import { projectCatalog } from "../../packages/core/src/catalog";
-import { FormulaSemanticsSidecarZ, Pass2BuildAuditSidecarZ, ReadOnlyBaseZ, TechnicalLearningDiscourseIndexZ } from "../../packages/core/src/zod";
+import { FormulaSemanticsSidecarZ, Pass2BuildAuditSidecarZ, ReadOnlyBaseZ, SourceManifestZ, TechnicalLearningDiscourseIndexZ } from "../../packages/core/src/zod";
 import { buildProfileArtifactHeader, buildProfileMetadata } from "../../packages/core/src/profile-artifact";
+import { buildSourceManifest } from "../../packages/core/src/source-manifest";
 import { buildFormulaSemanticsSidecar, type FormulaSemanticsBuildCandidate } from "../../packages/core/src/formula-semantics";
 import { buildTechnicalLearningDiscourseIndex, type TechnicalLearningDiscourseItem } from "../../packages/core/src/discourse-index";
 import { buildLidToWindowIndex, buildLongRangeCandidates, gatePass2BuildOutput, type Pass2LlmOutput } from "../../packages/core/src/pass2-build";
 import { deriveBookId } from "../../packages/core/src/book-id";
 import { computeBuildStatus, type Pass1Artifact } from "../../packages/core/src/build-resume";
+import { contentProfileUsage, parseContentProfileArgsOrExit } from "./content-profile-options";
 import { loadBookWindows, windowById } from "./load-book";
 
-const argv = process.argv.slice(2);
-const VALUE_FLAGS = new Set(["--book-id", "--formula-candidates", "--discourse-candidates", "--pass2-output"]);
+const parsedProfile = parseContentProfileArgsOrExit(process.argv.slice(2), { allowPaperExecution: true });
+const argv = parsedProfile.argv;
+const VALUE_FLAGS = new Set([
+  "--book-id",
+  "--formula-candidates",
+  "--discourse-candidates",
+  "--pass2-output",
+  "--original-pdf",
+  "--pdf-source-map",
+]);
 const opts: Record<string, string | undefined> = {};
 let allowPartial = false;
 const positional: string[] = [];
@@ -29,12 +39,14 @@ for (let i = 0; i < argv.length; i++) {
 }
 const book = positional[0];
 if (!book) {
-  console.error("usage: tsx pass1-batch.ts <book.md|epub> [--book-id <id>] [--allow-partial] [--formula-candidates <p>] [--discourse-candidates <p>] [--pass2-output <p>]");
+  console.error(`usage: tsx pass1-batch.ts <book.md|epub> [--book-id <id>] [--allow-partial] ${contentProfileUsage()} [--original-pdf <paper.pdf>] [--pdf-source-map <map.json>] [--formula-candidates <p>] [--discourse-candidates <p>] [--pass2-output <p>]`);
   process.exit(2);
 }
 const formulaCandidatesPath = opts["--formula-candidates"];
 const discourseCandidatesPath = opts["--discourse-candidates"];
 const pass2OutputPath = opts["--pass2-output"];
+const originalPdfPath = opts["--original-pdf"];
+const pdfSourceMapPath = opts["--pdf-source-map"];
 
 const { source, lidNodes, byLid, windows } = loadBookWindows(book);
 const bookId = deriveBookId(book, opts["--book-id"]);
@@ -47,7 +59,7 @@ for (const w of windows) {
   if (existsSync(f)) artifacts.set(w.id, JSON.parse(readFileSync(f, "utf8")) as Pass1Artifact);
 }
 // 续建判定:存在性 + content-hash 校验(陈旧/缺失=pending)
-const { done, pending } = computeBuildStatus(windows, byLid, source, artifacts);
+const { done, pending } = computeBuildStatus(windows, byLid, source, artifacts, parsedProfile.contentProfile);
 if (pending.length && !allowPartial) {
   console.error(`[pass1-batch] 拒绝收口:${pending.length}/${windows.length} 窗 pending(缺窗=缺节点=图不完整)`);
   console.error(`  pending ids: ${pending.join(",")}`);
@@ -76,8 +88,15 @@ const sampledAnchored = [...sampledLeaves].filter((l) => anchored.has(l)).length
 const sampledRate = sampledLeaves.size ? sampledAnchored / sampledLeaves.size : 0;
 
 // 固化小基座 + zod 校验(bookId 已在头部派生)
-const profileHeader = buildProfileArtifactHeader({ book_id: bookId });
+const profileHeader = buildProfileArtifactHeader({ book_id: bookId, content_profile: parsedProfile.contentProfile.id });
 const profileMetadata = buildProfileMetadata(profileHeader);
+const sourceManifest = buildSourceManifest({
+  book_id: bookId,
+  source_path: book,
+  original_pdf_path: originalPdfPath,
+  pdf_source_map_path: pdfSourceMapPath,
+});
+SourceManifestZ.parse(sourceManifest);
 const formulaSidecar = formulaCandidatesPath
   ? buildFormulaSemanticsSidecar(
       profileHeader,
@@ -125,6 +144,7 @@ mkdirSync(dir, { recursive: true });
 writeFileSync(`${dir}/base.json`, JSON.stringify(base, null, 2), "utf8");
 writeFileSync(`${dir}/source.txt`, source, "utf8"); // 原文旁路:book.text 取真原文用,按 LID.span(UTF-16)切 `[ADR-0024]`
 writeFileSync(`${dir}/profile_metadata.json`, JSON.stringify(profileMetadata, null, 2), "utf8");
+writeFileSync(`${dir}/source_manifest.json`, JSON.stringify(sourceManifest, null, 2), "utf8");
 // build-only:不被 Book::load 读,供 Pass2 prompt 输入 + 覆盖/审计调试 `[PB3 grill §2]`
 writeFileSync(`${dir}/long_range_candidates.json`, JSON.stringify(candidateIndex, null, 2), "utf8");
 if (formulaSidecar) {
@@ -137,7 +157,7 @@ if (pass2Gated) {
   writeFileSync(`${dir}/pass2_audit.json`, JSON.stringify(pass2Gated.audit, null, 2), "utf8");
 }
 
-console.log(`[pass1-batch] ${book}  bookId=${bookId}${allowPartial && pending.length ? "  [--allow-partial]" : ""}`);
+console.log(`[pass1-batch] ${book}  bookId=${bookId}  content_profile=${parsedProfile.contentProfile.id}${allowPartial && pending.length ? "  [--allow-partial]" : ""}`);
 console.log(`  窗口=${windows.length}  done=${done.length}  pending=${pending.length}  全书叶子=${lidNodes.filter((n) => n.children.length === 0).length}`);
 console.log(`  抽取输入: nodes=${outputs.reduce((s, o) => s + o.nodes.length, 0)} edges=${outputs.reduce((s, o) => s + o.edges.length, 0)}`);
 console.log(`  merge 合并: 节点合并=${report.nodesMerged} 边去重=${report.edgesDeduped}`);
@@ -147,6 +167,9 @@ console.log(`  锚定率(全书分母)=${(report.anchorRate * 100).toFixed(4)}%`
 console.log(`  锚定率(已抽窗口分母,${sampledAnchored}/${sampledLeaves.size})=${(sampledRate * 100).toFixed(2)}%`);
 console.log(`  基座固化: ${dir}/base.json  (zod 校验通过)`);
 console.log(`  profile metadata: ${dir}/profile_metadata.json`);
+console.log(
+  `  source manifest: ${dir}/source_manifest.json canonical=${sourceManifest.canonical_source.kind} pdf_attachments=${sourceManifest.attachments.length}`,
+);
 if (formulaSidecar) {
   console.log(
     `  formula semantics: ${dir}/formula_semantics.json items=${formulaSidecar.sidecar.items.length} pending=${formulaSidecar.pending.length}`,

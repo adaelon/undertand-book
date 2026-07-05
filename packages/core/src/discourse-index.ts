@@ -20,6 +20,14 @@ export type LocalFunction =
   | "question"
   | "answer"
   | "summary"
+  | "research_question"
+  | "hypothesis"
+  | "related_work"
+  | "method_description"
+  | "experiment_setup"
+  | "evidence_report"
+  | "result_interpretation"
+  | "future_work"
   | "transition";
 export type RhetoricalMove =
   | "chapter_setup"
@@ -33,6 +41,13 @@ export type RhetoricalMove =
   | "objection"
   | "resolution"
   | "recap"
+  | "abstract_summary"
+  | "related_work_positioning"
+  | "method_setup"
+  | "experiment_report"
+  | "result_claim"
+  | "limitation_acknowledgement"
+  | "future_work_projection"
   | "bridge_to_next";
 export type DiscourseRelationType =
   | "elaborates"
@@ -129,6 +144,14 @@ const LOCAL_FUNCTIONS = new Set<LocalFunction>([
   "question",
   "answer",
   "summary",
+  "research_question",
+  "hypothesis",
+  "related_work",
+  "method_description",
+  "experiment_setup",
+  "evidence_report",
+  "result_interpretation",
+  "future_work",
   "transition",
 ]);
 const RHETORICAL_MOVES = new Set<RhetoricalMove>([
@@ -143,6 +166,13 @@ const RHETORICAL_MOVES = new Set<RhetoricalMove>([
   "objection",
   "resolution",
   "recap",
+  "abstract_summary",
+  "related_work_positioning",
+  "method_setup",
+  "experiment_report",
+  "result_claim",
+  "limitation_acknowledgement",
+  "future_work_projection",
   "bridge_to_next",
 ]);
 const RELATION_TYPES = new Set<DiscourseRelationType>([

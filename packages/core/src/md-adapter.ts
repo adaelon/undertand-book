@@ -61,16 +61,20 @@ function inlineFormulaRanges(line: string): { start: number; end: number }[] {
         i = end + 2;
         continue;
       }
+      i += 2;
+      continue;
     }
     if (line[i] === "$" && line[i + 1] !== "$" && !isEscaped(line, i)) {
+      let found = false;
       for (let j = i + 1; j < line.length; j += 1) {
         if (line[j] === "$" && line[j + 1] !== "$" && line[j - 1] !== "$" && !isEscaped(line, j)) {
           if (j > i + 1) ranges.push({ start: i, end: j + 1 });
           i = j + 1;
+          found = true;
           break;
         }
-        if (j === line.length - 1) i += 1;
       }
+      if (!found) i += 1;
       continue;
     }
     i += 1;
@@ -151,6 +155,25 @@ export function markdownToBlocks(src: string): SourceBlock[] {
         }
       }
       pushAsset("formula", cs.start, end);
+      continue;
+    }
+
+    if (lineContent === "$") {
+      flush();
+      let end = cs.end;
+      let closed = false;
+      for (let j = i + 1; j < lines.length; j += 1) {
+        const endSpan = contentSpan(lines[j]);
+        end = endSpan?.end ?? lines[j].end;
+        if (endSpan && src.slice(endSpan.start, endSpan.end) === "$") {
+          i = j;
+          closed = true;
+          break;
+        }
+        if (j === lines.length - 1) i = j;
+      }
+      if (closed) pushAsset("formula", cs.start, end);
+      else appendPara(cs.start, cs.end);
       continue;
     }
 

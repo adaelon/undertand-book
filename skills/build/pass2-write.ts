@@ -1,5 +1,5 @@
 ﻿// PB3/PB6 Pass2 write: normalize one pass2-longrange-linker output and atomically persist it.
-//   tsx skills/build/pass2-write.ts <book.md|epub> <windowId> <subagent-output.json> [--book-id <id>]
+//   tsx skills/build/pass2-write.ts <book.md|epub> <windowId> <subagent-output.json> [--book-id <id>] [--content-profile technical_learning|paper] [--paper-subtype research_article|survey]
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { buildPass2Artifact } from "../../packages/core/src/pass2-orchestrate";
 import type { Pass2LlmOutput } from "../../packages/core/src/pass2-build";
@@ -9,7 +9,7 @@ import { loadPass2BuildContext, parseBookArgs } from "./pass2-common";
 const parsed = parseBookArgs(process.argv.slice(2));
 const [book, idStr, outputPath] = parsed.positional;
 if (!book || idStr === undefined || !outputPath) {
-  console.error("usage: tsx pass2-write.ts <book.md|epub> <windowId> <subagent-output.json> [--book-id <id>]");
+  console.error("usage: tsx pass2-write.ts <book.md|epub> <windowId> <subagent-output.json> [--book-id <id>] [--content-profile technical_learning|paper] [--paper-subtype research_article|survey]");
   process.exit(2);
 }
 const id = Number(idStr);
@@ -29,4 +29,4 @@ const finalPath = `${dir}/${id}.json`;
 const tmpPath = `${finalPath}.tmp`;
 writeFileSync(tmpPath, JSON.stringify(artifact, null, 2), "utf8");
 renameSync(tmpPath, finalPath);
-console.log(`[pass2-write] window ${id} -> ${finalPath} accepted=${output.accepted_edges.length} pending=${output.pending_edges.length} rejected=${output.rejected_candidates.length} hash=${artifact.content_hash.slice(0, 12)}`);
+console.log(`[pass2-write] window ${id} -> ${finalPath} content_profile=${parsed.contentProfile.id} accepted=${output.accepted_edges.length} pending=${output.pending_edges.length} rejected=${output.rejected_candidates.length} hash=${artifact.content_hash.slice(0, 12)}`);

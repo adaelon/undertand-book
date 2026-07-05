@@ -1,0 +1,18 @@
+{
+  "entries": [
+    {
+      "term": "SampleSet",
+      "term_type": "dataset_name",
+      "occurrences_lids": ["1.5.2"],
+      "chinese_gloss": "示例数据集"
+    },
+    {
+      "term": "RAG",
+      "term_type": "acronym",
+      "occurrences_lids": ["1.4.2"],
+      "defined_at_lid": "1.4.2",
+      "acronym_expansion": "Retrieval-Augmented Generation",
+      "aliases": ["Retrieval-Augmented Generation"]
+    }
+  ]
+}

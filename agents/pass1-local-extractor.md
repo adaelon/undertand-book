@@ -16,6 +16,8 @@ description: Pass1 局部抽取 subagent。逐窗口从带 LID 标注的书正�
 ```
 `[LID]` 是该段在全书中的唯一定位符(物化路径)。
 
+当输入以 `PAPER_PASS1_RULES` 开头时,前半段是 `paper` content profile 的抽取规则,`TEXT` 之后才是正文。规则头只约束抽取关注点,不是 source text,不得从规则头生成节点、边或 LID evidence。
+
 ## 抽取目标
 
 ### 节点(nodes)
@@ -30,6 +32,13 @@ description: Pass1 局部抽取 subagent。逐窗口从带 LID 标注的书正�
 - `direction` = `"directed"`(有序,如 builds_on/cites/exemplifies/defines)或 `"undirected"`(对称,如 contradicts/related_to)。
 - `scope` = `"local"`(本 Pass 恒定)。
 - `weight` = 0~1,你对这条关系成立的把握。
+
+### paper profile 关注点
+若规则头声明 `content_profile: paper`,优先抽取论文读懂所需对象,但仍降成上面的通用 `entity` / `concept` / `claim` 节点和 `local` 边:
+- research question / hypothesis / method / dataset / metric / baseline / result / limitation 可作为 entity 或 concept。
+- 论文明确主张、结果解释、限制结论可作为 claim,并锚定单个 LID。
+- claim->evidence、method->result、limitation->future_work 等只在两端都位于当前窗口时产 local edge。
+- 不抽 metadata、lexicon、跨论文关系,不新增 `paper_argument.json`。
 
 ## 输出(严格 JSON,无多余文字)
 ```json

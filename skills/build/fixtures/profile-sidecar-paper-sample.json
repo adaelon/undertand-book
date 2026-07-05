@@ -1,0 +1,29 @@
+{
+  "discourse_items": [
+    {
+      "lid": "1.1",
+      "mode": "argumentative",
+      "local_function": "research_question",
+      "rhetorical_move": "problem_framing",
+      "local_summary": "Frames the paper question.",
+      "relations": []
+    },
+    {
+      "lid": "1.4.2",
+      "mode": "argumentative",
+      "local_function": "method_description",
+      "rhetorical_move": "method_setup",
+      "local_summary": "Describes the method context.",
+      "relations": []
+    },
+    {
+      "lid": "1.5.2",
+      "mode": "argumentative",
+      "local_function": "evidence_report",
+      "rhetorical_move": "result_claim",
+      "local_summary": "Reports evidence for the result.",
+      "relations": []
+    }
+  ],
+  "formula_semantics": []
+}

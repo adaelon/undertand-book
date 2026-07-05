@@ -1,6 +1,6 @@
 // PB5-2 跨会话续建视图 CLI [ADR-0042]。新 Claude 会话冷启动第一步:零上下文、纯靠磁盘
 // `.understand-book/<bookId>/.build/pass1/<id>.json` 判哪些窗口还要(重)抽。
-//   tsx skills/build/build-status.ts <book.md|epub> [--book-id <id>]
+//   tsx skills/build/build-status.ts <book.md|epub> [--book-id <id>] [--content-profile technical_learning]
 // 逻辑确定性(无 LLM):重算窗口 → 逐窗 content-hash 校验磁盘产物 → 报 done/pending。
 import { readFileSync, existsSync } from "node:fs";
 import { segment, type SourceBlock } from "../../packages/core/src/segment";
@@ -9,13 +9,15 @@ import { epubToSource } from "../../packages/core/src/epub-adapter";
 import { splitWindows } from "../../packages/core/src/window";
 import { computeBuildStatus, type Pass1ArtifactMeta } from "../../packages/core/src/build-resume";
 import { deriveBookId } from "../../packages/core/src/book-id";
+import { contentProfileUsage, parseContentProfileArgsOrExit } from "./content-profile-options";
 
-const argv = process.argv.slice(2);
+const parsedProfile = parseContentProfileArgsOrExit(process.argv.slice(2), { allowPaperExecution: true });
+const argv = parsedProfile.argv;
 const book = argv.find((a) => !a.startsWith("--"));
 const bookIdIdx = argv.indexOf("--book-id");
 const override = bookIdIdx >= 0 ? argv[bookIdIdx + 1] : undefined;
 if (!book) {
-  console.error("usage: tsx build-status.ts <book.md|epub> [--book-id <id>]");
+  console.error(`usage: tsx build-status.ts <book.md|epub> [--book-id <id>] ${contentProfileUsage()}`);
   process.exit(2);
 }
 
@@ -40,9 +42,9 @@ for (const w of windows) {
   if (typeof meta?.content_hash === "string") existing.set(w.id, { content_hash: meta.content_hash });
 }
 
-const { done, pending } = computeBuildStatus(windows, byLid, source, existing);
+const { done, pending } = computeBuildStatus(windows, byLid, source, existing, parsedProfile.contentProfile);
 
-console.log(`[build-status] ${book}  bookId=${bookId}`);
+console.log(`[build-status] ${book}  bookId=${bookId}  content_profile=${parsedProfile.contentProfile.id}`);
 console.log(`  窗口=${windows.length}  done=${done.length}  pending=${pending.length}`);
 console.log(`  pass1 产物目录: ${pass1Dir}`);
 if (pending.length) console.log(`  pending ids: ${pending.join(",")}`);

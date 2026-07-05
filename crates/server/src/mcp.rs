@@ -16,6 +16,9 @@ pub const TOOL_NAMES: &[&str] = &[
     "book_concept",
     "book_structure",
     "book_guide_path",
+    "book_paper_metadata",
+    "book_paper_lexicon",
+    "book_paper_reading_guide",
     "book_query",
     "book_synthesize",
     "book_guide",
@@ -143,6 +146,12 @@ pub fn tools_list_result() -> Value {
             tool_schema("book_guide_path", "Return the public BookStructure guide path.", json!({
                 "at": {"type": "string"}
             })),
+            tool_schema("book_paper_metadata", "Return the current single paper metadata projection.", json!({})),
+            tool_schema("book_paper_lexicon", "Return the current single paper lexicon projection.", json!({})),
+            tool_schema("book_paper_reading_guide", "Return the paper reading projection for the current single book.", json!({
+                "mode": {"type": "string", "enum": ["skim", "close", "deep"]},
+                "stage": {"type": "string", "enum": ["passive", "active", "critical", "creative"]}
+            })),
             tool_schema("book_query", "Answer a question using explicit book evidence near anchor_lid.", json!({
                 "q": {"type": "string"},
                 "anchor_lid": {"type": "string"}
@@ -185,6 +194,9 @@ pub fn dispatch_mcp_tool(state: &mut AppState, name: &str, arguments: Value, now
         "book_concept" => route_book_concept(state, &arguments),
         "book_structure" => route_book_structure(state, &arguments),
         "book_guide_path" => route_book_guide_path(state, &arguments),
+        "book_paper_metadata" => route_book_paper_metadata(state),
+        "book_paper_lexicon" => route_book_paper_lexicon(state),
+        "book_paper_reading_guide" => route_book_paper_reading_guide(state, &arguments),
         "book_query" => route_book_query(state, &arguments),
         "book_synthesize" => route_book_synthesize(state, &arguments),
         "book_guide" => route_book_guide(state, &arguments, now_ms),
@@ -255,6 +267,32 @@ fn route_book_guide_path(state: &AppState, args: &Value) -> Reply {
     };
     match state.book.guide_path(at.as_deref()) {
         Ok(path) => ok_json(&path),
+        Err(e) => err_reply(&e),
+    }
+}
+
+fn route_book_paper_metadata(state: &AppState) -> Reply {
+    ok_json(&state.book.paper_metadata_projection())
+}
+
+fn route_book_paper_lexicon(state: &AppState) -> Reply {
+    ok_json(&state.book.paper_lexicon_projection())
+}
+
+fn route_book_paper_reading_guide(state: &AppState, args: &Value) -> Reply {
+    let mode = match optional_str(args, "mode") {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let stage = match optional_str(args, "stage") {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    match state
+        .book
+        .paper_reading_guide(mode.as_deref(), stage.as_deref())
+    {
+        Ok(guide) => ok_json(&guide),
         Err(e) => err_reply(&e),
     }
 }
@@ -795,10 +833,15 @@ mod tests {
         assert!(names.contains(&"book_guide".to_string()));
         assert!(names.contains(&"book_structure".to_string()));
         assert!(names.contains(&"book_guide_path".to_string()));
+        assert!(names.contains(&"book_paper_metadata".to_string()));
+        assert!(names.contains(&"book_paper_lexicon".to_string()));
+        assert!(names.contains(&"book_paper_reading_guide".to_string()));
         assert!(!names.iter().any(|n| n.starts_with("reader")));
         assert!(!names.iter().any(|n| n.starts_with("memory")));
         assert!(!names.contains(&"book_route_from".to_string()));
         assert!(!names.contains(&"book_route_to".to_string()));
+        assert!(!names.iter().any(|n| n.contains("cross_paper")));
+        assert!(!names.iter().any(|n| n.contains("corpus")));
     }
 
     #[test]
@@ -821,11 +864,30 @@ mod tests {
         );
         assert_eq!(s.visitor_sessions.len(), 0);
         assert_eq!(
+            dispatch_mcp_tool(&mut s, "book_paper_metadata", json!({}), "1003").status,
+            200
+        );
+        assert_eq!(s.visitor_sessions.len(), 0);
+        assert_eq!(
+            dispatch_mcp_tool(&mut s, "book_paper_lexicon", json!({}), "1004").status,
+            200
+        );
+        assert_eq!(s.visitor_sessions.len(), 0);
+        let paper = dispatch_mcp_tool(
+            &mut s,
+            "book_paper_reading_guide",
+            json!({"mode":"close", "stage":"active"}),
+            "1005",
+        );
+        assert_eq!(paper.status, 200);
+        assert!(paper.body.contains("\"available\":false"));
+        assert_eq!(s.visitor_sessions.len(), 0);
+        assert_eq!(
             dispatch_mcp_tool(
                 &mut s,
                 "book_query",
                 json!({"q":"alpha 是什么", "anchor_lid":"1.1"}),
-                "1003"
+                "1006"
             )
             .status,
             200

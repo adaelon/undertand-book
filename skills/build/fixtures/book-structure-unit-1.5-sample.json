@@ -1,0 +1,24 @@
+{
+  "unit_card": {
+    "unit_lid": "1.5",
+    "role": "synthesis",
+    "summary": {
+      "text": "States the paper goal.",
+      "evidence_lids": ["1.5.2"]
+    },
+    "candidate_key_stops": [
+      {
+        "id": "ks:1.5.2:goal",
+        "lid": "1.5.2",
+        "type": "claim",
+        "title": "Goal",
+        "reason": {
+          "text": "States the target claim for the paper.",
+          "evidence_lids": ["1.5.2"]
+        }
+      }
+    ],
+    "depends_on": ["1.4"],
+    "evidence_lids": ["1.5.2"]
+  }
+}

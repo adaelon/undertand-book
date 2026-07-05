@@ -1,0 +1,58 @@
+{
+  "spine": [
+    {
+      "lid": "1.4",
+      "role": "foundation",
+      "summary": {
+        "text": "Introduces the background for the paper.",
+        "evidence_lids": ["1.4.2"]
+      },
+      "key_stop_ids": ["ks:1.4.2:background"],
+      "depends_on": []
+    },
+    {
+      "lid": "1.5",
+      "role": "synthesis",
+      "summary": {
+        "text": "States the paper goal.",
+        "evidence_lids": ["1.5.2"]
+      },
+      "key_stop_ids": ["ks:1.5.2:goal"],
+      "depends_on": ["1.4"]
+    }
+  ],
+  "throughlines": [
+    {
+      "id": "thread:background-to-goal",
+      "name": "Background to goal",
+      "summary": {
+        "text": "Connects the background context to the stated goal.",
+        "evidence_lids": ["1.4.2", "1.5.2"]
+      },
+      "lids": ["1.4", "1.5"],
+      "key_stop_ids": ["ks:1.4.2:background", "ks:1.5.2:goal"]
+    }
+  ],
+  "key_stops": [
+    {
+      "id": "ks:1.4.2:background",
+      "lid": "1.4.2",
+      "type": "summary",
+      "title": "Background",
+      "reason": {
+        "text": "States the background context.",
+        "evidence_lids": ["1.4.2"]
+      }
+    },
+    {
+      "id": "ks:1.5.2:goal",
+      "lid": "1.5.2",
+      "type": "claim",
+      "title": "Goal",
+      "reason": {
+        "text": "States the target claim for the paper.",
+        "evidence_lids": ["1.5.2"]
+      }
+    }
+  ]
+}

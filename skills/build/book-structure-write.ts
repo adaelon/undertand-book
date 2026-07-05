@@ -1,5 +1,5 @@
 // PB7 BookStructure write: atomically persist one unit-card output or stitch output.
-//   tsx skills/build/book-structure-write.ts <book.md|epub> <unit:<lid>|stitch> <subagent-output.json> [--book-id <id>]
+//   tsx skills/build/book-structure-write.ts <book.md|epub> <unit:<lid>|stitch> <subagent-output.json> [--book-id <id>] [--content-profile technical_learning|paper] [--paper-subtype research_article|survey]
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import {
   buildBookStructureStitchArtifact,
@@ -19,11 +19,11 @@ import {
 const parsed = parseBookStructureArgs(process.argv.slice(2));
 const [book, jobId, outputPath] = parsed.positional;
 if (!book || !jobId || !outputPath) {
-  console.error("usage: tsx book-structure-write.ts <book.md|epub> <unit:<lid>|stitch> <subagent-output.json> [--book-id <id>]");
+  console.error("usage: tsx book-structure-write.ts <book.md|epub> <unit:<lid>|stitch> <subagent-output.json> [--book-id <id>] [--content-profile technical_learning|paper] [--paper-subtype research_article|survey]");
   process.exit(2);
 }
 
-const ctx = loadBookStructureBuildContext(book, parsed.override);
+const ctx = loadBookStructureBuildContext(book, parsed.override, parsed.contentProfile);
 const outputText = readFileSync(outputPath, "utf8").replace(/^\uFEFF/, "");
 
 if (jobId === "stitch") {
@@ -40,7 +40,7 @@ if (jobId === "stitch") {
   const tmpPath = `${finalPath}.tmp`;
   writeFileSync(tmpPath, JSON.stringify(artifact, null, 2), "utf8");
   renameSync(tmpPath, finalPath);
-  console.log(`[book-structure-write] stitch -> ${finalPath} spine=${output.spine?.length ?? 0} throughlines=${output.throughlines?.length ?? 0} key_stops=${output.key_stops?.length ?? 0} hash=${artifact.content_hash.slice(0, 12)}`);
+  console.log(`[book-structure-write] stitch -> ${finalPath} content_profile=${parsed.contentProfile.id} spine=${output.spine?.length ?? 0} throughlines=${output.throughlines?.length ?? 0} key_stops=${output.key_stops?.length ?? 0} hash=${artifact.content_hash.slice(0, 12)}`);
 } else {
   const source = findUnitSource(ctx, jobId);
   const output = JSON.parse(outputText) as BookStructureUnitExtractionOutput;
@@ -50,5 +50,5 @@ if (jobId === "stitch") {
   const tmpPath = `${finalPath}.tmp`;
   writeFileSync(tmpPath, JSON.stringify(artifact, null, 2), "utf8");
   renameSync(tmpPath, finalPath);
-  console.log(`[book-structure-write] ${source.job_id} -> ${finalPath} key_stop_candidates=${output.unit_card.candidate_key_stops.length} hash=${artifact.content_hash.slice(0, 12)}`);
+  console.log(`[book-structure-write] ${source.job_id} -> ${finalPath} content_profile=${parsed.contentProfile.id} key_stop_candidates=${output.unit_card.candidate_key_stops.length} hash=${artifact.content_hash.slice(0, 12)}`);
 }

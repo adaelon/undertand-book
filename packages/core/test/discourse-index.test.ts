@@ -19,6 +19,11 @@ const header = {
   core_schema_version: "core_v0",
   generated_at: "2026-06-26T00:00:00.000Z",
 };
+const paperHeader = {
+  ...header,
+  profile_id: "paper" as const,
+  profile_version: "paper_v0",
+};
 
 function validItem(): TechnicalLearningDiscourseItem {
   return {
@@ -48,6 +53,36 @@ describe("PB2 TechnicalLearningDiscourseIndex gate", () => {
     expect(result.dropped).toEqual([]);
     expect(result.sidecar.header).toEqual(header);
     expect(result.sidecar.items[0].relations[0].target_lid).toBe("1.2");
+  });
+
+  it("accepts paper discourse functions and rhetorical moves under the shared discourse sidecar", () => {
+    const result = buildTechnicalLearningDiscourseIndex(
+      paperHeader,
+      [
+        {
+          lid: "1.1",
+          mode: "argumentative",
+          local_function: "method_description",
+          rhetorical_move: "method_setup",
+          local_summary: "Describes the paper method.",
+          relations: [],
+        },
+        {
+          lid: "1.2",
+          mode: "argumentative",
+          local_function: "evidence_report",
+          rhetorical_move: "result_claim",
+          local_summary: "Reports evidence for a result.",
+          relations: [],
+        },
+      ],
+      nodes,
+    );
+
+    TechnicalLearningDiscourseIndexZ.parse(result.sidecar);
+    expect(result.dropped).toEqual([]);
+    expect(result.sidecar.header.profile_id).toBe("paper");
+    expect(result.sidecar.items.map((item) => item.local_function)).toEqual(["method_description", "evidence_report"]);
   });
 
   it("drops invalid relations without judging label semantics", () => {

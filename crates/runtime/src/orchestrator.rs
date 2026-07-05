@@ -183,6 +183,33 @@ pub fn tool_specs() -> Vec<ToolSpec> {
             }),
         ),
         s(
+            "book.paper_reading_guide",
+            "PaperReadingGuide 只读投影:组合 paper metadata/lexicon、BookStructure、graph、discourse 与原文,返回论文十问、Codebook、摘要阅读辅助。不会新增或修改持久 truth。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "mode": {"type": "string", "enum": ["skim", "close", "deep"], "description": "默认 skim"},
+                    "stage": {"type": "string", "enum": ["passive", "active", "critical", "creative"], "description": "默认 passive"}
+                }
+            }),
+        ),
+        s(
+            "book.paper_metadata",
+            "返回当前单篇 paper 的 metadata projection,保留 value/source/evidence_lids/confidence;缺 sidecar 时 explicit unavailable,不生成跨论文关系。",
+            json!({
+                "type": "object",
+                "properties": {}
+            }),
+        ),
+        s(
+            "book.paper_lexicon",
+            "返回当前单篇 paper 的 lexicon projection,用于术语/缩写/数据集候选对齐;缺 sidecar 时 explicit unavailable。",
+            json!({
+                "type": "object",
+                "properties": {}
+            }),
+        ),
+        s(
             "book.route_from",
             "从某 LID 出发的确定性导航前沿:按导航语义返回 5 类分组(back 前置/forward 深入/concretize 例证/cross 关联/continue 顺读),每步是真 LID+真边。零 LLM,用于决定『下一步去哪』。",
             json!({
@@ -320,6 +347,7 @@ const SYSTEM_PROMPT: &str = "你是这本书的阅读 agent。事实性回答经
 当用户问开放解释/综合问题且没有给引用或已知 LID 时,用 book.query(query,anchor_lid) 做锚定问答;答完书内实质问题再记录 qa。\
 当用户问『这和前后文/别处什么关系』且已有 LID 时,先 book.context(lid,near/mid/far) 取指针,再对少量相关 LID 调 book.text 或 book.synthesize。\
 book.route_from/guided_route_from/route_to/unvisited_back 只用于导航、带读、找前置和找路径,不是普通解释工具。\
+读论文时若用户要『元数据/作者/年份/数据集/术语/缩写/怎么读这篇/十问/Codebook/摘要辅助』,先调 book.paper_metadata、book.paper_lexicon 或 book.paper_reading_guide(mode,stage),再按其中 LID 证据读取原文。\
 特别注意——当用户要求操作阅读器时,必须真的调用对应 reader 工具来执行,不能只靠读原文代替:\
 要求『翻到/跳转』调 reader.gotoLid(lid);要求『高亮』调 reader.highlight(lid);要求『记笔记/记录』调 reader.note(lid,text)。\
 流程:先用 book.concept/context 定位到目标 LID,一旦定位到就立即调用 reader 工具完成操作,然后给简短终答,不要反复读原文。\
@@ -482,6 +510,15 @@ fn dispatch(
             };
             (body, None)
         }
+        "book.paper_reading_guide" => {
+            let body = match book.paper_reading_guide(sget("mode"), sget("stage")) {
+                Ok(p) => to_json(&p),
+                Err(e) => to_json(&e),
+            };
+            (body, None)
+        }
+        "book.paper_metadata" => (to_json(&book.paper_metadata_projection()), None),
+        "book.paper_lexicon" => (to_json(&book.paper_lexicon_projection()), None),
         "book.route_from" => {
             let Some(at) = sget("at") else {
                 return (
@@ -1253,6 +1290,9 @@ mod tests {
         let names: Vec<String> = tool_specs().into_iter().map(|s| s.name).collect();
         assert!(names.iter().any(|n| n == "book.structure"));
         assert!(names.iter().any(|n| n == "book.guide_path"));
+        assert!(names.iter().any(|n| n == "book.paper_reading_guide"));
+        assert!(names.iter().any(|n| n == "book.paper_metadata"));
+        assert!(names.iter().any(|n| n == "book.paper_lexicon"));
         assert!(names.iter().any(|n| n == "book.route_from"));
         assert!(names.iter().any(|n| n == "book.route_to"));
         assert!(names.iter().any(|n| n == "book.guided_route_from"));
@@ -1289,6 +1329,45 @@ mod tests {
         );
         assert!(guide.contains("\"segments\":[]"));
         assert!(guide.contains("\"available\":false"));
+        assert!(eff.is_none());
+
+        let (paper, eff) = dispatch(
+            "book.paper_reading_guide",
+            r#"{"mode":"close","stage":"active"}"#,
+            &b,
+            &mut store,
+            &mut reader,
+            &fake,
+            "t0",
+        );
+        assert!(paper.contains("\"available\":false"));
+        assert!(paper.contains("paper artifacts not attached"));
+        assert!(eff.is_none());
+
+        let (metadata, eff) = dispatch(
+            "book.paper_metadata",
+            r#"{}"#,
+            &b,
+            &mut store,
+            &mut reader,
+            &fake,
+            "t0",
+        );
+        assert!(metadata.contains("\"available\":false"));
+        assert!(metadata.contains("paper_metadata.json not attached"));
+        assert!(eff.is_none());
+
+        let (lexicon, eff) = dispatch(
+            "book.paper_lexicon",
+            r#"{}"#,
+            &b,
+            &mut store,
+            &mut reader,
+            &fake,
+            "t0",
+        );
+        assert!(lexicon.contains("\"entries\":[]"));
+        assert!(lexicon.contains("paper_lexicon.json not attached"));
         assert!(eff.is_none());
 
         let (bad, _) = dispatch(

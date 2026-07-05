@@ -1,0 +1,24 @@
+{
+  "unit_card": {
+    "unit_lid": "1.4",
+    "role": "foundation",
+    "summary": {
+      "text": "Introduces the background for the paper.",
+      "evidence_lids": ["1.4.2"]
+    },
+    "candidate_key_stops": [
+      {
+        "id": "ks:1.4.2:background",
+        "lid": "1.4.2",
+        "type": "summary",
+        "title": "Background",
+        "reason": {
+          "text": "States the background context.",
+          "evidence_lids": ["1.4.2"]
+        }
+      }
+    ],
+    "depends_on": [],
+    "evidence_lids": ["1.4.2"]
+  }
+}

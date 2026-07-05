@@ -6,6 +6,7 @@ import type { LidNode } from "./generated/LidNode";
 import type { Pass2AuditEdge, Pass2BuildAuditSidecar } from "./pass2-build";
 import type { ProfileArtifactHeader } from "./profile-artifact";
 import type { TechnicalLearningDiscourseIndex, TechnicalLearningDiscourseItem } from "./discourse-index";
+import { PAPER_PROFILE_ID, TECHNICAL_LEARNING_PROFILE, type ContentProfileDefinition } from "./content-profile";
 
 export type BookStructureSpineRole = "setup" | "foundation" | "method" | "application" | "case" | "synthesis";
 export type BookStructureKeyStopType =
@@ -64,11 +65,24 @@ export interface BookStructureTextExcerpt {
   text: string;
 }
 
+export interface BookStructureProfileRules {
+  rule_pack: "PAPER_BOOK_STRUCTURE_RULES";
+  content_profile: "paper";
+  paper_subtype: string;
+  book_structure_rules: string[];
+  unit_mapping: string[];
+  spine_strategy: string;
+  throughline_strategy: string;
+  key_stop_strategy: string;
+  metadata_policy: string;
+}
+
 export interface BookStructureUnitSource {
   job_id: string;
   unit_lid: string;
   unit_kind: LidNode["kind"];
   title_path: string[];
+  profile_rules?: BookStructureProfileRules;
   leaf_lids: string[];
   excerpts: BookStructureTextExcerpt[];
   graph_nodes: GraphNode[];
@@ -98,6 +112,7 @@ export interface BookStructureUnitArtifact {
 
 export interface BookStructureStitchPacket {
   job_id: "stitch";
+  profile_rules?: BookStructureProfileRules;
   unit_cards: BookStructureUnitCard[];
   long_range_edges: Pass2AuditEdge[];
 }
@@ -226,6 +241,31 @@ function pass2EdgesFor(leafSet: Set<string>, audit?: Pass2BuildAuditSidecar): Pa
     .sort((a, b) => a.candidate_id.localeCompare(b.candidate_id));
 }
 
+function bookStructureProfileRules(profile: ContentProfileDefinition): BookStructureProfileRules | undefined {
+  if (profile.id !== PAPER_PROFILE_ID) return undefined;
+  return {
+    rule_pack: "PAPER_BOOK_STRUCTURE_RULES",
+    content_profile: PAPER_PROFILE_ID,
+    paper_subtype: profile.paper.paper_subtype,
+    book_structure_rules: profile.paper.effective_rules.book_structure_rules,
+    unit_mapping: [
+      "abstract",
+      "introduction",
+      "related_work",
+      "method",
+      "experiment",
+      "result",
+      "discussion",
+      "limitation",
+      "conclusion",
+    ],
+    spine_strategy: "map paper sections into the shared setup/foundation/method/application/case/synthesis roles without adding paper-only roles",
+    throughline_strategy: "track research question, method-to-result chain, evidence-to-claim support, limitations, and future-work implications",
+    key_stop_strategy: "prefer contribution, research question, method, experiment design, central result, limitation, and conclusion stops with true LID evidence",
+    metadata_policy: "do not emit title/authors/venue/year/references; metadata stays in paper_metadata.json",
+  };
+}
+
 export function bookStructureUnitHash(source: BookStructureUnitSource): string {
   return sha256Json(source);
 }
@@ -242,11 +282,13 @@ export function buildBookStructureUnitSources(input: {
   discourseIndex?: TechnicalLearningDiscourseIndex;
   formulaSemantics?: FormulaSemantics[];
   pass2Audit?: Pass2BuildAuditSidecar;
+  contentProfile?: ContentProfileDefinition;
 }): BookStructureUnitSource[] {
   const byLid = new Map(input.lidNodes.map((node) => [node.lid, node]));
   const units = selectStructureUnits(input.lidNodes, byLid);
   const discourseByLid = new Map((input.discourseIndex?.items ?? []).map((item) => [item.lid, item]));
   const formulaByLid = new Map((input.formulaSemantics ?? []).map((item) => [item.formula_lid, item]));
+  const profileRules = bookStructureProfileRules(input.contentProfile ?? TECHNICAL_LEARNING_PROFILE);
 
   return units.map((unit) => {
     const leafLids = nodeLeaves(unit, byLid);
@@ -260,6 +302,7 @@ export function buildBookStructureUnitSources(input: {
       unit_lid: unit.lid,
       unit_kind: unit.kind,
       title_path: titlePathOf(unit.lid),
+      ...(profileRules ? { profile_rules: profileRules } : {}),
       leaf_lids: leafLids,
       excerpts: leafLids.map((lid) => {
         const node = byLid.get(lid);
@@ -297,9 +340,12 @@ export function buildBookStructureUnitArtifact(
 export function buildBookStructureStitchPacket(
   unitArtifacts: BookStructureUnitArtifact[],
   pass2Audit?: Pass2BuildAuditSidecar,
+  contentProfile: ContentProfileDefinition = TECHNICAL_LEARNING_PROFILE,
 ): BookStructureStitchPacket {
+  const profileRules = bookStructureProfileRules(contentProfile);
   return {
     job_id: "stitch",
+    ...(profileRules ? { profile_rules: profileRules } : {}),
     unit_cards: unitArtifacts.map((artifact) => artifact.output.unit_card),
     long_range_edges: [...(pass2Audit?.accepted ?? []), ...(pass2Audit?.pending ?? [])].sort((a, b) =>
       a.candidate_id.localeCompare(b.candidate_id),

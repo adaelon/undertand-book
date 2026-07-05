@@ -4,6 +4,7 @@ import { segment } from "../src/segment";
 import { splitWindows, type WindowBudget } from "../src/window";
 import { buildPass1Input } from "../src/pass1-input";
 import { pass1ContentHash, type Pass1ArtifactMeta } from "../src/build-resume";
+import { resolveContentProfile } from "../src/content-profile";
 import {
   buildProfileSidecarArtifact,
   buildProfileSidecarWindowInput,
@@ -52,6 +53,25 @@ describe("PB6 profile-sidecar build helpers", () => {
     expect(artifact.content_hash).toBe(pass1ContentHash(buildPass1Input(w, byLid, md)));
     expect(artifact.discourse_items).toHaveLength(1);
     expect(artifact.formula_semantics).toEqual([]);
+  });
+
+  it("adds paper discourse rules and binds profile-sidecar hash to the profile", () => {
+    const w = windows[0];
+    const paper = resolveContentProfile("paper", { paper_subtype: "survey" });
+    const technical = resolveContentProfile("technical_learning");
+    const technicalInput = buildProfileSidecarWindowInput(w, byLid, md, technical);
+    const paperInput = buildProfileSidecarWindowInput(w, byLid, md, paper);
+
+    expect(technicalInput.text).toBe(buildPass1Input(w, byLid, md).text);
+    expect(paperInput.text).toContain("PAPER_DISCOURSE_RULES");
+    expect(paperInput.text).toContain("paper_subtype: survey");
+    expect(paperInput.text).toContain("method_description");
+
+    const technicalArtifact = buildProfileSidecarArtifact(w, byLid, md, {}, technical);
+    const paperArtifact = buildProfileSidecarArtifact(w, byLid, md, {}, paper);
+    expect(technicalArtifact.content_hash).not.toBe(paperArtifact.content_hash);
+    expect(computeProfileSidecarStatus([w], byLid, md, new Map([[w.id, technicalArtifact]]), paper).pending).toEqual([w.id]);
+    expect(computeProfileSidecarStatus([w], byLid, md, new Map([[w.id, paperArtifact]]), paper).done).toEqual([w.id]);
   });
 
   it("computes done/pending using existence plus content_hash", () => {

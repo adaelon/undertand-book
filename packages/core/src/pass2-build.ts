@@ -73,6 +73,19 @@ const SIGNAL1_SOURCE_FUNCTIONS = new Set<LocalFunction>(["definition", "explanat
 const SIGNAL1_TARGET_FUNCTIONS = new Set<LocalFunction>(["application", "example", "procedure_step"]);
 const SIGNAL2_SOURCE_MOVES = new Set<RhetoricalMove>(["prerequisite", "main_point"]);
 const SIGNAL2_TARGET_MOVES = new Set<RhetoricalMove>(["concept_elaboration", "worked_example"]);
+const PAPER_METHOD_SOURCE_FUNCTIONS = new Set<LocalFunction>(["method_description"]);
+const PAPER_RESULT_TARGET_FUNCTIONS = new Set<LocalFunction>(["evidence_report", "result_interpretation"]);
+const PAPER_HYPOTHESIS_SOURCE_FUNCTIONS = new Set<LocalFunction>(["hypothesis"]);
+const PAPER_EXPERIMENT_TARGET_FUNCTIONS = new Set<LocalFunction>(["experiment_setup", "evidence_report", "result_interpretation"]);
+const PAPER_CLAIM_SOURCE_MOVES = new Set<RhetoricalMove>(["result_claim"]);
+const PAPER_EVIDENCE_TARGET_FUNCTIONS = new Set<LocalFunction>(["evidence_report", "result_interpretation"]);
+const PAPER_EVIDENCE_TARGET_MOVES = new Set<RhetoricalMove>(["experiment_report"]);
+const PAPER_RELATED_WORK_FUNCTIONS = new Set<LocalFunction>(["related_work"]);
+const PAPER_RELATED_WORK_MOVES = new Set<RhetoricalMove>(["related_work_positioning"]);
+const PAPER_LIMITATION_SOURCE_FUNCTIONS = new Set<LocalFunction>(["limitation"]);
+const PAPER_LIMITATION_SOURCE_MOVES = new Set<RhetoricalMove>(["limitation_acknowledgement"]);
+const PAPER_FUTURE_WORK_TARGET_FUNCTIONS = new Set<LocalFunction>(["future_work"]);
+const PAPER_FUTURE_WORK_TARGET_MOVES = new Set<RhetoricalMove>(["future_work_projection"]);
 
 function occLidsOf(node: GraphNode): string[] {
   if (node.type === "claim") return node.source_lid ? [node.source_lid] : [];
@@ -85,6 +98,10 @@ function uniqSort(values: string[]): string[] {
 
 function uniqHints(hints: TechnicalLearningLongRangeEdgeType[]): TechnicalLearningLongRangeEdgeType[] {
   return [...new Set(hints)];
+}
+
+function hasAny<T>(values: Array<T | undefined>, allowed: ReadonlySet<T>): boolean {
+  return values.some((value) => value !== undefined && allowed.has(value));
 }
 
 interface HintResult {
@@ -106,10 +123,7 @@ function hintsFor(
 
   const srcFuncs = sourceLids.map((l) => funcOf.get(l));
   const tgtFuncs = targetLids.map((l) => funcOf.get(l));
-  if (
-    srcFuncs.some((f) => f !== undefined && SIGNAL1_SOURCE_FUNCTIONS.has(f)) &&
-    tgtFuncs.some((f) => f !== undefined && SIGNAL1_TARGET_FUNCTIONS.has(f))
-  ) {
+  if (hasAny(srcFuncs, SIGNAL1_SOURCE_FUNCTIONS) && hasAny(tgtFuncs, SIGNAL1_TARGET_FUNCTIONS)) {
     hints.push("exemplifies", "applies");
     reasons.push("signal1_definition_to_use");
     signals++;
@@ -117,12 +131,45 @@ function hintsFor(
 
   const srcMoves = sourceLids.map((l) => moveOf.get(l));
   const tgtMoves = targetLids.map((l) => moveOf.get(l));
-  if (
-    srcMoves.some((m) => m !== undefined && SIGNAL2_SOURCE_MOVES.has(m)) &&
-    tgtMoves.some((m) => m !== undefined && SIGNAL2_TARGET_MOVES.has(m))
-  ) {
+  if (hasAny(srcMoves, SIGNAL2_SOURCE_MOVES) && hasAny(tgtMoves, SIGNAL2_TARGET_MOVES)) {
     hints.push("builds_on", "prerequisite");
     reasons.push("signal2_prerequisite_to_elaboration");
+    signals++;
+  }
+  if (hasAny(srcFuncs, PAPER_METHOD_SOURCE_FUNCTIONS) && hasAny(tgtFuncs, PAPER_RESULT_TARGET_FUNCTIONS)) {
+    hints.push("method_supports_result");
+    reasons.push("paper_signal_method_to_result");
+    signals++;
+  }
+  if (hasAny(srcFuncs, PAPER_HYPOTHESIS_SOURCE_FUNCTIONS) && hasAny(tgtFuncs, PAPER_EXPERIMENT_TARGET_FUNCTIONS)) {
+    hints.push("hypothesis_tested_by_experiment");
+    reasons.push("paper_signal_hypothesis_to_experiment");
+    signals++;
+  }
+  if (
+    hasAny(srcMoves, PAPER_CLAIM_SOURCE_MOVES) &&
+    (hasAny(tgtFuncs, PAPER_EVIDENCE_TARGET_FUNCTIONS) || hasAny(tgtMoves, PAPER_EVIDENCE_TARGET_MOVES))
+  ) {
+    hints.push("claim_supported_by_evidence");
+    reasons.push("paper_signal_claim_to_evidence");
+    signals++;
+  }
+  if (
+    hasAny(srcFuncs, PAPER_RELATED_WORK_FUNCTIONS) ||
+    hasAny(tgtFuncs, PAPER_RELATED_WORK_FUNCTIONS) ||
+    hasAny(srcMoves, PAPER_RELATED_WORK_MOVES) ||
+    hasAny(tgtMoves, PAPER_RELATED_WORK_MOVES)
+  ) {
+    hints.push("related_work_contrasts", "related_work_builds_on");
+    reasons.push("paper_signal_related_work_positioning");
+    signals++;
+  }
+  if (
+    (hasAny(srcFuncs, PAPER_LIMITATION_SOURCE_FUNCTIONS) || hasAny(srcMoves, PAPER_LIMITATION_SOURCE_MOVES)) &&
+    (hasAny(tgtFuncs, PAPER_FUTURE_WORK_TARGET_FUNCTIONS) || hasAny(tgtMoves, PAPER_FUTURE_WORK_TARGET_MOVES))
+  ) {
+    hints.push("limitation_motivates_future_work");
+    reasons.push("paper_signal_limitation_to_future_work");
     signals++;
   }
 
@@ -451,6 +498,54 @@ export const EDGE_TYPE_CONTRACTS: Record<TechnicalLearningLongRangeEdgeType, Edg
     when_not: "source denies target (contradicts) or argues against it (rebuts).",
     evidence: "source text explicitly compares/differentiates itself from target.",
     roles: "default directed (source contrasted against target); undirected only for pure symmetric comparison.",
+  },
+  claim_supported_by_evidence: {
+    type: "claim_supported_by_evidence",
+    direction: "directed",
+    when: "a paper claim is backed by reported evidence such as measurements, observations, proof, or qualitative findings.",
+    when_not: "the target merely discusses the same topic, or the evidence only supports a different/local claim.",
+    evidence: "source text states the claim; target text reports the evidence that substantiates it.",
+    roles: "source is the claim; target is the evidence supporting it.",
+  },
+  method_supports_result: {
+    type: "method_supports_result",
+    direction: "directed",
+    when: "a described method, model, protocol, or analysis procedure is what produces or justifies a reported result.",
+    when_not: "the method and result are only co-mentioned, or the target is just an example of the method.",
+    evidence: "source text describes the method; target text reports the result tied to that method.",
+    roles: "source is the method/procedure; target is the result it supports.",
+  },
+  hypothesis_tested_by_experiment: {
+    type: "hypothesis_tested_by_experiment",
+    direction: "directed",
+    when: "a stated hypothesis or research question is directly tested by an experiment, evaluation, or empirical setup.",
+    when_not: "the experiment is background-only, or it tests a different hypothesis.",
+    evidence: "source text states the hypothesis/question; target text gives the experiment or evaluation that tests it.",
+    roles: "source is the hypothesis or question; target is the experiment/evaluation.",
+  },
+  related_work_contrasts: {
+    type: "related_work_contrasts",
+    direction: "directed",
+    when: "the paper positions prior work by explicitly differentiating the current approach, result, or framing from it.",
+    when_not: "the text merely cites prior work without a contrastive relationship.",
+    evidence: "one side identifies related work; the other side states the difference or gap.",
+    roles: "source is the contrastive positioning; target is the related work or contrasted approach.",
+  },
+  related_work_builds_on: {
+    type: "related_work_builds_on",
+    direction: "directed",
+    when: "the paper's current method, problem framing, or claim explicitly extends or adapts prior work.",
+    when_not: "the prior work is only cited as background or contrasted without reuse.",
+    evidence: "source text describes the current extension/adaptation; target text identifies the prior work foundation.",
+    roles: "source is the current paper element; target is the related work foundation.",
+  },
+  limitation_motivates_future_work: {
+    type: "limitation_motivates_future_work",
+    direction: "directed",
+    when: "a stated limitation directly motivates a future-work direction or open next step.",
+    when_not: "the future work is generic or unrelated to the limitation.",
+    evidence: "source text states the limitation; target text proposes future work addressing or following from it.",
+    roles: "source is the limitation; target is the motivated future work.",
   },
 };
 

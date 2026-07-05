@@ -5,11 +5,13 @@ import {
   buildBookStructureStitchPacket,
   buildBookStructureUnitArtifact,
   buildBookStructureUnitSources,
+  bookStructureUnitHash,
   computeBookStructureStatus,
   type BookStructureCandidate,
 } from "../src/book-structure";
 import { BookStructureSidecarZ } from "../src/zod";
 import type { LidNode } from "../src/generated/LidNode";
+import { resolveContentProfile } from "../src/content-profile";
 
 const nodes: LidNode[] = [
   { lid: "1", path: [1], kind: "chapter", span: { start: 0, end: 100 }, children: ["1.1", "1.2"] },
@@ -206,6 +208,46 @@ describe("PB7 BookStructure build helpers", () => {
     expect(sources[0].discourse_items.map((item) => item.lid)).toEqual(["1.1"]);
     expect(sources[0].formula_semantics.map((item) => item.formula_lid)).toEqual(["1.2"]);
     expect(sources[0].pass2_edges.map((edge) => edge.candidate_id)).toEqual(["cand:concept:risk->claim:later"]);
+    expect(sources[0]).not.toHaveProperty("profile_rules");
+  });
+
+  it("adds paper BookStructure rules to paper unit and stitch inputs", () => {
+    const paper = resolveContentProfile("paper", { paper_subtype: "survey" });
+    const sources = buildBookStructureUnitSources({
+      lidNodes: nodes,
+      source: "Chapter one text.\nFormula text.\nChapter two text.",
+      contentProfile: paper,
+    });
+
+    expect(sources[0].profile_rules).toMatchObject({
+      rule_pack: "PAPER_BOOK_STRUCTURE_RULES",
+      content_profile: "paper",
+      paper_subtype: "survey",
+      metadata_policy: expect.stringContaining("paper_metadata.json"),
+    });
+    expect(sources[0].profile_rules?.unit_mapping).toEqual(
+      expect.arrayContaining(["abstract", "introduction", "method", "experiment", "result", "limitation", "conclusion"]),
+    );
+    expect(sources[0].profile_rules?.book_structure_rules).toEqual(
+      expect.arrayContaining(["paper.base.spine.abstract_to_conclusion", "paper.survey.spine.field_scope_to_gaps"]),
+    );
+
+    const unitArtifact = buildBookStructureUnitArtifact(sources[0], {
+      unit_card: {
+        unit_lid: "1",
+        role: "setup",
+        summary: { text: "Sets up the paper.", evidence_lids: ["1.1"] },
+        candidate_key_stops: [],
+        depends_on: [],
+        evidence_lids: ["1.1"],
+      },
+    });
+    const stitchPacket = buildBookStructureStitchPacket([unitArtifact], undefined, paper);
+
+    expect(stitchPacket.profile_rules?.content_profile).toBe("paper");
+    expect(bookStructureUnitHash(sources[0])).not.toEqual(
+      bookStructureUnitHash(buildBookStructureUnitSources({ lidNodes: nodes, source: "Chapter one text.\nFormula text.\nChapter two text." })[0]),
+    );
   });
 
   it("computes unit and stitch status from content hashes", () => {

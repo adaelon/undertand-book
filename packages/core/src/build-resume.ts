@@ -8,6 +8,8 @@ import { createHash } from "node:crypto";
 import type { LidNode } from "./generated/LidNode";
 import type { Window } from "./window";
 import { buildPass1Input, type Pass1Input } from "./pass1-input";
+import { buildProfiledPass1Input } from "./pass1-profile-input";
+import { TECHNICAL_LEARNING_PROFILE, type ContentProfileDefinition } from "./content-profile";
 import type { Pass1Output } from "./merge";
 
 /** Pass1 抽取产物落盘形状(`.build/pass1/<id>.json`)的 meta;续建视图只读 content_hash 判新鲜度。 */
@@ -27,9 +29,10 @@ export function buildPass1Artifact(
   byLid: Map<string, LidNode>,
   source: string,
   output: Pass1Output,
+  contentProfile: ContentProfileDefinition = TECHNICAL_LEARNING_PROFILE,
 ): Pass1Artifact {
   return {
-    content_hash: pass1ContentHash(buildPass1Input(window, byLid, source)),
+    content_hash: pass1ContentHash(buildProfiledPass1Input(window, byLid, source, contentProfile)),
     nodes: output.nodes,
     edges: output.edges,
   };
@@ -59,11 +62,12 @@ export function computeBuildStatus(
   byLid: Map<string, LidNode>,
   source: string,
   existing: Map<number, Pass1ArtifactMeta>,
+  contentProfile: ContentProfileDefinition = TECHNICAL_LEARNING_PROFILE,
 ): BuildStatus {
   const done: number[] = [];
   const pending: number[] = [];
   for (const w of windows) {
-    const expected = pass1ContentHash(buildPass1Input(w, byLid, source));
+    const expected = pass1ContentHash(buildProfiledPass1Input(w, byLid, source, contentProfile));
     const got = existing.get(w.id);
     if (got && got.content_hash === expected) done.push(w.id);
     else pending.push(w.id);

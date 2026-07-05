@@ -17,6 +17,8 @@ import {
 } from "../../packages/core/src/book-structure";
 import type { Pass2BuildAuditSidecar } from "../../packages/core/src/pass2-build";
 import { deriveBookId } from "../../packages/core/src/book-id";
+import { TECHNICAL_LEARNING_PROFILE, type ContentProfileDefinition } from "../../packages/core/src/content-profile";
+import { parseContentProfileArgsOrExit } from "./content-profile-options";
 import { loadBookWindows, type LoadedBook } from "./load-book";
 
 export interface BookStructureBuildContext extends LoadedBook {
@@ -29,6 +31,7 @@ export interface BookStructureBuildContext extends LoadedBook {
   formulaSemantics: FormulaSemantics[];
   pass2Audit: Pass2BuildAuditSidecar;
   unitSources: BookStructureUnitSource[];
+  contentProfile: ContentProfileDefinition;
 }
 
 function readJson<T>(path: string): T {
@@ -43,15 +46,22 @@ export function parseBookStructureArgs(argv: string[]): {
   book: string;
   override?: string;
   positional: string[];
+  contentProfile: ContentProfileDefinition;
 } {
-  const positional = argv.filter((a) => !a.startsWith("--"));
+  const parsedProfile = parseContentProfileArgsOrExit(argv, { allowPaperExecution: true });
+  const stripped = parsedProfile.argv;
+  const positional = stripped.filter((a) => !a.startsWith("--"));
   const book = positional[0];
-  const bookIdIdx = argv.indexOf("--book-id");
-  const override = bookIdIdx >= 0 ? argv[bookIdIdx + 1] : undefined;
-  return { book, override, positional };
+  const bookIdIdx = stripped.indexOf("--book-id");
+  const override = bookIdIdx >= 0 ? stripped[bookIdIdx + 1] : undefined;
+  return { book, override, positional, contentProfile: parsedProfile.contentProfile };
 }
 
-export function loadBookStructureBuildContext(book: string, override?: string): BookStructureBuildContext {
+export function loadBookStructureBuildContext(
+  book: string,
+  override?: string,
+  contentProfile?: ContentProfileDefinition,
+): BookStructureBuildContext {
   const loaded = loadBookWindows(book);
   const bookId = deriveBookId(book, override);
   const baseDir = `.understand-book/${bookId}`;
@@ -71,6 +81,7 @@ export function loadBookStructureBuildContext(book: string, override?: string): 
   const formulaSidecar = readJson<{ items?: FormulaSemantics[] } | FormulaSemantics[]>(formulaPath);
   const formulaSemantics = Array.isArray(formulaSidecar) ? formulaSidecar : formulaSidecar.items ?? [];
   const pass2Audit = readJson<Pass2BuildAuditSidecar>(pass2Path);
+  const resolvedContentProfile = contentProfile ?? TECHNICAL_LEARNING_PROFILE;
   const unitSources = buildBookStructureUnitSources({
     lidNodes: loaded.lidNodes,
     source: loaded.source,
@@ -79,6 +90,7 @@ export function loadBookStructureBuildContext(book: string, override?: string): 
     discourseIndex,
     formulaSemantics,
     pass2Audit,
+    contentProfile: resolvedContentProfile,
   });
 
   return {
@@ -92,6 +104,7 @@ export function loadBookStructureBuildContext(book: string, override?: string): 
     formulaSemantics,
     pass2Audit,
     unitSources,
+    contentProfile: resolvedContentProfile,
   };
 }
 
@@ -135,7 +148,7 @@ export function buildFreshStitchPacket(ctx: BookStructureBuildContext): BookStru
     if (!artifact || artifact.content_hash !== bookStructureUnitHash(source)) return undefined;
     unitArtifacts.push(artifact);
   }
-  return buildBookStructureStitchPacket(unitArtifacts, ctx.pass2Audit);
+  return buildBookStructureStitchPacket(unitArtifacts, ctx.pass2Audit, ctx.contentProfile);
 }
 
 export function computeCurrentBookStructureStatus(ctx: BookStructureBuildContext): {

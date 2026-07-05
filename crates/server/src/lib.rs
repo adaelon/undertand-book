@@ -443,6 +443,15 @@ fn route_book(book: &Book, store: &MemoryStore, leaf: &str, q: &HashMap<String, 
             Ok(p) => ok_json(&p),
             Err(e) => err_reply(&e),
         },
+        "paper_metadata" => ok_json(&book.paper_metadata_projection()),
+        "paper_lexicon" => ok_json(&book.paper_lexicon_projection()),
+        "paper_reading_guide" => match book.paper_reading_guide(
+            q.get("mode").map(|s| s.as_str()),
+            q.get("stage").map(|s| s.as_str()),
+        ) {
+            Ok(p) => ok_json(&p),
+            Err(e) => err_reply(&e),
+        },
         "route_from" => {
             let Some(at) = q.get("at") else {
                 return validation("INVALID_RANGE", "book.route_from 需 at 查询参数");
@@ -1325,6 +1334,20 @@ mod tests {
         assert!(guide.body.contains("\"segments\":[]"));
         assert_eq!(get(&mut s, "/book/structure?at=9.9").status, 404);
         assert_eq!(get(&mut s, "/book/guide_path?at=9.9").status, 404);
+        let paper_meta = get(&mut s, "/book/paper_metadata");
+        assert_eq!(paper_meta.status, 200);
+        assert!(paper_meta.body.contains("\"available\":false"));
+        let paper_lexicon = get(&mut s, "/book/paper_lexicon");
+        assert_eq!(paper_lexicon.status, 200);
+        assert!(paper_lexicon.body.contains("\"entries\":[]"));
+        let paper = get(&mut s, "/book/paper_reading_guide?mode=close&stage=active");
+        assert_eq!(paper.status, 200);
+        assert!(paper.body.contains("\"available\":false"));
+        assert!(paper.body.contains("paper artifacts not attached"));
+        assert_eq!(
+            get(&mut s, "/book/paper_reading_guide?mode=nope").status,
+            400
+        );
 
         // route_from:200 + 返 5 类前沿(Frontier 总含全 5 键)。
         let rf = get(&mut s, "/book/route_from?at=1.1");

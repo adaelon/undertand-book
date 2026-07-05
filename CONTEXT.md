@@ -52,6 +52,87 @@
 - **预构建期**:跑在 agent harness(Claude Code / Codex 等)里,一次性产出 `.understand-book` 产物。
 - **读时**:阅读器运行中,与任何 harness 脱钩,独立产品。
 
+## 规范化 Markdown 正文 (canonical Markdown source)
+PDF 论文 MVP 的正文真相:用户用外部 OCR / PDF-to-Markdown 工具得到并清洗后的 Markdown 文件。构建管线只以该 Markdown 生成 `source/source.txt`、`SourceBlock[]`、`LID/span/book.text`;原版 PDF 不参与正文切分。状态:NEW(详见 [docs/adr/0046])。
+
+## PDF 旁路附件 (PDF sidecar attachment)
+与规范化 Markdown 正文配对保存的原版 PDF,用于旁路预览、人工核对和未来回跳。它不是正文真相,也不是 citation anchor;图谱节点、断言、引用、FormulaSemantics 证据仍必须锚定真实 LID。状态:NEW(详见 [docs/adr/0046])。
+
+## PDF source map
+可选的 Markdown 到 PDF 版面映射 sidecar,形如 `md_span -> page/bbox`。只有存在该映射时,阅读器才能从某个 LID 近似/精确回跳原 PDF 页框;没有 source map 时只提供 PDF 旁路打开/人工核对。source map 只做 provenance,不得替代 LID 成为证据锚。状态:NEW(详见 [docs/adr/0046])。
+
+## paper profile
+英语学术论文的 content profile / extraction rule pack:把输入按论文体裁理解为 abstract、introduction、method、results、discussion、references 等论文结构和论证功能的组合,用于约束后续抽取内容与抽取规则。它不是新的存储基座或锚定体系;所有证据、引用和读时命令仍复用 LID/source/book.text。状态:NEW(详见 [docs/adr/0046], [docs/adr/0048])。
+
+## paper_subtype
+`content_profile=paper` 内部的论文体裁分型,用于在 paper base rules 之上叠加局部抽取规则。它不是新的顶层 content profile,也不得覆盖 LID/source/book.text/citation anchor、PDF 旁路、paper_metadata、paper_lexicon、单篇 MCP 边界等 paper base 契约。状态:NEW(详见 [docs/adr/0059])。
+
+## PaperSubtypeOverlay
+paper_subtype 对 paper base rules 的局部覆盖层。它只能 patch `detect_rules`、`section_classification_rules`、`metadata_extra_fields`、`argument_shape`、`graph_edge_rules`、`book_structure_rules`、`reading_guide_rules`、`validators` 等固定 slot;不得新增 Core schema、独立 pipeline 或 subtype 专属持久 truth。状态:NEW(详见 [docs/adr/0059])。
+
+## survey subtype
+综述类论文在 `paper` 规则包下的 subtype。其论证形状以领域范围、分类轴、文献簇、比较维度、综合判断、共识/分歧和未来空白为核心,而不是强套普通研究论文的 problem/method/experiment/result 链。状态:NEW(详见 [docs/adr/0059])。
+
+## paper claim source
+paper 规则包中声明事实来源层级的标记。`review_says` 表示本综述作者的转述或综合;`original_paper_verified` 表示已通过接入原始论文 MCP 或等价证据验证一手论文事实。综述中对原文献的描述默认只能标为 `review_says`。状态:NEW(详见 [docs/adr/0059])。
+
+## PaperArgumentLayer
+paper 规则包预构建抽取的论证链层:围绕 `problem -> research_question -> method -> evidence -> claim -> limitation` 组织本篇论文的可验证理解。它不是独立 `paper_argument.json`;具体落在共享 BookStructure(`spine/throughlines/key_stops`)、graph(`entity/concept/claim/edges`) 与 discourse sidecar(段落功能/语篇关系)中,再由 MCP/读时投影视图组合出来。服务单篇读懂、论文 MCP 自我说明和跨论文比较时的证据回应;每个判断必须带真实 LID evidence。状态:BOUNDARY_CHANGE(详见 [docs/adr/0049], [docs/adr/0053])。
+
+## PaperMetadataLayer
+paper 规则包预构建抽取的书目/上下文元数据层:记录 title、authors、affiliations、venue、year/date、DOI/arXiv/URL、keywords、field/topic labels、references、dataset/code/funding links 等单篇公开事实。它服务未来多论文 MCP 编排的候选对齐,不直接生成跨论文关系。所有字段必须使用 MetadataField envelope 表达 value/source/evidence/confidence;来自正文的字段必须带 LID evidence;来自用户或外部 resolver 的字段必须标 source,不得伪装成正文证据。该层作为独立 profile sidecar `paper_metadata.json` 物化,不塞进 BookStructure 或 graph。状态:BOUNDARY_CHANGE(详见 [docs/adr/0049], [docs/adr/0050], [docs/adr/0051])。
+
+## paper_metadata.json
+paper 规则包的独立 profile artifact,承载 PaperMetadataLayer。它是单篇论文的公开书目/上下文事实 sidecar,带 profile/version 头;其业务字段统一使用 MetadataField envelope,供 MCP projection 和多论文 MCP 编排读取。它不是 BookStructure,不参与 LID 树/图谱 schema,也不直接生成跨论文关系。状态:BOUNDARY_CHANGE(详见 [docs/adr/0050], [docs/adr/0051])。
+
+## PaperMetadata MVP 字段集
+paper_metadata.json 的 MVP 字段边界:只覆盖跨论文 MCP 编排最常用的对齐键,包括 title、authors、affiliations、venue、year、identifiers(DOI/arXiv/URL)、keywords、field_labels、references、datasets、code_links、funding。MVP 不做 citation style normalization、author disambiguation、institution canonicalization、BibTeX/CSL 完整兼容或 reference graph normalization。状态:NEW(详见 [docs/adr/0052])。
+
+## MetadataField
+paper metadata 字段的统一来源信封:`{value, source, evidence_lids?, confidence?}`。`source` 标记字段来自 front_matter、paper_text、user_supplied、filename、external_resolver 等来源;`evidence_lids` 只在字段可由正文 LID 证明时填写;`confidence` 表示抽取/解析置信度,不得替代 LID evidence。状态:NEW(详见 [docs/adr/0051])。
+
+## BilingualAidLayer
+面向“中文母语用户阅读英文论文”的双语辅助层。英文 `source/book.text` 仍是唯一正文真相和 citation source;中文只作为解释、释义、术语说明、句法拆解和学习辅助,不得替代原文或成为证据锚。预构建只抽关键术语/缩写/高价值短语的 paper_lexicon;普通单词、短语和句子理解走读时按需解释 + 用户 memory。状态:NEW(详见 [docs/adr/0054])。
+
+## paper_lexicon.json
+paper 规则包的双语术语 profile artifact,本质是论文术语索引而非预生成中文讲义。它承载本论文公共的关键英文词项:论文自定义术语、方法名、缩写、领域术语、数据集/指标/模型名、影响论证理解的高价值学术短语等。MVP 只抽“理解本论文必需”的词项,不抽普通英语生词。每项优先保存 term、term_type、`occurrences_lids`、`defined_at_lid?`、aliases、acronym_expansion 等索引信息;可选短中文 gloss,但深度中文解释、句法拆解和面向用户水平的讲解留给读时按上下文生成。它不保存全文翻译,也不保存读者私人不会的词。状态:BOUNDARY_CHANGE(详见 [docs/adr/0054], [docs/adr/0055], [docs/adr/0056], [docs/adr/0057])。
+
+## PaperReadingGuide projection
+paper 规则包的读时/MCP 投影视图,把单篇论文的 BookStructure、graph、discourse、paper_metadata、paper_lexicon 组合成“如何读这篇论文”的任务面。它支持速读/精读/研读层次、消极/积极/批判/创造性阶段、论文十问、Codebook 解码和摘要中文理解辅助;不新增 Core schema,不复制持久 truth。状态:NEW(详见 [docs/adr/0058])。
+
+## PaperReadingMode
+PaperReadingGuide 的阅读层次: `skim`(速读:标题/摘要/引言/贡献/是否值得读)、`close`(精读:问题/假设/方法/实验/证据/局限)、`deep`(研读:复现/公式细节/实现路径/后续研究)。状态:NEW(详见 [docs/adr/0058])。
+
+## PaperReadingStage
+PaperReadingGuide 的阅读阶段: `passive`(知道论文是什么)、`active`(知道它有什么用)、`critical`(质疑假设/实验/证据/局限)、`creative`(提出改进点和后续研究方向)。状态:NEW(详见 [docs/adr/0058])。
+
+## 论文十问 (paper reading questions)
+paper 规则包的标准 MCP/读时问答面:围绕问题/input-output、问题性质、hypothesis、相关研究/关键人物、核心贡献、实验设计、数据集、结果是否支撑假设、贡献总结、下一步工作十类问题组织回答。回答必须回到真实 LID evidence 或明确标注为 model_supplement / user reflection。状态:NEW(详见 [docs/adr/0058])。
+
+## PaperCodebook
+帮助读者“解码”论文的组合视图,不是单独产物。由 `paper_lexicon.json`(术语/缩写/方法名)、`paper_metadata.json`(作者/领域/时间/引用上下文)、BookStructure(展开逻辑)、discourse sidecar(段落功能)和 graph(claim/evidence/limitation)共同构成。状态:NEW(详见 [docs/adr/0058])。
+
+## AbstractReadingAid
+BilingualAidLayer 在论文摘要上的特化投影:围绕 abstract 的英文原文、关键术语、短中文释义、逐句理解检查和用户中文复述来暴露理解漏洞。它不做全文预翻译,也不把中文复述当 citation evidence。状态:NEW(详见 [docs/adr/0058])。
+
+## paper 消费层
+paper profile 预构建产物与读时用户任务之间的产品入口层。第一版主入口是 Web reader 单篇交互阅读:围绕单篇论文的 PaperReadingGuide、PaperCodebook、AbstractReadingAid、metadata/lexicon 与 LID 原文证据帮助读者读懂本篇;不负责跨论文综合,不把读者私有理解写回公共 paper truth。状态:NEW(2026-07-05 §0.5 paper 消费层 grill)。
+
+## content profile / extraction rule pack
+挂在 Core build pipeline 固定插槽上的可插拔抽取规则包。它决定 Pass1 抽取关注点、profile-sidecar 语篇/公式规则、Pass2 edge contracts、BookStructure key_stop/throughline 选择策略、MCP/读时投影视图;但不得改变 LID、source/book.text、citation anchor、确定性闸或 Core 命令面。状态:NEW(详见 [docs/adr/0048])。
+
+## Profile Plugin Framework
+让 `content_profile` 同时驱动预构建、后端读时/agent、前端消费的插件框架。后端 registry 管 build rules、runtime policy、projection contracts、evidence gate 和 profile manifest;前端 registry 管 profile 组件槽位、布局渲染和交互 affordance。二者通过共享 profile contract / version 对齐;前端不得拥有 paper/book truth、plan truth 或 citation policy。状态:NEW(详见 [docs/adr/0061])。
+
+## technical_learning rule pack
+当前已有抽取规则的正式规则包名,覆盖工具书、教材、技术书、数学、金融、科学、管理等说明型学习材料。现有 `pass1-local-extractor`、`profile-sidecar-extractor`、`pass2-longrange-linker`、`book-structure-extractor` 的规则应收敛为该规则包的默认实现,而不是项目全局真理。状态:BOUNDARY_CHANGE(详见 [docs/adr/0033], [docs/adr/0048])。
+
+## 单篇论文 MCP (single-paper MCP)
+一篇已构建论文对外暴露的 MCP 服务/工具面:只负责回答、检索、解释、对照本论文内部的 LID 证据与 paper profile 产物。它不拥有跨论文全局关系,也不写全局 corpus graph。状态:NEW(详见 [docs/adr/0047])。
+
+## 多论文 MCP 编排 (multi-paper MCP orchestration)
+外部 MCP 客户端(如 Claude / Codex)同时连接多个单篇论文 MCP,在运行时按用户任务询问、比较、挑战和综合多篇论文,从而建立临时跨论文关系。跨论文关系默认是会话级综合;只有用户显式保存时才进入 memory/note。状态:NEW(详见 [docs/adr/0047])。
+
 ## 阅读器 (reader)
 第三层(消费)的产品形态。一个独立的阅读应用,集成确定性导航(②)+ LLM 问答(③)。由 plugin 启动的本地临时查询服务(localhost)支撑;读时与 agent harness 无关。
 
@@ -75,6 +156,9 @@ E 的记忆所在。**独立于只读基座、用户私有、可变、跨书**�
 ## 命令面 (command surface)
 阅读器的命令可寻址引擎。人类能做的每个阅读器动作都暴露为具名、可参数化、agent 可调用的命令;GUI 是其上一层渲染。E 及任意外部 agent 与人类走**同一命令面**(人机对称、无特供),agent-CLI 普适。**一套面、三命名空间**:`book.*`(只读内容查询 ②③)/ `reader.*`(可变 UI 控制)/ `memory.*`(记忆层读写)。硬边界:reader/memory 不得写只读基座。详见 [docs/adr/0007]。
 **命令面分层** `[ADR-0014]`:命令面即 agent 的 tool 集,按是否调 LLM 分两层——**确定性命令 = 叶子工具**(见下),**LLM 命令 = 自建最小运行时被无状态调一次的暴露**(`book.query/synthesize`,本身即 agent loop)。
+
+## Reader UI Control Plane
+阅读器页面布局与面板状态的可命令化控制面,属于 `reader.*` 可变 UI 会话态。agent 不直接操作 DOM,只能发受控 `ReaderLayoutAction`(如 open/close/focus slot、切换 layout preset、pin evidence),由后端 session layout state 校验并产出可撤销 effect,前端按 profile registry 渲染同步状态。它不写 book truth、paper truth、BookStructure 或 memory。状态:NEW(详见 [docs/adr/0060])。
 
 ## 叶子工具 (leaf tool)
 确定性命令在"命令面即 agent tool 集"分层中的角色 `[ADR-0014]`:无 LLM、毫秒级、可组合的 primitive,agent loop 直接调它们捞素材。`book.manifest`(确定性拓扑)/ `book.context`(纯指针 near/mid/far,`{lid,layer,via}`)/ `book.text`(按 LID/区间取真原文)/ `book.concept`(概念全量 occurrences)即四个 book.* 叶子工具。区别于 LLM 命令(运行时暴露)。状态:NEW(详见 [docs/adr/0014])。
@@ -196,7 +280,7 @@ memory 层产物的生成机制 `[ADR-0038 修正 ADR-0018]`(命令面记录模�
 technical_learning profile 对 `route_from` 5 类前沿的**确定性教学整形** `[ADR-0034 决策4/0037]`,与 `book.synthesize`「Core+policy」同构([docs/adr/0033] 决策5)。**reorder** = 按教学优先序重排 5 类分组(组间序;无 reader_profile 时取中性默认 `continue>back>concretize>forward>cross`,占位常量待实测/profile 回填);**过滤** = 剔空组。零 LLM、确定性可单测。落 **runtime**(非 read-tools Core,守 Core/Profile 分离;profile 偏见绝不渗进 route 内核,[docs/adr/0034] 否决);经新工具 `book.guided_route_from(at, k?)` 暴露(= route_from + 整形;裸 `book.route_from` 仍在,给访客/高级)。返回有序分组 `GuidedFrontier`(保分组导航语义,不平铺)。reader_profile 个性化(新手 back 置顶 / 已懂跳过)留 P4。状态:NEW(详见 [docs/adr/0037])。
 
 ## BookStructure(书籍结构地图)
-technical_learning profile 的预构建结构 sidecar `[ADR-0044]`:描述一本书的公共结构理解,用于“带我读”先讲总体框架/当前位置意义,再进入逐停靠点 route。它不是读时临时摘要、不是 reader_profile、不是 memory;输入只来自公共书基座与 profile artifacts(`lid_tree/source_text/graph/discourse/formula/pass2_audit`),不得混入用户私人层。核心形状 = `spine + throughlines + key_stops`,所有判断必须锚定真 LID/evidence_lids。状态:NEW(详见 [docs/adr/0044])。
+content profile / extraction rule pack 驱动的预构建结构 sidecar `[ADR-0044/0048]`:描述一本书/论文的公共结构理解,用于“带我读”先讲总体框架/当前位置意义,再进入逐停靠点 route。它不是读时临时摘要、不是 reader_profile、不是 memory;输入只来自公共书基座与 profile artifacts(`lid_tree/source_text/graph/discourse/formula/pass2_audit`),不得混入用户私人层。核心形状 = `spine + throughlines + key_stops`,所有判断必须锚定真 LID/evidence_lids。`technical_learning` 与 `paper` 只改变抽取规则和投影口径,不各自复制一套结构 sidecar。状态:BOUNDARY_CHANGE(详见 [docs/adr/0044], [docs/adr/0048])。
 
 ## spine / throughline / key_stop
 BookStructure 的三层骨架 `[ADR-0044]`:

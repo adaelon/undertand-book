@@ -3,8 +3,10 @@ import type { ReadOnlyBase } from "../../packages/core/src/generated/ReadOnlyBas
 import type { FormulaSemantics } from "../../packages/core/src/generated/FormulaSemantics";
 import type { TechnicalLearningDiscourseIndex } from "../../packages/core/src/discourse-index";
 import { deriveBookId } from "../../packages/core/src/book-id";
+import type { ContentProfileDefinition } from "../../packages/core/src/content-profile";
 import { buildPass2Candidates, buildPass2WorkPacket } from "../../packages/core/src/pass2-orchestrate";
 import type { LongRangeCandidateIndex, Pass2WorkPacket } from "../../packages/core/src/pass2-build";
+import { parseContentProfileArgsOrExit } from "./content-profile-options";
 import { loadBookWindows, windowById, type LoadedBook } from "./load-book";
 
 export interface Pass2BuildContext extends LoadedBook {
@@ -64,10 +66,18 @@ export function loadPass2BuildContext(book: string, override?: string): Pass2Bui
   return { ...loaded, bookId, baseDir, base, discourseIndex, formulaSemantics, candidateIndex, packets };
 }
 
-export function parseBookArgs(argv: string[]): { book: string; override?: string; allowPartial: boolean; positional: string[] } {
-  const positional = argv.filter((a) => !a.startsWith("--"));
+export function parseBookArgs(argv: string[]): {
+  book: string;
+  override?: string;
+  allowPartial: boolean;
+  positional: string[];
+  contentProfile: ContentProfileDefinition;
+} {
+  const parsedProfile = parseContentProfileArgsOrExit(argv, { allowPaperExecution: true });
+  const stripped = parsedProfile.argv;
+  const positional = stripped.filter((a) => !a.startsWith("--"));
   const book = positional[0];
-  const bookIdIdx = argv.indexOf("--book-id");
-  const override = bookIdIdx >= 0 ? argv[bookIdIdx + 1] : undefined;
-  return { book, override, allowPartial: argv.includes("--allow-partial"), positional };
+  const bookIdIdx = stripped.indexOf("--book-id");
+  const override = bookIdIdx >= 0 ? stripped[bookIdIdx + 1] : undefined;
+  return { book, override, allowPartial: stripped.includes("--allow-partial"), positional, contentProfile: parsedProfile.contentProfile };
 }

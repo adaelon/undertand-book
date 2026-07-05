@@ -20,6 +20,8 @@ pub struct Book {
     formula_semantics: Vec<FormulaSemantics>,
     discourse_index: Vec<TechnicalLearningDiscourseItem>,
     book_structure: Option<BookStructureSidecar>,
+    paper_metadata: Option<PaperMetadataSidecar>,
+    paper_lexicon: Option<PaperLexiconSidecar>,
 }
 
 /// technical_learning discourse sidecar item(P2/P2a 契约的 Rust 读时载体)。
@@ -162,6 +164,291 @@ pub struct GuidePath {
     pub at: Option<String>,
     pub current_segment_index: Option<usize>,
     pub segments: Vec<GuidePathSegment>,
+    pub warning: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct MetadataField<T> {
+    pub value: T,
+    pub source: String,
+    #[serde(default)]
+    pub evidence_lids: Vec<String>,
+    pub confidence: Option<f32>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct PaperAuthor {
+    pub name: String,
+    pub raw: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct PaperReference {
+    pub raw: String,
+    pub identifiers: Option<HashMap<String, String>>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Default)]
+pub struct PaperMetadataIdentifiers {
+    pub doi: Option<MetadataField<String>>,
+    pub arxiv: Option<MetadataField<String>>,
+    pub url: Option<MetadataField<String>>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct PaperMetadataSidecar {
+    pub header: ProfileArtifactHeader,
+    pub title: Option<MetadataField<String>>,
+    pub authors: Option<MetadataField<Vec<PaperAuthor>>>,
+    pub affiliations: Option<MetadataField<Vec<String>>>,
+    pub venue: Option<MetadataField<String>>,
+    pub year: Option<MetadataField<i64>>,
+    pub identifiers: Option<PaperMetadataIdentifiers>,
+    pub keywords: Option<MetadataField<Vec<String>>>,
+    pub field_labels: Option<MetadataField<Vec<String>>>,
+    pub references: Option<MetadataField<Vec<PaperReference>>>,
+    pub datasets: Option<MetadataField<Vec<String>>>,
+    pub code_links: Option<MetadataField<Vec<String>>>,
+    pub funding: Option<MetadataField<Vec<String>>>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct PaperLexiconSidecar {
+    pub header: ProfileArtifactHeader,
+    pub entries: Vec<PaperLexiconEntry>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct PaperLexiconEntry {
+    pub term: String,
+    pub term_type: String,
+    #[serde(default)]
+    pub occurrences_lids: Vec<String>,
+    pub defined_at_lid: Option<String>,
+    #[serde(default)]
+    pub aliases: Vec<String>,
+    pub acronym_expansion: Option<String>,
+    pub chinese_gloss: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub enum PaperReadingMode {
+    Skim,
+    Close,
+    Deep,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub enum PaperReadingStage {
+    Passive,
+    Active,
+    Critical,
+    Creative,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub enum PaperReadingAnswerSlotKind {
+    PaperEvidence,
+    ModelSupplement,
+    UserReflection,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct PaperReadingAnswerSlot {
+    pub kind: PaperReadingAnswerSlotKind,
+    pub label: String,
+    pub instruction: String,
+    pub evidence_lids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct PaperReadingQuestion {
+    pub id: String,
+    pub question: String,
+    pub focus: String,
+    pub evidence_lids: Vec<String>,
+    pub answer_slots: Vec<PaperReadingAnswerSlot>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct PaperCodebookMetadata {
+    pub title: Option<String>,
+    pub authors: Vec<String>,
+    pub venue: Option<String>,
+    pub year: Option<i64>,
+    pub doi: Option<String>,
+    pub arxiv: Option<String>,
+    pub url: Option<String>,
+    pub keywords: Vec<String>,
+    pub field_labels: Vec<String>,
+    pub datasets: Vec<String>,
+    pub code_links: Vec<String>,
+    pub evidence_lids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct PaperCodebookTerm {
+    pub term: String,
+    pub term_type: String,
+    pub evidence_lids: Vec<String>,
+    pub defined_at_lid: Option<String>,
+    pub aliases: Vec<String>,
+    pub acronym_expansion: Option<String>,
+    pub chinese_gloss: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct PaperCodebookStructureItem {
+    pub id: String,
+    pub lid: String,
+    pub title: Option<String>,
+    pub summary: String,
+    pub evidence_lids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct PaperCodebook {
+    pub available: bool,
+    pub metadata: PaperCodebookMetadata,
+    pub terms: Vec<PaperCodebookTerm>,
+    pub throughlines: Vec<PaperCodebookStructureItem>,
+    pub key_stops: Vec<PaperCodebookStructureItem>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct PaperAbstractExcerpt {
+    pub lid: String,
+    pub text: String,
+    pub evidence_lids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct PaperAbstractCheck {
+    pub id: String,
+    pub prompt: String,
+    pub evidence_lids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct AbstractReadingAid {
+    pub available: bool,
+    pub abstract_lids: Vec<String>,
+    pub excerpts: Vec<PaperAbstractExcerpt>,
+    pub key_terms: Vec<PaperCodebookTerm>,
+    pub comprehension_checks: Vec<PaperAbstractCheck>,
+    pub user_reflection_prompt: String,
+    pub warning: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct PaperReadingGuide {
+    pub available: bool,
+    pub mode: PaperReadingMode,
+    pub stage: PaperReadingStage,
+    pub questions: Vec<PaperReadingQuestion>,
+    pub codebook: PaperCodebook,
+    pub abstract_aid: AbstractReadingAid,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct PaperMetadataStringField {
+    pub value: String,
+    pub source: String,
+    pub evidence_lids: Vec<String>,
+    pub confidence: Option<f32>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct PaperMetadataStringListField {
+    pub value: Vec<String>,
+    pub source: String,
+    pub evidence_lids: Vec<String>,
+    pub confidence: Option<f32>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct PaperMetadataNumberField {
+    pub value: i64,
+    pub source: String,
+    pub evidence_lids: Vec<String>,
+    pub confidence: Option<f32>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct PaperMetadataAuthorsField {
+    pub value: Vec<PaperAuthor>,
+    pub source: String,
+    pub evidence_lids: Vec<String>,
+    pub confidence: Option<f32>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct PaperMetadataReferencesField {
+    pub value: Vec<PaperReference>,
+    pub source: String,
+    pub evidence_lids: Vec<String>,
+    pub confidence: Option<f32>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct PaperMetadataIdentifiersProjection {
+    pub doi: Option<PaperMetadataStringField>,
+    pub arxiv: Option<PaperMetadataStringField>,
+    pub url: Option<PaperMetadataStringField>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct PaperMetadataProjection {
+    pub available: bool,
+    pub header: Option<ProfileArtifactHeader>,
+    pub title: Option<PaperMetadataStringField>,
+    pub authors: Option<PaperMetadataAuthorsField>,
+    pub affiliations: Option<PaperMetadataStringListField>,
+    pub venue: Option<PaperMetadataStringField>,
+    pub year: Option<PaperMetadataNumberField>,
+    pub identifiers: Option<PaperMetadataIdentifiersProjection>,
+    pub keywords: Option<PaperMetadataStringListField>,
+    pub field_labels: Option<PaperMetadataStringListField>,
+    pub references: Option<PaperMetadataReferencesField>,
+    pub datasets: Option<PaperMetadataStringListField>,
+    pub code_links: Option<PaperMetadataStringListField>,
+    pub funding: Option<PaperMetadataStringListField>,
+    pub warning: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct PaperLexiconProjection {
+    pub available: bool,
+    pub header: Option<ProfileArtifactHeader>,
+    pub entries: Vec<PaperCodebookTerm>,
     pub warning: Option<String>,
 }
 
@@ -342,6 +629,26 @@ fn parse_book_structure_sidecar(
     Ok(sidecar)
 }
 
+fn parse_paper_metadata_sidecar(
+    s: &str,
+    base: &ReadOnlyBase,
+) -> Result<PaperMetadataSidecar, String> {
+    let sidecar: PaperMetadataSidecar =
+        serde_json::from_str(s).map_err(|e| format!("解析 paper_metadata.json 失败: {e}"))?;
+    validate_paper_metadata_sidecar(&sidecar, base)?;
+    Ok(sidecar)
+}
+
+fn parse_paper_lexicon_sidecar(
+    s: &str,
+    base: &ReadOnlyBase,
+) -> Result<PaperLexiconSidecar, String> {
+    let sidecar: PaperLexiconSidecar =
+        serde_json::from_str(s).map_err(|e| format!("解析 paper_lexicon.json 失败: {e}"))?;
+    validate_paper_lexicon_sidecar(&sidecar, base)?;
+    Ok(sidecar)
+}
+
 fn validate_anchored_text(
     owner: &str,
     text: &AnchoredText,
@@ -456,12 +763,185 @@ fn validate_book_structure_sidecar(
     Ok(())
 }
 
+fn validate_metadata_field<T>(
+    field_name: &str,
+    field: &MetadataField<T>,
+    lids: &HashSet<String>,
+) -> Result<(), String> {
+    if matches!(field.source.as_str(), "front_matter" | "paper_text")
+        && field.evidence_lids.is_empty()
+    {
+        return Err(format!("paper_metadata {field_name}.evidence_lids 缺失"));
+    }
+    for lid in &field.evidence_lids {
+        if !lids.contains(lid) {
+            return Err(format!(
+                "paper_metadata {field_name}.evidence_lids 含不存在 LID: {lid}"
+            ));
+        }
+    }
+    if let Some(confidence) = field.confidence {
+        if !(0.0..=1.0).contains(&confidence) {
+            return Err(format!("paper_metadata {field_name}.confidence 不在 0..1"));
+        }
+    }
+    Ok(())
+}
+
+fn validate_paper_metadata_sidecar(
+    sidecar: &PaperMetadataSidecar,
+    base: &ReadOnlyBase,
+) -> Result<(), String> {
+    let lids: HashSet<String> = base.lid_nodes.iter().map(|n| n.lid.clone()).collect();
+    if let Some(field) = &sidecar.title {
+        validate_metadata_field("title", field, &lids)?;
+    }
+    if let Some(field) = &sidecar.authors {
+        validate_metadata_field("authors", field, &lids)?;
+    }
+    if let Some(field) = &sidecar.affiliations {
+        validate_metadata_field("affiliations", field, &lids)?;
+    }
+    if let Some(field) = &sidecar.venue {
+        validate_metadata_field("venue", field, &lids)?;
+    }
+    if let Some(field) = &sidecar.year {
+        validate_metadata_field("year", field, &lids)?;
+    }
+    if let Some(identifiers) = &sidecar.identifiers {
+        if let Some(field) = &identifiers.doi {
+            validate_metadata_field("identifiers.doi", field, &lids)?;
+        }
+        if let Some(field) = &identifiers.arxiv {
+            validate_metadata_field("identifiers.arxiv", field, &lids)?;
+        }
+        if let Some(field) = &identifiers.url {
+            validate_metadata_field("identifiers.url", field, &lids)?;
+        }
+    }
+    if let Some(field) = &sidecar.keywords {
+        validate_metadata_field("keywords", field, &lids)?;
+    }
+    if let Some(field) = &sidecar.field_labels {
+        validate_metadata_field("field_labels", field, &lids)?;
+    }
+    if let Some(field) = &sidecar.references {
+        validate_metadata_field("references", field, &lids)?;
+    }
+    if let Some(field) = &sidecar.datasets {
+        validate_metadata_field("datasets", field, &lids)?;
+    }
+    if let Some(field) = &sidecar.code_links {
+        validate_metadata_field("code_links", field, &lids)?;
+    }
+    if let Some(field) = &sidecar.funding {
+        validate_metadata_field("funding", field, &lids)?;
+    }
+    Ok(())
+}
+
+fn validate_paper_lexicon_sidecar(
+    sidecar: &PaperLexiconSidecar,
+    base: &ReadOnlyBase,
+) -> Result<(), String> {
+    let lids: HashSet<String> = base.lid_nodes.iter().map(|n| n.lid.clone()).collect();
+    let mut terms = HashSet::new();
+    for entry in &sidecar.entries {
+        let term_key = entry.term.trim().to_lowercase();
+        if term_key.is_empty() {
+            return Err("paper_lexicon entry term 为空".into());
+        }
+        if !terms.insert(term_key) {
+            return Err(format!("paper_lexicon entry 重复 term: {}", entry.term));
+        }
+        if entry.term_type.trim().is_empty() {
+            return Err(format!("paper_lexicon entry {} term_type 为空", entry.term));
+        }
+        if entry.occurrences_lids.is_empty() {
+            return Err(format!(
+                "paper_lexicon entry {} 缺 occurrences_lids",
+                entry.term
+            ));
+        }
+        for lid in &entry.occurrences_lids {
+            if !lids.contains(lid) {
+                return Err(format!(
+                    "paper_lexicon entry {} occurrences_lids 含不存在 LID: {}",
+                    entry.term, lid
+                ));
+            }
+        }
+        if let Some(lid) = &entry.defined_at_lid {
+            if !lids.contains(lid) {
+                return Err(format!(
+                    "paper_lexicon entry {} defined_at_lid 不存在: {}",
+                    entry.term, lid
+                ));
+            }
+            if !entry.occurrences_lids.iter().any(|own| own == lid) {
+                return Err(format!(
+                    "paper_lexicon entry {} defined_at_lid 未出现在 occurrences_lids",
+                    entry.term
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn lid_contains(container: &str, lid: &str) -> bool {
     lid == container || lid.starts_with(&format!("{container}."))
 }
 
 fn lid_related(a: &str, b: &str) -> bool {
     lid_contains(a, b) || lid_contains(b, a)
+}
+
+fn push_unique(target: &mut Vec<String>, value: &str) {
+    if !target.iter().any(|own| own == value) {
+        target.push(value.to_string());
+    }
+}
+
+fn push_unique_all(target: &mut Vec<String>, values: &[String]) {
+    for value in values {
+        push_unique(target, value);
+    }
+}
+
+fn contains_any(value: &Option<String>, needles: &[&str]) -> bool {
+    let Some(value) = value else {
+        return false;
+    };
+    let lower = value.to_lowercase();
+    needles.iter().any(|needle| lower.contains(needle))
+}
+
+fn parse_paper_reading_mode(raw: Option<&str>) -> Result<PaperReadingMode, ToolError> {
+    match raw.unwrap_or("skim") {
+        "skim" => Ok(PaperReadingMode::Skim),
+        "close" => Ok(PaperReadingMode::Close),
+        "deep" => Ok(PaperReadingMode::Deep),
+        other => Err(ToolError {
+            error_code: "INVALID_MODE".into(),
+            category: "validation".into(),
+            message: format!("paper_reading_guide mode 不支持: {other}"),
+        }),
+    }
+}
+
+fn parse_paper_reading_stage(raw: Option<&str>) -> Result<PaperReadingStage, ToolError> {
+    match raw.unwrap_or("passive") {
+        "passive" => Ok(PaperReadingStage::Passive),
+        "active" => Ok(PaperReadingStage::Active),
+        "critical" => Ok(PaperReadingStage::Critical),
+        "creative" => Ok(PaperReadingStage::Creative),
+        other => Err(ToolError {
+            error_code: "INVALID_STAGE".into(),
+            category: "validation".into(),
+            message: format!("paper_reading_guide stage 不支持: {other}"),
+        }),
+    }
 }
 
 impl Book {
@@ -496,10 +976,24 @@ impl Book {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
             Err(e) => return Err(format!("读 book_structure.json 失败: {e}")),
         };
+        let paper_metadata_path = format!("{dir}/paper_metadata.json");
+        let paper_metadata = match std::fs::read_to_string(&paper_metadata_path) {
+            Ok(s) => Some(parse_paper_metadata_sidecar(&s, &base)?),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(format!("读 paper_metadata.json 失败: {e}")),
+        };
+        let paper_lexicon_path = format!("{dir}/paper_lexicon.json");
+        let paper_lexicon = match std::fs::read_to_string(&paper_lexicon_path) {
+            Ok(s) => Some(parse_paper_lexicon_sidecar(&s, &base)?),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(format!("读 paper_lexicon.json 失败: {e}")),
+        };
         Ok(Book::new(base, &source)
             .with_formula_semantics(formula_semantics)
             .with_discourse_items(discourse_items)
-            .with_book_structure(book_structure))
+            .with_book_structure(book_structure)
+            .with_paper_metadata(paper_metadata)
+            .with_paper_lexicon(paper_lexicon))
     }
 
     pub fn new(base: ReadOnlyBase, source: &str) -> Book {
@@ -524,6 +1018,8 @@ impl Book {
             formula_semantics: Vec::new(),
             discourse_index: Vec::new(),
             book_structure: None,
+            paper_metadata: None,
+            paper_lexicon: None,
         }
     }
 
@@ -557,6 +1053,147 @@ impl Book {
 
     pub fn book_structure(&self) -> Option<&BookStructureSidecar> {
         self.book_structure.as_ref()
+    }
+
+    pub fn with_paper_metadata(mut self, paper_metadata: Option<PaperMetadataSidecar>) -> Book {
+        self.paper_metadata = paper_metadata;
+        self
+    }
+
+    pub fn paper_metadata(&self) -> Option<&PaperMetadataSidecar> {
+        self.paper_metadata.as_ref()
+    }
+
+    pub fn with_paper_lexicon(mut self, paper_lexicon: Option<PaperLexiconSidecar>) -> Book {
+        self.paper_lexicon = paper_lexicon;
+        self
+    }
+
+    pub fn paper_lexicon(&self) -> Option<&PaperLexiconSidecar> {
+        self.paper_lexicon.as_ref()
+    }
+
+    fn metadata_string_field(
+        field: &Option<MetadataField<String>>,
+    ) -> Option<PaperMetadataStringField> {
+        field.as_ref().map(|field| PaperMetadataStringField {
+            value: field.value.clone(),
+            source: field.source.clone(),
+            evidence_lids: field.evidence_lids.clone(),
+            confidence: field.confidence,
+        })
+    }
+
+    fn metadata_string_list_field(
+        field: &Option<MetadataField<Vec<String>>>,
+    ) -> Option<PaperMetadataStringListField> {
+        field.as_ref().map(|field| PaperMetadataStringListField {
+            value: field.value.clone(),
+            source: field.source.clone(),
+            evidence_lids: field.evidence_lids.clone(),
+            confidence: field.confidence,
+        })
+    }
+
+    fn metadata_number_field(
+        field: &Option<MetadataField<i64>>,
+    ) -> Option<PaperMetadataNumberField> {
+        field.as_ref().map(|field| PaperMetadataNumberField {
+            value: field.value,
+            source: field.source.clone(),
+            evidence_lids: field.evidence_lids.clone(),
+            confidence: field.confidence,
+        })
+    }
+
+    fn metadata_authors_field(
+        field: &Option<MetadataField<Vec<PaperAuthor>>>,
+    ) -> Option<PaperMetadataAuthorsField> {
+        field.as_ref().map(|field| PaperMetadataAuthorsField {
+            value: field.value.clone(),
+            source: field.source.clone(),
+            evidence_lids: field.evidence_lids.clone(),
+            confidence: field.confidence,
+        })
+    }
+
+    fn metadata_references_field(
+        field: &Option<MetadataField<Vec<PaperReference>>>,
+    ) -> Option<PaperMetadataReferencesField> {
+        field.as_ref().map(|field| PaperMetadataReferencesField {
+            value: field.value.clone(),
+            source: field.source.clone(),
+            evidence_lids: field.evidence_lids.clone(),
+            confidence: field.confidence,
+        })
+    }
+
+    pub fn paper_metadata_projection(&self) -> PaperMetadataProjection {
+        let Some(metadata) = &self.paper_metadata else {
+            return PaperMetadataProjection {
+                available: false,
+                header: None,
+                title: None,
+                authors: None,
+                affiliations: None,
+                venue: None,
+                year: None,
+                identifiers: None,
+                keywords: None,
+                field_labels: None,
+                references: None,
+                datasets: None,
+                code_links: None,
+                funding: None,
+                warning: Some("paper_metadata.json not attached".into()),
+            };
+        };
+        let identifiers = metadata.identifiers.as_ref().and_then(|identifiers| {
+            let projection = PaperMetadataIdentifiersProjection {
+                doi: Self::metadata_string_field(&identifiers.doi),
+                arxiv: Self::metadata_string_field(&identifiers.arxiv),
+                url: Self::metadata_string_field(&identifiers.url),
+            };
+            if projection.doi.is_some() || projection.arxiv.is_some() || projection.url.is_some() {
+                Some(projection)
+            } else {
+                None
+            }
+        });
+        PaperMetadataProjection {
+            available: true,
+            header: Some(metadata.header.clone()),
+            title: Self::metadata_string_field(&metadata.title),
+            authors: Self::metadata_authors_field(&metadata.authors),
+            affiliations: Self::metadata_string_list_field(&metadata.affiliations),
+            venue: Self::metadata_string_field(&metadata.venue),
+            year: Self::metadata_number_field(&metadata.year),
+            identifiers,
+            keywords: Self::metadata_string_list_field(&metadata.keywords),
+            field_labels: Self::metadata_string_list_field(&metadata.field_labels),
+            references: Self::metadata_references_field(&metadata.references),
+            datasets: Self::metadata_string_list_field(&metadata.datasets),
+            code_links: Self::metadata_string_list_field(&metadata.code_links),
+            funding: Self::metadata_string_list_field(&metadata.funding),
+            warning: None,
+        }
+    }
+
+    pub fn paper_lexicon_projection(&self) -> PaperLexiconProjection {
+        let Some(lexicon) = &self.paper_lexicon else {
+            return PaperLexiconProjection {
+                available: false,
+                header: None,
+                entries: Vec::new(),
+                warning: Some("paper_lexicon.json not attached".into()),
+            };
+        };
+        PaperLexiconProjection {
+            available: true,
+            header: Some(lexicon.header.clone()),
+            entries: self.paper_codebook_terms(),
+            warning: None,
+        }
     }
 
     fn key_stop_map(
@@ -686,6 +1323,692 @@ impl Book {
             current_segment_index: at.and_then(|lid| self.matching_spine_index(sidecar, lid)),
             segments,
             warning: None,
+        })
+    }
+
+    fn paper_profile_attached(&self) -> bool {
+        self.paper_metadata.is_some()
+            || self.paper_lexicon.is_some()
+            || self
+                .book_structure
+                .as_ref()
+                .map(|s| s.header.profile_id == "paper")
+                .unwrap_or(false)
+    }
+
+    fn metadata_evidence<T>(&self, field: &Option<MetadataField<T>>, out: &mut Vec<String>) {
+        if let Some(field) = field {
+            push_unique_all(out, &field.evidence_lids);
+        }
+    }
+
+    fn paper_metadata_evidence_lids(&self) -> Vec<String> {
+        let mut lids = Vec::new();
+        let Some(metadata) = &self.paper_metadata else {
+            return lids;
+        };
+        self.metadata_evidence(&metadata.title, &mut lids);
+        self.metadata_evidence(&metadata.authors, &mut lids);
+        self.metadata_evidence(&metadata.affiliations, &mut lids);
+        self.metadata_evidence(&metadata.venue, &mut lids);
+        self.metadata_evidence(&metadata.year, &mut lids);
+        if let Some(identifiers) = &metadata.identifiers {
+            self.metadata_evidence(&identifiers.doi, &mut lids);
+            self.metadata_evidence(&identifiers.arxiv, &mut lids);
+            self.metadata_evidence(&identifiers.url, &mut lids);
+        }
+        self.metadata_evidence(&metadata.keywords, &mut lids);
+        self.metadata_evidence(&metadata.field_labels, &mut lids);
+        self.metadata_evidence(&metadata.references, &mut lids);
+        self.metadata_evidence(&metadata.datasets, &mut lids);
+        self.metadata_evidence(&metadata.code_links, &mut lids);
+        self.metadata_evidence(&metadata.funding, &mut lids);
+        lids
+    }
+
+    fn paper_codebook_metadata(&self) -> PaperCodebookMetadata {
+        let Some(metadata) = &self.paper_metadata else {
+            return PaperCodebookMetadata {
+                title: None,
+                authors: Vec::new(),
+                venue: None,
+                year: None,
+                doi: None,
+                arxiv: None,
+                url: None,
+                keywords: Vec::new(),
+                field_labels: Vec::new(),
+                datasets: Vec::new(),
+                code_links: Vec::new(),
+                evidence_lids: Vec::new(),
+            };
+        };
+        let identifiers = metadata.identifiers.as_ref();
+        PaperCodebookMetadata {
+            title: metadata.title.as_ref().map(|f| f.value.clone()),
+            authors: metadata
+                .authors
+                .as_ref()
+                .map(|f| f.value.iter().map(|a| a.name.clone()).collect())
+                .unwrap_or_default(),
+            venue: metadata.venue.as_ref().map(|f| f.value.clone()),
+            year: metadata.year.as_ref().map(|f| f.value),
+            doi: identifiers.and_then(|i| i.doi.as_ref().map(|f| f.value.clone())),
+            arxiv: identifiers.and_then(|i| i.arxiv.as_ref().map(|f| f.value.clone())),
+            url: identifiers.and_then(|i| i.url.as_ref().map(|f| f.value.clone())),
+            keywords: metadata
+                .keywords
+                .as_ref()
+                .map(|f| f.value.clone())
+                .unwrap_or_default(),
+            field_labels: metadata
+                .field_labels
+                .as_ref()
+                .map(|f| f.value.clone())
+                .unwrap_or_default(),
+            datasets: metadata
+                .datasets
+                .as_ref()
+                .map(|f| f.value.clone())
+                .unwrap_or_default(),
+            code_links: metadata
+                .code_links
+                .as_ref()
+                .map(|f| f.value.clone())
+                .unwrap_or_default(),
+            evidence_lids: self.paper_metadata_evidence_lids(),
+        }
+    }
+
+    fn paper_codebook_terms(&self) -> Vec<PaperCodebookTerm> {
+        self.paper_lexicon
+            .as_ref()
+            .map(|lexicon| {
+                lexicon
+                    .entries
+                    .iter()
+                    .map(|entry| {
+                        let mut evidence_lids = Vec::new();
+                        push_unique_all(&mut evidence_lids, &entry.occurrences_lids);
+                        if let Some(lid) = &entry.defined_at_lid {
+                            push_unique(&mut evidence_lids, lid);
+                        }
+                        PaperCodebookTerm {
+                            term: entry.term.clone(),
+                            term_type: entry.term_type.clone(),
+                            evidence_lids,
+                            defined_at_lid: entry.defined_at_lid.clone(),
+                            aliases: entry.aliases.clone(),
+                            acronym_expansion: entry.acronym_expansion.clone(),
+                            chinese_gloss: entry.chinese_gloss.clone(),
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn paper_codebook(&self) -> PaperCodebook {
+        let metadata = self.paper_codebook_metadata();
+        let terms = self.paper_codebook_terms();
+        let mut warnings = Vec::new();
+        if self.paper_metadata.is_none() {
+            warnings.push("paper_metadata.json not attached".into());
+        }
+        if self.paper_lexicon.is_none() {
+            warnings.push("paper_lexicon.json not attached".into());
+        }
+        if self.book_structure.is_none() {
+            warnings.push("book_structure.json not attached".into());
+        }
+
+        let (throughlines, key_stops) = match &self.book_structure {
+            Some(sidecar) => (
+                sidecar
+                    .throughlines
+                    .iter()
+                    .map(|thread| PaperCodebookStructureItem {
+                        id: thread.id.clone(),
+                        lid: thread.lids.first().cloned().unwrap_or_default(),
+                        title: Some(thread.name.clone()),
+                        summary: thread.summary.text.clone(),
+                        evidence_lids: thread.summary.evidence_lids.clone(),
+                    })
+                    .collect(),
+                sidecar
+                    .key_stops
+                    .iter()
+                    .map(|stop| PaperCodebookStructureItem {
+                        id: stop.id.clone(),
+                        lid: stop.lid.clone(),
+                        title: stop.title.clone(),
+                        summary: stop.reason.text.clone(),
+                        evidence_lids: stop.reason.evidence_lids.clone(),
+                    })
+                    .collect(),
+            ),
+            None => (Vec::new(), Vec::new()),
+        };
+
+        PaperCodebook {
+            available: self.paper_profile_attached()
+                && (self.paper_metadata.is_some()
+                    || self.paper_lexicon.is_some()
+                    || self.book_structure.is_some()),
+            metadata,
+            terms,
+            throughlines,
+            key_stops,
+            warnings,
+        }
+    }
+
+    fn graph_lids_for_edge_types(&self, edge_types: &[&str]) -> Vec<String> {
+        let mut lids = Vec::new();
+        for edge in &self.base.graph_edges {
+            if !edge_types.iter().any(|t| *t == edge.edge_type.as_str()) {
+                continue;
+            }
+            for node_id in [&edge.source, &edge.target] {
+                let Some(index) = self.node_idx.get(node_id) else {
+                    continue;
+                };
+                let node = &self.base.graph_nodes[*index];
+                if let Some(lid) = &node.source_lid {
+                    push_unique(&mut lids, lid);
+                }
+                push_unique_all(&mut lids, &node.occurrences);
+            }
+        }
+        lids
+    }
+
+    fn graph_lids_for_claims(&self) -> Vec<String> {
+        let mut lids = Vec::new();
+        for node in &self.base.graph_nodes {
+            if node.node_type == GraphNodeType::Claim {
+                if let Some(lid) = &node.source_lid {
+                    push_unique(&mut lids, lid);
+                }
+            }
+        }
+        lids
+    }
+
+    fn discourse_lids_by_keywords(&self, needles: &[&str]) -> Vec<String> {
+        let mut lids = Vec::new();
+        for item in &self.discourse_index {
+            if contains_any(&item.local_function, needles)
+                || contains_any(&item.rhetorical_move, needles)
+                || contains_any(&item.local_summary, needles)
+            {
+                push_unique(&mut lids, &item.lid);
+                for relation in &item.relations {
+                    push_unique_all(&mut lids, &relation.evidence_lids);
+                }
+            }
+        }
+        lids
+    }
+
+    fn structure_lids_by_keywords(&self, needles: &[&str]) -> Vec<String> {
+        let mut lids = Vec::new();
+        let Some(sidecar) = &self.book_structure else {
+            return lids;
+        };
+        for unit in &sidecar.spine {
+            let summary = Some(unit.summary.text.clone());
+            if contains_any(&summary, needles) {
+                push_unique(&mut lids, &unit.lid);
+                push_unique_all(&mut lids, &unit.summary.evidence_lids);
+            }
+        }
+        for stop in &sidecar.key_stops {
+            let title = stop.title.clone();
+            let reason = Some(stop.reason.text.clone());
+            if contains_any(&title, needles) || contains_any(&reason, needles) {
+                push_unique(&mut lids, &stop.lid);
+                push_unique_all(&mut lids, &stop.reason.evidence_lids);
+            }
+        }
+        for thread in &sidecar.throughlines {
+            let name = Some(thread.name.clone());
+            let summary = Some(thread.summary.text.clone());
+            if contains_any(&name, needles) || contains_any(&summary, needles) {
+                push_unique_all(&mut lids, &thread.lids);
+                push_unique_all(&mut lids, &thread.summary.evidence_lids);
+            }
+        }
+        lids
+    }
+
+    fn metadata_field_lids_for(&self, field_name: &str) -> Vec<String> {
+        let mut lids = Vec::new();
+        let Some(metadata) = &self.paper_metadata else {
+            return lids;
+        };
+        match field_name {
+            "references" => self.metadata_evidence(&metadata.references, &mut lids),
+            "datasets" => self.metadata_evidence(&metadata.datasets, &mut lids),
+            "keywords" => self.metadata_evidence(&metadata.keywords, &mut lids),
+            "code_links" => self.metadata_evidence(&metadata.code_links, &mut lids),
+            _ => {}
+        }
+        lids
+    }
+
+    fn lexicon_lids_for_term_types(&self, term_types: &[&str]) -> Vec<String> {
+        let mut lids = Vec::new();
+        let Some(lexicon) = &self.paper_lexicon else {
+            return lids;
+        };
+        for entry in &lexicon.entries {
+            if term_types.iter().any(|t| *t == entry.term_type.as_str()) {
+                push_unique_all(&mut lids, &entry.occurrences_lids);
+                if let Some(lid) = &entry.defined_at_lid {
+                    push_unique(&mut lids, lid);
+                }
+            }
+        }
+        lids
+    }
+
+    fn evidence_for_paper_question(&self, id: &str) -> Vec<String> {
+        let mut lids = Vec::new();
+        match id {
+            "problem_input_output" => {
+                push_unique_all(
+                    &mut lids,
+                    &self.discourse_lids_by_keywords(&[
+                        "problem",
+                        "question",
+                        "input",
+                        "output",
+                        "abstract",
+                        "introduction",
+                    ]),
+                );
+                push_unique_all(
+                    &mut lids,
+                    &self.structure_lids_by_keywords(&["problem", "question", "goal"]),
+                );
+            }
+            "problem_nature" => {
+                push_unique_all(
+                    &mut lids,
+                    &self.discourse_lids_by_keywords(&[
+                        "motivation",
+                        "background",
+                        "problem",
+                        "gap",
+                        "limitation",
+                    ]),
+                );
+                push_unique_all(
+                    &mut lids,
+                    &self.structure_lids_by_keywords(&["background", "motivation", "gap"]),
+                );
+            }
+            "hypothesis" => {
+                push_unique_all(
+                    &mut lids,
+                    &self.discourse_lids_by_keywords(&["hypothesis", "claim", "goal"]),
+                );
+                push_unique_all(
+                    &mut lids,
+                    &self.graph_lids_for_edge_types(&["hypothesis_tested_by_experiment"]),
+                );
+                push_unique_all(&mut lids, &self.graph_lids_for_claims());
+            }
+            "related_work_key_people" => {
+                push_unique_all(
+                    &mut lids,
+                    &self.discourse_lids_by_keywords(&[
+                        "related", "prior", "citation", "contrast", "builds",
+                    ]),
+                );
+                push_unique_all(&mut lids, &self.metadata_field_lids_for("references"));
+                push_unique_all(
+                    &mut lids,
+                    &self.graph_lids_for_edge_types(&[
+                        "related_work_contrasts",
+                        "related_work_builds_on",
+                    ]),
+                );
+            }
+            "core_contribution" => {
+                push_unique_all(
+                    &mut lids,
+                    &self.discourse_lids_by_keywords(&[
+                        "contribution",
+                        "result",
+                        "claim",
+                        "method",
+                        "finding",
+                    ]),
+                );
+                push_unique_all(
+                    &mut lids,
+                    &self.structure_lids_by_keywords(&["contribution", "result", "claim", "goal"]),
+                );
+                push_unique_all(&mut lids, &self.graph_lids_for_claims());
+            }
+            "experiment_design" => {
+                push_unique_all(
+                    &mut lids,
+                    &self.discourse_lids_by_keywords(&[
+                        "experiment",
+                        "method",
+                        "evaluation",
+                        "setup",
+                        "protocol",
+                    ]),
+                );
+                push_unique_all(
+                    &mut lids,
+                    &self.graph_lids_for_edge_types(&[
+                        "method_supports_result",
+                        "hypothesis_tested_by_experiment",
+                    ]),
+                );
+            }
+            "dataset" => {
+                push_unique_all(&mut lids, &self.metadata_field_lids_for("datasets"));
+                push_unique_all(
+                    &mut lids,
+                    &self.lexicon_lids_for_term_types(&["dataset_name"]),
+                );
+                push_unique_all(
+                    &mut lids,
+                    &self.discourse_lids_by_keywords(&["dataset", "corpus", "benchmark"]),
+                );
+            }
+            "results_support_hypothesis" => {
+                push_unique_all(
+                    &mut lids,
+                    &self.discourse_lids_by_keywords(&[
+                        "evidence",
+                        "result",
+                        "support",
+                        "finding",
+                        "experiment",
+                    ]),
+                );
+                push_unique_all(
+                    &mut lids,
+                    &self.graph_lids_for_edge_types(&[
+                        "claim_supported_by_evidence",
+                        "method_supports_result",
+                        "hypothesis_tested_by_experiment",
+                    ]),
+                );
+            }
+            "contribution_summary" => {
+                push_unique_all(
+                    &mut lids,
+                    &self.discourse_lids_by_keywords(&[
+                        "conclusion",
+                        "summary",
+                        "contribution",
+                        "result",
+                    ]),
+                );
+                push_unique_all(
+                    &mut lids,
+                    &self.structure_lids_by_keywords(&["summary", "conclusion", "contribution"]),
+                );
+            }
+            "future_work" => {
+                push_unique_all(
+                    &mut lids,
+                    &self.discourse_lids_by_keywords(&["future", "limitation", "threat", "open"]),
+                );
+                push_unique_all(
+                    &mut lids,
+                    &self.graph_lids_for_edge_types(&["limitation_motivates_future_work"]),
+                );
+            }
+            _ => {}
+        }
+        if lids.is_empty() {
+            push_unique_all(&mut lids, &self.paper_metadata_evidence_lids());
+        }
+        lids
+    }
+
+    fn answer_slots_for_stage(
+        &self,
+        stage: &PaperReadingStage,
+        evidence_lids: &[String],
+    ) -> Vec<PaperReadingAnswerSlot> {
+        let mut slots = vec![PaperReadingAnswerSlot {
+            kind: PaperReadingAnswerSlotKind::PaperEvidence,
+            label: "paper_evidence".into(),
+            instruction: "Answer only from the listed LID evidence; cite every factual claim."
+                .into(),
+            evidence_lids: evidence_lids.to_vec(),
+        }];
+        if matches!(
+            stage,
+            PaperReadingStage::Critical | PaperReadingStage::Creative
+        ) {
+            slots.push(PaperReadingAnswerSlot {
+                kind: PaperReadingAnswerSlotKind::ModelSupplement,
+                label: "model_supplement".into(),
+                instruction:
+                    "Use only for critique or research ideas not explicitly asserted by the paper."
+                        .into(),
+                evidence_lids: evidence_lids.to_vec(),
+            });
+        }
+        slots.push(PaperReadingAnswerSlot {
+            kind: PaperReadingAnswerSlotKind::UserReflection,
+            label: "user_reflection".into(),
+            instruction: "Reader-owned notes or Chinese restatement; never use as paper citation."
+                .into(),
+            evidence_lids: Vec::new(),
+        });
+        slots
+    }
+
+    fn paper_questions(&self, stage: &PaperReadingStage) -> Vec<PaperReadingQuestion> {
+        let specs = [
+            (
+                "problem_input_output",
+                "What exact problem does the paper solve, and what are its inputs and outputs?",
+                "problem and task boundary",
+            ),
+            (
+                "problem_nature",
+                "What kind of problem is it: empirical, theoretical, engineering, or conceptual?",
+                "problem nature and motivation",
+            ),
+            (
+                "hypothesis",
+                "What hypothesis or central claim is being tested?",
+                "hypothesis or main claim",
+            ),
+            (
+                "related_work_key_people",
+                "Which prior work, authors, or competing lines does the paper position against?",
+                "related work and positioning",
+            ),
+            (
+                "core_contribution",
+                "What is the paper's core contribution?",
+                "claimed contribution",
+            ),
+            (
+                "experiment_design",
+                "How are the experiments or validation designed?",
+                "method and evaluation design",
+            ),
+            (
+                "dataset",
+                "Which datasets, benchmarks, or corpora are used?",
+                "data and benchmark context",
+            ),
+            (
+                "results_support_hypothesis",
+                "Do the results support the hypothesis or central claim?",
+                "result-to-claim evidence",
+            ),
+            (
+                "contribution_summary",
+                "How should the paper's contribution be summarized after reading?",
+                "paper-level summary",
+            ),
+            (
+                "future_work",
+                "What limitations or next research directions does the paper imply?",
+                "limitations and future work",
+            ),
+        ];
+        specs
+            .iter()
+            .map(|(id, question, focus)| {
+                let evidence_lids = self.evidence_for_paper_question(id);
+                PaperReadingQuestion {
+                    id: (*id).into(),
+                    question: (*question).into(),
+                    focus: (*focus).into(),
+                    answer_slots: self.answer_slots_for_stage(stage, &evidence_lids),
+                    evidence_lids,
+                }
+            })
+            .collect()
+    }
+
+    fn abstract_lids(&self) -> Vec<String> {
+        let mut lids = Vec::new();
+        for item in &self.discourse_index {
+            if contains_any(&item.local_function, &["abstract"])
+                || contains_any(&item.rhetorical_move, &["abstract"])
+                || contains_any(&item.local_summary, &["abstract"])
+            {
+                push_unique(&mut lids, &item.lid);
+            }
+        }
+        if lids.is_empty() {
+            if let Some(metadata) = &self.paper_metadata {
+                self.metadata_evidence(&metadata.title, &mut lids);
+                self.metadata_evidence(&metadata.keywords, &mut lids);
+            }
+        }
+        lids
+    }
+
+    fn abstract_reading_aid(&self, codebook_terms: &[PaperCodebookTerm]) -> AbstractReadingAid {
+        let abstract_lids = self.abstract_lids();
+        if abstract_lids.is_empty() {
+            return AbstractReadingAid {
+                available: false,
+                abstract_lids: Vec::new(),
+                excerpts: Vec::new(),
+                key_terms: Vec::new(),
+                comprehension_checks: Vec::new(),
+                user_reflection_prompt:
+                    "Write a short Chinese restatement only after selecting the abstract LIDs."
+                        .into(),
+                warning: Some("abstract LID not identified from discourse or metadata".into()),
+            };
+        }
+        let excerpts = abstract_lids
+            .iter()
+            .filter_map(|lid| {
+                self.text(lid, None).ok().map(|text| PaperAbstractExcerpt {
+                    lid: lid.clone(),
+                    text,
+                    evidence_lids: vec![lid.clone()],
+                })
+            })
+            .collect::<Vec<_>>();
+        let key_terms = codebook_terms
+            .iter()
+            .filter(|term| {
+                term.evidence_lids.iter().any(|term_lid| {
+                    abstract_lids
+                        .iter()
+                        .any(|abstract_lid| lid_related(abstract_lid, term_lid))
+                })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let checks = vec![
+            PaperAbstractCheck {
+                id: "abstract_problem".into(),
+                prompt: "Restate in Chinese the concrete problem named by the abstract.".into(),
+                evidence_lids: abstract_lids.clone(),
+            },
+            PaperAbstractCheck {
+                id: "abstract_method_or_claim".into(),
+                prompt: "Point to the exact words that state the method, claim, or contribution."
+                    .into(),
+                evidence_lids: abstract_lids.clone(),
+            },
+            PaperAbstractCheck {
+                id: "abstract_term_decode".into(),
+                prompt:
+                    "Decode each acronym or paper-specific term before translating the sentence."
+                        .into(),
+                evidence_lids: key_terms
+                    .iter()
+                    .flat_map(|term| term.evidence_lids.iter().cloned())
+                    .collect(),
+            },
+        ];
+        AbstractReadingAid {
+            available: true,
+            abstract_lids,
+            excerpts,
+            key_terms,
+            comprehension_checks: checks,
+            user_reflection_prompt:
+                "Write your Chinese restatement separately; treat it as user_reflection, not evidence."
+                    .into(),
+            warning: None,
+        }
+    }
+
+    /// `book.paper_reading_guide(mode?,stage?)`:paper 规则包只读投影。
+    /// 组合 BookStructure、graph、discourse、paper_metadata、paper_lexicon 与原文;不落地新 truth。
+    pub fn paper_reading_guide(
+        &self,
+        mode: Option<&str>,
+        stage: Option<&str>,
+    ) -> Result<PaperReadingGuide, ToolError> {
+        let mode = parse_paper_reading_mode(mode)?;
+        let stage = parse_paper_reading_stage(stage)?;
+        if !self.paper_profile_attached() {
+            let codebook = self.paper_codebook();
+            return Ok(PaperReadingGuide {
+                available: false,
+                mode,
+                stage,
+                questions: Vec::new(),
+                abstract_aid: self.abstract_reading_aid(&codebook.terms),
+                codebook,
+                warnings: vec![
+                    "paper artifacts not attached; load a paper-profile book to use this projection"
+                        .into(),
+                ],
+            });
+        }
+
+        let codebook = self.paper_codebook();
+        let abstract_aid = self.abstract_reading_aid(&codebook.terms);
+        let mut warnings = codebook.warnings.clone();
+        if let Some(warning) = &abstract_aid.warning {
+            warnings.push(warning.clone());
+        }
+        Ok(PaperReadingGuide {
+            available: true,
+            mode,
+            stage: stage.clone(),
+            questions: self.paper_questions(&stage),
+            codebook,
+            abstract_aid,
+            warnings,
         })
     }
 
@@ -1709,6 +3032,139 @@ mod tests {
         })
     }
 
+    fn paper_book_structure_json() -> serde_json::Value {
+        let mut value = book_structure_json();
+        value["header"]["profile_id"] = serde_json::json!("paper");
+        value["header"]["profile_version"] = serde_json::json!("paper_v0");
+        value["spine"][0]["summary"]["text"] =
+            serde_json::json!("Abstract frames the problem and contribution.");
+        value["spine"][1]["summary"]["text"] =
+            serde_json::json!("Experiment reports dataset evidence.");
+        value["key_stops"][0]["title"] = serde_json::json!("Abstract");
+        value["key_stops"][0]["reason"]["text"] =
+            serde_json::json!("Abstract states the problem and contribution.");
+        value["key_stops"][1]["title"] = serde_json::json!("Experiment");
+        value["key_stops"][1]["reason"]["text"] =
+            serde_json::json!("Experiment reports result evidence.");
+        value["throughlines"][0]["summary"]["text"] =
+            serde_json::json!("Connects abstract problem framing to experiment evidence.");
+        value
+    }
+
+    fn paper_metadata_json() -> serde_json::Value {
+        serde_json::json!({
+            "header": {
+                "book_id": "structure-book",
+                "book_version": "v1",
+                "profile_id": "paper",
+                "profile_version": "paper_v0",
+                "core_schema_version": "core_v0",
+                "generated_at": "2026-07-05T00:00:00.000Z"
+            },
+            "title": {
+                "value": "Sample Paper",
+                "source": "front_matter",
+                "evidence_lids": ["1.1"],
+                "confidence": 0.9
+            },
+            "authors": {
+                "value": [{"name": "Ada Lovelace", "raw": "Ada Lovelace"}],
+                "source": "paper_text",
+                "evidence_lids": ["1.1"]
+            },
+            "year": {
+                "value": 2026,
+                "source": "paper_text",
+                "evidence_lids": ["1.1"]
+            },
+            "keywords": {
+                "value": ["retrieval", "sample"],
+                "source": "paper_text",
+                "evidence_lids": ["1.1"]
+            },
+            "references": {
+                "value": [{"raw": "Smith et al. 2024"}],
+                "source": "paper_text",
+                "evidence_lids": ["1.1"]
+            },
+            "datasets": {
+                "value": ["SampleSet"],
+                "source": "paper_text",
+                "evidence_lids": ["2.1"]
+            }
+        })
+    }
+
+    fn paper_lexicon_json() -> serde_json::Value {
+        serde_json::json!({
+            "header": {
+                "book_id": "structure-book",
+                "book_version": "v1",
+                "profile_id": "paper",
+                "profile_version": "paper_v0",
+                "core_schema_version": "core_v0",
+                "generated_at": "2026-07-05T00:00:00.000Z"
+            },
+            "entries": [
+                {
+                    "term": "RAG",
+                    "term_type": "acronym",
+                    "occurrences_lids": ["1.1"],
+                    "defined_at_lid": "1.1",
+                    "aliases": ["Retrieval-Augmented Generation"],
+                    "acronym_expansion": "Retrieval-Augmented Generation",
+                    "chinese_gloss": "检索增强生成"
+                },
+                {
+                    "term": "SampleSet",
+                    "term_type": "dataset_name",
+                    "occurrences_lids": ["2.1"],
+                    "chinese_gloss": "示例数据集"
+                }
+            ]
+        })
+    }
+
+    fn paper_discourse_json() -> serde_json::Value {
+        serde_json::json!({
+            "header": {
+                "book_id": "structure-book",
+                "book_version": "v1",
+                "profile_id": "paper",
+                "profile_version": "paper_v0",
+                "core_schema_version": "core_v0",
+                "generated_at": "2026-07-05T00:00:00.000Z"
+            },
+            "items": [
+                {
+                    "lid": "1.1",
+                    "mode": "argumentative",
+                    "local_function": "abstract_summary",
+                    "rhetorical_move": "problem_framing",
+                    "local_summary": "Abstract states the problem, hypothesis, and contribution.",
+                    "relations": [
+                        {
+                            "target_lid": "2.1",
+                            "type": "claim_supported_by_evidence",
+                            "family": "support",
+                            "direction": "forward",
+                            "confidence": 0.9,
+                            "evidence_lids": ["1.1", "2.1"]
+                        }
+                    ]
+                },
+                {
+                    "lid": "2.1",
+                    "mode": "argumentative",
+                    "local_function": "experiment_design",
+                    "rhetorical_move": "evidence_report",
+                    "local_summary": "Experiment reports dataset evidence and result support.",
+                    "relations": []
+                }
+            ]
+        })
+    }
+
     #[test]
     fn load_reads_optional_discourse_index_sidecar() {
         let dir = std::env::temp_dir().join("ub-read-tools-discourse-sidecar");
@@ -1865,6 +3321,124 @@ mod tests {
 
         let err = book.structure(Some("9.9")).unwrap_err();
         assert_eq!(err.error_code, "LID_NOT_FOUND");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn paper_reading_guide_missing_paper_artifacts_degrades_explicitly() {
+        let guide = book().paper_reading_guide(None, None).unwrap();
+        assert!(!guide.available);
+        assert_eq!(guide.mode, PaperReadingMode::Skim);
+        assert_eq!(guide.stage, PaperReadingStage::Passive);
+        assert!(guide.questions.is_empty());
+        assert!(!guide.codebook.available);
+        assert!(guide
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("paper artifacts not attached")));
+        let metadata = book().paper_metadata_projection();
+        assert!(!metadata.available);
+        assert!(metadata.warning.unwrap().contains("not attached"));
+        let lexicon = book().paper_lexicon_projection();
+        assert!(!lexicon.available);
+        assert!(lexicon.entries.is_empty());
+    }
+
+    #[test]
+    fn load_valid_paper_sidecars_projects_reading_guide() {
+        let base = structure_base();
+        let dir = write_book_dir("ub-read-tools-paper-guide-valid", &base);
+        std::fs::write(
+            dir.join("book_structure.json"),
+            paper_book_structure_json().to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("paper_metadata.json"),
+            paper_metadata_json().to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("paper_lexicon.json"),
+            paper_lexicon_json().to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("discourse_index.json"),
+            paper_discourse_json().to_string(),
+        )
+        .unwrap();
+
+        let book = Book::load(dir.to_str().unwrap()).unwrap();
+        assert!(book.paper_metadata().is_some());
+        assert!(book.paper_lexicon().is_some());
+
+        let metadata = book.paper_metadata_projection();
+        assert!(metadata.available);
+        assert_eq!(metadata.header.unwrap().profile_id, "paper");
+        assert_eq!(metadata.title.unwrap().source, "front_matter");
+        assert_eq!(metadata.datasets.unwrap().evidence_lids, vec!["2.1"]);
+        let lexicon = book.paper_lexicon_projection();
+        assert!(lexicon.available);
+        assert_eq!(lexicon.entries.len(), 2);
+        assert_eq!(lexicon.entries[0].term, "RAG");
+
+        let guide = book
+            .paper_reading_guide(Some("close"), Some("active"))
+            .unwrap();
+        assert!(guide.available);
+        assert_eq!(guide.mode, PaperReadingMode::Close);
+        assert_eq!(guide.stage, PaperReadingStage::Active);
+        assert_eq!(guide.questions.len(), 10);
+        assert_eq!(
+            guide.codebook.metadata.title.as_deref(),
+            Some("Sample Paper")
+        );
+        assert_eq!(guide.codebook.metadata.datasets, vec!["SampleSet"]);
+        assert!(guide
+            .codebook
+            .terms
+            .iter()
+            .any(|term| term.term == "RAG" && term.evidence_lids == vec!["1.1"]));
+        assert!(guide.abstract_aid.available);
+        assert_eq!(guide.abstract_aid.abstract_lids, vec!["1.1"]);
+        assert!(guide.abstract_aid.excerpts[0].text.contains("AAAA"));
+        assert!(guide
+            .abstract_aid
+            .key_terms
+            .iter()
+            .any(|term| term.term == "RAG"));
+        let dataset = guide
+            .questions
+            .iter()
+            .find(|question| question.id == "dataset")
+            .unwrap();
+        assert!(dataset.evidence_lids.iter().any(|lid| lid == "2.1"));
+        assert!(dataset
+            .answer_slots
+            .iter()
+            .any(|slot| slot.kind == PaperReadingAnswerSlotKind::PaperEvidence));
+        assert!(dataset
+            .answer_slots
+            .iter()
+            .any(|slot| slot.kind == PaperReadingAnswerSlotKind::UserReflection));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_bad_paper_lexicon_fails_fast() {
+        let base = structure_base();
+        let dir = write_book_dir("ub-read-tools-paper-lexicon-bad", &base);
+        let mut lexicon = paper_lexicon_json();
+        lexicon["entries"][0]["occurrences_lids"] = serde_json::json!(["9.9"]);
+        std::fs::write(dir.join("paper_lexicon.json"), lexicon.to_string()).unwrap();
+
+        let err = match Book::load(dir.to_str().unwrap()) {
+            Ok(_) => panic!("expected bad paper_lexicon.json to fail"),
+            Err(e) => e,
+        };
+        assert!(err.contains("paper_lexicon"));
+        assert!(err.contains("不存在 LID"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

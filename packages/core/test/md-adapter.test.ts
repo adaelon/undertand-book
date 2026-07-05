@@ -69,4 +69,25 @@ describe("SA2 markdown asset block recognition", () => {
     expect(report.ok).toBe(true);
     expect(nodes.filter((n) => n.kind === "formula")).toHaveLength(2);
   });
+
+  it("recognizes single-dollar display math blocks as formula leaves", () => {
+    const display = ["Before.", "", "$", "I(X;Y) \\le H(Y)", "$", "", "After."].join("\n");
+    const blocks = markdownToBlocks(display);
+    expect(blocks.map((b) => ({ text: b.text, assetKind: b.assetKind ?? "paragraph" }))).toEqual([
+      { text: "Before.", assetKind: "paragraph" },
+      { text: "$\nI(X;Y) \\le H(Y)\n$", assetKind: "formula" },
+      { text: "After.", assetKind: "paragraph" },
+    ]);
+
+    const nodes = segment(blocks);
+    const report = checkPartitionInvariant(nodes, display);
+    expect(report.ok).toBe(true);
+    expect(nodes.filter((n) => n.kind === "formula")).toHaveLength(1);
+  });
+
+  it("keeps unmatched dollar markers as paragraph text", () => {
+    const src = "Price ends with $ and unmatched $$ marker.";
+    const blocks = markdownToBlocks(src);
+    expect(blocks).toEqual([{ kind: "leaf", text: src, span: { start: 0, end: src.length } }]);
+  });
 });

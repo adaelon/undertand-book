@@ -1,15 +1,15 @@
 // PB7 BookStructure input: emit one unit-card packet or the full-book stitch packet.
-//   tsx skills/build/book-structure-input.ts <book.md|epub> <unit:<lid>|stitch> [--book-id <id>]
+//   tsx skills/build/book-structure-input.ts <book.md|epub> <unit:<lid>|stitch> [--book-id <id>] [--content-profile technical_learning|paper] [--paper-subtype research_article|survey]
 import { computeCurrentBookStructureStatus, findUnitSource, loadBookStructureBuildContext, parseBookStructureArgs } from "./book-structure-common";
 
 const parsed = parseBookStructureArgs(process.argv.slice(2));
 const [book, jobId] = parsed.positional;
 if (!book || !jobId) {
-  console.error("usage: tsx book-structure-input.ts <book.md|epub> <unit:<lid>|stitch> [--book-id <id>]");
+  console.error("usage: tsx book-structure-input.ts <book.md|epub> <unit:<lid>|stitch> [--book-id <id>] [--content-profile technical_learning|paper] [--paper-subtype research_article|survey]");
   process.exit(2);
 }
 
-const ctx = loadBookStructureBuildContext(book, parsed.override);
+const ctx = loadBookStructureBuildContext(book, parsed.override, parsed.contentProfile);
 if (jobId === "stitch") {
   const { status, stitchPacket } = computeCurrentBookStructureStatus(ctx);
   if (!stitchPacket || status.stitch_blocked) {
@@ -18,11 +18,11 @@ if (jobId === "stitch") {
     process.exit(1);
   }
   console.log(JSON.stringify(stitchPacket, null, 2));
-  process.stderr.write(`[book-structure-input] stitch: unit_cards=${stitchPacket.unit_cards.length} long_range_edges=${stitchPacket.long_range_edges.length}\n`);
+  process.stderr.write(`[book-structure-input] stitch: content_profile=${parsed.contentProfile.id} unit_cards=${stitchPacket.unit_cards.length} long_range_edges=${stitchPacket.long_range_edges.length}\n`);
 } else {
   const source = findUnitSource(ctx, jobId);
   console.log(JSON.stringify(source, null, 2));
   process.stderr.write(
-    `[book-structure-input] ${source.job_id}: leaves=${source.leaf_lids.length} discourse=${source.discourse_items.length} formula=${source.formula_semantics.length} pass2=${source.pass2_edges.length}\n`,
+    `[book-structure-input] ${source.job_id}: content_profile=${parsed.contentProfile.id} leaves=${source.leaf_lids.length} discourse=${source.discourse_items.length} formula=${source.formula_semantics.length} pass2=${source.pass2_edges.length}\n`,
   );
 }
