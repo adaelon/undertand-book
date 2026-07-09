@@ -438,4 +438,4 @@ Status values:
 | G65 approval correction | covered | ADR-0063 rule 11, build-direction vs executor permission split |
 | G66 `BuildDecisionRequest` separate from permissions | covered | artifact contract |
 | G67 | covered | no Q67 exists in `grill.md`; ledger intentionally records the gap |
-| G68 natural-language sidecar plan | deferred | PH9 Build Workbench extension, not blocking PH1-PH8 |
+| G68 natural-language sidecar plan | covered | PH9 confirmable `sidecar_plan.json` / form draft before custom sidecar generation |
