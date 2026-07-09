@@ -315,6 +315,38 @@ export interface BuildJobState {
   created_at: string;
   updated_at: string;
 }
+export interface WorkbenchInputFingerprint {
+  paper_md_sha256: string;
+  paper_pdf_sha256: string;
+  config_hash: string;
+}
+export interface WorkbenchInputManifest {
+  version: "workbench_input_manifest.v1";
+  book_id: string;
+  profile_id: "paper";
+  display_title: string;
+  created_at: string;
+  updated_at: string;
+  inputs: {
+    paper_md: {
+      path: string;
+      sha256: string;
+      size_bytes: number;
+      source: "uploaded_text" | "selected_path";
+      original_path?: string | null;
+    };
+    paper_pdf: {
+      path: string;
+      sha256: string;
+      size_bytes: number;
+      source: "uploaded_base64" | "selected_path";
+      original_path?: string | null;
+    };
+  };
+  config_hash: string;
+  fingerprint: WorkbenchInputFingerprint;
+  trusted: false;
+}
 export interface SidecarFormDraft {
   version: "sidecar_form_draft.v1";
   fields: Array<{
@@ -350,6 +382,11 @@ export interface BuildWorkbenchSnapshot {
   version: "build_workbench_snapshot.v1";
   book_id: string;
   readiness: BuildWorkbenchReadiness;
+  input: {
+    manifest: WorkbenchInputManifest | null;
+    fingerprint: WorkbenchInputFingerprint | null;
+    ready: boolean;
+  };
   jobs: BuildJobState[];
   sidecar_plan: {
     plan: SidecarPlan | null;
@@ -491,6 +528,15 @@ export const api = {
   // ── book.query(LLM 命令,POST)──
   query: (q: string, anchor_lid?: string) =>
     http<QueryResponse>("POST", "/book/query", { q, anchor_lid }),
+  workbenchInputImport: (payload: {
+    target_dir?: string;
+    book_id?: string;
+    display_title?: string;
+    paper_md_path?: string;
+    paper_pdf_path?: string;
+    paper_md_text?: string;
+    paper_pdf_base64?: string;
+  }) => http<BuildWorkbenchSnapshot>("POST", "/build_workbench/input.import", payload),
   sidecarPlanConfirm: (fields: Record<string, unknown>) =>
     http<BuildWorkbenchSnapshot>("POST", "/build_workbench/sidecar_plan.confirm", { fields }),
 

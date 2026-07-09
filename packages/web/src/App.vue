@@ -66,6 +66,7 @@ const buildWorkbenchSnapshot = ref<BuildWorkbenchSnapshot | null>(null);
 const buildWorkbenchLoading = ref(false);
 const buildWorkbenchError = ref<string | null>(null);
 const buildWorkbenchConfirming = ref(false);
+const buildWorkbenchImporting = ref(false);
 const sourceManifest = ref<SourceManifestV2 | null>(null);
 const pdfSourceMap = ref<PdfSourceMap | null>(null);
 const pdfRuntimeError = ref<string | null>(null);
@@ -964,6 +965,27 @@ async function confirmSidecarPlan(fields: Record<string, unknown>) {
   }
 }
 
+async function importWorkbenchInput(payload: {
+  target_dir?: string;
+  book_id?: string;
+  display_title?: string;
+  paper_md_path?: string;
+  paper_pdf_path?: string;
+  paper_md_text?: string;
+  paper_pdf_base64?: string;
+}) {
+  buildWorkbenchImporting.value = true;
+  buildWorkbenchError.value = null;
+  try {
+    buildWorkbenchSnapshot.value = await api.workbenchInputImport(payload);
+    appSurface.value = "workbench";
+  } catch (e) {
+    buildWorkbenchError.value = errorMessage(e);
+  } finally {
+    buildWorkbenchImporting.value = false;
+  }
+}
+
 async function init() {
   try {
     appSurface.value = "loading";
@@ -1537,6 +1559,7 @@ function resetBookSessionUi() {
   buildWorkbenchLoading.value = false;
   buildWorkbenchError.value = null;
   buildWorkbenchConfirming.value = false;
+  buildWorkbenchImporting.value = false;
   sourceManifest.value = null;
   pdfSourceMap.value = null;
   pdfRuntimeError.value = null;
@@ -1664,7 +1687,9 @@ async function submitOpenBook(dir = bookPickerDir.value) {
       :loading="buildWorkbenchLoading"
       :error="buildWorkbenchError"
       :confirming="buildWorkbenchConfirming"
+      :importing="buildWorkbenchImporting"
       @refresh="refreshBuildWorkbench"
+      @import-input="importWorkbenchInput"
       @confirm-sidecar-plan="confirmSidecarPlan"
     />
 

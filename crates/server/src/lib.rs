@@ -391,6 +391,12 @@ pub fn route(state: &mut AppState, req: Req) -> Reply {
         }
         return route_sidecar_plan_confirm(&state.book, &state.book_dir, req.body, req.now);
     }
+    if path == "/build_workbench/input.import" {
+        if req.method != "POST" {
+            return method_not_allowed();
+        }
+        return route_workbench_input_import(state, req.body, req.now);
+    }
     // agent.*(S10f):外层 E agent 编排,POST(会话命令)`[ADR-0030]`。
     if path == "/agent/history" {
         if req.method != "GET" {
@@ -777,6 +783,231 @@ fn read_json_artifact_optional(
         })
 }
 
+const WORKBENCH_INPUT_MANIFEST_RELATIVE: &str = ".build/input/manifest.json";
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    const K: [u32; 64] = [
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
+        0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
+        0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
+        0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
+        0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
+        0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
+        0xc67178f2,
+    ];
+    let mut data = bytes.to_vec();
+    let bit_len = (data.len() as u64) * 8;
+    data.push(0x80);
+    while data.len() % 64 != 56 {
+        data.push(0);
+    }
+    data.extend_from_slice(&bit_len.to_be_bytes());
+
+    let mut h: [u32; 8] = [
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
+        0x5be0cd19,
+    ];
+
+    for chunk in data.chunks_exact(64) {
+        let mut w = [0u32; 64];
+        for (i, word) in w.iter_mut().take(16).enumerate() {
+            let j = i * 4;
+            *word = u32::from_be_bytes([chunk[j], chunk[j + 1], chunk[j + 2], chunk[j + 3]]);
+        }
+        for i in 16..64 {
+            let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
+            let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
+            w[i] = w[i - 16]
+                .wrapping_add(s0)
+                .wrapping_add(w[i - 7])
+                .wrapping_add(s1);
+        }
+
+        let mut a = h[0];
+        let mut b = h[1];
+        let mut c = h[2];
+        let mut d = h[3];
+        let mut e = h[4];
+        let mut f = h[5];
+        let mut g = h[6];
+        let mut hh = h[7];
+
+        for i in 0..64 {
+            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
+            let ch = (e & f) ^ ((!e) & g);
+            let temp1 = hh
+                .wrapping_add(s1)
+                .wrapping_add(ch)
+                .wrapping_add(K[i])
+                .wrapping_add(w[i]);
+            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
+            let maj = (a & b) ^ (a & c) ^ (b & c);
+            let temp2 = s0.wrapping_add(maj);
+            hh = g;
+            g = f;
+            f = e;
+            e = d.wrapping_add(temp1);
+            d = c;
+            c = b;
+            b = a;
+            a = temp1.wrapping_add(temp2);
+        }
+
+        h[0] = h[0].wrapping_add(a);
+        h[1] = h[1].wrapping_add(b);
+        h[2] = h[2].wrapping_add(c);
+        h[3] = h[3].wrapping_add(d);
+        h[4] = h[4].wrapping_add(e);
+        h[5] = h[5].wrapping_add(f);
+        h[6] = h[6].wrapping_add(g);
+        h[7] = h[7].wrapping_add(hh);
+    }
+
+    let mut out = String::with_capacity(64);
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    for word in h {
+        for byte in word.to_be_bytes() {
+            out.push(HEX[(byte >> 4) as usize] as char);
+            out.push(HEX[(byte & 0x0f) as usize] as char);
+        }
+    }
+    out
+}
+
+fn workbench_config_hash() -> String {
+    sha256_hex(b"workbench_input_manifest.v1:paper:source_reconciliation_v1")
+}
+
+fn base64_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'A'..=b'Z' => Some(byte - b'A'),
+        b'a'..=b'z' => Some(byte - b'a' + 26),
+        b'0'..=b'9' => Some(byte - b'0' + 52),
+        b'+' => Some(62),
+        b'/' => Some(63),
+        _ => None,
+    }
+}
+
+fn decode_base64(input: &str) -> Result<Vec<u8>, ToolError> {
+    let encoded = input
+        .split_once(',')
+        .filter(|(prefix, _)| prefix.trim_start().starts_with("data:"))
+        .map(|(_, payload)| payload)
+        .unwrap_or(input);
+    let mut out = Vec::new();
+    let mut buffer = 0u32;
+    let mut bits = 0u8;
+    let mut padded = false;
+    for byte in encoded.bytes().filter(|b| !b.is_ascii_whitespace()) {
+        if byte == b'=' {
+            padded = true;
+            continue;
+        }
+        if padded {
+            return Err(ToolError {
+                error_code: "INVALID_WORKBENCH_INPUT".into(),
+                category: "validation".into(),
+                message: "paper_pdf_base64 padding 后仍有内容".into(),
+            });
+        }
+        let Some(value) = base64_value(byte) else {
+            return Err(ToolError {
+                error_code: "INVALID_WORKBENCH_INPUT".into(),
+                category: "validation".into(),
+                message: "paper_pdf_base64 非合法 base64".into(),
+            });
+        };
+        buffer = (buffer << 6) | value as u32;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push(((buffer >> bits) & 0xff) as u8);
+        }
+    }
+    Ok(out)
+}
+
+fn workbench_input_manifest_path(book_dir: &Path) -> PathBuf {
+    book_dir.join(WORKBENCH_INPUT_MANIFEST_RELATIVE)
+}
+
+fn read_workbench_input_manifest(book_dir: &Path) -> Result<Option<serde_json::Value>, ToolError> {
+    read_json_artifact_optional(
+        &workbench_input_manifest_path(book_dir),
+        "WORKBENCH_INPUT_MANIFEST_INVALID",
+    )
+}
+
+fn input_fingerprint_from_manifest(
+    manifest: Option<&serde_json::Value>,
+) -> Option<serde_json::Value> {
+    manifest.and_then(|value| value.get("fingerprint")).cloned()
+}
+
+fn source_value(
+    value: &serde_json::Value,
+    content_key: &str,
+    path_key: &str,
+) -> Result<(Vec<u8>, &'static str, Option<String>), ToolError> {
+    let content = value.get(content_key).and_then(|v| v.as_str());
+    let path = value
+        .get(path_key)
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    match (content, path) {
+        (Some(_), Some(_)) => Err(ToolError {
+            error_code: "INVALID_WORKBENCH_INPUT".into(),
+            category: "validation".into(),
+            message: format!("{content_key} 与 {path_key} 只能提供一个"),
+        }),
+        (Some(text), None) if content_key == "paper_pdf_base64" => {
+            Ok((decode_base64(text)?, "uploaded_base64", None))
+        }
+        (Some(text), None) => Ok((text.as_bytes().to_vec(), "uploaded_text", None)),
+        (None, Some(path)) => std::fs::read(path)
+            .map(|bytes| (bytes, "selected_path", Some(path.to_string())))
+            .map_err(|e| ToolError {
+                error_code: "WORKBENCH_INPUT_READ_FAILED".into(),
+                category: "validation".into(),
+                message: format!("读取输入文件失败({path}): {e}"),
+            }),
+        (None, None) => Err(ToolError {
+            error_code: "INVALID_WORKBENCH_INPUT".into(),
+            category: "validation".into(),
+            message: format!("需提供 {content_key} 或 {path_key}"),
+        }),
+    }
+}
+
+fn write_workbench_input_file(path: &Path, bytes: &[u8]) -> Result<(), ToolError> {
+    std::fs::write(path, bytes).map_err(|e| ToolError {
+        error_code: "WORKBENCH_INPUT_WRITE_FAILED".into(),
+        category: "internal".into(),
+        message: format!("写入 Workbench 输入失败({}): {e}", path.display()),
+    })
+}
+
+fn write_workbench_json(path: &Path, value: &serde_json::Value) -> Result<(), ToolError> {
+    let raw = serde_json::to_string_pretty(value).map_err(|e| ToolError {
+        error_code: "WORKBENCH_INPUT_WRITE_FAILED".into(),
+        category: "internal".into(),
+        message: format!("序列化 Workbench input manifest 失败: {e}"),
+    })?;
+    std::fs::write(path, raw).map_err(|e| ToolError {
+        error_code: "WORKBENCH_INPUT_WRITE_FAILED".into(),
+        category: "internal".into(),
+        message: format!(
+            "写入 Workbench input manifest 失败({}): {e}",
+            path.display()
+        ),
+    })
+}
+
 fn artifact_config_hash(book_dir: &Path, relative: &str) -> Result<Option<String>, ToolError> {
     Ok(
         read_json_artifact_optional(&book_dir.join(relative), "ARTIFACT_INVALID")?.and_then(
@@ -985,6 +1216,11 @@ fn route_existing_technical_book_workbench(book: &Book, book_dir: &Path) -> Repl
             "stages": stages,
         },
         "jobs": [],
+        "input": {
+            "manifest": null,
+            "fingerprint": null,
+            "ready": false,
+        },
         "sidecar_plan": {
             "plan": null,
             "form_draft": null,
@@ -993,12 +1229,144 @@ fn route_existing_technical_book_workbench(book: &Book, book_dir: &Path) -> Repl
     }))
 }
 
+fn route_workbench_input_import(state: &mut AppState, body: &str, now: &str) -> Reply {
+    let value = match body_value(body) {
+        Ok(value) => value,
+        Err(reply) => return reply,
+    };
+    let target_dir = value
+        .get("target_dir")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| state.book_dir.clone());
+    if let Err(e) = std::fs::create_dir_all(&target_dir) {
+        return err_reply(&ToolError {
+            error_code: "WORKBENCH_INPUT_WRITE_FAILED".into(),
+            category: "internal".into(),
+            message: format!("创建 draft workspace 失败({}): {e}", target_dir.display()),
+        });
+    }
+
+    let existing_manifest = match read_workbench_input_manifest(&target_dir) {
+        Ok(value) => value,
+        Err(e) => return err_reply(&e),
+    };
+    let book_id = value
+        .get("book_id")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            existing_manifest
+                .as_ref()
+                .and_then(|manifest| manifest.get("book_id"))
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+        })
+        .map(str::to_string)
+        .or_else(|| read_book_id_from_base(&target_dir.join("base.json")))
+        .or_else(|| {
+            target_dir
+                .file_name()
+                .and_then(|s| s.to_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| state.book.base.book_id.clone());
+    let display_title = value
+        .get("display_title")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&book_id)
+        .to_string();
+
+    let (paper_md, paper_md_source, paper_md_original) =
+        match source_value(&value, "paper_md_text", "paper_md_path") {
+            Ok(value) => value,
+            Err(e) => return err_reply(&e),
+        };
+    let (paper_pdf, paper_pdf_source, paper_pdf_original) =
+        match source_value(&value, "paper_pdf_base64", "paper_pdf_path") {
+            Ok(value) => value,
+            Err(e) => return err_reply(&e),
+        };
+    let paper_md_path = target_dir.join("paper.md");
+    let paper_pdf_path = target_dir.join("paper.pdf");
+    if let Err(e) = write_workbench_input_file(&paper_md_path, &paper_md) {
+        return err_reply(&e);
+    }
+    if let Err(e) = write_workbench_input_file(&paper_pdf_path, &paper_pdf) {
+        return err_reply(&e);
+    }
+
+    let paper_md_sha256 = sha256_hex(&paper_md);
+    let paper_pdf_sha256 = sha256_hex(&paper_pdf);
+    let config_hash = workbench_config_hash();
+    let fingerprint = json!({
+        "paper_md_sha256": paper_md_sha256,
+        "paper_pdf_sha256": paper_pdf_sha256,
+        "config_hash": config_hash,
+    });
+    let manifest = json!({
+        "version": "workbench_input_manifest.v1",
+        "book_id": book_id,
+        "profile_id": "paper",
+        "display_title": display_title,
+        "created_at": now,
+        "updated_at": now,
+        "inputs": {
+            "paper_md": {
+                "path": "paper.md",
+                "sha256": paper_md_sha256,
+                "size_bytes": paper_md.len(),
+                "source": paper_md_source,
+                "original_path": paper_md_original,
+            },
+            "paper_pdf": {
+                "path": "paper.pdf",
+                "sha256": paper_pdf_sha256,
+                "size_bytes": paper_pdf.len(),
+                "source": paper_pdf_source,
+                "original_path": paper_pdf_original,
+            },
+        },
+        "config_hash": config_hash,
+        "fingerprint": fingerprint,
+        "trusted": false,
+    });
+    let manifest_path = workbench_input_manifest_path(&target_dir);
+    if let Some(parent) = manifest_path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            return err_reply(&ToolError {
+                error_code: "WORKBENCH_INPUT_WRITE_FAILED".into(),
+                category: "internal".into(),
+                message: format!("创建 Workbench input 目录失败({}): {e}", parent.display()),
+            });
+        }
+    }
+    if let Err(e) = write_workbench_json(&manifest_path, &manifest) {
+        return err_reply(&e);
+    }
+
+    state.book_dir = target_dir;
+    let _ = save_session(state, state.book_dir.to_str());
+    route_build_workbench(&state.book, &state.book_dir)
+}
+
 fn route_build_workbench(book: &Book, book_dir: &Path) -> Reply {
     if is_current_existing_technical_book(book, book_dir) {
         return route_existing_technical_book_workbench(book, book_dir);
     }
 
     let fallback_book_id = &book.base.book_id;
+    let input_manifest = match read_workbench_input_manifest(book_dir) {
+        Ok(value) => value,
+        Err(e) => return err_reply(&e),
+    };
+    let current_input_fingerprint = input_fingerprint_from_manifest(input_manifest.as_ref());
     let report = match read_json_artifact_optional(
         &book_dir
             .join(".build")
@@ -1043,6 +1411,24 @@ fn route_build_workbench(book: &Book, book_dir: &Path) -> Reply {
             ),
         );
         "missing"
+    } else if current_input_fingerprint
+        .as_ref()
+        .is_some_and(|fingerprint| {
+            report
+                .as_ref()
+                .and_then(|value| value.get("input_fingerprint"))
+                != Some(fingerprint)
+        })
+    {
+        stages.insert(
+            "source_reconciliation".into(),
+            stage_value(
+                "source_reconciliation",
+                "stale",
+                Some("source reconciliation input fingerprint does not match current inputs"),
+            ),
+        );
+        "stale"
     } else if unresolved_count > 0 {
         stages.insert(
             "source_reconciliation".into(),
@@ -1344,12 +1730,21 @@ fn route_build_workbench(book: &Book, book_dir: &Path) -> Reply {
         (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => return err_reply(&e),
     };
 
-    let book_id = workbench_book_id(
-        fallback_book_id,
-        book_dir,
-        report.as_ref(),
-        source_manifest.as_ref(),
-    );
+    let book_id = input_manifest
+        .as_ref()
+        .and_then(|value| value.get("book_id"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            workbench_book_id(
+                fallback_book_id,
+                book_dir,
+                report.as_ref(),
+                source_manifest.as_ref(),
+            )
+        });
     ok_json(&json!({
         "version": "build_workbench_snapshot.v1",
         "book_id": book_id,
@@ -1358,6 +1753,11 @@ fn route_build_workbench(book: &Book, book_dir: &Path) -> Reply {
             "status": readiness_status,
             "reasons": reasons,
             "stages": stages,
+        },
+        "input": {
+            "manifest": input_manifest,
+            "fingerprint": current_input_fingerprint,
+            "ready": current_input_fingerprint.is_some(),
         },
         "jobs": jobs,
         "sidecar_plan": sidecar_plan,
@@ -3379,6 +3779,74 @@ mod tests {
         assert_eq!(spec["version"], "sidecar_build_spec.v1");
         assert_eq!(spec["sidecar_id"], "custom_review");
         assert_eq!(spec["input_lids"][0], "1.1");
+    }
+
+    #[test]
+    fn workbench_input_import_upload_writes_manifest_and_snapshot_fingerprint() {
+        let mut s = state_named("workbench-input-import");
+
+        let r = post(
+            &mut s,
+            "/build_workbench/input.import",
+            r#"{"book_id":"paper-a","display_title":"Paper A","paper_md_text":"abc","paper_pdf_base64":"cGRm"}"#,
+        );
+
+        assert_eq!(r.status, 200);
+        let body: serde_json::Value = serde_json::from_str(&r.body).unwrap();
+        assert_eq!(body["version"], "build_workbench_snapshot.v1");
+        assert_eq!(body["book_id"], "paper-a");
+        assert_eq!(body["readiness"]["route"], "workbench");
+        assert_eq!(body["input"]["ready"], true);
+        assert_eq!(
+            body["input"]["fingerprint"]["paper_md_sha256"],
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(
+            body["input"]["fingerprint"]["paper_pdf_sha256"],
+            sha256_hex(b"pdf")
+        );
+        assert_eq!(
+            std::fs::read_to_string(s.book_dir.join("paper.md")).unwrap(),
+            "abc"
+        );
+        assert_eq!(std::fs::read(s.book_dir.join("paper.pdf")).unwrap(), b"pdf");
+        let manifest: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(workbench_input_manifest_path(&s.book_dir)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(manifest["version"], "workbench_input_manifest.v1");
+        assert_eq!(manifest["profile_id"], "paper");
+        assert_eq!(manifest["trusted"], false);
+    }
+
+    #[test]
+    fn workbench_input_manifest_survives_reopen_draft_workspace() {
+        let mut s = state_named("workbench-input-reopen-source");
+        let r = post(
+            &mut s,
+            "/build_workbench/input.import",
+            r#"{"book_id":"paper-reopen","paper_md_text":"abc","paper_pdf_base64":"cGRm"}"#,
+        );
+        assert_eq!(r.status, 200);
+        let dir = s.book_dir.clone();
+
+        let mut reopened = state_named("workbench-input-reopen-target");
+        let body = format!(
+            r#"{{"dir":{}}}"#,
+            serde_json::to_string(dir.to_str().unwrap()).unwrap()
+        );
+        assert_eq!(post(&mut reopened, "/book/open", &body).status, 200);
+
+        let snapshot = get(&mut reopened, "/book/build_workbench");
+        assert_eq!(snapshot.status, 200);
+        let body: serde_json::Value = serde_json::from_str(&snapshot.body).unwrap();
+        assert_eq!(body["book_id"], "paper-reopen");
+        assert_eq!(body["input"]["ready"], true);
+        assert_eq!(
+            body["input"]["manifest"]["inputs"]["paper_md"]["path"],
+            "paper.md"
+        );
+        assert_eq!(body["readiness"]["route"], "workbench");
     }
 
     #[test]

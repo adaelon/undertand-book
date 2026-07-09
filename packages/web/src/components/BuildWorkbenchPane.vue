@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, reactive, watch } from "vue";
+import { computed, reactive, ref, watch } from "vue";
 import type {
   BuildDecisionRequest,
   BuildJobEvent,
@@ -18,10 +18,20 @@ const props = defineProps<{
   loading: boolean;
   error: string | null;
   confirming: boolean;
+  importing: boolean;
 }>();
 
 const emit = defineEmits<{
   (e: "refresh"): void;
+  (e: "import-input", payload: {
+    target_dir?: string;
+    book_id?: string;
+    display_title?: string;
+    paper_md_path?: string;
+    paper_pdf_path?: string;
+    paper_md_text?: string;
+    paper_pdf_base64?: string;
+  }): void;
   (e: "confirm-sidecar-plan", fields: Record<string, unknown>): void;
 }>();
 
@@ -38,6 +48,17 @@ const stageOrder: BuildStageId[] = [
 ];
 
 const editableFields = reactive<Record<string, string>>({});
+const importMode = ref<"upload" | "path">("upload");
+const importError = ref<string | null>(null);
+const importFields = reactive({
+  target_dir: "",
+  book_id: "",
+  display_title: "",
+  paper_md_path: "",
+  paper_pdf_path: "",
+});
+const paperMdFile = ref<File | null>(null);
+const paperPdfFile = ref<File | null>(null);
 
 const latestJob = computed<BuildJobState | null>(() => {
   return props.snapshot?.jobs.at(-1) ?? null;
@@ -59,6 +80,7 @@ const sidecarForm = computed<SidecarFormDraft | null>(() =>
   props.snapshot?.sidecar_plan.form_draft ?? props.snapshot?.sidecar_plan.plan?.form_draft ?? null,
 );
 const sidecarPlanStatus = computed(() => props.snapshot?.sidecar_plan.plan?.status ?? "missing");
+const currentInputManifest = computed(() => props.snapshot?.input.manifest ?? null);
 
 const stageLabels: Record<BuildStageId, string> = {
   source_reconciliation: "来源对齐",
@@ -230,6 +252,79 @@ function parseFieldValue(raw: string): unknown {
   return raw;
 }
 
+function optionalText(value: string): string | undefined {
+  const trimmed = value.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+function onFileChange(event: Event, kind: "md" | "pdf") {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0] ?? null;
+  if (kind === "md") paperMdFile.value = file;
+  else paperPdfFile.value = file;
+}
+
+function readFileAsText(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result ?? ""));
+    reader.onerror = () => reject(reader.error ?? new Error("读取 Markdown 文件失败"));
+    reader.readAsText(file);
+  });
+}
+
+function readFileAsBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const raw = String(reader.result ?? "");
+      resolve(raw.includes(",") ? raw.slice(raw.indexOf(",") + 1) : raw);
+    };
+    reader.onerror = () => reject(reader.error ?? new Error("读取 PDF 文件失败"));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function importWorkbenchInput() {
+  importError.value = null;
+  const payload: {
+    target_dir?: string;
+    book_id?: string;
+    display_title?: string;
+    paper_md_path?: string;
+    paper_pdf_path?: string;
+    paper_md_text?: string;
+    paper_pdf_base64?: string;
+  } = {
+    target_dir: optionalText(importFields.target_dir),
+    book_id: optionalText(importFields.book_id),
+    display_title: optionalText(importFields.display_title),
+  };
+  try {
+    if (importMode.value === "path") {
+      const mdPath = optionalText(importFields.paper_md_path);
+      const pdfPath = optionalText(importFields.paper_pdf_path);
+      if (!mdPath || !pdfPath) {
+        importError.value = "请填写 paper.md 和 paper.pdf 的服务器本机路径。";
+        return;
+      }
+      payload.paper_md_path = mdPath;
+      payload.paper_pdf_path = pdfPath;
+    } else {
+      if (!paperMdFile.value || !paperPdfFile.value) {
+        importError.value = "请选择 paper.md 和 paper.pdf 文件。";
+        return;
+      }
+      payload.paper_md_text = await readFileAsText(paperMdFile.value);
+      payload.paper_pdf_base64 = await readFileAsBase64(paperPdfFile.value);
+      payload.display_title ??= paperMdFile.value.name.replace(/\.md$/i, "");
+    }
+    emit("import-input", payload);
+  } catch (error) {
+    importError.value = error instanceof Error ? error.message : String(error);
+  }
+}
+
 function confirmSidecarPlan() {
   const fields: Record<string, unknown> = {};
   for (const [id, raw] of Object.entries(editableFields)) fields[id] = parseFieldValue(raw);
@@ -256,6 +351,64 @@ function confirmSidecarPlan() {
     <p v-else-if="props.loading && !props.snapshot" class="workbench-empty">正在加载构建状态...</p>
 
     <template v-if="props.snapshot">
+      <section class="workbench-section input-section">
+        <div class="section-headline">
+          <h2>论文输入</h2>
+          <p v-if="currentInputManifest" class="workbench-meta">
+            {{ currentInputManifest.display_title }} · {{ currentInputManifest.inputs.paper_md.size_bytes }}B MD ·
+            {{ currentInputManifest.inputs.paper_pdf.size_bytes }}B PDF
+          </p>
+          <p v-else class="workbench-meta">尚未导入 paper.md + paper.pdf</p>
+        </div>
+        <div v-if="props.snapshot.input.fingerprint" class="fingerprint-grid">
+          <code>md {{ props.snapshot.input.fingerprint.paper_md_sha256.slice(0, 12) }}</code>
+          <code>pdf {{ props.snapshot.input.fingerprint.paper_pdf_sha256.slice(0, 12) }}</code>
+          <code>cfg {{ props.snapshot.input.fingerprint.config_hash.slice(0, 12) }}</code>
+        </div>
+        <div class="import-mode">
+          <label><input v-model="importMode" type="radio" value="upload" /> 上传文件</label>
+          <label><input v-model="importMode" type="radio" value="path" /> 服务器路径</label>
+        </div>
+        <div class="input-grid">
+          <label>
+            <span>Draft workspace</span>
+            <input v-model="importFields.target_dir" placeholder="留空则使用当前工作区" />
+          </label>
+          <label>
+            <span>Book ID</span>
+            <input v-model="importFields.book_id" placeholder="留空自动沿用目录名" />
+          </label>
+          <label>
+            <span>显示标题</span>
+            <input v-model="importFields.display_title" placeholder="留空自动生成" />
+          </label>
+        </div>
+        <div v-if="importMode === 'upload'" class="input-grid">
+          <label>
+            <span>paper.md</span>
+            <input type="file" accept=".md,text/markdown,text/plain" @change="onFileChange($event, 'md')" />
+          </label>
+          <label>
+            <span>paper.pdf</span>
+            <input type="file" accept="application/pdf,.pdf" @change="onFileChange($event, 'pdf')" />
+          </label>
+        </div>
+        <div v-else class="input-grid">
+          <label>
+            <span>paper.md 路径</span>
+            <input v-model="importFields.paper_md_path" placeholder="E:\\papers\\paper.md" />
+          </label>
+          <label>
+            <span>paper.pdf 路径</span>
+            <input v-model="importFields.paper_pdf_path" placeholder="E:\\papers\\paper.pdf" />
+          </label>
+        </div>
+        <p v-if="importError" class="workbench-error">{{ importError }}</p>
+        <button class="primary-action" :disabled="props.importing" @click="importWorkbenchInput">
+          {{ props.importing ? "导入中" : "导入输入" }}
+        </button>
+      </section>
+
       <section v-if="props.snapshot.readiness.reasons.length" class="workbench-section">
         <h2>构建就绪状态</h2>
         <ul class="workbench-reasons">
@@ -390,7 +543,8 @@ function confirmSidecarPlan() {
   align-items: center;
 }
 .workbench-actions button,
-.sidecar-form button {
+.sidecar-form button,
+.primary-action {
   min-height: 38px;
   border: 1px solid var(--hairline);
   border-radius: 8px;
@@ -423,6 +577,69 @@ function confirmSidecarPlan() {
 }
 .workbench-flows .workbench-section {
   flex: 1 1 0;
+}
+.section-headline {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.65rem;
+}
+.input-section {
+  display: grid;
+  gap: 0.7rem;
+}
+.fingerprint-grid,
+.input-grid,
+.import-mode {
+  display: grid;
+  gap: 0.55rem;
+}
+.fingerprint-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+.fingerprint-grid code {
+  overflow: hidden;
+  border: 1px solid var(--hairline-soft);
+  border-radius: 7px;
+  background: var(--surface-code);
+  color: var(--slate);
+  padding: 0.45rem 0.55rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.input-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+.input-grid label,
+.import-mode label {
+  display: grid;
+  gap: 0.3rem;
+  color: var(--slate);
+  font-size: 0.78rem;
+  font-weight: 650;
+}
+.import-mode {
+  grid-template-columns: repeat(2, max-content);
+}
+.import-mode label {
+  display: flex;
+  align-items: center;
+  font-weight: 500;
+}
+.input-grid input {
+  min-width: 0;
+  min-height: 36px;
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--ink);
+  padding: 0 0.55rem;
+}
+.primary-action {
+  justify-self: start;
+  background: var(--ink);
+  color: #fff;
 }
 .workbench-error,
 .workbench-empty,
@@ -536,8 +753,13 @@ function confirmSidecarPlan() {
 
 @media (max-width: 900px) {
   .workbench-head,
-  .workbench-flows {
+  .workbench-flows,
+  .section-headline {
     display: grid;
+  }
+  .fingerprint-grid,
+  .input-grid {
+    grid-template-columns: 1fr;
   }
 }
 </style>

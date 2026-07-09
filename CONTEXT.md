@@ -332,5 +332,11 @@ PDF/Markdown 对齐失败时的可选修复机制。LLM 只能提出格式修复
 ## Build controller
 Build Workbench 背后的服务端控制层:负责把上传的 `paper.md/paper.pdf` 固化为未信任输入 manifest,按 fingerprint 创建/复用 `.build/jobs/<job_id>.json`,启动 Codex/opencode/Claude/manual 等 executor adapter,把 stdout/stderr/heartbeat/权限请求/用户决策写成 job events,并在每次阶段结束后重新运行确定性 artifact gate。它只能驱动构建,不能绕过 `.build/<stage>` artifact/hash/schema gate。状态:NEW(见 `docs/切片方案-paper-pdf-first-hybrid.md` PH12-PH18)。
 
+## Draft paper workspace
+Build Workbench 接收 `paper.md + paper.pdf` 后形成的未信任论文构建目录。它可以保存 canonical 输入副本和 `.build/input/manifest.json`,但在 source reconciliation 与 artifact gate 通过前不得被 normal reader 当作可信书。状态:NEW(见 `docs/切片方案-paper-pdf-first-hybrid.md` PH12)。
+
+## Workbench input manifest
+Draft paper workspace 中记录原始 `paper.md/paper.pdf` 路径、sha256、profile、display title、config hash 与 current input fingerprint 的未信任 manifest。它只用于构建编排和 stale 判断,不替代 `.build/<stage>` accepted artifact。状态:NEW(见 `docs/切片方案-paper-pdf-first-hybrid.md` PH12)。
+
 ## BuildDecisionRequest
 Build Workbench 中影响构建方向或阶段 readiness 的用户选择请求,区别于 Codex/opencode/Claude 等 executor 的工具权限请求。其答案必须写入 job event,若影响构建结果还要写入 stage decision artifact。状态:NEW(见 [docs/adr/0063])。
