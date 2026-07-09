@@ -219,6 +219,7 @@ export type BuildStageId =
   | "book_structure"
   | "paper_reading_guide";
 export type ExecutorId = "codex" | "opencode" | "claude" | "manual";
+export type WorkbenchAdapterMode = "contract_only" | "fake_success" | "fake_failure" | "fake_permission";
 export interface BuildStageReadiness {
   stage: BuildStageId;
   status: BuildStageStatus;
@@ -548,7 +549,7 @@ export const api = {
     stage?: BuildStageId;
     executor?: ExecutorId;
     run_id?: string;
-    adapter_mode?: "contract_only" | "fake_success" | "fake_failure" | "fake_permission";
+    adapter_mode?: WorkbenchAdapterMode;
   }) =>
     http<BuildWorkbenchSnapshot>("POST", "/build_workbench/job.start", payload),
   workbenchJobResume: (job_id: string) =>

@@ -7,7 +7,9 @@ import type {
   AgentEffect,
   AgentHistoryResponse,
   BuildWorkbenchSnapshot,
+  BuildStageId,
   BookLibraryEntry,
+  ExecutorId,
   FormulaSemantics,
   ImageAssetManifestEntry,
   MemoryRecord,
@@ -26,6 +28,7 @@ import type {
   StructureProjection,
   TraceStep,
   Viewport,
+  WorkbenchAdapterMode,
 } from "./api";
 import { renderInlineMarkdown, renderMarkdown } from "./md";
 import { rangeToMarkdown } from "./selection";
@@ -67,6 +70,7 @@ const buildWorkbenchLoading = ref(false);
 const buildWorkbenchError = ref<string | null>(null);
 const buildWorkbenchConfirming = ref(false);
 const buildWorkbenchImporting = ref(false);
+const buildWorkbenchActioning = ref(false);
 const sourceManifest = ref<SourceManifestV2 | null>(null);
 const pdfSourceMap = ref<PdfSourceMap | null>(null);
 const pdfRuntimeError = ref<string | null>(null);
@@ -986,6 +990,50 @@ async function importWorkbenchInput(payload: {
   }
 }
 
+async function applyWorkbenchAction(action: () => Promise<BuildWorkbenchSnapshot>) {
+  buildWorkbenchActioning.value = true;
+  buildWorkbenchError.value = null;
+  try {
+    const snapshot = await action();
+    buildWorkbenchSnapshot.value = snapshot;
+    if (snapshot.readiness.route === "reader") {
+      await init();
+    } else {
+      appSurface.value = "workbench";
+    }
+  } catch (e) {
+    buildWorkbenchError.value = errorMessage(e);
+  } finally {
+    buildWorkbenchActioning.value = false;
+  }
+}
+
+async function createBuildJob() {
+  await applyWorkbenchAction(() => api.workbenchJobCreate());
+}
+
+async function startBuildJob(payload: {
+  job_id?: string;
+  stage: BuildStageId;
+  executor: ExecutorId;
+  run_id?: string;
+  adapter_mode?: WorkbenchAdapterMode;
+}) {
+  await applyWorkbenchAction(() => api.workbenchJobStart(payload));
+}
+
+async function resumeBuildJob(jobId: string) {
+  await applyWorkbenchAction(() => api.workbenchJobResume(jobId));
+}
+
+async function resolveBuildDecision(payload: { job_id: string; decision_id: string; answer: string }) {
+  await applyWorkbenchAction(() => api.workbenchDecisionResolve(payload));
+}
+
+async function resolveExecutorPermission(payload: { job_id: string; request_id: string; granted: boolean }) {
+  await applyWorkbenchAction(() => api.workbenchPermissionResolve(payload));
+}
+
 async function init() {
   try {
     appSurface.value = "loading";
@@ -1560,6 +1608,7 @@ function resetBookSessionUi() {
   buildWorkbenchError.value = null;
   buildWorkbenchConfirming.value = false;
   buildWorkbenchImporting.value = false;
+  buildWorkbenchActioning.value = false;
   sourceManifest.value = null;
   pdfSourceMap.value = null;
   pdfRuntimeError.value = null;
@@ -1688,8 +1737,14 @@ async function submitOpenBook(dir = bookPickerDir.value) {
       :error="buildWorkbenchError"
       :confirming="buildWorkbenchConfirming"
       :importing="buildWorkbenchImporting"
+      :actioning="buildWorkbenchActioning"
       @refresh="refreshBuildWorkbench"
       @import-input="importWorkbenchInput"
+      @create-job="createBuildJob"
+      @start-job="startBuildJob"
+      @resume-job="resumeBuildJob"
+      @resolve-decision="resolveBuildDecision"
+      @resolve-permission="resolveExecutorPermission"
       @confirm-sidecar-plan="confirmSidecarPlan"
     />
 

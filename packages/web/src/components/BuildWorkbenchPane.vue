@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, reactive, ref, watch } from "vue";
+import { computed, onBeforeUnmount, reactive, ref, watch } from "vue";
 import type {
   BuildDecisionRequest,
   BuildJobEvent,
@@ -9,8 +9,10 @@ import type {
   BuildStageId,
   BuildStageStatus,
   BuildWorkbenchSnapshot,
+  ExecutorId,
   ExecutorPermissionRequest,
   SidecarFormDraft,
+  WorkbenchAdapterMode,
 } from "../api";
 
 const props = defineProps<{
@@ -19,6 +21,7 @@ const props = defineProps<{
   error: string | null;
   confirming: boolean;
   importing: boolean;
+  actioning: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -32,6 +35,17 @@ const emit = defineEmits<{
     paper_md_text?: string;
     paper_pdf_base64?: string;
   }): void;
+  (e: "create-job"): void;
+  (e: "start-job", payload: {
+    job_id?: string;
+    stage: BuildStageId;
+    executor: ExecutorId;
+    run_id?: string;
+    adapter_mode?: WorkbenchAdapterMode;
+  }): void;
+  (e: "resume-job", jobId: string): void;
+  (e: "resolve-decision", payload: { job_id: string; decision_id: string; answer: string }): void;
+  (e: "resolve-permission", payload: { job_id: string; request_id: string; granted: boolean }): void;
   (e: "confirm-sidecar-plan", fields: Record<string, unknown>): void;
 }>();
 
@@ -46,6 +60,8 @@ const stageOrder: BuildStageId[] = [
   "book_structure",
   "paper_reading_guide",
 ];
+const executorOptions: ExecutorId[] = ["codex", "manual", "opencode", "claude"];
+const adapterModeOptions: WorkbenchAdapterMode[] = ["contract_only", "fake_success", "fake_failure", "fake_permission"];
 
 const editableFields = reactive<Record<string, string>>({});
 const importMode = ref<"upload" | "path">("upload");
@@ -59,15 +75,29 @@ const importFields = reactive({
 });
 const paperMdFile = ref<File | null>(null);
 const paperPdfFile = ref<File | null>(null);
+const selectedStage = ref<BuildStageId>("source_reconciliation");
+const selectedExecutor = ref<ExecutorId>("codex");
+const selectedAdapterMode = ref<WorkbenchAdapterMode>("contract_only");
+const runId = ref("");
+const pollingEnabled = ref(false);
+let pollingTimer: number | null = null;
 
 const latestJob = computed<BuildJobState | null>(() => {
   return props.snapshot?.jobs.at(-1) ?? null;
 });
-const pendingDecisions = computed<BuildDecisionRequest[]>(() =>
-  (props.snapshot?.jobs ?? []).flatMap((job) => job.decision_requests.filter((request) => request.status === "pending")),
+const pendingDecisionItems = computed<Array<{ job: BuildJobState; request: BuildDecisionRequest }>>(() =>
+  (props.snapshot?.jobs ?? []).flatMap((job) =>
+    job.decision_requests
+      .filter((request) => request.status === "pending")
+      .map((request) => ({ job, request })),
+  ),
 );
-const pendingPermissions = computed<ExecutorPermissionRequest[]>(() =>
-  (props.snapshot?.jobs ?? []).flatMap((job) => job.permission_requests.filter((request) => request.status === "pending")),
+const pendingPermissionItems = computed<Array<{ job: BuildJobState; request: ExecutorPermissionRequest }>>(() =>
+  (props.snapshot?.jobs ?? []).flatMap((job) =>
+    job.permission_requests
+      .filter((request) => request.status === "pending")
+      .map((request) => ({ job, request })),
+  ),
 );
 const recentEvents = computed<BuildJobEvent[]>(() =>
   (props.snapshot?.jobs ?? [])
@@ -81,6 +111,16 @@ const sidecarForm = computed<SidecarFormDraft | null>(() =>
 );
 const sidecarPlanStatus = computed(() => props.snapshot?.sidecar_plan.plan?.status ?? "missing");
 const currentInputManifest = computed(() => props.snapshot?.input.manifest ?? null);
+const activeRun = computed(() => latestJob.value?.active_run ?? null);
+const hasPendingUserGate = computed(() => pendingDecisionItems.value.length > 0 || pendingPermissionItems.value.length > 0);
+const canStartJob = computed(() =>
+  !!props.snapshot?.input.ready
+  && !props.actioning
+  && !hasPendingUserGate.value
+  && latestJob.value?.status !== "running",
+);
+const canResumeJob = computed(() => !!latestJob.value?.active_run && !props.actioning && !hasPendingUserGate.value);
+const selectedStageReadiness = computed(() => props.snapshot?.readiness.stages[selectedStage.value] ?? null);
 
 const stageLabels: Record<BuildStageId, string> = {
   source_reconciliation: "来源对齐",
@@ -92,6 +132,18 @@ const stageLabels: Record<BuildStageId, string> = {
   pass2: "Pass2 长程关联",
   book_structure: "书结构",
   paper_reading_guide: "论文阅读指南",
+};
+const executorLabels: Record<ExecutorId, string> = {
+  codex: "Codex",
+  opencode: "opencode",
+  claude: "Claude",
+  manual: "手动",
+};
+const adapterModeLabels: Record<WorkbenchAdapterMode, string> = {
+  contract_only: "只写执行契约",
+  fake_success: "模拟完成",
+  fake_failure: "模拟失败",
+  fake_permission: "模拟权限请求",
 };
 const readinessStatusLabels: Record<BuildReadinessStatus, string> = {
   trusted_book: "可进入阅读",
@@ -216,6 +268,14 @@ function jobStatusLabel(status: BuildJobStatus): string {
   return jobStatusLabels[status] ?? status;
 }
 
+function executorLabel(executor: ExecutorId): string {
+  return executorLabels[executor] ?? executor;
+}
+
+function adapterModeLabel(mode: WorkbenchAdapterMode): string {
+  return adapterModeLabels[mode] ?? mode;
+}
+
 function sidecarPlanStatusLabel(status: string): string {
   return sidecarStatusLabels[status] ?? status;
 }
@@ -330,6 +390,63 @@ async function importWorkbenchInput() {
   }
 }
 
+function createBuildJob() {
+  emit("create-job");
+}
+
+function startSelectedJob() {
+  emit("start-job", {
+    job_id: latestJob.value?.job_id,
+    stage: selectedStage.value,
+    executor: selectedExecutor.value,
+    run_id: optionalText(runId.value),
+    adapter_mode: selectedAdapterMode.value,
+  });
+}
+
+function resumeLatestJob() {
+  if (latestJob.value) emit("resume-job", latestJob.value.job_id);
+}
+
+function resolveDecision(item: { job: BuildJobState; request: BuildDecisionRequest }, answer: string) {
+  emit("resolve-decision", {
+    job_id: item.job.job_id,
+    decision_id: item.request.decision_id,
+    answer,
+  });
+}
+
+function resolvePermission(item: { job: BuildJobState; request: ExecutorPermissionRequest }, granted: boolean) {
+  emit("resolve-permission", {
+    job_id: item.job.job_id,
+    request_id: item.request.request_id,
+    granted,
+  });
+}
+
+function telemetryText(value: string | number | undefined, fallback = "暂无"): string {
+  if (value === undefined || value === "") return fallback;
+  return String(value);
+}
+
+function clearPollingTimer() {
+  if (pollingTimer !== null) {
+    window.clearInterval(pollingTimer);
+    pollingTimer = null;
+  }
+}
+
+watch(pollingEnabled, (enabled) => {
+  clearPollingTimer();
+  if (enabled) {
+    pollingTimer = window.setInterval(() => {
+      if (!props.loading && !props.actioning) emit("refresh");
+    }, 4000);
+  }
+});
+
+onBeforeUnmount(clearPollingTimer);
+
 function confirmSidecarPlan() {
   const fields: Record<string, unknown> = {};
   for (const [id, raw] of Object.entries(editableFields)) fields[id] = parseFieldValue(raw);
@@ -348,6 +465,10 @@ function confirmSidecarPlan() {
         <span v-if="props.snapshot" class="workbench-status" :data-status="props.snapshot.readiness.status">
           {{ readinessStatusLabel(props.snapshot.readiness.status) }}
         </span>
+        <label class="poll-toggle">
+          <input v-model="pollingEnabled" type="checkbox" />
+          自动轮询
+        </label>
         <button :disabled="props.loading" @click="emit('refresh')">{{ props.loading ? "刷新中" : "刷新" }}</button>
       </div>
     </header>
@@ -366,9 +487,9 @@ function confirmSidecarPlan() {
           <p v-else class="workbench-meta">尚未导入 paper.md + paper.pdf</p>
         </div>
         <div v-if="props.snapshot.input.fingerprint" class="fingerprint-grid">
-          <code>md {{ props.snapshot.input.fingerprint.paper_md_sha256.slice(0, 12) }}</code>
-          <code>pdf {{ props.snapshot.input.fingerprint.paper_pdf_sha256.slice(0, 12) }}</code>
-          <code>cfg {{ props.snapshot.input.fingerprint.config_hash.slice(0, 12) }}</code>
+          <code>MD {{ props.snapshot.input.fingerprint.paper_md_sha256.slice(0, 12) }}</code>
+          <code>PDF {{ props.snapshot.input.fingerprint.paper_pdf_sha256.slice(0, 12) }}</code>
+          <code>配置 {{ props.snapshot.input.fingerprint.config_hash.slice(0, 12) }}</code>
         </div>
         <div class="import-mode">
           <label><input v-model="importMode" type="radio" value="upload" /> 上传文件</label>
@@ -376,11 +497,11 @@ function confirmSidecarPlan() {
         </div>
         <div class="input-grid">
           <label>
-            <span>Draft workspace</span>
+            <span>草稿工作区</span>
             <input v-model="importFields.target_dir" placeholder="留空则使用当前工作区" />
           </label>
           <label>
-            <span>Book ID</span>
+            <span>书籍 ID</span>
             <input v-model="importFields.book_id" placeholder="留空自动沿用目录名" />
           </label>
           <label>
@@ -414,6 +535,100 @@ function confirmSidecarPlan() {
         </button>
       </section>
 
+      <section class="workbench-section">
+        <div class="section-headline">
+          <h2>运行控制</h2>
+          <p v-if="latestJob" class="workbench-meta">{{ latestJob.job_id }} · {{ jobStatusLabel(latestJob.status) }}</p>
+          <p v-else class="workbench-meta">尚未创建构建任务</p>
+        </div>
+        <div class="run-control-grid">
+          <label>
+            <span>阶段</span>
+            <select v-model="selectedStage">
+              <option v-for="stage in stageOrder" :key="stage" :value="stage">{{ stageLabel(stage) }}</option>
+            </select>
+          </label>
+          <label>
+            <span>执行器</span>
+            <select v-model="selectedExecutor">
+              <option v-for="executor in executorOptions" :key="executor" :value="executor">
+                {{ executorLabel(executor) }}
+              </option>
+            </select>
+          </label>
+          <label>
+            <span>执行模式</span>
+            <select v-model="selectedAdapterMode">
+              <option v-for="mode in adapterModeOptions" :key="mode" :value="mode">
+                {{ adapterModeLabel(mode) }}
+              </option>
+            </select>
+          </label>
+          <label>
+            <span>运行 ID</span>
+            <input v-model="runId" placeholder="留空自动生成" />
+          </label>
+        </div>
+        <p v-if="selectedStageReadiness?.reason" class="workbench-meta">
+          当前阶段: {{ stageStatusLabel(selectedStageReadiness.status) }} · {{ reasonText(selectedStageReadiness.reason) }}
+        </p>
+        <p v-if="hasPendingUserGate" class="workbench-meta">
+          当前任务正在等待下方的构建决策或执行权限处理。
+        </p>
+        <div class="action-row">
+          <button :disabled="props.actioning || !props.snapshot.input.ready" @click="createBuildJob">
+            创建/复用任务
+          </button>
+          <button class="primary-action" :disabled="!canStartJob" @click="startSelectedJob">
+            {{ props.actioning ? "处理中" : "启动所选阶段" }}
+          </button>
+          <button :disabled="!canResumeJob" @click="resumeLatestJob">
+            恢复活动任务
+          </button>
+        </div>
+        <p v-if="latestJob?.status === 'failed'" class="workbench-error">
+          上次构建任务失败。请检查事件日志后重新启动所选阶段，或刷新状态查看最新恢复信息。
+        </p>
+      </section>
+
+      <section v-if="activeRun" class="workbench-section">
+        <h2>活动执行器</h2>
+        <dl class="telemetry-grid">
+          <div>
+            <dt>运行 ID</dt>
+            <dd>{{ activeRun.run_id }}</dd>
+          </div>
+          <div>
+            <dt>阶段</dt>
+            <dd>{{ stageLabel(activeRun.stage) }}</dd>
+          </div>
+          <div>
+            <dt>执行器</dt>
+            <dd>{{ executorLabel(activeRun.executor) }}</dd>
+          </div>
+          <div>
+            <dt>进程 ID</dt>
+            <dd>{{ telemetryText(activeRun.telemetry?.pid) }}</dd>
+          </div>
+          <div>
+            <dt>启动时间</dt>
+            <dd>{{ telemetryText(activeRun.telemetry?.started_at) }}</dd>
+          </div>
+          <div>
+            <dt>心跳</dt>
+            <dd>{{ telemetryText(activeRun.telemetry?.last_heartbeat_at) }}</dd>
+          </div>
+          <div>
+            <dt>令牌用量</dt>
+            <dd>{{ telemetryText(activeRun.telemetry?.tokens_used) }}</dd>
+          </div>
+          <div>
+            <dt>成本</dt>
+            <dd>{{ telemetryText(activeRun.telemetry?.cost_usd) }}</dd>
+          </div>
+        </dl>
+      </section>
+
       <section v-if="props.snapshot.readiness.reasons.length" class="workbench-section">
         <h2>构建就绪状态</h2>
         <ul class="workbench-reasons">
@@ -441,13 +656,21 @@ function confirmSidecarPlan() {
       <section class="workbench-flows">
         <div class="workbench-section">
           <h2>待处理构建决策</h2>
-          <ul v-if="pendingDecisions.length" class="request-list">
-            <li v-for="request in pendingDecisions" :key="request.decision_id">
-              <strong>{{ decisionKindLabels[request.kind] ?? request.kind }}</strong>
-              <p>{{ request.prompt }}</p>
-              <div v-if="request.options.length" class="request-options">
-                <span v-for="option in request.options" :key="option.id">{{ option.label }}</span>
+          <ul v-if="pendingDecisionItems.length" class="request-list">
+            <li v-for="item in pendingDecisionItems" :key="item.request.decision_id">
+              <strong>{{ decisionKindLabels[item.request.kind] ?? item.request.kind }}</strong>
+              <p>{{ item.request.prompt }}</p>
+              <div v-if="item.request.options.length" class="request-options">
+                <button
+                  v-for="option in item.request.options"
+                  :key="option.id"
+                  :disabled="props.actioning"
+                  @click="resolveDecision(item, option.id)"
+                >
+                  {{ option.label }}
+                </button>
               </div>
+              <p v-else class="workbench-empty">这个决策暂未提供可选答案。</p>
             </li>
           </ul>
           <p v-else class="workbench-empty">暂无待处理构建决策。</p>
@@ -455,11 +678,15 @@ function confirmSidecarPlan() {
 
         <div class="workbench-section">
           <h2>待授权执行权限</h2>
-          <ul v-if="pendingPermissions.length" class="request-list">
-            <li v-for="request in pendingPermissions" :key="request.request_id">
-              <strong>{{ request.executor }} · {{ permissionCategoryLabels[request.category] ?? request.category }}</strong>
-              <p>{{ request.action_summary }}</p>
-              <small>授权范围: {{ permissionScopeLabels[request.scope_hint] ?? request.scope_hint }}</small>
+          <ul v-if="pendingPermissionItems.length" class="request-list">
+            <li v-for="item in pendingPermissionItems" :key="item.request.request_id">
+              <strong>{{ executorLabel(item.request.executor) }} · {{ permissionCategoryLabels[item.request.category] ?? item.request.category }}</strong>
+              <p>{{ item.request.action_summary }}</p>
+              <small>授权范围: {{ permissionScopeLabels[item.request.scope_hint] ?? item.request.scope_hint }}</small>
+              <div class="action-row compact">
+                <button :disabled="props.actioning" @click="resolvePermission(item, true)">批准</button>
+                <button :disabled="props.actioning" @click="resolvePermission(item, false)">拒绝</button>
+              </div>
             </li>
           </ul>
           <p v-else class="workbench-empty">暂无待授权执行权限。</p>
@@ -548,6 +775,7 @@ function confirmSidecarPlan() {
   align-items: center;
 }
 .workbench-actions button,
+.action-row button,
 .sidecar-form button,
 .primary-action {
   min-height: 38px;
@@ -556,6 +784,14 @@ function confirmSidecarPlan() {
   background: #fff;
   color: var(--ink);
   padding: 0 0.75rem;
+}
+.poll-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  color: var(--slate);
+  font-size: 0.78rem;
+  white-space: nowrap;
 }
 .workbench-status {
   border: 1px solid var(--hairline);
@@ -596,7 +832,9 @@ function confirmSidecarPlan() {
 }
 .fingerprint-grid,
 .input-grid,
-.import-mode {
+.import-mode,
+.run-control-grid,
+.telemetry-grid {
   display: grid;
   gap: 0.55rem;
 }
@@ -617,7 +855,8 @@ function confirmSidecarPlan() {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 .input-grid label,
-.import-mode label {
+.import-mode label,
+.run-control-grid label {
   display: grid;
   gap: 0.3rem;
   color: var(--slate);
@@ -632,7 +871,9 @@ function confirmSidecarPlan() {
   align-items: center;
   font-weight: 500;
 }
-.input-grid input {
+.input-grid input,
+.run-control-grid input,
+.run-control-grid select {
   min-width: 0;
   min-height: 36px;
   border: 1px solid var(--hairline);
@@ -640,6 +881,42 @@ function confirmSidecarPlan() {
   background: #fff;
   color: var(--ink);
   padding: 0 0.55rem;
+}
+.run-control-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin-bottom: 0.65rem;
+}
+.action-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.65rem;
+}
+.action-row.compact {
+  margin-top: 0.5rem;
+}
+.telemetry-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin: 0;
+}
+.telemetry-grid div {
+  min-width: 0;
+  border: 1px solid var(--hairline-soft);
+  border-radius: 7px;
+  background: #fff;
+  padding: 0.52rem 0.6rem;
+}
+.telemetry-grid dt {
+  color: var(--steel);
+  font-size: 0.7rem;
+}
+.telemetry-grid dd {
+  overflow: hidden;
+  margin: 0.18rem 0 0;
+  color: var(--ink);
+  font-size: 0.82rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .primary-action {
   justify-self: start;
@@ -718,9 +995,10 @@ function confirmSidecarPlan() {
   gap: 0.3rem;
   margin-top: 0.45rem;
 }
-.request-options span {
+.request-options button {
   border: 1px solid var(--hairline-soft);
   border-radius: 999px;
+  background: #fff;
   color: var(--slate);
   padding: 0.14rem 0.45rem;
   font-size: 0.72rem;
@@ -763,7 +1041,9 @@ function confirmSidecarPlan() {
     display: grid;
   }
   .fingerprint-grid,
-  .input-grid {
+  .input-grid,
+  .run-control-grid,
+  .telemetry-grid {
     grid-template-columns: 1fr;
   }
 }
