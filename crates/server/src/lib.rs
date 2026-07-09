@@ -15,10 +15,10 @@ use runtime::{
     guided_route_from, synthesize, unvisited_back, AdapterError, AssistantTurn, CompletionRequest,
     Message, ModelAdapter, ParsedResponse, ToolSpec,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::{BTreeMap, HashMap};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 pub mod mcp;
 
@@ -293,6 +293,74 @@ struct BookLibraryEntry {
     dir: String,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq)]
+struct PdfPageRectDto {
+    #[serde(rename = "pageIndex")]
+    page_index: usize,
+    bbox: [f64; 4],
+}
+
+#[derive(Debug, Deserialize)]
+struct PdfSelectionInputRect {
+    #[serde(rename = "pageIndex")]
+    page_index: Option<usize>,
+    bbox: [f64; 4],
+}
+
+#[derive(Debug, Deserialize)]
+struct PdfSelectionResolveInput {
+    #[serde(rename = "pageIndex")]
+    page_index: Option<usize>,
+    rects: Vec<PdfSelectionInputRect>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+struct SourceSpanDto {
+    start: usize,
+    end: usize,
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+struct PdfSemanticRange {
+    lid: String,
+    range: SourceSpanDto,
+    source_span: SourceSpanDto,
+    quote_markdown: String,
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+struct PdfSelectionResolveResponse {
+    status: String,
+    ranges: Vec<PdfSemanticRange>,
+    quote_markdown: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct PdfRangeInput {
+    lid: String,
+    range: Option<SourceSpanDto>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PdfRangesProjectInput {
+    ranges: Vec<PdfRangeInput>,
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+struct PdfRangeProjection {
+    lid: String,
+    range: Option<SourceSpanDto>,
+    status: String,
+    source_span: Option<SourceSpanDto>,
+    primary_region: Option<serde_json::Value>,
+    regions: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+struct PdfRangesProjectResponse {
+    projections: Vec<PdfRangeProjection>,
+}
+
 /// 纯函数路由 `[ADR-0028 决策3]`:按命名空间前缀定方法(`book.*`→GET 只读、
 /// `reader.*`/`memory.*`→POST 可变),端点名 = 命令名,错误原样透传 §4.4 信封。
 pub fn route(state: &mut AppState, req: Req) -> Reply {
@@ -511,6 +579,8 @@ fn route_book(
         "manifest" => ok_json(&book.manifest()),
         "library" => route_book_library(book_dir),
         "asset_manifest" => route_asset_manifest(book, book_dir),
+        "source_manifest" => route_source_manifest(book_dir),
+        "pdf_source_map" => route_pdf_source_map(book_dir),
         "text" => {
             let Some(lid) = q.get("lid") else {
                 return validation("INVALID_RANGE", "book.text 需 lid 查询参数");
@@ -665,7 +735,173 @@ fn route_asset_manifest(book: &Book, book_dir: &Path) -> Reply {
     }
 }
 
+fn read_json_artifact(
+    path: &Path,
+    missing_code: &str,
+    invalid_code: &str,
+) -> Result<serde_json::Value, ToolError> {
+    let raw = std::fs::read_to_string(path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            ToolError {
+                error_code: missing_code.into(),
+                category: "not_found".into(),
+                message: format!("artifact not found: {}", path.display()),
+            }
+        } else {
+            ToolError {
+                error_code: "ARTIFACT_READ_FAILED".into(),
+                category: "internal".into(),
+                message: format!("读取 artifact 失败({}): {e}", path.display()),
+            }
+        }
+    })?;
+    serde_json::from_str::<serde_json::Value>(&raw).map_err(|e| ToolError {
+        error_code: invalid_code.into(),
+        category: "internal".into(),
+        message: format!("artifact 非合法 JSON({}): {e}", path.display()),
+    })
+}
+
+fn source_manifest_value(book_dir: &Path) -> Result<serde_json::Value, ToolError> {
+    read_json_artifact(
+        &book_dir.join("source_manifest.json"),
+        "SOURCE_MANIFEST_NOT_FOUND",
+        "SOURCE_MANIFEST_INVALID",
+    )
+}
+
+fn route_source_manifest(book_dir: &Path) -> Reply {
+    match source_manifest_value(book_dir) {
+        Ok(value) => ok_json(&value),
+        Err(e) => err_reply(&e),
+    }
+}
+
+fn pdf_capability_status(manifest: &serde_json::Value, name: &str) -> Option<String> {
+    manifest
+        .get("capabilities")
+        .and_then(|v| v.get(name))
+        .and_then(|v| v.get("status"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+}
+
+fn pdf_capability_allows_runtime_map(manifest: &serde_json::Value) -> bool {
+    ["project_lid_to_pdf", "project_ranges_to_pdf"]
+        .iter()
+        .any(|name| {
+            matches!(
+                pdf_capability_status(manifest, name).as_deref(),
+                Some("available" | "degraded")
+            )
+        })
+}
+
+fn route_pdf_source_map(book_dir: &Path) -> Reply {
+    let manifest = match source_manifest_value(book_dir) {
+        Ok(value) => value,
+        Err(e) => return err_reply(&e),
+    };
+    if !pdf_capability_allows_runtime_map(&manifest) {
+        return err_reply(&ToolError {
+            error_code: "PDF_SOURCE_MAP_UNAVAILABLE".into(),
+            category: "validation".into(),
+            message: "source_manifest.v2 does not expose a usable PDF source map capability".into(),
+        });
+    }
+    match read_json_artifact(
+        &book_dir.join("pdf_source_map.json"),
+        "PDF_SOURCE_MAP_NOT_FOUND",
+        "PDF_SOURCE_MAP_INVALID",
+    ) {
+        Ok(value) => ok_json(&value),
+        Err(e) => err_reply(&e),
+    }
+}
+
+fn safe_manifest_path(book_dir: &Path, declared: &str) -> Result<PathBuf, ToolError> {
+    let declared_path = Path::new(declared);
+    if declared_path.is_absolute() {
+        return Ok(declared_path.to_path_buf());
+    }
+    let mut out = book_dir.to_path_buf();
+    for component in declared_path.components() {
+        match component {
+            Component::Normal(seg) => out.push(seg),
+            _ => {
+                return Err(ToolError {
+                    error_code: "INVALID_MANIFEST_PATH".into(),
+                    category: "validation".into(),
+                    message: format!("manifest path must be a normal relative path: {declared}"),
+                });
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn original_pdf_path(book_dir: &Path) -> Result<PathBuf, ToolError> {
+    let manifest = source_manifest_value(book_dir)?;
+    let Some(path) = manifest
+        .get("original_pdf")
+        .and_then(|v| v.get("path"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        return Err(ToolError {
+            error_code: "ORIGINAL_PDF_NOT_DECLARED".into(),
+            category: "not_found".into(),
+            message: "source_manifest.v2 does not declare original_pdf.path".into(),
+        });
+    };
+    safe_manifest_path(book_dir, path)
+}
+
+fn route_original_pdf_file(book_dir: &Path) -> BinaryReply {
+    let file = match original_pdf_path(book_dir) {
+        Ok(path) => path,
+        Err(e) => {
+            return BinaryReply {
+                status: status_for(&e.category),
+                content_type: "application/json; charset=utf-8".into(),
+                body: to_body(&e).into_bytes(),
+            };
+        }
+    };
+    match std::fs::read(&file) {
+        Ok(body) => BinaryReply {
+            status: 200,
+            content_type: "application/pdf".into(),
+            body,
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => BinaryReply {
+            status: 404,
+            content_type: "application/json; charset=utf-8".into(),
+            body: to_body(&ToolError {
+                error_code: "ORIGINAL_PDF_NOT_FOUND".into(),
+                category: "not_found".into(),
+                message: format!("original PDF not found: {}", file.display()),
+            })
+            .into_bytes(),
+        },
+        Err(e) => BinaryReply {
+            status: 500,
+            content_type: "application/json; charset=utf-8".into(),
+            body: to_body(&ToolError {
+                error_code: "ORIGINAL_PDF_READ_FAILED".into(),
+                category: "internal".into(),
+                message: format!("读取 original PDF 失败({}): {e}", file.display()),
+            })
+            .into_bytes(),
+        },
+    }
+}
+
 pub fn route_book_asset_file(book_dir: &Path, path: &str) -> Option<BinaryReply> {
+    if path == "/book/pdf/original" {
+        return Some(route_original_pdf_file(book_dir));
+    }
     let rel = path.strip_prefix("/book/assets/")?;
     let mut file = book_dir.join("assets");
     for seg in rel.split('/') {
@@ -831,6 +1067,10 @@ fn route_mut(state: &mut AppState, path: &str, body: &str, now: &str) -> Reply {
                 }
             }
         }
+        "/reader/pdf_selection.resolve" => {
+            route_pdf_selection_resolve(&state.book, &state.book_dir, &v)
+        }
+        "/reader/pdf_ranges.project" => route_pdf_ranges_project(&state.book, &state.book_dir, &v),
         "/memory/save" => {
             let (Some(ty), Some(anchor), Some(content)) =
                 (sget("type"), sget("anchor_lid"), sget("content"))
@@ -888,6 +1128,335 @@ fn route_mut(state: &mut AppState, path: &str, body: &str, now: &str) -> Reply {
         }
         _ => route_not_found(path),
     }
+}
+
+#[derive(Debug, Clone)]
+struct SelectionCharHit {
+    page_index: usize,
+    char_index: usize,
+    lid: Option<String>,
+    source_span: SourceSpanDto,
+}
+
+fn rect_intersects(a: [f64; 4], b: [f64; 4]) -> bool {
+    a[0] < b[2] && a[2] > b[0] && a[1] < b[3] && a[3] > b[1]
+}
+
+fn parse_pdf_rect(value: &serde_json::Value) -> Option<PdfPageRectDto> {
+    let page_index = value.get("pageIndex")?.as_u64()? as usize;
+    let bbox_value = value.get("bbox")?.as_array()?;
+    if bbox_value.len() != 4 {
+        return None;
+    }
+    let mut bbox = [0.0; 4];
+    for (i, v) in bbox_value.iter().enumerate() {
+        bbox[i] = v.as_f64()?;
+    }
+    Some(PdfPageRectDto { page_index, bbox })
+}
+
+fn parse_source_span(value: &serde_json::Value) -> Option<SourceSpanDto> {
+    Some(SourceSpanDto {
+        start: value.get("start")?.as_u64()? as usize,
+        end: value.get("end")?.as_u64()? as usize,
+    })
+}
+
+fn selection_manifest_value(book_dir: &Path) -> Result<serde_json::Value, ToolError> {
+    read_json_artifact(
+        &book_dir.join("pdf_selection_map").join("manifest.json"),
+        "PDF_SELECTION_MAP_NOT_FOUND",
+        "PDF_SELECTION_MAP_INVALID",
+    )
+}
+
+fn selection_page_shard_path(book_dir: &Path, page_index: usize) -> Result<PathBuf, ToolError> {
+    let manifest = selection_manifest_value(book_dir)?;
+    let Some(shard_path) = manifest
+        .get("page_shards")
+        .and_then(|v| v.as_array())
+        .and_then(|shards| {
+            shards.iter().find_map(|shard| {
+                let page = shard.get("pageIndex").and_then(|v| v.as_u64())? as usize;
+                if page == page_index {
+                    shard.get("path").and_then(|v| v.as_str())
+                } else {
+                    None
+                }
+            })
+        })
+    else {
+        return Err(ToolError {
+            error_code: "PDF_SELECTION_PAGE_NOT_FOUND".into(),
+            category: "not_found".into(),
+            message: format!("pdf_selection_map shard not found for page {page_index}"),
+        });
+    };
+    safe_manifest_path(&book_dir.join("pdf_selection_map"), shard_path)
+}
+
+fn selection_hits_for_page(
+    book_dir: &Path,
+    page_index: usize,
+    rects: &[[f64; 4]],
+) -> Result<(Vec<SelectionCharHit>, usize), ToolError> {
+    let shard_path = selection_page_shard_path(book_dir, page_index)?;
+    let shard = read_json_artifact(
+        &shard_path,
+        "PDF_SELECTION_PAGE_NOT_FOUND",
+        "PDF_SELECTION_PAGE_INVALID",
+    )?;
+    let mut hits = Vec::new();
+    let mut unmapped_hits = 0;
+    let Some(chars) = shard.get("chars").and_then(|v| v.as_array()) else {
+        return Err(ToolError {
+            error_code: "PDF_SELECTION_PAGE_INVALID".into(),
+            category: "internal".into(),
+            message: format!(
+                "pdf_selection_map page shard has no chars array: {}",
+                shard_path.display()
+            ),
+        });
+    };
+    for ch in chars {
+        let Some(rect) = ch.get("rect").and_then(parse_pdf_rect) else {
+            continue;
+        };
+        if rect.page_index != page_index
+            || !rects
+                .iter()
+                .any(|selected| rect_intersects(*selected, rect.bbox))
+        {
+            continue;
+        }
+        let Some(source_span) = ch.get("source_span").and_then(parse_source_span) else {
+            continue;
+        };
+        let lid = ch.get("lid").and_then(|v| v.as_str()).map(str::to_string);
+        if lid.is_none() {
+            unmapped_hits += 1;
+        }
+        hits.push(SelectionCharHit {
+            page_index,
+            char_index: ch.get("char_index").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
+            lid,
+            source_span,
+        });
+    }
+    Ok((hits, unmapped_hits))
+}
+
+fn lid_span(book: &Book, lid: &str) -> Result<SourceSpanDto, ToolError> {
+    book.base
+        .lid_nodes
+        .iter()
+        .find(|node| node.lid == lid)
+        .map(|node| SourceSpanDto {
+            start: node.span.start,
+            end: node.span.end,
+        })
+        .ok_or_else(|| ToolError {
+            error_code: "LID_NOT_FOUND".into(),
+            category: "not_found".into(),
+            message: format!("LID 不存在: {lid}"),
+        })
+}
+
+fn slice_utf16_lossy(text: &str, start: usize, end: usize) -> String {
+    let units: Vec<u16> = text.encode_utf16().collect();
+    let s = start.min(units.len());
+    let e = end.min(units.len()).max(s);
+    String::from_utf16_lossy(&units[s..e])
+}
+
+fn quote_lid_range(book: &Book, lid: &str, range: SourceSpanDto) -> Result<String, ToolError> {
+    let text = book.text(lid, None)?;
+    Ok(slice_utf16_lossy(&text, range.start, range.end))
+}
+
+fn route_pdf_selection_resolve(book: &Book, book_dir: &Path, body: &serde_json::Value) -> Reply {
+    let input = match serde_json::from_value::<PdfSelectionResolveInput>(body.clone()) {
+        Ok(input) => input,
+        Err(e) => {
+            return validation(
+                "INVALID_PDF_SELECTION",
+                &format!("reader.pdf_selection.resolve 需 pageIndex? + rects[]: {e}"),
+            );
+        }
+    };
+    if input.rects.is_empty() {
+        return validation(
+            "INVALID_PDF_SELECTION",
+            "reader.pdf_selection.resolve 需至少一个 rect",
+        );
+    }
+
+    let mut rects_by_page: BTreeMap<usize, Vec<[f64; 4]>> = BTreeMap::new();
+    for rect in input.rects {
+        let Some(page_index) = rect.page_index.or(input.page_index) else {
+            return validation(
+                "INVALID_PDF_SELECTION",
+                "selection rect 需 pageIndex,或 body 顶层提供 pageIndex",
+            );
+        };
+        rects_by_page.entry(page_index).or_default().push(rect.bbox);
+    }
+
+    let mut hits = Vec::new();
+    let mut unmapped_hits = 0;
+    for (page_index, rects) in rects_by_page {
+        match selection_hits_for_page(book_dir, page_index, &rects) {
+            Ok((mut page_hits, page_unmapped)) => {
+                hits.append(&mut page_hits);
+                unmapped_hits += page_unmapped;
+            }
+            Err(e) => return err_reply(&e),
+        }
+    }
+    hits.sort_by_key(|hit| (hit.page_index, hit.char_index));
+
+    let mut by_lid: BTreeMap<String, SourceSpanDto> = BTreeMap::new();
+    for hit in &hits {
+        let Some(lid) = &hit.lid else {
+            continue;
+        };
+        by_lid
+            .entry(lid.clone())
+            .and_modify(|span| {
+                span.start = span.start.min(hit.source_span.start);
+                span.end = span.end.max(hit.source_span.end);
+            })
+            .or_insert(hit.source_span);
+    }
+
+    let mut ranges = Vec::new();
+    for (lid, abs_span) in by_lid {
+        let node_span = match lid_span(book, &lid) {
+            Ok(span) => span,
+            Err(e) => return err_reply(&e),
+        };
+        let rel = SourceSpanDto {
+            start: abs_span.start.saturating_sub(node_span.start),
+            end: abs_span
+                .end
+                .saturating_sub(node_span.start)
+                .min(node_span.end - node_span.start),
+        };
+        let quote = match quote_lid_range(book, &lid, rel) {
+            Ok(quote) => quote,
+            Err(e) => return err_reply(&e),
+        };
+        ranges.push(PdfSemanticRange {
+            lid,
+            range: rel,
+            source_span: abs_span,
+            quote_markdown: quote,
+        });
+    }
+
+    let quote_markdown = ranges
+        .iter()
+        .map(|range| range.quote_markdown.as_str())
+        .collect::<Vec<_>>()
+        .join("");
+    let status = if ranges.is_empty() {
+        "unresolved"
+    } else if unmapped_hits > 0 || hits.iter().any(|hit| hit.lid.is_none()) {
+        "partial"
+    } else {
+        "resolved"
+    };
+    ok_json(&PdfSelectionResolveResponse {
+        status: status.into(),
+        ranges,
+        quote_markdown,
+    })
+}
+
+fn pdf_source_map_value(book_dir: &Path) -> Result<serde_json::Value, ToolError> {
+    let manifest = source_manifest_value(book_dir)?;
+    if !pdf_capability_allows_runtime_map(&manifest) {
+        return Err(ToolError {
+            error_code: "PDF_SOURCE_MAP_UNAVAILABLE".into(),
+            category: "validation".into(),
+            message: "source_manifest.v2 does not expose a usable PDF source map capability".into(),
+        });
+    }
+    read_json_artifact(
+        &book_dir.join("pdf_source_map.json"),
+        "PDF_SOURCE_MAP_NOT_FOUND",
+        "PDF_SOURCE_MAP_INVALID",
+    )
+}
+
+fn route_pdf_ranges_project(book: &Book, book_dir: &Path, body: &serde_json::Value) -> Reply {
+    let input = match serde_json::from_value::<PdfRangesProjectInput>(body.clone()) {
+        Ok(input) => input,
+        Err(e) => {
+            return validation(
+                "INVALID_PDF_RANGE",
+                &format!("reader.pdf_ranges.project 需 ranges[]: {e}"),
+            );
+        }
+    };
+    let map = match pdf_source_map_value(book_dir) {
+        Ok(map) => map,
+        Err(e) => return err_reply(&e),
+    };
+    let Some(entries) = map.get("entries").and_then(|v| v.as_array()) else {
+        return err_reply(&ToolError {
+            error_code: "PDF_SOURCE_MAP_INVALID".into(),
+            category: "internal".into(),
+            message: "pdf_source_map.entries missing or not an array".into(),
+        });
+    };
+
+    let mut projections = Vec::new();
+    for input_range in input.ranges {
+        if let Err(e) = lid_span(book, &input_range.lid) {
+            return err_reply(&e);
+        }
+        let entry = entries.iter().find(|entry| {
+            entry.get("lid").and_then(|v| v.as_str()) == Some(input_range.lid.as_str())
+        });
+        let Some(entry) = entry else {
+            projections.push(PdfRangeProjection {
+                lid: input_range.lid,
+                range: input_range.range,
+                status: "unmapped".into(),
+                source_span: None,
+                primary_region: None,
+                regions: vec![],
+            });
+            continue;
+        };
+        let regions = entry
+            .get("regions")
+            .and_then(|v| v.as_array())
+            .map(|items| items.to_vec())
+            .unwrap_or_default();
+        let source_span = entry.get("source_span").and_then(parse_source_span);
+        let entry_status = entry
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unmapped");
+        let status = if regions.is_empty() || entry_status == "unmapped" {
+            "unmapped"
+        } else if entry_status == "word_mapped" {
+            "exact"
+        } else {
+            "lid_region_fallback"
+        };
+        projections.push(PdfRangeProjection {
+            lid: input_range.lid,
+            range: input_range.range,
+            status: status.into(),
+            source_span,
+            primary_region: entry.get("primary_region").cloned(),
+            regions,
+        });
+    }
+    ok_json(&PdfRangesProjectResponse { projections })
 }
 
 /// `book.query` → POST(S10c)。直调内层 `runtime::query`:确定性档位检索 + LLM 合一轮判停 +
@@ -1415,9 +1984,7 @@ pub fn save_session(state: &AppState, dir: Option<&str>) {
         books: BTreeMap::new(),
     });
     session.current_book_dir = key.clone();
-    session
-        .books
-        .insert(key, SessionBookProgress { top_lid });
+    session.books.insert(key, SessionBookProgress { top_lid });
     if let Ok(json) = serde_json::to_string_pretty(&session) {
         let _ = std::fs::write(path, json);
     }
@@ -1427,13 +1994,11 @@ pub fn save_session(state: &AppState, dir: Option<&str>) {
 pub fn load_session(path: &Option<PathBuf>) -> Option<SessionState> {
     let p = path.as_ref()?;
     let raw = std::fs::read_to_string(p).ok()?;
-    serde_json::from_str::<SessionState>(&raw)
-        .ok()
-        .or_else(|| {
-            serde_json::from_str::<LegacySessionState>(&raw)
-                .ok()
-                .map(SessionState::from_legacy)
-        })
+    serde_json::from_str::<SessionState>(&raw).ok().or_else(|| {
+        serde_json::from_str::<LegacySessionState>(&raw)
+            .ok()
+            .map(SessionState::from_legacy)
+    })
 }
 
 #[cfg(test)]
@@ -1468,9 +2033,7 @@ mod tests {
         base.book_id = book_id.into();
         base.graph_nodes.clear();
         base.graph_edges.clear();
-        let children = (1..=leaves)
-            .map(|i| format!("1.{i}"))
-            .collect::<Vec<_>>();
+        let children = (1..=leaves).map(|i| format!("1.{i}")).collect::<Vec<_>>();
         let mut nodes = vec![LidNode {
             lid: "1".into(),
             path: vec![1],
@@ -1501,6 +2064,114 @@ mod tests {
         std::fs::write(dir.join("base.json"), serde_json::to_string(&base).unwrap()).unwrap();
         std::fs::write(dir.join("source.txt"), "X".repeat(leaves * 10)).unwrap();
         dir
+    }
+
+    fn write_pdf_runtime_artifacts(s: &mut AppState) {
+        let coord = serde_json::json!({
+            "space": "pdf_user_space",
+            "origin": "bottom_left",
+            "unit": "pt",
+            "rotation_applied": false
+        });
+        let source_manifest = serde_json::json!({
+            "version": "source_manifest.v2",
+            "book_id": s.book.base.book_id,
+            "canonical_source": {
+                "kind": "reconciled_markdown",
+                "path": "source.txt",
+                "citation_anchor": "lid",
+                "sha256": "sha-source"
+            },
+            "original_pdf": {
+                "path": "paper.pdf",
+                "sha256": "sha-pdf",
+                "citation_anchor": false
+            },
+            "capabilities": {
+                "view_pdf": { "status": "available", "artifact_path": "paper.pdf", "config_hash": "cfg-a" },
+                "project_lid_to_pdf": {
+                    "status": "degraded",
+                    "reason": "line fallback fixture",
+                    "artifact_path": "pdf_source_map.json",
+                    "report_path": "alignment_report.json",
+                    "config_hash": "cfg-a"
+                },
+                "resolve_pdf_selection": {
+                    "status": "available",
+                    "artifact_path": "pdf_selection_map/manifest.json",
+                    "report_path": "alignment_report.json",
+                    "config_hash": "cfg-a"
+                },
+                "project_ranges_to_pdf": {
+                    "status": "degraded",
+                    "reason": "line fallback fixture",
+                    "artifact_path": "pdf_source_map.json",
+                    "report_path": "alignment_report.json",
+                    "config_hash": "cfg-a"
+                }
+            }
+        });
+        std::fs::write(
+            s.book_dir.join("source_manifest.json"),
+            source_manifest.to_string(),
+        )
+        .unwrap();
+        std::fs::write(s.book_dir.join("paper.pdf"), b"%PDF-1.4\nfixture\n").unwrap();
+        let region =
+            serde_json::json!({"region_id":"r1","pageIndex":0,"bbox":[10.0,10.0,80.0,20.0]});
+        let pdf_source_map = serde_json::json!({
+            "version": "pdf_source_map.v1",
+            "book_id": s.book.base.book_id,
+            "coordinate_system": coord,
+            "pages": [{"pageIndex":0,"width":100.0,"height":100.0,"rotate":0,"view":[0.0,0.0,100.0,100.0]}],
+            "entries": [{
+                "lid": "1.1",
+                "source_span": {"start":0,"end":100},
+                "status": "line_fallback",
+                "regions": [region],
+                "primary_region": region,
+                "alignment": {"confidence":0.8,"reason":"fixture"}
+            }],
+            "excluded_regions": [],
+            "page_region_index": {"0":["r1"]},
+            "page_excluded_index": {},
+            "config_hash": "cfg-a"
+        });
+        std::fs::write(
+            s.book_dir.join("pdf_source_map.json"),
+            pdf_source_map.to_string(),
+        )
+        .unwrap();
+        let selection_dir = s.book_dir.join("pdf_selection_map");
+        std::fs::create_dir_all(selection_dir.join("pages")).unwrap();
+        let selection_manifest = serde_json::json!({
+            "version": "pdf_selection_map.v1",
+            "book_id": s.book.base.book_id,
+            "coordinate_system": {
+                "space": "pdf_user_space",
+                "origin": "bottom_left",
+                "unit": "pt",
+                "rotation_applied": false
+            },
+            "config_hash": "cfg-a",
+            "page_shards": [{"pageIndex":0,"path":"pages/0.json","sha256":"fixture"}]
+        });
+        std::fs::write(
+            selection_dir.join("manifest.json"),
+            selection_manifest.to_string(),
+        )
+        .unwrap();
+        let page = serde_json::json!({
+            "version": "pdf_selection_map_page.v1",
+            "book_id": s.book.base.book_id,
+            "pageIndex": 0,
+            "chars": [
+                {"char_index":0,"text":"P","rect":{"pageIndex":0,"bbox":[10.0,10.0,12.0,20.0]},"source_span":{"start":0,"end":1},"lid":"1.1"},
+                {"char_index":1,"text":"D","rect":{"pageIndex":0,"bbox":[12.0,10.0,14.0,20.0]},"source_span":{"start":1,"end":2},"lid":"1.1"},
+                {"char_index":2,"text":"F","rect":{"pageIndex":0,"bbox":[14.0,10.0,16.0,20.0]},"source_span":{"start":2,"end":3},"lid":"1.1"}
+            ]
+        });
+        std::fs::write(selection_dir.join("pages").join("0.json"), page.to_string()).unwrap();
     }
 
     /// 确定性 LLM 替身:首轮即 sufficient + 引用给定 LID(落在证据集内 ⇒ 过内层交叉验停)。
@@ -1691,6 +2362,83 @@ mod tests {
         let missing = route_book_asset_file(&dir, "/book/assets/images/missing.png").unwrap();
         assert_eq!(missing.status, 404);
         assert!(route_book_asset_file(&dir, "/book/text?lid=1.1").is_none());
+    }
+
+    #[test]
+    fn pdf_runtime_endpoints_expose_manifest_map_original_selection_and_range_projection() {
+        let mut s = state_named("pdf-runtime");
+        write_pdf_runtime_artifacts(&mut s);
+
+        let manifest = get(&mut s, "/book/source_manifest");
+        assert_eq!(manifest.status, 200);
+        assert!(manifest.body.contains("\"version\":\"source_manifest.v2\""));
+        assert!(manifest.body.contains("\"original_pdf\""));
+
+        let source_map = get(&mut s, "/book/pdf_source_map");
+        assert_eq!(source_map.status, 200);
+        assert!(source_map
+            .body
+            .contains("\"version\":\"pdf_source_map.v1\""));
+        assert!(source_map.body.contains("\"primary_region\""));
+
+        let pdf = route_book_asset_file(&s.book_dir, "/book/pdf/original").unwrap();
+        assert_eq!(pdf.status, 200);
+        assert_eq!(pdf.content_type, "application/pdf");
+        assert!(pdf.body.starts_with(b"%PDF-1.4"));
+
+        let resolved = post(
+            &mut s,
+            "/reader/pdf_selection.resolve",
+            r#"{"pageIndex":0,"rects":[{"bbox":[9.0,9.0,17.0,21.0]}]}"#,
+        );
+        assert_eq!(resolved.status, 200);
+        let resolved_body: serde_json::Value = serde_json::from_str(&resolved.body).unwrap();
+        assert_eq!(resolved_body["status"], "resolved");
+        assert_eq!(resolved_body["ranges"][0]["lid"], "1.1");
+        assert_eq!(
+            resolved_body["ranges"][0]["range"],
+            serde_json::json!({"start":0,"end":3})
+        );
+        assert_eq!(resolved_body["quote_markdown"], "XXX");
+
+        let projected = post(
+            &mut s,
+            "/reader/pdf_ranges.project",
+            r#"{"ranges":[{"lid":"1.1","range":{"start":0,"end":3}}]}"#,
+        );
+        assert_eq!(projected.status, 200);
+        let projected_body: serde_json::Value = serde_json::from_str(&projected.body).unwrap();
+        assert_eq!(
+            projected_body["projections"][0]["status"],
+            "lid_region_fallback"
+        );
+        assert_eq!(
+            projected_body["projections"][0]["primary_region"]["region_id"],
+            "r1"
+        );
+    }
+
+    #[test]
+    fn pdf_source_map_respects_manifest_capability() {
+        let mut s = state_named("pdf-runtime-unavailable");
+        write_pdf_runtime_artifacts(&mut s);
+        let mut manifest: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(s.book_dir.join("source_manifest.json")).unwrap(),
+        )
+        .unwrap();
+        manifest["capabilities"]["project_lid_to_pdf"] =
+            serde_json::json!({"status":"unavailable","reason":"fixture disabled"});
+        manifest["capabilities"]["project_ranges_to_pdf"] =
+            serde_json::json!({"status":"unavailable","reason":"fixture disabled"});
+        std::fs::write(
+            s.book_dir.join("source_manifest.json"),
+            manifest.to_string(),
+        )
+        .unwrap();
+
+        let r = get(&mut s, "/book/pdf_source_map");
+        assert_eq!(r.status, 400);
+        assert!(r.body.contains("PDF_SOURCE_MAP_UNAVAILABLE"));
     }
 
     #[test]
@@ -1932,7 +2680,9 @@ mod tests {
         assert!(rc.body.contains("\"range\""));
         assert!(rc.body.contains("\"start\":0"));
         assert!(rc.body.contains("\"content\":\"XXXXX\""));
-        assert!(rc.body.contains("\"source_session_id\":\"highlight-group:test\""));
+        assert!(rc
+            .body
+            .contains("\"source_session_id\":\"highlight-group:test\""));
         // 越界 → 400 INVALID_RANGE 不降级。
         let oob = post(
             &mut s,
@@ -2252,7 +3002,10 @@ mod tests {
         .unwrap();
 
         let session = load_session(&Some(session_path)).unwrap();
-        assert_eq!(session.current_book_dir, session_dir_key(&path_string(&dir)));
+        assert_eq!(
+            session.current_book_dir,
+            session_dir_key(&path_string(&dir))
+        );
         assert_eq!(session.top_lid_for_dir(&path_string(&dir)), Some("1.6"));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2305,7 +3058,10 @@ mod tests {
         );
 
         assert_eq!(post(&mut s, "/book/open", &body_a).status, 200);
-        assert_eq!(post(&mut s, "/reader/goto", r#"{"lid":"1.11"}"#).status, 200);
+        assert_eq!(
+            post(&mut s, "/reader/goto", r#"{"lid":"1.11"}"#).status,
+            200
+        );
         assert_eq!(s.reader.viewport().top_lid, "1.11");
 
         assert_eq!(post(&mut s, "/book/open", &body_b).status, 200);
