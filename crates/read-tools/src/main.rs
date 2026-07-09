@@ -9,7 +9,7 @@ use std::process::exit;
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
-        eprintln!("usage: read-tools <book_dir> manifest [lid] | text <lid> [end_lid] | context <lid> [near|mid|far] [k] | concept <name>");
+        eprintln!("usage: read-tools <book_dir> manifest [lid] | text <lid> [end_lid] | context <lid> [near|mid|far] [k] | concept <name> | paper_reading_guide [mode] [stage]");
         exit(2);
     }
     let (dir, cmd) = (&args[1], args[2].as_str());
@@ -86,6 +86,18 @@ fn main() {
             let name = args.get(3).map(String::as_str).unwrap_or("");
             match book.concept(name) {
                 Ok(c) => println!("{}", serde_json::to_string_pretty(&c).unwrap()),
+                Err(e) => {
+                    println!("{}", serde_json::to_string_pretty(&e).unwrap());
+                    exit(1);
+                }
+            }
+        }
+        "paper_reading_guide" => {
+            match book.paper_reading_guide(
+                args.get(3).map(String::as_str),
+                args.get(4).map(String::as_str),
+            ) {
+                Ok(guide) => println!("{}", serde_json::to_string_pretty(&guide).unwrap()),
                 Err(e) => {
                     println!("{}", serde_json::to_string_pretty(&e).unwrap());
                     exit(1);
