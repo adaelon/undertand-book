@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { buildSourceManifest } from "../src/source-manifest";
-import { SourceManifestZ } from "../src/zod";
+import { buildSourceManifest, buildSourceManifestV2 } from "../src/source-manifest";
+import { SourceManifestV2Z, SourceManifestZ } from "../src/zod";
 
 describe("PP1 source manifest", () => {
   it("records Markdown as the canonical source truth without PDF attachment", () => {
@@ -78,5 +78,88 @@ describe("PP1 source manifest", () => {
         pdf_source_map_path: "papers/paper-a.source-map.json",
       }),
     ).toThrow("requires original_pdf_path");
+  });
+});
+
+describe("PH1 source_manifest.v2", () => {
+  it("records reconciled source and all available PDF capabilities", () => {
+    const manifest = buildSourceManifestV2({
+      book_id: "paper-a",
+      source_sha256: "sha-source",
+      original_pdf_path: "paper.pdf",
+      original_pdf_sha256: "sha-pdf",
+      original_pdf_fingerprint: "pdf-fp",
+      pdf_source_map_path: "pdf_source_map.json",
+      pdf_selection_map_manifest_path: "pdf_selection_map/manifest.json",
+      alignment_report_path: "alignment_report.json",
+      config_hash: "cfg",
+    });
+
+    expect(SourceManifestV2Z.parse(manifest)).toEqual(manifest);
+    expect(SourceManifestZ.parse(manifest)).toEqual(manifest);
+    expect(manifest.canonical_source).toEqual({
+      kind: "reconciled_markdown",
+      path: "source.txt",
+      citation_anchor: "lid",
+      sha256: "sha-source",
+    });
+    expect(manifest.original_pdf).toEqual({
+      path: "paper.pdf",
+      sha256: "sha-pdf",
+      fingerprint: "pdf-fp",
+      citation_anchor: false,
+    });
+    expect(manifest.capabilities.project_lid_to_pdf).toMatchObject({
+      status: "available",
+      artifact_path: "pdf_source_map.json",
+      report_path: "alignment_report.json",
+      config_hash: "cfg",
+    });
+    expect(manifest.capabilities.resolve_pdf_selection).toMatchObject({
+      status: "available",
+      artifact_path: "pdf_selection_map/manifest.json",
+    });
+  });
+
+  it("makes PDF capabilities explicitly unavailable when artifacts are disabled", () => {
+    const manifest = buildSourceManifestV2({
+      book_id: "paper-a",
+      source_sha256: "sha-source",
+    });
+
+    expect(SourceManifestV2Z.parse(manifest)).toEqual(manifest);
+    expect(manifest.original_pdf).toBeUndefined();
+    expect(manifest.capabilities).toEqual({
+      view_pdf: { status: "unavailable", reason: "original PDF is not available" },
+      project_lid_to_pdf: { status: "unavailable", reason: "pdf_source_map.v1 is not available" },
+      resolve_pdf_selection: { status: "unavailable", reason: "pdf_selection_map.v1 is not available" },
+      project_ranges_to_pdf: { status: "unavailable", reason: "pdf_source_map.v1 is not available" },
+    });
+  });
+
+  it("accepts stale and degraded capability states for readiness detection", () => {
+    const manifest = buildSourceManifestV2({
+      book_id: "paper-a",
+      source_sha256: "sha-source",
+      original_pdf_path: "paper.pdf",
+      original_pdf_sha256: "sha-pdf",
+      capability_overrides: {
+        project_lid_to_pdf: {
+          status: "stale",
+          artifact_path: "pdf_source_map.json",
+          report_path: "alignment_report.json",
+          reason: "source hash changed",
+        },
+        resolve_pdf_selection: {
+          status: "degraded",
+          artifact_path: "pdf_selection_map/manifest.json",
+          reason: "selection shards are partial",
+        },
+      },
+    });
+
+    expect(SourceManifestV2Z.parse(manifest)).toEqual(manifest);
+    expect(manifest.capabilities.project_lid_to_pdf.status).toBe("stale");
+    expect(manifest.capabilities.resolve_pdf_selection.status).toBe("degraded");
   });
 });

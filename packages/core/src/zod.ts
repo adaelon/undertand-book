@@ -101,7 +101,7 @@ export const OriginalPdfAttachmentManifestEntryZ = z.object({
   pdf_source_map: PdfSourceMapManifestEntryZ,
 });
 
-export const SourceManifestZ = z.object({
+export const LegacySourceManifestZ = z.object({
   book_id: z.string().min(1),
   canonical_source: z.object({
     kind: z.enum(["markdown", "epub"]),
@@ -111,6 +111,144 @@ export const SourceManifestZ = z.object({
     citation_anchor: z.literal("lid"),
   }),
   attachments: z.array(OriginalPdfAttachmentManifestEntryZ),
+});
+
+export const PdfCapabilityStatusZ = z.enum(["unavailable", "available", "degraded", "stale", "failed"]);
+export const PdfCapabilityZ = z.object({
+  status: PdfCapabilityStatusZ,
+  reason: z.string().min(1).optional(),
+  artifact_path: z.string().min(1).optional(),
+  report_path: z.string().min(1).optional(),
+  config_hash: z.string().min(1).optional(),
+});
+export const SourceManifestV2Z = z.object({
+  version: z.literal("source_manifest.v2"),
+  book_id: z.string().min(1),
+  canonical_source: z.object({
+    kind: z.literal("reconciled_markdown"),
+    path: z.literal("source.txt"),
+    citation_anchor: z.literal("lid"),
+    sha256: z.string().min(1),
+  }),
+  original_pdf: z
+    .object({
+      path: z.string().min(1),
+      sha256: z.string().min(1),
+      fingerprint: z.string().min(1).optional(),
+      citation_anchor: z.literal(false),
+    })
+    .optional(),
+  capabilities: z.object({
+    view_pdf: PdfCapabilityZ,
+    project_lid_to_pdf: PdfCapabilityZ,
+    resolve_pdf_selection: PdfCapabilityZ,
+    project_ranges_to_pdf: PdfCapabilityZ,
+  }),
+});
+export const SourceManifestZ = z.union([SourceManifestV2Z, LegacySourceManifestZ]);
+
+export const SourceBlockReconcileStatusZ = z.enum([
+  "verified",
+  "auto_repaired",
+  "llm_format_repaired",
+  "needs_review",
+  "pdf_unmatched",
+  "md_unmatched",
+]);
+export const BuildInputFingerprintZ = z.object({
+  paper_md_sha256: z.string().min(1),
+  paper_pdf_sha256: z.string().min(1),
+  config_hash: z.string().min(1),
+});
+export const SourceReconciliationReportZ = z.object({
+  version: z.literal("source_reconciliation_report.v1"),
+  book_id: z.string().min(1),
+  input_fingerprint: BuildInputFingerprintZ,
+  summary: z.record(SourceBlockReconcileStatusZ, z.number().int().nonnegative()),
+  unresolved: z.array(
+    z.object({
+      id: z.string().min(1),
+      status: SourceBlockReconcileStatusZ,
+      reason: z.string().min(1),
+    }),
+  ),
+});
+
+export const PdfPageRectZ = z.object({
+  pageIndex: z.number().int().nonnegative(),
+  bbox: z.tuple([z.number(), z.number(), z.number(), z.number()]),
+});
+export const PdfRegionZ = PdfPageRectZ.extend({
+  region_id: z.string().min(1),
+});
+export const PdfPageMetaZ = z.object({
+  pageIndex: z.number().int().nonnegative(),
+  page_label: z.string().min(1).optional(),
+  width: z.number().positive(),
+  height: z.number().positive(),
+  rotate: z.union([z.literal(0), z.literal(90), z.literal(180), z.literal(270)]),
+  view: z.tuple([z.number(), z.number(), z.number(), z.number()]),
+});
+export const PdfCoordinateSystemZ = z.object({
+  space: z.literal("pdf_user_space"),
+  origin: z.literal("bottom_left"),
+  unit: z.literal("pt"),
+  rotation_applied: z.literal(false),
+});
+export const PdfSourceMapEntryZ = z.object({
+  lid: z.string().min(1),
+  source_span: SpanZ,
+  status: z.enum(["word_mapped", "line_fallback", "block_fallback", "unmapped", "excluded"]),
+  regions: z.array(PdfRegionZ),
+  primary_region: PdfRegionZ.optional(),
+  alignment: z.object({
+    confidence: z.number().min(0).max(1),
+    reason: z.string().min(1).optional(),
+    trace_id: z.string().min(1).optional(),
+  }),
+});
+export const PdfExcludedRegionZ = PdfRegionZ.extend({
+  reason: z.enum(["header", "footer", "page_number", "watermark", "other"]),
+});
+export const PdfSourceMapZ = z.object({
+  version: z.literal("pdf_source_map.v1"),
+  book_id: z.string().min(1),
+  coordinate_system: PdfCoordinateSystemZ,
+  pages: z.array(PdfPageMetaZ),
+  entries: z.array(PdfSourceMapEntryZ),
+  excluded_regions: z.array(PdfExcludedRegionZ),
+  page_region_index: z.record(z.array(z.string().min(1))),
+  page_excluded_index: z.record(z.array(z.string().min(1))),
+  config_hash: z.string().min(1),
+});
+export const PdfSelectionMapManifestZ = z.object({
+  version: z.literal("pdf_selection_map.v1"),
+  book_id: z.string().min(1),
+  coordinate_system: PdfCoordinateSystemZ,
+  config_hash: z.string().min(1),
+  page_shards: z.array(
+    z.object({
+      pageIndex: z.number().int().nonnegative(),
+      page_label: z.string().min(1).optional(),
+      path: z.string().min(1),
+      sha256: z.string().min(1),
+    }),
+  ),
+});
+export const PdfSelectionMapPageShardZ = z.object({
+  version: z.literal("pdf_selection_map_page.v1"),
+  book_id: z.string().min(1),
+  pageIndex: z.number().int().nonnegative(),
+  page_label: z.string().min(1).optional(),
+  chars: z.array(
+    z.object({
+      char_index: z.number().int().nonnegative(),
+      text: z.string(),
+      rect: PdfPageRectZ,
+      source_span: SpanZ,
+      lid: z.string().min(1).optional(),
+    }),
+  ),
 });
 
 export const ImageAssetManifestEntryZ = z.object({
