@@ -250,6 +250,22 @@ export const PdfSelectionMapPageShardZ = z.object({
     }),
   ),
 });
+export const AlignmentReportZ = z.object({
+  version: z.literal("alignment_report.v1"),
+  book_id: z.string().min(1),
+  config: z.object({
+    algorithm: z.literal("monotonic_forward_fuzzy_v1"),
+    lookback_words: z.number().int().nonnegative(),
+    lookahead_words: z.number().int().nonnegative(),
+    merge_gap_utf16: z.number().int().nonnegative(),
+    coordinate_system: z.literal("pdf_user_space"),
+    normalization: z.array(z.string().min(1)),
+  }),
+  config_hash: z.string().min(1),
+  hard_gates: z.record(z.union([z.boolean(), z.number()])),
+  diagnostics: z.record(z.unknown()),
+  normalization_provenance: z.array(z.object({ trace_id: z.string().min(1), summary: z.string().min(1) })),
+});
 
 export const ImageAssetManifestEntryZ = z.object({
   kind: z.literal("image"),
