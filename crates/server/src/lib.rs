@@ -427,6 +427,12 @@ pub fn route(state: &mut AppState, req: Req) -> Reply {
         }
         return route_workbench_decision_resolve(state, req.body, req.now);
     }
+    if path == "/build_workbench/source_review.resolve" {
+        if req.method != "POST" {
+            return method_not_allowed();
+        }
+        return route_workbench_source_review_resolve(state, req.body, req.now);
+    }
     if path == "/build_workbench/permission.resolve" {
         if req.method != "POST" {
             return method_not_allowed();
@@ -819,6 +825,18 @@ fn read_json_artifact_optional(
         })
 }
 
+fn read_text_artifact_optional(path: &Path) -> Result<Option<String>, ToolError> {
+    match std::fs::read_to_string(path) {
+        Ok(raw) => Ok(Some(raw)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(ToolError {
+            error_code: "ARTIFACT_READ_FAILED".into(),
+            category: "internal".into(),
+            message: format!("读取 artifact 失败({}): {e}", path.display()),
+        }),
+    }
+}
+
 const WORKBENCH_INPUT_MANIFEST_RELATIVE: &str = ".build/input/manifest.json";
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -1188,6 +1206,74 @@ fn pending_user_requests(job: &serde_json::Value) -> bool {
         .flatten()
         .any(|request| request.get("status").and_then(|value| value.as_str()) == Some("pending"));
     pending_decision || pending_permission
+}
+
+fn source_reconciliation_dir(book_dir: &Path) -> PathBuf {
+    book_dir.join(".build").join("source-reconciliation")
+}
+
+fn source_review_decision_allowed(decision: &str) -> bool {
+    matches!(
+        decision,
+        "accept_markdown" | "accept_pdf" | "use_candidate" | "keep_blocked"
+    )
+}
+
+fn source_review_ready_for_rerun(
+    report: Option<&serde_json::Value>,
+    decisions: Option<&serde_json::Value>,
+) -> bool {
+    let Some(unresolved) = report
+        .and_then(|value| value.get("unresolved"))
+        .and_then(|value| value.as_array())
+    else {
+        return false;
+    };
+    if unresolved.is_empty() {
+        return false;
+    }
+    let decision_by_block: BTreeMap<String, String> = decisions
+        .and_then(|value| value.get("decisions"))
+        .and_then(|value| value.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|decision| {
+            Some((
+                decision.get("block_id")?.as_str()?.to_string(),
+                decision.get("decision")?.as_str()?.to_string(),
+            ))
+        })
+        .collect();
+    unresolved.iter().all(|block| {
+        block
+            .get("id")
+            .and_then(|value| value.as_str())
+            .and_then(|id| decision_by_block.get(id))
+            .is_some_and(|decision| decision != "keep_blocked")
+    })
+}
+
+fn build_source_review_snapshot(
+    book_dir: &Path,
+    report: Option<&serde_json::Value>,
+) -> Result<serde_json::Value, ToolError> {
+    let dir = source_reconciliation_dir(book_dir);
+    let review_draft_markdown = read_text_artifact_optional(&dir.join("review-draft.md"))?;
+    let decisions = read_json_artifact_optional(
+        &dir.join("review-decisions.json"),
+        "SOURCE_REVIEW_DECISIONS_INVALID",
+    )?;
+    let unresolved = report
+        .and_then(|value| value.get("unresolved"))
+        .cloned()
+        .unwrap_or_else(|| json!([]));
+    Ok(json!({
+        "report": report.cloned(),
+        "unresolved": unresolved,
+        "review_draft_markdown": review_draft_markdown,
+        "decisions": decisions,
+        "ready_for_rerun": source_review_ready_for_rerun(report, decisions.as_ref()),
+    }))
 }
 
 fn executor_run_dir(book_dir: &Path, run_id: &str) -> PathBuf {
@@ -1598,6 +1684,13 @@ fn route_existing_technical_book_workbench(book: &Book, book_dir: &Path) -> Repl
             "manifest": null,
             "fingerprint": null,
             "ready": false,
+        },
+        "source_review": {
+            "report": null,
+            "unresolved": [],
+            "review_draft_markdown": null,
+            "decisions": null,
+            "ready_for_rerun": false,
         },
         "sidecar_plan": {
             "plan": null,
@@ -2118,6 +2211,158 @@ fn route_workbench_decision_resolve(state: &mut AppState, body: &str, now: &str)
     route_build_workbench(&state.book, &state.book_dir)
 }
 
+fn route_workbench_source_review_resolve(state: &mut AppState, body: &str, now: &str) -> Reply {
+    let value = match body_value(body) {
+        Ok(value) => value,
+        Err(reply) => return reply,
+    };
+    let Some(block_id) = value.get("block_id").and_then(|value| value.as_str()) else {
+        return validation("INVALID_SOURCE_REVIEW_DECISION", "需 block_id 字段");
+    };
+    let Some(decision) = value.get("decision").and_then(|value| value.as_str()) else {
+        return validation("INVALID_SOURCE_REVIEW_DECISION", "需 decision 字段");
+    };
+    if !source_review_decision_allowed(decision) {
+        return validation(
+            "INVALID_SOURCE_REVIEW_DECISION",
+            "decision 必须是 accept_markdown/accept_pdf/use_candidate/keep_blocked",
+        );
+    }
+    let note = value
+        .get("note")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let report_dir = source_reconciliation_dir(&state.book_dir);
+    let report_path = report_dir.join("report.json");
+    let report =
+        match read_json_artifact_optional(&report_path, "SOURCE_RECONCILIATION_REPORT_INVALID") {
+            Ok(Some(report)) => report,
+            Ok(None) => {
+                return validation(
+                    "SOURCE_RECONCILIATION_REPORT_MISSING",
+                    "缺少 source reconciliation report",
+                )
+            }
+            Err(e) => return err_reply(&e),
+        };
+    let block = report
+        .get("unresolved")
+        .and_then(|value| value.as_array())
+        .into_iter()
+        .flatten()
+        .find(|block| block.get("id").and_then(|value| value.as_str()) == Some(block_id))
+        .cloned();
+    let Some(block) = block else {
+        return validation(
+            "SOURCE_REVIEW_BLOCK_NOT_FOUND",
+            "source review block 不存在",
+        );
+    };
+    if let Err(e) = std::fs::create_dir_all(&report_dir) {
+        return err_reply(&ToolError {
+            error_code: "SOURCE_REVIEW_DECISIONS_WRITE_FAILED".into(),
+            category: "internal".into(),
+            message: format!("创建 source review 目录失败({}): {e}", report_dir.display()),
+        });
+    }
+    let decisions_path = report_dir.join("review-decisions.json");
+    let mut decisions = match read_json_artifact_optional(
+        &decisions_path,
+        "SOURCE_REVIEW_DECISIONS_INVALID",
+    ) {
+        Ok(Some(value)) => value,
+        Ok(None) => json!({
+            "version": "source_review_decisions.v1",
+            "book_id": state.book.base.book_id,
+            "stage": "source_reconciliation",
+            "input_fingerprint": report.get("input_fingerprint").cloned().unwrap_or_else(|| json!(null)),
+            "decisions": [],
+            "created_at": now,
+        }),
+        Err(e) => return err_reply(&e),
+    };
+    if !decisions
+        .get("decisions")
+        .is_some_and(|value| value.is_array())
+    {
+        decisions["decisions"] = json!([]);
+    }
+    let entry = json!({
+        "block_id": block_id,
+        "decision": decision,
+        "note": note,
+        "block_status": block.get("status").cloned().unwrap_or_else(|| json!(null)),
+        "block_reason": block.get("reason").cloned().unwrap_or_else(|| json!(null)),
+        "resolved_at": now,
+    });
+    let decision_items = decisions["decisions"]
+        .as_array_mut()
+        .expect("decisions initialized as array");
+    if let Some(existing) = decision_items
+        .iter_mut()
+        .find(|item| item.get("block_id").and_then(|value| value.as_str()) == Some(block_id))
+    {
+        *existing = entry;
+    } else {
+        decision_items.push(entry);
+    }
+    decisions["updated_at"] = json!(now);
+    if let Err(e) = write_workbench_json(&decisions_path, &decisions) {
+        return err_reply(&e);
+    }
+    let ready_for_rerun = source_review_ready_for_rerun(Some(&report), Some(&decisions));
+
+    if let Some(job_id) = value.get("job_id").and_then(|value| value.as_str()) {
+        let mut job = match read_build_job_by_id(&state.book_dir, job_id) {
+            Ok(job) => job,
+            Err(e) => return err_reply(&e),
+        };
+        if ready_for_rerun {
+            if let Some(requests) = job
+                .get_mut("decision_requests")
+                .and_then(|value| value.as_array_mut())
+            {
+                for request in requests.iter_mut().filter(|request| {
+                    let stage = request.get("stage").and_then(|value| value.as_str());
+                    let status = request.get("status").and_then(|value| value.as_str());
+                    let kind = request.get("kind").and_then(|value| value.as_str());
+                    stage == Some("source_reconciliation")
+                        && status == Some("pending")
+                        && matches!(
+                            kind,
+                            Some("review_acceptance" | "source_reconciliation_mode")
+                        )
+                }) {
+                    request["status"] = json!("answered");
+                    request["answer"] = json!("source_review_decisions_recorded");
+                    request["resolved_at"] = json!(now);
+                }
+            }
+            job["status"] = json!(if pending_user_requests(&job) {
+                "needs_user"
+            } else {
+                "ready"
+            });
+        }
+        job = append_job_event(
+            job,
+            now,
+            "source_review_decision_recorded",
+            Some("source_reconciliation"),
+            Some(&format!("Source review block {block_id} resolved")),
+            Some(
+                json!({ "block_id": block_id, "decision": decision, "ready_for_rerun": ready_for_rerun }),
+            ),
+        );
+        if let Err(e) = write_build_job_atomic(&state.book_dir, &job) {
+            return err_reply(&e);
+        }
+    }
+
+    route_build_workbench(&state.book, &state.book_dir)
+}
+
 fn route_workbench_permission_resolve(state: &mut AppState, body: &str, now: &str) -> Reply {
     let value = match body_value(body) {
         Ok(value) => value,
@@ -2568,6 +2813,10 @@ fn route_build_workbench(book: &Book, book_dir: &Path) -> Reply {
         }
         (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => return err_reply(&e),
     };
+    let source_review = match build_source_review_snapshot(book_dir, report.as_ref()) {
+        Ok(value) => value,
+        Err(e) => return err_reply(&e),
+    };
 
     let book_id = input_manifest
         .as_ref()
@@ -2599,6 +2848,7 @@ fn route_build_workbench(book: &Book, book_dir: &Path) -> Reply {
             "ready": current_input_fingerprint.is_some(),
         },
         "jobs": jobs,
+        "source_review": source_review,
         "sidecar_plan": sidecar_plan,
     }))
 }
@@ -4281,9 +4531,21 @@ mod tests {
                     "pdf_unmatched": 0,
                     "md_unmatched": 0
                 },
-                "unresolved": [{"id": "block-1", "status": "needs_review", "reason": "number mismatch"}]
+                "unresolved": [{
+                    "id": "block-1",
+                    "status": "needs_review",
+                    "reason": "number mismatch",
+                    "md_excerpt": "Markdown says 12 patients.",
+                    "pdf_excerpt": "PDF says 21 patients.",
+                    "candidate_text": "The study reports 21 patients."
+                }]
             })
             .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            report_dir.join("review-draft.md"),
+            "Candidate source review draft\n\nThe study reports 21 patients.",
         )
         .unwrap();
 
@@ -4586,6 +4848,54 @@ mod tests {
             body["sidecar_plan"]["form_draft"]["version"],
             "sidecar_form_draft.v1"
         );
+        assert_eq!(body["source_review"]["unresolved"][0]["id"], "block-1");
+        assert!(body["source_review"]["review_draft_markdown"]
+            .as_str()
+            .unwrap()
+            .contains("Candidate source review draft"));
+        assert_eq!(body["source_review"]["ready_for_rerun"], false);
+    }
+
+    #[test]
+    fn source_review_resolve_writes_decision_artifact_and_job_event() {
+        let mut s = state_named("workbench-source-review-resolve");
+        write_workbench_review_artifacts(&mut s);
+
+        let r = post(
+            &mut s,
+            "/build_workbench/source_review.resolve",
+            r#"{"job_id":"job_review","block_id":"block-1","decision":"accept_pdf","note":"PDF evidence wins"}"#,
+        );
+
+        assert_eq!(r.status, 200);
+        let body: serde_json::Value = serde_json::from_str(&r.body).unwrap();
+        assert_eq!(
+            body["source_review"]["decisions"]["decisions"][0]["decision"],
+            "accept_pdf"
+        );
+        assert_eq!(body["source_review"]["ready_for_rerun"], true);
+        assert_eq!(
+            body["jobs"][0]["decision_requests"][0]["status"],
+            "answered"
+        );
+        assert!(body["jobs"][0]["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|event| event["type"] == "source_review_decision_recorded"));
+
+        let decisions: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(
+                s.book_dir
+                    .join(".build")
+                    .join("source-reconciliation")
+                    .join("review-decisions.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(decisions["version"], "source_review_decisions.v1");
+        assert_eq!(decisions["decisions"][0]["block_id"], "block-1");
     }
 
     #[test]

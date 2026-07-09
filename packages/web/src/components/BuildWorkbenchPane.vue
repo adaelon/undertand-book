@@ -12,6 +12,8 @@ import type {
   ExecutorId,
   ExecutorPermissionRequest,
   SidecarFormDraft,
+  SourceReviewBlock,
+  SourceReviewDecisionKind,
   WorkbenchAdapterMode,
 } from "../api";
 
@@ -46,6 +48,12 @@ const emit = defineEmits<{
   (e: "resume-job", jobId: string): void;
   (e: "resolve-decision", payload: { job_id: string; decision_id: string; answer: string }): void;
   (e: "resolve-permission", payload: { job_id: string; request_id: string; granted: boolean }): void;
+  (e: "resolve-source-review", payload: {
+    job_id?: string;
+    block_id: string;
+    decision: SourceReviewDecisionKind;
+    note?: string;
+  }): void;
   (e: "confirm-sidecar-plan", fields: Record<string, unknown>): void;
 }>();
 
@@ -80,6 +88,7 @@ const selectedExecutor = ref<ExecutorId>("codex");
 const selectedAdapterMode = ref<WorkbenchAdapterMode>("contract_only");
 const runId = ref("");
 const pollingEnabled = ref(false);
+const reviewNotes = reactive<Record<string, string>>({});
 let pollingTimer: number | null = null;
 
 const latestJob = computed<BuildJobState | null>(() => {
@@ -111,6 +120,11 @@ const sidecarForm = computed<SidecarFormDraft | null>(() =>
 );
 const sidecarPlanStatus = computed(() => props.snapshot?.sidecar_plan.plan?.status ?? "missing");
 const currentInputManifest = computed(() => props.snapshot?.input.manifest ?? null);
+const sourceReview = computed(() => props.snapshot?.source_review ?? null);
+const sourceReviewBlocks = computed(() => sourceReview.value?.unresolved ?? []);
+const sourceReviewDecisionByBlock = computed(() =>
+  new Map((sourceReview.value?.decisions?.decisions ?? []).map((decision) => [decision.block_id, decision])),
+);
 const activeRun = computed(() => latestJob.value?.active_run ?? null);
 const hasPendingUserGate = computed(() => pendingDecisionItems.value.length > 0 || pendingPermissionItems.value.length > 0);
 const canStartJob = computed(() =>
@@ -145,6 +159,20 @@ const adapterModeLabels: Record<WorkbenchAdapterMode, string> = {
   fake_failure: "模拟失败",
   fake_permission: "模拟权限请求",
 };
+const sourceReviewDecisionLabels: Record<SourceReviewDecisionKind, string> = {
+  accept_markdown: "采用 Markdown",
+  accept_pdf: "采用 PDF",
+  use_candidate: "采用候选修复",
+  keep_blocked: "保持阻塞",
+};
+const sourceBlockStatusLabels: Record<string, string> = {
+  verified: "已验证",
+  auto_repaired: "已自动修复",
+  llm_format_repaired: "格式修复已通过",
+  needs_review: "需要复核",
+  pdf_unmatched: "PDF 未匹配",
+  md_unmatched: "Markdown 未匹配",
+};
 const readinessStatusLabels: Record<BuildReadinessStatus, string> = {
   trusted_book: "可进入阅读",
   missing: "缺少基座",
@@ -178,6 +206,7 @@ const eventTypeLabels: Record<BuildJobEvent["type"], string> = {
   executor_contract_written: "执行契约已写入",
   executor_completed: "执行器已完成",
   executor_failed: "执行器失败",
+  source_review_decision_recorded: "来源复核决策已记录",
   decision_requested: "请求构建决策",
   decision_resolved: "构建决策已处理",
   permission_requested: "请求执行权限",
@@ -188,6 +217,9 @@ const decisionKindLabels: Record<BuildDecisionRequest["kind"], string> = {
   hybrid_source_strategy: "混合来源策略",
   alignment_repair_strategy: "对齐修复策略",
   executor_selection: "执行器选择",
+  review_acceptance: "复核采纳",
+  artifact_conflict_resolution: "产物冲突处理",
+  continue_or_restart: "继续或重启",
   sidecar_plan: "辅助产物计划",
 };
 const permissionCategoryLabels: Record<ExecutorPermissionRequest["category"], string> = {
@@ -274,6 +306,14 @@ function executorLabel(executor: ExecutorId): string {
 
 function adapterModeLabel(mode: WorkbenchAdapterMode): string {
   return adapterModeLabels[mode] ?? mode;
+}
+
+function sourceReviewDecisionLabel(decision: SourceReviewDecisionKind): string {
+  return sourceReviewDecisionLabels[decision] ?? decision;
+}
+
+function sourceBlockStatusLabel(status: string): string {
+  return sourceBlockStatusLabels[status] ?? status;
 }
 
 function sidecarPlanStatusLabel(status: string): string {
@@ -421,6 +461,24 @@ function resolvePermission(item: { job: BuildJobState; request: ExecutorPermissi
     job_id: item.job.job_id,
     request_id: item.request.request_id,
     granted,
+  });
+}
+
+function sourceReviewDecision(blockId: string) {
+  return sourceReviewDecisionByBlock.value.get(blockId) ?? null;
+}
+
+function recordedSourceReviewDecisionText(blockId: string): string {
+  const decision = sourceReviewDecision(blockId);
+  return decision ? `已记录: ${sourceReviewDecisionLabel(decision.decision)}` : "";
+}
+
+function resolveSourceReview(block: SourceReviewBlock, decision: SourceReviewDecisionKind) {
+  emit("resolve-source-review", {
+    job_id: latestJob.value?.job_id,
+    block_id: block.id,
+    decision,
+    note: optionalText(reviewNotes[block.id] ?? ""),
   });
 }
 
@@ -634,6 +692,66 @@ function confirmSidecarPlan() {
         <ul class="workbench-reasons">
           <li v-for="reason in props.snapshot.readiness.reasons" :key="reason">{{ reasonText(reason) }}</li>
         </ul>
+      </section>
+
+      <section
+        v-if="sourceReview && (sourceReviewBlocks.length || sourceReview.review_draft_markdown || sourceReview.decisions)"
+        class="workbench-section"
+      >
+        <div class="section-headline">
+          <h2>来源对齐复核</h2>
+          <p class="workbench-meta">
+            {{ sourceReview.ready_for_rerun ? "复核决策已齐，等待重新运行来源对齐" : "仍需处理未解决片段" }}
+          </p>
+        </div>
+        <div v-if="sourceReview.review_draft_markdown" class="review-draft">
+          <strong>候选修复草稿</strong>
+          <pre>{{ sourceReview.review_draft_markdown }}</pre>
+        </div>
+        <ul v-if="sourceReviewBlocks.length" class="source-review-list">
+          <li v-for="block in sourceReviewBlocks" :key="block.id">
+            <div class="source-review-head">
+              <strong>{{ block.id }} · {{ sourceBlockStatusLabel(block.status) }}</strong>
+              <span v-if="recordedSourceReviewDecisionText(block.id)">
+                {{ recordedSourceReviewDecisionText(block.id) }}
+              </span>
+            </div>
+            <p>{{ block.reason }}</p>
+            <div class="review-evidence-grid">
+              <article v-if="block.md_excerpt" class="review-evidence">
+                <h3>Markdown 证据</h3>
+                <pre>{{ block.md_excerpt }}</pre>
+              </article>
+              <article v-if="block.pdf_excerpt" class="review-evidence">
+                <h3>PDF 证据</h3>
+                <pre>{{ block.pdf_excerpt }}</pre>
+              </article>
+              <article v-if="block.candidate_text" class="review-evidence">
+                <h3>候选文本</h3>
+                <pre>{{ block.candidate_text }}</pre>
+              </article>
+            </div>
+            <label class="review-note">
+              <span>复核备注</span>
+              <textarea v-model="reviewNotes[block.id]" rows="2" placeholder="可留空" spellcheck="false"></textarea>
+            </label>
+            <div class="request-options">
+              <button :disabled="props.actioning" @click="resolveSourceReview(block, 'accept_markdown')">
+                {{ sourceReviewDecisionLabel("accept_markdown") }}
+              </button>
+              <button :disabled="props.actioning" @click="resolveSourceReview(block, 'accept_pdf')">
+                {{ sourceReviewDecisionLabel("accept_pdf") }}
+              </button>
+              <button :disabled="props.actioning || !block.candidate_text" @click="resolveSourceReview(block, 'use_candidate')">
+                {{ sourceReviewDecisionLabel("use_candidate") }}
+              </button>
+              <button :disabled="props.actioning" @click="resolveSourceReview(block, 'keep_blocked')">
+                {{ sourceReviewDecisionLabel("keep_blocked") }}
+              </button>
+            </div>
+          </li>
+        </ul>
+        <p v-else class="workbench-empty">没有未解决片段。</p>
       </section>
 
       <section class="workbench-section">
@@ -979,7 +1097,8 @@ function confirmSidecarPlan() {
 }
 .request-list,
 .event-list,
-.sidecar-form {
+.sidecar-form,
+.source-review-list {
   display: grid;
   gap: 0.55rem;
 }
@@ -1002,6 +1121,82 @@ function confirmSidecarPlan() {
   color: var(--slate);
   padding: 0.14rem 0.45rem;
   font-size: 0.72rem;
+}
+.source-review-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.source-review-list li,
+.review-draft {
+  border: 1px solid var(--hairline-soft);
+  border-radius: 7px;
+  background: #fff;
+  padding: 0.7rem;
+}
+.source-review-head {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+.source-review-head span {
+  color: var(--steel);
+  font-size: 0.74rem;
+}
+.source-review-list p {
+  margin: 0.35rem 0 0.55rem;
+  color: var(--steel);
+  font-size: 0.82rem;
+}
+.review-draft {
+  display: grid;
+  gap: 0.45rem;
+  margin-bottom: 0.65rem;
+}
+.review-draft strong,
+.review-evidence h3,
+.review-note span {
+  color: var(--slate);
+  font-size: 0.78rem;
+}
+.review-draft pre,
+.review-evidence pre {
+  max-height: 220px;
+  overflow: auto;
+  margin: 0;
+  border: 1px solid var(--hairline-soft);
+  border-radius: 7px;
+  background: var(--surface-code);
+  color: var(--ink);
+  padding: 0.55rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.review-evidence-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.55rem;
+}
+.review-evidence {
+  min-width: 0;
+}
+.review-evidence h3 {
+  margin: 0 0 0.3rem;
+}
+.review-note {
+  display: grid;
+  gap: 0.3rem;
+  margin-top: 0.55rem;
+}
+.review-note textarea {
+  width: 100%;
+  resize: vertical;
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--ink);
+  padding: 0.5rem 0.6rem;
 }
 .sidecar-form label {
   display: grid;
@@ -1043,7 +1238,8 @@ function confirmSidecarPlan() {
   .fingerprint-grid,
   .input-grid,
   .run-control-grid,
-  .telemetry-grid {
+  .telemetry-grid,
+  .review-evidence-grid {
     grid-template-columns: 1fr;
   }
 }

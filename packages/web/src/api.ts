@@ -208,6 +208,7 @@ export type BuildRoute = "reader" | "workbench";
 export type BuildReadinessStatus = "trusted_book" | "missing" | "incomplete" | "needs_review" | "stale_input";
 export type BuildStageStatus = "blocked" | "missing" | "done" | "needs_review" | "stale" | "incomplete";
 export type BuildJobStatus = "ready" | "running" | "needs_user" | "failed" | "done" | "stale_input";
+export type SourceReviewDecisionKind = "accept_markdown" | "accept_pdf" | "use_candidate" | "keep_blocked";
 export type BuildStageId =
   | "source_reconciliation"
   | "hybrid_foundation"
@@ -240,6 +241,9 @@ export interface BuildDecisionRequest {
     | "hybrid_source_strategy"
     | "alignment_repair_strategy"
     | "executor_selection"
+    | "review_acceptance"
+    | "artifact_conflict_resolution"
+    | "continue_or_restart"
     | "sidecar_plan";
   prompt: string;
   options: Array<{ id: string; label: string; description?: string }>;
@@ -282,6 +286,7 @@ export interface BuildJobEvent {
     | "executor_contract_written"
     | "executor_completed"
     | "executor_failed"
+    | "source_review_decision_recorded"
     | "decision_requested"
     | "decision_resolved"
     | "permission_requested"
@@ -384,6 +389,38 @@ export interface SidecarPlan {
   created_at?: string;
   confirmed_at?: string;
 }
+export interface SourceReviewBlock {
+  id: string;
+  status: string;
+  reason: string;
+  md_excerpt?: string;
+  pdf_excerpt?: string;
+  candidate_text?: string;
+  evidence?: unknown;
+}
+export interface SourceReviewDecision {
+  block_id: string;
+  decision: SourceReviewDecisionKind;
+  note?: string | null;
+  block_status?: string | null;
+  block_reason?: string | null;
+  resolved_at: string;
+}
+export interface SourceReviewSnapshot {
+  report: unknown | null;
+  unresolved: SourceReviewBlock[];
+  review_draft_markdown: string | null;
+  decisions: {
+    version: "source_review_decisions.v1";
+    book_id?: string;
+    stage?: "source_reconciliation";
+    input_fingerprint?: unknown;
+    decisions: SourceReviewDecision[];
+    created_at?: string;
+    updated_at?: string;
+  } | null;
+  ready_for_rerun: boolean;
+}
 export interface BuildWorkbenchSnapshot {
   version: "build_workbench_snapshot.v1";
   book_id: string;
@@ -394,6 +431,7 @@ export interface BuildWorkbenchSnapshot {
     ready: boolean;
   };
   jobs: BuildJobState[];
+  source_review: SourceReviewSnapshot;
   sidecar_plan: {
     plan: SidecarPlan | null;
     form_draft: SidecarFormDraft | null;
@@ -560,6 +598,12 @@ export const api = {
     http<BuildWorkbenchSnapshot>("POST", "/build_workbench/decision.resolve", payload),
   workbenchPermissionResolve: (payload: { job_id: string; request_id: string; granted: boolean }) =>
     http<BuildWorkbenchSnapshot>("POST", "/build_workbench/permission.resolve", payload),
+  workbenchSourceReviewResolve: (payload: {
+    job_id?: string;
+    block_id: string;
+    decision: SourceReviewDecisionKind;
+    note?: string;
+  }) => http<BuildWorkbenchSnapshot>("POST", "/build_workbench/source_review.resolve", payload),
   sidecarPlanConfirm: (fields: Record<string, unknown>) =>
     http<BuildWorkbenchSnapshot>("POST", "/build_workbench/sidecar_plan.confirm", { fields }),
 

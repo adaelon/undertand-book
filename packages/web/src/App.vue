@@ -25,6 +25,7 @@ import type {
   ReaderLayoutProposal,
   ReaderLayoutState,
   SourceManifestV2,
+  SourceReviewDecisionKind,
   StructureProjection,
   TraceStep,
   Viewport,
@@ -1034,6 +1035,15 @@ async function resolveExecutorPermission(payload: { job_id: string; request_id: 
   await applyWorkbenchAction(() => api.workbenchPermissionResolve(payload));
 }
 
+async function resolveSourceReview(payload: {
+  job_id?: string;
+  block_id: string;
+  decision: SourceReviewDecisionKind;
+  note?: string;
+}) {
+  await applyWorkbenchAction(() => api.workbenchSourceReviewResolve(payload));
+}
+
 async function init() {
   try {
     appSurface.value = "loading";
@@ -1745,6 +1755,7 @@ async function submitOpenBook(dir = bookPickerDir.value) {
       @resume-job="resumeBuildJob"
       @resolve-decision="resolveBuildDecision"
       @resolve-permission="resolveExecutorPermission"
+      @resolve-source-review="resolveSourceReview"
       @confirm-sidecar-plan="confirmSidecarPlan"
     />
 
