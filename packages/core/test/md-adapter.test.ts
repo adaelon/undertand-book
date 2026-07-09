@@ -90,4 +90,31 @@ describe("SA2 markdown asset block recognition", () => {
     const blocks = markdownToBlocks(src);
     expect(blocks).toEqual([{ kind: "leaf", text: src, span: { start: 0, end: src.length } }]);
   });
+
+  it("recognizes div-wrapped raw HTML image tags as image leaves", () => {
+    const src = [
+      "Before.",
+      "",
+      '<div style="text-align: center;"><img src="https://example.com/markdown_2/imgs/chart.jpg?authorization=bce-auth-v1%2Ftoken" alt="Image" width="42%" /></div>',
+      "",
+      "After.",
+    ].join("\n");
+    const blocks = markdownToBlocks(src);
+    const image = blocks.find((block) => block.assetKind === "image");
+
+    expect(image).toMatchObject({
+      kind: "leaf",
+      assetKind: "image",
+      text: '<div style="text-align: center;"><img src="https://example.com/markdown_2/imgs/chart.jpg?authorization=bce-auth-v1%2Ftoken" alt="Image" width="42%" /></div>',
+      image: {
+        alt: "Image",
+        src: "https://example.com/markdown_2/imgs/chart.jpg?authorization=bce-auth-v1%2Ftoken",
+      },
+    });
+
+    const nodes = segment(blocks);
+    const report = checkPartitionInvariant(nodes, src);
+    expect(report.ok).toBe(true);
+    expect(nodes.filter((n) => n.kind === "image")).toHaveLength(1);
+  });
 });

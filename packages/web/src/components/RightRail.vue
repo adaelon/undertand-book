@@ -74,10 +74,10 @@ const historyOpen = ref(false);
 const notesExpanded = ref(false);
 const transcriptRef = ref<HTMLElement | null>(null);
 const tabs: { id: ContextTab; label: string }[] = [
-  { id: "agent", label: "Agent" },
-  { id: "trace", label: "Trace" },
-  { id: "formula", label: "Formula" },
-  { id: "notes", label: "Notes" },
+  { id: "agent", label: "问答" },
+  { id: "trace", label: "轨迹" },
+  { id: "formula", label: "公式" },
+  { id: "notes", label: "笔记" },
 ];
 const noteCount = computed(() => props.contextNotes.length + props.contextHighlights.length);
 watch(() => props.askDraft, (draft) => {
@@ -158,8 +158,8 @@ function notePreviewMarkdown(note: MemoryRecord): string {
 }
 function noteSourceLabel(note: MemoryRecord): string {
   const quote = leadingQuote(note.content);
-  if (quote) return "Quote source";
-  return note.anchor.lid ? "Go to source" : "No source";
+  if (quote) return "引用来源";
+  return note.anchor.lid ? "跳到来源" : "无来源";
 }
 function isLongNote(note: MemoryRecord): boolean {
   return note.content.length > 360 || note.content.split("\n").length > 8;
@@ -210,15 +210,15 @@ function deleteHistorySession(sessionId: string) {
     <section v-show="activeTab === 'agent'" class="tab-panel agent-panel">
       <div class="agent-head">
         <div>
-          <p class="rail-kicker">Reading agent</p>
-          <h3>Ask this book</h3>
+          <p class="rail-kicker">阅读助手</p>
+          <h3>问这本书</h3>
         </div>
         <div class="chat-actions">
-          <button class="history-button" title="Open chat history" @click="historyOpen = true">
-            History
+          <button class="history-button" title="打开对话历史" @click="historyOpen = true">
+            历史
             <span>{{ props.chatSessions.length }}</span>
           </button>
-          <button class="new-chat" title="New chat" @click="emit('new-chat')">New</button>
+          <button class="new-chat" title="新对话" @click="emit('new-chat')">新建</button>
         </div>
       </div>
 
@@ -226,29 +226,29 @@ function deleteHistorySession(sessionId: string) {
         <div v-for="(turn, ti) in props.chat" :key="ti" class="turn">
           <div v-if="turn.questionQuote" class="turn-quote">
             <div class="turn-quote-head">
-              <span>Quoted source</span>
+              <span>引用来源</span>
               <code>{{ turn.questionQuote.lid }}</code>
             </div>
             <blockquote>{{ turn.questionQuote.quote }}</blockquote>
           </div>
           <p class="u-msg">{{ turn.user }}</p>
-          <p v-if="turn.pending" class="pending">Agent is thinking…</p>
+          <p v-if="turn.pending" class="pending">正在思考...</p>
           <p v-else-if="turn.error" class="incomplete">{{ turn.error }}</p>
 
           <div v-else-if="turn.outcome" class="a-msg">
             <div v-if="turn.outcome.answer" class="ans-text md" @mouseup="onAnswerMouseUp(turn)" v-html="props.renderMarkdown(turn.outcome.answer)"></div>
-            <p v-else class="ans-text">No answer.</p>
-            <p v-if="turn.outcome.incomplete" class="incomplete">Incomplete: {{ turn.outcome.warning ?? "incomplete" }}</p>
+            <p v-else class="ans-text">暂无回答。</p>
+            <p v-if="turn.outcome.incomplete" class="incomplete">未完成: {{ turn.outcome.warning ?? "上下文不足" }}</p>
 
             <div v-if="turn.outcome.effects.length" class="proposals">
-              <p class="prop-h">Proposed changes</p>
+              <p class="prop-h">建议变更</p>
               <div v-for="(eff, ei) in turn.outcome.effects" :key="ei" class="proposal">
                 <span class="prop-label">{{ props.effLabel(eff) }}</span>
                 <template v-if="props.effState(ti, ei)">
                   <span class="done">{{ props.effState(ti, ei) }}</span>
                 </template>
                 <template v-else>
-                  <button v-if="props.isGoto(eff)" @click="emit('undo-effect', ti, ei, eff)">Back {{ props.gotoBack(eff) }}</button>
+                  <button v-if="props.isGoto(eff)" @click="emit('undo-effect', ti, ei, eff)">返回 {{ props.gotoBack(eff) }}</button>
                   <template v-else>
                     <button v-if="props.showEffectPrimary(eff)" @click="emit('keep-effect', ti, ei, eff)">
                       {{ props.effectPrimaryLabel(eff) }}
@@ -263,7 +263,7 @@ function deleteHistorySession(sessionId: string) {
 
             <div v-if="turn.outcome.trace.length" class="trace">
               <button class="trace-toggle" @click="emit('toggle-trace', ti)">
-                Trace ({{ turn.outcome.trace.length }}) {{ props.showTrace[ti] ? "▲" : "▼" }}
+                轨迹 ({{ turn.outcome.trace.length }}) {{ props.showTrace[ti] ? "▲" : "▼" }}
               </button>
               <ol v-if="props.showTrace[ti]">
                 <li v-for="(t, i) in turn.outcome.trace" :key="i">
@@ -277,35 +277,35 @@ function deleteHistorySession(sessionId: string) {
 
           </div>
         </div>
-        <p v-if="props.chat.length === 0" class="empty">Ask questions, inspect traces, and keep useful notes from the right rail.</p>
+        <p v-if="props.chat.length === 0" class="empty">可以在这里提问、查看工具轨迹，并把有用内容保存成笔记。</p>
       </div>
 
       <div class="agent-input">
         <div v-if="props.askDraft" class="ask-draft">
           <div class="ask-draft-head">
-            <span>Quoted source</span>
+            <span>引用来源</span>
             <code>{{ props.askDraft.lid }}</code>
-            <button title="Clear quoted source" @click="emit('clear-ask')">×</button>
+            <button title="清除引用来源" @click="emit('clear-ask')">×</button>
           </div>
           <blockquote>{{ props.askDraft.quote }}</blockquote>
         </div>
         <textarea
           :value="props.agentInput"
           rows="3"
-          :placeholder="props.askDraft ? 'Ask about the quoted source…' : 'Ask from the current reading position…'"
+          :placeholder="props.askDraft ? '围绕引用来源提问...' : '从当前阅读位置提问...'"
           @input="emit('update:agentInput', ($event.target as HTMLTextAreaElement).value)"
           @keydown.ctrl.enter="emit('send-agent')"
         />
         <button :disabled="props.sending || !props.agentInput.trim()" @click="emit('send-agent')">
-          {{ props.sending ? "…" : "Send" }}
+          {{ props.sending ? "..." : "发送" }}
         </button>
       </div>
     </section>
 
     <section v-show="activeTab === 'trace'" class="tab-panel context-panel">
       <div class="panel-head">
-        <p class="rail-kicker">Latest tool trace</p>
-        <h3>{{ props.latestTrace.length }} steps</h3>
+        <p class="rail-kicker">最近工具轨迹</p>
+        <h3>{{ props.latestTrace.length }} 步</h3>
       </div>
       <ol v-if="props.latestTrace.length" class="trace-list">
         <li v-for="(t, i) in props.latestTrace" :key="i" class="trace-card">
@@ -314,7 +314,7 @@ function deleteHistorySession(sessionId: string) {
           <p class="trace-result">{{ t.result_digest }}</p>
         </li>
       </ol>
-      <p v-else class="empty panel-empty">No trace yet.</p>
+      <p v-else class="empty panel-empty">暂无工具轨迹。</p>
     </section>
 
     <section v-show="activeTab === 'formula'" class="tab-panel context-panel">
@@ -351,17 +351,17 @@ function deleteHistorySession(sessionId: string) {
 
     <section v-show="activeTab === 'notes'" class="tab-panel context-panel">
       <div class="panel-head">
-        <p class="rail-kicker">All notes</p>
-        <h3>{{ noteCount }} items</h3>
+        <p class="rail-kicker">全部笔记</p>
+        <h3>{{ noteCount }} 条</h3>
         <div v-if="noteCount" class="note-fold-controls">
-          <button @click="notesExpanded = true">Expand</button>
-          <button @click="notesExpanded = false">Collapse</button>
+          <button @click="notesExpanded = true">展开</button>
+          <button @click="notesExpanded = false">收起</button>
         </div>
       </div>
       <div v-if="noteCount" class="memory-list">
         <details v-for="note in props.contextNotes" :key="note.mem_id" class="memory-card note-memory-card" :open="notesExpanded">
           <summary class="memory-meta note-memory-summary">
-            <span>Note</span>
+            <span>笔记</span>
             <button
               v-if="note.anchor.lid"
               class="note-source-button"
@@ -369,18 +369,18 @@ function deleteHistorySession(sessionId: string) {
             >
               {{ noteSourceLabel(note) }}
             </button>
-            <code v-else>No source</code>
-            <em>Toggle</em>
+            <code v-else>无来源</code>
+            <em>展开/收起</em>
             <div class="note-preview md" v-html="props.renderMarkdown(notePreviewMarkdown(note))"></div>
           </summary>
           <div class="md" v-html="props.renderMarkdown(note.content)"></div>
         </details>
         <article v-for="hl in props.contextHighlights" :key="hl.mem_id" class="memory-card highlight-card">
-          <div class="memory-meta"><span>Highlight</span><code>{{ hl.anchor.lid }}</code></div>
+          <div class="memory-meta"><span>高亮</span><code>{{ hl.anchor.lid }}</code></div>
           <p>{{ excerpt(hl) }}</p>
         </article>
       </div>
-      <p v-else class="empty panel-empty">No notes or highlights yet.</p>
+      <p v-else class="empty panel-empty">暂无笔记或高亮。</p>
     </section>
     <Teleport to="body">
       <div
@@ -388,7 +388,7 @@ function deleteHistorySession(sessionId: string) {
         class="answer-popover"
         :style="{ left: answerSelection.x + 'px', top: answerSelection.y - 40 + 'px' }"
       >
-        <button @mousedown.prevent="saveAnswerSelection(answerSelection.turn)">Note</button>
+        <button @mousedown.prevent="saveAnswerSelection(answerSelection.turn)">记笔记</button>
       </div>
     </Teleport>
 
@@ -397,10 +397,10 @@ function deleteHistorySession(sessionId: string) {
         <section class="history-dialog" role="dialog" aria-modal="true" aria-labelledby="history-title">
           <header class="history-dialog-head">
             <div>
-              <p class="rail-kicker">Agent history</p>
-              <h3 id="history-title">Chat history</h3>
+              <p class="rail-kicker">助手历史</p>
+              <h3 id="history-title">对话历史</h3>
             </div>
-            <button class="history-close" title="Close history" aria-label="Close history" @click="historyOpen = false">×</button>
+            <button class="history-close" title="关闭历史" aria-label="关闭历史" @click="historyOpen = false">×</button>
           </header>
           <div class="history-list">
             <article
@@ -417,28 +417,28 @@ function deleteHistorySession(sessionId: string) {
               <div class="history-card-head">
                 <div>
                   <h4>{{ compactText(session.title, 72) }}</h4>
-                  <p>{{ session.turn_count }} questions</p>
+                  <p>{{ session.turn_count }} 个问题</p>
                 </div>
-                <span v-if="session.id === props.activeChatSessionId" class="active-badge">Active</span>
+                <span v-if="session.id === props.activeChatSessionId" class="active-badge">当前</span>
               </div>
 
               <ol v-if="session.turns.length" class="history-turns">
                 <li v-for="(turn, i) in session.turns" :key="`${session.id}:${i}`">
                   <p class="history-question">{{ compactText(turn.user, 180) }}</p>
                   <div class="history-anchor-row">
-                    <span>Anchor</span>
-                    <code>{{ turnAnchor(turn) ?? "None" }}</code>
+                    <span>锚点</span>
+                    <code>{{ turnAnchor(turn) ?? "无" }}</code>
                     <button
                       v-if="turnAnchor(turn)"
                       class="history-goto"
                       @click.stop="gotoHistoryAnchor(turnAnchor(turn))"
                     >
-                      Goto
+                      跳转
                     </button>
                   </div>
                 </li>
               </ol>
-              <p v-else class="empty history-empty">No questions yet.</p>
+              <p v-else class="empty history-empty">暂无问题。</p>
 
               <div class="history-card-actions">
                 <button
@@ -446,12 +446,12 @@ function deleteHistorySession(sessionId: string) {
                   :disabled="session.id === props.activeChatSessionId"
                   @click.stop="openHistorySession(session.id)"
                 >
-                  Open chat
+                  打开对话
                 </button>
-                <button class="history-delete" @click.stop="deleteHistorySession(session.id)">Delete</button>
+                <button class="history-delete" @click.stop="deleteHistorySession(session.id)">删除</button>
               </div>
             </article>
-            <p v-if="props.chatSessions.length === 0" class="empty history-empty">No saved chat history.</p>
+            <p v-if="props.chatSessions.length === 0" class="empty history-empty">暂无保存的对话历史。</p>
           </div>
         </section>
       </div>

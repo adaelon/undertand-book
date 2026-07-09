@@ -8,7 +8,7 @@
 //! socket 绑定 / worker 线程 / Mutex 锁 / 时间戳生成 / adapter 装配在 `main.rs`。
 //! 外层 E agent(S10f)、静态资源(S10e)留后续子切片。
 use memory::{Anchor, MemoryStore, RecallQuery, SaveInput};
-use read_tools::{Book, ReaderLayoutAction, ToolError};
+use read_tools::{Book, ContentProfileId, ReaderLayoutAction, ToolError};
 use reader::{Reader, DEFAULT_RADIUS};
 use runtime::orchestrator::{new_session, run, OuterConfig};
 use runtime::{
@@ -385,6 +385,12 @@ pub fn route(state: &mut AppState, req: Req) -> Reply {
         }
         return route_synthesize(state, req.body);
     }
+    if path == "/build_workbench/sidecar_plan.confirm" {
+        if req.method != "POST" {
+            return method_not_allowed();
+        }
+        return route_sidecar_plan_confirm(&state.book, &state.book_dir, req.body, req.now);
+    }
     // agent.*(S10f):外层 E agent 编排,POST(会话命令)`[ADR-0030]`。
     if path == "/agent/history" {
         if req.method != "GET" {
@@ -455,6 +461,17 @@ fn route_open_book(state: &mut AppState, body: &str, now: &str) -> Reply {
     let book = match Book::load(dir) {
         Ok(book) => book,
         Err(e) => {
+            if Path::new(dir).is_dir() {
+                state.book_dir = PathBuf::from(dir);
+                let _ = save_session(state, Some(dir));
+                return ok_json(&json!({
+                    "ok": true,
+                    "book_id": read_book_id_from_base(&Path::new(dir).join("base.json"))
+                        .or_else(|| Path::new(dir).file_name().and_then(|s| s.to_str()).map(str::to_string))
+                        .unwrap_or_else(|| state.book.base.book_id.clone()),
+                    "route": "workbench"
+                }));
+            }
             return err_reply(&ToolError {
                 error_code: "BOOK_LOAD_FAILED".into(),
                 category: "validation".into(),
@@ -579,6 +596,7 @@ fn route_book(
         "manifest" => ok_json(&book.manifest()),
         "library" => route_book_library(book_dir),
         "asset_manifest" => route_asset_manifest(book, book_dir),
+        "build_workbench" => route_build_workbench(book, book_dir),
         "source_manifest" => route_source_manifest(book_dir),
         "pdf_source_map" => route_pdf_source_map(book_dir),
         "text" => {
@@ -733,6 +751,792 @@ fn route_asset_manifest(book: &Book, book_dir: &Path) -> Reply {
             message: format!("读取 asset_manifest.json 失败: {e}"),
         }),
     }
+}
+
+fn read_json_artifact_optional(
+    path: &Path,
+    invalid_code: &str,
+) -> Result<Option<serde_json::Value>, ToolError> {
+    let raw = match std::fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(ToolError {
+                error_code: "ARTIFACT_READ_FAILED".into(),
+                category: "internal".into(),
+                message: format!("读取 artifact 失败({}): {e}", path.display()),
+            })
+        }
+    };
+    serde_json::from_str::<serde_json::Value>(&raw)
+        .map(Some)
+        .map_err(|e| ToolError {
+            error_code: invalid_code.into(),
+            category: "internal".into(),
+            message: format!("artifact 非合法 JSON({}): {e}", path.display()),
+        })
+}
+
+fn artifact_config_hash(book_dir: &Path, relative: &str) -> Result<Option<String>, ToolError> {
+    Ok(
+        read_json_artifact_optional(&book_dir.join(relative), "ARTIFACT_INVALID")?.and_then(
+            |value| {
+                value
+                    .get("config_hash")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+            },
+        ),
+    )
+}
+
+fn stage_value(stage: &str, status: &str, reason: Option<&str>) -> serde_json::Value {
+    match reason {
+        Some(reason) => json!({ "stage": stage, "status": status, "reason": reason }),
+        None => json!({ "stage": stage, "status": status }),
+    }
+}
+
+const BUILD_WORKBENCH_STAGE_IDS: [&str; 9] = [
+    "source_reconciliation",
+    "hybrid_foundation",
+    "pass1",
+    "paper_metadata",
+    "paper_lexicon",
+    "profile_sidecar",
+    "pass2",
+    "book_structure",
+    "paper_reading_guide",
+];
+
+fn value_array_len(value: Option<&serde_json::Value>, key: &str) -> Option<usize> {
+    value
+        .and_then(|v| v.get(key))
+        .and_then(|v| v.as_array())
+        .map(Vec::len)
+}
+
+fn capability_value<'a>(
+    manifest: &'a serde_json::Value,
+    name: &str,
+) -> Option<&'a serde_json::Value> {
+    manifest.get("capabilities").and_then(|v| v.get(name))
+}
+
+fn capability_needs_artifact(capability: Option<&serde_json::Value>) -> bool {
+    let status = capability
+        .and_then(|v| v.get("status"))
+        .and_then(|v| v.as_str());
+    let has_artifact = capability
+        .and_then(|v| v.get("artifact_path"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .is_some_and(|s| !s.is_empty());
+    matches!(status, Some("available" | "degraded")) && has_artifact
+}
+
+fn capability_hash_mismatch(
+    capability: Option<&serde_json::Value>,
+    artifact_hash: Option<&str>,
+) -> bool {
+    let cap_hash = capability
+        .and_then(|v| v.get("config_hash"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    matches!((cap_hash, artifact_hash), (Some(left), Some(right)) if left != right)
+}
+
+fn capability_degraded_without_reason(capability: Option<&serde_json::Value>) -> bool {
+    let status = capability
+        .and_then(|v| v.get("status"))
+        .and_then(|v| v.as_str());
+    let reason = capability
+        .and_then(|v| v.get("reason"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    status == Some("degraded") && reason.is_none()
+}
+
+fn stage_dir_has_entries(path: &Path) -> bool {
+    std::fs::read_dir(path)
+        .map(|mut entries| entries.any(|entry| entry.is_ok()))
+        .unwrap_or(false)
+}
+
+fn derived_stage_status(
+    book_dir: &Path,
+    stage: &str,
+    dir_name: &str,
+    extra_file: Option<&str>,
+) -> serde_json::Value {
+    let done = stage_dir_has_entries(&book_dir.join(".build").join(dir_name))
+        || extra_file.is_some_and(|file| book_dir.join(file).is_file());
+    if done {
+        stage_value(stage, "done", None)
+    } else {
+        stage_value(
+            stage,
+            "missing",
+            Some("derived paper projection stage artifact is missing"),
+        )
+    }
+}
+
+fn read_build_jobs(book_dir: &Path) -> Result<Vec<serde_json::Value>, ToolError> {
+    let jobs_dir = book_dir.join(".build").join("jobs");
+    let entries = match std::fs::read_dir(&jobs_dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => {
+            return Err(ToolError {
+                error_code: "BUILD_JOBS_READ_FAILED".into(),
+                category: "internal".into(),
+                message: format!("读取 build jobs 失败({}): {e}", jobs_dir.display()),
+            })
+        }
+    };
+    let mut files = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|e| ToolError {
+            error_code: "BUILD_JOBS_READ_FAILED".into(),
+            category: "internal".into(),
+            message: format!("读取 build job entry 失败: {e}"),
+        })?;
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) == Some("json") {
+            files.push(path);
+        }
+    }
+    files.sort();
+    files
+        .iter()
+        .map(|path| {
+            read_json_artifact_optional(path, "BUILD_JOB_INVALID").and_then(|value| {
+                value.ok_or_else(|| ToolError {
+                    error_code: "BUILD_JOB_NOT_FOUND".into(),
+                    category: "not_found".into(),
+                    message: format!("build job disappeared while reading: {}", path.display()),
+                })
+            })
+        })
+        .collect()
+}
+
+fn workbench_book_id(
+    fallback_book_id: &str,
+    book_dir: &Path,
+    report: Option<&serde_json::Value>,
+    source_manifest: Option<&serde_json::Value>,
+) -> String {
+    report
+        .and_then(|v| v.get("book_id"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            source_manifest
+                .and_then(|v| v.get("book_id"))
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+        })
+        .map(str::to_string)
+        .or_else(|| read_book_id_from_base(&book_dir.join("base.json")))
+        .or_else(|| {
+            book_dir
+                .file_name()
+                .and_then(|s| s.to_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| fallback_book_id.to_string())
+}
+
+fn is_current_existing_technical_book(book: &Book, book_dir: &Path) -> bool {
+    if book.content_profile_id() == ContentProfileId::Paper
+        || !book_dir.join("source.txt").is_file()
+    {
+        return false;
+    }
+    read_book_id_from_base(&book_dir.join("base.json")).as_deref()
+        == Some(book.base.book_id.as_str())
+}
+
+fn route_existing_technical_book_workbench(book: &Book, book_dir: &Path) -> Reply {
+    let mut stages = serde_json::Map::new();
+    for stage in BUILD_WORKBENCH_STAGE_IDS {
+        stages.insert(
+            stage.into(),
+            stage_value(
+                stage,
+                "done",
+                Some("not required for technical_learning profile"),
+            ),
+        );
+    }
+    ok_json(&json!({
+        "version": "build_workbench_snapshot.v1",
+        "book_id": workbench_book_id(&book.base.book_id, book_dir, None, None),
+        "readiness": {
+            "route": "reader",
+            "status": "trusted_book",
+            "reasons": [],
+            "stages": stages,
+        },
+        "jobs": [],
+        "sidecar_plan": {
+            "plan": null,
+            "form_draft": null,
+            "build_spec": null,
+        },
+    }))
+}
+
+fn route_build_workbench(book: &Book, book_dir: &Path) -> Reply {
+    if is_current_existing_technical_book(book, book_dir) {
+        return route_existing_technical_book_workbench(book, book_dir);
+    }
+
+    let fallback_book_id = &book.base.book_id;
+    let report = match read_json_artifact_optional(
+        &book_dir
+            .join(".build")
+            .join("source-reconciliation")
+            .join("report.json"),
+        "SOURCE_RECONCILIATION_REPORT_INVALID",
+    ) {
+        Ok(value) => value,
+        Err(e) => return err_reply(&e),
+    };
+    let source_manifest = match read_json_artifact_optional(
+        &book_dir.join("source_manifest.json"),
+        "SOURCE_MANIFEST_INVALID",
+    ) {
+        Ok(value) => value,
+        Err(e) => return err_reply(&e),
+    };
+    let pdf_source_hash = match artifact_config_hash(book_dir, "pdf_source_map.json") {
+        Ok(value) => value,
+        Err(e) => return err_reply(&e),
+    };
+    let pdf_selection_hash = match artifact_config_hash(book_dir, "pdf_selection_map/manifest.json")
+    {
+        Ok(value) => value,
+        Err(e) => return err_reply(&e),
+    };
+    let alignment_hash = match artifact_config_hash(book_dir, "alignment_report.json") {
+        Ok(value) => value,
+        Err(e) => return err_reply(&e),
+    };
+
+    let mut stages = serde_json::Map::new();
+    let mut reasons = Vec::<String>::new();
+    let unresolved_count = value_array_len(report.as_ref(), "unresolved").unwrap_or(0);
+    let source_status = if report.is_none() {
+        stages.insert(
+            "source_reconciliation".into(),
+            stage_value(
+                "source_reconciliation",
+                "missing",
+                Some("source reconciliation report is missing"),
+            ),
+        );
+        "missing"
+    } else if unresolved_count > 0 {
+        stages.insert(
+            "source_reconciliation".into(),
+            stage_value(
+                "source_reconciliation",
+                "needs_review",
+                Some("source reconciliation has unresolved blocks"),
+            ),
+        );
+        "needs_review"
+    } else {
+        stages.insert(
+            "source_reconciliation".into(),
+            stage_value("source_reconciliation", "done", None),
+        );
+        "done"
+    };
+
+    let foundation_status = if source_status == "done" {
+        if !book_dir.join("source.txt").is_file() {
+            stages.insert(
+                "hybrid_foundation".into(),
+                stage_value(
+                    "hybrid_foundation",
+                    "missing",
+                    Some("trusted source.txt is missing"),
+                ),
+            );
+            "missing"
+        } else if !book_dir.join("base.json").is_file() {
+            stages.insert(
+                "hybrid_foundation".into(),
+                stage_value("hybrid_foundation", "missing", Some("base.json is missing")),
+            );
+            "missing"
+        } else if source_manifest.is_none() {
+            stages.insert(
+                "hybrid_foundation".into(),
+                stage_value(
+                    "hybrid_foundation",
+                    "missing",
+                    Some("source_manifest.json is missing"),
+                ),
+            );
+            "missing"
+        } else {
+            let manifest = source_manifest.as_ref().expect("checked above");
+            let project_lid = capability_value(manifest, "project_lid_to_pdf");
+            let project_ranges = capability_value(manifest, "project_ranges_to_pdf");
+            let resolve_selection = capability_value(manifest, "resolve_pdf_selection");
+            let missing_artifact = [
+                (
+                    "project_lid_to_pdf",
+                    project_lid,
+                    pdf_source_hash.as_deref(),
+                ),
+                (
+                    "project_ranges_to_pdf",
+                    project_ranges,
+                    pdf_source_hash.as_deref(),
+                ),
+                (
+                    "resolve_pdf_selection",
+                    resolve_selection,
+                    pdf_selection_hash.as_deref(),
+                ),
+            ]
+            .iter()
+            .find(|(_, capability, artifact_hash)| {
+                capability_needs_artifact(*capability) && artifact_hash.is_none()
+            })
+            .map(|(name, _, _)| *name);
+            let stale_artifact = [
+                (
+                    "project_lid_to_pdf",
+                    project_lid,
+                    pdf_source_hash.as_deref(),
+                ),
+                (
+                    "project_ranges_to_pdf",
+                    project_ranges,
+                    pdf_source_hash.as_deref(),
+                ),
+                (
+                    "resolve_pdf_selection",
+                    resolve_selection,
+                    pdf_selection_hash.as_deref(),
+                ),
+            ]
+            .iter()
+            .find(|(_, capability, artifact_hash)| {
+                capability_hash_mismatch(*capability, *artifact_hash)
+            })
+            .map(|(name, _, _)| *name);
+            let degraded_without_reason = [
+                ("project_lid_to_pdf", project_lid),
+                ("project_ranges_to_pdf", project_ranges),
+                ("resolve_pdf_selection", resolve_selection),
+            ]
+            .iter()
+            .find(|(_, capability)| capability_degraded_without_reason(*capability))
+            .map(|(name, _)| *name);
+            let manifest_config_hash = project_lid
+                .or(resolve_selection)
+                .and_then(|v| v.get("config_hash"))
+                .and_then(|v| v.as_str());
+            if let Some(name) = missing_artifact {
+                stages.insert(
+                    "hybrid_foundation".into(),
+                    stage_value(
+                        "hybrid_foundation",
+                        "incomplete",
+                        Some(&format!("{name} declares an artifact that is missing")),
+                    ),
+                );
+                "incomplete"
+            } else if let Some(name) = stale_artifact {
+                stages.insert(
+                    "hybrid_foundation".into(),
+                    stage_value(
+                        "hybrid_foundation",
+                        "stale",
+                        Some(&format!("{name} config hash does not match its artifact")),
+                    ),
+                );
+                "stale"
+            } else if let Some(name) = degraded_without_reason {
+                stages.insert(
+                    "hybrid_foundation".into(),
+                    stage_value(
+                        "hybrid_foundation",
+                        "incomplete",
+                        Some(&format!("{name} is degraded without an explicit reason")),
+                    ),
+                );
+                "incomplete"
+            } else if matches!((alignment_hash.as_deref(), manifest_config_hash), (Some(left), Some(right)) if left != right)
+            {
+                stages.insert(
+                    "hybrid_foundation".into(),
+                    stage_value(
+                        "hybrid_foundation",
+                        "stale",
+                        Some("alignment_report config hash does not match source_manifest capabilities"),
+                    ),
+                );
+                "stale"
+            } else {
+                stages.insert(
+                    "hybrid_foundation".into(),
+                    stage_value("hybrid_foundation", "done", None),
+                );
+                "done"
+            }
+        }
+    } else {
+        stages.insert(
+            "hybrid_foundation".into(),
+            stage_value(
+                "hybrid_foundation",
+                "blocked",
+                Some("upstream stage is not trusted yet"),
+            ),
+        );
+        "blocked"
+    };
+
+    if foundation_status == "done" {
+        stages.insert(
+            "pass1".into(),
+            derived_stage_status(book_dir, "pass1", "pass1", None),
+        );
+        stages.insert(
+            "paper_metadata".into(),
+            derived_stage_status(
+                book_dir,
+                "paper_metadata",
+                "paper-metadata",
+                Some("paper_metadata.json"),
+            ),
+        );
+        stages.insert(
+            "paper_lexicon".into(),
+            derived_stage_status(
+                book_dir,
+                "paper_lexicon",
+                "paper-lexicon",
+                Some("paper_lexicon.json"),
+            ),
+        );
+        stages.insert(
+            "profile_sidecar".into(),
+            derived_stage_status(
+                book_dir,
+                "profile_sidecar",
+                "profile-sidecar",
+                Some("profile_sidecar.json"),
+            ),
+        );
+        stages.insert(
+            "pass2".into(),
+            derived_stage_status(book_dir, "pass2", "pass2", None),
+        );
+        stages.insert(
+            "book_structure".into(),
+            derived_stage_status(
+                book_dir,
+                "book_structure",
+                "book-structure",
+                Some("book_structure.json"),
+            ),
+        );
+        stages.insert(
+            "paper_reading_guide".into(),
+            derived_stage_status(
+                book_dir,
+                "paper_reading_guide",
+                "paper-reading-guide",
+                Some("paper_reading_guide.json"),
+            ),
+        );
+    } else {
+        for stage in [
+            "pass1",
+            "paper_metadata",
+            "paper_lexicon",
+            "profile_sidecar",
+            "pass2",
+            "book_structure",
+            "paper_reading_guide",
+        ] {
+            stages.insert(
+                stage.into(),
+                stage_value(stage, "blocked", Some("upstream stage is not trusted yet")),
+            );
+        }
+    }
+
+    if source_status == "needs_review" {
+        reasons.push("source reconciliation needs review".into());
+    }
+    if source_status == "stale" || foundation_status == "stale" {
+        reasons.push("build input or artifacts are stale".into());
+    }
+    if source_status == "missing" || foundation_status == "missing" {
+        reasons.push("trusted source foundation is missing".into());
+    }
+    if foundation_status == "incomplete" {
+        let reason = stages
+            .get("hybrid_foundation")
+            .and_then(|v| v.get("reason"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("trusted source foundation is incomplete");
+        reasons.push(reason.into());
+    }
+
+    let route = if source_status == "done" && foundation_status == "done" {
+        "reader"
+    } else {
+        "workbench"
+    };
+    let readiness_status = if route == "reader" {
+        "trusted_book"
+    } else if source_status == "needs_review" {
+        "needs_review"
+    } else if source_status == "stale" || foundation_status == "stale" {
+        "stale_input"
+    } else if foundation_status == "incomplete" {
+        "incomplete"
+    } else {
+        "missing"
+    };
+    if reasons.is_empty() && route == "workbench" {
+        reasons.push("trusted source foundation is not ready".into());
+    }
+
+    let jobs = match read_build_jobs(book_dir) {
+        Ok(jobs) => jobs,
+        Err(e) => return err_reply(&e),
+    };
+    let sidecar_dir = book_dir.join(".build").join("sidecar-plan");
+    let sidecar_plan = match (
+        read_json_artifact_optional(
+            &sidecar_dir.join("sidecar_plan.json"),
+            "SIDECAR_PLAN_INVALID",
+        ),
+        read_json_artifact_optional(
+            &sidecar_dir.join("form_draft.json"),
+            "SIDECAR_FORM_DRAFT_INVALID",
+        ),
+        read_json_artifact_optional(
+            &sidecar_dir.join("sidecar_build_spec.json"),
+            "SIDECAR_BUILD_SPEC_INVALID",
+        ),
+    ) {
+        (Ok(plan), Ok(form_draft), Ok(build_spec)) => {
+            json!({ "plan": plan, "form_draft": form_draft, "build_spec": build_spec })
+        }
+        (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => return err_reply(&e),
+    };
+
+    let book_id = workbench_book_id(
+        fallback_book_id,
+        book_dir,
+        report.as_ref(),
+        source_manifest.as_ref(),
+    );
+    ok_json(&json!({
+        "version": "build_workbench_snapshot.v1",
+        "book_id": book_id,
+        "readiness": {
+            "route": route,
+            "status": readiness_status,
+            "reasons": reasons,
+            "stages": stages,
+        },
+        "jobs": jobs,
+        "sidecar_plan": sidecar_plan,
+    }))
+}
+
+fn update_sidecar_form_fields(
+    form: &mut serde_json::Value,
+    fields: &serde_json::Map<String, serde_json::Value>,
+) {
+    let Some(items) = form.get_mut("fields").and_then(|v| v.as_array_mut()) else {
+        return;
+    };
+    for item in items {
+        let Some(id) = item.get("id").and_then(|v| v.as_str()).map(str::to_string) else {
+            continue;
+        };
+        let editable = item
+            .get("editable")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if editable {
+            if let Some(value) = fields.get(&id) {
+                item["value"] = value.clone();
+            }
+        }
+    }
+}
+
+fn update_sidecar_plan_from_fields(
+    plan: &mut serde_json::Value,
+    fields: &serde_json::Map<String, serde_json::Value>,
+    now: &str,
+) {
+    plan["status"] = json!("confirmed");
+    plan["sidecar_generation_allowed"] = json!(true);
+    plan["confirmed_at"] = json!(now);
+    if let Some(target_view) = fields.get("target_view").and_then(|v| v.as_str()) {
+        plan["selected_option"] = json!(target_view);
+    }
+    let Some(intent) = plan.as_object_mut().and_then(|plan| {
+        Some(
+            plan.entry("intent")
+                .or_insert_with(|| json!({}))
+                .as_object_mut()?,
+        )
+    }) else {
+        return;
+    };
+    if let Some(target_view) = fields.get("target_view").and_then(|v| v.as_str()) {
+        intent.insert("target_view".into(), json!(target_view));
+    }
+    if let Some(source_scope) = fields.get("source_scope") {
+        intent.insert("source_scope".into(), source_scope.clone());
+    }
+    let output = intent
+        .entry("output_contract")
+        .or_insert_with(|| json!({}))
+        .as_object_mut();
+    if let Some(output) = output {
+        if let Some(sidecar_id) = fields.get("sidecar_id") {
+            output.insert("sidecar_id".into(), sidecar_id.clone());
+        }
+        if let Some(schema) = fields.get("schema") {
+            output.insert("schema".into(), schema.clone());
+        }
+        if let Some(visualization) = fields.get("visualization") {
+            output.insert("visualization".into(), visualization.clone());
+        }
+        if let Some(required_evidence) = fields.get("required_evidence") {
+            output.insert("required_evidence".into(), required_evidence.clone());
+        }
+    }
+}
+
+fn sidecar_build_spec(plan: &serde_json::Value) -> serde_json::Value {
+    let intent = plan.get("intent").unwrap_or(&serde_json::Value::Null);
+    let output = intent
+        .get("output_contract")
+        .unwrap_or(&serde_json::Value::Null);
+    let source_scope = intent
+        .get("source_scope")
+        .cloned()
+        .unwrap_or_else(|| json!({ "whole_book": true }));
+    let input_lids = source_scope
+        .get("lids")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let validation_rules = plan
+        .get("validation_rules")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    json!({
+        "version": "sidecar_build_spec.v1",
+        "sidecar_id": output.get("sidecar_id").and_then(|v| v.as_str()).unwrap_or("custom_sidecar"),
+        "stage": "custom_sidecar",
+        "input_lids": input_lids,
+        "source_scope": source_scope,
+        "extractor_prompt": intent.get("user_request").and_then(|v| v.as_str()).unwrap_or("custom sidecar"),
+        "output_schema": output.get("schema").cloned().unwrap_or_else(|| json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": true
+        })),
+        "validation_rules": validation_rules,
+        "visualization_hint": output.get("visualization").and_then(|v| v.as_str()).unwrap_or("cards"),
+    })
+}
+
+fn route_sidecar_plan_confirm(book: &Book, book_dir: &Path, body: &str, now: &str) -> Reply {
+    let v = match body_value(body) {
+        Ok(v) => v,
+        Err(reply) => return reply,
+    };
+    let Some(fields) = v.get("fields").and_then(|v| v.as_object()) else {
+        return validation(
+            "INVALID_SIDECAR_PLAN",
+            "sidecar plan confirm 需 fields 对象",
+        );
+    };
+    let sidecar_dir = book_dir.join(".build").join("sidecar-plan");
+    let plan_path = sidecar_dir.join("sidecar_plan.json");
+    let form_path = sidecar_dir.join("form_draft.json");
+    let mut plan = match read_json_artifact_optional(&plan_path, "SIDECAR_PLAN_INVALID") {
+        Ok(Some(plan)) => plan,
+        Ok(None) => {
+            return err_reply(&ToolError {
+                error_code: "SIDECAR_PLAN_NOT_FOUND".into(),
+                category: "not_found".into(),
+                message: format!("sidecar_plan.json not found: {}", plan_path.display()),
+            })
+        }
+        Err(e) => return err_reply(&e),
+    };
+    let mut form = match read_json_artifact_optional(&form_path, "SIDECAR_FORM_DRAFT_INVALID") {
+        Ok(Some(form)) => form,
+        Ok(None) => plan
+            .get("form_draft")
+            .cloned()
+            .unwrap_or_else(|| json!({ "version": "sidecar_form_draft.v1", "fields": [] })),
+        Err(e) => return err_reply(&e),
+    };
+    update_sidecar_form_fields(&mut form, fields);
+    update_sidecar_plan_from_fields(&mut plan, fields, now);
+    plan["form_draft"] = form.clone();
+    let spec = sidecar_build_spec(&plan);
+    if let Err(e) = std::fs::create_dir_all(&sidecar_dir) {
+        return err_reply(&ToolError {
+            error_code: "SIDECAR_PLAN_WRITE_FAILED".into(),
+            category: "internal".into(),
+            message: format!("创建 sidecar-plan 目录失败({}): {e}", sidecar_dir.display()),
+        });
+    }
+    for (path, value) in [
+        (&plan_path, &plan),
+        (&form_path, &form),
+        (&sidecar_dir.join("sidecar_build_spec.json"), &spec),
+    ] {
+        let raw = match serde_json::to_string_pretty(value) {
+            Ok(raw) => raw,
+            Err(e) => {
+                return err_reply(&ToolError {
+                    error_code: "SIDECAR_PLAN_WRITE_FAILED".into(),
+                    category: "internal".into(),
+                    message: format!("序列化 sidecar artifact 失败: {e}"),
+                })
+            }
+        };
+        if let Err(e) = std::fs::write(path, raw) {
+            return err_reply(&ToolError {
+                error_code: "SIDECAR_PLAN_WRITE_FAILED".into(),
+                category: "internal".into(),
+                message: format!("写入 sidecar artifact 失败({}): {e}", path.display()),
+            });
+        }
+    }
+    route_build_workbench(book, book_dir)
 }
 
 fn read_json_artifact(
@@ -2066,6 +2870,47 @@ mod tests {
         dir
     }
 
+    fn write_current_book_files(s: &AppState) {
+        let max_end = s
+            .book
+            .base
+            .lid_nodes
+            .iter()
+            .map(|node| node.span.end)
+            .max()
+            .unwrap_or(0);
+        std::fs::write(
+            s.book_dir.join("base.json"),
+            serde_json::to_string(&s.book.base).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(s.book_dir.join("source.txt"), "X".repeat(max_end + 8)).unwrap();
+    }
+
+    fn attach_paper_profile(s: &mut AppState) {
+        write_current_book_files(s);
+        std::fs::write(
+            s.book_dir.join("book_structure.json"),
+            serde_json::json!({
+                "header": {
+                    "book_id": s.book.base.book_id,
+                    "book_version": "v1",
+                    "profile_id": "paper",
+                    "profile_version": "paper_v0",
+                    "core_schema_version": "core_v0",
+                    "generated_at": "t0"
+                },
+                "spine": [],
+                "throughlines": [],
+                "key_stops": []
+            })
+            .to_string(),
+        )
+        .unwrap();
+        s.book = Book::load(s.book_dir.to_str().unwrap()).unwrap();
+        s.reader = Reader::new(&s.book, DEFAULT_RADIUS);
+    }
+
     fn write_pdf_runtime_artifacts(s: &mut AppState) {
         let coord = serde_json::json!({
             "space": "pdf_user_space",
@@ -2172,6 +3017,90 @@ mod tests {
             ]
         });
         std::fs::write(selection_dir.join("pages").join("0.json"), page.to_string()).unwrap();
+    }
+
+    fn write_workbench_review_artifacts(s: &mut AppState) {
+        attach_paper_profile(s);
+
+        let report_dir = s.book_dir.join(".build").join("source-reconciliation");
+        std::fs::create_dir_all(&report_dir).unwrap();
+        std::fs::write(
+            report_dir.join("report.json"),
+            serde_json::json!({
+                "version": "source_reconciliation_report.v1",
+                "book_id": s.book.base.book_id,
+                "input_fingerprint": {
+                    "paper_md_sha256": "sha-md",
+                    "paper_pdf_sha256": "sha-pdf",
+                    "config_hash": "cfg-a"
+                },
+                "summary": {
+                    "verified": 1,
+                    "auto_repaired": 0,
+                    "llm_format_repaired": 0,
+                    "needs_review": 1,
+                    "pdf_unmatched": 0,
+                    "md_unmatched": 0
+                },
+                "unresolved": [{"id": "block-1", "status": "needs_review", "reason": "number mismatch"}]
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let jobs_dir = s.book_dir.join(".build").join("jobs");
+        std::fs::create_dir_all(&jobs_dir).unwrap();
+        std::fs::write(
+            jobs_dir.join("job_review.json"),
+            serde_json::json!({
+                "version": "build_job_state.v1",
+                "job_id": "job_review",
+                "book_id": s.book.base.book_id,
+                "input_fingerprint": {
+                    "paper_md_sha256": "sha-md",
+                    "paper_pdf_sha256": "sha-pdf",
+                    "config_hash": "cfg-a"
+                },
+                "status": "needs_user",
+                "events": [
+                    {"event_id": "evt_1", "job_id": "job_review", "created_at": "t1", "type": "decision_requested", "stage": "source_reconciliation"}
+                ],
+                "decision_requests": [
+                    {"decision_id": "decision-1", "job_id": "job_review", "stage": "source_reconciliation", "kind": "source_reconciliation_mode", "prompt": "Choose review mode", "options": [], "status": "pending", "created_at": "t1"}
+                ],
+                "permission_requests": [
+                    {"request_id": "perm-1", "run_id": "run-1", "executor": "codex", "category": "filesystem", "action_summary": "Read PDF", "scope_hint": "stage", "status": "pending", "created_at": "t1"}
+                ],
+                "created_at": "t1",
+                "updated_at": "t1"
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let sidecar_dir = s.book_dir.join(".build").join("sidecar-plan");
+        std::fs::create_dir_all(&sidecar_dir).unwrap();
+        std::fs::write(
+            sidecar_dir.join("sidecar_plan.json"),
+            serde_json::json!({
+                "version": "sidecar_plan.v1",
+                "book_id": s.book.base.book_id,
+                "status": "draft",
+                "stage": "custom_sidecar",
+                "sidecar_generation_allowed": false
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            sidecar_dir.join("form_draft.json"),
+            serde_json::json!({
+                "version": "sidecar_form_draft.v1",
+                "fields": [{"id": "target_view", "label": "Target view", "value": "comparison_table", "editable": true}]
+            })
+            .to_string(),
+        )
+        .unwrap();
     }
 
     /// 确定性 LLM 替身:首轮即 sufficient + 引用给定 LID(落在证据集内 ⇒ 过内层交叉验停)。
@@ -2362,6 +3291,94 @@ mod tests {
         let missing = route_book_asset_file(&dir, "/book/assets/images/missing.png").unwrap();
         assert_eq!(missing.status, 404);
         assert!(route_book_asset_file(&dir, "/book/text?lid=1.1").is_none());
+    }
+
+    #[test]
+    fn build_workbench_routes_existing_technical_book_to_reader_without_paper_gate() {
+        let mut s = state_named("workbench-tech-existing");
+        write_current_book_files(&s);
+        std::fs::write(s.book_dir.join("source_manifest.json"), "{not-json").unwrap();
+
+        let r = get(&mut s, "/book/build_workbench");
+
+        assert_eq!(r.status, 200);
+        let body: serde_json::Value = serde_json::from_str(&r.body).unwrap();
+        assert_eq!(body["readiness"]["route"], "reader");
+        assert_eq!(body["readiness"]["status"], "trusted_book");
+        assert_eq!(body["readiness"]["reasons"].as_array().unwrap().len(), 0);
+        assert_eq!(
+            body["readiness"]["stages"]["source_reconciliation"]["status"],
+            "done"
+        );
+        assert_eq!(
+            body["readiness"]["stages"]["hybrid_foundation"]["reason"],
+            "not required for technical_learning profile"
+        );
+        assert_eq!(body["jobs"].as_array().unwrap().len(), 0);
+        assert!(body["sidecar_plan"]["plan"].is_null());
+    }
+
+    #[test]
+    fn build_workbench_snapshot_exposes_readiness_jobs_and_sidecar_plan() {
+        let mut s = state_named("workbench-snapshot");
+        write_workbench_review_artifacts(&mut s);
+
+        let r = get(&mut s, "/book/build_workbench");
+
+        assert_eq!(r.status, 200);
+        let body: serde_json::Value = serde_json::from_str(&r.body).unwrap();
+        assert_eq!(body["version"], "build_workbench_snapshot.v1");
+        assert_eq!(body["readiness"]["route"], "workbench");
+        assert_eq!(body["readiness"]["status"], "needs_review");
+        assert_eq!(
+            body["readiness"]["stages"]["source_reconciliation"]["status"],
+            "needs_review"
+        );
+        assert_eq!(
+            body["jobs"][0]["decision_requests"][0]["decision_id"],
+            "decision-1"
+        );
+        assert_eq!(
+            body["jobs"][0]["permission_requests"][0]["request_id"],
+            "perm-1"
+        );
+        assert_eq!(body["sidecar_plan"]["plan"]["version"], "sidecar_plan.v1");
+        assert_eq!(
+            body["sidecar_plan"]["form_draft"]["version"],
+            "sidecar_form_draft.v1"
+        );
+    }
+
+    #[test]
+    fn sidecar_plan_confirm_writes_confirmed_plan_and_build_spec() {
+        let mut s = state_named("workbench-sidecar-confirm");
+        write_workbench_review_artifacts(&mut s);
+
+        let r = post(
+            &mut s,
+            "/build_workbench/sidecar_plan.confirm",
+            r#"{"fields":{"sidecar_id":"custom_review","visualization":"table","required_evidence":"lid_required","source_scope":{"lids":["1.1"]},"schema":{"type":"object","properties":{"rows":{"type":"array"}}}}}"#,
+        );
+
+        assert_eq!(r.status, 200);
+        let plan: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(s.book_dir.join(".build/sidecar-plan/sidecar_plan.json"))
+                .unwrap(),
+        )
+        .unwrap();
+        let spec: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(
+                s.book_dir
+                    .join(".build/sidecar-plan/sidecar_build_spec.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(plan["status"], "confirmed");
+        assert_eq!(plan["sidecar_generation_allowed"], true);
+        assert_eq!(spec["version"], "sidecar_build_spec.v1");
+        assert_eq!(spec["sidecar_id"], "custom_review");
+        assert_eq!(spec["input_lids"][0], "1.1");
     }
 
     #[test]
@@ -3106,6 +4123,29 @@ mod tests {
         assert_eq!(post(&mut s, "/book/open", "{}").status, 400);
         assert_eq!(get(&mut s, "/book/open").status, 405);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn book_open_allows_prebase_directory_to_enter_workbench() {
+        let dir = tmp_dir("open-workbench-prebase");
+        std::fs::write(dir.join("paper.md"), "draft").unwrap();
+
+        let mut s = state_named("open-workbench");
+        let body = format!(
+            r#"{{"dir":{}}}"#,
+            serde_json::to_string(dir.to_str().unwrap()).unwrap()
+        );
+        let r = post(&mut s, "/book/open", &body);
+        assert_eq!(r.status, 200);
+        assert!(r.body.contains("\"route\":\"workbench\""));
+        assert_eq!(s.book_dir, dir);
+
+        let snapshot = get(&mut s, "/book/build_workbench");
+        assert_eq!(snapshot.status, 200);
+        let body: serde_json::Value = serde_json::from_str(&snapshot.body).unwrap();
+        assert_eq!(body["book_id"], "ub-server-test-open-workbench-prebase");
+        assert_eq!(body["readiness"]["route"], "workbench");
+        assert_eq!(body["readiness"]["status"], "missing");
     }
     // ── S10f /agent/chat + /agent/new ───────────────────────
     // /agent/chat:外层 E agent 驱动共享 reader,返 OuterOutcome 含 effects(可撤销提议)。

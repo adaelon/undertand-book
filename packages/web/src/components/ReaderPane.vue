@@ -51,11 +51,15 @@ function notePreview(note: MemoryRecord): string {
 }
 function noteSourceLabel(note: MemoryRecord): string {
   const quote = leadingQuote(note.content);
-  if (quote) return "Quote source";
-  return note.anchor.lid ? "Go to source" : "No source";
+  if (quote) return "引用来源";
+  return note.anchor.lid ? "跳到来源" : "无来源";
 }
 function isLongNote(note: MemoryRecord): boolean {
   return note.content.length > 360 || note.content.split("\n").length > 8;
+}
+function imageRenderSrc(asset: ImageAssetManifestEntry | null | undefined): string | null {
+  if (!asset) return null;
+  return asset.url_path ?? (asset.status === "external" ? asset.original_src : null);
 }
 const emit = defineEmits<{
   (e: "select", lid: string): void;
@@ -366,14 +370,14 @@ watch(
           </p>
           <template v-for="seg in item.segments" :key="`meta-${seg.lid}`">
             <div v-if="seg.lid === props.selectedLid" class="block-actions">
-              <button @click="emit('highlight-block', seg.lid)">Highlight block</button>
-              <button @click="emit('note-block', seg.lid)">Note</button>
+              <button @click="emit('highlight-block', seg.lid)">高亮整段</button>
+              <button @click="emit('note-block', seg.lid)">记笔记</button>
             </div>
             <div v-for="h in props.highlightCardsOf(seg.lid)" :key="h.mem_id" class="hl-card">
               <span class="hl-ex">{{ props.hlExcerpt(h) }}</span>
               <span class="hl-actions">
-                <button class="note-btn" title="改范围(移除后重选)" @click="emit('modify-highlight', h)">Edit</button>
-                <button class="note-btn del" title="删除高亮" @click="emit('delete-highlight', h)">Delete</button>
+                <button class="note-btn" title="改范围(移除后重选)" @click="emit('modify-highlight', h)">编辑</button>
+                <button class="note-btn del" title="删除高亮" @click="emit('delete-highlight', h)">删除</button>
               </span>
             </div>
             <details
@@ -383,7 +387,7 @@ watch(
               :open="!isLongNote(note)"
             >
               <summary class="note-summary">
-                <span class="note-kind">Note</span>
+                <span class="note-kind">笔记</span>
                 <button
                   v-if="note.anchor.lid"
                   class="note-source"
@@ -391,8 +395,8 @@ watch(
                 >
                   {{ noteSourceLabel(note) }}
                 </button>
-                <span v-else class="note-source">No source</span>
-                <span v-if="isLongNote(note)" class="note-fold">Toggle</span>
+                <span v-else class="note-source">无来源</span>
+                <span v-if="isLongNote(note)" class="note-fold">展开/收起</span>
                 <div
                   v-if="isLongNote(note)"
                   class="note-preview note-summary-preview md"
@@ -401,8 +405,8 @@ watch(
               </summary>
               <div class="note-md md" v-html="props.renderMarkdown(note.content)"></div>
               <div class="note-actions">
-                <button class="note-btn" title="编辑" @click="emit('edit-note', note)">Edit</button>
-                <button class="note-btn del" title="删除" @click="emit('delete-note', note)">Delete</button>
+                <button class="note-btn" title="编辑" @click="emit('edit-note', note)">编辑</button>
+                <button class="note-btn del" title="删除" @click="emit('delete-note', note)">删除</button>
               </div>
             </details>
           </template>
@@ -422,8 +426,8 @@ watch(
             v-html="props.renderSeg(item.segment)"
           ></p>
           <div v-if="item.segment.lid === props.selectedLid" class="block-actions">
-            <button @click="emit('highlight-block', item.segment.lid)">Highlight block</button>
-            <button @click="emit('note-block', item.segment.lid)">Note</button>
+            <button @click="emit('highlight-block', item.segment.lid)">高亮整段</button>
+            <button @click="emit('note-block', item.segment.lid)">记笔记</button>
           </div>
         </template>
 
@@ -440,33 +444,33 @@ watch(
         >
           <div class="asset-head">
             <span>{{ item.segment.kind }}</span>
-            <button class="asset-jump" title="选中该 LID" @click.stop="emit('select', item.segment.lid)">Locate</button>
+            <button class="asset-jump" title="选中该 LID" @click.stop="emit('select', item.segment.lid)">定位</button>
           </div>
           <pre v-if="item.segment.kind === 'code'" class="asset-source asset-code"><code v-html="props.renderSeg(item.segment)"></code></pre>
           <pre v-else-if="item.segment.kind === 'table'" class="asset-source asset-table" v-html="props.renderSeg(item.segment)"></pre>
           <figure v-else-if="item.segment.kind === 'image'" class="asset-image-figure">
             <img
-              v-if="props.imageAsset(item.segment.lid)?.url_path"
+              v-if="imageRenderSrc(props.imageAsset(item.segment.lid))"
               class="image-rendered"
-              :src="props.imageAsset(item.segment.lid)?.url_path || ''"
-              :alt="props.imageAsset(item.segment.lid)?.alt || props.imageMeta(item.segment.text)?.alt || 'Image'"
+              :src="imageRenderSrc(props.imageAsset(item.segment.lid)) || ''"
+              :alt="props.imageAsset(item.segment.lid)?.alt || props.imageMeta(item.segment.text)?.alt || '图片'"
               loading="lazy"
               decoding="async"
             />
             <div v-else class="image-preview">
-              <span>image</span>
-              <strong>{{ props.imageMeta(item.segment.text)?.alt || 'Untitled image' }}</strong>
-              <code>{{ props.imageMeta(item.segment.text)?.src || 'src unavailable' }}</code>
+              <span>图片</span>
+              <strong>{{ props.imageMeta(item.segment.text)?.alt || '未命名图片' }}</strong>
+              <code>{{ props.imageMeta(item.segment.text)?.src || '来源不可用' }}</code>
             </div>
             <p v-if="props.imageAsset(item.segment.lid)?.warning" class="image-warning">
               {{ props.imageAsset(item.segment.lid)?.warning }}
             </p>
-            <figcaption>Source</figcaption>
+            <figcaption>原文</figcaption>
             <pre class="asset-source" v-html="props.renderSeg(item.segment)"></pre>
           </figure>
           <div v-if="item.segment.lid === props.selectedLid" class="block-actions asset-actions">
-            <button @click.stop="emit('highlight-block', item.segment.lid)">Highlight block</button>
-            <button @click.stop="emit('note-block', item.segment.lid)">Note</button>
+            <button @click.stop="emit('highlight-block', item.segment.lid)">高亮整段</button>
+            <button @click.stop="emit('note-block', item.segment.lid)">记笔记</button>
           </div>
         </section>
 
@@ -474,8 +478,8 @@ watch(
           <div v-for="h in props.highlightCardsOf(item.segment.lid)" :key="h.mem_id" class="hl-card">
             <span class="hl-ex">{{ props.hlExcerpt(h) }}</span>
             <span class="hl-actions">
-              <button class="note-btn" title="改范围(移除后重选)" @click="emit('modify-highlight', h)">Edit</button>
-              <button class="note-btn del" title="删除高亮" @click="emit('delete-highlight', h)">Delete</button>
+              <button class="note-btn" title="改范围(移除后重选)" @click="emit('modify-highlight', h)">编辑</button>
+              <button class="note-btn del" title="删除高亮" @click="emit('delete-highlight', h)">删除</button>
             </span>
           </div>
           <details
@@ -485,7 +489,7 @@ watch(
             :open="!isLongNote(note)"
           >
             <summary class="note-summary">
-              <span class="note-kind">Note</span>
+              <span class="note-kind">笔记</span>
               <button
                 v-if="note.anchor.lid"
                 class="note-source"
@@ -493,8 +497,8 @@ watch(
               >
                 {{ noteSourceLabel(note) }}
               </button>
-              <span v-else class="note-source">No source</span>
-              <span v-if="isLongNote(note)" class="note-fold">Toggle</span>
+              <span v-else class="note-source">无来源</span>
+              <span v-if="isLongNote(note)" class="note-fold">展开/收起</span>
               <div
                 v-if="isLongNote(note)"
                 class="note-preview note-summary-preview md"
@@ -503,13 +507,13 @@ watch(
             </summary>
             <div class="note-md md" v-html="props.renderMarkdown(note.content)"></div>
             <div class="note-actions">
-              <button class="note-btn" title="编辑" @click="emit('edit-note', note)">Edit</button>
-              <button class="note-btn del" title="删除" @click="emit('delete-note', note)">Delete</button>
+              <button class="note-btn" title="编辑" @click="emit('edit-note', note)">编辑</button>
+              <button class="note-btn del" title="删除" @click="emit('delete-note', note)">删除</button>
             </div>
           </details>
         </template>
       </div>
-      <p v-if="props.segments.length === 0" class="empty">No content. Confirm the server loaded a book and is listening.</p>
+      <p v-if="props.segments.length === 0" class="empty">暂无正文。请确认服务端已加载书并正在监听。</p>
     </article>
 
   </main>

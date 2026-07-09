@@ -18,14 +18,14 @@ const emit = defineEmits<{
   <header class="topbar">
     <div class="topbar-brand">
       <span class="brand-mark">understand-book</span>
-      <span class="breadcrumb">{{ chapterTitle || "Reading workspace" }}</span>
+      <span class="breadcrumb">{{ chapterTitle || "阅读工作区" }}</span>
     </div>
     <div class="topbar-actions">
       <span class="progress">{{ progressPct }}%</span>
-      <button class="ghost-pill" :class="{ active: leftRailOpen }" @click="emit('toggle-left-rail')">Outline</button>
-      <button class="ghost-pill" @click="emit('new-chat')">New chat</button>
-      <button class="ghost-pill" @click="emit('open-book')">Open book</button>
-      <button class="ghost-pill" :class="{ active: debugOpen }" @click="emit('toggle-debug')">Debug</button>
+      <button class="ghost-pill" :class="{ active: leftRailOpen }" @click="emit('toggle-left-rail')">目录</button>
+      <button class="ghost-pill" @click="emit('new-chat')">新对话</button>
+      <button class="ghost-pill" @click="emit('open-book')">打开书</button>
+      <button class="ghost-pill" :class="{ active: debugOpen }" @click="emit('toggle-debug')">调试</button>
     </div>
   </header>
 </template>

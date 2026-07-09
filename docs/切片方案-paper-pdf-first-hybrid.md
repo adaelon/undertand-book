@@ -291,17 +291,84 @@ interface ExecutorPermissionRequest {
 - **Do not**: block PH1-PH8 on natural-language sidecar UX.
 - **Done**: Q68 is implemented as its own Build Workbench extension slice.
 
-### PH10 - Build Workbench frontend prebuild page
+### PH10 - Build Workbench snapshot page (minimum frontend shell)
 
-- **Do**: add a dedicated frontend route/page for pre-reader build state; consume readiness, job, event, decision, permission, and sidecar plan artifacts; show the stage DAG with source reconciliation, hybrid foundation, Pass1, and paper projection status; keep `BuildDecisionRequest` and `ExecutorPermissionRequest` as separate UI flows; let users confirm/edit PH9 `sidecar_plan.json` form drafts before custom sidecar generation.
-- **Do not**: run LLM/executors from frontend code, mark stages done from job state alone, mix Workbench state into normal `/reader/*`, or hide stale/needs_review targets behind the reader.
-- **Done**: missing, stale, needs_review, and incomplete books open Workbench; trusted books open the reader; source review and sidecar plan confirmation are visible before artifact trust; tests cover routing plus decision/permission separation.
+- **Do**: add a dedicated frontend route/page for pre-reader build state; consume existing readiness, job, event, decision, permission, and sidecar plan artifacts; show the stage DAG with source reconciliation, hybrid foundation, Pass1, and paper projection status; keep `BuildDecisionRequest` and `ExecutorPermissionRequest` as separate display flows; let users confirm/edit PH9 `sidecar_plan.json` form drafts before custom sidecar generation.
+- **Do not**: accept uploads, create/resume build jobs, start Codex/opencode/Claude/manual executors, approve executor permissions, mark stages done from job state alone, mix Workbench state into normal `/reader/*`, or hide stale/needs_review targets behind the reader.
+- **Done**: missing, stale, needs_review, and incomplete books open a snapshot Workbench shell; trusted books open the reader; source review and sidecar plan artifacts are visible before artifact trust. This is not the complete Build Workbench controller.
 
 ### PH11 - PDF.js body reader surface
 
 - **Do**: replace the minimal/native PDF surface with a controlled official `pdfjs-dist` body reader; render canvas pages, text-layer geometry for selection, all page shells with lazy page rendering, LID overlays from `pdf_source_map`, selection to `/reader/pdf_selection.resolve`, semantic range projection to `/reader/pdf_ranges.project`, and source preview fallback for unmapped LIDs.
 - **Do not**: add OCR for scanned PDFs, PDF annotation write-back, page/bbox citation anchors, Zotero code/assets, permanent Markdown/PDF split reader, thumbnails, or printing unless scoped later.
 - **Done**: PDF text body is rendered by project-controlled PDF.js pages, LID jump/selection/range projection work in UI, and citations/highlights still persist only LID/range.
+
+## 3.1 Complete Build Workbench Completion Plan
+
+Target contract:
+
+```text
+Build Workbench = pre-reader build controller
+
+paper.md + paper.pdf uploaded or selected by user
+  -> untrusted draft workspace + input manifest + fingerprint
+  -> create/reuse build job
+  -> user selects executor (Codex first, manual fallback)
+  -> server-side build controller starts executor
+  -> Workbench shows live/polled events, active run, token/cost, decisions, permissions
+  -> user resolves source reconciliation and permission gates
+  -> deterministic stage artifacts pass schema/hash/readiness gates
+  -> trusted source.txt/base.json/source_manifest/maps exist
+  -> route changes from workbench to reader
+```
+
+Hard boundary:
+- Frontend never runs Codex or writes trusted artifacts directly.
+- Job state is orchestration truth only; `.build/<stage>` artifacts plus deterministic gates remain reader trust truth.
+- Uploaded inputs are untrusted until a stage writes accepted artifacts.
+- Workbench is paper-profile build mode only; existing technical-learning books with trusted `base.json/source.txt` bypass paper gates and open reader.
+
+### PH12 - Workbench import and draft workspace
+
+- **Do**: add UI and server endpoints to upload or select `paper.md` and `paper.pdf`, create/open a draft paper build workspace, write an untrusted input manifest with file paths, sha256 hashes, profile id, display title, and config hash; return a `build_workbench_snapshot.v1` with current input fingerprint.
+- **Do not**: write trusted `source.txt`, `base.json`, `source_manifest.json`, PDF maps, or paper sidecars in this slice; do not mount uploaded PDF as reader truth.
+- **Done**: a Chinese user can start from an empty Workbench, provide PDF+MD, reopen the draft workspace, and see input readiness without entering the reader.
+
+### PH13 - Build controller API and durable job lifecycle
+
+- **Do**: add server-side build controller endpoints for create/reuse job, start/resume job, append job event, resolve `BuildDecisionRequest`, resolve `ExecutorPermissionRequest`, and refresh snapshot; persist `.build/jobs/<job_id>.json` atomically; reuse same-fingerprint incomplete jobs and mark stale jobs on input changes.
+- **Do not**: infer stage success from job status, invent completed artifacts, or allow normal `/reader/*` state to mutate build jobs.
+- **Done**: starting a build from Workbench creates/reuses a durable job; decisions and permissions round-trip through API and survive server restart.
+
+### PH14 - Codex executor adapter skeleton
+
+- **Do**: add a server-side Codex executor adapter behind the build controller; launch it with a scoped workdir, stage-specific prompt, explicit input/output contract, and no frontend shell execution; capture stdout/stderr, pid/heartbeat, command summary, token/cost telemetry when available, and map approval/escalation needs into `ExecutorPermissionRequest`.
+- **Do not**: grant permissions automatically, pass arbitrary browser-supplied commands to shell, or let Codex write trusted artifacts outside the declared stage output paths.
+- **Done**: a fake adapter is deterministically tested, and a real Codex-backed smoke path can create `executor_started`, permission, and completion/failure events without browser-side execution.
+
+### PH15 - Interactive Workbench action UI
+
+- **Do**: replace the static snapshot-only surface with controls for import/upload, executor choice, start/resume, refresh/polling, pending build decisions, pending executor permissions, active run telemetry, event log, and clear failure recovery; all visible text remains Chinese.
+- **Do not**: hide unresolved/stale states behind a reader route, combine build decisions with executor permissions, or expose raw enum-only UI to Chinese users.
+- **Done**: a user can drive a build from the Workbench UI until the next required decision/permission or completed trusted reader handoff.
+
+### PH16 - Source reconciliation review surface
+
+- **Do**: add a dedicated Workbench review panel for unresolved source reconciliation blocks; show Markdown/PDF evidence, candidate repaired text, unresolved reason, and decision options; write review decisions as build decision artifacts and rerun source reconciliation gates.
+- **Do not**: accept arbitrary LLM content edits, use PDF page/bbox as citation truth, or resolve content-bearing conflicts without deterministic equivalence/realignment.
+- **Done**: `needs_review` source reconciliation can be resolved from Workbench and either re-enter the trusted source pipeline or remain blocked with explicit reasons.
+
+### PH17 - Stage runner wiring and reader handoff
+
+- **Do**: wire build controller stages to existing PH1-PH9 scripts/runtime paths: source reconciliation, hybrid foundation close, PDF maps, paper projections, sidecar planning, and final readiness recomputation; after each stage, re-read artifacts and update snapshot; when trusted `source.txt/base.json/source_manifest/maps` pass gates, route to reader.
+- **Do not**: make stage runners depend on frontend state, skip schema/hash gates, or let sidecar/projection failures redefine source truth.
+- **Done**: from uploaded PDF+MD, the Workbench can run through trusted reader entry with deterministic gates as the only handoff authority.
+
+### PH18 - Recovery, observability, and operational hardening
+
+- **Do**: add stale-input warnings, orphaned active-run recovery, resumable polling after refresh, job failure summaries, permission audit trail, bounded job/event retention, and tests for interrupted/resumed builds.
+- **Do not**: add multi-user queueing, distributed workers, background daemon assumptions, or cloud storage in this v1.
+- **Done**: interrupted builds can be reopened safely, stale inputs cannot silently reuse old artifacts, and Workbench failures point to actionable stage/job/event details.
 
 ## 4. Hard Gates and Diagnostics
 
@@ -431,22 +498,22 @@ Status values:
 | G46 safe auto-repair and LLM format review | covered | PH3 and PH4 |
 | G47 content equivalence gate | covered | PH4 and hard gates |
 | G48 unresolved reconciliation blocks trusted build | covered | PH3 done criteria |
-| G49 dedicated source reconciliation review page | covered | PH10 Build Workbench frontend page; PH4/PH6 are artifact and shell foundations |
-| G50 source review outside normal reader | covered | PH10 Workbench route keeps source review outside normal reader |
+| G49 dedicated source reconciliation review page | covered | PH16 Workbench source reconciliation review surface; PH10 is snapshot shell only |
+| G50 source review outside normal reader | covered | PH12-PH17 Workbench build mode keeps source review outside normal reader |
 | G51 manual vs LLM review choice | covered | PH4 and `BuildDecisionRequest` |
 | G52 noninteractive CLI prompt proposal | superseded | replaced by Q53 Build Workbench user-choice surface |
-| G53 Codex/opencode executor feasibility | covered | PH6 executor adapters and telemetry |
-| G54 Workbench as build mode | covered | PH6 |
-| G55 readiness gate before reader | covered | end-to-end flow |
-| G56 explicit stage DAG | covered | Build Workbench stage DAG |
+| G53 Codex/opencode executor feasibility | covered | PH14 Codex executor adapter skeleton; opencode remains adapter-neutral follow-up |
+| G54 Workbench as build mode | covered | PH12-PH18 complete Workbench controller |
+| G55 readiness gate before reader | covered | PH17 reader handoff recomputes deterministic readiness |
+| G56 explicit stage DAG | covered | Build Workbench stage DAG plus PH15 interactive controls |
 | G57 `state.json` snapshot not truth | covered | locked decision 9 and PH6 prohibition |
 | G58 artifact root under book workspace | covered | `.understand-book/<book_id>/.build/<stage>` |
 | G59 jobs are orchestration logs | covered | locked decision 9 |
-| G60 job input fingerprint stale | covered | `BuildJobState.input_fingerprint`, PH6 |
-| G61 reuse incomplete same-input job | covered | PH6 same-input reuse rule |
-| G62 user decisions dual-recorded | covered | ADR-0063 rule 11 |
-| G63 run-control events include Codex choices | covered | `ExecutorPermissionRequest`, PH6 events |
-| G64 adapter-neutral permission schema | covered | `ExecutorPermissionRequest.native` |
+| G60 job input fingerprint stale | covered | `BuildJobState.input_fingerprint`, PH13 and PH18 stale-input handling |
+| G61 reuse incomplete same-input job | covered | PH13 durable job lifecycle |
+| G62 user decisions dual-recorded | covered | ADR-0063 rule 11 and PH13 decision resolve API |
+| G63 run-control events include Codex choices | covered | PH14 executor adapter and PH15 interactive run controls |
+| G64 adapter-neutral permission schema | covered | `ExecutorPermissionRequest.native`, PH13/PH14 permission loop |
 | G65 approval correction | covered | ADR-0063 rule 11, build-direction vs executor permission split |
 | G66 `BuildDecisionRequest` separate from permissions | covered | artifact contract |
 | G67 | covered | no Q67 exists in `grill.md`; ledger intentionally records the gap |

@@ -204,6 +204,159 @@ export interface PdfRangesProjectResponse {
     regions: PdfRegion[];
   }>;
 }
+export type BuildRoute = "reader" | "workbench";
+export type BuildReadinessStatus = "trusted_book" | "missing" | "incomplete" | "needs_review" | "stale_input";
+export type BuildStageStatus = "blocked" | "missing" | "done" | "needs_review" | "stale" | "incomplete";
+export type BuildJobStatus = "ready" | "running" | "needs_user" | "failed" | "done" | "stale_input";
+export type BuildStageId =
+  | "source_reconciliation"
+  | "hybrid_foundation"
+  | "pass1"
+  | "paper_metadata"
+  | "paper_lexicon"
+  | "profile_sidecar"
+  | "pass2"
+  | "book_structure"
+  | "paper_reading_guide";
+export type ExecutorId = "codex" | "opencode" | "claude" | "manual";
+export interface BuildStageReadiness {
+  stage: BuildStageId;
+  status: BuildStageStatus;
+  reason?: string;
+}
+export interface BuildWorkbenchReadiness {
+  route: BuildRoute;
+  status: BuildReadinessStatus;
+  reasons: string[];
+  stages: Record<BuildStageId, BuildStageReadiness>;
+}
+export interface BuildDecisionRequest {
+  decision_id: string;
+  job_id: string;
+  stage: BuildStageId;
+  kind:
+    | "source_reconciliation_mode"
+    | "hybrid_source_strategy"
+    | "alignment_repair_strategy"
+    | "executor_selection"
+    | "sidecar_plan";
+  prompt: string;
+  options: Array<{ id: string; label: string; description?: string }>;
+  status: "pending" | "answered";
+  answer?: string;
+  created_at: string;
+  resolved_at?: string;
+}
+export interface ExecutorPermissionRequest {
+  request_id: string;
+  run_id: string;
+  executor: ExecutorId;
+  category:
+    | "sandbox_escalation"
+    | "network"
+    | "filesystem"
+    | "mcp_tool"
+    | "skill_script"
+    | "shell_command"
+    | "destructive_action"
+    | "other";
+  action_summary: string;
+  scope_hint: "once" | "stage" | "job" | "profile";
+  native?: unknown;
+  status: "pending" | "granted" | "denied";
+  created_at: string;
+  resolved_at?: string;
+}
+export interface BuildJobEvent {
+  event_id: string;
+  job_id: string;
+  created_at: string;
+  type:
+    | "job_created"
+    | "job_reused"
+    | "job_marked_stale"
+    | "executor_started"
+    | "decision_requested"
+    | "decision_resolved"
+    | "permission_requested"
+    | "permission_resolved";
+  stage?: BuildStageId;
+  message?: string;
+  payload?: unknown;
+}
+export interface ActiveExecutorRun {
+  run_id: string;
+  stage: BuildStageId;
+  unit_id?: string;
+  executor: ExecutorId;
+  telemetry?: {
+    pid?: number;
+    command?: string;
+    started_at?: string;
+    last_heartbeat_at?: string;
+    tokens_used?: number;
+    cost_usd?: number;
+  };
+}
+export interface BuildJobState {
+  version: "build_job_state.v1";
+  job_id: string;
+  book_id: string;
+  input_fingerprint: {
+    paper_md_sha256: string;
+    paper_pdf_sha256: string;
+    config_hash: string;
+  };
+  status: BuildJobStatus;
+  active_run?: ActiveExecutorRun;
+  events: BuildJobEvent[];
+  decision_requests: BuildDecisionRequest[];
+  permission_requests: ExecutorPermissionRequest[];
+  created_at: string;
+  updated_at: string;
+}
+export interface SidecarFormDraft {
+  version: "sidecar_form_draft.v1";
+  fields: Array<{
+    id: string;
+    label: string;
+    value: unknown;
+    editable: boolean;
+  }>;
+  default_options?: Array<{
+    target_view: string;
+    label: string;
+    description: string;
+    output_contract?: unknown;
+    validation_rules?: string[];
+  }>;
+}
+export interface SidecarPlan {
+  version: "sidecar_plan.v1";
+  book_id?: string;
+  plan_id?: string;
+  status: "draft" | "confirmed" | "rejected";
+  stage: "custom_sidecar";
+  confirmation_required?: true;
+  selected_option?: string;
+  sidecar_generation_allowed: boolean;
+  intent?: unknown;
+  form_draft?: SidecarFormDraft;
+  validation_rules?: string[];
+  created_at?: string;
+  confirmed_at?: string;
+}
+export interface BuildWorkbenchSnapshot {
+  version: "build_workbench_snapshot.v1";
+  book_id: string;
+  readiness: BuildWorkbenchReadiness;
+  jobs: BuildJobState[];
+  sidecar_plan: {
+    plan: SidecarPlan | null;
+    form_draft: SidecarFormDraft | null;
+    build_spec: unknown | null;
+  };
+}
 export interface FormulaParameter {
   symbol: string;
   label: string | null;
@@ -318,6 +471,7 @@ export const api = {
   manifest: () => http<Manifest>("GET", "/book/manifest"),
   bookLibrary: () => http<BookLibraryResponse>("GET", "/book/library"),
   assetManifest: () => http<AssetManifest>("GET", "/book/asset_manifest"),
+  buildWorkbench: () => http<BuildWorkbenchSnapshot>("GET", "/book/build_workbench"),
   sourceManifest: () => http<SourceManifestV2>("GET", "/book/source_manifest"),
   pdfSourceMap: () => http<PdfSourceMap>("GET", "/book/pdf_source_map"),
   pdfOriginalUrl: () => `${BASE}/book/pdf/original`,
@@ -337,6 +491,8 @@ export const api = {
   // ── book.query(LLM 命令,POST)──
   query: (q: string, anchor_lid?: string) =>
     http<QueryResponse>("POST", "/book/query", { q, anchor_lid }),
+  sidecarPlanConfirm: (fields: Record<string, unknown>) =>
+    http<BuildWorkbenchSnapshot>("POST", "/build_workbench/sidecar_plan.confirm", { fields }),
 
   // ── reader.*(可变 POST,返 effect)──
   goto: (lid: string) => http<ViewportEffect>("POST", "/reader/goto", { lid }),

@@ -2,6 +2,7 @@
 // 规则:`#{1,6} ` 行 = heading(span 含 marker,保证无未分类字节);
 // fenced code / table / image / formula = 带 assetKind 的 leaf;其余非空行聚成普通 leaf 段。
 // span 用 JS 串下标(UTF-16 code unit),与 partition 检查同源、自洽。
+import { parse } from "node-html-parser";
 import type { AssetKind, SourceBlock, SourceImageRef } from "./segment";
 
 interface Line {
@@ -39,6 +40,17 @@ function lineLooksLikeTable(line: string): boolean {
 function parseImageLine(line: string): SourceImageRef | null {
   const m = /^!\[([^\]]*)]\(([^)]+)\)$/.exec(line.trim());
   return m ? { alt: m[1], src: m[2].trim() } : null;
+}
+
+function parseHtmlImageLine(line: string): SourceImageRef | null {
+  if (!/<img[\s>]/i.test(line)) return null;
+  const root = parse(line);
+  const img = root.querySelector("img");
+  const src = img?.getAttribute("src")?.trim();
+  if (!img || !src) return null;
+  const nonImageText = root.text.trim();
+  if (nonImageText) return null;
+  return { alt: img.getAttribute("alt") ?? "", src };
 }
 
 function standaloneInlineFormula(line: string): boolean {
@@ -184,7 +196,7 @@ export function markdownToBlocks(src: string): SourceBlock[] {
       continue;
     }
 
-    const image = parseImageLine(lineContent);
+    const image = parseImageLine(lineContent) ?? parseHtmlImageLine(lineContent);
     if (image) {
       flush();
       pushAsset("image", cs.start, cs.end, image);

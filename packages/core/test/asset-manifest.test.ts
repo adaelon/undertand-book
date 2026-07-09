@@ -78,6 +78,37 @@ describe("asset manifest image collection", () => {
     expect(existsSync(path.join(outDir, "assets"))).toBe(false);
   });
 
+  it("records remote div-wrapped raw HTML images as external Markdown assets", () => {
+    const dir = tempDir();
+    const mdPath = path.join(dir, "paper.md");
+    const outDir = path.join(dir, "out");
+    const remote = "https://example.com/markdown_2/imgs/chart.jpg?authorization=bce-auth-v1%2Ftoken";
+    writeFileSync(mdPath, `<div style="text-align: center;"><img src="${remote}" alt="Image" width="42%" /></div>\n`, "utf8");
+    const source = readFileSync(mdPath, "utf8");
+    const blocks = markdownToBlocks(source);
+    const lidNodes = segment(blocks);
+
+    const manifest = buildAssetManifest({
+      book_id: "paper-a",
+      book_path: mdPath,
+      output_dir: outDir,
+      source_blocks: blocks,
+      lid_nodes: lidNodes,
+    });
+
+    expect(AssetManifestZ.parse(manifest)).toEqual(manifest);
+    expect(manifest.images[0]).toMatchObject({
+      alt: "Image",
+      original_src: remote,
+      source: "markdown",
+      status: "external",
+      stored_path: null,
+      url_path: null,
+      warning: "external image URL is not copied into the book bundle",
+    });
+    expect(existsSync(path.join(outDir, "assets"))).toBe(false);
+  });
+
   it("extracts EPUB image files by their XHTML-relative src", () => {
     const dir = tempDir();
     const epubPath = path.join(dir, "book.epub");

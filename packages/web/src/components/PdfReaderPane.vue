@@ -1,6 +1,10 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from "vue";
-import type { PdfRegion, PdfSourceMap, PdfSourceMapEntry, SourceManifestV2 } from "../api";
+import { computed, nextTick, onBeforeUnmount, ref, shallowRef, watch } from "vue";
+import * as pdfjsLib from "pdfjs-dist";
+import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.mjs?url";
+import { api, type PdfRegion, type PdfSourceMap, type PdfSourceMapEntry, type SourceManifestV2 } from "../api";
+
+pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
 const props = defineProps<{
   sourceManifest: SourceManifestV2 | null;
@@ -16,7 +20,27 @@ const emit = defineEmits<{
   (e: "select", lid: string): void;
 }>();
 
+type PdfDocument = Awaited<ReturnType<typeof pdfjsLib.getDocument>["promise"]>;
+type PdfPage = Awaited<ReturnType<PdfDocument["getPage"]>>;
+
+interface PageRenderState {
+  rendered: boolean;
+  rendering: boolean;
+  error: string | null;
+}
+
 const pageList = ref<HTMLElement | null>(null);
+const pdfDoc = shallowRef<PdfDocument | null>(null);
+const pdfLoading = ref(false);
+const pdfError = ref<string | null>(null);
+const projectedRegions = ref<Array<{ lid: string; region: PdfRegion }>>([]);
+const pageEls = new Map<number, HTMLElement>();
+const canvasEls = new Map<number, HTMLCanvasElement>();
+const textLayerEls = new Map<number, HTMLElement>();
+const renderStates = ref<Record<number, PageRenderState>>({});
+let loadingTask: ReturnType<typeof pdfjsLib.getDocument> | null = null;
+let observer: IntersectionObserver | null = null;
+let renderToken = 0;
 
 const pageCount = computed(() => props.sourceMap?.pages.length ?? 0);
 const entriesByPage = computed(() => {
@@ -30,17 +54,38 @@ const entriesByPage = computed(() => {
   }
   return map;
 });
+const projectedByPage = computed(() => {
+  const map = new Map<number, Array<{ lid: string; region: PdfRegion }>>();
+  for (const item of projectedRegions.value) {
+    const list = map.get(item.region.pageIndex);
+    if (list) list.push(item);
+    else map.set(item.region.pageIndex, [item]);
+  }
+  return map;
+});
 const entryByLid = computed(() => new Map((props.sourceMap?.entries ?? []).map((entry) => [entry.lid, entry])));
 const activeEntry = computed(() => {
   const lid = props.activeLid ?? props.selectedLid;
   return lid ? entryByLid.value.get(lid) ?? null : null;
 });
 const activePageIndex = computed(() => activeEntry.value?.primary_region?.pageIndex ?? activeEntry.value?.regions[0]?.pageIndex ?? 0);
-const pdfFrameSrc = computed(() => `${props.pdfUrl}#page=${activePageIndex.value + 1}`);
 const mapCapability = computed(() => props.sourceManifest?.capabilities.project_lid_to_pdf.status ?? "unavailable");
+const capabilityStatusLabels: Record<string, string> = {
+  available: "映射可用",
+  degraded: "映射降级可用",
+  missing: "缺少映射",
+  unavailable: "映射不可用",
+  external: "外部资源",
+  unsupported: "暂不支持",
+};
+const mapCapabilityLabel = computed(() => capabilityStatusLabels[mapCapability.value] ?? mapCapability.value);
 
 function pageRegions(pageIndex: number): Array<{ entry: PdfSourceMapEntry; region: PdfRegion }> {
   return entriesByPage.value.get(pageIndex) ?? [];
+}
+
+function projectedPageRegions(pageIndex: number): Array<{ lid: string; region: PdfRegion }> {
+  return projectedByPage.value.get(pageIndex) ?? [];
 }
 
 function pageShellStyle(page: PdfSourceMap["pages"][number]): Record<string, string> {
@@ -59,6 +104,40 @@ function regionStyle(page: PdfSourceMap["pages"][number], region: PdfRegion): Re
   };
 }
 
+function pointToPdf(pageIndex: number, event: MouseEvent): { x: number; y: number } | null {
+  const page = props.sourceMap?.pages.find((p) => p.pageIndex === pageIndex);
+  const pageEl = pageEls.get(pageIndex);
+  if (!page || !pageEl) return null;
+  const rect = pageEl.getBoundingClientRect();
+  const scale = rect.width / page.width;
+  return {
+    x: (event.clientX - rect.left) / scale,
+    y: page.height - (event.clientY - rect.top) / scale,
+  };
+}
+
+function regionContains(region: PdfRegion, point: { x: number; y: number }): boolean {
+  const [x1, y1, x2, y2] = region.bbox;
+  return point.x >= x1 && point.x <= x2 && point.y >= y1 && point.y <= y2;
+}
+
+function hitEntry(pageIndex: number, event: MouseEvent): PdfSourceMapEntry | null {
+  const point = pointToPdf(pageIndex, event);
+  if (!point) return null;
+  const hit = [...pageRegions(pageIndex)].reverse().find(({ region }) => regionContains(region, point));
+  return hit?.entry ?? null;
+}
+
+function onPagePointer(pageIndex: number, event: MouseEvent) {
+  const entry = hitEntry(pageIndex, event);
+  if (entry) emit("select", entry.lid);
+}
+
+function onPageClick(pageIndex: number, event: MouseEvent) {
+  const entry = hitEntry(pageIndex, event);
+  if (entry) emit("goto", entry.lid);
+}
+
 function regionClass(entry: PdfSourceMapEntry): Record<string, boolean> {
   return {
     active: entry.lid === props.activeLid,
@@ -67,59 +146,324 @@ function regionClass(entry: PdfSourceMapEntry): Record<string, boolean> {
   };
 }
 
+function setPageRef(pageIndex: number, el: unknown) {
+  if (el instanceof HTMLElement) pageEls.set(pageIndex, el);
+  else pageEls.delete(pageIndex);
+}
+
+function setCanvasRef(pageIndex: number, el: unknown) {
+  if (el instanceof HTMLCanvasElement) canvasEls.set(pageIndex, el);
+  else canvasEls.delete(pageIndex);
+}
+
+function setTextLayerRef(pageIndex: number, el: unknown) {
+  if (el instanceof HTMLElement) textLayerEls.set(pageIndex, el);
+  else textLayerEls.delete(pageIndex);
+}
+
+function setRenderState(pageIndex: number, patch: Partial<PageRenderState>) {
+  const previous = renderStates.value[pageIndex] ?? {
+    rendered: false,
+    rendering: false,
+    error: null,
+  };
+  renderStates.value = {
+    ...renderStates.value,
+    [pageIndex]: {
+      ...previous,
+      ...patch,
+    },
+  };
+}
+
+function resetRenderedPages() {
+  renderStates.value = {};
+  for (const canvas of canvasEls.values()) {
+    const ctx = canvas.getContext("2d");
+    ctx?.clearRect(0, 0, canvas.width, canvas.height);
+  }
+  for (const layer of textLayerEls.values()) layer.replaceChildren();
+}
+
+async function loadPdfDocument() {
+  renderToken += 1;
+  const token = renderToken;
+  pdfDoc.value = null;
+  pdfError.value = null;
+  pdfLoading.value = true;
+  resetRenderedPages();
+  if (loadingTask) {
+    void loadingTask.destroy();
+    loadingTask = null;
+  }
+  try {
+    loadingTask = pdfjsLib.getDocument({ url: props.pdfUrl });
+    const doc = await loadingTask.promise;
+    if (token !== renderToken) {
+      await (doc as unknown as { destroy?: () => Promise<void> }).destroy?.();
+      return;
+    }
+    pdfDoc.value = doc;
+    await nextTick();
+    observePages();
+    await renderVisiblePages();
+  } catch (e) {
+    if (token === renderToken) pdfError.value = e instanceof Error ? e.message : String(e);
+  } finally {
+    if (token === renderToken) pdfLoading.value = false;
+  }
+}
+
+function pageScale(pageIndex: number): number {
+  const page = props.sourceMap?.pages.find((p) => p.pageIndex === pageIndex);
+  const el = pageEls.get(pageIndex);
+  if (!page || !el) return 1;
+  return el.clientWidth / page.width;
+}
+
+async function renderPage(pageInfo: PdfSourceMap["pages"][number], token: number) {
+  if (!pdfDoc.value) return;
+  const state = renderStates.value[pageInfo.pageIndex];
+  if (state?.rendered || state?.rendering) return;
+  const canvas = canvasEls.get(pageInfo.pageIndex);
+  const textLayer = textLayerEls.get(pageInfo.pageIndex);
+  if (!canvas || !textLayer) return;
+  setRenderState(pageInfo.pageIndex, { rendering: true, error: null });
+  try {
+    const page: PdfPage = await pdfDoc.value.getPage(pageInfo.pageIndex + 1);
+    if (token !== renderToken) return;
+    const scale = pageScale(pageInfo.pageIndex);
+    const viewport = page.getViewport({ scale });
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = Math.max(1, Math.floor(viewport.width * dpr));
+    canvas.height = Math.max(1, Math.floor(viewport.height * dpr));
+    canvas.style.width = `${viewport.width}px`;
+    canvas.style.height = `${viewport.height}px`;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) throw new Error("Canvas 2D context unavailable");
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    await page.render({ canvas, canvasContext: ctx, viewport }).promise;
+    if (token !== renderToken) return;
+    await renderTextLayer(page, viewport, textLayer);
+    setRenderState(pageInfo.pageIndex, { rendered: true, rendering: false, error: null });
+  } catch (e) {
+    setRenderState(pageInfo.pageIndex, {
+      rendering: false,
+      error: e instanceof Error ? e.message : String(e),
+    });
+  }
+}
+
+async function renderTextLayer(page: PdfPage, viewport: ReturnType<PdfPage["getViewport"]>, layer: HTMLElement) {
+  const content = await page.getTextContent();
+  layer.replaceChildren();
+  layer.style.width = `${viewport.width}px`;
+  layer.style.height = `${viewport.height}px`;
+  for (const item of content.items) {
+    if (!("str" in item) || !item.str) continue;
+    const transform = pdfjsLib.Util.transform(viewport.transform, item.transform);
+    const height = Math.hypot(transform[2], transform[3]);
+    const span = document.createElement("span");
+    span.textContent = item.str;
+    span.style.left = `${transform[4]}px`;
+    span.style.top = `${transform[5] - height}px`;
+    span.style.fontSize = `${height}px`;
+    span.style.transform = `scaleX(${item.width ? Math.max(0.2, (item.width * viewport.scale) / Math.max(1, item.str.length * height * 0.55)) : 1})`;
+    layer.appendChild(span);
+  }
+}
+
+function observePages() {
+  observer?.disconnect();
+  observer = new IntersectionObserver(
+    (entries) => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting) continue;
+        const pageIndex = Number((entry.target as HTMLElement).dataset.pageIndex);
+        const page = props.sourceMap?.pages.find((p) => p.pageIndex === pageIndex);
+        if (page) void renderPage(page, renderToken);
+      }
+    },
+    { root: pageList.value, rootMargin: "700px 0px" },
+  );
+  for (const el of pageEls.values()) observer.observe(el);
+}
+
+async function renderVisiblePages() {
+  const pages = props.sourceMap?.pages ?? [];
+  const visible = pages.filter((page) => {
+    const el = pageEls.get(page.pageIndex);
+    if (!el) return false;
+    const rect = el.getBoundingClientRect();
+    const root = pageList.value?.getBoundingClientRect();
+    if (!root) return false;
+    return rect.bottom >= root.top - 700 && rect.top <= root.bottom + 700;
+  });
+  for (const page of visible.length ? visible : pages.slice(0, 2)) {
+    await renderPage(page, renderToken);
+  }
+}
+
 async function scrollActiveIntoView() {
   await nextTick();
   const pageIndex = activePageIndex.value;
   const target = pageList.value?.querySelector<HTMLElement>(`[data-page-index="${pageIndex}"]`);
   target?.scrollIntoView({ block: "center" });
+  const page = props.sourceMap?.pages.find((p) => p.pageIndex === pageIndex);
+  if (page) await renderPage(page, renderToken);
 }
+
+function rectToPdfRegion(rect: DOMRect, pageIndex: number): PdfRegion | null {
+  const page = props.sourceMap?.pages.find((p) => p.pageIndex === pageIndex);
+  const pageEl = pageEls.get(pageIndex);
+  if (!page || !pageEl) return null;
+  const pageRect = pageEl.getBoundingClientRect();
+  const left = Math.max(rect.left, pageRect.left);
+  const right = Math.min(rect.right, pageRect.right);
+  const top = Math.max(rect.top, pageRect.top);
+  const bottom = Math.min(rect.bottom, pageRect.bottom);
+  if (right <= left || bottom <= top) return null;
+  const scale = pageRect.width / page.width;
+  const x1 = (left - pageRect.left) / scale;
+  const x2 = (right - pageRect.left) / scale;
+  const y1 = page.height - (bottom - pageRect.top) / scale;
+  const y2 = page.height - (top - pageRect.top) / scale;
+  return { region_id: `selection:${pageIndex}:${x1}:${y1}`, pageIndex, bbox: [x1, y1, x2, y2] };
+}
+
+function rectsOverlap(left: DOMRect, right: DOMRect): boolean {
+  return left.right > right.left && left.left < right.right && left.bottom > right.top && left.top < right.bottom;
+}
+
+async function resolvePdfSelection() {
+  const selection = window.getSelection();
+  if (!selection || selection.isCollapsed) return;
+  const rects: Array<{ pageIndex?: number; bbox: [number, number, number, number] }> = [];
+  const anchorNode = selection.anchorNode;
+  const focusNode = selection.focusNode;
+  for (let i = 0; i < selection.rangeCount; i += 1) {
+    for (const rect of selection.getRangeAt(i).getClientRects()) {
+      for (const [pageIndex, pageEl] of pageEls) {
+        const selectionTouchesPage =
+          (anchorNode ? pageEl.contains(anchorNode) : false)
+          || (focusNode ? pageEl.contains(focusNode) : false)
+          || rectsOverlap(rect, pageEl.getBoundingClientRect());
+        if (!selectionTouchesPage) continue;
+        const region = rectToPdfRegion(rect, pageIndex);
+        if (region) rects.push({ pageIndex, bbox: region.bbox });
+      }
+    }
+  }
+  if (!rects.length) return;
+  try {
+    const resolved = await api.pdfSelectionResolve({ rects });
+    const first = resolved.ranges[0];
+    if (first) {
+      emit("select", first.lid);
+      emit("goto", first.lid);
+      emit("focus-source", { lid: first.lid, quote: resolved.quote_markdown || first.quote_markdown });
+    }
+  } catch (e) {
+    pdfError.value = e instanceof Error ? e.message : String(e);
+  } finally {
+    selection.removeAllRanges();
+  }
+}
+
+async function projectActiveRange() {
+  const lid = props.activeLid ?? props.selectedLid;
+  projectedRegions.value = [];
+  if (!lid) return;
+  try {
+    const response = await api.pdfRangesProject([{ lid }]);
+    projectedRegions.value = response.projections.flatMap((projection) =>
+      projection.regions.map((region) => ({ lid: projection.lid, region })),
+    );
+  } catch {
+    projectedRegions.value = [];
+  }
+}
+
+watch(
+  () => [props.pdfUrl, props.sourceMap?.config_hash] as const,
+  () => {
+    if (props.pdfUrl && props.sourceMap) void loadPdfDocument();
+  },
+  { immediate: true },
+);
 
 watch(
   () => [props.activeLid, props.selectedLid, props.sourceMap?.config_hash] as const,
   () => {
     void scrollActiveIntoView();
+    void projectActiveRange();
   },
 );
+
+watch(pageCount, async () => {
+  await nextTick();
+  observePages();
+});
+
+onBeforeUnmount(() => {
+  renderToken += 1;
+  observer?.disconnect();
+  if (loadingTask) void loadingTask.destroy();
+  if (pdfDoc.value) void (pdfDoc.value as unknown as { destroy?: () => Promise<void> }).destroy?.();
+});
 </script>
 
 <template>
   <main class="pdf-reader-pane">
-    <section class="pdf-native-pane" aria-label="Original PDF">
-      <iframe class="pdf-frame" :src="pdfFrameSrc" title="Original PDF"></iframe>
-    </section>
-
-    <aside class="pdf-map-pane" aria-label="PDF map">
-      <header class="pdf-map-head">
+    <header class="pdf-reader-head">
+      <div>
         <strong>{{ props.sourceManifest?.book_id ?? props.sourceMap?.book_id ?? "PDF" }}</strong>
-        <span>{{ pageCount }} pages · {{ mapCapability }}</span>
-      </header>
-      <div ref="pageList" class="pdf-page-list">
-        <section
-          v-for="page in props.sourceMap?.pages ?? []"
-          :key="page.pageIndex"
-          class="pdf-page-shell"
-          :class="{ active: page.pageIndex === activePageIndex }"
-          :data-page-index="page.pageIndex"
-          :style="pageShellStyle(page)"
-        >
-          <div class="pdf-page-label">{{ page.page_label ?? page.pageIndex + 1 }}</div>
-          <button
-            v-for="{ entry, region } in pageRegions(page.pageIndex)"
-            :key="`${entry.lid}:${region.region_id}`"
-            class="pdf-region"
-            :class="regionClass(entry)"
-            :style="regionStyle(page, region)"
-            :title="entry.lid"
-            @click.stop="emit('goto', entry.lid)"
-            @mouseenter="emit('select', entry.lid)"
-          ></button>
-        </section>
-        <p v-if="!props.sourceMap?.pages.length" class="pdf-empty">PDF map unavailable.</p>
+        <span>{{ pageCount }} 页 · {{ mapCapabilityLabel }}</span>
       </div>
-      <footer v-if="props.activeLid && !activeEntry" class="pdf-map-foot">
-        <button @click="props.activeLid && emit('focus-source', { lid: props.activeLid, quote: null })">Open source</button>
-      </footer>
-    </aside>
+      <span v-if="pdfLoading">正在加载 PDF</span>
+      <span v-else-if="pdfError" class="pdf-error">{{ pdfError }}</span>
+    </header>
+
+    <div ref="pageList" class="pdf-page-list" @mouseup="resolvePdfSelection">
+      <section
+        v-for="page in props.sourceMap?.pages ?? []"
+        :key="page.pageIndex"
+        :ref="(el) => setPageRef(page.pageIndex, el)"
+        class="pdf-page-shell"
+        :class="{ active: page.pageIndex === activePageIndex }"
+        :data-page-index="page.pageIndex"
+        :style="pageShellStyle(page)"
+        @click="onPageClick(page.pageIndex, $event)"
+        @mousemove="onPagePointer(page.pageIndex, $event)"
+      >
+        <canvas :ref="(el) => setCanvasRef(page.pageIndex, el)" class="pdf-page-canvas"></canvas>
+        <div :ref="(el) => setTextLayerRef(page.pageIndex, el)" class="pdf-text-layer"></div>
+        <div class="pdf-page-label">{{ page.page_label ?? page.pageIndex + 1 }}</div>
+        <div
+          v-for="{ entry, region } in pageRegions(page.pageIndex)"
+          :key="`${entry.lid}:${region.region_id}`"
+          class="pdf-region"
+          :class="regionClass(entry)"
+          :style="regionStyle(page, region)"
+          :title="entry.lid"
+        ></div>
+        <div
+          v-for="{ lid, region } in projectedPageRegions(page.pageIndex)"
+          :key="`projected:${lid}:${region.region_id}`"
+          class="pdf-region projected"
+          :style="regionStyle(page, region)"
+          :title="lid"
+        ></div>
+        <p v-if="renderStates[page.pageIndex]?.error" class="pdf-page-error">
+          {{ renderStates[page.pageIndex]?.error }}
+        </p>
+      </section>
+      <p v-if="!props.sourceMap?.pages.length" class="pdf-empty">暂无 PDF 映射。</p>
+    </div>
+
+    <footer v-if="props.activeLid && !activeEntry" class="pdf-map-foot">
+      <button @click="props.activeLid && emit('focus-source', { lid: props.activeLid, quote: null })">打开来源正文</button>
+    </footer>
   </main>
 </template>
 
@@ -128,76 +472,89 @@ watch(
   min-width: 0;
   min-height: 0;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(13rem, 18rem);
+  grid-template-rows: auto minmax(0, 1fr) auto;
   background: var(--reader-canvas);
   border-left: 1px solid var(--hairline-soft);
   border-right: 1px solid var(--hairline-soft);
 }
-.pdf-native-pane {
-  min-width: 0;
-  min-height: 0;
-  background: #d8d4cc;
-}
-.pdf-frame {
-  display: block;
-  width: 100%;
-  height: 100%;
-  border: 0;
-  background: #fff;
-}
-.pdf-map-pane {
-  min-width: 0;
-  min-height: 0;
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
-  border-left: 1px solid var(--hairline-soft);
+.pdf-reader-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.65rem 0.85rem;
+  border-bottom: 1px solid var(--hairline-soft);
   background: var(--surface-soft);
 }
-.pdf-map-head {
+.pdf-reader-head div {
+  min-width: 0;
   display: grid;
-  gap: 0.12rem;
-  padding: 0.7rem 0.8rem;
-  border-bottom: 1px solid var(--hairline-soft);
+  gap: 0.08rem;
 }
-.pdf-map-head strong {
+.pdf-reader-head strong {
   min-width: 0;
   overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
   color: var(--ink);
   font-size: 0.9rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.pdf-map-head span {
+.pdf-reader-head span {
   color: var(--muted);
   font-size: 0.76rem;
+}
+.pdf-reader-head .pdf-error {
+  color: var(--brand-error);
 }
 .pdf-page-list {
   min-height: 0;
   overflow-y: auto;
   display: grid;
-  gap: 0.8rem;
+  justify-items: center;
+  gap: 1.1rem;
   align-content: start;
-  padding: 0.85rem;
+  padding: 1.1rem;
 }
 .pdf-page-shell {
   position: relative;
-  width: 100%;
+  width: min(100%, 56rem);
   overflow: hidden;
   border: 1px solid var(--hairline);
-  background:
-    linear-gradient(0deg, rgba(20, 20, 19, 0.03), rgba(20, 20, 19, 0.03)),
-    #fff;
+  background: #fff;
   content-visibility: auto;
-  contain-intrinsic-size: 260px 360px;
+  contain-intrinsic-size: 720px 940px;
 }
 .pdf-page-shell.active {
   border-color: var(--reader-coral);
 }
+.pdf-page-canvas,
+.pdf-text-layer {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+.pdf-page-canvas {
+  z-index: 0;
+}
+.pdf-text-layer {
+  z-index: 1;
+  overflow: hidden;
+  user-select: text;
+}
+.pdf-text-layer span {
+  position: absolute;
+  color: rgba(20, 20, 19, 0.01);
+  line-height: 1;
+  transform-origin: left top;
+  white-space: pre;
+  cursor: text;
+}
 .pdf-page-label {
   position: absolute;
-  top: 0.35rem;
-  left: 0.4rem;
-  z-index: 2;
+  top: 0.45rem;
+  left: 0.5rem;
+  z-index: 4;
   min-width: 1.6rem;
   padding: 0.12rem 0.32rem;
   border: 1px solid var(--hairline-soft);
@@ -208,22 +565,26 @@ watch(
 }
 .pdf-region {
   position: absolute;
-  z-index: 1;
+  z-index: 2;
   min-width: 4px;
   min-height: 4px;
   border: 1px solid rgba(93, 184, 166, 0.62);
-  background: rgba(93, 184, 166, 0.16);
+  background: rgba(93, 184, 166, 0.12);
   padding: 0;
-  cursor: pointer;
+  pointer-events: none;
 }
 .pdf-region.fallback {
   border-color: rgba(204, 120, 92, 0.62);
-  background: rgba(204, 120, 92, 0.15);
+  background: rgba(204, 120, 92, 0.12);
 }
 .pdf-region.active,
-.pdf-region.selected {
+.pdf-region.selected,
+.pdf-region.projected {
   border-color: var(--reader-amber);
-  background: rgba(212, 160, 23, 0.28);
+  background: rgba(212, 160, 23, 0.24);
+}
+.pdf-region.projected {
+  z-index: 3;
 }
 .pdf-map-foot {
   padding: 0.7rem 0.8rem;
@@ -237,26 +598,25 @@ watch(
   background: #fff;
   color: var(--ink);
 }
-.pdf-empty {
+.pdf-empty,
+.pdf-page-error {
   margin: 0;
   color: var(--muted);
   font-size: 0.86rem;
 }
+.pdf-page-error {
+  position: absolute;
+  inset: auto 1rem 1rem;
+  z-index: 5;
+  color: var(--brand-error);
+}
 
 @media (max-width: 900px) {
-  .pdf-reader-pane {
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: minmax(0, 1fr) minmax(12rem, 35vh);
-  }
-  .pdf-map-pane {
-    border-left: 0;
-    border-top: 1px solid var(--hairline-soft);
-  }
   .pdf-page-list {
-    grid-auto-flow: column;
-    grid-auto-columns: 9rem;
-    overflow-x: auto;
-    overflow-y: hidden;
+    padding: 0.65rem;
+  }
+  .pdf-page-shell {
+    width: 100%;
   }
 }
 </style>
