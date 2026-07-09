@@ -275,6 +275,8 @@ export interface BuildJobEvent {
     | "job_created"
     | "job_reused"
     | "job_marked_stale"
+    | "job_resumed"
+    | "job_event_appended"
     | "executor_started"
     | "decision_requested"
     | "decision_resolved"
@@ -537,6 +539,17 @@ export const api = {
     paper_md_text?: string;
     paper_pdf_base64?: string;
   }) => http<BuildWorkbenchSnapshot>("POST", "/build_workbench/input.import", payload),
+  workbenchJobCreate: () => http<BuildWorkbenchSnapshot>("POST", "/build_workbench/job.create", {}),
+  workbenchJobStart: (payload: { job_id?: string; stage?: BuildStageId; executor?: ExecutorId; run_id?: string }) =>
+    http<BuildWorkbenchSnapshot>("POST", "/build_workbench/job.start", payload),
+  workbenchJobResume: (job_id: string) =>
+    http<BuildWorkbenchSnapshot>("POST", "/build_workbench/job.resume", { job_id }),
+  workbenchJobEventAppend: (payload: { job_id: string; stage?: BuildStageId; message?: string; payload?: unknown }) =>
+    http<BuildWorkbenchSnapshot>("POST", "/build_workbench/job.event.append", payload),
+  workbenchDecisionResolve: (payload: { job_id: string; decision_id: string; answer: string }) =>
+    http<BuildWorkbenchSnapshot>("POST", "/build_workbench/decision.resolve", payload),
+  workbenchPermissionResolve: (payload: { job_id: string; request_id: string; granted: boolean }) =>
+    http<BuildWorkbenchSnapshot>("POST", "/build_workbench/permission.resolve", payload),
   sidecarPlanConfirm: (fields: Record<string, unknown>) =>
     http<BuildWorkbenchSnapshot>("POST", "/build_workbench/sidecar_plan.confirm", { fields }),
 

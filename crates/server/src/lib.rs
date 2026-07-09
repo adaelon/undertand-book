@@ -397,6 +397,42 @@ pub fn route(state: &mut AppState, req: Req) -> Reply {
         }
         return route_workbench_input_import(state, req.body, req.now);
     }
+    if path == "/build_workbench/job.create" {
+        if req.method != "POST" {
+            return method_not_allowed();
+        }
+        return route_workbench_job_create(state, req.now);
+    }
+    if path == "/build_workbench/job.start" {
+        if req.method != "POST" {
+            return method_not_allowed();
+        }
+        return route_workbench_job_start(state, req.body, req.now);
+    }
+    if path == "/build_workbench/job.resume" {
+        if req.method != "POST" {
+            return method_not_allowed();
+        }
+        return route_workbench_job_resume(state, req.body, req.now);
+    }
+    if path == "/build_workbench/job.event.append" {
+        if req.method != "POST" {
+            return method_not_allowed();
+        }
+        return route_workbench_job_event_append(state, req.body, req.now);
+    }
+    if path == "/build_workbench/decision.resolve" {
+        if req.method != "POST" {
+            return method_not_allowed();
+        }
+        return route_workbench_decision_resolve(state, req.body, req.now);
+    }
+    if path == "/build_workbench/permission.resolve" {
+        if req.method != "POST" {
+            return method_not_allowed();
+        }
+        return route_workbench_permission_resolve(state, req.body, req.now);
+    }
     // agent.*(S10f):外层 E agent 编排,POST(会话命令)`[ADR-0030]`。
     if path == "/agent/history" {
         if req.method != "GET" {
@@ -1008,6 +1044,152 @@ fn write_workbench_json(path: &Path, value: &serde_json::Value) -> Result<(), To
     })
 }
 
+fn build_jobs_dir(book_dir: &Path) -> PathBuf {
+    book_dir.join(".build").join("jobs")
+}
+
+fn fingerprint_field<'a>(fingerprint: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+    fingerprint.get(key).and_then(|value| value.as_str())
+}
+
+fn fingerprint_key(fingerprint: &serde_json::Value) -> Option<String> {
+    Some(format!(
+        "{}:{}:{}",
+        fingerprint_field(fingerprint, "paper_md_sha256")?,
+        fingerprint_field(fingerprint, "paper_pdf_sha256")?,
+        fingerprint_field(fingerprint, "config_hash")?
+    ))
+}
+
+fn fingerprints_equal(left: &serde_json::Value, right: &serde_json::Value) -> bool {
+    fingerprint_key(left)
+        .zip(fingerprint_key(right))
+        .is_some_and(|(left, right)| left == right)
+}
+
+fn make_build_job_id(book_id: &str, fingerprint: &serde_json::Value) -> String {
+    let key = fingerprint_key(fingerprint).unwrap_or_else(|| "invalid".into());
+    format!(
+        "job_{}",
+        &sha256_hex(format!("{book_id}:{key}").as_bytes())[..16]
+    )
+}
+
+fn job_file_path(book_dir: &Path, job_id: &str) -> PathBuf {
+    build_jobs_dir(book_dir).join(format!("{job_id}.json"))
+}
+
+fn job_event_id(job: &serde_json::Value) -> String {
+    let count = job
+        .get("events")
+        .and_then(|value| value.as_array())
+        .map(Vec::len)
+        .unwrap_or(0);
+    format!("evt_{}", count + 1)
+}
+
+fn append_job_event(
+    mut job: serde_json::Value,
+    now: &str,
+    event_type: &str,
+    stage: Option<&str>,
+    message: Option<&str>,
+    payload: Option<serde_json::Value>,
+) -> serde_json::Value {
+    let job_id = job
+        .get("job_id")
+        .and_then(|value| value.as_str())
+        .unwrap_or("unknown")
+        .to_string();
+    let mut event = serde_json::Map::new();
+    event.insert("event_id".into(), json!(job_event_id(&job)));
+    event.insert("job_id".into(), json!(job_id));
+    event.insert("created_at".into(), json!(now));
+    event.insert("type".into(), json!(event_type));
+    if let Some(stage) = stage {
+        event.insert("stage".into(), json!(stage));
+    }
+    if let Some(message) = message {
+        event.insert("message".into(), json!(message));
+    }
+    if let Some(payload) = payload {
+        event.insert("payload".into(), payload);
+    }
+    if !job.get("events").is_some_and(|value| value.is_array()) {
+        job["events"] = json!([]);
+    }
+    job["events"]
+        .as_array_mut()
+        .expect("events initialized as array")
+        .push(serde_json::Value::Object(event));
+    job["updated_at"] = json!(now);
+    job
+}
+
+fn write_build_job_atomic(book_dir: &Path, job: &serde_json::Value) -> Result<(), ToolError> {
+    let Some(job_id) = job.get("job_id").and_then(|value| value.as_str()) else {
+        return Err(ToolError {
+            error_code: "BUILD_JOB_INVALID".into(),
+            category: "validation".into(),
+            message: "build job 缺少 job_id".into(),
+        });
+    };
+    let jobs_dir = build_jobs_dir(book_dir);
+    std::fs::create_dir_all(&jobs_dir).map_err(|e| ToolError {
+        error_code: "BUILD_JOB_WRITE_FAILED".into(),
+        category: "internal".into(),
+        message: format!("创建 build jobs 目录失败({}): {e}", jobs_dir.display()),
+    })?;
+    let final_path = job_file_path(book_dir, job_id);
+    let tmp_path = jobs_dir.join(format!("{job_id}.json.tmp"));
+    let raw = serde_json::to_string_pretty(job).map_err(|e| ToolError {
+        error_code: "BUILD_JOB_WRITE_FAILED".into(),
+        category: "internal".into(),
+        message: format!("序列化 build job 失败: {e}"),
+    })?;
+    std::fs::write(&tmp_path, raw).map_err(|e| ToolError {
+        error_code: "BUILD_JOB_WRITE_FAILED".into(),
+        category: "internal".into(),
+        message: format!("写入 build job 临时文件失败({}): {e}", tmp_path.display()),
+    })?;
+    match std::fs::rename(&tmp_path, &final_path) {
+        Ok(()) => Ok(()),
+        Err(_) if final_path.exists() => {
+            std::fs::remove_file(&final_path).map_err(|e| ToolError {
+                error_code: "BUILD_JOB_WRITE_FAILED".into(),
+                category: "internal".into(),
+                message: format!("替换 build job 失败({}): {e}", final_path.display()),
+            })?;
+            std::fs::rename(&tmp_path, &final_path).map_err(|e| ToolError {
+                error_code: "BUILD_JOB_WRITE_FAILED".into(),
+                category: "internal".into(),
+                message: format!("提交 build job 失败({}): {e}", final_path.display()),
+            })
+        }
+        Err(e) => Err(ToolError {
+            error_code: "BUILD_JOB_WRITE_FAILED".into(),
+            category: "internal".into(),
+            message: format!("提交 build job 失败({}): {e}", final_path.display()),
+        }),
+    }
+}
+
+fn pending_user_requests(job: &serde_json::Value) -> bool {
+    let pending_decision = job
+        .get("decision_requests")
+        .and_then(|value| value.as_array())
+        .into_iter()
+        .flatten()
+        .any(|request| request.get("status").and_then(|value| value.as_str()) == Some("pending"));
+    let pending_permission = job
+        .get("permission_requests")
+        .and_then(|value| value.as_array())
+        .into_iter()
+        .flatten()
+        .any(|request| request.get("status").and_then(|value| value.as_str()) == Some("pending"));
+    pending_decision || pending_permission
+}
+
 fn artifact_config_hash(book_dir: &Path, relative: &str) -> Result<Option<String>, ToolError> {
     Ok(
         read_json_artifact_optional(&book_dir.join(relative), "ARTIFACT_INVALID")?.and_then(
@@ -1353,6 +1535,451 @@ fn route_workbench_input_import(state: &mut AppState, body: &str, now: &str) -> 
 
     state.book_dir = target_dir;
     let _ = save_session(state, state.book_dir.to_str());
+    route_build_workbench(&state.book, &state.book_dir)
+}
+
+fn current_workbench_job_input(
+    book_dir: &Path,
+    fallback_book_id: &str,
+) -> Result<(String, serde_json::Value), ToolError> {
+    let Some(manifest) = read_workbench_input_manifest(book_dir)? else {
+        return Err(ToolError {
+            error_code: "WORKBENCH_INPUT_NOT_READY".into(),
+            category: "validation".into(),
+            message: "尚未导入 paper.md + paper.pdf".into(),
+        });
+    };
+    let Some(fingerprint) = input_fingerprint_from_manifest(Some(&manifest)) else {
+        return Err(ToolError {
+            error_code: "WORKBENCH_INPUT_NOT_READY".into(),
+            category: "validation".into(),
+            message: "Workbench input manifest 缺少 fingerprint".into(),
+        });
+    };
+    let book_id = manifest
+        .get("book_id")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| fallback_book_id.to_string());
+    Ok((book_id, fingerprint))
+}
+
+fn create_build_job_value(
+    book_id: &str,
+    fingerprint: &serde_json::Value,
+    now: &str,
+) -> serde_json::Value {
+    let job_id = make_build_job_id(book_id, fingerprint);
+    let job = json!({
+        "version": "build_job_state.v1",
+        "job_id": job_id,
+        "book_id": book_id,
+        "input_fingerprint": fingerprint,
+        "status": "ready",
+        "events": [],
+        "decision_requests": [],
+        "permission_requests": [],
+        "created_at": now,
+        "updated_at": now,
+    });
+    append_job_event(
+        job,
+        now,
+        "job_created",
+        None,
+        Some("Build job created"),
+        None,
+    )
+}
+
+fn mark_stale_jobs(
+    book_dir: &Path,
+    jobs: &[serde_json::Value],
+    current_fingerprint: &serde_json::Value,
+    now: &str,
+) -> Result<(), ToolError> {
+    for job in jobs {
+        let same_input = job
+            .get("input_fingerprint")
+            .is_some_and(|fingerprint| fingerprints_equal(fingerprint, current_fingerprint));
+        let already_stale =
+            job.get("status").and_then(|value| value.as_str()) == Some("stale_input");
+        if same_input || already_stale {
+            continue;
+        }
+        let mut stale = job.clone();
+        stale["status"] = json!("stale_input");
+        stale["active_run"] = serde_json::Value::Null;
+        stale = append_job_event(
+            stale,
+            now,
+            "job_marked_stale",
+            None,
+            Some("Build job input fingerprint no longer matches current inputs"),
+            Some(json!({ "current": current_fingerprint })),
+        );
+        write_build_job_atomic(book_dir, &stale)?;
+    }
+    Ok(())
+}
+
+fn create_or_reuse_build_job(
+    book_dir: &Path,
+    book_id: &str,
+    fingerprint: &serde_json::Value,
+    now: &str,
+) -> Result<serde_json::Value, ToolError> {
+    let jobs = read_build_jobs(book_dir)?;
+    mark_stale_jobs(book_dir, &jobs, fingerprint, now)?;
+    if let Some(job) = jobs.iter().find(|job| {
+        job.get("book_id").and_then(|value| value.as_str()) == Some(book_id)
+            && job
+                .get("input_fingerprint")
+                .is_some_and(|existing| fingerprints_equal(existing, fingerprint))
+            && !matches!(
+                job.get("status").and_then(|value| value.as_str()),
+                Some("done" | "stale_input")
+            )
+    }) {
+        let reused = append_job_event(
+            job.clone(),
+            now,
+            "job_reused",
+            None,
+            Some("Reusing incomplete job for identical inputs"),
+            None,
+        );
+        write_build_job_atomic(book_dir, &reused)?;
+        return Ok(reused);
+    }
+    let job = create_build_job_value(book_id, fingerprint, now);
+    write_build_job_atomic(book_dir, &job)?;
+    Ok(job)
+}
+
+fn require_job_id(value: &serde_json::Value) -> Result<&str, Reply> {
+    value
+        .get("job_id")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| validation("INVALID_BUILD_JOB", "需 job_id 字段"))
+}
+
+fn read_build_job_by_id(book_dir: &Path, job_id: &str) -> Result<serde_json::Value, ToolError> {
+    read_json_artifact_optional(&job_file_path(book_dir, job_id), "BUILD_JOB_INVALID")?.ok_or_else(
+        || ToolError {
+            error_code: "BUILD_JOB_NOT_FOUND".into(),
+            category: "not_found".into(),
+            message: format!("build job not found: {job_id}"),
+        },
+    )
+}
+
+fn body_stage(value: &serde_json::Value) -> Result<&str, Reply> {
+    let stage = value
+        .get("stage")
+        .and_then(|value| value.as_str())
+        .unwrap_or("source_reconciliation");
+    if BUILD_WORKBENCH_STAGE_IDS.contains(&stage) {
+        Ok(stage)
+    } else {
+        Err(validation("INVALID_BUILD_STAGE", "未知 build stage"))
+    }
+}
+
+fn body_executor(value: &serde_json::Value) -> Result<&str, Reply> {
+    let executor = value
+        .get("executor")
+        .and_then(|value| value.as_str())
+        .unwrap_or("codex");
+    if matches!(executor, "codex" | "opencode" | "claude" | "manual") {
+        Ok(executor)
+    } else {
+        Err(validation("INVALID_EXECUTOR", "未知 executor"))
+    }
+}
+
+fn route_workbench_job_create(state: &mut AppState, now: &str) -> Reply {
+    let (book_id, fingerprint) =
+        match current_workbench_job_input(&state.book_dir, &state.book.base.book_id) {
+            Ok(value) => value,
+            Err(e) => return err_reply(&e),
+        };
+    if let Err(e) = create_or_reuse_build_job(&state.book_dir, &book_id, &fingerprint, now) {
+        return err_reply(&e);
+    }
+    route_build_workbench(&state.book, &state.book_dir)
+}
+
+fn route_workbench_job_start(state: &mut AppState, body: &str, now: &str) -> Reply {
+    let value = match body_value(body) {
+        Ok(value) => value,
+        Err(reply) => return reply,
+    };
+    let stage = match body_stage(&value) {
+        Ok(stage) => stage,
+        Err(reply) => return reply,
+    };
+    let executor = match body_executor(&value) {
+        Ok(executor) => executor,
+        Err(reply) => return reply,
+    };
+    let job = if let Some(job_id) = value.get("job_id").and_then(|value| value.as_str()) {
+        match read_build_job_by_id(&state.book_dir, job_id.trim()) {
+            Ok(job) => job,
+            Err(e) => return err_reply(&e),
+        }
+    } else {
+        let (book_id, fingerprint) =
+            match current_workbench_job_input(&state.book_dir, &state.book.base.book_id) {
+                Ok(value) => value,
+                Err(e) => return err_reply(&e),
+            };
+        match create_or_reuse_build_job(&state.book_dir, &book_id, &fingerprint, now) {
+            Ok(job) => job,
+            Err(e) => return err_reply(&e),
+        }
+    };
+    let job_id = job
+        .get("job_id")
+        .and_then(|value| value.as_str())
+        .unwrap_or("job");
+    let run_id = value
+        .get("run_id")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            format!(
+                "run_{}",
+                &sha256_hex(format!("{job_id}:{stage}:{executor}:{now}").as_bytes())[..12]
+            )
+        });
+    let mut started = job;
+    started["status"] = json!("running");
+    started["active_run"] = json!({
+        "run_id": run_id,
+        "stage": stage,
+        "executor": executor,
+        "telemetry": {
+            "started_at": now,
+            "last_heartbeat_at": now,
+        }
+    });
+    started = append_job_event(
+        started,
+        now,
+        "executor_started",
+        Some(stage),
+        Some(&format!("Executor {executor} started")),
+        None,
+    );
+    if let Err(e) = write_build_job_atomic(&state.book_dir, &started) {
+        return err_reply(&e);
+    }
+    route_build_workbench(&state.book, &state.book_dir)
+}
+
+fn route_workbench_job_resume(state: &mut AppState, body: &str, now: &str) -> Reply {
+    let value = match body_value(body) {
+        Ok(value) => value,
+        Err(reply) => return reply,
+    };
+    let job_id = match require_job_id(&value) {
+        Ok(job_id) => job_id,
+        Err(reply) => return reply,
+    };
+    let mut job = match read_build_job_by_id(&state.book_dir, job_id) {
+        Ok(job) => job,
+        Err(e) => return err_reply(&e),
+    };
+    if !job.get("active_run").is_some_and(|value| value.is_object()) {
+        return validation("BUILD_JOB_NOT_RUNNING", "该 job 没有可恢复的 active_run");
+    }
+    job["status"] = json!("running");
+    let stage = job
+        .get("active_run")
+        .and_then(|value| value.get("stage"))
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
+    job = append_job_event(
+        job,
+        now,
+        "job_resumed",
+        stage.as_deref(),
+        Some("Build job resumed"),
+        None,
+    );
+    if let Err(e) = write_build_job_atomic(&state.book_dir, &job) {
+        return err_reply(&e);
+    }
+    route_build_workbench(&state.book, &state.book_dir)
+}
+
+fn route_workbench_job_event_append(state: &mut AppState, body: &str, now: &str) -> Reply {
+    let value = match body_value(body) {
+        Ok(value) => value,
+        Err(reply) => return reply,
+    };
+    let job_id = match require_job_id(&value) {
+        Ok(job_id) => job_id,
+        Err(reply) => return reply,
+    };
+    let stage = value.get("stage").and_then(|value| value.as_str());
+    if let Some(stage) = stage {
+        if !BUILD_WORKBENCH_STAGE_IDS.contains(&stage) {
+            return validation("INVALID_BUILD_STAGE", "未知 build stage");
+        }
+    }
+    let message = value.get("message").and_then(|value| value.as_str());
+    let payload = value.get("payload").cloned();
+    let job = match read_build_job_by_id(&state.book_dir, job_id) {
+        Ok(job) => job,
+        Err(e) => return err_reply(&e),
+    };
+    let job = append_job_event(job, now, "job_event_appended", stage, message, payload);
+    if let Err(e) = write_build_job_atomic(&state.book_dir, &job) {
+        return err_reply(&e);
+    }
+    route_build_workbench(&state.book, &state.book_dir)
+}
+
+fn route_workbench_decision_resolve(state: &mut AppState, body: &str, now: &str) -> Reply {
+    let value = match body_value(body) {
+        Ok(value) => value,
+        Err(reply) => return reply,
+    };
+    let job_id = match require_job_id(&value) {
+        Ok(job_id) => job_id,
+        Err(reply) => return reply,
+    };
+    let Some(decision_id) = value.get("decision_id").and_then(|value| value.as_str()) else {
+        return validation("INVALID_BUILD_DECISION", "需 decision_id 字段");
+    };
+    let Some(answer) = value.get("answer").and_then(|value| value.as_str()) else {
+        return validation("INVALID_BUILD_DECISION", "需 answer 字段");
+    };
+    let mut job = match read_build_job_by_id(&state.book_dir, job_id) {
+        Ok(job) => job,
+        Err(e) => return err_reply(&e),
+    };
+    let resolved_stage = {
+        let Some(requests) = job
+            .get_mut("decision_requests")
+            .and_then(|value| value.as_array_mut())
+        else {
+            return validation("BUILD_DECISION_NOT_FOUND", "job 无 decision_requests");
+        };
+        let Some(request) = requests.iter_mut().find(|request| {
+            request.get("decision_id").and_then(|value| value.as_str()) == Some(decision_id)
+        }) else {
+            return validation("BUILD_DECISION_NOT_FOUND", "decision request 不存在");
+        };
+        request["status"] = json!("answered");
+        request["answer"] = json!(answer);
+        request["resolved_at"] = json!(now);
+        request
+            .get("stage")
+            .and_then(|value| value.as_str())
+            .map(str::to_string)
+    };
+    job["status"] = json!(if pending_user_requests(&job) {
+        "needs_user"
+    } else {
+        "ready"
+    });
+    job = append_job_event(
+        job,
+        now,
+        "decision_resolved",
+        resolved_stage.as_deref(),
+        Some(&format!("Build decision {decision_id} resolved")),
+        Some(json!({ "decision_id": decision_id, "answer": answer })),
+    );
+    if let Err(e) = write_build_job_atomic(&state.book_dir, &job) {
+        return err_reply(&e);
+    }
+    route_build_workbench(&state.book, &state.book_dir)
+}
+
+fn route_workbench_permission_resolve(state: &mut AppState, body: &str, now: &str) -> Reply {
+    let value = match body_value(body) {
+        Ok(value) => value,
+        Err(reply) => return reply,
+    };
+    let job_id = match require_job_id(&value) {
+        Ok(job_id) => job_id,
+        Err(reply) => return reply,
+    };
+    let Some(request_id) = value.get("request_id").and_then(|value| value.as_str()) else {
+        return validation("INVALID_EXECUTOR_PERMISSION", "需 request_id 字段");
+    };
+    let Some(granted) = value.get("granted").and_then(|value| value.as_bool()) else {
+        return validation("INVALID_EXECUTOR_PERMISSION", "需 granted 布尔字段");
+    };
+    let mut job = match read_build_job_by_id(&state.book_dir, job_id) {
+        Ok(job) => job,
+        Err(e) => return err_reply(&e),
+    };
+    let active_run_id = job
+        .get("active_run")
+        .and_then(|value| value.get("run_id"))
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
+    let active_stage = job
+        .get("active_run")
+        .and_then(|value| value.get("stage"))
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
+    let request_run_id = {
+        let Some(requests) = job
+            .get_mut("permission_requests")
+            .and_then(|value| value.as_array_mut())
+        else {
+            return validation(
+                "EXECUTOR_PERMISSION_NOT_FOUND",
+                "job 无 permission_requests",
+            );
+        };
+        let Some(request) = requests.iter_mut().find(|request| {
+            request.get("request_id").and_then(|value| value.as_str()) == Some(request_id)
+        }) else {
+            return validation("EXECUTOR_PERMISSION_NOT_FOUND", "permission request 不存在");
+        };
+        request["status"] = json!(if granted { "granted" } else { "denied" });
+        request["resolved_at"] = json!(now);
+        request
+            .get("run_id")
+            .and_then(|value| value.as_str())
+            .map(str::to_string)
+    };
+    let stage = active_run_id
+        .zip(request_run_id)
+        .filter(|(active, request)| active == request)
+        .and(active_stage);
+    job["status"] = json!(if pending_user_requests(&job) {
+        "needs_user"
+    } else {
+        "ready"
+    });
+    job = append_job_event(
+        job,
+        now,
+        "permission_resolved",
+        stage.as_deref(),
+        Some(&format!(
+            "Executor permission {request_id} {}",
+            if granted { "granted" } else { "denied" }
+        )),
+        Some(json!({ "request_id": request_id, "granted": granted })),
+    );
+    if let Err(e) = write_build_job_atomic(&state.book_dir, &job) {
+        return err_reply(&e);
+    }
     route_build_workbench(&state.book, &state.book_dir)
 }
 
@@ -3847,6 +4474,143 @@ mod tests {
             "paper.md"
         );
         assert_eq!(body["readiness"]["route"], "workbench");
+    }
+
+    #[test]
+    fn workbench_job_create_reuses_same_input_and_marks_stale_jobs() {
+        let mut s = state_named("workbench-job-create");
+        assert_eq!(
+            post(
+                &mut s,
+                "/build_workbench/input.import",
+                r#"{"book_id":"paper-job","paper_md_text":"abc","paper_pdf_base64":"cGRm"}"#
+            )
+            .status,
+            200
+        );
+
+        let first = post(&mut s, "/build_workbench/job.create", "{}");
+        assert_eq!(first.status, 200);
+        let first_body: serde_json::Value = serde_json::from_str(&first.body).unwrap();
+        let first_job_id = first_body["jobs"][0]["job_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(first_body["jobs"][0]["status"], "ready");
+        assert_eq!(first_body["jobs"][0]["events"][0]["type"], "job_created");
+
+        let reused = post(&mut s, "/build_workbench/job.create", "{}");
+        assert_eq!(reused.status, 200);
+        let reused_body: serde_json::Value = serde_json::from_str(&reused.body).unwrap();
+        assert_eq!(reused_body["jobs"].as_array().unwrap().len(), 1);
+        assert_eq!(reused_body["jobs"][0]["job_id"], first_job_id);
+        assert_eq!(reused_body["jobs"][0]["events"][1]["type"], "job_reused");
+
+        assert_eq!(
+            post(
+                &mut s,
+                "/build_workbench/input.import",
+                r#"{"book_id":"paper-job","paper_md_text":"abcd","paper_pdf_base64":"cGRm"}"#
+            )
+            .status,
+            200
+        );
+        let changed = post(&mut s, "/build_workbench/job.create", "{}");
+        assert_eq!(changed.status, 200);
+        let changed_body: serde_json::Value = serde_json::from_str(&changed.body).unwrap();
+        assert_eq!(changed_body["jobs"].as_array().unwrap().len(), 2);
+        assert!(changed_body["jobs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|job| job["job_id"] == first_job_id && job["status"] == "stale_input"));
+    }
+
+    #[test]
+    fn workbench_job_start_resume_and_append_event_persist() {
+        let mut s = state_named("workbench-job-start");
+        assert_eq!(
+            post(
+                &mut s,
+                "/build_workbench/input.import",
+                r#"{"book_id":"paper-run","paper_md_text":"abc","paper_pdf_base64":"cGRm"}"#
+            )
+            .status,
+            200
+        );
+        let started = post(
+            &mut s,
+            "/build_workbench/job.start",
+            r#"{"stage":"source_reconciliation","executor":"codex","run_id":"run-1"}"#,
+        );
+        assert_eq!(started.status, 200);
+        let started_body: serde_json::Value = serde_json::from_str(&started.body).unwrap();
+        let job_id = started_body["jobs"][0]["job_id"].as_str().unwrap();
+        assert_eq!(started_body["jobs"][0]["status"], "running");
+        assert_eq!(started_body["jobs"][0]["active_run"]["run_id"], "run-1");
+        assert!(started_body["jobs"][0]["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|event| event["type"] == "executor_started"));
+
+        let appended = post(
+            &mut s,
+            "/build_workbench/job.event.append",
+            &format!(
+                r#"{{"job_id":"{job_id}","stage":"source_reconciliation","message":"heartbeat","payload":{{"n":1}}}}"#
+            ),
+        );
+        assert_eq!(appended.status, 200);
+        let resumed = post(
+            &mut s,
+            "/build_workbench/job.resume",
+            &format!(r#"{{"job_id":"{job_id}"}}"#),
+        );
+        assert_eq!(resumed.status, 200);
+        let resumed_body: serde_json::Value = serde_json::from_str(&resumed.body).unwrap();
+        let events = resumed_body["jobs"][0]["events"].as_array().unwrap();
+        assert!(events
+            .iter()
+            .any(|event| event["type"] == "job_event_appended"));
+        assert!(events.iter().any(|event| event["type"] == "job_resumed"));
+    }
+
+    #[test]
+    fn workbench_resolves_build_decisions_and_executor_permissions() {
+        let mut s = state_named("workbench-resolve");
+        write_workbench_review_artifacts(&mut s);
+
+        let decision = post(
+            &mut s,
+            "/build_workbench/decision.resolve",
+            r#"{"job_id":"job_review","decision_id":"decision-1","answer":"accept_pdf"}"#,
+        );
+        assert_eq!(decision.status, 200);
+        let decision_body: serde_json::Value = serde_json::from_str(&decision.body).unwrap();
+        assert_eq!(
+            decision_body["jobs"][0]["decision_requests"][0]["status"],
+            "answered"
+        );
+        assert_eq!(decision_body["jobs"][0]["status"], "needs_user");
+
+        let permission = post(
+            &mut s,
+            "/build_workbench/permission.resolve",
+            r#"{"job_id":"job_review","request_id":"perm-1","granted":true}"#,
+        );
+        assert_eq!(permission.status, 200);
+        let permission_body: serde_json::Value = serde_json::from_str(&permission.body).unwrap();
+        assert_eq!(
+            permission_body["jobs"][0]["permission_requests"][0]["status"],
+            "granted"
+        );
+        assert_eq!(permission_body["jobs"][0]["status"], "ready");
+        assert!(permission_body["jobs"][0]["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|event| event["type"] == "permission_resolved"));
     }
 
     #[test]

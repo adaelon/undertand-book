@@ -120,6 +120,8 @@ const eventTypeLabels: Record<BuildJobEvent["type"], string> = {
   job_created: "创建构建任务",
   job_reused: "复用构建任务",
   job_marked_stale: "标记输入过期",
+  job_resumed: "恢复构建任务",
+  job_event_appended: "记录构建事件",
   executor_started: "执行器已启动",
   decision_requested: "请求构建决策",
   decision_resolved: "构建决策已处理",
