@@ -305,3 +305,29 @@ BookStructure 在读时提供的全书级带读路线 `[ADR-0045]`:按 spine 分
 
 ## 跨会话续建 (cross-session build resume)
 Claude 在环驱动预构建时,**会话 token / 上下文耗尽后由新会话接着建**的机制 `[ADR-0042]`——真书数十窗 × Pass1 subagent 抽取一个会话跑不完,**跨会话是常态路径非异常**(承软工准则 A4 防上下文断裂)。物理前提 = **逐窗原子落盘**(每抽完一窗即写 `pass1/<id>.json`,旧"手工拼单一 outputs.json"会话死则全丢)。续建判定 = **存在性 + content-hash 校验,位置 id 键**(`content_hash = sha256(buildPass1Input(window).text)`;新会话重算窗口逐窗比对,在且一致 = done,缺失/不一致 = pending);**无状态位 / watermark / lock**(承 [docs/adr/0038][docs/adr/0039] 砍单机过度工程),中断 = 没文件 = pending(二值)。冷启动靠 **agent 续建契约**(写进 `skills/build/SKILL.md`,与 SESSION_CHECKPOINT C4/C5 同招):新 Claude `status <book>` 拿 pending → 逐窗 `emit-input` + subagent 抽取 + 原子写 → 全 done 跑 `pass1-batch` 收口(pending 默认拒绝收口)。区别于跨版本增量构建([docs/adr/0019],书改了复用旧基座 + LID 重锚)与内容寻址复用(留 [docs/adr/0042] 何时回头),二者本刀不做。状态:NEW(详见 [docs/adr/0042])。
+## Hybrid paper source
+Paper profile 的双源输入模型:Markdown 与原版 PDF 共同进入 source reconciliation,生成可信 `source.txt`;PDF-first reader 再用 map artifact 把 LID/range 投影回 PDF 页面。状态:BOUNDARY_CHANGE(见 [docs/adr/0063])。
+
+## Source reconciliation
+PDF-first paper build 中把 `paper.md + paper.pdf` 对齐、修复版面/编码差异、阻断内容冲突,并只在确定性门禁通过后产出可信 `source.txt/base.json` 的阶段。状态:NEW(见 [docs/adr/0063])。
+
+## PDF visual source map
+`pdf_source_map.json` 中从可信 LID/source span 到 PDF `pageIndex + bbox` 区域的轻量运行时映射。它用于把 citation、note、highlight 投影回 PDF 页面,但不替代 LID,也不是 citation anchor。状态:BOUNDARY_CHANGE(见 [docs/adr/0063])。
+
+## PDF selection map
+后端私有的 char-level、按页分片 PDF 反解 artifact,用于把 PDF 选区或语义 LID/range 转成可保存或可显示的 LID range / PDF rect。状态:NEW(见 [docs/adr/0063])。
+
+## PDF-first reader surface
+paper profile 的主阅读表面:中心区域在当前书具备可用 PDF capability 时渲染原版 PDF 页面,并通过 PDF visual source map 显示 LID 高亮、跳转和证据位置。Markdown/结构化正文仅作为调试、降级和未映射 LID 的 fallback 视图。状态:NEW(见 [docs/adr/0063])。
+
+## Clean-room PDF extractor
+不复制 AGPL 代码或资产的 PDF 抽取器实现边界。可以参考外部项目的架构分层和处理顺序,但不得复制源码、测试、模型、bundle、私有协议或受限资产;公共契约由本项目自定义。状态:NEW(见 [docs/adr/0063])。
+
+## Alignment repair
+PDF/Markdown 对齐失败时的可选修复机制。LLM 只能提出格式修复候选;是否进入可信 `source.txt` 必须由 content equivalence、确定性 aligner 和阈值决定,不得由 LLM 直接判断内容正确性或 page/bbox 正确性。状态:NEW(见 [docs/adr/0063])。
+
+## Build Workbench
+可信 `source.txt/base.json` 尚不存在、构建未完成或 source reconciliation 需要用户决策时使用的独立 build-mode 工作台。它显示阶段 DAG、进度、token/cost、用户决策和 executor 事件,但不取代 `.build/<stage>` artifact 真相。状态:NEW(见 [docs/adr/0063])。
+
+## BuildDecisionRequest
+Build Workbench 中影响构建方向或阶段 readiness 的用户选择请求,区别于 Codex/opencode/Claude 等 executor 的工具权限请求。其答案必须写入 job event,若影响构建结果还要写入 stage decision artifact。状态:NEW(见 [docs/adr/0063])。
