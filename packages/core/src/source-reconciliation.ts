@@ -46,6 +46,8 @@ export interface SourceReconciliationReviewDecisions {
   decisions: Array<{ id: string; action: "accept_markdown" | "accept_pdf" | "manual_edit"; note?: string }>;
 }
 
+export type ReviewCandidateKind = "llm_format_repair" | "manual_review";
+
 export interface ReconcilePaperSourceInput {
   book_id: string;
   markdown_source: string;
@@ -61,10 +63,28 @@ export interface ReconcilePaperSourceResult {
   review_decisions: SourceReconciliationReviewDecisions;
 }
 
+export interface ReviewCandidateInput {
+  book_id: string;
+  original_source: string;
+  candidate_source: string;
+  pdf_geometry: PdfTextGeometry;
+  input_fingerprint: BuildInputFingerprint;
+  kind: ReviewCandidateKind;
+  decisions?: SourceReconciliationReviewDecisions["decisions"];
+  config?: Partial<SourceReconciliationConfig>;
+}
+
+export interface ReviewCandidateResult {
+  accepted: boolean;
+  reason?: string;
+  reconciliation?: ReconcilePaperSourceResult;
+}
+
 export interface WriteSourceReconciliationArtifactsResult {
   report_path: string;
   review_draft_path: string;
   review_decisions_path: string;
+  reviewed_draft_path?: string;
   source_path?: string;
 }
 
@@ -119,6 +139,17 @@ function searchable(text: string): string {
 
 function tokenSet(text: string): Set<string> {
   return new Set(searchable(text).toLowerCase().split(/[^a-z0-9]+/u).filter(Boolean));
+}
+
+function contentSignature(text: string): string {
+  return safeRepairText(text)
+    .toLowerCase()
+    .match(/[a-z0-9]+/gu)
+    ?.join(" ") ?? "";
+}
+
+export function contentEquivalent(left: string, right: string): boolean {
+  return contentSignature(left) === contentSignature(right);
 }
 
 function jaccard(a: Set<string>, b: Set<string>): number {
@@ -205,18 +236,47 @@ export function reconcilePaperSource(input: ReconcilePaperSourceInput): Reconcil
   };
 }
 
+export function reviewCandidateAndReconcile(input: ReviewCandidateInput): ReviewCandidateResult {
+  if (input.kind === "llm_format_repair" && !contentEquivalent(input.original_source, input.candidate_source)) {
+    return {
+      accepted: false,
+      reason: "LLM format repair candidate changed content-equivalence signature",
+    };
+  }
+  const reconciliation = reconcilePaperSource({
+    book_id: input.book_id,
+    markdown_source: input.candidate_source,
+    pdf_geometry: input.pdf_geometry,
+    input_fingerprint: input.input_fingerprint,
+    config: input.config,
+  });
+  reconciliation.review_decisions = {
+    version: "source_reconciliation_review_decisions.v1",
+    book_id: input.book_id,
+    decisions: input.decisions ?? [],
+  };
+  return {
+    accepted: sourceReconciliationTrusted(reconciliation.report),
+    ...(sourceReconciliationTrusted(reconciliation.report) ? {} : { reason: "review candidate still has unresolved reconciliation blocks" }),
+    reconciliation,
+  };
+}
+
 export function writeSourceReconciliationArtifacts(
   outputDir: string,
   result: ReconcilePaperSourceResult,
+  reviewedDraft?: string,
 ): WriteSourceReconciliationArtifactsResult {
   const stageDir = path.join(outputDir, ".build", "source-reconciliation");
   mkdirSync(stageDir, { recursive: true });
   const reportPath = path.join(stageDir, "report.json");
   const reviewDraftPath = path.join(stageDir, "review-draft.md");
   const reviewDecisionsPath = path.join(stageDir, "review-decisions.json");
+  const reviewedDraftPath = path.join(stageDir, "reviewed-draft.md");
   writeFileSync(reportPath, JSON.stringify(result.report, null, 2), "utf8");
   writeFileSync(reviewDraftPath, result.review_draft, "utf8");
   writeFileSync(reviewDecisionsPath, JSON.stringify(result.review_decisions, null, 2), "utf8");
+  if (reviewedDraft !== undefined) writeFileSync(reviewedDraftPath, reviewedDraft, "utf8");
   const sourcePath = path.join(stageDir, "source.txt");
   if (result.reconciled_source !== undefined) {
     writeFileSync(sourcePath, result.reconciled_source, "utf8");
@@ -227,6 +287,7 @@ export function writeSourceReconciliationArtifacts(
     report_path: reportPath,
     review_draft_path: reviewDraftPath,
     review_decisions_path: reviewDecisionsPath,
+    ...(reviewedDraft !== undefined ? { reviewed_draft_path: reviewedDraftPath } : {}),
     ...(result.reconciled_source !== undefined ? { source_path: sourcePath } : {}),
   };
 }
