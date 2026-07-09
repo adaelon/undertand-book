@@ -1190,6 +1190,202 @@ fn pending_user_requests(job: &serde_json::Value) -> bool {
     pending_decision || pending_permission
 }
 
+fn executor_run_dir(book_dir: &Path, run_id: &str) -> PathBuf {
+    book_dir.join(".build").join("executor-runs").join(run_id)
+}
+
+fn stage_output_paths(stage: &str) -> Vec<&'static str> {
+    match stage {
+        "source_reconciliation" => vec![
+            ".build/source-reconciliation/report.json",
+            ".build/source-reconciliation/review-draft.md",
+            ".build/source-reconciliation/review-decisions.json",
+            ".build/source-reconciliation/source.txt",
+        ],
+        "hybrid_foundation" => vec![
+            "source.txt",
+            "base.json",
+            "source_manifest.json",
+            "pdf_source_map.json",
+            "pdf_selection_map/manifest.json",
+            "alignment_report.json",
+        ],
+        "pass1" => vec![".build/pass1/"],
+        "paper_metadata" => vec!["paper_metadata.json", ".build/paper-metadata/"],
+        "paper_lexicon" => vec!["paper_lexicon.json", ".build/paper-lexicon/"],
+        "profile_sidecar" => vec!["profile_sidecar.json", ".build/profile-sidecar/"],
+        "pass2" => vec![".build/pass2/"],
+        "book_structure" => vec!["book_structure.json", ".build/book-structure/"],
+        "paper_reading_guide" => vec!["paper_reading_guide.json", ".build/paper-reading-guide/"],
+        _ => vec![".build/"],
+    }
+}
+
+fn stage_prompt(stage: &str) -> String {
+    format!(
+        "Run Build Workbench stage `{stage}` using only the declared input manifest and write only the declared output paths. Do not mark reader trust complete; deterministic gates will re-read artifacts after the stage."
+    )
+}
+
+fn write_executor_contract(
+    book_dir: &Path,
+    job: &serde_json::Value,
+    run_id: &str,
+    stage: &str,
+    executor: &str,
+    now: &str,
+) -> Result<serde_json::Value, ToolError> {
+    let run_dir = executor_run_dir(book_dir, run_id);
+    std::fs::create_dir_all(&run_dir).map_err(|e| ToolError {
+        error_code: "EXECUTOR_CONTRACT_WRITE_FAILED".into(),
+        category: "internal".into(),
+        message: format!("创建 executor run 目录失败({}): {e}", run_dir.display()),
+    })?;
+    let prompt = stage_prompt(stage);
+    let prompt_path = run_dir.join("prompt.md");
+    std::fs::write(&prompt_path, &prompt).map_err(|e| ToolError {
+        error_code: "EXECUTOR_CONTRACT_WRITE_FAILED".into(),
+        category: "internal".into(),
+        message: format!("写入 executor prompt 失败({}): {e}", prompt_path.display()),
+    })?;
+    let command_summary = if executor == "codex" {
+        format!(
+            "codex --no-alt-screen --workdir {} < {}",
+            book_dir.display(),
+            prompt_path.display()
+        )
+    } else {
+        format!("{executor} adapter for stage {stage}")
+    };
+    let contract = json!({
+        "version": "executor_run_contract.v1",
+        "run_id": run_id,
+        "job_id": job.get("job_id").cloned().unwrap_or_else(|| json!(null)),
+        "book_id": job.get("book_id").cloned().unwrap_or_else(|| json!(null)),
+        "stage": stage,
+        "executor": executor,
+        "created_at": now,
+        "workdir": path_string(book_dir),
+        "input_manifest": WORKBENCH_INPUT_MANIFEST_RELATIVE,
+        "prompt_path": path_string(&prompt_path),
+        "allowed_output_paths": stage_output_paths(stage),
+        "command_summary": command_summary,
+        "permission_policy": {
+            "auto_grant": false,
+            "browser_commands_allowed": false
+        }
+    });
+    write_workbench_json(&run_dir.join("contract.json"), &contract)?;
+    Ok(contract)
+}
+
+fn apply_executor_adapter_skeleton(
+    book_dir: &Path,
+    mut job: serde_json::Value,
+    run_id: &str,
+    stage: &str,
+    executor: &str,
+    adapter_mode: &str,
+    now: &str,
+) -> Result<serde_json::Value, ToolError> {
+    if !matches!(
+        adapter_mode,
+        "contract_only" | "fake_success" | "fake_failure" | "fake_permission"
+    ) {
+        return Err(ToolError {
+            error_code: "INVALID_EXECUTOR_ADAPTER_MODE".into(),
+            category: "validation".into(),
+            message: "adapter_mode 必须是 contract_only/fake_success/fake_failure/fake_permission"
+                .into(),
+        });
+    }
+    let contract = write_executor_contract(book_dir, &job, run_id, stage, executor, now)?;
+    job = append_job_event(
+        job,
+        now,
+        "executor_contract_written",
+        Some(stage),
+        Some("Executor run contract written"),
+        Some(json!({
+            "run_id": run_id,
+            "contract_path": path_string(&executor_run_dir(book_dir, run_id).join("contract.json")),
+            "command_summary": contract.get("command_summary").cloned().unwrap_or_else(|| json!(null)),
+        })),
+    );
+    match adapter_mode {
+        "fake_success" => {
+            job["status"] = json!("ready");
+            job["active_run"] = serde_json::Value::Null;
+            Ok(append_job_event(
+                job,
+                now,
+                "executor_completed",
+                Some(stage),
+                Some("Fake executor completed"),
+                Some(json!({ "run_id": run_id })),
+            ))
+        }
+        "fake_failure" => {
+            job["status"] = json!("failed");
+            job["active_run"] = serde_json::Value::Null;
+            Ok(append_job_event(
+                job,
+                now,
+                "executor_failed",
+                Some(stage),
+                Some("Fake executor failed"),
+                Some(json!({ "run_id": run_id })),
+            ))
+        }
+        "fake_permission" => {
+            let request_id = format!(
+                "perm_{}",
+                &sha256_hex(format!("{run_id}:{stage}:permission").as_bytes())[..12]
+            );
+            let request = json!({
+                "request_id": request_id,
+                "run_id": run_id,
+                "executor": executor,
+                "category": "sandbox_escalation",
+                "action_summary": contract.get("command_summary").and_then(|value| value.as_str()).unwrap_or("executor permission requested"),
+                "scope_hint": "stage",
+                "native": {
+                    "contract_path": path_string(&executor_run_dir(book_dir, run_id).join("contract.json"))
+                },
+                "status": "pending",
+                "created_at": now,
+            });
+            if !job
+                .get("permission_requests")
+                .is_some_and(|value| value.is_array())
+            {
+                job["permission_requests"] = json!([]);
+            }
+            job["permission_requests"]
+                .as_array_mut()
+                .expect("permission_requests initialized as array")
+                .push(request.clone());
+            job["status"] = json!("needs_user");
+            Ok(append_job_event(
+                job,
+                now,
+                "permission_requested",
+                Some(stage),
+                request
+                    .get("action_summary")
+                    .and_then(|value| value.as_str()),
+                Some(json!({
+                    "request_id": request.get("request_id").cloned().unwrap_or_else(|| json!(null)),
+                    "category": "sandbox_escalation",
+                    "scope_hint": "stage",
+                })),
+            ))
+        }
+        "contract_only" => Ok(job),
+        _ => unreachable!("adapter_mode was validated before writing executor contract"),
+    }
+}
+
 fn artifact_config_hash(book_dir: &Path, relative: &str) -> Result<Option<String>, ToolError> {
     Ok(
         read_json_artifact_optional(&book_dir.join(relative), "ARTIFACT_INVALID")?.and_then(
@@ -1727,6 +1923,10 @@ fn route_workbench_job_start(state: &mut AppState, body: &str, now: &str) -> Rep
         Ok(executor) => executor,
         Err(reply) => return reply,
     };
+    let adapter_mode = value
+        .get("adapter_mode")
+        .and_then(|value| value.as_str())
+        .unwrap_or("contract_only");
     let job = if let Some(job_id) = value.get("job_id").and_then(|value| value.as_str()) {
         match read_build_job_by_id(&state.book_dir, job_id.trim()) {
             Ok(job) => job,
@@ -1778,6 +1978,18 @@ fn route_workbench_job_start(state: &mut AppState, body: &str, now: &str) -> Rep
         Some(&format!("Executor {executor} started")),
         None,
     );
+    let started = match apply_executor_adapter_skeleton(
+        &state.book_dir,
+        started,
+        &run_id,
+        stage,
+        executor,
+        adapter_mode,
+        now,
+    ) {
+        Ok(job) => job,
+        Err(e) => return err_reply(&e),
+    };
     if let Err(e) = write_build_job_atomic(&state.book_dir, &started) {
         return err_reply(&e);
     }
@@ -4574,6 +4786,106 @@ mod tests {
             .iter()
             .any(|event| event["type"] == "job_event_appended"));
         assert!(events.iter().any(|event| event["type"] == "job_resumed"));
+    }
+
+    #[test]
+    fn codex_executor_skeleton_writes_contract_and_permission_request() {
+        let mut s = state_named("executor-skeleton-codex");
+        let imported = post(
+            &mut s,
+            "/build_workbench/input.import",
+            r#"{"book_id":"paper-codex","paper_md_text":"abc","paper_pdf_base64":"cGRm"}"#,
+        );
+        assert_eq!(imported.status, 200);
+
+        let started = post(
+            &mut s,
+            "/build_workbench/job.start",
+            r#"{"stage":"source_reconciliation","executor":"codex","run_id":"run-codex","adapter_mode":"fake_permission"}"#,
+        );
+        assert_eq!(started.status, 200);
+        let started_body: serde_json::Value = serde_json::from_str(&started.body).unwrap();
+        let job = &started_body["jobs"][0];
+        assert_eq!(job["status"], "needs_user");
+        assert_eq!(job["permission_requests"][0]["status"], "pending");
+        assert_eq!(
+            job["permission_requests"][0]["category"],
+            "sandbox_escalation"
+        );
+        assert!(job["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|event| event["type"] == "executor_contract_written"));
+
+        let contract_path = s
+            .book_dir
+            .join(".build")
+            .join("executor-runs")
+            .join("run-codex")
+            .join("contract.json");
+        let contract: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(contract_path).unwrap()).unwrap();
+        assert_eq!(contract["version"], "executor_run_contract.v1");
+        assert_eq!(contract["executor"], "codex");
+        assert!(contract["command_summary"]
+            .as_str()
+            .unwrap()
+            .contains("codex --no-alt-screen"));
+        assert_eq!(contract["permission_policy"]["auto_grant"], false);
+    }
+
+    #[test]
+    fn fake_executor_success_records_completion_without_trusting_reader_artifacts() {
+        let mut s = state_named("executor-skeleton-fake");
+        let imported = post(
+            &mut s,
+            "/build_workbench/input.import",
+            r#"{"book_id":"paper-fake","paper_md_text":"abc","paper_pdf_base64":"cGRm"}"#,
+        );
+        assert_eq!(imported.status, 200);
+
+        let started = post(
+            &mut s,
+            "/build_workbench/job.start",
+            r#"{"stage":"source_reconciliation","executor":"manual","run_id":"run-fake","adapter_mode":"fake_success"}"#,
+        );
+        assert_eq!(started.status, 200);
+        let started_body: serde_json::Value = serde_json::from_str(&started.body).unwrap();
+        let job = &started_body["jobs"][0];
+        assert_eq!(job["status"], "ready");
+        assert!(job["active_run"].is_null());
+        assert_eq!(started_body["readiness"]["route"], "workbench");
+        assert!(job["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|event| event["type"] == "executor_completed"));
+    }
+
+    #[test]
+    fn invalid_executor_adapter_mode_is_rejected_without_contract_artifact() {
+        let mut s = state_named("executor-skeleton-invalid-mode");
+        let imported = post(
+            &mut s,
+            "/build_workbench/input.import",
+            r#"{"book_id":"paper-invalid","paper_md_text":"abc","paper_pdf_base64":"cGRm"}"#,
+        );
+        assert_eq!(imported.status, 200);
+
+        let started = post(
+            &mut s,
+            "/build_workbench/job.start",
+            r#"{"stage":"source_reconciliation","executor":"codex","run_id":"run-invalid","adapter_mode":"browser_shell"}"#,
+        );
+        assert_eq!(started.status, 400);
+        assert!(!s
+            .book_dir
+            .join(".build")
+            .join("executor-runs")
+            .join("run-invalid")
+            .join("contract.json")
+            .exists());
     }
 
     #[test]

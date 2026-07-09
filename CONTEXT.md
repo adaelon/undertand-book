@@ -338,5 +338,8 @@ Build Workbench 接收 `paper.md + paper.pdf` 后形成的未信任论文构建�
 ## Workbench input manifest
 Draft paper workspace 中记录原始 `paper.md/paper.pdf` 路径、sha256、profile、display title、config hash 与 current input fingerprint 的未信任 manifest。它只用于构建编排和 stale 判断,不替代 `.build/<stage>` accepted artifact。状态:NEW(见 `docs/切片方案-paper-pdf-first-hybrid.md` PH12)。
 
+## Executor run contract
+Build controller 为一次 server-side executor run 写出的未信任执行契约,包含 stage、scoped workdir、prompt、input manifest、允许输出路径、command summary 和权限策略。它只约束 executor 行为,不证明 stage artifact 可信。状态:NEW(见 `docs/切片方案-paper-pdf-first-hybrid.md` PH14)。
+
 ## BuildDecisionRequest
 Build Workbench 中影响构建方向或阶段 readiness 的用户选择请求,区别于 Codex/opencode/Claude 等 executor 的工具权限请求。其答案必须写入 job event,若影响构建结果还要写入 stage decision artifact。状态:NEW(见 [docs/adr/0063])。

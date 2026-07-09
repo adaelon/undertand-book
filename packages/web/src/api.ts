@@ -278,6 +278,9 @@ export interface BuildJobEvent {
     | "job_resumed"
     | "job_event_appended"
     | "executor_started"
+    | "executor_contract_written"
+    | "executor_completed"
+    | "executor_failed"
     | "decision_requested"
     | "decision_resolved"
     | "permission_requested"
@@ -540,7 +543,13 @@ export const api = {
     paper_pdf_base64?: string;
   }) => http<BuildWorkbenchSnapshot>("POST", "/build_workbench/input.import", payload),
   workbenchJobCreate: () => http<BuildWorkbenchSnapshot>("POST", "/build_workbench/job.create", {}),
-  workbenchJobStart: (payload: { job_id?: string; stage?: BuildStageId; executor?: ExecutorId; run_id?: string }) =>
+  workbenchJobStart: (payload: {
+    job_id?: string;
+    stage?: BuildStageId;
+    executor?: ExecutorId;
+    run_id?: string;
+    adapter_mode?: "contract_only" | "fake_success" | "fake_failure" | "fake_permission";
+  }) =>
     http<BuildWorkbenchSnapshot>("POST", "/build_workbench/job.start", payload),
   workbenchJobResume: (job_id: string) =>
     http<BuildWorkbenchSnapshot>("POST", "/build_workbench/job.resume", { job_id }),
