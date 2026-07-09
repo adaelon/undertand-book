@@ -116,6 +116,94 @@ export interface BookLibraryResponse {
   root: string;
   books: BookLibraryEntry[];
 }
+export type PdfCapabilityStatus = "unavailable" | "available" | "degraded" | "stale" | "failed";
+export interface PdfCapability {
+  status: PdfCapabilityStatus;
+  reason?: string;
+  artifact_path?: string;
+  report_path?: string;
+  config_hash?: string;
+}
+export interface SourceManifestV2 {
+  version: "source_manifest.v2";
+  book_id: string;
+  canonical_source: {
+    kind: "reconciled_markdown";
+    path: "source.txt";
+    citation_anchor: "lid";
+    sha256: string;
+  };
+  original_pdf?: {
+    path: string;
+    sha256: string;
+    fingerprint?: string;
+    citation_anchor: false;
+  };
+  capabilities: {
+    view_pdf: PdfCapability;
+    project_lid_to_pdf: PdfCapability;
+    resolve_pdf_selection: PdfCapability;
+    project_ranges_to_pdf: PdfCapability;
+  };
+}
+export interface PdfPageRect {
+  pageIndex: number;
+  bbox: [number, number, number, number];
+}
+export interface PdfRegion extends PdfPageRect {
+  region_id: string;
+}
+export interface PdfSourceMapEntry {
+  lid: string;
+  source_span: TextRange;
+  status: "word_mapped" | "line_fallback" | "block_fallback" | "unmapped" | "excluded";
+  regions: PdfRegion[];
+  primary_region?: PdfRegion;
+  alignment: { confidence: number; reason?: string; trace_id?: string };
+}
+export interface PdfSourceMap {
+  version: "pdf_source_map.v1";
+  book_id: string;
+  coordinate_system: {
+    space: "pdf_user_space";
+    origin: "bottom_left";
+    unit: "pt";
+    rotation_applied: false;
+  };
+  pages: Array<{
+    pageIndex: number;
+    page_label?: string;
+    width: number;
+    height: number;
+    rotate: 0 | 90 | 180 | 270;
+    view: [number, number, number, number];
+  }>;
+  entries: PdfSourceMapEntry[];
+  excluded_regions: PdfRegion[];
+  page_region_index: Record<string, string[]>;
+  page_excluded_index: Record<string, string[]>;
+  config_hash: string;
+}
+export interface PdfSelectionResolveResponse {
+  status: "resolved" | "partial" | "unresolved";
+  ranges: Array<{
+    lid: string;
+    range: TextRange;
+    source_span: TextRange;
+    quote_markdown: string;
+  }>;
+  quote_markdown: string;
+}
+export interface PdfRangesProjectResponse {
+  projections: Array<{
+    lid: string;
+    range?: TextRange | null;
+    status: "exact" | "lid_region_fallback" | "unmapped";
+    source_span?: TextRange | null;
+    primary_region?: PdfRegion | null;
+    regions: PdfRegion[];
+  }>;
+}
 export interface FormulaParameter {
   symbol: string;
   label: string | null;
@@ -230,6 +318,9 @@ export const api = {
   manifest: () => http<Manifest>("GET", "/book/manifest"),
   bookLibrary: () => http<BookLibraryResponse>("GET", "/book/library"),
   assetManifest: () => http<AssetManifest>("GET", "/book/asset_manifest"),
+  sourceManifest: () => http<SourceManifestV2>("GET", "/book/source_manifest"),
+  pdfSourceMap: () => http<PdfSourceMap>("GET", "/book/pdf_source_map"),
+  pdfOriginalUrl: () => `${BASE}/book/pdf/original`,
   profileManifest: (profile_id?: "technical_learning" | "paper") =>
     http<ProfileManifest>("GET", `/profile/manifest${qs({ profile_id })}`),
   text: (lid: string, end?: string) =>
@@ -254,6 +345,10 @@ export const api = {
   highlight: (lid: string, range?: TextRange, sourceSessionId?: string) =>
     http<HighlightEffect>("POST", "/reader/highlight", { lid, range, source_session_id: sourceSessionId }),
   note: (lid: string, text: string) => http<NoteEffect>("POST", "/reader/note", { lid, text }),
+  pdfSelectionResolve: (body: { pageIndex?: number; rects: Array<{ pageIndex?: number; bbox: [number, number, number, number] }> }) =>
+    http<PdfSelectionResolveResponse>("POST", "/reader/pdf_selection.resolve", body),
+  pdfRangesProject: (ranges: Array<{ lid: string; range?: TextRange }>) =>
+    http<PdfRangesProjectResponse>("POST", "/reader/pdf_ranges.project", { ranges }),
   layoutApply: (body: {
     actions?: ReaderLayoutAction[];
     proposal_id?: string;

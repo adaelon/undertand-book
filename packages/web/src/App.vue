@@ -16,12 +16,15 @@ import type {
   PaperReadingGuide,
   PaperReadingMode,
   PaperReadingStage,
+  PdfSourceMap,
+  PdfSourceMapEntry,
   ProfileManifest,
   ProfileSummary,
   ReaderLayoutAction,
   ReaderLayoutProposal,
   ReaderLayoutState,
   StructureProjection,
+  SourceManifestV2,
   TraceStep,
   Viewport,
 } from "./api";
@@ -30,6 +33,7 @@ import { rangeToMarkdown } from "./selection";
 import TopBar from "./components/TopBar.vue";
 import LeftRail from "./components/LeftRail.vue";
 import ReaderPane from "./components/ReaderPane.vue";
+import PdfReaderPane from "./components/PdfReaderPane.vue";
 import RightRail from "./components/RightRail.vue";
 
 type NodeKind = import("./api").Manifest["tree"][number]["kind"];
@@ -69,6 +73,9 @@ const leafOrder = ref<string[]>([]); // 全书叶 LID 序(读位感分母 + 进�
 const kindByLid = ref<Map<string, NodeKind>>(new Map());
 const imageAssetByLid = ref<Map<string, ImageAssetManifestEntry>>(new Map());
 const outlineItems = ref<OutlineItem[]>([]);
+const sourceManifest = ref<SourceManifestV2 | null>(null);
+const pdfSourceMap = ref<PdfSourceMap | null>(null);
+const pdfRuntimeError = ref<string | null>(null);
 const titleByLid = ref<Map<string, string>>(new Map());
 const viewport = ref<Viewport | null>(null);
 const edgeLoading = ref(false);
@@ -183,6 +190,23 @@ const progressPct = computed(() => {
   return Math.round(((idx + 1) / leafOrder.value.length) * 100);
 });
 const selectedSegment = computed(() => segments.value.find((seg) => seg.lid === selectedLid.value) ?? null);
+function pdfCapabilityUsable(status: string | undefined): boolean {
+  return status === "available" || status === "degraded";
+}
+const pdfReaderAvailable = computed(() =>
+  sourceManifest.value?.capabilities.view_pdf.status === "available"
+  && !!sourceManifest.value.original_pdf
+  && !!pdfSourceMap.value
+  && pdfCapabilityUsable(sourceManifest.value.capabilities.project_lid_to_pdf.status),
+);
+const pdfEntryByLid = computed(() => new Map((pdfSourceMap.value?.entries ?? []).map((entry) => [entry.lid, entry])));
+const pdfActiveLid = computed(() => selectedLid.value ?? readingAnchorLid.value);
+function pdfEntryHasRegion(entry: PdfSourceMapEntry | null | undefined): boolean {
+  return !!entry?.primary_region || !!entry?.regions.length;
+}
+function pdfLidHasRegion(lid: string): boolean {
+  return pdfEntryHasRegion(pdfEntryByLid.value.get(lid));
+}
 const selectedFormula = computed(() => selectedSegment.value?.formula ?? null);
 const segmentByLid = computed(() => new Map(segments.value.map((seg) => [seg.lid, seg])));
 function lidOrderIndex(lid: string | null | undefined): number {
@@ -980,11 +1004,31 @@ async function loadChapter(anchorLid: string) {
   }
 }
 
+
+async function loadPdfRuntimeArtifacts() {
+  sourceManifest.value = null;
+  pdfSourceMap.value = null;
+  pdfRuntimeError.value = null;
+  try {
+    const manifest = await api.sourceManifest();
+    sourceManifest.value = manifest;
+    if (
+      manifest.capabilities.view_pdf.status === "available"
+      && pdfCapabilityUsable(manifest.capabilities.project_lid_to_pdf.status)
+    ) {
+      pdfSourceMap.value = await api.pdfSourceMap();
+    }
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 404) return;
+    pdfRuntimeError.value = errorMessage(e);
+  }
+}
 async function init() {
   try {
     const m = await api.manifest();
     const assets = await api.assetManifest();
     kindByLid.value = new Map(m.tree.map((n) => [n.lid, n.kind]));
+    await loadPdfRuntimeArtifacts();
     imageAssetByLid.value = new Map(assets.images.map((img) => [img.lid, img]));
     leafOrder.value = m.tree.filter((n) => n.children.length === 0).map((n) => n.lid);
     await loadOutlineTitles(m.tree);
@@ -1035,6 +1079,9 @@ async function doGoto(lid: string, focusQuote?: string | null) {
     sourceFocus.value = focusQuote === undefined ? null : { lid, quote: focusQuote };
     await loadWindow((await api.goto(lid)).viewport);
     await loadPaperProjectionData();
+    if (pdfReaderAvailable.value && !pdfLidHasRegion(lid)) {
+      await openSourcePreview({ lid, quote: focusQuote ?? null });
+    }
     gotoInput.value = "";
   } catch (e) {
     fail(e);
@@ -1539,6 +1586,9 @@ function resetBookSessionUi() {
   kindByLid.value = new Map();
   imageAssetByLid.value = new Map();
   outlineItems.value = [];
+  sourceManifest.value = null;
+  pdfSourceMap.value = null;
+  pdfRuntimeError.value = null;
   titleByLid.value = new Map();
   viewport.value = null;
   segments.value = [];
@@ -1835,7 +1885,20 @@ async function submitOpenBook(dir = bookPickerDir.value) {
         @mousedown="startResize('left', $event)"
       ></div>
 
+      <PdfReaderPane
+        v-if="pdfReaderAvailable"
+        :source-manifest="sourceManifest"
+        :source-map="pdfSourceMap"
+        :pdf-url="api.pdfOriginalUrl()"
+        :active-lid="pdfActiveLid"
+        :selected-lid="selectedLid"
+        @goto="doGoto"
+        @select="onSelectSeg"
+        @focus-source="focusLocalSource"
+      />
+
       <ReaderPane
+        v-else
         ref="readerPaneRef"
         :segments="segments"
         :viewport-anchor="readingAnchorLid"
