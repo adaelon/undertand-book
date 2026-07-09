@@ -1,50 +1,33 @@
-# SESSION_CHECKPOINT - 2026-07-06 00:48
+# SESSION_CHECKPOINT - 2026-07-09 13:20
 
-## Freshness Check
-- Last committed base when written: `4966e9e fix: harden native provider compatibility`.
-- This checkpoint is written immediately before the requested feature commit+push. On read, compare `git log -3` and `git status --short`; trust git if newer.
+## 新鲜度自检
+- 写入时基准 commit: `3d42b39 feat: add confirmable sidecar planning`.
+- 读入时先跑 `git log --oneline -3` 和 `git status --short`;若更新,以 git 为准。
 
-## Current Work
-PF24-PF26 are implemented and verified:
-- PF24 image assets: Markdown/EPUB/data-uri images are copied into `.understand-book/<bookId>/assets/images/`, indexed by `asset_manifest.json`, served by `/book/assets/...`, and rendered by the web reader/source preview.
-- PF25 open-book picker: TopBar `Open book` opens a modal listing built `.understand-book/<book_id>` directories from `/book/library`, with manual path fallback.
-- PF26 per-book progress: `session.json` now stores `current_book_dir` plus `books.{dir}.top_lid`, keeps old `{book_dir, top_lid}` compatibility, and restores each book to its own saved position.
+## 当前状态
+- PH6-PH9 已完成并提交: Workbench core shell、PDF runtime endpoints、最小 PDF surface、trusted-source paper projections、confirmable sidecar plan。
+- 两块前端仍未实现,已落档为后续切片:
+  - PH10: Build Workbench 前端预构建页。
+  - PH11: PDF.js 正文阅读面。
 
-## Next Steps
-1. Commit and push the PF24-PF26 changes if not already committed.
-2. Start the real paper prebuild only after the real input path is known. Do not guess from untracked scratch Markdown files.
-3. For a real paper input, first run:
-   `.\node_modules\.bin\tsx.ps1 skills\build\build-status.ts <paper.md|epub> --content-profile paper --paper-subtype research_article [--book-id <id>]`
-4. Continue the paper pipeline in file-state order: Pass1 `status -> emit-input -> pass1-local-extractor -> pass1-write -> pass1-batch`, then `profile-sidecar-*`, `paper-metadata-*`, `paper-lexicon-*`, `pass2-*`, and `book-structure-*`.
-5. Use only real extractor/subagent outputs for the paper build. Do not use deterministic filler, generic discourse, empty formula explanations, or reject-all Pass2 as substitutes.
-6. After artifacts close, smoke the built paper with `/book/paper_metadata`, `/book/paper_lexicon`, `/book/paper_reading_guide`, `/book/asset_manifest`, and the web paper slots.
+## 下一步可直接接手
+1. 打开 `docs/切片方案-paper-pdf-first-hybrid.md` 的 PH10/PH11,先确认本轮做哪一块。
+2. PH10: 扫 `packages/core/src/build-workbench.ts`、`packages/web/src/App.vue`、`packages/web/src/api.ts`、`packages/web/src/components/*`,做 Workbench route/API/UI 最小闭环。
+3. PH11: 扫 `packages/web/src/components/PdfReaderPane.vue`、`packages/web/src/api.ts` 和 PH7 endpoints,把最小 PDF surface 升级为 controlled PDF.js canvas/text-layer/lazy page surface。
+4. 每个小切片实现后运行相关 typecheck/test/build,单独 commit。
 
-## Uncommitted / Unfinished
-- Intended staged files for the feature commit include tracked changes under `crates/server`, `packages/core`, `packages/web`, `skills/build`, `docs/adr/0029-*`, `docs/切片方案-asset一等对象.md`, `docs/代码链路.md`, plus new `packages/core/src/asset-manifest.ts` and `packages/core/test/asset-manifest.test.ts`.
-- Keep unrelated local artifacts out of the commit unless explicitly requested: `.fluid/`, `DESIGN-*.md`, dev/server logs, scratch Chinese reference Markdown, `todo.md`, `understand-book.md`, `grill.md`, and untracked docs not tied to this feature commit.
-- The real paper prebuild has not started in this checkpoint because no concrete `<paper.md|epub>` input path was specified.
+## 未提交/未完成
+- PH10/PH11 当前仅落档方案,尚未实现。
+- 工作区有既有脏改和未跟踪文件;不要误 stage unrelated files。
+- 已知既有脏改包括 `packages/core/src/md-adapter.ts`、core tests、`packages/web/src/App.vue`、`LeftRail.vue`、`ReaderPane.vue`、`md.ts`、`style.css` 等。
 
-## Cold-Start Reading Sequence
-1. `skills/build/SKILL.md` - paper profile-aware Pass1, profile sidecar, metadata, lexicon, Pass2, BookStructure, and resume rules.
-2. `docs/预购建流程.md` - end-to-end prebuild mental model and extractor quality constraints.
-3. `docs/切片方案-paper规则包.md` - paper profile scope, artifacts, and PP acceptance.
-4. `docs/切片方案-profile插件框架.md` - profile plugin framework consumer/runtime/frontend boundary.
-5. `docs/切片方案-asset一等对象.md` and `docs/adr/0029-*` - image asset/LID/source truth boundary.
-6. `docs/代码链路.md` - PF24/PF25/PF26 implementation trail.
-7. `crates/server/src/lib.rs`, `packages/web/src/App.vue`, and `packages/core/src/asset-manifest.ts` only if debugging the just-finished feature surfaces.
+## 冷启动读序
+1. `docs/切片方案-paper-pdf-first-hybrid.md` - 读 PH10/PH11,再看 G49/G50/G11/G36/G17b/G35。
+2. `docs/代码链路.md` - 读 2026-07-09 PH6-PH9 以及 PH10/PH11 docs entry。
+3. `packages/core/src/build-workbench.ts` - PH10 的 readiness/job/decision/permission 状态模型。
+4. `packages/web/src/App.vue` - PH10/PH11 的 frontend entry 和 reader surface 切换点。
+5. `packages/web/src/components/PdfReaderPane.vue` - PH11 的最小实现现状。
 
-## Decisions Made
-- Image render assets are a local render bundle, not citation truth; `source.txt` and LID remain the source/citation anchors.
-- External HTTP(S) image URLs are recorded as external instead of downloaded during deterministic prebuild.
-- Open-book discovery is local and conservative: only `.understand-book` child directories with `base.json` are listed.
-- Reading progress is keyed by canonicalized book directory, with Windows verbatim path prefixes stripped for compatibility.
-
-## Verification
-- `npm run test -- asset-manifest` in `packages/core`: passed.
-- `npm run test` in `packages/core`: passed.
-- `npm run typecheck` in `packages/core`: passed.
-- `npm run typecheck` and `npm run build` in `packages/web`: passed.
-- `cargo test -p server`: passed, 47 lib tests plus main/bin tests.
-- Root `.\node_modules\.bin\tsc.ps1 --noEmit --pretty false`: passed.
-- `pass1-batch.ts understand-book.md --book-id understand-book-image-smoke --allow-partial`: produced `images=1 available=1`.
-- `git diff --check`: passed; only LF/CRLF warnings.
+## 本会话决策摘要
+- “前端预构建页面”不是 PH6 已完成内容,应作为 PH10 单独实现。
+- “前端 PDF 正文”不是 PH7 最小 native/minimal surface 已完成内容,应作为 PH11 单独实现。

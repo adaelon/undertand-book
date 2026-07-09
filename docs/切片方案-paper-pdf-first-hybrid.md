@@ -291,6 +291,18 @@ interface ExecutorPermissionRequest {
 - **Do not**: block PH1-PH8 on natural-language sidecar UX.
 - **Done**: Q68 is implemented as its own Build Workbench extension slice.
 
+### PH10 - Build Workbench frontend prebuild page
+
+- **Do**: add a dedicated frontend route/page for pre-reader build state; consume readiness, job, event, decision, permission, and sidecar plan artifacts; show the stage DAG with source reconciliation, hybrid foundation, Pass1, and paper projection status; keep `BuildDecisionRequest` and `ExecutorPermissionRequest` as separate UI flows; let users confirm/edit PH9 `sidecar_plan.json` form drafts before custom sidecar generation.
+- **Do not**: run LLM/executors from frontend code, mark stages done from job state alone, mix Workbench state into normal `/reader/*`, or hide stale/needs_review targets behind the reader.
+- **Done**: missing, stale, needs_review, and incomplete books open Workbench; trusted books open the reader; source review and sidecar plan confirmation are visible before artifact trust; tests cover routing plus decision/permission separation.
+
+### PH11 - PDF.js body reader surface
+
+- **Do**: replace the minimal/native PDF surface with a controlled official `pdfjs-dist` body reader; render canvas pages, text-layer geometry for selection, all page shells with lazy page rendering, LID overlays from `pdf_source_map`, selection to `/reader/pdf_selection.resolve`, semantic range projection to `/reader/pdf_ranges.project`, and source preview fallback for unmapped LIDs.
+- **Do not**: add OCR for scanned PDFs, PDF annotation write-back, page/bbox citation anchors, Zotero code/assets, permanent Markdown/PDF split reader, thumbnails, or printing unless scoped later.
+- **Done**: PDF text body is rendered by project-controlled PDF.js pages, LID jump/selection/range projection work in UI, and citations/highlights still persist only LID/range.
+
 ## 4. Hard Gates and Diagnostics
 
 Hard gates:
@@ -372,7 +384,7 @@ Status values:
 | G8 normalized-to-raw offset maps | covered | `alignment_report.normalization_provenance`, original UTF-16 spans |
 | G9 book-scoped PDF route | covered | `/book/pdf/original`, source manifest path rules |
 | G10 hybrid foundation only | covered | PH5 excludes paper sidecar chain; PH8 runs later |
-| G11 controlled pdf.js surface | covered | PH7 `PdfReaderPane`, no iframe/embed |
+| G11 controlled pdf.js surface | covered | PH7 minimal `PdfReaderPane`; PH11 full PDF.js body reader |
 | G12 PDF scroll syncs semantic LID | covered | Reader semantics: call `reader.goto(lid)` |
 | G13 PDF selection aligns to existing popover model | covered | `PdfSelectionResolveResponse`, LID/range persistence |
 | G14 early selection-map sharding | covered | `pdf_selection_map/manifest.json + pages/*.json` |
@@ -391,7 +403,7 @@ Status values:
 | G14b sharded selection map | covered | same as G14 early |
 | G15b semantic annotation back-projection | covered | `/reader/pdf_ranges.project` |
 | G16b text-layer geometry only | covered | Reader semantics; browser text not quote truth |
-| G17b page virtualization | superseded | replaced by Q36 all page shells + lazy rendering for v1 |
+| G17b page virtualization | superseded | replaced by Q36 all page shells + PH11 lazy PDF.js page rendering |
 | G18b source-manifest-driven capability | covered | `source_manifest.v2`, API gates |
 | G19b book-scoped PDF/map artifacts | covered | source manifest artifact paths and PH5 |
 | G20b freshness hashes | covered | hard gates: manifest/map/selection hashes agree |
@@ -405,8 +417,8 @@ Status values:
 | G32 batch range projection | covered | `/reader/pdf_ranges.project` |
 | G33 frontend coordinate conversion | covered | PDF user-space persisted; frontend converts locally |
 | G34 PDF scroll through `reader.goto` | covered | Reader semantics |
-| G35 official `pdfjs-dist` thin adapters | covered | PH2 build adapter and PH7 web rendering adapter |
-| G36 all page shells + lazy canvas | covered | PH7 rendering rule |
+| G35 official `pdfjs-dist` thin adapters | covered | PH2 build adapter and PH11 web rendering adapter |
+| G36 all page shells + lazy canvas | covered | PH11 rendering rule |
 | G37 deterministic citation jump | covered | `primary_region` and LID jump behavior |
 | G38 mutually exclusive center surface | covered | PH7 `PdfReaderPane` vs HTML reader |
 | G39 source manifest v2 | covered | `SourceManifestV2` |
@@ -419,8 +431,8 @@ Status values:
 | G46 safe auto-repair and LLM format review | covered | PH3 and PH4 |
 | G47 content equivalence gate | covered | PH4 and hard gates |
 | G48 unresolved reconciliation blocks trusted build | covered | PH3 done criteria |
-| G49 dedicated source reconciliation review page | covered | PH4 human review artifacts, PH6 Workbench shell |
-| G50 source review outside normal reader | covered | PH6 build-mode boundary |
+| G49 dedicated source reconciliation review page | covered | PH10 Build Workbench frontend page; PH4/PH6 are artifact and shell foundations |
+| G50 source review outside normal reader | covered | PH10 Workbench route keeps source review outside normal reader |
 | G51 manual vs LLM review choice | covered | PH4 and `BuildDecisionRequest` |
 | G52 noninteractive CLI prompt proposal | superseded | replaced by Q53 Build Workbench user-choice surface |
 | G53 Codex/opencode executor feasibility | covered | PH6 executor adapters and telemetry |
