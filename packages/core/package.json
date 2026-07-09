@@ -8,13 +8,14 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "zod": "^3.23.0",
     "fflate": "^0.8.2",
-    "node-html-parser": "^7.0.1"
+    "node-html-parser": "^7.0.1",
+    "pdfjs-dist": "^6.1.200",
+    "zod": "^3.23.0"
   },
   "devDependencies": {
+    "@types/node": "^22.0.0",
     "typescript": "^5.7.0",
-    "vitest": "^3.1.0",
-    "@types/node": "^22.0.0"
+    "vitest": "^3.1.0"
   }
 }
