@@ -103,6 +103,30 @@ describe("PH8 paper projection chain", () => {
     expect(() => assertTrustedPaperProjectionSource(dir)).toThrow("canonical source hash");
   });
 
+  it("plans projections from an explicitly accepted manual override while retaining residual diagnostics", () => {
+    const dir = tempDir();
+    writeTrustedBook(dir);
+    writeJson(path.join(dir, ".build", "source-reconciliation", "report.json"), {
+      ...trustedReport(),
+      summary: { ...emptyReconciliationSummary(), needs_review: 1 },
+      unresolved: [{ id: "block-1", status: "needs_review", reason: "manual review remained different" }],
+      acceptance: {
+        mode: "manual_override",
+        policy: "single_review_then_override_v1",
+        accepted_at: "2026-07-10T12:00:00.000Z",
+        residual_unresolved_count: 1,
+        decision_count: 1,
+      },
+    });
+
+    const plan = buildPaperProjectionChainPlan(dir);
+    const source = assertTrustedPaperProjectionSource(dir);
+
+    expect(plan.source_truth_locked).toBe(true);
+    expect(source.source_reconciliation_report.unresolved).toHaveLength(1);
+    expect(source.source_reconciliation_report.acceptance?.mode).toBe("manual_override");
+  });
+
   it("rejects unresolved source reconciliation reports", () => {
     const dir = tempDir();
     writeTrustedBook(dir);

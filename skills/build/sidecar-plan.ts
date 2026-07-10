@@ -43,9 +43,16 @@ if (!bookDir || !request || (targetView && !allowedTargetViews.has(targetView)))
 
 function readBookId(dir: string): string {
   const basePath = path.join(dir, "base.json");
-  if (!existsSync(basePath)) return path.basename(path.resolve(dir));
-  const base = JSON.parse(readFileSync(basePath, "utf8")) as { book_id?: unknown };
-  return typeof base.book_id === "string" && base.book_id.trim() ? base.book_id : path.basename(path.resolve(dir));
+  if (existsSync(basePath)) {
+    const base = JSON.parse(readFileSync(basePath, "utf8")) as { book_id?: unknown };
+    if (typeof base.book_id === "string" && base.book_id.trim()) return base.book_id;
+  }
+  const inputManifestPath = path.join(dir, ".build", "input", "manifest.json");
+  if (existsSync(inputManifestPath)) {
+    const manifest = JSON.parse(readFileSync(inputManifestPath, "utf8")) as { book_id?: unknown };
+    if (typeof manifest.book_id === "string" && manifest.book_id.trim()) return manifest.book_id;
+  }
+  return path.basename(path.resolve(dir));
 }
 
 function splitList(value: string | undefined): string[] | undefined {

@@ -139,6 +139,34 @@ describe("PH6 Build Workbench readiness", () => {
     expect(readiness.stages.hybrid_foundation.status).toBe("blocked");
   });
 
+  it("treats an explicit manual override as an accepted source stage while retaining residual diagnostics", () => {
+    const source = "The measured value is 42 mg.\n";
+    const readiness = detectBuildReadiness({
+      book_id: "paper-a",
+      current_input_fingerprint: fingerprint(),
+      source_reconciliation_report: {
+        ...reviewReport(),
+        acceptance: {
+          mode: "manual_override",
+          policy: "single_review_then_override_v1",
+          accepted_at: "2026-07-10T12:00:00.000Z",
+          residual_unresolved_count: 1,
+          decision_count: 1,
+        },
+      },
+      source_txt_sha256: sha256Text(source),
+      source_manifest: manifest(source),
+      base_exists: true,
+      pdf_source_map: { config_hash: "cfg-a" },
+      pdf_selection_map: { config_hash: "cfg-a" },
+      alignment_report: { config_hash: "cfg-a" },
+    });
+
+    expect(readiness.stages.source_reconciliation.status).toBe("done");
+    expect(readiness.stages.hybrid_foundation.status).toBe("done");
+    expect(readiness.route).toBe("reader");
+  });
+
   it("routes stale input fingerprints to Build Workbench", () => {
     const readiness = detectBuildReadiness({
       book_id: "paper-a",

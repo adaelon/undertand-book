@@ -4,7 +4,7 @@ import { SourceManifestV2Z, SourceReconciliationReportZ } from "./zod";
 import type { SourceManifestV2 } from "./source-manifest";
 import {
   sha256Text,
-  sourceReconciliationTrusted,
+  sourceReconciliationAccepted,
   type SourceReconciliationReport,
 } from "./source-reconciliation";
 
@@ -140,7 +140,7 @@ export function assertTrustedPaperProjectionSource(bookDirInput: string): Truste
   if (report.book_id !== sourceManifest.book_id) {
     throw new Error(`source reconciliation report book_id ${report.book_id} does not match source_manifest book_id ${sourceManifest.book_id}`);
   }
-  if (!sourceReconciliationTrusted(report)) {
+  if (!sourceReconciliationAccepted(report)) {
     throw new Error("source reconciliation report still has unresolved blocks");
   }
 

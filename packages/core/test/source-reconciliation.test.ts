@@ -4,9 +4,12 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import type { PdfTextGeometry } from "../src/pdf-geometry";
 import {
+  acceptSourceReconciliationManualOverride,
+  buildReviewedDraftFromDecisions,
   contentEquivalent,
   reconcilePaperSource,
   reviewCandidateAndReconcile,
+  sourceReconciliationAccepted,
   sourceReconciliationTrusted,
   writeSourceReconciliationArtifacts,
 } from "../src/source-reconciliation";
@@ -78,9 +81,99 @@ describe("PH3 source reconciliation engine", () => {
     expect(result.report.unresolved[0]).toMatchObject({
       id: "block-1",
       status: "needs_review",
+      md_excerpt: "The measured value is 42 mg.",
+      pdf_excerpt: "The measured value is 43 mg.",
+      candidate_text: "The measured value is 43 mg.",
+      review_question: "Markdown 与 PDF 的内容不同，请确认可信正文应采用哪一版。",
+      md_context: "The measured value is 42 mg.",
+      pdf_context: "The measured value is 43 mg.",
+      pdf_page_index: 0,
+      pdf_line_start: 0,
+      pdf_line_end: 0,
+      difference: { markdown: "42", pdf: "43" },
     });
     expect(result.reconciled_source).toBeUndefined();
     expect(sourceReconciliationTrusted(result.report)).toBe(false);
+  });
+
+  it("auto-accepts inline LaTeX and PDF Unicode presentation equivalents as one paragraph", () => {
+    const markdown = "The sample was spun at $ 300\\times g $ and used 0.2 U/$ \\mu $L inhibitor at $ 4^{\\circ} $C.\n";
+    const result = reconcilePaperSource({
+      book_id: "paper-a",
+      markdown_source: markdown,
+      pdf_geometry: geometryFromLines(["The sample was spun at 300×g and used 0.2 U/μL inhibitor at 4°C."]),
+      input_fingerprint: fingerprint(),
+    });
+
+    expect(result.report.unresolved).toEqual([]);
+    expect(result.report.summary.format_equivalent).toBe(1);
+    expect(result.reconciled_source).toBe(markdown);
+    expect(contentEquivalent("$ \\mu $", "μ")).toBe(true);
+    expect(contentEquivalent("$ \\mu $", "σ")).toBe(false);
+  });
+
+  it("provides nearby PDF context when no replacement candidate is reliable", () => {
+    const result = reconcilePaperSource({
+      book_id: "paper-a",
+      markdown_source: "A sentence that is absent from the PDF.\n",
+      pdf_geometry: geometryFromLines(["Nearby extracted PDF line.", "Another PDF line."]),
+      input_fingerprint: fingerprint(),
+    });
+
+    expect(result.report.unresolved[0]).toMatchObject({
+      status: "md_unmatched",
+      pdf_context: "Nearby extracted PDF line.\nAnother PDF line.",
+      pdf_page_index: 0,
+    });
+    expect(result.report.unresolved[0].pdf_excerpt).toBeUndefined();
+  });
+
+  it("uses global PDF anchors for review evidence without auto-trusting an out-of-order candidate", () => {
+    const result = reconcilePaperSource({
+      book_id: "paper-a",
+      markdown_source: "Opening anchor.\n\nLitvicukova M, Talavera-Lopez C, Maatz H. Cells of the adult heart.\n",
+      pdf_geometry: geometryFromLines([
+        "Opening anchor.",
+        "Unrelated extracted material that pushes the reference beyond the local search window.",
+        "Litvinukova M, Talavera-Lopez C, Maatz H. Cells of the adult heart.",
+      ]),
+      input_fingerprint: fingerprint(),
+      config: { lookback_chars: 0, lookahead_chars: 8 },
+    });
+
+    expect(result.report.unresolved).toHaveLength(1);
+    expect(result.report.unresolved[0]).toMatchObject({
+      id: "block-2",
+      status: "needs_review",
+      pdf_page_index: 0,
+      difference: { markdown: "litvicukova", pdf: "litvinukova" },
+    });
+    expect(result.report.unresolved[0].pdf_context).toContain("Litvinukova M, Talavera-Lopez");
+    expect(result.report.unresolved[0].pdf_excerpt).toContain("Litvinukova M, TalaveraLopez");
+    expect(sourceReconciliationTrusted(result.report)).toBe(false);
+  });
+
+  it("keeps nearby PDF context when a global candidate remains below the trust threshold", () => {
+    const result = reconcilePaperSource({
+      book_id: "paper-a",
+      markdown_source: "Opening anchor.\n\nalpha beta gamma delta\n",
+      pdf_geometry: geometryFromLines([
+        "Opening anchor.",
+        "alpha unrelated nearby words",
+        "filler ".repeat(40),
+        "alpha beta unrelated ending",
+      ]),
+      input_fingerprint: fingerprint(),
+      config: { lookback_chars: 0, lookahead_chars: 40 },
+    });
+
+    expect(result.report.unresolved).toHaveLength(1);
+    expect(result.report.unresolved[0]).toMatchObject({
+      status: "md_unmatched",
+      pdf_page_index: 0,
+    });
+    expect(result.report.unresolved[0].pdf_context).toContain("alpha unrelated nearby words");
+    expect(result.report.unresolved[0].pdf_context).not.toContain("alpha beta unrelated ending");
   });
 
   it("writes trusted source only when reconciliation has no unresolved blocks", () => {
@@ -117,6 +210,133 @@ describe("PH3 source reconciliation engine", () => {
 });
 
 describe("PH4 review candidate gate", () => {
+  it("preserves explicit manual-override acceptance provenance in the report schema", () => {
+    const result = reconcilePaperSource({
+      book_id: "paper-a",
+      markdown_source: "The measured value is 42 mg.\n",
+      pdf_geometry: geometryFromLines(["The measured value is 43 mg."]),
+      input_fingerprint: fingerprint(),
+    });
+    const report = {
+      ...result.report,
+      acceptance: {
+        mode: "manual_override" as const,
+        policy: "single_review_then_override_v1" as const,
+        accepted_at: "2026-07-10T12:00:00.000Z",
+        residual_unresolved_count: 1,
+        decision_count: 1,
+      },
+    };
+
+    expect(SourceReconciliationReportZ.parse(report)).toEqual(report);
+    expect(sourceReconciliationTrusted(report)).toBe(false);
+  });
+
+  it("builds a manual reviewed draft from recorded PDF evidence decisions", () => {
+    const initial = reconcilePaperSource({
+      book_id: "paper-a",
+      markdown_source: "# Result\n\nThe measured value is 42 mg.\n",
+      pdf_geometry: geometryFromLines(["Result", "The measured value is 43 mg."]),
+      input_fingerprint: fingerprint(),
+    });
+
+    const reviewed = buildReviewedDraftFromDecisions(
+      "# Result\n\nThe measured value is 42 mg.\n",
+      initial.report,
+      {
+        version: "source_review_decisions.v1",
+        book_id: "paper-a",
+        stage: "source_reconciliation",
+        input_fingerprint: fingerprint(),
+        decisions: [{ block_id: "block-2", decision: "accept_pdf", note: "PDF checked" }],
+      },
+    );
+
+    expect(reviewed.reviewed_draft).toBe("# Result\n\nThe measured value is 43 mg.\n");
+    expect(reviewed.decisions).toEqual([
+      { block_id: "block-2", decision: "accept_pdf", note: "PDF checked" },
+    ]);
+  });
+
+  it("refuses incomplete or explicitly blocked review decisions", () => {
+    const initial = reconcilePaperSource({
+      book_id: "paper-a",
+      markdown_source: "The measured value is 42 mg.\n",
+      pdf_geometry: geometryFromLines(["The measured value is 43 mg."]),
+      input_fingerprint: fingerprint(),
+    });
+    const base = {
+      version: "source_review_decisions.v1" as const,
+      book_id: "paper-a",
+      stage: "source_reconciliation" as const,
+      input_fingerprint: fingerprint(),
+    };
+
+    expect(() => buildReviewedDraftFromDecisions("The measured value is 42 mg.\n", initial.report, {
+      ...base,
+      decisions: [],
+    })).toThrow(/missing decision/);
+    expect(() => buildReviewedDraftFromDecisions("The measured value is 42 mg.\n", initial.report, {
+      ...base,
+      decisions: [{ block_id: "block-1", decision: "keep_blocked" }],
+    })).toThrow(/remains blocked/);
+  });
+
+  it("keeps explicit keep-Markdown residual until manual override acceptance is recorded", () => {
+    const original = "The measured val-\nue is 42 mg.\n";
+    const initial = reconcilePaperSource({
+      book_id: "paper-a",
+      markdown_source: original,
+      pdf_geometry: geometryFromLines(["The measured value is 43 mg."]),
+      input_fingerprint: fingerprint(),
+    });
+    const base = {
+      version: "source_review_decisions.v1" as const,
+      book_id: "paper-a",
+      stage: "source_reconciliation" as const,
+      input_fingerprint: fingerprint(),
+    };
+
+    const kept = buildReviewedDraftFromDecisions(original, initial.report, {
+      ...base,
+      decisions: [{ block_id: "block-1", decision: "accept_markdown" }],
+    });
+    const keptResult = reviewCandidateAndReconcile({
+      book_id: "paper-a",
+      original_source: original,
+      candidate_source: kept.reviewed_draft,
+      pdf_geometry: geometryFromLines(["The measured value is 43 mg."]),
+      input_fingerprint: fingerprint(),
+      kind: "manual_review",
+      decisions: kept.decisions,
+    });
+    expect(keptResult.accepted).toBe(false);
+    expect(keptResult.reconciliation?.report.unresolved).toHaveLength(1);
+    expect(sourceReconciliationTrusted(keptResult.reconciliation!.report)).toBe(false);
+    expect(sourceReconciliationAccepted(keptResult.reconciliation!.report)).toBe(false);
+
+    const overridden = acceptSourceReconciliationManualOverride(
+      keptResult.reconciliation!,
+      kept.reviewed_draft,
+      "2026-07-10T12:00:00.000Z",
+    );
+    expect(sourceReconciliationTrusted(overridden.report)).toBe(false);
+    expect(sourceReconciliationAccepted(overridden.report)).toBe(true);
+    expect(overridden.report.unresolved).toHaveLength(1);
+    expect(overridden.report.acceptance).toMatchObject({
+      mode: "manual_override",
+      residual_unresolved_count: 1,
+      decision_count: 1,
+    });
+    expect(overridden.reconciled_source).toBe("The measured value is 42 mg.\n");
+
+    const edited = buildReviewedDraftFromDecisions(original, initial.report, {
+      ...base,
+      decisions: [{ block_id: "block-1", decision: "manual_edit", replacement_text: "The measured value is 44 mg." }],
+    });
+    expect(edited.reviewed_draft).toBe("The measured value is 44 mg.\n");
+  });
+
   it("accepts LLM format repair only when content equivalence is preserved and realignment passes", () => {
     const result = reviewCandidateAndReconcile({
       book_id: "paper-a",
@@ -157,13 +377,13 @@ describe("PH4 review candidate gate", () => {
       pdf_geometry: geometryFromLines(["The measured value is 43 mg."]),
       input_fingerprint: fingerprint(),
       kind: "manual_review",
-      decisions: [{ id: "block-1", action: "manual_edit", note: "PDF verified value" }],
+      decisions: [{ block_id: "block-1", decision: "accept_pdf", note: "PDF verified value" }],
     });
 
     expect(result.accepted).toBe(true);
     expect(result.reconciliation?.report.unresolved).toEqual([]);
     expect(result.reconciliation?.review_decisions.decisions).toEqual([
-      { id: "block-1", action: "manual_edit", note: "PDF verified value" },
+      { block_id: "block-1", decision: "accept_pdf", note: "PDF verified value" },
     ]);
   });
 

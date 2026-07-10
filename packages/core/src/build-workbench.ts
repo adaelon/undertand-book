@@ -3,7 +3,7 @@ import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import type { SourceManifestV2, PdfCapabilityName, PdfCapability } from "./source-manifest";
 import {
-  sourceReconciliationTrusted,
+  sourceReconciliationAccepted,
   sha256Text,
   type BuildInputFingerprint,
   type SourceReconciliationReport,
@@ -40,7 +40,7 @@ export const BUILD_STAGE_DAG: Record<BuildStageId, BuildStageNode> = {
 export type BuildRoute = "reader" | "workbench";
 export type BuildReadinessStatus = "trusted_book" | "missing" | "incomplete" | "needs_review" | "stale_input";
 export type BuildStageStatus = "blocked" | "missing" | "done" | "needs_review" | "stale" | "incomplete";
-export type BuildJobStatus = "ready" | "running" | "needs_user" | "failed" | "done" | "stale_input";
+export type BuildJobStatus = "ready" | "running" | "needs_user" | "failed" | "done" | "stale_input" | "interrupted";
 export type ExecutorId = "codex" | "opencode" | "claude" | "manual";
 
 export interface BuildStageReadiness {
@@ -85,6 +85,8 @@ export interface ActiveExecutorRun {
     last_heartbeat_at?: string;
     tokens_used?: number;
     cost_usd?: number;
+    stdout_path?: string;
+    stderr_path?: string;
   };
 }
 
@@ -138,6 +140,13 @@ export interface BuildJobEvent {
     | "job_reused"
     | "job_marked_stale"
     | "executor_started"
+    | "stage_started"
+    | "stage_completed"
+    | "stage_blocked"
+    | "stage_failed"
+    | "readiness_recomputed"
+    | "run_interrupted"
+    | "job_recovered"
     | "decision_requested"
     | "decision_resolved"
     | "permission_requested"
@@ -157,6 +166,16 @@ export interface BuildJobState {
   events: BuildJobEvent[];
   decision_requests: BuildDecisionRequest[];
   permission_requests: ExecutorPermissionRequest[];
+  failure_summary?: {
+    stage?: BuildStageId;
+    run_id?: string;
+    message: string;
+    failed_at: string;
+    exit_code?: number;
+    stdout_path?: string;
+    stderr_path?: string;
+    recoverable?: boolean;
+  };
   created_at: string;
   updated_at: string;
 }
@@ -267,7 +286,7 @@ export function detectBuildReadiness(snapshot: BuildWorkbenchSnapshot): BuildWor
     !buildInputFingerprintsEqual(report.input_fingerprint, snapshot.current_input_fingerprint)
   ) {
     setStage(stages, "source_reconciliation", "stale", "source reconciliation input fingerprint does not match current inputs");
-  } else if (!sourceReconciliationTrusted(report)) {
+  } else if (!sourceReconciliationAccepted(report)) {
     setStage(stages, "source_reconciliation", "needs_review", "source reconciliation has unresolved blocks");
   } else {
     setStage(stages, "source_reconciliation", "done");

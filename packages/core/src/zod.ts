@@ -150,6 +150,8 @@ export const SourceManifestZ = z.union([SourceManifestV2Z, LegacySourceManifestZ
 export const SourceBlockReconcileStatusZ = z.enum([
   "verified",
   "auto_repaired",
+  "format_equivalent",
+  "reviewed",
   "llm_format_repaired",
   "needs_review",
   "pdf_unmatched",
@@ -159,6 +161,13 @@ export const BuildInputFingerprintZ = z.object({
   paper_md_sha256: z.string().min(1),
   paper_pdf_sha256: z.string().min(1),
   config_hash: z.string().min(1),
+});
+export const SourceReconciliationAcceptanceZ = z.object({
+  mode: z.literal("manual_override"),
+  policy: z.literal("single_review_then_override_v1"),
+  accepted_at: z.string().min(1),
+  residual_unresolved_count: z.number().int().nonnegative(),
+  decision_count: z.number().int().nonnegative(),
 });
 export const SourceReconciliationReportZ = z.object({
   version: z.literal("source_reconciliation_report.v1"),
@@ -170,8 +179,22 @@ export const SourceReconciliationReportZ = z.object({
       id: z.string().min(1),
       status: SourceBlockReconcileStatusZ,
       reason: z.string().min(1),
+      source_span: z.object({ start: z.number().int().nonnegative(), end: z.number().int().nonnegative() }).optional(),
+      md_excerpt: z.string().optional(),
+      pdf_excerpt: z.string().optional(),
+      candidate_text: z.string().optional(),
+      review_question: z.string().min(1).optional(),
+      md_context: z.string().optional(),
+      pdf_context: z.string().optional(),
+      pdf_page_index: z.number().int().nonnegative().optional(),
+      pdf_page_label: z.string().min(1).optional(),
+      pdf_line_start: z.number().int().nonnegative().optional(),
+      pdf_line_end: z.number().int().nonnegative().optional(),
+      comparison_score: z.number().min(0).max(1).optional(),
+      difference: z.object({ markdown: z.string(), pdf: z.string() }).optional(),
     }),
   ),
+  acceptance: SourceReconciliationAcceptanceZ.optional(),
 });
 
 export const PdfPageRectZ = z.object({
