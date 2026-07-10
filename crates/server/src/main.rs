@@ -81,6 +81,7 @@ fn main() {
         history_path,
         agent_history,
         visitor_sessions: VisitorSessions::default(),
+        workbench_loaded_revision: None,
     }));
     // 启动时立即写入 session.json(book_dir + 当前 top_lid),否则后续 goto/scroll
     // 的 save_session(None) 因读不到旧 book_dir 而永远不写,重启即丢位置。
@@ -243,7 +244,7 @@ fn split_url(url: &str) -> (&str, &str) {
 fn mime_for(path: &Path) -> &'static str {
     match path.extension().and_then(|s| s.to_str()).unwrap_or("") {
         "html" => "text/html; charset=utf-8",
-        "js" => "text/javascript; charset=utf-8",
+        "js" | "mjs" => "text/javascript; charset=utf-8",
         "css" => "text/css; charset=utf-8",
         "json" => "application/json; charset=utf-8",
         "svg" => "image/svg+xml",
@@ -334,6 +335,10 @@ mod tests {
         );
         assert_eq!(
             mime_for(Path::new("app.js")),
+            "text/javascript; charset=utf-8"
+        );
+        assert_eq!(
+            mime_for(Path::new("pdf.worker.mjs")),
             "text/javascript; charset=utf-8"
         );
         assert_eq!(mime_for(Path::new("style.css")), "text/css; charset=utf-8");

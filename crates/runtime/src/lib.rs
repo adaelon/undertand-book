@@ -203,6 +203,19 @@ pub struct AssistantTurn {
 /// `complete` = 内层 query 合一轮(JSON 契约);`chat` = 外层多轮 tool-calling。
 pub trait ModelAdapter {
     fn complete(&self, req: CompletionRequest) -> Result<ParsedResponse, AdapterError>;
+    /// Provider-neutral structured completion for bounded build-time judgments.
+    /// Native providers override this to request a JSON object directly. The
+    /// default keeps test/legacy adapters usable by parsing `complete().answer`.
+    fn complete_structured(
+        &self,
+        req: CompletionRequest,
+    ) -> Result<serde_json::Value, AdapterError> {
+        let response = self.complete(req)?;
+        let answer = response.answer.ok_or_else(|| AdapterError {
+            message: "结构化模型响应缺 answer".into(),
+        })?;
+        structured_json_from_content(&answer)
+    }
     fn chat(&self, messages: &[Message], tools: &[ToolSpec])
         -> Result<AssistantTurn, AdapterError>;
 }
@@ -1564,6 +1577,15 @@ fn parsed_response_from_content(content: &str) -> Result<ParsedResponse, Adapter
     })
 }
 
+fn structured_json_from_content(content: &str) -> Result<serde_json::Value, AdapterError> {
+    let json = extract_json_object(content).ok_or_else(|| AdapterError {
+        message: format!("模型输出抽不到合法 JSON 对象;原文={content}"),
+    })?;
+    serde_json::from_str(json).map_err(|e| AdapterError {
+        message: format!("模型输出非合法 JSON: {e};原文={content}"),
+    })
+}
+
 #[derive(Deserialize)]
 struct ReActOut {
     #[serde(default, rename = "final", alias = "answer")]
@@ -1718,6 +1740,23 @@ impl ModelAdapter for NativeAdapter {
         parsed_response_from_content(response_message_content(&v)?)
     }
 
+    fn complete_structured(
+        &self,
+        req: CompletionRequest,
+    ) -> Result<serde_json::Value, AdapterError> {
+        let body = serde_json::json!({
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": req.system},
+                {"role": "user", "content": req.user},
+            ],
+            "response_format": {"type": "json_object"},
+            "temperature": 0,
+        });
+        let response = self.post_chat_completions(body)?;
+        structured_json_from_content(response_message_content(&response)?)
+    }
+
     /// 外层多轮 tool-calling:带 `tools` schema 请求,解析 `assistant.tool_calls` + `usage` `[ADR-0026]`。
     fn chat(
         &self,
@@ -1800,6 +1839,13 @@ impl ModelAdapter for ReActAdapter {
         });
         let v = self.native.post_chat_completions(body)?;
         parsed_response_from_content(response_message_content(&v)?)
+    }
+
+    fn complete_structured(
+        &self,
+        req: CompletionRequest,
+    ) -> Result<serde_json::Value, AdapterError> {
+        self.native.complete_structured(req)
     }
 
     fn chat(
@@ -2696,6 +2742,44 @@ mod tests {
             })
             .unwrap_or(0);
         bytes.len() >= header_end + 4 + content_length
+    }
+
+    #[test]
+    fn native_adapter_requests_and_parses_structured_json() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let handle = std::thread::spawn(move || {
+            let mut stream = accept_with_timeout(&listener);
+            let request = read_http_request(&mut stream);
+            assert!(request.contains(r#""response_format":{"type":"json_object"}"#));
+            assert!(request.contains("compare evidence"));
+            let content = r#"{"choices":[{"message":{"content":"```json\n{\"summary\":\"different\",\"confidence\":0.8}\n```"}}]}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                content.len(),
+                content
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        let adapter = NativeAdapter::from_config(ProviderConfig {
+            mode: ProviderMode::Native,
+            api_key: "test-key".into(),
+            base_url: format!("http://{addr}"),
+            model: "test-model".into(),
+        });
+        let output = adapter
+            .complete_structured(CompletionRequest {
+                system: "structured system".into(),
+                user: "compare evidence".into(),
+            })
+            .unwrap();
+
+        handle.join().unwrap();
+        assert_eq!(output["summary"], "different");
+        assert_eq!(output["confidence"], 0.8);
     }
 
     #[test]

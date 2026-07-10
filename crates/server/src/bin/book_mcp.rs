@@ -46,6 +46,7 @@ fn main() {
         history_path: None,
         agent_history: server::AgentHistory::default(),
         visitor_sessions: VisitorSessions::default(),
+        workbench_loaded_revision: None,
     };
 
     let stdin = std::io::stdin();

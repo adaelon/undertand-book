@@ -820,6 +820,7 @@ mod tests {
             visitor_sessions: timeout_ms
                 .map(VisitorSessions::with_timeout_ms)
                 .unwrap_or_default(),
+            workbench_loaded_revision: None,
         }
     }
 
