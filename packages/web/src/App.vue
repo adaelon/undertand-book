@@ -26,6 +26,7 @@ import type {
   ReaderLayoutState,
   SourceManifestV2,
   SourceReviewDecisionKind,
+  SourceReviewLlmSuggestion,
   StructureProjection,
   TraceStep,
   Viewport,
@@ -33,8 +34,15 @@ import type {
 } from "./api";
 import { renderInlineMarkdown, renderMarkdown } from "./md";
 import { rangeToMarkdown } from "./selection";
+import {
+  getSourceReviewAutoRerunRequest,
+  runSourceReviewLlmBatch,
+  sourceReviewBatchTargets,
+  type SourceReviewLlmBatchState,
+} from "./source-review-batch";
 import TopBar from "./components/TopBar.vue";
 import BuildWorkbenchPane from "./components/BuildWorkbenchPane.vue";
+import FileDropField from "./components/FileDropField.vue";
 import LeftRail from "./components/LeftRail.vue";
 import PdfReaderPane from "./components/PdfReaderPane.vue";
 import ReaderPane from "./components/ReaderPane.vue";
@@ -72,6 +80,42 @@ const buildWorkbenchError = ref<string | null>(null);
 const buildWorkbenchConfirming = ref(false);
 const buildWorkbenchImporting = ref(false);
 const buildWorkbenchActioning = ref(false);
+const sourceReviewLlmSuggestions = ref<Record<string, SourceReviewLlmSuggestion>>({});
+const sourceReviewLlmAnalyzingBlockId = ref<string | null>(null);
+const sourceReviewLlmErrors = ref<Record<string, string>>({});
+const sourceReviewLlmBatch = ref<SourceReviewLlmBatchState | null>(null);
+let buildWorkbenchActionOwner = 0;
+let sourceReviewLlmBatchRunToken = 0;
+let sourceReviewLlmRequestToken = 0;
+
+function beginWorkbenchAction(): number {
+  const owner = ++buildWorkbenchActionOwner;
+  buildWorkbenchActioning.value = true;
+  return owner;
+}
+
+function endWorkbenchAction(owner: number) {
+  if (owner === buildWorkbenchActionOwner) buildWorkbenchActioning.value = false;
+}
+
+const sourceReviewEvidenceKey = computed(() => JSON.stringify(
+  (buildWorkbenchSnapshot.value?.source_review.unresolved ?? []).map((block) => [
+    block.id,
+    block.status,
+    block.md_excerpt ?? "",
+    block.pdf_excerpt ?? "",
+    block.candidate_text ?? "",
+  ]),
+));
+watch(sourceReviewEvidenceKey, (next, previous) => {
+  if (next === previous) return;
+  sourceReviewLlmBatchRunToken += 1;
+  sourceReviewLlmRequestToken += 1;
+  sourceReviewLlmSuggestions.value = {};
+  sourceReviewLlmAnalyzingBlockId.value = null;
+  sourceReviewLlmErrors.value = {};
+  sourceReviewLlmBatch.value = null;
+});
 const sourceManifest = ref<SourceManifestV2 | null>(null);
 const pdfSourceMap = ref<PdfSourceMap | null>(null);
 const pdfRuntimeError = ref<string | null>(null);
@@ -131,6 +175,11 @@ const bookPickerError = ref<string | null>(null);
 const bookPickerRoot = ref("");
 const bookPickerBooks = ref<BookLibraryEntry[]>([]);
 const bookPickerDir = ref("");
+const bookPickerMode = ref<"open" | "create">("open");
+const newBookTitle = ref("");
+const newBookId = ref("");
+const newBookMarkdown = ref<File | null>(null);
+const newBookPdf = ref<File | null>(null);
 const openingBook = ref(false);
 const debugOpen = ref(false);
 const leftRailOpen = ref(true);
@@ -942,7 +991,9 @@ async function loadBuildWorkbenchSnapshot(): Promise<BuildWorkbenchSnapshot | nu
   buildWorkbenchLoading.value = true;
   buildWorkbenchError.value = null;
   try {
-    const snapshot = await api.buildWorkbench();
+    let snapshot = await api.buildWorkbench();
+    buildWorkbenchSnapshot.value = snapshot;
+    snapshot = await maybeAutoRerunSourceReview(snapshot);
     buildWorkbenchSnapshot.value = snapshot;
     return snapshot;
   } catch (e) {
@@ -954,8 +1005,33 @@ async function loadBuildWorkbenchSnapshot(): Promise<BuildWorkbenchSnapshot | nu
   }
 }
 
+function workbenchControlPending(snapshot: BuildWorkbenchSnapshot): boolean {
+  return snapshot.jobs.some((job) => job.status === "running" || job.status === "needs_user" || job.status === "interrupted");
+}
+
+async function maybeAutoRerunSourceReview(
+  snapshot: BuildWorkbenchSnapshot,
+  actionOwner?: number,
+): Promise<BuildWorkbenchSnapshot> {
+  const request = getSourceReviewAutoRerunRequest(snapshot);
+  if (!request) return snapshot;
+
+  const ownsAction = actionOwner === undefined;
+  const owner = actionOwner ?? beginWorkbenchAction();
+  buildWorkbenchSnapshot.value = snapshot;
+  try {
+    return await api.workbenchJobStart(request);
+  } catch (e) {
+    buildWorkbenchError.value = `复核决定已保存，但自动重新运行来源对齐失败：${errorMessage(e)}`;
+    return snapshot;
+  } finally {
+    if (ownsAction) endWorkbenchAction(owner);
+  }
+}
+
 async function refreshBuildWorkbench() {
-  await loadBuildWorkbenchSnapshot();
+  const snapshot = await loadBuildWorkbenchSnapshot();
+  if (snapshot?.readiness.route === "reader" && !workbenchControlPending(snapshot)) await init();
 }
 
 async function confirmSidecarPlan(fields: Record<string, unknown>) {
@@ -992,12 +1068,14 @@ async function importWorkbenchInput(payload: {
 }
 
 async function applyWorkbenchAction(action: () => Promise<BuildWorkbenchSnapshot>) {
-  buildWorkbenchActioning.value = true;
+  const actionOwner = beginWorkbenchAction();
   buildWorkbenchError.value = null;
   try {
-    const snapshot = await action();
+    let snapshot = await action();
     buildWorkbenchSnapshot.value = snapshot;
-    if (snapshot.readiness.route === "reader") {
+    snapshot = await maybeAutoRerunSourceReview(snapshot, actionOwner);
+    buildWorkbenchSnapshot.value = snapshot;
+    if (snapshot.readiness.route === "reader" && !workbenchControlPending(snapshot)) {
       await init();
     } else {
       appSurface.value = "workbench";
@@ -1005,7 +1083,7 @@ async function applyWorkbenchAction(action: () => Promise<BuildWorkbenchSnapshot
   } catch (e) {
     buildWorkbenchError.value = errorMessage(e);
   } finally {
-    buildWorkbenchActioning.value = false;
+    endWorkbenchAction(actionOwner);
   }
 }
 
@@ -1039,9 +1117,137 @@ async function resolveSourceReview(payload: {
   job_id?: string;
   block_id: string;
   decision: SourceReviewDecisionKind;
+  replacement_text?: string;
   note?: string;
 }) {
   await applyWorkbenchAction(() => api.workbenchSourceReviewResolve(payload));
+}
+
+async function analyzeSourceReview(payload: { block_id: string }) {
+  if (sourceReviewLlmBatch.value?.status === "running" || buildWorkbenchActioning.value) return;
+  const blockId = payload.block_id;
+  const requestToken = ++sourceReviewLlmRequestToken;
+  const bookId = buildWorkbenchSnapshot.value?.book_id;
+  const evidenceKey = sourceReviewEvidenceKey.value;
+  const stillCurrent = () => (
+    requestToken === sourceReviewLlmRequestToken
+    && buildWorkbenchSnapshot.value?.book_id === bookId
+    && sourceReviewEvidenceKey.value === evidenceKey
+  );
+  sourceReviewLlmAnalyzingBlockId.value = blockId;
+  const nextErrors = { ...sourceReviewLlmErrors.value };
+  const nextSuggestions = { ...sourceReviewLlmSuggestions.value };
+  delete nextErrors[blockId];
+  delete nextSuggestions[blockId];
+  sourceReviewLlmErrors.value = nextErrors;
+  sourceReviewLlmSuggestions.value = nextSuggestions;
+  try {
+    const suggestion = await api.workbenchSourceReviewAnalyze(blockId);
+    if (stillCurrent()) {
+      sourceReviewLlmSuggestions.value = {
+        ...sourceReviewLlmSuggestions.value,
+        [blockId]: suggestion,
+      };
+    }
+  } catch (e) {
+    if (stillCurrent()) {
+      sourceReviewLlmErrors.value = {
+        ...sourceReviewLlmErrors.value,
+        [blockId]: errorMessage(e),
+      };
+    }
+  } finally {
+    if (stillCurrent() && sourceReviewLlmAnalyzingBlockId.value === blockId) {
+      sourceReviewLlmAnalyzingBlockId.value = null;
+    }
+  }
+}
+
+async function applyAllSourceReviewWithLlm() {
+  const snapshot = buildWorkbenchSnapshot.value;
+  if (
+    !snapshot
+    || buildWorkbenchActioning.value
+    || sourceReviewLlmAnalyzingBlockId.value
+    || sourceReviewLlmBatch.value?.status === "running"
+  ) return;
+  const targets = sourceReviewBatchTargets(snapshot);
+  if (!targets.length) return;
+
+  const runToken = ++sourceReviewLlmBatchRunToken;
+  sourceReviewLlmRequestToken += 1;
+  sourceReviewLlmAnalyzingBlockId.value = null;
+  const actionOwner = beginWorkbenchAction();
+  const bookId = snapshot.book_id;
+  const targetIds = new Set(targets.map((block) => block.id));
+  const nextErrors = { ...sourceReviewLlmErrors.value };
+  const nextSuggestions = { ...sourceReviewLlmSuggestions.value };
+  for (const blockId of targetIds) {
+    delete nextErrors[blockId];
+    delete nextSuggestions[blockId];
+  }
+  sourceReviewLlmErrors.value = nextErrors;
+  sourceReviewLlmSuggestions.value = nextSuggestions;
+  buildWorkbenchError.value = null;
+
+  const latestJobId = [...snapshot.jobs]
+    .sort((left, right) => left.updated_at.localeCompare(right.updated_at))
+    .at(-1)?.job_id;
+  const stillCurrent = () => (
+    runToken === sourceReviewLlmBatchRunToken
+    && buildWorkbenchSnapshot.value?.book_id === bookId
+  );
+
+  try {
+    const result = await runSourceReviewLlmBatch({
+      snapshot,
+      jobId: latestJobId,
+      analyze: (blockId) => api.workbenchSourceReviewAnalyze(blockId),
+      resolve: (payload) => api.workbenchSourceReviewResolve(payload),
+      formatError: errorMessage,
+      isCancelled: () => !stillCurrent(),
+      onState: (state) => {
+        if (!stillCurrent()) return;
+        sourceReviewLlmBatch.value = state;
+        sourceReviewLlmAnalyzingBlockId.value = state.status === "running"
+          ? state.current_block_id
+          : null;
+      },
+      onSuggestion: (suggestion) => {
+        if (!stillCurrent()) return;
+        sourceReviewLlmSuggestions.value = {
+          ...sourceReviewLlmSuggestions.value,
+          [suggestion.block_id]: suggestion,
+        };
+      },
+      onFailure: (failure) => {
+        if (!stillCurrent()) return;
+        sourceReviewLlmErrors.value = {
+          ...sourceReviewLlmErrors.value,
+          [failure.block_id]: failure.message,
+        };
+      },
+      onSnapshot: (nextSnapshot) => {
+        if (stillCurrent()) buildWorkbenchSnapshot.value = nextSnapshot;
+      },
+    });
+    if (stillCurrent()) {
+      let nextSnapshot = result.snapshot;
+      buildWorkbenchSnapshot.value = nextSnapshot;
+      sourceReviewLlmBatch.value = result.state;
+      nextSnapshot = await maybeAutoRerunSourceReview(nextSnapshot, actionOwner);
+      if (stillCurrent()) buildWorkbenchSnapshot.value = nextSnapshot;
+    }
+  } catch (e) {
+    if (stillCurrent()) buildWorkbenchError.value = errorMessage(e);
+  } finally {
+    if (stillCurrent()) sourceReviewLlmAnalyzingBlockId.value = null;
+    endWorkbenchAction(actionOwner);
+  }
+}
+
+async function draftSidecarPlan(payload: { request: string }) {
+  await applyWorkbenchAction(() => api.sidecarPlanDraft(payload));
 }
 
 async function init() {
@@ -1052,7 +1258,7 @@ async function init() {
       appSurface.value = "workbench";
       return;
     }
-    if (workbench?.readiness.route === "workbench") {
+    if (workbench && (workbench.readiness.route === "workbench" || workbenchControlPending(workbench))) {
       appSurface.value = "workbench";
       return;
     }
@@ -1603,12 +1809,97 @@ async function openBook() {
   }
 }
 
+function switchBookPickerMode(mode: "open" | "create") {
+  bookPickerMode.value = mode;
+  bookPickerError.value = null;
+}
+
+function slugifyBookId(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[\s_.]+/g, "-")
+    .replace(/[^a-z0-9-]/g, "")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "");
+}
+
+function selectNewBookMarkdown(file: File | null) {
+  newBookMarkdown.value = file;
+  if (!file) return;
+  const inferredTitle = file.name.replace(/\.md$/i, "");
+  if (!newBookTitle.value.trim()) newBookTitle.value = inferredTitle;
+  if (!newBookId.value.trim()) newBookId.value = slugifyBookId(inferredTitle);
+}
+
+function readLocalFileAsText(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result ?? ""));
+    reader.onerror = () => reject(reader.error ?? new Error("读取 Markdown 文件失败"));
+    reader.readAsText(file);
+  });
+}
+
+function readLocalFileAsBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const raw = String(reader.result ?? "");
+      resolve(raw.includes(",") ? raw.slice(raw.indexOf(",") + 1) : raw);
+    };
+    reader.onerror = () => reject(reader.error ?? new Error("读取 PDF 文件失败"));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function submitCreateBook() {
+  const bookId = newBookId.value.trim();
+  const markdown = newBookMarkdown.value;
+  const pdf = newBookPdf.value;
+  if (!bookId) {
+    bookPickerError.value = "请输入由小写字母、数字和连字符组成的书 ID。";
+    return;
+  }
+  if (!markdown || !pdf) {
+    bookPickerError.value = "请选择 Markdown 和 PDF 文件。";
+    return;
+  }
+  try {
+    openingBook.value = true;
+    banner.value = "";
+    bookPickerError.value = null;
+    const snapshot = await api.createBook({
+      book_id: bookId,
+      display_title: newBookTitle.value.trim() || markdown.name.replace(/\.md$/i, ""),
+      paper_md_text: await readLocalFileAsText(markdown),
+      paper_pdf_base64: await readLocalFileAsBase64(pdf),
+    });
+    resetBookSessionUi();
+    buildWorkbenchSnapshot.value = snapshot;
+    appSurface.value = "workbench";
+    bookPickerOpen.value = false;
+    bookPickerMode.value = "open";
+    newBookTitle.value = "";
+    newBookId.value = "";
+    newBookMarkdown.value = null;
+    newBookPdf.value = null;
+  } catch (e) {
+    bookPickerError.value = e instanceof Error ? e.message : String(e);
+    fail(e);
+  } finally {
+    openingBook.value = false;
+  }
+}
+
 function closeBookPicker() {
   if (openingBook.value) return;
   bookPickerOpen.value = false;
 }
 
 function resetBookSessionUi() {
+  buildWorkbenchActionOwner += 1;
+  sourceReviewLlmBatchRunToken += 1;
+  sourceReviewLlmRequestToken += 1;
   leafOrder.value = [];
   kindByLid.value = new Map();
   imageAssetByLid.value = new Map();
@@ -1619,6 +1910,10 @@ function resetBookSessionUi() {
   buildWorkbenchConfirming.value = false;
   buildWorkbenchImporting.value = false;
   buildWorkbenchActioning.value = false;
+  sourceReviewLlmSuggestions.value = {};
+  sourceReviewLlmAnalyzingBlockId.value = null;
+  sourceReviewLlmErrors.value = {};
+  sourceReviewLlmBatch.value = null;
   sourceManifest.value = null;
   pdfSourceMap.value = null;
   pdfRuntimeError.value = null;
@@ -1689,12 +1984,31 @@ async function submitOpenBook(dir = bookPickerDir.value) {
         <header class="book-picker-head">
           <div>
             <p class="formula-dialog-kicker">书库</p>
-            <h3 id="book-picker-title">打开书</h3>
+            <h3 id="book-picker-title">书库</h3>
           </div>
           <button class="formula-dialog-close" title="关闭" aria-label="关闭书库" @click="closeBookPicker">×</button>
         </header>
 
-        <div class="book-picker-body">
+        <div class="book-picker-tabs" role="tablist" aria-label="书库操作">
+          <button
+            role="tab"
+            :aria-selected="bookPickerMode === 'open'"
+            :class="{ active: bookPickerMode === 'open' }"
+            @click="switchBookPickerMode('open')"
+          >
+            打开
+          </button>
+          <button
+            role="tab"
+            :aria-selected="bookPickerMode === 'create'"
+            :class="{ active: bookPickerMode === 'create' }"
+            @click="switchBookPickerMode('create')"
+          >
+            新建论文书
+          </button>
+        </div>
+
+        <div v-if="bookPickerMode === 'open'" class="book-picker-body">
           <div class="book-picker-input-row">
             <label>
               <span>目录</span>
@@ -1725,16 +2039,70 @@ async function submitOpenBook(dir = bookPickerDir.value) {
               @click="bookPickerDir = book.dir"
               @dblclick="submitOpenBook(book.dir)"
             >
-              <strong>{{ book.book_id || book.name }}</strong>
+              <span class="book-picker-card-title">
+                <strong>{{ book.book_id || book.name }}</strong>
+                <small v-if="book.route === 'workbench'">构建中</small>
+              </span>
               <span>{{ book.dir }}</span>
             </button>
           </div>
         </div>
 
+        <div v-else class="book-picker-body">
+          <div class="book-create-grid">
+            <label>
+              <span>标题</span>
+              <input v-model="newBookTitle" :disabled="openingBook" placeholder="论文标题" />
+            </label>
+            <label>
+              <span>书 ID</span>
+              <input
+                v-model="newBookId"
+                :disabled="openingBook"
+                placeholder="paper-title"
+                autocomplete="off"
+                @keydown.enter.prevent="submitCreateBook"
+              />
+            </label>
+            <FileDropField
+              :model-value="newBookMarkdown"
+              label="Markdown"
+              accept=".md,text/markdown,text/plain"
+              accept-label=".md"
+              kind="markdown"
+              :disabled="openingBook"
+              @update:model-value="selectNewBookMarkdown"
+            />
+            <FileDropField
+              v-model="newBookPdf"
+              label="PDF"
+              accept=".pdf,application/pdf"
+              accept-label=".pdf"
+              kind="pdf"
+              :disabled="openingBook"
+            />
+          </div>
+          <p v-if="bookPickerRoot" class="book-picker-root">{{ bookPickerRoot }}</p>
+          <p v-if="bookPickerError" class="book-picker-error">{{ bookPickerError }}</p>
+        </div>
+
         <footer class="book-picker-actions">
           <button :disabled="openingBook" @click="closeBookPicker">取消</button>
-          <button class="primary-action" :disabled="openingBook || !bookPickerDir.trim()" @click="submitOpenBook()">
+          <button
+            v-if="bookPickerMode === 'open'"
+            class="primary-action"
+            :disabled="openingBook || !bookPickerDir.trim()"
+            @click="submitOpenBook()"
+          >
             {{ openingBook ? "打开中" : "打开" }}
+          </button>
+          <button
+            v-else
+            class="primary-action"
+            :disabled="openingBook || !newBookId.trim() || !newBookMarkdown || !newBookPdf"
+            @click="submitCreateBook"
+          >
+            {{ openingBook ? "创建中" : "创建并构建" }}
           </button>
         </footer>
       </section>
@@ -1748,6 +2116,11 @@ async function submitOpenBook(dir = bookPickerDir.value) {
       :confirming="buildWorkbenchConfirming"
       :importing="buildWorkbenchImporting"
       :actioning="buildWorkbenchActioning"
+      :pdf-url="api.pdfOriginalUrl()"
+      :source-review-llm-suggestions="sourceReviewLlmSuggestions"
+      :source-review-llm-analyzing-block-id="sourceReviewLlmAnalyzingBlockId"
+      :source-review-llm-errors="sourceReviewLlmErrors"
+      :source-review-llm-batch="sourceReviewLlmBatch"
       @refresh="refreshBuildWorkbench"
       @import-input="importWorkbenchInput"
       @create-job="createBuildJob"
@@ -1756,6 +2129,9 @@ async function submitOpenBook(dir = bookPickerDir.value) {
       @resolve-decision="resolveBuildDecision"
       @resolve-permission="resolveExecutorPermission"
       @resolve-source-review="resolveSourceReview"
+      @analyze-source-review="analyzeSourceReview"
+      @apply-all-source-review-with-llm="applyAllSourceReviewWithLlm"
+      @draft-sidecar-plan="draftSidecarPlan"
       @confirm-sidecar-plan="confirmSidecarPlan"
     />
 
@@ -2231,6 +2607,28 @@ async function submitOpenBook(dir = bookPickerDir.value) {
   margin: 0;
   font-size: 1rem;
 }
+.book-picker-tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 2px;
+  margin: 0.8rem 1rem 0;
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background: var(--canvas);
+  padding: 2px;
+}
+.book-picker-tabs button {
+  min-height: 38px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+}
+.book-picker-tabs button.active {
+  background: #fff;
+  color: var(--ink);
+  box-shadow: 0 0 0 1px var(--hairline-soft);
+}
 .book-picker-body {
   min-height: 0;
   overflow-y: auto;
@@ -2259,6 +2657,31 @@ async function submitOpenBook(dir = bookPickerDir.value) {
   color: var(--ink);
   padding: 0.55rem 0.7rem;
   font-family: var(--mono);
+  font-size: 0.84rem;
+}
+.book-create-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.85rem;
+}
+.book-create-grid label {
+  display: grid;
+  gap: 0.32rem;
+  min-width: 0;
+  color: var(--steel);
+  font-size: 0.78rem;
+  font-weight: 650;
+}
+.book-create-grid input {
+  width: 100%;
+  min-width: 0;
+  min-height: 42px;
+  box-sizing: border-box;
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--ink);
+  padding: 0.55rem 0.7rem;
   font-size: 0.84rem;
 }
 .book-picker-input-row button,
@@ -2311,6 +2734,25 @@ async function submitOpenBook(dir = bookPickerDir.value) {
 .book-picker-card strong {
   font-size: 0.92rem;
 }
+.book-picker-card-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  color: var(--ink) !important;
+  font-family: inherit !important;
+  font-size: inherit !important;
+}
+.book-picker-card-title small {
+  flex: 0 0 auto;
+  border: 1px solid var(--hairline);
+  border-radius: 999px;
+  background: #fff;
+  color: var(--steel);
+  padding: 0.12rem 0.42rem;
+  font-size: 0.68rem;
+  font-weight: 650;
+}
 .book-picker-card span {
   color: var(--muted);
   font-family: var(--mono);
@@ -2324,6 +2766,11 @@ async function submitOpenBook(dir = bookPickerDir.value) {
 .book-picker-actions .primary-action {
   background: var(--ink);
   color: #fff;
+}
+@media (max-width: 640px) {
+  .book-create-grid {
+    grid-template-columns: 1fr;
+  }
 }
 .formula-dialog-body {
   min-height: 0;

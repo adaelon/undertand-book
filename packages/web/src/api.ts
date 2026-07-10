@@ -111,6 +111,7 @@ export interface BookLibraryEntry {
   name: string;
   book_id: string;
   dir: string;
+  route: "reader" | "workbench";
 }
 export interface BookLibraryResponse {
   root: string;
@@ -207,8 +208,8 @@ export interface PdfRangesProjectResponse {
 export type BuildRoute = "reader" | "workbench";
 export type BuildReadinessStatus = "trusted_book" | "missing" | "incomplete" | "needs_review" | "stale_input";
 export type BuildStageStatus = "blocked" | "missing" | "done" | "needs_review" | "stale" | "incomplete";
-export type BuildJobStatus = "ready" | "running" | "needs_user" | "failed" | "done" | "stale_input";
-export type SourceReviewDecisionKind = "accept_markdown" | "accept_pdf" | "use_candidate" | "keep_blocked";
+export type BuildJobStatus = "ready" | "running" | "needs_user" | "failed" | "done" | "stale_input" | "interrupted";
+export type SourceReviewDecisionKind = "accept_markdown" | "accept_pdf" | "use_candidate" | "manual_edit" | "keep_blocked";
 export type BuildStageId =
   | "source_reconciliation"
   | "hybrid_foundation"
@@ -220,7 +221,7 @@ export type BuildStageId =
   | "book_structure"
   | "paper_reading_guide";
 export type ExecutorId = "codex" | "opencode" | "claude" | "manual";
-export type WorkbenchAdapterMode = "contract_only" | "fake_success" | "fake_failure" | "fake_permission";
+export type WorkbenchAdapterMode = "builtin" | "contract_only" | "fake_success" | "fake_failure" | "fake_permission";
 export interface BuildStageReadiness {
   stage: BuildStageId;
   status: BuildStageStatus;
@@ -283,6 +284,14 @@ export interface BuildJobEvent {
     | "job_resumed"
     | "job_event_appended"
     | "executor_started"
+    | "stage_runner_spawned"
+    | "stage_started"
+    | "stage_completed"
+    | "stage_blocked"
+    | "stage_failed"
+    | "readiness_recomputed"
+    | "run_interrupted"
+    | "job_recovered"
     | "executor_contract_written"
     | "executor_completed"
     | "executor_failed"
@@ -307,6 +316,8 @@ export interface ActiveExecutorRun {
     last_heartbeat_at?: string;
     tokens_used?: number;
     cost_usd?: number;
+    stdout_path?: string;
+    stderr_path?: string;
   };
 }
 export interface BuildJobState {
@@ -323,6 +334,16 @@ export interface BuildJobState {
   events: BuildJobEvent[];
   decision_requests: BuildDecisionRequest[];
   permission_requests: ExecutorPermissionRequest[];
+  failure_summary?: {
+    stage?: BuildStageId;
+    run_id?: string;
+    message: string;
+    failed_at: string;
+    exit_code?: number;
+    stdout_path?: string;
+    stderr_path?: string;
+    recoverable?: boolean;
+  };
   created_at: string;
   updated_at: string;
 }
@@ -396,11 +417,49 @@ export interface SourceReviewBlock {
   md_excerpt?: string;
   pdf_excerpt?: string;
   candidate_text?: string;
+  review_question?: string;
+  md_context?: string;
+  pdf_context?: string;
+  pdf_page_index?: number;
+  pdf_page_label?: string;
+  pdf_line_start?: number;
+  pdf_line_end?: number;
+  comparison_score?: number;
+  difference?: { markdown: string; pdf: string };
   evidence?: unknown;
+}
+export type SourceReviewLlmDifferenceKind =
+  | "formatting"
+  | "wording"
+  | "number"
+  | "symbol"
+  | "missing_in_markdown"
+  | "extra_in_markdown"
+  | "order"
+  | "extraction_noise"
+  | "uncertain";
+export type SourceReviewLlmRecommendation = "keep_markdown" | "use_pdf" | "manual_edit" | "uncertain";
+export interface SourceReviewLlmDifference {
+  kind: SourceReviewLlmDifferenceKind;
+  markdown: string;
+  pdf: string;
+  explanation: string;
+}
+export interface SourceReviewLlmSuggestion {
+  version: "source_review_llm_suggestion.v1";
+  block_id: string;
+  basis: "markdown_and_pdf_extracted_text";
+  summary: string;
+  differences: SourceReviewLlmDifference[];
+  recommendation: SourceReviewLlmRecommendation;
+  replacement_text: string;
+  confidence: number;
+  warnings: string[];
 }
 export interface SourceReviewDecision {
   block_id: string;
   decision: SourceReviewDecisionKind;
+  replacement_text?: string;
   note?: string | null;
   block_status?: string | null;
   block_reason?: string | null;
@@ -432,6 +491,26 @@ export interface BuildWorkbenchSnapshot {
   };
   jobs: BuildJobState[];
   source_review: SourceReviewSnapshot;
+  operations: {
+    warnings: Array<{ code: string; message: string; job_id?: string | null; stage?: BuildStageId | null }>;
+    permission_audit: Array<{
+      audit_id: string;
+      job_id: string;
+      request_id: string;
+      run_id?: string | null;
+      executor?: ExecutorId | null;
+      category?: ExecutorPermissionRequest["category"] | null;
+      action_summary?: string | null;
+      scope_hint?: ExecutorPermissionRequest["scope_hint"] | null;
+      granted: boolean;
+      resolved_at: string;
+    }>;
+    retention: {
+      max_jobs: number;
+      max_events_per_job: number;
+      max_permission_audit_entries: number;
+    };
+  };
   sidecar_plan: {
     plan: SidecarPlan | null;
     form_draft: SidecarFormDraft | null;
@@ -568,6 +647,12 @@ export const api = {
   formulaSemantics: (lid: string) =>
     http<FormulaSemantics>("GET", `/book/formula_semantics${qs({ lid })}`),
   openBook: (dir: string) => http<{ ok: boolean; book_id: string }>("POST", "/book/open", { dir }),
+  createBook: (payload: {
+    book_id: string;
+    display_title: string;
+    paper_md_text: string;
+    paper_pdf_base64: string;
+  }) => http<BuildWorkbenchSnapshot>("POST", "/book/create", payload),
 
   // ── book.query(LLM 命令,POST)──
   query: (q: string, anchor_lid?: string) =>
@@ -602,8 +687,17 @@ export const api = {
     job_id?: string;
     block_id: string;
     decision: SourceReviewDecisionKind;
+    replacement_text?: string;
     note?: string;
   }) => http<BuildWorkbenchSnapshot>("POST", "/build_workbench/source_review.resolve", payload),
+  workbenchSourceReviewAnalyze: (block_id: string) =>
+    http<SourceReviewLlmSuggestion>("POST", "/build_workbench/source_review.analyze", { block_id }),
+  sidecarPlanDraft: (payload: {
+    request: string;
+    target_view?: "timeline" | "concept_map" | "comparison_table" | "argument_map" | "custom";
+    lids?: string[];
+    sections?: string[];
+  }) => http<BuildWorkbenchSnapshot>("POST", "/build_workbench/sidecar_plan.draft", payload),
   sidecarPlanConfirm: (fields: Record<string, unknown>) =>
     http<BuildWorkbenchSnapshot>("POST", "/build_workbench/sidecar_plan.confirm", { fields }),
 

@@ -12,10 +12,17 @@ import type {
   ExecutorId,
   ExecutorPermissionRequest,
   SidecarFormDraft,
-  SourceReviewBlock,
   SourceReviewDecisionKind,
+  SourceReviewLlmSuggestion,
   WorkbenchAdapterMode,
 } from "../api";
+import {
+  getSourceReviewManualOverride,
+  sourceReviewDecisionSetMatchesReport,
+  type SourceReviewLlmBatchState,
+} from "../source-review-batch";
+import FileDropField from "./FileDropField.vue";
+import SourceReviewWorkspace from "./SourceReviewWorkspace.vue";
 
 const props = defineProps<{
   snapshot: BuildWorkbenchSnapshot | null;
@@ -24,6 +31,11 @@ const props = defineProps<{
   confirming: boolean;
   importing: boolean;
   actioning: boolean;
+  pdfUrl: string;
+  sourceReviewLlmSuggestions?: Record<string, SourceReviewLlmSuggestion>;
+  sourceReviewLlmAnalyzingBlockId?: string | null;
+  sourceReviewLlmErrors?: Record<string, string>;
+  sourceReviewLlmBatch?: SourceReviewLlmBatchState | null;
 }>();
 
 const emit = defineEmits<{
@@ -52,8 +64,12 @@ const emit = defineEmits<{
     job_id?: string;
     block_id: string;
     decision: SourceReviewDecisionKind;
+    replacement_text?: string;
     note?: string;
   }): void;
+  (e: "analyze-source-review", payload: { block_id: string }): void;
+  (e: "apply-all-source-review-with-llm"): void;
+  (e: "draft-sidecar-plan", payload: { request: string }): void;
   (e: "confirm-sidecar-plan", fields: Record<string, unknown>): void;
 }>();
 
@@ -69,7 +85,7 @@ const stageOrder: BuildStageId[] = [
   "paper_reading_guide",
 ];
 const executorOptions: ExecutorId[] = ["codex", "manual", "opencode", "claude"];
-const adapterModeOptions: WorkbenchAdapterMode[] = ["contract_only", "fake_success", "fake_failure", "fake_permission"];
+const adapterModeOptions: WorkbenchAdapterMode[] = ["builtin", "contract_only", "fake_success", "fake_failure", "fake_permission"];
 
 const editableFields = reactive<Record<string, string>>({});
 const importMode = ref<"upload" | "path">("upload");
@@ -85,24 +101,27 @@ const paperMdFile = ref<File | null>(null);
 const paperPdfFile = ref<File | null>(null);
 const selectedStage = ref<BuildStageId>("source_reconciliation");
 const selectedExecutor = ref<ExecutorId>("codex");
-const selectedAdapterMode = ref<WorkbenchAdapterMode>("contract_only");
+const selectedAdapterMode = ref<WorkbenchAdapterMode>("builtin");
 const runId = ref("");
 const pollingEnabled = ref(false);
-const reviewNotes = reactive<Record<string, string>>({});
+const sidecarRequest = ref("");
 let pollingTimer: number | null = null;
 
 const latestJob = computed<BuildJobState | null>(() => {
-  return props.snapshot?.jobs.at(-1) ?? null;
+  return [...(props.snapshot?.jobs ?? [])].sort((left, right) => left.updated_at.localeCompare(right.updated_at)).at(-1) ?? null;
 });
+const currentGateJobs = computed(() => (
+  (props.snapshot?.jobs ?? []).filter((job) => job.status !== "stale_input")
+));
 const pendingDecisionItems = computed<Array<{ job: BuildJobState; request: BuildDecisionRequest }>>(() =>
-  (props.snapshot?.jobs ?? []).flatMap((job) =>
+  currentGateJobs.value.flatMap((job) =>
     job.decision_requests
       .filter((request) => request.status === "pending")
       .map((request) => ({ job, request })),
   ),
 );
 const pendingPermissionItems = computed<Array<{ job: BuildJobState; request: ExecutorPermissionRequest }>>(() =>
-  (props.snapshot?.jobs ?? []).flatMap((job) =>
+  currentGateJobs.value.flatMap((job) =>
     job.permission_requests
       .filter((request) => request.status === "pending")
       .map((request) => ({ job, request })),
@@ -121,20 +140,62 @@ const sidecarForm = computed<SidecarFormDraft | null>(() =>
 const sidecarPlanStatus = computed(() => props.snapshot?.sidecar_plan.plan?.status ?? "missing");
 const currentInputManifest = computed(() => props.snapshot?.input.manifest ?? null);
 const sourceReview = computed(() => props.snapshot?.source_review ?? null);
+const sourceReviewStale = computed(() => props.snapshot?.readiness.stages.source_reconciliation?.status === "stale");
+const operationalWarnings = computed(() => props.snapshot?.operations.warnings ?? []);
+const recentPermissionAudit = computed(() => [...(props.snapshot?.operations.permission_audit ?? [])].slice(-10).reverse());
 const sourceReviewBlocks = computed(() => sourceReview.value?.unresolved ?? []);
-const sourceReviewDecisionByBlock = computed(() =>
-  new Map((sourceReview.value?.decisions?.decisions ?? []).map((decision) => [decision.block_id, decision])),
-);
 const activeRun = computed(() => latestJob.value?.active_run ?? null);
+const sourceReviewDecisionSetCurrent = computed(() => (
+  props.snapshot ? sourceReviewDecisionSetMatchesReport(props.snapshot) : true
+));
+const sourceReviewManualOverride = computed(() => (
+  props.snapshot ? getSourceReviewManualOverride(props.snapshot) : null
+));
+const sourceReviewVisible = computed(() => (
+  !sourceReviewManualOverride.value
+  && (
+    sourceReviewStale.value
+    || !!(sourceReview.value
+      && (sourceReviewBlocks.value.length || sourceReview.value.review_draft_markdown || sourceReview.value.decisions)
+      && props.snapshot?.readiness.stages.source_reconciliation?.status !== "done")
+  )
+));
+const sourceReviewRerunning = computed(() => (
+  sourceReview.value?.ready_for_rerun === true
+  && latestJob.value?.status === "running"
+  && activeRun.value?.stage === "source_reconciliation"
+));
 const hasPendingUserGate = computed(() => pendingDecisionItems.value.length > 0 || pendingPermissionItems.value.length > 0);
+const selectedModeSupported = computed(() => selectedAdapterMode.value !== "builtin" || selectedStage.value !== "pass1");
 const canStartJob = computed(() =>
   !!props.snapshot?.input.ready
   && !props.actioning
   && !hasPendingUserGate.value
+  && selectedModeSupported.value
   && latestJob.value?.status !== "running",
 );
 const canResumeJob = computed(() => !!latestJob.value?.active_run && !props.actioning && !hasPendingUserGate.value);
 const selectedStageReadiness = computed(() => props.snapshot?.readiness.stages[selectedStage.value] ?? null);
+let foundationAutoSelectedForBook: string | null = null;
+
+watch(
+  () => [
+    props.snapshot?.book_id,
+    props.snapshot?.readiness.stages.source_reconciliation?.status,
+    props.snapshot?.readiness.stages.hybrid_foundation?.status,
+  ] as const,
+  ([bookId, sourceStatus, foundationStatus]) => {
+    if (
+      !bookId
+      || foundationAutoSelectedForBook === bookId
+      || sourceStatus !== "done"
+      || foundationStatus !== "missing"
+    ) return;
+    foundationAutoSelectedForBook = bookId;
+    if (selectedStage.value === "source_reconciliation") selectedStage.value = "hybrid_foundation";
+  },
+  { immediate: true },
+);
 
 const stageLabels: Record<BuildStageId, string> = {
   source_reconciliation: "来源对齐",
@@ -154,24 +215,11 @@ const executorLabels: Record<ExecutorId, string> = {
   manual: "手动",
 };
 const adapterModeLabels: Record<WorkbenchAdapterMode, string> = {
+  builtin: "运行内置阶段",
   contract_only: "只写执行契约",
   fake_success: "模拟完成",
   fake_failure: "模拟失败",
   fake_permission: "模拟权限请求",
-};
-const sourceReviewDecisionLabels: Record<SourceReviewDecisionKind, string> = {
-  accept_markdown: "采用 Markdown",
-  accept_pdf: "采用 PDF",
-  use_candidate: "采用候选修复",
-  keep_blocked: "保持阻塞",
-};
-const sourceBlockStatusLabels: Record<string, string> = {
-  verified: "已验证",
-  auto_repaired: "已自动修复",
-  llm_format_repaired: "格式修复已通过",
-  needs_review: "需要复核",
-  pdf_unmatched: "PDF 未匹配",
-  md_unmatched: "Markdown 未匹配",
 };
 const readinessStatusLabels: Record<BuildReadinessStatus, string> = {
   trusted_book: "可进入阅读",
@@ -195,6 +243,7 @@ const jobStatusLabels: Record<BuildJobStatus, string> = {
   failed: "失败",
   done: "完成",
   stale_input: "输入已过期",
+  interrupted: "运行已中断",
 };
 const eventTypeLabels: Record<BuildJobEvent["type"], string> = {
   job_created: "创建构建任务",
@@ -203,6 +252,14 @@ const eventTypeLabels: Record<BuildJobEvent["type"], string> = {
   job_resumed: "恢复构建任务",
   job_event_appended: "记录构建事件",
   executor_started: "执行器已启动",
+  stage_runner_spawned: "阶段运行器已启动",
+  stage_started: "阶段开始",
+  stage_completed: "阶段完成",
+  stage_blocked: "阶段等待复核",
+  stage_failed: "阶段失败",
+  readiness_recomputed: "已重算阅读门禁",
+  run_interrupted: "检测到运行中断",
+  job_recovered: "已恢复构建任务",
   executor_contract_written: "执行契约已写入",
   executor_completed: "执行器已完成",
   executor_failed: "执行器失败",
@@ -308,14 +365,6 @@ function adapterModeLabel(mode: WorkbenchAdapterMode): string {
   return adapterModeLabels[mode] ?? mode;
 }
 
-function sourceReviewDecisionLabel(decision: SourceReviewDecisionKind): string {
-  return sourceReviewDecisionLabels[decision] ?? decision;
-}
-
-function sourceBlockStatusLabel(status: string): string {
-  return sourceBlockStatusLabels[status] ?? status;
-}
-
 function sidecarPlanStatusLabel(status: string): string {
   return sidecarStatusLabels[status] ?? status;
 }
@@ -329,6 +378,14 @@ function capabilityLabel(name: string): string {
 }
 
 function reasonText(reason: string): string {
+  if (
+    sourceReview.value?.ready_for_rerun
+    && (reason === "source reconciliation has unresolved blocks" || reason === "source reconciliation needs review")
+  ) {
+    return sourceReviewRerunning.value
+      ? "来源复核已完成，正在重新运行来源对齐。"
+      : "来源复核已完成，系统将自动重新运行来源对齐。";
+  }
   if (knownReasonLabels[reason]) return knownReasonLabels[reason];
   const missingArtifact = /^(.+) declares an artifact that is missing$/.exec(reason);
   if (missingArtifact) return `${capabilityLabel(missingArtifact[1])} 声明了产物，但文件缺失。`;
@@ -360,13 +417,6 @@ function parseFieldValue(raw: string): unknown {
 function optionalText(value: string): string | undefined {
   const trimmed = value.trim();
   return trimmed ? trimmed : undefined;
-}
-
-function onFileChange(event: Event, kind: "md" | "pdf") {
-  const input = event.target as HTMLInputElement;
-  const file = input.files?.[0] ?? null;
-  if (kind === "md") paperMdFile.value = file;
-  else paperPdfFile.value = file;
 }
 
 function readFileAsText(file: File): Promise<string> {
@@ -464,24 +514,6 @@ function resolvePermission(item: { job: BuildJobState; request: ExecutorPermissi
   });
 }
 
-function sourceReviewDecision(blockId: string) {
-  return sourceReviewDecisionByBlock.value.get(blockId) ?? null;
-}
-
-function recordedSourceReviewDecisionText(blockId: string): string {
-  const decision = sourceReviewDecision(blockId);
-  return decision ? `已记录: ${sourceReviewDecisionLabel(decision.decision)}` : "";
-}
-
-function resolveSourceReview(block: SourceReviewBlock, decision: SourceReviewDecisionKind) {
-  emit("resolve-source-review", {
-    job_id: latestJob.value?.job_id,
-    block_id: block.id,
-    decision,
-    note: optionalText(reviewNotes[block.id] ?? ""),
-  });
-}
-
 function telemetryText(value: string | number | undefined, fallback = "暂无"): string {
   if (value === undefined || value === "") return fallback;
   return String(value);
@@ -503,12 +535,26 @@ watch(pollingEnabled, (enabled) => {
   }
 });
 
+watch(
+  () => latestJob.value?.status,
+  (status) => {
+    if (status === "running") pollingEnabled.value = true;
+    else if (status && status !== "needs_user") pollingEnabled.value = false;
+  },
+  { immediate: true },
+);
+
 onBeforeUnmount(clearPollingTimer);
 
 function confirmSidecarPlan() {
   const fields: Record<string, unknown> = {};
   for (const [id, raw] of Object.entries(editableFields)) fields[id] = parseFieldValue(raw);
   emit("confirm-sidecar-plan", fields);
+}
+
+function draftSidecarPlan() {
+  const request = optionalText(sidecarRequest.value);
+  if (request) emit("draft-sidecar-plan", { request });
 }
 </script>
 
@@ -527,7 +573,7 @@ function confirmSidecarPlan() {
           <input v-model="pollingEnabled" type="checkbox" />
           自动轮询
         </label>
-        <button :disabled="props.loading" @click="emit('refresh')">{{ props.loading ? "刷新中" : "刷新" }}</button>
+        <button :disabled="props.loading || props.actioning" @click="emit('refresh')">{{ props.loading ? "刷新中" : "刷新" }}</button>
       </div>
     </header>
 
@@ -535,6 +581,38 @@ function confirmSidecarPlan() {
     <p v-else-if="props.loading && !props.snapshot" class="workbench-empty">正在加载构建状态...</p>
 
     <template v-if="props.snapshot">
+      <SourceReviewWorkspace
+        v-if="sourceReviewVisible"
+        :blocks="sourceReviewBlocks"
+        :decisions="sourceReview?.decisions?.decisions ?? []"
+        :pdf-url="props.pdfUrl"
+        :job-id="latestJob?.job_id"
+        :actioning="props.actioning"
+        :stale="sourceReviewStale"
+        :ready-for-rerun="sourceReview?.ready_for_rerun ?? false"
+        :review-draft="sourceReview?.review_draft_markdown"
+        :llm-suggestions="props.sourceReviewLlmSuggestions"
+        :llm-analyzing-block-id="props.sourceReviewLlmAnalyzingBlockId"
+        :llm-errors="props.sourceReviewLlmErrors"
+        :llm-batch-state="props.sourceReviewLlmBatch"
+        :decision-set-current="sourceReviewDecisionSetCurrent"
+        :rerunning="sourceReviewRerunning"
+        @resolve="emit('resolve-source-review', $event)"
+        @analyze="emit('analyze-source-review', $event)"
+        @analyze-all="emit('apply-all-source-review-with-llm')"
+      />
+
+      <section v-if="sourceReviewManualOverride" class="workbench-section source-review-override">
+        <div>
+          <h2>已采用人工终裁正文</h2>
+          <p>
+            一次来源验证仍有 {{ sourceReviewManualOverride.residual_unresolved_count }} 个残余差异；
+            系统已保留诊断报告，并按已记录的复核决定继续后续构建。
+          </p>
+        </div>
+        <small v-if="sourceReviewManualOverride.accepted_at">终裁时间 {{ sourceReviewManualOverride.accepted_at }}</small>
+      </section>
+
       <section class="workbench-section input-section">
         <div class="section-headline">
           <h2>论文输入</h2>
@@ -567,15 +645,23 @@ function confirmSidecarPlan() {
             <input v-model="importFields.display_title" placeholder="留空自动生成" />
           </label>
         </div>
-        <div v-if="importMode === 'upload'" class="input-grid">
-          <label>
-            <span>paper.md</span>
-            <input type="file" accept=".md,text/markdown,text/plain" @change="onFileChange($event, 'md')" />
-          </label>
-          <label>
-            <span>paper.pdf</span>
-            <input type="file" accept="application/pdf,.pdf" @change="onFileChange($event, 'pdf')" />
-          </label>
+        <div v-if="importMode === 'upload'" class="file-input-grid">
+          <FileDropField
+            v-model="paperMdFile"
+            label="paper.md"
+            accept=".md,text/markdown,text/plain"
+            accept-label=".md"
+            kind="markdown"
+            :disabled="props.importing"
+          />
+          <FileDropField
+            v-model="paperPdfFile"
+            label="paper.pdf"
+            accept="application/pdf,.pdf"
+            accept-label=".pdf"
+            kind="pdf"
+            :disabled="props.importing"
+          />
         </div>
         <div v-else class="input-grid">
           <label>
@@ -633,6 +719,9 @@ function confirmSidecarPlan() {
         <p v-if="hasPendingUserGate" class="workbench-meta">
           当前任务正在等待下方的构建决策或执行权限处理。
         </p>
+        <p v-if="!selectedModeSupported" class="workbench-meta">
+          Pass1 需要 executor 先生成逐窗抽取产物，请选择“只写执行契约”交给执行器。
+        </p>
         <div class="action-row">
           <button :disabled="props.actioning || !props.snapshot.input.ready" @click="createBuildJob">
             创建/复用任务
@@ -644,9 +733,14 @@ function confirmSidecarPlan() {
             恢复活动任务
           </button>
         </div>
-        <p v-if="latestJob?.status === 'failed'" class="workbench-error">
-          上次构建任务失败。请检查事件日志后重新启动所选阶段，或刷新状态查看最新恢复信息。
+        <p v-if="latestJob?.failure_summary" class="workbench-error">
+          {{ latestJob.failure_summary.message }}
+          <template v-if="latestJob.failure_summary.recoverable">可使用“恢复活动任务”重新执行当前阶段。</template>
         </p>
+        <div v-if="latestJob?.failure_summary?.stdout_path || latestJob?.failure_summary?.stderr_path" class="failure-paths">
+          <code v-if="latestJob.failure_summary.stdout_path">stdout {{ latestJob.failure_summary.stdout_path }}</code>
+          <code v-if="latestJob.failure_summary.stderr_path">stderr {{ latestJob.failure_summary.stderr_path }}</code>
+        </div>
       </section>
 
       <section v-if="activeRun" class="workbench-section">
@@ -694,64 +788,13 @@ function confirmSidecarPlan() {
         </ul>
       </section>
 
-      <section
-        v-if="sourceReview && (sourceReviewBlocks.length || sourceReview.review_draft_markdown || sourceReview.decisions)"
-        class="workbench-section"
-      >
-        <div class="section-headline">
-          <h2>来源对齐复核</h2>
-          <p class="workbench-meta">
-            {{ sourceReview.ready_for_rerun ? "复核决策已齐，等待重新运行来源对齐" : "仍需处理未解决片段" }}
-          </p>
-        </div>
-        <div v-if="sourceReview.review_draft_markdown" class="review-draft">
-          <strong>候选修复草稿</strong>
-          <pre>{{ sourceReview.review_draft_markdown }}</pre>
-        </div>
-        <ul v-if="sourceReviewBlocks.length" class="source-review-list">
-          <li v-for="block in sourceReviewBlocks" :key="block.id">
-            <div class="source-review-head">
-              <strong>{{ block.id }} · {{ sourceBlockStatusLabel(block.status) }}</strong>
-              <span v-if="recordedSourceReviewDecisionText(block.id)">
-                {{ recordedSourceReviewDecisionText(block.id) }}
-              </span>
-            </div>
-            <p>{{ block.reason }}</p>
-            <div class="review-evidence-grid">
-              <article v-if="block.md_excerpt" class="review-evidence">
-                <h3>Markdown 证据</h3>
-                <pre>{{ block.md_excerpt }}</pre>
-              </article>
-              <article v-if="block.pdf_excerpt" class="review-evidence">
-                <h3>PDF 证据</h3>
-                <pre>{{ block.pdf_excerpt }}</pre>
-              </article>
-              <article v-if="block.candidate_text" class="review-evidence">
-                <h3>候选文本</h3>
-                <pre>{{ block.candidate_text }}</pre>
-              </article>
-            </div>
-            <label class="review-note">
-              <span>复核备注</span>
-              <textarea v-model="reviewNotes[block.id]" rows="2" placeholder="可留空" spellcheck="false"></textarea>
-            </label>
-            <div class="request-options">
-              <button :disabled="props.actioning" @click="resolveSourceReview(block, 'accept_markdown')">
-                {{ sourceReviewDecisionLabel("accept_markdown") }}
-              </button>
-              <button :disabled="props.actioning" @click="resolveSourceReview(block, 'accept_pdf')">
-                {{ sourceReviewDecisionLabel("accept_pdf") }}
-              </button>
-              <button :disabled="props.actioning || !block.candidate_text" @click="resolveSourceReview(block, 'use_candidate')">
-                {{ sourceReviewDecisionLabel("use_candidate") }}
-              </button>
-              <button :disabled="props.actioning" @click="resolveSourceReview(block, 'keep_blocked')">
-                {{ sourceReviewDecisionLabel("keep_blocked") }}
-              </button>
-            </div>
+      <section v-if="operationalWarnings.length" class="workbench-section">
+        <h2>运行警告</h2>
+        <ul class="workbench-reasons">
+          <li v-for="warning in operationalWarnings" :key="`${warning.code}:${warning.job_id ?? ''}`">
+            {{ warning.message }}
           </li>
         </ul>
-        <p v-else class="workbench-empty">没有未解决片段。</p>
       </section>
 
       <section class="workbench-section">
@@ -814,6 +857,16 @@ function confirmSidecarPlan() {
       <section class="workbench-section">
         <h2>辅助产物计划</h2>
         <p class="workbench-meta">状态 {{ sidecarPlanStatusLabel(sidecarPlanStatus) }}</p>
+        <div class="sidecar-request">
+          <textarea
+            v-model="sidecarRequest"
+            rows="2"
+            placeholder="描述需要的时间线、概念图、比较表或论证图"
+          ></textarea>
+          <button :disabled="props.actioning || !sidecarRequest.trim()" @click="draftSidecarPlan">
+            生成计划草稿
+          </button>
+        </div>
         <div v-if="sidecarForm" class="sidecar-form">
           <label v-for="field in sidecarForm.fields" :key="field.id">
             <span>{{ sidecarFieldLabel(field) }}</span>
@@ -844,6 +897,19 @@ function confirmSidecarPlan() {
           </li>
         </ol>
         <p v-else class="workbench-empty">暂无构建事件。</p>
+      </section>
+
+      <section class="workbench-section">
+        <h2>权限审计</h2>
+        <ol v-if="recentPermissionAudit.length" class="event-list">
+          <li v-for="entry in recentPermissionAudit" :key="entry.audit_id">
+            <span>{{ entry.granted ? "已批准" : "已拒绝" }}</span>
+            <strong>{{ entry.executor ? executorLabel(entry.executor) : "执行器" }}</strong>
+            <small>{{ entry.resolved_at }}</small>
+            <p>{{ entry.action_summary ?? entry.request_id }}</p>
+          </li>
+        </ol>
+        <p v-else class="workbench-empty">暂无权限审计记录。</p>
       </section>
     </template>
   </main>
@@ -903,6 +969,16 @@ function confirmSidecarPlan() {
   color: var(--ink);
   padding: 0 0.75rem;
 }
+.failure-paths {
+  display: grid;
+  gap: 0.3rem;
+  margin-top: 0.5rem;
+}
+.failure-paths code {
+  overflow-wrap: anywhere;
+  color: var(--steel);
+  font-size: 0.72rem;
+}
 .poll-toggle {
   display: flex;
   align-items: center;
@@ -933,6 +1009,28 @@ function confirmSidecarPlan() {
   border-radius: 8px;
   background: rgba(255, 253, 248, 0.78);
   padding: 0.9rem;
+}
+.source-review-override {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  border-color: #c9dcd7;
+  background: #f3faf8;
+}
+.source-review-override h2 {
+  margin-bottom: 0.25rem;
+}
+.source-review-override p {
+  margin: 0;
+  color: var(--slate);
+  font-size: 0.8rem;
+  line-height: 1.5;
+}
+.source-review-override small {
+  flex: 0 0 auto;
+  color: var(--steel);
+  font-size: 0.68rem;
 }
 .workbench-flows .workbench-section {
   flex: 1 1 0;
@@ -971,6 +1069,11 @@ function confirmSidecarPlan() {
 }
 .input-grid {
   grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+.file-input-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.75rem;
 }
 .input-grid label,
 .import-mode label,
@@ -1097,8 +1200,7 @@ function confirmSidecarPlan() {
 }
 .request-list,
 .event-list,
-.sidecar-form,
-.source-review-list {
+.sidecar-form {
   display: grid;
   gap: 0.55rem;
 }
@@ -1122,85 +1224,33 @@ function confirmSidecarPlan() {
   padding: 0.14rem 0.45rem;
   font-size: 0.72rem;
 }
-.source-review-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-}
-.source-review-list li,
-.review-draft {
-  border: 1px solid var(--hairline-soft);
-  border-radius: 7px;
-  background: #fff;
-  padding: 0.7rem;
-}
-.source-review-head {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: space-between;
-  gap: 0.5rem;
-}
-.source-review-head span {
-  color: var(--steel);
-  font-size: 0.74rem;
-}
-.source-review-list p {
-  margin: 0.35rem 0 0.55rem;
-  color: var(--steel);
-  font-size: 0.82rem;
-}
-.review-draft {
-  display: grid;
-  gap: 0.45rem;
-  margin-bottom: 0.65rem;
-}
-.review-draft strong,
-.review-evidence h3,
-.review-note span {
-  color: var(--slate);
-  font-size: 0.78rem;
-}
-.review-draft pre,
-.review-evidence pre {
-  max-height: 220px;
-  overflow: auto;
-  margin: 0;
-  border: 1px solid var(--hairline-soft);
-  border-radius: 7px;
-  background: var(--surface-code);
-  color: var(--ink);
-  padding: 0.55rem;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-.review-evidence-grid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 0.55rem;
-}
-.review-evidence {
-  min-width: 0;
-}
-.review-evidence h3 {
-  margin: 0 0 0.3rem;
-}
-.review-note {
+.sidecar-form label {
   display: grid;
   gap: 0.3rem;
-  margin-top: 0.55rem;
 }
-.review-note textarea {
-  width: 100%;
+.sidecar-request {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.5rem;
+  margin-bottom: 0.7rem;
+}
+.sidecar-request textarea {
+  min-width: 0;
   resize: vertical;
   border: 1px solid var(--hairline);
   border-radius: 8px;
   background: #fff;
   color: var(--ink);
-  padding: 0.5rem 0.6rem;
+  padding: 0.55rem 0.65rem;
 }
-.sidecar-form label {
-  display: grid;
-  gap: 0.3rem;
+.sidecar-request button {
+  min-height: 38px;
+  align-self: end;
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--ink);
+  padding: 0 0.75rem;
 }
 .sidecar-form label span {
   color: var(--slate);
@@ -1232,14 +1282,18 @@ function confirmSidecarPlan() {
 @media (max-width: 900px) {
   .workbench-head,
   .workbench-flows,
-  .section-headline {
+  .section-headline,
+  .source-review-override {
     display: grid;
   }
   .fingerprint-grid,
   .input-grid,
+  .file-input-grid,
   .run-control-grid,
-  .telemetry-grid,
-  .review-evidence-grid {
+  .telemetry-grid {
+    grid-template-columns: 1fr;
+  }
+  .sidecar-request {
     grid-template-columns: 1fr;
   }
 }
