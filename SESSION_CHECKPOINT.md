@@ -1,9 +1,9 @@
 # SESSION_CHECKPOINT - 2026-07-11 00:13
 
 ## 新鲜度自检
-- 写入时实现/文档基准 commit:`3d209c4 docs: document prebuild workbench flow`。
-- 本页在该基准后单独提交；读入时先比较 `git log --oneline -5` 与 `git status --short`，以 Git/worktree 为准。
-- 本轮提交序列:`479c08a` Core runner -> `c49993e` Server controller -> `92ce701` Web Workbench -> `3d209c4` 流程文档。
+- 写入时已推送基准 commit:`6f78b59 docs: refresh prebuild workbench checkpoint`。
+- 本页在该基准后做最终状态校正；读入时先比较 `git log --oneline -5` 与 `git status --short`，以 Git/worktree 为准。
+- 本轮提交序列:`479c08a` Core runner -> `c49993e` Server controller -> `92ce701` Web Workbench -> `3d209c4` 流程文档 -> `6f78b59` checkpoint。
 
 ## 当前主线
 预构建 Build Workbench 已成为 paper profile 的 reader 前置控制面；冷启动先恢复完整工作台流程，再下钻来源终裁或单个 book 的运行状态。
@@ -35,7 +35,7 @@
 
 ## 未提交 / 未完成
 - 真实 book `1`：待运行 `hybrid_foundation` 并完成 reader handoff 实测。
-- 预构建 Workbench 实现与流程文档已进入上述四个本地 commit；本页单独提交。
+- 预构建 Workbench 实现、流程文档与上一版 checkpoint 已推送到 `origin/main`；当前无 tracked pending change。
 - worktree 仍有 `.fluid`、Chrome profile、日志、截图、论文/参考资料和个人设计稿等无关未跟踪文件；保留且不要纳入功能提交。
 
 ## 冷启动读序
