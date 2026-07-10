@@ -355,16 +355,22 @@ Hard boundary:
 ### PH16 - Source reconciliation review surface
 
 - **Do**: add a dedicated Workbench review panel for unresolved source reconciliation blocks; show Markdown/PDF evidence, candidate repaired text, unresolved reason, and decision options; write review decisions as build decision artifacts and rerun source reconciliation gates.
+- **Bulk LLM policy (2026-07-10)**: one explicit user click authorizes analysis and immediate `manual_edit` decisions for each valid non-uncertain suggestion with confidence `>= 0.8`. Successful decisions remain durable when another block fails; provider errors, invalid output, low confidence, and `uncertain` remain unresolved for individual review.
+- **Manual override policy (2026-07-10)**: after all review decisions are usable, run deterministic reconciliation exactly once. If that reviewed draft still has residual unresolved blocks, persist the failed diagnostics but accept the reviewed draft with explicit `manual_override` provenance and continue the build; do not return the same review round to the user.
 - **Do not**: accept arbitrary LLM content edits, use PDF page/bbox as citation truth, or resolve content-bearing conflicts without deterministic equivalence/realignment.
-- **Done**: `needs_review` source reconciliation can be resolved from Workbench and either re-enter the trusted source pipeline or remain blocked with explicit reasons.
+- **Done**: `needs_review` source reconciliation can be resolved from Workbench, rerun exactly once, then either pass deterministic trust or continue with explicit `manual_override` acceptance while preserving residual diagnostics.
 
 ### PH17 - Stage runner wiring and reader handoff
+
+- **Status (2026-07-10)**: complete. Fixed server-side builtin runner covers source reconciliation, hybrid foundation/PDF maps, PH8 projection commands, PH9 sidecar planning, per-stage readiness recomputation, and revision-aware Book/Reader handoff.
 
 - **Do**: wire build controller stages to existing PH1-PH9 scripts/runtime paths: source reconciliation, hybrid foundation close, PDF maps, paper projections, sidecar planning, and final readiness recomputation; after each stage, re-read artifacts and update snapshot; when trusted `source.txt/base.json/source_manifest/maps` pass gates, route to reader.
 - **Do not**: make stage runners depend on frontend state, skip schema/hash gates, or let sidecar/projection failures redefine source truth.
 - **Done**: from uploaded PDF+MD, the Workbench can run through trusted reader entry with deterministic gates as the only handoff authority.
 
 ### PH18 - Recovery, observability, and operational hardening
+
+- **Status (2026-07-10)**: complete. Durable heartbeat recovery, resumable polling, structured failures/warnings, permission audit, and bounded job/event/audit retention are implemented and covered by interrupted/resumed build tests.
 
 - **Do**: add stale-input warnings, orphaned active-run recovery, resumable polling after refresh, job failure summaries, permission audit trail, bounded job/event retention, and tests for interrupted/resumed builds.
 - **Do not**: add multi-user queueing, distributed workers, background daemon assumptions, or cloud storage in this v1.

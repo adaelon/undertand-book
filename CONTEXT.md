@@ -314,6 +314,12 @@ PDF-first paper build 中把 `paper.md + paper.pdf` 对齐、修复版面/编码
 ## Source review decisions
 Source reconciliation unresolved block 的用户复核记录,写入 `.build/source-reconciliation/review-decisions.json`。它只表达用户选择和备注,供后续 source reconciliation rerun/gate 消费;自身不生成可信 `source.txt`,也不能替代 content equivalence 与 realignment gate。状态:NEW(见 `docs/切片方案-paper-pdf-first-hybrid.md` PH16)。
 
+## Bulk LLM source review decisions
+用户在 Source reconciliation review surface 上一次明确选择,授权系统逐项请求 LLM 修订并把高置信、非 uncertain 的有效结果记录为 Source review decisions。批量操作允许部分成功:成功项保留决策,技术失败、无效输出、低置信或 uncertain 项继续留给用户逐项复核;它不是全有或全无事务,也不直接生成可信 `source.txt`。状态:BOUNDARY_CHANGE(见 `docs/切片方案-paper-pdf-first-hybrid.md` PH16)。
+
+## Manual source override
+Source review decisions 全部齐备后,系统只执行一次确定性 source reconciliation 重跑;若 reviewed draft 仍有 residual unresolved,用户终裁优先于这一次验证结果,该 reviewed draft 以显式 `manual_override` provenance 进入后续构建。残余报告必须保留用于审计,但不得再次生成同一轮来源复核或自动重跑。它不允许跳过首轮逐项复核,也不允许直接采用尚未持久化的 LLM suggestion。状态:BOUNDARY_CHANGE(见 [docs/adr/0065])。
+
 ## PDF visual source map
 `pdf_source_map.json` 中从可信 LID/source span 到 PDF `pageIndex + bbox` 区域的轻量运行时映射。它用于把 citation、note、highlight 投影回 PDF 页面,但不替代 LID,也不是 citation anchor。状态:BOUNDARY_CHANGE(见 [docs/adr/0063])。
 
