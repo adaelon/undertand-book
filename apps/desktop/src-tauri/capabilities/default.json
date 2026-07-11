@@ -6,5 +6,13 @@
     "urls": ["http://127.0.0.1:*"]
   },
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": [
+    "core:default",
+    "dialog:allow-open",
+    "allow-codex-plugin-status",
+    "allow-install-codex-plugin",
+    "allow-set-desktop-library-directory",
+    "allow-desktop-provider-status",
+    "allow-save-desktop-provider-settings"
+  ]
 }

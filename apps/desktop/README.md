@@ -10,6 +10,12 @@ offline marketplace, or declined consent leaves the reader installed and the plu
 the desktop Settings dialog. Uninstall removes the plugin only when an Understand Book installation
 receipt proves Setup installed it; books, registered external workspaces, and memory are retained.
 
+Desktop Settings lets the user select a library parent (or an existing `.understand-book`) and
+change the Reader LLM provider without restarting. The effective library root and provider mode,
+Base URL, model, and API key are stored in `%LOCALAPPDATA%\UnderstandBook\settings.json`. The API
+key is currently plain text by explicit product decision; it is never returned to the web UI or
+embedded in Setup. A blank key on a later save preserves the stored value.
+
 Release prerequisites:
 
 - Windows x64 with Rust MSVC, WebView2, pnpm, Bun, and the Tauri NSIS tooling;

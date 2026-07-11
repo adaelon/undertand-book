@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-install-codex-plugin"
+description = "Enables the install_codex_plugin command without any pre-configured scope."
+commands.allow = ["install_codex_plugin"]
+
+[[permission]]
+identifier = "deny-install-codex-plugin"
+description = "Denies the install_codex_plugin command without any pre-configured scope."
+commands.deny = ["install_codex_plugin"]

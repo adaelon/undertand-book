@@ -83,6 +83,13 @@ impl ProviderMode {
             }),
         }
     }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ProviderMode::Native => "native",
+            ProviderMode::ReAct => "react",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -94,6 +101,33 @@ pub struct ProviderConfig {
 }
 
 impl ProviderConfig {
+    pub fn from_values(
+        mode: &str,
+        api_key: impl Into<String>,
+        base_url: impl Into<String>,
+        model: impl Into<String>,
+    ) -> Result<ProviderConfig, AdapterError> {
+        let mode = ProviderMode::parse(mode)?;
+        let api_key = api_key.into().trim().to_string();
+        let base_url = base_url.into().trim().trim_end_matches('/').to_string();
+        let model = model.into().trim().to_string();
+        if api_key.is_empty() {
+            return Err(AdapterError { message: "Provider API Key 不能为空".into() });
+        }
+        if model.is_empty() {
+            return Err(AdapterError { message: "Provider Model 不能为空".into() });
+        }
+        let parsed = url::Url::parse(&base_url).map_err(|error| AdapterError {
+            message: format!("Provider Base URL 非法:{error}"),
+        })?;
+        if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+            return Err(AdapterError {
+                message: "Provider Base URL 必须是带主机名的 http/https URL".into(),
+            });
+        }
+        Ok(ProviderConfig { mode, api_key, base_url, model })
+    }
+
     fn from_getter<F>(mut get: F) -> Result<ProviderConfig, AdapterError>
     where
         F: FnMut(&str) -> Option<String>,
@@ -103,15 +137,12 @@ impl ProviderConfig {
                 message: format!("缺少环境变量 {k}(填 .env 或 export)"),
             })
         };
-        let mode = ProviderMode::parse(
+        ProviderConfig::from_values(
             &get("UNDERSTAND_BOOK_PROVIDER").unwrap_or_else(|| "native".into()),
-        )?;
-        Ok(ProviderConfig {
-            mode,
-            api_key: required("OPENCODE_API_KEY", &mut get)?,
-            base_url: required("OPENCODE_BASE_URL", &mut get)?,
-            model: required("FLUID_LLM_MODEL", &mut get)?,
-        })
+            required("OPENCODE_API_KEY", &mut get)?,
+            required("OPENCODE_BASE_URL", &mut get)?,
+            required("FLUID_LLM_MODEL", &mut get)?,
+        )
     }
 
     pub fn from_env() -> Result<ProviderConfig, AdapterError> {
@@ -2666,6 +2697,24 @@ mod tests {
         })
         .unwrap();
         assert_eq!(react.mode, ProviderMode::ReAct);
+    }
+
+    #[test]
+    fn provider_config_from_values_validates_and_normalizes() {
+        let config = ProviderConfig::from_values(
+            "react",
+            " secret ",
+            "https://provider.example/v1/",
+            " model-name ",
+        ).unwrap();
+        assert_eq!(config.mode, ProviderMode::ReAct);
+        assert_eq!(config.api_key, "secret");
+        assert_eq!(config.base_url, "https://provider.example/v1");
+        assert_eq!(config.model, "model-name");
+
+        assert!(ProviderConfig::from_values("native", "", "https://example.com", "m").is_err());
+        assert!(ProviderConfig::from_values("native", "k", "file:///tmp", "m").is_err());
+        assert!(ProviderConfig::from_values("unknown", "k", "https://example.com", "m").is_err());
     }
 
     #[test]

@@ -6,7 +6,7 @@ use base_schema::{LidNode, NodeKind, ReadOnlyBase, Span};
 use memory::MemoryStore;
 use read_tools::Book;
 use reader::{Reader, DEFAULT_RADIUS};
-use runtime::{ModelAdapter, ProviderRegistry};
+use runtime::{ModelAdapter, ProviderConfig, ProviderRegistry};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -47,9 +47,28 @@ pub struct RunningServer {
     pub url: String,
     stop: Arc<AtomicBool>,
     handles: Vec<JoinHandle<()>>,
+    state: Arc<Mutex<AppState>>,
 }
 
 impl RunningServer {
+    pub fn set_library_root(&self, library_root: PathBuf) {
+        let mut state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.library_root = Some(library_root);
+    }
+
+    pub fn library_root(&self) -> Option<PathBuf> {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .library_root
+            .clone()
+    }
+
+    pub fn set_provider_config(&self, config: ProviderConfig) {
+        let mut state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.adapter = ProviderRegistry::adapter_from_config(config);
+    }
+
     pub fn wait(mut self) {
         for handle in self.handles.drain(..) {
             let _ = handle.join();
@@ -97,10 +116,7 @@ pub fn start_server(config: ServerHostConfig) -> Result<RunningServer, String> {
     }
     let adapter: Box<dyn ModelAdapter + Send> = match ProviderRegistry::adapter_from_env() {
         Ok(adapter) => adapter,
-        Err(error) => {
-            eprintln!("LLM provider is not configured ({}); deterministic reader commands remain available", error.message);
-            Box::new(UnconfiguredAdapter)
-        }
+        Err(_) => Box::new(UnconfiguredAdapter),
     };
     let mut agent_history = load_agent_history(&history_path);
     let messages = ensure_agent_history_for_book(&mut agent_history, &book.base.book_id, "server-start");
@@ -168,15 +184,13 @@ pub fn start_server(config: ServerHostConfig) -> Result<RunningServer, String> {
             }
         }));
     }
-    Ok(RunningServer { url, stop, handles })
+    Ok(RunningServer { url, stop, handles, state })
 }
 
 fn bootstrap_book(library_root: Option<&Path>) -> Result<(String, Book, Option<String>), String> {
     let root = library_root
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from(".understand-book"));
-    std::fs::create_dir_all(&root)
-        .map_err(|error| format!("failed to create library {}: {error}", root.display()))?;
     let source = "Select or create a book.";
     let base = ReadOnlyBase {
         book_id: "__desktop_bootstrap__".into(),

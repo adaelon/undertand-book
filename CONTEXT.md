@@ -353,6 +353,12 @@ Build Workbench 背后的服务端控制层:负责把上传的 `paper.md/paper.p
 ## Desktop Reader App
 把现有 Vue reader 与 Rust localhost REST host 封装为 Windows 桌面应用的产品表面。第一版使用 Tauri 2 + WebView2,保留同源 REST 契约,支持无当前书启动、默认书库和外部 `.understand-book/<book_id>` workspace 注册且不复制产物。状态:BOUNDARY_CHANGE(详见 [docs/adr/0068])。
 
+## 用户书库根目录 (user library root)
+Desktop Reader App 中由当前用户选择、跨启动保持的唯一书库根路径,决定书库扫描范围与新建书写入位置。用户可选择普通父目录或现有 `.understand-book`;前者解析为其下的 `.understand-book`,后者直接复用。切换不迁移、不复制、不删除旧书库,当前已打开的书保持不变。状态:NEW(详见 [docs/adr/0069])。
+
+## 桌面 Provider 设置 (desktop provider settings)
+Desktop Reader App 当前用户为读时 LLM adapter 提供的模式、Base URL、Model 与 API Key 配置。保存成功后立即替换当前 server 的 adapter,不重启、不改变当前书与会话;保存只做确定性格式校验,不自动产生模型请求。API Key 暂按用户明确接受的风险明文保存在用户级设置中,界面不回显已存值。状态:NEW(详见 [docs/adr/0070])。
+
 ## Build Engine Sidecar
 随 Desktop Reader App 安装、由 Codex plugin 调用但不直接展示的确定性预构建可执行程序 `understand-book-build.exe`。它承载 resolve/next/input/write/close/gate 与 protocol doctor,不执行语义模型;用户不需要安装 Node、pnpm 或 Cargo。状态:NEW(详见 [docs/adr/0068])。
 

@@ -123,6 +123,7 @@ export interface DesktopStatus {
   active_book: boolean;
   book_dir: string | null;
   library_root: string;
+  library_root_available: boolean;
 }
 export type PdfCapabilityStatus = "unavailable" | "available" | "degraded" | "stale" | "failed";
 export interface PdfCapability {

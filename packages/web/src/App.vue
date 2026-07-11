@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from "vue";
+import { FolderOpen, Save } from "@lucide/vue";
 import { api, ApiError } from "./api";
 import type {
   AgentChatSessionSummary,
@@ -33,6 +34,13 @@ import type {
   WorkbenchAdapterMode,
 } from "./api";
 import { renderInlineMarkdown, renderMarkdown } from "./md";
+import { desktopLibraryNeedsSelection } from "./desktop-library";
+import {
+  desktopProviderDraft,
+  desktopProviderStatusLabel,
+  type DesktopProviderMode,
+  type DesktopProviderStatus,
+} from "./desktop-provider";
 import { rangeToMarkdown } from "./selection";
 import {
   getSourceReviewAutoRerunRequest,
@@ -192,6 +200,18 @@ const openingBook = ref(false);
 const desktopNeedsBook = ref(false);
 const desktopHost = ref(false);
 const desktopSettingsOpen = ref(false);
+const desktopLibraryRoot = ref("");
+const desktopLibraryAvailable = ref(true);
+const desktopLibraryChanging = ref(false);
+const desktopLibraryError = ref("");
+const desktopProviderStatus = ref<DesktopProviderStatus | null>(null);
+const desktopProviderMode = ref<DesktopProviderMode>("native");
+const desktopProviderBaseUrl = ref("");
+const desktopProviderModel = ref("");
+const desktopProviderApiKey = ref("");
+const desktopProviderLoading = ref(false);
+const desktopProviderSaving = ref(false);
+const desktopProviderError = ref("");
 const codexPluginLoading = ref(false);
 const codexPluginError = ref("");
 type CodexPluginState =
@@ -1303,8 +1323,16 @@ async function init() {
       throw error;
     });
     desktopHost.value = Boolean(desktop?.desktop_host);
+    desktopLibraryRoot.value = desktop?.library_root ?? "";
+    desktopLibraryAvailable.value = desktop?.library_root_available ?? true;
+    desktopNeedsBook.value = Boolean(desktop && !desktop.active_book);
+    if (desktopLibraryNeedsSelection(desktop)) {
+      desktopSettingsOpen.value = true;
+      bookPickerOpen.value = false;
+      await refreshDesktopProviderStatus();
+      return;
+    }
     if (desktop && !desktop.active_book) {
-      desktopNeedsBook.value = true;
       bookPickerOpen.value = true;
       await loadBookLibrary();
       return;
@@ -1348,12 +1376,12 @@ async function init() {
   }
 }
 
-async function invokeDesktop<T>(command: string): Promise<T> {
+async function invokeDesktop<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   if (!("__TAURI_INTERNALS__" in window)) {
     throw new Error("桌面命令仅在 Understand Book 应用中可用");
   }
   const { invoke } = await import("@tauri-apps/api/core");
-  return invoke<T>(command);
+  return invoke<T>(command, args);
 }
 
 async function refreshCodexPluginStatus() {
@@ -1370,7 +1398,81 @@ async function refreshCodexPluginStatus() {
 
 async function openDesktopSettings() {
   desktopSettingsOpen.value = true;
-  await refreshCodexPluginStatus();
+  await Promise.all([refreshCodexPluginStatus(), refreshDesktopProviderStatus()]);
+}
+
+function closeDesktopSettings() {
+  if (desktopLibraryChanging.value || desktopProviderSaving.value || !desktopLibraryAvailable.value) return;
+  desktopSettingsOpen.value = false;
+}
+
+async function refreshDesktopProviderStatus() {
+  desktopProviderLoading.value = true;
+  desktopProviderError.value = "";
+  try {
+    const status = await invokeDesktop<DesktopProviderStatus>("desktop_provider_status");
+    desktopProviderStatus.value = status;
+    const draft = desktopProviderDraft(status);
+    desktopProviderMode.value = draft.mode;
+    desktopProviderBaseUrl.value = draft.baseUrl;
+    desktopProviderModel.value = draft.model;
+    desktopProviderApiKey.value = draft.apiKey;
+  } catch (error) {
+    desktopProviderError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    desktopProviderLoading.value = false;
+  }
+}
+
+async function saveDesktopProviderSettings() {
+  desktopProviderSaving.value = true;
+  desktopProviderError.value = "";
+  try {
+    const status = await invokeDesktop<DesktopProviderStatus>("save_desktop_provider_settings", {
+      input: {
+        mode: desktopProviderMode.value,
+        api_key: desktopProviderApiKey.value,
+        base_url: desktopProviderBaseUrl.value,
+        model: desktopProviderModel.value,
+      },
+    });
+    desktopProviderStatus.value = status;
+    desktopProviderApiKey.value = "";
+  } catch (error) {
+    desktopProviderError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    desktopProviderSaving.value = false;
+  }
+}
+
+async function chooseDesktopLibraryDirectory() {
+  desktopLibraryChanging.value = true;
+  desktopLibraryError.value = "";
+  try {
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const selected = await open({
+      directory: true,
+      multiple: false,
+      title: "选择 Understand Book 书库位置",
+    });
+    if (!selected || Array.isArray(selected)) return;
+    const result = await invokeDesktop<{ library_root: string }>("set_desktop_library_directory", {
+      selectedDir: selected,
+    });
+    desktopLibraryRoot.value = result.library_root;
+    desktopLibraryAvailable.value = true;
+    await loadBookLibrary();
+    desktopSettingsOpen.value = false;
+    if (desktopNeedsBook.value) {
+      bookPickerOpen.value = true;
+    } else {
+      await init();
+    }
+  } catch (error) {
+    desktopLibraryError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    desktopLibraryChanging.value = false;
+  }
 }
 
 async function installCodexPlugin() {
@@ -2100,35 +2202,117 @@ async function submitOpenBook(dir = bookPickerDir.value) {
 
     <p v-if="banner" class="banner">{{ banner }}</p>
 
-    <div v-if="desktopSettingsOpen" class="desktop-settings-modal" @click.self="desktopSettingsOpen = false">
+    <div v-if="desktopSettingsOpen" class="desktop-settings-modal" @click.self="closeDesktopSettings">
       <section class="desktop-settings-dialog" role="dialog" aria-modal="true" aria-labelledby="desktop-settings-title">
         <header class="desktop-settings-head">
           <div>
             <p class="formula-dialog-kicker">桌面应用</p>
             <h3 id="desktop-settings-title">设置</h3>
           </div>
-          <button class="formula-dialog-close" title="关闭" aria-label="关闭设置" @click="desktopSettingsOpen = false">×</button>
+          <button
+            class="formula-dialog-close"
+            title="关闭"
+            aria-label="关闭设置"
+            :disabled="desktopLibraryChanging || desktopProviderSaving || !desktopLibraryAvailable"
+            @click="closeDesktopSettings"
+          >×</button>
         </header>
         <div class="desktop-settings-body">
-          <div class="desktop-settings-row">
-            <div>
-              <strong>Codex 预构建插件</strong>
-              <p v-if="codexPluginStatus">{{ codexPluginStateLabel(codexPluginStatus.state) }}</p>
-              <p v-else>{{ codexPluginLoading ? "正在检测..." : "尚未检测" }}</p>
+          <div class="desktop-settings-section">
+            <div class="desktop-settings-row">
+              <div>
+                <strong>书库位置</strong>
+                <p>{{ desktopLibraryAvailable ? "用于扫描和新建书" : "当前目录不可用，请重新选择" }}</p>
+              </div>
+              <button
+                class="desktop-library-button"
+                :disabled="desktopLibraryChanging"
+                @click="chooseDesktopLibraryDirectory"
+              >
+                <FolderOpen :size="17" aria-hidden="true" />
+                <span>{{ desktopLibraryChanging ? "处理中" : "选择目录" }}</span>
+              </button>
             </div>
-            <button
-              v-if="codexPluginStatus && !['installed_by_setup', 'installed_externally'].includes(codexPluginStatus.state)"
-              class="primary-action"
-              :disabled="codexPluginLoading"
-              @click="installCodexPlugin"
-            >
-              {{ codexPluginLoading ? "处理中..." : "安装或重试" }}
-            </button>
-            <button v-else :disabled="codexPluginLoading" @click="refreshCodexPluginStatus">刷新</button>
+            <p v-if="desktopLibraryRoot" class="desktop-settings-path">{{ desktopLibraryRoot }}</p>
+            <p v-if="desktopLibraryError" class="book-picker-error">{{ desktopLibraryError }}</p>
           </div>
-          <p v-if="codexPluginStatus" class="desktop-settings-message">{{ codexPluginStatus.message }}</p>
-          <p v-if="codexPluginStatus?.codex_path" class="desktop-settings-path">{{ codexPluginStatus.codex_path }}</p>
-          <p v-if="codexPluginError" class="book-picker-error">{{ codexPluginError }}</p>
+          <div class="desktop-settings-section">
+            <div class="desktop-settings-row desktop-provider-heading">
+              <div>
+                <strong>Reader Provider</strong>
+                <p>{{ desktopProviderLoading ? "正在读取..." : desktopProviderStatusLabel(desktopProviderStatus) }}</p>
+              </div>
+              <div class="desktop-provider-mode" role="group" aria-label="Provider 模式">
+                <button
+                  type="button"
+                  :class="{ active: desktopProviderMode === 'native' }"
+                  :aria-pressed="desktopProviderMode === 'native'"
+                  :disabled="desktopProviderSaving"
+                  @click="desktopProviderMode = 'native'"
+                >Native</button>
+                <button
+                  type="button"
+                  :class="{ active: desktopProviderMode === 'react' }"
+                  :aria-pressed="desktopProviderMode === 'react'"
+                  :disabled="desktopProviderSaving"
+                  @click="desktopProviderMode = 'react'"
+                >ReAct</button>
+              </div>
+            </div>
+            <div class="desktop-provider-grid">
+              <label>
+                <span>Base URL</span>
+                <input v-model="desktopProviderBaseUrl" type="url" :disabled="desktopProviderSaving" placeholder="https://provider.example/v1" />
+              </label>
+              <label>
+                <span>Model</span>
+                <input v-model="desktopProviderModel" :disabled="desktopProviderSaving" placeholder="model-name" />
+              </label>
+              <label class="desktop-provider-key">
+                <span>API Key</span>
+                <input
+                  v-model="desktopProviderApiKey"
+                  type="password"
+                  autocomplete="new-password"
+                  :disabled="desktopProviderSaving"
+                  :placeholder="desktopProviderStatus?.api_key_configured ? '留空保留已保存密钥' : '输入 API Key'"
+                />
+              </label>
+            </div>
+            <div class="desktop-provider-actions">
+              <p>API Key 明文保存在当前 Windows 用户设置中。</p>
+              <button
+                class="primary-action desktop-provider-save"
+                :disabled="desktopProviderSaving || !desktopProviderBaseUrl.trim() || !desktopProviderModel.trim()"
+                @click="saveDesktopProviderSettings"
+              >
+                <Save :size="16" aria-hidden="true" />
+                <span>{{ desktopProviderSaving ? "应用中" : "保存并应用" }}</span>
+              </button>
+            </div>
+            <p v-if="desktopProviderError" class="book-picker-error">{{ desktopProviderError }}</p>
+          </div>
+          <div class="desktop-settings-section">
+            <div class="desktop-settings-row">
+              <div>
+                <strong>Codex 预构建插件</strong>
+                <p v-if="codexPluginStatus">{{ codexPluginStateLabel(codexPluginStatus.state) }}</p>
+                <p v-else>{{ codexPluginLoading ? "正在检测..." : "尚未检测" }}</p>
+              </div>
+              <button
+                v-if="codexPluginStatus && !['installed_by_setup', 'installed_externally'].includes(codexPluginStatus.state)"
+                class="primary-action"
+                :disabled="codexPluginLoading"
+                @click="installCodexPlugin"
+              >
+                {{ codexPluginLoading ? "处理中..." : "安装或重试" }}
+              </button>
+              <button v-else :disabled="codexPluginLoading" @click="refreshCodexPluginStatus">刷新</button>
+            </div>
+            <p v-if="codexPluginStatus" class="desktop-settings-message">{{ codexPluginStatus.message }}</p>
+            <p v-if="codexPluginStatus?.codex_path" class="desktop-settings-path">{{ codexPluginStatus.codex_path }}</p>
+            <p v-if="codexPluginError" class="book-picker-error">{{ codexPluginError }}</p>
+          </div>
         </div>
       </section>
     </div>
@@ -2542,6 +2726,9 @@ async function submitOpenBook(dir = bookPickerDir.value) {
 }
 .desktop-settings-dialog {
   width: min(32rem, 94vw);
+  max-height: min(90vh, 48rem);
+  display: flex;
+  flex-direction: column;
   overflow: hidden;
   border: 1px solid var(--hairline);
   border-radius: 8px;
@@ -2560,7 +2747,14 @@ async function submitOpenBook(dir = bookPickerDir.value) {
   font-size: 1rem;
 }
 .desktop-settings-body {
+  min-height: 0;
+  overflow-y: auto;
   padding: 1rem;
+}
+.desktop-settings-section + .desktop-settings-section {
+  margin-top: 1rem;
+  border-top: 1px solid var(--line);
+  padding-top: 1rem;
 }
 .desktop-settings-row {
   display: flex;
@@ -2582,6 +2776,78 @@ async function submitOpenBook(dir = bookPickerDir.value) {
 .desktop-settings-row button {
   min-height: 36px;
   flex: 0 0 auto;
+}
+.desktop-library-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.42rem;
+}
+.desktop-provider-heading {
+  align-items: flex-start;
+}
+.desktop-provider-mode {
+  display: inline-grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  border: 1px solid var(--hairline);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.desktop-provider-mode button {
+  min-height: 32px;
+  border: 0;
+  border-radius: 0;
+  background: #fff;
+  padding: 0.35rem 0.65rem;
+  color: var(--slate);
+}
+.desktop-provider-mode button + button {
+  border-left: 1px solid var(--hairline);
+}
+.desktop-provider-mode button.active {
+  background: var(--ink);
+  color: #fff;
+}
+.desktop-provider-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(9rem, 0.58fr);
+  gap: 0.7rem;
+  margin-top: 0.8rem;
+}
+.desktop-provider-grid label {
+  min-width: 0;
+  display: grid;
+  gap: 0.3rem;
+  color: var(--steel);
+  font-size: 0.75rem;
+  font-weight: 650;
+}
+.desktop-provider-grid input {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+}
+.desktop-provider-key {
+  grid-column: 1 / -1;
+}
+.desktop-provider-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.8rem;
+  margin-top: 0.75rem;
+}
+.desktop-provider-actions p {
+  margin: 0;
+  color: var(--steel);
+  font-size: 0.72rem;
+  line-height: 1.4;
+}
+.desktop-provider-save {
+  min-height: 36px;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
 }
 .desktop-settings-message {
   margin-top: 0.85rem;
@@ -2988,6 +3254,19 @@ async function submitOpenBook(dir = bookPickerDir.value) {
 @media (max-width: 640px) {
   .book-create-grid {
     grid-template-columns: 1fr;
+  }
+  .desktop-provider-grid {
+    grid-template-columns: 1fr;
+  }
+  .desktop-provider-key {
+    grid-column: auto;
+  }
+  .desktop-provider-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .desktop-provider-save {
+    justify-content: center;
   }
 }
 .formula-dialog-body {

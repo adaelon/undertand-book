@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-desktop-provider-status"
+description = "Enables the desktop_provider_status command without any pre-configured scope."
+commands.allow = ["desktop_provider_status"]
+
+[[permission]]
+identifier = "deny-desktop-provider-status"
+description = "Denies the desktop_provider_status command without any pre-configured scope."
+commands.deny = ["desktop_provider_status"]

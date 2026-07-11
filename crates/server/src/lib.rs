@@ -382,6 +382,7 @@ pub fn route(state: &mut AppState, req: Req) -> Reply {
             "active_book": active_book,
             "book_dir": active_book.then(|| path_string(&state.book_dir)),
             "library_root": path_string(&state_library_root(state)),
+            "library_root_available": state_library_root(state).is_dir(),
         }));
     }
     if path == "/book/library" {
@@ -6077,6 +6078,20 @@ mod tests {
         let selected: serde_json::Value = serde_json::from_str(&selected.body).unwrap();
         assert_eq!(selected["active_book"], true);
         assert_eq!(selected["book_dir"], path_string(&state.book_dir));
+    }
+
+    #[test]
+    fn desktop_status_reports_an_unavailable_configured_library_root() {
+        let mut state = state_named("desktop-library-unavailable");
+        let missing = tmp_dir("desktop-library-missing").join("removed");
+        state.library_root = Some(missing.clone());
+
+        let response = get(&mut state, "/desktop/status");
+        let body: serde_json::Value = serde_json::from_str(&response.body).unwrap();
+
+        assert_eq!(body["library_root"], path_string(&missing));
+        assert_eq!(body["library_root_available"], false);
+        assert!(!missing.exists());
     }
 
     #[test]

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-codex-plugin-status"
+description = "Enables the codex_plugin_status command without any pre-configured scope."
+commands.allow = ["codex_plugin_status"]
+
+[[permission]]
+identifier = "deny-codex-plugin-status"
+description = "Denies the codex_plugin_status command without any pre-configured scope."
+commands.deny = ["codex_plugin_status"]
