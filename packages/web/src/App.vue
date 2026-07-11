@@ -50,10 +50,7 @@ import {
 } from "./source-review-batch";
 import {
   chooseAppSurface,
-  readSurfacePreference,
   workbenchAvailable,
-  workbenchControlPending,
-  writeSurfacePreference,
   type AppSurface,
 } from "./surface-selection";
 import TopBar from "./components/TopBar.vue";
@@ -90,6 +87,7 @@ const leafOrder = ref<string[]>([]); // 全书叶 LID 序(读位感分母 + 进�
 const kindByLid = ref<Map<string, NodeKind>>(new Map());
 const imageAssetByLid = ref<Map<string, ImageAssetManifestEntry>>(new Map());
 const appSurface = ref<AppSurface>("loading");
+const diagnosticWorkbenchBookId = ref<string | null>(null);
 const buildWorkbenchSnapshot = ref<BuildWorkbenchSnapshot | null>(null);
 const buildWorkbenchLoading = ref(false);
 const buildWorkbenchError = ref<string | null>(null);
@@ -1076,13 +1074,16 @@ async function maybeAutoRerunSourceReview(
 async function refreshBuildWorkbench() {
   const snapshot = await loadBuildWorkbenchSnapshot();
   if (!snapshot) return;
-  const surface = chooseAppSurface(
-    snapshot,
-    appSurface.value,
-    readSurfacePreference(window.sessionStorage, snapshot.book_id),
-  );
-  appSurface.value = surface;
-  if (workbenchAvailable(snapshot)) writeSurfacePreference(window.sessionStorage, snapshot.book_id, surface);
+  await showSurfaceForWorkbenchSnapshot(snapshot);
+}
+
+async function showSurfaceForWorkbenchSnapshot(snapshot: BuildWorkbenchSnapshot) {
+  const surface = chooseAppSurface(snapshot);
+  if (surface === "reader" && diagnosticWorkbenchBookId.value !== snapshot.book_id) {
+    await init();
+    return;
+  }
+  appSurface.value = "workbench";
 }
 
 async function confirmSidecarPlan(fields: Record<string, unknown>) {
@@ -1110,7 +1111,7 @@ async function importWorkbenchInput(payload: {
   buildWorkbenchError.value = null;
   try {
     buildWorkbenchSnapshot.value = await api.workbenchInputImport(payload);
-    writeSurfacePreference(window.sessionStorage, buildWorkbenchSnapshot.value.book_id, "workbench");
+    diagnosticWorkbenchBookId.value = null;
     appSurface.value = "workbench";
   } catch (e) {
     buildWorkbenchError.value = errorMessage(e);
@@ -1127,10 +1128,7 @@ async function applyWorkbenchAction(action: () => Promise<BuildWorkbenchSnapshot
     buildWorkbenchSnapshot.value = snapshot;
     snapshot = await maybeAutoRerunSourceReview(snapshot, actionOwner);
     buildWorkbenchSnapshot.value = snapshot;
-    appSurface.value = "workbench";
-    if (workbenchAvailable(snapshot)) {
-      writeSurfacePreference(window.sessionStorage, snapshot.book_id, "workbench");
-    }
+    await showSurfaceForWorkbenchSnapshot(snapshot);
   } catch (e) {
     buildWorkbenchError.value = errorMessage(e);
   } finally {
@@ -1303,15 +1301,15 @@ async function draftSidecarPlan(payload: { request: string }) {
 
 async function enterReader() {
   const snapshot = buildWorkbenchSnapshot.value;
-  if (!snapshot || snapshot.readiness.route !== "reader" || workbenchControlPending(snapshot)) return;
-  writeSurfacePreference(window.sessionStorage, snapshot.book_id, "reader");
+  if (!snapshot || snapshot.readiness.route !== "reader") return;
+  diagnosticWorkbenchBookId.value = null;
   await init();
 }
 
 async function openBuildWorkbench() {
   const snapshot = await loadBuildWorkbenchSnapshot();
   if (!snapshot || !workbenchAvailable(snapshot)) return;
-  writeSurfacePreference(window.sessionStorage, snapshot.book_id, "workbench");
+  diagnosticWorkbenchBookId.value = snapshot.book_id;
   appSurface.value = "workbench";
 }
 
@@ -1344,15 +1342,8 @@ async function init() {
       return;
     }
     if (workbench) {
-      const surface = chooseAppSurface(
-        workbench,
-        appSurface.value,
-        readSurfacePreference(window.sessionStorage, workbench.book_id),
-      );
+      const surface = chooseAppSurface(workbench);
       if (surface === "workbench") {
-        if (workbenchAvailable(workbench)) {
-          writeSurfacePreference(window.sessionStorage, workbench.book_id, "workbench");
-        }
         appSurface.value = "workbench";
         return;
       }
@@ -2093,7 +2084,6 @@ async function submitCreateBook() {
     });
     resetBookSessionUi();
     buildWorkbenchSnapshot.value = snapshot;
-    writeSurfacePreference(window.sessionStorage, snapshot.book_id, "workbench");
     appSurface.value = "workbench";
     bookPickerOpen.value = false;
     bookPickerMode.value = "open";
@@ -2122,6 +2112,7 @@ function resetBookSessionUi() {
   kindByLid.value = new Map();
   imageAssetByLid.value = new Map();
   appSurface.value = "loading";
+  diagnosticWorkbenchBookId.value = null;
   buildWorkbenchSnapshot.value = null;
   buildWorkbenchLoading.value = false;
   buildWorkbenchError.value = null;

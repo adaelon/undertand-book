@@ -74,6 +74,30 @@ function snapshot(): BuildWorkbenchSnapshot {
 }
 
 describe("BuildWorkbenchPane source review", () => {
+  it("allows reader entry when artifacts are trusted despite an interrupted job", async () => {
+    const trusted = snapshot();
+    trusted.readiness.route = "reader";
+    trusted.readiness.status = "trusted_book";
+    trusted.jobs[0]!.status = "interrupted";
+
+    const wrapper = mount(BuildWorkbenchPane, {
+      props: {
+        snapshot: trusted,
+        loading: false,
+        error: null,
+        confirming: false,
+        importing: false,
+        actioning: false,
+        pdfUrl: "/book/pdf/original",
+      },
+    });
+    const enterButton = wrapper.findAll("button").find((button) => button.text() === "进入阅读");
+
+    expect(enterButton?.attributes("disabled")).toBeUndefined();
+    await enterButton?.trigger("click");
+    expect(wrapper.emitted("enter-reader")).toHaveLength(1);
+  });
+
   it("renders paired evidence and emits an explicit manual replacement", async () => {
     const wrapper = mount(BuildWorkbenchPane, {
       props: {

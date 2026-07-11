@@ -339,7 +339,7 @@ PDF/Markdown 对齐失败时的可选修复机制。LLM 只能提出格式修复
 可信 `source.txt/base.json` 尚不存在、构建未完成或 source reconciliation 需要用户决策时使用的独立 build-mode 控制台。它承载 paper 输入上传/选择、draft workspace 创建、job 创建/续跑、server-side executor 启动、用户决策、执行权限审批、阶段 DAG、事件日志和 token/cost 观察;但不取代 `.build/<stage>` artifact 真相,也不把 job 状态当作 reader trust。状态:BOUNDARY_CHANGE(见 [docs/adr/0063] 与 `docs/切片方案-paper-pdf-first-hybrid.md` PH12-PH18)。
 
 ## Reader surface selection
-已通过 reader trust gate 的 paper workspace 在 Build Workbench 与 reader 之间的用户界面选择。它按 `book_id` 只保存在当前浏览器会话中,不得改变 artifact readiness；后端仍未可信时必须显示 Build Workbench,新浏览器会话中的可信书默认进入 reader。状态:NEW(见 [docs/adr/0066])。
+paper workspace 的主界面由 reader trust gate 决定:未可信时必须显示 Build Workbench；一旦确定性 artifact readiness 给出 `route=reader`,当前构建流程立即进入 reader,历史 job 状态与界面偏好都不得阻塞或恢复 Workbench。可信书只允许用户从 reader 主动打开 Workbench 作为当前会话的诊断视图。状态:BOUNDARY_CHANGE(见 [docs/adr/0071],取代 [docs/adr/0066])。
 
 ## Build controller
 Build Workbench 背后的服务端控制层:负责把上传的 `paper.md/paper.pdf` 固化为未信任输入 manifest,按 fingerprint 创建/复用 `.build/jobs/<job_id>.json`,启动 Codex/opencode/Claude/manual 等 executor adapter,把 stdout/stderr/heartbeat/权限请求/用户决策写成 job events,并在每次阶段结束后重新运行确定性 artifact gate。它只能驱动构建,不能绕过 `.build/<stage>` artifact/hash/schema gate。状态:NEW(见 `docs/切片方案-paper-pdf-first-hybrid.md` PH12-PH18)。

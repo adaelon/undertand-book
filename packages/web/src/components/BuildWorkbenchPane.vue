@@ -179,9 +179,6 @@ const canResumeJob = computed(() => !!latestJob.value?.active_run && !props.acti
 const canEnterReader = computed(() => (
   props.snapshot?.readiness.route === "reader"
   && !props.actioning
-  && !currentGateJobs.value.some((job) => (
-    job.status === "running" || job.status === "needs_user" || job.status === "interrupted"
-  ))
 ));
 const selectedStageReadiness = computed(() => props.snapshot?.readiness.stages[selectedStage.value] ?? null);
 let foundationAutoSelectedForBook: string | null = null;

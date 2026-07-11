@@ -1,11 +1,7 @@
 // @vitest-environment happy-dom
 import { describe, expect, it } from "vitest";
-import type { BuildStageId, BuildWorkbenchSnapshot } from "./api";
-import {
-  chooseAppSurface,
-  readSurfacePreference,
-  writeSurfacePreference,
-} from "./surface-selection";
+import type { BuildJobState, BuildStageId, BuildWorkbenchSnapshot } from "./api";
+import { chooseAppSurface } from "./surface-selection";
 
 const stages = [
   "source_reconciliation",
@@ -67,20 +63,29 @@ function trustedPaperSnapshot(): BuildWorkbenchSnapshot {
 }
 
 describe("reader surface selection", () => {
-  it("keeps the visible Workbench after reader trust becomes available", () => {
-    expect(chooseAppSurface(trustedPaperSnapshot(), "workbench", null)).toBe("workbench");
+  it("moves the visible Workbench to reader after reader trust becomes available", () => {
+    expect(chooseAppSurface(trustedPaperSnapshot())).toBe("reader");
   });
 
-  it("defaults a trusted paper to reader but restores an explicit session choice", () => {
+  it("opens a trusted paper in reader", () => {
+    expect(chooseAppSurface(trustedPaperSnapshot())).toBe("reader");
+  });
+
+  it("does not let an interrupted orchestration job block a trusted reader", () => {
     const snapshot = trustedPaperSnapshot();
-    expect(chooseAppSurface(snapshot, "loading", null)).toBe("reader");
-    expect(chooseAppSurface(snapshot, "loading", "workbench")).toBe("workbench");
-  });
+    snapshot.jobs = [{
+      version: "build_job_state.v1",
+      job_id: "old-job",
+      book_id: snapshot.book_id,
+      input_fingerprint: snapshot.input.fingerprint!,
+      status: "interrupted",
+      events: [],
+      decision_requests: [],
+      permission_requests: [],
+      created_at: "1",
+      updated_at: "2",
+    } satisfies BuildJobState];
 
-  it("stores the choice per book for the current browser session", () => {
-    writeSurfacePreference(sessionStorage, "paper-a", "workbench");
-    writeSurfacePreference(sessionStorage, "paper-b", "reader");
-    expect(readSurfacePreference(sessionStorage, "paper-a")).toBe("workbench");
-    expect(readSurfacePreference(sessionStorage, "paper-b")).toBe("reader");
+    expect(chooseAppSurface(snapshot)).toBe("reader");
   });
 });
