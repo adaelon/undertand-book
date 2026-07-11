@@ -16,7 +16,7 @@ export type PaperProjectionStageId =
   | "book_structure"
   | "paper_reading_guide";
 
-export type PaperProjectionStageKind = "build_batch" | "read_projection_smoke";
+export type PaperProjectionStageKind = "build_batch" | "projection_verification";
 
 export interface PaperProjectionChainStage {
   stage: PaperProjectionStageId;
@@ -230,9 +230,9 @@ export function buildPaperProjectionChainPlan(
     ),
     {
       stage: "paper_reading_guide",
-      kind: "read_projection_smoke",
-      command: "cargo",
-      args: ["run", "-q", "-p", "read-tools", "--", bookRoot, "paper_reading_guide", "close", "active"],
+      kind: "projection_verification",
+      command: "pnpm",
+      args: ["exec", "tsx", "skills/build/verify-paper-reading-guide.ts", bookRoot],
       required_inputs: [
         sourcePath,
         path.join(bookRoot, "base.json"),

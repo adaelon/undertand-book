@@ -40,6 +40,14 @@ import {
   sourceReviewBatchTargets,
   type SourceReviewLlmBatchState,
 } from "./source-review-batch";
+import {
+  chooseAppSurface,
+  readSurfacePreference,
+  workbenchAvailable,
+  workbenchControlPending,
+  writeSurfacePreference,
+  type AppSurface,
+} from "./surface-selection";
 import TopBar from "./components/TopBar.vue";
 import BuildWorkbenchPane from "./components/BuildWorkbenchPane.vue";
 import FileDropField from "./components/FileDropField.vue";
@@ -73,7 +81,7 @@ export interface OutlineItem {
 const leafOrder = ref<string[]>([]); // 全书叶 LID 序(读位感分母 + 进度)
 const kindByLid = ref<Map<string, NodeKind>>(new Map());
 const imageAssetByLid = ref<Map<string, ImageAssetManifestEntry>>(new Map());
-const appSurface = ref<"loading" | "reader" | "workbench">("loading");
+const appSurface = ref<AppSurface>("loading");
 const buildWorkbenchSnapshot = ref<BuildWorkbenchSnapshot | null>(null);
 const buildWorkbenchLoading = ref(false);
 const buildWorkbenchError = ref<string | null>(null);
@@ -181,6 +189,26 @@ const newBookId = ref("");
 const newBookMarkdown = ref<File | null>(null);
 const newBookPdf = ref<File | null>(null);
 const openingBook = ref(false);
+const desktopNeedsBook = ref(false);
+const desktopHost = ref(false);
+const desktopSettingsOpen = ref(false);
+const codexPluginLoading = ref(false);
+const codexPluginError = ref("");
+type CodexPluginState =
+  | "installed_by_setup"
+  | "installed_externally"
+  | "pending_configuration"
+  | "codex_not_found"
+  | "not_installed"
+  | "error";
+type CodexPluginStatus = {
+  state: CodexPluginState;
+  codex_path: string | null;
+  marketplace_name: string;
+  plugin_name: string;
+  message: string;
+};
+const codexPluginStatus = ref<CodexPluginStatus | null>(null);
 const debugOpen = ref(false);
 const leftRailOpen = ref(true);
 const leftRailWidth = ref(240);
@@ -1005,10 +1033,6 @@ async function loadBuildWorkbenchSnapshot(): Promise<BuildWorkbenchSnapshot | nu
   }
 }
 
-function workbenchControlPending(snapshot: BuildWorkbenchSnapshot): boolean {
-  return snapshot.jobs.some((job) => job.status === "running" || job.status === "needs_user" || job.status === "interrupted");
-}
-
 async function maybeAutoRerunSourceReview(
   snapshot: BuildWorkbenchSnapshot,
   actionOwner?: number,
@@ -1031,7 +1055,14 @@ async function maybeAutoRerunSourceReview(
 
 async function refreshBuildWorkbench() {
   const snapshot = await loadBuildWorkbenchSnapshot();
-  if (snapshot?.readiness.route === "reader" && !workbenchControlPending(snapshot)) await init();
+  if (!snapshot) return;
+  const surface = chooseAppSurface(
+    snapshot,
+    appSurface.value,
+    readSurfacePreference(window.sessionStorage, snapshot.book_id),
+  );
+  appSurface.value = surface;
+  if (workbenchAvailable(snapshot)) writeSurfacePreference(window.sessionStorage, snapshot.book_id, surface);
 }
 
 async function confirmSidecarPlan(fields: Record<string, unknown>) {
@@ -1059,6 +1090,7 @@ async function importWorkbenchInput(payload: {
   buildWorkbenchError.value = null;
   try {
     buildWorkbenchSnapshot.value = await api.workbenchInputImport(payload);
+    writeSurfacePreference(window.sessionStorage, buildWorkbenchSnapshot.value.book_id, "workbench");
     appSurface.value = "workbench";
   } catch (e) {
     buildWorkbenchError.value = errorMessage(e);
@@ -1075,10 +1107,9 @@ async function applyWorkbenchAction(action: () => Promise<BuildWorkbenchSnapshot
     buildWorkbenchSnapshot.value = snapshot;
     snapshot = await maybeAutoRerunSourceReview(snapshot, actionOwner);
     buildWorkbenchSnapshot.value = snapshot;
-    if (snapshot.readiness.route === "reader" && !workbenchControlPending(snapshot)) {
-      await init();
-    } else {
-      appSurface.value = "workbench";
+    appSurface.value = "workbench";
+    if (workbenchAvailable(snapshot)) {
+      writeSurfacePreference(window.sessionStorage, snapshot.book_id, "workbench");
     }
   } catch (e) {
     buildWorkbenchError.value = errorMessage(e);
@@ -1250,17 +1281,53 @@ async function draftSidecarPlan(payload: { request: string }) {
   await applyWorkbenchAction(() => api.sidecarPlanDraft(payload));
 }
 
+async function enterReader() {
+  const snapshot = buildWorkbenchSnapshot.value;
+  if (!snapshot || snapshot.readiness.route !== "reader" || workbenchControlPending(snapshot)) return;
+  writeSurfacePreference(window.sessionStorage, snapshot.book_id, "reader");
+  await init();
+}
+
+async function openBuildWorkbench() {
+  const snapshot = await loadBuildWorkbenchSnapshot();
+  if (!snapshot || !workbenchAvailable(snapshot)) return;
+  writeSurfacePreference(window.sessionStorage, snapshot.book_id, "workbench");
+  appSurface.value = "workbench";
+}
+
 async function init() {
   try {
     appSurface.value = "loading";
+    const desktop = await api.desktopStatus().catch((error) => {
+      if (error instanceof ApiError && error.status === 404) return null;
+      throw error;
+    });
+    desktopHost.value = Boolean(desktop?.desktop_host);
+    if (desktop && !desktop.active_book) {
+      desktopNeedsBook.value = true;
+      bookPickerOpen.value = true;
+      await loadBookLibrary();
+      return;
+    }
+    desktopNeedsBook.value = false;
     const workbench = await loadBuildWorkbenchSnapshot();
     if (!workbench && buildWorkbenchError.value) {
       appSurface.value = "workbench";
       return;
     }
-    if (workbench && (workbench.readiness.route === "workbench" || workbenchControlPending(workbench))) {
-      appSurface.value = "workbench";
-      return;
+    if (workbench) {
+      const surface = chooseAppSurface(
+        workbench,
+        appSurface.value,
+        readSurfacePreference(window.sessionStorage, workbench.book_id),
+      );
+      if (surface === "workbench") {
+        if (workbenchAvailable(workbench)) {
+          writeSurfacePreference(window.sessionStorage, workbench.book_id, "workbench");
+        }
+        appSurface.value = "workbench";
+        return;
+      }
     }
     const m = await api.manifest();
     const assets = await api.assetManifest();
@@ -1279,6 +1346,54 @@ async function init() {
     appSurface.value = buildWorkbenchSnapshot.value?.readiness.route === "workbench" ? "workbench" : "reader";
     fail(e);
   }
+}
+
+async function invokeDesktop<T>(command: string): Promise<T> {
+  if (!("__TAURI_INTERNALS__" in window)) {
+    throw new Error("桌面命令仅在 Understand Book 应用中可用");
+  }
+  const { invoke } = await import("@tauri-apps/api/core");
+  return invoke<T>(command);
+}
+
+async function refreshCodexPluginStatus() {
+  codexPluginLoading.value = true;
+  codexPluginError.value = "";
+  try {
+    codexPluginStatus.value = await invokeDesktop<CodexPluginStatus>("codex_plugin_status");
+  } catch (error) {
+    codexPluginError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    codexPluginLoading.value = false;
+  }
+}
+
+async function openDesktopSettings() {
+  desktopSettingsOpen.value = true;
+  await refreshCodexPluginStatus();
+}
+
+async function installCodexPlugin() {
+  codexPluginLoading.value = true;
+  codexPluginError.value = "";
+  try {
+    codexPluginStatus.value = await invokeDesktop<CodexPluginStatus>("install_codex_plugin");
+  } catch (error) {
+    codexPluginError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    codexPluginLoading.value = false;
+  }
+}
+
+function codexPluginStateLabel(state: CodexPluginState): string {
+  return {
+    installed_by_setup: "已由安装程序安装",
+    installed_externally: "已在 Codex 中安装",
+    pending_configuration: "等待发布配置",
+    codex_not_found: "未找到 Codex",
+    not_installed: "尚未安装",
+    error: "需要处理",
+  }[state];
 }
 onMounted(init);
 
@@ -1876,6 +1991,7 @@ async function submitCreateBook() {
     });
     resetBookSessionUi();
     buildWorkbenchSnapshot.value = snapshot;
+    writeSurfacePreference(window.sessionStorage, snapshot.book_id, "workbench");
     appSurface.value = "workbench";
     bookPickerOpen.value = false;
     bookPickerMode.value = "open";
@@ -1892,7 +2008,7 @@ async function submitCreateBook() {
 }
 
 function closeBookPicker() {
-  if (openingBook.value) return;
+  if (openingBook.value || desktopNeedsBook.value) return;
   bookPickerOpen.value = false;
 }
 
@@ -1951,6 +2067,7 @@ async function submitOpenBook(dir = bookPickerDir.value) {
     banner.value = "";
     bookPickerError.value = null;
     await api.openBook(target);
+    desktopNeedsBook.value = false;
     resetBookSessionUi();
     await init();
     bookPickerOpen.value = false;
@@ -1971,13 +2088,50 @@ async function submitOpenBook(dir = bookPickerDir.value) {
       :anchor-lid="readingAnchorLid"
       :debug-open="debugOpen"
       :left-rail-open="leftRailOpen"
+      :workbench-available="appSurface === 'reader' && workbenchAvailable(buildWorkbenchSnapshot)"
+      :desktop-host="desktopHost"
       @new-chat="newChat"
+      @open-workbench="openBuildWorkbench"
       @open-book="openBook"
+      @open-settings="openDesktopSettings"
       @toggle-left-rail="leftRailOpen = !leftRailOpen"
       @toggle-debug="debugOpen = !debugOpen"
     />
 
     <p v-if="banner" class="banner">{{ banner }}</p>
+
+    <div v-if="desktopSettingsOpen" class="desktop-settings-modal" @click.self="desktopSettingsOpen = false">
+      <section class="desktop-settings-dialog" role="dialog" aria-modal="true" aria-labelledby="desktop-settings-title">
+        <header class="desktop-settings-head">
+          <div>
+            <p class="formula-dialog-kicker">桌面应用</p>
+            <h3 id="desktop-settings-title">设置</h3>
+          </div>
+          <button class="formula-dialog-close" title="关闭" aria-label="关闭设置" @click="desktopSettingsOpen = false">×</button>
+        </header>
+        <div class="desktop-settings-body">
+          <div class="desktop-settings-row">
+            <div>
+              <strong>Codex 预构建插件</strong>
+              <p v-if="codexPluginStatus">{{ codexPluginStateLabel(codexPluginStatus.state) }}</p>
+              <p v-else>{{ codexPluginLoading ? "正在检测..." : "尚未检测" }}</p>
+            </div>
+            <button
+              v-if="codexPluginStatus && !['installed_by_setup', 'installed_externally'].includes(codexPluginStatus.state)"
+              class="primary-action"
+              :disabled="codexPluginLoading"
+              @click="installCodexPlugin"
+            >
+              {{ codexPluginLoading ? "处理中..." : "安装或重试" }}
+            </button>
+            <button v-else :disabled="codexPluginLoading" @click="refreshCodexPluginStatus">刷新</button>
+          </div>
+          <p v-if="codexPluginStatus" class="desktop-settings-message">{{ codexPluginStatus.message }}</p>
+          <p v-if="codexPluginStatus?.codex_path" class="desktop-settings-path">{{ codexPluginStatus.codex_path }}</p>
+          <p v-if="codexPluginError" class="book-picker-error">{{ codexPluginError }}</p>
+        </div>
+      </section>
+    </div>
 
     <div v-if="bookPickerOpen" class="book-picker-modal" @click.self="closeBookPicker">
       <section class="book-picker-dialog" role="dialog" aria-modal="true" aria-labelledby="book-picker-title">
@@ -2133,6 +2287,7 @@ async function submitOpenBook(dir = bookPickerDir.value) {
       @apply-all-source-review-with-llm="applyAllSourceReviewWithLlm"
       @draft-sidecar-plan="draftSidecarPlan"
       @confirm-sidecar-plan="confirmSidecarPlan"
+      @enter-reader="enterReader"
     />
 
     <main v-else-if="appSurface === 'loading'" class="app-loading">正在加载工作区...</main>
@@ -2373,6 +2528,69 @@ async function submitOpenBook(dir = bookPickerDir.value) {
   </div>
 </template>
 <style scoped>
+.desktop-settings-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  background: rgba(10, 10, 10, 0.3);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+.desktop-settings-dialog {
+  width: min(32rem, 94vw);
+  overflow: hidden;
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.98);
+}
+.desktop-settings-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.85rem 1rem;
+  border-bottom: 1px solid var(--line);
+}
+.desktop-settings-head h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+.desktop-settings-body {
+  padding: 1rem;
+}
+.desktop-settings-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+.desktop-settings-row strong {
+  font-size: 0.9rem;
+}
+.desktop-settings-row p,
+.desktop-settings-message,
+.desktop-settings-path {
+  margin: 0.25rem 0 0;
+  color: var(--slate);
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+.desktop-settings-row button {
+  min-height: 36px;
+  flex: 0 0 auto;
+}
+.desktop-settings-message {
+  margin-top: 0.85rem;
+}
+.desktop-settings-path {
+  overflow-wrap: anywhere;
+  font-family: var(--mono);
+  font-size: 0.75rem;
+}
 .app-loading {
   min-height: 0;
   flex: 1 1 auto;

@@ -1,0 +1,14 @@
+{
+  "name": "@understand-book/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "tauri": "tauri",
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "package:windows": "node scripts/assert-release-config.mjs && tauri build --bundles nsis && node scripts/export-installer.mjs"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0"
+  }
+}

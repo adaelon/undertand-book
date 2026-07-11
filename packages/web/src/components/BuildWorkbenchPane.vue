@@ -71,6 +71,7 @@ const emit = defineEmits<{
   (e: "apply-all-source-review-with-llm"): void;
   (e: "draft-sidecar-plan", payload: { request: string }): void;
   (e: "confirm-sidecar-plan", fields: Record<string, unknown>): void;
+  (e: "enter-reader"): void;
 }>();
 
 const stageOrder: BuildStageId[] = [
@@ -175,6 +176,13 @@ const canStartJob = computed(() =>
   && latestJob.value?.status !== "running",
 );
 const canResumeJob = computed(() => !!latestJob.value?.active_run && !props.actioning && !hasPendingUserGate.value);
+const canEnterReader = computed(() => (
+  props.snapshot?.readiness.route === "reader"
+  && !props.actioning
+  && !currentGateJobs.value.some((job) => (
+    job.status === "running" || job.status === "needs_user" || job.status === "interrupted"
+  ))
+));
 const selectedStageReadiness = computed(() => props.snapshot?.readiness.stages[selectedStage.value] ?? null);
 let foundationAutoSelectedForBook: string | null = null;
 
@@ -566,6 +574,14 @@ function draftSidecarPlan() {
         <h1>{{ props.snapshot?.book_id ?? "当前书" }}</h1>
       </div>
       <div class="workbench-actions">
+        <button
+          v-if="props.snapshot?.readiness.route === 'reader'"
+          class="primary-action"
+          :disabled="!canEnterReader"
+          @click="emit('enter-reader')"
+        >
+          进入阅读
+        </button>
         <span v-if="props.snapshot" class="workbench-status" :data-status="props.snapshot.readiness.status">
           {{ readinessStatusLabel(props.snapshot.readiness.status) }}
         </span>

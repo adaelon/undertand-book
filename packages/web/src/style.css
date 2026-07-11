@@ -113,6 +113,24 @@ body {
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.72);
 }
+.topbar-icon-button {
+  width: 36px;
+  height: 36px;
+  min-height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid var(--soft-ring);
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.72);
+  color: var(--steel);
+  cursor: pointer;
+}
+.topbar-icon-button:hover {
+  color: var(--apple-ink);
+  border-color: var(--hairline);
+}
 
 .banner {
   margin: 0;

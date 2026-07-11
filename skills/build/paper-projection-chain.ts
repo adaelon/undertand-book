@@ -53,11 +53,6 @@ if (!bookDir || (paperSubtype !== "research_article" && paperSubtype !== "survey
   process.exit(2);
 }
 
-function executable(command: string): string {
-  if (command === "cargo" && process.platform === "win32") return "cargo.exe";
-  return command;
-}
-
 function spawnCommand(stage: PaperProjectionChainStage): { command: string; args: string[] } {
   if (stage.command === "pnpm" && stage.args[0] === "exec" && stage.args[1] === "tsx") {
     return {
@@ -65,7 +60,7 @@ function spawnCommand(stage: PaperProjectionChainStage): { command: string; args
       args: [path.resolve("node_modules", "tsx", "dist", "cli.mjs"), ...stage.args.slice(2)],
     };
   }
-  return { command: executable(stage.command), args: stage.args };
+  return { command: stage.command, args: stage.args };
 }
 
 function runStage(stage: PaperProjectionChainStage): void {

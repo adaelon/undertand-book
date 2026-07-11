@@ -1,7 +1,6 @@
 ---
-name: read
-description: Start the understand-book local reader: one localhost server serves both the packaged Vue SPA and the REST command surface for a built book.
-argument-hint: ["<book-dir>"]
+name: understand-book-read
+description: "Start the understand-book local reader: one localhost server serves both the packaged Vue SPA and the REST command surface for a built book."
 ---
 
 # /understand-book:read

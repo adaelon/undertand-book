@@ -117,6 +117,13 @@ export interface BookLibraryResponse {
   root: string;
   books: BookLibraryEntry[];
 }
+
+export interface DesktopStatus {
+  desktop_host: boolean;
+  active_book: boolean;
+  book_dir: string | null;
+  library_root: string;
+}
 export type PdfCapabilityStatus = "unavailable" | "available" | "degraded" | "stale" | "failed";
 export interface PdfCapability {
   status: PdfCapabilityStatus;
@@ -627,6 +634,7 @@ function qs(params: Record<string, string | undefined>): string {
 }
 
 export const api = {
+  desktopStatus: () => http<DesktopStatus>("GET", "/desktop/status"),
   // ── book.*(只读 GET)──
   manifest: () => http<Manifest>("GET", "/book/manifest"),
   bookLibrary: () => http<BookLibraryResponse>("GET", "/book/library"),

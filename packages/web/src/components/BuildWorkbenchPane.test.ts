@@ -276,4 +276,39 @@ describe("BuildWorkbenchPane source review", () => {
     expect(wrapper.text()).not.toContain("旧任务权限不应显示");
     expect(wrapper.text()).not.toContain("当前任务正在等待下方的构建决策或执行权限处理。");
   });
+
+  it("offers an explicit reader transition after the trust gate passes", async () => {
+    const trusted = snapshot();
+    trusted.input.ready = true;
+    trusted.readiness.route = "reader";
+    trusted.readiness.status = "trusted_book";
+    trusted.readiness.reasons = [];
+    trusted.readiness.stages.source_reconciliation = {
+      stage: "source_reconciliation",
+      status: "done",
+    };
+    trusted.readiness.stages.hybrid_foundation = {
+      stage: "hybrid_foundation",
+      status: "done",
+    };
+    trusted.jobs[0]!.status = "done";
+
+    const wrapper = mount(BuildWorkbenchPane, {
+      props: {
+        snapshot: trusted,
+        loading: false,
+        error: null,
+        confirming: false,
+        importing: false,
+        actioning: false,
+        pdfUrl: "/book/pdf/original",
+      },
+      global: { stubs: { SourceReviewPdfPage: true } },
+    });
+
+    const enterReader = wrapper.findAll("button").find((button) => button.text() === "进入阅读");
+    expect(enterReader).toBeDefined();
+    await enterReader?.trigger("click");
+    expect(wrapper.emitted("enter-reader")).toHaveLength(1);
+  });
 });

@@ -338,8 +338,29 @@ PDF/Markdown 对齐失败时的可选修复机制。LLM 只能提出格式修复
 ## Build Workbench
 可信 `source.txt/base.json` 尚不存在、构建未完成或 source reconciliation 需要用户决策时使用的独立 build-mode 控制台。它承载 paper 输入上传/选择、draft workspace 创建、job 创建/续跑、server-side executor 启动、用户决策、执行权限审批、阶段 DAG、事件日志和 token/cost 观察;但不取代 `.build/<stage>` artifact 真相,也不把 job 状态当作 reader trust。状态:BOUNDARY_CHANGE(见 [docs/adr/0063] 与 `docs/切片方案-paper-pdf-first-hybrid.md` PH12-PH18)。
 
+## Reader surface selection
+已通过 reader trust gate 的 paper workspace 在 Build Workbench 与 reader 之间的用户界面选择。它按 `book_id` 只保存在当前浏览器会话中,不得改变 artifact readiness；后端仍未可信时必须显示 Build Workbench,新浏览器会话中的可信书默认进入 reader。状态:NEW(见 [docs/adr/0066])。
+
 ## Build controller
 Build Workbench 背后的服务端控制层:负责把上传的 `paper.md/paper.pdf` 固化为未信任输入 manifest,按 fingerprint 创建/复用 `.build/jobs/<job_id>.json`,启动 Codex/opencode/Claude/manual 等 executor adapter,把 stdout/stderr/heartbeat/权限请求/用户决策写成 job events,并在每次阶段结束后重新运行确定性 artifact gate。它只能驱动构建,不能绕过 `.build/<stage>` artifact/hash/schema gate。状态:NEW(见 `docs/切片方案-paper-pdf-first-hybrid.md` PH12-PH18)。
+
+## 一键预构建 (guided automatic prebuild)
+用户用一个命令授权 build orchestrator 自动推进适用阶段 DAG 的预构建方式。paper 的来源对齐与混合阅读基座仍由 Build Workbench 完成,一键命令从可信基座继续;非 paper 可从 Markdown/EPUB 原始输入开始。orchestrator 只在构建方向必须由用户裁决、需要额外权限或自动修复耗尽时暂停;普通阶段选择、执行器选择和恢复细节不暴露为用户工作。阶段是否完成仍只由 `.build/<stage>` artifact/hash/schema gate 判定,job、orchestrator 或 executor 的自述不能替代。状态:BOUNDARY_CHANGE(2026-07-11 §0.5)。
+
+## Codex plugin
+以 `.codex-plugin/plugin.json` 打包、由 Codex 安装和加载的本地预构建 harness 外壳。它通过 `$understand-book-build` 驱动现有确定性脚本与专用语义抽取契约,正常条件下一次调用完成、外部中断后按磁盘产物幂等续跑。paper 只消费 Build Workbench 已可信的混合阅读基座;非 paper 可从 Markdown/EPUB 原始输入开始。它不是 Web 内置模型 worker,不嵌入 Codex app-server,也不能绕过 artifact/hash/schema gate。状态:NEW(2026-07-11 §0.5)。
+
+## Desktop Reader App
+把现有 Vue reader 与 Rust localhost REST host 封装为 Windows 桌面应用的产品表面。第一版使用 Tauri 2 + WebView2,保留同源 REST 契约,支持无当前书启动、默认书库和外部 `.understand-book/<book_id>` workspace 注册且不复制产物。状态:BOUNDARY_CHANGE(详见 [docs/adr/0068])。
+
+## Build Engine Sidecar
+随 Desktop Reader App 安装、由 Codex plugin 调用但不直接展示的确定性预构建可执行程序 `understand-book-build.exe`。它承载 resolve/next/input/write/close/gate 与 protocol doctor,不执行语义模型;用户不需要安装 Node、pnpm 或 Cargo。状态:NEW(详见 [docs/adr/0068])。
+
+## Windows Installer
+用户首次运行的 per-user NSIS `UnderstandBookSetup.exe`:安装桌面阅读器与 Build Engine Sidecar,经明确授权后从公开 Git marketplace 安装 Codex plugin。阅读器安装与插件安装分事务;Codex/网络失败只产生可重试的待安装状态。状态:NEW(详见 [docs/adr/0068])。
+
+## Plugin Installation Receipt
+Windows Installer 对 Codex plugin 安装所有权的用户级记录。只有 `installed_by_reader_setup=true` 的插件才由阅读器卸载器默认提议移除;书库、`.understand-book` 与阅读记忆默认不删除。状态:NEW(详见 [docs/adr/0068])。
 
 ## Draft paper workspace
 Build Workbench 接收 `paper.md + paper.pdf` 后形成的未信任论文构建目录。它可以保存 canonical 输入副本和 `.build/input/manifest.json`,但在 source reconciliation 与 artifact gate 通过前不得被 normal reader 当作可信书。状态:NEW(见 `docs/切片方案-paper-pdf-first-hybrid.md` PH12)。

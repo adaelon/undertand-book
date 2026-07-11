@@ -1,10 +1,57 @@
-﻿---
-name: build
-description: Turn a book (epub/md) into a read-only knowledge-graph base for anchored-reasoning reading. Deterministic LID segmentation + LLM semantic-edge extraction, gated.
-argument-hint: ["<path-to-epub-or-md> [--full]"]
+---
+name: understand-book-build
+description: Build or resume a book (EPUB/Markdown) or trusted paper Workbench workspace into a complete evidence-anchored reading base with one Codex invocation.
 ---
 
-# /understand-book:build
+# $understand-book-build
+
+> **Codex 入口**:`$understand-book-build <target>`。`target` 可以是 Markdown/EPUB、paper
+> Workbench book id,或 `.understand-book/<book_id>` workspace。Claude Code 兼容入口仍是
+> `/understand-book:build`(由插件名和 skill 文件夹名决定)。
+
+## Codex 一命令自动编排(强制)
+
+调用本 skill 后,主 agent 必须持续运行下面的确定性 loop,直到 action=`done`、出现
+`needs_user`,或发生已耗尽自动修复的明确失败。不得只解释命令、只打印计划、只写 executor
+contract,也不得在普通 stage 边界停下等待用户继续。
+
+1. 定位本插件根目录(含 `.codex-plugin/plugin.json`)和确定性构建 sidecar:
+   - 若 `UNDERSTAND_BOOK_BUILD_EXE` 指向存在的文件,使用它。
+   - Windows 安装版读取 `HKCU\Software\UnderstandBook` 的 `InstallDir`,使用同目录下的
+     `understand-book-build.exe`。
+   - 仅插件开发/非 Windows 环境允许回退 Node:若缺少 `node_modules/tsx`,在插件根运行
+     `pnpm install --frozen-lockfile`;依赖失败则报告阻塞,不得伪造构建。
+2. 安装版执行第一种命令;开发回退执行第二种命令:
+
+   ```text
+   <understand-book-build.exe> next <target> --plugin-root <插件根目录>
+   node node_modules/tsx/dist/cli.mjs skills/build/automatic-build.ts next <target>
+   ```
+
+3. 只消费 stdout 的 `automatic_build_next.v1` JSON:
+   - `action.kind=extract`:若有 `extractor_prompt_command` 则执行并完整读取其 stdout,否则完整读取
+     `extractor_prompt`;对 `tasks[]` 先执行 `input_command`,再按
+     可用 multi-agent 槽位并发启动专用 subagent。每个 subagent 只接收该 prompt + 该 task
+     input,只返回契约 JSON。把输出写入临时 JSON 后执行 `write_command`(替换
+     `{output_json}`)。write 成功后必须执行该 task 的 `record_success_command`;subagent、
+     writer 或 gate 失败时必须执行 `record_failure_command`(替换 `{diagnostic}`),再把确定性
+     诊断反馈给同一任务重抽。不得在内存中自行计算尝试次数。
+   - `action.kind=close_stage`:原样执行 `command`;禁止添加 `--allow-partial`。失败时保留磁盘
+     中已完成窗口并报告结构化 stderr。
+   - `action.kind=needs_user`:停止自动 loop,向用户展示 stage、task id、最后诊断与
+     `reset_commands`;只有用户确认重试后才能执行 reset。
+   - `action.kind=done`:报告 workspace 路径和已完成阶段,结束 goal。
+4. 每批 write 或 stage close 后立即回到步骤 2。磁盘 `.build/<stage>` 是唯一续建真相;
+   不依赖对话记忆判断 done/pending。
+
+硬边界:
+- paper 必须先在 Build Workbench 完成 source reconciliation 与 hybrid foundation;本 skill
+  只查找并验证其可信产物,不自行替代来源对齐。
+- 非 paper Markdown/EPUB 从原始输入执行全管线。
+- 专用 subagent/multi-agent 不可用时 fail-fast;不允许主 agent 用通用摘要、空节点、
+  reject-all 或模板 sidecar 降级。
+- 自动修复最多 2 次(总尝试 3 次);之后才向用户展示 task id、gate 诊断和重试/停止选择。
+- 正常条件下一次调用跑完;配额、进程或机器外部中断后,再次调用同一命令幂等续跑。
 
 > **调用形态**:插件 skill 强制命名空间 = `/<插件名>:<skill文件夹名>`。本插件 name
 > `understand-book`(`.claude-plugin/plugin.json`)+ skill 文件夹 `build` ⇒ 命令

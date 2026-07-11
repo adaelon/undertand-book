@@ -92,7 +92,11 @@ describe("PH8 paper projection chain", () => {
     expect(plan.stages[0].args).toContain(plan.trusted_source_path);
     expect(plan.stages[0].args).toContain("--allow-partial");
     expect(plan.stages[4].allow_partial_supported).toBe(false);
-    expect(plan.stages[5]).toMatchObject({ kind: "read_projection_smoke", command: "cargo" });
+    expect(plan.stages[5]).toMatchObject({
+      kind: "projection_verification",
+      command: "pnpm",
+      args: ["exec", "tsx", "skills/build/verify-paper-reading-guide.ts", path.resolve(dir)],
+    });
   });
 
   it("rejects stale canonical source hashes before planning projections", () => {

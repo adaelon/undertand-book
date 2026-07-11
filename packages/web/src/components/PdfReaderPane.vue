@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, shallowRef, watch } from "vue";
-import * as pdfjsLib from "pdfjs-dist";
-import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.mjs?url";
+import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf.mjs";
+import pdfWorkerUrl from "pdfjs-dist/legacy/build/pdf.worker.mjs?url";
 import { api, type PdfRegion, type PdfSourceMap, type PdfSourceMapEntry, type SourceManifestV2 } from "../api";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
@@ -22,6 +22,7 @@ const emit = defineEmits<{
 
 type PdfDocument = Awaited<ReturnType<typeof pdfjsLib.getDocument>["promise"]>;
 type PdfPage = Awaited<ReturnType<PdfDocument["getPage"]>>;
+type PdfTextLayer = InstanceType<typeof pdfjsLib.TextLayer>;
 
 interface PageRenderState {
   rendered: boolean;
@@ -37,6 +38,7 @@ const projectedRegions = ref<Array<{ lid: string; region: PdfRegion }>>([]);
 const pageEls = new Map<number, HTMLElement>();
 const canvasEls = new Map<number, HTMLCanvasElement>();
 const textLayerEls = new Map<number, HTMLElement>();
+const textLayerTasks = new Map<number, PdfTextLayer>();
 const renderStates = ref<Record<number, PageRenderState>>({});
 let loadingTask: ReturnType<typeof pdfjsLib.getDocument> | null = null;
 let observer: IntersectionObserver | null = null;
@@ -178,6 +180,8 @@ function setRenderState(pageIndex: number, patch: Partial<PageRenderState>) {
 
 function resetRenderedPages() {
   renderStates.value = {};
+  for (const task of textLayerTasks.values()) task.cancel();
+  textLayerTasks.clear();
   for (const canvas of canvasEls.values()) {
     const ctx = canvas.getContext("2d");
     ctx?.clearRect(0, 0, canvas.width, canvas.height);
@@ -244,7 +248,7 @@ async function renderPage(pageInfo: PdfSourceMap["pages"][number], token: number
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     await page.render({ canvas, canvasContext: ctx, viewport }).promise;
     if (token !== renderToken) return;
-    await renderTextLayer(page, viewport, textLayer);
+    await renderTextLayer(pageInfo.pageIndex, page, viewport, textLayer);
     setRenderState(pageInfo.pageIndex, { rendered: true, rendering: false, error: null });
   } catch (e) {
     setRenderState(pageInfo.pageIndex, {
@@ -254,22 +258,29 @@ async function renderPage(pageInfo: PdfSourceMap["pages"][number], token: number
   }
 }
 
-async function renderTextLayer(page: PdfPage, viewport: ReturnType<PdfPage["getViewport"]>, layer: HTMLElement) {
-  const content = await page.getTextContent();
+async function renderTextLayer(
+  pageIndex: number,
+  page: PdfPage,
+  viewport: ReturnType<PdfPage["getViewport"]>,
+  layer: HTMLElement,
+) {
+  const content = await page.getTextContent({ includeMarkedContent: true, disableNormalization: true });
   layer.replaceChildren();
+  layer.style.setProperty("--scale-factor", String(viewport.scale));
+  layer.style.setProperty("--user-unit", "1");
+  layer.style.setProperty("--total-scale-factor", "calc(var(--scale-factor) * var(--user-unit))");
+  const textLayer = new pdfjsLib.TextLayer({
+    textContentSource: content,
+    container: layer,
+    viewport,
+  });
   layer.style.width = `${viewport.width}px`;
   layer.style.height = `${viewport.height}px`;
-  for (const item of content.items) {
-    if (!("str" in item) || !item.str) continue;
-    const transform = pdfjsLib.Util.transform(viewport.transform, item.transform);
-    const height = Math.hypot(transform[2], transform[3]);
-    const span = document.createElement("span");
-    span.textContent = item.str;
-    span.style.left = `${transform[4]}px`;
-    span.style.top = `${transform[5] - height}px`;
-    span.style.fontSize = `${height}px`;
-    span.style.transform = `scaleX(${item.width ? Math.max(0.2, (item.width * viewport.scale) / Math.max(1, item.str.length * height * 0.55)) : 1})`;
-    layer.appendChild(span);
+  textLayerTasks.set(pageIndex, textLayer);
+  try {
+    await textLayer.render();
+  } finally {
+    if (textLayerTasks.get(pageIndex) === textLayer) textLayerTasks.delete(pageIndex);
   }
 }
 
@@ -510,6 +521,7 @@ onBeforeUnmount(() => {
   min-height: 0;
   overflow-y: auto;
   display: grid;
+  grid-auto-rows: max-content;
   justify-items: center;
   gap: 1.1rem;
   align-content: start;
@@ -540,15 +552,31 @@ onBeforeUnmount(() => {
 .pdf-text-layer {
   z-index: 1;
   overflow: hidden;
-  user-select: text;
-}
-.pdf-text-layer span {
-  position: absolute;
-  color: rgba(20, 20, 19, 0.01);
+  text-align: initial;
   line-height: 1;
+  letter-spacing: normal;
+  word-spacing: normal;
+  text-size-adjust: none;
+  transform-origin: 0 0;
+  user-select: text;
+  --min-font-size: 1;
+  --text-scale-factor: calc(var(--total-scale-factor) * var(--min-font-size));
+  --min-font-size-inv: calc(1 / var(--min-font-size));
+}
+.pdf-text-layer :deep(:is(span, br)) {
+  position: absolute;
+  color: transparent;
   transform-origin: left top;
   white-space: pre;
   cursor: text;
+  user-select: text;
+}
+.pdf-text-layer :deep(span:not(.markedContent)) {
+  font-size: calc(var(--text-scale-factor) * var(--font-height));
+  transform: rotate(var(--rotate, 0deg)) scaleX(var(--scale-x, 1)) scale(var(--min-font-size-inv));
+}
+.pdf-text-layer :deep(.markedContent) {
+  display: contents;
 }
 .pdf-page-label {
   position: absolute;

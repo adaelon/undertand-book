@@ -96,8 +96,8 @@ describe("PH17 Workbench deterministic stage runtime", () => {
     });
     expect(projectionJob.status).toBe("done");
     expect(commands).toHaveLength(1);
-    expect(commands[0].command).toMatch(/cargo(?:\.exe)?$/);
-    expect(commands[0].args).toContain("paper_reading_guide");
+    expect(commands[0].command).toBe(process.execPath);
+    expect(commands[0].args.some((arg) => arg.endsWith("verify-paper-reading-guide.ts"))).toBe(true);
     expect(existsSync(path.join(dir, ".build", "paper-reading-guide", "completion.json"))).toBe(true);
   });
 

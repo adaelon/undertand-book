@@ -17,6 +17,8 @@ import { deriveBookId } from "../../packages/core/src/book-id";
 import { computeBuildStatus, type Pass1Artifact } from "../../packages/core/src/build-resume";
 import { contentProfileUsage, parseContentProfileArgsOrExit } from "./content-profile-options";
 import { loadBookWindows, windowById } from "./load-book";
+import { assertTrustedPaperProjectionSource } from "../../packages/core/src/paper-projection-chain";
+import path from "node:path";
 
 const parsedProfile = parseContentProfileArgsOrExit(process.argv.slice(2), { allowPaperExecution: true });
 const argv = parsedProfile.argv;
@@ -27,6 +29,7 @@ const VALUE_FLAGS = new Set([
   "--pass2-output",
   "--original-pdf",
   "--pdf-source-map",
+  "--preserve-foundation",
 ]);
 const opts: Record<string, string | undefined> = {};
 let allowPartial = false;
@@ -48,9 +51,23 @@ const discourseCandidatesPath = opts["--discourse-candidates"];
 const pass2OutputPath = opts["--pass2-output"];
 const originalPdfPath = opts["--original-pdf"];
 const pdfSourceMapPath = opts["--pdf-source-map"];
+const preserveFoundationPath = opts["--preserve-foundation"];
 
 const { source, blocks, lidNodes, byLid, windows } = loadBookWindows(book);
 const bookId = deriveBookId(book, opts["--book-id"]);
+const outputDir = path.resolve(`.understand-book/${bookId}`);
+if (preserveFoundationPath) {
+  if (parsedProfile.contentProfile.id !== "paper") {
+    throw new Error("--preserve-foundation is only valid for content_profile=paper");
+  }
+  if (path.resolve(preserveFoundationPath) !== outputDir) {
+    throw new Error(`--preserve-foundation must equal the target workspace ${outputDir}`);
+  }
+  const trusted = assertTrustedPaperProjectionSource(outputDir);
+  if (path.resolve(book) !== path.resolve(trusted.trusted_source_path)) {
+    throw new Error(`paper Pass1 must consume the trusted workspace source.txt: ${trusted.trusted_source_path}`);
+  }
+}
 
 // 消费 `.build/pass1/<id>.json`:逐窗读已落产物(缺文件=不入 map)
 const pass1Dir = `.understand-book/${bookId}/.build/pass1`;
@@ -91,13 +108,15 @@ const sampledRate = sampledLeaves.size ? sampledAnchored / sampledLeaves.size : 
 // 固化小基座 + zod 校验(bookId 已在头部派生)
 const profileHeader = buildProfileArtifactHeader({ book_id: bookId, content_profile: parsedProfile.contentProfile.id });
 const profileMetadata = buildProfileMetadata(profileHeader);
-const sourceManifest = buildSourceManifest({
-  book_id: bookId,
-  source_path: book,
-  original_pdf_path: originalPdfPath,
-  pdf_source_map_path: pdfSourceMapPath,
-});
-SourceManifestZ.parse(sourceManifest);
+const sourceManifest = preserveFoundationPath
+  ? null
+  : buildSourceManifest({
+      book_id: bookId,
+      source_path: book,
+      original_pdf_path: originalPdfPath,
+      pdf_source_map_path: pdfSourceMapPath,
+    });
+if (sourceManifest) SourceManifestZ.parse(sourceManifest);
 const formulaSidecar = formulaCandidatesPath
   ? buildFormulaSemanticsSidecar(
       profileHeader,
@@ -151,9 +170,11 @@ const assetManifest = buildAssetManifest({
 });
 AssetManifestZ.parse(assetManifest);
 writeFileSync(`${dir}/base.json`, JSON.stringify(base, null, 2), "utf8");
-writeFileSync(`${dir}/source.txt`, source, "utf8"); // 原文旁路:book.text 取真原文用,按 LID.span(UTF-16)切 `[ADR-0024]`
+if (!preserveFoundationPath) {
+  writeFileSync(`${dir}/source.txt`, source, "utf8"); // 原文旁路:book.text 取真原文用,按 LID.span(UTF-16)切 `[ADR-0024]`
+}
 writeFileSync(`${dir}/profile_metadata.json`, JSON.stringify(profileMetadata, null, 2), "utf8");
-writeFileSync(`${dir}/source_manifest.json`, JSON.stringify(sourceManifest, null, 2), "utf8");
+if (sourceManifest) writeFileSync(`${dir}/source_manifest.json`, JSON.stringify(sourceManifest, null, 2), "utf8");
 writeFileSync(`${dir}/asset_manifest.json`, JSON.stringify(assetManifest, null, 2), "utf8");
 // build-only:不被 Book::load 读,供 Pass2 prompt 输入 + 覆盖/审计调试 `[PB3 grill §2]`
 writeFileSync(`${dir}/long_range_candidates.json`, JSON.stringify(candidateIndex, null, 2), "utf8");
@@ -166,6 +187,7 @@ if (discourseSidecar) {
 if (pass2Gated) {
   writeFileSync(`${dir}/pass2_audit.json`, JSON.stringify(pass2Gated.audit, null, 2), "utf8");
 }
+if (preserveFoundationPath) assertTrustedPaperProjectionSource(outputDir);
 
 console.log(`[pass1-batch] ${book}  bookId=${bookId}  content_profile=${parsedProfile.contentProfile.id}${allowPartial && pending.length ? "  [--allow-partial]" : ""}`);
 console.log(`  窗口=${windows.length}  done=${done.length}  pending=${pending.length}  全书叶子=${lidNodes.filter((n) => n.children.length === 0).length}`);
@@ -177,9 +199,13 @@ console.log(`  锚定率(全书分母)=${(report.anchorRate * 100).toFixed(4)}%`
 console.log(`  锚定率(已抽窗口分母,${sampledAnchored}/${sampledLeaves.size})=${(sampledRate * 100).toFixed(2)}%`);
 console.log(`  基座固化: ${dir}/base.json  (zod 校验通过)`);
 console.log(`  profile metadata: ${dir}/profile_metadata.json`);
-console.log(
-  `  source manifest: ${dir}/source_manifest.json canonical=${sourceManifest.canonical_source.kind} pdf_attachments=${sourceManifest.attachments.length}`,
-);
+if (sourceManifest) {
+  console.log(
+    `  source manifest: ${dir}/source_manifest.json canonical=${sourceManifest.canonical_source.kind} pdf_attachments=${sourceManifest.attachments.length}`,
+  );
+} else {
+  console.log(`  source manifest: ${dir}/source_manifest.json preserved reconciled foundation`);
+}
 console.log(
   `  asset manifest: ${dir}/asset_manifest.json images=${assetManifest.images.length} available=${assetManifest.images.filter((img) => img.status === "available").length}`,
 );

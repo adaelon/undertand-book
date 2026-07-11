@@ -1,0 +1,29 @@
+{
+  "name": "understand-book",
+  "version": "0.1.0",
+  "description": "Build books and papers into evidence-anchored local reading workspaces.",
+  "author": {
+    "name": "Understand Book contributors"
+  },
+  "license": "MIT",
+  "keywords": [
+    "book",
+    "paper",
+    "reading",
+    "knowledge-graph",
+    "LID"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Understand Book",
+    "shortDescription": "Build evidence-anchored reading workspaces.",
+    "longDescription": "Turn Markdown, EPUB, or a trusted paper Workbench workspace into a resumable local reading base with LID evidence, semantic structure, and paper reading projections.",
+    "developerName": "Understand Book contributors",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "defaultPrompt": "Use $understand-book-build to build a book or trusted paper workspace."
+  }
+}

@@ -37,6 +37,7 @@ fn main() {
     };
     let mut state = AppState {
         book_dir: std::path::PathBuf::from(&dir),
+        library_root: None,
         book,
         reader,
         store,

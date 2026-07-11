@@ -300,7 +300,7 @@ export function workbenchStageCommand(bookDir: string, stage: BuildStageId): Wor
     };
   }
   return {
-    command: process.platform === "win32" && selected.command === "cargo" ? "cargo.exe" : selected.command,
+    command: selected.command,
     args: selected.args,
     cwd: WORKSPACE_ROOT,
   };

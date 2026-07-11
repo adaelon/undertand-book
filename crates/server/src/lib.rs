@@ -22,12 +22,15 @@ use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 
 pub mod mcp;
+pub mod host;
 
 /// 服务的单会话共享状态(切片0 单用户单书)`[ADR-0028 决策2]`。
 /// S10b:持只读 `Book` + 会话态 `Reader` + 用户私有 `MemoryStore`(物理隔离 `[ADR-0006]`)。
 /// S10c:持 LLM `adapter`(`book.query` 经它触模型;`+ Send` 供 `Arc<Mutex<_>>` 跨 worker 线程)。
 pub struct AppState {
     pub book_dir: PathBuf,
+    /// Stable desktop library root. `None` preserves the legacy current-book-derived behavior.
+    pub library_root: Option<PathBuf>,
     pub book: Book,
     pub reader: Reader,
     pub store: MemoryStore,
@@ -369,6 +372,24 @@ struct PdfRangesProjectResponse {
 /// `reader.*`/`memory.*`→POST 可变),端点名 = 命令名,错误原样透传 §4.4 信封。
 pub fn route(state: &mut AppState, req: Req) -> Reply {
     let (path, q) = parse_query(req.url);
+    if path == "/desktop/status" {
+        if req.method != "GET" {
+            return method_not_allowed();
+        }
+        let active_book = state.book_dir.file_name().and_then(|name| name.to_str()) != Some("__desktop_bootstrap__");
+        return ok_json(&json!({
+            "desktop_host": true,
+            "active_book": active_book,
+            "book_dir": active_book.then(|| path_string(&state.book_dir)),
+            "library_root": path_string(&state_library_root(state)),
+        }));
+    }
+    if path == "/book/library" {
+        if req.method != "GET" {
+            return method_not_allowed();
+        }
+        return route_book_library(state);
+    }
     // book.query:`book.*` 命名空间但 LLM 命令(秒级、非确定性叶子)→ POST,
     // 单列于 GET-only `route_book` 之前(决策3 的方法分派对它例外)`[ADR-0014/0028]`。
     if path == "/book/open" {
@@ -539,6 +560,7 @@ fn route_open_book(state: &mut AppState, body: &str, now: &str) -> Reply {
         Err(e) => {
             if Path::new(dir).is_dir() {
                 state.book_dir = PathBuf::from(dir);
+                let _ = register_external_workspace(state, Path::new(dir));
                 state.workbench_loaded_revision = None;
                 let _ = save_session(state, Some(dir));
                 return ok_json(&json!({
@@ -564,6 +586,7 @@ fn route_open_book(state: &mut AppState, body: &str, now: &str) -> Reply {
     }
     state.reader = reader;
     state.book_dir = PathBuf::from(dir);
+    let _ = register_external_workspace(state, Path::new(dir));
     state.book = book;
     state.workbench_loaded_revision = None;
     state.messages =
@@ -582,9 +605,9 @@ fn route_profile_manifest(book: &Book, q: &HashMap<String, String>) -> Reply {
     }
 }
 
-fn route_book_library(book_dir: &Path) -> Reply {
-    let root = book_library_root(book_dir);
-    let books = list_book_library(&root);
+fn route_book_library(state: &AppState) -> Reply {
+    let root = state_library_root(state);
+    let books = list_mixed_book_library(&root);
     ok_json(&json!({
         "root": path_string(&root),
         "books": books,
@@ -611,7 +634,7 @@ fn route_create_book(state: &mut AppState, body: &str, now: &str) -> Reply {
         );
     }
 
-    let target_dir = book_library_root(&state.book_dir).join(book_id);
+    let target_dir = state_library_root(state).join(book_id);
     if target_dir.exists() {
         return validation(
             "BOOK_ALREADY_EXISTS",
@@ -647,6 +670,80 @@ fn book_library_root(book_dir: &Path) -> PathBuf {
         .join(".understand-book")
 }
 
+fn state_library_root(state: &AppState) -> PathBuf {
+    state
+        .library_root
+        .clone()
+        .unwrap_or_else(|| book_library_root(&state.book_dir))
+}
+
+#[derive(Default, Deserialize, Serialize)]
+struct LibraryRegistry {
+    #[serde(default)]
+    workspaces: Vec<String>,
+}
+
+fn library_registry_path(root: &Path) -> PathBuf {
+    root.join("library-registry.json")
+}
+
+fn read_library_registry(root: &Path) -> LibraryRegistry {
+    std::fs::read(library_registry_path(root))
+        .ok()
+        .and_then(|body| serde_json::from_slice(&body).ok())
+        .unwrap_or_default()
+}
+
+fn register_external_workspace(state: &AppState, workspace: &Path) -> Result<(), String> {
+    let Some(root) = state.library_root.as_deref() else {
+        return Ok(());
+    };
+    let workspace_path = if workspace.is_absolute() {
+        workspace.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(workspace)
+    };
+    let normalized_workspace = workspace_path
+        .canonicalize()
+        .unwrap_or_else(|_| workspace_path.clone());
+    let normalized_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    if normalized_workspace.starts_with(&normalized_root) {
+        return Ok(());
+    }
+    std::fs::create_dir_all(root).map_err(|error| error.to_string())?;
+    let mut registry = read_library_registry(root);
+    let workspace_value = path_string(&workspace_path);
+    if registry.workspaces.iter().any(|entry| entry == &workspace_value) {
+        return Ok(());
+    }
+    registry.workspaces.push(workspace_value);
+    registry.workspaces.sort();
+    let path = library_registry_path(root);
+    let temporary = path.with_extension("json.tmp");
+    let body = serde_json::to_vec_pretty(&registry).map_err(|error| error.to_string())?;
+    std::fs::write(&temporary, body).map_err(|error| error.to_string())?;
+    std::fs::rename(temporary, path).map_err(|error| error.to_string())
+}
+
+fn list_mixed_book_library(root: &Path) -> Vec<BookLibraryEntry> {
+    let mut books = list_book_library(root);
+    for workspace in read_library_registry(root).workspaces {
+        if let Some(entry) = book_library_entry(Path::new(&workspace)) {
+            books.push(entry);
+        }
+    }
+    books.sort_by(|a, b| {
+        a.book_id
+            .cmp(&b.book_id)
+            .then_with(|| a.name.cmp(&b.name))
+            .then_with(|| a.dir.cmp(&b.dir))
+    });
+    books.dedup_by(|a, b| a.dir == b.dir);
+    books
+}
+
 fn list_book_library(root: &Path) -> Vec<BookLibraryEntry> {
     let Ok(entries) = std::fs::read_dir(root) else {
         return Vec::new();
@@ -658,32 +755,7 @@ fn list_book_library(root: &Path) -> Vec<BookLibraryEntry> {
             if !file_type.is_dir() {
                 return None;
             }
-            let path = entry.path();
-            let base_path = path.join("base.json");
-            let draft_manifest = read_workbench_input_manifest(&path).ok().flatten();
-            if !base_path.is_file() && draft_manifest.is_none() {
-                return None;
-            }
-            let name = entry.file_name().to_string_lossy().to_string();
-            let book_id = read_book_id_from_base(&base_path)
-                .or_else(|| {
-                    draft_manifest
-                        .as_ref()
-                        .and_then(|manifest| manifest.get("book_id"))
-                        .and_then(|value| value.as_str())
-                        .map(str::to_string)
-                })
-                .unwrap_or_else(|| name.clone());
-            Some(BookLibraryEntry {
-                name,
-                book_id,
-                dir: path_string(&path),
-                route: if base_path.is_file() {
-                    "reader".into()
-                } else {
-                    "workbench".into()
-                },
-            })
+            book_library_entry(&entry.path())
         })
         .collect::<Vec<_>>();
     books.sort_by(|a, b| {
@@ -693,6 +765,34 @@ fn list_book_library(root: &Path) -> Vec<BookLibraryEntry> {
             .then_with(|| a.dir.cmp(&b.dir))
     });
     books
+}
+
+fn book_library_entry(path: &Path) -> Option<BookLibraryEntry> {
+    let base_path = path.join("base.json");
+    let draft_manifest = read_workbench_input_manifest(path).ok().flatten();
+    if !base_path.is_file() && draft_manifest.is_none() {
+        return None;
+    }
+    let name = path.file_name()?.to_string_lossy().to_string();
+    let book_id = read_book_id_from_base(&base_path)
+        .or_else(|| {
+            draft_manifest
+                .as_ref()
+                .and_then(|manifest| manifest.get("book_id"))
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| name.clone());
+    Some(BookLibraryEntry {
+        name,
+        book_id,
+        dir: path_string(path),
+        route: if base_path.is_file() {
+            "reader".into()
+        } else {
+            "workbench".into()
+        },
+    })
 }
 
 fn read_book_id_from_base(path: &Path) -> Option<String> {
@@ -731,7 +831,11 @@ fn route_book(
 ) -> Reply {
     match leaf {
         "manifest" => ok_json(&book.manifest()),
-        "library" => route_book_library(book_dir),
+        "library" => {
+            let root = book_library_root(book_dir);
+            let books = list_book_library(&root);
+            ok_json(&json!({ "root": path_string(&root), "books": books }))
+        }
         "asset_manifest" => route_asset_manifest(book, book_dir),
         "build_workbench" => route_build_workbench(book, book_dir),
         "source_manifest" => route_source_manifest(book_dir),
@@ -5797,6 +5901,7 @@ mod tests {
         let adapter = Box::new(StubAdapter { lid: "1.1".into() });
         AppState {
             book_dir: tmp_dir(&format!("book-dir-{mem}")),
+            library_root: None,
             book,
             reader,
             store,
@@ -5957,6 +6062,24 @@ mod tests {
     }
 
     #[test]
+    fn desktop_status_blocks_content_initialization_until_a_workspace_is_selected() {
+        let mut state = state_named("desktop-status");
+        state.book_dir = tmp_dir("desktop-library").join("__desktop_bootstrap__");
+
+        let bootstrap = get(&mut state, "/desktop/status");
+        assert_eq!(bootstrap.status, 200);
+        let bootstrap: serde_json::Value = serde_json::from_str(&bootstrap.body).unwrap();
+        assert_eq!(bootstrap["active_book"], false);
+        assert_eq!(bootstrap["book_dir"], serde_json::Value::Null);
+
+        state.book_dir = tmp_dir("desktop-library").join("paper-a");
+        let selected = get(&mut state, "/desktop/status");
+        let selected: serde_json::Value = serde_json::from_str(&selected.body).unwrap();
+        assert_eq!(selected["active_book"], true);
+        assert_eq!(selected["book_dir"], path_string(&state.book_dir));
+    }
+
+    #[test]
     fn book_library_lists_reader_and_workbench_dirs_from_current_book_parent() {
         let mut s = state_named("book-library");
         let base = tmp_dir("book-library-root");
@@ -5991,6 +6114,39 @@ mod tests {
         assert_eq!(books[1]["book_id"], "draft-paper");
         assert_eq!(books[1]["route"], "workbench");
         assert_eq!(body["root"], path_string(&root));
+    }
+
+    #[test]
+    fn desktop_library_persists_external_workspaces_without_changing_default_root() {
+        let mut s = state_named("desktop-external-library");
+        let base = tmp_dir("desktop-external-library-root");
+        let root = base.join(".understand-book");
+        let local = root.join("local-book");
+        std::fs::create_dir_all(&local).unwrap();
+        std::fs::write(local.join("base.json"), r#"{"book_id":"local-book"}"#).unwrap();
+        let external = write_multi_leaf_book("desktop-external-book", "external-book", 2);
+        s.library_root = Some(root.clone());
+
+        let opened = post(
+            &mut s,
+            "/book/open",
+            &json!({ "dir": path_string(&external) }).to_string(),
+        );
+        assert_eq!(opened.status, 200);
+
+        let response: serde_json::Value =
+            serde_json::from_str(&get(&mut s, "/book/library").body).unwrap();
+        assert_eq!(response["root"], path_string(&root));
+        let books = response["books"].as_array().unwrap();
+        assert_eq!(books.len(), 2);
+        assert!(books.iter().any(|book| book["book_id"] == "local-book"));
+        assert!(books.iter().any(|book| {
+            book["book_id"] == "external-book" && book["dir"] == path_string(&external)
+        }));
+        assert!(library_registry_path(&root).is_file());
+
+        let _ = std::fs::remove_dir_all(base);
+        let _ = std::fs::remove_dir_all(external);
     }
 
     #[test]
@@ -7308,6 +7464,7 @@ mod tests {
         let adapter = Box::new(StubAdapter { lid: "1.1".into() });
         let mut s = AppState {
             book_dir: tmp_dir("formula-semantics-book-dir"),
+            library_root: None,
             book,
             reader,
             store,
@@ -7746,6 +7903,7 @@ mod tests {
         });
         let mut s = AppState {
             book_dir: dir.clone(),
+            library_root: None,
             book,
             reader,
             store,
