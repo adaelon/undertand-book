@@ -4,6 +4,7 @@
 use base_schema::{
     Direction, EdgeScope, FormulaSemantics, GraphNodeType, LidNode, NodeKind, ReadOnlyBase, Span,
 };
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use ts_rs::TS;
@@ -22,6 +23,87 @@ pub struct Book {
     book_structure: Option<BookStructureSidecar>,
     paper_metadata: Option<PaperMetadataSidecar>,
     paper_lexicon: Option<PaperLexiconSidecar>,
+    paper_minimap_artifacts: PaperMinimapArtifacts,
+}
+
+#[derive(Debug, Clone, Default)]
+struct PaperMinimapArtifacts {
+    source_manifest: Option<RuntimeSourceManifestV2>,
+    pdf_source_map: Option<RuntimePdfSourceMap>,
+    pass2_audit: Option<RuntimePass2Audit>,
+    warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct RuntimeSourceManifestV2 {
+    version: String,
+    book_id: String,
+    canonical_source: RuntimeCanonicalSource,
+    capabilities: RuntimePdfCapabilities,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct RuntimeCanonicalSource {
+    path: String,
+    sha256: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct RuntimePdfCapabilities {
+    view_pdf: RuntimePdfCapability,
+    project_lid_to_pdf: RuntimePdfCapability,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct RuntimePdfCapability {
+    status: String,
+    config_hash: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct RuntimePdfSourceMap {
+    version: String,
+    book_id: String,
+    pages: Vec<RuntimePdfPage>,
+    entries: Vec<RuntimePdfSourceMapEntry>,
+    config_hash: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct RuntimePdfPage {
+    #[serde(rename = "pageIndex")]
+    page_index: u32,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct RuntimePdfSourceMapEntry {
+    lid: String,
+    source_span: Span,
+    regions: Vec<RuntimePdfRegion>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct RuntimePdfRegion {
+    #[serde(rename = "pageIndex")]
+    page_index: u32,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct RuntimePass2Audit {
+    header: ProfileArtifactHeader,
+    accepted: Vec<RuntimePass2AuditEdge>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct RuntimePass2AuditEdge {
+    candidate_id: String,
+    source: String,
+    target: String,
+    #[serde(rename = "type")]
+    relation_type: String,
+    source_evidence_lids: Vec<String>,
+    target_evidence_lids: Vec<String>,
+    evidence_lids: Vec<String>,
 }
 
 /// technical_learning discourse sidecar item(P2/P2a 契约的 Rust 读时载体)。
@@ -147,6 +229,180 @@ pub struct StructureProjection {
     pub key_stops: Vec<BookStructureKeyStop>,
     pub throughlines: Vec<BookStructureThroughline>,
     pub warning: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub enum PaperMinimapAvailabilityStatus {
+    Available,
+    Degraded,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub enum PaperRegionKind {
+    Abstract,
+    Introduction,
+    RelatedWork,
+    Method,
+    Results,
+    Discussion,
+    Conclusion,
+    References,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub enum PaperRegionClassificationSource {
+    Heading,
+    Discourse,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub enum PaperLandmarkKind {
+    ResearchQuestion,
+    Hypothesis,
+    RelatedWork,
+    Method,
+    Experiment,
+    Evidence,
+    Result,
+    Claim,
+    Contribution,
+    Limitation,
+    FutureWork,
+    Other,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub enum PaperLandmarkProvenance {
+    BookStructure,
+    Discourse,
+    Graph,
+    Pass2,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub enum PaperMinimapRelation {
+    Frames,
+    Addresses,
+    Tests,
+    Produces,
+    Supports,
+    Challenges,
+    Limits,
+    Motivates,
+    BuildsOn,
+    Contrasts,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub enum PaperArgumentSlot {
+    Background,
+    ResearchGap,
+    ResearchQuestion,
+    Hypothesis,
+    Input,
+    Object,
+    MethodStep,
+    Method,
+    Output,
+    Assumption,
+    Experiment,
+    Evidence,
+    Result,
+    Claim,
+    Contribution,
+    Interpretation,
+    Limitation,
+    FutureWork,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct PaperLidSpan {
+    pub start_lid: String,
+    pub end_lid: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct PaperPageSpan {
+    pub start_page: u32,
+    pub end_page: u32,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct PaperRegion {
+    pub region_id: String,
+    pub title: String,
+    pub kind: PaperRegionKind,
+    pub lid_span: PaperLidSpan,
+    pub page_span: PaperPageSpan,
+    pub classification_source: PaperRegionClassificationSource,
+    pub confidence: f32,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct PaperLandmark {
+    pub landmark_id: String,
+    pub kind: PaperLandmarkKind,
+    pub anchor_lid: String,
+    pub page_index: u32,
+    pub label: String,
+    pub source_label: Option<String>,
+    pub evidence_lids: Vec<String>,
+    pub provenance: Vec<PaperLandmarkProvenance>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct PaperArgumentRelation {
+    pub relation_id: String,
+    #[serde(rename = "type")]
+    #[ts(rename = "type")]
+    pub relation_type: PaperMinimapRelation,
+    pub source_landmark_id: String,
+    pub target_landmark_id: String,
+    pub evidence_lids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct PaperMinimapLayerStatus {
+    pub status: PaperMinimapAvailabilityStatus,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct PaperMinimapBase {
+    pub version: String,
+    pub book_id: String,
+    pub book_version: String,
+    pub fingerprint: String,
+    pub status: PaperMinimapAvailabilityStatus,
+    pub regions: Vec<PaperRegion>,
+    pub landmarks: Vec<PaperLandmark>,
+    pub relations: Vec<PaperArgumentRelation>,
+    pub layer_status: HashMap<String, PaperMinimapLayerStatus>,
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, TS)]
@@ -1581,6 +1837,372 @@ fn parse_paper_reading_mode(raw: Option<&str>) -> Result<PaperReadingMode, ToolE
     }
 }
 
+fn load_optional_minimap_json<T: DeserializeOwned>(
+    path: &str,
+    label: &str,
+    warnings: &mut Vec<String>,
+) -> Option<T> {
+    match std::fs::read_to_string(path) {
+        Ok(raw) => match serde_json::from_str(&raw) {
+            Ok(value) => Some(value),
+            Err(error) => {
+                warnings.push(format!("{label} is invalid: {error}"));
+                None
+            }
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            warnings.push(format!("{label} is not attached"));
+            None
+        }
+        Err(error) => {
+            warnings.push(format!("{label} cannot be read: {error}"));
+            None
+        }
+    }
+}
+
+fn load_paper_minimap_artifacts(dir: &str) -> PaperMinimapArtifacts {
+    let mut warnings = Vec::new();
+    let source_manifest = load_optional_minimap_json(
+        &format!("{dir}/source_manifest.json"),
+        "source_manifest.json",
+        &mut warnings,
+    );
+    let pdf_source_map = load_optional_minimap_json(
+        &format!("{dir}/pdf_source_map.json"),
+        "pdf_source_map.json",
+        &mut warnings,
+    );
+    let pass2_audit = load_optional_minimap_json(
+        &format!("{dir}/pass2_audit.json"),
+        "pass2_audit.json",
+        &mut warnings,
+    );
+    PaperMinimapArtifacts {
+        source_manifest,
+        pdf_source_map,
+        pass2_audit,
+        warnings,
+    }
+}
+
+fn stable_minimap_fingerprint(parts: &[String]) -> String {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for part in parts {
+        for byte in part.as_bytes().iter().chain(std::iter::once(&0_u8)) {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+    }
+    format!("paper-minimap-fnv1a64-{hash:016x}")
+}
+
+fn pdf_capability_usable(capability: &RuntimePdfCapability) -> bool {
+    matches!(capability.status.as_str(), "available" | "degraded")
+}
+
+fn is_structural_node(node: &LidNode) -> bool {
+    matches!(node.kind, NodeKind::Chapter | NodeKind::Section)
+}
+
+fn structural_parent_lids(lid: &str) -> Vec<String> {
+    let parts: Vec<&str> = lid.split('.').collect();
+    (1..parts.len()).map(|end| parts[..end].join(".")).collect()
+}
+
+fn select_paper_region_units<'a>(
+    nodes: &'a [LidNode],
+    by_lid: &HashMap<&str, &'a LidNode>,
+) -> Vec<&'a LidNode> {
+    let structural: Vec<&LidNode> = nodes
+        .iter()
+        .filter(|node| is_structural_node(node))
+        .collect();
+    let structural_lids: HashSet<&str> = structural.iter().map(|node| node.lid.as_str()).collect();
+    let roots: Vec<&LidNode> = structural
+        .iter()
+        .copied()
+        .filter(|node| {
+            !structural_parent_lids(&node.lid)
+                .iter()
+                .any(|parent| structural_lids.contains(parent.as_str()))
+        })
+        .collect();
+    if roots.len() == 1 {
+        let children: Vec<&LidNode> = roots[0]
+            .children
+            .iter()
+            .filter_map(|lid| by_lid.get(lid.as_str()).copied())
+            .filter(|node| is_structural_node(node))
+            .collect();
+        if !children.is_empty() {
+            return children;
+        }
+    }
+    if !roots.is_empty() {
+        return roots;
+    }
+    let non_leaf: Vec<&LidNode> = nodes
+        .iter()
+        .filter(|node| !node.children.is_empty())
+        .collect();
+    if !non_leaf.is_empty() {
+        return non_leaf;
+    }
+    nodes.first().into_iter().collect()
+}
+
+fn paper_heading(raw: &str, fallback: &str) -> String {
+    let heading = raw
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or(fallback)
+        .trim_start_matches('#')
+        .trim();
+    let without_number = heading.trim_start_matches(|ch: char| {
+        ch.is_ascii_digit() || matches!(ch, '.' | ')' | '(' | ':' | '-' | ' ')
+    });
+    if without_number.is_empty() {
+        fallback.to_string()
+    } else {
+        without_number.to_string()
+    }
+}
+
+fn classify_paper_heading(title: &str) -> PaperRegionKind {
+    let normalized = title
+        .to_lowercase()
+        .chars()
+        .map(|ch| if ch.is_alphanumeric() { ch } else { ' ' })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    match normalized.as_str() {
+        "abstract" => PaperRegionKind::Abstract,
+        "introduction" | "background" => PaperRegionKind::Introduction,
+        "related work" | "literature review" => PaperRegionKind::RelatedWork,
+        "materials and methods"
+        | "methods"
+        | "methodology"
+        | "experimental procedures"
+        | "experimental design" => PaperRegionKind::Method,
+        "results" | "findings" => PaperRegionKind::Results,
+        "results and discussion" | "discussion" => PaperRegionKind::Discussion,
+        "conclusion" | "conclusions" | "concluding remarks" => PaperRegionKind::Conclusion,
+        "references" | "bibliography" => PaperRegionKind::References,
+        _ => PaperRegionKind::Unknown,
+    }
+}
+
+#[derive(Debug, Clone)]
+struct MinimapLandmarkCandidate {
+    kind: PaperLandmarkKind,
+    anchor_lid: String,
+    label: String,
+    source_label: Option<String>,
+    evidence_lids: Vec<String>,
+    provenance: Vec<PaperLandmarkProvenance>,
+}
+
+#[derive(Debug, Clone)]
+struct NormalizedMinimapEdge {
+    relation: PaperMinimapRelation,
+    reverse: bool,
+    source_kind: Option<PaperLandmarkKind>,
+    target_kind: Option<PaperLandmarkKind>,
+}
+
+#[derive(Debug, Clone)]
+struct PendingMinimapRelation {
+    relation: PaperMinimapRelation,
+    source_candidate_key: String,
+    target_candidate_key: String,
+    evidence_lids: Vec<String>,
+}
+
+fn paper_landmark_kind_key(kind: &PaperLandmarkKind) -> &'static str {
+    match kind {
+        PaperLandmarkKind::ResearchQuestion => "research_question",
+        PaperLandmarkKind::Hypothesis => "hypothesis",
+        PaperLandmarkKind::RelatedWork => "related_work",
+        PaperLandmarkKind::Method => "method",
+        PaperLandmarkKind::Experiment => "experiment",
+        PaperLandmarkKind::Evidence => "evidence",
+        PaperLandmarkKind::Result => "result",
+        PaperLandmarkKind::Claim => "claim",
+        PaperLandmarkKind::Contribution => "contribution",
+        PaperLandmarkKind::Limitation => "limitation",
+        PaperLandmarkKind::FutureWork => "future_work",
+        PaperLandmarkKind::Other => "other",
+    }
+}
+
+fn minimap_candidate_key(kind: &PaperLandmarkKind, anchor_lid: &str) -> String {
+    format!("{}:{anchor_lid}", paper_landmark_kind_key(kind))
+}
+
+fn push_unique_provenance(
+    target: &mut Vec<PaperLandmarkProvenance>,
+    value: PaperLandmarkProvenance,
+) {
+    if !target.iter().any(|own| own == &value) {
+        target.push(value);
+    }
+}
+
+fn paper_relation_key(relation: &PaperMinimapRelation) -> &'static str {
+    match relation {
+        PaperMinimapRelation::Frames => "frames",
+        PaperMinimapRelation::Addresses => "addresses",
+        PaperMinimapRelation::Tests => "tests",
+        PaperMinimapRelation::Produces => "produces",
+        PaperMinimapRelation::Supports => "supports",
+        PaperMinimapRelation::Challenges => "challenges",
+        PaperMinimapRelation::Limits => "limits",
+        PaperMinimapRelation::Motivates => "motivates",
+        PaperMinimapRelation::BuildsOn => "builds_on",
+        PaperMinimapRelation::Contrasts => "contrasts",
+    }
+}
+
+fn discourse_landmark_kind(item: &TechnicalLearningDiscourseItem) -> Option<PaperLandmarkKind> {
+    let local = match item.local_function.as_deref() {
+        Some("research_question") => Some(PaperLandmarkKind::ResearchQuestion),
+        Some("hypothesis") => Some(PaperLandmarkKind::Hypothesis),
+        Some("related_work") => Some(PaperLandmarkKind::RelatedWork),
+        Some("method_description") => Some(PaperLandmarkKind::Method),
+        Some("experiment_setup") => Some(PaperLandmarkKind::Experiment),
+        Some("evidence_report") => Some(PaperLandmarkKind::Evidence),
+        Some("result_interpretation") => Some(PaperLandmarkKind::Result),
+        Some("limitation") => Some(PaperLandmarkKind::Limitation),
+        Some("future_work") => Some(PaperLandmarkKind::FutureWork),
+        _ => None,
+    };
+    local.or_else(|| match item.rhetorical_move.as_deref() {
+        Some("related_work_positioning") => Some(PaperLandmarkKind::RelatedWork),
+        Some("method_setup") => Some(PaperLandmarkKind::Method),
+        Some("experiment_report") => Some(PaperLandmarkKind::Experiment),
+        Some("result_claim") => Some(PaperLandmarkKind::Claim),
+        Some("limitation_acknowledgement") => Some(PaperLandmarkKind::Limitation),
+        Some("future_work_projection") => Some(PaperLandmarkKind::FutureWork),
+        _ => None,
+    })
+}
+
+fn book_structure_key_stop_kind(stop: &BookStructureKeyStop) -> PaperLandmarkKind {
+    match &stop.stop_type {
+        BookStructureKeyStopType::Claim => PaperLandmarkKind::Claim,
+        BookStructureKeyStopType::Example => PaperLandmarkKind::Evidence,
+        BookStructureKeyStopType::Warning => PaperLandmarkKind::Limitation,
+        BookStructureKeyStopType::Summary => PaperLandmarkKind::Contribution,
+        _ => PaperLandmarkKind::Other,
+    }
+}
+
+fn book_structure_spine_kind(role: &BookStructureSpineRole) -> PaperLandmarkKind {
+    match role {
+        BookStructureSpineRole::Method => PaperLandmarkKind::Method,
+        BookStructureSpineRole::Synthesis => PaperLandmarkKind::Contribution,
+        _ => PaperLandmarkKind::Other,
+    }
+}
+
+fn graph_node_landmark_kind(node_type: &GraphNodeType) -> PaperLandmarkKind {
+    match node_type {
+        GraphNodeType::Claim => PaperLandmarkKind::Claim,
+        _ => PaperLandmarkKind::Other,
+    }
+}
+
+fn normalize_graph_relation(relation_type: &str) -> Option<NormalizedMinimapEdge> {
+    let normalized = match relation_type {
+        "claim_supported_by_evidence" => NormalizedMinimapEdge {
+            relation: PaperMinimapRelation::Supports,
+            reverse: true,
+            source_kind: Some(PaperLandmarkKind::Claim),
+            target_kind: Some(PaperLandmarkKind::Evidence),
+        },
+        "method_supports_result" => NormalizedMinimapEdge {
+            relation: PaperMinimapRelation::Produces,
+            reverse: false,
+            source_kind: Some(PaperLandmarkKind::Method),
+            target_kind: Some(PaperLandmarkKind::Result),
+        },
+        "hypothesis_tested_by_experiment" => NormalizedMinimapEdge {
+            relation: PaperMinimapRelation::Tests,
+            reverse: true,
+            source_kind: Some(PaperLandmarkKind::Hypothesis),
+            target_kind: Some(PaperLandmarkKind::Experiment),
+        },
+        "related_work_contrasts" => NormalizedMinimapEdge {
+            relation: PaperMinimapRelation::Contrasts,
+            reverse: false,
+            source_kind: Some(PaperLandmarkKind::RelatedWork),
+            target_kind: None,
+        },
+        "related_work_builds_on" => NormalizedMinimapEdge {
+            relation: PaperMinimapRelation::BuildsOn,
+            reverse: false,
+            source_kind: Some(PaperLandmarkKind::RelatedWork),
+            target_kind: None,
+        },
+        "limitation_motivates_future_work" => NormalizedMinimapEdge {
+            relation: PaperMinimapRelation::Motivates,
+            reverse: false,
+            source_kind: Some(PaperLandmarkKind::Limitation),
+            target_kind: Some(PaperLandmarkKind::FutureWork),
+        },
+        "supports" => NormalizedMinimapEdge {
+            relation: PaperMinimapRelation::Supports,
+            reverse: false,
+            source_kind: None,
+            target_kind: None,
+        },
+        "rebuts" | "contradicts" => NormalizedMinimapEdge {
+            relation: PaperMinimapRelation::Challenges,
+            reverse: false,
+            source_kind: None,
+            target_kind: None,
+        },
+        "builds_on" => NormalizedMinimapEdge {
+            relation: PaperMinimapRelation::BuildsOn,
+            reverse: false,
+            source_kind: None,
+            target_kind: None,
+        },
+        "contrasts" => NormalizedMinimapEdge {
+            relation: PaperMinimapRelation::Contrasts,
+            reverse: false,
+            source_kind: None,
+            target_kind: None,
+        },
+        "prerequisite" => NormalizedMinimapEdge {
+            relation: PaperMinimapRelation::Frames,
+            reverse: false,
+            source_kind: None,
+            target_kind: None,
+        },
+        _ => return None,
+    };
+    Some(normalized)
+}
+
+fn normalize_discourse_relation(relation_type: &str) -> Option<PaperMinimapRelation> {
+    match relation_type {
+        "supports" => Some(PaperMinimapRelation::Supports),
+        "rebuts" => Some(PaperMinimapRelation::Challenges),
+        "contrasts" => Some(PaperMinimapRelation::Contrasts),
+        "answers" => Some(PaperMinimapRelation::Addresses),
+        "depends_on" => Some(PaperMinimapRelation::BuildsOn),
+        "prepares" => Some(PaperMinimapRelation::Frames),
+        "results_in" => Some(PaperMinimapRelation::Produces),
+        "causes" => Some(PaperMinimapRelation::Motivates),
+        _ => None,
+    }
+}
+
 fn parse_paper_reading_stage(raw: Option<&str>) -> Result<PaperReadingStage, ToolError> {
     match raw.unwrap_or("passive") {
         "passive" => Ok(PaperReadingStage::Passive),
@@ -1639,12 +2261,14 @@ impl Book {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
             Err(e) => return Err(format!("读 paper_lexicon.json 失败: {e}")),
         };
+        let paper_minimap_artifacts = load_paper_minimap_artifacts(dir);
         Ok(Book::new(base, &source)
             .with_formula_semantics(formula_semantics)
             .with_discourse_items(discourse_items)
             .with_book_structure(book_structure)
             .with_paper_metadata(paper_metadata)
-            .with_paper_lexicon(paper_lexicon))
+            .with_paper_lexicon(paper_lexicon)
+            .with_paper_minimap_artifacts(paper_minimap_artifacts))
     }
 
     pub fn new(base: ReadOnlyBase, source: &str) -> Book {
@@ -1671,6 +2295,7 @@ impl Book {
             book_structure: None,
             paper_metadata: None,
             paper_lexicon: None,
+            paper_minimap_artifacts: PaperMinimapArtifacts::default(),
         }
     }
 
@@ -1722,6 +2347,1016 @@ impl Book {
 
     pub fn paper_lexicon(&self) -> Option<&PaperLexiconSidecar> {
         self.paper_lexicon.as_ref()
+    }
+
+    fn with_paper_minimap_artifacts(mut self, artifacts: PaperMinimapArtifacts) -> Book {
+        self.paper_minimap_artifacts = artifacts;
+        self
+    }
+
+    fn paper_minimap_book_version(&self) -> String {
+        self.book_structure
+            .as_ref()
+            .map(|sidecar| sidecar.header.book_version.clone())
+            .or_else(|| {
+                self.paper_minimap_artifacts
+                    .source_manifest
+                    .as_ref()
+                    .map(|manifest| manifest.canonical_source.sha256.clone())
+            })
+            .filter(|version| !version.trim().is_empty())
+            .unwrap_or_else(|| "unknown".into())
+    }
+
+    fn unavailable_paper_minimap(
+        &self,
+        mut warnings: Vec<String>,
+        reason: impl Into<String>,
+    ) -> PaperMinimapBase {
+        let reason = reason.into();
+        if !warnings.iter().any(|warning| warning == &reason) {
+            warnings.push(reason.clone());
+        }
+        let book_version = self.paper_minimap_book_version();
+        PaperMinimapBase {
+            version: "paper_minimap.v1".into(),
+            book_id: self.base.book_id.clone(),
+            fingerprint: stable_minimap_fingerprint(&[
+                self.base.book_id.clone(),
+                book_version.clone(),
+                "unavailable".into(),
+                reason.clone(),
+            ]),
+            book_version,
+            status: PaperMinimapAvailabilityStatus::Unavailable,
+            regions: Vec::new(),
+            landmarks: Vec::new(),
+            relations: Vec::new(),
+            layer_status: HashMap::from([
+                (
+                    "topology".into(),
+                    PaperMinimapLayerStatus {
+                        status: PaperMinimapAvailabilityStatus::Unavailable,
+                        reason: Some(reason),
+                    },
+                ),
+                (
+                    "regions".into(),
+                    PaperMinimapLayerStatus {
+                        status: PaperMinimapAvailabilityStatus::Unavailable,
+                        reason: Some("topology is unavailable".into()),
+                    },
+                ),
+                (
+                    "landmarks".into(),
+                    PaperMinimapLayerStatus {
+                        status: PaperMinimapAvailabilityStatus::Unavailable,
+                        reason: Some("landmark projection has not run".into()),
+                    },
+                ),
+                (
+                    "arguments".into(),
+                    PaperMinimapLayerStatus {
+                        status: PaperMinimapAvailabilityStatus::Unavailable,
+                        reason: Some("argument projection has not run".into()),
+                    },
+                ),
+            ]),
+            warnings,
+        }
+    }
+
+    fn validated_paper_minimap_artifacts(
+        &self,
+    ) -> Result<
+        (
+            &RuntimeSourceManifestV2,
+            &RuntimePdfSourceMap,
+            HashMap<&str, &RuntimePdfSourceMapEntry>,
+        ),
+        String,
+    > {
+        let manifest = self
+            .paper_minimap_artifacts
+            .source_manifest
+            .as_ref()
+            .ok_or_else(|| "source_manifest.v2 is unavailable".to_string())?;
+        let pdf_map = self
+            .paper_minimap_artifacts
+            .pdf_source_map
+            .as_ref()
+            .ok_or_else(|| "pdf_source_map.v1 is unavailable".to_string())?;
+        if manifest.version != "source_manifest.v2" {
+            return Err(format!(
+                "unsupported source manifest version: {}",
+                manifest.version
+            ));
+        }
+        if pdf_map.version != "pdf_source_map.v1" {
+            return Err(format!(
+                "unsupported PDF source map version: {}",
+                pdf_map.version
+            ));
+        }
+        if manifest.book_id != self.base.book_id || pdf_map.book_id != self.base.book_id {
+            return Err("paper minimap artifacts do not match base book_id".into());
+        }
+        if manifest.canonical_source.path != "source.txt"
+            || manifest.canonical_source.sha256.trim().is_empty()
+        {
+            return Err("source manifest canonical source identity is invalid".into());
+        }
+        if !pdf_capability_usable(&manifest.capabilities.view_pdf)
+            || !pdf_capability_usable(&manifest.capabilities.project_lid_to_pdf)
+        {
+            return Err("PDF view or LID projection capability is unavailable".into());
+        }
+        let manifest_config_hash = manifest
+            .capabilities
+            .project_lid_to_pdf
+            .config_hash
+            .as_deref()
+            .filter(|hash| !hash.trim().is_empty())
+            .ok_or_else(|| "PDF projection capability has no config_hash".to_string())?;
+        if pdf_map.config_hash.trim().is_empty() || manifest_config_hash != pdf_map.config_hash {
+            return Err("PDF source map config_hash is stale".into());
+        }
+
+        let mut page_indices = HashSet::new();
+        for page in &pdf_map.pages {
+            if !page_indices.insert(page.page_index) {
+                return Err(format!("duplicate PDF page identity: {}", page.page_index));
+            }
+        }
+        if page_indices.is_empty() {
+            return Err("PDF source map contains no pages".into());
+        }
+
+        let mut entries = HashMap::new();
+        for entry in &pdf_map.entries {
+            if entries.insert(entry.lid.as_str(), entry).is_some() {
+                return Err(format!("duplicate PDF source map LID: {}", entry.lid));
+            }
+            let node = self
+                .lid_idx
+                .get(&entry.lid)
+                .map(|index| &self.base.lid_nodes[*index])
+                .ok_or_else(|| format!("PDF source map references missing LID: {}", entry.lid))?;
+            if !node.children.is_empty() {
+                return Err(format!("PDF source map LID is not a leaf: {}", entry.lid));
+            }
+            if entry.source_span != node.span {
+                return Err(format!(
+                    "PDF source map span is stale for LID: {}",
+                    entry.lid
+                ));
+            }
+            for region in &entry.regions {
+                if !page_indices.contains(&region.page_index) {
+                    return Err(format!(
+                        "PDF source map LID {} references missing page {}",
+                        entry.lid, region.page_index
+                    ));
+                }
+            }
+        }
+        Ok((manifest, pdf_map, entries))
+    }
+
+    fn collect_minimap_leaf_lids(&self, lid: &str, leaves: &mut Vec<String>) -> Result<(), String> {
+        let node = self
+            .lid_idx
+            .get(lid)
+            .map(|index| &self.base.lid_nodes[*index])
+            .ok_or_else(|| format!("structure references missing LID: {lid}"))?;
+        if node.children.is_empty() {
+            leaves.push(node.lid.clone());
+            return Ok(());
+        }
+        for child in &node.children {
+            self.collect_minimap_leaf_lids(child, leaves)?;
+        }
+        Ok(())
+    }
+
+    fn minimap_source_excerpt(&self, lid: &str) -> Option<String> {
+        let node = self
+            .lid_idx
+            .get(lid)
+            .map(|index| &self.base.lid_nodes[*index])?;
+        let text = self.source_u16.get(node.span.start..node.span.end)?;
+        let value = String::from_utf16_lossy(text)
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        if value.is_empty() {
+            None
+        } else {
+            Some(value.chars().take(160).collect())
+        }
+    }
+
+    fn graph_node_evidence_lids(&self, node: &base_schema::GraphNode) -> Vec<String> {
+        match &node.node_type {
+            GraphNodeType::Claim => node.source_lid.clone().into_iter().collect(),
+            _ => node.occurrences.clone(),
+        }
+    }
+
+    fn insert_minimap_candidate(
+        &self,
+        candidates: &mut HashMap<String, MinimapLandmarkCandidate>,
+        mut candidate: MinimapLandmarkCandidate,
+        warnings: &mut Vec<String>,
+    ) -> Option<String> {
+        if !self.lid_idx.contains_key(&candidate.anchor_lid) {
+            warnings.push(format!(
+                "paper landmark candidate references missing anchor LID: {}",
+                candidate.anchor_lid
+            ));
+            return None;
+        }
+        if candidate.evidence_lids.is_empty() {
+            candidate.evidence_lids.push(candidate.anchor_lid.clone());
+        }
+        if let Some(dangling) = candidate
+            .evidence_lids
+            .iter()
+            .find(|lid| !self.lid_idx.contains_key(*lid))
+        {
+            warnings.push(format!(
+                "paper landmark candidate {} has dangling evidence LID: {dangling}",
+                candidate.anchor_lid
+            ));
+            return None;
+        }
+        let mut unique_evidence = Vec::new();
+        push_unique_all(&mut unique_evidence, &candidate.evidence_lids);
+        candidate.evidence_lids = unique_evidence;
+        if candidate.label.trim().is_empty() {
+            candidate.label = self
+                .minimap_source_excerpt(&candidate.anchor_lid)
+                .unwrap_or_else(|| candidate.anchor_lid.clone());
+        }
+        let key = minimap_candidate_key(&candidate.kind, &candidate.anchor_lid);
+        if let Some(existing) = candidates.get_mut(&key) {
+            push_unique_all(&mut existing.evidence_lids, &candidate.evidence_lids);
+            for provenance in candidate.provenance {
+                push_unique_provenance(&mut existing.provenance, provenance);
+            }
+            if existing.source_label.is_none() {
+                existing.source_label = candidate.source_label;
+            }
+        } else {
+            candidates.insert(key.clone(), candidate);
+        }
+        Some(key)
+    }
+
+    fn minimap_candidate_page(
+        &self,
+        candidate: &MinimapLandmarkCandidate,
+        entries: &HashMap<&str, &RuntimePdfSourceMapEntry>,
+    ) -> Option<u32> {
+        let direct_pages = candidate
+            .evidence_lids
+            .iter()
+            .chain(std::iter::once(&candidate.anchor_lid))
+            .filter_map(|lid| entries.get(lid.as_str()))
+            .flat_map(|entry| entry.regions.iter().map(|region| region.page_index));
+        if let Some(page) = direct_pages.min() {
+            return Some(page);
+        }
+        let mut leaves = Vec::new();
+        self.collect_minimap_leaf_lids(&candidate.anchor_lid, &mut leaves)
+            .ok()?;
+        leaves
+            .iter()
+            .filter_map(|lid| entries.get(lid.as_str()))
+            .flat_map(|entry| entry.regions.iter().map(|region| region.page_index))
+            .min()
+    }
+
+    fn valid_minimap_relation_evidence(&self, evidence_lids: &[String]) -> bool {
+        !evidence_lids.is_empty()
+            && evidence_lids
+                .iter()
+                .all(|lid| self.lid_idx.contains_key(lid))
+    }
+
+    fn insert_pending_minimap_relation(
+        &self,
+        relations: &mut HashMap<String, PendingMinimapRelation>,
+        relation: PaperMinimapRelation,
+        source_candidate_key: String,
+        target_candidate_key: String,
+        evidence_lids: Vec<String>,
+        warning_context: &str,
+        warnings: &mut Vec<String>,
+    ) {
+        if !self.valid_minimap_relation_evidence(&evidence_lids) {
+            warnings.push(format!(
+                "{warning_context} has empty or dangling evidence_lids"
+            ));
+            return;
+        }
+        let key = format!(
+            "{}|{}|{}",
+            paper_relation_key(&relation),
+            source_candidate_key,
+            target_candidate_key
+        );
+        if let Some(existing) = relations.get_mut(&key) {
+            push_unique_all(&mut existing.evidence_lids, &evidence_lids);
+        } else {
+            let mut unique_evidence = Vec::new();
+            push_unique_all(&mut unique_evidence, &evidence_lids);
+            relations.insert(
+                key,
+                PendingMinimapRelation {
+                    relation,
+                    source_candidate_key,
+                    target_candidate_key,
+                    evidence_lids: unique_evidence,
+                },
+            );
+        }
+    }
+
+    fn project_discourse_minimap_relations(
+        &self,
+        discourse_by_lid: &HashMap<&str, &TechnicalLearningDiscourseItem>,
+        candidates: &mut HashMap<String, MinimapLandmarkCandidate>,
+        relations: &mut HashMap<String, PendingMinimapRelation>,
+        warnings: &mut Vec<String>,
+    ) {
+        for item in &self.discourse_index {
+            for relation in &item.relations {
+                let Some(normalized) = normalize_discourse_relation(&relation.relation_type) else {
+                    continue;
+                };
+                let Some(target_item) = discourse_by_lid.get(relation.target_lid.as_str()) else {
+                    warnings.push(format!(
+                        "discourse relation {} -> {} has no target item",
+                        item.lid, relation.target_lid
+                    ));
+                    continue;
+                };
+                if !relation.evidence_lids.iter().any(|lid| lid == &item.lid)
+                    || !relation
+                        .evidence_lids
+                        .iter()
+                        .any(|lid| lid == &relation.target_lid)
+                {
+                    warnings.push(format!(
+                        "discourse relation {} -> {} does not cover both endpoints",
+                        item.lid, relation.target_lid
+                    ));
+                    continue;
+                }
+                let source_kind = discourse_landmark_kind(item).unwrap_or(PaperLandmarkKind::Other);
+                let target_kind =
+                    discourse_landmark_kind(target_item).unwrap_or(PaperLandmarkKind::Other);
+                let source_key = self.insert_minimap_candidate(
+                    candidates,
+                    MinimapLandmarkCandidate {
+                        kind: source_kind,
+                        anchor_lid: item.lid.clone(),
+                        label: item
+                            .local_summary
+                            .clone()
+                            .or_else(|| self.minimap_source_excerpt(&item.lid))
+                            .unwrap_or_else(|| item.lid.clone()),
+                        source_label: self.minimap_source_excerpt(&item.lid),
+                        evidence_lids: vec![item.lid.clone()],
+                        provenance: vec![PaperLandmarkProvenance::Discourse],
+                    },
+                    warnings,
+                );
+                let target_key = self.insert_minimap_candidate(
+                    candidates,
+                    MinimapLandmarkCandidate {
+                        kind: target_kind,
+                        anchor_lid: target_item.lid.clone(),
+                        label: target_item
+                            .local_summary
+                            .clone()
+                            .or_else(|| self.minimap_source_excerpt(&target_item.lid))
+                            .unwrap_or_else(|| target_item.lid.clone()),
+                        source_label: self.minimap_source_excerpt(&target_item.lid),
+                        evidence_lids: vec![target_item.lid.clone()],
+                        provenance: vec![PaperLandmarkProvenance::Discourse],
+                    },
+                    warnings,
+                );
+                let (Some(source_key), Some(target_key)) = (source_key, target_key) else {
+                    continue;
+                };
+                self.insert_pending_minimap_relation(
+                    relations,
+                    normalized,
+                    source_key,
+                    target_key,
+                    relation.evidence_lids.clone(),
+                    "discourse relation",
+                    warnings,
+                );
+            }
+        }
+    }
+
+    fn graph_relation_endpoint_candidate(
+        &self,
+        node: &base_schema::GraphNode,
+        kind: PaperLandmarkKind,
+        evidence_lids: &[String],
+        provenance: Vec<PaperLandmarkProvenance>,
+        candidates: &mut HashMap<String, MinimapLandmarkCandidate>,
+        warnings: &mut Vec<String>,
+    ) -> Option<String> {
+        let anchor_lid = evidence_lids.first()?.clone();
+        self.insert_minimap_candidate(
+            candidates,
+            MinimapLandmarkCandidate {
+                kind,
+                anchor_lid: anchor_lid.clone(),
+                label: node.name.clone(),
+                source_label: self.minimap_source_excerpt(&anchor_lid),
+                evidence_lids: evidence_lids.to_vec(),
+                provenance,
+            },
+            warnings,
+        )
+    }
+
+    fn project_graph_minimap_relations(
+        &self,
+        candidates: &mut HashMap<String, MinimapLandmarkCandidate>,
+        relations: &mut HashMap<String, PendingMinimapRelation>,
+        warnings: &mut Vec<String>,
+    ) {
+        for edge in &self.base.graph_edges {
+            if edge.scope != EdgeScope::Local {
+                continue;
+            }
+            let Some(normalized) = normalize_graph_relation(&edge.edge_type) else {
+                continue;
+            };
+            let (Some(source_index), Some(target_index)) = (
+                self.node_idx.get(&edge.source),
+                self.node_idx.get(&edge.target),
+            ) else {
+                warnings.push(format!(
+                    "graph relation {} has a missing graph endpoint",
+                    edge.edge_type
+                ));
+                continue;
+            };
+            let source_node = &self.base.graph_nodes[*source_index];
+            let target_node = &self.base.graph_nodes[*target_index];
+            let source_evidence = self.graph_node_evidence_lids(source_node);
+            let target_evidence = self.graph_node_evidence_lids(target_node);
+            let source_kind = normalized
+                .source_kind
+                .clone()
+                .unwrap_or_else(|| graph_node_landmark_kind(&source_node.node_type));
+            let target_kind = normalized
+                .target_kind
+                .clone()
+                .unwrap_or_else(|| graph_node_landmark_kind(&target_node.node_type));
+            let source_key = self.graph_relation_endpoint_candidate(
+                source_node,
+                source_kind,
+                &source_evidence,
+                vec![PaperLandmarkProvenance::Graph],
+                candidates,
+                warnings,
+            );
+            let target_key = self.graph_relation_endpoint_candidate(
+                target_node,
+                target_kind,
+                &target_evidence,
+                vec![PaperLandmarkProvenance::Graph],
+                candidates,
+                warnings,
+            );
+            let (Some(mut source_key), Some(mut target_key)) = (source_key, target_key) else {
+                warnings.push(format!(
+                    "graph relation {} has an endpoint without LID evidence",
+                    edge.edge_type
+                ));
+                continue;
+            };
+            if normalized.reverse {
+                std::mem::swap(&mut source_key, &mut target_key);
+            }
+            let mut evidence_lids = source_evidence;
+            push_unique_all(&mut evidence_lids, &target_evidence);
+            self.insert_pending_minimap_relation(
+                relations,
+                normalized.relation,
+                source_key,
+                target_key,
+                evidence_lids,
+                "graph relation",
+                warnings,
+            );
+        }
+
+        let Some(audit) = &self.paper_minimap_artifacts.pass2_audit else {
+            return;
+        };
+        if audit.header.book_id != self.base.book_id
+            || self
+                .book_structure
+                .as_ref()
+                .is_some_and(|structure| structure.header.book_version != audit.header.book_version)
+        {
+            warnings.push("pass2_audit.json header does not match the paper minimap base".into());
+            return;
+        }
+        for edge in &audit.accepted {
+            let Some(normalized) = normalize_graph_relation(&edge.relation_type) else {
+                continue;
+            };
+            let (Some(source_index), Some(target_index)) = (
+                self.node_idx.get(&edge.source),
+                self.node_idx.get(&edge.target),
+            ) else {
+                warnings.push(format!(
+                    "Pass2 edge {} has a missing graph endpoint",
+                    edge.candidate_id
+                ));
+                continue;
+            };
+            let evidence_covers_sides = edge
+                .source_evidence_lids
+                .iter()
+                .chain(edge.target_evidence_lids.iter())
+                .all(|lid| edge.evidence_lids.iter().any(|evidence| evidence == lid));
+            if edge.source_evidence_lids.is_empty()
+                || edge.target_evidence_lids.is_empty()
+                || !evidence_covers_sides
+                || !self.valid_minimap_relation_evidence(&edge.evidence_lids)
+            {
+                warnings.push(format!(
+                    "Pass2 edge {} has invalid evidence",
+                    edge.candidate_id
+                ));
+                continue;
+            }
+            let source_node = &self.base.graph_nodes[*source_index];
+            let target_node = &self.base.graph_nodes[*target_index];
+            let source_kind = normalized
+                .source_kind
+                .clone()
+                .unwrap_or_else(|| graph_node_landmark_kind(&source_node.node_type));
+            let target_kind = normalized
+                .target_kind
+                .clone()
+                .unwrap_or_else(|| graph_node_landmark_kind(&target_node.node_type));
+            let provenance = vec![
+                PaperLandmarkProvenance::Graph,
+                PaperLandmarkProvenance::Pass2,
+            ];
+            let source_key = self.graph_relation_endpoint_candidate(
+                source_node,
+                source_kind,
+                &edge.source_evidence_lids,
+                provenance.clone(),
+                candidates,
+                warnings,
+            );
+            let target_key = self.graph_relation_endpoint_candidate(
+                target_node,
+                target_kind,
+                &edge.target_evidence_lids,
+                provenance,
+                candidates,
+                warnings,
+            );
+            let (Some(mut source_key), Some(mut target_key)) = (source_key, target_key) else {
+                continue;
+            };
+            if normalized.reverse {
+                std::mem::swap(&mut source_key, &mut target_key);
+            }
+            self.insert_pending_minimap_relation(
+                relations,
+                normalized.relation,
+                source_key,
+                target_key,
+                edge.evidence_lids.clone(),
+                "Pass2 relation",
+                warnings,
+            );
+        }
+    }
+
+    fn project_book_structure_minimap_relations(
+        &self,
+        _candidates: &mut HashMap<String, MinimapLandmarkCandidate>,
+        relations: &mut HashMap<String, PendingMinimapRelation>,
+        warnings: &mut Vec<String>,
+    ) {
+        let Some(structure) = &self.book_structure else {
+            return;
+        };
+        let units_by_lid: HashMap<&str, &BookStructureSpineUnit> = structure
+            .spine
+            .iter()
+            .map(|unit| (unit.lid.as_str(), unit))
+            .collect();
+        for unit in &structure.spine {
+            for dependency_lid in &unit.depends_on {
+                let Some(dependency) = units_by_lid.get(dependency_lid.as_str()) else {
+                    warnings.push(format!(
+                        "book structure dependency {} -> {} is missing",
+                        unit.lid, dependency_lid
+                    ));
+                    continue;
+                };
+                let mut evidence_lids = unit.summary.evidence_lids.clone();
+                push_unique_all(&mut evidence_lids, &dependency.summary.evidence_lids);
+                self.insert_pending_minimap_relation(
+                    relations,
+                    PaperMinimapRelation::BuildsOn,
+                    minimap_candidate_key(&book_structure_spine_kind(&unit.role), &unit.lid),
+                    minimap_candidate_key(
+                        &book_structure_spine_kind(&dependency.role),
+                        &dependency.lid,
+                    ),
+                    evidence_lids,
+                    "book structure dependency",
+                    warnings,
+                );
+            }
+        }
+    }
+
+    fn project_paper_minimap_semantics(
+        &self,
+        entries: &HashMap<&str, &RuntimePdfSourceMapEntry>,
+        warnings: &mut Vec<String>,
+    ) -> (
+        Vec<PaperLandmark>,
+        Vec<PaperArgumentRelation>,
+        PaperMinimapLayerStatus,
+        PaperMinimapLayerStatus,
+    ) {
+        let warning_start = warnings.len();
+        let mut candidates: HashMap<String, MinimapLandmarkCandidate> = HashMap::new();
+        let mut pending_relations: HashMap<String, PendingMinimapRelation> = HashMap::new();
+        let discourse_by_lid: HashMap<&str, &TechnicalLearningDiscourseItem> = self
+            .discourse_index
+            .iter()
+            .map(|item| (item.lid.as_str(), item))
+            .collect();
+
+        for item in &self.discourse_index {
+            let Some(kind) = discourse_landmark_kind(item) else {
+                continue;
+            };
+            let label = item
+                .local_summary
+                .clone()
+                .or_else(|| self.minimap_source_excerpt(&item.lid))
+                .unwrap_or_else(|| item.lid.clone());
+            self.insert_minimap_candidate(
+                &mut candidates,
+                MinimapLandmarkCandidate {
+                    kind,
+                    anchor_lid: item.lid.clone(),
+                    label,
+                    source_label: self.minimap_source_excerpt(&item.lid),
+                    evidence_lids: vec![item.lid.clone()],
+                    provenance: vec![PaperLandmarkProvenance::Discourse],
+                },
+                warnings,
+            );
+        }
+
+        for node in &self.base.graph_nodes {
+            if node.node_type != GraphNodeType::Claim {
+                continue;
+            }
+            let Some(anchor_lid) = node.source_lid.clone() else {
+                warnings.push(format!("claim graph node {} has no source_lid", node.id));
+                continue;
+            };
+            self.insert_minimap_candidate(
+                &mut candidates,
+                MinimapLandmarkCandidate {
+                    kind: PaperLandmarkKind::Claim,
+                    anchor_lid: anchor_lid.clone(),
+                    label: node.name.clone(),
+                    source_label: self.minimap_source_excerpt(&anchor_lid),
+                    evidence_lids: vec![anchor_lid],
+                    provenance: vec![PaperLandmarkProvenance::Graph],
+                },
+                warnings,
+            );
+        }
+
+        if let Some(structure) = &self.book_structure {
+            for stop in &structure.key_stops {
+                self.insert_minimap_candidate(
+                    &mut candidates,
+                    MinimapLandmarkCandidate {
+                        kind: book_structure_key_stop_kind(stop),
+                        anchor_lid: stop.lid.clone(),
+                        label: stop
+                            .title
+                            .clone()
+                            .unwrap_or_else(|| stop.reason.text.clone()),
+                        source_label: self.minimap_source_excerpt(&stop.lid),
+                        evidence_lids: stop.reason.evidence_lids.clone(),
+                        provenance: vec![PaperLandmarkProvenance::BookStructure],
+                    },
+                    warnings,
+                );
+            }
+            for unit in &structure.spine {
+                self.insert_minimap_candidate(
+                    &mut candidates,
+                    MinimapLandmarkCandidate {
+                        kind: book_structure_spine_kind(&unit.role),
+                        anchor_lid: unit.lid.clone(),
+                        label: unit.summary.text.clone(),
+                        source_label: self.minimap_source_excerpt(&unit.lid),
+                        evidence_lids: unit.summary.evidence_lids.clone(),
+                        provenance: vec![PaperLandmarkProvenance::BookStructure],
+                    },
+                    warnings,
+                );
+            }
+        }
+
+        // Relation sources may add evidence-backed endpoint candidates before final page resolution.
+        self.project_discourse_minimap_relations(
+            &discourse_by_lid,
+            &mut candidates,
+            &mut pending_relations,
+            warnings,
+        );
+        self.project_graph_minimap_relations(&mut candidates, &mut pending_relations, warnings);
+        self.project_book_structure_minimap_relations(
+            &mut candidates,
+            &mut pending_relations,
+            warnings,
+        );
+
+        let mut candidate_entries: Vec<(String, MinimapLandmarkCandidate)> =
+            candidates.into_iter().collect();
+        candidate_entries.sort_by(|left, right| left.0.cmp(&right.0));
+        let mut candidate_to_landmark = HashMap::new();
+        let mut landmarks = Vec::new();
+        for (candidate_key, candidate) in candidate_entries {
+            let Some(page_index) = self.minimap_candidate_page(&candidate, entries) else {
+                warnings.push(format!(
+                    "paper landmark {} has no PDF projection",
+                    candidate.anchor_lid
+                ));
+                continue;
+            };
+            let landmark_id = format!(
+                "landmark:{}:{}",
+                paper_landmark_kind_key(&candidate.kind),
+                candidate.anchor_lid
+            );
+            candidate_to_landmark.insert(candidate_key, landmark_id.clone());
+            landmarks.push(PaperLandmark {
+                landmark_id,
+                kind: candidate.kind,
+                anchor_lid: candidate.anchor_lid,
+                page_index,
+                label: candidate.label,
+                source_label: candidate.source_label,
+                evidence_lids: candidate.evidence_lids,
+                provenance: candidate.provenance,
+            });
+        }
+        landmarks.sort_by(|left, right| {
+            left.page_index
+                .cmp(&right.page_index)
+                .then_with(|| left.anchor_lid.cmp(&right.anchor_lid))
+                .then_with(|| left.landmark_id.cmp(&right.landmark_id))
+        });
+
+        let mut relation_entries: Vec<PendingMinimapRelation> =
+            pending_relations.into_values().collect();
+        relation_entries.sort_by(|left, right| {
+            left.source_candidate_key
+                .cmp(&right.source_candidate_key)
+                .then_with(|| left.target_candidate_key.cmp(&right.target_candidate_key))
+                .then_with(|| {
+                    paper_relation_key(&left.relation).cmp(paper_relation_key(&right.relation))
+                })
+        });
+        let mut relations = Vec::new();
+        for pending in relation_entries {
+            let (Some(source_landmark_id), Some(target_landmark_id)) = (
+                candidate_to_landmark.get(&pending.source_candidate_key),
+                candidate_to_landmark.get(&pending.target_candidate_key),
+            ) else {
+                warnings.push(format!(
+                    "paper relation {} has an endpoint without PDF projection",
+                    paper_relation_key(&pending.relation)
+                ));
+                continue;
+            };
+            relations.push(PaperArgumentRelation {
+                relation_id: format!(
+                    "relation:{}:{}:{}",
+                    paper_relation_key(&pending.relation),
+                    source_landmark_id,
+                    target_landmark_id
+                ),
+                relation_type: pending.relation,
+                source_landmark_id: source_landmark_id.clone(),
+                target_landmark_id: target_landmark_id.clone(),
+                evidence_lids: pending.evidence_lids,
+            });
+        }
+
+        let semantic_degraded = warnings.len() > warning_start
+            || self.book_structure.is_none()
+            || self.discourse_index.is_empty();
+        let landmark_status = if landmarks.is_empty() {
+            PaperMinimapLayerStatus {
+                status: PaperMinimapAvailabilityStatus::Unavailable,
+                reason: Some("no evidence-backed paper landmarks are available".into()),
+            }
+        } else if semantic_degraded {
+            PaperMinimapLayerStatus {
+                status: PaperMinimapAvailabilityStatus::Degraded,
+                reason: Some("one or more semantic sources or candidates are unavailable".into()),
+            }
+        } else {
+            PaperMinimapLayerStatus {
+                status: PaperMinimapAvailabilityStatus::Available,
+                reason: None,
+            }
+        };
+        let relation_status = if relations.is_empty() {
+            PaperMinimapLayerStatus {
+                status: PaperMinimapAvailabilityStatus::Unavailable,
+                reason: Some("no evidence-backed paper relations are available".into()),
+            }
+        } else if semantic_degraded || self.paper_minimap_artifacts.pass2_audit.is_none() {
+            PaperMinimapLayerStatus {
+                status: PaperMinimapAvailabilityStatus::Degraded,
+                reason: Some("one or more relation sources or candidates are unavailable".into()),
+            }
+        } else {
+            PaperMinimapLayerStatus {
+                status: PaperMinimapAvailabilityStatus::Available,
+                reason: None,
+            }
+        };
+        (landmarks, relations, landmark_status, relation_status)
+    }
+
+    /// Deterministic, read-only paper topology projected from existing LID/PDF artifacts.
+    pub fn paper_minimap(&self) -> PaperMinimapBase {
+        let mut warnings = self.paper_minimap_artifacts.warnings.clone();
+        let (manifest, pdf_map, entries) = match self.validated_paper_minimap_artifacts() {
+            Ok(artifacts) => artifacts,
+            Err(reason) => return self.unavailable_paper_minimap(warnings, reason),
+        };
+        let by_lid: HashMap<&str, &LidNode> = self
+            .base
+            .lid_nodes
+            .iter()
+            .map(|node| (node.lid.as_str(), node))
+            .collect();
+        let units = select_paper_region_units(&self.base.lid_nodes, &by_lid);
+        let mut regions = Vec::new();
+        for unit in units {
+            let mut leaves = Vec::new();
+            if let Err(reason) = self.collect_minimap_leaf_lids(&unit.lid, &mut leaves) {
+                return self.unavailable_paper_minimap(warnings, reason);
+            }
+            let pages: Vec<u32> = leaves
+                .iter()
+                .filter_map(|lid| entries.get(lid.as_str()))
+                .flat_map(|entry| entry.regions.iter().map(|region| region.page_index))
+                .collect();
+            let (Some(start_page), Some(end_page)) =
+                (pages.iter().min().copied(), pages.iter().max().copied())
+            else {
+                warnings.push(format!("paper region {} has no PDF projection", unit.lid));
+                continue;
+            };
+            let Some(start_lid) = leaves.first().cloned() else {
+                warnings.push(format!("paper region {} has no leaf LID", unit.lid));
+                continue;
+            };
+            let end_lid = leaves.last().cloned().unwrap_or_else(|| start_lid.clone());
+            let raw_title = self
+                .source_u16
+                .get(unit.span.start..unit.span.end)
+                .map(String::from_utf16_lossy)
+                .unwrap_or_else(|| unit.lid.clone());
+            let title = paper_heading(&raw_title, &unit.lid);
+            let kind = classify_paper_heading(&title);
+            let confidence = if kind == PaperRegionKind::Unknown {
+                0.0
+            } else {
+                1.0
+            };
+            regions.push(PaperRegion {
+                region_id: format!("region:{}", unit.lid),
+                title,
+                kind,
+                lid_span: PaperLidSpan { start_lid, end_lid },
+                page_span: PaperPageSpan {
+                    start_page,
+                    end_page,
+                },
+                classification_source: PaperRegionClassificationSource::Heading,
+                confidence,
+            });
+        }
+        if regions.is_empty() {
+            return self.unavailable_paper_minimap(
+                warnings,
+                "no structural paper region has a valid PDF projection",
+            );
+        }
+
+        let (landmarks, relations, landmark_status, argument_status) =
+            self.project_paper_minimap_semantics(&entries, &mut warnings);
+        let mut fingerprint_parts = vec![
+            self.base.book_id.clone(),
+            manifest.canonical_source.sha256.clone(),
+            pdf_map.config_hash.clone(),
+        ];
+        for region in &regions {
+            fingerprint_parts.push(format!(
+                "{}:{}:{}:{}:{}:{:?}",
+                region.region_id,
+                region.lid_span.start_lid,
+                region.lid_span.end_lid,
+                region.page_span.start_page,
+                region.page_span.end_page,
+                region.kind
+            ));
+        }
+        for landmark in &landmarks {
+            fingerprint_parts.push(format!(
+                "{}:{}:{}:{}",
+                landmark.landmark_id,
+                landmark.anchor_lid,
+                landmark.page_index,
+                landmark.evidence_lids.join(",")
+            ));
+        }
+        for relation in &relations {
+            fingerprint_parts.push(format!(
+                "{}:{}:{}:{}",
+                relation.relation_id,
+                relation.source_landmark_id,
+                relation.target_landmark_id,
+                relation.evidence_lids.join(",")
+            ));
+        }
+        let status = if landmark_status.status == PaperMinimapAvailabilityStatus::Available
+            && argument_status.status == PaperMinimapAvailabilityStatus::Available
+        {
+            PaperMinimapAvailabilityStatus::Available
+        } else {
+            PaperMinimapAvailabilityStatus::Degraded
+        };
+        PaperMinimapBase {
+            version: "paper_minimap.v1".into(),
+            book_id: self.base.book_id.clone(),
+            book_version: self.paper_minimap_book_version(),
+            fingerprint: stable_minimap_fingerprint(&fingerprint_parts),
+            status,
+            regions,
+            landmarks,
+            relations,
+            layer_status: HashMap::from([
+                (
+                    "topology".into(),
+                    PaperMinimapLayerStatus {
+                        status: PaperMinimapAvailabilityStatus::Available,
+                        reason: None,
+                    },
+                ),
+                (
+                    "regions".into(),
+                    PaperMinimapLayerStatus {
+                        status: PaperMinimapAvailabilityStatus::Available,
+                        reason: None,
+                    },
+                ),
+                ("landmarks".into(), landmark_status),
+                ("arguments".into(), argument_status),
+            ]),
+            warnings,
+        }
     }
 
     pub fn content_profile_id(&self) -> ContentProfileId {
@@ -4519,5 +6154,516 @@ mod tests {
         let b = book_chain();
         // 目标需 2 跳,预算 k=1 → 够不到 → 空路径非 error。
         assert!(b.route_to("1.1", "1.3", Some(1)).unwrap().is_empty());
+    }
+
+    fn write_paper_minimap_book(name: &str, manifest_config_hash: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(name);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let sections = [
+            ("Introduction", "Intro text.\n", vec![0_u32]),
+            (
+                "Materials and Methods",
+                "Method text.\n",
+                vec![2_u32, 3_u32],
+            ),
+            ("Odd Segment", "Odd text.\n", vec![4_u32]),
+        ];
+        let mut source = String::new();
+        let mut nodes = Vec::new();
+        let mut map_entries = Vec::new();
+        let mut section_lids = Vec::new();
+        for (index, (title, body, pages)) in sections.iter().enumerate() {
+            let section_lid = format!("1.{}", index + 1);
+            let leaf_lid = format!("{section_lid}.1");
+            let section_start = source.encode_utf16().count();
+            let heading = format!("# {title}\n");
+            source.push_str(&heading);
+            let leaf_start = source.encode_utf16().count();
+            source.push_str(body);
+            let section_end = source.encode_utf16().count();
+            nodes.push(LidNode {
+                lid: section_lid.clone(),
+                path: vec![1, (index + 1) as u32],
+                kind: NodeKind::Section,
+                span: Span {
+                    start: section_start,
+                    end: section_end,
+                },
+                children: vec![leaf_lid.clone()],
+            });
+            nodes.push(LidNode {
+                lid: leaf_lid.clone(),
+                path: vec![1, (index + 1) as u32, 1],
+                kind: NodeKind::Paragraph,
+                span: Span {
+                    start: leaf_start,
+                    end: section_end,
+                },
+                children: Vec::new(),
+            });
+            map_entries.push(serde_json::json!({
+                "lid": leaf_lid,
+                "source_span": {"start": leaf_start, "end": section_end},
+                "status": "word_mapped",
+                "regions": pages.iter().enumerate().map(|(region_index, page)| serde_json::json!({
+                    "region_id": format!("pdf:{index}:{region_index}"),
+                    "pageIndex": page,
+                    "bbox": [0, 0, 10, 10]
+                })).collect::<Vec<_>>(),
+                "alignment": {"confidence": 1.0}
+            }));
+            section_lids.push(section_lid);
+        }
+        nodes.insert(
+            0,
+            LidNode {
+                lid: "1".into(),
+                path: vec![1],
+                kind: NodeKind::Chapter,
+                span: Span {
+                    start: 0,
+                    end: source.encode_utf16().count(),
+                },
+                children: section_lids,
+            },
+        );
+        let base = ReadOnlyBase {
+            book_id: "paper-minimap-book".into(),
+            lid_nodes: nodes,
+            graph_nodes: Vec::new(),
+            graph_edges: Vec::new(),
+        };
+        let source_manifest = serde_json::json!({
+            "version": "source_manifest.v2",
+            "book_id": "paper-minimap-book",
+            "canonical_source": {
+                "kind": "reconciled_markdown",
+                "path": "source.txt",
+                "citation_anchor": "lid",
+                "sha256": "source-sha-a"
+            },
+            "capabilities": {
+                "view_pdf": {"status": "available"},
+                "project_lid_to_pdf": {
+                    "status": "available",
+                    "config_hash": manifest_config_hash
+                },
+                "resolve_pdf_selection": {"status": "unavailable"},
+                "project_ranges_to_pdf": {"status": "available"}
+            }
+        });
+        let pdf_source_map = serde_json::json!({
+            "version": "pdf_source_map.v1",
+            "book_id": "paper-minimap-book",
+            "pages": (0..5).map(|page| serde_json::json!({
+                "pageIndex": page,
+                "width": 100,
+                "height": 100,
+                "rotate": 0,
+                "view": [0, 0, 100, 100]
+            })).collect::<Vec<_>>(),
+            "entries": map_entries,
+            "config_hash": "config-a"
+        });
+        std::fs::write(dir.join("base.json"), serde_json::to_string(&base).unwrap()).unwrap();
+        std::fs::write(dir.join("source.txt"), source).unwrap();
+        std::fs::write(
+            dir.join("source_manifest.json"),
+            source_manifest.to_string(),
+        )
+        .unwrap();
+        std::fs::write(dir.join("pdf_source_map.json"), pdf_source_map.to_string()).unwrap();
+        dir
+    }
+
+    fn write_paper_minimap_semantics(dir: &std::path::Path, dangling_pass2_evidence: bool) {
+        let base_raw = std::fs::read_to_string(dir.join("base.json")).unwrap();
+        let mut base: ReadOnlyBase = serde_json::from_str(&base_raw).unwrap();
+        base.graph_nodes = vec![
+            base_schema::GraphNode {
+                id: "claim:hypothesis".into(),
+                node_type: GraphNodeType::Claim,
+                name: "The intervention should improve the outcome".into(),
+                occurrences: Vec::new(),
+                source_lid: Some("1.1.1".into()),
+            },
+            base_schema::GraphNode {
+                id: "entity:experiment".into(),
+                node_type: GraphNodeType::Entity,
+                name: "Controlled experiment".into(),
+                occurrences: vec!["1.2.1".into()],
+                source_lid: None,
+            },
+            base_schema::GraphNode {
+                id: "claim:result".into(),
+                node_type: GraphNodeType::Claim,
+                name: "The experiment improved the outcome".into(),
+                occurrences: Vec::new(),
+                source_lid: Some("1.3.1".into()),
+            },
+        ];
+        base.graph_edges = vec![
+            base_schema::GraphEdge {
+                source: "claim:hypothesis".into(),
+                target: "entity:experiment".into(),
+                edge_type: "hypothesis_tested_by_experiment".into(),
+                direction: Direction::Directed,
+                scope: EdgeScope::Local,
+                weight: 1.0,
+            },
+            base_schema::GraphEdge {
+                source: "entity:experiment".into(),
+                target: "claim:result".into(),
+                edge_type: "method_supports_result".into(),
+                direction: Direction::Directed,
+                scope: EdgeScope::Local,
+                weight: 1.0,
+            },
+        ];
+        std::fs::write(dir.join("base.json"), serde_json::to_string(&base).unwrap()).unwrap();
+
+        let discourse = serde_json::json!({
+            "header": {
+                "book_id": "paper-minimap-book",
+                "book_version": "v1",
+                "profile_id": "paper",
+                "profile_version": "paper_v0",
+                "core_schema_version": "core_v0",
+                "generated_at": "2026-07-12T00:00:00Z"
+            },
+            "items": [
+                {
+                    "lid": "1.1.1",
+                    "mode": "argumentative",
+                    "local_function": "research_question",
+                    "local_summary": "Which intervention improves the outcome?",
+                    "relations": [{
+                        "target_lid": "1.3.1",
+                        "type": "supports",
+                        "direction": "forward",
+                        "confidence": 1.0,
+                        "evidence_lids": ["1.1.1", "1.3.1"]
+                    }]
+                },
+                {
+                    "lid": "1.2.1",
+                    "mode": "procedural",
+                    "local_function": "method_description",
+                    "local_summary": "Runs the controlled experiment.",
+                    "relations": []
+                },
+                {
+                    "lid": "1.3.1",
+                    "mode": "argumentative",
+                    "local_function": "result_interpretation",
+                    "rhetorical_move": "result_claim",
+                    "local_summary": "Interprets the positive result.",
+                    "relations": []
+                }
+            ]
+        });
+        std::fs::write(dir.join("discourse_index.json"), discourse.to_string()).unwrap();
+
+        let structure = serde_json::json!({
+            "header": {
+                "book_id": "paper-minimap-book",
+                "book_version": "v1",
+                "profile_id": "paper",
+                "profile_version": "paper_v0",
+                "core_schema_version": "core_v0",
+                "generated_at": "2026-07-12T00:00:00Z"
+            },
+            "spine": [
+                {
+                    "lid": "1.2",
+                    "role": "method",
+                    "summary": {"text": "Controlled method", "evidence_lids": ["1.2.1"]},
+                    "key_stop_ids": [],
+                    "depends_on": []
+                },
+                {
+                    "lid": "1.3",
+                    "role": "synthesis",
+                    "summary": {"text": "Result synthesis", "evidence_lids": ["1.3.1"]},
+                    "key_stop_ids": ["ks:result"],
+                    "depends_on": ["1.2"]
+                }
+            ],
+            "throughlines": [],
+            "key_stops": [{
+                "id": "ks:result",
+                "lid": "1.3.1",
+                "type": "claim",
+                "title": "Central result",
+                "reason": {"text": "Central result claim", "evidence_lids": ["1.3.1"]}
+            }]
+        });
+        std::fs::write(dir.join("book_structure.json"), structure.to_string()).unwrap();
+
+        let pass2_evidence = if dangling_pass2_evidence {
+            vec!["1.1.1", "9.9"]
+        } else {
+            vec!["1.1.1", "1.3.1"]
+        };
+        let pass2 = serde_json::json!({
+            "header": {
+                "book_id": "paper-minimap-book",
+                "book_version": "v1",
+                "profile_id": "paper",
+                "profile_version": "paper_v0",
+                "core_schema_version": "core_v0",
+                "generated_at": "2026-07-12T00:00:00Z"
+            },
+            "accepted": [{
+                "candidate_id": "cand:hypothesis-result",
+                "source": "claim:hypothesis",
+                "target": "claim:result",
+                "type": "supports",
+                "source_evidence_lids": ["1.1.1"],
+                "target_evidence_lids": [pass2_evidence[1]],
+                "evidence_lids": pass2_evidence,
+                "support_level": "explicit",
+                "rationale": "Explicit cross-section support"
+            }],
+            "pending": [{
+                "candidate_id": "pending:must-not-project",
+                "source": "claim:result",
+                "target": "claim:hypothesis",
+                "type": "rebuts",
+                "source_evidence_lids": ["1.3.1"],
+                "target_evidence_lids": ["1.1.1"],
+                "evidence_lids": ["1.3.1", "1.1.1"],
+                "support_level": "strong_inference",
+                "rationale": "Pending only"
+            }],
+            "rejected": [],
+            "gate_dropped": []
+        });
+        std::fs::write(dir.join("pass2_audit.json"), pass2.to_string()).unwrap();
+    }
+
+    #[test]
+    fn paper_minimap_projects_heading_alias_unknown_and_cross_page_region() {
+        let dir = write_paper_minimap_book("ub-read-tools-paper-minimap-project", "config-a");
+        let book = Book::load(dir.to_str().unwrap()).unwrap();
+        let minimap = book.paper_minimap();
+
+        assert_eq!(minimap.status, PaperMinimapAvailabilityStatus::Degraded);
+        assert_eq!(minimap.regions.len(), 3);
+        assert_eq!(minimap.regions[0].title, "Introduction");
+        assert_eq!(minimap.regions[0].kind, PaperRegionKind::Introduction);
+        assert_eq!(minimap.regions[1].kind, PaperRegionKind::Method);
+        assert_eq!(minimap.regions[1].page_span.start_page, 2);
+        assert_eq!(minimap.regions[1].page_span.end_page, 3);
+        assert_eq!(minimap.regions[2].kind, PaperRegionKind::Unknown);
+        assert_eq!(minimap.regions[2].confidence, 0.0);
+        assert_eq!(minimap.fingerprint, book.paper_minimap().fingerprint);
+        assert_eq!(
+            minimap.layer_status["topology"].status,
+            PaperMinimapAvailabilityStatus::Available
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn paper_minimap_stale_config_degrades_without_breaking_book_load() {
+        let dir = write_paper_minimap_book("ub-read-tools-paper-minimap-stale", "config-b");
+        let book = Book::load(dir.to_str().unwrap()).unwrap();
+        let minimap = book.paper_minimap();
+
+        assert_eq!(minimap.status, PaperMinimapAvailabilityStatus::Unavailable);
+        assert!(minimap.regions.is_empty());
+        assert!(minimap
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("config_hash is stale")));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn paper_minimap_projects_deduped_landmarks_provenance_and_closed_relations() {
+        let dir = write_paper_minimap_book("ub-read-tools-paper-minimap-semantics", "config-a");
+        write_paper_minimap_semantics(&dir, false);
+        let book = Book::load(dir.to_str().unwrap()).unwrap();
+        let minimap = book.paper_minimap();
+
+        assert_eq!(minimap.status, PaperMinimapAvailabilityStatus::Available);
+        assert!(minimap
+            .landmarks
+            .iter()
+            .any(|landmark| landmark.kind == PaperLandmarkKind::ResearchQuestion));
+        assert!(minimap
+            .landmarks
+            .iter()
+            .any(|landmark| landmark.kind == PaperLandmarkKind::Method));
+        let result_claims: Vec<&PaperLandmark> = minimap
+            .landmarks
+            .iter()
+            .filter(|landmark| {
+                landmark.kind == PaperLandmarkKind::Claim && landmark.anchor_lid == "1.3.1"
+            })
+            .collect();
+        assert_eq!(result_claims.len(), 1);
+        assert!(result_claims[0]
+            .provenance
+            .contains(&PaperLandmarkProvenance::BookStructure));
+        assert!(result_claims[0]
+            .provenance
+            .contains(&PaperLandmarkProvenance::Graph));
+        assert!(result_claims[0]
+            .provenance
+            .contains(&PaperLandmarkProvenance::Pass2));
+        let tests_relation = minimap
+            .relations
+            .iter()
+            .find(|relation| relation.relation_type == PaperMinimapRelation::Tests)
+            .unwrap();
+        assert!(tests_relation
+            .source_landmark_id
+            .starts_with("landmark:experiment:"));
+        assert!(tests_relation
+            .target_landmark_id
+            .starts_with("landmark:hypothesis:"));
+        assert!(minimap
+            .relations
+            .iter()
+            .any(|relation| relation.relation_type == PaperMinimapRelation::Produces));
+        assert!(!minimap
+            .relations
+            .iter()
+            .any(|relation| relation.relation_type == PaperMinimapRelation::Challenges));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn paper_minimap_drops_dangling_pass2_evidence_and_degrades_arguments_only() {
+        let dir =
+            write_paper_minimap_book("ub-read-tools-paper-minimap-dangling-pass2", "config-a");
+        write_paper_minimap_semantics(&dir, true);
+        let book = Book::load(dir.to_str().unwrap()).unwrap();
+        let minimap = book.paper_minimap();
+
+        assert_eq!(minimap.status, PaperMinimapAvailabilityStatus::Degraded);
+        assert_eq!(
+            minimap.layer_status["topology"].status,
+            PaperMinimapAvailabilityStatus::Available
+        );
+        assert_eq!(
+            minimap.layer_status["arguments"].status,
+            PaperMinimapAvailabilityStatus::Degraded
+        );
+        assert!(minimap
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("Pass2 edge") && warning.contains("invalid evidence")));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn paper_minimap_missing_semantic_sidecars_keeps_topology_and_marks_layers_unavailable() {
+        let dir = write_paper_minimap_book("ub-read-tools-paper-minimap-topology-only", "config-a");
+        let book = Book::load(dir.to_str().unwrap()).unwrap();
+        let minimap = book.paper_minimap();
+
+        assert_eq!(minimap.regions.len(), 3);
+        assert_eq!(
+            minimap.layer_status["landmarks"].status,
+            PaperMinimapAvailabilityStatus::Unavailable
+        );
+        assert_eq!(
+            minimap.layer_status["arguments"].status,
+            PaperMinimapAvailabilityStatus::Unavailable
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn paper_minimap_base_contract_round_trips_closed_types() {
+        let region = PaperRegion {
+            region_id: "region:method".into(),
+            title: "Methods".into(),
+            kind: PaperRegionKind::Method,
+            lid_span: PaperLidSpan {
+                start_lid: "2.1".into(),
+                end_lid: "2.4".into(),
+            },
+            page_span: PaperPageSpan {
+                start_page: 2,
+                end_page: 4,
+            },
+            classification_source: PaperRegionClassificationSource::Heading,
+            confidence: 1.0,
+        };
+        let landmark = PaperLandmark {
+            landmark_id: "landmark:method:2.2".into(),
+            kind: PaperLandmarkKind::Method,
+            anchor_lid: "2.2".into(),
+            page_index: 3,
+            label: "核心方法".into(),
+            source_label: Some("Splicing assay".into()),
+            evidence_lids: vec!["2.2".into()],
+            provenance: vec![
+                PaperLandmarkProvenance::BookStructure,
+                PaperLandmarkProvenance::Discourse,
+            ],
+        };
+        let relation = PaperArgumentRelation {
+            relation_id: "relation:method-result".into(),
+            relation_type: PaperMinimapRelation::Produces,
+            source_landmark_id: landmark.landmark_id.clone(),
+            target_landmark_id: "landmark:result:3.1".into(),
+            evidence_lids: vec!["2.2".into(), "3.1".into()],
+        };
+        let base = PaperMinimapBase {
+            version: "paper_minimap.v1".into(),
+            book_id: "paper-a".into(),
+            book_version: "v1".into(),
+            fingerprint: "fp-a".into(),
+            status: PaperMinimapAvailabilityStatus::Degraded,
+            regions: vec![region],
+            landmarks: vec![landmark],
+            relations: vec![relation],
+            layer_status: HashMap::from([(
+                "arguments".into(),
+                PaperMinimapLayerStatus {
+                    status: PaperMinimapAvailabilityStatus::Degraded,
+                    reason: Some("partial graph coverage".into()),
+                },
+            )]),
+            warnings: vec!["partial graph coverage".into()],
+        };
+
+        let value = serde_json::to_value(&base).unwrap();
+        assert_eq!(value["version"], "paper_minimap.v1");
+        assert_eq!(value["status"], "degraded");
+        assert_eq!(value["regions"][0]["kind"], "method");
+        assert_eq!(value["relations"][0]["type"], "produces");
+        assert_eq!(
+            serde_json::from_value::<PaperMinimapBase>(value).unwrap(),
+            base
+        );
+    }
+
+    #[test]
+    fn paper_minimap_contract_rejects_unknown_enum_and_missing_required_field() {
+        let unknown_kind = serde_json::json!({
+            "region_id": "region:x",
+            "title": "X",
+            "kind": "invented",
+            "lid_span": {"start_lid": "1.1", "end_lid": "1.1"},
+            "page_span": {"start_page": 0, "end_page": 0},
+            "classification_source": "unknown",
+            "confidence": 0.0
+        });
+        assert!(serde_json::from_value::<PaperRegion>(unknown_kind).is_err());
+
+        let missing_evidence = serde_json::json!({
+            "relation_id": "relation:x",
+            "type": "supports",
+            "source_landmark_id": "landmark:a",
+            "target_landmark_id": "landmark:b"
+        });
+        assert!(serde_json::from_value::<PaperArgumentRelation>(missing_evidence).is_err());
     }
 }

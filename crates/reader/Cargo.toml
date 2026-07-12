@@ -8,6 +8,8 @@ publish = false
 read-tools = { path = "../read-tools" }
 memory = { path = "../memory" }
 serde = { version = "1", features = ["derive"] }
+ts-rs = "10"
 
 [dev-dependencies]
 base-schema = { path = "../base-schema" }
+serde_json = "1"

@@ -132,4 +132,70 @@ describe("PdfReaderPane", () => {
 
     wrapper.unmount();
   });
+
+  it("coalesces scrolling and resolves a cross-page center to the nearest mapped LID", async () => {
+    const mappedSource: PdfSourceMap = {
+      ...sourceMap,
+      entries: [
+        {
+          lid: "1.1",
+          source_span: { start: 0, end: 10 },
+          status: "word_mapped",
+          regions: [{ region_id: "r-1", pageIndex: 0, bbox: [0, 0, 600, 160] }],
+          alignment: { confidence: 1 },
+        },
+        {
+          lid: "2.1",
+          source_span: { start: 10, end: 20 },
+          status: "word_mapped",
+          regions: [{ region_id: "r-2", pageIndex: 1, bbox: [0, 640, 600, 800] }],
+          alignment: { confidence: 1 },
+        },
+      ],
+    };
+    const wrapper = mount(PdfReaderPane, {
+      props: {
+        sourceManifest: null,
+        sourceMap: mappedSource,
+        pdfUrl: "/api/book/pdf/original",
+        activeLid: null,
+        selectedLid: null,
+      },
+    });
+    await flushPromises();
+    await flushPromises();
+
+    const rect = (top: number, bottom: number): DOMRect => ({
+      x: 0,
+      y: top,
+      top,
+      bottom,
+      left: 0,
+      right: 600,
+      width: 600,
+      height: bottom - top,
+      toJSON: () => ({}),
+    });
+    vi.spyOn(wrapper.get(".pdf-page-list").element, "getBoundingClientRect").mockReturnValue(rect(0, 800));
+    const pages = wrapper.findAll(".pdf-page-shell");
+    vi.spyOn(pages[0].element, "getBoundingClientRect").mockReturnValue(rect(-500, 300));
+    vi.spyOn(pages[1].element, "getBoundingClientRect").mockReturnValue(rect(320, 1120));
+
+    const before = wrapper.emitted("viewport-change")?.length ?? 0;
+    await wrapper.get(".pdf-page-list").trigger("scroll");
+    await wrapper.get(".pdf-page-list").trigger("scroll");
+    await new Promise((resolve) => window.setTimeout(resolve, 30));
+
+    const changes = wrapper.emitted("viewport-change") ?? [];
+    expect(changes).toHaveLength(before + 1);
+    expect(changes.at(-1)?.[0]).toMatchObject({
+      start_page: 0,
+      end_page: 1,
+      anchor_lid: "2.1",
+      region_id: null,
+    });
+    expect((changes.at(-1)?.[0] as { center_page: number }).center_page).toBeCloseTo(1.1, 4);
+
+    wrapper.unmount();
+  });
 });

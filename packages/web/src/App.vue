@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { FolderOpen, Save } from "@lucide/vue";
 import { api, ApiError } from "./api";
 import type {
@@ -15,9 +15,12 @@ import type {
   ImageAssetManifestEntry,
   MemoryRecord,
   OuterOutcome,
-  PaperReadingGuide,
-  PaperReadingMode,
-  PaperReadingStage,
+  PaperMinimapApplyOutcome,
+  PaperMinimapCommand,
+  PaperMinimapEffect,
+  PaperMinimapLocalization,
+  PaperMinimapStateResponse,
+  PaperViewportPosition,
   PdfSourceMap,
   PdfSourceMapEntry,
   ProfileManifest,
@@ -28,7 +31,6 @@ import type {
   SourceManifestV2,
   SourceReviewDecisionKind,
   SourceReviewLlmSuggestion,
-  StructureProjection,
   TraceStep,
   Viewport,
   WorkbenchAdapterMode,
@@ -42,6 +44,10 @@ import {
   type DesktopProviderStatus,
 } from "./desktop-provider";
 import { rangeToMarkdown } from "./selection";
+import {
+  normalizePaperViewportForMinimap,
+  shouldOpenPdfSourcePreview,
+} from "./paper-minimap-navigation";
 import {
   getSourceReviewAutoRerunRequest,
   runSourceReviewLlmBatch,
@@ -66,14 +72,6 @@ type ManifestNode = import("./api").Manifest["tree"][number];
 interface ScrollAnchor {
   lid: string;
   top: number;
-}
-
-interface PaperEvidenceRow {
-  id: string;
-  lid: string;
-  title: string;
-  summary: string;
-  evidence_lids: string[];
 }
 
 export interface OutlineItem {
@@ -172,12 +170,20 @@ const profileSummary = ref<ProfileSummary | null>(null);
 const profileManifest = ref<ProfileManifest | null>(null);
 const readerLayout = ref<ReaderLayoutState | null>(null);
 const pendingLayoutProposal = ref<ReaderLayoutProposal | null>(null);
-const paperGuide = ref<PaperReadingGuide | null>(null);
-const structureProjection = ref<StructureProjection | null>(null);
+const paperMinimapSnapshot = ref<PaperMinimapStateResponse | null>(null);
+const paperMinimapLocalization = ref<PaperMinimapLocalization | null>(null);
+const lastPaperMinimapEffect = ref<PaperMinimapEffect | null>(null);
+const paperMinimapActionBusy = ref(false);
 const paperProjectionLoading = ref(false);
 const paperProjectionError = ref<string | null>(null);
 const paperProjectionKey = ref("");
 let paperProjectionSeq = 0;
+let paperPositionSyncTimer: number | null = null;
+let paperPositionSyncRunning = false;
+let paperPositionSyncCompletion: Promise<void> | null = null;
+let completePaperPositionSync: (() => void) | null = null;
+let pendingPaperViewport: PaperViewportPosition | null = null;
+let pendingPaperSelection: string | null | undefined;
 
 // goto 输入 + 错误条
 const gotoInput = ref("");
@@ -292,12 +298,12 @@ const pdfReaderAvailable = computed(() =>
   && pdfCapabilityUsable(sourceManifest.value.capabilities.project_lid_to_pdf.status),
 );
 const pdfEntryByLid = computed(() => new Map((pdfSourceMap.value?.entries ?? []).map((entry) => [entry.lid, entry])));
+const pdfMappedLids = computed(() => new Set(
+  (pdfSourceMap.value?.entries ?? []).filter(pdfEntryHasRegion).map((entry) => entry.lid),
+));
 const pdfActiveLid = computed(() => selectedLid.value ?? readingAnchorLid.value);
 function pdfEntryHasRegion(entry: PdfSourceMapEntry | null | undefined): boolean {
   return !!entry?.primary_region || !!entry?.regions.length;
-}
-function pdfLidHasRegion(lid: string): boolean {
-  return pdfEntryHasRegion(pdfEntryByLid.value.get(lid));
 }
 const selectedSegment = computed(() => segments.value.find((seg) => seg.lid === selectedLid.value) ?? null);
 const selectedFormula = computed(() => selectedSegment.value?.formula ?? null);
@@ -331,46 +337,241 @@ function layoutRevNumber(value: number | bigint): number {
   return Number(value);
 }
 const isPaperProfile = computed(() => profileSummary.value?.profile_id === "paper");
-const paperModeStage = computed<{ mode: PaperReadingMode; stage: PaperReadingStage }>(() => {
-  switch (readerLayout.value?.active_preset) {
-    case "paper_skim":
-      return { mode: "skim", stage: "passive" };
-    case "paper_deep_read":
-      return { mode: "deep", stage: "critical" };
-    case "paper_abstract":
-      return { mode: "close", stage: "active" };
-    default:
-      return { mode: "close", stage: "active" };
-  }
-});
 function resetPaperProjectionData() {
   paperProjectionSeq += 1;
-  paperGuide.value = null;
-  structureProjection.value = null;
+  if (paperPositionSyncTimer !== null) window.clearTimeout(paperPositionSyncTimer);
+  paperPositionSyncTimer = null;
+  pendingPaperViewport = null;
+  pendingPaperSelection = undefined;
+  paperMinimapSnapshot.value = null;
+  paperMinimapLocalization.value = null;
+  lastPaperMinimapEffect.value = null;
+  paperMinimapActionBusy.value = false;
   paperProjectionLoading.value = false;
   paperProjectionError.value = null;
   paperProjectionKey.value = "";
+}
+
+function minimapRegionForPosition(position: PaperViewportPosition): string | null {
+  const regions = paperMinimapSnapshot.value?.base.regions ?? [];
+  const centerPage = Math.floor(position.center_page);
+  const pageMatches = regions.filter((region) =>
+    centerPage >= region.page_span.start_page && centerPage <= region.page_span.end_page);
+  if (pageMatches.length <= 1 || !position.anchor_lid) return pageMatches[0]?.region_id ?? null;
+  const anchorOrder = lidOrderIndex(position.anchor_lid);
+  return pageMatches.find((region) => {
+    const start = lidOrderIndex(region.lid_span.start_lid);
+    const end = lidOrderIndex(region.lid_span.end_lid);
+    return anchorOrder >= start && anchorOrder <= end;
+  })?.region_id ?? pageMatches[0]?.region_id ?? null;
+}
+
+function paperMinimapStateFromOutcome(outcome: PaperMinimapApplyOutcome) {
+  if (outcome.kind === "effect") return outcome.effect.after;
+  if (outcome.kind === "noop") return outcome.state;
+  return null;
+}
+
+function schedulePaperPositionSync() {
+  if (paperPositionSyncTimer !== null) window.clearTimeout(paperPositionSyncTimer);
+  paperPositionSyncTimer = window.setTimeout(() => {
+    paperPositionSyncTimer = null;
+    void flushPaperPositionSync();
+  }, 180);
+}
+
+async function flushPaperPositionSync() {
+  if (paperPositionSyncRunning) {
+    await paperPositionSyncCompletion;
+    return;
+  }
+  const snapshot = paperMinimapSnapshot.value;
+  const viewportPosition = pendingPaperViewport;
+  const selected = pendingPaperSelection;
+  if (!snapshot || (!viewportPosition && selected === undefined)) return;
+  pendingPaperViewport = null;
+  pendingPaperSelection = undefined;
+  const commands: PaperMinimapCommand[] = [];
+  if (viewportPosition) {
+    commands.push({ scope: "session", action: { kind: "update_viewport", position: viewportPosition } });
+  }
+  if (selected !== undefined) {
+    commands.push({ scope: "session", action: { kind: "set_selected_lid", selected_lid: selected } });
+  }
+  paperPositionSyncRunning = true;
+  paperPositionSyncCompletion = new Promise((resolve) => {
+    completePaperPositionSync = resolve;
+  });
+  try {
+    const outcome = await api.paperMinimapApply({
+      base_state_rev: Number(snapshot.state.rev),
+      actor: "user",
+      reason: "sync deterministic PDF viewport and selection",
+      commands,
+    });
+    const state = paperMinimapStateFromOutcome(outcome);
+    if (state && paperMinimapSnapshot.value?.base.fingerprint === state.base_map_rev) {
+      paperMinimapSnapshot.value = { ...paperMinimapSnapshot.value, state };
+      if (lastPaperMinimapEffect.value
+        && Number(lastPaperMinimapEffect.value.after_state_rev) !== Number(state.rev)) {
+        lastPaperMinimapEffect.value = null;
+      }
+      if (state.viewport_position.anchor_lid) currentReadingLid.value = state.viewport_position.anchor_lid;
+    }
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 409) {
+      paperMinimapSnapshot.value = await api.paperMinimapState();
+      pendingPaperViewport ??= viewportPosition;
+      if (pendingPaperSelection === undefined) pendingPaperSelection = selected;
+      schedulePaperPositionSync();
+    } else {
+      fail(error);
+    }
+  } finally {
+    paperPositionSyncRunning = false;
+    completePaperPositionSync?.();
+    completePaperPositionSync = null;
+    paperPositionSyncCompletion = null;
+    if (pendingPaperViewport || pendingPaperSelection !== undefined) schedulePaperPositionSync();
+  }
+}
+
+function onPdfViewportChange(position: PaperViewportPosition) {
+  if (!paperMinimapSnapshot.value) return;
+  const bounded = normalizePaperViewportForMinimap(
+    position,
+    paperMinimapSnapshot.value.base.regions.map((region) => region.page_span),
+  );
+  if (!bounded) return;
+  const normalized = { ...bounded, region_id: minimapRegionForPosition(bounded) };
+  pendingPaperViewport = normalized;
+  paperMinimapSnapshot.value = {
+    ...paperMinimapSnapshot.value,
+    state: { ...paperMinimapSnapshot.value.state, viewport_position: normalized },
+  };
+  schedulePaperPositionSync();
+}
+
+function queuePaperSelection(selected: string | null) {
+  if (!isPaperProfile.value || !pdfReaderAvailable.value || !paperMinimapSnapshot.value) return;
+  pendingPaperSelection = selected;
+  paperMinimapSnapshot.value = {
+    ...paperMinimapSnapshot.value,
+    state: { ...paperMinimapSnapshot.value.state, selected_lid: selected },
+  };
+  schedulePaperPositionSync();
+}
+
+async function applyPaperMinimapCommands(commands: PaperMinimapCommand[], reason: string) {
+  if (paperMinimapActionBusy.value) return;
+  if (paperPositionSyncTimer !== null) {
+    window.clearTimeout(paperPositionSyncTimer);
+    paperPositionSyncTimer = null;
+    await flushPaperPositionSync();
+  } else if (paperPositionSyncRunning) {
+    await flushPaperPositionSync();
+  }
+  const snapshot = paperMinimapSnapshot.value;
+  if (!snapshot) return;
+  paperMinimapActionBusy.value = true;
+  try {
+    const outcome = await api.paperMinimapApply({
+      base_state_rev: Number(snapshot.state.rev),
+      actor: "user",
+      reason,
+      commands,
+    });
+    const state = paperMinimapStateFromOutcome(outcome);
+    if (outcome.kind === "effect") lastPaperMinimapEffect.value = outcome.effect;
+    if (state) paperMinimapSnapshot.value = { ...snapshot, state };
+    paperMinimapSnapshot.value = await api.paperMinimapState();
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 409) {
+      paperMinimapSnapshot.value = await api.paperMinimapState();
+      lastPaperMinimapEffect.value = null;
+    } else {
+      fail(error);
+    }
+  } finally {
+    paperMinimapActionBusy.value = false;
+  }
+}
+
+async function setPaperMinimapMode(mode: import("./api").ReaderPaperMinimapState["mode"]) {
+  if (mode === paperMinimapSnapshot.value?.state.mode) return;
+  const modeLabel = { skim: "速览", abstract: "摘要", deep: "深读" }[mode];
+  await applyPaperMinimapCommands(
+    [{ scope: "session", action: { kind: "set_mode_lens", mode } }],
+    `切换为${modeLabel}模式`,
+  );
+}
+
+async function setPaperMinimapLayer(layer: string, visible: boolean) {
+  const layerLabel = {
+    regions: "章节区域",
+    landmarks: "重点位置",
+    arguments: "论证关系",
+    user: "我的标记",
+  }[layer] ?? layer;
+  await applyPaperMinimapCommands(
+    [{ scope: "session", action: { kind: "set_layer_visibility", layer, visible } }],
+    `${visible ? "显示" : "隐藏"}${layerLabel}图层`,
+  );
+}
+
+async function togglePaperMinimapPin(landmarkId: string, pinned: boolean) {
+  await applyPaperMinimapCommands(
+    [{
+      scope: "session",
+      action: pinned
+        ? { kind: "unpin_landmark", landmark_id: landmarkId }
+        : { kind: "pin_landmark", landmark_id: landmarkId },
+    }],
+    pinned ? "取消固定地标" : "固定地标",
+  );
+}
+
+async function undoLastPaperMinimapEffect() {
+  const effect = lastPaperMinimapEffect.value;
+  const snapshot = paperMinimapSnapshot.value;
+  if (!effect || !snapshot || paperMinimapActionBusy.value) return;
+  paperMinimapActionBusy.value = true;
+  try {
+    const outcome = await api.paperMinimapApply({
+      base_state_rev: Number(snapshot.state.rev),
+      undo_effect_id: effect.effect_id,
+    });
+    const state = paperMinimapStateFromOutcome(outcome);
+    if (state) paperMinimapSnapshot.value = { ...snapshot, state };
+    lastPaperMinimapEffect.value = null;
+    paperMinimapSnapshot.value = await api.paperMinimapState();
+  } catch (error) {
+    fail(error);
+  } finally {
+    paperMinimapActionBusy.value = false;
+  }
 }
 async function loadPaperProjectionData(force = false) {
   if (!isPaperProfile.value) {
     resetPaperProjectionData();
     return;
   }
-  const { mode, stage } = paperModeStage.value;
-  const key = `${profileSummary.value?.profile_id}:${profileSummary.value?.profile_version}:${readingAnchorLid.value ?? ""}:${mode}:${stage}`;
+  const key = `${profileSummary.value?.profile_id}:${profileSummary.value?.profile_version}:${readingAnchorLid.value ?? ""}`;
   if (!force && paperProjectionKey.value === key) return;
   const seq = ++paperProjectionSeq;
   paperProjectionLoading.value = true;
   paperProjectionError.value = null;
   try {
-    const at = readingAnchorLid.value ?? undefined;
-    const [guide, structure] = await Promise.all([
-      api.paperReadingGuide(mode, stage),
-      api.structure(at),
-    ]);
+    const minimap = await api.paperMinimapState();
     if (seq !== paperProjectionSeq) return;
-    paperGuide.value = guide;
-    structureProjection.value = structure;
+    paperMinimapSnapshot.value = minimap;
+    if (paperMinimapLocalization.value?.base_map_rev !== minimap.base.fingerprint) {
+      const localization = await api.paperMinimapLocalize();
+      if (seq !== paperProjectionSeq) return;
+      if (localization.base_map_rev === minimap.base.fingerprint) {
+        paperMinimapLocalization.value = localization;
+      }
+    }
     paperProjectionKey.value = key;
   } catch (e) {
     if (seq !== paperProjectionSeq) return;
@@ -379,87 +580,34 @@ async function loadPaperProjectionData(force = false) {
     if (seq === paperProjectionSeq) paperProjectionLoading.value = false;
   }
 }
+
+async function togglePaperMinimap() {
+  const snapshot = paperMinimapSnapshot.value;
+  if (!snapshot) return;
+  const presentation = snapshot.state.presentation === "expanded" ? "collapsed" : "expanded";
+  try {
+    await api.paperMinimapApply({
+      base_state_rev: Number(snapshot.state.rev),
+      actor: "user",
+      reason: presentation === "expanded" ? "user expanded paper minimap" : "user collapsed paper minimap",
+      commands: [{
+        scope: "session",
+        action: { kind: "set_presentation", presentation },
+      }],
+    });
+    paperMinimapSnapshot.value = await api.paperMinimapState();
+  } catch (error) {
+    fail(error);
+  }
+}
 watch(
   () => [
     profileSummary.value?.profile_id,
     profileSummary.value?.profile_version,
     readingAnchorLid.value,
-    readerLayout.value?.active_preset,
   ] as const,
   () => { void loadPaperProjectionData(); },
 );
-
-function readableKind(value: string): string {
-  return value.replace(/_/g, " ");
-}
-function evidenceLids(lids: readonly string[] | null | undefined, limit = 4): string[] {
-  return [...new Set((lids ?? []).filter((lid) => !!lid.trim()))].slice(0, limit);
-}
-const paperWarnings = computed(() => {
-  const warnings = [
-    ...(paperGuide.value?.warnings ?? []),
-    ...(paperGuide.value?.codebook.warnings ?? []),
-    paperGuide.value?.abstract_aid.warning,
-    structureProjection.value?.warning,
-  ].filter((warning): warning is string => !!warning);
-  return [...new Set(warnings)];
-});
-const paperStructureRows = computed<PaperEvidenceRow[]>(() => {
-  const rows: PaperEvidenceRow[] = [];
-  const structure = structureProjection.value;
-  if (structure?.spine_unit) {
-    rows.push({
-      id: `spine:${structure.spine_unit.lid}`,
-      lid: structure.spine_unit.lid,
-      title: `Spine · ${readableKind(String(structure.spine_unit.role))}`,
-      summary: structure.spine_unit.summary.text,
-      evidence_lids: evidenceLids(structure.spine_unit.summary.evidence_lids.length ? structure.spine_unit.summary.evidence_lids : [structure.spine_unit.lid]),
-    });
-  }
-  for (const stop of structure?.key_stops ?? []) {
-    rows.push({
-      id: `key:${stop.id}`,
-      lid: stop.lid,
-      title: stop.title ?? readableKind(String(stop.type)),
-      summary: stop.reason.text,
-      evidence_lids: evidenceLids(stop.reason.evidence_lids.length ? stop.reason.evidence_lids : [stop.lid]),
-    });
-  }
-  for (const line of structure?.throughlines ?? []) {
-    rows.push({
-      id: `through:${line.id}`,
-      lid: line.lids[0] ?? readingAnchorLid.value ?? "",
-      title: line.name,
-      summary: line.summary.text,
-      evidence_lids: evidenceLids(line.summary.evidence_lids.length ? line.summary.evidence_lids : line.lids),
-    });
-  }
-  if (!rows.length && paperGuide.value?.codebook.available) {
-    for (const item of [...paperGuide.value.codebook.key_stops, ...paperGuide.value.codebook.throughlines]) {
-      rows.push({
-        id: item.id,
-        lid: item.lid,
-        title: item.title ?? item.id,
-        summary: item.summary,
-        evidence_lids: evidenceLids(item.evidence_lids.length ? item.evidence_lids : [item.lid]),
-      });
-    }
-  }
-  return rows.filter((row) => !!row.lid).slice(0, 7);
-});
-const paperPinnedEvidence = computed(() =>
-  (readerLayout.value?.pinned_evidence ?? []).filter((pin) => pin.slot_id.startsWith("paper.")),
-);
-const paperMinimapPresets = computed(() =>
-  (profileManifest.value?.layout_presets ?? []).map((preset) => ({
-    id: preset.id,
-    title: preset.title,
-    description: preset.description,
-    active: readerLayout.value?.active_preset === preset.id,
-  })),
-);
-const paperQuestionCount = computed(() => paperGuide.value?.questions.length ?? 0);
-const paperLayoutRev = computed(() => readerLayout.value ? layoutRevNumber(readerLayout.value.rev) : null);
 
 // ── 标注:高亮(整段 / 段内 range)+ 笔记 ──
 // 整段高亮(range 缺省)→ <p> 背景;段内 range 高亮 → <mark>(见 renderSeg)`[ADR-0031]`。
@@ -996,11 +1144,11 @@ async function applyReaderState(st: Awaited<ReturnType<typeof api.state>>) {
   readerLayout.value = st.layout;
   await ensureProfileManifest(st.profile);
 }
-async function syncViewport() {
+async function syncViewport(forcePaperProjection = false) {
   const st = await api.state();
   await applyReaderState(st);
   await loadWindow(st.viewport);
-  await loadPaperProjectionData();
+  await loadPaperProjectionData(forcePaperProjection);
 }
 
 // 章节标题:取 anchor 顶层段(LID 首段)原文首行作标签(读位感「第N章…」)。
@@ -1489,6 +1637,9 @@ function codexPluginStateLabel(state: CodexPluginState): string {
   }[state];
 }
 onMounted(init);
+onBeforeUnmount(() => {
+  if (paperPositionSyncTimer !== null) window.clearTimeout(paperPositionSyncTimer);
+});
 
 // ── 四动作 ──
 async function onScrollEdge(direction: "up" | "down") {
@@ -1524,8 +1675,14 @@ async function doGoto(lid: string, focusQuote?: string | null) {
   try {
     banner.value = "";
     sourceFocus.value = focusQuote === undefined ? null : { lid, quote: focusQuote };
-    await loadWindow((await api.goto(lid)).viewport);
-    if (pdfReaderAvailable.value && !pdfLidHasRegion(lid)) {
+    const gotoEffect = await api.goto(lid);
+    await loadWindow(gotoEffect.viewport);
+    queuePaperSelection(lid);
+    if (pdfReaderAvailable.value && shouldOpenPdfSourcePreview(
+      lid,
+      gotoEffect.viewport.top_lid,
+      pdfMappedLids.value,
+    )) {
       await openSourcePreview({ lid, quote: focusQuote ?? null });
     }
     await loadPaperProjectionData();
@@ -1660,6 +1817,7 @@ function onSelectSeg(lid: string) {
   selectedLid.value = lid;
   currentReadingLid.value = lid;
   sourceFocus.value = null;
+  queuePaperSelection(lid);
 }
 
 function onCurrentLid(lid: string) {
@@ -1811,6 +1969,8 @@ function isGoto(e: AgentEffect): boolean {
   return e.kind === "Goto";
 }
 function effLabel(e: AgentEffect): string {
+  if (e.kind === "PaperMinimap") return `论文地图 · ${e.effect.reason}`;
+  if (e.kind === "PaperMinimapProposal") return `论文地图建议 · ${e.proposal.summary}`;
   if (e.kind === "Goto") return `📖 翻到 ${e.after_anchor}`;
   if (e.kind === "Highlight") return `🖍 高亮 ${e.lid}`;
   if (e.kind === "Note") return `📝 笔记 ${e.lid}`;
@@ -1821,20 +1981,23 @@ function gotoBack(e: AgentEffect): string {
   return e.kind === "Goto" ? e.before_anchor : "";
 }
 function effectPrimaryLabel(e: AgentEffect): string {
-  if (e.kind === "LayoutProposal") return "应用";
+  if (e.kind === "LayoutProposal" || e.kind === "PaperMinimapProposal") return "应用";
   if (e.kind === "Highlight" || e.kind === "Note") return "保留";
   return "";
 }
 function effectSecondaryLabel(e: AgentEffect): string {
-  if (e.kind === "LayoutProposal") return "忽略";
+  if (e.kind === "LayoutProposal" || e.kind === "PaperMinimapProposal") return "忽略";
+  if (e.kind === "PaperMinimap") return "撤销";
   if (e.kind === "Highlight" || e.kind === "Note") return "撤销";
   return "";
 }
 function showEffectPrimary(e: AgentEffect): boolean {
-  return e.kind === "Highlight" || e.kind === "Note" || e.kind === "LayoutProposal";
+  return e.kind === "Highlight" || e.kind === "Note" || e.kind === "LayoutProposal"
+    || e.kind === "PaperMinimapProposal";
 }
 function showEffectSecondary(e: AgentEffect): boolean {
-  return e.kind === "Highlight" || e.kind === "Note" || e.kind === "LayoutProposal";
+  return e.kind === "Highlight" || e.kind === "Note" || e.kind === "LayoutProposal"
+    || e.kind === "PaperMinimap" || e.kind === "PaperMinimapProposal";
 }
 async function applyLayoutActions(actions: ReaderLayoutAction[]) {
   const outcome = await api.layoutApply({ actions });
@@ -1856,13 +2019,6 @@ async function applyPendingLayoutProposal(proposal = pendingLayoutProposal.value
   const st = await api.state();
   await applyReaderState(st);
 }
-function dismissPendingLayoutProposal() {
-  pendingLayoutProposal.value = null;
-}
-async function requestLayoutPreset(presetId: string) {
-  await applyLayoutActions([{ kind: "set_layout_preset", preset_id: presetId }]);
-}
-
 async function sendAgent() {
   const msg = agentInput.value.trim();
   if (!msg) return;
@@ -1885,8 +2041,12 @@ async function sendAgent() {
     });
     const proposalEffect = turn.outcome.effects.find((effect) => effect.kind === "LayoutProposal");
     if (proposalEffect?.kind === "LayoutProposal") pendingLayoutProposal.value = proposalEffect.proposal;
+    const minimapEffect = [...turn.outcome.effects]
+      .reverse()
+      .find((effect) => effect.kind === "PaperMinimap");
+    if (minimapEffect?.kind === "PaperMinimap") lastPaperMinimapEffect.value = minimapEffect.effect;
     // agent 可能驱动了共享 reader 视口 / 落了 session 标注 → 同步阅读区。
-    await syncViewport();
+    await syncViewport(true);
     await refreshAgentHistory();
   } catch (e) {
     turn.error = e instanceof ApiError ? `[${e.category}] ${e.errorCode}: ${e.message}` : String(e);
@@ -1908,8 +2068,24 @@ async function undoEffect(ti: number, ei: number, e: AgentEffect) {
       await refreshAnnotations();
     } else if (e.kind === "LayoutProposal") {
       if (pendingLayoutProposal.value?.proposal_id === e.proposal.proposal_id) pendingLayoutProposal.value = null;
+    } else if (e.kind === "PaperMinimap") {
+      const snapshot = paperMinimapSnapshot.value ?? await api.paperMinimapState();
+      await api.paperMinimapApply({
+        base_state_rev: Number(snapshot.state.rev),
+        undo_effect_id: e.effect.effect_id,
+      });
+      if (lastPaperMinimapEffect.value?.effect_id === e.effect.effect_id) lastPaperMinimapEffect.value = null;
+      paperMinimapSnapshot.value = await api.paperMinimapState();
+    } else if (e.kind === "PaperMinimapProposal") {
+      await api.paperMinimapApply({
+        base_state_rev: Number(e.proposal.base_state_rev),
+        base_map_rev: e.proposal.base_map_rev,
+        dismiss_proposal_id: e.proposal.proposal_id,
+      });
     }
-    handled.value[effKey(ti, ei)] = e.kind === "LayoutProposal" ? "已忽略" : "已撤销";
+    handled.value[effKey(ti, ei)] = e.kind === "LayoutProposal" || e.kind === "PaperMinimapProposal"
+      ? "已忽略"
+      : "已撤销";
   } catch (err) {
     fail(err);
   }
@@ -1917,11 +2093,23 @@ async function undoEffect(ti: number, ei: number, e: AgentEffect) {
 
 // 提议「保留」(Highlight/Note):同内容以 long_term 再 save → 同 mem_id upsert 升级层。
 async function keepEffect(ti: number, ei: number, e: AgentEffect) {
+  if (e.kind === "PaperMinimap") return;
   if (e.kind === "Goto" || e.kind === "Layout") return;
   try {
     banner.value = "";
     if (e.kind === "LayoutProposal") {
       await applyPendingLayoutProposal(e.proposal);
+      handled.value[effKey(ti, ei)] = "已应用";
+      return;
+    }
+    if (e.kind === "PaperMinimapProposal") {
+      const outcome = await api.paperMinimapApply({
+        proposal_id: e.proposal.proposal_id,
+        base_map_rev: e.proposal.base_map_rev,
+        base_state_rev: Number(e.proposal.base_state_rev),
+      });
+      if (outcome.kind === "effect") lastPaperMinimapEffect.value = outcome.effect;
+      paperMinimapSnapshot.value = await api.paperMinimapState();
       handled.value[effKey(ti, ei)] = "已应用";
       return;
     }
@@ -2481,21 +2669,19 @@ async function submitOpenBook(dir = bookPickerDir.value) {
         :paper-enabled="isPaperProfile"
         :paper-loading="paperProjectionLoading"
         :paper-error="paperProjectionError"
-        :paper-warnings="paperWarnings"
-        :paper-profile-version="profileManifest?.profile_version ?? null"
-        :paper-layout-rev="paperLayoutRev"
-        :paper-mode="paperModeStage.mode"
-        :paper-stage="paperModeStage.stage"
-        :paper-guide-ready="!!paperGuide?.available"
-        :paper-question-count="paperQuestionCount"
-        :paper-presets="paperMinimapPresets"
-        :paper-rows="paperStructureRows"
-        :paper-pinned-evidence="paperPinnedEvidence"
-        :paper-proposal-summary="pendingLayoutProposal?.summary ?? null"
+        :paper-minimap-base="paperMinimapSnapshot?.base ?? null"
+        :paper-minimap-state="paperMinimapSnapshot?.state ?? null"
+        :paper-minimap-lens="paperMinimapSnapshot?.lens ?? null"
+        :paper-minimap-localization="paperMinimapLocalization"
+        :paper-minimap-effect-reason="lastPaperMinimapEffect?.reason ?? null"
+        :paper-minimap-undo-available="!!lastPaperMinimapEffect"
+        :paper-minimap-action-busy="paperMinimapActionBusy"
         @goto="doGoto"
-        @paper-preset="requestLayoutPreset"
-        @paper-proposal-apply="applyPendingLayoutProposal()"
-        @paper-proposal-dismiss="dismissPendingLayoutProposal"
+        @paper-minimap-toggle="togglePaperMinimap"
+        @paper-minimap-mode="setPaperMinimapMode"
+        @paper-minimap-layer="setPaperMinimapLayer"
+        @paper-minimap-pin="togglePaperMinimapPin"
+        @paper-minimap-undo="undoLastPaperMinimapEffect"
       />
 
       <div
@@ -2515,6 +2701,7 @@ async function submitOpenBook(dir = bookPickerDir.value) {
         :selected-lid="selectedLid"
         @goto="doGoto"
         @select="onSelectSeg"
+        @viewport-change="onPdfViewportChange"
         @focus-source="focusLocalSource"
       />
 

@@ -52,7 +52,10 @@ pub struct RunningServer {
 
 impl RunningServer {
     pub fn set_library_root(&self, library_root: PathBuf) {
-        let mut state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         state.library_root = Some(library_root);
     }
 
@@ -65,7 +68,10 @@ impl RunningServer {
     }
 
     pub fn set_provider_config(&self, config: ProviderConfig) {
-        let mut state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         state.adapter = ProviderRegistry::adapter_from_config(config);
     }
 
@@ -84,18 +90,26 @@ impl RunningServer {
 }
 
 pub fn start_server(config: ServerHostConfig) -> Result<RunningServer, String> {
-    let session_path = MemoryStore::default_path().parent().map(|p| p.join("session.json"));
-    let history_path = MemoryStore::default_path().parent().map(|p| p.join("agent-history.json"));
+    let session_path = MemoryStore::default_path()
+        .parent()
+        .map(|p| p.join("session.json"));
+    let history_path = MemoryStore::default_path()
+        .parent()
+        .map(|p| p.join("agent-history.json"));
     let session = load_session(&session_path);
     let (dir, book, saved_top) = match config.book_dir {
         Some(book_dir) => {
             let requested = book_dir.to_string_lossy().into_owned();
             let (dir, saved_top) = select_start_book(requested, session.as_ref());
-            let book = Book::load(&dir).map_err(|error| format!("failed to load book {dir}: {error}"))?;
+            let book =
+                Book::load(&dir).map_err(|error| format!("failed to load book {dir}: {error}"))?;
             (dir, book, saved_top)
         }
         None => {
-            if let Some(saved) = session.as_ref().filter(|saved| Path::new(&saved.current_book_dir).is_dir()) {
+            if let Some(saved) = session
+                .as_ref()
+                .filter(|saved| Path::new(&saved.current_book_dir).is_dir())
+            {
                 if let Ok(book) = Book::load(&saved.current_book_dir) {
                     let dir = saved.current_book_dir.clone();
                     let top = saved.top_lid_for_dir(&dir).map(str::to_string);
@@ -114,12 +128,15 @@ pub fn start_server(config: ServerHostConfig) -> Result<RunningServer, String> {
     if let Some(top) = saved_top {
         reader.restore_top_lid(&book, &top);
     }
+    crate::restore_saved_paper_minimap_overlay(&mut reader, &book, &session_path)
+        .map_err(|error| format!("failed to restore paper minimap overlay: {}", error.message))?;
     let adapter: Box<dyn ModelAdapter + Send> = match ProviderRegistry::adapter_from_env() {
         Ok(adapter) => adapter,
         Err(_) => Box::new(UnconfiguredAdapter),
     };
     let mut agent_history = load_agent_history(&history_path);
-    let messages = ensure_agent_history_for_book(&mut agent_history, &book.base.book_id, "server-start");
+    let messages =
+        ensure_agent_history_for_book(&mut agent_history, &book.base.book_id, "server-start");
     let state = Arc::new(Mutex::new(AppState {
         book_dir: PathBuf::from(&dir),
         library_root: config.library_root.clone(),
@@ -135,14 +152,22 @@ pub fn start_server(config: ServerHostConfig) -> Result<RunningServer, String> {
         workbench_loaded_revision: None,
     }));
     {
-        let guard = state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let guard = state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if !is_bootstrap_dir(&guard.book_dir) {
             let _ = save_session(&guard, Some(dir.as_str()));
         }
     }
 
-    let server = Arc::new(Server::http(&config.addr).map_err(|error| format!("failed to bind {}: {error}", config.addr))?);
-    let address = server.server_addr().to_ip().ok_or_else(|| "server did not bind an IP address".to_string())?;
+    let server = Arc::new(
+        Server::http(&config.addr)
+            .map_err(|error| format!("failed to bind {}: {error}", config.addr))?,
+    );
+    let address = server
+        .server_addr()
+        .to_ip()
+        .ok_or_else(|| "server did not bind an IP address".to_string())?;
     let url = format!("http://{address}");
     let stop = Arc::new(AtomicBool::new(false));
     let mut handles = Vec::new();
@@ -153,7 +178,9 @@ pub fn start_server(config: ServerHostConfig) -> Result<RunningServer, String> {
         let stop_signal = stop.clone();
         handles.push(thread::spawn(move || {
             while !stop_signal.load(Ordering::Acquire) {
-                let Ok(request) = server.recv_timeout(Duration::from_millis(100)) else { break };
+                let Ok(request) = server.recv_timeout(Duration::from_millis(100)) else {
+                    break;
+                };
                 let Some(mut request) = request else { continue };
                 let method = request.method().to_string();
                 let url = request.url().to_string();
@@ -165,7 +192,9 @@ pub fn start_server(config: ServerHostConfig) -> Result<RunningServer, String> {
                         let api_url = normalize_api_url(&url);
                         if method == "GET" {
                             let asset = {
-                                let guard = state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                                let guard = state
+                                    .lock()
+                                    .unwrap_or_else(|poisoned| poisoned.into_inner());
                                 route_book_asset_file(&guard.book_dir, &api_url)
                             };
                             if let Some(reply) = asset {
@@ -174,8 +203,18 @@ pub fn start_server(config: ServerHostConfig) -> Result<RunningServer, String> {
                             }
                         }
                         let reply = {
-                            let mut guard = state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-                            route(&mut guard, Req { method: &method, url: &api_url, body: &body, now: &now_ts() })
+                            let mut guard = state
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                            route(
+                                &mut guard,
+                                Req {
+                                    method: &method,
+                                    url: &api_url,
+                                    body: &body,
+                                    now: &now_ts(),
+                                },
+                            )
                         };
                         response_from_json(reply.status, reply.body)
                     }
@@ -184,7 +223,12 @@ pub fn start_server(config: ServerHostConfig) -> Result<RunningServer, String> {
             }
         }));
     }
-    Ok(RunningServer { url, stop, handles, state })
+    Ok(RunningServer {
+        url,
+        stop,
+        handles,
+        state,
+    })
 }
 
 fn bootstrap_book(library_root: Option<&Path>) -> Result<(String, Book, Option<String>), String> {
@@ -198,14 +242,19 @@ fn bootstrap_book(library_root: Option<&Path>) -> Result<(String, Book, Option<S
             lid: "1".into(),
             path: vec![1],
             kind: NodeKind::Paragraph,
-            span: Span { start: 0, end: source.encode_utf16().count() },
+            span: Span {
+                start: 0,
+                end: source.encode_utf16().count(),
+            },
             children: Vec::new(),
         }],
         graph_nodes: Vec::new(),
         graph_edges: Vec::new(),
     };
     Ok((
-        root.join("__desktop_bootstrap__").to_string_lossy().into_owned(),
+        root.join("__desktop_bootstrap__")
+            .to_string_lossy()
+            .into_owned(),
         Book::new(base, source),
         None,
     ))
@@ -253,9 +302,17 @@ fn static_response(dist: &Path, method: &str, url: &str) -> Option<StaticReply> 
     }
     let (path, _) = split_url(url);
     let requested = static_path(dist, path)?;
-    let file = if requested.is_file() { requested } else { dist.join("index.html") };
+    let file = if requested.is_file() {
+        requested
+    } else {
+        dist.join("index.html")
+    };
     Some(match std::fs::read(&file) {
-        Ok(body) => StaticReply { status: 200, content_type: mime_for(&file), body },
+        Ok(body) => StaticReply {
+            status: 200,
+            content_type: mime_for(&file),
+            body,
+        },
         Err(_) => StaticReply {
             status: 404,
             content_type: "text/plain; charset=utf-8",
@@ -282,11 +339,17 @@ fn static_path(dist: &Path, path: &str) -> Option<PathBuf> {
 }
 
 fn split_url(url: &str) -> (&str, &str) {
-    url.find('?').map(|index| (&url[..index], &url[index..])).unwrap_or((url, ""))
+    url.find('?')
+        .map(|index| (&url[..index], &url[index..]))
+        .unwrap_or((url, ""))
 }
 
 fn mime_for(path: &Path) -> &'static str {
-    match path.extension().and_then(|value| value.to_str()).unwrap_or("") {
+    match path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("")
+    {
         "html" => "text/html; charset=utf-8",
         "js" | "mjs" => "text/javascript; charset=utf-8",
         "css" => "text/css; charset=utf-8",
@@ -303,18 +366,30 @@ fn mime_for(path: &Path) -> &'static str {
 }
 
 fn response_from_json(status: u16, body: String) -> Response<std::io::Cursor<Vec<u8>>> {
-    let header = Header::from_bytes(&b"Content-Type"[..], &b"application/json; charset=utf-8"[..]).expect("valid content-type header");
-    Response::from_string(body).with_status_code(status).with_header(header)
+    let header = Header::from_bytes(
+        &b"Content-Type"[..],
+        &b"application/json; charset=utf-8"[..],
+    )
+    .expect("valid content-type header");
+    Response::from_string(body)
+        .with_status_code(status)
+        .with_header(header)
 }
 
 fn response_from_static(reply: StaticReply) -> Response<std::io::Cursor<Vec<u8>>> {
-    let header = Header::from_bytes(&b"Content-Type"[..], reply.content_type.as_bytes()).expect("valid content-type header");
-    Response::from_data(reply.body).with_status_code(reply.status).with_header(header)
+    let header = Header::from_bytes(&b"Content-Type"[..], reply.content_type.as_bytes())
+        .expect("valid content-type header");
+    Response::from_data(reply.body)
+        .with_status_code(reply.status)
+        .with_header(header)
 }
 
 fn response_from_binary(reply: crate::BinaryReply) -> Response<std::io::Cursor<Vec<u8>>> {
-    let header = Header::from_bytes(&b"Content-Type"[..], reply.content_type.as_bytes()).expect("valid content-type header");
-    Response::from_data(reply.body).with_status_code(reply.status).with_header(header)
+    let header = Header::from_bytes(&b"Content-Type"[..], reply.content_type.as_bytes())
+        .expect("valid content-type header");
+    Response::from_data(reply.body)
+        .with_status_code(reply.status)
+        .with_header(header)
 }
 
 #[cfg(test)]
@@ -334,8 +409,14 @@ mod tests {
 
     #[test]
     fn api_prefix_is_stripped_before_routing() {
-        assert_eq!(normalize_api_url("/api/book/text?lid=1.1"), "/book/text?lid=1.1");
-        assert_eq!(normalize_api_url("/book/text?lid=1.1"), "/book/text?lid=1.1");
+        assert_eq!(
+            normalize_api_url("/api/book/text?lid=1.1"),
+            "/book/text?lid=1.1"
+        );
+        assert_eq!(
+            normalize_api_url("/book/text?lid=1.1"),
+            "/book/text?lid=1.1"
+        );
     }
 
     #[test]

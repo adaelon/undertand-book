@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Paper Minimap Visual Check</title>
+    <style>
+      html,
+      body,
+      #app {
+        min-width: 320px;
+        min-height: 100%;
+        margin: 0;
+      }
+
+      .visual-shell {
+        display: grid;
+        grid-template-columns: 240px minmax(0, 1fr);
+        width: 100%;
+        min-height: 100vh;
+        background: #e9edf2;
+      }
+
+      .visual-rail {
+        box-sizing: border-box;
+        min-width: 0;
+        padding: 14px;
+        overflow: hidden;
+        border-right: 1px solid #c9d0d8;
+        background: #f7f8fa;
+      }
+
+      .visual-pdf {
+        box-sizing: border-box;
+        min-width: 0;
+        min-height: 100vh;
+        padding: 32px;
+        overflow: auto;
+      }
+
+      .visual-page {
+        box-sizing: border-box;
+        width: min(720px, 100%);
+        min-height: 920px;
+        margin: 0 auto;
+        padding: 64px 72px;
+        color: #20252b;
+        background: #fff;
+        box-shadow: 0 2px 12px rgb(32 37 43 / 12%);
+      }
+
+      @media (max-width: 767px) {
+        .visual-shell {
+          display: block;
+        }
+
+        .visual-rail {
+          width: 0;
+          height: 0;
+          padding: 0;
+          border: 0;
+        }
+
+        .visual-pdf {
+          width: 100%;
+          padding: 16px;
+        }
+
+        .visual-page {
+          min-height: 900px;
+          padding: 44px 28px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/paper-minimap-visual.ts"></script>
+  </body>
+</html>

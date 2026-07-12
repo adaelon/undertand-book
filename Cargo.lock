@@ -2361,6 +2361,8 @@ dependencies = [
  "memory",
  "read-tools",
  "serde",
+ "serde_json",
+ "ts-rs",
 ]
 
 [[package]]

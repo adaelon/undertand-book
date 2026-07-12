@@ -7,12 +7,14 @@
 //! 时间戳由调用方注入(确定性可测,守 A2);错误复用 `ToolError` 信封,禁宽松降级 `[ADR-0015]`。
 use memory::{Anchor, MemoryStore, RecallQuery, SaveInput, TextRange};
 use read_tools::{
-    Book, LayoutRegion, LayoutSize, PinnedEvidence, ProfileManifest, ReaderLayoutAction,
-    ReaderLayoutActionKind, ReaderLayoutApplyOutcome, ReaderLayoutEffect, ReaderLayoutProposal,
-    ReaderLayoutState, ToolError,
+    Book, LayoutRegion, LayoutSize, PaperArgumentSlot, PaperLandmark, PaperLandmarkKind,
+    PaperMinimapAvailabilityStatus, PaperMinimapBase, PaperRegion, PaperRegionKind, PinnedEvidence,
+    ProfileManifest, ReaderLayoutAction, ReaderLayoutActionKind, ReaderLayoutApplyOutcome,
+    ReaderLayoutEffect, ReaderLayoutProposal, ReaderLayoutState, ToolError,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use ts_rs::TS;
 
 /// 叶序滑动窗口半径(占位,实测回填 V3 §4.2「何时回头」):窗口 = anchor ± radius,最多 2*radius+1 叶。
 pub const DEFAULT_WIDTH: usize = 20;
@@ -58,6 +60,564 @@ pub struct ReaderState {
     pub layout: ReaderLayoutState,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub enum PaperMinimapMode {
+    Skim,
+    Abstract,
+    Deep,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub enum PaperMinimapActor {
+    User,
+    Agent,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub enum PaperMinimapPresentation {
+    Collapsed,
+    Expanded,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct PaperViewportPosition {
+    pub start_page: u32,
+    pub end_page: u32,
+    pub center_page: f32,
+    pub progress_ratio: f32,
+    pub anchor_lid: Option<String>,
+    pub region_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct PaperMapFocus {
+    pub region_id: Option<String>,
+    pub landmark_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct PaperLocalProjection {
+    pub region_id: String,
+    pub grammar: PaperRegionKind,
+    pub focus_slots: Vec<PaperArgumentSlot>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct PaperArgumentSlotBinding {
+    pub slot: PaperArgumentSlot,
+    pub landmark_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct PaperAbstractCorrespondence {
+    pub slot: PaperArgumentSlot,
+    pub abstract_landmark_id: String,
+    pub body_landmark_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct PaperMinimapLensProjection {
+    pub mode: PaperMinimapMode,
+    pub focus_region_id: Option<String>,
+    pub global_landmark_ids: Vec<String>,
+    pub local_landmark_ids: Vec<String>,
+    pub relation_ids: Vec<String>,
+    pub slot_bindings: Vec<PaperArgumentSlotBinding>,
+    pub abstract_correspondences: Vec<PaperAbstractCorrespondence>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct MinimapOverlay {
+    pub emphasized_landmark_ids: Vec<String>,
+    pub hidden_landmark_ids: Vec<String>,
+    pub pinned_landmark_ids: Vec<String>,
+    pub focused_region_id: Option<String>,
+    pub focused_landmark_id: Option<String>,
+    pub visible_layers: Vec<String>,
+    pub local_projection: Option<PaperLocalProjection>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub enum UserLandmarkKind {
+    Important,
+    Question,
+    Confusing,
+    FollowUp,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct UserLandmark {
+    pub landmark_id: String,
+    pub label: String,
+    pub anchor_lid: String,
+    pub kind: UserLandmarkKind,
+    pub note: Option<String>,
+    pub created_from_effect: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub enum UserLandmarkOverrideOperation {
+    Hide,
+    Deemphasize,
+    Rename,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct UserLandmarkOverride {
+    pub target_landmark_id: String,
+    pub operation: UserLandmarkOverrideOperation,
+    pub label: Option<String>,
+    pub user_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct PaperMinimapSavedModePreference {
+    pub mode: PaperMinimapMode,
+    pub visible_layers: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct SavedUserOverlay {
+    pub book_id: String,
+    pub book_version: String,
+    pub overlay_rev: u64,
+    pub emphasized_kinds: Vec<PaperLandmarkKind>,
+    pub hidden_landmark_ids: Vec<String>,
+    pub pinned_landmark_ids: Vec<String>,
+    pub custom_landmarks: Vec<UserLandmark>,
+    pub landmark_overrides: Vec<UserLandmarkOverride>,
+    pub saved_mode_preferences: Vec<PaperMinimapSavedModePreference>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct ReaderPaperMinimapState {
+    pub rev: u64,
+    pub base_map_rev: String,
+    pub presentation: PaperMinimapPresentation,
+    pub mode: PaperMinimapMode,
+    pub viewport_position: PaperViewportPosition,
+    pub selected_lid: Option<String>,
+    pub map_focus: Option<PaperMapFocus>,
+    pub session_overlay: MinimapOverlay,
+    pub saved_user_overlay: SavedUserOverlay,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, TS)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub enum PaperMinimapAction {
+    SetPresentation {
+        presentation: PaperMinimapPresentation,
+    },
+    UpdateViewport {
+        position: PaperViewportPosition,
+    },
+    SetSelectedLid {
+        selected_lid: Option<String>,
+    },
+    FocusRegion {
+        region_id: String,
+    },
+    FocusLandmark {
+        landmark_id: String,
+    },
+    EmphasizeLandmarks {
+        landmark_ids: Vec<String>,
+        reason: String,
+    },
+    SelectLocalProjection {
+        region_id: String,
+        grammar: PaperRegionKind,
+        focus_slots: Vec<PaperArgumentSlot>,
+    },
+    SetLayerVisibility {
+        layer: String,
+        visible: bool,
+    },
+    PinLandmark {
+        landmark_id: String,
+    },
+    UnpinLandmark {
+        landmark_id: String,
+    },
+    SetModeLens {
+        mode: PaperMinimapMode,
+    },
+    ClearSessionOverlay {},
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, TS)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub enum SavedUserOverlayAction {
+    SaveUserLandmark {
+        anchor_lid: String,
+        label: String,
+        user_kind: UserLandmarkKind,
+        note: Option<String>,
+    },
+    RemoveUserLandmark {
+        landmark_id: String,
+    },
+    SetLandmarkOverride {
+        target_landmark_id: String,
+        operation: UserLandmarkOverrideOperation,
+        label: Option<String>,
+        user_reason: Option<String>,
+    },
+    RemoveLandmarkOverride {
+        target_landmark_id: String,
+    },
+    SaveModePreference {
+        mode: PaperMinimapMode,
+        visible_layers: Vec<String>,
+    },
+    ClearSavedOverlay {},
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, TS)]
+#[serde(tag = "scope", content = "action", rename_all = "snake_case")]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub enum PaperMinimapCommand {
+    Session(PaperMinimapAction),
+    Saved(SavedUserOverlayAction),
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct PaperMinimapEffect {
+    pub effect_id: String,
+    pub base_map_rev: String,
+    pub before_state_rev: u64,
+    pub after_state_rev: u64,
+    pub trigger_turn_id: Option<String>,
+    pub actions: Vec<PaperMinimapCommand>,
+    pub reason: String,
+    pub evidence_lids: Vec<String>,
+    pub created_at: String,
+    pub before: ReaderPaperMinimapState,
+    pub after: ReaderPaperMinimapState,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct PaperMinimapProposal {
+    pub proposal_id: String,
+    pub base_map_rev: String,
+    pub base_state_rev: u64,
+    pub actions: Vec<PaperMinimapCommand>,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, TS)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub enum PaperMinimapApplyOutcome {
+    Effect { effect: PaperMinimapEffect },
+    Proposal { proposal: PaperMinimapProposal },
+    Noop { state: ReaderPaperMinimapState },
+}
+
+const MINIMAP_GLOBAL_LANDMARK_BUDGET: usize = 5;
+const MINIMAP_LOCAL_LANDMARK_BUDGET: usize = 4;
+const MINIMAP_RELATION_BUDGET: usize = 3;
+const MINIMAP_ABSTRACT_CORRESPONDENCE_BUDGET: usize = 3;
+
+fn minimap_landmark_priority(kind: &PaperLandmarkKind) -> usize {
+    match kind {
+        PaperLandmarkKind::ResearchQuestion => 0,
+        PaperLandmarkKind::Method => 1,
+        PaperLandmarkKind::Evidence => 2,
+        PaperLandmarkKind::Result => 3,
+        PaperLandmarkKind::Contribution => 4,
+        PaperLandmarkKind::Claim => 5,
+        PaperLandmarkKind::Limitation => 6,
+        PaperLandmarkKind::Hypothesis => 7,
+        PaperLandmarkKind::Experiment => 8,
+        PaperLandmarkKind::FutureWork => 9,
+        PaperLandmarkKind::RelatedWork => 10,
+        PaperLandmarkKind::Other => 11,
+    }
+}
+
+fn minimap_slot_for_landmark(
+    region_kind: &PaperRegionKind,
+    landmark_kind: &PaperLandmarkKind,
+) -> Option<PaperArgumentSlot> {
+    match region_kind {
+        PaperRegionKind::Abstract => match landmark_kind {
+            PaperLandmarkKind::ResearchQuestion => Some(PaperArgumentSlot::ResearchQuestion),
+            PaperLandmarkKind::Method => Some(PaperArgumentSlot::Method),
+            PaperLandmarkKind::Result => Some(PaperArgumentSlot::Result),
+            PaperLandmarkKind::Contribution => Some(PaperArgumentSlot::Contribution),
+            _ => None,
+        },
+        PaperRegionKind::Introduction => match landmark_kind {
+            PaperLandmarkKind::ResearchQuestion => Some(PaperArgumentSlot::ResearchQuestion),
+            PaperLandmarkKind::Hypothesis => Some(PaperArgumentSlot::Hypothesis),
+            _ => None,
+        },
+        PaperRegionKind::Method => match landmark_kind {
+            PaperLandmarkKind::Method => Some(PaperArgumentSlot::Method),
+            _ => None,
+        },
+        PaperRegionKind::Results => match landmark_kind {
+            PaperLandmarkKind::Experiment => Some(PaperArgumentSlot::Experiment),
+            PaperLandmarkKind::Evidence => Some(PaperArgumentSlot::Evidence),
+            PaperLandmarkKind::Result => Some(PaperArgumentSlot::Result),
+            PaperLandmarkKind::Claim => Some(PaperArgumentSlot::Claim),
+            _ => None,
+        },
+        PaperRegionKind::Discussion => match landmark_kind {
+            PaperLandmarkKind::Claim => Some(PaperArgumentSlot::Claim),
+            PaperLandmarkKind::Result => Some(PaperArgumentSlot::Result),
+            PaperLandmarkKind::Limitation => Some(PaperArgumentSlot::Limitation),
+            PaperLandmarkKind::FutureWork => Some(PaperArgumentSlot::FutureWork),
+            _ => None,
+        },
+        PaperRegionKind::Conclusion => match landmark_kind {
+            PaperLandmarkKind::ResearchQuestion => Some(PaperArgumentSlot::ResearchQuestion),
+            PaperLandmarkKind::Contribution => Some(PaperArgumentSlot::Contribution),
+            PaperLandmarkKind::Claim => Some(PaperArgumentSlot::Claim),
+            PaperLandmarkKind::Limitation => Some(PaperArgumentSlot::Limitation),
+            _ => None,
+        },
+        PaperRegionKind::RelatedWork => match landmark_kind {
+            PaperLandmarkKind::RelatedWork => Some(PaperArgumentSlot::Background),
+            PaperLandmarkKind::Claim => Some(PaperArgumentSlot::Claim),
+            _ => None,
+        },
+        PaperRegionKind::Unknown | PaperRegionKind::References => None,
+    }
+}
+
+fn minimap_slot_priority(slot: &PaperArgumentSlot) -> usize {
+    match slot {
+        PaperArgumentSlot::Background => 0,
+        PaperArgumentSlot::ResearchGap => 1,
+        PaperArgumentSlot::ResearchQuestion => 2,
+        PaperArgumentSlot::Hypothesis => 3,
+        PaperArgumentSlot::Input => 4,
+        PaperArgumentSlot::Object => 5,
+        PaperArgumentSlot::MethodStep => 6,
+        PaperArgumentSlot::Method => 7,
+        PaperArgumentSlot::Output => 8,
+        PaperArgumentSlot::Assumption => 9,
+        PaperArgumentSlot::Experiment => 10,
+        PaperArgumentSlot::Evidence => 11,
+        PaperArgumentSlot::Result => 12,
+        PaperArgumentSlot::Claim => 13,
+        PaperArgumentSlot::Contribution => 14,
+        PaperArgumentSlot::Interpretation => 15,
+        PaperArgumentSlot::Limitation => 16,
+        PaperArgumentSlot::FutureWork => 17,
+    }
+}
+
+fn minimap_region_contains(region: &PaperRegion, landmark: &PaperLandmark) -> bool {
+    landmark.page_index >= region.page_span.start_page
+        && landmark.page_index <= region.page_span.end_page
+}
+
+/// Applies a deterministic mode lens to immutable base IDs. It never creates map facts.
+pub fn project_paper_minimap_lens(
+    base: &PaperMinimapBase,
+    mode: PaperMinimapMode,
+    requested_focus_region_id: Option<&str>,
+) -> Result<PaperMinimapLensProjection, ToolError> {
+    if base.status == PaperMinimapAvailabilityStatus::Unavailable {
+        return Err(ToolError {
+            error_code: "PAPER_MINIMAP_UNAVAILABLE".into(),
+            category: "unavailable".into(),
+            message: "paper minimap topology is unavailable".into(),
+        });
+    }
+    let mut warnings = Vec::new();
+    let requested_region = requested_focus_region_id
+        .map(|region_id| {
+            base.regions
+                .iter()
+                .find(|region| region.region_id == region_id)
+                .ok_or_else(|| ToolError {
+                    error_code: "PAPER_MINIMAP_REGION_NOT_FOUND".into(),
+                    category: "not_found".into(),
+                    message: format!("paper minimap region does not exist: {region_id}"),
+                })
+        })
+        .transpose()?;
+    let focus_region = match mode {
+        PaperMinimapMode::Skim => None,
+        PaperMinimapMode::Abstract => {
+            let abstract_region = base
+                .regions
+                .iter()
+                .find(|region| region.kind == PaperRegionKind::Abstract);
+            if abstract_region.is_none() {
+                warnings.push("paper minimap has no abstract region".into());
+            }
+            abstract_region
+        }
+        PaperMinimapMode::Deep => {
+            if requested_region.is_none() {
+                warnings.push("deep minimap lens requires an explicit focus region".into());
+            }
+            requested_region
+        }
+    };
+
+    let mut global_landmarks: Vec<&PaperLandmark> = base.landmarks.iter().collect();
+    global_landmarks.sort_by(|left, right| {
+        minimap_landmark_priority(&left.kind)
+            .cmp(&minimap_landmark_priority(&right.kind))
+            .then_with(|| left.page_index.cmp(&right.page_index))
+            .then_with(|| left.anchor_lid.cmp(&right.anchor_lid))
+            .then_with(|| left.landmark_id.cmp(&right.landmark_id))
+    });
+    let global_landmark_ids: Vec<String> = global_landmarks
+        .into_iter()
+        .take(MINIMAP_GLOBAL_LANDMARK_BUDGET)
+        .map(|landmark| landmark.landmark_id.clone())
+        .collect();
+
+    let mut local_candidates: Vec<(&PaperLandmark, PaperArgumentSlot)> = focus_region
+        .map(|region| {
+            base.landmarks
+                .iter()
+                .filter(|landmark| minimap_region_contains(region, landmark))
+                .filter_map(|landmark| {
+                    minimap_slot_for_landmark(&region.kind, &landmark.kind)
+                        .map(|slot| (landmark, slot))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    local_candidates.sort_by(|(left_landmark, left_slot), (right_landmark, right_slot)| {
+        minimap_slot_priority(left_slot)
+            .cmp(&minimap_slot_priority(right_slot))
+            .then_with(|| left_landmark.page_index.cmp(&right_landmark.page_index))
+            .then_with(|| left_landmark.anchor_lid.cmp(&right_landmark.anchor_lid))
+            .then_with(|| left_landmark.landmark_id.cmp(&right_landmark.landmark_id))
+    });
+    let mut used_slots = Vec::new();
+    let mut local_landmark_ids = Vec::new();
+    let mut slot_bindings = Vec::new();
+    for (landmark, slot) in local_candidates {
+        if used_slots.iter().any(|used| used == &slot) {
+            continue;
+        }
+        used_slots.push(slot.clone());
+        local_landmark_ids.push(landmark.landmark_id.clone());
+        slot_bindings.push(PaperArgumentSlotBinding {
+            slot,
+            landmark_id: landmark.landmark_id.clone(),
+        });
+        if local_landmark_ids.len() == MINIMAP_LOCAL_LANDMARK_BUDGET {
+            break;
+        }
+    }
+
+    let visible_landmark_ids: HashSet<&str> = global_landmark_ids
+        .iter()
+        .chain(local_landmark_ids.iter())
+        .map(String::as_str)
+        .collect();
+    let local_relations_allowed = focus_region
+        .map(|region| {
+            !matches!(
+                region.kind,
+                PaperRegionKind::Unknown | PaperRegionKind::References
+            )
+        })
+        .unwrap_or(true);
+    let mut relation_ids: Vec<String> = if local_relations_allowed {
+        base.relations
+            .iter()
+            .filter(|relation| {
+                visible_landmark_ids.contains(relation.source_landmark_id.as_str())
+                    && visible_landmark_ids.contains(relation.target_landmark_id.as_str())
+            })
+            .map(|relation| relation.relation_id.clone())
+            .collect()
+    } else {
+        Vec::new()
+    };
+    relation_ids.sort();
+    relation_ids.truncate(MINIMAP_RELATION_BUDGET);
+
+    let mut abstract_correspondences = Vec::new();
+    if mode == PaperMinimapMode::Abstract {
+        if let Some(abstract_region) = focus_region {
+            for binding in &slot_bindings {
+                let Some(abstract_landmark) = base
+                    .landmarks
+                    .iter()
+                    .find(|landmark| landmark.landmark_id == binding.landmark_id)
+                else {
+                    continue;
+                };
+                let mut body_matches: Vec<&PaperLandmark> = base
+                    .landmarks
+                    .iter()
+                    .filter(|landmark| {
+                        landmark.kind == abstract_landmark.kind
+                            && !minimap_region_contains(abstract_region, landmark)
+                    })
+                    .collect();
+                body_matches.sort_by(|left, right| {
+                    left.page_index
+                        .cmp(&right.page_index)
+                        .then_with(|| left.anchor_lid.cmp(&right.anchor_lid))
+                        .then_with(|| left.landmark_id.cmp(&right.landmark_id))
+                });
+                if let Some(body_landmark) = body_matches.first() {
+                    abstract_correspondences.push(PaperAbstractCorrespondence {
+                        slot: binding.slot.clone(),
+                        abstract_landmark_id: binding.landmark_id.clone(),
+                        body_landmark_id: body_landmark.landmark_id.clone(),
+                    });
+                }
+                if abstract_correspondences.len() == MINIMAP_ABSTRACT_CORRESPONDENCE_BUDGET {
+                    break;
+                }
+            }
+        }
+    }
+
+    Ok(PaperMinimapLensProjection {
+        mode,
+        focus_region_id: focus_region.map(|region| region.region_id.clone()),
+        global_landmark_ids,
+        local_landmark_ids,
+        relation_ids,
+        slot_bindings,
+        abstract_correspondences,
+        warnings,
+    })
+}
+
 /// 命令优先阅读器(headless,有状态会话态)。不拥有 Book/MemoryStore(调用方注入),
 /// 标注不归 reader 持有(归记忆层),reader 只持视口/选区会话态。
 pub struct Reader {
@@ -74,6 +634,11 @@ pub struct Reader {
     /// 高风险 layout proposals,绑定 base layout rev,Apply 时复验。
     layout_proposals: HashMap<String, ReaderLayoutProposal>,
     layout_proposal_seq: u64,
+    paper_minimap: ReaderPaperMinimapState,
+    paper_minimap_proposals: HashMap<String, PaperMinimapProposal>,
+    paper_minimap_effects: HashMap<String, PaperMinimapEffect>,
+    paper_minimap_proposal_seq: u64,
+    paper_minimap_effect_seq: u64,
 }
 
 fn region_key(region: &LayoutRegion) -> String {
@@ -236,6 +801,575 @@ fn remove_slot_from_order(state: &mut ReaderLayoutState, slot_id: &str) {
     for slots in state.slot_order.values_mut() {
         slots.retain(|id| id != slot_id);
     }
+}
+
+fn default_minimap_overlay() -> MinimapOverlay {
+    MinimapOverlay {
+        emphasized_landmark_ids: Vec::new(),
+        hidden_landmark_ids: Vec::new(),
+        pinned_landmark_ids: Vec::new(),
+        focused_region_id: None,
+        focused_landmark_id: None,
+        visible_layers: vec!["regions".into(), "landmarks".into(), "arguments".into()],
+        local_projection: None,
+    }
+}
+
+fn default_paper_minimap_state(book: &Book) -> ReaderPaperMinimapState {
+    let base = book.paper_minimap();
+    let first_region = base.regions.first();
+    let start_page = first_region
+        .map(|region| region.page_span.start_page)
+        .unwrap_or(0);
+    ReaderPaperMinimapState {
+        rev: 0,
+        base_map_rev: base.fingerprint,
+        presentation: PaperMinimapPresentation::Collapsed,
+        mode: PaperMinimapMode::Skim,
+        viewport_position: PaperViewportPosition {
+            start_page,
+            end_page: start_page,
+            center_page: start_page as f32,
+            progress_ratio: 0.0,
+            anchor_lid: book
+                .base
+                .lid_nodes
+                .iter()
+                .find(|node| node.children.is_empty())
+                .map(|node| node.lid.clone()),
+            region_id: first_region.map(|region| region.region_id.clone()),
+        },
+        selected_lid: None,
+        map_focus: None,
+        session_overlay: default_minimap_overlay(),
+        saved_user_overlay: SavedUserOverlay {
+            book_id: base.book_id,
+            book_version: base.book_version,
+            overlay_rev: 0,
+            emphasized_kinds: Vec::new(),
+            hidden_landmark_ids: Vec::new(),
+            pinned_landmark_ids: Vec::new(),
+            custom_landmarks: Vec::new(),
+            landmark_overrides: Vec::new(),
+            saved_mode_preferences: Vec::new(),
+        },
+    }
+}
+
+fn minimap_error(code: &str, category: &str, message: impl Into<String>) -> ToolError {
+    ToolError {
+        error_code: code.into(),
+        category: category.into(),
+        message: message.into(),
+    }
+}
+
+fn minimap_region<'a>(
+    base: &'a PaperMinimapBase,
+    region_id: &str,
+) -> Result<&'a PaperRegion, ToolError> {
+    base.regions
+        .iter()
+        .find(|region| region.region_id == region_id)
+        .ok_or_else(|| {
+            minimap_error(
+                "PAPER_MINIMAP_REGION_NOT_FOUND",
+                "not_found",
+                format!("paper minimap region does not exist: {region_id}"),
+            )
+        })
+}
+
+fn require_minimap_landmark(base: &PaperMinimapBase, landmark_id: &str) -> Result<(), ToolError> {
+    if base
+        .landmarks
+        .iter()
+        .any(|landmark| landmark.landmark_id == landmark_id)
+    {
+        Ok(())
+    } else {
+        Err(minimap_error(
+            "PAPER_MINIMAP_LANDMARK_NOT_FOUND",
+            "not_found",
+            format!("paper minimap landmark does not exist: {landmark_id}"),
+        ))
+    }
+}
+
+fn allowed_minimap_slots(kind: &PaperRegionKind) -> Vec<PaperArgumentSlot> {
+    let candidates = [
+        PaperArgumentSlot::Background,
+        PaperArgumentSlot::ResearchGap,
+        PaperArgumentSlot::ResearchQuestion,
+        PaperArgumentSlot::Hypothesis,
+        PaperArgumentSlot::Input,
+        PaperArgumentSlot::Object,
+        PaperArgumentSlot::MethodStep,
+        PaperArgumentSlot::Method,
+        PaperArgumentSlot::Output,
+        PaperArgumentSlot::Assumption,
+        PaperArgumentSlot::Experiment,
+        PaperArgumentSlot::Evidence,
+        PaperArgumentSlot::Result,
+        PaperArgumentSlot::Claim,
+        PaperArgumentSlot::Contribution,
+        PaperArgumentSlot::Interpretation,
+        PaperArgumentSlot::Limitation,
+        PaperArgumentSlot::FutureWork,
+    ];
+    candidates
+        .into_iter()
+        .filter(|slot| match kind {
+            PaperRegionKind::Abstract => matches!(
+                slot,
+                PaperArgumentSlot::ResearchQuestion
+                    | PaperArgumentSlot::Method
+                    | PaperArgumentSlot::Result
+                    | PaperArgumentSlot::Contribution
+            ),
+            PaperRegionKind::Introduction => matches!(
+                slot,
+                PaperArgumentSlot::Background
+                    | PaperArgumentSlot::ResearchGap
+                    | PaperArgumentSlot::ResearchQuestion
+                    | PaperArgumentSlot::Hypothesis
+            ),
+            PaperRegionKind::Method => matches!(
+                slot,
+                PaperArgumentSlot::Input
+                    | PaperArgumentSlot::Object
+                    | PaperArgumentSlot::MethodStep
+                    | PaperArgumentSlot::Output
+                    | PaperArgumentSlot::Assumption
+                    | PaperArgumentSlot::Method
+            ),
+            PaperRegionKind::Results => matches!(
+                slot,
+                PaperArgumentSlot::Experiment
+                    | PaperArgumentSlot::Evidence
+                    | PaperArgumentSlot::Result
+                    | PaperArgumentSlot::Claim
+            ),
+            PaperRegionKind::Discussion => matches!(
+                slot,
+                PaperArgumentSlot::Claim
+                    | PaperArgumentSlot::Result
+                    | PaperArgumentSlot::Interpretation
+                    | PaperArgumentSlot::Limitation
+                    | PaperArgumentSlot::FutureWork
+            ),
+            PaperRegionKind::Conclusion => matches!(
+                slot,
+                PaperArgumentSlot::ResearchQuestion
+                    | PaperArgumentSlot::Contribution
+                    | PaperArgumentSlot::Claim
+                    | PaperArgumentSlot::Limitation
+            ),
+            PaperRegionKind::RelatedWork => {
+                matches!(
+                    slot,
+                    PaperArgumentSlot::Background | PaperArgumentSlot::Claim
+                )
+            }
+            PaperRegionKind::Unknown | PaperRegionKind::References => false,
+        })
+        .collect()
+}
+
+fn minimap_commands_require_proposal(
+    actor: &PaperMinimapActor,
+    commands: &[PaperMinimapCommand],
+) -> bool {
+    commands.iter().any(|command| match command {
+        PaperMinimapCommand::Saved(_) => true,
+        PaperMinimapCommand::Session(PaperMinimapAction::SetModeLens { .. }) => {
+            actor == &PaperMinimapActor::Agent
+        }
+        _ => false,
+    })
+}
+
+fn apply_minimap_session_action(
+    book: &Book,
+    base: &PaperMinimapBase,
+    state: &mut ReaderPaperMinimapState,
+    actor: &PaperMinimapActor,
+    action: &PaperMinimapAction,
+) -> Result<(), ToolError> {
+    match action {
+        PaperMinimapAction::SetPresentation { presentation } => {
+            if actor == &PaperMinimapActor::Agent {
+                return Err(minimap_error(
+                    "PAPER_MINIMAP_ACTION_FORBIDDEN",
+                    "permission",
+                    "agent cannot change minimap presentation",
+                ));
+            }
+            state.presentation = presentation.clone();
+        }
+        PaperMinimapAction::UpdateViewport { position } => {
+            if actor == &PaperMinimapActor::Agent {
+                return Err(minimap_error(
+                    "PAPER_MINIMAP_ACTION_FORBIDDEN",
+                    "permission",
+                    "agent cannot update the deterministic PDF viewport",
+                ));
+            }
+            let first_page = base
+                .regions
+                .iter()
+                .map(|region| region.page_span.start_page)
+                .min()
+                .ok_or_else(|| {
+                    minimap_error(
+                        "INVALID_PAPER_MINIMAP_VIEWPORT",
+                        "validation",
+                        "paper minimap viewport requires base regions",
+                    )
+                })?;
+            let last_page = base
+                .regions
+                .iter()
+                .map(|region| region.page_span.end_page)
+                .max()
+                .unwrap_or(first_page);
+            if position.start_page > position.end_page
+                || position.start_page < first_page
+                || position.end_page > last_page
+                || !position.center_page.is_finite()
+                || position.center_page < position.start_page as f32
+                || position.center_page > position.end_page.saturating_add(1) as f32
+                || !position.progress_ratio.is_finite()
+                || !(0.0..=1.0).contains(&position.progress_ratio)
+            {
+                return Err(minimap_error(
+                    "INVALID_PAPER_MINIMAP_VIEWPORT",
+                    "validation",
+                    "paper minimap viewport is outside the trusted PDF page bounds",
+                ));
+            }
+            if let Some(anchor_lid) = &position.anchor_lid {
+                if !book
+                    .base
+                    .lid_nodes
+                    .iter()
+                    .any(|node| node.lid == *anchor_lid)
+                {
+                    return Err(minimap_error(
+                        "PAPER_MINIMAP_LID_NOT_FOUND",
+                        "not_found",
+                        format!("paper minimap viewport LID does not exist: {anchor_lid}"),
+                    ));
+                }
+            }
+            if let Some(region_id) = &position.region_id {
+                let region = minimap_region(base, region_id)?;
+                let center_page = position.center_page.floor() as u32;
+                if center_page < region.page_span.start_page
+                    || center_page > region.page_span.end_page
+                {
+                    return Err(minimap_error(
+                        "INVALID_PAPER_MINIMAP_VIEWPORT",
+                        "validation",
+                        "paper minimap viewport region does not contain its center page",
+                    ));
+                }
+            }
+            state.viewport_position = position.clone();
+        }
+        PaperMinimapAction::SetSelectedLid { selected_lid } => {
+            if actor == &PaperMinimapActor::Agent {
+                return Err(minimap_error(
+                    "PAPER_MINIMAP_ACTION_FORBIDDEN",
+                    "permission",
+                    "agent cannot change the reader selection",
+                ));
+            }
+            if let Some(lid) = selected_lid {
+                if !book.base.lid_nodes.iter().any(|node| node.lid == *lid) {
+                    return Err(minimap_error(
+                        "PAPER_MINIMAP_LID_NOT_FOUND",
+                        "not_found",
+                        format!("paper minimap selected LID does not exist: {lid}"),
+                    ));
+                }
+            }
+            state.selected_lid = selected_lid.clone();
+        }
+        PaperMinimapAction::FocusRegion { region_id } => {
+            minimap_region(base, region_id)?;
+            state.map_focus = Some(PaperMapFocus {
+                region_id: Some(region_id.clone()),
+                landmark_id: None,
+            });
+            state.session_overlay.focused_region_id = Some(region_id.clone());
+            state.session_overlay.focused_landmark_id = None;
+        }
+        PaperMinimapAction::FocusLandmark { landmark_id } => {
+            require_minimap_landmark(base, landmark_id)?;
+            state.map_focus = Some(PaperMapFocus {
+                region_id: None,
+                landmark_id: Some(landmark_id.clone()),
+            });
+            state.session_overlay.focused_region_id = None;
+            state.session_overlay.focused_landmark_id = Some(landmark_id.clone());
+        }
+        PaperMinimapAction::EmphasizeLandmarks {
+            landmark_ids,
+            reason,
+        } => {
+            if reason.trim().is_empty() || landmark_ids.len() > MINIMAP_GLOBAL_LANDMARK_BUDGET {
+                return Err(minimap_error(
+                    "INVALID_PAPER_MINIMAP_ACTION",
+                    "validation",
+                    "emphasis requires a reason and at most five landmarks",
+                ));
+            }
+            let mut unique = Vec::new();
+            for landmark_id in landmark_ids {
+                require_minimap_landmark(base, landmark_id)?;
+                if !unique.iter().any(|own| own == landmark_id) {
+                    unique.push(landmark_id.clone());
+                }
+            }
+            state.session_overlay.emphasized_landmark_ids = unique;
+        }
+        PaperMinimapAction::SelectLocalProjection {
+            region_id,
+            grammar,
+            focus_slots,
+        } => {
+            let region = minimap_region(base, region_id)?;
+            if &region.kind != grammar || focus_slots.len() > MINIMAP_LOCAL_LANDMARK_BUDGET {
+                return Err(minimap_error(
+                    "INVALID_PAPER_MINIMAP_GRAMMAR",
+                    "validation",
+                    "local projection grammar or budget does not match the region",
+                ));
+            }
+            let allowed = allowed_minimap_slots(grammar);
+            let mut unique = Vec::new();
+            for slot in focus_slots {
+                if !allowed.contains(slot) || unique.contains(slot) {
+                    return Err(minimap_error(
+                        "INVALID_PAPER_MINIMAP_GRAMMAR",
+                        "validation",
+                        "local projection contains an invalid or duplicate slot",
+                    ));
+                }
+                unique.push(slot.clone());
+            }
+            state.session_overlay.local_projection = Some(PaperLocalProjection {
+                region_id: region_id.clone(),
+                grammar: grammar.clone(),
+                focus_slots: unique,
+            });
+        }
+        PaperMinimapAction::SetLayerVisibility { layer, visible } => {
+            if !matches!(
+                layer.as_str(),
+                "regions" | "landmarks" | "arguments" | "user"
+            ) {
+                return Err(minimap_error(
+                    "INVALID_PAPER_MINIMAP_LAYER",
+                    "validation",
+                    format!("unknown paper minimap layer: {layer}"),
+                ));
+            }
+            state
+                .session_overlay
+                .visible_layers
+                .retain(|existing| existing != layer);
+            if *visible {
+                state.session_overlay.visible_layers.push(layer.clone());
+                state.session_overlay.visible_layers.sort();
+            }
+        }
+        PaperMinimapAction::PinLandmark { landmark_id } => {
+            require_minimap_landmark(base, landmark_id)?;
+            if !state
+                .session_overlay
+                .pinned_landmark_ids
+                .iter()
+                .any(|existing| existing == landmark_id)
+            {
+                state
+                    .session_overlay
+                    .pinned_landmark_ids
+                    .push(landmark_id.clone());
+            }
+        }
+        PaperMinimapAction::UnpinLandmark { landmark_id } => {
+            require_minimap_landmark(base, landmark_id)?;
+            state
+                .session_overlay
+                .pinned_landmark_ids
+                .retain(|existing| existing != landmark_id);
+        }
+        PaperMinimapAction::SetModeLens { mode } => state.mode = mode.clone(),
+        PaperMinimapAction::ClearSessionOverlay {} => {
+            state.session_overlay = default_minimap_overlay();
+            state.map_focus = None;
+        }
+    }
+    Ok(())
+}
+
+fn apply_minimap_saved_action(
+    book: &Book,
+    base: &PaperMinimapBase,
+    state: &mut ReaderPaperMinimapState,
+    action: &SavedUserOverlayAction,
+) -> Result<(), ToolError> {
+    match action {
+        SavedUserOverlayAction::SaveUserLandmark {
+            anchor_lid,
+            label,
+            user_kind,
+            note,
+        } => {
+            if label.trim().is_empty()
+                || !book
+                    .base
+                    .lid_nodes
+                    .iter()
+                    .any(|node| node.lid == *anchor_lid)
+            {
+                return Err(minimap_error(
+                    "INVALID_SAVED_PAPER_MINIMAP_ACTION",
+                    "validation",
+                    "saved user landmark requires a valid LID and non-empty label",
+                ));
+            }
+            let landmark_id = format!(
+                "user-landmark:{}:{}",
+                state.saved_user_overlay.overlay_rev + 1,
+                state.saved_user_overlay.custom_landmarks.len() + 1
+            );
+            state
+                .saved_user_overlay
+                .custom_landmarks
+                .push(UserLandmark {
+                    landmark_id,
+                    label: label.trim().into(),
+                    anchor_lid: anchor_lid.clone(),
+                    kind: user_kind.clone(),
+                    note: note.clone(),
+                    created_from_effect: None,
+                });
+        }
+        SavedUserOverlayAction::RemoveUserLandmark { landmark_id } => {
+            state
+                .saved_user_overlay
+                .custom_landmarks
+                .retain(|landmark| landmark.landmark_id != *landmark_id);
+        }
+        SavedUserOverlayAction::SetLandmarkOverride {
+            target_landmark_id,
+            operation,
+            label,
+            user_reason,
+        } => {
+            require_minimap_landmark(base, target_landmark_id)?;
+            if operation == &UserLandmarkOverrideOperation::Rename
+                && label.as_deref().is_none_or(|value| value.trim().is_empty())
+            {
+                return Err(minimap_error(
+                    "INVALID_SAVED_PAPER_MINIMAP_ACTION",
+                    "validation",
+                    "rename override requires a non-empty label",
+                ));
+            }
+            state
+                .saved_user_overlay
+                .landmark_overrides
+                .retain(|item| item.target_landmark_id != *target_landmark_id);
+            state
+                .saved_user_overlay
+                .landmark_overrides
+                .push(UserLandmarkOverride {
+                    target_landmark_id: target_landmark_id.clone(),
+                    operation: operation.clone(),
+                    label: label.clone(),
+                    user_reason: user_reason.clone(),
+                });
+        }
+        SavedUserOverlayAction::RemoveLandmarkOverride { target_landmark_id } => {
+            state
+                .saved_user_overlay
+                .landmark_overrides
+                .retain(|item| item.target_landmark_id != *target_landmark_id);
+        }
+        SavedUserOverlayAction::SaveModePreference {
+            mode,
+            visible_layers,
+        } => {
+            if visible_layers.iter().any(|layer| {
+                !matches!(
+                    layer.as_str(),
+                    "regions" | "landmarks" | "arguments" | "user"
+                )
+            }) {
+                return Err(minimap_error(
+                    "INVALID_PAPER_MINIMAP_LAYER",
+                    "validation",
+                    "saved mode preference contains an unknown layer",
+                ));
+            }
+            state
+                .saved_user_overlay
+                .saved_mode_preferences
+                .retain(|preference| preference.mode != *mode);
+            state
+                .saved_user_overlay
+                .saved_mode_preferences
+                .push(PaperMinimapSavedModePreference {
+                    mode: mode.clone(),
+                    visible_layers: visible_layers.clone(),
+                });
+        }
+        SavedUserOverlayAction::ClearSavedOverlay {} => {
+            let overlay_rev = state.saved_user_overlay.overlay_rev;
+            state.saved_user_overlay = SavedUserOverlay {
+                book_id: base.book_id.clone(),
+                book_version: base.book_version.clone(),
+                overlay_rev,
+                emphasized_kinds: Vec::new(),
+                hidden_landmark_ids: Vec::new(),
+                pinned_landmark_ids: Vec::new(),
+                custom_landmarks: Vec::new(),
+                landmark_overrides: Vec::new(),
+                saved_mode_preferences: Vec::new(),
+            };
+        }
+    }
+    Ok(())
+}
+
+fn apply_minimap_commands_to_state(
+    book: &Book,
+    base: &PaperMinimapBase,
+    state: &mut ReaderPaperMinimapState,
+    actor: &PaperMinimapActor,
+    commands: &[PaperMinimapCommand],
+) -> Result<(), ToolError> {
+    let saved_before = state.saved_user_overlay.clone();
+    let mut saved_changed = false;
+    for command in commands {
+        match command {
+            PaperMinimapCommand::Session(action) => {
+                apply_minimap_session_action(book, base, state, actor, action)?
+            }
+            PaperMinimapCommand::Saved(action) => {
+                apply_minimap_saved_action(book, base, state, action)?;
+                saved_changed = true;
+            }
+        }
+    }
+    if saved_changed && state.saved_user_overlay != saved_before {
+        state.saved_user_overlay.overlay_rev = saved_before.overlay_rev + 1;
+    }
+    Ok(())
 }
 
 fn move_slot_to_region(state: &mut ReaderLayoutState, slot_id: &str, region: &LayoutRegion) {
@@ -419,6 +1553,11 @@ impl Reader {
             layout: default_layout_state(&book.profile_manifest()),
             layout_proposals: HashMap::new(),
             layout_proposal_seq: 0,
+            paper_minimap: default_paper_minimap_state(book),
+            paper_minimap_proposals: HashMap::new(),
+            paper_minimap_effects: HashMap::new(),
+            paper_minimap_proposal_seq: 0,
+            paper_minimap_effect_seq: 0,
         }
     }
 
@@ -773,6 +1912,384 @@ impl Reader {
 
     /// headless 文本渲染:逐 visible_lid 拼原文,**读 memory.recall(lid) 画标注**
     /// —— 标注从记忆层来(单一真相源),非 reader 自持。锚点叶前缀 `▶`。
+    pub fn paper_minimap_state(&self) -> ReaderPaperMinimapState {
+        self.paper_minimap.clone()
+    }
+
+    pub fn restore_saved_user_overlay(
+        &mut self,
+        book: &Book,
+        overlay: SavedUserOverlay,
+    ) -> Result<(), ToolError> {
+        let base = book.paper_minimap();
+        if overlay.book_id != base.book_id || overlay.book_version != base.book_version {
+            return Err(minimap_error(
+                "PAPER_MINIMAP_OVERLAY_IDENTITY_MISMATCH",
+                "conflict",
+                "saved paper minimap overlay does not match the current book version",
+            ));
+        }
+        if overlay.custom_landmarks.iter().any(|landmark| {
+            !book
+                .base
+                .lid_nodes
+                .iter()
+                .any(|node| node.lid == landmark.anchor_lid)
+        }) {
+            return Err(minimap_error(
+                "PAPER_MINIMAP_OVERLAY_DANGLING_LID",
+                "validation",
+                "saved paper minimap overlay contains a dangling custom landmark LID",
+            ));
+        }
+        let base_landmark_ids: HashSet<&str> = base
+            .landmarks
+            .iter()
+            .map(|landmark| landmark.landmark_id.as_str())
+            .collect();
+        if overlay
+            .hidden_landmark_ids
+            .iter()
+            .chain(overlay.pinned_landmark_ids.iter())
+            .chain(
+                overlay
+                    .landmark_overrides
+                    .iter()
+                    .map(|item| &item.target_landmark_id),
+            )
+            .any(|landmark_id| !base_landmark_ids.contains(landmark_id.as_str()))
+        {
+            return Err(minimap_error(
+                "PAPER_MINIMAP_OVERLAY_DANGLING_LANDMARK",
+                "validation",
+                "saved paper minimap overlay contains a dangling base landmark",
+            ));
+        }
+        self.paper_minimap.saved_user_overlay = overlay;
+        Ok(())
+    }
+
+    fn validate_minimap_base_and_rev(
+        &self,
+        base: &PaperMinimapBase,
+        base_state_rev: u64,
+    ) -> Result<(), ToolError> {
+        if base.fingerprint != self.paper_minimap.base_map_rev {
+            return Err(minimap_error(
+                "PAPER_MINIMAP_BASE_STALE",
+                "conflict",
+                "paper minimap base fingerprint has changed",
+            ));
+        }
+        if base_state_rev != self.paper_minimap.rev {
+            return Err(minimap_error(
+                "PAPER_MINIMAP_STATE_STALE",
+                "conflict",
+                format!(
+                    "paper minimap state is stale: base={base_state_rev} current={}",
+                    self.paper_minimap.rev
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn commit_minimap_commands(
+        &mut self,
+        book: &Book,
+        base: &PaperMinimapBase,
+        actor: PaperMinimapActor,
+        commands: Vec<PaperMinimapCommand>,
+        reason: String,
+        evidence_lids: Vec<String>,
+        trigger_turn_id: Option<String>,
+        created_at: String,
+    ) -> Result<PaperMinimapApplyOutcome, ToolError> {
+        let before = self.paper_minimap.clone();
+        let existing_custom_landmarks = before.saved_user_overlay.custom_landmarks.len();
+        let mut after = before.clone();
+        apply_minimap_commands_to_state(book, base, &mut after, &actor, &commands)?;
+        if after == before {
+            return Ok(PaperMinimapApplyOutcome::Noop { state: before });
+        }
+        after.rev = before.rev + 1;
+        self.paper_minimap_effect_seq += 1;
+        let effect_id = format!(
+            "paper_minimap_effect_{}_{}",
+            before.rev, self.paper_minimap_effect_seq
+        );
+        for landmark in after
+            .saved_user_overlay
+            .custom_landmarks
+            .iter_mut()
+            .skip(existing_custom_landmarks)
+        {
+            if landmark.created_from_effect.is_none() {
+                landmark.created_from_effect = Some(effect_id.clone());
+            }
+        }
+        self.paper_minimap = after.clone();
+        let effect = PaperMinimapEffect {
+            effect_id: effect_id.clone(),
+            base_map_rev: base.fingerprint.clone(),
+            before_state_rev: before.rev,
+            after_state_rev: after.rev,
+            trigger_turn_id,
+            actions: commands,
+            reason,
+            evidence_lids,
+            created_at,
+            before,
+            after,
+        };
+        let undoable = effect.actions.iter().any(|command| {
+            !matches!(
+                command,
+                PaperMinimapCommand::Session(PaperMinimapAction::UpdateViewport { .. })
+                    | PaperMinimapCommand::Session(PaperMinimapAction::SetSelectedLid { .. })
+            )
+        });
+        if undoable {
+            self.paper_minimap_effects.insert(effect_id, effect.clone());
+            if self.paper_minimap_effects.len() > 64 {
+                if let Some(oldest_id) = self
+                    .paper_minimap_effects
+                    .values()
+                    .min_by_key(|item| item.before_state_rev)
+                    .map(|item| item.effect_id.clone())
+                {
+                    self.paper_minimap_effects.remove(&oldest_id);
+                }
+            }
+        }
+        Ok(PaperMinimapApplyOutcome::Effect { effect })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn apply_paper_minimap_commands(
+        &mut self,
+        book: &Book,
+        base_state_rev: u64,
+        actor: PaperMinimapActor,
+        commands: Vec<PaperMinimapCommand>,
+        reason: impl Into<String>,
+        evidence_lids: Vec<String>,
+        trigger_turn_id: Option<String>,
+        created_at: impl Into<String>,
+    ) -> Result<PaperMinimapApplyOutcome, ToolError> {
+        if commands.is_empty() {
+            return Err(minimap_error(
+                "INVALID_PAPER_MINIMAP_ACTION",
+                "validation",
+                "paper minimap apply requires at least one command",
+            ));
+        }
+        let reason = reason.into();
+        if reason.trim().is_empty()
+            || evidence_lids
+                .iter()
+                .any(|lid| !book.base.lid_nodes.iter().any(|node| node.lid == *lid))
+        {
+            return Err(minimap_error(
+                "INVALID_PAPER_MINIMAP_ACTION",
+                "validation",
+                "paper minimap apply requires a reason and valid evidence LIDs",
+            ));
+        }
+        let base = book.paper_minimap();
+        self.validate_minimap_base_and_rev(&base, base_state_rev)?;
+        let mut scratch = self.paper_minimap.clone();
+        apply_minimap_commands_to_state(book, &base, &mut scratch, &actor, &commands)?;
+        if minimap_commands_require_proposal(&actor, &commands) {
+            self.paper_minimap_proposal_seq += 1;
+            let proposal = PaperMinimapProposal {
+                proposal_id: format!(
+                    "paper_minimap_proposal_{}_{}",
+                    self.paper_minimap.rev, self.paper_minimap_proposal_seq
+                ),
+                base_map_rev: base.fingerprint,
+                base_state_rev: self.paper_minimap.rev,
+                actions: commands,
+                summary: reason,
+            };
+            self.paper_minimap_proposals
+                .insert(proposal.proposal_id.clone(), proposal.clone());
+            return Ok(PaperMinimapApplyOutcome::Proposal { proposal });
+        }
+        self.commit_minimap_commands(
+            book,
+            &base,
+            actor,
+            commands,
+            reason,
+            evidence_lids,
+            trigger_turn_id,
+            created_at.into(),
+        )
+    }
+
+    pub fn apply_paper_minimap_proposal(
+        &mut self,
+        book: &Book,
+        proposal_id: &str,
+        base_map_rev: &str,
+        base_state_rev: u64,
+        created_at: impl Into<String>,
+    ) -> Result<PaperMinimapEffect, ToolError> {
+        let proposal = self
+            .paper_minimap_proposals
+            .get(proposal_id)
+            .cloned()
+            .ok_or_else(|| {
+                minimap_error(
+                    "PAPER_MINIMAP_PROPOSAL_NOT_FOUND",
+                    "not_found",
+                    format!("paper minimap proposal does not exist: {proposal_id}"),
+                )
+            })?;
+        let base = book.paper_minimap();
+        if proposal.base_map_rev != base_map_rev
+            || proposal.base_map_rev != base.fingerprint
+            || proposal.base_state_rev != base_state_rev
+        {
+            return Err(minimap_error(
+                "PAPER_MINIMAP_PROPOSAL_STALE",
+                "conflict",
+                "paper minimap proposal base identity is stale",
+            ));
+        }
+        self.validate_minimap_base_and_rev(&base, base_state_rev)
+            .map_err(|_| {
+                minimap_error(
+                    "PAPER_MINIMAP_PROPOSAL_STALE",
+                    "conflict",
+                    "paper minimap proposal state revision is stale",
+                )
+            })?;
+        let outcome = self.commit_minimap_commands(
+            book,
+            &base,
+            PaperMinimapActor::User,
+            proposal.actions,
+            proposal.summary,
+            Vec::new(),
+            None,
+            created_at.into(),
+        )?;
+        self.paper_minimap_proposals.remove(proposal_id);
+        match outcome {
+            PaperMinimapApplyOutcome::Effect { effect } => Ok(effect),
+            PaperMinimapApplyOutcome::Noop { .. } => Err(minimap_error(
+                "PAPER_MINIMAP_PROPOSAL_NOOP",
+                "conflict",
+                "paper minimap proposal no longer changes state",
+            )),
+            PaperMinimapApplyOutcome::Proposal { .. } => unreachable!(),
+        }
+    }
+
+    pub fn dismiss_paper_minimap_proposal(
+        &mut self,
+        proposal_id: &str,
+        base_map_rev: &str,
+        base_state_rev: u64,
+    ) -> Result<ReaderPaperMinimapState, ToolError> {
+        let proposal = self
+            .paper_minimap_proposals
+            .get(proposal_id)
+            .ok_or_else(|| {
+                minimap_error(
+                    "PAPER_MINIMAP_PROPOSAL_NOT_FOUND",
+                    "not_found",
+                    format!("paper minimap proposal does not exist: {proposal_id}"),
+                )
+            })?;
+        if proposal.base_map_rev != base_map_rev
+            || proposal.base_state_rev != base_state_rev
+            || self.paper_minimap.base_map_rev != base_map_rev
+            || self.paper_minimap.rev != base_state_rev
+        {
+            return Err(minimap_error(
+                "PAPER_MINIMAP_PROPOSAL_STALE",
+                "conflict",
+                "paper minimap proposal cannot be dismissed from a stale state",
+            ));
+        }
+        self.paper_minimap_proposals.remove(proposal_id);
+        Ok(self.paper_minimap.clone())
+    }
+
+    pub fn undo_paper_minimap_effect(
+        &mut self,
+        effect: &PaperMinimapEffect,
+        created_at: impl Into<String>,
+    ) -> Result<PaperMinimapEffect, ToolError> {
+        if effect.base_map_rev != self.paper_minimap.base_map_rev
+            || effect.after_state_rev != self.paper_minimap.rev
+        {
+            return Err(minimap_error(
+                "PAPER_MINIMAP_EFFECT_STALE",
+                "conflict",
+                "paper minimap effect cannot be undone from the current revision",
+            ));
+        }
+        let before = self.paper_minimap.clone();
+        let mut after = effect.before.clone();
+        after.rev = before.rev + 1;
+        self.paper_minimap_effect_seq += 1;
+        let undo = PaperMinimapEffect {
+            effect_id: format!(
+                "paper_minimap_effect_{}_{}",
+                before.rev, self.paper_minimap_effect_seq
+            ),
+            base_map_rev: effect.base_map_rev.clone(),
+            before_state_rev: before.rev,
+            after_state_rev: after.rev,
+            trigger_turn_id: None,
+            actions: Vec::new(),
+            reason: format!("undo {}", effect.effect_id),
+            evidence_lids: effect.evidence_lids.clone(),
+            created_at: created_at.into(),
+            before,
+            after: after.clone(),
+        };
+        self.paper_minimap = after;
+        Ok(undo)
+    }
+
+    pub fn undo_paper_minimap_effect_by_id(
+        &mut self,
+        effect_id: &str,
+        base_state_rev: u64,
+        created_at: impl Into<String>,
+    ) -> Result<PaperMinimapEffect, ToolError> {
+        if self.paper_minimap.rev != base_state_rev {
+            return Err(minimap_error(
+                "PAPER_MINIMAP_STATE_STALE",
+                "conflict",
+                format!(
+                    "paper minimap state is stale: base={base_state_rev} current={}",
+                    self.paper_minimap.rev
+                ),
+            ));
+        }
+        let effect = self
+            .paper_minimap_effects
+            .get(effect_id)
+            .cloned()
+            .ok_or_else(|| {
+                minimap_error(
+                    "PAPER_MINIMAP_EFFECT_NOT_FOUND",
+                    "not_found",
+                    format!("paper minimap effect does not exist: {effect_id}"),
+                )
+            })?;
+        let undo = self.undo_paper_minimap_effect(&effect, created_at)?;
+        self.paper_minimap_effects.remove(effect_id);
+        Ok(undo)
+    }
+
     pub fn render(&self, book: &Book, store: &MemoryStore) -> String {
         let vp = self.viewport();
         let mut out = String::new();
@@ -851,6 +2368,99 @@ mod tests {
         let p = std::env::temp_dir().join(format!("ub-reader-test-{name}.json"));
         let _ = std::fs::remove_file(&p);
         p
+    }
+
+    fn paper_minimap_book(name: &str) -> (Book, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("ub-reader-minimap-{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = "# Introduction\nWhich method works?\n";
+        let heading_end = "# Introduction\n".encode_utf16().count();
+        let source_end = source.encode_utf16().count();
+        let base = ReadOnlyBase {
+            book_id: "reader-minimap-book".into(),
+            lid_nodes: vec![
+                LidNode {
+                    lid: "1".into(),
+                    path: vec![1],
+                    kind: NodeKind::Chapter,
+                    span: Span {
+                        start: 0,
+                        end: source_end,
+                    },
+                    children: vec!["1.1".into()],
+                },
+                LidNode {
+                    lid: "1.1".into(),
+                    path: vec![1, 1],
+                    kind: NodeKind::Section,
+                    span: Span {
+                        start: 0,
+                        end: source_end,
+                    },
+                    children: vec!["1.1.1".into()],
+                },
+                LidNode {
+                    lid: "1.1.1".into(),
+                    path: vec![1, 1, 1],
+                    kind: NodeKind::Paragraph,
+                    span: Span {
+                        start: heading_end,
+                        end: source_end,
+                    },
+                    children: Vec::new(),
+                },
+            ],
+            graph_nodes: Vec::new(),
+            graph_edges: Vec::new(),
+        };
+        std::fs::write(dir.join("base.json"), serde_json::to_string(&base).unwrap()).unwrap();
+        std::fs::write(dir.join("source.txt"), source).unwrap();
+        std::fs::write(
+            dir.join("source_manifest.json"),
+            serde_json::json!({
+                "version": "source_manifest.v2",
+                "book_id": "reader-minimap-book",
+                "canonical_source": {"path": "source.txt", "sha256": "sha-a"},
+                "capabilities": {
+                    "view_pdf": {"status": "available"},
+                    "project_lid_to_pdf": {"status": "available", "config_hash": "cfg-a"}
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("pdf_source_map.json"),
+            serde_json::json!({
+                "version": "pdf_source_map.v1",
+                "book_id": "reader-minimap-book",
+                "pages": [{"pageIndex": 0}],
+                "entries": [{
+                    "lid": "1.1.1",
+                    "source_span": {"start": heading_end, "end": source_end},
+                    "regions": [{"pageIndex": 0}]
+                }],
+                "config_hash": "cfg-a"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("discourse_index.json"),
+            serde_json::json!({
+                "items": [{
+                    "lid": "1.1.1",
+                    "mode": "argumentative",
+                    "local_function": "research_question",
+                    "local_summary": "Which method works?",
+                    "relations": []
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        (Book::load(dir.to_str().unwrap()).unwrap(), dir)
     }
 
     // new:锚点落书首叶;viewport 叶序窗口 anchor ± radius,书首左侧 saturating。
@@ -985,7 +2595,15 @@ mod tests {
         assert_eq!(got[0].range, Some(memory::TextRange { start: 2, end: 5 }));
         // 越界:end 超过段长(10)→ INVALID_RANGE 不降级。
         let e = r
-            .highlight(&b, &mut store, "1.2", Some((8, 99)), None, "long_term", "t0")
+            .highlight(
+                &b,
+                &mut store,
+                "1.2",
+                Some((8, 99)),
+                None,
+                "long_term",
+                "t0",
+            )
             .unwrap_err();
         assert_eq!(e.error_code, "INVALID_RANGE");
     }
@@ -1216,5 +2834,712 @@ mod tests {
         );
         assert!(!read.contains(&"1.10".to_string()));
         assert!(!read.contains(&"1".to_string()));
+    }
+
+    fn minimap_state() -> ReaderPaperMinimapState {
+        ReaderPaperMinimapState {
+            rev: 3,
+            base_map_rev: "fp-a".into(),
+            presentation: PaperMinimapPresentation::Collapsed,
+            mode: PaperMinimapMode::Skim,
+            viewport_position: PaperViewportPosition {
+                start_page: 1,
+                end_page: 2,
+                center_page: 1.5,
+                progress_ratio: 0.25,
+                anchor_lid: Some("1.2".into()),
+                region_id: Some("region:introduction".into()),
+            },
+            selected_lid: Some("1.2".into()),
+            map_focus: Some(PaperMapFocus {
+                region_id: Some("region:introduction".into()),
+                landmark_id: None,
+            }),
+            session_overlay: MinimapOverlay {
+                emphasized_landmark_ids: vec!["landmark:rq".into()],
+                hidden_landmark_ids: Vec::new(),
+                pinned_landmark_ids: Vec::new(),
+                focused_region_id: Some("region:introduction".into()),
+                focused_landmark_id: None,
+                visible_layers: vec!["regions".into(), "landmarks".into()],
+                local_projection: Some(PaperLocalProjection {
+                    region_id: "region:introduction".into(),
+                    grammar: PaperRegionKind::Introduction,
+                    focus_slots: vec![
+                        PaperArgumentSlot::ResearchGap,
+                        PaperArgumentSlot::ResearchQuestion,
+                    ],
+                }),
+            },
+            saved_user_overlay: SavedUserOverlay {
+                book_id: "paper-a".into(),
+                book_version: "v1".into(),
+                overlay_rev: 1,
+                emphasized_kinds: vec![PaperLandmarkKind::Limitation],
+                hidden_landmark_ids: Vec::new(),
+                pinned_landmark_ids: vec!["landmark:rq".into()],
+                custom_landmarks: Vec::new(),
+                landmark_overrides: Vec::new(),
+                saved_mode_preferences: Vec::new(),
+            },
+        }
+    }
+
+    fn lens_base() -> PaperMinimapBase {
+        let region =
+            |region_id: &str, kind: PaperRegionKind, page: u32| -> read_tools::PaperRegion {
+                read_tools::PaperRegion {
+                    region_id: region_id.into(),
+                    title: region_id.into(),
+                    kind,
+                    lid_span: read_tools::PaperLidSpan {
+                        start_lid: format!("{page}.1"),
+                        end_lid: format!("{page}.9"),
+                    },
+                    page_span: read_tools::PaperPageSpan {
+                        start_page: page,
+                        end_page: page,
+                    },
+                    classification_source: read_tools::PaperRegionClassificationSource::Heading,
+                    confidence: 1.0,
+                }
+            };
+        let landmark =
+            |id: &str, kind: PaperLandmarkKind, page: u32| -> read_tools::PaperLandmark {
+                read_tools::PaperLandmark {
+                    landmark_id: id.into(),
+                    kind,
+                    anchor_lid: format!("{page}.{id}"),
+                    page_index: page,
+                    label: id.into(),
+                    source_label: None,
+                    evidence_lids: vec![format!("{page}.1")],
+                    provenance: vec![read_tools::PaperLandmarkProvenance::Discourse],
+                }
+            };
+        let relation =
+            |id: &str, source: &str, target: &str| -> read_tools::PaperArgumentRelation {
+                read_tools::PaperArgumentRelation {
+                    relation_id: id.into(),
+                    relation_type: read_tools::PaperMinimapRelation::Supports,
+                    source_landmark_id: source.into(),
+                    target_landmark_id: target.into(),
+                    evidence_lids: vec!["2.1".into()],
+                }
+            };
+        PaperMinimapBase {
+            version: "paper_minimap.v1".into(),
+            book_id: "lens-book".into(),
+            book_version: "v1".into(),
+            fingerprint: "lens-fp".into(),
+            status: PaperMinimapAvailabilityStatus::Available,
+            regions: vec![
+                region("region:abstract", PaperRegionKind::Abstract, 0),
+                region("region:method", PaperRegionKind::Method, 1),
+                region("region:results", PaperRegionKind::Results, 2),
+                region("region:discussion", PaperRegionKind::Discussion, 3),
+                region("region:unknown", PaperRegionKind::Unknown, 4),
+            ],
+            landmarks: vec![
+                landmark("rq", PaperLandmarkKind::ResearchQuestion, 0),
+                landmark("abstract-method", PaperLandmarkKind::Method, 0),
+                landmark("abstract-result", PaperLandmarkKind::Result, 0),
+                landmark("abstract-contribution", PaperLandmarkKind::Contribution, 0),
+                landmark("method", PaperLandmarkKind::Method, 1),
+                landmark("experiment", PaperLandmarkKind::Experiment, 2),
+                landmark("evidence", PaperLandmarkKind::Evidence, 2),
+                landmark("result", PaperLandmarkKind::Result, 2),
+                landmark("claim", PaperLandmarkKind::Claim, 2),
+                landmark("limitation", PaperLandmarkKind::Limitation, 3),
+                landmark("future", PaperLandmarkKind::FutureWork, 3),
+                landmark("other", PaperLandmarkKind::Other, 4),
+            ],
+            relations: vec![
+                relation("rel:experiment-evidence", "experiment", "evidence"),
+                relation("rel:evidence-result", "evidence", "result"),
+                relation("rel:result-claim", "result", "claim"),
+                relation("rel:claim-future", "claim", "future"),
+            ],
+            layer_status: HashMap::new(),
+            warnings: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn paper_minimap_lens_enforces_global_local_and_relation_budgets() {
+        let base = lens_base();
+        let skim = project_paper_minimap_lens(&base, PaperMinimapMode::Skim, None).unwrap();
+        assert_eq!(skim.global_landmark_ids.len(), 5);
+        assert!(skim.local_landmark_ids.is_empty());
+        assert!(skim.relation_ids.len() <= 3);
+
+        let deep =
+            project_paper_minimap_lens(&base, PaperMinimapMode::Deep, Some("region:results"))
+                .unwrap();
+        assert_eq!(deep.local_landmark_ids.len(), 4);
+        assert_eq!(deep.slot_bindings.len(), 4);
+        assert_eq!(deep.relation_ids.len(), 3);
+        assert_eq!(deep.slot_bindings[0].slot, PaperArgumentSlot::Experiment);
+        assert_eq!(deep.slot_bindings[1].slot, PaperArgumentSlot::Evidence);
+        assert_eq!(deep.slot_bindings[2].slot, PaperArgumentSlot::Result);
+        assert_eq!(deep.slot_bindings[3].slot, PaperArgumentSlot::Claim);
+    }
+
+    #[test]
+    fn paper_layout_preset_and_minimap_mode_are_independent_control_planes() {
+        let (_, dir) = paper_minimap_book("layout-mode-independence");
+        std::fs::write(
+            dir.join("book_structure.json"),
+            serde_json::json!({
+                "header": {
+                    "book_id": "reader-minimap-book", "book_version": "v1",
+                    "profile_id": "paper", "profile_version": "paper_v0",
+                    "core_schema_version": "core_v0", "generated_at": "t0"
+                },
+                "spine": [], "throughlines": [], "key_stops": []
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let book = Book::load(dir.to_str().unwrap()).unwrap();
+        let mut reader = Reader::new(&book, 2);
+        let proposal = match reader
+            .apply_layout_actions(
+                &book,
+                vec![ReaderLayoutAction::SetLayoutPreset {
+                    preset_id: "paper_deep_read".into(),
+                }],
+            )
+            .unwrap()
+        {
+            ReaderLayoutApplyOutcome::Proposal { proposal } => proposal,
+            _ => panic!("expected layout proposal"),
+        };
+        reader
+            .apply_layout_proposal(&book, &proposal.proposal_id, proposal.base_layout_rev)
+            .unwrap();
+        assert_eq!(
+            reader.layout_state().active_preset.as_deref(),
+            Some("paper_deep_read")
+        );
+        assert!(reader
+            .layout_state()
+            .open_slots
+            .iter()
+            .any(|slot| slot == "paper.ten_questions"));
+        assert_eq!(reader.paper_minimap_state().mode, PaperMinimapMode::Skim);
+
+        reader
+            .apply_paper_minimap_commands(
+                &book,
+                0,
+                PaperMinimapActor::User,
+                vec![PaperMinimapCommand::Session(
+                    PaperMinimapAction::SetModeLens {
+                        mode: PaperMinimapMode::Abstract,
+                    },
+                )],
+                "user selected abstract minimap mode",
+                Vec::new(),
+                None,
+                "t1",
+            )
+            .unwrap();
+        assert_eq!(
+            reader.paper_minimap_state().mode,
+            PaperMinimapMode::Abstract
+        );
+        assert_eq!(
+            reader.layout_state().active_preset.as_deref(),
+            Some("paper_deep_read")
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn paper_minimap_lens_unknown_region_stays_empty_and_never_fabricates_ids() {
+        let base = lens_base();
+        let projection =
+            project_paper_minimap_lens(&base, PaperMinimapMode::Deep, Some("region:unknown"))
+                .unwrap();
+        assert!(projection.local_landmark_ids.is_empty());
+        assert!(projection.slot_bindings.is_empty());
+        assert!(projection.relation_ids.is_empty());
+        assert!(projection.global_landmark_ids.iter().all(|id| base
+            .landmarks
+            .iter()
+            .any(|landmark| &landmark.landmark_id == id)));
+    }
+
+    #[test]
+    fn paper_minimap_abstract_lens_has_four_slots_and_explicit_missing_fallback() {
+        let mut base = lens_base();
+        let projection =
+            project_paper_minimap_lens(&base, PaperMinimapMode::Abstract, None).unwrap();
+        assert_eq!(
+            projection.focus_region_id.as_deref(),
+            Some("region:abstract")
+        );
+        assert_eq!(projection.local_landmark_ids.len(), 4);
+        assert_eq!(projection.abstract_correspondences.len(), 2);
+        assert!(projection.abstract_correspondences.iter().all(|item| {
+            base.landmarks
+                .iter()
+                .any(|landmark| landmark.landmark_id == item.abstract_landmark_id)
+                && base
+                    .landmarks
+                    .iter()
+                    .any(|landmark| landmark.landmark_id == item.body_landmark_id)
+        }));
+        assert!(projection.warnings.is_empty());
+
+        base.regions
+            .retain(|region| region.kind != PaperRegionKind::Abstract);
+        let fallback = project_paper_minimap_lens(&base, PaperMinimapMode::Abstract, None).unwrap();
+        assert!(fallback.focus_region_id.is_none());
+        assert!(fallback.local_landmark_ids.is_empty());
+        assert!(fallback.abstract_correspondences.is_empty());
+        assert_eq!(fallback.global_landmark_ids.len(), 5);
+        assert!(fallback
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("no abstract region")));
+    }
+
+    #[test]
+    fn paper_minimap_reducer_applies_user_effect_noop_and_undo() {
+        let (book, dir) = paper_minimap_book("effect");
+        let mut reader = Reader::new(&book, 2);
+        let outcome = reader
+            .apply_paper_minimap_commands(
+                &book,
+                0,
+                PaperMinimapActor::User,
+                vec![PaperMinimapCommand::Session(
+                    PaperMinimapAction::SetPresentation {
+                        presentation: PaperMinimapPresentation::Expanded,
+                    },
+                )],
+                "user opened minimap",
+                Vec::new(),
+                None,
+                "t1",
+            )
+            .unwrap();
+        let effect = match outcome {
+            PaperMinimapApplyOutcome::Effect { effect } => effect,
+            _ => panic!("expected effect"),
+        };
+        assert_eq!(reader.paper_minimap_state().rev, 1);
+        assert_eq!(
+            reader.paper_minimap_state().presentation,
+            PaperMinimapPresentation::Expanded
+        );
+        let undo = reader
+            .undo_paper_minimap_effect_by_id(&effect.effect_id, effect.after_state_rev, "t2")
+            .unwrap();
+        assert_eq!(undo.after_state_rev, 2);
+        assert_eq!(
+            reader.paper_minimap_state().presentation,
+            PaperMinimapPresentation::Collapsed
+        );
+        let replay = reader
+            .undo_paper_minimap_effect_by_id(&effect.effect_id, 2, "t2-replay")
+            .unwrap_err();
+        assert_eq!(replay.error_code, "PAPER_MINIMAP_EFFECT_NOT_FOUND");
+
+        let mut fresh = Reader::new(&book, 2);
+        let noop = fresh
+            .apply_paper_minimap_commands(
+                &book,
+                0,
+                PaperMinimapActor::User,
+                vec![PaperMinimapCommand::Session(
+                    PaperMinimapAction::SetPresentation {
+                        presentation: PaperMinimapPresentation::Collapsed,
+                    },
+                )],
+                "keep collapsed",
+                Vec::new(),
+                None,
+                "t3",
+            )
+            .unwrap();
+        assert!(matches!(noop, PaperMinimapApplyOutcome::Noop { .. }));
+        assert_eq!(fresh.paper_minimap_state().rev, 0);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn paper_minimap_reducer_syncs_viewport_and_selection_without_changing_focus() {
+        let (book, dir) = paper_minimap_book("viewport-sync");
+        let base = book.paper_minimap();
+        let region_id = base.regions[0].region_id.clone();
+        let mut reader = Reader::new(&book, 2);
+        let outcome = reader
+            .apply_paper_minimap_commands(
+                &book,
+                0,
+                PaperMinimapActor::User,
+                vec![
+                    PaperMinimapCommand::Session(PaperMinimapAction::UpdateViewport {
+                        position: PaperViewportPosition {
+                            start_page: 0,
+                            end_page: 0,
+                            center_page: 0.5,
+                            progress_ratio: 0.5,
+                            anchor_lid: Some("1.1.1".into()),
+                            region_id: Some(region_id),
+                        },
+                    }),
+                    PaperMinimapCommand::Session(PaperMinimapAction::SetSelectedLid {
+                        selected_lid: Some("1.1.1".into()),
+                    }),
+                ],
+                "sync deterministic PDF position",
+                Vec::new(),
+                None,
+                "t1",
+            )
+            .unwrap();
+        let effect = match outcome {
+            PaperMinimapApplyOutcome::Effect { effect } => effect,
+            _ => panic!("expected effect"),
+        };
+        let after = &effect.after;
+        assert_eq!(after.viewport_position.center_page, 0.5);
+        assert_eq!(after.selected_lid.as_deref(), Some("1.1.1"));
+        assert!(after.map_focus.is_none());
+        let not_undoable = reader
+            .undo_paper_minimap_effect_by_id(&effect.effect_id, 1, "t1-undo")
+            .unwrap_err();
+        assert_eq!(not_undoable.error_code, "PAPER_MINIMAP_EFFECT_NOT_FOUND");
+
+        let forbidden = reader
+            .apply_paper_minimap_commands(
+                &book,
+                1,
+                PaperMinimapActor::Agent,
+                vec![PaperMinimapCommand::Session(
+                    PaperMinimapAction::SetSelectedLid { selected_lid: None },
+                )],
+                "agent tried to clear selection",
+                Vec::new(),
+                None,
+                "t2",
+            )
+            .unwrap_err();
+        assert_eq!(forbidden.error_code, "PAPER_MINIMAP_ACTION_FORBIDDEN");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn paper_minimap_reducer_rejects_untrusted_viewport_coordinates() {
+        let (book, dir) = paper_minimap_book("viewport-validation");
+        let mut reader = Reader::new(&book, 2);
+        let invalid_page = reader
+            .apply_paper_minimap_commands(
+                &book,
+                0,
+                PaperMinimapActor::User,
+                vec![PaperMinimapCommand::Session(
+                    PaperMinimapAction::UpdateViewport {
+                        position: PaperViewportPosition {
+                            start_page: 0,
+                            end_page: 3,
+                            center_page: 1.5,
+                            progress_ratio: 0.5,
+                            anchor_lid: Some("1.1.1".into()),
+                            region_id: None,
+                        },
+                    },
+                )],
+                "invalid PDF position",
+                Vec::new(),
+                None,
+                "t1",
+            )
+            .unwrap_err();
+        assert_eq!(invalid_page.error_code, "INVALID_PAPER_MINIMAP_VIEWPORT");
+
+        let invalid_lid = reader
+            .apply_paper_minimap_commands(
+                &book,
+                0,
+                PaperMinimapActor::User,
+                vec![PaperMinimapCommand::Session(
+                    PaperMinimapAction::SetSelectedLid {
+                        selected_lid: Some("9.9".into()),
+                    },
+                )],
+                "invalid PDF selection",
+                Vec::new(),
+                None,
+                "t2",
+            )
+            .unwrap_err();
+        assert_eq!(invalid_lid.error_code, "PAPER_MINIMAP_LID_NOT_FOUND");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn paper_minimap_reducer_enforces_agent_and_proposal_authority() {
+        let (book, dir) = paper_minimap_book("authority");
+        let mut reader = Reader::new(&book, 2);
+        let forbidden = reader
+            .apply_paper_minimap_commands(
+                &book,
+                0,
+                PaperMinimapActor::Agent,
+                vec![PaperMinimapCommand::Session(
+                    PaperMinimapAction::SetPresentation {
+                        presentation: PaperMinimapPresentation::Expanded,
+                    },
+                )],
+                "agent tried to open minimap",
+                Vec::new(),
+                Some("turn-1".into()),
+                "t1",
+            )
+            .unwrap_err();
+        assert_eq!(forbidden.error_code, "PAPER_MINIMAP_ACTION_FORBIDDEN");
+
+        let proposal = match reader
+            .apply_paper_minimap_commands(
+                &book,
+                0,
+                PaperMinimapActor::Agent,
+                vec![PaperMinimapCommand::Session(
+                    PaperMinimapAction::SetModeLens {
+                        mode: PaperMinimapMode::Deep,
+                    },
+                )],
+                "agent suggests deep mode",
+                Vec::new(),
+                Some("turn-2".into()),
+                "t2",
+            )
+            .unwrap()
+        {
+            PaperMinimapApplyOutcome::Proposal { proposal } => proposal,
+            _ => panic!("expected proposal"),
+        };
+        assert_eq!(reader.paper_minimap_state().mode, PaperMinimapMode::Skim);
+        let effect = reader
+            .apply_paper_minimap_proposal(
+                &book,
+                &proposal.proposal_id,
+                &proposal.base_map_rev,
+                proposal.base_state_rev,
+                "t3",
+            )
+            .unwrap();
+        assert_eq!(effect.after.mode, PaperMinimapMode::Deep);
+
+        let saved = reader
+            .apply_paper_minimap_commands(
+                &book,
+                1,
+                PaperMinimapActor::User,
+                vec![PaperMinimapCommand::Saved(
+                    SavedUserOverlayAction::SaveUserLandmark {
+                        anchor_lid: "1.1.1".into(),
+                        label: "Revisit".into(),
+                        user_kind: UserLandmarkKind::FollowUp,
+                        note: None,
+                    },
+                )],
+                "save a personal landmark",
+                vec!["1.1.1".into()],
+                None,
+                "t4",
+            )
+            .unwrap();
+        assert!(matches!(saved, PaperMinimapApplyOutcome::Proposal { .. }));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn paper_minimap_reducer_rejects_stale_invalid_ids_grammar_and_budget() {
+        let (book, dir) = paper_minimap_book("validation");
+        let mut reader = Reader::new(&book, 2);
+        let base = book.paper_minimap();
+        let landmark_id = base.landmarks[0].landmark_id.clone();
+        let region_id = base.regions[0].region_id.clone();
+        let proposal = match reader
+            .apply_paper_minimap_commands(
+                &book,
+                0,
+                PaperMinimapActor::Agent,
+                vec![PaperMinimapCommand::Session(
+                    PaperMinimapAction::SetModeLens {
+                        mode: PaperMinimapMode::Deep,
+                    },
+                )],
+                "suggest deep",
+                Vec::new(),
+                None,
+                "t1",
+            )
+            .unwrap()
+        {
+            PaperMinimapApplyOutcome::Proposal { proposal } => proposal,
+            _ => panic!("expected proposal"),
+        };
+        reader
+            .apply_paper_minimap_commands(
+                &book,
+                0,
+                PaperMinimapActor::User,
+                vec![PaperMinimapCommand::Session(
+                    PaperMinimapAction::FocusLandmark {
+                        landmark_id: landmark_id.clone(),
+                    },
+                )],
+                "focus landmark",
+                Vec::new(),
+                None,
+                "t2",
+            )
+            .unwrap();
+        let stale = reader
+            .apply_paper_minimap_proposal(
+                &book,
+                &proposal.proposal_id,
+                &proposal.base_map_rev,
+                proposal.base_state_rev,
+                "t3",
+            )
+            .unwrap_err();
+        assert_eq!(stale.error_code, "PAPER_MINIMAP_PROPOSAL_STALE");
+
+        let bad_id = reader
+            .apply_paper_minimap_commands(
+                &book,
+                1,
+                PaperMinimapActor::User,
+                vec![PaperMinimapCommand::Session(
+                    PaperMinimapAction::FocusLandmark {
+                        landmark_id: "missing".into(),
+                    },
+                )],
+                "bad id",
+                Vec::new(),
+                None,
+                "t4",
+            )
+            .unwrap_err();
+        assert_eq!(bad_id.error_code, "PAPER_MINIMAP_LANDMARK_NOT_FOUND");
+
+        let bad_grammar = reader
+            .apply_paper_minimap_commands(
+                &book,
+                1,
+                PaperMinimapActor::User,
+                vec![PaperMinimapCommand::Session(
+                    PaperMinimapAction::SelectLocalProjection {
+                        region_id,
+                        grammar: PaperRegionKind::Method,
+                        focus_slots: vec![PaperArgumentSlot::Method],
+                    },
+                )],
+                "bad grammar",
+                Vec::new(),
+                None,
+                "t5",
+            )
+            .unwrap_err();
+        assert_eq!(bad_grammar.error_code, "INVALID_PAPER_MINIMAP_GRAMMAR");
+
+        let over_budget = reader
+            .apply_paper_minimap_commands(
+                &book,
+                1,
+                PaperMinimapActor::User,
+                vec![PaperMinimapCommand::Session(
+                    PaperMinimapAction::EmphasizeLandmarks {
+                        landmark_ids: vec![landmark_id; 6],
+                        reason: "too many".into(),
+                    },
+                )],
+                "over budget",
+                Vec::new(),
+                None,
+                "t6",
+            )
+            .unwrap_err();
+        assert_eq!(over_budget.error_code, "INVALID_PAPER_MINIMAP_ACTION");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn paper_minimap_reader_contract_round_trips_commands_and_outcome() {
+        let before = minimap_state();
+        let mut after = before.clone();
+        after.rev = 4;
+        after.presentation = PaperMinimapPresentation::Expanded;
+        let command = PaperMinimapCommand::Session(PaperMinimapAction::SetPresentation {
+            presentation: PaperMinimapPresentation::Expanded,
+        });
+        let effect = PaperMinimapEffect {
+            effect_id: "minimap-effect-1".into(),
+            base_map_rev: before.base_map_rev.clone(),
+            before_state_rev: before.rev,
+            after_state_rev: after.rev,
+            trigger_turn_id: None,
+            actions: vec![command],
+            reason: "user opened minimap".into(),
+            evidence_lids: Vec::new(),
+            created_at: "2026-07-12T12:00:00Z".into(),
+            before,
+            after,
+        };
+        let outcome = PaperMinimapApplyOutcome::Effect { effect };
+
+        let value = serde_json::to_value(&outcome).unwrap();
+        assert_eq!(value["kind"], "effect");
+        assert_eq!(value["effect"]["actions"][0]["scope"], "session");
+        assert_eq!(
+            value["effect"]["actions"][0]["action"]["kind"],
+            "set_presentation"
+        );
+        assert_eq!(
+            serde_json::from_value::<PaperMinimapApplyOutcome>(value).unwrap(),
+            outcome
+        );
+    }
+
+    #[test]
+    fn paper_minimap_saved_actions_are_proposal_safe_and_closed() {
+        let command = PaperMinimapCommand::Saved(SavedUserOverlayAction::SetLandmarkOverride {
+            target_landmark_id: "landmark:claim".into(),
+            operation: UserLandmarkOverrideOperation::Rename,
+            label: Some("我关注的主张".into()),
+            user_reason: Some("user correction".into()),
+        });
+        let proposal = PaperMinimapProposal {
+            proposal_id: "minimap-proposal-1".into(),
+            base_map_rev: "fp-a".into(),
+            base_state_rev: 3,
+            actions: vec![command],
+            summary: "保存个人地标标签".into(),
+        };
+        let value = serde_json::to_value(&proposal).unwrap();
+        assert_eq!(value["actions"][0]["scope"], "saved");
+        assert_eq!(value["actions"][0]["action"]["operation"], "rename");
+        assert_eq!(
+            serde_json::from_value::<PaperMinimapProposal>(value).unwrap(),
+            proposal
+        );
+
+        let unknown_action = serde_json::json!({"kind": "draw_arbitrary_graph"});
+        assert!(serde_json::from_value::<PaperMinimapAction>(unknown_action).is_err());
+        let missing_target = serde_json::json!({
+            "kind": "set_landmark_override",
+            "operation": "hide",
+            "label": null,
+            "user_reason": null
+        });
+        assert!(serde_json::from_value::<SavedUserOverlayAction>(missing_target).is_err());
     }
 }

@@ -18,6 +18,13 @@ import type { PaperReadingStage } from "./generated/PaperReadingStage";
 import type { PaperMetadataProjection } from "./generated/PaperMetadataProjection";
 import type { PaperLexiconProjection } from "./generated/PaperLexiconProjection";
 import type { StructureProjection } from "./generated/StructureProjection";
+import type { PaperMinimapBase } from "./generated/PaperMinimapBase";
+import type { ReaderPaperMinimapState } from "./generated/ReaderPaperMinimapState";
+import type { PaperMinimapLensProjection } from "./generated/PaperMinimapLensProjection";
+import type { PaperMinimapApplyOutcome } from "./generated/PaperMinimapApplyOutcome";
+import type { PaperMinimapCommand } from "./generated/PaperMinimapCommand";
+import type { PaperViewportPosition } from "./generated/PaperViewportPosition";
+import type { PaperMinimapEffect } from "./generated/PaperMinimapEffect";
 
 export type {
   Manifest,
@@ -37,6 +44,13 @@ export type {
   PaperMetadataProjection,
   PaperLexiconProjection,
   StructureProjection,
+  PaperMinimapBase,
+  ReaderPaperMinimapState,
+  PaperMinimapLensProjection,
+  PaperMinimapApplyOutcome,
+  PaperMinimapCommand,
+  PaperViewportPosition,
+  PaperMinimapEffect,
 };
 
 const BASE = "/api";
@@ -59,6 +73,22 @@ export interface ReaderState {
   selection: string | null;
   layout: ReaderLayoutState;
   profile: ProfileSummary;
+}
+export interface PaperMinimapStateResponse {
+  base: PaperMinimapBase;
+  state: ReaderPaperMinimapState;
+  lens: PaperMinimapLensProjection | null;
+  lens_error?: ToolError;
+}
+export interface PaperMinimapLocalization {
+  book_id: string;
+  book_version: string;
+  base_map_rev: string;
+  locale: "zh-CN";
+  source: "llm" | "cache" | "fallback";
+  region_labels: Record<string, string>;
+  landmark_labels: Record<string, string>;
+  warning: string | null;
 }
 export interface HighlightEffect {
   ok: boolean;
@@ -643,6 +673,7 @@ export const api = {
   buildWorkbench: () => http<BuildWorkbenchSnapshot>("GET", "/book/build_workbench"),
   sourceManifest: () => http<SourceManifestV2>("GET", "/book/source_manifest"),
   pdfSourceMap: () => http<PdfSourceMap>("GET", "/book/pdf_source_map"),
+  paperMinimap: () => http<PaperMinimapBase>("GET", "/book/paper_minimap"),
   pdfOriginalUrl: () => `${BASE}/book/pdf/original`,
   profileManifest: (profile_id?: "technical_learning" | "paper") =>
     http<ProfileManifest>("GET", `/profile/manifest${qs({ profile_id })}`),
@@ -726,6 +757,20 @@ export const api = {
     proposal_id?: string;
     base_layout_rev?: number;
   }) => http<ReaderLayoutApplyOutcome>("POST", "/reader/layout.apply", body),
+  paperMinimapState: () => http<PaperMinimapStateResponse>("POST", "/reader/paper_minimap.state", {}),
+  paperMinimapLocalize: () => http<PaperMinimapLocalization>("POST", "/reader/paper_minimap.localize", {}),
+  paperMinimapApply: (body: {
+    base_state_rev: number;
+    commands?: PaperMinimapCommand[];
+    proposal_id?: string;
+    dismiss_proposal_id?: string;
+    undo_effect_id?: string;
+    base_map_rev?: string;
+    actor?: "user" | "agent";
+    reason?: string;
+    evidence_lids?: string[];
+    trigger_turn_id?: string;
+  }) => http<PaperMinimapApplyOutcome>("POST", "/reader/paper_minimap.apply", body),
   state: () => http<ReaderState>("POST", "/reader/state", {}),
 
   // ── memory.*(POST)──

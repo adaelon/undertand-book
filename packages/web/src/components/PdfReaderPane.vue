@@ -2,7 +2,14 @@
 import { computed, nextTick, onBeforeUnmount, ref, shallowRef, watch } from "vue";
 import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf.mjs";
 import pdfWorkerUrl from "pdfjs-dist/legacy/build/pdf.worker.mjs?url";
-import { api, type PdfRegion, type PdfSourceMap, type PdfSourceMapEntry, type SourceManifestV2 } from "../api";
+import {
+  api,
+  type PaperViewportPosition,
+  type PdfRegion,
+  type PdfSourceMap,
+  type PdfSourceMapEntry,
+  type SourceManifestV2,
+} from "../api";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
@@ -18,6 +25,7 @@ const emit = defineEmits<{
   (e: "goto", lid: string): void;
   (e: "focus-source", source: { lid: string; quote: string | null }): void;
   (e: "select", lid: string): void;
+  (e: "viewport-change", position: PaperViewportPosition): void;
 }>();
 
 type PdfDocument = Awaited<ReturnType<typeof pdfjsLib.getDocument>["promise"]>;
@@ -43,6 +51,8 @@ const renderStates = ref<Record<number, PageRenderState>>({});
 let loadingTask: ReturnType<typeof pdfjsLib.getDocument> | null = null;
 let observer: IntersectionObserver | null = null;
 let renderToken = 0;
+let viewportFrame: number | null = null;
+let lastViewportFingerprint = "";
 
 const pageCount = computed(() => props.sourceMap?.pages.length ?? 0);
 const entriesByPage = computed(() => {
@@ -88,6 +98,83 @@ function pageRegions(pageIndex: number): Array<{ entry: PdfSourceMapEntry; regio
 
 function projectedPageRegions(pageIndex: number): Array<{ lid: string; region: PdfRegion }> {
   return projectedByPage.value.get(pageIndex) ?? [];
+}
+
+function nearestMappedLid(centerPage: number): string | null {
+  let nearest: { lid: string; distance: number; order: number } | null = null;
+  for (const [order, entry] of (props.sourceMap?.entries ?? []).entries()) {
+    for (const region of entry.regions) {
+      const page = props.sourceMap?.pages.find((item) => item.pageIndex === region.pageIndex);
+      if (!page) continue;
+      const verticalCenter = (region.bbox[1] + region.bbox[3]) / 2;
+      const visualRatio = Math.max(0, Math.min(0.999999, (page.height - verticalCenter) / page.height));
+      const distance = Math.abs(region.pageIndex + visualRatio - centerPage);
+      if (!nearest || distance < nearest.distance || (distance === nearest.distance && order < nearest.order)) {
+        nearest = { lid: entry.lid, distance, order };
+      }
+    }
+  }
+  return nearest?.lid ?? null;
+}
+
+function measureViewport(): PaperViewportPosition | null {
+  const root = pageList.value;
+  const pages = props.sourceMap?.pages ?? [];
+  if (!root || !pages.length) return null;
+  const rootRect = root.getBoundingClientRect();
+  if (rootRect.height <= 0) return null;
+  const visible = pages.filter((page) => {
+    const rect = pageEls.get(page.pageIndex)?.getBoundingClientRect();
+    return !!rect && rect.bottom > rootRect.top && rect.top < rootRect.bottom;
+  });
+  if (!visible.length) return null;
+  const rootCenter = rootRect.top + rootRect.height / 2;
+  const centerPage = visible
+    .map((page) => {
+      const rect = pageEls.get(page.pageIndex)!.getBoundingClientRect();
+      const distance = rootCenter < rect.top
+        ? rect.top - rootCenter
+        : rootCenter > rect.bottom
+          ? rootCenter - rect.bottom
+          : 0;
+      return { page, rect, distance };
+    })
+    .sort((left, right) => left.distance - right.distance || left.page.pageIndex - right.page.pageIndex)[0];
+  const localRatio = Math.max(
+    0,
+    Math.min(0.999999, (rootCenter - centerPage.rect.top) / Math.max(1, centerPage.rect.height)),
+  );
+  const center = centerPage.page.pageIndex + localRatio;
+  const firstPage = Math.min(...pages.map((page) => page.pageIndex));
+  const lastPage = Math.max(...pages.map((page) => page.pageIndex));
+  return {
+    start_page: Math.min(...visible.map((page) => page.pageIndex)),
+    end_page: Math.max(...visible.map((page) => page.pageIndex)),
+    center_page: center,
+    progress_ratio: Math.max(0, Math.min(1, (center - firstPage) / Math.max(1, lastPage - firstPage + 1))),
+    anchor_lid: nearestMappedLid(center),
+    region_id: null,
+  };
+}
+
+function emitViewportChange() {
+  viewportFrame = null;
+  const position = measureViewport();
+  if (!position) return;
+  const fingerprint = [
+    position.start_page,
+    position.end_page,
+    position.center_page.toFixed(4),
+    position.anchor_lid ?? "",
+  ].join(":");
+  if (fingerprint === lastViewportFingerprint) return;
+  lastViewportFingerprint = fingerprint;
+  emit("viewport-change", position);
+}
+
+function scheduleViewportChange() {
+  if (viewportFrame !== null) return;
+  viewportFrame = window.requestAnimationFrame(emitViewportChange);
 }
 
 function pageShellStyle(page: PdfSourceMap["pages"][number]): Record<string, string> {
@@ -211,6 +298,7 @@ async function loadPdfDocument() {
     await nextTick();
     observePages();
     await renderVisiblePages();
+    scheduleViewportChange();
   } catch (e) {
     if (token === renderToken) pdfError.value = e instanceof Error ? e.message : String(e);
   } finally {
@@ -414,10 +502,15 @@ watch(
 watch(pageCount, async () => {
   await nextTick();
   observePages();
+  scheduleViewportChange();
 });
+
+window.addEventListener("resize", scheduleViewportChange);
 
 onBeforeUnmount(() => {
   renderToken += 1;
+  if (viewportFrame !== null) window.cancelAnimationFrame(viewportFrame);
+  window.removeEventListener("resize", scheduleViewportChange);
   observer?.disconnect();
   if (loadingTask) void loadingTask.destroy();
   if (pdfDoc.value) void (pdfDoc.value as unknown as { destroy?: () => Promise<void> }).destroy?.();
@@ -435,7 +528,12 @@ onBeforeUnmount(() => {
       <span v-else-if="pdfError" class="pdf-error">{{ pdfError }}</span>
     </header>
 
-    <div ref="pageList" class="pdf-page-list" @mouseup="resolvePdfSelection">
+    <div
+      ref="pageList"
+      class="pdf-page-list"
+      @scroll.passive="scheduleViewportChange"
+      @mouseup="resolvePdfSelection"
+    >
       <section
         v-for="page in props.sourceMap?.pages ?? []"
         :key="page.pageIndex"

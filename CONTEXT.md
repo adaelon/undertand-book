@@ -329,6 +329,27 @@ Source review decisions 全部齐备后,系统只执行一次确定性 source re
 ## PDF-first reader surface
 paper profile 的主阅读表面:中心区域在当前书具备可用 PDF capability 时渲染原版 PDF 页面,并通过 PDF visual source map 显示 LID 高亮、跳转和证据位置。Markdown/结构化正文仅作为调试、降级和未映射 LID 的 fallback 视图。状态:NEW(见 [docs/adr/0063])。
 
+## Agentic paper minimap
+paper reader 中常驻的辅助型全局导航:以 PDF 页/章节顺序为稳定坐标,默认只显示区域、当前位置和地标点,用户展开后才显示模式图层与局部论证关系。它不是摘要、阅读指南或第二主阅读面,agent 只能通过受控命令调整可撤销视图。状态:BOUNDARY_CHANGE(见 [docs/adr/0072])。
+
+## Paper minimap base projection
+由可信 LID tree、PDF visual source map、BookStructure、discourse 与 graph/Pass2 确定性组合的只读地图基座,包含区域、地标和证据化关系,不新增持久 paper truth。基础拓扑不可用时整图 unavailable;语义图层缺失时独立 degraded。状态:NEW(见 [docs/adr/0072])。
+
+## Paper minimap mode lens
+小地图的 `skim / abstract / deep` 展示口径:只改变地标筛选、强调和当前位置局部投影,不得重排 PDF/章节坐标,也不等同于 ReaderLayoutPreset。用户拥有模式控制权;agent 推断出的模式切换必须以 proposal 交由用户确认。状态:NEW(见 [docs/adr/0072])。
+
+## Paper minimap position triad
+小地图中相互独立的三个位置状态:`viewport_position` 表示用户实际看到的 PDF 范围,`selected_lid` 表示用户选择,`map_focus` 表示 agent 或用户当前强调。agent 改 map_focus 默认不触发正文导航。状态:NEW(见 [docs/adr/0072])。
+
+## Paper minimap overlay
+叠加在只读地图基座上的读者私有可变层:SessionOverlay 承载本会话焦点、强调和图层显隐,SavedUserOverlay 承载用户确认后跨会话保留的地标与覆盖。个人覆盖必须保留 provenance,不得改写派生地标或存入论文 workspace。状态:NEW(见 [docs/adr/0072])。
+
+## Paper minimap action
+人类与 resident agent 共用的 typed reader command,用于聚焦区域/地标、选择合法局部投影、调整图层和临时固定地标。后端 reducer 是最终权威:直接视图变化返回可撤销 effect,agent 推断的模式切换或长期状态变更返回 revision-bound proposal。状态:NEW(见 [docs/adr/0072])。
+
+## 论文地图中文显示层 (paper minimap Chinese display layer)
+面向中文母语读者的小地图可失效展示投影:首次加载时可由 LLM 把章节标题与地标描述批量转成中文,关系类型使用固定中文词表,模型、方法、数据集、指标和缩写等专有名词保留英文;英文正文、LID、citation、地图坐标与证据关系仍是唯一权威。结果按 book version 与 base fingerprint 缓存,滚动和跳转不得触发 LLM;Provider 不可用或输出无效时退回确定性中文类别与原始标签。状态:BOUNDARY_CHANGE(见 [docs/adr/0073])。
+
 ## Clean-room PDF extractor
 不复制 AGPL 代码或资产的 PDF 抽取器实现边界。可以参考外部项目的架构分层和处理顺序,但不得复制源码、测试、模型、bundle、私有协议或受限资产;公共契约由本项目自定义。状态:NEW(见 [docs/adr/0063])。
 

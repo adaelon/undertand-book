@@ -8,11 +8,15 @@
 use crate::{query, synthesize, AssistantTurn, Message, ModelAdapter, Role, ToolSpec};
 use memory::{Anchor, MemCitation, MemoryStore, RecallQuery, SaveInput};
 use read_tools::{
-    Book, ReaderLayoutAction, ReaderLayoutApplyOutcome, ReaderLayoutEffect, ReaderLayoutProposal,
-    ToolError,
+    Book, PaperLandmarkKind, PaperMinimapAvailabilityStatus, PaperRegion, ReaderLayoutAction,
+    ReaderLayoutApplyOutcome, ReaderLayoutEffect, ReaderLayoutProposal, ToolError,
 };
-use reader::Reader;
+use reader::{
+    project_paper_minimap_lens, PaperMinimapActor, PaperMinimapApplyOutcome, PaperMinimapCommand,
+    PaperMinimapEffect, PaperMinimapMode, PaperMinimapProposal, PaperViewportPosition, Reader,
+};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use ts_rs::TS;
 
 /// 外层停机预算(切片0 占位,实测回填 `[ADR-0016]`)。
@@ -71,6 +75,47 @@ pub enum AgentEffect {
     Layout { effect: ReaderLayoutEffect },
     /// 高风险布局变更提议;Apply 时以后端 `proposal_id` + `base_layout_rev` 复验。
     LayoutProposal { proposal: ReaderLayoutProposal },
+    /// Agent-applied reversible paper minimap session effect.
+    PaperMinimap { effect: PaperMinimapEffect },
+    /// Paper minimap mode/saved change awaiting explicit user confirmation.
+    PaperMinimapProposal { proposal: PaperMinimapProposal },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PaperMinimapAgentLandmarkState {
+    Normal,
+    Emphasized,
+    Hidden,
+    Pinned,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PaperMinimapAgentLandmark {
+    pub landmark_id: String,
+    pub kind: PaperLandmarkKind,
+    pub anchor_lid: String,
+    pub page_index: u32,
+    pub label: String,
+    pub state: PaperMinimapAgentLandmarkState,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PaperMinimapAgentUserSignal {
+    pub current_goal: Option<String>,
+    pub latest_feedback: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PaperMinimapAgentContext {
+    pub map_rev: String,
+    pub state_rev: u64,
+    pub topology: Vec<PaperRegion>,
+    pub position: PaperViewportPosition,
+    pub mode: PaperMinimapMode,
+    pub landmarks: Vec<PaperMinimapAgentLandmark>,
+    pub user_signal: PaperMinimapAgentUserSignal,
+    pub allowed_actions: Vec<String>,
 }
 
 /// 查询踪迹一步 `[ADR-0030 决策5]`:tool_calls 序列摘要,对用户可见(book.query 的检索范围 + citations 链在 `result_digest` 里)。
@@ -360,8 +405,22 @@ note/highlight 自动锚回 anchor 的 LID;context 可经 citations 锚回支撑
             }),
         ),
         s(
+            "reader.paper_minimap.apply",
+            "按 paper_minimap_agent_context policy 经 reducer 应用 typed commands。orientation/interest/confusion/density 可直执 session focus/emphasis/local projection/layer;mode/correction/persistence 必须返回 proposal。不得展开、导航或写 viewport/selection。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "base_state_rev": {"type": "integer", "minimum": 0},
+                    "commands": {"type": "array", "items": {"type": "object"}},
+                    "reason": {"type": "string"},
+                    "evidence_lids": {"type": "array", "items": {"type": "string"}}
+                },
+                "required": ["base_state_rev", "commands", "reason"]
+            }),
+        ),
+        s(
             "reader.state",
-            "取阅读器当前会话态 {viewport, open_panels, selection, layout, profile},供中途接入/手动操作后 re-sync。",
+            "取阅读器当前会话态 {viewport, open_panels, selection, layout, profile, paper_minimap, paper_minimap_agent_context},供中途接入/手动操作后 re-sync。",
             json!({"type": "object", "properties": {}}),
         ),
     ]
@@ -380,6 +439,9 @@ const SYSTEM_PROMPT: &str = "你是这本书的阅读 agent。事实性回答经
 book.route_from/guided_route_from/route_to/unvisited_back 只用于导航、带读、找前置和找路径,不是普通解释工具。\
 reader.state 会返回当前 layout 与 profile summary;若需要完整 slots/presets/projections/tool policy,调 profile.manifest。\
 读论文时若用户要『元数据/作者/年份/数据集/术语/缩写/怎么读这篇/十问/Codebook/摘要辅助』,先调 book.paper_metadata、book.paper_lexicon 或 book.paper_reading_guide(mode,stage),再按其中 LID 证据读取原文。\
+论文地图反馈 policy——仅在本自然语言回合注入的 paper_minimap_agent_context 内行动:\
+orientation(我在哪/结构位置)→focus 当前 region;interest(关注/重点)→必要时读 evidence LID 后 emphasize 最多5个地标;confusion(困惑/没懂)→当前 region 的合法 local projection 最多4槽;density(太密/太多)→只改 session layer visibility;correction(更正/不对)→带理由的 saved override proposal;persistence(记住/保存偏好)→saved proposal。\
+没有合法 region/landmark/evidence 时 noop 或简短澄清,不得补造节点/关系。Agent 不得展开地图、写 viewport/selection、直接导航正文、直接切 mode 或直接持久化;saved 和 mode 必须让 reducer 返回 proposal 等用户确认。\
 特别注意——当用户要求操作阅读器时,必须真的调用对应 reader 工具来执行,不能只靠读原文代替:\
 要求『翻到/跳转』调 reader.gotoLid(lid);要求『高亮』调 reader.highlight(lid);要求『记笔记/记录』调 reader.note(lid,text)。\
 要求『打开/聚焦/固定证据/调整布局/切换论文工作台』调 reader.layout.apply({actions:[...]})。layout action 必须使用 manifest 里的 slot_id 和 snake_case kind;open_slot/focus_slot/pin_evidence/set_panel_size 可直执,close_slot/reorder_slot/set_layout_preset/reset_layout 会返回 proposal,等待用户确认,不要绕过 reducer。\
@@ -413,6 +475,210 @@ memory.save(type='qa', anchor_lid=<你刚才传给 book.query 的那个 anchor>,
 看读者之前在这里问过什么,据此把解释贴合他关心的点(卡过的地方多讲一点)。\
 证据不足时诚实说明,不要编造 LID。准备好最终答案时直接用自然语言回复(不再调用工具)。";
 
+fn classify_paper_minimap_feedback(input: &str) -> Option<&'static str> {
+    let text = input.to_lowercase();
+    let has = |needles: &[&str]| needles.iter().any(|needle| text.contains(needle));
+    if has(&[
+        "不对",
+        "错了",
+        "更正",
+        "纠正",
+        "应该是",
+        "incorrect",
+        "correct this",
+    ]) {
+        Some("correction")
+    } else if has(&[
+        "记住",
+        "保存",
+        "以后",
+        "偏好",
+        "remember",
+        "persist",
+        "save this",
+    ]) {
+        Some("persistence")
+    } else if has(&[
+        "太密",
+        "太多",
+        "简化",
+        "少一点",
+        "隐藏",
+        "dense",
+        "clutter",
+        "simplify",
+    ]) {
+        Some("density")
+    } else if has(&[
+        "没懂",
+        "不明白",
+        "困惑",
+        "看不懂",
+        "confused",
+        "don't understand",
+    ]) {
+        Some("confusion")
+    } else if has(&[
+        "感兴趣",
+        "关注",
+        "重点",
+        "重要",
+        "interest",
+        "focus on",
+        "important",
+    ]) {
+        Some("interest")
+    } else if has(&[
+        "我在哪",
+        "到哪",
+        "位置",
+        "结构",
+        "全局",
+        "where am i",
+        "orientation",
+    ]) {
+        Some("orientation")
+    } else {
+        None
+    }
+}
+
+pub fn paper_minimap_agent_context(
+    book: &Book,
+    reader: &Reader,
+    current_goal: Option<&str>,
+) -> Option<PaperMinimapAgentContext> {
+    let base = book.paper_minimap();
+    if base.status == PaperMinimapAvailabilityStatus::Unavailable {
+        return None;
+    }
+    let state = reader.paper_minimap_state();
+    let mut landmark_ids = project_paper_minimap_lens(&base, PaperMinimapMode::Skim, None)
+        .ok()
+        .map(|lens| lens.global_landmark_ids)
+        .unwrap_or_default();
+    landmark_ids.extend(
+        state
+            .session_overlay
+            .emphasized_landmark_ids
+            .iter()
+            .cloned(),
+    );
+    landmark_ids.extend(state.session_overlay.pinned_landmark_ids.iter().cloned());
+    landmark_ids.extend(state.saved_user_overlay.pinned_landmark_ids.iter().cloned());
+    landmark_ids.extend(state.session_overlay.hidden_landmark_ids.iter().cloned());
+    landmark_ids.extend(state.saved_user_overlay.hidden_landmark_ids.iter().cloned());
+    if let Some(landmark_id) = state
+        .map_focus
+        .as_ref()
+        .and_then(|focus| focus.landmark_id.clone())
+    {
+        landmark_ids.push(landmark_id);
+    }
+    let mut seen = HashSet::new();
+    landmark_ids.retain(|landmark_id| seen.insert(landmark_id.clone()));
+    landmark_ids.truncate(12);
+
+    let session_pins: HashSet<&str> = state
+        .session_overlay
+        .pinned_landmark_ids
+        .iter()
+        .map(String::as_str)
+        .collect();
+    let saved_pins: HashSet<&str> = state
+        .saved_user_overlay
+        .pinned_landmark_ids
+        .iter()
+        .map(String::as_str)
+        .collect();
+    let hidden: HashSet<&str> = state
+        .session_overlay
+        .hidden_landmark_ids
+        .iter()
+        .chain(state.saved_user_overlay.hidden_landmark_ids.iter())
+        .map(String::as_str)
+        .collect();
+    let emphasized: HashSet<&str> = state
+        .session_overlay
+        .emphasized_landmark_ids
+        .iter()
+        .map(String::as_str)
+        .collect();
+    let selected: HashSet<&str> = landmark_ids.iter().map(String::as_str).collect();
+    let landmarks = base
+        .landmarks
+        .iter()
+        .filter(|landmark| selected.contains(landmark.landmark_id.as_str()))
+        .map(|landmark| {
+            let landmark_id = landmark.landmark_id.as_str();
+            let landmark_state =
+                if session_pins.contains(landmark_id) || saved_pins.contains(landmark_id) {
+                    PaperMinimapAgentLandmarkState::Pinned
+                } else if hidden.contains(landmark_id) {
+                    PaperMinimapAgentLandmarkState::Hidden
+                } else if emphasized.contains(landmark_id)
+                    || state
+                        .saved_user_overlay
+                        .emphasized_kinds
+                        .contains(&landmark.kind)
+                {
+                    PaperMinimapAgentLandmarkState::Emphasized
+                } else {
+                    PaperMinimapAgentLandmarkState::Normal
+                };
+            PaperMinimapAgentLandmark {
+                landmark_id: landmark.landmark_id.clone(),
+                kind: landmark.kind.clone(),
+                anchor_lid: landmark.anchor_lid.clone(),
+                page_index: landmark.page_index,
+                label: landmark.label.clone(),
+                state: landmark_state,
+            }
+        })
+        .collect();
+    let current_goal = current_goal
+        .map(str::trim)
+        .filter(|goal| !goal.is_empty())
+        .map(String::from);
+    let latest_feedback = current_goal
+        .as_deref()
+        .and_then(classify_paper_minimap_feedback)
+        .map(String::from);
+    Some(PaperMinimapAgentContext {
+        map_rev: base.fingerprint,
+        state_rev: state.rev,
+        topology: base.regions,
+        position: state.viewport_position,
+        mode: state.mode,
+        landmarks,
+        user_signal: PaperMinimapAgentUserSignal {
+            current_goal,
+            latest_feedback,
+        },
+        allowed_actions: vec![
+            "focus_region".into(),
+            "focus_landmark".into(),
+            "emphasize_landmarks".into(),
+            "select_local_projection".into(),
+            "set_layer_visibility".into(),
+            "pin_landmark".into(),
+            "unpin_landmark".into(),
+            "set_mode_lens_proposal".into(),
+            "saved_overlay_proposal".into(),
+        ],
+    })
+}
+
+fn paper_minimap_contextual_question(book: &Book, reader: &Reader, question: &str) -> String {
+    let Some(context) = paper_minimap_agent_context(book, reader, Some(question)) else {
+        return question.to_string();
+    };
+    let context_json = serde_json::to_string(&context).unwrap_or_else(|_| "{}".into());
+    format!(
+        "{question}\n\n<paper_minimap_agent_context>{context_json}</paper_minimap_agent_context>"
+    )
+}
+
 fn reader_state_value(book: &Book, reader: &Reader) -> serde_json::Value {
     let state = reader.state();
     serde_json::json!({
@@ -421,6 +687,8 @@ fn reader_state_value(book: &Book, reader: &Reader) -> serde_json::Value {
         "selection": state.selection,
         "layout": state.layout,
         "profile": book.profile_summary(),
+        "paper_minimap": reader.paper_minimap_state(),
+        "paper_minimap_agent_context": paper_minimap_agent_context(book, reader, None),
     })
 }
 
@@ -810,6 +1078,86 @@ fn dispatch(
                 Err(e) => (to_json(&e), None),
             }
         }
+        "reader.paper_minimap.apply" => {
+            let Some(base_state_rev) = args.get("base_state_rev").and_then(|value| value.as_u64())
+            else {
+                return (
+                    err_json(
+                        "INVALID_PAPER_MINIMAP_ACTION",
+                        "validation",
+                        "reader.paper_minimap.apply requires base_state_rev",
+                    ),
+                    None,
+                );
+            };
+            let Some(commands_value) = args.get("commands") else {
+                return (
+                    err_json(
+                        "INVALID_PAPER_MINIMAP_ACTION",
+                        "validation",
+                        "reader.paper_minimap.apply requires commands",
+                    ),
+                    None,
+                );
+            };
+            let commands =
+                match serde_json::from_value::<Vec<PaperMinimapCommand>>(commands_value.clone()) {
+                    Ok(commands) => commands,
+                    Err(error) => {
+                        return (
+                            err_json(
+                                "INVALID_PAPER_MINIMAP_ACTION",
+                                "validation",
+                                &format!("invalid paper minimap commands: {error}"),
+                            ),
+                            None,
+                        )
+                    }
+                };
+            let evidence_lids = match args.get("evidence_lids") {
+                Some(value) => match serde_json::from_value::<Vec<String>>(value.clone()) {
+                    Ok(lids) => lids,
+                    Err(error) => {
+                        return (
+                            err_json(
+                                "INVALID_PAPER_MINIMAP_ACTION",
+                                "validation",
+                                &format!("invalid minimap evidence_lids: {error}"),
+                            ),
+                            None,
+                        )
+                    }
+                },
+                None => Vec::new(),
+            };
+            match reader.apply_paper_minimap_commands(
+                book,
+                base_state_rev,
+                PaperMinimapActor::Agent,
+                commands,
+                sget("reason").unwrap_or("agent paper minimap action"),
+                evidence_lids,
+                None,
+                now,
+            ) {
+                Ok(PaperMinimapApplyOutcome::Effect { effect }) => {
+                    let body = to_json(&PaperMinimapApplyOutcome::Effect {
+                        effect: effect.clone(),
+                    });
+                    (body, Some(AgentEffect::PaperMinimap { effect }))
+                }
+                Ok(PaperMinimapApplyOutcome::Proposal { proposal }) => {
+                    let body = to_json(&PaperMinimapApplyOutcome::Proposal {
+                        proposal: proposal.clone(),
+                    });
+                    (body, Some(AgentEffect::PaperMinimapProposal { proposal }))
+                }
+                Ok(PaperMinimapApplyOutcome::Noop { state }) => {
+                    (to_json(&PaperMinimapApplyOutcome::Noop { state }), None)
+                }
+                Err(error) => (to_json(&error), None),
+            }
+        }
         "reader.state" => (to_json(&reader_state_value(book, reader)), None),
         other => (
             err_json("INVALID_RANGE", "validation", &format!("未知工具: {other}")),
@@ -874,7 +1222,9 @@ pub fn run(
     cfg: OuterConfig,
 ) -> Result<OuterOutcome, ToolError> {
     let tools = tool_specs();
-    messages.push(Message::user(question)); // system 由 new_session 注入;messages 跨回合保留
+    messages.push(Message::user(paper_minimap_contextual_question(
+        book, reader, question,
+    ))); // system 由 new_session 注入;messages 跨回合保留
     let before_anchor = reader.state().viewport.anchor_lid; // 回合前视口锚(viewport undo 基准)
     let mut effects: Vec<AgentEffect> = Vec::new();
     let mut trace: Vec<TraceStep> = Vec::new();
@@ -1060,6 +1410,108 @@ mod tests {
     fn book() -> Book {
         let src = "X".repeat(100) + "尾巴";
         Book::new(sample_base(), &src)
+    }
+
+    fn paper_book(name: &str) -> (Book, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("ub-orch-paper-{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = "# Introduction\nWhich method works?\n";
+        let heading_end = "# Introduction\n".encode_utf16().count();
+        let source_end = source.encode_utf16().count();
+        let base = ReadOnlyBase {
+            book_id: "runtime-paper".into(),
+            lid_nodes: vec![
+                LidNode {
+                    lid: "1".into(),
+                    path: vec![1],
+                    kind: NodeKind::Chapter,
+                    span: Span {
+                        start: 0,
+                        end: source_end,
+                    },
+                    children: vec!["1.1".into()],
+                },
+                LidNode {
+                    lid: "1.1".into(),
+                    path: vec![1, 1],
+                    kind: NodeKind::Section,
+                    span: Span {
+                        start: 0,
+                        end: source_end,
+                    },
+                    children: vec!["1.1.1".into()],
+                },
+                LidNode {
+                    lid: "1.1.1".into(),
+                    path: vec![1, 1, 1],
+                    kind: NodeKind::Paragraph,
+                    span: Span {
+                        start: heading_end,
+                        end: source_end,
+                    },
+                    children: Vec::new(),
+                },
+            ],
+            graph_nodes: Vec::new(),
+            graph_edges: Vec::new(),
+        };
+        std::fs::write(dir.join("base.json"), serde_json::to_string(&base).unwrap()).unwrap();
+        std::fs::write(dir.join("source.txt"), source).unwrap();
+        std::fs::write(
+            dir.join("book_structure.json"),
+            serde_json::json!({
+                "header": {
+                    "book_id": "runtime-paper", "book_version": "v1",
+                    "profile_id": "paper", "profile_version": "paper_v0",
+                    "core_schema_version": "core_v0", "generated_at": "t0"
+                },
+                "spine": [], "throughlines": [], "key_stops": []
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("source_manifest.json"),
+            serde_json::json!({
+                "version": "source_manifest.v2", "book_id": "runtime-paper",
+                "canonical_source": {"path": "source.txt", "sha256": "sha-a"},
+                "capabilities": {
+                    "view_pdf": {"status": "available"},
+                    "project_lid_to_pdf": {"status": "available", "config_hash": "cfg-a"}
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("pdf_source_map.json"),
+            serde_json::json!({
+                "version": "pdf_source_map.v1", "book_id": "runtime-paper",
+                "pages": [{"pageIndex": 0}],
+                "entries": [{
+                    "lid": "1.1.1",
+                    "source_span": {"start": heading_end, "end": source_end},
+                    "regions": [{"pageIndex": 0}]
+                }],
+                "config_hash": "cfg-a"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("discourse_index.json"),
+            serde_json::json!({
+                "items": [{
+                    "lid": "1.1.1", "mode": "argumentative",
+                    "local_function": "research_question",
+                    "local_summary": "Which method works?", "relations": []
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        (Book::load(dir.to_str().unwrap()).unwrap(), dir)
     }
     /// 容器 "1" 下挂 n 个叶 "1.1".."1.n"(各 10 字符),供视口跳转/合并测试(首叶 "1.1")。
     fn book_leaves(n: usize) -> Book {
@@ -1980,6 +2432,213 @@ mod tests {
     }
 
     // loop 在工具报错后仍继续、并能收敛(错误回喂 → 模型读到后终答)。
+    #[test]
+    fn agent_loop_paper_minimap_tool_emits_effect_and_mode_proposal() {
+        let b = book();
+        let mut store = MemoryStore::open(tmp("paper-minimap-loop")).unwrap();
+        let fake = FakeAdapter::new(
+            vec![
+                turn_calls(vec![call(
+                    "m1",
+                    "reader.paper_minimap.apply",
+                    r#"{"base_state_rev":0,"reason":"reduce density","commands":[{"scope":"session","action":{"kind":"set_layer_visibility","layer":"arguments","visible":false}}]}"#,
+                )]),
+                turn_calls(vec![call(
+                    "m2",
+                    "reader.paper_minimap.apply",
+                    r#"{"base_state_rev":1,"reason":"deep reading may help","commands":[{"scope":"session","action":{"kind":"set_mode_lens","mode":"deep"}}]}"#,
+                )]),
+                turn_final("Adjusted density and proposed deep mode."),
+            ],
+            vec![],
+        );
+        let mut reader = Reader::new(&b, DEFAULT_RADIUS);
+        let mut messages = new_session();
+        let out = run(
+            &b,
+            &mut store,
+            &mut reader,
+            &fake,
+            &mut messages,
+            "Make the paper minimap less dense and switch to deep mode",
+            "t0",
+            OuterConfig::default(),
+        )
+        .unwrap();
+        assert_eq!(out.effects.len(), 2);
+        assert!(matches!(out.effects[0], AgentEffect::PaperMinimap { .. }));
+        assert!(matches!(
+            out.effects[1],
+            AgentEffect::PaperMinimapProposal { .. }
+        ));
+        assert!(!reader
+            .paper_minimap_state()
+            .session_overlay
+            .visible_layers
+            .iter()
+            .any(|layer| layer == "arguments"));
+        assert_eq!(
+            reader.paper_minimap_state().mode,
+            reader::PaperMinimapMode::Skim
+        );
+    }
+
+    #[test]
+    fn paper_minimap_feedback_classifier_covers_the_frozen_policy() {
+        for (input, expected) in [
+            ("我现在在论文的哪个结构位置?", "orientation"),
+            ("我对这个结果很感兴趣", "interest"),
+            ("这里我还是没懂", "confusion"),
+            ("地图太密了,少一点", "density"),
+            ("这个重点不对,请更正", "correction"),
+            ("记住我以后都想看证据层", "persistence"),
+        ] {
+            assert_eq!(classify_paper_minimap_feedback(input), Some(expected));
+        }
+        assert_eq!(classify_paper_minimap_feedback("继续读"), None);
+    }
+
+    #[test]
+    fn agent_loop_paper_minimap_policy_emits_effect_proposal_noop_and_clarify() {
+        let (b, dir) = paper_book("feedback-policy");
+        let base = b.paper_minimap();
+        let region = &base.regions[0];
+        let landmark = &base.landmarks[0];
+        let calls = vec![
+            call(
+                "p1",
+                "reader.paper_minimap.apply",
+                &serde_json::json!({
+                    "base_state_rev": 0, "reason": "定位当前区域",
+                    "commands": [{"scope": "session", "action": {
+                        "kind": "focus_region", "region_id": region.region_id
+                    }}]
+                })
+                .to_string(),
+            ),
+            call(
+                "p2",
+                "reader.paper_minimap.apply",
+                &serde_json::json!({
+                    "base_state_rev": 1, "reason": "强调用户关注点",
+                    "evidence_lids": [landmark.anchor_lid],
+                    "commands": [{"scope": "session", "action": {
+                        "kind": "emphasize_landmarks",
+                        "landmark_ids": [landmark.landmark_id],
+                        "reason": "用户明确表示关注"
+                    }}]
+                })
+                .to_string(),
+            ),
+            call(
+                "p3",
+                "reader.paper_minimap.apply",
+                &serde_json::json!({
+                    "base_state_rev": 2, "reason": "展开当前区域论证槽",
+                    "commands": [{"scope": "session", "action": {
+                        "kind": "select_local_projection",
+                        "region_id": region.region_id,
+                        "grammar": "introduction",
+                        "focus_slots": ["research_question"]
+                    }}]
+                })
+                .to_string(),
+            ),
+            call(
+                "p4",
+                "reader.paper_minimap.apply",
+                r#"{"base_state_rev":3,"reason":"降低密度","commands":[{"scope":"session","action":{"kind":"set_layer_visibility","layer":"arguments","visible":false}}]}"#,
+            ),
+            call(
+                "p5",
+                "reader.paper_minimap.apply",
+                &serde_json::json!({
+                    "base_state_rev": 4, "reason": "用户更正地标权重",
+                    "commands": [{"scope": "saved", "action": {
+                        "kind": "set_landmark_override",
+                        "target_landmark_id": landmark.landmark_id,
+                        "operation": "deemphasize", "label": null,
+                        "user_reason": "用户指出它不是重点"
+                    }}]
+                })
+                .to_string(),
+            ),
+            call(
+                "p6",
+                "reader.paper_minimap.apply",
+                r#"{"base_state_rev":4,"reason":"保存阅读偏好","commands":[{"scope":"saved","action":{"kind":"save_mode_preference","mode":"skim","visible_layers":["regions","landmarks"]}}]}"#,
+            ),
+            call(
+                "p7",
+                "reader.paper_minimap.apply",
+                r#"{"base_state_rev":4,"reason":"保持低密度","commands":[{"scope":"session","action":{"kind":"set_layer_visibility","layer":"arguments","visible":false}}]}"#,
+            ),
+        ];
+        let fake = FakeAdapter::new(
+            vec![
+                turn_calls(vec![calls[0].clone()]),
+                turn_calls(vec![calls[1].clone()]),
+                turn_calls(vec![calls[2].clone()]),
+                turn_calls(vec![calls[3].clone()]),
+                turn_calls(vec![calls[4].clone()]),
+                turn_calls(vec![calls[5].clone()]),
+                turn_calls(vec![calls[6].clone()]),
+                turn_final("请说明你要更正的是地标标签、重要性,还是证据范围。"),
+            ],
+            vec![],
+        );
+        let mut store = MemoryStore::open(tmp("paper-minimap-feedback-policy")).unwrap();
+        let mut reader = Reader::new(&b, DEFAULT_RADIUS);
+        let context = paper_minimap_agent_context(&b, &reader, Some("地图太密了")).unwrap();
+        assert_eq!(
+            context.user_signal.latest_feedback.as_deref(),
+            Some("density")
+        );
+        assert!(!context
+            .allowed_actions
+            .iter()
+            .any(|action| action == "set_presentation" || action == "update_viewport"));
+        let mut messages = new_session();
+        let out = run(
+            &b,
+            &mut store,
+            &mut reader,
+            &fake,
+            &mut messages,
+            "地图太密了,也请关注研究问题;不确定我的更正目标时先问我。",
+            "t0",
+            OuterConfig::default(),
+        )
+        .unwrap();
+        assert_eq!(out.effects.len(), 6);
+        assert_eq!(
+            out.effects
+                .iter()
+                .filter(|effect| matches!(effect, AgentEffect::PaperMinimap { .. }))
+                .count(),
+            4
+        );
+        assert_eq!(
+            out.effects
+                .iter()
+                .filter(|effect| matches!(effect, AgentEffect::PaperMinimapProposal { .. }))
+                .count(),
+            2
+        );
+        assert!(out.answer.unwrap().contains("请说明"));
+        assert!(messages[1]
+            .content
+            .as_deref()
+            .unwrap()
+            .contains("paper_minimap_agent_context"));
+        assert_eq!(reader.paper_minimap_state().rev, 4);
+        assert_eq!(
+            reader.paper_minimap_state().saved_user_overlay.overlay_rev,
+            0
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn loop_continues_after_tool_error_and_converges() {
         let b = book();
