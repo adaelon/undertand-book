@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  hasMappedPdfNavigationTarget,
   normalizePaperViewportForMinimap,
-  shouldOpenPdfSourcePreview,
 } from "./paper-minimap-navigation";
 
 describe("paper minimap navigation", () => {
@@ -29,10 +29,11 @@ describe("paper minimap navigation", () => {
     expect(normalized?.progress_ratio).toBeCloseTo(1 / 12, 6);
   });
 
-  it("does not open source preview when a container goto resolves to a mapped PDF leaf", () => {
+  it("accepts either a requested LID or its resolved leaf as a mapped PDF target", () => {
     const mapped = new Set(["2.1"]);
 
-    expect(shouldOpenPdfSourcePreview("2", "2.1", mapped)).toBe(false);
-    expect(shouldOpenPdfSourcePreview("appendix", "appendix.1", mapped)).toBe(true);
+    expect(hasMappedPdfNavigationTarget("2", "2.1", mapped)).toBe(true);
+    expect(hasMappedPdfNavigationTarget("2.1", "2.1", mapped)).toBe(true);
+    expect(hasMappedPdfNavigationTarget("appendix", "appendix.1", mapped)).toBe(false);
   });
 });

@@ -38,4 +38,16 @@ describe("paper minimap migration boundary", () => {
     expect(modeHandler).toContain("applyPaperMinimapCommands");
     expect(modeHandler).not.toContain("layoutApply");
   });
+
+  it("keeps outline goto in the PDF reader when a LID has no mapped region", () => {
+    const app = readFileSync("src/App.vue", "utf8");
+    const gotoHandler = app.slice(
+      app.indexOf("async function doGoto"),
+      app.indexOf("async function focusSource"),
+    );
+
+    expect(gotoHandler).toContain("hasMappedPdfNavigationTarget");
+    expect(gotoHandler).toContain("已保留当前 PDF 页面");
+    expect(gotoHandler).not.toContain("openSourcePreview");
+  });
 });

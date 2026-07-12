@@ -17,37 +17,43 @@ function tempDir(): string {
   return mkdtempSync(path.join(tmpdir(), "understand-book-hybrid-"));
 }
 
-function geometryFromLines(lines: string[]): PdfTextGeometry {
-  let charIndex = 0;
+function geometryFromPages(pageLines: string[][]): PdfTextGeometry {
   return {
-    pages: [
-      {
-        pageIndex: 0,
-        page_label: "1",
-        width: 300,
-        height: 200,
+    pages: pageLines.map((lines, pageIndex) => {
+      let charIndex = 0;
+      const width = Math.max(600, ...lines.map((line) => 144 + line.length * 6));
+      const height = Math.max(200, 80 + lines.length * 18);
+      return {
+        pageIndex,
+        page_label: String(pageIndex + 1),
+        width,
+        height,
         rotate: 0,
-        view: [0, 0, 300, 200],
+        view: [0, 0, width, height],
         words: [],
         chars: lines.flatMap((line, lineIndex) =>
           Array.from(line).map((text, offset) => ({
-            pageIndex: 0,
+            pageIndex,
             charIndex: charIndex++,
             text,
-            bbox: [72 + offset * 6, 120 - lineIndex * 18, 78 + offset * 6, 132 - lineIndex * 18],
+            bbox: [72 + offset * 6, height - 60 - lineIndex * 18, 78 + offset * 6, height - 48 - lineIndex * 18],
           })),
         ),
         lines: lines.map((text, lineIndex) => ({
-          pageIndex: 0,
+          pageIndex,
           lineIndex,
           text,
           char_start: 0,
           char_end: text.length,
-          bbox: [72, 120 - lineIndex * 18, 72 + text.length * 6, 132 - lineIndex * 18],
+          bbox: [72, height - 60 - lineIndex * 18, 72 + text.length * 6, height - 48 - lineIndex * 18],
         })),
-      },
-    ],
+      };
+    }),
   };
+}
+
+function geometryFromLines(lines: string[]): PdfTextGeometry {
+  return geometryFromPages([lines]);
 }
 
 describe("PH5 hybrid foundation", () => {
@@ -98,5 +104,172 @@ describe("PH5 hybrid foundation", () => {
     expect(written.pdf_selection_map_page_paths.every((p) => existsSync(p))).toBe(true);
     expect(existsSync(written.alignment_report_path)).toBe(true);
     expect(readFileSync(written.source_path, "utf8")).toBe(source);
+  });
+
+  it("prefers a nearby split heading over a later prose repetition", () => {
+    const source = [
+      "# Paper",
+      "",
+      "### Isoform Diversity Analysis",
+      "",
+      "### Differential Isoform Usage Analysis",
+      "",
+    ].join("\n");
+    const artifacts = buildHybridFoundation({
+      book_id: "paper-window",
+      source_txt: source,
+      original_pdf_path: "paper.pdf",
+      original_pdf_sha256: "sha-pdf",
+      pdf_geometry: geometryFromPages([
+        ["Paper", "Isoform Diversity", "Analysis", "Differential Isoform Usage Analysis"],
+        ["Later discussion says Isoform Diversity Analysis showed a secondary pattern."],
+      ]),
+    });
+
+    expect(artifacts.pdf_source_map.entries[1].primary_region?.pageIndex).toBe(0);
+    expect(artifacts.pdf_source_map.entries[2].primary_region?.pageIndex).toBe(0);
+  });
+
+  it("maps a paragraph anchor across consecutive PDF lines", () => {
+    const source = "# Title\n\nA long paragraph spans PDF lines and should remain mapped.\n";
+    const artifacts = buildHybridFoundation({
+      book_id: "paper-multiline",
+      source_txt: source,
+      original_pdf_path: "paper.pdf",
+      original_pdf_sha256: "sha-pdf",
+      pdf_geometry: geometryFromLines([
+        "Title",
+        "A long paragraph spans PDF",
+        "lines and should remain mapped.",
+      ]),
+    });
+
+    expect(artifacts.pdf_source_map.entries[1].status).toBe("block_fallback");
+    expect(artifacts.pdf_source_map.entries[1].regions).toHaveLength(2);
+  });
+
+  it("maps a paragraph across a hyphenated PDF line break", () => {
+    const source = "# Title\n\nThe enriched pathway remains stable.\n";
+    const artifacts = buildHybridFoundation({
+      book_id: "paper-hyphenated-line-break",
+      source_txt: source,
+      original_pdf_path: "paper.pdf",
+      original_pdf_sha256: "sha-pdf",
+      pdf_geometry: geometryFromLines([
+        "Title",
+        "The en-",
+        "riched pathway remains stable.",
+      ]),
+    });
+
+    expect(artifacts.pdf_source_map.entries[1].status).toBe("block_fallback");
+    expect(artifacts.pdf_source_map.entries[1].regions).toHaveLength(2);
+  });
+
+  it("normalizes semantic source hyphens and PDF line-break hyphens consistently", () => {
+    const source = "# Title\n\nSingle-nuclei extraction remains stable.\n";
+    const artifacts = buildHybridFoundation({
+      book_id: "paper-semantic-hyphen",
+      source_txt: source,
+      original_pdf_path: "paper.pdf",
+      original_pdf_sha256: "sha-pdf",
+      pdf_geometry: geometryFromLines([
+        "Title",
+        "Single-",
+        "nuclei extraction remains stable.",
+      ]),
+    });
+
+    expect(artifacts.pdf_source_map.entries[1].status).toBe("block_fallback");
+  });
+
+  it("continues a mid-line paragraph anchor onto following PDF lines", () => {
+    const source = "# Title\n\nTarget begins here and continues across another PDF line.\n";
+    const geometry = geometryFromLines([
+      "Title",
+      "Several preceding words appear before Target begins here and continues",
+      "across another PDF line.",
+    ]);
+    geometry.pages[0].lines[1].bbox[2] = 250;
+    geometry.pages[0].lines[2].bbox[2] = 250;
+    const artifacts = buildHybridFoundation({
+      book_id: "paper-mid-line-anchor",
+      source_txt: source,
+      original_pdf_path: "paper.pdf",
+      original_pdf_sha256: "sha-pdf",
+      pdf_geometry: geometry,
+    });
+
+    expect(artifacts.pdf_source_map.entries[1].status).toBe("block_fallback");
+    expect(artifacts.pdf_source_map.entries[1].regions).toHaveLength(2);
+  });
+
+  it("ignores out-of-bounds PDF geometry lines as alignment candidates", () => {
+    const source = "# Title\n\nTarget paragraph.\n";
+    const geometry = geometryFromLines(["Title", "Target paragraph."]);
+    geometry.pages[0].lines[1].bbox = [0, 0, geometry.pages[0].width + 100, geometry.pages[0].height + 100];
+
+    const artifacts = buildHybridFoundation({
+      book_id: "paper-invalid-geometry",
+      source_txt: source,
+      original_pdf_path: "paper.pdf",
+      original_pdf_sha256: "sha-pdf",
+      pdf_geometry: geometry,
+    });
+
+    expect(artifacts.pdf_source_map.entries[1].status).toBe("unmapped");
+    expect(artifacts.alignment_report.hard_gates.all_mapped_regions_in_page_bounds).toBe(true);
+  });
+
+  it("does not use tiny source fragments as contains anchors", () => {
+    const source = "# Title\n\nat\n\n## Next Section\n";
+    const artifacts = buildHybridFoundation({
+      book_id: "paper-tiny-fragment",
+      source_txt: source,
+      original_pdf_path: "paper.pdf",
+      original_pdf_sha256: "sha-pdf",
+      pdf_geometry: geometryFromLines(["Title", "Samples were held at room temperature.", "Next Section"]),
+    });
+
+    expect(artifacts.pdf_source_map.entries[1].status).toBe("unmapped");
+    expect(artifacts.pdf_source_map.entries[2].status).toBe("line_fallback");
+  });
+
+  it("aligns two-column pages by spatial reading order instead of PDF content-stream order", () => {
+    const source = "# Clinical Perspective\n\nBody continuation.\n\n## Methods\n";
+    const geometry = geometryFromPages([["Body continuation.", "Methods", "Clinical Perspective"]]);
+    geometry.pages[0].height = 800;
+    geometry.pages[0].view = [0, 0, geometry.pages[0].width, 800];
+    geometry.pages[0].lines[0].bbox = [320, 600, 500, 612];
+    geometry.pages[0].lines[1].bbox = [320, 500, 400, 512];
+    geometry.pages[0].lines[2].bbox = [60, 700, 220, 712];
+
+    const artifacts = buildHybridFoundation({
+      book_id: "paper-two-column-order",
+      source_txt: source,
+      original_pdf_path: "paper.pdf",
+      original_pdf_sha256: "sha-pdf",
+      pdf_geometry: geometry,
+    });
+
+    expect(artifacts.pdf_source_map.entries.map((entry) => entry.status)).toEqual([
+      "line_fallback",
+      "line_fallback",
+      "line_fallback",
+    ]);
+  });
+
+  it("rejects a foundation whose text mapping coverage is not reader-ready", () => {
+    const source = "# Title\n\nOne missing block.\n\nTwo missing blocks.\n\nThree missing blocks.\n\nFour missing blocks.\n";
+    const artifacts = buildHybridFoundation({
+      book_id: "paper-low-coverage",
+      source_txt: source,
+      original_pdf_path: "paper.pdf",
+      original_pdf_sha256: "sha-pdf",
+      pdf_geometry: geometryFromLines(["Title"]),
+    });
+
+    expect(artifacts.alignment_report.hard_gates.minimum_text_mapping_ratio).toBe(false);
+    expect(() => assertHybridFoundationHardGates(artifacts)).toThrow(/mapping coverage/i);
   });
 });

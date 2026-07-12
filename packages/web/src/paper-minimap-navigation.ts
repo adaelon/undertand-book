@@ -32,10 +32,10 @@ export function normalizePaperViewportForMinimap(
   };
 }
 
-export function shouldOpenPdfSourcePreview(
+export function hasMappedPdfNavigationTarget(
   requestedLid: string,
   resolvedLid: string,
   mappedLids: ReadonlySet<string>,
 ): boolean {
-  return !mappedLids.has(requestedLid) && !mappedLids.has(resolvedLid);
+  return mappedLids.has(requestedLid) || mappedLids.has(resolvedLid);
 }

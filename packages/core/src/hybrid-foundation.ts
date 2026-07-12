@@ -12,14 +12,14 @@ import {
   type PdfSourceMap,
   type PdfSourceMapEntry,
 } from "./pdf-source-map";
-import type { PdfGeometryChar, PdfGeometryLine, PdfTextGeometry } from "./pdf-geometry";
+import type { PdfGeometryChar, PdfGeometryLine, PdfGeometryPage, PdfTextGeometry } from "./pdf-geometry";
 import type { ReadOnlyBase } from "./generated/ReadOnlyBase";
 
 export interface AlignmentReport {
   version: "alignment_report.v1";
   book_id: string;
   config: {
-    algorithm: "monotonic_forward_fuzzy_v1";
+    algorithm: "monotonic_forward_fuzzy_v1" | "monotonic_windowed_blocks_v2";
     lookback_words: number;
     lookahead_words: number;
     merge_gap_utf16: number;
@@ -72,8 +72,23 @@ function keyOfSpan(span: { start: number; end: number }): string {
   return `${span.start}:${span.end}`;
 }
 
-function searchable(text: string): string {
-  return text.normalize("NFC").replace(/\r\n?/g, "\n").replace(/\s+/g, " ").trim().toLowerCase();
+const ALIGNMENT_ALGORITHM = "monotonic_windowed_blocks_v2" as const;
+const ALIGNMENT_LOOKAHEAD_WORDS = 240;
+const PARAGRAPH_ANCHOR_TOKENS = 16;
+const MAX_MATCH_LINES = 8;
+const MINIMUM_TEXT_MAPPING_RATIO = 0.6;
+const MINIMUM_HEADING_MAPPING_RATIO = 0.8;
+
+function alignmentTokens(text: string): string[] {
+  return text
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/([\p{L}\p{N}])[\p{Pd}\u00ad]\s+(?=[\p{L}\p{N}])/gu, "$1")
+    .replace(/[\p{Pd}\u00ad]/gu, "")
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim()
+    .split(/\s+/u)
+    .filter(Boolean);
 }
 
 function lineRegion(pageIndex: number, line: PdfGeometryLine, regionId: string): PdfRegion {
@@ -84,13 +99,97 @@ function lineRegion(pageIndex: number, line: PdfGeometryLine, regionId: string):
   };
 }
 
-function findLineForBlock(lines: Array<PdfGeometryLine & { pageIndex: number }>, block: SourceBlock, startAt: number): number {
-  const needle = searchable(block.text);
-  if (!needle) return -1;
-  for (let i = startAt; i < lines.length; i++) {
-    if (searchable(lines[i].text).includes(needle)) return i;
+function pageLinesInReadingOrder(page: PdfGeometryPage): Array<PdfGeometryLine & { pageIndex: number }> {
+  const midpoint = (page.view[0] + page.view[2]) / 2;
+  const pageWidth = page.view[2] - page.view[0];
+  const maxNormalLineHeight = Math.max(30, page.height * 0.08);
+  return page.lines
+    .filter((line) => line.bbox[0] >= 0
+      && line.bbox[1] >= 0
+      && line.bbox[2] <= page.width
+      && line.bbox[3] <= page.height
+      && line.bbox[3] - line.bbox[1] <= maxNormalLineHeight)
+    .map((line, contentIndex) => ({ ...line, pageIndex: page.pageIndex, contentIndex }))
+    .sort((left, right) => {
+      const group = (line: PdfGeometryLine): number => {
+        const width = line.bbox[2] - line.bbox[0];
+        const height = line.bbox[3] - line.bbox[1];
+        const spansColumns = line.bbox[0] < midpoint
+          && line.bbox[2] > midpoint
+          && width >= pageWidth * 0.45
+          && height <= maxNormalLineHeight;
+        if (spansColumns) return 0;
+        return (line.bbox[0] + line.bbox[2]) / 2 < midpoint ? 1 : 2;
+      };
+      return group(left) - group(right)
+        || right.bbox[3] - left.bbox[3]
+        || left.bbox[0] - right.bbox[0]
+        || left.contentIndex - right.contentIndex;
+    })
+    .map(({ contentIndex: _contentIndex, ...line }) => line);
+}
+
+interface PdfLineMatch {
+  startIndex: number;
+  endIndex: number;
+  quality: "exact" | "line_start" | "contains";
+}
+
+function tokenSequenceIndex(haystack: string[], needle: string[]): number {
+  if (!needle.length || needle.length > haystack.length) return -1;
+  for (let start = 0; start <= haystack.length - needle.length; start++) {
+    if (needle.every((token, offset) => haystack[start + offset] === token)) return start;
   }
   return -1;
+}
+
+function findLinesForBlock(
+  lines: Array<PdfGeometryLine & { pageIndex: number }>,
+  block: SourceBlock,
+  startAt: number,
+): PdfLineMatch | null {
+  if (block.assetKind) return null;
+  const blockTokens = alignmentTokens(block.text);
+  if (!blockTokens.length) return null;
+  const anchorTokens = block.kind === "heading"
+    ? blockTokens
+    : blockTokens.slice(0, PARAGRAPH_ANCHOR_TOKENS);
+  const candidates: Array<PdfLineMatch & { distanceWords: number }> = [];
+  let distanceWords = 0;
+
+  for (let start = startAt; start < lines.length; start++) {
+    const localCandidate = distanceWords <= ALIGNMENT_LOOKAHEAD_WORDS;
+    for (let end = start; end < Math.min(lines.length, start + MAX_MATCH_LINES); end++) {
+      if (lines[end].pageIndex !== lines[start].pageIndex) break;
+      const combinedTokens = alignmentTokens(lines
+        .slice(start, end + 1)
+        .map((line) => line.text)
+        .join(" "));
+      if (combinedTokens.length < anchorTokens.length) continue;
+      const tokenIndex = tokenSequenceIndex(combinedTokens, anchorTokens);
+      if (tokenIndex < 0) continue;
+      const quality = tokenIndex === 0 && combinedTokens.length === anchorTokens.length
+        ? "exact"
+        : tokenIndex === 0
+          ? "line_start"
+          : "contains";
+      if (block.kind !== "heading" && blockTokens.length < 4 && quality !== "exact") continue;
+      if (localCandidate || (block.kind === "heading" && quality === "exact")) {
+        candidates.push({ startIndex: start, endIndex: end, quality, distanceWords });
+      }
+      break;
+    }
+    distanceWords += alignmentTokens(lines[start].text).length;
+    if (!localCandidate && block.kind !== "heading") break;
+  }
+
+  const qualityRank = { exact: 3, line_start: 2, contains: 1 } as const;
+  candidates.sort((left, right) =>
+    qualityRank[right.quality] - qualityRank[left.quality]
+      || left.distanceWords - right.distanceWords
+      || left.startIndex - right.startIndex,
+  );
+  return candidates[0] ?? null;
 }
 
 function rectIntersects(a: [number, number, number, number], b: [number, number, number, number]): boolean {
@@ -106,8 +205,8 @@ export function buildHybridFoundation(input: HybridFoundationInput): HybridFound
   const lidNodes = segment(blocks);
   const leafLids = new Set(lidNodes.filter((node) => node.children.length === 0).map((node) => node.lid));
   const lidBySpan = new Map(lidNodes.filter((node) => node.children.length === 0).map((node) => [keyOfSpan(node.span), node.lid]));
-  const configHash = sha256("hybrid_foundation_v1:monotonic_forward_fuzzy_v1");
-  const allLines = input.pdf_geometry.pages.flatMap((page) => page.lines.map((line) => ({ ...line, pageIndex: page.pageIndex })));
+  const configHash = sha256(`hybrid_foundation_v2:${ALIGNMENT_ALGORITHM}`);
+  const allLines = input.pdf_geometry.pages.flatMap(pageLinesInReadingOrder);
   const entries: PdfSourceMapEntry[] = [];
   const pageRegionIndex: Record<string, string[]> = {};
   let lineCursor = 0;
@@ -115,8 +214,8 @@ export function buildHybridFoundation(input: HybridFoundationInput): HybridFound
   for (const block of blocks) {
     const lid = lidBySpan.get(keyOfSpan(block.span));
     if (!lid) continue;
-    const lineIndex = findLineForBlock(allLines, block, lineCursor);
-    if (lineIndex < 0) {
+    const match = findLinesForBlock(allLines, block, lineCursor);
+    if (!match) {
       entries.push({
         lid,
         source_span: block.span,
@@ -126,18 +225,28 @@ export function buildHybridFoundation(input: HybridFoundationInput): HybridFound
       });
       continue;
     }
-    const line = allLines[lineIndex];
-    const region = lineRegion(line.pageIndex, line, `r${entries.length + 1}`);
-    pageRegionIndex[String(line.pageIndex)] = [...(pageRegionIndex[String(line.pageIndex)] ?? []), region.region_id];
+    const matchedLines = allLines.slice(match.startIndex, match.endIndex + 1);
+    const regionBase = `r${entries.length + 1}`;
+    const regions = matchedLines.map((line, offset) => lineRegion(
+      line.pageIndex,
+      line,
+      matchedLines.length === 1 ? regionBase : `${regionBase}-${offset + 1}`,
+    ));
+    for (const region of regions) {
+      pageRegionIndex[String(region.pageIndex)] = [...(pageRegionIndex[String(region.pageIndex)] ?? []), region.region_id];
+    }
     entries.push({
       lid,
       source_span: block.span,
-      status: "line_fallback",
-      regions: [region],
-      primary_region: region,
-      alignment: { confidence: 0.8, reason: "line text matched source block" },
+      status: regions.length === 1 ? "line_fallback" : "block_fallback",
+      regions,
+      primary_region: regions[0],
+      alignment: {
+        confidence: match.quality === "exact" ? 0.9 : match.quality === "line_start" ? 0.82 : 0.7,
+        reason: `${match.quality} token anchor matched ${regions.length} PDF line${regions.length === 1 ? "" : "s"}`,
+      },
     });
-    lineCursor = lineIndex + 1;
+    lineCursor = match.endIndex + 1;
   }
 
   const pdfSourceMap: PdfSourceMap = {
@@ -189,6 +298,18 @@ export function buildHybridFoundation(input: HybridFoundationInput): HybridFound
   };
 
   const mapped = entries.filter((entry) => entry.status !== "unmapped").length;
+  const alignableLids = new Set(blocks
+    .filter((block) => !block.assetKind && alignmentTokens(block.text).length > 0)
+    .map((block) => lidBySpan.get(keyOfSpan(block.span)))
+    .filter((lid): lid is string => Boolean(lid)));
+  const headingLids = new Set(blocks
+    .filter((block) => block.kind === "heading" && alignmentTokens(block.text).length > 0)
+    .map((block) => lidBySpan.get(keyOfSpan(block.span)))
+    .filter((lid): lid is string => Boolean(lid)));
+  const mappedAlignable = entries.filter((entry) => alignableLids.has(entry.lid) && entry.status !== "unmapped").length;
+  const mappedHeadings = entries.filter((entry) => headingLids.has(entry.lid) && entry.status !== "unmapped").length;
+  const textMappingRatio = alignableLids.size ? mappedAlignable / alignableLids.size : 1;
+  const headingMappingRatio = headingLids.size ? mappedHeadings / headingLids.size : 1;
   const allEntriesReferenceLeaves = entries.every((entry) => leafLids.has(entry.lid));
   const allRegionsInBounds = entries.every((entry) =>
     entry.regions.every((region) => {
@@ -201,12 +322,12 @@ export function buildHybridFoundation(input: HybridFoundationInput): HybridFound
     version: "alignment_report.v1",
     book_id: input.book_id,
     config: {
-      algorithm: "monotonic_forward_fuzzy_v1",
+      algorithm: ALIGNMENT_ALGORITHM,
       lookback_words: 24,
-      lookahead_words: 240,
+      lookahead_words: ALIGNMENT_LOOKAHEAD_WORDS,
       merge_gap_utf16: 2,
       coordinate_system: "pdf_user_space",
-      normalization: ["unicode_nfc", "whitespace_collapse"],
+      normalization: ["unicode_nfkc", "case_fold", "hyphen_join", "punctuation_to_space", "whitespace_collapse"],
     },
     config_hash: configHash,
     hard_gates: {
@@ -215,9 +336,17 @@ export function buildHybridFoundation(input: HybridFoundationInput): HybridFound
       selection_page_hashes_match: pageHashesMatch,
       leaf_count: leafLids.size,
       mapped_leaf_count: mapped,
+      minimum_text_mapping_ratio: textMappingRatio >= MINIMUM_TEXT_MAPPING_RATIO,
+      minimum_heading_mapping_ratio: headingMappingRatio >= MINIMUM_HEADING_MAPPING_RATIO,
     },
     diagnostics: {
       mapped_leaf_ratio: leafLids.size ? mapped / leafLids.size : 0,
+      alignable_text_count: alignableLids.size,
+      mapped_text_count: mappedAlignable,
+      mapped_text_ratio: textMappingRatio,
+      heading_count: headingLids.size,
+      mapped_heading_count: mappedHeadings,
+      mapped_heading_ratio: headingMappingRatio,
       line_fallback_count: entries.filter((entry) => entry.status === "line_fallback").length,
       unmapped_count: entries.filter((entry) => entry.status === "unmapped").length,
     },
@@ -281,6 +410,12 @@ export function assertHybridFoundationHardGates(artifacts: HybridFoundationArtif
     const page = artifacts.pdf_selection_map_pages.find((p) => p.pageIndex === shard.pageIndex);
     if (!page) throw new Error(`pdf_selection_map shard references missing page: ${shard.pageIndex}`);
     if (jsonSha256(page) !== shard.sha256) throw new Error(`pdf_selection_map shard hash mismatch: ${shard.path}`);
+  }
+  if (artifacts.alignment_report.hard_gates.minimum_text_mapping_ratio === false) {
+    throw new Error("hybrid foundation text mapping coverage is below the reader-ready minimum");
+  }
+  if (artifacts.alignment_report.hard_gates.minimum_heading_mapping_ratio === false) {
+    throw new Error("hybrid foundation heading mapping coverage is below the reader-ready minimum");
   }
 }
 

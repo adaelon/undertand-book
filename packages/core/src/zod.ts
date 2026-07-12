@@ -277,7 +277,7 @@ export const AlignmentReportZ = z.object({
   version: z.literal("alignment_report.v1"),
   book_id: z.string().min(1),
   config: z.object({
-    algorithm: z.literal("monotonic_forward_fuzzy_v1"),
+    algorithm: z.enum(["monotonic_forward_fuzzy_v1", "monotonic_windowed_blocks_v2"]),
     lookback_words: z.number().int().nonnegative(),
     lookahead_words: z.number().int().nonnegative(),
     merge_gap_utf16: z.number().int().nonnegative(),

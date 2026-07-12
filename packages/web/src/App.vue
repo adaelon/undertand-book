@@ -45,8 +45,8 @@ import {
 } from "./desktop-provider";
 import { rangeToMarkdown } from "./selection";
 import {
+  hasMappedPdfNavigationTarget,
   normalizePaperViewportForMinimap,
-  shouldOpenPdfSourcePreview,
 } from "./paper-minimap-navigation";
 import {
   getSourceReviewAutoRerunRequest,
@@ -1678,12 +1678,12 @@ async function doGoto(lid: string, focusQuote?: string | null) {
     const gotoEffect = await api.goto(lid);
     await loadWindow(gotoEffect.viewport);
     queuePaperSelection(lid);
-    if (pdfReaderAvailable.value && shouldOpenPdfSourcePreview(
+    if (pdfReaderAvailable.value && !hasMappedPdfNavigationTarget(
       lid,
       gotoEffect.viewport.top_lid,
       pdfMappedLids.value,
     )) {
-      await openSourcePreview({ lid, quote: focusQuote ?? null });
+      banner.value = `PDF 暂无 ${gotoEffect.viewport.top_lid} 的可靠定位，已保留当前 PDF 页面。`;
     }
     await loadPaperProjectionData();
     gotoInput.value = "";
