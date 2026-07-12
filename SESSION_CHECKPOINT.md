@@ -1,39 +1,38 @@
-# SESSION_CHECKPOINT - 2026-07-11 23:20
+# SESSION_CHECKPOINT — 2026-07-12 20:12
 
 ## 新鲜度自检
-- 写入时功能基线 commit:`5529581 fix: enter reader when paper build becomes trusted`。
-- checkpoint 自身会有后续 docs commit;读入时比较 `git log -3`,不一致时以 Git 为准。
-- worktree 有大量既有用户资料、日志和临时产物;不得清理、提交或回退。
+- 论文地图功能基线 commit:`d46a94c feat: add localized agentic paper minimap`。
+- 本文件会有后续独立 docs commit;读入时比较 `git log --oneline -3`,若代码晚于 `d46a94c` 则以 Git 为准。
 
 ## 当前在做什么
-可信 paper 自动进入 reader 已完成;下一会话工作上下文切到 paper 阅读区本身:PDF 正文、论文小地图与结构/阅读指南投影。
+Agentic paper minimap 已完成并交付 Setup:只读 PDF/章节坐标、区域/重点位置/论证关系、skim/abstract/deep、viewport 双向同步、受控 Agent overlay、用户私有保存与 LLM 中文显示缓存均已接通。
 
-## 下一步（可直接接手）
-1. 关闭旧 Reader,运行 `dist/UnderstandBookSetup.exe`,打开一个已可信 paper workspace。
-2. 实测 `PdfReaderPane` 的 PDF 页面、LID overlay/跳转/选区与 Markdown source fallback,记录第一个确定性失败点。
-3. 实测 `LeftRail` 论文小地图的 preset、structure rows、pinned evidence 与当前位置联动。
-4. 改码前先跑 `pnpm -C packages/web test -- components/PdfReaderPane.test.ts`,再按用户反馈完成新的 §0 对齐。
+## 下一步(可直接接手)
+1. 安装 `dist/UnderstandBookSetup.exe`,打开一个已可信的英文 paper workspace。
+2. 配置 Provider 后首次进入论文地图,确认章节与重点位置变为中文且 `BERT` 等专有名词保留英文。
+3. 关闭并重新进入同一论文版本,确认命中 `paper-minimap-localizations.json` 且不再次调用 Provider。
+4. 点击章节区域、重点位置和地图轨道,确认 PDF 跳转正确且不再出现 `INVALID_PAPER_MINIMAP_VIEWPORT` 或误开“引用来源”。
+5. 将第一个真实使用失败点作为新需求重新走 §0 对齐;不要恢复旧 `paperStructureRows/PaperReadingGuide` 地图表面。
 
 ## 未提交 / 未完成
-- 本轮功能与 checkpoint 已提交;tracked worktree 干净。
-- paper 阅读区尚无新的已冻结需求;下一会话先以真实可信 paper 做验收和需求对齐。
-- 最新 Setup:`dist/UnderstandBookSetup.exe`,33,603,539 bytes,SHA-256 `FFF4D8E9076BD7C4AA5830B98EE6FA23596C7DE50DE97D9F9C8B2C52B8A0C1D2`。
+- 论文地图功能已提交为 `d46a94c`;本 checkpoint 以独立 docs commit 落盘。
+- AM13 真实论文验收、Setup smoke 与真实 Provider smoke 按用户要求未由 Agent 执行,不得记为已通过。
+- 工作树仍有用户资料、日志、浏览器 profile、测试产物及 `crates/runtime/src/{lib.rs,goldset.rs}` 格式化改动;不得清理、回退或混入论文地图提交。
 
 ## 冷启动读序
-1. `docs/adr/0063-paper-pdf-first-reconciled-source-build-workbench.md` - source trust、PDF-first reader 与 Workbench 边界。
-2. `docs/切片方案-paper-pdf-first-hybrid.md` 的 PH11、Reader runtime flow 和 Hard Gates - PDF.js 正文阅读契约。
-3. `docs/架构.md` 的组件图与 `App init -> PdfReaderPane` 数据流。
-4. `CONTEXT.md` 的 BookStructure、结构投影、PDF visual source map、PDF-first reader surface、Reader surface selection。
-5. `packages/web/src/App.vue` 的 `pdfReaderAvailable/loadPdfRuntimeArtifacts/loadPaperProjectionData/paperStructureRows/doGoto` 与 reader template。
-6. `packages/web/src/components/PdfReaderPane.vue`、`PdfReaderPane.test.ts` - PDF.js canvas/text/overlay/selection 主阅读面。
-7. `packages/web/src/components/LeftRail.vue` - paper minimap、preset、结构停靠点与 pinned evidence。
-8. `packages/web/src/api.ts` 的 `SourceManifestV2/PdfSourceMap/PaperReadingGuide` 类型和对应 API。
+1. `docs/切片方案-paper-agentic-minimap.md` — 冻结范围、AM0-AM13 与 hard gates。
+2. `docs/adr/0072-agentic-paper-minimap-readonly-projection-and-user-overlays.md` — 只读地图、overlay 与 Agent 权限边界。
+3. `docs/adr/0073-paper-minimap-chinese-display-cache.md` — 首次 LLM 翻译、版本缓存与失败回退。
+4. `CONTEXT.md` 的 Agentic paper minimap / Chinese display layer 术语 — 领域边界。
+5. `packages/web/src/components/PaperMinimap.vue`、`packages/web/src/App.vue` — 中文渲染、交互与 viewport/goto 链路。
+6. `crates/server/src/lib.rs` 的 `route_paper_minimap_localize` 与 paper minimap routes — HTTP、缓存和 reducer 边界。
+7. `docs/代码链路.md` 末尾 paper minimap 条目 — 逐切片入口与验证证据。
 
 ## 本会话决策摘要
-- ADR-0071:artifact readiness 给出 `route=reader` 后立即进入阅读;job 状态和历史界面偏好不得阻塞,用户仍可主动打开诊断 Workbench。
+- ADR-0072:地图基座只读;Agent 只发 typed action;滚动不触发 LLM。
+- ADR-0073:中文标签是可失效显示缓存,不替代英文正文、LID、citation 或证据关系。
+- 导航修复:viewport 规范化到地图页域;请求 LID 的 resolved leaf 有 PDF 坐标时不打开来源 fallback。
 
-## 验证证据
-- `pnpm -C packages/web test`:10 files / 54 tests passed。
-- `pnpm -C packages/web typecheck`:passed。
-- `pnpm -C packages/web build`:passed。
-- `pnpm -C apps/desktop package:windows`:release NSIS passed,Setup hash 见上。
+## 最近验证
+- Server full:95 passed;Web full:13 files / 66 tests;typecheck/build passed;Playwright desktop/mobile:2 passed。
+- Setup:`dist/UnderstandBookSetup.exe`,33,889,606 bytes,SHA-256 `1748718451FE4DE002E82AD463BDAA1FC938165F53FD484BD2F012561305FCBC`。
