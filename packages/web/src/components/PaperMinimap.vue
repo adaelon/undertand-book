@@ -34,6 +34,7 @@ const emit = defineEmits<{
 }>();
 
 const expanded = computed(() => props.state?.presentation === "expanded");
+const activeMode = computed<PaperMinimapMode>(() => props.state?.mode ?? props.lens?.mode ?? "skim");
 const dragRatio = ref<number | null>(null);
 let dragPointerId: number | null = null;
 const regions = computed(() => props.base?.regions ?? []);
@@ -63,6 +64,32 @@ const abstractCorrespondences = computed(() => (props.lens?.abstract_corresponde
     bodyLandmark: NonNullable<typeof item.bodyLandmark>;
   } => !!item.abstractLandmark && !!item.bodyLandmark)
   .slice(0, 3));
+const regionById = computed(() => new Map(regions.value.map((region) => [region.region_id, region])));
+const lensFocusedRegionIds = computed(() => {
+  const focused = new Set<string>();
+  const addLandmarkRegion = (landmark: PaperLandmark | undefined) => {
+    if (!landmark) return;
+    const region = regions.value.find((candidate) => (
+      landmark.page_index >= candidate.page_span.start_page
+      && landmark.page_index <= candidate.page_span.end_page
+    ));
+    if (region) focused.add(region.region_id);
+  };
+  if (activeMode.value === "skim") {
+    globalLandmarks.value.forEach(addLandmarkRegion);
+  } else {
+    if (props.lens?.focus_region_id) focused.add(props.lens.focus_region_id);
+    if (activeMode.value === "abstract") {
+      abstractCorrespondences.value.forEach((item) => addLandmarkRegion(item.bodyLandmark));
+    }
+  }
+  return focused;
+});
+const focusedRegionLabel = computed(() => {
+  const regionId = props.lens?.focus_region_id;
+  const region = regionId ? regionById.value.get(regionId) : undefined;
+  return region ? regionDisplayLabel(region) : "当前章节";
+});
 const visibleLayers = computed(() => new Set(props.state?.session_overlay.visible_layers ?? []));
 const activeLocalization = computed(() => (
   props.localization?.base_map_rev === props.base?.fingerprint ? props.localization : null
@@ -316,7 +343,10 @@ function relationLabel(relation: string): string {
           v-for="region in regions"
           :key="region.region_id"
           type="button"
-          :class="{ active: props.state?.viewport_position.region_id === region.region_id }"
+          :class="{
+            active: props.state?.viewport_position.region_id === region.region_id,
+            'lens-focus': lensFocusedRegionIds.has(region.region_id),
+          }"
           @click="emit('goto', region.lid_span.start_lid)"
         >
           <span class="paper-map-region-swatch" :class="`kind-${region.kind}`"></span>
@@ -359,61 +389,78 @@ function relationLabel(relation: string): string {
         </div>
 
         <div v-if="visibleLayers.has('landmarks')" class="paper-map-lens">
-          <div v-if="globalLandmarks.length" class="paper-map-chain" data-testid="global-chain">
-            <div
-              v-for="landmark in globalLandmarks"
-              :key="landmark.landmark_id"
-              class="paper-map-chain-row"
-            >
-              <button type="button" class="paper-map-landmark-link" @click="emit('goto', landmark.anchor_lid)">
-                <span>{{ landmarkDisplayLabel(landmark) }}</span>
-                <small>{{ landmark.anchor_lid }}</small>
-              </button>
-              <button
-                class="paper-map-pin"
-                type="button"
-                :title="pinnedLandmarks.has(landmark.landmark_id) ? '取消固定' : '固定地标'"
-                :aria-label="pinnedLandmarks.has(landmark.landmark_id) ? '取消固定' : '固定地标'"
-                @click.stop="emit('pin-toggle', landmark.landmark_id, pinnedLandmarks.has(landmark.landmark_id))"
+          <section v-if="activeMode === 'skim'" class="paper-map-mode-section" data-testid="skim-route">
+            <h3 class="paper-map-section-title">全文主线</h3>
+            <div v-if="globalLandmarks.length" class="paper-map-chain" data-testid="global-chain">
+              <div
+                v-for="landmark in globalLandmarks"
+                :key="landmark.landmark_id"
+                class="paper-map-chain-row"
               >
-                <PinOff v-if="pinnedLandmarks.has(landmark.landmark_id)" :size="13" aria-hidden="true" />
-                <Pin v-else :size="13" aria-hidden="true" />
+                <button type="button" class="paper-map-landmark-link" @click="emit('goto', landmark.anchor_lid)">
+                  <span>{{ landmarkDisplayLabel(landmark) }}</span>
+                </button>
+                <button
+                  class="paper-map-pin"
+                  type="button"
+                  :title="pinnedLandmarks.has(landmark.landmark_id) ? '取消固定' : '固定地标'"
+                  :aria-label="pinnedLandmarks.has(landmark.landmark_id) ? '取消固定' : '固定地标'"
+                  @click.stop="emit('pin-toggle', landmark.landmark_id, pinnedLandmarks.has(landmark.landmark_id))"
+                >
+                  <PinOff v-if="pinnedLandmarks.has(landmark.landmark_id)" :size="13" aria-hidden="true" />
+                  <Pin v-else :size="13" aria-hidden="true" />
+                </button>
+              </div>
+            </div>
+            <p v-else class="paper-map-empty">没有可显示的全文重点</p>
+          </section>
+
+          <section
+            v-else
+            class="paper-map-mode-section"
+            :data-testid="activeMode === 'abstract' ? 'abstract-structure' : 'deep-region'"
+          >
+            <h3 class="paper-map-section-title">
+              {{ activeMode === 'abstract' ? '摘要结构' : `${focusedRegionLabel} · 深读` }}
+            </h3>
+            <div v-if="localBindings.length" class="paper-map-local-chain" data-testid="local-chain">
+              <button
+                v-for="binding in localBindings"
+                :key="`${binding.slot}:${binding.landmark_id}`"
+                type="button"
+                @click="emit('goto', binding.landmark.anchor_lid)"
+              >
+                <small>{{ slotLabel(binding.slot) }}</small>
+                <strong>{{ landmarkDisplayLabel(binding.landmark) }}</strong>
               </button>
             </div>
-          </div>
+            <p v-else class="paper-map-empty">
+              {{ activeMode === 'abstract' ? '摘要没有可显示的论证结构' : '当前章节没有可显示的论证结构' }}
+            </p>
 
-          <div v-if="localBindings.length" class="paper-map-local-chain" data-testid="local-chain">
-            <button
-              v-for="binding in localBindings"
-              :key="`${binding.slot}:${binding.landmark_id}`"
-              type="button"
-              @click="emit('goto', binding.landmark.anchor_lid)"
+            <div
+              v-if="activeMode === 'abstract' && abstractCorrespondences.length"
+              class="paper-map-correspondence-section"
             >
-              <small>{{ slotLabel(binding.slot) }}</small>
-              <strong>{{ landmarkDisplayLabel(binding.landmark) }}</strong>
-            </button>
-          </div>
-          <p v-else-if="props.state?.mode !== 'skim'" class="paper-map-empty">当前章节没有可显示的论证关系</p>
-
-          <div
-            v-if="props.state?.mode === 'abstract' && abstractCorrespondences.length"
-            class="paper-map-correspondences"
-            data-testid="abstract-correspondences"
-          >
-            <button
-              v-for="item in abstractCorrespondences"
-              :key="`${item.abstract_landmark_id}:${item.body_landmark_id}`"
-              type="button"
-              @click="emit('goto', item.bodyLandmark.anchor_lid)"
-            >
-              <span>{{ landmarkDisplayLabel(item.abstractLandmark) }}</span>
-              <ArrowRight :size="12" aria-hidden="true" />
-              <span>{{ landmarkDisplayLabel(item.bodyLandmark) }}</span>
-            </button>
-          </div>
+              <h3 class="paper-map-section-title">对应正文</h3>
+              <div class="paper-map-correspondences" data-testid="abstract-correspondences">
+                <button
+                  v-for="item in abstractCorrespondences"
+                  :key="`${item.abstract_landmark_id}:${item.body_landmark_id}`"
+                  type="button"
+                  @click="emit('goto', item.bodyLandmark.anchor_lid)"
+                >
+                  <span>{{ landmarkDisplayLabel(item.abstractLandmark) }}</span>
+                  <ArrowRight :size="12" aria-hidden="true" />
+                  <span>{{ landmarkDisplayLabel(item.bodyLandmark) }}</span>
+                </button>
+              </div>
+            </div>
+          </section>
         </div>
 
         <div v-if="visibleLayers.has('arguments') && lensRelations.length" class="paper-map-relations">
+          <h3 class="paper-map-section-title">论证关系</h3>
           <div v-for="relation in lensRelations" :key="relation.relation_id">
             <span>{{ relationLandmarkLabel(relation.source_landmark_id) }}</span>
             <span class="paper-map-relation-kind">
@@ -611,6 +658,8 @@ function relationLabel(relation: string): string {
   font-size: 0.68rem;
 }
 .paper-map-lens,
+.paper-map-mode-section,
+.paper-map-correspondence-section,
 .paper-map-chain,
 .paper-map-local-chain,
 .paper-map-correspondences,
@@ -619,20 +668,23 @@ function relationLabel(relation: string): string {
   gap: 0.25rem;
   min-width: 0;
 }
+.paper-map-section-title {
+  margin: 0;
+  color: var(--ink);
+  font-size: 0.7rem;
+  font-weight: 700;
+}
 .paper-map-chain-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 24px;
-  align-items: center;
+  align-items: start;
   gap: 0.35rem;
   min-width: 0;
   min-height: 30px;
   border-bottom: 1px solid var(--hairline-soft);
 }
 .paper-map-landmark-link {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 0.35rem;
+  display: block;
   min-width: 0;
   border: 0;
   background: transparent;
@@ -641,11 +693,10 @@ function relationLabel(relation: string): string {
   text-align: left;
 }
 .paper-map-landmark-link > span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  line-height: 1.4;
+  white-space: normal;
 }
-.paper-map-landmark-link > small { color: var(--stone); font-family: var(--mono); }
 .paper-map-pin {
   display: grid;
   width: 24px;
@@ -657,7 +708,7 @@ function relationLabel(relation: string): string {
   padding: 0;
 }
 .paper-map-local-chain {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1fr);
 }
 .paper-map-local-chain button {
   display: grid;
@@ -673,13 +724,11 @@ function relationLabel(relation: string): string {
 }
 .paper-map-local-chain small { color: var(--stone); font-size: 0.6rem; text-transform: uppercase; }
 .paper-map-local-chain strong {
-  display: -webkit-box;
-  overflow: hidden;
+  display: block;
   overflow-wrap: anywhere;
   font-size: 0.68rem;
+  line-height: 1.45;
   white-space: normal;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
 }
 .paper-map-correspondences button {
   display: grid;
@@ -696,13 +745,18 @@ function relationLabel(relation: string): string {
   font-size: 0.64rem;
   text-align: left;
 }
-.paper-map-correspondences span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.paper-map-correspondences span {
+  overflow-wrap: anywhere;
+  line-height: 1.4;
+  white-space: normal;
+}
 .paper-map-relations > div {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
-  align-items: center;
-  gap: 0.25rem;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0.2rem;
+  border-bottom: 1px solid var(--hairline-soft);
   color: var(--steel);
+  padding: 0.25rem 0;
   font-size: 0.62rem;
 }
 .paper-map-relations > div > span:not(.paper-map-relation-kind) {
@@ -710,7 +764,13 @@ function relationLabel(relation: string): string {
   line-height: 1.35;
   white-space: normal;
 }
-.paper-map-relation-kind { display: flex; align-items: center; gap: 0.15rem; color: var(--stone); }
+.paper-map-relation-kind {
+  display: flex;
+  align-items: center;
+  gap: 0.15rem;
+  color: var(--stone);
+}
+.paper-map-relation-kind svg { transform: rotate(90deg); }
 .paper-map-empty { margin: 0; color: var(--muted); font-size: 0.68rem; }
 .paper-map-effect {
   display: grid;
@@ -722,7 +782,7 @@ function relationLabel(relation: string): string {
   color: var(--muted);
   font-size: 0.66rem;
 }
-.paper-map-effect span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.paper-map-effect span { overflow-wrap: anywhere; line-height: 1.4; white-space: normal; }
 .paper-map-effect button {
   display: grid;
   width: 28px;
@@ -753,6 +813,9 @@ function relationLabel(relation: string): string {
   background: var(--reader-coral-soft);
   color: var(--ink);
 }
+.paper-map-region-list button.lens-focus {
+  box-shadow: inset 2px 0 var(--map-accent);
+}
 .paper-map-region-swatch {
   width: 5px;
   height: 24px;
@@ -767,10 +830,10 @@ function relationLabel(relation: string): string {
   gap: 0.4rem;
 }
 .paper-map-region-copy strong {
-  overflow: hidden;
+  overflow-wrap: anywhere;
   font-size: 0.75rem;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  line-height: 1.4;
+  white-space: normal;
 }
 .paper-map-region-copy small {
   flex: 0 0 auto;

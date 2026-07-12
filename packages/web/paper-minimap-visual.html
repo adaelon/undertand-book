@@ -17,7 +17,9 @@
         display: grid;
         grid-template-columns: 240px minmax(0, 1fr);
         width: 100%;
-        min-height: 100vh;
+        height: 100vh;
+        min-height: 0;
+        overflow: hidden;
         background: #e9edf2;
       }
 
@@ -25,7 +27,7 @@
         box-sizing: border-box;
         min-width: 0;
         padding: 14px;
-        overflow: hidden;
+        overflow-y: auto;
         border-right: 1px solid #c9d0d8;
         background: #f7f8fa;
       }
@@ -33,7 +35,8 @@
       .visual-pdf {
         box-sizing: border-box;
         min-width: 0;
-        min-height: 100vh;
+        height: 100vh;
+        min-height: 0;
         padding: 32px;
         overflow: auto;
       }

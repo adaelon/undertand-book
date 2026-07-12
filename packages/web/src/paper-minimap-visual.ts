@@ -31,13 +31,21 @@ const base: PaperMinimapBase = {
     confidence: 1,
   })),
   landmarks: [
+    ["research_question", "1.1", 0, "Abstract research question"],
+    ["method", "1.2", 0, "Abstract method"],
+    ["result", "1.3", 0, "Abstract result"],
+    ["contribution", "1.4", 0, "Abstract contribution"],
     ["research_question", "2.4", 1, "Research question"],
     ["method", "3.4", 4, "Core method"],
+    ["experiment", "4.1", 6, "Experiment"],
+    ["evidence", "4.3", 7, "Evidence"],
     ["result", "4.4", 7, "Central result"],
+    ["claim", "4.6", 8, "Result claim"],
     ["limitation", "5.4", 10, "Limitation"],
+    ["contribution", "6.2", 11, "Contribution"],
   ].map(([kind, lid, page, label]) => ({
     landmark_id: `landmark:${kind}:${lid}`,
-    kind: kind as "research_question" | "method" | "result" | "limitation",
+    kind: kind as "research_question" | "method" | "experiment" | "evidence" | "result" | "claim" | "contribution" | "limitation",
     anchor_lid: String(lid),
     page_index: Number(page),
     label: String(label),
@@ -47,19 +55,34 @@ const base: PaperMinimapBase = {
   })),
   relations: [
     {
+      relation_id: "relation:abstract-rq-method", type: "frames",
+      source_landmark_id: "landmark:research_question:1.1", target_landmark_id: "landmark:method:1.2",
+      evidence_lids: ["1.1", "1.2"],
+    },
+    {
+      relation_id: "relation:abstract-method-result", type: "produces",
+      source_landmark_id: "landmark:method:1.2", target_landmark_id: "landmark:result:1.3",
+      evidence_lids: ["1.2", "1.3"],
+    },
+    {
       relation_id: "relation:rq-method", type: "frames",
       source_landmark_id: "landmark:research_question:2.4", target_landmark_id: "landmark:method:3.4",
       evidence_lids: ["2.4", "3.4"],
     },
     {
-      relation_id: "relation:method-result", type: "produces",
-      source_landmark_id: "landmark:method:3.4", target_landmark_id: "landmark:result:4.4",
-      evidence_lids: ["3.4", "4.4"],
+      relation_id: "relation:experiment-evidence", type: "produces",
+      source_landmark_id: "landmark:experiment:4.1", target_landmark_id: "landmark:evidence:4.3",
+      evidence_lids: ["4.1", "4.3"],
     },
     {
-      relation_id: "relation:result-limitation", type: "limits",
-      source_landmark_id: "landmark:result:4.4", target_landmark_id: "landmark:limitation:5.4",
-      evidence_lids: ["4.4", "5.4"],
+      relation_id: "relation:evidence-result", type: "supports",
+      source_landmark_id: "landmark:evidence:4.3", target_landmark_id: "landmark:result:4.4",
+      evidence_lids: ["4.3", "4.4"],
+    },
+    {
+      relation_id: "relation:result-claim", type: "supports",
+      source_landmark_id: "landmark:result:4.4", target_landmark_id: "landmark:claim:4.6",
+      evidence_lids: ["4.4", "4.6"],
     },
   ],
   layer_status: {
@@ -80,10 +103,18 @@ const localization: PaperMinimapLocalization = {
     "摘要", "引言", "材料与方法", "结果", "讨论", "结论",
   ].map((label, index) => [`region:${index}`, label])),
   landmark_labels: {
-    "landmark:research_question:2.4": "研究问题",
-    "landmark:method:3.4": "使用 BERT 的核心方法",
-    "landmark:result:4.4": "主要结果",
-    "landmark:limitation:5.4": "研究局限",
+    "landmark:research_question:1.1": "摘要中的研究问题与适用边界",
+    "landmark:method:1.2": "摘要中的 BERT 方法概述",
+    "landmark:result:1.3": "摘要报告的主要结果",
+    "landmark:contribution:1.4": "摘要声明的核心贡献",
+    "landmark:research_question:2.4": "全文研究问题与需要验证的关键假设",
+    "landmark:method:3.4": "使用 BERT LongMethodName-ExtremelySpecificVariant 的多阶段核心方法",
+    "landmark:experiment:4.1": "使用 BERT LongMethodName-ExtremelySpecificVariant 覆盖主要对照组与消融条件的实验设计",
+    "landmark:evidence:4.3": "支持主要结论的定量证据与置信区间",
+    "landmark:result:4.4": "实验观察到的主要结果及其适用范围",
+    "landmark:claim:4.6": "由证据直接支持且不外推的核心主张",
+    "landmark:limitation:5.4": "研究局限与当前数据无法回答的问题",
+    "landmark:contribution:6.2": "论文最终确认的方法与实证贡献",
   },
   warning: null,
 };
@@ -121,29 +152,65 @@ function makeState(
 }
 
 function makeLens(mode: ReaderPaperMinimapState["mode"]): PaperMinimapLensProjection {
-  const landmarkIds = base.landmarks.map((landmark) => landmark.landmark_id);
+  const globalLandmarkIds = [
+    "landmark:research_question:2.4",
+    "landmark:method:3.4",
+    "landmark:result:4.4",
+    "landmark:contribution:6.2",
+    "landmark:limitation:5.4",
+  ];
+  const abstractLandmarkIds = [
+    "landmark:research_question:1.1",
+    "landmark:method:1.2",
+    "landmark:result:1.3",
+    "landmark:contribution:1.4",
+  ];
+  const deepLandmarkIds = [
+    "landmark:experiment:4.1",
+    "landmark:evidence:4.3",
+    "landmark:result:4.4",
+    "landmark:claim:4.6",
+  ];
   return {
     mode,
     focus_region_id: mode === "deep" ? "region:3" : mode === "abstract" ? "region:0" : null,
-    global_landmark_ids: landmarkIds,
-    local_landmark_ids: mode === "skim" ? [] : landmarkIds,
-    relation_ids: base.relations.map((relation) => relation.relation_id),
-    slot_bindings: mode === "skim" ? [] : [
-      { slot: "research_question", landmark_id: landmarkIds[0] },
-      { slot: "method", landmark_id: landmarkIds[1] },
-      { slot: "result", landmark_id: landmarkIds[2] },
-      { slot: "limitation", landmark_id: landmarkIds[3] },
-    ],
+    global_landmark_ids: globalLandmarkIds,
+    local_landmark_ids: mode === "abstract"
+      ? abstractLandmarkIds
+      : mode === "deep"
+        ? deepLandmarkIds
+        : [],
+    relation_ids: mode === "skim"
+      ? ["relation:rq-method"]
+      : mode === "abstract"
+        ? ["relation:abstract-rq-method", "relation:abstract-method-result"]
+        : ["relation:experiment-evidence", "relation:evidence-result", "relation:result-claim"],
+    slot_bindings: mode === "abstract" ? [
+      { slot: "research_question", landmark_id: abstractLandmarkIds[0] },
+      { slot: "method", landmark_id: abstractLandmarkIds[1] },
+      { slot: "result", landmark_id: abstractLandmarkIds[2] },
+      { slot: "contribution", landmark_id: abstractLandmarkIds[3] },
+    ] : mode === "deep" ? [
+      { slot: "experiment", landmark_id: deepLandmarkIds[0] },
+      { slot: "evidence", landmark_id: deepLandmarkIds[1] },
+      { slot: "result", landmark_id: deepLandmarkIds[2] },
+      { slot: "claim", landmark_id: deepLandmarkIds[3] },
+    ] : [],
     abstract_correspondences: mode === "abstract" ? [
       {
         slot: "method",
-        abstract_landmark_id: landmarkIds[0],
-        body_landmark_id: landmarkIds[1],
+        abstract_landmark_id: abstractLandmarkIds[1],
+        body_landmark_id: "landmark:method:3.4",
       },
       {
         slot: "result",
-        abstract_landmark_id: landmarkIds[2],
-        body_landmark_id: landmarkIds[3],
+        abstract_landmark_id: abstractLandmarkIds[2],
+        body_landmark_id: "landmark:result:4.4",
+      },
+      {
+        slot: "contribution",
+        abstract_landmark_id: abstractLandmarkIds[3],
+        body_landmark_id: "landmark:contribution:6.2",
       },
     ] : [],
     warnings: [],

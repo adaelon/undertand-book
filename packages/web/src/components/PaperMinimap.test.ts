@@ -199,6 +199,7 @@ describe("PaperMinimap", () => {
     expect(wrapper.text()).toContain("使用 BERT 进行受控实验");
     expect(wrapper.text()).not.toContain("Materials and Methods");
     expect(wrapper.text()).not.toContain("Controlled experiment");
+    expect(wrapper.text()).not.toContain("2.2");
   });
 
   it("keeps the collapsed map to coordinates, viewport, and landmark dots", async () => {
@@ -257,12 +258,20 @@ describe("PaperMinimap", () => {
         undoAvailable: true,
       },
     });
+    expect(wrapper.find("[data-testid='skim-route']").exists()).toBe(true);
+    expect(wrapper.find("[data-testid='abstract-structure']").exists()).toBe(false);
+    expect(wrapper.find("[data-testid='deep-region']").exists()).toBe(false);
     expect(wrapper.findAll("[data-testid='global-chain'] .paper-map-chain-row")).toHaveLength(5);
     expect(wrapper.find("[data-testid='local-chain']").exists()).toBe(false);
     expect(wrapper.findAll(".paper-map-relations > div")).toHaveLength(3);
+    await wrapper.get(".paper-map-pin").trigger("click");
+    expect(wrapper.emitted("pin-toggle")?.[0]).toEqual(["landmark:method:2.2", false]);
 
     await wrapper.setProps({ state: stateWithArguments("deep"), lens: deepLens });
     expect(wrapper.attributes("data-mode")).toBe("deep");
+    expect(wrapper.find("[data-testid='skim-route']").exists()).toBe(false);
+    expect(wrapper.find("[data-testid='deep-region']").exists()).toBe(true);
+    expect(wrapper.text()).toContain("方法 · 深读");
     expect(wrapper.findAll("[data-testid='local-chain'] > button")).toHaveLength(4);
 
     await wrapper.setProps({
@@ -270,6 +279,9 @@ describe("PaperMinimap", () => {
       lens: {
         ...deepLens,
         mode: "abstract",
+        focus_region_id: "region:introduction",
+        local_landmark_ids: ["landmark:rq"],
+        slot_bindings: [{ slot: "research_question", landmark_id: "landmark:rq" }],
         abstract_correspondences: [{
           slot: "method",
           abstract_landmark_id: "landmark:rq",
@@ -277,16 +289,41 @@ describe("PaperMinimap", () => {
         }],
       },
     });
+    expect(wrapper.find("[data-testid='abstract-structure']").exists()).toBe(true);
+    expect(wrapper.find("[data-testid='deep-region']").exists()).toBe(false);
+    expect(wrapper.findAll("[data-testid='local-chain'] > button")).toHaveLength(1);
     expect(wrapper.findAll("[data-testid='abstract-correspondences'] > button")).toHaveLength(1);
 
     await wrapper.findAll(".paper-map-modes button")[1].trigger("click");
     expect(wrapper.emitted("mode-change")?.[0]).toEqual(["abstract"]);
     await wrapper.findAll(".paper-map-layers input")[0].setValue(false);
     expect(wrapper.emitted("layer-toggle")?.[0]).toEqual(["regions", false]);
-    await wrapper.get(".paper-map-pin").trigger("click");
-    expect(wrapper.emitted("pin-toggle")?.[0]).toEqual(["landmark:method:2.2", false]);
     await wrapper.get(".paper-map-effect button").trigger("click");
     expect(wrapper.emitted("undo")).toHaveLength(1);
+  });
+
+  it("renders complete long labels without exposing internal LIDs", () => {
+    const longLabel = "使用 BERT LongMethodName-ExtremelySpecificVariant 完成多阶段受控实验并保留全部限定条件";
+    const wrapper = mount(PaperMinimap, {
+      props: {
+        base: richBase,
+        state: stateWithArguments("skim"),
+        lens: skimLens,
+        localization: {
+          book_id: "paper-a",
+          book_version: "v1",
+          base_map_rev: "fp-a",
+          locale: "zh-CN",
+          source: "llm",
+          region_labels: {},
+          landmark_labels: { "landmark:method:2.2": longLabel },
+          warning: null,
+        },
+      },
+    });
+
+    expect(wrapper.text()).toContain(longLabel);
+    expect(wrapper.text()).not.toContain("2.2");
   });
 
   it("shows explicit empty states for unknown or unavailable argument layers", () => {
@@ -304,7 +341,7 @@ describe("PaperMinimap", () => {
         lens: { ...deepLens, local_landmark_ids: [], slot_bindings: [], relation_ids: [] },
       },
     });
-    expect(wrapper.text()).toContain("当前章节没有可显示的论证关系");
+    expect(wrapper.text()).toContain("当前章节没有可显示的论证结构");
     expect(wrapper.text()).toContain("论证关系不可用");
     expect(wrapper.findAll(".paper-map-layers input")[2].attributes()).toHaveProperty("disabled");
   });

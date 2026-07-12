@@ -539,31 +539,46 @@ pub fn project_paper_minimap_lens(
         }
     }
 
-    let visible_landmark_ids: HashSet<&str> = global_landmark_ids
+    let global_landmark_set: HashSet<&str> =
+        global_landmark_ids.iter().map(String::as_str).collect();
+    let local_landmark_set: HashSet<&str> = local_landmark_ids.iter().map(String::as_str).collect();
+    let visible_landmark_ids: HashSet<&str> = global_landmark_set
         .iter()
-        .chain(local_landmark_ids.iter())
-        .map(String::as_str)
+        .chain(local_landmark_set.iter())
+        .copied()
         .collect();
-    let local_relations_allowed = focus_region
-        .map(|region| {
-            !matches!(
-                region.kind,
-                PaperRegionKind::Unknown | PaperRegionKind::References
-            )
+    let local_relations_allowed = focus_region.is_some_and(|region| {
+        !matches!(
+            region.kind,
+            PaperRegionKind::Unknown | PaperRegionKind::References
+        )
+    });
+    let mut relation_ids: Vec<String> = base
+        .relations
+        .iter()
+        .filter(|relation| {
+            let source = relation.source_landmark_id.as_str();
+            let target = relation.target_landmark_id.as_str();
+            match mode {
+                PaperMinimapMode::Skim => {
+                    global_landmark_set.contains(source) && global_landmark_set.contains(target)
+                }
+                PaperMinimapMode::Abstract => {
+                    local_relations_allowed
+                        && local_landmark_set.contains(source)
+                        && local_landmark_set.contains(target)
+                }
+                PaperMinimapMode::Deep => {
+                    local_relations_allowed
+                        && visible_landmark_ids.contains(source)
+                        && visible_landmark_ids.contains(target)
+                        && (local_landmark_set.contains(source)
+                            || local_landmark_set.contains(target))
+                }
+            }
         })
-        .unwrap_or(true);
-    let mut relation_ids: Vec<String> = if local_relations_allowed {
-        base.relations
-            .iter()
-            .filter(|relation| {
-                visible_landmark_ids.contains(relation.source_landmark_id.as_str())
-                    && visible_landmark_ids.contains(relation.target_landmark_id.as_str())
-            })
-            .map(|relation| relation.relation_id.clone())
-            .collect()
-    } else {
-        Vec::new()
-    };
+        .map(|relation| relation.relation_id.clone())
+        .collect();
     relation_ids.sort();
     relation_ids.truncate(MINIMAP_RELATION_BUDGET);
 
@@ -2973,6 +2988,14 @@ mod tests {
         assert!(skim.local_landmark_ids.is_empty());
         assert!(skim.relation_ids.len() <= 3);
 
+        let abstract_lens =
+            project_paper_minimap_lens(&base, PaperMinimapMode::Abstract, None).unwrap();
+        assert_eq!(
+            abstract_lens.focus_region_id.as_deref(),
+            Some("region:abstract")
+        );
+        assert_eq!(abstract_lens.local_landmark_ids.len(), 4);
+
         let deep =
             project_paper_minimap_lens(&base, PaperMinimapMode::Deep, Some("region:results"))
                 .unwrap();
@@ -2983,6 +3006,20 @@ mod tests {
         assert_eq!(deep.slot_bindings[1].slot, PaperArgumentSlot::Evidence);
         assert_eq!(deep.slot_bindings[2].slot, PaperArgumentSlot::Result);
         assert_eq!(deep.slot_bindings[3].slot, PaperArgumentSlot::Claim);
+        assert_ne!(abstract_lens.slot_bindings, deep.slot_bindings);
+        assert_ne!(skim.relation_ids, deep.relation_ids);
+        assert!(deep.relation_ids.iter().all(|relation_id| {
+            let relation = base
+                .relations
+                .iter()
+                .find(|relation| &relation.relation_id == relation_id)
+                .unwrap();
+            deep.local_landmark_ids
+                .contains(&relation.source_landmark_id)
+                || deep
+                    .local_landmark_ids
+                    .contains(&relation.target_landmark_id)
+        }));
     }
 
     #[test]
