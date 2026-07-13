@@ -2,7 +2,7 @@
 
 > 定位:让 PDF 原生拖选与 Markdown 正文共用 Highlight、Note、Ask AI 语义,同时保持原版 PDF 纯净阅读。
 > 冻结决策:[ADR-0074](adr/0074-pdf-selection-actions-and-exact-user-annotation-projection.md)。
-> 状态:PS0-PS1 完成;PS2-PS7 待实现。
+> 状态:PS0-PS2 完成;PS3-PS7 待实现。
 
 ## 0. 冻结边界
 
@@ -330,6 +330,8 @@ pnpm -C packages/web typecheck
 - **Do**:实现原子 replace command/HTTP client,默认继承 selection context,显式 reselection 才替换。
 - **Do not**:改 Note UI。
 - **Done**:成功替换、写失败保留旧记录、缺 mem_id、显式 reanchor tests 全绿。
+
+状态:完成;候选快照落盘成功后才交换内存状态,HTTP/TS command 已接通。
 
 前置条件:PS1 schema 与旧数据兼容测试已绿。
 

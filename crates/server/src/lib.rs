@@ -7,7 +7,7 @@
 //! 路由是**纯函数 `route(&mut AppState, Req) -> Reply`**(脱 socket 可单测,守 A2);
 //! socket 绑定 / worker 线程 / Mutex 锁 / 时间戳生成 / adapter 装配在 `main.rs`。
 //! 外层 E agent(S10f)、静态资源(S10e)留后续子切片。
-use memory::{Anchor, MemoryStore, RecallQuery, SaveInput, SelectionContext};
+use memory::{Anchor, MemoryStore, RecallQuery, ReplaceInput, SaveInput, SelectionContext};
 use read_tools::{
     Book, ContentProfileId, PaperLandmarkKind, PaperMinimapBase, PaperRegionKind,
     ReaderLayoutAction, ToolError,
@@ -5504,6 +5504,37 @@ fn route_mut(state: &mut AppState, path: &str, body: &str, now: &str) -> Reply {
             };
             ok_json(&state.store.recall(&q))
         }
+        "/memory/replace" => {
+            let (Some(mem_id), Some(content)) = (sget("mem_id"), sget("content")) else {
+                return validation(
+                    "INVALID_MEMORY_REPLACE",
+                    "memory.replace 需 mem_id + content",
+                );
+            };
+            let selection_context = match v.get("selection_context") {
+                None | Some(serde_json::Value::Null) => None,
+                Some(value) => match serde_json::from_value::<SelectionContext>(value.clone()) {
+                    Ok(context) => Some(context),
+                    Err(e) => {
+                        return validation(
+                            "INVALID_SELECTION_CONTEXT",
+                            &format!("memory.replace selection_context 非法: {e}"),
+                        );
+                    }
+                },
+            };
+            match state.store.replace(
+                ReplaceInput {
+                    mem_id: mem_id.into(),
+                    content: content.into(),
+                    selection_context,
+                },
+                now,
+            ) {
+                Ok(record) => ok_json(&record),
+                Err(e) => err_reply(&e),
+            }
+        }
         "/memory/delete" => {
             // 用户显式删(S10g agent 提议「撤销」走它);找不到 → MEMORY_NOT_FOUND 不降级 `[ADR-0015]`。
             let Some(mem_id) = sget("mem_id") else {
@@ -8982,6 +9013,44 @@ mod tests {
         let r = post(&mut s, "/memory/save", r#"{"type":"note"}"#);
         assert_eq!(r.status, 400);
         assert!(r.body.contains("INVALID_MEMORY_TYPE"));
+    }
+
+    #[test]
+    fn memory_replace_is_single_command_and_missing_is_404() {
+        let mut s = state_named("memreplace");
+        let saved = post(
+            &mut s,
+            "/memory/save",
+            r#"{"type":"note","anchor_lid":"1.1","content":"旧内容"}"#,
+        );
+        assert_eq!(saved.status, 200);
+        let old: serde_json::Value = serde_json::from_str(&saved.body).unwrap();
+        let old_id = old["mem_id"].as_str().unwrap();
+
+        let replaced = post(
+            &mut s,
+            "/memory/replace",
+            &serde_json::json!({"mem_id":old_id,"content":"新内容"}).to_string(),
+        );
+        assert_eq!(replaced.status, 200);
+        let new_record: serde_json::Value = serde_json::from_str(&replaced.body).unwrap();
+        assert_ne!(new_record["mem_id"], old["mem_id"]);
+        assert_eq!(new_record["content"], "新内容");
+        assert_eq!(new_record["anchor"], old["anchor"]);
+        assert_eq!(new_record["citations"], old["citations"]);
+
+        let recalled = post(&mut s, "/memory/recall", r#"{}"#);
+        let records: serde_json::Value = serde_json::from_str(&recalled.body).unwrap();
+        assert_eq!(records.as_array().unwrap().len(), 1);
+        assert_eq!(records[0]["mem_id"], new_record["mem_id"]);
+
+        let missing = post(
+            &mut s,
+            "/memory/replace",
+            r#"{"mem_id":"mem_missing","content":"x"}"#,
+        );
+        assert_eq!(missing.status, 404);
+        assert!(missing.body.contains("MEMORY_NOT_FOUND"));
     }
 
     // S10g-pre:memory.delete 删一条后 recall 不再返;删不存在 → 404 MEMORY_NOT_FOUND 不降级。

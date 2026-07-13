@@ -102,6 +102,14 @@ pub struct SaveInput {
     pub source_session_id: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct ReplaceInput {
+    pub mem_id: String,
+    pub content: String,
+    /// None = 继承旧 selection context;Some = 显式重新选择并移动锚。
+    pub selection_context: Option<SelectionContext>,
+}
+
 /// recall 查询(切片0 维度;concept 维度留切片1+)`[ADR-0026]`。
 #[derive(Debug, Clone, Default)]
 pub struct RecallQuery {
@@ -183,6 +191,20 @@ fn validate_selection_context(input: &SaveInput) -> Result<(), ToolError> {
     Ok(())
 }
 
+fn selection_citations(context: &SelectionContext, book_id: &str) -> Vec<MemCitation> {
+    let mut seen = BTreeSet::new();
+    context
+        .ranges
+        .iter()
+        .filter(|selected| seen.insert(selected.lid.as_str()))
+        .map(|selected| MemCitation {
+            lid: selected.lid.clone(),
+            book_id: book_id.to_string(),
+            note: None,
+        })
+        .collect()
+}
+
 /// 用户私有 memory 库:与只读基座物理隔离的独立 JSON 文件 `[ADR-0006/0026]`。
 pub struct MemoryStore {
     path: PathBuf,
@@ -226,6 +248,47 @@ impl MemoryStore {
         std::fs::write(&self.path, s).map_err(|e| internal(format!("写 memory 失败: {e}")))
     }
 
+    fn persist_records_atomically(&self, records: &[Record]) -> Result<(), ToolError> {
+        let Some(parent) = self.path.parent() else {
+            return Err(internal("memory 路径缺少父目录".into()));
+        };
+        std::fs::create_dir_all(parent)
+            .map_err(|e| internal(format!("建 memory 目录失败: {e}")))?;
+        let serialized = serde_json::to_string_pretty(records)
+            .map_err(|e| internal(format!("序列化 memory 失败: {e}")))?;
+        let temporary = self.path.with_extension("replace.tmp");
+        let backup = self.path.with_extension("replace.bak");
+        if temporary.exists() {
+            std::fs::remove_file(&temporary)
+                .map_err(|e| internal(format!("清理 memory 临时文件失败: {e}")))?;
+        }
+        if backup.exists() {
+            std::fs::remove_file(&backup)
+                .map_err(|e| internal(format!("清理 memory 备份失败: {e}")))?;
+        }
+        std::fs::write(&temporary, serialized)
+            .map_err(|e| internal(format!("写 memory 临时文件失败: {e}")))?;
+
+        let had_original = self.path.exists();
+        if had_original {
+            if let Err(error) = std::fs::rename(&self.path, &backup) {
+                let _ = std::fs::remove_file(&temporary);
+                return Err(internal(format!("备份旧 memory 失败: {error}")));
+            }
+        }
+        if let Err(error) = std::fs::rename(&temporary, &self.path) {
+            if had_original {
+                let _ = std::fs::rename(&backup, &self.path);
+            }
+            let _ = std::fs::remove_file(&temporary);
+            return Err(internal(format!("切换 memory 快照失败: {error}")));
+        }
+        if had_original {
+            let _ = std::fs::remove_file(backup);
+        }
+        Ok(())
+    }
+
     /// `memory.save`:内容寻址 upsert + note/highlight citation 自动派生 `[ADR-0026]`。
     /// `now` = generated_at/last_used 时间戳(调用方注入,不进 mem_id ⇒ id 时间无关)。
     pub fn save(&mut self, input: SaveInput, now: &str) -> Result<Record, ToolError> {
@@ -245,17 +308,7 @@ impl MemoryStore {
             Some(c) => c,
             None => {
                 if let Some(context) = &input.selection_context {
-                    let mut seen = BTreeSet::new();
-                    context
-                        .ranges
-                        .iter()
-                        .filter(|selected| seen.insert(selected.lid.as_str()))
-                        .map(|selected| MemCitation {
-                            lid: selected.lid.clone(),
-                            book_id: input.book_id.clone(),
-                            note: None,
-                        })
-                        .collect()
+                    selection_citations(context, &input.book_id)
                 } else if matches!(input.mem_type.as_str(), "note" | "highlight") {
                     if let Some(lid) = &input.anchor.lid {
                         vec![MemCitation {
@@ -303,6 +356,101 @@ impl MemoryStore {
         // P4-4:账本变更后重派生只读 .md 视图(best-effort,不阻断真相源)`[ADR-0040]`。
         let _ = self.write_profile_files();
         Ok(record)
+    }
+
+    /// 原子替换一条 memory:候选快照落盘成功后才切换内存状态。
+    pub fn replace(&mut self, input: ReplaceInput, now: &str) -> Result<Record, ToolError> {
+        let Some(index) = self.records.iter().position(|record| record.mem_id == input.mem_id)
+        else {
+            return Err(memory_not_found(&input.mem_id));
+        };
+        if input.content.trim().is_empty() {
+            return Err(ToolError {
+                error_code: "INVALID_MEMORY_CONTENT".into(),
+                category: "validation".into(),
+                message: "memory.replace content 不得为空".into(),
+            });
+        }
+
+        let old = self.records[index].clone();
+        let explicitly_reanchored = input.selection_context.is_some();
+        let selection_context = input.selection_context.or_else(|| old.selection_context.clone());
+        let anchor = if explicitly_reanchored {
+            Anchor {
+                lid: selection_context
+                    .as_ref()
+                    .and_then(|context| context.ranges.first())
+                    .map(|selected| selected.lid.clone()),
+                concept: None,
+            }
+        } else {
+            old.anchor.clone()
+        };
+        let citations = if explicitly_reanchored {
+            selection_context
+                .as_ref()
+                .map(|context| selection_citations(context, &old.book_id))
+                .unwrap_or_default()
+        } else {
+            old.citations.clone()
+        };
+        let validation_input = SaveInput {
+            mem_id: None,
+            mem_type: old.mem_type.clone(),
+            layer: old.layer.clone(),
+            book_id: old.book_id.clone(),
+            anchor: anchor.clone(),
+            content: input.content.clone(),
+            range: old.range.clone(),
+            selection_context: selection_context.clone(),
+            citations: Some(citations.clone()),
+            source_session_id: old.source_session_id.clone(),
+        };
+        validate_selection_context(&validation_input)?;
+        let mem_id = content_mem_id(
+            &old.book_id,
+            &old.mem_type,
+            &anchor,
+            &input.content,
+            old.range.as_ref(),
+            selection_context.as_ref(),
+        );
+        if self
+            .records
+            .iter()
+            .enumerate()
+            .any(|(candidate_index, record)| candidate_index != index && record.mem_id == mem_id)
+        {
+            return Err(ToolError {
+                error_code: "MEMORY_REPLACE_CONFLICT".into(),
+                category: "conflict".into(),
+                message: format!("memory.replace 目标记录已存在: {mem_id}"),
+            });
+        }
+
+        let replacement = Record {
+            mem_id,
+            mem_type: old.mem_type,
+            layer: old.layer,
+            book_id: old.book_id,
+            anchor,
+            content: input.content,
+            range: old.range,
+            selection_context,
+            citations,
+            usage: Usage {
+                count: old.usage.count,
+                last_used: Some(now.to_string()),
+            },
+            generated_at: now.to_string(),
+            source_session_id: old.source_session_id,
+        };
+        let mut candidate = self.records.clone();
+        candidate[index] = replacement.clone();
+        self.persist_records_atomically(&candidate)?;
+        self.records = candidate;
+        let _ = self.write_profile_files();
+        Ok(replacement)
     }
 
     /// `memory.delete(mem_id)`:用户**显式删**一条(区别于议题7 后台 usage 遗忘 `[ADR-0018]`)`[V3 §4.3]`。
@@ -587,6 +735,14 @@ fn invalid_selection_context(message: String) -> ToolError {
     }
 }
 
+fn memory_not_found(mem_id: &str) -> ToolError {
+    ToolError {
+        error_code: "MEMORY_NOT_FOUND".into(),
+        category: "not_found".into(),
+        message: format!("memory 记录不存在: {mem_id}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -721,6 +877,153 @@ mod tests {
         mismatch.selection_context = Some(selection_context());
         assert_eq!(store.save(mismatch, "t0").unwrap_err().error_code, "INVALID_SELECTION_CONTEXT");
         assert!(store.recall(&RecallQuery::default()).is_empty());
+    }
+
+    #[test]
+    fn replace_content_inherits_selection_context_anchor_citations_and_envelope() {
+        let path = tmp("replace-inherit");
+        let mut store = MemoryStore::open(&path).unwrap();
+        let mut input = note_input("bookA", "1.1", "旧内容");
+        input.selection_context = Some(selection_context());
+        input.source_session_id = Some("session-a".into());
+        let old = store.save(input, "t0").unwrap();
+
+        let replaced = store
+            .replace(
+                ReplaceInput {
+                    mem_id: old.mem_id.clone(),
+                    content: "新内容".into(),
+                    selection_context: None,
+                },
+                "t1",
+            )
+            .unwrap();
+
+        assert_ne!(replaced.mem_id, old.mem_id);
+        assert_eq!(replaced.content, "新内容");
+        assert_eq!(replaced.anchor, old.anchor);
+        assert_eq!(replaced.selection_context, old.selection_context);
+        assert_eq!(replaced.citations, old.citations);
+        assert_eq!(replaced.layer, old.layer);
+        assert_eq!(replaced.mem_type, old.mem_type);
+        assert_eq!(replaced.book_id, old.book_id);
+        assert_eq!(replaced.source_session_id, old.source_session_id);
+        assert_eq!(store.recall(&RecallQuery::default()), vec![replaced.clone()]);
+
+        let reopened = MemoryStore::open(&path).unwrap();
+        assert_eq!(reopened.recall(&RecallQuery::default()), vec![replaced]);
+    }
+
+    #[test]
+    fn replace_with_explicit_selection_context_reanchors_and_rederives_citations() {
+        let path = tmp("replace-reanchor");
+        let mut store = MemoryStore::open(&path).unwrap();
+        let old = store.save(note_input("bookA", "1.1", "旧内容"), "t0").unwrap();
+        let context = SelectionContext {
+            status: SelectionResolution::Partial,
+            raw_quote: "new raw".into(),
+            resolved_quote: "new resolved".into(),
+            ranges: vec![
+                SelectedRange {
+                    lid: "2.1".into(),
+                    range: TextRange { start: 2, end: 5 },
+                },
+                SelectedRange {
+                    lid: "2.2".into(),
+                    range: TextRange { start: 0, end: 4 },
+                },
+            ],
+        };
+
+        let replaced = store
+            .replace(
+                ReplaceInput {
+                    mem_id: old.mem_id,
+                    content: "新内容".into(),
+                    selection_context: Some(context.clone()),
+                },
+                "t1",
+            )
+            .unwrap();
+
+        assert_eq!(replaced.anchor.lid.as_deref(), Some("2.1"));
+        assert_eq!(replaced.selection_context, Some(context));
+        assert_eq!(
+            replaced.citations.iter().map(|citation| citation.lid.as_str()).collect::<Vec<_>>(),
+            vec!["2.1", "2.2"]
+        );
+    }
+
+    #[test]
+    fn replace_rejects_missing_empty_and_target_id_conflict_without_mutation() {
+        let path = tmp("replace-validation");
+        let mut store = MemoryStore::open(&path).unwrap();
+        let first = store.save(note_input("bookA", "1.1", "first"), "t0").unwrap();
+        let second = store.save(note_input("bookA", "1.1", "second"), "t0").unwrap();
+        let before = store.recall(&RecallQuery::default());
+
+        let missing = store
+            .replace(
+                ReplaceInput {
+                    mem_id: "mem_missing".into(),
+                    content: "new".into(),
+                    selection_context: None,
+                },
+                "t1",
+            )
+            .unwrap_err();
+        assert_eq!(missing.error_code, "MEMORY_NOT_FOUND");
+
+        let empty = store
+            .replace(
+                ReplaceInput {
+                    mem_id: first.mem_id.clone(),
+                    content: "  ".into(),
+                    selection_context: None,
+                },
+                "t1",
+            )
+            .unwrap_err();
+        assert_eq!(empty.error_code, "INVALID_MEMORY_CONTENT");
+
+        let conflict = store
+            .replace(
+                ReplaceInput {
+                    mem_id: first.mem_id,
+                    content: second.content,
+                    selection_context: None,
+                },
+                "t1",
+            )
+            .unwrap_err();
+        assert_eq!(conflict.error_code, "MEMORY_REPLACE_CONFLICT");
+        assert_eq!(store.recall(&RecallQuery::default()), before);
+    }
+
+    #[test]
+    fn replace_persistence_failure_preserves_memory_and_disk_record() {
+        let path = tmp("replace-persist-old");
+        let mut store = MemoryStore::open(&path).unwrap();
+        let old = store.save(note_input("bookA", "1.1", "旧内容"), "t0").unwrap();
+
+        let blocker = tmp("replace-parent-blocker");
+        std::fs::write(&blocker, "not a directory").unwrap();
+        store.path = blocker.join("memory.json");
+        let error = store
+            .replace(
+                ReplaceInput {
+                    mem_id: old.mem_id.clone(),
+                    content: "不能落盘的新内容".into(),
+                    selection_context: None,
+                },
+                "t1",
+            )
+            .unwrap_err();
+        assert_eq!(error.category, "internal");
+        assert_eq!(store.recall(&RecallQuery::default()), vec![old.clone()]);
+
+        let reopened = MemoryStore::open(&path).unwrap();
+        assert_eq!(reopened.recall(&RecallQuery::default()), vec![old]);
     }
 
     // save → recall 往返:存的记录能按 book_id 取回,字段完整。

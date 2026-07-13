@@ -790,6 +790,8 @@ export const api = {
     http<MemoryRecord[]>("POST", "/memory/recall", q),
   save: (r: { type: string; anchor_lid: string; content: string; layer?: string; selection_context?: SelectionContext }) =>
     http<MemoryRecord>("POST", "/memory/save", r),
+  replace: (r: { mem_id: string; content: string; selection_context?: SelectionContext }) =>
+    http<MemoryRecord>("POST", "/memory/replace", r),
   delete: (mem_id: string) => http<{ ok: boolean }>("POST", "/memory/delete", { mem_id }),
 
   // ── agent.*(外层 E agent,POST)`[ADR-0030]` ──
