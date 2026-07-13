@@ -41,6 +41,12 @@ import {
   type PdfSelectionDraft,
   usePdfSelectionDraft,
 } from "./pdf-selection-draft";
+import {
+  buildPdfProjectionBatch,
+  EMPTY_PDF_ANNOTATION_PROJECTION,
+  projectPdfAnnotations,
+  type PdfUserAnnotationProjection,
+} from "./pdf-annotation-projection";
 import { renderInlineMarkdown, renderMarkdown } from "./md";
 import { desktopLibraryNeedsSelection } from "./desktop-library";
 import {
@@ -154,6 +160,9 @@ interface Segment {
 }
 const segments = ref<Segment[]>([]); // 视口内连续正文(LID 隐形)
 const annotations = ref<MemoryRecord[]>([]); // 当前书全部标注(客户端按 lid 过滤)
+const pdfAnnotationProjection = ref<PdfUserAnnotationProjection>(EMPTY_PDF_ANNOTATION_PROJECTION);
+const pdfAnnotationProjectionError = ref<string | null>(null);
+let pdfAnnotationProjectionSeq = 0;
 const HIGHLIGHT_GROUP_PREFIX = "highlight-group:";
 const selectedLid = ref<string | null>(null);
 const currentReadingLid = ref<string | null>(null);
@@ -1017,7 +1026,7 @@ function openEditNote(rec: MemoryRecord) {
 }
 function cancelNote() {
   if (noteEditor.value?.selectionContext && pdfSelectionState.value.phase === "saving") {
-    pdfSelectionSession.cancel();
+    cancelPdfSelectionDraft();
   }
   noteEditor.value = null;
 }
@@ -1128,8 +1137,43 @@ async function formulaFor(lid: string, kind: NodeKind): Promise<FormulaSemantics
     throw e;
   }
 }
+
+function resetPdfAnnotationProjection() {
+  pdfAnnotationProjectionSeq += 1;
+  pdfAnnotationProjection.value = EMPTY_PDF_ANNOTATION_PROJECTION;
+  pdfAnnotationProjectionError.value = null;
+}
+
+async function refreshPdfAnnotationProjection(records: MemoryRecord[]) {
+  const seq = ++pdfAnnotationProjectionSeq;
+  pdfAnnotationProjectionError.value = null;
+  if (
+    !pdfReaderAvailable.value
+    || !pdfCapabilityUsable(sourceManifest.value?.capabilities.project_ranges_to_pdf.status)
+  ) {
+    pdfAnnotationProjection.value = EMPTY_PDF_ANNOTATION_PROJECTION;
+    return;
+  }
+  const batch = buildPdfProjectionBatch(records);
+  if (!batch.requests.length) {
+    pdfAnnotationProjection.value = projectPdfAnnotations(batch, { projections: [] });
+    return;
+  }
+  try {
+    const response = await api.pdfRangesProject(batch.requests);
+    if (seq !== pdfAnnotationProjectionSeq) return;
+    pdfAnnotationProjection.value = projectPdfAnnotations(batch, response);
+  } catch (error) {
+    if (seq !== pdfAnnotationProjectionSeq) return;
+    pdfAnnotationProjection.value = projectPdfAnnotations(batch, { projections: [] });
+    pdfAnnotationProjectionError.value = errorMessage(error);
+  }
+}
+
 async function refreshAnnotations() {
-  annotations.value = await api.recall({}); // 单书:取全部,客户端按 lid 过滤
+  const records = await api.recall({}); // 单书:取全部,客户端按 lid 过滤
+  annotations.value = records;
+  await refreshPdfAnnotationProjection(records);
 }
 
 type SegmentLoadMode = "replace" | "append" | "prepend";
@@ -1799,6 +1843,10 @@ const pdfSelectionSession = usePdfSelectionDraft((capture) =>
   api.pdfSelectionResolve({ rects: capture.rects }),
 );
 const pdfSelectionState = pdfSelectionSession.state;
+const pdfReselectTarget = ref<{
+  kind: "note" | "highlight";
+  record: MemoryRecord;
+} | null>(null);
 const pdfSelectionToolbarStyle = computed(() => {
   const rect = pdfSelectionState.value.capture?.screen_rect;
   if (!rect) return {};
@@ -1815,6 +1863,7 @@ function onPdfSelectionCapture(capture: PdfSelectionCapture) {
 
 function cancelPdfSelectionDraft() {
   pdfSelectionSession.cancel();
+  pdfReselectTarget.value = null;
 }
 
 function selectionContextOf(draft: PdfSelectionDraft): SelectionContext {
@@ -1828,7 +1877,20 @@ function selectionContextOf(draft: PdfSelectionDraft): SelectionContext {
 
 function completePdfSelectionAction() {
   pdfSelectionSession.complete();
+  pdfReselectTarget.value = null;
   window.getSelection()?.removeAllRanges();
+}
+
+function reselectPdfNote(note: MemoryRecord) {
+  pdfSelectionSession.cancel();
+  pdfReselectTarget.value = { kind: "note", record: note };
+  banner.value = "重新框选 PDF 文字后选择“笔记”；保存成功前原位置保持不变。";
+}
+
+function reselectPdfHighlight(highlight: MemoryRecord) {
+  pdfSelectionSession.cancel();
+  pdfReselectTarget.value = { kind: "highlight", record: highlight };
+  banner.value = "重新框选 PDF 文字后选择“高亮”；新范围保存成功前原高亮保持不变。";
 }
 
 // ── 自由选区:可跨多个 LID,高亮按 LID 拆 range;Note/Ask AI 锚到起点 LID `[ADR-0031]` ──
@@ -2008,9 +2070,18 @@ async function highlightPdfSelection() {
   try {
     banner.value = "";
     const groupId = draft.ranges.length > 1 ? newHighlightGroupId() : undefined;
-    await Promise.all(draft.ranges.map((selected) =>
+    const created = await Promise.all(draft.ranges.map((selected) =>
       api.highlight(selected.lid, selected.range, groupId),
     ));
+    const reselect = pdfReselectTarget.value?.kind === "highlight" ? pdfReselectTarget.value.record : null;
+    if (reselect) {
+      try {
+        await Promise.all(highlightGroupMembers(reselect).map((record) => api.delete(record.mem_id)));
+      } catch (error) {
+        await Promise.allSettled(created.map((effect) => api.delete(effect.highlight_id)));
+        throw error;
+      }
+    }
     selectedLid.value = draft.ranges[0]?.lid ?? selectedLid.value;
     completePdfSelectionAction();
     await refreshAnnotations();
@@ -2026,7 +2097,18 @@ function notePdfSelection() {
   if (!draft || !first) return;
   const quote = draft.raw_quote.replace(/\s+/g, " ").trim();
   selectedLid.value = first.lid;
-  openNewNote(first.lid, quote ? `> ${quote}` : "", selectionContextOf(draft));
+  const reselect = pdfReselectTarget.value?.kind === "note" ? pdfReselectTarget.value.record : null;
+  if (reselect) {
+    noteEditor.value = {
+      lid: first.lid,
+      memId: reselect.mem_id,
+      layer: reselect.layer,
+      content: reselect.content,
+      selectionContext: selectionContextOf(draft),
+    };
+  } else {
+    openNewNote(first.lid, quote ? `> ${quote}` : "", selectionContextOf(draft));
+  }
 }
 
 function askPdfSelection() {
@@ -2443,6 +2525,9 @@ function resetBookSessionUi() {
   viewport.value = null;
   segments.value = [];
   annotations.value = [];
+  resetPdfAnnotationProjection();
+  cancelPdfSelectionDraft();
+  noteEditor.value = null;
   selectedLid.value = null;
   currentReadingLid.value = null;
   formulaDialog.value = null;
@@ -2823,11 +2908,19 @@ async function submitOpenBook(dir = bookPickerDir.value) {
         :pdf-url="api.pdfOriginalUrl()"
         :active-lid="pdfActiveLid"
         :selected-lid="selectedLid"
+        :annotation-projection="pdfAnnotationProjection"
+        :annotation-error="pdfAnnotationProjectionError"
+        :render-markdown="renderMarkdown"
         @goto="doGoto"
         @viewport-change="onPdfViewportChange"
         @focus-source="focusLocalSource"
         @selection-capture="onPdfSelectionCapture"
         @selection-cancel="cancelPdfSelectionDraft"
+        @edit-note="openEditNote"
+        @delete-note="deleteNote"
+        @reselect-note="reselectPdfNote"
+        @delete-highlight="deleteHighlight"
+        @reselect-highlight="reselectPdfHighlight"
       />
 
       <ReaderPane
@@ -2882,6 +2975,7 @@ async function submitOpenBook(dir = bookPickerDir.value) {
         :selected-formula="selectedFormula"
         :context-notes="allNotes"
         :context-highlights="allHighlights"
+        :annotation-location="pdfAnnotationProjection.location_by_mem_id"
         :render-markdown="renderMarkdown"
         :eff-label="effLabel"
         :eff-state="effState"

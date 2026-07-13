@@ -2,7 +2,8 @@
 import { flushPromises, mount } from "@vue/test-utils";
 import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { PdfSourceMap } from "../api";
+import type { MemoryRecord, PdfSourceMap } from "../api";
+import type { PdfUserAnnotationProjection } from "../pdf-annotation-projection";
 
 const pdfMocks = vi.hoisted(() => {
   const viewport = {
@@ -79,6 +80,18 @@ class TestIntersectionObserver {
   unobserve() {}
 }
 
+function annotation(memId: string, type: "highlight" | "note", lid = "1.1"): MemoryRecord {
+  return {
+    mem_id: memId,
+    type,
+    layer: "long_term",
+    book_id: "paper-a",
+    anchor: { lid, concept: null },
+    content: type === "note" ? `> quote\n\nNote ${memId}` : `Highlight ${memId}`,
+    range: type === "highlight" ? { start: 0, end: 4 } : undefined,
+  };
+}
+
 describe("PdfReaderPane", () => {
   beforeEach(() => {
     vi.stubGlobal("IntersectionObserver", TestIntersectionObserver);
@@ -95,6 +108,7 @@ describe("PdfReaderPane", () => {
     pdfMocks.modernGetDocument.mockClear();
     pdfMocks.legacyGetDocument.mockClear();
     pdfMocks.legacyTextLayer.mockClear();
+    document.body.replaceChildren();
   });
 
   it("uses the compatible worker and keeps pages and dynamic text in their layers", async () => {
@@ -291,6 +305,124 @@ describe("PdfReaderPane", () => {
     const cancelsBefore = wrapper.emitted("selection-cancel")?.length ?? 0;
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
     expect(wrapper.emitted("selection-cancel")).toHaveLength(cancelsBefore + 1);
+    wrapper.unmount();
+  });
+
+  it("renders exact user strokes and aggregated note markers without automatic regions", async () => {
+    const noteA = annotation("n-a", "note");
+    const noteB = annotation("n-b", "note");
+    const projection: PdfUserAnnotationProjection = {
+      highlights: [{
+        mem_id: "h-a",
+        record: annotation("h-a", "highlight"),
+        rects: [
+          { pageIndex: 0, bbox: [20, 680, 120, 700] },
+          { pageIndex: 1, bbox: [30, 650, 110, 670] },
+        ],
+      }],
+      note_markers: [{
+        terminal_key: "0:1.1:3:4",
+        anchor_rect: { pageIndex: 0, bbox: [115, 680, 120, 700] },
+        notes: [noteA, noteB],
+      }],
+      location_by_mem_id: { "h-a": "exact", "n-a": "exact", "n-b": "exact" },
+    };
+    const wrapper = mount(PdfReaderPane, {
+      attachTo: document.body,
+      props: {
+        sourceManifest: null,
+        sourceMap,
+        pdfUrl: "/api/book/pdf/original",
+        activeLid: null,
+        selectedLid: null,
+        annotationProjection: projection,
+        renderMarkdown: (source: string) => `<p>${source}</p>`,
+      },
+    });
+    await flushPromises();
+    await flushPromises();
+
+    expect(wrapper.findAll(".pdf-user-highlight")).toHaveLength(2);
+    expect(wrapper.get(".pdf-user-highlight").attributes("style")).toContain("top: 12.5%");
+    expect(wrapper.findAll(".pdf-note-marker")).toHaveLength(1);
+    expect(wrapper.get(".pdf-note-marker").text()).toBe("2");
+    expect(wrapper.findAll(".pdf-region")).toHaveLength(0);
+
+    const list = wrapper.get(".pdf-page-list").element as HTMLElement;
+    list.scrollTop = 120;
+    await wrapper.get(".pdf-note-marker").trigger("click");
+    await flushPromises();
+    expect(document.querySelectorAll(".pdf-annotation-surface .note-card")).toHaveLength(2);
+    expect(document.querySelector(".pdf-annotation-surface")?.getAttribute("data-surface-kind")).toBe("notes");
+    expect(list.scrollTop).toBe(120);
+
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    await flushPromises();
+    expect(document.querySelector(".pdf-annotation-surface")).toBeNull();
+    expect(list.scrollTop).toBe(120);
+    await wrapper.get(".pdf-note-marker").trigger("click");
+    await flushPromises();
+
+    const surface = document.querySelector(".pdf-annotation-surface")!;
+    (surface.querySelector('button[title="编辑"]') as HTMLButtonElement).click();
+    (surface.querySelector('button[title="删除"]') as HTMLButtonElement).click();
+    (surface.querySelector('button[title="重新选择位置"]') as HTMLButtonElement).click();
+    await flushPromises();
+    expect(wrapper.emitted("edit-note")?.at(-1)).toEqual([noteA]);
+    expect(wrapper.emitted("delete-note")?.at(-1)).toEqual([noteA]);
+    expect(wrapper.emitted("reselect-note")?.at(-1)).toEqual([noteA]);
+    expect(list.scrollTop).toBe(120);
+
+    const componentSource = readFileSync("src/components/PdfReaderPane.vue", "utf8");
+    expect(componentSource).toContain("env(safe-area-inset-bottom)");
+    wrapper.unmount();
+  });
+
+  it("opens a highlight surface through page hit testing and keeps failed mutations parent-owned", async () => {
+    const highlight = annotation("h-hit", "highlight");
+    const projection: PdfUserAnnotationProjection = {
+      highlights: [{
+        mem_id: highlight.mem_id,
+        record: highlight,
+        rects: [{ pageIndex: 0, bbox: [20, 680, 120, 700] }],
+      }],
+      note_markers: [],
+      location_by_mem_id: { "h-hit": "exact" },
+    };
+    const wrapper = mount(PdfReaderPane, {
+      attachTo: document.body,
+      props: {
+        sourceManifest: null,
+        sourceMap,
+        pdfUrl: "/api/book/pdf/original",
+        activeLid: null,
+        selectedLid: null,
+        annotationProjection: projection,
+      },
+    });
+    await flushPromises();
+    await flushPromises();
+
+    const page = wrapper.findAll(".pdf-page-shell")[0];
+    vi.spyOn(page.element, "getBoundingClientRect").mockReturnValue({
+      x: 0, y: 0, top: 0, bottom: 800, left: 0, right: 600,
+      width: 600, height: 800, toJSON: () => ({}),
+    });
+    await page.trigger("click", { clientX: 50, clientY: 110 });
+    expect(wrapper.emitted("goto")).toBeUndefined();
+    expect(document.querySelector(".pdf-annotation-surface")?.textContent).toContain("Highlight h-hit");
+
+    const surface = document.querySelector(".pdf-annotation-surface")!;
+    (surface.querySelector('button[title="删除高亮"]') as HTMLButtonElement).click();
+    await flushPromises();
+    expect(document.querySelector(".pdf-annotation-surface")).not.toBeNull();
+    (surface.querySelector('button[title="重新选择高亮"]') as HTMLButtonElement).click();
+    await flushPromises();
+    expect(wrapper.emitted("delete-highlight")?.at(-1)).toEqual([highlight]);
+    expect(wrapper.emitted("reselect-highlight")?.at(-1)).toEqual([highlight]);
+
+    await page.trigger("click", { clientX: 500, clientY: 500 });
+    expect(document.querySelector(".pdf-annotation-surface")).toBeNull();
     wrapper.unmount();
   });
 });

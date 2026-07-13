@@ -2,7 +2,7 @@
 
 > 定位:让 PDF 原生拖选与 Markdown 正文共用 Highlight、Note、Ask AI 语义,同时保持原版 PDF 纯净阅读。
 > 冻结决策:[ADR-0074](adr/0074-pdf-selection-actions-and-exact-user-annotation-projection.md)。
-> 状态:PS0-PS5 完成;PS6-PS7 待实现。
+> 状态:PS0-PS6 完成;PS7 待实现。
 
 ## 0. 冻结边界
 
@@ -611,6 +611,8 @@ pnpm -C packages/web build
 - **Do**:批量投影 memory annotations,渲染精确 Highlight strokes、Note marker 聚合、popover/bottom sheet 与 shared NoteCard。
 - **Do not**:显示自动 map regions 或近似 bbox。
 - **Done**:桌面/移动 geometry、collision、边界翻转、无法定位、edit/delete/reselect tests 全绿。
+
+状态:完成;memory records 单批 exact-only 投影、Highlight strokes、聚合 Note marker、共享 NoteCard surface 与显式重选已接通。
 
 前置条件:PS1 schema、PS2 replace、PS3 exact projection、PS4 NoteCard 与 PS5 draft 全部已绿。
 

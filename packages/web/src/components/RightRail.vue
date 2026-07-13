@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from "vue";
 import type { AgentEffect, FormulaSemantics, MemoryRecord, OuterOutcome, TraceStep } from "../api";
+import type { PdfAnnotationLocation } from "../pdf-annotation-projection";
 import { rangeToMarkdown } from "../selection";
 
 type ContextTab = "agent" | "trace" | "formula" | "notes";
@@ -43,6 +44,7 @@ const props = defineProps<{
   selectedFormula: FormulaSemantics | null;
   contextNotes: MemoryRecord[];
   contextHighlights: MemoryRecord[];
+  annotationLocation?: Record<string, PdfAnnotationLocation>;
   renderMarkdown: (source: string) => string;
   effLabel: (effect: AgentEffect) => string;
   effState: (turnIndex: number, effectIndex: number) => string | undefined;
@@ -155,6 +157,13 @@ function leadingQuote(content: string): string | null {
   }
   const quote = quoteLines.join(" ").replace(/\s+/g, " ").trim();
   return quote || null;
+}
+function annotationLocationLabel(record: MemoryRecord): string | null {
+  const status = props.annotationLocation?.[record.mem_id];
+  if (status === "exact") return "PDF 已定位";
+  if (status === "partial") return "PDF 部分定位";
+  if (status === "unmapped") return "PDF 未定位";
+  return null;
 }
 function notePreviewMarkdown(note: MemoryRecord): string {
   const body = note.content.replace(/^>.*(\n>.*)*\n*/m, "").trim();
@@ -366,7 +375,12 @@ function deleteHistorySession(sessionId: string) {
       <div v-if="noteCount" class="memory-list">
         <details v-for="note in props.contextNotes" :key="note.mem_id" class="memory-card note-memory-card" :open="notesExpanded">
           <summary class="memory-meta note-memory-summary">
-            <span>笔记</span>
+            <span class="memory-kind-with-location">
+              笔记
+              <small v-if="annotationLocationLabel(note)" :data-location="props.annotationLocation?.[note.mem_id]">
+                {{ annotationLocationLabel(note) }}
+              </small>
+            </span>
             <button
               v-if="note.anchor.lid"
               class="note-source-button"
@@ -381,7 +395,15 @@ function deleteHistorySession(sessionId: string) {
           <div class="md" v-html="props.renderMarkdown(note.content)"></div>
         </details>
         <article v-for="hl in props.contextHighlights" :key="hl.mem_id" class="memory-card highlight-card">
-          <div class="memory-meta"><span>高亮</span><code>{{ hl.anchor.lid }}</code></div>
+          <div class="memory-meta">
+            <span class="memory-kind-with-location">
+              高亮
+              <small v-if="annotationLocationLabel(hl)" :data-location="props.annotationLocation?.[hl.mem_id]">
+                {{ annotationLocationLabel(hl) }}
+              </small>
+            </span>
+            <code>{{ hl.anchor.lid }}</code>
+          </div>
           <p>{{ excerpt(hl) }}</p>
         </article>
       </div>
@@ -1075,6 +1097,29 @@ function deleteHistorySession(sessionId: string) {
   color: var(--stone);
   font-style: normal;
   text-transform: uppercase;
+}
+.memory-kind-with-location {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  min-width: 0;
+}
+.memory-kind-with-location small {
+  padding: 0.08rem 0.28rem;
+  border: 1px solid var(--hairline-soft);
+  border-radius: 5px;
+  color: var(--stone);
+  font-size: 0.64rem;
+  font-weight: 500;
+  line-height: 1.2;
+  text-transform: none;
+  white-space: nowrap;
+}
+.memory-kind-with-location small[data-location="partial"],
+.memory-kind-with-location small[data-location="unmapped"] {
+  border-color: rgba(194, 132, 38, 0.28);
+  color: #8a5a14;
+  background: rgba(252, 239, 198, 0.42);
 }
 .highlight-card {
   background: #fffdf0;

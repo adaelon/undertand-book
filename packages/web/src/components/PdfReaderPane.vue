@@ -1,25 +1,46 @@
 <script setup lang="ts">
+import { MessageSquareText, ScanText, Trash2, X } from "@lucide/vue";
 import { computed, nextTick, onBeforeUnmount, ref, shallowRef, watch } from "vue";
 import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf.mjs";
 import pdfWorkerUrl from "pdfjs-dist/legacy/build/pdf.worker.mjs?url";
 import {
+  type MemoryRecord,
   type PaperViewportPosition,
   type PdfRegion,
   type PdfSourceMap,
   type PdfSourceMapEntry,
   type SourceManifestV2,
 } from "../api";
+import {
+  EMPTY_PDF_ANNOTATION_PROJECTION,
+  layoutNoteMarkers,
+  overlayPointToPdf,
+  pdfPageVisualSize,
+  pdfRectToOverlay,
+  type PdfNoteMarkerLayout,
+  type PdfUserAnnotationProjection,
+  type ProjectedHighlight,
+  type ProjectedNoteMarker,
+} from "../pdf-annotation-projection";
 import type { PdfSelectionCapture } from "../pdf-selection-draft";
+import NoteCard from "./NoteCard.vue";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   sourceManifest: SourceManifestV2 | null;
   sourceMap: PdfSourceMap | null;
   pdfUrl: string;
   activeLid: string | null;
   selectedLid: string | null;
-}>();
+  annotationProjection?: PdfUserAnnotationProjection;
+  annotationError?: string | null;
+  renderMarkdown?: (source: string) => string;
+}>(), {
+  annotationProjection: () => EMPTY_PDF_ANNOTATION_PROJECTION,
+  annotationError: null,
+  renderMarkdown: (source: string) => source,
+});
 
 const emit = defineEmits<{
   (e: "goto", lid: string): void;
@@ -27,6 +48,11 @@ const emit = defineEmits<{
   (e: "viewport-change", position: PaperViewportPosition): void;
   (e: "selection-capture", capture: PdfSelectionCapture): void;
   (e: "selection-cancel"): void;
+  (e: "edit-note", note: MemoryRecord): void;
+  (e: "delete-note", note: MemoryRecord): void;
+  (e: "reselect-note", note: MemoryRecord): void;
+  (e: "delete-highlight", highlight: MemoryRecord): void;
+  (e: "reselect-highlight", highlight: MemoryRecord): void;
 }>();
 
 type PdfDocument = Awaited<ReturnType<typeof pdfjsLib.getDocument>["promise"]>;
@@ -39,6 +65,17 @@ interface PageRenderState {
   error: string | null;
 }
 
+interface SurfaceAnchor {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
+
+type AnnotationSurface =
+  | { kind: "notes"; terminalKey: string; anchor: SurfaceAnchor }
+  | { kind: "highlight"; memId: string; anchor: SurfaceAnchor };
+
 const pageList = ref<HTMLElement | null>(null);
 const pdfDoc = shallowRef<PdfDocument | null>(null);
 const pdfLoading = ref(false);
@@ -48,12 +85,42 @@ const canvasEls = new Map<number, HTMLCanvasElement>();
 const textLayerEls = new Map<number, HTMLElement>();
 const textLayerTasks = new Map<number, PdfTextLayer>();
 const renderStates = ref<Record<number, PageRenderState>>({});
+const annotationSurface = ref<AnnotationSurface | null>(null);
 let loadingTask: ReturnType<typeof pdfjsLib.getDocument> | null = null;
 let observer: IntersectionObserver | null = null;
 let renderToken = 0;
 let viewportFrame: number | null = null;
 let lastViewportFingerprint = "";
 let selectionRequestSequence = 0;
+
+const activeNoteMarker = computed(() => {
+  const surface = annotationSurface.value;
+  if (surface?.kind !== "notes") return null;
+  return props.annotationProjection.note_markers.find((marker) => marker.terminal_key === surface.terminalKey) ?? null;
+});
+const activeHighlight = computed(() => {
+  const surface = annotationSurface.value;
+  if (surface?.kind !== "highlight") return null;
+  return props.annotationProjection.highlights.find((highlight) => highlight.mem_id === surface.memId) ?? null;
+});
+const annotationSurfaceStyle = computed(() => {
+  const surface = annotationSurface.value;
+  if (!surface) return {};
+  const viewportWidth = window.innerWidth;
+  const viewportHeight = window.innerHeight;
+  const width = Math.min(360, Math.max(280, viewportWidth - 16));
+  const estimatedHeight = Math.min(420, Math.max(240, viewportHeight - 16));
+  const opensLeft = surface.anchor.right + 10 + width > viewportWidth - 8;
+  const opensAbove = surface.anchor.bottom + 10 + estimatedHeight > viewportHeight - 8;
+  const left = opensLeft ? surface.anchor.left - width - 10 : surface.anchor.right + 10;
+  const top = opensAbove ? surface.anchor.top - estimatedHeight - 10 : surface.anchor.bottom + 10;
+  return {
+    left: `${Math.max(8, Math.min(left, viewportWidth - width - 8))}px`,
+    top: `${Math.max(8, Math.min(top, viewportHeight - estimatedHeight - 8))}px`,
+    width: `${width}px`,
+    maxHeight: `${estimatedHeight}px`,
+  };
+});
 
 const pageCount = computed(() => props.sourceMap?.pages.length ?? 0);
 const entriesByPage = computed(() => {
@@ -166,8 +233,9 @@ function scheduleViewportChange() {
 }
 
 function pageShellStyle(page: PdfSourceMap["pages"][number]): Record<string, string> {
+  const visual = pdfPageVisualSize(page);
   return {
-    aspectRatio: `${page.width} / ${page.height}`,
+    aspectRatio: `${visual.width} / ${visual.height}`,
   };
 }
 
@@ -176,11 +244,11 @@ function pointToPdf(pageIndex: number, event: MouseEvent): { x: number; y: numbe
   const pageEl = pageEls.get(pageIndex);
   if (!page || !pageEl) return null;
   const rect = pageEl.getBoundingClientRect();
-  const scale = rect.width / page.width;
-  return {
-    x: (event.clientX - rect.left) / scale,
-    y: page.height - (event.clientY - rect.top) / scale,
-  };
+  if (rect.width <= 0 || rect.height <= 0) return null;
+  return overlayPointToPdf(page, {
+    x: ((event.clientX - rect.left) / rect.width) * 100,
+    y: ((event.clientY - rect.top) / rect.height) * 100,
+  });
 }
 
 function regionContains(region: PdfRegion, point: { x: number; y: number }): boolean {
@@ -195,12 +263,105 @@ function hitEntry(pageIndex: number, event: MouseEvent): PdfSourceMapEntry | nul
   return hit?.entry ?? null;
 }
 
+function highlightContains(highlight: ProjectedHighlight, pageIndex: number, point: { x: number; y: number }): boolean {
+  return highlight.rects.some((rect) => rect.pageIndex === pageIndex && regionContains({
+    region_id: highlight.mem_id,
+    pageIndex,
+    bbox: rect.bbox,
+  }, point));
+}
+
+function hitUserHighlight(pageIndex: number, event: MouseEvent): ProjectedHighlight | null {
+  const point = pointToPdf(pageIndex, event);
+  if (!point) return null;
+  return [...props.annotationProjection.highlights]
+    .reverse()
+    .find((highlight) => highlightContains(highlight, pageIndex, point)) ?? null;
+}
+
+function eventAnchor(event: MouseEvent): SurfaceAnchor {
+  return { left: event.clientX, right: event.clientX, top: event.clientY, bottom: event.clientY };
+}
+
+function elementAnchor(element: Element): SurfaceAnchor {
+  const rect = element.getBoundingClientRect();
+  return { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom };
+}
+
+function closeAnnotationSurface() {
+  annotationSurface.value = null;
+}
+
+function openNoteSurface(marker: ProjectedNoteMarker, event: MouseEvent) {
+  annotationSurface.value = {
+    kind: "notes",
+    terminalKey: marker.terminal_key,
+    anchor: elementAnchor(event.currentTarget as Element),
+  };
+}
+
+function openHighlightSurface(highlight: ProjectedHighlight, event: MouseEvent) {
+  annotationSurface.value = {
+    kind: "highlight",
+    memId: highlight.mem_id,
+    anchor: eventAnchor(event),
+  };
+}
+
 function onPageClick(pageIndex: number, event: MouseEvent) {
   const selection = window.getSelection();
   if (selection && !selection.isCollapsed) return;
   emit("selection-cancel");
+  closeAnnotationSurface();
+  const highlight = hitUserHighlight(pageIndex, event);
+  if (highlight) {
+    openHighlightSurface(highlight, event);
+    return;
+  }
   const entry = hitEntry(pageIndex, event);
   if (entry) emit("goto", entry.lid);
+}
+
+function highlightsForPage(pageIndex: number) {
+  return props.annotationProjection.highlights.flatMap((highlight) =>
+    highlight.rects
+      .filter((rect) => rect.pageIndex === pageIndex)
+      .map((rect, rectIndex) => ({ highlight, rect, rectIndex })));
+}
+
+function noteMarkersForPage(page: PdfSourceMap["pages"][number]): PdfNoteMarkerLayout[] {
+  return layoutNoteMarkers(
+    props.annotationProjection.note_markers.filter((marker) => marker.anchor_rect.pageIndex === page.pageIndex),
+    page,
+  );
+}
+
+function projectedRectStyle(page: PdfSourceMap["pages"][number], bbox: [number, number, number, number]) {
+  const rect = pdfRectToOverlay(page, bbox);
+  return {
+    left: `${rect.left}%`,
+    top: `${rect.top}%`,
+    width: `${rect.width}%`,
+    height: `${rect.height}%`,
+  };
+}
+
+function markerStyle(marker: PdfNoteMarkerLayout) {
+  return {
+    left: `${marker.left}%`,
+    top: `${marker.top}%`,
+    "--marker-shift-y": `${marker.shift_y}px`,
+  };
+}
+
+function emitNoteReselect(note: MemoryRecord) {
+  emit("reselect-note", note);
+  closeAnnotationSurface();
+}
+
+function emitHighlightReselect(highlight: MemoryRecord) {
+  emit("reselect-highlight", highlight);
+  closeAnnotationSurface();
 }
 
 function setPageRef(pageIndex: number, el: unknown) {
@@ -278,7 +439,7 @@ function pageScale(pageIndex: number): number {
   const page = props.sourceMap?.pages.find((p) => p.pageIndex === pageIndex);
   const el = pageEls.get(pageIndex);
   if (!page || !el) return 1;
-  return el.clientWidth / page.width;
+  return el.clientWidth / pdfPageVisualSize(page).width;
 }
 
 async function renderPage(pageInfo: PdfSourceMap["pages"][number], token: number) {
@@ -390,11 +551,28 @@ function rectToPdfRegion(rect: DOMRect, pageIndex: number): PdfRegion | null {
   const top = Math.max(rect.top, pageRect.top);
   const bottom = Math.min(rect.bottom, pageRect.bottom);
   if (right <= left || bottom <= top) return null;
-  const scale = pageRect.width / page.width;
-  const x1 = (left - pageRect.left) / scale;
-  const x2 = (right - pageRect.left) / scale;
-  const y1 = page.height - (bottom - pageRect.top) / scale;
-  const y2 = page.height - (top - pageRect.top) / scale;
+  const corners = [
+    overlayPointToPdf(page, {
+      x: ((left - pageRect.left) / pageRect.width) * 100,
+      y: ((top - pageRect.top) / pageRect.height) * 100,
+    }),
+    overlayPointToPdf(page, {
+      x: ((right - pageRect.left) / pageRect.width) * 100,
+      y: ((top - pageRect.top) / pageRect.height) * 100,
+    }),
+    overlayPointToPdf(page, {
+      x: ((left - pageRect.left) / pageRect.width) * 100,
+      y: ((bottom - pageRect.top) / pageRect.height) * 100,
+    }),
+    overlayPointToPdf(page, {
+      x: ((right - pageRect.left) / pageRect.width) * 100,
+      y: ((bottom - pageRect.top) / pageRect.height) * 100,
+    }),
+  ];
+  const x1 = Math.min(...corners.map((corner) => corner.x));
+  const x2 = Math.max(...corners.map((corner) => corner.x));
+  const y1 = Math.min(...corners.map((corner) => corner.y));
+  const y2 = Math.max(...corners.map((corner) => corner.y));
   return { region_id: `selection:${pageIndex}:${x1}:${y1}`, pageIndex, bbox: [x1, y1, x2, y2] };
 }
 
@@ -445,7 +623,9 @@ function capturePdfSelection() {
 }
 
 function onSelectionKeydown(event: KeyboardEvent) {
-  if (event.key === "Escape") emit("selection-cancel");
+  if (event.key !== "Escape") return;
+  closeAnnotationSurface();
+  emit("selection-cancel");
 }
 
 watch(
@@ -469,6 +649,14 @@ watch(pageCount, async () => {
   observePages();
   scheduleViewportChange();
 });
+
+watch(
+  () => props.annotationProjection,
+  () => {
+    if (annotationSurface.value?.kind === "notes" && !activeNoteMarker.value) closeAnnotationSurface();
+    if (annotationSurface.value?.kind === "highlight" && !activeHighlight.value) closeAnnotationSurface();
+  },
+);
 
 window.addEventListener("resize", scheduleViewportChange);
 window.addEventListener("keydown", onSelectionKeydown);
@@ -494,6 +682,9 @@ onBeforeUnmount(() => {
       </div>
       <span v-if="pdfLoading">正在加载 PDF</span>
       <span v-else-if="pdfError" class="pdf-error">{{ pdfError }}</span>
+      <span v-else-if="props.annotationError" class="pdf-annotation-error" :title="props.annotationError">
+        标注定位暂不可用
+      </span>
     </header>
 
     <div
@@ -514,6 +705,28 @@ onBeforeUnmount(() => {
       >
         <canvas :ref="(el) => setCanvasRef(page.pageIndex, el)" class="pdf-page-canvas"></canvas>
         <div :ref="(el) => setTextLayerRef(page.pageIndex, el)" class="pdf-text-layer"></div>
+        <div class="pdf-user-annotation-layer">
+          <span
+            v-for="item in highlightsForPage(page.pageIndex)"
+            :key="`${item.highlight.mem_id}:${item.rectIndex}`"
+            class="pdf-user-highlight"
+            :data-mem-id="item.highlight.mem_id"
+            :style="projectedRectStyle(page, item.rect.bbox)"
+          ></span>
+          <button
+            v-for="marker in noteMarkersForPage(page)"
+            :key="marker.terminal_key"
+            class="pdf-note-marker"
+            :class="[`side-${marker.side}`, `direction-${marker.direction}`]"
+            :style="markerStyle(marker)"
+            :aria-label="`打开 ${marker.notes.length} 条 PDF 笔记`"
+            :title="`${marker.notes.length} 条笔记`"
+            @click.stop="openNoteSurface(marker, $event)"
+          >
+            <MessageSquareText :size="14" aria-hidden="true" />
+            <span>{{ marker.notes.length }}</span>
+          </button>
+        </div>
         <div class="pdf-page-label">{{ page.page_label ?? page.pageIndex + 1 }}</div>
         <p v-if="renderStates[page.pageIndex]?.error" class="pdf-page-error">
           {{ renderStates[page.pageIndex]?.error }}
@@ -525,6 +738,60 @@ onBeforeUnmount(() => {
     <footer v-if="props.activeLid && !activeEntry" class="pdf-map-foot">
       <button @click="props.activeLid && emit('focus-source', { lid: props.activeLid, quote: null })">打开来源正文</button>
     </footer>
+
+    <Teleport to="body">
+      <section
+        v-if="annotationSurface && (activeNoteMarker || activeHighlight)"
+        class="pdf-annotation-surface"
+        :data-surface-kind="annotationSurface.kind"
+        :style="annotationSurfaceStyle"
+        role="dialog"
+        aria-modal="false"
+        aria-label="PDF 用户标注"
+        @click.stop
+      >
+        <header class="pdf-annotation-surface-head">
+          <strong>{{ annotationSurface.kind === "notes" ? `${activeNoteMarker?.notes.length ?? 0} 条笔记` : "高亮" }}</strong>
+          <button title="关闭" aria-label="关闭" @click="closeAnnotationSurface">
+            <X :size="16" />
+          </button>
+        </header>
+
+        <div v-if="activeNoteMarker" class="pdf-annotation-note-list">
+          <div v-for="note in activeNoteMarker.notes" :key="note.mem_id" class="pdf-annotation-note-item">
+            <NoteCard
+              :note="note"
+              :render-markdown="props.renderMarkdown"
+              @focus-source="emit('focus-source', $event)"
+              @edit="emit('edit-note', $event)"
+              @delete="emit('delete-note', $event)"
+            />
+            <button
+              class="pdf-annotation-reselect"
+              title="重新选择位置"
+              @click="emitNoteReselect(note)"
+            >
+              <ScanText :size="15" />
+              重新选择位置
+            </button>
+          </div>
+        </div>
+
+        <div v-else-if="activeHighlight" class="pdf-highlight-surface">
+          <p>{{ activeHighlight.record.content }}</p>
+          <div class="pdf-highlight-actions">
+            <button title="重新选择高亮" @click="emitHighlightReselect(activeHighlight.record)">
+              <ScanText :size="15" />
+              重新选择
+            </button>
+            <button class="danger" title="删除高亮" @click="emit('delete-highlight', activeHighlight.record)">
+              <Trash2 :size="15" />
+              删除
+            </button>
+          </div>
+        </div>
+      </section>
+    </Teleport>
   </main>
 </template>
 
@@ -566,6 +833,9 @@ onBeforeUnmount(() => {
 }
 .pdf-reader-head .pdf-error {
   color: var(--brand-error);
+}
+.pdf-reader-head .pdf-annotation-error {
+  color: #8a5a14;
 }
 .pdf-page-list {
   min-height: 0;
@@ -628,6 +898,51 @@ onBeforeUnmount(() => {
 .pdf-text-layer :deep(.markedContent) {
   display: contents;
 }
+.pdf-user-annotation-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  overflow: hidden;
+  pointer-events: none;
+}
+.pdf-user-highlight {
+  position: absolute;
+  box-sizing: border-box;
+  background: rgba(246, 204, 74, 0.34);
+  border: 0;
+  border-radius: 2px;
+  pointer-events: none;
+}
+.pdf-note-marker {
+  position: absolute;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  min-width: 28px;
+  height: 28px;
+  padding: 0 5px;
+  border: 1px solid rgba(182, 83, 59, 0.38);
+  border-radius: 7px;
+  background: #fffaf5;
+  box-shadow: 0 2px 8px rgba(42, 36, 31, 0.18);
+  color: var(--reader-coral);
+  font-size: 0.7rem;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  pointer-events: auto;
+}
+.pdf-note-marker.side-right {
+  transform: translate(4px, calc(-50% + var(--marker-shift-y)));
+}
+.pdf-note-marker.side-left {
+  transform: translate(calc(-100% - 4px), calc(-50% + var(--marker-shift-y)));
+}
+.pdf-note-marker:hover,
+.pdf-note-marker:focus-visible {
+  border-color: var(--reader-coral);
+  background: #fff;
+}
 .pdf-page-label {
   position: absolute;
   top: 0.45rem;
@@ -665,6 +980,92 @@ onBeforeUnmount(() => {
   z-index: 5;
   color: var(--brand-error);
 }
+.pdf-annotation-surface {
+  position: fixed;
+  z-index: 120;
+  box-sizing: border-box;
+  overflow-y: auto;
+  padding: 0.7rem;
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 12px 34px rgba(27, 31, 35, 0.22);
+  color: var(--ink);
+}
+.pdf-annotation-surface-head {
+  position: sticky;
+  top: -0.7rem;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 36px;
+  margin: -0.7rem -0.7rem 0.65rem;
+  padding: 0.45rem 0.55rem 0.4rem 0.7rem;
+  border-bottom: 1px solid var(--hairline-soft);
+  background: #fff;
+}
+.pdf-annotation-surface-head strong {
+  font-size: 0.82rem;
+}
+.pdf-annotation-surface-head button {
+  display: inline-grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+}
+.pdf-annotation-note-list,
+.pdf-annotation-note-item {
+  display: grid;
+  gap: 0.45rem;
+}
+.pdf-annotation-note-list {
+  gap: 0.75rem;
+}
+.pdf-annotation-note-item + .pdf-annotation-note-item {
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--hairline-soft);
+}
+.pdf-annotation-note-item :deep(.note-card) {
+  margin: 0;
+}
+.pdf-annotation-reselect,
+.pdf-highlight-actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.3rem;
+  min-height: 32px;
+  border: 1px solid var(--hairline);
+  border-radius: 6px;
+  background: #fff;
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+.pdf-annotation-reselect {
+  justify-self: end;
+}
+.pdf-highlight-surface p {
+  margin: 0;
+  color: var(--ink);
+  font-size: 0.86rem;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+.pdf-highlight-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.45rem;
+  margin-top: 0.75rem;
+}
+.pdf-highlight-actions button.danger {
+  color: var(--brand-error);
+}
 
 @media (max-width: 900px) {
   .pdf-page-list {
@@ -672,6 +1073,20 @@ onBeforeUnmount(() => {
   }
   .pdf-page-shell {
     width: 100%;
+  }
+}
+@media (max-width: 700px) {
+  .pdf-annotation-surface {
+    inset: auto 0 0 !important;
+    width: 100% !important;
+    max-height: min(68vh, 34rem) !important;
+    padding: 0.8rem 0.8rem calc(0.8rem + env(safe-area-inset-bottom));
+    border-width: 1px 0 0;
+    border-radius: 8px 8px 0 0;
+  }
+  .pdf-annotation-surface-head {
+    top: -0.8rem;
+    margin: -0.8rem -0.8rem 0.7rem;
   }
 }
 </style>
