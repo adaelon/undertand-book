@@ -3,13 +3,13 @@ import { computed, nextTick, onBeforeUnmount, ref, shallowRef, watch } from "vue
 import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf.mjs";
 import pdfWorkerUrl from "pdfjs-dist/legacy/build/pdf.worker.mjs?url";
 import {
-  api,
   type PaperViewportPosition,
   type PdfRegion,
   type PdfSourceMap,
   type PdfSourceMapEntry,
   type SourceManifestV2,
 } from "../api";
+import type { PdfSelectionCapture } from "../pdf-selection-draft";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
@@ -24,8 +24,9 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: "goto", lid: string): void;
   (e: "focus-source", source: { lid: string; quote: string | null }): void;
-  (e: "select", lid: string): void;
   (e: "viewport-change", position: PaperViewportPosition): void;
+  (e: "selection-capture", capture: PdfSelectionCapture): void;
+  (e: "selection-cancel"): void;
 }>();
 
 type PdfDocument = Awaited<ReturnType<typeof pdfjsLib.getDocument>["promise"]>;
@@ -52,6 +53,7 @@ let observer: IntersectionObserver | null = null;
 let renderToken = 0;
 let viewportFrame: number | null = null;
 let lastViewportFingerprint = "";
+let selectionRequestSequence = 0;
 
 const pageCount = computed(() => props.sourceMap?.pages.length ?? 0);
 const entriesByPage = computed(() => {
@@ -193,12 +195,10 @@ function hitEntry(pageIndex: number, event: MouseEvent): PdfSourceMapEntry | nul
   return hit?.entry ?? null;
 }
 
-function onPagePointer(pageIndex: number, event: MouseEvent) {
-  const entry = hitEntry(pageIndex, event);
-  if (entry) emit("select", entry.lid);
-}
-
 function onPageClick(pageIndex: number, event: MouseEvent) {
+  const selection = window.getSelection();
+  if (selection && !selection.isCollapsed) return;
+  emit("selection-cancel");
   const entry = hitEntry(pageIndex, event);
   if (entry) emit("goto", entry.lid);
 }
@@ -402,14 +402,18 @@ function rectsOverlap(left: DOMRect, right: DOMRect): boolean {
   return left.right > right.left && left.left < right.right && left.bottom > right.top && left.top < right.bottom;
 }
 
-async function resolvePdfSelection() {
+function capturePdfSelection() {
   const selection = window.getSelection();
   if (!selection || selection.isCollapsed) return;
-  const rects: Array<{ pageIndex?: number; bbox: [number, number, number, number] }> = [];
+  const rawQuote = selection.toString();
+  if (!rawQuote.trim()) return;
+  const rects: PdfSelectionCapture["rects"] = [];
+  const clientRects: DOMRect[] = [];
   const anchorNode = selection.anchorNode;
   const focusNode = selection.focusNode;
   for (let i = 0; i < selection.rangeCount; i += 1) {
     for (const rect of selection.getRangeAt(i).getClientRects()) {
+      clientRects.push(rect);
       for (const [pageIndex, pageEl] of pageEls) {
         const selectionTouchesPage =
           (anchorNode ? pageEl.contains(anchorNode) : false)
@@ -421,25 +425,33 @@ async function resolvePdfSelection() {
       }
     }
   }
-  if (!rects.length) return;
-  try {
-    const resolved = await api.pdfSelectionResolve({ rects });
-    const first = resolved.ranges[0];
-    if (first) {
-      emit("select", first.lid);
-      emit("goto", first.lid);
-      emit("focus-source", { lid: first.lid, quote: resolved.quote_markdown || first.quote_markdown });
-    }
-  } catch (e) {
-    pdfError.value = e instanceof Error ? e.message : String(e);
-  } finally {
-    selection.removeAllRanges();
-  }
+  if (!rects.length || !clientRects.length) return;
+  const screenRect = clientRects.reduce(
+    (box, rect) => ({
+      left: Math.min(box.left, rect.left),
+      top: Math.min(box.top, rect.top),
+      right: Math.max(box.right, rect.right),
+      bottom: Math.max(box.bottom, rect.bottom),
+    }),
+    { left: Infinity, top: Infinity, right: -Infinity, bottom: -Infinity },
+  );
+  selectionRequestSequence += 1;
+  emit("selection-capture", {
+    request_id: `pdf-selection-${Date.now()}-${selectionRequestSequence}`,
+    raw_quote: rawQuote,
+    rects,
+    screen_rect: screenRect,
+  });
+}
+
+function onSelectionKeydown(event: KeyboardEvent) {
+  if (event.key === "Escape") emit("selection-cancel");
 }
 
 watch(
   () => [props.pdfUrl, props.sourceMap?.config_hash] as const,
   () => {
+    emit("selection-cancel");
     if (props.pdfUrl && props.sourceMap) void loadPdfDocument();
   },
   { immediate: true },
@@ -459,11 +471,14 @@ watch(pageCount, async () => {
 });
 
 window.addEventListener("resize", scheduleViewportChange);
+window.addEventListener("keydown", onSelectionKeydown);
 
 onBeforeUnmount(() => {
   renderToken += 1;
   if (viewportFrame !== null) window.cancelAnimationFrame(viewportFrame);
   window.removeEventListener("resize", scheduleViewportChange);
+  window.removeEventListener("keydown", onSelectionKeydown);
+  emit("selection-cancel");
   observer?.disconnect();
   if (loadingTask) void loadingTask.destroy();
   if (pdfDoc.value) void (pdfDoc.value as unknown as { destroy?: () => Promise<void> }).destroy?.();
@@ -485,7 +500,7 @@ onBeforeUnmount(() => {
       ref="pageList"
       class="pdf-page-list"
       @scroll.passive="scheduleViewportChange"
-      @mouseup="resolvePdfSelection"
+      @mouseup="capturePdfSelection"
     >
       <section
         v-for="page in props.sourceMap?.pages ?? []"
@@ -496,7 +511,6 @@ onBeforeUnmount(() => {
         :data-page-index="page.pageIndex"
         :style="pageShellStyle(page)"
         @click="onPageClick(page.pageIndex, $event)"
-        @mousemove="onPagePointer(page.pageIndex, $event)"
       >
         <canvas :ref="(el) => setCanvasRef(page.pageIndex, el)" class="pdf-page-canvas"></canvas>
         <div :ref="(el) => setTextLayerRef(page.pageIndex, el)" class="pdf-text-layer"></div>

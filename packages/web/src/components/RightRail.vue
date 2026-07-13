@@ -73,6 +73,7 @@ const activeTab = ref<ContextTab>("agent");
 const historyOpen = ref(false);
 const notesExpanded = ref(false);
 const transcriptRef = ref<HTMLElement | null>(null);
+const agentInputRef = ref<HTMLTextAreaElement | null>(null);
 const tabs: { id: ContextTab; label: string }[] = [
   { id: "agent", label: "问答" },
   { id: "trace", label: "轨迹" },
@@ -80,8 +81,11 @@ const tabs: { id: ContextTab; label: string }[] = [
   { id: "notes", label: "笔记" },
 ];
 const noteCount = computed(() => props.contextNotes.length + props.contextHighlights.length);
-watch(() => props.askDraft, (draft) => {
-  if (draft) activeTab.value = "agent";
+watch(() => props.askDraft, async (draft) => {
+  if (!draft) return;
+  activeTab.value = "agent";
+  await nextTick();
+  agentInputRef.value?.focus();
 });
 
 async function scrollTranscriptToBottom() {
@@ -290,6 +294,7 @@ function deleteHistorySession(sessionId: string) {
           <blockquote>{{ props.askDraft.quote }}</blockquote>
         </div>
         <textarea
+          ref="agentInputRef"
           :value="props.agentInput"
           rows="3"
           :placeholder="props.askDraft ? '围绕引用来源提问...' : '从当前阅读位置提问...'"

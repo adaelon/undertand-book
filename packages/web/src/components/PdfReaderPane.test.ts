@@ -234,4 +234,63 @@ describe("PdfReaderPane", () => {
 
     wrapper.unmount();
   });
+
+  it("captures native selection without navigating or clearing it and cancels on Escape", async () => {
+    const wrapper = mount(PdfReaderPane, {
+      props: {
+        sourceManifest: null,
+        sourceMap,
+        pdfUrl: "/api/book/pdf/original",
+        activeLid: null,
+        selectedLid: null,
+      },
+    });
+    await flushPromises();
+    await flushPromises();
+
+    const page = wrapper.findAll(".pdf-page-shell")[0];
+    vi.spyOn(page.element, "getBoundingClientRect").mockReturnValue({
+      x: 0, y: 0, top: 0, bottom: 800, left: 0, right: 600,
+      width: 600, height: 800, toJSON: () => ({}),
+    });
+    const selectedRect = {
+      x: 20, y: 100, top: 100, bottom: 120, left: 20, right: 120,
+      width: 100, height: 20, toJSON: () => ({}),
+    } as DOMRect;
+    const textNode = wrapper.get(".pdf-text-layer span").element.firstChild;
+    const removeAllRanges = vi.fn();
+    const selectionSpy = vi.spyOn(window, "getSelection").mockReturnValue({
+      isCollapsed: false,
+      anchorNode: textNode,
+      focusNode: textNode,
+      rangeCount: 1,
+      toString: () => "raw PDF quote",
+      getRangeAt: () => ({ getClientRects: () => [selectedRect] }) as unknown as Range,
+      removeAllRanges,
+    } as unknown as Selection);
+
+    await wrapper.get(".pdf-page-list").trigger("mouseup");
+    const captures = wrapper.emitted("selection-capture") ?? [];
+    expect(captures).toHaveLength(1);
+    expect(captures[0][0]).toMatchObject({
+      raw_quote: "raw PDF quote",
+      rects: [{ pageIndex: 0, bbox: [20, 680, 120, 700] }],
+      screen_rect: { left: 20, top: 100, right: 120, bottom: 120 },
+    });
+    expect((captures[0][0] as { request_id: string }).request_id).toMatch(/^pdf-selection-/);
+    expect(wrapper.emitted("goto")).toBeUndefined();
+    expect(wrapper.emitted("select")).toBeUndefined();
+    expect(wrapper.emitted("focus-source")).toBeUndefined();
+    expect(removeAllRanges).not.toHaveBeenCalled();
+
+    selectionSpy.mockReturnValue({ isCollapsed: true } as Selection);
+    const cancelsBeforeClick = wrapper.emitted("selection-cancel")?.length ?? 0;
+    await page.trigger("click", { clientX: 500, clientY: 500 });
+    expect(wrapper.emitted("selection-cancel")).toHaveLength(cancelsBeforeClick + 1);
+
+    const cancelsBefore = wrapper.emitted("selection-cancel")?.length ?? 0;
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    expect(wrapper.emitted("selection-cancel")).toHaveLength(cancelsBefore + 1);
+    wrapper.unmount();
+  });
 });

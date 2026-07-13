@@ -2,7 +2,7 @@
 
 > 定位:让 PDF 原生拖选与 Markdown 正文共用 Highlight、Note、Ask AI 语义,同时保持原版 PDF 纯净阅读。
 > 冻结决策:[ADR-0074](adr/0074-pdf-selection-actions-and-exact-user-annotation-projection.md)。
-> 状态:PS0-PS4 完成;PS5-PS7 待实现。
+> 状态:PS0-PS5 完成;PS6-PS7 待实现。
 
 ## 0. 冻结边界
 
@@ -529,6 +529,8 @@ pnpm -C packages/web build
 - **Do**:实现 request-safe 状态机、浮动工具条、动作门禁、取消与失败恢复;移除自动 goto/focus-source。
 - **Do not**:实现持久 PDF annotation projection。
 - **Done**:resolved/partial/unresolved、迟到响应、Esc/空白/切书、失败重试 tests 全绿。
+
+状态:完成;PdfReaderPane 只捕获原生选区,App-owned 状态机与显式三动作已接通,自动 mouseup 导航已移除。
 
 前置条件:PS1 wire 类型可供 App 使用;PS3 exact projection 可独立完成,但本刀只消费 selection resolve。
 

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { FolderOpen, Save } from "@lucide/vue";
+import { FolderOpen, Highlighter, MessageSquareText, RotateCcw, Save, Sparkles, X } from "@lucide/vue";
 import { api, ApiError } from "./api";
 import type {
   AgentChatSessionSummary,
@@ -28,6 +28,7 @@ import type {
   ReaderLayoutAction,
   ReaderLayoutProposal,
   ReaderLayoutState,
+  SelectionContext,
   SourceManifestV2,
   SourceReviewDecisionKind,
   SourceReviewLlmSuggestion,
@@ -35,6 +36,11 @@ import type {
   Viewport,
   WorkbenchAdapterMode,
 } from "./api";
+import {
+  type PdfSelectionCapture,
+  type PdfSelectionDraft,
+  usePdfSelectionDraft,
+} from "./pdf-selection-draft";
 import { renderInlineMarkdown, renderMarkdown } from "./md";
 import { desktopLibraryNeedsSelection } from "./desktop-library";
 import {
@@ -988,19 +994,34 @@ async function modifyHighlight(rec: MemoryRecord) {
 }
 
 // ── 笔记编辑器(内联模态 + 实时 MD/LaTeX 预览)替换 window.prompt ──
-const noteEditor = ref<{ lid: string; memId: string | null; layer: string; content: string } | null>(null);
+const noteEditor = ref<{
+  lid: string;
+  memId: string | null;
+  layer: string;
+  content: string;
+  selectionContext: SelectionContext | null;
+} | null>(null);
 const notePreview = computed(() => renderMarkdown(noteEditor.value?.content ?? ""));
-function openNewNote(lid = selectedLid.value, content = "") {
+function openNewNote(lid = selectedLid.value, content = "", selectionContext: SelectionContext | null = null) {
   if (!lid) return;
-  noteEditor.value = { lid, memId: null, layer: "long_term", content };
+  noteEditor.value = { lid, memId: null, layer: "long_term", content, selectionContext };
 }
 function openEditNote(rec: MemoryRecord) {
-  noteEditor.value = { lid: rec.anchor.lid ?? "", memId: rec.mem_id, layer: rec.layer, content: rec.content };
+  noteEditor.value = {
+    lid: rec.anchor.lid ?? "",
+    memId: rec.mem_id,
+    layer: rec.layer,
+    content: rec.content,
+    selectionContext: null,
+  };
 }
 function cancelNote() {
+  if (noteEditor.value?.selectionContext && pdfSelectionState.value.phase === "saving") {
+    pdfSelectionSession.cancel();
+  }
   noteEditor.value = null;
 }
-// 保存:新建直接 save;编辑 = 删旧 + 存新(mem_id 内容寻址 `[ADR-0026]`)。
+// 保存:新建走 save;编辑走原子 replace,默认继承旧锚与 selection context。
 async function saveNote() {
   const ed = noteEditor.value;
   if (!ed) return;
@@ -1008,10 +1029,26 @@ async function saveNote() {
   if (!content) return;
   try {
     banner.value = "";
-    if (ed.memId) await api.delete(ed.memId);
-    await api.save({ type: "note", anchor_lid: ed.lid, content, layer: ed.layer });
+    if (ed.memId) {
+      await api.replace({
+        mem_id: ed.memId,
+        content,
+        selection_context: ed.selectionContext ?? undefined,
+      });
+    } else {
+      await api.save({
+        type: "note",
+        anchor_lid: ed.lid,
+        content,
+        layer: ed.layer,
+        selection_context: ed.selectionContext ?? undefined,
+      });
+    }
     noteEditor.value = null;
     await refreshAnnotations();
+    if (ed.selectionContext && pdfSelectionState.value.phase === "saving") {
+      completePdfSelectionAction();
+    }
   } catch (e) {
     fail(e);
   }
@@ -1758,13 +1795,49 @@ function noteBlock(lid: string) {
   openNewNote(lid);
 }
 
+const pdfSelectionSession = usePdfSelectionDraft((capture) =>
+  api.pdfSelectionResolve({ rects: capture.rects }),
+);
+const pdfSelectionState = pdfSelectionSession.state;
+const pdfSelectionToolbarStyle = computed(() => {
+  const rect = pdfSelectionState.value.capture?.screen_rect;
+  if (!rect) return {};
+  const center = (rect.left + rect.right) / 2;
+  return {
+    left: `clamp(132px, ${center}px, calc(100vw - 132px))`,
+    top: `${Math.max(8, rect.top - 48)}px`,
+  };
+});
+
+function onPdfSelectionCapture(capture: PdfSelectionCapture) {
+  void pdfSelectionSession.capture(capture);
+}
+
+function cancelPdfSelectionDraft() {
+  pdfSelectionSession.cancel();
+}
+
+function selectionContextOf(draft: PdfSelectionDraft): SelectionContext {
+  return {
+    status: draft.status,
+    raw_quote: draft.raw_quote,
+    resolved_quote: draft.resolved_quote,
+    ranges: draft.ranges,
+  };
+}
+
+function completePdfSelectionAction() {
+  pdfSelectionSession.complete();
+  window.getSelection()?.removeAllRanges();
+}
+
 // ── 自由选区:可跨多个 LID,高亮按 LID 拆 range;Note/Ask AI 锚到起点 LID `[ADR-0031]` ──
-interface SelectedRange {
+interface MarkdownSelectedRange {
   lid: string;
   start: number;
   end: number;
 }
-const hlPopover = ref<{ x: number; y: number; anchorLid: string; ranges: SelectedRange[]; text: string } | null>(null);
+const hlPopover = ref<{ x: number; y: number; anchorLid: string; ranges: MarkdownSelectedRange[]; text: string } | null>(null);
 
 function lidElementOf(node: Node | null): HTMLElement | null {
   const el = node && node.nodeType === 3 ? node.parentElement : (node as HTMLElement | null);
@@ -1778,7 +1851,7 @@ function domTextOffset(el: HTMLElement, container: Node, offset: number): number
   return pre.toString().length;
 }
 
-function selectedRangeForElement(el: HTMLElement, range: Range, startEl: HTMLElement, endEl: HTMLElement): SelectedRange | null {
+function selectedRangeForElement(el: HTMLElement, range: Range, startEl: HTMLElement, endEl: HTMLElement): MarkdownSelectedRange | null {
   const lid = el.getAttribute("data-lid") ?? "";
   const seg = lid ? segmentByLid.value.get(lid) : null;
   if (!lid || !seg) return null;
@@ -1800,7 +1873,7 @@ function selectedRangeForElement(el: HTMLElement, range: Range, startEl: HTMLEle
   };
 }
 
-function selectionRanges(range: Range): SelectedRange[] {
+function selectionRanges(range: Range): MarkdownSelectedRange[] {
   const startEl = lidElementOf(range.startContainer);
   const endEl = lidElementOf(range.endContainer);
   if (!startEl || !endEl) return [];
@@ -1810,7 +1883,7 @@ function selectionRanges(range: Range): SelectedRange[] {
   return Array.from(root.querySelectorAll<HTMLElement>("[data-lid]"))
     .filter((el) => range.intersectsNode(el))
     .map((el) => selectedRangeForElement(el, range, startEl, endEl))
-    .filter((r): r is SelectedRange => r !== null && r.end > r.start);
+    .filter((r): r is MarkdownSelectedRange => r !== null && r.end > r.start);
 }
 
 function onSelectSeg(lid: string) {
@@ -1915,6 +1988,10 @@ interface ChatTurn {
 interface AskDraft {
   lid: string;
   quote: string;
+  ranges?: SelectionContext["ranges"];
+  status?: SelectionContext["status"];
+  raw_quote?: string;
+  resolved_quote?: string;
 }
 const chat = ref<ChatTurn[]>([]);
 const chatSessions = ref<AgentChatSessionSummary[]>([]);
@@ -1922,6 +1999,53 @@ const activeChatSessionId = ref("");
 const agentInput = ref("");
 const askDraft = ref<AskDraft | null>(null);
 const sending = ref(false);
+
+async function highlightPdfSelection() {
+  const ready = pdfSelectionState.value.draft;
+  if (!ready || ready.status !== "resolved") return;
+  const draft = pdfSelectionSession.beginAction();
+  if (!draft) return;
+  try {
+    banner.value = "";
+    const groupId = draft.ranges.length > 1 ? newHighlightGroupId() : undefined;
+    await Promise.all(draft.ranges.map((selected) =>
+      api.highlight(selected.lid, selected.range, groupId),
+    ));
+    selectedLid.value = draft.ranges[0]?.lid ?? selectedLid.value;
+    completePdfSelectionAction();
+    await refreshAnnotations();
+  } catch (error) {
+    pdfSelectionSession.actionFailed(error);
+    fail(error);
+  }
+}
+
+function notePdfSelection() {
+  const draft = pdfSelectionSession.beginAction();
+  const first = draft?.ranges[0];
+  if (!draft || !first) return;
+  const quote = draft.raw_quote.replace(/\s+/g, " ").trim();
+  selectedLid.value = first.lid;
+  openNewNote(first.lid, quote ? `> ${quote}` : "", selectionContextOf(draft));
+}
+
+function askPdfSelection() {
+  const draft = pdfSelectionSession.beginAction();
+  const first = draft?.ranges[0];
+  if (!draft || !first) return;
+  const quote = draft.raw_quote.replace(/\s+/g, " ").trim();
+  askDraft.value = {
+    lid: first.lid,
+    quote,
+    ranges: draft.ranges,
+    status: draft.status,
+    raw_quote: draft.raw_quote,
+    resolved_quote: draft.resolved_quote,
+  };
+  selectedLid.value = first.lid;
+  agentInput.value = "";
+  completePdfSelectionAction();
+}
 const showTrace = ref<Record<string, boolean>>({});
 const latestTrace = computed<TraceStep[]>(() => {
   for (let i = chat.value.length - 1; i >= 0; i -= 1) {
@@ -2700,9 +2824,10 @@ async function submitOpenBook(dir = bookPickerDir.value) {
         :active-lid="pdfActiveLid"
         :selected-lid="selectedLid"
         @goto="doGoto"
-        @select="onSelectSeg"
         @viewport-change="onPdfViewportChange"
         @focus-source="focusLocalSource"
+        @selection-capture="onPdfSelectionCapture"
+        @selection-cancel="cancelPdfSelectionDraft"
       />
 
       <ReaderPane
@@ -2779,6 +2904,53 @@ async function submitOpenBook(dir = bookPickerDir.value) {
         @keep-effect="keepEffect"
         @save-answer-selection="saveAgentSelection"
       />
+    </div>
+
+    <div
+      v-if="pdfSelectionState.phase !== 'idle' && pdfSelectionState.capture"
+      class="hl-popover pdf-selection-toolbar"
+      :style="pdfSelectionToolbarStyle"
+      role="toolbar"
+      aria-label="PDF 选区操作"
+    >
+      <span v-if="pdfSelectionState.phase === 'resolving'" class="pdf-selection-status">定位中...</span>
+      <template v-else-if="pdfSelectionState.phase === 'error'">
+        <span class="pdf-selection-status error">{{ pdfSelectionState.error }}</span>
+        <button title="重试定位" aria-label="重试定位" @mousedown.prevent="pdfSelectionSession.retry">
+          <RotateCcw :size="16" />
+        </button>
+      </template>
+      <template v-else-if="pdfSelectionState.draft">
+        <span v-if="pdfSelectionState.draft.status === 'partial'" class="pdf-selection-status">部分定位</span>
+        <button
+          title="高亮"
+          :disabled="pdfSelectionState.phase === 'saving' || pdfSelectionState.draft.status !== 'resolved'"
+          @mousedown.prevent="highlightPdfSelection"
+        >
+          <Highlighter :size="16" />
+          <span>高亮</span>
+        </button>
+        <button
+          title="笔记"
+          :disabled="pdfSelectionState.phase === 'saving'"
+          @mousedown.prevent="notePdfSelection"
+        >
+          <MessageSquareText :size="16" />
+          <span>笔记</span>
+        </button>
+        <button
+          title="问 AI"
+          :disabled="pdfSelectionState.phase === 'saving'"
+          @mousedown.prevent="askPdfSelection"
+        >
+          <Sparkles :size="16" />
+          <span>问 AI</span>
+        </button>
+        <span v-if="pdfSelectionState.error" class="pdf-selection-status error">{{ pdfSelectionState.error }}</span>
+      </template>
+      <button title="关闭" aria-label="关闭 PDF 选区操作" @mousedown.prevent="cancelPdfSelectionDraft">
+        <X :size="16" />
+      </button>
     </div>
 
     <div
@@ -3174,6 +3346,37 @@ async function submitOpenBook(dir = bookPickerDir.value) {
 }
 .hl-popover button:hover {
   background: rgba(255, 255, 255, 0.12);
+}
+.hl-popover button:disabled {
+  cursor: not-allowed;
+  opacity: 0.42;
+}
+.pdf-selection-toolbar {
+  min-width: 248px;
+  max-width: min(520px, calc(100vw - 16px));
+  min-height: 44px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+}
+.pdf-selection-toolbar button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.3rem;
+  border-radius: 6px;
+}
+.pdf-selection-status {
+  padding: 0 0.45rem;
+  color: rgba(255, 255, 255, 0.82);
+  font-size: 0.76rem;
+  white-space: nowrap;
+}
+.pdf-selection-status.error {
+  max-width: 220px;
+  overflow: hidden;
+  color: #ffd4ce;
+  text-overflow: ellipsis;
 }
 
 /* 公式 sidecar 查看弹窗 */
