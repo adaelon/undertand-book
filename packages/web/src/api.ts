@@ -772,7 +772,7 @@ export const api = {
   highlight: (lid: string, range?: TextRange, sourceSessionId?: string) =>
     http<HighlightEffect>("POST", "/reader/highlight", { lid, range, source_session_id: sourceSessionId }),
   note: (lid: string, text: string) => http<NoteEffect>("POST", "/reader/note", { lid, text }),
-  pdfSelectionResolve: (body: { pageIndex?: number; rects: Array<{ pageIndex?: number; bbox: [number, number, number, number] }> }) =>
+  pdfSelectionResolve: (body: { pageIndex?: number; raw_quote?: string; rects: Array<{ pageIndex?: number; bbox: [number, number, number, number] }> }) =>
     http<PdfSelectionResolveResponse>("POST", "/reader/pdf_selection.resolve", body),
   pdfRangesProject: (ranges: Array<{ lid: string; range: TextRange }>) =>
     http<PdfRangesProjectResponse>("POST", "/reader/pdf_ranges.project", { ranges }),

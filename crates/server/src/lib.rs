@@ -1025,6 +1025,7 @@ struct PdfSelectionResolveInput {
     #[serde(rename = "pageIndex")]
     page_index: Option<usize>,
     rects: Vec<PdfSelectionInputRect>,
+    raw_quote: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
@@ -5574,13 +5575,170 @@ fn route_mut(state: &mut AppState, path: &str, body: &str, now: &str) -> Reply {
 struct SelectionCharHit {
     page_index: usize,
     char_index: usize,
+    text: String,
     lid: Option<String>,
     source_span: SourceSpanDto,
     rect: PdfPageRectDto,
 }
 
-fn rect_intersects(a: [f64; 4], b: [f64; 4]) -> bool {
-    a[0] < b[2] && a[2] > b[0] && a[1] < b[3] && a[3] > b[1]
+fn selection_rect_hits_glyph(selected: [f64; 4], glyph: [f64; 4]) -> bool {
+    let selected_left = selected[0].min(selected[2]);
+    let selected_right = selected[0].max(selected[2]);
+    let selected_bottom = selected[1].min(selected[3]);
+    let selected_top = selected[1].max(selected[3]);
+    let glyph_left = glyph[0].min(glyph[2]);
+    let glyph_right = glyph[0].max(glyph[2]);
+    let glyph_vertical_center = (glyph[1] + glyph[3]) / 2.0;
+    selected_left < glyph_right
+        && selected_right > glyph_left
+        && glyph_vertical_center >= selected_bottom
+        && glyph_vertical_center <= selected_top
+}
+
+fn normalized_selection_chars(text: &str) -> Vec<char> {
+    text.chars()
+        .map(|value| if value.is_whitespace() { ' ' } else { value })
+        .collect()
+}
+
+fn greedy_quote_hit_pairs(
+    quote: &[char],
+    hits: &[(usize, char, bool)],
+) -> Vec<(usize, usize)> {
+    let mut pairs = Vec::new();
+    let mut quote_index = 0;
+    let mut hit_index = 0;
+    const LOOKAHEAD: usize = 64;
+    while quote_index < quote.len() && hit_index < hits.len() {
+        if quote[quote_index] == hits[hit_index].1 {
+            if !hits[hit_index].2 {
+                if let Some(mapped_hit) = ((hit_index + 1)
+                    ..hits.len().min(hit_index + LOOKAHEAD + 1))
+                    .find(|index| hits[*index].1 == quote[quote_index] && hits[*index].2)
+                {
+                    hit_index = mapped_hit;
+                }
+            }
+            pairs.push((quote_index, hit_index));
+            quote_index += 1;
+            hit_index += 1;
+            continue;
+        }
+        let next_quote = ((quote_index + 1)..quote.len().min(quote_index + LOOKAHEAD + 1))
+            .find(|index| quote[*index] == hits[hit_index].1);
+        let next_hit = ((hit_index + 1)..hits.len().min(hit_index + LOOKAHEAD + 1))
+            .find(|index| hits[*index].1 == quote[quote_index]);
+        match (next_quote, next_hit) {
+            (Some(next_quote), Some(next_hit))
+                if next_quote - quote_index <= next_hit - hit_index =>
+            {
+                quote_index = next_quote;
+            }
+            (_, Some(next_hit)) => hit_index = next_hit,
+            (Some(next_quote), None) => quote_index = next_quote,
+            (None, None) => {
+                quote_index += 1;
+                hit_index += 1;
+            }
+        }
+    }
+    pairs
+}
+
+fn quote_hit_pairs(quote: &[char], hits: &[(usize, char, bool)]) -> Vec<(usize, usize)> {
+    const MAX_LCS_CELLS: usize = 4_000_000;
+    if quote.is_empty() || hits.is_empty() {
+        return Vec::new();
+    }
+    if quote.len().saturating_mul(hits.len()) > MAX_LCS_CELLS {
+        return greedy_quote_hit_pairs(quote, hits);
+    }
+
+    let width = hits.len();
+    let mut directions = vec![0u8; quote.len() * width];
+    let mut previous = vec![0usize; width + 1];
+    let mut current = vec![0usize; width + 1];
+    for quote_index in 1..=quote.len() {
+        for hit_index in 1..=width {
+            let direction_index = (quote_index - 1) * width + hit_index - 1;
+            if quote[quote_index - 1] == hits[hit_index - 1].1 {
+                let match_weight = if hits[hit_index - 1].2 {
+                    quote.len() + 1
+                } else {
+                    1
+                };
+                let diagonal = previous[hit_index - 1] + match_weight;
+                if diagonal >= previous[hit_index] && diagonal >= current[hit_index - 1] {
+                    current[hit_index] = diagonal;
+                    directions[direction_index] = 1;
+                } else if previous[hit_index] >= current[hit_index - 1] {
+                    current[hit_index] = previous[hit_index];
+                    directions[direction_index] = 2;
+                } else {
+                    current[hit_index] = current[hit_index - 1];
+                    directions[direction_index] = 3;
+                }
+            } else if previous[hit_index] >= current[hit_index - 1] {
+                current[hit_index] = previous[hit_index];
+                directions[direction_index] = 2;
+            } else {
+                current[hit_index] = current[hit_index - 1];
+                directions[direction_index] = 3;
+            }
+        }
+        std::mem::swap(&mut previous, &mut current);
+        current.fill(0);
+    }
+
+    let mut pairs = Vec::new();
+    let mut quote_index = quote.len();
+    let mut hit_index = hits.len();
+    while quote_index > 0 && hit_index > 0 {
+        match directions[(quote_index - 1) * width + hit_index - 1] {
+            1 => {
+                pairs.push((quote_index - 1, hit_index - 1));
+                quote_index -= 1;
+                hit_index -= 1;
+            }
+            2 => quote_index -= 1,
+            _ => hit_index -= 1,
+        }
+    }
+    pairs.reverse();
+    pairs
+}
+
+fn filter_hits_to_raw_quote(
+    hits: Vec<SelectionCharHit>,
+    raw_quote: &str,
+) -> Vec<SelectionCharHit> {
+    let quote = normalized_selection_chars(raw_quote);
+    let hit_units = hits
+        .iter()
+        .enumerate()
+        .flat_map(|(index, hit)| {
+            normalized_selection_chars(&hit.text)
+                .into_iter()
+                .map(move |value| (index, value, hit.lid.is_some()))
+        })
+        .collect::<Vec<_>>();
+    let pairs = quote_hit_pairs(&quote, &hit_units);
+    let quote_non_whitespace = quote.iter().filter(|value| !value.is_whitespace()).count();
+    let matched_non_whitespace = pairs
+        .iter()
+        .filter(|(quote_index, _)| !quote[*quote_index].is_whitespace())
+        .count();
+    if quote_non_whitespace == 0 || matched_non_whitespace * 5 < quote_non_whitespace * 4 {
+        return hits;
+    }
+    let matched_hits = pairs
+        .into_iter()
+        .map(|(_, hit_unit_index)| hit_units[hit_unit_index].0)
+        .collect::<HashSet<_>>();
+    hits.into_iter()
+        .enumerate()
+        .filter_map(|(index, hit)| matched_hits.contains(&index).then_some(hit))
+        .collect()
 }
 
 fn parse_pdf_rect(value: &serde_json::Value) -> Option<PdfPageRectDto> {
@@ -5666,7 +5824,7 @@ fn selection_hits_for_page(
         if rect.page_index != page_index
             || !rects
                 .iter()
-                .any(|selected| rect_intersects(*selected, rect.bbox))
+                .any(|selected| selection_rect_hits_glyph(*selected, rect.bbox))
         {
             continue;
         }
@@ -5680,6 +5838,11 @@ fn selection_hits_for_page(
         hits.push(SelectionCharHit {
             page_index,
             char_index: ch.get("char_index").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
+            text: ch
+                .get("text")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .to_string(),
             lid,
             source_span,
             rect,
@@ -5745,17 +5908,19 @@ fn route_pdf_selection_resolve(book: &Book, book_dir: &Path, body: &serde_json::
     }
 
     let mut hits = Vec::new();
-    let mut unmapped_hits = 0;
     for (page_index, rects) in rects_by_page {
         match selection_hits_for_page(book_dir, page_index, &rects) {
-            Ok((mut page_hits, page_unmapped)) => {
+            Ok((mut page_hits, _page_unmapped)) => {
                 hits.append(&mut page_hits);
-                unmapped_hits += page_unmapped;
             }
             Err(e) => return err_reply(&e),
         }
     }
     hits.sort_by_key(|hit| (hit.page_index, hit.char_index));
+    if let Some(raw_quote) = input.raw_quote.as_deref().filter(|quote| !quote.trim().is_empty()) {
+        hits = filter_hits_to_raw_quote(hits, raw_quote);
+    }
+    let unmapped_hits = hits.iter().filter(|hit| hit.lid.is_none()).count();
 
     let mut by_lid: BTreeMap<String, SourceSpanDto> = BTreeMap::new();
     for hit in &hits {
@@ -5891,6 +6056,11 @@ fn selection_chars_for_source_range(
                 page_index,
                 char_index: ch.get("char_index").and_then(|value| value.as_u64()).unwrap_or(0)
                     as usize,
+                text: ch
+                    .get("text")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
                 lid: Some(lid.to_string()),
                 source_span,
                 rect,
@@ -8645,6 +8815,116 @@ mod tests {
         assert_eq!(projection["terminal_rect"]["bbox"], serde_json::json!([14.0,10.0,16.0,20.0]));
         assert!(projection.get("primary_region").is_none());
         assert!(projection.get("regions").is_none());
+    }
+
+    #[test]
+    fn pdf_selection_ignores_line_box_fringe_overlap_with_an_unmapped_neighbor() {
+        let mut s = state_named("pdf-selection-line-fringe");
+        write_pdf_runtime_artifacts(&mut s);
+        let page = serde_json::json!({
+            "version": "pdf_selection_map_page.v1",
+            "book_id": s.book.base.book_id,
+            "pageIndex": 0,
+            "chars": [
+                {"char_index":0,"text":"P","rect":{"pageIndex":0,"bbox":[10.0,10.0,12.0,20.0]},"source_span":{"start":0,"end":1},"lid":"1.1"},
+                {"char_index":1,"text":"D","rect":{"pageIndex":0,"bbox":[12.0,10.0,14.0,20.0]},"source_span":{"start":1,"end":2},"lid":"1.1"},
+                {"char_index":2,"text":"F","rect":{"pageIndex":0,"bbox":[14.0,10.0,16.0,20.0]},"source_span":{"start":2,"end":3},"lid":"1.1"},
+                {"char_index":3,"text":"x","rect":{"pageIndex":0,"bbox":[10.0,0.0,12.0,9.5]},"source_span":{"start":0,"end":0}}
+            ]
+        });
+        std::fs::write(
+            s.book_dir
+                .join("pdf_selection_map")
+                .join("pages")
+                .join("0.json"),
+            page.to_string(),
+        )
+        .unwrap();
+
+        let resolved = post(
+            &mut s,
+            "/reader/pdf_selection.resolve",
+            r#"{"pageIndex":0,"rects":[{"bbox":[9.0,8.0,17.0,21.0]}]}"#,
+        );
+        assert_eq!(resolved.status, 200);
+        let body: serde_json::Value = serde_json::from_str(&resolved.body).unwrap();
+        assert_eq!(body["status"], "resolved");
+        assert_eq!(
+            body["ranges"][0]["range"],
+            serde_json::json!({"start":0,"end":3})
+        );
+    }
+
+    #[test]
+    fn pdf_selection_raw_quote_excludes_an_overlapping_unmapped_glyph() {
+        let mut s = state_named("pdf-selection-overlapping-watermark");
+        write_pdf_runtime_artifacts(&mut s);
+        let page = serde_json::json!({
+            "version": "pdf_selection_map_page.v1",
+            "book_id": s.book.base.book_id,
+            "pageIndex": 0,
+            "chars": [
+                {"char_index":0,"text":"P","rect":{"pageIndex":0,"bbox":[10.0,10.0,12.0,20.0]},"source_span":{"start":0,"end":1},"lid":"1.1"},
+                {"char_index":1,"text":"D","rect":{"pageIndex":0,"bbox":[12.0,10.0,14.0,20.0]},"source_span":{"start":1,"end":2},"lid":"1.1"},
+                {"char_index":2,"text":"F","rect":{"pageIndex":0,"bbox":[14.0,10.0,16.0,20.0]},"source_span":{"start":2,"end":3},"lid":"1.1"},
+                {"char_index":3,"text":"F","rect":{"pageIndex":0,"bbox":[14.0,10.0,16.0,20.0]},"source_span":{"start":0,"end":0}}
+            ]
+        });
+        std::fs::write(
+            s.book_dir
+                .join("pdf_selection_map")
+                .join("pages")
+                .join("0.json"),
+            page.to_string(),
+        )
+        .unwrap();
+
+        let resolved = post(
+            &mut s,
+            "/reader/pdf_selection.resolve",
+            r#"{"pageIndex":0,"raw_quote":"PDF","rects":[{"bbox":[9.0,9.0,17.0,21.0]}]}"#,
+        );
+        assert_eq!(resolved.status, 200);
+        let body: serde_json::Value = serde_json::from_str(&resolved.body).unwrap();
+        assert_eq!(body["status"], "resolved");
+        assert_eq!(body["quote_markdown"], "XXX");
+    }
+
+    #[test]
+    fn pdf_selection_raw_quote_keeps_an_unmapped_formula_between_mapped_text() {
+        let mut s = state_named("pdf-selection-inline-formula");
+        write_pdf_runtime_artifacts(&mut s);
+        let page = serde_json::json!({
+            "version": "pdf_selection_map_page.v1",
+            "book_id": s.book.base.book_id,
+            "pageIndex": 0,
+            "chars": [
+                {"char_index":0,"text":"P","rect":{"pageIndex":0,"bbox":[10.0,10.0,12.0,20.0]},"source_span":{"start":0,"end":1},"lid":"1.1"},
+                {"char_index":1,"text":"≈","rect":{"pageIndex":0,"bbox":[12.0,10.0,14.0,20.0]},"source_span":{"start":0,"end":0}},
+                {"char_index":2,"text":"D","rect":{"pageIndex":0,"bbox":[14.0,10.0,16.0,20.0]},"source_span":{"start":1,"end":2},"lid":"1.1"}
+            ]
+        });
+        std::fs::write(
+            s.book_dir
+                .join("pdf_selection_map")
+                .join("pages")
+                .join("0.json"),
+            page.to_string(),
+        )
+        .unwrap();
+
+        let resolved = post(
+            &mut s,
+            "/reader/pdf_selection.resolve",
+            r#"{"pageIndex":0,"raw_quote":"P≈D","rects":[{"bbox":[9.0,9.0,17.0,21.0]}]}"#,
+        );
+        assert_eq!(resolved.status, 200);
+        let body: serde_json::Value = serde_json::from_str(&resolved.body).unwrap();
+        assert_eq!(body["status"], "partial");
+        assert_eq!(
+            body["ranges"][0]["range"],
+            serde_json::json!({"start":0,"end":2})
+        );
     }
 
     #[test]

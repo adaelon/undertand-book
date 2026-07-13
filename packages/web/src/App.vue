@@ -1841,7 +1841,7 @@ function noteBlock(lid: string) {
 }
 
 const pdfSelectionSession = usePdfSelectionDraft((capture) =>
-  api.pdfSelectionResolve({ rects: capture.rects }),
+  api.pdfSelectionResolve({ rects: capture.rects, raw_quote: capture.raw_quote }),
 );
 const pdfSelectionState = pdfSelectionSession.state;
 const pdfReselectTarget = ref<{

@@ -19,7 +19,7 @@ export interface AlignmentReport {
   version: "alignment_report.v1";
   book_id: string;
   config: {
-    algorithm: "monotonic_forward_fuzzy_v1" | "monotonic_windowed_blocks_v2";
+    algorithm: "monotonic_forward_fuzzy_v1" | "monotonic_windowed_blocks_v2" | "monotonic_windowed_characters_v3";
     lookback_words: number;
     lookahead_words: number;
     merge_gap_utf16: number;
@@ -72,10 +72,12 @@ function keyOfSpan(span: { start: number; end: number }): string {
   return `${span.start}:${span.end}`;
 }
 
-const ALIGNMENT_ALGORITHM = "monotonic_windowed_blocks_v2" as const;
+const ALIGNMENT_ALGORITHM = "monotonic_windowed_characters_v3" as const;
 const ALIGNMENT_LOOKAHEAD_WORDS = 240;
 const PARAGRAPH_ANCHOR_TOKENS = 16;
-const MAX_MATCH_LINES = 8;
+const MAX_MATCH_LINES = 32;
+const MAX_LCS_CELLS = 8_000_000;
+const MIN_EXTENSION_TOKEN_MATCH_RATIO = 0.55;
 const MINIMUM_TEXT_MAPPING_RATIO = 0.6;
 const MINIMUM_HEADING_MAPPING_RATIO = 0.8;
 
@@ -103,22 +105,61 @@ function pageLinesInReadingOrder(page: PdfGeometryPage): Array<PdfGeometryLine &
   const midpoint = (page.view[0] + page.view[2]) / 2;
   const pageWidth = page.view[2] - page.view[0];
   const maxNormalLineHeight = Math.max(30, page.height * 0.08);
-  return page.lines
+  const lines = page.lines
     .filter((line) => line.bbox[0] >= 0
       && line.bbox[1] >= 0
       && line.bbox[2] <= page.width
       && line.bbox[3] <= page.height
       && line.bbox[3] - line.bbox[1] <= maxNormalLineHeight)
-    .map((line, contentIndex) => ({ ...line, pageIndex: page.pageIndex, contentIndex }))
+    .map((line, contentIndex) => ({ ...line, pageIndex: page.pageIndex, contentIndex }));
+  const spansColumns = (line: PdfGeometryLine): boolean => {
+    const width = line.bbox[2] - line.bbox[0];
+    return line.bbox[0] < midpoint
+      && line.bbox[2] > midpoint
+      && width >= pageWidth * 0.45;
+  };
+  const spanningByHeight = lines
+    .filter(spansColumns)
+    .sort((left, right) => right.bbox[3] - left.bbox[3]);
+  const clusters: typeof spanningByHeight[] = [];
+  for (const line of spanningByHeight) {
+    const cluster = clusters.at(-1);
+    const previous = cluster?.at(-1);
+    const previousCenter = previous ? (previous.bbox[1] + previous.bbox[3]) / 2 : null;
+    const center = (line.bbox[1] + line.bbox[3]) / 2;
+    if (!cluster || previousCenter === null || previousCenter - center > maxNormalLineHeight) {
+      clusters.push([line]);
+    } else {
+      cluster.push(line);
+    }
+  }
+  const primarySpanningCluster = clusters
+    .filter((cluster) => cluster.length >= 3)
+    .sort((left, right) => right.length - left.length || right[0].bbox[3] - left[0].bbox[3])[0];
+  const spanningBand = primarySpanningCluster
+    ? (() => {
+        const leftEdges = primarySpanningCluster.map((line) => line.bbox[0]).sort((left, right) => left - right);
+        return {
+        top: Math.max(...primarySpanningCluster.map((line) => line.bbox[3])),
+        bottom: Math.min(...primarySpanningCluster.map((line) => line.bbox[1])),
+          left: leftEdges[Math.floor(leftEdges.length / 2)],
+        };
+      })()
+    : null;
+
+  return lines
     .sort((left, right) => {
       const group = (line: PdfGeometryLine): number => {
-        const width = line.bbox[2] - line.bbox[0];
-        const height = line.bbox[3] - line.bbox[1];
-        const spansColumns = line.bbox[0] < midpoint
-          && line.bbox[2] > midpoint
-          && width >= pageWidth * 0.45
-          && height <= maxNormalLineHeight;
-        if (spansColumns) return 0;
+        const centerY = (line.bbox[1] + line.bbox[3]) / 2;
+        const alignsWithBandLeft = spanningBand
+          ? Math.abs(line.bbox[0] - spanningBand.left) <= Math.max(12, pageWidth * 0.04)
+          : false;
+        const inPrimaryBand = spanningBand
+          ? centerY >= spanningBand.bottom
+            && centerY <= spanningBand.top
+            && (spansColumns(line) || alignsWithBandLeft)
+          : spansColumns(line);
+        if (inPrimaryBand) return 0;
         return (line.bbox[0] + line.bbox[2]) / 2 < midpoint ? 1 : 2;
       };
       return group(left) - group(right)
@@ -143,6 +184,21 @@ function tokenSequenceIndex(haystack: string[], needle: string[]): number {
   return -1;
 }
 
+function sequenceMatchCount(left: string[], right: string[]): number {
+  let previous = new Uint32Array(right.length + 1);
+  let current = new Uint32Array(right.length + 1);
+  for (let i = 1; i <= left.length; i += 1) {
+    for (let j = 1; j <= right.length; j += 1) {
+      current[j] = left[i - 1] === right[j - 1]
+        ? previous[j - 1] + 1
+        : Math.max(previous[j], current[j - 1]);
+    }
+    [previous, current] = [current, previous];
+    current.fill(0);
+  }
+  return previous[right.length];
+}
+
 function findLinesForBlock(
   lines: Array<PdfGeometryLine & { pageIndex: number }>,
   block: SourceBlock,
@@ -159,6 +215,9 @@ function findLinesForBlock(
 
   for (let start = startAt; start < lines.length; start++) {
     const localCandidate = distanceWords <= ALIGNMENT_LOOKAHEAD_WORDS;
+    let best: (PdfLineMatch & { matchedTokens: number; extraTokens: number }) | null = null;
+    let previousMatchedTokens = 0;
+    let previousAlignedTokenCount = 0;
     for (let end = start; end < Math.min(lines.length, start + MAX_MATCH_LINES); end++) {
       if (lines[end].pageIndex !== lines[start].pageIndex) break;
       const combinedTokens = alignmentTokens(lines
@@ -168,16 +227,50 @@ function findLinesForBlock(
       if (combinedTokens.length < anchorTokens.length) continue;
       const tokenIndex = tokenSequenceIndex(combinedTokens, anchorTokens);
       if (tokenIndex < 0) continue;
-      const quality = tokenIndex === 0 && combinedTokens.length === anchorTokens.length
+      let anchorStartIndex = start;
+      let tokensBeforeLine = 0;
+      for (let lineIndex = start; lineIndex <= end; lineIndex += 1) {
+        const lineTokenCount = alignmentTokens(lines[lineIndex].text).length;
+        if (tokenIndex < tokensBeforeLine + lineTokenCount) {
+          anchorStartIndex = lineIndex;
+          break;
+        }
+        tokensBeforeLine += lineTokenCount;
+      }
+      const alignedTokens = combinedTokens.slice(tokenIndex);
+      const matchedTokens = sequenceMatchCount(blockTokens, alignedTokens);
+      const extraTokens = Math.max(0, alignedTokens.length - blockTokens.length);
+      if (best && alignedTokens.length > previousAlignedTokenCount) {
+        const addedTokens = alignedTokens.length - previousAlignedTokenCount;
+        const addedMatches = matchedTokens - previousMatchedTokens;
+        if (addedMatches / addedTokens < MIN_EXTENSION_TOKEN_MATCH_RATIO) break;
+      }
+      const quality = tokenIndex === 0
+        && alignedTokens.length === blockTokens.length
+        && matchedTokens === blockTokens.length
         ? "exact"
         : tokenIndex === 0
           ? "line_start"
           : "contains";
       if (block.kind !== "heading" && blockTokens.length < 4 && quality !== "exact") continue;
-      if (localCandidate || (block.kind === "heading" && quality === "exact")) {
-        candidates.push({ startIndex: start, endIndex: end, quality, distanceWords });
+      if (!best
+        || matchedTokens > best.matchedTokens
+        || (matchedTokens === best.matchedTokens && extraTokens < best.extraTokens)) {
+        best = { startIndex: anchorStartIndex, endIndex: end, quality, matchedTokens, extraTokens };
       }
-      break;
+      previousMatchedTokens = matchedTokens;
+      previousAlignedTokenCount = alignedTokens.length;
+      if (matchedTokens === blockTokens.length && alignedTokens.length >= blockTokens.length) break;
+      const overrun = Math.max(8, Math.ceil(blockTokens.length * 0.25));
+      if (alignedTokens.length > blockTokens.length + overrun) break;
+    }
+    if (best && (localCandidate || (block.kind === "heading" && best.quality === "exact"))) {
+      candidates.push({
+        startIndex: best.startIndex,
+        endIndex: best.endIndex,
+        quality: best.quality,
+        distanceWords,
+      });
     }
     distanceWords += alignmentTokens(lines[start].text).length;
     if (!localCandidate && block.kind !== "heading") break;
@@ -192,12 +285,169 @@ function findLinesForBlock(
   return candidates[0] ?? null;
 }
 
-function rectIntersects(a: [number, number, number, number], b: [number, number, number, number]): boolean {
-  return a[0] < b[2] && a[2] > b[0] && a[1] < b[3] && a[3] > b[1];
+interface SourceAlignmentUnit {
+  key: string;
+  span: { start: number; end: number };
 }
 
-function charEntryForRegions(char: PdfGeometryChar, entries: PdfSourceMapEntry[]): PdfSourceMapEntry | undefined {
-  return entries.find((entry) => entry.regions.some((region) => region.pageIndex === char.pageIndex && rectIntersects(region.bbox, char.bbox)));
+interface PdfAlignmentUnit {
+  key: string;
+  char: PdfGeometryChar;
+}
+
+interface SelectionCharAssignment {
+  lid: string;
+  source_span: { start: number; end: number };
+}
+
+function normalizedCharacterKeys(char: string): string[] {
+  const normalized = char.normalize("NFKC").toLowerCase();
+  const keys: string[] = [];
+  for (const value of normalized) {
+    if (/^[\p{Pd}\u00ad]$/u.test(value)) continue;
+    keys.push(/^\s$/u.test(value) ? " " : value);
+  }
+  return keys;
+}
+
+function sourceAlignmentUnits(source: string, span: { start: number; end: number }): SourceAlignmentUnit[] {
+  const units: SourceAlignmentUnit[] = [];
+  let offset = span.start;
+  for (const char of source.slice(span.start, span.end)) {
+    const charSpan = { start: offset, end: offset + char.length };
+    for (const key of normalizedCharacterKeys(char)) units.push({ key, span: charSpan });
+    offset += char.length;
+  }
+  return units;
+}
+
+function pdfAlignmentUnits(chars: PdfGeometryChar[]): PdfAlignmentUnit[] {
+  return chars.flatMap((char) => normalizedCharacterKeys(char.text).map((key) => ({ key, char })));
+}
+
+function greedyAlignmentPairs(left: SourceAlignmentUnit[], right: PdfAlignmentUnit[]): Array<[number, number]> {
+  const pairs: Array<[number, number]> = [];
+  let i = 0;
+  let j = 0;
+  const lookahead = 64;
+  const nextKey = <T extends { key: string }>(units: T[], key: string, start: number): number => {
+    const end = Math.min(units.length, start + lookahead + 1);
+    for (let index = start + 1; index < end; index += 1) {
+      if (units[index].key === key) return index;
+    }
+    return -1;
+  };
+  while (i < left.length && j < right.length) {
+    if (left[i].key === right[j].key) {
+      pairs.push([i, j]);
+      i += 1;
+      j += 1;
+      continue;
+    }
+    const nextLeft = nextKey(left, right[j].key, i);
+    const nextRight = nextKey(right, left[i].key, j);
+    if (nextLeft >= 0 && (nextRight < 0 || nextLeft - i <= nextRight - j)) i = nextLeft;
+    else if (nextRight >= 0) j = nextRight;
+    else {
+      i += 1;
+      j += 1;
+    }
+  }
+  return pairs;
+}
+
+function alignmentPairs(left: SourceAlignmentUnit[], right: PdfAlignmentUnit[]): Array<[number, number]> {
+  if (!left.length || !right.length) return [];
+  if (left.length * right.length > MAX_LCS_CELLS) return greedyAlignmentPairs(left, right);
+  const width = right.length;
+  const directions = new Uint8Array(left.length * width);
+  let previous = new Uint32Array(width + 1);
+  let current = new Uint32Array(width + 1);
+  for (let i = 1; i <= left.length; i += 1) {
+    for (let j = 1; j <= width; j += 1) {
+      const directionIndex = (i - 1) * width + j - 1;
+      if (left[i - 1].key === right[j - 1].key) {
+        current[j] = previous[j - 1] + 1;
+        directions[directionIndex] = 1;
+      } else if (previous[j] >= current[j - 1]) {
+        current[j] = previous[j];
+        directions[directionIndex] = 2;
+      } else {
+        current[j] = current[j - 1];
+        directions[directionIndex] = 3;
+      }
+    }
+    [previous, current] = [current, previous];
+    current.fill(0);
+  }
+
+  const pairs: Array<[number, number]> = [];
+  let i = left.length;
+  let j = right.length;
+  while (i > 0 && j > 0) {
+    const direction = directions[(i - 1) * width + j - 1];
+    if (direction === 1) {
+      pairs.push([i - 1, j - 1]);
+      i -= 1;
+      j -= 1;
+    } else if (direction === 2) i -= 1;
+    else j -= 1;
+  }
+  return pairs.reverse();
+}
+
+function selectionKey(char: PdfGeometryChar): string {
+  return `${char.pageIndex}:${char.charIndex}`;
+}
+
+function charsForLines(geometry: PdfTextGeometry, lines: Array<PdfGeometryLine & { pageIndex: number }>): PdfGeometryChar[] {
+  const pages = new Map(geometry.pages.map((page) => [page.pageIndex, page]));
+  return lines.flatMap((line) => (pages.get(line.pageIndex)?.chars ?? [])
+    .filter((char) => char.charIndex >= line.char_start && char.charIndex < line.char_end)
+    .sort((left, right) => left.charIndex - right.charIndex));
+}
+
+function alignSelectionChars(
+  source: string,
+  block: SourceBlock,
+  lid: string,
+  lines: Array<PdfGeometryLine & { pageIndex: number }>,
+  geometry: PdfTextGeometry,
+): Map<string, SelectionCharAssignment> {
+  const chars = charsForLines(geometry, lines);
+  const sourceUnits = sourceAlignmentUnits(source, block.span);
+  const pdfUnits = pdfAlignmentUnits(chars);
+  const spansByChar = new Map<string, { start: number; end: number }>();
+  for (const [sourceIndex, pdfIndex] of alignmentPairs(sourceUnits, pdfUnits)) {
+    const key = selectionKey(pdfUnits[pdfIndex].char);
+    const sourceSpan = sourceUnits[sourceIndex].span;
+    const existing = spansByChar.get(key);
+    spansByChar.set(key, existing
+      ? { start: Math.min(existing.start, sourceSpan.start), end: Math.max(existing.end, sourceSpan.end) }
+      : { ...sourceSpan });
+  }
+
+  const direct = chars.map((char) => spansByChar.get(selectionKey(char)) ?? null);
+  const nextDirect: Array<{ start: number; end: number } | null> = new Array(chars.length).fill(null);
+  let next: { start: number; end: number } | null = null;
+  for (let index = chars.length - 1; index >= 0; index -= 1) {
+    if (direct[index]) next = direct[index];
+    nextDirect[index] = next;
+  }
+
+  const assignments = new Map<string, SelectionCharAssignment>();
+  let previous: { start: number; end: number } | null = null;
+  for (let index = 0; index < chars.length; index += 1) {
+    const span = direct[index];
+    if (span) previous = span;
+    const insertion = previous && nextDirect[index] ? previous.end : undefined;
+    if (!span && insertion === undefined) continue;
+    assignments.set(selectionKey(chars[index]), {
+      lid,
+      source_span: span ?? { start: insertion!, end: insertion! },
+    });
+  }
+  return assignments;
 }
 
 export function buildHybridFoundation(input: HybridFoundationInput): HybridFoundationArtifacts {
@@ -209,6 +459,7 @@ export function buildHybridFoundation(input: HybridFoundationInput): HybridFound
   const allLines = input.pdf_geometry.pages.flatMap(pageLinesInReadingOrder);
   const entries: PdfSourceMapEntry[] = [];
   const pageRegionIndex: Record<string, string[]> = {};
+  const selectionAssignments = new Map<string, SelectionCharAssignment>();
   let lineCursor = 0;
 
   for (const block of blocks) {
@@ -246,7 +497,10 @@ export function buildHybridFoundation(input: HybridFoundationInput): HybridFound
         reason: `${match.quality} token anchor matched ${regions.length} PDF line${regions.length === 1 ? "" : "s"}`,
       },
     });
-    lineCursor = match.endIndex + 1;
+    for (const [key, assignment] of alignSelectionChars(input.source_txt, block, lid, matchedLines, input.pdf_geometry)) {
+      selectionAssignments.set(key, assignment);
+    }
+    lineCursor = match.endIndex;
   }
 
   const pdfSourceMap: PdfSourceMap = {
@@ -274,13 +528,13 @@ export function buildHybridFoundation(input: HybridFoundationInput): HybridFound
     pageIndex: page.pageIndex,
     ...(page.page_label ? { page_label: page.page_label } : {}),
     chars: page.chars.map((char) => {
-      const entry = charEntryForRegions(char, entries);
+      const assignment = selectionAssignments.get(selectionKey(char));
       return {
         char_index: char.charIndex,
         text: char.text,
         rect: { pageIndex: char.pageIndex, bbox: char.bbox },
-        source_span: entry?.source_span ?? { start: 0, end: 0 },
-        ...(entry ? { lid: entry.lid } : {}),
+        source_span: assignment?.source_span ?? { start: 0, end: 0 },
+        ...(assignment ? { lid: assignment.lid } : {}),
       };
     }),
   }));

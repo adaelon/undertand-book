@@ -21,6 +21,11 @@ function geometryFromPages(pageLines: string[][]): PdfTextGeometry {
   return {
     pages: pageLines.map((lines, pageIndex) => {
       let charIndex = 0;
+      const lineRanges = lines.map((line) => {
+        const start = charIndex;
+        charIndex += Array.from(line).length;
+        return { start, end: charIndex };
+      });
       const width = Math.max(600, ...lines.map((line) => 144 + line.length * 6));
       const height = Math.max(200, 80 + lines.length * 18);
       return {
@@ -34,7 +39,7 @@ function geometryFromPages(pageLines: string[][]): PdfTextGeometry {
         chars: lines.flatMap((line, lineIndex) =>
           Array.from(line).map((text, offset) => ({
             pageIndex,
-            charIndex: charIndex++,
+            charIndex: lineRanges[lineIndex].start + offset,
             text,
             bbox: [72 + offset * 6, height - 60 - lineIndex * 18, 78 + offset * 6, height - 48 - lineIndex * 18],
           })),
@@ -43,8 +48,8 @@ function geometryFromPages(pageLines: string[][]): PdfTextGeometry {
           pageIndex,
           lineIndex,
           text,
-          char_start: 0,
-          char_end: text.length,
+          char_start: lineRanges[lineIndex].start,
+          char_end: lineRanges[lineIndex].end,
           bbox: [72, height - 60 - lineIndex * 18, 72 + text.length * 6, height - 48 - lineIndex * 18],
         })),
       };
@@ -146,6 +151,97 @@ describe("PH5 hybrid foundation", () => {
 
     expect(artifacts.pdf_source_map.entries[1].status).toBe("block_fallback");
     expect(artifacts.pdf_source_map.entries[1].regions).toHaveLength(2);
+  });
+
+  it("extends a matched paragraph through all PDF lines and assigns per-character source spans", () => {
+    const paragraph = [
+      "Alpha beta gamma delta epsilon zeta",
+      "eta theta iota kappa lambda mu",
+      "nu xi omicron pi rho sigma",
+      "tau upsilon phi chi psi omega.",
+    ];
+    const source = `# Title\n\n${paragraph.join(" ")}\n`;
+    const artifacts = buildHybridFoundation({
+      book_id: "paper-character-selection",
+      source_txt: source,
+      original_pdf_path: "paper.pdf",
+      original_pdf_sha256: "sha-pdf",
+      pdf_geometry: geometryFromLines(["Title", ...paragraph]),
+    });
+
+    const entry = artifacts.pdf_source_map.entries[1];
+    expect(entry.status).toBe("block_fallback");
+    expect(entry.regions).toHaveLength(4);
+
+    const selectionPage = artifacts.pdf_selection_map_pages[0];
+    const tauCharIndex = geometryFromLines(["Title", ...paragraph]).pages[0].lines[4].char_start;
+    const tau = selectionPage.chars.find((char) => char.char_index === tauCharIndex);
+    const tauStart = source.indexOf("tau upsilon");
+    expect(tau).toMatchObject({
+      text: "t",
+      lid: entry.lid,
+      source_span: { start: tauStart, end: tauStart + 1 },
+    });
+    expect(new Set(
+      selectionPage.chars
+        .filter((char) => char.lid === entry.lid)
+        .map((char) => `${char.source_span.start}:${char.source_span.end}`),
+    ).size).toBeGreaterThan(20);
+  });
+
+  it("stops paragraph extension before a weakly matching following block", () => {
+    const source = [
+      "# Title",
+      "",
+      "Alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho sigma tau upsilon phi chi psi omega.",
+      "",
+      "## Omega unrelated section",
+      "",
+    ].join("\n");
+    const artifacts = buildHybridFoundation({
+      book_id: "paper-extension-boundary",
+      source_txt: source,
+      original_pdf_path: "paper.pdf",
+      original_pdf_sha256: "sha-pdf",
+      pdf_geometry: geometryFromLines([
+        "Title",
+        "Alpha beta gamma delta epsilon zeta",
+        "eta theta iota kappa lambda mu",
+        "nu xi omicron pi rho sigma",
+        "Omega unrelated section",
+      ]),
+    });
+
+    expect(artifacts.pdf_source_map.entries[1].regions).toHaveLength(3);
+    expect(artifacts.pdf_source_map.entries[2]).toMatchObject({
+      status: "line_fallback",
+      regions: [{ pageIndex: 0 }],
+    });
+  });
+
+  it("maps source blocks on both sides of an inline formula to one shared PDF line", () => {
+    const source = "# Title\n\nAlpha beta gamma delta epsilon $ x $ zeta eta theta iota kappa\n";
+    const geometry = geometryFromLines(["Title", "Alpha beta gamma delta epsilon x zeta eta theta iota kappa"]);
+    geometry.pages[0].lines[1].bbox[2] = 250;
+    const artifacts = buildHybridFoundation({
+      book_id: "paper-shared-pdf-line",
+      source_txt: source,
+      original_pdf_path: "paper.pdf",
+      original_pdf_sha256: "sha-pdf",
+      pdf_geometry: geometry,
+    });
+
+    const leading = artifacts.pdf_source_map.entries[1];
+    const trailing = artifacts.pdf_source_map.entries[3];
+    expect(leading.status).toBe("line_fallback");
+    expect(trailing.status).toBe("line_fallback");
+    expect(leading.regions[0].bbox).toEqual(trailing.regions[0].bbox);
+
+    const page = artifacts.pdf_selection_map_pages[0];
+    const lineStart = geometry.pages[0].lines[1].char_start;
+    expect(page.chars.find((char) => char.char_index === lineStart)).toMatchObject({ lid: leading.lid });
+    const zetaIndex = geometry.pages[0].chars.find((char) => char.charIndex >= lineStart && char.text === "z")!.charIndex;
+    expect(page.chars.find((char) => char.char_index === zetaIndex)).toMatchObject({ lid: trailing.lid });
   });
 
   it("maps a paragraph across a hyphenated PDF line break", () => {
@@ -257,6 +353,65 @@ describe("PH5 hybrid foundation", () => {
       "line_fallback",
       "line_fallback",
     ]);
+  });
+
+  it("keeps a short final line inside the full-width band before entering two columns", () => {
+    const source = [
+      "# Paper",
+      "",
+      "Full width opening alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu short continuation.",
+      "",
+      "## Full Width Next",
+      "",
+      "## Left Section",
+      "",
+      "Left body.",
+      "",
+      "## Right Section",
+      "",
+      "Right body.",
+      "",
+    ].join("\n");
+    const geometry = geometryFromPages([[
+      "Paper",
+      "Full width opening alpha beta",
+      "Downloaded furniture",
+      "gamma delta epsilon zeta",
+      "eta theta iota kappa lambda mu",
+      "short continuation.",
+      "Full Width Next",
+      "Left Section",
+      "Left body.",
+      "Right Section",
+      "Right body.",
+    ]]);
+    geometry.pages[0].height = 800;
+    geometry.pages[0].view = [0, 0, 600, 800];
+    const boxes = [
+      [60, 750, 540, 762],
+      [60, 700, 540, 712],
+      [20, 690, 190, 698],
+      [60, 680, 540, 692],
+      [60, 660, 540, 672],
+      [60, 640, 220, 652],
+      [60, 600, 540, 612],
+      [60, 550, 220, 562],
+      [60, 530, 220, 542],
+      [320, 550, 500, 562],
+      [320, 530, 500, 542],
+    ] as Array<[number, number, number, number]>;
+    geometry.pages[0].lines.forEach((line, index) => { line.bbox = boxes[index]; });
+
+    const artifacts = buildHybridFoundation({
+      book_id: "paper-full-width-tail",
+      source_txt: source,
+      original_pdf_path: "paper.pdf",
+      original_pdf_sha256: "sha-pdf",
+      pdf_geometry: geometry,
+    });
+
+    expect(artifacts.pdf_source_map.entries[1].regions).toHaveLength(4);
+    expect(artifacts.pdf_source_map.entries.slice(2).every((entry) => entry.status === "line_fallback")).toBe(true);
   });
 
   it("rejects a foundation whose text mapping coverage is not reader-ready", () => {
