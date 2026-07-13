@@ -1,6 +1,6 @@
 # ADR-0041 qa 落地:qa = LID 价值/提问热度信号(读者私人)+ 三消费方锚 LID + 升权压已读 + back 组 count 分层
 
-状态:已接受(2026-06-29,P4 qa 落地 §0.5 grill;回收 P4-2 `puzzle_lids` 恒空缺口)
+状态:部分被 [ADR-0075](0075-runtime-owned-evidence-backed-profile-memory.md) 细化(2026-07-13);qa 记录/count 与技术回看消费保留,不再把 count 普遍解释为困惑或掌握状态。
 
 ## 背景
 

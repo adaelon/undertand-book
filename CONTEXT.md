@@ -238,25 +238,44 @@ note 卡片的展示层 `[ADR-0043]`:note 内容仍来自 memory,overlay 只负�
 ## 读位感 (reading position sense)
 替代"页码"的位置参照 `[ADR-0028]`:**章节定位**(从当前 anchor 上溯容器 LID,显示"第N章 …")+ **进度%**(`anchor_idx` / 叶总数,确定性)。只做导航 / 显示,**不做引用锚**。本项目**无一等页码**——页在 reflowable / 连续滚动模型里物理不存在,造页号不可复现(违锚定红线);印刷版 page-list 仅当源 EPUB 携带时作 LID 展示标签(切片1+),citation 恒为 LID。状态:NEW(详见 [docs/adr/0028])。
 
-## 记忆 consolidation(确定性账本 + 用户主动 LLM 记忆 + 四层派生)
-memory 层产物的生成机制 `[ADR-0038 修正 ADR-0018]`(命令面记录模型见 [docs/adr/0015])。**ADR-0038 推翻 ADR-0018 的「参照 Codex 两阶段后台自动抽推断」根基**(后台自动抽=不透明 + 记猜测,违最高原则、用户实测别扭),重定位为 Claude Code 式透明 memory:记确定事实 / 用户真说的话。
-- **来源三分(重划)**:① 确定性账本(无 LLM,直存)= 真读过的 LID 历史 + `note/highlight/qa`(用户显式动作);② 用户主动 LLM 记忆(LLM,**agent judgment 触发 + 用户显式,前台读时非后台** `[ADR-0039 修正 ADR-0038]`)= 用户显式「记下 X」∨ agent 读时 judgment 觉得值得构建进对该读者的理解(偏好/关注/卡点);**「记什么」放宽到「构建用户上下文(含对用户的理解/推断)」+ 三护栏(透明落可见文件 / 用户可改可删 / 认知诚实标注+citation 锚真 LID)**;**落 `memory.save type=context`(区别于 `note`=用户逐字便签)、直接 `long_term` + 可删兜底**(砍确定性计数器、放宽 ADR-0038「只记事实」否决;确定性 reader_profile 派生仍不塞推断);③ 会话临时(`dialogue/position`,不持久)。
-- **读时主动,非后台流水线**:agent 在 E loop 读时判断该记什么 → 调已有 `memory.save`,透明落可见文件、用户即时可改可删。**砍** Codex Phase1/Phase2 后台 + idle/claim/lease/锁/watermark/git diff(单机过度工程 + 后台=不透明)。
-- **四层产物 = 物化只读派生 .md** `[ADR-0040]`:从 ①② 确定性聚合渲染成 `.md` 落盘(memory.json 同目录),**纯派生只读快照·save/delete 后整页单向覆写·真相源唯一 memory.json**(改东西走 memory.delete/编 json,手编 .md 无意义);物化但单向,折中 ADR-0038(物化)× ADR-0012/0020(不双向)。**v1 两层零 LLM**:`reader-profile.md`(单书常驻 = 已读集 + 关注点 note·highlight + 卡点 qa(LID 提问热度 + 真实问题文本,`[ADR-0041]`)+ context 按 generated_at 成长时间线)/ `阅读手册.md`(per-book × cross-book 双维;概念对齐留 ADR-0006)。`session 详档`/`raw 原料`两层**随 ADR-0038 砍 Phase1 失生产者,v1 不做**;LLM 表达层摘要留后续。
-- **遗忘按来源分裂**:确定性产物**只用户显式 `memory.delete`**(是事实);主动记忆可 usage 剪枝。
-状态:NEW(详见 [docs/adr/0038],修正 [docs/adr/0018])。
+## MemoryDocument
+本地单用户、跨书的读者私人记忆真相源;统一容纳内容记录、画像事实及其审核状态,与只读书基座物理隔离。旧的裸记录数组是其待迁移前身,不是并列真相源。状态:BOUNDARY_CHANGE(详见 [docs/adr/0075])。
 
-## qa 提问热度 / LID 价值信号 (qa heat)
-读者对某 LID 的提问频次构成的**读者私人价值信号** `[ADR-0041]`:某 LID 被问得多 = 对**这个读者**更值钱(更难/更关键/更想懂)。qa = agent 用 `book.query` 答书内问题后存的真问答记录(`type=qa`,锚 query 的 anchor LID + 用户原问题),heat = 该 LID 的 qa 记录条数。属 ② 读者私人记忆(不写 book base、不跨读者聚合;"书内在价值"=跨读者聚合属 ① 世界模型,另开)。三消费方全锚 `anchor.lid`:**lid→count** 喂 `technical_learning_reorder` 在 **back 组**做卡点升权(压已读、count 分层 tiebreak weight×距离);**lid→问题文本** 经 `memory.recall(lid,type=qa)` 做 LID-local recall(到该 LID 看历史提问)+ `reader-profile.md` 透明展示。区别于 `note`(用户逐字便签)/ `context`(agent 构建的用户理解)。`puzzle_heat: BTreeMap<lid,u32>` 是其 reader_profile 派生形(替代旧 `puzzle_lids` 去重平表)。状态:NEW(详见 [docs/adr/0041])。
+## ProfileFact
+一条带来源、证据、信任状态和生命周期的结构化用户画像事实。`scope` 表示事实属于全局还是某本书,`applicability` 表示它适用于全部内容、某个 `content_profile`、论文 subtype 或领域;两者正交。状态:NEW(详见 [docs/adr/0075])。
+
+## GlobalReaderProfile
+从有效 `ProfileFact` 投影出的跨书稳定读者画像,只包含相关背景、领域能力、长期目标、稳定讲解偏好和长期约束。它不吸收单本阅读反应、临时情绪或普通 context memory。状态:NEW(详见 [docs/adr/0075])。
+
+## BookReadingState
+某一本书的读者私人阅读状态,由已读 LID、提问/笔记/高亮等原始行为信号、单本事实和当前 `MemoryPolicy` 投影组成。旧代码级 `ReaderProfile {read_lids, focus_lids, puzzle_heat}` 此后归入本术语;行为信号本身不证明困惑或掌握。状态:BOUNDARY_CHANGE(详见 [docs/adr/0075])。
+
+## ReaderProfileSnapshot
+runtime 在读者回合开始前从 `GlobalReaderProfile`、当前 `BookReadingState` 和适用事实组装的有界上下文视图。它自动注入住户 agent、可按账本重建,不是第二真相源,也不写入对话历史。状态:NEW(详见 [docs/adr/0075])。
+
+## MemoryIntentGate
+住户用户消息进入主 agent 前的显式记忆意图入口:结构化 UI 动作直接生成记忆操作,明确的“记住/纠正/忘记”表达才触发前台结构化抽取。未命中的普通表达不增加当前回答延迟,由后台审核兜底。状态:NEW(详见 [docs/adr/0075])。
+
+## ReviewJob / 记忆 consolidation
+`ReviewJob` 是对住户会话未审核回合做增量事实抽取的持久任务;全局 consolidation 只消费已落账事实与跨书独立证据,生成待确认的全局候选。二者都由 runtime 调度并以 watermark 保证可恢复,不依赖主 agent 自愿调用 `memory.save/recall`。状态:BOUNDARY_CHANGE(详见 [docs/adr/0075])。
+
+## MemoryPolicy
+`content_profile` 为读者记忆提供的语义解释策略:定义哪些私人信号值得提取、如何派生 profile-specific state、以及如何给快照候选排序。它不得改变 MemoryDocument、信任/删除规则、LID/citation 红线或直接生成自由文本提示;未知 profile 使用中性策略。状态:NEW(详见 [docs/adr/0075])。
+
+## ProfileUsageTrace
+一次住户回答对画像的可检查使用轨迹,区分 runtime 确定性注入的事实与模型声明实际参考的事实。模型声明不是客观因果证明,只能作为弱统计和用户解释入口。状态:NEW(详见 [docs/adr/0075])。
+
+## qa 提问活动 (qa activity)
+读者在某 LID 留下的不同 qa 记录数,只证明发生过提问并构成私人关注信号,不单独证明困惑、难度或掌握程度。`technical_learning` 可将其用于回看排序,`paper` 等其他 MemoryPolicy 按自己的语义解释;`puzzle_heat` 仅是旧实现字段名。状态:BOUNDARY_CHANGE(详见 [docs/adr/0041], [docs/adr/0075])。
 
 ## agent 可撤销提议 (agent reversible proposal)
 读时 E agent 在阅读器中对视图/标注的修改**是可撤销的提议、用户终裁** `[ADR-0030]`。agent **真执行**命令(守人机对称 [docs/adr/0007],命令面无特供),可撤销落**前端交互层**:用 effect 返回([docs/adr/0015])的反向命令 undo(goto 回原 anchor / `memory.delete(id)`)。**提议单元 = 一次对话回合**(`/agent/chat` 一次调用的全部副作用)= 事务性 undo。**agent 提议态 = 标注落 `layer=session`(临时),用户「保留」才升 `long_term`**(复用 memory 两层,零新字段;未处置走人则不污染长期记忆)。`orchestrator` 的 `OuterOutcome` 加 `effects[]`(副作用清单)+ `trace[]`(查询踪迹,对用户可见)承载之。状态:NEW(详见 [docs/adr/0030])。
 
 ## 读时会话边界 (reading session boundary)
-对话会话的切分 = **用户显式控制** `[ADR-0030]`:用户点「新对话」创建新的 active 对话会话并使用 fresh messages,**不按 idle 时间戳自动判定**。与 [docs/adr/0018] Phase1 的记忆抽取边界(idle/关书/退出)**解耦**——对话会话是用户交互意图,记忆抽取是后台流水线,各自独立。新会话**冷启动上下文 = memory.recall 兜底**(note/highlight/position,精炼 state 而非全量 messages,记大局不被细节淹没);完整轨迹摘要/reader-profile 常驻留 consolidation 刀。状态:NEW(详见 [docs/adr/0030])。
+对话会话的切分仍由用户显式控制 `[ADR-0030]`;idle 只触发 ReviewJob,不自动创建新对话。新对话、切书和 context compression 是记忆审核边界,新回合以自动 `ReaderProfileSnapshot` 冷启动而非依赖 agent 主动 recall。状态:BOUNDARY_CHANGE(详见 [docs/adr/0030], [docs/adr/0075])。
 
 ## agent 对话历史 (agent chat history)
-住户 agent 的本地、读者私有、按 `book_id` 分组的可恢复对话会话列表 `[ADR-0030]`:每个历史会话保留人类可见 transcript 与该会话的 agent messages;选择历史会话会恢复二者,删除只删除该历史会话。它不是 memory 记录,不派生 citation,不进入 reader_profile,也不暴露给 visitor/MCP。状态:NEW(详见 [docs/adr/0030])。
+住户 agent 的本地、读者私有、按 `book_id` 分组的可恢复对话会话列表 `[ADR-0030]`。它不是 memory 真相,但其中的用户回合可作为 ReviewJob 的画像证据引用;删除原会话不等同于执行 memory“忘记”,且历史绝不暴露给 visitor/MCP。状态:BOUNDARY_CHANGE(详见 [docs/adr/0030], [docs/adr/0075])。
 
 ## route(导航原语)
 图谱上的**确定性多跳导航原语** `[ADR-0034]`,零 LLM,只保证返回的 LID/边真实("确定性 LID 由 route 保证")。两形态:`route_from(at)` = **前沿式内核**(站在当前 LID 返回可走的下一步);`route_to(from, target)` = 同批边上跑 BFS 的确定性组合(派生)。区别于 `book.context`(单跳"相关点"):route 是把 context 链起来 + 按边语义排序成"可导航下一步"的多跳找路。route 内核是 Core(架在 book.context 上);教学性排序/过滤属 technical_learning policy。状态:NEW(详见 [docs/adr/0034])。
@@ -265,10 +284,10 @@ memory 层产物的生成机制 `[ADR-0038 修正 ADR-0018]`(命令面记录模�
 `route_from` 的返回形状 `[ADR-0034]`:不是一条平铺 ranked list,而是按导航语义分的 **5 个类别**——`back`(前置/背景)/ `forward`(深入/承接)/ `concretize`(例证/具体)/ `cross`(关联/跨章)/ `continue`(顺读)。`edge_type → 类别` 是固定确定性映射表(Core),组内按 weight×距离 排序。意图直接落到类别("没懂"→back,"给例子"→concretize)。状态:NEW(详见 [docs/adr/0034])。
 
 ## 住户 / 访客 (resident / visitor)
-读时两类 agent 的本质区别 `[ADR-0034][ADR-0035]`:**住户** = 我们的 agent,住在世界模型里,携带当前位置 + **这个读者的记忆**(reader_profile/memory),与读者有持续关系;**访客** = 外部 agent,只带自己的外来意图进来,对本书零记忆、无所有权。**能共享的不构成区别**(route/世界模型可借给访客);不可让渡的是 ②读者私人记忆。访客 = 临时住户 lite(拿临时会话+游标,够不到读者私人房间)。状态:NEW(详见 [docs/adr/0034/0035])。
+读时两类 agent 的本质区别 `[ADR-0034][ADR-0035]`:**住户**携带当前位置与自动注入的 `ReaderProfileSnapshot`,和读者有持续关系;**访客**只带外来意图和临时会话,不得读取、生成或修改读者私人记忆。可共享的是 route/世界模型,不可让渡的是读者私人层。状态:BOUNDARY_CHANGE(详见 [docs/adr/0034], [docs/adr/0035], [docs/adr/0075])。
 
 ## 三类记忆 (three memory classes)
-读时记忆按可见性分三类 `[ADR-0035]`:**① 世界模型**(公共,可借:route/book.text/citation gate)/ **② 读者私人记忆**(durable + 读者所有 + 绝不外借:reader_profile/memory/viewport)/ **③ 访客会话记忆**(ephemeral + 访客交互所有:它问了啥、我们返了啥、它的"不对")。③ ≠ ②——给访客 session 记忆不破"私人房间不外借"。状态:NEW(详见 [docs/adr/0035])。
+读时记忆按可见性分三类 `[ADR-0035]`:**① 世界模型**(公共,可借:route/book.text/citation gate)/ **② 读者私人记忆**(durable + 读者所有:MemoryDocument/GlobalReaderProfile/BookReadingState)/ **③ 访客会话记忆**(ephemeral + 访客交互所有)。③ 不得成为②的证据来源。状态:BOUNDARY_CHANGE(详见 [docs/adr/0035], [docs/adr/0075])。
 
 ## 访客会话 (visitor session)
 外部 agent 经 MCP 连接我们时的 ephemeral 会话 `[ADR-0035]`,**TCP 式握手/挥手**维护:握手发 `session_id`、传输期迭代引导(支持"不对"refine)、挥手即焚 + 超时 GC。内容 = `transcript`(交互记录)+ 临时**游标** `cursor{at_lid, last_frontier}`(访客自己的位置,≠ 读者 viewport)。绝不写入 ② 的 durable store。修订了 P7 原"无状态"假设(见 [docs/adr/0035])。状态:NEW(详见 [docs/adr/0035])。
@@ -277,16 +296,16 @@ memory 层产物的生成机制 `[ADR-0038 修正 ADR-0018]`(命令面记录模�
 外部 agent 投影的只读 LLM 命令 `[ADR-0035]`:`book_guide(intent, anchor?)` 返回 `意图→入口节点→route 路线(每步理由+证据 LID)`。是 `book_query` 的姊妹——**query 返答案,guide 返路线**。配访客会话态可跨调用 refine。返回全是真 LID/真边,外部可独立验证。状态:NEW(详见 [docs/adr/0035])。
 
 ## 反馈信号 (feedback signal)
-带读 loop 中调整下一步的转向输入 `[ADR-0036]`。**唯一主信号 = 用户在停靠点的开放 NL 提问**(非闭集 token);viewport 偏离仅作弱旁路、memory/reader_profile 作慢先验、quiz 留后。区别于"agent 主动观测 viewport 行为推断"(已否决:弱代理误读违用户终裁)。状态:NEW(详见 [docs/adr/0036])。
+带读 loop 中调整下一步的转向输入 `[ADR-0036]`。**唯一主信号 = 用户在停靠点的开放 NL 提问**(非闭集 token);viewport 偏离仅作弱旁路、`ReaderProfileSnapshot` 作慢先验,当前明确指令始终优先。状态:BOUNDARY_CHANGE(详见 [docs/adr/0036], [docs/adr/0075])。
 
 ## 导航轴 / 讲法轴 (navigation axis / explanation axis)
-反馈意图的两个正交轴 `[ADR-0036]`:**导航轴**(去哪)落 `route_from` 的 5 类导航类别;**讲法轴**(怎么讲/多细/重讲)落 technical_learning policy 讲法层(复用 `book.synthesize` + reader_profile),不动 route。agent 据 NL 提问语义把信号定到 `{轴, route 类别, 可能的 target}`;裸"没懂"歧义靠结构兜底(确定性命令 `book.unvisited_back(at)` = `route_from(at).back ∩ (全集 \ read_lids)`,P3-2 落地)+ 可撤销提议 + 二次信号升级消解,不靠 LLM 神判;未读判定确定性,不靠 agent 心算交集。状态:NEW(详见 [docs/adr/0036])。
+反馈意图的两个正交轴 `[ADR-0036]`:**导航轴**(去哪)落 `route_from` 的导航类别;**讲法轴**(怎么讲/多细/重讲)由当前 `MemoryPolicy` 消费 `BookReadingState` 与适用全局事实,不改变 route Core。裸“没懂”仍先使用确定性未读前置,不得把画像假设当成用户当前指令。状态:BOUNDARY_CHANGE(详见 [docs/adr/0036], [docs/adr/0075])。
 
 ## TechnicalLearningAgentPolicy(带读教学整形)
-technical_learning profile 对 `route_from` 5 类前沿的**确定性教学整形** `[ADR-0034 决策4/0037]`,与 `book.synthesize`「Core+policy」同构([docs/adr/0033] 决策5)。**reorder** = 按教学优先序重排 5 类分组(组间序;无 reader_profile 时取中性默认 `continue>back>concretize>forward>cross`,占位常量待实测/profile 回填);**过滤** = 剔空组。零 LLM、确定性可单测。落 **runtime**(非 read-tools Core,守 Core/Profile 分离;profile 偏见绝不渗进 route 内核,[docs/adr/0034] 否决);经新工具 `book.guided_route_from(at, k?)` 暴露(= route_from + 整形;裸 `book.route_from` 仍在,给访客/高级)。返回有序分组 `GuidedFrontier`(保分组导航语义,不平铺)。reader_profile 个性化(新手 back 置顶 / 已懂跳过)留 P4。状态:NEW(详见 [docs/adr/0037])。
+`technical_learning` 对 `route_from` 前沿和讲解方式的 profile policy `[ADR-0034][ADR-0037]`。它可消费已读与 qa/note/highlight 等原始活动及证据化学习假设,但不得从行为自动断言 novice/expert、掌握或卡点,也不得让 profile 偏见进入 route Core。状态:BOUNDARY_CHANGE(详见 [docs/adr/0037], [docs/adr/0075])。
 
 ## BookStructure(书籍结构地图)
-content profile / extraction rule pack 驱动的预构建结构 sidecar `[ADR-0044/0048]`:描述一本书/论文的公共结构理解,用于“带我读”先讲总体框架/当前位置意义,再进入逐停靠点 route。它不是读时临时摘要、不是 reader_profile、不是 memory;输入只来自公共书基座与 profile artifacts(`lid_tree/source_text/graph/discourse/formula/pass2_audit`),不得混入用户私人层。核心形状 = `spine + throughlines + key_stops`,所有判断必须锚定真 LID/evidence_lids。`technical_learning` 与 `paper` 只改变抽取规则和投影口径,不各自复制一套结构 sidecar。状态:BOUNDARY_CHANGE(详见 [docs/adr/0044], [docs/adr/0048])。
+content profile / extraction rule pack 驱动的预构建结构 sidecar `[ADR-0044/0048]`:描述一本书/论文的公共结构理解,用于“带我读”先讲总体框架/当前位置意义,再进入逐停靠点 route。它不是读时临时摘要、不是 `ReaderProfileSnapshot`、不是 memory;输入只来自公共书基座与 profile artifacts,不得混入用户私人层。状态:BOUNDARY_CHANGE(详见 [docs/adr/0044], [docs/adr/0048])。
 
 ## spine / throughline / key_stop
 BookStructure 的三层骨架 `[ADR-0044]`:
@@ -298,7 +317,7 @@ BookStructure 的三层骨架 `[ADR-0044]`:
 BookStructure 构建期的压缩中间卡片 `[ADR-0044]`:按章/节等结构单元从 LID tree、source excerpts、discourse summaries、graph claims/concepts、formula semantics 投影而来,记录单元 role、summary、candidate_key_stops、depends_on 和 evidence_lids。它是 stitching 全书 spine/throughlines 的输入,不是最终读时展示文案。状态:NEW(详见 [docs/adr/0044])。
 
 ## 结构投影 (structure projection)
-BookStructure 在读时围绕某个 LID 投影出的结构解释 `[ADR-0045]`:回答“当前位置在全书/当前 spine/throughline/key_stop 中意味着什么”。它只消费公共 BookStructure sidecar 与真实 LID,不消费 reader_profile、memory 或读者 viewport。状态:NEW(详见 [docs/adr/0045])。
+BookStructure 在读时围绕某个 LID 投影出的结构解释 `[ADR-0045]`:回答“当前位置在全书/当前 spine/throughline/key_stop 中意味着什么”。它只消费公共 BookStructure sidecar 与真实 LID,不消费 `ReaderProfileSnapshot`、MemoryDocument 或读者 viewport。状态:BOUNDARY_CHANGE(详见 [docs/adr/0045], [docs/adr/0075])。
 
 ## 宏观带读路线 (guide path)
 BookStructure 在读时提供的全书级带读路线 `[ADR-0045]`:按 spine 分段展开 key_stops,用于“先把这本书的重要地方过一遍”。它区别于 `guided_route_from`:guide path 是宏观路线,`guided_route_from` 是站在当前 LID 的局部转向前沿。状态:NEW(详见 [docs/adr/0045])。

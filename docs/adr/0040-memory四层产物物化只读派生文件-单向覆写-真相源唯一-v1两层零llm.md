@@ -1,6 +1,6 @@
 # ADR-0040 memory 四层产物 = 物化只读派生 .md(单向覆写、真相源唯一 memory.json、v1 两层零 LLM)
 
-状态:已接受(2026-06-29,P4-4 §0.5 grill)
+状态:已接受;“单一真相源 + 单向派生 Markdown”保留,“因无后台生产者而零 LLM”被 [ADR-0075](0075-runtime-owned-evidence-backed-profile-memory.md) 取代(2026-07-13)。
 
 ## 背景
 

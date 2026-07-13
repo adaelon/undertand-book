@@ -1,6 +1,6 @@
 # ADR-0038 memory 重定位:Claude Code 式透明确定性账本 + LLM 限定用户主动信号(修正 ADR-0018 Codex 自动 consolidation 根基)
 
-状态:已接受(2026-06-28,P4 §0.5 grill 暴露 ADR-0018 根基问题)
+状态:部分被 [ADR-0075](0075-runtime-owned-evidence-backed-profile-memory.md) 取代(2026-07-13);透明、证据与用户终裁保留,禁止后台整理与主 Agent 自愿触发不再有效。
 
 ## 背景
 

@@ -216,6 +216,8 @@ source/target 不存在或 evidence_lids 悬空 -> candidate 丢弃,不得 LLM �
 
 ### 1.5.4 ReaderProfile v0
 
+> **状态**:本节作为历史草案保留;自动能力评级与单一 ReaderProfile 形状已被 [ADR-0075](adr/0075-runtime-owned-evidence-backed-profile-memory.md) 及 [可靠画像 memory 切片方案](切片方案-memory可靠画像升级.md) 取代。
+
 `reader_profile` 是 memory consolidation 的 Layer 3 读时投影,不是 `technical_learning` book artifact。它影响解释路径和检索计划,不写入 book base,不作为 citation。
 
 ```ts

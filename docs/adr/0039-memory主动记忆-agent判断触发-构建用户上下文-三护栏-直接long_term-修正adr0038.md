@@ -1,6 +1,6 @@
 # ADR-0039 memory ② 用户主动记忆:agent judgment 触发 + 构建用户上下文 + 三护栏 + 直接 long_term(修正 ADR-0038 决策2 计数器与认知诚实否决)
 
-状态:已接受(2026-06-28 §0.5 grill 落档;2026-06-29 实现落地,type=`context`、citation 闸=无效丢弃·零有效仍存)
+状态:部分被 [ADR-0075](0075-runtime-owned-evidence-backed-profile-memory.md) 取代(2026-07-13);`context` 内容记忆保留,Agent judgment 直接写画像与前台-only 触发不再有效。
 
 ## 背景
 
