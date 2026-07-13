@@ -4,9 +4,16 @@
 //! 时间戳与落盘路径由调用方注入(确定性可测,守 A2)。
 //! S7a 从 runtime 抽成独立 crate(拆 runtime↔reader 循环依赖,reader/runtime 共同依赖它)`[ADR-0027]`。
 mod document;
+mod profile;
 
 use document::StoredMemory;
 pub use document::{MemoryDocument, MEMORY_SCHEMA_VERSION};
+pub use profile::{
+    Applicability, BackgroundClaim, CapabilityClaim, Confidence, ConstraintClaim,
+    CreateProfileFact, EvidenceExclusion, EvidenceRef, ExclusionReason, FactSource, FactStatus,
+    ForgetProfileFactOutcome, GoalClaim, PreferenceClaim, ProfileFact, ProfilePayload,
+    ProfileResolutionContext, ProfileScope, Sensitivity,
+};
 use read_tools::ToolError;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -126,7 +133,7 @@ pub struct RecallQuery {
 }
 
 /// FNV-1a 64-bit:稳定确定性哈希(跨平台/版本恒定,内容寻址 mem_id 用,非 std DefaultHasher)。
-fn fnv1a(s: &str) -> u64 {
+pub(crate) fn fnv1a(s: &str) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for b in s.bytes() {
         h ^= b as u64;

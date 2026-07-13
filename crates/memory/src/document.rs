@@ -1,7 +1,8 @@
+use crate::profile::{EvidenceExclusion, ProfileFact};
 use crate::Record;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub const MEMORY_SCHEMA_VERSION: u32 = 2;
 
@@ -12,11 +13,11 @@ pub struct MemoryDocument {
     pub projection_revision: u64,
     pub records: Vec<Record>,
     #[serde(default)]
-    pub(crate) profile_facts: Vec<Value>,
+    pub profile_facts: Vec<ProfileFact>,
     #[serde(default)]
     pub(crate) review_state: BTreeMap<String, Value>,
     #[serde(default)]
-    pub(crate) exclusions: Vec<Value>,
+    pub exclusions: Vec<EvidenceExclusion>,
 }
 
 impl MemoryDocument {
@@ -56,6 +57,23 @@ impl MemoryDocument {
                 "memory projection_revision {} 超过 document_revision {}",
                 self.projection_revision, self.document_revision
             ));
+        }
+        let mut fact_ids = BTreeSet::new();
+        for fact in &self.profile_facts {
+            fact.validate_persisted().map_err(|error| error.message)?;
+            if !fact_ids.insert(fact.fact_id.as_str()) {
+                return Err(format!("重复 profile fact_id: {}", fact.fact_id));
+            }
+        }
+        let mut evidence_ids = BTreeSet::new();
+        for exclusion in &self.exclusions {
+            exclusion.validate().map_err(|error| error.message)?;
+            if !evidence_ids.insert(exclusion.evidence_id.as_str()) {
+                return Err(format!(
+                    "重复 evidence exclusion: {}",
+                    exclusion.evidence_id
+                ));
+            }
         }
         Ok(())
     }
