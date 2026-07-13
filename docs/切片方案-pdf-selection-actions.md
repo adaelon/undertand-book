@@ -2,7 +2,7 @@
 
 > 定位:让 PDF 原生拖选与 Markdown 正文共用 Highlight、Note、Ask AI 语义,同时保持原版 PDF 纯净阅读。
 > 冻结决策:[ADR-0074](adr/0074-pdf-selection-actions-and-exact-user-annotation-projection.md)。
-> 状态:PS0 领域与决策基线完成;PS1-PS7 待实现。
+> 状态:PS0-PS1 完成;PS2-PS7 待实现。
 
 ## 0. 冻结边界
 
@@ -224,6 +224,8 @@ git diff --check -- CONTEXT.md docs/adr/0074-pdf-selection-actions-and-exact-use
 - **Do**:增加共享 `SelectionContext/SelectedRange`,memory 可选 selection context,兼容 serde/TS 类型与 mem_id/citation 规则。
 - **Do not**:改前端交互或 PDF 投影。
 - **Done**:旧 memory fixture round-trip 不变;新 Note 多 LID ranges、双 quote、citations、mem_id tests 全绿。
+
+状态:完成;Rust/HTTP/TS schema 已同构,旧 hash 与缺省字段兼容测试已锁定。
 
 前置条件:
 

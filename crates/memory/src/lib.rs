@@ -5,7 +5,7 @@
 //! S7a 从 runtime 抽成独立 crate(拆 runtime↔reader 循环依赖,reader/runtime 共同依赖它)`[ADR-0027]`。
 use read_tools::ToolError;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 /// 记忆记录(符 V3 §4.3 / `[ADR-0015]`)。`type` 是 Rust 保留词 ⇒ serde rename。
@@ -21,6 +21,8 @@ pub struct Record {
     /// 高亮的段内字符区间(UTF-16,相对 LID 文本)`[ADR-0031]`;note/整段高亮为 None。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub range: Option<TextRange>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection_context: Option<SelectionContext>,
     #[serde(default)]
     pub citations: Vec<MemCitation>,
     pub usage: Usage,
@@ -45,6 +47,27 @@ pub struct Anchor {
 pub struct TextRange {
     pub start: u32,
     pub end: u32,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SelectionResolution {
+    Resolved,
+    Partial,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SelectedRange {
+    pub lid: String,
+    pub range: TextRange,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SelectionContext {
+    pub status: SelectionResolution,
+    pub raw_quote: String,
+    pub resolved_quote: String,
+    pub ranges: Vec<SelectedRange>,
 }
 
 /// 记忆引用锚定(`[ADR-0015]`,引用红线延伸 `[ADR-0004]`):recall 可验证、可跳原文。
@@ -74,6 +97,7 @@ pub struct SaveInput {
     pub content: String,
     /// 段内字符区间(高亮选区)`[ADR-0031]`;缺省 None = 整段/note。
     pub range: Option<TextRange>,
+    pub selection_context: Option<SelectionContext>,
     pub citations: Option<Vec<MemCitation>>,
     pub source_session_id: Option<String>,
 }
@@ -107,6 +131,7 @@ fn content_mem_id(
     anchor: &Anchor,
     content: &str,
     range: Option<&TextRange>,
+    selection_context: Option<&SelectionContext>,
 ) -> String {
     let a = anchor
         .lid
@@ -114,11 +139,48 @@ fn content_mem_id(
         .or(anchor.concept.as_deref())
         .unwrap_or("");
     let base = format!("{book_id}|{mem_type}|{a}|{content}");
-    let key = match range {
+    let mut key = match range {
         Some(r) => format!("{base}|{}:{}", r.start, r.end),
         None => base,
     };
+    if let Some(context) = selection_context {
+        let canonical = serde_json::to_string(context)
+            .expect("serializing SelectionContext with fixed fields cannot fail");
+        key.push_str("|selection:");
+        key.push_str(&canonical);
+    }
     format!("mem_{:016x}", fnv1a(&key))
+}
+
+fn validate_selection_context(input: &SaveInput) -> Result<(), ToolError> {
+    let Some(context) = &input.selection_context else {
+        return Ok(());
+    };
+    if input.mem_type != "note" {
+        return Err(invalid_selection_context(
+            "selection_context 只允许用于 note".into(),
+        ));
+    }
+    let Some(first) = context.ranges.first() else {
+        return Err(invalid_selection_context(
+            "selection_context.ranges 不得为空".into(),
+        ));
+    };
+    if input.anchor.lid.as_deref() != Some(first.lid.as_str()) {
+        return Err(invalid_selection_context(
+            "anchor.lid 必须等于 selection_context 首个 LID".into(),
+        ));
+    }
+    if context
+        .ranges
+        .iter()
+        .any(|selected| selected.lid.is_empty() || selected.range.start >= selected.range.end)
+    {
+        return Err(invalid_selection_context(
+            "selection_context range 需非空 LID 且 start < end".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// 用户私有 memory 库:与只读基座物理隔离的独立 JSON 文件 `[ADR-0006/0026]`。
@@ -167,6 +229,7 @@ impl MemoryStore {
     /// `memory.save`:内容寻址 upsert + note/highlight citation 自动派生 `[ADR-0026]`。
     /// `now` = generated_at/last_used 时间戳(调用方注入,不进 mem_id ⇒ id 时间无关)。
     pub fn save(&mut self, input: SaveInput, now: &str) -> Result<Record, ToolError> {
+        validate_selection_context(&input)?;
         let mem_id = input.mem_id.clone().unwrap_or_else(|| {
             content_mem_id(
                 &input.book_id,
@@ -174,13 +237,26 @@ impl MemoryStore {
                 &input.anchor,
                 &input.content,
                 input.range.as_ref(),
+                input.selection_context.as_ref(),
             )
         });
         // citation 自动派生:note/highlight 未给 citations 且 anchor 有 lid → 锚回自身 LID。
         let citations = match input.citations {
             Some(c) => c,
             None => {
-                if matches!(input.mem_type.as_str(), "note" | "highlight") {
+                if let Some(context) = &input.selection_context {
+                    let mut seen = BTreeSet::new();
+                    context
+                        .ranges
+                        .iter()
+                        .filter(|selected| seen.insert(selected.lid.as_str()))
+                        .map(|selected| MemCitation {
+                            lid: selected.lid.clone(),
+                            book_id: input.book_id.clone(),
+                            note: None,
+                        })
+                        .collect()
+                } else if matches!(input.mem_type.as_str(), "note" | "highlight") {
                     if let Some(lid) = &input.anchor.lid {
                         vec![MemCitation {
                             lid: lid.clone(),
@@ -209,6 +285,7 @@ impl MemoryStore {
             anchor: input.anchor,
             content: input.content,
             range: input.range,
+            selection_context: input.selection_context,
             citations,
             usage: Usage {
                 count: prev_count + 1,
@@ -281,6 +358,7 @@ impl MemoryStore {
                 },
                 content: String::new(),
                 range: None,
+                selection_context: None,
                 citations: None,
                 source_session_id: None,
             },
@@ -501,6 +579,14 @@ fn internal(message: String) -> ToolError {
     }
 }
 
+fn invalid_selection_context(message: String) -> ToolError {
+    ToolError {
+        error_code: "INVALID_SELECTION_CONTEXT".into(),
+        category: "validation".into(),
+        message,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -523,6 +609,7 @@ mod tests {
             },
             content: content.into(),
             range: None,
+            selection_context: None,
             citations: None,
             source_session_id: None,
         }
@@ -537,9 +624,103 @@ mod tests {
             anchor: Anchor { lid: Some(lid.into()), concept: None },
             content: content.into(),
             range: Some(TextRange { start, end }),
+            selection_context: None,
             citations: None,
             source_session_id: None,
         }
+    }
+
+    fn selection_context() -> SelectionContext {
+        SelectionContext {
+            status: SelectionResolution::Resolved,
+            raw_quote: "raw PDF quote".into(),
+            resolved_quote: "resolved quote".into(),
+            ranges: vec![
+                SelectedRange {
+                    lid: "1.1".into(),
+                    range: TextRange { start: 1, end: 4 },
+                },
+                SelectedRange {
+                    lid: "1.2".into(),
+                    range: TextRange { start: 0, end: 3 },
+                },
+                SelectedRange {
+                    lid: "1.1".into(),
+                    range: TextRange { start: 8, end: 10 },
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn legacy_record_roundtrip_omits_selection_context_and_keeps_mem_id() {
+        let legacy = r#"{
+          "mem_id":"mem_6802d90a28719aac","type":"note","layer":"long_term",
+          "book_id":"bookA","anchor":{"lid":"1.1"},"content":"笔记",
+          "citations":[{"lid":"1.1","book_id":"bookA"}],
+          "usage":{"count":1,"last_used":"t0"},"generated_at":"t0"
+        }"#;
+        let record: Record = serde_json::from_str(legacy).unwrap();
+        assert!(record.selection_context.is_none());
+        let encoded = serde_json::to_value(&record).unwrap();
+        assert!(encoded.get("selection_context").is_none());
+
+        let path = tmp("legacy-selection-context");
+        let mut store = MemoryStore::open(&path).unwrap();
+        let saved = store.save(note_input("bookA", "1.1", "笔记"), "t0").unwrap();
+        assert_eq!(saved.mem_id, "mem_6802d90a28719aac");
+    }
+
+    #[test]
+    fn selection_context_derives_ordered_unique_citations_and_enters_mem_id() {
+        let path = tmp("selection-context");
+        let mut store = MemoryStore::open(&path).unwrap();
+        let mut input = note_input("bookA", "1.1", "跨段笔记");
+        input.selection_context = Some(selection_context());
+        let saved = store.save(input, "t0").unwrap();
+
+        assert_eq!(saved.selection_context, Some(selection_context()));
+        assert_eq!(
+            saved.citations.iter().map(|c| c.lid.as_str()).collect::<Vec<_>>(),
+            vec!["1.1", "1.2"]
+        );
+
+        let mut same = note_input("bookA", "1.1", "跨段笔记");
+        same.selection_context = Some(selection_context());
+        assert_eq!(store.save(same, "t1").unwrap().mem_id, saved.mem_id);
+
+        let mut changed_context = selection_context();
+        changed_context.raw_quote.push('!');
+        let mut changed = note_input("bookA", "1.1", "跨段笔记");
+        changed.selection_context = Some(changed_context);
+        assert_ne!(store.save(changed, "t2").unwrap().mem_id, saved.mem_id);
+    }
+
+    #[test]
+    fn selection_context_rejects_non_note_empty_ranges_invalid_ranges_and_anchor_mismatch() {
+        let path = tmp("invalid-selection-context");
+        let mut store = MemoryStore::open(&path).unwrap();
+
+        let mut non_note = hl_input("bookA", "1.1", "raw", 0, 3);
+        non_note.selection_context = Some(selection_context());
+        assert_eq!(store.save(non_note, "t0").unwrap_err().error_code, "INVALID_SELECTION_CONTEXT");
+
+        let mut empty = note_input("bookA", "1.1", "note");
+        let mut empty_context = selection_context();
+        empty_context.ranges.clear();
+        empty.selection_context = Some(empty_context);
+        assert_eq!(store.save(empty, "t0").unwrap_err().error_code, "INVALID_SELECTION_CONTEXT");
+
+        let mut invalid_range = note_input("bookA", "1.1", "note");
+        let mut invalid_context = selection_context();
+        invalid_context.ranges[0].range.end = invalid_context.ranges[0].range.start;
+        invalid_range.selection_context = Some(invalid_context);
+        assert_eq!(store.save(invalid_range, "t0").unwrap_err().error_code, "INVALID_SELECTION_CONTEXT");
+
+        let mut mismatch = note_input("bookA", "9.9", "note");
+        mismatch.selection_context = Some(selection_context());
+        assert_eq!(store.save(mismatch, "t0").unwrap_err().error_code, "INVALID_SELECTION_CONTEXT");
+        assert!(store.recall(&RecallQuery::default()).is_empty());
     }
 
     // save → recall 往返:存的记录能按 book_id 取回,字段完整。
@@ -729,6 +910,7 @@ mod tests {
             anchor: Anchor { lid: Some(lid.into()), concept: None },
             content: q.into(),
             range: None,
+            selection_context: None,
             citations: None,
             source_session_id: None,
         };
@@ -766,6 +948,7 @@ mod tests {
             anchor: Anchor { lid: Some(lid.into()), concept: None },
             content: q.into(),
             range: None,
+            selection_context: None,
             citations: None,
             source_session_id: None,
         };

@@ -103,6 +103,17 @@ export interface TextRange {
   start: number;
   end: number;
 }
+export type SelectionResolution = "resolved" | "partial";
+export interface SelectedRange {
+  lid: string;
+  range: TextRange;
+}
+export interface SelectionContext {
+  status: SelectionResolution;
+  raw_quote: string;
+  resolved_quote: string;
+  ranges: SelectedRange[];
+}
 /** memory 记录(符 V3 §4.3;JSON 字段 `type` = Rust mem_type 的 serde rename)。 */
 export interface MemoryRecord {
   mem_id: string;
@@ -112,6 +123,7 @@ export interface MemoryRecord {
   anchor: { lid?: string | null; concept?: string | null };
   content: string;
   range?: TextRange | null; // 高亮段内区间;note / 整段高亮为空 `[ADR-0031]`
+  selection_context?: SelectionContext | null;
   source_session_id?: string | null;
 }
 export interface BookText {
@@ -776,7 +788,7 @@ export const api = {
   // ── memory.*(POST)──
   recall: (q: { book_id?: string; lid?: string; type?: string; layer?: string; text?: string } = {}) =>
     http<MemoryRecord[]>("POST", "/memory/recall", q),
-  save: (r: { type: string; anchor_lid: string; content: string; layer?: string }) =>
+  save: (r: { type: string; anchor_lid: string; content: string; layer?: string; selection_context?: SelectionContext }) =>
     http<MemoryRecord>("POST", "/memory/save", r),
   delete: (mem_id: string) => http<{ ok: boolean }>("POST", "/memory/delete", { mem_id }),
 

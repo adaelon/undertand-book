@@ -7,7 +7,7 @@
 //! 路由是**纯函数 `route(&mut AppState, Req) -> Reply`**(脱 socket 可单测,守 A2);
 //! socket 绑定 / worker 线程 / Mutex 锁 / 时间戳生成 / adapter 装配在 `main.rs`。
 //! 外层 E agent(S10f)、静态资源(S10e)留后续子切片。
-use memory::{Anchor, MemoryStore, RecallQuery, SaveInput};
+use memory::{Anchor, MemoryStore, RecallQuery, SaveInput, SelectionContext};
 use read_tools::{
     Book, ContentProfileId, PaperLandmarkKind, PaperMinimapBase, PaperRegionKind,
     ReaderLayoutAction, ToolError,
@@ -5461,6 +5461,18 @@ fn route_mut(state: &mut AppState, path: &str, body: &str, now: &str) -> Reply {
             } else {
                 "long_term"
             });
+            let selection_context = match v.get("selection_context") {
+                None | Some(serde_json::Value::Null) => None,
+                Some(value) => match serde_json::from_value::<SelectionContext>(value.clone()) {
+                    Ok(context) => Some(context),
+                    Err(e) => {
+                        return validation(
+                            "INVALID_SELECTION_CONTEXT",
+                            &format!("memory.save selection_context 非法: {e}"),
+                        );
+                    }
+                },
+            };
             let input = SaveInput {
                 mem_id: None,
                 mem_type: ty.into(),
@@ -5472,6 +5484,7 @@ fn route_mut(state: &mut AppState, path: &str, body: &str, now: &str) -> Reply {
                 },
                 content: content.into(),
                 range: None, // memory.save 直存(note / agent 高亮保留)无段内 range;人段内高亮走 reader.highlight `[ADR-0031]`
+                selection_context,
                 citations: None,
                 source_session_id: None,
             };
@@ -8930,6 +8943,37 @@ mod tests {
         let rc = post(&mut s, "/memory/recall", r#"{"text":"闭包"}"#);
         assert_eq!(rc.status, 200);
         assert!(rc.body.contains("闭包即对象"));
+    }
+
+    #[test]
+    fn memory_save_selection_context_roundtrips_and_validates_anchor() {
+        let mut s = state_named("mem-selection-context");
+        let body = r#"{
+          "type":"note","anchor_lid":"1.1","content":"跨段笔记",
+          "selection_context":{
+            "status":"resolved","raw_quote":"raw","resolved_quote":"resolved",
+            "ranges":[
+              {"lid":"1.1","range":{"start":0,"end":2}},
+              {"lid":"1.2","range":{"start":3,"end":5}},
+              {"lid":"1.1","range":{"start":8,"end":9}}
+            ]
+          }
+        }"#;
+        let saved = post(&mut s, "/memory/save", body);
+        assert_eq!(saved.status, 200);
+        let value: serde_json::Value = serde_json::from_str(&saved.body).unwrap();
+        assert_eq!(value["selection_context"]["status"], "resolved");
+        assert_eq!(value["citations"][0]["lid"], "1.1");
+        assert_eq!(value["citations"][1]["lid"], "1.2");
+        assert_eq!(value["citations"].as_array().unwrap().len(), 2);
+
+        let invalid = post(
+            &mut s,
+            "/memory/save",
+            &body.replace("\"anchor_lid\":\"1.1\"", "\"anchor_lid\":\"9.9\""),
+        );
+        assert_eq!(invalid.status, 400);
+        assert!(invalid.body.contains("INVALID_SELECTION_CONTEXT"));
     }
 
     #[test]

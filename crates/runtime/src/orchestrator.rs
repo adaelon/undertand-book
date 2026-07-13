@@ -950,6 +950,7 @@ fn dispatch(
                 },
                 content: content.into(),
                 range: None,
+                selection_context: None,
                 citations,
                 source_session_id: None,
             };
