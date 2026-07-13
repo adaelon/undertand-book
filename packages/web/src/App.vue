@@ -61,7 +61,11 @@ import {
   hasMappedPdfNavigationTarget,
   normalizePaperViewportForMinimap,
 } from "./paper-minimap-navigation";
-import { resolveReaderNavigationTarget } from "./reader-navigation";
+import {
+  hasSuccessfulReaderNavigation,
+  resolveReaderNavigationTarget,
+  resolveReaderStateNavigationTarget,
+} from "./reader-navigation";
 import {
   getSourceReviewAutoRerunRequest,
   runSourceReviewLlmBatch,
@@ -1237,10 +1241,13 @@ async function applyReaderState(st: Awaited<ReturnType<typeof api.state>>) {
   readerLayout.value = st.layout;
   await ensureProfileManifest(st.profile);
 }
-async function syncViewport(forcePaperProjection = false) {
+async function syncViewport(forcePaperProjection = false, preferReaderSelection = false) {
   const st = await api.state();
   await applyReaderState(st);
-  await loadWindow(st.viewport);
+  const navigationTargetLid = preferReaderSelection
+    ? resolveReaderStateNavigationTarget(st.viewport.top_lid, st.selection, leafOrder.value)
+    : st.viewport.top_lid;
+  await loadWindow(st.viewport, "replace", navigationTargetLid);
   await loadPaperProjectionData(forcePaperProjection);
 }
 
@@ -2261,7 +2268,7 @@ async function sendAgent() {
       .find((effect) => effect.kind === "PaperMinimap");
     if (minimapEffect?.kind === "PaperMinimap") lastPaperMinimapEffect.value = minimapEffect.effect;
     // agent 可能驱动了共享 reader 视口 / 落了 session 标注 → 同步阅读区。
-    await syncViewport(true);
+    await syncViewport(true, hasSuccessfulReaderNavigation(turn.outcome.trace));
     await refreshAgentHistory();
   } catch (e) {
     turn.error = e instanceof ApiError ? `[${e.category}] ${e.errorCode}: ${e.message}` : String(e);

@@ -1,6 +1,10 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { resolveReaderNavigationTarget } from "./reader-navigation";
+import {
+  hasSuccessfulReaderNavigation,
+  resolveReaderNavigationTarget,
+  resolveReaderStateNavigationTarget,
+} from "./reader-navigation";
 
 describe("reader navigation", () => {
   it("keeps neighboring outline containers on their own first leaves", () => {
@@ -26,5 +30,28 @@ describe("reader navigation", () => {
     expect(app).toContain("outlineNavigationLid.value = lid");
     expect(app).toContain(":anchor-lid=\"outlineAnchorLid\"");
     expect(app).toContain("@viewport-interaction=\"clearOutlineNavigation\"");
+  });
+
+  it("uses the reader selection after a successful agent goto in a clamped viewport", () => {
+    const leaves = Array.from({ length: 20 }, (_, index) => `2.53.${index + 32}`);
+
+    expect(resolveReaderStateNavigationTarget("2.53.32", "2.53.40", leaves)).toBe("2.53.40");
+    expect(resolveReaderStateNavigationTarget("2.53.32", "2.53", leaves)).toBe("2.53.32");
+    expect(hasSuccessfulReaderNavigation([
+      {
+        tool: "reader.gotoLid",
+        result_digest: '{"ok":true,"viewport":{"top_lid":"2.53.32"',
+      },
+    ])).toBe(true);
+    expect(hasSuccessfulReaderNavigation([
+      {
+        tool: "reader.gotoLid",
+        result_digest: '{"error_code":"LID_NOT_FOUND","category":"not_found"}',
+      },
+    ])).toBe(false);
+
+    const app = readFileSync("src/App.vue", "utf8");
+    expect(app).toContain("hasSuccessfulReaderNavigation(turn.outcome.trace)");
+    expect(app).toContain("resolveReaderStateNavigationTarget(");
   });
 });
