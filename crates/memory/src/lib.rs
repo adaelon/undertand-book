@@ -747,10 +747,31 @@ fn memory_not_found(mem_id: &str) -> ToolError {
 mod tests {
     use super::*;
 
+    const LEGACY_MEMORY_V1: &str =
+        include_str!("../tests/fixtures/legacy-memory-v1.json");
+    const LEGACY_READER_PROFILE: &str =
+        include_str!("../tests/fixtures/legacy-reader-profile.md");
+    const LEGACY_READING_HANDBOOK: &str =
+        include_str!("../tests/fixtures/legacy-reading-handbook.md");
+
     fn tmp(name: &str) -> PathBuf {
         let p = std::env::temp_dir().join(format!("ub-mem-test-{name}.json"));
         let _ = std::fs::remove_file(&p);
         p
+    }
+
+    fn legacy_store(name: &str) -> (PathBuf, MemoryStore) {
+        let dir = std::env::temp_dir().join(format!("ub-mem-legacy-{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("memory.json");
+        std::fs::write(&path, LEGACY_MEMORY_V1).unwrap();
+        let store = MemoryStore::open(&path).unwrap();
+        (path, store)
+    }
+
+    fn normalize_newlines(value: &str) -> String {
+        value.replace("\r\n", "\n")
     }
 
     fn note_input(book: &str, lid: &str, content: &str) -> SaveInput {
@@ -806,6 +827,125 @@ mod tests {
                 },
             ],
         }
+    }
+
+    #[test]
+    fn legacy_vec_fixture_opens_and_derives_current_views() {
+        let raw: serde_json::Value = serde_json::from_str(LEGACY_MEMORY_V1).unwrap();
+        assert!(raw.is_array(), "legacy memory must remain a bare JSON array");
+
+        let (_path, store) = legacy_store("open-and-derive");
+        let records = store.recall(&RecallQuery::default());
+        assert_eq!(records.len(), 8);
+        assert!(records.windows(2).all(|pair| pair[0].mem_id < pair[1].mem_id));
+
+        let selected = records
+            .iter()
+            .find(|record| record.mem_id == "mem_a4acdf2b6f3df284")
+            .unwrap();
+        assert_eq!(selected.anchor.lid.as_deref(), Some("3.1"));
+        assert_eq!(
+            selected
+                .selection_context
+                .as_ref()
+                .unwrap()
+                .ranges
+                .iter()
+                .map(|range| range.lid.as_str())
+                .collect::<Vec<_>>(),
+            vec!["3.1", "3.2"]
+        );
+        assert_eq!(
+            selected
+                .citations
+                .iter()
+                .map(|citation| citation.lid.as_str())
+                .collect::<Vec<_>>(),
+            vec!["3.1", "3.2"]
+        );
+
+        assert_eq!(
+            store.derive_reader_profile("book-a"),
+            ReaderProfile {
+                book_id: "book-a".into(),
+                read_lids: vec!["1.2".into()],
+                focus_lids: vec!["1.1".into(), "2.1".into(), "3.1".into()],
+                puzzle_heat: BTreeMap::from([("4.1".into(), 2)]),
+            }
+        );
+        assert_eq!(
+            store.render_reader_profile_md(),
+            normalize_newlines(LEGACY_READER_PROFILE)
+        );
+        assert_eq!(
+            store.render_handbook_md(),
+            normalize_newlines(LEGACY_READING_HANDBOOK)
+        );
+    }
+
+    #[test]
+    fn legacy_vec_fixture_preserves_save_replace_delete_and_reopen() {
+        let (path, mut store) = legacy_store("mutations");
+
+        let saved = store
+            .save(
+                note_input("book-a", "1.1", "legacy note"),
+                "2026-02-01T00:00:00Z",
+            )
+            .unwrap();
+        assert_eq!(saved.mem_id, "mem_620ddff409de9979");
+        assert_eq!(saved.usage.count, 3);
+        assert_eq!(saved.citations.len(), 1);
+        assert_eq!(saved.citations[0].lid, "1.1");
+
+        let replaced = store
+            .replace(
+                ReplaceInput {
+                    mem_id: "mem_a4acdf2b6f3df284".into(),
+                    content: "updated selected note".into(),
+                    selection_context: None,
+                },
+                "2026-02-02T00:00:00Z",
+            )
+            .unwrap();
+        assert_eq!(replaced.mem_id, "mem_350f3ef2974c5419");
+        assert_eq!(replaced.anchor.lid.as_deref(), Some("3.1"));
+        assert_eq!(
+            replaced
+                .selection_context
+                .as_ref()
+                .unwrap()
+                .ranges
+                .iter()
+                .map(|range| range.lid.as_str())
+                .collect::<Vec<_>>(),
+            vec!["3.1", "3.2"]
+        );
+        assert_eq!(
+            replaced
+                .citations
+                .iter()
+                .map(|citation| citation.lid.as_str())
+                .collect::<Vec<_>>(),
+            vec!["3.1", "3.2"]
+        );
+
+        store.delete("mem_0dcc7e3a8f87d6c4").unwrap();
+        let reopened = MemoryStore::open(path).unwrap();
+        let records = reopened.recall(&RecallQuery::default());
+        assert_eq!(records.len(), 7);
+        assert!(records.iter().any(|record| {
+            record.mem_id == "mem_620ddff409de9979" && record.usage.count == 3
+        }));
+        assert!(records
+            .iter()
+            .any(|record| record.mem_id == "mem_350f3ef2974c5419"));
+        assert!(!records.iter().any(|record| {
+            matches!(
+                record.mem_id.as_str(),
+                "mem_a4acdf2b6f3df284" | "mem_0dcc7e3a8f87d6c4"
+            )
+        }));
     }
 
     #[test]
