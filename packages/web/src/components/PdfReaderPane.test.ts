@@ -12,8 +12,14 @@ const pdfMocks = vi.hoisted(() => {
     scale: 1,
     transform: [1, 0, 0, -1, 0, 800],
   };
+  const getViewport = vi.fn(({ scale = 1 }: { scale?: number } = {}) => ({
+    ...viewport,
+    width: viewport.width * scale,
+    height: viewport.height * scale,
+    scale,
+  }));
   const page = {
-    getViewport: vi.fn(() => viewport),
+    getViewport,
     render: vi.fn(() => ({ promise: Promise.resolve() })),
     getTextContent: vi.fn(async () => ({
       items: [{ str: "Visible only through selection", transform: [1, 0, 0, 12, 20, 760], width: 150 }],
@@ -34,6 +40,7 @@ const pdfMocks = vi.hoisted(() => {
     modernGetDocument: vi.fn(task),
     legacyGetDocument: vi.fn(task),
     legacyTextLayer,
+    getViewport,
     transform: vi.fn((_left: number[], right: number[]) => right),
   };
 });
@@ -108,6 +115,7 @@ describe("PdfReaderPane", () => {
     pdfMocks.modernGetDocument.mockClear();
     pdfMocks.legacyGetDocument.mockClear();
     pdfMocks.legacyTextLayer.mockClear();
+    pdfMocks.getViewport.mockClear();
     document.body.replaceChildren();
   });
 
@@ -308,6 +316,58 @@ describe("PdfReaderPane", () => {
     expect(lowTargetScroll).toBeGreaterThan(highTargetScroll + 400);
     await wrapper.get(".pdf-page-list").trigger("wheel", { deltaY: 40 });
     expect(wrapper.emitted("viewport-interaction")).toHaveLength(1);
+    wrapper.unmount();
+  });
+
+  it("zooms every PDF layer from the reader toolbar and rerenders at the new scale", async () => {
+    const wrapper = mount(PdfReaderPane, {
+      props: {
+        sourceManifest: null,
+        sourceMap,
+        pdfUrl: "/api/book/pdf/original",
+        activeLid: null,
+        selectedLid: null,
+      },
+    });
+    await flushPromises();
+    await flushPromises();
+
+    expect(wrapper.get('[aria-label="\u7f29\u5c0f PDF"]')).toBeTruthy();
+    expect(wrapper.get('[aria-label="\u9002\u5408\u680f\u5bbd"]')).toBeTruthy();
+    const zoomOut = wrapper.get('[aria-label="\u7f29\u5c0f PDF"]');
+    const zoomFit = wrapper.get('[aria-label="\u9002\u5408\u680f\u5bbd"]');
+    const zoomIn = wrapper.get('[aria-label="\u653e\u5927 PDF"]');
+    const pageShells = wrapper.findAll(".pdf-page-shell");
+    const pageWidthSpies = pageShells.map((shell) => (
+      vi.spyOn(shell.element, "clientWidth", "get").mockReturnValue(750)
+    ));
+    const renderCount = pdfMocks.legacyTextLayer.mock.calls.length;
+
+    await zoomIn.trigger("click");
+    await flushPromises();
+
+    expect(wrapper.get('[aria-label="\u9002\u5408\u680f\u5bbd"]').text()).toContain("125%");
+    expect(wrapper.get(".pdf-page-list").classes()).toContain("is-zoomed");
+    expect(pageShells[0].attributes("style")).toContain("125%");
+    expect(pdfMocks.getViewport).toHaveBeenCalledWith({ scale: 1.25 });
+    expect(pdfMocks.legacyTextLayer.mock.calls.length).toBeGreaterThan(renderCount);
+
+    for (const width of pageWidthSpies) width.mockReturnValue(600);
+    pdfMocks.getViewport.mockClear();
+    await zoomFit.trigger("click");
+    await flushPromises();
+    expect(zoomFit.text()).toContain("100%");
+    expect(wrapper.get(".pdf-page-list").classes()).not.toContain("is-zoomed");
+    expect(pdfMocks.getViewport).toHaveBeenCalledWith({ scale: 1 });
+
+    for (const width of pageWidthSpies) width.mockReturnValue(450);
+    pdfMocks.getViewport.mockClear();
+    await zoomOut.trigger("click");
+    await flushPromises();
+    expect(zoomFit.text()).toContain("75%");
+    expect(zoomOut.attributes()).toHaveProperty("disabled");
+    expect(pdfMocks.getViewport).toHaveBeenCalledWith({ scale: 0.75 });
+
     wrapper.unmount();
   });
 

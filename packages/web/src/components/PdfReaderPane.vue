@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { MessageSquareText, ScanText, Trash2, X } from "@lucide/vue";
+import { MessageSquareText, Minus, Plus, Scan, ScanText, Trash2, X } from "@lucide/vue";
 import { computed, nextTick, onBeforeUnmount, ref, shallowRef, watch } from "vue";
 import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf.mjs";
 import pdfWorkerUrl from "pdfjs-dist/legacy/build/pdf.worker.mjs?url";
@@ -59,6 +59,12 @@ const emit = defineEmits<{
 type PdfDocument = Awaited<ReturnType<typeof pdfjsLib.getDocument>["promise"]>;
 type PdfPage = Awaited<ReturnType<PdfDocument["getPage"]>>;
 type PdfTextLayer = InstanceType<typeof pdfjsLib.TextLayer>;
+type PdfRenderTask = ReturnType<PdfPage["render"]>;
+
+const PDF_ZOOM_MIN = 0.75;
+const PDF_ZOOM_MAX = 2.5;
+const PDF_ZOOM_STEP = 0.25;
+const PDF_PAGE_MAX_WIDTH_REM = 56;
 
 interface PageRenderState {
   rendered: boolean;
@@ -85,8 +91,10 @@ const pageEls = new Map<number, HTMLElement>();
 const canvasEls = new Map<number, HTMLCanvasElement>();
 const textLayerEls = new Map<number, HTMLElement>();
 const textLayerTasks = new Map<number, PdfTextLayer>();
+const pageRenderTasks = new Map<number, PdfRenderTask>();
 const renderStates = ref<Record<number, PageRenderState>>({});
 const annotationSurface = ref<AnnotationSurface | null>(null);
+const zoom = ref(1);
 let loadingTask: ReturnType<typeof pdfjsLib.getDocument> | null = null;
 let observer: IntersectionObserver | null = null;
 let renderToken = 0;
@@ -152,6 +160,7 @@ const capabilityStatusLabels: Record<string, string> = {
   unsupported: "暂不支持",
 };
 const mapCapabilityLabel = computed(() => capabilityStatusLabels[mapCapability.value] ?? mapCapability.value);
+const zoomText = computed(() => `${Math.round(zoom.value * 100)}%`);
 
 function pageRegions(pageIndex: number): Array<{ entry: PdfSourceMapEntry; region: PdfRegion }> {
   return entriesByPage.value.get(pageIndex) ?? [];
@@ -236,9 +245,69 @@ function scheduleViewportChange() {
 
 function pageShellStyle(page: PdfSourceMap["pages"][number]): Record<string, string> {
   const visual = pdfPageVisualSize(page);
+  const zoomPercent = Math.round(zoom.value * 100);
+  const maxWidth = Number((PDF_PAGE_MAX_WIDTH_REM * zoom.value).toFixed(2));
   return {
     aspectRatio: `${visual.width} / ${visual.height}`,
+    "--pdf-page-width": `${zoomPercent}%`,
+    "--pdf-page-max-width": `${maxWidth}rem`,
   };
+}
+
+interface PdfZoomAnchor {
+  pageIndex: number;
+  pageRatio: number;
+  probeOffset: number;
+  horizontalRatio: number | null;
+}
+
+function captureZoomAnchor(): PdfZoomAnchor | null {
+  const root = pageList.value;
+  if (!root) return null;
+  const rootRect = root.getBoundingClientRect();
+  if (rootRect.height <= 0) return null;
+  const probeOffset = Math.min(
+    Math.max(rootRect.height * 0.28, 96),
+    Math.max(rootRect.height - 24, 0),
+  );
+  const probeY = rootRect.top + probeOffset;
+  const candidates = [...pageEls.entries()]
+    .map(([pageIndex, element]) => ({ pageIndex, rect: element.getBoundingClientRect() }))
+    .filter(({ rect }) => rect.height > 0)
+    .sort((left, right) => {
+      const leftDistance = probeY < left.rect.top
+        ? left.rect.top - probeY
+        : probeY > left.rect.bottom
+          ? probeY - left.rect.bottom
+          : 0;
+      const rightDistance = probeY < right.rect.top
+        ? right.rect.top - probeY
+        : probeY > right.rect.bottom
+          ? probeY - right.rect.bottom
+          : 0;
+      return leftDistance - rightDistance || left.pageIndex - right.pageIndex;
+    });
+  const target = candidates[0];
+  if (!target) return null;
+  const pageRatio = Math.max(0, Math.min(1, (probeY - target.rect.top) / target.rect.height));
+  const horizontalRatio = root.scrollWidth > 0
+    ? (root.scrollLeft + root.clientWidth / 2) / root.scrollWidth
+    : null;
+  return { pageIndex: target.pageIndex, pageRatio, probeOffset, horizontalRatio };
+}
+
+function restoreZoomAnchor(anchor: PdfZoomAnchor | null) {
+  if (!anchor) return;
+  const root = pageList.value;
+  const target = pageEls.get(anchor.pageIndex);
+  if (!root || !target) return;
+  const rootRect = root.getBoundingClientRect();
+  const targetRect = target.getBoundingClientRect();
+  const targetY = targetRect.top + targetRect.height * anchor.pageRatio;
+  root.scrollTop = Math.max(0, root.scrollTop + targetY - (rootRect.top + anchor.probeOffset));
+  if (anchor.horizontalRatio !== null && root.scrollWidth > root.clientWidth) {
+    root.scrollLeft = Math.max(0, anchor.horizontalRatio * root.scrollWidth - root.clientWidth / 2);
+  }
 }
 
 function pointToPdf(pageIndex: number, event: MouseEvent): { x: number; y: number } | null {
@@ -396,7 +465,11 @@ function setRenderState(pageIndex: number, patch: Partial<PageRenderState>) {
   };
 }
 
-function resetRenderedPages() {
+async function resetRenderedPages() {
+  const pageTasks = [...pageRenderTasks.values()];
+  pageRenderTasks.clear();
+  for (const task of pageTasks) task.cancel();
+  await Promise.allSettled(pageTasks.map((task) => task.promise));
   renderStates.value = {};
   for (const task of textLayerTasks.values()) task.cancel();
   textLayerTasks.clear();
@@ -413,7 +486,8 @@ async function loadPdfDocument() {
   pdfDoc.value = null;
   pdfError.value = null;
   pdfLoading.value = true;
-  resetRenderedPages();
+  await resetRenderedPages();
+  if (token !== renderToken) return;
   if (loadingTask) {
     void loadingTask.destroy();
     loadingTask = null;
@@ -452,6 +526,7 @@ async function renderPage(pageInfo: PdfSourceMap["pages"][number], token: number
   const textLayer = textLayerEls.get(pageInfo.pageIndex);
   if (!canvas || !textLayer) return;
   setRenderState(pageInfo.pageIndex, { rendering: true, error: null });
+  let renderTask: PdfRenderTask | null = null;
   try {
     const page: PdfPage = await pdfDoc.value.getPage(pageInfo.pageIndex + 1);
     if (token !== renderToken) return;
@@ -465,16 +540,41 @@ async function renderPage(pageInfo: PdfSourceMap["pages"][number], token: number
     const ctx = canvas.getContext("2d");
     if (!ctx) throw new Error("Canvas 2D context unavailable");
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    await page.render({ canvas, canvasContext: ctx, viewport }).promise;
+    renderTask = page.render({ canvas, canvasContext: ctx, viewport });
+    pageRenderTasks.set(pageInfo.pageIndex, renderTask);
+    await renderTask.promise;
     if (token !== renderToken) return;
     await renderTextLayer(pageInfo.pageIndex, page, viewport, textLayer);
     setRenderState(pageInfo.pageIndex, { rendered: true, rendering: false, error: null });
   } catch (e) {
+    if (token !== renderToken || (e instanceof Error && e.name === "RenderingCancelledException")) return;
     setRenderState(pageInfo.pageIndex, {
       rendering: false,
       error: e instanceof Error ? e.message : String(e),
     });
+  } finally {
+    if (renderTask && pageRenderTasks.get(pageInfo.pageIndex) === renderTask) {
+      pageRenderTasks.delete(pageInfo.pageIndex);
+    }
   }
+}
+
+async function setZoom(next: number) {
+  const clamped = Math.max(PDF_ZOOM_MIN, Math.min(PDF_ZOOM_MAX, Number(next.toFixed(2))));
+  if (clamped === zoom.value || pdfLoading.value) return;
+  const anchor = captureZoomAnchor();
+  closeAnnotationSurface();
+  emit("selection-cancel");
+  zoom.value = clamped;
+  renderToken += 1;
+  const token = renderToken;
+  await resetRenderedPages();
+  if (token !== renderToken) return;
+  await nextTick();
+  restoreZoomAnchor(anchor);
+  observePages();
+  await renderVisiblePages();
+  if (token === renderToken) scheduleViewportChange();
 }
 
 async function renderTextLayer(
@@ -686,6 +786,10 @@ onBeforeUnmount(() => {
   window.removeEventListener("keydown", onSelectionKeydown);
   emit("selection-cancel");
   observer?.disconnect();
+  for (const task of pageRenderTasks.values()) task.cancel();
+  pageRenderTasks.clear();
+  for (const task of textLayerTasks.values()) task.cancel();
+  textLayerTasks.clear();
   if (loadingTask) void loadingTask.destroy();
   if (pdfDoc.value) void (pdfDoc.value as unknown as { destroy?: () => Promise<void> }).destroy?.();
 });
@@ -698,16 +802,50 @@ onBeforeUnmount(() => {
         <strong>{{ props.sourceManifest?.book_id ?? props.sourceMap?.book_id ?? "PDF" }}</strong>
         <span>{{ pageCount }} 页 · {{ mapCapabilityLabel }}</span>
       </div>
-      <span v-if="pdfLoading">正在加载 PDF</span>
-      <span v-else-if="pdfError" class="pdf-error">{{ pdfError }}</span>
-      <span v-else-if="props.annotationError" class="pdf-annotation-error" :title="props.annotationError">
-        标注定位暂不可用
-      </span>
+      <div class="pdf-reader-head-actions">
+        <span v-if="pdfLoading">正在加载 PDF</span>
+        <span v-else-if="pdfError" class="pdf-error">{{ pdfError }}</span>
+        <span v-else-if="props.annotationError" class="pdf-annotation-error" :title="props.annotationError">
+          标注定位暂不可用
+        </span>
+        <div class="pdf-reader-tools" role="group" aria-label="PDF 缩放">
+          <button
+            type="button"
+            title="缩小"
+            aria-label="缩小 PDF"
+            :disabled="pdfLoading || zoom <= PDF_ZOOM_MIN"
+            @click="setZoom(zoom - PDF_ZOOM_STEP)"
+          >
+            <Minus :size="15" aria-hidden="true" />
+          </button>
+          <button
+            type="button"
+            class="pdf-zoom-fit"
+            title="适合栏宽"
+            aria-label="适合栏宽"
+            :disabled="pdfLoading"
+            @click="setZoom(1)"
+          >
+            <Scan :size="15" aria-hidden="true" />
+            <span>{{ zoomText }}</span>
+          </button>
+          <button
+            type="button"
+            title="放大"
+            aria-label="放大 PDF"
+            :disabled="pdfLoading || zoom >= PDF_ZOOM_MAX"
+            @click="setZoom(zoom + PDF_ZOOM_STEP)"
+          >
+            <Plus :size="15" aria-hidden="true" />
+          </button>
+        </div>
+      </div>
     </header>
 
     <div
       ref="pageList"
       class="pdf-page-list"
+      :class="{ 'is-zoomed': zoom > 1 }"
       @scroll.passive="scheduleViewportChange"
       @wheel.passive="emit('viewport-interaction')"
       @pointerdown="emit('viewport-interaction')"
@@ -829,12 +967,14 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 1rem;
   padding: 0.65rem 0.85rem;
   border-bottom: 1px solid var(--hairline-soft);
   background: var(--surface-soft);
 }
-.pdf-reader-head div {
+.pdf-reader-head > div:first-child {
+  flex: 1 1 10rem;
   min-width: 0;
   display: grid;
   gap: 0.08rem;
@@ -857,9 +997,54 @@ onBeforeUnmount(() => {
 .pdf-reader-head .pdf-annotation-error {
   color: #8a5a14;
 }
+.pdf-reader-head-actions {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.55rem;
+  margin-left: auto;
+}
+.pdf-reader-tools {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 0.2rem;
+}
+.pdf-reader-tools button {
+  width: 30px;
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.22rem;
+  box-sizing: border-box;
+  border: 1px solid var(--hairline-soft);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--slate);
+  padding: 0;
+}
+.pdf-reader-tools button:hover:not(:disabled) {
+  border-color: var(--reader-coral);
+  color: var(--ink);
+}
+.pdf-reader-tools button:disabled {
+  cursor: default;
+  opacity: 0.42;
+}
+.pdf-reader-tools .pdf-zoom-fit {
+  width: 66px;
+  padding: 0 0.38rem;
+}
+.pdf-reader-tools .pdf-zoom-fit span {
+  color: inherit;
+  font-size: 0.68rem;
+  white-space: nowrap;
+}
 .pdf-page-list {
   min-height: 0;
-  overflow-y: auto;
+  overflow: auto;
   display: grid;
   grid-auto-rows: max-content;
   justify-items: center;
@@ -867,9 +1052,12 @@ onBeforeUnmount(() => {
   align-content: start;
   padding: 1.1rem;
 }
+.pdf-page-list.is-zoomed {
+  justify-items: start;
+}
 .pdf-page-shell {
   position: relative;
-  width: min(100%, 56rem);
+  width: min(var(--pdf-page-width, 100%), var(--pdf-page-max-width, 56rem));
   overflow: hidden;
   border: 1px solid var(--hairline);
   background: #fff;
@@ -1090,9 +1278,6 @@ onBeforeUnmount(() => {
 @media (max-width: 900px) {
   .pdf-page-list {
     padding: 0.65rem;
-  }
-  .pdf-page-shell {
-    width: 100%;
   }
 }
 @media (max-width: 700px) {
