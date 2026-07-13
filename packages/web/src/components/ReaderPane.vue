@@ -2,6 +2,7 @@
 import { computed, nextTick, onMounted, ref, watch } from "vue";
 import type { FormulaSemantics, ImageAssetManifestEntry, MemoryRecord } from "../api";
 import type { Manifest } from "../api";
+import NoteCard from "./NoteCard.vue";
 
 type NodeKind = Manifest["tree"][number]["kind"];
 export interface Segment {
@@ -33,30 +34,6 @@ type ReaderItem =
   | { type: "flow"; segments: Segment[] }
   | { type: "single"; segment: Segment };
 
-function leadingQuote(content: string): string | null {
-  const lines = content.split("\n");
-  const quoteLines: string[] = [];
-  for (const line of lines) {
-    if (line.startsWith(">")) quoteLines.push(line.replace(/^>\s?/, ""));
-    else if (quoteLines.length > 0 && line.trim() === "") break;
-    else if (quoteLines.length > 0) break;
-  }
-  const quote = quoteLines.join(" ").replace(/\s+/g, " ").trim();
-  return quote || null;
-}
-function notePreview(note: MemoryRecord): string {
-  const content = note.content.replace(/^>.*(\n>.*)*\n*/m, "").trim();
-  if (content.length <= 260) return content;
-  return `${content.slice(0, 260).trimEnd()}...`;
-}
-function noteSourceLabel(note: MemoryRecord): string {
-  const quote = leadingQuote(note.content);
-  if (quote) return "引用来源";
-  return note.anchor.lid ? "跳到来源" : "无来源";
-}
-function isLongNote(note: MemoryRecord): boolean {
-  return note.content.length > 360 || note.content.split("\n").length > 8;
-}
 function imageRenderSrc(asset: ImageAssetManifestEntry | null | undefined): string | null {
   if (!asset) return null;
   return asset.url_path ?? (asset.status === "external" ? asset.original_src : null);
@@ -380,35 +357,15 @@ watch(
                 <button class="note-btn del" title="删除高亮" @click="emit('delete-highlight', h)">删除</button>
               </span>
             </div>
-            <details
+            <NoteCard
               v-for="note in notesOf(seg.lid)"
               :key="note.mem_id"
-              class="note-card"
-              :open="!isLongNote(note)"
-            >
-              <summary class="note-summary">
-                <span class="note-kind">笔记</span>
-                <button
-                  v-if="note.anchor.lid"
-                  class="note-source"
-                  @click.prevent.stop="emit('focus-source-local', { lid: note.anchor.lid, quote: leadingQuote(note.content) })"
-                >
-                  {{ noteSourceLabel(note) }}
-                </button>
-                <span v-else class="note-source">无来源</span>
-                <span v-if="isLongNote(note)" class="note-fold">展开/收起</span>
-                <div
-                  v-if="isLongNote(note)"
-                  class="note-preview note-summary-preview md"
-                  v-html="props.renderMarkdown(notePreview(note))"
-                ></div>
-              </summary>
-              <div class="note-md md" v-html="props.renderMarkdown(note.content)"></div>
-              <div class="note-actions">
-                <button class="note-btn" title="编辑" @click="emit('edit-note', note)">编辑</button>
-                <button class="note-btn del" title="删除" @click="emit('delete-note', note)">删除</button>
-              </div>
-            </details>
+              :note="note"
+              :render-markdown="props.renderMarkdown"
+              @focus-source="emit('focus-source-local', $event)"
+              @edit="emit('edit-note', $event)"
+              @delete="emit('delete-note', $event)"
+            />
           </template>
         </template>
 
@@ -482,35 +439,15 @@ watch(
               <button class="note-btn del" title="删除高亮" @click="emit('delete-highlight', h)">删除</button>
             </span>
           </div>
-          <details
+          <NoteCard
             v-for="note in notesOf(item.segment.lid)"
             :key="note.mem_id"
-            class="note-card"
-            :open="!isLongNote(note)"
-          >
-            <summary class="note-summary">
-              <span class="note-kind">笔记</span>
-              <button
-                v-if="note.anchor.lid"
-                class="note-source"
-                @click.prevent.stop="emit('focus-source-local', { lid: note.anchor.lid, quote: leadingQuote(note.content) })"
-              >
-                {{ noteSourceLabel(note) }}
-              </button>
-              <span v-else class="note-source">无来源</span>
-              <span v-if="isLongNote(note)" class="note-fold">展开/收起</span>
-              <div
-                v-if="isLongNote(note)"
-                class="note-preview note-summary-preview md"
-                v-html="props.renderMarkdown(notePreview(note))"
-              ></div>
-            </summary>
-            <div class="note-md md" v-html="props.renderMarkdown(note.content)"></div>
-            <div class="note-actions">
-              <button class="note-btn" title="编辑" @click="emit('edit-note', note)">编辑</button>
-              <button class="note-btn del" title="删除" @click="emit('delete-note', note)">删除</button>
-            </div>
-          </details>
+            :note="note"
+            :render-markdown="props.renderMarkdown"
+            @focus-source="emit('focus-source-local', $event)"
+            @edit="emit('edit-note', $event)"
+            @delete="emit('delete-note', $event)"
+          />
         </template>
       </div>
       <p v-if="props.segments.length === 0" class="empty">暂无正文。请确认服务端已加载书并正在监听。</p>

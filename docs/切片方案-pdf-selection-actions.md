@@ -2,7 +2,7 @@
 
 > 定位:让 PDF 原生拖选与 Markdown 正文共用 Highlight、Note、Ask AI 语义,同时保持原版 PDF 纯净阅读。
 > 冻结决策:[ADR-0074](adr/0074-pdf-selection-actions-and-exact-user-annotation-projection.md)。
-> 状态:PS0-PS3 完成;PS4-PS7 待实现。
+> 状态:PS0-PS4 完成;PS5-PS7 待实现。
 
 ## 0. 冻结边界
 
@@ -477,6 +477,8 @@ pnpm -C packages/web typecheck
 - **Do**:从 ReaderPane 提取行为不变的 NoteCard,Markdown 继续原位渲染。
 - **Do not**:新增 PDF marker 或改变 Note 样式/操作。
 - **Done**:重构前后 Markdown Note DOM、编辑、删除测试不变。
+
+状态:完成;ReaderPane flow/single 两条路径复用同一 NoteCard,characterization tests 锁定原行为。
 
 前置条件:PS1 的 `MemoryRecord.selection_context?` 已进入 TS 类型;NoteCard 本身不得依赖 PDF。
 
