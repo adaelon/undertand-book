@@ -46,6 +46,7 @@ const emit = defineEmits<{
   (e: "goto", lid: string): void;
   (e: "focus-source", source: { lid: string; quote: string | null }): void;
   (e: "viewport-change", position: PaperViewportPosition): void;
+  (e: "viewport-interaction"): void;
   (e: "selection-capture", capture: PdfSelectionCapture): void;
   (e: "selection-cancel"): void;
   (e: "edit-note", note: MemoryRecord): void;
@@ -139,7 +140,8 @@ const activeEntry = computed(() => {
   const lid = props.activeLid ?? props.selectedLid;
   return lid ? entryByLid.value.get(lid) ?? null : null;
 });
-const activePageIndex = computed(() => activeEntry.value?.primary_region?.pageIndex ?? activeEntry.value?.regions[0]?.pageIndex ?? 0);
+const activeRegion = computed(() => activeEntry.value?.primary_region ?? activeEntry.value?.regions[0] ?? null);
+const activePageIndex = computed(() => activeRegion.value?.pageIndex ?? null);
 const mapCapability = computed(() => props.sourceManifest?.capabilities.project_lid_to_pdf.status ?? "unavailable");
 const capabilityStatusLabels: Record<string, string> = {
   available: "映射可用",
@@ -534,10 +536,26 @@ async function renderVisiblePages() {
 
 async function scrollActiveIntoView() {
   await nextTick();
-  const pageIndex = activePageIndex.value;
+  const region = activeRegion.value;
+  if (!region) return;
+  const pageIndex = region.pageIndex;
   const target = pageList.value?.querySelector<HTMLElement>(`[data-page-index="${pageIndex}"]`);
   target?.scrollIntoView({ block: "center" });
   const page = props.sourceMap?.pages.find((p) => p.pageIndex === pageIndex);
+  const root = pageList.value;
+  if (page && root && target) {
+    const rootRect = root.getBoundingClientRect();
+    const pageRect = target.getBoundingClientRect();
+    if (rootRect.height > 0 && pageRect.height > 0) {
+      const overlay = pdfRectToOverlay(page, region.bbox);
+      const targetY = pageRect.top + ((overlay.top + overlay.height / 2) / 100) * pageRect.height;
+      const probeOffset = Math.min(
+        Math.max(rootRect.height * 0.28, 96),
+        Math.max(rootRect.height - 24, 0),
+      );
+      root.scrollTop = Math.max(0, root.scrollTop + targetY - (rootRect.top + probeOffset));
+    }
+  }
   if (page) await renderPage(page, renderToken);
 }
 
@@ -691,6 +709,8 @@ onBeforeUnmount(() => {
       ref="pageList"
       class="pdf-page-list"
       @scroll.passive="scheduleViewportChange"
+      @wheel.passive="emit('viewport-interaction')"
+      @pointerdown="emit('viewport-interaction')"
       @mouseup="capturePdfSelection"
     >
       <section

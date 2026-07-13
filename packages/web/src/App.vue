@@ -61,6 +61,7 @@ import {
   hasMappedPdfNavigationTarget,
   normalizePaperViewportForMinimap,
 } from "./paper-minimap-navigation";
+import { resolveReaderNavigationTarget } from "./reader-navigation";
 import {
   getSourceReviewAutoRerunRequest,
   runSourceReviewLlmBatch,
@@ -151,6 +152,7 @@ const edgeLoading = ref(false);
 const readerPaneRef = ref<{
   captureScrollAnchor: (candidateLids: string[]) => ScrollAnchor | null;
   restoreScrollAnchor: (anchor: ScrollAnchor | null) => Promise<void>;
+  scrollLidIntoView: (lid: string) => Promise<boolean>;
 } | null>(null);
 interface Segment {
   lid: string;
@@ -167,6 +169,7 @@ let pdfAnnotationProjectionSeq = 0;
 const HIGHLIGHT_GROUP_PREFIX = "highlight-group:";
 const selectedLid = ref<string | null>(null);
 const currentReadingLid = ref<string | null>(null);
+const outlineNavigationLid = ref<string | null>(null);
 const formulaDialog = ref<Segment | null>(null);
 const chapterTitle = ref<string>("");
 interface SourceFocus {
@@ -289,8 +292,9 @@ function fail(e: unknown) {
 
 // 读位感:anchor 在叶序中的位置 → 进度%;章节 = anchor 顶层段(LID 首段)。
 const readingAnchorLid = computed(() => currentReadingLid.value ?? viewport.value?.top_lid ?? null);
+const outlineAnchorLid = computed(() => outlineNavigationLid.value ?? readingAnchorLid.value);
 const activeOutlineItem = computed(() => {
-  const anchor = readingAnchorLid.value;
+  const anchor = outlineAnchorLid.value;
   if (!anchor) return null;
   return outlineItems.value
     .filter((item) => anchor === item.lid || anchor.startsWith(`${item.lid}.`))
@@ -1203,14 +1207,21 @@ function mergeSegments(current: Segment[], incoming: Segment[], mode: SegmentLoa
 }
 
 // 视口加载:逐 visible_lid 取真原文。replace 用于 goto/sync;append/prepend 用于正文连续滚动缓冲。
-async function loadWindow(vp: Viewport, mode: SegmentLoadMode = "replace") {
+async function loadWindow(
+  vp: Viewport,
+  mode: SegmentLoadMode = "replace",
+  navigationTargetLid = vp.top_lid,
+) {
   viewport.value = vp;
   if (mode === "replace") {
-    selectedLid.value = vp.top_lid;
-    currentReadingLid.value = vp.top_lid;
+    selectedLid.value = navigationTargetLid;
+    currentReadingLid.value = navigationTargetLid;
   }
   const next = await hydrateSegments(vp.visible_lids);
   segments.value = mergeSegments(segments.value, next, mode);
+  if (mode === "replace") {
+    await readerPaneRef.value?.scrollLidIntoView(navigationTargetLid);
+  }
   await refreshAnnotations();
   await loadChapter(vp.top_lid);
 }
@@ -1758,18 +1769,22 @@ async function doGoto(lid: string, focusQuote?: string | null) {
     banner.value = "";
     sourceFocus.value = focusQuote === undefined ? null : { lid, quote: focusQuote };
     const gotoEffect = await api.goto(lid);
-    await loadWindow(gotoEffect.viewport);
+    outlineNavigationLid.value = lid;
+    const navigationTargetLid = resolveReaderNavigationTarget(lid, leafOrder.value)
+      ?? gotoEffect.viewport.top_lid;
+    await loadWindow(gotoEffect.viewport, "replace", navigationTargetLid);
     queuePaperSelection(lid);
     if (pdfReaderAvailable.value && !hasMappedPdfNavigationTarget(
       lid,
-      gotoEffect.viewport.top_lid,
+      navigationTargetLid,
       pdfMappedLids.value,
     )) {
-      banner.value = `PDF 暂无 ${gotoEffect.viewport.top_lid} 的可靠定位，已保留当前 PDF 页面。`;
+      banner.value = `PDF 暂无 ${navigationTargetLid} 的可靠定位，已保留当前 PDF 页面。`;
     }
     await loadPaperProjectionData();
     gotoInput.value = "";
   } catch (e) {
+    if (outlineNavigationLid.value === lid) outlineNavigationLid.value = null;
     fail(e);
   }
 }
@@ -1780,8 +1795,7 @@ function focusLocalSource(source: { lid: string; quote: string | null }) {
   void openSourcePreview(source);
 }
 function sourcePreviewCenterLid(lid: string): string {
-  if (leafOrder.value.includes(lid)) return lid;
-  return leafOrder.value.find((leaf) => leaf.startsWith(`${lid}.`)) ?? lid;
+  return resolveReaderNavigationTarget(lid, leafOrder.value) ?? lid;
 }
 function sourcePreviewLids(centerLid: string): string[] {
   const idx = leafOrder.value.indexOf(centerLid);
@@ -1958,6 +1972,10 @@ function onSelectSeg(lid: string) {
 
 function onCurrentLid(lid: string) {
   currentReadingLid.value = lid;
+}
+
+function clearOutlineNavigation() {
+  outlineNavigationLid.value = null;
 }
 
 function openFormulaDialog(seg: Segment) {
@@ -2521,6 +2539,7 @@ function resetBookSessionUi() {
   noteEditor.value = null;
   selectedLid.value = null;
   currentReadingLid.value = null;
+  outlineNavigationLid.value = null;
   formulaDialog.value = null;
   profileSummary.value = null;
   profileManifest.value = null;
@@ -2864,7 +2883,7 @@ async function submitOpenBook(dir = bookPickerDir.value) {
         v-model:search-query="outlineSearch"
         :outline-items="outlineItems"
         :progress-pct="progressPct"
-        :anchor-lid="readingAnchorLid"
+        :anchor-lid="outlineAnchorLid"
         :selected-lid="selectedLid"
         :leaf-count="leafOrder.length"
         :debug-open="debugOpen"
@@ -2909,6 +2928,7 @@ async function submitOpenBook(dir = bookPickerDir.value) {
         @focus-source="focusLocalSource"
         @selection-capture="onPdfSelectionCapture"
         @selection-cancel="cancelPdfSelectionDraft"
+        @viewport-interaction="clearOutlineNavigation"
         @edit-note="openEditNote"
         @delete-note="deleteNote"
         @reselect-note="reselectPdfNote"
@@ -2936,6 +2956,7 @@ async function submitOpenBook(dir = bookPickerDir.value) {
         @select="onSelectSeg"
         @prose-mouse-up="onProseMouseUp"
         @current-lid="onCurrentLid"
+        @viewport-interaction="clearOutlineNavigation"
         @scroll-edge="onScrollEdge"
         @highlight-block="highlightBlock"
         @note-block="noteBlock"

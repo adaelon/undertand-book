@@ -249,6 +249,68 @@ describe("PdfReaderPane", () => {
     wrapper.unmount();
   });
 
+  it("scrolls same-page outline targets to their exact mapped regions", async () => {
+    const mappedSource: PdfSourceMap = {
+      ...sourceMap,
+      entries: [
+        {
+          lid: "1.1",
+          source_span: { start: 0, end: 10 },
+          status: "word_mapped",
+          regions: [{ region_id: "r-high", pageIndex: 0, bbox: [100, 700, 200, 720] }],
+          primary_region: { region_id: "r-high", pageIndex: 0, bbox: [100, 700, 200, 720] },
+          alignment: { confidence: 1 },
+        },
+        {
+          lid: "1.2",
+          source_span: { start: 10, end: 20 },
+          status: "word_mapped",
+          regions: [{ region_id: "r-low", pageIndex: 0, bbox: [100, 80, 200, 100] }],
+          primary_region: { region_id: "r-low", pageIndex: 0, bbox: [100, 80, 200, 100] },
+          alignment: { confidence: 1 },
+        },
+      ],
+    };
+    const wrapper = mount(PdfReaderPane, {
+      props: {
+        sourceManifest: null,
+        sourceMap: mappedSource,
+        pdfUrl: "/api/book/pdf/original",
+        activeLid: null,
+        selectedLid: null,
+      },
+    });
+    await flushPromises();
+    await flushPromises();
+
+    const list = wrapper.get(".pdf-page-list").element as HTMLElement;
+    const page = wrapper.findAll(".pdf-page-shell")[0].element as HTMLElement;
+    vi.spyOn(list, "getBoundingClientRect").mockReturnValue({
+      x: 0, y: 0, top: 0, bottom: 400, left: 0, right: 600,
+      width: 600, height: 400, toJSON: () => ({}),
+    });
+    vi.spyOn(page, "getBoundingClientRect").mockReturnValue({
+      x: 0, y: 0, top: 0, bottom: 800, left: 0, right: 600,
+      width: 600, height: 800, toJSON: () => ({}),
+    });
+    vi.spyOn(page, "scrollIntoView").mockImplementation(() => undefined);
+
+    list.scrollTop = 0;
+    await wrapper.setProps({ activeLid: "1.1" });
+    await flushPromises();
+    const highTargetScroll = list.scrollTop;
+
+    list.scrollTop = 0;
+    await wrapper.setProps({ activeLid: "1.2" });
+    await flushPromises();
+    const lowTargetScroll = list.scrollTop;
+
+    expect(lowTargetScroll).toBeGreaterThan(highTargetScroll + 400);
+    await wrapper.get(".pdf-page-list").trigger("wheel", { deltaY: 40 });
+    expect(wrapper.emitted("viewport-interaction")).toHaveLength(1);
+    wrapper.unmount();
+  });
+
   it("captures native selection without navigating or clearing it and cancels on Escape", async () => {
     const wrapper = mount(PdfReaderPane, {
       props: {

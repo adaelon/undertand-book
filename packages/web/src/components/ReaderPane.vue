@@ -52,6 +52,7 @@ const emit = defineEmits<{
   (e: "open-formula", seg: Segment): void;
   (e: "scroll-edge", direction: "up" | "down"): void;
   (e: "current-lid", lid: string): void;
+  (e: "viewport-interaction"): void;
 }>();
 
 const notesByLid = computed(() => {
@@ -203,6 +204,7 @@ function onScroll() {
 function onWheel(event: WheelEvent) {
   const el = pane.value;
   if (!el) return;
+  if (event.deltaY !== 0) emit("viewport-interaction");
   if (event.deltaY > 0 && atBottomEdge(el)) {
     event.preventDefault();
     requestBuffer("down");
@@ -233,6 +235,7 @@ function onKeydown(event: KeyboardEvent) {
   else if (event.key === "PageDown") delta = page;
   else if (event.key === "PageUp") delta = -page;
   else return;
+  emit("viewport-interaction");
   event.preventDefault();
   if (delta > 0 && atBottomEdge(el)) {
     requestBuffer("down");
@@ -281,7 +284,20 @@ async function restoreScrollAnchor(anchor: ScrollAnchor | null) {
   void scheduleScrollStateCheck();
 }
 
-defineExpose({ captureScrollAnchor, restoreScrollAnchor });
+async function scrollLidIntoView(lid: string): Promise<boolean> {
+  await nextTick();
+  const el = pane.value;
+  const node = lidElement(lid);
+  if (!el || !node) return false;
+  const paneRect = el.getBoundingClientRect();
+  const nodeRect = node.getBoundingClientRect();
+  el.scrollTop += nodeRect.top - paneRect.top;
+  currentReadingLid = lid;
+  emit("current-lid", lid);
+  return true;
+}
+
+defineExpose({ captureScrollAnchor, restoreScrollAnchor, scrollLidIntoView });
 
 onMounted(() => {
   void scheduleScrollStateCheck();
@@ -299,7 +315,15 @@ watch(
 </script>
 
 <template>
-  <main ref="pane" class="reader-pane" tabindex="0" @scroll.passive="onScroll" @wheel="onWheel" @keydown="onKeydown">
+  <main
+    ref="pane"
+    class="reader-pane"
+    tabindex="0"
+    @scroll.passive="onScroll"
+    @wheel="onWheel"
+    @pointerdown="emit('viewport-interaction')"
+    @keydown="onKeydown"
+  >
     <article class="prose" @mouseup="emit('prose-mouse-up')">
       <div v-for="item in readerItems" :key="itemKey(item)" class="seg">
         <template v-if="item.type === 'flow'">
