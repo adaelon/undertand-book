@@ -1,42 +1,35 @@
-# SESSION_CHECKPOINT — 2026-07-12 23:44
+# SESSION_CHECKPOINT — 2026-07-14 00:34
 
 ## 新鲜度自检
-- 论文地图代码基线 commit:`93e9774 fix: improve paper PDF mapping and navigation`。
-- 前一提交:`a6e8814 fix: differentiate paper minimap reading modes`。
-- 本文件以独立 docs commit 落盘;读入时比较 `git log --oneline -3`,若代码晚于 `93e9774` 则以 Git 为准。
+- 写入时最新实现 commit: `e1e6260 refactor(memory): model per-book reading engagement`。
+- 本 checkpoint 可随后形成独立 docs commit;读入时请对比 `git log --oneline -6`,若实现提交晚于 `e1e6260` 则以 Git 与工作树为准。
 
 ## 当前在做什么
-PDF LID 对齐器、大纲导航和正式论文 artifacts 已修复;新 Setup 已完成 release/NSIS 编译,等待安装启动验收。
+可靠画像 memory 的 M0 数据地基已完整实现并通过总闸;当前无在途 M0 代码,下一高层阶段是 M1 显式记忆闭环,首刀 M1.1 ReaderProfileSnapshot 纯投影尚未开始。
 
 ## 下一步(可直接接手)
-1. 安装 `dist/UnderstandBookSetup.exe`,启动新 Reader 并打开 workspace `.understand-book/1`。
-2. 确认 source map `config_hash=f55c0a80...`,实测大纲 mapped/unmapped 点击均留在 PDF 面。
-3. 确认来源正文只可通过显式按钮或引用操作打开。
-4. 实测 `2.47.23.1`、`2.47.24.1` 滚动到 PDF 文件第 3 页对应标题。
+1. 按 `docs/切片方案-memory可靠画像升级.md` M1.1 输出 A1 声明:只做 seeded facts 到有界 snapshot 的纯投影,不接对话或模型。
+2. 读取 `crates/memory/src/{document,profile,reading_state}.rs` 与方案 §2.6/§6 M1.1,确定 snapshot 分区、排序和 token budget 输入输出。
+3. 新增 `crates/memory/src/projection.rs` 与最小 deterministic tests,覆盖 status/authority/applicability/recency 和各区预算。
+4. 以 `projection_revision` 做 cache invalidation;不得提前进入 M1.2 每回合注入。
 
 ## 未提交 / 未完成
-- 论文地图、PDF 映射、导航和代码链路已提交;Setup 已重建但未安装,桌面 Reader 未运行,未做在线 API/安装验收。
-- 正式 artifacts 已由 `.tmp-hybrid-foundation-v2-tZ5sAV` 写回;旧版备份在 `.understand-book/1/.build/hybrid-foundation-backup-2026-07-12T15-02-12-080Z`。
-- `crates/runtime/src/{lib.rs,goldset.rs}` 和其他用户资料/日志/测试产物为既有改动,不得清理或回退。
+- M0:无未提交或未测试项;四刀 commits 为 `6aa103e`、`762f51e`、`d57c870`、`e1e6260`。
+- `crates/runtime/src/goldset.rs`、`crates/runtime/src/lib.rs`:用户既有格式化修改;M0.4 提交已选择性排除,不得回退或混入后续提交。
+- M1-M4 尚未实现;runtime-owned capture/snapshot injection/review worker/policy/UI 均不属于已完成能力。
+- `docs/预构建画像-quantification-essence.md` 及大量未跟踪资料、日志、截图、临时目录为用户/环境既有内容,未清理或暂存。
 
 ## 冷启动读序
-1. `docs/切片方案-paper-agentic-minimap.md` — 论文地图冻结范围、AM0-AM13 和 hard gates。
-2. `docs/adr/0072-agentic-paper-minimap-readonly-projection-and-user-overlays.md` — 只读地图、overlay 与 Agent 权限边界。
-3. `docs/adr/0073-paper-minimap-chinese-display-cache.md` — 中文显示缓存和正文/LID 边界。
-4. `docs/代码链路.md` 末尾论文地图模式、PDF LID 对齐和 release package 条目 — 本轮入口与验证证据。
-5. `crates/reader/src/lib.rs:project_paper_minimap_lens` 与 `packages/web/src/components/PaperMinimap.vue` — skim/摘要/深读投影和完整文字布局。
-6. `packages/core/src/hybrid-foundation.ts` 与 `packages/core/test/hybrid-foundation.test.ts` — 空间阅读顺序、窗口匹配和 hard gates。
-7. `packages/core/scripts/{rebuild-hybrid-foundation-temp,apply-hybrid-foundation-candidate}.ts` — 临时重建、schema/hash 复验和事务写回。
-8. `packages/web/src/App.vue:doGoto` 与 `paper-minimap-navigation.ts` — 无映射时保留 PDF,禁止自动来源 fallback。
+1. `docs/切片方案-memory可靠画像升级.md` §2.6、§6 M1、§8 - snapshot 契约、后续切片与发布矩阵。
+2. `docs/adr/0075-runtime-owned-evidence-backed-profile-memory.md` - 冻结所有权、信任、隐私与不做范围。
+3. `crates/memory/src/document.rs` - v2 envelope、revision 与 atomic storage。
+4. `crates/memory/src/profile.rs` - typed fact reducer、evidence exclusion 与 resolver。
+5. `crates/memory/src/reading_state.rs` - BookReadingState、EngagementSignals 与 legacy projection。
+6. `docs/架构.md` / `docs/代码链路.md` 末尾 M0.1-M0.4 - 当前结构、数据流、验证与提交索引。
 
 ## 本会话决策摘要
-- 论文地图基座只读;skim/摘要/深读使用不同 lens,文字完整换行显示。
-- PDF 内容流不等于阅读顺序;对齐按页内跨栏/左栏/右栏空间顺序,异常几何不得进入候选。
-- 短文本碎片只允许整行精确匹配;正文/标题覆盖率必须分别达到 60%/80%。
-- 大纲 goto 永不自动打开来源正文;无 PDF region 时保留当前 PDF 页面并提示。
-- 临时重建与正式写回分离;本次正式替换已获用户确认并保留回滚备份。
-
-## 最近验证
-- 正式复读:algorithm v2,正文 166/258(64.34%),标题/outline 29/29,全部 gates true;正式 artifact hash 与候选一致,目标两 LID 均为 `pageIndex=2`。
-- Core full:36 files / 206 tests;Web full:13 files / 68 tests;Core/Web typecheck 与 Web production build 通过。
-- Setup:33,881,407 bytes,SHA-256 `92EAC8CE8F0E0415D99089F19EDA42A6B518ED4A723DB62AC3AB64CB5C3004BF`;export/bundle hash 一致。
+- ADR-0075 前置文档已提交为 `ebf2899`;M0 严格按四个独立子切片提交。
+- legacy 裸数组首次打开原子迁移到 `MemoryDocument` v2;所有 mutation 先落盘再切内存。
+- ProfileFact 状态由 source × scope 信任矩阵决定;forget 物理删值并只留 content-free evidence hash。
+- 旧 code-level ReaderProfile 已由 BookReadingState 取代;旧四字段 JSON/Markdown 仅由显式兼容投影保留。
+- 最终总闸:`cargo test -p memory -p runtime -p server` 通过(35/63/105)。
