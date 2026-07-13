@@ -1,12 +1,17 @@
 //! 最小 memory 层 `[ADR-0026/0015/0006]`:用户私有 · 跨书 · 与只读基座**物理隔离**。
-//! 单 JSON 落盘;`save`=内容寻址 mem_id upsert + citation 自动派生;`recall`=线性过滤。
+//! 单一 versioned `MemoryDocument` JSON 落盘;`save`=内容寻址 upsert;`recall`=线性过滤。
 //! 切片0 type=note/highlight/position;consolidation / 跨书 concept recall 留议题7 `[ADR-0018]`。
 //! 时间戳与落盘路径由调用方注入(确定性可测,守 A2)。
 //! S7a 从 runtime 抽成独立 crate(拆 runtime↔reader 循环依赖,reader/runtime 共同依赖它)`[ADR-0027]`。
+mod document;
+
+use document::StoredMemory;
+pub use document::{MemoryDocument, MEMORY_SCHEMA_VERSION};
 use read_tools::ToolError;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 
 /// 记忆记录(符 V3 §4.3 / `[ADR-0015]`)。`type` 是 Rust 保留词 ⇒ serde rename。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -205,10 +210,79 @@ fn selection_citations(context: &SelectionContext, book_id: &str) -> Vec<MemCita
         .collect()
 }
 
+fn atomic_temporary_path(path: &Path) -> PathBuf {
+    path.with_extension("replace.tmp")
+}
+
+fn atomic_backup_path(path: &Path) -> PathBuf {
+    path.with_extension("replace.bak")
+}
+
+fn recover_interrupted_commit(path: &Path) -> Result<(), ToolError> {
+    let backup = atomic_backup_path(path);
+    if !path.exists() && backup.exists() {
+        std::fs::rename(&backup, path)
+            .map_err(|e| internal(format!("恢复 memory 备份失败: {e}")))?;
+    }
+    Ok(())
+}
+
+fn persist_document_atomically(path: &Path, document: &MemoryDocument) -> Result<(), ToolError> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent).map_err(|e| internal(format!("建 memory 目录失败: {e}")))?;
+    let serialized = serde_json::to_string_pretty(document)
+        .map_err(|e| internal(format!("序列化 memory 失败: {e}")))?;
+    let temporary = atomic_temporary_path(path);
+    let backup = atomic_backup_path(path);
+    if temporary.exists() {
+        std::fs::remove_file(&temporary)
+            .map_err(|e| internal(format!("清理 memory 临时文件失败: {e}")))?;
+    }
+    if backup.exists() {
+        std::fs::remove_file(&backup)
+            .map_err(|e| internal(format!("清理 memory 备份失败: {e}")))?;
+    }
+
+    let write_result = (|| -> Result<(), std::io::Error> {
+        let mut file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temporary)?;
+        file.write_all(serialized.as_bytes())?;
+        file.sync_all()
+    })();
+    if let Err(error) = write_result {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(internal(format!("写 memory 临时文件失败: {error}")));
+    }
+
+    let had_original = path.exists();
+    if had_original {
+        if let Err(error) = std::fs::rename(path, &backup) {
+            let _ = std::fs::remove_file(&temporary);
+            return Err(internal(format!("备份旧 memory 失败: {error}")));
+        }
+    }
+    if let Err(error) = std::fs::rename(&temporary, path) {
+        if had_original {
+            let _ = std::fs::rename(&backup, path);
+        }
+        let _ = std::fs::remove_file(&temporary);
+        return Err(internal(format!("切换 memory 快照失败: {error}")));
+    }
+    if had_original {
+        let _ = std::fs::remove_file(backup);
+    }
+    Ok(())
+}
+
 /// 用户私有 memory 库:与只读基座物理隔离的独立 JSON 文件 `[ADR-0006/0026]`。
 pub struct MemoryStore {
     path: PathBuf,
-    records: Vec<Record>,
+    document: MemoryDocument,
 }
 
 impl MemoryStore {
@@ -230,62 +304,54 @@ impl MemoryStore {
     /// 打开(或初始化)库;文件不存在 = 空库。
     pub fn open(path: impl Into<PathBuf>) -> Result<MemoryStore, ToolError> {
         let path = path.into();
-        let records = if path.exists() {
-            let s = std::fs::read_to_string(&path).map_err(|e| internal(format!("读 memory 失败: {e}")))?;
-            serde_json::from_str(&s).map_err(|e| internal(format!("解析 memory 失败: {e}")))?
+        recover_interrupted_commit(&path)?;
+        let document = if path.exists() {
+            let s = std::fs::read_to_string(&path)
+                .map_err(|e| internal(format!("读 memory 失败: {e}")))?;
+            match serde_json::from_str::<StoredMemory>(&s)
+                .map_err(|e| internal(format!("解析 memory 失败: {e}")))?
+            {
+                StoredMemory::Document(document) => {
+                    document.validate().map_err(internal)?;
+                    document
+                }
+                StoredMemory::Legacy(records) => {
+                    let document = MemoryDocument::from_legacy(records);
+                    persist_document_atomically(&path, &document)?;
+                    document
+                }
+            }
         } else {
-            Vec::new()
+            MemoryDocument::empty()
         };
-        Ok(MemoryStore { path, records })
+        Ok(MemoryStore { path, document })
     }
 
-    fn persist(&self) -> Result<(), ToolError> {
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| internal(format!("建 memory 目录失败: {e}")))?;
-        }
-        let s = serde_json::to_string_pretty(&self.records)
-            .map_err(|e| internal(format!("序列化 memory 失败: {e}")))?;
-        std::fs::write(&self.path, s).map_err(|e| internal(format!("写 memory 失败: {e}")))
+    pub fn document_revision(&self) -> u64 {
+        self.document.document_revision
     }
 
-    fn persist_records_atomically(&self, records: &[Record]) -> Result<(), ToolError> {
-        let Some(parent) = self.path.parent() else {
-            return Err(internal("memory 路径缺少父目录".into()));
-        };
-        std::fs::create_dir_all(parent)
-            .map_err(|e| internal(format!("建 memory 目录失败: {e}")))?;
-        let serialized = serde_json::to_string_pretty(records)
-            .map_err(|e| internal(format!("序列化 memory 失败: {e}")))?;
-        let temporary = self.path.with_extension("replace.tmp");
-        let backup = self.path.with_extension("replace.bak");
-        if temporary.exists() {
-            std::fs::remove_file(&temporary)
-                .map_err(|e| internal(format!("清理 memory 临时文件失败: {e}")))?;
-        }
-        if backup.exists() {
-            std::fs::remove_file(&backup)
-                .map_err(|e| internal(format!("清理 memory 备份失败: {e}")))?;
-        }
-        std::fs::write(&temporary, serialized)
-            .map_err(|e| internal(format!("写 memory 临时文件失败: {e}")))?;
+    pub fn projection_revision(&self) -> u64 {
+        self.document.projection_revision
+    }
 
-        let had_original = self.path.exists();
-        if had_original {
-            if let Err(error) = std::fs::rename(&self.path, &backup) {
-                let _ = std::fs::remove_file(&temporary);
-                return Err(internal(format!("备份旧 memory 失败: {error}")));
-            }
-        }
-        if let Err(error) = std::fs::rename(&temporary, &self.path) {
-            if had_original {
-                let _ = std::fs::rename(&backup, &self.path);
-            }
-            let _ = std::fs::remove_file(&temporary);
-            return Err(internal(format!("切换 memory 快照失败: {error}")));
-        }
-        if had_original {
-            let _ = std::fs::remove_file(backup);
-        }
+    fn projection_mutation_candidate(&self) -> Result<MemoryDocument, ToolError> {
+        let mut candidate = self.document.clone();
+        candidate.document_revision = candidate
+            .document_revision
+            .checked_add(1)
+            .ok_or_else(|| internal("memory document_revision 溢出".into()))?;
+        candidate.projection_revision = candidate
+            .projection_revision
+            .checked_add(1)
+            .ok_or_else(|| internal("memory projection_revision 溢出".into()))?;
+        Ok(candidate)
+    }
+
+    fn commit_document(&mut self, candidate: MemoryDocument) -> Result<(), ToolError> {
+        candidate.validate().map_err(internal)?;
+        persist_document_atomically(&self.path, &candidate)?;
+        self.document = candidate;
         Ok(())
     }
 
@@ -325,6 +391,7 @@ impl MemoryStore {
             }
         };
         let prev_count = self
+            .document
             .records
             .iter()
             .find(|r| r.mem_id == mem_id)
@@ -348,11 +415,12 @@ impl MemoryStore {
             source_session_id: input.source_session_id,
         };
         // upsert:同 mem_id 替换,否则追加。
-        match self.records.iter_mut().find(|r| r.mem_id == mem_id) {
+        let mut candidate = self.projection_mutation_candidate()?;
+        match candidate.records.iter_mut().find(|r| r.mem_id == mem_id) {
             Some(slot) => *slot = record.clone(),
-            None => self.records.push(record.clone()),
+            None => candidate.records.push(record.clone()),
         }
-        self.persist()?;
+        self.commit_document(candidate)?;
         // P4-4:账本变更后重派生只读 .md 视图(best-effort,不阻断真相源)`[ADR-0040]`。
         let _ = self.write_profile_files();
         Ok(record)
@@ -360,7 +428,11 @@ impl MemoryStore {
 
     /// 原子替换一条 memory:候选快照落盘成功后才切换内存状态。
     pub fn replace(&mut self, input: ReplaceInput, now: &str) -> Result<Record, ToolError> {
-        let Some(index) = self.records.iter().position(|record| record.mem_id == input.mem_id)
+        let Some(index) = self
+            .document
+            .records
+            .iter()
+            .position(|record| record.mem_id == input.mem_id)
         else {
             return Err(memory_not_found(&input.mem_id));
         };
@@ -372,7 +444,7 @@ impl MemoryStore {
             });
         }
 
-        let old = self.records[index].clone();
+        let old = self.document.records[index].clone();
         let explicitly_reanchored = input.selection_context.is_some();
         let selection_context = input.selection_context.or_else(|| old.selection_context.clone());
         let anchor = if explicitly_reanchored {
@@ -416,6 +488,7 @@ impl MemoryStore {
             selection_context.as_ref(),
         );
         if self
+            .document
             .records
             .iter()
             .enumerate()
@@ -445,10 +518,9 @@ impl MemoryStore {
             generated_at: now.to_string(),
             source_session_id: old.source_session_id,
         };
-        let mut candidate = self.records.clone();
-        candidate[index] = replacement.clone();
-        self.persist_records_atomically(&candidate)?;
-        self.records = candidate;
+        let mut candidate = self.projection_mutation_candidate()?;
+        candidate.records[index] = replacement.clone();
+        self.commit_document(candidate)?;
         let _ = self.write_profile_files();
         Ok(replacement)
     }
@@ -456,16 +528,17 @@ impl MemoryStore {
     /// `memory.delete(mem_id)`:用户**显式删**一条(区别于议题7 后台 usage 遗忘 `[ADR-0018]`)`[V3 §4.3]`。
     /// 找不到 → `MEMORY_NOT_FOUND`(禁静默降级,守 `[ADR-0015]`)。S10g:agent 提议「撤销」走它。
     pub fn delete(&mut self, mem_id: &str) -> Result<(), ToolError> {
-        let before = self.records.len();
-        self.records.retain(|r| r.mem_id != mem_id);
-        if self.records.len() == before {
+        let mut candidate = self.projection_mutation_candidate()?;
+        let before = candidate.records.len();
+        candidate.records.retain(|r| r.mem_id != mem_id);
+        if candidate.records.len() == before {
             return Err(ToolError {
                 error_code: "MEMORY_NOT_FOUND".into(),
                 category: "not_found".into(),
                 message: format!("memory 记录不存在: {mem_id}"),
             });
         }
-        self.persist()?;
+        self.commit_document(candidate)?;
         // P4-4:删后重派生只读 .md 视图,旧条目从文件消失(单向覆写)`[ADR-0040]`。
         let _ = self.write_profile_files();
         Ok(())
@@ -475,6 +548,7 @@ impl MemoryStore {
     /// 切片0 不实现 concept 维度(跨书概念对齐留切片1+)。结果按 mem_id 排序(确定性)。
     pub fn recall(&self, q: &RecallQuery) -> Vec<Record> {
         let mut out: Vec<Record> = self
+            .document
             .records
             .iter()
             .filter(|r| q.book_id.as_ref().is_none_or(|b| &r.book_id == b))
@@ -530,6 +604,7 @@ impl MemoryStore {
     /// 某书某类型记忆锚定的 LID 集(去重 + LID 序确定性)。reader_profile 关注点/疑惑点派生用。
     fn anchor_lids_of_type(&self, book_id: &str, types: &[&str]) -> Vec<String> {
         let mut lids: Vec<String> = self
+            .document
             .records
             .iter()
             .filter(|r| r.book_id == book_id && types.contains(&r.mem_type.as_str()))
@@ -557,7 +632,7 @@ impl MemoryStore {
     /// 纯确定性聚合、无 LLM、无认知水平推断。读者私人 ②,供 back 组卡点升权 / 透明展示。
     fn qa_heat(&self, book_id: &str) -> BTreeMap<String, u32> {
         let mut heat: BTreeMap<String, u32> = BTreeMap::new();
-        for r in &self.records {
+        for r in &self.document.records {
             if r.book_id == book_id && r.mem_type == "qa" {
                 if let Some(lid) = &r.anchor.lid {
                     *heat.entry(lid.clone()).or_insert(0) += 1;
@@ -571,6 +646,7 @@ impl MemoryStore {
     /// 区别于 `qa_heat`(只数条数):此处取真实问题文本,让 reader-profile.md 卡点段可读"问了什么"。
     fn qa_questions(&self, book_id: &str, lid: &str) -> Vec<&str> {
         let mut recs: Vec<&Record> = self
+            .document
             .records
             .iter()
             .filter(|r| {
@@ -587,7 +663,12 @@ impl MemoryStore {
 
     /// 出现过的全部 book_id(distinct·排序,确定性)。
     fn all_book_ids(&self) -> Vec<String> {
-        let mut ids: Vec<String> = self.records.iter().map(|r| r.book_id.clone()).collect();
+        let mut ids: Vec<String> = self
+            .document
+            .records
+            .iter()
+            .map(|r| r.book_id.clone())
+            .collect();
         ids.sort();
         ids.dedup();
         ids
@@ -596,6 +677,7 @@ impl MemoryStore {
     /// 某书 context 记忆按成长时间线序(`generated_at`,tie `mem_id`)`[ADR-0039/0040]`。
     fn context_timeline(&self, book_id: &str) -> Vec<&Record> {
         let mut recs: Vec<&Record> = self
+            .document
             .records
             .iter()
             .filter(|r| r.book_id == book_id && r.mem_type == "context")
@@ -760,12 +842,17 @@ mod tests {
         p
     }
 
-    fn legacy_store(name: &str) -> (PathBuf, MemoryStore) {
+    fn write_legacy_fixture(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("ub-mem-legacy-{name}"));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("memory.json");
         std::fs::write(&path, LEGACY_MEMORY_V1).unwrap();
+        path
+    }
+
+    fn legacy_store(name: &str) -> (PathBuf, MemoryStore) {
+        let path = write_legacy_fixture(name);
         let store = MemoryStore::open(&path).unwrap();
         (path, store)
     }
@@ -946,6 +1033,129 @@ mod tests {
                 "mem_a4acdf2b6f3df284" | "mem_0dcc7e3a8f87d6c4"
             )
         }));
+    }
+
+    #[test]
+    fn legacy_open_migrates_losslessly_once_to_v2_document() {
+        let path = write_legacy_fixture("migration");
+        let legacy: Vec<Record> = serde_json::from_str(LEGACY_MEMORY_V1).unwrap();
+
+        let store = MemoryStore::open(&path).unwrap();
+        assert_eq!(store.document_revision(), 1);
+        assert_eq!(store.projection_revision(), 1);
+
+        let migrated = std::fs::read_to_string(&path).unwrap();
+        let document: MemoryDocument = serde_json::from_str(&migrated).unwrap();
+        assert_eq!(document.schema_version, MEMORY_SCHEMA_VERSION);
+        assert_eq!(document.document_revision, 1);
+        assert_eq!(document.projection_revision, 1);
+        assert_eq!(document.records, legacy);
+        assert!(document.profile_facts.is_empty());
+        assert!(document.review_state.is_empty());
+        assert!(document.exclusions.is_empty());
+
+        let temporary = atomic_temporary_path(&path);
+        std::fs::create_dir_all(&temporary).unwrap();
+        let reopened = MemoryStore::open(&path).unwrap();
+        assert_eq!(reopened.document_revision(), 1);
+        assert_eq!(reopened.projection_revision(), 1);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), migrated);
+        std::fs::remove_dir_all(temporary).unwrap();
+    }
+
+    #[test]
+    fn legacy_migration_write_failure_preserves_original_file() {
+        let path = write_legacy_fixture("migration-write-failure");
+        let original = std::fs::read_to_string(&path).unwrap();
+        std::fs::create_dir_all(atomic_temporary_path(&path)).unwrap();
+
+        let error = MemoryStore::open(&path).err().unwrap();
+        assert_eq!(error.category, "internal");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+        let persisted: serde_json::Value = serde_json::from_str(&original).unwrap();
+        assert!(persisted.is_array());
+    }
+
+    #[test]
+    fn record_mutations_increment_both_revisions_and_persist_document() {
+        let (path, mut store) = legacy_store("revision-commit");
+
+        let saved = store
+            .save(
+                note_input("book-a", "6.1", "revision note"),
+                "2026-02-03T00:00:00Z",
+            )
+            .unwrap();
+        assert_eq!((store.document_revision(), store.projection_revision()), (2, 2));
+
+        let replaced = store
+            .replace(
+                ReplaceInput {
+                    mem_id: saved.mem_id,
+                    content: "revised note".into(),
+                    selection_context: None,
+                },
+                "2026-02-04T00:00:00Z",
+            )
+            .unwrap();
+        assert_eq!((store.document_revision(), store.projection_revision()), (3, 3));
+
+        store.delete(&replaced.mem_id).unwrap();
+        assert_eq!((store.document_revision(), store.projection_revision()), (4, 4));
+
+        let persisted: MemoryDocument =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(persisted.document_revision, 4);
+        assert_eq!(persisted.projection_revision, 4);
+        assert_eq!(persisted.records, store.document.records);
+    }
+
+    #[test]
+    fn failed_save_and_delete_preserve_memory_and_disk_document() {
+        let (path, mut store) = legacy_store("failed-record-mutations");
+        let before_document = store.document.clone();
+        let before_disk = std::fs::read_to_string(&path).unwrap();
+
+        let blocker = tmp("record-mutation-parent-blocker");
+        std::fs::write(&blocker, "not a directory").unwrap();
+        store.path = blocker.join("memory.json");
+
+        let save_error = store
+            .save(
+                note_input("book-a", "7.1", "must not commit"),
+                "2026-02-05T00:00:00Z",
+            )
+            .unwrap_err();
+        assert_eq!(save_error.category, "internal");
+        assert_eq!(store.document, before_document);
+
+        let delete_error = store.delete("mem_620ddff409de9979").unwrap_err();
+        assert_eq!(delete_error.category, "internal");
+        assert_eq!(store.document, before_document);
+        assert_eq!(std::fs::read_to_string(path).unwrap(), before_disk);
+    }
+
+    #[test]
+    fn v2_open_rejects_unknown_schema_and_invalid_revision_order() {
+        let unknown_path = tmp("unknown-memory-schema");
+        let mut unknown = MemoryDocument::empty();
+        unknown.schema_version = MEMORY_SCHEMA_VERSION + 1;
+        std::fs::write(&unknown_path, serde_json::to_string_pretty(&unknown).unwrap()).unwrap();
+        assert!(MemoryStore::open(&unknown_path)
+            .err()
+            .unwrap()
+            .message
+            .contains("schema_version"));
+
+        let invalid_path = tmp("invalid-memory-revisions");
+        let mut invalid = MemoryDocument::empty();
+        invalid.projection_revision = 1;
+        std::fs::write(&invalid_path, serde_json::to_string_pretty(&invalid).unwrap()).unwrap();
+        assert!(MemoryStore::open(&invalid_path)
+            .err()
+            .unwrap()
+            .message
+            .contains("projection_revision"));
     }
 
     #[test]
