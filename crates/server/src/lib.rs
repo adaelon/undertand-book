@@ -1548,7 +1548,7 @@ fn reader_state_response(book: &Book, reader: &Reader) -> serde_json::Value {
     })
 }
 
-/// `book.*` 只读叶子 → GET(S10a)。`store` 仅 `guided_route_from` 用(派生 reader_profile 已读降权)。
+/// `book.*` 只读叶子 → GET(S10a)。`store` 仅 route policy 使用(派生 BookReadingState 原始信号)。
 fn route_book(
     book: &Book,
     book_dir: &Path,
@@ -1660,9 +1660,9 @@ fn route_book(
                     Err(_) => return validation("INVALID_K", "k 须为非负整数"),
                 },
             };
-            // reader_profile 已读降权 `[ADR-0038]`:派生读者画像传入(住户读自己的整形 route)。
-            let profile = store.derive_reader_profile(&book.base.book_id);
-            match guided_route_from(book, at, k, &profile) {
+            // 单本阅读状态 `[ADR-0075]`:派生 read + engagement 原始信号供住户整形 route。
+            let reading_state = store.derive_book_reading_state(&book.base.book_id);
+            match guided_route_from(book, at, k, &reading_state) {
                 Ok(g) => ok_json(&json!({ "at": at, "groups": g })),
                 Err(e) => err_reply(&e),
             }
@@ -1671,9 +1671,9 @@ fn route_book(
             let Some(at) = q.get("at") else {
                 return validation("INVALID_RANGE", "book.unvisited_back 需 at 查询参数");
             };
-            // 裸「没懂」兜底 `[ADR-0036 决策3]`:派生 reader_profile,确定性 back ∩ 未读前置。
-            let profile = store.derive_reader_profile(&book.base.book_id);
-            match unvisited_back(book, at, &profile) {
+            // 裸「没懂」兜底 `[ADR-0036 决策3]`:派生单本阅读状态,确定性 back ∩ 未读前置。
+            let reading_state = store.derive_book_reading_state(&book.base.book_id);
+            match unvisited_back(book, at, &reading_state) {
                 Ok(steps) => ok_json(&json!({ "at": at, "unvisited_back": steps })),
                 Err(e) => err_reply(&e),
             }

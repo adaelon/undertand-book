@@ -2,7 +2,7 @@
 //! 确定性档位检索(复用 `read-tools` 的 `Book`)+ ModelAdapter 合一轮判停 + 确定性交叉验停。
 //! 切片0:scope 两档(local/chapter)+ FakeAdapter(确定性测);NativeAdapter 见 S5b。
 use base_schema::{GraphNodeType, LidNode, NodeKind};
-use memory::ReaderProfile;
+use memory::{BookReadingState, EngagementSignals};
 use read_tools::{Book, Frontier, NavCategory, RankedStep, ToolError};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
@@ -1909,8 +1909,8 @@ pub struct GuidedGroup {
     pub steps: Vec<RankedStep>,
 }
 
-/// 无 reader_profile 时的中性默认教学序 `[ADR-0037 决策4]`:主线推进优先,不假设新手。
-/// 占位常量,实测 / reader_profile(P4)回填(ADR-0037 何时回头)。
+/// 无 BookReadingState 信号时的中性默认教学序 `[ADR-0037 决策4]`:主线推进优先,不假设新手。
+/// 占位常量,实测 / content profile policy 回填(ADR-0037 何时回头)。
 const TEACHING_ORDER: [NavCategory; 5] = [
     NavCategory::Continue,
     NavCategory::Back,
@@ -1919,18 +1919,19 @@ const TEACHING_ORDER: [NavCategory; 5] = [
     NavCategory::Cross,
 ];
 
-/// technical_learning 教学整形 `[ADR-0037 决策2 / ADR-0038 已读降权 / ADR-0041 qa 卡点升权]`:
+/// technical_learning 教学整形 `[ADR-0037 决策2 / ADR-0038 已读降权 / ADR-0041 qa 活动升权]`:
 /// 按 `TEACHING_ORDER` 重排 5 类分组 + 剔空组 + **组内信号整形**。零 LLM、确定性可单测;与 `book.synthesize`「Core+policy」同构。
 /// 组内整形分两套:
 /// - **非 back 组**:仅已读降权——稳定排序未读在前、已读沉底(保组内原 weight×距离 次序,不剔除)。
-/// - **back 组(qa 卡点升权,压已读)**`[ADR-0041 决策5/6/7]`:Tier A 问过(`puzzle_heat`>0,按 heat 降序)/
-///   Tier B 未读+没问过 / Tier C 读过+没问过(沉底)。卡点=读过+问过 落 Tier A 冒顶(升权压已读);
+/// - **back 组(qa 活动升权,压已读)**`[ADR-0041 决策5/6/7]`:Tier A 问过(`qa_count`>0,按 count 降序)/
+///   Tier B 未读+没问过 / Tier C 读过+没问过(沉底)。读过且问过仍落 Tier A(升权压已读);
 ///   tiebreak 用 route_from 的 score 序(稳定排序)。
-/// `read_set` / `puzzle_heat` 空 ⇒ 退化为纯 TEACHING_ORDER 重排(向后兼容)。
+///
+/// `read_set` / `engagement_by_lid` 空 ⇒ 退化为纯 TEACHING_ORDER 重排(向后兼容)。
 fn technical_learning_reorder(
     f: Frontier,
     read_set: &HashSet<String>,
-    puzzle_heat: &BTreeMap<String, u32>,
+    engagement_by_lid: &BTreeMap<String, EngagementSignals>,
 ) -> Vec<GuidedGroup> {
     let Frontier {
         back,
@@ -1948,19 +1949,22 @@ fn technical_learning_reorder(
     ];
     for (cat, steps) in buckets.iter_mut() {
         if matches!(cat, NavCategory::Back) {
-            // back 组 qa 卡点升权(压已读):Tier A 问过(heat 降序)/ B 未读 / C 读过沉底;
+            // back 组 qa 活动升权(压已读):Tier A 问过(count 降序)/ B 未读 / C 读过沉底;
             // tiebreak 保 route_from score 序(稳定排序)`[ADR-0041]`。
             steps.sort_by_key(|s| {
-                let heat = *puzzle_heat.get(&s.lid).unwrap_or(&0);
+                let qa_count = engagement_by_lid
+                    .get(&s.lid)
+                    .map(|signals| signals.qa_count)
+                    .unwrap_or(0);
                 let read = read_set.contains(&s.lid);
-                let tier: u8 = if heat > 0 {
+                let tier: u8 = if qa_count > 0 {
                     0
                 } else if !read {
                     1
                 } else {
                     2
                 };
-                (tier, std::cmp::Reverse(heat))
+                (tier, std::cmp::Reverse(qa_count))
             });
         } else {
             // 其余组:仅已读降权(未读在前、已读沉底,稳定排序保组内原次序)。
@@ -1978,35 +1982,35 @@ fn technical_learning_reorder(
 }
 
 /// `book.guided_route_from(at, k?)` `[ADR-0037 决策1 / ADR-0038]`:route_from(Core)+ technical_learning
-/// 教学整形 + reader_profile 个性化(已读降权 + back 组 qa 卡点升权 `[ADR-0041]`)。裸 `book.route_from` 仍在
-/// (访客/高级);住户带读优先用本工具。`profile` 是读者私人画像(② 绝不外借访客);消费 `read_lids`(降权)
-/// + `puzzle_heat`(back 组卡点升权);focus 留后续。
+/// 教学整形 + 单本阅读状态适配(已读降权 + back 组 qa 活动升权 `[ADR-0041/0075]`)。裸
+/// `book.route_from` 仍在(访客/高级);住户带读优先用本工具。这里只消费 `read_lids` 与原始
+/// `EngagementSignals`,不把 qa/note/highlight 自动解释为认知结论。
 pub fn guided_route_from(
     book: &Book,
     at: &str,
     k: Option<usize>,
-    profile: &ReaderProfile,
+    reading_state: &BookReadingState,
 ) -> Result<Vec<GuidedGroup>, ToolError> {
-    let read_set: HashSet<String> = profile.read_lids.iter().cloned().collect();
+    let read_set: HashSet<String> = reading_state.read_lids.iter().cloned().collect();
     Ok(technical_learning_reorder(
         book.route_from(at, k)?,
         &read_set,
-        &profile.puzzle_heat,
+        &reading_state.engagement_by_lid,
     ))
 }
 
 /// `book.unvisited_back(at)` `[ADR-0036 决策3]`:裸「没懂」(无 locus)结构兜底的确定性原语。
 /// 返回 `route_from(at).back ∩ (全集 \ read_lids)` = **未读前置**(back 类别里读者还没读过的)。
-/// 未读过滤在 runtime policy 层消费 ②(reader_profile),route Core 零 LLM 不破(承 guided_route_from)。
+/// 未读过滤在 runtime policy 层消费 `BookReadingState`,route Core 零 LLM 不破(承 guided_route_from)。
 /// agent 据返回**空/非空**走分支(空→讲法轴原地重讲 / 非空→可撤销提议「先回看 首项」),
 /// **不让 agent 心算 back ∩ 未读 交集**(守 ADR-0036 命门 + 质量优先:未读判定确定性)。
 /// 组内保持 route_from 的 weight×距离 序(首项 = 最该回看的未读前置)。
 pub fn unvisited_back(
     book: &Book,
     at: &str,
-    profile: &ReaderProfile,
+    reading_state: &BookReadingState,
 ) -> Result<Vec<RankedStep>, ToolError> {
-    let read_set: HashSet<String> = profile.read_lids.iter().cloned().collect();
+    let read_set: HashSet<String> = reading_state.read_lids.iter().cloned().collect();
     let back = book.route_from(at, None)?.back;
     Ok(back
         .into_iter()
@@ -2077,7 +2081,7 @@ mod tests {
         assert!(technical_learning_reorder(f, &HashSet::new(), &BTreeMap::new()).is_empty());
     }
 
-    // reader_profile 已读降权 `[ADR-0038]`:组内未读在前、已读沉底(稳定排序保原次序);不剔除。
+    // BookReadingState 已读降权 `[ADR-0075]`:组内未读在前、已读沉底(稳定排序保原次序);不剔除。
     #[test]
     fn technical_learning_reorder_demotes_read_within_group() {
         let f = Frontier {
@@ -2100,12 +2104,12 @@ mod tests {
         assert_eq!(fwd.steps[0].lid, "2.0"); // 全未读不变
     }
 
-    // qa-2 back 组卡点升权 `[ADR-0041 决策5/6/7]`:Tier A 问过(heat 降序)/ B 未读 / C 读过沉底;
-    // 升权压已读(卡点=读过+问过冒顶);仅 back 组受 heat 影响,其余组不变。
+    // qa-2 back 组活动升权 `[ADR-0041/0075]`:Tier A 问过(count 降序)/ B 未读 / C 读过沉底;
+    // 仅 back 组消费 qa_count,其余组不变;计数本身不声明困惑或掌握。
     #[test]
-    fn technical_learning_reorder_back_promotes_qa_heat_over_read() {
+    fn technical_learning_reorder_back_promotes_qa_activity_over_read() {
         let f = Frontier {
-            // back:2.1 读过+问1 / 2.2 读过+问3(卡点最重) / 2.3 未读没问 / 2.4 读过没问
+            // back:2.1 读过+问1 / 2.2 读过+问3 / 2.3 未读没问 / 2.4 读过没问
             back: vec![rstep("2.1"), rstep("2.2"), rstep("2.3"), rstep("2.4")],
             forward: vec![rstep("3.1"), rstep("3.2")], // 3.1 问过 ×5,但 forward 不升权
             concretize: vec![],
@@ -2116,16 +2120,25 @@ mod tests {
             .iter()
             .map(|s| s.to_string())
             .collect();
-        let heat: BTreeMap<String, u32> = [("2.2", 3u32), ("2.1", 1u32), ("3.1", 5u32)]
+        let engagement: BTreeMap<String, EngagementSignals> =
+            [("2.2", 3u32), ("2.1", 1u32), ("3.1", 5u32)]
             .iter()
-            .map(|(l, c)| (l.to_string(), *c))
+            .map(|(l, c)| {
+                (
+                    l.to_string(),
+                    EngagementSignals {
+                        qa_count: *c,
+                        ..Default::default()
+                    },
+                )
+            })
             .collect();
-        let g = technical_learning_reorder(f, &read, &heat);
+        let g = technical_learning_reorder(f, &read, &engagement);
         let back = g.iter().find(|x| x.category == NavCategory::Back).unwrap();
         let lids: Vec<&str> = back.steps.iter().map(|s| s.lid.as_str()).collect();
-        // Tier A 问过按 heat 降序:2.2(×3) > 2.1(×1,卡点压已读冒上 Tier A);Tier B 未读:2.3;Tier C 读过没问:2.4。
+        // Tier A 按 qa_count:2.2(×3) > 2.1(×1);Tier B 未读:2.3;Tier C 读过没问:2.4。
         assert_eq!(lids, vec!["2.2", "2.1", "2.3", "2.4"]);
-        // forward 不受 heat 影响:3.1 问过 ×5 也不升,保 route_from 原序(都未读)。
+        // forward 不受 qa_count 影响:3.1 问过 ×5 也不升,保 route_from 原序(都未读)。
         let fwd = g
             .iter()
             .find(|x| x.category == NavCategory::Forward)
@@ -2214,12 +2227,11 @@ mod tests {
         Book::new(base, &src)
     }
 
-    fn profile_read(read: &[&str]) -> ReaderProfile {
-        ReaderProfile {
+    fn reading_state(read: &[&str]) -> BookReadingState {
+        BookReadingState {
             book_id: "back-book".into(),
             read_lids: read.iter().map(|s| s.to_string()).collect(),
-            focus_lids: vec![],
-            puzzle_heat: BTreeMap::new(),
+            engagement_by_lid: BTreeMap::new(),
         }
     }
 
@@ -2229,22 +2241,22 @@ mod tests {
     fn unvisited_back_filters_read_prereqs_deterministically() {
         let b = book_with_back_prereqs();
         // 全未读:back 两前置都在(确认 fixture 真产 back)。
-        let all = unvisited_back(&b, "1.1", &profile_read(&[])).unwrap();
+        let all = unvisited_back(&b, "1.1", &reading_state(&[])).unwrap();
         let mut lids: Vec<&str> = all.iter().map(|s| s.lid.as_str()).collect();
         lids.sort();
         assert_eq!(lids, vec!["2.1", "2.2"]);
         // 读过 2.1:确定性过滤剩未读 2.2(不靠 agent 心算交集)。
-        let un = unvisited_back(&b, "1.1", &profile_read(&["2.1"])).unwrap();
+        let un = unvisited_back(&b, "1.1", &reading_state(&["2.1"])).unwrap();
         assert_eq!(
             un.iter().map(|s| s.lid.as_str()).collect::<Vec<_>>(),
             vec!["2.2"]
         );
         // 两前置都读过:空 → agent 走讲法轴原地重讲。
-        assert!(unvisited_back(&b, "1.1", &profile_read(&["2.1", "2.2"]))
+        assert!(unvisited_back(&b, "1.1", &reading_state(&["2.1", "2.2"]))
             .unwrap()
             .is_empty());
         // invalid at → not_found(承 route_from,不静默)。
-        let err = unvisited_back(&b, "9.9", &profile_read(&[])).unwrap_err();
+        let err = unvisited_back(&b, "9.9", &reading_state(&[])).unwrap_err();
         assert_eq!(err.error_code, "LID_NOT_FOUND");
         assert_eq!(err.category, "not_found");
     }

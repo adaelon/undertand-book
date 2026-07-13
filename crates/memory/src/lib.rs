@@ -5,6 +5,7 @@
 //! S7a 从 runtime 抽成独立 crate(拆 runtime↔reader 循环依赖,reader/runtime 共同依赖它)`[ADR-0027]`。
 mod document;
 mod profile;
+mod reading_state;
 
 use document::StoredMemory;
 pub use document::{MemoryDocument, MEMORY_SCHEMA_VERSION};
@@ -14,9 +15,10 @@ pub use profile::{
     ForgetProfileFactOutcome, GoalClaim, PreferenceClaim, ProfileFact, ProfilePayload,
     ProfileResolutionContext, ProfileScope, Sensitivity,
 };
+pub use reading_state::{BookReadingState, EngagementSignals, LegacyReaderProfileProjection};
 use read_tools::ToolError;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -608,49 +610,18 @@ impl MemoryStore {
         recs.into_iter().filter_map(|r| r.anchor.lid).collect()
     }
 
-    /// 某书某类型记忆锚定的 LID 集(去重 + LID 序确定性)。reader_profile 关注点/疑惑点派生用。
-    fn anchor_lids_of_type(&self, book_id: &str, types: &[&str]) -> Vec<String> {
-        let mut lids: Vec<String> = self
-            .document
-            .records
-            .iter()
-            .filter(|r| r.book_id == book_id && types.contains(&r.mem_type.as_str()))
-            .filter_map(|r| r.anchor.lid.clone())
-            .collect();
-        lids.sort();
-        lids.dedup();
-        lids
-    }
-
-    /// reader_profile 确定性派生 `[ADR-0038 决策3]`:从 ①② 确定性聚合,**无 LLM、不推断认知水平**。
-    /// evidence 全是真 LID(来自已落账本/标注),可追溯。读时投影、**不物化落盘**(承 ADR-0012/0020)。
-    /// 供 P3-3 已读降权 / P3-2 兜底。`qa` 类型未落地 ⇒ 疑惑点暂空(诚实,不假装)。
-    pub fn derive_reader_profile(&self, book_id: &str) -> ReaderProfile {
-        ReaderProfile {
-            book_id: book_id.into(),
-            read_lids: self.read_lids(book_id),
-            focus_lids: self.anchor_lids_of_type(book_id, &["note", "highlight"]),
-            puzzle_heat: self.qa_heat(book_id),
-        }
-    }
-
-    /// qa 提问热度 `[ADR-0041]`:某书 qa 记录按 `anchor.lid` 聚合的条数(lid→问了几个不同问题)。
-    /// 每条 qa record(内容寻址:不同问题=不同 record)计 1;heat = 该 LID 的卡点强度信号。
-    /// 纯确定性聚合、无 LLM、无认知水平推断。读者私人 ②,供 back 组卡点升权 / 透明展示。
-    fn qa_heat(&self, book_id: &str) -> BTreeMap<String, u32> {
-        let mut heat: BTreeMap<String, u32> = BTreeMap::new();
-        for r in &self.document.records {
-            if r.book_id == book_id && r.mem_type == "qa" {
-                if let Some(lid) = &r.anchor.lid {
-                    *heat.entry(lid.clone()).or_insert(0) += 1;
-                }
-            }
-        }
-        heat
+    /// 单本阅读状态确定性派生 `[ADR-0075]`:保留已读顺序,其余只归约 qa/note/highlight 原始活动。
+    /// 行为信号不直接表达困惑、掌握或能力;旧 reader profile 字段由显式兼容投影提供。
+    pub fn derive_book_reading_state(&self, book_id: &str) -> BookReadingState {
+        BookReadingState::from_records(
+            book_id,
+            self.read_lids(book_id),
+            &self.document.records,
+        )
     }
 
     /// 某书某 LID 的 qa 提问文本 `[ADR-0041]`,按 `generated_at` 序(tie `mem_id`),供透明展示。
-    /// 区别于 `qa_heat`(只数条数):此处取真实问题文本,让 reader-profile.md 卡点段可读"问了什么"。
+    /// 区别于 legacy `puzzle_heat` 兼容投影(只数条数):此处取真实问题文本供 Markdown 展示。
     fn qa_questions(&self, book_id: &str, lid: &str) -> Vec<&str> {
         let mut recs: Vec<&Record> = self
             .document
@@ -700,7 +671,9 @@ impl MemoryStore {
              > 自动派生只读快照 · 真相源 = memory.json · 改动走 memory.delete / 编 json `[ADR-0040]`\n",
         );
         for book_id in self.all_book_ids() {
-            let p = self.derive_reader_profile(&book_id);
+            let p = self
+                .derive_book_reading_state(&book_id)
+                .legacy_reader_profile();
             s.push_str(&format!("\n## {book_id}\n"));
             s.push_str(&format!("### 已读 ({} 叶)\n", p.read_lids.len()));
             s.push_str(&if p.read_lids.is_empty() {
@@ -755,7 +728,9 @@ impl MemoryStore {
             s.push_str("(暂无)\n");
         }
         for book_id in &books {
-            let p = self.derive_reader_profile(book_id);
+            let p = self
+                .derive_book_reading_state(book_id)
+                .legacy_reader_profile();
             let ctx = self.context_timeline(book_id).len();
             s.push_str(&format!(
                 "- **{book_id}** — 读到 {} 叶 / 关注 {} / 卡点 {} / context {}\n",
@@ -794,20 +769,6 @@ impl MemoryStore {
     }
 }
 
-/// reader_profile 确定性派生产物 `[ADR-0038 决策3]`:读者私人画像(② 读者私有,绝不外借访客)。
-/// 三维全是确定性聚合 + 真 LID evidence,**不含认知水平推断**(novice/expert 是猜,ADR-0038 否决)。
-#[derive(Debug, Clone, Serialize, PartialEq, Default)]
-pub struct ReaderProfile {
-    pub book_id: String,
-    /// 已读集 / reading journey(`read_lids`,触达序)。
-    pub read_lids: Vec<String>,
-    /// 关注点:note/highlight 锚定的 LID(去重,LID 序)。
-    pub focus_lids: Vec<String>,
-    /// 提问热度 / 卡点:qa 记录按 `anchor.lid` 聚合的条数(lid→问了几个不同问题)`[ADR-0041]`。
-    /// 替代旧 `puzzle_lids` 去重平表——保留次数即"价值热度"信号,供 back 组卡点升权 / 透明展示。
-    pub puzzle_heat: BTreeMap<String, u32>,
-}
-
 fn internal(message: String) -> ToolError {
     ToolError {
         error_code: "INTERNAL_ERROR".into(),
@@ -835,6 +796,7 @@ fn memory_not_found(mem_id: &str) -> ToolError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
 
     const LEGACY_MEMORY_V1: &str =
         include_str!("../tests/fixtures/legacy-memory-v1.json");
@@ -958,14 +920,29 @@ mod tests {
             vec!["3.1", "3.2"]
         );
 
+        let reading_state = store.derive_book_reading_state("book-a");
         assert_eq!(
-            store.derive_reader_profile("book-a"),
-            ReaderProfile {
+            reading_state.legacy_reader_profile(),
+            LegacyReaderProfileProjection {
                 book_id: "book-a".into(),
                 read_lids: vec!["1.2".into()],
                 focus_lids: vec!["1.1".into(), "2.1".into(), "3.1".into()],
                 puzzle_heat: BTreeMap::from([("4.1".into(), 2)]),
             }
+        );
+        assert_eq!(
+            serde_json::to_value(&reading_state).unwrap(),
+            serde_json::json!({
+                "book_id": "book-a",
+                "read_lids": ["1.2"],
+                "focus_lids": ["1.1", "2.1", "3.1"],
+                "puzzle_heat": {"4.1": 2}
+            })
+        );
+        assert_eq!(reading_state.engagement_by_lid["4.1"].qa_count, 2);
+        assert_eq!(
+            reading_state.engagement_by_lid["4.1"].last_seen_at.as_deref(),
+            Some("2026-01-06T00:00:00Z")
         );
         assert_eq!(
             store.render_reader_profile_md(),
@@ -1537,10 +1514,9 @@ mod tests {
         assert_eq!(s2.read_lids("bookA"), vec!["1.1", "1.2"]);
     }
 
-    // reader_profile 派生 `[ADR-0038]`:已读集(触达序)+ 关注点(note/highlight 去重·LID 序)
-    // + 疑惑点(qa 暂空,诚实);跨书隔离;evidence 全真 LID。
+    // BookReadingState 派生 `[ADR-0075]`:已读集(触达序)+ note/highlight 原始活动;跨书隔离。
     #[test]
-    fn derive_reader_profile_aggregates_deterministically() {
+    fn derive_book_reading_state_aggregates_deterministically() {
         let path = tmp("profile");
         let mut s = MemoryStore::open(&path).unwrap();
         s.mark_read("bookA", "1.1", "t0").unwrap();
@@ -1549,17 +1525,25 @@ mod tests {
         s.save(hl_input("bookA", "2.1", "X", 0, 1), "t3").unwrap(); // 同 LID 关注点去重
         s.save(hl_input("bookA", "2.3", "Y", 0, 1), "t4").unwrap();
         s.mark_read("bookB", "9.9", "t5").unwrap(); // 别书噪声
-        let p = s.derive_reader_profile("bookA");
-        assert_eq!(p.book_id, "bookA");
-        assert_eq!(p.read_lids, vec!["1.1", "1.2"]); // 触达序
-        assert_eq!(p.focus_lids, vec!["2.1", "2.3"]); // note+highlight 去重·LID 序(read 不计入)
-        assert!(p.puzzle_heat.is_empty()); // 无 qa → 卡点热度空
+        let state = s.derive_book_reading_state("bookA");
+        assert_eq!(state.book_id, "bookA");
+        assert_eq!(state.read_lids, vec!["1.1", "1.2"]); // 触达序
+        assert_eq!(state.engagement_by_lid["2.1"].note_count, 1);
+        assert_eq!(state.engagement_by_lid["2.1"].highlight_count, 1);
+        assert_eq!(state.engagement_by_lid["2.3"].highlight_count, 1);
+        assert_eq!(
+            state.legacy_reader_profile().focus_lids,
+            vec!["2.1", "2.3"]
+        );
+        assert!(state
+            .legacy_reader_profile()
+            .puzzle_heat
+            .is_empty());
     }
 
-    // qa 提问热度派生 `[ADR-0041]`:qa 记录按 anchor.lid 聚合条数(不同问题=不同条目);
-    // 重复同问题 upsert 不增条数;跨书隔离;read/note 锚同 lid 也不计入 puzzle_heat(维度隔离)。
+    // qa 原始活动派生 `[ADR-0041/0075]`:不同 qa record 计数;read/note/highlight 各自独立。
     #[test]
-    fn derive_reader_profile_qa_heat_aggregates() {
+    fn derive_book_reading_state_keeps_engagement_dimensions_separate() {
         let path = tmp("qaheat");
         let mut s = MemoryStore::open(&path).unwrap();
         let qa = |lid: &str, q: &str| SaveInput {
@@ -1579,20 +1563,22 @@ mod tests {
         s.save(qa("3.2", "move 语义"), "t2").unwrap();
         s.save(qa("3.2", "所有权怎么传递"), "t3").unwrap(); // 重复同问题 = upsert,不增条数
         s.save(qa("1.1", "这章讲啥"), "t4").unwrap();
-        s.mark_read("bookA", "3.2", "t5").unwrap(); // read 不计入 puzzle_heat
+        s.mark_read("bookA", "3.2", "t5").unwrap();
         s.save(note_input("bookA", "3.2", "笔记"), "t6").unwrap(); // note 不计入
         let mut qb = qa("5.5", "B书问题");
         qb.book_id = "bookB".into();
         s.save(qb, "t7").unwrap(); // 跨书
 
-        let p = s.derive_reader_profile("bookA");
-        assert_eq!(p.puzzle_heat.get("3.2"), Some(&3)); // 3 个不同问题(重复不增)
-        assert_eq!(p.puzzle_heat.get("1.1"), Some(&1));
-        assert!(!p.puzzle_heat.contains_key("5.5")); // 跨书隔离
-        assert_eq!(p.puzzle_heat.len(), 2); // 仅 3.2 / 1.1
-        // 维度隔离:3.2 同时被 read + note,但 puzzle_heat 只数 qa。
-        assert_eq!(p.read_lids, vec!["3.2"]);
-        assert_eq!(p.focus_lids, vec!["3.2"]);
+        let state = s.derive_book_reading_state("bookA");
+        assert_eq!(state.engagement_by_lid["3.2"].qa_count, 3);
+        assert_eq!(state.engagement_by_lid["3.2"].note_count, 1);
+        assert_eq!(state.engagement_by_lid["3.2"].highlight_count, 0);
+        assert_eq!(state.engagement_by_lid["1.1"].qa_count, 1);
+        assert!(!state.engagement_by_lid.contains_key("5.5"));
+        assert_eq!(state.read_lids, vec!["3.2"]);
+        let legacy = state.legacy_reader_profile();
+        assert_eq!(legacy.puzzle_heat.get("3.2"), Some(&3));
+        assert_eq!(legacy.focus_lids, vec!["3.2"]);
     }
 
     // qa-2 透明展示 `[ADR-0041]`:reader-profile.md 卡点段渲染 `lid (×count)` + 嵌套真实问题文本(generated_at 序)。

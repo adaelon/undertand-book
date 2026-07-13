@@ -864,9 +864,9 @@ fn dispatch(
                 );
             };
             let k = args.get("k").and_then(|v| v.as_u64()).map(|u| u as usize);
-            // reader_profile 已读降权 `[ADR-0038]`:从持久账本派生读者画像传入整形。
-            let profile = store.derive_reader_profile(&book.base.book_id);
-            let body = match crate::guided_route_from(book, at, k, &profile) {
+            // 单本阅读状态 `[ADR-0075]`:从持久账本派生 read + engagement 原始信号传入整形。
+            let reading_state = store.derive_book_reading_state(&book.base.book_id);
+            let body = match crate::guided_route_from(book, at, k, &reading_state) {
                 Ok(g) => to_json(&serde_json::json!({ "at": at, "groups": g })),
                 Err(e) => to_json(&e),
             };
@@ -879,9 +879,9 @@ fn dispatch(
                     None,
                 );
             };
-            // 裸「没懂」兜底 `[ADR-0036 决策3]`:确定性 back ∩ 未读前置,未读过滤消费 ② reader_profile。
-            let profile = store.derive_reader_profile(&book.base.book_id);
-            let body = match crate::unvisited_back(book, at, &profile) {
+            // 裸「没懂」兜底 `[ADR-0036 决策3]`:确定性 back ∩ 未读前置,消费单本阅读状态。
+            let reading_state = store.derive_book_reading_state(&book.base.book_id);
+            let body = match crate::unvisited_back(book, at, &reading_state) {
                 Ok(steps) => to_json(&serde_json::json!({ "at": at, "unvisited_back": steps })),
                 Err(e) => to_json(&e),
             };
@@ -2255,10 +2255,10 @@ mod tests {
     }
 
     // P4-5 qa-1 生产 `[ADR-0041]`:dispatch memory.save type=qa → 落 long_term + anchor 设 +
-    // 不产可撤销 effect;recall(type=qa) 取回;derive_reader_profile.puzzle_heat 按 lid 聚合条数。
+    // 不产可撤销 effect;recall(type=qa) 取回;BookReadingState 按 lid 保留 qa_count 原始活动。
     // judgment「是不是实质问题」靠真 LLM 手动验(B2);本测只钉确定性存储 + 派生。
     #[test]
-    fn dispatch_memory_save_qa_lands_longterm_and_feeds_heat() {
+    fn dispatch_memory_save_qa_lands_longterm_and_feeds_engagement() {
         let b = book_leaves(3); // 真 LID: 1, 1.1, 1.2, 1.3
         let mut store = MemoryStore::open(tmp("qa-save")).unwrap();
         let fake = FakeAdapter::new(vec![], vec![]);
@@ -2278,7 +2278,7 @@ mod tests {
         assert!(ok.contains("\"lid\":\"1.2\"")); // anchor 设
         assert!(eff.is_none()); // qa 不产可撤销 effect
 
-        // 同 lid 再问不同问题 → heat=2(内容寻址,两条独立 record)。
+        // 同 lid 再问不同问题 → qa_count=2(内容寻址,两条独立 record)。
         let _ = dispatch(
             "memory.save",
             r#"{"type":"qa","anchor_lid":"1.2","content":"和上一段啥关系"}"#,
@@ -2294,8 +2294,8 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(got.len(), 2);
-        let p = store.derive_reader_profile("bookL");
-        assert_eq!(p.puzzle_heat.get("1.2"), Some(&2));
+        let state = store.derive_book_reading_state("bookL");
+        assert_eq!(state.engagement_by_lid["1.2"].qa_count, 2);
     }
 
     // 闭环验收:agent 经外层 loop 命令面跑通「问→跳转→高亮→记笔记」一次闭环 `[ADR-0007/0015]`。
