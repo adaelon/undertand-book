@@ -146,6 +146,12 @@ paper profile 预构建产物与读时用户任务之间的产品入口层。第
 E 的记忆所在。**独立于只读基座、用户私有、可变、跨书**。两层:会话工作记忆(临时:当前对话+阅读位置)+ 长期记忆(持久:旅程/问答/兴趣/卡点/笔记)。book agent 读写但不拥有。详见 [docs/adr/0006]。
 **记录模型** `[ADR-0015]`(参考 Codex `codex-rs/memories`):结构信封 + 散文 content + **记忆引用锚定**(见下)。命令面 `memory.save/recall/delete`(议题6 定);Codex 式两阶段后台 consolidation(Phase1 抽取阅读会话 / Phase2 合并+遗忘+usage 剪枝)+ 分层渐进披露产物留议题7。
 
+## Memory selection context
+选区创建的 Note 可选携带的结构化来源上下文:保存 `resolved/partial` 状态、用户实际选择的 `raw_quote`、可验证的 `resolved_quote` 与按阅读顺序排列的完整 LID ranges。用户内容可保留 raw quote,但 citations 与精确投影只能使用 resolved quote/ranges。Note 的 `anchor.lid` 仍取首个 resolved LID用于语义定位和排序,PDF 行内标记取末 range 作为显示锚,citations 由 ranges 中的 LID 去重派生;普通旧 Note 无此字段且保持兼容。状态:BOUNDARY_CHANGE。
+
+## Memory replace
+Note 内容编辑使用的原子替换命令:验证旧 `mem_id` 后只更新 content,默认继承 anchor、selection context、citations 与 layer;写入失败时旧记录保持不变。重新定位必须走显式“重新选择”并提交新的 selection context,不得把内容编辑伪装成锚点迁移。状态:NEW。
+
 ## 记忆引用锚定 (memory citation)
 记忆记录回溯到源位置的锚 `[ADR-0015]`,借自 Codex memory 的 `MemoryCitationEntry{path, line_range, note}`——把 Codex 的 `path:行号区间` 换成本项目的 **LID**:`citations:[{lid, book_id, note}]`。使 `memory.recall` 返回的每条记忆**可验证、可跳原文**,是引用红线([docs/adr/0004])在记忆层的延伸。区别于 book 的 `citations[]`(那是问答证据;此为记忆溯源)。状态:NEW(详见 [docs/adr/0015])。
 
@@ -325,6 +331,18 @@ Source review decisions 全部齐备后,系统只执行一次确定性 source re
 
 ## PDF selection map
 后端私有的 char-level、按页分片 PDF 反解 artifact,用于把 PDF 选区或语义 LID/range 转成可保存或可显示的 LID range / PDF rect。状态:NEW(见 [docs/adr/0063])。
+
+## PDF 临时选区快照 (PDF selection draft)
+PDF 原生拖选经 selection map 反解后形成的前端会话态:冻结规范 LID ranges、引用文本与工具条位置,只供用户显式选择高亮、笔记或 Ask AI;它不自动改变 reader 位置、不打开来源正文,在动作执行、取消或新选区替换时销毁。状态:NEW。
+
+## PDF 用户标注投影 (PDF user annotation projection)
+把用户主动保存的 Highlight 与 Note 从 memory 精确投影回原版 PDF 的可变展示层;它不显示自动 source-map regions,不改变 PDF/LID 真相,投影失败时不得用整段 bbox 猜测位置。状态:NEW。
+
+## PDF 行内 Note 标记 (PDF inline note marker)
+锚在 Note 持久化选区最后一个精确字符之后的小型交互标记;点击后打开与 Markdown Note 卡片一致的内容、编辑和删除界面。跨 LID/跨页选区以最后一个 range 作为显示锚,完整 ranges 保留为引用上下文;无法精确反向投影时只在 Notes 列表显示无法定位状态。状态:NEW。
+
+## Ask AI 选区上下文 (Ask AI selection context)
+Markdown 与 PDF 共用的临时引用草稿:保留现有首 LID 与完整 quote 展示,同时携带全部规范 ranges 和 `resolved/partial` 状态;它只在右栏等待用户输入问题,不自动发送、不写 memory、不改变 reader 位置,发送、清除或切换会话后销毁。状态:BOUNDARY_CHANGE。
 
 ## PDF-first reader surface
 paper profile 的主阅读表面:中心区域在当前书具备可用 PDF capability 时渲染原版 PDF 页面,并通过 PDF visual source map 显示 LID 高亮、跳转和证据位置。Markdown/结构化正文仅作为调试、降级和未映射 LID 的 fallback 视图。状态:NEW(见 [docs/adr/0063])。
