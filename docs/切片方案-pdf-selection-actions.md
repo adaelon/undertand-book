@@ -2,7 +2,7 @@
 
 > 定位:让 PDF 原生拖选与 Markdown 正文共用 Highlight、Note、Ask AI 语义,同时保持原版 PDF 纯净阅读。
 > 冻结决策:[ADR-0074](adr/0074-pdf-selection-actions-and-exact-user-annotation-projection.md)。
-> 状态:PS0-PS6 完成;PS7 待实现。
+> 状态:PS0-PS7 全部完成。
 
 ## 0. 冻结边界
 
@@ -697,6 +697,8 @@ pnpm -C packages/web test:e2e
 - **Do**:增强现有 AskDraft,把 ranges/status/raw/resolved quote 传入 agent metadata;用真实 PDF fixture 验收三动作。
 - **Do not**:新增 PDF-only agent 入口或自动发送。
 - **Done**:跨 LID resolved/partial prompt contract、citation gate、全量 Web/Rust tests、typecheck/build、Playwright desktop/mobile 全绿。
+
+状态:完成;AskQuote provenance 已贯通 Web/Server/history/runtime prompt,服务端从 ranges 重建 resolved quote,真实 PDF 三动作与全量回归已通过。
 
 前置条件:PS5 能建立 resolved/partial AskDraft;PS6 完成完整 PDF annotation UI。
 

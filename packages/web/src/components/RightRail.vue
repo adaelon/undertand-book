@@ -1,15 +1,12 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from "vue";
-import type { AgentEffect, FormulaSemantics, MemoryRecord, OuterOutcome, TraceStep } from "../api";
+import type { AgentEffect, AskQuote, FormulaSemantics, MemoryRecord, OuterOutcome, TraceStep } from "../api";
 import type { PdfAnnotationLocation } from "../pdf-annotation-projection";
 import { rangeToMarkdown } from "../selection";
 
 type ContextTab = "agent" | "trace" | "formula" | "notes";
 
-interface AskDraft {
-  lid: string;
-  quote: string;
-}
+type AskDraft = AskQuote;
 interface ChatTurn {
   user: string;
   outcome: OuterOutcome | null;
@@ -158,6 +155,9 @@ function leadingQuote(content: string): string | null {
   const quote = quoteLines.join(" ").replace(/\s+/g, " ").trim();
   return quote || null;
 }
+function askQuoteLabel(quote: AskQuote): string {
+  return quote.status === "partial" ? "部分定位引用" : "引用来源";
+}
 function annotationLocationLabel(record: MemoryRecord): string | null {
   const status = props.annotationLocation?.[record.mem_id];
   if (status === "exact") return "PDF 已定位";
@@ -239,7 +239,7 @@ function deleteHistorySession(sessionId: string) {
         <div v-for="(turn, ti) in props.chat" :key="ti" class="turn">
           <div v-if="turn.questionQuote" class="turn-quote">
             <div class="turn-quote-head">
-              <span>引用来源</span>
+              <span>{{ askQuoteLabel(turn.questionQuote) }}</span>
               <code>{{ turn.questionQuote.lid }}</code>
             </div>
             <blockquote>{{ turn.questionQuote.quote }}</blockquote>
@@ -296,7 +296,7 @@ function deleteHistorySession(sessionId: string) {
       <div class="agent-input">
         <div v-if="props.askDraft" class="ask-draft">
           <div class="ask-draft-head">
-            <span>引用来源</span>
+            <span>{{ askQuoteLabel(props.askDraft) }}</span>
             <code>{{ props.askDraft.lid }}</code>
             <button title="清除引用来源" @click="emit('clear-ask')">×</button>
           </div>

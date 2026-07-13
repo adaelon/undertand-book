@@ -604,6 +604,10 @@ export interface FormulaSemantics {
 export interface AskQuote {
   lid: string;
   quote: string;
+  ranges?: SelectedRange[];
+  status?: SelectionResolution;
+  raw_quote?: string;
+  resolved_quote?: string;
 }
 export interface AgentChatTurn {
   user: string;

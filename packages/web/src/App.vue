@@ -5,6 +5,7 @@ import { api, ApiError } from "./api";
 import type {
   AgentChatSessionSummary,
   AgentChatTurn as StoredAgentChatTurn,
+  AskQuote,
   AgentEffect,
   AgentHistoryResponse,
   BuildWorkbenchSnapshot,
@@ -2047,14 +2048,7 @@ interface ChatTurn {
   questionAnchorLid: string | null;
   questionQuote: AskDraft | null;
 }
-interface AskDraft {
-  lid: string;
-  quote: string;
-  ranges?: SelectionContext["ranges"];
-  status?: SelectionContext["status"];
-  raw_quote?: string;
-  resolved_quote?: string;
-}
+type AskDraft = AskQuote;
 const chat = ref<ChatTurn[]>([]);
 const chatSessions = ref<AgentChatSessionSummary[]>([]);
 const activeChatSessionId = ref("");
@@ -2230,9 +2224,6 @@ async function sendAgent() {
   if (!msg) return;
   const draft = askDraft.value;
   const questionAnchorLid = draft?.lid ?? selectedLid.value ?? viewport.value?.top_lid ?? null;
-  const outbound = draft
-    ? `引用原文 [LID: ${draft.lid}]:\n「${draft.quote}」\n\n我的问题:\n${msg}`
-    : msg;
   const turn: ChatTurn = { user: msg, outcome: null, pending: true, questionAnchorLid, questionQuote: draft ? { ...draft } : null };
   chat.value.push(turn);
   agentInput.value = "";
@@ -2240,7 +2231,7 @@ async function sendAgent() {
   sending.value = true;
   banner.value = "";
   try {
-    turn.outcome = await api.agentChat(outbound, {
+    turn.outcome = await api.agentChat(msg, {
       display_user: msg,
       question_anchor_lid: questionAnchorLid,
       question_quote: draft ? { ...draft } : null,
@@ -2542,6 +2533,8 @@ function resetBookSessionUi() {
   chat.value = [];
   chatSessions.value = [];
   activeChatSessionId.value = "";
+  askDraft.value = null;
+  agentInput.value = "";
   handled.value = {};
   showTrace.value = {};
 }
