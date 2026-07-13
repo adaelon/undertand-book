@@ -42,7 +42,6 @@ const pageList = ref<HTMLElement | null>(null);
 const pdfDoc = shallowRef<PdfDocument | null>(null);
 const pdfLoading = ref(false);
 const pdfError = ref<string | null>(null);
-const projectedRegions = ref<Array<{ lid: string; region: PdfRegion }>>([]);
 const pageEls = new Map<number, HTMLElement>();
 const canvasEls = new Map<number, HTMLCanvasElement>();
 const textLayerEls = new Map<number, HTMLElement>();
@@ -66,15 +65,6 @@ const entriesByPage = computed(() => {
   }
   return map;
 });
-const projectedByPage = computed(() => {
-  const map = new Map<number, Array<{ lid: string; region: PdfRegion }>>();
-  for (const item of projectedRegions.value) {
-    const list = map.get(item.region.pageIndex);
-    if (list) list.push(item);
-    else map.set(item.region.pageIndex, [item]);
-  }
-  return map;
-});
 const entryByLid = computed(() => new Map((props.sourceMap?.entries ?? []).map((entry) => [entry.lid, entry])));
 const activeEntry = computed(() => {
   const lid = props.activeLid ?? props.selectedLid;
@@ -94,10 +84,6 @@ const mapCapabilityLabel = computed(() => capabilityStatusLabels[mapCapability.v
 
 function pageRegions(pageIndex: number): Array<{ entry: PdfSourceMapEntry; region: PdfRegion }> {
   return entriesByPage.value.get(pageIndex) ?? [];
-}
-
-function projectedPageRegions(pageIndex: number): Array<{ lid: string; region: PdfRegion }> {
-  return projectedByPage.value.get(pageIndex) ?? [];
 }
 
 function nearestMappedLid(centerPage: number): string | null {
@@ -183,16 +169,6 @@ function pageShellStyle(page: PdfSourceMap["pages"][number]): Record<string, str
   };
 }
 
-function regionStyle(page: PdfSourceMap["pages"][number], region: PdfRegion): Record<string, string> {
-  const [x1, y1, x2, y2] = region.bbox;
-  return {
-    left: `${(x1 / page.width) * 100}%`,
-    top: `${((page.height - y2) / page.height) * 100}%`,
-    width: `${((x2 - x1) / page.width) * 100}%`,
-    height: `${((y2 - y1) / page.height) * 100}%`,
-  };
-}
-
 function pointToPdf(pageIndex: number, event: MouseEvent): { x: number; y: number } | null {
   const page = props.sourceMap?.pages.find((p) => p.pageIndex === pageIndex);
   const pageEl = pageEls.get(pageIndex);
@@ -225,14 +201,6 @@ function onPagePointer(pageIndex: number, event: MouseEvent) {
 function onPageClick(pageIndex: number, event: MouseEvent) {
   const entry = hitEntry(pageIndex, event);
   if (entry) emit("goto", entry.lid);
-}
-
-function regionClass(entry: PdfSourceMapEntry): Record<string, boolean> {
-  return {
-    active: entry.lid === props.activeLid,
-    selected: entry.lid === props.selectedLid,
-    fallback: entry.status !== "word_mapped",
-  };
 }
 
 function setPageRef(pageIndex: number, el: unknown) {
@@ -469,20 +437,6 @@ async function resolvePdfSelection() {
   }
 }
 
-async function projectActiveRange() {
-  const lid = props.activeLid ?? props.selectedLid;
-  projectedRegions.value = [];
-  if (!lid) return;
-  try {
-    const response = await api.pdfRangesProject([{ lid }]);
-    projectedRegions.value = response.projections.flatMap((projection) =>
-      projection.regions.map((region) => ({ lid: projection.lid, region })),
-    );
-  } catch {
-    projectedRegions.value = [];
-  }
-}
-
 watch(
   () => [props.pdfUrl, props.sourceMap?.config_hash] as const,
   () => {
@@ -495,7 +449,6 @@ watch(
   () => [props.activeLid, props.selectedLid, props.sourceMap?.config_hash] as const,
   () => {
     void scrollActiveIntoView();
-    void projectActiveRange();
   },
 );
 
@@ -548,21 +501,6 @@ onBeforeUnmount(() => {
         <canvas :ref="(el) => setCanvasRef(page.pageIndex, el)" class="pdf-page-canvas"></canvas>
         <div :ref="(el) => setTextLayerRef(page.pageIndex, el)" class="pdf-text-layer"></div>
         <div class="pdf-page-label">{{ page.page_label ?? page.pageIndex + 1 }}</div>
-        <div
-          v-for="{ entry, region } in pageRegions(page.pageIndex)"
-          :key="`${entry.lid}:${region.region_id}`"
-          class="pdf-region"
-          :class="regionClass(entry)"
-          :style="regionStyle(page, region)"
-          :title="entry.lid"
-        ></div>
-        <div
-          v-for="{ lid, region } in projectedPageRegions(page.pageIndex)"
-          :key="`projected:${lid}:${region.region_id}`"
-          class="pdf-region projected"
-          :style="regionStyle(page, region)"
-          :title="lid"
-        ></div>
         <p v-if="renderStates[page.pageIndex]?.error" class="pdf-page-error">
           {{ renderStates[page.pageIndex]?.error }}
         </p>
@@ -688,29 +626,6 @@ onBeforeUnmount(() => {
   color: var(--muted);
   font-size: 0.68rem;
   font-variant-numeric: tabular-nums;
-}
-.pdf-region {
-  position: absolute;
-  z-index: 2;
-  min-width: 4px;
-  min-height: 4px;
-  border: 1px solid rgba(93, 184, 166, 0.62);
-  background: rgba(93, 184, 166, 0.12);
-  padding: 0;
-  pointer-events: none;
-}
-.pdf-region.fallback {
-  border-color: rgba(204, 120, 92, 0.62);
-  background: rgba(204, 120, 92, 0.12);
-}
-.pdf-region.active,
-.pdf-region.selected,
-.pdf-region.projected {
-  border-color: var(--reader-amber);
-  background: rgba(212, 160, 23, 0.24);
-}
-.pdf-region.projected {
-  z-index: 3;
 }
 .pdf-map-foot {
   padding: 0.7rem 0.8rem;

@@ -133,6 +133,42 @@ describe("PdfReaderPane", () => {
     wrapper.unmount();
   });
 
+  it("keeps source-map geometry interactive without painting automatic PDF masks", async () => {
+    const mappedSource: PdfSourceMap = {
+      ...sourceMap,
+      entries: [{
+        lid: "1.1",
+        source_span: { start: 0, end: 10 },
+        status: "word_mapped",
+        regions: [{ region_id: "r-1", pageIndex: 0, bbox: [0, 0, 600, 800] }],
+        primary_region: { region_id: "r-1", pageIndex: 0, bbox: [0, 0, 600, 800] },
+        alignment: { confidence: 1 },
+      }],
+    };
+    const wrapper = mount(PdfReaderPane, {
+      props: {
+        sourceManifest: null,
+        sourceMap: mappedSource,
+        pdfUrl: "/api/book/pdf/original",
+        activeLid: "1.1",
+        selectedLid: null,
+      },
+    });
+    await flushPromises();
+    await flushPromises();
+
+    expect(wrapper.findAll(".pdf-region")).toHaveLength(0);
+    const page = wrapper.findAll(".pdf-page-shell")[0];
+    vi.spyOn(page.element, "getBoundingClientRect").mockReturnValue({
+      x: 0, y: 0, top: 0, bottom: 800, left: 0, right: 600,
+      width: 600, height: 800, toJSON: () => ({}),
+    });
+    await page.trigger("click", { clientX: 300, clientY: 400 });
+    expect(wrapper.emitted("goto")?.at(-1)).toEqual(["1.1"]);
+
+    wrapper.unmount();
+  });
+
   it("coalesces scrolling and resolves a cross-page center to the nearest mapped LID", async () => {
     const mappedSource: PdfSourceMap = {
       ...sourceMap,

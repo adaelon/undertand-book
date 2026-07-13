@@ -13,6 +13,29 @@ async function expectTextBlocksNotClipped(locator: Locator) {
   expect(failures).toEqual([]);
 }
 
+async function expectRegionLabelsSeparated(locator: Locator) {
+  const failures = await locator.evaluateAll((rows) => {
+    const messages: string[] = [];
+    let previousTitleBottom = Number.NEGATIVE_INFINITY;
+    rows.forEach((row, index) => {
+      const title = row.querySelector<HTMLElement>(".paper-map-region-copy strong");
+      const pages = row.querySelector<HTMLElement>(".paper-map-region-copy small");
+      if (!title || !pages) return;
+      const titleRect = title.getBoundingClientRect();
+      const pagesRect = pages.getBoundingClientRect();
+      if (titleRect.top < previousTitleBottom - 0.5) {
+        messages.push(`region ${index} title overlaps the previous title`);
+      }
+      if (pagesRect.top < titleRect.bottom - 0.5) {
+        messages.push(`region ${index} page range shares the long-title line`);
+      }
+      previousTitleBottom = titleRect.bottom;
+    });
+    return messages;
+  });
+  expect(failures).toEqual([]);
+}
+
 test("desktop expansion preserves the PDF surface", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto("/paper-minimap-visual.html");
@@ -27,6 +50,7 @@ test("desktop expansion preserves the PDF surface", async ({ page }) => {
   expect(map!.x + map!.width).toBeLessThanOrEqual(after!.x);
   await expect(page.locator("[data-testid='skim-route']")).toBeVisible();
   await expect(page.locator("[data-testid='global-chain'] .paper-map-chain-row")).toHaveCount(5);
+  await expectRegionLabelsSeparated(page.locator(".paper-map-region-list button"));
 
   await page.getByRole("button", { name: "摘要", exact: true }).click();
   await expect(page.locator("[data-testid='abstract-structure']")).toBeVisible();
@@ -40,7 +64,7 @@ test("desktop expansion preserves the PDF surface", async ({ page }) => {
   await expect(page.locator("[data-testid='deep-region']")).toBeVisible();
   await expect(page.locator("[data-testid='abstract-structure']")).toHaveCount(0);
   await expect(page.locator(".paper-map-region-list button.lens-focus")).toHaveCount(1);
-  await expect(page.locator(".paper-map-shell")).toContainText("材料与方法");
+  await expect(page.locator(".paper-map-shell")).toContainText("数据来源、预处理流程与多阶段实验方法");
   await expect(page.locator(".paper-map-shell")).toContainText("BERT");
   await expect(page.locator(".paper-map-shell")).toContainText("LongMethodName-ExtremelySpecificVariant");
   await expect(page.locator(".paper-map-shell")).toContainText("覆盖主要对照组与消融条件的实验设计");

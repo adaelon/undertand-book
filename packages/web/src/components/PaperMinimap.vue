@@ -610,8 +610,9 @@ function relationLabel(relation: string): string {
 }
 .paper-map-region-list {
   display: grid;
+  grid-auto-rows: max-content;
   align-content: start;
-  gap: 0.15rem;
+  gap: 0.25rem;
   min-width: 0;
   max-height: 18rem;
   overflow-y: auto;
@@ -797,8 +798,9 @@ function relationLabel(relation: string): string {
 .paper-map-region-list button {
   display: grid;
   grid-template-columns: 8px minmax(0, 1fr);
-  align-items: center;
+  align-items: start;
   gap: 0.45rem;
+  height: auto;
   min-width: 0;
   min-height: 34px;
   border: 0;
@@ -817,26 +819,28 @@ function relationLabel(relation: string): string {
   box-shadow: inset 2px 0 var(--map-accent);
 }
 .paper-map-region-swatch {
+  align-self: start;
   width: 5px;
   height: 24px;
+  margin-top: 0.1rem;
   border-radius: 2px;
   background: #aeb7b4;
 }
 .paper-map-region-copy {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0.15rem;
   min-width: 0;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 0.4rem;
 }
 .paper-map-region-copy strong {
+  min-width: 0;
   overflow-wrap: anywhere;
   font-size: 0.75rem;
   line-height: 1.4;
   white-space: normal;
 }
 .paper-map-region-copy small {
-  flex: 0 0 auto;
+  justify-self: end;
   color: var(--stone);
   font-family: var(--mono);
   font-size: 0.65rem;

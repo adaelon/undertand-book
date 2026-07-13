@@ -100,7 +100,12 @@ const localization: PaperMinimapLocalization = {
   locale: "zh-CN",
   source: "cache",
   region_labels: Object.fromEntries([
-    "摘要", "引言", "材料与方法", "结果", "讨论", "结论",
+    "研究摘要与核心发现概览",
+    "研究背景、临床问题与目标界定",
+    "数据来源、预处理流程与多阶段实验方法",
+    "跨队列验证结果、统计不确定性与敏感性分析",
+    "局限性、外部效度与潜在偏差讨论",
+    "结论、临床意义与后续研究方向",
   ].map((label, index) => [`region:${index}`, label])),
   landmark_labels: {
     "landmark:research_question:1.1": "摘要中的研究问题与适用边界",
