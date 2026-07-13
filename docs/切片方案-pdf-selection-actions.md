@@ -2,7 +2,7 @@
 
 > 定位:让 PDF 原生拖选与 Markdown 正文共用 Highlight、Note、Ask AI 语义,同时保持原版 PDF 纯净阅读。
 > 冻结决策:[ADR-0074](adr/0074-pdf-selection-actions-and-exact-user-annotation-projection.md)。
-> 状态:PS0-PS2 完成;PS3-PS7 待实现。
+> 状态:PS0-PS3 完成;PS4-PS7 待实现。
 
 ## 0. 冻结边界
 
@@ -400,6 +400,8 @@ pnpm -C packages/web typecheck
 - **Do**:让 `pdf_ranges.project` 真正消费 range,从 char-level selection shards 返回精确 glyph/line rects 与 terminal coverage。
 - **Do not**:恢复自动 source-map overlays。
 - **Done**:单行/跨行/跨页/旋转/partial/unmapped/末字符 tests 全绿;整段 bbox fallback 被拒绝。
+
+状态:完成;range 必填,字符级 rect/连续 coverage/terminal rect 已由 selection shards 确定性返回。
 
 前置条件:PS1 已冻结 `SelectedRange` 的 UTF-16 口径;PS2 可并行但不阻塞本刀。
 

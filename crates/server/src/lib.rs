@@ -1040,7 +1040,7 @@ struct PdfSelectionResolveResponse {
 #[derive(Debug, Deserialize)]
 struct PdfRangeInput {
     lid: String,
-    range: Option<SourceSpanDto>,
+    range: SourceSpanDto,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1051,11 +1051,21 @@ struct PdfRangesProjectInput {
 #[derive(Debug, Serialize, PartialEq)]
 struct PdfRangeProjection {
     lid: String,
-    range: Option<SourceSpanDto>,
+    range: SourceSpanDto,
     status: String,
-    source_span: Option<SourceSpanDto>,
-    primary_region: Option<serde_json::Value>,
-    regions: Vec<serde_json::Value>,
+    rects: Vec<ExactPdfRect>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    covered_range: Option<SourceSpanDto>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    terminal_rect: Option<ExactPdfRect>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+struct ExactPdfRect {
+    #[serde(rename = "pageIndex")]
+    page_index: usize,
+    bbox: [f64; 4],
+    source_span: SourceSpanDto,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -5555,6 +5565,7 @@ struct SelectionCharHit {
     char_index: usize,
     lid: Option<String>,
     source_span: SourceSpanDto,
+    rect: PdfPageRectDto,
 }
 
 fn rect_intersects(a: [f64; 4], b: [f64; 4]) -> bool {
@@ -5660,6 +5671,7 @@ fn selection_hits_for_page(
             char_index: ch.get("char_index").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
             lid,
             source_span,
+            rect,
         });
     }
     Ok((hits, unmapped_hits))
@@ -5792,20 +5804,90 @@ fn route_pdf_selection_resolve(book: &Book, book_dir: &Path, body: &serde_json::
     })
 }
 
-fn pdf_source_map_value(book_dir: &Path) -> Result<serde_json::Value, ToolError> {
-    let manifest = source_manifest_value(book_dir)?;
-    if !pdf_capability_allows_runtime_map(&manifest) {
+fn selection_page_shards(book_dir: &Path) -> Result<Vec<(usize, PathBuf)>, ToolError> {
+    let manifest = selection_manifest_value(book_dir)?;
+    let Some(shards) = manifest.get("page_shards").and_then(|value| value.as_array()) else {
         return Err(ToolError {
-            error_code: "PDF_SOURCE_MAP_UNAVAILABLE".into(),
-            category: "validation".into(),
-            message: "source_manifest.v2 does not expose a usable PDF source map capability".into(),
+            error_code: "PDF_SELECTION_MAP_INVALID".into(),
+            category: "internal".into(),
+            message: "pdf_selection_map.page_shards missing or not an array".into(),
         });
+    };
+    let mut out = Vec::with_capacity(shards.len());
+    for shard in shards {
+        let Some(page_index) = shard.get("pageIndex").and_then(|value| value.as_u64()) else {
+            return Err(ToolError {
+                error_code: "PDF_SELECTION_MAP_INVALID".into(),
+                category: "internal".into(),
+                message: "pdf_selection_map page shard missing pageIndex".into(),
+            });
+        };
+        let Some(path) = shard.get("path").and_then(|value| value.as_str()) else {
+            return Err(ToolError {
+                error_code: "PDF_SELECTION_MAP_INVALID".into(),
+                category: "internal".into(),
+                message: "pdf_selection_map page shard missing path".into(),
+            });
+        };
+        out.push((
+            page_index as usize,
+            safe_manifest_path(&book_dir.join("pdf_selection_map"), path)?,
+        ));
     }
-    read_json_artifact(
-        &book_dir.join("pdf_source_map.json"),
-        "PDF_SOURCE_MAP_NOT_FOUND",
-        "PDF_SOURCE_MAP_INVALID",
-    )
+    out.sort_by_key(|(page_index, _)| *page_index);
+    Ok(out)
+}
+
+fn selection_chars_for_source_range(
+    book_dir: &Path,
+    lid: &str,
+    target: SourceSpanDto,
+) -> Result<Vec<SelectionCharHit>, ToolError> {
+    let mut hits = Vec::new();
+    for (page_index, shard_path) in selection_page_shards(book_dir)? {
+        let shard = read_json_artifact(
+            &shard_path,
+            "PDF_SELECTION_PAGE_NOT_FOUND",
+            "PDF_SELECTION_PAGE_INVALID",
+        )?;
+        let Some(chars) = shard.get("chars").and_then(|value| value.as_array()) else {
+            return Err(ToolError {
+                error_code: "PDF_SELECTION_PAGE_INVALID".into(),
+                category: "internal".into(),
+                message: format!(
+                    "pdf_selection_map page shard has no chars array: {}",
+                    shard_path.display()
+                ),
+            });
+        };
+        for ch in chars {
+            if ch.get("lid").and_then(|value| value.as_str()) != Some(lid) {
+                continue;
+            }
+            let Some(source_span) = ch.get("source_span").and_then(parse_source_span) else {
+                continue;
+            };
+            if source_span.start >= target.end || source_span.end <= target.start {
+                continue;
+            }
+            let Some(rect) = ch.get("rect").and_then(parse_pdf_rect) else {
+                continue;
+            };
+            if rect.page_index != page_index {
+                continue;
+            }
+            hits.push(SelectionCharHit {
+                page_index,
+                char_index: ch.get("char_index").and_then(|value| value.as_u64()).unwrap_or(0)
+                    as usize,
+                lid: Some(lid.to_string()),
+                source_span,
+                rect,
+            });
+        }
+    }
+    hits.sort_by_key(|hit| (hit.page_index, hit.char_index));
+    Ok(hits)
 }
 
 fn route_pdf_ranges_project(book: &Book, book_dir: &Path, body: &serde_json::Value) -> Reply {
@@ -5818,61 +5900,86 @@ fn route_pdf_ranges_project(book: &Book, book_dir: &Path, body: &serde_json::Val
             );
         }
     };
-    let map = match pdf_source_map_value(book_dir) {
-        Ok(map) => map,
-        Err(e) => return err_reply(&e),
-    };
-    let Some(entries) = map.get("entries").and_then(|v| v.as_array()) else {
-        return err_reply(&ToolError {
-            error_code: "PDF_SOURCE_MAP_INVALID".into(),
-            category: "internal".into(),
-            message: "pdf_source_map.entries missing or not an array".into(),
-        });
-    };
-
     let mut projections = Vec::new();
     for input_range in input.ranges {
-        if let Err(e) = lid_span(book, &input_range.lid) {
-            return err_reply(&e);
-        }
-        let entry = entries.iter().find(|entry| {
-            entry.get("lid").and_then(|v| v.as_str()) == Some(input_range.lid.as_str())
-        });
-        let Some(entry) = entry else {
-            projections.push(PdfRangeProjection {
-                lid: input_range.lid,
-                range: input_range.range,
-                status: "unmapped".into(),
-                source_span: None,
-                primary_region: None,
-                regions: vec![],
-            });
-            continue;
+        let node_span = match lid_span(book, &input_range.lid) {
+            Ok(span) => span,
+            Err(e) => return err_reply(&e),
         };
-        let regions = entry
-            .get("regions")
-            .and_then(|v| v.as_array())
-            .map(|items| items.to_vec())
-            .unwrap_or_default();
-        let source_span = entry.get("source_span").and_then(parse_source_span);
-        let entry_status = entry
-            .get("status")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unmapped");
-        let status = if regions.is_empty() || entry_status == "unmapped" {
+        let text_len = match book.text(&input_range.lid, None) {
+            Ok(text) => text.encode_utf16().count(),
+            Err(e) => return err_reply(&e),
+        };
+        if input_range.range.start >= input_range.range.end || input_range.range.end > text_len {
+            return validation(
+                "INVALID_PDF_RANGE",
+                &format!(
+                    "reader.pdf_ranges.project range 越界: {} [{}..{}) / {}",
+                    input_range.lid,
+                    input_range.range.start,
+                    input_range.range.end,
+                    text_len
+                ),
+            );
+        }
+        let target = SourceSpanDto {
+            start: node_span.start + input_range.range.start,
+            end: node_span.start + input_range.range.end,
+        };
+        let hits = match selection_chars_for_source_range(book_dir, &input_range.lid, target) {
+            Ok(hits) => hits,
+            Err(e) => return err_reply(&e),
+        };
+        let mut coverage_spans = hits.iter().map(|hit| hit.source_span).collect::<Vec<_>>();
+        coverage_spans.sort_by_key(|span| (span.start, span.end));
+        let mut cursor = target.start;
+        for span in coverage_spans {
+            if span.start > cursor {
+                break;
+            }
+            if span.end > cursor {
+                cursor = span.end.min(target.end);
+            }
+            if cursor == target.end {
+                break;
+            }
+        }
+        let exact = cursor == target.end;
+        let status = if hits.is_empty() {
             "unmapped"
-        } else if entry_status == "word_mapped" {
+        } else if exact {
             "exact"
         } else {
-            "lid_region_fallback"
+            "partial"
         };
+        let covered_range = (cursor > target.start).then_some(SourceSpanDto {
+            start: input_range.range.start,
+            end: input_range.range.start + (cursor - target.start),
+        });
+        let rects = hits
+            .iter()
+            .map(|hit| ExactPdfRect {
+                page_index: hit.page_index,
+                bbox: hit.rect.bbox,
+                source_span: hit.source_span,
+            })
+            .collect::<Vec<_>>();
+        let terminal_rect = exact.then(|| {
+            hits.iter()
+                .find(|hit| hit.source_span.start < target.end && hit.source_span.end >= target.end)
+                .map(|hit| ExactPdfRect {
+                    page_index: hit.page_index,
+                    bbox: hit.rect.bbox,
+                    source_span: hit.source_span,
+                })
+        }).flatten();
         projections.push(PdfRangeProjection {
             lid: input_range.lid,
             range: input_range.range,
             status: status.into(),
-            source_span,
-            primary_region: entry.get("primary_region").cloned(),
-            regions,
+            rects,
+            covered_range,
+            terminal_rect,
         });
     }
     ok_json(&PdfRangesProjectResponse { projections })
@@ -6635,6 +6742,41 @@ mod tests {
             ]
         });
         std::fs::write(selection_dir.join("pages").join("0.json"), page.to_string()).unwrap();
+    }
+
+    fn write_projection_selection_pages(s: &AppState, pages: Vec<serde_json::Value>) {
+        let selection_dir = s.book_dir.join("pdf_selection_map");
+        std::fs::create_dir_all(selection_dir.join("pages")).unwrap();
+        let page_shards = pages
+            .iter()
+            .map(|page| {
+                let page_index = page["pageIndex"].as_u64().unwrap();
+                serde_json::json!({
+                    "pageIndex": page_index,
+                    "path": format!("pages/{page_index}.json"),
+                    "sha256": format!("fixture-{page_index}")
+                })
+            })
+            .collect::<Vec<_>>();
+        let manifest = serde_json::json!({
+            "version":"pdf_selection_map.v1",
+            "book_id":s.book.base.book_id,
+            "coordinate_system":{
+                "space":"pdf_user_space","origin":"bottom_left","unit":"pt",
+                "rotation_applied":false
+            },
+            "config_hash":"projection-fixture",
+            "page_shards":page_shards
+        });
+        std::fs::write(selection_dir.join("manifest.json"), manifest.to_string()).unwrap();
+        for page in pages {
+            let page_index = page["pageIndex"].as_u64().unwrap();
+            std::fs::write(
+                selection_dir.join("pages").join(format!("{page_index}.json")),
+                page.to_string(),
+            )
+            .unwrap();
+        }
     }
 
     fn write_workbench_review_artifacts(s: &mut AppState) {
@@ -8287,14 +8429,187 @@ mod tests {
         );
         assert_eq!(projected.status, 200);
         let projected_body: serde_json::Value = serde_json::from_str(&projected.body).unwrap();
-        assert_eq!(
-            projected_body["projections"][0]["status"],
-            "lid_region_fallback"
+        let projection = &projected_body["projections"][0];
+        assert_eq!(projection["status"], "exact");
+        assert_eq!(projection["covered_range"], serde_json::json!({"start":0,"end":3}));
+        assert_eq!(projection["rects"].as_array().unwrap().len(), 3);
+        assert_eq!(projection["rects"][0]["bbox"], serde_json::json!([10.0,10.0,12.0,20.0]));
+        assert_eq!(projection["terminal_rect"]["bbox"], serde_json::json!([14.0,10.0,16.0,20.0]));
+        assert!(projection.get("primary_region").is_none());
+        assert!(projection.get("regions").is_none());
+    }
+
+    #[test]
+    fn pdf_range_projection_reports_partial_missing_terminal_and_rejects_source_map_fallback() {
+        let mut s = state_named("pdf-range-partial");
+        write_pdf_runtime_artifacts(&mut s);
+        write_projection_selection_pages(
+            &s,
+            vec![serde_json::json!({
+                "version":"pdf_selection_map_page.v1","book_id":s.book.base.book_id,
+                "pageIndex":0,"rotate":0,
+                "chars":[
+                    {"char_index":0,"text":"X","rect":{"pageIndex":0,"bbox":[1.0,20.0,2.0,22.0]},"source_span":{"start":0,"end":1},"lid":"1.1"},
+                    {"char_index":1,"text":"X","rect":{"pageIndex":0,"bbox":[1.0,10.0,2.0,12.0]},"source_span":{"start":1,"end":2},"lid":"1.1"},
+                    {"char_index":2,"text":"X","rect":{"pageIndex":0,"bbox":[2.0,10.0,3.0,12.0]},"source_span":{"start":2,"end":3},"lid":"1.1"}
+                ]
+            })],
         );
-        assert_eq!(
-            projected_body["projections"][0]["primary_region"]["region_id"],
-            "r1"
+        let cross_line = post(
+            &mut s,
+            "/reader/pdf_ranges.project",
+            r#"{"ranges":[{"lid":"1.1","range":{"start":0,"end":3}}]}"#,
         );
+        let body: serde_json::Value = serde_json::from_str(&cross_line.body).unwrap();
+        assert_eq!(body["projections"][0]["status"], "exact");
+        assert_eq!(body["projections"][0]["rects"].as_array().unwrap().len(), 3);
+        assert_eq!(
+            body["projections"][0]["rects"][1]["bbox"],
+            serde_json::json!([1.0,10.0,2.0,12.0])
+        );
+
+        write_projection_selection_pages(
+            &s,
+            vec![serde_json::json!({
+                "version":"pdf_selection_map_page.v1","book_id":s.book.base.book_id,
+                "pageIndex":0,"rotate":0,
+                "chars":[
+                    {"char_index":0,"text":"X","rect":{"pageIndex":0,"bbox":[1.0,1.0,2.0,2.0]},"source_span":{"start":0,"end":1},"lid":"1.1"},
+                    {"char_index":2,"text":"X","rect":{"pageIndex":0,"bbox":[3.0,1.0,4.0,2.0]},"source_span":{"start":2,"end":3},"lid":"1.1"}
+                ]
+            })],
+        );
+        let partial = post(
+            &mut s,
+            "/reader/pdf_ranges.project",
+            r#"{"ranges":[{"lid":"1.1","range":{"start":0,"end":3}}]}"#,
+        );
+        assert_eq!(partial.status, 200);
+        let body: serde_json::Value = serde_json::from_str(&partial.body).unwrap();
+        let projection = &body["projections"][0];
+        assert_eq!(projection["status"], "partial");
+        assert_eq!(projection["covered_range"], serde_json::json!({"start":0,"end":1}));
+        assert_eq!(projection["rects"].as_array().unwrap().len(), 2);
+        assert!(projection["terminal_rect"].is_null());
+
+        write_projection_selection_pages(
+            &s,
+            vec![serde_json::json!({
+                "version":"pdf_selection_map_page.v1","book_id":s.book.base.book_id,
+                "pageIndex":0,"rotate":0,
+                "chars":[
+                    {"char_index":0,"text":"X","rect":{"pageIndex":0,"bbox":[1.0,1.0,2.0,2.0]},"source_span":{"start":0,"end":1},"lid":"1.1"},
+                    {"char_index":1,"text":"X","rect":{"pageIndex":0,"bbox":[2.0,1.0,3.0,2.0]},"source_span":{"start":1,"end":2},"lid":"1.1"}
+                ]
+            })],
+        );
+        let missing_terminal = post(
+            &mut s,
+            "/reader/pdf_ranges.project",
+            r#"{"ranges":[{"lid":"1.1","range":{"start":0,"end":3}}]}"#,
+        );
+        let body: serde_json::Value = serde_json::from_str(&missing_terminal.body).unwrap();
+        assert_eq!(body["projections"][0]["status"], "partial");
+        assert_eq!(body["projections"][0]["covered_range"], serde_json::json!({"start":0,"end":2}));
+        assert!(body["projections"][0]["terminal_rect"].is_null());
+
+        write_projection_selection_pages(
+            &s,
+            vec![serde_json::json!({
+                "version":"pdf_selection_map_page.v1","book_id":s.book.base.book_id,
+                "pageIndex":0,"rotate":0,"chars":[]
+            })],
+        );
+        let unmapped = post(
+            &mut s,
+            "/reader/pdf_ranges.project",
+            r#"{"ranges":[{"lid":"1.1","range":{"start":0,"end":3}}]}"#,
+        );
+        let body: serde_json::Value = serde_json::from_str(&unmapped.body).unwrap();
+        assert_eq!(body["projections"][0]["status"], "unmapped");
+        assert_eq!(body["projections"][0]["rects"], serde_json::json!([]));
+        assert!(body["projections"][0]["covered_range"].is_null());
+        assert!(body["projections"][0]["terminal_rect"].is_null());
+    }
+
+    #[test]
+    fn pdf_range_projection_preserves_request_page_char_order_and_rotated_geometry() {
+        let mut s = state_named("pdf-range-order");
+        let base = multi_leaf_base("sample-book", 2);
+        s.book = Book::new(base, &"X".repeat(20));
+        s.reader = Reader::new(&s.book, DEFAULT_RADIUS);
+        write_pdf_runtime_artifacts(&mut s);
+        write_projection_selection_pages(
+            &s,
+            vec![
+                serde_json::json!({
+                    "version":"pdf_selection_map_page.v1","book_id":s.book.base.book_id,
+                    "pageIndex":0,"rotate":0,
+                    "chars":[
+                        {"char_index":0,"text":"X","rect":{"pageIndex":0,"bbox":[1.0,1.0,2.0,2.0]},"source_span":{"start":0,"end":1},"lid":"1.1"},
+                        {"char_index":5,"text":"X","rect":{"pageIndex":0,"bbox":[5.0,5.0,6.0,6.0]},"source_span":{"start":10,"end":11},"lid":"1.2"}
+                    ]
+                }),
+                serde_json::json!({
+                    "version":"pdf_selection_map_page.v1","book_id":s.book.base.book_id,
+                    "pageIndex":1,"rotate":90,
+                    "chars":[
+                        {"char_index":0,"text":"X","rect":{"pageIndex":1,"bbox":[70.0,10.0,80.0,12.0]},"source_span":{"start":1,"end":2},"lid":"1.1"},
+                        {"char_index":2,"text":"X","rect":{"pageIndex":1,"bbox":[90.0,20.0,92.0,22.0]},"source_span":{"start":11,"end":12},"lid":"1.2"}
+                    ]
+                }),
+                serde_json::json!({
+                    "version":"pdf_selection_map_page.v1","book_id":s.book.base.book_id,
+                    "pageIndex":2,"rotate":180,
+                    "chars":[
+                        {"char_index":0,"text":"X","rect":{"pageIndex":2,"bbox":[30.0,40.0,32.0,42.0]},"source_span":{"start":2,"end":3},"lid":"1.1"}
+                    ]
+                }),
+                serde_json::json!({
+                    "version":"pdf_selection_map_page.v1","book_id":s.book.base.book_id,
+                    "pageIndex":3,"rotate":270,
+                    "chars":[
+                        {"char_index":0,"text":"X","rect":{"pageIndex":3,"bbox":[50.0,60.0,52.0,62.0]},"source_span":{"start":3,"end":4},"lid":"1.1"}
+                    ]
+                })
+            ],
+        );
+        let projected = post(
+            &mut s,
+            "/reader/pdf_ranges.project",
+            r#"{"ranges":[
+                {"lid":"1.2","range":{"start":0,"end":2}},
+                {"lid":"1.1","range":{"start":0,"end":4}}
+            ]}"#,
+        );
+        assert_eq!(projected.status, 200);
+        let body: serde_json::Value = serde_json::from_str(&projected.body).unwrap();
+        assert_eq!(body["projections"][0]["lid"], "1.2");
+        assert_eq!(body["projections"][1]["lid"], "1.1");
+        assert_eq!(body["projections"][1]["status"], "exact");
+        assert_eq!(body["projections"][1]["rects"][0]["pageIndex"], 0);
+        assert_eq!(body["projections"][1]["rects"][1]["pageIndex"], 1);
+        assert_eq!(body["projections"][1]["rects"][2]["pageIndex"], 2);
+        assert_eq!(body["projections"][1]["rects"][3]["pageIndex"], 3);
+        assert_eq!(
+            body["projections"][1]["terminal_rect"]["bbox"],
+            serde_json::json!([50.0,60.0,52.0,62.0])
+        );
+    }
+
+    #[test]
+    fn pdf_range_projection_rejects_missing_empty_and_out_of_bounds_ranges() {
+        let mut s = state_named("pdf-range-invalid");
+        write_pdf_runtime_artifacts(&mut s);
+        for body in [
+            r#"{"ranges":[{"lid":"1.1"}]}"#,
+            r#"{"ranges":[{"lid":"1.1","range":{"start":2,"end":2}}]}"#,
+            r#"{"ranges":[{"lid":"1.1","range":{"start":0,"end":101}}]}"#,
+        ] {
+            let response = post(&mut s, "/reader/pdf_ranges.project", body);
+            assert_eq!(response.status, 400, "body={body} response={}", response.body);
+            assert!(response.body.contains("INVALID_PDF_RANGE"));
+        }
     }
 
     #[test]

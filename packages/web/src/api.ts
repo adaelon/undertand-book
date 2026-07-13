@@ -248,11 +248,19 @@ export interface PdfSelectionResolveResponse {
 export interface PdfRangesProjectResponse {
   projections: Array<{
     lid: string;
-    range?: TextRange | null;
-    status: "exact" | "lid_region_fallback" | "unmapped";
-    source_span?: TextRange | null;
-    primary_region?: PdfRegion | null;
-    regions: PdfRegion[];
+    range: TextRange;
+    status: "exact" | "partial" | "unmapped";
+    rects: Array<{
+      pageIndex: number;
+      bbox: [number, number, number, number];
+      source_span: TextRange;
+    }>;
+    covered_range?: TextRange;
+    terminal_rect?: {
+      pageIndex: number;
+      bbox: [number, number, number, number];
+      source_span: TextRange;
+    };
   }>;
 }
 export type BuildRoute = "reader" | "workbench";
@@ -762,7 +770,7 @@ export const api = {
   note: (lid: string, text: string) => http<NoteEffect>("POST", "/reader/note", { lid, text }),
   pdfSelectionResolve: (body: { pageIndex?: number; rects: Array<{ pageIndex?: number; bbox: [number, number, number, number] }> }) =>
     http<PdfSelectionResolveResponse>("POST", "/reader/pdf_selection.resolve", body),
-  pdfRangesProject: (ranges: Array<{ lid: string; range?: TextRange }>) =>
+  pdfRangesProject: (ranges: Array<{ lid: string; range: TextRange }>) =>
     http<PdfRangesProjectResponse>("POST", "/reader/pdf_ranges.project", { ranges }),
   layoutApply: (body: {
     actions?: ReaderLayoutAction[];
