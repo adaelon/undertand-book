@@ -1,53 +1,53 @@
-# SESSION_CHECKPOINT - 2026-07-14 21:20 +08:00
+# SESSION_CHECKPOINT - 2026-07-14 23:04 +08:00
 
 ## Freshness check
-- Commit at write time: `441c660 feat(memory): materialize profile markdown v2`.
+- Commit at write time: `df05359 feat(web): govern explicit profile backfill`.
 - This checkpoint is committed separately;compare with `git log --oneline -10` and trust newer implementation commits.
 
 ## Current state
-Reliable profile memory M4 remains active. M4.1 governance API,M4.2 Web governance UI,and M4.3 derived Markdown v2 are complete;M4.4 explicit historical backfill,M4.5 privacy/E2E,and the M4 total gate remain before goal completion.
+Reliable profile memory M4 remains active. M4.1 governance,M4.2 Web UI,M4.3 Markdown v2,and M4.4 explicit historical backfill are complete. M4.5 privacy/E2E and the M4 total gate remain before goal completion.
 
 ## Completed slices
 - M4 alignment `0426b8d`: ADR-0076 and governance/backfill/Markdown/privacy/UI boundaries.
-- M4.1 `a085cc5` + `2879e1d` + `13fee97`: pure MemoryOp reducer,governance reducer,and resident typed HTTP.
-- M4.2 `bb58fe8`: quiet update/undo,Profile rail,Pending/evidence/status/rules UI,usage trace,and responsive visual gate.
-- M4.3a `6ca658a`: behavior-preserving Markdown renderer module extraction.
-- M4.3b `441c660`: revision-tagged Markdown v2,active scope partitions,raw activity,privacy redaction,pair materialization,and derived status.
+- M4.1 `a085cc5` + `2879e1d` + `13fee97`: pure MemoryOp/governance reducers and resident typed HTTP.
+- M4.2 `bb58fe8`: automatic-first Profile rail,Pending/evidence/status/rules,quiet update/undo,and responsive visual gate.
+- M4.3 `6ca658a` + `441c660`: renderer extraction and revision-tagged/redacted/atomic Markdown v2.
+- M4.4a `2b7886b`: durable HistoricalBackfillJob,source/capture separation,range/progress/retry/clear/forget reducers.
+- M4.4b `05b4381`: upgrade baseline,one-turn resident executor,current-book API,and generated Web contracts.
+- M4.4c `df05359`: explicit session/range controls,job progress/actions,active-only polling,and historical candidate labels.
 
 ## Verification
-- M4.3 final gate:`cargo test -p memory -p runtime -p server` passed 79/106/130.
-- `crates/memory/src/markdown.rs:tests` covers stable bytes across document-only mutation,active/Pending scope behavior,Sensitive fact/key and legacy-record redaction,forget grep removal,and current/stale/missing/unreadable failure states.
-- memory strict clippy passed with zero exemptions;target markdown rustfmt and `git diff --check` passed.
-- M4.2 Web gate remains 20 files/98 tests,typecheck,production build,and 1440x900 + 390x844 Playwright geometry/screenshots.
-- Runtime/server retain only their frozen ts-rs diagnostic output;no new warnings or test failures were introduced.
+- M4.4a/b gates:memory 88,runtime 112,server 134;server backfill directed 4/4;strict clippy retained only frozen runtime/server whitelist categories.
+- M4.4c final gate:Web 20 files/99 tests,typecheck,production build,and `git diff --check` passed.
+- Playwright used the real resident `/profile/backfill` API at 1440x900 and 390x844:document/profile overflow 0,page script errors 0,and action geometry remained inside each job row.
+- No explicit HistoricalBackfillJob means no history scan;only Queued/Running jobs create a 750ms Web poll;switch/unmount clears timer and invalidates requests.
 
 ## Key decisions
 - `MemoryDocument` v2 remains the only durable truth;HTTP,Web,and Markdown are projections/adapters.
-- Markdown first-line markers carry only `profile-markdown.v2 + projection_revision`;status is derived by reading files and is never persisted as truth.
-- Markdown includes Confirmed/Provisional facts only;Global and Book remain separate;Sensitive fact key/value and Sensitive/Secret QA/context text use one fixed redaction marker.
-- Both Markdown files are staged and fsynced before either switch;truth commits first and projection failure never rolls it back.
-- A document-only governance mutation leaves `projection_revision`,rendered bytes,and current file status unchanged.
-- Web remains automatic-first;user clicks are limited to Pending/sensitive/destructive/explicit-backfill or optional governance actions.
-- Visitor MCP has no profile/memory or backfill surface and never reads resident private state.
+- Upgrade initializes the normal-review watermark to existing history without jobs;only an explicit frozen resident range backfills old semantic turns.
+- Backfill preserves UserStated/AgentInferred source but records capture=historical_backfill and forces every candidate Pending.
+- One scheduler tick processes one exact turn outside AppState lock;cancel/clear races discard provider output;retry resumes only the remainder.
+- Web remains automatic-first;backfill is optional,terminal/no jobs do not poll,and task completion does not force-collapse user-opened details.
+- Markdown remains one-way,revision-tagged,and redacted;visitor MCP has no profile/memory/backfill surface.
 
 ## Next steps (directly actionable)
-1. Add durable `HistoricalBackfillJob` state/reducers in `crates/memory`,with frozen session turn bounds,progress,cancel/retry/clear,and partial-result tests.
-2. Extend `crates/runtime/src/memory_review.rs` with a backfill extraction contract that preserves source refs and forces every candidate to Pending.
-3. Add resident-only preview/start/cancel/retry/clear routes and executor wiring over the explicitly selected AgentHistory range;keep visitor/MCP absent.
-4. Project backfill jobs/candidates through `profile_api` and add explicit controls/status to `ProfileMemoryPanel`.
-5. Run deterministic memory/runtime/server/Web tests,append code trail/update architecture,commit M4.4,and refresh this checkpoint.
+1. Build a MEM-E01..E21 coverage ledger from existing test names;mark only genuinely uncovered rows for M4.5 implementation.
+2. Locate/add the current-OS-user private storage gate around `MemoryStore::default_path` and resident startup;fail closed for profile persistence without blocking ordinary reading.
+3. Add deterministic permission,Secret,and Sensitive end-to-end cases plus any missing MEM-E contract tests;do not claim application encryption.
+4. Run `cargo test --workspace`,`pnpm test`,`pnpm --filter @understand-book/web build`,strict relevant clippy,and Playwright only where UI contracts require it.
+5. Append the M4.5 code trail/update architecture,commit independently,then execute the M4 total gate and refresh this checkpoint.
 
 ## Uncommitted / unfinished
-- M4.4,M4.5,and the M4 total gate are not implemented.
+- M4.5 and the M4 total gate are not implemented.
 - No tracked implementation changes should remain after this checkpoint commit.
 
 ## Cold-start reading sequence
-1. `docs/切片方案-memory可靠画像升级.md` M4.4,M4.5,and total-gate sections plus `CONTEXT.md:HistoricalBackfillJob`.
+1. `docs/切片方案-memory可靠画像升级.md` M4.5,§7,§8,and total-gate sections.
 2. `docs/adr/0075-runtime-owned-evidence-backed-profile-memory.md` and `docs/adr/0076-profile-governance-and-backfill-ownership.md`.
-3. `crates/memory/src/review.rs` ReviewState/ReviewJob reducers and `crates/runtime/src/memory_review.rs` extractor contracts.
-4. Resident AgentHistory/review coordinator/profile routes in `crates/server/src/lib.rs` and `crates/server/src/host.rs`.
-5. `crates/runtime/src/profile_api.rs`,`packages/web/src/components/ProfileMemoryPanel.vue`,`docs/架构.md`,and the tail of `docs/代码链路.md`.
+3. `crates/memory/src/{lib,document,privacy,operation,markdown}.rs` path/privacy/persistence tests.
+4. `crates/server/src/host.rs` resident startup and `crates/server/src/lib.rs` Secret/Sensitive/profile E2E tests.
+5. `docs/架构.md` profile sections and the tail of `docs/代码链路.md`.
 
 ## Worktree
-- After this checkpoint commit there should be no tracked M4.3 changes.
+- After this checkpoint commit there should be no tracked M4.4 changes.
 - Existing untracked materials,logs,screenshots,test results,and temporary directories belong to the user and remain untouched.
