@@ -10,9 +10,9 @@
 use memory::{
     classify_profile_fact_privacy, classify_profile_privacy, Anchor, Applicability,
     ExplicitProfileFact, MemoryOp, MemoryOpOutcome, MemoryStore, ProfilePrivacyClass,
-    ProfileResolutionContext, ProfileScope, RecallQuery, ReplaceInput, SaveInput, SelectedRange,
-    SelectionContext, SelectionResolution, Sensitivity, SnapshotContext, SnapshotRequest,
-    ReviewSessionCursor,
+    PendingTurnRef, ProfileResolutionContext, ProfileScope, ProfileStatus, RecallQuery,
+    ReplaceInput, ReviewJobStatus, ReviewSessionCursor, SaveInput, SelectedRange, SelectionContext,
+    SelectionResolution, Sensitivity, SnapshotContext, SnapshotRequest,
 };
 use read_tools::{
     Book, ContentProfileId, PaperLandmarkKind, PaperMinimapBase, PaperRegionKind,
@@ -7114,12 +7114,7 @@ fn route_profile_memory_apply(state: &mut AppState, body: &str, now: &str) -> Re
 fn route_profile_memory_state(state: &mut AppState, now: &str) -> Reply {
     let book_id = state.book.base.book_id.clone();
     let content_profile = current_content_profile(&state.book);
-    let request = SnapshotRequest::current(SnapshotContext {
-        book_id: Some(book_id.clone()),
-        content_profile: Some(content_profile.into()),
-        now: Some(now.into()),
-        ..Default::default()
-    });
+    let request = profile_snapshot_request(state, &book_id, content_profile, now);
     let snapshot = state
         .profile_context_cache
         .snapshot(&state.store, &request)
@@ -7379,12 +7374,7 @@ fn run_precommitted_agent_chat(
         }
     }
 
-    let snapshot_request = SnapshotRequest::current(SnapshotContext {
-        book_id: Some(current_book_id.into()),
-        content_profile: Some(content_profile.into()),
-        now: Some(now.into()),
-        ..Default::default()
-    });
+    let snapshot_request = profile_snapshot_request(state, current_book_id, content_profile, now);
     let profile_snapshot = state
         .profile_context_cache
         .snapshot(&state.store, &snapshot_request)
@@ -7404,6 +7394,65 @@ fn run_precommitted_agent_chat(
         now,
         OuterConfig::default(),
     )
+}
+
+fn profile_snapshot_request(
+    state: &AppState,
+    book_id: &str,
+    content_profile: &str,
+    now: &str,
+) -> SnapshotRequest {
+    let review_state = state.store.review_state();
+    let unresolved = review_state.review_jobs.iter().any(|job| {
+        job.book_id == book_id && job.status != ReviewJobStatus::Completed
+    });
+    let stale = unresolved && review_state.last_error.is_some();
+    let mut request = SnapshotRequest::current(SnapshotContext {
+        book_id: Some(book_id.into()),
+        content_profile: Some(content_profile.into()),
+        now: Some(now.into()),
+        ..Default::default()
+    });
+    if stale {
+        request.profile_status = ProfileStatus::Stale;
+        request.pending_context = pending_review_context(state, book_id);
+    }
+    request
+}
+
+fn pending_review_context(state: &AppState, book_id: &str) -> Vec<PendingTurnRef> {
+    let reviewed_through = &state.store.review_state().reviewed_through;
+    let mut pending = Vec::new();
+    for session in state
+        .agent_history
+        .sessions
+        .iter()
+        .filter(|session| session.book_id == book_id)
+    {
+        let watermark = reviewed_through.get(&session.id).copied().unwrap_or(0);
+        pending.extend(
+            session
+                .turns
+                .iter()
+                .filter(|turn| turn.user_turn_ordinal > watermark)
+                .filter(|turn| {
+                    classify_profile_privacy(&turn.user) == ProfilePrivacyClass::Normal
+                })
+                .map(|turn| PendingTurnRef {
+                    session_id: session.id.clone(),
+                    turn_id: turn.turn_id.clone(),
+                    user_turn_ordinal: turn.user_turn_ordinal,
+                    text: turn.user.clone(),
+                }),
+        );
+    }
+    pending.sort_by(|left, right| {
+        left.session_id
+            .cmp(&right.session_id)
+            .then_with(|| left.user_turn_ordinal.cmp(&right.user_turn_ordinal))
+            .then_with(|| left.turn_id.cmp(&right.turn_id))
+    });
+    pending
 }
 
 fn route_agent_new(state: &mut AppState, now: &str) -> Reply {

@@ -21,6 +21,16 @@ pub struct ProfileMemoryStatusView {
     pub projection_revision: u64,
     pub profile_status: String,
     pub pending_sensitive_confirmation: bool,
+    pub pending_review_jobs: u32,
+    pub review_error: Option<ProfileReviewErrorView>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct ProfileReviewErrorView {
+    pub error_code: String,
+    pub message: String,
+    pub occurred_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq, Eq)]
@@ -114,6 +124,22 @@ pub fn build_profile_memory_state(
             projection_revision: store.projection_revision(),
             profile_status: profile_status(snapshot.profile_status).into(),
             pending_sensitive_confirmation,
+            pending_review_jobs: u32::try_from(
+                store
+                    .review_state()
+                    .review_jobs
+                    .iter()
+                    .filter(|job| job.status != memory::ReviewJobStatus::Completed)
+                    .count(),
+            )
+            .unwrap_or(u32::MAX),
+            review_error: store.review_state().last_error.as_ref().map(|error| {
+                ProfileReviewErrorView {
+                    error_code: error.error_code.clone(),
+                    message: error.message.clone(),
+                    occurred_at: error.occurred_at.clone(),
+                }
+            }),
         },
         snapshot: snapshot_view(snapshot),
         facts,

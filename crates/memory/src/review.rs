@@ -309,9 +309,16 @@ impl MemoryStore {
             .reviewed_through
             .insert(current.session_id, current.to_turn_inclusive);
         state.last_success_at = Some(now.into());
-        state.last_error = None;
+        clear_last_error_if_drained(&mut state);
         self.commit_review_state(state)?;
         Ok(completed)
+    }
+
+    pub fn record_review_error(&mut self, error: ReviewErrorState) -> Result<(), ToolError> {
+        error.validate().map_err(invalid_review_state)?;
+        let mut state = self.document.review_state.clone();
+        state.last_error = Some(error);
+        self.commit_review_state(state)
     }
 
     pub fn commit_review_result(
@@ -460,7 +467,7 @@ impl MemoryStore {
             .reviewed_through
             .insert(current.session_id, current.to_turn_inclusive);
         candidate.review_state.last_success_at = Some(now.into());
-        candidate.review_state.last_error = None;
+        clear_last_error_if_drained(&mut candidate.review_state);
         self.commit_document(candidate)?;
         if !added_fact_ids.is_empty() {
             let _ = self.write_profile_files();
@@ -920,6 +927,16 @@ fn sort_review_jobs(jobs: &mut [ReviewJob]) {
             .then_with(|| left.to_turn_inclusive.cmp(&right.to_turn_inclusive))
             .then_with(|| left.job_id.cmp(&right.job_id))
     });
+}
+
+fn clear_last_error_if_drained(state: &mut ReviewState) {
+    if state
+        .review_jobs
+        .iter()
+        .all(|job| job.status == ReviewJobStatus::Completed)
+    {
+        state.last_error = None;
+    }
 }
 
 fn validate_consolidation_jobs(jobs: &[GlobalConsolidationJob]) -> Result<(), String> {
