@@ -5,6 +5,7 @@
 //! S7a 从 runtime 抽成独立 crate(拆 runtime↔reader 循环依赖,reader/runtime 共同依赖它)`[ADR-0027]`。
 mod document;
 mod operation;
+mod privacy;
 mod profile;
 mod projection;
 mod reading_state;
@@ -12,6 +13,9 @@ mod reading_state;
 use document::StoredMemory;
 pub use document::{MemoryDocument, MEMORY_SCHEMA_VERSION};
 pub use operation::{ExplicitProfileFact, MemoryOp, MemoryOpOutcome};
+pub use privacy::{
+    classify_profile_fact_privacy, classify_profile_privacy, ProfilePrivacyClass,
+};
 pub use profile::{
     Applicability, BackgroundClaim, CapabilityClaim, Confidence, ConstraintClaim,
     CreateProfileFact, EvidenceExclusion, EvidenceRef, ExclusionReason, FactSource, FactStatus,

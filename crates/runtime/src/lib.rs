@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, HashSet};
 use ts_rs::TS;
 
 pub mod goldset;
+pub mod memory_intent;
 pub mod orchestrator;
 pub mod profile_context;
 

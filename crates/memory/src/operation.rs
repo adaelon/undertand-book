@@ -1,8 +1,8 @@
 use crate::profile::{build_profile_fact, reject_excluded_evidence};
 use crate::{
-    fnv1a, Applicability, Confidence, CreateProfileFact, EvidenceExclusion, EvidenceRef,
-    ExclusionReason, FactSource, FactStatus, MemoryStore, ProfileFact, ProfilePayload,
-    ProfileScope, Record, Sensitivity, Usage,
+    classify_profile_fact_privacy, fnv1a, Applicability, Confidence, CreateProfileFact,
+    EvidenceExclusion, EvidenceRef, ExclusionReason, FactSource, FactStatus, MemoryStore,
+    ProfileFact, ProfilePayload, ProfilePrivacyClass, ProfileScope, Record, Sensitivity, Usage,
 };
 use read_tools::ToolError;
 use serde::{Deserialize, Serialize};
@@ -110,11 +110,11 @@ impl MemoryStore {
         operation_id: String,
         book_id: String,
         evidence_text: String,
-        fact: ExplicitProfileFact,
+        mut fact: ExplicitProfileFact,
         now: &str,
     ) -> Result<MemoryOpOutcome, ToolError> {
         validate_operation_fields(&operation_id, Some(&book_id), Some(&evidence_text), now)?;
-        validate_explicit_fact(&fact)?;
+        validate_explicit_fact(&evidence_text, &mut fact)?;
         let evidence = explicit_evidence(&operation_id);
         let evidence_mem_id = match &evidence {
             EvidenceRef::MemoryRecord { mem_id } => mem_id.clone(),
@@ -165,11 +165,11 @@ impl MemoryStore {
         book_id: String,
         evidence_text: String,
         fact_id: String,
-        replacement: ExplicitProfileFact,
+        mut replacement: ExplicitProfileFact,
         now: &str,
     ) -> Result<MemoryOpOutcome, ToolError> {
         validate_operation_fields(&operation_id, Some(&book_id), Some(&evidence_text), now)?;
-        validate_explicit_fact(&replacement)?;
+        validate_explicit_fact(&evidence_text, &mut replacement)?;
         let current = self
             .document
             .profile_facts
@@ -347,11 +347,25 @@ fn validate_operation_fields(
     Ok(())
 }
 
-fn validate_explicit_fact(fact: &ExplicitProfileFact) -> Result<(), ToolError> {
+fn validate_explicit_fact(
+    evidence_text: &str,
+    fact: &mut ExplicitProfileFact,
+) -> Result<(), ToolError> {
     if matches!(&fact.payload, ProfilePayload::Extension { .. }) {
         return Err(invalid_operation(
             "profile extension requires a registered M3 schema validator",
         ));
+    }
+    match classify_profile_fact_privacy(evidence_text, &fact.payload) {
+        ProfilePrivacyClass::Secret => {
+            return Err(ToolError {
+                error_code: "SECRET_PROFILE_REJECTED".into(),
+                category: "validation".into(),
+                message: "credentials and other secrets are never stored in profile memory".into(),
+            });
+        }
+        ProfilePrivacyClass::Sensitive => fact.sensitivity = Sensitivity::Sensitive,
+        ProfilePrivacyClass::Normal => {}
     }
     if fact.sensitivity == Sensitivity::Sensitive && !fact.sensitive_plaintext_acknowledged {
         return Err(ToolError {
@@ -756,6 +770,40 @@ mod tests {
         };
         assert_eq!(fact.sensitivity, Sensitivity::Sensitive);
         assert_eq!(store.document_revision(), 1);
+    }
+
+    #[test]
+    fn reducer_rejects_secret_and_upgrades_sensitive_content_from_normal() {
+        let (path, mut store) = store("privacy-upgrade");
+        let secret = store
+            .apply_memory_op(
+                remember(
+                    "op-secret",
+                    "remember my API key is sk-abcdefghijklmnop",
+                    "preferred account",
+                ),
+                "2026-01-01T00:00:00Z",
+            )
+            .unwrap_err();
+        assert_eq!(secret.error_code, "SECRET_PROFILE_REJECTED");
+        assert_eq!(store.document_revision(), 0);
+        assert!(store.profile_facts().is_empty());
+        assert!(!std::fs::read_to_string(&path)
+            .unwrap_or_default()
+            .contains("sk-abcdefghijklmnop"));
+
+        let sensitive = store
+            .apply_memory_op(
+                remember(
+                    "op-sensitive-upgrade",
+                    "remember this preference",
+                    "my medical diagnosis needs review",
+                ),
+                "2026-01-01T00:00:00Z",
+            )
+            .unwrap_err();
+        assert_eq!(sensitive.error_code, "SENSITIVE_CONFIRMATION_REQUIRED");
+        assert_eq!(store.document_revision(), 0);
     }
 
     #[test]
