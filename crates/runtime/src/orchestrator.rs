@@ -67,6 +67,7 @@ pub enum ProfileInfluence {
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq, Eq)]
 #[ts(export, export_to = "../../../packages/web/src/generated/")]
 pub struct ProfileUsageTrace {
+    #[ts(type = "number")]
     pub snapshot_revision: u64,
     pub injected_fact_ids: Vec<String>,
     pub claimed_used_fact_ids: Vec<String>,

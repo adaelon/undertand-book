@@ -1,10 +1,23 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from "vue";
-import type { AgentEffect, AskQuote, FormulaSemantics, MemoryRecord, OuterOutcome, TraceStep } from "../api";
+import { Undo2 } from "@lucide/vue";
+import type {
+  AgentEffect,
+  AskQuote,
+  FormulaSemantics,
+  MemoryRecord,
+  OuterOutcome,
+  ProfileGovernanceActionRequest,
+  ProfileMemoryState,
+  ProfileMemoryUpdate,
+  ProfileUsageTrace,
+  TraceStep,
+} from "../api";
 import type { PdfAnnotationLocation } from "../pdf-annotation-projection";
 import { rangeToMarkdown } from "../selection";
+import ProfileMemoryPanel from "./ProfileMemoryPanel.vue";
 
-type ContextTab = "agent" | "trace" | "formula" | "notes";
+type ContextTab = "agent" | "profile" | "trace" | "formula" | "notes";
 
 type AskDraft = AskQuote;
 interface ChatTurn {
@@ -52,6 +65,12 @@ const props = defineProps<{
   effectSecondaryLabel: (effect: AgentEffect) => string;
   gotoBack: (effect: AgentEffect) => string;
   askDraft: AskDraft | null;
+  profileMemory?: ProfileMemoryState | null;
+  profileMemoryLoading?: boolean;
+  profileMemoryBusy?: boolean;
+  profileMemoryError?: string | null;
+  profileMemoryNotice?: string | null;
+  profileUpdateStates?: Record<string, string>;
 }>();
 const emit = defineEmits<{
   (e: "update:agentInput", value: string): void;
@@ -66,6 +85,10 @@ const emit = defineEmits<{
   (e: "save-answer-selection", turn: ChatTurn, text: string): void;
   (e: "goto", lid: string): void;
   (e: "focus-source", source: { lid: string; quote: string | null }): void;
+  (e: "refresh-profile"): void;
+  (e: "mutate-profile", action: ProfileGovernanceActionRequest): void;
+  (e: "confirm-sensitive-profile"): void;
+  (e: "undo-profile-update", turnIndex: number, updateIndex: number, update: ProfileMemoryUpdate): void;
 }>();
 
 const activeTab = ref<ContextTab>("agent");
@@ -75,11 +98,16 @@ const transcriptRef = ref<HTMLElement | null>(null);
 const agentInputRef = ref<HTMLTextAreaElement | null>(null);
 const tabs: { id: ContextTab; label: string }[] = [
   { id: "agent", label: "问答" },
+  { id: "profile", label: "画像" },
   { id: "trace", label: "轨迹" },
   { id: "formula", label: "公式" },
   { id: "notes", label: "笔记" },
 ];
 const noteCount = computed(() => props.contextNotes.length + props.contextHighlights.length);
+const profileAttentionCount = computed(() => (
+  (props.profileMemory?.pending_candidates.length ?? 0)
+  + (props.profileMemory?.status.pending_sensitive_confirmation ? 1 : 0)
+));
 watch(() => props.askDraft, async (draft) => {
   if (!draft) return;
   activeTab.value = "agent";
@@ -204,6 +232,47 @@ function deleteHistorySession(sessionId: string) {
   if (!sessionId) return;
   emit("delete-chat", sessionId);
 }
+
+function selectTab(tab: ContextTab) {
+  activeTab.value = tab;
+  if (tab === "profile") emit("refresh-profile");
+}
+
+function memoryUpdateLabel(update: ProfileMemoryUpdate): string {
+  return {
+    remembered: "画像已记住",
+    corrected: "画像已纠正",
+    forgotten: "画像已忘记",
+    needs_clarification: "画像需要澄清",
+    needs_sensitive_confirmation: "敏感画像等待确认",
+    sensitive_confirmation_cancelled: "敏感画像保存已取消",
+    rejected: "画像更新未保存",
+  }[update.kind];
+}
+
+function memoryUpdateKey(turnIndex: number, updateIndex: number): string {
+  return `${turnIndex}:${updateIndex}`;
+}
+
+function canUndoMemoryUpdate(update: ProfileMemoryUpdate): boolean {
+  return update.kind === "remembered" || update.kind === "corrected";
+}
+
+function hasProfileUsage(usage: ProfileUsageTrace): boolean {
+  return usage.injected_fact_ids.length > 0
+    || usage.claimed_used_fact_ids.length > 0
+    || usage.influences.length > 0;
+}
+
+function influenceLabel(influence: ProfileUsageTrace["influences"][number]): string {
+  return {
+    retrieval_plan: "检索计划",
+    explanation_depth: "讲解深度",
+    terminology: "术语选择",
+    example_choice: "示例选择",
+    navigation: "阅读导航",
+  }[influence];
+}
 </script>
 
 <template>
@@ -214,9 +283,12 @@ function deleteHistorySession(sessionId: string) {
         :key="tab.id"
         class="tab"
         :class="{ active: activeTab === tab.id }"
-        @click="activeTab = tab.id"
+        @click="selectTab(tab.id)"
       >
         {{ tab.label }}
+        <span v-if="tab.id === 'profile' && profileAttentionCount" class="tab-badge">
+          {{ profileAttentionCount }}
+        </span>
       </button>
     </div>
 
@@ -274,6 +346,41 @@ function deleteHistorySession(sessionId: string) {
               </div>
             </div>
 
+            <div v-if="turn.outcome.memory_updates.length" class="memory-update-list">
+              <div
+                v-for="(update, ui) in turn.outcome.memory_updates"
+                :key="`${update.operation_id ?? update.kind}:${ui}`"
+                class="memory-update-row"
+              >
+                <span>{{ memoryUpdateLabel(update) }}</span>
+                <small v-if="update.message">{{ update.message }}</small>
+                <em v-if="props.profileUpdateStates?.[memoryUpdateKey(ti, ui)]">
+                  {{ props.profileUpdateStates[memoryUpdateKey(ti, ui)] }}
+                </em>
+                <button
+                  v-else-if="canUndoMemoryUpdate(update)"
+                  type="button"
+                  title="撤销画像更新"
+                  aria-label="撤销画像更新"
+                  :disabled="props.profileMemoryBusy"
+                  @click="emit('undo-profile-update', ti, ui, update)"
+                >
+                  <Undo2 :size="15" aria-hidden="true" />
+                </button>
+              </div>
+            </div>
+
+            <details v-if="hasProfileUsage(turn.outcome.profile_usage)" class="profile-usage">
+              <summary>画像依据 · {{ turn.outcome.profile_usage.injected_fact_ids.length }}</summary>
+              <p>快照版本 {{ turn.outcome.profile_usage.snapshot_revision }}</p>
+              <p v-if="turn.outcome.profile_usage.influences.length">
+                {{ turn.outcome.profile_usage.influences.map(influenceLabel).join(" · ") }}
+              </p>
+              <code v-if="turn.outcome.profile_usage.claimed_used_fact_ids.length">
+                {{ turn.outcome.profile_usage.claimed_used_fact_ids.join(", ") }}
+              </code>
+            </details>
+
             <div v-if="turn.outcome.trace.length" class="trace">
               <button class="trace-toggle" @click="emit('toggle-trace', ti)">
                 轨迹 ({{ turn.outcome.trace.length }}) {{ props.showTrace[ti] ? "▲" : "▼" }}
@@ -314,6 +421,20 @@ function deleteHistorySession(sessionId: string) {
           {{ props.sending ? "..." : "发送" }}
         </button>
       </div>
+    </section>
+
+    <section v-show="activeTab === 'profile'" class="tab-panel profile-panel">
+      <ProfileMemoryPanel
+        :state="props.profileMemory"
+        :loading="props.profileMemoryLoading"
+        :busy="props.profileMemoryBusy"
+        :error="props.profileMemoryError"
+        :notice="props.profileMemoryNotice"
+        @refresh="emit('refresh-profile')"
+        @mutate="emit('mutate-profile', $event)"
+        @confirm-sensitive="emit('confirm-sensitive-profile')"
+        @goto="emit('goto', $event)"
+      />
     </section>
 
     <section v-show="activeTab === 'trace'" class="tab-panel context-panel">
@@ -501,11 +622,12 @@ function deleteHistorySession(sessionId: string) {
 .context-tabs {
   flex: 0 0 auto;
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 0;
   padding: 0.75rem 0.75rem 0;
 }
 .tab {
+  position: relative;
   min-height: 40px;
   border: 0;
   border-bottom: 2px solid transparent;
@@ -515,6 +637,22 @@ function deleteHistorySession(sessionId: string) {
   padding: 0.55rem 0.25rem;
   font-size: 0.82rem;
   transition: color 160ms ease, border-color 160ms ease, transform 160ms ease;
+}
+.tab-badge {
+  position: absolute;
+  top: 2px;
+  right: 4px;
+  min-width: 17px;
+  height: 17px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: var(--reader-amber);
+  color: var(--ink);
+  padding: 0 4px;
+  font-size: 0.62rem;
+  font-variant-numeric: tabular-nums;
 }
 .tab.active {
   color: var(--ink);
@@ -542,6 +680,9 @@ function deleteHistorySession(sessionId: string) {
 }
 .agent-head {
   padding: 1rem 1rem 0.7rem;
+}
+.profile-panel {
+  overflow: hidden;
 }
 .chat-actions {
   flex: 0 0 auto;
@@ -937,6 +1078,64 @@ function deleteHistorySession(sessionId: string) {
   border-radius: 8px;
   background: var(--canvas);
   padding: 0.65rem 0.75rem;
+}
+.memory-update-list {
+  display: grid;
+  gap: 0.35rem;
+  margin-top: 0.65rem;
+  border-top: 1px solid var(--hairline-soft);
+  padding-top: 0.55rem;
+}
+.memory-update-row {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.12rem 0.45rem;
+  border-left: 2px solid var(--brand-tag);
+  padding: 0.22rem 0 0.22rem 0.5rem;
+  color: var(--charcoal);
+  font-size: 0.78rem;
+}
+.memory-update-row small {
+  grid-column: 1 / -1;
+  color: var(--steel);
+  overflow-wrap: anywhere;
+}
+.memory-update-row em {
+  color: var(--brand-green-deep);
+  font-size: 0.72rem;
+  font-style: normal;
+}
+.memory-update-row button {
+  width: 30px;
+  height: 30px;
+  min-height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  padding: 0;
+}
+.profile-usage {
+  margin-top: 0.55rem;
+  color: var(--steel);
+  font-size: 0.72rem;
+}
+.profile-usage summary {
+  color: var(--ink);
+  cursor: pointer;
+  font-weight: 600;
+}
+.profile-usage p {
+  margin: 0.3rem 0 0;
+}
+.profile-usage code {
+  display: block;
+  margin-top: 0.3rem;
+  overflow-wrap: anywhere;
+  font-family: var(--mono);
+  font-size: 0.68rem;
 }
 .ask-draft-head {
   display: flex;

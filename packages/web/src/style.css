@@ -1180,6 +1180,7 @@ input:focus {
   .topbar {
     height: auto;
     min-height: 56px;
+    flex-basis: auto;
     align-items: flex-start;
     flex-wrap: wrap;
     padding: 0.55rem 0.75rem;
@@ -1189,7 +1190,16 @@ input:focus {
   }
   .topbar-actions {
     width: 100%;
-    justify-content: space-between;
+    justify-content: flex-start;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    scrollbar-width: thin;
+  }
+  .topbar-actions > * {
+    flex: 0 0 auto;
+  }
+  .topbar-actions button {
+    white-space: nowrap;
   }
   button {
     min-height: 40px;

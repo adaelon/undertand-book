@@ -25,6 +25,9 @@ import type {
   PdfSourceMap,
   PdfSourceMapEntry,
   ProfileManifest,
+  ProfileGovernanceActionRequest,
+  ProfileMemoryState,
+  ProfileMemoryUpdate,
   ProfileSummary,
   ReaderLayoutAction,
   ReaderLayoutProposal,
@@ -72,6 +75,7 @@ import {
   sourceReviewBatchTargets,
   type SourceReviewLlmBatchState,
 } from "./source-review-batch";
+import { buildUndoProfileAction } from "./profile-memory";
 import {
   chooseAppSurface,
   workbenchAvailable,
@@ -191,6 +195,13 @@ const sourcePreview = ref<SourcePreview | null>(null);
 const sourcePreviewBodyRef = ref<HTMLElement | null>(null);
 const profileSummary = ref<ProfileSummary | null>(null);
 const profileManifest = ref<ProfileManifest | null>(null);
+const profileMemory = ref<ProfileMemoryState | null>(null);
+const profileMemoryLoading = ref(false);
+const profileMemoryBusy = ref(false);
+const profileMemoryError = ref<string | null>(null);
+const profileMemoryNotice = ref<string | null>(null);
+const profileUpdateStates = ref<Record<string, string>>({});
+let profileMemoryRequestSeq = 0;
 const readerLayout = ref<ReaderLayoutState | null>(null);
 const pendingLayoutProposal = ref<ReaderLayoutProposal | null>(null);
 const paperMinimapSnapshot = ref<PaperMinimapStateResponse | null>(null);
@@ -1241,6 +1252,101 @@ async function applyReaderState(st: Awaited<ReturnType<typeof api.state>>) {
   readerLayout.value = st.layout;
   await ensureProfileManifest(st.profile);
 }
+
+function profileOperationId(kind: string): string {
+  const random = globalThis.crypto?.randomUUID?.()
+    ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  return `profile-ui-${kind}-${random}`;
+}
+
+async function refreshProfileMemory(preserveFeedback = false) {
+  const requestSeq = ++profileMemoryRequestSeq;
+  profileMemoryLoading.value = true;
+  if (!preserveFeedback) {
+    profileMemoryError.value = null;
+    profileMemoryNotice.value = null;
+  }
+  try {
+    const state = await api.profileMemory();
+    if (requestSeq !== profileMemoryRequestSeq) return;
+    profileMemory.value = state;
+  } catch (error) {
+    if (requestSeq !== profileMemoryRequestSeq) return;
+    profileMemoryError.value = errorMessage(error);
+  } finally {
+    if (requestSeq === profileMemoryRequestSeq) profileMemoryLoading.value = false;
+  }
+}
+
+function profileMutationLabel(action: ProfileGovernanceActionRequest): string {
+  return {
+    remember: "画像已记住",
+    correct: "画像已纠正",
+    forget: "画像已忘记",
+    confirm: "画像已确认",
+    reject: "候选已忽略",
+    change_scope: "画像范围已更新",
+    add_collection_rule: "自动收集规则已添加",
+    remove_collection_rule: "自动收集规则已移除",
+  }[action.kind];
+}
+
+async function mutateProfile(action: ProfileGovernanceActionRequest) {
+  if (profileMemoryBusy.value) return null;
+  if (!profileMemory.value) await refreshProfileMemory();
+  const state = profileMemory.value;
+  if (!state) return null;
+  profileMemoryBusy.value = true;
+  profileMemoryError.value = null;
+  profileMemoryNotice.value = null;
+  try {
+    const response = await api.profileMemoryApply({
+      expected_document_revision: state.status.document_revision,
+      action,
+    });
+    profileMemoryNotice.value = response.kind === "applied"
+      ? profileMutationLabel(action)
+      : "敏感画像等待确认";
+    await refreshProfileMemory(true);
+    return response;
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 409) {
+      await refreshProfileMemory(true);
+      profileMemoryError.value = error.errorCode === "MEMORY_DOCUMENT_REVISION_CONFLICT"
+        ? "画像已在后台更新，已载入最新版本，请重试刚才的操作。"
+        : error.message;
+    } else {
+      profileMemoryError.value = errorMessage(error);
+    }
+    return null;
+  } finally {
+    profileMemoryBusy.value = false;
+  }
+}
+
+async function undoProfileUpdate(
+  turnIndex: number,
+  updateIndex: number,
+  update: ProfileMemoryUpdate,
+) {
+  const key = `${turnIndex}:${updateIndex}`;
+  if (!profileMemory.value) await refreshProfileMemory();
+  const action = buildUndoProfileAction(
+    profileMemory.value,
+    update,
+    profileOperationId("undo"),
+  );
+  if (!action) {
+    profileUpdateStates.value = { ...profileUpdateStates.value, [key]: "无法撤销" };
+    return;
+  }
+  const response = await mutateProfile(action);
+  if (!response) return;
+  const status = response.kind === "applied" ? "已撤销" : "等待确认";
+  profileUpdateStates.value = { ...profileUpdateStates.value, [key]: status };
+  profileMemoryNotice.value = response.kind === "applied" ? "画像更新已撤销" : "敏感画像等待确认";
+}
+
 async function syncViewport(forcePaperProjection = false, preferReaderSelection = false) {
   const st = await api.state();
   await applyReaderState(st);
@@ -1608,6 +1714,7 @@ async function init() {
     await loadWindow(st.viewport);
     await loadPaperProjectionData();
     await refreshAgentHistory();
+    await refreshProfileMemory();
     appSurface.value = "reader";
   } catch (e) {
     appSurface.value = buildWorkbenchSnapshot.value?.readiness.route === "workbench" ? "workbench" : "reader";
@@ -2244,20 +2351,22 @@ async function applyPendingLayoutProposal(proposal = pendingLayoutProposal.value
   const st = await api.state();
   await applyReaderState(st);
 }
-async function sendAgent() {
-  const msg = agentInput.value.trim();
-  if (!msg) return;
-  const draft = askDraft.value;
+async function submitAgentMessage(msg: string, displayUser: string, draft: AskDraft | null) {
+  if (sending.value) return;
   const questionAnchorLid = draft?.lid ?? selectedLid.value ?? viewport.value?.top_lid ?? null;
-  const turn: ChatTurn = { user: msg, outcome: null, pending: true, questionAnchorLid, questionQuote: draft ? { ...draft } : null };
+  const turn: ChatTurn = {
+    user: displayUser,
+    outcome: null,
+    pending: true,
+    questionAnchorLid,
+    questionQuote: draft ? { ...draft } : null,
+  };
   chat.value.push(turn);
-  agentInput.value = "";
-  askDraft.value = null;
   sending.value = true;
   banner.value = "";
   try {
     turn.outcome = await api.agentChat(msg, {
-      display_user: msg,
+      display_user: displayUser,
       question_anchor_lid: questionAnchorLid,
       question_quote: draft ? { ...draft } : null,
     });
@@ -2270,11 +2379,31 @@ async function sendAgent() {
     // agent 可能驱动了共享 reader 视口 / 落了 session 标注 → 同步阅读区。
     await syncViewport(true, hasSuccessfulReaderNavigation(turn.outcome.trace));
     await refreshAgentHistory();
+    await refreshProfileMemory(true);
   } catch (e) {
     turn.error = e instanceof ApiError ? `[${e.category}] ${e.errorCode}: ${e.message}` : String(e);
+    await refreshProfileMemory(true);
   } finally {
     turn.pending = false;
     sending.value = false;
+  }
+}
+
+async function sendAgent() {
+  const msg = agentInput.value.trim();
+  if (!msg) return;
+  const draft = askDraft.value;
+  agentInput.value = "";
+  askDraft.value = null;
+  await submitAgentMessage(msg, msg, draft);
+}
+
+async function confirmSensitiveProfile() {
+  if (sending.value || profileMemoryBusy.value) return;
+  profileMemoryNotice.value = "正在确认敏感画像";
+  await submitAgentMessage("confirm save", "确认保存敏感画像", null);
+  if (!profileMemory.value?.status.pending_sensitive_confirmation) {
+    profileMemoryNotice.value = "敏感画像已处理";
   }
 }
 
@@ -2378,6 +2507,7 @@ async function newChat() {
     applyAgentHistory(response.history);
     askDraft.value = null;
     agentInput.value = "";
+    await refreshProfileMemory(true);
   } catch (e) {
     fail(e);
   }
@@ -2388,6 +2518,7 @@ async function selectChat(sessionId: string) {
     applyAgentHistory(await api.agentHistorySelect(sessionId));
     askDraft.value = null;
     agentInput.value = "";
+    await refreshProfileMemory(true);
   } catch (e) {
     fail(e);
   }
@@ -2399,6 +2530,7 @@ async function deleteChat(sessionId: string) {
     applyAgentHistory(await api.agentHistoryDelete(sessionId));
     askDraft.value = null;
     agentInput.value = "";
+    await refreshProfileMemory(true);
   } catch (e) {
     fail(e);
   }
@@ -2550,6 +2682,13 @@ function resetBookSessionUi() {
   formulaDialog.value = null;
   profileSummary.value = null;
   profileManifest.value = null;
+  profileMemoryRequestSeq += 1;
+  profileMemory.value = null;
+  profileMemoryLoading.value = false;
+  profileMemoryBusy.value = false;
+  profileMemoryError.value = null;
+  profileMemoryNotice.value = null;
+  profileUpdateStates.value = {};
   readerLayout.value = null;
   pendingLayoutProposal.value = null;
   resetPaperProjectionData();
@@ -3007,6 +3146,12 @@ async function submitOpenBook(dir = bookPickerDir.value) {
         :effect-secondary-label="effectSecondaryLabel"
         :goto-back="gotoBack"
         :ask-draft="askDraft"
+        :profile-memory="profileMemory"
+        :profile-memory-loading="profileMemoryLoading"
+        :profile-memory-busy="profileMemoryBusy || sending"
+        :profile-memory-error="profileMemoryError"
+        :profile-memory-notice="profileMemoryNotice"
+        :profile-update-states="profileUpdateStates"
         @send-agent="sendAgent"
         @new-chat="newChat"
         @select-chat="selectChat"
@@ -3018,6 +3163,10 @@ async function submitOpenBook(dir = bookPickerDir.value) {
         @undo-effect="undoEffect"
         @keep-effect="keepEffect"
         @save-answer-selection="saveAgentSelection"
+        @refresh-profile="refreshProfileMemory()"
+        @mutate-profile="mutateProfile"
+        @confirm-sensitive-profile="confirmSensitiveProfile"
+        @undo-profile-update="undoProfileUpdate"
       />
     </div>
 
