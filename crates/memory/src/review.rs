@@ -1,4 +1,5 @@
 use crate::global_consolidation::reconcile_global_promotions;
+use crate::governance::collection_rules_block;
 use crate::profile::{build_profile_fact, reject_excluded_evidence};
 use crate::{
     fnv1a, CreateProfileFact, EvidenceRef, FactSource, MemoryStore, ProfileFact, ProfileScope,
@@ -392,6 +393,14 @@ impl MemoryStore {
                 ));
             }
             reject_excluded_evidence(&self.document.exclusions, &candidate.fact.evidence)?;
+            if collection_rules_block(
+                self.collection_rules(),
+                &candidate.fact.scope,
+                &candidate.fact.applicability,
+                &candidate.fact.payload,
+            ) {
+                continue;
+            }
             facts.push(build_profile_fact(candidate.fact.clone(), Vec::new(), now)?);
         }
         facts.sort_by(|left, right| left.fact_id.cmp(&right.fact_id));

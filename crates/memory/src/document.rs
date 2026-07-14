@@ -1,3 +1,4 @@
+use crate::governance::ProfileGovernanceState;
 use crate::profile::{EvidenceExclusion, ProfileFact};
 use crate::Record;
 use crate::ReviewState;
@@ -18,6 +19,8 @@ pub struct MemoryDocument {
     pub(crate) review_state: ReviewState,
     #[serde(default)]
     pub exclusions: Vec<EvidenceExclusion>,
+    #[serde(default, skip_serializing_if = "ProfileGovernanceState::is_empty")]
+    pub(crate) governance_state: ProfileGovernanceState,
 }
 
 impl MemoryDocument {
@@ -30,6 +33,7 @@ impl MemoryDocument {
             profile_facts: Vec::new(),
             review_state: ReviewState::default(),
             exclusions: Vec::new(),
+            governance_state: ProfileGovernanceState::default(),
         }
     }
 
@@ -42,6 +46,7 @@ impl MemoryDocument {
             profile_facts: Vec::new(),
             review_state: ReviewState::default(),
             exclusions: Vec::new(),
+            governance_state: ProfileGovernanceState::default(),
         }
     }
 
@@ -80,6 +85,8 @@ impl MemoryDocument {
             &self.review_state.global_promotions,
             &self.profile_facts,
         )?;
+        self.governance_state
+            .validate(self.document_revision, self.projection_revision)?;
         Ok(())
     }
 }

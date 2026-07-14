@@ -1,4 +1,5 @@
 use crate::document::MemoryDocument;
+use crate::governance::collection_rules_block;
 use crate::profile::build_profile_fact;
 use crate::{
     fnv1a, Applicability, Confidence, CreateProfileFact, EvidenceRef, FactSource, FactStatus,
@@ -119,18 +120,25 @@ pub(crate) fn reconcile_global_promotions(
     let mut desired_promotions = Vec::new();
     let mut added_facts = Vec::new();
     for cluster in clusters.into_values() {
+        let existing_promotion = previous_promotions
+            .iter()
+            .find(|promotion| promotion.cluster_key == cluster.cluster_key);
+        let blocked_by_collection_rule = collection_rules_block(
+            &document.governance_state.collection_rules,
+            &ProfileScope::Global,
+            &cluster.applicability,
+            &cluster.payload,
+        );
         if cluster.book_ids.len() < MIN_PROMOTION_BOOKS
             || cluster.evidence_by_id.len() < MIN_PROMOTION_EVIDENCE
             || blocking_global_clusters.contains(&cluster.cluster_key)
+            || (blocked_by_collection_rule && existing_promotion.is_none())
         {
             continue;
         }
         let supporting_fact_ids: Vec<_> = cluster.supporting_fact_ids.into_iter().collect();
         let book_ids: Vec<_> = cluster.book_ids.into_iter().collect();
         let evidence_ids: Vec<_> = cluster.evidence_by_id.keys().cloned().collect();
-        let existing_promotion = previous_promotions
-            .iter()
-            .find(|promotion| promotion.cluster_key == cluster.cluster_key);
         let existing_fact = existing_promotion.and_then(|promotion| {
             document
                 .profile_facts
