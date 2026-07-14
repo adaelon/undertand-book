@@ -16,7 +16,7 @@ use reader::{
     PaperMinimapEffect, PaperMinimapMode, PaperMinimapProposal, PaperViewportPosition, Reader,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use ts_rs::TS;
 
 /// 外层停机预算(切片0 占位,实测回填 `[ADR-0016]`)。
@@ -49,6 +49,50 @@ pub struct OuterOutcome {
     pub tokens_spent: u32,
     pub effects: Vec<AgentEffect>,
     pub trace: Vec<TraceStep>,
+    pub profile_usage: ProfileUsageTrace,
+    pub memory_updates: Vec<ProfileMemoryUpdate>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq, Eq, PartialOrd, Ord)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+#[serde(rename_all = "snake_case")]
+pub enum ProfileInfluence {
+    RetrievalPlan,
+    ExplanationDepth,
+    Terminology,
+    ExampleChoice,
+    Navigation,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct ProfileUsageTrace {
+    pub snapshot_revision: u64,
+    pub injected_fact_ids: Vec<String>,
+    pub claimed_used_fact_ids: Vec<String>,
+    pub influences: Vec<ProfileInfluence>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+#[serde(rename_all = "snake_case")]
+pub enum ProfileMemoryUpdateKind {
+    Remembered,
+    Corrected,
+    Forgotten,
+    NeedsClarification,
+    NeedsSensitiveConfirmation,
+    SensitiveConfirmationCancelled,
+    Rejected,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct ProfileMemoryUpdate {
+    pub kind: ProfileMemoryUpdateKind,
+    pub operation_id: Option<String>,
+    pub fact_ids: Vec<String>,
+    pub message: Option<String>,
 }
 
 /// 一次对话回合的**可撤销副作用** `[ADR-0030 决策3]`:前端据此做反向命令 undo。
@@ -269,6 +313,32 @@ pub fn tool_specs() -> Vec<ToolSpec> {
                 "properties": {
                     "profile_id": {"type": "string", "enum": ["technical_learning", "paper"], "description": "可选;缺省为当前 book profile"}
                 }
+            }),
+        ),
+        s(
+            "profile.mark_used",
+            "可选的只读画像使用声明:只报告本回合 snapshot 中实际影响回答的 fact ID 与影响维度;不读取或修改 memory。",
+            json!({
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "fact_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "minItems": 1,
+                        "uniqueItems": true
+                    },
+                    "influences": {
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "enum": ["retrieval_plan", "explanation_depth", "terminology", "example_choice", "navigation"]
+                        },
+                        "minItems": 1,
+                        "uniqueItems": true
+                    }
+                },
+                "required": ["fact_ids", "influences"]
             }),
         ),
         s(
@@ -1228,6 +1298,121 @@ fn messages_with_profile_snapshot(
     request
 }
 
+fn parse_profile_influence(value: &str) -> Option<ProfileInfluence> {
+    match value {
+        "retrieval_plan" => Some(ProfileInfluence::RetrievalPlan),
+        "explanation_depth" => Some(ProfileInfluence::ExplanationDepth),
+        "terminology" => Some(ProfileInfluence::Terminology),
+        "example_choice" => Some(ProfileInfluence::ExampleChoice),
+        "navigation" => Some(ProfileInfluence::Navigation),
+        _ => None,
+    }
+}
+
+fn mark_profile_used(
+    arguments: &str,
+    injected: &HashSet<String>,
+    claimed_used: &mut BTreeSet<String>,
+    influences: &mut BTreeSet<ProfileInfluence>,
+) -> String {
+    let args: serde_json::Value = match serde_json::from_str(arguments) {
+        Ok(value) => value,
+        Err(error) => {
+            return err_json(
+                "INVALID_PROFILE_USAGE",
+                "validation",
+                &format!("profile.mark_used arguments must be valid JSON: {error}"),
+            );
+        }
+    };
+    let Some(object) = args.as_object() else {
+        return err_json(
+            "INVALID_PROFILE_USAGE",
+            "validation",
+            "profile.mark_used arguments must be an object",
+        );
+    };
+    if object
+        .keys()
+        .any(|key| key != "fact_ids" && key != "influences")
+    {
+        return err_json(
+            "INVALID_PROFILE_USAGE",
+            "validation",
+            "profile.mark_used contains an unknown field",
+        );
+    }
+    let (Some(fact_values), Some(influence_values)) = (
+        object.get("fact_ids").and_then(serde_json::Value::as_array),
+        object
+            .get("influences")
+            .and_then(serde_json::Value::as_array),
+    ) else {
+        return err_json(
+            "INVALID_PROFILE_USAGE",
+            "validation",
+            "profile.mark_used requires fact_ids and influences arrays",
+        );
+    };
+    if fact_values.is_empty() || influence_values.is_empty() {
+        return err_json(
+            "INVALID_PROFILE_USAGE",
+            "validation",
+            "profile.mark_used arrays must not be empty",
+        );
+    }
+
+    let mut accepted_ids = BTreeSet::new();
+    for value in fact_values {
+        let Some(fact_id) = value.as_str().filter(|id| !id.trim().is_empty()) else {
+            return err_json(
+                "INVALID_PROFILE_USAGE",
+                "validation",
+                "profile.mark_used fact_ids must be nonempty strings",
+            );
+        };
+        if !injected.contains(fact_id) {
+            return err_json(
+                "PROFILE_FACT_NOT_IN_SNAPSHOT",
+                "validation",
+                &format!("profile.mark_used fact_id was not injected: {fact_id}"),
+            );
+        }
+        accepted_ids.insert(fact_id.to_string());
+    }
+    let mut accepted_influences = BTreeSet::new();
+    for value in influence_values {
+        let Some(influence) = value.as_str().and_then(parse_profile_influence) else {
+            return err_json(
+                "INVALID_PROFILE_USAGE",
+                "validation",
+                "profile.mark_used contains an unsupported influence",
+            );
+        };
+        accepted_influences.insert(influence);
+    }
+
+    claimed_used.extend(accepted_ids.iter().cloned());
+    influences.extend(accepted_influences.iter().copied());
+    to_json(&serde_json::json!({
+        "accepted_fact_ids": accepted_ids,
+        "influences": accepted_influences,
+    }))
+}
+
+fn profile_usage_trace(
+    profile_snapshot: &ReaderProfileSnapshot,
+    claimed_used: &BTreeSet<String>,
+    influences: &BTreeSet<ProfileInfluence>,
+) -> ProfileUsageTrace {
+    ProfileUsageTrace {
+        snapshot_revision: profile_snapshot.source_revision,
+        injected_fact_ids: profile_snapshot.injected_fact_ids(),
+        claimed_used_fact_ids: claimed_used.iter().cloned().collect(),
+        influences: influences.iter().copied().collect(),
+    }
+}
+
 /// 外层 E 编排 loop `[ADR-0026/0016/0030]`:LLM 自主多轮调工具,双重停机诚实标 incomplete。
 /// `reader`/`messages` 由调用方注入(与前端共享同一会话态视口 + 跨回合 messages `[ADR-0030 决策2]`);
 /// 本回合(一次调用)的可撤销 `effects` + 查询 `trace` 随 `OuterOutcome` 返回。
@@ -1251,6 +1436,7 @@ pub fn run(
         messages,
         profile_snapshot,
         None,
+        Vec::new(),
         question,
         now,
         cfg,
@@ -1268,6 +1454,7 @@ pub fn run_with_ephemeral_context(
     messages: &mut Vec<Message>,
     profile_snapshot: &ReaderProfileSnapshot,
     ephemeral_context: Option<&str>,
+    profile_memory_updates: Vec<ProfileMemoryUpdate>,
     question: &str,
     now: &str,
     cfg: OuterConfig,
@@ -1282,6 +1469,10 @@ pub fn run_with_ephemeral_context(
     let trace_dbg = std::env::var("UB_TRACE").is_ok(); // 诊断:打印每轮 tool_calls + 结果(env-gated)
     let mut spent: u32 = 0;
     let mut turns: usize = 0;
+    let injected_fact_ids: HashSet<String> =
+        profile_snapshot.injected_fact_ids().into_iter().collect();
+    let mut claimed_used_fact_ids = BTreeSet::new();
+    let mut profile_influences = BTreeSet::new();
 
     loop {
         turns += 1;
@@ -1328,6 +1519,12 @@ pub fn run_with_ephemeral_context(
                 tokens_spent: spent,
                 effects: with_goto(reader, &before_anchor, effects),
                 trace,
+                profile_usage: profile_usage_trace(
+                    profile_snapshot,
+                    &claimed_used_fact_ids,
+                    &profile_influences,
+                ),
+                memory_updates: profile_memory_updates,
             });
         }
 
@@ -1339,8 +1536,19 @@ pub fn run_with_ephemeral_context(
             tool_call_id: None,
         });
         for tc in &turn.tool_calls {
-            let (result, effect) =
-                dispatch(&tc.name, &tc.arguments, book, store, reader, adapter, now);
+            let (result, effect) = if tc.name == "profile.mark_used" {
+                (
+                    mark_profile_used(
+                        &tc.arguments,
+                        &injected_fact_ids,
+                        &mut claimed_used_fact_ids,
+                        &mut profile_influences,
+                    ),
+                    None,
+                )
+            } else {
+                dispatch(&tc.name, &tc.arguments, book, store, reader, adapter, now)
+            };
             if trace_dbg {
                 eprintln!(
                     "   ↳ {} => {}",
@@ -1374,6 +1582,12 @@ pub fn run_with_ephemeral_context(
                 tokens_spent: spent,
                 effects: with_goto(reader, &before_anchor, effects),
                 trace,
+                profile_usage: profile_usage_trace(
+                    profile_snapshot,
+                    &claimed_used_fact_ids,
+                    &profile_influences,
+                ),
+                memory_updates: profile_memory_updates,
             });
         }
     }
@@ -1748,6 +1962,14 @@ mod tests {
         .unwrap();
         assert_eq!(out.answer.as_deref(), Some("done"));
         assert_eq!(store.projection_revision(), 2);
+        assert_eq!(out.profile_usage.snapshot_revision, 1);
+        assert_eq!(
+            out.profile_usage.injected_fact_ids,
+            snapshot.injected_fact_ids()
+        );
+        assert!(out.profile_usage.claimed_used_fact_ids.is_empty());
+        assert!(out.profile_usage.influences.is_empty());
+        assert!(out.memory_updates.is_empty());
 
         let seen = adapter.seen_messages.borrow();
         assert_eq!(seen.len(), 2);
@@ -1778,6 +2000,99 @@ mod tests {
         let persisted = serde_json::to_string(&messages).unwrap();
         assert!(!persisted.contains("reader_profile_snapshot.v1"));
         assert!(!persisted.contains("detailed"));
+    }
+
+    #[test]
+    fn profile_mark_used_accepts_only_injected_ids_and_is_atomic_on_error() {
+        let b = book();
+        let mut store = MemoryStore::open(tmp("profile-usage")).unwrap();
+        let fact = store
+            .create_profile_fact(
+                CreateProfileFact {
+                    scope: ProfileScope::Global,
+                    applicability: Applicability::Any,
+                    payload: ProfilePayload::ExplanationPreference(PreferenceClaim {
+                        key: "depth".into(),
+                        value: "detailed".into(),
+                    }),
+                    source: FactSource::UserStated,
+                    evidence: vec![EvidenceRef::Turn {
+                        session_id: "seed".into(),
+                        turn_id: "turn".into(),
+                    }],
+                    confidence: None,
+                    sensitivity: Sensitivity::Normal,
+                    valid_until: None,
+                },
+                "2026-01-01T00:00:00Z",
+            )
+            .unwrap();
+        let snapshot =
+            store.project_reader_profile_snapshot(&SnapshotRequest::current(SnapshotContext {
+                book_id: Some(b.base.book_id.clone()),
+                content_profile: Some("technical_learning".into()),
+                now: Some("2026-01-02T00:00:00Z".into()),
+                ..Default::default()
+            }));
+        let valid = format!(
+            r#"{{"fact_ids":["{}"],"influences":["explanation_depth"]}}"#,
+            fact.fact_id
+        );
+        let adapter = RecordingAdapter {
+            chats: RefCell::new(
+                vec![
+                    turn_calls(vec![call("usage-ok", "profile.mark_used", &valid)]),
+                    turn_calls(vec![call(
+                        "usage-bad",
+                        "profile.mark_used",
+                        r#"{"fact_ids":["fact_missing"],"influences":["navigation"]}"#,
+                    )]),
+                    turn_final("done"),
+                ]
+                .into(),
+            ),
+            seen_messages: RefCell::new(Vec::new()),
+        };
+        let update = ProfileMemoryUpdate {
+            kind: ProfileMemoryUpdateKind::Remembered,
+            operation_id: Some("operation-1".into()),
+            fact_ids: vec![fact.fact_id.clone()],
+            message: None,
+        };
+        let mut reader = Reader::new(&b, DEFAULT_RADIUS);
+        let mut messages = new_session();
+        let out = run_with_ephemeral_context(
+            &b,
+            &mut store,
+            &mut reader,
+            &adapter,
+            &mut messages,
+            &snapshot,
+            None,
+            vec![update.clone()],
+            "answer with my profile",
+            "2026-01-02T00:00:00Z",
+            OuterConfig::default(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            out.profile_usage.snapshot_revision,
+            snapshot.source_revision
+        );
+        assert_eq!(
+            out.profile_usage.injected_fact_ids,
+            vec![fact.fact_id.clone()]
+        );
+        assert_eq!(out.profile_usage.claimed_used_fact_ids, vec![fact.fact_id]);
+        assert_eq!(
+            out.profile_usage.influences,
+            vec![ProfileInfluence::ExplanationDepth]
+        );
+        assert_eq!(out.memory_updates, vec![update]);
+        assert_eq!(store.projection_revision(), 1);
+        let persisted = serde_json::to_string(&messages).unwrap();
+        assert!(persisted.contains("PROFILE_FACT_NOT_IN_SNAPSHOT"));
     }
 
     // 多跳收敛:chat 调 book.query(触发内层 complete)→ chat 调 memory.save → chat 终答。
@@ -2048,6 +2363,7 @@ mod tests {
         assert!(names.iter().any(|n| n == "book.paper_metadata"));
         assert!(names.iter().any(|n| n == "book.paper_lexicon"));
         assert!(names.iter().any(|n| n == "profile.manifest"));
+        assert!(names.iter().any(|n| n == "profile.mark_used"));
         assert!(names.iter().any(|n| n == "reader.layout.apply"));
         assert!(names.iter().any(|n| n == "book.route_from"));
         assert!(names.iter().any(|n| n == "book.route_to"));

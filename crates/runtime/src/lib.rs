@@ -11,6 +11,7 @@ use ts_rs::TS;
 pub mod goldset;
 pub mod memory_intent;
 pub mod orchestrator;
+pub mod profile_api;
 pub mod profile_context;
 
 /// scope 档(P1 扩到 local/chapter/cross_chapter/global)`[ADR-0016/0033]`。

@@ -7,7 +7,12 @@ import type { OuterOutcome } from "./generated/OuterOutcome";
 import type { AgentEffect } from "./generated/AgentEffect";
 import type { TraceStep } from "./generated/TraceStep";
 import type { ProfileManifest } from "./generated/ProfileManifest";
+import type { ProfileInfluence } from "./generated/ProfileInfluence";
+import type { ProfileMemoryState } from "./generated/ProfileMemoryState";
+import type { ProfileMemoryUpdate } from "./generated/ProfileMemoryUpdate";
+import type { ProfileMemoryUpdateKind } from "./generated/ProfileMemoryUpdateKind";
 import type { ProfileSummary } from "./generated/ProfileSummary";
+import type { ProfileUsageTrace } from "./generated/ProfileUsageTrace";
 import type { ReaderLayoutAction } from "./generated/ReaderLayoutAction";
 import type { ReaderLayoutApplyOutcome } from "./generated/ReaderLayoutApplyOutcome";
 import type { ReaderLayoutProposal } from "./generated/ReaderLayoutProposal";
@@ -33,7 +38,12 @@ export type {
   AgentEffect,
   TraceStep,
   ProfileManifest,
+  ProfileInfluence,
+  ProfileMemoryState,
+  ProfileMemoryUpdate,
+  ProfileMemoryUpdateKind,
   ProfileSummary,
+  ProfileUsageTrace,
   ReaderLayoutAction,
   ReaderLayoutApplyOutcome,
   ReaderLayoutProposal,
@@ -701,6 +711,7 @@ export const api = {
   pdfOriginalUrl: () => `${BASE}/book/pdf/original`,
   profileManifest: (profile_id?: "technical_learning" | "paper") =>
     http<ProfileManifest>("GET", `/profile/manifest${qs({ profile_id })}`),
+  profileMemory: () => http<ProfileMemoryState>("GET", "/profile/memory"),
   text: (lid: string, end?: string) =>
     http<BookText>("GET", `/book/text${qs({ lid, end })}`),
   structure: (at?: string) => http<StructureProjection>("GET", `/book/structure${qs({ at })}`),

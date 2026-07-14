@@ -22,7 +22,10 @@ use reader::{
     Reader, SavedUserOverlay, DEFAULT_RADIUS,
 };
 use runtime::memory_intent::{evaluate_memory_intent, MemoryIntentDecision, MemoryIntentRequest};
-use runtime::orchestrator::{new_session, run_with_ephemeral_context, OuterConfig};
+use runtime::orchestrator::{
+    new_session, run_with_ephemeral_context, OuterConfig, ProfileMemoryUpdate,
+    ProfileMemoryUpdateKind,
+};
 use runtime::{
     guided_route_from, synthesize, unvisited_back, AdapterError, AssistantTurn, CompletionRequest,
     Message, ModelAdapter, ParsedResponse, ToolSpec,
@@ -1264,6 +1267,12 @@ pub fn route(state: &mut AppState, req: Req) -> Reply {
             return agent_method_not_allowed();
         }
         return route_agent_new(state, req.now);
+    }
+    if path == "/profile/memory" {
+        if req.method != "GET" {
+            return method_not_allowed();
+        }
+        return route_profile_memory_state(state, req.now);
     }
     if path == "/profile/memory/apply" {
         if req.method != "POST" {
@@ -6493,6 +6502,50 @@ fn memory_applied_event(outcome: &MemoryOpOutcome) -> serde_json::Value {
     json!({ "kind": "applied", "outcome": outcome })
 }
 
+fn memory_applied_update(outcome: &MemoryOpOutcome) -> ProfileMemoryUpdate {
+    match outcome {
+        MemoryOpOutcome::Remembered {
+            operation_id,
+            fact,
+            ..
+        } => ProfileMemoryUpdate {
+            kind: ProfileMemoryUpdateKind::Remembered,
+            operation_id: Some(operation_id.clone()),
+            fact_ids: vec![fact.fact_id.clone()],
+            message: None,
+        },
+        MemoryOpOutcome::Corrected {
+            operation_id,
+            fact,
+            ..
+        } => ProfileMemoryUpdate {
+            kind: ProfileMemoryUpdateKind::Corrected,
+            operation_id: Some(operation_id.clone()),
+            fact_ids: vec![fact.fact_id.clone()],
+            message: None,
+        },
+        MemoryOpOutcome::Forgotten {
+            operation_id,
+            forgotten_fact_ids,
+            ..
+        } => ProfileMemoryUpdate {
+            kind: ProfileMemoryUpdateKind::Forgotten,
+            operation_id: Some(operation_id.clone()),
+            fact_ids: forgotten_fact_ids.clone(),
+            message: None,
+        },
+    }
+}
+
+fn record_memory_outcome(
+    outcome: &MemoryOpOutcome,
+    events: &mut Vec<serde_json::Value>,
+    updates: &mut Vec<ProfileMemoryUpdate>,
+) {
+    events.push(memory_applied_event(outcome));
+    updates.push(memory_applied_update(outcome));
+}
+
 fn memory_ephemeral_context(events: &[serde_json::Value]) -> Option<String> {
     if events.is_empty() {
         return None;
@@ -6504,7 +6557,7 @@ rules=Report the operation result accurately. Runtime already owns this profile 
     ))
 }
 
-fn rejected_memory_chat_reply(error_code: &str, message: &str) -> Reply {
+fn rejected_memory_chat_reply(snapshot_revision: u64, error_code: &str, message: &str) -> Reply {
     ok_json(&json!({
         "answer": message,
         "incomplete": false,
@@ -6512,7 +6565,19 @@ fn rejected_memory_chat_reply(error_code: &str, message: &str) -> Reply {
         "turns": 0,
         "tokens_spent": 0,
         "effects": [],
-        "trace": []
+        "trace": [],
+        "profile_usage": {
+            "snapshot_revision": snapshot_revision,
+            "injected_fact_ids": [],
+            "claimed_used_fact_ids": [],
+            "influences": []
+        },
+        "memory_updates": [{
+            "kind": "rejected",
+            "operation_id": null,
+            "fact_ids": [],
+            "message": message
+        }]
     }))
 }
 
@@ -6698,6 +6763,36 @@ fn route_profile_memory_apply(state: &mut AppState, body: &str, now: &str) -> Re
     }
 }
 
+fn route_profile_memory_state(state: &mut AppState, now: &str) -> Reply {
+    let book_id = state.book.base.book_id.clone();
+    let content_profile = current_content_profile(&state.book);
+    let request = SnapshotRequest::current(SnapshotContext {
+        book_id: Some(book_id.clone()),
+        content_profile: Some(content_profile.into()),
+        now: Some(now.into()),
+        ..Default::default()
+    });
+    let snapshot = state
+        .profile_context_cache
+        .snapshot(&state.store, &request)
+        .clone();
+    let pending_sensitive_confirmation = state
+        .agent_history
+        .active_by_book
+        .get(&book_id)
+        .is_some_and(|session_id| {
+            state
+                .agent_history
+                .pending_memory_ops
+                .contains_key(session_id)
+        });
+    ok_json(&runtime::profile_api::build_profile_memory_state(
+        &state.store,
+        &snapshot,
+        pending_sensitive_confirmation,
+    ))
+}
+
 /// `POST /agent/chat`(S10f)`[ADR-0030]`:外层 E agent 编排 loop,注入同一
 /// `book/store/reader/messages/adapter`(与前端共享视口、跨回合 messages)。body `{message}` →
 /// `OuterOutcome{answer, incomplete, effects, trace, ...}`;agent 动作即时驱动共享 reader 视口,
@@ -6747,6 +6842,7 @@ fn route_agent_chat(state: &mut AppState, body: &str, now: &str) -> Reply {
         ..Default::default()
     };
     let mut memory_events = Vec::new();
+    let mut memory_updates = Vec::new();
     let mut confirmation_applied = false;
     if let Some(pending) = state.agent_history.pending_memory_ops.remove(&session_id) {
         if is_sensitive_memory_confirmation(msg) {
@@ -6756,7 +6852,11 @@ fn route_agent_chat(state: &mut AppState, body: &str, now: &str) -> Reply {
                 .apply_memory_op(acknowledge_sensitive_memory_op(pending), now)
             {
                 Ok(outcome) => {
-                    memory_events.push(memory_applied_event(&outcome));
+                    record_memory_outcome(
+                        &outcome,
+                        &mut memory_events,
+                        &mut memory_updates,
+                    );
                     confirmation_applied = true;
                 }
                 Err(error) => {
@@ -6770,10 +6870,17 @@ fn route_agent_chat(state: &mut AppState, body: &str, now: &str) -> Reply {
                 }
             }
         } else {
+            let message = "The pending sensitive profile save was cancelled because the next message was not an exact confirmation.";
             memory_events.push(json!({
                 "kind": "sensitive_confirmation_cancelled",
-                "message": "The pending sensitive profile save was cancelled because the next message was not an exact confirmation."
+                "message": message
             }));
+            memory_updates.push(ProfileMemoryUpdate {
+                kind: ProfileMemoryUpdateKind::SensitiveConfirmationCancelled,
+                operation_id: None,
+                fact_ids: Vec::new(),
+                message: Some(message.into()),
+            });
         }
     }
 
@@ -6799,7 +6906,11 @@ fn route_agent_chat(state: &mut AppState, body: &str, now: &str) -> Reply {
             MemoryIntentDecision::NoIntent => {}
             MemoryIntentDecision::Apply { operation } => {
                 match state.store.apply_memory_op(operation, now) {
-                    Ok(outcome) => memory_events.push(memory_applied_event(&outcome)),
+                    Ok(outcome) => record_memory_outcome(
+                        &outcome,
+                        &mut memory_events,
+                        &mut memory_updates,
+                    ),
                     Err(error) => return err_reply(&error),
                 }
             }
@@ -6807,12 +6918,24 @@ fn route_agent_chat(state: &mut AppState, body: &str, now: &str) -> Reply {
                 intent,
                 candidates,
                 message,
-            } => memory_events.push(json!({
-                "kind": "needs_clarification",
-                "intent": intent,
-                "candidates": candidates,
-                "message": message
-            })),
+            } => {
+                let candidate_ids = candidates
+                    .iter()
+                    .map(|candidate| candidate.fact_id.clone())
+                    .collect();
+                memory_events.push(json!({
+                    "kind": "needs_clarification",
+                    "intent": intent,
+                    "candidates": candidates,
+                    "message": message
+                }));
+                memory_updates.push(ProfileMemoryUpdate {
+                    kind: ProfileMemoryUpdateKind::NeedsClarification,
+                    operation_id: None,
+                    fact_ids: candidate_ids,
+                    message: Some(message),
+                });
+            }
             MemoryIntentDecision::NeedsSensitiveConfirmation {
                 operation,
                 preview,
@@ -6827,11 +6950,23 @@ fn route_agent_chat(state: &mut AppState, body: &str, now: &str) -> Reply {
                     "preview": preview,
                     "warning": warning
                 }));
+                memory_updates.push(ProfileMemoryUpdate {
+                    kind: ProfileMemoryUpdateKind::NeedsSensitiveConfirmation,
+                    operation_id: None,
+                    fact_ids: Vec::new(),
+                    message: Some(warning),
+                });
             }
             MemoryIntentDecision::Rejected {
                 error_code,
                 message,
-            } => return rejected_memory_chat_reply(&error_code, &message),
+            } => {
+                return rejected_memory_chat_reply(
+                    state.store.projection_revision(),
+                    &error_code,
+                    &message,
+                );
+            }
         }
     }
 
@@ -6855,6 +6990,7 @@ fn route_agent_chat(state: &mut AppState, body: &str, now: &str) -> Reply {
         &mut state.messages,
         &profile_snapshot,
         memory_context.as_deref(),
+        memory_updates,
         &agent_message,
         now,
         OuterConfig::default(),
@@ -10774,6 +10910,20 @@ mod tests {
         let first = post(&mut s, "/agent/chat", r#"{"message":"记住我喜欢详细解释"}"#);
         assert_eq!(first.status, 200, "{}", first.body);
         assert_eq!(s.store.profile_facts().len(), 1);
+        let first_body: serde_json::Value = serde_json::from_str(&first.body).unwrap();
+        assert_eq!(first_body["memory_updates"][0]["kind"], "remembered");
+        assert_eq!(
+            first_body["profile_usage"]["snapshot_revision"],
+            s.store.projection_revision()
+        );
+        assert_eq!(
+            first_body["profile_usage"]["injected_fact_ids"][0],
+            s.store.profile_facts()[0].fact_id
+        );
+        assert!(first_body["profile_usage"]["claimed_used_fact_ids"]
+            .as_array()
+            .unwrap()
+            .is_empty());
         assert_eq!(
             s.store.profile_facts()[0].status,
             memory::FactStatus::Confirmed
@@ -11015,6 +11165,91 @@ mod tests {
         assert!(!serde_json::to_string(&sensitive.agent_history)
             .unwrap()
             .contains("UI_SENSITIVE_ONLY"));
+    }
+
+    #[test]
+    fn profile_memory_state_exposes_resident_snapshot_facts_evidence_and_pending_status() {
+        let mut s = state_named("profile-memory-state");
+        let book_id = s.book.base.book_id.clone();
+        let normal_action = json!({
+            "kind": "remember",
+            "operation_id": "state-normal-1",
+            "evidence_text": "Remember this API-visible preference",
+            "fact": ExplicitProfileFact {
+                scope: ProfileScope::Book { book_id: book_id.clone() },
+                applicability: Applicability::Any,
+                payload: ProfilePayload::ExplanationPreference(PreferenceClaim {
+                    key: "depth".into(),
+                    value: "STATE_API_SENTINEL".into(),
+                }),
+                sensitivity: Sensitivity::Normal,
+                valid_until: None,
+                sensitive_plaintext_acknowledged: false,
+            }
+        });
+        assert_eq!(
+            post(
+                &mut s,
+                "/profile/memory/apply",
+                &normal_action.to_string()
+            )
+            .status,
+            200
+        );
+
+        let state = get(&mut s, "/profile/memory");
+        assert_eq!(state.status, 200, "{}", state.body);
+        let body: serde_json::Value = serde_json::from_str(&state.body).unwrap();
+        assert_eq!(body["status"]["document_revision"], 1);
+        assert_eq!(body["status"]["projection_revision"], 1);
+        assert_eq!(body["status"]["profile_status"], "current");
+        assert_eq!(body["status"]["pending_sensitive_confirmation"], false);
+        assert_eq!(body["snapshot"]["source_revision"], 1);
+        assert_eq!(
+            body["snapshot"]["book_state_core"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(body["facts"][0]["payload_value"], "STATE_API_SENTINEL");
+        assert_eq!(body["facts"][0]["status"], "confirmed");
+        assert_eq!(
+            body["evidence"][0]["text"],
+            "Remember this API-visible preference"
+        );
+
+        let sensitive_action = json!({
+            "kind": "remember",
+            "operation_id": "state-sensitive-1",
+            "evidence_text": "Remember my medical preference",
+            "fact": ExplicitProfileFact {
+                scope: ProfileScope::Book { book_id },
+                applicability: Applicability::Any,
+                payload: ProfilePayload::ExplanationPreference(PreferenceClaim {
+                    key: "health".into(),
+                    value: "PENDING_STATE_SECRET".into(),
+                }),
+                sensitivity: Sensitivity::Normal,
+                valid_until: None,
+                sensitive_plaintext_acknowledged: false,
+            }
+        });
+        assert_eq!(
+            post(
+                &mut s,
+                "/profile/memory/apply",
+                &sensitive_action.to_string()
+            )
+            .status,
+            200
+        );
+        let pending = get(&mut s, "/profile/memory");
+        let body: serde_json::Value = serde_json::from_str(&pending.body).unwrap();
+        assert_eq!(body["status"]["pending_sensitive_confirmation"], true);
+        assert_eq!(body["facts"].as_array().unwrap().len(), 1);
+        assert!(!pending.body.contains("PENDING_STATE_SECRET"));
+        assert_eq!(post(&mut s, "/profile/memory", "{}").status, 405);
     }
 
     #[test]

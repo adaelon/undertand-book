@@ -875,6 +875,7 @@ mod tests {
         assert!(names.contains(&"book_paper_reading_guide".to_string()));
         assert!(!names.iter().any(|n| n.starts_with("reader")));
         assert!(!names.iter().any(|n| n.starts_with("memory")));
+        assert!(!names.iter().any(|n| n.starts_with("profile")));
         assert!(!names.contains(&"book_route_from".to_string()));
         assert!(!names.contains(&"book_route_to".to_string()));
         assert!(!names.iter().any(|n| n.contains("cross_paper")));
