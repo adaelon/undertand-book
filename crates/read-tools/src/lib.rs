@@ -717,6 +717,13 @@ pub enum ContentProfileId {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct MemoryPolicyRef {
+    pub policy_id: String,
+    pub policy_version: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(export, export_to = "../../../packages/web/src/generated/")]
 pub enum ProjectionKind {
@@ -854,6 +861,7 @@ pub struct ProfileDefaults {
 pub struct ProfileManifest {
     pub profile_id: ContentProfileId,
     pub profile_version: String,
+    pub memory_policy: MemoryPolicyRef,
     pub projections: Vec<ProjectionSpec>,
     pub ui_slots: Vec<UiSlotSpec>,
     pub layout_presets: Vec<LayoutPresetSpec>,
@@ -962,6 +970,8 @@ pub enum ReaderLayoutApplyOutcome {
 
 pub const TECHNICAL_LEARNING_PROFILE_VERSION: &str = "technical_learning_v0";
 pub const PAPER_PROFILE_VERSION: &str = "paper_v0";
+pub const TECHNICAL_LEARNING_MEMORY_POLICY_VERSION: &str = "technical_learning_memory_v1";
+pub const PAPER_MEMORY_POLICY_VERSION: &str = "paper_memory_v1";
 
 fn all_layout_actions() -> Vec<ReaderLayoutActionKind> {
     vec![
@@ -1017,6 +1027,10 @@ pub fn technical_learning_profile_manifest() -> ProfileManifest {
     ProfileManifest {
         profile_id: ContentProfileId::TechnicalLearning,
         profile_version: TECHNICAL_LEARNING_PROFILE_VERSION.into(),
+        memory_policy: MemoryPolicyRef {
+            policy_id: "technical_learning".into(),
+            policy_version: TECHNICAL_LEARNING_MEMORY_POLICY_VERSION.into(),
+        },
         projections: vec![
             ProjectionSpec {
                 id: "book.structure".into(),
@@ -1116,6 +1130,10 @@ pub fn paper_profile_manifest() -> ProfileManifest {
     ProfileManifest {
         profile_id: ContentProfileId::Paper,
         profile_version: PAPER_PROFILE_VERSION.into(),
+        memory_policy: MemoryPolicyRef {
+            policy_id: "paper".into(),
+            policy_version: PAPER_MEMORY_POLICY_VERSION.into(),
+        },
         projections: vec![
             ProjectionSpec {
                 id: "paper.reading_guide".into(),
@@ -5641,6 +5659,10 @@ mod tests {
         let manifest = ProfileManifest {
             profile_id: ContentProfileId::Paper,
             profile_version: "paper_v0".into(),
+            memory_policy: MemoryPolicyRef {
+                policy_id: "paper".into(),
+                policy_version: PAPER_MEMORY_POLICY_VERSION.into(),
+            },
             projections: vec![ProjectionSpec {
                 id: "paper.reading_guide".into(),
                 kind: ProjectionKind::ReadingGuide,
@@ -5701,6 +5723,11 @@ mod tests {
 
         let value = serde_json::to_value(&manifest).unwrap();
         assert_eq!(value["profile_id"], "paper");
+        assert_eq!(value["memory_policy"]["policy_id"], "paper");
+        assert_eq!(
+            value["memory_policy"]["policy_version"],
+            PAPER_MEMORY_POLICY_VERSION
+        );
         assert_eq!(
             value["projections"][0]["runtime_tool"],
             "book.paper_reading_guide"

@@ -3,9 +3,10 @@ import type { AgentToolSpec } from "./AgentToolSpec";
 import type { ContentProfileId } from "./ContentProfileId";
 import type { GuidedReadingPolicySpec } from "./GuidedReadingPolicySpec";
 import type { LayoutPresetSpec } from "./LayoutPresetSpec";
+import type { MemoryPolicyRef } from "./MemoryPolicyRef";
 import type { ProfileDefaults } from "./ProfileDefaults";
 import type { ProjectionSpec } from "./ProjectionSpec";
 import type { ReaderLayoutActionKind } from "./ReaderLayoutActionKind";
 import type { UiSlotSpec } from "./UiSlotSpec";
 
-export type ProfileManifest = { profile_id: ContentProfileId, profile_version: string, projections: Array<ProjectionSpec>, ui_slots: Array<UiSlotSpec>, layout_presets: Array<LayoutPresetSpec>, allowed_layout_actions: Array<ReaderLayoutActionKind>, agent_tools: Array<AgentToolSpec>, guided_reading_policy: GuidedReadingPolicySpec, defaults: ProfileDefaults, };
+export type ProfileManifest = { profile_id: ContentProfileId, profile_version: string, memory_policy: MemoryPolicyRef, projections: Array<ProjectionSpec>, ui_slots: Array<UiSlotSpec>, layout_presets: Array<LayoutPresetSpec>, allowed_layout_actions: Array<ReaderLayoutActionKind>, agent_tools: Array<AgentToolSpec>, guided_reading_policy: GuidedReadingPolicySpec, defaults: ProfileDefaults, };

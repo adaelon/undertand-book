@@ -25,6 +25,7 @@ use reader::{
 use runtime::memory_intent::{
     evaluate_memory_intent, scan_memory_intent, MemoryIntentDecision, MemoryIntentRequest,
 };
+use runtime::memory_policy::{MemoryPolicyRegistry, PolicyProjectionInput};
 use runtime::orchestrator::{
     new_session, run_with_ephemeral_context, OuterConfig, OuterOutcome, ProfileMemoryUpdate,
     ProfileMemoryUpdateKind, ProfileUsageTrace,
@@ -7407,12 +7408,32 @@ fn profile_snapshot_request(
         job.book_id == book_id && job.status != ReviewJobStatus::Completed
     });
     let stale = unresolved && review_state.last_error.is_some();
-    let mut request = SnapshotRequest::current(SnapshotContext {
+    let context = SnapshotContext {
         book_id: Some(book_id.into()),
         content_profile: Some(content_profile.into()),
         now: Some(now.into()),
         ..Default::default()
-    });
+    };
+    let reading_state = state.store.derive_book_reading_state(book_id);
+    let resolved_facts = state
+        .store
+        .resolve_profile_facts(&ProfileResolutionContext {
+            book_id: Some(book_id.into()),
+            content_profile: Some(content_profile.into()),
+            now: Some(now.into()),
+            ..Default::default()
+        });
+    let manifest = state.book.profile_manifest();
+    let policy_projection = MemoryPolicyRegistry::default().project(
+        &manifest.memory_policy,
+        &PolicyProjectionInput {
+            source_revision: state.store.projection_revision(),
+            reading_state: &reading_state,
+            resolved_facts: &resolved_facts,
+        },
+    );
+    let mut request = SnapshotRequest::current(context);
+    request.profile_candidates = policy_projection.candidates;
     if stale {
         request.profile_status = ProfileStatus::Stale;
         request.pending_context = pending_review_context(state, book_id);
@@ -11715,6 +11736,36 @@ mod tests {
         assert_eq!(body["facts"].as_array().unwrap().len(), 1);
         assert!(!pending.body.contains("PENDING_STATE_SECRET"));
         assert_eq!(post(&mut s, "/profile/memory", "{}").status, 405);
+    }
+
+    #[test]
+    fn profile_memory_state_includes_neutral_raw_activity_projection() {
+        let mut state = state_named("profile-memory-neutral-activity");
+        let book_id = state.book.base.book_id.clone();
+        state
+            .store
+            .mark_read(&book_id, "1.1", "2026-07-14T00:00:00Z")
+            .unwrap();
+
+        let response = get(&mut state, "/profile/memory");
+        assert_eq!(response.status, 200, "{}", response.body);
+        let body: serde_json::Value = serde_json::from_str(&response.body).unwrap();
+        let projection = body["snapshot"]["profile_projection"]
+            .as_array()
+            .unwrap();
+
+        assert_eq!(body["facts"].as_array().unwrap().len(), 0);
+        assert_eq!(projection.len(), 2);
+        assert!(projection
+            .iter()
+            .all(|item| item["status"] == "confirmed"));
+        assert!(projection
+            .iter()
+            .any(|item| item["text"].as_str().unwrap().contains("read_lids")));
+        assert!(projection.iter().any(|item| item["text"]
+            .as_str()
+            .unwrap()
+            .contains("activity:1.1")));
     }
 
     #[test]
