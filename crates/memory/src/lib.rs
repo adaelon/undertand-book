@@ -29,8 +29,9 @@ pub use projection::{
 };
 pub use reading_state::{BookReadingState, EngagementSignals, LegacyReaderProfileProjection};
 pub use review::{
-    GlobalConsolidationJob, IntentObservation, ReviewErrorState, ReviewJob, ReviewJobStatus,
-    ReviewReconciliation, ReviewSessionCursor, ReviewState,
+    GlobalConsolidationJob, IntentObservation, IntentObservationCandidate, ReviewCommitOutcome,
+    ReviewErrorState, ReviewFactCandidate, ReviewJob, ReviewJobStatus, ReviewReconciliation,
+    ReviewSessionCursor, ReviewState,
 };
 use read_tools::ToolError;
 use serde::{Deserialize, Serialize};

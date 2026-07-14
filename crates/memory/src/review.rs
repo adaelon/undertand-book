@@ -1,4 +1,8 @@
-use crate::{fnv1a, EvidenceRef, MemoryStore};
+use crate::profile::{build_profile_fact, reject_excluded_evidence};
+use crate::{
+    fnv1a, CreateProfileFact, EvidenceRef, FactSource, MemoryStore, ProfileFact, ProfileScope,
+    Sensitivity,
+};
 use read_tools::ToolError;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -45,6 +49,27 @@ pub struct IntentObservation {
     pub content_profile: String,
     pub evidence: Vec<EvidenceRef>,
     pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ReviewFactCandidate {
+    pub candidate_id: String,
+    pub fact: CreateProfileFact,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IntentObservationCandidate {
+    pub intent_key: String,
+    pub content_profile: String,
+    pub evidence: Vec<EvidenceRef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewCommitOutcome {
+    pub completed_job: ReviewJob,
+    pub added_fact_ids: Vec<String>,
+    pub added_observation_ids: Vec<String>,
+    pub already_completed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -289,6 +314,165 @@ impl MemoryStore {
         Ok(completed)
     }
 
+    pub fn commit_review_result(
+        &mut self,
+        job_id: &str,
+        eligible_turn_ids: &[String],
+        fact_candidates: &[ReviewFactCandidate],
+        intent_candidates: &[IntentObservationCandidate],
+        now: &str,
+    ) -> Result<ReviewCommitOutcome, ToolError> {
+        validate_required("review commit timestamp", now)?;
+        let current = self
+            .document
+            .review_state
+            .review_jobs
+            .iter()
+            .find(|job| job.job_id == job_id)
+            .cloned()
+            .ok_or_else(|| review_job_not_found(job_id))?;
+        if current.status == ReviewJobStatus::Completed {
+            return Ok(ReviewCommitOutcome {
+                completed_job: current,
+                added_fact_ids: Vec::new(),
+                added_observation_ids: Vec::new(),
+                already_completed: true,
+            });
+        }
+        if current.status != ReviewJobStatus::Running {
+            return Err(review_state_conflict(format!(
+                "cannot commit result for {:?} review job: {job_id}",
+                current.status
+            )));
+        }
+        let watermark = self
+            .document
+            .review_state
+            .reviewed_through
+            .get(&current.session_id)
+            .copied()
+            .unwrap_or(0);
+        if watermark != current.from_turn_exclusive {
+            return Err(review_state_conflict(format!(
+                "review job {job_id} starts at {}, current watermark is {watermark}",
+                current.from_turn_exclusive
+            )));
+        }
+
+        let eligible_turn_ids = normalize_eligible_turn_ids(eligible_turn_ids, &current)?;
+        let mut facts = Vec::<ProfileFact>::new();
+        let mut candidate_ids = BTreeSet::new();
+        for candidate in fact_candidates {
+            candidate.validate()?;
+            if !candidate_ids.insert(candidate.candidate_id.as_str()) {
+                return Err(invalid_review_result("duplicate review fact candidate"));
+            }
+            validate_review_evidence(
+                &candidate.fact.evidence,
+                &current.session_id,
+                &eligible_turn_ids,
+            )?;
+            if matches!(
+                &candidate.fact.scope,
+                ProfileScope::Book { book_id } if book_id != &current.book_id
+            ) {
+                return Err(invalid_review_result(
+                    "review fact book scope does not match the review job",
+                ));
+            }
+            reject_excluded_evidence(&self.document.exclusions, &candidate.fact.evidence)?;
+            facts.push(build_profile_fact(candidate.fact.clone(), Vec::new(), now)?);
+        }
+        facts.sort_by(|left, right| left.fact_id.cmp(&right.fact_id));
+
+        let mut observations = Vec::new();
+        let mut observation_ids = BTreeSet::<String>::new();
+        for candidate in intent_candidates {
+            let observation = candidate.build(now)?;
+            validate_review_evidence(
+                &observation.evidence,
+                &current.session_id,
+                &eligible_turn_ids,
+            )?;
+            reject_excluded_evidence(&self.document.exclusions, &observation.evidence)?;
+            if !observation_ids.insert(observation.observation_id.clone()) {
+                return Err(invalid_review_result(
+                    "duplicate review intent observation candidate",
+                ));
+            }
+            observations.push(observation);
+        }
+        observations.sort_by(|left, right| left.observation_id.cmp(&right.observation_id));
+
+        let existing_fact_ids: BTreeSet<_> = self
+            .document
+            .profile_facts
+            .iter()
+            .map(|fact| fact.fact_id.as_str())
+            .collect();
+        let new_facts: Vec<_> = facts
+            .into_iter()
+            .filter(|fact| !existing_fact_ids.contains(fact.fact_id.as_str()))
+            .collect();
+        let existing_observation_ids: BTreeSet<_> = self
+            .document
+            .review_state
+            .intent_observations
+            .iter()
+            .map(|observation| observation.observation_id.as_str())
+            .collect();
+        let new_observations: Vec<_> = observations
+            .into_iter()
+            .filter(|observation| {
+                !existing_observation_ids.contains(observation.observation_id.as_str())
+            })
+            .collect();
+
+        let mut candidate = if new_facts.is_empty() {
+            self.document_mutation_candidate()?
+        } else {
+            self.projection_mutation_candidate()?
+        };
+        let added_fact_ids: Vec<String> =
+            new_facts.iter().map(|fact| fact.fact_id.clone()).collect();
+        let added_observation_ids: Vec<String> = new_observations
+            .iter()
+            .map(|observation| observation.observation_id.clone())
+            .collect();
+        candidate.profile_facts.extend(new_facts);
+        candidate
+            .review_state
+            .intent_observations
+            .extend(new_observations);
+        let index = candidate
+            .review_state
+            .review_jobs
+            .iter()
+            .position(|job| job.job_id == job_id)
+            .expect("review job was resolved from the same document");
+        let job = &mut candidate.review_state.review_jobs[index];
+        job.status = ReviewJobStatus::Completed;
+        job.next_attempt_at = None;
+        job.updated_at = now.into();
+        let completed_job = job.clone();
+        candidate
+            .review_state
+            .reviewed_through
+            .insert(current.session_id, current.to_turn_inclusive);
+        candidate.review_state.last_success_at = Some(now.into());
+        candidate.review_state.last_error = None;
+        self.commit_document(candidate)?;
+        if !added_fact_ids.is_empty() {
+            let _ = self.write_profile_files();
+        }
+        Ok(ReviewCommitOutcome {
+            completed_job,
+            added_fact_ids,
+            added_observation_ids,
+            already_completed: false,
+        })
+    }
+
     fn reconcile_review_jobs_inner(
         &mut self,
         sessions: &[ReviewSessionCursor],
@@ -464,6 +648,133 @@ impl IntentObservation {
         .expect("intent observation identity has fixed serializable fields");
         format!("observation_{:016x}", fnv1a(&canonical))
     }
+}
+
+impl ReviewFactCandidate {
+    pub fn new(mut fact: CreateProfileFact) -> Result<Self, ToolError> {
+        fact.evidence.sort();
+        fact.evidence.dedup();
+        if !matches!(
+            fact.source,
+            FactSource::UserStated | FactSource::AgentInferred
+        ) {
+            return Err(invalid_review_result(
+                "review extractor may only emit user-stated or agent-inferred facts",
+            ));
+        }
+        if fact.sensitivity != Sensitivity::Normal {
+            return Err(invalid_review_result(
+                "background review may not store sensitive profile facts",
+            ));
+        }
+        let built = build_profile_fact(fact.clone(), Vec::new(), "candidate")?;
+        Ok(Self {
+            candidate_id: built.fact_id.replacen("fact_", "candidate_", 1),
+            fact,
+        })
+    }
+
+    fn validate(&self) -> Result<(), ToolError> {
+        if Self::new(self.fact.clone())? != *self {
+            return Err(invalid_review_result(
+                "review candidate_id is not content-addressed",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl IntentObservationCandidate {
+    pub fn new(
+        intent_key: impl Into<String>,
+        content_profile: impl Into<String>,
+        mut evidence: Vec<EvidenceRef>,
+    ) -> Result<Self, ToolError> {
+        let intent_key = intent_key.into();
+        let content_profile = content_profile.into();
+        evidence.sort();
+        evidence.dedup();
+        let candidate = Self {
+            intent_key,
+            content_profile,
+            evidence,
+        };
+        candidate.build("candidate")?;
+        Ok(candidate)
+    }
+
+    fn build(&self, now: &str) -> Result<IntentObservation, ToolError> {
+        validate_required("intent observation timestamp", now)?;
+        if self.intent_key.trim().is_empty()
+            || self.content_profile.trim().is_empty()
+            || self.evidence.is_empty()
+        {
+            return Err(invalid_review_result(
+                "intent observation fields must not be empty",
+            ));
+        }
+        let mut evidence = self.evidence.clone();
+        evidence.sort();
+        evidence.dedup();
+        if evidence != self.evidence {
+            return Err(invalid_review_result(
+                "intent observation evidence must be normalized",
+            ));
+        }
+        Ok(IntentObservation {
+            observation_id: IntentObservation::stable_id(
+                &self.intent_key,
+                &self.content_profile,
+                &evidence,
+            ),
+            intent_key: self.intent_key.clone(),
+            content_profile: self.content_profile.clone(),
+            evidence,
+            created_at: now.into(),
+        })
+    }
+}
+
+fn normalize_eligible_turn_ids(
+    turn_ids: &[String],
+    job: &ReviewJob,
+) -> Result<BTreeSet<String>, ToolError> {
+    let normalized: BTreeSet<_> = turn_ids
+        .iter()
+        .map(|turn_id| turn_id.trim().to_string())
+        .collect();
+    let expected = job.to_turn_inclusive - job.from_turn_exclusive;
+    if normalized.iter().any(String::is_empty)
+        || u64::try_from(normalized.len()).ok() != Some(expected)
+    {
+        return Err(invalid_review_result(
+            "eligible user turn IDs do not cover the review job range",
+        ));
+    }
+    Ok(normalized)
+}
+
+fn validate_review_evidence(
+    evidence: &[EvidenceRef],
+    session_id: &str,
+    eligible_turn_ids: &BTreeSet<String>,
+) -> Result<(), ToolError> {
+    if evidence.is_empty()
+        || evidence.iter().any(|evidence| {
+            !matches!(
+                evidence,
+                EvidenceRef::Turn {
+                    session_id: evidence_session_id,
+                    turn_id,
+                } if evidence_session_id == session_id && eligible_turn_ids.contains(turn_id)
+            )
+        })
+    {
+        return Err(invalid_review_result(
+            "review output must cite eligible resident user turns",
+        ));
+    }
+    Ok(())
 }
 
 fn normalize_session_cursors(
@@ -725,6 +1036,14 @@ fn invalid_review_state(message: impl Into<String>) -> ToolError {
     }
 }
 
+fn invalid_review_result(message: impl Into<String>) -> ToolError {
+    ToolError {
+        error_code: "INVALID_REVIEW_RESULT".into(),
+        category: "validation".into(),
+        message: message.into(),
+    }
+}
+
 fn review_job_not_found(job_id: &str) -> ToolError {
     ToolError {
         error_code: "REVIEW_JOB_NOT_FOUND".into(),
@@ -744,6 +1063,7 @@ fn review_state_conflict(message: String) -> ToolError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{Applicability, Confidence, PreferenceClaim, ProfilePayload};
     use std::path::PathBuf;
 
     fn store(name: &str) -> (PathBuf, MemoryStore) {
@@ -766,6 +1086,31 @@ mod tests {
     fn only_job(store: &MemoryStore) -> ReviewJob {
         assert_eq!(store.review_state().review_jobs.len(), 1);
         store.review_state().review_jobs[0].clone()
+    }
+
+    fn fact_candidate(
+        session_id: &str,
+        turn_id: &str,
+        source: FactSource,
+        scope: ProfileScope,
+    ) -> ReviewFactCandidate {
+        ReviewFactCandidate::new(CreateProfileFact {
+            scope,
+            applicability: Applicability::Any,
+            payload: ProfilePayload::ExplanationPreference(PreferenceClaim {
+                key: format!("example_order_{turn_id}"),
+                value: "worked_examples_first".into(),
+            }),
+            source,
+            evidence: vec![EvidenceRef::Turn {
+                session_id: session_id.into(),
+                turn_id: turn_id.into(),
+            }],
+            confidence: (source == FactSource::AgentInferred).then_some(Confidence::Medium),
+            sensitivity: Sensitivity::Normal,
+            valid_until: None,
+        })
+        .unwrap()
     }
 
     #[test]
@@ -1020,5 +1365,233 @@ mod tests {
         let error = MemoryStore::open(path).err().unwrap();
         assert_eq!(error.category, "internal");
         assert!(error.message.contains("exceeds session watermark"));
+    }
+
+    #[test]
+    fn review_result_atomically_applies_trust_status_observation_and_watermark() {
+        let (path, mut store) = store("atomic-result");
+        store
+            .reconcile_review_jobs(&[cursor(2)], "2026-07-14T00:00:00Z")
+            .unwrap();
+        let job = only_job(&store);
+        store
+            .claim_review_job(&job.job_id, "2026-07-14T00:01:00Z")
+            .unwrap();
+        let before_document_revision = store.document_revision();
+        let before_projection_revision = store.projection_revision();
+        let user_stated = fact_candidate(
+            "session-a",
+            "turn-1",
+            FactSource::UserStated,
+            ProfileScope::Book {
+                book_id: "book-a".into(),
+            },
+        );
+        let global_inference = fact_candidate(
+            "session-a",
+            "turn-2",
+            FactSource::AgentInferred,
+            ProfileScope::Global,
+        );
+        let observation = IntentObservationCandidate::new(
+            "request_diagram",
+            "technical_learning",
+            vec![EvidenceRef::Turn {
+                session_id: "session-a".into(),
+                turn_id: "turn-2".into(),
+            }],
+        )
+        .unwrap();
+
+        let outcome = store
+            .commit_review_result(
+                &job.job_id,
+                &["turn-1".into(), "turn-2".into()],
+                &[user_stated, global_inference],
+                &[observation],
+                "2026-07-14T00:02:00Z",
+            )
+            .unwrap();
+
+        assert!(!outcome.already_completed);
+        assert_eq!(outcome.added_fact_ids.len(), 2);
+        assert_eq!(outcome.added_observation_ids.len(), 1);
+        assert_eq!(store.document_revision(), before_document_revision + 1);
+        assert_eq!(store.projection_revision(), before_projection_revision + 1);
+        assert_eq!(store.review_state().reviewed_through["session-a"], 2);
+        assert_eq!(only_job(&store).status, ReviewJobStatus::Completed);
+        assert_eq!(
+            store
+                .profile_facts()
+                .iter()
+                .find(|fact| fact.source == FactSource::UserStated)
+                .unwrap()
+                .status,
+            crate::FactStatus::Confirmed
+        );
+        assert_eq!(
+            store
+                .profile_facts()
+                .iter()
+                .find(|fact| fact.source == FactSource::AgentInferred)
+                .unwrap()
+                .status,
+            crate::FactStatus::Pending
+        );
+        assert_eq!(store.review_state().intent_observations.len(), 1);
+        assert_eq!(
+            store
+                .resolve_profile_facts(&crate::ProfileResolutionContext {
+                    book_id: Some("book-a".into()),
+                    ..Default::default()
+                })
+                .len(),
+            1,
+            "pending global inference and intent observations must not enter projection"
+        );
+
+        let revision = store.document_revision();
+        let duplicate = store
+            .commit_review_result(
+                &job.job_id,
+                &["turn-1".into(), "turn-2".into()],
+                &[],
+                &[],
+                "2026-07-14T00:03:00Z",
+            )
+            .unwrap();
+        assert!(duplicate.already_completed);
+        assert_eq!(store.document_revision(), revision);
+        let reopened = MemoryStore::open(path).unwrap();
+        assert_eq!(reopened.profile_facts(), store.profile_facts());
+        assert_eq!(reopened.review_state(), store.review_state());
+    }
+
+    #[test]
+    fn observation_only_review_does_not_advance_projection_revision() {
+        let (_path, mut store) = store("observation-only");
+        store
+            .reconcile_review_jobs(&[cursor(1)], "2026-07-14T00:00:00Z")
+            .unwrap();
+        let job = only_job(&store);
+        store
+            .claim_review_job(&job.job_id, "2026-07-14T00:01:00Z")
+            .unwrap();
+        let projection_revision = store.projection_revision();
+        let observation = IntentObservationCandidate::new(
+            "request_diagram",
+            "technical_learning",
+            vec![EvidenceRef::Turn {
+                session_id: "session-a".into(),
+                turn_id: "turn-1".into(),
+            }],
+        )
+        .unwrap();
+
+        store
+            .commit_review_result(
+                &job.job_id,
+                &["turn-1".into()],
+                &[],
+                &[observation],
+                "2026-07-14T00:02:00Z",
+            )
+            .unwrap();
+
+        assert_eq!(store.projection_revision(), projection_revision);
+        assert!(store.profile_facts().is_empty());
+        assert_eq!(store.review_state().intent_observations.len(), 1);
+    }
+
+    #[test]
+    fn ineligible_review_evidence_rejects_the_whole_result_without_mutation() {
+        let (path, mut store) = store("invalid-evidence-atomic");
+        store
+            .reconcile_review_jobs(&[cursor(1)], "2026-07-14T00:00:00Z")
+            .unwrap();
+        let job = only_job(&store);
+        store
+            .claim_review_job(&job.job_id, "2026-07-14T00:01:00Z")
+            .unwrap();
+        let before_state = store.review_state().clone();
+        let before_revision = store.document_revision();
+        let before_disk = std::fs::read_to_string(&path).unwrap();
+        let invalid = fact_candidate(
+            "visitor-session",
+            "turn-1",
+            FactSource::UserStated,
+            ProfileScope::Book {
+                book_id: "book-a".into(),
+            },
+        );
+
+        let error = store
+            .commit_review_result(
+                &job.job_id,
+                &["turn-1".into()],
+                &[invalid],
+                &[],
+                "2026-07-14T00:02:00Z",
+            )
+            .unwrap_err();
+
+        assert_eq!(error.error_code, "INVALID_REVIEW_RESULT");
+        assert_eq!(store.review_state(), &before_state);
+        assert!(store.profile_facts().is_empty());
+        assert_eq!(store.document_revision(), before_revision);
+        assert_eq!(std::fs::read_to_string(path).unwrap(), before_disk);
+    }
+
+    #[test]
+    fn failed_atomic_result_persistence_keeps_facts_observations_and_watermark_unchanged() {
+        let (path, mut store) = store("result-persist-failure");
+        store
+            .reconcile_review_jobs(&[cursor(1)], "2026-07-14T00:00:00Z")
+            .unwrap();
+        let job = only_job(&store);
+        store
+            .claim_review_job(&job.job_id, "2026-07-14T00:01:00Z")
+            .unwrap();
+        let before_state = store.review_state().clone();
+        let before_revision = store.document_revision();
+        let before_disk = std::fs::read_to_string(&path).unwrap();
+        let fact = fact_candidate(
+            "session-a",
+            "turn-1",
+            FactSource::UserStated,
+            ProfileScope::Book {
+                book_id: "book-a".into(),
+            },
+        );
+        let observation = IntentObservationCandidate::new(
+            "request_diagram",
+            "technical_learning",
+            vec![EvidenceRef::Turn {
+                session_id: "session-a".into(),
+                turn_id: "turn-1".into(),
+            }],
+        )
+        .unwrap();
+        let blocker = std::env::temp_dir().join("ub-review-result-parent-blocker");
+        let _ = std::fs::remove_file(&blocker);
+        let _ = std::fs::remove_dir_all(&blocker);
+        std::fs::write(&blocker, "not a directory").unwrap();
+        store.path = blocker.join("memory.json");
+
+        let error = store
+            .commit_review_result(
+                &job.job_id,
+                &["turn-1".into()],
+                &[fact],
+                &[observation],
+                "2026-07-14T00:02:00Z",
+            )
+            .unwrap_err();
+
+        assert_eq!(error.category, "internal");
+        assert_eq!(store.review_state(), &before_state);
+        assert!(store.profile_facts().is_empty());
+        assert_eq!(store.document_revision(), before_revision);
+        assert_eq!(std::fs::read_to_string(path).unwrap(), before_disk);
     }
 }

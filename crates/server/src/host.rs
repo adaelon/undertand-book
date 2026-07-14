@@ -8,8 +8,8 @@ use memory::{MemoryStore, ReviewErrorState, ReviewJobStatus};
 use read_tools::Book;
 use reader::{Reader, DEFAULT_RADIUS};
 use runtime::memory_review::{
-    ReviewExecutionOutput, ReviewExecutorFactory, ReviewInput, ReviewTurnInput, ReviewTurnStatus,
-    UnavailableReviewExecutorFactory,
+    ProviderReviewExecutorFactory, ReviewExecutionOutput, ReviewExecutorFactory, ReviewInput,
+    ReviewTurnInput, ReviewTurnStatus,
 };
 use runtime::{AdapterError, ModelAdapter, ProviderConfig, ProviderRegistry};
 use std::path::{Path, PathBuf};
@@ -156,16 +156,30 @@ impl ReviewCoordinator {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         match execution {
             Ok(output) => {
-                state.store.mark_review_job_retryable(
+                let eligible_turn_ids: Vec<String> = input
+                    .turns
+                    .iter()
+                    .map(|turn| turn.turn_id.clone())
+                    .collect();
+                if let Err(error) = state.store.commit_review_result(
                     &job_id,
+                    &eligible_turn_ids,
+                    &output.fact_candidates,
+                    &output.intent_observations,
                     now,
-                    ReviewErrorState {
-                        error_code: "REVIEW_RESULT_PENDING_VALIDATION".into(),
-                        message: "review output awaits the M2.5 validator and atomic commit".into(),
-                        occurred_at: now.into(),
-                    },
-                    now,
-                )?;
+                ) {
+                    state.store.mark_review_job_retryable(
+                        &job_id,
+                        now,
+                        ReviewErrorState {
+                            error_code: error.error_code.clone(),
+                            message: error.message.clone(),
+                            occurred_at: now.into(),
+                        },
+                        now,
+                    )?;
+                    return Err(error);
+                }
                 Ok(Some(ReviewRunOutcome { job_id, output }))
             }
             Err(error) => {
@@ -235,6 +249,7 @@ fn copy_review_input(
         job_id: job.job_id.clone(),
         session_id: job.session_id.clone(),
         book_id: job.book_id.clone(),
+        content_profile: crate::current_content_profile(&state.book).into(),
         from_turn_exclusive: job.from_turn_exclusive,
         to_turn_inclusive: job.to_turn_inclusive,
         turns,
@@ -371,7 +386,7 @@ pub fn start_server(config: ServerHostConfig) -> Result<RunningServer, String> {
     let review_coordinator = Arc::new(ReviewCoordinator::new(
         state.clone(),
         provider_config,
-        Arc::new(UnavailableReviewExecutorFactory),
+        Arc::new(ProviderReviewExecutorFactory),
     ));
     {
         let guard = state
@@ -619,7 +634,10 @@ fn response_from_binary(reply: crate::BinaryReply) -> Response<std::io::Cursor<V
 mod tests {
     use super::*;
     use crate::{AgentChatSession, AgentChatTurn, AgentHistory, AgentTurnError};
-    use memory::{ReviewJobStatus, ReviewSessionCursor};
+    use memory::{
+        Applicability, CreateProfileFact, EvidenceRef, FactSource, PreferenceClaim, ProfilePayload,
+        ProfileScope, ReviewFactCandidate, ReviewJobStatus, ReviewSessionCursor, Sensitivity,
+    };
     use runtime::memory_review::{ReviewExecutor, ReviewExecutorFactory};
     use runtime::orchestrator::new_session;
     use std::collections::BTreeMap;
@@ -670,8 +688,28 @@ mod tests {
                 state = self.control.changed.wait(state).unwrap();
             }
             state.active -= 1;
+            let fact = ReviewFactCandidate::new(CreateProfileFact {
+                scope: ProfileScope::Book {
+                    book_id: input.book_id.clone(),
+                },
+                applicability: Applicability::Any,
+                payload: ProfilePayload::ExplanationPreference(PreferenceClaim {
+                    key: "example_order".into(),
+                    value: "worked_examples_first".into(),
+                }),
+                source: FactSource::UserStated,
+                evidence: vec![EvidenceRef::Turn {
+                    session_id: input.session_id.clone(),
+                    turn_id: input.turns[0].turn_id.clone(),
+                }],
+                confidence: None,
+                sensitivity: Sensitivity::Normal,
+                valid_until: None,
+            })
+            .unwrap();
             Ok(ReviewExecutionOutput {
-                value: serde_json::json!({"job_id": input.job_id}),
+                fact_candidates: vec![fact],
+                intent_observations: Vec::new(),
             })
         }
     }
@@ -688,37 +726,46 @@ mod tests {
         let mut store = MemoryStore::open(memory_path).unwrap();
         store
             .reconcile_review_jobs(
-                &[ReviewSessionCursor {
-                    session_id: "review-session".into(),
-                    book_id: book.base.book_id.clone(),
-                    latest_user_turn_ordinal: 1,
-                }],
+                &[
+                    ReviewSessionCursor {
+                        session_id: "review-session-a".into(),
+                        book_id: book.base.book_id.clone(),
+                        latest_user_turn_ordinal: 1,
+                    },
+                    ReviewSessionCursor {
+                        session_id: "review-session-b".into(),
+                        book_id: book.base.book_id.clone(),
+                        latest_user_turn_ordinal: 1,
+                    },
+                ],
                 "t0",
             )
             .unwrap();
-        let turn = AgentChatTurn {
-            turn_id: "turn-review-1".into(),
-            user_turn_ordinal: 1,
-            user: "I prefer worked examples".into(),
-            status: AgentAssistantStatus::Failed,
-            outcome: None,
-            error: Some(AgentTurnError {
-                error_code: "PROVIDER_ERROR".into(),
-                category: "provider".into(),
-                message: "earlier main-agent failure".into(),
-            }),
-            question_anchor_lid: None,
-            question_quote: None,
-        };
-        let session = AgentChatSession {
-            id: "review-session".into(),
-            book_id: book.base.book_id.clone(),
-            title: "review".into(),
-            created_at: "t0".into(),
-            updated_at: "t0".into(),
-            turns: vec![turn],
-            messages: new_session(),
-        };
+        let sessions = ["a", "b"]
+            .into_iter()
+            .map(|suffix| AgentChatSession {
+                id: format!("review-session-{suffix}"),
+                book_id: book.base.book_id.clone(),
+                title: "review".into(),
+                created_at: "t0".into(),
+                updated_at: "t0".into(),
+                turns: vec![AgentChatTurn {
+                    turn_id: format!("turn-review-{suffix}"),
+                    user_turn_ordinal: 1,
+                    user: "I prefer worked examples".into(),
+                    status: AgentAssistantStatus::Failed,
+                    outcome: None,
+                    error: Some(AgentTurnError {
+                        error_code: "PROVIDER_ERROR".into(),
+                        category: "provider".into(),
+                        message: "earlier main-agent failure".into(),
+                    }),
+                    question_anchor_lid: None,
+                    question_quote: None,
+                }],
+                messages: new_session(),
+            })
+            .collect();
         Arc::new(Mutex::new(AppState {
             book_dir: PathBuf::from(dir),
             library_root: None,
@@ -732,9 +779,9 @@ mod tests {
             agent_history: AgentHistory {
                 active_by_book: BTreeMap::from([(
                     "__desktop_bootstrap__".into(),
-                    "review-session".into(),
+                    "review-session-a".into(),
                 )]),
-                sessions: vec![session],
+                sessions,
                 pending_memory_ops: BTreeMap::new(),
             },
             profile_context_cache: runtime::profile_context::ProfileContextCache::default(),
@@ -839,9 +886,9 @@ mod tests {
         }
         let first = first.join().unwrap().unwrap().unwrap();
         let second = second.join().unwrap().unwrap().unwrap();
-        assert_eq!(first.job_id, second.job_id);
-        assert_eq!(first.output.value["job_id"], first.job_id);
-        assert_eq!(second.output.value["job_id"], second.job_id);
+        assert_ne!(first.job_id, second.job_id);
+        assert_eq!(first.output.fact_candidates.len(), 1);
+        assert_eq!(second.output.fact_candidates.len(), 1);
 
         let observed = control.state.lock().unwrap();
         assert_eq!(observed.entered, 2);
@@ -849,19 +896,14 @@ mod tests {
         assert_eq!(observed.models, vec!["model-a", "model-b"]);
         drop(observed);
         let state = state.lock().unwrap();
-        assert_eq!(
-            state.store.review_state().review_jobs[0].status,
-            ReviewJobStatus::Retryable
-        );
-        assert_eq!(
-            state
-                .store
-                .review_state()
-                .last_error
-                .as_ref()
-                .unwrap()
-                .error_code,
-            "REVIEW_RESULT_PENDING_VALIDATION"
-        );
+        assert!(state
+            .store
+            .review_state()
+            .review_jobs
+            .iter()
+            .all(|job| job.status == ReviewJobStatus::Completed));
+        assert_eq!(state.store.review_state().reviewed_through.len(), 2);
+        assert!(state.store.review_state().last_error.is_none());
+        assert_eq!(state.store.profile_facts().len(), 2);
     }
 }

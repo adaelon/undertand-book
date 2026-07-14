@@ -244,7 +244,7 @@ impl ProfileFact {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CreateProfileFact {
     pub scope: ProfileScope,
     pub applicability: Applicability,
