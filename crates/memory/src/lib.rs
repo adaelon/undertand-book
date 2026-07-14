@@ -4,6 +4,7 @@
 //! 时间戳与落盘路径由调用方注入(确定性可测,守 A2)。
 //! S7a 从 runtime 抽成独立 crate(拆 runtime↔reader 循环依赖,reader/runtime 共同依赖它)`[ADR-0027]`。
 mod document;
+mod global_consolidation;
 mod operation;
 mod privacy;
 mod profile;
@@ -13,6 +14,7 @@ mod review;
 
 use document::StoredMemory;
 pub use document::{MemoryDocument, MEMORY_SCHEMA_VERSION};
+pub use global_consolidation::GlobalPromotionState;
 pub use operation::{ExplicitProfileFact, MemoryOp, MemoryOpOutcome};
 pub use privacy::{
     classify_profile_fact_privacy, classify_profile_privacy, ProfilePrivacyClass,

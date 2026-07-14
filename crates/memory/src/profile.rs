@@ -1,3 +1,4 @@
+use crate::global_consolidation::reconcile_global_promotions;
 use crate::{fnv1a, MemoryStore};
 use read_tools::ToolError;
 use serde::{Deserialize, Serialize};
@@ -322,7 +323,9 @@ impl MemoryStore {
         }
 
         let mut candidate = self.projection_mutation_candidate()?;
+        let affected_keys = vec![fact.payload.semantic_key()];
         candidate.profile_facts.push(fact.clone());
+        reconcile_global_promotions(&mut candidate, &affected_keys, now)?;
         self.commit_document(candidate)?;
         Ok(fact)
     }
@@ -360,8 +363,29 @@ impl MemoryStore {
         fact.status = FactStatus::Confirmed;
         fact.updated_at = now.to_string();
         let confirmed = fact.clone();
+        reconcile_global_promotions(&mut candidate, &[confirmed.payload.semantic_key()], now)?;
         self.commit_document(candidate)?;
         Ok(confirmed)
+    }
+
+    pub fn reject_profile_fact(
+        &mut self,
+        fact_id: &str,
+        now: &str,
+    ) -> Result<ProfileFact, ToolError> {
+        let current = self
+            .document
+            .profile_facts
+            .iter()
+            .find(|fact| fact.fact_id == fact_id)
+            .cloned()
+            .ok_or_else(|| profile_fact_not_found(fact_id))?;
+        if current.status != FactStatus::Pending {
+            return Err(profile_state_conflict(format!(
+                "只能拒绝 pending profile fact: {fact_id}"
+            )));
+        }
+        self.expire_profile_fact(fact_id, now)
     }
 
     pub fn correct_profile_fact(
@@ -411,6 +435,14 @@ impl MemoryStore {
         old.status = FactStatus::Superseded;
         old.updated_at = now.to_string();
         candidate.profile_facts.push(corrected.clone());
+        reconcile_global_promotions(
+            &mut candidate,
+            &[
+                current.payload.semantic_key(),
+                corrected.payload.semantic_key(),
+            ],
+            now,
+        )?;
         self.commit_document(candidate)?;
         Ok(corrected)
     }
@@ -447,6 +479,7 @@ impl MemoryStore {
         fact.status = FactStatus::Expired;
         fact.updated_at = now.to_string();
         let expired = fact.clone();
+        reconcile_global_promotions(&mut candidate, &[expired.payload.semantic_key()], now)?;
         self.commit_document(candidate)?;
         Ok(expired)
     }
@@ -471,6 +504,20 @@ impl MemoryStore {
             .collect();
         excluded_evidence_ids.sort();
         excluded_evidence_ids.dedup();
+        let excluded_evidence_id_set: BTreeSet<_> =
+            excluded_evidence_ids.iter().map(String::as_str).collect();
+        let mut affected_keys = vec![target.payload.semantic_key()];
+        affected_keys.extend(
+            self.document
+                .profile_facts
+                .iter()
+                .filter(|fact| {
+                    fact.evidence.iter().any(|evidence| {
+                        excluded_evidence_id_set.contains(evidence.evidence_id().as_str())
+                    })
+                })
+                .map(|fact| fact.payload.semantic_key()),
+        );
 
         let mut candidate = self.projection_mutation_candidate()?;
         candidate.profile_facts.remove(index);
@@ -510,6 +557,10 @@ impl MemoryStore {
         candidate
             .exclusions
             .sort_by(|a, b| a.evidence_id.cmp(&b.evidence_id));
+        let consolidation = reconcile_global_promotions(&mut candidate, &affected_keys, now)?;
+        removed_dependent_fact_ids.extend(consolidation.removed_fact_ids);
+        removed_dependent_fact_ids.sort();
+        removed_dependent_fact_ids.dedup();
         self.commit_document(candidate)?;
 
         Ok(ForgetProfileFactOutcome {

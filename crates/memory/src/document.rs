@@ -76,6 +76,10 @@ impl MemoryDocument {
             }
         }
         self.review_state.validate()?;
+        crate::global_consolidation::validate_promotion_links(
+            &self.review_state.global_promotions,
+            &self.profile_facts,
+        )?;
         Ok(())
     }
 }

@@ -1,3 +1,4 @@
+use crate::global_consolidation::reconcile_global_promotions;
 use crate::profile::{build_profile_fact, reject_excluded_evidence};
 use crate::{
     fnv1a, CreateProfileFact, EvidenceRef, FactSource, MemoryStore, ProfileFact, ProfileScope,
@@ -86,6 +87,8 @@ pub struct ReviewState {
     #[serde(default)]
     pub consolidation_jobs: Vec<GlobalConsolidationJob>,
     #[serde(default)]
+    pub global_promotions: Vec<crate::GlobalPromotionState>,
+    #[serde(default)]
     pub intent_observations: Vec<IntentObservation>,
     #[serde(default)]
     pub reviewed_through: BTreeMap<String, u64>,
@@ -169,6 +172,7 @@ impl ReviewState {
             error.validate()?;
         }
         validate_consolidation_jobs(&self.consolidation_jobs)?;
+        crate::global_consolidation::validate_promotion_states(&self.global_promotions)?;
         validate_intent_observations(&self.intent_observations)?;
         Ok(())
     }
@@ -442,6 +446,10 @@ impl MemoryStore {
         };
         let added_fact_ids: Vec<String> =
             new_facts.iter().map(|fact| fact.fact_id.clone()).collect();
+        let affected_keys: Vec<String> = new_facts
+            .iter()
+            .map(|fact| fact.payload.semantic_key())
+            .collect();
         let added_observation_ids: Vec<String> = new_observations
             .iter()
             .map(|observation| observation.observation_id.clone())
@@ -468,6 +476,7 @@ impl MemoryStore {
             .insert(current.session_id, current.to_turn_inclusive);
         candidate.review_state.last_success_at = Some(now.into());
         clear_last_error_if_drained(&mut candidate.review_state);
+        reconcile_global_promotions(&mut candidate, &affected_keys, now)?;
         self.commit_document(candidate)?;
         if !added_fact_ids.is_empty() {
             let _ = self.write_profile_files();

@@ -1,3 +1,4 @@
+use crate::global_consolidation::reconcile_global_promotions;
 use crate::profile::{build_profile_fact, reject_excluded_evidence};
 use crate::{
     classify_profile_fact_privacy, fnv1a, Applicability, Confidence, CreateProfileFact,
@@ -148,7 +149,9 @@ impl MemoryStore {
             &evidence_text,
             now,
         )?;
+        let affected_keys = vec![profile_fact.payload.semantic_key()];
         candidate.profile_facts.push(profile_fact.clone());
+        reconcile_global_promotions(&mut candidate, &affected_keys, now)?;
         self.commit_document(candidate)?;
         let _ = self.write_profile_files();
         Ok(MemoryOpOutcome::Remembered {
@@ -224,6 +227,14 @@ impl MemoryStore {
         old.status = FactStatus::Superseded;
         old.updated_at = now.into();
         candidate.profile_facts.push(corrected.clone());
+        reconcile_global_promotions(
+            &mut candidate,
+            &[
+                current.payload.semantic_key(),
+                corrected.payload.semantic_key(),
+            ],
+            now,
+        )?;
         self.commit_document(candidate)?;
         let _ = self.write_profile_files();
         Ok(MemoryOpOutcome::Corrected {
@@ -267,6 +278,22 @@ impl MemoryStore {
         }
         excluded_evidence_ids.sort();
         excluded_evidence_ids.dedup();
+        let excluded_evidence_id_set: BTreeSet<_> =
+            excluded_evidence_ids.iter().map(String::as_str).collect();
+        let mut affected_keys: Vec<String> = self
+            .document
+            .profile_facts
+            .iter()
+            .filter(|fact| {
+                forgotten_ids.contains(fact.fact_id.as_str())
+                    || fact.evidence.iter().any(|evidence| {
+                        excluded_evidence_id_set.contains(evidence.evidence_id().as_str())
+                    })
+            })
+            .map(|fact| fact.payload.semantic_key())
+            .collect();
+        affected_keys.sort();
+        affected_keys.dedup();
 
         let mut candidate = self.projection_mutation_candidate()?;
         candidate
@@ -312,6 +339,10 @@ impl MemoryStore {
         candidate
             .exclusions
             .sort_by(|left, right| left.evidence_id.cmp(&right.evidence_id));
+        let consolidation = reconcile_global_promotions(&mut candidate, &affected_keys, now)?;
+        removed_dependent_fact_ids.extend(consolidation.removed_fact_ids);
+        removed_dependent_fact_ids.sort();
+        removed_dependent_fact_ids.dedup();
         self.commit_document(candidate)?;
         let _ = self.write_profile_files();
 
