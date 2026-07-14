@@ -9,6 +9,7 @@ mod privacy;
 mod profile;
 mod projection;
 mod reading_state;
+mod review;
 
 use document::StoredMemory;
 pub use document::{MemoryDocument, MEMORY_SCHEMA_VERSION};
@@ -27,6 +28,10 @@ pub use projection::{
     SnapshotBudgets, SnapshotCandidate, SnapshotContext, SnapshotItem, SnapshotRequest,
 };
 pub use reading_state::{BookReadingState, EngagementSignals, LegacyReaderProfileProjection};
+pub use review::{
+    GlobalConsolidationJob, IntentObservation, ReviewErrorState, ReviewJob, ReviewJobStatus,
+    ReviewReconciliation, ReviewSessionCursor, ReviewState,
+};
 use read_tools::ToolError;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -333,7 +338,7 @@ impl MemoryStore {
             {
                 StoredMemory::Document(document) => {
                     document.validate().map_err(internal)?;
-                    document
+                    *document
                 }
                 StoredMemory::Legacy(records) => {
                     let document = MemoryDocument::from_legacy(records);
@@ -355,12 +360,17 @@ impl MemoryStore {
         self.document.projection_revision
     }
 
-    fn projection_mutation_candidate(&self) -> Result<MemoryDocument, ToolError> {
+    fn document_mutation_candidate(&self) -> Result<MemoryDocument, ToolError> {
         let mut candidate = self.document.clone();
         candidate.document_revision = candidate
             .document_revision
             .checked_add(1)
             .ok_or_else(|| internal("memory document_revision 溢出".into()))?;
+        Ok(candidate)
+    }
+
+    fn projection_mutation_candidate(&self) -> Result<MemoryDocument, ToolError> {
+        let mut candidate = self.document_mutation_candidate()?;
         candidate.projection_revision = candidate
             .projection_revision
             .checked_add(1)

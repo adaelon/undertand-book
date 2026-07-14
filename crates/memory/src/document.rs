@@ -1,8 +1,8 @@
 use crate::profile::{EvidenceExclusion, ProfileFact};
 use crate::Record;
+use crate::ReviewState;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 pub const MEMORY_SCHEMA_VERSION: u32 = 2;
 
@@ -15,7 +15,7 @@ pub struct MemoryDocument {
     #[serde(default)]
     pub profile_facts: Vec<ProfileFact>,
     #[serde(default)]
-    pub(crate) review_state: BTreeMap<String, Value>,
+    pub(crate) review_state: ReviewState,
     #[serde(default)]
     pub exclusions: Vec<EvidenceExclusion>,
 }
@@ -28,7 +28,7 @@ impl MemoryDocument {
             projection_revision: 0,
             records: Vec::new(),
             profile_facts: Vec::new(),
-            review_state: BTreeMap::new(),
+            review_state: ReviewState::default(),
             exclusions: Vec::new(),
         }
     }
@@ -40,7 +40,7 @@ impl MemoryDocument {
             projection_revision: 1,
             records,
             profile_facts: Vec::new(),
-            review_state: BTreeMap::new(),
+            review_state: ReviewState::default(),
             exclusions: Vec::new(),
         }
     }
@@ -75,6 +75,7 @@ impl MemoryDocument {
                 ));
             }
         }
+        self.review_state.validate()?;
         Ok(())
     }
 }
@@ -82,6 +83,6 @@ impl MemoryDocument {
 #[derive(Deserialize)]
 #[serde(untagged)]
 pub(crate) enum StoredMemory {
-    Document(MemoryDocument),
+    Document(Box<MemoryDocument>),
     Legacy(Vec<Record>),
 }
