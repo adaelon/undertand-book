@@ -11739,12 +11739,33 @@ mod tests {
     }
 
     #[test]
-    fn profile_memory_state_includes_neutral_raw_activity_projection() {
+    fn profile_memory_state_includes_technical_activity_and_raw_projection() {
         let mut state = state_named("profile-memory-neutral-activity");
         let book_id = state.book.base.book_id.clone();
         state
             .store
             .mark_read(&book_id, "1.1", "2026-07-14T00:00:00Z")
+            .unwrap();
+        state
+            .store
+            .save(
+                SaveInput {
+                    mem_id: None,
+                    mem_type: "qa".into(),
+                    layer: "long_term".into(),
+                    book_id: book_id.clone(),
+                    anchor: Anchor {
+                        lid: Some("1.1".into()),
+                        concept: None,
+                    },
+                    content: "Can you explain this again?".into(),
+                    range: None,
+                    selection_context: None,
+                    citations: None,
+                    source_session_id: None,
+                },
+                "2026-07-14T00:01:00Z",
+            )
             .unwrap();
 
         let response = get(&mut state, "/profile/memory");
@@ -11755,17 +11776,29 @@ mod tests {
             .unwrap();
 
         assert_eq!(body["facts"].as_array().unwrap().len(), 0);
-        assert_eq!(projection.len(), 2);
-        assert!(projection
-            .iter()
-            .all(|item| item["status"] == "confirmed"));
-        assert!(projection
-            .iter()
-            .any(|item| item["text"].as_str().unwrap().contains("read_lids")));
+        assert!(projection.len() >= 3);
+        assert!(projection.iter().any(|item| {
+            item["status"] == "confirmed"
+                && item["text"].as_str().unwrap().contains("read_lids")
+        }));
         assert!(projection.iter().any(|item| item["text"]
             .as_str()
             .unwrap()
             .contains("activity:1.1")));
+        assert!(projection.iter().any(|item| item["text"]
+            .as_str()
+            .unwrap()
+            .contains("concept_activity:lid:1.1")));
+        let review_items: Vec<_> = projection
+            .iter()
+            .filter(|item| item["text"].as_str().unwrap().contains("needs_review"))
+            .collect();
+        assert!(!review_items.is_empty());
+        assert!(review_items
+            .iter()
+            .all(|item| item["status"] == "provisional"));
+        assert!(!response.body.contains("mastery"));
+        assert!(!response.body.contains("confusion"));
     }
 
     #[test]

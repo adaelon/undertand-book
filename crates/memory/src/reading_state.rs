@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct EngagementSignals {
+    pub read_count: u32,
     pub qa_count: u32,
     pub note_count: u32,
     pub highlight_count: u32,
@@ -37,10 +38,10 @@ impl BookReadingState {
             };
             let signals: &mut EngagementSignals = engagement_by_lid.entry(lid.clone()).or_default();
             match record.mem_type.as_str() {
+                "read" => signals.read_count = signals.read_count.max(record.usage.count),
                 "qa" => signals.qa_count += 1,
                 "note" => signals.note_count += 1,
                 "highlight" => signals.highlight_count += 1,
-                "read" => {}
                 _ => unreachable!("record type filtered above"),
             }
             if signals

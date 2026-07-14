@@ -1538,6 +1538,10 @@ mod tests {
         s.mark_read("bookA", "1.2", "t2").unwrap();
         let again = s.mark_read("bookA", "1.1", "t3").unwrap();
         assert_eq!(again.usage.count, 2); // 重读 = 同 mem_id upsert,count 累加
+        assert_eq!(
+            s.derive_book_reading_state("bookA").engagement_by_lid["1.1"].read_count,
+            2
+        );
         // 已读集去重 + 按 generated_at 序(1.1 刷新到 t3 ⇒ 排末):[1.3(t0), 1.2(t2), 1.1(t3)]。
         assert_eq!(s.read_lids("bookA"), vec!["1.3", "1.2", "1.1"]);
         // 跨书隔离:bookB 未读。
@@ -1571,6 +1575,7 @@ mod tests {
         let state = s.derive_book_reading_state("bookA");
         assert_eq!(state.book_id, "bookA");
         assert_eq!(state.read_lids, vec!["1.1", "1.2"]); // 触达序
+        assert_eq!(state.engagement_by_lid["1.1"].read_count, 1);
         assert_eq!(state.engagement_by_lid["2.1"].note_count, 1);
         assert_eq!(state.engagement_by_lid["2.1"].highlight_count, 1);
         assert_eq!(state.engagement_by_lid["2.3"].highlight_count, 1);
