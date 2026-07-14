@@ -2,8 +2,9 @@ use crate::global_consolidation::reconcile_global_promotions;
 use crate::profile::{build_profile_fact, reject_excluded_evidence};
 use crate::{
     classify_profile_fact_privacy, fnv1a, Applicability, Confidence, CreateProfileFact,
-    EvidenceExclusion, EvidenceRef, ExclusionReason, FactSource, FactStatus, MemoryStore,
-    ProfileFact, ProfilePayload, ProfilePrivacyClass, ProfileScope, Record, Sensitivity, Usage,
+    EvidenceExclusion, EvidenceRef, ExclusionReason, FactSource, FactStatus, MemoryDocument,
+    MemoryStore, ProfileFact, ProfilePayload, ProfilePrivacyClass, ProfileScope, Record,
+    Sensitivity, Usage,
 };
 use read_tools::ToolError;
 use serde::{Deserialize, Serialize};
@@ -66,26 +67,47 @@ pub enum MemoryOpOutcome {
     },
 }
 
+pub(crate) struct ReducedMemoryOp {
+    pub(crate) candidate: Option<MemoryDocument>,
+    pub(crate) outcome: MemoryOpOutcome,
+    pub(crate) refresh_profile_files: bool,
+}
+
 impl MemoryStore {
     pub fn apply_memory_op(
         &mut self,
         operation: MemoryOp,
         now: &str,
     ) -> Result<MemoryOpOutcome, ToolError> {
+        let reduced = self.reduce_memory_op(operation, now)?;
+        if let Some(candidate) = reduced.candidate {
+            self.commit_document(candidate)?;
+            if reduced.refresh_profile_files {
+                let _ = self.write_profile_files();
+            }
+        }
+        Ok(reduced.outcome)
+    }
+
+    pub(crate) fn reduce_memory_op(
+        &self,
+        operation: MemoryOp,
+        now: &str,
+    ) -> Result<ReducedMemoryOp, ToolError> {
         match operation {
             MemoryOp::Remember {
                 operation_id,
                 book_id,
                 evidence_text,
                 fact,
-            } => self.apply_remember(operation_id, book_id, evidence_text, fact, now),
+            } => self.reduce_remember(operation_id, book_id, evidence_text, fact, now),
             MemoryOp::Correct {
                 operation_id,
                 book_id,
                 evidence_text,
                 fact_id,
                 replacement,
-            } => self.apply_correction(
+            } => self.reduce_correction(
                 operation_id,
                 book_id,
                 evidence_text,
@@ -96,7 +118,7 @@ impl MemoryStore {
             MemoryOp::Forget {
                 operation_id,
                 fact_id,
-            } => self.apply_forget(operation_id, fact_id, now),
+            } => self.reduce_forget(operation_id, fact_id, now),
         }
     }
 
@@ -106,14 +128,14 @@ impl MemoryStore {
         })
     }
 
-    fn apply_remember(
-        &mut self,
+    fn reduce_remember(
+        &self,
         operation_id: String,
         book_id: String,
         evidence_text: String,
         mut fact: ExplicitProfileFact,
         now: &str,
-    ) -> Result<MemoryOpOutcome, ToolError> {
+    ) -> Result<ReducedMemoryOp, ToolError> {
         validate_operation_fields(&operation_id, Some(&book_id), Some(&evidence_text), now)?;
         validate_explicit_fact(&evidence_text, &mut fact)?;
         let evidence = explicit_evidence(&operation_id);
@@ -134,10 +156,14 @@ impl MemoryStore {
             .find(|candidate| candidate.fact_id == profile_fact.fact_id)
         {
             validate_existing_evidence(self, &evidence_mem_id, &book_id, &evidence_text)?;
-            return Ok(MemoryOpOutcome::Remembered {
-                operation_id,
-                fact: existing.clone(),
-                evidence_mem_id,
+            return Ok(ReducedMemoryOp {
+                candidate: None,
+                outcome: MemoryOpOutcome::Remembered {
+                    operation_id,
+                    fact: existing.clone(),
+                    evidence_mem_id,
+                },
+                refresh_profile_files: false,
             });
         }
 
@@ -152,25 +178,27 @@ impl MemoryStore {
         let affected_keys = vec![profile_fact.payload.semantic_key()];
         candidate.profile_facts.push(profile_fact.clone());
         reconcile_global_promotions(&mut candidate, &affected_keys, now)?;
-        self.commit_document(candidate)?;
-        let _ = self.write_profile_files();
-        Ok(MemoryOpOutcome::Remembered {
-            operation_id,
-            fact: profile_fact,
-            evidence_mem_id,
+        Ok(ReducedMemoryOp {
+            candidate: Some(candidate),
+            outcome: MemoryOpOutcome::Remembered {
+                operation_id,
+                fact: profile_fact,
+                evidence_mem_id,
+            },
+            refresh_profile_files: true,
         })
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn apply_correction(
-        &mut self,
+    fn reduce_correction(
+        &self,
         operation_id: String,
         book_id: String,
         evidence_text: String,
         fact_id: String,
         mut replacement: ExplicitProfileFact,
         now: &str,
-    ) -> Result<MemoryOpOutcome, ToolError> {
+    ) -> Result<ReducedMemoryOp, ToolError> {
         validate_operation_fields(&operation_id, Some(&book_id), Some(&evidence_text), now)?;
         validate_explicit_fact(&evidence_text, &mut replacement)?;
         let current = self
@@ -198,10 +226,14 @@ impl MemoryStore {
             .find(|fact| fact.fact_id == corrected.fact_id)
         {
             validate_existing_evidence(self, &evidence_mem_id, &book_id, &evidence_text)?;
-            return Ok(MemoryOpOutcome::Corrected {
-                operation_id,
-                fact: existing.clone(),
-                evidence_mem_id,
+            return Ok(ReducedMemoryOp {
+                candidate: None,
+                outcome: MemoryOpOutcome::Corrected {
+                    operation_id,
+                    fact: existing.clone(),
+                    evidence_mem_id,
+                },
+                refresh_profile_files: false,
             });
         }
         if matches!(current.status, FactStatus::Superseded | FactStatus::Expired) {
@@ -235,21 +267,23 @@ impl MemoryStore {
             ],
             now,
         )?;
-        self.commit_document(candidate)?;
-        let _ = self.write_profile_files();
-        Ok(MemoryOpOutcome::Corrected {
-            operation_id,
-            fact: corrected,
-            evidence_mem_id,
+        Ok(ReducedMemoryOp {
+            candidate: Some(candidate),
+            outcome: MemoryOpOutcome::Corrected {
+                operation_id,
+                fact: corrected,
+                evidence_mem_id,
+            },
+            refresh_profile_files: true,
         })
     }
 
-    fn apply_forget(
-        &mut self,
+    fn reduce_forget(
+        &self,
         operation_id: String,
         fact_id: String,
         now: &str,
-    ) -> Result<MemoryOpOutcome, ToolError> {
+    ) -> Result<ReducedMemoryOp, ToolError> {
         validate_operation_fields(&operation_id, None, None, now)?;
         if !self
             .document
@@ -343,14 +377,15 @@ impl MemoryStore {
         removed_dependent_fact_ids.extend(consolidation.removed_fact_ids);
         removed_dependent_fact_ids.sort();
         removed_dependent_fact_ids.dedup();
-        self.commit_document(candidate)?;
-        let _ = self.write_profile_files();
-
-        Ok(MemoryOpOutcome::Forgotten {
-            operation_id,
-            forgotten_fact_ids: forgotten_ids.into_iter().collect(),
-            excluded_evidence_ids,
-            removed_dependent_fact_ids,
+        Ok(ReducedMemoryOp {
+            candidate: Some(candidate),
+            outcome: MemoryOpOutcome::Forgotten {
+                operation_id,
+                forgotten_fact_ids: forgotten_ids.into_iter().collect(),
+                excluded_evidence_ids,
+                removed_dependent_fact_ids,
+            },
+            refresh_profile_files: true,
         })
     }
 }
