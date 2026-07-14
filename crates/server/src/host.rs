@@ -1297,6 +1297,7 @@ mod tests {
                 )]),
                 sessions,
                 pending_memory_ops: BTreeMap::new(),
+                pending_governance_mutations: BTreeMap::new(),
             },
             profile_context_cache: runtime::profile_context::ProfileContextCache::default(),
             visitor_sessions: VisitorSessions::default(),

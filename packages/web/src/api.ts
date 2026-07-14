@@ -8,6 +8,13 @@ import type { AgentEffect } from "./generated/AgentEffect";
 import type { TraceStep } from "./generated/TraceStep";
 import type { ProfileManifest } from "./generated/ProfileManifest";
 import type { ProfileInfluence } from "./generated/ProfileInfluence";
+import type { ProfileCollectionRuleMatcherView } from "./generated/ProfileCollectionRuleMatcherView";
+import type { ProfileCollectionRuleView } from "./generated/ProfileCollectionRuleView";
+import type { ProfileFactDraftView } from "./generated/ProfileFactDraftView";
+import type { ProfileGovernanceActionRequest } from "./generated/ProfileGovernanceActionRequest";
+import type { ProfileGovernanceMutationRequest } from "./generated/ProfileGovernanceMutationRequest";
+import type { ProfileGovernanceOutcomeView } from "./generated/ProfileGovernanceOutcomeView";
+import type { ProfileGovernanceResponseView } from "./generated/ProfileGovernanceResponseView";
 import type { ProfileMemoryState } from "./generated/ProfileMemoryState";
 import type { ProfileMemoryUpdate } from "./generated/ProfileMemoryUpdate";
 import type { ProfileMemoryUpdateKind } from "./generated/ProfileMemoryUpdateKind";
@@ -39,6 +46,13 @@ export type {
   TraceStep,
   ProfileManifest,
   ProfileInfluence,
+  ProfileCollectionRuleMatcherView,
+  ProfileCollectionRuleView,
+  ProfileFactDraftView,
+  ProfileGovernanceActionRequest,
+  ProfileGovernanceMutationRequest,
+  ProfileGovernanceOutcomeView,
+  ProfileGovernanceResponseView,
   ProfileMemoryState,
   ProfileMemoryUpdate,
   ProfileMemoryUpdateKind,
@@ -712,6 +726,8 @@ export const api = {
   profileManifest: (profile_id?: "technical_learning" | "paper") =>
     http<ProfileManifest>("GET", `/profile/manifest${qs({ profile_id })}`),
   profileMemory: () => http<ProfileMemoryState>("GET", "/profile/memory"),
+  profileMemoryApply: (mutation: ProfileGovernanceMutationRequest) =>
+    http<ProfileGovernanceResponseView>("POST", "/profile/memory/apply", mutation),
   text: (lid: string, end?: string) =>
     http<BookText>("GET", `/book/text${qs({ lid, end })}`),
   structure: (at?: string) => http<StructureProjection>("GET", `/book/structure${qs({ at })}`),

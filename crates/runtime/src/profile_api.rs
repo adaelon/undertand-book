@@ -1,6 +1,8 @@
 use memory::{
-    Applicability, EvidenceRef, FactSource, FactStatus, MemoryStore, PendingTurnRef,
-    ProfilePayload, ProfileScope, ProfileStatus, ReaderProfileSnapshot, Sensitivity, SnapshotItem,
+    Applicability, CollectionRule, EvidenceRef, FactSource, FactStatus, MemoryStore,
+    PendingTurnRef, ProfileGovernanceOutcome, ProfileGovernanceOutcomeKind, ProfilePayload,
+    ProfilePayloadKind, ProfileScope, ProfileStatus, ReaderProfileSnapshot, Sensitivity,
+    SnapshotItem,
 };
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -8,16 +10,137 @@ use ts_rs::TS;
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq, Eq)]
 #[ts(export, export_to = "../../../packages/web/src/generated/")]
 pub struct ProfileMemoryState {
+    pub current_book_id: String,
     pub status: ProfileMemoryStatusView,
     pub snapshot: ProfileSnapshotView,
     pub facts: Vec<ProfileFactView>,
+    pub pending_candidates: Vec<ProfileFactView>,
     pub evidence: Vec<ProfileEvidenceView>,
+    pub collection_rules: Vec<ProfileCollectionRuleView>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct ProfileCollectionRuleView {
+    pub rule_id: String,
+    pub payload_kind: String,
+    pub semantic_key: Option<String>,
+    pub scope_kind: Option<String>,
+    pub scope_value: Option<String>,
+    pub applicability_kind: Option<String>,
+    pub applicability_value: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct ProfileFactDraftView {
+    pub scope_kind: String,
+    pub applicability_kind: String,
+    pub applicability_value: Option<String>,
+    pub payload_kind: String,
+    pub payload_key: String,
+    pub payload_value: String,
+    pub sensitivity: String,
+    pub valid_until: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct ProfileCollectionRuleMatcherView {
+    pub payload_kind: String,
+    pub semantic_key: Option<String>,
+    pub scope_kind: Option<String>,
+    pub scope_value: Option<String>,
+    pub applicability_kind: Option<String>,
+    pub applicability_value: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
+pub enum ProfileGovernanceActionRequest {
+    Remember {
+        operation_id: String,
+        evidence_text: String,
+        fact: ProfileFactDraftView,
+    },
+    Correct {
+        operation_id: String,
+        evidence_text: String,
+        fact_id: String,
+        payload_value: String,
+        valid_until: Option<String>,
+    },
+    Forget {
+        operation_id: String,
+        fact_id: String,
+    },
+    Confirm {
+        operation_id: String,
+        fact_id: String,
+    },
+    Reject {
+        operation_id: String,
+        fact_id: String,
+    },
+    ChangeScope {
+        operation_id: String,
+        fact_id: String,
+        scope_kind: String,
+    },
+    AddCollectionRule {
+        operation_id: String,
+        matcher: ProfileCollectionRuleMatcherView,
+    },
+    RemoveCollectionRule {
+        operation_id: String,
+        rule_id: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct ProfileGovernanceMutationRequest {
+    #[ts(type = "number")]
+    pub expected_document_revision: u64,
+    pub action: ProfileGovernanceActionRequest,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct ProfileGovernanceOutcomeView {
+    pub operation_id: String,
+    pub kind: String,
+    #[ts(type = "number")]
+    pub document_revision: u64,
+    #[ts(type = "number")]
+    pub projection_revision: u64,
+    pub fact_ids: Vec<String>,
+    pub collection_rule_ids: Vec<String>,
+    pub excluded_evidence_ids: Vec<String>,
+    pub removed_dependent_fact_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ProfileGovernanceResponseView {
+    Applied {
+        outcome: ProfileGovernanceOutcomeView,
+    },
+    NeedsSensitiveConfirmation {
+        warning: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq, Eq)]
 #[ts(export, export_to = "../../../packages/web/src/generated/")]
 pub struct ProfileMemoryStatusView {
+    #[ts(type = "number")]
     pub document_revision: u64,
+    #[ts(type = "number")]
     pub projection_revision: u64,
     pub profile_status: String,
     pub pending_sensitive_confirmation: bool,
@@ -36,6 +159,7 @@ pub struct ProfileReviewErrorView {
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq, Eq)]
 #[ts(export, export_to = "../../../packages/web/src/generated/")]
 pub struct ProfileSnapshotView {
+    #[ts(type = "number")]
     pub source_revision: u64,
     pub profile_status: String,
     pub global_core: Vec<ProfileSnapshotItemView>,
@@ -58,6 +182,7 @@ pub struct ProfileSnapshotItemView {
 pub struct ProfilePendingTurnView {
     pub session_id: String,
     pub turn_id: String,
+    #[ts(type = "number")]
     pub user_turn_ordinal: u64,
     pub text: String,
 }
@@ -100,12 +225,27 @@ pub struct ProfileEvidenceView {
 pub fn build_profile_memory_state(
     store: &MemoryStore,
     snapshot: &ReaderProfileSnapshot,
+    current_book_id: &str,
     pending_sensitive_confirmation: bool,
 ) -> ProfileMemoryState {
-    let mut facts: Vec<_> = store.profile_facts().iter().map(fact_view).collect();
-    facts.sort_by(|left, right| left.fact_id.cmp(&right.fact_id));
-    let mut evidence: Vec<_> = store
+    let relevant_facts: Vec<_> = store
         .profile_facts()
+        .iter()
+        .filter(|fact| fact_is_relevant(fact, current_book_id))
+        .collect();
+    let mut facts: Vec<_> = relevant_facts
+        .iter()
+        .filter(|fact| fact.status != FactStatus::Pending)
+        .map(|fact| fact_view(fact))
+        .collect();
+    facts.sort_by(|left, right| left.fact_id.cmp(&right.fact_id));
+    let mut pending_candidates: Vec<_> = relevant_facts
+        .iter()
+        .filter(|fact| fact.status == FactStatus::Pending)
+        .map(|fact| fact_view(fact))
+        .collect();
+    pending_candidates.sort_by(|left, right| left.fact_id.cmp(&right.fact_id));
+    let mut evidence: Vec<_> = relevant_facts
         .iter()
         .flat_map(|fact| {
             fact.evidence
@@ -118,7 +258,15 @@ pub fn build_profile_memory_state(
             .cmp(&right.fact_id)
             .then_with(|| left.evidence_id.cmp(&right.evidence_id))
     });
+    let mut collection_rules: Vec<_> = store
+        .collection_rules()
+        .iter()
+        .filter(|rule| collection_rule_is_relevant(rule, current_book_id))
+        .map(collection_rule_view)
+        .collect();
+    collection_rules.sort_by(|left, right| left.rule_id.cmp(&right.rule_id));
     ProfileMemoryState {
+        current_book_id: current_book_id.into(),
         status: ProfileMemoryStatusView {
             document_revision: store.document_revision(),
             projection_revision: store.projection_revision(),
@@ -143,7 +291,81 @@ pub fn build_profile_memory_state(
         },
         snapshot: snapshot_view(snapshot),
         facts,
+        pending_candidates,
         evidence,
+        collection_rules,
+    }
+}
+
+pub fn profile_governance_outcome_view(
+    outcome: ProfileGovernanceOutcome,
+) -> ProfileGovernanceOutcomeView {
+    ProfileGovernanceOutcomeView {
+        operation_id: outcome.operation_id,
+        kind: governance_outcome_kind(outcome.kind).into(),
+        document_revision: outcome.document_revision,
+        projection_revision: outcome.projection_revision,
+        fact_ids: outcome.fact_ids,
+        collection_rule_ids: outcome.collection_rule_ids,
+        excluded_evidence_ids: outcome.excluded_evidence_ids,
+        removed_dependent_fact_ids: outcome.removed_dependent_fact_ids,
+    }
+}
+
+fn fact_is_relevant(fact: &memory::ProfileFact, current_book_id: &str) -> bool {
+    matches!(fact.scope, ProfileScope::Global)
+        || matches!(&fact.scope, ProfileScope::Book { book_id } if book_id == current_book_id)
+}
+
+fn collection_rule_is_relevant(rule: &CollectionRule, current_book_id: &str) -> bool {
+    rule.matcher.scope.as_ref().is_none_or(|scope| {
+        matches!(scope, ProfileScope::Global)
+            || matches!(scope, ProfileScope::Book { book_id } if book_id == current_book_id)
+    })
+}
+
+fn collection_rule_view(rule: &CollectionRule) -> ProfileCollectionRuleView {
+    let (scope_kind, scope_value) = rule
+        .matcher
+        .scope
+        .as_ref()
+        .map(scope_view)
+        .unwrap_or((None, None));
+    let (applicability_kind, applicability_value) = rule
+        .matcher
+        .applicability
+        .as_ref()
+        .map(applicability_view)
+        .unwrap_or((None, None));
+    ProfileCollectionRuleView {
+        rule_id: rule.rule_id.clone(),
+        payload_kind: payload_kind(rule.matcher.payload_kind).into(),
+        semantic_key: rule.matcher.semantic_key.clone(),
+        scope_kind,
+        scope_value,
+        applicability_kind,
+        applicability_value,
+        created_at: rule.created_at.clone(),
+    }
+}
+
+fn scope_view(scope: &ProfileScope) -> (Option<String>, Option<String>) {
+    match scope {
+        ProfileScope::Global => (Some("global".into()), None),
+        ProfileScope::Book { book_id } => (Some("book".into()), Some(book_id.clone())),
+    }
+}
+
+fn applicability_view(applicability: &Applicability) -> (Option<String>, Option<String>) {
+    match applicability {
+        Applicability::Any => (Some("any".into()), None),
+        Applicability::ContentProfile { profile_id } => {
+            (Some("content_profile".into()), Some(profile_id.clone()))
+        }
+        Applicability::PaperSubtype { subtype } => {
+            (Some("paper_subtype".into()), Some(subtype.clone()))
+        }
+        Applicability::Domain { domain } => (Some("domain".into()), Some(domain.clone())),
     }
 }
 
@@ -329,5 +551,29 @@ fn sensitivity(value: Sensitivity) -> &'static str {
     match value {
         Sensitivity::Normal => "normal",
         Sensitivity::Sensitive => "sensitive",
+    }
+}
+
+fn payload_kind(kind: ProfilePayloadKind) -> &'static str {
+    match kind {
+        ProfilePayloadKind::Background => "background",
+        ProfilePayloadKind::Capability => "capability",
+        ProfilePayloadKind::Goal => "goal",
+        ProfilePayloadKind::ExplanationPreference => "explanation_preference",
+        ProfilePayloadKind::Constraint => "constraint",
+        ProfilePayloadKind::Extension => "extension",
+    }
+}
+
+fn governance_outcome_kind(kind: ProfileGovernanceOutcomeKind) -> &'static str {
+    match kind {
+        ProfileGovernanceOutcomeKind::Remembered => "remembered",
+        ProfileGovernanceOutcomeKind::Corrected => "corrected",
+        ProfileGovernanceOutcomeKind::Forgotten => "forgotten",
+        ProfileGovernanceOutcomeKind::Confirmed => "confirmed",
+        ProfileGovernanceOutcomeKind::Rejected => "rejected",
+        ProfileGovernanceOutcomeKind::ScopeChanged => "scope_changed",
+        ProfileGovernanceOutcomeKind::CollectionRuleAdded => "collection_rule_added",
+        ProfileGovernanceOutcomeKind::CollectionRuleRemoved => "collection_rule_removed",
     }
 }

@@ -9,9 +9,12 @@
 //! 外层 E agent(S10f)、静态资源(S10e)留后续子切片。
 use memory::{
     classify_profile_fact_privacy, classify_profile_privacy, Anchor, Applicability,
-    ExplicitProfileFact, MemoryOp, MemoryOpOutcome, MemoryStore, ProfilePrivacyClass,
-    PendingTurnRef, ProfileResolutionContext, ProfileScope, ProfileStatus, RecallQuery,
-    ReplaceInput, ReviewJobStatus, ReviewSessionCursor, SaveInput, SelectedRange, SelectionContext,
+    BackgroundClaim, CapabilityClaim, CollectionRuleMatcher, ConstraintClaim, ExplicitProfileFact,
+    GoalClaim, MemoryOp, MemoryOpOutcome, MemoryStore, PendingTurnRef, PreferenceClaim,
+    ProfileGovernanceAction, ProfileGovernanceMutation, ProfileGovernanceOutcome,
+    ProfileGovernanceOutcomeKind, ProfilePayload, ProfilePayloadKind, ProfilePrivacyClass,
+    ProfileResolutionContext, ProfileScope, ProfileStatus, RecallQuery, ReplaceInput,
+    ReviewJobStatus, ReviewSessionCursor, SaveInput, SelectedRange, SelectionContext,
     SelectionResolution, Sensitivity, SnapshotContext, SnapshotRequest,
 };
 use read_tools::{
@@ -31,6 +34,11 @@ use runtime::memory_policy::{
 use runtime::orchestrator::{
     new_session, run_with_ephemeral_context, OuterConfig, OuterOutcome, ProfileMemoryUpdate,
     ProfileMemoryUpdateKind, ProfileUsageTrace,
+};
+use runtime::profile_api::{
+    profile_governance_outcome_view, ProfileCollectionRuleMatcherView, ProfileFactDraftView,
+    ProfileGovernanceActionRequest, ProfileGovernanceMutationRequest,
+    ProfileGovernanceResponseView,
 };
 use runtime::{
     guided_route_from, synthesize, unvisited_back, AdapterError, AssistantTurn, CompletionRequest,
@@ -834,26 +842,9 @@ pub struct AgentHistory {
     /// Process-local only:pending plaintext is never written into AgentHistory.
     #[serde(skip)]
     pub pending_memory_ops: BTreeMap<String, MemoryOp>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-enum StructuredProfileMemoryAction {
-    Remember {
-        operation_id: String,
-        evidence_text: String,
-        fact: ExplicitProfileFact,
-    },
-    Correct {
-        operation_id: String,
-        evidence_text: String,
-        fact_id: String,
-        replacement: ExplicitProfileFact,
-    },
-    Forget {
-        operation_id: String,
-        fact_id: String,
-    },
+    /// Structured governance mutations awaiting the same plaintext acknowledgement.
+    #[serde(skip)]
+    pub pending_governance_mutations: BTreeMap<String, ProfileGovernanceMutation>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -6845,6 +6836,15 @@ fn acknowledge_sensitive_memory_op(mut operation: MemoryOp) -> MemoryOp {
     operation
 }
 
+fn acknowledge_sensitive_governance_mutation(
+    mut mutation: ProfileGovernanceMutation,
+) -> ProfileGovernanceMutation {
+    if let ProfileGovernanceAction::ApplyMemoryOp { operation } = &mut mutation.action {
+        *operation = acknowledge_sensitive_memory_op(operation.clone());
+    }
+    mutation
+}
+
 fn memory_applied_event(outcome: &MemoryOpOutcome) -> serde_json::Value {
     json!({ "kind": "applied", "outcome": outcome })
 }
@@ -6891,6 +6891,61 @@ fn record_memory_outcome(
 ) {
     events.push(memory_applied_event(outcome));
     updates.push(memory_applied_update(outcome));
+}
+
+fn governance_applied_event(outcome: &ProfileGovernanceOutcome) -> serde_json::Value {
+    json!({
+        "kind": "applied",
+        "outcome": profile_governance_outcome_view(outcome.clone())
+    })
+}
+
+fn governance_applied_update(outcome: &ProfileGovernanceOutcome) -> Option<ProfileMemoryUpdate> {
+    let kind = match outcome.kind {
+        ProfileGovernanceOutcomeKind::Remembered => ProfileMemoryUpdateKind::Remembered,
+        ProfileGovernanceOutcomeKind::Corrected | ProfileGovernanceOutcomeKind::ScopeChanged => {
+            ProfileMemoryUpdateKind::Corrected
+        }
+        ProfileGovernanceOutcomeKind::Forgotten => ProfileMemoryUpdateKind::Forgotten,
+        ProfileGovernanceOutcomeKind::Rejected => ProfileMemoryUpdateKind::Rejected,
+        ProfileGovernanceOutcomeKind::Confirmed
+        | ProfileGovernanceOutcomeKind::CollectionRuleAdded
+        | ProfileGovernanceOutcomeKind::CollectionRuleRemoved => return None,
+    };
+    Some(ProfileMemoryUpdate {
+        kind,
+        operation_id: Some(outcome.operation_id.clone()),
+        fact_ids: outcome.fact_ids.clone(),
+        message: None,
+    })
+}
+
+fn record_governance_outcome(
+    outcome: &ProfileGovernanceOutcome,
+    events: &mut Vec<serde_json::Value>,
+    updates: &mut Vec<ProfileMemoryUpdate>,
+) {
+    events.push(governance_applied_event(outcome));
+    if let Some(update) = governance_applied_update(outcome) {
+        updates.push(update);
+    }
+}
+
+fn record_sensitive_confirmation_cancelled(
+    events: &mut Vec<serde_json::Value>,
+    updates: &mut Vec<ProfileMemoryUpdate>,
+) {
+    let message = "The pending sensitive profile save was cancelled because the next message was not an exact confirmation.";
+    events.push(json!({
+        "kind": "sensitive_confirmation_cancelled",
+        "message": message
+    }));
+    updates.push(ProfileMemoryUpdate {
+        kind: ProfileMemoryUpdateKind::SensitiveConfirmationCancelled,
+        operation_id: None,
+        fact_ids: Vec::new(),
+        message: Some(message.into()),
+    });
 }
 
 fn memory_ephemeral_context(events: &[serde_json::Value]) -> Option<String> {
@@ -6980,42 +7035,271 @@ fn validate_structured_profile_fact(
     Ok(())
 }
 
-fn prepare_structured_memory_operation(
-    action: StructuredProfileMemoryAction,
+fn parse_profile_scope(scope_kind: &str, current_book_id: &str) -> Result<ProfileScope, ToolError> {
+    match scope_kind {
+        "global" => Ok(ProfileScope::Global),
+        "book" => Ok(ProfileScope::Book {
+            book_id: current_book_id.into(),
+        }),
+        _ => Err(profile_memory_error(
+            "INVALID_MEMORY_SCOPE",
+            "scope_kind must be global or book",
+        )),
+    }
+}
+
+fn parse_profile_applicability(
+    kind: &str,
+    value: Option<String>,
+    content_profile: &str,
+) -> Result<Applicability, ToolError> {
+    match kind {
+        "any" if value.is_none() => Ok(Applicability::Any),
+        "content_profile" if value.as_deref() == Some(content_profile) => {
+            Ok(Applicability::ContentProfile {
+                profile_id: content_profile.into(),
+            })
+        }
+        "any" | "content_profile" => Err(profile_memory_error(
+            "INVALID_MEMORY_APPLICABILITY",
+            "applicability_value must be empty for any or match the current content profile",
+        )),
+        _ => Err(profile_memory_error(
+            "INVALID_MEMORY_APPLICABILITY",
+            "profile facts support any or the current content profile",
+        )),
+    }
+}
+
+fn parse_profile_payload(
+    kind: &str,
+    key: String,
+    value: String,
+) -> Result<ProfilePayload, ToolError> {
+    let payload = match kind {
+        "background" => ProfilePayload::Background(BackgroundClaim { key, value }),
+        "capability" => ProfilePayload::Capability(CapabilityClaim { key, value }),
+        "goal" => ProfilePayload::Goal(GoalClaim { key, value }),
+        "explanation_preference" => {
+            ProfilePayload::ExplanationPreference(PreferenceClaim { key, value })
+        }
+        "constraint" => ProfilePayload::Constraint(ConstraintClaim { key, value }),
+        "extension" => {
+            return Err(profile_memory_error(
+                "INVALID_MEMORY_OP",
+                "profile extension requires a registered M3 schema validator",
+            ));
+        }
+        _ => {
+            return Err(profile_memory_error(
+                "INVALID_MEMORY_OP",
+                "unknown profile payload_kind",
+            ));
+        }
+    };
+    Ok(payload)
+}
+
+fn replace_profile_payload_value(
+    payload: &ProfilePayload,
+    value: String,
+) -> Result<ProfilePayload, ToolError> {
+    let replacement = match payload {
+        ProfilePayload::Background(claim) => ProfilePayload::Background(BackgroundClaim {
+            key: claim.key.clone(),
+            value,
+        }),
+        ProfilePayload::Capability(claim) => ProfilePayload::Capability(CapabilityClaim {
+            key: claim.key.clone(),
+            value,
+        }),
+        ProfilePayload::Goal(claim) => ProfilePayload::Goal(GoalClaim {
+            key: claim.key.clone(),
+            value,
+        }),
+        ProfilePayload::ExplanationPreference(claim) => {
+            ProfilePayload::ExplanationPreference(PreferenceClaim {
+                key: claim.key.clone(),
+                value,
+            })
+        }
+        ProfilePayload::Constraint(claim) => ProfilePayload::Constraint(ConstraintClaim {
+            key: claim.key.clone(),
+            value,
+        }),
+        ProfilePayload::Extension { .. } => {
+            return Err(profile_memory_error(
+                "INVALID_MEMORY_OP",
+                "profile extension requires a registered M3 schema validator",
+            ));
+        }
+    };
+    Ok(replacement)
+}
+
+fn parse_profile_sensitivity(value: &str) -> Result<Sensitivity, ToolError> {
+    match value {
+        "normal" => Ok(Sensitivity::Normal),
+        "sensitive" => Ok(Sensitivity::Sensitive),
+        _ => Err(profile_memory_error(
+            "INVALID_MEMORY_OP",
+            "sensitivity must be normal or sensitive",
+        )),
+    }
+}
+
+fn explicit_profile_fact_from_view(
+    fact: ProfileFactDraftView,
     current_book_id: &str,
     content_profile: &str,
-) -> Result<(MemoryOp, ProfilePrivacyClass), ToolError> {
-    let mut operation = match action {
-        StructuredProfileMemoryAction::Remember {
-            operation_id,
-            evidence_text,
-            fact,
-        } => MemoryOp::Remember {
-            operation_id,
+) -> Result<ExplicitProfileFact, ToolError> {
+    Ok(ExplicitProfileFact {
+        scope: parse_profile_scope(&fact.scope_kind, current_book_id)?,
+        applicability: parse_profile_applicability(
+            &fact.applicability_kind,
+            fact.applicability_value,
+            content_profile,
+        )?,
+        payload: parse_profile_payload(
+            &fact.payload_kind,
+            fact.payload_key,
+            fact.payload_value,
+        )?,
+        sensitivity: parse_profile_sensitivity(&fact.sensitivity)?,
+        valid_until: fact.valid_until,
+        sensitive_plaintext_acknowledged: false,
+    })
+}
+
+fn profile_fact_is_resident_relevant(fact: &memory::ProfileFact, current_book_id: &str) -> bool {
+    matches!(fact.scope, ProfileScope::Global)
+        || matches!(&fact.scope, ProfileScope::Book { book_id } if book_id == current_book_id)
+}
+
+fn resident_profile_fact<'a>(
+    store: &'a MemoryStore,
+    fact_id: &str,
+    current_book_id: &str,
+) -> Result<&'a memory::ProfileFact, ToolError> {
+    let fact = store
+        .profile_facts()
+        .iter()
+        .find(|fact| fact.fact_id == fact_id)
+        .ok_or_else(|| ToolError {
+            error_code: "PROFILE_FACT_NOT_FOUND".into(),
+            category: "not_found".into(),
+            message: format!("profile fact does not exist: {fact_id}"),
+        })?;
+    if !profile_fact_is_resident_relevant(fact, current_book_id) {
+        return Err(profile_memory_error(
+            "INVALID_MEMORY_SCOPE",
+            "profile action may target only global or current-book facts",
+        ));
+    }
+    Ok(fact)
+}
+
+fn parse_rule_payload_kind(kind: &str) -> Result<ProfilePayloadKind, ToolError> {
+    match kind {
+        "background" => Ok(ProfilePayloadKind::Background),
+        "capability" => Ok(ProfilePayloadKind::Capability),
+        "goal" => Ok(ProfilePayloadKind::Goal),
+        "explanation_preference" => Ok(ProfilePayloadKind::ExplanationPreference),
+        "constraint" => Ok(ProfilePayloadKind::Constraint),
+        "extension" => Ok(ProfilePayloadKind::Extension),
+        _ => Err(profile_memory_error(
+            "INVALID_COLLECTION_RULE",
+            "unknown collection-rule payload_kind",
+        )),
+    }
+}
+
+fn parse_rule_scope(
+    kind: Option<String>,
+    value: Option<String>,
+    current_book_id: &str,
+) -> Result<Option<ProfileScope>, ToolError> {
+    match (kind.as_deref(), value.as_deref()) {
+        (None, None) => Ok(None),
+        (Some("global"), None) => Ok(Some(ProfileScope::Global)),
+        (Some("book"), None) => Ok(Some(ProfileScope::Book {
             book_id: current_book_id.into(),
-            evidence_text,
-            fact,
-        },
-        StructuredProfileMemoryAction::Correct {
-            operation_id,
-            evidence_text,
-            fact_id,
-            replacement,
-        } => MemoryOp::Correct {
-            operation_id,
-            book_id: current_book_id.into(),
-            evidence_text,
-            fact_id,
-            replacement,
-        },
-        StructuredProfileMemoryAction::Forget {
-            operation_id,
-            fact_id,
-        } => MemoryOp::Forget {
-            operation_id,
-            fact_id,
-        },
-    };
+        })),
+        (Some("book"), Some(book_id)) if book_id == current_book_id => {
+            Ok(Some(ProfileScope::Book {
+                book_id: current_book_id.into(),
+            }))
+        }
+        (Some("book"), Some(_)) => Err(profile_memory_error(
+            "INVALID_MEMORY_SCOPE",
+            "book collection rule must target the current book",
+        )),
+        _ => Err(profile_memory_error(
+            "INVALID_COLLECTION_RULE",
+            "collection-rule scope must be omitted, global, or current book",
+        )),
+    }
+}
+
+fn parse_rule_applicability(
+    kind: Option<String>,
+    value: Option<String>,
+    content_profile: &str,
+) -> Result<Option<Applicability>, ToolError> {
+    match (kind.as_deref(), value.as_deref()) {
+        (None, None) => Ok(None),
+        (Some("any"), None) => Ok(Some(Applicability::Any)),
+        (Some("content_profile"), None) => Ok(Some(Applicability::ContentProfile {
+            profile_id: content_profile.into(),
+        })),
+        (Some("content_profile"), Some(profile_id)) if profile_id == content_profile => {
+            Ok(Some(Applicability::ContentProfile {
+                profile_id: content_profile.into(),
+            }))
+        }
+        (Some("paper_subtype"), Some(subtype)) if !subtype.trim().is_empty() => {
+            Ok(Some(Applicability::PaperSubtype {
+                subtype: subtype.into(),
+            }))
+        }
+        (Some("domain"), Some(domain)) if !domain.trim().is_empty() => {
+            Ok(Some(Applicability::Domain {
+                domain: domain.into(),
+            }))
+        }
+        (Some("content_profile"), Some(_)) => Err(profile_memory_error(
+            "INVALID_MEMORY_APPLICABILITY",
+            "content-profile collection rule must match the current book",
+        )),
+        _ => Err(profile_memory_error(
+            "INVALID_COLLECTION_RULE",
+            "invalid collection-rule applicability",
+        )),
+    }
+}
+
+fn collection_rule_matcher_from_view(
+    matcher: ProfileCollectionRuleMatcherView,
+    current_book_id: &str,
+    content_profile: &str,
+) -> Result<CollectionRuleMatcher, ToolError> {
+    Ok(CollectionRuleMatcher {
+        payload_kind: parse_rule_payload_kind(&matcher.payload_kind)?,
+        semantic_key: matcher.semantic_key,
+        scope: parse_rule_scope(matcher.scope_kind, matcher.scope_value, current_book_id)?,
+        applicability: parse_rule_applicability(
+            matcher.applicability_kind,
+            matcher.applicability_value,
+            content_profile,
+        )?,
+    })
+}
+
+fn classify_structured_memory_operation(
+    operation: &mut MemoryOp,
+    current_book_id: &str,
+    content_profile: &str,
+) -> Result<ProfilePrivacyClass, ToolError> {
     if matches!(
         &operation,
         MemoryOp::Correct { fact_id, .. } if fact_id.trim().is_empty()
@@ -7026,7 +7310,7 @@ fn prepare_structured_memory_operation(
         ));
     }
 
-    let privacy = match &mut operation {
+    let privacy = match operation {
         MemoryOp::Remember {
             operation_id,
             evidence_text,
@@ -7076,40 +7360,232 @@ fn prepare_structured_memory_operation(
             ProfilePrivacyClass::Normal
         }
     };
-    Ok((operation, privacy))
+    Ok(privacy)
+}
+
+fn prepare_profile_governance_mutation(
+    request: ProfileGovernanceMutationRequest,
+    store: &MemoryStore,
+    current_book_id: &str,
+    content_profile: &str,
+) -> Result<(ProfileGovernanceMutation, ProfilePrivacyClass), ToolError> {
+    let (action, privacy) = match request.action {
+        ProfileGovernanceActionRequest::Remember {
+            operation_id,
+            evidence_text,
+            fact,
+        } => {
+            let mut operation = MemoryOp::Remember {
+                operation_id,
+                book_id: current_book_id.into(),
+                evidence_text,
+                fact: explicit_profile_fact_from_view(fact, current_book_id, content_profile)?,
+            };
+            let privacy = classify_structured_memory_operation(
+                &mut operation,
+                current_book_id,
+                content_profile,
+            )?;
+            (ProfileGovernanceAction::ApplyMemoryOp { operation }, privacy)
+        }
+        ProfileGovernanceActionRequest::Correct {
+            operation_id,
+            evidence_text,
+            fact_id,
+            payload_value,
+            valid_until,
+        } => {
+            let current = resident_profile_fact(store, &fact_id, current_book_id)?;
+            let mut operation = MemoryOp::Correct {
+                operation_id,
+                book_id: current_book_id.into(),
+                evidence_text,
+                fact_id,
+                replacement: ExplicitProfileFact {
+                    scope: current.scope.clone(),
+                    applicability: current.applicability.clone(),
+                    payload: replace_profile_payload_value(&current.payload, payload_value)?,
+                    sensitivity: current.sensitivity,
+                    valid_until,
+                    sensitive_plaintext_acknowledged: false,
+                },
+            };
+            let privacy = classify_structured_memory_operation(
+                &mut operation,
+                current_book_id,
+                content_profile,
+            )?;
+            (ProfileGovernanceAction::ApplyMemoryOp { operation }, privacy)
+        }
+        ProfileGovernanceActionRequest::Forget {
+            operation_id,
+            fact_id,
+        } => {
+            if let Some(fact) = store
+                .profile_facts()
+                .iter()
+                .find(|fact| fact.fact_id == fact_id)
+            {
+                if !profile_fact_is_resident_relevant(fact, current_book_id) {
+                    return Err(profile_memory_error(
+                        "INVALID_MEMORY_SCOPE",
+                        "profile action may target only global or current-book facts",
+                    ));
+                }
+            }
+            (
+                ProfileGovernanceAction::ApplyMemoryOp {
+                    operation: MemoryOp::Forget {
+                        operation_id,
+                        fact_id,
+                    },
+                },
+                ProfilePrivacyClass::Normal,
+            )
+        }
+        ProfileGovernanceActionRequest::Confirm {
+            operation_id,
+            fact_id,
+        } => {
+            resident_profile_fact(store, &fact_id, current_book_id)?;
+            (
+                ProfileGovernanceAction::Confirm {
+                    operation_id,
+                    fact_id,
+                },
+                ProfilePrivacyClass::Normal,
+            )
+        }
+        ProfileGovernanceActionRequest::Reject {
+            operation_id,
+            fact_id,
+        } => {
+            resident_profile_fact(store, &fact_id, current_book_id)?;
+            (
+                ProfileGovernanceAction::Reject {
+                    operation_id,
+                    fact_id,
+                },
+                ProfilePrivacyClass::Normal,
+            )
+        }
+        ProfileGovernanceActionRequest::ChangeScope {
+            operation_id,
+            fact_id,
+            scope_kind,
+        } => {
+            resident_profile_fact(store, &fact_id, current_book_id)?;
+            (
+                ProfileGovernanceAction::ChangeScope {
+                    operation_id,
+                    fact_id,
+                    book_id: current_book_id.into(),
+                    scope: parse_profile_scope(&scope_kind, current_book_id)?,
+                },
+                ProfilePrivacyClass::Normal,
+            )
+        }
+        ProfileGovernanceActionRequest::AddCollectionRule {
+            operation_id,
+            matcher,
+        } => (
+            ProfileGovernanceAction::AddCollectionRule {
+                operation_id,
+                matcher: collection_rule_matcher_from_view(
+                    matcher,
+                    current_book_id,
+                    content_profile,
+                )?,
+            },
+            ProfilePrivacyClass::Normal,
+        ),
+        ProfileGovernanceActionRequest::RemoveCollectionRule {
+            operation_id,
+            rule_id,
+        } => (
+            ProfileGovernanceAction::RemoveCollectionRule {
+                operation_id,
+                rule_id,
+            },
+            ProfilePrivacyClass::Normal,
+        ),
+    };
+    Ok((
+        ProfileGovernanceMutation {
+            expected_document_revision: request.expected_document_revision,
+            action,
+        },
+        privacy,
+    ))
+}
+
+fn profile_governance_applied_reply(outcome: ProfileGovernanceOutcome) -> Reply {
+    ok_json(&ProfileGovernanceResponseView::Applied {
+        outcome: profile_governance_outcome_view(outcome),
+    })
 }
 
 fn route_profile_memory_apply(state: &mut AppState, body: &str, now: &str) -> Reply {
-    let action = match serde_json::from_str::<StructuredProfileMemoryAction>(body) {
-        Ok(action) => action,
+    let request = match serde_json::from_str::<ProfileGovernanceMutationRequest>(body) {
+        Ok(request) => request,
         Err(error) => {
             return validation(
-                "INVALID_MEMORY_OP",
-                &format!("invalid structured profile memory action: {error}"),
+                "INVALID_PROFILE_GOVERNANCE_MUTATION",
+                &format!("invalid profile governance mutation: {error}"),
             );
         }
     };
     let book_id = state.book.base.book_id.clone();
     let content_profile = current_content_profile(&state.book);
-    let (operation, privacy) =
-        match prepare_structured_memory_operation(action, &book_id, content_profile) {
+    let (mutation, privacy) =
+        match prepare_profile_governance_mutation(request, &state.store, &book_id, content_profile) {
             Ok(prepared) => prepared,
             Err(error) => return err_reply(&error),
         };
-    let session_index = ensure_active_agent_session(&mut state.agent_history, &book_id, now);
-    let session_id = state.agent_history.sessions[session_index].id.clone();
     if privacy == ProfilePrivacyClass::Sensitive {
+        match state
+            .store
+            .apply_profile_governance_mutation(mutation.clone(), now)
+        {
+            Ok(outcome) => return profile_governance_applied_reply(outcome),
+            Err(error) if error.error_code == "SENSITIVE_CONFIRMATION_REQUIRED" => {}
+            Err(error) if error.error_code == "PROFILE_OPERATION_ID_CONFLICT" => {
+                match state.store.apply_profile_governance_mutation(
+                    acknowledge_sensitive_governance_mutation(mutation.clone()),
+                    now,
+                ) {
+                    Ok(outcome) => return profile_governance_applied_reply(outcome),
+                    Err(_) => return err_reply(&error),
+                }
+            }
+            Err(error) => return err_reply(&error),
+        }
+        let session_index = ensure_active_agent_session(&mut state.agent_history, &book_id, now);
+        let session_id = state.agent_history.sessions[session_index].id.clone();
+        if state
+            .agent_history
+            .pending_governance_mutations
+            .get(&session_id)
+            .is_some_and(|pending| pending != &mutation)
+            || state.agent_history.pending_memory_ops.contains_key(&session_id)
+        {
+            return err_reply(&ToolError {
+                error_code: "SENSITIVE_CONFIRMATION_PENDING".into(),
+                category: "conflict".into(),
+                message: "another sensitive profile operation is awaiting confirmation".into(),
+            });
+        }
+        state.agent_history.pending_memory_ops.remove(&session_id);
         state
             .agent_history
-            .pending_memory_ops
-            .insert(session_id, operation);
-        return ok_json(&json!({
-            "kind": "needs_sensitive_confirmation",
-            "warning": "This sensitive profile value will be stored as local plaintext. Send an exact confirmation as your next message to save it."
-        }));
+            .pending_governance_mutations
+            .insert(session_id, mutation);
+        return ok_json(&ProfileGovernanceResponseView::NeedsSensitiveConfirmation {
+            warning: "This sensitive profile value will be stored as local plaintext. Send an exact confirmation as your next message to save it.".into(),
+        });
     }
-    match state.store.apply_memory_op(operation, now) {
-        Ok(outcome) => ok_json(&memory_applied_event(&outcome)),
+    match state.store.apply_profile_governance_mutation(mutation, now) {
+        Ok(outcome) => profile_governance_applied_reply(outcome),
         Err(error) => err_reply(&error),
     }
 }
@@ -7131,10 +7607,15 @@ fn route_profile_memory_state(state: &mut AppState, now: &str) -> Reply {
                 .agent_history
                 .pending_memory_ops
                 .contains_key(session_id)
+                || state
+                    .agent_history
+                    .pending_governance_mutations
+                    .contains_key(session_id)
         });
     ok_json(&runtime::profile_api::build_profile_memory_state(
         &state.store,
         &snapshot,
+        &book_id,
         pending_sensitive_confirmation,
     ))
 }
@@ -7184,6 +7665,10 @@ fn route_agent_chat(state: &mut AppState, body: &str, now: &str) -> Reply {
             .cloned()
         {
             state.agent_history.pending_memory_ops.remove(&session_id);
+            state
+                .agent_history
+                .pending_governance_mutations
+                .remove(&session_id);
         }
         return ok_json(&rejected_memory_outcome(
             state.store.projection_revision(),
@@ -7254,6 +7739,38 @@ fn run_precommitted_agent_chat(
     let mut confirmation_applied = false;
     if let Some(pending) = state
         .agent_history
+        .pending_governance_mutations
+        .remove(&turn_ref.session_id)
+    {
+        if is_sensitive_memory_confirmation(msg) {
+            let retry = pending.clone();
+            match state.store.apply_profile_governance_mutation(
+                acknowledge_sensitive_governance_mutation(pending),
+                now,
+            ) {
+                Ok(outcome) => {
+                    record_governance_outcome(
+                        &outcome,
+                        &mut memory_events,
+                        &mut memory_updates,
+                    );
+                    confirmation_applied = true;
+                }
+                Err(error) => {
+                    if error.category == "internal" {
+                        state
+                            .agent_history
+                            .pending_governance_mutations
+                            .insert(turn_ref.session_id.clone(), retry);
+                    }
+                    return Err(error);
+                }
+            }
+        } else {
+            record_sensitive_confirmation_cancelled(&mut memory_events, &mut memory_updates);
+        }
+    } else if let Some(pending) = state
+        .agent_history
         .pending_memory_ops
         .remove(&turn_ref.session_id)
     {
@@ -7282,17 +7799,7 @@ fn run_precommitted_agent_chat(
                 }
             }
         } else {
-            let message = "The pending sensitive profile save was cancelled because the next message was not an exact confirmation.";
-            memory_events.push(json!({
-                "kind": "sensitive_confirmation_cancelled",
-                "message": message
-            }));
-            memory_updates.push(ProfileMemoryUpdate {
-                kind: ProfileMemoryUpdateKind::SensitiveConfirmationCancelled,
-                operation_id: None,
-                fact_ids: Vec::new(),
-                message: Some(message.into()),
-            });
+            record_sensitive_confirmation_cancelled(&mut memory_events, &mut memory_updates);
         }
     }
 
@@ -7348,6 +7855,10 @@ fn run_precommitted_agent_chat(
                 preview,
                 warning,
             } => {
+                state
+                    .agent_history
+                    .pending_governance_mutations
+                    .remove(&turn_ref.session_id);
                 state
                     .agent_history
                     .pending_memory_ops
@@ -7562,6 +8073,10 @@ fn route_agent_history_delete(state: &mut AppState, body: &str, now: &str) -> Re
         );
     }
     state.agent_history.pending_memory_ops.remove(session_id);
+    state
+        .agent_history
+        .pending_governance_mutations
+        .remove(session_id);
     if state
         .agent_history
         .active_by_book
@@ -8540,6 +9055,43 @@ mod tests {
                 now,
             },
         )
+    }
+
+    fn profile_mutation(
+        expected_document_revision: u64,
+        action: serde_json::Value,
+    ) -> serde_json::Value {
+        json!({
+            "expected_document_revision": expected_document_revision,
+            "action": action,
+        })
+    }
+
+    fn profile_fact_draft(
+        scope_kind: &str,
+        payload_key: &str,
+        payload_value: &str,
+        sensitivity: &str,
+    ) -> serde_json::Value {
+        json!({
+            "scope_kind": scope_kind,
+            "applicability_kind": "any",
+            "applicability_value": null,
+            "payload_kind": "explanation_preference",
+            "payload_key": payload_key,
+            "payload_value": payload_value,
+            "sensitivity": sensitivity,
+            "valid_until": null,
+        })
+    }
+
+    fn post_profile(
+        state: &mut AppState,
+        expected_document_revision: u64,
+        action: serde_json::Value,
+    ) -> Reply {
+        let mutation = profile_mutation(expected_document_revision, action);
+        post(state, "/profile/memory/apply", &mutation.to_string())
     }
 
     fn simple_pdf(text: &str) -> Vec<u8> {
@@ -11606,99 +12158,90 @@ mod tests {
     }
 
     #[test]
-    fn structured_profile_action_applies_normal_and_ignores_forged_sensitive_ack() {
+    fn structured_profile_action_applies_normal_and_requires_server_owned_sensitive_ack() {
         let mut normal = state_named("structured-memory-normal");
-        let book_id = normal.book.base.book_id.clone();
         let normal_action = json!({
             "kind": "remember",
             "operation_id": "ui-normal-1",
             "evidence_text": "Remember my UI preference",
-            "fact": ExplicitProfileFact {
-                scope: ProfileScope::Book { book_id },
-                applicability: Applicability::Any,
-                payload: ProfilePayload::ExplanationPreference(PreferenceClaim {
-                    key: "depth".into(),
-                    value: "UI_NORMAL_SENTINEL".into(),
-                }),
-                sensitivity: Sensitivity::Normal,
-                valid_until: None,
-                sensitive_plaintext_acknowledged: true,
-            }
+            "fact": profile_fact_draft("book", "depth", "UI_NORMAL_SENTINEL", "normal"),
         });
-        let reply = post(
-            &mut normal,
-            "/profile/memory/apply",
-            &normal_action.to_string(),
-        );
+        let reply = post_profile(&mut normal, 0, normal_action);
         assert_eq!(reply.status, 200, "{}", reply.body);
         assert!(reply.body.contains("applied"));
+        assert!(reply.body.contains("remembered"));
         assert_eq!(normal.store.profile_facts().len(), 1);
 
         let mut sensitive = state_named("structured-memory-sensitive");
-        let book_id = sensitive.book.base.book_id.clone();
+        let mut forged_fact = profile_fact_draft(
+            "book",
+            "health",
+            "UI_SENSITIVE_ONLY",
+            "normal",
+        );
+        forged_fact["sensitive_plaintext_acknowledged"] = json!(true);
         let sensitive_action = json!({
             "kind": "remember",
             "operation_id": "ui-sensitive-1",
             "evidence_text": "Remember my medical preference",
-            "fact": ExplicitProfileFact {
-                scope: ProfileScope::Book { book_id },
-                applicability: Applicability::Any,
-                payload: ProfilePayload::ExplanationPreference(PreferenceClaim {
-                    key: "health".into(),
-                    value: "UI_SENSITIVE_ONLY".into(),
-                }),
-                sensitivity: Sensitivity::Normal,
-                valid_until: None,
-                sensitive_plaintext_acknowledged: true,
-            }
+            "fact": forged_fact,
         });
-        let reply = post(
-            &mut sensitive,
-            "/profile/memory/apply",
-            &sensitive_action.to_string(),
-        );
+        let reply = post_profile(&mut sensitive, 0, sensitive_action.clone());
         assert_eq!(reply.status, 200, "{}", reply.body);
         assert!(reply.body.contains("needs_sensitive_confirmation"));
         assert!(sensitive.store.profile_facts().is_empty());
-        assert_eq!(sensitive.agent_history.pending_memory_ops.len(), 1);
+        assert_eq!(sensitive.agent_history.pending_governance_mutations.len(), 1);
+        assert!(sensitive.agent_history.pending_memory_ops.is_empty());
         assert!(!serde_json::to_string(&sensitive.agent_history)
             .unwrap()
             .contains("UI_SENSITIVE_ONLY"));
+
+        sensitive.adapter = Box::new(ChatStubAdapter::scripted(vec![AssistantTurn {
+            text: Some("saved".into()),
+            tool_calls: vec![],
+            usage_total_tokens: Some(3),
+        }]));
+        let confirmed = post(
+            &mut sensitive,
+            "/agent/chat",
+            r#"{"message":"confirm save"}"#,
+        );
+        assert_eq!(confirmed.status, 200, "{}", confirmed.body);
+        assert!(sensitive.agent_history.pending_governance_mutations.is_empty());
+        assert_eq!(sensitive.store.profile_facts().len(), 1);
+        assert_eq!(sensitive.store.profile_facts()[0].sensitivity, Sensitivity::Sensitive);
+        assert_eq!(
+            match &sensitive.store.profile_facts()[0].payload {
+                ProfilePayload::ExplanationPreference(claim) => claim.value.as_str(),
+                _ => unreachable!(),
+            },
+            "UI_SENSITIVE_ONLY"
+        );
+        assert!(!serde_json::to_string(&sensitive.agent_history)
+            .unwrap()
+            .contains("UI_SENSITIVE_ONLY"));
+
+        let replay = post_profile(&mut sensitive, 0, sensitive_action);
+        assert_eq!(replay.status, 200, "{}", replay.body);
+        assert!(replay.body.contains("remembered"));
+        assert_eq!(sensitive.store.profile_facts().len(), 1);
     }
 
     #[test]
     fn profile_memory_state_exposes_resident_snapshot_facts_evidence_and_pending_status() {
         let mut s = state_named("profile-memory-state");
-        let book_id = s.book.base.book_id.clone();
         let normal_action = json!({
             "kind": "remember",
             "operation_id": "state-normal-1",
             "evidence_text": "Remember this API-visible preference",
-            "fact": ExplicitProfileFact {
-                scope: ProfileScope::Book { book_id: book_id.clone() },
-                applicability: Applicability::Any,
-                payload: ProfilePayload::ExplanationPreference(PreferenceClaim {
-                    key: "depth".into(),
-                    value: "STATE_API_SENTINEL".into(),
-                }),
-                sensitivity: Sensitivity::Normal,
-                valid_until: None,
-                sensitive_plaintext_acknowledged: false,
-            }
+            "fact": profile_fact_draft("book", "depth", "STATE_API_SENTINEL", "normal"),
         });
-        assert_eq!(
-            post(
-                &mut s,
-                "/profile/memory/apply",
-                &normal_action.to_string()
-            )
-            .status,
-            200
-        );
+        assert_eq!(post_profile(&mut s, 0, normal_action).status, 200);
 
         let state = get(&mut s, "/profile/memory");
         assert_eq!(state.status, 200, "{}", state.body);
         let body: serde_json::Value = serde_json::from_str(&state.body).unwrap();
+        assert_eq!(body["current_book_id"], s.book.base.book_id);
         assert_eq!(body["status"]["document_revision"], 1);
         assert_eq!(body["status"]["projection_revision"], 1);
         assert_eq!(body["status"]["profile_status"], "current");
@@ -11713,6 +12256,8 @@ mod tests {
         );
         assert_eq!(body["facts"][0]["payload_value"], "STATE_API_SENTINEL");
         assert_eq!(body["facts"][0]["status"], "confirmed");
+        assert!(body["pending_candidates"].as_array().unwrap().is_empty());
+        assert!(body["collection_rules"].as_array().unwrap().is_empty());
         assert_eq!(
             body["evidence"][0]["text"],
             "Remember this API-visible preference"
@@ -11722,33 +12267,339 @@ mod tests {
             "kind": "remember",
             "operation_id": "state-sensitive-1",
             "evidence_text": "Remember my medical preference",
-            "fact": ExplicitProfileFact {
-                scope: ProfileScope::Book { book_id },
-                applicability: Applicability::Any,
-                payload: ProfilePayload::ExplanationPreference(PreferenceClaim {
-                    key: "health".into(),
-                    value: "PENDING_STATE_SECRET".into(),
-                }),
-                sensitivity: Sensitivity::Normal,
-                valid_until: None,
-                sensitive_plaintext_acknowledged: false,
-            }
+            "fact": profile_fact_draft("book", "health", "PENDING_STATE_SECRET", "normal"),
         });
-        assert_eq!(
-            post(
-                &mut s,
-                "/profile/memory/apply",
-                &sensitive_action.to_string()
-            )
-            .status,
-            200
-        );
+        assert_eq!(post_profile(&mut s, 1, sensitive_action).status, 200);
         let pending = get(&mut s, "/profile/memory");
         let body: serde_json::Value = serde_json::from_str(&pending.body).unwrap();
         assert_eq!(body["status"]["pending_sensitive_confirmation"], true);
         assert_eq!(body["facts"].as_array().unwrap().len(), 1);
         assert!(!pending.body.contains("PENDING_STATE_SECRET"));
         assert_eq!(post(&mut s, "/profile/memory", "{}").status, 405);
+    }
+
+    #[test]
+    fn profile_governance_http_enforces_revision_replay_and_all_mutation_actions() {
+        let mut state = state_named("profile-governance-http");
+        let mut pending_ids = Vec::new();
+        for (key, turn_id) in [("candidate-a", "turn-a"), ("candidate-b", "turn-b")] {
+            let fact = state
+                .store
+                .create_profile_fact(
+                    CreateProfileFact {
+                        scope: ProfileScope::Global,
+                        applicability: Applicability::Any,
+                        payload: ProfilePayload::Goal(memory::GoalClaim {
+                            key: key.into(),
+                            value: format!("value-{key}"),
+                        }),
+                        source: FactSource::AgentInferred,
+                        evidence: vec![EvidenceRef::Turn {
+                            session_id: "review-session".into(),
+                            turn_id: turn_id.into(),
+                        }],
+                        confidence: Some(memory::Confidence::Medium),
+                        sensitivity: Sensitivity::Normal,
+                        valid_until: None,
+                    },
+                    "2026-07-14T00:00:00Z",
+                )
+                .unwrap();
+            pending_ids.push(fact.fact_id);
+        }
+        let visible = get(&mut state, "/profile/memory");
+        let visible: serde_json::Value = serde_json::from_str(&visible.body).unwrap();
+        assert!(visible["facts"].as_array().unwrap().is_empty());
+        assert_eq!(visible["pending_candidates"].as_array().unwrap().len(), 2);
+
+        let confirmed = post_profile(
+            &mut state,
+            2,
+            json!({
+                "kind": "confirm",
+                "operation_id": "gov-confirm",
+                "fact_id": pending_ids[0],
+            }),
+        );
+        assert_eq!(confirmed.status, 200, "{}", confirmed.body);
+        assert!(confirmed.body.contains("confirmed"));
+
+        let rejected = post_profile(
+            &mut state,
+            3,
+            json!({
+                "kind": "reject",
+                "operation_id": "gov-reject",
+                "fact_id": pending_ids[1],
+            }),
+        );
+        assert_eq!(rejected.status, 200, "{}", rejected.body);
+        assert!(rejected.body.contains("rejected"));
+
+        let remember_action = json!({
+            "kind": "remember",
+            "operation_id": "gov-remember",
+            "evidence_text": "Remember detailed explanations",
+            "fact": profile_fact_draft("book", "depth", "detailed", "normal"),
+        });
+        let remembered = post_profile(&mut state, 4, remember_action.clone());
+        assert_eq!(remembered.status, 200, "{}", remembered.body);
+        let remembered_body: serde_json::Value = serde_json::from_str(&remembered.body).unwrap();
+        assert_eq!(remembered_body["outcome"]["kind"], "remembered");
+        let remembered_fact_id = remembered_body["outcome"]["fact_ids"][0]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let replay = post_profile(&mut state, 4, remember_action);
+        assert_eq!(replay.status, 200, "{}", replay.body);
+        assert_eq!(replay.body, remembered.body);
+        assert_eq!(state.store.document_revision(), 5);
+
+        let reused = post_profile(
+            &mut state,
+            4,
+            json!({
+                "kind": "remember",
+                "operation_id": "gov-remember",
+                "evidence_text": "Different request",
+                "fact": profile_fact_draft("book", "depth", "brief", "normal"),
+            }),
+        );
+        assert_eq!(reused.status, 409, "{}", reused.body);
+        assert!(reused.body.contains("PROFILE_OPERATION_ID_CONFLICT"));
+
+        let stale = post_profile(
+            &mut state,
+            4,
+            json!({
+                "kind": "remember",
+                "operation_id": "gov-stale",
+                "evidence_text": "A stale request",
+                "fact": profile_fact_draft("book", "stale", "ignored", "normal"),
+            }),
+        );
+        assert_eq!(stale.status, 409, "{}", stale.body);
+        assert!(stale.body.contains("MEMORY_DOCUMENT_REVISION_CONFLICT"));
+
+        let corrected = post_profile(
+            &mut state,
+            5,
+            json!({
+                "kind": "correct",
+                "operation_id": "gov-correct",
+                "evidence_text": "Use concise explanations now",
+                "fact_id": remembered_fact_id,
+                "payload_value": "concise",
+                "valid_until": null,
+            }),
+        );
+        assert_eq!(corrected.status, 200, "{}", corrected.body);
+        let corrected_body: serde_json::Value = serde_json::from_str(&corrected.body).unwrap();
+        assert_eq!(corrected_body["outcome"]["kind"], "corrected");
+        let corrected_fact_id = corrected_body["outcome"]["fact_ids"][0]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let scope_changed = post_profile(
+            &mut state,
+            6,
+            json!({
+                "kind": "change_scope",
+                "operation_id": "gov-scope",
+                "fact_id": corrected_fact_id,
+                "scope_kind": "global",
+            }),
+        );
+        assert_eq!(scope_changed.status, 200, "{}", scope_changed.body);
+        let scope_body: serde_json::Value = serde_json::from_str(&scope_changed.body).unwrap();
+        assert_eq!(scope_body["outcome"]["kind"], "scope_changed");
+        let scoped_fact_id = scope_body["outcome"]["fact_ids"][0]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let book_id = state.book.base.book_id.clone();
+        let rule_added = post_profile(
+            &mut state,
+            7,
+            json!({
+                "kind": "add_collection_rule",
+                "operation_id": "gov-rule-add",
+                "matcher": {
+                    "payload_kind": "explanation_preference",
+                    "semantic_key": "explanation_preference:depth",
+                    "scope_kind": "book",
+                    "scope_value": book_id,
+                    "applicability_kind": "any",
+                    "applicability_value": null,
+                },
+            }),
+        );
+        assert_eq!(rule_added.status, 200, "{}", rule_added.body);
+        let rule_body: serde_json::Value = serde_json::from_str(&rule_added.body).unwrap();
+        assert_eq!(rule_body["outcome"]["kind"], "collection_rule_added");
+        let rule_id = rule_body["outcome"]["collection_rule_ids"][0]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let with_rule = get(&mut state, "/profile/memory");
+        let with_rule: serde_json::Value = serde_json::from_str(&with_rule.body).unwrap();
+        assert_eq!(with_rule["collection_rules"][0]["rule_id"], rule_id);
+
+        let rule_removed = post_profile(
+            &mut state,
+            8,
+            json!({
+                "kind": "remove_collection_rule",
+                "operation_id": "gov-rule-remove",
+                "rule_id": rule_id,
+            }),
+        );
+        assert_eq!(rule_removed.status, 200, "{}", rule_removed.body);
+        assert!(rule_removed.body.contains("collection_rule_removed"));
+
+        let forgotten = post_profile(
+            &mut state,
+            9,
+            json!({
+                "kind": "forget",
+                "operation_id": "gov-forget",
+                "fact_id": scoped_fact_id,
+            }),
+        );
+        assert_eq!(forgotten.status, 200, "{}", forgotten.body);
+        assert!(forgotten.body.contains("forgotten"));
+        assert_eq!(state.store.document_revision(), 10);
+    }
+
+    #[test]
+    fn profile_memory_state_filters_other_book_facts_evidence_and_rules() {
+        let mut state = state_named("profile-memory-book-boundary");
+        let current_book_id = state.book.base.book_id.clone();
+        for (scope, key, value, turn_id) in [
+            (
+                ProfileScope::Global,
+                "global",
+                "GLOBAL_VISIBLE",
+                "turn-global",
+            ),
+            (
+                ProfileScope::Book {
+                    book_id: current_book_id.clone(),
+                },
+                "current",
+                "CURRENT_VISIBLE",
+                "turn-current",
+            ),
+            (
+                ProfileScope::Book {
+                    book_id: "other-book".into(),
+                },
+                "other",
+                "OTHER_BOOK_PRIVATE",
+                "turn-other",
+            ),
+        ] {
+            state
+                .store
+                .create_profile_fact(
+                    CreateProfileFact {
+                        scope,
+                        applicability: Applicability::Any,
+                        payload: ProfilePayload::ExplanationPreference(PreferenceClaim {
+                            key: key.into(),
+                            value: value.into(),
+                        }),
+                        source: FactSource::UserStated,
+                        evidence: vec![EvidenceRef::Turn {
+                            session_id: "boundary-session".into(),
+                            turn_id: turn_id.into(),
+                        }],
+                        confidence: None,
+                        sensitivity: Sensitivity::Normal,
+                        valid_until: None,
+                    },
+                    "2026-07-14T00:00:00Z",
+                )
+                .unwrap();
+        }
+        state
+            .store
+            .create_profile_fact(
+                CreateProfileFact {
+                    scope: ProfileScope::Global,
+                    applicability: Applicability::Any,
+                    payload: ProfilePayload::Goal(memory::GoalClaim {
+                        key: "pending".into(),
+                        value: "PENDING_VISIBLE".into(),
+                    }),
+                    source: FactSource::AgentInferred,
+                    evidence: vec![EvidenceRef::Turn {
+                        session_id: "boundary-session".into(),
+                        turn_id: "turn-pending".into(),
+                    }],
+                    confidence: Some(memory::Confidence::Low),
+                    sensitivity: Sensitivity::Normal,
+                    valid_until: None,
+                },
+                "2026-07-14T00:00:01Z",
+            )
+            .unwrap();
+
+        let revision = state.store.document_revision();
+        state
+            .store
+            .apply_profile_governance_mutation(
+                ProfileGovernanceMutation {
+                    expected_document_revision: revision,
+                    action: ProfileGovernanceAction::AddCollectionRule {
+                        operation_id: "boundary-other-rule".into(),
+                        matcher: CollectionRuleMatcher {
+                            payload_kind: ProfilePayloadKind::Goal,
+                            semantic_key: None,
+                            scope: Some(ProfileScope::Book {
+                                book_id: "other-book".into(),
+                            }),
+                            applicability: None,
+                        },
+                    },
+                },
+                "2026-07-14T00:00:02Z",
+            )
+            .unwrap();
+        state
+            .store
+            .apply_profile_governance_mutation(
+                ProfileGovernanceMutation {
+                    expected_document_revision: revision + 1,
+                    action: ProfileGovernanceAction::AddCollectionRule {
+                        operation_id: "boundary-global-rule".into(),
+                        matcher: CollectionRuleMatcher {
+                            payload_kind: ProfilePayloadKind::Capability,
+                            semantic_key: None,
+                            scope: Some(ProfileScope::Global),
+                            applicability: None,
+                        },
+                    },
+                },
+                "2026-07-14T00:00:03Z",
+            )
+            .unwrap();
+
+        let response = get(&mut state, "/profile/memory");
+        assert_eq!(response.status, 200, "{}", response.body);
+        assert!(response.body.contains("GLOBAL_VISIBLE"));
+        assert!(response.body.contains("CURRENT_VISIBLE"));
+        assert!(response.body.contains("PENDING_VISIBLE"));
+        assert!(!response.body.contains("OTHER_BOOK_PRIVATE"));
+        assert!(!response.body.contains("turn-other"));
+        let body: serde_json::Value = serde_json::from_str(&response.body).unwrap();
+        assert_eq!(body["facts"].as_array().unwrap().len(), 2);
+        assert_eq!(body["pending_candidates"].as_array().unwrap().len(), 1);
+        assert_eq!(body["collection_rules"].as_array().unwrap().len(), 1);
+        assert_eq!(body["collection_rules"][0]["scope_kind"], "global");
     }
 
     #[test]

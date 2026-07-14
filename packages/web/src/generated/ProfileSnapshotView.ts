@@ -2,4 +2,4 @@
 import type { ProfilePendingTurnView } from "./ProfilePendingTurnView";
 import type { ProfileSnapshotItemView } from "./ProfileSnapshotItemView";
 
-export type ProfileSnapshotView = { source_revision: bigint, profile_status: string, global_core: Array<ProfileSnapshotItemView>, applicable_global: Array<ProfileSnapshotItemView>, book_state_core: Array<ProfileSnapshotItemView>, profile_projection: Array<ProfileSnapshotItemView>, pending_context: Array<ProfilePendingTurnView>, };
+export type ProfileSnapshotView = { source_revision: number, profile_status: string, global_core: Array<ProfileSnapshotItemView>, applicable_global: Array<ProfileSnapshotItemView>, book_state_core: Array<ProfileSnapshotItemView>, profile_projection: Array<ProfileSnapshotItemView>, pending_context: Array<ProfilePendingTurnView>, };
