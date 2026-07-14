@@ -14,6 +14,9 @@ import type {
   ExecutorId,
   FormulaSemantics,
   ImageAssetManifestEntry,
+  HistoricalBackfillJobRequest,
+  HistoricalBackfillStartRequest,
+  HistoricalBackfillStateView,
   MemoryRecord,
   OuterOutcome,
   PaperMinimapApplyOutcome,
@@ -202,6 +205,13 @@ const profileMemoryError = ref<string | null>(null);
 const profileMemoryNotice = ref<string | null>(null);
 const profileUpdateStates = ref<Record<string, string>>({});
 let profileMemoryRequestSeq = 0;
+const profileBackfill = ref<HistoricalBackfillStateView | null>(null);
+const profileBackfillLoading = ref(false);
+const profileBackfillBusy = ref(false);
+const profileBackfillError = ref<string | null>(null);
+const profileBackfillNotice = ref<string | null>(null);
+let profileBackfillRequestSeq = 0;
+let profileBackfillPollTimer: number | null = null;
 const readerLayout = ref<ReaderLayoutState | null>(null);
 const pendingLayoutProposal = ref<ReaderLayoutProposal | null>(null);
 const paperMinimapSnapshot = ref<PaperMinimapStateResponse | null>(null);
@@ -1278,6 +1288,98 @@ async function refreshProfileMemory(preserveFeedback = false) {
   }
 }
 
+async function refreshProfileBackfill(preserveFeedback = false) {
+  const requestSeq = ++profileBackfillRequestSeq;
+  profileBackfillLoading.value = true;
+  if (!preserveFeedback) {
+    profileBackfillError.value = null;
+    profileBackfillNotice.value = null;
+  }
+  try {
+    const state = await api.profileBackfill();
+    if (requestSeq !== profileBackfillRequestSeq) return;
+    profileBackfill.value = state;
+  } catch (error) {
+    if (requestSeq !== profileBackfillRequestSeq) return;
+    profileBackfillError.value = errorMessage(error);
+  } finally {
+    if (requestSeq === profileBackfillRequestSeq) profileBackfillLoading.value = false;
+  }
+}
+
+async function refreshProfileSurface(preserveFeedback = false) {
+  await Promise.all([
+    refreshProfileMemory(preserveFeedback),
+    refreshProfileBackfill(preserveFeedback),
+  ]);
+}
+
+function scheduleProfileBackfillPoll() {
+  if (profileBackfillPollTimer !== null) window.clearTimeout(profileBackfillPollTimer);
+  profileBackfillPollTimer = null;
+  const active = profileBackfill.value?.jobs.some((job) =>
+    job.status === "queued" || job.status === "running") ?? false;
+  if (!active) return;
+  profileBackfillPollTimer = window.setTimeout(async () => {
+    profileBackfillPollTimer = null;
+    await Promise.all([
+      refreshProfileBackfill(true),
+      refreshProfileMemory(true),
+    ]);
+    scheduleProfileBackfillPoll();
+  }, 750);
+}
+
+watch(
+  () => profileBackfill.value?.jobs
+    .map((job) => `${job.job_id}:${job.status}:${job.processed_through}`)
+    .join("|") ?? "",
+  scheduleProfileBackfillPoll,
+);
+
+async function startProfileBackfill(request: HistoricalBackfillStartRequest) {
+  if (profileBackfillBusy.value) return;
+  profileBackfillBusy.value = true;
+  profileBackfillError.value = null;
+  profileBackfillNotice.value = null;
+  try {
+    profileBackfill.value = await api.profileBackfillStart(request);
+    profileBackfillNotice.value = "历史回填已开始";
+    await refreshProfileMemory(true);
+  } catch (error) {
+    profileBackfillError.value = errorMessage(error);
+  } finally {
+    profileBackfillBusy.value = false;
+  }
+}
+
+async function mutateProfileBackfill(
+  action: "cancel" | "retry" | "clear",
+  request: HistoricalBackfillJobRequest,
+) {
+  if (profileBackfillBusy.value) return;
+  profileBackfillBusy.value = true;
+  profileBackfillError.value = null;
+  profileBackfillNotice.value = null;
+  try {
+    profileBackfill.value = action === "cancel"
+      ? await api.profileBackfillCancel(request)
+      : action === "retry"
+        ? await api.profileBackfillRetry(request)
+        : await api.profileBackfillClear(request);
+    profileBackfillNotice.value = {
+      cancel: "历史回填已中止",
+      retry: "历史回填已继续",
+      clear: "历史回填记录已清除",
+    }[action];
+    await refreshProfileMemory(true);
+  } catch (error) {
+    profileBackfillError.value = errorMessage(error);
+  } finally {
+    profileBackfillBusy.value = false;
+  }
+}
+
 function profileMutationLabel(action: ProfileGovernanceActionRequest): string {
   return {
     remember: "画像已记住",
@@ -1714,7 +1816,7 @@ async function init() {
     await loadWindow(st.viewport);
     await loadPaperProjectionData();
     await refreshAgentHistory();
-    await refreshProfileMemory();
+    await refreshProfileSurface();
     appSurface.value = "reader";
   } catch (e) {
     appSurface.value = buildWorkbenchSnapshot.value?.readiness.route === "workbench" ? "workbench" : "reader";
@@ -1846,6 +1948,7 @@ function codexPluginStateLabel(state: CodexPluginState): string {
 onMounted(init);
 onBeforeUnmount(() => {
   if (paperPositionSyncTimer !== null) window.clearTimeout(paperPositionSyncTimer);
+  if (profileBackfillPollTimer !== null) window.clearTimeout(profileBackfillPollTimer);
 });
 
 // ── 四动作 ──
@@ -2379,10 +2482,10 @@ async function submitAgentMessage(msg: string, displayUser: string, draft: AskDr
     // agent 可能驱动了共享 reader 视口 / 落了 session 标注 → 同步阅读区。
     await syncViewport(true, hasSuccessfulReaderNavigation(turn.outcome.trace));
     await refreshAgentHistory();
-    await refreshProfileMemory(true);
+    await refreshProfileSurface(true);
   } catch (e) {
     turn.error = e instanceof ApiError ? `[${e.category}] ${e.errorCode}: ${e.message}` : String(e);
-    await refreshProfileMemory(true);
+    await refreshProfileSurface(true);
   } finally {
     turn.pending = false;
     sending.value = false;
@@ -2507,7 +2610,7 @@ async function newChat() {
     applyAgentHistory(response.history);
     askDraft.value = null;
     agentInput.value = "";
-    await refreshProfileMemory(true);
+    await refreshProfileSurface(true);
   } catch (e) {
     fail(e);
   }
@@ -2518,7 +2621,7 @@ async function selectChat(sessionId: string) {
     applyAgentHistory(await api.agentHistorySelect(sessionId));
     askDraft.value = null;
     agentInput.value = "";
-    await refreshProfileMemory(true);
+    await refreshProfileSurface(true);
   } catch (e) {
     fail(e);
   }
@@ -2530,7 +2633,7 @@ async function deleteChat(sessionId: string) {
     applyAgentHistory(await api.agentHistoryDelete(sessionId));
     askDraft.value = null;
     agentInput.value = "";
-    await refreshProfileMemory(true);
+    await refreshProfileSurface(true);
   } catch (e) {
     fail(e);
   }
@@ -2688,6 +2791,14 @@ function resetBookSessionUi() {
   profileMemoryBusy.value = false;
   profileMemoryError.value = null;
   profileMemoryNotice.value = null;
+  profileBackfillRequestSeq += 1;
+  if (profileBackfillPollTimer !== null) window.clearTimeout(profileBackfillPollTimer);
+  profileBackfillPollTimer = null;
+  profileBackfill.value = null;
+  profileBackfillLoading.value = false;
+  profileBackfillBusy.value = false;
+  profileBackfillError.value = null;
+  profileBackfillNotice.value = null;
   profileUpdateStates.value = {};
   readerLayout.value = null;
   pendingLayoutProposal.value = null;
@@ -3151,6 +3262,11 @@ async function submitOpenBook(dir = bookPickerDir.value) {
         :profile-memory-busy="profileMemoryBusy || sending"
         :profile-memory-error="profileMemoryError"
         :profile-memory-notice="profileMemoryNotice"
+        :profile-backfill="profileBackfill"
+        :profile-backfill-loading="profileBackfillLoading"
+        :profile-backfill-busy="profileBackfillBusy || sending"
+        :profile-backfill-error="profileBackfillError"
+        :profile-backfill-notice="profileBackfillNotice"
         :profile-update-states="profileUpdateStates"
         @send-agent="sendAgent"
         @new-chat="newChat"
@@ -3163,9 +3279,11 @@ async function submitOpenBook(dir = bookPickerDir.value) {
         @undo-effect="undoEffect"
         @keep-effect="keepEffect"
         @save-answer-selection="saveAgentSelection"
-        @refresh-profile="refreshProfileMemory()"
+        @refresh-profile="refreshProfileSurface()"
         @mutate-profile="mutateProfile"
         @confirm-sensitive-profile="confirmSensitiveProfile"
+        @start-profile-backfill="startProfileBackfill"
+        @mutate-profile-backfill="mutateProfileBackfill"
         @undo-profile-update="undoProfileUpdate"
       />
     </div>

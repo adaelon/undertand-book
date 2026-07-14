@@ -1,7 +1,11 @@
 // @vitest-environment happy-dom
 import { mount } from "@vue/test-utils";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { ProfileGovernanceActionRequest, ProfileMemoryState } from "../api";
+import type {
+  HistoricalBackfillStateView,
+  ProfileGovernanceActionRequest,
+  ProfileMemoryState,
+} from "../api";
 import ProfileMemoryPanel from "./ProfileMemoryPanel.vue";
 
 function profileState(): ProfileMemoryState {
@@ -143,6 +147,67 @@ function actions(wrapper: ReturnType<typeof mount>): ProfileGovernanceActionRequ
   return (wrapper.emitted("mutate") ?? []).map((args) => args[0] as ProfileGovernanceActionRequest);
 }
 
+function backfillState(): HistoricalBackfillStateView {
+  return {
+    sessions: [
+      {
+        session_id: "session-a",
+        book_id: "book-a",
+        title: "概念梳理",
+        latest_user_turn_ordinal: 3,
+        created_at: "t0",
+        updated_at: "t1",
+      },
+      {
+        session_id: "session-b",
+        book_id: "book-a",
+        title: "推导复盘",
+        latest_user_turn_ordinal: 6,
+        created_at: "t2",
+        updated_at: "t3",
+      },
+    ],
+    jobs: [
+      {
+        job_id: "job-running",
+        session_id: "session-a",
+        book_id: "book-a",
+        from_turn_exclusive: 0,
+        to_turn_inclusive: 3,
+        processed_through: 1,
+        completed_turns: 1,
+        total_turns: 3,
+        status: "running",
+        attempts: 1,
+        candidate_fact_ids: ["fact-pending"],
+        last_error: null,
+        created_at: "t4",
+        updated_at: "t5",
+      },
+      {
+        job_id: "job-retryable",
+        session_id: "session-b",
+        book_id: "book-a",
+        from_turn_exclusive: 1,
+        to_turn_inclusive: 5,
+        processed_through: 3,
+        completed_turns: 2,
+        total_turns: 4,
+        status: "retryable",
+        attempts: 2,
+        candidate_fact_ids: [],
+        last_error: {
+          error_code: "PROVIDER_FAILED",
+          message: "模型暂不可用",
+          occurred_at: "t6",
+        },
+        created_at: "t4",
+        updated_at: "t6",
+      },
+    ],
+  };
+}
+
 afterEach(() => {
   vi.restoreAllMocks();
   document.body.replaceChildren();
@@ -237,5 +302,34 @@ describe("ProfileMemoryPanel", () => {
       "后台整理失败",
     ]);
     expect(wrapper.get('.profile-status[data-status="stale"]').text()).toBe("待刷新");
+  });
+
+  it("starts and governs explicit historical backfill without changing automatic memory", async () => {
+    const state = profileState();
+    state.pending_candidates[0].capture = "historical_backfill";
+    const wrapper = mount(ProfileMemoryPanel, {
+      props: { state, backfill: backfillState() },
+    });
+
+    expect(wrapper.get(".pending-fact small").text()).toContain("历史回填");
+    await wrapper.get(".backfill-session-field select").setValue("session-b");
+    const rangeInputs = wrapper.findAll(".backfill-range input");
+    await rangeInputs[0].setValue(2);
+    await rangeInputs[1].setValue(5);
+    await wrapper.get(".backfill-form").trigger("submit");
+    expect(wrapper.emitted("backfill-start")?.[0]).toEqual([{
+      session_id: "session-b",
+      from_turn_exclusive: 1,
+      to_turn_inclusive: 5,
+    }]);
+
+    await wrapper.get('button[aria-label="中止历史回填"]').trigger("click");
+    await wrapper.get('button[aria-label="继续历史回填"]').trigger("click");
+    await wrapper.get('button[aria-label="清除回填任务与未确认候选"]').trigger("click");
+    expect(wrapper.emitted("backfill-action")).toEqual([
+      ["cancel", { job_id: "job-running" }],
+      ["retry", { job_id: "job-retryable" }],
+      ["clear", { job_id: "job-retryable" }],
+    ]);
   });
 });

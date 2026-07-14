@@ -5,6 +5,9 @@ import type {
   AgentEffect,
   AskQuote,
   FormulaSemantics,
+  HistoricalBackfillJobRequest,
+  HistoricalBackfillStartRequest,
+  HistoricalBackfillStateView,
   MemoryRecord,
   OuterOutcome,
   ProfileGovernanceActionRequest,
@@ -70,6 +73,11 @@ const props = defineProps<{
   profileMemoryBusy?: boolean;
   profileMemoryError?: string | null;
   profileMemoryNotice?: string | null;
+  profileBackfill?: HistoricalBackfillStateView | null;
+  profileBackfillLoading?: boolean;
+  profileBackfillBusy?: boolean;
+  profileBackfillError?: string | null;
+  profileBackfillNotice?: string | null;
   profileUpdateStates?: Record<string, string>;
 }>();
 const emit = defineEmits<{
@@ -88,6 +96,8 @@ const emit = defineEmits<{
   (e: "refresh-profile"): void;
   (e: "mutate-profile", action: ProfileGovernanceActionRequest): void;
   (e: "confirm-sensitive-profile"): void;
+  (e: "start-profile-backfill", request: HistoricalBackfillStartRequest): void;
+  (e: "mutate-profile-backfill", action: "cancel" | "retry" | "clear", request: HistoricalBackfillJobRequest): void;
   (e: "undo-profile-update", turnIndex: number, updateIndex: number, update: ProfileMemoryUpdate): void;
 }>();
 
@@ -430,9 +440,16 @@ function influenceLabel(influence: ProfileUsageTrace["influences"][number]): str
         :busy="props.profileMemoryBusy"
         :error="props.profileMemoryError"
         :notice="props.profileMemoryNotice"
+        :backfill="props.profileBackfill"
+        :backfill-loading="props.profileBackfillLoading"
+        :backfill-busy="props.profileBackfillBusy"
+        :backfill-error="props.profileBackfillError"
+        :backfill-notice="props.profileBackfillNotice"
         @refresh="emit('refresh-profile')"
         @mutate="emit('mutate-profile', $event)"
         @confirm-sensitive="emit('confirm-sensitive-profile')"
+        @backfill-start="emit('start-profile-backfill', $event)"
+        @backfill-action="(action, request) => emit('mutate-profile-backfill', action, request)"
         @goto="emit('goto', $event)"
       />
     </section>
