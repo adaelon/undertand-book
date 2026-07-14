@@ -1211,14 +1211,19 @@ pub fn new_session() -> Vec<Message> {
 fn messages_with_profile_snapshot(
     messages: &[Message],
     profile_snapshot: &ReaderProfileSnapshot,
+    ephemeral_context: Option<&str>,
 ) -> Vec<Message> {
     let insert_at = messages
         .iter()
         .position(|message| message.role != Role::System)
         .unwrap_or(messages.len());
-    let mut request = Vec::with_capacity(messages.len() + 1);
+    let mut request =
+        Vec::with_capacity(messages.len() + 1 + usize::from(ephemeral_context.is_some()));
     request.extend_from_slice(&messages[..insert_at]);
     request.push(Message::system(profile_snapshot.to_prompt_data()));
+    if let Some(context) = ephemeral_context {
+        request.push(Message::system(context));
+    }
     request.extend_from_slice(&messages[insert_at..]);
     request
 }
@@ -1238,6 +1243,35 @@ pub fn run(
     now: &str,
     cfg: OuterConfig,
 ) -> Result<OuterOutcome, ToolError> {
+    run_with_ephemeral_context(
+        book,
+        store,
+        reader,
+        adapter,
+        messages,
+        profile_snapshot,
+        None,
+        question,
+        now,
+        cfg,
+    )
+}
+
+/// Runs one resident turn with optional server-owned data that is visible to every
+/// provider call in this tool loop but never appended to durable conversation messages.
+#[allow(clippy::too_many_arguments)]
+pub fn run_with_ephemeral_context(
+    book: &Book,
+    store: &mut MemoryStore,
+    reader: &mut Reader,
+    adapter: &dyn ModelAdapter,
+    messages: &mut Vec<Message>,
+    profile_snapshot: &ReaderProfileSnapshot,
+    ephemeral_context: Option<&str>,
+    question: &str,
+    now: &str,
+    cfg: OuterConfig,
+) -> Result<OuterOutcome, ToolError> {
     let tools = tool_specs();
     messages.push(Message::user(paper_minimap_contextual_question(
         book, reader, question,
@@ -1251,7 +1285,8 @@ pub fn run(
 
     loop {
         turns += 1;
-        let request_messages = messages_with_profile_snapshot(messages, profile_snapshot);
+        let request_messages =
+            messages_with_profile_snapshot(messages, profile_snapshot, ephemeral_context);
         let turn: AssistantTurn =
             adapter
                 .chat(&request_messages, &tools)
