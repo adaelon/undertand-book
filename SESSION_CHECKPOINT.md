@@ -1,44 +1,45 @@
-# SESSION_CHECKPOINT - 2026-07-14 17:40 +08:00
+# SESSION_CHECKPOINT - 2026-07-14 19:39 +08:00
 
 ## Freshness check
-- Commit at write time: `5db5b21 feat(memory): consolidate global profile candidates`.
+- Commit at write time: `13fee97 feat(memory): expose profile governance API`.
 - This checkpoint is committed separately; compare with `git log --oneline -8` and trust newer implementation commits.
 
 ## Current state
-Reliable profile memory M3 is complete. Neutral, technical_learning, paper, and event-driven global consolidation are implemented, documented, independently committed, and have passed the M3 total gate.
+Reliable profile memory M4 remains active. M4.1 Profile governance API is complete;M4.2-M4.5 and the M4 total gate remain required before the goal can be marked complete.
 
 ## Completed slices
-- M3.1 `8eaf17a`: versioned MemoryPolicy registry + Neutral/orphaned fallback.
-- M3.2 `00e80a2`: technical_learning activity, evidence-backed review hypotheses, and typed hints.
-- M3.3 `e4a0d87`: paper IDs/LIDs-only private projection and explicit mode/stage choices.
-- M3.4 `5db5b21`: affected-key global promotion, Pending trust gate, and reverse reconciliation.
-- Per-slice checkpoint commits: `1ff2a7e`, `0a25e16`, `a846d49`;this final checkpoint follows M3 total-gate evidence.
+- M4 alignment `0426b8d`: ADR-0076,CollectionRule/scope-change/backfill/Markdown/privacy/UI boundaries.
+- M4.1a0 `a085cc5`: pure MemoryOp candidate-document reducer refactor.
+- M4.1a `2879e1d`: ProfileGovernanceMutation reducer,exact-replay receipts,and CollectionRule gates.
+- M4.1b `13fee97`: resident GET/POST governance HTTP,server-owned sensitive confirmation,generated Web types,and typed client.
 
 ## Verification
-- `cargo test -p read-tools -p memory -p runtime -p server`: 122/69/99/128 passed.
-- `pnpm -C packages/web typecheck`: passed.
-- strict clippy `--all-targets --no-deps -D warnings`: passed;memory has no exemption,other crates use only frozen 5/3/7-class baselines.
-- M3.4 target rustfmt check and `git diff --check`: passed.
-- Whole-repo rustfmt still reports pre-existing out-of-slice differences;no unrelated formatting was applied.
+- `cargo test -p memory`: 76/76 passed at M4.1a.
+- `cargo test -p runtime -p server`: 106/130 passed at M4.1b.
+- `npm run typecheck` in `packages/web`: passed with generated JSON-number revisions.
+- strict runtime/server clippy passed under only the frozen 3/7-class baselines;M4.1a memory strict clippy passed with no exemption.
+- `git diff --check`: passed. Whole-file rustfmt remains intentionally out of scope because the repo has pre-existing formatting differences.
 
 ## Key decisions
-- MemoryPolicy state is rebuildable and in-process;ProfileFact ledger remains the durable truth.
-- Paper policy keeps public paper text/claims/gloss in sidecars and carries only guide IDs,term keys,and evidence LIDs.
-- Global consolidation belongs to `crates/memory`,so source mutation,promotion index,job record,and revision share one atomic document commit.
-- Consolidation reads affected ledger keys only;it never scans transcript/history or calls a model.
-- At least two books plus three distinct evidence refs creates only an AgentInferred Global Pending candidate;confirmation is always explicit.
-- Correction,expiry,forget,and evidence exclusion reverse-reconcile stale candidates;Book facts still override Global during resolution.
+- `MemoryDocument` v2 remains the only durable truth;HTTP and Markdown are projections/adapters.
+- Every governance action carries `expected_document_revision`;exact replay returns its receipt before revision checks,and operation-ID content reuse conflicts.
+- GET exposes only Global/current-book facts and their evidence;Pending candidates and applicable collection rules are separate collections.
+- Scope changes create Confirmed UserStated successors;they never edit facts in place.
+- Collection rules affect future automatic/backfill capture only;explicit remember is a one-time exception and does not remove the rule.
+- Sensitive remember/correct is process-local until the exact next-message acknowledgement;the client cannot forge the acknowledgement bit,and pending plaintext is `serde(skip)`.
+- Web remains automatic-first:normal background updates do not require clicks;user actions are for centralized Pending review,sensitive confirmation,destructive forget,explicit backfill,and optional correction/governance.
+- Visitor MCP has no profile/memory route and never reads resident pending state.
 
 ## Next stage (not started)
-M4.1 Profile governance API. First align the contract for global/current-book facts,pending candidates,evidence,status,confirm/reject/correct/forget/change-scope,and collection rules. Every mutation must pass MemoryOp/validators and stale `document_revision` must conflict rather than overwrite.
+M4.2 Web profile/status UI:quiet update + undo,ReviewJob status,Global/current-book tabs,central Pending review,evidence disclosure,collapsed usage trace,and visible stale/error states. Users must be able to inspect source,correct,forget,change scope,and confirm a Global candidate without per-fact approval popups or permanent explanatory copy on the reading surface.
 
 ## Cold-start reading sequence
-1. `docs/切片方案-memory可靠画像升级.md` M4.1 and M4 total-gate sections.
-2. `docs/adr/0075-runtime-owned-evidence-backed-profile-memory.md`.
-3. `crates/memory/src/{profile,operation,global_consolidation,review,document}.rs`.
-4. `crates/runtime/src/profile_api.rs` and resident `/profile/memory` routes in `crates/server/src/lib.rs`.
-5. `docs/架构.md` Event-driven global consolidation and the tail of `docs/代码链路.md`.
+1. `docs/切片方案-memory可靠画像升级.md` M4.2 and M4 total-gate sections.
+2. `docs/adr/0075-runtime-owned-evidence-backed-profile-memory.md` and `docs/adr/0076-profile-governance-and-backfill-ownership.md`.
+3. `crates/runtime/src/profile_api.rs` and resident profile routes/tests in `crates/server/src/lib.rs`.
+4. `packages/web/src/api.ts`,profile generated types,and the current App/rail component structure.
+5. `docs/架构.md` Resident profile governance HTTP and the tail of `docs/代码链路.md`.
 
 ## Worktree
-- After the final docs commit there should be no M3 tracked changes.
+- After this checkpoint commit there should be no M4.1 tracked changes.
 - Existing untracked materials,logs,screenshots,test results,and temporary directories belong to the user and remain untouched.
