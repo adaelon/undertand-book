@@ -795,6 +795,34 @@ historical AgentHistory
 
 回答“风格是否更合适”另做有/无 snapshot 成对行为评测;LLM-as-judge 只能辅助,不能替代以上 document/watermark/snapshot/trace 断言。
 
+### 8.1 M4.5 coverage ledger
+
+以下 ID 均由自动测试验收;测试名是稳定定位符,最终发布闸仍以实际 runner 结果为准。
+
+| ID | 自动验收测试 ID | 覆盖面 |
+| --- | --- | --- |
+| MEM-E01 | `server::tests::explicit_remember_commits_before_same_turn_snapshot_and_survives_new_chat` | 当前回合 Confirmed、visible update、同回合 snapshot 与新会话复用 |
+| MEM-E02 | `server::host::tests::{fake_clock_triggers_idle_review_only_after_sixty_seconds,fake_clock_forces_review_after_eight_unreviewed_turns}` | 60s idle 与 8-turn 两个调度阈值及 watermark |
+| MEM-E03 | `server::host::tests::startup_resume_replays_interrupted_job_once_without_duplicate_fact` | Running crash 后 resume、attempt 与 fact 唯一性 |
+| MEM-E04 | `server::tests::new_resident_chat_injects_seeded_profile_without_persisting_snapshot` | 新会话不调用 recall 仍注入,且 snapshot 不落 history |
+| MEM-E05 | `memory::profile::tests::resolver_prefers_book_scope_specific_applicability_and_authority`;`memory::projection::tests::partitions_active_facts_and_excludes_pending_expired_and_extensions` | Book scope resolver 与最终 snapshot 双层排除其他书 ID/值 |
+| MEM-E06 | `runtime::memory_policy::tests::paper_specific_preference_does_not_leak_into_technical_snapshot` | paper applicability 不进入 technical_learning snapshot |
+| MEM-E07 | `memory::global_consolidation::tests::two_books_three_evidence_create_pending_then_confirmed_snapshot` | inferred Global 在 confirm 前不进入 injected IDs |
+| MEM-E08 | `memory::profile::tests::correction_supersedes_old_fact_and_resolver_selects_replacement`;`memory::projection::tests::correction_authority_outranks_a_newer_user_statement` | correction chain 与新 snapshot 只选 replacement |
+| MEM-E09 | `memory::operation::tests::forget_deletes_correction_chain_evidence_and_disk_values`;`memory::markdown::tests::forget_removes_values_from_both_materialized_views`;`memory::backfill::tests::forget_scrubs_backfill_candidates_that_share_excluded_evidence`;`server::tests::profile_governance_http_enforces_revision_replay_and_all_mutation_actions` | document/evidence、Markdown、backfill candidate 与 resident cache/API 均移除原值 |
+| MEM-E10 | `runtime::orchestrator::tests::profile_mark_used_accepts_only_injected_ids_and_is_atomic_on_error` | claimed_used 子集约束与不存在 ID 原子拒绝 |
+| MEM-E11 | `server::host::tests::fake_boundary_timeout_projects_stale_pending_context_and_visible_error` | stale/error/pending context 可见且 reader goto 继续成功 |
+| MEM-E12 | `runtime::memory_review::tests::user_statement_is_typed_and_ambiguous_scope_defaults_to_book` | 含糊陈述固定 local-first Book scope |
+| MEM-E13 | `memory::global_consolidation::tests::two_books_three_evidence_create_pending_then_confirmed_snapshot` | 2 books/3 evidence 只先生成 Pending promotion |
+| MEM-E14 | `memory::tests::derive_book_reading_state_keeps_engagement_dimensions_separate`;`server::tests::profile_memory_state_includes_technical_activity_and_raw_projection` | QA 只增加 qa_count,不产生 mastery/confusion confirmed fact |
+| MEM-E15 | `runtime::memory_policy::tests::paper_policy_uses_explicit_choices_and_keeps_activity_non_semantic` | mode/stage 只接受 explicit UserStated choice,行为不晋级 |
+| MEM-E16 | `server::mcp::tests::{visitor_dispatch_has_no_reader_or_memory_branch,visitor_guide_never_reads_or_injects_reader_private_profile}` | visitor 无私有工具入口,不读画像且 facts/jobs revision 不变 |
+| MEM-E17 | `server::tests::secret_memory_request_never_calls_provider_or_reaches_disk_or_history` | Secret 在 extractor/history/disk 前拒绝且不可搜索 |
+| MEM-E18 | `runtime::memory_review::tests::sensitive_and_secret_candidates_are_rejected_without_echoing_values`;`server::tests::sensitive_memory_waits_for_exact_next_message_without_second_extraction` | 自动候选拒绝,显式敏感保存等待精确明文确认 |
+| MEM-E19 | `memory::tests::{legacy_open_migrates_losslessly_once_to_v2_document,legacy_migration_write_failure_preserves_original_file}` | Record 逐字段迁移与失败时原文件可读 |
+| MEM-E20 | `runtime::memory_policy::tests::{missing_and_mismatched_policies_fall_back_and_mark_state_orphaned,fallback_snapshot_keeps_core_facts_and_does_not_mutate_the_ledger}` | unknown profile 回退 Neutral,保留 Core/raw ledger |
+| MEM-E21 | `runtime::memory_review::tests::intent_observation_is_typed_separately_from_profile_facts`;`memory::review::tests::repeated_intent_observations_do_not_change_profile_snapshot`;`runtime::orchestrator::tests::profile_snapshot_is_ephemeral_and_frozen_across_the_tool_loop` | 重复 intent_key 可持久记录但 projection revision/snapshot 不变,动作与回答只消费同一 frozen snapshot contract |
+
 ---
 
 ## 9. 实施顺序

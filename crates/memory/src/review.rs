@@ -1569,8 +1569,14 @@ mod tests {
     }
 
     #[test]
-    fn observation_only_review_does_not_advance_projection_revision() {
+    fn repeated_intent_observations_do_not_change_profile_snapshot() {
         let (_path, mut store) = store("observation-only");
+        let request = crate::SnapshotRequest::current(crate::SnapshotContext {
+            book_id: Some("book-a".into()),
+            content_profile: Some("technical_learning".into()),
+            ..Default::default()
+        });
+        let snapshot_before = store.project_reader_profile_snapshot(&request);
         store
             .reconcile_review_jobs(&[cursor(1)], "2026-07-14T00:00:00Z")
             .unwrap();
@@ -1599,9 +1605,45 @@ mod tests {
             )
             .unwrap();
 
+        store
+            .reconcile_review_jobs(&[cursor(2)], "2026-07-14T00:03:00Z")
+            .unwrap();
+        let second_job = store
+            .review_state()
+            .review_jobs
+            .iter()
+            .find(|job| job.status == ReviewJobStatus::Queued)
+            .unwrap()
+            .clone();
+        store
+            .claim_review_job(&second_job.job_id, "2026-07-14T00:04:00Z")
+            .unwrap();
+        let repeated_observation = IntentObservationCandidate::new(
+            "request_diagram",
+            "technical_learning",
+            vec![EvidenceRef::Turn {
+                session_id: "session-a".into(),
+                turn_id: "turn-2".into(),
+            }],
+        )
+        .unwrap();
+        store
+            .commit_review_result(
+                &second_job.job_id,
+                &["turn-2".into()],
+                &[],
+                &[repeated_observation],
+                "2026-07-14T00:05:00Z",
+            )
+            .unwrap();
+
         assert_eq!(store.projection_revision(), projection_revision);
         assert!(store.profile_facts().is_empty());
-        assert_eq!(store.review_state().intent_observations.len(), 1);
+        assert_eq!(store.review_state().intent_observations.len(), 2);
+        assert_eq!(
+            store.project_reader_profile_snapshot(&request),
+            snapshot_before
+        );
     }
 
     #[test]

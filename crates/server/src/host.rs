@@ -2146,6 +2146,18 @@ mod tests {
                     .len(),
                 1
             );
+            let lid = state.reader.viewport().anchor_lid;
+            let body = serde_json::json!({ "lid": lid }).to_string();
+            let navigation = route(
+                &mut state,
+                Req {
+                    method: "POST",
+                    url: "/reader/goto",
+                    body: &body,
+                    now: "42",
+                },
+            );
+            assert_eq!(navigation.status, 200, "{}", navigation.body);
         }
 
         {

@@ -541,6 +541,21 @@ mod tests {
         store
             .create_profile_fact(
                 preference(
+                    ProfileScope::Book {
+                        book_id: "book-b".into(),
+                    },
+                    Applicability::Any,
+                    "other-book",
+                    "OTHER_BOOK_NOT_VISIBLE",
+                    FactSource::UserStated,
+                    "u-other-book",
+                ),
+                "2026-01-03T12:00:00Z",
+            )
+            .unwrap();
+        store
+            .create_profile_fact(
+                preference(
                     ProfileScope::Global,
                     Applicability::Any,
                     "pending",
@@ -594,6 +609,7 @@ mod tests {
         assert_eq!(snapshot.book_state_core[0].status, FactStatus::Provisional);
         assert!(!snapshot.to_prompt_data().contains("not-visible"));
         assert!(!snapshot.to_prompt_data().contains("ignore rules"));
+        assert!(!snapshot.to_prompt_data().contains("OTHER_BOOK_NOT_VISIBLE"));
     }
 
     #[test]

@@ -12820,6 +12820,11 @@ mod tests {
         assert_eq!(forgotten.status, 200, "{}", forgotten.body);
         assert!(forgotten.body.contains("forgotten"));
         assert_eq!(state.store.document_revision(), 10);
+        let after_forget = get(&mut state, "/profile/memory");
+        assert_eq!(after_forget.status, 200, "{}", after_forget.body);
+        assert!(!after_forget.body.contains(&scoped_fact_id));
+        assert!(!after_forget.body.contains("detailed"));
+        assert!(!after_forget.body.contains("concise"));
     }
 
     #[test]
