@@ -71,14 +71,59 @@ pub struct ReviewInput {
     pub turns: Vec<ReviewTurnInput>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HistoricalBackfillInput {
+    pub job_id: String,
+    pub session_id: String,
+    pub book_id: String,
+    pub content_profile: String,
+    pub turn: ReviewTurnInput,
+}
+
+impl HistoricalBackfillInput {
+    pub fn review_input(&self) -> Result<ReviewInput, AdapterError> {
+        let from_turn_exclusive = self
+            .turn
+            .user_turn_ordinal
+            .checked_sub(1)
+            .ok_or_else(|| invalid_output("historical backfill turn ordinal must be positive"))?;
+        let input = ReviewInput {
+            job_id: self.job_id.clone(),
+            session_id: self.session_id.clone(),
+            book_id: self.book_id.clone(),
+            content_profile: self.content_profile.clone(),
+            from_turn_exclusive,
+            to_turn_inclusive: self.turn.user_turn_ordinal,
+            turns: vec![self.turn.clone()],
+        };
+        validate_input(&input)?;
+        Ok(input)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ReviewExecutionOutput {
     pub fact_candidates: Vec<ReviewFactCandidate>,
     pub intent_observations: Vec<IntentObservationCandidate>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HistoricalBackfillExecutionOutput {
+    pub fact_candidates: Vec<ReviewFactCandidate>,
+}
+
 pub trait ReviewExecutor: Send {
     fn execute(&mut self, input: &ReviewInput) -> Result<ReviewExecutionOutput, AdapterError>;
+}
+
+pub fn execute_historical_backfill(
+    executor: &mut dyn ReviewExecutor,
+    input: &HistoricalBackfillInput,
+) -> Result<HistoricalBackfillExecutionOutput, AdapterError> {
+    let output = executor.execute(&input.review_input()?)?;
+    Ok(HistoricalBackfillExecutionOutput {
+        fact_candidates: output.fact_candidates,
+    })
 }
 
 pub trait ReviewExecutorFactory: Send + Sync {
@@ -582,5 +627,48 @@ mod tests {
         assert!(request.system.contains("context"));
         assert!(request.user.contains("technical_learning"));
         assert!(request.user.contains("turn-a"));
+    }
+
+    #[test]
+    fn historical_backfill_reuses_one_turn_validation_and_keeps_only_fact_candidates() {
+        let review = input("I prefer worked examples first.");
+        let historical = HistoricalBackfillInput {
+            job_id: "backfill-a".into(),
+            session_id: review.session_id,
+            book_id: review.book_id,
+            content_profile: review.content_profile,
+            turn: review.turns[0].clone(),
+        };
+        let request = Arc::new(Mutex::new(None));
+        let mut raw = candidate("user_stated", "book", "I prefer worked examples first.");
+        raw["intent_observations"] = serde_json::json!([{
+            "intent_key": "request_examples",
+            "evidence": [{
+                "turn_id": "turn-a",
+                "user_quote": "worked examples"
+            }]
+        }]);
+        let mut executor = ProviderReviewExecutor {
+            adapter: Box::new(StructuredAdapter {
+                request: request.clone(),
+                output: raw,
+            }),
+        };
+
+        let output = execute_historical_backfill(&mut executor, &historical).unwrap();
+
+        assert_eq!(output.fact_candidates.len(), 1);
+        assert_eq!(
+            output.fact_candidates[0].fact.source,
+            FactSource::UserStated
+        );
+        let sent = request.lock().unwrap();
+        let sent = sent.as_ref().unwrap();
+        assert!(sent.user.contains("\"from_turn_exclusive\":0"));
+        assert!(sent.user.contains("\"to_turn_inclusive\":1"));
+
+        let mut invalid = historical;
+        invalid.turn.user_turn_ordinal = 0;
+        assert!(invalid.review_input().is_err());
     }
 }

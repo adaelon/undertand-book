@@ -7,7 +7,9 @@ import {
   factsForScope,
 } from "./profile-memory";
 
-function fact(overrides: Partial<ProfileMemoryState["facts"][number]> = {}) {
+function fact(
+  overrides: Partial<ProfileMemoryState["facts"][number]> = {},
+): ProfileMemoryState["facts"][number] {
   return {
     fact_id: "fact-current",
     scope_kind: "book",
@@ -18,6 +20,7 @@ function fact(overrides: Partial<ProfileMemoryState["facts"][number]> = {}) {
     payload_key: "depth",
     payload_value: "concise",
     source: "user_stated",
+    capture: "current_interaction",
     status: "confirmed",
     sensitivity: "normal",
     evidence_ids: ["evidence-current"],

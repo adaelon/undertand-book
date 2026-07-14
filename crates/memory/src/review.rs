@@ -84,6 +84,8 @@ pub struct ReviewErrorState {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReviewState {
     #[serde(default)]
+    pub historical_baseline_initialized: bool,
+    #[serde(default)]
     pub review_jobs: Vec<ReviewJob>,
     #[serde(default)]
     pub historical_backfill_jobs: Vec<crate::HistoricalBackfillJob>,
@@ -198,6 +200,33 @@ pub struct ReviewReconciliation {
 impl MemoryStore {
     pub fn review_state(&self) -> &ReviewState {
         &self.document.review_state
+    }
+
+    pub fn initialize_review_watermark_baseline(
+        &mut self,
+        sessions: &[ReviewSessionCursor],
+        now: &str,
+    ) -> Result<Vec<String>, ToolError> {
+        validate_required("review baseline timestamp", now)?;
+        if self.document.review_state.historical_baseline_initialized {
+            return Ok(Vec::new());
+        }
+        let sessions = normalize_session_cursors(sessions)?;
+        let mut candidate = self.document_mutation_candidate()?;
+        let state = &mut candidate.review_state;
+        let mut baselined = Vec::new();
+        if state.review_jobs.is_empty() && state.reviewed_through.is_empty() {
+            for cursor in sessions.values() {
+                state.reviewed_through.insert(
+                    cursor.session_id.clone(),
+                    cursor.latest_user_turn_ordinal,
+                );
+                baselined.push(cursor.session_id.clone());
+            }
+        }
+        state.historical_baseline_initialized = true;
+        self.commit_document(candidate)?;
+        Ok(baselined)
     }
 
     pub fn reconcile_review_jobs(
@@ -1119,6 +1148,40 @@ mod tests {
             book_id: "book-a".into(),
             latest_user_turn_ordinal: latest,
         }
+    }
+
+    #[test]
+    fn one_time_baseline_skips_pre_upgrade_history_but_not_new_turns() {
+        let (path, mut store) = store("historical-baseline");
+        let baselined = store
+            .initialize_review_watermark_baseline(&[cursor(3)], "baseline")
+            .unwrap();
+        assert_eq!(baselined, vec!["session-a"]);
+        assert!(store.review_state().historical_baseline_initialized);
+        assert_eq!(store.review_state().reviewed_through["session-a"], 3);
+        assert!(store.review_state().review_jobs.is_empty());
+        let revision = store.document_revision();
+
+        assert!(store
+            .initialize_review_watermark_baseline(&[cursor(9)], "duplicate")
+            .unwrap()
+            .is_empty());
+        assert_eq!(store.document_revision(), revision);
+        assert!(store
+            .reconcile_review_jobs(&[cursor(3)], "same-history")
+            .unwrap()
+            .created_job_ids
+            .is_empty());
+        let next = store
+            .reconcile_review_jobs(&[cursor(4)], "new-turn")
+            .unwrap();
+        assert_eq!(next.created_job_ids.len(), 1);
+        assert_eq!(only_job(&store).from_turn_exclusive, 3);
+        assert_eq!(only_job(&store).to_turn_inclusive, 4);
+
+        let reopened = MemoryStore::open(path).unwrap();
+        assert!(reopened.review_state().historical_baseline_initialized);
+        assert_eq!(reopened.review_state().reviewed_through["session-a"], 3);
     }
 
     fn only_job(store: &MemoryStore) -> ReviewJob {

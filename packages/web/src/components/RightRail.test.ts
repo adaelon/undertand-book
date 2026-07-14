@@ -115,6 +115,7 @@ describe("RightRail AskQuote", () => {
         payload_key: "reading",
         payload_value: "understand",
         source: "agent_inferred",
+        capture: "current_interaction",
         status: "pending",
         sensitivity: "normal",
         evidence_ids: [],

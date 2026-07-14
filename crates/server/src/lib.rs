@@ -10,12 +10,12 @@
 use memory::{
     classify_profile_fact_privacy, classify_profile_privacy, Anchor, Applicability,
     BackgroundClaim, CapabilityClaim, CollectionRuleMatcher, ConstraintClaim, ExplicitProfileFact,
-    GoalClaim, MemoryOp, MemoryOpOutcome, MemoryStore, PendingTurnRef, PreferenceClaim,
-    ProfileGovernanceAction, ProfileGovernanceMutation, ProfileGovernanceOutcome,
-    ProfileGovernanceOutcomeKind, ProfilePayload, ProfilePayloadKind, ProfilePrivacyClass,
-    ProfileResolutionContext, ProfileScope, ProfileStatus, RecallQuery, ReplaceInput,
-    ReviewJobStatus, ReviewSessionCursor, SaveInput, SelectedRange, SelectionContext,
-    SelectionResolution, Sensitivity, SnapshotContext, SnapshotRequest,
+    GoalClaim, HistoricalBackfillRange, MemoryOp, MemoryOpOutcome, MemoryStore, PendingTurnRef,
+    PreferenceClaim, ProfileGovernanceAction, ProfileGovernanceMutation,
+    ProfileGovernanceOutcome, ProfileGovernanceOutcomeKind, ProfilePayload, ProfilePayloadKind,
+    ProfilePrivacyClass, ProfileResolutionContext, ProfileScope, ProfileStatus, RecallQuery,
+    ReplaceInput, ReviewJobStatus, ReviewSessionCursor, SaveInput, SelectedRange,
+    SelectionContext, SelectionResolution, Sensitivity, SnapshotContext, SnapshotRequest,
 };
 use read_tools::{
     Book, ContentProfileId, PaperLandmarkKind, PaperMinimapBase, PaperRegionKind,
@@ -36,9 +36,10 @@ use runtime::orchestrator::{
     ProfileMemoryUpdateKind, ProfileUsageTrace,
 };
 use runtime::profile_api::{
-    profile_governance_outcome_view, ProfileCollectionRuleMatcherView, ProfileFactDraftView,
-    ProfileGovernanceActionRequest, ProfileGovernanceMutationRequest,
-    ProfileGovernanceResponseView,
+    historical_backfill_job_view, profile_governance_outcome_view,
+    HistoricalBackfillJobRequest, HistoricalBackfillSessionView, HistoricalBackfillStartRequest,
+    HistoricalBackfillStateView, ProfileCollectionRuleMatcherView, ProfileFactDraftView,
+    ProfileGovernanceActionRequest, ProfileGovernanceMutationRequest, ProfileGovernanceResponseView,
 };
 use runtime::{
     guided_route_from, synthesize, unvisited_back, AdapterError, AssistantTurn, CompletionRequest,
@@ -1609,6 +1610,18 @@ pub fn route(state: &mut AppState, req: Req) -> Reply {
             return method_not_allowed();
         }
         return route_profile_memory_apply(state, req.body, req.now);
+    }
+    if path == "/profile/backfill" {
+        if req.method != "GET" {
+            return method_not_allowed();
+        }
+        return route_profile_backfill_state(state);
+    }
+    if let Some(action) = path.strip_prefix("/profile/backfill/") {
+        if req.method != "POST" {
+            return method_not_allowed();
+        }
+        return route_profile_backfill_action(state, action, req.body, req.now);
     }
     if path == "/profile/manifest" {
         if req.method != "GET" {
@@ -7620,6 +7633,145 @@ fn route_profile_memory_state(state: &mut AppState, now: &str) -> Reply {
     ))
 }
 
+fn profile_backfill_state(state: &AppState) -> HistoricalBackfillStateView {
+    let current_book_id = &state.book.base.book_id;
+    let mut sessions: Vec<_> = state
+        .agent_history
+        .sessions
+        .iter()
+        .filter(|session| &session.book_id == current_book_id)
+        .filter_map(|session| {
+            session
+                .turns
+                .last()
+                .map(|turn| HistoricalBackfillSessionView {
+                    session_id: session.id.clone(),
+                    book_id: session.book_id.clone(),
+                    title: session.title.clone(),
+                    latest_user_turn_ordinal: turn.user_turn_ordinal,
+                    created_at: session.created_at.clone(),
+                    updated_at: session.updated_at.clone(),
+                })
+        })
+        .collect();
+    sessions.sort_by(|left, right| {
+        right
+            .updated_at
+            .cmp(&left.updated_at)
+            .then_with(|| right.session_id.cmp(&left.session_id))
+    });
+    let mut jobs: Vec<_> = state
+        .store
+        .historical_backfill_jobs()
+        .iter()
+        .filter(|job| &job.book_id == current_book_id)
+        .map(historical_backfill_job_view)
+        .collect();
+    jobs.sort_by(|left, right| {
+        right
+            .created_at
+            .cmp(&left.created_at)
+            .then_with(|| right.job_id.cmp(&left.job_id))
+    });
+    HistoricalBackfillStateView { sessions, jobs }
+}
+
+fn route_profile_backfill_state(state: &AppState) -> Reply {
+    ok_json(&profile_backfill_state(state))
+}
+
+fn route_profile_backfill_action(
+    state: &mut AppState,
+    action: &str,
+    body: &str,
+    now: &str,
+) -> Reply {
+    let result = match action {
+        "start" => {
+            let request = match serde_json::from_str::<HistoricalBackfillStartRequest>(body) {
+                Ok(request) => request,
+                Err(error) => {
+                    return validation(
+                        "INVALID_HISTORICAL_BACKFILL",
+                        &format!("invalid historical backfill start request: {error}"),
+                    );
+                }
+            };
+            let Some(session) = state
+                .agent_history
+                .sessions
+                .iter()
+                .find(|session| {
+                    session.id == request.session_id
+                        && session.book_id == state.book.base.book_id
+                })
+            else {
+                return err_reply(&ToolError {
+                    error_code: "HISTORICAL_BACKFILL_SESSION_NOT_FOUND".into(),
+                    category: "not_found".into(),
+                    message: "historical backfill session does not exist".into(),
+                });
+            };
+            let latest = session
+                .turns
+                .last()
+                .map(|turn| turn.user_turn_ordinal)
+                .unwrap_or(0);
+            if request.from_turn_exclusive >= request.to_turn_inclusive
+                || request.to_turn_inclusive > latest
+            {
+                return validation(
+                    "INVALID_HISTORICAL_BACKFILL_RANGE",
+                    "historical backfill range must stay within the selected resident session",
+                );
+            }
+            state.store.start_historical_backfill_job(
+                HistoricalBackfillRange {
+                    session_id: session.id.clone(),
+                    book_id: session.book_id.clone(),
+                    from_turn_exclusive: request.from_turn_exclusive,
+                    to_turn_inclusive: request.to_turn_inclusive,
+                },
+                now,
+            )
+        }
+        "cancel" | "retry" | "clear" => {
+            let request = match serde_json::from_str::<HistoricalBackfillJobRequest>(body) {
+                Ok(request) => request,
+                Err(error) => {
+                    return validation(
+                        "INVALID_HISTORICAL_BACKFILL",
+                        &format!("invalid historical backfill action request: {error}"),
+                    );
+                }
+            };
+            match action {
+                "cancel" => state
+                    .store
+                    .cancel_historical_backfill_job(&request.job_id, now),
+                "retry" => state
+                    .store
+                    .retry_historical_backfill_job(&request.job_id, now),
+                "clear" => {
+                    return match state
+                        .store
+                        .clear_historical_backfill_job(&request.job_id, now)
+                    {
+                        Ok(_) => ok_json(&profile_backfill_state(state)),
+                        Err(error) => err_reply(&error),
+                    };
+                }
+                _ => unreachable!(),
+            }
+        }
+        _ => return route_not_found(&format!("/profile/backfill/{action}")),
+    };
+    match result {
+        Ok(_) => ok_json(&profile_backfill_state(state)),
+        Err(error) => err_reply(&error),
+    }
+}
+
 /// `POST /agent/chat`(S10f)`[ADR-0030]`:外层 E agent 编排 loop,注入同一
 /// `book/store/reader/messages/adapter`(与前端共享视口、跨回合 messages)。body `{message}` →
 /// `OuterOutcome{answer, incomplete, effects, trace, ...}`;agent 动作即时驱动共享 reader 视口,
@@ -12276,6 +12428,118 @@ mod tests {
         assert_eq!(body["facts"].as_array().unwrap().len(), 1);
         assert!(!pending.body.contains("PENDING_STATE_SECRET"));
         assert_eq!(post(&mut s, "/profile/memory", "{}").status, 405);
+    }
+
+    #[test]
+    fn profile_backfill_http_freezes_only_selected_current_book_history() {
+        let mut state = state_named("profile-backfill-http");
+        let book_id = state.book.base.book_id.clone();
+        let turns = (1..=3)
+            .map(|ordinal| AgentChatTurn {
+                turn_id: format!("turn-{ordinal}"),
+                user_turn_ordinal: ordinal,
+                user: format!("resident turn {ordinal}"),
+                status: AgentAssistantStatus::Failed,
+                outcome: None,
+                error: Some(AgentTurnError {
+                    error_code: "TEST_FAILURE".into(),
+                    category: "provider".into(),
+                    message: "fixture".into(),
+                }),
+                question_anchor_lid: None,
+                question_quote: None,
+            })
+            .collect();
+        state.agent_history.sessions.push(AgentChatSession {
+            id: "session-current".into(),
+            book_id: book_id.clone(),
+            title: "Current book history".into(),
+            created_at: "created".into(),
+            updated_at: "updated".into(),
+            turns,
+            messages: new_session(),
+        });
+        state.agent_history.sessions.push(AgentChatSession {
+            id: "session-other".into(),
+            book_id: "other-book".into(),
+            title: "Other book history".into(),
+            created_at: "created".into(),
+            updated_at: "updated".into(),
+            turns: vec![AgentChatTurn {
+                turn_id: "other-turn".into(),
+                user_turn_ordinal: 1,
+                user: "other".into(),
+                status: AgentAssistantStatus::Failed,
+                outcome: None,
+                error: Some(AgentTurnError {
+                    error_code: "TEST_FAILURE".into(),
+                    category: "provider".into(),
+                    message: "fixture".into(),
+                }),
+                question_anchor_lid: None,
+                question_quote: None,
+            }],
+            messages: new_session(),
+        });
+
+        let preview = get(&mut state, "/profile/backfill");
+        assert_eq!(preview.status, 200, "{}", preview.body);
+        let preview: serde_json::Value = serde_json::from_str(&preview.body).unwrap();
+        assert_eq!(preview["sessions"].as_array().unwrap().len(), 1);
+        assert_eq!(preview["sessions"][0]["session_id"], "session-current");
+        assert!(preview["jobs"].as_array().unwrap().is_empty());
+        assert!(state.store.profile_facts().is_empty());
+
+        let invalid = post(
+            &mut state,
+            "/profile/backfill/start",
+            r#"{"session_id":"session-current","from_turn_exclusive":0,"to_turn_inclusive":4}"#,
+        );
+        assert_eq!(invalid.status, 400, "{}", invalid.body);
+        assert!(state.store.historical_backfill_jobs().is_empty());
+        let other = post(
+            &mut state,
+            "/profile/backfill/start",
+            r#"{"session_id":"session-other","from_turn_exclusive":0,"to_turn_inclusive":1}"#,
+        );
+        assert_eq!(other.status, 404, "{}", other.body);
+
+        let started = post(
+            &mut state,
+            "/profile/backfill/start",
+            r#"{"session_id":"session-current","from_turn_exclusive":1,"to_turn_inclusive":3}"#,
+        );
+        assert_eq!(started.status, 200, "{}", started.body);
+        let started: serde_json::Value = serde_json::from_str(&started.body).unwrap();
+        assert_eq!(started["jobs"][0]["status"], "queued");
+        assert_eq!(started["jobs"][0]["from_turn_exclusive"], 1);
+        assert_eq!(started["jobs"][0]["to_turn_inclusive"], 3);
+        let job_id = started["jobs"][0]["job_id"].as_str().unwrap();
+
+        let cancelled = post(
+            &mut state,
+            "/profile/backfill/cancel",
+            &json!({"job_id": job_id}).to_string(),
+        );
+        assert_eq!(cancelled.status, 200, "{}", cancelled.body);
+        assert!(cancelled.body.contains("\"status\":\"cancelled\""));
+        let retried = post(
+            &mut state,
+            "/profile/backfill/retry",
+            &json!({"job_id": job_id}).to_string(),
+        );
+        assert_eq!(retried.status, 200, "{}", retried.body);
+        assert!(retried.body.contains("\"status\":\"queued\""));
+        let cleared = post(
+            &mut state,
+            "/profile/backfill/clear",
+            &json!({"job_id": job_id}).to_string(),
+        );
+        assert_eq!(cleared.status, 200, "{}", cleared.body);
+        assert!(serde_json::from_str::<serde_json::Value>(&cleared.body).unwrap()["jobs"]
+            .as_array()
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

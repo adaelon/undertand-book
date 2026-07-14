@@ -6,6 +6,9 @@ import type { ToolError } from "./generated/ToolError";
 import type { OuterOutcome } from "./generated/OuterOutcome";
 import type { AgentEffect } from "./generated/AgentEffect";
 import type { TraceStep } from "./generated/TraceStep";
+import type { HistoricalBackfillJobRequest } from "./generated/HistoricalBackfillJobRequest";
+import type { HistoricalBackfillStartRequest } from "./generated/HistoricalBackfillStartRequest";
+import type { HistoricalBackfillStateView } from "./generated/HistoricalBackfillStateView";
 import type { ProfileManifest } from "./generated/ProfileManifest";
 import type { ProfileInfluence } from "./generated/ProfileInfluence";
 import type { ProfileCollectionRuleMatcherView } from "./generated/ProfileCollectionRuleMatcherView";
@@ -44,6 +47,9 @@ export type {
   OuterOutcome,
   AgentEffect,
   TraceStep,
+  HistoricalBackfillJobRequest,
+  HistoricalBackfillStartRequest,
+  HistoricalBackfillStateView,
   ProfileManifest,
   ProfileInfluence,
   ProfileCollectionRuleMatcherView,
@@ -728,6 +734,15 @@ export const api = {
   profileMemory: () => http<ProfileMemoryState>("GET", "/profile/memory"),
   profileMemoryApply: (mutation: ProfileGovernanceMutationRequest) =>
     http<ProfileGovernanceResponseView>("POST", "/profile/memory/apply", mutation),
+  profileBackfill: () => http<HistoricalBackfillStateView>("GET", "/profile/backfill"),
+  profileBackfillStart: (request: HistoricalBackfillStartRequest) =>
+    http<HistoricalBackfillStateView>("POST", "/profile/backfill/start", request),
+  profileBackfillCancel: (request: HistoricalBackfillJobRequest) =>
+    http<HistoricalBackfillStateView>("POST", "/profile/backfill/cancel", request),
+  profileBackfillRetry: (request: HistoricalBackfillJobRequest) =>
+    http<HistoricalBackfillStateView>("POST", "/profile/backfill/retry", request),
+  profileBackfillClear: (request: HistoricalBackfillJobRequest) =>
+    http<HistoricalBackfillStateView>("POST", "/profile/backfill/clear", request),
   text: (lid: string, end?: string) =>
     http<BookText>("GET", `/book/text${qs({ lid, end })}`),
   structure: (at?: string) => http<StructureProjection>("GET", `/book/structure${qs({ at })}`),

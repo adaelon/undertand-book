@@ -1,8 +1,8 @@
 use memory::{
-    Applicability, CollectionRule, EvidenceRef, FactSource, FactStatus, MemoryStore,
-    PendingTurnRef, ProfileGovernanceOutcome, ProfileGovernanceOutcomeKind, ProfilePayload,
-    ProfilePayloadKind, ProfileScope, ProfileStatus, ReaderProfileSnapshot, Sensitivity,
-    SnapshotItem,
+    Applicability, CollectionRule, EvidenceRef, FactSource, FactStatus, HistoricalBackfillJob,
+    HistoricalBackfillJobStatus, MemoryStore, PendingTurnRef, ProfileFactCapture,
+    ProfileGovernanceOutcome, ProfileGovernanceOutcomeKind, ProfilePayload, ProfilePayloadKind,
+    ProfileScope, ProfileStatus, ReaderProfileSnapshot, Sensitivity, SnapshotItem,
 };
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -30,6 +30,68 @@ pub struct ProfileCollectionRuleView {
     pub applicability_kind: Option<String>,
     pub applicability_value: Option<String>,
     pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct HistoricalBackfillSessionView {
+    pub session_id: String,
+    pub book_id: String,
+    pub title: String,
+    #[ts(type = "number")]
+    pub latest_user_turn_ordinal: u64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct HistoricalBackfillJobView {
+    pub job_id: String,
+    pub session_id: String,
+    pub book_id: String,
+    #[ts(type = "number")]
+    pub from_turn_exclusive: u64,
+    #[ts(type = "number")]
+    pub to_turn_inclusive: u64,
+    #[ts(type = "number")]
+    pub processed_through: u64,
+    #[ts(type = "number")]
+    pub completed_turns: u64,
+    #[ts(type = "number")]
+    pub total_turns: u64,
+    pub status: String,
+    #[ts(type = "number")]
+    pub attempts: u32,
+    pub candidate_fact_ids: Vec<String>,
+    pub last_error: Option<ProfileReviewErrorView>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct HistoricalBackfillStateView {
+    pub sessions: Vec<HistoricalBackfillSessionView>,
+    pub jobs: Vec<HistoricalBackfillJobView>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+#[serde(deny_unknown_fields)]
+pub struct HistoricalBackfillStartRequest {
+    pub session_id: String,
+    #[ts(type = "number")]
+    pub from_turn_exclusive: u64,
+    #[ts(type = "number")]
+    pub to_turn_inclusive: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+#[serde(deny_unknown_fields)]
+pub struct HistoricalBackfillJobRequest {
+    pub job_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq, Eq)]
@@ -199,6 +261,7 @@ pub struct ProfileFactView {
     pub payload_key: String,
     pub payload_value: String,
     pub source: String,
+    pub capture: String,
     pub status: String,
     pub sensitivity: String,
     pub evidence_ids: Vec<String>,
@@ -309,6 +372,33 @@ pub fn profile_governance_outcome_view(
         collection_rule_ids: outcome.collection_rule_ids,
         excluded_evidence_ids: outcome.excluded_evidence_ids,
         removed_dependent_fact_ids: outcome.removed_dependent_fact_ids,
+    }
+}
+
+pub fn historical_backfill_job_view(job: &HistoricalBackfillJob) -> HistoricalBackfillJobView {
+    HistoricalBackfillJobView {
+        job_id: job.job_id.clone(),
+        session_id: job.session_id.clone(),
+        book_id: job.book_id.clone(),
+        from_turn_exclusive: job.from_turn_exclusive,
+        to_turn_inclusive: job.to_turn_inclusive,
+        processed_through: job.processed_through,
+        completed_turns: job
+            .processed_through
+            .saturating_sub(job.from_turn_exclusive),
+        total_turns: job
+            .to_turn_inclusive
+            .saturating_sub(job.from_turn_exclusive),
+        status: historical_backfill_status(job.status).into(),
+        attempts: job.attempts,
+        candidate_fact_ids: job.candidate_fact_ids.clone(),
+        last_error: job.last_error.as_ref().map(|error| ProfileReviewErrorView {
+            error_code: error.error_code.clone(),
+            message: error.message.clone(),
+            occurred_at: error.occurred_at.clone(),
+        }),
+        created_at: job.created_at.clone(),
+        updated_at: job.updated_at.clone(),
     }
 }
 
@@ -442,6 +532,7 @@ fn fact_view(fact: &memory::ProfileFact) -> ProfileFactView {
         payload_key,
         payload_value,
         source: fact_source(fact.source).into(),
+        capture: fact_capture(fact.capture).into(),
         status: fact_status(fact.status).into(),
         sensitivity: sensitivity(fact.sensitivity).into(),
         evidence_ids: fact.evidence.iter().map(EvidenceRef::evidence_id).collect(),
@@ -544,6 +635,23 @@ fn fact_source(source: FactSource) -> &'static str {
         FactSource::DeterministicBehavior => "deterministic_behavior",
         FactSource::UserStated => "user_stated",
         FactSource::AgentInferred => "agent_inferred",
+    }
+}
+
+fn fact_capture(capture: ProfileFactCapture) -> &'static str {
+    match capture {
+        ProfileFactCapture::CurrentInteraction => "current_interaction",
+        ProfileFactCapture::HistoricalBackfill => "historical_backfill",
+    }
+}
+
+fn historical_backfill_status(status: HistoricalBackfillJobStatus) -> &'static str {
+    match status {
+        HistoricalBackfillJobStatus::Queued => "queued",
+        HistoricalBackfillJobStatus::Running => "running",
+        HistoricalBackfillJobStatus::Retryable => "retryable",
+        HistoricalBackfillJobStatus::Cancelled => "cancelled",
+        HistoricalBackfillJobStatus::Completed => "completed",
     }
 }
 

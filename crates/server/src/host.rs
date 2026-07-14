@@ -4,10 +4,14 @@ use crate::{
     AgentAssistantStatus, AppState, Req, UnconfiguredAdapter,
 };
 use base_schema::{LidNode, NodeKind, ReadOnlyBase, Span};
-use memory::{MemoryStore, ReviewErrorState, ReviewJobStatus};
+use memory::{
+    HistoricalBackfillJob, HistoricalBackfillJobStatus, MemoryStore, ReviewErrorState,
+    ReviewJobStatus,
+};
 use read_tools::Book;
 use reader::{Reader, DEFAULT_RADIUS};
 use runtime::memory_review::{
+    execute_historical_backfill, HistoricalBackfillExecutionOutput, HistoricalBackfillInput,
     ProviderReviewExecutorFactory, ReviewExecutionOutput, ReviewExecutorFactory, ReviewInput,
     ReviewTurnInput, ReviewTurnStatus,
 };
@@ -67,6 +71,13 @@ pub struct RunningServer {
 pub struct ReviewRunOutcome {
     pub job_id: String,
     pub output: ReviewExecutionOutput,
+}
+
+#[derive(Debug)]
+pub struct HistoricalBackfillRunOutcome {
+    pub job_id: String,
+    pub turn_ordinal: u64,
+    pub output: HistoricalBackfillExecutionOutput,
 }
 
 struct ReviewCoordinator {
@@ -211,6 +222,16 @@ impl ReviewCoordinator {
         })
     }
 
+    fn run_one_backfill(
+        &self,
+        now: &str,
+    ) -> Result<Option<HistoricalBackfillRunOutcome>, read_tools::ToolError> {
+        self.run_one_backfill_at(ReviewMoment {
+            millis: now.parse().unwrap_or(0),
+            timestamp: now.into(),
+        })
+    }
+
     fn request_startup_run(&self) {
         self.schedule
             .lock()
@@ -239,6 +260,11 @@ impl ReviewCoordinator {
 
     fn scheduler_tick(&self) -> Result<usize, read_tools::ToolError> {
         let now_ms = self.clock.now_millis();
+        if self.ready_backfill_count() > 0 {
+            return self
+                .run_one_backfill_at(ReviewMoment::from_millis(now_ms))
+                .map(|outcome| usize::from(outcome.is_some()));
+        }
         let (has_ready_job, has_due_retry) = {
             let state = self
                 .state
@@ -302,6 +328,27 @@ impl ReviewCoordinator {
             .review_jobs
             .iter()
             .filter(|job| review_job_is_ready(job, now_ms))
+            .count()
+    }
+
+    fn ready_backfill_count(&self) -> usize {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let current_book_id = &state.book.base.book_id;
+        state
+            .store
+            .historical_backfill_jobs()
+            .iter()
+            .filter(|job| {
+                &job.book_id == current_book_id
+                    && matches!(
+                        job.status,
+                        HistoricalBackfillJobStatus::Queued
+                            | HistoricalBackfillJobStatus::Running
+                    )
+            })
             .count()
     }
 
@@ -455,6 +502,124 @@ impl ReviewCoordinator {
             }
         }
     }
+
+    fn run_one_backfill_at(
+        &self,
+        moment: ReviewMoment,
+    ) -> Result<Option<HistoricalBackfillRunOutcome>, read_tools::ToolError> {
+        let _serial = self
+            .serial_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let config = self
+            .provider_config
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+
+        let (job_id, input, running) = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let current_book_id = state.book.base.book_id.clone();
+            let Some(selected) = state
+                .store
+                .historical_backfill_jobs()
+                .iter()
+                .find(|job| {
+                    job.book_id == current_book_id
+                        && matches!(
+                            job.status,
+                            HistoricalBackfillJobStatus::Queued
+                                | HistoricalBackfillJobStatus::Running
+                        )
+                })
+                .cloned()
+            else {
+                return Ok(None);
+            };
+            let running = if selected.status == HistoricalBackfillJobStatus::Queued {
+                state
+                    .store
+                    .claim_historical_backfill_job(&selected.job_id, &moment.timestamp)?
+            } else {
+                selected
+            };
+            if config.is_none() {
+                let error = review_error(
+                    "HISTORICAL_BACKFILL_PROVIDER_UNCONFIGURED",
+                    "historical backfill provider is not configured",
+                );
+                mark_historical_backfill_retryable(
+                    &mut state.store,
+                    &running,
+                    &error,
+                    &moment,
+                )?;
+                return Err(error);
+            }
+            let input = match copy_historical_backfill_input(&state, &running) {
+                Ok(input) => input,
+                Err(error) => {
+                    mark_historical_backfill_retryable(
+                        &mut state.store,
+                        &running,
+                        &error,
+                        &moment,
+                    )?;
+                    return Err(error);
+                }
+            };
+            (running.job_id.clone(), input, running)
+        };
+
+        let config = config.expect("checked before historical backfill claim");
+        let mut executor = self.factory.create(&config);
+        let execution = execute_historical_backfill(executor.as_mut(), &input);
+
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !historical_backfill_job_is_running(&state.store, &job_id) {
+            return Ok(None);
+        }
+        match execution {
+            Ok(output) => {
+                if let Err(error) = state.store.commit_historical_backfill_turn(
+                    &job_id,
+                    input.turn.user_turn_ordinal,
+                    &input.turn.turn_id,
+                    &output.fact_candidates,
+                    &moment.timestamp,
+                ) {
+                    mark_historical_backfill_retryable(
+                        &mut state.store,
+                        &running,
+                        &error,
+                        &moment,
+                    )?;
+                    return Err(error);
+                }
+                Ok(Some(HistoricalBackfillRunOutcome {
+                    job_id,
+                    turn_ordinal: input.turn.user_turn_ordinal,
+                    output,
+                }))
+            }
+            Err(error) => {
+                let provider_error = historical_backfill_provider_error(error);
+                mark_historical_backfill_retryable(
+                    &mut state.store,
+                    &running,
+                    &provider_error,
+                    &moment,
+                )?;
+                Err(provider_error)
+            }
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -546,6 +711,93 @@ fn mark_review_retryable(
     Ok(())
 }
 
+fn historical_backfill_job_is_running(store: &MemoryStore, job_id: &str) -> bool {
+    store
+        .historical_backfill_jobs()
+        .iter()
+        .any(|job| {
+            job.job_id == job_id && job.status == HistoricalBackfillJobStatus::Running
+        })
+}
+
+fn mark_historical_backfill_retryable(
+    store: &mut MemoryStore,
+    job: &HistoricalBackfillJob,
+    error: &read_tools::ToolError,
+    moment: &ReviewMoment,
+) -> Result<(), read_tools::ToolError> {
+    if !historical_backfill_job_is_running(store, &job.job_id) {
+        return Ok(());
+    }
+    store.mark_historical_backfill_retryable(
+        &job.job_id,
+        ReviewErrorState {
+            error_code: error.error_code.clone(),
+            message: error.message.clone(),
+            occurred_at: moment.timestamp.clone(),
+        },
+        &moment.timestamp,
+    )?;
+    Ok(())
+}
+
+fn copy_historical_backfill_input(
+    state: &AppState,
+    job: &HistoricalBackfillJob,
+) -> Result<HistoricalBackfillInput, read_tools::ToolError> {
+    let turn_ordinal = job
+        .processed_through
+        .checked_add(1)
+        .filter(|ordinal| *ordinal <= job.to_turn_inclusive)
+        .ok_or_else(|| {
+            review_error(
+                "HISTORICAL_BACKFILL_RANGE_EXHAUSTED",
+                "historical backfill job has no remaining selected turn",
+            )
+        })?;
+    let session = state
+        .agent_history
+        .sessions
+        .iter()
+        .find(|session| session.id == job.session_id && session.book_id == job.book_id)
+        .ok_or_else(|| {
+            review_error(
+                "HISTORICAL_BACKFILL_INPUT_MISSING",
+                "historical backfill session does not exist",
+            )
+        })?;
+    let turn = session
+        .turns
+        .iter()
+        .find(|turn| turn.user_turn_ordinal == turn_ordinal)
+        .ok_or_else(|| {
+            review_error(
+                "HISTORICAL_BACKFILL_INPUT_GAP",
+                "historical backfill selected turn is missing from AgentHistory",
+            )
+        })?;
+    Ok(HistoricalBackfillInput {
+        job_id: job.job_id.clone(),
+        session_id: job.session_id.clone(),
+        book_id: job.book_id.clone(),
+        content_profile: crate::current_content_profile(&state.book).into(),
+        turn: ReviewTurnInput {
+            turn_id: turn.turn_id.clone(),
+            user_turn_ordinal: turn.user_turn_ordinal,
+            user: turn.user.clone(),
+            assistant_status: match turn.status {
+                AgentAssistantStatus::PendingAssistant => ReviewTurnStatus::PendingAssistant,
+                AgentAssistantStatus::Completed => ReviewTurnStatus::Completed,
+                AgentAssistantStatus::Failed => ReviewTurnStatus::Failed,
+            },
+            assistant_answer: turn
+                .outcome
+                .as_ref()
+                .and_then(|outcome| outcome.answer.clone()),
+        },
+    })
+}
+
 fn copy_review_input(
     state: &AppState,
     job: &memory::ReviewJob,
@@ -619,6 +871,14 @@ fn review_provider_error(error: AdapterError) -> read_tools::ToolError {
     }
 }
 
+fn historical_backfill_provider_error(error: AdapterError) -> read_tools::ToolError {
+    read_tools::ToolError {
+        error_code: "HISTORICAL_BACKFILL_EXECUTOR_FAILED".into(),
+        category: "provider".into(),
+        message: error.message,
+    }
+}
+
 impl RunningServer {
     pub fn set_library_root(&self, library_root: PathBuf) {
         let mut state = self
@@ -650,6 +910,13 @@ impl RunningServer {
         now: &str,
     ) -> Result<Option<ReviewRunOutcome>, read_tools::ToolError> {
         self.review_coordinator.run_one(now)
+    }
+
+    pub fn run_one_historical_backfill(
+        &self,
+        now: &str,
+    ) -> Result<Option<HistoricalBackfillRunOutcome>, read_tools::ToolError> {
+        self.review_coordinator.run_one_backfill(now)
     }
 
     pub fn drain_review_boundary(&self, timeout: Duration) -> Result<bool, read_tools::ToolError> {
@@ -723,9 +990,16 @@ pub fn start_server(config: ServerHostConfig) -> Result<RunningServer, String> {
     let messages =
         ensure_agent_history_for_book(&mut agent_history, &book.base.book_id, "server-start");
     let startup_now = now_ts();
+    let review_cursors = agent_history_review_cursors(&agent_history);
     store
-        .resume_review_jobs(&agent_history_review_cursors(&agent_history), &startup_now)
+        .initialize_review_watermark_baseline(&review_cursors, &startup_now)
+        .map_err(|error| format!("failed to initialize memory review baseline: {}", error.message))?;
+    store
+        .resume_review_jobs(&review_cursors, &startup_now)
         .map_err(|error| format!("failed to resume memory review jobs: {}", error.message))?;
+    store
+        .resume_interrupted_historical_backfill_jobs(&startup_now)
+        .map_err(|error| format!("failed to resume historical backfill jobs: {}", error.message))?;
     let startup_review_pending = store
         .review_state()
         .review_jobs
@@ -1051,9 +1325,10 @@ mod tests {
     use super::*;
     use crate::{AgentChatSession, AgentChatTurn, AgentHistory, AgentTurnError};
     use memory::{
-        Applicability, CreateProfileFact, EvidenceRef, FactSource, PreferenceClaim, ProfilePayload,
-        ProfileScope, ProfileStatus, ReviewFactCandidate, ReviewJobStatus, ReviewSessionCursor,
-        Sensitivity,
+        Applicability, CreateProfileFact, EvidenceRef, FactSource, FactStatus,
+        HistoricalBackfillJobStatus, HistoricalBackfillRange, PreferenceClaim, ProfileFactCapture,
+        ProfilePayload, ProfileScope, ProfileStatus, ReviewFactCandidate, ReviewJobStatus,
+        ReviewSessionCursor, Sensitivity,
     };
     use runtime::memory_review::{ReviewExecutor, ReviewExecutorFactory};
     use runtime::orchestrator::new_session;
@@ -1420,6 +1695,181 @@ mod tests {
         assert_eq!(state.store.review_state().reviewed_through.len(), 2);
         assert!(state.store.review_state().last_error.is_none());
         assert_eq!(state.store.profile_facts().len(), 2);
+    }
+
+    #[test]
+    fn historical_backfill_executor_processes_one_frozen_turn_per_run_as_pending() {
+        let state = review_test_state_with("historical-backfill-turns", 1, 2);
+        let job_id = {
+            let mut state = state.lock().unwrap();
+            let book_id = state.book.base.book_id.clone();
+            state
+                .store
+                .start_historical_backfill_job(
+                    HistoricalBackfillRange {
+                        session_id: "review-session-0".into(),
+                        book_id,
+                        from_turn_exclusive: 0,
+                        to_turn_inclusive: 2,
+                    },
+                    "start",
+                )
+                .unwrap()
+                .job_id
+        };
+        let control = Arc::new(ExecutorControl {
+            state: Mutex::new(ExecutorControlState {
+                release: true,
+                ..Default::default()
+            }),
+            changed: Condvar::new(),
+        });
+        let coordinator = ReviewCoordinator::new(
+            state.clone(),
+            Some(review_provider("backfill-model")),
+            Arc::new(ControlledFactory { control }),
+        );
+
+        let first = coordinator.run_one_backfill("10").unwrap().unwrap();
+        assert_eq!(first.job_id, job_id);
+        assert_eq!(first.turn_ordinal, 1);
+        assert_eq!(first.output.fact_candidates.len(), 1);
+        {
+            let state = state.lock().unwrap();
+            let job = &state.store.historical_backfill_jobs()[0];
+            assert_eq!(job.status, HistoricalBackfillJobStatus::Running);
+            assert_eq!(job.processed_through, 1);
+            assert_eq!(state.store.profile_facts().len(), 1);
+            assert_eq!(state.store.profile_facts()[0].status, FactStatus::Pending);
+            assert_eq!(
+                state.store.profile_facts()[0].capture,
+                ProfileFactCapture::HistoricalBackfill
+            );
+            assert_eq!(state.store.profile_facts()[0].source, FactSource::UserStated);
+        }
+
+        let second = coordinator.run_one_backfill("20").unwrap().unwrap();
+        assert_eq!(second.turn_ordinal, 2);
+        let state = state.lock().unwrap();
+        let job = &state.store.historical_backfill_jobs()[0];
+        assert_eq!(job.status, HistoricalBackfillJobStatus::Completed);
+        assert_eq!(job.processed_through, 2);
+        assert_eq!(state.store.profile_facts().len(), 2);
+        assert!(state
+            .store
+            .profile_facts()
+            .iter()
+            .all(|fact| fact.status == FactStatus::Pending));
+    }
+
+    #[test]
+    fn cancelling_during_backfill_model_call_discards_that_turn_without_holding_app_state() {
+        let state = review_test_state_with("historical-backfill-cancel", 1, 1);
+        let job_id = {
+            let mut state = state.lock().unwrap();
+            let book_id = state.book.base.book_id.clone();
+            state
+                .store
+                .start_historical_backfill_job(
+                    HistoricalBackfillRange {
+                        session_id: "review-session-0".into(),
+                        book_id,
+                        from_turn_exclusive: 0,
+                        to_turn_inclusive: 1,
+                    },
+                    "start",
+                )
+                .unwrap()
+                .job_id
+        };
+        let control = Arc::new(ExecutorControl {
+            state: Mutex::new(ExecutorControlState::default()),
+            changed: Condvar::new(),
+        });
+        let coordinator = Arc::new(ReviewCoordinator::new(
+            state.clone(),
+            Some(review_provider("backfill-model")),
+            Arc::new(ControlledFactory {
+                control: control.clone(),
+            }),
+        ));
+        let running = {
+            let coordinator = coordinator.clone();
+            thread::spawn(move || coordinator.run_one_backfill("10"))
+        };
+        {
+            let mut observed = control.state.lock().unwrap();
+            while observed.entered == 0 {
+                observed = control.changed.wait(observed).unwrap();
+            }
+        }
+        {
+            let mut state = state.lock().unwrap();
+            state
+                .store
+                .cancel_historical_backfill_job(&job_id, "cancel")
+                .unwrap();
+        }
+        {
+            let mut observed = control.state.lock().unwrap();
+            observed.release = true;
+            control.changed.notify_all();
+        }
+
+        assert!(running.join().unwrap().unwrap().is_none());
+        let state = state.lock().unwrap();
+        assert_eq!(
+            state.store.historical_backfill_jobs()[0].status,
+            HistoricalBackfillJobStatus::Cancelled
+        );
+        assert_eq!(state.store.historical_backfill_jobs()[0].processed_through, 0);
+        assert!(state.store.profile_facts().is_empty());
+    }
+
+    #[test]
+    fn unconfigured_backfill_provider_becomes_explicit_retryable_status() {
+        let state = review_test_state_with("historical-backfill-unconfigured", 1, 1);
+        {
+            let mut state = state.lock().unwrap();
+            let book_id = state.book.base.book_id.clone();
+            state
+                .store
+                .start_historical_backfill_job(
+                    HistoricalBackfillRange {
+                        session_id: "review-session-0".into(),
+                        book_id,
+                        from_turn_exclusive: 0,
+                        to_turn_inclusive: 1,
+                    },
+                    "start",
+                )
+                .unwrap();
+        }
+        let calls = Arc::new(AtomicUsize::new(0));
+        let coordinator = ReviewCoordinator::new(
+            state.clone(),
+            None,
+            Arc::new(ImmediateFactory {
+                calls: calls.clone(),
+            }),
+        );
+
+        assert_eq!(
+            coordinator
+                .run_one_backfill("10")
+                .unwrap_err()
+                .error_code,
+            "HISTORICAL_BACKFILL_PROVIDER_UNCONFIGURED"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        let state = state.lock().unwrap();
+        let job = &state.store.historical_backfill_jobs()[0];
+        assert_eq!(job.status, HistoricalBackfillJobStatus::Retryable);
+        assert_eq!(job.processed_through, 0);
+        assert_eq!(
+            job.last_error.as_ref().unwrap().error_code,
+            "HISTORICAL_BACKFILL_PROVIDER_UNCONFIGURED"
+        );
     }
 
     #[test]
