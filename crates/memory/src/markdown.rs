@@ -192,26 +192,37 @@ impl MemoryStore {
 
     /// 成对物化两个单向派生视图;失败不会改变 `MemoryDocument` 真相 `[ADR-0076]`。
     pub fn write_profile_files(&self) -> Result<(), ToolError> {
+        self.ensure_storage_available()?;
         let Some(dir) = self.path.parent() else {
             return Ok(());
         };
         std::fs::create_dir_all(dir).map_err(|error| {
             profile_markdown_error(format!("create profile projection directory: {error}"))
         })?;
-        write_projection_pair(&[
-            (
-                dir.join(READER_PROFILE_FILENAME),
-                self.render_reader_profile_md(),
-            ),
-            (
-                dir.join(READING_HANDBOOK_FILENAME),
-                self.render_handbook_md(),
-            ),
-        ])
+        write_projection_pair(
+            &[
+                (
+                    dir.join(READER_PROFILE_FILENAME),
+                    self.render_reader_profile_md(),
+                ),
+                (
+                    dir.join(READING_HANDBOOK_FILENAME),
+                    self.render_handbook_md(),
+                ),
+            ],
+            self.private_storage_enabled(),
+        )
     }
 
     pub fn profile_markdown_projection_status(&self) -> ProfileMarkdownProjectionStatus {
         let revision = self.projection_revision();
+        if !self.private_storage_available() {
+            return ProfileMarkdownProjectionStatus {
+                source_projection_revision: revision,
+                reader_profile: ProfileMarkdownFileState::Unreadable,
+                reading_handbook: ProfileMarkdownFileState::Unreadable,
+            };
+        }
         let Some(dir) = self.path.parent() else {
             return ProfileMarkdownProjectionStatus {
                 source_projection_revision: revision,
@@ -488,7 +499,7 @@ fn projection_sibling_path(path: &Path, suffix: &str) -> PathBuf {
     path.with_file_name(format!(".{filename}.{suffix}"))
 }
 
-fn write_projection_pair(files: &[(PathBuf, String)]) -> Result<(), ToolError> {
+fn write_projection_pair(files: &[(PathBuf, String)], private: bool) -> Result<(), ToolError> {
     for (target, _) in files {
         recover_projection_target(target)?;
         ensure_regular_or_missing(target)?;
@@ -496,7 +507,7 @@ fn write_projection_pair(files: &[(PathBuf, String)]) -> Result<(), ToolError> {
 
     let mut prepared = Vec::with_capacity(files.len());
     for (target, contents) in files {
-        match prepare_projection_file(target, contents) {
+        match prepare_projection_file(target, contents, private) {
             Ok(file) => prepared.push(file),
             Err(error) => {
                 cleanup_prepared_files(&prepared);
@@ -576,6 +587,7 @@ fn ensure_regular_or_missing(path: &Path) -> Result<(), ToolError> {
 fn prepare_projection_file(
     target: &Path,
     contents: &str,
+    private: bool,
 ) -> Result<PreparedProjectionFile, ToolError> {
     let temporary = projection_temporary_path(target);
     let backup = projection_backup_path(target);
@@ -595,6 +607,12 @@ fn prepare_projection_file(
             "stage {}: {error}",
             target.display()
         )));
+    }
+    if private {
+        if let Err(error) = crate::private_storage::secure_private_file(&temporary) {
+            let _ = std::fs::remove_file(&temporary);
+            return Err(error);
+        }
     }
     Ok(PreparedProjectionFile {
         target: target.to_path_buf(),

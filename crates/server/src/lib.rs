@@ -1244,6 +1244,9 @@ fn reconcile_agent_history_review_jobs(
     state: &mut AppState,
     now: &str,
 ) -> Result<(), ToolError> {
+    if !state.store.private_storage_available() {
+        return Ok(());
+    }
     let cursors = agent_history_review_cursors(&state.agent_history);
     state.store.reconcile_review_jobs(&cursors, now)?;
     Ok(())
@@ -7539,6 +7542,9 @@ fn profile_governance_applied_reply(outcome: ProfileGovernanceOutcome) -> Reply 
 }
 
 fn route_profile_memory_apply(state: &mut AppState, body: &str, now: &str) -> Reply {
+    if let Err(error) = state.store.ensure_storage_available() {
+        return err_reply(&error);
+    }
     let request = match serde_json::from_str::<ProfileGovernanceMutationRequest>(body) {
         Ok(request) => request,
         Err(error) => {
@@ -7807,9 +7813,8 @@ fn route_agent_chat(state: &mut AppState, body: &str, now: &str) -> Reply {
             "question_anchor_lid 必须等于 question_quote lid",
         );
     }
-    if scan_memory_intent(msg).is_some()
-        && classify_profile_privacy(msg) == ProfilePrivacyClass::Secret
-    {
+    let memory_intent = scan_memory_intent(msg);
+    if memory_intent.is_some() && classify_profile_privacy(msg) == ProfilePrivacyClass::Secret {
         if let Some(session_id) = state
             .agent_history
             .active_by_book
@@ -7827,6 +7832,15 @@ fn route_agent_chat(state: &mut AppState, body: &str, now: &str) -> Reply {
             "SECRET_PROFILE_REJECTED",
             "credentials and other secrets are never stored in profile memory",
         ));
+    }
+    if memory_intent.is_some() {
+        if let Err(error) = state.store.ensure_storage_available() {
+            return ok_json(&rejected_memory_outcome(
+                state.store.projection_revision(),
+                &error.error_code,
+                &error.message,
+            ));
+        }
     }
     let agent_message = agent_question_with_provenance(msg, question_quote.as_ref());
     let current_book_id = state.book.base.book_id.clone();
@@ -8072,7 +8086,8 @@ fn profile_snapshot_request(
     let unresolved = review_state.review_jobs.iter().any(|job| {
         job.book_id == book_id && job.status != ReviewJobStatus::Completed
     });
-    let stale = unresolved && review_state.last_error.is_some();
+    let review_stale = unresolved && review_state.last_error.is_some();
+    let stale = state.store.private_storage_diagnostic().is_some() || review_stale;
     let context = SnapshotContext {
         book_id: Some(book_id.into()),
         content_profile: Some(content_profile.into()),
@@ -8112,7 +8127,9 @@ fn profile_snapshot_request(
     request.profile_candidates = policy_projection.candidates;
     if stale {
         request.profile_status = ProfileStatus::Stale;
-        request.pending_context = pending_review_context(state, book_id);
+        if review_stale {
+            request.pending_context = pending_review_context(state, book_id);
+        }
     }
     request
 }
@@ -9295,6 +9312,73 @@ mod tests {
         let r = get(&mut state_named("manifest"), "/book/manifest");
         assert_eq!(r.status, 200);
         assert!(r.body.contains("\"tree\""));
+    }
+
+    #[test]
+    fn unavailable_private_memory_exposes_diagnostic_without_blocking_reading() {
+        let mut state = state_named("private-storage-degraded");
+        let path = tmp("private-storage-degraded-no-write");
+        state.store = MemoryStore::unavailable(
+            &path,
+            ToolError {
+                error_code: memory::READER_PRIVATE_STORAGE_UNAVAILABLE.into(),
+                category: "permission".into(),
+                message: "test private storage failure".into(),
+            },
+            "t-storage",
+        );
+
+        assert_eq!(get(&mut state, "/book/manifest").status, 200);
+        assert_eq!(
+            post(&mut state, "/reader/goto", r#"{"lid":"1.1"}"#).status,
+            200
+        );
+
+        let profile = get(&mut state, "/profile/memory");
+        assert_eq!(profile.status, 200, "{}", profile.body);
+        let profile: serde_json::Value = serde_json::from_str(&profile.body).unwrap();
+        assert_eq!(profile["status"]["profile_status"], "stale");
+        assert_eq!(profile["snapshot"]["profile_status"], "stale");
+        assert_eq!(
+            profile["status"]["review_error"]["error_code"],
+            memory::READER_PRIVATE_STORAGE_UNAVAILABLE
+        );
+        assert!(profile["facts"].as_array().unwrap().is_empty());
+
+        let saved = post(
+            &mut state,
+            "/memory/save",
+            r#"{"type":"note","anchor_lid":"1.1","content":"blocked"}"#,
+        );
+        assert_eq!(saved.status, 403);
+        assert!(saved
+            .body
+            .contains(memory::READER_PRIVATE_STORAGE_UNAVAILABLE));
+
+        let governed = post_profile(
+            &mut state,
+            0,
+            json!({
+                "kind": "forget",
+                "operation_id": "unavailable-forget",
+                "fact_id": "missing"
+            }),
+        );
+        assert_eq!(governed.status, 403);
+        assert!(governed
+            .body
+            .contains(memory::READER_PRIVATE_STORAGE_UNAVAILABLE));
+
+        let chat = post(
+            &mut state,
+            "/agent/chat",
+            r#"{"message":"remember that I prefer examples"}"#,
+        );
+        assert_eq!(chat.status, 200);
+        assert!(chat
+            .body
+            .contains(memory::READER_PRIVATE_STORAGE_UNAVAILABLE));
+        assert!(!path.exists());
     }
 
     #[test]

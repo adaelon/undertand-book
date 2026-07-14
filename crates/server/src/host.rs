@@ -940,13 +940,26 @@ impl RunningServer {
     }
 }
 
+fn open_resident_memory_store(memory_path: &Path, now: &str) -> MemoryStore {
+    match MemoryStore::open_private(memory_path) {
+        Ok(store) => store,
+        Err(error) => MemoryStore::unavailable(memory_path, error, now),
+    }
+}
+
 pub fn start_server(config: ServerHostConfig) -> Result<RunningServer, String> {
-    let session_path = MemoryStore::default_path()
-        .parent()
-        .map(|p| p.join("session.json"));
-    let history_path = MemoryStore::default_path()
-        .parent()
-        .map(|p| p.join("agent-history.json"));
+    let startup_now = now_ts();
+    let memory_path = MemoryStore::default_path();
+    let mut store = open_resident_memory_store(&memory_path, &startup_now);
+    let (session_path, history_path) = if store.private_storage_available() {
+        let parent = memory_path.parent();
+        (
+            parent.map(|path| path.join("session.json")),
+            parent.map(|path| path.join("agent-history.json")),
+        )
+    } else {
+        (None, None)
+    };
     let session = load_session(&session_path);
     let (dir, book, saved_top) = match config.book_dir {
         Some(book_dir) => {
@@ -973,8 +986,6 @@ pub fn start_server(config: ServerHostConfig) -> Result<RunningServer, String> {
             }
         }
     };
-    let mut store = MemoryStore::open(MemoryStore::default_path())
-        .map_err(|error| format!("failed to open memory store: {}", error.message))?;
     let mut reader = Reader::new(&book, DEFAULT_RADIUS);
     if let Some(top) = saved_top {
         reader.restore_top_lid(&book, &top);
@@ -989,17 +1000,30 @@ pub fn start_server(config: ServerHostConfig) -> Result<RunningServer, String> {
     let mut agent_history = load_agent_history(&history_path);
     let messages =
         ensure_agent_history_for_book(&mut agent_history, &book.base.book_id, "server-start");
-    let startup_now = now_ts();
     let review_cursors = agent_history_review_cursors(&agent_history);
-    store
-        .initialize_review_watermark_baseline(&review_cursors, &startup_now)
-        .map_err(|error| format!("failed to initialize memory review baseline: {}", error.message))?;
-    store
-        .resume_review_jobs(&review_cursors, &startup_now)
-        .map_err(|error| format!("failed to resume memory review jobs: {}", error.message))?;
-    store
-        .resume_interrupted_historical_backfill_jobs(&startup_now)
-        .map_err(|error| format!("failed to resume historical backfill jobs: {}", error.message))?;
+    if store.private_storage_available() {
+        store
+            .initialize_review_watermark_baseline(&review_cursors, &startup_now)
+            .map_err(|error| {
+                format!(
+                    "failed to initialize memory review baseline: {}",
+                    error.message
+                )
+            })?;
+        store
+            .resume_review_jobs(&review_cursors, &startup_now)
+            .map_err(|error| {
+                format!("failed to resume memory review jobs: {}", error.message)
+            })?;
+        store
+            .resume_interrupted_historical_backfill_jobs(&startup_now)
+            .map_err(|error| {
+                format!(
+                    "failed to resume historical backfill jobs: {}",
+                    error.message
+                )
+            })?;
+    }
     let startup_review_pending = store
         .review_state()
         .review_jobs
@@ -1505,6 +1529,31 @@ mod tests {
 
     fn review_provider(model: &str) -> ProviderConfig {
         ProviderConfig::from_values("native", "test-key", "https://example.com", model).unwrap()
+    }
+
+    #[test]
+    fn resident_store_open_failure_degrades_to_empty_diagnostic_state() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let blocker = std::env::temp_dir().join(format!(
+            "ub-private-storage-blocker-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::write(&blocker, "not a directory").unwrap();
+        let memory_path = blocker.join("memory.json");
+
+        let store = open_resident_memory_store(&memory_path, "t-storage");
+
+        assert!(!store.private_storage_available());
+        assert_eq!(store.profile_facts().len(), 0);
+        assert_eq!(
+            store.private_storage_diagnostic().unwrap().error_code,
+            memory::READER_PRIVATE_STORAGE_UNAVAILABLE
+        );
+        assert!(!memory_path.exists());
+        std::fs::remove_file(blocker).unwrap();
     }
 
     fn review_test_state(name: &str) -> Arc<Mutex<AppState>> {

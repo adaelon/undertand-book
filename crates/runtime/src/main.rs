@@ -71,19 +71,20 @@ fn main() {
                 usage();
             }
             let question = args[3..].join(" ");
-            let mut store = match MemoryStore::open(MemoryStore::default_path()) {
+            let now = now_ts();
+            let memory_path = MemoryStore::default_path();
+            let mut store = match MemoryStore::open_private(&memory_path) {
                 Ok(s) => s,
                 Err(e) => {
                     eprintln!(
-                        "memory 打开失败: [{}/{}] {}",
+                        "memory 不可用，本次 chat 使用空画像: [{}/{}] {}",
                         e.category, e.error_code, e.message
                     );
-                    exit(1);
+                    MemoryStore::unavailable(memory_path, e, &now)
                 }
             };
             let mut reader = Reader::new(&book, DEFAULT_RADIUS);
             let mut messages = new_session();
-            let now = now_ts();
             let content_profile = match book.content_profile_id() {
                 ContentProfileId::TechnicalLearning => "technical_learning",
                 ContentProfileId::Paper => "paper",

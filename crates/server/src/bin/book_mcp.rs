@@ -1,5 +1,5 @@
-use memory::MemoryStore;
-use read_tools::Book;
+use memory::{MemoryStore, READER_PRIVATE_STORAGE_UNAVAILABLE};
+use read_tools::{Book, ToolError};
 use reader::{Reader, DEFAULT_RADIUS};
 use runtime::orchestrator::new_session;
 use runtime::{ModelAdapter, ProviderRegistry};
@@ -24,13 +24,15 @@ fn main() {
         }
     };
     let reader = Reader::new(&book, DEFAULT_RADIUS);
-    let store = match MemoryStore::open(MemoryStore::default_path()) {
-        Ok(store) => store,
-        Err(e) => {
-            eprintln!("failed to open memory store metadata: {}", e.message);
-            std::process::exit(1);
-        }
-    };
+    let store = MemoryStore::unavailable(
+        MemoryStore::default_path(),
+        ToolError {
+            error_code: READER_PRIVATE_STORAGE_UNAVAILABLE.into(),
+            category: "permission".into(),
+            message: "visitor MCP cannot access resident private memory".into(),
+        },
+        now_ms(),
+    );
     let adapter: Box<dyn ModelAdapter + Send> = match ProviderRegistry::adapter_from_env() {
         Ok(adapter) => adapter,
         Err(_) => Box::new(UnconfiguredAdapter),

@@ -1609,6 +1609,9 @@ impl Reader {
         store: &mut MemoryStore,
         now: &str,
     ) -> Result<(), ToolError> {
+        if !store.private_storage_available() {
+            return Ok(());
+        }
         for lid in &self.viewport().visible_lids {
             store.mark_read(&book.base.book_id, lid, now)?;
         }
@@ -2549,6 +2552,34 @@ mod tests {
         let e = r.goto_lid(&b, &mut store, "9.9", "t0").unwrap_err();
         assert_eq!(e.error_code, "LID_NOT_FOUND");
         assert_eq!(e.category, "not_found");
+    }
+
+    #[test]
+    fn unavailable_private_memory_keeps_navigation_but_rejects_persistent_annotations() {
+        let b = book_n_leaves(5);
+        let path = tmp("private-unavailable-navigation");
+        let mut store = MemoryStore::unavailable(
+            &path,
+            ToolError {
+                error_code: memory::READER_PRIVATE_STORAGE_UNAVAILABLE.into(),
+                category: "permission".into(),
+                message: "test private storage failure".into(),
+            },
+            "t0",
+        );
+        let mut r = Reader::new(&b, 1);
+
+        assert!(r.goto_lid(&b, &mut store, "1.2", "t1").unwrap().ok);
+        assert!(r.scroll(&b, &mut store, 1, "t2").unwrap().ok);
+        let error = r
+            .note(&b, &mut store, "1.2", "note", "long_term", "t3")
+            .unwrap_err();
+
+        assert_eq!(
+            error.error_code,
+            memory::READER_PRIVATE_STORAGE_UNAVAILABLE
+        );
+        assert!(!path.exists());
     }
 
     // note 委托 memory.save:返回 note_id=mem_id,记录真落记忆层、citation 自动锚回 lid。

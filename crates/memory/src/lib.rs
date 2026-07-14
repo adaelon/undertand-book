@@ -9,6 +9,7 @@ mod global_consolidation;
 mod governance;
 mod markdown;
 mod operation;
+mod private_storage;
 mod privacy;
 mod profile;
 mod projection;
@@ -29,6 +30,10 @@ pub use governance::{
 };
 pub use markdown::{ProfileMarkdownFileState, ProfileMarkdownProjectionStatus};
 pub use operation::{ExplicitProfileFact, MemoryOp, MemoryOpOutcome};
+pub use private_storage::{
+    ReaderPrivateStorageDiagnostic, ReaderPrivateStorageGate,
+    READER_PRIVATE_STORAGE_UNAVAILABLE,
+};
 pub use privacy::{
     classify_profile_fact_privacy, classify_profile_privacy, ProfilePrivacyClass,
 };
@@ -268,7 +273,11 @@ fn recover_interrupted_commit(path: &Path) -> Result<(), ToolError> {
     Ok(())
 }
 
-fn persist_document_atomically(path: &Path, document: &MemoryDocument) -> Result<(), ToolError> {
+fn persist_document_atomically(
+    path: &Path,
+    document: &MemoryDocument,
+    private: bool,
+) -> Result<(), ToolError> {
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -299,6 +308,12 @@ fn persist_document_atomically(path: &Path, document: &MemoryDocument) -> Result
         let _ = std::fs::remove_file(&temporary);
         return Err(internal(format!("写 memory 临时文件失败: {error}")));
     }
+    if private {
+        if let Err(error) = private_storage::secure_private_file(&temporary) {
+            let _ = std::fs::remove_file(&temporary);
+            return Err(error);
+        }
+    }
 
     let had_original = path.exists();
     if had_original {
@@ -324,6 +339,12 @@ fn persist_document_atomically(path: &Path, document: &MemoryDocument) -> Result
 pub struct MemoryStore {
     path: PathBuf,
     document: MemoryDocument,
+    storage: MemoryStorage,
+}
+
+enum MemoryStorage {
+    Available { private: bool },
+    Unavailable(ReaderPrivateStorageDiagnostic),
 }
 
 impl MemoryStore {
@@ -358,14 +379,69 @@ impl MemoryStore {
                 }
                 StoredMemory::Legacy(records) => {
                     let document = MemoryDocument::from_legacy(records);
-                    persist_document_atomically(&path, &document)?;
+                    persist_document_atomically(&path, &document, false)?;
                     document
                 }
             }
         } else {
             MemoryDocument::empty()
         };
-        Ok(MemoryStore { path, document })
+        Ok(MemoryStore {
+            path,
+            document,
+            storage: MemoryStorage::Available { private: false },
+        })
+    }
+
+    /// Production entry point for the local plaintext reader store.
+    pub fn open_private(path: impl Into<PathBuf>) -> Result<MemoryStore, ToolError> {
+        let path = path.into();
+        ReaderPrivateStorageGate::enforce(&path)?;
+        let mut store = Self::open(&path)?;
+        if path.exists() {
+            private_storage::secure_private_file(&path)?;
+        }
+        store.storage = MemoryStorage::Available { private: true };
+        Ok(store)
+    }
+
+    /// Fail-closed empty projection used when the production permission gate cannot open safely.
+    pub fn unavailable(
+        path: impl Into<PathBuf>,
+        error: ToolError,
+        occurred_at: impl Into<String>,
+    ) -> MemoryStore {
+        MemoryStore {
+            path: path.into(),
+            document: MemoryDocument::empty(),
+            storage: MemoryStorage::Unavailable(ReaderPrivateStorageDiagnostic {
+                error_code: error.error_code,
+                message: error.message,
+                occurred_at: occurred_at.into(),
+            }),
+        }
+    }
+
+    pub fn private_storage_diagnostic(&self) -> Option<&ReaderPrivateStorageDiagnostic> {
+        match &self.storage {
+            MemoryStorage::Available { .. } => None,
+            MemoryStorage::Unavailable(diagnostic) => Some(diagnostic),
+        }
+    }
+
+    pub fn private_storage_available(&self) -> bool {
+        self.private_storage_diagnostic().is_none()
+    }
+
+    pub(crate) fn private_storage_enabled(&self) -> bool {
+        matches!(self.storage, MemoryStorage::Available { private: true })
+    }
+
+    pub fn ensure_storage_available(&self) -> Result<(), ToolError> {
+        match &self.storage {
+            MemoryStorage::Available { .. } => Ok(()),
+            MemoryStorage::Unavailable(diagnostic) => Err(diagnostic.tool_error()),
+        }
     }
 
     pub fn document_revision(&self) -> u64 {
@@ -377,6 +453,7 @@ impl MemoryStore {
     }
 
     fn document_mutation_candidate(&self) -> Result<MemoryDocument, ToolError> {
+        self.ensure_storage_available()?;
         let mut candidate = self.document.clone();
         candidate.document_revision = candidate
             .document_revision
@@ -395,8 +472,9 @@ impl MemoryStore {
     }
 
     fn commit_document(&mut self, candidate: MemoryDocument) -> Result<(), ToolError> {
+        self.ensure_storage_available()?;
         candidate.validate().map_err(internal)?;
-        persist_document_atomically(&self.path, &candidate)?;
+        persist_document_atomically(&self.path, &candidate, self.private_storage_enabled())?;
         self.document = candidate;
         Ok(())
     }
