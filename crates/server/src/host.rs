@@ -1,12 +1,17 @@
 use crate::{
     ensure_agent_history_for_book, load_agent_history, load_session, mcp::VisitorSessions, route,
-    route_book_asset_file, save_session, select_start_book, AppState, Req, UnconfiguredAdapter,
+    route_book_asset_file, save_session, select_start_book, AgentAssistantStatus, AppState, Req,
+    UnconfiguredAdapter,
 };
 use base_schema::{LidNode, NodeKind, ReadOnlyBase, Span};
-use memory::MemoryStore;
+use memory::{MemoryStore, ReviewErrorState, ReviewJobStatus};
 use read_tools::Book;
 use reader::{Reader, DEFAULT_RADIUS};
-use runtime::{ModelAdapter, ProviderConfig, ProviderRegistry};
+use runtime::memory_review::{
+    ReviewExecutionOutput, ReviewExecutorFactory, ReviewInput, ReviewTurnInput, ReviewTurnStatus,
+    UnavailableReviewExecutorFactory,
+};
+use runtime::{AdapterError, ModelAdapter, ProviderConfig, ProviderRegistry};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -48,6 +53,208 @@ pub struct RunningServer {
     stop: Arc<AtomicBool>,
     handles: Vec<JoinHandle<()>>,
     state: Arc<Mutex<AppState>>,
+    review_coordinator: Arc<ReviewCoordinator>,
+}
+
+pub struct ReviewRunOutcome {
+    pub job_id: String,
+    pub output: ReviewExecutionOutput,
+}
+
+struct ReviewCoordinator {
+    state: Arc<Mutex<AppState>>,
+    provider_config: Mutex<Option<ProviderConfig>>,
+    factory: Arc<dyn ReviewExecutorFactory>,
+    serial_gate: Mutex<()>,
+}
+
+impl ReviewCoordinator {
+    fn new(
+        state: Arc<Mutex<AppState>>,
+        provider_config: Option<ProviderConfig>,
+        factory: Arc<dyn ReviewExecutorFactory>,
+    ) -> Self {
+        Self {
+            state,
+            provider_config: Mutex::new(provider_config),
+            factory,
+            serial_gate: Mutex::new(()),
+        }
+    }
+
+    fn set_provider_config(&self, config: ProviderConfig) {
+        *self
+            .provider_config
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(config);
+    }
+
+    fn run_one(&self, now: &str) -> Result<Option<ReviewRunOutcome>, read_tools::ToolError> {
+        let _serial = self
+            .serial_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let config = self
+            .provider_config
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+
+        let (job_id, input) = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let Some(job_id) = state
+                .store
+                .review_state()
+                .review_jobs
+                .iter()
+                .find(|job| {
+                    matches!(
+                        job.status,
+                        ReviewJobStatus::Queued | ReviewJobStatus::Retryable
+                    )
+                })
+                .map(|job| job.job_id.clone())
+            else {
+                return Ok(None);
+            };
+            if config.is_none() {
+                return Err(review_error(
+                    "REVIEW_PROVIDER_UNCONFIGURED",
+                    "review provider is not configured",
+                ));
+            }
+            let claimed = state.store.claim_review_job(&job_id, now)?;
+            let input = match copy_review_input(&state, &claimed) {
+                Ok(input) => input,
+                Err(error) => {
+                    state.store.mark_review_job_retryable(
+                        &job_id,
+                        now,
+                        ReviewErrorState {
+                            error_code: error.error_code.clone(),
+                            message: error.message.clone(),
+                            occurred_at: now.into(),
+                        },
+                        now,
+                    )?;
+                    return Err(error);
+                }
+            };
+            (job_id, input)
+        };
+
+        let config = config.expect("checked before claim");
+        let mut executor = self.factory.create(&config);
+        let execution = executor.execute(&input);
+
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match execution {
+            Ok(output) => {
+                state.store.mark_review_job_retryable(
+                    &job_id,
+                    now,
+                    ReviewErrorState {
+                        error_code: "REVIEW_RESULT_PENDING_VALIDATION".into(),
+                        message: "review output awaits the M2.5 validator and atomic commit".into(),
+                        occurred_at: now.into(),
+                    },
+                    now,
+                )?;
+                Ok(Some(ReviewRunOutcome { job_id, output }))
+            }
+            Err(error) => {
+                state.store.mark_review_job_retryable(
+                    &job_id,
+                    now,
+                    ReviewErrorState {
+                        error_code: "REVIEW_EXECUTOR_FAILED".into(),
+                        message: error.message.clone(),
+                        occurred_at: now.into(),
+                    },
+                    now,
+                )?;
+                Err(review_provider_error(error))
+            }
+        }
+    }
+}
+
+fn copy_review_input(
+    state: &AppState,
+    job: &memory::ReviewJob,
+) -> Result<ReviewInput, read_tools::ToolError> {
+    let session = state
+        .agent_history
+        .sessions
+        .iter()
+        .find(|session| session.id == job.session_id && session.book_id == job.book_id)
+        .ok_or_else(|| review_error("REVIEW_INPUT_MISSING", "review session does not exist"))?;
+    let turns: Vec<ReviewTurnInput> = session
+        .turns
+        .iter()
+        .filter(|turn| {
+            turn.user_turn_ordinal > job.from_turn_exclusive
+                && turn.user_turn_ordinal <= job.to_turn_inclusive
+        })
+        .map(|turn| ReviewTurnInput {
+            turn_id: turn.turn_id.clone(),
+            user_turn_ordinal: turn.user_turn_ordinal,
+            user: turn.user.clone(),
+            assistant_status: match turn.status {
+                AgentAssistantStatus::PendingAssistant => ReviewTurnStatus::PendingAssistant,
+                AgentAssistantStatus::Completed => ReviewTurnStatus::Completed,
+                AgentAssistantStatus::Failed => ReviewTurnStatus::Failed,
+            },
+            assistant_answer: turn
+                .outcome
+                .as_ref()
+                .and_then(|outcome| outcome.answer.clone()),
+        })
+        .collect();
+    let expected_len = job.to_turn_inclusive - job.from_turn_exclusive;
+    if u64::try_from(turns.len()).ok() != Some(expected_len)
+        || turns.iter().enumerate().any(|(index, turn)| {
+            u64::try_from(index)
+                .ok()
+                .and_then(|index| job.from_turn_exclusive.checked_add(index + 1))
+                != Some(turn.user_turn_ordinal)
+        })
+    {
+        return Err(review_error(
+            "REVIEW_INPUT_GAP",
+            "review job turn range is not contiguous in AgentHistory",
+        ));
+    }
+    Ok(ReviewInput {
+        job_id: job.job_id.clone(),
+        session_id: job.session_id.clone(),
+        book_id: job.book_id.clone(),
+        from_turn_exclusive: job.from_turn_exclusive,
+        to_turn_inclusive: job.to_turn_inclusive,
+        turns,
+    })
+}
+
+fn review_error(code: &str, message: impl Into<String>) -> read_tools::ToolError {
+    read_tools::ToolError {
+        error_code: code.into(),
+        category: "internal".into(),
+        message: message.into(),
+    }
+}
+
+fn review_provider_error(error: AdapterError) -> read_tools::ToolError {
+    read_tools::ToolError {
+        error_code: "REVIEW_EXECUTOR_FAILED".into(),
+        category: "provider".into(),
+        message: error.message,
+    }
 }
 
 impl RunningServer {
@@ -68,11 +275,19 @@ impl RunningServer {
     }
 
     pub fn set_provider_config(&self, config: ProviderConfig) {
+        self.review_coordinator.set_provider_config(config.clone());
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         state.adapter = ProviderRegistry::adapter_from_config(config);
+    }
+
+    pub fn run_one_review(
+        &self,
+        now: &str,
+    ) -> Result<Option<ReviewRunOutcome>, read_tools::ToolError> {
+        self.review_coordinator.run_one(now)
     }
 
     pub fn wait(mut self) {
@@ -130,10 +345,11 @@ pub fn start_server(config: ServerHostConfig) -> Result<RunningServer, String> {
     }
     crate::restore_saved_paper_minimap_overlay(&mut reader, &book, &session_path)
         .map_err(|error| format!("failed to restore paper minimap overlay: {}", error.message))?;
-    let adapter: Box<dyn ModelAdapter + Send> = match ProviderRegistry::adapter_from_env() {
-        Ok(adapter) => adapter,
-        Err(_) => Box::new(UnconfiguredAdapter),
-    };
+    let provider_config = ProviderConfig::from_env().ok();
+    let adapter: Box<dyn ModelAdapter + Send> = provider_config
+        .clone()
+        .map(ProviderRegistry::adapter_from_config)
+        .unwrap_or_else(|| Box::new(UnconfiguredAdapter));
     let mut agent_history = load_agent_history(&history_path);
     let messages =
         ensure_agent_history_for_book(&mut agent_history, &book.base.book_id, "server-start");
@@ -152,6 +368,11 @@ pub fn start_server(config: ServerHostConfig) -> Result<RunningServer, String> {
         visitor_sessions: VisitorSessions::default(),
         workbench_loaded_revision: None,
     }));
+    let review_coordinator = Arc::new(ReviewCoordinator::new(
+        state.clone(),
+        provider_config,
+        Arc::new(UnavailableReviewExecutorFactory),
+    ));
     {
         let guard = state
             .lock()
@@ -229,6 +450,7 @@ pub fn start_server(config: ServerHostConfig) -> Result<RunningServer, String> {
         stop,
         handles,
         state,
+        review_coordinator,
     })
 }
 
@@ -396,6 +618,130 @@ fn response_from_binary(reply: crate::BinaryReply) -> Response<std::io::Cursor<V
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{AgentChatSession, AgentChatTurn, AgentHistory, AgentTurnError};
+    use memory::{ReviewJobStatus, ReviewSessionCursor};
+    use runtime::memory_review::{ReviewExecutor, ReviewExecutorFactory};
+    use runtime::orchestrator::new_session;
+    use std::collections::BTreeMap;
+    use std::sync::mpsc;
+    use std::sync::Condvar;
+
+    #[derive(Default)]
+    struct ExecutorControlState {
+        entered: usize,
+        active: usize,
+        max_active: usize,
+        release: bool,
+        models: Vec<String>,
+    }
+
+    struct ExecutorControl {
+        state: Mutex<ExecutorControlState>,
+        changed: Condvar,
+    }
+
+    struct ControlledFactory {
+        control: Arc<ExecutorControl>,
+    }
+
+    struct ControlledExecutor {
+        model: String,
+        control: Arc<ExecutorControl>,
+    }
+
+    impl ReviewExecutorFactory for ControlledFactory {
+        fn create(&self, config: &ProviderConfig) -> Box<dyn ReviewExecutor> {
+            Box::new(ControlledExecutor {
+                model: config.model.clone(),
+                control: self.control.clone(),
+            })
+        }
+    }
+
+    impl ReviewExecutor for ControlledExecutor {
+        fn execute(&mut self, input: &ReviewInput) -> Result<ReviewExecutionOutput, AdapterError> {
+            let mut state = self.control.state.lock().unwrap();
+            state.entered += 1;
+            state.active += 1;
+            state.max_active = state.max_active.max(state.active);
+            state.models.push(self.model.clone());
+            self.control.changed.notify_all();
+            while !state.release {
+                state = self.control.changed.wait(state).unwrap();
+            }
+            state.active -= 1;
+            Ok(ReviewExecutionOutput {
+                value: serde_json::json!({"job_id": input.job_id}),
+            })
+        }
+    }
+
+    fn review_provider(model: &str) -> ProviderConfig {
+        ProviderConfig::from_values("native", "test-key", "https://example.com", model).unwrap()
+    }
+
+    fn review_test_state(name: &str) -> Arc<Mutex<AppState>> {
+        let (dir, book, _) = bootstrap_book(None).unwrap();
+        let reader = Reader::new(&book, DEFAULT_RADIUS);
+        let memory_path = std::env::temp_dir().join(format!("ub-review-host-{name}.json"));
+        let _ = std::fs::remove_file(&memory_path);
+        let mut store = MemoryStore::open(memory_path).unwrap();
+        store
+            .reconcile_review_jobs(
+                &[ReviewSessionCursor {
+                    session_id: "review-session".into(),
+                    book_id: book.base.book_id.clone(),
+                    latest_user_turn_ordinal: 1,
+                }],
+                "t0",
+            )
+            .unwrap();
+        let turn = AgentChatTurn {
+            turn_id: "turn-review-1".into(),
+            user_turn_ordinal: 1,
+            user: "I prefer worked examples".into(),
+            status: AgentAssistantStatus::Failed,
+            outcome: None,
+            error: Some(AgentTurnError {
+                error_code: "PROVIDER_ERROR".into(),
+                category: "provider".into(),
+                message: "earlier main-agent failure".into(),
+            }),
+            question_anchor_lid: None,
+            question_quote: None,
+        };
+        let session = AgentChatSession {
+            id: "review-session".into(),
+            book_id: book.base.book_id.clone(),
+            title: "review".into(),
+            created_at: "t0".into(),
+            updated_at: "t0".into(),
+            turns: vec![turn],
+            messages: new_session(),
+        };
+        Arc::new(Mutex::new(AppState {
+            book_dir: PathBuf::from(dir),
+            library_root: None,
+            book,
+            reader,
+            store,
+            adapter: Box::new(UnconfiguredAdapter),
+            messages: new_session(),
+            session_path: None,
+            history_path: None,
+            agent_history: AgentHistory {
+                active_by_book: BTreeMap::from([(
+                    "__desktop_bootstrap__".into(),
+                    "review-session".into(),
+                )]),
+                sessions: vec![session],
+                pending_memory_ops: BTreeMap::new(),
+            },
+            profile_context_cache: runtime::profile_context::ProfileContextCache::default(),
+            visitor_sessions: VisitorSessions::default(),
+            workbench_loaded_revision: None,
+        }))
+    }
 
     #[test]
     fn desktop_host_uses_random_loopback_address() {
@@ -432,5 +778,90 @@ mod tests {
         assert!(static_path(Path::new("dist"), "/assets/app.js").is_some());
         assert!(static_path(Path::new("dist"), "/../Cargo.toml").is_none());
         assert!(static_path(Path::new("dist"), "/a\\b").is_none());
+    }
+
+    #[test]
+    fn review_executor_releases_app_state_serializes_runs_and_uses_hot_config() {
+        let state = review_test_state("lock-and-hot-config");
+        let control = Arc::new(ExecutorControl {
+            state: Mutex::new(ExecutorControlState::default()),
+            changed: Condvar::new(),
+        });
+        let coordinator = Arc::new(ReviewCoordinator::new(
+            state.clone(),
+            Some(review_provider("model-a")),
+            Arc::new(ControlledFactory {
+                control: control.clone(),
+            }),
+        ));
+
+        let first = {
+            let coordinator = coordinator.clone();
+            thread::spawn(move || coordinator.run_one("t1"))
+        };
+        {
+            let mut observed = control.state.lock().unwrap();
+            while observed.entered < 1 {
+                observed = control.changed.wait(observed).unwrap();
+            }
+        }
+
+        let local_reply = {
+            let mut state = state.lock().unwrap();
+            route(
+                &mut state,
+                Req {
+                    method: "POST",
+                    url: "/reader/state",
+                    body: "",
+                    now: "t1",
+                },
+            )
+        };
+        assert_eq!(local_reply.status, 200);
+
+        coordinator.set_provider_config(review_provider("model-b"));
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let second = {
+            let coordinator = coordinator.clone();
+            thread::spawn(move || {
+                ready_tx.send(()).unwrap();
+                coordinator.run_one("t2")
+            })
+        };
+        ready_rx.recv().unwrap();
+        assert_eq!(control.state.lock().unwrap().entered, 1);
+
+        {
+            let mut observed = control.state.lock().unwrap();
+            observed.release = true;
+            control.changed.notify_all();
+        }
+        let first = first.join().unwrap().unwrap().unwrap();
+        let second = second.join().unwrap().unwrap().unwrap();
+        assert_eq!(first.job_id, second.job_id);
+        assert_eq!(first.output.value["job_id"], first.job_id);
+        assert_eq!(second.output.value["job_id"], second.job_id);
+
+        let observed = control.state.lock().unwrap();
+        assert_eq!(observed.entered, 2);
+        assert_eq!(observed.max_active, 1);
+        assert_eq!(observed.models, vec!["model-a", "model-b"]);
+        drop(observed);
+        let state = state.lock().unwrap();
+        assert_eq!(
+            state.store.review_state().review_jobs[0].status,
+            ReviewJobStatus::Retryable
+        );
+        assert_eq!(
+            state
+                .store
+                .review_state()
+                .last_error
+                .as_ref()
+                .unwrap()
+                .error_code,
+            "REVIEW_RESULT_PENDING_VALIDATION"
+        );
     }
 }

@@ -10,6 +10,7 @@ use ts_rs::TS;
 
 pub mod goldset;
 pub mod memory_intent;
+pub mod memory_review;
 pub mod orchestrator;
 pub mod profile_api;
 pub mod profile_context;
