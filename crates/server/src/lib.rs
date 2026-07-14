@@ -25,7 +25,9 @@ use reader::{
 use runtime::memory_intent::{
     evaluate_memory_intent, scan_memory_intent, MemoryIntentDecision, MemoryIntentRequest,
 };
-use runtime::memory_policy::{MemoryPolicyRegistry, PolicyProjectionInput};
+use runtime::memory_policy::{
+    MemoryPolicyRegistry, PaperPolicyContext, PolicyProjectionInput, PAPER_MEMORY_POLICY_ID,
+};
 use runtime::orchestrator::{
     new_session, run_with_ephemeral_context, OuterConfig, OuterOutcome, ProfileMemoryUpdate,
     ProfileMemoryUpdateKind, ProfileUsageTrace,
@@ -7424,12 +7426,23 @@ fn profile_snapshot_request(
             ..Default::default()
         });
     let manifest = state.book.profile_manifest();
+    let paper_context = if manifest.memory_policy.policy_id == PAPER_MEMORY_POLICY_ID {
+        state
+            .book
+            .paper_reading_guide(None, None)
+            .ok()
+            .filter(|guide| guide.available)
+            .map(|guide| PaperPolicyContext::from_reading_guide(&guide))
+    } else {
+        None
+    };
     let policy_projection = MemoryPolicyRegistry::default().project(
         &manifest.memory_policy,
         &PolicyProjectionInput {
             source_revision: state.store.projection_revision(),
             reading_state: &reading_state,
             resolved_facts: &resolved_facts,
+            paper_context: paper_context.as_ref(),
         },
     );
     let mut request = SnapshotRequest::current(context);
@@ -11799,6 +11812,75 @@ mod tests {
             .all(|item| item["status"] == "provisional"));
         assert!(!response.body.contains("mastery"));
         assert!(!response.body.contains("confusion"));
+    }
+
+    #[test]
+    fn profile_memory_state_uses_paper_guide_ids_without_copying_public_text() {
+        let mut state = state_named("profile-memory-paper-policy");
+        attach_paper_profile(&mut state);
+        let book_id = state.book.base.book_id.clone();
+        let guide = state.book.paper_reading_guide(None, None).unwrap();
+        let question = guide
+            .questions
+            .iter()
+            .find(|question| !question.evidence_lids.is_empty())
+            .expect("the paper fixture exposes a question with LID evidence");
+        state
+            .store
+            .mark_read(
+                &book_id,
+                &question.evidence_lids[0],
+                "2026-07-14T00:00:00Z",
+            )
+            .unwrap();
+        for (turn_id, key, value) in [
+            ("paper-mode", "paper_reading_mode", "close"),
+            ("paper-stage", "paper_reading_stage", "critical"),
+        ] {
+            state
+                .store
+                .create_profile_fact(
+                    CreateProfileFact {
+                        scope: ProfileScope::Book {
+                            book_id: book_id.clone(),
+                        },
+                        applicability: Applicability::ContentProfile {
+                            profile_id: "paper".into(),
+                        },
+                        payload: ProfilePayload::ExplanationPreference(PreferenceClaim {
+                            key: key.into(),
+                            value: value.into(),
+                        }),
+                        source: FactSource::UserStated,
+                        evidence: vec![EvidenceRef::Turn {
+                            session_id: "session".into(),
+                            turn_id: turn_id.into(),
+                        }],
+                        confidence: None,
+                        sensitivity: Sensitivity::Normal,
+                        valid_until: None,
+                    },
+                    "2026-07-14T00:00:01Z",
+                )
+                .unwrap();
+        }
+        let fact_count = state.store.profile_facts().len();
+
+        let response = get(&mut state, "/profile/memory");
+
+        assert_eq!(response.status, 200, "{}", response.body);
+        assert!(response.body.contains("paper_mode"));
+        assert!(response.body.contains("paper_stage"));
+        assert!(response.body.contains("paper_question"));
+        assert!(guide
+            .questions
+            .iter()
+            .any(|question| response.body.contains(&question.id)));
+        assert!(guide
+            .questions
+            .iter()
+            .all(|question| !response.body.contains(&question.question)));
+        assert_eq!(state.store.profile_facts().len(), fact_count);
     }
 
     #[test]

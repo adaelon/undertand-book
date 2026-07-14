@@ -2,7 +2,10 @@ use memory::{
     Applicability, BookReadingState, EngagementSignals, EvidenceRef, FactSource, FactStatus,
     ProfileFact, ProfilePayload, SnapshotCandidate,
 };
-use read_tools::{MemoryPolicyRef, TECHNICAL_LEARNING_MEMORY_POLICY_VERSION};
+use read_tools::{
+    MemoryPolicyRef, PaperReadingGuide, PaperReadingMode, PaperReadingStage,
+    PAPER_MEMORY_POLICY_VERSION, TECHNICAL_LEARNING_MEMORY_POLICY_VERSION,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -11,8 +14,11 @@ use std::sync::Arc;
 pub const NEUTRAL_MEMORY_POLICY_ID: &str = "neutral";
 pub const NEUTRAL_MEMORY_POLICY_VERSION: &str = "neutral_memory_v1";
 pub const TECHNICAL_LEARNING_MEMORY_POLICY_ID: &str = "technical_learning";
+pub const PAPER_MEMORY_POLICY_ID: &str = "paper";
 const UNDERSTOOD_CONCEPT_KEY: &str = "understood_concept";
 const REQUESTED_PREREQUISITE_KEY: &str = "requested_prerequisite";
+const PAPER_READING_MODE_KEY: &str = "paper_reading_mode";
+const PAPER_READING_STAGE_KEY: &str = "paper_reading_stage";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -47,6 +53,11 @@ pub enum ReadingHintKind {
     CurrentGoal,
     RequestedPrerequisite,
     ExplanationPreference,
+    PaperMode,
+    PaperStage,
+    PaperQuestion,
+    PaperTerminology,
+    PaperFacet,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -91,6 +102,74 @@ pub struct TechnicalLearningMemoryState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExplicitChoice<T> {
+    pub value: T,
+    pub fact_id: String,
+    pub evidence: Vec<EvidenceRef>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum QuestionActivity {
+    Unvisited,
+    Explored,
+    UserReflected,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum PaperFacet {
+    Terminology,
+    Method,
+    Claim,
+    Evidence,
+    Limitation,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PaperMemoryState {
+    pub last_selected_mode: Option<ExplicitChoice<PaperReadingMode>>,
+    pub last_selected_stage: Option<ExplicitChoice<PaperReadingStage>>,
+    pub question_progress: BTreeMap<String, QuestionActivity>,
+    pub terminology_assistance: BTreeMap<String, EngagementSignals>,
+    pub facet_attention: BTreeMap<PaperFacet, Vec<EvidenceRef>>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PaperPolicyContext {
+    pub question_evidence_by_id: BTreeMap<String, Vec<String>>,
+    pub terminology_evidence_by_term: BTreeMap<String, Vec<String>>,
+}
+
+impl PaperPolicyContext {
+    pub fn from_reading_guide(guide: &PaperReadingGuide) -> Self {
+        if !guide.available {
+            return Self::default();
+        }
+        let question_evidence_by_id = guide
+            .questions
+            .iter()
+            .map(|question| {
+                (
+                    question.id.clone(),
+                    sorted_unique(question.evidence_lids.clone()),
+                )
+            })
+            .collect();
+        let terminology_evidence_by_term = guide
+            .codebook
+            .terms
+            .iter()
+            .map(|term| (term.term.clone(), sorted_unique(term.evidence_lids.clone())))
+            .collect();
+        Self {
+            question_evidence_by_id,
+            terminology_evidence_by_term,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PolicyFallbackReason {
     MissingPolicy,
@@ -107,6 +186,7 @@ pub struct PolicyProjectionInput<'a> {
     pub source_revision: u64,
     pub reading_state: &'a BookReadingState,
     pub resolved_facts: &'a [ProfileFact],
+    pub paper_context: Option<&'a PaperPolicyContext>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -141,6 +221,9 @@ impl Default for MemoryPolicyRegistry {
         registry
             .register(Arc::new(TechnicalLearningMemoryPolicy))
             .expect("the built-in technical learning policy has a valid unique identity");
+        registry
+            .register(Arc::new(PaperMemoryPolicy))
+            .expect("the built-in paper policy has a valid unique identity");
         registry
     }
 }
@@ -422,6 +505,309 @@ impl MemoryPolicy for TechnicalLearningMemoryPolicy {
     }
 }
 
+#[derive(Debug)]
+pub struct PaperMemoryPolicy;
+
+impl MemoryPolicy for PaperMemoryPolicy {
+    fn policy_ref(&self) -> MemoryPolicyRef {
+        MemoryPolicyRef {
+            policy_id: PAPER_MEMORY_POLICY_ID.into(),
+            policy_version: PAPER_MEMORY_POLICY_VERSION.into(),
+        }
+    }
+
+    fn validate_extension(&self, fact: &ProfileFact) -> Result<(), PolicyError> {
+        if matches!(
+            &fact.payload,
+            ProfilePayload::Extension { namespace, .. } if namespace != PAPER_MEMORY_POLICY_ID
+        ) {
+            return Err(PolicyError {
+                code: "UNSUPPORTED_PROFILE_EXTENSION",
+                message: "paper policy only accepts its own extension namespace".into(),
+            });
+        }
+        Ok(())
+    }
+
+    fn derive_book_state(&self, input: &PolicyProjectionInput<'_>) -> Value {
+        serde_json::to_value(paper_memory_state(input))
+            .expect("PaperMemoryState has fixed serializable fields")
+    }
+
+    fn snapshot_candidates(&self, input: &PolicyProjectionInput<'_>) -> Vec<SnapshotCandidate> {
+        NeutralMemoryPolicy.snapshot_candidates(input)
+    }
+
+    fn rank_snapshot_items(&self, candidates: &mut [SnapshotCandidate]) {
+        candidates.sort_by(|left, right| {
+            paper_candidate_rank(&left.key)
+                .cmp(&paper_candidate_rank(&right.key))
+                .then_with(|| left.key.cmp(&right.key))
+                .then_with(|| left.fact_id.cmp(&right.fact_id))
+        });
+    }
+
+    fn reading_hints(&self, state: &Value, input: &PolicyProjectionInput<'_>) -> ReadingHints {
+        let state: PaperMemoryState = serde_json::from_value(state.clone())
+            .expect("paper policy produced its own typed state");
+        let mut items = Vec::new();
+        if let Some(choice) = state.last_selected_mode {
+            items.push(reading_hint(
+                ReadingHintKind::PaperMode,
+                FactStatus::Confirmed,
+                FactSource::UserStated,
+                serde_json::to_string(&choice.value)
+                    .expect("PaperReadingMode is a closed serializable enum"),
+                choice_source_ids(&choice.fact_id, &choice.evidence),
+            ));
+        }
+        if let Some(choice) = state.last_selected_stage {
+            items.push(reading_hint(
+                ReadingHintKind::PaperStage,
+                FactStatus::Confirmed,
+                FactSource::UserStated,
+                serde_json::to_string(&choice.value)
+                    .expect("PaperReadingStage is a closed serializable enum"),
+                choice_source_ids(&choice.fact_id, &choice.evidence),
+            ));
+        }
+        if let Some(context) = input.paper_context {
+            for (question_id, activity) in state.question_progress {
+                if activity == QuestionActivity::Unvisited {
+                    continue;
+                }
+                let source_ids = context
+                    .question_evidence_by_id
+                    .get(&question_id)
+                    .map(|lids| engaged_evidence_ids(input, lids))
+                    .unwrap_or_default();
+                items.push(reading_hint(
+                    ReadingHintKind::PaperQuestion,
+                    FactStatus::Confirmed,
+                    FactSource::DeterministicBehavior,
+                    serde_json::to_string(&json!({
+                        "question_id": question_id,
+                        "activity": activity,
+                    }))
+                    .expect("paper question hint contains typed scalar fields"),
+                    source_ids,
+                ));
+            }
+            for (term, signals) in state.terminology_assistance {
+                let source_ids = context
+                    .terminology_evidence_by_term
+                    .get(&term)
+                    .map(|lids| engaged_evidence_ids(input, lids))
+                    .unwrap_or_default();
+                items.push(reading_hint(
+                    ReadingHintKind::PaperTerminology,
+                    FactStatus::Confirmed,
+                    FactSource::DeterministicBehavior,
+                    serde_json::to_string(&json!({"term": term, "signals": signals}))
+                        .expect("paper terminology hint contains typed fields"),
+                    source_ids,
+                ));
+            }
+        }
+        for (facet, evidence) in state.facet_attention {
+            items.push(reading_hint(
+                ReadingHintKind::PaperFacet,
+                FactStatus::Confirmed,
+                FactSource::DeterministicBehavior,
+                serde_json::to_string(&facet).expect("PaperFacet is a closed serializable enum"),
+                evidence.iter().map(EvidenceRef::evidence_id).collect(),
+            ));
+        }
+        items.sort_by(|left, right| left.hint_id.cmp(&right.hint_id));
+        ReadingHints { items }
+    }
+}
+
+fn paper_memory_state(input: &PolicyProjectionInput<'_>) -> PaperMemoryState {
+    let last_selected_mode =
+        explicit_paper_preference(input, PAPER_READING_MODE_KEY).and_then(|(fact, value)| {
+            parse_paper_mode(value).map(|value| explicit_choice(fact, value))
+        });
+    let last_selected_stage =
+        explicit_paper_preference(input, PAPER_READING_STAGE_KEY).and_then(|(fact, value)| {
+            parse_paper_stage(value).map(|value| explicit_choice(fact, value))
+        });
+    let mut question_progress = BTreeMap::new();
+    let mut terminology_assistance = BTreeMap::new();
+    let mut facet_attention: BTreeMap<PaperFacet, Vec<EvidenceRef>> = BTreeMap::new();
+
+    if let Some(context) = input.paper_context {
+        for (question_id, lids) in &context.question_evidence_by_id {
+            let signals = aggregate_engagement(input, lids);
+            let activity = if signals.note_count > 0 {
+                QuestionActivity::UserReflected
+            } else if engagement_present(&signals) {
+                QuestionActivity::Explored
+            } else {
+                QuestionActivity::Unvisited
+            };
+            question_progress.insert(question_id.clone(), activity);
+            if engagement_present(&signals) {
+                for facet in paper_question_facets(question_id) {
+                    facet_attention
+                        .entry(facet)
+                        .or_default()
+                        .extend(engaged_book_locations(input, lids));
+                }
+            }
+        }
+
+        for (term, lids) in &context.terminology_evidence_by_term {
+            let signals = aggregate_engagement(input, lids);
+            if !engagement_present(&signals) {
+                continue;
+            }
+            terminology_assistance.insert(term.clone(), signals);
+            facet_attention
+                .entry(PaperFacet::Terminology)
+                .or_default()
+                .extend(engaged_book_locations(input, lids));
+        }
+    }
+
+    for evidence in facet_attention.values_mut() {
+        evidence.sort();
+        evidence.dedup();
+    }
+
+    PaperMemoryState {
+        last_selected_mode,
+        last_selected_stage,
+        question_progress,
+        terminology_assistance,
+        facet_attention,
+    }
+}
+
+fn explicit_paper_preference<'a>(
+    input: &'a PolicyProjectionInput<'_>,
+    key: &str,
+) -> Option<(&'a ProfileFact, &'a str)> {
+    input.resolved_facts.iter().find_map(|fact| {
+        if fact.source != FactSource::UserStated
+            || fact.status != FactStatus::Confirmed
+            || !matches!(
+                &fact.applicability,
+                Applicability::ContentProfile { profile_id }
+                    if profile_id == PAPER_MEMORY_POLICY_ID
+            )
+        {
+            return None;
+        }
+        match &fact.payload {
+            ProfilePayload::ExplanationPreference(claim) if claim.key == key => {
+                Some((fact, claim.value.as_str()))
+            }
+            _ => None,
+        }
+    })
+}
+
+fn explicit_choice<T>(fact: &ProfileFact, value: T) -> ExplicitChoice<T> {
+    ExplicitChoice {
+        value,
+        fact_id: fact.fact_id.clone(),
+        evidence: fact.evidence.clone(),
+    }
+}
+
+fn parse_paper_mode(value: &str) -> Option<PaperReadingMode> {
+    match value {
+        "skim" => Some(PaperReadingMode::Skim),
+        "close" => Some(PaperReadingMode::Close),
+        "deep" => Some(PaperReadingMode::Deep),
+        _ => None,
+    }
+}
+
+fn parse_paper_stage(value: &str) -> Option<PaperReadingStage> {
+    match value {
+        "passive" => Some(PaperReadingStage::Passive),
+        "active" => Some(PaperReadingStage::Active),
+        "critical" => Some(PaperReadingStage::Critical),
+        "creative" => Some(PaperReadingStage::Creative),
+        _ => None,
+    }
+}
+
+fn aggregate_engagement(input: &PolicyProjectionInput<'_>, lids: &[String]) -> EngagementSignals {
+    let mut aggregate = EngagementSignals::default();
+    for lid in lids {
+        let Some(signals) = input.reading_state.engagement_by_lid.get(lid) else {
+            continue;
+        };
+        aggregate.read_count = aggregate.read_count.saturating_add(signals.read_count);
+        aggregate.qa_count = aggregate.qa_count.saturating_add(signals.qa_count);
+        aggregate.note_count = aggregate.note_count.saturating_add(signals.note_count);
+        aggregate.highlight_count = aggregate
+            .highlight_count
+            .saturating_add(signals.highlight_count);
+        if signals.last_seen_at > aggregate.last_seen_at {
+            aggregate.last_seen_at = signals.last_seen_at.clone();
+        }
+    }
+    aggregate
+}
+
+fn engagement_present(signals: &EngagementSignals) -> bool {
+    signals.read_count > 0
+        || signals.qa_count > 0
+        || signals.note_count > 0
+        || signals.highlight_count > 0
+}
+
+fn engaged_book_locations(input: &PolicyProjectionInput<'_>, lids: &[String]) -> Vec<EvidenceRef> {
+    lids.iter()
+        .filter(|lid| {
+            input
+                .reading_state
+                .engagement_by_lid
+                .get(*lid)
+                .is_some_and(engagement_present)
+        })
+        .map(|lid| EvidenceRef::BookLocation {
+            book_id: input.reading_state.book_id.clone(),
+            lid: lid.clone(),
+        })
+        .collect()
+}
+
+fn engaged_evidence_ids(input: &PolicyProjectionInput<'_>, lids: &[String]) -> Vec<String> {
+    engaged_book_locations(input, lids)
+        .iter()
+        .map(EvidenceRef::evidence_id)
+        .collect()
+}
+
+fn paper_question_facets(question_id: &str) -> Vec<PaperFacet> {
+    match question_id {
+        "experiment_design" => vec![PaperFacet::Method],
+        "hypothesis" | "core_contribution" | "contribution_summary" => {
+            vec![PaperFacet::Claim]
+        }
+        "dataset" | "results_support_hypothesis" => vec![PaperFacet::Evidence],
+        "future_work" => vec![PaperFacet::Limitation],
+        _ => Vec::new(),
+    }
+}
+
+fn choice_source_ids(fact_id: &str, evidence: &[EvidenceRef]) -> Vec<String> {
+    let mut source_ids = vec![fact_id.to_string()];
+    source_ids.extend(evidence.iter().map(EvidenceRef::evidence_id));
+    sorted_unique(source_ids)
+}
+
+fn sorted_unique(mut values: Vec<String>) -> Vec<String> {
+    values.sort();
+    values.dedup();
+    values
+}
+
 fn technical_learning_state(input: &PolicyProjectionInput<'_>) -> TechnicalLearningMemoryState {
     let mut concept_activity = BTreeMap::new();
     for lid in &input.reading_state.read_lids {
@@ -552,6 +938,11 @@ fn reading_hint_kind_name(kind: ReadingHintKind) -> &'static str {
         ReadingHintKind::CurrentGoal => "current_goal",
         ReadingHintKind::RequestedPrerequisite => "requested_prerequisite",
         ReadingHintKind::ExplanationPreference => "explanation_preference",
+        ReadingHintKind::PaperMode => "paper_mode",
+        ReadingHintKind::PaperStage => "paper_stage",
+        ReadingHintKind::PaperQuestion => "paper_question",
+        ReadingHintKind::PaperTerminology => "paper_terminology",
+        ReadingHintKind::PaperFacet => "paper_facet",
     }
 }
 
@@ -601,6 +992,18 @@ fn technical_candidate_rank(key: &str) -> u8 {
     }
 }
 
+fn paper_candidate_rank(key: &str) -> u8 {
+    if key.starts_with("read_lids") || key.starts_with("activity:") {
+        0
+    } else if key.starts_with("paper_mode:") || key.starts_with("paper_stage:") {
+        1
+    } else if key.starts_with("paper_question:") {
+        2
+    } else {
+        3
+    }
+}
+
 fn neutral_candidate(
     book_id: &str,
     key: &str,
@@ -636,6 +1039,10 @@ mod tests {
         CapabilityClaim, ConstraintClaim, CreateProfileFact, EvidenceRef, GoalClaim, MemoryStore,
         PreferenceClaim, ProfileScope, Sensitivity, SnapshotContext, SnapshotRequest,
     };
+    use read_tools::{
+        AbstractReadingAid, PaperCodebook, PaperCodebookMetadata, PaperCodebookTerm,
+        PaperReadingQuestion,
+    };
     use std::path::PathBuf;
 
     fn store(name: &str) -> (PathBuf, MemoryStore) {
@@ -656,6 +1063,7 @@ mod tests {
             source_revision,
             reading_state,
             resolved_facts,
+            paper_context: None,
         }
     }
 
@@ -942,6 +1350,202 @@ mod tests {
     }
 
     #[test]
+    fn paper_policy_uses_explicit_choices_and_keeps_activity_non_semantic() {
+        let guide = paper_guide();
+        let paper_context = PaperPolicyContext::from_reading_guide(&guide);
+        let serialized_context = serde_json::to_string(&paper_context).unwrap();
+        assert!(!serialized_context.contains("PUBLIC_TITLE"));
+        assert!(!serialized_context.contains("PUBLIC_CLAIM_TEXT"));
+        assert!(!serialized_context.contains("PUBLIC_GLOSS"));
+        assert_eq!(
+            paper_context.question_evidence_by_id["experiment_design"],
+            vec!["1.1"]
+        );
+
+        let reading_state = BookReadingState {
+            book_id: "book-a".into(),
+            read_lids: vec!["1.1".into(), "1.2".into()],
+            engagement_by_lid: BTreeMap::from([
+                (
+                    "1.1".into(),
+                    EngagementSignals {
+                        read_count: 1,
+                        qa_count: 1,
+                        note_count: 0,
+                        highlight_count: 0,
+                        last_seen_at: Some("2026-07-14T00:00:00Z".into()),
+                    },
+                ),
+                (
+                    "1.2".into(),
+                    EngagementSignals {
+                        read_count: 1,
+                        qa_count: 0,
+                        note_count: 1,
+                        highlight_count: 0,
+                        last_seen_at: Some("2026-07-14T00:01:00Z".into()),
+                    },
+                ),
+            ]),
+        };
+        let inferred_only = vec![inferred_paper_preference(
+            "fact_inferred_only",
+            PAPER_READING_STAGE_KEY,
+            "creative",
+        )];
+        let behavior_only = MemoryPolicyRegistry::default().project(
+            &MemoryPolicyRef {
+                policy_id: PAPER_MEMORY_POLICY_ID.into(),
+                policy_version: PAPER_MEMORY_POLICY_VERSION.into(),
+            },
+            &PolicyProjectionInput {
+                source_revision: 12,
+                reading_state: &reading_state,
+                resolved_facts: &inferred_only,
+                paper_context: Some(&paper_context),
+            },
+        );
+        let behavior_state: PaperMemoryState =
+            serde_json::from_value(behavior_only.state.state).unwrap();
+        assert!(behavior_state.last_selected_mode.is_none());
+        assert!(behavior_state.last_selected_stage.is_none());
+
+        let facts = vec![
+            inferred_paper_preference("fact_inferred_stage", PAPER_READING_STAGE_KEY, "creative"),
+            paper_user_preference("fact_mode", PAPER_READING_MODE_KEY, "close"),
+            paper_user_preference("fact_stage", PAPER_READING_STAGE_KEY, "critical"),
+        ];
+        let projection = MemoryPolicyRegistry::default().project(
+            &MemoryPolicyRef {
+                policy_id: PAPER_MEMORY_POLICY_ID.into(),
+                policy_version: PAPER_MEMORY_POLICY_VERSION.into(),
+            },
+            &PolicyProjectionInput {
+                source_revision: 13,
+                reading_state: &reading_state,
+                resolved_facts: &facts,
+                paper_context: Some(&paper_context),
+            },
+        );
+        let state: PaperMemoryState =
+            serde_json::from_value(projection.state.state.clone()).unwrap();
+
+        assert_eq!(projection.state.status, ProfileStateStatus::Current);
+        assert_eq!(
+            state.last_selected_mode.as_ref().unwrap().value,
+            PaperReadingMode::Close
+        );
+        assert_eq!(
+            state.last_selected_stage.as_ref().unwrap().value,
+            PaperReadingStage::Critical
+        );
+        assert_eq!(
+            state.question_progress["experiment_design"],
+            QuestionActivity::Explored
+        );
+        assert_eq!(
+            state.question_progress["future_work"],
+            QuestionActivity::UserReflected
+        );
+        assert_eq!(
+            state.question_progress["core_contribution"],
+            QuestionActivity::Unvisited
+        );
+        assert_eq!(state.terminology_assistance["Transformer"].qa_count, 1);
+        assert!(state.facet_attention.contains_key(&PaperFacet::Method));
+        assert!(state.facet_attention.contains_key(&PaperFacet::Limitation));
+        assert!(state.facet_attention.contains_key(&PaperFacet::Terminology));
+        for kind in [
+            ReadingHintKind::PaperMode,
+            ReadingHintKind::PaperStage,
+            ReadingHintKind::PaperQuestion,
+            ReadingHintKind::PaperTerminology,
+            ReadingHintKind::PaperFacet,
+        ] {
+            assert!(projection.hints.items.iter().any(|hint| hint.kind == kind));
+        }
+        assert!(projection
+            .candidates
+            .iter()
+            .filter(|candidate| candidate.namespace == "paper_hint")
+            .all(|candidate| candidate.applicability
+                == Applicability::ContentProfile {
+                    profile_id: PAPER_MEMORY_POLICY_ID.into()
+                }));
+        let serialized_projection = serde_json::to_string(&projection.state.state).unwrap()
+            + &projection
+                .candidates
+                .iter()
+                .map(|candidate| {
+                    format!(
+                        "{}:{}:{}",
+                        candidate.namespace, candidate.key, candidate.value
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+        assert!(!serialized_projection.contains("PUBLIC_TITLE"));
+        assert!(!serialized_projection.contains("PUBLIC_CLAIM_TEXT"));
+        assert!(!serialized_projection.contains("PUBLIC_GLOSS"));
+        assert!(!serialized_projection.contains("understood"));
+        assert!(!serialized_projection.contains("auto_advanced"));
+    }
+
+    #[test]
+    fn paper_specific_preference_does_not_leak_into_technical_snapshot() {
+        let (_path, mut store) = store("paper-cross-profile");
+        let fact = store
+            .create_profile_fact(
+                CreateProfileFact {
+                    scope: ProfileScope::Book {
+                        book_id: "book-a".into(),
+                    },
+                    applicability: Applicability::ContentProfile {
+                        profile_id: PAPER_MEMORY_POLICY_ID.into(),
+                    },
+                    payload: ProfilePayload::ExplanationPreference(PreferenceClaim {
+                        key: PAPER_READING_MODE_KEY.into(),
+                        value: "deep".into(),
+                    }),
+                    source: FactSource::UserStated,
+                    evidence: vec![EvidenceRef::Turn {
+                        session_id: "session".into(),
+                        turn_id: "paper-mode".into(),
+                    }],
+                    confidence: None,
+                    sensitivity: Sensitivity::Normal,
+                    valid_until: None,
+                },
+                "2026-07-14T00:00:00Z",
+            )
+            .unwrap();
+        let paper_snapshot =
+            store.project_reader_profile_snapshot(&SnapshotRequest::current(SnapshotContext {
+                book_id: Some("book-a".into()),
+                content_profile: Some(PAPER_MEMORY_POLICY_ID.into()),
+                ..Default::default()
+            }));
+        let technical_snapshot =
+            store.project_reader_profile_snapshot(&SnapshotRequest::current(SnapshotContext {
+                book_id: Some("book-a".into()),
+                content_profile: Some(TECHNICAL_LEARNING_MEMORY_POLICY_ID.into()),
+                ..Default::default()
+            }));
+
+        assert!(paper_snapshot
+            .book_state_core
+            .iter()
+            .any(|item| item.fact_id == fact.fact_id));
+        assert!(!technical_snapshot
+            .injected_fact_ids()
+            .iter()
+            .any(|fact_id| fact_id == &fact.fact_id));
+        assert!(!technical_snapshot
+            .to_prompt_data()
+            .contains("paper_reading_mode"));
+    }
+
+    #[test]
     fn neutral_policy_rejects_extension_facts() {
         let fact = ProfileFact {
             fact_id: "fact_extension".into(),
@@ -988,6 +1592,119 @@ mod tests {
             updated_at: "now".into(),
             valid_until: None,
             supersedes: vec![],
+        }
+    }
+
+    fn paper_user_preference(fact_id: &str, key: &str, value: &str) -> ProfileFact {
+        profile_preference_fact(
+            fact_id,
+            key,
+            value,
+            FactSource::UserStated,
+            FactStatus::Confirmed,
+        )
+    }
+
+    fn inferred_paper_preference(fact_id: &str, key: &str, value: &str) -> ProfileFact {
+        profile_preference_fact(
+            fact_id,
+            key,
+            value,
+            FactSource::AgentInferred,
+            FactStatus::Provisional,
+        )
+    }
+
+    fn profile_preference_fact(
+        fact_id: &str,
+        key: &str,
+        value: &str,
+        source: FactSource,
+        status: FactStatus,
+    ) -> ProfileFact {
+        ProfileFact {
+            fact_id: fact_id.into(),
+            scope: ProfileScope::Book {
+                book_id: "book-a".into(),
+            },
+            applicability: Applicability::ContentProfile {
+                profile_id: PAPER_MEMORY_POLICY_ID.into(),
+            },
+            payload: ProfilePayload::ExplanationPreference(PreferenceClaim {
+                key: key.into(),
+                value: value.into(),
+            }),
+            source,
+            evidence: vec![EvidenceRef::Turn {
+                session_id: "session".into(),
+                turn_id: format!("turn-{fact_id}"),
+            }],
+            status,
+            confidence: None,
+            sensitivity: Sensitivity::Normal,
+            created_at: "now".into(),
+            updated_at: "now".into(),
+            valid_until: None,
+            supersedes: vec![],
+        }
+    }
+
+    fn paper_guide() -> PaperReadingGuide {
+        let question = |id: &str, text: &str, lids: Vec<&str>| PaperReadingQuestion {
+            id: id.into(),
+            question: text.into(),
+            focus: "PUBLIC_FOCUS_TEXT".into(),
+            evidence_lids: lids.into_iter().map(str::to_string).collect(),
+            answer_slots: Vec::new(),
+        };
+        PaperReadingGuide {
+            available: true,
+            mode: PaperReadingMode::Skim,
+            stage: PaperReadingStage::Passive,
+            questions: vec![
+                question("experiment_design", "PUBLIC_CLAIM_TEXT", vec!["1.1", "1.1"]),
+                question("future_work", "PUBLIC_LIMITATION_TEXT", vec!["1.2"]),
+                question("core_contribution", "PUBLIC_CONTRIBUTION_TEXT", vec!["1.3"]),
+            ],
+            codebook: PaperCodebook {
+                available: true,
+                metadata: PaperCodebookMetadata {
+                    title: Some("PUBLIC_TITLE".into()),
+                    authors: vec!["PUBLIC_AUTHOR".into()],
+                    venue: None,
+                    year: None,
+                    doi: None,
+                    arxiv: None,
+                    url: None,
+                    keywords: Vec::new(),
+                    field_labels: Vec::new(),
+                    datasets: Vec::new(),
+                    code_links: Vec::new(),
+                    evidence_lids: vec!["1.1".into()],
+                },
+                terms: vec![PaperCodebookTerm {
+                    term: "Transformer".into(),
+                    term_type: "model".into(),
+                    evidence_lids: vec!["1.1".into()],
+                    defined_at_lid: Some("1.1".into()),
+                    aliases: vec!["PUBLIC_ALIAS".into()],
+                    acronym_expansion: None,
+                    chinese_gloss: Some("PUBLIC_GLOSS".into()),
+                }],
+                throughlines: Vec::new(),
+                key_stops: Vec::new(),
+                warnings: Vec::new(),
+            },
+            abstract_aid: AbstractReadingAid {
+                available: false,
+                abstract_lids: Vec::new(),
+                excerpts: Vec::new(),
+                key_terms: Vec::new(),
+                comprehension_checks: Vec::new(),
+                user_reflection_prompt: "PUBLIC_REFLECTION_PROMPT".into(),
+                warning: None,
+            },
+            warnings: Vec::new(),
         }
     }
 }

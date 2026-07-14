@@ -489,7 +489,7 @@ pub struct PaperLexiconEntry {
     pub chinese_gloss: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq, TS)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(export, export_to = "../../../packages/web/src/generated/")]
 pub enum PaperReadingMode {
@@ -498,7 +498,7 @@ pub enum PaperReadingMode {
     Deep,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq, TS)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(export, export_to = "../../../packages/web/src/generated/")]
 pub enum PaperReadingStage {
