@@ -12,6 +12,7 @@ use memory::{
     ExplicitProfileFact, MemoryOp, MemoryOpOutcome, MemoryStore, ProfilePrivacyClass,
     ProfileResolutionContext, ProfileScope, RecallQuery, ReplaceInput, SaveInput, SelectedRange,
     SelectionContext, SelectionResolution, Sensitivity, SnapshotContext, SnapshotRequest,
+    ReviewSessionCursor,
 };
 use read_tools::{
     Book, ContentProfileId, PaperLandmarkKind, PaperMinimapBase, PaperRegionKind,
@@ -1228,6 +1229,31 @@ fn finalize_agent_turn_failed(
     )
 }
 
+fn agent_history_review_cursors(history: &AgentHistory) -> Vec<ReviewSessionCursor> {
+    let mut cursors: Vec<ReviewSessionCursor> = history
+        .sessions
+        .iter()
+        .filter_map(|session| {
+            session.turns.last().map(|turn| ReviewSessionCursor {
+                session_id: session.id.clone(),
+                book_id: session.book_id.clone(),
+                latest_user_turn_ordinal: turn.user_turn_ordinal,
+            })
+        })
+        .collect();
+    cursors.sort_by(|left, right| left.session_id.cmp(&right.session_id));
+    cursors
+}
+
+fn reconcile_agent_history_review_jobs(
+    state: &mut AppState,
+    now: &str,
+) -> Result<(), ToolError> {
+    let cursors = agent_history_review_cursors(&state.agent_history);
+    state.store.reconcile_review_jobs(&cursors, now)?;
+    Ok(())
+}
+
 fn ensure_active_agent_session(history: &mut AgentHistory, book_id: &str, now: &str) -> usize {
     if let Some(active_id) = history.active_by_book.get(book_id) {
         if let Some(i) = history
@@ -1627,6 +1653,9 @@ fn route_open_book(state: &mut AppState, body: &str, now: &str) -> Reply {
     };
     if dir.is_empty() {
         return validation("INVALID_RANGE", "book.open 的 dir 不能为空");
+    }
+    if let Err(error) = reconcile_agent_history_review_jobs(state, now) {
+        return err_reply(&error);
     }
     let book = match Book::load(dir) {
         Ok(book) => book,
@@ -3629,6 +3658,11 @@ fn route_workbench_input_import(state: &mut AppState, body: &str, now: &str) -> 
             Ok(value) => value,
             Err(e) => return err_reply(&e),
         };
+    if target_dir != state.book_dir {
+        if let Err(error) = reconcile_agent_history_review_jobs(state, now) {
+            return err_reply(&error);
+        }
+    }
     if let Err(e) = std::fs::create_dir_all(&target_dir) {
         return err_reply(&ToolError {
             error_code: "WORKBENCH_INPUT_WRITE_FAILED".into(),
@@ -7185,11 +7219,17 @@ fn route_agent_chat(state: &mut AppState, body: &str, now: &str) -> Reply {
             if let Err(error) = finalize_agent_turn_completed(state, &turn_ref, &outcome, now) {
                 return err_reply(&error);
             }
+            if let Err(error) = reconcile_agent_history_review_jobs(state, now) {
+                return err_reply(&error);
+            }
             ok_json(&outcome)
         }
         Err(error) => {
             if let Err(finalize_error) = finalize_agent_turn_failed(state, &turn_ref, &error, now) {
                 return err_reply(&finalize_error);
+            }
+            if let Err(reconcile_error) = reconcile_agent_history_review_jobs(state, now) {
+                return err_reply(&reconcile_error);
             }
             err_reply(&error)
         }
@@ -7367,6 +7407,9 @@ fn run_precommitted_agent_chat(
 }
 
 fn route_agent_new(state: &mut AppState, now: &str) -> Reply {
+    if let Err(error) = reconcile_agent_history_review_jobs(state, now) {
+        return err_reply(&error);
+    }
     let book_id = state.book.base.book_id.clone();
     let ordinal = state.agent_history.sessions.len();
     let session = new_agent_session(&book_id, now, ordinal);
@@ -11640,6 +11683,14 @@ mod tests {
         );
         assert_eq!(chat.status, 200);
         assert!(s.messages.len() > 1);
+        assert_eq!(s.store.review_state().review_jobs.len(), 1);
+        assert_eq!(
+            (
+                s.store.review_state().review_jobs[0].from_turn_exclusive,
+                s.store.review_state().review_jobs[0].to_turn_inclusive,
+            ),
+            (0, 1)
+        );
 
         let history = get(&mut s, "/agent/history");
         assert_eq!(history.status, 200);
@@ -11713,6 +11764,11 @@ mod tests {
         );
         assert_eq!(reply.status, 502);
         assert!(*observed_pending.lock().unwrap());
+        assert_eq!(s.store.review_state().review_jobs.len(), 1);
+        assert_eq!(
+            s.store.review_state().review_jobs[0].status,
+            memory::ReviewJobStatus::Queued
+        );
 
         let first = load_agent_history(&Some(history_path.clone()));
         let first_value = serde_json::to_value(&first).unwrap();
@@ -11748,6 +11804,49 @@ mod tests {
         }
         .evidence_id();
         assert_eq!(restarted_evidence_id, first_evidence_id);
+    }
+
+    #[test]
+    fn new_chat_boundary_repairs_history_job_commit_gap_idempotently() {
+        let memory_path = tmp("agent-review-job-commit-gap");
+        let mut s = state_named("agent-review-job-commit-gap");
+        let history_path = tmp("agent-review-job-commit-gap-history");
+        let _ = std::fs::remove_file(&history_path);
+        s.history_path = Some(history_path.clone());
+        s.adapter = Box::new(ChatStubAdapter::scripted(vec![AssistantTurn {
+            text: Some("durable answer".into()),
+            tool_calls: vec![],
+            usage_total_tokens: Some(3),
+        }]));
+        let temporary = memory_path.with_extension("replace.tmp");
+        let _ = std::fs::remove_file(&temporary);
+        let _ = std::fs::remove_dir_all(&temporary);
+        std::fs::create_dir_all(&temporary).unwrap();
+
+        let reply = post_at(
+            &mut s,
+            "/agent/chat",
+            r#"{"message":"I learn best from worked examples"}"#,
+            "2026-07-14T00:00:00Z",
+        );
+        assert_eq!(reply.status, 500);
+        assert!(s.store.review_state().review_jobs.is_empty());
+        let history = serde_json::to_value(load_agent_history(&Some(history_path))).unwrap();
+        assert_eq!(history["sessions"][0]["turns"][0]["status"], "completed");
+
+        std::fs::remove_dir_all(temporary).unwrap();
+        assert_eq!(
+            post_at(&mut s, "/agent/new", "{}", "2026-07-14T00:01:00Z").status,
+            200
+        );
+        assert_eq!(s.store.review_state().review_jobs.len(), 1);
+        let job_id = s.store.review_state().review_jobs[0].job_id.clone();
+        assert_eq!(
+            post_at(&mut s, "/agent/new", "{}", "2026-07-14T00:02:00Z").status,
+            200
+        );
+        assert_eq!(s.store.review_state().review_jobs.len(), 1);
+        assert_eq!(s.store.review_state().review_jobs[0].job_id, job_id);
     }
 
     #[test]
