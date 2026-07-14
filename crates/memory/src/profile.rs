@@ -551,7 +551,7 @@ struct ProfileFactIdentity<'a> {
     supersedes: &'a [String],
 }
 
-fn build_profile_fact(
+pub(crate) fn build_profile_fact(
     mut input: CreateProfileFact,
     mut supersedes: Vec<String>,
     now: &str,
@@ -725,7 +725,7 @@ fn initial_status(source: FactSource, scope: &ProfileScope) -> Result<FactStatus
     }
 }
 
-fn reject_excluded_evidence(
+pub(crate) fn reject_excluded_evidence(
     exclusions: &[EvidenceExclusion],
     evidence: &[EvidenceRef],
 ) -> Result<(), ToolError> {

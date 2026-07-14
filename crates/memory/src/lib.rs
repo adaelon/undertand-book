@@ -4,12 +4,14 @@
 //! 时间戳与落盘路径由调用方注入(确定性可测,守 A2)。
 //! S7a 从 runtime 抽成独立 crate(拆 runtime↔reader 循环依赖,reader/runtime 共同依赖它)`[ADR-0027]`。
 mod document;
+mod operation;
 mod profile;
 mod projection;
 mod reading_state;
 
 use document::StoredMemory;
 pub use document::{MemoryDocument, MEMORY_SCHEMA_VERSION};
+pub use operation::{ExplicitProfileFact, MemoryOp, MemoryOpOutcome};
 pub use profile::{
     Applicability, BackgroundClaim, CapabilityClaim, Confidence, ConstraintClaim,
     CreateProfileFact, EvidenceExclusion, EvidenceRef, ExclusionReason, FactSource, FactStatus,
@@ -372,6 +374,9 @@ impl MemoryStore {
     /// `memory.save`:内容寻址 upsert + note/highlight citation 自动派生 `[ADR-0026]`。
     /// `now` = generated_at/last_used 时间戳(调用方注入,不进 mem_id ⇒ id 时间无关)。
     pub fn save(&mut self, input: SaveInput, now: &str) -> Result<Record, ToolError> {
+        if input.mem_type == operation::PROFILE_EVIDENCE_RECORD_TYPE {
+            return Err(profile_evidence_protected());
+        }
         validate_selection_context(&input)?;
         let mem_id = input.mem_id.clone().unwrap_or_else(|| {
             content_mem_id(
@@ -450,6 +455,9 @@ impl MemoryStore {
         else {
             return Err(memory_not_found(&input.mem_id));
         };
+        if self.document.records[index].mem_type == operation::PROFILE_EVIDENCE_RECORD_TYPE {
+            return Err(profile_evidence_protected());
+        }
         if input.content.trim().is_empty() {
             return Err(ToolError {
                 error_code: "INVALID_MEMORY_CONTENT".into(),
@@ -542,6 +550,12 @@ impl MemoryStore {
     /// `memory.delete(mem_id)`:用户**显式删**一条(区别于议题7 后台 usage 遗忘 `[ADR-0018]`)`[V3 §4.3]`。
     /// 找不到 → `MEMORY_NOT_FOUND`(禁静默降级,守 `[ADR-0015]`)。S10g:agent 提议「撤销」走它。
     pub fn delete(&mut self, mem_id: &str) -> Result<(), ToolError> {
+        if self.document.records.iter().any(|record| {
+            record.mem_id == mem_id
+                && record.mem_type == operation::PROFILE_EVIDENCE_RECORD_TYPE
+        }) {
+            return Err(profile_evidence_protected());
+        }
         let mut candidate = self.projection_mutation_candidate()?;
         let before = candidate.records.len();
         candidate.records.retain(|r| r.mem_id != mem_id);
@@ -565,6 +579,7 @@ impl MemoryStore {
             .document
             .records
             .iter()
+            .filter(|record| record.mem_type != operation::PROFILE_EVIDENCE_RECORD_TYPE)
             .filter(|r| q.book_id.as_ref().is_none_or(|b| &r.book_id == b))
             .filter(|r| q.mem_type.as_ref().is_none_or(|t| &r.mem_type == t))
             .filter(|r| q.layer.as_ref().is_none_or(|l| &r.layer == l))
@@ -795,6 +810,14 @@ fn memory_not_found(mem_id: &str) -> ToolError {
         error_code: "MEMORY_NOT_FOUND".into(),
         category: "not_found".into(),
         message: format!("memory 记录不存在: {mem_id}"),
+    }
+}
+
+fn profile_evidence_protected() -> ToolError {
+    ToolError {
+        error_code: "PROFILE_EVIDENCE_PROTECTED".into(),
+        category: "conflict".into(),
+        message: "profile evidence can only be changed through MemoryOp".into(),
     }
 }
 
