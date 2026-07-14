@@ -8,10 +8,10 @@
 //! socket 绑定 / worker 线程 / Mutex 锁 / 时间戳生成 / adapter 装配在 `main.rs`。
 //! 外层 E agent(S10f)、静态资源(S10e)留后续子切片。
 use memory::{
-    classify_profile_fact_privacy, Anchor, Applicability, ExplicitProfileFact, MemoryOp,
-    MemoryOpOutcome, MemoryStore, ProfilePrivacyClass, ProfileResolutionContext, ProfileScope,
-    RecallQuery, ReplaceInput, SaveInput, SelectedRange, SelectionContext, SelectionResolution,
-    Sensitivity, SnapshotContext, SnapshotRequest,
+    classify_profile_fact_privacy, classify_profile_privacy, Anchor, Applicability,
+    ExplicitProfileFact, MemoryOp, MemoryOpOutcome, MemoryStore, ProfilePrivacyClass,
+    ProfileResolutionContext, ProfileScope, RecallQuery, ReplaceInput, SaveInput, SelectedRange,
+    SelectionContext, SelectionResolution, Sensitivity, SnapshotContext, SnapshotRequest,
 };
 use read_tools::{
     Book, ContentProfileId, PaperLandmarkKind, PaperMinimapBase, PaperRegionKind,
@@ -21,10 +21,12 @@ use reader::{
     project_paper_minimap_lens, PaperMinimapActor, PaperMinimapApplyOutcome, PaperMinimapCommand,
     Reader, SavedUserOverlay, DEFAULT_RADIUS,
 };
-use runtime::memory_intent::{evaluate_memory_intent, MemoryIntentDecision, MemoryIntentRequest};
+use runtime::memory_intent::{
+    evaluate_memory_intent, scan_memory_intent, MemoryIntentDecision, MemoryIntentRequest,
+};
 use runtime::orchestrator::{
-    new_session, run_with_ephemeral_context, OuterConfig, ProfileMemoryUpdate,
-    ProfileMemoryUpdateKind,
+    new_session, run_with_ephemeral_context, OuterConfig, OuterOutcome, ProfileMemoryUpdate,
+    ProfileMemoryUpdateKind, ProfileUsageTrace,
 };
 use runtime::{
     guided_route_from, synthesize, unvisited_back, AdapterError, AssistantTurn, CompletionRequest,
@@ -33,6 +35,7 @@ use runtime::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -770,10 +773,38 @@ pub struct AskQuote {
     pub resolved_quote: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentAssistantStatus {
+    PendingAssistant,
+    Completed,
+    Failed,
+}
+
+fn completed_agent_assistant_status() -> AgentAssistantStatus {
+    AgentAssistantStatus::Completed
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct AgentTurnError {
+    pub error_code: String,
+    pub category: String,
+    pub message: String,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AgentChatTurn {
+    #[serde(default)]
+    pub turn_id: String,
+    #[serde(default)]
+    pub user_turn_ordinal: u64,
     pub user: String,
-    pub outcome: runtime::orchestrator::OuterOutcome,
+    #[serde(default = "completed_agent_assistant_status")]
+    pub status: AgentAssistantStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<OuterOutcome>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<AgentTurnError>,
     pub question_anchor_lid: Option<String>,
     pub question_quote: Option<AskQuote>,
 }
@@ -878,14 +909,174 @@ fn new_agent_session(book_id: &str, now: &str, ordinal: usize) -> AgentChatSessi
     }
 }
 
+fn stable_agent_turn_id(session_id: &str, user_turn_ordinal: u64) -> String {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in format!("{session_id}\u{1f}{user_turn_ordinal}").bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("turn_{hash:016x}")
+}
+
+fn validate_agent_turn(turn: &AgentChatTurn) -> Result<(), ToolError> {
+    if turn.turn_id.trim().is_empty() || turn.user_turn_ordinal == 0 || turn.user.trim().is_empty() {
+        return Err(agent_history_internal(
+            "agent turn id/ordinal/user must not be empty",
+        ));
+    }
+    let valid = matches!(
+        (turn.status, turn.outcome.is_some(), turn.error.is_some()),
+        (AgentAssistantStatus::PendingAssistant, false, false)
+            | (AgentAssistantStatus::Completed, true, false)
+            | (AgentAssistantStatus::Failed, false, true)
+    );
+    if !valid {
+        return Err(agent_history_internal(format!(
+            "agent turn {} has inconsistent assistant state",
+            turn.turn_id
+        )));
+    }
+    Ok(())
+}
+
+fn migrate_agent_history(mut history: AgentHistory) -> Result<AgentHistory, ToolError> {
+    let mut turn_ids = HashSet::new();
+    for session in &mut history.sessions {
+        if session.id.trim().is_empty() || session.book_id.trim().is_empty() {
+            return Err(agent_history_internal(
+                "agent session id/book_id must not be empty",
+            ));
+        }
+        let mut previous_ordinal = 0;
+        for (index, turn) in session.turns.iter_mut().enumerate() {
+            if turn.user_turn_ordinal == 0 {
+                turn.user_turn_ordinal = u64::try_from(index)
+                    .ok()
+                    .and_then(|value| value.checked_add(1))
+                    .ok_or_else(|| agent_history_internal("agent turn ordinal overflow"))?;
+            }
+            if turn.user_turn_ordinal <= previous_ordinal {
+                return Err(agent_history_internal(format!(
+                    "agent session {} turn ordinals are not strictly increasing",
+                    session.id
+                )));
+            }
+            if turn.turn_id.trim().is_empty() {
+                turn.turn_id = stable_agent_turn_id(&session.id, turn.user_turn_ordinal);
+            }
+            validate_agent_turn(turn)?;
+            if !turn_ids.insert(turn.turn_id.clone()) {
+                return Err(agent_history_internal(format!(
+                    "duplicate agent turn_id: {}",
+                    turn.turn_id
+                )));
+            }
+            previous_ordinal = turn.user_turn_ordinal;
+        }
+    }
+    Ok(history)
+}
+
+fn agent_history_temporary_path(path: &Path) -> PathBuf {
+    path.with_extension("replace.tmp")
+}
+
+fn agent_history_backup_path(path: &Path) -> PathBuf {
+    path.with_extension("replace.bak")
+}
+
+fn recover_interrupted_agent_history_commit(path: &Path) -> Result<(), ToolError> {
+    let backup = agent_history_backup_path(path);
+    if !path.exists() && backup.exists() {
+        std::fs::rename(&backup, path)
+            .map_err(|error| agent_history_internal(format!("恢复 agent history 备份失败: {error}")))?;
+    }
+    Ok(())
+}
+
+fn persist_agent_history_atomically(path: &Path, history: &AgentHistory) -> Result<(), ToolError> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)
+        .map_err(|error| agent_history_internal(format!("建 agent history 目录失败: {error}")))?;
+    let serialized = serde_json::to_string_pretty(history)
+        .map_err(|error| agent_history_internal(format!("序列化 agent history 失败: {error}")))?;
+    let temporary = agent_history_temporary_path(path);
+    let backup = agent_history_backup_path(path);
+    if temporary.exists() {
+        std::fs::remove_file(&temporary).map_err(|error| {
+            agent_history_internal(format!("清理 agent history 临时文件失败: {error}"))
+        })?;
+    }
+    if backup.exists() {
+        std::fs::remove_file(&backup).map_err(|error| {
+            agent_history_internal(format!("清理 agent history 备份失败: {error}"))
+        })?;
+    }
+
+    let write_result = (|| -> Result<(), std::io::Error> {
+        let mut file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temporary)?;
+        file.write_all(serialized.as_bytes())?;
+        file.sync_all()
+    })();
+    if let Err(error) = write_result {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(agent_history_internal(format!(
+            "写 agent history 临时文件失败: {error}"
+        )));
+    }
+
+    let had_original = path.exists();
+    if had_original {
+        if let Err(error) = std::fs::rename(path, &backup) {
+            let _ = std::fs::remove_file(&temporary);
+            return Err(agent_history_internal(format!(
+                "备份旧 agent history 失败: {error}"
+            )));
+        }
+    }
+    if let Err(error) = std::fs::rename(&temporary, path) {
+        if had_original {
+            let _ = std::fs::rename(&backup, path);
+        }
+        let _ = std::fs::remove_file(&temporary);
+        return Err(agent_history_internal(format!(
+            "切换 agent history 快照失败: {error}"
+        )));
+    }
+    if had_original {
+        let _ = std::fs::remove_file(backup);
+    }
+    Ok(())
+}
+
+fn agent_history_internal(message: impl Into<String>) -> ToolError {
+    ToolError {
+        error_code: "INTERNAL_ERROR".into(),
+        category: "internal".into(),
+        message: message.into(),
+    }
+}
+
 pub fn load_agent_history(path: &Option<PathBuf>) -> AgentHistory {
-    let Some(p) = path.as_ref() else {
+    let Some(path) = path.as_ref() else {
         return AgentHistory::default();
     };
-    let Ok(raw) = std::fs::read_to_string(p) else {
+    if recover_interrupted_agent_history_commit(path).is_err() {
+        return AgentHistory::default();
+    }
+    let Ok(raw) = std::fs::read_to_string(path) else {
         return AgentHistory::default();
     };
-    serde_json::from_str::<AgentHistory>(&raw).unwrap_or_default()
+    serde_json::from_str::<AgentHistory>(&raw)
+        .ok()
+        .and_then(|history| migrate_agent_history(history).ok())
+        .unwrap_or_default()
 }
 
 fn save_agent_history_path(
@@ -895,27 +1086,146 @@ fn save_agent_history_path(
     let Some(path) = path else {
         return Ok(());
     };
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| ToolError {
-            error_code: "INTERNAL_ERROR".into(),
-            category: "internal".into(),
-            message: format!("建 agent history 目录失败: {e}"),
-        })?;
+    for session in &history.sessions {
+        for turn in &session.turns {
+            validate_agent_turn(turn)?;
+        }
     }
-    let body = serde_json::to_string_pretty(history).map_err(|e| ToolError {
-        error_code: "INTERNAL_ERROR".into(),
-        category: "internal".into(),
-        message: format!("序列化 agent history 失败: {e}"),
-    })?;
-    std::fs::write(path, body).map_err(|e| ToolError {
-        error_code: "INTERNAL_ERROR".into(),
-        category: "internal".into(),
-        message: format!("写 agent history 失败: {e}"),
-    })
+    persist_agent_history_atomically(path, history)
 }
 
 fn save_agent_history(state: &AppState) -> Result<(), ToolError> {
     save_agent_history_path(&state.history_path, &state.agent_history)
+}
+
+#[derive(Debug, Clone)]
+struct AgentTurnRef {
+    session_id: String,
+    turn_id: String,
+    user_turn_ordinal: u64,
+}
+
+fn commit_agent_history_candidate(
+    state: &mut AppState,
+    candidate: AgentHistory,
+) -> Result<(), ToolError> {
+    save_agent_history_path(&state.history_path, &candidate)?;
+    state.agent_history = candidate;
+    Ok(())
+}
+
+fn precommit_agent_turn(
+    state: &mut AppState,
+    book_id: &str,
+    user: String,
+    question_anchor_lid: Option<String>,
+    question_quote: Option<AskQuote>,
+    now: &str,
+) -> Result<AgentTurnRef, ToolError> {
+    let mut candidate = state.agent_history.clone();
+    let session_index = ensure_active_agent_session(&mut candidate, book_id, now);
+    let session = &mut candidate.sessions[session_index];
+    let user_turn_ordinal = session
+        .turns
+        .last()
+        .map(|turn| turn.user_turn_ordinal)
+        .unwrap_or(0)
+        .checked_add(1)
+        .ok_or_else(|| agent_history_internal("agent turn ordinal overflow"))?;
+    let turn_id = stable_agent_turn_id(&session.id, user_turn_ordinal);
+    if session.turns.is_empty() {
+        session.title = compact_title(&user);
+    }
+    session.updated_at = now.into();
+    session.turns.push(AgentChatTurn {
+        turn_id: turn_id.clone(),
+        user_turn_ordinal,
+        user,
+        status: AgentAssistantStatus::PendingAssistant,
+        outcome: None,
+        error: None,
+        question_anchor_lid,
+        question_quote,
+    });
+    let turn_ref = AgentTurnRef {
+        session_id: session.id.clone(),
+        turn_id,
+        user_turn_ordinal,
+    };
+    let messages = session.messages.clone();
+    commit_agent_history_candidate(state, candidate)?;
+    state.messages = messages;
+    Ok(turn_ref)
+}
+
+fn finalize_agent_turn(
+    state: &mut AppState,
+    turn_ref: &AgentTurnRef,
+    status: AgentAssistantStatus,
+    outcome: Option<OuterOutcome>,
+    error: Option<AgentTurnError>,
+    now: &str,
+) -> Result<(), ToolError> {
+    let mut candidate = state.agent_history.clone();
+    let session = candidate
+        .sessions
+        .iter_mut()
+        .find(|session| session.id == turn_ref.session_id)
+        .ok_or_else(|| agent_history_internal("precommitted agent session disappeared"))?;
+    let turn = session
+        .turns
+        .iter_mut()
+        .find(|turn| turn.turn_id == turn_ref.turn_id)
+        .ok_or_else(|| agent_history_internal("precommitted agent turn disappeared"))?;
+    if turn.status != AgentAssistantStatus::PendingAssistant {
+        return Err(agent_history_internal(format!(
+            "agent turn {} is already finalized",
+            turn.turn_id
+        )));
+    }
+    turn.status = status;
+    turn.outcome = outcome;
+    turn.error = error;
+    validate_agent_turn(turn)?;
+    session.updated_at = now.into();
+    session.messages = state.messages.clone();
+    commit_agent_history_candidate(state, candidate)
+}
+
+fn finalize_agent_turn_completed(
+    state: &mut AppState,
+    turn_ref: &AgentTurnRef,
+    outcome: &OuterOutcome,
+    now: &str,
+) -> Result<(), ToolError> {
+    finalize_agent_turn(
+        state,
+        turn_ref,
+        AgentAssistantStatus::Completed,
+        Some(outcome.clone()),
+        None,
+        now,
+    )
+}
+
+fn finalize_agent_turn_failed(
+    state: &mut AppState,
+    turn_ref: &AgentTurnRef,
+    error: &ToolError,
+    now: &str,
+) -> Result<(), ToolError> {
+    finalize_agent_turn(
+        state,
+        turn_ref,
+        AgentAssistantStatus::Failed,
+        None,
+        Some(AgentTurnError {
+            error_code: error.error_code.clone(),
+            category: error.category.clone(),
+            message: error.message.clone(),
+        }),
+        now,
+    )
 }
 
 fn ensure_active_agent_session(history: &mut AgentHistory, book_id: &str, now: &str) -> usize {
@@ -6467,7 +6777,7 @@ fn current_content_profile(book: &Book) -> &'static str {
     }
 }
 
-fn stable_memory_operation_id(session_id: &str, turn_ordinal: usize, message: &str) -> String {
+fn stable_memory_operation_id(session_id: &str, turn_ordinal: u64, message: &str) -> String {
     let mut hash = 0xcbf29ce484222325_u64;
     for byte in format!("{session_id}\u{1f}{turn_ordinal}\u{1f}{message}").bytes() {
         hash ^= u64::from(byte);
@@ -6557,28 +6867,32 @@ rules=Report the operation result accurately. Runtime already owns this profile 
     ))
 }
 
-fn rejected_memory_chat_reply(snapshot_revision: u64, error_code: &str, message: &str) -> Reply {
-    ok_json(&json!({
-        "answer": message,
-        "incomplete": false,
-        "warning": error_code,
-        "turns": 0,
-        "tokens_spent": 0,
-        "effects": [],
-        "trace": [],
-        "profile_usage": {
-            "snapshot_revision": snapshot_revision,
-            "injected_fact_ids": [],
-            "claimed_used_fact_ids": [],
-            "influences": []
+fn rejected_memory_outcome(
+    snapshot_revision: u64,
+    error_code: &str,
+    message: &str,
+) -> OuterOutcome {
+    OuterOutcome {
+        answer: Some(message.into()),
+        incomplete: false,
+        warning: Some(error_code.into()),
+        turns: 0,
+        tokens_spent: 0,
+        effects: Vec::new(),
+        trace: Vec::new(),
+        profile_usage: ProfileUsageTrace {
+            snapshot_revision,
+            injected_fact_ids: Vec::new(),
+            claimed_used_fact_ids: Vec::new(),
+            influences: Vec::new(),
         },
-        "memory_updates": [{
-            "kind": "rejected",
-            "operation_id": null,
-            "fact_ids": [],
-            "message": message
-        }]
-    }))
+        memory_updates: vec![ProfileMemoryUpdate {
+            kind: ProfileMemoryUpdateKind::Rejected,
+            operation_id: None,
+            fact_ids: Vec::new(),
+            message: Some(message.into()),
+        }],
+    }
 }
 
 fn profile_memory_error(error_code: &str, message: impl Into<String>) -> ToolError {
@@ -6828,15 +7142,71 @@ fn route_agent_chat(state: &mut AppState, body: &str, now: &str) -> Reply {
             "question_anchor_lid 必须等于 question_quote lid",
         );
     }
+    if scan_memory_intent(msg).is_some()
+        && classify_profile_privacy(msg) == ProfilePrivacyClass::Secret
+    {
+        if let Some(session_id) = state
+            .agent_history
+            .active_by_book
+            .get(&state.book.base.book_id)
+            .cloned()
+        {
+            state.agent_history.pending_memory_ops.remove(&session_id);
+        }
+        return ok_json(&rejected_memory_outcome(
+            state.store.projection_revision(),
+            "SECRET_PROFILE_REJECTED",
+            "credentials and other secrets are never stored in profile memory",
+        ));
+    }
     let agent_message = agent_question_with_provenance(msg, question_quote.as_ref());
     let current_book_id = state.book.base.book_id.clone();
-    let session_index =
-        ensure_active_agent_session(&mut state.agent_history, &current_book_id, now);
-    let session_id = state.agent_history.sessions[session_index].id.clone();
-    let turn_ordinal = state.agent_history.sessions[session_index].turns.len();
+    let turn_ref = match precommit_agent_turn(
+        state,
+        &current_book_id,
+        display_user,
+        question_anchor_lid,
+        question_quote,
+        now,
+    ) {
+        Ok(turn_ref) => turn_ref,
+        Err(error) => return err_reply(&error),
+    };
+    let result = run_precommitted_agent_chat(
+        state,
+        msg,
+        &agent_message,
+        &current_book_id,
+        &turn_ref,
+        now,
+    );
+    match result {
+        Ok(outcome) => {
+            if let Err(error) = finalize_agent_turn_completed(state, &turn_ref, &outcome, now) {
+                return err_reply(&error);
+            }
+            ok_json(&outcome)
+        }
+        Err(error) => {
+            if let Err(finalize_error) = finalize_agent_turn_failed(state, &turn_ref, &error, now) {
+                return err_reply(&finalize_error);
+            }
+            err_reply(&error)
+        }
+    }
+}
+
+fn run_precommitted_agent_chat(
+    state: &mut AppState,
+    msg: &str,
+    agent_message: &str,
+    current_book_id: &str,
+    turn_ref: &AgentTurnRef,
+    now: &str,
+) -> Result<OuterOutcome, ToolError> {
     let content_profile = current_content_profile(&state.book);
     let profile_context = ProfileResolutionContext {
-        book_id: Some(current_book_id.clone()),
+        book_id: Some(current_book_id.into()),
         content_profile: Some(content_profile.into()),
         now: Some(now.into()),
         ..Default::default()
@@ -6844,7 +7214,11 @@ fn route_agent_chat(state: &mut AppState, body: &str, now: &str) -> Reply {
     let mut memory_events = Vec::new();
     let mut memory_updates = Vec::new();
     let mut confirmation_applied = false;
-    if let Some(pending) = state.agent_history.pending_memory_ops.remove(&session_id) {
+    if let Some(pending) = state
+        .agent_history
+        .pending_memory_ops
+        .remove(&turn_ref.session_id)
+    {
         if is_sensitive_memory_confirmation(msg) {
             let retry = pending.clone();
             match state
@@ -6864,9 +7238,9 @@ fn route_agent_chat(state: &mut AppState, body: &str, now: &str) -> Reply {
                         state
                             .agent_history
                             .pending_memory_ops
-                            .insert(session_id.clone(), retry);
+                            .insert(turn_ref.session_id.clone(), retry);
                     }
-                    return err_reply(&error);
+                    return Err(error);
                 }
             }
         } else {
@@ -6886,33 +7260,28 @@ fn route_agent_chat(state: &mut AppState, body: &str, now: &str) -> Reply {
 
     if !confirmation_applied {
         let active_facts = state.store.resolve_profile_facts(&profile_context);
-        let operation_id = stable_memory_operation_id(&session_id, turn_ordinal, msg);
-        let decision = match evaluate_memory_intent(
+        let operation_id = stable_memory_operation_id(
+            &turn_ref.session_id,
+            turn_ref.user_turn_ordinal,
+            msg,
+        );
+        let decision = evaluate_memory_intent(
             state.adapter.as_ref(),
             &MemoryIntentRequest {
                 operation_id: &operation_id,
-                book_id: &current_book_id,
+                book_id: current_book_id,
                 content_profile,
                 paper_subtype: None,
                 domain: None,
                 message: msg,
                 active_facts: &active_facts,
             },
-        ) {
-            Ok(decision) => decision,
-            Err(error) => return err_reply(&error),
-        };
+        )?;
         match decision {
             MemoryIntentDecision::NoIntent => {}
             MemoryIntentDecision::Apply { operation } => {
-                match state.store.apply_memory_op(operation, now) {
-                    Ok(outcome) => record_memory_outcome(
-                        &outcome,
-                        &mut memory_events,
-                        &mut memory_updates,
-                    ),
-                    Err(error) => return err_reply(&error),
-                }
+                let outcome = state.store.apply_memory_op(operation, now)?;
+                record_memory_outcome(&outcome, &mut memory_events, &mut memory_updates);
             }
             MemoryIntentDecision::NeedsClarification {
                 intent,
@@ -6944,7 +7313,7 @@ fn route_agent_chat(state: &mut AppState, body: &str, now: &str) -> Reply {
                 state
                     .agent_history
                     .pending_memory_ops
-                    .insert(session_id.clone(), operation);
+                    .insert(turn_ref.session_id.clone(), operation);
                 memory_events.push(json!({
                     "kind": "needs_sensitive_confirmation",
                     "preview": preview,
@@ -6961,17 +7330,17 @@ fn route_agent_chat(state: &mut AppState, body: &str, now: &str) -> Reply {
                 error_code,
                 message,
             } => {
-                return rejected_memory_chat_reply(
+                return Ok(rejected_memory_outcome(
                     state.store.projection_revision(),
                     &error_code,
                     &message,
-                );
+                ));
             }
         }
     }
 
     let snapshot_request = SnapshotRequest::current(SnapshotContext {
-        book_id: Some(current_book_id),
+        book_id: Some(current_book_id.into()),
         content_profile: Some(content_profile.into()),
         now: Some(now.into()),
         ..Default::default()
@@ -6982,7 +7351,7 @@ fn route_agent_chat(state: &mut AppState, body: &str, now: &str) -> Reply {
         .clone();
     let memory_context = memory_ephemeral_context(&memory_events);
     // 字段级不相交借用:book(shared)+ store/reader/messages(mut)+ adapter(shared)。
-    match run_with_ephemeral_context(
+    run_with_ephemeral_context(
         &state.book,
         &mut state.store,
         &mut state.reader,
@@ -6991,32 +7360,10 @@ fn route_agent_chat(state: &mut AppState, body: &str, now: &str) -> Reply {
         &profile_snapshot,
         memory_context.as_deref(),
         memory_updates,
-        &agent_message,
+        agent_message,
         now,
         OuterConfig::default(),
-    ) {
-        Ok(out) => {
-            let book_id = state.book.base.book_id.clone();
-            let idx = ensure_active_agent_session(&mut state.agent_history, &book_id, now);
-            let session = &mut state.agent_history.sessions[idx];
-            if session.turns.is_empty() {
-                session.title = compact_title(&display_user);
-            }
-            session.updated_at = now.into();
-            session.messages = state.messages.clone();
-            session.turns.push(AgentChatTurn {
-                user: display_user,
-                outcome: out.clone(),
-                question_anchor_lid,
-                question_quote,
-            });
-            if let Err(e) = save_agent_history(state) {
-                return err_reply(&e);
-            }
-            ok_json(&out)
-        }
-        Err(e) => err_reply(&e),
-    }
+    )
 }
 
 fn route_agent_new(state: &mut AppState, now: &str) -> Reply {
@@ -7896,6 +8243,10 @@ mod tests {
     struct ChatRecordingAdapter {
         seen_messages: Arc<Mutex<Vec<Vec<Message>>>>,
     }
+    struct PrecommitInspectingFailAdapter {
+        history_path: PathBuf,
+        observed_pending: Arc<Mutex<bool>>,
+    }
     struct MemoryFlowAdapter {
         structured_outputs: RefCell<VecDeque<serde_json::Value>>,
         chat_answers: RefCell<VecDeque<String>>,
@@ -7937,6 +8288,28 @@ mod tests {
                 text: Some("profile observed".into()),
                 tool_calls: vec![],
                 usage_total_tokens: Some(3),
+            })
+        }
+    }
+
+    impl ModelAdapter for PrecommitInspectingFailAdapter {
+        fn complete(&self, _req: CompletionRequest) -> Result<ParsedResponse, AdapterError> {
+            unimplemented!("precommit ordering test does not use complete")
+        }
+
+        fn chat(&self, _: &[Message], _: &[ToolSpec]) -> Result<AssistantTurn, AdapterError> {
+            let persisted: serde_json::Value = serde_json::from_str(
+                &std::fs::read_to_string(&self.history_path)
+                    .expect("history must exist before provider chat"),
+            )
+            .unwrap();
+            assert_eq!(
+                persisted["sessions"][0]["turns"][0]["status"],
+                "pending_assistant"
+            );
+            *self.observed_pending.lock().unwrap() = true;
+            Err(AdapterError {
+                message: "provider failed after observing precommit".into(),
             })
         }
     }
@@ -11278,6 +11651,13 @@ mod tests {
             "1.1"
         );
         assert_eq!(history["current"]["turns"][0]["user"], "用户看到的问题");
+        assert_eq!(history["current"]["turns"][0]["user_turn_ordinal"], 1);
+        assert_eq!(history["current"]["turns"][0]["status"], "completed");
+        assert!(history["current"]["turns"][0]["outcome"].is_object());
+        assert!(history["current"]["turns"][0].get("error").is_none());
+        assert!(history["current"]["turns"][0]["turn_id"]
+            .as_str()
+            .is_some_and(|turn_id| !turn_id.is_empty()));
         assert_eq!(
             history["current"]["turns"][0]["question_quote"]["quote"],
             "引用"
@@ -11311,6 +11691,137 @@ mod tests {
         let deleted: serde_json::Value = serde_json::from_str(&deleted.body).unwrap();
         assert_eq!(deleted["active_session_id"], new_id);
         assert_eq!(deleted["sessions"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn provider_failure_persists_stable_failed_turn_before_restart() {
+        let mut s = state_named("agent-precommit-provider-failure");
+        let history_path = tmp("agent-precommit-provider-failure-history");
+        let _ = std::fs::remove_file(&history_path);
+        s.history_path = Some(history_path.clone());
+        let observed_pending = Arc::new(Mutex::new(false));
+        s.adapter = Box::new(PrecommitInspectingFailAdapter {
+            history_path: history_path.clone(),
+            observed_pending: observed_pending.clone(),
+        });
+
+        let reply = post_at(
+            &mut s,
+            "/agent/chat",
+            r#"{"message":"I prefer detailed examples"}"#,
+            "2026-07-14T00:00:00Z",
+        );
+        assert_eq!(reply.status, 502);
+        assert!(*observed_pending.lock().unwrap());
+
+        let first = load_agent_history(&Some(history_path.clone()));
+        let first_value = serde_json::to_value(&first).unwrap();
+        let turn = &first_value["sessions"][0]["turns"][0];
+        assert_eq!(turn["user"], "I prefer detailed examples");
+        assert_eq!(turn["user_turn_ordinal"], 1);
+        assert_eq!(turn["status"], "failed");
+        assert_eq!(turn["error"]["error_code"], "PROVIDER_ERROR");
+        assert!(turn.get("outcome").is_none());
+        let turn_id = turn["turn_id"].as_str().unwrap().to_string();
+        let session_id = first_value["sessions"][0]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let first_evidence_id = memory::EvidenceRef::Turn {
+            session_id,
+            turn_id: turn_id.clone(),
+        }
+        .evidence_id();
+
+        let restarted = load_agent_history(&Some(history_path));
+        let restarted_value = serde_json::to_value(&restarted).unwrap();
+        assert_eq!(restarted_value["sessions"][0]["turns"][0]["turn_id"], turn_id);
+        let restarted_evidence_id = memory::EvidenceRef::Turn {
+            session_id: restarted_value["sessions"][0]["id"]
+                .as_str()
+                .unwrap()
+                .into(),
+            turn_id: restarted_value["sessions"][0]["turns"][0]["turn_id"]
+                .as_str()
+                .unwrap()
+                .into(),
+        }
+        .evidence_id();
+        assert_eq!(restarted_evidence_id, first_evidence_id);
+    }
+
+    #[test]
+    fn failed_precommit_does_not_mutate_history_or_call_provider() {
+        let mut s = state_named("agent-precommit-write-failure");
+        let blocker = tmp("agent-precommit-write-failure-blocker");
+        let _ = std::fs::remove_file(&blocker);
+        let _ = std::fs::remove_dir_all(&blocker);
+        std::fs::write(&blocker, "not a directory").unwrap();
+        s.history_path = Some(blocker.join("agent-history.json"));
+        let seen_messages = Arc::new(Mutex::new(Vec::new()));
+        s.adapter = Box::new(ChatRecordingAdapter {
+            seen_messages: seen_messages.clone(),
+        });
+
+        let reply = post_at(
+            &mut s,
+            "/agent/chat",
+            r#"{"message":"I prefer diagrams"}"#,
+            "2026-07-14T00:00:00Z",
+        );
+        assert_eq!(reply.status, 500);
+        assert!(seen_messages.lock().unwrap().is_empty());
+        assert!(s.agent_history.sessions.is_empty());
+        assert_eq!(s.messages.len(), 1);
+        assert_eq!(s.messages[0].role, runtime::Role::System);
+    }
+
+    #[test]
+    fn legacy_history_migration_assigns_stable_turn_identity() {
+        let mut s = state_named("agent-history-legacy-turn-migration");
+        let history_path = tmp("agent-history-legacy-turn-migration-file");
+        let _ = std::fs::remove_file(&history_path);
+        s.history_path = Some(history_path.clone());
+        s.adapter = Box::new(ChatStubAdapter::scripted(vec![AssistantTurn {
+            text: Some("legacy answer".into()),
+            tool_calls: vec![],
+            usage_total_tokens: Some(3),
+        }]));
+        assert_eq!(
+            post_at(
+                &mut s,
+                "/agent/chat",
+                r#"{"message":"legacy question"}"#,
+                "2026-07-14T00:00:00Z",
+            )
+            .status,
+            200
+        );
+
+        let mut legacy: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&history_path).unwrap()).unwrap();
+        let turn = legacy["sessions"][0]["turns"][0]
+            .as_object_mut()
+            .unwrap();
+        turn.remove("turn_id");
+        turn.remove("user_turn_ordinal");
+        turn.remove("status");
+        turn.remove("error");
+        std::fs::write(&history_path, serde_json::to_string_pretty(&legacy).unwrap()).unwrap();
+
+        let first = serde_json::to_value(load_agent_history(&Some(history_path.clone()))).unwrap();
+        let second = serde_json::to_value(load_agent_history(&Some(history_path))).unwrap();
+        assert_eq!(first["sessions"][0]["turns"][0]["user_turn_ordinal"], 1);
+        assert_eq!(first["sessions"][0]["turns"][0]["status"], "completed");
+        assert!(first["sessions"][0]["turns"][0]["outcome"].is_object());
+        assert_eq!(
+            first["sessions"][0]["turns"][0]["turn_id"],
+            second["sessions"][0]["turns"][0]["turn_id"]
+        );
+        assert!(!first["sessions"][0]["turns"][0]["turn_id"]
+            .as_str()
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
