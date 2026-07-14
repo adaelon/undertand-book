@@ -1,31 +1,44 @@
-# SESSION_CHECKPOINT - 2026-07-14 17:03 +08:00
+# SESSION_CHECKPOINT - 2026-07-14 17:40 +08:00
 
 ## Freshness check
-- Commit at write time: `e4a0d87 feat(runtime): add paper memory policy`.
-- This checkpoint will be committed separately; on read compare with `git log --oneline -6` and trust newer implementation commits.
+- Commit at write time: `5db5b21 feat(memory): consolidate global profile candidates`.
+- This checkpoint is committed separately; compare with `git log --oneline -8` and trust newer implementation commits.
 
-## What's in progress
-Reliable profile memory M3.1-M3.3 are complete; M3.4 event-driven global consolidation is active and is the last implementation slice before the M3 total gate.
+## Current state
+Reliable profile memory M3 is complete. Neutral, technical_learning, paper, and event-driven global consolidation are implemented, documented, independently committed, and have passed the M3 total gate.
 
-## Next steps (ready to hand off)
-1. Read `docs/切片方案-memory可靠画像升级.md` sections 2.3, 4.4, 5.5, M3.4, and MEM-E07/E13; freeze affected-key and evidence-independence rules.
-2. Read `crates/memory/src/{profile,review,operation,document}.rs`; identify the atomic mutation seam for Pending global candidates and reverse recomputation after correction/forget.
-3. Add `crates/runtime/src/global_consolidation.rs` only if orchestration belongs outside MemoryStore; do not scan transcripts or auto-confirm inferred global facts.
-4. Add deterministic contracts: one book never promotes; two books/three independent evidence produce only Pending; confirm affects the next snapshot; reject/expiry/evidence deletion retract candidates.
-5. Run affected and full M3 tests, Web typecheck, strict clippy, rustfmt/diff checks; update architecture/code trail and commit M3.4 independently.
+## Completed slices
+- M3.1 `8eaf17a`: versioned MemoryPolicy registry + Neutral/orphaned fallback.
+- M3.2 `00e80a2`: technical_learning activity, evidence-backed review hypotheses, and typed hints.
+- M3.3 `e4a0d87`: paper IDs/LIDs-only private projection and explicit mode/stage choices.
+- M3.4 `5db5b21`: affected-key global promotion, Pending trust gate, and reverse reconciliation.
+- Per-slice checkpoint commits: `1ff2a7e`, `0a25e16`, `a846d49`;this final checkpoint follows M3 total-gate evidence.
 
-## Uncommitted / unfinished
-- Tracked files: only this checkpoint before its docs commit.
-- M3.4 event-driven global consolidation and the final M3 total gate: not implemented.
-- Existing untracked materials, logs, screenshots, test results, and temporary directories belong to the user and remain untouched.
+## Verification
+- `cargo test -p read-tools -p memory -p runtime -p server`: 122/69/99/128 passed.
+- `pnpm -C packages/web typecheck`: passed.
+- strict clippy `--all-targets --no-deps -D warnings`: passed;memory has no exemption,other crates use only frozen 5/3/7-class baselines.
+- M3.4 target rustfmt check and `git diff --check`: passed.
+- Whole-repo rustfmt still reports pre-existing out-of-slice differences;no unrelated formatting was applied.
+
+## Key decisions
+- MemoryPolicy state is rebuildable and in-process;ProfileFact ledger remains the durable truth.
+- Paper policy keeps public paper text/claims/gloss in sidecars and carries only guide IDs,term keys,and evidence LIDs.
+- Global consolidation belongs to `crates/memory`,so source mutation,promotion index,job record,and revision share one atomic document commit.
+- Consolidation reads affected ledger keys only;it never scans transcript/history or calls a model.
+- At least two books plus three distinct evidence refs creates only an AgentInferred Global Pending candidate;confirmation is always explicit.
+- Correction,expiry,forget,and evidence exclusion reverse-reconcile stale candidates;Book facts still override Global during resolution.
+
+## Next stage (not started)
+M4.1 Profile governance API. First align the contract for global/current-book facts,pending candidates,evidence,status,confirm/reject/correct/forget/change-scope,and collection rules. Every mutation must pass MemoryOp/validators and stale `document_revision` must conflict rather than overwrite.
 
 ## Cold-start reading sequence
-1. `docs/切片方案-memory可靠画像升级.md` - sections 2.3, 4.4, 5.5, M3.4, MEM-E07, and MEM-E13.
-2. `docs/adr/0075-runtime-owned-evidence-backed-profile-memory.md` - trust and global promotion boundary.
-3. `crates/memory/src/profile.rs` - fact identity, trust state, resolver, confirm/expire/forget.
-4. `crates/memory/src/review.rs` and `crates/memory/src/document.rs` - atomic review commit and durable indexes/state.
-5. `docs/架构.md` and `docs/代码链路.md` - completed M3.1-M3.3 data flows and latest commit `e4a0d87`.
+1. `docs/切片方案-memory可靠画像升级.md` M4.1 and M4 total-gate sections.
+2. `docs/adr/0075-runtime-owned-evidence-backed-profile-memory.md`.
+3. `crates/memory/src/{profile,operation,global_consolidation,review,document}.rs`.
+4. `crates/runtime/src/profile_api.rs` and resident `/profile/memory` routes in `crates/server/src/lib.rs`.
+5. `docs/架构.md` Event-driven global consolidation and the tail of `docs/代码链路.md`.
 
-## Decisions made this session
-- ADR-0075 remains authoritative: consolidation consumes ledger facts and independent evidence only; inferred Global facts remain Pending until explicit confirmation.
-- M3.3: PaperPolicyContext carries guide IDs/LIDs only; public paper text stays in sidecars, and mode/stage require confirmed UserStated paper-specific preferences.
+## Worktree
+- After the final docs commit there should be no M3 tracked changes.
+- Existing untracked materials,logs,screenshots,test results,and temporary directories belong to the user and remain untouched.
