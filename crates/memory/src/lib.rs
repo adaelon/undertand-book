@@ -5,6 +5,7 @@
 //! S7a 从 runtime 抽成独立 crate(拆 runtime↔reader 循环依赖,reader/runtime 共同依赖它)`[ADR-0027]`。
 mod document;
 mod profile;
+mod projection;
 mod reading_state;
 
 use document::StoredMemory;
@@ -14,6 +15,10 @@ pub use profile::{
     CreateProfileFact, EvidenceExclusion, EvidenceRef, ExclusionReason, FactSource, FactStatus,
     ForgetProfileFactOutcome, GoalClaim, PreferenceClaim, ProfileFact, ProfilePayload,
     ProfileResolutionContext, ProfileScope, Sensitivity,
+};
+pub use projection::{
+    estimate_snapshot_tokens, PendingTurnRef, ProfileStatus, ReaderProfileSnapshot,
+    SnapshotBudgets, SnapshotCandidate, SnapshotContext, SnapshotItem, SnapshotRequest,
 };
 pub use reading_state::{BookReadingState, EngagementSignals, LegacyReaderProfileProjection};
 use read_tools::ToolError;

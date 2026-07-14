@@ -10,6 +10,7 @@ use ts_rs::TS;
 
 pub mod goldset;
 pub mod orchestrator;
+pub mod profile_context;
 
 /// scope 档(P1 扩到 local/chapter/cross_chapter/global)`[ADR-0016/0033]`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

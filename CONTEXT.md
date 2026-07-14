@@ -244,6 +244,12 @@ note 卡片的展示层 `[ADR-0043]`:note 内容仍来自 memory,overlay 只负�
 ## ProfileFact
 一条带来源、证据、信任状态和生命周期的结构化用户画像事实。`scope` 表示事实属于全局还是某本书,`applicability` 表示它适用于全部内容、某个 `content_profile`、论文 subtype 或领域;两者正交。状态:NEW(详见 [docs/adr/0075])。
 
+## 显式画像证据记录 (explicit profile evidence record)
+用户明确 remember 或 correct 画像时授权保留的来源原话,供 `ProfileFact` 审计与来源检查;它不是普通 context memory、不进入 snapshot,执行 forget 时必须与事实值一起物理删除。状态:NEW(详见 [docs/adr/0075])。
+
+## 画像隐私分类 (profile privacy class)
+画像写入前的三档确定性分类:`Normal` 可按显式意图保存,`Sensitive` 只允许用户明示并二次确认本地明文风险,`Secret` 在任何情况下都拒绝保存;分类 validator 可升级风险但不得降级。状态:NEW(详见 [docs/adr/0075])。
+
 ## GlobalReaderProfile
 从有效 `ProfileFact` 投影出的跨书稳定读者画像,只包含相关背景、领域能力、长期目标、稳定讲解偏好和长期约束。它不吸收单本阅读反应、临时情绪或普通 context memory。状态:NEW(详见 [docs/adr/0075])。
 
@@ -255,6 +261,9 @@ runtime 在读者回合开始前从 `GlobalReaderProfile`、当前 `BookReadingS
 
 ## MemoryIntentGate
 住户用户消息进入主 agent 前的显式记忆意图入口:结构化 UI 动作直接生成记忆操作,明确的“记住/纠正/忘记”表达才触发前台结构化抽取。未命中的普通表达不增加当前回答延迟,由后台审核兜底。状态:NEW(详见 [docs/adr/0075])。
+
+## MemoryOp
+由结构化 UI 动作或 `MemoryIntentGate` 前台抽取产生的 typed 画像记忆操作,统一表达 remember、correct 和 forget;它必须经过 source、scope、sensitivity 与 schema 校验后才能原子修改 `MemoryDocument`,不等同于普通 `memory.save(type=context)`。状态:NEW(详见 [docs/adr/0075])。
 
 ## ReviewJob / 记忆 consolidation
 `ReviewJob` 是对住户会话未审核回合做增量事实抽取的持久任务;全局 consolidation 只消费已落账事实与跨书独立证据,生成待确认的全局候选。二者都由 runtime 调度并以 watermark 保证可恢复,不依赖主 agent 自愿调用 `memory.save/recall`。状态:BOUNDARY_CHANGE(详见 [docs/adr/0075])。

@@ -171,6 +171,17 @@ struct EvidenceExclusion {
 - 推断事实失去全部有效证据后退出 snapshot;用户明确事实可保留规范化结论并显示“来源已删除”。
 - “忘记”删除事实和值,只保留不含内容的 exclusion,防止旧 turn 被再次抽取。
 
+#### §2.3.1 显式画像证据
+
+**决策**:M1 将明确 remember/correct 原话作为内部 `profile_evidence` Record,与引用它的 `ProfileFact` 在同一 `MemoryDocument` mutation 中原子提交。
+
+**否决**:
+- 提前实现 M2.2 turn precommit:越过 M1 边界。
+- 无 evidence 的明确事实:无法审计或防止 forget 后重抽取。
+
+**命门**:内部 evidence 不进普通 recall/snapshot;forget 必须物理删值并只留 content-free exclusion。
+**何时回头**:M2.2 提供可恢复 turn evidence 后,普通后台抽取直接使用 `EvidenceRef::Turn`。
+
 ### 2.4 ReviewState
 
 ```rust
@@ -270,6 +281,38 @@ enum ProfileStatus { Current, Stale }
 ```
 
 Core 为每区设置独立 token budget,只序列化规范化结论、状态和 ID。当前用户指令不属于 snapshot budget,且始终优先。
+
+#### §2.6.1 Snapshot 预算计量
+
+**决策**:各区对实际序列化的 ID、状态与文本独立使用确定性估算单位(CJK=1,其他字符=0.25,向上取整)。
+
+**否决**:
+- Provider tokenizer:无法为多 Provider 提供稳定的 Core 契约。
+- 只计文本:会忽略真实注入的 ID 与状态开销。
+
+**何时回头**:产品锁定单一 Provider tokenizer 且可保持跨版本稳定时。
+
+#### §2.6.2 Snapshot 分区所有权
+
+**决策**:M1 Core 过滤并分区 ledger facts,同时以 typed input 接收 profile candidates 与 pending context;M1 生产路径后两区先为空。
+
+**否决**:
+- M1 内建 `MemoryPolicy`:会提前侵入 M3 边界。
+- M1 内建 ReviewJob pending:会提前侵入 M2 边界。
+
+**命门**:五区输入都必须经过 Core 统一序列化与独立预算。
+**何时回头**:M2/M3 接入时只替换候选生产者,不改 snapshot 分区契约。
+
+#### §2.6.3 Snapshot 文本边界
+
+**决策**:M1 只把内建 typed payload 按 `status + fact_id + kind.key + JSON-escaped value` 序列化为只读数据,不注入未验证 `Extension`。
+
+**否决**:
+- 自由文本 prompt:无法区分画像数据与指令。
+- 直接注入 `Extension`:M3 namespace schema validator 尚不存在。
+
+**命门**:snapshot 外层必须明示“只读数据、当前用户指令优先”。
+**何时回头**:M3 为命名空间提供已验证的 typed serializer 时。
 
 ### 2.7 ProfileUsageTrace
 
@@ -395,6 +438,17 @@ affected profile key changes
 | historical backfill candidate | Pending | 不可以,集中预览确认 |
 
 敏感信息例外:secret 永拒;敏感画像永不自动推断;用户明确保存须二次确认本地明文风险。
+
+#### §4.1.1 画像隐私分类
+
+**决策**:确定性 validator 将写入分为 Normal、Sensitive 与 Secret;Secret 永拒,Sensitive 只在用户明示后经下一条消息确认才写本地明文。
+
+**否决**:
+- 仅由 extractor 判风险:模型不能作隐私终闸。
+- Secret 确认后保存:确认不能解锁凭据类数据。
+
+**命门**:validator 可将 extractor 结果升级为 Sensitive/Secret,绝不得降级;非确认的下一条消息取消 pending sensitive op。
+**何时回头**:当新法域、产品同步或加密改变数据保管边界时。
 
 ### 4.2 scope 与 applicability
 
