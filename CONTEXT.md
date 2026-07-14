@@ -244,11 +244,23 @@ note 卡片的展示层 `[ADR-0043]`:note 内容仍来自 memory,overlay 只负�
 ## ProfileFact
 一条带来源、证据、信任状态和生命周期的结构化用户画像事实。`scope` 表示事实属于全局还是某本书,`applicability` 表示它适用于全部内容、某个 `content_profile`、论文 subtype 或领域;两者正交。状态:NEW(详见 [docs/adr/0075])。
 
+## ProfileFactCapture (画像事实采集方式)
+记录画像事实是在当前交互中采集,还是从用户选定的历史对话中回填;它与事实 `source` 正交。`HistoricalBackfill` 保留原始来源,但确认前始终为 `Pending`。状态:NEW(2026-07-14 M4 §0.5)。
+
+## CollectionRule (画像采集规则)
+用户对未来画像采集边界的持久规则,以画像事实类别、可选语义键与 `scope`/`applicability` 确定性限定哪些信息不得自动或回填进入画像。当前显式 `remember` 可作单次例外且不解除规则;已有事实只有经显式 `forget` 才清除。状态:NEW(2026-07-14 M4 §0.5)。
+
+## ProfileScopeChange (画像作用域变更)
+用户把既有画像事实显式重述到新 `scope` 的治理动作。它产生 `UserStated + Confirmed` 后继事实并 supersede 旧事实,不原地改写事实权威或审计链。状态:NEW(2026-07-14 M4 §0.5)。
+
 ## 显式画像证据记录 (explicit profile evidence record)
 用户明确 remember 或 correct 画像时授权保留的来源原话,供 `ProfileFact` 审计与来源检查;它不是普通 context memory、不进入 snapshot,执行 forget 时必须与事实值一起物理删除。状态:NEW(详见 [docs/adr/0075])。
 
 ## 画像隐私分类 (profile privacy class)
 画像写入前的三档确定性分类:`Normal` 可按显式意图保存,`Sensitive` 只允许用户明示并二次确认本地明文风险,`Secret` 在任何情况下都拒绝保存;分类 validator 可升级风险但不得降级。状态:NEW(详见 [docs/adr/0075])。
+
+## ReaderPrivateStorageGate (读者私人存储闸)
+保证本地明文读者记忆只对当前 OS 用户可读写的隐私边界。权限无法收紧或验证时必须停止私人 memory 读写并暴露可诊断状态,但不阻断不依赖私人记忆的普通阅读。状态:NEW(2026-07-14 M4 §0.5)。
 
 ## GlobalReaderProfile
 从有效 `ProfileFact` 投影出的跨书稳定读者画像,只包含相关背景、领域能力、长期目标、稳定讲解偏好和长期约束。它不吸收单本阅读反应、临时情绪或普通 context memory。状态:NEW(详见 [docs/adr/0075])。
@@ -265,14 +277,26 @@ runtime 在读者回合开始前从 `GlobalReaderProfile`、当前 `BookReadingS
 ## MemoryOp
 由结构化 UI 动作或 `MemoryIntentGate` 前台抽取产生的 typed 画像记忆操作,统一表达 remember、correct 和 forget;它必须经过 source、scope、sensitivity 与 schema 校验后才能原子修改 `MemoryDocument`,不等同于普通 `memory.save(type=context)`。状态:NEW(详见 [docs/adr/0075])。
 
+## ProfileGovernanceMutation (画像治理变更)
+用户通过治理面发起的 typed 画像变更,由 `operation_id` 标识意图并以 `expected_document_revision` 保护并发状态。已成功的同 ID 同内容重放返回原结果,同 ID 异内容或未见请求的 stale revision 均冲突。状态:NEW(2026-07-14 M4 §0.5)。
+
+## ProfileGovernanceSurface (画像治理面)
+住户读者查看画像来源、集中审核并主动纠错的控制面,不是画像产生的必经流程。普通低风险更新保持自动且只给非阻塞通知;全局 Pending、敏感信息、不可逆 forget 与显式历史回填才要求用户主动动作。状态:NEW(2026-07-14 M4 §0.5)。
+
 ## ReviewJob / 记忆 consolidation
 `ReviewJob` 是对住户会话未审核回合做增量事实抽取的持久任务;全局 consolidation 只消费已落账事实与跨书独立证据,生成待确认的全局候选。二者都由 runtime 调度并以 watermark 保证可恢复,不依赖主 agent 自愿调用 `memory.save/recall`。状态:BOUNDARY_CHANGE(详见 [docs/adr/0075])。
+
+## HistoricalBackfillJob (历史画像回填任务)
+用户显式发起、用于预览历史语义画像候选的持久任务,范围冻结为选定的住户会话及其当时的用户回合上界。其候选均以 `HistoricalBackfill + Pending` 进入集中审核;失败或取消保留已完成部分与进度,重试只补剩余范围,清除只移除任务与未确认候选,已确认事实只能经显式 `forget` 删除。状态:NEW(2026-07-14 M4 §0.5)。
 
 ## MemoryPolicy
 `content_profile` 为读者记忆提供的语义解释策略:定义哪些私人信号值得提取、如何派生 profile-specific state、以及如何给快照候选排序。它不得改变 MemoryDocument、信任/删除规则、LID/citation 红线或直接生成自由文本提示;未知 profile 使用中性策略。状态:NEW(详见 [docs/adr/0075])。
 
 ## ProfileUsageTrace
 一次住户回答对画像的可检查使用轨迹,区分 runtime 确定性注入的事实与模型声明实际参考的事实。模型声明不是客观因果证明,只能作为弱统计和用户解释入口。状态:NEW(详见 [docs/adr/0075])。
+
+## ProfileMarkdownProjection (画像 Markdown 投影)
+`reader-profile.md` 与 `reading-handbook.md` 是从画像真相源单向覆写的可检查派生视图,不接受反向写入。其 `current/stale/missing/unreadable` 状态由文件标记的 `projection_revision` 与当前真相源对比得出,不成为新的持久真相。状态:BOUNDARY_CHANGE(2026-07-14 M4 §0.5)。
 
 ## qa 提问活动 (qa activity)
 读者在某 LID 留下的不同 qa 记录数,只证明发生过提问并构成私人关注信号,不单独证明困惑、难度或掌握程度。`technical_learning` 可将其用于回看排序,`paper` 等其他 MemoryPolicy 按自己的语义解释;`puzzle_heat` 仅是旧实现字段名。状态:BOUNDARY_CHANGE(详见 [docs/adr/0041], [docs/adr/0075])。

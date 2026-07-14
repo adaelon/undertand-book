@@ -1,0 +1,5 @@
+# Profile governance and backfill ownership
+
+Status: Accepted, 2026-07-14.
+
+Profile governance remains a resident-only mutation surface over `MemoryDocument` v2: every change passes typed reducers with exact-replay receipts and `document_revision` concurrency checks; scope changes create user-confirmed successors, while deterministic collection rules constrain automatic and backfill capture without masquerading as facts, and a later explicit remember may create one exception without removing its rule. Historical backfill freezes the user-authorized resident-turn range and retains source-preserving Pending candidates in durable job state; cancellation or failure keeps partial progress, retry fills only the remainder, and clearing removes only unconfirmed candidates. Markdown v2 stays a revision-tagged derived view, private storage fails closed without blocking ordinary reading, and the Web surface remains automatic-first and quiet except for pending, sensitive, destructive, or explicitly requested backfill actions.
