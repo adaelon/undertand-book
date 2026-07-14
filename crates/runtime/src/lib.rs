@@ -115,10 +115,14 @@ impl ProviderConfig {
         let base_url = base_url.into().trim().trim_end_matches('/').to_string();
         let model = model.into().trim().to_string();
         if api_key.is_empty() {
-            return Err(AdapterError { message: "Provider API Key 不能为空".into() });
+            return Err(AdapterError {
+                message: "Provider API Key 不能为空".into(),
+            });
         }
         if model.is_empty() {
-            return Err(AdapterError { message: "Provider Model 不能为空".into() });
+            return Err(AdapterError {
+                message: "Provider Model 不能为空".into(),
+            });
         }
         let parsed = url::Url::parse(&base_url).map_err(|error| AdapterError {
             message: format!("Provider Base URL 非法:{error}"),
@@ -128,7 +132,12 @@ impl ProviderConfig {
                 message: "Provider Base URL 必须是带主机名的 http/https URL".into(),
             });
         }
-        Ok(ProviderConfig { mode, api_key, base_url, model })
+        Ok(ProviderConfig {
+            mode,
+            api_key,
+            base_url,
+            model,
+        })
     }
 
     fn from_getter<F>(mut get: F) -> Result<ProviderConfig, AdapterError>
@@ -2721,7 +2730,8 @@ mod tests {
             " secret ",
             "https://provider.example/v1/",
             " model-name ",
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(config.mode, ProviderMode::ReAct);
         assert_eq!(config.api_key, "secret");
         assert_eq!(config.base_url, "https://provider.example/v1");
@@ -2735,14 +2745,8 @@ mod tests {
     #[test]
     fn provider_tool_name_sanitizes_dotted_names_and_collisions() {
         let mut used = std::collections::HashSet::new();
-        assert_eq!(
-            provider_tool_name("book.text", 0, &mut used),
-            "book_text"
-        );
-        assert_eq!(
-            provider_tool_name("book_text", 1, &mut used),
-            "book_text_2"
-        );
+        assert_eq!(provider_tool_name("book.text", 0, &mut used), "book_text");
+        assert_eq!(provider_tool_name("book_text", 1, &mut used), "book_text_2");
         assert_eq!(provider_tool_name("工具", 2, &mut used), "tool_3");
         assert!(provider_tool_name(&"a".repeat(80), 3, &mut used).len() <= 64);
     }

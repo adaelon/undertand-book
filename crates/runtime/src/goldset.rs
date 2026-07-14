@@ -122,7 +122,12 @@ pub fn build_report(results: Vec<ItemResult>) -> GoldReport {
         if evaluated == 0 {
             0.0
         } else {
-            results.iter().filter(|r| r.error.is_none()).map(f).sum::<f32>() / evaluated as f32
+            results
+                .iter()
+                .filter(|r| r.error.is_none())
+                .map(f)
+                .sum::<f32>()
+                / evaluated as f32
         }
     };
     let mean_recall = mean(&|r| r.recall);
@@ -197,7 +202,10 @@ pub fn run_goldset(
             // provider 错(瞬时,可重试 `[ADR-0015]`)重试一次;仍失败或非 provider 错则记 errored。
             Err(_) => match evaluate_item(book, adapter, item) {
                 Ok(r) => r,
-                Err(e) => errored_item(item, format!("[{}/{}] {}", e.category, e.error_code, e.message)),
+                Err(e) => errored_item(
+                    item,
+                    format!("[{}/{}] {}", e.category, e.error_code, e.message),
+                ),
             },
         };
         results.push(r);
@@ -208,7 +216,10 @@ pub fn run_goldset(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AdapterError, AssistantTurn, CompletionRequest, Message, ParsedResponse, RawCitation, ToolSpec};
+    use crate::{
+        AdapterError, AssistantTurn, CompletionRequest, Message, ParsedResponse, RawCitation,
+        ToolSpec,
+    };
     use base_schema::sample_base;
     use std::cell::RefCell;
     use std::collections::VecDeque;
@@ -274,13 +285,26 @@ mod tests {
     #[test]
     fn build_report_excludes_errored() {
         let ok = ItemResult {
-            id: "ok".into(), anchor_lid: "1.1".into(), scope_used: "local".into(),
-            incomplete: false, expect_cite: vec!["1.1".into()], returned_cite: vec!["1.1".into()],
-            structural_ok: true, dangling: vec![], recall: 1.0, precision: 1.0,
-            answer: Some("a".into()), error: None,
+            id: "ok".into(),
+            anchor_lid: "1.1".into(),
+            scope_used: "local".into(),
+            incomplete: false,
+            expect_cite: vec!["1.1".into()],
+            returned_cite: vec!["1.1".into()],
+            structural_ok: true,
+            dangling: vec![],
+            recall: 1.0,
+            precision: 1.0,
+            answer: Some("a".into()),
+            error: None,
         };
         let bad = errored_item(
-            &GoldItem { id: "bad".into(), q: "q".into(), anchor_lid: "1.1".into(), expect_cite: vec!["1.1".into()] },
+            &GoldItem {
+                id: "bad".into(),
+                q: "q".into(),
+                anchor_lid: "1.1".into(),
+                expect_cite: vec!["1.1".into()],
+            },
             "[provider/PROVIDER_ERROR] 空响应".into(),
         );
         let rep = build_report(vec![ok, bad]);
@@ -297,9 +321,12 @@ mod tests {
     }
     impl ModelAdapter for FakeAdapter {
         fn complete(&self, _req: CompletionRequest) -> Result<ParsedResponse, AdapterError> {
-            self.completes.borrow_mut().pop_front().ok_or_else(|| AdapterError {
-                message: "fake 脚本耗尽".into(),
-            })
+            self.completes
+                .borrow_mut()
+                .pop_front()
+                .ok_or_else(|| AdapterError {
+                    message: "fake 脚本耗尽".into(),
+                })
         }
         fn chat(&self, _: &[Message], _: &[ToolSpec]) -> Result<AssistantTurn, AdapterError> {
             unimplemented!("goldset 走内层 query,不涉外层 chat")
@@ -315,7 +342,11 @@ mod tests {
                 vec![ParsedResponse {
                     sufficient: true,
                     answer: Some("答案".into()),
-                    citations: vec![RawCitation { lid: "1.1".into(), text: "片段".into(), role: "support".into() }],
+                    citations: vec![RawCitation {
+                        lid: "1.1".into(),
+                        text: "片段".into(),
+                        role: "support".into(),
+                    }],
                     model_supplement: vec![],
                 }]
                 .into(),
