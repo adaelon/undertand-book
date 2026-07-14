@@ -9,7 +9,7 @@
 //! 外层 E agent(S10f)、静态资源(S10e)留后续子切片。
 use memory::{
     Anchor, MemoryStore, RecallQuery, ReplaceInput, SaveInput, SelectedRange, SelectionContext,
-    SelectionResolution,
+    SelectionResolution, SnapshotContext, SnapshotRequest,
 };
 use read_tools::{
     Book, ContentProfileId, PaperLandmarkKind, PaperMinimapBase, PaperRegionKind,
@@ -53,6 +53,8 @@ pub struct AppState {
     pub history_path: Option<PathBuf>,
     /// resident agent 的可恢复历史会话。只服务当前人类读者,不写 memory,不开放给访客。
     pub agent_history: AgentHistory,
+    /// Resident-only ReaderProfileSnapshot cache;visitor/MCP paths never read it.
+    pub profile_context_cache: runtime::profile_context::ProfileContextCache,
     /// P7 访客向导会话表:ephemeral ③,只给 MCP `book_guide` 使用,不写 durable memory。
     pub visitor_sessions: mcp::VisitorSessions,
     /// Last durable Workbench job revision loaded into `book`/`reader`.
@@ -6454,6 +6456,20 @@ fn route_agent_chat(state: &mut AppState, body: &str, now: &str) -> Reply {
     let agent_message = agent_question_with_provenance(msg, question_quote.as_ref());
     let current_book_id = state.book.base.book_id.clone();
     ensure_active_agent_session(&mut state.agent_history, &current_book_id, now);
+    let content_profile = match state.book.content_profile_id() {
+        ContentProfileId::TechnicalLearning => "technical_learning",
+        ContentProfileId::Paper => "paper",
+    };
+    let snapshot_request = SnapshotRequest::current(SnapshotContext {
+        book_id: Some(current_book_id),
+        content_profile: Some(content_profile.into()),
+        now: Some(now.into()),
+        ..Default::default()
+    });
+    let profile_snapshot = state
+        .profile_context_cache
+        .snapshot(&state.store, &snapshot_request)
+        .clone();
     // 字段级不相交借用:book(shared)+ store/reader/messages(mut)+ adapter(shared)。
     match run(
         &state.book,
@@ -6461,6 +6477,7 @@ fn route_agent_chat(state: &mut AppState, body: &str, now: &str) -> Reply {
         &mut state.reader,
         state.adapter.as_ref(),
         &mut state.messages,
+        &profile_snapshot,
         &agent_message,
         now,
         OuterConfig::default(),
@@ -6915,6 +6932,10 @@ mod tests {
         sample_base, FormulaComposition, FormulaParameter, FormulaSemantics, LidNode, NodeKind,
         ReadOnlyBase, Span,
     };
+    use memory::{
+        Applicability, CreateProfileFact, EvidenceRef, FactSource, PreferenceClaim, ProfilePayload,
+        ProfileScope, Sensitivity,
+    };
     use reader::DEFAULT_RADIUS;
     use runtime::{RawCitation, ToolCall};
     use std::cell::RefCell;
@@ -7347,6 +7368,7 @@ mod tests {
             session_path: None,
             history_path: None,
             agent_history: AgentHistory::default(),
+            profile_context_cache: runtime::profile_context::ProfileContextCache::default(),
             visitor_sessions: mcp::VisitorSessions::default(),
             workbench_loaded_revision: None,
         }
@@ -7356,6 +7378,9 @@ mod tests {
     /// `complete` 不走(内层 book.query 在 agent 测里不触发)。
     struct ChatStubAdapter {
         turns: RefCell<VecDeque<AssistantTurn>>,
+    }
+    struct ChatRecordingAdapter {
+        seen_messages: Arc<Mutex<Vec<Vec<Message>>>>,
     }
     impl ChatStubAdapter {
         fn scripted(turns: Vec<AssistantTurn>) -> Self {
@@ -7375,6 +7400,24 @@ mod tests {
                 .ok_or_else(|| AdapterError {
                     message: "chat 脚本耗尽".into(),
                 })
+        }
+    }
+    impl ModelAdapter for ChatRecordingAdapter {
+        fn complete(&self, _req: CompletionRequest) -> Result<ParsedResponse, AdapterError> {
+            unimplemented!("profile injection test does not use complete")
+        }
+
+        fn chat(
+            &self,
+            messages: &[Message],
+            _tools: &[ToolSpec],
+        ) -> Result<AssistantTurn, AdapterError> {
+            self.seen_messages.lock().unwrap().push(messages.to_vec());
+            Ok(AssistantTurn {
+                text: Some("profile observed".into()),
+                tool_calls: vec![],
+                usage_total_tokens: Some(3),
+            })
         }
     }
 
@@ -9207,6 +9250,7 @@ mod tests {
             session_path: None,
             history_path: None,
             agent_history: AgentHistory::default(),
+            profile_context_cache: runtime::profile_context::ProfileContextCache::default(),
             visitor_sessions: mcp::VisitorSessions::default(),
             workbench_loaded_revision: None,
         };
@@ -10015,6 +10059,7 @@ mod tests {
             session_path: None,
             history_path: None,
             agent_history: AgentHistory::default(),
+            profile_context_cache: runtime::profile_context::ProfileContextCache::default(),
             visitor_sessions: mcp::VisitorSessions::default(),
             workbench_loaded_revision: None,
         };
@@ -10218,6 +10263,54 @@ mod tests {
         let rc = post(&mut s, "/memory/recall", r#"{"layer":"session"}"#);
         assert_eq!(rc.status, 200);
         assert!(rc.body.contains("\"type\":\"highlight\""));
+    }
+
+    #[test]
+    fn new_resident_chat_injects_seeded_profile_without_persisting_snapshot() {
+        let mut s = state_named("agent-profile-injection");
+        s.store
+            .create_profile_fact(
+                CreateProfileFact {
+                    scope: ProfileScope::Global,
+                    applicability: Applicability::Any,
+                    payload: ProfilePayload::ExplanationPreference(PreferenceClaim {
+                        key: "depth".into(),
+                        value: "PRIVATE_PROFILE_SENTINEL".into(),
+                    }),
+                    source: FactSource::UserStated,
+                    evidence: vec![EvidenceRef::Turn {
+                        session_id: "seed".into(),
+                        turn_id: "turn".into(),
+                    }],
+                    confidence: None,
+                    sensitivity: Sensitivity::Normal,
+                    valid_until: None,
+                },
+                "2026-01-01T00:00:00Z",
+            )
+            .unwrap();
+        assert_eq!(post(&mut s, "/agent/new", "{}").status, 200);
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        s.adapter = Box::new(ChatRecordingAdapter {
+            seen_messages: Arc::clone(&seen),
+        });
+
+        let reply = post(&mut s, "/agent/chat", r#"{"message":"new chat question"}"#);
+        assert_eq!(reply.status, 200, "{}", reply.body);
+        assert!(reply.body.contains("profile observed"));
+        let requests = seen.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        let prompt = serde_json::to_string(&requests[0]).unwrap();
+        assert!(prompt.contains("reader_profile_snapshot.v1"));
+        assert!(prompt.contains("PRIVATE_PROFILE_SENTINEL"));
+        drop(requests);
+
+        let persisted_messages = serde_json::to_string(&s.messages).unwrap();
+        let persisted_history = serde_json::to_string(&s.agent_history).unwrap();
+        assert!(!persisted_messages.contains("reader_profile_snapshot.v1"));
+        assert!(!persisted_messages.contains("PRIVATE_PROFILE_SENTINEL"));
+        assert!(!persisted_history.contains("reader_profile_snapshot.v1"));
+        assert!(!persisted_history.contains("PRIVATE_PROFILE_SENTINEL"));
     }
 
     #[test]

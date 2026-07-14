@@ -676,7 +676,10 @@ mod tests {
         Direction, EdgeScope, GraphEdge, GraphNode, GraphNodeType, LidNode, NodeKind, ReadOnlyBase,
         Span,
     };
-    use memory::MemoryStore;
+    use memory::{
+        Applicability, CreateProfileFact, EvidenceRef, FactSource, MemoryStore, PreferenceClaim,
+        ProfilePayload, ProfileScope, Sensitivity,
+    };
     use read_tools::Book;
     use reader::{Reader, DEFAULT_RADIUS};
     use runtime::orchestrator::new_session;
@@ -685,14 +688,44 @@ mod tests {
         RawCitation, ToolSpec,
     };
     use std::path::PathBuf;
+    use std::sync::{Arc, Mutex};
 
     struct StubAdapter;
+    struct CompleteRecordingAdapter {
+        requests: Arc<Mutex<Vec<CompletionRequest>>>,
+    }
 
     impl ModelAdapter for StubAdapter {
         fn complete(&self, _req: CompletionRequest) -> Result<ParsedResponse, AdapterError> {
             Ok(ParsedResponse {
                 sufficient: true,
                 answer: Some("从入口开始沿结构边阅读。".into()),
+                citations: vec![RawCitation {
+                    lid: "1.1".into(),
+                    text: "片段".into(),
+                    role: "support".into(),
+                }],
+                model_supplement: vec![],
+            })
+        }
+
+        fn chat(
+            &self,
+            _messages: &[Message],
+            _tools: &[ToolSpec],
+        ) -> Result<AssistantTurn, AdapterError> {
+            Err(AdapterError {
+                message: "not used".into(),
+            })
+        }
+    }
+
+    impl ModelAdapter for CompleteRecordingAdapter {
+        fn complete(&self, req: CompletionRequest) -> Result<ParsedResponse, AdapterError> {
+            self.requests.lock().unwrap().push(req);
+            Ok(ParsedResponse {
+                sufficient: true,
+                answer: Some("public visitor answer".into()),
                 citations: vec![RawCitation {
                     lid: "1.1".into(),
                     text: "片段".into(),
@@ -818,6 +851,7 @@ mod tests {
             session_path: None,
             history_path: None,
             agent_history: crate::AgentHistory::default(),
+            profile_context_cache: runtime::profile_context::ProfileContextCache::default(),
             visitor_sessions: timeout_ms
                 .map(VisitorSessions::with_timeout_ms)
                 .unwrap_or_default(),
@@ -905,6 +939,56 @@ mod tests {
         assert_eq!(r.status, 404);
         assert!(r.body.contains("TOOL_NOT_FOUND"));
         assert_eq!(s.visitor_sessions.len(), 0);
+    }
+
+    #[test]
+    fn visitor_guide_never_reads_or_injects_reader_private_profile() {
+        let mut s = state(None);
+        s.store
+            .create_profile_fact(
+                CreateProfileFact {
+                    scope: ProfileScope::Global,
+                    applicability: Applicability::Any,
+                    payload: ProfilePayload::ExplanationPreference(PreferenceClaim {
+                        key: "private".into(),
+                        value: "PRIVATE_VISITOR_SENTINEL".into(),
+                    }),
+                    source: FactSource::UserStated,
+                    evidence: vec![EvidenceRef::Turn {
+                        session_id: "seed".into(),
+                        turn_id: "turn".into(),
+                    }],
+                    confidence: None,
+                    sensitivity: Sensitivity::Normal,
+                    valid_until: None,
+                },
+                "2026-01-01T00:00:00Z",
+            )
+            .unwrap();
+        let revision = s.store.projection_revision();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        s.adapter = Box::new(CompleteRecordingAdapter {
+            requests: Arc::clone(&requests),
+        });
+
+        let reply = dispatch_mcp_tool(
+            &mut s,
+            "book_guide",
+            json!({"intent":"public route", "anchor_lid":"1.1"}),
+            "1000",
+        );
+        assert_eq!(reply.status, 200, "{}", reply.body);
+        let requests = requests.lock().unwrap();
+        assert!(!requests.is_empty());
+        let serialized = requests
+            .iter()
+            .map(|request| format!("{}\n{}", request.system, request.user))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!serialized.contains("reader_profile_snapshot.v1"));
+        assert!(!serialized.contains("PRIVATE_VISITOR_SENTINEL"));
+        assert_eq!(s.store.projection_revision(), revision);
+        assert_eq!(s.store.profile_facts().len(), 1);
     }
 
     #[test]

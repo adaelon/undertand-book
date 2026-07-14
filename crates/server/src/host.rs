@@ -148,6 +148,7 @@ pub fn start_server(config: ServerHostConfig) -> Result<RunningServer, String> {
         session_path,
         history_path,
         agent_history,
+        profile_context_cache: runtime::profile_context::ProfileContextCache::default(),
         visitor_sessions: VisitorSessions::default(),
         workbench_loaded_revision: None,
     }));

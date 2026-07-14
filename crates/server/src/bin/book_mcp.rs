@@ -46,6 +46,7 @@ fn main() {
         session_path: None,
         history_path: None,
         agent_history: server::AgentHistory::default(),
+        profile_context_cache: runtime::profile_context::ProfileContextCache::default(),
         visitor_sessions: VisitorSessions::default(),
         workbench_loaded_revision: None,
     };

@@ -6,7 +6,7 @@
 //! 「问→跳转→高亮→记笔记」闭环 `[ADR-0007/0015]`。
 //! 内层 book.query 复用 `crate::query`(同一 adapter 触 `complete`)`[ADR-0025]`。
 use crate::{query, synthesize, AssistantTurn, Message, ModelAdapter, Role, ToolSpec};
-use memory::{Anchor, MemCitation, MemoryStore, RecallQuery, SaveInput};
+use memory::{Anchor, MemCitation, MemoryStore, ReaderProfileSnapshot, RecallQuery, SaveInput};
 use read_tools::{
     Book, PaperLandmarkKind, PaperMinimapAvailabilityStatus, PaperRegion, ReaderLayoutAction,
     ReaderLayoutApplyOutcome, ReaderLayoutEffect, ReaderLayoutProposal, ToolError,
@@ -1208,6 +1208,21 @@ pub fn new_session() -> Vec<Message> {
     vec![Message::system(SYSTEM_PROMPT)]
 }
 
+fn messages_with_profile_snapshot(
+    messages: &[Message],
+    profile_snapshot: &ReaderProfileSnapshot,
+) -> Vec<Message> {
+    let insert_at = messages
+        .iter()
+        .position(|message| message.role != Role::System)
+        .unwrap_or(messages.len());
+    let mut request = Vec::with_capacity(messages.len() + 1);
+    request.extend_from_slice(&messages[..insert_at]);
+    request.push(Message::system(profile_snapshot.to_prompt_data()));
+    request.extend_from_slice(&messages[insert_at..]);
+    request
+}
+
 /// 外层 E 编排 loop `[ADR-0026/0016/0030]`:LLM 自主多轮调工具,双重停机诚实标 incomplete。
 /// `reader`/`messages` 由调用方注入(与前端共享同一会话态视口 + 跨回合 messages `[ADR-0030 决策2]`);
 /// 本回合(一次调用)的可撤销 `effects` + 查询 `trace` 随 `OuterOutcome` 返回。
@@ -1218,6 +1233,7 @@ pub fn run(
     reader: &mut Reader,
     adapter: &dyn ModelAdapter,
     messages: &mut Vec<Message>,
+    profile_snapshot: &ReaderProfileSnapshot,
     question: &str,
     now: &str,
     cfg: OuterConfig,
@@ -1235,9 +1251,10 @@ pub fn run(
 
     loop {
         turns += 1;
+        let request_messages = messages_with_profile_snapshot(messages, profile_snapshot);
         let turn: AssistantTurn =
             adapter
-                .chat(messages.as_slice(), &tools)
+                .chat(&request_messages, &tools)
                 .map_err(|e| ToolError {
                     error_code: "PROVIDER_ERROR".into(),
                     category: "provider".into(),
@@ -1245,7 +1262,7 @@ pub fn run(
                 })?;
         spent += turn
             .usage_total_tokens
-            .unwrap_or_else(|| messages_estimate(messages.as_slice()));
+            .unwrap_or_else(|| messages_estimate(&request_messages));
 
         if trace_dbg {
             eprintln!(
@@ -1335,9 +1352,13 @@ mod tests {
         ToolCall,
     };
     use base_schema::{sample_base, GraphEdge, GraphNode, LidNode, NodeKind, ReadOnlyBase, Span};
+    use memory::{
+        Applicability, CreateProfileFact, EvidenceRef, FactSource, PreferenceClaim, ProfilePayload,
+        ProfileScope, Sensitivity, SnapshotContext, SnapshotRequest,
+    };
     use read_tools::{
-        LayoutRegion, LayoutSize, LayoutSizeKind, ReaderLayoutAction, ReaderLayoutEffect,
-        ReaderLayoutState,
+        ContentProfileId, LayoutRegion, LayoutSize, LayoutSizeKind, ReaderLayoutAction,
+        ReaderLayoutEffect, ReaderLayoutState,
     };
     use reader::DEFAULT_RADIUS;
     use std::cell::RefCell;
@@ -1352,6 +1373,10 @@ mod tests {
     struct ScriptedReActAdapter {
         chats: RefCell<VecDeque<String>>,
         completes: RefCell<VecDeque<ParsedResponse>>,
+    }
+    struct RecordingAdapter {
+        chats: RefCell<VecDeque<AssistantTurn>>,
+        seen_messages: RefCell<Vec<Vec<Message>>>,
     }
     impl FakeAdapter {
         fn new(chats: Vec<AssistantTurn>, completes: Vec<ParsedResponse>) -> Self {
@@ -1406,6 +1431,55 @@ mod tests {
                 })?;
             parse_react_assistant_turn(&raw)
         }
+    }
+
+    impl ModelAdapter for RecordingAdapter {
+        fn complete(&self, _req: CompletionRequest) -> Result<ParsedResponse, AdapterError> {
+            Err(AdapterError {
+                message: "recording adapter complete is not scripted".into(),
+            })
+        }
+
+        fn chat(
+            &self,
+            messages: &[Message],
+            _tools: &[ToolSpec],
+        ) -> Result<AssistantTurn, AdapterError> {
+            self.seen_messages.borrow_mut().push(messages.to_vec());
+            self.chats
+                .borrow_mut()
+                .pop_front()
+                .ok_or_else(|| AdapterError {
+                    message: "recording chat script exhausted".into(),
+                })
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run(
+        book: &Book,
+        store: &mut MemoryStore,
+        reader: &mut Reader,
+        adapter: &dyn ModelAdapter,
+        messages: &mut Vec<Message>,
+        question: &str,
+        now: &str,
+        cfg: OuterConfig,
+    ) -> Result<OuterOutcome, ToolError> {
+        let content_profile = match book.content_profile_id() {
+            ContentProfileId::TechnicalLearning => "technical_learning",
+            ContentProfileId::Paper => "paper",
+        };
+        let request = SnapshotRequest::current(SnapshotContext {
+            book_id: Some(book.base.book_id.clone()),
+            content_profile: Some(content_profile.into()),
+            now: Some(now.into()),
+            ..Default::default()
+        });
+        let snapshot = store.project_reader_profile_snapshot(&request);
+        super::run(
+            book, store, reader, adapter, messages, &snapshot, question, now, cfg,
+        )
     }
 
     fn book() -> Book {
@@ -1573,6 +1647,102 @@ mod tests {
             tool_calls: vec![],
             usage_total_tokens: Some(10),
         }
+    }
+
+    #[test]
+    fn profile_snapshot_is_ephemeral_and_frozen_across_the_tool_loop() {
+        let b = book();
+        let mut store = MemoryStore::open(tmp("profile-snapshot-loop")).unwrap();
+        store
+            .create_profile_fact(
+                CreateProfileFact {
+                    scope: ProfileScope::Global,
+                    applicability: Applicability::Any,
+                    payload: ProfilePayload::ExplanationPreference(PreferenceClaim {
+                        key: "depth".into(),
+                        value: "detailed".into(),
+                    }),
+                    source: FactSource::UserStated,
+                    evidence: vec![EvidenceRef::Turn {
+                        session_id: "seed".into(),
+                        turn_id: "turn".into(),
+                    }],
+                    confidence: None,
+                    sensitivity: Sensitivity::Normal,
+                    valid_until: None,
+                },
+                "2026-01-01T00:00:00Z",
+            )
+            .unwrap();
+        let request = SnapshotRequest::current(SnapshotContext {
+            book_id: Some(b.base.book_id.clone()),
+            content_profile: Some("technical_learning".into()),
+            now: Some("2026-01-02T00:00:00Z".into()),
+            ..Default::default()
+        });
+        let snapshot = store.project_reader_profile_snapshot(&request);
+        assert_eq!(snapshot.source_revision, 1);
+
+        let adapter = RecordingAdapter {
+            chats: RefCell::new(
+                vec![
+                    turn_calls(vec![call(
+                        "save",
+                        "memory.save",
+                        r#"{"type":"context","anchor_lid":"1.1","content":"loop mutation"}"#,
+                    )]),
+                    turn_final("done"),
+                ]
+                .into(),
+            ),
+            seen_messages: RefCell::new(Vec::new()),
+        };
+        let mut reader = Reader::new(&b, DEFAULT_RADIUS);
+        let mut messages = new_session();
+        let out = super::run(
+            &b,
+            &mut store,
+            &mut reader,
+            &adapter,
+            &mut messages,
+            &snapshot,
+            "remember the current request first",
+            "2026-01-02T00:00:00Z",
+            OuterConfig::default(),
+        )
+        .unwrap();
+        assert_eq!(out.answer.as_deref(), Some("done"));
+        assert_eq!(store.projection_revision(), 2);
+
+        let seen = adapter.seen_messages.borrow();
+        assert_eq!(seen.len(), 2);
+        for request_messages in seen.iter() {
+            let snapshots: Vec<&str> = request_messages
+                .iter()
+                .filter_map(|message| message.content.as_deref())
+                .filter(|content| content.starts_with("reader_profile_snapshot.v1"))
+                .collect();
+            assert_eq!(snapshots.len(), 1);
+            assert!(snapshots[0].contains("source_revision=1"));
+            assert!(snapshots[0].contains("detailed"));
+            let snapshot_index = request_messages
+                .iter()
+                .position(|message| {
+                    message
+                        .content
+                        .as_deref()
+                        .is_some_and(|content| content.starts_with("reader_profile_snapshot.v1"))
+                })
+                .unwrap();
+            let user_index = request_messages
+                .iter()
+                .position(|message| message.role == Role::User)
+                .unwrap();
+            assert!(snapshot_index < user_index);
+        }
+        let persisted = serde_json::to_string(&messages).unwrap();
+        assert!(!persisted.contains("reader_profile_snapshot.v1"));
+        assert!(!persisted.contains("detailed"));
     }
 
     // 多跳收敛:chat 调 book.query(触发内层 complete)→ chat 调 memory.save → chat 终答。

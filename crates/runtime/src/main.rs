@@ -2,8 +2,8 @@
 //!   runtime <book_dir> query <anchor_lid> <question...>   内层 book.query mini-loop(S5b)
 //!   runtime <book_dir> chat  <question...>                外层 E 编排 loop(S6c)
 //!   runtime <book_dir> goldset <file.json>                金标准集 + 验收闸(S8)`[ADR-0004]`
-use memory::MemoryStore;
-use read_tools::Book;
+use memory::{MemoryStore, SnapshotContext, SnapshotRequest};
+use read_tools::{Book, ContentProfileId};
 use reader::{Reader, DEFAULT_RADIUS};
 use runtime::goldset::{run_goldset, GoldItem};
 use runtime::orchestrator::{new_session, run, OuterConfig};
@@ -83,14 +83,27 @@ fn main() {
             };
             let mut reader = Reader::new(&book, DEFAULT_RADIUS);
             let mut messages = new_session();
+            let now = now_ts();
+            let content_profile = match book.content_profile_id() {
+                ContentProfileId::TechnicalLearning => "technical_learning",
+                ContentProfileId::Paper => "paper",
+            };
+            let snapshot =
+                store.project_reader_profile_snapshot(&SnapshotRequest::current(SnapshotContext {
+                    book_id: Some(book.base.book_id.clone()),
+                    content_profile: Some(content_profile.into()),
+                    now: Some(now.clone()),
+                    ..Default::default()
+                }));
             match run(
                 &book,
                 &mut store,
                 &mut reader,
                 adapter.as_ref(),
                 &mut messages,
+                &snapshot,
                 &question,
-                &now_ts(),
+                &now,
                 OuterConfig::default(),
             ) {
                 Ok(out) => println!("{}", serde_json::to_string_pretty(&out).unwrap()),
