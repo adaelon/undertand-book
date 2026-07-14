@@ -153,6 +153,14 @@ pub enum FactSource {
     AgentInferred,
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProfileFactCapture {
+    #[default]
+    CurrentInteraction,
+    HistoricalBackfill,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum FactStatus {
@@ -185,6 +193,8 @@ pub struct ProfileFact {
     pub applicability: Applicability,
     pub payload: ProfilePayload,
     pub source: FactSource,
+    #[serde(default)]
+    pub capture: ProfileFactCapture,
     pub evidence: Vec<EvidenceRef>,
     pub status: FactStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -226,6 +236,7 @@ impl ProfileFact {
         }
         validate_source_contract(
             self.source,
+            self.capture,
             &self.scope,
             self.status,
             self.confidence,
@@ -551,12 +562,18 @@ impl MemoryStore {
         let mut removed_dependent_fact_ids: Vec<String> = candidate
             .profile_facts
             .iter()
-            .filter(|fact| fact.source != FactSource::UserStated && fact.evidence.is_empty())
+            .filter(|fact| {
+                (fact.source != FactSource::UserStated
+                    || fact.capture == ProfileFactCapture::HistoricalBackfill)
+                    && fact.evidence.is_empty()
+            })
             .map(|fact| fact.fact_id.clone())
             .collect();
-        candidate
-            .profile_facts
-            .retain(|fact| fact.source == FactSource::UserStated || !fact.evidence.is_empty());
+        candidate.profile_facts.retain(|fact| {
+            (fact.source == FactSource::UserStated
+                && fact.capture == ProfileFactCapture::CurrentInteraction)
+                || !fact.evidence.is_empty()
+        });
         removed_dependent_fact_ids.sort();
         candidate
             .exclusions
@@ -565,6 +582,15 @@ impl MemoryStore {
         removed_dependent_fact_ids.extend(consolidation.removed_fact_ids);
         removed_dependent_fact_ids.sort();
         removed_dependent_fact_ids.dedup();
+        let removed_fact_ids: BTreeSet<String> = removed_dependent_fact_ids
+            .iter()
+            .cloned()
+            .chain(std::iter::once(fact_id.to_string()))
+            .collect();
+        crate::backfill::remove_historical_backfill_candidate_links(
+            &mut candidate.review_state.historical_backfill_jobs,
+            &removed_fact_ids,
+        );
         self.commit_document(candidate)?;
         let _ = self.write_profile_files();
 
@@ -608,8 +634,22 @@ struct ProfileFactIdentity<'a> {
 }
 
 pub(crate) fn build_profile_fact(
+    input: CreateProfileFact,
+    supersedes: Vec<String>,
+    now: &str,
+) -> Result<ProfileFact, ToolError> {
+    build_profile_fact_with_capture(
+        input,
+        supersedes,
+        ProfileFactCapture::CurrentInteraction,
+        now,
+    )
+}
+
+pub(crate) fn build_profile_fact_with_capture(
     mut input: CreateProfileFact,
     mut supersedes: Vec<String>,
+    capture: ProfileFactCapture,
     now: &str,
 ) -> Result<ProfileFact, ToolError> {
     validate_now(now)?;
@@ -618,7 +658,10 @@ pub(crate) fn build_profile_fact(
     supersedes.sort();
     supersedes.dedup();
     validate_create_input(&input)?;
-    let status = initial_status(input.source, &input.scope)?;
+    let status = match capture {
+        ProfileFactCapture::CurrentInteraction => initial_status(input.source, &input.scope)?,
+        ProfileFactCapture::HistoricalBackfill => FactStatus::Pending,
+    };
     let identity = ProfileFactIdentity {
         scope: &input.scope,
         applicability: &input.applicability,
@@ -630,14 +673,21 @@ pub(crate) fn build_profile_fact(
         valid_until: &input.valid_until,
         supersedes: &supersedes,
     };
-    let canonical = serde_json::to_string(&identity)
-        .map_err(|error| invalid_profile_fact(format!("profile identity 序列化失败: {error}")))?;
+    let canonical = match capture {
+        ProfileFactCapture::CurrentInteraction => serde_json::to_string(&identity),
+        ProfileFactCapture::HistoricalBackfill => serde_json::to_string(&(
+            ProfileFactCapture::HistoricalBackfill,
+            identity,
+        )),
+    }
+    .map_err(|error| invalid_profile_fact(format!("profile identity 序列化失败: {error}")))?;
     let fact = ProfileFact {
         fact_id: format!("fact_{:016x}", fnv1a(&canonical)),
         scope: input.scope,
         applicability: input.applicability,
         payload: input.payload,
         source: input.source,
+        capture,
         evidence: input.evidence,
         status,
         confidence: input.confidence,
@@ -673,6 +723,7 @@ fn validate_create_input(input: &CreateProfileFact) -> Result<(), ToolError> {
     let status = initial_status(input.source, &input.scope)?;
     validate_source_contract(
         input.source,
+        ProfileFactCapture::CurrentInteraction,
         &input.scope,
         status,
         input.confidence,
@@ -714,6 +765,7 @@ fn validate_claim(kind: &str, key: &str, value: &str) -> Result<(), ToolError> {
 
 fn validate_source_contract(
     source: FactSource,
+    capture: ProfileFactCapture,
     scope: &ProfileScope,
     status: FactStatus,
     confidence: Option<Confidence>,
@@ -735,15 +787,27 @@ fn validate_source_contract(
             "deterministic behavior 只能写 book scope".into(),
         ));
     }
-    if evidence_is_empty && source != FactSource::UserStated {
+    if capture == ProfileFactCapture::HistoricalBackfill
+        && source == FactSource::DeterministicBehavior
+    {
+        return Err(invalid_profile_fact(
+            "historical backfill 只接受 user_stated 或 agent_inferred fact".into(),
+        ));
+    }
+    if evidence_is_empty
+        && (source != FactSource::UserStated
+            || capture == ProfileFactCapture::HistoricalBackfill)
+    {
         return Err(invalid_profile_fact(
             "非 user_stated fact 不得失去全部 evidence".into(),
         ));
     }
-    let valid_status = matches!(
-        (source, scope, status),
-        (_, _, FactStatus::Superseded | FactStatus::Expired)
-            | (
+    let valid_status = matches!(status, FactStatus::Superseded | FactStatus::Expired)
+        || (capture == ProfileFactCapture::HistoricalBackfill
+            && matches!(status, FactStatus::Pending | FactStatus::Confirmed))
+        || matches!(
+            (source, scope, status),
+            (
                 FactSource::DeterministicBehavior,
                 ProfileScope::Book { .. },
                 FactStatus::Confirmed
@@ -760,7 +824,7 @@ fn validate_source_contract(
                 FactStatus::Pending
             )
             | (FactSource::AgentInferred, _, FactStatus::Confirmed)
-    );
+        );
     if !valid_status {
         return Err(invalid_profile_fact(format!(
             "source/scope/status 组合非法: {source:?}/{scope:?}/{status:?}"
@@ -1506,5 +1570,26 @@ mod tests {
             turn("session-a", "turn-a").evidence_id()
         );
         assert_ne!(evidence_a.evidence_id(), evidence_b.evidence_id());
+    }
+
+    #[test]
+    fn persisted_fact_without_capture_defaults_to_current_interaction() {
+        let input = preference_input(
+            book_scope("book-a"),
+            Applicability::Any,
+            "depth",
+            "detailed",
+            FactSource::UserStated,
+            vec![turn("session-a", "turn-a")],
+        );
+        let fact = build_profile_fact(input, Vec::new(), "2026-01-01T00:00:00Z").unwrap();
+        let mut persisted = serde_json::to_value(fact).unwrap();
+        persisted.as_object_mut().unwrap().remove("capture");
+
+        let reopened: ProfileFact = serde_json::from_value(persisted).unwrap();
+        assert_eq!(
+            reopened.capture,
+            ProfileFactCapture::CurrentInteraction
+        );
     }
 }

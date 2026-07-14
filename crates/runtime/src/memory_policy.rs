@@ -1557,6 +1557,7 @@ mod tests {
                 value: json!({"value": true}),
             },
             source: FactSource::UserStated,
+            capture: memory::ProfileFactCapture::CurrentInteraction,
             evidence: vec![],
             status: FactStatus::Confirmed,
             confidence: None,
@@ -1581,6 +1582,7 @@ mod tests {
             },
             payload,
             source: FactSource::UserStated,
+            capture: memory::ProfileFactCapture::CurrentInteraction,
             evidence: vec![EvidenceRef::Turn {
                 session_id: "session".into(),
                 turn_id: format!("turn-{fact_id}"),
@@ -1635,6 +1637,7 @@ mod tests {
                 value: value.into(),
             }),
             source,
+            capture: memory::ProfileFactCapture::CurrentInteraction,
             evidence: vec![EvidenceRef::Turn {
                 session_id: "session".into(),
                 turn_id: format!("turn-{fact_id}"),

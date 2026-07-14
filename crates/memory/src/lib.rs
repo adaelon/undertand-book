@@ -3,6 +3,7 @@
 //! 切片0 type=note/highlight/position;consolidation / 跨书 concept recall 留议题7 `[ADR-0018]`。
 //! 时间戳与落盘路径由调用方注入(确定性可测,守 A2)。
 //! S7a 从 runtime 抽成独立 crate(拆 runtime↔reader 循环依赖,reader/runtime 共同依赖它)`[ADR-0027]`。
+mod backfill;
 mod document;
 mod global_consolidation;
 mod governance;
@@ -15,6 +16,10 @@ mod reading_state;
 mod review;
 
 use document::StoredMemory;
+pub use backfill::{
+    HistoricalBackfillClearOutcome, HistoricalBackfillCommitOutcome, HistoricalBackfillJob,
+    HistoricalBackfillJobStatus, HistoricalBackfillRange,
+};
 pub use document::{MemoryDocument, MEMORY_SCHEMA_VERSION};
 pub use global_consolidation::GlobalPromotionState;
 pub use governance::{
@@ -30,8 +35,8 @@ pub use privacy::{
 pub use profile::{
     Applicability, BackgroundClaim, CapabilityClaim, Confidence, ConstraintClaim,
     CreateProfileFact, EvidenceExclusion, EvidenceRef, ExclusionReason, FactSource, FactStatus,
-    ForgetProfileFactOutcome, GoalClaim, PreferenceClaim, ProfileFact, ProfilePayload,
-    ProfileResolutionContext, ProfileScope, Sensitivity,
+    ForgetProfileFactOutcome, GoalClaim, PreferenceClaim, ProfileFact, ProfileFactCapture,
+    ProfilePayload, ProfileResolutionContext, ProfileScope, Sensitivity,
 };
 pub use projection::{
     estimate_snapshot_tokens, PendingTurnRef, ProfileStatus, ReaderProfileSnapshot,

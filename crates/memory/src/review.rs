@@ -86,6 +86,8 @@ pub struct ReviewState {
     #[serde(default)]
     pub review_jobs: Vec<ReviewJob>,
     #[serde(default)]
+    pub historical_backfill_jobs: Vec<crate::HistoricalBackfillJob>,
+    #[serde(default)]
     pub consolidation_jobs: Vec<GlobalConsolidationJob>,
     #[serde(default)]
     pub global_promotions: Vec<crate::GlobalPromotionState>,
@@ -173,6 +175,7 @@ impl ReviewState {
             error.validate()?;
         }
         validate_consolidation_jobs(&self.consolidation_jobs)?;
+        crate::backfill::validate_historical_backfill_jobs(&self.historical_backfill_jobs)?;
         crate::global_consolidation::validate_promotion_states(&self.global_promotions)?;
         validate_intent_observations(&self.intent_observations)?;
         Ok(())
@@ -699,7 +702,7 @@ impl ReviewFactCandidate {
         })
     }
 
-    fn validate(&self) -> Result<(), ToolError> {
+    pub(crate) fn validate(&self) -> Result<(), ToolError> {
         if Self::new(self.fact.clone())? != *self {
             return Err(invalid_review_result(
                 "review candidate_id is not content-addressed",

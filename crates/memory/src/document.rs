@@ -81,6 +81,10 @@ impl MemoryDocument {
             }
         }
         self.review_state.validate()?;
+        crate::backfill::validate_historical_backfill_fact_links(
+            &self.review_state.historical_backfill_jobs,
+            &self.profile_facts,
+        )?;
         crate::global_consolidation::validate_promotion_links(
             &self.review_state.global_promotions,
             &self.profile_facts,

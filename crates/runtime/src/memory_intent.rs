@@ -588,6 +588,7 @@ mod tests {
                 value: key.into(),
             }),
             source: memory::FactSource::UserStated,
+            capture: memory::ProfileFactCapture::CurrentInteraction,
             evidence: vec![EvidenceRef::Turn {
                 session_id: "session".into(),
                 turn_id: id.into(),
