@@ -742,6 +742,8 @@ struct PaperMemoryState {
 - **不做**:不声称明文文件已应用级加密。
 - **判据**:`cargo test --workspace`, `pnpm test`, `pnpm --filter @understand-book/web build` 通过;§8 每行均有测试 ID 或明确人工验收记录。
 
+**完成记录（2026-07-15）**:当前 OS 用户私有存储 gate 与安全降级已落地;§8.1 为 21/21 自动测试账本。`cargo test --workspace -- --test-threads=1`、`pnpm test`（core 210 + web 99）及 Web production build 全绿。真实 production server 在强制私有存储失败时经 Playwright 验收 1440x900/390x844:Profile stale 诊断可见、PDF 阅读面保留 14 个页面项、document/panel 横向溢出为零、无 page error/request failure/非预期 HTTP 错误;9 个 `formula_semantics` 404 是前端显式处理的可选侧车缺失。
+
 ---
 
 ## 7. 迁移与兼容
