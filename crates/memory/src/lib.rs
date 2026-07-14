@@ -22,6 +22,7 @@ pub use governance::{
     ProfileGovernanceOutcome, ProfileGovernanceOutcomeKind, ProfileGovernanceState,
     ProfilePayloadKind,
 };
+pub use markdown::{ProfileMarkdownFileState, ProfileMarkdownProjectionStatus};
 pub use operation::{ExplicitProfileFact, MemoryOp, MemoryOpOutcome};
 pub use privacy::{
     classify_profile_fact_privacy, classify_profile_privacy, ProfilePrivacyClass,
@@ -683,19 +684,6 @@ impl MemoryStore {
 
     // ===== P4-4 四层产物物化(只读派生 .md · 单向覆写 · 真相源唯一 memory.json)`[ADR-0040]` =====
 
-    /// 出现过的全部 book_id(distinct·排序,确定性)。
-    fn all_book_ids(&self) -> Vec<String> {
-        let mut ids: Vec<String> = self
-            .document
-            .records
-            .iter()
-            .map(|r| r.book_id.clone())
-            .collect();
-        ids.sort();
-        ids.dedup();
-        ids
-    }
-
     /// 某书 context 记忆按成长时间线序(`generated_at`,tie `mem_id`)`[ADR-0039/0040]`。
     fn context_timeline(&self, book_id: &str) -> Vec<&Record> {
         let mut recs: Vec<&Record> = self
@@ -893,14 +881,22 @@ mod tests {
             reading_state.engagement_by_lid["4.1"].last_seen_at.as_deref(),
             Some("2026-01-06T00:00:00Z")
         );
-        assert_eq!(
-            store.render_reader_profile_md(),
-            normalize_newlines(LEGACY_READER_PROFILE)
-        );
-        assert_eq!(
-            store.render_handbook_md(),
-            normalize_newlines(LEGACY_READING_HANDBOOK)
-        );
+        let legacy_profile = normalize_newlines(LEGACY_READER_PROFILE);
+        let legacy_handbook = normalize_newlines(LEGACY_READING_HANDBOOK);
+        assert!(!legacy_profile.contains("profile-markdown.v2"));
+        assert!(!legacy_handbook.contains("profile-markdown.v2"));
+
+        let profile_v2 = store.render_reader_profile_md();
+        let handbook_v2 = store.render_handbook_md();
+        assert_ne!(profile_v2, legacy_profile);
+        assert_ne!(handbook_v2, legacy_handbook);
+        assert!(profile_v2.starts_with("<!-- profile-markdown.v2 projection_revision=1 -->"));
+        assert!(profile_v2.contains("1.2"));
+        assert!(profile_v2.contains("4.1 (×2)"));
+        assert!(profile_v2.contains("prefers examples [cite: 5.1]"));
+        assert!(handbook_v2.starts_with("<!-- profile-markdown.v2 projection_revision=1 -->"));
+        assert!(handbook_v2.contains("**book-a**"));
+        assert!(handbook_v2.contains("读过的书:book-a, book-b"));
     }
 
     #[test]

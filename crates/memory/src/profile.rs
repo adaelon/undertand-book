@@ -327,6 +327,7 @@ impl MemoryStore {
         candidate.profile_facts.push(fact.clone());
         reconcile_global_promotions(&mut candidate, &affected_keys, now)?;
         self.commit_document(candidate)?;
+        let _ = self.write_profile_files();
         Ok(fact)
     }
 
@@ -365,6 +366,7 @@ impl MemoryStore {
         let confirmed = fact.clone();
         reconcile_global_promotions(&mut candidate, &[confirmed.payload.semantic_key()], now)?;
         self.commit_document(candidate)?;
+        let _ = self.write_profile_files();
         Ok(confirmed)
     }
 
@@ -444,6 +446,7 @@ impl MemoryStore {
             now,
         )?;
         self.commit_document(candidate)?;
+        let _ = self.write_profile_files();
         Ok(corrected)
     }
 
@@ -481,6 +484,7 @@ impl MemoryStore {
         let expired = fact.clone();
         reconcile_global_promotions(&mut candidate, &[expired.payload.semantic_key()], now)?;
         self.commit_document(candidate)?;
+        let _ = self.write_profile_files();
         Ok(expired)
     }
 
@@ -562,6 +566,7 @@ impl MemoryStore {
         removed_dependent_fact_ids.sort();
         removed_dependent_fact_ids.dedup();
         self.commit_document(candidate)?;
+        let _ = self.write_profile_files();
 
         Ok(ForgetProfileFactOutcome {
             forgotten_fact_id: fact_id.to_string(),
