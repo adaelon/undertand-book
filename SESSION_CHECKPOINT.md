@@ -1,33 +1,32 @@
-# SESSION_CHECKPOINT - 2026-07-15 23:19 +08:00
+# SESSION_CHECKPOINT - 2026-07-16 00:21 +08:00
 
 ## Freshness check
-- Commit at write time: `2dce7b8 fix: restore book-scoped PDF note markers`.
+- Commit at write time: `6311c28 feat: refine PDF note marker controls`.
 - On read, compare with `git log -3 --oneline`; if newer commits exist, trust Git.
-- Verified installer: `dist/UnderstandBookSetup.exe`, 34,623,533 bytes, SHA-256 `0B580CFA83FE9737B7FB5F90C24AB2979E0576428763A598FC975A4A328A530D`, built 2026-07-15 23:02:34 +08:00.
+- Verified installer: `dist/UnderstandBookSetup.exe`, 34,616,812 bytes, SHA-256 `FFCA937D6D2BF478265A8496195F136EB70FFCD5DC0C51BD93054F8C22AFDD71`, built 2026-07-16 00:18:22 +08:00.
 
 ## What's in progress
-The book-scoped PDF annotation and Agent Note range repair is implemented and packaged; only post-install visual acceptance with newly created notes remains.
+PDF Note marker visibility and count affordances are implemented, tested, committed, and packaged; only post-install acceptance remains.
 
 ## Next steps (ready to hand off)
-1. After the user closes the installed Reader and runs `dist/UnderstandBookSetup.exe`, open the affected PDF book and confirm its existing Highlight renders without the annotation-location-unavailable banner.
-2. In an Agent conversation backed by a resolved PDF question selection, select answer text, save a new Note, and confirm the PDF body shows its Note marker.
-3. If either check fails, query `/api/book/build_workbench`, `/api/memory/recall` with the active `book_id`, and `/api/reader/pdf_ranges.project` for that record's ranges before changing code.
-4. Do not use legacy Agent Notes as acceptance evidence: records created without exact `selection_context.ranges` are intentionally not migrated.
+1. After the user closes the installed Reader, run `dist/UnderstandBookSetup.exe` and open a PDF-backed book.
+2. Use the Eye/EyeOff button in the PDF header and confirm every inline Note marker hides and restores while Highlights remain visible.
+3. Confirm a one-Note marker is icon-only; save another Note against the same exact PDF selection and confirm the aggregate marker shows `2`.
+4. Confirm opening a marker still shows its Note cards and hiding markers closes an already open Note surface.
+5. If acceptance fails, inspect `PdfReaderPane.vue`, the active `pdfAnnotationProjection`, and `/api/reader/pdf_ranges.project` before changing projection data.
 
 ## Uncommitted / unfinished
-- This repair has no uncommitted source changes; implementation and tests are in `2dce7b8`.
 - Pre-existing tracked modifications remain in `crates/base-schema/tests/roundtrip.rs`, `crates/memory/src/{lib,profile,review}.rs`, and `crates/reader/src/lib.rs`; they were not staged, reverted, or tested by this slice.
 - Existing untracked logs, screenshots, drafts, books, test results, and temporary directories remain unrelated and untouched.
-- Visual acceptance is pending because the new setup was built but not installed or launched by this session.
+- No Note marker source changes remain uncommitted; only post-install acceptance is pending.
 
 ## Cold-start reading sequence
-1. `docs/code-trail-S12-continuous-reader.md` - the three 2026-07-15 repair entries and setup fingerprint.
-2. `packages/web/src/reader-annotations.ts` and its test, then `packages/web/src/App.vue:refreshAnnotations` - current-book recall and stale-response guard.
-3. `packages/web/src/agent-note-selection.ts` and its test, then `packages/web/src/App.vue:saveAgentSelection` - structured Agent Note provenance without legacy range fabrication.
-4. `crates/server/src/lib.rs:route_pdf_selection_resolve` and `pdf_selection_splits_same_lid_source_gaps_into_exact_ranges` - ordered contiguous source-run resolution and reverse-projection regression.
-5. `packages/web/src/pdf-annotation-projection.ts` and `packages/web/src/components/PdfReaderPane.vue` - exact-only PDF strokes and Note marker rendering.
+1. `docs/code-trail-S12-continuous-reader.md` - the 2026-07-15/16 Note repair, visibility, count, and setup entries.
+2. `packages/web/src/components/PdfReaderPane.vue`, its component test, and `packages/web/playwright/pdf-annotation.spec.ts` - marker controls and acceptance contracts.
+3. `packages/web/src/pdf-annotation-projection.ts` and its test - exact-terminal aggregation and projection rules.
+4. `packages/web/src/reader-annotations.ts`, its test, and `packages/web/src/App.vue:refreshAnnotations` - current-book annotation recall and stale-response guard.
+5. `packages/web/src/agent-note-selection.ts`, its test, and `packages/web/src/App.vue:saveAgentSelection` - structured Agent Note provenance.
 
 ## Decisions made this session
-- Reader annotations are recalled with the active `book_id` and defensively filtered client-side; logged in `docs/code-trail-S12-continuous-reader.md`.
-- Agent answer Notes inherit only complete structured question ranges; legacy turns do not receive fabricated provenance.
-- Same-LID PDF selection hits separated by source gaps become multiple ordered ranges; existing malformed Notes are not backfilled.
+- Single Note markers are icon-only; aggregate markers show counts only when `notes.length > 1`, while accessible labels retain the exact count.
+- The Eye/EyeOff toggle is component-local and hides only PDF inline Note markers, not Highlights, memory records, projection data, or other Note surfaces.
