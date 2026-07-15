@@ -1,52 +1,62 @@
-# SESSION_CHECKPOINT - 2026-07-15 01:02 +08:00
+# SESSION_CHECKPOINT - 2026-07-15 21:08 +08:00
 
 ## Freshness check
-- Commit at write time: `d466511 docs: close M4 release gate`.
-- This checkpoint is committed separately;compare with `git log --oneline -10` and trust newer implementation commits.
+- Latest implementation commit: `8d2d6b0 feat: make book query referent-first`.
+- This checkpoint is the immediate docs-only successor to that implementation commit; use `git log -2 --oneline` to confirm both commits.
+- `dist/UnderstandBookSetup.exe` was built from an isolated detached worktree pinned to `8d2d6b0`, then copied into the main worktree after verification.
 
 ## Current state
-Reliable profile memory M4 is complete. M4.1 governance,M4.2 Web UI,M4.3 Markdown v2,M4.4 explicit historical backfill,and M4.5 privacy/E2E all passed their release gates. No required M4 implementation remains.
+- M6.1-M6.6 referent-first `book.query` is implemented, verified, committed, and packaged.
+- Reliable profile memory M4 remains complete; its 21/21 release ledger is unchanged.
+- M5 AgentHistory safety remains planned and was not implemented or folded into M6.
+- The user explicitly selected M6, waived a new Grill, and authorized the implementation commit plus setup rebuild.
 
-## Completed slices
-- M4 alignment `0426b8d`: ADR-0076 and frozen governance/backfill/Markdown/privacy/UI boundaries.
-- M4.1 `a085cc5` + `2879e1d` + `13fee97`: MemoryOp/governance reducers and resident typed HTTP.
-- M4.2 `bb58fe8`: automatic-first Profile rail,Pending/evidence/status/rules,update/undo,and responsive visual gate.
-- M4.3 `6ca658a` + `441c660`: renderer extraction and revision-tagged/redacted/atomic Markdown v2.
-- M4.4 `2b7886b` + `05b4381` + `df05359`: durable explicit historical backfill,one-turn executor,API,and Web controls.
-- M4.5a `1b14ea6`: current-user private storage gate,fail-closed empty Store,visible diagnostic,and reading-safe degradation.
-- M4.5b `21b6c8c`: MEM-E01..E21 automated coverage ledger plus cross-book,forget-cache,stale-navigation,and repeated-intent tests.
-- M4.5c `d466511`: workspace/Web/build/desktop-mobile production release gate record.
+## M6 landed behavior
+- Resident/REST/MCP/CLI/Web query surfaces require `BookQueryRequest {query,intent,targets,obligations,anchor_lid}` and return tagged `QueryOutcome`; legacy or incomplete plans fail before retrieval.
+- `Book::referent_catalog` searches graph concepts/entities or the paper lexicon with graph fallback. Ranking is `RecallStrength -> lexical score -> anchor peer tie-break`; Top-12 applies fair target quotas and bounded previews.
+- PlanGate/Resolver classifies every candidate, freezes one strong binding, preserves ambiguity, and permits at most three lexical probes plus one replacement retry.
+- Evidence rereads full source LIDs from frozen bindings. One bounded expansion may read up to three remaining or graph/discourse/formula-reachable LIDs. Preview, gloss, sidecar, and model supplement cannot satisfy citations.
+- The LLM judges every obligation as supported/uncertain/unsupported. Completion requires valid plan, bindings, coverage, source-grounded citations, and all obligations supported.
+- `QueryAudit` stays out of tool results/messages and persists only in optional `TraceStep.query_audit`; its fields have serde defaults for early-M6 history compatibility.
+- RightRail renders expanded QueryAudit; legacy traces still load. The obsolete anchor-scope ladder, `legacy_query`, and generated `QueryResponse.ts` were removed.
+- Typed goldset fixtures freeze expected binding/status/citation LIDs. `goldset-topk` and `run_topk_replay` compare K=5/8/12/20 while all other budgets remain fixed; default K is 12.
 
-## Final verification
-- `cargo test --workspace -- --test-threads=1`:all crates,desktop app,binaries,and doc tests passed.
-- `pnpm test`:core 36 files/210 tests and Web 20 files/99 tests passed.
-- `pnpm --filter @understand-book/web build`:typecheck + Vite production build passed(1903 modules).
-- Relevant strict clippy passed;Memory has zero exemptions,Reader/Runtime/Server use only their frozen pre-existing category lists.
-- Production Playwright at 1440x900 and 390x844 forced private-storage failure:stale diagnostic visible,PDF reading retained 14 items,document/panel horizontal overflow 0,page errors/request failures/unexpected HTTP errors 0.
-- Nine `formula_semantics` 404 responses were accepted only because the existing client explicitly maps missing optional semantics to `null` and preserves source reading.
+## Defect baselines
+- `learnability` with a far mu/sigma anchor freezes `concept:eta`, cites `2.1`, and records rank 1 / seed `2.1` in QueryAudit.
+- `trend` freezes `concept:trend_strategy`, cites `2.2` in the frozen fixture, and records rank 1 / seed `2.2`; it does not bind `drift_mu`.
 
-## Final boundaries
-- `MemoryDocument` v2 remains the only durable truth;HTTP,Web,and Markdown are projections/adapters.
-- Production resident hosts must use `MemoryStore::open_private`;permission enforcement/verification failure disables private reads,writes,review,and backfill without blocking ordinary navigation.
-- Windows current-user DACL and Unix 0700/0600 are platform implementations behind the available/unavailable boundary;mobile hosts can inject app-private roots and later platform protection.
-- Secret is never stored;Sensitive requires explicit plaintext acknowledgement;the project does not claim application-level encryption.
-- Visitor MCP never opens resident private memory or mutates profile/review jobs.
-- Historical semantic scans remain explicit frozen-range jobs;upgrade never scans old transcripts automatically.
+## Verification
+- Rust gate passed: read-tools 125, runtime 143, server 137 tests.
+- JS/Web gate passed: core 210, Web 100 tests; Web typecheck passed; production build passed with 1906 transformed modules.
+- QRY-E01..E14 map to real automated tests in the M6 ledger. QRY-E01/E02 and runtime 143/143 were rerun after final audit/error-shape changes.
+- Playwright visual verification passed at 1440x900 and 390x844 with expanded QueryAudit and zero horizontal overflow.
+- `git diff --check` and ordinary clippy for read-tools/runtime/server passed. M6-introduced clippy warnings were removed.
+- Strict `-D warnings` remains blocked by six pre-existing read-tools warnings outside M6. Full rustfmt still reports pre-existing debt in `runtime/memory_review.rs`, `runtime/profile_api.rs`, and `server/host.rs`; these were excluded from M6.
+- Real-provider goldset/Top-K replay was not run; it remains optional and must retain raw QueryAudit if executed.
 
-## Next steps
-1. User acceptance may exercise normal Profile remember/correct/forget/scope,explicit backfill,and visible status behavior.
-2. Any post-M4 change starts a new aligned slice;mobile native storage protection,account sync,and application encryption remain separate scope.
+## Setup artifact
+- Official command: `$env:UNDERSTAND_BOOK_MARKETPLACE_SOURCE='adaelon/undertand-book'; pnpm -C apps/desktop package:windows`.
+- Artifact: `dist/UnderstandBookSetup.exe`; size `34,613,759` bytes; timestamp `2026-07-15 21:02:29 +08:00`.
+- SHA-256: `2B14318FAB3A44399A88933AC27A16488125292228288BC65BF91D9E95D10A33`.
+- The NSIS artifact is `NotSigned`; no signing configuration was introduced. The temporary detached worktree was removed after export and hash verification.
 
-## Uncommitted / unfinished
-- No tracked M4 changes should remain after this checkpoint commit.
-- Temporary release binaries,logs,and visual harness files are untracked and are not product artifacts.
+## Documentation
+- `CONTEXT.md` defines implemented query ownership, referent/binding, PlanGate, structural gate, and expanded QueryAudit vocabulary.
+- `docs/adr/0077-referent-first-query-and-structural-evidence-gates.md` records the accepted M6 decision and rejected alternatives.
+- Architecture, code-chain, and slice-plan documents record the runtime chain, implementation trail, QRY-E01..E14 ledger, and completed M6 scope.
+
+## Worktree boundaries
+- Commit `8d2d6b0` contains only M6 code, Web, generated DTO, fixture, and documentation changes.
+- Pre-existing tracked modifications in base-schema/memory/reader and unrelated untracked logs, screenshots, drafts, books, and temporary directories remain uncommitted and untouched.
+- The setup artifact is exported output and is not part of the implementation commit.
+
+## Next actions
+1. Install/smoke-test `dist/UnderstandBookSetup.exe` on the target Windows account, then publish or push `8d2d6b0` when desired.
+2. Optionally run `runtime <book_dir> goldset-topk <file.json>` against a configured real provider and retain the report plus raw QueryAudit; do not auto-tune from one run.
+3. Implement M5 only as a separate user-authorized slice using MEM-E22..E24; do not infer that M6 completed it.
 
 ## Cold-start reading sequence
-1. `docs/切片方案-memory可靠画像升级.md` M4.5,§7,§8,and §8.1.
-2. `docs/adr/0075-runtime-owned-evidence-backed-profile-memory.md` and `docs/adr/0076-profile-governance-and-backfill-ownership.md`.
-3. `crates/memory/src/{private_storage,lib,privacy,operation,markdown,review}.rs`.
-4. `crates/server/src/host.rs`,then profile/privacy routes and tests in `crates/server/src/lib.rs`.
-5. `docs/架构.md` reader-private/profile sections and the tail of `docs/代码链路.md`.
-
-## Worktree
-- Existing unrelated untracked materials,logs,screenshots,test results,and temporary directories remain untouched.
+1. Read this checkpoint, then the M6 section and QRY-E01..E14 ledger in `docs/切片方案-memory可靠画像升级.md`.
+2. Read ADR-0077 and the referent-first chain in `docs/架构.md`.
+3. Follow `BookQueryRequest -> resolve_referents -> build_initial_query_evidence / targeted_expansion_lids -> structural_support_gate -> query_run_with_budgets`.
+4. For surfaces/audit, inspect `runtime/orchestrator.rs`, server REST/MCP routes, `QueryAuditPanel.vue`, and `runtime/goldset.rs`.
