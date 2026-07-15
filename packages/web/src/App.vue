@@ -72,6 +72,8 @@ import {
   resolveReaderNavigationTarget,
   resolveReaderStateNavigationTarget,
 } from "./reader-navigation";
+import { recallBookAnnotations } from "./reader-annotations";
+import { selectionContextForAgentNote } from "./agent-note-selection";
 import {
   getSourceReviewAutoRerunRequest,
   runSourceReviewLlmBatch,
@@ -1201,7 +1203,14 @@ async function refreshPdfAnnotationProjection(records: MemoryRecord[]) {
 }
 
 async function refreshAnnotations() {
-  const records = await api.recall({}); // 单书:取全部,客户端按 lid 过滤
+  const bookId = buildWorkbenchSnapshot.value?.book_id;
+  if (!bookId) {
+    annotations.value = [];
+    resetPdfAnnotationProjection();
+    return;
+  }
+  const records = await recallBookAnnotations(bookId, api.recall);
+  if (buildWorkbenchSnapshot.value?.book_id !== bookId) return;
   annotations.value = records;
   await refreshPdfAnnotationProjection(records);
 }
@@ -2586,14 +2595,21 @@ async function keepEffect(ti: number, ei: number, e: AgentEffect) {
 }
 
 async function saveAgentSelection(turn: ChatTurn, text: string) {
-  const anchor = turn.questionAnchorLid;
+  const selectionContext = selectionContextForAgentNote(turn.questionQuote);
+  const anchor = selectionContext?.ranges[0]?.lid ?? turn.questionAnchorLid;
   const content = text.trim();
   if (!content || !anchor) return;
   const sourceQuote = turn.questionQuote?.quote.replace(/\s+/g, " ").trim();
   const noteContent = sourceQuote ? `> ${sourceQuote}\n\n${content}` : content;
   try {
     banner.value = "";
-    await api.save({ type: "note", anchor_lid: anchor, content: noteContent, layer: "long_term" });
+    await api.save({
+      type: "note",
+      anchor_lid: anchor,
+      content: noteContent,
+      layer: "long_term",
+      selection_context: selectionContext,
+    });
     if (viewport.value?.visible_lids.includes(anchor)) {
       await refreshAnnotations();
     } else {

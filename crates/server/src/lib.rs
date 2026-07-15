@@ -6317,22 +6317,25 @@ fn route_pdf_selection_resolve(book: &Book, book_dir: &Path, body: &serde_json::
     }
     let unmapped_hits = hits.iter().filter(|hit| hit.lid.is_none()).count();
 
-    let mut by_lid: BTreeMap<String, SourceSpanDto> = BTreeMap::new();
+    let mut source_runs: Vec<(String, SourceSpanDto)> = Vec::new();
     for hit in &hits {
         let Some(lid) = &hit.lid else {
             continue;
         };
-        by_lid
-            .entry(lid.clone())
-            .and_modify(|span| {
-                span.start = span.start.min(hit.source_span.start);
-                span.end = span.end.max(hit.source_span.end);
-            })
-            .or_insert(hit.source_span);
+        if let Some((run_lid, run_span)) = source_runs.last_mut() {
+            let spans_touch =
+                hit.source_span.start <= run_span.end && hit.source_span.end >= run_span.start;
+            if run_lid == lid && spans_touch {
+                run_span.start = run_span.start.min(hit.source_span.start);
+                run_span.end = run_span.end.max(hit.source_span.end);
+                continue;
+            }
+        }
+        source_runs.push((lid.clone(), hit.source_span));
     }
 
     let mut ranges = Vec::new();
-    for (lid, abs_span) in by_lid {
+    for (lid, abs_span) in source_runs {
         let node_span = match lid_span(book, &lid) {
             Ok(span) => span,
             Err(e) => return err_reply(&e),
@@ -10735,6 +10738,65 @@ mod tests {
         );
         assert!(projection.get("primary_region").is_none());
         assert!(projection.get("regions").is_none());
+    }
+
+    #[test]
+    fn pdf_selection_splits_same_lid_source_gaps_into_exact_ranges() {
+        let mut s = state_named("pdf-selection-source-gaps");
+        write_pdf_runtime_artifacts(&mut s);
+        write_projection_selection_pages(
+            &s,
+            vec![serde_json::json!({
+                "version":"pdf_selection_map_page.v1","book_id":s.book.base.book_id,
+                "pageIndex":0,"rotate":0,
+                "chars":[
+                    {"char_index":0,"text":"X","rect":{"pageIndex":0,"bbox":[10.0,10.0,12.0,20.0]},"source_span":{"start":0,"end":1},"lid":"1.1"},
+                    {"char_index":1,"text":"X","rect":{"pageIndex":0,"bbox":[12.0,10.0,14.0,20.0]},"source_span":{"start":1,"end":2},"lid":"1.1"},
+                    {"char_index":2,"text":"X","rect":{"pageIndex":0,"bbox":[14.0,10.0,16.0,20.0]},"source_span":{"start":3,"end":4},"lid":"1.1"},
+                    {"char_index":3,"text":"X","rect":{"pageIndex":0,"bbox":[16.0,10.0,18.0,20.0]},"source_span":{"start":4,"end":5},"lid":"1.1"}
+                ]
+            })],
+        );
+
+        let resolved = post(
+            &mut s,
+            "/reader/pdf_selection.resolve",
+            r#"{"pageIndex":0,"rects":[{"bbox":[9.0,9.0,19.0,21.0]}]}"#,
+        );
+        assert_eq!(resolved.status, 200, "{}", resolved.body);
+        let body: serde_json::Value = serde_json::from_str(&resolved.body).unwrap();
+        assert_eq!(body["status"], "resolved");
+        assert_eq!(
+            body["ranges"],
+            serde_json::json!([
+                {
+                    "lid":"1.1",
+                    "range":{"start":0,"end":2},
+                    "source_span":{"start":0,"end":2},
+                    "quote_markdown":"XX"
+                },
+                {
+                    "lid":"1.1",
+                    "range":{"start":3,"end":5},
+                    "source_span":{"start":3,"end":5},
+                    "quote_markdown":"XX"
+                }
+            ])
+        );
+
+        let projected = post(
+            &mut s,
+            "/reader/pdf_ranges.project",
+            &serde_json::json!({"ranges":body["ranges"]}).to_string(),
+        );
+        assert_eq!(projected.status, 200, "{}", projected.body);
+        let projection_body: serde_json::Value = serde_json::from_str(&projected.body).unwrap();
+        assert_eq!(projection_body["projections"].as_array().unwrap().len(), 2);
+        assert!(projection_body["projections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|projection| projection["status"] == "exact"));
     }
 
     #[test]
