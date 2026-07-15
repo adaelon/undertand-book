@@ -1,18 +1,19 @@
 //! runtime CLI(headless 驱动自建运行时,读 `.env` 的 OpenAI-兼容后端)`[ADR-0025/0026]`。
-//!   runtime <book_dir> query <anchor_lid> <question...>   内层 book.query mini-loop(S5b)
+//!   runtime <book_dir> query <request-json>                内层 book.query mini-loop
 //!   runtime <book_dir> chat  <question...>                外层 E 编排 loop(S6c)
-//!   runtime <book_dir> goldset <file.json>                金标准集 + 验收闸(S8)`[ADR-0004]`
+//!   runtime <book_dir> goldset <file.json>                typed 金标准集 + 验收闸
+//!   runtime <book_dir> goldset-topk <file.json>           固定 K=5/8/12/20 回放
 use memory::{MemoryStore, SnapshotContext, SnapshotRequest};
 use read_tools::{Book, ContentProfileId};
 use reader::{Reader, DEFAULT_RADIUS};
-use runtime::goldset::{run_goldset, GoldItem};
+use runtime::goldset::{run_goldset, run_topk_replay, GoldItem};
 use runtime::orchestrator::{new_session, run, OuterConfig};
-use runtime::{query, ProviderRegistry};
+use runtime::{parse_book_query_request, query, ProviderRegistry};
 use std::process::exit;
 
 fn usage() -> ! {
     eprintln!(
-        "usage:\n  runtime <book_dir> query <anchor_lid> <question...>\n  runtime <book_dir> chat <question...>\n  runtime <book_dir> goldset <file.json>"
+        "usage:\n  runtime <book_dir> query <request-json>\n  runtime <book_dir> chat <question...>\n  runtime <book_dir> goldset <file.json>\n  runtime <book_dir> goldset-topk <file.json>"
     );
     exit(2);
 }
@@ -50,12 +51,24 @@ fn main() {
 
     match cmd.as_str() {
         "query" => {
-            if args.len() < 5 {
+            if args.len() != 4 {
                 usage();
             }
-            let anchor = &args[3];
-            let question = args[4..].join(" ");
-            match query(&book, &question, anchor, adapter.as_ref()) {
+            let value = match serde_json::from_str(&args[3]) {
+                Ok(value) => value,
+                Err(error) => {
+                    eprintln!("query request JSON 非法: {error}");
+                    exit(2);
+                }
+            };
+            let request = match parse_book_query_request(value) {
+                Ok(request) => request,
+                Err(outcome) => {
+                    println!("{}", serde_json::to_string_pretty(&outcome).unwrap());
+                    exit(2);
+                }
+            };
+            match query(&book, &request, adapter.as_ref()) {
                 Ok(out) => println!("{}", serde_json::to_string_pretty(&out).unwrap()),
                 Err(e) => {
                     eprintln!(
@@ -114,7 +127,7 @@ fn main() {
                 }
             }
         }
-        "goldset" => {
+        "goldset" | "goldset-topk" => {
             if args.len() < 4 {
                 usage();
             }
@@ -133,24 +146,39 @@ fn main() {
                     exit(1);
                 }
             };
+            if cmd == "goldset-topk" {
+                match run_topk_replay(&book, adapter.as_ref(), &items, &[5, 8, 12, 20]) {
+                    Ok(report) => {
+                        println!("{}", serde_json::to_string_pretty(&report).unwrap());
+                    }
+                    Err(error) => {
+                        eprintln!(
+                            "goldset Top-K replay failed: [{}/{}] {}",
+                            error.category, error.error_code, error.message
+                        );
+                        exit(1);
+                    }
+                }
+                return;
+            }
             match run_goldset(&book, adapter.as_ref(), &items) {
                 Ok(rep) => {
                     println!("{}", serde_json::to_string_pretty(&rep).unwrap());
-                    // 一行汇总到 stderr(结构红线判据 = 100%)。
-                    let evaluated = rep.total - rep.errored;
                     eprintln!(
-                        "── goldset: 结构红线 {}/{} = {:.1}%(判据 100%,分母=成功应答)| mean_recall {:.2} | mean_precision {:.2} | incomplete {} | errored {}/{}",
-                        rep.structural_pass, evaluated, rep.structural_redline_pct,
-                        rep.mean_recall, rep.mean_precision, rep.incomplete_count, rep.errored, rep.total
+                        "goldset: structural {}/{} = {:.1}% | status {}/{} = {:.1}% | binding recall {:.2} | citation recall {:.2} | calls {:.2} | errored {}/{}",
+                        rep.structural_pass, rep.evaluated, rep.structural_redline_pct,
+                        rep.status_pass, rep.evaluated, rep.status_match_pct,
+                        rep.mean_binding_recall, rep.mean_citation_recall,
+                        rep.mean_model_calls, rep.errored, rep.total
                     );
                     if rep.errored > 0 {
                         eprintln!(
-                            "!! {} 条 query 失败(provider 偶发,重试后仍失败)——见报告 items[].error",
+                            "!! {} query items failed after one retry; inspect items[].error",
                             rep.errored
                         );
                     }
                     if rep.structural_redline_pct < 100.0 {
-                        eprintln!("!! 结构红线未达 100%:存在悬空 citation,违 [ADR-0004]");
+                        eprintln!("!! structural citation redline is below 100%");
                         exit(1);
                     }
                 }

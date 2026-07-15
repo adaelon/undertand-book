@@ -6,7 +6,7 @@ use base_schema::{
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use ts_rs::TS;
 
 // API DTO 的 ts-rs 导出目标(相对本 crate src/):前端类型契约单一真相源 `[ADR-0028 决策6]`。
@@ -1527,6 +1527,217 @@ pub struct Concept {
     pub related_entities: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum CatalogRecallStrength {
+    None,
+    ContextOnly,
+    Approximate,
+    Direct,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CatalogReferentKind {
+    Concept,
+    Entity,
+    PaperTerm,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum CatalogReferentSource {
+    Graph,
+    PaperLexicon,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct CatalogExcerpt {
+    pub lid: String,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct CatalogHint {
+    pub acronym_expansion: Option<String>,
+    pub chinese_gloss: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ReferentCandidate {
+    pub candidate_id: String,
+    pub kind: CatalogReferentKind,
+    pub sources: Vec<CatalogReferentSource>,
+    pub labels: Vec<String>,
+    pub aliases: Vec<String>,
+    pub recall_strength: CatalogRecallStrength,
+    pub lexical_score: u32,
+    pub match_reasons: Vec<String>,
+    pub occurrence_lids: Vec<String>,
+    pub defined_at_lid: Option<String>,
+    pub excerpts: Vec<CatalogExcerpt>,
+    pub hint_only: Option<CatalogHint>,
+    pub anchor_distance: usize,
+}
+
+pub struct ReferentCatalog<'a> {
+    book: &'a Book,
+    anchor_lid: String,
+}
+
+pub fn fair_candidate_quotas(target_count: usize, total: usize) -> Vec<usize> {
+    if target_count == 0 {
+        return Vec::new();
+    }
+    let base = total / target_count;
+    let remainder = total % target_count;
+    (0..target_count)
+        .map(|index| base + usize::from(index < remainder))
+        .collect()
+}
+
+fn lexical_tokens(value: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    for ch in value.chars().flat_map(char::to_lowercase) {
+        if ch.is_alphanumeric() {
+            current.push(ch);
+        } else if !current.is_empty() {
+            tokens.push(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    tokens
+}
+
+fn lexical_match(
+    target: &str,
+    labels: &[String],
+    aliases: &[String],
+    occurrence_texts: &[String],
+) -> (CatalogRecallStrength, u32, Vec<String>) {
+    let target_tokens: BTreeSet<String> = lexical_tokens(target).into_iter().collect();
+    let target_joined = target_tokens.iter().cloned().collect::<Vec<_>>().join(" ");
+    let mut label_tokens = BTreeSet::new();
+    let mut exact_full = false;
+    for field in labels.iter().chain(aliases) {
+        let tokens = lexical_tokens(field);
+        let joined = tokens.join(" ");
+        exact_full |= !joined.is_empty() && joined == target_joined;
+        label_tokens.extend(tokens);
+    }
+    let direct_overlap = target_tokens.intersection(&label_tokens).count();
+    if exact_full || direct_overlap > 0 {
+        return (
+            CatalogRecallStrength::Direct,
+            9_000
+                + u32::try_from(direct_overlap)
+                    .unwrap_or(u32::MAX)
+                    .saturating_mul(100)
+                + u32::from(exact_full) * 900,
+            vec![if exact_full {
+                "exact label or alias".into()
+            } else {
+                "direct label token".into()
+            }],
+        );
+    }
+
+    let approximate_overlap = target_tokens
+        .iter()
+        .filter(|target_token| {
+            target_token.chars().count() > 1
+                && label_tokens.iter().any(|label_token| {
+                    label_token.contains(target_token.as_str())
+                        || target_token.contains(label_token.as_str())
+                })
+        })
+        .count();
+    if approximate_overlap > 0 {
+        return (
+            CatalogRecallStrength::Approximate,
+            5_000
+                + u32::try_from(approximate_overlap)
+                    .unwrap_or(u32::MAX)
+                    .saturating_mul(100),
+            vec!["approximate label token".into()],
+        );
+    }
+
+    let context_hits = occurrence_texts
+        .iter()
+        .flat_map(|text| lexical_tokens(text))
+        .filter(|token| target_tokens.contains(token))
+        .count();
+    if context_hits > 0 {
+        return (
+            CatalogRecallStrength::ContextOnly,
+            1_000 + u32::try_from(context_hits).unwrap_or(u32::MAX).min(999),
+            vec!["occurrence text token".into()],
+        );
+    }
+    (CatalogRecallStrength::None, 0, Vec::new())
+}
+
+fn sentence_or_centered_excerpt(text: &str, target: &str, cap: usize) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= cap {
+        return text.to_string();
+    }
+    let lowercase = text.to_lowercase();
+    let match_byte = lexical_tokens(target)
+        .into_iter()
+        .filter_map(|token| lowercase.find(&token))
+        .min();
+    let match_char = match_byte
+        .map(|index| lowercase[..index].chars().count())
+        .unwrap_or(0);
+    let sentence_break = |ch: char| matches!(ch, '。' | '！' | '？' | '.' | '!' | '?' | '\n');
+    let sentence_start = chars[..match_char.min(chars.len())]
+        .iter()
+        .rposition(|ch| sentence_break(*ch))
+        .map(|index| index + 1)
+        .unwrap_or(0);
+    let sentence_end = chars[match_char.min(chars.len())..]
+        .iter()
+        .position(|ch| sentence_break(*ch))
+        .map(|index| match_char + index + 1)
+        .unwrap_or(chars.len());
+    if sentence_end.saturating_sub(sentence_start) <= cap {
+        return chars[sentence_start..sentence_end].iter().collect();
+    }
+    let start = match_char.saturating_sub(cap / 2).min(chars.len() - cap);
+    chars[start..start + cap].iter().collect()
+}
+
+fn normalized_label_set(candidate: &ReferentCandidate) -> BTreeSet<String> {
+    candidate
+        .labels
+        .iter()
+        .chain(&candidate.aliases)
+        .map(|value| lexical_tokens(value).join(" "))
+        .filter(|value| !value.is_empty())
+        .collect()
+}
+
+fn all_candidate_lids(candidate: &ReferentCandidate) -> BTreeSet<&str> {
+    candidate
+        .occurrence_lids
+        .iter()
+        .map(String::as_str)
+        .chain(candidate.defined_at_lid.as_deref())
+        .collect()
+}
+
+impl ReferentCandidate {
+    fn compatible_for_paper_graph_merge(&self, other: &ReferentCandidate) -> bool {
+        !normalized_label_set(self).is_disjoint(&normalized_label_set(other))
+            && !all_candidate_lids(self).is_disjoint(&all_candidate_lids(other))
+    }
+}
+
 fn parse_formula_semantics_sidecar(s: &str) -> Result<Vec<FormulaSemantics>, serde_json::Error> {
     let value: serde_json::Value = serde_json::from_str(s)?;
     if value.is_array() {
@@ -2235,6 +2446,211 @@ fn parse_paper_reading_stage(raw: Option<&str>) -> Result<PaperReadingStage, Too
     }
 }
 
+impl<'a> ReferentCatalog<'a> {
+    fn source_texts(&self, lids: &[String]) -> Vec<String> {
+        lids.iter()
+            .filter_map(|lid| self.book.text(lid, None).ok())
+            .collect()
+    }
+
+    fn anchor_distance(&self, lids: &[String]) -> usize {
+        let Some(anchor_index) = self.book.lid_idx.get(&self.anchor_lid).copied() else {
+            return usize::MAX;
+        };
+        lids.iter()
+            .filter_map(|lid| self.book.lid_idx.get(lid).copied())
+            .map(|index| index.abs_diff(anchor_index))
+            .min()
+            .unwrap_or(usize::MAX)
+    }
+
+    fn excerpts(&self, target: &str, lids: &[String]) -> Vec<CatalogExcerpt> {
+        let target_tokens = lexical_tokens(target);
+        let mut entries: Vec<(bool, usize, String, String)> = lids
+            .iter()
+            .filter_map(|lid| {
+                self.book.text(lid, None).ok().map(|text| {
+                    let normalized = text.to_lowercase();
+                    let matched = target_tokens.iter().any(|token| normalized.contains(token));
+                    let distance = self.anchor_distance(std::slice::from_ref(lid));
+                    (matched, distance, lid.clone(), text)
+                })
+            })
+            .collect();
+        entries.sort_by(|left, right| {
+            right
+                .0
+                .cmp(&left.0)
+                .then_with(|| left.1.cmp(&right.1))
+                .then_with(|| left.2.cmp(&right.2))
+        });
+        entries
+            .into_iter()
+            .take(2)
+            .map(|(_, _, lid, text)| CatalogExcerpt {
+                lid,
+                text: sentence_or_centered_excerpt(&text, target, 180),
+            })
+            .collect()
+    }
+
+    fn refresh_match(&self, target: &str, candidate: &mut ReferentCandidate) {
+        let mut search_labels = candidate.labels.clone();
+        search_labels.push(candidate.candidate_id.clone());
+        let texts = self.source_texts(&candidate.occurrence_lids);
+        let (strength, score, reasons) =
+            lexical_match(target, &search_labels, &candidate.aliases, &texts);
+        candidate.recall_strength = strength;
+        candidate.lexical_score = score;
+        candidate.match_reasons = reasons;
+        let mut evidence_lids = Vec::new();
+        if let Some(defined_at) = &candidate.defined_at_lid {
+            evidence_lids.push(defined_at.clone());
+        }
+        for lid in &candidate.occurrence_lids {
+            if !evidence_lids.contains(lid) {
+                evidence_lids.push(lid.clone());
+            }
+        }
+        candidate.anchor_distance = self.anchor_distance(&evidence_lids);
+        candidate.excerpts = if strength == CatalogRecallStrength::None {
+            Vec::new()
+        } else {
+            self.excerpts(target, &evidence_lids)
+        };
+        candidate.aliases.truncate(6);
+    }
+
+    fn graph_candidates(&self, target: &str) -> Vec<ReferentCandidate> {
+        self.book
+            .base
+            .graph_nodes
+            .iter()
+            .filter(|node| {
+                matches!(
+                    node.node_type,
+                    GraphNodeType::Concept | GraphNodeType::Entity
+                )
+            })
+            .map(|node| {
+                let mut candidate = ReferentCandidate {
+                    candidate_id: node.id.clone(),
+                    kind: if node.node_type == GraphNodeType::Concept {
+                        CatalogReferentKind::Concept
+                    } else {
+                        CatalogReferentKind::Entity
+                    },
+                    sources: vec![CatalogReferentSource::Graph],
+                    labels: vec![node.name.clone()],
+                    aliases: Vec::new(),
+                    recall_strength: CatalogRecallStrength::None,
+                    lexical_score: 0,
+                    match_reasons: Vec::new(),
+                    occurrence_lids: node.occurrences.clone(),
+                    defined_at_lid: None,
+                    excerpts: Vec::new(),
+                    hint_only: None,
+                    anchor_distance: usize::MAX,
+                };
+                self.refresh_match(target, &mut candidate);
+                candidate
+            })
+            .collect()
+    }
+
+    fn paper_candidates(&self, target: &str) -> Vec<ReferentCandidate> {
+        let Some(lexicon) = self.book.paper_lexicon() else {
+            return Vec::new();
+        };
+        lexicon
+            .entries
+            .iter()
+            .map(|entry| {
+                let mut aliases = entry.aliases.clone();
+                if let Some(expansion) = &entry.acronym_expansion {
+                    if !aliases.contains(expansion) {
+                        aliases.push(expansion.clone());
+                    }
+                }
+                let stable_term = lexical_tokens(&entry.term).join("_");
+                let mut candidate = ReferentCandidate {
+                    candidate_id: format!("paper_term:{stable_term}"),
+                    kind: CatalogReferentKind::PaperTerm,
+                    sources: vec![CatalogReferentSource::PaperLexicon],
+                    labels: vec![entry.term.clone()],
+                    aliases,
+                    recall_strength: CatalogRecallStrength::None,
+                    lexical_score: 0,
+                    match_reasons: Vec::new(),
+                    occurrence_lids: entry.occurrences_lids.clone(),
+                    defined_at_lid: entry.defined_at_lid.clone(),
+                    excerpts: Vec::new(),
+                    hint_only: Some(CatalogHint {
+                        acronym_expansion: entry.acronym_expansion.clone(),
+                        chinese_gloss: entry.chinese_gloss.clone(),
+                    }),
+                    anchor_distance: usize::MAX,
+                };
+                self.refresh_match(target, &mut candidate);
+                candidate
+            })
+            .collect()
+    }
+
+    pub fn search(&self, target: &str, limit: usize) -> Vec<ReferentCandidate> {
+        let mut graph = self.graph_candidates(target);
+        let mut merged = Vec::new();
+        for mut paper in self.paper_candidates(target) {
+            let matching_graph: Vec<usize> = graph
+                .iter()
+                .enumerate()
+                .filter_map(|(index, candidate)| {
+                    paper
+                        .compatible_for_paper_graph_merge(candidate)
+                        .then_some(index)
+                })
+                .collect();
+            for index in matching_graph.into_iter().rev() {
+                let graph_candidate = graph.remove(index);
+                for source in graph_candidate.sources {
+                    if !paper.sources.contains(&source) {
+                        paper.sources.push(source);
+                    }
+                }
+                for label in graph_candidate.labels {
+                    if !paper.labels.contains(&label) {
+                        paper.labels.push(label);
+                    }
+                }
+                for alias in graph_candidate.aliases {
+                    if !paper.aliases.contains(&alias) {
+                        paper.aliases.push(alias);
+                    }
+                }
+                for lid in graph_candidate.occurrence_lids {
+                    if !paper.occurrence_lids.contains(&lid) {
+                        paper.occurrence_lids.push(lid);
+                    }
+                }
+            }
+            paper.sources.sort();
+            self.refresh_match(target, &mut paper);
+            merged.push(paper);
+        }
+        merged.extend(graph);
+        merged.sort_by(|left, right| {
+            right
+                .recall_strength
+                .cmp(&left.recall_strength)
+                .then_with(|| right.lexical_score.cmp(&left.lexical_score))
+                .then_with(|| left.anchor_distance.cmp(&right.anchor_distance))
+                .then_with(|| left.candidate_id.cmp(&right.candidate_id))
+        });
+        merged.truncate(limit);
+        merged
+    }
+}
+
 impl Book {
     /// 从书目录(含 base.json + source.txt)加载。
     pub fn load(dir: &str) -> Result<Book, String> {
@@ -2365,6 +2781,14 @@ impl Book {
 
     pub fn paper_lexicon(&self) -> Option<&PaperLexiconSidecar> {
         self.paper_lexicon.as_ref()
+    }
+
+    pub fn referent_catalog(&self, anchor_lid: &str) -> Result<ReferentCatalog<'_>, ToolError> {
+        self.node(anchor_lid)?;
+        Ok(ReferentCatalog {
+            book: self,
+            anchor_lid: anchor_lid.into(),
+        })
     }
 
     fn with_paper_minimap_artifacts(mut self, artifacts: PaperMinimapArtifacts) -> Book {
@@ -6028,6 +6452,186 @@ mod tests {
         assert_eq!(err.error_code, "INVALID_GRANULARITY");
         assert_eq!(err.category, "validation");
     }
+    fn referent_catalog_book() -> Book {
+        let texts = vec![
+            "The nearby paragraph mentions target only as context.".to_string(),
+            format!("{} target RAG {}", "a".repeat(220), "b".repeat(220)),
+            "SameName appears at a different source location.".to_string(),
+            "PaperOther and CoLocated share a location without sharing a label.".to_string(),
+        ];
+        let lids = ["1.1", "1.2", "2.1", "2.2"];
+        let mut source = String::new();
+        let mut lid_nodes = Vec::new();
+        let mut offset = 0usize;
+        for (index, (lid, text)) in lids.iter().zip(&texts).enumerate() {
+            let start = offset;
+            source.push_str(text);
+            offset += text.encode_utf16().count();
+            lid_nodes.push(LidNode {
+                lid: (*lid).into(),
+                path: vec![u32::try_from(index + 1).unwrap()],
+                kind: NodeKind::Paragraph,
+                span: Span { start, end: offset },
+                children: Vec::new(),
+            });
+        }
+        let base = ReadOnlyBase {
+            book_id: "referent-catalog".into(),
+            lid_nodes,
+            graph_nodes: vec![
+                GraphNode {
+                    id: "concept:nearby".into(),
+                    node_type: GraphNodeType::Concept,
+                    name: "nearby".into(),
+                    occurrences: vec!["1.1".into()],
+                    source_lid: None,
+                },
+                GraphNode {
+                    id: "concept:target".into(),
+                    node_type: GraphNodeType::Concept,
+                    name: "target".into(),
+                    occurrences: vec!["1.2".into()],
+                    source_lid: None,
+                },
+                GraphNode {
+                    id: "concept:RAG".into(),
+                    node_type: GraphNodeType::Concept,
+                    name: "RAG".into(),
+                    occurrences: vec!["1.2".into()],
+                    source_lid: None,
+                },
+                GraphNode {
+                    id: "concept:SameName".into(),
+                    node_type: GraphNodeType::Concept,
+                    name: "SameName".into(),
+                    occurrences: vec!["1.1".into()],
+                    source_lid: None,
+                },
+                GraphNode {
+                    id: "concept:CoLocated".into(),
+                    node_type: GraphNodeType::Concept,
+                    name: "CoLocated".into(),
+                    occurrences: vec!["2.2".into()],
+                    source_lid: None,
+                },
+            ],
+            graph_edges: Vec::new(),
+        };
+        Book::new(base, &source).with_paper_lexicon(Some(PaperLexiconSidecar {
+            header: ProfileArtifactHeader {
+                book_id: "referent-catalog".into(),
+                book_version: "v1".into(),
+                profile_id: "paper".into(),
+                profile_version: "v1".into(),
+                core_schema_version: "v1".into(),
+                generated_at: "now".into(),
+            },
+            entries: vec![
+                PaperLexiconEntry {
+                    term: "RAG".into(),
+                    term_type: "acronym".into(),
+                    occurrences_lids: vec!["1.2".into()],
+                    defined_at_lid: Some("1.2".into()),
+                    aliases: (0..9).map(|index| format!("rag-alias-{index}")).collect(),
+                    acronym_expansion: Some("Retrieval Augmented Generation".into()),
+                    chinese_gloss: Some("检索增强生成".into()),
+                },
+                PaperLexiconEntry {
+                    term: "SameName".into(),
+                    term_type: "term".into(),
+                    occurrences_lids: vec!["2.1".into()],
+                    defined_at_lid: None,
+                    aliases: Vec::new(),
+                    acronym_expansion: None,
+                    chinese_gloss: None,
+                },
+                PaperLexiconEntry {
+                    term: "PaperOther".into(),
+                    term_type: "term".into(),
+                    occurrences_lids: vec!["2.2".into()],
+                    defined_at_lid: None,
+                    aliases: Vec::new(),
+                    acronym_expansion: None,
+                    chinese_gloss: None,
+                },
+            ],
+        }))
+    }
+
+    #[test]
+    fn referent_ranking_uses_anchor_only_as_peer_tiebreak() {
+        let book = referent_catalog_book();
+        for anchor in ["1.1", "2.2"] {
+            let candidates = book.referent_catalog(anchor).unwrap().search("target", 5);
+            assert_eq!(candidates[0].candidate_id, "concept:target");
+            assert_eq!(candidates[0].recall_strength, CatalogRecallStrength::Direct);
+            assert_eq!(
+                candidates
+                    .iter()
+                    .find(|candidate| candidate.candidate_id == "concept:nearby")
+                    .unwrap()
+                    .recall_strength,
+                CatalogRecallStrength::ContextOnly
+            );
+        }
+    }
+
+    #[test]
+    fn candidate_preview_enforces_fair_topk_and_match_centered_caps() {
+        let book = referent_catalog_book();
+        let candidates = book.referent_catalog("1.1").unwrap().search("RAG", 12);
+        assert_eq!(fair_candidate_quotas(1, 12), vec![12]);
+        assert_eq!(fair_candidate_quotas(2, 12), vec![6, 6]);
+        assert_eq!(fair_candidate_quotas(3, 12), vec![4, 4, 4]);
+        let rag = candidates
+            .iter()
+            .find(|candidate| candidate.labels.iter().any(|label| label == "RAG"))
+            .unwrap();
+        assert!(rag.aliases.len() <= 6);
+        assert!(rag.excerpts.len() <= 2);
+        assert!(rag
+            .excerpts
+            .iter()
+            .all(|excerpt| excerpt.text.chars().count() <= 180));
+        assert!(rag
+            .excerpts
+            .iter()
+            .any(|excerpt| excerpt.text.contains("target")));
+    }
+
+    #[test]
+    fn paper_referent_catalog_merges_only_alias_and_shared_lid_matches() {
+        let book = referent_catalog_book();
+        let candidates = book.referent_catalog("1.1").unwrap().search("RAG", 20);
+        let merged = candidates
+            .iter()
+            .filter(|candidate| candidate.labels.iter().any(|label| label == "RAG"))
+            .collect::<Vec<_>>();
+        assert_eq!(merged.len(), 1);
+        assert_eq!(
+            merged[0].sources,
+            vec![
+                CatalogReferentSource::Graph,
+                CatalogReferentSource::PaperLexicon
+            ]
+        );
+        assert_eq!(
+            candidates
+                .iter()
+                .filter(|candidate| candidate.labels.iter().any(|label| label == "SameName"))
+                .count(),
+            2
+        );
+        assert!(candidates.iter().any(|candidate| {
+            candidate.labels.iter().any(|label| label == "PaperOther")
+                && candidate.sources == vec![CatalogReferentSource::PaperLexicon]
+        }));
+        assert!(candidates.iter().any(|candidate| {
+            candidate.labels.iter().any(|label| label == "CoLocated")
+                && candidate.sources == vec![CatalogReferentSource::Graph]
+        }));
+    }
+
     #[test]
     fn concept_found_and_missing() {
         let b = book();

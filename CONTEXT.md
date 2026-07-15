@@ -193,17 +193,32 @@ LID 的字符串编码 = 各级序号点分串(如 `3.2.5.2`)。比较用**逐�
 ## 最小 agent loop / 自建运行时 (minimal agent loop)
 模块 E 的心脏:本地查询服务内置的 agent 运行时,U-A 没有、本项目净新自建 `[ADR-0005][ADR-0016]`。**双层嵌套**:
 - **外层 = E 编排 loop**(会话级,有状态 messages+memory):LLM 自主调三命名空间命令(book/reader/memory),管多跳编排 + 会话态 + 主动策略;**双重停机**——正常停=LLM 给最终答(无工具请求)/ 硬闸=`max_turns`+token 预算,触顶诚实标 `incomplete`+`CONTEXT_BUDGET_EXCEEDED`,不静默截断。
-- **内层 = `book.query` 自含 mini-loop**(无状态,被外层调一次,裸调即完整):**混合驱动**——确定性档位骨架管"捞什么"(scope 阶梯沿图谱确定性遍历捞 LID+真原文),LLM 管"够不够+答什么";**合一轮条件产出**`{sufficient,answer?,citations?,model_supplement?}`+**确定性交叉验停**(citations⊆证据集 LID 全集才留=结构红线读时落地;零有效 citation 强制外扩堵早停;`scope==global` 触顶堵晚停)。
-状态:NEW(详见 [docs/adr/0016])。
+- **内层 = `book.query` 自含 mini-loop**(无状态,被外层调一次,裸调即完整):外层提交自含问题、显式 referents 与回答义务;内层先从本地 ReferentCatalog 产候选并冻结唯一 binding,再围绕该 binding 回读来源 LID、由 LLM 判断开放语义支持度,最后由结构硬闸校验义务覆盖与 citations。anchor 仅是同级排序先验,不再定义检索边界。
+状态:BOUNDARY_CHANGE(基础双层 loop 承 [docs/adr/0016],query 内层由 [docs/adr/0077] 修订)。
 
 ## ModelAdapter (provider 适配层)
-统一 loop 骨架与具体后端之间的薄序列化层 `[ADR-0016]`。loop 控制(档位推进/停机/citations 校验)**provider 无关恒定**,只通过 `complete(messages, tools?, schema?) → ParsedResponse` 跟模型打交道;两实现:**NativeAdapter**(原生 tools API + JSON mode,直接拿结构化)/ **ReActAdapter**(无原生 tool-calling 的弱后端:注入 ReAct/JSON 模板 + 解析文本回填成同一 ParsedResponse)。⇒ 弱后端只改输出解析方式、loop 行为恒定;结构红线([ADR-0004])靠确定性 citations 过滤,后端无关 100% 守。状态:NEW(详见 [docs/adr/0016])。
+统一 loop 骨架与具体后端之间的薄序列化层 `[ADR-0016]`。loop 控制(请求校验、候选/证据预算、停机、状态聚合、citations 校验)**provider 无关恒定**,只通过 `complete(messages, tools?, schema?) → ParsedResponse` 跟模型打交道;两实现:**NativeAdapter**(原生 tools API + JSON mode,直接拿结构化)/ **ReActAdapter**(无原生 tool-calling 的弱后端:注入 ReAct/JSON 模板 + 解析文本回填成同一 ParsedResponse)。弱后端只改输出解析方式;开放语义相关性由 LLM 判断,结构红线([docs/adr/0004])仍由确定性 citations 过滤。状态:BOUNDARY_CHANGE(详见 [docs/adr/0016][docs/adr/0077])。
 
 ## book.query / book.synthesize(LLM 命令分工)
-两个 LLM 命令按**输入形态**分工 `[ADR-0017]`:`book.query(query, anchor_lid?, scope=auto)` = NL 问题 + 单 anchor,系统**隐式检索 + scope 外扩**找证据(内层自含外扩 loop,[docs/adr/0016]);`book.synthesize(lids:[LID...], task?)` = 调用方**给定离散多 LID 集**,系统只在该范围内综合、**无外扩**。query 单 anchor+连续半径表达不了"就这几个不相邻 LID",synthesize 填此缺口(阅读器圈选多段 / E 编排已圈定)。synthesize 内部**确定性分批归并**(超预算 map-reduce:按 LID 顺序切批局部综合→归并,横向不出 lids、纵向不静默丢);响应**复用 query 骨架**(`citations[].role` 承载多 LID 对照,`scope_used`→`source_lids`+`batched`);`citations ⊆ 输入 lids`(结构红线范围更紧)。状态:NEW(详见 [docs/adr/0017])。
+两个 LLM 命令按**证据所有权**分工:`book.query(query,intent,targets,obligations,anchor_lid)` 只处理显式 referent 的语义问答,系统先解析 target、冻结唯一 referent,再围绕它隐式取证并回答;`anchor_lid` 只作弱排序先验。`book.synthesize(lids:[LID...], task?)` 由调用方拥有证据选择权,系统只在给定离散 LID 内综合、无检索、无外扩。章节主旨/论文贡献先用 `book.structure`/`book.guide_path`(technical book)或 `book.paper_reading_guide`(paper)选 LID 再 synthesize;当前 passage 优先 `book.text`/`book.context` 或已知 LID 的 synthesize;query 不承担文档级搜索,也不在答后重复调用 synthesize。两者 citations 都只能指向各自允许的来源 LID。状态:BOUNDARY_CHANGE(原分工承 [docs/adr/0017],query 边界由 [docs/adr/0077] 修订)。
 
-## scope-granularity 同轴半径 (coaxial retrieval radius)
-`book.query` 的 scope 四档(`local/chapter/cross_chapter/global`)与 `book.context` 的 granularity 三档(`near/mid/far`)**同源**:reduce 到同一批已固化图谱原语(树邻接 / local 边 / 概念二跳 / long_range 边 / 子树范围,见 [docs/adr/0013]),只是**截断半径粗细不同**——near/mid/far 是半径轴上三个具名点,scope 四档是同轴更粗的检索广度档。非两套真相,内层 `retrieve(anchor, scope)` 与 `book.context` 投影复用同一遍历。状态:NEW(详见 [docs/adr/0016])。
+## Query referent / frozen referent binding
+**Query referent** 是外层 Agent 在 `book.query` 请求中显式声明、需要内层回答其语义问题的自然语言逻辑对象;它不是用户原话、anchor LID 或附近主题。内层 Resolver 必须把每个 target 映射到唯一 catalog candidate 后形成 **frozen referent binding**,取证期间不得再被 anchor 邻文或后来出现的候选替换。多义未消除则返回 ambiguous,无可接受候选则 unresolved,均不得生成语义答案。状态:NEW(详见 [docs/adr/0077])。
+
+## ReferentCatalog
+读时本地 referent 路由索引的统一名称:technical book 以 graph Concept/Entity 为目录,paper 以 paper lexicon 为主、graph Concept/Entity 为兜底。它通过名称、显式 alias/acronym 与自身 occurrence 文本产生候选,不依赖向量服务,也不要求构建期穷举所有别名。catalog、候选摘录、gloss 和图谱边都只是 routing artifact;只有候选冻结后回读的真实来源 LID 才能成为 query evidence。状态:NEW(详见 [docs/adr/0077])。
+
+## Query obligation / PlanGate
+**Query obligation** 是外层 Agent 随自含 query 一并声明的原子回答要求,只表达“这次必须回答什么”,不枚举定义、因果、类比、机制等关系逻辑,也不预先规定哪些来源可推出哪些关系。**PlanGate** 是内层对 query、targets 与 obligations 是否无损一致的语义 veto;缺项时只返回 invalid_plan 交外层修正,不得静默补题或缩题。状态:NEW(详见 [docs/adr/0077])。
+
+## Query structural gate / semantic support assessment
+`book.query` 的两类判定边界:**semantic support assessment** 由 LLM 阅读 frozen referent 的来源证据后开放判断每项 obligation 为 supported/uncertain/unsupported;程序不试图穷举知识关系。**Query structural gate** 只确定性检查请求合法、binding 唯一且冻结、每项 obligation 有 assessment、citation 位于证据包且 quote 来自对应真实 LID,再聚合 complete/partial/insufficient。排序分数不能补救结构闸失败。状态:NEW(详见 [docs/adr/0077])。
+
+## QueryAudit
+`book.query` 每次运行产生的旁路结构化审计:记录请求、候选、逐候选 fit、Resolver 结果、frozen bindings 及 selected round/rank、证据选择/预算/扩展/overflow、模型调用数、obligation assessments、citations 与结构闸结果。它供用户和开发者检查并随 resident Agent 回合历史持久化,但不进入 tool result、messages 或后续模型上下文,不充当来源证据,也不保存隐藏思维链。状态:NEW(详见 [docs/adr/0077])。
+
+## scope-granularity 同轴半径 (legacy query retrieval)
+`book.context` 的 near/mid/far 仍是从树邻接、local 边、概念二跳与 long_range 边确定性投影的累积半径 `[ADR-0013]`。`book.query` 原 local/chapter/cross_chapter/global anchor-scope 阶梯曾与它同轴,但该 query 用法已被 referent-first 取证取代:query 只能在 frozen referent 之后复用这些图谱/结构原语扩展证据,不得再以 anchor 为中心扫章或全书。状态:BOUNDARY_CHANGE([docs/adr/0077] 修订 [docs/adr/0016] 的 query 检索部分)。
 
 ## 构建侧增量(双轨变更检测 + 变更分级 + Pass2 受影响追踪 + 独立基座内容寻址)
 书没变但构建器升级、或书小改时,不全量重建、复用旧基座未变部分的机制 `[ADR-0019]`。**只覆盖「构建侧」**(记忆侧迁移见下条 8b)。

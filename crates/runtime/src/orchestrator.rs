@@ -5,7 +5,10 @@
 //! dispatch 仍保留 manifest 防御分支。reader.* 是会话态阅读器(S7 接入):agent 经命令面驱动
 //! 「问→跳转→高亮→记笔记」闭环 `[ADR-0007/0015]`。
 //! 内层 book.query 复用 `crate::query`(同一 adapter 触 `complete`)`[ADR-0025]`。
-use crate::{query, synthesize, AssistantTurn, Message, ModelAdapter, Role, ToolSpec};
+use crate::{
+    parse_book_query_request, query_run, synthesize, AssistantTurn, Message, ModelAdapter,
+    QueryAudit, Role, ToolSpec,
+};
 use memory::{Anchor, MemCitation, MemoryStore, ReaderProfileSnapshot, RecallQuery, SaveInput};
 use read_tools::{
     Book, PaperLandmarkKind, PaperMinimapAvailabilityStatus, PaperRegion, ReaderLayoutAction,
@@ -170,6 +173,9 @@ pub struct TraceStep {
     pub tool: String,
     pub args: String,
     pub result_digest: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub query_audit: Option<QueryAudit>,
 }
 
 /// 确定性近似 token(CJK=1,其余=0.25,ceil);仅在后端不返 usage 时兜底 `[ADR-0026]`。
@@ -203,14 +209,28 @@ pub fn tool_specs() -> Vec<ToolSpec> {
     vec![
         s(
             "book.query",
-            "对本书做锚定问答:给定问题与一个锚点 LID,内部确定性检索+合一轮作答,返回带真 LID citation 的答案。",
+            "对显式 referent 做自含语义问答:先解析 targets,再围绕冻结指代读取来源证据。",
             json!({
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": "自然语言问题"},
-                    "anchor_lid": {"type": "string", "description": "锚点 LID(从 manifest/context 获得)"}
+                    "query": {"type": "string", "description": "不依赖对话代词的自含问题"},
+                    "intent": {"type": "string", "enum": ["definition", "explanation", "relation", "comparison"]},
+                    "targets": {"type": "array", "minItems": 1, "maxItems": 3, "items": {"type": "string"}},
+                    "obligations": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 3,
+                        "items": {
+                            "type": "object",
+                            "properties": {"requirement": {"type": "string"}},
+                            "required": ["requirement"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "anchor_lid": {"type": "string", "description": "同级排序先验,不是检索边界"}
                 },
-                "required": ["query", "anchor_lid"]
+                "required": ["query", "intent", "targets", "obligations", "anchor_lid"],
+                "additionalProperties": false
             }),
         ),
         s(
@@ -497,7 +517,7 @@ note/highlight 自动锚回 anchor 的 LID;context 可经 citations 锚回支撑
     ]
 }
 
-const SYSTEM_PROMPT: &str = "你是这本书的阅读 agent。事实性回答经 book.query 取得带真 LID citation 的证据;\
+const SYSTEM_PROMPT: &str = "你是这本书的阅读 agent。显式概念/实体的语义问答经 book.query 取得带真 LID citation 的证据;\
 用 book.concept/context/text 定位与读原文。\
 工具价值判断——先判断任务类型和证据缺口,只调用能减少当前不确定性的最小工具。\
 当用户给出『引用原文 [LID: ...]』并问『这段怎么理解/什么意思』时,引用文本本身是最高优先级证据:先直接解释引用;\
@@ -505,7 +525,8 @@ const SYSTEM_PROMPT: &str = "你是这本书的阅读 agent。事实性回答经
 不要把引用拆成一串关键词去批量调用 book.concept,也不要先用 book.query 做开放检索。\
 当问题指向当前阅读位置但没有引用时,先 reader.state() 取 anchor,再按缺口用 book.text(anchor)、book.context(anchor,near) 或 book.synthesize([anchor])。\
 当用户问明确概念『在哪里讲/有哪些出现』时,book.concept(name) 最高价值;概念不存在时不要换同义词连续试探超过两次,改为说明没在图谱中命中。\
-当用户问开放解释/综合问题且没有给引用或已知 LID 时,用 book.query(query,anchor_lid) 做锚定问答;答完书内实质问题再记录 qa。\
+当用户问显式概念/实体的定义、解释、关系或比较时,调用 book.query(query,intent,targets,obligations,anchor_lid):query 必须自含,targets 是明确 referent,obligations 是 1..3 个原子回答要求;不得把『它/这里/刚才』原样传入。\
+章节主旨/整篇贡献先用 book.structure/book.guide_path 或 book.paper_reading_guide 选 LID,再 book.synthesize;当前 passage 问题优先 book.text/book.context 或已知 LID 的 book.synthesize。\
 当用户问『这和前后文/别处什么关系』且已有 LID 时,先 book.context(lid,near/mid/far) 取指针,再对少量相关 LID 调 book.text 或 book.synthesize。\
 book.route_from/guided_route_from/route_to/unvisited_back 只用于导航、带读、找前置和找路径,不是普通解释工具。\
 reader.state 会返回当前 layout 与 profile summary;若需要完整 slots/presets/projections/tool policy,调 profile.manifest。\
@@ -763,6 +784,34 @@ fn reader_state_value(book: &Book, reader: &Reader) -> serde_json::Value {
     })
 }
 
+fn execute_book_query(
+    arguments: &str,
+    book: &Book,
+    adapter: &dyn ModelAdapter,
+) -> (String, Option<QueryAudit>) {
+    let args = match serde_json::from_str(arguments) {
+        Ok(args) => args,
+        Err(error) => {
+            return (
+                err_json(
+                    "INVALID_RANGE",
+                    "validation",
+                    &format!("工具参数非合法 JSON: {error}"),
+                ),
+                None,
+            )
+        }
+    };
+    let request = match parse_book_query_request(args) {
+        Ok(request) => request,
+        Err(outcome) => return (to_json(&outcome), None),
+    };
+    match query_run(book, &request, adapter) {
+        Ok(run) => (to_json(&run.response), Some(run.audit)),
+        Err(error) => (to_json(&error), None),
+    }
+}
+
 /// 执行一次工具调用,返回 `(喂回模型的结果 JSON, 可选可撤销 effect)` `[ADR-0015/0026/0030]`。
 /// 错误**不降级**:把 ToolError 信封原样回喂,模型据 recovery 自纠。
 /// agent 的 highlight/note 落 `session` 层(提议态,用户「保留」才升 long_term `[ADR-0030]`)。
@@ -794,20 +843,7 @@ fn dispatch(
 
     match name {
         "book.query" => {
-            let (Some(q), Some(anchor)) = (sget("query"), sget("anchor_lid")) else {
-                return (
-                    err_json(
-                        "INVALID_RANGE",
-                        "validation",
-                        "book.query 需 query + anchor_lid",
-                    ),
-                    None,
-                );
-            };
-            let body = match query(book, q, anchor, adapter) {
-                Ok(resp) => to_json(&resp),
-                Err(e) => to_json(&e),
-            };
+            let (body, _) = execute_book_query(arguments, book, adapter);
             (body, None)
         }
         "book.synthesize" => {
@@ -1537,7 +1573,7 @@ pub fn run_with_ephemeral_context(
             tool_call_id: None,
         });
         for tc in &turn.tool_calls {
-            let (result, effect) = if tc.name == "profile.mark_used" {
+            let (result, effect, query_audit) = if tc.name == "profile.mark_used" {
                 (
                     mark_profile_used(
                         &tc.arguments,
@@ -1546,9 +1582,15 @@ pub fn run_with_ephemeral_context(
                         &mut profile_influences,
                     ),
                     None,
+                    None,
                 )
+            } else if tc.name == "book.query" {
+                let (result, query_audit) = execute_book_query(&tc.arguments, book, adapter);
+                (result, None, query_audit)
             } else {
-                dispatch(&tc.name, &tc.arguments, book, store, reader, adapter, now)
+                let (result, effect) =
+                    dispatch(&tc.name, &tc.arguments, book, store, reader, adapter, now);
+                (result, effect, None)
             };
             if trace_dbg {
                 eprintln!(
@@ -1561,6 +1603,7 @@ pub fn run_with_ephemeral_context(
                 tool: tc.name.clone(),
                 args: tc.arguments.clone(),
                 result_digest: digest(&result),
+                query_audit,
             });
             if let Some(e) = effect {
                 effects.push(e);
@@ -1625,6 +1668,10 @@ mod tests {
         completes: RefCell<VecDeque<ParsedResponse>>,
     }
     struct RecordingAdapter {
+        chats: RefCell<VecDeque<AssistantTurn>>,
+        seen_messages: RefCell<Vec<Vec<Message>>>,
+    }
+    struct QueryAuditAdapter {
         chats: RefCell<VecDeque<AssistantTurn>>,
         seen_messages: RefCell<Vec<Vec<Message>>>,
     }
@@ -1701,6 +1748,58 @@ mod tests {
                 .pop_front()
                 .ok_or_else(|| AdapterError {
                     message: "recording chat script exhausted".into(),
+                })
+        }
+    }
+
+    impl ModelAdapter for QueryAuditAdapter {
+        fn complete(&self, _req: CompletionRequest) -> Result<ParsedResponse, AdapterError> {
+            Err(AdapterError {
+                message: "query audit adapter requires structured completion".into(),
+            })
+        }
+
+        fn complete_structured(
+            &self,
+            req: CompletionRequest,
+        ) -> Result<serde_json::Value, AdapterError> {
+            if req.system.contains("PlanGate") {
+                Ok(serde_json::json!({
+                    "plan_gate": {"valid": true, "missing_requirements": [], "target_issues": []},
+                    "candidate_fits": [{
+                        "target_index": 0,
+                        "candidate_id": "entity:command",
+                        "fit": "direct_match",
+                        "reason": "fixture"
+                    }],
+                    "probes": []
+                }))
+            } else {
+                Ok(serde_json::json!({
+                    "answer": "command answer",
+                    "assessments": [{
+                        "obligation_index": 0,
+                        "verdict": "supported",
+                        "citation_lids": ["1.1"],
+                        "support_note": "fixture"
+                    }],
+                    "citations": [{"lid": "1.1", "text": "X", "role": "support"}],
+                    "model_supplement": []
+                }))
+            }
+        }
+
+        fn chat(
+            &self,
+            messages: &[Message],
+            _tools: &[ToolSpec],
+        ) -> Result<AssistantTurn, AdapterError> {
+            self.seen_messages.borrow_mut().push(messages.to_vec());
+            self.chats
+                .borrow_mut()
+                .pop_front()
+                .ok_or_else(|| AdapterError {
+                    message: "query audit chat script exhausted".into(),
                 })
         }
     }
@@ -2106,7 +2205,7 @@ mod tests {
                 turn_calls(vec![call(
                     "c1",
                     "book.query",
-                    r#"{"query":"命令模式?","anchor_lid":"1.1"}"#,
+                    r#"{"query":"命令模式是什么?","intent":"definition","targets":["命令模式"],"obligations":[{"requirement":"给出命令模式的定义"}],"anchor_lid":"1.1"}"#,
                 )]),
                 turn_calls(vec![call(
                     "c2",
@@ -2147,6 +2246,73 @@ mod tests {
         let recalled = store.recall(&RecallQuery::default());
         assert_eq!(recalled.len(), 1);
         assert_eq!(recalled[0].citations[0].lid, "1.1");
+    }
+
+    #[test]
+    fn query_audit_is_out_of_band_and_trace_is_backward_compatible() {
+        let b = book();
+        let mut store = MemoryStore::open(tmp("query-audit-out-of-band")).unwrap();
+        let adapter = QueryAuditAdapter {
+            chats: RefCell::new(
+                vec![
+                    turn_calls(vec![call(
+                        "query-1",
+                        "book.query",
+                        r#"{"query":"命令模式是什么","intent":"definition","targets":["command"],"obligations":[{"requirement":"给出定义"}],"anchor_lid":"1.1"}"#,
+                    )]),
+                    turn_final("final answer"),
+                ]
+                .into(),
+            ),
+            seen_messages: RefCell::new(Vec::new()),
+        };
+        let mut reader = Reader::new(&b, DEFAULT_RADIUS);
+        let mut messages = new_session();
+        let out = run(
+            &b,
+            &mut store,
+            &mut reader,
+            &adapter,
+            &mut messages,
+            "define command",
+            "t0",
+            OuterConfig::default(),
+        )
+        .unwrap();
+        let audit = out.trace[0].query_audit.as_ref().unwrap();
+        assert_eq!(audit.outcome_status, "complete");
+        assert_eq!(audit.model_calls, 2);
+        assert_eq!(audit.bindings[0].candidate_id, "entity:command");
+        assert_eq!(audit.selected_bindings[0].rank, 1);
+        assert_eq!(audit.evidence.seed_lids, vec!["1.1"]);
+        let provider_messages =
+            serde_json::to_string(&adapter.seen_messages.borrow().as_slice()).unwrap();
+        assert!(!provider_messages.contains("referent-first-v1"));
+        assert!(!provider_messages.contains("candidate_rounds"));
+
+        let round_trip: OuterOutcome =
+            serde_json::from_str(&serde_json::to_string(&out).unwrap()).unwrap();
+        assert_eq!(round_trip.trace[0].query_audit.as_ref(), Some(audit));
+        let legacy: TraceStep = serde_json::from_value(serde_json::json!({
+            "tool": "book.text",
+            "args": "{}",
+            "result_digest": "old trace"
+        }))
+        .unwrap();
+        assert!(legacy.query_audit.is_none());
+
+        let mut early_audit = serde_json::to_value(audit).unwrap();
+        let audit_object = early_audit.as_object_mut().unwrap();
+        audit_object.remove("model_calls");
+        audit_object.remove("selected_bindings");
+        let evidence = audit_object["evidence"].as_object_mut().unwrap();
+        evidence.remove("expansion_rounds");
+        evidence.remove("mandatory_overflow_reasons");
+        let early_audit: QueryAudit = serde_json::from_value(early_audit).unwrap();
+        assert_eq!(early_audit.model_calls, 0);
+        assert!(early_audit.selected_bindings.is_empty());
+        assert_eq!(early_audit.evidence.expansion_rounds, 0);
+        assert!(early_audit.evidence.mandatory_overflow_reasons.is_empty());
     }
 
     #[test]
@@ -2369,6 +2535,32 @@ mod tests {
         assert!(names.iter().any(|n| n == "book.route_from"));
         assert!(names.iter().any(|n| n == "book.route_to"));
         assert!(names.iter().any(|n| n == "book.guided_route_from"));
+    }
+
+    #[test]
+    fn query_routing_keeps_document_and_passage_questions_on_owned_tools() {
+        assert!(SYSTEM_PROMPT.contains(
+            "章节主旨/整篇贡献先用 book.structure/book.guide_path 或 book.paper_reading_guide 选 LID,再 book.synthesize"
+        ));
+        assert!(SYSTEM_PROMPT.contains(
+            "当前 passage 问题优先 book.text/book.context 或已知 LID 的 book.synthesize"
+        ));
+        assert!(SYSTEM_PROMPT
+            .contains("当用户问显式概念/实体的定义、解释、关系或比较时,调用 book.query"));
+
+        let query = tool_specs()
+            .into_iter()
+            .find(|spec| spec.name == "book.query")
+            .expect("book.query tool spec");
+        assert!(query.description.contains("显式 referent"));
+        assert_eq!(
+            query.parameters["required"],
+            serde_json::json!(["query", "intent", "targets", "obligations", "anchor_lid"])
+        );
+        assert_eq!(
+            query.parameters["additionalProperties"],
+            serde_json::Value::Bool(false)
+        );
     }
 
     #[test]
@@ -2831,7 +3023,7 @@ mod tests {
                 turn_calls(vec![call(
                     "c1",
                     "book.query",
-                    r#"{"query":"命令模式?","anchor_lid":"1.1"}"#,
+                    r#"{"query":"命令模式是什么?","intent":"definition","targets":["命令模式"],"obligations":[{"requirement":"给出命令模式的定义"}],"anchor_lid":"1.1"}"#,
                 )]),
                 turn_calls(vec![call("c2", "reader.gotoLid", r#"{"lid":"1.1"}"#)]),
                 turn_calls(vec![call("c3", "reader.highlight", r#"{"lid":"1.1"}"#)]),

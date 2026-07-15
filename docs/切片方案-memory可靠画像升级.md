@@ -2,7 +2,7 @@
 
 > **定位**:把现有“Agent 自愿 save/recall”的 memory 升级为 runtime 可靠写入、可靠消费、证据可追溯、按 `content_profile` 适配的读者画像系统。
 > **冻结决策**:[ADR-0075](adr/0075-runtime-owned-evidence-backed-profile-memory.md)。
-> **状态**:§0.5 Grill 已收口,仅完成 ADR/方案落档;尚未声明任何代码 A1 切片。
+> **状态**:M0-M4 已完成;M5 AgentHistory 修复与独立 M6 query 修复已完成方案 Grill、尚待逐刀实施。
 
 ---
 
@@ -12,7 +12,7 @@
 
 **明确不做**:
 
-- 不改 `book.query` 能力与证据算法。
+- M0-M5 不改 `book.query` 能力与证据算法;后续独立 M6 以自己的 FrozenIntent 修复该边界。
 - 不做账户、多用户、跨设备同步或云端画像。
 - 不做应用级加密;MVP 保持本地明文并执行敏感信息边界。
 - 不实现 `InteractionRoutine`;只保留非生效 intent 观察及后续晋升路径。
@@ -744,6 +744,263 @@ struct PaperMemoryState {
 
 **完成记录（2026-07-15）**:当前 OS 用户私有存储 gate 与安全降级已落地;§8.1 为 21/21 自动测试账本。`cargo test --workspace -- --test-threads=1`、`pnpm test`（core 210 + web 99）及 Web production build 全绿。真实 production server 在强制私有存储失败时经 Playwright 验收 1440x900/390x844:Profile stale 诊断可见、PDF 阅读面保留 14 个页面项、document/panel 横向溢出为零、无 page error/request failure/非预期 HTTP 错误;9 个 `formula_semantics` 404 是前端显式处理的可选侧车缺失。
 
+### M5 · AgentHistory 兼容与防覆写修复（待实施）
+
+**缺陷基线**:`a3a7093` 在 M1.4 为持久化 `OuterOutcome` 新增必填 `profile_usage`/`memory_updates`,pre-M history 因缺字段反序列化失败;`load_agent_history` 又把读取/解码/迁移错误静默折叠为默认空历史,启动创建 `server-start` 会话后由 `GET /agent/history` 写回,最终覆盖原文件。现有 legacy test 从当前 outcome 删 turn 字段,未覆盖真实 pre-M outcome shape。
+
+**边界**:M5 只防止再次丢失并兼容仍存在的旧文件;已经被覆盖的完整对话不能从新空历史或画像 memory 反推,恢复须依赖外部备份并另立任务。
+
+#### M5.1 真实 pre-M fixture 与加法兼容
+
+- **做**:从 pre-M 持久化 shape 固定不可变 `agent-history-pre-m.json` fixture;为 M1.4 新增字段定义字段级 serde default,缺失 usage trace 映射为 revision=0/空 ID/空 influences,`memory_updates` 映射为空数组。
+- **不做**:不伪造历史画像使用或更新,不把“未记录 trace”解释成“确定未使用画像”,不丢 session/turn/message/outcome 旧字段。
+- **判据**:fixture 可完整加载;旧 session/turn/message 计数与原值保持,既有 outcome 字段逐项相等;兼容占位只出现在新增字段;重复加载结果稳定。
+- **触达**:`crates/runtime/src/orchestrator.rs`,`crates/server/tests/fixtures/agent-history-pre-m.json`,`crates/server/src/lib.rs` tests。
+
+#### M5.2 可失败加载与启动阻断
+
+- **做**:`load_agent_history` 返回 `Result`;仅路径未配置或文件不存在可产生新历史,备份恢复/读取/JSON 解码/migration/validation 失败均携带 path+stage 返回错误;host 在创建默认会话、初始化 watermark 或启动 worker 前传播失败。
+- **不做**:不再使用 `.ok()`/`unwrap_or_default()` 吞错,不自动删除、隔离或重写故障源文件,不以“服务可启动”为由降级为空历史。
+- **判据**:malformed JSON、不可兼容 schema、非法 turn 三类 fixture 都使启动确定性失败;原文件 bytes/hash 不变,无 `server-start` 会话、无后台 job、无 history 写调用;文件不存在仍可正常首启。
+- **触达**:`crates/server/src/lib.rs`,`crates/server/src/host.rs`,loader/host tests。
+
+#### M5.3 查询写入隔离与回归闸
+
+- **做**:把 `agent_history_response` 拆为纯查询 projection 与显式 session command;`GET /agent/history` 不再调用 `save_agent_history`;只有 new/select/delete/chat/切书等已校验 mutation 可原子写入。
+- **不做**:不把首次 GET 当迁移提交点,不让 API 刷新改变 history bytes,不扩展到历史语义回填或画像恢复。
+- **判据**:有效旧文件经启动+重复 GET 后 bytes 不变;显式 mutation 仍原子持久化;未来给持久化 outcome 增无 default 字段时,pre-M fixture gate 必须失败并阻止发布。
+- **触达**:`crates/server/src/lib.rs`,`crates/server/src/host.rs`,route/integration tests。
+
+**M5 总闸**:MEM-E22~E24 全绿,定向 server/runtime tests 与 `cargo test --workspace -- --test-threads=1` 通过;不得改写 M4.5 已完成的 21/21 历史账本。
+
+### M6 · `book.query` 指代优先与来源取证修复（已完成）
+
+**状态**:2026-07-15 §0.5 Grill 已收口;M6 是 M5 之后的独立 query 修复,不回写 M0-M5 的 memory FrozenIntent,也不改变 M4.5 已完成账本。
+
+**M6 FrozenIntent**:把 `book.query` 从“围绕 anchor 扩大上下文后作答”改为“先解析外层 Agent 指定的 referent,再围绕冻结 referent 读取来源证据并回答”;成功标准是远 anchor 不再覆盖正确概念、歧义不静默折叠、每项回答可回溯到真实来源与可检查轨迹。
+
+**明确不做**:
+- 不引入向量检索、服务端 embedding 或穷举别名表;候选搜索保持本地词法/结构检索。
+- 不让 query 承担章节主旨、整篇贡献、当前段综合或导航;这些分别走 `book.structure`/`book.guide_path`/`book.paper_reading_guide`、`book.text`/`book.context`/`book.synthesize`、route。
+- 不在程序中枚举因果、类比、定义、机制等开放语义关系;LLM 继续判断语义相关性与支持度。
+- 不把 graph、paper lexicon、gloss、candidate preview 当最终证据;citation 只认回读后的来源 LID。
+- 不保留旧 `{query,anchor_lid}` 的静默兼容算法;缺 targets/obligations 必须显式失败。
+
+**缺陷基线**:
+- `可学习性 learnability 是什么意思` + anchor `1.18.13.43` 被附近 μ/σ 上下文吸走,未解析到 `可学习性 eta` 的真实出现处。
+- `trend 趋势 在书中是什么意思` + anchor `1.18.13` 被附近漂移项 μ 吸走,未解析到 `trend_strategy` / `1.2.7`。
+
+**RiskReceipt**:用户接受开放语义支持度仍由 LLM 判断,程序只能确定性保证请求结构、referent 冻结、来源范围、citation 真实性、义务覆盖和诚实状态;真实正确性通过固定金标准、真实回放和可见 QueryAudit 持续观察。
+
+**ChangeType**:`[边界重构]`。
+
+**M6 TermMap**:
+
+| 术语 | 状态 | 最终含义 |
+| --- | --- | --- |
+| `book.query` | BOUNDARY_CHANGE | 仅处理显式 referent 的自含语义问答,先解析指代再取来源证据 |
+| `anchor_lid` | BOUNDARY_CHANGE | 同级候选/证据排序先验,不是检索边界或默认主题 |
+| Query referent / target | NEW | 外层 Agent 声明、等待解析的自然语言逻辑对象 |
+| ReferentCatalog | NEW | book graph 或 paper lexicon+graph 的本地候选路由索引 |
+| frozen referent binding | NEW | Resolver 唯一选定且取证阶段不可替换的 referent 映射 |
+| Query obligation | NEW | 外层 Agent 声明的原子回答清单,不承载关系规则表 |
+| PlanGate | NEW | 对 query/targets/obligations 无损一致性的内层语义 veto |
+| semantic support assessment | NEW | LLM 对来源证据能否支持 obligation 的开放判断 |
+| Query structural gate | NEW | 程序对 plan/binding/coverage/citation 的确定性检查与状态聚合 |
+| QueryAudit | NEW | 不进入模型上下文、随回合历史持久化的旁路结构化审计 |
+| `book.synthesize` | EXISTING | 只综合调用方给定 LID,不检索、不外扩 |
+
+零 `UNRESOLVED` 术语;定义与 CONTEXT.md、ADR-0077 一致。
+
+#### M6 请求、路由与结果契约
+
+```ts
+type BookQueryIntent = "definition" | "explanation" | "relation" | "comparison";
+
+type QueryObligation = {
+  requirement: string;
+};
+
+type BookQueryRequest = {
+  query: string;
+  intent: BookQueryIntent;
+  targets: string[];
+  obligations: QueryObligation[];
+  anchor_lid: string;
+};
+
+type SupportAssessment = {
+  obligation_index: number;
+  verdict: "supported" | "uncertain" | "unsupported";
+  citation_lids: string[];
+  support_note: string;
+};
+```
+
+- `query`、targets 与 obligations 都由外层 Agent 生成,不是把用户原话直接塞给内层;`query` 必须自含,不得依赖对话中的“它/这里/刚才”。
+- definition/explanation 需 `1..3` targets;relation/comparison 需 `2..3`;所有 intent 都需 `1..3` 个原子 obligation。`targets=[]` 是外层路由错误。
+- `intent` 只提示检索侧重与回答形态,不规定事物间可推导关系,也不覆盖 obligations。
+- `PlanGate` 对照 query 检查 targets/obligations 是否无损且原子;缺项返回 `invalid_plan{missing_requirements,target_issues}`,由外层 Agent 修正重发,内层不得自动补写。
+- 文档级问题先经 `book.structure`/`book.guide_path`(technical book)或 `book.paper_reading_guide`(paper)选 LID,再由 `book.synthesize` 综合;当前 passage 用 `book.text`/`book.context` 或已知 LID 的 synthesize;query 只处理显式 referent 的语义问答。
+- query 自己完成回答,不得答完再调用 synthesize;`book.synthesize` 仍只消费调用方给定 LID,不检索、不外扩。
+
+```ts
+type QueryOutcome =
+  | { status: "complete" | "partial" | "insufficient"; answer?: string; citations: Citation[]; bindings: ReferentBinding[]; support: SupportAssessment[] }
+  | { status: "invalid_plan"; missing_requirements: string[]; target_issues: string[] }
+  | { status: "ambiguous"; target: string; candidates: CandidatePreview[] }
+  | { status: "unresolved"; target: string };
+```
+
+`complete` 要求全部 targets 已冻结、全部 obligations 被 LLM 判为 supported、全部 citations 通过确定性来源校验;部分 supported 为 `partial`;零 supported 且定向扩展耗尽为 `insufficient`。ambiguous/unresolved/invalid_plan 不生成语义答案。
+
+#### M6 ReferentCatalog 与 Resolver
+
+`ReferentCatalog.search(target, limit) -> Vec<ReferentCandidate>` 是本地 routing API:technical book 搜 graph Concept/Entity;paper 先搜 `paper_lexicon`,再以 graph Concept/Entity 兜底。搜索字段只含名称/id/显式 alias/acronym 与自身 occurrence 文本;paper 中文 gloss 仅作 hint。候选按严格字典序排序:
+
+```text
+RecallStrength(DIRECT > APPROXIMATE > CONTEXT_ONLY > NONE)
+  -> lexical_score
+  -> anchor_proximity 仅最终同级 tie-break
+```
+
+anchor 不得跨 RecallStrength、不得挤掉明显更强词法命中,Resolver 也不得看到 anchor 邻段文本。paper lexicon 与 graph 候选仅在“规范名或显式 alias 相容”且“共享 occurrence/defined_at LID”同时成立时合并;不按名称相似或同段出现做语义猜合并。
+
+```ts
+type CandidatePreview = {
+  candidate_id: string;
+  kind: "concept" | "entity" | "paper_term";
+  sources: Array<"graph" | "paper_lexicon">;
+  labels: string[];
+  aliases: string[];
+  recall_strength: "direct" | "approximate" | "context_only" | "none";
+  match_reasons: string[];
+  occurrence_count: number;
+  excerpts: Array<{ lid: string; text: string }>;
+  hint_only?: { acronym_expansion?: string; chinese_gloss?: string };
+};
+```
+
+preview 每候选最多 6 aliases、2 excerpts;每 excerpt 最多 180 Unicode 字符,优先完整命中句,过长则以真实命中位置居中截取,无正文命中而来自 defined_at 时才回退开头。preview 即使含原文摘录也仍是 routing artifact;冻结候选后必须回读完整 LID 才能引用。
+
+Resolver 对每个 target 的全部候选逐项输出 `direct_match | semantic_match | plausible | reject`,不输出数值 confidence。唯一 strong(`direct_match | semantic_match`) 且其余全 reject 才 `resolved`;两个以上非 reject 为 `ambiguous`;仅一个 plausible 或全部 reject 为 `unresolved`。context-only/none 或首轮全 reject 时,Resolver 最多生成 3 个词法 probe,本地重搜一次并替换原 Top-K;不追加第二批、不循环。Resolved bindings 在取证前冻结。
+
+#### M6 目标取证、结构硬闸与开放语义
+
+```text
+validated request
+  -> local candidates
+  -> PlanGate + Resolver
+  -> frozen bindings
+  -> target-first source seeds
+  -> LLM obligation support + answer
+  -> at most one targeted expansion
+  -> structural gate + QueryOutcome
+```
+
+- 取证先读 frozen referent 的 defined_at/occurrences 与 obligation 相关位置;defined_at 只是优先路标,必须由完整来源原文验证。anchor 只在同级 seed 间排序。
+- 附近段落只有明确属于 frozen referent 的 occurrence,或由该 referent 的 graph/discourse/formula 路标可达时才可进入证据包;禁止回到“anchor 附近全捞”。
+- 首轮缺支持时只围绕同一 frozen referent 和未满足 obligations 定向扩展一次;不读取全部 occurrences,不恢复 chapter/global 全书 anchored 叶扫描。
+- LLM 自由判断任意开放关系是否被证据支持,输出 supported/uncertain/unsupported 与短 support_note;程序不判断因果、定义或推导逻辑。
+- 确定性结构闸检查 PlanGate 通过、bindings 冻结、每个 obligation 有唯一 assessment、citation LID 属于最终证据包、citation text 在 CRLF 归一化后是完整 `book.text(lid)` 的精确子串。sidecar/gloss/preview/model_supplement 均不能满足 obligation。
+- RankScore 只能决定候选与证据顺序,不能补救 plan/binding/citation/coverage 失败。模型世界知识可留 `model_supplement`,但不参与 complete/partial 判定。
+
+#### M6 旁路 QueryAudit
+
+```ts
+type QueryRun = {
+  response: QueryOutcome;
+  audit: QueryAudit;
+};
+
+type TraceStep = {
+  tool: string;
+  args: string;
+  result_digest: string;
+  query_audit?: QueryAudit;
+};
+```
+
+QueryAudit 记录 validated request、PlanGate、初始/重搜候选、逐候选 fit、聚合 outcome、frozen bindings、证据 seed/扩展/跳过项、obligation assessments、结构闸各维结果与预算实耗。audit 走 dispatch 旁路,不得进入 tool result/messages 或后续模型上下文;resident Agent 将其随现有 `OuterOutcome.trace` 持久化进 AgentHistory,前端轨迹可展开。不得记录隐藏思维链,只记录结构字段、短 verdict 理由和来源文本摘录。
+
+#### M6 V1 可调预算
+
+**决策**:候选与证据预算集中版本化。
+
+**否决**:
+- 常量散落各检索阶段:无法复现实验或判断哪项调参生效。
+- 无上限读取 occurrences/global scope:成本不可控且放大近邻误配。
+
+**命门**:唯一必需的完整 LID 可单条受控越界,但必须记录原因和实际字符数。
+**何时回头**:固定金标准与真实 QueryAudit 回放显示召回、完整率或成本异常时,一次只调整一个参数。
+
+| 参数 | V1 默认值 | 统计口径 |
+| --- | ---: | --- |
+| `definition/explanation targets` | `1..3` | 外层 Agent 提供的逻辑 referent 数 |
+| `relation/comparison targets` | `2..3` | anchor 不计入 target |
+| `max_obligations` | `3/query` | 每项原子化且可独立检查覆盖 |
+| `candidate_top_k_total` | `12` | 全部 targets 合计,probe 重试替换而非追加 |
+| `candidate_quota_by_target_count` | `1→12; 2→6+6; 3→4+4+4` | target 间公平配额 |
+| `max_search_probes` / `retry_rounds` | `3 / 1` | LLM 词法 probes / 本地重搜轮数 |
+| `max_preview_aliases` / `excerpts` | `6 / 2` | 每 candidate |
+| `preview_excerpt_chars` | `180/excerpt` | Unicode 字符,命中居中 |
+| `max_seeds_per_target` | `3` | 首轮完整来源 LID |
+| `max_evidence_lids_total` | `12` | 去重后的最终证据包 |
+| `max_evidence_chars_total` | `16,000` | 完整来源文本 Unicode 字符 |
+| `max_expansion_rounds` | `1` | 首轮 assessment 后定向扩展 |
+| `max_joint_evidence_lids` | `3` | relation/comparison 的共享 seed,计入总 12 |
+| `mandatory_overflow_lids` | `1` | 唯一必需完整 LID 的受控越界 |
+
+QueryAudit 必须记录 `budget_version`、每 target 候选数与 selected rank、probe 数、证据 LID/字符实耗、预算跳过项、越界原因、扩展轮数和结构闸结果。Top-K 首轮固定对照 `K∈{5,8,12,20}`,默认 `12`;调参不得同时改 K 与证据预算。
+
+#### M6.1 Typed request/outcome 与路由 fail-fast
+
+- **做**:新增 BookQueryRequest/QueryOutcome/QueryObligation/SupportAssessment 权威 Rust DTO 与校验;工具 prompt、REST、MCP 缺 targets/obligations 时返回 invalid_plan/validation,不走旧算法。
+- **不做**:本刀不实现 candidate search 或模型 Resolver。
+- **判据**:数量/intent/空项/legacy 缺字段测试全绿;document-level 与 current-passage 路由 prompt contract 固定;所有旧 wire fixture 显式迁移。
+- **触达**:`crates/runtime/src/lib.rs`,`crates/runtime/src/orchestrator.rs`,`crates/server/src/{lib.rs,mcp.rs}`,generated TS。
+
+#### M6.2 本地 ReferentCatalog 与 CandidatePreview
+
+- **做**:在 read-tools 建 book/paper 本地 catalog search、严格排序、公平 Top-K、paper 双源去重、命中居中 preview。
+- **不做**:不调用 provider,不建向量,不物化新 sidecar,不扩充构建期 alias schema。
+- **判据**:相同 artifact 输入字节稳定;anchor 只能同级 tie-break;paper 合并双条件与 180 字符边界测试全绿。
+- **触达**:`crates/read-tools/src/lib.rs`,base/paper fixture tests。
+
+#### M6.3 PlanGate、Resolver 与一次 probe 重搜
+
+- **做**:结构化 LLM 一轮同时检查 plan 与逐候选 fit;确定性聚合 invalid/resolved/ambiguous/unresolved;仅失败路径允许一次 probes 重搜。
+- **不做**:不自动改 obligations,不按数值 confidence 选 winner,不把 anchor 邻文喂 Resolver。
+- **判据**:可学习性 eta、trend_strategy 两条 red-green 绑定测试通过;PlanGate 拒绝非原子/漏项义务;同强度多义返回 ambiguous;唯一 plausible 不冒充 resolved;retry 次数硬闸可断言。
+- **触达**:`crates/runtime/src/lib.rs`,structured FakeAdapter/gold fixtures。
+
+#### M6.4 Target-first evidence、support map 与 citation gate
+
+- **做**:从 frozen bindings 组 seed,按 obligations 取证并定向扩展一次;产生 obligation support map 与 typed outcome;精确校验 citation quote。
+- **不做**:不再执行 local→chapter→cross_chapter→global scope ladder,不让 routing artifact 充证据,不编码开放关系规则。
+- **判据**:两条缺陷基线引用远处正确来源且不引用 anchor 近邻替代物;partial/insufficient、预算越界、sidecar 非证据和 quote mismatch 均有确定性测试。
+- **触达**:`crates/runtime/src/lib.rs`,`crates/runtime/src/goldset.rs`。
+
+#### M6.5 QueryAudit 旁路、历史持久化与轨迹 UI
+
+- **做**:dispatch 返回 response+audit,TraceStep 加可选 typed detail;AgentHistory 原子持久化并由 RightRail 展开候选/绑定/证据/闸结果。
+- **不做**:audit 不进入 Message/tool result,不另建服务端日志,不记录 chain-of-thought。
+- **判据**:provider 收到的 messages 不含 audit sentinel;历史 reload 后 audit 等值;pre-M/M5 缺字段兼容;桌面/移动 trace 无溢出。
+- **触达**:`crates/runtime/src/orchestrator.rs`,`crates/server/src/lib.rs`,`packages/web/src/{api.ts,components/RightRail.vue}`。
+
+#### M6.6 Surface 迁移、固定回放与调参基线
+
+- **做**:迁移 resident/REST/MCP/goldset 全入口;固定 technical book + paper 回放;比较 K=5/8/12/20 的 binding recall、ambiguous/unresolved、complete/partial、证据字符数与调用次数。
+- **不做**:不以 LLM 自评分替代 expected binding/LID/status;不在首轮自动调参或批量候选调用。
+- **判据**:QRY-E01~E14 全绿,workspace/Web 构建通过;真实 provider 回放仅作补充报告,默认值变更须单变量 diff + QueryAudit 证据。
+- **触达**:runtime/server/read-tools tests,Web tests,`docs/代码链路.md`,`docs/架构.md`。
+
+**完成记录（2026-07-15）**:resident/REST/MCP/CLI/Web/goldset 已统一 typed request/outcome；旧 anchor-scope query 实现与 `QueryResponse` 已删除。内置 12 条 goldset 固定 expected binding/status/LID，`goldset-topk` 与 QRY-E14 对 technical book、paper 分别输出 K=5/8/12/20 的 binding recall、歧义/未解析、complete/partial、证据字符与模型调用数，默认 K 保持 12。QueryAudit 显式记录 selected rank、模型调用数、扩展轮次与 mandatory overflow 原因；eta/trend 两条缺陷基线直接断言 frozen binding、citation、seed 与 audit 终态。真实 provider 回放未执行，它仍是补充观察项而非自动发布判据。
+
+**M6 总闸**:QRY-E01~E14 全绿;`cargo test -p read-tools -p runtime -p server`、Web test/typecheck/build 与目标 clippy/diff check 通过;两条缺陷基线的 frozen binding、citation LID 和 QueryAudit 可人工展开复核。
+
+**总闸结果（2026-07-15）**:`read-tools` 125/125、`runtime` 143/143、`server` 137/137；core 210/210、Web 100/100；Web typecheck 与 production build（1906 modules）通过；`git diff --check` 通过。临时 Vite fixture + Playwright 在 1440×900/390×844 展开真实 QueryAuditPanel，document/panel 横向溢出均为 0，长 target/candidate ID、rank、预算与闸结果可见；fixture/截图/进程验后清理。三目标普通 clippy 通过且 M6 新代码零 clippy 告警；`-D warnings` 仍被 read-tools 既有 6 条非 M6 告警阻断，全仓 rustfmt check 仍只命中 checkpoint 已记录的 `memory_review.rs`、`profile_api.rs`、`server/host.rs` 格式债务，本刀未批量改写这些文件。
+
 ---
 
 ## 7. 迁移与兼容
@@ -760,12 +1017,25 @@ legacy context Record
 historical AgentHistory
   -> 新 watermark 从升级点开始
   -> 只有显式 backfill 才回扫,且全部 Pending
+
+pre-M AgentHistory outcome
+  -> 字段级兼容解码(legacy usage trace=未记录,memory_updates=[])
+  -> stable-turn migration + 全量 validation
+  -> 全部成功后才可进入原子写路径
 ```
 
 - `memory.save/recall/delete/replace` 内容记录 API 保持兼容;profile mutation 使用独立 typed API。
 - 旧 `reader-profile.md` / `reading-handbook.md` 在第一次 v2 mutation 后由新 projector 覆写。
 - 迁移前保留原文件直到 v2 原子切换成功;失败返回错误且不启动后台 worker。
 - 所有新 TS 类型继续由 Rust `ts-rs` 生成,禁止手编 generated files。
+
+### §7.1 AgentHistory 迁移失败边界
+**决策**:解码失败保留原文件并阻断覆写。
+**否决**:
+- 静默空历史:将兼容错误变成数据丢失。
+- 仅补字段默认值:无法防住未来 schema 破坏。
+**命门**:完整解码、迁移、校验成功前,启动/GET/切书均不得落盘。
+**何时回头**:引入显式版本 envelope 与只读恢复工具时。
 
 ---
 
@@ -794,6 +1064,9 @@ historical AgentHistory
 | MEM-E19 | legacy migration | Record 逐字段相等,旧文件在失败时保持可读 |
 | MEM-E20 | unknown profile | Neutral projection 可用且不丢原始事实 |
 | MEM-E21 | repeated intent observation | 可记录 `intent_key`,但 snapshot/动作/回答 contract 均不变化 |
+| MEM-E22 | pre-M AgentHistory outcome 缺画像字段 | transcript/outcome 原值保留,新增 trace/update 仅取兼容占位 |
+| MEM-E23 | history 读取/解码/迁移失败 | 显式失败且源文件 bytes 不变,不创建默认会话或后台 job |
+| MEM-E24 | 重复 `GET /agent/history` | 查询不写盘;文件 bytes 不变,显式 mutation 仍原子提交 |
 
 回答“风格是否更合适”另做有/无 snapshot 成对行为评测;LLM-as-judge 只能辅助,不能替代以上 document/watermark/snapshot/trace 断言。
 
@@ -825,6 +1098,37 @@ historical AgentHistory
 | MEM-E20 | `runtime::memory_policy::tests::{missing_and_mismatched_policies_fall_back_and_mark_state_orphaned,fallback_snapshot_keeps_core_facts_and_does_not_mutate_the_ledger}` | unknown profile 回退 Neutral,保留 Core/raw ledger |
 | MEM-E21 | `runtime::memory_review::tests::intent_observation_is_typed_separately_from_profile_facts`;`memory::review::tests::repeated_intent_observations_do_not_change_profile_snapshot`;`runtime::orchestrator::tests::profile_snapshot_is_ephemeral_and_frozen_across_the_tool_loop` | 重复 intent_key 可持久记录但 projection revision/snapshot 不变,动作与回答只消费同一 frozen snapshot contract |
 
+### 8.2 M5 planned coverage ledger
+
+以下 ID 是待实现发布闸,不计入 §8.1 的 M4.5 完成状态;测试名在 M5 实现时作为稳定定位符落地。
+
+| ID | 计划自动验收测试 ID | 覆盖面 |
+| --- | --- | --- |
+| MEM-E22 | `server::tests::pre_m_agent_history_fixture_migrates_without_losing_transcript` | 真实 pre-M outcome 缺字段兼容、旧 transcript/outcome 守恒、重复加载稳定 |
+| MEM-E23 | `server::host::tests::agent_history_load_failure_preserves_source_and_blocks_startup` | recovery/read/decode/migration/validation 分阶段报错,源 bytes 不变且 worker 未启动 |
+| MEM-E24 | `server::tests::agent_history_get_is_read_only_and_mutations_remain_atomic` | startup+重复 GET 零写入,显式 command 仍通过原子提交 |
+
+### 8.3 M6 completed coverage ledger
+
+以下 QRY ID 属于独立 query 修复,不计入 MEM-E01~E24 的 memory 完成状态。语义判断用 scripted structured adapter 固定输入输出以验证控制流;真实 provider 回放只验证产品效果并保留原始 QueryAudit,不以模型自评分作验收。
+
+| ID | 计划自动验收测试 ID | 覆盖面 |
+| --- | --- | --- |
+| QRY-E01 | `runtime::tests::learnability_resolves_eta_despite_far_anchor` | “可学习性”候选含并冻结 eta,证据不从 μ/σ anchor 邻文替代 |
+| QRY-E02 | `runtime::tests::trend_resolves_strategy_not_drift` | “trend 趋势”冻结 trend_strategy/1.2.7,不等同漂移 μ |
+| QRY-E03 | `read_tools::tests::referent_ranking_uses_anchor_only_as_peer_tiebreak` | 改 anchor 不跨 RecallStrength/词法层,强候选 binding 不变 |
+| QRY-E04 | `runtime::tests::resolver_preserves_multiple_viable_meanings_as_ambiguous` | 两个非 reject 候选返回 ambiguous,零答案/零取证 |
+| QRY-E05 | `runtime::tests::resolver_retries_three_or_fewer_lexical_probes_once_then_unresolved` | probes≤3、重搜=1、替换 Top-K、耗尽后 unresolved |
+| QRY-E06 | `runtime::tests::plan_gate_rejects_missing_target_or_obligation_without_retrieval` | 漏 target/obligation 返回 invalid_plan,不自动补写、不读证据 |
+| QRY-E07 | `read_tools::tests::candidate_preview_enforces_fair_topk_and_match_centered_caps` | Top-12 公平配额、aliases≤6、excerpts≤2、每条≤180 Unicode 字符 |
+| QRY-E08 | `read_tools::tests::paper_referent_catalog_merges_only_alias_and_shared_lid_matches` | paper lexicon 优先、graph 兜底、双条件去重、gloss 仅 hint |
+| QRY-E09 | `runtime::tests::target_evidence_respects_seed_total_char_expansion_and_overflow_budgets` | seeds/target≤3、总 LID≤12、字符≤16000、扩展≤1、单条受控越界 |
+| QRY-E10 | `runtime::tests::citation_gate_requires_exact_source_quote_and_rejects_routing_artifacts` | citation 属于证据 LID 且 quote 精确;preview/sidecar/gloss 不充证据 |
+| QRY-E11 | `runtime::tests::query_outcome_aggregates_obligation_support_without_semantic_rule_tables` | 全 supported=complete、部分=partial、零=insufficient,无关系枚举 |
+| QRY-E12 | `server::tests::query_audit_is_out_of_band_persisted_and_backward_compatible` | audit 不进 messages,历史 reload 等值,M5/pre-M 缺 detail 可解码 |
+| QRY-E13 | `runtime::orchestrator::tests::query_routing_keeps_document_and_passage_questions_on_owned_tools` | 文档级走 structure/guide 投影+synthesize,当前段优先 text/context,referent QA 才 query |
+| QRY-E14 | `runtime::goldset::tests::referent_topk_replay_reports_k_5_8_12_20_without_mutating_defaults` | 固定 book/paper 候选集输出各 K 召回/歧义/成本报告,默认仍 K=12 |
+
 ---
 
 ## 9. 实施顺序
@@ -835,6 +1139,8 @@ M0.1 -> M0.2 -> M0.3 -> M0.4
   -> M2.1 -> M2.2 -> M2.3 -> M2.4 -> M2.5 -> M2.6
   -> M3.1 -> M3.2 -> M3.3 -> M3.4
   -> M4.1 -> M4.2 -> M4.3 -> M4.4 -> M4.5
+  -> M5.1 -> M5.2 -> M5.3
+  -> M6.1 -> M6.2 -> M6.3 -> M6.4 -> M6.5 -> M6.6
 ```
 
 每个子刀完成时必须:
@@ -845,4 +1151,4 @@ M0.1 -> M0.2 -> M0.3 -> M0.4
 4. 单独 commit;不得把纯重构 M0.4 与功能刀混交。
 5. 大阶段 commit 后刷新 `SESSION_CHECKPOINT.md`,使下一会话只靠文件即可接手。
 
-**领域对齐完成**:本方案与 ADR-0075、CONTEXT.md 使用同一组术语,无未解析边界;A1 从 M0.1 开始,但必须由后续实现回合单独声明。
+**领域对齐完成**:M0-M5 与 ADR-0075/0076、M6 与 ADR-0077 及 CONTEXT.md 使用同一组术语,零未解析边界。后续实现默认先从数据安全优先的 M5.1 开始,再进入 M6.1;若用户显式重排优先级,每个子刀仍必须由实现回合单独声明 A1。

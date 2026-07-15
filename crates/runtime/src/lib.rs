@@ -1,9 +1,11 @@
-//! 模块 E 自建最小运行时:`book.query` 内层无状态 mini-loop `[ADR-0016/0025]`。
-//! 确定性档位检索(复用 `read-tools` 的 `Book`)+ ModelAdapter 合一轮判停 + 确定性交叉验停。
-//! 切片0:scope 两档(local/chapter)+ FakeAdapter(确定性测);NativeAdapter 见 S5b。
+//! 模块 E 自建最小运行时。`book.query` 使用 referent-first typed mini-loop；
+//! `book.synthesize` 与其他工具保留各自明确的证据所有权。
 use base_schema::{GraphNodeType, LidNode, NodeKind};
 use memory::{BookReadingState, EngagementSignals};
-use read_tools::{Book, Frontier, NavCategory, RankedStep, ToolError};
+use read_tools::{
+    fair_candidate_quotas, Book, CatalogRecallStrength, CatalogReferentKind, CatalogReferentSource,
+    Frontier, NavCategory, RankedStep, ReferentCandidate, ToolError,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 use ts_rs::TS;
@@ -15,26 +17,6 @@ pub mod memory_review;
 pub mod orchestrator;
 pub mod profile_api;
 pub mod profile_context;
-
-/// scope 档(P1 扩到 local/chapter/cross_chapter/global)`[ADR-0016/0033]`。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Scope {
-    Local,
-    Chapter,
-    CrossChapter,
-    Global,
-}
-
-impl Scope {
-    fn as_str(self) -> &'static str {
-        match self {
-            Scope::Local => "local",
-            Scope::Chapter => "chapter",
-            Scope::CrossChapter => "cross_chapter",
-            Scope::Global => "global",
-        }
-    }
-}
 
 /// 证据集:lid → 真原文(BTreeMap 保证确定性顺序)。
 pub type EvidenceSet = BTreeMap<String, String>;
@@ -299,20 +281,7 @@ fn message_to_json(m: &Message) -> serde_json::Value {
     o
 }
 
-/// `book.query` 对外响应(符 V3 §4.1 核心子集)。citations 已过确定性验停 ⇒ lid 全真。
-#[derive(Debug, Serialize, TS)]
-#[ts(export, export_to = "../../../packages/web/src/generated/")]
-pub struct QueryResponse {
-    pub answer: Option<String>,
-    pub citations: Vec<Citation>,
-    pub model_supplement: Vec<SupplementOut>,
-    pub scope_used: String,
-    pub incomplete: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub warning: Option<String>,
-}
-
-#[derive(Debug, Serialize, TS)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
 #[ts(export, export_to = "../../../packages/web/src/generated/")]
 pub struct Citation {
     pub lid: String,
@@ -320,11 +289,1444 @@ pub struct Citation {
     pub role: String,
 }
 
-#[derive(Debug, Serialize, TS)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
 #[ts(export, export_to = "../../../packages/web/src/generated/")]
 pub struct SupplementOut {
     pub text: String,
     pub source: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub enum BookQueryIntent {
+    Definition,
+    Explanation,
+    Relation,
+    Comparison,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct QueryObligation {
+    pub requirement: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[serde(deny_unknown_fields)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct BookQueryRequest {
+    pub query: String,
+    pub intent: BookQueryIntent,
+    pub targets: Vec<String>,
+    pub obligations: Vec<QueryObligation>,
+    pub anchor_lid: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QueryBudgets {
+    pub version: String,
+    pub candidate_top_k_total: usize,
+    pub max_search_probes: usize,
+    pub retry_rounds: usize,
+    pub max_seeds_per_target: usize,
+    pub max_evidence_lids_total: usize,
+    pub max_evidence_chars_total: usize,
+    pub max_expansion_rounds: usize,
+    pub max_joint_evidence_lids: usize,
+    pub mandatory_overflow_lids: usize,
+}
+
+impl Default for QueryBudgets {
+    fn default() -> Self {
+        Self {
+            version: "referent-first-v1".into(),
+            candidate_top_k_total: 12,
+            max_search_probes: 3,
+            retry_rounds: 1,
+            max_seeds_per_target: 3,
+            max_evidence_lids_total: 12,
+            max_evidence_chars_total: 16_000,
+            max_expansion_rounds: 1,
+            max_joint_evidence_lids: 3,
+            mandatory_overflow_lids: 1,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct QueryPlanGateAudit {
+    pub valid: bool,
+    pub missing_requirements: Vec<String>,
+    pub target_issues: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct QueryTargetCandidatesAudit {
+    pub target_index: usize,
+    pub target: String,
+    pub candidates: Vec<CandidatePreview>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct QueryCandidateRoundAudit {
+    pub round: usize,
+    pub targets: Vec<QueryTargetCandidatesAudit>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct QueryCandidateFitAudit {
+    pub round: usize,
+    pub target_index: usize,
+    pub candidate_id: String,
+    pub fit: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct QuerySelectedBindingAudit {
+    pub target_index: usize,
+    pub candidate_id: String,
+    pub round: usize,
+    pub rank: usize,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct QueryEvidenceAudit {
+    pub seed_lids: Vec<String>,
+    pub expansion_lids: Vec<String>,
+    #[serde(default)]
+    pub expansion_rounds: usize,
+    pub skipped_lids: Vec<String>,
+    pub chars_used: usize,
+    pub mandatory_overflow_used: usize,
+    #[serde(default)]
+    pub mandatory_overflow_reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct QueryStructuralGateAudit {
+    pub bindings_complete: bool,
+    pub assessments_complete: bool,
+    pub citations_valid: bool,
+    pub all_obligations_supported: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct QueryAudit {
+    pub budget_version: String,
+    #[serde(default)]
+    pub model_calls: usize,
+    pub request: BookQueryRequest,
+    pub plan_gate: QueryPlanGateAudit,
+    pub candidate_rounds: Vec<QueryCandidateRoundAudit>,
+    pub candidate_fits: Vec<QueryCandidateFitAudit>,
+    pub probes: Vec<String>,
+    pub bindings: Vec<ReferentBinding>,
+    #[serde(default)]
+    pub selected_bindings: Vec<QuerySelectedBindingAudit>,
+    pub evidence: QueryEvidenceAudit,
+    pub assessments: Vec<SupportAssessment>,
+    pub structural_gate: QueryStructuralGateAudit,
+    pub outcome_status: String,
+}
+
+impl QueryAudit {
+    fn new(request: &BookQueryRequest, budgets: &QueryBudgets) -> Self {
+        Self {
+            budget_version: budgets.version.clone(),
+            model_calls: 0,
+            request: request.clone(),
+            plan_gate: QueryPlanGateAudit {
+                valid: false,
+                missing_requirements: Vec::new(),
+                target_issues: Vec::new(),
+            },
+            candidate_rounds: Vec::new(),
+            candidate_fits: Vec::new(),
+            probes: Vec::new(),
+            bindings: Vec::new(),
+            selected_bindings: Vec::new(),
+            evidence: QueryEvidenceAudit::default(),
+            assessments: Vec::new(),
+            structural_gate: QueryStructuralGateAudit::default(),
+            outcome_status: "pending".into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct QueryRun {
+    pub response: QueryOutcome,
+    pub audit: QueryAudit,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub enum ReferentKind {
+    Concept,
+    Entity,
+    PaperTerm,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub enum ReferentSource {
+    Graph,
+    PaperLexicon,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub enum RecallStrength {
+    None,
+    ContextOnly,
+    Approximate,
+    Direct,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct CandidateExcerpt {
+    pub lid: String,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct CandidateHint {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub acronym_expansion: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chinese_gloss: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct CandidatePreview {
+    pub candidate_id: String,
+    pub kind: ReferentKind,
+    pub sources: Vec<ReferentSource>,
+    pub labels: Vec<String>,
+    pub aliases: Vec<String>,
+    pub recall_strength: RecallStrength,
+    pub match_reasons: Vec<String>,
+    pub occurrence_count: usize,
+    pub excerpts: Vec<CandidateExcerpt>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hint_only: Option<CandidateHint>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct ReferentBinding {
+    pub target: String,
+    pub candidate_id: String,
+    pub kind: ReferentKind,
+    pub canonical_label: String,
+    pub source_lids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub enum SupportVerdict {
+    Supported,
+    Uncertain,
+    Unsupported,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct SupportAssessment {
+    pub obligation_index: usize,
+    pub verdict: SupportVerdict,
+    pub citation_lids: Vec<String>,
+    pub support_note: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+#[serde(tag = "status", rename_all = "snake_case")]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub enum QueryOutcome {
+    Complete {
+        answer: Option<String>,
+        citations: Vec<Citation>,
+        bindings: Vec<ReferentBinding>,
+        support: Vec<SupportAssessment>,
+        model_supplement: Vec<SupplementOut>,
+    },
+    Partial {
+        answer: Option<String>,
+        citations: Vec<Citation>,
+        bindings: Vec<ReferentBinding>,
+        support: Vec<SupportAssessment>,
+        model_supplement: Vec<SupplementOut>,
+    },
+    Insufficient {
+        answer: Option<String>,
+        citations: Vec<Citation>,
+        bindings: Vec<ReferentBinding>,
+        support: Vec<SupportAssessment>,
+        model_supplement: Vec<SupplementOut>,
+    },
+    InvalidPlan {
+        missing_requirements: Vec<String>,
+        target_issues: Vec<String>,
+    },
+    Ambiguous {
+        target: String,
+        candidates: Vec<CandidatePreview>,
+    },
+    Unresolved {
+        target: String,
+    },
+}
+
+pub fn validate_book_query_request(request: &BookQueryRequest) -> Result<(), QueryOutcome> {
+    let mut missing_requirements = Vec::new();
+    let mut target_issues = Vec::new();
+    if request.query.trim().is_empty() {
+        missing_requirements.push("query".into());
+    }
+    if request.anchor_lid.trim().is_empty() {
+        missing_requirements.push("anchor_lid".into());
+    }
+    if request.targets.is_empty() {
+        missing_requirements.push("targets".into());
+    }
+    if request.obligations.is_empty() {
+        missing_requirements.push("obligations".into());
+    }
+
+    let target_range = match request.intent {
+        BookQueryIntent::Definition | BookQueryIntent::Explanation => 1..=3,
+        BookQueryIntent::Relation | BookQueryIntent::Comparison => 2..=3,
+    };
+    if !request.targets.is_empty() && !target_range.contains(&request.targets.len()) {
+        target_issues.push(format!(
+            "intent {:?} requires {} targets",
+            request.intent,
+            if matches!(
+                request.intent,
+                BookQueryIntent::Definition | BookQueryIntent::Explanation
+            ) {
+                "1..3"
+            } else {
+                "2..3"
+            }
+        ));
+    }
+    if request
+        .targets
+        .iter()
+        .any(|target| target.trim().is_empty())
+    {
+        target_issues.push("targets must not contain empty items".into());
+    }
+    let unique_targets: HashSet<String> = request
+        .targets
+        .iter()
+        .map(|target| target.trim().to_lowercase())
+        .collect();
+    if unique_targets.len() != request.targets.len() {
+        target_issues.push("targets must be unique".into());
+    }
+    if request.obligations.len() > 3 {
+        missing_requirements.push("obligations must contain 1..3 items".into());
+    }
+    if request
+        .obligations
+        .iter()
+        .any(|obligation| obligation.requirement.trim().is_empty())
+    {
+        missing_requirements.push("obligations must not contain empty requirements".into());
+    }
+
+    if missing_requirements.is_empty() && target_issues.is_empty() {
+        Ok(())
+    } else {
+        Err(QueryOutcome::InvalidPlan {
+            missing_requirements,
+            target_issues,
+        })
+    }
+}
+
+pub fn parse_book_query_request(
+    value: serde_json::Value,
+) -> Result<BookQueryRequest, QueryOutcome> {
+    let request = serde_json::from_value::<BookQueryRequest>(value).map_err(|error| {
+        QueryOutcome::InvalidPlan {
+            missing_requirements: vec![error.to_string()],
+            target_issues: Vec::new(),
+        }
+    })?;
+    validate_book_query_request(&request)?;
+    Ok(request)
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum CandidateFit {
+    DirectMatch,
+    SemanticMatch,
+    Plausible,
+    Reject,
+}
+
+impl CandidateFit {
+    fn is_strong(self) -> bool {
+        matches!(
+            self,
+            CandidateFit::DirectMatch | CandidateFit::SemanticMatch
+        )
+    }
+
+    fn is_viable(self) -> bool {
+        self != CandidateFit::Reject
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            CandidateFit::DirectMatch => "direct_match",
+            CandidateFit::SemanticMatch => "semantic_match",
+            CandidateFit::Plausible => "plausible",
+            CandidateFit::Reject => "reject",
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct PlanGateJudgment {
+    valid: bool,
+    #[serde(default)]
+    missing_requirements: Vec<String>,
+    #[serde(default)]
+    target_issues: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CandidateFitJudgment {
+    target_index: usize,
+    candidate_id: String,
+    fit: CandidateFit,
+    #[serde(default)]
+    reason: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct LexicalProbe {
+    target_index: usize,
+    query: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ResolverJudgment {
+    plan_gate: PlanGateJudgment,
+    #[serde(default)]
+    candidate_fits: Vec<CandidateFitJudgment>,
+    #[serde(default)]
+    probes: Vec<LexicalProbe>,
+}
+
+#[derive(Debug, Clone)]
+struct TargetCandidateGroup {
+    target_index: usize,
+    target: String,
+    quota: usize,
+    candidates: Vec<ReferentCandidate>,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedReferent {
+    binding: ReferentBinding,
+    target_index: usize,
+    round: usize,
+    selected_rank: usize,
+}
+
+struct ResolutionFailure {
+    outcome: Box<QueryOutcome>,
+    unresolved_targets: HashSet<usize>,
+}
+
+enum ResolutionStage {
+    Resolved(Vec<ResolvedReferent>),
+    Terminal(QueryOutcome),
+}
+
+fn referent_kind(kind: CatalogReferentKind) -> ReferentKind {
+    match kind {
+        CatalogReferentKind::Concept => ReferentKind::Concept,
+        CatalogReferentKind::Entity => ReferentKind::Entity,
+        CatalogReferentKind::PaperTerm => ReferentKind::PaperTerm,
+    }
+}
+
+fn referent_source(source: CatalogReferentSource) -> ReferentSource {
+    match source {
+        CatalogReferentSource::Graph => ReferentSource::Graph,
+        CatalogReferentSource::PaperLexicon => ReferentSource::PaperLexicon,
+    }
+}
+
+fn recall_strength(strength: CatalogRecallStrength) -> RecallStrength {
+    match strength {
+        CatalogRecallStrength::None => RecallStrength::None,
+        CatalogRecallStrength::ContextOnly => RecallStrength::ContextOnly,
+        CatalogRecallStrength::Approximate => RecallStrength::Approximate,
+        CatalogRecallStrength::Direct => RecallStrength::Direct,
+    }
+}
+
+fn candidate_preview(candidate: &ReferentCandidate) -> CandidatePreview {
+    CandidatePreview {
+        candidate_id: candidate.candidate_id.clone(),
+        kind: referent_kind(candidate.kind),
+        sources: candidate
+            .sources
+            .iter()
+            .copied()
+            .map(referent_source)
+            .collect(),
+        labels: candidate.labels.clone(),
+        aliases: candidate.aliases.clone(),
+        recall_strength: recall_strength(candidate.recall_strength),
+        match_reasons: candidate.match_reasons.clone(),
+        occurrence_count: candidate.occurrence_lids.len(),
+        excerpts: candidate
+            .excerpts
+            .iter()
+            .map(|excerpt| CandidateExcerpt {
+                lid: excerpt.lid.clone(),
+                text: excerpt.text.clone(),
+            })
+            .collect(),
+        hint_only: candidate.hint_only.as_ref().map(|hint| CandidateHint {
+            acronym_expansion: hint.acronym_expansion.clone(),
+            chinese_gloss: hint.chinese_gloss.clone(),
+        }),
+    }
+}
+
+fn query_candidate_groups(
+    book: &Book,
+    request: &BookQueryRequest,
+    budgets: &QueryBudgets,
+) -> Result<Vec<TargetCandidateGroup>, ToolError> {
+    let quotas = fair_candidate_quotas(request.targets.len(), budgets.candidate_top_k_total);
+    let catalog = book.referent_catalog(&request.anchor_lid)?;
+    Ok(request
+        .targets
+        .iter()
+        .enumerate()
+        .map(|(target_index, target)| TargetCandidateGroup {
+            target_index,
+            target: target.clone(),
+            quota: quotas[target_index],
+            candidates: catalog.search(target, quotas[target_index]),
+        })
+        .collect())
+}
+
+fn resolver_prompt(
+    request: &BookQueryRequest,
+    groups: &[TargetCandidateGroup],
+) -> CompletionRequest {
+    let candidates: Vec<serde_json::Value> = groups
+        .iter()
+        .map(|group| {
+            serde_json::json!({
+                "target_index": group.target_index,
+                "target": group.target,
+                "candidates": group.candidates.iter().map(candidate_preview).collect::<Vec<_>>()
+            })
+        })
+        .collect();
+    CompletionRequest {
+        system: "You are the bounded PlanGate and referent resolver. Return one JSON object. Check that query, targets, and obligations preserve the same request. Classify every candidate as direct_match, semantic_match, plausible, or reject. Do not infer from anchor-neighbor text. If lexical recall failed, emit at most three short lexical probes total. Reasons must be short verdict summaries, never hidden chain-of-thought.".into(),
+        user: serde_json::json!({
+            "request": request,
+            "candidate_groups": candidates,
+            "response_schema": {
+                "plan_gate": {"valid": true, "missing_requirements": [], "target_issues": []},
+                "candidate_fits": [{"target_index": 0, "candidate_id": "id", "fit": "direct_match", "reason": "short"}],
+                "probes": [{"target_index": 0, "query": "lexical probe"}]
+            }
+        })
+        .to_string(),
+    }
+}
+
+fn resolver_judgment(
+    request: &BookQueryRequest,
+    groups: &[TargetCandidateGroup],
+    adapter: &dyn ModelAdapter,
+) -> Result<ResolverJudgment, ToolError> {
+    let value = adapter
+        .complete_structured(resolver_prompt(request, groups))
+        .map_err(|error| ToolError {
+            error_code: "PROVIDER_ERROR".into(),
+            category: "provider".into(),
+            message: error.message,
+        })?;
+    serde_json::from_value(value).map_err(|error| ToolError {
+        error_code: "QUERY_RESOLVER_PROTOCOL_ERROR".into(),
+        category: "provider".into(),
+        message: format!("query resolver response invalid: {error}"),
+    })
+}
+
+fn record_candidate_round(audit: &mut QueryAudit, round: usize, groups: &[TargetCandidateGroup]) {
+    audit.candidate_rounds.push(QueryCandidateRoundAudit {
+        round,
+        targets: groups
+            .iter()
+            .map(|group| QueryTargetCandidatesAudit {
+                target_index: group.target_index,
+                target: group.target.clone(),
+                candidates: group.candidates.iter().map(candidate_preview).collect(),
+            })
+            .collect(),
+    });
+}
+
+fn record_resolver_judgment(audit: &mut QueryAudit, round: usize, judgment: &ResolverJudgment) {
+    audit.model_calls += 1;
+    audit.plan_gate = QueryPlanGateAudit {
+        valid: judgment.plan_gate.valid,
+        missing_requirements: judgment.plan_gate.missing_requirements.clone(),
+        target_issues: judgment.plan_gate.target_issues.clone(),
+    };
+    audit.candidate_fits.extend(
+        judgment
+            .candidate_fits
+            .iter()
+            .map(|fit| QueryCandidateFitAudit {
+                round,
+                target_index: fit.target_index,
+                candidate_id: fit.candidate_id.clone(),
+                fit: fit.fit.as_str().into(),
+                reason: fit.reason.clone(),
+            }),
+    );
+}
+
+fn sort_referent_candidates(candidates: &mut [ReferentCandidate]) {
+    candidates.sort_by(|left, right| {
+        right
+            .recall_strength
+            .cmp(&left.recall_strength)
+            .then_with(|| right.lexical_score.cmp(&left.lexical_score))
+            .then_with(|| left.anchor_distance.cmp(&right.anchor_distance))
+            .then_with(|| left.candidate_id.cmp(&right.candidate_id))
+    });
+}
+
+fn replacement_groups(
+    book: &Book,
+    request: &BookQueryRequest,
+    groups: &[TargetCandidateGroup],
+    unresolved_targets: &HashSet<usize>,
+    probes: &[LexicalProbe],
+    budgets: &QueryBudgets,
+) -> Result<Option<Vec<TargetCandidateGroup>>, ToolError> {
+    let catalog = book.referent_catalog(&request.anchor_lid)?;
+    let mut replacement = groups.to_vec();
+    let mut used_any = false;
+    for group in &mut replacement {
+        if !unresolved_targets.contains(&group.target_index) {
+            continue;
+        }
+        let target_probes: Vec<&str> = probes
+            .iter()
+            .filter(|probe| probe.target_index == group.target_index)
+            .map(|probe| probe.query.trim())
+            .filter(|probe| !probe.is_empty())
+            .take(budgets.max_search_probes)
+            .collect();
+        if target_probes.is_empty() {
+            continue;
+        }
+        used_any = true;
+        let mut by_id = BTreeMap::new();
+        for probe in target_probes {
+            for candidate in catalog.search(probe, group.quota) {
+                by_id
+                    .entry(candidate.candidate_id.clone())
+                    .or_insert(candidate);
+            }
+        }
+        group.candidates = by_id.into_values().collect();
+        sort_referent_candidates(&mut group.candidates);
+        group.candidates.truncate(group.quota);
+    }
+    Ok(used_any.then_some(replacement))
+}
+
+fn lid_anchor_distance(book: &Book, anchor_lid: &str, lid: &str) -> usize {
+    let anchor_index = book
+        .base
+        .lid_nodes
+        .iter()
+        .position(|node| node.lid == anchor_lid);
+    let lid_index = book.base.lid_nodes.iter().position(|node| node.lid == lid);
+    anchor_index
+        .zip(lid_index)
+        .map(|(anchor, current)| anchor.abs_diff(current))
+        .unwrap_or(usize::MAX)
+}
+
+fn ordered_source_lids(
+    book: &Book,
+    anchor_lid: &str,
+    candidate: &ReferentCandidate,
+) -> Vec<String> {
+    let mut lids = candidate.occurrence_lids.clone();
+    if let Some(defined_at) = &candidate.defined_at_lid {
+        if !lids.contains(defined_at) {
+            lids.push(defined_at.clone());
+        }
+    }
+    lids.sort_by(|left, right| {
+        let left_defined = candidate.defined_at_lid.as_ref() == Some(left);
+        let right_defined = candidate.defined_at_lid.as_ref() == Some(right);
+        right_defined
+            .cmp(&left_defined)
+            .then_with(|| {
+                lid_anchor_distance(book, anchor_lid, left)
+                    .cmp(&lid_anchor_distance(book, anchor_lid, right))
+            })
+            .then_with(|| left.cmp(right))
+    });
+    lids.dedup();
+    lids
+}
+
+fn aggregate_resolution(
+    book: &Book,
+    anchor_lid: &str,
+    groups: &[TargetCandidateGroup],
+    judgment: &ResolverJudgment,
+    round: usize,
+) -> Result<Vec<ResolvedReferent>, ResolutionFailure> {
+    if !judgment.plan_gate.valid {
+        return Err(ResolutionFailure {
+            outcome: Box::new(QueryOutcome::InvalidPlan {
+                missing_requirements: judgment.plan_gate.missing_requirements.clone(),
+                target_issues: judgment.plan_gate.target_issues.clone(),
+            }),
+            unresolved_targets: HashSet::new(),
+        });
+    }
+    let mut resolved = Vec::new();
+    let mut unresolved_targets = HashSet::new();
+    for group in groups {
+        let fits: BTreeMap<&str, (&CandidateFit, &str)> = judgment
+            .candidate_fits
+            .iter()
+            .filter(|fit| fit.target_index == group.target_index)
+            .map(|fit| (fit.candidate_id.as_str(), (&fit.fit, fit.reason.as_str())))
+            .collect();
+        let omitted = group
+            .candidates
+            .iter()
+            .any(|candidate| !fits.contains_key(candidate.candidate_id.as_str()));
+        let viable: Vec<&ReferentCandidate> = group
+            .candidates
+            .iter()
+            .filter(|candidate| {
+                fits.get(candidate.candidate_id.as_str())
+                    .is_some_and(|(fit, _)| fit.is_viable())
+            })
+            .collect();
+        if viable.len() > 1 {
+            return Err(ResolutionFailure {
+                outcome: Box::new(QueryOutcome::Ambiguous {
+                    target: group.target.clone(),
+                    candidates: viable.into_iter().map(candidate_preview).collect(),
+                }),
+                unresolved_targets: HashSet::new(),
+            });
+        }
+        let Some(candidate) = viable.first().copied() else {
+            unresolved_targets.insert(group.target_index);
+            continue;
+        };
+        let fit = *fits[candidate.candidate_id.as_str()].0;
+        if omitted || !fit.is_strong() {
+            unresolved_targets.insert(group.target_index);
+            continue;
+        }
+        let source_lids = ordered_source_lids(book, anchor_lid, candidate);
+        resolved.push(ResolvedReferent {
+            binding: ReferentBinding {
+                target: group.target.clone(),
+                candidate_id: candidate.candidate_id.clone(),
+                kind: referent_kind(candidate.kind),
+                canonical_label: candidate
+                    .labels
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| candidate.candidate_id.clone()),
+                source_lids,
+            },
+            target_index: group.target_index,
+            round,
+            selected_rank: group
+                .candidates
+                .iter()
+                .position(|item| item.candidate_id == candidate.candidate_id)
+                .map(|index| index + 1)
+                .unwrap_or(0),
+        });
+    }
+    if unresolved_targets.is_empty() {
+        Ok(resolved)
+    } else {
+        let target_index = *unresolved_targets.iter().min().unwrap();
+        Err(ResolutionFailure {
+            outcome: Box::new(QueryOutcome::Unresolved {
+                target: groups[target_index].target.clone(),
+            }),
+            unresolved_targets,
+        })
+    }
+}
+
+fn resolve_referents(
+    book: &Book,
+    request: &BookQueryRequest,
+    adapter: &dyn ModelAdapter,
+    budgets: &QueryBudgets,
+    audit: &mut QueryAudit,
+) -> Result<ResolutionStage, ToolError> {
+    if let Err(outcome) = validate_book_query_request(request) {
+        if let QueryOutcome::InvalidPlan {
+            missing_requirements,
+            target_issues,
+        } = &outcome
+        {
+            audit.plan_gate = QueryPlanGateAudit {
+                valid: false,
+                missing_requirements: missing_requirements.clone(),
+                target_issues: target_issues.clone(),
+            };
+        }
+        return Ok(ResolutionStage::Terminal(outcome));
+    }
+    let groups = query_candidate_groups(book, request, budgets)?;
+    record_candidate_round(audit, 0, &groups);
+    let first = resolver_judgment(request, &groups, adapter)?;
+    record_resolver_judgment(audit, 0, &first);
+    match aggregate_resolution(book, &request.anchor_lid, &groups, &first, 0) {
+        Ok(resolved) => Ok(ResolutionStage::Resolved(resolved)),
+        Err(failure)
+            if matches!(
+                failure.outcome.as_ref(),
+                QueryOutcome::Ambiguous { .. } | QueryOutcome::InvalidPlan { .. }
+            ) =>
+        {
+            Ok(ResolutionStage::Terminal(*failure.outcome))
+        }
+        Err(failure) => {
+            let outcome = *failure.outcome;
+            let unresolved_targets = failure.unresolved_targets;
+            let probes: Vec<LexicalProbe> = first
+                .probes
+                .into_iter()
+                .take(budgets.max_search_probes)
+                .collect();
+            audit.probes = probes.iter().map(|probe| probe.query.clone()).collect();
+            if budgets.retry_rounds == 0 {
+                return Ok(ResolutionStage::Terminal(outcome));
+            }
+            let Some(replacement) = replacement_groups(
+                book,
+                request,
+                &groups,
+                &unresolved_targets,
+                &probes,
+                budgets,
+            )?
+            else {
+                return Ok(ResolutionStage::Terminal(outcome));
+            };
+            record_candidate_round(audit, 1, &replacement);
+            let second = resolver_judgment(request, &replacement, adapter)?;
+            record_resolver_judgment(audit, 1, &second);
+            Ok(
+                match aggregate_resolution(book, &request.anchor_lid, &replacement, &second, 1) {
+                    Ok(resolved) => ResolutionStage::Resolved(resolved),
+                    Err(failure) => ResolutionStage::Terminal(*failure.outcome),
+                },
+            )
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct QueryEvidenceBundle {
+    texts: EvidenceSet,
+    seed_lids: Vec<String>,
+    expansion_lids: Vec<String>,
+    expansion_rounds: usize,
+    skipped_lids: Vec<String>,
+    chars_used: usize,
+    mandatory_overflow_used: usize,
+    mandatory_overflow_reasons: Vec<String>,
+}
+
+impl QueryEvidenceBundle {
+    fn add_lid(
+        &mut self,
+        book: &Book,
+        lid: &str,
+        budgets: &QueryBudgets,
+        expansion: bool,
+        mandatory: bool,
+    ) -> Result<bool, ToolError> {
+        if self.texts.contains_key(lid) {
+            return Ok(false);
+        }
+        let text = book.text(lid, None)?;
+        let chars = text.chars().count();
+        let within_budget = self.texts.len() < budgets.max_evidence_lids_total
+            && self.chars_used.saturating_add(chars) <= budgets.max_evidence_chars_total;
+        let overflow = !within_budget
+            && mandatory
+            && self.mandatory_overflow_used < budgets.mandatory_overflow_lids;
+        if !within_budget && !overflow {
+            if !self.skipped_lids.iter().any(|skipped| skipped == lid) {
+                self.skipped_lids.push(lid.into());
+            }
+            return Ok(false);
+        }
+        if overflow {
+            self.mandatory_overflow_used += 1;
+            self.mandatory_overflow_reasons.push(format!(
+                "mandatory source LID {lid} exceeded the evidence LID or character budget"
+            ));
+        }
+        self.chars_used = self.chars_used.saturating_add(chars);
+        self.texts.insert(lid.into(), text);
+        if expansion {
+            self.expansion_lids.push(lid.into());
+        } else {
+            self.seed_lids.push(lid.into());
+        }
+        Ok(true)
+    }
+}
+
+fn build_initial_query_evidence(
+    book: &Book,
+    resolved: &[ResolvedReferent],
+    budgets: &QueryBudgets,
+) -> Result<QueryEvidenceBundle, ToolError> {
+    let mut evidence = QueryEvidenceBundle::default();
+    for referent in resolved {
+        let mut added_for_target = 0usize;
+        for lid in referent
+            .binding
+            .source_lids
+            .iter()
+            .take(budgets.max_seeds_per_target)
+        {
+            if evidence.add_lid(book, lid, budgets, false, added_for_target == 0)? {
+                added_for_target += 1;
+            }
+        }
+    }
+    Ok(evidence)
+}
+
+fn push_unique_lid(lids: &mut Vec<String>, lid: &str) {
+    if !lid.trim().is_empty() && !lids.iter().any(|item| item == lid) {
+        lids.push(lid.into());
+    }
+}
+
+fn related_landmark_lids(
+    book: &Book,
+    resolved: &[ResolvedReferent],
+    anchor_lid: &str,
+) -> Vec<String> {
+    let mut related = Vec::new();
+    let mut binding_source_lids = HashSet::new();
+    for referent in resolved {
+        binding_source_lids.extend(referent.binding.source_lids.iter().cloned());
+        let graph_ids: HashSet<&str> = book
+            .base
+            .graph_nodes
+            .iter()
+            .filter(|node| {
+                node.id == referent.binding.candidate_id
+                    || (node
+                        .name
+                        .eq_ignore_ascii_case(&referent.binding.canonical_label)
+                        && node
+                            .source_lid
+                            .iter()
+                            .chain(node.occurrences.iter())
+                            .any(|lid| referent.binding.source_lids.contains(lid)))
+            })
+            .map(|node| node.id.as_str())
+            .collect();
+        for edge in &book.base.graph_edges {
+            let neighbor_id = if graph_ids.contains(edge.source.as_str()) {
+                Some(edge.target.as_str())
+            } else if graph_ids.contains(edge.target.as_str()) {
+                Some(edge.source.as_str())
+            } else {
+                None
+            };
+            let Some(neighbor) =
+                neighbor_id.and_then(|id| book.base.graph_nodes.iter().find(|node| node.id == id))
+            else {
+                continue;
+            };
+            if let Some(lid) = &neighbor.source_lid {
+                push_unique_lid(&mut related, lid);
+            }
+            for lid in &neighbor.occurrences {
+                push_unique_lid(&mut related, lid);
+            }
+        }
+
+        for lid in &referent.binding.source_lids {
+            if let Some(item) = book.discourse_item(lid) {
+                for relation in &item.relations {
+                    push_unique_lid(&mut related, &relation.target_lid);
+                    for evidence_lid in &relation.evidence_lids {
+                        push_unique_lid(&mut related, evidence_lid);
+                    }
+                }
+            }
+        }
+    }
+
+    let mut formula_seeds: Vec<String> = binding_source_lids.iter().cloned().collect();
+    formula_seeds.extend(related.iter().cloned());
+    formula_seeds.sort();
+    formula_seeds.dedup();
+    for lid in formula_seeds {
+        let Some(semantics) = book.formula_semantics(&lid) else {
+            continue;
+        };
+        push_unique_lid(&mut related, &semantics.composition.source_lid);
+        for evidence_lid in &semantics.composition.evidence_lids {
+            push_unique_lid(&mut related, evidence_lid);
+        }
+        for parameter in &semantics.parameters {
+            for evidence_lid in &parameter.evidence_lids {
+                push_unique_lid(&mut related, evidence_lid);
+            }
+        }
+        for link in &semantics.context_links {
+            push_unique_lid(&mut related, &link.target_lid);
+            for evidence_lid in &link.evidence_lids {
+                push_unique_lid(&mut related, evidence_lid);
+            }
+        }
+    }
+
+    related.retain(|lid| {
+        !binding_source_lids.contains(lid)
+            && book.base.lid_nodes.iter().any(|node| node.lid == *lid)
+    });
+    related.sort_by(|left, right| {
+        lid_anchor_distance(book, anchor_lid, left)
+            .cmp(&lid_anchor_distance(book, anchor_lid, right))
+            .then_with(|| left.cmp(right))
+    });
+    related
+}
+
+fn targeted_expansion_lids(
+    book: &Book,
+    resolved: &[ResolvedReferent],
+    budgets: &QueryBudgets,
+    anchor_lid: &str,
+) -> Vec<String> {
+    let mut candidates = Vec::new();
+    let max_sources = resolved
+        .iter()
+        .map(|referent| referent.binding.source_lids.len())
+        .max()
+        .unwrap_or(0);
+    for index in budgets.max_seeds_per_target..max_sources {
+        for referent in resolved {
+            if let Some(lid) = referent.binding.source_lids.get(index) {
+                push_unique_lid(&mut candidates, lid);
+            }
+        }
+    }
+    for lid in related_landmark_lids(book, resolved, anchor_lid) {
+        push_unique_lid(&mut candidates, &lid);
+    }
+    candidates.truncate(budgets.max_joint_evidence_lids);
+    candidates
+}
+
+fn expand_query_evidence(
+    book: &Book,
+    resolved: &[ResolvedReferent],
+    anchor_lid: &str,
+    budgets: &QueryBudgets,
+    evidence: &mut QueryEvidenceBundle,
+) -> Result<bool, ToolError> {
+    let mut added = false;
+    for lid in targeted_expansion_lids(book, resolved, budgets, anchor_lid) {
+        added |= evidence.add_lid(book, &lid, budgets, true, false)?;
+    }
+    if added {
+        evidence.expansion_rounds += 1;
+    }
+    Ok(added)
+}
+
+#[derive(Debug, Deserialize)]
+struct ModelSupportCitation {
+    lid: String,
+    text: String,
+    #[serde(default)]
+    role: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ModelSupportSupplement {
+    text: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ModelSupportResponse {
+    answer: Option<String>,
+    #[serde(default)]
+    assessments: Vec<SupportAssessment>,
+    #[serde(default)]
+    citations: Vec<ModelSupportCitation>,
+    #[serde(default)]
+    model_supplement: Vec<ModelSupportSupplement>,
+}
+
+fn support_prompt(
+    request: &BookQueryRequest,
+    resolved: &[ResolvedReferent],
+    evidence: &QueryEvidenceBundle,
+) -> CompletionRequest {
+    let bindings: Vec<&ReferentBinding> = resolved.iter().map(|item| &item.binding).collect();
+    let source: Vec<serde_json::Value> = evidence
+        .texts
+        .iter()
+        .map(|(lid, text)| serde_json::json!({"lid": lid, "text": text}))
+        .collect();
+    CompletionRequest {
+        system: "Answer only from the full source LIDs supplied for frozen referent bindings. Assess every obligation exactly once as supported, uncertain, or unsupported. Each supported assessment must list citation_lids and citations must quote an exact nonempty substring of that source LID. Open semantic support is your judgment; do not expose hidden chain-of-thought. Put outside knowledge only in model_supplement.".into(),
+        user: serde_json::json!({
+            "request": request,
+            "frozen_bindings": bindings,
+            "source_evidence": source,
+            "response_schema": {
+                "answer": "answer or null",
+                "assessments": [{
+                    "obligation_index": 0,
+                    "verdict": "supported",
+                    "citation_lids": ["1.2"],
+                    "support_note": "short verdict reason"
+                }],
+                "citations": [{"lid": "1.2", "text": "exact source quote", "role": "support"}],
+                "model_supplement": [{"text": "optional outside knowledge"}]
+            }
+        })
+        .to_string(),
+    }
+}
+
+fn assess_query_support(
+    request: &BookQueryRequest,
+    resolved: &[ResolvedReferent],
+    evidence: &QueryEvidenceBundle,
+    adapter: &dyn ModelAdapter,
+) -> Result<ModelSupportResponse, ToolError> {
+    let value = adapter
+        .complete_structured(support_prompt(request, resolved, evidence))
+        .map_err(|error| ToolError {
+            error_code: "PROVIDER_ERROR".into(),
+            category: "provider".into(),
+            message: error.message,
+        })?;
+    serde_json::from_value(value).map_err(|error| ToolError {
+        error_code: "QUERY_SUPPORT_PROTOCOL_ERROR".into(),
+        category: "provider".into(),
+        message: format!("query support response invalid: {error}"),
+    })
+}
+
+fn normalize_source_text(value: &str) -> String {
+    value.replace("\r\n", "\n").replace('\r', "\n")
+}
+
+struct StructuralSupport {
+    answer: Option<String>,
+    assessments: Vec<SupportAssessment>,
+    citations: Vec<Citation>,
+    model_supplement: Vec<SupplementOut>,
+    any_supported: bool,
+    all_supported: bool,
+    assessments_complete: bool,
+    citations_valid: bool,
+}
+
+fn structural_support_gate(
+    request: &BookQueryRequest,
+    evidence: &QueryEvidenceBundle,
+    response: ModelSupportResponse,
+) -> StructuralSupport {
+    let citation_count = response.citations.len();
+    let valid_citations: Vec<Citation> = response
+        .citations
+        .into_iter()
+        .filter_map(|citation| {
+            let source = evidence.texts.get(&citation.lid)?;
+            let quote = normalize_source_text(&citation.text);
+            let valid = !quote.is_empty() && normalize_source_text(source).contains(&quote);
+            valid.then_some(Citation {
+                lid: citation.lid,
+                text: citation.text,
+                role: if citation.role.trim().is_empty() {
+                    "support".into()
+                } else {
+                    citation.role
+                },
+            })
+        })
+        .collect();
+    let mut citations_valid = valid_citations.len() == citation_count;
+    let valid_lids: HashSet<&str> = valid_citations
+        .iter()
+        .map(|citation| citation.lid.as_str())
+        .collect();
+    let mut assessments = Vec::with_capacity(request.obligations.len());
+    let mut assessments_complete = response
+        .assessments
+        .iter()
+        .all(|assessment| assessment.obligation_index < request.obligations.len());
+    for obligation_index in 0..request.obligations.len() {
+        let matches: Vec<&SupportAssessment> = response
+            .assessments
+            .iter()
+            .filter(|assessment| assessment.obligation_index == obligation_index)
+            .collect();
+        let mut assessment = if matches.len() == 1 {
+            matches[0].clone()
+        } else {
+            assessments_complete = false;
+            SupportAssessment {
+                obligation_index,
+                verdict: SupportVerdict::Unsupported,
+                citation_lids: Vec::new(),
+                support_note: "structural gate requires exactly one assessment".into(),
+            }
+        };
+        if assessment.verdict == SupportVerdict::Supported
+            && (assessment.citation_lids.is_empty()
+                || assessment
+                    .citation_lids
+                    .iter()
+                    .any(|lid| !valid_lids.contains(lid.as_str())))
+        {
+            citations_valid = false;
+            assessment.verdict = SupportVerdict::Unsupported;
+            assessment.support_note = "supported assessment lacks an exact source citation".into();
+        }
+        assessments.push(assessment);
+    }
+    let supported_lids: HashSet<&str> = assessments
+        .iter()
+        .filter(|assessment| assessment.verdict == SupportVerdict::Supported)
+        .flat_map(|assessment| assessment.citation_lids.iter().map(String::as_str))
+        .collect();
+    let citations: Vec<Citation> = valid_citations
+        .into_iter()
+        .filter(|citation| supported_lids.contains(citation.lid.as_str()))
+        .collect();
+    let any_supported = assessments
+        .iter()
+        .any(|assessment| assessment.verdict == SupportVerdict::Supported);
+    let obligations_supported = !assessments.is_empty()
+        && assessments
+            .iter()
+            .all(|assessment| assessment.verdict == SupportVerdict::Supported);
+    let all_supported = assessments_complete && citations_valid && obligations_supported;
+    StructuralSupport {
+        answer: response.answer,
+        assessments,
+        citations,
+        model_supplement: response
+            .model_supplement
+            .into_iter()
+            .map(|supplement| SupplementOut {
+                text: supplement.text,
+                source: "model".into(),
+            })
+            .collect(),
+        any_supported,
+        all_supported,
+        assessments_complete,
+        citations_valid,
+    }
+}
+
+fn query_outcome_from_support(
+    bindings: Vec<ReferentBinding>,
+    support: StructuralSupport,
+) -> QueryOutcome {
+    let StructuralSupport {
+        answer,
+        assessments,
+        citations,
+        model_supplement,
+        any_supported,
+        all_supported,
+        assessments_complete: _,
+        citations_valid: _,
+    } = support;
+    if all_supported {
+        QueryOutcome::Complete {
+            answer,
+            citations,
+            bindings,
+            support: assessments,
+            model_supplement,
+        }
+    } else if any_supported {
+        QueryOutcome::Partial {
+            answer,
+            citations,
+            bindings,
+            support: assessments,
+            model_supplement,
+        }
+    } else {
+        QueryOutcome::Insufficient {
+            answer: None,
+            citations,
+            bindings,
+            support: assessments,
+            model_supplement,
+        }
+    }
+}
+
+fn query_outcome_status(outcome: &QueryOutcome) -> &'static str {
+    match outcome {
+        QueryOutcome::Complete { .. } => "complete",
+        QueryOutcome::Partial { .. } => "partial",
+        QueryOutcome::Insufficient { .. } => "insufficient",
+        QueryOutcome::InvalidPlan { .. } => "invalid_plan",
+        QueryOutcome::Ambiguous { .. } => "ambiguous",
+        QueryOutcome::Unresolved { .. } => "unresolved",
+    }
+}
+
+fn evidence_audit(evidence: &QueryEvidenceBundle) -> QueryEvidenceAudit {
+    QueryEvidenceAudit {
+        seed_lids: evidence.seed_lids.clone(),
+        expansion_lids: evidence.expansion_lids.clone(),
+        expansion_rounds: evidence.expansion_rounds,
+        skipped_lids: evidence.skipped_lids.clone(),
+        chars_used: evidence.chars_used,
+        mandatory_overflow_used: evidence.mandatory_overflow_used,
+        mandatory_overflow_reasons: evidence.mandatory_overflow_reasons.clone(),
+    }
+}
+
+pub(crate) fn query_run_with_budgets(
+    book: &Book,
+    request: &BookQueryRequest,
+    adapter: &dyn ModelAdapter,
+    budgets: &QueryBudgets,
+) -> Result<QueryRun, ToolError> {
+    let mut audit = QueryAudit::new(request, budgets);
+    let resolved = match resolve_referents(book, request, adapter, budgets, &mut audit)? {
+        ResolutionStage::Terminal(outcome) => {
+            audit.outcome_status = query_outcome_status(&outcome).into();
+            return Ok(QueryRun {
+                response: outcome,
+                audit,
+            });
+        }
+        ResolutionStage::Resolved(resolved) => resolved,
+    };
+    let bindings: Vec<ReferentBinding> = resolved
+        .iter()
+        .map(|referent| referent.binding.clone())
+        .collect();
+    audit.bindings = bindings.clone();
+    audit.selected_bindings = resolved
+        .iter()
+        .map(|referent| QuerySelectedBindingAudit {
+            target_index: referent.target_index,
+            candidate_id: referent.binding.candidate_id.clone(),
+            round: referent.round,
+            rank: referent.selected_rank,
+        })
+        .collect();
+    let mut evidence = build_initial_query_evidence(book, &resolved, budgets)?;
+    if evidence.texts.is_empty() {
+        let outcome = QueryOutcome::Insufficient {
+            answer: None,
+            citations: Vec::new(),
+            bindings,
+            support: Vec::new(),
+            model_supplement: Vec::new(),
+        };
+        audit.evidence = evidence_audit(&evidence);
+        audit.outcome_status = query_outcome_status(&outcome).into();
+        return Ok(QueryRun {
+            response: outcome,
+            audit,
+        });
+    }
+    let first = assess_query_support(request, &resolved, &evidence, adapter)?;
+    audit.model_calls += 1;
+    let mut structural = structural_support_gate(request, &evidence, first);
+    if !structural.all_supported
+        && budgets.max_expansion_rounds > 0
+        && expand_query_evidence(book, &resolved, &request.anchor_lid, budgets, &mut evidence)?
+    {
+        let second = assess_query_support(request, &resolved, &evidence, adapter)?;
+        audit.model_calls += 1;
+        structural = structural_support_gate(request, &evidence, second);
+    }
+    audit.evidence = evidence_audit(&evidence);
+    audit.assessments = structural.assessments.clone();
+    audit.structural_gate = QueryStructuralGateAudit {
+        bindings_complete: bindings.len() == request.targets.len(),
+        assessments_complete: structural.assessments_complete,
+        citations_valid: structural.citations_valid,
+        all_obligations_supported: structural.all_supported,
+    };
+    let outcome = query_outcome_from_support(bindings, structural);
+    audit.outcome_status = query_outcome_status(&outcome).into();
+    Ok(QueryRun {
+        response: outcome,
+        audit,
+    })
 }
 
 /// `book.synthesize` 对外响应:复用 query 的 answer/citations/model_supplement 骨架,
@@ -373,161 +1775,8 @@ pub struct BookGuideResponse {
     pub citations: Vec<Citation>,
     pub model_supplement: Vec<SupplementOut>,
 }
-/// 物化路径父 LID:"11.18.4" → Some("11.18");"1" → None。
-fn parent_of(lid: &str) -> Option<String> {
-    lid.rfind('.').map(|i| lid[..i].to_string())
-}
-
 fn lid_node<'a>(book: &'a Book, lid: &str) -> Option<&'a LidNode> {
     book.base.lid_nodes.iter().find(|n| n.lid == lid)
-}
-
-/// 章根 = 从 anchor 上溯最近的 `NodeKind∈{Section,Chapter}` 祖先(深度可变 LID 用 kind 定位,
-/// 非物化路径段数 `[ADR-0025]`);无显式章/节祖先则退化到顶层段。
-fn chapter_root(book: &Book, anchor: &str) -> String {
-    let mut cur = parent_of(anchor);
-    while let Some(lid) = cur {
-        if let Some(n) = lid_node(book, &lid) {
-            if matches!(n.kind, NodeKind::Section | NodeKind::Chapter) {
-                return lid;
-            }
-        }
-        cur = parent_of(&lid);
-    }
-    anchor.split('.').next().unwrap_or(anchor).to_string()
-}
-
-/// 章子树内、所有 anchored 叶 LID(实体/概念 occ + 断言 source_lid)`[ADR-0025]`。
-fn anchored_leaves_under(book: &Book, root: &str) -> Vec<String> {
-    let prefix = format!("{root}.");
-    let mut out: Vec<String> = Vec::new();
-    for n in &book.base.graph_nodes {
-        let lids: Vec<&str> = match n.node_type {
-            GraphNodeType::Claim => n.source_lid.as_deref().into_iter().collect(),
-            _ => n.occurrences.iter().map(|s| s.as_str()).collect(),
-        };
-        for l in lids {
-            let in_tree = l == root || l.starts_with(&prefix);
-            let is_leaf = lid_node(book, l)
-                .map(|nd| nd.children.is_empty())
-                .unwrap_or(false);
-            if in_tree && is_leaf && !out.iter().any(|x| x == l) {
-                out.push(l.to_string());
-            }
-        }
-    }
-    out.sort();
-    out
-}
-
-/// 全书所有 anchored 叶 LID,供 global scope 使用。
-fn anchored_leaves_all(book: &Book) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    for n in &book.base.graph_nodes {
-        let lids: Vec<&str> = match n.node_type {
-            GraphNodeType::Claim => n.source_lid.as_deref().into_iter().collect(),
-            _ => n.occurrences.iter().map(|s| s.as_str()).collect(),
-        };
-        for l in lids {
-            let is_leaf = lid_node(book, l)
-                .map(|nd| nd.children.is_empty())
-                .unwrap_or(false);
-            if is_leaf && !out.iter().any(|x| x == l) {
-                out.push(l.to_string());
-            }
-        }
-    }
-    out.sort();
-    out
-}
-
-/// 确定性档位检索:沿图谱/树捞 LID + 真原文成证据集 `[ADR-0016/0033]`。
-/// local = anchor ∪ context(near);chapter = local ∪ 章内 anchored 叶;
-/// cross_chapter = chapter ∪ context(far);global = cross_chapter ∪ 全书 anchored 叶。
-fn retrieve(book: &Book, anchor: &str, scope: Scope) -> Result<EvidenceSet, ToolError> {
-    let mut ev: EvidenceSet = BTreeMap::new();
-    ev.insert(anchor.to_string(), book.text(anchor, None)?);
-
-    let ctx = book.context(anchor, Some("near"), Some(usize::MAX))?;
-    for it in ctx.items {
-        if !ev.contains_key(&it.lid) {
-            ev.insert(it.lid.clone(), book.text(&it.lid, None)?);
-        }
-    }
-
-    if matches!(scope, Scope::Chapter | Scope::CrossChapter | Scope::Global) {
-        let root = chapter_root(book, anchor);
-        for l in anchored_leaves_under(book, &root) {
-            if !ev.contains_key(&l) {
-                ev.insert(l.clone(), book.text(&l, None)?);
-            }
-        }
-    }
-
-    if matches!(scope, Scope::CrossChapter | Scope::Global) {
-        let ctx = book.context(anchor, Some("far"), Some(usize::MAX))?;
-        for it in ctx.items {
-            if !ev.contains_key(&it.lid) {
-                ev.insert(it.lid.clone(), book.text(&it.lid, None)?);
-            }
-        }
-    }
-
-    if scope == Scope::Global {
-        for l in anchored_leaves_all(book) {
-            if !ev.contains_key(&l) {
-                ev.insert(l.clone(), book.text(&l, None)?);
-            }
-        }
-    }
-
-    Ok(ev)
-}
-/// 合一轮提示:问题 + 证据集(每段前缀 `[LID]`,红线物理前提 `[ADR-0004]`)。
-fn build_prompt(q: &str, ev: &EvidenceSet) -> CompletionRequest {
-    let mut user = String::from("问题:\n");
-    user.push_str(q);
-    user.push_str("\n\n证据(每条前缀 [LID],citations 只能引用这里出现的 LID):\n");
-    for (lid, text) in ev {
-        user.push_str(&format!("[{lid}] {text}\n"));
-    }
-    CompletionRequest {
-        system: "你是锚定问答器。只依据证据作答。判断证据是否足以作答(sufficient)。\
-                 citations 只能引用证据中出现的 [LID];原文未覆盖的世界知识补充放 model_supplement(无 LID)。"
-            .into(),
-        user,
-    }
-}
-
-fn build_response(
-    r: ParsedResponse,
-    valid: Vec<RawCitation>,
-    scope: Scope,
-    incomplete: bool,
-    warning: Option<String>,
-) -> QueryResponse {
-    QueryResponse {
-        answer: r.answer,
-        citations: valid
-            .into_iter()
-            .map(|c| Citation {
-                lid: c.lid,
-                text: c.text,
-                role: c.role,
-            })
-            .collect(),
-        model_supplement: r
-            .model_supplement
-            .into_iter()
-            .map(|s| SupplementOut {
-                text: s.text,
-                source: "model".into(),
-            })
-            .collect(),
-        scope_used: scope.as_str().into(),
-        incomplete,
-        warning,
-    }
 }
 
 const SYNTHESIZE_BATCH_TOKEN_LIMIT: usize = 80;
@@ -997,54 +2246,21 @@ pub fn synthesize(
         suggested_probing(book, &source_lids),
     ))
 }
-/// `book.query` 内层无状态 mini-loop `[ADR-0016/0025]`。
-/// 混合驱动:确定性档位骨架捞证据 → LLM 合一轮判停作答 → 确定性交叉验停(citations⊆证据集)。
-/// 不足或零有效 citation → 外扩(local→chapter→cross_chapter→global);global 仍不足 → 触顶诚实标 incomplete。
+/// Typed M6 referent-first query entrypoint.
+pub fn query_run(
+    book: &Book,
+    request: &BookQueryRequest,
+    adapter: &dyn ModelAdapter,
+) -> Result<QueryRun, ToolError> {
+    query_run_with_budgets(book, request, adapter, &QueryBudgets::default())
+}
+
 pub fn query(
     book: &Book,
-    q: &str,
-    anchor: &str,
+    request: &BookQueryRequest,
     adapter: &dyn ModelAdapter,
-) -> Result<QueryResponse, ToolError> {
-    let ladder = [
-        Scope::Local,
-        Scope::Chapter,
-        Scope::CrossChapter,
-        Scope::Global,
-    ];
-    for (i, &scope) in ladder.iter().enumerate() {
-        let ev = retrieve(book, anchor, scope)?;
-        let resp = adapter
-            .complete(build_prompt(q, &ev))
-            .map_err(|e| ToolError {
-                error_code: "PROVIDER_ERROR".into(),
-                category: "provider".into(),
-                message: e.message,
-            })?;
-        // 确定性交叉验停:只留落在证据集 LID 全集内的 citation(悬空滤净 = 结构红线)。
-        let valid: Vec<RawCitation> = resp
-            .citations
-            .iter()
-            .filter(|c| ev.contains_key(&c.lid))
-            .cloned()
-            .collect();
-        let is_top = i + 1 == ladder.len();
-        if resp.sufficient && !valid.is_empty() {
-            return Ok(build_response(resp, valid, scope, false, None));
-        }
-        if is_top {
-            // 触顶兜底:global 仍不足/零有效 → 诚实标 incomplete,不假装完整。
-            return Ok(build_response(
-                resp,
-                valid,
-                scope,
-                true,
-                Some("CONTEXT_BUDGET_EXCEEDED".into()),
-            ));
-        }
-        // 否则外扩到下一档(早停防护:声称 sufficient 但零有效 citation 也外扩)。
-    }
-    unreachable!("ladder 非空,必在循环内 return")
+) -> Result<QueryOutcome, ToolError> {
+    query_run(book, request, adapter).map(|run| run.response)
 }
 
 fn first_leaf_lid(book: &Book) -> Result<String, ToolError> {
@@ -2036,8 +3252,9 @@ pub fn unvisited_back(
 mod tests {
     use super::*;
     use base_schema::{
-        sample_base, Direction, EdgeScope, FormulaComposition, FormulaParameter, FormulaSemantics,
-        GraphEdge, GraphNode, GraphNodeType, LidNode, NodeKind, ReadOnlyBase, Span,
+        sample_base, Direction, EdgeScope, FormulaComposition, FormulaContextLink,
+        FormulaParameter, FormulaSemantics, GraphEdge, GraphNode, GraphNodeType, LidNode, NodeKind,
+        ReadOnlyBase, Span,
     };
     use read_tools::{TechnicalLearningDiscourseItem, TechnicalLearningDiscourseRelation};
     use std::cell::RefCell;
@@ -2136,17 +3353,17 @@ mod tests {
             .collect();
         let engagement: BTreeMap<String, EngagementSignals> =
             [("2.2", 3u32), ("2.1", 1u32), ("3.1", 5u32)]
-            .iter()
-            .map(|(l, c)| {
-                (
-                    l.to_string(),
-                    EngagementSignals {
-                        qa_count: *c,
-                        ..Default::default()
-                    },
-                )
-            })
-            .collect();
+                .iter()
+                .map(|(l, c)| {
+                    (
+                        l.to_string(),
+                        EngagementSignals {
+                            qa_count: *c,
+                            ..Default::default()
+                        },
+                    )
+                })
+                .collect();
         let g = technical_learning_reorder(f, &read, &engagement);
         let back = g.iter().find(|x| x.category == NavCategory::Back).unwrap();
         let lids: Vec<&str> = back.steps.iter().map(|s| s.lid.as_str()).collect();
@@ -2284,6 +3501,45 @@ mod tests {
         scripted: RefCell<VecDeque<ParsedResponse>>,
         users: RefCell<Vec<String>>,
     }
+
+    struct StructuredResolverAdapter {
+        scripted: RefCell<VecDeque<serde_json::Value>>,
+        prompts: RefCell<Vec<String>>,
+    }
+
+    impl StructuredResolverAdapter {
+        fn new(scripted: Vec<serde_json::Value>) -> Self {
+            Self {
+                scripted: RefCell::new(scripted.into()),
+                prompts: RefCell::new(Vec::new()),
+            }
+        }
+    }
+
+    impl ModelAdapter for StructuredResolverAdapter {
+        fn complete(&self, _: CompletionRequest) -> Result<ParsedResponse, AdapterError> {
+            Err(AdapterError {
+                message: "structured resolver must not use unstructured complete".into(),
+            })
+        }
+
+        fn complete_structured(
+            &self,
+            req: CompletionRequest,
+        ) -> Result<serde_json::Value, AdapterError> {
+            self.prompts.borrow_mut().push(req.user);
+            self.scripted
+                .borrow_mut()
+                .pop_front()
+                .ok_or_else(|| AdapterError {
+                    message: "structured resolver script exhausted".into(),
+                })
+        }
+
+        fn chat(&self, _: &[Message], _: &[ToolSpec]) -> Result<AssistantTurn, AdapterError> {
+            unimplemented!("resolver tests do not use outer chat")
+        }
+    }
     impl FakeAdapter {
         fn new(rs: Vec<ParsedResponse>) -> Self {
             FakeAdapter {
@@ -2332,6 +3588,173 @@ mod tests {
         // sample_base: "1"(容器)+ "1.1"(叶);entity:command occ=["1.1"]、claim source=1.1。
         let src = "X".repeat(100) + "尾巴";
         Book::new(sample_base(), &src)
+    }
+
+    fn resolver_book() -> Book {
+        let texts = [
+            "anchor text about mu and sigma",
+            "可学习性 learnability is represented by eta",
+            "trend_strategy defines the trend 趋势 policy",
+            "drift_mu mentions trend only in a different context",
+        ];
+        let lids = ["1.1", "2.1", "2.2", "2.3"];
+        let mut source = String::new();
+        let mut lid_nodes = Vec::new();
+        let mut offset = 0usize;
+        for (index, (lid, text)) in lids.iter().zip(texts).enumerate() {
+            let start = offset;
+            source.push_str(text);
+            offset += text.encode_utf16().count();
+            lid_nodes.push(LidNode {
+                lid: (*lid).into(),
+                path: vec![u32::try_from(index + 1).unwrap()],
+                kind: NodeKind::Paragraph,
+                span: Span { start, end: offset },
+                children: Vec::new(),
+            });
+        }
+        Book::new(
+            ReadOnlyBase {
+                book_id: "resolver-book".into(),
+                lid_nodes,
+                graph_nodes: vec![
+                    GraphNode {
+                        id: "concept:eta".into(),
+                        node_type: GraphNodeType::Concept,
+                        name: "eta".into(),
+                        occurrences: vec!["2.1".into()],
+                        source_lid: None,
+                    },
+                    GraphNode {
+                        id: "concept:mu".into(),
+                        node_type: GraphNodeType::Concept,
+                        name: "mu".into(),
+                        occurrences: vec!["1.1".into()],
+                        source_lid: None,
+                    },
+                    GraphNode {
+                        id: "concept:sigma".into(),
+                        node_type: GraphNodeType::Concept,
+                        name: "sigma".into(),
+                        occurrences: vec!["1.1".into()],
+                        source_lid: None,
+                    },
+                    GraphNode {
+                        id: "concept:trend_strategy".into(),
+                        node_type: GraphNodeType::Concept,
+                        name: "trend_strategy".into(),
+                        occurrences: vec!["2.2".into()],
+                        source_lid: None,
+                    },
+                    GraphNode {
+                        id: "concept:drift_mu".into(),
+                        node_type: GraphNodeType::Concept,
+                        name: "drift_mu".into(),
+                        occurrences: vec!["2.3".into()],
+                        source_lid: None,
+                    },
+                ],
+                graph_edges: vec![GraphEdge {
+                    source: "concept:eta".into(),
+                    target: "concept:trend_strategy".into(),
+                    edge_type: "related_fixture".into(),
+                    direction: Direction::Directed,
+                    scope: EdgeScope::LongRange,
+                    weight: 1.0,
+                }],
+            },
+            &source,
+        )
+        .with_discourse_items(vec![TechnicalLearningDiscourseItem {
+            lid: "2.1".into(),
+            mode: "explanation".into(),
+            local_function: None,
+            rhetorical_move: None,
+            local_summary: None,
+            relations: vec![TechnicalLearningDiscourseRelation {
+                target_lid: "2.3".into(),
+                relation_type: "contrasts".into(),
+                family: None,
+                direction: "outgoing".into(),
+                confidence: 1.0,
+                evidence_lids: Vec::new(),
+            }],
+        }])
+        .with_formula_semantics(vec![FormulaSemantics {
+            formula_lid: "2.1".into(),
+            parameters: vec![FormulaParameter {
+                symbol: "eta".into(),
+                label: Some("learnability".into()),
+                meaning: "fixture".into(),
+                unit: None,
+                domain: None,
+                evidence_lids: vec!["1.1".into()],
+            }],
+            composition: FormulaComposition {
+                source_lid: "2.1".into(),
+                meaning: "fixture".into(),
+                terms: vec!["eta".into()],
+                evidence_lids: Vec::new(),
+            },
+            context_links: vec![FormulaContextLink {
+                target_lid: "2.3".into(),
+                relation: "contrasts".into(),
+                description: "fixture".into(),
+                evidence_lids: Vec::new(),
+            }],
+        }])
+    }
+
+    fn definition_request(query: &str, target: &str) -> BookQueryRequest {
+        BookQueryRequest {
+            query: query.into(),
+            intent: BookQueryIntent::Definition,
+            targets: vec![target.into()],
+            obligations: vec![QueryObligation {
+                requirement: format!("define {target}"),
+            }],
+            anchor_lid: "1.1".into(),
+        }
+    }
+
+    fn resolver_response(fits: &[(&str, &str)], probes: &[&str]) -> serde_json::Value {
+        serde_json::json!({
+            "plan_gate": {"valid": true, "missing_requirements": [], "target_issues": []},
+            "candidate_fits": fits.iter().map(|(id, fit)| serde_json::json!({
+                "target_index": 0,
+                "candidate_id": id,
+                "fit": fit,
+                "reason": "scripted"
+            })).collect::<Vec<_>>(),
+            "probes": probes.iter().map(|query| serde_json::json!({
+                "target_index": 0,
+                "query": query
+            })).collect::<Vec<_>>()
+        })
+    }
+
+    fn supported_response(answer: &str, lid: &str, quote: &str) -> serde_json::Value {
+        serde_json::json!({
+            "answer": answer,
+            "assessments": [{
+                "obligation_index": 0,
+                "verdict": "supported",
+                "citation_lids": [lid],
+                "support_note": "source directly supports the obligation"
+            }],
+            "citations": [{"lid": lid, "text": quote, "role": "support"}],
+            "model_supplement": []
+        })
+    }
+
+    fn resolve_for_test(
+        book: &Book,
+        request: &BookQueryRequest,
+        adapter: &dyn ModelAdapter,
+    ) -> Result<ResolutionStage, ToolError> {
+        let budgets = QueryBudgets::default();
+        let mut audit = QueryAudit::new(request, &budgets);
+        resolve_referents(book, request, adapter, &budgets, &mut audit)
     }
 
     fn book_with_cjk_leaves(n: usize) -> Book {
@@ -2610,56 +4033,400 @@ mod tests {
         assert_eq!(out.citations.len(), 1);
         assert_eq!(out.citations[0].lid, "1.2");
     }
-    // 路径①:首轮 sufficient + 有效 citation → local 收口,非 incomplete。
-    #[test]
-    fn sufficient_with_valid_citation_stops_at_local() {
-        let b = book();
-        let fake = FakeAdapter::new(vec![resp(true, vec![cite("1.1")])]);
-        let out = query(&b, "命令模式是什么", "1.1", &fake).unwrap();
-        assert_eq!(out.scope_used, "local");
-        assert!(!out.incomplete);
-        assert_eq!(out.citations.len(), 1);
-        assert_eq!(out.citations[0].lid, "1.1");
+    const ALL_RESOLVER_IDS: [&str; 5] = [
+        "concept:eta",
+        "concept:mu",
+        "concept:sigma",
+        "concept:trend_strategy",
+        "concept:drift_mu",
+    ];
+
+    fn fits_with<'a>(selected: &'a [(&'a str, &'a str)]) -> Vec<(&'a str, &'a str)> {
+        ALL_RESOLVER_IDS
+            .iter()
+            .map(|id| {
+                selected
+                    .iter()
+                    .find(|(selected_id, _)| selected_id == id)
+                    .copied()
+                    .unwrap_or((id, "reject"))
+            })
+            .collect()
     }
 
-    // 路径②:首轮声称 sufficient 但 citation 悬空(零有效)→ 强制外扩;
-    //        次轮给真 LID → chapter 收口。验证「零有效强制外扩」+「悬空滤净(结构红线)」。
     #[test]
-    fn zero_valid_citation_forces_expand_and_filters_hallucination() {
-        let b = book();
-        let fake = FakeAdapter::new(vec![
-            resp(true, vec![cite("9.9")]), // 9.9 不在证据集 → 滤掉 → 零有效 → 外扩
-            resp(true, vec![cite("1.1")]),
+    fn learnability_resolves_eta_despite_far_anchor() {
+        let fits = fits_with(&[("concept:eta", "semantic_match")]);
+        let adapter = StructuredResolverAdapter::new(vec![
+            resolver_response(&fits, &[]),
+            supported_response(
+                "eta 表示可学习性",
+                "2.1",
+                "可学习性 learnability is represented by eta",
+            ),
         ]);
-        let out = query(&b, "问", "1.1", &fake).unwrap();
-        assert_eq!(out.scope_used, "chapter");
-        assert!(!out.incomplete);
-        assert!(out.citations.iter().all(|c| c.lid == "1.1")); // 悬空 9.9 不出现
+        let request =
+            definition_request("可学习性 learnability 是什么意思", "可学习性 learnability");
+        let run = query_run_with_budgets(
+            &resolver_book(),
+            &request,
+            &adapter,
+            &QueryBudgets::default(),
+        )
+        .unwrap();
+        assert_eq!(run.audit.outcome_status, "complete");
+        assert_eq!(run.audit.selected_bindings[0].rank, 1);
+        assert_eq!(run.audit.evidence.seed_lids, vec!["2.1"]);
+        let QueryOutcome::Complete {
+            bindings,
+            citations,
+            ..
+        } = run.response
+        else {
+            panic!("expected complete query");
+        };
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(bindings[0].candidate_id, "concept:eta");
+        assert_eq!(bindings[0].source_lids, vec!["2.1"]);
+        assert_eq!(citations[0].lid, "2.1");
+        assert!(!adapter.prompts.borrow()[0].contains("anchor text about mu and sigma"));
     }
 
-    // 路径③:四档都不足 → 触顶诚实标 incomplete + CONTEXT_BUDGET_EXCEEDED。
     #[test]
-    fn exhausting_ladder_marks_incomplete() {
-        let b = book();
-        let fake = FakeAdapter::new(vec![
-            resp(false, vec![]),
-            resp(false, vec![]),
-            resp(false, vec![]),
-            resp(false, vec![]),
+    fn trend_resolves_strategy_not_drift() {
+        let fits = fits_with(&[("concept:trend_strategy", "direct_match")]);
+        let adapter = StructuredResolverAdapter::new(vec![
+            resolver_response(&fits, &[]),
+            supported_response(
+                "trend_strategy 定义趋势策略",
+                "2.2",
+                "trend_strategy defines the trend 趋势 policy",
+            ),
         ]);
-        let out = query(&b, "问", "1.1", &fake).unwrap();
-        assert_eq!(out.scope_used, "global");
-        assert!(out.incomplete);
-        assert_eq!(out.warning.as_deref(), Some("CONTEXT_BUDGET_EXCEEDED"));
+        let request = definition_request("trend 趋势 在书中是什么意思", "trend 趋势");
+        let run = query_run_with_budgets(
+            &resolver_book(),
+            &request,
+            &adapter,
+            &QueryBudgets::default(),
+        )
+        .unwrap();
+        assert_eq!(run.audit.outcome_status, "complete");
+        assert_eq!(run.audit.selected_bindings[0].rank, 1);
+        assert_eq!(run.audit.evidence.seed_lids, vec!["2.2"]);
+        let QueryOutcome::Complete {
+            bindings,
+            citations,
+            ..
+        } = run.response
+        else {
+            panic!("expected complete query");
+        };
+        assert_eq!(bindings[0].candidate_id, "concept:trend_strategy");
+        assert_eq!(bindings[0].source_lids, vec!["2.2"]);
+        assert_eq!(citations[0].lid, "2.2");
     }
 
-    // retrieve:证据集含 anchor 自身 + 真原文。
     #[test]
-    fn retrieve_local_includes_anchor_text() {
-        let b = book();
-        let ev = retrieve(&b, "1.1", Scope::Local).unwrap();
-        assert!(ev.contains_key("1.1"));
-        assert_eq!(ev["1.1"], "X".repeat(100));
+    fn resolver_preserves_multiple_viable_meanings_as_ambiguous() {
+        let ambiguous_fits = fits_with(&[
+            ("concept:eta", "semantic_match"),
+            ("concept:mu", "plausible"),
+        ]);
+        let adapter = StructuredResolverAdapter::new(vec![resolver_response(&ambiguous_fits, &[])]);
+        let request = definition_request("可学习性是什么", "可学习性");
+        let ResolutionStage::Terminal(QueryOutcome::Ambiguous { candidates, .. }) =
+            resolve_for_test(&resolver_book(), &request, &adapter).unwrap()
+        else {
+            panic!("expected ambiguous outcome");
+        };
+        assert_eq!(candidates.len(), 2);
+
+        let plausible_fits = fits_with(&[("concept:eta", "plausible")]);
+        let adapter = StructuredResolverAdapter::new(vec![resolver_response(&plausible_fits, &[])]);
+        assert!(matches!(
+            resolve_for_test(&resolver_book(), &request, &adapter).unwrap(),
+            ResolutionStage::Terminal(QueryOutcome::Unresolved { .. })
+        ));
+    }
+
+    #[test]
+    fn resolver_retries_three_or_fewer_lexical_probes_once_then_unresolved() {
+        let rejected = fits_with(&[]);
+        let adapter = StructuredResolverAdapter::new(vec![
+            resolver_response(
+                &rejected,
+                &["eta", "learnability", "可学习性", "forbidden-fourth"],
+            ),
+            resolver_response(&rejected, &[]),
+        ]);
+        let request = definition_request("unknown referent", "unknown referent");
+        assert!(matches!(
+            resolve_for_test(&resolver_book(), &request, &adapter).unwrap(),
+            ResolutionStage::Terminal(QueryOutcome::Unresolved { .. })
+        ));
+        assert_eq!(adapter.prompts.borrow().len(), 2);
+    }
+
+    #[test]
+    fn plan_gate_rejects_missing_target_or_obligation_without_retrieval() {
+        let adapter = StructuredResolverAdapter::new(Vec::new());
+        let request = BookQueryRequest {
+            targets: Vec::new(),
+            obligations: Vec::new(),
+            ..definition_request("what is eta", "eta")
+        };
+        assert!(matches!(
+            resolve_for_test(&resolver_book(), &request, &adapter).unwrap(),
+            ResolutionStage::Terminal(QueryOutcome::InvalidPlan { .. })
+        ));
+        assert!(adapter.prompts.borrow().is_empty());
+    }
+
+    #[test]
+    fn target_evidence_respects_seed_total_char_expansion_and_overflow_budgets() {
+        let book = resolver_book();
+        let resolved = vec![ResolvedReferent {
+            binding: ReferentBinding {
+                target: "multi".into(),
+                candidate_id: "concept:multi".into(),
+                kind: ReferentKind::Concept,
+                canonical_label: "multi".into(),
+                source_lids: vec!["1.1".into(), "2.1".into(), "2.2".into(), "2.3".into()],
+            },
+            target_index: 0,
+            round: 0,
+            selected_rank: 1,
+        }];
+        let budgets = QueryBudgets::default();
+        let mut evidence = build_initial_query_evidence(&book, &resolved, &budgets).unwrap();
+        assert_eq!(evidence.seed_lids, vec!["1.1", "2.1", "2.2"]);
+        assert!(evidence.texts.len() <= budgets.max_evidence_lids_total);
+        assert!(evidence.chars_used <= budgets.max_evidence_chars_total);
+        assert!(expand_query_evidence(&book, &resolved, "1.1", &budgets, &mut evidence).unwrap());
+        assert_eq!(evidence.expansion_lids, vec!["2.3"]);
+        assert_eq!(evidence.expansion_rounds, 1);
+        assert!(!expand_query_evidence(&book, &resolved, "1.1", &budgets, &mut evidence).unwrap());
+
+        let tight = QueryBudgets {
+            max_evidence_chars_total: 1,
+            ..QueryBudgets::default()
+        };
+        let overflow = build_initial_query_evidence(&book, &resolved, &tight).unwrap();
+        assert_eq!(overflow.mandatory_overflow_used, 1);
+        assert_eq!(overflow.mandatory_overflow_reasons.len(), 1);
+        assert_eq!(overflow.texts.len(), 1);
+        assert!(!overflow.skipped_lids.is_empty());
+    }
+
+    #[test]
+    fn source_lids_prioritize_definition_then_anchor_as_peer_tiebreak() {
+        let book = resolver_book();
+        let candidate = ReferentCandidate {
+            candidate_id: "concept:ordered".into(),
+            kind: CatalogReferentKind::Concept,
+            sources: vec![CatalogReferentSource::Graph],
+            labels: vec!["ordered".into()],
+            aliases: Vec::new(),
+            recall_strength: CatalogRecallStrength::Direct,
+            lexical_score: 1,
+            match_reasons: Vec::new(),
+            occurrence_lids: vec!["2.3".into(), "2.1".into(), "1.1".into()],
+            defined_at_lid: Some("2.2".into()),
+            excerpts: Vec::new(),
+            hint_only: None,
+            anchor_distance: 0,
+        };
+        assert_eq!(
+            ordered_source_lids(&book, "1.1", &candidate),
+            vec!["2.2", "1.1", "2.1", "2.3"]
+        );
+    }
+
+    #[test]
+    fn targeted_expansion_uses_only_binding_reachable_landmarks_with_fixed_cap() {
+        let book = resolver_book();
+        let resolved = vec![ResolvedReferent {
+            binding: ReferentBinding {
+                target: "eta".into(),
+                candidate_id: "concept:eta".into(),
+                kind: ReferentKind::Concept,
+                canonical_label: "eta".into(),
+                source_lids: vec!["2.1".into()],
+            },
+            target_index: 0,
+            round: 0,
+            selected_rank: 1,
+        }];
+        let budgets = QueryBudgets::default();
+        let mut evidence = build_initial_query_evidence(&book, &resolved, &budgets).unwrap();
+        assert!(expand_query_evidence(&book, &resolved, "1.1", &budgets, &mut evidence).unwrap());
+        assert_eq!(evidence.expansion_lids, vec!["1.1", "2.2", "2.3"]);
+        assert_eq!(
+            evidence.expansion_lids.len(),
+            budgets.max_joint_evidence_lids
+        );
+        assert_eq!(evidence.expansion_rounds, 1);
+    }
+
+    #[test]
+    fn citation_gate_requires_exact_source_quote_and_rejects_routing_artifacts() {
+        let request = definition_request("alpha 是什么", "alpha");
+        let evidence = QueryEvidenceBundle {
+            texts: BTreeMap::from([("1.1".into(), "line one\r\nline two".into())]),
+            ..Default::default()
+        };
+        let exact: ModelSupportResponse = serde_json::from_value(serde_json::json!({
+            "answer": "answer",
+            "assessments": [{
+                "obligation_index": 0,
+                "verdict": "supported",
+                "citation_lids": ["1.1"],
+                "support_note": "exact"
+            }],
+            "citations": [{"lid": "1.1", "text": "line one\nline two", "role": "support"}],
+            "model_supplement": []
+        }))
+        .unwrap();
+        let exact = structural_support_gate(&request, &evidence, exact);
+        assert!(exact.all_supported);
+
+        let polluted: ModelSupportResponse = serde_json::from_value(serde_json::json!({
+            "answer": "answer",
+            "assessments": [
+                {"obligation_index": 0, "verdict": "supported", "citation_lids": ["1.1"], "support_note": "exact"},
+                {"obligation_index": 1, "verdict": "supported", "citation_lids": ["1.1"], "support_note": "out of range"}
+            ],
+            "citations": [
+                {"lid": "1.1", "text": "line one", "role": "support"},
+                {"lid": "9.9", "text": "invalid extra", "role": "support"}
+            ],
+            "model_supplement": []
+        }))
+        .unwrap();
+        let polluted = structural_support_gate(&request, &evidence, polluted);
+        assert!(polluted.any_supported);
+        assert!(!polluted.all_supported);
+        assert!(!polluted.assessments_complete);
+        assert!(!polluted.citations_valid);
+        assert!(matches!(
+            query_outcome_from_support(Vec::new(), polluted),
+            QueryOutcome::Partial { .. }
+        ));
+
+        for (lid, text) in [("1.1", "mismatched quote"), ("preview:alpha", "line one")] {
+            let invalid: ModelSupportResponse = serde_json::from_value(serde_json::json!({
+                "answer": "unsupported answer",
+                "assessments": [{
+                    "obligation_index": 0,
+                    "verdict": "supported",
+                    "citation_lids": [lid],
+                    "support_note": "claimed"
+                }],
+                "citations": [{"lid": lid, "text": text, "role": "support"}],
+                "model_supplement": []
+            }))
+            .unwrap();
+            let invalid = structural_support_gate(&request, &evidence, invalid);
+            assert!(!invalid.any_supported);
+            assert!(invalid.citations.is_empty());
+        }
+    }
+
+    #[test]
+    fn query_outcome_aggregates_obligation_support_without_semantic_rule_tables() {
+        let request = BookQueryRequest {
+            query: "compare alpha and beta".into(),
+            intent: BookQueryIntent::Comparison,
+            targets: vec!["alpha".into(), "beta".into()],
+            obligations: vec![
+                QueryObligation {
+                    requirement: "define alpha".into(),
+                },
+                QueryObligation {
+                    requirement: "compare beta".into(),
+                },
+            ],
+            anchor_lid: "1.1".into(),
+        };
+        let evidence = QueryEvidenceBundle {
+            texts: BTreeMap::from([("1.1".into(), "alpha source".into())]),
+            ..Default::default()
+        };
+        let response: ModelSupportResponse = serde_json::from_value(serde_json::json!({
+            "answer": "partial answer",
+            "assessments": [
+                {"obligation_index": 0, "verdict": "supported", "citation_lids": ["1.1"], "support_note": "yes"},
+                {"obligation_index": 1, "verdict": "unsupported", "citation_lids": [], "support_note": "missing"}
+            ],
+            "citations": [{"lid": "1.1", "text": "alpha source", "role": "support"}],
+            "model_supplement": []
+        }))
+        .unwrap();
+        let partial = structural_support_gate(&request, &evidence, response);
+        assert!(matches!(
+            query_outcome_from_support(Vec::new(), partial),
+            QueryOutcome::Partial { .. }
+        ));
+
+        let unsupported: ModelSupportResponse = serde_json::from_value(serde_json::json!({
+            "answer": "must be discarded",
+            "assessments": [
+                {"obligation_index": 0, "verdict": "unsupported", "citation_lids": [], "support_note": "missing"},
+                {"obligation_index": 1, "verdict": "uncertain", "citation_lids": [], "support_note": "uncertain"}
+            ],
+            "citations": [],
+            "model_supplement": []
+        }))
+        .unwrap();
+        let insufficient = structural_support_gate(&request, &evidence, unsupported);
+        let QueryOutcome::Insufficient { answer, .. } =
+            query_outcome_from_support(Vec::new(), insufficient)
+        else {
+            panic!("expected insufficient");
+        };
+        assert!(answer.is_none());
+    }
+
+    #[test]
+    fn book_query_request_validation_enforces_intent_counts_and_atomic_obligations() {
+        let valid = BookQueryRequest {
+            query: "比较 eta 与 mu".into(),
+            intent: BookQueryIntent::Comparison,
+            targets: vec!["eta".into(), "mu".into()],
+            obligations: vec![QueryObligation {
+                requirement: "说明两者差异".into(),
+            }],
+            anchor_lid: "1.1".into(),
+        };
+        assert_eq!(validate_book_query_request(&valid), Ok(()));
+
+        let invalid = BookQueryRequest {
+            targets: vec!["eta".into()],
+            obligations: vec![QueryObligation {
+                requirement: " ".into(),
+            }],
+            ..valid
+        };
+        let Err(QueryOutcome::InvalidPlan {
+            missing_requirements,
+            target_issues,
+        }) = validate_book_query_request(&invalid)
+        else {
+            panic!("expected invalid plan");
+        };
+        assert!(!missing_requirements.is_empty());
+        assert!(!target_issues.is_empty());
+    }
+
+    #[test]
+    fn legacy_book_query_wire_is_not_silently_accepted() {
+        let outcome = parse_book_query_request(serde_json::json!({
+            "q": "命令模式是什么",
+            "anchor_lid": "1.1"
+        }))
+        .unwrap_err();
+        assert!(matches!(outcome, QueryOutcome::InvalidPlan { .. }));
     }
 
     // S9 判据①:纯 JSON / 带围栏 / 前后包散文 三形态都抽对。

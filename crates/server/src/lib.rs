@@ -1,9 +1,9 @@
 //! 读时 localhost 服务:把冻结命令面投影成 REST `[ADR-0028]`。
 //! S10a:`book.*` 四只读叶子 → GET。S10b:`reader.*`/`memory.*` 可变命令 → POST(JSON body),
 //! reader.* 返 effect、highlight/note 委托 memory.save(标注单源 `[ADR-0015/0006]`)、非法 LID 透传不降级。
-//! S10c:`book.query` 是 LLM 命令(秒级,非确定性叶子)→ **POST**(body `{q, anchor_lid?}`),
-//! 直调内层 `runtime::query`(provider 经注入的 `ModelAdapter`)→ 返 `QueryResponse`,结构红线由
-//! 内层确定性交叉验停守(citations⊆证据集);anchor 缺省取 reader 当前 anchor(读模式起点)。
+//! S10c:`book.query` 是 LLM 命令(秒级,非确定性叶子)→ **POST** typed request；
+//! 直调 referent-first `runtime::query`，返回 tagged `QueryOutcome`。请求必须显式提供
+//! query/intent/targets/obligations/anchor_lid，结构闸校验 frozen binding、义务覆盖与 citations。
 //! 路由是**纯函数 `route(&mut AppState, Req) -> Reply`**(脱 socket 可单测,守 A2);
 //! socket 绑定 / worker 线程 / Mutex 锁 / 时间戳生成 / adapter 装配在 `main.rs`。
 //! 外层 E agent(S10f)、静态资源(S10e)留后续子切片。
@@ -11,11 +11,11 @@ use memory::{
     classify_profile_fact_privacy, classify_profile_privacy, Anchor, Applicability,
     BackgroundClaim, CapabilityClaim, CollectionRuleMatcher, ConstraintClaim, ExplicitProfileFact,
     GoalClaim, HistoricalBackfillRange, MemoryOp, MemoryOpOutcome, MemoryStore, PendingTurnRef,
-    PreferenceClaim, ProfileGovernanceAction, ProfileGovernanceMutation,
-    ProfileGovernanceOutcome, ProfileGovernanceOutcomeKind, ProfilePayload, ProfilePayloadKind,
-    ProfilePrivacyClass, ProfileResolutionContext, ProfileScope, ProfileStatus, RecallQuery,
-    ReplaceInput, ReviewJobStatus, ReviewSessionCursor, SaveInput, SelectedRange,
-    SelectionContext, SelectionResolution, Sensitivity, SnapshotContext, SnapshotRequest,
+    PreferenceClaim, ProfileGovernanceAction, ProfileGovernanceMutation, ProfileGovernanceOutcome,
+    ProfileGovernanceOutcomeKind, ProfilePayload, ProfilePayloadKind, ProfilePrivacyClass,
+    ProfileResolutionContext, ProfileScope, ProfileStatus, RecallQuery, ReplaceInput,
+    ReviewJobStatus, ReviewSessionCursor, SaveInput, SelectedRange, SelectionContext,
+    SelectionResolution, Sensitivity, SnapshotContext, SnapshotRequest,
 };
 use read_tools::{
     Book, ContentProfileId, PaperLandmarkKind, PaperMinimapBase, PaperRegionKind,
@@ -36,10 +36,10 @@ use runtime::orchestrator::{
     ProfileMemoryUpdateKind, ProfileUsageTrace,
 };
 use runtime::profile_api::{
-    historical_backfill_job_view, profile_governance_outcome_view,
-    HistoricalBackfillJobRequest, HistoricalBackfillSessionView, HistoricalBackfillStartRequest,
-    HistoricalBackfillStateView, ProfileCollectionRuleMatcherView, ProfileFactDraftView,
-    ProfileGovernanceActionRequest, ProfileGovernanceMutationRequest, ProfileGovernanceResponseView,
+    historical_backfill_job_view, profile_governance_outcome_view, HistoricalBackfillJobRequest,
+    HistoricalBackfillSessionView, HistoricalBackfillStartRequest, HistoricalBackfillStateView,
+    ProfileCollectionRuleMatcherView, ProfileFactDraftView, ProfileGovernanceActionRequest,
+    ProfileGovernanceMutationRequest, ProfileGovernanceResponseView,
 };
 use runtime::{
     guided_route_from, synthesize, unvisited_back, AdapterError, AssistantTurn, CompletionRequest,
@@ -915,7 +915,8 @@ fn stable_agent_turn_id(session_id: &str, user_turn_ordinal: u64) -> String {
 }
 
 fn validate_agent_turn(turn: &AgentChatTurn) -> Result<(), ToolError> {
-    if turn.turn_id.trim().is_empty() || turn.user_turn_ordinal == 0 || turn.user.trim().is_empty() {
+    if turn.turn_id.trim().is_empty() || turn.user_turn_ordinal == 0 || turn.user.trim().is_empty()
+    {
         return Err(agent_history_internal(
             "agent turn id/ordinal/user must not be empty",
         ));
@@ -984,8 +985,9 @@ fn agent_history_backup_path(path: &Path) -> PathBuf {
 fn recover_interrupted_agent_history_commit(path: &Path) -> Result<(), ToolError> {
     let backup = agent_history_backup_path(path);
     if !path.exists() && backup.exists() {
-        std::fs::rename(&backup, path)
-            .map_err(|error| agent_history_internal(format!("恢复 agent history 备份失败: {error}")))?;
+        std::fs::rename(&backup, path).map_err(|error| {
+            agent_history_internal(format!("恢复 agent history 备份失败: {error}"))
+        })?;
     }
     Ok(())
 }
@@ -1240,10 +1242,7 @@ fn agent_history_review_cursors(history: &AgentHistory) -> Vec<ReviewSessionCurs
     cursors
 }
 
-fn reconcile_agent_history_review_jobs(
-    state: &mut AppState,
-    now: &str,
-) -> Result<(), ToolError> {
+fn reconcile_agent_history_review_jobs(state: &mut AppState, now: &str) -> Result<(), ToolError> {
     if !state.store.private_storage_available() {
         return Ok(());
     }
@@ -5999,10 +5998,7 @@ fn normalized_selection_chars(text: &str) -> Vec<char> {
         .collect()
 }
 
-fn greedy_quote_hit_pairs(
-    quote: &[char],
-    hits: &[(usize, char, bool)],
-) -> Vec<(usize, usize)> {
+fn greedy_quote_hit_pairs(quote: &[char], hits: &[(usize, char, bool)]) -> Vec<(usize, usize)> {
     let mut pairs = Vec::new();
     let mut quote_index = 0;
     let mut hit_index = 0;
@@ -6106,10 +6102,7 @@ fn quote_hit_pairs(quote: &[char], hits: &[(usize, char, bool)]) -> Vec<(usize, 
     pairs
 }
 
-fn filter_hits_to_raw_quote(
-    hits: Vec<SelectionCharHit>,
-    raw_quote: &str,
-) -> Vec<SelectionCharHit> {
+fn filter_hits_to_raw_quote(hits: Vec<SelectionCharHit>, raw_quote: &str) -> Vec<SelectionCharHit> {
     let quote = normalized_selection_chars(raw_quote);
     let hit_units = hits
         .iter()
@@ -6315,7 +6308,11 @@ fn route_pdf_selection_resolve(book: &Book, book_dir: &Path, body: &serde_json::
         }
     }
     hits.sort_by_key(|hit| (hit.page_index, hit.char_index));
-    if let Some(raw_quote) = input.raw_quote.as_deref().filter(|quote| !quote.trim().is_empty()) {
+    if let Some(raw_quote) = input
+        .raw_quote
+        .as_deref()
+        .filter(|quote| !quote.trim().is_empty())
+    {
         hits = filter_hits_to_raw_quote(hits, raw_quote);
     }
     let unmapped_hits = hits.iter().filter(|hit| hit.lid.is_none()).count();
@@ -6380,7 +6377,10 @@ fn route_pdf_selection_resolve(book: &Book, book_dir: &Path, body: &serde_json::
 
 fn selection_page_shards(book_dir: &Path) -> Result<Vec<(usize, PathBuf)>, ToolError> {
     let manifest = selection_manifest_value(book_dir)?;
-    let Some(shards) = manifest.get("page_shards").and_then(|value| value.as_array()) else {
+    let Some(shards) = manifest
+        .get("page_shards")
+        .and_then(|value| value.as_array())
+    else {
         return Err(ToolError {
             error_code: "PDF_SELECTION_MAP_INVALID".into(),
             category: "internal".into(),
@@ -6452,8 +6452,10 @@ fn selection_chars_for_source_range(
             }
             hits.push(SelectionCharHit {
                 page_index,
-                char_index: ch.get("char_index").and_then(|value| value.as_u64()).unwrap_or(0)
-                    as usize,
+                char_index: ch
+                    .get("char_index")
+                    .and_then(|value| value.as_u64())
+                    .unwrap_or(0) as usize,
                 text: ch
                     .get("text")
                     .and_then(|value| value.as_str())
@@ -6494,10 +6496,7 @@ fn route_pdf_ranges_project(book: &Book, book_dir: &Path, body: &serde_json::Val
                 "INVALID_PDF_RANGE",
                 &format!(
                     "reader.pdf_ranges.project range 越界: {} [{}..{}) / {}",
-                    input_range.lid,
-                    input_range.range.start,
-                    input_range.range.end,
-                    text_len
+                    input_range.lid, input_range.range.start, input_range.range.end, text_len
                 ),
             );
         }
@@ -6543,15 +6542,19 @@ fn route_pdf_ranges_project(book: &Book, book_dir: &Path, body: &serde_json::Val
                 source_span: hit.source_span,
             })
             .collect::<Vec<_>>();
-        let terminal_rect = exact.then(|| {
-            hits.iter()
-                .find(|hit| hit.source_span.start < target.end && hit.source_span.end >= target.end)
-                .map(|hit| ExactPdfRect {
-                    page_index: hit.page_index,
-                    bbox: hit.rect.bbox,
-                    source_span: hit.source_span,
-                })
-        }).flatten();
+        let terminal_rect = exact
+            .then(|| {
+                hits.iter()
+                    .find(|hit| {
+                        hit.source_span.start < target.end && hit.source_span.end >= target.end
+                    })
+                    .map(|hit| ExactPdfRect {
+                        page_index: hit.page_index,
+                        bbox: hit.rect.bbox,
+                        source_span: hit.source_span,
+                    })
+            })
+            .flatten();
         projections.push(PdfRangeProjection {
             lid: input_range.lid,
             range: input_range.range,
@@ -6564,24 +6567,18 @@ fn route_pdf_ranges_project(book: &Book, book_dir: &Path, body: &serde_json::Val
     ok_json(&PdfRangesProjectResponse { projections })
 }
 
-/// `book.query` → POST(S10c)。直调内层 `runtime::query`:确定性档位检索 + LLM 合一轮判停 +
-/// 确定性交叉验停(citations⊆证据集 = 结构红线 `[ADR-0004/0016]`)。anchor 缺省取 reader 当前
-/// anchor(读模式起点 `[ADR-0028]`);`scope` 入参暂不接(内层切片0 固定 local→chapter auto 阶梯,
-/// 无 scope 旋钮,留切片1+)。provider 错经 `runtime::query` 映射 `PROVIDER_ERROR` 透传不降级。
+/// `book.query` → POST。M6 请求必须自含 query/intent/targets/obligations/anchor_lid;
+/// 缺项返回 typed invalid_plan,不回退旧 `{q,anchor_lid}` 算法。
 fn route_query(state: &mut AppState, body: &str) -> Reply {
     let v = match body_value(body) {
         Ok(v) => v,
         Err(reply) => return reply,
     };
-    let Some(q) = v.get("q").and_then(|x| x.as_str()) else {
-        return validation("INVALID_RANGE", "book.query 需 q(问题文本)");
+    let request = match runtime::parse_book_query_request(v) {
+        Ok(request) => request,
+        Err(outcome) => return ok_json(&outcome),
     };
-    // anchor:显式给则用,否则取 reader 当前视口 anchor(读到哪问到哪)。
-    let anchor = match v.get("anchor_lid").and_then(|x| x.as_str()) {
-        Some(a) => a.to_string(),
-        None => state.reader.state().viewport.anchor_lid,
-    };
-    match runtime::query(&state.book, q, &anchor, state.adapter.as_ref()) {
+    match runtime::query(&state.book, &request, state.adapter.as_ref()) {
         Ok(resp) => ok_json(&resp),
         Err(e) => err_reply(&e),
     }
@@ -6868,9 +6865,7 @@ fn memory_applied_event(outcome: &MemoryOpOutcome) -> serde_json::Value {
 fn memory_applied_update(outcome: &MemoryOpOutcome) -> ProfileMemoryUpdate {
     match outcome {
         MemoryOpOutcome::Remembered {
-            operation_id,
-            fact,
-            ..
+            operation_id, fact, ..
         } => ProfileMemoryUpdate {
             kind: ProfileMemoryUpdateKind::Remembered,
             operation_id: Some(operation_id.clone()),
@@ -6878,9 +6873,7 @@ fn memory_applied_update(outcome: &MemoryOpOutcome) -> ProfileMemoryUpdate {
             message: None,
         },
         MemoryOpOutcome::Corrected {
-            operation_id,
-            fact,
-            ..
+            operation_id, fact, ..
         } => ProfileMemoryUpdate {
             kind: ProfileMemoryUpdateKind::Corrected,
             operation_id: Some(operation_id.clone()),
@@ -7176,11 +7169,7 @@ fn explicit_profile_fact_from_view(
             fact.applicability_value,
             content_profile,
         )?,
-        payload: parse_profile_payload(
-            &fact.payload_kind,
-            fact.payload_key,
-            fact.payload_value,
-        )?,
+        payload: parse_profile_payload(&fact.payload_kind, fact.payload_key, fact.payload_value)?,
         sensitivity: parse_profile_sensitivity(&fact.sensitivity)?,
         valid_until: fact.valid_until,
         sensitive_plaintext_acknowledged: false,
@@ -7402,7 +7391,10 @@ fn prepare_profile_governance_mutation(
                 current_book_id,
                 content_profile,
             )?;
-            (ProfileGovernanceAction::ApplyMemoryOp { operation }, privacy)
+            (
+                ProfileGovernanceAction::ApplyMemoryOp { operation },
+                privacy,
+            )
         }
         ProfileGovernanceActionRequest::Correct {
             operation_id,
@@ -7431,7 +7423,10 @@ fn prepare_profile_governance_mutation(
                 current_book_id,
                 content_profile,
             )?;
-            (ProfileGovernanceAction::ApplyMemoryOp { operation }, privacy)
+            (
+                ProfileGovernanceAction::ApplyMemoryOp { operation },
+                privacy,
+            )
         }
         ProfileGovernanceActionRequest::Forget {
             operation_id,
@@ -7557,7 +7552,8 @@ fn route_profile_memory_apply(state: &mut AppState, body: &str, now: &str) -> Re
     let book_id = state.book.base.book_id.clone();
     let content_profile = current_content_profile(&state.book);
     let (mutation, privacy) =
-        match prepare_profile_governance_mutation(request, &state.store, &book_id, content_profile) {
+        match prepare_profile_governance_mutation(request, &state.store, &book_id, content_profile)
+        {
             Ok(prepared) => prepared,
             Err(error) => return err_reply(&error),
         };
@@ -7586,7 +7582,10 @@ fn route_profile_memory_apply(state: &mut AppState, body: &str, now: &str) -> Re
             .pending_governance_mutations
             .get(&session_id)
             .is_some_and(|pending| pending != &mutation)
-            || state.agent_history.pending_memory_ops.contains_key(&session_id)
+            || state
+                .agent_history
+                .pending_memory_ops
+                .contains_key(&session_id)
         {
             return err_reply(&ToolError {
                 error_code: "SENSITIVE_CONFIRMATION_PENDING".into(),
@@ -7703,15 +7702,9 @@ fn route_profile_backfill_action(
                     );
                 }
             };
-            let Some(session) = state
-                .agent_history
-                .sessions
-                .iter()
-                .find(|session| {
-                    session.id == request.session_id
-                        && session.book_id == state.book.base.book_id
-                })
-            else {
+            let Some(session) = state.agent_history.sessions.iter().find(|session| {
+                session.id == request.session_id && session.book_id == state.book.base.book_id
+            }) else {
                 return err_reply(&ToolError {
                     error_code: "HISTORICAL_BACKFILL_SESSION_NOT_FOUND".into(),
                     category: "not_found".into(),
@@ -7855,14 +7848,8 @@ fn route_agent_chat(state: &mut AppState, body: &str, now: &str) -> Reply {
         Ok(turn_ref) => turn_ref,
         Err(error) => return err_reply(&error),
     };
-    let result = run_precommitted_agent_chat(
-        state,
-        msg,
-        &agent_message,
-        &current_book_id,
-        &turn_ref,
-        now,
-    );
+    let result =
+        run_precommitted_agent_chat(state, msg, &agent_message, &current_book_id, &turn_ref, now);
     match result {
         Ok(outcome) => {
             if let Err(error) = finalize_agent_turn_completed(state, &turn_ref, &outcome, now) {
@@ -7915,11 +7902,7 @@ fn run_precommitted_agent_chat(
                 now,
             ) {
                 Ok(outcome) => {
-                    record_governance_outcome(
-                        &outcome,
-                        &mut memory_events,
-                        &mut memory_updates,
-                    );
+                    record_governance_outcome(&outcome, &mut memory_events, &mut memory_updates);
                     confirmation_applied = true;
                 }
                 Err(error) => {
@@ -7947,11 +7930,7 @@ fn run_precommitted_agent_chat(
                 .apply_memory_op(acknowledge_sensitive_memory_op(pending), now)
             {
                 Ok(outcome) => {
-                    record_memory_outcome(
-                        &outcome,
-                        &mut memory_events,
-                        &mut memory_updates,
-                    );
+                    record_memory_outcome(&outcome, &mut memory_events, &mut memory_updates);
                     confirmation_applied = true;
                 }
                 Err(error) => {
@@ -7971,11 +7950,8 @@ fn run_precommitted_agent_chat(
 
     if !confirmation_applied {
         let active_facts = state.store.resolve_profile_facts(&profile_context);
-        let operation_id = stable_memory_operation_id(
-            &turn_ref.session_id,
-            turn_ref.user_turn_ordinal,
-            msg,
-        );
+        let operation_id =
+            stable_memory_operation_id(&turn_ref.session_id, turn_ref.user_turn_ordinal, msg);
         let decision = evaluate_memory_intent(
             state.adapter.as_ref(),
             &MemoryIntentRequest {
@@ -8083,9 +8059,10 @@ fn profile_snapshot_request(
     now: &str,
 ) -> SnapshotRequest {
     let review_state = state.store.review_state();
-    let unresolved = review_state.review_jobs.iter().any(|job| {
-        job.book_id == book_id && job.status != ReviewJobStatus::Completed
-    });
+    let unresolved = review_state
+        .review_jobs
+        .iter()
+        .any(|job| job.book_id == book_id && job.status != ReviewJobStatus::Completed);
     let review_stale = unresolved && review_state.last_error.is_some();
     let stale = state.store.private_storage_diagnostic().is_some() || review_stale;
     let context = SnapshotContext {
@@ -8149,9 +8126,7 @@ fn pending_review_context(state: &AppState, book_id: &str) -> Vec<PendingTurnRef
                 .turns
                 .iter()
                 .filter(|turn| turn.user_turn_ordinal > watermark)
-                .filter(|turn| {
-                    classify_profile_privacy(&turn.user) == ProfilePrivacyClass::Normal
-                })
+                .filter(|turn| classify_profile_privacy(&turn.user) == ProfilePrivacyClass::Normal)
                 .map(|turn| PendingTurnRef {
                     session_id: session.id.clone(),
                     turn_id: turn.turn_id.clone(),
@@ -8422,7 +8397,7 @@ fn query_method_not_allowed() -> Reply {
         body: to_body(&ToolError {
             error_code: "METHOD_NOT_ALLOWED".into(),
             category: "validation".into(),
-            message: "book.query 是 LLM 命令,只支持 POST(body {q, anchor_lid?})".into(),
+            message: "book.query 是 LLM 命令,只支持 POST(body {query,intent,targets,obligations,anchor_lid})".into(),
         }),
     }
 }
@@ -8842,7 +8817,9 @@ mod tests {
         for page in pages {
             let page_index = page["pageIndex"].as_u64().unwrap();
             std::fs::write(
-                selection_dir.join("pages").join(format!("{page_index}.json")),
+                selection_dir
+                    .join("pages")
+                    .join(format!("{page_index}.json")),
                 page.to_string(),
             )
             .unwrap();
@@ -8955,8 +8932,8 @@ mod tests {
         })
     }
 
-    /// 确定性 LLM 替身:首轮即 sufficient + 引用给定 LID(落在证据集内 ⇒ 过内层交叉验停)。
-    /// 让 book.query 的 HTTP 路由层脱离真 LLM 可测(守 A2);真跑端到端走 B2 人工。
+    /// 确定性 LLM 替身:解析唯一 referent 后对给定来源 LID 返回 supported assessment。
+    /// 让 book.query 的 HTTP 路由层脱离真 LLM 可测。
     struct StubAdapter {
         lid: String,
     }
@@ -8972,6 +8949,35 @@ mod tests {
                 }],
                 model_supplement: vec![],
             })
+        }
+        fn complete_structured(
+            &self,
+            req: CompletionRequest,
+        ) -> Result<serde_json::Value, AdapterError> {
+            if req.system.contains("PlanGate") {
+                Ok(json!({
+                    "plan_gate": {"valid": true, "missing_requirements": [], "target_issues": []},
+                    "candidate_fits": [{
+                        "target_index": 0,
+                        "candidate_id": "entity:command",
+                        "fit": "direct_match",
+                        "reason": "fixture"
+                    }],
+                    "probes": []
+                }))
+            } else {
+                Ok(json!({
+                    "answer": "桩答案",
+                    "assessments": [{
+                        "obligation_index": 0,
+                        "verdict": "supported",
+                        "citation_lids": [self.lid],
+                        "support_note": "fixture"
+                    }],
+                    "citations": [{"lid": self.lid, "text": "X", "role": "support"}],
+                    "model_supplement": []
+                }))
+            }
         }
         fn chat(&self, _: &[Message], _: &[ToolSpec]) -> Result<AssistantTurn, AdapterError> {
             unimplemented!("server 测不走外层 chat(S10f)")
@@ -9026,7 +9032,7 @@ mod tests {
         let book = Book::new(sample_base(), &src);
         let reader = Reader::new(&book, DEFAULT_RADIUS);
         let store = MemoryStore::open(tmp(mem)).unwrap();
-        // 默认桩引用首叶 "1.1"(book.query 缺省 anchor = reader 首叶,落证据集)。
+        // 桩固定引用首叶 "1.1"；typed query 的 anchor 由请求显式提供。
         let adapter = Box::new(StubAdapter { lid: "1.1".into() });
         AppState {
             book_dir: tmp_dir(&format!("book-dir-{mem}")),
@@ -10714,10 +10720,19 @@ mod tests {
         let projected_body: serde_json::Value = serde_json::from_str(&projected.body).unwrap();
         let projection = &projected_body["projections"][0];
         assert_eq!(projection["status"], "exact");
-        assert_eq!(projection["covered_range"], serde_json::json!({"start":0,"end":3}));
+        assert_eq!(
+            projection["covered_range"],
+            serde_json::json!({"start":0,"end":3})
+        );
         assert_eq!(projection["rects"].as_array().unwrap().len(), 3);
-        assert_eq!(projection["rects"][0]["bbox"], serde_json::json!([10.0,10.0,12.0,20.0]));
-        assert_eq!(projection["terminal_rect"]["bbox"], serde_json::json!([14.0,10.0,16.0,20.0]));
+        assert_eq!(
+            projection["rects"][0]["bbox"],
+            serde_json::json!([10.0, 10.0, 12.0, 20.0])
+        );
+        assert_eq!(
+            projection["terminal_rect"]["bbox"],
+            serde_json::json!([14.0, 10.0, 16.0, 20.0])
+        );
         assert!(projection.get("primary_region").is_none());
         assert!(projection.get("regions").is_none());
     }
@@ -10858,7 +10873,7 @@ mod tests {
         assert_eq!(body["projections"][0]["rects"].as_array().unwrap().len(), 3);
         assert_eq!(
             body["projections"][0]["rects"][1]["bbox"],
-            serde_json::json!([1.0,10.0,2.0,12.0])
+            serde_json::json!([1.0, 10.0, 2.0, 12.0])
         );
 
         write_projection_selection_pages(
@@ -10881,7 +10896,10 @@ mod tests {
         let body: serde_json::Value = serde_json::from_str(&partial.body).unwrap();
         let projection = &body["projections"][0];
         assert_eq!(projection["status"], "partial");
-        assert_eq!(projection["covered_range"], serde_json::json!({"start":0,"end":1}));
+        assert_eq!(
+            projection["covered_range"],
+            serde_json::json!({"start":0,"end":1})
+        );
         assert_eq!(projection["rects"].as_array().unwrap().len(), 2);
         assert!(projection["terminal_rect"].is_null());
 
@@ -10903,7 +10921,10 @@ mod tests {
         );
         let body: serde_json::Value = serde_json::from_str(&missing_terminal.body).unwrap();
         assert_eq!(body["projections"][0]["status"], "partial");
-        assert_eq!(body["projections"][0]["covered_range"], serde_json::json!({"start":0,"end":2}));
+        assert_eq!(
+            body["projections"][0]["covered_range"],
+            serde_json::json!({"start":0,"end":2})
+        );
         assert!(body["projections"][0]["terminal_rect"].is_null());
 
         write_projection_selection_pages(
@@ -10964,7 +10985,7 @@ mod tests {
                     "chars":[
                         {"char_index":0,"text":"X","rect":{"pageIndex":3,"bbox":[50.0,60.0,52.0,62.0]},"source_span":{"start":3,"end":4},"lid":"1.1"}
                     ]
-                })
+                }),
             ],
         );
         let projected = post(
@@ -10986,7 +11007,7 @@ mod tests {
         assert_eq!(body["projections"][1]["rects"][3]["pageIndex"], 3);
         assert_eq!(
             body["projections"][1]["terminal_rect"]["bbox"],
-            serde_json::json!([50.0,60.0,52.0,62.0])
+            serde_json::json!([50.0, 60.0, 52.0, 62.0])
         );
     }
 
@@ -11000,7 +11021,11 @@ mod tests {
             r#"{"ranges":[{"lid":"1.1","range":{"start":0,"end":101}}]}"#,
         ] {
             let response = post(&mut s, "/reader/pdf_ranges.project", body);
-            assert_eq!(response.status, 400, "body={body} response={}", response.body);
+            assert_eq!(
+                response.status, 400,
+                "body={body} response={}",
+                response.body
+            );
             assert!(response.body.contains("INVALID_PDF_RANGE"));
         }
     }
@@ -11798,31 +11823,38 @@ mod tests {
 
     // ── S10c book.query POST ────────────────────────────────
     #[test]
-    fn book_query_returns_query_response() {
+    fn book_query_returns_typed_complete_outcome() {
         let mut s = state_named("query");
-        // 缺省 anchor = reader 首叶 "1.1";桩引用 "1.1" 落证据集 → 过交叉验停。
-        let r = post(&mut s, "/book/query", r#"{"q":"什么是命令模式"}"#);
+        let r = post(
+            &mut s,
+            "/book/query",
+            r#"{"query":"什么是命令模式","intent":"definition","targets":["命令模式"],"obligations":[{"requirement":"给出定义"}],"anchor_lid":"1.1"}"#,
+        );
         assert_eq!(r.status, 200);
-        assert!(r.body.contains("\"scope_used\":\"local\""));
-        assert!(r.body.contains("\"incomplete\":false"));
-        assert!(r.body.contains("\"lid\":\"1.1\"")); // citation 全真 LID
+        assert!(r.body.contains("\"status\":\"complete\""));
+        assert!(r.body.contains("\"candidate_id\":\"entity:command\""));
+        assert!(r.body.contains("\"lid\":\"1.1\""));
         assert!(r.body.contains("桩答案"));
     }
 
     #[test]
     fn book_query_explicit_anchor() {
         let mut s = state_named("query-anchor");
-        let r = post(&mut s, "/book/query", r#"{"q":"问","anchor_lid":"1.1"}"#);
+        let r = post(
+            &mut s,
+            "/book/query",
+            r#"{"query":"命令模式是什么","intent":"definition","targets":["命令模式"],"obligations":[{"requirement":"解释含义"}],"anchor_lid":"1.1"}"#,
+        );
         assert_eq!(r.status, 200);
         assert!(r.body.contains("\"citations\""));
     }
 
     #[test]
-    fn book_query_missing_q_400() {
+    fn book_query_missing_plan_returns_typed_invalid_plan() {
         let mut s = state_named("query-missing");
         let r = post(&mut s, "/book/query", "{}");
-        assert_eq!(r.status, 400);
-        assert!(r.body.contains("INVALID_RANGE"));
+        assert_eq!(r.status, 200);
+        assert!(r.body.contains("\"status\":\"invalid_plan\""));
     }
 
     #[test]
@@ -11838,7 +11870,11 @@ mod tests {
     fn book_query_provider_error_502() {
         let mut s = state_named("query-err");
         s.adapter = Box::new(UnconfiguredAdapter);
-        let r = post(&mut s, "/book/query", r#"{"q":"x"}"#);
+        let r = post(
+            &mut s,
+            "/book/query",
+            r#"{"query":"x 是什么","intent":"definition","targets":["x"],"obligations":[{"requirement":"定义 x"}],"anchor_lid":"1.1"}"#,
+        );
         assert_eq!(r.status, 502);
         assert!(r.body.contains("PROVIDER_ERROR"));
     }
@@ -12409,12 +12445,7 @@ mod tests {
         assert_eq!(normal.store.profile_facts().len(), 1);
 
         let mut sensitive = state_named("structured-memory-sensitive");
-        let mut forged_fact = profile_fact_draft(
-            "book",
-            "health",
-            "UI_SENSITIVE_ONLY",
-            "normal",
-        );
+        let mut forged_fact = profile_fact_draft("book", "health", "UI_SENSITIVE_ONLY", "normal");
         forged_fact["sensitive_plaintext_acknowledged"] = json!(true);
         let sensitive_action = json!({
             "kind": "remember",
@@ -12426,7 +12457,10 @@ mod tests {
         assert_eq!(reply.status, 200, "{}", reply.body);
         assert!(reply.body.contains("needs_sensitive_confirmation"));
         assert!(sensitive.store.profile_facts().is_empty());
-        assert_eq!(sensitive.agent_history.pending_governance_mutations.len(), 1);
+        assert_eq!(
+            sensitive.agent_history.pending_governance_mutations.len(),
+            1
+        );
         assert!(sensitive.agent_history.pending_memory_ops.is_empty());
         assert!(!serde_json::to_string(&sensitive.agent_history)
             .unwrap()
@@ -12443,9 +12477,15 @@ mod tests {
             r#"{"message":"confirm save"}"#,
         );
         assert_eq!(confirmed.status, 200, "{}", confirmed.body);
-        assert!(sensitive.agent_history.pending_governance_mutations.is_empty());
+        assert!(sensitive
+            .agent_history
+            .pending_governance_mutations
+            .is_empty());
         assert_eq!(sensitive.store.profile_facts().len(), 1);
-        assert_eq!(sensitive.store.profile_facts()[0].sensitivity, Sensitivity::Sensitive);
+        assert_eq!(
+            sensitive.store.profile_facts()[0].sensitivity,
+            Sensitivity::Sensitive
+        );
         assert_eq!(
             match &sensitive.store.profile_facts()[0].payload {
                 ProfilePayload::ExplanationPreference(claim) => claim.value.as_str(),
@@ -12620,10 +12660,12 @@ mod tests {
             &json!({"job_id": job_id}).to_string(),
         );
         assert_eq!(cleared.status, 200, "{}", cleared.body);
-        assert!(serde_json::from_str::<serde_json::Value>(&cleared.body).unwrap()["jobs"]
-            .as_array()
-            .unwrap()
-            .is_empty());
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&cleared.body).unwrap()["jobs"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -12988,20 +13030,16 @@ mod tests {
         let response = get(&mut state, "/profile/memory");
         assert_eq!(response.status, 200, "{}", response.body);
         let body: serde_json::Value = serde_json::from_str(&response.body).unwrap();
-        let projection = body["snapshot"]["profile_projection"]
-            .as_array()
-            .unwrap();
+        let projection = body["snapshot"]["profile_projection"].as_array().unwrap();
 
         assert_eq!(body["facts"].as_array().unwrap().len(), 0);
         assert!(projection.len() >= 3);
         assert!(projection.iter().any(|item| {
-            item["status"] == "confirmed"
-                && item["text"].as_str().unwrap().contains("read_lids")
+            item["status"] == "confirmed" && item["text"].as_str().unwrap().contains("read_lids")
         }));
-        assert!(projection.iter().any(|item| item["text"]
-            .as_str()
-            .unwrap()
-            .contains("activity:1.1")));
+        assert!(projection
+            .iter()
+            .any(|item| item["text"].as_str().unwrap().contains("activity:1.1")));
         assert!(projection.iter().any(|item| item["text"]
             .as_str()
             .unwrap()
@@ -13031,11 +13069,7 @@ mod tests {
             .expect("the paper fixture exposes a question with LID evidence");
         state
             .store
-            .mark_read(
-                &book_id,
-                &question.evidence_lids[0],
-                "2026-07-14T00:00:00Z",
-            )
+            .mark_read(&book_id, &question.evidence_lids[0], "2026-07-14T00:00:00Z")
             .unwrap();
         for (turn_id, key, value) in [
             ("paper-mode", "paper_reading_mode", "close"),
@@ -13210,7 +13244,10 @@ mod tests {
 
         let restarted = load_agent_history(&Some(history_path));
         let restarted_value = serde_json::to_value(&restarted).unwrap();
-        assert_eq!(restarted_value["sessions"][0]["turns"][0]["turn_id"], turn_id);
+        assert_eq!(
+            restarted_value["sessions"][0]["turns"][0]["turn_id"],
+            turn_id
+        );
         let restarted_evidence_id = memory::EvidenceRef::Turn {
             session_id: restarted_value["sessions"][0]["id"]
                 .as_str()
@@ -13318,14 +13355,16 @@ mod tests {
 
         let mut legacy: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&history_path).unwrap()).unwrap();
-        let turn = legacy["sessions"][0]["turns"][0]
-            .as_object_mut()
-            .unwrap();
+        let turn = legacy["sessions"][0]["turns"][0].as_object_mut().unwrap();
         turn.remove("turn_id");
         turn.remove("user_turn_ordinal");
         turn.remove("status");
         turn.remove("error");
-        std::fs::write(&history_path, serde_json::to_string_pretty(&legacy).unwrap()).unwrap();
+        std::fs::write(
+            &history_path,
+            serde_json::to_string_pretty(&legacy).unwrap(),
+        )
+        .unwrap();
 
         let first = serde_json::to_value(load_agent_history(&Some(history_path.clone()))).unwrap();
         let second = serde_json::to_value(load_agent_history(&Some(history_path))).unwrap();
@@ -13340,6 +13379,84 @@ mod tests {
             .as_str()
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn query_audit_is_out_of_band_persisted_and_backward_compatible() {
+        let state = state_named("query-audit-history");
+        let request = runtime::BookQueryRequest {
+            query: "command 是什么".into(),
+            intent: runtime::BookQueryIntent::Definition,
+            targets: vec!["command".into()],
+            obligations: vec![runtime::QueryObligation {
+                requirement: "给出定义".into(),
+            }],
+            anchor_lid: "1.1".into(),
+        };
+        let query_run = runtime::query_run(&state.book, &request, state.adapter.as_ref()).unwrap();
+        let audit = query_run.audit.clone();
+        let outer = OuterOutcome {
+            answer: Some("resident answer".into()),
+            incomplete: false,
+            warning: None,
+            turns: 1,
+            tokens_spent: 1,
+            effects: Vec::new(),
+            trace: vec![runtime::orchestrator::TraceStep {
+                tool: "book.query".into(),
+                args: serde_json::to_string(&request).unwrap(),
+                result_digest: "complete".into(),
+                query_audit: Some(audit.clone()),
+            }],
+            profile_usage: ProfileUsageTrace {
+                snapshot_revision: 0,
+                injected_fact_ids: Vec::new(),
+                claimed_used_fact_ids: Vec::new(),
+                influences: Vec::new(),
+            },
+            memory_updates: Vec::new(),
+        };
+        let mut history = AgentHistory::default();
+        let mut session = new_agent_session("book", "t0", 0);
+        session.turns.push(AgentChatTurn {
+            turn_id: stable_agent_turn_id(&session.id, 1),
+            user_turn_ordinal: 1,
+            user: "command 是什么".into(),
+            status: AgentAssistantStatus::Completed,
+            outcome: Some(outer),
+            error: None,
+            question_anchor_lid: Some("1.1".into()),
+            question_quote: None,
+        });
+        history
+            .active_by_book
+            .insert("book".into(), session.id.clone());
+        history.sessions.push(session);
+
+        let path = tmp("query-audit-history-file");
+        let _ = std::fs::remove_file(&path);
+        save_agent_history_path(&Some(path.clone()), &history).unwrap();
+        let loaded = load_agent_history(&Some(path.clone()));
+        let loaded_audit = loaded.sessions[0].turns[0].outcome.as_ref().unwrap().trace[0]
+            .query_audit
+            .as_ref()
+            .unwrap();
+        assert_eq!(loaded_audit, &audit);
+
+        let mut legacy = serde_json::to_value(&loaded).unwrap();
+        legacy["sessions"][0]["turns"][0]["outcome"]["trace"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("query_audit");
+        std::fs::write(&path, serde_json::to_string_pretty(&legacy).unwrap()).unwrap();
+        let legacy_loaded = load_agent_history(&Some(path));
+        assert!(legacy_loaded.sessions[0].turns[0]
+            .outcome
+            .as_ref()
+            .unwrap()
+            .trace[0]
+            .query_audit
+            .is_none());
     }
 
     #[test]

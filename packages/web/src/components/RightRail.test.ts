@@ -177,4 +177,102 @@ describe("RightRail AskQuote", () => {
     expect(wrapper.emitted("refresh-profile")).toHaveLength(1);
     expect(wrapper.get(".profile-memory-panel").isVisible()).toBe(true);
   });
+
+  it("renders persisted QueryAudit without placing it in the result digest", async () => {
+    const audit = {
+      budget_version: "referent-first-v1",
+      model_calls: 2,
+      request: {
+        query: "command 是什么",
+        intent: "definition" as const,
+        targets: ["command"],
+        obligations: [{ requirement: "给出定义" }],
+        anchor_lid: "1.1",
+      },
+      plan_gate: { valid: true, missing_requirements: [], target_issues: [] },
+      candidate_rounds: [{
+        round: 0,
+        targets: [{
+          target_index: 0,
+          target: "command",
+          candidates: [{
+            candidate_id: "entity:command",
+            kind: "entity" as const,
+            sources: ["graph" as const],
+            labels: ["command"],
+            aliases: [],
+            recall_strength: "direct" as const,
+            match_reasons: ["exact label"],
+            occurrence_count: 1,
+            excerpts: [{ lid: "1.1", text: "command source" }],
+            hint_only: null,
+          }],
+        }],
+      }],
+      candidate_fits: [{
+        round: 0,
+        target_index: 0,
+        candidate_id: "entity:command",
+        fit: "direct_match",
+        reason: "fixture",
+      }],
+      probes: [],
+      bindings: [{
+        target: "command",
+        candidate_id: "entity:command",
+        kind: "entity" as const,
+        canonical_label: "command",
+        source_lids: ["1.1"],
+      }],
+      selected_bindings: [{
+        target_index: 0,
+        candidate_id: "entity:command",
+        round: 0,
+        rank: 1,
+      }],
+      evidence: {
+        seed_lids: ["1.1"],
+        expansion_lids: [],
+        expansion_rounds: 0,
+        skipped_lids: [],
+        chars_used: 14,
+        mandatory_overflow_used: 0,
+        mandatory_overflow_reasons: [],
+      },
+      assessments: [{
+        obligation_index: 0,
+        verdict: "supported" as const,
+        citation_lids: ["1.1"],
+        support_note: "source support",
+      }],
+      structural_gate: {
+        bindings_complete: true,
+        assessments_complete: true,
+        citations_valid: true,
+        all_obligations_supported: true,
+      },
+      outcome_status: "complete",
+    };
+    const wrapper = mount(RightRail, {
+      props: {
+        ...baseProps,
+        askDraft: null,
+        latestTrace: [{
+          tool: "book.query",
+          args: "typed request",
+          result_digest: "complete response only",
+          query_audit: audit,
+        }],
+      },
+    });
+    const traceTab = wrapper.findAll(".tab").find((tab) => tab.text().includes("轨迹"));
+    await traceTab!.trigger("click");
+    expect(wrapper.get(".trace-result").text()).toBe("complete response only");
+    const panel = wrapper.get(".query-audit");
+    expect(panel.text()).toContain("QueryAudit");
+    await panel.get("summary").trigger("click");
+    expect(panel.text()).toContain("entity:command");
+    expect(panel.text()).toContain("seed: 1.1");
+    expect(panel.text()).toContain("citations=true");
+  });
 });

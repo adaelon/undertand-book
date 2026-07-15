@@ -1,11 +1,13 @@
 // 类型化命令面 REST 客户端 `[ADR-0028]`:前端经 `/api` dev proxy 打到 tiny_http。
 // 端点名 = 命令名;book.*→GET、reader.*/memory.*/book.query→POST;错误透传 §4.4 信封。
 import type { Manifest } from "./generated/Manifest";
-import type { QueryResponse } from "./generated/QueryResponse";
+import type { BookQueryRequest } from "./generated/BookQueryRequest";
+import type { QueryOutcome } from "./generated/QueryOutcome";
 import type { ToolError } from "./generated/ToolError";
 import type { OuterOutcome } from "./generated/OuterOutcome";
 import type { AgentEffect } from "./generated/AgentEffect";
 import type { TraceStep } from "./generated/TraceStep";
+import type { QueryAudit } from "./generated/QueryAudit";
 import type { HistoricalBackfillJobRequest } from "./generated/HistoricalBackfillJobRequest";
 import type { HistoricalBackfillStartRequest } from "./generated/HistoricalBackfillStartRequest";
 import type { HistoricalBackfillStateView } from "./generated/HistoricalBackfillStateView";
@@ -43,10 +45,12 @@ import type { PaperMinimapEffect } from "./generated/PaperMinimapEffect";
 
 export type {
   Manifest,
-  QueryResponse,
+  BookQueryRequest,
+  QueryOutcome,
   OuterOutcome,
   AgentEffect,
   TraceStep,
+  QueryAudit,
   HistoricalBackfillJobRequest,
   HistoricalBackfillStartRequest,
   HistoricalBackfillStateView,
@@ -761,8 +765,8 @@ export const api = {
   }) => http<BuildWorkbenchSnapshot>("POST", "/book/create", payload),
 
   // ── book.query(LLM 命令,POST)──
-  query: (q: string, anchor_lid?: string) =>
-    http<QueryResponse>("POST", "/book/query", { q, anchor_lid }),
+  query: (request: BookQueryRequest) =>
+    http<QueryOutcome>("POST", "/book/query", request),
   workbenchInputImport: (payload: {
     target_dir?: string;
     book_id?: string;

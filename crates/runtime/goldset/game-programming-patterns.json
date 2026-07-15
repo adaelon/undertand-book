@@ -1,74 +1,158 @@
 [
   {
     "id": "cmd-closure",
-    "q": "命令模式如何在没有闭包的语言里模拟闭包?",
-    "anchor_lid": "11.18.4",
-    "expect_cite": ["11.18.4"]
+    "request": {
+      "query": "命令模式如何在没有闭包的语言里模拟闭包?",
+      "intent": "explanation",
+      "targets": ["命令模式"],
+      "obligations": [{ "requirement": "解释命令对象如何保存接收者与参数以模拟闭包" }],
+      "anchor_lid": "11.18.4"
+    },
+    "expect_bindings": [{ "target": "命令模式", "canonical_label": "命令模式" }],
+    "expect_cite": ["11.18.4"],
+    "expect_status": "complete"
   },
   {
     "id": "cmd-undo-class",
-    "q": "为什么可撤销这类多操作的命令,用类来实现比用单一函数更合适?",
-    "anchor_lid": "11.18.5",
-    "expect_cite": ["11.18.5"]
+    "request": {
+      "query": "为什么可撤销这类多操作的命令,用类来实现比用单一函数更合适?",
+      "intent": "explanation",
+      "targets": ["可撤销命令"],
+      "obligations": [{ "requirement": "解释类如何封装撤销所需的多项状态与操作" }],
+      "anchor_lid": "11.18.5"
+    },
+    "expect_bindings": [{ "target": "可撤销命令", "canonical_label": "可撤销命令" }],
+    "expect_cite": ["11.18.5"],
+    "expect_status": "complete"
   },
   {
     "id": "cpp-first-class",
-    "q": "C++ 对头等函数的支持情况如何?",
-    "anchor_lid": "11.18.3",
-    "expect_cite": ["11.18.3"]
+    "request": {
+      "query": "C++ 对头等函数的支持情况如何?",
+      "intent": "explanation",
+      "targets": ["头等函数"],
+      "obligations": [{ "requirement": "说明 C++ 对头等函数的支持边界" }],
+      "anchor_lid": "11.18.3"
+    },
+    "expect_bindings": [{ "target": "头等函数", "canonical_label": "头等函数" }],
+    "expect_cite": ["11.18.3"],
+    "expect_status": "complete"
   },
   {
     "id": "flyweight-memory",
-    "q": "享元模式怎样缓解无状态命令实例带来的内存浪费?",
-    "anchor_lid": "11.19.5",
-    "expect_cite": ["11.19.5"]
+    "request": {
+      "query": "享元模式怎样缓解无状态命令实例带来的内存浪费?",
+      "intent": "explanation",
+      "targets": ["享元模式"],
+      "obligations": [{ "requirement": "解释共享无状态实例为何减少内存占用" }],
+      "anchor_lid": "11.19.5"
+    },
+    "expect_bindings": [{ "target": "享元模式", "canonical_label": "享元模式" }],
+    "expect_cite": ["11.19.5"],
+    "expect_status": "complete"
   },
   {
     "id": "flyweight-on-demand",
-    "q": "当无法预测会用到哪些享元时,应该怎么创建它们?",
-    "anchor_lid": "12.10.3",
-    "expect_cite": ["12.10.3"]
+    "request": {
+      "query": "当无法预测会用到哪些享元时,应该怎么创建它们?",
+      "intent": "explanation",
+      "targets": ["享元"],
+      "obligations": [{ "requirement": "说明无法预知使用集合时的按需创建策略" }],
+      "anchor_lid": "12.10.3"
+    },
+    "expect_bindings": [{ "target": "享元", "canonical_label": "享元" }],
+    "expect_cite": ["12.10.3"],
+    "expect_status": "complete"
   },
   {
     "id": "hide-constructor",
-    "q": "隐藏构造函数的一个典型做法是什么?",
-    "anchor_lid": "12.10.4",
-    "expect_cite": ["12.10.4"]
+    "request": {
+      "query": "隐藏构造函数的一个典型做法是什么?",
+      "intent": "explanation",
+      "targets": ["隐藏构造函数"],
+      "obligations": [{ "requirement": "说明隐藏构造函数的典型实现方式" }],
+      "anchor_lid": "12.10.4"
+    },
+    "expect_bindings": [{ "target": "隐藏构造函数", "canonical_label": "隐藏构造函数" }],
+    "expect_cite": ["12.10.4"],
+    "expect_status": "complete"
   },
   {
     "id": "object-pool",
-    "q": "对象池模式适合用来存储什么?",
-    "anchor_lid": "12.10.5",
-    "expect_cite": ["12.10.5"]
+    "request": {
+      "query": "对象池模式适合用来存储什么?",
+      "intent": "definition",
+      "targets": ["对象池"],
+      "obligations": [{ "requirement": "指出对象池适合保存的对象类型" }],
+      "anchor_lid": "12.10.5"
+    },
+    "expect_bindings": [{ "target": "对象池", "canonical_label": "对象池" }],
+    "expect_cite": ["12.10.5"],
+    "expect_status": "complete"
   },
   {
     "id": "stateless-state",
-    "q": "无字段的状态对象能不能在多个状态机之间共享?",
-    "anchor_lid": "12.10.6",
-    "expect_cite": ["12.10.6"]
+    "request": {
+      "query": "无字段的状态对象能不能在多个状态机之间共享?",
+      "intent": "explanation",
+      "targets": ["无状态的状态对象"],
+      "obligations": [{ "requirement": "说明无字段状态对象能否以及为何可跨状态机共享" }],
+      "anchor_lid": "12.10.6"
+    },
+    "expect_bindings": [{ "target": "无状态的状态对象", "canonical_label": "无状态的状态对象" }],
+    "expect_cite": ["12.10.6"],
+    "expect_status": "complete"
   },
   {
     "id": "simplicity-less-code",
-    "q": "保持简单性会对代码量和心智负担产生什么影响?",
-    "anchor_lid": "9.9.3",
-    "expect_cite": ["9.9.3"]
+    "request": {
+      "query": "保持简单性会对代码量和心智负担产生什么影响?",
+      "intent": "explanation",
+      "targets": ["简单性"],
+      "obligations": [{ "requirement": "解释简单性与代码量、心智负担的关系" }],
+      "anchor_lid": "9.9.3"
+    },
+    "expect_bindings": [{ "target": "简单性", "canonical_label": "简单性" }],
+    "expect_cite": ["9.9.3"],
+    "expect_status": "complete"
   },
   {
     "id": "when-abstract",
-    "q": "什么时候才应该为了灵活性去抽象和解耦?",
-    "anchor_lid": "9.10.3",
-    "expect_cite": ["9.10.3"]
+    "request": {
+      "query": "什么时候才应该为了灵活性去抽象和解耦?",
+      "intent": "explanation",
+      "targets": ["抽象"],
+      "obligations": [{ "requirement": "说明为灵活性引入抽象和解耦的时机" }],
+      "anchor_lid": "9.10.3"
+    },
+    "expect_bindings": [{ "target": "抽象", "canonical_label": "抽象" }],
+    "expect_cite": ["9.10.3"],
+    "expect_status": "complete"
   },
   {
     "id": "observer-boilerplate",
-    "q": "在大型应用里观察者模式会暴露出什么问题?",
-    "anchor_lid": "13.12.2",
-    "expect_cite": ["13.12.2"]
+    "request": {
+      "query": "在大型应用里观察者模式会暴露出什么问题?",
+      "intent": "explanation",
+      "targets": ["观察者模式"],
+      "obligations": [{ "requirement": "说明观察者模式在大型应用中的主要问题" }],
+      "anchor_lid": "13.12.2"
+    },
+    "expect_bindings": [{ "target": "观察者模式", "canonical_label": "观察者模式" }],
+    "expect_cite": ["13.12.2"],
+    "expect_status": "complete"
   },
   {
     "id": "data-binding-imperative",
-    "q": "数据绑定能否消除命令式代码?",
-    "anchor_lid": "13.12.7",
-    "expect_cite": ["13.12.7"]
+    "request": {
+      "query": "数据绑定能否消除命令式代码?",
+      "intent": "explanation",
+      "targets": ["数据绑定"],
+      "obligations": [{ "requirement": "说明数据绑定对命令式代码的影响与边界" }],
+      "anchor_lid": "13.12.7"
+    },
+    "expect_bindings": [{ "target": "数据绑定", "canonical_label": "数据绑定" }],
+    "expect_cite": ["13.12.7"],
+    "expect_status": "complete"
   }
 ]

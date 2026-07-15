@@ -1,7 +1,8 @@
 use crate::{err_reply, ok_json, validation, AppState, Reply};
 use read_tools::{RankedStep, ToolError};
 use runtime::{
-    book_guide, query, synthesize, BookGuideRequest, BookGuideResponse, BookGuideSessionContext,
+    book_guide, parse_book_query_request, query, synthesize, BookGuideRequest, BookGuideResponse,
+    BookGuideSessionContext,
 };
 use serde::Serialize;
 use serde_json::{json, Map, Value};
@@ -152,10 +153,7 @@ pub fn tools_list_result() -> Value {
                 "mode": {"type": "string", "enum": ["skim", "close", "deep"]},
                 "stage": {"type": "string", "enum": ["passive", "active", "critical", "creative"]}
             })),
-            tool_schema("book_query", "Answer a question using explicit book evidence near anchor_lid.", json!({
-                "q": {"type": "string"},
-                "anchor_lid": {"type": "string"}
-            })),
+            query_tool_schema(),
             tool_schema("book_synthesize", "Synthesize explicit LIDs without expanding evidence scope.", json!({
                 "lids": {"type": "array", "items": {"type": "string"}},
                 "task": {"type": "string"}
@@ -178,6 +176,35 @@ fn tool_schema(name: &str, description: &str, properties: Value) -> Value {
         "inputSchema": {
             "type": "object",
             "properties": properties,
+            "additionalProperties": false
+        }
+    })
+}
+
+fn query_tool_schema() -> Value {
+    json!({
+        "name": "book_query",
+        "description": "Resolve explicit referents, reread their source LIDs, and answer atomic obligations.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "intent": {"type": "string", "enum": ["definition", "explanation", "relation", "comparison"]},
+                "targets": {"type": "array", "minItems": 1, "maxItems": 3, "items": {"type": "string"}},
+                "obligations": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 3,
+                    "items": {
+                        "type": "object",
+                        "properties": {"requirement": {"type": "string"}},
+                        "required": ["requirement"],
+                        "additionalProperties": false
+                    }
+                },
+                "anchor_lid": {"type": "string"}
+            },
+            "required": ["query", "intent", "targets", "obligations", "anchor_lid"],
             "additionalProperties": false
         }
     })
@@ -298,15 +325,11 @@ fn route_book_paper_reading_guide(state: &AppState, args: &Value) -> Reply {
 }
 
 fn route_book_query(state: &AppState, args: &Value) -> Reply {
-    let q = match required_str(args, "q") {
-        Ok(v) => v,
-        Err(r) => return r,
+    let request = match parse_book_query_request(args.clone()) {
+        Ok(request) => request,
+        Err(outcome) => return ok_json(&outcome),
     };
-    let anchor = match required_str(args, "anchor_lid") {
-        Ok(v) => v,
-        Err(r) => return r,
-    };
-    match query(&state.book, &q, &anchor, state.adapter.as_ref()) {
+    match query(&state.book, &request, state.adapter.as_ref()) {
         Ok(resp) => ok_json(&resp),
         Err(e) => err_reply(&e),
     }
@@ -709,6 +732,35 @@ mod tests {
             })
         }
 
+        fn complete_structured(
+            &self,
+            req: CompletionRequest,
+        ) -> Result<serde_json::Value, AdapterError> {
+            if req.system.contains("PlanGate") {
+                Ok(json!({
+                    "plan_gate": {"valid": true, "missing_requirements": [], "target_issues": []},
+                    "candidate_fits": [
+                        {"target_index": 0, "candidate_id": "entity:alpha", "fit": "direct_match", "reason": "fixture"},
+                        {"target_index": 0, "candidate_id": "entity:beta", "fit": "reject", "reason": "fixture"},
+                        {"target_index": 0, "candidate_id": "entity:gamma", "fit": "reject", "reason": "fixture"}
+                    ],
+                    "probes": []
+                }))
+            } else {
+                Ok(json!({
+                    "answer": "alpha answer",
+                    "assessments": [{
+                        "obligation_index": 0,
+                        "verdict": "supported",
+                        "citation_lids": ["1.1"],
+                        "support_note": "fixture"
+                    }],
+                    "citations": [{"lid": "1.1", "text": "A", "role": "support"}],
+                    "model_supplement": []
+                }))
+            }
+        }
+
         fn chat(
             &self,
             _messages: &[Message],
@@ -924,7 +976,13 @@ mod tests {
             dispatch_mcp_tool(
                 &mut s,
                 "book_query",
-                json!({"q":"alpha 是什么", "anchor_lid":"1.1"}),
+                json!({
+                    "query":"alpha 是什么",
+                    "intent":"definition",
+                    "targets":["alpha"],
+                    "obligations":[{"requirement":"给出 alpha 的定义"}],
+                    "anchor_lid":"1.1"
+                }),
                 "1006"
             )
             .status,
@@ -1105,7 +1163,13 @@ mod tests {
         let r = dispatch_mcp_tool(
             &mut s,
             "book_query",
-            json!({"q":"x", "anchor_lid":"1.1"}),
+            json!({
+                "query":"x 是什么",
+                "intent":"definition",
+                "targets":["x"],
+                "obligations":[{"requirement":"定义 x"}],
+                "anchor_lid":"1.1"
+            }),
             "1000",
         );
         assert_eq!(r.status, 502);

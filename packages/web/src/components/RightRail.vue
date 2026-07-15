@@ -19,6 +19,7 @@ import type {
 import type { PdfAnnotationLocation } from "../pdf-annotation-projection";
 import { rangeToMarkdown } from "../selection";
 import ProfileMemoryPanel from "./ProfileMemoryPanel.vue";
+import QueryAuditPanel from "./QueryAuditPanel.vue";
 
 type ContextTab = "agent" | "profile" | "trace" | "formula" | "notes";
 
@@ -400,6 +401,7 @@ function influenceLabel(influence: ProfileUsageTrace["influences"][number]): str
                   <code>{{ t.tool }}</code>
                   <span class="t-args">{{ t.args }}</span>
                   <span class="t-res">→ {{ t.result_digest }}</span>
+                  <QueryAuditPanel v-if="t.query_audit" :audit="t.query_audit" />
                 </li>
               </ol>
             </div>
@@ -464,6 +466,7 @@ function influenceLabel(influence: ProfileUsageTrace["influences"][number]): str
           <code>{{ t.tool }}</code>
           <p class="trace-args">{{ t.args }}</p>
           <p class="trace-result">{{ t.result_digest }}</p>
+          <QueryAuditPanel v-if="t.query_audit" :audit="t.query_audit" />
         </li>
       </ol>
       <p v-else class="empty panel-empty">暂无工具轨迹。</p>
