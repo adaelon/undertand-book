@@ -45,3 +45,39 @@
 
 **Entry point**: `UNDERSTAND_BOOK_MARKETPLACE_SOURCE=adaelon/undertand-book` -> `pnpm -C apps/desktop package:windows` -> `dist/UnderstandBookSetup.exe`.
 **Test**: package exit 0; exported setup and Tauri NSIS bundle are both 34,623,533 bytes with SHA-256 `0B580CFA83FE9737B7FB5F90C24AB2979E0576428763A598FC975A4A328A530D`.
+
+## 2026-07-15 PDF Note marker visibility toggle
+
+**Touched**:
+- `packages/web/src/components/PdfReaderPane.vue:toggleNoteMarkers/noteMarkersForPage` - adds an accessible header toggle that hides all inline Note markers without changing highlights or annotation projection data.
+- `packages/web/src/components/PdfReaderPane.test.ts:PdfReaderPane exact annotation rendering` - covers default visibility, hide/show restoration, retained highlights, and closing an open Note surface.
+- `packages/web/playwright/pdf-annotation.spec.ts:desktop/mobile PDF annotation acceptance` - verifies the toggle in real desktop and narrow browser viewports.
+
+**Entry point**: the Eye/EyeOff button in the PDF reader header toggles component-local marker rendering.
+**Test**: `pnpm test` (103 tests), `pnpm build`, and `playwright test pdf-annotation.spec.ts` (2 tests).
+
+## 2026-07-16 PDF Note marker toggle setup rebuild
+
+**Touched**:
+- `dist/UnderstandBookSetup.exe` - rebuilds the Windows installer with the PDF Note marker visibility toggle.
+
+**Entry point**: `UNDERSTAND_BOOK_MARKETPLACE_SOURCE=adaelon/undertand-book` -> `pnpm -C apps/desktop package:windows` -> `dist/UnderstandBookSetup.exe`.
+**Test**: package exit 0; exported setup and Tauri NSIS bundle are both 34,620,383 bytes with SHA-256 `46B0718E4F36565CDEEDBD0325C2C03BBEC83F5CE4A1DE8929A2A1A08C0CB872`.
+
+## 2026-07-16 Single Note marker count affordance
+
+**Touched**:
+- `packages/web/src/components/PdfReaderPane.vue:PDF Note marker template` - suppresses the visible count for one Note while retaining counts for exact-anchor aggregates.
+- `packages/web/src/components/PdfReaderPane.test.ts:single Note marker rendering` - covers icon-only single markers and preserved accessible count metadata.
+- `packages/web/playwright/pdf-annotation.spec.ts:desktop PDF annotation acceptance` - verifies a single marker has no visible number and a two-Note marker still shows `2`.
+
+**Entry point**: exact PDF Note projection -> `PdfReaderPane` Note marker rendering.
+**Test**: `pnpm test` (104 tests), `pnpm build`, and `playwright test pdf-annotation.spec.ts` (2 tests).
+
+## 2026-07-16 Single Note marker setup rebuild
+
+**Touched**:
+- `dist/UnderstandBookSetup.exe` - rebuilds the Windows installer with icon-only single Note markers and aggregate-only counts.
+
+**Entry point**: `UNDERSTAND_BOOK_MARKETPLACE_SOURCE=adaelon/undertand-book` -> `pnpm -C apps/desktop package:windows` -> `dist/UnderstandBookSetup.exe`.
+**Test**: package exit 0; exported setup and Tauri NSIS bundle are both 34,616,812 bytes with SHA-256 `FFCA937D6D2BF478265A8496195F136EB70FFCD5DC0C51BD93054F8C22AFDD71`.

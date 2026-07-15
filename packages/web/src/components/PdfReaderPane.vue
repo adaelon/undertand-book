@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { MessageSquareText, Minus, Plus, Scan, ScanText, Trash2, X } from "@lucide/vue";
+import { Eye, EyeOff, MessageSquareText, Minus, Plus, Scan, ScanText, Trash2, X } from "@lucide/vue";
 import { computed, nextTick, onBeforeUnmount, ref, shallowRef, watch } from "vue";
 import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf.mjs";
 import pdfWorkerUrl from "pdfjs-dist/legacy/build/pdf.worker.mjs?url";
@@ -94,6 +94,7 @@ const textLayerTasks = new Map<number, PdfTextLayer>();
 const pageRenderTasks = new Map<number, PdfRenderTask>();
 const renderStates = ref<Record<number, PageRenderState>>({});
 const annotationSurface = ref<AnnotationSurface | null>(null);
+const noteMarkersVisible = ref(true);
 const zoom = ref(1);
 let loadingTask: ReturnType<typeof pdfjsLib.getDocument> | null = null;
 let observer: IntersectionObserver | null = null;
@@ -103,6 +104,7 @@ let lastViewportFingerprint = "";
 let selectionRequestSequence = 0;
 
 const activeNoteMarker = computed(() => {
+  if (!noteMarkersVisible.value) return null;
   const surface = annotationSurface.value;
   if (surface?.kind !== "notes") return null;
   return props.annotationProjection.note_markers.find((marker) => marker.terminal_key === surface.terminalKey) ?? null;
@@ -363,6 +365,13 @@ function closeAnnotationSurface() {
   annotationSurface.value = null;
 }
 
+function toggleNoteMarkers() {
+  noteMarkersVisible.value = !noteMarkersVisible.value;
+  if (!noteMarkersVisible.value && annotationSurface.value?.kind === "notes") {
+    closeAnnotationSurface();
+  }
+}
+
 function openNoteSurface(marker: ProjectedNoteMarker, event: MouseEvent) {
   annotationSurface.value = {
     kind: "notes",
@@ -401,6 +410,7 @@ function highlightsForPage(pageIndex: number) {
 }
 
 function noteMarkersForPage(page: PdfSourceMap["pages"][number]): PdfNoteMarkerLayout[] {
+  if (!noteMarkersVisible.value) return [];
   return layoutNoteMarkers(
     props.annotationProjection.note_markers.filter((marker) => marker.anchor_rect.pageIndex === page.pageIndex),
     page,
@@ -808,7 +818,19 @@ onBeforeUnmount(() => {
         <span v-else-if="props.annotationError" class="pdf-annotation-error" :title="props.annotationError">
           标注定位暂不可用
         </span>
-        <div class="pdf-reader-tools" role="group" aria-label="PDF 缩放">
+        <div class="pdf-reader-tools" role="group" aria-label="PDF 工具">
+          <button
+            type="button"
+            class="pdf-note-visibility-toggle"
+            :class="{ active: noteMarkersVisible }"
+            :title="noteMarkersVisible ? '隐藏笔记标记' : '显示笔记标记'"
+            :aria-label="noteMarkersVisible ? '隐藏笔记标记' : '显示笔记标记'"
+            :aria-pressed="noteMarkersVisible"
+            @click="toggleNoteMarkers"
+          >
+            <Eye v-if="noteMarkersVisible" :size="15" aria-hidden="true" />
+            <EyeOff v-else :size="15" aria-hidden="true" />
+          </button>
           <button
             type="button"
             title="缩小"
@@ -882,7 +904,7 @@ onBeforeUnmount(() => {
             @click.stop="openNoteSurface(marker, $event)"
           >
             <MessageSquareText :size="14" aria-hidden="true" />
-            <span>{{ marker.notes.length }}</span>
+            <span v-if="marker.notes.length > 1">{{ marker.notes.length }}</span>
           </button>
         </div>
         <div class="pdf-page-label">{{ page.page_label ?? page.pageIndex + 1 }}</div>
@@ -1028,6 +1050,11 @@ onBeforeUnmount(() => {
 .pdf-reader-tools button:hover:not(:disabled) {
   border-color: var(--reader-coral);
   color: var(--ink);
+}
+.pdf-reader-tools button.active {
+  border-color: rgba(182, 83, 59, 0.45);
+  background: #fffaf5;
+  color: var(--reader-coral);
 }
 .pdf-reader-tools button:disabled {
   cursor: default;

@@ -470,6 +470,17 @@ describe("PdfReaderPane", () => {
     expect(wrapper.get(".pdf-note-marker").text()).toBe("2");
     expect(wrapper.findAll(".pdf-region")).toHaveLength(0);
 
+    const noteVisibilityToggle = wrapper.get(".pdf-note-visibility-toggle");
+    expect(noteVisibilityToggle.attributes("aria-pressed")).toBe("true");
+    expect(noteVisibilityToggle.attributes("title")).toBe("隐藏笔记标记");
+    await noteVisibilityToggle.trigger("click");
+    expect(wrapper.findAll(".pdf-note-marker")).toHaveLength(0);
+    expect(wrapper.findAll(".pdf-user-highlight")).toHaveLength(2);
+    expect(noteVisibilityToggle.attributes("aria-pressed")).toBe("false");
+    expect(noteVisibilityToggle.attributes("title")).toBe("显示笔记标记");
+    await noteVisibilityToggle.trigger("click");
+    expect(wrapper.findAll(".pdf-note-marker")).toHaveLength(1);
+
     const list = wrapper.get(".pdf-page-list").element as HTMLElement;
     list.scrollTop = 120;
     await wrapper.get(".pdf-note-marker").trigger("click");
@@ -477,6 +488,15 @@ describe("PdfReaderPane", () => {
     expect(document.querySelectorAll(".pdf-annotation-surface .note-card")).toHaveLength(2);
     expect(document.querySelector(".pdf-annotation-surface")?.getAttribute("data-surface-kind")).toBe("notes");
     expect(list.scrollTop).toBe(120);
+
+    await noteVisibilityToggle.trigger("click");
+    await flushPromises();
+    expect(wrapper.findAll(".pdf-note-marker")).toHaveLength(0);
+    expect(document.querySelector(".pdf-annotation-surface")).toBeNull();
+    await noteVisibilityToggle.trigger("click");
+    expect(wrapper.findAll(".pdf-note-marker")).toHaveLength(1);
+    await wrapper.get(".pdf-note-marker").trigger("click");
+    await flushPromises();
 
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
     await flushPromises();
@@ -497,6 +517,37 @@ describe("PdfReaderPane", () => {
 
     const componentSource = readFileSync("src/components/PdfReaderPane.vue", "utf8");
     expect(componentSource).toContain("env(safe-area-inset-bottom)");
+    wrapper.unmount();
+  });
+
+  it("omits the visible count for a single Note marker", async () => {
+    const note = annotation("n-single", "note");
+    const projection: PdfUserAnnotationProjection = {
+      highlights: [],
+      note_markers: [{
+        terminal_key: "0:1.1:3:4",
+        anchor_rect: { pageIndex: 0, bbox: [115, 680, 120, 700] },
+        notes: [note],
+      }],
+      location_by_mem_id: { "n-single": "exact" },
+    };
+    const wrapper = mount(PdfReaderPane, {
+      props: {
+        sourceManifest: null,
+        sourceMap,
+        pdfUrl: "/api/book/pdf/original",
+        activeLid: null,
+        selectedLid: null,
+        annotationProjection: projection,
+      },
+    });
+    await flushPromises();
+    await flushPromises();
+
+    const marker = wrapper.get('[aria-label="打开 1 条 PDF 笔记"]');
+    expect(marker.text()).toBe("");
+    expect(marker.find("span").exists()).toBe(false);
+    expect(marker.attributes("title")).toBe("1 条笔记");
     wrapper.unmount();
   });
 

@@ -7,6 +7,17 @@ test("desktop exact annotations stay on-page and open one bounded surface", asyn
   await expect(page.locator(".pdf-region")).toHaveCount(0);
   await expect(page.locator(".pdf-user-highlight")).toHaveCount(2);
   await expect(page.locator(".pdf-note-marker")).toHaveCount(2);
+  await expect(page.getByRole("button", { name: "打开 1 条 PDF 笔记" })).toHaveText("");
+  await expect(page.getByRole("button", { name: "打开 2 条 PDF 笔记" })).toHaveText("2");
+  const noteVisibilityToggle = page.getByRole("button", { name: "隐藏笔记标记" });
+  await expect(noteVisibilityToggle).toHaveAttribute("aria-pressed", "true");
+  await noteVisibilityToggle.click();
+  await expect(page.locator(".pdf-note-marker")).toHaveCount(0);
+  await expect(page.locator(".pdf-user-highlight")).toHaveCount(2);
+  const showNoteMarkers = page.getByRole("button", { name: "显示笔记标记" });
+  await expect(showNoteMarkers).toHaveAttribute("aria-pressed", "false");
+  await showNoteMarkers.click();
+  await expect(page.locator(".pdf-note-marker")).toHaveCount(2);
   const markerLocators = await page.locator(".pdf-note-marker").all();
   const markers = (await Promise.all(markerLocators.map((marker) => marker.boundingBox())))
     .filter((box): box is NonNullable<typeof box> => box !== null);
@@ -34,6 +45,7 @@ test("desktop exact annotations stay on-page and open one bounded surface", asyn
 test("mobile annotation surface becomes a safe bounded bottom sheet", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/pdf-annotation-visual.html");
+  await expect(page.getByRole("button", { name: "隐藏笔记标记" })).toBeVisible();
   await page.getByRole("button", { name: "打开 2 条 PDF 笔记" }).click();
 
   const surface = page.locator(".pdf-annotation-surface");
