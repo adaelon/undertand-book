@@ -2,7 +2,7 @@
 
 > **定位**:把现有“Agent 自愿 save/recall”的 memory 升级为 runtime 可靠写入、可靠消费、证据可追溯、按 `content_profile` 适配的读者画像系统。
 > **冻结决策**:[ADR-0075](adr/0075-runtime-owned-evidence-backed-profile-memory.md)。
-> **状态**:M0-M4 已完成;M5 AgentHistory 修复与独立 M6 query 修复已完成方案 Grill、尚待逐刀实施。
+> **状态**:M0-M6 已完成;M5 AgentHistory 修复与独立 M6 query 修复均已通过各自发布闸。
 
 ---
 
@@ -744,7 +744,7 @@ struct PaperMemoryState {
 
 **完成记录（2026-07-15）**:当前 OS 用户私有存储 gate 与安全降级已落地;§8.1 为 21/21 自动测试账本。`cargo test --workspace -- --test-threads=1`、`pnpm test`（core 210 + web 99）及 Web production build 全绿。真实 production server 在强制私有存储失败时经 Playwright 验收 1440x900/390x844:Profile stale 诊断可见、PDF 阅读面保留 14 个页面项、document/panel 横向溢出为零、无 page error/request failure/非预期 HTTP 错误;9 个 `formula_semantics` 404 是前端显式处理的可选侧车缺失。
 
-### M5 · AgentHistory 兼容与防覆写修复（待实施）
+### M5 · AgentHistory 兼容与防覆写修复（已完成）
 
 **缺陷基线**:`a3a7093` 在 M1.4 为持久化 `OuterOutcome` 新增必填 `profile_usage`/`memory_updates`,pre-M history 因缺字段反序列化失败;`load_agent_history` 又把读取/解码/迁移错误静默折叠为默认空历史,启动创建 `server-start` 会话后由 `GET /agent/history` 写回,最终覆盖原文件。现有 legacy test 从当前 outcome 删 turn 字段,未覆盖真实 pre-M outcome shape。
 
@@ -772,6 +772,8 @@ struct PaperMemoryState {
 - **触达**:`crates/server/src/lib.rs`,`crates/server/src/host.rs`,route/integration tests。
 
 **M5 总闸**:MEM-E22~E24 全绿,定向 server/runtime tests 与 `cargo test --workspace -- --test-threads=1` 通过;不得改写 M4.5 已完成的 21/21 历史账本。
+
+**完成记录（2026-07-16）**:M5.1~M5.3 分别以 `c414dc2`、`2d0d3f3`、`1418dae` 独立提交;MEM-E22~E24 全绿。`cargo test -p runtime -p server -- --test-threads=1` 为 runtime 144/144、server 153/153;`cargo test --workspace -- --test-threads=1` 全绿;`git diff --check` 通过。M4.5 的 MEM-E01~E21 与 M6 的 QRY-E01~E14 账本未改写。
 
 ### M6 · `book.query` 指代优先与来源取证修复（已完成）
 
@@ -1098,11 +1100,11 @@ pre-M AgentHistory outcome
 | MEM-E20 | `runtime::memory_policy::tests::{missing_and_mismatched_policies_fall_back_and_mark_state_orphaned,fallback_snapshot_keeps_core_facts_and_does_not_mutate_the_ledger}` | unknown profile 回退 Neutral,保留 Core/raw ledger |
 | MEM-E21 | `runtime::memory_review::tests::intent_observation_is_typed_separately_from_profile_facts`;`memory::review::tests::repeated_intent_observations_do_not_change_profile_snapshot`;`runtime::orchestrator::tests::profile_snapshot_is_ephemeral_and_frozen_across_the_tool_loop` | 重复 intent_key 可持久记录但 projection revision/snapshot 不变,动作与回答只消费同一 frozen snapshot contract |
 
-### 8.2 M5 planned coverage ledger
+### 8.2 M5 completed coverage ledger
 
-以下 ID 是待实现发布闸,不计入 §8.1 的 M4.5 完成状态;测试名在 M5 实现时作为稳定定位符落地。
+以下 ID 均已由自动测试验收,仍不计入 §8.1 的 M4.5 完成状态;测试名是稳定定位符,最终发布闸以实际 runner 结果为准。
 
-| ID | 计划自动验收测试 ID | 覆盖面 |
+| ID | 自动验收测试 ID | 覆盖面 |
 | --- | --- | --- |
 | MEM-E22 | `server::tests::pre_m_agent_history_fixture_migrates_without_losing_transcript` | 真实 pre-M outcome 缺字段兼容、旧 transcript/outcome 守恒、重复加载稳定 |
 | MEM-E23 | `server::host::tests::agent_history_load_failure_preserves_source_and_blocks_startup` | recovery/read/decode/migration/validation 分阶段报错,源 bytes 不变且 worker 未启动 |
@@ -1151,4 +1153,4 @@ M0.1 -> M0.2 -> M0.3 -> M0.4
 4. 单独 commit;不得把纯重构 M0.4 与功能刀混交。
 5. 大阶段 commit 后刷新 `SESSION_CHECKPOINT.md`,使下一会话只靠文件即可接手。
 
-**领域对齐完成**:M0-M5 与 ADR-0075/0076、M6 与 ADR-0077 及 CONTEXT.md 使用同一组术语,零未解析边界。后续实现默认先从数据安全优先的 M5.1 开始,再进入 M6.1;若用户显式重排优先级,每个子刀仍必须由实现回合单独声明 A1。
+**领域对齐完成**:M0-M5 与 ADR-0075/0076、M6 与 ADR-0077 及 CONTEXT.md 使用同一组术语,零未解析边界。实现已按 M5.1~M5.3 与 M6.1~M6.6 独立切片、测试和提交完成。
