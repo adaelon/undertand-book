@@ -161,6 +161,16 @@ impl ProviderRegistry {
             ProviderMode::ReAct => Box::new(ReActAdapter::from_config(cfg)),
         }
     }
+
+    pub fn adapter_from_config_with_timeout(
+        cfg: ProviderConfig,
+        timeout: std::time::Duration,
+    ) -> Box<dyn ModelAdapter + Send> {
+        match cfg.mode {
+            ProviderMode::Native => Box::new(NativeAdapter::from_config_with_timeout(cfg, timeout)),
+            ProviderMode::ReAct => Box::new(ReActAdapter::from_config_with_timeout(cfg, timeout)),
+        }
+    }
 }
 
 /// 外层 loop 会话消息角色(OpenAI-兼容)`[ADR-0026]`。
@@ -2541,6 +2551,7 @@ pub struct NativeAdapter {
     api_key: String,
     base_url: String,
     model: String,
+    request_timeout: Option<std::time::Duration>,
 }
 
 impl NativeAdapter {
@@ -2549,6 +2560,19 @@ impl NativeAdapter {
             api_key: cfg.api_key,
             base_url: cfg.base_url,
             model: cfg.model,
+            request_timeout: None,
+        }
+    }
+
+    pub fn from_config_with_timeout(
+        cfg: ProviderConfig,
+        timeout: std::time::Duration,
+    ) -> NativeAdapter {
+        NativeAdapter {
+            api_key: cfg.api_key,
+            base_url: cfg.base_url,
+            model: cfg.model,
+            request_timeout: Some(timeout),
         }
     }
 
@@ -2594,10 +2618,14 @@ impl NativeAdapter {
         url: &str,
         body: &serde_json::Value,
     ) -> Result<ureq::Response, ureq::Error> {
-        ureq::post(url)
+        let request = ureq::post(url)
             .set("Authorization", &format!("Bearer {}", self.api_key))
-            .set("Content-Type", "application/json")
-            .send_json(body)
+            .set("Content-Type", "application/json");
+        let request = match self.request_timeout {
+            Some(timeout) => request.timeout(timeout),
+            None => request,
+        };
+        request.send_json(body)
     }
 }
 
@@ -2975,6 +3003,15 @@ impl ReActAdapter {
     pub fn from_config(cfg: ProviderConfig) -> ReActAdapter {
         ReActAdapter {
             native: NativeAdapter::from_config(cfg),
+        }
+    }
+
+    pub fn from_config_with_timeout(
+        cfg: ProviderConfig,
+        timeout: std::time::Duration,
+    ) -> ReActAdapter {
+        ReActAdapter {
+            native: NativeAdapter::from_config_with_timeout(cfg, timeout),
         }
     }
 
@@ -4617,6 +4654,41 @@ mod tests {
         handle.join().unwrap();
         assert_eq!(output["summary"], "different");
         assert_eq!(output["confidence"], 0.8);
+    }
+
+    #[test]
+    fn provider_registry_timeout_factory_bounds_native_requests() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let handle = std::thread::spawn(move || {
+            let mut stream = accept_with_timeout(&listener);
+            let _ = read_http_request(&mut stream);
+            std::thread::sleep(Duration::from_millis(300));
+        });
+
+        let adapter = ProviderRegistry::adapter_from_config_with_timeout(
+            ProviderConfig {
+                mode: ProviderMode::Native,
+                api_key: "test-key".into(),
+                base_url: format!("http://{addr}"),
+                model: "test-model".into(),
+            },
+            Duration::from_millis(50),
+        );
+        let started = Instant::now();
+        let error = adapter
+            .complete_structured(CompletionRequest {
+                system: "structured system".into(),
+                user: "timeout request".into(),
+            })
+            .unwrap_err();
+        let elapsed = started.elapsed();
+
+        handle.join().unwrap();
+        assert!(elapsed < Duration::from_millis(250), "elapsed={elapsed:?}");
+        assert!(error.message.contains("HTTP 请求失败"), "{error:?}");
     }
 
     #[test]

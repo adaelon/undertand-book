@@ -93,3 +93,16 @@
 
 **Entry point**: `/agent/chat` structured `question_quote` validation; PT1 can reuse the same owned-book range validation before translation preparation.
 **Test**: `cargo test -p server agent_chat_` (8 tests) and `cargo test -p server` (141 tests).
+
+## 2026-07-16 PT1 PDF selection translation preparation and Provider contract
+
+**Touched**:
+- `crates/server/src/lib.rs:prepare_selection_translation` - validates paper selections, chooses resolved/partial source text, applies 4k source and 12k context budgets, deduplicates context LIDs, and selects at most 32 matching lexicon constraints.
+- `crates/server/src/lib.rs:selection_translation_prompt/parse_selection_translation_output` - serializes untrusted inputs as JSON data and enforces the single-field non-empty 12k Markdown response contract.
+- `crates/server/src/lib.rs:execute_selection_translation` - executes structured translation through a timeout-bound Provider adapter without adding an HTTP route.
+- `crates/runtime/src/lib.rs:ProviderRegistry::adapter_from_config_with_timeout` - constructs Native/ReAct adapters whose `ureq` calls use the supplied request timeout.
+- `crates/server/src/lib.rs:tests::selection_translation_*` - covers resolved/partial source choice, budgets, lexicon boundaries/aliases/policies, prompt injection boundaries, output rejection, and structured execution.
+- `crates/runtime/src/lib.rs:tests::provider_registry_timeout_factory_bounds_native_requests` - proves the factory applies a real request timeout against a stalled local HTTP provider.
+
+**Entry point**: PT2 will call `prepare_selection_translation` while holding `AppState`, then call `execute_selection_translation` after releasing it.
+**Test**: `cargo test -p runtime` (144 tests) and `cargo test -p server` (147 tests).
