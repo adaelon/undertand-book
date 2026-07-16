@@ -1032,8 +1032,15 @@ fn open_resident_memory_store(memory_path: &Path, now: &str) -> MemoryStore {
 }
 
 pub fn start_server(config: ServerHostConfig) -> Result<RunningServer, String> {
-    let startup_now = now_ts();
     let memory_path = MemoryStore::default_path();
+    start_server_with_memory_path(config, memory_path)
+}
+
+fn start_server_with_memory_path(
+    config: ServerHostConfig,
+    memory_path: PathBuf,
+) -> Result<RunningServer, String> {
+    let startup_now = now_ts();
     let mut store = open_resident_memory_store(&memory_path, &startup_now);
     let (session_path, history_path) = if store.private_storage_available() {
         let parent = memory_path.parent();
@@ -1081,7 +1088,8 @@ pub fn start_server(config: ServerHostConfig) -> Result<RunningServer, String> {
         .clone()
         .map(ProviderRegistry::adapter_from_config)
         .unwrap_or_else(|| Box::new(UnconfiguredAdapter));
-    let mut agent_history = load_agent_history(&history_path);
+    let mut agent_history = load_agent_history(&history_path)
+        .map_err(|error| format!("failed to load agent history: {}", error.message))?;
     let messages =
         ensure_agent_history_for_book(&mut agent_history, &book.base.book_id, "server-start");
     let review_cursors = agent_history_review_cursors(&agent_history);
@@ -1655,6 +1663,42 @@ mod tests {
         );
         assert!(!memory_path.exists());
         std::fs::remove_file(blocker).unwrap();
+    }
+
+    #[test]
+    fn agent_history_load_failure_preserves_source_and_blocks_startup() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "ub-agent-history-startup-failure-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let memory_path = root.join("memory.json");
+        let history_path = root.join("agent-history.json");
+        let source = b"{malformed-agent-history";
+        std::fs::write(&history_path, source).unwrap();
+
+        let result = start_server_with_memory_path(
+            ServerHostConfig {
+                book_dir: None,
+                library_root: Some(root.join("library")),
+                addr: "not-a-valid-server-address".into(),
+                web_dist: root.join("web-dist"),
+            },
+            memory_path,
+        );
+        let error = result.err().expect("history failure must block startup");
+
+        assert!(error.contains("stage=decode"), "{error}");
+        assert!(error.contains(&history_path.display().to_string()), "{error}");
+        assert!(!error.contains("failed to bind"), "{error}");
+        assert_eq!(std::fs::read(&history_path).unwrap(), source);
+        assert!(!history_path.with_extension("replace.tmp").exists());
+        assert!(!history_path.with_extension("replace.bak").exists());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     fn review_test_state(name: &str) -> Arc<Mutex<AppState>> {

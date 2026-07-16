@@ -938,13 +938,7 @@ fn validate_agent_turn(turn: &AgentChatTurn) -> Result<(), ToolError> {
 }
 
 fn migrate_agent_history(mut history: AgentHistory) -> Result<AgentHistory, ToolError> {
-    let mut turn_ids = HashSet::new();
     for session in &mut history.sessions {
-        if session.id.trim().is_empty() || session.book_id.trim().is_empty() {
-            return Err(agent_history_internal(
-                "agent session id/book_id must not be empty",
-            ));
-        }
         let mut previous_ordinal = 0;
         for (index, turn) in session.turns.iter_mut().enumerate() {
             if turn.user_turn_ordinal == 0 {
@@ -962,6 +956,21 @@ fn migrate_agent_history(mut history: AgentHistory) -> Result<AgentHistory, Tool
             if turn.turn_id.trim().is_empty() {
                 turn.turn_id = stable_agent_turn_id(&session.id, turn.user_turn_ordinal);
             }
+            previous_ordinal = turn.user_turn_ordinal;
+        }
+    }
+    Ok(history)
+}
+
+fn validate_agent_history(history: &AgentHistory) -> Result<(), ToolError> {
+    let mut turn_ids = HashSet::new();
+    for session in &history.sessions {
+        if session.id.trim().is_empty() || session.book_id.trim().is_empty() {
+            return Err(agent_history_internal(
+                "agent session id/book_id must not be empty",
+            ));
+        }
+        for turn in &session.turns {
             validate_agent_turn(turn)?;
             if !turn_ids.insert(turn.turn_id.clone()) {
                 return Err(agent_history_internal(format!(
@@ -969,10 +978,9 @@ fn migrate_agent_history(mut history: AgentHistory) -> Result<AgentHistory, Tool
                     turn.turn_id
                 )));
             }
-            previous_ordinal = turn.user_turn_ordinal;
         }
     }
-    Ok(history)
+    Ok(())
 }
 
 fn agent_history_temporary_path(path: &Path) -> PathBuf {
@@ -1062,20 +1070,53 @@ fn agent_history_internal(message: impl Into<String>) -> ToolError {
     }
 }
 
-pub fn load_agent_history(path: &Option<PathBuf>) -> AgentHistory {
-    let Some(path) = path.as_ref() else {
-        return AgentHistory::default();
-    };
-    if recover_interrupted_agent_history_commit(path).is_err() {
-        return AgentHistory::default();
+fn agent_history_load_error(path: &Path, stage: &str, detail: impl Into<String>) -> ToolError {
+    ToolError {
+        error_code: "AGENT_HISTORY_LOAD_FAILED".into(),
+        category: "internal".into(),
+        message: format!(
+            "agent history load failed: path={} stage={stage}: {}",
+            path.display(),
+            detail.into()
+        ),
     }
-    let Ok(raw) = std::fs::read_to_string(path) else {
-        return AgentHistory::default();
+}
+
+fn load_agent_history_path_with_recovery<F>(
+    path: &Path,
+    recover: F,
+) -> Result<AgentHistory, ToolError>
+where
+    F: FnOnce(&Path) -> Result<(), ToolError>,
+{
+    let path_exists = path.try_exists().map_err(|error| {
+        agent_history_load_error(path, "read", format!("检查 history 路径失败: {error}"))
+    })?;
+    let backup_exists = agent_history_backup_path(path).try_exists().map_err(|error| {
+        agent_history_load_error(path, "recovery", format!("检查 history 备份失败: {error}"))
+    })?;
+    if !path_exists && !backup_exists {
+        return Ok(AgentHistory::default());
+    }
+    recover(path).map_err(|error| agent_history_load_error(path, "recovery", error.message))?;
+    let raw = std::fs::read_to_string(path).map_err(|error| {
+        agent_history_load_error(path, "read", format!("读取 history 失败: {error}"))
+    })?;
+    let history = serde_json::from_str::<AgentHistory>(&raw).map_err(|error| {
+        agent_history_load_error(path, "decode", format!("解码 history JSON 失败: {error}"))
+    })?;
+    let history = migrate_agent_history(history)
+        .map_err(|error| agent_history_load_error(path, "migration", error.message))?;
+    validate_agent_history(&history)
+        .map_err(|error| agent_history_load_error(path, "validation", error.message))?;
+    Ok(history)
+}
+
+pub fn load_agent_history(path: &Option<PathBuf>) -> Result<AgentHistory, ToolError> {
+    let Some(path) = path.as_ref() else {
+        return Ok(AgentHistory::default());
     };
-    serde_json::from_str::<AgentHistory>(&raw)
-        .ok()
-        .and_then(|history| migrate_agent_history(history).ok())
-        .unwrap_or_default()
+    load_agent_history_path_with_recovery(path, recover_interrupted_agent_history_commit)
 }
 
 fn save_agent_history_path(
@@ -1085,11 +1126,7 @@ fn save_agent_history_path(
     let Some(path) = path else {
         return Ok(());
     };
-    for session in &history.sessions {
-        for turn in &session.turns {
-            validate_agent_turn(turn)?;
-        }
-    }
+    validate_agent_history(history)?;
     persist_agent_history_atomically(path, history)
 }
 
@@ -13589,7 +13626,7 @@ mod tests {
             memory::ReviewJobStatus::Queued
         );
 
-        let first = load_agent_history(&Some(history_path.clone()));
+        let first = load_agent_history(&Some(history_path.clone())).unwrap();
         let first_value = serde_json::to_value(&first).unwrap();
         let turn = &first_value["sessions"][0]["turns"][0];
         assert_eq!(turn["user"], "I prefer detailed examples");
@@ -13608,7 +13645,7 @@ mod tests {
         }
         .evidence_id();
 
-        let restarted = load_agent_history(&Some(history_path));
+        let restarted = load_agent_history(&Some(history_path)).unwrap();
         let restarted_value = serde_json::to_value(&restarted).unwrap();
         assert_eq!(
             restarted_value["sessions"][0]["turns"][0]["turn_id"],
@@ -13653,7 +13690,8 @@ mod tests {
         );
         assert_eq!(reply.status, 500);
         assert!(s.store.review_state().review_jobs.is_empty());
-        let history = serde_json::to_value(load_agent_history(&Some(history_path))).unwrap();
+        let history =
+            serde_json::to_value(load_agent_history(&Some(history_path)).unwrap()).unwrap();
         assert_eq!(history["sessions"][0]["turns"][0]["status"], "completed");
 
         std::fs::remove_dir_all(temporary).unwrap();
@@ -13732,8 +13770,12 @@ mod tests {
         )
         .unwrap();
 
-        let first = serde_json::to_value(load_agent_history(&Some(history_path.clone()))).unwrap();
-        let second = serde_json::to_value(load_agent_history(&Some(history_path))).unwrap();
+        let first = serde_json::to_value(
+            load_agent_history(&Some(history_path.clone())).unwrap(),
+        )
+        .unwrap();
+        let second =
+            serde_json::to_value(load_agent_history(&Some(history_path)).unwrap()).unwrap();
         assert_eq!(first["sessions"][0]["turns"][0]["user_turn_ordinal"], 1);
         assert_eq!(first["sessions"][0]["turns"][0]["status"], "completed");
         assert!(first["sessions"][0]["turns"][0]["outcome"].is_object());
@@ -13797,6 +13839,82 @@ mod tests {
     }
 
     #[test]
+    fn agent_history_load_errors_report_stage_and_preserve_source() {
+        let raw = include_str!("../tests/fixtures/agent-history-pre-m.json");
+
+        let recovery_path = tmp("agent-history-load-recovery");
+        std::fs::write(&recovery_path, raw).unwrap();
+        let recovery_before = std::fs::read(&recovery_path).unwrap();
+        let recovery_error = load_agent_history_path_with_recovery(&recovery_path, |_| {
+            Err(agent_history_internal("forced recovery failure"))
+        })
+        .unwrap_err();
+        assert!(recovery_error.message.contains("stage=recovery"));
+        assert!(recovery_error
+            .message
+            .contains(&recovery_path.display().to_string()));
+        assert_eq!(std::fs::read(&recovery_path).unwrap(), recovery_before);
+
+        let read_path = tmp_dir("agent-history-load-read");
+        let read_error = load_agent_history(&Some(read_path.clone())).unwrap_err();
+        assert!(read_error.message.contains("stage=read"));
+        assert!(read_error
+            .message
+            .contains(&read_path.display().to_string()));
+
+        let decode_path = tmp("agent-history-load-decode");
+        std::fs::write(&decode_path, b"{not-json").unwrap();
+        let decode_before = std::fs::read(&decode_path).unwrap();
+        let decode_error = load_agent_history(&Some(decode_path.clone())).unwrap_err();
+        assert!(decode_error.message.contains("stage=decode"));
+        assert_eq!(std::fs::read(&decode_path).unwrap(), decode_before);
+
+        let incompatible_path = tmp("agent-history-load-incompatible-schema");
+        std::fs::write(&incompatible_path, br#"{"sessions":"not-a-session-list"}"#).unwrap();
+        let incompatible_before = std::fs::read(&incompatible_path).unwrap();
+        let incompatible_error =
+            load_agent_history(&Some(incompatible_path.clone())).unwrap_err();
+        assert!(incompatible_error.message.contains("stage=decode"));
+        assert_eq!(
+            std::fs::read(&incompatible_path).unwrap(),
+            incompatible_before
+        );
+
+        let mut migration_value: serde_json::Value = serde_json::from_str(raw).unwrap();
+        let first_turn = migration_value["sessions"][0]["turns"][0].clone();
+        migration_value["sessions"][0]["turns"] = json!([first_turn.clone(), first_turn]);
+        migration_value["sessions"][0]["turns"][0]["user_turn_ordinal"] = json!(2);
+        migration_value["sessions"][0]["turns"][1]["user_turn_ordinal"] = json!(1);
+        let migration_path = tmp("agent-history-load-migration");
+        std::fs::write(
+            &migration_path,
+            serde_json::to_vec_pretty(&migration_value).unwrap(),
+        )
+        .unwrap();
+        let migration_before = std::fs::read(&migration_path).unwrap();
+        let migration_error = load_agent_history(&Some(migration_path.clone())).unwrap_err();
+        assert!(migration_error.message.contains("stage=migration"));
+        assert_eq!(std::fs::read(&migration_path).unwrap(), migration_before);
+
+        let mut validation_value: serde_json::Value = serde_json::from_str(raw).unwrap();
+        validation_value["sessions"][0]["turns"][0]["outcome"] = serde_json::Value::Null;
+        let validation_path = tmp("agent-history-load-validation");
+        std::fs::write(
+            &validation_path,
+            serde_json::to_vec_pretty(&validation_value).unwrap(),
+        )
+        .unwrap();
+        let validation_before = std::fs::read(&validation_path).unwrap();
+        let validation_error = load_agent_history(&Some(validation_path.clone())).unwrap_err();
+        assert!(validation_error.message.contains("stage=validation"));
+        assert_eq!(std::fs::read(&validation_path).unwrap(), validation_before);
+
+        let missing_path = tmp("agent-history-load-missing");
+        let missing = load_agent_history(&Some(missing_path)).unwrap();
+        assert!(missing.sessions.is_empty());
+    }
+
+    #[test]
     fn query_audit_is_out_of_band_persisted_and_backward_compatible() {
         let state = state_named("query-audit-history");
         let request = runtime::BookQueryRequest {
@@ -13851,7 +13969,7 @@ mod tests {
         let path = tmp("query-audit-history-file");
         let _ = std::fs::remove_file(&path);
         save_agent_history_path(&Some(path.clone()), &history).unwrap();
-        let loaded = load_agent_history(&Some(path.clone()));
+        let loaded = load_agent_history(&Some(path.clone())).unwrap();
         let loaded_audit = loaded.sessions[0].turns[0].outcome.as_ref().unwrap().trace[0]
             .query_audit
             .as_ref()
@@ -13864,7 +13982,7 @@ mod tests {
             .unwrap()
             .remove("query_audit");
         std::fs::write(&path, serde_json::to_string_pretty(&legacy).unwrap()).unwrap();
-        let legacy_loaded = load_agent_history(&Some(path));
+        let legacy_loaded = load_agent_history(&Some(path)).unwrap();
         assert!(legacy_loaded.sessions[0].turns[0]
             .outcome
             .as_ref()
