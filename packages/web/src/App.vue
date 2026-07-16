@@ -3356,14 +3356,13 @@ async function submitOpenBook(dir = bookPickerDir.value) {
     </div>
 
     <div
-      v-if="pdfSelectionState.phase !== 'idle' && pdfSelectionState.capture"
+      v-if="pdfSelectionState.capture && (pdfSelectionState.phase === 'error' || pdfSelectionState.draft)"
       class="hl-popover pdf-selection-toolbar"
       :style="pdfSelectionToolbarStyle"
       role="toolbar"
       aria-label="PDF 选区操作"
     >
-      <span v-if="pdfSelectionState.phase === 'resolving'" class="pdf-selection-status">定位中...</span>
-      <template v-else-if="pdfSelectionState.phase === 'error'">
+      <template v-if="pdfSelectionState.phase === 'error'">
         <span class="pdf-selection-status error">{{ pdfSelectionState.error }}</span>
         <button title="重试定位" aria-label="重试定位" @mousedown.prevent="pdfSelectionSession.retry">
           <RotateCcw :size="16" />

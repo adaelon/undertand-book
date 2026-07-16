@@ -355,6 +355,186 @@ describe("PH5 hybrid foundation", () => {
     ]);
   });
 
+  it("keeps a top two-column body ahead of a dense lower figure band", () => {
+    const source = [
+      "# Results",
+      "",
+      "Left column body establishes the first source block.",
+      "",
+      "Right column continuation remains adjacent in reading order.",
+      "",
+    ].join("\n");
+    const figureLines = Array.from(
+      { length: 80 },
+      (_, index) => `chart label ${index} alpha beta gamma delta epsilon zeta`,
+    );
+    const geometry = geometryFromPages([[
+      "Results",
+      "Left column body establishes the first source block.",
+      "Right column continuation remains adjacent in reading order.",
+      ...figureLines,
+    ]]);
+    geometry.pages[0].height = 800;
+    geometry.pages[0].view = [0, 0, 600, 800];
+    geometry.pages[0].lines[0].bbox = [60, 750, 540, 762];
+    geometry.pages[0].lines[1].bbox = [60, 700, 280, 712];
+    geometry.pages[0].lines[2].bbox = [320, 700, 540, 712];
+    geometry.pages[0].lines.slice(3).forEach((line, index) => {
+      line.bbox = [60, 600 - index * 5, 280, 604 - index * 5];
+    });
+
+    const artifacts = buildHybridFoundation({
+      book_id: "paper-figure-band-order",
+      source_txt: source,
+      original_pdf_path: "paper.pdf",
+      original_pdf_sha256: "sha-pdf",
+      pdf_geometry: geometry,
+    });
+
+    const right = artifacts.pdf_source_map.entries[2];
+    expect(right).toMatchObject({
+      status: "line_fallback",
+      primary_region: { pageIndex: 0, bbox: [320, 700, 540, 712] },
+    });
+    const rightLineStart = geometry.pages[0].lines[2].char_start;
+    expect(artifacts.pdf_selection_map_pages[0].chars
+      .find((char) => char.char_index === rightLineStart)).toMatchObject({
+        lid: right.lid,
+      });
+  });
+
+  it("resynchronizes a paragraph on one unique strong anchor after dense noise", () => {
+    const source = [
+      "# Results",
+      "",
+      "Opening body establishes the monotonic cursor.",
+      "",
+      "Unique recovery anchor alpha beta gamma delta epsilon zeta.",
+      "",
+      "Following body remains mapped after recovery.",
+      "",
+    ].join("\n");
+    const noise = Array.from(
+      { length: 80 },
+      (_, index) => `chart noise ${index} lambda mu nu xi omicron pi rho`,
+    );
+    const artifacts = buildHybridFoundation({
+      book_id: "paper-unique-recovery",
+      source_txt: source,
+      original_pdf_path: "paper.pdf",
+      original_pdf_sha256: "sha-pdf",
+      pdf_geometry: geometryFromPages([[
+        "Results",
+        "Opening body establishes the monotonic cursor.",
+        ...noise,
+        "Unique recovery anchor alpha beta gamma delta epsilon zeta.",
+        "Following body remains mapped after recovery.",
+      ]]),
+    });
+
+    expect(artifacts.pdf_source_map.entries[2]).toMatchObject({
+      status: "line_fallback",
+      alignment: { reason: expect.stringContaining("recovered") },
+    });
+    expect(artifacts.pdf_source_map.entries[3].status).toBe("line_fallback");
+  });
+
+  it("resynchronizes a unique anchor split by PDF line-end hyphenation", () => {
+    const source = [
+      "# Results",
+      "",
+      "Opening body establishes the monotonic cursor.",
+      "",
+      "Unique recovery anchor demonstrates hyphenation stability after dense noise.",
+      "",
+      "Following body remains mapped after hyphenated recovery.",
+      "",
+    ].join("\n");
+    const noise = Array.from(
+      { length: 80 },
+      (_, index) => `chart noise ${index} lambda mu nu xi omicron pi rho`,
+    );
+    const artifacts = buildHybridFoundation({
+      book_id: "paper-hyphenated-recovery",
+      source_txt: source,
+      original_pdf_path: "paper.pdf",
+      original_pdf_sha256: "sha-pdf",
+      pdf_geometry: geometryFromPages([[
+        "Results",
+        "Opening body establishes the monotonic cursor.",
+        ...noise,
+        "Unique recovery anchor demonstrates hyphen-",
+        "ation stability after dense noise.",
+        "Following body remains mapped after hyphenated recovery.",
+      ]]),
+    });
+
+    expect(artifacts.pdf_source_map.entries[2]).toMatchObject({
+      status: "block_fallback",
+      alignment: { reason: expect.stringContaining("recovered") },
+    });
+    expect(artifacts.pdf_source_map.entries[3].status).toBe("line_fallback");
+  });
+
+  it("rejects paragraph resynchronization when a strong anchor is repeated", () => {
+    const source = [
+      "# Results",
+      "",
+      "Opening body establishes the monotonic cursor.",
+      "",
+      "Repeated recovery anchor alpha beta gamma delta epsilon zeta.",
+      "",
+    ].join("\n");
+    const noise = Array.from(
+      { length: 80 },
+      (_, index) => `chart noise ${index} lambda mu nu xi omicron pi rho`,
+    );
+    const repeated = "Repeated recovery anchor alpha beta gamma delta epsilon zeta.";
+    const artifacts = buildHybridFoundation({
+      book_id: "paper-ambiguous-recovery",
+      source_txt: source,
+      original_pdf_path: "paper.pdf",
+      original_pdf_sha256: "sha-pdf",
+      pdf_geometry: geometryFromPages([[
+        "Results",
+        "Opening body establishes the monotonic cursor.",
+        ...noise,
+        repeated,
+        repeated,
+      ]]),
+    });
+
+    expect(artifacts.pdf_source_map.entries[2].status).toBe("unmapped");
+  });
+
+  it("does not resynchronize a paragraph more than one page ahead", () => {
+    const source = [
+      "# Results",
+      "",
+      "Opening body establishes the monotonic cursor.",
+      "",
+      "Distant recovery anchor alpha beta gamma delta epsilon zeta.",
+      "",
+    ].join("\n");
+    const noise = (page: number) => Array.from(
+      { length: 80 },
+      (_, index) => `page ${page} noise ${index} lambda mu nu xi omicron pi rho`,
+    );
+    const artifacts = buildHybridFoundation({
+      book_id: "paper-distant-recovery",
+      source_txt: source,
+      original_pdf_path: "paper.pdf",
+      original_pdf_sha256: "sha-pdf",
+      pdf_geometry: geometryFromPages([
+        ["Results", "Opening body establishes the monotonic cursor.", ...noise(0)],
+        noise(1),
+        ["Distant recovery anchor alpha beta gamma delta epsilon zeta."],
+      ]),
+    });
+
+    expect(artifacts.pdf_source_map.entries[2].status).toBe("unmapped");
+  });
+
   it("keeps a short final line inside the full-width band before entering two columns", () => {
     const source = [
       "# Paper",

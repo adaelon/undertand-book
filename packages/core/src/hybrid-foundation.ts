@@ -19,7 +19,7 @@ export interface AlignmentReport {
   version: "alignment_report.v1";
   book_id: string;
   config: {
-    algorithm: "monotonic_forward_fuzzy_v1" | "monotonic_windowed_blocks_v2" | "monotonic_windowed_characters_v3";
+    algorithm: "monotonic_forward_fuzzy_v1" | "monotonic_windowed_blocks_v2" | "monotonic_windowed_characters_v3" | "banded_windowed_characters_v4";
     lookback_words: number;
     lookahead_words: number;
     merge_gap_utf16: number;
@@ -72,12 +72,14 @@ function keyOfSpan(span: { start: number; end: number }): string {
   return `${span.start}:${span.end}`;
 }
 
-const ALIGNMENT_ALGORITHM = "monotonic_windowed_characters_v3" as const;
+const ALIGNMENT_ALGORITHM = "banded_windowed_characters_v4" as const;
 const ALIGNMENT_LOOKAHEAD_WORDS = 240;
 const PARAGRAPH_ANCHOR_TOKENS = 16;
 const MAX_MATCH_LINES = 32;
 const MAX_LCS_CELLS = 8_000_000;
 const MIN_EXTENSION_TOKEN_MATCH_RATIO = 0.55;
+const RECOVERY_MIN_ANCHOR_TOKENS = 6;
+const RECOVERY_MAX_PAGE_DISTANCE = 1;
 const MINIMUM_TEXT_MAPPING_RATIO = 0.6;
 const MINIMUM_HEADING_MAPPING_RATIO = 0.8;
 
@@ -101,17 +103,43 @@ function lineRegion(pageIndex: number, line: PdfGeometryLine, regionId: string):
   };
 }
 
-function pageLinesInReadingOrder(page: PdfGeometryPage): Array<PdfGeometryLine & { pageIndex: number }> {
+type OrderedPageLine = PdfGeometryLine & { pageIndex: number; contentIndex: number };
+
+function horizontalLineBands(lines: OrderedPageLine[], page: PdfGeometryPage): OrderedPageLine[][] {
+  if (!lines.length) return [];
+  const heights = lines
+    .map((line) => line.bbox[3] - line.bbox[1])
+    .filter((height) => height > 0)
+    .sort((left, right) => left - right);
+  const medianHeight = heights[Math.floor(heights.length / 2)] ?? 0;
+  const gapThreshold = Math.max(12, medianHeight * 1.8, page.height * 0.015);
+  const spatial = [...lines].sort((left, right) =>
+    right.bbox[3] - left.bbox[3]
+      || left.bbox[0] - right.bbox[0]
+      || left.contentIndex - right.contentIndex,
+  );
+  const bands: OrderedPageLine[][] = [];
+  let bandBottom = Number.POSITIVE_INFINITY;
+  for (const line of spatial) {
+    const current = bands.at(-1);
+    if (!current || bandBottom - line.bbox[3] > gapThreshold) {
+      bands.push([line]);
+      bandBottom = line.bbox[1];
+      continue;
+    }
+    current.push(line);
+    bandBottom = Math.min(bandBottom, line.bbox[1]);
+  }
+  return bands;
+}
+
+function bandLinesInReadingOrder(
+  lines: OrderedPageLine[],
+  page: PdfGeometryPage,
+  maxNormalLineHeight: number,
+): OrderedPageLine[] {
   const midpoint = (page.view[0] + page.view[2]) / 2;
   const pageWidth = page.view[2] - page.view[0];
-  const maxNormalLineHeight = Math.max(30, page.height * 0.08);
-  const lines = page.lines
-    .filter((line) => line.bbox[0] >= 0
-      && line.bbox[1] >= 0
-      && line.bbox[2] <= page.width
-      && line.bbox[3] <= page.height
-      && line.bbox[3] - line.bbox[1] <= maxNormalLineHeight)
-    .map((line, contentIndex) => ({ ...line, pageIndex: page.pageIndex, contentIndex }));
   const spansColumns = (line: PdfGeometryLine): boolean => {
     const width = line.bbox[2] - line.bbox[0];
     return line.bbox[0] < midpoint
@@ -147,17 +175,13 @@ function pageLinesInReadingOrder(page: PdfGeometryPage): Array<PdfGeometryLine &
       })()
     : null;
 
-  return lines
-    .sort((left, right) => {
+  return [...lines].sort((left, right) => {
       const group = (line: PdfGeometryLine): number => {
-        const centerY = (line.bbox[1] + line.bbox[3]) / 2;
         const alignsWithBandLeft = spanningBand
           ? Math.abs(line.bbox[0] - spanningBand.left) <= Math.max(12, pageWidth * 0.04)
           : false;
         const inPrimaryBand = spanningBand
-          ? centerY >= spanningBand.bottom
-            && centerY <= spanningBand.top
-            && (spansColumns(line) || alignsWithBandLeft)
+          ? spansColumns(line) || alignsWithBandLeft
           : spansColumns(line);
         if (inPrimaryBand) return 0;
         return (line.bbox[0] + line.bbox[2]) / 2 < midpoint ? 1 : 2;
@@ -166,7 +190,20 @@ function pageLinesInReadingOrder(page: PdfGeometryPage): Array<PdfGeometryLine &
         || right.bbox[3] - left.bbox[3]
         || left.bbox[0] - right.bbox[0]
         || left.contentIndex - right.contentIndex;
-    })
+    });
+}
+
+function pageLinesInReadingOrder(page: PdfGeometryPage): Array<PdfGeometryLine & { pageIndex: number }> {
+  const maxNormalLineHeight = Math.max(30, page.height * 0.08);
+  const lines = page.lines
+    .filter((line) => line.bbox[0] >= 0
+      && line.bbox[1] >= 0
+      && line.bbox[2] <= page.width
+      && line.bbox[3] <= page.height
+      && line.bbox[3] - line.bbox[1] <= maxNormalLineHeight)
+    .map((line, contentIndex) => ({ ...line, pageIndex: page.pageIndex, contentIndex }));
+  return horizontalLineBands(lines, page)
+    .flatMap((band) => bandLinesInReadingOrder(band, page, maxNormalLineHeight))
     .map(({ contentIndex: _contentIndex, ...line }) => line);
 }
 
@@ -174,7 +211,10 @@ interface PdfLineMatch {
   startIndex: number;
   endIndex: number;
   quality: "exact" | "line_start" | "contains";
+  recovered: boolean;
 }
+
+type RankedPdfLineMatch = PdfLineMatch & { matchedTokens: number; extraTokens: number };
 
 function tokenSequenceIndex(haystack: string[], needle: string[]): number {
   if (!needle.length || needle.length > haystack.length) return -1;
@@ -199,6 +239,105 @@ function sequenceMatchCount(left: string[], right: string[]): number {
   return previous[right.length];
 }
 
+function bestLineMatchAt(
+  lines: Array<PdfGeometryLine & { pageIndex: number }>,
+  block: SourceBlock,
+  blockTokens: string[],
+  anchorTokens: string[],
+  start: number,
+): RankedPdfLineMatch | null {
+  let best: RankedPdfLineMatch | null = null;
+  let previousMatchedTokens = 0;
+  let previousAlignedTokenCount = 0;
+  for (let end = start; end < Math.min(lines.length, start + MAX_MATCH_LINES); end++) {
+    if (lines[end].pageIndex !== lines[start].pageIndex) break;
+    const combinedTokens = alignmentTokens(lines
+      .slice(start, end + 1)
+      .map((line) => line.text)
+      .join(" "));
+    if (combinedTokens.length < anchorTokens.length) continue;
+    const tokenIndex = tokenSequenceIndex(combinedTokens, anchorTokens);
+    if (tokenIndex < 0) continue;
+    let anchorStartIndex = start;
+    let tokensBeforeLine = 0;
+    for (let lineIndex = start; lineIndex <= end; lineIndex += 1) {
+      const lineTokenCount = alignmentTokens(lines[lineIndex].text).length;
+      if (tokenIndex < tokensBeforeLine + lineTokenCount) {
+        anchorStartIndex = lineIndex;
+        break;
+      }
+      tokensBeforeLine += lineTokenCount;
+    }
+    const alignedTokens = combinedTokens.slice(tokenIndex);
+    const matchedTokens = sequenceMatchCount(blockTokens, alignedTokens);
+    const extraTokens = Math.max(0, alignedTokens.length - blockTokens.length);
+    if (best && alignedTokens.length > previousAlignedTokenCount) {
+      const addedTokens = alignedTokens.length - previousAlignedTokenCount;
+      const addedMatches = matchedTokens - previousMatchedTokens;
+      if (addedMatches / addedTokens < MIN_EXTENSION_TOKEN_MATCH_RATIO) break;
+    }
+    const quality = tokenIndex === 0
+      && alignedTokens.length === blockTokens.length
+      && matchedTokens === blockTokens.length
+      ? "exact"
+      : tokenIndex === 0
+        ? "line_start"
+        : "contains";
+    if (block.kind !== "heading" && blockTokens.length < 4 && quality !== "exact") continue;
+    if (!best
+      || matchedTokens > best.matchedTokens
+      || (matchedTokens === best.matchedTokens && extraTokens < best.extraTokens)) {
+      best = {
+        startIndex: anchorStartIndex,
+        endIndex: end,
+        quality,
+        recovered: false,
+        matchedTokens,
+        extraTokens,
+      };
+    }
+    previousMatchedTokens = matchedTokens;
+    previousAlignedTokenCount = alignedTokens.length;
+    if (matchedTokens === blockTokens.length && alignedTokens.length >= blockTokens.length) break;
+    const overrun = Math.max(8, Math.ceil(blockTokens.length * 0.25));
+    if (alignedTokens.length > blockTokens.length + overrun) break;
+  }
+  return best;
+}
+
+function recoveryAnchorLineOccurrences(
+  lines: Array<PdfGeometryLine & { pageIndex: number }>,
+  anchorTokens: string[],
+  startAt: number,
+  lastPage: number,
+): number[] {
+  const tokenStream: Array<{ token: string; lineIndex: number }> = [];
+  let previousLine: (PdfGeometryLine & { pageIndex: number }) | null = null;
+  for (let lineIndex = startAt; lineIndex < lines.length; lineIndex++) {
+    if (lines[lineIndex].pageIndex > lastPage) break;
+    const lineTokens = alignmentTokens(lines[lineIndex].text);
+    const normalizedPrevious = previousLine?.text.normalize("NFKC") ?? "";
+    const normalizedCurrent = lines[lineIndex].text.normalize("NFKC");
+    const joinsPreviousToken = previousLine?.pageIndex === lines[lineIndex].pageIndex
+      && /[\p{L}\p{N}][\p{Pd}\u00ad]\s*$/u.test(normalizedPrevious)
+      && /^\s*[\p{L}\p{N}]/u.test(normalizedCurrent);
+    if (joinsPreviousToken && tokenStream.length > 0 && lineTokens.length > 0) {
+      tokenStream[tokenStream.length - 1].token += lineTokens.shift();
+    }
+    for (const token of lineTokens) {
+      tokenStream.push({ token, lineIndex });
+    }
+    previousLine = lines[lineIndex];
+  }
+  const occurrences: number[] = [];
+  for (let start = 0; start <= tokenStream.length - anchorTokens.length; start++) {
+    if (anchorTokens.every((token, offset) => tokenStream[start + offset].token === token)) {
+      occurrences.push(tokenStream[start].lineIndex);
+    }
+  }
+  return occurrences;
+}
+
 function findLinesForBlock(
   lines: Array<PdfGeometryLine & { pageIndex: number }>,
   block: SourceBlock,
@@ -215,60 +354,13 @@ function findLinesForBlock(
 
   for (let start = startAt; start < lines.length; start++) {
     const localCandidate = distanceWords <= ALIGNMENT_LOOKAHEAD_WORDS;
-    let best: (PdfLineMatch & { matchedTokens: number; extraTokens: number }) | null = null;
-    let previousMatchedTokens = 0;
-    let previousAlignedTokenCount = 0;
-    for (let end = start; end < Math.min(lines.length, start + MAX_MATCH_LINES); end++) {
-      if (lines[end].pageIndex !== lines[start].pageIndex) break;
-      const combinedTokens = alignmentTokens(lines
-        .slice(start, end + 1)
-        .map((line) => line.text)
-        .join(" "));
-      if (combinedTokens.length < anchorTokens.length) continue;
-      const tokenIndex = tokenSequenceIndex(combinedTokens, anchorTokens);
-      if (tokenIndex < 0) continue;
-      let anchorStartIndex = start;
-      let tokensBeforeLine = 0;
-      for (let lineIndex = start; lineIndex <= end; lineIndex += 1) {
-        const lineTokenCount = alignmentTokens(lines[lineIndex].text).length;
-        if (tokenIndex < tokensBeforeLine + lineTokenCount) {
-          anchorStartIndex = lineIndex;
-          break;
-        }
-        tokensBeforeLine += lineTokenCount;
-      }
-      const alignedTokens = combinedTokens.slice(tokenIndex);
-      const matchedTokens = sequenceMatchCount(blockTokens, alignedTokens);
-      const extraTokens = Math.max(0, alignedTokens.length - blockTokens.length);
-      if (best && alignedTokens.length > previousAlignedTokenCount) {
-        const addedTokens = alignedTokens.length - previousAlignedTokenCount;
-        const addedMatches = matchedTokens - previousMatchedTokens;
-        if (addedMatches / addedTokens < MIN_EXTENSION_TOKEN_MATCH_RATIO) break;
-      }
-      const quality = tokenIndex === 0
-        && alignedTokens.length === blockTokens.length
-        && matchedTokens === blockTokens.length
-        ? "exact"
-        : tokenIndex === 0
-          ? "line_start"
-          : "contains";
-      if (block.kind !== "heading" && blockTokens.length < 4 && quality !== "exact") continue;
-      if (!best
-        || matchedTokens > best.matchedTokens
-        || (matchedTokens === best.matchedTokens && extraTokens < best.extraTokens)) {
-        best = { startIndex: anchorStartIndex, endIndex: end, quality, matchedTokens, extraTokens };
-      }
-      previousMatchedTokens = matchedTokens;
-      previousAlignedTokenCount = alignedTokens.length;
-      if (matchedTokens === blockTokens.length && alignedTokens.length >= blockTokens.length) break;
-      const overrun = Math.max(8, Math.ceil(blockTokens.length * 0.25));
-      if (alignedTokens.length > blockTokens.length + overrun) break;
-    }
+    const best = bestLineMatchAt(lines, block, blockTokens, anchorTokens, start);
     if (best && (localCandidate || (block.kind === "heading" && best.quality === "exact"))) {
       candidates.push({
         startIndex: best.startIndex,
         endIndex: best.endIndex,
         quality: best.quality,
+        recovered: false,
         distanceWords,
       });
     }
@@ -282,7 +374,20 @@ function findLinesForBlock(
       || left.distanceWords - right.distanceWords
       || left.startIndex - right.startIndex,
   );
-  return candidates[0] ?? null;
+  if (candidates[0]) return candidates[0];
+  if (block.kind === "heading" || anchorTokens.length < RECOVERY_MIN_ANCHOR_TOKENS) return null;
+  const startPage = lines[startAt]?.pageIndex;
+  if (startPage === undefined) return null;
+  const occurrences = recoveryAnchorLineOccurrences(
+    lines,
+    anchorTokens,
+    startAt,
+    startPage + RECOVERY_MAX_PAGE_DISTANCE,
+  );
+  if (occurrences.length !== 1) return null;
+  const recovered = bestLineMatchAt(lines, block, blockTokens, anchorTokens, occurrences[0]);
+  if (!recovered) return null;
+  return { ...recovered, recovered: true };
 }
 
 interface SourceAlignmentUnit {
@@ -493,8 +598,14 @@ export function buildHybridFoundation(input: HybridFoundationInput): HybridFound
       regions,
       primary_region: regions[0],
       alignment: {
-        confidence: match.quality === "exact" ? 0.9 : match.quality === "line_start" ? 0.82 : 0.7,
-        reason: `${match.quality} token anchor matched ${regions.length} PDF line${regions.length === 1 ? "" : "s"}`,
+        confidence: match.recovered
+          ? 0.68
+          : match.quality === "exact"
+            ? 0.9
+            : match.quality === "line_start"
+              ? 0.82
+              : 0.7,
+        reason: `${match.recovered ? "recovered " : ""}${match.quality} token anchor matched ${regions.length} PDF line${regions.length === 1 ? "" : "s"}`,
       },
     });
     for (const [key, assignment] of alignSelectionChars(input.source_txt, block, lid, matchedLines, input.pdf_geometry)) {

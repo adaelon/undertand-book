@@ -81,7 +81,7 @@ function json(route: Route, value: unknown, status = 200) {
   });
 }
 
-async function installApiFixture(page: Page, resolveStatus: ResolveStatus) {
+async function installApiFixture(page: Page, resolveStatus: ResolveStatus, resolveDelayMs = 0) {
   const calls = {
     highlights: [] as Record<string, unknown>[],
     notes: [] as Record<string, unknown>[],
@@ -192,6 +192,9 @@ async function installApiFixture(page: Page, resolveStatus: ResolveStatus) {
     if (path === "/api/memory/recall") return json(route, records);
     if (path === "/api/reader/pdf_selection.resolve") {
       calls.resolves += 1;
+      if (resolveDelayMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, resolveDelayMs));
+      }
       if (resolveStatus === "unresolved") {
         return json(route, { status: "unresolved", ranges: [], quote_markdown: "" });
       }
@@ -354,6 +357,22 @@ test("partial mobile selection disables Highlight but keeps Note and Ask explici
   expect(calls.highlights).toHaveLength(0);
   expect(calls.notes).toHaveLength(0);
   expect(calls.agent).toHaveLength(0);
+});
+
+test("pending and unresolved PDF selection never renders an action toolbar", async ({ page }) => {
+  const calls = await installApiFixture(page, "unresolved", 1_000);
+  await page.goto("/");
+  await page.waitForTimeout(500);
+  await selectFixtureText(page, 0, 10);
+
+  await expect.poll(() => calls.resolves).toBe(1);
+  await page.waitForTimeout(200);
+  expect(await page.locator(".pdf-selection-toolbar").count()).toBe(0);
+  expect(await page.evaluate(() => window.getSelection()?.toString())).toBe("Selectable");
+
+  await page.waitForTimeout(900);
+  await expect(page.locator(".pdf-selection-toolbar")).toHaveCount(0);
+  expect(await page.evaluate(() => window.getSelection()?.toString())).toBe("Selectable");
 });
 
 test("unresolved real PDF selection remains native-copy only", async ({ page }) => {

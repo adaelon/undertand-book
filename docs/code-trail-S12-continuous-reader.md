@@ -172,3 +172,53 @@
 
 **Entry point**: ready PDF selection translation surface -> Close in the header or Copy in the footer.
 **Test**: red-green component regression (5 tests), full `pnpm test` (121 tests), `pnpm build`, and desktop/mobile Playwright (2 tests) with inspected screenshots. Package exit 0; exported setup and Tauri NSIS bundle are both 34,637,772 bytes with SHA-256 `177F2825C44EF0B82B8CB1281E898ECD3C4FBC7C6C249A185CFF1F58AF91896A`.
+
+## 2026-07-16 PF0 PDF selection mapping stability decision
+
+**Touched**:
+- `docs/adr/0079-pdf-selection-banded-reading-order-and-conservative-resynchronization.md:§1-§3` - fixes the banded page-order, unique-anchor recovery, and resolved-only toolbar decisions.
+- `docs/切片方案-pdf选区映射稳定性.md:PF0-PF4` - records the reproduced page-5 failure, frozen boundaries, independent implementation slices, and deterministic acceptance matrix.
+
+**Entry point**: reproduced `.understand-book/1` PDF selection instability -> ADR-0079 -> PF1-PF4 implementation order.
+**Test**: `git diff --check` for both new documents; links and UTF-8 content inspected.
+
+## 2026-07-16 PF1 banded PDF reading order
+
+**Touched**:
+- `packages/core/src/hybrid-foundation.ts:horizontalLineBands/bandLinesInReadingOrder/pageLinesInReadingOrder` - partitions each PDF page by normalized horizontal whitespace before applying existing spanning/single/two-column ordering inside each band.
+- `packages/core/src/hybrid-foundation.ts:ALIGNMENT_ALGORITHM` and `packages/core/src/zod.ts:AlignmentReportZ` - bump the artifact freshness contract to `banded_windowed_characters_v4`.
+- `packages/core/test/hybrid-foundation.test.ts:keeps a top two-column body ahead of a dense lower figure band` - reproduces a right-column continuation hidden behind more than 240 words of lower figure text and locks its LID/selection-char mapping.
+
+**Entry point**: PH5 `buildHybridFoundation` -> page geometry reading order -> block and selection-map alignment.
+**Test**: red-green targeted regression; `pnpm test -- test/hybrid-foundation.test.ts` (16 tests) and `pnpm typecheck` in `packages/core`.
+
+## 2026-07-16 PF2 conservative PDF paragraph resynchronization
+
+**Touched**:
+- `packages/core/src/hybrid-foundation.ts:bestLineMatchAt/findLinesForBlock` - keeps the 240-word local search first, then accepts recovery only for one unique 6+ token anchor on the current or following page.
+- `packages/core/src/hybrid-foundation.ts:recoveryAnchorLineOccurrences` - preserves PDF line-end hyphenation semantics while retaining token-to-line provenance for the unique-anchor prefilter.
+- `packages/core/src/hybrid-foundation.ts:PdfLineMatch/alignment reason` - marks recovered matches explicitly and lowers their confidence without changing LID/range truth.
+- `packages/core/test/hybrid-foundation.test.ts:paragraph resynchronization regressions` - covers unique recovery, line-end hyphenation, repeated-anchor rejection, one-page distance, and post-recovery cursor continuity.
+
+**Entry point**: a PH5 source block misses the local alignment window -> bounded deterministic recovery -> later blocks continue from the recovered cursor.
+**Test**: red-green four-case regression; full `pnpm test` (223 tests) and `pnpm typecheck` in `packages/core`.
+
+## 2026-07-16 PF3 resolved-only PDF selection toolbar
+
+**Touched**:
+- `packages/web/src/App.vue:PDF selection toolbar gate` - mounts the action toolbar only for an error or an owned partial/resolved draft, never for the pending resolving phase.
+- `packages/web/playwright/pdf-selection-actions.spec.ts:pending and unresolved PDF selection never renders an action toolbar` - holds the resolve response for one second, checks the pending DOM synchronously, and proves native selection survives the unresolved response.
+
+**Entry point**: `PdfReaderPane` mouseup capture -> `usePdfSelectionDraft.resolveCapture` -> toolbar appears only after a usable draft exists.
+**Test**: red-green Playwright regression; full `pnpm test` (124 tests), `pnpm build`, and `playwright test pdf-selection-actions.spec.ts` (4 tests) in `packages/web`.
+
+## 2026-07-16 PF4 real-book PDF selection mapping acceptance
+
+**Touched**:
+- `.understand-book/1:hybrid foundation artifacts` - atomically applies the audited `banded_windowed_characters_v4` candidate while preserving canonical source, original PDF, all 424 LIDs, and the semantic graph digest.
+- `.understand-book/1/.build/hybrid-foundation-backup-2026-07-16T14-21-32-476Z` - retains the pre-PF4 artifact rollback point.
+- `docs/切片方案-pdf选区映射稳定性.md:PF4` - records final mapping ratios, page-level selectable-character coverage, runtime behavior, and the rollback location.
+- `docs/architecture.md:Major Data Flows/Decision Index` - records the banded order and bounded recovery contract and indexes ADR-0079.
+
+**Entry point**: audited temp rebuild -> hard-gated atomic artifact apply -> live localhost API -> physical Chromium PDF selection.
+**Test**: candidate and official hard gates pass; `206/258` alignable text and `29/29` headings map with no page regression; pages 5/6/7/10/11 selectable-character coverage rises to `41.7%/76.5%/39.7%/21.1%/86.2%`; physical mapped/unmapped selection proves resolved-only toolbar behavior. Final checks: Core `223` tests plus typecheck, Web `124` tests plus build, selection Playwright `4` tests, and server `pdf_selection_` `4` tests.
