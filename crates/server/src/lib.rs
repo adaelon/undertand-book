@@ -13748,6 +13748,55 @@ mod tests {
     }
 
     #[test]
+    fn pre_m_agent_history_fixture_migrates_without_losing_transcript() {
+        let raw = include_str!("../tests/fixtures/agent-history-pre-m.json");
+        let original: serde_json::Value = serde_json::from_str(raw).unwrap();
+        let load = || {
+            let history: AgentHistory = serde_json::from_str(raw).unwrap();
+            migrate_agent_history(history).unwrap()
+        };
+
+        let first = serde_json::to_value(load()).unwrap();
+        let second = serde_json::to_value(load()).unwrap();
+        let original_session = &original["sessions"][0];
+        let migrated_session = &first["sessions"][0];
+        let original_turn = &original_session["turns"][0];
+        let migrated_turn = &migrated_session["turns"][0];
+        let original_outcome = &original_turn["outcome"];
+        let migrated_outcome = &migrated_turn["outcome"];
+
+        for field in ["id", "book_id", "title", "created_at", "updated_at"] {
+            assert_eq!(migrated_session[field], original_session[field], "{field}");
+        }
+        assert_eq!(migrated_session["messages"], original_session["messages"]);
+        for field in ["user", "question_anchor_lid", "question_quote"] {
+            assert_eq!(migrated_turn[field], original_turn[field], "{field}");
+        }
+        for field in [
+            "answer",
+            "incomplete",
+            "turns",
+            "tokens_spent",
+            "effects",
+            "trace",
+        ] {
+            assert_eq!(migrated_outcome[field], original_outcome[field], "{field}");
+        }
+        assert_eq!(migrated_outcome["profile_usage"]["snapshot_revision"], 0);
+        assert_eq!(
+            migrated_outcome["profile_usage"]["injected_fact_ids"],
+            json!([])
+        );
+        assert_eq!(
+            migrated_outcome["profile_usage"]["claimed_used_fact_ids"],
+            json!([])
+        );
+        assert_eq!(migrated_outcome["profile_usage"]["influences"], json!([]));
+        assert_eq!(migrated_outcome["memory_updates"], json!([]));
+        assert_eq!(first, second);
+    }
+
+    #[test]
     fn query_audit_is_out_of_band_persisted_and_backward_compatible() {
         let state = state_named("query-audit-history");
         let request = runtime::BookQueryRequest {

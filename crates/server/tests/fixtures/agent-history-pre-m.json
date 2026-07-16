@@ -1,0 +1,64 @@
+{
+  "active_by_book": {
+    "book-pre-m": "chat_pre_m_0"
+  },
+  "sessions": [
+    {
+      "id": "chat_pre_m_0",
+      "book_id": "book-pre-m",
+      "title": "Pre-M transcript",
+      "created_at": "2026-07-12T08:00:00Z",
+      "updated_at": "2026-07-12T08:01:00Z",
+      "turns": [
+        {
+          "user": "Explain the command pattern",
+          "outcome": {
+            "answer": "A command packages a request as an object.",
+            "incomplete": false,
+            "turns": 2,
+            "tokens_spent": 17,
+            "effects": [
+              {
+                "kind": "Goto",
+                "before_anchor": "1",
+                "after_anchor": "1.1"
+              }
+            ],
+            "trace": [
+              {
+                "tool": "book.text",
+                "args": "{\"lid\":\"1.1\"}",
+                "result_digest": "A command packages a request as an object."
+              }
+            ]
+          },
+          "question_anchor_lid": "1.1",
+          "question_quote": {
+            "lid": "1.1",
+            "quote": "A command packages a request as an object."
+          }
+        }
+      ],
+      "messages": [
+        {
+          "role": "System",
+          "content": "pre-M resident system prompt",
+          "tool_calls": [],
+          "tool_call_id": null
+        },
+        {
+          "role": "User",
+          "content": "Explain the command pattern",
+          "tool_calls": [],
+          "tool_call_id": null
+        },
+        {
+          "role": "Assistant",
+          "content": "A command packages a request as an object.",
+          "tool_calls": [],
+          "tool_call_id": null
+        }
+      ]
+    }
+  ]
+}

@@ -52,7 +52,9 @@ pub struct OuterOutcome {
     pub tokens_spent: u32,
     pub effects: Vec<AgentEffect>,
     pub trace: Vec<TraceStep>,
+    #[serde(default)]
     pub profile_usage: ProfileUsageTrace,
+    #[serde(default)]
     pub memory_updates: Vec<ProfileMemoryUpdate>,
 }
 
@@ -67,7 +69,7 @@ pub enum ProfileInfluence {
     Navigation,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS, PartialEq, Eq)]
 #[ts(export, export_to = "../../../packages/web/src/generated/")]
 pub struct ProfileUsageTrace {
     #[ts(type = "number")]
