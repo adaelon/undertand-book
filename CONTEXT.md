@@ -402,6 +402,12 @@ Source review decisions 全部齐备后,系统只执行一次确定性 source re
 ## PDF 临时选区快照 (PDF selection draft)
 PDF 原生拖选经 selection map 反解后形成的前端会话态:冻结规范 LID ranges、引用文本与工具条位置,只供用户显式选择高亮、笔记或 Ask AI;它不自动改变 reader 位置、不打开来源正文,在动作执行、取消或新选区替换时销毁。状态:NEW。
 
+## PDF 选区翻译 (PDF selection translation)
+BilingualAidLayer 对 PDF 临时选区提供的读时按需辅助:用户显式触发后,基于选中英文、规范 LID ranges 与论文术语上下文生成忠实中文译文。英文原文仍是唯一正文真相和 citation source;译文不进入 Agent 对话、不写 memory、不持久化。`paper_lexicon` 只在后台约束术语用词,不作为译文或独立展示内容。状态:NEW(2026-07-16 §0.5 PDF 选区翻译 Grill)。
+
+## PDF 选区翻译浮层 (PDF selection translation surface)
+锚在当前 PDF 选区旁、只显示中文译文的临时只读 surface。它不替换 PDF 正文,不承载术语讲解,关闭或产生新选区后销毁。状态:NEW(2026-07-16 §0.5 PDF 选区翻译 Grill)。
+
 ## PDF 用户标注投影 (PDF user annotation projection)
 把用户主动保存的 Highlight 与 Note 从 memory 精确投影回原版 PDF 的可变展示层;它不显示自动 source-map regions,不改变 PDF/LID 真相,投影失败时不得用整段 bbox 猜测位置。状态:NEW。
 

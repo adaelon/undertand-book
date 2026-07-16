@@ -144,3 +144,20 @@
 
 **Entry point**: select paper PDF text -> click the Languages `翻译` action -> `usePdfSelectionTranslation.start` -> independent translation surface.
 **Test**: `pnpm test` (120 tests), `pnpm build`, and `playwright test pdf-selection-translation.spec.ts` (2 tests); desktop and 390px screenshots inspected for overlap and overflow.
+
+## 2026-07-16 PT5 real-book translation acceptance and Windows installer
+
+**Touched**:
+- `.understand-book/1` with the configured real Provider - exercises the production `POST /reader/selection.translate` path against owned paper text, lexicon, selection-map capability, and cross-LID formula ranges.
+- `dist/UnderstandBookSetup.exe` - rebuilds the Windows installer with PT0-PT4 PDF selection translation.
+- `CONTEXT.md`, `docs/adr/0078-pdf-selection-translation-ephemeral-lock-free-bilingual-projection.md`, and `docs/切片方案-pdf选区翻译.md` - freeze the domain terms, decision boundary, slice contract, and acceptance matrix.
+
+**Real Provider acceptance**:
+- Ordinary sentence: `However, a detailed characterization...` -> `然而，对人类心脏异构体景观的详细描述仍然不完整。`
+- Lexicon: `Alternative splicing...` uses the owned `paper_lexicon` gloss `可变剪接` in a faithful sentence translation.
+- Formula Markdown: the Chinese result retains `$P_{adjusted} \leq 0.05$` and `$\geq 0.6$` verbatim for KaTeX rendering.
+- Partial: a PDF-visible `devel-\nopment` raw quote translates cleanly while its canonical LID `2.27` range remains provenance/context.
+- Error recovery: a forged resolved quote returns HTTP 400 `INVALID_SELECTION_CONTEXT`; the next valid request on the same server process returns HTTP 200.
+
+**Entry point**: `.understand-book/1` -> isolated localhost server with real `.env` Provider -> production translation endpoint; then `UNDERSTAND_BOOK_MARKETPLACE_SOURCE=adaelon/undertand-book` -> `pnpm -C apps/desktop package:windows`.
+**Test**: `cargo test -p runtime -p server` (144 + 149 tests), `pnpm test` (120 tests), `pnpm build`, and `playwright test pdf-selection-translation.spec.ts` (2 tests). Package exit 0; exported setup and Tauri NSIS bundle are both 34,646,190 bytes with SHA-256 `6B7AF182C01783D2FBAB7632D1E45B3F5DDFB0D964A43B4426E1DEC5EF893C55`.
