@@ -6609,18 +6609,21 @@ fn route_synthesize(state: &mut AppState, body: &str) -> Reply {
     }
 }
 
-fn validate_ask_ranges(book: &Book, lid: &str, ranges: &[SelectedRange]) -> Result<(), Reply> {
-    if ranges.is_empty() {
-        return Err(validation(
-            "INVALID_SELECTION_CONTEXT",
-            "question_quote ranges 不得为空",
-        ));
+fn invalid_selection_context(label: &str, detail: &str) -> ToolError {
+    ToolError {
+        error_code: "INVALID_SELECTION_CONTEXT".into(),
+        category: "validation".into(),
+        message: format!("{label} {detail}"),
     }
-    if ranges[0].lid != lid {
-        return Err(validation(
-            "INVALID_SELECTION_CONTEXT",
-            "question_quote 首 range LID 必须等于 lid",
-        ));
+}
+
+fn validate_and_rebuild_selection_quote(
+    book: &Book,
+    ranges: &[SelectedRange],
+    label: &str,
+) -> Result<String, ToolError> {
+    if ranges.is_empty() {
+        return Err(invalid_selection_context(label, "ranges 不得为空"));
     }
     let order: HashMap<&str, usize> = book
         .base
@@ -6630,40 +6633,38 @@ fn validate_ask_ranges(book: &Book, lid: &str, ranges: &[SelectedRange]) -> Resu
         .map(|(index, node)| (node.lid.as_str(), index))
         .collect();
     let mut previous: Option<(usize, u32)> = None;
+    let mut canonical_quote = String::new();
     for selected in ranges {
         let Some(&lid_order) = order.get(selected.lid.as_str()) else {
-            return Err(validation(
-                "INVALID_SELECTION_CONTEXT",
-                "question_quote range 包含不存在的 LID",
-            ));
+            return Err(invalid_selection_context(label, "range 包含不存在的 LID"));
         };
-        let text_len = book
+        let text = book
             .text(&selected.lid, None)
-            .map(|text| text.encode_utf16().count() as u32)
-            .map_err(|_| {
-                validation(
-                    "INVALID_SELECTION_CONTEXT",
-                    "question_quote range LID 无法读取",
-                )
-            })?;
+            .map_err(|_| invalid_selection_context(label, "range LID 无法读取"))?;
+        let text_len = text.encode_utf16().count() as u32;
         if selected.range.start >= selected.range.end || selected.range.end > text_len {
-            return Err(validation(
-                "INVALID_SELECTION_CONTEXT",
-                "question_quote range 必须是 LID 内合法 UTF-16 区间",
+            return Err(invalid_selection_context(
+                label,
+                "range 必须是 LID 内合法 UTF-16 区间",
             ));
         }
         if previous.is_some_and(|(previous_order, previous_end)| {
             lid_order < previous_order
                 || (lid_order == previous_order && selected.range.start < previous_end)
         }) {
-            return Err(validation(
-                "INVALID_SELECTION_CONTEXT",
-                "question_quote ranges 必须按书序排列且不得重叠",
+            return Err(invalid_selection_context(
+                label,
+                "ranges 必须按书序排列且不得重叠",
             ));
         }
         previous = Some((lid_order, selected.range.end));
+        canonical_quote.push_str(&slice_utf16_lossy(
+            &text,
+            selected.range.start as usize,
+            selected.range.end as usize,
+        ));
     }
-    Ok(())
+    Ok(canonical_quote)
 }
 
 fn parse_question_quote(v: &serde_json::Value, book: &Book) -> Result<Option<AskQuote>, Reply> {
@@ -6738,26 +6739,15 @@ fn parse_question_quote(v: &serde_json::Value, book: &Book) -> Result<Option<Ask
             "question_quote raw/resolved quote 不得为空",
         ));
     }
-    validate_ask_ranges(book, lid, &ranges)?;
-    let canonical_resolved_quote = ranges
-        .iter()
-        .map(|selected| {
-            book.text(&selected.lid, None).map(|text| {
-                slice_utf16_lossy(
-                    &text,
-                    selected.range.start as usize,
-                    selected.range.end as usize,
-                )
-            })
-        })
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| {
-            validation(
-                "INVALID_SELECTION_CONTEXT",
-                "question_quote resolved_quote 无法从 ranges 重建",
-            )
-        })?
-        .join("");
+    if ranges.first().is_some_and(|range| range.lid != lid) {
+        return Err(validation(
+            "INVALID_SELECTION_CONTEXT",
+            "question_quote 首 range LID 必须等于 lid",
+        ));
+    }
+    let canonical_resolved_quote =
+        validate_and_rebuild_selection_quote(book, &ranges, "question_quote")
+            .map_err(|error| err_reply(&error))?;
     if canonical_resolved_quote != resolved_quote {
         return Err(validation(
             "INVALID_SELECTION_CONTEXT",
@@ -13564,6 +13554,67 @@ mod tests {
         assert_eq!(quote["ranges"].as_array().unwrap().len(), 2);
         assert_eq!(quote["raw_quote"], "RAW_DO_NOT_CITE");
         assert_eq!(quote["resolved_quote"], "XX");
+    }
+
+    fn selected_range(lid: &str, start: u32, end: u32) -> SelectedRange {
+        SelectedRange {
+            lid: lid.into(),
+            range: memory::TextRange { start, end },
+        }
+    }
+
+    #[test]
+    fn agent_chat_selection_ranges_rebuild_canonical_quote() {
+        let s = state_named("agent-selection-canonical");
+        let ranges = [selected_range("1", 0, 1), selected_range("1.1", 0, 1)];
+
+        let canonical =
+            validate_and_rebuild_selection_quote(&s.book, &ranges, "question_quote").unwrap();
+
+        assert_eq!(canonical, "XX");
+    }
+
+    #[test]
+    fn agent_chat_selection_ranges_reject_empty_out_of_order_and_overlap() {
+        let s = state_named("agent-selection-range-validation");
+        let invalid = [
+            ("empty", Vec::new(), "ranges 不得为空"),
+            (
+                "out-of-order",
+                vec![selected_range("1.1", 0, 1), selected_range("1", 0, 1)],
+                "ranges 必须按书序排列且不得重叠",
+            ),
+            (
+                "overlap",
+                vec![selected_range("1.1", 0, 2), selected_range("1.1", 1, 3)],
+                "ranges 必须按书序排列且不得重叠",
+            ),
+        ];
+
+        for (case, ranges, expected_message) in invalid {
+            let error = validate_and_rebuild_selection_quote(&s.book, &ranges, "question_quote")
+                .unwrap_err();
+            assert_eq!(error.error_code, "INVALID_SELECTION_CONTEXT", "{case}");
+            assert!(
+                error.message.contains(expected_message),
+                "{case}: {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn agent_chat_rejects_forged_canonical_selection_quote() {
+        let mut s = state_named("agent-selection-forged-quote");
+        let reply = post(
+            &mut s,
+            "/agent/chat",
+            r#"{"message":"q","question_quote":{"lid":"1","quote":"q","status":"resolved","raw_quote":"q","resolved_quote":"client forged quote","ranges":[{"lid":"1","range":{"start":0,"end":1}}]}}"#,
+        );
+
+        assert_eq!(reply.status, 400, "{}", reply.body);
+        assert!(reply
+            .body
+            .contains("question_quote resolved_quote 必须与 ranges 对应的书内原文一致"));
     }
 
     #[test]

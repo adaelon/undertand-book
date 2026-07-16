@@ -81,3 +81,15 @@
 
 **Entry point**: `UNDERSTAND_BOOK_MARKETPLACE_SOURCE=adaelon/undertand-book` -> `pnpm -C apps/desktop package:windows` -> `dist/UnderstandBookSetup.exe`.
 **Test**: package exit 0; exported setup and Tauri NSIS bundle are both 34,616,812 bytes with SHA-256 `FFCA937D6D2BF478265A8496195F136EB70FFCD5DC0C51BD93054F8C22AFDD71`.
+
+## 2026-07-16 PT0 PDF selection validation extraction
+
+**Touched**:
+- `crates/server/src/lib.rs:validate_and_rebuild_selection_quote` - validates non-empty, existing, in-bounds, book-ordered, non-overlapping UTF-16 ranges and rebuilds their canonical book quote.
+- `crates/server/src/lib.rs:parse_question_quote` - reuses the shared validator while retaining the Ask AI-specific first-range LID and forged resolved-quote gates.
+- `crates/server/src/lib.rs:tests::agent_chat_selection_ranges_rebuild_canonical_quote` - characterizes canonical reconstruction from ordered cross-LID ranges.
+- `crates/server/src/lib.rs:tests::agent_chat_selection_ranges_reject_empty_out_of_order_and_overlap` - characterizes empty, out-of-order, and overlapping range rejection.
+- `crates/server/src/lib.rs:tests::agent_chat_rejects_forged_canonical_selection_quote` - characterizes rejection of a client-forged resolved quote.
+
+**Entry point**: `/agent/chat` structured `question_quote` validation; PT1 can reuse the same owned-book range validation before translation preparation.
+**Test**: `cargo test -p server agent_chat_` (8 tests) and `cargo test -p server` (141 tests).
