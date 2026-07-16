@@ -54,6 +54,26 @@ describe("PdfSelectionTranslationSurface", () => {
     expect(wrapper.emitted("copy")).toEqual([["译文 $x^2$"]]);
   });
 
+  it("keeps the copy and close icons at a clearly visible fixed size", async () => {
+    const wrapper = mount(PdfSelectionTranslationSurface, {
+      props: {
+        state: state("ready", { translation_markdown: "译文" }),
+        anchorRect,
+        renderMarkdown: (source) => source,
+        showSettings: false,
+      },
+    });
+    await nextTick();
+
+    for (const label of ["关闭翻译", "复制译文 Markdown"]) {
+      const button = wrapper.get(`[aria-label="${label}"]`);
+      expect(button.classes()).toContain("pdf-translation-primary-icon");
+      expect(button.get("svg").attributes("width")).toBe("22");
+      expect(button.get("svg").attributes("height")).toBe("22");
+      expect(button.get("svg").attributes("stroke-width")).toBe("2.2");
+    }
+  });
+
   it("keeps close available in loading and exposes retry/settings for provider errors", async () => {
     const loading = mount(PdfSelectionTranslationSurface, {
       props: {

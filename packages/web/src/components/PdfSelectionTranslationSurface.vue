@@ -99,8 +99,14 @@ onBeforeUnmount(() => {
   >
     <header class="pdf-translation-head">
       <strong>选区翻译</strong>
-      <button type="button" title="关闭翻译" aria-label="关闭翻译" @click="emit('close')">
-        <X :size="17" aria-hidden="true" />
+      <button
+        class="pdf-translation-primary-icon"
+        type="button"
+        title="关闭翻译"
+        aria-label="关闭翻译"
+        @click="emit('close')"
+      >
+        <X :size="22" :stroke-width="2.2" aria-hidden="true" />
       </button>
     </header>
 
@@ -131,8 +137,14 @@ onBeforeUnmount(() => {
     <div v-else-if="state.phase === 'ready'" class="pdf-translation-ready">
       <div class="pdf-translation-markdown" v-html="renderedTranslation"></div>
       <footer class="pdf-translation-actions">
-        <button type="button" title="复制译文 Markdown" aria-label="复制译文 Markdown" @click="copyTranslation">
-          <Copy :size="17" aria-hidden="true" />
+        <button
+          class="pdf-translation-primary-icon"
+          type="button"
+          title="复制译文 Markdown"
+          aria-label="复制译文 Markdown"
+          @click="copyTranslation"
+        >
+          <Copy :size="22" :stroke-width="2.2" aria-hidden="true" />
         </button>
       </footer>
     </div>
@@ -170,13 +182,33 @@ onBeforeUnmount(() => {
   display: inline-flex;
   width: 34px;
   height: 34px;
+  min-width: 34px;
+  min-height: 34px;
+  flex: 0 0 34px;
   align-items: center;
   justify-content: center;
+  padding: 0;
   border: 1px solid transparent;
   border-radius: 6px;
   background: transparent;
   color: var(--ink);
   cursor: pointer;
+}
+.pdf-translation-head button svg,
+.pdf-translation-actions button svg {
+  display: block;
+  flex: 0 0 auto;
+}
+.pdf-translation-head .pdf-translation-primary-icon,
+.pdf-translation-actions .pdf-translation-primary-icon {
+  width: 40px;
+  height: 40px;
+  min-width: 40px;
+  min-height: 40px;
+  flex-basis: 40px;
+  border-color: var(--hairline);
+  background: #fff;
+  color: #252b30;
 }
 .pdf-translation-head button:hover,
 .pdf-translation-actions button:hover {

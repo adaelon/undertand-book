@@ -161,3 +161,14 @@
 
 **Entry point**: `.understand-book/1` -> isolated localhost server with real `.env` Provider -> production translation endpoint; then `UNDERSTAND_BOOK_MARKETPLACE_SOURCE=adaelon/undertand-book` -> `pnpm -C apps/desktop package:windows`.
 **Test**: `cargo test -p runtime -p server` (144 + 149 tests), `pnpm test` (120 tests), `pnpm build`, and `playwright test pdf-selection-translation.spec.ts` (2 tests). Package exit 0; exported setup and Tauri NSIS bundle are both 34,646,190 bytes with SHA-256 `6B7AF182C01783D2FBAB7632D1E45B3F5DDFB0D964A43B4426E1DEC5EF893C55`.
+
+## 2026-07-16 PDF translation icon visibility
+
+**Touched**:
+- `packages/web/src/components/PdfSelectionTranslationSurface.vue:primary icon buttons` - clears inherited global button padding and flex shrink, then gives Copy/Close fixed 40px hit areas with 22px, 2.2-stroke Lucide icons and visible button boundaries.
+- `packages/web/src/components/PdfSelectionTranslationSurface.test.ts:fixed icon size` - locks the Copy/Close class and SVG size/stroke contract.
+- `packages/web/playwright/pdf-selection-translation.spec.ts:desktop icon geometry` - verifies merged production CSS yields exact 40px buttons, zero horizontal padding, and 22px SVG bounds.
+- `dist/UnderstandBookSetup.exe` - rebuilds the Windows installer with the visible Copy/Close controls.
+
+**Entry point**: ready PDF selection translation surface -> Close in the header or Copy in the footer.
+**Test**: red-green component regression (5 tests), full `pnpm test` (121 tests), `pnpm build`, and desktop/mobile Playwright (2 tests) with inspected screenshots. Package exit 0; exported setup and Tauri NSIS bundle are both 34,637,772 bytes with SHA-256 `177F2825C44EF0B82B8CB1281E898ECD3C4FBC7C6C249A185CFF1F58AF91896A`.

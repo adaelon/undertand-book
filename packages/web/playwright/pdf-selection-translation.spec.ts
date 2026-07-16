@@ -16,6 +16,31 @@ test("desktop translation stays anchored, flips in view, and does not resize the
   const surface = page.getByRole("dialog", { name: "PDF 选区翻译" });
   await expect(surface.locator(".katex")).toBeVisible();
   await expect(page.getByRole("button", { name: "高亮" })).toBeEnabled();
+  for (const name of ["关闭翻译", "复制译文 Markdown"]) {
+    const button = page.getByRole("button", { name });
+    await expect(button).toBeVisible();
+    const geometry = await button.evaluate((element) => {
+      const buttonBox = element.getBoundingClientRect();
+      const iconBox = element.querySelector("svg")!.getBoundingClientRect();
+      const style = getComputedStyle(element);
+      return {
+        buttonWidth: buttonBox.width,
+        buttonHeight: buttonBox.height,
+        iconWidth: iconBox.width,
+        iconHeight: iconBox.height,
+        paddingLeft: style.paddingLeft,
+        paddingRight: style.paddingRight,
+      };
+    });
+    expect(geometry).toEqual({
+      buttonWidth: 40,
+      buttonHeight: 40,
+      iconWidth: 22,
+      iconHeight: 22,
+      paddingLeft: "0px",
+      paddingRight: "0px",
+    });
+  }
   const surfaceBox = await surface.boundingBox();
   const selectionBox = await page.locator(".translation-selection").boundingBox();
   expect(surfaceBox).not.toBeNull();
