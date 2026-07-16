@@ -125,6 +125,48 @@ describe("automatic build orchestrator", () => {
     expect(nextAutomaticBuildAction(snapshot)).toEqual({ kind: "close_stage", stage: "pass1" });
   });
 
+  it("reopens Pass1 when fresh artifacts disagree with the closed base graph", () => {
+    const root = tempDir();
+    const workspace = writeTrustedPaperWorkspace(root);
+    const sourcePath = path.join(workspace, "source.txt");
+    const source = readFileSync(sourcePath, "utf8");
+    const lidNodes = segment(markdownToBlocks(source));
+    const byLid = new Map(lidNodes.map((node) => [node.lid, node]));
+    const windows = splitWindows(lidNodes, source);
+    const profile = resolveContentProfile("paper");
+    const anchorLid = lidNodes.find((node) => node.children.length === 0)!.lid;
+    for (const window of windows) {
+      writeJson(
+        path.join(workspace, ".build", "pass1", `${window.id}.json`),
+        buildPass1Artifact(window, byLid, source, {
+          nodes: window.id === windows[0].id ? [{
+            id: "concept:retrieval",
+            type: "concept",
+            name: "retrieval",
+            occurrences: [anchorLid],
+            source_lid: null,
+          }] : [],
+          edges: [],
+        }, profile),
+      );
+    }
+    writeJson(path.join(workspace, "base.json"), {
+      book_id: "paper-a",
+      lid_nodes: lidNodes,
+      graph_nodes: [],
+      graph_edges: [],
+    });
+    writeJson(path.join(workspace, "profile_metadata.json"), {
+      header: { book_id: "paper-a", profile_id: "paper" },
+    });
+    writeJson(path.join(workspace, "long_range_candidates.json"), { candidates: [] });
+
+    const snapshot = buildAutomaticBuildSnapshot(resolveAutomaticBuildTarget(workspace, root));
+
+    expect(snapshot.stages).toEqual([{ stage: "pass1", pending_tasks: [], closed: false }]);
+    expect(nextAutomaticBuildAction(snapshot)).toEqual({ kind: "close_stage", stage: "pass1" });
+  });
+
   it("paper Pass1 close preserves the trusted foundation manifest and PDF maps", () => {
     const root = tempDir();
     const workspace = writeTrustedPaperWorkspace(root);

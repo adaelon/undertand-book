@@ -101,6 +101,43 @@ describe("PH17 Workbench deterministic stage runtime", () => {
     expect(existsSync(path.join(dir, ".build", "paper-reading-guide", "completion.json"))).toBe(true);
   });
 
+  it("preserves a same-LID semantic graph when hybrid foundation reruns", async () => {
+    const { dir } = workspace("Hello PDF\n", "Hello PDF");
+    await runWorkbenchStage({ book_dir: dir, job_id: "job_fixture", stage: "source_reconciliation", now: "2" });
+    await runWorkbenchStage({ book_dir: dir, job_id: "job_fixture", stage: "hybrid_foundation", now: "3" });
+    const basePath = path.join(dir, "base.json");
+    const base = JSON.parse(readFileSync(basePath, "utf8"));
+    const anchorLid = base.lid_nodes.find((node: { children: string[] }) => node.children.length === 0).lid;
+    const graphNodes = [{
+      id: "concept:hello",
+      type: "concept",
+      name: "Hello",
+      occurrences: [anchorLid],
+      source_lid: null,
+    }, {
+      id: `claim:${anchorLid}:hello`,
+      type: "claim",
+      name: "Hello PDF",
+      occurrences: [],
+      source_lid: anchorLid,
+    }];
+    const graphEdges = [{
+      source: "concept:hello",
+      target: `claim:${anchorLid}:hello`,
+      type: "supports",
+      direction: "directed",
+      scope: "local",
+      weight: 1,
+    }];
+    writeFileSync(basePath, JSON.stringify({ ...base, graph_nodes: graphNodes, graph_edges: graphEdges }, null, 2));
+
+    await runWorkbenchStage({ book_dir: dir, job_id: "job_fixture", stage: "hybrid_foundation", now: "4" });
+    const after = JSON.parse(readFileSync(basePath, "utf8"));
+
+    expect(after.graph_nodes).toEqual(graphNodes);
+    expect(after.graph_edges).toEqual(graphEdges);
+  });
+
   it("blocks for review, then applies recorded PDF evidence and reruns the same gate", async () => {
     const { dir } = workspace("The measured value is 42 mg.\n", "The measured value is 43 mg.");
 

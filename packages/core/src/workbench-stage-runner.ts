@@ -4,6 +4,8 @@ import { spawn } from "node:child_process";
 import path from "node:path";
 import { extractPdfTextGeometry } from "./pdf-geometry";
 import { buildHybridFoundation, writeHybridFoundationArtifacts } from "./hybrid-foundation";
+import { mergeHybridFoundationBase, sameLidIdentity } from "./hybrid-foundation-apply";
+import { ReadOnlyBaseZ } from "./zod";
 import {
   acceptSourceReconciliationManualOverride,
   buildReviewedDraftFromDecisions,
@@ -267,7 +269,14 @@ async function runHybridFoundation(
     original_pdf_sha256: manifest.fingerprint.paper_pdf_sha256,
     pdf_geometry: geometry,
   });
-  writeHybridFoundationArtifacts(bookDir, source, artifacts);
+  const basePath = path.join(bookDir, "base.json");
+  const existingBase = existsSync(basePath)
+    ? ReadOnlyBaseZ.parse(readJson<unknown>(basePath))
+    : undefined;
+  const base = existingBase && sameLidIdentity(existingBase, artifacts.base)
+    ? mergeHybridFoundationBase(existingBase, artifacts.base)
+    : artifacts.base;
+  writeHybridFoundationArtifacts(bookDir, source, { ...artifacts, base });
   const readiness = detectBuildReadiness(
     readBuildWorkbenchSnapshot(bookDir, { current_input_fingerprint: manifest.fingerprint }),
   );

@@ -8,7 +8,8 @@ import { markdownToBlocks } from "./md-adapter";
 import { epubToSource } from "./epub-adapter";
 import { segment } from "./segment";
 import { splitWindows } from "./window";
-import { computeBuildStatus, type Pass1ArtifactMeta } from "./build-resume";
+import { computeBuildStatus, type Pass1Artifact, type Pass1ArtifactMeta } from "./build-resume";
+import { mergeAndGate } from "./merge";
 import { computePaperMetadataStatus } from "./paper-metadata";
 import { computePaperLexiconStatus } from "./paper-lexicon";
 import { computeProfileSidecarStatus } from "./profile-sidecar-build";
@@ -131,6 +132,47 @@ function artifactMetaByNumericTask(dir: string, taskIds: number[]): Map<number, 
   return result;
 }
 
+function pass1ArtifactsByNumericTask(dir: string, taskIds: number[]): Map<number, Pass1Artifact> {
+  const result = new Map<number, Pass1Artifact>();
+  for (const id of taskIds) {
+    const file = path.join(dir, `${id}.json`);
+    if (!existsSync(file)) continue;
+    const artifact = readJson<Pass1Artifact>(file);
+    if (
+      typeof artifact.content_hash === "string"
+      && Array.isArray(artifact.nodes)
+      && Array.isArray(artifact.edges)
+    ) {
+      result.set(id, artifact);
+    }
+  }
+  return result;
+}
+
+function pass1GraphMatchesClosedBase(
+  basePath: string,
+  doneTaskIds: number[],
+  artifacts: Map<number, Pass1Artifact>,
+  lidNodes: LoadedAutomaticBook["lidNodes"],
+): boolean {
+  if (!existsSync(basePath) || doneTaskIds.some((id) => !artifacts.has(id))) return false;
+  try {
+    const base = readJson<ReadOnlyBase>(basePath);
+    const expected = mergeAndGate(
+      doneTaskIds.map((id) => {
+        const artifact = artifacts.get(id)!;
+        return { nodes: artifact.nodes, edges: artifact.edges };
+      }),
+      lidNodes,
+    );
+    const closedLocalEdges = base.graph_edges.filter((edge) => edge.scope !== "long_range");
+    return JSON.stringify(base.graph_nodes) === JSON.stringify(expected.nodes)
+      && JSON.stringify(closedLocalEdges) === JSON.stringify(expected.edges);
+  } catch {
+    return false;
+  }
+}
+
 function profileArtifactMatches(file: string, target: AutomaticBuildTarget): boolean {
   if (!existsSync(file)) return false;
   const value = readJson<{ header?: { book_id?: string; profile_id?: string } }>(file);
@@ -243,13 +285,20 @@ export function buildAutomaticBuildSnapshot(target: AutomaticBuildTarget): Autom
   const profile = resolveContentProfile(target.profile_id);
   const buildRoot = path.join(target.workspace_dir, ".build");
 
-  const pass1Meta = artifactMetaByNumericTask(
+  const pass1Artifacts = pass1ArtifactsByNumericTask(
     path.join(buildRoot, "pass1"),
     loaded.windows.map((window) => window.id),
   );
-  const pass1 = computeBuildStatus(loaded.windows, loaded.byLid, loaded.source, pass1Meta, profile);
+  const pass1 = computeBuildStatus(loaded.windows, loaded.byLid, loaded.source, pass1Artifacts, profile);
   const pass1Closed = profileArtifactMatches(path.join(target.workspace_dir, "profile_metadata.json"), target)
-    && existsSync(path.join(target.workspace_dir, "long_range_candidates.json"));
+    && existsSync(path.join(target.workspace_dir, "long_range_candidates.json"))
+    && pass1.pending.length === 0
+    && pass1GraphMatchesClosedBase(
+      path.join(target.workspace_dir, "base.json"),
+      pass1.done,
+      pass1Artifacts,
+      loaded.lidNodes,
+    );
   stages.push(stageState("pass1", pass1.pending, pass1Closed));
   if (pass1.pending.length || !pass1Closed) return { target, stages };
 

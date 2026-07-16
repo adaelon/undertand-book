@@ -239,10 +239,25 @@ visible_nodes = endpoints(selected_edges) + ranked_fill(remaining_budget)
 
 Base endpoint 为 15 regions、181 landmarks、18 relations;arguments 为 `degraded` 而非 `unavailable`,原因是仍有部分 relation source/candidate 不可用。Web 会渲染已有关系并显示部分降级提示。
 
-### 7.3 最终门禁
+### 7.3 预构建责任闭环
+
+预构建对此故障负直接、主要责任,不是单纯的 Reader 展示问题:
+
+- `hybrid foundation` 产出的 candidate graph 本来为空;旧的 candidate apply 路径整体替换正式 `base.json`,直接抹掉了已闭合的 Pass1/Pass2 graph。
+- Workbench 的进程内 `runHybridFoundation()` 还存在一条绕过 candidate apply helper 的直接写回路径;同 LID 重跑同样可以再次清空 graph。
+- 自动预构建旧的 Pass1 `closed` 判据只检查 `profile_metadata.json` header 与 `long_range_candidates.json` 是否存在,没有核对正式 graph,因此“artifact 完整、base graph 已空”的 workspace 会被误判为绿色并跳过恢复。
+- Reader/Web 的旧空态合并放大了问题,但它是次级症状:上游 graph 已经被写坏,三个阅读 mode 共享同一空关系基座。
+
+闭环后的确定性不变量:
+
+- 外部 candidate apply 与 Workbench 进程内重跑都在 LID identity 相同时保留并复验正式 semantic graph;LID 改变时不沿用不兼容 graph。
+- 自动预构建从所有 fresh Pass1 artifacts 重新执行 `mergeAndGate`,要求期望 nodes/local edges 与 `base.json` 精确一致后才承认 Pass1 closed;不一致会返回 `close_stage: pass1`,由 `--preserve-foundation` 路径确定性重闭合。
+- 该保护不改抽取算法、不生成关系、不改 LID/PDF truth,只阻止写坏与假绿。
+
+### 7.4 最终门禁
 
 - Rust:`read-tools 126 + reader 54 + runtime 144 + server 153` 全绿。
-- Core:216/216;typecheck 通过。
+- Core:218/218;typecheck 通过。
 - Web:全量 Vitest 通过;typecheck + production build(1912 modules)通过。
 - PaperMinimap component:11/11;Playwright desktop 1440x900 + mobile 390x844 = 2/2。
 - `cargo fmt --check`、`git diff --check` 通过;仅保留仓库既有 ts-rs serde warning 与 Vite chunk-size warning。
