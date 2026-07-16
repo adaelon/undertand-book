@@ -146,4 +146,17 @@ describe("PDF selection translation controller", () => {
     expect(pane).toContain('@scroll.passive="onViewportScroll"');
     expect(pane).toContain('emit("viewport-interaction")');
   });
+
+  it("starts translation without consuming the selection action draft", () => {
+    const app = readFileSync("src/App.vue", "utf8");
+    const start = app.indexOf("function translatePdfSelection()");
+    const end = app.indexOf("function closePdfSelectionTranslation()", start);
+    const translationAction = app.slice(start, end);
+
+    expect(translationAction).toContain("pdfSelectionState.value.draft");
+    expect(translationAction).toContain("pdfSelectionTranslation.start(draft)");
+    expect(translationAction).not.toContain("beginAction");
+    expect(app).toContain("<PdfSelectionTranslationSurface");
+    expect(app).toContain("pdfSelectionTranslationState.phase === 'loading'");
+  });
 });

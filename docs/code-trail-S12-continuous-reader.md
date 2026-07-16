@@ -132,3 +132,15 @@
 
 **Entry point**: `App.vue` constructs the controller against `api.pdfSelectionTranslate`; PT4 will expose `start()` from the selection toolbar and render its state.
 **Test**: `pnpm test` (115 tests) and `pnpm build` in `packages/web`.
+
+## 2026-07-16 PT4 PDF selection translation surface
+
+**Touched**:
+- `packages/web/src/App.vue:translatePdfSelection/PdfSelectionTranslationSurface` - adds the explicit Languages action without consuming the selection draft, disables other selection actions only while loading, and keeps both close paths available.
+- `packages/web/src/components/PdfSelectionTranslationSurface.vue` - renders loading/error/ready states, Markdown and KaTeX output, copy/retry/settings/close actions, desktop clamp-and-flip placement, and a narrow-screen bottom sheet.
+- `packages/web/src/components/PdfSelectionTranslationSurface.test.ts:PDF selection translation surface` - covers Markdown/KaTeX output, actions, loading/error controls, desktop placement, and mobile mode.
+- `packages/web/pdf-selection-translation-visual.html` and `packages/web/src/pdf-selection-translation-visual.ts` - provide a real controller/component fixture with delayed success and failure Provider responses.
+- `packages/web/playwright/pdf-selection-translation.spec.ts:PDF selection translation visual acceptance` - checks stable toolbar dimensions, loading gates, formula rendering, desktop viewport placement, and a 390px bottom sheet.
+
+**Entry point**: select paper PDF text -> click the Languages `翻译` action -> `usePdfSelectionTranslation.start` -> independent translation surface.
+**Test**: `pnpm test` (120 tests), `pnpm build`, and `playwright test pdf-selection-translation.spec.ts` (2 tests); desktop and 390px screenshots inspected for overlap and overflow.

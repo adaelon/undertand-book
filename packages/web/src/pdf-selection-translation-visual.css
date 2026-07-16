@@ -1,0 +1,101 @@
+.translation-visual {
+  min-height: 100vh;
+  overflow: hidden;
+  background: #edf0ed;
+  color: var(--ink);
+}
+.translation-visual-header {
+  height: 54px;
+  display: flex;
+  align-items: center;
+  padding: 0 1.2rem;
+  border-bottom: 1px solid var(--hairline);
+  background: #fff;
+  font-size: 0.86rem;
+  font-weight: 700;
+}
+.translation-paper {
+  position: relative;
+  width: min(680px, calc(100vw - 32px));
+  height: min(720px, calc(100vh - 92px));
+  margin: 18px auto;
+  overflow: hidden;
+  border: 1px solid #d8dcd7;
+  background: #fff;
+  box-shadow: 0 8px 24px rgba(29, 34, 39, 0.1);
+}
+.translation-paper-copy {
+  max-width: 540px;
+  margin: 3.4rem auto 0;
+  padding: 0 1.3rem;
+  color: #343a40;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 1rem;
+  line-height: 1.8;
+}
+.translation-selection {
+  position: absolute;
+  right: 12%;
+  bottom: 68px;
+  left: 14%;
+  padding: 0.28rem 0.35rem;
+  background: rgba(83, 145, 190, 0.24);
+  font-family: Georgia, "Times New Roman", serif;
+  line-height: 1.5;
+}
+.translation-visual-toolbar {
+  position: fixed;
+  z-index: 50;
+  left: 50%;
+  bottom: 20px;
+  transform: translateX(-50%);
+  display: flex;
+  min-width: min(336px, calc(100vw - 16px));
+  min-height: 44px;
+  align-items: center;
+  justify-content: center;
+  gap: 0.25rem;
+  padding: 0.25rem;
+  border-radius: 8px;
+  background: var(--ink);
+}
+.translation-visual-toolbar button {
+  display: inline-flex;
+  min-height: 36px;
+  align-items: center;
+  justify-content: center;
+  gap: 0.3rem;
+  padding: 0.28rem 0.65rem;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #fff;
+  font-size: 0.82rem;
+}
+.translation-visual-toolbar button:disabled {
+  opacity: 0.42;
+}
+.translation-visual-status {
+  position: fixed;
+  top: 64px;
+  right: 14px;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+@media (max-width: 640px) {
+  .translation-paper {
+    width: calc(100vw - 18px);
+    height: calc(100vh - 74px);
+    margin: 10px auto;
+  }
+  .translation-paper-copy {
+    margin-top: 2rem;
+    font-size: 0.88rem;
+  }
+  .translation-selection {
+    bottom: 104px;
+  }
+  .translation-visual-toolbar {
+    bottom: 10px;
+  }
+}

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { FolderOpen, Highlighter, MessageSquareText, RotateCcw, Save, Sparkles, X } from "@lucide/vue";
+import { FolderOpen, Highlighter, Languages, MessageSquareText, RotateCcw, Save, Sparkles, X } from "@lucide/vue";
 import { api, ApiError } from "./api";
 import type {
   AgentChatSessionSummary,
@@ -52,6 +52,7 @@ import {
   type PdfSelectionTranslationInvalidation,
   usePdfSelectionTranslation,
 } from "./pdf-selection-translation";
+import PdfSelectionTranslationSurface from "./components/PdfSelectionTranslationSurface.vue";
 import {
   buildPdfProjectionBatch,
   EMPTY_PDF_ANNOTATION_PROJECTION,
@@ -2092,6 +2093,11 @@ const pdfSelectionTranslation = usePdfSelectionTranslation((request) =>
   api.pdfSelectionTranslate(request),
 );
 const pdfSelectionState = pdfSelectionSession.state;
+const pdfSelectionTranslationState = pdfSelectionTranslation.state;
+const showPdfTranslationSettings = computed(() =>
+  desktopHost.value
+  && pdfSelectionTranslationState.value.error?.error_code === "TRANSLATION_PROVIDER_UNCONFIGURED",
+);
 const pdfReselectTarget = ref<{
   kind: "note" | "highlight";
   record: MemoryRecord;
@@ -2101,7 +2107,7 @@ const pdfSelectionToolbarStyle = computed(() => {
   if (!rect) return {};
   const center = (rect.left + rect.right) / 2;
   return {
-    left: `clamp(132px, ${center}px, calc(100vw - 132px))`,
+    left: `clamp(178px, ${center}px, calc(100vw - 178px))`,
     top: `${Math.max(8, rect.top - 48)}px`,
   };
 });
@@ -2124,6 +2130,29 @@ function cancelPdfSelectionDraft() {
 function onPdfViewportInteraction() {
   pdfSelectionTranslation.invalidate("viewport");
   clearOutlineNavigation();
+}
+
+function translatePdfSelection() {
+  const draft = pdfSelectionState.value.draft;
+  if (!draft || pdfSelectionTranslationState.value.phase === "loading") return;
+  void pdfSelectionTranslation.start(draft);
+}
+
+function closePdfSelectionTranslation() {
+  pdfSelectionTranslation.invalidate("close");
+}
+
+function retryPdfSelectionTranslation() {
+  void pdfSelectionTranslation.retry();
+}
+
+async function copyPdfSelectionTranslation(markdown: string) {
+  try {
+    await navigator.clipboard.writeText(markdown);
+    banner.value = "译文已复制";
+  } catch (error) {
+    fail(error);
+  }
 }
 
 function selectionContextOf(draft: PdfSelectionDraft): SelectionContext {
@@ -3344,7 +3373,7 @@ async function submitOpenBook(dir = bookPickerDir.value) {
         <span v-if="pdfSelectionState.draft.status === 'partial'" class="pdf-selection-status">部分定位</span>
         <button
           title="高亮"
-          :disabled="pdfSelectionState.phase === 'saving' || pdfSelectionState.draft.status !== 'resolved'"
+          :disabled="pdfSelectionState.phase === 'saving' || pdfSelectionTranslationState.phase === 'loading' || pdfSelectionState.draft.status !== 'resolved'"
           @mousedown.prevent="highlightPdfSelection"
         >
           <Highlighter :size="16" />
@@ -3352,7 +3381,7 @@ async function submitOpenBook(dir = bookPickerDir.value) {
         </button>
         <button
           title="笔记"
-          :disabled="pdfSelectionState.phase === 'saving'"
+          :disabled="pdfSelectionState.phase === 'saving' || pdfSelectionTranslationState.phase === 'loading'"
           @mousedown.prevent="notePdfSelection"
         >
           <MessageSquareText :size="16" />
@@ -3360,11 +3389,19 @@ async function submitOpenBook(dir = bookPickerDir.value) {
         </button>
         <button
           title="问 AI"
-          :disabled="pdfSelectionState.phase === 'saving'"
+          :disabled="pdfSelectionState.phase === 'saving' || pdfSelectionTranslationState.phase === 'loading'"
           @mousedown.prevent="askPdfSelection"
         >
           <Sparkles :size="16" />
           <span>问 AI</span>
+        </button>
+        <button
+          title="翻译"
+          :disabled="pdfSelectionState.phase === 'saving' || pdfSelectionTranslationState.phase === 'loading'"
+          @mousedown.prevent="translatePdfSelection"
+        >
+          <Languages :size="16" />
+          <span>翻译</span>
         </button>
         <span v-if="pdfSelectionState.error" class="pdf-selection-status error">{{ pdfSelectionState.error }}</span>
       </template>
@@ -3372,6 +3409,18 @@ async function submitOpenBook(dir = bookPickerDir.value) {
         <X :size="16" />
       </button>
     </div>
+
+    <PdfSelectionTranslationSurface
+      v-if="pdfSelectionTranslationState.phase !== 'idle' && pdfSelectionState.draft"
+      :state="pdfSelectionTranslationState"
+      :anchor-rect="pdfSelectionState.draft.screen_rect"
+      :render-markdown="renderMarkdown"
+      :show-settings="showPdfTranslationSettings"
+      @close="closePdfSelectionTranslation"
+      @retry="retryPdfSelectionTranslation"
+      @settings="openDesktopSettings"
+      @copy="copyPdfSelectionTranslation"
+    />
 
     <div
       v-if="hlPopover"
@@ -3772,7 +3821,7 @@ async function submitOpenBook(dir = bookPickerDir.value) {
   opacity: 0.42;
 }
 .pdf-selection-toolbar {
-  min-width: 248px;
+  min-width: min(336px, calc(100vw - 16px));
   max-width: min(520px, calc(100vw - 16px));
   min-height: 44px;
   align-items: center;
