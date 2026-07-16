@@ -1130,10 +1130,6 @@ fn save_agent_history_path(
     persist_agent_history_atomically(path, history)
 }
 
-fn save_agent_history(state: &AppState) -> Result<(), ToolError> {
-    save_agent_history_path(&state.history_path, &state.agent_history)
-}
-
 #[derive(Debug, Clone)]
 struct AgentTurnRef {
     session_id: String,
@@ -1352,17 +1348,39 @@ fn session_summary(s: &AgentChatSession) -> AgentChatSessionSummary {
     }
 }
 
-fn agent_history_response(state: &mut AppState, now: &str) -> AgentHistoryResponse {
-    let book_id = state.book.base.book_id.clone();
-    let i = ensure_active_agent_session(&mut state.agent_history, &book_id, now);
-    state.messages = state.agent_history.sessions[i].messages.clone();
-    let active_session_id = state.agent_history.sessions[i].id.clone();
-    let current = session_view(&state.agent_history.sessions[i]);
-    let mut sessions: Vec<AgentChatSessionSummary> = state
-        .agent_history
+fn active_agent_session_index(history: &AgentHistory, book_id: &str) -> Option<usize> {
+    history
+        .active_by_book
+        .get(book_id)
+        .and_then(|active_id| {
+            history
+                .sessions
+                .iter()
+                .position(|session| session.book_id == book_id && &session.id == active_id)
+        })
+        .or_else(|| {
+            history
+                .sessions
+                .iter()
+                .rposition(|session| session.book_id == book_id)
+        })
+}
+
+fn agent_history_response(
+    history: &AgentHistory,
+    book_id: &str,
+) -> Result<AgentHistoryResponse, ToolError> {
+    let i = active_agent_session_index(history, book_id).ok_or_else(|| {
+        agent_history_internal(format!(
+            "agent history has no session for current book: {book_id}"
+        ))
+    })?;
+    let active_session_id = history.sessions[i].id.clone();
+    let current = session_view(&history.sessions[i]);
+    let mut sessions: Vec<AgentChatSessionSummary> = history
         .sessions
         .iter()
-        .filter(|s| s.book_id == book_id)
+        .filter(|session| session.book_id == book_id)
         .map(session_summary)
         .collect();
     sessions.sort_by(|a, b| {
@@ -1371,11 +1389,11 @@ fn agent_history_response(state: &mut AppState, now: &str) -> AgentHistoryRespon
             .then_with(|| b.created_at.cmp(&a.created_at))
             .then_with(|| b.id.cmp(&a.id))
     });
-    AgentHistoryResponse {
+    Ok(AgentHistoryResponse {
         active_session_id,
         sessions,
         current,
-    }
+    })
 }
 
 /// 一次请求的传输无关输入:方法 + 原始 url(含 query)+ JSON body(GET 为空)+ 时间戳。
@@ -1609,17 +1627,17 @@ pub fn route(state: &mut AppState, req: Req) -> Reply {
         if req.method != "GET" {
             return agent_history_method_not_allowed();
         }
-        let response = agent_history_response(state, req.now);
-        if let Err(e) = save_agent_history(state) {
-            return err_reply(&e);
-        }
-        return ok_json(&response);
+        let book_id = state.book.base.book_id.as_str();
+        return match agent_history_response(&state.agent_history, book_id) {
+            Ok(response) => ok_json(&response),
+            Err(error) => err_reply(&error),
+        };
     }
     if path == "/agent/history/select" {
         if req.method != "POST" {
             return agent_method_not_allowed();
         }
-        return route_agent_history_select(state, req.body, req.now);
+        return route_agent_history_select(state, req.body);
     }
     if path == "/agent/history/delete" {
         if req.method != "POST" {
@@ -1737,16 +1755,18 @@ fn route_open_book(state: &mut AppState, body: &str, now: &str) -> Reply {
     {
         return err_reply(&error);
     }
+    let mut history_candidate = state.agent_history.clone();
+    let messages =
+        ensure_agent_history_for_book(&mut history_candidate, &book.base.book_id, now);
+    if let Err(e) = commit_agent_history_candidate(state, history_candidate) {
+        return err_reply(&e);
+    }
     state.reader = reader;
     state.book_dir = PathBuf::from(dir);
     let _ = register_external_workspace(state, Path::new(dir));
     state.book = book;
     state.workbench_loaded_revision = None;
-    state.messages =
-        ensure_agent_history_for_book(&mut state.agent_history, &state.book.base.book_id, now);
-    if let Err(e) = save_agent_history(state) {
-        return err_reply(&e);
-    }
+    state.messages = messages;
     let _ = save_session(state, Some(dir));
     ok_json(&json!({ "ok": true, "book_id": state.book.base.book_id }))
 }
@@ -5090,14 +5110,16 @@ fn route_build_workbench_state(state: &mut AppState, now: &str) -> Reply {
         }
     };
     if loaded.base != state.book.base || revision != state.workbench_loaded_revision {
+        let mut history_candidate = state.agent_history.clone();
+        let messages =
+            ensure_agent_history_for_book(&mut history_candidate, &loaded.base.book_id, now);
+        if let Err(e) = commit_agent_history_candidate(state, history_candidate) {
+            return err_reply(&e);
+        }
         state.reader = Reader::new(&loaded, DEFAULT_RADIUS);
         state.book = loaded;
         state.workbench_loaded_revision = revision;
-        state.messages =
-            ensure_agent_history_for_book(&mut state.agent_history, &state.book.base.book_id, now);
-        if let Err(e) = save_agent_history(state) {
-            return err_reply(&e);
-        }
+        state.messages = messages;
         let _ = save_session(state, Some(&dir));
     }
     reply
@@ -8493,22 +8515,26 @@ fn route_agent_new(state: &mut AppState, now: &str) -> Reply {
         return err_reply(&error);
     }
     let book_id = state.book.base.book_id.clone();
-    let ordinal = state.agent_history.sessions.len();
+    let mut candidate = state.agent_history.clone();
+    let ordinal = candidate.sessions.len();
     let session = new_agent_session(&book_id, now, ordinal);
-    state
-        .agent_history
+    candidate
         .active_by_book
-        .insert(book_id, session.id.clone());
-    state.messages = session.messages.clone();
-    state.agent_history.sessions.push(session);
-    let response = agent_history_response(state, now);
-    if let Err(e) = save_agent_history(state) {
+        .insert(book_id.clone(), session.id.clone());
+    let messages = session.messages.clone();
+    candidate.sessions.push(session);
+    let response = match agent_history_response(&candidate, &book_id) {
+        Ok(response) => response,
+        Err(error) => return err_reply(&error),
+    };
+    if let Err(e) = commit_agent_history_candidate(state, candidate) {
         return err_reply(&e);
     }
+    state.messages = messages;
     ok_json(&json!({ "ok": true, "history": response }))
 }
 
-fn route_agent_history_select(state: &mut AppState, body: &str, now: &str) -> Reply {
+fn route_agent_history_select(state: &mut AppState, body: &str) -> Reply {
     let v = match body_value(body) {
         Ok(v) => v,
         Err(reply) => return reply,
@@ -8517,8 +8543,8 @@ fn route_agent_history_select(state: &mut AppState, body: &str, now: &str) -> Re
         return validation("INVALID_RANGE", "agent.history.select 需 session_id");
     };
     let book_id = state.book.base.book_id.clone();
-    let Some(idx) = state
-        .agent_history
+    let mut candidate = state.agent_history.clone();
+    let Some(idx) = candidate
         .sessions
         .iter()
         .position(|s| s.book_id == book_id && s.id == session_id)
@@ -8528,15 +8554,18 @@ fn route_agent_history_select(state: &mut AppState, body: &str, now: &str) -> Re
             "agent history session 不属于当前 book 或不存在",
         );
     };
-    state
-        .agent_history
+    candidate
         .active_by_book
-        .insert(book_id, session_id.into());
-    state.messages = state.agent_history.sessions[idx].messages.clone();
-    let response = agent_history_response(state, now);
-    if let Err(e) = save_agent_history(state) {
+        .insert(book_id.clone(), session_id.into());
+    let messages = candidate.sessions[idx].messages.clone();
+    let response = match agent_history_response(&candidate, &book_id) {
+        Ok(response) => response,
+        Err(error) => return err_reply(&error),
+    };
+    if let Err(e) = commit_agent_history_candidate(state, candidate) {
         return err_reply(&e);
     }
+    state.messages = messages;
     ok_json(&response)
 }
 
@@ -8549,36 +8578,38 @@ fn route_agent_history_delete(state: &mut AppState, body: &str, now: &str) -> Re
         return validation("INVALID_RANGE", "agent.history.delete 需 session_id");
     };
     let book_id = state.book.base.book_id.clone();
-    let before = state.agent_history.sessions.len();
-    state
-        .agent_history
+    let mut candidate = state.agent_history.clone();
+    let before = candidate.sessions.len();
+    candidate
         .sessions
         .retain(|s| !(s.book_id == book_id && s.id == session_id));
-    if state.agent_history.sessions.len() == before {
+    if candidate.sessions.len() == before {
         return validation(
             "INVALID_RANGE",
             "agent history session 不属于当前 book 或不存在",
         );
     }
-    state.agent_history.pending_memory_ops.remove(session_id);
-    state
-        .agent_history
+    candidate.pending_memory_ops.remove(session_id);
+    candidate
         .pending_governance_mutations
         .remove(session_id);
-    if state
-        .agent_history
+    if candidate
         .active_by_book
         .get(&book_id)
         .is_some_and(|id| id == session_id)
     {
-        state.agent_history.active_by_book.remove(&book_id);
+        candidate.active_by_book.remove(&book_id);
     }
-    let idx = ensure_active_agent_session(&mut state.agent_history, &book_id, now);
-    state.messages = state.agent_history.sessions[idx].messages.clone();
-    let response = agent_history_response(state, now);
-    if let Err(e) = save_agent_history(state) {
+    let idx = ensure_active_agent_session(&mut candidate, &book_id, now);
+    let messages = candidate.sessions[idx].messages.clone();
+    let response = match agent_history_response(&candidate, &book_id) {
+        Ok(response) => response,
+        Err(error) => return err_reply(&error),
+    };
+    if let Err(e) = commit_agent_history_candidate(state, candidate) {
         return err_reply(&e);
     }
+    state.messages = messages;
     ok_json(&response)
 }
 
@@ -13598,6 +13629,119 @@ mod tests {
         let deleted: serde_json::Value = serde_json::from_str(&deleted.body).unwrap();
         assert_eq!(deleted["active_session_id"], new_id);
         assert_eq!(deleted["sessions"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn agent_history_get_is_read_only_and_mutations_remain_atomic() {
+        let mut state = state_named("agent-history-read-only");
+        let history_path = tmp("agent-history-read-only-file");
+        state.history_path = Some(history_path.clone());
+        let created = post_at(
+            &mut state,
+            "/agent/new",
+            "{}",
+            "2026-07-16T00:00:00Z",
+        );
+        assert_eq!(created.status, 200, "{}", created.body);
+
+        let bytes_before_get = std::fs::read(&history_path).unwrap();
+        let history_before_get = serde_json::to_value(&state.agent_history).unwrap();
+        let messages_before_get = serde_json::to_value(&state.messages).unwrap();
+        for _ in 0..2 {
+            let response = get(&mut state, "/agent/history");
+            assert_eq!(response.status, 200, "{}", response.body);
+        }
+        assert_eq!(std::fs::read(&history_path).unwrap(), bytes_before_get);
+        assert_eq!(
+            serde_json::to_value(&state.agent_history).unwrap(),
+            history_before_get
+        );
+        assert_eq!(
+            serde_json::to_value(&state.messages).unwrap(),
+            messages_before_get
+        );
+
+        let blocker = tmp("agent-history-read-only-blocker");
+        std::fs::write(&blocker, b"not a directory").unwrap();
+        state.history_path = Some(blocker.join("agent-history.json"));
+        let blocked_get = get(&mut state, "/agent/history");
+        assert_eq!(blocked_get.status, 200, "{}", blocked_get.body);
+
+        let history_before_failed_mutation = serde_json::to_value(&state.agent_history).unwrap();
+        let messages_before_failed_mutation = serde_json::to_value(&state.messages).unwrap();
+        let failed_mutation = post_at(
+            &mut state,
+            "/agent/new",
+            "{}",
+            "2026-07-16T00:01:00Z",
+        );
+        assert_eq!(failed_mutation.status, 500, "{}", failed_mutation.body);
+        assert_eq!(
+            serde_json::to_value(&state.agent_history).unwrap(),
+            history_before_failed_mutation
+        );
+        assert_eq!(
+            serde_json::to_value(&state.messages).unwrap(),
+            messages_before_failed_mutation
+        );
+        assert_eq!(std::fs::read(&history_path).unwrap(), bytes_before_get);
+
+        state.history_path = Some(history_path.clone());
+        let committed = post_at(
+            &mut state,
+            "/agent/new",
+            "{}",
+            "2026-07-16T00:02:00Z",
+        );
+        assert_eq!(committed.status, 200, "{}", committed.body);
+        assert_ne!(std::fs::read(&history_path).unwrap(), bytes_before_get);
+        assert_eq!(
+            serde_json::to_value(load_agent_history(&Some(history_path.clone())).unwrap()).unwrap(),
+            serde_json::to_value(&state.agent_history).unwrap()
+        );
+
+        let active_id = state
+            .agent_history
+            .active_by_book
+            .get(&state.book.base.book_id)
+            .unwrap()
+            .clone();
+        let other_id = state
+            .agent_history
+            .sessions
+            .iter()
+            .find(|session| session.id != active_id)
+            .unwrap()
+            .id
+            .clone();
+        let committed_bytes = std::fs::read(state.history_path.as_ref().unwrap()).unwrap();
+        state.history_path = Some(blocker.join("agent-history.json"));
+        let history_before_failed_commands = serde_json::to_value(&state.agent_history).unwrap();
+        let messages_before_failed_commands = serde_json::to_value(&state.messages).unwrap();
+
+        let select = post_at(
+            &mut state,
+            "/agent/history/select",
+            &json!({ "session_id": other_id }).to_string(),
+            "2026-07-16T00:03:00Z",
+        );
+        assert_eq!(select.status, 500, "{}", select.body);
+        let delete = post_at(
+            &mut state,
+            "/agent/history/delete",
+            &json!({ "session_id": active_id }).to_string(),
+            "2026-07-16T00:04:00Z",
+        );
+        assert_eq!(delete.status, 500, "{}", delete.body);
+        assert_eq!(
+            serde_json::to_value(&state.agent_history).unwrap(),
+            history_before_failed_commands
+        );
+        assert_eq!(
+            serde_json::to_value(&state.messages).unwrap(),
+            messages_before_failed_commands
+        );
+        assert_eq!(std::fs::read(&history_path).unwrap(), committed_bytes);
     }
 
     #[test]
