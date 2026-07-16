@@ -245,6 +245,11 @@ function scheduleViewportChange() {
   viewportFrame = window.requestAnimationFrame(emitViewportChange);
 }
 
+function onViewportScroll() {
+  scheduleViewportChange();
+  emit("viewport-interaction");
+}
+
 function pageShellStyle(page: PdfSourceMap["pages"][number]): Record<string, string> {
   const visual = pdfPageVisualSize(page);
   const zoomPercent = Math.round(zoom.value * 100);
@@ -868,7 +873,7 @@ onBeforeUnmount(() => {
       ref="pageList"
       class="pdf-page-list"
       :class="{ 'is-zoomed': zoom > 1 }"
-      @scroll.passive="scheduleViewportChange"
+      @scroll.passive="onViewportScroll"
       @wheel.passive="emit('viewport-interaction')"
       @pointerdown="emit('viewport-interaction')"
       @mouseup="capturePdfSelection"

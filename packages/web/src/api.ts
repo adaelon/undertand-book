@@ -279,6 +279,11 @@ export interface PdfSelectionResolveResponse {
   }>;
   quote_markdown: string;
 }
+export type SelectionTranslationRequest = SelectionContext;
+export interface SelectionTranslationResponse {
+  translation_markdown: string;
+  target_locale: "zh-CN";
+}
 export interface PdfRangesProjectResponse {
   projections: Array<{
     lid: string;
@@ -820,6 +825,8 @@ export const api = {
   note: (lid: string, text: string) => http<NoteEffect>("POST", "/reader/note", { lid, text }),
   pdfSelectionResolve: (body: { pageIndex?: number; raw_quote?: string; rects: Array<{ pageIndex?: number; bbox: [number, number, number, number] }> }) =>
     http<PdfSelectionResolveResponse>("POST", "/reader/pdf_selection.resolve", body),
+  pdfSelectionTranslate: (body: SelectionTranslationRequest) =>
+    http<SelectionTranslationResponse>("POST", "/reader/selection.translate", body),
   pdfRangesProject: (ranges: Array<{ lid: string; range: TextRange }>) =>
     http<PdfRangesProjectResponse>("POST", "/reader/pdf_ranges.project", { ranges }),
   layoutApply: (body: {

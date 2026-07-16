@@ -11,7 +11,7 @@ flowchart LR
   State --> Artifacts[Book artifacts and PDF selection map]
 ```
 
-- **Web reader** owns ephemeral interaction state and calls localhost Reader APIs.
+- **Web reader** owns ephemeral interaction state and calls localhost Reader APIs. `usePdfSelectionDraft` owns native selection resolution; the independent `usePdfSelectionTranslation` controller owns only translation request state.
 - **server::host** owns sockets, worker threads, the global `AppState` mutex, Provider configuration snapshots, and lock boundaries.
 - **AppState** owns the active immutable `Book` plus mutable Reader, memory, and Agent session state.
 - **runtime::ProviderRegistry** constructs Native/ReAct model adapters; timeout-bound adapters apply the supplied duration to the actual HTTP request.
@@ -34,6 +34,8 @@ POST /reader/selection.translate
 ```
 
 The Provider call cannot mutate Reader, Agent chat, memory, book text, citations, or caches. Existing Reader requests may acquire `AppState` while translation is waiting on the Provider.
+
+The web translation controller follows `IDLE -> LOADING -> READY | ERROR`. Every start increments a local sequence; new selection, existing selection action, book switch, scroll/zoom, close, or unmount increments it again and clears the surface, so late responses cannot restore stale UI. Repeating the same selection starts a fresh Provider request; no client cache is maintained.
 
 ## Decision Index
 

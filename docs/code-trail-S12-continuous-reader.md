@@ -119,3 +119,16 @@
 
 **Entry point**: HTTP `POST /reader/selection.translate`; the response remains an ephemeral `translation_markdown + zh-CN` projection.
 **Test**: `cargo test -p server selection_translation_` (8 tests) and `cargo test -p server` (149 tests).
+
+## 2026-07-16 PT3 PDF selection translation API and controller
+
+**Touched**:
+- `packages/web/src/api.ts:SelectionTranslationRequest/SelectionTranslationResponse/api.pdfSelectionTranslate` - adds the typed `POST /reader/selection.translate` client contract without a client request ID.
+- `packages/web/src/pdf-selection-translation.ts:usePdfSelectionTranslation` - owns loading/ready/error state, retry, request sequencing, typed errors, invalidation, and deliberately performs no caching or selection action.
+- `packages/web/src/App.vue:pdfSelectionTranslation lifecycle wiring` - invalidates translation on new selection, existing action, book switch, viewport interaction, close, and unmount while leaving `usePdfSelectionDraft` independent.
+- `packages/web/src/components/PdfReaderPane.vue:onViewportScroll` - emits viewport interaction for scrollbar/programmatic scrolling as well as wheel/pointer/zoom paths.
+- `packages/web/src/pdf-selection-translation.test.ts:PDF selection translation controller` - covers exact request payload, stale success/failure, retry, every invalidation reason, no cache, and App/PdfReader lifecycle wiring.
+- `docs/architecture.md:Major Data Flows` - records the independent controller state machine and stale-response sequence rule.
+
+**Entry point**: `App.vue` constructs the controller against `api.pdfSelectionTranslate`; PT4 will expose `start()` from the selection toolbar and render its state.
+**Test**: `pnpm test` (115 tests) and `pnpm build` in `packages/web`.

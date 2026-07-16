@@ -49,6 +49,10 @@ import {
   usePdfSelectionDraft,
 } from "./pdf-selection-draft";
 import {
+  type PdfSelectionTranslationInvalidation,
+  usePdfSelectionTranslation,
+} from "./pdf-selection-translation";
+import {
   buildPdfProjectionBatch,
   EMPTY_PDF_ANNOTATION_PROJECTION,
   projectPdfAnnotations,
@@ -1958,6 +1962,7 @@ onMounted(init);
 onBeforeUnmount(() => {
   if (paperPositionSyncTimer !== null) window.clearTimeout(paperPositionSyncTimer);
   if (profileBackfillPollTimer !== null) window.clearTimeout(profileBackfillPollTimer);
+  pdfSelectionTranslation.invalidate("unmount");
 });
 
 // ── 四动作 ──
@@ -2083,6 +2088,9 @@ function noteBlock(lid: string) {
 const pdfSelectionSession = usePdfSelectionDraft((capture) =>
   api.pdfSelectionResolve({ rects: capture.rects, raw_quote: capture.raw_quote }),
 );
+const pdfSelectionTranslation = usePdfSelectionTranslation((request) =>
+  api.pdfSelectionTranslate(request),
+);
 const pdfSelectionState = pdfSelectionSession.state;
 const pdfReselectTarget = ref<{
   kind: "note" | "highlight";
@@ -2099,12 +2107,23 @@ const pdfSelectionToolbarStyle = computed(() => {
 });
 
 function onPdfSelectionCapture(capture: PdfSelectionCapture) {
+  pdfSelectionTranslation.invalidate("selection");
   void pdfSelectionSession.capture(capture);
 }
 
-function cancelPdfSelectionDraft() {
+function cancelPdfSelectionDraftFor(reason: PdfSelectionTranslationInvalidation) {
+  pdfSelectionTranslation.invalidate(reason);
   pdfSelectionSession.cancel();
   pdfReselectTarget.value = null;
+}
+
+function cancelPdfSelectionDraft() {
+  cancelPdfSelectionDraftFor("close");
+}
+
+function onPdfViewportInteraction() {
+  pdfSelectionTranslation.invalidate("viewport");
+  clearOutlineNavigation();
 }
 
 function selectionContextOf(draft: PdfSelectionDraft): SelectionContext {
@@ -2117,18 +2136,21 @@ function selectionContextOf(draft: PdfSelectionDraft): SelectionContext {
 }
 
 function completePdfSelectionAction() {
+  pdfSelectionTranslation.invalidate("existing-action");
   pdfSelectionSession.complete();
   pdfReselectTarget.value = null;
   window.getSelection()?.removeAllRanges();
 }
 
 function reselectPdfNote(note: MemoryRecord) {
+  pdfSelectionTranslation.invalidate("existing-action");
   pdfSelectionSession.cancel();
   pdfReselectTarget.value = { kind: "note", record: note };
   banner.value = "重新框选 PDF 文字后选择“笔记”；保存成功前原位置保持不变。";
 }
 
 function reselectPdfHighlight(highlight: MemoryRecord) {
+  pdfSelectionTranslation.invalidate("existing-action");
   pdfSelectionSession.cancel();
   pdfReselectTarget.value = { kind: "highlight", record: highlight };
   banner.value = "重新框选 PDF 文字后选择“高亮”；新范围保存成功前原高亮保持不变。";
@@ -2793,7 +2815,7 @@ function resetBookSessionUi() {
   segments.value = [];
   annotations.value = [];
   resetPdfAnnotationProjection();
-  cancelPdfSelectionDraft();
+  cancelPdfSelectionDraftFor("book-switch");
   noteEditor.value = null;
   selectedLid.value = null;
   currentReadingLid.value = null;
@@ -3201,7 +3223,7 @@ async function submitOpenBook(dir = bookPickerDir.value) {
         @focus-source="focusLocalSource"
         @selection-capture="onPdfSelectionCapture"
         @selection-cancel="cancelPdfSelectionDraft"
-        @viewport-interaction="clearOutlineNavigation"
+        @viewport-interaction="onPdfViewportInteraction"
         @edit-note="openEditNote"
         @delete-note="deleteNote"
         @reselect-note="reselectPdfNote"
