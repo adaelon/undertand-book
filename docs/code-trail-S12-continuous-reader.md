@@ -106,3 +106,16 @@
 
 **Entry point**: PT2 will call `prepare_selection_translation` while holding `AppState`, then call `execute_selection_translation` after releasing it.
 **Test**: `cargo test -p runtime` (144 tests) and `cargo test -p server` (147 tests).
+
+## 2026-07-16 PT2 lock-free PDF selection translation endpoint
+
+**Touched**:
+- `crates/server/src/host.rs:route_selection_translation_request` - parses and prepares translation under the `AppState` lock, then executes the frozen Provider work after the guard is dropped.
+- `crates/server/src/host.rs:start_server` - routes `POST /reader/selection.translate` through the two-phase handler and snapshots the current Provider configuration per request.
+- `crates/server/src/host.rs:SelectionTranslationExecutor` - separates production Provider execution from deterministic blocking/error tests.
+- `crates/server/src/host.rs:tests::selection_translation_executes_after_releasing_app_state_lock` - proves another Reader request can acquire and use `AppState` while translation is blocked in Provider execution.
+- `crates/server/src/host.rs:tests::selection_translation_endpoint_classifies_method_request_provider_and_capability_errors` - fixes 405/400/404/502 contracts for method, request, selection-map, unconfigured, and Provider failures.
+- `docs/architecture.md:Major Data Flows` - records the lock-in/lock-out translation flow and its ADR index.
+
+**Entry point**: HTTP `POST /reader/selection.translate`; the response remains an ephemeral `translation_markdown + zh-CN` projection.
+**Test**: `cargo test -p server selection_translation_` (8 tests) and `cargo test -p server` (149 tests).

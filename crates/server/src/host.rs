@@ -1,7 +1,9 @@
 use crate::{
     agent_history_review_cursors, ensure_agent_history_for_book, load_agent_history, load_session,
-    mcp::VisitorSessions, route, route_book_asset_file, save_session, select_start_book,
-    AgentAssistantStatus, AppState, Req, UnconfiguredAdapter,
+    mcp::VisitorSessions, prepare_selection_translation, route, route_book_asset_file,
+    save_session, select_start_book, selection_manifest_value, AgentAssistantStatus, AppState,
+    Reply, Req, SelectionTranslationRequest, SelectionTranslationResponse,
+    SelectionTranslationWork, UnconfiguredAdapter, SELECTION_TRANSLATION_TIMEOUT,
 };
 use base_schema::{LidNode, NodeKind, ReadOnlyBase, Span};
 use memory::{
@@ -30,6 +32,81 @@ const REVIEW_RETRY_BASE_MS: u64 = 1_000;
 const REVIEW_RETRY_MAX_MS: u64 = 60_000;
 const REVIEW_SCHEDULER_POLL_MS: u64 = 250;
 const REVIEW_BOUNDARY_TIMEOUT_MS: u64 = 10_000;
+
+trait SelectionTranslationExecutor: Send + Sync {
+    fn execute(
+        &self,
+        provider: ProviderConfig,
+        work: SelectionTranslationWork,
+        timeout: Duration,
+    ) -> Result<SelectionTranslationResponse, read_tools::ToolError>;
+}
+
+struct ProviderSelectionTranslationExecutor;
+
+impl SelectionTranslationExecutor for ProviderSelectionTranslationExecutor {
+    fn execute(
+        &self,
+        provider: ProviderConfig,
+        work: SelectionTranslationWork,
+        timeout: Duration,
+    ) -> Result<SelectionTranslationResponse, read_tools::ToolError> {
+        crate::execute_selection_translation(provider, work, timeout)
+    }
+}
+
+fn selection_translation_method_not_allowed() -> Reply {
+    Reply {
+        status: 405,
+        body: serde_json::to_string(&read_tools::ToolError {
+            error_code: "METHOD_NOT_ALLOWED".into(),
+            category: "validation".into(),
+            message: "reader.selection.translate only accepts POST".into(),
+        })
+        .expect("method error is serializable"),
+    }
+}
+
+fn route_selection_translation_request(
+    state: &Arc<Mutex<AppState>>,
+    provider: Option<ProviderConfig>,
+    body: &str,
+    executor: &dyn SelectionTranslationExecutor,
+) -> Reply {
+    let request: SelectionTranslationRequest = match serde_json::from_str(body) {
+        Ok(request) => request,
+        Err(error) => {
+            return crate::err_reply(&read_tools::ToolError {
+                error_code: "INVALID_TRANSLATION_REQUEST".into(),
+                category: "validation".into(),
+                message: format!("reader.selection.translate request is invalid: {error}"),
+            });
+        }
+    };
+    let work = {
+        let guard = state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Err(error) = selection_manifest_value(&guard.book_dir) {
+            return crate::err_reply(&error);
+        }
+        match prepare_selection_translation(&guard.book, request) {
+            Ok(work) => work,
+            Err(error) => return crate::err_reply(&error),
+        }
+    };
+    let Some(provider) = provider else {
+        return crate::err_reply(&read_tools::ToolError {
+            error_code: "TRANSLATION_PROVIDER_UNCONFIGURED".into(),
+            category: "provider".into(),
+            message: "Reader Provider is not configured".into(),
+        });
+    };
+    match executor.execute(provider, work, SELECTION_TRANSLATION_TIMEOUT) {
+        Ok(response) => crate::ok_json(&response),
+        Err(error) => crate::err_reply(&error),
+    }
+}
 
 pub struct ServerHostConfig {
     pub book_dir: Option<PathBuf>,
@@ -213,6 +290,13 @@ impl ReviewCoordinator {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(config);
         self.wake.notify_all();
+    }
+
+    fn provider_config_snapshot(&self) -> Option<ProviderConfig> {
+        self.provider_config
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 
     fn run_one(&self, now: &str) -> Result<Option<ReviewRunOutcome>, read_tools::ToolError> {
@@ -1084,10 +1168,13 @@ pub fn start_server(config: ServerHostConfig) -> Result<RunningServer, String> {
         }));
     }
     let boundary_timeout = review_boundary_timeout();
+    let selection_translation_executor: Arc<dyn SelectionTranslationExecutor> =
+        Arc::new(ProviderSelectionTranslationExecutor);
     for _ in 0..4 {
         let server = server.clone();
         let state = state.clone();
         let review_coordinator = review_coordinator.clone();
+        let selection_translation_executor = selection_translation_executor.clone();
         let dist = config.web_dist.clone();
         let stop_signal = stop.clone();
         handles.push(thread::spawn(move || {
@@ -1107,6 +1194,20 @@ pub fn start_server(config: ServerHostConfig) -> Result<RunningServer, String> {
                         let request_now = now_ts();
                         if is_review_boundary(&method, &api_url) {
                             let _ = review_coordinator.drain_boundary(boundary_timeout);
+                        }
+                        if api_url == "/reader/selection.translate" {
+                            let reply = if method == "POST" {
+                                route_selection_translation_request(
+                                    &state,
+                                    review_coordinator.provider_config_snapshot(),
+                                    &body,
+                                    selection_translation_executor.as_ref(),
+                                )
+                            } else {
+                                selection_translation_method_not_allowed()
+                            };
+                            let _ = request.respond(response_from_json(reply.status, reply.body));
+                            continue;
                         }
                         if method == "GET" {
                             let asset = {
@@ -1627,6 +1728,212 @@ mod tests {
             visitor_sessions: VisitorSessions::default(),
             workbench_loaded_revision: None,
         }))
+    }
+
+    fn translation_host_state(name: &str) -> Arc<Mutex<AppState>> {
+        let dir = std::env::temp_dir().join(format!("ub-translation-host-{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("pdf_selection_map")).unwrap();
+        std::fs::write(dir.join("pdf_selection_map").join("manifest.json"), "{}").unwrap();
+        let source = "X".repeat(100);
+        let mut base = base_schema::sample_base();
+        base.book_id = format!("translation-{name}");
+        let book =
+            Book::new(base, &source).with_book_structure(Some(read_tools::BookStructureSidecar {
+                header: read_tools::ProfileArtifactHeader {
+                    book_id: format!("translation-{name}"),
+                    book_version: "v1".into(),
+                    profile_id: "paper".into(),
+                    profile_version: "v1".into(),
+                    core_schema_version: "v1".into(),
+                    generated_at: "test".into(),
+                },
+                spine: vec![],
+                throughlines: vec![],
+                key_stops: vec![],
+            }));
+        let reader = Reader::new(&book, DEFAULT_RADIUS);
+        let store = MemoryStore::open(dir.join("memory.json")).unwrap();
+        Arc::new(Mutex::new(AppState {
+            book_dir: dir,
+            library_root: None,
+            book,
+            reader,
+            store,
+            adapter: Box::new(UnconfiguredAdapter),
+            messages: new_session(),
+            session_path: None,
+            history_path: None,
+            agent_history: AgentHistory::default(),
+            profile_context_cache: runtime::profile_context::ProfileContextCache::default(),
+            visitor_sessions: VisitorSessions::default(),
+            workbench_loaded_revision: None,
+        }))
+    }
+
+    fn translation_request_body() -> &'static str {
+        r#"{"status":"resolved","raw_quote":"X","resolved_quote":"X","ranges":[{"lid":"1.1","range":{"start":0,"end":1}}]}"#
+    }
+
+    #[derive(Default)]
+    struct TranslationExecutionState {
+        entered: bool,
+        release: bool,
+        timeout: Option<Duration>,
+    }
+
+    struct TranslationExecutionControl {
+        state: Mutex<TranslationExecutionState>,
+        changed: Condvar,
+    }
+
+    struct BlockingSelectionTranslationExecutor {
+        control: Arc<TranslationExecutionControl>,
+    }
+
+    impl SelectionTranslationExecutor for BlockingSelectionTranslationExecutor {
+        fn execute(
+            &self,
+            _provider: ProviderConfig,
+            _work: SelectionTranslationWork,
+            timeout: Duration,
+        ) -> Result<SelectionTranslationResponse, read_tools::ToolError> {
+            let mut state = self.control.state.lock().unwrap();
+            state.entered = true;
+            state.timeout = Some(timeout);
+            self.control.changed.notify_all();
+            while !state.release {
+                state = self.control.changed.wait(state).unwrap();
+            }
+            Ok(SelectionTranslationResponse {
+                translation_markdown: "译文".into(),
+                target_locale: "zh-CN".into(),
+            })
+        }
+    }
+
+    struct FailingSelectionTranslationExecutor;
+
+    impl SelectionTranslationExecutor for FailingSelectionTranslationExecutor {
+        fn execute(
+            &self,
+            _provider: ProviderConfig,
+            _work: SelectionTranslationWork,
+            _timeout: Duration,
+        ) -> Result<SelectionTranslationResponse, read_tools::ToolError> {
+            Err(read_tools::ToolError {
+                error_code: "TRANSLATION_PROVIDER_FAILED".into(),
+                category: "provider".into(),
+                message: "provider failed".into(),
+            })
+        }
+    }
+
+    #[test]
+    fn selection_translation_executes_after_releasing_app_state_lock() {
+        let state = translation_host_state("lock-release");
+        let control = Arc::new(TranslationExecutionControl {
+            state: Mutex::new(TranslationExecutionState::default()),
+            changed: Condvar::new(),
+        });
+        let executor = BlockingSelectionTranslationExecutor {
+            control: Arc::clone(&control),
+        };
+        let request_state = Arc::clone(&state);
+        let running = thread::spawn(move || {
+            route_selection_translation_request(
+                &request_state,
+                Some(review_provider("translation-model")),
+                translation_request_body(),
+                &executor,
+            )
+        });
+        {
+            let mut execution = control.state.lock().unwrap();
+            while !execution.entered {
+                execution = control.changed.wait(execution).unwrap();
+            }
+        }
+
+        {
+            let mut guard = match state.try_lock() {
+                Ok(guard) => guard,
+                Err(_) => panic!("AppState lock remained held during translation Provider call"),
+            };
+            let reader = route(
+                &mut guard,
+                Req {
+                    method: "POST",
+                    url: "/reader/state",
+                    body: "",
+                    now: "translation-lock-test",
+                },
+            );
+            assert_eq!(reader.status, 200, "{}", reader.body);
+        }
+
+        {
+            let mut execution = control.state.lock().unwrap();
+            assert_eq!(execution.timeout, Some(Duration::from_secs(60)));
+            execution.release = true;
+            control.changed.notify_all();
+        }
+        let reply = running.join().unwrap();
+        assert_eq!(reply.status, 200, "{}", reply.body);
+        assert!(reply.body.contains("\"translation_markdown\":\"译文\""));
+    }
+
+    #[test]
+    fn selection_translation_endpoint_classifies_method_request_provider_and_capability_errors() {
+        let state = translation_host_state("errors");
+        let provider = Some(review_provider("translation-model"));
+
+        let method = selection_translation_method_not_allowed();
+        assert_eq!(method.status, 405);
+        assert!(method.body.contains("METHOD_NOT_ALLOWED"));
+
+        let invalid = route_selection_translation_request(
+            &state,
+            provider.clone(),
+            r#"{"status":"unresolved"}"#,
+            &FailingSelectionTranslationExecutor,
+        );
+        assert_eq!(invalid.status, 400, "{}", invalid.body);
+        assert!(invalid.body.contains("INVALID_TRANSLATION_REQUEST"));
+
+        let unconfigured = route_selection_translation_request(
+            &state,
+            None,
+            translation_request_body(),
+            &FailingSelectionTranslationExecutor,
+        );
+        assert_eq!(unconfigured.status, 502, "{}", unconfigured.body);
+        assert!(unconfigured
+            .body
+            .contains("TRANSLATION_PROVIDER_UNCONFIGURED"));
+
+        let provider_failure = route_selection_translation_request(
+            &state,
+            provider,
+            translation_request_body(),
+            &FailingSelectionTranslationExecutor,
+        );
+        assert_eq!(provider_failure.status, 502, "{}", provider_failure.body);
+        assert!(provider_failure
+            .body
+            .contains("TRANSLATION_PROVIDER_FAILED"));
+
+        let missing_map_state = translation_host_state("missing-map");
+        let map_dir = missing_map_state.lock().unwrap().book_dir.clone();
+        std::fs::remove_file(map_dir.join("pdf_selection_map").join("manifest.json")).unwrap();
+        let unavailable = route_selection_translation_request(
+            &missing_map_state,
+            Some(review_provider("translation-model")),
+            translation_request_body(),
+            &FailingSelectionTranslationExecutor,
+        );
+        assert_eq!(unavailable.status, 404, "{}", unavailable.body);
+        assert!(unavailable.body.contains("PDF_SELECTION_MAP_NOT_FOUND"));
     }
 
     #[test]

@@ -6676,6 +6676,7 @@ const TRANSLATION_TARGET_LOCALE: &str = "zh-CN";
 pub(crate) const SELECTION_TRANSLATION_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SelectionTranslationRequest {
     status: SelectionResolution,
     raw_quote: String,
