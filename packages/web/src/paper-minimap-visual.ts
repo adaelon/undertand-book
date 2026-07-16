@@ -8,6 +8,8 @@ import type {
 import PaperMinimap from "./components/PaperMinimap.vue";
 import "./style.css";
 
+const argumentScenario = new URLSearchParams(window.location.search).get("arguments") ?? "degraded";
+
 const base: PaperMinimapBase = {
   version: "paper_minimap.v1",
   book_id: "visual-paper",
@@ -88,7 +90,11 @@ const base: PaperMinimapBase = {
   layer_status: {
     regions: { status: "available", reason: null },
     landmarks: { status: "available", reason: null },
-    arguments: { status: "available", reason: null },
+    arguments: argumentScenario === "unavailable"
+      ? { status: "unavailable", reason: "no evidence-backed paper relations are available" }
+      : argumentScenario === "empty"
+        ? { status: "available", reason: null }
+        : { status: "degraded", reason: "some evidence anchors could not be resolved" },
   },
   warnings: [],
 };
@@ -185,11 +191,13 @@ function makeLens(mode: ReaderPaperMinimapState["mode"]): PaperMinimapLensProjec
       : mode === "deep"
         ? deepLandmarkIds
         : [],
-    relation_ids: mode === "skim"
-      ? ["relation:rq-method"]
-      : mode === "abstract"
-        ? ["relation:abstract-rq-method", "relation:abstract-method-result"]
-        : ["relation:experiment-evidence", "relation:evidence-result", "relation:result-claim"],
+    relation_ids: argumentScenario === "empty" || argumentScenario === "unavailable"
+      ? []
+      : mode === "skim"
+        ? ["relation:rq-method"]
+        : mode === "abstract"
+          ? ["relation:abstract-rq-method", "relation:abstract-method-result"]
+          : ["relation:experiment-evidence", "relation:evidence-result", "relation:result-claim"],
     slot_bindings: mode === "abstract" ? [
       { slot: "research_question", landmark_id: abstractLandmarkIds[0] },
       { slot: "method", landmark_id: abstractLandmarkIds[1] },

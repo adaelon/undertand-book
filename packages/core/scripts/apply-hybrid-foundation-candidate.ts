@@ -7,10 +7,16 @@ import {
   readFileSync,
   renameSync,
   rmdirSync,
+  writeFileSync,
 } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { assertHybridFoundationHardGates, type HybridFoundationArtifacts } from "../src/hybrid-foundation";
+import {
+  mergeHybridFoundationBase,
+  semanticGraphDigest,
+} from "../src/hybrid-foundation-apply";
+import type { ReadOnlyBase } from "../src/generated/ReadOnlyBase";
 import {
   AlignmentReportZ,
   PdfSelectionMapManifestZ,
@@ -82,26 +88,30 @@ function artifactHashes(root: string, artifacts: HybridFoundationArtifacts): Rec
   ]));
 }
 
-function sameLidIdentity(left: HybridFoundationArtifacts["base"], right: HybridFoundationArtifacts["base"]): boolean {
-  return JSON.stringify(left.lid_nodes.map((node) => node.lid))
-    === JSON.stringify(right.lid_nodes.map((node) => node.lid));
-}
-
 function timestamp(): string {
   return new Date().toISOString().replace(/[:.]/g, "-");
 }
 
-function stageCandidate(candidateDir: string, stageDir: string): void {
+function stageCandidate(candidateDir: string, stageDir: string, mergedBase: ReadOnlyBase): void {
   mkdirSync(stageDir, { recursive: true });
   for (const relativePath of FILE_ARTIFACTS) {
-    copyFileSync(path.join(candidateDir, relativePath), path.join(stageDir, relativePath));
+    if (relativePath === "base.json") {
+      writeFileSync(path.join(stageDir, relativePath), `${JSON.stringify(mergedBase, null, 2)}\n`, "utf8");
+    } else {
+      copyFileSync(path.join(candidateDir, relativePath), path.join(stageDir, relativePath));
+    }
   }
   for (const relativePath of DIRECTORY_ARTIFACTS) {
     cpSync(path.join(candidateDir, relativePath), path.join(stageDir, relativePath), { recursive: true });
   }
 }
 
-function replaceWithRollback(bookDir: string, stageDir: string, backupDir: string): void {
+function replaceWithRollback(
+  bookDir: string,
+  stageDir: string,
+  backupDir: string,
+  validateReplacement: () => void,
+): void {
   const artifacts = [...FILE_ARTIFACTS, ...DIRECTORY_ARTIFACTS];
   const originalsMoved: string[] = [];
   const candidatesMoved: string[] = [];
@@ -117,6 +127,7 @@ function replaceWithRollback(bookDir: string, stageDir: string, backupDir: strin
       renameSync(path.join(stageDir, relativePath), path.join(bookDir, relativePath));
       candidatesMoved.push(relativePath);
     }
+    validateReplacement();
   } catch (error) {
     for (const relativePath of candidatesMoved.reverse()) {
       const target = path.join(bookDir, relativePath);
@@ -155,7 +166,9 @@ async function main(): Promise<void> {
   const candidate = loadArtifacts(candidateDir);
   const officialBefore = loadArtifacts(bookDir);
   assertHybridFoundationHardGates(candidate);
-  if (!sameLidIdentity(officialBefore.base, candidate.base)) throw new Error("official and candidate LID identity differ");
+  const mergedBase = mergeHybridFoundationBase(officialBefore.base, candidate.base);
+  const expected = { ...candidate, base: mergedBase };
+  assertHybridFoundationHardGates(expected);
   if (sha256(readFileSync(path.join(bookDir, candidate.source_manifest.canonical_source.path)))
     !== candidate.source_manifest.canonical_source.sha256) {
     throw new Error("official canonical source changed after the candidate rebuild");
@@ -169,16 +182,23 @@ async function main(): Promise<void> {
   const id = timestamp();
   const stageDir = path.join(buildDir, `hybrid-foundation-apply-${id}`);
   const backupDir = path.join(buildDir, `hybrid-foundation-backup-${id}`);
-  stageCandidate(candidateDir, stageDir);
-  replaceWithRollback(bookDir, stageDir, backupDir);
-
-  const officialAfter = loadArtifacts(bookDir);
-  assertHybridFoundationHardGates(officialAfter);
-  const candidateHashes = artifactHashes(candidateDir, candidate);
-  const officialHashes = artifactHashes(bookDir, officialAfter);
-  if (JSON.stringify(candidateHashes) !== JSON.stringify(officialHashes)) {
-    throw new Error(`official artifact hashes differ from candidate; restore from ${backupDir}`);
-  }
+  stageCandidate(candidateDir, stageDir, mergedBase);
+  const stagedHashes = artifactHashes(stageDir, expected);
+  const graphDigestBefore = semanticGraphDigest(officialBefore.base);
+  let officialAfter: HybridFoundationArtifacts | undefined;
+  replaceWithRollback(bookDir, stageDir, backupDir, () => {
+    const loaded = loadArtifacts(bookDir);
+    assertHybridFoundationHardGates(loaded);
+    const officialHashes = artifactHashes(bookDir, loaded);
+    if (JSON.stringify(stagedHashes) !== JSON.stringify(officialHashes)) {
+      throw new Error("official artifact hashes differ from staged artifacts");
+    }
+    if (semanticGraphDigest(loaded.base) !== graphDigestBefore) {
+      throw new Error("semantic graph digest changed during hybrid foundation writeback");
+    }
+    officialAfter = loaded;
+  });
+  if (!officialAfter) throw new Error("hybrid foundation replacement validation did not complete");
 
   const keyLids = ["2.47.23.1", "2.47.24.1"];
   const byLid = new Map(officialAfter.pdf_source_map.entries.map((entry) => [entry.lid, entry]));
@@ -188,7 +208,10 @@ async function main(): Promise<void> {
     candidate_dir: candidateDir,
     backup_dir: backupDir,
     applied_artifacts: [...FILE_ARTIFACTS, ...DIRECTORY_ARTIFACTS],
-    hashes_match_candidate: true,
+    hashes_match_staged: true,
+    semantic_graph_preserved: true,
+    semantic_graph_digest_before: graphDigestBefore,
+    semantic_graph_digest_after: semanticGraphDigest(officialAfter.base),
     diagnostics: officialAfter.alignment_report.diagnostics,
     hard_gates: officialAfter.alignment_report.hard_gates,
     key_lids: keyLids.map((lid) => ({

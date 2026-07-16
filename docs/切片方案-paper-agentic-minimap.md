@@ -580,3 +580,12 @@ PDF scroll
 - Agent 后台常驻、滚动触发 LLM、Agent 自由绘图或直接改 paper truth。
 - OCR、PDF annotation write-back、page/bbox citation anchor。
 - 多设备同步、多人协作 overlay 或通用 ReaderThemeAction。
+
+## 12. 2026-07-16 PMF 修复补记
+
+- **Status**:complete。详见 [`bug-论文地图无可论证关系.md`](../bug-论文地图无可论证关系.md)。
+- Hybrid foundation 的 candidate 继续拥有 LID/PDF foundation,但 same-LID 写回必须保留并复验正式 semantic graph;不得用空 candidate graph 覆盖。
+- region projector 增加 structured abstract 与显式 major-heading inheritance;BookStructure 仍只投影 landmarks。局部地标归属改为数值 LID span,不按共享 PDF page 判断。
+- ModeLens 改为先稳定装入 eligible evidence edges,再在 5/4/3 预算内填节点;无合法 edge 时返回空数组,不得合成关系。
+- Web 区分 unavailable、degraded-with-relations、valid-empty-lens、missing abstract 与 unknown deep region,不再把它们统一显示为“论证关系不可用”。
+- 本次只对受影响书库执行了定向真实 endpoint 恢复验收;AM13 的全论文族/Windows Setup 验收仍保持 waived,不得据此改写为 complete。

@@ -2181,6 +2181,120 @@ fn select_paper_region_units<'a>(
     nodes.first().into_iter().collect()
 }
 
+fn normalize_paper_heading(title: &str) -> String {
+    title
+        .to_lowercase()
+        .chars()
+        .map(|ch| if ch.is_alphanumeric() { ch } else { ' ' })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn structured_abstract_marker(text: &str) -> Option<&'static str> {
+    let (label, _) = text.trim().split_once(':')?;
+    match normalize_paper_heading(label).as_str() {
+        "background" => Some("background"),
+        "objective" | "objectives" | "aim" | "aims" => Some("objective"),
+        "method" | "methods" => Some("methods"),
+        "result" | "results" | "findings" => Some("results"),
+        "conclusion" | "conclusions" => Some("conclusions"),
+        _ => None,
+    }
+}
+
+fn structured_abstract_leaf_lids(
+    nodes: &[LidNode],
+    source_u16: &[u16],
+    before_offset: usize,
+) -> Vec<String> {
+    let leaves: Vec<&LidNode> = nodes
+        .iter()
+        .filter(|node| node.children.is_empty() && node.span.end <= before_offset)
+        .collect();
+    let markers: Vec<(usize, &'static str)> = leaves
+        .iter()
+        .enumerate()
+        .filter_map(|(index, node)| {
+            if node.kind != NodeKind::Paragraph {
+                return None;
+            }
+            source_u16
+                .get(node.span.start..node.span.end)
+                .map(String::from_utf16_lossy)
+                .as_deref()
+                .and_then(structured_abstract_marker)
+                .map(|marker| (index, marker))
+        })
+        .collect();
+    let distinct: HashSet<&str> = markers.iter().map(|(_, marker)| *marker).collect();
+    if distinct.len() < 2 || (!distinct.contains("results") && !distinct.contains("conclusions")) {
+        return Vec::new();
+    }
+    let Some((start, _)) = markers.first() else {
+        return Vec::new();
+    };
+    let Some((end, _)) = markers.last() else {
+        return Vec::new();
+    };
+    leaves[*start..=*end]
+        .iter()
+        .map(|node| node.lid.clone())
+        .collect()
+}
+
+fn is_end_matter_heading(title: &str) -> bool {
+    matches!(
+        normalize_paper_heading(title).as_str(),
+        "acknowledgment"
+            | "acknowledgments"
+            | "acknowledgement"
+            | "acknowledgements"
+            | "author contributions"
+            | "funding"
+            | "disclosures"
+            | "data availability"
+            | "supplemental material"
+    )
+}
+
+fn inherited_major_heading_kind(
+    source_u16: &[u16],
+    before_offset: usize,
+) -> Option<PaperRegionKind> {
+    let prefix = String::from_utf16_lossy(source_u16.get(..before_offset)?);
+    let mut inherited = None;
+    for line in prefix.lines() {
+        let raw = line.trim();
+        let markdown_heading = raw.starts_with('#');
+        let heading = raw.trim_start_matches('#').trim();
+        if heading.is_empty() {
+            continue;
+        }
+        if is_end_matter_heading(heading)
+            || classify_paper_heading(heading) == PaperRegionKind::References
+        {
+            inherited = None;
+            continue;
+        }
+        let kind = classify_paper_heading(heading);
+        if matches!(kind, PaperRegionKind::Results | PaperRegionKind::Discussion)
+            || (!markdown_heading
+                && matches!(
+                    kind,
+                    PaperRegionKind::Introduction
+                        | PaperRegionKind::RelatedWork
+                        | PaperRegionKind::Method
+                        | PaperRegionKind::Conclusion
+                ))
+        {
+            inherited = Some(kind);
+        }
+    }
+    inherited
+}
+
 fn paper_heading(raw: &str, fallback: &str) -> String {
     let heading = raw
         .lines()
@@ -2200,14 +2314,7 @@ fn paper_heading(raw: &str, fallback: &str) -> String {
 }
 
 fn classify_paper_heading(title: &str) -> PaperRegionKind {
-    let normalized = title
-        .to_lowercase()
-        .chars()
-        .map(|ch| if ch.is_alphanumeric() { ch } else { ' ' })
-        .collect::<String>()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
+    let normalized = normalize_paper_heading(title);
     match normalized.as_str() {
         "abstract" => PaperRegionKind::Abstract,
         "introduction" | "background" => PaperRegionKind::Introduction,
@@ -2981,6 +3088,47 @@ impl Book {
         Ok(())
     }
 
+    fn paper_region_from_leaves(
+        &self,
+        region_id: String,
+        title: String,
+        kind: PaperRegionKind,
+        classification_source: PaperRegionClassificationSource,
+        confidence: f32,
+        leaves: Vec<String>,
+        entries: &HashMap<&str, &RuntimePdfSourceMapEntry>,
+        warnings: &mut Vec<String>,
+    ) -> Option<PaperRegion> {
+        let pages: Vec<u32> = leaves
+            .iter()
+            .filter_map(|lid| entries.get(lid.as_str()))
+            .flat_map(|entry| entry.regions.iter().map(|region| region.page_index))
+            .collect();
+        let (Some(start_page), Some(end_page)) =
+            (pages.iter().min().copied(), pages.iter().max().copied())
+        else {
+            warnings.push(format!("paper region {region_id} has no PDF projection"));
+            return None;
+        };
+        let Some(start_lid) = leaves.first().cloned() else {
+            warnings.push(format!("paper region {region_id} has no leaf LID"));
+            return None;
+        };
+        let end_lid = leaves.last().cloned().unwrap_or_else(|| start_lid.clone());
+        Some(PaperRegion {
+            region_id,
+            title,
+            kind,
+            lid_span: PaperLidSpan { start_lid, end_lid },
+            page_span: PaperPageSpan {
+                start_page,
+                end_page,
+            },
+            classification_source,
+            confidence,
+        })
+    }
+
     fn minimap_source_excerpt(&self, lid: &str) -> Option<String> {
         let node = self
             .lid_idx
@@ -3674,51 +3822,84 @@ impl Book {
             .collect();
         let units = select_paper_region_units(&self.base.lid_nodes, &by_lid);
         let mut regions = Vec::new();
+        let has_explicit_abstract = units.iter().any(|unit| {
+            self.source_u16
+                .get(unit.span.start..unit.span.end)
+                .map(String::from_utf16_lossy)
+                .map(|raw| classify_paper_heading(&paper_heading(&raw, &unit.lid)))
+                == Some(PaperRegionKind::Abstract)
+        });
+        if !has_explicit_abstract {
+            let before_offset = units
+                .iter()
+                .map(|unit| unit.span.start)
+                .min()
+                .unwrap_or(self.source_u16.len());
+            let abstract_leaves = structured_abstract_leaf_lids(
+                &self.base.lid_nodes,
+                &self.source_u16,
+                before_offset,
+            );
+            if !abstract_leaves.is_empty() {
+                let region_id = format!("region:abstract:{}", abstract_leaves[0]);
+                if let Some(region) = self.paper_region_from_leaves(
+                    region_id,
+                    "Abstract".into(),
+                    PaperRegionKind::Abstract,
+                    PaperRegionClassificationSource::Discourse,
+                    1.0,
+                    abstract_leaves,
+                    &entries,
+                    &mut warnings,
+                ) {
+                    regions.push(region);
+                }
+            }
+        }
         for unit in units {
             let mut leaves = Vec::new();
             if let Err(reason) = self.collect_minimap_leaf_lids(&unit.lid, &mut leaves) {
                 return self.unavailable_paper_minimap(warnings, reason);
             }
-            let pages: Vec<u32> = leaves
-                .iter()
-                .filter_map(|lid| entries.get(lid.as_str()))
-                .flat_map(|entry| entry.regions.iter().map(|region| region.page_index))
-                .collect();
-            let (Some(start_page), Some(end_page)) =
-                (pages.iter().min().copied(), pages.iter().max().copied())
-            else {
-                warnings.push(format!("paper region {} has no PDF projection", unit.lid));
-                continue;
-            };
-            let Some(start_lid) = leaves.first().cloned() else {
-                warnings.push(format!("paper region {} has no leaf LID", unit.lid));
-                continue;
-            };
-            let end_lid = leaves.last().cloned().unwrap_or_else(|| start_lid.clone());
             let raw_title = self
                 .source_u16
                 .get(unit.span.start..unit.span.end)
                 .map(String::from_utf16_lossy)
                 .unwrap_or_else(|| unit.lid.clone());
             let title = paper_heading(&raw_title, &unit.lid);
-            let kind = classify_paper_heading(&title);
-            let confidence = if kind == PaperRegionKind::Unknown {
-                0.0
-            } else {
-                1.0
-            };
-            regions.push(PaperRegion {
-                region_id: format!("region:{}", unit.lid),
+            let exact_kind = classify_paper_heading(&title);
+            let (kind, classification_source, confidence) =
+                if exact_kind != PaperRegionKind::Unknown {
+                    (exact_kind, PaperRegionClassificationSource::Heading, 1.0)
+                } else if is_end_matter_heading(&title) {
+                    (
+                        PaperRegionKind::Unknown,
+                        PaperRegionClassificationSource::Unknown,
+                        0.0,
+                    )
+                } else if let Some(inherited) =
+                    inherited_major_heading_kind(&self.source_u16, unit.span.start)
+                {
+                    (inherited, PaperRegionClassificationSource::Heading, 0.9)
+                } else {
+                    (
+                        PaperRegionKind::Unknown,
+                        PaperRegionClassificationSource::Unknown,
+                        0.0,
+                    )
+                };
+            if let Some(region) = self.paper_region_from_leaves(
+                format!("region:{}", unit.lid),
                 title,
                 kind,
-                lid_span: PaperLidSpan { start_lid, end_lid },
-                page_span: PaperPageSpan {
-                    start_page,
-                    end_page,
-                },
-                classification_source: PaperRegionClassificationSource::Heading,
+                classification_source,
                 confidence,
-            });
+                leaves,
+                &entries,
+                &mut warnings,
+            ) {
+                regions.push(region);
+            }
         }
         if regions.is_empty() {
             return self.unavailable_paper_minimap(
@@ -6908,6 +7089,159 @@ mod tests {
         dir
     }
 
+    fn write_flattened_paper_minimap_book(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(name);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut source = String::new();
+        let mut nodes = Vec::new();
+        let mut map_entries = Vec::new();
+        let mut root_children = Vec::new();
+        let mut push_paragraph = |lid: &str, text: &str, page: u32| {
+            let start = source.encode_utf16().count();
+            source.push_str(text);
+            source.push_str("\n\n");
+            let end = source.encode_utf16().count();
+            let path = lid
+                .split('.')
+                .map(|part| part.parse::<u32>().unwrap())
+                .collect();
+            nodes.push(LidNode {
+                lid: lid.into(),
+                path,
+                kind: NodeKind::Paragraph,
+                span: Span { start, end },
+                children: Vec::new(),
+            });
+            map_entries.push(serde_json::json!({
+                "lid": lid,
+                "source_span": {"start": start, "end": end},
+                "status": "word_mapped",
+                "regions": [{
+                    "region_id": format!("pdf:{lid}"),
+                    "pageIndex": page,
+                    "bbox": [0, 0, 10, 10]
+                }],
+                "alignment": {"confidence": 1.0}
+            }));
+            root_children.push(lid.to_string());
+        };
+        push_paragraph("1.1", "BACKGROUND: Context and research gap.", 0);
+        push_paragraph("1.2", "METHODS: We ran the experiment.", 0);
+        push_paragraph("1.3", "RESULTS: The intervention worked.", 0);
+        push_paragraph("1.4", "CONCLUSIONS: The result matters.", 0);
+        push_paragraph("1.5", "METHODS", 0);
+        drop(push_paragraph);
+
+        let sections = [
+            ("1.6", "Tissue Acquisition", "Method body.", 1_u32),
+            ("1.7", "RESULTS", "Results overview.", 2_u32),
+            ("1.8", "Detailed Finding", "Detailed result.", 2_u32),
+            ("1.9", "Acknowledgments", "Thanks.", 3_u32),
+        ];
+        for (lid, title, body, page) in sections {
+            let start = source.encode_utf16().count();
+            source.push_str(&format!("## {title}\n\n"));
+            let leaf_start = source.encode_utf16().count();
+            source.push_str(body);
+            source.push_str("\n\n");
+            let end = source.encode_utf16().count();
+            let leaf_lid = format!("{lid}.1");
+            let path = lid
+                .split('.')
+                .map(|part| part.parse::<u32>().unwrap())
+                .collect::<Vec<_>>();
+            let mut leaf_path = path.clone();
+            leaf_path.push(1);
+            nodes.push(LidNode {
+                lid: lid.into(),
+                path,
+                kind: NodeKind::Section,
+                span: Span { start, end },
+                children: vec![leaf_lid.clone()],
+            });
+            nodes.push(LidNode {
+                lid: leaf_lid.clone(),
+                path: leaf_path,
+                kind: NodeKind::Paragraph,
+                span: Span {
+                    start: leaf_start,
+                    end,
+                },
+                children: Vec::new(),
+            });
+            map_entries.push(serde_json::json!({
+                "lid": leaf_lid,
+                "source_span": {"start": leaf_start, "end": end},
+                "status": "word_mapped",
+                "regions": [{
+                    "region_id": format!("pdf:{lid}"),
+                    "pageIndex": page,
+                    "bbox": [0, 0, 10, 10]
+                }],
+                "alignment": {"confidence": 1.0}
+            }));
+            root_children.push(lid.into());
+        }
+        nodes.insert(
+            0,
+            LidNode {
+                lid: "1".into(),
+                path: vec![1],
+                kind: NodeKind::Chapter,
+                span: Span {
+                    start: 0,
+                    end: source.encode_utf16().count(),
+                },
+                children: root_children,
+            },
+        );
+        let base = ReadOnlyBase {
+            book_id: "paper-minimap-flat".into(),
+            lid_nodes: nodes,
+            graph_nodes: Vec::new(),
+            graph_edges: Vec::new(),
+        };
+        let source_manifest = serde_json::json!({
+            "version": "source_manifest.v2",
+            "book_id": "paper-minimap-flat",
+            "canonical_source": {
+                "kind": "reconciled_markdown",
+                "path": "source.txt",
+                "citation_anchor": "lid",
+                "sha256": "source-sha-flat"
+            },
+            "capabilities": {
+                "view_pdf": {"status": "available"},
+                "project_lid_to_pdf": {"status": "available", "config_hash": "config-flat"},
+                "resolve_pdf_selection": {"status": "unavailable"},
+                "project_ranges_to_pdf": {"status": "available"}
+            }
+        });
+        let pdf_source_map = serde_json::json!({
+            "version": "pdf_source_map.v1",
+            "book_id": "paper-minimap-flat",
+            "pages": (0..4).map(|page| serde_json::json!({
+                "pageIndex": page,
+                "width": 100,
+                "height": 100,
+                "rotate": 0,
+                "view": [0, 0, 100, 100]
+            })).collect::<Vec<_>>(),
+            "entries": map_entries,
+            "config_hash": "config-flat"
+        });
+        std::fs::write(dir.join("base.json"), serde_json::to_string(&base).unwrap()).unwrap();
+        std::fs::write(dir.join("source.txt"), source).unwrap();
+        std::fs::write(
+            dir.join("source_manifest.json"),
+            source_manifest.to_string(),
+        )
+        .unwrap();
+        std::fs::write(dir.join("pdf_source_map.json"), pdf_source_map.to_string()).unwrap();
+        dir
+    }
+
     fn write_paper_minimap_semantics(dir: &std::path::Path, dangling_pass2_evidence: bool) {
         let base_raw = std::fs::read_to_string(dir.join("base.json")).unwrap();
         let mut base: ReadOnlyBase = serde_json::from_str(&base_raw).unwrap();
@@ -7094,6 +7428,23 @@ mod tests {
             minimap.layer_status["topology"].status,
             PaperMinimapAvailabilityStatus::Available
         );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn paper_minimap_recovers_structured_abstract_and_flattened_major_sections() {
+        let dir = write_flattened_paper_minimap_book("ub-read-tools-paper-minimap-flat");
+        let book = Book::load(dir.to_str().unwrap()).unwrap();
+        let minimap = book.paper_minimap();
+
+        assert_eq!(minimap.regions.len(), 5);
+        assert_eq!(minimap.regions[0].kind, PaperRegionKind::Abstract);
+        assert_eq!(minimap.regions[0].lid_span.start_lid, "1.1");
+        assert_eq!(minimap.regions[0].lid_span.end_lid, "1.4");
+        assert_eq!(minimap.regions[1].kind, PaperRegionKind::Method);
+        assert_eq!(minimap.regions[2].kind, PaperRegionKind::Results);
+        assert_eq!(minimap.regions[3].kind, PaperRegionKind::Results);
+        assert_eq!(minimap.regions[4].kind, PaperRegionKind::Unknown);
         let _ = std::fs::remove_dir_all(dir);
     }
 

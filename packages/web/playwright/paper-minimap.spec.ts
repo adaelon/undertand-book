@@ -72,7 +72,9 @@ test("desktop expansion preserves the PDF surface", async ({ page }) => {
   await expect(page.locator(".paper-map-shell")).not.toContainText("Materials and Methods");
   expect(await pdf.boundingBox()).toEqual(before);
   await expect(page.locator("[data-testid='local-chain'] > button")).toHaveCount(4);
-  expect(await page.locator(".paper-map-relations > div").count()).toBeLessThanOrEqual(3);
+  await expect(page.locator(".paper-map-relations > div")).toHaveCount(3);
+  await expect(page.getByTestId("argument-status"))
+    .toHaveText("部分论证关系因证据不完整未显示");
   expect(await page.locator("[data-testid='global-chain'] .paper-map-chain-row").count()).toBeLessThanOrEqual(5);
   await expectTextBlocksNotClipped(page.locator([
     ".paper-map-region-copy strong",
@@ -80,13 +82,14 @@ test("desktop expansion preserves the PDF surface", async ({ page }) => {
     ".paper-map-local-chain strong",
     ".paper-map-correspondences span",
     ".paper-map-relations > div > span",
+    "[data-testid='argument-status']",
   ].join(",")));
   await page.screenshot({ path: "../../docs/screenshots/paper-minimap-chinese-desktop.png", fullPage: true });
 });
 
 test("mobile expansion stays inside the viewport as an overlay", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto("/paper-minimap-visual.html");
+  await page.goto("/paper-minimap-visual.html?arguments=empty");
   await page.locator(".paper-map-toggle").click();
   const map = await page.locator(".paper-map-shell").boundingBox();
   expect(map).not.toBeNull();
@@ -97,10 +100,13 @@ test("mobile expansion stays inside the viewport as an overlay", async ({ page }
   await page.getByRole("button", { name: "深读", exact: true }).click();
   await expect(page.locator("[data-testid='deep-region']")).toBeVisible();
   await expect(page.locator(".paper-map-shell")).toContainText("LongMethodName-ExtremelySpecificVariant");
+  await expect(page.getByTestId("argument-status")).toHaveText("当前模式暂无证据化关系");
+  await expect(page.locator(".paper-map-relations")).toHaveCount(0);
   await expectTextBlocksNotClipped(page.locator([
     ".paper-map-region-copy strong",
     ".paper-map-local-chain strong",
     ".paper-map-relations > div > span",
+    "[data-testid='argument-status']",
   ].join(",")));
   await expect(page.locator(".paper-map-shell")).toHaveCSS("overflow-y", "auto");
   await page.screenshot({ path: "../../docs/screenshots/paper-minimap-chinese-mobile.png", fullPage: true });

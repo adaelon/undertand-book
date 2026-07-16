@@ -326,7 +326,7 @@ describe("PaperMinimap", () => {
     expect(wrapper.text()).not.toContain("2.2");
   });
 
-  it("shows explicit empty states for unknown or unavailable argument layers", () => {
+  it("distinguishes unavailable argument data from an empty lens", () => {
     const unavailableBase: PaperMinimapBase = {
       ...richBase,
       layer_status: {
@@ -342,8 +342,83 @@ describe("PaperMinimap", () => {
       },
     });
     expect(wrapper.text()).toContain("当前章节没有可显示的论证结构");
-    expect(wrapper.text()).toContain("论证关系不可用");
+    expect(wrapper.get("[data-testid='argument-status']").text()).toContain("论证关系不可用");
+    expect(wrapper.get("[data-testid='argument-status']").attributes("title"))
+      .toBe("no evidence-backed relations");
+    expect(wrapper.text()).not.toContain("当前模式暂无证据化关系");
     expect(wrapper.findAll(".paper-map-layers input")[2].attributes()).toHaveProperty("disabled");
+  });
+
+  it("keeps degraded relations visible and explains that the result is partial", () => {
+    const degradedBase: PaperMinimapBase = {
+      ...richBase,
+      layer_status: {
+        ...richBase.layer_status,
+        arguments: { status: "degraded", reason: "one relation has an unresolved evidence anchor" },
+      },
+    };
+    const wrapper = mount(PaperMinimap, {
+      props: { base: degradedBase, state: stateWithArguments("deep"), lens: deepLens },
+    });
+
+    expect(wrapper.findAll(".paper-map-relations > div")).toHaveLength(3);
+    expect(wrapper.get("[data-testid='argument-status']").text())
+      .toContain("部分论证关系因证据不完整未显示");
+    expect(wrapper.get("[data-testid='argument-status']").attributes("title"))
+      .toBe("one relation has an unresolved evidence anchor");
+    expect(wrapper.findAll(".paper-map-layers input")[2].attributes("disabled")).toBeUndefined();
+  });
+
+  it("reports a valid mode with no eligible evidence-backed relation without calling it unavailable", () => {
+    const wrapper = mount(PaperMinimap, {
+      props: {
+        base: richBase,
+        state: stateWithArguments("deep"),
+        lens: { ...deepLens, relation_ids: [] },
+      },
+    });
+
+    expect(wrapper.get("[data-testid='argument-status']").text())
+      .toContain("当前模式暂无证据化关系");
+    expect(wrapper.text()).not.toContain("论证关系不可用");
+  });
+
+  it("explains missing abstract focus and an unclassified deep region separately", async () => {
+    const unknownRegionBase: PaperMinimapBase = {
+      ...richBase,
+      regions: richBase.regions.map((region) => (
+        region.region_id === "region:method" ? { ...region, kind: "unknown" } : region
+      )),
+    };
+    const wrapper = mount(PaperMinimap, {
+      props: {
+        base: unknownRegionBase,
+        state: stateWithArguments("abstract"),
+        lens: {
+          ...deepLens,
+          mode: "abstract",
+          focus_region_id: null,
+          local_landmark_ids: [],
+          slot_bindings: [],
+          relation_ids: [],
+          warnings: ["paper minimap has no abstract region"],
+        },
+      },
+    });
+
+    expect(wrapper.get("[data-testid='local-structure-status']").text()).toContain("未识别到摘要区域");
+
+    await wrapper.setProps({
+      state: stateWithArguments("deep"),
+      lens: {
+        ...deepLens,
+        local_landmark_ids: [],
+        slot_bindings: [],
+        relation_ids: [],
+      },
+    });
+    expect(wrapper.get("[data-testid='local-structure-status']").text())
+      .toContain("当前区域未分类，无法生成局部论证结构");
   });
 
   it("disables expansion when topology is unavailable", () => {

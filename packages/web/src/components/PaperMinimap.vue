@@ -65,6 +65,10 @@ const abstractCorrespondences = computed(() => (props.lens?.abstract_corresponde
   } => !!item.abstractLandmark && !!item.bodyLandmark)
   .slice(0, 3));
 const regionById = computed(() => new Map(regions.value.map((region) => [region.region_id, region])));
+const focusedRegion = computed(() => {
+  const regionId = props.lens?.focus_region_id;
+  return regionId ? regionById.value.get(regionId) : undefined;
+});
 const lensFocusedRegionIds = computed(() => {
   const focused = new Set<string>();
   const addLandmarkRegion = (landmark: PaperLandmark | undefined) => {
@@ -86,10 +90,22 @@ const lensFocusedRegionIds = computed(() => {
   return focused;
 });
 const focusedRegionLabel = computed(() => {
-  const regionId = props.lens?.focus_region_id;
-  const region = regionId ? regionById.value.get(regionId) : undefined;
-  return region ? regionDisplayLabel(region) : "当前章节";
+  return focusedRegion.value ? regionDisplayLabel(focusedRegion.value) : "当前章节";
 });
+const localStructureEmptyText = computed(() => {
+  if (activeMode.value === "abstract" && props.lens && !props.lens.focus_region_id) {
+    return "未识别到摘要区域";
+  }
+  if (activeMode.value === "deep" && focusedRegion.value?.kind === "unknown") {
+    return "当前区域未分类，无法生成局部论证结构";
+  }
+  return activeMode.value === "abstract"
+    ? "摘要没有可显示的论证结构"
+    : "当前章节没有可显示的论证结构";
+});
+const argumentLayerStatus = computed(() => (
+  props.base?.layer_status.arguments?.status ?? "available"
+));
 const visibleLayers = computed(() => new Set(props.state?.session_overlay.visible_layers ?? []));
 const activeLocalization = computed(() => (
   props.localization?.base_map_rev === props.base?.fingerprint ? props.localization : null
@@ -434,8 +450,8 @@ function relationLabel(relation: string): string {
                 <strong>{{ landmarkDisplayLabel(binding.landmark) }}</strong>
               </button>
             </div>
-            <p v-else class="paper-map-empty">
-              {{ activeMode === 'abstract' ? '摘要没有可显示的论证结构' : '当前章节没有可显示的论证结构' }}
+            <p v-else class="paper-map-empty" data-testid="local-structure-status">
+              {{ localStructureEmptyText }}
             </p>
 
             <div
@@ -459,7 +475,10 @@ function relationLabel(relation: string): string {
           </section>
         </div>
 
-        <div v-if="visibleLayers.has('arguments') && lensRelations.length" class="paper-map-relations">
+        <div
+          v-if="visibleLayers.has('arguments') && argumentLayerStatus !== 'unavailable' && lensRelations.length"
+          class="paper-map-relations"
+        >
           <h3 class="paper-map-section-title">论证关系</h3>
           <div v-for="relation in lensRelations" :key="relation.relation_id">
             <span>{{ relationLandmarkLabel(relation.source_landmark_id) }}</span>
@@ -471,11 +490,28 @@ function relationLabel(relation: string): string {
           </div>
         </div>
         <p
-          v-else-if="visibleLayers.has('arguments') && props.base?.layer_status.arguments?.status !== 'available'"
+          v-if="visibleLayers.has('arguments') && argumentLayerStatus === 'unavailable'"
           class="paper-map-empty"
+          data-testid="argument-status"
           :title="layerReason('arguments')"
         >
           论证关系不可用
+        </p>
+        <p
+          v-else-if="visibleLayers.has('arguments') && !lensRelations.length"
+          class="paper-map-empty"
+          data-testid="argument-status"
+          :title="layerReason('arguments')"
+        >
+          当前模式暂无证据化关系
+        </p>
+        <p
+          v-else-if="visibleLayers.has('arguments') && argumentLayerStatus === 'degraded'"
+          class="paper-map-empty"
+          data-testid="argument-status"
+          :title="layerReason('arguments')"
+        >
+          部分论证关系因证据不完整未显示
         </p>
 
         <div v-if="props.effectReason" class="paper-map-effect">

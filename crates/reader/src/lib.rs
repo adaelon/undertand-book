@@ -7,10 +7,11 @@
 //! 时间戳由调用方注入(确定性可测,守 A2);错误复用 `ToolError` 信封,禁宽松降级 `[ADR-0015]`。
 use memory::{Anchor, MemoryStore, RecallQuery, SaveInput, TextRange};
 use read_tools::{
-    Book, LayoutRegion, LayoutSize, PaperArgumentSlot, PaperLandmark, PaperLandmarkKind,
-    PaperMinimapAvailabilityStatus, PaperMinimapBase, PaperRegion, PaperRegionKind, PinnedEvidence,
-    ProfileManifest, ReaderLayoutAction, ReaderLayoutActionKind, ReaderLayoutApplyOutcome,
-    ReaderLayoutEffect, ReaderLayoutProposal, ReaderLayoutState, ToolError,
+    Book, LayoutRegion, LayoutSize, PaperArgumentRelation, PaperArgumentSlot, PaperLandmark,
+    PaperLandmarkKind, PaperMinimapAvailabilityStatus, PaperMinimapBase, PaperMinimapRelation,
+    PaperRegion, PaperRegionKind, PinnedEvidence, ProfileManifest, ReaderLayoutAction,
+    ReaderLayoutActionKind, ReaderLayoutApplyOutcome, ReaderLayoutEffect, ReaderLayoutProposal,
+    ReaderLayoutState, ToolError,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -363,6 +364,32 @@ fn minimap_landmark_priority(kind: &PaperLandmarkKind) -> usize {
     }
 }
 
+fn minimap_relation_priority(relation: &PaperMinimapRelation) -> usize {
+    match relation {
+        PaperMinimapRelation::Frames => 0,
+        PaperMinimapRelation::Addresses => 1,
+        PaperMinimapRelation::Tests => 2,
+        PaperMinimapRelation::Produces => 3,
+        PaperMinimapRelation::Supports => 4,
+        PaperMinimapRelation::Challenges => 5,
+        PaperMinimapRelation::Limits => 6,
+        PaperMinimapRelation::Motivates => 7,
+        PaperMinimapRelation::BuildsOn => 8,
+        PaperMinimapRelation::Contrasts => 9,
+    }
+}
+
+fn sort_minimap_relations(relations: &mut Vec<&PaperArgumentRelation>) {
+    relations.sort_by(|left, right| {
+        minimap_relation_priority(&left.relation_type)
+            .cmp(&minimap_relation_priority(&right.relation_type))
+            .then_with(|| left.evidence_lids.cmp(&right.evidence_lids))
+            .then_with(|| left.source_landmark_id.cmp(&right.source_landmark_id))
+            .then_with(|| left.target_landmark_id.cmp(&right.target_landmark_id))
+            .then_with(|| left.relation_id.cmp(&right.relation_id))
+    });
+}
+
 fn minimap_slot_for_landmark(
     region_kind: &PaperRegionKind,
     landmark_kind: &PaperLandmarkKind,
@@ -437,9 +464,24 @@ fn minimap_slot_priority(slot: &PaperArgumentSlot) -> usize {
     }
 }
 
+fn materialized_lid_path(lid: &str) -> Option<Vec<u32>> {
+    lid.split('.')
+        .map(str::parse::<u32>)
+        .collect::<Result<Vec<_>, _>>()
+        .ok()
+}
+
 fn minimap_region_contains(region: &PaperRegion, landmark: &PaperLandmark) -> bool {
-    landmark.page_index >= region.page_span.start_page
-        && landmark.page_index <= region.page_span.end_page
+    let Some(anchor) = materialized_lid_path(&landmark.anchor_lid) else {
+        return false;
+    };
+    let Some(start) = materialized_lid_path(&region.lid_span.start_lid) else {
+        return false;
+    };
+    let Some(end) = materialized_lid_path(&region.lid_span.end_lid) else {
+        return false;
+    };
+    anchor >= start && anchor <= end
 }
 
 /// Applies a deterministic mode lens to immutable base IDs. It never creates map facts.
@@ -496,12 +538,6 @@ pub fn project_paper_minimap_lens(
             .then_with(|| left.anchor_lid.cmp(&right.anchor_lid))
             .then_with(|| left.landmark_id.cmp(&right.landmark_id))
     });
-    let global_landmark_ids: Vec<String> = global_landmarks
-        .into_iter()
-        .take(MINIMAP_GLOBAL_LANDMARK_BUDGET)
-        .map(|landmark| landmark.landmark_id.clone())
-        .collect();
-
     let mut local_candidates: Vec<(&PaperLandmark, PaperArgumentSlot)> = focus_region
         .map(|region| {
             base.landmarks
@@ -539,30 +575,29 @@ pub fn project_paper_minimap_lens(
         }
     }
 
-    let global_landmark_set: HashSet<&str> =
-        global_landmark_ids.iter().map(String::as_str).collect();
     let local_landmark_set: HashSet<&str> = local_landmark_ids.iter().map(String::as_str).collect();
-    let visible_landmark_ids: HashSet<&str> = global_landmark_set
-        .iter()
-        .chain(local_landmark_set.iter())
-        .copied()
-        .collect();
     let local_relations_allowed = focus_region.is_some_and(|region| {
         !matches!(
             region.kind,
             PaperRegionKind::Unknown | PaperRegionKind::References
         )
     });
-    let mut relation_ids: Vec<String> = base
+    let base_landmark_ids: HashSet<&str> = base
+        .landmarks
+        .iter()
+        .map(|landmark| landmark.landmark_id.as_str())
+        .collect();
+    let mut eligible_relations: Vec<&PaperArgumentRelation> = base
         .relations
         .iter()
         .filter(|relation| {
             let source = relation.source_landmark_id.as_str();
             let target = relation.target_landmark_id.as_str();
+            if !base_landmark_ids.contains(source) || !base_landmark_ids.contains(target) {
+                return false;
+            }
             match mode {
-                PaperMinimapMode::Skim => {
-                    global_landmark_set.contains(source) && global_landmark_set.contains(target)
-                }
+                PaperMinimapMode::Skim => true,
                 PaperMinimapMode::Abstract => {
                     local_relations_allowed
                         && local_landmark_set.contains(source)
@@ -570,17 +605,67 @@ pub fn project_paper_minimap_lens(
                 }
                 PaperMinimapMode::Deep => {
                     local_relations_allowed
-                        && visible_landmark_ids.contains(source)
-                        && visible_landmark_ids.contains(target)
                         && (local_landmark_set.contains(source)
                             || local_landmark_set.contains(target))
                 }
             }
         })
-        .map(|relation| relation.relation_id.clone())
         .collect();
-    relation_ids.sort();
-    relation_ids.truncate(MINIMAP_RELATION_BUDGET);
+    sort_minimap_relations(&mut eligible_relations);
+    if mode == PaperMinimapMode::Deep {
+        eligible_relations.sort_by_key(|relation| {
+            let local_endpoint_count = [
+                relation.source_landmark_id.as_str(),
+                relation.target_landmark_id.as_str(),
+            ]
+            .into_iter()
+            .filter(|endpoint| local_landmark_set.contains(*endpoint))
+            .count();
+            std::cmp::Reverse(local_endpoint_count)
+        });
+    }
+
+    let mut relation_ids = Vec::new();
+    let mut required_global_ids = Vec::new();
+    let mut required_global_set = HashSet::new();
+    for relation in eligible_relations {
+        let endpoints = [
+            relation.source_landmark_id.as_str(),
+            relation.target_landmark_id.as_str(),
+        ];
+        let additions: Vec<&str> = endpoints
+            .into_iter()
+            .filter(|endpoint| match mode {
+                PaperMinimapMode::Skim => !required_global_set.contains(*endpoint),
+                PaperMinimapMode::Abstract => false,
+                PaperMinimapMode::Deep => {
+                    !local_landmark_set.contains(*endpoint)
+                        && !required_global_set.contains(*endpoint)
+                }
+            })
+            .collect();
+        if required_global_set.len() + additions.len() > MINIMAP_GLOBAL_LANDMARK_BUDGET {
+            continue;
+        }
+        for endpoint in additions {
+            required_global_set.insert(endpoint.to_string());
+            required_global_ids.push(endpoint.to_string());
+        }
+        relation_ids.push(relation.relation_id.clone());
+        if relation_ids.len() == MINIMAP_RELATION_BUDGET {
+            break;
+        }
+    }
+
+    let mut global_landmark_ids = required_global_ids;
+    for landmark in global_landmarks {
+        if global_landmark_ids.len() == MINIMAP_GLOBAL_LANDMARK_BUDGET {
+            break;
+        }
+        if required_global_set.insert(landmark.landmark_id.clone()) {
+            global_landmark_ids.push(landmark.landmark_id.clone());
+        }
+    }
 
     let mut abstract_correspondences = Vec::new();
     if mode == PaperMinimapMode::Abstract {
@@ -2954,10 +3039,11 @@ mod tests {
             };
         let landmark =
             |id: &str, kind: PaperLandmarkKind, page: u32| -> read_tools::PaperLandmark {
+                let anchor_index = minimap_landmark_priority(&kind) + 1;
                 read_tools::PaperLandmark {
                     landmark_id: id.into(),
                     kind,
-                    anchor_lid: format!("{page}.{id}"),
+                    anchor_lid: format!("{page}.{anchor_index}"),
                     page_index: page,
                     label: id.into(),
                     source_label: None,
@@ -3056,6 +3142,28 @@ mod tests {
     }
 
     #[test]
+    fn paper_minimap_skim_packs_sparse_relations_before_filling_landmarks() {
+        let base = lens_base();
+        let projection = project_paper_minimap_lens(&base, PaperMinimapMode::Skim, None).unwrap();
+
+        assert_eq!(projection.global_landmark_ids.len(), 5);
+        assert_eq!(projection.relation_ids.len(), 3);
+        assert!(projection.relation_ids.iter().all(|relation_id| {
+            let relation = base
+                .relations
+                .iter()
+                .find(|relation| &relation.relation_id == relation_id)
+                .unwrap();
+            projection
+                .global_landmark_ids
+                .contains(&relation.source_landmark_id)
+                && projection
+                    .global_landmark_ids
+                    .contains(&relation.target_landmark_id)
+        }));
+    }
+
+    #[test]
     fn paper_layout_preset_and_minimap_mode_are_independent_control_planes() {
         let (_, dir) = paper_minimap_book("layout-mode-independence");
         std::fs::write(
@@ -3139,6 +3247,37 @@ mod tests {
             .landmarks
             .iter()
             .any(|landmark| &landmark.landmark_id == id)));
+    }
+
+    #[test]
+    fn paper_minimap_lens_uses_lid_span_when_regions_share_a_pdf_page() {
+        let mut base = lens_base();
+        let method_region = base
+            .regions
+            .iter_mut()
+            .find(|region| region.region_id == "region:method")
+            .unwrap();
+        method_region.page_span = read_tools::PaperPageSpan {
+            start_page: 2,
+            end_page: 2,
+        };
+        let method_landmark = base
+            .landmarks
+            .iter_mut()
+            .find(|landmark| landmark.landmark_id == "method")
+            .unwrap();
+        method_landmark.kind = PaperLandmarkKind::Experiment;
+        method_landmark.anchor_lid = "1.5".into();
+        method_landmark.page_index = 2;
+
+        let projection =
+            project_paper_minimap_lens(&base, PaperMinimapMode::Deep, Some("region:results"))
+                .unwrap();
+
+        assert!(!projection
+            .local_landmark_ids
+            .iter()
+            .any(|landmark_id| landmark_id == "method"));
     }
 
     #[test]
