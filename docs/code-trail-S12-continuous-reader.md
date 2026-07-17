@@ -222,3 +222,30 @@
 
 **Entry point**: audited temp rebuild -> hard-gated atomic artifact apply -> live localhost API -> physical Chromium PDF selection.
 **Test**: candidate and official hard gates pass; `206/258` alignable text and `29/29` headings map with no page regression; pages 5/6/7/10/11 selectable-character coverage rises to `41.7%/76.5%/39.7%/21.1%/86.2%`; physical mapped/unmapped selection proves resolved-only toolbar behavior. Final checks: Core `223` tests plus typecheck, Web `124` tests plus build, selection Playwright `4` tests, and server `pdf_selection_` `4` tests.
+
+## 2026-07-17 TS1 PDF selection translation source-boundary red test
+
+**Touched**:
+- `crates/server/src/lib.rs:tests::selection_translation_prompt_limits_output_to_source_markdown` - characterizes a selected suffix whose reference context still contains an unselected prefix, then requires explicit source-only system and user-message roles.
+- `docs/切片方案-pdf选区翻译源文边界.md:TS1` - freezes the prompt-first repair boundary and red-green acceptance sequence.
+
+**Entry point**: `prepare_selection_translation` builds distinct `source_markdown` and full-LID context -> `selection_translation_prompt` serializes the Provider request.
+**Test**: `cargo test -p server selection_translation_prompt_limits_output_to_source_markdown` fails only because the current system prompt lacks the exact-source rule; production prompt remains unchanged in this slice.
+
+## 2026-07-17 TS2 PDF selection translation prompt source boundary
+
+**Touched**:
+- `crates/server/src/lib.rs:selection_translation_prompt` - declares `source_markdown` as the sole output scope, marks context as reference-only, and serializes full-LID context below `reference_only.context_blocks`.
+- `crates/server/src/lib.rs:tests::selection_translation_prompt_limits_output_to_source_markdown` - turns the TS1 selected-suffix regression green without removing context or changing preparation budgets.
+
+**Entry point**: `POST /reader/selection.translate` -> prepared source/context/terminology -> source-scoped structured Provider prompt.
+**Test**: targeted source-boundary test 1/1, `cargo test -p server selection_translation_` 9/9, and `cargo test -p server` 154/154; `git diff --check` passes for the slice. Package-wide rustfmt check remains blocked by pre-existing formatting drift outside this change.
+
+## 2026-07-17 TS3 real-book translation source-boundary acceptance
+
+**Touched**:
+- `.understand-book/1:pageIndex 1 Tissue Acquisition selection` - replays the exact 13-line native selection from `The heart was transected...` through the material transfer agreement.
+- `.tmp-ts3-target/debug/server.exe` - isolates a newly built prompt implementation at `127.0.0.1:8795` without replacing or stopping the existing `8794` server.
+
+**Entry point**: real selection-map rects -> `POST /reader/pdf_selection.resolve` -> identical `partial` translation request repeated five times against the configured Provider.
+**Test**: resolver is HTTP 200 `partial` with 13 ranges; all 5 isolated translations plus one request after restarting the active `8794` backend are HTTP 200, retain selected `15` and `80`, start at the selected heart-transection sentence, end at the material transfer agreement, and exclude context-only `PRO00006097` and `STU00216333`.

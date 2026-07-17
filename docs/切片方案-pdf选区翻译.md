@@ -1,6 +1,6 @@
 # 切片方案 - PDF 选区翻译
 
-> 状态:2026-07-16 §0.5 Grill 完成,待实现。
+> 状态:2026-07-17 PT0-PT5 已完成;prompt 源文边界修复见 [TS0-TS4](切片方案-pdf选区翻译源文边界.md)。
 > 决策:[ADR-0078](adr/0078-pdf-selection-translation-ephemeral-lock-free-bilingual-projection.md)。
 > 术语:[CONTEXT.md](../CONTEXT.md) 的 `PDF 选区翻译` 与 `PDF 选区翻译浮层`。
 
@@ -78,7 +78,15 @@ aliases -> 只用于命中
 
 ## 3. Provider 与输出
 
-Provider prompt 只允许返回:
+Provider prompt 输入角色:
+
+```text
+source_markdown = 唯一待翻译正文
+reference_only.context_blocks = 仅用于消歧,禁止翻译、引用、总结、前插或后附
+terminology = 只约束 source_markdown 的用词,不得增加内容
+```
+
+system 与 user JSON 必须同时声明上述角色;若 source 与 context 不同,输出范围始终由 source 决定。Provider 只允许返回:
 
 ```json
 {"translation_markdown":"..."}
@@ -189,7 +197,7 @@ IDLE
 | 层 | 必测契约 |
 |---|---|
 | Rust validation | forged quote/range、乱序/重叠、resolved/partial source、4k/12k/32 budgets |
-| Rust prompt/output | data-not-instructions、术语优先级、Markdown 字段、空/坏/超长输出、无 lexicon |
+| Rust prompt/output | 唯一 `source_markdown` 输出范围、reference-only context、data-not-instructions、术语优先级、Markdown 字段、空/坏/超长输出、无 lexicon |
 | Host | lock released before Provider、60s timeout、unconfigured/timeout/provider/validation error mapping |
 | Frontend state | stale response、retry、close、selection retained、existing action consumes、scroll/zoom cancel |
 | Component | loading/ready/error/settings、copy Markdown、KaTeX render、accessible labels |
