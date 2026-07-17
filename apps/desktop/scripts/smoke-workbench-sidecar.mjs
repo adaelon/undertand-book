@@ -44,11 +44,16 @@ const fingerprint = {
   paper_pdf_sha256: "pdf-sidecar-smoke",
   config_hash: "sidecar-smoke-v1",
 };
+const canonicalSource = "Hello PDF\n";
 
 try {
   mkdirSync(path.join(workspace, ".build", "input"), { recursive: true });
   mkdirSync(path.join(workspace, ".build", "jobs"), { recursive: true });
-  writeFileSync(path.join(workspace, "paper.md"), "Hello PDF\n", "utf8");
+  writeFileSync(
+    path.join(workspace, "paper.md"),
+    '<div style="text-align: center;"><div style="text-align: center;">Hello PDF</div> </div>\n',
+    "utf8",
+  );
   writeFileSync(path.join(workspace, "paper.pdf"), simplePdf("Hello PDF"));
   writeFileSync(path.join(workspace, ".build", "input", "manifest.json"), JSON.stringify({
     version: "workbench_input_manifest.v1",
@@ -101,8 +106,19 @@ try {
 
   const job = JSON.parse(readFileSync(path.join(workspace, ".build", "jobs", `${jobId}.json`), "utf8"));
   const report = JSON.parse(readFileSync(path.join(workspace, ".build", "source-reconciliation", "report.json"), "utf8"));
-  if (job.status !== "ready" || report.book_id !== "paper-sidecar-smoke") {
-    throw new Error(`workbench sidecar smoke produced invalid artifacts: ${JSON.stringify({ status: job.status, book_id: report.book_id })}`);
+  const source = readFileSync(path.join(workspace, ".build", "source-reconciliation", "source.txt"), "utf8");
+  if (
+    job.status !== "ready"
+    || report.book_id !== "paper-sidecar-smoke"
+    || report.canonicalization?.presentation_html_unwrap !== 1
+    || source !== canonicalSource
+  ) {
+    throw new Error(`workbench sidecar smoke produced invalid artifacts: ${JSON.stringify({
+      status: job.status,
+      book_id: report.book_id,
+      canonicalization: report.canonicalization,
+      source,
+    })}`);
   }
   console.log("workbench sidecar smoke passed");
 } finally {
