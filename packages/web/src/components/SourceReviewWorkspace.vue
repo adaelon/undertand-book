@@ -22,6 +22,7 @@ import type {
 import {
   SOURCE_REVIEW_LLM_BATCH_NOTE_PREFIX,
   sourceReviewDecisionResolvesBlock,
+  type SourceReviewLoad,
   type SourceReviewLlmBatchState,
 } from "../source-review-batch";
 import { renderMarkdown } from "../md";
@@ -40,10 +41,12 @@ const props = withDefaults(defineProps<{
   llmAnalyzingBlockId?: string | null;
   llmErrors?: Record<string, string>;
   llmBatchState?: SourceReviewLlmBatchState | null;
+  reviewLoad?: SourceReviewLoad | null;
   decisionSetCurrent?: boolean;
   rerunning?: boolean;
 }>(), {
   decisionSetCurrent: true,
+  reviewLoad: null,
   rerunning: false,
 });
 
@@ -82,6 +85,7 @@ const activeLlmError = computed(() => {
 });
 const llmAnalyzing = computed(() => props.llmAnalyzingBlockId === activeBlock.value?.id);
 const llmBatchRunning = computed(() => props.llmBatchState?.status === "running");
+const llmBatchOverloaded = computed(() => props.reviewLoad?.overloaded === true);
 const llmBatchTargetCount = computed(() => props.blocks.filter((block) => {
   if (!props.decisionSetCurrent) return true;
   const decision = decisionByBlock.value.get(block.id);
@@ -89,6 +93,7 @@ const llmBatchTargetCount = computed(() => props.blocks.filter((block) => {
 }).length);
 const llmBatchActionLabel = computed(() => {
   const batch = props.llmBatchState;
+  if (llmBatchOverloaded.value) return "批量 LLM 已暂停";
   if (batch?.status === "running") return `处理中 ${batch.processed}/${batch.total}`;
   if (!llmBatchTargetCount.value) return "LLM 已处理全部";
   if (batch?.status === "completed" && batch.failed) return `LLM 重试剩余 (${llmBatchTargetCount.value})`;
@@ -216,7 +221,7 @@ function requestLlmAnalysis() {
 }
 
 function requestAllLlmAnalysis() {
-  if (!llmBatchTargetCount.value || llmBatchRunning.value || props.llmAnalyzingBlockId) return;
+  if (llmBatchOverloaded.value || !llmBatchTargetCount.value || llmBatchRunning.value || props.llmAnalyzingBlockId) return;
   emit("analyze-all");
 }
 
@@ -293,7 +298,7 @@ watch(
         <button
           type="button"
           class="review-batch-action"
-          :disabled="props.stale || props.actioning || llmBatchRunning || !!props.llmAnalyzingBlockId || !llmBatchTargetCount"
+          :disabled="props.stale || props.actioning || llmBatchOverloaded || llmBatchRunning || !!props.llmAnalyzingBlockId || !llmBatchTargetCount"
           :aria-busy="llmBatchRunning"
           @click="requestAllLlmAnalysis"
         >
@@ -310,6 +315,10 @@ watch(
         </div>
       </div>
     </header>
+
+    <p v-if="llmBatchOverloaded" class="review-overload-notice" role="status">
+      当前 {{ props.reviewLoad?.unresolved_count }} 项差异已超过逐项复核门限。请先重新运行修复后的来源对齐；批量 LLM 已暂停。
+    </p>
 
     <section
       v-if="props.llmBatchState"
@@ -571,6 +580,16 @@ watch(
   border: 1px solid var(--hairline-soft);
   border-radius: 8px;
   background: #f7f7f5;
+}
+
+.review-overload-notice {
+  margin: 0;
+  padding: 0.75rem 1rem;
+  border-left: 3px solid #b45309;
+  background: #fff7ed;
+  color: #7c2d12;
+  font-size: 0.875rem;
+  line-height: 1.5;
 }
 .review-workspace-head {
   min-height: 62px;

@@ -17,6 +17,7 @@ import type {
   WorkbenchAdapterMode,
 } from "../api";
 import {
+  evaluateSourceReviewLoad,
   getSourceReviewManualOverride,
   sourceReviewDecisionSetMatchesReport,
   type SourceReviewLlmBatchState,
@@ -145,6 +146,9 @@ const sourceReviewStale = computed(() => props.snapshot?.readiness.stages.source
 const operationalWarnings = computed(() => props.snapshot?.operations.warnings ?? []);
 const recentPermissionAudit = computed(() => [...(props.snapshot?.operations.permission_audit ?? [])].slice(-10).reverse());
 const sourceReviewBlocks = computed(() => sourceReview.value?.unresolved ?? []);
+const sourceReviewLoad = computed(() => (
+  props.snapshot ? evaluateSourceReviewLoad(props.snapshot) : null
+));
 const activeRun = computed(() => latestJob.value?.active_run ?? null);
 const sourceReviewDecisionSetCurrent = computed(() => (
   props.snapshot ? sourceReviewDecisionSetMatchesReport(props.snapshot) : true
@@ -608,6 +612,7 @@ function draftSidecarPlan() {
         :llm-analyzing-block-id="props.sourceReviewLlmAnalyzingBlockId"
         :llm-errors="props.sourceReviewLlmErrors"
         :llm-batch-state="props.sourceReviewLlmBatch"
+        :review-load="sourceReviewLoad"
         :decision-set-current="sourceReviewDecisionSetCurrent"
         :rerunning="sourceReviewRerunning"
         @resolve="emit('resolve-source-review', $event)"

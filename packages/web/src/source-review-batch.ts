@@ -8,6 +8,24 @@ import type {
 
 export const SOURCE_REVIEW_LLM_AUTO_APPLY_CONFIDENCE = 0.8;
 export const SOURCE_REVIEW_LLM_BATCH_NOTE_PREFIX = "批量 LLM 自动采用";
+export const SOURCE_REVIEW_OVERLOAD_ABSOLUTE_COUNT = 100;
+export const SOURCE_REVIEW_OVERLOAD_MIN_COUNT = 20;
+export const SOURCE_REVIEW_OVERLOAD_UNRESOLVED_RATIO = 0.3;
+export const SOURCE_REVIEW_OVERLOAD_UNMATCHED_RATIO = 0.15;
+
+export type SourceReviewLoadReason =
+  | "absolute_count"
+  | "unresolved_density"
+  | "unmatched_density";
+
+export interface SourceReviewLoad {
+  overloaded: boolean;
+  unresolved_count: number;
+  total_units: number | null;
+  unresolved_ratio: number | null;
+  unmatched_ratio: number | null;
+  reason: SourceReviewLoadReason | null;
+}
 
 export type SourceReviewLlmBatchFailureKind =
   | "analysis_failed"
@@ -93,6 +111,55 @@ function jsonValuesEqual(left: unknown, right: unknown): boolean {
       && jsonValuesEqual(left[key], right[key]));
 }
 
+function nonNegativeCount(value: unknown): number | null {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : null;
+}
+
+export function evaluateSourceReviewLoad(snapshot: BuildWorkbenchSnapshot): SourceReviewLoad {
+  const unresolvedCount = snapshot.source_review.unresolved.length;
+  const report = snapshot.source_review.report;
+  const summary = isRecord(report) && isRecord(report.summary) ? report.summary : null;
+  const summaryCounts = summary
+    ? Object.values(summary).map(nonNegativeCount)
+    : [];
+  const completeSummary = summaryCounts.length > 0 && summaryCounts.every((count) => count !== null);
+  const totalUnits = completeSummary
+    ? (summaryCounts as number[]).reduce((total, count) => total + count, 0)
+    : null;
+  const mdUnmatched = summary ? nonNegativeCount(summary.md_unmatched) : null;
+  const pdfUnmatched = summary ? nonNegativeCount(summary.pdf_unmatched) : null;
+  const unresolvedRatio = totalUnits && totalUnits > 0 ? unresolvedCount / totalUnits : null;
+  const unmatchedRatio = totalUnits && totalUnits > 0 && mdUnmatched !== null && pdfUnmatched !== null
+    ? (mdUnmatched + pdfUnmatched) / totalUnits
+    : null;
+
+  let reason: SourceReviewLoadReason | null = null;
+  if (unresolvedCount >= SOURCE_REVIEW_OVERLOAD_ABSOLUTE_COUNT) {
+    reason = "absolute_count";
+  } else if (
+    unresolvedCount >= SOURCE_REVIEW_OVERLOAD_MIN_COUNT
+    && unresolvedRatio !== null
+    && unresolvedRatio >= SOURCE_REVIEW_OVERLOAD_UNRESOLVED_RATIO
+  ) {
+    reason = "unresolved_density";
+  } else if (
+    unresolvedCount >= SOURCE_REVIEW_OVERLOAD_MIN_COUNT
+    && unmatchedRatio !== null
+    && unmatchedRatio >= SOURCE_REVIEW_OVERLOAD_UNMATCHED_RATIO
+  ) {
+    reason = "unmatched_density";
+  }
+
+  return {
+    overloaded: reason !== null,
+    unresolved_count: unresolvedCount,
+    total_units: totalUnits,
+    unresolved_ratio: unresolvedRatio,
+    unmatched_ratio: unmatchedRatio,
+    reason,
+  };
+}
+
 function isSourceReviewLlmSuggestion(value: unknown): value is SourceReviewLlmSuggestion {
   if (!isRecord(value)) return false;
   if (value.version !== "source_review_llm_suggestion.v1") return false;
@@ -141,6 +208,7 @@ export function sourceReviewDecisionSetMatchesReport(snapshot: BuildWorkbenchSna
 /** Selects every unresolved block that is not currently usable by the rerun gate. */
 export function getSourceReviewLlmBatchTargets(snapshot: BuildWorkbenchSnapshot): SourceReviewBlock[] {
   if (getSourceReviewManualOverride(snapshot)) return [];
+  if (evaluateSourceReviewLoad(snapshot).overloaded) return [];
   if (!sourceReviewDecisionSetMatchesReport(snapshot)) return [...snapshot.source_review.unresolved];
   const latestDecisionByBlock = new Map(
     (snapshot.source_review.decisions?.decisions ?? []).map((decision) => [decision.block_id, decision]),
@@ -304,6 +372,12 @@ function immutableSnapshot(snapshot: BuildWorkbenchSnapshot): BuildWorkbenchSnap
 export async function runSourceReviewLlmBatch(
   options: RunSourceReviewLlmBatchOptions,
 ): Promise<{ snapshot: BuildWorkbenchSnapshot; state: SourceReviewLlmBatchState }> {
+  const reviewLoad = evaluateSourceReviewLoad(options.snapshot);
+  if (reviewLoad.overloaded) {
+    throw new Error(
+      `SOURCE_REVIEW_OVERLOAD: ${reviewLoad.unresolved_count} unresolved blocks require deterministic realignment before batch LLM review`,
+    );
+  }
   const targets = getSourceReviewLlmBatchTargets(options.snapshot);
   let currentSnapshot = options.snapshot;
   const state: SourceReviewLlmBatchState = {

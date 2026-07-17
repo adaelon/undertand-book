@@ -267,6 +267,27 @@ describe("SourceReviewWorkspace", () => {
     expect(wrapper.text()).toContain("已采用 LLM 修订");
   });
 
+  it("blocks batch LLM when source reconciliation is overloaded", async () => {
+    const wrapper = mountWorkspace();
+    await wrapper.setProps({
+      reviewLoad: {
+        overloaded: true,
+        unresolved_count: 390,
+        total_units: 667,
+        unresolved_ratio: 390 / 667,
+        unmatched_ratio: 233 / 667,
+        reason: "absolute_count",
+      },
+    });
+
+    expect(wrapper.text()).toContain("390 项差异已超过逐项复核门限");
+    expect(wrapper.text()).toContain("批量 LLM 已暂停");
+    const batchButton = wrapper.findAll("button").find((button) => button.text().includes("批量 LLM 已暂停"));
+    expect(batchButton?.attributes("disabled")).toBeDefined();
+    await batchButton?.trigger("click");
+    expect(wrapper.emitted("analyze-all")).toBeUndefined();
+  });
+
   it("does not start a batch while an individual LLM analysis is running", async () => {
     const wrapper = mountWorkspace();
     await wrapper.setProps({ llmAnalyzingBlockId: "block-1" });

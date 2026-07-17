@@ -7,6 +7,7 @@ import type {
 import {
   SOURCE_REVIEW_LLM_AUTO_APPLY_CONFIDENCE,
   SOURCE_REVIEW_LLM_BATCH_NOTE_PREFIX,
+  evaluateSourceReviewLoad,
   evaluateSourceReviewLlmBatchEligibility,
   getSourceReviewAutoRerunRequest,
   getSourceReviewLlmBatchTargets,
@@ -155,6 +156,55 @@ describe("source review LLM batch targets", () => {
     snapshot.source_review.decisions!.input_fingerprint = { pdf: "same", md: "current" };
     expect(getSourceReviewLlmBatchTargets(snapshot)).toEqual([]);
   });
+
+  it("returns no batch targets when the reconciliation report is overloaded", () => {
+    const snapshot = makeSnapshot(Array.from({ length: 390 }, (_, index) => `block-${index + 1}`));
+    snapshot.source_review.report = {
+      summary: {
+        verified: 176,
+        format_equivalent: 101,
+        needs_review: 157,
+        md_unmatched: 233,
+      },
+    };
+
+    expect(evaluateSourceReviewLoad(snapshot)).toMatchObject({
+      overloaded: true,
+      unresolved_count: 390,
+      total_units: 667,
+      reason: "absolute_count",
+    });
+    expect(getSourceReviewLlmBatchTargets(snapshot)).toEqual([]);
+  });
+});
+
+describe("source review overload", () => {
+  it.each([
+    [19, { verified: 1, md_unmatched: 18 }, false, null],
+    [20, { verified: 30, needs_review: 20 }, true, "unresolved_density"],
+    [30, { verified: 170, md_unmatched: 30, pdf_unmatched: 0 }, true, "unmatched_density"],
+    [100, { verified: 900, needs_review: 100 }, true, "absolute_count"],
+  ])(
+    "classifies %i unresolved items without changing small-queue behavior",
+    (unresolvedCount, summary, overloaded, reason) => {
+      const snapshot = makeSnapshot(Array.from({ length: unresolvedCount }, (_, index) => `block-${index + 1}`));
+      snapshot.source_review.report = { summary };
+
+      expect(evaluateSourceReviewLoad(snapshot)).toMatchObject({ overloaded, reason });
+    },
+  );
+
+  it("falls back conservatively when report summary fields are missing", () => {
+    const snapshot = makeSnapshot(Array.from({ length: 20 }, (_, index) => `block-${index + 1}`));
+    snapshot.source_review.report = { summary: { md_unmatched: "20" } };
+
+    expect(evaluateSourceReviewLoad(snapshot)).toMatchObject({
+      overloaded: false,
+      unresolved_count: 20,
+      total_units: null,
+      reason: null,
+    });
+  });
 });
 
 describe("source review automatic rerun", () => {
@@ -302,6 +352,17 @@ describe("source review LLM batch eligibility", () => {
 });
 
 describe("runSourceReviewLlmBatch", () => {
+  it("refuses to start an overloaded batch even when called directly", async () => {
+    const snapshot = makeSnapshot(Array.from({ length: 100 }, (_, index) => `block-${index + 1}`));
+    const analyze = vi.fn(async (blockId: string) => makeSuggestion(blockId));
+    const resolve = vi.fn(async () => snapshot);
+
+    await expect(runSourceReviewLlmBatch({ snapshot, analyze, resolve }))
+      .rejects.toThrow(/SOURCE_REVIEW_OVERLOAD/);
+    expect(analyze).not.toHaveBeenCalled();
+    expect(resolve).not.toHaveBeenCalled();
+  });
+
   it("persists eligible items immediately and continues after every failure class", async () => {
     const blockIds = [
       "applied-1",
