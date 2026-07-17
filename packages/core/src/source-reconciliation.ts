@@ -216,6 +216,9 @@ const LATEX_SYMBOLS: Record<string, string> = {
   chi: "χ",
   omega: "ω",
   Omega: "Ω",
+  partial: "∂",
+  nabla: "∇",
+  top: "T",
   times: "×",
   cdot: "·",
   circ: "°",
@@ -248,14 +251,16 @@ const LATEX_PRESENTATION_COMMANDS = new Set([
 
 function latexToDisplayText(text: string): string {
   let value = text.replace(/\$\s*\^\{ID\}\s*\$/giu, " ");
-  for (let pass = 0; pass < 4; pass += 1) {
-    value = value.replace(/\\(?:text|textrm|textit|textbf|mathrm|mathbf|mathit|operatorname)\s*\{([^{}]*)\}/gu, "$1");
+  for (let pass = 0; pass < 6; pass += 1) {
+    value = value
+      .replace(/\\(?:text|textrm|textit|textbf|mathrm|mathbf|mathit|mathsf|mathtt|mathbb|mathcal|operatorname|boldsymbol|bm|pmb)\s*\{([^{}]*)\}/gu, "$1")
+      .replace(/\\(?:frac|dfrac|tfrac)\s*\{([^{}]*)\}\s*\{([^{}]*)\}/gu, "$1/$2");
   }
   return value
     .replace(/\\begin\{[^{}]+\}|\\end\{[^{}]+\}/gu, " ")
     .replace(/\\[,:;!]/gu, " ")
     .replace(/\\\s+/gu, " ")
-    .replace(/\\([A-Za-z]+)\b/gu, (_match, command: string) => {
+    .replace(/\\([A-Za-z]+)(?![A-Za-z])/gu, (_match, command: string) => {
       if (LATEX_PRESENTATION_COMMANDS.has(command)) return " ";
       return LATEX_SYMBOLS[command] ?? command;
     })
@@ -278,6 +283,7 @@ function stripMarkup(text: string): string {
 function comparisonText(text: string): string {
   return stripMarkup(latexToDisplayText(safeRepairText(text)))
     .normalize("NFKC")
+    .replace(/[⊤ᵀ]/gu, "T")
     .replace(/µ/gu, "μ")
     .replace(/[‐‑‒–—−]/gu, "-")
     .replace(/(?<=[\p{L}\p{N}])-(?=[\p{L}\p{N}])/gu, "")
@@ -513,12 +519,18 @@ function reconciliationUnits(source: string): ReconciliationUnit[] {
     const block = blocks[index];
     const current = units.at(-1);
     const gap = current ? source.slice(current.span.end, block.span.start) : "";
+    const touchesStandaloneFormula = Boolean(
+      current
+      && (current.last_block.assetKind === "formula" || block.assetKind === "formula"),
+    );
     const mergeFormulaContext = Boolean(
       current
       && !hardReconciliationBoundary(current.last_block)
       && !hardReconciliationBoundary(block)
-      && !/\n\s*\n/u.test(gap)
-      && (current.contains_formula || block.assetKind === "formula"),
+      && (
+        touchesStandaloneFormula
+        || (!/\n\s*\n/u.test(gap) && (current.contains_formula || block.assetKind === "formula"))
+      ),
     );
     if (current && mergeFormulaContext) {
       current.span.end = block.span.end;

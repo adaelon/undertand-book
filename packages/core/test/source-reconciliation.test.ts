@@ -112,6 +112,58 @@ describe("PH3 source reconciliation engine", () => {
     expect(contentEquivalent("$ \\mu $", "σ")).toBe(false);
   });
 
+  it("aligns blank-line display formulas with adjacent prose after presentation normalization", () => {
+    const markdown = [
+      "The covariance is defined below.",
+      "",
+      "$$ \\mathbb{E}_{\\boldsymbol{x}}[\\boldsymbol{x}\\boldsymbol{x}^{\\top}] = \\frac{1}{n}\\sum_i x_i x_i^{\\top}. $$",
+      "",
+      "This quantity drives the update.",
+      "",
+    ].join("\n");
+    const result = reconcilePaperSource({
+      book_id: "paper-a",
+      markdown_source: markdown,
+      pdf_geometry: geometryFromLines([
+        "The covariance is defined below.",
+        "E x [x x ⊤] = 1/n ∑i x i x i ⊤.",
+        "This quantity drives the update.",
+      ]),
+      input_fingerprint: fingerprint(),
+    });
+
+    expect(result.report.unresolved).toEqual([]);
+    expect(result.report.summary.format_equivalent).toBe(1);
+    expect(result.reconciled_source).toBe(markdown);
+  });
+
+  it("keeps a content difference inside a contextualized display formula unresolved", () => {
+    const result = reconcilePaperSource({
+      book_id: "paper-a",
+      markdown_source: [
+        "The covariance is defined below.",
+        "",
+        "$$ \\mathbb{E}_{\\boldsymbol{x}}[\\boldsymbol{x}\\boldsymbol{x}^{\\top}] = \\frac{1}{n}\\sum_i x_i x_i^{\\top}. $$",
+        "",
+        "This quantity drives the update.",
+        "",
+      ].join("\n"),
+      pdf_geometry: geometryFromLines([
+        "The covariance is defined below.",
+        "E x [x x ⊤] = 2/n ∑i x i x i ⊤.",
+        "This quantity drives the update.",
+      ]),
+      input_fingerprint: fingerprint(),
+    });
+
+    expect(result.report.unresolved).toHaveLength(1);
+    expect(result.report.unresolved[0]).toMatchObject({
+      md_excerpt: expect.stringContaining("\\frac{1}{n}"),
+      pdf_excerpt: expect.stringContaining("2/n"),
+    });
+    expect(result.reconciled_source).toBeUndefined();
+  });
+
   it("provides nearby PDF context when no replacement candidate is reliable", () => {
     const result = reconcilePaperSource({
       book_id: "paper-a",
