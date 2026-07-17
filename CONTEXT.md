@@ -384,6 +384,9 @@ Paper profile 的双源输入模型:Markdown 与原版 PDF 共同进入 source r
 ## Source reconciliation
 PDF-first paper build 中把 `paper.md + paper.pdf` 对齐、修复版面/编码差异、阻断内容冲突,并只在确定性门禁通过后产出可信 `source.txt/base.json` 的阶段。状态:NEW(见 [docs/adr/0063])。
 
+## Paper Markdown canonicalization
+Source reconciliation 对 draft `paper.md` 中不承载内容的表示噪声执行确定性规范化，所得文本是对齐 span、人工复核和可信 `source.txt` 的共同正文基准；原始输入只保留 provenance。未知或承载结构的 HTML 不得被静默删除。状态:NEW(见 [docs/adr/0081])。
+
 ## Source reconciliation overload
 Source reconciliation 的派生诊断：未解决项的绝对数量或密度已表明系统性对齐失配，不应继续作为逐项人工或批量 LLM 复核队列。它只暂停高成本复核并要求先修复、重跑确定性对齐器；不删除 unresolved 诊断，不产生可信 `source.txt`，也不改变 Manual source override 契约。状态:NEW(见 `docs/修复方案-来源对齐复核过载.md`)。
 
