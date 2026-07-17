@@ -9,6 +9,7 @@ import {
   contentEquivalent,
   reconcilePaperSource,
   reviewCandidateAndReconcile,
+  sourceComparisonText,
   sourceReconciliationAccepted,
   sourceReconciliationTrusted,
   writeSourceReconciliationArtifacts,
@@ -112,6 +113,28 @@ describe("PH3 source reconciliation engine", () => {
     expect(contentEquivalent("$ \\mu $", "σ")).toBe(false);
   });
 
+  it("normalizes proven LaTeX presentation forms without erasing mathematical operators", () => {
+    expect(contentEquivalent("$ \\underline{\\text{A kernel}} $", "A kernel")).toBe(true);
+    expect(contentEquivalent("$ \\kappa_1(\\cdot) $", "κ 1(·)")).toBe(true);
+    expect(contentEquivalent("$ ^{\\dagger} $", "†")).toBe(true);
+    expect(contentEquivalent("$ d_k \\gtrsim N $", "dk ≳ N")).toBe(true);
+    expect(contentEquivalent("$ n \\in \\mathbb{N} $", "n ∈ N")).toBe(true);
+    expect(contentEquivalent("$ x^{\\otimes 2} $", "x⊗2")).toBe(true);
+    expect(contentEquivalent("$ n \\in \\mathbb{N} $", "n N")).toBe(false);
+    expect(contentEquivalent("$ x^{\\otimes 2} $", "x2")).toBe(false);
+    expect(contentEquivalent("$ d_k \\gtrsim N $", "dk > N")).toBe(false);
+    expect(contentEquivalent("key-value", "keyvalue")).toBe(true);
+    expect(contentEquivalent("$ I - kk^\\top $", "I-kk⊤")).toBe(true);
+    expect(contentEquivalent("$ I - kk^\\top $", "I+kk⊤")).toBe(false);
+    expect(sourceComparisonText(
+      "$ \\underbrace{I - \\boldsymbol{k}\\boldsymbol{k}^{\\top}}_{\\boldsymbol{B}_t} $",
+    )).toBe("I-kkT Bt");
+    expect(contentEquivalent(
+      "$ \\frac{\\boldsymbol{x}^{\\top}\\boldsymbol{y}}{\\tau} $",
+      "x⊤y/τ",
+    )).toBe(true);
+  });
+
   it("aligns blank-line display formulas with adjacent prose after presentation normalization", () => {
     const markdown = [
       "The covariance is defined below.",
@@ -135,6 +158,68 @@ describe("PH3 source reconciliation engine", () => {
     expect(result.report.unresolved).toEqual([]);
     expect(result.report.summary.format_equivalent).toBe(1);
     expect(result.reconciled_source).toBe(markdown);
+  });
+
+  it("accepts formula token-boundary and bracket glyph presentation without ignoring operators", () => {
+    const equivalent = reconcilePaperSource({
+      book_id: "paper-a",
+      markdown_source: "The kernel is $ [x^\\top y] $.\n",
+      pdf_geometry: geometryFromLines(["The kernel is ⌊x⊤ y⌋."]),
+      input_fingerprint: fingerprint(),
+    });
+    const changedOperator = reconcilePaperSource({
+      book_id: "paper-a",
+      markdown_source: "The kernel is $ [x^\\top y] $.\n",
+      pdf_geometry: geometryFromLines(["The kernel is ⌊x+y⌋."]),
+      input_fingerprint: fingerprint(),
+    });
+
+    expect(equivalent.report.unresolved).toEqual([]);
+    expect(equivalent.report.summary.format_equivalent).toBe(1);
+    expect(changedOperator.report.unresolved).toHaveLength(1);
+    expect(changedOperator.reconciled_source).toBeUndefined();
+  });
+
+  it("keeps a PDF-only equation number outside the contextualized formula unit", () => {
+    const result = reconcilePaperSource({
+      book_id: "paper-a",
+      markdown_source: [
+        "The update is defined below.",
+        "",
+        "$$ x = y. $$",
+        "",
+        "The next paragraph is exact.",
+        "",
+      ].join("\n"),
+      pdf_geometry: geometryFromLines([
+        "The update is defined below.",
+        "x = y. (1)",
+        "The next paragraph is exact.",
+      ]),
+      input_fingerprint: fingerprint(),
+    });
+
+    expect(result.report.unresolved).toEqual([]);
+    expect(result.report.summary.format_equivalent).toBe(1);
+  });
+
+  it("accepts a PDF-extracted fraction with a missing visual bar but not a changed operator", () => {
+    const equivalent = reconcilePaperSource({
+      book_id: "paper-a",
+      markdown_source: "The factor is $ \\frac{1}{t} $.\n",
+      pdf_geometry: geometryFromLines(["The factor is 1 t."]),
+      input_fingerprint: fingerprint(),
+    });
+    const changedOperator = reconcilePaperSource({
+      book_id: "paper-a",
+      markdown_source: "The factor is $ \\frac{1}{t} $.\n",
+      pdf_geometry: geometryFromLines(["The factor is 1+t."]),
+      input_fingerprint: fingerprint(),
+    });
+
+    expect(equivalent.report.unresolved).toEqual([]);
+    expect(equivalent.report.summary.format_equivalent).toBe(1);
+    expect(changedOperator.report.unresolved).toHaveLength(1);
   });
 
   it("keeps a content difference inside a contextualized display formula unresolved", () => {

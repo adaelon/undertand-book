@@ -205,6 +205,7 @@ const LATEX_SYMBOLS: Record<string, string> = {
   epsilon: "ε",
   eta: "η",
   theta: "θ",
+  kappa: "κ",
   lambda: "λ",
   mu: "μ",
   pi: "π",
@@ -213,12 +214,30 @@ const LATEX_SYMBOLS: Record<string, string> = {
   Sigma: "Σ",
   tau: "τ",
   phi: "φ",
+  varphi: "φ",
   chi: "χ",
   omega: "ω",
   Omega: "Ω",
   partial: "∂",
   nabla: "∇",
   top: "T",
+  dagger: "†",
+  ast: "*",
+  in: "∈",
+  gtrsim: "≳",
+  lesssim: "≲",
+  gg: "≫",
+  ll: "≪",
+  subset: "⊂",
+  subseteq: "⊆",
+  supset: "⊃",
+  supseteq: "⊇",
+  otimes: "⊗",
+  vdots: "⋮",
+  ldots: "…",
+  cdots: "…",
+  langle: "⟨",
+  rangle: "⟩",
   times: "×",
   cdot: "·",
   circ: "°",
@@ -247,14 +266,106 @@ const LATEX_PRESENTATION_COMMANDS = new Set([
   "nolimits",
   "quad",
   "qquad",
+  "big",
+  "Big",
+  "bigg",
+  "Bigg",
+  "middle",
 ]);
 
-function latexToDisplayText(text: string): string {
+const LATEX_WRAPPER_COMMANDS = new Set([
+  "text",
+  "textrm",
+  "textit",
+  "textbf",
+  "mathrm",
+  "mathbf",
+  "mathit",
+  "mathsf",
+  "mathtt",
+  "mathbb",
+  "mathcal",
+  "operatorname",
+  "boldsymbol",
+  "bm",
+  "pmb",
+  "underline",
+  "overline",
+  "underbrace",
+  "overbrace",
+  "hat",
+  "widehat",
+  "bar",
+  "vec",
+  "tilde",
+  "widetilde",
+]);
+
+function latexGroupAt(text: string, start: number): { content: string; end: number } | null {
+  if (text[start] !== "{") return null;
+  let depth = 1;
+  for (let index = start + 1; index < text.length; index += 1) {
+    if (text[index] === "\\" && (text[index + 1] === "{" || text[index + 1] === "}")) {
+      index += 1;
+      continue;
+    }
+    if (text[index] === "{") depth += 1;
+    if (text[index] === "}") depth -= 1;
+    if (depth === 0) return { content: text.slice(start + 1, index), end: index + 1 };
+  }
+  return null;
+}
+
+function skipLatexWhitespace(text: string, start: number): number {
+  let index = start;
+  while (index < text.length && /\s/u.test(text[index])) index += 1;
+  return index;
+}
+
+function rewriteLatexStructuredCommands(text: string, fractionSeparator: string): string {
+  let output = "";
+  let index = 0;
+  while (index < text.length) {
+    if (text[index] !== "\\") {
+      output += text[index];
+      index += 1;
+      continue;
+    }
+    const commandMatch = /^\\([A-Za-z]+)/u.exec(text.slice(index));
+    if (!commandMatch) {
+      output += text[index];
+      index += 1;
+      continue;
+    }
+    const command = commandMatch[1];
+    const commandEnd = index + commandMatch[0].length;
+    const firstStart = skipLatexWhitespace(text, commandEnd);
+    const first = latexGroupAt(text, firstStart);
+    if (first && LATEX_WRAPPER_COMMANDS.has(command)) {
+      output += first.content;
+      if (command === "underbrace" || command === "overbrace") output += " ";
+      index = first.end;
+      continue;
+    }
+    if (first && (command === "frac" || command === "dfrac" || command === "tfrac")) {
+      const secondStart = skipLatexWhitespace(text, first.end);
+      const second = latexGroupAt(text, secondStart);
+      if (second) {
+        output += `${first.content}${fractionSeparator}${second.content}`;
+        index = second.end;
+        continue;
+      }
+    }
+    output += commandMatch[0];
+    index = commandEnd;
+  }
+  return output;
+}
+
+function latexToDisplayText(text: string, fractionSeparator = "/"): string {
   let value = text.replace(/\$\s*\^\{ID\}\s*\$/giu, " ");
   for (let pass = 0; pass < 6; pass += 1) {
-    value = value
-      .replace(/\\(?:text|textrm|textit|textbf|mathrm|mathbf|mathit|mathsf|mathtt|mathbb|mathcal|operatorname|boldsymbol|bm|pmb)\s*\{([^{}]*)\}/gu, "$1")
-      .replace(/\\(?:frac|dfrac|tfrac)\s*\{([^{}]*)\}\s*\{([^{}]*)\}/gu, "$1/$2");
+    value = rewriteLatexStructuredCommands(value, fractionSeparator);
   }
   return value
     .replace(/\\begin\{[^{}]+\}|\\end\{[^{}]+\}/gu, " ")
@@ -280,13 +391,13 @@ function stripMarkup(text: string): string {
     .replace(/[*_`]+/gu, "");
 }
 
-function comparisonText(text: string): string {
-  return stripMarkup(latexToDisplayText(safeRepairText(text)))
+function comparisonText(text: string, options: { fractionSeparator?: string } = {}): string {
+  return stripMarkup(latexToDisplayText(safeRepairText(text), options.fractionSeparator))
     .normalize("NFKC")
     .replace(/[⊤ᵀ]/gu, "T")
     .replace(/µ/gu, "μ")
     .replace(/[‐‑‒–—−]/gu, "-")
-    .replace(/(?<=[\p{L}\p{N}])-(?=[\p{L}\p{N}])/gu, "")
+    .replace(/(?<=[\p{L}]{2})-(?=[\p{L}]{2})/gu, "")
     .replace(/[‘’]/gu, "'")
     .replace(/[′]/gu, "'")
     .replace(/[″]/gu, "\"")
@@ -295,7 +406,7 @@ function comparisonText(text: string): string {
     .replace(/[~∼]/gu, "≈")
     .replace(/[■◼▪●]/gu, " ")
     .replace(/(?<=[\p{L}])(?=[\p{N}])|(?<=[\p{N}])(?=[\p{L}])/gu, " ")
-    .replace(/\s*([×·≤≥≠≈=+\-/*°%μ])\s*/gu, "$1")
+    .replace(/\s*([×·≤≥≠≈≳≲≫≪∈⊂⊆⊃⊇⊗∑∏√∂∇=+\-/*°%μ])\s*/gu, "$1")
     .replace(/\s+/gu, " ")
     .trim();
 }
@@ -312,17 +423,17 @@ function comparisonBaseline(text: string): string {
     .replace(/∆/gu, "Δ")
     .replace(/[‘’′]/gu, "'")
     .replace(/[“”″]/gu, "\"")
-    .replace(/(?<=[\p{L}\p{N}])-(?=[\p{L}\p{N}])/gu, "")
+    .replace(/(?<=[\p{L}]{2})-(?=[\p{L}]{2})/gu, "")
     .replace(/[~∼]/gu, "≈")
     .replace(/[■◼▪●]/gu, " ")
     .replace(/(?<=[\p{L}])(?=[\p{N}])|(?<=[\p{N}])(?=[\p{L}])/gu, " ")
-    .replace(/\s*([×·≤≥≠≈=+\-/*°%μ])\s*/gu, "$1")
+    .replace(/\s*([×·≤≥≠≈≳≲≫≪∈⊂⊆⊃⊇⊗∑∏√∂∇=+\-/*°%μ])\s*/gu, "$1")
     .replace(/\s+/gu, " ")
     .trim();
 }
 
 function comparisonTokens(text: string): string[] {
-  return comparisonText(text).toLocaleLowerCase("en-US").match(/[\p{L}\p{N}]+|[×·≤≥≠≈=+\-/*°%]/gu) ?? [];
+  return comparisonText(text).toLocaleLowerCase("en-US").match(/[\p{L}\p{N}]+|[×·≤≥≠≈≳≲≫≪∈⊂⊆⊃⊇⊗∑∏√∂∇=+\-/*°%]/gu) ?? [];
 }
 
 function tokenSet(text: string): Set<string> {
@@ -462,7 +573,7 @@ function tokenEquivalentAt(haystack: string, needle: string, offset: number): { 
   const expected = comparisonTokens(needle);
   if (!expected.length) return null;
   const sample = haystack.slice(offset, Math.min(haystack.length, offset + Math.max(needle.length + 256, 512)));
-  const matches = [...sample.toLocaleLowerCase("en-US").matchAll(/[\p{L}\p{N}]+|[×·≤≥≠≈=+\-/*°%]/gu)];
+  const matches = [...sample.toLocaleLowerCase("en-US").matchAll(/[\p{L}\p{N}]+|[×·≤≥≠≈≳≲≫≪∈⊂⊆⊃⊇⊗∑∏√∂∇=+\-/*°%]/gu)];
   if (matches.length < expected.length) return null;
   for (let index = 0; index < expected.length; index += 1) {
     if (matches[index][0] !== expected[index]) return null;
@@ -555,7 +666,10 @@ function buildPdfTextIndex(geometry: PdfTextGeometry): PdfTextIndex {
   let text = "";
   for (const page of geometry.pages) {
     for (const line of page.lines) {
-      const normalized = comparisonText(line.text);
+      const compared = comparisonText(line.text);
+      const normalized = /[×·≤≥≠≈≳≲≫≪∈⊂⊆⊃⊇⊗∑∏√∂∇=+\-/*]/u.test(compared)
+        ? compared.replace(/\s+\(\d{1,4}[a-z]?\)$/iu, "")
+        : compared;
       if (!normalized) continue;
       const previous = lines.at(-1);
       const unwrapHyphen = Boolean(previous && /[\p{L}\p{N}]-$/u.test(text) && /^[\p{L}\p{N}]/u.test(normalized));
@@ -643,25 +757,45 @@ export function reconcilePaperSource(input: ReconcilePaperSourceInput): Reconcil
     const repaired = safeRepairText(unit.text);
     const displayNeedle = comparisonText(repaired);
     const needle = displayNeedle.toLocaleLowerCase("en-US");
+    const fractionlessDisplayNeedle = comparisonText(repaired, { fractionSeparator: " " });
+    const deterministicNeedles = [
+      { display: displayNeedle, search: needle, extraction_variant: false },
+      ...(fractionlessDisplayNeedle !== displayNeedle && fractionlessDisplayNeedle.length >= 12
+        ? [{
+            display: fractionlessDisplayNeedle,
+            search: fractionlessDisplayNeedle.toLocaleLowerCase("en-US"),
+            extraction_variant: true,
+          }]
+        : []),
+    ];
     const id = unit.id;
     if (!needle) continue;
 
     const from = Math.max(0, cursor - config.lookback_chars);
     const fuzzyTo = Math.min(pdfSearch.length, cursor + config.lookahead_chars);
-    const foundExactOffset = pdfSearch.indexOf(needle, cursor);
-    const exactOffset = foundExactOffset >= 0 && foundExactOffset <= fuzzyTo ? foundExactOffset : -1;
-    if (exactOffset >= 0) {
-      const status = resolvedStatus(unit.text, repaired);
+    const exactMatch = deterministicNeedles
+      .map((variant) => ({ variant, offset: pdfSearch.indexOf(variant.search, cursor) }))
+      .filter((candidate) => candidate.offset >= 0 && candidate.offset <= fuzzyTo)
+      .sort((left, right) => left.offset - right.offset || Number(left.variant.extraction_variant) - Number(right.variant.extraction_variant))[0];
+    if (exactMatch) {
+      const status = exactMatch.variant.extraction_variant
+        ? "format_equivalent"
+        : resolvedStatus(unit.text, repaired);
       summary[status]++;
-      cursor = exactOffset + needle.length;
+      cursor = exactMatch.offset + exactMatch.variant.search.length;
       continue;
     }
-    const uniqueOffset = (needle.length >= 12 || unit.last_block.kind === "heading")
-      ? uniqueExactOffset(pdfSearch, needle)
-      : null;
-    if (uniqueOffset !== null && uniqueOffset >= cursor) {
-      summary[resolvedStatus(unit.text, repaired)]++;
-      cursor = uniqueOffset + needle.length;
+    const uniqueMatch = (needle.length >= 12 || unit.last_block.kind === "heading")
+      ? deterministicNeedles
+          .map((variant) => ({ variant, offset: uniqueExactOffset(pdfSearch, variant.search) }))
+          .filter((candidate): candidate is { variant: typeof deterministicNeedles[number]; offset: number } => (
+            candidate.offset !== null && candidate.offset >= cursor
+          ))
+          .sort((left, right) => left.offset - right.offset || Number(left.variant.extraction_variant) - Number(right.variant.extraction_variant))[0]
+      : undefined;
+    if (uniqueMatch) {
+      summary[uniqueMatch.variant.extraction_variant ? "format_equivalent" : resolvedStatus(unit.text, repaired)]++;
+      cursor = uniqueMatch.offset + uniqueMatch.variant.search.length;
       continue;
     }
 
@@ -674,11 +808,17 @@ export function reconcilePaperSource(input: ReconcilePaperSourceInput): Reconcil
       ? fuzzyCandidateFromPrefix(pdfSearch, needle, 0, pdfSearch.length)
       : null;
     const fuzzy = bestCandidate([atPrefix, globalPrefix, atCursor, scanned], cursor);
-    const compactEquivalent = fuzzy ? compactEquivalentAt(pdfIndex.text, displayNeedle, fuzzy.offset) : null;
-    const tokenEquivalent = compactEquivalent ?? (fuzzy ? tokenEquivalentAt(pdfIndex.text, displayNeedle, fuzzy.offset) : null);
-    if (tokenEquivalent && fuzzy!.offset >= cursor) {
+    const deterministicEquivalent = fuzzy
+      ? deterministicNeedles
+          .map((variant) => (
+            compactEquivalentAt(pdfIndex.text, variant.display, fuzzy.offset)
+            ?? tokenEquivalentAt(pdfIndex.text, variant.display, fuzzy.offset)
+          ))
+          .find((equivalent) => equivalent !== null)
+      : null;
+    if (deterministicEquivalent && fuzzy!.offset >= cursor) {
       summary.format_equivalent++;
-      cursor = Math.max(cursor, tokenEquivalent.end);
+      cursor = Math.max(cursor, deterministicEquivalent.end);
       continue;
     }
     const globalEvidence = fuzzy && fuzzy.score >= config.fuzzy_threshold
