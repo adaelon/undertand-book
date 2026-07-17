@@ -174,6 +174,9 @@ export const SourceReconciliationReportZ = z.object({
   book_id: z.string().min(1),
   input_fingerprint: BuildInputFingerprintZ,
   summary: z.record(SourceBlockReconcileStatusZ, z.number().int().nonnegative()),
+  canonicalization: z.object({
+    presentation_html_unwrap: z.number().int().nonnegative(),
+  }).optional(),
   unresolved: z.array(
     z.object({
       id: z.string().min(1),

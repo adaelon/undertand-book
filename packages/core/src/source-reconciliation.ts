@@ -46,6 +46,7 @@ export interface SourceReconciliationReport {
   book_id: string;
   input_fingerprint: BuildInputFingerprint;
   summary: Record<SourceBlockReconcileStatus, number>;
+  canonicalization?: { presentation_html_unwrap: number };
   unresolved: SourceReconciliationIssue[];
   acceptance?: SourceReconciliationAcceptance;
 }
@@ -751,7 +752,8 @@ export function reconcilePaperSource(input: ReconcilePaperSourceInput): Reconcil
   const unresolved: SourceReconciliationIssue[] = [];
   const pdfIndex = buildPdfTextIndex(input.pdf_geometry);
   const pdfSearch = pdfIndex.text.toLocaleLowerCase("en-US");
-  const canonicalSource = canonicalizePaperMarkdown(input.markdown_source).markdown;
+  const canonicalization = canonicalizePaperMarkdown(input.markdown_source);
+  const canonicalSource = canonicalization.markdown;
   const units = reconciliationUnits(canonicalSource);
   let cursor = 0;
 
@@ -889,6 +891,7 @@ export function reconcilePaperSource(input: ReconcilePaperSourceInput): Reconcil
     book_id: input.book_id,
     input_fingerprint: input.input_fingerprint,
     summary,
+    canonicalization: { presentation_html_unwrap: canonicalization.repairs.length },
     unresolved,
   };
   return {

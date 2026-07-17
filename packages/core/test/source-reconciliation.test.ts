@@ -80,6 +80,9 @@ describe("PH3 source reconciliation engine", () => {
     });
 
     expect(result.report.unresolved).toEqual([]);
+    expect(result.report.canonicalization).toEqual({ presentation_html_unwrap: 1 });
+    const { canonicalization: _canonicalization, ...legacyReport } = result.report;
+    expect(SourceReconciliationReportZ.parse(legacyReport)).toEqual(legacyReport);
     expect(result.review_draft).toBe(`${caption}\n`);
     expect(result.reconciled_source).toBe(`${caption}\n`);
   });
