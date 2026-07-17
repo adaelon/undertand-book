@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { detectBuildReadiness, readBuildWorkbenchSnapshot } from "../src/build-workbench";
-import { runWorkbenchStage } from "../src/workbench-stage-runner";
+import { runWorkbenchStage, workbenchStageCommand } from "../src/workbench-stage-runner";
 
 function asciiBytes(text: string): Uint8Array {
   return new TextEncoder().encode(text);
@@ -71,6 +71,27 @@ function workspace(markdown: string, pdfText: string) {
 }
 
 describe("PH17 Workbench deterministic stage runtime", () => {
+  it("routes packaged projection stages through the compiled build sidecar", async () => {
+    const { dir } = workspace("Hello PDF\n", "Hello PDF");
+    await runWorkbenchStage({ book_dir: dir, job_id: "job_fixture", stage: "source_reconciliation", now: "2" });
+    await runWorkbenchStage({ book_dir: dir, job_id: "job_fixture", stage: "hybrid_foundation", now: "3" });
+    const previous = process.env.UNDERSTAND_BOOK_SIDECAR_SELF;
+    process.env.UNDERSTAND_BOOK_SIDECAR_SELF = "C:\\Program Files\\Understand Book\\understand-book-build.exe";
+    try {
+      const command = workbenchStageCommand(dir, "paper_reading_guide");
+      expect(command.command).toBe(process.env.UNDERSTAND_BOOK_SIDECAR_SELF);
+      expect(command.args).toEqual([
+        "run-script",
+        "verify-paper-reading-guide.ts",
+        dir,
+      ]);
+      expect(command.args.every((arg) => !arg.includes("node_modules") && !arg.includes("tsx"))).toBe(true);
+    } finally {
+      if (previous === undefined) delete process.env.UNDERSTAND_BOOK_SIDECAR_SELF;
+      else process.env.UNDERSTAND_BOOK_SIDECAR_SELF = previous;
+    }
+  });
+
   it("runs source reconciliation and hybrid foundation to the reader trust gate", async () => {
     const { dir, fingerprint } = workspace("Hello PDF\n", "Hello PDF");
 

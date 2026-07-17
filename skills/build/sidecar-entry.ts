@@ -1,9 +1,13 @@
 import bookStructurePrompt from "../../agents/book-structure-extractor.md";
+import canvasGeometry from "@napi-rs/canvas/geometry.js";
 import paperLexiconPrompt from "../../agents/paper-lexicon-extractor.md";
 import paperMetadataPrompt from "../../agents/paper-metadata-extractor.md";
 import pass1Prompt from "../../agents/pass1-local-extractor.md";
 import pass2Prompt from "../../agents/pass2-longrange-linker.md";
+import "pdfjs-dist/legacy/build/pdf.worker.mjs";
 import profileSidecarPrompt from "../../agents/profile-sidecar-extractor.md";
+
+if (!globalThis.DOMMatrix) globalThis.DOMMatrix = canvasGeometry.DOMMatrix as typeof DOMMatrix;
 
 const argv = process.argv.slice(2);
 const command = argv[0];
@@ -53,6 +57,7 @@ async function runScript(script: string, args: string[]): Promise<void> {
     case "book-structure-write.ts": await import("./book-structure-write"); break;
     case "book-structure-batch.ts": await import("./book-structure-batch"); break;
     case "verify-paper-reading-guide.ts": await import("./verify-paper-reading-guide"); break;
+    case "workbench-stage-runner.ts": await import("./workbench-stage-runner"); break;
     default:
       console.error(`unsupported sidecar script: ${script}`);
       process.exit(2);
@@ -76,7 +81,9 @@ if (command === "prompt") {
     process.exit(2);
   }
   await runScript(script, forwardedArgs(2));
+} else if (command === "workbench-stage") {
+  await runScript("workbench-stage-runner.ts", forwardedArgs(1));
 } else {
-  console.error("usage: understand-book-build <next|record-attempt|run-script|prompt> [...args]");
+  console.error("usage: understand-book-build <next|record-attempt|run-script|prompt|workbench-stage> [...args]");
   process.exit(2);
 }

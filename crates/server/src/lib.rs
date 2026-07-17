@@ -48,6 +48,7 @@ use runtime::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::ffi::OsString;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -3135,6 +3136,81 @@ fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BuiltinStageRunnerCommand {
+    program: PathBuf,
+    prefix_args: Vec<OsString>,
+    current_dir: PathBuf,
+}
+
+fn packaged_stage_runner_command(sidecar: PathBuf) -> BuiltinStageRunnerCommand {
+    let current_dir = sidecar
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    BuiltinStageRunnerCommand {
+        program: sidecar,
+        prefix_args: vec![OsString::from("workbench-stage")],
+        current_dir,
+    }
+}
+
+fn resolve_builtin_stage_runner_command(
+    root: &Path,
+    executable_dir: Option<&Path>,
+    configured_sidecar: Option<&Path>,
+) -> Result<BuiltinStageRunnerCommand, ToolError> {
+    if let Some(sidecar) = configured_sidecar {
+        if sidecar.is_file() {
+            return Ok(packaged_stage_runner_command(sidecar.to_path_buf()));
+        }
+        return Err(ToolError {
+            error_code: "STAGE_RUNNER_NOT_INSTALLED".into(),
+            category: "internal".into(),
+            message: format!(
+                "UNDERSTAND_BOOK_BUILD_SIDECAR 指向不存在的文件: {}",
+                sidecar.display()
+            ),
+        });
+    }
+
+    if let Some(executable_dir) = executable_dir {
+        let sidecar = executable_dir.join(format!(
+            "understand-book-build{}",
+            std::env::consts::EXE_SUFFIX
+        ));
+        if sidecar.is_file() {
+            return Ok(packaged_stage_runner_command(sidecar));
+        }
+    }
+
+    let tsx_cli = root
+        .join("node_modules")
+        .join("tsx")
+        .join("dist")
+        .join("cli.mjs");
+    let runner = root
+        .join("skills")
+        .join("build")
+        .join("workbench-stage-runner.ts");
+    if tsx_cli.is_file() && runner.is_file() {
+        return Ok(BuiltinStageRunnerCommand {
+            program: PathBuf::from(
+                std::env::var_os("UNDERSTAND_BOOK_NODE").unwrap_or_else(|| OsString::from("node")),
+            ),
+            prefix_args: vec![tsx_cli.into_os_string(), runner.into_os_string()],
+            current_dir: root.to_path_buf(),
+        });
+    }
+
+    Err(ToolError {
+        error_code: "STAGE_RUNNER_NOT_INSTALLED".into(),
+        category: "internal".into(),
+        message: "缺少已安装的 understand-book-build sidecar，且开发态 tsx stage runner 不可用"
+            .into(),
+    })
+}
+
 fn write_builtin_stage_contract(
     book_dir: &Path,
     job: &serde_json::Value,
@@ -3193,34 +3269,39 @@ fn spawn_builtin_stage_runner(
         });
     }
     let root = workspace_root();
-    let tsx_cli = root
-        .join("node_modules")
-        .join("tsx")
-        .join("dist")
-        .join("cli.mjs");
-    let runner = root
-        .join("skills")
-        .join("build")
-        .join("workbench-stage-runner.ts");
-    if !tsx_cli.is_file() || !runner.is_file() {
-        return Err(ToolError {
-            error_code: "STAGE_RUNNER_NOT_INSTALLED".into(),
-            category: "internal".into(),
-            message: "缺少 node_modules/tsx 或 workbench-stage-runner.ts".into(),
-        });
-    }
-    let node = std::env::var("UNDERSTAND_BOOK_NODE").unwrap_or_else(|_| "node".into());
-    let command_summary = format!(
-        "{} {} {} --book-dir {} --job-id {} --stage {}",
-        node,
-        tsx_cli.display(),
-        runner.display(),
-        book_dir.display(),
-        job.get("job_id")
-            .and_then(|value| value.as_str())
-            .unwrap_or("job"),
-        stage
-    );
+    let executable_dir = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(Path::to_path_buf));
+    let configured_sidecar = std::env::var_os("UNDERSTAND_BOOK_BUILD_SIDECAR")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    let runner_command = resolve_builtin_stage_runner_command(
+        &root,
+        executable_dir.as_deref(),
+        configured_sidecar.as_deref(),
+    )?;
+    let job_id = job
+        .get("job_id")
+        .and_then(|value| value.as_str())
+        .unwrap_or("job")
+        .to_string();
+    let runner_token = format!("{job_id}:{run_id}:{stage}");
+    let runner_args = [
+        OsString::from("--book-dir"),
+        book_dir.as_os_str().to_os_string(),
+        OsString::from("--job-id"),
+        OsString::from(&job_id),
+        OsString::from("--stage"),
+        OsString::from(stage),
+        OsString::from("--runner-token"),
+        OsString::from(&runner_token),
+    ];
+    let command_summary = std::iter::once(runner_command.program.as_os_str())
+        .chain(runner_command.prefix_args.iter().map(OsString::as_os_str))
+        .chain(runner_args.iter().map(OsString::as_os_str))
+        .map(|value| value.to_string_lossy())
+        .collect::<Vec<_>>()
+        .join(" ");
     write_builtin_stage_contract(book_dir, &job, run_id, stage, now, &command_summary)?;
     let run_dir = executor_run_dir(book_dir, run_id);
     let stdout_path = run_dir.join("stdout.log");
@@ -3235,24 +3316,10 @@ fn spawn_builtin_stage_runner(
         category: "internal".into(),
         message: format!("创建 stage stderr 失败: {e}"),
     })?;
-    let job_id = job
-        .get("job_id")
-        .and_then(|value| value.as_str())
-        .unwrap_or("job")
-        .to_string();
-    let runner_token = format!("{job_id}:{run_id}:{stage}");
-    let child = Command::new(&node)
-        .arg(&tsx_cli)
-        .arg(&runner)
-        .arg("--book-dir")
-        .arg(book_dir)
-        .arg("--job-id")
-        .arg(&job_id)
-        .arg("--stage")
-        .arg(stage)
-        .arg("--runner-token")
-        .arg(&runner_token)
-        .current_dir(&root)
+    let child = Command::new(&runner_command.program)
+        .args(&runner_command.prefix_args)
+        .args(&runner_args)
+        .current_dir(&runner_command.current_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr))
@@ -9680,6 +9747,38 @@ mod tests {
             "trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n"
         ));
         pdf.into_bytes()
+    }
+
+    #[test]
+    fn packaged_stage_runner_resolves_without_a_source_workspace() {
+        let install_dir = tmp_dir("packaged-stage-runner");
+        let sidecar = install_dir.join(format!(
+            "understand-book-build{}",
+            std::env::consts::EXE_SUFFIX
+        ));
+        std::fs::write(&sidecar, b"packaged-sidecar").unwrap();
+        let missing_workspace = install_dir.join("deleted-build-worktree");
+
+        let command =
+            resolve_builtin_stage_runner_command(&missing_workspace, Some(&install_dir), None)
+                .unwrap();
+
+        assert_eq!(command.program, sidecar);
+        assert_eq!(
+            command.prefix_args,
+            vec![std::ffi::OsString::from("workbench-stage")]
+        );
+        assert_eq!(command.current_dir, install_dir);
+
+        let missing_configured = install_dir.join("missing-sidecar.exe");
+        let error = resolve_builtin_stage_runner_command(
+            &missing_workspace,
+            Some(&install_dir),
+            Some(&missing_configured),
+        )
+        .unwrap_err();
+        assert_eq!(error.error_code, "STAGE_RUNNER_NOT_INSTALLED");
+        assert!(error.message.contains(&missing_configured.display().to_string()));
     }
 
     fn wait_for_job_status(book_dir: &Path, job_id: &str, expected: &str) -> serde_json::Value {

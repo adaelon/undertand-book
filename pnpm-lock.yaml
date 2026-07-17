@@ -8,6 +8,9 @@ importers:
 
   .:
     devDependencies:
+      '@napi-rs/canvas':
+        specifier: 1.0.2
+        version: 1.0.2
       '@types/node':
         specifier: ^22.0.0
         version: 22.20.0
@@ -1945,7 +1948,6 @@ snapshots:
       '@napi-rs/canvas-linux-x64-musl': 1.0.2
       '@napi-rs/canvas-win32-arm64-msvc': 1.0.2
       '@napi-rs/canvas-win32-x64-msvc': 1.0.2
-    optional: true
 
   '@one-ini/wasm@0.1.1': {}
 

@@ -300,8 +300,21 @@ export function workbenchStageCommand(bookDir: string, stage: BuildStageId): Wor
   const plan = buildPaperProjectionChainPlan(bookDir);
   const selected = plan.stages.find((item) => item.stage === stage);
   if (!selected) throw new Error(`paper projection plan has no stage ${stage}`);
-  if (selected.kind === "build_batch") assertPaperProjectionWorkspaceTarget(plan, WORKSPACE_ROOT);
+  const workspaceContainer = path.dirname(plan.book_dir);
+  const runtimeWorkspaceRoot = path.basename(workspaceContainer) === ".understand-book"
+    && path.basename(plan.book_dir) === plan.book_id
+    ? path.dirname(workspaceContainer)
+    : WORKSPACE_ROOT;
+  if (selected.kind === "build_batch") assertPaperProjectionWorkspaceTarget(plan, runtimeWorkspaceRoot);
   if (selected.command === "pnpm" && selected.args[0] === "exec" && selected.args[1] === "tsx") {
+    const sidecar = process.env.UNDERSTAND_BOOK_SIDECAR_SELF;
+    if (sidecar) {
+      return {
+        command: sidecar,
+        args: ["run-script", path.basename(selected.args[2]!), ...selected.args.slice(3)],
+        cwd: runtimeWorkspaceRoot,
+      };
+    }
     return {
       command: process.execPath,
       args: [path.join(WORKSPACE_ROOT, "node_modules", "tsx", "dist", "cli.mjs"), ...selected.args.slice(2)],

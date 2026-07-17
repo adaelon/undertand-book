@@ -1,56 +1,47 @@
-# SESSION_CHECKPOINT - 2026-07-17 14:02 +08:00
+# SESSION_CHECKPOINT - 2026-07-17 16:23 +08:00
 
 ## 新鲜度自检
-- 写入时修复 commit:`655a710 fix(desktop): migrate setup-owned Codex marketplace`;读入时先运行 `git log -3 --oneline` 与 `git status --short`,不一致时以 Git 和磁盘现状为准。
-- Windows Setup 已从 detached `655a710` 快照重建;WD5 与本 checkpoint 待单独提交构建记录。
+- 写入时最新 commit:`13f6d01 fix(pdf): stabilize native text-layer selection`;读入时先运行 `git log -3 --oneline` 与 `git status --short`,不一致时以 Git 和磁盘现状为准。
+- 当前主切片:安装版 Workbench builtin stage runner 已修复并通过源码、编译 sidecar、正式 package 与 NSIS 构建;旧 Reader 已关闭,尚未安装新 bundle 做 installed Reader 验收。
 
-## 当前状态
-Codex plugin marketplace 更新失败 goal 已完成:
-- 同源且 Setup-owned:调用 `codex plugin marketplace upgrade`。
-- source 变化且 receipt 匹配 plugin/marketplace 名并声明 `marketplace_added_by_setup=true`:迁移旧 marketplace、重装 plugin、替换 receipt。
-- 迁移失败:恢复 receipt 中的旧 source 与迁移前 plugin 状态。
-- 外部同名 marketplace:绝不自动 remove,返回人工处理提示。
-- Codex config 内部文件、plugin manifest、预构建协议、UI、书库和 Provider 均未改变。
+## 当前在做什么
+收口 `STAGE_RUNNER_NOT_INSTALLED` 修复:生产态不再依赖编译期 worktree 的 `node_modules/tsx` 与 TS 源文件,而是启动 `UnderstandBook.exe` 同目录的 `understand-book-build.exe workbench-stage`。
 
-## 验证证据
-- red:source change、same-source refresh、隐藏冲突恢复、外部冲突提示 4 条旧行为回归全部失败。
-- green:plugin-manager 8/8;desktop 全量 16/16。
-- `cargo fmt -p understand-book-desktop -- --check`、目标 `git diff --check`、desktop-only clippy `-D warnings` 通过。
-- dependency clippy 严格模式仅被既有 `crates/read-tools` 6 条 lint 阻断,与 WD4 无关。
-- 隔离真实 CLI:`CODEX_HOME/LOCALAPPDATA` 从旧本地同名 source 迁移到当前仓库;最终 `understand-book@understand-book` 0.1.0,receipt source 更新;真实用户 Codex 状态未修改。
-- package:`pnpm -C apps/desktop package:windows` 退出 0;Web、sidecar、Rust release 与 NSIS 全部完成。
+已完成:
+1. Server 生产态优先解析 sibling Bun sidecar,可用 `UNDERSTAND_BOOK_BUILD_SIDECAR` 显式覆盖;源码态保留 Node/tsx fallback。
+2. Bun sidecar 新增 `workbench-stage`,内嵌 Workbench runner、DOMMatrix 与 PDF worker;来源对齐可在无 Node/tsx 环境执行。
+3. Core projection stages 在 sidecar 环境生成 `run-script` self-command,不再回跳 `node_modules/tsx`。
+4. Desktop `beforeBuildCommand` 强制运行编译 sidecar 来源对齐 smoke,防止源码测试绿但安装产物坏。
+5. `docs/架构.md` 与 `docs/代码链路.md` 已更新;ADR-0068 的单 exe 决策未改变。
 
-## Windows Setup
-- 路径:`dist/UnderstandBookSetup.exe`(gitignored)。
-- 来源:detached `655a7107336f627bd2ba3ecdd1386691c904a129`。
-- 大小:`34,650,810` bytes。
-- SHA-256:`995070276B9ACD674E8A4B797219711A9EAC49A2F41EBB64CDF3B23A5559B0A1`。
-- file/product version:`0.1.0`;Authenticode:`NotSigned`。
-- NSIS source、detached export 与主工作区 Setup 哈希一致;安装器未启动。
-
-## 工作区边界
-- PDF 原生选区 PE0-PE5:`PdfReaderPane.vue`、同名单测、`pdf-selection-actions.spec.ts`、ADR-0080、边界方案、`docs/architecture.md`、`docs/code-trail-S12-continuous-reader.md`;保持未提交。
-- 任务前 Rust:`crates/base-schema/tests/roundtrip.rs`、`crates/memory/src/{lib,profile,review}.rs`、`crates/reader/src/lib.rs`、`crates/runtime/src/{memory_review,profile_api}.rs`;保持未提交。
-- 其余用户材料、日志、`.fluid/`、hybrid candidates、preview memory 与 test-results 均未处理。
-- 两个 detached worktree 的 Git 元数据均已 prune;每个目录各残留 2 个、合计 13,208,064 bytes 的 pnpm 硬链接(总计约 26.4 MB),由活动 Vite/esbuild 占用。停止 4174 后可删除 `.tmp-translation-setup-worktree` 与 `.tmp-codex-marketplace-setup-worktree`。
-
-## 运行服务
-- Web:`http://127.0.0.1:4174/`,Vite PID `25156`,esbuild PID `18720`;收口检查 HTTP 200。
-- Backend:`http://127.0.0.1:8794/`,此前 PID `22388`;`/desktop/status` 收口检查 HTTP 200。
-- 安装器未运行;真实用户 Codex plugin/marketplace 未被本 goal 修改。
+## 验证结果
+- 红测:Core 初始返回 `node.exe`;Server 无 packaged resolver;均已转绿。
+- `pnpm -C packages/core test`:224/224。
+- `pnpm -C packages/core typecheck`:通过。
+- `cargo test -p server -p understand-book-desktop -- --test-threads=1`:Server 155/155,Desktop 16/16。
+- 编译 sidecar smoke:`workbench sidecar smoke passed`;真实生成 source reconciliation report/job ready。
+- `UNDERSTAND_BOOK_MARKETPLACE_SOURCE=adaelon/undertand-book pnpm -C apps/desktop package:windows`:release guard、Web 1913 modules、sidecar smoke、Rust release、NSIS/export 全部通过。
+- 正式安装包:`dist/UnderstandBookSetup.exe`,35,299,952 bytes,SHA-256 `2358BA25A95ACB36260C0F2915F6104A9375AD220A15D60B64D4D5881B845767`。
+- `git diff --check`:通过;独立 rustfmt check 仍命中任务前 Server/host 既有格式债务,本次新增测试已按建议格式化。
 
 ## 下一步(可直接接手)
-1. 可运行 `dist/UnderstandBookSetup.exe` 做人工安装 smoke;当前包未签名,Windows 会按本机策略提示。
-2. 安装后在 Reader 设置点击“安装或重试”,Setup-owned 旧 source 应自动迁移;外部 source 冲突应保留并显示人工指引。
-3. 停止 4174 后删除两个残留 `.tmp-*-setup-worktree` 目录,再按需重启 Vite。
+1. 运行 `dist\UnderstandBookSetup.exe` 更新已关闭的旧安装版。
+2. 在 installed Reader 新建 fresh draft,导入最小一致 `paper.md + paper.pdf`,以 `adapter_mode=builtin` 启动 `source_reconciliation`。
+3. 检查 `.build/source-reconciliation/report.json`、job `status=ready|needs_user` 与 stderr;不得再出现 `STAGE_RUNNER_NOT_INSTALLED`、DOMMatrix 或 pdf.worker failure。
+4. 验收后按文件归属暂存本切片,不要混入任务前 Rust/用户材料。
+
+## 未完成 / 工作区边界
+- 本次提交范围:`apps/desktop/{package.json,scripts/smoke-workbench-sidecar.mjs,src-tauri/tauri.conf.json}`、`crates/server/src/lib.rs`、`packages/core/src/workbench-stage-runner.ts`、同名单测、`skills/build/sidecar-entry.ts`、根 `package.json/pnpm-lock.yaml`、`docs/{架构.md,代码链路.md}`、本 checkpoint。
+- 任务前 Rust:`crates/base-schema/tests/roundtrip.rs`、`crates/memory/src/{lib,profile,review}.rs`、`crates/reader/src/lib.rs`、`crates/runtime/src/{memory_review,profile_api}.rs`;保持未提交且未整理。
+- 其余用户材料、日志、临时候选与 test-results 均未处理。
 
 ## 冷启动读序
-1. `CONTEXT.md:Codex marketplace source migration` 与 ADR-0068 marketplace migration - 术语与所有权门禁。
-2. `apps/desktop/src-tauri/src/plugin_manager.rs:install_with_runner/migrate_owned_marketplace` - 状态机、回滚和测试。
-3. `docs/代码链路.md:WD4-WD5` 与 `docs/架构.md:Windows desktop distribution` - 实现链和构建证据。
-4. `apps/desktop/README.md` - 发布、重试与外部 source 行为。
+1. `docs/架构.md:Deterministic stage runner/Windows desktop distribution` - 生产与开发命令边界。
+2. `crates/server/src/lib.rs:resolve_builtin_stage_runner_command/spawn_builtin_stage_runner` - sibling sidecar 解析和 job spawn。
+3. `skills/build/sidecar-entry.ts`、`apps/desktop/scripts/smoke-workbench-sidecar.mjs` - 单 exe 命令面与编译产物 smoke。
+4. `packages/core/src/workbench-stage-runner.ts:workbenchStageCommand` 与同名单测 - projection self-command。
+5. `docs/代码链路.md:WB1 Packaged Workbench stage runner` - 改动索引与验证账本。
 
 ## 本会话决策摘要
-- Marketplace source migration:仅自动迁移 Setup receipt 拥有的同名 marketplace(ADR-0068)。
-- External conflict:保留外部 source,返回人工 remove/retry 指引(ADR-0068)。
-- Build isolation:Setup 仅来自已提交 detached 快照。
+- 兑现 ADR-0068:安装版 Workbench 复用既有 Bun 单 sidecar;不向安装包加入 Node/tsx/TS 源码。
+- 开发态 Node/tsx 仅作源码 checkout fallback;生产路径不得依赖 `CARGO_MANIFEST_DIR` 指向的 worktree 存活。

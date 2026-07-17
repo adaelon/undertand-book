@@ -9,6 +9,7 @@
     "gen-schema": "cargo test -p base-schema export_bindings"
   },
   "devDependencies": {
+    "@napi-rs/canvas": "1.0.2",
     "typescript": "^5.7.0",
     "vitest": "^3.1.0",
     "@types/node": "^22.0.0",
