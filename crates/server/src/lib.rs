@@ -2304,7 +2304,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 fn workbench_config_hash() -> String {
-    sha256_hex(b"workbench_input_manifest.v1:paper:source_reconciliation_v4")
+    sha256_hex(b"workbench_input_manifest.v1:paper:source_reconciliation_v5")
 }
 
 fn base64_value(byte: u8) -> Option<u8> {
@@ -10378,6 +10378,45 @@ mod tests {
         assert_eq!(body["readiness"]["status"], "stale_input");
         assert_eq!(body["source_review"]["ready_for_rerun"], false);
         assert_eq!(body["source_review"]["unresolved"][0]["id"], "block-1");
+    }
+
+    #[test]
+    fn source_review_v4_config_becomes_stale_after_canonicalization_upgrade() {
+        let mut s = state_named("workbench-source-review-v4-canonicalization-stale");
+        write_workbench_review_artifacts(&mut s);
+        let v4_config_hash = sha256_hex(
+            b"workbench_input_manifest.v1:paper:source_reconciliation_v4",
+        );
+        let report_path = source_reconciliation_dir(&s.book_dir).join("report.json");
+        let mut report: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&report_path).unwrap()).unwrap();
+        report["input_fingerprint"]["config_hash"] = json!(v4_config_hash.clone());
+        std::fs::write(&report_path, report.to_string()).unwrap();
+
+        let input_dir = s.book_dir.join(".build").join("input");
+        std::fs::create_dir_all(&input_dir).unwrap();
+        std::fs::write(
+            input_dir.join("manifest.json"),
+            json!({
+                "fingerprint": {
+                    "paper_md_sha256": "sha-md",
+                    "paper_pdf_sha256": "sha-pdf",
+                    "config_hash": v4_config_hash,
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let snapshot = get(&mut s, "/book/build_workbench");
+        assert_eq!(snapshot.status, 200, "{}", snapshot.body);
+        let body: serde_json::Value = serde_json::from_str(&snapshot.body).unwrap();
+        assert_eq!(
+            body["readiness"]["stages"]["source_reconciliation"]["status"],
+            "stale"
+        );
+        assert_eq!(body["readiness"]["status"], "stale_input");
+        assert_eq!(body["source_review"]["ready_for_rerun"], false);
     }
 
     #[test]
