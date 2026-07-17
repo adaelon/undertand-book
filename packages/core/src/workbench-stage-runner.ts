@@ -219,10 +219,10 @@ async function runSourceReconciliation(
   initial.review_decisions = currentDecisions;
 
   if (sourceReviewReady(initial.report, currentDecisions)) {
-    const reviewed = buildReviewedDraftFromDecisions(markdown, initial.report, currentDecisions);
+    const reviewed = buildReviewedDraftFromDecisions(initial.review_draft, initial.report, currentDecisions);
     const gated = reviewCandidateAndReconcile({
       book_id: manifest.book_id,
-      original_source: markdown,
+      original_source: initial.review_draft,
       candidate_source: reviewed.reviewed_draft,
       pdf_geometry: geometry,
       input_fingerprint: manifest.fingerprint,

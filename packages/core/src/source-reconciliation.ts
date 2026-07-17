@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { parse } from "node-html-parser";
 import path from "node:path";
 import { markdownToBlocks } from "./md-adapter";
+import { canonicalizePaperMarkdown } from "./paper-markdown-canonicalization";
 import type { PdfTextGeometry } from "./pdf-geometry";
 
 export type SourceBlockReconcileStatus =
@@ -750,7 +751,8 @@ export function reconcilePaperSource(input: ReconcilePaperSourceInput): Reconcil
   const unresolved: SourceReconciliationIssue[] = [];
   const pdfIndex = buildPdfTextIndex(input.pdf_geometry);
   const pdfSearch = pdfIndex.text.toLocaleLowerCase("en-US");
-  const units = reconciliationUnits(input.markdown_source);
+  const canonicalSource = canonicalizePaperMarkdown(input.markdown_source).markdown;
+  const units = reconciliationUnits(canonicalSource);
   let cursor = 0;
 
   for (const unit of units) {
@@ -834,7 +836,7 @@ export function reconcilePaperSource(input: ReconcilePaperSourceInput): Reconcil
       && (evidenceCandidate.offset < from || evidenceCandidate.offset > fuzzyTo),
     );
     const evidenceFields = {
-      md_context: markdownContext(input.markdown_source, unit.span),
+      md_context: markdownContext(canonicalSource, unit.span),
       ...(evidence?.context ? { pdf_context: evidence.context } : {}),
       ...(evidence ? { pdf_page_index: evidence.page_index } : {}),
       ...(evidence?.page_label ? { pdf_page_label: evidence.page_label } : {}),
@@ -881,7 +883,7 @@ export function reconcilePaperSource(input: ReconcilePaperSourceInput): Reconcil
     }
   }
 
-  const repairedSource = safeRepairText(input.markdown_source);
+  const repairedSource = safeRepairText(canonicalSource);
   const report: SourceReconciliationReport = {
     version: "source_reconciliation_report.v1",
     book_id: input.book_id,
@@ -892,7 +894,7 @@ export function reconcilePaperSource(input: ReconcilePaperSourceInput): Reconcil
   return {
     report,
     ...(sourceReconciliationTrusted(report) ? { reconciled_source: repairedSource } : {}),
-    review_draft: repairedSource,
+    review_draft: canonicalSource,
     review_decisions: {
       version: "source_review_decisions.v1",
       book_id: input.book_id,

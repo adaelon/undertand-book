@@ -69,6 +69,47 @@ describe("PH3 source reconciliation engine", () => {
     expect(sourceReconciliationTrusted(result.report)).toBe(true);
   });
 
+  it("writes presentation-canonical Markdown after an exact PDF match", () => {
+    const caption = "Figure 3 Swap task diagram.";
+    const markdown = `<div style="text-align: center;"><div style="text-align: center;">${caption}</div> </div>\n`;
+    const result = reconcilePaperSource({
+      book_id: "paper-caption",
+      markdown_source: markdown,
+      pdf_geometry: geometryFromLines([caption]),
+      input_fingerprint: fingerprint(),
+    });
+
+    expect(result.report.unresolved).toEqual([]);
+    expect(result.review_draft).toBe(`${caption}\n`);
+    expect(result.reconciled_source).toBe(`${caption}\n`);
+  });
+
+  it("uses canonical Markdown spans and excerpts for unresolved review decisions", () => {
+    const markdown = '<div style="text-align: center;"><div style="text-align: center;">The value is 42 mg.</div> </div>\n';
+    const canonical = "The value is 42 mg.\n";
+    const result = reconcilePaperSource({
+      book_id: "paper-caption",
+      markdown_source: markdown,
+      pdf_geometry: geometryFromLines(["The value is 43 mg."]),
+      input_fingerprint: fingerprint(),
+    });
+
+    expect(result.review_draft).toBe(canonical);
+    expect(result.report.unresolved[0]).toMatchObject({
+      source_span: { start: 0, end: canonical.trimEnd().length },
+      md_excerpt: canonical.trim(),
+      difference: { markdown: "42", pdf: "43" },
+    });
+    const reviewed = buildReviewedDraftFromDecisions(result.review_draft, result.report, {
+      version: "source_review_decisions.v1",
+      book_id: "paper-caption",
+      stage: "source_reconciliation",
+      input_fingerprint: fingerprint(),
+      decisions: [{ block_id: "block-1", decision: "accept_markdown" }],
+    });
+    expect(reviewed.reviewed_draft).toBe(canonical);
+  });
+
   it("keeps content-bearing fuzzy matches in needs_review", () => {
     const result = reconcilePaperSource({
       book_id: "paper-a",

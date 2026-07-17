@@ -181,6 +181,44 @@ describe("PH17 Workbench deterministic stage runtime", () => {
     expect(completed.decision_requests[0].status).toBe("answered");
   });
 
+  it("keeps canonical caption spans through accept-Markdown review and final source", async () => {
+    const canonical = "The figure value is 42 mg.\n";
+    const raw = `<div style="text-align: center;"><div style="text-align: center;">${canonical.trim()}</div> </div>\n`;
+    const { dir } = workspace(raw, "The figure value is 43 mg.");
+
+    const blocked = await runWorkbenchStage({
+      book_dir: dir,
+      job_id: "job_fixture",
+      stage: "source_reconciliation",
+      now: "2",
+    });
+    expect(blocked.status).toBe("needs_user");
+    const report = JSON.parse(readFileSync(
+      path.join(dir, ".build", "source-reconciliation", "report.json"),
+      "utf8",
+    ));
+    expect(report.unresolved[0].md_excerpt).toBe(canonical.trim());
+
+    writeFileSync(path.join(dir, ".build", "source-reconciliation", "review-decisions.json"), JSON.stringify({
+      version: "source_review_decisions.v1",
+      book_id: "paper-stage-fixture",
+      stage: "source_reconciliation",
+      decisions: [{ block_id: report.unresolved[0].id, decision: "accept_markdown", resolved_at: "3" }],
+    }, null, 2));
+    const completed = await runWorkbenchStage({
+      book_dir: dir,
+      job_id: "job_fixture",
+      stage: "source_reconciliation",
+      now: "4",
+    });
+
+    expect(completed.status).toBe("ready");
+    expect(readFileSync(path.join(dir, ".build", "source-reconciliation", "reviewed-draft.md"), "utf8"))
+      .toBe(canonical);
+    expect(readFileSync(path.join(dir, ".build", "source-reconciliation", "source.txt"), "utf8"))
+      .toBe(canonical);
+  });
+
   it("accepts residual issues after one complete reviewed rerun without requesting review again", async () => {
     const { dir } = workspace("The measured value is 42 mg.\n", "The measured value is 43 mg.");
 
