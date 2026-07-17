@@ -400,13 +400,31 @@ Source reconciliation unresolved block 的用户复核记录,写入 `.build/sour
 用户在 Source reconciliation review surface 上一次明确选择,授权系统逐项请求 LLM 修订并把高置信、非 uncertain 的有效结果记录为 Source review decisions。批量操作允许部分成功:成功项保留决策,技术失败、无效输出、低置信或 uncertain 项继续留给用户逐项复核;它不是全有或全无事务,也不直接生成可信 `source.txt`。状态:BOUNDARY_CHANGE(见 `docs/切片方案-paper-pdf-first-hybrid.md` PH16)。
 
 ## Manual source override
-Source review decisions 全部齐备后,系统只执行一次确定性 source reconciliation 重跑;若 reviewed draft 仍有 residual unresolved,用户终裁优先于这一次验证结果,该 reviewed draft 以显式 `manual_override` provenance 进入后续构建。残余报告必须保留用于审计,但不得再次生成同一轮来源复核或自动重跑。它不允许跳过首轮逐项复核,也不允许直接采用尚未持久化的 LLM suggestion。状态:BOUNDARY_CHANGE(见 [docs/adr/0065])。
+Source review decisions 全部齐备后,系统只执行一次确定性 source reconciliation 重跑;若 reviewed draft 仍有 residual unresolved,用户终裁优先于这一次验证结果,该 reviewed draft 以显式 `manual_override` provenance 进入后续构建。残余报告必须保留用于审计,但不得再次生成同一轮来源复核或自动重跑。它不允许跳过首轮逐项复核,也不允许直接采用尚未持久化的 LLM suggestion;它终结的是来源文本决定,不证明 PDF 页、行、字符或 bbox 映射正确。状态:BOUNDARY_CHANGE(见 [docs/adr/0065]、[docs/adr/0082])。
+
+## Hybrid alignment unit
+混合阅读基座定位 PDF 时使用的有序、互不重叠来源区间,把正文与相邻公式上下文作为一个定位单元;定位成功后再把证据投影到该区间内的子 LID。它不改变 SourceBlock/LID 分区,也不是 citation anchor。状态:NEW(见 [docs/adr/0082])。
+
+## Source alignment evidence
+Source reconciliation 为 Hybrid alignment unit 持久化的输入指纹绑定证据,记录来源区间、PDF 页/行区间与 `verified | format_equivalent | reviewed_hint | unmapped` 状态。只有 `verified`/`format_equivalent` 可作为确定性定位种子;`reviewed_hint` 只能缩小搜索范围并须重新验证,不能证明几何正确。状态:NEW(见 [docs/adr/0082])。
+
+## PDF projection precision
+每个子 LID 的 PDF 投影等级:`char_exact` 可支持字符级引用、复制和标注,`region_exact` 只支持导航或公式对象标记,`partial` 只允许显式受限操作,`unmapped` 只保留 PDF 原生选择/复制。单元级 bbox 不得冒充子 LID 的字符几何。状态:NEW(见 [docs/adr/0082])。
+
+## Hybrid foundation integrity gate
+混合阅读基座的二元安全门禁,校验输入指纹、artifact/hash/schema、LID/页身份、bbox 边界、单调顺序和无重复绑定;任一失败都使阶段失败且不得替换旧产物。它不包含覆盖率或质量阈值。状态:NEW(见 [docs/adr/0082])。
+
+## PDF alignment quality tier
+Hybrid foundation integrity gate 通过后的映射质量分级:`full` 达到版本化质量策略目标,`degraded` 未达目标但仍可进入 Reader。分级由 `unit_location_ratio`、按来源区间加权的 `exact_text_span_ratio`、`exact_formula_ratio` 与 `heading_location_ratio` 决定,不改变可信 `source.txt`。状态:NEW(见 [docs/adr/0082])。
+
+## Versioned alignment benchmark
+以版本号、输入哈希和人工真值冻结的 PDF 对齐回归集,包含可入库的许可小样本与哈希引用的本地真实论文样本;算法变更必须由确定性 runner 报告错误页、重复绑定和各质量指标,LLM 不承担通过判定。状态:NEW(见 [docs/adr/0082])。
 
 ## PDF visual source map
-`pdf_source_map.json` 中从可信 LID/source span 到 PDF `pageIndex + bbox` 区域的轻量运行时映射。它用于把 citation、note、highlight 投影回 PDF 页面,但不替代 LID,也不是 citation anchor。状态:BOUNDARY_CHANGE(见 [docs/adr/0063])。
+`pdf_source_map.json` 中从可信 LID/source span 到 PDF `pageIndex + bbox` 区域的轻量运行时映射。v2 为每个子 LID 标注 PDF projection precision;只有 `char_exact` 可承担字符级 citation/note/highlight 投影,`region_exact` 仅作导航或对象标记。它不替代 LID,也不是 citation anchor。状态:BOUNDARY_CHANGE(见 [docs/adr/0063]、[docs/adr/0082])。
 
 ## PDF selection map
-后端私有的 char-level、按页分片 PDF 反解 artifact,用于把 PDF 选区或语义 LID/range 转成可保存或可显示的 LID range / PDF rect。状态:NEW(见 [docs/adr/0063])。
+后端私有的 char-level、按页分片 PDF 反解 artifact,用于把 PDF 选区或语义 LID/range 转成可保存或可显示的 LID range / PDF rect。v2 只有 `char_exact` 或 `partial` 中已证实的 exact 字符子区间可写入规范 LID/source span;`region_exact/unmapped` 不得伪造字符映射。状态:BOUNDARY_CHANGE(见 [docs/adr/0063]、[docs/adr/0082])。
 
 ## PDF 临时选区快照 (PDF selection draft)
 PDF 原生拖选经 selection map 反解后形成的前端会话态:冻结规范 LID ranges、引用文本与工具条位置,只供用户显式选择高亮、笔记或 Ask AI;它不自动改变 reader 位置、不打开来源正文,在动作执行、取消或新选区替换时销毁。状态:NEW。
@@ -460,7 +478,7 @@ PDF/Markdown 对齐失败时的可选修复机制。LLM 只能提出格式修复
 可信 `source.txt/base.json` 尚不存在、构建未完成或 source reconciliation 需要用户决策时使用的独立 build-mode 控制台。它承载 paper 输入上传/选择、draft workspace 创建、job 创建/续跑、server-side executor 启动、用户决策、执行权限审批、阶段 DAG、事件日志和 token/cost 观察;但不取代 `.build/<stage>` artifact 真相,也不把 job 状态当作 reader trust。状态:BOUNDARY_CHANGE(见 [docs/adr/0063] 与 `docs/切片方案-paper-pdf-first-hybrid.md` PH12-PH18)。
 
 ## Reader surface selection
-paper workspace 的主界面由 reader trust gate 决定:未可信时必须显示 Build Workbench；一旦确定性 artifact readiness 给出 `route=reader`,当前构建流程立即进入 reader,历史 job 状态与界面偏好都不得阻塞或恢复 Workbench。可信书只允许用户从 reader 主动打开 Workbench 作为当前会话的诊断视图。状态:BOUNDARY_CHANGE(见 [docs/adr/0071],取代 [docs/adr/0066])。
+paper workspace 的主界面由来源信任与 Hybrid foundation integrity gate 决定:来源未可信或完整性失败时显示 Build Workbench;来源可信且完整性通过后立即进入 Reader,PDF alignment quality tier 为 `degraded` 不得阻断。历史 job 状态与界面偏好不能改变该路由;可信书只允许用户从 Reader 主动打开 Workbench 诊断。状态:BOUNDARY_CHANGE(见 [docs/adr/0071]、[docs/adr/0082],取代 [docs/adr/0066])。
 
 ## Build controller
 Build Workbench 背后的服务端控制层:负责把上传的 `paper.md/paper.pdf` 固化为未信任输入 manifest,按 fingerprint 创建/复用 `.build/jobs/<job_id>.json`,启动 Codex/opencode/Claude/manual 等 executor adapter,把 stdout/stderr/heartbeat/权限请求/用户决策写成 job events,并在每次阶段结束后重新运行确定性 artifact gate。它只能驱动构建,不能绕过 `.build/<stage>` artifact/hash/schema gate。状态:NEW(见 `docs/切片方案-paper-pdf-first-hybrid.md` PH12-PH18)。

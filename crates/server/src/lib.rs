@@ -1456,6 +1456,35 @@ struct SourceSpanDto {
     end: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PdfRuntimeMapVersion {
+    V1,
+    V2,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PdfRuntimeProjectionPrecision {
+    CharExact,
+    RegionExact,
+    Partial,
+    Unmapped,
+}
+
+#[derive(Debug, Clone)]
+struct PdfRuntimeEntryPolicy {
+    precision: PdfRuntimeProjectionPrecision,
+    exact_source_spans: Vec<SourceSpanDto>,
+    regions: Vec<PdfPageRectDto>,
+}
+
+#[derive(Debug, Clone)]
+struct PdfRuntimeProjectionPolicy {
+    version: PdfRuntimeMapVersion,
+    book_id: String,
+    config_hash: String,
+    entries: HashMap<String, PdfRuntimeEntryPolicy>,
+}
+
 #[derive(Debug, Serialize, PartialEq)]
 struct PdfSemanticRange {
     lid: String,
@@ -5526,6 +5555,28 @@ fn route_pdf_source_map(book_dir: &Path) -> Reply {
             message: "source_manifest.v2 does not expose a usable PDF source map capability".into(),
         });
     }
+    let policy = match pdf_runtime_projection_policy(book_dir) {
+        Ok(policy) => policy,
+        Err(error) => return err_reply(&error),
+    };
+    let Some(book_id) = manifest.get("book_id").and_then(|value| value.as_str()) else {
+        return err_reply(&pdf_runtime_artifact_error(
+            "source_manifest.v2 book_id is missing",
+        ));
+    };
+    let capability_name = if matches!(
+        pdf_capability_status(&manifest, "project_lid_to_pdf").as_deref(),
+        Some("available" | "degraded")
+    ) {
+        "project_lid_to_pdf"
+    } else {
+        "project_ranges_to_pdf"
+    };
+    if let Err(error) =
+        validate_pdf_runtime_policy_identity(&policy, &manifest, book_id, capability_name)
+    {
+        return err_reply(&error);
+    }
     match read_json_artifact(
         &book_dir.join("pdf_source_map.json"),
         "PDF_SOURCE_MAP_NOT_FOUND",
@@ -6259,6 +6310,71 @@ fn filter_hits_to_raw_quote(hits: Vec<SelectionCharHit>, raw_quote: &str) -> Vec
         .collect()
 }
 
+fn raw_quote_fully_covered_by_hits(hits: &[SelectionCharHit], raw_quote: &str) -> bool {
+    let quote = normalized_selection_chars(raw_quote);
+    let hit_units = hits
+        .iter()
+        .enumerate()
+        .flat_map(|(index, hit)| {
+            normalized_selection_chars(&hit.text)
+                .into_iter()
+                .map(move |value| (index, value, hit.lid.is_some()))
+        })
+        .collect::<Vec<_>>();
+    let pairs = quote_hit_pairs(&quote, &hit_units);
+    let quote_non_whitespace = quote.iter().filter(|value| !value.is_whitespace()).count();
+    let matched_non_whitespace = pairs
+        .iter()
+        .map(|(quote_index, _)| *quote_index)
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .filter(|quote_index| !quote[*quote_index].is_whitespace())
+        .count();
+    quote_non_whitespace == 0 || matched_non_whitespace == quote_non_whitespace
+}
+
+fn selection_rect_intersects_region(selected: [f64; 4], region: [f64; 4]) -> bool {
+    let selected_left = selected[0].min(selected[2]);
+    let selected_right = selected[0].max(selected[2]);
+    let selected_bottom = selected[1].min(selected[3]);
+    let selected_top = selected[1].max(selected[3]);
+    let region_left = region[0].min(region[2]);
+    let region_right = region[0].max(region[2]);
+    let region_bottom = region[1].min(region[3]);
+    let region_top = region[1].max(region[3]);
+    selected_left < region_right
+        && selected_right > region_left
+        && selected_bottom < region_top
+        && selected_top > region_bottom
+}
+
+fn v2_selection_has_degraded_precision(
+    policy: &PdfRuntimeProjectionPolicy,
+    rects_by_page: &BTreeMap<usize, Vec<[f64; 4]>>,
+    hits: &[SelectionCharHit],
+) -> bool {
+    if policy.version != PdfRuntimeMapVersion::V2 {
+        return false;
+    }
+    let partial_hit = hits.iter().any(|hit| {
+        hit.lid
+            .as_deref()
+            .and_then(|lid| policy.entries.get(lid))
+            .is_some_and(|entry| entry.precision != PdfRuntimeProjectionPrecision::CharExact)
+    });
+    partial_hit
+        || policy.entries.values().any(|entry| {
+            entry.precision != PdfRuntimeProjectionPrecision::CharExact
+                && entry.regions.iter().any(|region| {
+                    rects_by_page.get(&region.page_index).is_some_and(|rects| {
+                        rects.iter().any(|selected| {
+                            selection_rect_intersects_region(*selected, region.bbox)
+                        })
+                    })
+                })
+        })
+}
+
 fn parse_pdf_rect(value: &serde_json::Value) -> Option<PdfPageRectDto> {
     let page_index = value.get("pageIndex")?.as_u64()? as usize;
     let bbox_value = value.get("bbox")?.as_array()?;
@@ -6279,6 +6395,255 @@ fn parse_source_span(value: &serde_json::Value) -> Option<SourceSpanDto> {
     })
 }
 
+fn pdf_runtime_artifact_error(message: impl Into<String>) -> ToolError {
+    ToolError {
+        error_code: "PDF_RUNTIME_ARTIFACT_INVALID".into(),
+        category: "validation".into(),
+        message: message.into(),
+    }
+}
+
+fn require_pdf_runtime_capability(
+    book_dir: &Path,
+    name: &str,
+) -> Result<serde_json::Value, ToolError> {
+    let manifest = source_manifest_value(book_dir)?;
+    if matches!(
+        pdf_capability_status(&manifest, name).as_deref(),
+        Some("available" | "degraded")
+    ) {
+        Ok(manifest)
+    } else {
+        Err(ToolError {
+            error_code: "PDF_RUNTIME_CAPABILITY_UNAVAILABLE".into(),
+            category: "validation".into(),
+            message: format!("source_manifest.v2 capability is unavailable: {name}"),
+        })
+    }
+}
+
+fn validate_pdf_runtime_policy_identity(
+    policy: &PdfRuntimeProjectionPolicy,
+    manifest: &serde_json::Value,
+    expected_book_id: &str,
+    capability_name: &str,
+) -> Result<(), ToolError> {
+    if policy.book_id != expected_book_id
+        || manifest.get("book_id").and_then(|value| value.as_str()) != Some(expected_book_id)
+    {
+        return Err(pdf_runtime_artifact_error(
+            "source manifest, Book, and PDF source map book_id values do not match",
+        ));
+    }
+    let capability_hash = manifest
+        .get("capabilities")
+        .and_then(|value| value.get(capability_name))
+        .and_then(|value| value.get("config_hash"))
+        .and_then(|value| value.as_str());
+    if capability_hash.is_some_and(|hash| hash != policy.config_hash) {
+        return Err(pdf_runtime_artifact_error(format!(
+            "PDF runtime capability config_hash is stale: {capability_name}"
+        )));
+    }
+    Ok(())
+}
+
+fn pdf_runtime_projection_policy(book_dir: &Path) -> Result<PdfRuntimeProjectionPolicy, ToolError> {
+    let map = read_json_artifact(
+        &book_dir.join("pdf_source_map.json"),
+        "PDF_SOURCE_MAP_NOT_FOUND",
+        "PDF_SOURCE_MAP_INVALID",
+    )?;
+    let version = match map.get("version").and_then(|value| value.as_str()) {
+        Some("pdf_source_map.v1") => PdfRuntimeMapVersion::V1,
+        Some("pdf_source_map.v2") => PdfRuntimeMapVersion::V2,
+        Some(version) => {
+            return Err(pdf_runtime_artifact_error(format!(
+                "unsupported PDF source map version: {version}"
+            )))
+        }
+        None => {
+            return Err(pdf_runtime_artifact_error(
+                "PDF source map version is missing",
+            ))
+        }
+    };
+    let book_id = map
+        .get("book_id")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| pdf_runtime_artifact_error("PDF source map book_id is missing"))?
+        .to_string();
+    let config_hash = map
+        .get("config_hash")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| pdf_runtime_artifact_error("PDF source map config_hash is missing"))?
+        .to_string();
+    let raw_entries = map
+        .get("entries")
+        .and_then(|value| value.as_array())
+        .ok_or_else(|| pdf_runtime_artifact_error("PDF source map entries are missing"))?;
+    let mut entries = HashMap::new();
+    for entry in raw_entries {
+        let lid = entry
+            .get("lid")
+            .and_then(|value| value.as_str())
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| pdf_runtime_artifact_error("PDF source map entry has no LID"))?
+            .to_string();
+        let source_span = entry
+            .get("source_span")
+            .and_then(parse_source_span)
+            .ok_or_else(|| {
+                pdf_runtime_artifact_error(format!(
+                    "PDF source map entry has no source span: {lid}"
+                ))
+            })?;
+        let precision = match version {
+            PdfRuntimeMapVersion::V1 => {
+                match entry.get("status").and_then(|value| value.as_str()) {
+                    Some("word_mapped") => PdfRuntimeProjectionPrecision::CharExact,
+                    Some("line_fallback" | "block_fallback") => {
+                        PdfRuntimeProjectionPrecision::Partial
+                    }
+                    _ => PdfRuntimeProjectionPrecision::Unmapped,
+                }
+            }
+            PdfRuntimeMapVersion::V2 => {
+                match entry.get("precision").and_then(|value| value.as_str()) {
+                    Some("char_exact") => PdfRuntimeProjectionPrecision::CharExact,
+                    Some("region_exact") => PdfRuntimeProjectionPrecision::RegionExact,
+                    Some("partial") => PdfRuntimeProjectionPrecision::Partial,
+                    Some("unmapped") => PdfRuntimeProjectionPrecision::Unmapped,
+                    value => {
+                        return Err(pdf_runtime_artifact_error(format!(
+                            "PDF source map v2 entry has invalid precision: {lid} ({value:?})"
+                        )))
+                    }
+                }
+            }
+        };
+        let exact_source_spans = if version == PdfRuntimeMapVersion::V2 {
+            entry
+                .get("exact_source_spans")
+                .and_then(|value| value.as_array())
+                .ok_or_else(|| {
+                    pdf_runtime_artifact_error(format!(
+                        "PDF source map v2 entry has no exact spans: {lid}"
+                    ))
+                })?
+                .iter()
+                .map(|value| {
+                    parse_source_span(value).ok_or_else(|| {
+                        pdf_runtime_artifact_error(format!(
+                            "PDF source map v2 entry has an invalid exact span: {lid}"
+                        ))
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        } else {
+            Vec::new()
+        };
+        if exact_source_spans.iter().any(|span| {
+            span.start >= span.end || span.start < source_span.start || span.end > source_span.end
+        }) {
+            return Err(pdf_runtime_artifact_error(format!(
+                "PDF source map exact span is outside its LID: {lid}"
+            )));
+        }
+        let regions = entry
+            .get("regions")
+            .and_then(|value| value.as_array())
+            .ok_or_else(|| {
+                pdf_runtime_artifact_error(format!("PDF source map entry has no regions: {lid}"))
+            })?
+            .iter()
+            .map(|value| {
+                parse_pdf_rect(value).ok_or_else(|| {
+                    pdf_runtime_artifact_error(format!(
+                        "PDF source map entry has an invalid region: {lid}"
+                    ))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if version == PdfRuntimeMapVersion::V2
+            && precision == PdfRuntimeProjectionPrecision::RegionExact
+            && !exact_source_spans.is_empty()
+        {
+            return Err(pdf_runtime_artifact_error(format!(
+                "region_exact entry claims character spans: {lid}"
+            )));
+        }
+        if version == PdfRuntimeMapVersion::V2
+            && precision == PdfRuntimeProjectionPrecision::Unmapped
+            && (!exact_source_spans.is_empty() || !regions.is_empty())
+        {
+            return Err(pdf_runtime_artifact_error(format!(
+                "unmapped entry claims PDF evidence: {lid}"
+            )));
+        }
+        if entries
+            .insert(
+                lid.clone(),
+                PdfRuntimeEntryPolicy {
+                    precision,
+                    exact_source_spans,
+                    regions,
+                },
+            )
+            .is_some()
+        {
+            return Err(pdf_runtime_artifact_error(format!(
+                "duplicate PDF source map LID: {lid}"
+            )));
+        }
+    }
+    Ok(PdfRuntimeProjectionPolicy {
+        version,
+        book_id,
+        config_hash,
+        entries,
+    })
+}
+
+fn selection_manifest_for_policy(
+    book_dir: &Path,
+    policy: &PdfRuntimeProjectionPolicy,
+) -> Result<serde_json::Value, ToolError> {
+    let manifest = selection_manifest_value(book_dir)?;
+    let expected_version = match policy.version {
+        PdfRuntimeMapVersion::V1 => "pdf_selection_map.v1",
+        PdfRuntimeMapVersion::V2 => "pdf_selection_map.v2",
+    };
+    if manifest.get("version").and_then(|value| value.as_str()) != Some(expected_version) {
+        return Err(pdf_runtime_artifact_error(format!(
+            "PDF source/selection map versions do not match: expected {expected_version}"
+        )));
+    }
+    if manifest.get("book_id").and_then(|value| value.as_str()) != Some(policy.book_id.as_str()) {
+        return Err(pdf_runtime_artifact_error(
+            "PDF source/selection map book_id values do not match",
+        ));
+    }
+    if policy.version == PdfRuntimeMapVersion::V2
+        && manifest.get("config_hash").and_then(|value| value.as_str())
+            != Some(policy.config_hash.as_str())
+    {
+        return Err(pdf_runtime_artifact_error(
+            "PDF source/selection map config_hash values do not match",
+        ));
+    }
+    Ok(manifest)
+}
+
+fn source_span_is_exact(entry: &PdfRuntimeEntryPolicy, span: SourceSpanDto) -> bool {
+    entry
+        .exact_source_spans
+        .iter()
+        .any(|exact| span.start >= exact.start && span.end <= exact.end)
+}
+
 fn selection_manifest_value(book_dir: &Path) -> Result<serde_json::Value, ToolError> {
     read_json_artifact(
         &book_dir.join("pdf_selection_map").join("manifest.json"),
@@ -6287,8 +6652,12 @@ fn selection_manifest_value(book_dir: &Path) -> Result<serde_json::Value, ToolEr
     )
 }
 
-fn selection_page_shard_path(book_dir: &Path, page_index: usize) -> Result<PathBuf, ToolError> {
-    let manifest = selection_manifest_value(book_dir)?;
+fn selection_page_shard_path(
+    book_dir: &Path,
+    page_index: usize,
+    policy: &PdfRuntimeProjectionPolicy,
+) -> Result<PathBuf, ToolError> {
+    let manifest = selection_manifest_for_policy(book_dir, policy)?;
     let Some(shard_path) = manifest
         .get("page_shards")
         .and_then(|v| v.as_array())
@@ -6316,8 +6685,9 @@ fn selection_hits_for_page(
     book_dir: &Path,
     page_index: usize,
     rects: &[[f64; 4]],
+    policy: &PdfRuntimeProjectionPolicy,
 ) -> Result<(Vec<SelectionCharHit>, usize), ToolError> {
-    let shard_path = selection_page_shard_path(book_dir, page_index)?;
+    let shard_path = selection_page_shard_path(book_dir, page_index, policy)?;
     let shard = read_json_artifact(
         &shard_path,
         "PDF_SELECTION_PAGE_NOT_FOUND",
@@ -6325,6 +6695,16 @@ fn selection_hits_for_page(
     )?;
     let mut hits = Vec::new();
     let mut unmapped_hits = 0;
+    let expected_page_version = match policy.version {
+        PdfRuntimeMapVersion::V1 => "pdf_selection_map_page.v1",
+        PdfRuntimeMapVersion::V2 => "pdf_selection_map_page.v2",
+    };
+    if shard.get("version").and_then(|value| value.as_str()) != Some(expected_page_version) {
+        return Err(pdf_runtime_artifact_error(format!(
+            "PDF selection page version does not match its manifest: {}",
+            shard_path.display()
+        )));
+    }
     let Some(chars) = shard.get("chars").and_then(|v| v.as_array()) else {
         return Err(ToolError {
             error_code: "PDF_SELECTION_PAGE_INVALID".into(),
@@ -6350,6 +6730,20 @@ fn selection_hits_for_page(
             continue;
         };
         let lid = ch.get("lid").and_then(|v| v.as_str()).map(str::to_string);
+        if policy.version == PdfRuntimeMapVersion::V2 {
+            let Some(entry) = lid.as_deref().and_then(|lid| policy.entries.get(lid)) else {
+                unmapped_hits += 1;
+                continue;
+            };
+            if !matches!(
+                entry.precision,
+                PdfRuntimeProjectionPrecision::CharExact | PdfRuntimeProjectionPrecision::Partial
+            ) || !source_span_is_exact(entry, source_span)
+            {
+                unmapped_hits += 1;
+                continue;
+            }
+        }
         if lid.is_none() {
             unmapped_hits += 1;
         }
@@ -6398,6 +6792,22 @@ fn quote_lid_range(book: &Book, lid: &str, range: SourceSpanDto) -> Result<Strin
 }
 
 fn route_pdf_selection_resolve(book: &Book, book_dir: &Path, body: &serde_json::Value) -> Reply {
+    let manifest = match require_pdf_runtime_capability(book_dir, "resolve_pdf_selection") {
+        Ok(manifest) => manifest,
+        Err(error) => return err_reply(&error),
+    };
+    let policy = match pdf_runtime_projection_policy(book_dir) {
+        Ok(policy) => policy,
+        Err(error) => return err_reply(&error),
+    };
+    if let Err(error) = validate_pdf_runtime_policy_identity(
+        &policy,
+        &manifest,
+        &book.base.book_id,
+        "resolve_pdf_selection",
+    ) {
+        return err_reply(&error);
+    }
     let input = match serde_json::from_value::<PdfSelectionResolveInput>(body.clone()) {
         Ok(input) => input,
         Err(e) => {
@@ -6426,23 +6836,30 @@ fn route_pdf_selection_resolve(book: &Book, book_dir: &Path, body: &serde_json::
     }
 
     let mut hits = Vec::new();
-    for (page_index, rects) in rects_by_page {
-        match selection_hits_for_page(book_dir, page_index, &rects) {
-            Ok((mut page_hits, _page_unmapped)) => {
+    let mut rejected_hit_count = 0;
+    for (page_index, rects) in &rects_by_page {
+        match selection_hits_for_page(book_dir, *page_index, rects, &policy) {
+            Ok((mut page_hits, page_unmapped)) => {
                 hits.append(&mut page_hits);
+                if policy.version == PdfRuntimeMapVersion::V2 {
+                    rejected_hit_count += page_unmapped;
+                }
             }
             Err(e) => return err_reply(&e),
         }
     }
     hits.sort_by_key(|hit| (hit.page_index, hit.char_index));
-    if let Some(raw_quote) = input
+    let raw_quote = input
         .raw_quote
         .as_deref()
-        .filter(|quote| !quote.trim().is_empty())
-    {
+        .filter(|quote| !quote.trim().is_empty());
+    if let Some(raw_quote) = raw_quote {
         hits = filter_hits_to_raw_quote(hits, raw_quote);
     }
     let unmapped_hits = hits.iter().filter(|hit| hit.lid.is_none()).count();
+    let raw_quote_incomplete = policy.version == PdfRuntimeMapVersion::V2
+        && raw_quote.is_some_and(|quote| !raw_quote_fully_covered_by_hits(&hits, quote));
+    let degraded_precision = v2_selection_has_degraded_precision(&policy, &rects_by_page, &hits);
 
     let mut source_runs: Vec<(String, SourceSpanDto)> = Vec::new();
     for hit in &hits {
@@ -6493,7 +6910,12 @@ fn route_pdf_selection_resolve(book: &Book, book_dir: &Path, body: &serde_json::
         .join("");
     let status = if ranges.is_empty() {
         "unresolved"
-    } else if unmapped_hits > 0 || hits.iter().any(|hit| hit.lid.is_none()) {
+    } else if unmapped_hits > 0
+        || rejected_hit_count > 0
+        || hits.iter().any(|hit| hit.lid.is_none())
+        || raw_quote_incomplete
+        || degraded_precision
+    {
         "partial"
     } else {
         "resolved"
@@ -6505,8 +6927,11 @@ fn route_pdf_selection_resolve(book: &Book, book_dir: &Path, body: &serde_json::
     })
 }
 
-fn selection_page_shards(book_dir: &Path) -> Result<Vec<(usize, PathBuf)>, ToolError> {
-    let manifest = selection_manifest_value(book_dir)?;
+fn selection_page_shards(
+    book_dir: &Path,
+    policy: &PdfRuntimeProjectionPolicy,
+) -> Result<Vec<(usize, PathBuf)>, ToolError> {
+    let manifest = selection_manifest_for_policy(book_dir, policy)?;
     let Some(shards) = manifest
         .get("page_shards")
         .and_then(|value| value.as_array())
@@ -6546,9 +6971,10 @@ fn selection_chars_for_source_range(
     book_dir: &Path,
     lid: &str,
     target: SourceSpanDto,
+    policy: &PdfRuntimeProjectionPolicy,
 ) -> Result<Vec<SelectionCharHit>, ToolError> {
     let mut hits = Vec::new();
-    for (page_index, shard_path) in selection_page_shards(book_dir)? {
+    for (page_index, shard_path) in selection_page_shards(book_dir, policy)? {
         let shard = read_json_artifact(
             &shard_path,
             "PDF_SELECTION_PAGE_NOT_FOUND",
@@ -6564,6 +6990,16 @@ fn selection_chars_for_source_range(
                 ),
             });
         };
+        let expected_page_version = match policy.version {
+            PdfRuntimeMapVersion::V1 => "pdf_selection_map_page.v1",
+            PdfRuntimeMapVersion::V2 => "pdf_selection_map_page.v2",
+        };
+        if shard.get("version").and_then(|value| value.as_str()) != Some(expected_page_version) {
+            return Err(pdf_runtime_artifact_error(format!(
+                "PDF selection page version does not match its manifest: {}",
+                shard_path.display()
+            )));
+        }
         for ch in chars {
             if ch.get("lid").and_then(|value| value.as_str()) != Some(lid) {
                 continue;
@@ -6571,6 +7007,19 @@ fn selection_chars_for_source_range(
             let Some(source_span) = ch.get("source_span").and_then(parse_source_span) else {
                 continue;
             };
+            if policy.version == PdfRuntimeMapVersion::V2 {
+                let Some(entry) = policy.entries.get(lid) else {
+                    continue;
+                };
+                if !matches!(
+                    entry.precision,
+                    PdfRuntimeProjectionPrecision::CharExact
+                        | PdfRuntimeProjectionPrecision::Partial
+                ) || !source_span_is_exact(entry, source_span)
+                {
+                    continue;
+                }
+            }
             if source_span.start >= target.end || source_span.end <= target.start {
                 continue;
             }
@@ -6602,6 +7051,22 @@ fn selection_chars_for_source_range(
 }
 
 fn route_pdf_ranges_project(book: &Book, book_dir: &Path, body: &serde_json::Value) -> Reply {
+    let manifest = match require_pdf_runtime_capability(book_dir, "project_ranges_to_pdf") {
+        Ok(manifest) => manifest,
+        Err(error) => return err_reply(&error),
+    };
+    let policy = match pdf_runtime_projection_policy(book_dir) {
+        Ok(policy) => policy,
+        Err(error) => return err_reply(&error),
+    };
+    if let Err(error) = validate_pdf_runtime_policy_identity(
+        &policy,
+        &manifest,
+        &book.base.book_id,
+        "project_ranges_to_pdf",
+    ) {
+        return err_reply(&error);
+    }
     let input = match serde_json::from_value::<PdfRangesProjectInput>(body.clone()) {
         Ok(input) => input,
         Err(e) => {
@@ -6634,10 +7099,16 @@ fn route_pdf_ranges_project(book: &Book, book_dir: &Path, body: &serde_json::Val
             start: node_span.start + input_range.range.start,
             end: node_span.start + input_range.range.end,
         };
-        let hits = match selection_chars_for_source_range(book_dir, &input_range.lid, target) {
-            Ok(hits) => hits,
-            Err(e) => return err_reply(&e),
-        };
+        let entry_precision = policy
+            .entries
+            .get(&input_range.lid)
+            .map(|entry| entry.precision)
+            .unwrap_or(PdfRuntimeProjectionPrecision::Unmapped);
+        let hits =
+            match selection_chars_for_source_range(book_dir, &input_range.lid, target, &policy) {
+                Ok(hits) => hits,
+                Err(e) => return err_reply(&e),
+            };
         let mut coverage_spans = hits.iter().map(|hit| hit.source_span).collect::<Vec<_>>();
         coverage_spans.sort_by_key(|span| (span.start, span.end));
         let mut cursor = target.start;
@@ -6653,9 +7124,18 @@ fn route_pdf_ranges_project(book: &Book, book_dir: &Path, body: &serde_json::Val
             }
         }
         let exact = cursor == target.end;
-        let status = if hits.is_empty() {
+        let status = if hits.is_empty()
+            || (policy.version == PdfRuntimeMapVersion::V2
+                && matches!(
+                    entry_precision,
+                    PdfRuntimeProjectionPrecision::RegionExact
+                        | PdfRuntimeProjectionPrecision::Unmapped
+                )) {
             "unmapped"
-        } else if exact {
+        } else if exact
+            && !(policy.version == PdfRuntimeMapVersion::V2
+                && entry_precision == PdfRuntimeProjectionPrecision::Partial)
+        {
             "exact"
         } else {
             "partial"
@@ -6672,7 +7152,7 @@ fn route_pdf_ranges_project(book: &Book, book_dir: &Path, body: &serde_json::Val
                 source_span: hit.source_span,
             })
             .collect::<Vec<_>>();
-        let terminal_rect = exact
+        let terminal_rect = (status == "exact")
             .then(|| {
                 hits.iter()
                     .find(|hit| {
@@ -9243,6 +9723,47 @@ mod tests {
         std::fs::write(selection_dir.join("pages").join("0.json"), page.to_string()).unwrap();
     }
 
+    fn rewrite_pdf_runtime_artifacts_v2(s: &AppState, precision: &str, exact_end: usize) {
+        let source_map_path = s.book_dir.join("pdf_source_map.json");
+        let mut source_map: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&source_map_path).unwrap()).unwrap();
+        source_map["version"] = serde_json::json!("pdf_source_map.v2");
+        let entry = &mut source_map["entries"][0];
+        entry.as_object_mut().unwrap().remove("status");
+        entry["precision"] = serde_json::json!(precision);
+        entry["exact_source_spans"] = if exact_end > 0 {
+            serde_json::json!([{"start":0,"end":exact_end}])
+        } else {
+            serde_json::json!([])
+        };
+        entry["alignment"] = serde_json::json!({"unit_id":"unit-1","reason":"v2 runtime fixture"});
+        if precision == "unmapped" {
+            entry["regions"] = serde_json::json!([]);
+            entry.as_object_mut().unwrap().remove("primary_region");
+        }
+        std::fs::write(source_map_path, source_map.to_string()).unwrap();
+
+        let selection_manifest_path = s.book_dir.join("pdf_selection_map").join("manifest.json");
+        let mut selection_manifest: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&selection_manifest_path).unwrap())
+                .unwrap();
+        selection_manifest["version"] = serde_json::json!("pdf_selection_map.v2");
+        std::fs::write(selection_manifest_path, selection_manifest.to_string()).unwrap();
+        let selection_page_path = s
+            .book_dir
+            .join("pdf_selection_map")
+            .join("pages")
+            .join("0.json");
+        let mut selection_page: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&selection_page_path).unwrap()).unwrap();
+        selection_page["version"] = serde_json::json!("pdf_selection_map_page.v2");
+        selection_page["chars"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|value| value["source_span"]["end"].as_u64().unwrap() as usize <= exact_end);
+        std::fs::write(selection_page_path, selection_page.to_string()).unwrap();
+    }
+
     fn write_projection_selection_pages(s: &AppState, pages: Vec<serde_json::Value>) {
         let selection_dir = s.book_dir.join("pdf_selection_map");
         std::fs::create_dir_all(selection_dir.join("pages")).unwrap();
@@ -11262,6 +11783,116 @@ mod tests {
     }
 
     #[test]
+    fn pdf_runtime_v2_applies_entry_precision_without_regressing_v1() {
+        let mut s = state_named("pdf-runtime-v2-precision");
+        write_pdf_runtime_artifacts(&mut s);
+        rewrite_pdf_runtime_artifacts_v2(&s, "char_exact", 3);
+
+        let source_map = get(&mut s, "/book/pdf_source_map");
+        assert_eq!(source_map.status, 200, "{}", source_map.body);
+        assert!(source_map
+            .body
+            .contains("\"version\":\"pdf_source_map.v2\""));
+        let resolved = post(
+            &mut s,
+            "/reader/pdf_selection.resolve",
+            r#"{"pageIndex":0,"raw_quote":"PDF","rects":[{"bbox":[9.0,9.0,17.0,21.0]}]}"#,
+        );
+        let body: serde_json::Value = serde_json::from_str(&resolved.body).unwrap();
+        assert_eq!(body["status"], "resolved");
+        let projected = post(
+            &mut s,
+            "/reader/pdf_ranges.project",
+            r#"{"ranges":[{"lid":"1.1","range":{"start":0,"end":3}}]}"#,
+        );
+        let body: serde_json::Value = serde_json::from_str(&projected.body).unwrap();
+        assert_eq!(body["projections"][0]["status"], "exact");
+
+        write_pdf_runtime_artifacts(&mut s);
+        rewrite_pdf_runtime_artifacts_v2(&s, "partial", 2);
+        let partial = post(
+            &mut s,
+            "/reader/pdf_selection.resolve",
+            r#"{"pageIndex":0,"raw_quote":"PDF","rects":[{"bbox":[9.0,9.0,17.0,21.0]}]}"#,
+        );
+        let body: serde_json::Value = serde_json::from_str(&partial.body).unwrap();
+        assert_eq!(body["status"], "partial");
+        assert_eq!(
+            body["ranges"][0]["range"],
+            serde_json::json!({"start":0,"end":2})
+        );
+        let projected = post(
+            &mut s,
+            "/reader/pdf_ranges.project",
+            r#"{"ranges":[{"lid":"1.1","range":{"start":0,"end":3}}]}"#,
+        );
+        let body: serde_json::Value = serde_json::from_str(&projected.body).unwrap();
+        assert_eq!(body["projections"][0]["status"], "partial");
+
+        write_pdf_runtime_artifacts(&mut s);
+        rewrite_pdf_runtime_artifacts_v2(&s, "region_exact", 0);
+        let selection_page_path = s
+            .book_dir
+            .join("pdf_selection_map")
+            .join("pages")
+            .join("0.json");
+        let mut malicious_page: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&selection_page_path).unwrap()).unwrap();
+        malicious_page["chars"] = serde_json::json!([{
+            "char_index":0,
+            "text":"P",
+            "rect":{"pageIndex":0,"bbox":[10.0,10.0,12.0,20.0]},
+            "source_span":{"start":0,"end":1},
+            "lid":"1.1"
+        }]);
+        std::fs::write(selection_page_path, malicious_page.to_string()).unwrap();
+        let unresolved = post(
+            &mut s,
+            "/reader/pdf_selection.resolve",
+            r#"{"pageIndex":0,"raw_quote":"PDF","rects":[{"bbox":[9.0,9.0,81.0,21.0]}]}"#,
+        );
+        let body: serde_json::Value = serde_json::from_str(&unresolved.body).unwrap();
+        assert_eq!(body["status"], "unresolved");
+        let projected = post(
+            &mut s,
+            "/reader/pdf_ranges.project",
+            r#"{"ranges":[{"lid":"1.1","range":{"start":0,"end":3}}]}"#,
+        );
+        let body: serde_json::Value = serde_json::from_str(&projected.body).unwrap();
+        assert_eq!(body["projections"][0]["status"], "unmapped");
+
+        write_pdf_runtime_artifacts(&mut s);
+        rewrite_pdf_runtime_artifacts_v2(&s, "unmapped", 0);
+        let unresolved = post(
+            &mut s,
+            "/reader/pdf_selection.resolve",
+            r#"{"pageIndex":0,"raw_quote":"PDF","rects":[{"bbox":[9.0,9.0,17.0,21.0]}]}"#,
+        );
+        let body: serde_json::Value = serde_json::from_str(&unresolved.body).unwrap();
+        assert_eq!(body["status"], "unresolved");
+        let projected = post(
+            &mut s,
+            "/reader/pdf_ranges.project",
+            r#"{"ranges":[{"lid":"1.1","range":{"start":0,"end":3}}]}"#,
+        );
+        let body: serde_json::Value = serde_json::from_str(&projected.body).unwrap();
+        assert_eq!(body["projections"][0]["status"], "unmapped");
+
+        write_pdf_runtime_artifacts(&mut s);
+        rewrite_pdf_runtime_artifacts_v2(&s, "char_exact", 3);
+        let source_map_path = s.book_dir.join("pdf_source_map.json");
+        let mut wrong_book_map: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&source_map_path).unwrap(),
+        )
+        .unwrap();
+        wrong_book_map["book_id"] = serde_json::json!("another-book");
+        std::fs::write(source_map_path, wrong_book_map.to_string()).unwrap();
+        let rejected = get(&mut s, "/book/pdf_source_map");
+        assert_eq!(rejected.status, 400);
+        assert!(rejected.body.contains("PDF_RUNTIME_ARTIFACT_INVALID"));
+    }
+
+    #[test]
     fn pdf_selection_splits_same_lid_source_gaps_into_exact_ranges() {
         let mut s = state_named("pdf-selection-source-gaps");
         write_pdf_runtime_artifacts(&mut s);
@@ -11625,6 +12256,8 @@ mod tests {
             serde_json::json!({"status":"unavailable","reason":"fixture disabled"});
         manifest["capabilities"]["project_ranges_to_pdf"] =
             serde_json::json!({"status":"unavailable","reason":"fixture disabled"});
+        manifest["capabilities"]["resolve_pdf_selection"] =
+            serde_json::json!({"status":"unavailable","reason":"fixture disabled"});
         std::fs::write(
             s.book_dir.join("source_manifest.json"),
             manifest.to_string(),
@@ -11634,6 +12267,22 @@ mod tests {
         let r = get(&mut s, "/book/pdf_source_map");
         assert_eq!(r.status, 400);
         assert!(r.body.contains("PDF_SOURCE_MAP_UNAVAILABLE"));
+        let selection = post(
+            &mut s,
+            "/reader/pdf_selection.resolve",
+            r#"{"pageIndex":0,"rects":[{"bbox":[9.0,9.0,17.0,21.0]}]}"#,
+        );
+        assert_eq!(selection.status, 400);
+        assert!(selection
+            .body
+            .contains("PDF_RUNTIME_CAPABILITY_UNAVAILABLE"));
+        let ranges = post(
+            &mut s,
+            "/reader/pdf_ranges.project",
+            r#"{"ranges":[{"lid":"1.1","range":{"start":0,"end":3}}]}"#,
+        );
+        assert_eq!(ranges.status, 400);
+        assert!(ranges.body.contains("PDF_RUNTIME_CAPABILITY_UNAVAILABLE"));
     }
 
     #[test]

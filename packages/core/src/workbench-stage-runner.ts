@@ -1,16 +1,28 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import path from "node:path";
 import { extractPdfTextGeometry } from "./pdf-geometry";
-import { buildHybridFoundation, writeHybridFoundationArtifacts } from "./hybrid-foundation";
-import { mergeHybridFoundationBase, sameLidIdentity } from "./hybrid-foundation-apply";
+import { validateHybridFoundationV1ArtifactSet } from "./hybrid-foundation";
+import {
+  buildHybridFoundationV2Candidate,
+  validateHybridFoundationV2ArtifactSet,
+  writeHybridFoundationV2ArtifactSet,
+} from "./hybrid-foundation-v2";
+import {
+  applyHybridFoundationArtifactSet,
+  mergeHybridFoundationBase,
+  sameLidIdentity,
+  type HybridFoundationApplyFaultInjector,
+} from "./hybrid-foundation-apply";
 import { ReadOnlyBaseZ } from "./zod";
 import {
   acceptSourceReconciliationManualOverride,
   buildReviewedDraftFromDecisions,
   reconcilePaperSource,
   reviewCandidateAndReconcile,
+  sourceReconciliationEvidenceFingerprint,
   sourceReconciliationAccepted,
   writeSourceReconciliationArtifacts,
   type BuildInputFingerprint,
@@ -19,6 +31,8 @@ import {
   type SourceReconciliationReviewDecisions,
   type SourceReviewDecision,
 } from "./source-reconciliation";
+import { acceptSourceAlignmentEvidence } from "./source-alignment-evidence";
+import { SourceAlignmentEvidenceV1Z } from "./source-alignment-evidence";
 import {
   buildInputFingerprintsEqual,
   detectBuildReadiness,
@@ -45,6 +59,7 @@ export interface RunWorkbenchStageOptions {
   stage: BuildStageId;
   now?: string;
   command_runner?: WorkbenchStageCommandRunner;
+  hybrid_apply_fault_injector?: HybridFoundationApplyFaultInjector;
 }
 
 export interface WorkbenchStageCommandSpec {
@@ -59,6 +74,10 @@ export type WorkbenchStageCommandRunner = (
 
 const WORKSPACE_ROOT = path.resolve(fileURLToPath(new URL("../../../", import.meta.url)));
 const MAX_BUILD_JOB_EVENTS = 200;
+
+function sha256(data: Uint8Array | string): string {
+  return createHash("sha256").update(data).digest("hex");
+}
 
 function readJson<T>(file: string): T {
   return JSON.parse(readFileSync(file, "utf8")) as T;
@@ -184,15 +203,28 @@ async function runSourceReconciliation(
   const stageDir = path.join(bookDir, ".build", "source-reconciliation");
   const reportPath = path.join(stageDir, "report.json");
   const stageSourcePath = path.join(stageDir, "source.txt");
+  const alignmentEvidencePath = path.join(stageDir, "alignment-evidence.json");
   const acceptedReport = existsSync(reportPath)
     ? readJson<SourceReconciliationReport>(reportPath)
     : undefined;
+  const acceptedEvidenceIsCurrent = (() => {
+    if (!existsSync(stageSourcePath) || !existsSync(alignmentEvidencePath)) return false;
+    try {
+      const expectedFingerprint = sourceReconciliationEvidenceFingerprint(
+        readFileSync(stageSourcePath, "utf8"),
+        manifest.fingerprint.paper_pdf_sha256,
+      );
+      return acceptSourceAlignmentEvidence(readJson<unknown>(alignmentEvidencePath), expectedFingerprint) !== null;
+    } catch {
+      return false;
+    }
+  })();
   if (
     acceptedReport?.acceptance?.mode === "manual_override"
     && acceptedReport.book_id === manifest.book_id
     && buildInputFingerprintsEqual(acceptedReport.input_fingerprint, manifest.fingerprint)
     && sourceReconciliationAccepted(acceptedReport)
-    && existsSync(stageSourcePath)
+    && acceptedEvidenceIsCurrent
   ) {
     resolveSourceDecisionRequest(job, now);
     job.status = "ready";
@@ -228,6 +260,7 @@ async function runSourceReconciliation(
       input_fingerprint: manifest.fingerprint,
       kind: "manual_review",
       decisions: reviewed.decisions,
+      reviewed_source_spans: reviewed.reviewed_spans,
     });
     if (!gated.reconciliation) throw new Error(gated.reason ?? "reviewed source was rejected");
     const accepted = gated.accepted
@@ -237,6 +270,7 @@ async function runSourceReconciliation(
   } else {
     const staleStageSource = path.join(stageDir, "source.txt");
     if (initial.report.unresolved.length && existsSync(staleStageSource)) rmSync(staleStageSource);
+    if (initial.report.unresolved.length && existsSync(alignmentEvidencePath)) rmSync(alignmentEvidencePath);
     writeSourceReconciliationArtifacts(bookDir, initial);
     if (initial.report.unresolved.length) {
       requestSourceReview(job, now);
@@ -255,19 +289,31 @@ async function runHybridFoundation(
   manifest: WorkbenchInputManifest,
   job: BuildJobState,
   now: string,
+  applyFaultInjector?: HybridFoundationApplyFaultInjector,
 ): Promise<void> {
   const stageSourcePath = path.join(bookDir, ".build", "source-reconciliation", "source.txt");
   if (!existsSync(stageSourcePath)) throw new Error("trusted source reconciliation output is missing");
   const pdfPath = path.resolve(bookDir, manifest.inputs.paper_pdf.path);
   const source = readFileSync(stageSourcePath, "utf8");
   const pdfBytes = new Uint8Array(readFileSync(pdfPath));
+  const pdfSha256 = sha256(pdfBytes);
+  if (pdfSha256 !== manifest.fingerprint.paper_pdf_sha256.toLowerCase()) {
+    throw new Error("current PDF hash does not match the Workbench input fingerprint");
+  }
+  const evidencePath = path.join(bookDir, ".build", "source-reconciliation", "alignment-evidence.json");
+  if (!existsSync(evidencePath)) throw new Error("current source alignment evidence is missing");
+  const evidenceBytes = readFileSync(evidencePath);
+  const evidence = SourceAlignmentEvidenceV1Z.parse(JSON.parse(evidenceBytes.toString("utf8")));
+  if (evidence.book_id !== manifest.book_id) throw new Error("source alignment evidence book identity differs");
+  const evidenceSha256 = sha256(evidenceBytes);
   const geometry = await extractPdfTextGeometry(pdfBytes);
-  const artifacts = buildHybridFoundation({
+  const artifacts = buildHybridFoundationV2Candidate({
     book_id: manifest.book_id,
     source_txt: source,
     original_pdf_path: manifest.inputs.paper_pdf.path.replaceAll("\\", "/"),
-    original_pdf_sha256: manifest.fingerprint.paper_pdf_sha256,
+    original_pdf_sha256: pdfSha256,
     pdf_geometry: geometry,
+    source_alignment_evidence: evidence,
   });
   const basePath = path.join(bookDir, "base.json");
   const existingBase = existsSync(basePath)
@@ -276,14 +322,51 @@ async function runHybridFoundation(
   const base = existingBase && sameLidIdentity(existingBase, artifacts.base)
     ? mergeHybridFoundationBase(existingBase, artifacts.base)
     : artifacts.base;
-  writeHybridFoundationArtifacts(bookDir, source, { ...artifacts, base });
+  const candidateRoot = path.join(bookDir, ".build", "hybrid-foundation-candidates");
+  mkdirSync(candidateRoot, { recursive: true });
+  const candidateDir = mkdtempSync(path.join(candidateRoot, `${job.job_id}-`));
+  let application: ReturnType<typeof applyHybridFoundationArtifactSet>;
+  try {
+    writeHybridFoundationV2ArtifactSet(candidateDir, source, { ...artifacts, base });
+    const validateAnyFoundation = (root: string) => {
+      const map = readJson<{ version?: string }>(path.join(root, "pdf_source_map.json"));
+      if (map.version === "pdf_source_map.v1") {
+        validateHybridFoundationV1ArtifactSet(root);
+      } else if (map.version === "pdf_source_map.v2") {
+        validateHybridFoundationV2ArtifactSet(root);
+      } else {
+        throw new Error(`unsupported hybrid foundation source map version: ${map.version ?? "missing"}`);
+      }
+    };
+    const validateCurrentCandidate = (root: string) => {
+      validateHybridFoundationV2ArtifactSet(root, {
+        expected_pdf_sha256: pdfSha256,
+        expected_source_alignment_evidence_sha256: evidenceSha256,
+      });
+    };
+    application = applyHybridFoundationArtifactSet({
+      book_dir: bookDir,
+      candidate_dir: candidateDir,
+      validate_artifact_set: validateAnyFoundation,
+      validate_candidate_artifact_set: validateCurrentCandidate,
+      fault_injector: applyFaultInjector,
+    });
+  } finally {
+    rmSync(candidateDir, { recursive: true, force: true });
+  }
   const readiness = detectBuildReadiness(
     readBuildWorkbenchSnapshot(bookDir, { current_input_fingerprint: manifest.fingerprint }),
   );
   job.status = readiness.route === "reader" ? "done" : "ready";
   job.active_run = undefined;
   appendEvent(job, now, "readiness_recomputed", "hybrid_foundation", `Reader handoff: ${readiness.route}`, readiness);
-  appendEvent(job, now, "stage_completed", "hybrid_foundation", "Hybrid foundation passed deterministic gates");
+  appendEvent(
+    job,
+    now,
+    "stage_completed",
+    "hybrid_foundation",
+    `Hybrid foundation passed deterministic gates (${application.status})`,
+  );
 }
 
 function stageBuildDirName(stage: BuildStageId): string {
@@ -407,7 +490,7 @@ export async function runWorkbenchStage(options: RunWorkbenchStageOptions): Prom
     if (options.stage === "source_reconciliation") {
       await runSourceReconciliation(bookDir, manifest, job, now);
     } else if (options.stage === "hybrid_foundation") {
-      await runHybridFoundation(bookDir, manifest, job, now);
+      await runHybridFoundation(bookDir, manifest, job, now, options.hybrid_apply_fault_injector);
     } else {
       await runPaperProjection(
         bookDir,

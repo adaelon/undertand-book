@@ -1,0 +1,119 @@
+{
+  "version": "hybrid_foundation_expected.v1",
+  "fixture_id": "licensed-two-column-formula",
+  "input_sha256": {
+    "source": "ba3547197c4c514db1082c962130cf9f3a4da5787e7de0fbac6ab39b69095f10",
+    "pdf": "bc13a0a3893da86247329331001c2a794228c44e9a7d19233d2874e11c4deba7"
+  },
+  "annotations": [
+    {
+      "annotation_id": "title",
+      "source_span": { "start": 0, "end": 28 },
+      "source_text": "# Two Column Formula Fixture",
+      "pdf_text": "Two Column Formula Fixture",
+      "expected_page_index": 0,
+      "expected_line_start_index": 0,
+      "expected_line_end_index": 0,
+      "expected_bbox": [54, 720, 275.36000000000007, 736],
+      "expected_precision": "char_exact"
+    },
+    {
+      "annotation_id": "left-heading",
+      "source_span": { "start": 30, "end": 45 },
+      "source_text": "## Left Formula",
+      "pdf_text": "Left Formula",
+      "expected_page_index": 0,
+      "expected_line_start_index": 1,
+      "expected_line_end_index": 1,
+      "expected_bbox": [54, 660, 126.672, 672],
+      "expected_precision": "char_exact"
+    },
+    {
+      "annotation_id": "left-leading-text",
+      "source_span": { "start": 47, "end": 78 },
+      "source_text": "Alpha beta gamma delta epsilon ",
+      "pdf_text": "Alpha beta gamma delta epsilon",
+      "expected_page_index": 0,
+      "expected_line_start_index": 2,
+      "expected_line_end_index": 2,
+      "expected_bbox": [54, 636, 176.07150000000001, 645],
+      "expected_precision": "char_exact"
+    },
+    {
+      "annotation_id": "left-formula",
+      "source_span": { "start": 78, "end": 84 },
+      "source_text": "$ qk $",
+      "pdf_text": "qk",
+      "expected_page_index": 0,
+      "expected_line_start_index": 2,
+      "expected_line_end_index": 2,
+      "expected_bbox": [180.14055000000002, 636, 188.27865000000003, 645],
+      "expected_precision": "region_exact"
+    },
+    {
+      "annotation_id": "left-trailing-text",
+      "source_span": { "start": 84, "end": 111 },
+      "source_text": " zeta eta theta iota kappa.",
+      "pdf_text": "zeta eta theta iota kappa.",
+      "expected_page_index": 0,
+      "expected_line_start_index": 2,
+      "expected_line_end_index": 2,
+      "expected_bbox": [192.34770000000003, 636, 298.14300000000003, 645],
+      "expected_precision": "char_exact"
+    },
+    {
+      "annotation_id": "right-heading",
+      "source_span": { "start": 113, "end": 129 },
+      "source_text": "## Right Formula",
+      "pdf_text": "Right Formula",
+      "expected_page_index": 0,
+      "expected_line_start_index": 1,
+      "expected_line_end_index": 1,
+      "expected_bbox": [320, 660, 401.336, 672],
+      "expected_precision": "char_exact"
+    },
+    {
+      "annotation_id": "right-leading-text",
+      "source_span": { "start": 131, "end": 155 },
+      "source_text": "Lambda mu nu xi omicron ",
+      "pdf_text": "Lambda mu nu xi omicron",
+      "expected_page_index": 0,
+      "expected_line_start_index": 2,
+      "expected_line_end_index": 2,
+      "expected_bbox": [320, 636, 416.0161538461538, 645],
+      "expected_precision": "char_exact"
+    },
+    {
+      "annotation_id": "right-formula",
+      "source_span": { "start": 155, "end": 161 },
+      "source_text": "$ vw $",
+      "pdf_text": "vw",
+      "expected_page_index": 0,
+      "expected_line_start_index": 2,
+      "expected_line_end_index": 2,
+      "expected_bbox": [420.1907692307692, 636, 428.54, 645],
+      "expected_precision": "region_exact"
+    },
+    {
+      "annotation_id": "right-trailing-text",
+      "source_span": { "start": 161, "end": 187 },
+      "source_text": " pi rho sigma tau upsilon.",
+      "pdf_text": "pi rho sigma tau upsilon.",
+      "expected_page_index": 0,
+      "expected_line_start_index": 2,
+      "expected_line_end_index": 2,
+      "expected_bbox": [432.7146153846154, 636, 537.08, 645],
+      "expected_precision": "char_exact"
+    }
+  ],
+  "expected_v1": {
+    "hard_gate_error": "hybrid foundation heading mapping coverage is below the reader-ready minimum",
+    "leaf_count": 9,
+    "mapped_leaf_count": 6,
+    "mapped_text_ratio": 0.8571428571428571,
+    "mapped_heading_ratio": 0.6666666666666666,
+    "unmapped_asset_count": 2,
+    "annotated_wrong_page_count": 0,
+    "duplicate_pdf_binding_count": 1
+  }
+}

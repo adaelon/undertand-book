@@ -209,6 +209,15 @@ export interface PdfCapability {
   report_path?: string;
   config_hash?: string;
 }
+export interface PdfAlignmentQuality {
+  policy_version: "hybrid_quality_policy.v1";
+  tier: "full" | "degraded";
+  unit_location_ratio: number;
+  exact_text_span_ratio: number;
+  exact_formula_ratio: number;
+  heading_location_ratio: number;
+  report_path: string;
+}
 export interface SourceManifestV2 {
   version: "source_manifest.v2";
   book_id: string;
@@ -230,6 +239,7 @@ export interface SourceManifestV2 {
     resolve_pdf_selection: PdfCapability;
     project_ranges_to_pdf: PdfCapability;
   };
+  alignment_quality?: PdfAlignmentQuality;
 }
 export interface PdfPageRect {
   pageIndex: number;
@@ -238,7 +248,7 @@ export interface PdfPageRect {
 export interface PdfRegion extends PdfPageRect {
   region_id: string;
 }
-export interface PdfSourceMapEntry {
+export interface PdfSourceMapEntryV1 {
   lid: string;
   source_span: TextRange;
   status: "word_mapped" | "line_fallback" | "block_fallback" | "unmapped" | "excluded";
@@ -246,8 +256,18 @@ export interface PdfSourceMapEntry {
   primary_region?: PdfRegion;
   alignment: { confidence: number; reason?: string; trace_id?: string };
 }
-export interface PdfSourceMap {
-  version: "pdf_source_map.v1";
+export interface PdfSourceMapEntryV2 {
+  lid: string;
+  source_span: TextRange;
+  precision: "char_exact" | "region_exact" | "partial" | "unmapped";
+  regions: PdfRegion[];
+  exact_source_spans: TextRange[];
+  primary_region?: PdfRegion;
+  alignment: { unit_id: string; reason: string; trace_id?: string };
+}
+export type PdfSourceMapEntry = PdfSourceMapEntryV1 | PdfSourceMapEntryV2;
+
+interface PdfSourceMapBase {
   book_id: string;
   coordinate_system: {
     space: "pdf_user_space";
@@ -263,12 +283,20 @@ export interface PdfSourceMap {
     rotate: 0 | 90 | 180 | 270;
     view: [number, number, number, number];
   }>;
-  entries: PdfSourceMapEntry[];
-  excluded_regions: PdfRegion[];
   page_region_index: Record<string, string[]>;
-  page_excluded_index: Record<string, string[]>;
   config_hash: string;
 }
+export interface PdfSourceMapV1 extends PdfSourceMapBase {
+  version: "pdf_source_map.v1";
+  entries: PdfSourceMapEntryV1[];
+  excluded_regions: PdfRegion[];
+  page_excluded_index: Record<string, string[]>;
+}
+export interface PdfSourceMapV2 extends PdfSourceMapBase {
+  version: "pdf_source_map.v2";
+  entries: PdfSourceMapEntryV2[];
+}
+export type PdfSourceMap = PdfSourceMapV1 | PdfSourceMapV2;
 export interface PdfSelectionResolveResponse {
   status: "resolved" | "partial" | "unresolved";
   ranges: Array<{

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { markdownToBlocks } from "./md-adapter";
 import { segment, type SourceBlock } from "./segment";
@@ -14,6 +14,14 @@ import {
 } from "./pdf-source-map";
 import type { PdfGeometryChar, PdfGeometryLine, PdfGeometryPage, PdfTextGeometry } from "./pdf-geometry";
 import type { ReadOnlyBase } from "./generated/ReadOnlyBase";
+import {
+  AlignmentReportZ,
+  PdfSelectionMapManifestZ,
+  PdfSelectionMapPageShardZ,
+  PdfSourceMapZ,
+  ReadOnlyBaseZ,
+  SourceManifestV2Z,
+} from "./zod";
 
 export interface AlignmentReport {
   version: "alignment_report.v1";
@@ -782,6 +790,55 @@ export function assertHybridFoundationHardGates(artifacts: HybridFoundationArtif
   if (artifacts.alignment_report.hard_gates.minimum_heading_mapping_ratio === false) {
     throw new Error("hybrid foundation heading mapping coverage is below the reader-ready minimum");
   }
+}
+
+export function readHybridFoundationV1ArtifactSet(root: string): HybridFoundationArtifacts {
+  const selectionDir = path.join(root, "pdf_selection_map");
+  const selectionManifest = PdfSelectionMapManifestZ.parse(JSON.parse(
+    readFileSync(path.join(selectionDir, "manifest.json"), "utf8"),
+  ));
+  const selectionRoot = path.resolve(selectionDir);
+  const pages = selectionManifest.page_shards.map((shard) => {
+    const pagePath = path.resolve(selectionDir, shard.path);
+    const relative = path.relative(selectionRoot, pagePath);
+    if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) {
+      throw new Error(`pdf_selection_map shard path escapes its artifact directory: ${shard.path}`);
+    }
+    return PdfSelectionMapPageShardZ.parse(JSON.parse(readFileSync(pagePath, "utf8")));
+  });
+  return {
+    base: ReadOnlyBaseZ.parse(JSON.parse(readFileSync(path.join(root, "base.json"), "utf8"))),
+    source_manifest: SourceManifestV2Z.parse(JSON.parse(readFileSync(path.join(root, "source_manifest.json"), "utf8"))),
+    pdf_source_map: PdfSourceMapZ.parse(JSON.parse(readFileSync(path.join(root, "pdf_source_map.json"), "utf8"))),
+    pdf_selection_map_manifest: selectionManifest,
+    pdf_selection_map_pages: pages,
+    alignment_report: AlignmentReportZ.parse(JSON.parse(readFileSync(path.join(root, "alignment_report.json"), "utf8"))),
+  };
+}
+
+export function validateHybridFoundationV1ArtifactSet(root: string): HybridFoundationArtifacts {
+  const artifacts = readHybridFoundationV1ArtifactSet(root);
+  assertHybridFoundationHardGates(artifacts);
+  const bookIds = new Set([
+    artifacts.base.book_id,
+    artifacts.source_manifest.book_id,
+    artifacts.pdf_source_map.book_id,
+    artifacts.pdf_selection_map_manifest.book_id,
+    artifacts.alignment_report.book_id,
+    ...artifacts.pdf_selection_map_pages.map((page) => page.book_id),
+  ]);
+  if (bookIds.size !== 1) throw new Error("hybrid foundation artifact book identity differs");
+  const configHashes = new Set([
+    artifacts.pdf_source_map.config_hash,
+    artifacts.pdf_selection_map_manifest.config_hash,
+    artifacts.alignment_report.config_hash,
+  ]);
+  if (configHashes.size !== 1) throw new Error("hybrid foundation artifact config hashes differ");
+  const source = readFileSync(path.join(root, artifacts.source_manifest.canonical_source.path));
+  if (sha256(source) !== artifacts.source_manifest.canonical_source.sha256) {
+    throw new Error("hybrid foundation canonical source hash differs from source_manifest");
+  }
+  return artifacts;
 }
 
 export function writeHybridFoundationArtifacts(outputDir: string, sourceTxt: string, artifacts: HybridFoundationArtifacts): WriteHybridFoundationArtifactsResult {

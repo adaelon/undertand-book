@@ -79,6 +79,10 @@ struct RuntimePdfPage {
 struct RuntimePdfSourceMapEntry {
     lid: String,
     source_span: Span,
+    #[serde(default)]
+    precision: Option<String>,
+    #[serde(default)]
+    exact_source_spans: Vec<Span>,
     regions: Vec<RuntimePdfRegion>,
 }
 
@@ -2130,6 +2134,53 @@ fn pdf_capability_usable(capability: &RuntimePdfCapability) -> bool {
     matches!(capability.status.as_str(), "available" | "degraded")
 }
 
+fn validate_runtime_pdf_entry_contract(
+    map_version: &str,
+    entry: &RuntimePdfSourceMapEntry,
+) -> Result<(), String> {
+    if map_version == "pdf_source_map.v1" {
+        return Ok(());
+    }
+    let precision = entry
+        .precision
+        .as_deref()
+        .ok_or_else(|| format!("PDF source map v2 entry has no precision: {}", entry.lid))?;
+    if !matches!(
+        precision,
+        "char_exact" | "region_exact" | "partial" | "unmapped"
+    ) {
+        return Err(format!(
+            "PDF source map v2 entry has unsupported precision: {} ({precision})",
+            entry.lid
+        ));
+    }
+    if entry.exact_source_spans.iter().any(|span| {
+        span.start >= span.end
+            || span.start < entry.source_span.start
+            || span.end > entry.source_span.end
+    }) {
+        return Err(format!(
+            "PDF source map v2 exact span is outside its LID: {}",
+            entry.lid
+        ));
+    }
+    if precision == "region_exact" && !entry.exact_source_spans.is_empty() {
+        return Err(format!(
+            "PDF source map v2 region_exact entry claims character spans: {}",
+            entry.lid
+        ));
+    }
+    if precision == "unmapped"
+        && (!entry.regions.is_empty() || !entry.exact_source_spans.is_empty())
+    {
+        return Err(format!(
+            "PDF source map v2 unmapped entry claims PDF evidence: {}",
+            entry.lid
+        ));
+    }
+    Ok(())
+}
+
 fn is_structural_node(node: &LidNode) -> bool {
     matches!(node.kind, NodeKind::Chapter | NodeKind::Section)
 }
@@ -2994,14 +3045,17 @@ impl Book {
             .paper_minimap_artifacts
             .pdf_source_map
             .as_ref()
-            .ok_or_else(|| "pdf_source_map.v1 is unavailable".to_string())?;
+            .ok_or_else(|| "PDF source map is unavailable".to_string())?;
         if manifest.version != "source_manifest.v2" {
             return Err(format!(
                 "unsupported source manifest version: {}",
                 manifest.version
             ));
         }
-        if pdf_map.version != "pdf_source_map.v1" {
+        if !matches!(
+            pdf_map.version.as_str(),
+            "pdf_source_map.v1" | "pdf_source_map.v2"
+        ) {
             return Err(format!(
                 "unsupported PDF source map version: {}",
                 pdf_map.version
@@ -3043,6 +3097,7 @@ impl Book {
 
         let mut entries = HashMap::new();
         for entry in &pdf_map.entries {
+            validate_runtime_pdf_entry_contract(&pdf_map.version, entry)?;
             if entries.insert(entry.lid.as_str(), entry).is_some() {
                 return Err(format!("duplicate PDF source map LID: {}", entry.lid));
             }
@@ -7089,6 +7144,23 @@ mod tests {
         dir
     }
 
+    fn rewrite_paper_minimap_map_v2(dir: &std::path::Path) {
+        let path = dir.join("pdf_source_map.json");
+        let mut map: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        map["version"] = serde_json::json!("pdf_source_map.v2");
+        for entry in map["entries"].as_array_mut().unwrap() {
+            entry.as_object_mut().unwrap().remove("status");
+            entry["precision"] = serde_json::json!("char_exact");
+            entry["exact_source_spans"] = serde_json::json!([entry["source_span"].clone()]);
+            entry["alignment"] = serde_json::json!({
+                "unit_id": format!("unit:{}", entry["lid"].as_str().unwrap()),
+                "reason": "v2 test projection"
+            });
+        }
+        std::fs::write(path, map.to_string()).unwrap();
+    }
+
     fn write_flattened_paper_minimap_book(name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(name);
         let _ = std::fs::remove_dir_all(&dir);
@@ -7429,6 +7501,43 @@ mod tests {
             PaperMinimapAvailabilityStatus::Available
         );
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn paper_minimap_dual_reads_v1_and_v2_source_maps_but_rejects_unknown_versions() {
+        let v1_dir = write_paper_minimap_book("ub-read-tools-paper-minimap-v1", "config-a");
+        let v1 = Book::load(v1_dir.to_str().unwrap())
+            .unwrap()
+            .paper_minimap();
+        assert_ne!(v1.status, PaperMinimapAvailabilityStatus::Unavailable);
+
+        let v2_dir = write_paper_minimap_book("ub-read-tools-paper-minimap-v2", "config-a");
+        rewrite_paper_minimap_map_v2(&v2_dir);
+        let v2 = Book::load(v2_dir.to_str().unwrap())
+            .unwrap()
+            .paper_minimap();
+        assert_ne!(v2.status, PaperMinimapAvailabilityStatus::Unavailable);
+        assert_eq!(v2.regions, v1.regions);
+
+        let unknown_dir =
+            write_paper_minimap_book("ub-read-tools-paper-minimap-unknown", "config-a");
+        let path = unknown_dir.join("pdf_source_map.json");
+        let mut map: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        map["version"] = serde_json::json!("pdf_source_map.v3");
+        std::fs::write(path, map.to_string()).unwrap();
+        let unknown = Book::load(unknown_dir.to_str().unwrap())
+            .unwrap()
+            .paper_minimap();
+        assert_eq!(unknown.status, PaperMinimapAvailabilityStatus::Unavailable);
+        assert!(unknown
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("unsupported PDF source map version")));
+
+        let _ = std::fs::remove_dir_all(v1_dir);
+        let _ = std::fs::remove_dir_all(v2_dir);
+        let _ = std::fs::remove_dir_all(unknown_dir);
     }
 
     #[test]

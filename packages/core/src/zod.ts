@@ -144,6 +144,15 @@ export const SourceManifestV2Z = z.object({
     resolve_pdf_selection: PdfCapabilityZ,
     project_ranges_to_pdf: PdfCapabilityZ,
   }),
+  alignment_quality: z.object({
+    policy_version: z.literal("hybrid_quality_policy.v1"),
+    tier: z.enum(["full", "degraded"]),
+    unit_location_ratio: z.number().min(0).max(1),
+    exact_text_span_ratio: z.number().min(0).max(1),
+    exact_formula_ratio: z.number().min(0).max(1),
+    heading_location_ratio: z.number().min(0).max(1),
+    report_path: z.string().min(1),
+  }).optional(),
 });
 export const SourceManifestZ = z.union([SourceManifestV2Z, LegacySourceManifestZ]);
 
@@ -276,6 +285,75 @@ export const PdfSelectionMapPageShardZ = z.object({
     }),
   ),
 });
+export const PdfProjectionPrecisionV2Z = z.enum(["char_exact", "region_exact", "partial", "unmapped"]);
+export const PdfSourceMapEntryV2Z = z.object({
+  lid: z.string().min(1),
+  source_span: SpanZ,
+  precision: PdfProjectionPrecisionV2Z,
+  regions: z.array(PdfRegionZ),
+  exact_source_spans: z.array(SpanZ),
+  primary_region: PdfRegionZ.optional(),
+  alignment: z.object({
+    unit_id: z.string().min(1),
+    reason: z.string().min(1),
+    trace_id: z.string().min(1).optional(),
+  }),
+}).superRefine((entry, context) => {
+  if (entry.precision === "char_exact" && (!entry.regions.length || !entry.exact_source_spans.length)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "char_exact requires regions and exact_source_spans" });
+  }
+  if (entry.precision === "region_exact" && (!entry.regions.length || entry.exact_source_spans.length)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "region_exact requires regions and forbids exact_source_spans" });
+  }
+  if (entry.precision === "partial" && !entry.regions.length) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "partial requires at least one proven region" });
+  }
+  if (entry.precision === "unmapped" && (entry.regions.length || entry.exact_source_spans.length || entry.primary_region)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "unmapped forbids regions, exact_source_spans, and primary_region" });
+  }
+});
+export const PdfSourceMapV2Z = z.object({
+  version: z.literal("pdf_source_map.v2"),
+  book_id: z.string().min(1),
+  coordinate_system: PdfCoordinateSystemZ,
+  pages: z.array(PdfPageMetaZ),
+  entries: z.array(PdfSourceMapEntryV2Z),
+  page_region_index: z.record(z.array(z.string().min(1))),
+  config_hash: z.string().min(1),
+}).superRefine((map, context) => {
+  const lids = new Set<string>();
+  map.entries.forEach((entry, index) => {
+    if (lids.has(entry.lid)) {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ["entries", index, "lid"], message: "duplicate LID entry" });
+    }
+    lids.add(entry.lid);
+  });
+});
+export const PdfSelectionMapManifestV2Z = z.object({
+  version: z.literal("pdf_selection_map.v2"),
+  book_id: z.string().min(1),
+  coordinate_system: PdfCoordinateSystemZ,
+  config_hash: z.string().min(1),
+  page_shards: z.array(z.object({
+    pageIndex: z.number().int().nonnegative(),
+    page_label: z.string().min(1).optional(),
+    path: z.string().min(1),
+    sha256: z.string().regex(/^[a-f0-9]{64}$/u),
+  })),
+});
+export const PdfSelectionMapPageShardV2Z = z.object({
+  version: z.literal("pdf_selection_map_page.v2"),
+  book_id: z.string().min(1),
+  pageIndex: z.number().int().nonnegative(),
+  page_label: z.string().min(1).optional(),
+  chars: z.array(z.object({
+    char_index: z.number().int().nonnegative(),
+    text: z.string(),
+    rect: PdfPageRectZ,
+    source_span: SpanZ.refine((span) => span.end > span.start, "selection source span must be non-empty"),
+    lid: z.string().min(1),
+  })),
+});
 export const AlignmentReportZ = z.object({
   version: z.literal("alignment_report.v1"),
   book_id: z.string().min(1),
@@ -291,6 +369,41 @@ export const AlignmentReportZ = z.object({
   hard_gates: z.record(z.union([z.boolean(), z.number()])),
   diagnostics: z.record(z.unknown()),
   normalization_provenance: z.array(z.object({ trace_id: z.string().min(1), summary: z.string().min(1) })),
+});
+export const HybridFoundationIntegrityV2Z = z.object({
+  input_fingerprint_matches: z.boolean(),
+  artifact_hashes_match: z.boolean(),
+  all_leaf_lids_unique_and_present: z.boolean(),
+  all_regions_in_page_bounds: z.boolean(),
+  located_units_monotonic: z.boolean(),
+  no_duplicate_pdf_bindings: z.boolean(),
+  selection_shards_match_manifest: z.boolean(),
+});
+export const HybridFoundationQualityV1Z = z.object({
+  policy_version: z.literal("hybrid_quality_policy.v1"),
+  tier: z.enum(["full", "degraded"]),
+  unit_location_ratio: z.number().min(0).max(1),
+  exact_text_span_ratio: z.number().min(0).max(1),
+  exact_formula_ratio: z.number().min(0).max(1),
+  heading_location_ratio: z.number().min(0).max(1),
+});
+export const AlignmentReportV2Z = z.object({
+  version: z.literal("alignment_report.v2"),
+  book_id: z.string().min(1),
+  input_fingerprint: z.object({
+    source_sha256: z.string().regex(/^[a-f0-9]{64}$/u),
+    pdf_sha256: z.string().regex(/^[a-f0-9]{64}$/u),
+    source_alignment_evidence_sha256: z.string().regex(/^[a-f0-9]{64}$/u).optional(),
+  }),
+  config: z.object({
+    algorithm: z.literal("semantic_unit_projection_v2"),
+    coordinate_system: z.literal("pdf_user_space"),
+    quality_policy_version: z.literal("hybrid_quality_policy.v1"),
+  }),
+  config_hash: z.string().regex(/^[a-f0-9]{64}$/u),
+  integrity: HybridFoundationIntegrityV2Z,
+  quality: HybridFoundationQualityV1Z,
+  diagnostics: z.record(z.unknown()),
 });
 
 export const ImageAssetManifestEntryZ = z.object({

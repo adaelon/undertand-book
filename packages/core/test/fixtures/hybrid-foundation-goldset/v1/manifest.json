@@ -1,0 +1,35 @@
+{
+  "version": "hybrid_foundation_goldset.v1",
+  "policy_version": "hybrid_quality_policy.v1",
+  "fixtures": [
+    {
+      "fixture_id": "licensed-inline-formula",
+      "directory": "licensed-inline-formula",
+      "source_path": "source.md",
+      "pdf_path": "paper.pdf",
+      "expected_path": "expected.json",
+      "license": {
+        "spdx": "CC0-1.0",
+        "copyright": "Understand Book contributors"
+      }
+    },
+    {
+      "fixture_id": "licensed-two-column-formula",
+      "directory": "licensed-two-column-formula",
+      "source_path": "source.md",
+      "pdf_path": "paper.pdf",
+      "expected_path": "expected.json",
+      "license": {
+        "spdx": "CC0-1.0",
+        "copyright": "Understand Book contributors"
+      }
+    }
+  ],
+  "external_benchmarks": [
+    {
+      "benchmark_id": "external-formula-dense-transformer",
+      "descriptor_path": "external-formula-dense-transformer.json",
+      "requires_explicit_book_path": true
+    }
+  ]
+}

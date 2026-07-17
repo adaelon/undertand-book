@@ -1,0 +1,55 @@
+{
+  "version": "hybrid_foundation_external_benchmark.v1",
+  "benchmark_id": "external-formula-dense-transformer",
+  "book_id": "understanding-transformer-from-the-perspective-of",
+  "input_sha256": {
+    "source": "61a6285c64cd7c3995fb26b08c7057e35c22a057d4db1c75bfefaf0aa50c1004",
+    "pdf": "9391b89821c97dd14e66937fd71d22bfcfc72357f8023daddc6fc6334c68b9b0"
+  },
+  "annotations": [
+    {
+      "annotation_id": "abstract-heading",
+      "source_span": { "start": 255, "end": 266 },
+      "source_text": "## Abstract",
+      "pdf_text": "Abstract",
+      "expected_page_index": 0,
+      "expected_line_start_index": 5,
+      "expected_line_end_index": 5,
+      "expected_bbox": [279.669, 513.265, 332.33165599999995, 525.2202],
+      "expected_precision": "char_exact"
+    },
+    {
+      "annotation_id": "introduction-heading",
+      "source_span": { "start": 1675, "end": 1692 },
+      "source_text": "## 1 Introduction",
+      "pdf_text": "1 Introduction",
+      "expected_page_index": 0,
+      "expected_line_start_index": 23,
+      "expected_line_end_index": 23,
+      "expected_bbox": [70.866, 232.32, 159.71704640000002, 244.27519999999998],
+      "expected_precision": "char_exact"
+    },
+    {
+      "annotation_id": "associative-memory-heading",
+      "source_span": { "start": 7584, "end": 7607 },
+      "source_text": "## 2 Associative Memory",
+      "pdf_text": "2 Associative Memory",
+      "expected_page_index": 2,
+      "expected_line_start_index": 2,
+      "expected_line_end_index": 2,
+      "expected_bbox": [70.86599999999999, 645.6940000000001, 209.58218559999995, 657.6492000000001],
+      "expected_precision": "char_exact"
+    }
+  ],
+  "expected_v1": {
+    "hard_gate_error": "hybrid foundation text mapping coverage is below the reader-ready minimum",
+    "leaf_count": 2077,
+    "mapped_leaf_count": 559,
+    "alignable_text_count": 1100,
+    "mapped_text_count": 559,
+    "mapped_text_ratio": 0.5081818181818182,
+    "heading_count": 43,
+    "mapped_heading_count": 38,
+    "mapped_heading_ratio": 0.8837209302325582
+  }
+}

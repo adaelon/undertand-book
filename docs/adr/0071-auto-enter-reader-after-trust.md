@@ -1,6 +1,7 @@
 # ADR-0071 Auto-enter reader after trust
 
 Status: Accepted, 2026-07-11.
+Revised by: ADR-0082, which defines trusted Reader entry as accepted source plus hybrid-foundation integrity; mapping quality may be degraded.
 
 **Decision**:确定性 artifact readiness 给出 `route=reader` 后立即进入 reader,任何 job 状态或历史界面偏好都不得阻塞。
 

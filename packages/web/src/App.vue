@@ -48,11 +48,13 @@ import {
   type PdfSelectionDraft,
   usePdfSelectionDraft,
 } from "./pdf-selection-draft";
+import { pdfSelectionCapabilities as getPdfSelectionCapabilities } from "./pdf-selection-capabilities";
 import {
   type PdfSelectionTranslationInvalidation,
   usePdfSelectionTranslation,
 } from "./pdf-selection-translation";
 import PdfSelectionTranslationSurface from "./components/PdfSelectionTranslationSurface.vue";
+import AlignmentQualityBar from "./components/AlignmentQualityBar.vue";
 import {
   buildPdfProjectionBatch,
   EMPTY_PDF_ANNOTATION_PROJECTION,
@@ -2132,6 +2134,9 @@ const pdfSelectionTranslation = usePdfSelectionTranslation((request) =>
 );
 const pdfSelectionState = pdfSelectionSession.state;
 const pdfSelectionTranslationState = pdfSelectionTranslation.state;
+const pdfSelectionCapabilities = computed(() => getPdfSelectionCapabilities(
+  pdfSelectionState.value.draft?.status ?? "unresolved",
+));
 const showPdfTranslationSettings = computed(() =>
   desktopHost.value
   && pdfSelectionTranslationState.value.error?.error_code === "TRANSLATION_PROVIDER_UNCONFIGURED",
@@ -2172,7 +2177,11 @@ function onPdfViewportInteraction() {
 
 function translatePdfSelection() {
   const draft = pdfSelectionState.value.draft;
-  if (!draft || pdfSelectionTranslationState.value.phase === "loading") return;
+  if (
+    !draft
+    || !getPdfSelectionCapabilities(draft.status).canTranslate
+    || pdfSelectionTranslationState.value.phase === "loading"
+  ) return;
   void pdfSelectionTranslation.start(draft);
 }
 
@@ -2419,6 +2428,8 @@ async function highlightPdfSelection() {
 }
 
 function notePdfSelection() {
+  const ready = pdfSelectionState.value.draft;
+  if (!ready || !getPdfSelectionCapabilities(ready.status).canNote) return;
   const draft = pdfSelectionSession.beginAction();
   const first = draft?.ranges[0];
   if (!draft || !first) return;
@@ -2439,6 +2450,8 @@ function notePdfSelection() {
 }
 
 function askPdfSelection() {
+  const ready = pdfSelectionState.value.draft;
+  if (!ready || !getPdfSelectionCapabilities(ready.status).canAsk) return;
   const draft = pdfSelectionSession.beginAction();
   const first = draft?.ranges[0];
   if (!draft || !first) return;
@@ -2962,6 +2975,13 @@ async function submitOpenBook(dir = bookPickerDir.value) {
       @toggle-debug="debugOpen = !debugOpen"
     />
 
+    <AlignmentQualityBar
+      v-if="appSurface === 'reader' && sourceManifest?.alignment_quality"
+      :quality="sourceManifest.alignment_quality"
+      :workbench-available="workbenchAvailable(buildWorkbenchSnapshot)"
+      @open-workbench="openBuildWorkbench"
+    />
+
     <p v-if="banner" class="banner">{{ banner }}</p>
 
     <div v-if="desktopSettingsOpen" class="desktop-settings-modal" @click.self="closeDesktopSettings">
@@ -3408,16 +3428,20 @@ async function submitOpenBook(dir = bookPickerDir.value) {
         </button>
       </template>
       <template v-else-if="pdfSelectionState.draft">
-        <span v-if="pdfSelectionState.draft.status === 'partial'" class="pdf-selection-status">部分定位</span>
+        <span v-if="pdfSelectionCapabilities.statusLabel" class="pdf-selection-status">
+          {{ pdfSelectionCapabilities.statusLabel }}
+        </span>
         <button
+          v-if="pdfSelectionCapabilities.canHighlight"
           title="高亮"
-          :disabled="pdfSelectionState.phase === 'saving' || pdfSelectionTranslationState.phase === 'loading' || pdfSelectionState.draft.status !== 'resolved'"
+          :disabled="pdfSelectionState.phase === 'saving' || pdfSelectionTranslationState.phase === 'loading'"
           @mousedown.prevent="highlightPdfSelection"
         >
           <Highlighter :size="16" />
           <span>高亮</span>
         </button>
         <button
+          v-if="pdfSelectionCapabilities.canNote"
           title="笔记"
           :disabled="pdfSelectionState.phase === 'saving' || pdfSelectionTranslationState.phase === 'loading'"
           @mousedown.prevent="notePdfSelection"
@@ -3426,6 +3450,7 @@ async function submitOpenBook(dir = bookPickerDir.value) {
           <span>笔记</span>
         </button>
         <button
+          v-if="pdfSelectionCapabilities.canAsk"
           title="问 AI"
           :disabled="pdfSelectionState.phase === 'saving' || pdfSelectionTranslationState.phase === 'loading'"
           @mousedown.prevent="askPdfSelection"
@@ -3434,6 +3459,7 @@ async function submitOpenBook(dir = bookPickerDir.value) {
           <span>问 AI</span>
         </button>
         <button
+          v-if="pdfSelectionCapabilities.canTranslate"
           title="翻译"
           :disabled="pdfSelectionState.phase === 'saving' || pdfSelectionTranslationState.phase === 'loading'"
           @mousedown.prevent="translatePdfSelection"
@@ -3884,6 +3910,20 @@ async function submitOpenBook(dir = bookPickerDir.value) {
   overflow: hidden;
   color: #ffd4ce;
   text-overflow: ellipsis;
+}
+@media (max-width: 640px) {
+  .pdf-selection-toolbar {
+    left: 8px !important;
+    right: 8px;
+    min-width: 0;
+    max-width: none;
+    transform: none;
+  }
+  .pdf-selection-status {
+    min-width: 0;
+    line-height: 1.25;
+    white-space: normal;
+  }
 }
 
 /* 公式 sidecar 查看弹窗 */

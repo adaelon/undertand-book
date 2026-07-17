@@ -3,6 +3,7 @@
 > Positioning: replace the paper MVP "Markdown-only reader" with a PDF-first reader while preserving LID/range as the only semantic, memory, and citation anchor.
 > Frozen decision: ADR-0063 and ADR-0064.
 > Status: v2 design landed; implementation not started.
+> Revision: PH5 map versions, alignment gates, degraded routing, migration, and capability semantics are superseded by [ADR-0082](adr/0082-hybrid-foundation-semantic-unit-alignment-and-degraded-reader.md) and [the hybrid-foundation v2 repair plan](修复方案-混合阅读基座语义单元对齐-v2.md).
 
 ## 0. Locked Decisions
 
@@ -13,7 +14,7 @@
 5. `pdf_source_map.json` is lightweight and public to the frontend for overlay, hit-test, and LID jump.
 6. `pdf_selection_map/` is backend-only, char-level, and sharded by page for PDF selection resolve and semantic range projection.
 7. Heavy provenance lives in `alignment_report.json`, not in runtime maps.
-8. Build Workbench is separate from normal reader state. Missing, incomplete, stale, or review-required source inputs cannot enter the normal reader.
+8. Build Workbench is separate from normal reader state. Missing, integrity-invalid, stale, or review-required source inputs cannot enter the normal reader; ADR-0082 permits integrity-valid, quality-degraded PDF maps to enter with capability gates.
 9. `.build/<stage>` contains accepted stage artifacts; `.build/jobs/<job_id>` contains orchestration logs, telemetry, active executor state, and user events.
 10. LLM review is format-only and cannot alter content. Accepted LLM candidates must pass deterministic `content_equivalence` and realignment gates.
 11. Zotero document-worker remains an architecture reference only. No Zotero source, tests, fixtures, bundle paths, ONNX models, wasm assets, or forked pdf.js paths enter this project.

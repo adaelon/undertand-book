@@ -1,12 +1,19 @@
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { detectBuildReadiness, readBuildWorkbenchSnapshot } from "../src/build-workbench";
+import { buildHybridFoundation, writeHybridFoundationArtifacts } from "../src/hybrid-foundation";
+import { extractPdfTextGeometry } from "../src/pdf-geometry";
 import { runWorkbenchStage, workbenchStageCommand } from "../src/workbench-stage-runner";
 
 function asciiBytes(text: string): Uint8Array {
   return new TextEncoder().encode(text);
+}
+
+function sha256(data: Uint8Array | string): string {
+  return createHash("sha256").update(data).digest("hex");
 }
 
 function simplePdf(text: string): Uint8Array {
@@ -33,11 +40,12 @@ function simplePdf(text: string): Uint8Array {
 
 function workspace(markdown: string, pdfText: string) {
   const dir = mkdtempSync(path.join(tmpdir(), "understand-book-stage-runner-"));
+  const pdf = simplePdf(pdfText);
   writeFileSync(path.join(dir, "paper.md"), markdown, "utf8");
-  writeFileSync(path.join(dir, "paper.pdf"), simplePdf(pdfText));
+  writeFileSync(path.join(dir, "paper.pdf"), pdf);
   const fingerprint = {
-    paper_md_sha256: "md-fixture",
-    paper_pdf_sha256: "pdf-fixture",
+    paper_md_sha256: sha256(markdown),
+    paper_pdf_sha256: sha256(pdf),
     config_hash: "workbench-fixture-v1",
   };
   mkdirSync(path.join(dir, ".build", "input"), { recursive: true });
@@ -98,10 +106,19 @@ describe("PH17 Workbench deterministic stage runtime", () => {
     const sourceJob = await runWorkbenchStage({ book_dir: dir, job_id: "job_fixture", stage: "source_reconciliation", now: "2" });
     expect(sourceJob.status).toBe("ready");
     expect(existsSync(path.join(dir, ".build", "source-reconciliation", "source.txt"))).toBe(true);
+    expect(existsSync(path.join(dir, ".build", "source-reconciliation", "alignment-evidence.json"))).toBe(true);
 
     const foundationJob = await runWorkbenchStage({ book_dir: dir, job_id: "job_fixture", stage: "hybrid_foundation", now: "3" });
     expect(foundationJob.status).toBe("done");
     expect(existsSync(path.join(dir, "base.json"))).toBe(true);
+    const sourceMap = JSON.parse(readFileSync(path.join(dir, "pdf_source_map.json"), "utf8"));
+    const selectionMap = JSON.parse(readFileSync(path.join(dir, "pdf_selection_map", "manifest.json"), "utf8"));
+    const alignmentReport = JSON.parse(readFileSync(path.join(dir, "alignment_report.json"), "utf8"));
+    const evidence = readFileSync(path.join(dir, ".build", "source-reconciliation", "alignment-evidence.json"));
+    expect(sourceMap.version).toBe("pdf_source_map.v2");
+    expect(selectionMap.version).toBe("pdf_selection_map.v2");
+    expect(alignmentReport.version).toBe("alignment_report.v2");
+    expect(alignmentReport.input_fingerprint.source_alignment_evidence_sha256).toBe(sha256(evidence));
     expect(detectBuildReadiness(readBuildWorkbenchSnapshot(dir, { current_input_fingerprint: fingerprint })).route).toBe("reader");
 
     const commands: Array<{ command: string; args: string[] }> = [];
@@ -120,6 +137,86 @@ describe("PH17 Workbench deterministic stage runtime", () => {
     expect(commands[0].command).toBe(process.execPath);
     expect(commands[0].args.some((arg) => arg.endsWith("verify-paper-reading-guide.ts"))).toBe(true);
     expect(existsSync(path.join(dir, ".build", "paper-reading-guide", "completion.json"))).toBe(true);
+  });
+
+  it("fails before candidate generation when current source alignment evidence is missing", async () => {
+    const { dir } = workspace("Hello PDF\n", "Hello PDF");
+    await runWorkbenchStage({ book_dir: dir, job_id: "job_fixture", stage: "source_reconciliation", now: "2" });
+    rmSync(path.join(dir, ".build", "source-reconciliation", "alignment-evidence.json"));
+
+    const failed = await runWorkbenchStage({
+      book_dir: dir,
+      job_id: "job_fixture",
+      stage: "hybrid_foundation",
+      now: "3",
+    });
+
+    expect(failed.status).toBe("failed");
+    expect(failed.failure_summary?.message).toMatch(/alignment evidence.*missing/i);
+    expect(existsSync(path.join(dir, "pdf_source_map.json"))).toBe(false);
+  });
+
+  it("atomically replaces a complete v1 set only when the hybrid stage is explicitly rerun", async () => {
+    const { dir, fingerprint } = workspace("Hello PDF\n", "Hello PDF");
+    await runWorkbenchStage({ book_dir: dir, job_id: "job_fixture", stage: "source_reconciliation", now: "2" });
+    const source = readFileSync(path.join(dir, ".build", "source-reconciliation", "source.txt"), "utf8");
+    const pdfBytes = new Uint8Array(readFileSync(path.join(dir, "paper.pdf")));
+    const v1 = buildHybridFoundation({
+      book_id: "paper-stage-fixture",
+      source_txt: source,
+      original_pdf_path: "paper.pdf",
+      original_pdf_sha256: fingerprint.paper_pdf_sha256,
+      pdf_geometry: await extractPdfTextGeometry(pdfBytes),
+    });
+    writeHybridFoundationArtifacts(dir, source, v1);
+    expect(JSON.parse(readFileSync(path.join(dir, "pdf_source_map.json"), "utf8")).version).toBe("pdf_source_map.v1");
+
+    const rebuilt = await runWorkbenchStage({
+      book_dir: dir,
+      job_id: "job_fixture",
+      stage: "hybrid_foundation",
+      now: "3",
+    });
+    expect(rebuilt.status).toBe("done");
+    expect(JSON.parse(readFileSync(path.join(dir, "pdf_source_map.json"), "utf8")).version).toBe("pdf_source_map.v2");
+    expect(existsSync(path.join(dir, ".build", "hybrid-foundation-transactions"))).toBe(true);
+  });
+
+  it("restores the pre-foundation state when atomic apply fails, then retries cleanly", async () => {
+    const { dir, fingerprint } = workspace("Hello PDF\n", "Hello PDF");
+    await runWorkbenchStage({ book_dir: dir, job_id: "job_fixture", stage: "source_reconciliation", now: "2" });
+
+    const failed = await runWorkbenchStage({
+      book_dir: dir,
+      job_id: "job_fixture",
+      stage: "hybrid_foundation",
+      now: "3",
+      hybrid_apply_fault_injector: (point) => {
+        if (point === "after_move_new:source_manifest.json") throw new Error("injected runner apply failure");
+      },
+    });
+
+    expect(failed.status).toBe("failed");
+    expect(failed.failure_summary?.message).toContain("injected runner apply failure");
+    for (const relativePath of [
+      "base.json",
+      "source.txt",
+      "source_manifest.json",
+      "pdf_source_map.json",
+      "alignment_report.json",
+      "pdf_selection_map",
+    ]) {
+      expect(existsSync(path.join(dir, relativePath)), relativePath).toBe(false);
+    }
+
+    const retried = await runWorkbenchStage({
+      book_dir: dir,
+      job_id: "job_fixture",
+      stage: "hybrid_foundation",
+      now: "4",
+    });
+    expect(retried.status).toBe("done");
+    expect(detectBuildReadiness(readBuildWorkbenchSnapshot(dir, { current_input_fingerprint: fingerprint })).route).toBe("reader");
   });
 
   it("preserves a same-LID semantic graph when hybrid foundation reruns", async () => {
@@ -254,6 +351,22 @@ describe("PH17 Workbench deterministic stage runtime", () => {
     expect(repeated.status).toBe("ready");
     expect(repeatedReport.acceptance.accepted_at).toBe("4");
     expect(repeated.decision_requests.some((request) => request.status === "pending")).toBe(false);
+
+    const evidencePath = path.join(dir, ".build", "source-reconciliation", "alignment-evidence.json");
+    const staleEvidence = JSON.parse(readFileSync(evidencePath, "utf8"));
+    staleEvidence.input_fingerprint.source_sha256 = "0".repeat(64);
+    writeFileSync(evidencePath, JSON.stringify(staleEvidence, null, 2));
+    const rebuilt = await runWorkbenchStage({
+      book_dir: dir,
+      job_id: "job_fixture",
+      stage: "source_reconciliation",
+      now: "6",
+    });
+    const rebuiltReport = JSON.parse(readFileSync(reportPath, "utf8"));
+    const rebuiltEvidence = JSON.parse(readFileSync(evidencePath, "utf8"));
+    expect(rebuilt.status).toBe("ready");
+    expect(rebuiltReport.acceptance.accepted_at).toBe("6");
+    expect(rebuiltEvidence.input_fingerprint.source_sha256).not.toBe("0".repeat(64));
   });
 
   it("preserves partial current decisions without failing or applying an incomplete review", async () => {

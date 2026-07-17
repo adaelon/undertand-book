@@ -60,6 +60,15 @@ export interface SourceManifestV2 {
     citation_anchor: false;
   };
   capabilities: Record<PdfCapabilityName, PdfCapability>;
+  alignment_quality?: {
+    policy_version: "hybrid_quality_policy.v1";
+    tier: "full" | "degraded";
+    unit_location_ratio: number;
+    exact_text_span_ratio: number;
+    exact_formula_ratio: number;
+    heading_location_ratio: number;
+    report_path: string;
+  };
 }
 
 export interface SourceManifestInput {
@@ -80,6 +89,7 @@ export interface SourceManifestV2Input {
   alignment_report_path?: string;
   config_hash?: string;
   capability_overrides?: Partial<Record<PdfCapabilityName, PdfCapability>>;
+  alignment_quality?: SourceManifestV2["alignment_quality"];
 }
 
 function requireNonEmpty(field: string, value: string | undefined): string {
@@ -204,5 +214,6 @@ export function buildSourceManifestV2(input: SourceManifestV2Input): SourceManif
       resolve_pdf_selection: input.capability_overrides?.resolve_pdf_selection ?? resolveSelection,
       project_ranges_to_pdf: input.capability_overrides?.project_ranges_to_pdf ?? projectRanges,
     },
+    ...(input.alignment_quality ? { alignment_quality: input.alignment_quality } : {}),
   };
 }

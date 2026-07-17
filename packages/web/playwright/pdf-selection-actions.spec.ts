@@ -188,9 +188,18 @@ async function installApiFixture(
         original_pdf: { path: "fixture.pdf", sha256: "pdf", citation_anchor: false },
         capabilities: {
           view_pdf: { status: "available" },
-          project_lid_to_pdf: { status: "available" },
+          project_lid_to_pdf: { status: "degraded", reason: "fixture quality gate" },
           resolve_pdf_selection: { status: "available" },
-          project_ranges_to_pdf: { status: "available" },
+          project_ranges_to_pdf: { status: "degraded", reason: "fixture quality gate" },
+        },
+        alignment_quality: {
+          policy_version: "hybrid_quality_policy.v1",
+          tier: "degraded",
+          unit_location_ratio: 0.8465608466,
+          exact_text_span_ratio: 0.6627206241,
+          exact_formula_ratio: 0.3168202765,
+          heading_location_ratio: 0.976744186,
+          report_path: "alignment_report.json",
         },
       });
     }
@@ -358,6 +367,11 @@ test("resolved real PDF selection performs three explicit actions and sends stru
   const calls = await installApiFixture(page, "resolved");
   await page.goto("/");
   await expect(page.locator(".pdf-text-layer span").first()).toHaveText(/Selectable PDF fixture/);
+  const quality = page.locator(".alignment-quality-bar");
+  await quality.locator("summary").click();
+  await expect(quality).toContainText("66.3%");
+  await page.screenshot({ path: "../../docs/screenshots/hf2-reader-degraded-desktop.png", fullPage: true });
+  await quality.locator("summary").click();
 
   await selectFixtureText(page, 0, 10);
   await page.locator(".pdf-selection-toolbar").getByTitle("高亮").click();
@@ -400,16 +414,27 @@ test("resolved real PDF selection performs three explicit actions and sends stru
   });
 });
 
-test("partial mobile selection disables Highlight but keeps Note and Ask explicit", async ({ page }) => {
+test("partial mobile selection hides persistence actions but keeps exact-subrange Ask explicit", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   const calls = await installApiFixture(page, "partial");
   await page.goto("/");
+  const quality = page.locator(".alignment-quality-bar");
+  await expect(quality.getByText("PDF 对齐：部分可用")).toBeVisible();
+  await quality.locator("summary").click();
+  await expect(quality).toContainText("66.3%");
   await selectFixtureText(page, 0, 10);
   const toolbar = page.locator(".pdf-selection-toolbar");
-  await expect(toolbar).toContainText("部分定位");
-  await expect(toolbar.getByTitle("高亮")).toBeDisabled();
-  await expect(toolbar.getByTitle("笔记")).toBeEnabled();
+  await expect(toolbar).toContainText("部分定位，仅精确子区间可用于问 AI");
+  await expect(toolbar.getByTitle("高亮")).toHaveCount(0);
+  await expect(toolbar.getByTitle("笔记")).toHaveCount(0);
   await expect(toolbar.getByTitle("问 AI")).toBeEnabled();
+  const toolbarBox = await toolbar.boundingBox();
+  const statusBox = await toolbar.locator(".pdf-selection-status").boundingBox();
+  expect(toolbarBox?.x).toBeGreaterThanOrEqual(8);
+  expect((toolbarBox?.x ?? 0) + (toolbarBox?.width ?? 0)).toBeLessThanOrEqual(382);
+  expect(statusBox?.x).toBeGreaterThanOrEqual(8);
+  expect((statusBox?.x ?? 0) + (statusBox?.width ?? 0)).toBeLessThanOrEqual(382);
+  await page.screenshot({ path: "../../docs/screenshots/hf2-reader-partial-mobile.png", fullPage: true });
   await toolbar.getByTitle("问 AI").click();
   await expect(page.locator(".ask-draft")).toContainText("部分定位");
   expect(calls.highlights).toHaveLength(0);

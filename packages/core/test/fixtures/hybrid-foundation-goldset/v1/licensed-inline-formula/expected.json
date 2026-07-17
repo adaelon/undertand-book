@@ -1,0 +1,64 @@
+{
+  "version": "hybrid_foundation_expected.v1",
+  "fixture_id": "licensed-inline-formula",
+  "input_sha256": {
+    "source": "b514b0facd959707eb4fa3e824bd8207af4611d23dbabf34d99c86bc69e9122c",
+    "pdf": "f013b377aeda614fcfb585237b7b458c01a6692dc60310019fa75661351f3d7b"
+  },
+  "annotations": [
+    {
+      "annotation_id": "title",
+      "source_span": { "start": 0, "end": 24 },
+      "source_text": "# Inline Formula Fixture",
+      "pdf_text": "Inline Formula Fixture",
+      "expected_page_index": 0,
+      "expected_line_start_index": 0,
+      "expected_line_end_index": 0,
+      "expected_bbox": [72, 720, 239.152, 736],
+      "expected_precision": "char_exact"
+    },
+    {
+      "annotation_id": "leading-text",
+      "source_span": { "start": 26, "end": 37 },
+      "source_text": "Alpha beta ",
+      "pdf_text": "Alpha beta",
+      "expected_page_index": 0,
+      "expected_line_start_index": 1,
+      "expected_line_end_index": 1,
+      "expected_bbox": [72, 660, 128.32444444444445, 672],
+      "expected_precision": "char_exact"
+    },
+    {
+      "annotation_id": "formula",
+      "source_span": { "start": 37, "end": 44 },
+      "source_text": "$ x_i $",
+      "pdf_text": "x_i",
+      "expected_page_index": 0,
+      "expected_line_start_index": 1,
+      "expected_line_end_index": 1,
+      "expected_bbox": [133.9568888888889, 660, 150.85422222222223, 672],
+      "expected_precision": "region_exact"
+    },
+    {
+      "annotation_id": "trailing-text",
+      "source_span": { "start": 44, "end": 57 },
+      "source_text": " gamma delta.",
+      "pdf_text": "gamma delta.",
+      "expected_page_index": 0,
+      "expected_line_start_index": 1,
+      "expected_line_end_index": 1,
+      "expected_bbox": [156.48666666666668, 660, 224.07600000000002, 672],
+      "expected_precision": "char_exact"
+    }
+  ],
+  "expected_v1": {
+    "hard_gate_error": "hybrid foundation text mapping coverage is below the reader-ready minimum",
+    "leaf_count": 4,
+    "mapped_leaf_count": 1,
+    "mapped_text_ratio": 0.3333333333333333,
+    "mapped_heading_ratio": 1,
+    "unmapped_asset_count": 1,
+    "annotated_wrong_page_count": 0,
+    "duplicate_pdf_binding_count": 0
+  }
+}

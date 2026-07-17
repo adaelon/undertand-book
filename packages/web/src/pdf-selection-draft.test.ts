@@ -111,7 +111,9 @@ describe("usePdfSelectionDraft", () => {
     expect(paneBinding).toContain('@selection-capture="onPdfSelectionCapture"');
     expect(paneBinding).not.toContain('@select="onSelectSeg"');
     expect(app).toContain("raw_quote: capture.raw_quote");
-    expect(app).toContain("pdfSelectionState.draft.status !== 'resolved'");
+    expect(app).toContain("getPdfSelectionCapabilities(ready.status).canNote");
+    expect(app).toContain('v-if="pdfSelectionCapabilities.canHighlight"');
+    expect(app).toContain('v-if="pdfSelectionCapabilities.canAsk"');
     expect(app).toContain("pdfSelectionSession.actionFailed(error)");
     expect(app).toContain("await api.replace({");
   });

@@ -5,6 +5,14 @@ import path from "node:path";
 import { markdownToBlocks } from "./md-adapter";
 import { canonicalizePaperMarkdown } from "./paper-markdown-canonicalization";
 import type { PdfTextGeometry } from "./pdf-geometry";
+import {
+  SourceAlignmentEvidenceV1Z,
+  acceptSourceAlignmentEvidence,
+  sourceAlignmentConfigHash,
+  sourceAlignmentEvidenceFingerprint,
+  type AlignmentUnitEvidence,
+  type SourceAlignmentEvidenceV1,
+} from "./source-alignment-evidence";
 
 export type SourceBlockReconcileStatus =
   | "verified"
@@ -100,6 +108,7 @@ export interface ReconcilePaperSourceResult {
   reconciled_source?: string;
   review_draft: string;
   review_decisions: SourceReconciliationReviewDecisions;
+  alignment_evidence: SourceAlignmentEvidenceV1;
 }
 
 export interface ReviewCandidateInput {
@@ -110,6 +119,7 @@ export interface ReviewCandidateInput {
   input_fingerprint: BuildInputFingerprint;
   kind: ReviewCandidateKind;
   decisions?: SourceReconciliationReviewDecisions["decisions"];
+  reviewed_source_spans?: Array<{ start: number; end: number }>;
   config?: Partial<SourceReconciliationConfig>;
 }
 
@@ -125,6 +135,7 @@ export interface WriteSourceReconciliationArtifactsResult {
   review_decisions_path: string;
   reviewed_draft_path?: string;
   source_path?: string;
+  alignment_evidence_path?: string;
 }
 
 const DEFAULT_CONFIG: SourceReconciliationConfig = {
@@ -142,6 +153,19 @@ const DEFAULT_CONFIG: SourceReconciliationConfig = {
     "whitespace_collapse",
   ],
 };
+
+export function sourceReconciliationEvidenceFingerprint(
+  source: string,
+  pdfSha256: string,
+  config: Partial<SourceReconciliationConfig> = {},
+) {
+  const effectiveConfig: SourceReconciliationConfig = { ...DEFAULT_CONFIG, ...config };
+  return sourceAlignmentEvidenceFingerprint(
+    source,
+    pdfSha256,
+    sourceAlignmentConfigHash(effectiveConfig),
+  );
+}
 
 export function emptyReconciliationSummary(): Record<SourceBlockReconcileStatus, number> {
   return {
@@ -663,6 +687,24 @@ function reconciliationUnits(source: string): ReconciliationUnit[] {
   return units;
 }
 
+function finalSourceSpansForUnits(
+  canonicalSource: string,
+  finalSource: string,
+  units: ReconciliationUnit[],
+): Map<string, { start: number; end: number }> {
+  const spans = new Map<string, { start: number; end: number }>();
+  let cursor = 0;
+  for (const unit of units) {
+    const finalSlice = safeRepairText(canonicalSource.slice(unit.span.start, unit.span.end));
+    const start = finalSource.indexOf(finalSlice, cursor);
+    if (start < 0) throw new Error(`failed to project reconciliation unit into final source: ${unit.id}`);
+    const span = { start, end: start + finalSlice.length };
+    spans.set(unit.id, span);
+    cursor = span.end;
+  }
+  return spans;
+}
+
 function buildPdfTextIndex(geometry: PdfTextGeometry): PdfTextIndex {
   const lines: IndexedPdfLine[] = [];
   let text = "";
@@ -712,6 +754,28 @@ function nearestPdfLineIndex(lines: IndexedPdfLine[], offset: number): number {
   return bestIndex;
 }
 
+function pdfLineSpansAt(index: PdfTextIndex, offset: number, length: number): AlignmentUnitEvidence["pdf_line_spans"] {
+  if (!index.lines.length) return [];
+  const safeOffset = Math.max(0, Math.min(offset, Math.max(0, index.text.length - 1)));
+  const endOffset = Math.min(index.text.length, safeOffset + Math.max(1, length));
+  const firstIndex = nearestPdfLineIndex(index.lines, safeOffset);
+  const lastIndex = nearestPdfLineIndex(index.lines, Math.max(safeOffset, endOffset - 1));
+  const spans: AlignmentUnitEvidence["pdf_line_spans"] = [];
+  for (const line of index.lines.slice(firstIndex, Math.max(firstIndex, lastIndex) + 1)) {
+    const current = spans.at(-1);
+    if (current && current.pageIndex === line.page_index && line.line_index <= current.end_line_index + 1) {
+      current.end_line_index = Math.max(current.end_line_index, line.line_index);
+    } else {
+      spans.push({
+        pageIndex: line.page_index,
+        start_line_index: line.line_index,
+        end_line_index: line.line_index,
+      });
+    }
+  }
+  return spans;
+}
+
 function pdfEvidenceAt(index: PdfTextIndex, offset: number, length: number) {
   if (!index.lines.length) return undefined;
   const safeOffset = Math.max(0, Math.min(offset, Math.max(0, index.text.length - 1)));
@@ -754,7 +818,25 @@ export function reconcilePaperSource(input: ReconcilePaperSourceInput): Reconcil
   const pdfSearch = pdfIndex.text.toLocaleLowerCase("en-US");
   const canonicalization = canonicalizePaperMarkdown(input.markdown_source);
   const canonicalSource = canonicalization.markdown;
+  const repairedSource = safeRepairText(canonicalSource);
   const units = reconciliationUnits(canonicalSource);
+  const finalSourceSpans = finalSourceSpansForUnits(canonicalSource, repairedSource, units);
+  const evidenceUnits: AlignmentUnitEvidence[] = [];
+  const appendEvidence = (
+    unit: ReconciliationUnit,
+    status: AlignmentUnitEvidence["status"],
+    pdfOffset?: number,
+    pdfLength?: number,
+  ) => {
+    evidenceUnits.push({
+      unit_id: unit.id,
+      source_span: finalSourceSpans.get(unit.id)!,
+      pdf_line_spans: pdfOffset === undefined
+        ? []
+        : pdfLineSpansAt(pdfIndex, pdfOffset, pdfLength ?? 1),
+      status,
+    });
+  };
   let cursor = 0;
 
   for (const unit of units) {
@@ -773,7 +855,10 @@ export function reconcilePaperSource(input: ReconcilePaperSourceInput): Reconcil
         : []),
     ];
     const id = unit.id;
-    if (!needle) continue;
+    if (!needle) {
+      appendEvidence(unit, "unmapped");
+      continue;
+    }
 
     const from = Math.max(0, cursor - config.lookback_chars);
     const fuzzyTo = Math.min(pdfSearch.length, cursor + config.lookahead_chars);
@@ -786,6 +871,12 @@ export function reconcilePaperSource(input: ReconcilePaperSourceInput): Reconcil
         ? "format_equivalent"
         : resolvedStatus(unit.text, repaired);
       summary[status]++;
+      appendEvidence(
+        unit,
+        status === "format_equivalent" ? "format_equivalent" : "verified",
+        exactMatch.offset,
+        exactMatch.variant.search.length,
+      );
       cursor = exactMatch.offset + exactMatch.variant.search.length;
       continue;
     }
@@ -798,7 +889,14 @@ export function reconcilePaperSource(input: ReconcilePaperSourceInput): Reconcil
           .sort((left, right) => left.offset - right.offset || Number(left.variant.extraction_variant) - Number(right.variant.extraction_variant))[0]
       : undefined;
     if (uniqueMatch) {
-      summary[uniqueMatch.variant.extraction_variant ? "format_equivalent" : resolvedStatus(unit.text, repaired)]++;
+      const status = uniqueMatch.variant.extraction_variant ? "format_equivalent" : resolvedStatus(unit.text, repaired);
+      summary[status]++;
+      appendEvidence(
+        unit,
+        status === "format_equivalent" ? "format_equivalent" : "verified",
+        uniqueMatch.offset,
+        uniqueMatch.variant.search.length,
+      );
       cursor = uniqueMatch.offset + uniqueMatch.variant.search.length;
       continue;
     }
@@ -822,6 +920,7 @@ export function reconcilePaperSource(input: ReconcilePaperSourceInput): Reconcil
       : null;
     if (deterministicEquivalent && fuzzy!.offset >= cursor) {
       summary.format_equivalent++;
+      appendEvidence(unit, "format_equivalent", fuzzy!.offset, deterministicEquivalent.end - fuzzy!.offset);
       cursor = Math.max(cursor, deterministicEquivalent.end);
       continue;
     }
@@ -833,6 +932,12 @@ export function reconcilePaperSource(input: ReconcilePaperSourceInput): Reconcil
       : fuzzy;
     const evidenceOffset = evidenceCandidate?.offset ?? candidateCursor;
     const evidence = pdfEvidenceAt(pdfIndex, evidenceOffset, displayNeedle.length);
+    appendEvidence(
+      unit,
+      "unmapped",
+      evidenceCandidate ? evidenceOffset : undefined,
+      displayNeedle.length,
+    );
     const outsideTrustedOrder = Boolean(
       evidenceCandidate
       && (evidenceCandidate.offset < from || evidenceCandidate.offset > fuzzyTo),
@@ -885,7 +990,6 @@ export function reconcilePaperSource(input: ReconcilePaperSourceInput): Reconcil
     }
   }
 
-  const repairedSource = safeRepairText(canonicalSource);
   const report: SourceReconciliationReport = {
     version: "source_reconciliation_report.v1",
     book_id: input.book_id,
@@ -905,6 +1009,16 @@ export function reconcilePaperSource(input: ReconcilePaperSourceInput): Reconcil
       input_fingerprint: input.input_fingerprint,
       decisions: [],
     },
+    alignment_evidence: SourceAlignmentEvidenceV1Z.parse({
+      version: "source_alignment_evidence.v1",
+      book_id: input.book_id,
+      input_fingerprint: sourceReconciliationEvidenceFingerprint(
+        repairedSource,
+        input.input_fingerprint.paper_pdf_sha256,
+        config,
+      ),
+      units: evidenceUnits,
+    }),
   };
 }
 
@@ -912,7 +1026,11 @@ export function buildReviewedDraftFromDecisions(
   markdownSource: string,
   report: SourceReconciliationReport,
   artifact: SourceReconciliationReviewDecisions,
-): { reviewed_draft: string; decisions: SourceReviewDecision[] } {
+): {
+  reviewed_draft: string;
+  decisions: SourceReviewDecision[];
+  reviewed_spans: Array<{ start: number; end: number }>;
+} {
   if (artifact.book_id !== report.book_id) {
     throw new Error(`review decisions book_id ${artifact.book_id} does not match report ${report.book_id}`);
   }
@@ -945,11 +1063,47 @@ export function buildReviewedDraftFromDecisions(
     replacements.push({ ...issue.source_span, text: replacement });
   }
 
+  const reviewedSpans: Array<{ start: number; end: number }> = [];
+  let delta = 0;
+  for (const replacement of [...replacements].sort((left, right) => left.start - right.start)) {
+    const start = replacement.start + delta;
+    reviewedSpans.push({ start, end: start + replacement.text.length });
+    delta += replacement.text.length - (replacement.end - replacement.start);
+  }
   let reviewedDraft = markdownSource;
-  for (const replacement of replacements.sort((left, right) => right.start - left.start)) {
+  for (const replacement of [...replacements].sort((left, right) => right.start - left.start)) {
     reviewedDraft = `${reviewedDraft.slice(0, replacement.start)}${replacement.text}${reviewedDraft.slice(replacement.end)}`;
   }
-  return { reviewed_draft: reviewedDraft, decisions: artifact.decisions };
+  return { reviewed_draft: reviewedDraft, decisions: artifact.decisions, reviewed_spans: reviewedSpans };
+}
+
+function mapSpansToRepairedSource(
+  source: string,
+  spans: Array<{ start: number; end: number }>,
+): Array<{ start: number; end: number }> {
+  return spans.map((span) => ({
+    start: safeRepairText(source.slice(0, span.start)).length,
+    end: safeRepairText(source.slice(0, span.end)).length,
+  }));
+}
+
+function spansOverlap(
+  left: { start: number; end: number },
+  right: { start: number; end: number },
+): boolean {
+  return left.start < right.end && right.start < left.end;
+}
+
+function downgradeEvidenceToReviewedHints(
+  evidence: SourceAlignmentEvidenceV1,
+  reviewedSpans: Array<{ start: number; end: number }>,
+): SourceAlignmentEvidenceV1 {
+  return SourceAlignmentEvidenceV1Z.parse({
+    ...evidence,
+    units: evidence.units.map((unit) => reviewedSpans.some((span) => spansOverlap(unit.source_span, span))
+      ? { ...unit, status: "reviewed_hint" as const }
+      : unit),
+  });
 }
 
 export function reviewCandidateAndReconcile(input: ReviewCandidateInput): ReviewCandidateResult {
@@ -973,6 +1127,15 @@ export function reviewCandidateAndReconcile(input: ReviewCandidateInput): Review
     input_fingerprint: input.input_fingerprint,
     decisions: input.decisions ?? [],
   };
+  if (input.kind === "manual_review" && (input.decisions?.length ?? 0) > 0) {
+    const reviewedSpans = input.reviewed_source_spans?.length
+      ? mapSpansToRepairedSource(input.candidate_source, input.reviewed_source_spans)
+      : [{ start: 0, end: safeRepairText(input.candidate_source).length }];
+    reconciliation.alignment_evidence = downgradeEvidenceToReviewedHints(
+      reconciliation.alignment_evidence,
+      reviewedSpans,
+    );
+  }
   const accepted = sourceReconciliationTrusted(reconciliation.report);
   return {
     accepted,
@@ -992,6 +1155,16 @@ export function acceptSourceReconciliationManualOverride(
   if (!acceptedAt.trim()) throw new Error("manual override requires accepted_at");
   const decisionCount = result.review_decisions.decisions.length;
   if (!decisionCount) throw new Error("manual override requires persisted review decisions");
+  const reconciledSource = safeRepairText(reviewedDraft);
+  const alignmentEvidence = SourceAlignmentEvidenceV1Z.parse({
+    ...result.alignment_evidence,
+    units: result.alignment_evidence.units.map((unit) => unit.status === "unmapped"
+      ? { ...unit, status: "reviewed_hint" as const }
+      : unit),
+  });
+  if (alignmentEvidence.input_fingerprint.source_sha256 !== sha256Text(reconciledSource)) {
+    throw new Error("manual override alignment evidence does not match final source");
+  }
   return {
     ...result,
     report: {
@@ -1004,7 +1177,8 @@ export function acceptSourceReconciliationManualOverride(
         decision_count: decisionCount,
       },
     },
-    reconciled_source: safeRepairText(reviewedDraft),
+    reconciled_source: reconciledSource,
+    alignment_evidence: alignmentEvidence,
   };
 }
 
@@ -1019,15 +1193,25 @@ export function writeSourceReconciliationArtifacts(
   const reviewDraftPath = path.join(stageDir, "review-draft.md");
   const reviewDecisionsPath = path.join(stageDir, "review-decisions.json");
   const reviewedDraftPath = path.join(stageDir, "reviewed-draft.md");
+  const alignmentEvidencePath = path.join(stageDir, "alignment-evidence.json");
   writeFileSync(reportPath, JSON.stringify(result.report, null, 2), "utf8");
   writeFileSync(reviewDraftPath, result.review_draft, "utf8");
   writeFileSync(reviewDecisionsPath, JSON.stringify(result.review_decisions, null, 2), "utf8");
   if (reviewedDraft !== undefined) writeFileSync(reviewedDraftPath, reviewedDraft, "utf8");
   const sourcePath = path.join(stageDir, "source.txt");
   if (result.reconciled_source !== undefined) {
+    const expectedFingerprint = {
+      ...result.alignment_evidence.input_fingerprint,
+      source_sha256: sha256Text(result.reconciled_source),
+    };
+    const evidence = acceptSourceAlignmentEvidence(result.alignment_evidence, expectedFingerprint);
+    if (!evidence) throw new Error("source alignment evidence fingerprint does not match final source");
     writeFileSync(sourcePath, result.reconciled_source, "utf8");
+    writeFileSync(alignmentEvidencePath, JSON.stringify(evidence, null, 2), "utf8");
   } else if (existsSync(sourcePath)) {
     throw new Error(`Refusing to leave stale trusted source at ${sourcePath}`);
+  } else if (existsSync(alignmentEvidencePath)) {
+    throw new Error(`Refusing to leave stale source alignment evidence at ${alignmentEvidencePath}`);
   }
   return {
     report_path: reportPath,
@@ -1035,5 +1219,6 @@ export function writeSourceReconciliationArtifacts(
     review_decisions_path: reviewDecisionsPath,
     ...(reviewedDraft !== undefined ? { reviewed_draft_path: reviewedDraftPath } : {}),
     ...(result.reconciled_source !== undefined ? { source_path: sourcePath } : {}),
+    ...(result.reconciled_source !== undefined ? { alignment_evidence_path: alignmentEvidencePath } : {}),
   };
 }

@@ -78,6 +78,57 @@ export interface PdfSelectionMapPageShard {
   chars: PdfSelectionMapChar[];
 }
 
+export type PdfProjectionPrecisionV2 = "char_exact" | "region_exact" | "partial" | "unmapped";
+
+export interface PdfSourceMapEntryV2 {
+  lid: string;
+  source_span: { start: number; end: number };
+  precision: PdfProjectionPrecisionV2;
+  regions: PdfRegion[];
+  exact_source_spans: Array<{ start: number; end: number }>;
+  primary_region?: PdfRegion;
+  alignment: { unit_id: string; reason: string; trace_id?: string };
+}
+
+export interface PdfSourceMapV2 {
+  version: "pdf_source_map.v2";
+  book_id: string;
+  coordinate_system: PdfSourceMap["coordinate_system"];
+  pages: PdfPageMeta[];
+  entries: PdfSourceMapEntryV2[];
+  page_region_index: Record<string, string[]>;
+  config_hash: string;
+}
+
+export interface PdfSelectionMapCharV2 {
+  char_index: number;
+  text: string;
+  rect: PdfPageRect;
+  source_span: { start: number; end: number };
+  lid: string;
+}
+
+export interface PdfSelectionMapPageShardV2 {
+  version: "pdf_selection_map_page.v2";
+  book_id: string;
+  pageIndex: number;
+  page_label?: string;
+  chars: PdfSelectionMapCharV2[];
+}
+
+export interface PdfSelectionMapManifestV2 {
+  version: "pdf_selection_map.v2";
+  book_id: string;
+  coordinate_system: PdfSourceMap["coordinate_system"];
+  config_hash: string;
+  page_shards: Array<{
+    pageIndex: number;
+    page_label?: string;
+    path: string;
+    sha256: string;
+  }>;
+}
+
 export function pdfUserSpaceCoordinateSystem(): PdfSourceMap["coordinate_system"] {
   return {
     space: "pdf_user_space",
