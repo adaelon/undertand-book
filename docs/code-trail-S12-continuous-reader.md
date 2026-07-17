@@ -249,3 +249,12 @@
 
 **Entry point**: real selection-map rects -> `POST /reader/pdf_selection.resolve` -> identical `partial` translation request repeated five times against the configured Provider.
 **Test**: resolver is HTTP 200 `partial` with 13 ranges; all 5 isolated translations plus one request after restarting the active `8794` backend are HTTP 200, retain selected `15` and `80`, start at the selected heart-transection sentence, end at the material transfer agreement, and exclude context-only `PRO00006097` and `STU00216333`.
+
+## 2026-07-17 TS5 Windows installer rebuild
+
+**Touched**:
+- `02e123b fix(reader): constrain PDF translation to selected text` - freezes the exact source snapshot used for packaging and excludes the existing PE0-PE5, memory/profile, and other dirty-worktree changes.
+- `dist/UnderstandBookSetup.exe` - replaces the ignored local installer with the NSIS export built from the detached snapshot.
+
+**Entry point**: detached `02e123b` worktree -> offline frozen pnpm install -> `pnpm -C apps/desktop package:windows` -> exported Setup -> SHA-256 verification and copy to the main workspace.
+**Test**: package command exits 0 after Web production build, sidecar build, Rust release compile, and NSIS bundling. The NSIS source, detached export, and final Setup are all 34,662,819 bytes with SHA-256 `2F431F7225FE7DB4F938E4F4C6ACD45217163C116E4E502AC0D58A0E8205E006`; file/product version is `0.1.0`. The installer is unsigned and was not launched.
