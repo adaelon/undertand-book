@@ -3,6 +3,7 @@ import { Eye, EyeOff, MessageSquareText, Minus, Plus, Scan, ScanText, Trash2, X 
 import { computed, nextTick, onBeforeUnmount, ref, shallowRef, watch } from "vue";
 import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf.mjs";
 import pdfWorkerUrl from "pdfjs-dist/legacy/build/pdf.worker.mjs?url";
+import { TextLayerBuilder } from "pdfjs-dist/web/pdf_viewer.mjs";
 import {
   type MemoryRecord,
   type PaperViewportPosition,
@@ -58,7 +59,7 @@ const emit = defineEmits<{
 
 type PdfDocument = Awaited<ReturnType<typeof pdfjsLib.getDocument>["promise"]>;
 type PdfPage = Awaited<ReturnType<PdfDocument["getPage"]>>;
-type PdfTextLayer = InstanceType<typeof pdfjsLib.TextLayer>;
+type PdfTextLayer = InstanceType<typeof TextLayerBuilder>;
 type PdfRenderTask = ReturnType<PdfPage["render"]>;
 
 const PDF_ZOOM_MIN = 0.75;
@@ -598,23 +599,31 @@ async function renderTextLayer(
   viewport: ReturnType<PdfPage["getViewport"]>,
   layer: HTMLElement,
 ) {
-  const content = await page.getTextContent({ includeMarkedContent: true, disableNormalization: true });
   layer.replaceChildren();
   layer.style.setProperty("--scale-factor", String(viewport.scale));
   layer.style.setProperty("--user-unit", "1");
   layer.style.setProperty("--total-scale-factor", "calc(var(--scale-factor) * var(--user-unit))");
-  const textLayer = new pdfjsLib.TextLayer({
-    textContentSource: content,
-    container: layer,
-    viewport,
+  const textLayer = new TextLayerBuilder({
+    pdfPage: page,
+    onAppend: (textLayerDiv: HTMLElement) => layer.replaceChildren(textLayerDiv),
   });
   layer.style.width = `${viewport.width}px`;
   layer.style.height = `${viewport.height}px`;
   textLayerTasks.set(pageIndex, textLayer);
   try {
-    await textLayer.render();
-  } finally {
-    if (textLayerTasks.get(pageIndex) === textLayer) textLayerTasks.delete(pageIndex);
+    await textLayer.render({
+      viewport,
+      // PDFPageView passes null when the page has no text-layer image coordinates.
+      images: null as never,
+      textContentParams: { includeMarkedContent: true, disableNormalization: true },
+    });
+  } catch (error) {
+    if (textLayerTasks.get(pageIndex) === textLayer) {
+      textLayerTasks.delete(pageIndex);
+      textLayer.cancel();
+      layer.replaceChildren();
+    }
+    throw error;
   }
 }
 
@@ -1123,6 +1132,20 @@ onBeforeUnmount(() => {
   --text-scale-factor: calc(var(--total-scale-factor) * var(--min-font-size));
   --min-font-size-inv: calc(1 / var(--min-font-size));
 }
+.pdf-text-layer :deep(.textLayer) {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  overflow: clip;
+  color-scheme: only light;
+  text-align: initial;
+  line-height: 1;
+  letter-spacing: normal;
+  word-spacing: normal;
+  text-size-adjust: none;
+  transform-origin: 0 0;
+  caret-color: CanvasText;
+}
 .pdf-text-layer :deep(:is(span, br)) {
   position: absolute;
   color: transparent;
@@ -1131,12 +1154,35 @@ onBeforeUnmount(() => {
   cursor: text;
   user-select: text;
 }
-.pdf-text-layer :deep(span:not(.markedContent)) {
+.pdf-text-layer :deep(.textLayer > :not(.markedContent)),
+.pdf-text-layer :deep(.textLayer .markedContent span:not(.markedContent)) {
+  z-index: 1;
+  --font-height: 0;
+  --scale-x: 1;
+  --rotate: 0deg;
   font-size: calc(var(--text-scale-factor) * var(--font-height));
-  transform: rotate(var(--rotate, 0deg)) scaleX(var(--scale-x, 1)) scale(var(--min-font-size-inv));
+  transform: rotate(var(--rotate)) scaleX(var(--scale-x)) scale(var(--min-font-size-inv));
 }
 .pdf-text-layer :deep(.markedContent) {
   display: contents;
+}
+.pdf-text-layer :deep(span[role="img"]) {
+  cursor: default;
+  user-select: none;
+}
+.pdf-text-layer :deep(br::selection) {
+  background: transparent;
+}
+.pdf-text-layer :deep(.textLayer .endOfContent) {
+  position: absolute;
+  inset: 100% 0 0;
+  z-index: 0;
+  display: block;
+  cursor: default;
+  user-select: none;
+}
+.pdf-text-layer :deep(.textLayer.selecting .endOfContent) {
+  top: 0;
 }
 .pdf-user-annotation-layer {
   position: absolute;

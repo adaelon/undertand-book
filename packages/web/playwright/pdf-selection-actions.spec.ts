@@ -2,8 +2,7 @@ import { expect, test, type Page, type Route } from "@playwright/test";
 
 type ResolveStatus = "resolved" | "partial" | "unresolved";
 
-function pdfFixture(): Buffer {
-  const content = "BT /F1 20 Tf 72 700 Td (Selectable PDF fixture text for explicit actions.) Tj ET";
+function pdfFixture(content = "BT /F1 20 Tf 72 700 Td (Selectable PDF fixture text for explicit actions.) Tj ET"): Buffer {
   const objects = [
     "<< /Type /Catalog /Pages 2 0 R >>",
     "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
@@ -23,6 +22,19 @@ function pdfFixture(): Buffer {
   body += offsets.slice(1).map((offset) => `${String(offset).padStart(10, "0")} 00000 n \n`).join("");
   body += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF\n`;
   return Buffer.from(body, "ascii");
+}
+
+function boundaryPdfFixture(): Buffer {
+  return pdfFixture([
+    "BT /F1 16 Tf",
+    "72 740 Td (Selectable PDF fixture text for explicit actions.) Tj",
+    "0 -24 Td (Boundary paragraph target.) Tj",
+    "0 -48 Td (Boundary line target.) Tj",
+    "0 -24 Td (Same paragraph continuation.) Tj",
+    "0 -24 Td (Boundary filler line.) Tj",
+    "0 -48 Td (Following paragraph.) Tj",
+    "ET",
+  ].join("\n"));
 }
 
 const profile = {
@@ -81,12 +93,18 @@ function json(route: Route, value: unknown, status = 200) {
   });
 }
 
-async function installApiFixture(page: Page, resolveStatus: ResolveStatus, resolveDelayMs = 0) {
+async function installApiFixture(
+  page: Page,
+  resolveStatus: ResolveStatus,
+  resolveDelayMs = 0,
+  pdf = pdfFixture(),
+) {
   const calls = {
     highlights: [] as Record<string, unknown>[],
     notes: [] as Record<string, unknown>[],
     agent: [] as Record<string, unknown>[],
     resolves: 0,
+    resolveRequests: [] as Record<string, unknown>[],
   };
   const records: Record<string, unknown>[] = [];
   let nextId = 1;
@@ -115,7 +133,7 @@ async function installApiFixture(page: Page, resolveStatus: ResolveStatus, resol
     const path = new URL(request.url()).pathname;
     const body = request.postData() ? request.postDataJSON() as Record<string, unknown> : null;
     if (path === "/api/book/pdf/original") {
-      return route.fulfill({ status: 200, contentType: "application/pdf", body: pdfFixture() });
+      return route.fulfill({ status: 200, contentType: "application/pdf", body: pdf });
     }
     if (path === "/api/desktop/status") {
       return json(route, {
@@ -192,6 +210,7 @@ async function installApiFixture(page: Page, resolveStatus: ResolveStatus, resol
     if (path === "/api/memory/recall") return json(route, records);
     if (path === "/api/reader/pdf_selection.resolve") {
       calls.resolves += 1;
+      calls.resolveRequests.push(body ?? {});
       if (resolveDelayMs > 0) {
         await new Promise((resolve) => setTimeout(resolve, resolveDelayMs));
       }
@@ -295,6 +314,45 @@ async function selectFixtureText(page: Page, start: number, end: number) {
   }, { start, end });
 }
 
+async function dragPastTextEnd(page: Page, text: string) {
+  const span = page.locator(".pdf-text-layer span").filter({ hasText: text }).first();
+  await expect(span).toHaveText(text);
+  await span.scrollIntoViewIfNeeded();
+  const box = await span.boundingBox();
+  if (!box) throw new Error(`PDF text span has no box: ${text}`);
+  const y = box.y + box.height / 2;
+  await page.mouse.move(box.x + 2, y);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width + 2, y, { steps: 12 });
+  await page.mouse.up();
+}
+
+async function dragBetweenTextOffsets(page: Page, text: string, start: number, end: number) {
+  const span = page.locator(".pdf-text-layer span").filter({ hasText: text }).first();
+  await expect(span).toHaveText(text);
+  await span.scrollIntoViewIfNeeded();
+  const points = await span.evaluate((element, offsets) => {
+    const node = element.firstChild;
+    if (!(node instanceof Text)) throw new Error("PDF text span has no text node");
+    const characterRect = (offset: number) => {
+      const range = document.createRange();
+      range.setStart(node, offset);
+      range.setEnd(node, offset + 1);
+      return range.getBoundingClientRect();
+    };
+    const first = characterRect(offsets.start);
+    const last = characterRect(offsets.end - 1);
+    return {
+      start: { x: first.left + 1, y: first.top + first.height / 2 },
+      end: { x: last.right - 1, y: last.top + last.height / 2 },
+    };
+  }, { start, end });
+  await page.mouse.move(points.start.x, points.start.y);
+  await page.mouse.down();
+  await page.mouse.move(points.end.x, points.end.y, { steps: 12 });
+  await page.mouse.up();
+}
+
 test("resolved real PDF selection performs three explicit actions and sends structured AskQuote", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   const calls = await installApiFixture(page, "resolved");
@@ -386,3 +444,29 @@ test("unresolved real PDF selection remains native-copy only", async ({ page }) 
   expect(calls.notes).toHaveLength(0);
   expect(calls.agent).toHaveLength(0);
 });
+
+test("physical selection can start in the middle of a PDF line", async ({ page }) => {
+  const text = "Selectable PDF fixture text for explicit actions.";
+  const calls = await installApiFixture(page, "resolved");
+  await page.goto("/");
+  await dragBetweenTextOffsets(page, text, 15, 27);
+  expect(await page.evaluate(() => window.getSelection()?.toString())).toBe("fixture text");
+  await expect.poll(() => calls.resolveRequests.length).toBe(1);
+  expect(calls.resolveRequests[0]).toMatchObject({ raw_quote: "fixture text" });
+});
+
+for (const [boundary, text] of [
+  ["line", "Boundary line target."],
+  ["paragraph", "Boundary paragraph target."],
+] as const) {
+  test(`physical trailing whitespace keeps ${boundary} selection exact`, async ({ page }) => {
+    const calls = await installApiFixture(page, "resolved", 0, boundaryPdfFixture());
+    await page.goto("/");
+    await page.evaluate(() => window.getSelection()?.removeAllRanges());
+    await dragPastTextEnd(page, text);
+    await expect.poll(() => calls.resolveRequests.length).toBe(1);
+    expect(await page.evaluate(() => window.getSelection()?.toString())).toBe(text);
+    expect(calls.resolveRequests[0]).toMatchObject({ raw_quote: text });
+    expect((calls.resolveRequests[0].rects as unknown[])).toHaveLength(1);
+  });
+}

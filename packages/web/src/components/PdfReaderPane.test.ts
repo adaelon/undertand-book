@@ -27,19 +27,34 @@ const pdfMocks = vi.hoisted(() => {
   };
   const pdfDocument = { getPage: vi.fn(async () => page), destroy: vi.fn(async () => undefined) };
   const task = () => ({ promise: Promise.resolve(pdfDocument), destroy: vi.fn(async () => undefined) });
-  const legacyTextLayer = vi.fn(function (this: { render: () => Promise<void> }, options: { container: HTMLElement }) {
-    this.render = async () => {
+  const textLayerRender = vi.fn();
+  const textLayerCancel = vi.fn();
+  const textLayerBuilder = vi.fn(function (
+    this: { div: HTMLElement; render: (options: unknown) => Promise<void>; cancel: () => void },
+    options: { onAppend: (div: HTMLElement) => void },
+  ) {
+    this.div = globalThis.document.createElement("div");
+    this.div.className = "textLayer";
+    this.render = async (renderOptions) => {
+      textLayerRender(renderOptions);
       const span = globalThis.document.createElement("span");
       span.textContent = "Visible only through selection";
-      options.container.append(span);
+      this.div.append(span);
+      const end = globalThis.document.createElement("div");
+      end.className = "endOfContent";
+      this.div.append(end);
+      options.onAppend(this.div);
     };
+    this.cancel = textLayerCancel;
   });
   return {
     modernWorkerOptions: { workerSrc: "" },
     legacyWorkerOptions: { workerSrc: "" },
     modernGetDocument: vi.fn(task),
     legacyGetDocument: vi.fn(task),
-    legacyTextLayer,
+    textLayerBuilder,
+    textLayerRender,
+    textLayerCancel,
     getViewport,
     transform: vi.fn((_left: number[], right: number[]) => right),
   };
@@ -54,10 +69,10 @@ vi.mock("pdfjs-dist/build/pdf.worker.mjs?url", () => ({ default: "modern-worker.
 vi.mock("pdfjs-dist/legacy/build/pdf.mjs", () => ({
   GlobalWorkerOptions: pdfMocks.legacyWorkerOptions,
   getDocument: pdfMocks.legacyGetDocument,
-  TextLayer: pdfMocks.legacyTextLayer,
   Util: { transform: pdfMocks.transform },
 }));
 vi.mock("pdfjs-dist/legacy/build/pdf.worker.mjs?url", () => ({ default: "legacy-worker.mjs" }));
+vi.mock("pdfjs-dist/web/pdf_viewer.mjs", () => ({ TextLayerBuilder: pdfMocks.textLayerBuilder }));
 
 import PdfReaderPane from "./PdfReaderPane.vue";
 
@@ -114,7 +129,9 @@ describe("PdfReaderPane", () => {
     vi.unstubAllGlobals();
     pdfMocks.modernGetDocument.mockClear();
     pdfMocks.legacyGetDocument.mockClear();
-    pdfMocks.legacyTextLayer.mockClear();
+    pdfMocks.textLayerBuilder.mockClear();
+    pdfMocks.textLayerRender.mockClear();
+    pdfMocks.textLayerCancel.mockClear();
     pdfMocks.getViewport.mockClear();
     document.body.replaceChildren();
   });
@@ -134,14 +151,17 @@ describe("PdfReaderPane", () => {
 
     expect(pdfMocks.legacyGetDocument).toHaveBeenCalledWith({ url: "/api/book/pdf/original" });
     expect(pdfMocks.legacyWorkerOptions.workerSrc).toBe("legacy-worker.mjs");
-    expect(pdfMocks.legacyTextLayer).toHaveBeenCalledTimes(sourceMap.pages.length);
-    expect(pdfMocks.legacyTextLayer).toHaveBeenNthCalledWith(
+    expect(pdfMocks.textLayerBuilder).toHaveBeenCalledTimes(sourceMap.pages.length);
+    expect(pdfMocks.textLayerBuilder).toHaveBeenNthCalledWith(
       1,
       expect.objectContaining({
-        container: expect.any(HTMLElement),
-        textContentSource: expect.objectContaining({ items: expect.any(Array) }),
-        viewport: expect.objectContaining({ width: 600, height: 800 }),
+        pdfPage: expect.any(Object),
+        onAppend: expect.any(Function),
       }),
+    );
+    expect(pdfMocks.textLayerRender).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ viewport: expect.objectContaining({ width: 600, height: 800 }) }),
     );
 
     const textSpan = wrapper.get(".pdf-text-layer span").element;
@@ -149,8 +169,9 @@ describe("PdfReaderPane", () => {
 
     const componentSource = readFileSync("src/components/PdfReaderPane.vue", "utf8");
     expect(componentSource).toContain("grid-auto-rows: max-content");
-    expect(componentSource).toContain(".pdf-text-layer :deep(:is(span, br))");
-    expect(componentSource).toContain("scaleX(var(--scale-x, 1))");
+    expect(componentSource).toContain(".pdf-text-layer :deep(.textLayer)");
+    expect(componentSource).toContain(".pdf-text-layer :deep(.textLayer .endOfContent)");
+    expect(componentSource).toContain("scaleX(var(--scale-x))");
 
     wrapper.unmount();
   });
@@ -341,7 +362,7 @@ describe("PdfReaderPane", () => {
     const pageWidthSpies = pageShells.map((shell) => (
       vi.spyOn(shell.element, "clientWidth", "get").mockReturnValue(750)
     ));
-    const renderCount = pdfMocks.legacyTextLayer.mock.calls.length;
+    const renderCount = pdfMocks.textLayerBuilder.mock.calls.length;
 
     await zoomIn.trigger("click");
     await flushPromises();
@@ -350,7 +371,8 @@ describe("PdfReaderPane", () => {
     expect(wrapper.get(".pdf-page-list").classes()).toContain("is-zoomed");
     expect(pageShells[0].attributes("style")).toContain("125%");
     expect(pdfMocks.getViewport).toHaveBeenCalledWith({ scale: 1.25 });
-    expect(pdfMocks.legacyTextLayer.mock.calls.length).toBeGreaterThan(renderCount);
+    expect(pdfMocks.textLayerCancel).toHaveBeenCalledTimes(renderCount);
+    expect(pdfMocks.textLayerBuilder.mock.calls.length).toBeGreaterThan(renderCount);
 
     for (const width of pageWidthSpies) width.mockReturnValue(600);
     pdfMocks.getViewport.mockClear();

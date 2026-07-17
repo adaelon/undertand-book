@@ -223,6 +223,62 @@
 **Entry point**: audited temp rebuild -> hard-gated atomic artifact apply -> live localhost API -> physical Chromium PDF selection.
 **Test**: candidate and official hard gates pass; `206/258` alignable text and `29/29` headings map with no page regression; pages 5/6/7/10/11 selectable-character coverage rises to `41.7%/76.5%/39.7%/21.1%/86.2%`; physical mapped/unmapped selection proves resolved-only toolbar behavior. Final checks: Core `223` tests plus typecheck, Web `124` tests plus build, selection Playwright `4` tests, and server `pdf_selection_` `4` tests.
 
+## 2026-07-17 PE0 PDF selection boundary decision
+
+**Touched**:
+- `docs/adr/0080-pdf-text-layer-native-selection-lifecycle.md:§1` - assigns native PDF selection ownership to the public PDF.js TextLayerBuilder lifecycle.
+- `docs/切片方案-pdf选区边界稳定性.md:PE0-PE4` - freezes the reproduced line/paragraph-end expansion, repair boundary, slices, and deterministic acceptance matrix.
+
+**Entry point**: physical PDF drag ending 2px past a text span -> expanded native Selection -> ADR-0080 -> PE1-PE4.
+**Test**: both documents were read back as UTF-8; reciprocal links and the no-backend-change boundary were inspected.
+
+## 2026-07-17 PE1 physical PDF trailing-boundary regression
+
+**Touched**:
+- `packages/web/playwright/pdf-selection-actions.spec.ts:boundaryPdfFixture/dragPastTextEnd` - adds real-pointer line-end and paragraph-end cases plus resolve-request capture.
+
+**Entry point**: Playwright mouse down inside a PDF text span -> drag 2px beyond its right edge -> native Selection and resolve request.
+**Test**: red run proves both cases fail before production changes: the line target includes two later lines and the paragraph target includes three later lines.
+
+## 2026-07-17 PE2 PDF.js native selection ownership
+
+**Touched**:
+- `packages/web/src/components/PdfReaderPane.vue:renderTextLayer/textLayerTasks` - replaces the low-level TextLayer with public TextLayerBuilder ownership and retains each builder until deterministic cancel on rerender or unmount.
+- `packages/web/src/components/PdfReaderPane.vue:.textLayer/.endOfContent styles` - scopes the PDF.js text and native-selection CSS contract to the reader text layer.
+- `packages/web/src/components/PdfReaderPane.test.ts:TextLayerBuilder mocks/zoom lifecycle` - proves append/render wiring and cancellation before replacement builders are created.
+
+**Entry point**: PDF page render -> TextLayerBuilder native selection lifecycle -> existing mouseup capture.
+**Test**: `PdfReaderPane.test.ts` 9/9, Web typecheck, and physical line/paragraph trailing-whitespace Playwright 2/2.
+
+## 2026-07-17 PE3 PDF selection boundary Web regression
+
+**Touched**:
+- `packages/web:production bundle` - compiles the scoped TextLayerBuilder integration without importing the global PDF viewer stylesheet.
+
+**Entry point**: all Web reader interactions sharing PdfReaderPane after the native-selection ownership change.
+**Test**: Web 24 files/124 tests; production typecheck/build; selection actions Playwright 6/6; translation and annotation Playwright 4/4. Built CSS contains only scoped `.textLayer/.endOfContent` selectors and no global `.pdfViewer/.toolbar` selectors.
+
+## 2026-07-17 PE4 real-book PDF boundary acceptance and Windows installer
+
+**Touched**:
+- `.understand-book/1:pageIndex 5 native text layer` - exercises the production browser Selection and resolve request without changing canonical or mapping artifacts.
+- `docs/architecture.md:Major Data Flows/Decision Index` - records TextLayerBuilder ownership, cancellation boundaries, and ADR-0080.
+- `dist/UnderstandBookSetup.exe` - rebuilds the Windows installer from a detached `ea34a82` worktree containing only the production PdfReaderPane change.
+
+**Entry point**: physical Chromium drag 2px beyond the frozen line/paragraph targets -> builder-stabilized Selection -> existing resolve API; then isolated `package:windows`.
+**Test**: `Due to its tolerance` is 20/20 and `2A and 2B).` is 11/11; each native Selection/request has one rect and exact `raw_quote`, with HTTP 200 responses. The resolved line target renders one toolbar and the unresolved paragraph target renders none, preserving the existing gate. Packaging exits 0; exported Setup and NSIS bundle are both 34,754,425 bytes with SHA-256 `ECE6D45232EC4B69C89320D80F3F574BC4B143A0BAC13C94B9D60CE3D1D0D061`. The installer was not launched.
+
+## 2026-07-17 PE5 PDF mid-line selection hit testing
+
+**Touched**:
+- `packages/web/src/components/PdfReaderPane.vue:.textLayer .endOfContent` - restores the official selector specificity so the expanded selection tail remains below text at effective `z-index: 0`.
+- `packages/web/playwright/pdf-selection-actions.spec.ts:dragBetweenTextOffsets/physical selection can start in the middle` - calibrates character pixels with a Range, then uses only real mouse input to lock the native anchor and request quote.
+- `packages/web/src/components/PdfReaderPane.test.ts:scoped endOfContent selector assertion` - prevents regression to the lower-specificity selector.
+- `dist/UnderstandBookSetup.exe` - rebuilds the installer from a detached clean Rust tree plus the final PdfReaderPane production file.
+
+**Entry point**: pointer down over a middle character -> TextLayerBuilder expands `.endOfContent` -> pointer move continues to hit the text span -> existing mouseup capture.
+**Test**: red evidence shows offset 15 is correct on pointer down, then effective `z-index: 1` makes `.endOfContent` the top hit and collapses the caret to the outer wrapper. Green evidence: fixture selects `fixture text`; real pageIndex 5 selects/sends `its tolerance` with anchor 7, focus 20, and one rect. Selection actions 7/7, Web 24 files/124 tests, and production build pass. Final Setup/NSIS are both 34,761,794 bytes with SHA-256 `755096BA8E08E9CAF6DF30D9F9C2CB294FF3592CE7F0FF58379F2CF4618DB467`; installer not launched.
+
 ## 2026-07-17 TS1 PDF selection translation source-boundary red test
 
 **Touched**:
