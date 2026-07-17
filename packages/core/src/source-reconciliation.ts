@@ -648,7 +648,7 @@ export function reconcilePaperSource(input: ReconcilePaperSourceInput): Reconcil
 
     const from = Math.max(0, cursor - config.lookback_chars);
     const fuzzyTo = Math.min(pdfSearch.length, cursor + config.lookahead_chars);
-    const foundExactOffset = pdfSearch.indexOf(needle, from);
+    const foundExactOffset = pdfSearch.indexOf(needle, cursor);
     const exactOffset = foundExactOffset >= 0 && foundExactOffset <= fuzzyTo ? foundExactOffset : -1;
     if (exactOffset >= 0) {
       const status = resolvedStatus(unit.text, repaired);
@@ -656,8 +656,12 @@ export function reconcilePaperSource(input: ReconcilePaperSourceInput): Reconcil
       cursor = exactOffset + needle.length;
       continue;
     }
-    if ((needle.length >= 12 || unit.last_block.kind === "heading") && uniqueExactOffset(pdfSearch, needle) !== null) {
+    const uniqueOffset = (needle.length >= 12 || unit.last_block.kind === "heading")
+      ? uniqueExactOffset(pdfSearch, needle)
+      : null;
+    if (uniqueOffset !== null && uniqueOffset >= cursor) {
       summary[resolvedStatus(unit.text, repaired)]++;
+      cursor = uniqueOffset + needle.length;
       continue;
     }
 
@@ -672,9 +676,9 @@ export function reconcilePaperSource(input: ReconcilePaperSourceInput): Reconcil
     const fuzzy = bestCandidate([atPrefix, globalPrefix, atCursor, scanned], cursor);
     const compactEquivalent = fuzzy ? compactEquivalentAt(pdfIndex.text, displayNeedle, fuzzy.offset) : null;
     const tokenEquivalent = compactEquivalent ?? (fuzzy ? tokenEquivalentAt(pdfIndex.text, displayNeedle, fuzzy.offset) : null);
-    if (tokenEquivalent) {
+    if (tokenEquivalent && fuzzy!.offset >= cursor) {
       summary.format_equivalent++;
-      if (fuzzy!.offset >= from && fuzzy!.offset <= fuzzyTo) cursor = Math.max(cursor, tokenEquivalent.end);
+      cursor = Math.max(cursor, tokenEquivalent.end);
       continue;
     }
     const globalEvidence = fuzzy && fuzzy.score >= config.fuzzy_threshold

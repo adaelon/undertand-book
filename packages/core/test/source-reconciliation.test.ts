@@ -205,6 +205,85 @@ describe("PH3 source reconciliation engine", () => {
     expect(sourceReconciliationTrusted(result.report)).toBe(false);
   });
 
+  it("resynchronizes the cursor at a unique exact forward anchor outside the local window", () => {
+    const result = reconcilePaperSource({
+      book_id: "paper-a",
+      markdown_source: [
+        "Opening anchor.",
+        "",
+        "A unique forward anchor appears after omitted PDF extraction material.",
+        "",
+        "The measured value is 42 mg.",
+        "",
+      ].join("\n"),
+      pdf_geometry: geometryFromLines([
+        "Opening anchor.",
+        "filler ".repeat(80),
+        "A unique forward anchor appears after omitted PDF extraction material.",
+        "The measured value is 43 mg.",
+      ]),
+      input_fingerprint: fingerprint(),
+      config: { lookback_chars: 0, lookahead_chars: 40 },
+    });
+
+    expect(result.report.unresolved).toHaveLength(1);
+    expect(result.report.unresolved[0]).toMatchObject({
+      id: "block-3",
+      status: "needs_review",
+      reason: expect.stringMatching(/^fuzzy match score .* below trusted exact-match gate$/),
+      difference: { markdown: "42", pdf: "43" },
+    });
+  });
+
+  it("resynchronizes the cursor at a forward compact-equivalent anchor outside the local window", () => {
+    const result = reconcilePaperSource({
+      book_id: "paper-a",
+      markdown_source: [
+        "Opening anchor.",
+        "",
+        "The unique covariance anchor in this derivation is $ \\mathbb{E}_{\\boldsymbol{x}} $.",
+        "",
+        "The measured value is 42 mg.",
+        "",
+      ].join("\n"),
+      pdf_geometry: geometryFromLines([
+        "Opening anchor.",
+        "filler ".repeat(80),
+        "The unique covariance anchor in this derivation is E x.",
+        "The measured value is 43 mg.",
+      ]),
+      input_fingerprint: fingerprint(),
+      config: { lookback_chars: 0, lookahead_chars: 40 },
+    });
+
+    expect(result.report.summary.format_equivalent).toBe(1);
+    expect(result.report.unresolved).toHaveLength(1);
+    expect(result.report.unresolved[0]).toMatchObject({
+      id: "block-5",
+      status: "needs_review",
+      reason: expect.stringMatching(/^fuzzy match score .* below trusted exact-match gate$/),
+      difference: { markdown: "42", pdf: "43" },
+    });
+  });
+
+  it("does not trust a unique exact candidate behind the monotonic cursor", () => {
+    const result = reconcilePaperSource({
+      book_id: "paper-a",
+      markdown_source: "First anchor.\n\nSecond anchor.\n",
+      pdf_geometry: geometryFromLines(["Second anchor.", "First anchor."]),
+      input_fingerprint: fingerprint(),
+      config: { lookback_chars: 0 },
+    });
+
+    expect(result.report.unresolved).toHaveLength(1);
+    expect(result.report.unresolved[0]).toMatchObject({
+      id: "block-2",
+      status: "needs_review",
+      reason: "candidate found outside trusted PDF text order",
+    });
+    expect(result.reconciled_source).toBeUndefined();
+  });
+
   it("keeps nearby PDF context when a global candidate remains below the trust threshold", () => {
     const result = reconcilePaperSource({
       book_id: "paper-a",
