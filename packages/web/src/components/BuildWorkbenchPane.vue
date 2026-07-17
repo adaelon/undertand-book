@@ -68,6 +68,11 @@ const emit = defineEmits<{
     replacement_text?: string;
     note?: string;
   }): void;
+  (e: "resolve-source-review-group", payload: {
+    job_id?: string;
+    group_id: string;
+    note?: string;
+  }): void;
   (e: "analyze-source-review", payload: { block_id: string }): void;
   (e: "apply-all-source-review-with-llm"): void;
   (e: "draft-sidecar-plan", payload: { request: string }): void;
@@ -616,6 +621,7 @@ function draftSidecarPlan() {
         :decision-set-current="sourceReviewDecisionSetCurrent"
         :rerunning="sourceReviewRerunning"
         @resolve="emit('resolve-source-review', $event)"
+        @resolve-group="emit('resolve-source-review-group', $event)"
         @analyze="emit('analyze-source-review', $event)"
         @analyze-all="emit('apply-all-source-review-with-llm')"
       />

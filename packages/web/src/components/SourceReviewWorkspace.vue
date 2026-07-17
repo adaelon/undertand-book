@@ -21,6 +21,7 @@ import type {
 } from "../api";
 import {
   SOURCE_REVIEW_LLM_BATCH_NOTE_PREFIX,
+  groupSourceReviewBlocks,
   sourceReviewDecisionResolvesBlock,
   type SourceReviewLoad,
   type SourceReviewLlmBatchState,
@@ -60,6 +61,7 @@ const emit = defineEmits<{
   }): void;
   (e: "analyze", payload: { block_id: string }): void;
   (e: "analyze-all"): void;
+  (e: "resolve-group", payload: { job_id?: string; group_id: string; note?: string }): void;
 }>();
 
 type ReviewTab = "pdf" | "markdown" | "extracted";
@@ -102,6 +104,16 @@ const llmBatchActionLabel = computed(() => {
 const blockResolved = (block: SourceReviewBlock) => props.decisionSetCurrent && (
   sourceReviewDecisionResolvesBlock(block, decisionByBlock.value.get(block.id))
 );
+const reviewGroups = computed(() => groupSourceReviewBlocks(props.blocks));
+const activeReviewGroup = computed(() => {
+  const blockId = activeBlock.value?.id;
+  return blockId
+    ? reviewGroups.value.find((group) => group.blocks.some((block) => block.id === blockId)) ?? null
+    : null;
+});
+const activeGroupPendingBlocks = computed(() => (
+  activeReviewGroup.value?.blocks.filter((block) => !blockResolved(block)) ?? []
+));
 const resolvedCount = computed(() => props.blocks.filter(blockResolved).length);
 const remainingCount = computed(() => Math.max(0, props.blocks.length - resolvedCount.value));
 const reviewComplete = computed(() => (
@@ -225,6 +237,16 @@ function requestAllLlmAnalysis() {
   emit("analyze-all");
 }
 
+function requestPageMarkdownGroup() {
+  const group = activeReviewGroup.value;
+  if (!llmBatchOverloaded.value || !group || !activeGroupPendingBlocks.value.length) return;
+  emit("resolve-group", {
+    job_id: props.jobId,
+    group_id: group.id,
+    note: undefined,
+  });
+}
+
 function applyLlmSuggestion() {
   const block = activeBlock.value;
   if (!block) return;
@@ -296,6 +318,17 @@ watch(
       </div>
       <div v-if="activeBlock && !reviewComplete" class="review-head-actions">
         <button
+          v-if="llmBatchOverloaded && activeGroupPendingBlocks.length"
+          type="button"
+          class="review-page-action"
+          title="核对当前 PDF 页面后保留本页 Markdown"
+          :disabled="props.stale || props.actioning"
+          @click="requestPageMarkdownGroup"
+        >
+          <FileCheck2 :size="16" aria-hidden="true" />
+          本页 {{ activeGroupPendingBlocks.length }} 项均保留 Markdown
+        </button>
+        <button
           type="button"
           class="review-batch-action"
           :disabled="props.stale || props.actioning || llmBatchOverloaded || llmBatchRunning || !!props.llmAnalyzingBlockId || !llmBatchTargetCount"
@@ -317,7 +350,7 @@ watch(
     </header>
 
     <p v-if="llmBatchOverloaded" class="review-overload-notice" role="status">
-      当前 {{ props.reviewLoad?.unresolved_count }} 项差异已超过逐项复核门限。请先重新运行修复后的来源对齐；批量 LLM 已暂停。
+      当前 {{ props.reviewLoad?.unresolved_count }} 项差异已超过逐项复核门限：{{ props.reviewLoad?.unresolved_count }} 项原子差异 · {{ props.reviewLoad?.review_group_count }} 个页面复核组。批量 LLM 已暂停。
     </p>
 
     <section
@@ -635,7 +668,8 @@ watch(
   align-items: center;
   gap: 0.45rem;
 }
-.review-batch-action {
+.review-batch-action,
+.review-page-action {
   min-height: 34px;
   display: inline-flex;
   align-items: center;
@@ -648,7 +682,13 @@ watch(
   font-size: 0.72rem;
   font-weight: 700;
 }
-.review-batch-action:disabled {
+.review-page-action {
+  border-color: #8a5b18;
+  background: #fff8e8;
+  color: #6f4510;
+}
+.review-batch-action:disabled,
+.review-page-action:disabled {
   opacity: 0.5;
 }
 .review-pager button {
@@ -1266,7 +1306,8 @@ article.review-source-pane > header span {
     width: 100%;
     justify-content: space-between;
   }
-  .review-batch-action {
+  .review-batch-action,
+  .review-page-action {
     min-width: 0;
     flex: 1 1 auto;
   }

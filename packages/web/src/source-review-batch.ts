@@ -12,6 +12,7 @@ export const SOURCE_REVIEW_OVERLOAD_ABSOLUTE_COUNT = 100;
 export const SOURCE_REVIEW_OVERLOAD_MIN_COUNT = 20;
 export const SOURCE_REVIEW_OVERLOAD_UNRESOLVED_RATIO = 0.3;
 export const SOURCE_REVIEW_OVERLOAD_UNMATCHED_RATIO = 0.15;
+export const SOURCE_REVIEW_PAGE_GROUP_NOTE_PREFIX = "页面复核组保留 Markdown";
 
 export type SourceReviewLoadReason =
   | "absolute_count"
@@ -21,10 +22,34 @@ export type SourceReviewLoadReason =
 export interface SourceReviewLoad {
   overloaded: boolean;
   unresolved_count: number;
+  review_group_count: number;
   total_units: number | null;
   unresolved_ratio: number | null;
   unmatched_ratio: number | null;
   reason: SourceReviewLoadReason | null;
+}
+
+export interface SourceReviewPageGroup {
+  id: string;
+  pdf_page_index?: number;
+  pdf_page_label?: string;
+  blocks: SourceReviewBlock[];
+}
+
+export interface SourceReviewPageGroupResolvePayload {
+  job_id?: string;
+  block_id: string;
+  decision: "accept_markdown";
+  note: string;
+}
+
+export interface RunSourceReviewPageGroupDecisionOptions {
+  snapshot: BuildWorkbenchSnapshot;
+  groupId: string;
+  jobId?: string;
+  note?: string;
+  resolve: (payload: SourceReviewPageGroupResolvePayload) => Promise<BuildWorkbenchSnapshot>;
+  onSnapshot?: (snapshot: Readonly<BuildWorkbenchSnapshot>) => void;
 }
 
 export type SourceReviewLlmBatchFailureKind =
@@ -115,6 +140,35 @@ function nonNegativeCount(value: unknown): number | null {
   return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : null;
 }
 
+/** Groups located blocks by PDF page while leaving every unlocated block independent. */
+export function groupSourceReviewBlocks(blocks: SourceReviewBlock[]): SourceReviewPageGroup[] {
+  const groups: SourceReviewPageGroup[] = [];
+  const locatedGroups = new Map<number, SourceReviewPageGroup>();
+
+  for (const block of blocks) {
+    const pageIndex = nonNegativeCount(block.pdf_page_index);
+    if (pageIndex === null) {
+      groups.push({ id: `block:${block.id}`, blocks: [block] });
+      continue;
+    }
+
+    let group = locatedGroups.get(pageIndex);
+    if (!group) {
+      group = {
+        id: `page:${pageIndex}`,
+        pdf_page_index: pageIndex,
+        pdf_page_label: block.pdf_page_label,
+        blocks: [],
+      };
+      locatedGroups.set(pageIndex, group);
+      groups.push(group);
+    }
+    group.blocks.push(block);
+  }
+
+  return groups;
+}
+
 export function evaluateSourceReviewLoad(snapshot: BuildWorkbenchSnapshot): SourceReviewLoad {
   const unresolvedCount = snapshot.source_review.unresolved.length;
   const report = snapshot.source_review.report;
@@ -153,6 +207,7 @@ export function evaluateSourceReviewLoad(snapshot: BuildWorkbenchSnapshot): Sour
   return {
     overloaded: reason !== null,
     unresolved_count: unresolvedCount,
+    review_group_count: groupSourceReviewBlocks(snapshot.source_review.unresolved).length,
     total_units: totalUnits,
     unresolved_ratio: unresolvedRatio,
     unmatched_ratio: unmatchedRatio,
@@ -220,6 +275,56 @@ export function getSourceReviewLlmBatchTargets(snapshot: BuildWorkbenchSnapshot)
 }
 
 export const sourceReviewBatchTargets = getSourceReviewLlmBatchTargets;
+
+function latestSourceReviewDecisionByBlock(snapshot: BuildWorkbenchSnapshot): Map<string, SourceReviewDecision> {
+  const latest = new Map<string, SourceReviewDecision>();
+  for (const decision of snapshot.source_review.decisions?.decisions ?? []) {
+    latest.set(decision.block_id, decision);
+  }
+  return latest;
+}
+
+/** Persists one explicit page decision as existing atomic decisions, retaining partial success. */
+export async function runSourceReviewPageGroupDecision(
+  options: RunSourceReviewPageGroupDecisionOptions,
+): Promise<BuildWorkbenchSnapshot> {
+  const group = groupSourceReviewBlocks(options.snapshot.source_review.unresolved)
+    .find((candidate) => candidate.id === options.groupId);
+  if (!group) throw new Error(`SOURCE_REVIEW_PAGE_GROUP_NOT_FOUND: ${options.groupId}`);
+
+  const decisionSetCurrent = sourceReviewDecisionSetMatchesReport(options.snapshot);
+  const decisions = decisionSetCurrent
+    ? latestSourceReviewDecisionByBlock(options.snapshot)
+    : new Map<string, SourceReviewDecision>();
+  const targets = group.blocks.filter((block) => (
+    !sourceReviewDecisionResolvesBlock(block, decisions.get(block.id))
+  ));
+  let currentSnapshot = options.snapshot;
+
+  for (const block of targets) {
+    if (typeof block.md_excerpt !== "string") {
+      throw new Error(`SOURCE_REVIEW_PAGE_GROUP_MISSING_MARKDOWN: ${block.id}`);
+    }
+    const nextSnapshot = await options.resolve({
+      job_id: options.jobId,
+      block_id: block.id,
+      decision: "accept_markdown",
+      note: options.note?.trim()
+        || `${SOURCE_REVIEW_PAGE_GROUP_NOTE_PREFIX}; group=${options.groupId}`,
+    });
+    const persistedDecision = latestSourceReviewDecisionByBlock(nextSnapshot).get(block.id);
+    if (
+      !sourceReviewDecisionSetMatchesReport(nextSnapshot)
+      || !sourceReviewDecisionResolvesBlock(block, persistedDecision)
+    ) {
+      throw new Error(`SOURCE_REVIEW_PAGE_GROUP_DECISION_NOT_PERSISTED: ${block.id}`);
+    }
+    currentSnapshot = nextSnapshot;
+    options.onSnapshot?.(immutableSnapshot(currentSnapshot));
+  }
+
+  return currentSnapshot;
+}
 
 export interface SourceReviewAutoRerunRequest {
   job_id: string;

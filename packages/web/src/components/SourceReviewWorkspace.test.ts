@@ -276,6 +276,7 @@ describe("SourceReviewWorkspace", () => {
         total_units: 667,
         unresolved_ratio: 390 / 667,
         unmatched_ratio: 233 / 667,
+        review_group_count: 40,
         reason: "absolute_count",
       },
     });
@@ -286,6 +287,36 @@ describe("SourceReviewWorkspace", () => {
     expect(batchButton?.attributes("disabled")).toBeDefined();
     await batchButton?.trigger("click");
     expect(wrapper.emitted("analyze-all")).toBeUndefined();
+  });
+
+  it("emits one explicit page-group command for blocks sharing the active PDF page", async () => {
+    const samePage = {
+      ...blocks[0]!,
+      id: "block-3",
+      md_excerpt: "Another Markdown formula.",
+    };
+    const wrapper = mountWorkspace();
+    await wrapper.setProps({
+      blocks: [blocks[0]!, samePage, blocks[1]!],
+      reviewLoad: {
+        overloaded: true,
+        unresolved_count: 3,
+        total_units: 5,
+        unresolved_ratio: 0.6,
+        unmatched_ratio: 0.2,
+        review_group_count: 2,
+        reason: "unresolved_density",
+      },
+    });
+
+    expect(wrapper.text()).toContain("3 项原子差异 · 2 个页面复核组");
+    const pageAction = wrapper.findAll("button").find((button) => button.text().includes("本页 2 项均保留 Markdown"));
+    await pageAction?.trigger("click");
+    expect(wrapper.emitted("resolve-group")?.[0]?.[0]).toEqual({
+      job_id: "job-a",
+      group_id: "page:2",
+      note: undefined,
+    });
   });
 
   it("does not start a batch while an individual LLM analysis is running", async () => {

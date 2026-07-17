@@ -82,6 +82,7 @@ import { selectionContextForAgentNote } from "./agent-note-selection";
 import {
   getSourceReviewAutoRerunRequest,
   runSourceReviewLlmBatch,
+  runSourceReviewPageGroupDecision,
   sourceReviewBatchTargets,
   type SourceReviewLlmBatchState,
 } from "./source-review-batch";
@@ -1642,6 +1643,43 @@ async function resolveSourceReview(payload: {
   await applyWorkbenchAction(() => api.workbenchSourceReviewResolve(payload));
 }
 
+async function resolveSourceReviewGroup(payload: {
+  job_id?: string;
+  group_id: string;
+  note?: string;
+}) {
+  const snapshot = buildWorkbenchSnapshot.value;
+  if (!snapshot || buildWorkbenchActioning.value) return;
+  const actionOwner = beginWorkbenchAction();
+  const bookId = snapshot.book_id;
+  const stillCurrent = () => buildWorkbenchSnapshot.value?.book_id === bookId;
+  buildWorkbenchError.value = null;
+
+  try {
+    let nextSnapshot = await runSourceReviewPageGroupDecision({
+      snapshot,
+      groupId: payload.group_id,
+      jobId: payload.job_id,
+      note: payload.note,
+      resolve: (decision) => api.workbenchSourceReviewResolve(decision),
+      onSnapshot: (persistedSnapshot) => {
+        if (stillCurrent()) buildWorkbenchSnapshot.value = persistedSnapshot;
+      },
+    });
+    if (!stillCurrent()) return;
+    buildWorkbenchSnapshot.value = nextSnapshot;
+    nextSnapshot = await maybeAutoRerunSourceReview(nextSnapshot, actionOwner);
+    if (stillCurrent()) {
+      buildWorkbenchSnapshot.value = nextSnapshot;
+      await showSurfaceForWorkbenchSnapshot(nextSnapshot);
+    }
+  } catch (e) {
+    if (stillCurrent()) buildWorkbenchError.value = errorMessage(e);
+  } finally {
+    endWorkbenchAction(actionOwner);
+  }
+}
+
 async function analyzeSourceReview(payload: { block_id: string }) {
   if (sourceReviewLlmBatch.value?.status === "running" || buildWorkbenchActioning.value) return;
   const blockId = payload.block_id;
@@ -3191,6 +3229,7 @@ async function submitOpenBook(dir = bookPickerDir.value) {
       @resolve-decision="resolveBuildDecision"
       @resolve-permission="resolveExecutorPermission"
       @resolve-source-review="resolveSourceReview"
+      @resolve-source-review-group="resolveSourceReviewGroup"
       @analyze-source-review="analyzeSourceReview"
       @apply-all-source-review-with-llm="applyAllSourceReviewWithLlm"
       @draft-sidecar-plan="draftSidecarPlan"

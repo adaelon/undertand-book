@@ -9,10 +9,12 @@ import {
   SOURCE_REVIEW_LLM_BATCH_NOTE_PREFIX,
   evaluateSourceReviewLoad,
   evaluateSourceReviewLlmBatchEligibility,
+  groupSourceReviewBlocks,
   getSourceReviewAutoRerunRequest,
   getSourceReviewLlmBatchTargets,
   getSourceReviewManualOverride,
   runSourceReviewLlmBatch,
+  runSourceReviewPageGroupDecision,
   type SourceReviewLlmBatchFailure,
   type SourceReviewLlmBatchState,
 } from "./source-review-batch";
@@ -204,6 +206,74 @@ describe("source review overload", () => {
       total_units: null,
       reason: null,
     });
+  });
+});
+
+describe("source review page groups", () => {
+  it("groups located blocks by PDF page and keeps unlocated blocks isolated", () => {
+    const snapshot = makeSnapshot(["page-a-1", "unknown-1", "page-b", "page-a-2", "unknown-2"]);
+    const [pageA1, unknown1, pageB, pageA2, unknown2] = snapshot.source_review.unresolved;
+    Object.assign(pageA1!, { pdf_page_index: 2, pdf_page_label: "3" });
+    Object.assign(pageA2!, { pdf_page_index: 2, pdf_page_label: "3" });
+    Object.assign(pageB!, { pdf_page_index: 4, pdf_page_label: "5" });
+
+    expect(groupSourceReviewBlocks(snapshot.source_review.unresolved).map((group) => ({
+      id: group.id,
+      blocks: group.blocks.map((block) => block.id),
+    }))).toEqual([
+      { id: "page:2", blocks: ["page-a-1", "page-a-2"] },
+      { id: "block:unknown-1", blocks: ["unknown-1"] },
+      { id: "page:4", blocks: ["page-b"] },
+      { id: "block:unknown-2", blocks: ["unknown-2"] },
+    ]);
+  });
+
+  it("keeps successful page decisions and retries only remaining blocks after failure", async () => {
+    const blockIds = ["block-1", "block-2", "block-3"];
+    let current = makeSnapshot(blockIds);
+    current.source_review.unresolved.forEach((block) => { block.pdf_page_index = 6; });
+    const snapshots: BuildWorkbenchSnapshot[] = [];
+    let failSecond = true;
+    const resolve = vi.fn(async (payload: { block_id: string }) => {
+      if (payload.block_id === "block-2" && failSecond) {
+        failSecond = false;
+        throw new Error("write rejected");
+      }
+      current = makeSnapshot(blockIds, [
+        ...(current.source_review.decisions?.decisions ?? []),
+        {
+          block_id: payload.block_id,
+          decision: "accept_markdown",
+          resolved_at: `resolved-${payload.block_id}`,
+        },
+      ]);
+      current.source_review.unresolved.forEach((block) => { block.pdf_page_index = 6; });
+      return current;
+    });
+
+    await expect(runSourceReviewPageGroupDecision({
+      snapshot: current,
+      groupId: "page:6",
+      resolve,
+      onSnapshot: (snapshot) => snapshots.push(snapshot),
+    })).rejects.toThrow("write rejected");
+    expect(snapshots).toHaveLength(1);
+    expect(snapshots[0]!.source_review.decisions?.decisions.map((decision) => decision.block_id))
+      .toEqual(["block-1"]);
+
+    const result = await runSourceReviewPageGroupDecision({
+      snapshot: snapshots[0]!,
+      groupId: "page:6",
+      resolve,
+    });
+    expect(resolve.mock.calls.map(([payload]) => payload.block_id)).toEqual([
+      "block-1",
+      "block-2",
+      "block-2",
+      "block-3",
+    ]);
+    expect(result.source_review.decisions?.decisions.map((decision) => decision.block_id))
+      .toEqual(blockIds);
   });
 });
 
