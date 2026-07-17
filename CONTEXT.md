@@ -390,6 +390,9 @@ Source reconciliation 的派生诊断：未解决项的绝对数量或密度已�
 ## Source review decisions
 Source reconciliation unresolved block 的用户复核记录,写入 `.build/source-reconciliation/review-decisions.json`。它只表达用户选择和备注,供后续 source reconciliation rerun/gate 消费;自身不生成可信 `source.txt`,也不能替代 content equivalence 与 realignment gate。状态:NEW(见 `docs/切片方案-paper-pdf-first-hybrid.md` PH16)。
 
+## Source review page group
+把共享同一 `pdf_page_index` 的 Source reconciliation unresolved blocks 投影为一次页面级复核操作的临时分组；无页码 block 必须各自成组。分组不合并、删除或信任原子诊断，用户页面级决定仍逐条持久化为 Source review decisions。状态:NEW(见 `docs/修复方案-来源对齐复核过载.md`)。
+
 ## Bulk LLM source review decisions
 用户在 Source reconciliation review surface 上一次明确选择,授权系统逐项请求 LLM 修订并把高置信、非 uncertain 的有效结果记录为 Source review decisions。批量操作允许部分成功:成功项保留决策,技术失败、无效输出、低置信或 uncertain 项继续留给用户逐项复核;它不是全有或全无事务,也不直接生成可信 `source.txt`。状态:BOUNDARY_CHANGE(见 `docs/切片方案-paper-pdf-first-hybrid.md` PH16)。
 
