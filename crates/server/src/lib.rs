@@ -10384,9 +10384,8 @@ mod tests {
     fn source_review_v4_config_becomes_stale_after_canonicalization_upgrade() {
         let mut s = state_named("workbench-source-review-v4-canonicalization-stale");
         write_workbench_review_artifacts(&mut s);
-        let v4_config_hash = sha256_hex(
-            b"workbench_input_manifest.v1:paper:source_reconciliation_v4",
-        );
+        let v4_config_hash =
+            sha256_hex(b"workbench_input_manifest.v1:paper:source_reconciliation_v4");
         let report_path = source_reconciliation_dir(&s.book_dir).join("report.json");
         let mut report: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&report_path).unwrap()).unwrap();
