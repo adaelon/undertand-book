@@ -480,6 +480,9 @@ Desktop Reader App 当前用户为读时 LLM adapter 提供的模式、Base URL�
 ## Plugin Installation Receipt
 Windows Installer 对 Codex plugin 安装所有权的用户级记录。只有 `installed_by_reader_setup=true` 的插件才由阅读器卸载器默认提议移除;书库、`.understand-book` 与阅读记忆默认不删除。状态:NEW(详见 [docs/adr/0068])。
 
+## Codex marketplace source migration
+Understand Book 将同名 Codex plugin marketplace 从旧 source 切换到当前发布 source 的受控更新。只有 Plugin Installation Receipt 同时匹配 plugin/marketplace 名且声明该 marketplace 由 Setup 创建时,Reader 才可删除旧 plugin/marketplace 后重新添加;无回执、名称不匹配或外部拥有的 marketplace 必须保持不变并返回人工处理提示。同一 source 的正常更新只刷新 marketplace snapshot。状态:BOUNDARY_CHANGE(详见 [docs/adr/0068])。
+
 ## Draft paper workspace
 Build Workbench 接收 `paper.md + paper.pdf` 后形成的未信任论文构建目录。它可以保存 canonical 输入副本和 `.build/input/manifest.json`,但在 source reconciliation 与 artifact gate 通过前不得被 normal reader 当作可信书。状态:NEW(见 `docs/切片方案-paper-pdf-first-hybrid.md` PH12)。
 

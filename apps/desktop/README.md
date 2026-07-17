@@ -9,6 +9,9 @@ Reader installation and plugin installation are separate transactions. A missing
 offline marketplace, or declined consent leaves the reader installed and the plugin retryable from
 the desktop Settings dialog. Uninstall removes the plugin only when an Understand Book installation
 receipt proves Setup installed it; books, registered external workspaces, and memory are retained.
+Retrying an installed Setup-owned plugin refreshes its marketplace. If the configured source changed,
+the Reader migrates the marketplace only when the receipt proves Setup created it; an external
+same-name marketplace is never removed automatically and instead returns manual recovery guidance.
 
 Desktop Settings lets the user select a library parent (or an existing `.understand-book`) and
 change the Reader LLM provider without restarting. The effective library root and provider mode,

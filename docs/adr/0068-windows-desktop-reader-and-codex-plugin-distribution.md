@@ -20,3 +20,15 @@ Status: Accepted, 2026-07-11.
 - sidecar 是 Bun 编译的单 exe,内嵌 extractor prompts 与确定性 TS pipeline;Codex plugin 包不携带 Node 依赖。
 
 **何时回头**:Tauri/WebView2 无法稳定承载 localhost Reader,或 Codex 提供稳定的 App 原生 Git marketplace 安装协议以替代 CLI 检测。
+
+## Marketplace source migration
+
+**决策**:仅迁移 Setup receipt 拥有的同名 marketplace。
+
+**否决**:
+- 无条件 remove/re-add:可能删除用户自行管理的同名 source。
+- 永远报错交给用户:使 Setup-owned 插件无法随发布 source 演进。
+- 直接编辑 Codex config:绕过 CLI 契约并绑定内部存储格式。
+
+**命门**:receipt 必须匹配 plugin/marketplace 名且 `marketplace_added_by_setup=true`;同源只调用 upgrade。
+**何时回头**:Codex CLI 提供原子 source replace 或可验证的 marketplace ownership API。
