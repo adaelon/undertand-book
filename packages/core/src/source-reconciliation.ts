@@ -720,9 +720,6 @@ export function reconcilePaperSource(input: ReconcilePaperSourceInput): Reconcil
         ...(difference ? { difference } : {}),
         ...(pdfExcerpt ? { pdf_excerpt: pdfExcerpt, candidate_text: pdfExcerpt } : {}),
       });
-      if (evidenceCandidate.offset >= from && evidenceCandidate.offset <= fuzzyTo) {
-        cursor = Math.max(cursor, evidenceCandidate.offset + needle.length);
-      }
     } else {
       const hasCandidate = Boolean(evidenceCandidate && evidenceCandidate.score >= 0.15 && evidence?.excerpt);
       const pdfExcerpt = hasCandidate ? evidence?.excerpt : undefined;

@@ -284,6 +284,31 @@ describe("PH3 source reconciliation engine", () => {
     expect(result.reconciled_source).toBeUndefined();
   });
 
+  it("does not let fuzzy review evidence advance past the next exact anchor", () => {
+    const result = reconcilePaperSource({
+      book_id: "paper-a",
+      markdown_source: [
+        `alpha beta gamma delta epsilon 42 ${"alpha ".repeat(20).trim()}`,
+        "",
+        "epsilon delta gamma",
+        "",
+      ].join("\n"),
+      pdf_geometry: geometryFromLines([
+        "alpha beta gamma delta epsilon 43.",
+        "epsilon delta gamma",
+      ]),
+      input_fingerprint: fingerprint(),
+    });
+
+    expect(result.report.unresolved).toHaveLength(1);
+    expect(result.report.unresolved[0]).toMatchObject({
+      id: "block-1",
+      status: "needs_review",
+      difference: { markdown: "42", pdf: "43" },
+    });
+    expect(result.report.summary.verified).toBe(1);
+  });
+
   it("keeps nearby PDF context when a global candidate remains below the trust threshold", () => {
     const result = reconcilePaperSource({
       book_id: "paper-a",
