@@ -35,6 +35,8 @@ $env:UNDERSTAND_BOOK_MARKETPLACE_SOURCE = "adaelon/undertand-book"
 pnpm -C apps/desktop package:windows
 ```
 
-The release command refuses local marketplace paths and exports `dist/UnderstandBookSetup.exe`.
+The release command first verifies that the public marketplace plugin manifest matches the root
+Codex manifest and that its compact build skill carries the automatic-build v2 orchestration
+contract. It then refuses local marketplace paths and exports `dist/UnderstandBookSetup.exe`.
 For a local pending-state smoke build, run Tauri with `--debug --bundles nsis`, then run
 `node apps/desktop/scripts/export-installer.mjs --debug`.

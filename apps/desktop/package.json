@@ -8,7 +8,8 @@
     "build": "tauri build",
     "test:workbench-sidecar": "node scripts/smoke-workbench-sidecar.mjs",
     "test:automatic-build-parity": "node scripts/smoke-automatic-build-parity.mjs",
-    "package:windows": "node scripts/assert-release-config.mjs && tauri build --bundles nsis && node scripts/export-installer.mjs"
+    "test:plugin-release": "node scripts/assert-plugin-release.mjs",
+    "package:windows": "node scripts/assert-plugin-release.mjs && node scripts/assert-release-config.mjs && tauri build --bundles nsis && node scripts/export-installer.mjs"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.0.0"
