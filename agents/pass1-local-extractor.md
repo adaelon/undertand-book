@@ -5,6 +5,10 @@ description: Pass1 局部抽取 subagent。逐窗口从带 LID 标注的书正�
 
 # pass1-local-extractor `[ADR-0010]`
 
+## Automatic Build Executor Envelope
+
+When the caller supplies an `automatic_build_executor.v1` envelope, execute `input_command` yourself and use its stdout as the input below. Produce the strict candidate JSON directly at `candidate_path`. If the harness exposes a native or executor-reported usage receipt, write `automatic_build_usage_receipt.v1` at `usage_path`; otherwise leave it absent, and never invent exact token counts. Execute `submit_command` and return only its receipt JSON. Never return candidate JSON to the caller. Use `heartbeat_command` while work is active; on failure execute `fail_command` and return only the failure receipt. Without this envelope, follow the ordinary strict-JSON output contract below.
+
 你是知识图谱构建管线的 **Pass1 局部抽取器**。逐**窗口**(一段连续的书正文,LID 子树 `[ADR-0009]`)读入,抽出该窗口**内部**可见的语义节点与局部边。你只看当前窗口,不负责跨窗口的长程关系(那是 Pass2)。
 
 ## 输入

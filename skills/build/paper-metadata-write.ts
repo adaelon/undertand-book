@@ -4,8 +4,9 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { deriveBookId } from "../../packages/core/src/book-id";
 import {
   buildPaperMetadataArtifact,
-  type PaperMetadataExtractionOutput,
 } from "../../packages/core/src/paper-metadata";
+import { analyzePaperMetadataCandidates } from "../../packages/core/src/paper-metadata-router";
+import { parseExtractorCandidate } from "../../packages/core/src/extractor-contract";
 import { contentProfileUsage, parsePaperContentProfileArgsOrExit } from "./content-profile-options";
 import { loadBookWindows, windowById } from "./load-book";
 
@@ -27,8 +28,16 @@ if (!Number.isInteger(id)) {
 
 const { source, byLid, windows } = loadBookWindows(book);
 const w = windowById(windows, id);
+const routing = analyzePaperMetadataCandidates({ windows, byLid, source });
+const packet = routing.packets[String(id)];
+if (!packet) {
+  const skipped = routing.skip_reasons[String(id)];
+  throw new Error(`paper metadata window ${id} is not model-eligible: ${skipped?.code ?? "not_in_plan"}`);
+}
 const outputText = readFileSync(outputPath, "utf8").replace(/^\uFEFF/, "");
-const output = JSON.parse(outputText) as PaperMetadataExtractionOutput;
+const output = parseExtractorCandidate("paper_metadata", JSON.parse(outputText), {
+  allowed_evidence_lids: [...packet.visible_lids],
+});
 const artifact = buildPaperMetadataArtifact(w, byLid, source, output);
 
 const bookId = deriveBookId(book, override);

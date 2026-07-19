@@ -1,10 +1,11 @@
 // PB7 BookStructure batch: close unit-card + stitch outputs into book_structure.json.
 //   tsx skills/build/book-structure-batch.ts <book.md|epub> [--book-id <id>] [--content-profile technical_learning|paper] [--paper-subtype research_article|survey]
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 import { buildBookStructureSidecar } from "../../packages/core/src/book-structure";
-import { buildProfileArtifactHeader } from "../../packages/core/src/profile-artifact";
+import { buildReproducibleProfileArtifactHeader } from "../../packages/core/src/profile-artifact";
 import { BookStructureSidecarZ } from "../../packages/core/src/zod";
 import { computeCurrentBookStructureStatus, loadBookStructureBuildContext, parseBookStructureArgs } from "./book-structure-common";
+import { publishAutomaticBuildArtifactSet } from "../../packages/core/src/automatic-build-publication";
 
 const { book, override, contentProfile } = parseBookStructureArgs(process.argv.slice(2));
 if (!book) {
@@ -26,12 +27,16 @@ if (!status.stitch_done || !stitchArtifact) {
   process.exit(1);
 }
 
-const header = buildProfileArtifactHeader({ book_id: ctx.bookId, content_profile: contentProfile.id });
+const header = buildReproducibleProfileArtifactHeader({ book_id: ctx.bookId, content_profile: contentProfile.id });
 const result = buildBookStructureSidecar(header, stitchArtifact.output, ctx.lidNodes);
 BookStructureSidecarZ.parse(result.sidecar);
 mkdirSync(ctx.baseDir, { recursive: true });
 const outPath = `${ctx.baseDir}/book_structure.json`;
-writeFileSync(outPath, JSON.stringify(result.sidecar, null, 2), "utf8");
+publishAutomaticBuildArtifactSet({
+  workspace_dir: ctx.baseDir,
+  stage: "book_structure",
+  artifacts: { "book_structure.json": JSON.stringify(result.sidecar, null, 2) },
+});
 
 console.log(`[book-structure-batch] ${book}  bookId=${ctx.bookId}  content_profile=${contentProfile.id}`);
 console.log(`  units=${ctx.unitSources.length} stitch=done`);

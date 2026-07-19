@@ -6,6 +6,61 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(export, export_to = "../../../packages/core/src/generated/")]
+pub struct BuildTargetRefV2 {
+    pub version: String,
+    pub workspace_dir: String,
+    pub book_id: String,
+    pub profile_id: String,
+    pub input_fingerprint: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "../../../packages/core/src/generated/")]
+pub enum ExtractionQualityProfile {
+    Full,
+    Balanced,
+    Sparse,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(export, export_to = "../../../packages/core/src/generated/")]
+pub struct ExtractionPolicyFingerprintV1 {
+    pub profile_id: String,
+    pub profile_version: String,
+    pub stage_policy_version: String,
+    pub router_version: String,
+    pub prompt_sha256: String,
+    pub schema_version: String,
+    pub quality_profile: ExtractionQualityProfile,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(export, export_to = "../../../packages/core/src/generated/")]
+pub struct SemanticArtifactProvenanceV2 {
+    pub executor: String,
+    pub model: Option<String>,
+    pub attempt: u32,
+    pub generated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(export, export_to = "../../../packages/core/src/generated/")]
+pub struct SemanticArtifactEnvelopeV2 {
+    pub version: String,
+    pub target: BuildTargetRefV2,
+    pub stage: String,
+    pub work_unit_id: String,
+    pub input_hash: String,
+    pub policy_fingerprint: ExtractionPolicyFingerprintV1,
+    pub artifact_hash: String,
+    pub provenance: SemanticArtifactProvenanceV2,
+    #[ts(type = "unknown")]
+    pub payload: serde_json::Value,
+}
+
 /// 内容区间(半开 [start, end)),映射回源文。
 /// 切片0 = **UTF-16 code unit 下标**(TS segment 用 JS 串下标);字节精确化留后 `[ADR-0024]`。
 /// ⇒ Rust book.text 须按 UTF-16 语义切原文(encode_utf16 索引),勿按 UTF-8 字节直切(中文会错位)。

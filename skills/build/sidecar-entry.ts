@@ -71,7 +71,24 @@ if (command === "prompt") {
     process.exit(2);
   }
   process.stdout.write(prompt);
-} else if (command === "next" || command === "record-attempt") {
+} else if ([
+  "plan",
+  "next",
+  "audit-legacy",
+  "migration-mode",
+  "quality",
+  "metrics",
+  "record-attempt",
+  "heartbeat",
+  "candidate",
+  "submit",
+  "legacy-submit",
+  "fail",
+  "inspect",
+  "input",
+  "write",
+  "close",
+].includes(command ?? "")) {
   prepare("automatic-build.ts", argv);
   await import("./automatic-build");
 } else if (command === "run-script") {
@@ -84,6 +101,6 @@ if (command === "prompt") {
 } else if (command === "workbench-stage") {
   await runScript("workbench-stage-runner.ts", forwardedArgs(1));
 } else {
-  console.error("usage: understand-book-build <next|record-attempt|run-script|prompt|workbench-stage> [...args]");
+  console.error("usage: understand-book-build <plan|next|audit-legacy|migration-mode|quality|metrics|record-attempt|heartbeat|candidate|submit|legacy-submit|fail|inspect|input|write|close|run-script|prompt|workbench-stage> [...args]");
   process.exit(2);
 }

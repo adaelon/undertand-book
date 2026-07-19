@@ -103,12 +103,22 @@ function normalizeEntry(raw: unknown, lidSet: Set<string>): PaperLexiconEntry {
   };
 }
 
-function entriesFromOutput(output: PaperLexiconExtractionOutput): PaperLexiconEntry[] {
+export function paperLexiconEntriesFromOutput(output: PaperLexiconExtractionOutput): PaperLexiconEntry[] {
   return output.paper_lexicon?.entries ?? output.entries ?? [];
 }
 
+export function normalizePaperLexiconKey(term: string): string {
+  return term
+    .normalize("NFKC")
+    .toLocaleLowerCase()
+    .replace(/[\u2010-\u2015_-]+/g, " ")
+    .replace(/[^\p{L}\p{N}+#.]+/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function keyOf(entry: PaperLexiconEntry): string {
-  return entry.term.trim().toLocaleLowerCase();
+  return normalizePaperLexiconKey(entry.term);
 }
 
 function mergeEntry(current: PaperLexiconEntry, next: PaperLexiconEntry): PaperLexiconEntry {
@@ -153,7 +163,7 @@ export function buildPaperLexiconArtifact(
       core_schema_version: "core_v0",
       generated_at: "1970-01-01T00:00:00.000Z",
     },
-    entriesFromOutput(output),
+    paperLexiconEntriesFromOutput(output),
     lidNodes,
   );
   return {

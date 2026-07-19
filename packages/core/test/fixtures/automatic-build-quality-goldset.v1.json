@@ -1,0 +1,12 @@
+{
+  "version": "automatic_build_quality_goldset.v1",
+  "license": "CC0-1.0",
+  "description": "Deterministic quality-floor boundary cases for eligible semantic units.",
+  "cases": [
+    { "id": "pass1-full-boundary", "stage": "pass1", "quality_profile": "full", "eligible_units": 5, "grounded_units": 4, "low_information_items": 0, "total_items": 4, "expected": "passed" },
+    { "id": "pass1-full-below", "stage": "pass1", "quality_profile": "full", "eligible_units": 5, "grounded_units": 3, "low_information_items": 0, "total_items": 3, "expected": "below_floor" },
+    { "id": "metadata-balanced-boundary", "stage": "paper_metadata", "quality_profile": "balanced", "eligible_units": 2, "grounded_units": 1, "low_information_items": 0, "total_items": 2, "expected": "passed" },
+    { "id": "profile-full-filler", "stage": "profile_sidecar", "quality_profile": "full", "eligible_units": 4, "grounded_units": 4, "low_information_items": 1, "total_items": 4, "expected": "below_floor" },
+    { "id": "pass2-full-disposition", "stage": "pass2", "quality_profile": "full", "eligible_units": 3, "grounded_units": 3, "low_information_items": 0, "total_items": 3, "expected": "passed" }
+  ]
+}

@@ -1,11 +1,13 @@
 ﻿// PB3/PB6 Pass2 batch: close candidate classification and write long_range edges + audit.
 //   tsx skills/build/pass2-batch.ts <book.md|epub> [--book-id <id>] [--allow-partial] [--content-profile technical_learning|paper] [--paper-subtype research_article|survey]
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { buildProfileArtifactHeader } from "../../packages/core/src/profile-artifact";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { buildReproducibleProfileArtifactHeader } from "../../packages/core/src/profile-artifact";
 import { buildLidToWindowIndex, gatePass2BuildOutput, type Pass2LlmOutput } from "../../packages/core/src/pass2-build";
 import { computePass2Status, type Pass2Artifact } from "../../packages/core/src/pass2-orchestrate";
 import { Pass2BuildAuditSidecarZ, ReadOnlyBaseZ } from "../../packages/core/src/zod";
 import { loadPass2BuildContext, parseBookArgs } from "./pass2-common";
+import { semanticArtifactPayload } from "../../packages/core/src/semantic-artifact";
+import { publishAutomaticBuildArtifactSet } from "../../packages/core/src/automatic-build-publication";
 
 const { book, override, allowPartial, contentProfile } = parseBookArgs(process.argv.slice(2));
 if (!book) {
@@ -20,7 +22,7 @@ const artifacts = new Map<number, Pass2Artifact>();
 for (const id of ctx.packets.keys()) {
   const f = `${buildDir}/${id}.json`;
   if (!existsSync(f)) continue;
-  const artifact = JSON.parse(readFileSync(f, "utf8")) as Pass2Artifact;
+  const artifact = semanticArtifactPayload<Pass2Artifact>(JSON.parse(readFileSync(f, "utf8")));
   artifacts.set(id, artifact);
   if (typeof artifact?.content_hash === "string") existing.set(id, { content_hash: artifact.content_hash });
 }
@@ -39,7 +41,7 @@ for (const id of status.done) {
   output.pending_edges.push(...artifact.output.pending_edges);
   output.rejected_candidates.push(...artifact.output.rejected_candidates);
 }
-const header = buildProfileArtifactHeader({ book_id: ctx.bookId, content_profile: contentProfile.id });
+const header = buildReproducibleProfileArtifactHeader({ book_id: ctx.bookId, content_profile: contentProfile.id });
 const lidToWindowIndex = buildLidToWindowIndex(ctx.windows);
 const gated = gatePass2BuildOutput(output, header, ctx.base.graph_nodes, ctx.lidNodes, lidToWindowIndex);
 Pass2BuildAuditSidecarZ.parse(gated.audit);
@@ -48,9 +50,15 @@ const localEdges = ctx.base.graph_edges.filter((edge) => edge.scope !== "long_ra
 const base = { ...ctx.base, graph_edges: [...localEdges, ...gated.edges] };
 ReadOnlyBaseZ.parse(base);
 mkdirSync(ctx.baseDir, { recursive: true });
-writeFileSync(`${ctx.baseDir}/long_range_candidates.json`, JSON.stringify(ctx.candidateIndex, null, 2), "utf8");
-writeFileSync(`${ctx.baseDir}/base.json`, JSON.stringify(base, null, 2), "utf8");
-writeFileSync(`${ctx.baseDir}/pass2_audit.json`, JSON.stringify(gated.audit, null, 2), "utf8");
+publishAutomaticBuildArtifactSet({
+  workspace_dir: ctx.baseDir,
+  stage: "pass2",
+  artifacts: {
+    "long_range_candidates.json": JSON.stringify(ctx.candidateIndex, null, 2),
+    "base.json": JSON.stringify(base, null, 2),
+    "pass2_audit.json": JSON.stringify(gated.audit, null, 2),
+  },
+});
 
 console.log(`[pass2-batch] ${book}  bookId=${ctx.bookId}  content_profile=${contentProfile.id}${allowPartial && status.pending.length ? "  [--allow-partial]" : ""}`);
 console.log(`  windows=${ctx.windows.length} candidates=${ctx.candidateIndex.candidates.length} done=${status.done.length} pending=${status.pending.length} skipped=${status.skipped.length}`);

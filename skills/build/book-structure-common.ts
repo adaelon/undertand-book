@@ -20,6 +20,7 @@ import { deriveBookId } from "../../packages/core/src/book-id";
 import { TECHNICAL_LEARNING_PROFILE, type ContentProfileDefinition } from "../../packages/core/src/content-profile";
 import { parseContentProfileArgsOrExit } from "./content-profile-options";
 import { loadBookWindows, type LoadedBook } from "./load-book";
+import { semanticArtifactPayload } from "../../packages/core/src/semantic-artifact";
 
 export interface BookStructureBuildContext extends LoadedBook {
   bookId: string;
@@ -130,14 +131,14 @@ export function readUnitArtifacts(ctx: BookStructureBuildContext): Map<string, B
   for (const source of ctx.unitSources) {
     const path = unitArtifactPath(ctx, source.unit_lid);
     if (!existsSync(path)) continue;
-    artifacts.set(source.job_id, readJson<BookStructureUnitArtifact>(path));
+    artifacts.set(source.job_id, semanticArtifactPayload<BookStructureUnitArtifact>(readJson(path)));
   }
   return artifacts;
 }
 
 export function readStitchArtifact(ctx: BookStructureBuildContext): BookStructureStitchArtifact | undefined {
   const path = stitchArtifactPath(ctx);
-  return existsSync(path) ? readJson<BookStructureStitchArtifact>(path) : undefined;
+  return existsSync(path) ? semanticArtifactPayload<BookStructureStitchArtifact>(readJson(path)) : undefined;
 }
 
 export function buildFreshStitchPacket(ctx: BookStructureBuildContext): BookStructureStitchPacket | undefined {

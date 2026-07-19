@@ -9,6 +9,7 @@ export { TECHNICAL_LEARNING_PROFILE_ID, TECHNICAL_LEARNING_PROFILE_VERSION } fro
 
 export const CORE_SCHEMA_VERSION = "core_v0";
 export const DEFAULT_BOOK_VERSION = "v1";
+export const REPRODUCIBLE_ARTIFACT_TIMESTAMP = "1970-01-01T00:00:00.000Z";
 
 export interface ProfileArtifactHeader {
   book_id: string;
@@ -50,6 +51,12 @@ export function buildProfileArtifactHeader(input: ProfileArtifactHeaderInput): P
     core_schema_version: requireNonEmpty("core_schema_version", input.core_schema_version ?? CORE_SCHEMA_VERSION),
     generated_at: requireNonEmpty("generated_at", input.generated_at ?? new Date().toISOString()),
   };
+}
+
+export function buildReproducibleProfileArtifactHeader(
+  input: Omit<ProfileArtifactHeaderInput, "generated_at">,
+): ProfileArtifactHeader {
+  return buildProfileArtifactHeader({ ...input, generated_at: REPRODUCIBLE_ARTIFACT_TIMESTAMP });
 }
 
 export function buildProfileMetadata(header: ProfileArtifactHeader): ProfileMetadata {

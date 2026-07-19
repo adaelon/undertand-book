@@ -3,11 +3,11 @@
 // 图不完整),`--allow-partial` 显式兜底。本脚本零 LLM,是续建 loop 的末步(全 done 后收口)。
 //   tsx pass1-batch.ts <book.md|epub> [--book-id <id>] [--allow-partial]
 //     [--content-profile technical_learning] [--formula-candidates <p>] [--discourse-candidates <p>] [--pass2-output <p>]
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
+import { readFileSync, mkdirSync, existsSync } from "node:fs";
 import { mergeAndGate, type Pass1Output } from "../../packages/core/src/merge";
 import { projectCatalog } from "../../packages/core/src/catalog";
 import { AssetManifestZ, FormulaSemanticsSidecarZ, Pass2BuildAuditSidecarZ, ReadOnlyBaseZ, SourceManifestZ, TechnicalLearningDiscourseIndexZ } from "../../packages/core/src/zod";
-import { buildProfileArtifactHeader, buildProfileMetadata } from "../../packages/core/src/profile-artifact";
+import { buildProfileMetadata, buildReproducibleProfileArtifactHeader } from "../../packages/core/src/profile-artifact";
 import { buildSourceManifest } from "../../packages/core/src/source-manifest";
 import { buildAssetManifest } from "../../packages/core/src/asset-manifest";
 import { buildFormulaSemanticsSidecar, type FormulaSemanticsBuildCandidate } from "../../packages/core/src/formula-semantics";
@@ -15,10 +15,12 @@ import { buildTechnicalLearningDiscourseIndex, type TechnicalLearningDiscourseIt
 import { buildLidToWindowIndex, buildLongRangeCandidates, gatePass2BuildOutput, type Pass2LlmOutput } from "../../packages/core/src/pass2-build";
 import { deriveBookId } from "../../packages/core/src/book-id";
 import { computeBuildStatus, type Pass1Artifact } from "../../packages/core/src/build-resume";
+import { semanticArtifactPayload } from "../../packages/core/src/semantic-artifact";
 import { contentProfileUsage, parseContentProfileArgsOrExit } from "./content-profile-options";
 import { loadBookWindows, windowById } from "./load-book";
 import { assertTrustedPaperProjectionSource } from "../../packages/core/src/paper-projection-chain";
 import path from "node:path";
+import { publishAutomaticBuildArtifactSet } from "../../packages/core/src/automatic-build-publication";
 
 const parsedProfile = parseContentProfileArgsOrExit(process.argv.slice(2), { allowPaperExecution: true });
 const argv = parsedProfile.argv;
@@ -74,7 +76,7 @@ const pass1Dir = `.understand-book/${bookId}/.build/pass1`;
 const artifacts = new Map<number, Pass1Artifact>();
 for (const w of windows) {
   const f = `${pass1Dir}/${w.id}.json`;
-  if (existsSync(f)) artifacts.set(w.id, JSON.parse(readFileSync(f, "utf8")) as Pass1Artifact);
+  if (existsSync(f)) artifacts.set(w.id, semanticArtifactPayload<Pass1Artifact>(JSON.parse(readFileSync(f, "utf8"))));
 }
 // 续建判定:存在性 + content-hash 校验(陈旧/缺失=pending)
 const { done, pending } = computeBuildStatus(windows, byLid, source, artifacts, parsedProfile.contentProfile);
@@ -106,7 +108,7 @@ const sampledAnchored = [...sampledLeaves].filter((l) => anchored.has(l)).length
 const sampledRate = sampledLeaves.size ? sampledAnchored / sampledLeaves.size : 0;
 
 // 固化小基座 + zod 校验(bookId 已在头部派生)
-const profileHeader = buildProfileArtifactHeader({ book_id: bookId, content_profile: parsedProfile.contentProfile.id });
+const profileHeader = buildReproducibleProfileArtifactHeader({ book_id: bookId, content_profile: parsedProfile.contentProfile.id });
 const profileMetadata = buildProfileMetadata(profileHeader);
 const sourceManifest = preserveFoundationPath
   ? null
@@ -169,24 +171,19 @@ const assetManifest = buildAssetManifest({
   lid_nodes: lidNodes,
 });
 AssetManifestZ.parse(assetManifest);
-writeFileSync(`${dir}/base.json`, JSON.stringify(base, null, 2), "utf8");
-if (!preserveFoundationPath) {
-  writeFileSync(`${dir}/source.txt`, source, "utf8"); // 原文旁路:book.text 取真原文用,按 LID.span(UTF-16)切 `[ADR-0024]`
-}
-writeFileSync(`${dir}/profile_metadata.json`, JSON.stringify(profileMetadata, null, 2), "utf8");
-if (sourceManifest) writeFileSync(`${dir}/source_manifest.json`, JSON.stringify(sourceManifest, null, 2), "utf8");
-writeFileSync(`${dir}/asset_manifest.json`, JSON.stringify(assetManifest, null, 2), "utf8");
-// build-only:不被 Book::load 读,供 Pass2 prompt 输入 + 覆盖/审计调试 `[PB3 grill §2]`
-writeFileSync(`${dir}/long_range_candidates.json`, JSON.stringify(candidateIndex, null, 2), "utf8");
-if (formulaSidecar) {
-  writeFileSync(`${dir}/formula_semantics.json`, JSON.stringify(formulaSidecar.sidecar, null, 2), "utf8");
-}
-if (discourseSidecar) {
-  writeFileSync(`${dir}/discourse_index.json`, JSON.stringify(discourseSidecar.sidecar, null, 2), "utf8");
-}
-if (pass2Gated) {
-  writeFileSync(`${dir}/pass2_audit.json`, JSON.stringify(pass2Gated.audit, null, 2), "utf8");
-}
+const publicArtifacts: Record<string, string> = {
+  "base.json": JSON.stringify(base, null, 2),
+  "profile_metadata.json": JSON.stringify(profileMetadata, null, 2),
+  "asset_manifest.json": JSON.stringify(assetManifest, null, 2),
+  // build-only:不被 Book::load 读,供 Pass2 prompt 输入 + 覆盖/审计调试 `[PB3 grill §2]`
+  "long_range_candidates.json": JSON.stringify(candidateIndex, null, 2),
+};
+if (!preserveFoundationPath) publicArtifacts["source.txt"] = source;
+if (sourceManifest) publicArtifacts["source_manifest.json"] = JSON.stringify(sourceManifest, null, 2);
+if (formulaSidecar) publicArtifacts["formula_semantics.json"] = JSON.stringify(formulaSidecar.sidecar, null, 2);
+if (discourseSidecar) publicArtifacts["discourse_index.json"] = JSON.stringify(discourseSidecar.sidecar, null, 2);
+if (pass2Gated) publicArtifacts["pass2_audit.json"] = JSON.stringify(pass2Gated.audit, null, 2);
+publishAutomaticBuildArtifactSet({ workspace_dir: dir, stage: "pass1", artifacts: publicArtifacts });
 if (preserveFoundationPath) assertTrustedPaperProjectionSource(outputDir);
 
 console.log(`[pass1-batch] ${book}  bookId=${bookId}  content_profile=${parsedProfile.contentProfile.id}${allowPartial && pending.length ? "  [--allow-partial]" : ""}`);

@@ -33,7 +33,7 @@ export interface ProfileSidecarStatus {
   pending: number[];
 }
 
-function profileSidecarContentHash(window: Window, input: ProfileSidecarWindowInput): string {
+export function profileSidecarContentHash(window: Window, input: ProfileSidecarWindowInput): string {
   return pass1ContentHash({ windowId: window.id, lids: [...window.leafLids], text: input.text });
 }
 
@@ -65,6 +65,10 @@ function renderPaperProfileSidecarInput(profile: PaperProfileDefinition, baseTex
   ].join("\n");
 }
 
+export function renderProfileSidecarDiscourseText(profile: ContentProfileDefinition, baseText: string): string {
+  return profile.id === PAPER_PROFILE_ID ? renderPaperProfileSidecarInput(profile, baseText) : baseText;
+}
+
 export function buildProfileSidecarWindowInput(
   window: Window,
   byLid: Map<string, LidNode>,
@@ -76,7 +80,7 @@ export function buildProfileSidecarWindowInput(
     window_id: window.id,
     visible_lids: [...window.leafLids],
     formula_lids: window.leafLids.filter((lid) => byLid.get(lid)?.kind === "formula"),
-    text: contentProfile.id === PAPER_PROFILE_ID ? renderPaperProfileSidecarInput(contentProfile, input.text) : input.text,
+    text: renderProfileSidecarDiscourseText(contentProfile, input.text),
   };
 }
 

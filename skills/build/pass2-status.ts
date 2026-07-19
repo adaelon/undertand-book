@@ -3,6 +3,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { computePass2Status, type Pass2Artifact } from "../../packages/core/src/pass2-orchestrate";
 import { loadPass2BuildContext, parseBookArgs } from "./pass2-common";
+import { semanticArtifactPayload } from "../../packages/core/src/semantic-artifact";
 
 const { book, override, contentProfile } = parseBookArgs(process.argv.slice(2));
 if (!book) {
@@ -16,7 +17,7 @@ const existing = new Map<number, Pick<Pass2Artifact, "content_hash">>();
 for (const id of ctx.packets.keys()) {
   const f = `${dir}/${id}.json`;
   if (!existsSync(f)) continue;
-  const artifact = JSON.parse(readFileSync(f, "utf8")) as Pass2Artifact;
+  const artifact = semanticArtifactPayload<Pass2Artifact>(JSON.parse(readFileSync(f, "utf8")));
   if (typeof artifact?.content_hash === "string") existing.set(id, { content_hash: artifact.content_hash });
 }
 const status = computePass2Status(ctx.packets, existing);

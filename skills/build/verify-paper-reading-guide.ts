@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { verifyPaperReadingGuideProjection } from "../../packages/core/src/paper-reading-guide-verification";
+import { REPRODUCIBLE_ARTIFACT_TIMESTAMP } from "../../packages/core/src/profile-artifact";
 
 const workspace = process.argv[2] ? path.resolve(process.argv[2]) : null;
 if (!workspace) {
@@ -26,7 +27,7 @@ const output = path.join(outputDir, "verification.json");
 const temporary = `${output}.tmp-${process.pid}`;
 writeFileSync(temporary, JSON.stringify({
   version: "paper_reading_guide_verification.v1",
-  verified_at: new Date().toISOString(),
+  verified_at: REPRODUCIBLE_ARTIFACT_TIMESTAMP,
   inputs: Object.fromEntries(required.map((relative) => [relative, sha256File(path.join(workspace, relative))])),
   mode: "close",
   stage: "active",

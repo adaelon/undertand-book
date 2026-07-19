@@ -1,6 +1,6 @@
 // PP2 paper metadata input: same window text as Pass1 plus requested metadata fields.
 //   tsx skills/build/paper-metadata-input.ts <book.md|epub> <windowId> [--book-id <id>] --content-profile paper
-import { buildPaperMetadataWindowInput } from "../../packages/core/src/paper-metadata";
+import { analyzePaperMetadataCandidates } from "../../packages/core/src/paper-metadata-router";
 import { contentProfileUsage, parsePaperContentProfileArgsOrExit } from "./content-profile-options";
 import { loadBookWindows, windowById } from "./load-book";
 
@@ -19,12 +19,18 @@ if (!Number.isInteger(id)) {
 }
 
 const { source, byLid, windows } = loadBookWindows(book);
-const w = windowById(windows, id);
-const input = buildPaperMetadataWindowInput(w, byLid, source);
+windowById(windows, id);
+const routing = analyzePaperMetadataCandidates({ windows, byLid, source });
+const input = routing.packets[String(id)];
+if (!input) {
+  const skipped = routing.skip_reasons[String(id)];
+  throw new Error(`paper metadata window ${id} is not model-eligible: ${skipped?.code ?? "not_in_plan"}`);
+}
 
-console.log("PAPER_METADATA_WINDOW");
+console.log("PAPER_METADATA_CANDIDATE");
 console.log(`window_id: ${input.window_id}`);
 console.log(`visible_lids: ${JSON.stringify(input.visible_lids)}`);
+console.log(`signal_types: ${JSON.stringify(input.signal_types)}`);
 console.log(`requested_fields: ${JSON.stringify(input.requested_fields)}`);
 console.log("");
 console.log("TEXT");

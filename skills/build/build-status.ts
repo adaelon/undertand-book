@@ -10,6 +10,7 @@ import { splitWindows } from "../../packages/core/src/window";
 import { computeBuildStatus, type Pass1ArtifactMeta } from "../../packages/core/src/build-resume";
 import { deriveBookId } from "../../packages/core/src/book-id";
 import { contentProfileUsage, parseContentProfileArgsOrExit } from "./content-profile-options";
+import { semanticArtifactPayload } from "../../packages/core/src/semantic-artifact";
 
 const parsedProfile = parseContentProfileArgsOrExit(process.argv.slice(2), { allowPaperExecution: true });
 const argv = parsedProfile.argv;
@@ -38,7 +39,7 @@ const existing = new Map<number, Pass1ArtifactMeta>();
 for (const w of windows) {
   const f = `${pass1Dir}/${w.id}.json`;
   if (!existsSync(f)) continue;
-  const meta = JSON.parse(readFileSync(f, "utf8")) as Pass1ArtifactMeta;
+  const meta = semanticArtifactPayload<Pass1ArtifactMeta>(JSON.parse(readFileSync(f, "utf8")));
   if (typeof meta?.content_hash === "string") existing.set(w.id, { content_hash: meta.content_hash });
 }
 

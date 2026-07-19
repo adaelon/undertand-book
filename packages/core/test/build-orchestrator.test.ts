@@ -7,6 +7,7 @@ import {
   nextAutomaticBuildAction,
   buildAutomaticBuildSnapshot,
   resolveAutomaticBuildTarget,
+  type AutomaticBuildTarget,
   type AutomaticBuildSnapshot,
 } from "../src/build-orchestrator";
 import { buildSourceManifestV2 } from "../src/source-manifest";
@@ -16,6 +17,7 @@ import { segment } from "../src/segment";
 import { splitWindows } from "../src/window";
 import { buildPass1Artifact } from "../src/build-resume";
 import { resolveContentProfile } from "../src/content-profile";
+import { automaticBuildExtractionPolicy, buildSemanticArtifactEnvelope } from "../src/semantic-artifact";
 
 function tempDir(): string {
   return mkdtempSync(path.join(tmpdir(), "understand-book-orchestrator-"));
@@ -26,12 +28,25 @@ function writeJson(file: string, value: unknown): void {
   writeFileSync(file, JSON.stringify(value, null, 2), "utf8");
 }
 
+function pass1Envelope(target: AutomaticBuildTarget, taskId: number, payload: { content_hash: string; nodes: unknown[]; edges: unknown[] }) {
+  return buildSemanticArtifactEnvelope({
+    target: target.target_ref,
+    stage: "pass1",
+    work_unit_id: String(taskId),
+    input_hash: payload.content_hash,
+    policy_fingerprint: automaticBuildExtractionPolicy("pass1", resolveContentProfile(target.profile_id), "full"),
+    provenance: { executor: "test", model: "codex-test", attempt: 1, generated_at: "2026-07-19T00:00:00.000Z" },
+    payload,
+  });
+}
+
 function writeTrustedPaperWorkspace(root: string, bookId = "paper-a"): string {
   const dir = path.join(root, ".understand-book", bookId);
-  const source = "# Abstract\n\nThis paper studies retrieval.\n";
+  const source = "# Abstract\n\nThis paper studies Softmax Attention retrieval.\n\n# Discussion\n\nThe Softmax Attention comparison continues here.\n";
+  const draftSource = "# Abstract\n\nThis paper studies Softmax Attention retrieval with OCR noise.\n\n# Discussion\n\nThe Softmax Attention comparison continues here.\n";
   mkdirSync(dir, { recursive: true });
   writeFileSync(path.join(dir, "source.txt"), source, "utf8");
-  writeFileSync(path.join(dir, "paper.md"), source, "utf8");
+  writeFileSync(path.join(dir, "paper.md"), draftSource, "utf8");
   writeFileSync(path.join(dir, "paper.pdf"), "pdf", "utf8");
   writeJson(path.join(dir, "base.json"), { book_id: bookId, lid_nodes: [], graph_nodes: [], graph_edges: [] });
   writeJson(path.join(dir, "source_manifest.json"), buildSourceManifestV2({
@@ -47,7 +62,7 @@ function writeTrustedPaperWorkspace(root: string, bookId = "paper-a"): string {
   writeJson(path.join(dir, ".build", "source-reconciliation", "report.json"), {
     version: "source_reconciliation_report.v1",
     book_id: bookId,
-    input_fingerprint: { paper_md_sha256: sha256Text(source), paper_pdf_sha256: "sha-pdf", config_hash: "cfg-a" },
+    input_fingerprint: { paper_md_sha256: sha256Text(draftSource), paper_pdf_sha256: "sha-pdf", config_hash: "cfg-a" },
     summary: { ...emptyReconciliationSummary(), verified: 1 },
     unresolved: [],
   });
@@ -55,7 +70,8 @@ function writeTrustedPaperWorkspace(root: string, bookId = "paper-a"): string {
     version: "workbench_input_manifest.v1",
     book_id: bookId,
     profile_id: "paper",
-    inputs: { paper_md: { path: "paper.md", original_path: null, sha256: sha256Text(source) }, paper_pdf: { path: "paper.pdf", original_path: null, sha256: "sha-pdf" } },
+    fingerprint: { paper_md_sha256: sha256Text(draftSource), paper_pdf_sha256: "sha-pdf", config_hash: "cfg-a" },
+    inputs: { paper_md: { path: "paper.md", original_path: null, sha256: sha256Text(draftSource) }, paper_pdf: { path: "paper.pdf", original_path: null, sha256: "sha-pdf" } },
   });
   return dir;
 }
@@ -72,7 +88,36 @@ describe("automatic build orchestrator", () => {
       root_dir: path.resolve(root),
       workspace_dir: path.resolve(workspace),
       source_path: path.join(path.resolve(workspace), "source.txt"),
+      target_ref: {
+        version: "build_target_ref.v2",
+        workspace_dir: path.resolve(workspace),
+        book_id: "paper-a",
+        profile_id: "paper",
+        input_fingerprint: expect.any(String),
+      },
     });
+  });
+
+  it("resolves a reconciled source.txt back to its trusted paper workspace", () => {
+    const root = tempDir();
+    const workspace = writeTrustedPaperWorkspace(root);
+
+    expect(resolveAutomaticBuildTarget(path.join(workspace, "source.txt"), root)).toMatchObject({
+      kind: "paper_workspace",
+      book_id: "paper-a",
+      profile_id: "paper",
+      workspace_dir: path.resolve(workspace),
+      source_path: path.join(path.resolve(workspace), "source.txt"),
+    });
+  });
+
+  it("fails closed for an untrusted source.txt inside a build workspace", () => {
+    const root = tempDir();
+    const source = path.join(root, ".understand-book", "orphan", "source.txt");
+    mkdirSync(path.dirname(source), { recursive: true });
+    writeFileSync(source, "# Orphan\n", "utf8");
+
+    expect(() => resolveAutomaticBuildTarget(source, root)).toThrow("Workbench input manifest");
   });
 
   it("rejects a paper workspace whose trusted foundation is incomplete", () => {
@@ -99,7 +144,7 @@ describe("automatic build orchestrator", () => {
 
   it("selects only the first unfinished stage and batches pending semantic tasks", () => {
     const snapshot: AutomaticBuildSnapshot = {
-      target: { kind: "paper_workspace", profile_id: "paper", book_id: "paper-a", root_dir: "C:/repo", workspace_dir: "C:/repo/.understand-book/paper-a", source_path: "C:/repo/.understand-book/paper-a/source.txt" },
+      target: { kind: "paper_workspace", profile_id: "paper", book_id: "paper-a", root_dir: "C:/repo", workspace_dir: "C:/repo/.understand-book/paper-a", source_path: "C:/repo/.understand-book/paper-a/source.txt", target_ref: { version: "build_target_ref.v2", workspace_dir: "C:/repo/.understand-book/paper-a", book_id: "paper-a", profile_id: "paper", input_fingerprint: "paper-fingerprint" } },
       stages: [
         { stage: "pass1", pending_tasks: [], closed: true },
         { stage: "paper_metadata", pending_tasks: ["2", "4", "8", "9", "10", "11"], closed: false },
@@ -118,7 +163,7 @@ describe("automatic build orchestrator", () => {
 
   it("closes a stage only after every semantic task passes", () => {
     const snapshot: AutomaticBuildSnapshot = {
-      target: { kind: "source_file", profile_id: "technical_learning", book_id: "guide", root_dir: "C:/repo", workspace_dir: "C:/repo/.understand-book/guide", source_path: "C:/repo/guide.md" },
+      target: { kind: "source_file", profile_id: "technical_learning", book_id: "guide", root_dir: "C:/repo", workspace_dir: "C:/repo/.understand-book/guide", source_path: "C:/repo/guide.md", target_ref: { version: "build_target_ref.v2", workspace_dir: "C:/repo/.understand-book/guide", book_id: "guide", profile_id: "technical_learning", input_fingerprint: "source-fingerprint" } },
       stages: [{ stage: "pass1", pending_tasks: [], closed: false }],
     };
 
@@ -134,11 +179,12 @@ describe("automatic build orchestrator", () => {
     const byLid = new Map(lidNodes.map((node) => [node.lid, node]));
     const windows = splitWindows(lidNodes, source);
     const profile = resolveContentProfile("paper");
+    const target = resolveAutomaticBuildTarget(workspace, root);
     const anchorLid = lidNodes.find((node) => node.children.length === 0)!.lid;
     for (const window of windows) {
       writeJson(
         path.join(workspace, ".build", "pass1", `${window.id}.json`),
-        buildPass1Artifact(window, byLid, source, {
+        pass1Envelope(target, window.id, buildPass1Artifact(window, byLid, source, {
           nodes: window.id === windows[0].id ? [{
             id: "concept:retrieval",
             type: "concept",
@@ -147,7 +193,7 @@ describe("automatic build orchestrator", () => {
             source_lid: null,
           }] : [],
           edges: [],
-        }, profile),
+        }, profile)),
       );
     }
     writeJson(path.join(workspace, "base.json"), {
@@ -161,9 +207,19 @@ describe("automatic build orchestrator", () => {
     });
     writeJson(path.join(workspace, "long_range_candidates.json"), { candidates: [] });
 
-    const snapshot = buildAutomaticBuildSnapshot(resolveAutomaticBuildTarget(workspace, root));
+    const snapshot = buildAutomaticBuildSnapshot(target);
 
-    expect(snapshot.stages).toEqual([{ stage: "pass1", pending_tasks: [], closed: false }]);
+    expect(snapshot.stages).toMatchObject([{
+      stage: "pass1",
+      pending_tasks: [],
+      pending_work_units: [],
+      closed: false,
+    }]);
+    expect(snapshot.stages[0].work_units?.[0]).toMatchObject({
+      version: "automatic_build_work_unit.v2",
+      work_unit_id: "0",
+      kind: "pass1_window",
+    });
     expect(nextAutomaticBuildAction(snapshot)).toEqual({ kind: "close_stage", stage: "pass1" });
   });
 
@@ -176,10 +232,11 @@ describe("automatic build orchestrator", () => {
     const byLid = new Map(lidNodes.map((node) => [node.lid, node]));
     const windows = splitWindows(lidNodes, source);
     const profile = resolveContentProfile("paper");
+    const target = resolveAutomaticBuildTarget(workspace, root);
     for (const window of windows) {
       writeJson(
         path.join(workspace, ".build", "pass1", `${window.id}.json`),
-        buildPass1Artifact(window, byLid, source, { nodes: [], edges: [] }, profile),
+        pass1Envelope(target, window.id, buildPass1Artifact(window, byLid, source, { nodes: [], edges: [] }, profile)),
       );
     }
     writeFileSync(path.join(workspace, "pdf_source_map.json"), "map-sentinel", "utf8");
@@ -203,11 +260,71 @@ describe("automatic build orchestrator", () => {
     expect(readFileSync(path.join(workspace, "source_manifest.json"), "utf8")).toBe(manifestBefore);
     expect(readFileSync(path.join(workspace, "pdf_source_map.json"), "utf8")).toBe("map-sentinel");
     expect(JSON.parse(manifestBefore).canonical_source.kind).toBe("reconciled_markdown");
-    const target = resolveAutomaticBuildTarget(workspace, root);
-    expect(nextAutomaticBuildAction(buildAutomaticBuildSnapshot(target))).toMatchObject({
+    const metadataSnapshot = buildAutomaticBuildSnapshot(target);
+    const metadataStage = metadataSnapshot.stages.find((stage) => stage.stage === "paper_metadata")!;
+    expect(metadataStage.work_units).toHaveLength(2);
+    expect(metadataStage.work_units?.[1]).toMatchObject({
+      work_unit_id: "1",
+      deterministic_skip: { code: "no_metadata_signal" },
+      policy_fingerprint: { router_version: "paper_metadata_candidate.v2" },
+    });
+    expect(metadataStage.pending_work_units?.map((unit) => unit.work_unit_id)).toEqual(["0"]);
+    expect(nextAutomaticBuildAction(metadataSnapshot)).toMatchObject({
       kind: "extract",
       stage: "paper_metadata",
       extractor: "paper-metadata-extractor",
+      task_ids: ["0"],
+      work_units: [{ work_unit_id: "0" }],
+    });
+
+    const metadataUnit = metadataStage.pending_work_units![0];
+    writeJson(path.join(workspace, ".build", "paper-metadata", `${metadataUnit.work_unit_id}.json`), buildSemanticArtifactEnvelope({
+      target: target.target_ref,
+      stage: "paper_metadata",
+      work_unit_id: metadataUnit.work_unit_id,
+      input_hash: metadataUnit.input_hash,
+      policy_fingerprint: metadataUnit.policy_fingerprint,
+      provenance: { executor: "test", model: "codex-test", attempt: 1, generated_at: "2026-07-19T00:00:00.000Z" },
+      payload: { content_hash: metadataUnit.input_hash, metadata: {} },
+    }));
+    writeJson(path.join(workspace, "paper_metadata.json"), { header: { book_id: target.book_id, profile_id: "paper" } });
+
+    const lexiconSnapshot = buildAutomaticBuildSnapshot(target);
+    const lexiconStage = lexiconSnapshot.stages.find((stage) => stage.stage === "paper_lexicon")!;
+    expect(lexiconStage.pending_work_units?.length).toBeGreaterThan(0);
+    expect(lexiconStage.pending_work_units?.every((unit) => unit.work_unit_id.startsWith("lexicon-batch-"))).toBe(true);
+    expect(lexiconStage.work_units?.filter((unit) => unit.deterministic_skip)
+      .every((unit) => !lexiconStage.pending_tasks.includes(unit.work_unit_id))).toBe(true);
+    expect(nextAutomaticBuildAction(lexiconSnapshot)).toMatchObject({
+      kind: "extract",
+      stage: "paper_lexicon",
+      task_ids: lexiconStage.pending_tasks,
+    });
+
+    for (const unit of lexiconStage.pending_work_units ?? []) {
+      writeJson(path.join(workspace, ".build", "paper-lexicon", `${unit.work_unit_id}.json`), buildSemanticArtifactEnvelope({
+        target: target.target_ref,
+        stage: "paper_lexicon",
+        work_unit_id: unit.work_unit_id,
+        input_hash: unit.input_hash,
+        policy_fingerprint: unit.policy_fingerprint,
+        provenance: { executor: "test", model: "codex-test", attempt: 1, generated_at: "2026-07-19T00:00:00.000Z" },
+        payload: { content_hash: unit.input_hash, entries: [] },
+      }));
+    }
+    writeJson(path.join(workspace, "paper_lexicon.json"), { header: { book_id: target.book_id, profile_id: "paper" }, entries: [] });
+
+    const sidecarSnapshot = buildAutomaticBuildSnapshot(target);
+    const sidecarStage = sidecarSnapshot.stages.find((stage) => stage.stage === "profile_sidecar")!;
+    expect(sidecarStage.pending_work_units?.length).toBeGreaterThan(0);
+    expect(sidecarStage.pending_work_units?.every((unit) => unit.kind === "profile_sidecar_discourse")).toBe(true);
+    expect(sidecarStage.work_units?.some((unit) => unit.kind === "profile_sidecar_formula" && unit.deterministic_skip?.code === "no_formula_in_window")).toBe(true);
+    expect(sidecarStage.work_units?.filter((unit) => unit.deterministic_skip)
+      .every((unit) => !sidecarStage.pending_tasks.includes(unit.work_unit_id))).toBe(true);
+    expect(nextAutomaticBuildAction(sidecarSnapshot)).toMatchObject({
+      kind: "extract",
+      stage: "profile_sidecar",
+      task_ids: sidecarStage.pending_tasks,
     });
   });
 });

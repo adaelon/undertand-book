@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
   buildProfileArtifactHeader,
   buildProfileMetadata,
+  buildReproducibleProfileArtifactHeader,
   CORE_SCHEMA_VERSION,
   DEFAULT_BOOK_VERSION,
+  REPRODUCIBLE_ARTIFACT_TIMESTAMP,
   TECHNICAL_LEARNING_PROFILE_ID,
   TECHNICAL_LEARNING_PROFILE_VERSION,
 } from "../src/profile-artifact";
@@ -40,6 +42,20 @@ describe("PB0 profile artifact metadata", () => {
 
     expect(defaults).toEqual(explicit);
     expect(resolveContentProfile()).toEqual(resolveContentProfile("technical_learning"));
+  });
+
+  it("separates reproducible semantic projection time from runtime receipts", () => {
+    const first = buildReproducibleProfileArtifactHeader({
+      book_id: "book-a",
+      content_profile: "paper",
+    });
+    const second = buildReproducibleProfileArtifactHeader({
+      book_id: "book-a",
+      content_profile: "paper",
+    });
+
+    expect(first.generated_at).toBe(REPRODUCIBLE_ARTIFACT_TIMESTAMP);
+    expect(second).toEqual(first);
   });
 
   it("builds paper profile headers after PP0.5 resolver support", () => {

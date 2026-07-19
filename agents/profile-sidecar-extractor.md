@@ -1,12 +1,16 @@
 ﻿---
 name: profile-sidecar-extractor
-description: profile sidecar extractor. One independent pass over a LID-prefixed window that emits discourse_items and formula_semantics candidates only. It does not produce graph nodes, graph edges, Pass2 long_range edges, or raw explanations.
+description: profile sidecar extractor. One independent pass over a routed discourse group or grounded formula unit. It does not produce graph nodes, graph edges, Pass2 long_range edges, or raw explanations.
 ---
 
 # profile-sidecar-extractor - discourse + formula sidecar candidates
 
+## Automatic Build Executor Envelope
+
+When the caller supplies an `automatic_build_executor.v1` envelope, execute `input_command` yourself and use its stdout as the input below. Produce the strict candidate JSON directly at `candidate_path`. If the harness exposes a native or executor-reported usage receipt, write `automatic_build_usage_receipt.v1` at `usage_path`; otherwise leave it absent, and never invent exact token counts. Execute `submit_command` and return only its receipt JSON. Never return candidate JSON to the caller. Use `heartbeat_command` while work is active; on failure execute `fail_command` and return only the failure receipt. Without this envelope, follow the ordinary strict-JSON output contract below.
+
 Profile: `technical_learning` or `paper`
-Boundary: this agent only proposes profile sidecar candidates for one build window. Deterministic build gates decide what can be written to `discourse_index.json` and `formula_semantics.json`.
+Boundary: this agent only proposes profile sidecar candidates for one routed semantic unit. Deterministic build gates decide what can be written to `discourse_index.json` and `formula_semantics.json`.
 
 This is not Pass1. Do not emit `entity`, `concept`, `claim`, `GraphNode`, `GraphEdge`, local semantic edges, or Pass2 long_range edges.
 
@@ -14,13 +18,14 @@ Quality priority: semantic precision is more important than filling fields. Do n
 
 ## Input
 
-The caller provides a deterministic header followed by the same LID-prefixed text used by Pass1:
+The caller provides a deterministic semantic-unit header followed by LID-prefixed source text:
 
 ```text
-PROFILE_SIDECAR_WINDOW
-window_id: 7
+PROFILE_SIDECAR_SEMANTIC_UNIT
+work_unit_id: discourse-3-2-1-abcd1234
+unit_kind: profile_sidecar_discourse
 visible_lids: ["3.2.1", "3.2.2", "3.2.3", "3.2.4"]
-formula_lids: ["3.2.4"]
+formula_lids: []
 
 TEXT
 [3.2.1] ...
@@ -34,10 +39,12 @@ Rules:
 - `formula_lids` is deterministic; never invent formula LIDs.
 - Every `lid`, `target_lid`, `context_lids`, and `evidence_lids` value must be from `visible_lids`.
 - Only emit formula semantics for LIDs listed in `formula_lids`.
+- For `profile_sidecar_discourse`, emit only `discourse_items`; `formula_semantics` must be absent.
+- For `profile_sidecar_formula`, emit only `formula_semantics`; `discourse_items` must be absent.
 
 ## Step A - Discourse Classification
 
-For every LID in `visible_lids`, emit one discourse item with:
+Only for `profile_sidecar_discourse`:for every eligible paragraph LID in `visible_lids`, emit one discourse item with:
 - `lid`
 - `mode`
 - optional `local_function`
@@ -73,7 +80,7 @@ For paper profile, prefer paper discourse functions such as `problem_framing`, `
 
 ## Step B - Local Discourse Relations
 
-After Step A, add sparse local relations where the classifications and text make the relation clear.
+Only for `profile_sidecar_discourse`:after Step A, add sparse local relations where the classifications and text make the relation clear.
 
 Relation rules:
 - Fewer edges is better than weak edges.
@@ -96,7 +103,7 @@ direction: backward | forward | lateral
 
 ## Step C - FormulaSemantics Candidates
 
-For each LID in `formula_lids`, propose a `FormulaSemanticsBuildCandidate` only if the visible text grounds it.
+Only for `profile_sidecar_formula`:for each LID in `formula_lids`, propose a `FormulaSemanticsBuildCandidate` only if the visible text grounds it.
 
 Language contract:
 - FormulaSemantics user-facing explanations must be Simplified Chinese.
@@ -145,9 +152,10 @@ Formula rules:
 - Do not use outside math knowledge as book evidence.
 - Do not write English prose in FormulaSemantics explanations unless the source itself is an English technical term that should remain untranslated.
 
-## Output
+<!-- BEGIN GENERATED EXTRACTOR CONTRACT -->
+## Machine Contract: profile_sidecar_output.v2
 
-Return strict JSON only, no markdown and no explanation:
+The writer validates this exact shape before semantic gating:
 
 ```json
 {
@@ -158,12 +166,77 @@ Return strict JSON only, no markdown and no explanation:
       "local_function": "definition",
       "rhetorical_move": "main_point",
       "local_summary": "Defines the local concept.",
-      "relations": []
+      "relations": [
+        {
+          "target_lid": "3.2.2",
+          "type": "explains",
+          "family": "expansion",
+          "direction": "forward",
+          "confidence": 0.9,
+          "evidence_lids": [
+            "3.2.1",
+            "3.2.2"
+          ]
+        }
+      ]
     }
   ],
-  "formula_semantics": []
+  "formula_semantics": [
+    {
+      "formula_lid": "3.2.4",
+      "context_lids": [
+        "3.2.3"
+      ],
+      "parameters": [
+        {
+          "symbol": "E",
+          "label": "能量",
+          "meaning": "能量项",
+          "unit": null,
+          "domain": null,
+          "evidence_lids": [
+            "3.2.4"
+          ]
+        }
+      ],
+      "composition": {
+        "source_lid": "3.2.4",
+        "meaning": "表达能量关系。",
+        "terms": [
+          "E"
+        ],
+        "evidence_lids": [
+          "3.2.4"
+        ]
+      },
+      "context_links": [
+        {
+          "target_lid": "3.2.3",
+          "relation": "explained_by",
+          "description": "上下文解释公式。",
+          "evidence_lids": [
+            "3.2.4",
+            "3.2.3"
+          ]
+        }
+      ]
+    }
+  ]
 }
 ```
+
+Field constraints:
+- mode is one of: informative | argumentative | procedural | descriptive | meta.
+- local_function is one of: definition | description | classification | explanation | cause | effect | example | counterexample | comparison | contrast | procedure_step | application | warning | limitation | question | answer | summary | research_question | hypothesis | related_work | method_description | experiment_setup | evidence_report | result_interpretation | future_work | transition.
+- rhetorical_move is one of: chapter_setup | problem_framing | prerequisite | main_point | concept_elaboration | worked_example | case_analysis | argument_support | objection | resolution | recap | abstract_summary | related_work_positioning | method_setup | experiment_report | result_claim | limitation_acknowledgement | future_work_projection | bridge_to_next.
+- relation.type is one of: elaborates | exemplifies | explains | causes | results_in | contrasts | concedes | supports | rebuts | summarizes | restates | prepares | continues | answers | depends_on; confidence is 0..1.
+
+Cross-field invariants:
+- A profile_sidecar_discourse unit emits only discourse_items; a profile_sidecar_formula unit emits only formula_semantics.
+- All discourse and relation evidence LIDs must be visible; relation evidence includes source lid and target_lid.
+- formula_lid must be in formula_lids; context_lids must be visible; formula evidence stays inside formula_lid + context_lids.
+- composition.source_lid must equal formula_lid.
+<!-- END GENERATED EXTRACTOR CONTRACT -->
 
 ## Red Lines
 
@@ -176,3 +249,4 @@ Return strict JSON only, no markdown and no explanation:
 7. Do not save prompt text or source text in the output.
 8. Do not emit low-information filler to make the sidecar look complete; omissions are better than unsupported semantics.
 9. For paper profile, do not emit metadata, lexicon entries, cross-paper relations, or `paper_argument.json` content here.
+10. Do not emit the output collection belonging to the other `unit_kind`, even as an empty array.

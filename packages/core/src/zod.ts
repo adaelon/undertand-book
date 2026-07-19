@@ -12,6 +12,38 @@ export const ProfileArtifactHeaderZ = z.object({
   core_schema_version: z.string().min(1),
   generated_at: z.string().min(1),
 });
+export const BuildTargetRefV2Z = z.object({
+  version: z.literal("build_target_ref.v2"),
+  workspace_dir: z.string().min(1),
+  book_id: z.string().min(1),
+  profile_id: z.enum(SUPPORTED_CONTENT_PROFILE_IDS),
+  input_fingerprint: z.string().min(1),
+}).strict();
+export const ExtractionPolicyFingerprintV1Z = z.object({
+  profile_id: z.string().min(1),
+  profile_version: z.string().min(1),
+  stage_policy_version: z.string().min(1),
+  router_version: z.string().min(1),
+  prompt_sha256: z.string().regex(/^[a-f0-9]{64}$/),
+  schema_version: z.string().min(1),
+  quality_profile: z.enum(["full", "balanced", "sparse"]),
+}).strict();
+export const SemanticArtifactEnvelopeV2Z = z.object({
+  version: z.literal("semantic_task_artifact.v2"),
+  target: BuildTargetRefV2Z,
+  stage: z.enum(["pass1", "paper_metadata", "paper_lexicon", "profile_sidecar", "pass2", "book_structure"]),
+  work_unit_id: z.string().min(1),
+  input_hash: z.string().min(1),
+  policy_fingerprint: ExtractionPolicyFingerprintV1Z,
+  artifact_hash: z.string().regex(/^[a-f0-9]{64}$/),
+  provenance: z.object({
+    executor: z.string().min(1),
+    model: z.string().min(1).optional(),
+    attempt: z.number().int().positive(),
+    generated_at: z.string().datetime(),
+  }).strict(),
+  payload: z.unknown(),
+}).strict();
 export const SpanZ = z.object({
   start: z.number().int().nonnegative(),
   end: z.number().int().nonnegative(),

@@ -21,27 +21,69 @@ contract,也不得在普通 stage 边界停下等待用户继续。
      `understand-book-build.exe`。
    - 仅插件开发/非 Windows 环境允许回退 Node:若缺少 `node_modules/tsx`,在插件根运行
      `pnpm install --frozen-lockfile`;依赖失败则报告阻塞,不得伪造构建。
-2. 安装版执行第一种命令;开发回退执行第二种命令:
+2. 每次进入一个可能需要模型抽取的 stage,先用与后续 `next` 完全相同的
+   `--max-parallel`、`--quality-profile` 和预算参数执行只读 preflight。`--max-parallel`
+   是已接受计划允许的 worker 上限(最多 3);`--available-agent-slots` 是此刻真正空闲的专用
+   subagent/multi-agent 槽位,必须在每次 `plan/next` 前按 harness 事实重算:
 
    ```text
-   <understand-book-build.exe> next <target> --plugin-root <插件根目录>
-   node node_modules/tsx/dist/cli.mjs skills/build/automatic-build.ts next <target>
+   <understand-book-build.exe> plan <target> --plugin-root <插件根目录> --max-parallel <1..3> --available-agent-slots <0..3> [策略与预算参数]
+   node node_modules/tsx/dist/cli.mjs skills/build/automatic-build.ts plan <target> --max-parallel <1..3> --available-agent-slots <0..3> [策略与预算参数]
    ```
 
+   只消费 stdout 的 `automatic_build_plan.v1` JSON。`preflight=null` 表示下一步不需要模型,
+   直接执行 `next`;否则先检查 work-unit 数量、成本分布、估算 Token 区间、质量策略、预算状态和
+   worker plan。`preflight.budget.status=exceeded` 时停止并报告
+   `needs_user(budget_exceeded)`,不得 claim。预算内则冻结并传回 `plan_digest`:
+
+   ```text
+   <understand-book-build.exe> next <target> --plugin-root <插件根目录> [相同策略/预算] --max-parallel <1..3> --available-agent-slots <当前值> --accepted-plan <plan_digest>
+   node node_modules/tsx/dist/cli.mjs skills/build/automatic-build.ts next <target> [相同策略/预算] --max-parallel <1..3> --available-agent-slots <当前值> --accepted-plan <plan_digest>
+   ```
+
+   `available_agent_slots` 不进入 plan identity,因此槽位缩减不会使已接受 digest 漂移;
+   `worker_plan.max_workers=min(requested,available,3,max_parallel_cost 容量)`。0 槽位返回
+   `needs_user(executor_unavailable)`;plan 不创建 task、attempt 或 lease 状态。
+
 3. 只消费 stdout 的 `automatic_build_next.v1` JSON:
-   - `action.kind=extract`:若有 `extractor_prompt_command` 则执行并完整读取其 stdout,否则完整读取
-     `extractor_prompt`;对 `tasks[]` 先执行 `input_command`,再按
-     可用 multi-agent 槽位并发启动专用 subagent。每个 subagent 只接收该 prompt + 该 task
-     input,只返回契约 JSON。把输出写入临时 JSON 后执行 `write_command`(替换
-     `{output_json}`)。write 成功后必须执行该 task 的 `record_success_command`;subagent、
-     writer 或 gate 失败时必须执行 `record_failure_command`(替换 `{diagnostic}`),再把确定性
-     诊断反馈给同一任务重抽。不得在内存中自行计算尝试次数。
+   - `action.kind=extract`:若没有可用专用 subagent/multi-agent 槽位,立即停止并报告
+     `needs_user(executor_unavailable)`,不得由 root 代跑模型。若有
+     `extractor_prompt_command`,读取 prompt;否则读取 `extractor_prompt`。随后按可用槽位启动
+     专用 subagent,每个只接收 prompt 与一个 `automatic_build_executor.v1` 信封。启动数必须等于
+     `action.tasks.length`,不得超过 `worker_plan.max_workers`:
+
+     ```text
+     task_id / attempt_number / lease_ref
+     input_command / candidate_path / usage_path / submit_command
+     heartbeat_command / fail_command / inspect_command
+     ```
+
+     subagent 必须自行执行 `input_command`,把该 stdout 作为唯一抽取输入;模型候选必须由
+     subagent 直接写入 `candidate_path`;若 harness 提供原生或 executor-reported usage receipt,按
+     `automatic_build_usage_receipt.v1` 写入 `usage_path`,否则不创建该文件。`source=unavailable`
+     时禁止写任何精确 Token 字段,estimate 必须使用独立的带版本 method。随后自行执行
+     `submit_command`。成功时只向 root 返回
+     submit stdout 的 `automatic_build_task_receipt.v1`;失败时自行执行 `fail_command` 并只返回
+     failure receipt。root 只把本批最多 3 个 bounded receipt 组成临时 receipt 列表,核对
+     `receipt_aggregation.expected_receipts/max_total_bytes` 后丢弃列表并回到步骤 2;不得把 receipt
+     扩成 artifact 内容。root 禁止接收、复述、缓存、写入或转发 candidate JSON,也禁止调用
+     `legacy-submit` 兼容入口。长任务由 subagent 执行 `heartbeat_command`。尝试次数与任务完成
+     真相只从 lease/mailbox/receipt 得出,不得在对话内计算。
+   - `action.kind=waiting`:按 `retry_after_ms` 有界等待后重新执行步骤 2;不得重发 active lease。
    - `action.kind=close_stage`:原样执行 `command`;禁止添加 `--allow-partial`。失败时保留磁盘
-     中已完成窗口并报告结构化 stderr。
-   - `action.kind=needs_user`:停止自动 loop,向用户展示 stage、task id、最后诊断与
-     `reset_commands`;只有用户确认重试后才能执行 reset。
+     中已完成窗口并报告结构化 stderr。semantic close 的 action 必须带已通过的
+     `automatic_build_stage_quality_report.v1`;close 会在事务发布前重新计算并把报告写入
+     `.build/automatic-build/v2/quality/<stage>.json`,不得绕过或手改报告。
+   - `action.kind=needs_user`:停止自动 loop。预算类展示 `reason`、stage、plan digest 与
+     violations;`preflight_required` 表示尚未确认当前计划;`plan_changed` 表示 descriptor、质量、
+     policy、预算或 worker 请求已变化,必须回到步骤 2 重新 plan。`legacy_migration_required`
+     必须展示只读 audit 与 `legacy_resume/v2_rebuild` 两个命令,等待用户显式选择;root 不得代选。
+     `legacy_resume_selected` 只能转回冻结的 production v1 contract,其结果始终标
+     `legacy_policy_unknown`,不得继续 v2 loop。`quality_gate_failed` 必须分别展示 integrity 与
+     selected quality floor violations,不得用全叶锚定率、LLM 自评或 `--allow-partial` 覆盖。重试耗尽时展示 task id、
+     最后诊断与 `reset_commands`;只有用户确认重试后才能执行 reset。
    - `action.kind=done`:报告 workspace 路径和已完成阶段,结束 goal。
-4. 每批 write 或 stage close 后立即回到步骤 2。磁盘 `.build/<stage>` 是唯一续建真相;
+4. 每批 write 或 stage close 后立即回到步骤 2 重新生成当前 pending 集合的 preflight。磁盘 `.build/<stage>` 是唯一续建真相;
    不依赖对话记忆判断 done/pending。
 
 硬边界:
@@ -51,6 +93,9 @@ contract,也不得在普通 stage 边界停下等待用户继续。
 - 专用 subagent/multi-agent 不可用时 fail-fast;不允许主 agent 用通用摘要、空节点、
   reject-all 或模板 sidecar 降级。
 - 自动修复最多 2 次(总尝试 3 次);之后才向用户展示 task id、gate 诊断和重试/停止选择。
+- v2 claim 前若发现 legacy/mixed artifact,必须先执行 `audit-legacy`;`v2_rebuild` 会把旧文件
+  复制到不可变 legacy snapshot 后再执行,绝不删除或原地伪装 policy。公共 artifact 仅在完整
+  v2 candidate set 通过 integrity+quality 后经事务发布;失败恢复旧公共集合。
 - 正常条件下一次调用跑完;配额、进程或机器外部中断后,再次调用同一命令幂等续跑。
 
 > **调用形态**:插件 skill 强制命名空间 = `/<插件名>:<skill文件夹名>`。本插件 name
@@ -204,26 +249,27 @@ TEXT
 → `packages/core/src/generated/`)。
 ## profile-sidecar 独立抽取趟 `[PB6]`
 
-> `discourse_index.json` 与 `formula_semantics.json` 不属于 Pass1 收口;不要把它们塞进 `pass1-batch`。PB6 是第二条独立 profile artifact 抽取趟:复用同一 window/input/hash,但读写 `.build/profile-sidecar/`。PP5 起 `--content-profile paper` 会在 input 的 `TEXT` 段内注入 `PAPER_DISCOURSE_RULES`,并将 content_hash 绑定到 profile-aware input。
+> `discourse_index.json` 与 `formula_semantics.json` 不属于 Pass1 收口;不要把它们塞进 `pass1-batch`。PB6 先把正文段落组与 grounded formula 拆成独立 semantic units,再读写 `.build/profile-sidecar/`。paper discourse unit 会注入 `PAPER_DISCOURSE_RULES`;formula unit 只携公式与邻接解释。
 
 ```text
 1. tsx skills/build/profile-sidecar-status.ts <book> [--book-id <id>]
-   -> 查看 `.build/profile-sidecar/<id>.json` 的 done/pending(content_hash 校验)
-2. 对每个 pending window id:
-   a. tsx skills/build/profile-sidecar-input.ts <book> <id>
-      -> 输出 visible_lids + formula_lids + `[LID]` 正文
+   -> 查看 discourse eligible/group 与 formula eligible/skip/done/pending accounting
+2. 对每个 pending `discourse-*` / `formula-*` work unit:
+   a. tsx skills/build/profile-sidecar-input.ts <book> <work-unit-id>
+      -> 输出 unit_kind + visible_lids + formula_lids + `[LID]` 正文
    b. 交给 subagent profile-sidecar-extractor
-      -> 只产 {discourse_items, formula_semantics}
-   c. tsx skills/build/profile-sidecar-write.ts <book> <id> out.json
-      -> 原子写 `.build/profile-sidecar/<id>.json`
-3. 全 done -> tsx skills/build/profile-sidecar-batch.ts <book>
+      -> discourse unit 只产 discourse_items;formula unit 只产 formula_semantics
+   c. tsx skills/build/profile-sidecar-write.ts <book> <work-unit-id> out.json
+      -> 互斥 gate 后原子写 `.build/profile-sidecar/<work-unit-id>.json`
+3. 全部 eligible semantic units done -> tsx skills/build/profile-sidecar-batch.ts <book>
    -> 只写 `discourse_index.json` / `formula_semantics.json`
 ```
 
 铁律:
 - profile-sidecar batch 不改 `base.json` / `source.txt` / `profile_metadata.json` / `long_range_candidates.json`。
-- `formula_lids` 由 `LidNode.kind === "formula"` 确定性注入,LLM 不判断哪些 LID 是公式。
-- 每个 pending window 必须交 `profile-sidecar-extractor` 做真实语义抽取;不得用模板化 discourse item
+- `formula_lids` 由 `LidNode.kind === "formula"` + fragment/context router 确定性注入,LLM 不判断哪些 LID 是公式。
+- 裸变量、页码/脚注、文本装饰、bibliography 公式与无解释公式必须 deterministic skip,不得生成空 artifact 或 discourse item。
+- 每个 pending semantic unit 必须交 `profile-sidecar-extractor` 做真实语义抽取;不得用模板化 discourse item
   或“以相邻原文为准”这类通用 formula 解释填满 sidecar。
 - 对公式语义,宁可让无证据公式保持 pending/omit 后暴露质量缺口,也不要编造参数、单位或组合含义。
 - pending 默认拒绝收口;`--allow-partial` 只用于 smoke/救急。
@@ -235,21 +281,22 @@ TEXT
 
 ```text
 1. tsx skills/build/paper-metadata-status.ts <book> [--book-id <id>] --content-profile paper
-   -> 查看 `.build/paper-metadata/<id>.json` 的 done/pending(content_hash 校验)
-2. 对每个 pending window id:
+   -> 查看 candidate router 的 eligible/skipped/done/pending(content_hash 校验)
+2. 对每个 pending candidate id:
    a. tsx skills/build/paper-metadata-input.ts <book> <id> --content-profile paper
-      -> 输出 visible_lids + requested_fields + `[LID]` 正文
+      -> 输出 signal_types + visible_lids + requested_fields + `[LID]` 正文
    b. 交给 subagent paper-metadata-extractor
       -> 只产 `{paper_metadata: {...}}`
    c. tsx skills/build/paper-metadata-write.ts <book> <id> out.json --content-profile paper
       -> 校验 MetadataField envelope / LID evidence 后原子写 `.build/paper-metadata/<id>.json`
-3. 全 done -> tsx skills/build/paper-metadata-batch.ts <book> --content-profile paper
-   -> 合并字段,写 `paper_metadata.json`
+3. 全部 eligible candidate done -> tsx skills/build/paper-metadata-batch.ts <book> --content-profile paper
+   -> 合并模型字段与确定性 bibliography references,写 `paper_metadata.json`
 ```
 
 铁律:
 - 所有业务字段必须是 `{value, source, evidence_lids?, confidence?}`;裸字符串/裸数组直接 fail-fast。
 - `front_matter` / `paper_text` 来源字段必须带真实 LID evidence。
+- 无 metadata 信号窗口必须记录 deterministic skip,不得生成空模型 artifact;编号清晰且有年份/identifier 锚点的 bibliography reference 由 router 确定性合并,只有歧义项进入模型 candidate。
 - 不做 author disambiguation、institution canonicalization、BibTeX/CSL 或 reference graph。
 - pending 默认拒绝收口;`--allow-partial` 只用于 smoke/救急。
 
@@ -259,20 +306,22 @@ TEXT
 
 ```text
 1. tsx skills/build/paper-lexicon-status.ts <book> [--book-id <id>] --content-profile paper
-   -> 查看 `.build/paper-lexicon/<id>.json` 的 done/pending(content_hash 校验)
-2. 对每个 pending window id:
-   a. tsx skills/build/paper-lexicon-input.ts <book> <id> --content-profile paper
-      -> 输出 visible_lids + requested_term_types + `[LID]` 正文
+   -> 查看 normalized clusters / budgeted batches / skipped windows / done / pending
+2. 对每个 pending `lexicon-batch-<digest>`:
+   a. tsx skills/build/paper-lexicon-input.ts <book> <work-unit-id> --content-profile paper
+      -> 输出 candidate_clusters + visible_lids + requested_term_types + `[LID]` 代表上下文
    b. 交给 subagent paper-lexicon-extractor
       -> 只产 `{entries:[...]}`
-   c. tsx skills/build/paper-lexicon-write.ts <book> <id> out.json --content-profile paper
-      -> 校验 term_type / occurrences_lids / defined_at_lid 后原子写 `.build/paper-lexicon/<id>.json`
-3. 全 done -> tsx skills/build/paper-lexicon-batch.ts <book> --content-profile paper
+   c. tsx skills/build/paper-lexicon-write.ts <book> <work-unit-id> out.json --content-profile paper
+      -> 校验候选边界 / term_type / occurrence / definition 后原子写 `.build/paper-lexicon/<work-unit-id>.json`
+3. 全部 candidate batch done -> tsx skills/build/paper-lexicon-batch.ts <book> --content-profile paper
    -> 合并去重,写 `paper_lexicon.json`
 ```
 
 铁律:
 - 每个条目必须有非空 `occurrences_lids`,且全是真实 LID。
+- 同一 normalized term/acronym 的 occurrence 必须先聚成一个 cluster,再按 context cost 合批;不得恢复逐 Pass1 window 重复抽取。
+- 无候选窗口只写 deterministic skip descriptor,不生成空 lexicon artifact;模型不得输出 candidate_clusters 外术语。
 - `defined_at_lid` 只在论文明确给出定义时填写,且必须也出现在 `occurrences_lids` 中。
 - 不收普通英语生词;不得预生成长中文解释或全文翻译。
 - pending 默认拒绝收口;`--allow-partial` 只用于 smoke/救急。

@@ -2,10 +2,11 @@
 //   tsx skills/build/paper-metadata-status.ts <book.md|epub> [--book-id <id>] --content-profile paper
 import { existsSync, readFileSync } from "node:fs";
 import { deriveBookId } from "../../packages/core/src/book-id";
-import { computePaperMetadataStatus } from "../../packages/core/src/paper-metadata";
+import { computePaperMetadataCandidateStatus } from "../../packages/core/src/paper-metadata-router";
 import type { Pass1ArtifactMeta } from "../../packages/core/src/build-resume";
 import { contentProfileUsage, parsePaperContentProfileArgsOrExit } from "./content-profile-options";
 import { loadBookWindows } from "./load-book";
+import { semanticArtifactPayload } from "../../packages/core/src/semantic-artifact";
 
 const parsedProfile = parsePaperContentProfileArgsOrExit(process.argv.slice(2));
 const argv = parsedProfile.argv;
@@ -24,13 +25,13 @@ const existing = new Map<number, Pass1ArtifactMeta>();
 for (const w of windows) {
   const f = `${dir}/${w.id}.json`;
   if (!existsSync(f)) continue;
-  const meta = JSON.parse(readFileSync(f, "utf8")) as Pass1ArtifactMeta;
+  const meta = semanticArtifactPayload<Pass1ArtifactMeta>(JSON.parse(readFileSync(f, "utf8")));
   if (typeof meta?.content_hash === "string") existing.set(w.id, { content_hash: meta.content_hash });
 }
 
-const { done, pending } = computePaperMetadataStatus(windows, byLid, source, existing);
+const status = computePaperMetadataCandidateStatus({ windows, byLid, source, existing });
 console.log(`[paper-metadata-status] ${book}  bookId=${bookId}  content_profile=${parsedProfile.contentProfile.id}`);
-console.log(`  windows=${windows.length}  done=${done.length}  pending=${pending.length}`);
+console.log(`  windows=${status.total}  eligible=${status.eligible}  skipped=${status.skipped}  done=${status.committed}  pending=${status.pending}`);
 console.log(`  artifact dir: ${dir}`);
-if (pending.length) console.log(`  pending ids: ${pending.join(",")}`);
+if (status.pending_ids.length) console.log(`  pending ids: ${status.pending_ids.join(",")}`);
 else console.log(`  all windows done -> can close with: tsx skills/build/paper-metadata-batch.ts ${book} --content-profile paper`);

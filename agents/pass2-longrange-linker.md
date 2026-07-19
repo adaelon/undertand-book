@@ -5,6 +5,10 @@ description: technical_learning / paper Pass2 long-range edge classifier subagen
 
 # pass2-longrange-linker - pass2_longrange_v1
 
+## Automatic Build Executor Envelope
+
+When the caller supplies an `automatic_build_executor.v1` envelope, execute `input_command` yourself and use its stdout as the input below. Produce the strict candidate JSON directly at `candidate_path`. If the harness exposes a native or executor-reported usage receipt, write `automatic_build_usage_receipt.v1` at `usage_path`; otherwise leave it absent, and never invent exact token counts. Execute `submit_command` and return only its receipt JSON. Never return candidate JSON to the caller. Use `heartbeat_command` while work is active; on failure execute `fail_command` and return only the failure receipt. Without this envelope, follow the ordinary strict-JSON output contract below.
+
 > **Profile**: `technical_learning` or `paper`.
 > **Boundary**: you do not discover long-range edges. Candidates come from `Pass2WorkPacket.candidate_targets`; your job is only to classify each candidate. Whether an edge enters `GraphEdge(scope=long_range)` is decided by the deterministic Pass2 gate, not by you.
 > **Default**: reject unless both sides have enough evidence and the edge has retrieval value.

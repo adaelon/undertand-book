@@ -1,11 +1,12 @@
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const desktopRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const repoRoot = path.resolve(desktopRoot, "..", "..");
 const sidecar = path.join(
   desktopRoot,
   "src-tauri",
@@ -37,7 +38,8 @@ function simplePdf(text) {
   return Buffer.from(value);
 }
 
-const workspace = mkdtempSync(path.join(tmpdir(), "understand-book-sidecar-smoke-"));
+const smokeRoot = mkdtempSync(path.join(tmpdir(), "understand-book-sidecar-smoke-"));
+const workspace = path.join(smokeRoot, ".understand-book", "paper-sidecar-smoke");
 const jobId = "job_sidecar_smoke";
 const markdown = '<div style="text-align: center;"><div style="text-align: center;">Hello PDF</div> </div>\n';
 const pdf = simplePdf("Hello PDF");
@@ -83,6 +85,47 @@ function spawnStage(stage, runId) {
       `workbench sidecar ${stage} smoke failed (${result.status}):\n${result.stdout}\n${result.stderr}\n${JSON.stringify(failedJob.failure_summary)}`,
     );
   }
+}
+
+function spawnGenerated(command, replacements = {}) {
+  const args = command.slice(1).map((value) => replacements[value] ?? value);
+  const result = spawnSync(command[0], args, { encoding: "utf8", timeout: 30_000 });
+  if (result.error) throw result.error;
+  if (result.status !== 0) {
+    throw new Error(`generated sidecar command failed (${result.status}):\n${result.stdout}\n${result.stderr}`);
+  }
+  return result;
+}
+
+function spawnCaptured(command, args) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { windowsHide: true });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.on("error", reject);
+    child.on("close", (status) => resolve({ status, stdout, stderr }));
+  });
+}
+
+function spawnSidecarJson(args, label) {
+  const result = spawnSync(sidecar, args, { encoding: "utf8", timeout: 30_000 });
+  if (result.error) throw result.error;
+  if (result.status !== 0) {
+    throw new Error(`${label} failed (${result.status}):\n${result.stdout}\n${result.stderr}`);
+  }
+  return { result, value: JSON.parse(result.stdout) };
+}
+
+function spawnAcceptedNext(target, args, label) {
+  const { value: plan } = spawnSidecarJson(["plan", target, ...args], `${label} plan`);
+  const nextArgs = plan.preflight
+    ? ["next", target, ...args, "--accepted-plan", plan.preflight.plan_digest]
+    : ["next", target, ...args];
+  return spawnSidecarJson(nextArgs, label);
 }
 
 try {
@@ -163,7 +206,434 @@ try {
       integrity: alignmentReport.integrity,
     })}`);
   }
-  console.log("workbench sidecar source + hybrid v2 smoke passed");
+  const automaticTarget = path.join(workspace, "source.txt");
+  const automaticArgs = ["--root", smokeRoot, "--max-parallel", "1"];
+  const taskStoreRoot = path.join(workspace, ".build", "automatic-build", "v2", "tasks");
+  const { value: preflightPlan } = spawnSidecarJson(
+    ["plan", automaticTarget, ...automaticArgs],
+    "automatic build preflight smoke",
+  );
+  if (
+    preflightPlan.version !== "automatic_build_plan.v1"
+    || preflightPlan.preflight?.version !== "automatic_build_preflight.v1"
+    || preflightPlan.preflight?.budget?.status !== "within_budget"
+    || preflightPlan.preflight?.worker_plan?.max_workers !== 1
+    || existsSync(taskStoreRoot)
+  ) {
+    throw new Error(`automatic build plan was not read-only or budgeted: ${JSON.stringify(preflightPlan)}`);
+  }
+  const { value: unacceptedPlan } = spawnSidecarJson(
+    ["next", automaticTarget, ...automaticArgs],
+    "automatic build unaccepted preflight smoke",
+  );
+  if (unacceptedPlan.action?.reason !== "preflight_required" || existsSync(taskStoreRoot)) {
+    throw new Error(`unaccepted preflight created task state: ${JSON.stringify(unacceptedPlan)}`);
+  }
+  const acceptedPlanDigest = preflightPlan.preflight.plan_digest;
+  const competingResults = await Promise.all(["sidecar-a", "sidecar-b", "sidecar-c"].map((owner) => spawnCaptured(sidecar, [
+    "next",
+    automaticTarget,
+    ...automaticArgs,
+    "--owner", owner,
+    "--lease-ttl-ms", "30000",
+    "--accepted-plan", acceptedPlanDigest,
+  ])));
+  if (competingResults.some((result) => result.status !== 0)) {
+    throw new Error(`automatic build competing next smoke failed: ${JSON.stringify(competingResults)}`);
+  }
+  const competingPlans = competingResults.map((result) => JSON.parse(result.stdout));
+  const extractedPlans = competingPlans.filter((plan) => plan.action?.kind === "extract");
+  const waitingPlans = competingPlans.filter((plan) => plan.action?.kind === "waiting");
+  if (extractedPlans.length !== 1 || waitingPlans.length !== 2) {
+    throw new Error(`automatic build claim was not exclusive: ${JSON.stringify(competingPlans)}`);
+  }
+  const next = extractedPlans[0];
+  const task = next.action?.tasks?.[0];
+  const canonicalWorkspace = path.resolve(workspace);
+  if (
+    next.version !== "automatic_build_next.v1"
+    || next.snapshot?.target?.kind !== "paper_workspace"
+    || next.snapshot.target.target_ref?.version !== "build_target_ref.v2"
+    || path.resolve(next.snapshot.target.target_ref.workspace_dir) !== canonicalWorkspace
+    || next.action?.kind !== "extract"
+    || task?.input_command?.[1] !== "input"
+    || path.resolve(task.input_command[2]) !== canonicalWorkspace
+    || task?.submit_command?.[1] !== "submit"
+    || path.resolve(task.submit_command[2]) !== canonicalWorkspace
+    || task?.descriptor?.version !== "automatic_build_work_unit.v2"
+    || task.descriptor.work_unit_id !== task.task_id
+    || task.descriptor.kind !== "pass1_window"
+    || task.descriptor.input_hash !== task.lease.input_hash
+    || JSON.stringify(task.descriptor.policy_fingerprint) !== JSON.stringify(task.lease.policy_fingerprint)
+    || task.descriptor.target?.input_fingerprint !== next.snapshot.target.target_ref.input_fingerprint
+    || !(task.descriptor.cost?.score > 0)
+    || Object.hasOwn(task, "write_command")
+    || Object.hasOwn(task, "record_success_command")
+  ) {
+    throw new Error(`automatic build next did not preserve canonical target identity: ${JSON.stringify(next)}`);
+  }
+  const inputResult = spawnGenerated(task.input_command);
+  if (!inputResult.stdout.includes("PAPER_PASS1_RULES") || !/\[\d+(?:\.\d+)*\]/.test(inputResult.stdout)) {
+    throw new Error(`generated input command returned an invalid packet: ${inputResult.stdout}`);
+  }
+  const visibleLid = inputResult.stdout.match(/\[(\d+(?:\.\d+)*)\]/)?.[1];
+  if (!visibleLid) throw new Error(`generated input command did not expose a visible LID: ${inputResult.stdout}`);
+  spawnGenerated(task.fail_command, {
+    "{diagnostic_code}": "executor_failed",
+    "{diagnostic}": "ap5-sidecar-smoke",
+  });
+  const retryResult = spawnSync(sidecar, [
+    "next",
+    automaticTarget,
+    ...automaticArgs,
+    "--accepted-plan", acceptedPlanDigest,
+  ], { encoding: "utf8", timeout: 30_000 });
+  if (retryResult.error) throw retryResult.error;
+  if (retryResult.status !== 0) {
+    throw new Error(`automatic build retry smoke failed (${retryResult.status}):\n${retryResult.stdout}\n${retryResult.stderr}`);
+  }
+  const retry = JSON.parse(retryResult.stdout);
+  const retryTask = retry.action?.tasks?.[0];
+  if (retryTask?.task_id !== task.task_id || retryTask?.attempt_number !== 2) {
+    throw new Error(`automatic build retry did not advance the durable attempt: ${retryResult.stdout}`);
+  }
+  spawnGenerated(retryTask.input_command);
+  const candidateSource = path.join(smokeRoot, "pass1-candidate.json");
+  const candidateOnlyMarker = "AP5_CANDIDATE_ONLY_MARKER";
+  writeFileSync(candidateSource, JSON.stringify({ nodes: [], edges: [], executor_marker: candidateOnlyMarker }), "utf8");
+  writeFileSync(retryTask.candidate_path, readFileSync(candidateSource));
+  const submitResult = spawnGenerated(retryTask.submit_command);
+  const receipt = JSON.parse(submitResult.stdout);
+  const replayReceipt = JSON.parse(spawnGenerated(retryTask.submit_command).stdout);
+  const inspectedReceipt = JSON.parse(spawnGenerated(retryTask.inspect_command).stdout);
+  if (
+    receipt.state !== "committed"
+    || receipt.task_ref !== replayReceipt.task_ref
+    || receipt.artifact_sha256 !== replayReceipt.artifact_sha256
+    || JSON.stringify(inspectedReceipt) !== JSON.stringify(receipt)
+    || Buffer.byteLength(JSON.stringify(receipt)) > 4_096
+    || Object.hasOwn(receipt, "payload")
+    || JSON.stringify(receipt).includes(candidateOnlyMarker)
+    || receipt.metrics?.usage?.source !== "unavailable"
+    || Object.hasOwn(receipt.metrics.usage, "input_tokens")
+    || Object.hasOwn(receipt.metrics.usage, "output_tokens")
+  ) {
+    throw new Error(`automatic build mailbox receipt was not bounded and idempotent: ${submitResult.stdout}`);
+  }
+  const metricsResult = spawnSync(sidecar, [
+    "metrics", workspace, "pass1", "--root", smokeRoot,
+  ], { encoding: "utf8", timeout: 30_000 });
+  if (metricsResult.error) throw metricsResult.error;
+  if (metricsResult.status !== 0) {
+    throw new Error(`automatic build metrics smoke failed (${metricsResult.status}):\n${metricsResult.stdout}\n${metricsResult.stderr}`);
+  }
+  const metricsSummary = JSON.parse(metricsResult.stdout);
+  if (
+    metricsSummary.attempt_count !== 2
+    || metricsSummary.status_counts?.retryable_failure !== 1
+    || metricsSummary.status_counts?.committed !== 1
+    || metricsSummary.usage?.unavailable_attempts !== 2
+    || metricsSummary.usage?.known_usage_coverage !== 0
+    || !metricsSummary.digest
+  ) {
+    throw new Error(`automatic build metrics summary was not reproducible: ${metricsResult.stdout}`);
+  }
+  const taskAttempts = path.join(
+    workspace,
+    ".build",
+    "automatic-build",
+    "v2",
+    "tasks",
+    "pass1",
+    encodeURIComponent(task.task_id),
+    "attempts",
+  );
+  const firstAttempt = JSON.parse(readFileSync(path.join(taskAttempts, "0001", "result.json"), "utf8"));
+  const secondAttempt = JSON.parse(readFileSync(path.join(taskAttempts, "0002", "result.json"), "utf8"));
+  if (
+    firstAttempt.outcome !== "failure"
+    || secondAttempt.outcome !== "success"
+    || !existsSync(path.join(taskAttempts, "0002", "candidate.json"))
+    || !existsSync(path.join(taskAttempts, "0002", "receipt.json"))
+    || !existsSync(path.join(workspace, ".build", "pass1", `${task.task_id}.json`))
+    || existsSync(path.join(workspace, ".build", "automatic-build", "attempts.json"))
+    || existsSync(path.join(smokeRoot, ".understand-book", "source"))
+  ) {
+    throw new Error("automatic build attempt events were not isolated in the canonical paper workspace");
+  }
+  const semanticArtifactPath = path.join(workspace, ".build", "pass1", `${task.task_id}.json`);
+  const semanticArtifact = JSON.parse(readFileSync(semanticArtifactPath, "utf8"));
+  const policyLock = JSON.parse(readFileSync(path.join(
+    workspace, ".build", "automatic-build", "v2", "policies", "pass1.json",
+  ), "utf8"));
+  if (
+    semanticArtifact.version !== "semantic_task_artifact.v2"
+    || semanticArtifact.stage !== "pass1"
+    || semanticArtifact.work_unit_id !== task.task_id
+    || semanticArtifact.input_hash !== semanticArtifact.payload?.content_hash
+    || semanticArtifact.policy_fingerprint?.quality_profile !== "full"
+    || semanticArtifact.provenance?.attempt !== 2
+    || semanticArtifact.provenance?.executor !== retryTask.lease.owner
+    || sha256(readFileSync(semanticArtifactPath)) !== receipt.artifact_sha256
+    || JSON.stringify(policyLock.policy_fingerprint) !== JSON.stringify(retryTask.lease.policy_fingerprint)
+    || !/^[a-f0-9]{64}$/.test(policyLock.policy_digest ?? "")
+  ) {
+    throw new Error(`automatic build semantic artifact was not policy-bound: ${JSON.stringify(semanticArtifact)}`);
+  }
+  const invalidMetadataPath = path.join(smokeRoot, "paper-metadata-task-22-invalid.json");
+  const validMetadataPath = path.join(smokeRoot, "paper-metadata-task-22-valid.json");
+  const metadataMarker = "AP8_FULL_CANDIDATE_MARKER";
+  writeFileSync(invalidMetadataPath, JSON.stringify({
+    paper_metadata: {
+      title: { value: metadataMarker, source: "paper_text", evidence_lids: [visibleLid] },
+      references: { value: ["Smith 2020"], source: "paper_text", evidence_lids: [visibleLid] },
+    },
+  }), "utf8");
+  const metadataArgs = [
+    "run-script", "paper-metadata-write.ts", path.join(workspace, "source.txt"), "0",
+    invalidMetadataPath, "--book-id", "paper-sidecar-smoke", "--content-profile", "paper",
+    "--paper-subtype", "research_article",
+  ];
+  const invalidMetadata = spawnSync(sidecar, metadataArgs, { cwd: smokeRoot, encoding: "utf8", timeout: 30_000 });
+  if (
+    invalidMetadata.status === 0
+    || !invalidMetadata.stderr.includes('"code":"schema_invalid"')
+    || !invalidMetadata.stderr.includes('"json_pointer":"/paper_metadata/references/value/0"')
+    || invalidMetadata.stderr.includes(metadataMarker)
+  ) {
+    throw new Error(`compiled metadata writer did not return a bounded AP8 diagnostic: ${invalidMetadata.stderr}`);
+  }
+  writeFileSync(validMetadataPath, JSON.stringify({
+    paper_metadata: {
+      references: {
+        value: [{ raw: "Smith 2020", identifiers: { doi: "10.1/example" } }],
+        source: "paper_text",
+        evidence_lids: [visibleLid],
+      },
+    },
+  }), "utf8");
+  metadataArgs[4] = validMetadataPath;
+  const validMetadata = spawnSync(sidecar, metadataArgs, { cwd: smokeRoot, encoding: "utf8", timeout: 30_000 });
+  if (validMetadata.status !== 0) {
+    throw new Error(`compiled metadata writer rejected the corrected AP8 fixture: ${validMetadata.stderr}`);
+  }
+  const metadataRouterFixture = path.join(smokeRoot, "metadata-router.md");
+  writeFileSync(metadataRouterFixture, "# Routed Paper\n\nAda Example\n\n# Discussion\n\nOrdinary body text.\n", "utf8");
+  const eligibleMetadataInput = spawnSync(sidecar, [
+    "run-script", "paper-metadata-input.ts", metadataRouterFixture, "0",
+    "--book-id", "metadata-router", "--content-profile", "paper", "--paper-subtype", "research_article",
+  ], { cwd: smokeRoot, encoding: "utf8", timeout: 30_000 });
+  if (
+    eligibleMetadataInput.status !== 0
+    || !eligibleMetadataInput.stdout.includes("PAPER_METADATA_CANDIDATE")
+    || !eligibleMetadataInput.stdout.includes('signal_types: ["front_matter"]')
+  ) {
+    throw new Error(`compiled AP10 metadata router rejected an eligible unit: ${eligibleMetadataInput.stdout}\n${eligibleMetadataInput.stderr}`);
+  }
+  const skippedMetadataInput = spawnSync(sidecar, [
+    "run-script", "paper-metadata-input.ts", metadataRouterFixture, "1",
+    "--book-id", "metadata-router", "--content-profile", "paper", "--paper-subtype", "research_article",
+  ], { cwd: smokeRoot, encoding: "utf8", timeout: 30_000 });
+  if (skippedMetadataInput.status === 0 || !skippedMetadataInput.stderr.includes("not model-eligible: no_metadata_signal")) {
+    throw new Error(`compiled AP10 metadata router exposed a skipped unit: ${skippedMetadataInput.stdout}\n${skippedMetadataInput.stderr}`);
+  }
+  const lexiconRouterFixture = path.join(smokeRoot, "lexicon-router.md");
+  writeFileSync(lexiconRouterFixture, "# Lexicon\n\nSoftmax Attention appears.\n\n# Discussion\n\nSoftmax Attention recurs.\n\n# Empty\n\nOrdinary body text.\n", "utf8");
+  const lexiconBatchId = "lexicon-batch-05ca60e0288eb41a";
+  const eligibleLexiconInput = spawnSync(sidecar, [
+    "run-script", "paper-lexicon-input.ts", lexiconRouterFixture, lexiconBatchId,
+    "--book-id", "lexicon-router", "--content-profile", "paper", "--paper-subtype", "research_article",
+  ], { cwd: smokeRoot, encoding: "utf8", timeout: 30_000 });
+  if (
+    eligibleLexiconInput.status !== 0
+    || !eligibleLexiconInput.stdout.includes("PAPER_LEXICON_CANDIDATE_BATCH")
+    || !eligibleLexiconInput.stdout.includes('"normalized_key":"softmax attention"')
+  ) {
+    throw new Error(`compiled AP11 lexicon router rejected an eligible batch: ${eligibleLexiconInput.stdout}\n${eligibleLexiconInput.stderr}`);
+  }
+  const skippedLexiconInput = spawnSync(sidecar, [
+    "run-script", "paper-lexicon-input.ts", lexiconRouterFixture, "lexicon-skip-window-2",
+    "--book-id", "lexicon-router", "--content-profile", "paper", "--paper-subtype", "research_article",
+  ], { cwd: smokeRoot, encoding: "utf8", timeout: 30_000 });
+  if (skippedLexiconInput.status === 0 || !skippedLexiconInput.stderr.includes("not model-eligible")) {
+    throw new Error(`compiled AP11 lexicon router exposed a skipped window: ${skippedLexiconInput.stdout}\n${skippedLexiconInput.stderr}`);
+  }
+  const semanticUnitFixture = path.join(repoRoot, "packages", "core", "test", "fixtures", "profile-sidecar-semantic-units.md");
+  for (const [workUnitId, expectedKind] of [
+    ["discourse-2-2-ac069329d625", "profile_sidecar_discourse"],
+    ["formula-2-7-0faf54c756", "profile_sidecar_formula"],
+  ]) {
+    const semanticInput = spawnSync(sidecar, [
+      "run-script", "profile-sidecar-input.ts", semanticUnitFixture, workUnitId,
+      "--book-id", "semantic-unit-router", "--content-profile", "technical_learning",
+    ], { cwd: smokeRoot, encoding: "utf8", timeout: 30_000 });
+    if (
+      semanticInput.status !== 0
+      || !semanticInput.stdout.includes("PROFILE_SIDECAR_SEMANTIC_UNIT")
+      || !semanticInput.stdout.includes(`unit_kind: ${expectedKind}`)
+    ) {
+      throw new Error(`compiled AP12 semantic-unit router rejected ${workUnitId}: ${semanticInput.stdout}\n${semanticInput.stderr}`);
+    }
+  }
+  const skippedSemanticInput = spawnSync(sidecar, [
+    "run-script", "profile-sidecar-input.ts", semanticUnitFixture, "formula-skip-2-3",
+    "--book-id", "semantic-unit-router", "--content-profile", "technical_learning",
+  ], { cwd: smokeRoot, encoding: "utf8", timeout: 30_000 });
+  if (skippedSemanticInput.status === 0 || !skippedSemanticInput.stderr.includes("not model-eligible")) {
+    throw new Error(`compiled AP12 semantic-unit router exposed a skipped formula: ${skippedSemanticInput.stdout}\n${skippedSemanticInput.stderr}`);
+  }
+  semanticArtifact.policy_fingerprint = { ...semanticArtifact.policy_fingerprint, schema_version: "pass1_output.v999" };
+  writeFileSync(semanticArtifactPath, JSON.stringify(semanticArtifact, null, 2), "utf8");
+  const { result: staleResult, value: stalePlan } = spawnAcceptedNext(
+    workspace,
+    ["--root", smokeRoot, "--max-parallel", "1"],
+    "automatic build policy drift smoke",
+  );
+  if (stalePlan.action?.kind !== "extract" || stalePlan.action?.stage !== "pass1") {
+    throw new Error(`policy drift did not reopen only the stale semantic stage: ${staleResult.stdout}`);
+  }
+  const concurrencySource = path.join(smokeRoot, "sidecar-concurrency.md");
+  writeFileSync(concurrencySource, [
+    "# Sidecar concurrency",
+    ...Array.from({ length: 320 }, (_, index) => `Paragraph ${index + 1} carries deterministic evidence for safe worker release.`),
+  ].join("\n\n"), "utf8");
+  const concurrencyArgs = [
+    "--root", smokeRoot,
+    "--max-parallel", "3",
+    "--available-agent-slots", "3",
+    "--max-parallel-cost", "2000000",
+  ];
+  const { value: concurrencyPlan } = spawnSidecarJson(
+    ["plan", concurrencySource, ...concurrencyArgs],
+    "automatic build AP14 concurrency plan smoke",
+  );
+  if (
+    concurrencyPlan.preflight?.worker_plan?.max_workers !== 3
+    || concurrencyPlan.preflight?.worker_plan?.hard_worker_limit !== 3
+    || concurrencyPlan.preflight?.worker_plan?.concurrency_release !== "ap14_safe_concurrency.v1"
+  ) {
+    throw new Error(`compiled AP14 plan did not release exactly three safe workers: ${JSON.stringify(concurrencyPlan)}`);
+  }
+  const { value: concurrencyNext } = spawnSidecarJson([
+    "next", concurrencySource, ...concurrencyArgs,
+    "--accepted-plan", concurrencyPlan.preflight.plan_digest,
+  ], "automatic build AP14 concurrency claim smoke");
+  const concurrencyTasks = concurrencyNext.action?.tasks ?? [];
+  if (
+    concurrencyNext.action?.kind !== "extract"
+    || concurrencyTasks.length !== 3
+    || new Set(concurrencyTasks.map((task) => task.task_id)).size !== 3
+    || concurrencyNext.action?.receipt_aggregation?.expected_receipts !== 3
+    || concurrencyNext.action?.receipt_aggregation?.max_total_bytes !== 12_288
+    || concurrencyNext.action?.receipt_aggregation?.candidate_payload_forbidden !== true
+  ) {
+    throw new Error(`compiled AP14 claim was not a bounded three-task batch: ${JSON.stringify(concurrencyNext)}`);
+  }
+  const { value: noSlotNext } = spawnSidecarJson([
+    "next", concurrencySource,
+    "--root", smokeRoot,
+    "--max-parallel", "3",
+    "--available-agent-slots", "0",
+    "--max-parallel-cost", "2000000",
+    "--accepted-plan", concurrencyPlan.preflight.plan_digest,
+  ], "automatic build AP14 no-slot smoke");
+  if (noSlotNext.action?.reason !== "executor_unavailable") {
+    throw new Error(`compiled AP14 zero-slot gate claimed more work: ${JSON.stringify(noSlotNext)}`);
+  }
+  const submitEmptyTasks = (tasks) => {
+    for (const task of tasks) {
+      writeFileSync(task.candidate_path, JSON.stringify({ nodes: [], edges: [] }), "utf8");
+      const receipt = JSON.parse(spawnGenerated(task.submit_command).stdout);
+      if (receipt.state !== "committed" || Object.hasOwn(receipt, "payload")) {
+        throw new Error(`compiled fake executor returned an invalid bounded receipt: ${JSON.stringify(receipt)}`);
+      }
+    }
+  };
+  submitEmptyTasks(concurrencyTasks);
+  let qualityGatePlan;
+  for (let round = 0; round < 10; round += 1) {
+    const { value: plan } = spawnSidecarJson(
+      ["plan", concurrencySource, ...concurrencyArgs],
+      "automatic build AP15 quality plan smoke",
+    );
+    if (!plan.preflight) {
+      qualityGatePlan = spawnSidecarJson(
+        ["next", concurrencySource, ...concurrencyArgs],
+        "automatic build AP15 quality gate smoke",
+      ).value;
+      break;
+    }
+    const { value: nextBatch } = spawnSidecarJson([
+      "next", concurrencySource, ...concurrencyArgs,
+      "--accepted-plan", plan.preflight.plan_digest,
+    ], "automatic build AP15 empty batch smoke");
+    submitEmptyTasks(nextBatch.action?.tasks ?? []);
+  }
+  const concurrencyWorkspace = concurrencyPlan.snapshot.target.workspace_dir;
+  if (
+    qualityGatePlan?.action?.reason !== "quality_gate_failed"
+    || qualityGatePlan?.action?.gate_status !== "quality_below_floor"
+    || qualityGatePlan?.quality_report?.integrity?.status !== "passed"
+    || existsSync(path.join(concurrencyWorkspace, "base.json"))
+  ) {
+    throw new Error(`compiled AP15 quality gate published an empty semantic base: ${JSON.stringify(qualityGatePlan)}`);
+  }
+
+  const legacySource = path.join(smokeRoot, "sidecar-legacy.md");
+  writeFileSync(legacySource, "# Legacy\n\nA source-fresh legacy paragraph.\n", "utf8");
+  const legacyArgs = ["--root", smokeRoot, "--max-parallel", "1", "--available-agent-slots", "1"];
+  const { value: legacyPlan } = spawnSidecarJson(
+    ["plan", legacySource, ...legacyArgs],
+    "automatic build AP15 legacy plan smoke",
+  );
+  const legacyDescriptor = legacyPlan.preflight?.cost && legacyPlan.next_action?.work_units?.[0];
+  if (!legacyDescriptor) throw new Error(`compiled AP15 legacy plan has no descriptor: ${JSON.stringify(legacyPlan)}`);
+  const legacyWorkspace = legacyPlan.snapshot.target.workspace_dir;
+  const legacyArtifactPath = path.join(legacyWorkspace, ".build", "pass1", `${legacyDescriptor.work_unit_id}.json`);
+  mkdirSync(path.dirname(legacyArtifactPath), { recursive: true });
+  writeFileSync(legacyArtifactPath, JSON.stringify({
+    content_hash: legacyDescriptor.input_hash,
+    nodes: [],
+    edges: [],
+  }), "utf8");
+  const { value: legacyAudit } = spawnSidecarJson(
+    ["audit-legacy", legacySource, "pass1", "--root", smokeRoot],
+    "automatic build AP15 legacy audit smoke",
+  );
+  const { value: fullLegacyAudit } = spawnSidecarJson(
+    ["audit-legacy", legacySource, "--root", smokeRoot],
+    "automatic build AP15 all-stage legacy audit smoke",
+  );
+  const { value: migrationRequired } = spawnSidecarJson(
+    ["next", legacySource, ...legacyArgs],
+    "automatic build AP15 migration-required smoke",
+  );
+  if (
+    legacyAudit.legacy_artifacts !== 1
+    || fullLegacyAudit.legacy_artifacts !== 1
+    || legacyAudit.source_fresh_artifacts !== 1
+    || legacyAudit.schema_valid_artifacts !== 1
+    || legacyAudit.policy_status !== "legacy_policy_unknown"
+    || migrationRequired.action?.reason !== "legacy_migration_required"
+  ) {
+    throw new Error(`compiled AP15 legacy audit was not fail-closed: ${JSON.stringify({ legacyAudit, migrationRequired })}`);
+  }
+  const { value: migrationDecision } = spawnSidecarJson(
+    ["migration-mode", legacySource, "v2_rebuild", "--root", smokeRoot, "--now", "2026-07-19T00:00:00.000Z"],
+    "automatic build AP15 v2 rebuild decision smoke",
+  );
+  const { value: rebuildNext } = spawnSidecarJson(
+    ["next", legacySource, ...legacyArgs],
+    "automatic build AP15 v2 rebuild resume smoke",
+  );
+  if (
+    migrationDecision.mode !== "v2_rebuild"
+    || !existsSync(path.join(migrationDecision.legacy_snapshot_path, "manifest.json"))
+    || rebuildNext.action?.reason !== "preflight_required"
+  ) {
+    throw new Error(`compiled AP15 v2 rebuild did not preserve legacy before resume: ${JSON.stringify({ migrationDecision, rebuildNext })}`);
+  }
+  console.log("workbench sidecar source + hybrid v2 + automatic target/attempt store smoke passed");
 } finally {
-  rmSync(workspace, { recursive: true, force: true });
+  rmSync(smokeRoot, { recursive: true, force: true });
 }
