@@ -71,6 +71,57 @@ function sourceOutcome(stale = false) {
 }
 
 describe("RightRail agent sources", () => {
+  it("shows context shortage only for an actual context-budget warning", () => {
+    const deliveryFailure = {
+      ...sourceOutcome(),
+      answer: "这次回答生成失败，请重试。",
+      answer_view: undefined,
+      incomplete: true,
+      warning: null,
+    };
+    const contextBudget = {
+      ...sourceOutcome(),
+      answer: "Partial answer.",
+      answer_view: undefined,
+      incomplete: true,
+      warning: "CONTEXT_BUDGET_EXCEEDED",
+    };
+    const wrapper = mount(RightRail, {
+      attachTo: document.body,
+      props: {
+        ...baseProps,
+        askDraft: null,
+        chat: [
+          {
+            turnId: "turn-delivery",
+            user: "question one",
+            outcome: deliveryFailure,
+            pending: false,
+            questionAnchorLid: null,
+            questionQuote: null,
+            questionSelection: null,
+            effectLabels: [],
+          },
+          {
+            turnId: "turn-budget",
+            user: "question two",
+            outcome: contextBudget,
+            pending: false,
+            questionAnchorLid: null,
+            questionQuote: null,
+            questionSelection: null,
+            effectLabels: [],
+          },
+        ],
+      },
+    });
+
+    expect(wrapper.text()).toContain("这次回答生成失败，请重试。");
+    const notices = wrapper.findAll(".incomplete");
+    expect(notices).toHaveLength(1);
+    expect(notices[0].text()).toBe("未完成: 上下文不足");
+  });
+
   it("renders inline single and grouped source buttons without visible LIDs", () => {
     const wrapper = mount(RightRail, {
       attachTo: document.body,

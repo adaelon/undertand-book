@@ -1,90 +1,61 @@
-# SESSION_CHECKPOINT - Agent 对话用户可见来源
+# SESSION_CHECKPOINT - SR7-SR11 与 SR8.1 已完成
 
-更新时间：2026-07-20 11:35 +08:00
+更新时间：2026-07-20 16:32 +08:00
 
-## 新鲜度自检
+## 冷启动顺序
 
-- 功能实现与 Windows Setup 的冻结输入：`a0d7a48 feat(agent): present user-visible source references`，分支 `main`。本 checkpoint 与发布记录在打包完成后单独提交；冷启动以 `git log -3 --oneline` 确认最新文档提交。
-- 冷启动先执行 `git log -3 --oneline` 与 `git status --short`；工作树包含用户原有大量 dirty/untracked 文件，不得清理或恢复。
-- 本 checkpoint 覆盖旧的 Note placement 热启动内容。Agent 来源 SR0-SR7 已全部实现、验证并打包，不要从 SR1 重做。
+1. 先读 `docs/切片方案-Agent对话用户可见来源.md` 的 §16-§21；SR7-SR11 已实现，不要重复施工。
+2. 再读 `docs/adr/0087-provenance-aware-answer-delivery-and-compact-provider-history.md`；SR8.1 已把修复边界改为单次自由重写。
+3. 沿 `docs/代码链路.md` 最后的 SR7-SR11、SR8.1 条目定位实现和测试；架构总览见 `docs/架构.md`。
+4. 执行 `git log -3 --oneline`、`git status --short`；工作树有大量用户既有 dirty/untracked 文件，不得清理或恢复。
 
-## 当前结果
+## 新鲜度
 
-目标“实现全部 SR”已完成并生成本地 Windows Setup：普通 Agent 对话不再把内部 LID 作为位置名称展示，而是在相关句后显示蓝色来源按钮。
+- 本 checkpoint 写入时基线为 `53dd983 docs(release): record agent source setup build`；SR7-SR11 与 SR8.1 将和本文件在同一提交中落库，读入时以 `git log -3 --oneline` 为准。
+- 最新 Setup：`dist/UnderstandBookSetup.exe`，35,508,464 bytes，SHA-256 `9D7B1D89C1C0FDD82AE8721BDD0BE35CB5A3076CA8C0997141BB019561465141`。
+- Setup 来自 detached `53dd983` + SR7-SR11 Runtime/Server + SR8.1 Runtime/Web 精确补丁；主工作区其他 dirty 文件未进入产物。
+- 本轮 `.tmp-sr81-release-worktree`、补丁与 Git 注册已删除。旧 `.tmp-sr11-release-worktree` 仍可能因用户现有 Vite 进程占用硬链接而残留；不要为清理它停止用户进程。
 
-- SR1：`Book::resolve_source` 验证真实连续 EvidenceRange，生成语义标签、exact quote、连续上下文、preview 与 digest。
-- SR2：Runtime 本轮 ledger 只观察 verified selection、gated query/synthesize citations 和成功 `book.text`；`source.present` 可选且不能越权。
-- SR3：Native/ReAct 共用 final compiler；受控 marker 编译为 typed parts，原始 LID/unknown ref 一次修复后 fail-closed。
-- SR4：Server 持久 internal binding，对外只给 opaque ref；resolve/open 复验 owner/digest，stale 禁止导航。
-- SR5：`RightRail` 渲染句后单/多来源按钮；桌面锚定弹窗、移动底部 sheet；首次点击不跳 Reader，次级按钮才打开正文。
-- SR6：旧 `[LID: real.node]` 仅在只读 View 中保守转换；代码、链接、转义、裸数字不动；重启稳定，切书/删历史 fail-closed。
-- SR7：从 detached `a0d7a48` 运行正式 Web/sidecar/Rust/NSIS 发布链；最终 Setup 位于 `dist/UnderstandBookSetup.exe`，不受主工作区其他 dirty 改动影响。
+## 已完成能力
 
-冻结决策仍以 `docs/adr/0086-runtime-owned-user-visible-source-references.md` 为准。实现切片与门禁见 `docs/切片方案-Agent对话用户可见来源.md`。
+- SR7：`AnswerProvenanceLedger` 分离 public/internal locator；公开同形章节号可交付，内部 locator 自然化和显式 `LID/节点` 泄漏拒绝；Native/ReAct 共用验证器。
+- SR8/SR8.1：合法首答零修复；非法回答最多一次独立、无工具修复。修复请求不带完整历史或 Tool body，允许重写整答，最终仍必须通过同一 marker/source-ref/provenance/LID 编译闸。
+- SR9：交付诊断只在服务端持久；公开 chat/history/TS/trace/Provider messages 均无诊断字段和值；最终失败只返回通用回答。
+- SR10：completed Tool 历史在 Provider 读时替换为 typed receipt；当前活动回合保留完整 Tool result，持久 messages 零写回。
+- SR11：真实 Transformer 跨回合回放覆盖同形碰撞、内部位置自然化、修复路径和本轮重读引用；真实 cardiac HTTP ref 跨重启稳定。
+- Web：只有 `warning=CONTEXT_BUDGET_EXCEEDED` 才显示“上下文不足”；交付失败的 `incomplete=true, warning=null` 只显示通用失败回答。
 
-## 关键代码入口
+## 决策边界
 
-1. `crates/read-tools/src/lib.rs`：`EvidenceRange`、`ResolvedSource`、`Book::resolve_source`、`disambiguate_source_labels`。
-2. `crates/runtime/src/orchestrator.rs`：`TurnEvidenceLedger`、typed tool observers、`source.present`、`compile_agent_answer`、`deliver_agent_answer`。
-3. `crates/server/src/lib.rs`：internal/public Agent history split、`turn_view`、`legacy_answer_projection`、`agent_source_binding`、source resolve/open routes。
-4. `packages/web/src/components/RightRail.vue`：typed answer parts、source popup controller、semantic question/effect/history labels。
-5. `packages/web/src/App.vue`：history View mapping、当前回合 question selection 保留、source open 后 Reader 同步。
-6. `packages/web/src/api.ts` 与 `packages/web/src/generated/AgentAnswer*.ts`：opaque Web 契约。
-7. `packages/web/playwright/agent-source.spec.ts` 与 `crates/server/scripts/smoke-agent-source-real-book.mjs`：浏览器和真书发布门禁。
+- 用户明确接受重试时不限制改写范围；模型可自由重写候选答案。这会允许主张变化，风险由“单次调用 + 禁止工具 + 同一确定性编译闸”约束，而非字符范围比较。
+- 来源保持可选；Runtime 不自动调用 `source.present`，历史 ref 权限不跨回合继承。
+- public provenance 只来自当前/历史公开文本、验证选区和白名单规范证据正文；未知 JSON 不递归扫描。
+- diagnostics 不保存候选全文、repair prompt 或思维链，不进入公开契约或轨迹。
+- receipt 只含 tool、顶层 locator args、状态/error、账本接受的 evidence、source refs、独立 opaque digest。
+- 轨迹 UI、公开 history View、选区注入、`book.*` 契约和持久 session messages 未改变。
 
-## 验证快照
+## 故障复盘
 
-- `cargo test -q --workspace`：640/640。
-- `cargo test -q -p read-tools`：136/136。
-- `cargo test -q -p runtime`：160/160。
-- `cargo test -q -p server`：162/162。
-- `pnpm -C packages/web test -- --reporter=dot`：145/145。
-- `pnpm -C packages/web typecheck`：通过。
-- `pnpm -C packages/web build`：通过；仅有既存 chunk size warning。
-- `pnpm -C packages/web test:e2e`：15/15，含 1440x900 与 390x844 来源截图。
-- `UNDERSTAND_BOOK_MARKETPLACE_SOURCE=adaelon/undertand-book pnpm -C apps/desktop package:windows`：从 detached `a0d7a48` 通过 plugin release parity、Web production build、compiled sidecar smoke、Rust release 与 NSIS。
-- NSIS 原始产物、detached export 和主工作区 `dist/UnderstandBookSetup.exe` 三份一致：35,462,929 bytes，SHA-256 `210D2CCE3C3BA2130DA433A7C4D85990A422F71B5164299E33D3B02147E7FCEF`；file/product version `0.1.0`，未签名，未启动安装器。
-- 真书重放：cardiac-splicing LID `2.26.2` -> `legacy_source_eb0bb55a08248e06`，标签“正文 · Abstract”，上下文 175 词；重启 ref/evidence 稳定，history/base/source 未改。
-- 静态审计：普通 Agent 模板无 `questionQuote.lid`/`askDraft.lid`/history raw anchor 插值；AgentAnswer 三个生成类型无 LID/range/anchor；`git diff --check` 通过。
-- `cargo fmt --check` 未作为绿门禁：`crates/server/src/lib.rs` 存在本切片外的既有 rustfmt 差异；本轮只手工格式化新增区域，未扫动用户改动。
+- 最新真实会话 `chat_1784534009277_8` 的导航和读取已成功；初答含内部 locator，旧局部修复因改动范围扩大被拒绝，最终返回 `incomplete=true, warning=null`。
+- UI 曾把所有 warning 为空的 incomplete 都显示成“上下文不足”，造成频繁上下文耗尽的假象；它不是 Provider token 预算触顶。
+- SR8.1 同时移除局部范围拒绝并修正 UI 归因；最终编译失败仍 fail-closed，不向用户暴露内部错误码。
 
-## 本轮文件边界
+## 验证记录
 
-来源功能主要触达：
+- `cargo test -p runtime answer_delivery` 4/4；Runtime 173/173；Server `agent_delivery` 2/2；`cargo test --workspace` 656/656。
+- Web 26 files / 146 tests；typecheck 与 production build 通过。
+- Runtime `cargo fmt -p runtime -- --check` 与目标 diff check 通过。
+- 隔离发布通过 plugin release parity、Web build、compiled sidecar smoke、Rust release、Tauri 与 NSIS。
+- 现有 `ts-rs` serde 警告和 Vite 大 chunk 警告不阻断。
 
-- `CONTEXT.md`
-- `docs/adr/0086-runtime-owned-user-visible-source-references.md`
-- `docs/切片方案-Agent对话用户可见来源.md`
-- `docs/architecture.md`
-- `docs/代码链路.md`
-- `docs/screenshots/agent-source-desktop.png`
-- `docs/screenshots/agent-source-mobile.png`
-- `crates/read-tools/src/lib.rs`
-- `crates/runtime/src/orchestrator.rs`
-- `crates/server/src/lib.rs`
-- `crates/server/src/host.rs`
-- `crates/server/scripts/smoke-agent-source-real-book.mjs`
-- `packages/web/src/api.ts`
-- `packages/web/src/App.vue`
-- `packages/web/src/components/RightRail.vue`
-- `packages/web/src/components/RightRail.test.ts`
-- `packages/web/src/agent-note-selection.test.ts`
-- `packages/web/src/generated/AgentAnswerPart.ts`
-- `packages/web/src/generated/AgentAnswerSource.ts`
-- `packages/web/src/generated/AgentAnswerView.ts`
-- `packages/web/src/generated/OuterOutcome.ts`
-- `packages/web/agent-source-visual.html`
-- `packages/web/src/agent-source-visual.ts`
-- `packages/web/src/agent-source-visual.css`
-- `packages/web/playwright/agent-source.spec.ts`
-- `dist/UnderstandBookSetup.exe`（本地忽略产物，不进入 Git 提交）
+## 文件边界
 
-其他已修改/未跟踪文件多数属于用户先前工作、自动构建或测试日志；尤其 memory/profile/reader/base-schema、NP0 文档、大量 `.tmp-*` 与资料文件，不得归入来源功能或恢复。
+- 生产实现：`crates/runtime/src/orchestrator.rs`、`crates/server/src/lib.rs`、`packages/web/src/components/RightRail.vue`。
+- 测试：Runtime 同文件测试、`packages/web/src/components/RightRail.test.ts`；Server 既有交付测试继续覆盖私有诊断。
+- 文档：ADR 0087、来源切片方案、`docs/架构.md`、`docs/代码链路.md`、本 checkpoint。
+- `crates/runtime/src/memory_review.rs`、`profile_api.rs`、reader/base-schema 及其他 dirty 修改不属于本轮，不得吸收或恢复。
 
-## 下一步
+## 下一步原子动作
 
-本目标没有剩余实现或打包项。下一会话只需：
-
-1. 用 `git log -3 --oneline` 确认功能提交与发布记录提交；除非源码再次变化，不要重复构建 Setup。
-2. `main` 尚未 push；只有用户明确要求时才推送。`dist/UnderstandBookSetup.exe` 受 `.gitignore` 管理，不会随 push 发布。
-3. 若继续 Note placement，重新读取 ADR-0083 与对应切片；不要把它和已完成的来源 SR 混成一个提交。
+1. 执行 `git show --stat --oneline HEAD`，确认最新提交包含 SR7-SR11/SR8.1；继续开发前先核对剩余 dirty 文件归属。
+2. 未经用户明确要求，不安装或启动 Setup，也不 push。

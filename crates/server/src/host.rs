@@ -1745,6 +1745,7 @@ mod tests {
                         question_anchor_lid: None,
                         question_quote: None,
                         source_bindings: Vec::new(),
+                        delivery_diagnostics: None,
                     })
                     .collect(),
                 messages: new_session(),

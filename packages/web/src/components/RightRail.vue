@@ -188,6 +188,11 @@ function answerParts(outcome: OuterOutcome): AgentAnswerPart[] {
       : [];
 }
 
+function incompleteNotice(outcome: OuterOutcome): string | null {
+  if (!outcome.incomplete || !outcome.warning) return null;
+  return outcome.warning === "CONTEXT_BUDGET_EXCEEDED" ? "上下文不足" : outcome.warning;
+}
+
 function sourceButtonLabel(outcome: OuterOutcome, sourceRefIds: string[]): string {
   if (sourceRefIds.length !== 1) return `${sourceRefIds.length} 个来源`;
   return outcome.answer_view?.sources.find((source) => source.source_ref_id === sourceRefIds[0])?.label
@@ -472,7 +477,9 @@ function influenceLabel(influence: ProfileUsageTrace["influences"][number]): str
               </template>
             </div>
             <p v-else class="ans-text">暂无回答。</p>
-            <p v-if="turn.outcome.incomplete" class="incomplete">未完成: {{ turn.outcome.warning ?? "上下文不足" }}</p>
+            <p v-if="incompleteNotice(turn.outcome)" class="incomplete">
+              未完成: {{ incompleteNotice(turn.outcome) }}
+            </p>
 
             <div v-if="turn.outcome.effects.length" class="proposals">
               <p class="prop-h">建议变更</p>

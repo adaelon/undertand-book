@@ -34,8 +34,8 @@ use runtime::memory_policy::{
 };
 use runtime::orchestrator::{
     new_session, run_with_ephemeral_context, AgentAnswerPart, AgentAnswerSource, AgentAnswerView,
-    AgentEffect, OuterConfig, OuterOutcome, ProfileMemoryUpdate, ProfileMemoryUpdateKind,
-    ProfileUsageTrace, SourceBinding,
+    AgentEffect, AnswerDeliveryDiagnostics, OuterConfig, OuterOutcome, ProfileMemoryUpdate,
+    ProfileMemoryUpdateKind, ProfileUsageTrace, SourceBinding,
 };
 use runtime::profile_api::{
     historical_backfill_job_view, profile_governance_outcome_view, HistoricalBackfillJobRequest,
@@ -826,6 +826,8 @@ pub struct AgentChatTurn {
     pub question_quote: Option<AskQuote>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub source_bindings: Vec<SourceBinding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_diagnostics: Option<AnswerDeliveryDiagnostics>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -985,6 +987,34 @@ fn validate_agent_turn(turn: &AgentChatTurn) -> Result<(), ToolError> {
             "agent turn {} has inconsistent assistant state",
             turn.turn_id
         )));
+    }
+    if turn.delivery_diagnostics.is_some() && turn.status != AgentAssistantStatus::Completed {
+        return Err(agent_history_internal(format!(
+            "agent turn {} has diagnostics outside a completed turn",
+            turn.turn_id
+        )));
+    }
+    if let Some(diagnostics) = &turn.delivery_diagnostics {
+        for issue in diagnostics.initial.issues.iter().chain(
+            diagnostics
+                .repair
+                .iter()
+                .flat_map(|attempt| attempt.issues.iter()),
+        ) {
+            if issue.error_code.trim().is_empty()
+                || issue.match_form.trim().is_empty()
+                || issue.start.is_some() != issue.end.is_some()
+                || issue
+                    .start
+                    .zip(issue.end)
+                    .is_some_and(|(start, end)| start >= end)
+            {
+                return Err(agent_history_internal(format!(
+                    "agent turn {} has invalid delivery diagnostics",
+                    turn.turn_id
+                )));
+            }
+        }
     }
     let mut source_refs = HashSet::new();
     for binding in &turn.source_bindings {
@@ -1254,6 +1284,7 @@ fn precommit_agent_turn(
         question_anchor_lid,
         question_quote,
         source_bindings: Vec::new(),
+        delivery_diagnostics: None,
     });
     let turn_ref = AgentTurnRef {
         session_id: session.id.clone(),
@@ -1292,6 +1323,23 @@ fn finalize_agent_turn(
         )));
     }
     turn.status = status;
+    turn.delivery_diagnostics = outcome
+        .as_mut()
+        .and_then(|outcome| outcome.delivery_diagnostics.take());
+    if let Some(outcome) = outcome
+        .as_mut()
+        .filter(|outcome| outcome.incomplete && turn.delivery_diagnostics.is_some())
+    {
+        outcome.answer = Some("这次回答生成失败，请重试。".into());
+        outcome.answer_view = Some(AgentAnswerView {
+            parts: vec![AgentAnswerPart::Markdown {
+                text: "这次回答生成失败，请重试。".into(),
+            }],
+            sources: Vec::new(),
+        });
+        outcome.warning = None;
+        outcome.source_bindings.clear();
+    }
     turn.source_bindings = outcome
         .as_mut()
         .map(|outcome| std::mem::take(&mut outcome.source_bindings))
@@ -8535,6 +8583,7 @@ fn rejected_memory_outcome(
             message: Some(message.into()),
         }],
         source_bindings: Vec::new(),
+        delivery_diagnostics: None,
     }
 }
 
@@ -14558,6 +14607,7 @@ mod tests {
                 question_anchor_lid: None,
                 question_quote: None,
                 source_bindings: Vec::new(),
+                delivery_diagnostics: None,
             })
             .collect();
         state.agent_history.sessions.push(AgentChatSession {
@@ -14589,6 +14639,7 @@ mod tests {
                 question_anchor_lid: None,
                 question_quote: None,
                 source_bindings: Vec::new(),
+                delivery_diagnostics: None,
             }],
             messages: new_session(),
         });
@@ -15177,6 +15228,7 @@ mod tests {
             profile_usage: ProfileUsageTrace::default(),
             memory_updates: Vec::new(),
             source_bindings: vec![binding],
+            delivery_diagnostics: None,
         };
         finalize_agent_turn_completed(state, &turn_ref, &outcome, "2026-07-20T00:00:01Z").unwrap();
         (turn_ref.turn_id, source_ref_id)
@@ -15210,9 +15262,201 @@ mod tests {
             profile_usage: ProfileUsageTrace::default(),
             memory_updates: Vec::new(),
             source_bindings: Vec::new(),
+            delivery_diagnostics: None,
         };
         finalize_agent_turn_completed(state, &turn_ref, &outcome, "2026-07-20T00:00:01Z").unwrap();
         turn_ref.turn_id
+    }
+
+    #[test]
+    fn agent_delivery_diagnostics_persist_across_restart_and_stay_out_of_public_views() {
+        let mut state = state_named("agent-delivery-diagnostics");
+        let history_path = tmp("agent-delivery-diagnostics-history");
+        state.history_path = Some(history_path.clone());
+        let book_id = state.book.base.book_id.clone();
+        let turn_ref = precommit_agent_turn(
+            &mut state,
+            &book_id,
+            "Explain this safely".into(),
+            None,
+            None,
+            "2026-07-20T00:00:00Z",
+        )
+        .unwrap();
+        let diagnostics = AnswerDeliveryDiagnostics {
+            initial: runtime::orchestrator::AnswerDeliveryAttemptDiagnostics {
+                issues: vec![runtime::orchestrator::AnswerDeliveryIssue {
+                    error_code: "RAW_LID_LEAK".into(),
+                    start: Some(4),
+                    end: Some(7),
+                    trigger_value: Some("1.1".into()),
+                    match_form: "explicit_lid".into(),
+                    source_channels: vec!["tool_argument:book.text:lid".into()],
+                }],
+            },
+            repair: Some(runtime::orchestrator::AnswerDeliveryAttemptDiagnostics {
+                issues: vec![runtime::orchestrator::AnswerDeliveryIssue {
+                    error_code: "REPAIR_SCOPE_VIOLATION".into(),
+                    start: None,
+                    end: None,
+                    trigger_value: None,
+                    match_form: "out_of_scope_rewrite".into(),
+                    source_channels: Vec::new(),
+                }],
+            }),
+        };
+        let outcome = OuterOutcome {
+            answer: Some("bad candidate LID 1.1".into()),
+            answer_view: None,
+            incomplete: true,
+            warning: Some("SOURCE_PRESENTATION_FAILED".into()),
+            turns: 2,
+            tokens_spent: 4,
+            effects: Vec::new(),
+            trace: Vec::new(),
+            profile_usage: ProfileUsageTrace::default(),
+            memory_updates: Vec::new(),
+            source_bindings: Vec::new(),
+            delivery_diagnostics: Some(diagnostics.clone()),
+        };
+
+        finalize_agent_turn_completed(&mut state, &turn_ref, &outcome, "2026-07-20T00:00:01Z")
+            .unwrap();
+
+        let persisted = std::fs::read_to_string(&history_path).unwrap();
+        assert!(persisted.contains("delivery_diagnostics"));
+        assert!(persisted.contains("RAW_LID_LEAK"));
+        assert!(persisted.contains("REPAIR_SCOPE_VIOLATION"));
+        assert!(!persisted.contains("bad candidate"));
+        let restarted = load_agent_history(&Some(history_path)).unwrap();
+        assert_eq!(
+            restarted.sessions[0].turns[0].delivery_diagnostics,
+            Some(diagnostics)
+        );
+        assert_eq!(
+            restarted.sessions[0].turns[0]
+                .outcome
+                .as_ref()
+                .and_then(|outcome| outcome.answer.as_deref()),
+            Some("这次回答生成失败，请重试。")
+        );
+
+        let public = get(&mut state, "/agent/history");
+        assert_eq!(public.status, 200, "{}", public.body);
+        for hidden in [
+            "delivery_diagnostics",
+            "RAW_LID_LEAK",
+            "REPAIR_SCOPE_VIOLATION",
+            "tool_argument:book.text:lid",
+            "bad candidate",
+            "SOURCE_PRESENTATION_FAILED",
+            "1.1",
+        ] {
+            assert!(
+                !public.body.contains(hidden),
+                "public history leaked {hidden}"
+            );
+        }
+        assert!(public.body.contains("这次回答生成失败，请重试。"));
+        let public_outcome = serde_json::to_string(&outcome).unwrap();
+        assert!(!public_outcome.contains("delivery_diagnostics"));
+        assert!(!public_outcome.contains("RAW_LID_LEAK"));
+    }
+
+    #[test]
+    fn agent_delivery_legacy_history_and_generated_contract_have_no_diagnostics_surface() {
+        let raw = include_str!("../tests/fixtures/agent-history-pre-m.json");
+        let history: AgentHistory = serde_json::from_str(raw).unwrap();
+        assert!(history.sessions[0].turns[0].delivery_diagnostics.is_none());
+        let roundtrip = serde_json::to_string(&history).unwrap();
+        assert!(!roundtrip.contains("delivery_diagnostics"));
+        let decoded: AgentHistory = serde_json::from_str(&roundtrip).unwrap();
+        assert!(decoded.sessions[0].turns[0].delivery_diagnostics.is_none());
+
+        let generated = include_str!("../../../packages/web/src/generated/OuterOutcome.ts");
+        assert!(!generated.contains("delivery_diagnostics"));
+        assert!(!generated.contains("AnswerDeliveryDiagnostics"));
+    }
+
+    #[test]
+    fn agent_history_projection_compacts_provider_request_without_rewriting_persisted_messages() {
+        let mut state = state_named("agent-history-provider-projection");
+        let history_path = tmp("agent-history-provider-projection-file");
+        state.history_path = Some(history_path.clone());
+        let historical_messages = vec![
+            Message::system("system"),
+            Message::user("old question"),
+            Message {
+                role: runtime::Role::Assistant,
+                content: None,
+                tool_calls: vec![runtime::ToolCall {
+                    id: "old-text".into(),
+                    name: "book.text".into(),
+                    arguments: r#"{"lid":"1.1","history_arg_secret":"ARG_SECRET"}"#.into(),
+                }],
+                tool_call_id: None,
+            },
+            Message {
+                role: runtime::Role::Tool,
+                content: Some(
+                    r#"{"lid":"1.1","text":"HISTORICAL_TOOL_BODY","extra":"RESULT_SECRET"}"#.into(),
+                ),
+                tool_calls: Vec::new(),
+                tool_call_id: Some("old-text".into()),
+            },
+            Message {
+                role: runtime::Role::Assistant,
+                content: Some("old answer".into()),
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+            },
+        ];
+        let historical_bytes = serde_json::to_vec(&historical_messages).unwrap();
+        let book_id = state.book.base.book_id.clone();
+        let mut session = new_agent_session(&book_id, "2026-07-20T00:00:00Z", 0);
+        session.messages = historical_messages.clone();
+        state
+            .agent_history
+            .active_by_book
+            .insert(book_id.clone(), session.id.clone());
+        state.agent_history.sessions.push(session);
+        state.messages = historical_messages;
+        save_agent_history_path(&state.history_path, &state.agent_history).unwrap();
+
+        let seen_messages = Arc::new(Mutex::new(Vec::new()));
+        state.adapter = Box::new(ChatRecordingAdapter {
+            seen_messages: Arc::clone(&seen_messages),
+        });
+        let reply = post_at(
+            &mut state,
+            "/agent/chat",
+            r#"{"message":"current question"}"#,
+            "2026-07-20T00:00:01Z",
+        );
+        assert_eq!(reply.status, 200, "{}", reply.body);
+
+        let provider = seen_messages.lock().unwrap();
+        assert_eq!(provider.len(), 1);
+        let provider_json = serde_json::to_string(&provider[0]).unwrap();
+        assert!(provider_json.contains("historical_tool_receipt.v1"));
+        assert!(provider_json.contains("current question"));
+        for secret in ["HISTORICAL_TOOL_BODY", "RESULT_SECRET", "ARG_SECRET"] {
+            assert!(!provider_json.contains(secret), "provider leaked {secret}");
+        }
+        drop(provider);
+
+        let persisted = load_agent_history(&Some(history_path)).unwrap();
+        let persisted_prefix = &persisted.sessions[0].messages[..5];
+        assert_eq!(
+            serde_json::to_vec(persisted_prefix).unwrap(),
+            historical_bytes
+        );
+        assert!(serde_json::to_string(persisted_prefix)
+            .unwrap()
+            .contains("HISTORICAL_TOOL_BODY"));
+        let public = get(&mut state, "/agent/history");
+        assert!(!public.body.contains("HISTORICAL_TOOL_BODY"));
+        assert!(!public.body.contains("historical_tool_receipt.v1"));
     }
 
     #[test]
@@ -15995,6 +16239,7 @@ Version 1.2 and bare 1.1 stay unchanged.
             },
             memory_updates: Vec::new(),
             source_bindings: Vec::new(),
+            delivery_diagnostics: None,
         };
         let mut history = AgentHistory::default();
         let mut session = new_agent_session("book", "t0", 0);
@@ -16008,6 +16253,7 @@ Version 1.2 and bare 1.1 stay unchanged.
             question_anchor_lid: Some("1.1".into()),
             question_quote: None,
             source_bindings: Vec::new(),
+            delivery_diagnostics: None,
         });
         history
             .active_by_book

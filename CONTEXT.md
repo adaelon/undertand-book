@@ -13,6 +13,18 @@
 ## 本轮证据账本 (turn evidence ledger)
 Resident Agent 在当前用户回合内实际观察且通过现有结构闸的连续证据段集合。条目只来自用户已验证选区或证据型读取结果;视口、导航候选、错误恢复提示等仅含 LID 的状态不是证据。用户可见来源引用只能绑定本账本中的条目;账本随回合结束,不构成新的持久真相源。状态:NEW(见 [ADR-0086](docs/adr/0086-runtime-owned-user-visible-source-references.md))。
 
+## 回答来源属性 (answer provenance)
+普通 Agent 回答中某段信息来自公开文本还是内部结构通道的类型化属性。用户可见对话文本与已验证规范证据正文属于公开文本来源,可跨回合沿用;`lid/start_lid/end_lid/anchor_lid/citation_candidate_lids` 等结构字段属于内部位置来源,即使自然化为章节措辞也不改变属性。明示 `LID`/节点号的措辞始终属于内部位置;仅字面相同且有公开文本来源时不构成 LID 泄露。状态:NEW(见 [ADR-0087](docs/adr/0087-provenance-aware-answer-delivery-and-compact-provider-history.md))。
+
+## 历史 Tool 回执 (historical Tool receipt)
+已完成回合的 Tool 调用在 Provider 上下文中的类型化摘要。它保留工具名、定位型参数、成功状态或错误码、证据账本实际接受的范围、生成的 source ref 与不含正文片段的 opaque result digest,但不包含 Tool result body,不复用轨迹中截断正文的 `result_digest`,也不把结果中出现的所有 LID 当成证据。状态:NEW(见 [ADR-0087](docs/adr/0087-provenance-aware-answer-delivery-and-compact-provider-history.md))。
+
+## Provider 历史投影 (provider history projection)
+从持久对话消息生成本次模型请求上下文的只读投影。已完成历史 Tool 消息变为历史 Tool 回执,当前活动回合工具结果保持完整;投影追溯适用于旧会话但不改写持久历史、公开历史 View 或轨迹 UI。状态:NEW(见 [ADR-0087](docs/adr/0087-provenance-aware-answer-delivery-and-compact-provider-history.md))。
+
+## 回答交付诊断 (answer delivery diagnostic)
+来源边界校验在初次回答和唯一一次修复后产生的服务端结构记录,只含错误码、触发值、匹配形态与来源通道。它不保存回答候选全文或思维链,不进入 Provider 历史、公开历史 View 或轨迹 UI。状态:NEW(见 [ADR-0087](docs/adr/0087-provenance-aware-answer-delivery-and-compact-provider-history.md))。
+
 ## 锚定 (anchor)
 节点 / 边 / 引用必须绑定到**真实存在的 LID**。基数按类型分裂 `[ADR-0010]`:**实体 / 概念锚定一个或多个 LID**(`occurrences`,贯穿全书的身份),**断言 / 引用锚定单个 LID**(`source_lid`)。未锚定或锚定到不存在 LID 的对象,一律由确定性闸丢弃。`citations[]` 只放真 LID 即此义。
 

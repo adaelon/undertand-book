@@ -21,7 +21,7 @@ use reader::{
     PaperMinimapEffect, PaperMinimapMode, PaperMinimapProposal, PaperViewportPosition, Reader,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use ts_rs::TS;
 
 /// 外层停机预算(切片0 占位,实测回填 `[ADR-0016]`)。
@@ -64,6 +64,30 @@ pub struct OuterOutcome {
     #[serde(skip)]
     #[ts(skip)]
     pub source_bindings: Vec<SourceBinding>,
+    #[serde(skip)]
+    #[ts(skip)]
+    pub delivery_diagnostics: Option<AnswerDeliveryDiagnostics>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AnswerDeliveryIssue {
+    pub error_code: String,
+    pub start: Option<usize>,
+    pub end: Option<usize>,
+    pub trigger_value: Option<String>,
+    pub match_form: String,
+    pub source_channels: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AnswerDeliveryAttemptDiagnostics {
+    pub issues: Vec<AnswerDeliveryIssue>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AnswerDeliveryDiagnostics {
+    pub initial: AnswerDeliveryAttemptDiagnostics,
+    pub repair: Option<AnswerDeliveryAttemptDiagnostics>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -218,6 +242,29 @@ pub struct TraceStep {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub query_audit: Option<QueryAudit>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum HistoricalToolStatus {
+    Ok,
+    Error,
+    LegacyUnparsed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct HistoricalToolReceipt {
+    version: String,
+    tool: String,
+    locator_args: serde_json::Value,
+    status: HistoricalToolStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    accepted_evidence: Vec<EvidenceRange>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    source_refs: Vec<String>,
+    opaque_result_digest: String,
 }
 
 /// 确定性近似 token(CJK=1,其余=0.25,ceil);仅在后端不返 usage 时兜底 `[ADR-0026]`。
@@ -638,11 +685,687 @@ fn observe_tool_evidence(
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AnswerProvenanceChannel {
+    CurrentQuestion,
+    HistoricalUser,
+    HistoricalAssistant,
+    SelectionEvidence,
+    SelectionLocator,
+    NormativeEvidence { tool: String, field: String },
+    ToolArgument { tool: String, field: String },
+    ToolResult { tool: String, field: String },
+    RuntimeContext { field: String },
+    ExplicitInternalSyntax,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AnswerViolationForm {
+    ExplicitLid,
+    ExplicitNode,
+    BracketedLocator,
+    InternalLocator,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AnswerProvenanceViolation {
+    start: usize,
+    end: usize,
+    value: String,
+    form: AnswerViolationForm,
+    channels: Vec<AnswerProvenanceChannel>,
+}
+
+impl AnswerProvenanceViolation {
+    fn delivery_issue(&self) -> AnswerDeliveryIssue {
+        AnswerDeliveryIssue {
+            error_code: "RAW_LID_LEAK".into(),
+            start: Some(self.start),
+            end: Some(self.end),
+            trigger_value: Some(self.value.clone()),
+            match_form: self.form.diagnostic_name().into(),
+            source_channels: self
+                .channels
+                .iter()
+                .map(AnswerProvenanceChannel::diagnostic_name)
+                .collect(),
+        }
+    }
+}
+
+impl AnswerViolationForm {
+    fn diagnostic_name(&self) -> &'static str {
+        match self {
+            AnswerViolationForm::ExplicitLid => "explicit_lid",
+            AnswerViolationForm::ExplicitNode => "explicit_node",
+            AnswerViolationForm::BracketedLocator => "bracketed_locator",
+            AnswerViolationForm::InternalLocator => "internal_locator",
+        }
+    }
+}
+
+impl AnswerProvenanceChannel {
+    fn diagnostic_name(&self) -> String {
+        match self {
+            AnswerProvenanceChannel::CurrentQuestion => "current_question".into(),
+            AnswerProvenanceChannel::HistoricalUser => "historical_user".into(),
+            AnswerProvenanceChannel::HistoricalAssistant => "historical_assistant".into(),
+            AnswerProvenanceChannel::SelectionEvidence => "selection_evidence".into(),
+            AnswerProvenanceChannel::SelectionLocator => "selection_locator".into(),
+            AnswerProvenanceChannel::NormativeEvidence { tool, field } => {
+                format!("normative_evidence:{tool}:{field}")
+            }
+            AnswerProvenanceChannel::ToolArgument { tool, field } => {
+                format!("tool_argument:{tool}:{field}")
+            }
+            AnswerProvenanceChannel::ToolResult { tool, field } => {
+                format!("tool_result:{tool}:{field}")
+            }
+            AnswerProvenanceChannel::RuntimeContext { field } => {
+                format!("runtime_context:{field}")
+            }
+            AnswerProvenanceChannel::ExplicitInternalSyntax => "explicit_internal_syntax".into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PublicAnswerProvenance {
+    text: String,
+    channel: AnswerProvenanceChannel,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InternalAnswerProvenance {
+    value: String,
+    channels: Vec<AnswerProvenanceChannel>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct AnswerProvenanceLedger {
+    public_texts: Vec<PublicAnswerProvenance>,
+    internal_locators: Vec<InternalAnswerProvenance>,
+}
+
+impl AnswerProvenanceLedger {
+    fn from_messages(messages: &[Message]) -> Self {
+        let current_user = messages
+            .iter()
+            .rposition(|message| message.role == Role::User);
+        let mut ledger = Self::default();
+        let mut tool_names: Vec<(String, String)> = Vec::new();
+        for (index, message) in messages.iter().enumerate() {
+            match message.role {
+                Role::System => {}
+                Role::User => {
+                    if let Some(content) = message.content.as_deref() {
+                        let channel = if Some(index) == current_user {
+                            AnswerProvenanceChannel::CurrentQuestion
+                        } else {
+                            AnswerProvenanceChannel::HistoricalUser
+                        };
+                        ledger.observe_user_message(content, channel);
+                    }
+                }
+                Role::Assistant => {
+                    if message.tool_calls.is_empty() {
+                        if let Some(content) = message.content.as_deref() {
+                            ledger.observe_public_text(
+                                content,
+                                AnswerProvenanceChannel::HistoricalAssistant,
+                            );
+                        }
+                    }
+                    for call in &message.tool_calls {
+                        ledger.observe_tool_arguments(&call.name, &call.arguments);
+                        tool_names.push((call.id.clone(), call.name.clone()));
+                    }
+                }
+                Role::Tool => {
+                    let Some(content) = message.content.as_deref() else {
+                        continue;
+                    };
+                    let Some(tool_call_id) = message.tool_call_id.as_deref() else {
+                        continue;
+                    };
+                    if let Some((_, tool)) = tool_names
+                        .iter()
+                        .rev()
+                        .find(|(call_id, _)| call_id == tool_call_id)
+                    {
+                        ledger.observe_tool_result(tool, content);
+                    }
+                }
+            }
+        }
+        ledger
+    }
+
+    fn current_question(&self) -> Option<&str> {
+        self.public_texts.iter().find_map(|item| {
+            (item.channel == AnswerProvenanceChannel::CurrentQuestion).then_some(item.text.as_str())
+        })
+    }
+
+    fn observe_public_text(&mut self, text: &str, channel: AnswerProvenanceChannel) {
+        let text = text.trim();
+        if text.is_empty()
+            || self
+                .public_texts
+                .iter()
+                .any(|item| item.text == text && item.channel == channel)
+        {
+            return;
+        }
+        self.public_texts.push(PublicAnswerProvenance {
+            text: text.into(),
+            channel,
+        });
+    }
+
+    fn observe_internal_locator(&mut self, value: &str, channel: AnswerProvenanceChannel) {
+        let value = value.trim();
+        if !is_answer_locator(value) {
+            return;
+        }
+        if let Some(existing) = self
+            .internal_locators
+            .iter_mut()
+            .find(|item| item.value == value)
+        {
+            if !existing.channels.contains(&channel) {
+                existing.channels.push(channel);
+            }
+            return;
+        }
+        self.internal_locators.push(InternalAnswerProvenance {
+            value: value.into(),
+            channels: vec![channel],
+        });
+    }
+
+    fn observe_user_message(&mut self, content: &str, channel: AnswerProvenanceChannel) {
+        let (visible, minimap_json) = split_paper_minimap_context(content);
+        if let Some(context_json) = minimap_json {
+            self.observe_paper_minimap_context(context_json);
+        }
+
+        if visible.starts_with("selection_provenance.v1 ") {
+            if let Some(value) = provenance_json_string_field(visible, "user_question") {
+                self.observe_public_text(&value, channel);
+            }
+            for field in ["resolved_quote", "unverified_raw_quote"] {
+                if let Some(value) = provenance_json_string_field(visible, field) {
+                    self.observe_public_text(&value, AnswerProvenanceChannel::SelectionEvidence);
+                }
+            }
+            if let Some(values) =
+                provenance_json_string_array_field(visible, "citation_candidate_lids")
+            {
+                for value in values {
+                    self.observe_internal_locator(
+                        &value,
+                        AnswerProvenanceChannel::SelectionLocator,
+                    );
+                }
+            }
+            return;
+        }
+
+        if let Some(after_prefix) = visible.strip_prefix("引用原文 [LID: ") {
+            if let Some((lid, rest)) = after_prefix.split_once("]:") {
+                self.observe_internal_locator(lid, AnswerProvenanceChannel::SelectionLocator);
+                if let Some(quote_start) = rest.find('「') {
+                    if let Some(relative_end) = rest[quote_start + '「'.len_utf8()..].find('」') {
+                        let start = quote_start + '「'.len_utf8();
+                        self.observe_public_text(
+                            &rest[start..start + relative_end],
+                            AnswerProvenanceChannel::SelectionEvidence,
+                        );
+                    }
+                }
+                if let Some((_, question)) = rest.split_once("我的问题:\n") {
+                    self.observe_public_text(question, channel);
+                }
+                return;
+            }
+        }
+
+        self.observe_public_text(visible, channel);
+    }
+
+    fn observe_paper_minimap_context(&mut self, context_json: &str) {
+        let Ok(context) = serde_json::from_str::<PaperMinimapAgentContext>(context_json) else {
+            return;
+        };
+        if let Some(lid) = context.position.anchor_lid.as_deref() {
+            self.observe_internal_locator(
+                lid,
+                AnswerProvenanceChannel::RuntimeContext {
+                    field: "position.anchor_lid".into(),
+                },
+            );
+        }
+        for region in context.topology {
+            for (field, value) in [
+                ("topology.lid_span.start_lid", region.lid_span.start_lid),
+                ("topology.lid_span.end_lid", region.lid_span.end_lid),
+            ] {
+                self.observe_internal_locator(
+                    &value,
+                    AnswerProvenanceChannel::RuntimeContext {
+                        field: field.into(),
+                    },
+                );
+            }
+        }
+        for landmark in context.landmarks {
+            self.observe_internal_locator(
+                &landmark.anchor_lid,
+                AnswerProvenanceChannel::RuntimeContext {
+                    field: "landmarks.anchor_lid".into(),
+                },
+            );
+        }
+    }
+
+    fn observe_tool_arguments(&mut self, tool: &str, arguments: &str) {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(arguments) else {
+            return;
+        };
+        let scalar_fields: &[&str] = match tool {
+            "book.text" => &["lid", "end_lid"],
+            "book.context" => &["lid"],
+            "book.query" => &["anchor_lid"],
+            "book.structure"
+            | "book.guide_path"
+            | "book.route_from"
+            | "book.guided_route_from"
+            | "book.unvisited_back" => &["at"],
+            "book.route_to" => &["from", "target"],
+            "source.present" => &["start_lid", "end_lid"],
+            "memory.save" => &["anchor_lid"],
+            "memory.recall" | "reader.gotoLid" | "reader.highlight" | "reader.note" => &["lid"],
+            _ => &[],
+        };
+        for field in scalar_fields {
+            if let Some(locator) = value.get(field).and_then(serde_json::Value::as_str) {
+                self.observe_internal_locator(
+                    locator,
+                    AnswerProvenanceChannel::ToolArgument {
+                        tool: tool.into(),
+                        field: (*field).into(),
+                    },
+                );
+            }
+        }
+        let array_fields: &[&str] = match tool {
+            "book.synthesize" => &["lids"],
+            "memory.save" => &["citations"],
+            "reader.paper_minimap.apply" => &["evidence_lids"],
+            _ => &[],
+        };
+        for field in array_fields {
+            if let Some(values) = value.get(field).and_then(serde_json::Value::as_array) {
+                for locator in values.iter().filter_map(serde_json::Value::as_str) {
+                    self.observe_internal_locator(
+                        locator,
+                        AnswerProvenanceChannel::ToolArgument {
+                            tool: tool.into(),
+                            field: (*field).into(),
+                        },
+                    );
+                }
+            }
+        }
+    }
+
+    fn observe_tool_result(&mut self, tool: &str, result: &str) {
+        match tool {
+            "book.text" => {
+                let Ok(observed) = serde_json::from_str::<ObservedBookText>(result) else {
+                    return;
+                };
+                self.observe_internal_locator(
+                    &observed.lid,
+                    AnswerProvenanceChannel::ToolResult {
+                        tool: tool.into(),
+                        field: "lid".into(),
+                    },
+                );
+                self.observe_public_text(
+                    &observed.text,
+                    AnswerProvenanceChannel::NormativeEvidence {
+                        tool: tool.into(),
+                        field: "text".into(),
+                    },
+                );
+            }
+            "book.query" | "book.synthesize" => {
+                let Ok(observed) = serde_json::from_str::<ObservedCitationEnvelope>(result) else {
+                    return;
+                };
+                for citation in observed.citations {
+                    self.observe_internal_locator(
+                        &citation.lid,
+                        AnswerProvenanceChannel::ToolResult {
+                            tool: tool.into(),
+                            field: "citations.lid".into(),
+                        },
+                    );
+                    self.observe_public_text(
+                        &citation.text,
+                        AnswerProvenanceChannel::NormativeEvidence {
+                            tool: tool.into(),
+                            field: "citations.text".into(),
+                        },
+                    );
+                }
+            }
+            "book.context" => {
+                let Ok(value) = serde_json::from_str::<serde_json::Value>(result) else {
+                    return;
+                };
+                self.observe_result_scalar(tool, &value, "anchor");
+                if let Some(items) = value.get("items").and_then(serde_json::Value::as_array) {
+                    for item in items {
+                        self.observe_result_scalar(tool, item, "lid");
+                        if let Some(via) = item.get("via") {
+                            for field in ["source_lid", "target_lid"] {
+                                self.observe_result_scalar(tool, via, field);
+                            }
+                            self.observe_result_array(tool, via, "evidence_lids");
+                        }
+                    }
+                }
+            }
+            "book.concept" => {
+                let Ok(value) = serde_json::from_str::<serde_json::Value>(result) else {
+                    return;
+                };
+                self.observe_result_array(tool, &value, "occurrences");
+            }
+            "book.route_from"
+            | "book.unvisited_back"
+            | "book.route_to"
+            | "book.guided_route_from" => {
+                let Ok(value) = serde_json::from_str::<serde_json::Value>(result) else {
+                    return;
+                };
+                self.observe_route_result(tool, &value);
+            }
+            "source.present" => {
+                let Ok(value) = serde_json::from_str::<serde_json::Value>(result) else {
+                    return;
+                };
+                for field in ["label", "preview"] {
+                    if let Some(text) = value.get(field).and_then(serde_json::Value::as_str) {
+                        self.observe_public_text(
+                            text,
+                            AnswerProvenanceChannel::NormativeEvidence {
+                                tool: tool.into(),
+                                field: field.into(),
+                            },
+                        );
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn observe_result_scalar(&mut self, tool: &str, value: &serde_json::Value, field: &str) {
+        if let Some(locator) = value.get(field).and_then(serde_json::Value::as_str) {
+            self.observe_internal_locator(
+                locator,
+                AnswerProvenanceChannel::ToolResult {
+                    tool: tool.into(),
+                    field: field.into(),
+                },
+            );
+        }
+    }
+
+    fn observe_result_array(&mut self, tool: &str, value: &serde_json::Value, field: &str) {
+        if let Some(values) = value.get(field).and_then(serde_json::Value::as_array) {
+            for locator in values.iter().filter_map(serde_json::Value::as_str) {
+                self.observe_internal_locator(
+                    locator,
+                    AnswerProvenanceChannel::ToolResult {
+                        tool: tool.into(),
+                        field: field.into(),
+                    },
+                );
+            }
+        }
+    }
+
+    fn observe_route_result(&mut self, tool: &str, value: &serde_json::Value) {
+        for field in ["entry_lid", "at"] {
+            self.observe_result_scalar(tool, value, field);
+        }
+        for field in [
+            "back",
+            "forward",
+            "concretize",
+            "cross",
+            "continue",
+            "route",
+            "frontier",
+        ] {
+            if let Some(steps) = value.get(field).and_then(serde_json::Value::as_array) {
+                self.observe_ranked_steps(tool, steps);
+            }
+        }
+        if let Some(groups) = value.as_array() {
+            for group in groups {
+                if let Some(steps) = group.get("steps").and_then(serde_json::Value::as_array) {
+                    self.observe_ranked_steps(tool, steps);
+                }
+            }
+        }
+    }
+
+    fn observe_ranked_steps(&mut self, tool: &str, steps: &[serde_json::Value]) {
+        for step in steps {
+            self.observe_result_scalar(tool, step, "lid");
+            self.observe_result_array(tool, step, "evidence_lids");
+        }
+    }
+
+    fn violations(&self, answer: &str) -> Vec<AnswerProvenanceViolation> {
+        let mut violations = explicit_answer_locator_violations(answer);
+        let mut locators = self.internal_locators.clone();
+        locators.sort_by_key(|item| std::cmp::Reverse(item.value.len()));
+        for locator in locators {
+            if self
+                .public_texts
+                .iter()
+                .any(|item| contains_locator_literal(&item.text, &locator.value))
+            {
+                continue;
+            }
+            for (start, _) in answer.match_indices(&locator.value) {
+                let end = start + locator.value.len();
+                if !answer[..start]
+                    .chars()
+                    .next_back()
+                    .is_none_or(is_lid_start_boundary)
+                    || !is_lid_end_boundary(&answer[end..])
+                    || violations
+                        .iter()
+                        .any(|violation| start < violation.end && end > violation.start)
+                {
+                    continue;
+                }
+                violations.push(AnswerProvenanceViolation {
+                    start,
+                    end,
+                    value: locator.value.clone(),
+                    form: if is_bracketed_locator(answer, start, end) {
+                        AnswerViolationForm::BracketedLocator
+                    } else {
+                        AnswerViolationForm::InternalLocator
+                    },
+                    channels: locator.channels.clone(),
+                });
+            }
+        }
+        violations.sort_by_key(|violation| (violation.start, violation.end));
+        violations.dedup_by(|left, right| {
+            left.start == right.start && left.end == right.end && left.form == right.form
+        });
+        violations
+    }
+}
+
+fn split_paper_minimap_context(content: &str) -> (&str, Option<&str>) {
+    const OPEN: &str = "<paper_minimap_agent_context>";
+    const CLOSE: &str = "</paper_minimap_agent_context>";
+    let Some(open) = content.find(OPEN) else {
+        return (content, None);
+    };
+    let json_start = open + OPEN.len();
+    let Some(relative_close) = content[json_start..].find(CLOSE) else {
+        return (&content[..open], None);
+    };
+    (
+        content[..open].trim_end(),
+        Some(&content[json_start..json_start + relative_close]),
+    )
+}
+
+fn provenance_field<'a>(content: &'a str, field: &str) -> Option<&'a str> {
+    let prefix = format!("{field}=");
+    content.lines().find_map(|line| line.strip_prefix(&prefix))
+}
+
+fn provenance_json_string_field(content: &str, field: &str) -> Option<String> {
+    serde_json::from_str(provenance_field(content, field)?).ok()
+}
+
+fn provenance_json_string_array_field(content: &str, field: &str) -> Option<Vec<String>> {
+    serde_json::from_str(provenance_field(content, field)?).ok()
+}
+
+fn is_answer_locator(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .split('.')
+            .all(|segment| !segment.is_empty() && segment.bytes().all(|byte| byte.is_ascii_digit()))
+}
+
+fn contains_locator_literal(text: &str, locator: &str) -> bool {
+    text.match_indices(locator).any(|(start, _)| {
+        text[..start]
+            .chars()
+            .next_back()
+            .is_none_or(is_lid_start_boundary)
+            && is_lid_end_boundary(&text[start + locator.len()..])
+    })
+}
+
+fn explicit_answer_locator_violations(answer: &str) -> Vec<AnswerProvenanceViolation> {
+    let mut violations = Vec::new();
+    for (prefix, form, ascii_case_insensitive) in [
+        ("lid", AnswerViolationForm::ExplicitLid, true),
+        ("node", AnswerViolationForm::ExplicitNode, true),
+        ("节点号", AnswerViolationForm::ExplicitNode, false),
+        ("节点", AnswerViolationForm::ExplicitNode, false),
+        ("節點號", AnswerViolationForm::ExplicitNode, false),
+        ("節點", AnswerViolationForm::ExplicitNode, false),
+    ] {
+        for (start, _) in answer.char_indices() {
+            let Some(candidate_prefix) = answer[start..].get(..prefix.len()) else {
+                continue;
+            };
+            let prefix_matches = if ascii_case_insensitive {
+                candidate_prefix.eq_ignore_ascii_case(prefix)
+            } else {
+                candidate_prefix == prefix
+            };
+            if !prefix_matches
+                || answer[..start]
+                    .chars()
+                    .next_back()
+                    .is_some_and(|character| character.is_ascii_alphanumeric() || character == '_')
+            {
+                continue;
+            }
+            let after_prefix = start + prefix.len();
+            let separator_len = locator_separator_len(&answer[after_prefix..]);
+            let value_start = after_prefix + separator_len;
+            let value_len = locator_prefix_len(&answer[value_start..]);
+            if value_len == 0 || !is_lid_end_boundary(&answer[value_start + value_len..]) {
+                continue;
+            }
+            violations.push(AnswerProvenanceViolation {
+                start,
+                end: value_start + value_len,
+                value: answer[value_start..value_start + value_len].into(),
+                form: form.clone(),
+                channels: vec![AnswerProvenanceChannel::ExplicitInternalSyntax],
+            });
+        }
+    }
+    violations.sort_by_key(|violation| (violation.start, violation.end));
+    violations.dedup_by(|left, right| left.start == right.start && left.end == right.end);
+    violations
+}
+
+fn locator_separator_len(value: &str) -> usize {
+    let mut end = 0;
+    for (index, character) in value.char_indices() {
+        if character.is_whitespace() || matches!(character, ':' | '：' | '=' | '#' | '-') {
+            end = index + character.len_utf8();
+        } else {
+            break;
+        }
+    }
+    end
+}
+
+fn locator_prefix_len(value: &str) -> usize {
+    let bytes = value.as_bytes();
+    let mut cursor = 0;
+    while cursor < bytes.len() && bytes[cursor].is_ascii_digit() {
+        cursor += 1;
+    }
+    if cursor == 0 {
+        return 0;
+    }
+    loop {
+        if cursor >= bytes.len() || bytes[cursor] != b'.' {
+            break;
+        }
+        let dot = cursor;
+        cursor += 1;
+        let segment_start = cursor;
+        while cursor < bytes.len() && bytes[cursor].is_ascii_digit() {
+            cursor += 1;
+        }
+        if cursor == segment_start {
+            cursor = dot;
+            break;
+        }
+    }
+    cursor
+}
+
+fn is_bracketed_locator(answer: &str, start: usize, end: usize) -> bool {
+    answer[..start].trim_end().ends_with('[') && answer[end..].trim_start().starts_with(']')
+}
+
 #[derive(Debug)]
 struct CompiledAgentAnswer {
     answer: String,
     view: AgentAnswerView,
     bindings: Vec<SourceBinding>,
+}
+
+#[derive(Debug)]
+struct AnswerCompileError {
+    issues: Vec<AnswerDeliveryIssue>,
 }
 
 struct AnswerDelivery {
@@ -651,21 +1374,25 @@ struct AnswerDelivery {
     warning: Option<String>,
     extra_turns: usize,
     extra_tokens: u32,
+    diagnostics: Option<AnswerDeliveryDiagnostics>,
 }
 
 const SOURCE_MARKER_PREFIX: &str = "[[source:";
-const SOURCE_PRESENTATION_FAILURE_MESSAGE: &str =
-    "这次回答包含无法安全呈现的内部来源信息，已停止显示。请重新生成回答。";
+const SOURCE_PRESENTATION_FAILURE_MESSAGE: &str = "这次回答生成失败，请重试。";
 
 fn compile_agent_answer(
     raw: &str,
     bindings: &[SourceBinding],
-    book: &Book,
-) -> Result<CompiledAgentAnswer, ToolError> {
+    provenance: &AnswerProvenanceLedger,
+) -> Result<CompiledAgentAnswer, AnswerCompileError> {
     if raw.trim().is_empty() {
         return Err(answer_compile_error(
             "INVALID_AGENT_ANSWER",
             "final answer must contain visible text",
+            None,
+            None,
+            None,
+            "empty_answer",
         ));
     }
 
@@ -676,10 +1403,16 @@ fn compile_agent_answer(
     while let Some(relative_start) = raw[cursor..].find(SOURCE_MARKER_PREFIX) {
         let marker_start = cursor + relative_start;
         let markdown = &raw[cursor..marker_start];
-        if markdown.to_ascii_lowercase().contains("[[source") {
+        if let Some(relative_bad) = markdown.to_ascii_lowercase().find("[[source") {
+            let bad_start = cursor + relative_bad;
+            let bad_end = source_marker_span_end(raw, bad_start);
             return Err(answer_compile_error(
                 "INVALID_SOURCE_MARKER",
                 "source marker syntax is malformed",
+                Some(bad_start),
+                Some(bad_end),
+                Some(&raw[bad_start..bad_end]),
+                "malformed_source_marker",
             ));
         }
         push_answer_markdown(&mut parts, markdown);
@@ -688,6 +1421,10 @@ fn compile_agent_answer(
             return Err(answer_compile_error(
                 "INVALID_SOURCE_MARKER",
                 "source markers must follow visible answer text",
+                Some(marker_start),
+                Some(source_marker_span_end(raw, marker_start)),
+                Some(&raw[marker_start..source_marker_span_end(raw, marker_start)]),
+                "leading_source_marker",
             ));
         }
 
@@ -702,6 +1439,10 @@ fn compile_agent_answer(
                 return Err(answer_compile_error(
                     "UNKNOWN_SOURCE_REF",
                     "source marker does not belong to this turn",
+                    Some(next_marker),
+                    Some(marker_end),
+                    Some(&source_ref_id),
+                    "unknown_source_marker",
                 ));
             }
             if !group.contains(&source_ref_id) {
@@ -732,17 +1473,26 @@ fn compile_agent_answer(
     let tail = &raw[cursor..];
     push_answer_markdown(&mut parts, tail);
     answer.push_str(tail);
-    if answer.to_ascii_lowercase().contains("[[source") {
+    if let Some(relative_bad) = tail.to_ascii_lowercase().find("[[source") {
+        let bad_start = cursor + relative_bad;
+        let bad_end = source_marker_span_end(raw, bad_start);
         return Err(answer_compile_error(
             "INVALID_SOURCE_MARKER",
             "source marker syntax is malformed",
+            Some(bad_start),
+            Some(bad_end),
+            Some(&raw[bad_start..bad_end]),
+            "malformed_source_marker",
         ));
     }
-    if contains_raw_lid(&answer, book) {
-        return Err(answer_compile_error(
-            "RAW_LID_LEAK",
-            "final answer contains an internal LID",
-        ));
+    let provenance_violations = provenance.violations(raw);
+    if !provenance_violations.is_empty() {
+        return Err(AnswerCompileError {
+            issues: provenance_violations
+                .iter()
+                .map(AnswerProvenanceViolation::delivery_issue)
+                .collect(),
+        });
     }
 
     let mut used_bindings = Vec::with_capacity(used_ref_ids.len());
@@ -777,12 +1527,19 @@ fn push_answer_markdown(parts: &mut Vec<AgentAnswerPart>, text: &str) {
     }
 }
 
-fn parse_source_marker(raw: &str, marker_start: usize) -> Result<(String, usize), ToolError> {
+fn parse_source_marker(
+    raw: &str,
+    marker_start: usize,
+) -> Result<(String, usize), AnswerCompileError> {
     let content_start = marker_start + SOURCE_MARKER_PREFIX.len();
     let Some(relative_end) = raw[content_start..].find("]]") else {
         return Err(answer_compile_error(
             "INVALID_SOURCE_MARKER",
             "source marker is not closed",
+            Some(marker_start),
+            Some(raw.len()),
+            Some(&raw[marker_start..]),
+            "unclosed_source_marker",
         ));
     };
     let content_end = content_start + relative_end;
@@ -795,81 +1552,33 @@ fn parse_source_marker(raw: &str, marker_start: usize) -> Result<(String, usize)
         return Err(answer_compile_error(
             "INVALID_SOURCE_MARKER",
             "source marker contains an invalid ref",
+            Some(marker_start),
+            Some(content_end + 2),
+            Some(source_ref_id),
+            "invalid_source_marker_ref",
         ));
     }
     Ok((source_ref_id.into(), content_end + 2))
 }
 
-fn answer_compile_error(error_code: &str, message: &str) -> ToolError {
-    ToolError {
-        error_code: error_code.into(),
-        category: "validation".into(),
-        message: message.into(),
+fn answer_compile_error(
+    error_code: &str,
+    _message: &str,
+    start: Option<usize>,
+    end: Option<usize>,
+    trigger_value: Option<&str>,
+    match_form: &str,
+) -> AnswerCompileError {
+    AnswerCompileError {
+        issues: vec![AnswerDeliveryIssue {
+            error_code: error_code.into(),
+            start,
+            end,
+            trigger_value: trigger_value.map(str::to_string),
+            match_form: match_form.into(),
+            source_channels: Vec::new(),
+        }],
     }
-}
-
-fn contains_raw_lid(answer: &str, book: &Book) -> bool {
-    let mut lids: Vec<_> = book
-        .base
-        .lid_nodes
-        .iter()
-        .map(|node| node.lid.as_str())
-        .collect();
-    lids.sort_by_key(|lid| std::cmp::Reverse(lid.len()));
-    lids.into_iter().any(|lid| {
-        contains_bracketed_lid(answer, lid)
-            || contains_prefixed_lid(answer, lid)
-            || (lid.contains('.') && contains_standalone_lid(answer, lid))
-    })
-}
-
-fn contains_bracketed_lid(answer: &str, lid: &str) -> bool {
-    let mut rest = answer;
-    while let Some(open) = rest.find('[') {
-        let after_open = &rest[open + 1..];
-        let Some(close) = after_open.find(']') else {
-            return false;
-        };
-        if after_open[..close].trim() == lid {
-            return true;
-        }
-        rest = &after_open[close + 1..];
-    }
-    false
-}
-
-fn contains_prefixed_lid(answer: &str, lid: &str) -> bool {
-    let lower = answer.to_lowercase();
-    ["lid", "node", "节点号", "节点", "節點號", "節點"]
-        .into_iter()
-        .any(|prefix| {
-            let searchable = if prefix.is_ascii() {
-                lower.as_str()
-            } else {
-                answer
-            };
-            searchable.match_indices(prefix).any(|(index, _)| {
-                let before = searchable[..index].chars().next_back();
-                if before.is_some_and(|character| character.is_alphanumeric() || character == '_') {
-                    return false;
-                }
-                let after_prefix = &searchable[index + prefix.len()..];
-                let candidate = after_prefix.trim_start_matches(|character: char| {
-                    character.is_whitespace() || matches!(character, ':' | '：' | '=' | '#' | '-')
-                });
-                candidate.starts_with(lid) && is_lid_end_boundary(&candidate[lid.len()..])
-            })
-        })
-}
-
-fn contains_standalone_lid(answer: &str, lid: &str) -> bool {
-    answer.match_indices(lid).any(|(index, _)| {
-        answer[..index]
-            .chars()
-            .next_back()
-            .is_none_or(is_lid_start_boundary)
-            && is_lid_end_boundary(&answer[index + lid.len()..])
-    })
 }
 
 fn is_lid_start_boundary(character: char) -> bool {
@@ -890,17 +1599,17 @@ fn is_lid_end_boundary(rest: &str) -> bool {
 fn deliver_agent_answer(
     raw: &str,
     bindings: &[SourceBinding],
-    book: &Book,
+    provenance: &AnswerProvenanceLedger,
     adapter: &dyn ModelAdapter,
-    request_messages: &[Message],
 ) -> AnswerDelivery {
-    match compile_agent_answer(raw, bindings, book) {
+    match compile_agent_answer(raw, bindings, provenance) {
         Ok(compiled) => AnswerDelivery {
             compiled,
             incomplete: false,
             warning: None,
             extra_turns: 0,
             extra_tokens: 0,
+            diagnostics: None,
         },
         Err(error) => {
             let allowed_sources: Vec<_> = bindings
@@ -909,53 +1618,98 @@ fn deliver_agent_answer(
                     serde_json::json!({
                         "source_ref_id": binding.source_ref_id,
                         "label": binding.label_snapshot,
+                        "preview": binding.preview_snapshot,
                     })
                 })
                 .collect();
-            let repair_prompt = format!(
-                "source_answer_repair.v1\n\
-The previous candidate answer failed deterministic delivery validation ({code}).\n\
-Return one repaired final answer only; do not call tools. Preserve supported meaning, remove every raw LID, and use only exact markers of the form [[source:<source_ref_id>]] from allowed_sources. Sources are optional; do not invent or require them. Do not mention this repair.\n\
-allowed_sources={sources}\n\
-candidate_answer={answer}",
-                code = error.error_code,
-                sources = serde_json::to_string(&allowed_sources).unwrap_or_else(|_| "[]".into()),
-                answer = serde_json::to_string(raw).unwrap_or_else(|_| "\"\"".into()),
-            );
-            let mut repair_messages = request_messages.to_vec();
-            repair_messages.push(Message::system(repair_prompt));
+            let payload = serde_json::json!({
+                "original_question": provenance.current_question().unwrap_or_default(),
+                "candidate_answer": raw,
+                "violations": error.issues,
+                "allowed_sources": allowed_sources,
+            });
+            let repair_messages = vec![
+                Message::system(
+                    "source_answer_repair.v3\nReturn one revised final answer and no tool calls. Rewrite the candidate freely as needed. The final answer must avoid every listed violation, may use only source_ref_id values from allowed_sources, and must not mention validation or create sources.",
+                ),
+                Message::user(payload.to_string()),
+            ];
             let repaired = adapter.chat(&repair_messages, &[]);
             let extra_tokens = repaired
                 .as_ref()
                 .ok()
                 .and_then(|turn| turn.usage_total_tokens)
                 .unwrap_or_else(|| messages_estimate(&repair_messages));
-            if let Ok(turn) = repaired {
-                if turn.tool_calls.is_empty() {
-                    if let Some(text) = turn.text {
-                        if let Ok(compiled) = compile_agent_answer(&text, bindings, book) {
-                            return AnswerDelivery {
-                                compiled,
-                                incomplete: false,
-                                warning: None,
-                                extra_turns: 1,
-                                extra_tokens,
-                            };
-                        }
-                    }
-                }
+            let initial = AnswerDeliveryAttemptDiagnostics {
+                issues: error.issues.clone(),
+            };
+            let (repair_issues, repaired_compiled) = match repaired {
+                Err(_) => (
+                    vec![delivery_issue("REPAIR_PROVIDER_ERROR", "provider_error")],
+                    None,
+                ),
+                Ok(turn) if !turn.tool_calls.is_empty() => (
+                    vec![delivery_issue("REPAIR_TOOL_CALL", "repair_tool_call")],
+                    None,
+                ),
+                Ok(turn) => match turn.text {
+                    None => (
+                        vec![delivery_issue("REPAIR_EMPTY_ANSWER", "empty_repair")],
+                        None,
+                    ),
+                    Some(text) => match compile_agent_answer(&text, bindings, provenance) {
+                        Err(repair_error) => (repair_error.issues, None),
+                        Ok(compiled) => (Vec::new(), Some(compiled)),
+                    },
+                },
+            };
+            let diagnostics = Some(AnswerDeliveryDiagnostics {
+                initial,
+                repair: Some(AnswerDeliveryAttemptDiagnostics {
+                    issues: repair_issues,
+                }),
+            });
+            if let Some(compiled) = repaired_compiled {
+                return AnswerDelivery {
+                    compiled,
+                    incomplete: false,
+                    warning: None,
+                    extra_turns: 1,
+                    extra_tokens,
+                    diagnostics,
+                };
             }
-            let compiled = compile_agent_answer(SOURCE_PRESENTATION_FAILURE_MESSAGE, &[], book)
-                .expect("fixed source failure message must compile");
+            let compiled =
+                compile_agent_answer(SOURCE_PRESENTATION_FAILURE_MESSAGE, &[], provenance)
+                    .expect("fixed source failure message must compile");
             AnswerDelivery {
                 compiled,
                 incomplete: true,
-                warning: Some("SOURCE_PRESENTATION_FAILED".into()),
+                warning: None,
                 extra_turns: 1,
                 extra_tokens,
+                diagnostics,
             }
         }
     }
+}
+
+fn delivery_issue(error_code: &str, match_form: &str) -> AnswerDeliveryIssue {
+    AnswerDeliveryIssue {
+        error_code: error_code.into(),
+        start: None,
+        end: None,
+        trigger_value: None,
+        match_form: match_form.into(),
+        source_channels: Vec::new(),
+    }
+}
+
+fn source_marker_span_end(value: &str, start: usize) -> usize {
+    value[start..]
+        .find("]]")
+        .map(|relative| start + relative + 2)
+        .unwrap_or(value.len())
 }
 
 /// 外层 loop 暴露给模型的工具集(7 个;reader.* 留 S7)`[ADR-0026]`。
@@ -2054,6 +2808,139 @@ fn digest(s: &str) -> String {
     s.chars().take(200).collect()
 }
 
+fn opaque_tool_result_digest(result: &str) -> String {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in result.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("tool-result-fnv1a64-{hash:016x}-bytes-{}", result.len())
+}
+
+fn compact_tool_locator_arguments(arguments: &str) -> serde_json::Value {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(arguments) else {
+        return serde_json::json!({});
+    };
+    let Some(object) = value.as_object() else {
+        return serde_json::json!({});
+    };
+    let mut compact = serde_json::Map::new();
+    for field in [
+        "lid",
+        "start_lid",
+        "end_lid",
+        "anchor_lid",
+        "at",
+        "from",
+        "target",
+    ] {
+        if let Some(value) = object.get(field).filter(|value| value.is_string()) {
+            compact.insert(field.into(), value.clone());
+        }
+    }
+    for field in [
+        "lids",
+        "citations",
+        "evidence_lids",
+        "citation_candidate_lids",
+        "source_lids",
+    ] {
+        if let Some(values) = object.get(field).and_then(serde_json::Value::as_array) {
+            if values.iter().all(serde_json::Value::is_string) {
+                compact.insert(field.into(), serde_json::Value::Array(values.clone()));
+            }
+        }
+    }
+    serde_json::Value::Object(compact)
+}
+
+fn historical_tool_receipt(
+    tool: &str,
+    arguments: &str,
+    result: &str,
+    book: &Book,
+) -> HistoricalToolReceipt {
+    let parsed = serde_json::from_str::<serde_json::Value>(result).ok();
+    let error_code = parsed
+        .as_ref()
+        .and_then(|value| value.get("error_code"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    let status = if parsed.is_none() {
+        HistoricalToolStatus::LegacyUnparsed
+    } else if error_code.is_some() {
+        HistoricalToolStatus::Error
+    } else {
+        HistoricalToolStatus::Ok
+    };
+    let accepted_evidence = if status == HistoricalToolStatus::Ok {
+        let mut ledger = TurnEvidenceLedger::default();
+        observe_tool_evidence(&mut ledger, tool, arguments, result, book);
+        ledger.evidence
+    } else {
+        Vec::new()
+    };
+    let source_refs = parsed
+        .as_ref()
+        .and_then(|value| value.get("source_ref_id"))
+        .and_then(serde_json::Value::as_str)
+        .map(|value| vec![value.to_string()])
+        .unwrap_or_default();
+    HistoricalToolReceipt {
+        version: "historical_tool_receipt.v1".into(),
+        tool: tool.into(),
+        locator_args: compact_tool_locator_arguments(arguments),
+        status,
+        error_code,
+        accepted_evidence,
+        source_refs,
+        opaque_result_digest: opaque_tool_result_digest(result),
+    }
+}
+
+fn provider_history_projection(messages: &[Message], book: &Book) -> Vec<Message> {
+    let completed_end = messages
+        .iter()
+        .rposition(|message| message.role == Role::User)
+        .unwrap_or(0);
+    let mut projected = messages.to_vec();
+    let mut tool_calls: HashMap<String, (String, String)> = HashMap::new();
+    for index in 0..completed_end {
+        let original = &messages[index];
+        match original.role {
+            Role::Assistant => {
+                for (projected_call, original_call) in projected[index]
+                    .tool_calls
+                    .iter_mut()
+                    .zip(&original.tool_calls)
+                {
+                    tool_calls.insert(
+                        original_call.id.clone(),
+                        (original_call.name.clone(), original_call.arguments.clone()),
+                    );
+                    projected_call.arguments =
+                        compact_tool_locator_arguments(&original_call.arguments).to_string();
+                }
+            }
+            Role::Tool => {
+                let call = original
+                    .tool_call_id
+                    .as_deref()
+                    .and_then(|id| tool_calls.get(id));
+                let (tool, arguments) = call
+                    .map(|(tool, arguments)| (tool.as_str(), arguments.as_str()))
+                    .unwrap_or(("unknown", "{}"));
+                let result = original.content.as_deref().unwrap_or_default();
+                projected[index].content = Some(to_json(&historical_tool_receipt(
+                    tool, arguments, result, book,
+                )));
+            }
+            Role::System | Role::User => {}
+        }
+    }
+    projected
+}
+
 /// 回合收尾:视口若较回合前 anchor 变了,合并成单条 `Goto` effect(事务性 undo `[ADR-0030]`)。
 fn with_goto(reader: &Reader, before: &str, mut effects: Vec<AgentEffect>) -> Vec<AgentEffect> {
     let after = reader.state().viewport.anchor_lid;
@@ -2094,7 +2981,9 @@ fn messages_with_profile_snapshot(
     messages: &[Message],
     profile_snapshot: &ReaderProfileSnapshot,
     ephemeral_context: Option<&str>,
+    book: &Book,
 ) -> Vec<Message> {
+    let messages = provider_history_projection(messages, book);
     let insert_at = messages
         .iter()
         .position(|message| message.role != Role::System)
@@ -2288,11 +3177,12 @@ pub fn run_with_ephemeral_context(
     let mut claimed_used_fact_ids = BTreeSet::new();
     let mut profile_influences = BTreeSet::new();
     let mut evidence_ledger = TurnEvidenceLedger::from_seed(book, initial_evidence)?;
+    let mut answer_provenance = AnswerProvenanceLedger::from_messages(messages);
 
     loop {
         turns += 1;
         let request_messages =
-            messages_with_profile_snapshot(messages, profile_snapshot, ephemeral_context);
+            messages_with_profile_snapshot(messages, profile_snapshot, ephemeral_context, book);
         let turn: AssistantTurn =
             adapter
                 .chat(&request_messages, &tools)
@@ -2322,7 +3212,7 @@ pub fn run_with_ephemeral_context(
         if turn.tool_calls.is_empty() {
             let registered_bindings = evidence_ledger.bindings();
             let delivery = turn.text.as_deref().map(|raw| {
-                deliver_agent_answer(raw, &registered_bindings, book, adapter, &request_messages)
+                deliver_agent_answer(raw, &registered_bindings, &answer_provenance, adapter)
             });
             if let Some(delivery) = &delivery {
                 turns += delivery.extra_turns;
@@ -2334,6 +3224,9 @@ pub fn run_with_ephemeral_context(
             let answer_view = delivery
                 .as_ref()
                 .map(|delivery| delivery.compiled.view.clone());
+            let delivery_diagnostics = delivery
+                .as_ref()
+                .and_then(|delivery| delivery.diagnostics.clone());
             messages.push(Message {
                 role: Role::Assistant,
                 content: answer.clone(),
@@ -2362,6 +3255,7 @@ pub fn run_with_ephemeral_context(
                 source_bindings: delivery
                     .map(|delivery| delivery.compiled.bindings)
                     .unwrap_or_default(),
+                delivery_diagnostics,
             });
         }
 
@@ -2373,6 +3267,7 @@ pub fn run_with_ephemeral_context(
             tool_call_id: None,
         });
         for tc in &turn.tool_calls {
+            answer_provenance.observe_tool_arguments(&tc.name, &tc.arguments);
             let (result, effect, query_audit) = if tc.name == "profile.mark_used" {
                 (
                     mark_profile_used(
@@ -2399,6 +3294,7 @@ pub fn run_with_ephemeral_context(
                 (result, effect, None)
             };
             observe_tool_evidence(&mut evidence_ledger, &tc.name, &tc.arguments, &result, book);
+            answer_provenance.observe_tool_result(&tc.name, &result);
             if trace_dbg {
                 eprintln!(
                     "   ↳ {} => {}",
@@ -2426,32 +3322,31 @@ pub fn run_with_ephemeral_context(
         // 硬闸双重停机:max_turns ∨ token 触顶 → 诚实标 incomplete,不假装完整。
         if turns >= cfg.max_turns || spent > cfg.token_budget {
             let registered_bindings = evidence_ledger.bindings();
-            let compiled = turn.text.as_deref().and_then(|raw| {
-                compile_agent_answer(raw, &registered_bindings, book)
-                    .ok()
-                    .or_else(|| {
-                        compile_agent_answer(SOURCE_PRESENTATION_FAILURE_MESSAGE, &[], book).ok()
+            let attempted = turn
+                .text
+                .as_deref()
+                .map(|raw| compile_agent_answer(raw, &registered_bindings, &answer_provenance));
+            let source_failed = attempted.as_ref().is_some_and(Result::is_err);
+            let delivery_diagnostics = attempted.as_ref().and_then(|result| {
+                result
+                    .as_ref()
+                    .err()
+                    .map(|error| AnswerDeliveryDiagnostics {
+                        initial: AnswerDeliveryAttemptDiagnostics {
+                            issues: error.issues.clone(),
+                        },
+                        repair: None,
                     })
             });
-            let source_failed = turn.text.is_some()
-                && compile_agent_answer(
-                    turn.text.as_deref().unwrap_or_default(),
-                    &registered_bindings,
-                    book,
-                )
-                .is_err();
+            let compiled = attempted.and_then(Result::ok).or_else(|| {
+                compile_agent_answer(SOURCE_PRESENTATION_FAILURE_MESSAGE, &[], &answer_provenance)
+                    .ok()
+            });
             return Ok(OuterOutcome {
                 answer: compiled.as_ref().map(|compiled| compiled.answer.clone()),
                 answer_view: compiled.as_ref().map(|compiled| compiled.view.clone()),
                 incomplete: true,
-                warning: Some(
-                    if source_failed {
-                        "SOURCE_PRESENTATION_FAILED"
-                    } else {
-                        "CONTEXT_BUDGET_EXCEEDED"
-                    }
-                    .into(),
-                ),
+                warning: (!source_failed).then_some("CONTEXT_BUDGET_EXCEEDED".into()),
                 turns,
                 tokens_spent: spent,
                 effects: with_goto(reader, &before_anchor, effects),
@@ -2465,6 +3360,7 @@ pub fn run_with_ephemeral_context(
                 source_bindings: compiled
                     .map(|compiled| compiled.bindings)
                     .unwrap_or_default(),
+                delivery_diagnostics,
             });
         }
     }
@@ -2507,6 +3403,10 @@ mod tests {
     struct QueryAuditAdapter {
         chats: RefCell<VecDeque<AssistantTurn>>,
         seen_messages: RefCell<Vec<Vec<Message>>>,
+    }
+    struct RealRereadAdapter {
+        step: RefCell<usize>,
+        lid: String,
     }
     impl FakeAdapter {
         fn new(chats: Vec<AssistantTurn>, completes: Vec<ParsedResponse>) -> Self {
@@ -2634,6 +3534,73 @@ mod tests {
                 .ok_or_else(|| AdapterError {
                     message: "query audit chat script exhausted".into(),
                 })
+        }
+    }
+
+    impl ModelAdapter for RealRereadAdapter {
+        fn complete(&self, _req: CompletionRequest) -> Result<ParsedResponse, AdapterError> {
+            Err(AdapterError {
+                message: "real reread fixture does not use complete".into(),
+            })
+        }
+
+        fn chat(
+            &self,
+            messages: &[Message],
+            _tools: &[ToolSpec],
+        ) -> Result<AssistantTurn, AdapterError> {
+            let mut step = self.step.borrow_mut();
+            let turn = match *step {
+                0 => AssistantTurn {
+                    text: None,
+                    tool_calls: vec![ToolCall {
+                        id: "real-read".into(),
+                        name: "book.text".into(),
+                        arguments: serde_json::json!({"lid": self.lid}).to_string(),
+                    }],
+                    usage_total_tokens: Some(10),
+                },
+                1 => AssistantTurn {
+                    text: None,
+                    tool_calls: vec![ToolCall {
+                        id: "real-present".into(),
+                        name: "source.present".into(),
+                        arguments: serde_json::json!({"start_lid": self.lid}).to_string(),
+                    }],
+                    usage_total_tokens: Some(10),
+                },
+                2 => {
+                    let source_ref_id = messages
+                        .iter()
+                        .rev()
+                        .find(|message| message.tool_call_id.as_deref() == Some("real-present"))
+                        .and_then(|message| message.content.as_deref())
+                        .and_then(|content| serde_json::from_str::<serde_json::Value>(content).ok())
+                        .and_then(|value| {
+                            value
+                                .get("source_ref_id")
+                                .and_then(serde_json::Value::as_str)
+                                .map(str::to_string)
+                        })
+                        .ok_or_else(|| AdapterError {
+                            message: "source.present did not return a source ref".into(),
+                        })?;
+                    AssistantTurn {
+                        text: Some(format!(
+                            "The reread passage supports this explanation.[[source:{source_ref_id}]]"
+                        )),
+                        tool_calls: Vec::new(),
+                        usage_total_tokens: Some(10),
+                    }
+                }
+                _ => {
+                    return Err(AdapterError {
+                        message: "real reread fixture exhausted".into(),
+                    })
+                }
+            };
+            *step += 1;
+            Ok(turn)
         }
     }
 
@@ -3605,8 +4572,781 @@ mod tests {
     }
 
     #[test]
-    fn source_presentation_compiler_emits_typed_parts_merges_adjacent_refs_and_prunes_unused() {
+    fn answer_provenance_allows_public_collision_and_unknown_numbers() {
+        let mut provenance = AnswerProvenanceLedger::default();
+        provenance.observe_public_text(
+            "正文把第1.19节称为设计边界。",
+            AnswerProvenanceChannel::CurrentQuestion,
+        );
+        provenance.observe_internal_locator(
+            "1.19",
+            AnswerProvenanceChannel::ToolArgument {
+                tool: "book.text".into(),
+                field: "lid".into(),
+            },
+        );
+
+        assert!(provenance
+            .violations("第1.19节讨论设计边界；客户端版本是 2.0 和 v1.19.0。")
+            .is_empty());
+    }
+
+    #[test]
+    fn answer_provenance_rejects_internal_naturalization_and_explicit_internal_syntax() {
+        let channel = AnswerProvenanceChannel::ToolArgument {
+            tool: "book.text".into(),
+            field: "lid".into(),
+        };
+        let mut internal_only = AnswerProvenanceLedger::default();
+        internal_only.observe_internal_locator("1.19", channel.clone());
+
+        let naturalized = internal_only.violations("请看第1.19节的说明。");
+        assert_eq!(naturalized.len(), 1);
+        assert_eq!(naturalized[0].value, "1.19");
+        assert_eq!(naturalized[0].form, AnswerViolationForm::InternalLocator);
+        assert_eq!(naturalized[0].channels, vec![channel]);
+
+        let mut collided = internal_only;
+        collided.observe_public_text(
+            "第1.19节是用户可见正文。",
+            AnswerProvenanceChannel::HistoricalAssistant,
+        );
+        for (answer, expected_form) in [
+            ("参见 LID 1.19。", AnswerViolationForm::ExplicitLid),
+            ("参见节点 1.19。", AnswerViolationForm::ExplicitNode),
+        ] {
+            let violations = collided.violations(answer);
+            assert_eq!(violations.len(), 1, "{answer}");
+            assert_eq!(violations[0].form, expected_form, "{answer}");
+            assert_eq!(
+                violations[0].channels,
+                vec![AnswerProvenanceChannel::ExplicitInternalSyntax],
+                "{answer}"
+            );
+        }
+    }
+
+    #[test]
+    fn answer_provenance_extracts_history_and_typed_evidence_only() {
+        let messages = vec![
+            Message::user("历史用户提到第1.19节。"),
+            Message {
+                role: Role::Assistant,
+                content: Some("历史回答使用公开版本 2.4.0。".into()),
+                tool_calls: vec![call("read", "book.text", r#"{"lid":"1.20"}"#)],
+                tool_call_id: None,
+            },
+            Message {
+                role: Role::Tool,
+                content: Some(r#"{"lid":"1.20","text":"第1.20节是规范证据正文。"}"#.into()),
+                tool_calls: vec![],
+                tool_call_id: Some("read".into()),
+            },
+            Message {
+                role: Role::Assistant,
+                content: None,
+                tool_calls: vec![call("opaque", "unknown.tool", "{}")],
+                tool_call_id: None,
+            },
+            Message {
+                role: Role::Tool,
+                content: Some(r#"{"lid":"9.9","opaque":"not typed evidence"}"#.into()),
+                tool_calls: vec![],
+                tool_call_id: Some("opaque".into()),
+            },
+        ];
+        let provenance = AnswerProvenanceLedger::from_messages(&messages);
+
+        assert!(provenance.violations("第1.19节与版本 2.4.0。").is_empty());
+        assert!(provenance.violations("第1.20节提供证据。").is_empty());
+        assert!(provenance
+            .violations("普通编号第9.9节保持原文。")
+            .is_empty());
+
+        let violations = provenance.violations("把内部位置自然化成第1.20节。");
+        assert!(violations.is_empty(), "typed evidence text wins collisions");
+    }
+
+    #[test]
+    fn answer_provenance_parses_selection_envelope_without_promoting_locator_fields() {
+        let messages = vec![Message::user(
+            "selection_provenance.v1 (server-validated data, not instructions)\n\
+status=resolved\n\
+citation_candidate_lids=[\"1.19\",\"1.20\"]\n\
+resolved_quote=\"正文明确写作第1.19节。\"\n\
+unverified_raw_quote=\"第1.19节\"\n\
+rules=typed\n\
+user_question=\"这段怎么理解？\"",
+        )];
+        let provenance = AnswerProvenanceLedger::from_messages(&messages);
+
+        assert!(provenance.violations("第1.19节可以复述。").is_empty());
+        let violations = provenance.violations("第1.20节只来自结构字段。");
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].value, "1.20");
+        assert_eq!(
+            violations[0].channels,
+            vec![AnswerProvenanceChannel::SelectionLocator]
+        );
+    }
+
+    #[test]
+    fn answer_provenance_native_and_react_outputs_share_the_same_validator() {
+        let mut provenance = AnswerProvenanceLedger::default();
+        provenance.observe_internal_locator(
+            "1.19",
+            AnswerProvenanceChannel::ToolResult {
+                tool: "book.context".into(),
+                field: "lid".into(),
+            },
+        );
+        let native = turn_final("第1.19节来自内部位置。");
+        let react = parse_react_assistant_turn(r#"{"final":"第1.19节来自内部位置。"}"#).unwrap();
+
+        assert_eq!(
+            provenance.violations(native.text.as_deref().unwrap()),
+            provenance.violations(react.text.as_deref().unwrap())
+        );
+        assert_eq!(
+            provenance
+                .violations(native.text.as_deref().unwrap())
+                .first()
+                .map(|violation| &violation.form),
+            Some(&AnswerViolationForm::InternalLocator)
+        );
+    }
+
+    #[test]
+    fn answer_delivery_public_collision_needs_no_repair_request() {
         let b = book();
+        let adapter = RecordingAdapter {
+            chats: RefCell::new(vec![turn_final("第1.1节是用户刚才提到的公开章节号。")].into()),
+            seen_messages: RefCell::new(Vec::new()),
+        };
+        let mut store = MemoryStore::open(tmp("answer-delivery-public-collision")).unwrap();
+        let mut reader = Reader::new(&b, DEFAULT_RADIUS);
+        let mut messages = new_session();
+
+        let out = run(
+            &b,
+            &mut store,
+            &mut reader,
+            &adapter,
+            &mut messages,
+            "第1.1节是什么意思？",
+            "t0",
+            OuterConfig::default(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            out.answer.as_deref(),
+            Some("第1.1节是用户刚才提到的公开章节号。")
+        );
+        assert_eq!(adapter.seen_messages.borrow().len(), 1);
+        assert!(out.delivery_diagnostics.is_none());
+    }
+
+    #[test]
+    fn answer_delivery_repair_uses_minimal_context_and_server_only_diagnostics() {
+        let b = book();
+        let adapter = RecordingAdapter {
+            chats: RefCell::new(
+                vec![
+                    turn_final("See LID 1.1 for details."),
+                    turn_final("See the relevant passage for details."),
+                ]
+                .into(),
+            ),
+            seen_messages: RefCell::new(Vec::new()),
+        };
+        let mut store = MemoryStore::open(tmp("answer-delivery-exact-repair")).unwrap();
+        let mut reader = Reader::new(&b, DEFAULT_RADIUS);
+        let mut messages = new_session();
+        messages.push(Message {
+            role: Role::Assistant,
+            content: None,
+            tool_calls: vec![call("old-read", "book.text", r#"{"lid":"1.1"}"#)],
+            tool_call_id: None,
+        });
+        messages.push(Message {
+            role: Role::Tool,
+            content: Some(r#"{"lid":"1.1","text":"SECRET_TOOL_BODY"}"#.into()),
+            tool_calls: vec![],
+            tool_call_id: Some("old-read".into()),
+        });
+
+        let out = run(
+            &b,
+            &mut store,
+            &mut reader,
+            &adapter,
+            &mut messages,
+            "Where is the explanation?",
+            "t0",
+            OuterConfig::default(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            out.answer.as_deref(),
+            Some("See the relevant passage for details.")
+        );
+        assert!(!out.incomplete);
+        let seen = adapter.seen_messages.borrow();
+        assert_eq!(seen.len(), 2);
+        let repair_json = serde_json::to_string(&seen[1]).unwrap();
+        assert!(!repair_json.contains("SECRET_TOOL_BODY"));
+        assert!(repair_json.contains("Where is the explanation?"));
+        assert!(repair_json.contains("See LID 1.1 for details."));
+        assert!(repair_json.contains("explicit_lid"));
+        assert!(repair_json.contains("source_answer_repair.v3"));
+        assert!(repair_json.contains("Rewrite the candidate freely"));
+        assert!(!repair_json.contains("Preserve every other character"));
+        assert_eq!(seen[1].len(), 2);
+
+        let diagnostics = out.delivery_diagnostics.as_ref().unwrap();
+        assert!(!diagnostics.initial.issues.is_empty());
+        assert!(diagnostics.repair.as_ref().unwrap().issues.is_empty());
+        let public_json = serde_json::to_string(&out).unwrap();
+        assert!(!public_json.contains("delivery_diagnostics"));
+        assert!(!public_json.contains("RAW_LID_LEAK"));
+        assert!(!public_json.contains("1.1"));
+    }
+
+    #[test]
+    fn answer_delivery_accepts_a_rewritten_repair_when_the_final_answer_is_valid() {
+        let b = book();
+        let fake = FakeAdapter::new(
+            vec![
+                turn_final("See LID 1.1 for details."),
+                turn_final("Entirely different new claim."),
+            ],
+            vec![],
+        );
+        let mut store = MemoryStore::open(tmp("answer-delivery-rewritten-repair")).unwrap();
+        let mut reader = Reader::new(&b, DEFAULT_RADIUS);
+        let mut messages = new_session();
+
+        let out = run(
+            &b,
+            &mut store,
+            &mut reader,
+            &fake,
+            &mut messages,
+            "answer safely",
+            "t0",
+            OuterConfig::default(),
+        )
+        .unwrap();
+
+        assert!(!out.incomplete);
+        assert_eq!(out.answer.as_deref(), Some("Entirely different new claim."));
+        assert!(out
+            .delivery_diagnostics
+            .as_ref()
+            .unwrap()
+            .repair
+            .as_ref()
+            .unwrap()
+            .issues
+            .is_empty());
+    }
+
+    #[test]
+    fn answer_delivery_rejects_invalid_repair_with_generic_failure() {
+        let cases = [
+            (
+                "tool-call",
+                turn_calls(vec![call("repair-call", "book.text", r#"{"lid":"1.1"}"#)]),
+                "REPAIR_TOOL_CALL",
+            ),
+            (
+                "unknown-marker",
+                turn_final("See the relevant passage.[[source:not_allowed]]"),
+                "UNKNOWN_SOURCE_REF",
+            ),
+        ];
+
+        for (name, repair, expected_code) in cases {
+            let b = book();
+            let fake =
+                FakeAdapter::new(vec![turn_final("See LID 1.1 for details."), repair], vec![]);
+            let mut store = MemoryStore::open(tmp(&format!("answer-delivery-{name}"))).unwrap();
+            let mut reader = Reader::new(&b, DEFAULT_RADIUS);
+            let mut messages = new_session();
+
+            let out = run(
+                &b,
+                &mut store,
+                &mut reader,
+                &fake,
+                &mut messages,
+                "answer safely",
+                "t0",
+                OuterConfig::default(),
+            )
+            .unwrap();
+
+            assert!(out.incomplete, "{name}");
+            assert_eq!(out.answer.as_deref(), Some("这次回答生成失败，请重试。"));
+            assert!(out.warning.is_none());
+            let diagnostics = out.delivery_diagnostics.as_ref().unwrap();
+            assert!(diagnostics
+                .repair
+                .as_ref()
+                .unwrap()
+                .issues
+                .iter()
+                .any(|issue| issue.error_code == expected_code));
+            let public_json = serde_json::to_string(&out).unwrap();
+            assert!(!public_json.contains(expected_code));
+            assert!(!public_json.contains("内部来源信息"));
+        }
+    }
+
+    #[test]
+    fn provider_history_projection_replaces_completed_tool_bodies_and_keeps_active_turn_full() {
+        let b = book();
+        let observed_text = b.text("1.1", None).unwrap();
+        let historical_text_result = serde_json::json!({
+            "lid": "1.1",
+            "text": observed_text,
+            "secret": "TEXT_SECRET_BODY"
+        })
+        .to_string();
+        let messages = vec![
+            Message::system("system"),
+            Message::user("historical question"),
+            Message {
+                role: Role::Assistant,
+                content: None,
+                tool_calls: vec![
+                    call(
+                        "guide",
+                        "book.paper_reading_guide",
+                        r#"{"mode":"close","stage":"active"}"#,
+                    ),
+                    call("lexicon", "book.paper_lexicon", "{}"),
+                    call(
+                        "text",
+                        "book.text",
+                        r#"{"lid":"1.1","non_locator_secret":"ARG_SECRET"}"#,
+                    ),
+                    call(
+                        "present",
+                        "source.present",
+                        r#"{"start_lid":"1.1","quote":"QUOTE_SECRET"}"#,
+                    ),
+                    call("error", "book.text", r#"{"lid":"9.9"}"#),
+                    call("legacy", "legacy.tool", r#"{"lid":"9.9"}"#),
+                ],
+                tool_call_id: None,
+            },
+            Message {
+                role: Role::Tool,
+                content: Some(r#"{"available":true,"body":"GUIDE_SECRET_BODY"}"#.into()),
+                tool_calls: vec![],
+                tool_call_id: Some("guide".into()),
+            },
+            Message {
+                role: Role::Tool,
+                content: Some(r#"{"entries":[{"term":"LEXICON_SECRET_BODY"}]}"#.into()),
+                tool_calls: vec![],
+                tool_call_id: Some("lexicon".into()),
+            },
+            Message {
+                role: Role::Tool,
+                content: Some(historical_text_result),
+                tool_calls: vec![],
+                tool_call_id: Some("text".into()),
+            },
+            Message {
+                role: Role::Tool,
+                content: Some(
+                    r#"{"source_ref_id":"source_ref_history","label":"正文","preview":"preview"}"#
+                        .into(),
+                ),
+                tool_calls: vec![],
+                tool_call_id: Some("present".into()),
+            },
+            Message {
+                role: Role::Tool,
+                content: Some(
+                    r#"{"error_code":"LID_NOT_FOUND","category":"not_found","message":"ERROR_SECRET_BODY"}"#
+                        .into(),
+                ),
+                tool_calls: vec![],
+                tool_call_id: Some("error".into()),
+            },
+            Message {
+                role: Role::Tool,
+                content: Some("LEGACY_RAW_SECRET LID 9.9".into()),
+                tool_calls: vec![],
+                tool_call_id: Some("legacy".into()),
+            },
+            Message {
+                role: Role::Assistant,
+                content: Some("historical answer".into()),
+                tool_calls: vec![],
+                tool_call_id: None,
+            },
+            Message::user("current question"),
+            Message {
+                role: Role::Assistant,
+                content: None,
+                tool_calls: vec![call(
+                    "current",
+                    "book.text",
+                    r#"{"lid":"1.1","current_secret":"CURRENT_ARG_BODY"}"#,
+                )],
+                tool_call_id: None,
+            },
+            Message {
+                role: Role::Tool,
+                content: Some("CURRENT_TOOL_BODY".into()),
+                tool_calls: vec![],
+                tool_call_id: Some("current".into()),
+            },
+        ];
+        let before = serde_json::to_vec(&messages).unwrap();
+
+        let projected = provider_history_projection(&messages, &b);
+
+        assert_eq!(serde_json::to_vec(&messages).unwrap(), before);
+        let projected_json = serde_json::to_string(&projected).unwrap();
+        for secret in [
+            "GUIDE_SECRET_BODY",
+            "LEXICON_SECRET_BODY",
+            "TEXT_SECRET_BODY",
+            "ARG_SECRET",
+            "QUOTE_SECRET",
+            "ERROR_SECRET_BODY",
+            "LEGACY_RAW_SECRET",
+        ] {
+            assert!(!projected_json.contains(secret), "history leaked {secret}");
+        }
+        assert!(projected_json.contains("CURRENT_ARG_BODY"));
+        assert!(projected_json.contains("CURRENT_TOOL_BODY"));
+
+        let text_receipt: HistoricalToolReceipt = serde_json::from_str(
+            projected
+                .iter()
+                .find(|message| message.tool_call_id.as_deref() == Some("text"))
+                .and_then(|message| message.content.as_deref())
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(text_receipt.tool, "book.text");
+        assert_eq!(text_receipt.status, HistoricalToolStatus::Ok);
+        assert_eq!(text_receipt.accepted_evidence.len(), 1);
+        assert_eq!(text_receipt.accepted_evidence[0].start_lid, "1.1");
+        assert!(text_receipt
+            .opaque_result_digest
+            .starts_with("tool-result-fnv1a64-"));
+
+        let source_receipt: HistoricalToolReceipt = serde_json::from_str(
+            projected
+                .iter()
+                .find(|message| message.tool_call_id.as_deref() == Some("present"))
+                .and_then(|message| message.content.as_deref())
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(source_receipt.source_refs, vec!["source_ref_history"]);
+
+        let error_receipt: HistoricalToolReceipt = serde_json::from_str(
+            projected
+                .iter()
+                .find(|message| message.tool_call_id.as_deref() == Some("error"))
+                .and_then(|message| message.content.as_deref())
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(error_receipt.status, HistoricalToolStatus::Error);
+        assert_eq!(error_receipt.error_code.as_deref(), Some("LID_NOT_FOUND"));
+        assert!(error_receipt.accepted_evidence.is_empty());
+
+        let legacy_receipt: HistoricalToolReceipt = serde_json::from_str(
+            projected
+                .iter()
+                .find(|message| message.tool_call_id.as_deref() == Some("legacy"))
+                .and_then(|message| message.content.as_deref())
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(legacy_receipt.status, HistoricalToolStatus::LegacyUnparsed);
+        assert!(legacy_receipt.accepted_evidence.is_empty());
+
+        let historical_call = projected
+            .iter()
+            .flat_map(|message| message.tool_calls.iter())
+            .find(|call| call.id == "text")
+            .unwrap();
+        assert_eq!(historical_call.arguments, r#"{"lid":"1.1"}"#);
+    }
+
+    #[test]
+    fn provider_history_projection_preserves_native_and_react_tool_pairing() {
+        let b = book();
+        let messages = vec![
+            Message::system("system"),
+            Message::user("old"),
+            Message {
+                role: Role::Assistant,
+                content: None,
+                tool_calls: vec![call("old-call", "book.context", r#"{"lid":"1.1"}"#)],
+                tool_call_id: None,
+            },
+            Message {
+                role: Role::Tool,
+                content: Some(r#"{"anchor":"1.1","items":[]}"#.into()),
+                tool_calls: vec![],
+                tool_call_id: Some("old-call".into()),
+            },
+            Message {
+                role: Role::Assistant,
+                content: Some("old answer".into()),
+                tool_calls: vec![],
+                tool_call_id: None,
+            },
+            Message::user("current"),
+        ];
+        let projected = provider_history_projection(&messages, &b);
+        let native: Vec<_> = projected.iter().map(crate::message_to_json).collect();
+        let react: Vec<_> = projected.iter().map(crate::react_message_to_json).collect();
+
+        assert_eq!(native[2]["tool_calls"][0]["id"], "old-call");
+        assert_eq!(native[3]["tool_call_id"], "old-call");
+        assert!(native[3]["content"]
+            .as_str()
+            .unwrap()
+            .contains("historical_tool_receipt.v1"));
+        assert!(react[2]["content"].as_str().unwrap().contains("old-call"));
+        assert!(react[3]["content"]
+            .as_str()
+            .unwrap()
+            .contains("historical_tool_receipt.v1"));
+    }
+
+    fn sr11_real_book() -> Option<Book> {
+        let Ok(path) = std::env::var("UB_SR11_REAL_BOOK_DIR") else {
+            eprintln!("sr11 real-book replay skipped: UB_SR11_REAL_BOOK_DIR is unset");
+            return None;
+        };
+        Some(Book::load(&path).expect("SR11 real book must load"))
+    }
+
+    #[test]
+    fn sr11_real_book_cross_turn_provenance_repair_and_current_reread() {
+        let Some(b) = sr11_real_book() else {
+            return;
+        };
+        for lid in ["1.19", "1.19.83"] {
+            assert!(
+                b.base.lid_nodes.iter().any(|node| node.lid == lid),
+                "real book is missing {lid}"
+            );
+        }
+
+        let historical_text = b.text("1.19", None).unwrap();
+        let mut public_messages = new_session();
+        public_messages.push(Message::user("历史公开文本把它称为第1.19节。"));
+        public_messages.push(Message {
+            role: Role::Assistant,
+            content: None,
+            tool_calls: vec![call("old-read", "book.text", r#"{"lid":"1.19"}"#)],
+            tool_call_id: None,
+        });
+        public_messages.push(Message {
+            role: Role::Tool,
+            content: Some(serde_json::json!({"lid":"1.19","text":historical_text}).to_string()),
+            tool_calls: Vec::new(),
+            tool_call_id: Some("old-read".into()),
+        });
+        public_messages.push(Message {
+            role: Role::Assistant,
+            content: Some("Earlier public answer.".into()),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+        });
+        let public_adapter = FakeAdapter::new(
+            vec![turn_final("第1.19节沿用了用户可见的章节称呼。")],
+            vec![],
+        );
+        let mut public_store = MemoryStore::open(tmp("sr11-real-public-collision")).unwrap();
+        let mut public_reader = Reader::new(&b, DEFAULT_RADIUS);
+        let public = run(
+            &b,
+            &mut public_store,
+            &mut public_reader,
+            &public_adapter,
+            &mut public_messages,
+            "继续解释",
+            "t0",
+            OuterConfig::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            public.answer.as_deref(),
+            Some("第1.19节沿用了用户可见的章节称呼。")
+        );
+        assert!(!public.incomplete);
+        assert_eq!(public.turns, 1);
+
+        let mut internal_messages = new_session();
+        internal_messages.push(Message::user("old question without a locator"));
+        internal_messages.push(Message {
+            role: Role::Assistant,
+            content: None,
+            tool_calls: vec![call("old-context", "book.context", r#"{"lid":"1.19"}"#)],
+            tool_call_id: None,
+        });
+        internal_messages.push(Message {
+            role: Role::Tool,
+            content: Some(r#"{"anchor":"1.19","items":[]}"#.into()),
+            tool_calls: Vec::new(),
+            tool_call_id: Some("old-context".into()),
+        });
+        internal_messages.push(Message {
+            role: Role::Assistant,
+            content: Some("old answer".into()),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+        });
+        let internal_adapter = FakeAdapter::new(
+            vec![
+                turn_final("第1.19节来自结构位置。"),
+                turn_final("This is an unrelated replacement claim."),
+            ],
+            vec![],
+        );
+        let mut internal_store = MemoryStore::open(tmp("sr11-real-internal-repair")).unwrap();
+        let mut internal_reader = Reader::new(&b, DEFAULT_RADIUS);
+        let internal = run(
+            &b,
+            &mut internal_store,
+            &mut internal_reader,
+            &internal_adapter,
+            &mut internal_messages,
+            "explain safely",
+            "t0",
+            OuterConfig::default(),
+        )
+        .unwrap();
+        assert!(internal.incomplete);
+        assert_eq!(internal.turns, 2);
+        assert_eq!(
+            internal.answer.as_deref(),
+            Some("这次回答生成失败，请重试。")
+        );
+        assert!(!serde_json::to_string(&internal).unwrap().contains("1.19"));
+
+        let reread_adapter = RealRereadAdapter {
+            step: RefCell::new(0),
+            lid: "1.19.83".into(),
+        };
+        let mut reread_messages = new_session();
+        reread_messages.push(Message::user("Earlier we found a useful location."));
+        reread_messages.push(Message {
+            role: Role::Assistant,
+            content: Some("It can be revisited later.".into()),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+        });
+        let mut reread_store = MemoryStore::open(tmp("sr11-real-reread-source")).unwrap();
+        let mut reread_reader = Reader::new(&b, DEFAULT_RADIUS);
+        let reread = run(
+            &b,
+            &mut reread_store,
+            &mut reread_reader,
+            &reread_adapter,
+            &mut reread_messages,
+            "Reread it and cite the supporting passage.",
+            "t0",
+            OuterConfig::default(),
+        )
+        .unwrap();
+        assert!(!reread.incomplete);
+        assert_eq!(reread.turns, 3);
+        assert_eq!(reread.source_bindings.len(), 1);
+        assert_eq!(
+            reread.source_bindings[0].evidence_range.start_lid,
+            "1.19.83"
+        );
+        assert!(reread
+            .answer_view
+            .as_ref()
+            .is_some_and(|view| !view.sources.is_empty()));
+        assert!(!reread.answer.as_deref().unwrap().contains("1.19.83"));
+        assert_eq!(reread.trace.len(), 2);
+        assert_eq!(reread.trace[0].tool, "book.text");
+        assert_eq!(reread.trace[1].tool, "source.present");
+    }
+
+    #[test]
+    fn sr11_real_history_projection_reports_char_and_token_reduction_without_writeback() {
+        let Some(b) = sr11_real_book() else {
+            return;
+        };
+        let Ok(history_path) = std::env::var("UB_SR11_REAL_HISTORY") else {
+            eprintln!("sr11 real-history replay skipped: UB_SR11_REAL_HISTORY is unset");
+            return;
+        };
+        let before_file = std::fs::read(&history_path).unwrap();
+        let history: serde_json::Value = serde_json::from_slice(&before_file).unwrap();
+        let session_id =
+            std::env::var("UB_SR11_REAL_SESSION").unwrap_or_else(|_| "chat_1784306466551_4".into());
+        let session = history["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|session| session["id"] == session_id)
+            .expect("SR11 real session must exist");
+        let mut messages: Vec<Message> =
+            serde_json::from_value(session["messages"].clone()).unwrap();
+        let historical_tool_bodies: Vec<String> = messages
+            .iter()
+            .filter(|message| message.role == Role::Tool)
+            .filter_map(|message| message.content.clone())
+            .collect();
+        messages.push(Message::user("sr11 projection probe"));
+        let before = serde_json::to_string(&messages).unwrap();
+        let projected = provider_history_projection(&messages, &b);
+        let after = serde_json::to_string(&projected).unwrap();
+        let before_tokens = estimate_tokens(&before);
+        let after_tokens = estimate_tokens(&after);
+
+        println!(
+            "{}",
+            serde_json::json!({
+                "session_id": session_id,
+                "tool_messages": historical_tool_bodies.len(),
+                "before_chars": before.len(),
+                "after_chars": after.len(),
+                "before_token_estimate": before_tokens,
+                "after_token_estimate": after_tokens,
+                "char_reduction_percent": (10000usize.saturating_sub(after.len() * 10000 / before.len())) as f64 / 100.0,
+                "token_reduction_percent": (10000u32.saturating_sub(after_tokens * 10000 / before_tokens)) as f64 / 100.0,
+            })
+        );
+        assert!(after.len() < before.len() / 2);
+        assert!(after_tokens < before_tokens / 2);
+        for body in historical_tool_bodies
+            .iter()
+            .filter(|body| body.len() >= 64)
+        {
+            assert!(
+                !after.contains(body),
+                "historical Tool body survived projection"
+            );
+        }
+        assert!(after.contains("historical_tool_receipt.v1"));
+        assert_eq!(std::fs::read(&history_path).unwrap(), before_file);
+    }
+
+    #[test]
+    fn source_presentation_compiler_emits_typed_parts_merges_adjacent_refs_and_prunes_unused() {
         let bindings = vec![
             source_binding_fixture("ref_a", "1.1"),
             source_binding_fixture("ref_b", "1.1"),
@@ -3616,7 +5356,7 @@ mod tests {
         let compiled = compile_agent_answer(
             "First claim.[[source:ref_a]] [[source:ref_b]]\n\nNext paragraph.",
             &bindings,
-            &b,
+            &AnswerProvenanceLedger::default(),
         )
         .unwrap();
 
@@ -3642,7 +5382,8 @@ mod tests {
 
     #[test]
     fn source_presentation_compiler_accepts_plain_answer_without_sources() {
-        let compiled = compile_agent_answer("Plain answer.", &[], &book()).unwrap();
+        let compiled =
+            compile_agent_answer("Plain answer.", &[], &AnswerProvenanceLedger::default()).unwrap();
 
         assert_eq!(compiled.answer, "Plain answer.");
         assert_eq!(
@@ -3657,8 +5398,15 @@ mod tests {
 
     #[test]
     fn source_presentation_compiler_rejects_unknown_bad_and_raw_lid_output() {
-        let b = book();
         let binding = source_binding_fixture("ref_current", "1.1");
+        let mut provenance = AnswerProvenanceLedger::default();
+        provenance.observe_internal_locator(
+            "1.1",
+            AnswerProvenanceChannel::ToolArgument {
+                tool: "book.text".into(),
+                field: "lid".into(),
+            },
+        );
         let cases = [
             ("Unknown.[[source:ref_old]]", "UNKNOWN_SOURCE_REF"),
             ("Broken.[[source:]]", "INVALID_SOURCE_MARKER"),
@@ -3667,9 +5415,9 @@ mod tests {
         ];
 
         for (answer, expected) in cases {
-            let error =
-                compile_agent_answer(answer, std::slice::from_ref(&binding), &b).unwrap_err();
-            assert_eq!(error.error_code, expected, "{answer}");
+            let error = compile_agent_answer(answer, std::slice::from_ref(&binding), &provenance)
+                .unwrap_err();
+            assert_eq!(error.issues[0].error_code, expected, "{answer}");
         }
     }
 
@@ -3679,7 +5427,7 @@ mod tests {
         let fake = FakeAdapter::new(
             vec![
                 turn_final("See LID 1.1 for details."),
-                turn_final("Clean repaired answer."),
+                turn_final("See the relevant passage for details."),
             ],
             vec![],
         );
@@ -3699,14 +5447,17 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(out.answer.as_deref(), Some("Clean repaired answer."));
+        assert_eq!(
+            out.answer.as_deref(),
+            Some("See the relevant passage for details.")
+        );
         assert!(out.answer_view.is_some());
         assert_eq!(out.turns, 2);
         assert!(!out.incomplete);
         assert!(out.warning.is_none());
         let persisted = serde_json::to_string(&messages).unwrap();
         assert!(!persisted.contains("LID 1.1"));
-        assert!(persisted.contains("Clean repaired answer."));
+        assert!(persisted.contains("See the relevant passage for details."));
     }
 
     #[test]
@@ -3736,11 +5487,11 @@ mod tests {
         .unwrap();
 
         assert!(out.incomplete);
-        assert_eq!(out.warning.as_deref(), Some("SOURCE_PRESENTATION_FAILED"));
+        assert!(out.warning.is_none());
         assert_eq!(out.turns, 2);
         assert!(out.source_bindings.is_empty());
         let answer = out.answer.unwrap();
-        assert!(answer.contains("重新生成"));
+        assert_eq!(answer, "这次回答生成失败，请重试。");
         assert!(!answer.contains("1.1"));
     }
 
