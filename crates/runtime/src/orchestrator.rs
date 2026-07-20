@@ -7,12 +7,14 @@
 //! 内层 book.query 复用 `crate::query`(同一 adapter 触 `complete`)`[ADR-0025]`。
 use crate::{
     parse_book_query_request, query_run, synthesize, AssistantTurn, Message, ModelAdapter,
-    QueryAudit, Role, ToolSpec,
+    QueryAudit, QueryOutcome, Role, ToolSpec,
 };
 use memory::{Anchor, MemCitation, MemoryStore, ReaderProfileSnapshot, RecallQuery, SaveInput};
 use read_tools::{
-    Book, PaperLandmarkKind, PaperMinimapAvailabilityStatus, PaperRegion, ReaderLayoutAction,
-    ReaderLayoutApplyOutcome, ReaderLayoutEffect, ReaderLayoutProposal, ToolError,
+    disambiguate_source_labels, Book, EvidenceRange, PaperLandmarkKind,
+    PaperMinimapAvailabilityStatus, PaperRegion, ReaderLayoutAction, ReaderLayoutApplyOutcome,
+    ReaderLayoutEffect, ReaderLayoutProposal, ResolvedSource, SourceSelectedRange, SourceTextRange,
+    ToolError,
 };
 use reader::{
     project_paper_minimap_lens, PaperMinimapActor, PaperMinimapApplyOutcome, PaperMinimapCommand,
@@ -45,6 +47,9 @@ impl Default for OuterConfig {
 #[ts(export, export_to = "../../../packages/web/src/generated/")]
 pub struct OuterOutcome {
     pub answer: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub answer_view: Option<AgentAnswerView>,
     pub incomplete: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,
@@ -56,6 +61,41 @@ pub struct OuterOutcome {
     pub profile_usage: ProfileUsageTrace,
     #[serde(default)]
     pub memory_updates: Vec<ProfileMemoryUpdate>,
+    #[serde(skip)]
+    #[ts(skip)]
+    pub source_bindings: Vec<SourceBinding>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SourceBinding {
+    pub source_ref_id: String,
+    pub book_id: String,
+    pub evidence_range: EvidenceRange,
+    pub evidence_text_digest: String,
+    pub label_snapshot: String,
+    pub preview_snapshot: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AgentAnswerPart {
+    Markdown { text: String },
+    Sources { source_ref_ids: Vec<String> },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct AgentAnswerSource {
+    pub source_ref_id: String,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct AgentAnswerView {
+    pub parts: Vec<AgentAnswerPart>,
+    pub sources: Vec<AgentAnswerSource>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq, Eq, PartialOrd, Ord)]
@@ -200,6 +240,724 @@ fn messages_estimate(messages: &[Message]) -> u32 {
         .sum()
 }
 
+const SOURCE_PRESENTATION_LOCALE: &str = "zh-CN";
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SourcePresentArgs {
+    start_lid: String,
+    #[serde(default)]
+    end_lid: Option<String>,
+    #[serde(default)]
+    quote: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct SourcePresentResult {
+    source_ref_id: String,
+    label: String,
+    preview: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ObservedCitation {
+    lid: String,
+    text: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ObservedCitationEnvelope {
+    citations: Vec<ObservedCitation>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ObservedBookText {
+    lid: String,
+    text: String,
+}
+
+#[derive(Debug, Clone)]
+struct PresentedSource {
+    binding: SourceBinding,
+    resolved: ResolvedSource,
+}
+
+#[derive(Debug, Default)]
+struct TurnEvidenceLedger {
+    evidence: Vec<EvidenceRange>,
+    presented: Vec<PresentedSource>,
+}
+
+impl TurnEvidenceLedger {
+    fn from_seed(book: &Book, seed: Vec<EvidenceRange>) -> Result<Self, ToolError> {
+        let mut ledger = TurnEvidenceLedger::default();
+        for evidence in seed {
+            book.resolve_source(&evidence, SOURCE_PRESENTATION_LOCALE, None)?;
+            ledger.observe(evidence);
+        }
+        Ok(ledger)
+    }
+
+    fn observe(&mut self, evidence: EvidenceRange) {
+        if !self.evidence.contains(&evidence) {
+            self.evidence.push(evidence);
+        }
+    }
+
+    fn present(&mut self, book: &Book, arguments: &str) -> Result<SourcePresentResult, ToolError> {
+        let args: SourcePresentArgs =
+            serde_json::from_str(arguments).map_err(|error| ToolError {
+                error_code: "INVALID_SOURCE_RANGE".into(),
+                category: "validation".into(),
+                message: format!("source.present arguments are invalid: {error}"),
+            })?;
+        let start_lid = args.start_lid.trim();
+        let end_lid = args.end_lid.as_deref().unwrap_or(start_lid).trim();
+        if start_lid.is_empty() || end_lid.is_empty() {
+            return Err(source_presentation_error(
+                "INVALID_SOURCE_RANGE",
+                "source.present requires non-empty start_lid/end_lid",
+            ));
+        }
+
+        let quote = args.quote.as_deref().map(normalize_presented_quote);
+        let mut exact = Vec::new();
+        for evidence in self
+            .evidence
+            .iter()
+            .filter(|evidence| evidence.start_lid == start_lid && evidence.end_lid == end_lid)
+        {
+            let resolved = book.resolve_source(evidence, SOURCE_PRESENTATION_LOCALE, None)?;
+            if quote.as_ref().is_none_or(|quote| {
+                normalize_presented_quote(&resolved.highlighted_quote) == *quote
+            }) {
+                exact.push((evidence.clone(), resolved));
+            }
+        }
+
+        let (evidence_range, resolved) = match exact.len() {
+            1 => exact.pop().expect("length checked"),
+            count if count > 1 => {
+                return Err(source_presentation_error(
+                    "SOURCE_AMBIGUOUS",
+                    "multiple observed passages match; provide the exact observed quote",
+                ))
+            }
+            _ => {
+                let coarse = EvidenceRange {
+                    start_lid: start_lid.into(),
+                    end_lid: end_lid.into(),
+                    ranges: Vec::new(),
+                };
+                let candidate = if let Some(quote) = args.quote.as_deref() {
+                    if start_lid == end_lid {
+                        source_quote_evidence(book, start_lid, quote).unwrap_or(coarse)
+                    } else {
+                        coarse
+                    }
+                } else {
+                    coarse
+                };
+                let resolved = book.resolve_source(&candidate, SOURCE_PRESENTATION_LOCALE, None)?;
+                if quote.as_ref().is_some_and(|quote| {
+                    normalize_presented_quote(&resolved.highlighted_quote) != *quote
+                }) || !self.covers(book, &candidate)
+                {
+                    return Err(source_presentation_error(
+                        "SOURCE_NOT_OBSERVED",
+                        "source.present may only use evidence observed in this turn",
+                    ));
+                }
+                (candidate, resolved)
+            }
+        };
+
+        if let Some(existing) = self
+            .presented
+            .iter()
+            .find(|source| source.binding.evidence_range == evidence_range)
+        {
+            return Ok(SourcePresentResult {
+                source_ref_id: existing.binding.source_ref_id.clone(),
+                label: existing.binding.label_snapshot.clone(),
+                preview: existing.binding.preview_snapshot.clone(),
+            });
+        }
+
+        let source_ref_id = stable_source_ref_id(
+            &resolved.evidence_text_digest,
+            self.presented.len(),
+            &self.presented,
+        );
+        self.presented.push(PresentedSource {
+            binding: SourceBinding {
+                source_ref_id: source_ref_id.clone(),
+                book_id: book.base.book_id.clone(),
+                evidence_range,
+                evidence_text_digest: resolved.evidence_text_digest.clone(),
+                label_snapshot: resolved.label.clone(),
+                preview_snapshot: resolved.preview.clone(),
+            },
+            resolved,
+        });
+        self.refresh_labels();
+        let source = self.presented.last().expect("just pushed");
+        Ok(SourcePresentResult {
+            source_ref_id,
+            label: source.binding.label_snapshot.clone(),
+            preview: source.binding.preview_snapshot.clone(),
+        })
+    }
+
+    fn covers(&self, book: &Book, candidate: &EvidenceRange) -> bool {
+        let Some(candidate_intervals) = evidence_intervals(book, candidate) else {
+            return false;
+        };
+        let mut observed: Vec<_> = self
+            .evidence
+            .iter()
+            .filter_map(|evidence| evidence_intervals(book, evidence))
+            .flatten()
+            .collect();
+        observed.sort_unstable();
+        let mut merged: Vec<(usize, usize)> = Vec::new();
+        for (start, end) in observed {
+            if let Some(last) = merged.last_mut().filter(|last| start <= last.1) {
+                last.1 = last.1.max(end);
+            } else {
+                merged.push((start, end));
+            }
+        }
+        candidate_intervals.iter().all(|(start, end)| {
+            merged
+                .iter()
+                .any(|(seen_start, seen_end)| seen_start <= start && seen_end >= end)
+        })
+    }
+
+    fn refresh_labels(&mut self) {
+        let mut resolved: Vec<_> = self
+            .presented
+            .iter()
+            .map(|source| source.resolved.clone())
+            .collect();
+        disambiguate_source_labels(&mut resolved);
+        for (source, resolved) in self.presented.iter_mut().zip(resolved) {
+            source.binding.label_snapshot = resolved.label;
+        }
+    }
+
+    fn bindings(&self) -> Vec<SourceBinding> {
+        self.presented
+            .iter()
+            .map(|source| source.binding.clone())
+            .collect()
+    }
+}
+
+fn source_presentation_error(error_code: &str, message: &str) -> ToolError {
+    ToolError {
+        error_code: error_code.into(),
+        category: "validation".into(),
+        message: message.into(),
+    }
+}
+
+fn normalize_presented_quote(value: &str) -> String {
+    value
+        .replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .trim()
+        .into()
+}
+
+fn source_quote_evidence(book: &Book, lid: &str, quote: &str) -> Option<EvidenceRange> {
+    let node = book
+        .base
+        .lid_nodes
+        .iter()
+        .find(|node| node.lid == lid && node.children.is_empty())?;
+    let text = book.text(lid, None).ok()?;
+    let source: Vec<u16> = text.encode_utf16().collect();
+    let quote: Vec<u16> = quote.encode_utf16().collect();
+    if quote.is_empty() || quote.len() > source.len() {
+        return None;
+    }
+    let start = source
+        .windows(quote.len())
+        .position(|window| window == quote)?;
+    let end = start.checked_add(quote.len())?;
+    let start = u32::try_from(start).ok()?;
+    let end = u32::try_from(end).ok()?;
+    Some(EvidenceRange {
+        start_lid: node.lid.clone(),
+        end_lid: node.lid.clone(),
+        ranges: vec![SourceSelectedRange {
+            lid: node.lid.clone(),
+            range: SourceTextRange { start, end },
+        }],
+    })
+}
+
+fn evidence_intervals(book: &Book, evidence: &EvidenceRange) -> Option<Vec<(usize, usize)>> {
+    book.resolve_source(evidence, SOURCE_PRESENTATION_LOCALE, None)
+        .ok()?;
+    if evidence.ranges.is_empty() {
+        let start = book
+            .base
+            .lid_nodes
+            .iter()
+            .find(|node| node.lid == evidence.start_lid)?
+            .span
+            .start;
+        let end = book
+            .base
+            .lid_nodes
+            .iter()
+            .find(|node| node.lid == evidence.end_lid)?
+            .span
+            .end;
+        return Some(vec![(start, end)]);
+    }
+    evidence
+        .ranges
+        .iter()
+        .map(|selected| {
+            let node = book
+                .base
+                .lid_nodes
+                .iter()
+                .find(|node| node.lid == selected.lid)?;
+            Some((
+                node.span.start + selected.range.start as usize,
+                node.span.start + selected.range.end as usize,
+            ))
+        })
+        .collect()
+}
+
+fn stable_source_ref_id(digest: &str, ordinal: usize, existing: &[PresentedSource]) -> String {
+    let mut salt = ordinal;
+    loop {
+        let mut hash = 0xcbf29ce484222325_u64;
+        for byte in format!("source-ref.v1\u{1f}{digest}\u{1f}{salt}").bytes() {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+        let candidate = format!("source_ref_{hash:016x}");
+        if existing
+            .iter()
+            .all(|source| source.binding.source_ref_id != candidate)
+        {
+            return candidate;
+        }
+        salt += 1;
+    }
+}
+
+fn observe_tool_evidence(
+    ledger: &mut TurnEvidenceLedger,
+    name: &str,
+    arguments: &str,
+    result: &str,
+    book: &Book,
+) {
+    match name {
+        "book.query" => {
+            let Ok(outcome) = serde_json::from_str::<QueryOutcome>(result) else {
+                return;
+            };
+            let citations = match outcome {
+                QueryOutcome::Complete { citations, .. }
+                | QueryOutcome::Partial { citations, .. }
+                | QueryOutcome::Insufficient { citations, .. } => citations,
+                _ => return,
+            };
+            for citation in citations {
+                if let Some(evidence) = source_quote_evidence(book, &citation.lid, &citation.text) {
+                    if book
+                        .resolve_source(&evidence, SOURCE_PRESENTATION_LOCALE, None)
+                        .is_ok()
+                    {
+                        ledger.observe(evidence);
+                    }
+                }
+            }
+        }
+        "book.synthesize" => {
+            let Ok(envelope) = serde_json::from_str::<ObservedCitationEnvelope>(result) else {
+                return;
+            };
+            for citation in envelope.citations {
+                if let Some(evidence) = source_quote_evidence(book, &citation.lid, &citation.text) {
+                    if book
+                        .resolve_source(&evidence, SOURCE_PRESENTATION_LOCALE, None)
+                        .is_ok()
+                    {
+                        ledger.observe(evidence);
+                    }
+                }
+            }
+        }
+        "book.text" => {
+            let Ok(observed) = serde_json::from_str::<ObservedBookText>(result) else {
+                return;
+            };
+            let Ok(args) = serde_json::from_str::<serde_json::Value>(arguments) else {
+                return;
+            };
+            let Some(lid) = args.get("lid").and_then(|value| value.as_str()) else {
+                return;
+            };
+            let end_lid = args
+                .get("end_lid")
+                .and_then(|value| value.as_str())
+                .unwrap_or(lid);
+            if observed.lid != lid
+                || book
+                    .text(lid, (end_lid != lid).then_some(end_lid))
+                    .ok()
+                    .as_deref()
+                    != Some(observed.text.as_str())
+            {
+                return;
+            }
+            let evidence = EvidenceRange {
+                start_lid: lid.into(),
+                end_lid: end_lid.into(),
+                ranges: Vec::new(),
+            };
+            if book
+                .resolve_source(&evidence, SOURCE_PRESENTATION_LOCALE, None)
+                .is_ok()
+            {
+                ledger.observe(evidence);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[derive(Debug)]
+struct CompiledAgentAnswer {
+    answer: String,
+    view: AgentAnswerView,
+    bindings: Vec<SourceBinding>,
+}
+
+struct AnswerDelivery {
+    compiled: CompiledAgentAnswer,
+    incomplete: bool,
+    warning: Option<String>,
+    extra_turns: usize,
+    extra_tokens: u32,
+}
+
+const SOURCE_MARKER_PREFIX: &str = "[[source:";
+const SOURCE_PRESENTATION_FAILURE_MESSAGE: &str =
+    "这次回答包含无法安全呈现的内部来源信息，已停止显示。请重新生成回答。";
+
+fn compile_agent_answer(
+    raw: &str,
+    bindings: &[SourceBinding],
+    book: &Book,
+) -> Result<CompiledAgentAnswer, ToolError> {
+    if raw.trim().is_empty() {
+        return Err(answer_compile_error(
+            "INVALID_AGENT_ANSWER",
+            "final answer must contain visible text",
+        ));
+    }
+
+    let mut parts = Vec::new();
+    let mut answer = String::new();
+    let mut used_ref_ids = Vec::new();
+    let mut cursor = 0;
+    while let Some(relative_start) = raw[cursor..].find(SOURCE_MARKER_PREFIX) {
+        let marker_start = cursor + relative_start;
+        let markdown = &raw[cursor..marker_start];
+        if markdown.to_ascii_lowercase().contains("[[source") {
+            return Err(answer_compile_error(
+                "INVALID_SOURCE_MARKER",
+                "source marker syntax is malformed",
+            ));
+        }
+        push_answer_markdown(&mut parts, markdown);
+        answer.push_str(markdown);
+        if answer.trim().is_empty() {
+            return Err(answer_compile_error(
+                "INVALID_SOURCE_MARKER",
+                "source markers must follow visible answer text",
+            ));
+        }
+
+        let mut group = Vec::new();
+        let mut next_marker = marker_start;
+        loop {
+            let (source_ref_id, marker_end) = parse_source_marker(raw, next_marker)?;
+            if !bindings
+                .iter()
+                .any(|binding| binding.source_ref_id == source_ref_id)
+            {
+                return Err(answer_compile_error(
+                    "UNKNOWN_SOURCE_REF",
+                    "source marker does not belong to this turn",
+                ));
+            }
+            if !group.contains(&source_ref_id) {
+                group.push(source_ref_id.clone());
+            }
+            if !used_ref_ids.contains(&source_ref_id) {
+                used_ref_ids.push(source_ref_id);
+            }
+
+            let mut probe = marker_end;
+            while let Some(character) = raw[probe..].chars().next() {
+                if !character.is_whitespace() {
+                    break;
+                }
+                probe += character.len_utf8();
+            }
+            if raw[probe..].starts_with(SOURCE_MARKER_PREFIX) {
+                next_marker = probe;
+                continue;
+            }
+            cursor = marker_end;
+            break;
+        }
+        parts.push(AgentAnswerPart::Sources {
+            source_ref_ids: group,
+        });
+    }
+    let tail = &raw[cursor..];
+    push_answer_markdown(&mut parts, tail);
+    answer.push_str(tail);
+    if answer.to_ascii_lowercase().contains("[[source") {
+        return Err(answer_compile_error(
+            "INVALID_SOURCE_MARKER",
+            "source marker syntax is malformed",
+        ));
+    }
+    if contains_raw_lid(&answer, book) {
+        return Err(answer_compile_error(
+            "RAW_LID_LEAK",
+            "final answer contains an internal LID",
+        ));
+    }
+
+    let mut used_bindings = Vec::with_capacity(used_ref_ids.len());
+    let mut sources = Vec::with_capacity(used_ref_ids.len());
+    for source_ref_id in used_ref_ids {
+        let binding = bindings
+            .iter()
+            .find(|binding| binding.source_ref_id == source_ref_id)
+            .expect("source refs were validated above")
+            .clone();
+        sources.push(AgentAnswerSource {
+            source_ref_id: source_ref_id.clone(),
+            label: binding.label_snapshot.clone(),
+        });
+        used_bindings.push(binding);
+    }
+    Ok(CompiledAgentAnswer {
+        answer,
+        view: AgentAnswerView { parts, sources },
+        bindings: used_bindings,
+    })
+}
+
+fn push_answer_markdown(parts: &mut Vec<AgentAnswerPart>, text: &str) {
+    if text.is_empty() {
+        return;
+    }
+    if let Some(AgentAnswerPart::Markdown { text: previous }) = parts.last_mut() {
+        previous.push_str(text);
+    } else {
+        parts.push(AgentAnswerPart::Markdown { text: text.into() });
+    }
+}
+
+fn parse_source_marker(raw: &str, marker_start: usize) -> Result<(String, usize), ToolError> {
+    let content_start = marker_start + SOURCE_MARKER_PREFIX.len();
+    let Some(relative_end) = raw[content_start..].find("]]") else {
+        return Err(answer_compile_error(
+            "INVALID_SOURCE_MARKER",
+            "source marker is not closed",
+        ));
+    };
+    let content_end = content_start + relative_end;
+    let source_ref_id = &raw[content_start..content_end];
+    if source_ref_id.is_empty()
+        || !source_ref_id
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
+    {
+        return Err(answer_compile_error(
+            "INVALID_SOURCE_MARKER",
+            "source marker contains an invalid ref",
+        ));
+    }
+    Ok((source_ref_id.into(), content_end + 2))
+}
+
+fn answer_compile_error(error_code: &str, message: &str) -> ToolError {
+    ToolError {
+        error_code: error_code.into(),
+        category: "validation".into(),
+        message: message.into(),
+    }
+}
+
+fn contains_raw_lid(answer: &str, book: &Book) -> bool {
+    let mut lids: Vec<_> = book
+        .base
+        .lid_nodes
+        .iter()
+        .map(|node| node.lid.as_str())
+        .collect();
+    lids.sort_by_key(|lid| std::cmp::Reverse(lid.len()));
+    lids.into_iter().any(|lid| {
+        contains_bracketed_lid(answer, lid)
+            || contains_prefixed_lid(answer, lid)
+            || (lid.contains('.') && contains_standalone_lid(answer, lid))
+    })
+}
+
+fn contains_bracketed_lid(answer: &str, lid: &str) -> bool {
+    let mut rest = answer;
+    while let Some(open) = rest.find('[') {
+        let after_open = &rest[open + 1..];
+        let Some(close) = after_open.find(']') else {
+            return false;
+        };
+        if after_open[..close].trim() == lid {
+            return true;
+        }
+        rest = &after_open[close + 1..];
+    }
+    false
+}
+
+fn contains_prefixed_lid(answer: &str, lid: &str) -> bool {
+    let lower = answer.to_lowercase();
+    ["lid", "node", "节点号", "节点", "節點號", "節點"]
+        .into_iter()
+        .any(|prefix| {
+            let searchable = if prefix.is_ascii() {
+                lower.as_str()
+            } else {
+                answer
+            };
+            searchable.match_indices(prefix).any(|(index, _)| {
+                let before = searchable[..index].chars().next_back();
+                if before.is_some_and(|character| character.is_alphanumeric() || character == '_') {
+                    return false;
+                }
+                let after_prefix = &searchable[index + prefix.len()..];
+                let candidate = after_prefix.trim_start_matches(|character: char| {
+                    character.is_whitespace() || matches!(character, ':' | '：' | '=' | '#' | '-')
+                });
+                candidate.starts_with(lid) && is_lid_end_boundary(&candidate[lid.len()..])
+            })
+        })
+}
+
+fn contains_standalone_lid(answer: &str, lid: &str) -> bool {
+    answer.match_indices(lid).any(|(index, _)| {
+        answer[..index]
+            .chars()
+            .next_back()
+            .is_none_or(is_lid_start_boundary)
+            && is_lid_end_boundary(&answer[index + lid.len()..])
+    })
+}
+
+fn is_lid_start_boundary(character: char) -> bool {
+    !character.is_ascii_alphanumeric() && !matches!(character, '.' | '_')
+}
+
+fn is_lid_end_boundary(rest: &str) -> bool {
+    let mut characters = rest.chars();
+    match characters.next() {
+        None => true,
+        Some('.') => !characters
+            .next()
+            .is_some_and(|character| character.is_ascii_digit()),
+        Some(character) => !character.is_ascii_alphanumeric() && character != '_',
+    }
+}
+
+fn deliver_agent_answer(
+    raw: &str,
+    bindings: &[SourceBinding],
+    book: &Book,
+    adapter: &dyn ModelAdapter,
+    request_messages: &[Message],
+) -> AnswerDelivery {
+    match compile_agent_answer(raw, bindings, book) {
+        Ok(compiled) => AnswerDelivery {
+            compiled,
+            incomplete: false,
+            warning: None,
+            extra_turns: 0,
+            extra_tokens: 0,
+        },
+        Err(error) => {
+            let allowed_sources: Vec<_> = bindings
+                .iter()
+                .map(|binding| {
+                    serde_json::json!({
+                        "source_ref_id": binding.source_ref_id,
+                        "label": binding.label_snapshot,
+                    })
+                })
+                .collect();
+            let repair_prompt = format!(
+                "source_answer_repair.v1\n\
+The previous candidate answer failed deterministic delivery validation ({code}).\n\
+Return one repaired final answer only; do not call tools. Preserve supported meaning, remove every raw LID, and use only exact markers of the form [[source:<source_ref_id>]] from allowed_sources. Sources are optional; do not invent or require them. Do not mention this repair.\n\
+allowed_sources={sources}\n\
+candidate_answer={answer}",
+                code = error.error_code,
+                sources = serde_json::to_string(&allowed_sources).unwrap_or_else(|_| "[]".into()),
+                answer = serde_json::to_string(raw).unwrap_or_else(|_| "\"\"".into()),
+            );
+            let mut repair_messages = request_messages.to_vec();
+            repair_messages.push(Message::system(repair_prompt));
+            let repaired = adapter.chat(&repair_messages, &[]);
+            let extra_tokens = repaired
+                .as_ref()
+                .ok()
+                .and_then(|turn| turn.usage_total_tokens)
+                .unwrap_or_else(|| messages_estimate(&repair_messages));
+            if let Ok(turn) = repaired {
+                if turn.tool_calls.is_empty() {
+                    if let Some(text) = turn.text {
+                        if let Ok(compiled) = compile_agent_answer(&text, bindings, book) {
+                            return AnswerDelivery {
+                                compiled,
+                                incomplete: false,
+                                warning: None,
+                                extra_turns: 1,
+                                extra_tokens,
+                            };
+                        }
+                    }
+                }
+            }
+            let compiled = compile_agent_answer(SOURCE_PRESENTATION_FAILURE_MESSAGE, &[], book)
+                .expect("fixed source failure message must compile");
+            AnswerDelivery {
+                compiled,
+                incomplete: true,
+                warning: Some("SOURCE_PRESENTATION_FAILED".into()),
+                extra_turns: 1,
+                extra_tokens,
+            }
+        }
+    }
+}
+
 /// 外层 loop 暴露给模型的工具集(7 个;reader.* 留 S7)`[ADR-0026]`。
 pub fn tool_specs() -> Vec<ToolSpec> {
     use serde_json::json;
@@ -257,6 +1015,20 @@ pub fn tool_specs() -> Vec<ToolSpec> {
                     "end_lid": {"type": "string", "description": "可选,取 [lid, end_lid] 区间"}
                 },
                 "required": ["lid"]
+            }),
+        ),
+        s(
+            "source.present",
+            "可选:把本轮已观察的连续书内证据转换为可放在相关句子后的用户可见来源。只传已观察的 LID;同一位置有多段证据时用原样 quote 消歧。返回 opaque source_ref_id、标签和预览,不返回 LID。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "start_lid": {"type": "string"},
+                    "end_lid": {"type": "string", "description": "可选连续终点;缺省等于 start_lid"},
+                    "quote": {"type": "string", "description": "可选;必须原样匹配本轮已观察证据"}
+                },
+                "required": ["start_lid"],
+                "additionalProperties": false
             }),
         ),
         s(
@@ -522,6 +1294,7 @@ note/highlight 自动锚回 anchor 的 LID;context 可经 citations 锚回支撑
 const SYSTEM_PROMPT: &str = "你是这本书的阅读 agent。显式概念/实体的语义问答经 book.query 取得带真 LID citation 的证据;\
 用 book.concept/context/text 定位与读原文。\
 工具价值判断——先判断任务类型和证据缺口,只调用能减少当前不确定性的最小工具。\
+来源呈现是可选的,不要为了覆盖率强行补来源。只有当你想在回答中向用户呈现书内位置时,才对本轮已观察证据调用 source.present;将返回的 [[source:<source_ref_id>]] 放在相关句子后,不得把原始 LID 写进普通回答。\
 当用户给出『引用原文 [LID: ...]』并问『这段怎么理解/什么意思』时,引用文本本身是最高优先级证据:先直接解释引用;\
 必要时最多用 book.text(lid) 补完整原文、book.context(lid,near) 补近邻上下文、book.synthesize([lid]) 做受控综合。\
 不要把引用拆成一串关键词去批量调用 book.concept,也不要先用 book.query 做开放检索。\
@@ -1476,6 +2249,7 @@ pub fn run(
         profile_snapshot,
         None,
         Vec::new(),
+        Vec::new(),
         question,
         now,
         cfg,
@@ -1493,6 +2267,7 @@ pub fn run_with_ephemeral_context(
     messages: &mut Vec<Message>,
     profile_snapshot: &ReaderProfileSnapshot,
     ephemeral_context: Option<&str>,
+    initial_evidence: Vec<EvidenceRange>,
     profile_memory_updates: Vec<ProfileMemoryUpdate>,
     question: &str,
     now: &str,
@@ -1512,6 +2287,7 @@ pub fn run_with_ephemeral_context(
         profile_snapshot.injected_fact_ids().into_iter().collect();
     let mut claimed_used_fact_ids = BTreeSet::new();
     let mut profile_influences = BTreeSet::new();
+    let mut evidence_ledger = TurnEvidenceLedger::from_seed(book, initial_evidence)?;
 
     loop {
         turns += 1;
@@ -1544,16 +2320,35 @@ pub fn run_with_ephemeral_context(
 
         // 正常停:无工具请求 = LLM 给最终答。终答入 messages(跨回合保留,下一回合可见上轮回答)。
         if turn.tool_calls.is_empty() {
+            let registered_bindings = evidence_ledger.bindings();
+            let delivery = turn.text.as_deref().map(|raw| {
+                deliver_agent_answer(raw, &registered_bindings, book, adapter, &request_messages)
+            });
+            if let Some(delivery) = &delivery {
+                turns += delivery.extra_turns;
+                spent += delivery.extra_tokens;
+            }
+            let answer = delivery
+                .as_ref()
+                .map(|delivery| delivery.compiled.answer.clone());
+            let answer_view = delivery
+                .as_ref()
+                .map(|delivery| delivery.compiled.view.clone());
             messages.push(Message {
                 role: Role::Assistant,
-                content: turn.text.clone(),
+                content: answer.clone(),
                 tool_calls: vec![],
                 tool_call_id: None,
             });
             return Ok(OuterOutcome {
-                answer: turn.text,
-                incomplete: false,
-                warning: None,
+                answer,
+                answer_view,
+                incomplete: delivery
+                    .as_ref()
+                    .is_some_and(|delivery| delivery.incomplete),
+                warning: delivery
+                    .as_ref()
+                    .and_then(|delivery| delivery.warning.clone()),
                 turns,
                 tokens_spent: spent,
                 effects: with_goto(reader, &before_anchor, effects),
@@ -1564,6 +2359,9 @@ pub fn run_with_ephemeral_context(
                     &profile_influences,
                 ),
                 memory_updates: profile_memory_updates,
+                source_bindings: delivery
+                    .map(|delivery| delivery.compiled.bindings)
+                    .unwrap_or_default(),
             });
         }
 
@@ -1589,11 +2387,18 @@ pub fn run_with_ephemeral_context(
             } else if tc.name == "book.query" {
                 let (result, query_audit) = execute_book_query(&tc.arguments, book, adapter);
                 (result, None, query_audit)
+            } else if tc.name == "source.present" {
+                let result = match evidence_ledger.present(book, &tc.arguments) {
+                    Ok(source) => to_json(&source),
+                    Err(error) => to_json(&error),
+                };
+                (result, None, None)
             } else {
                 let (result, effect) =
                     dispatch(&tc.name, &tc.arguments, book, store, reader, adapter, now);
                 (result, effect, None)
             };
+            observe_tool_evidence(&mut evidence_ledger, &tc.name, &tc.arguments, &result, book);
             if trace_dbg {
                 eprintln!(
                     "   ↳ {} => {}",
@@ -1620,10 +2425,33 @@ pub fn run_with_ephemeral_context(
 
         // 硬闸双重停机:max_turns ∨ token 触顶 → 诚实标 incomplete,不假装完整。
         if turns >= cfg.max_turns || spent > cfg.token_budget {
+            let registered_bindings = evidence_ledger.bindings();
+            let compiled = turn.text.as_deref().and_then(|raw| {
+                compile_agent_answer(raw, &registered_bindings, book)
+                    .ok()
+                    .or_else(|| {
+                        compile_agent_answer(SOURCE_PRESENTATION_FAILURE_MESSAGE, &[], book).ok()
+                    })
+            });
+            let source_failed = turn.text.is_some()
+                && compile_agent_answer(
+                    turn.text.as_deref().unwrap_or_default(),
+                    &registered_bindings,
+                    book,
+                )
+                .is_err();
             return Ok(OuterOutcome {
-                answer: turn.text,
+                answer: compiled.as_ref().map(|compiled| compiled.answer.clone()),
+                answer_view: compiled.as_ref().map(|compiled| compiled.view.clone()),
                 incomplete: true,
-                warning: Some("CONTEXT_BUDGET_EXCEEDED".into()),
+                warning: Some(
+                    if source_failed {
+                        "SOURCE_PRESENTATION_FAILED"
+                    } else {
+                        "CONTEXT_BUDGET_EXCEEDED"
+                    }
+                    .into(),
+                ),
                 turns,
                 tokens_spent: spent,
                 effects: with_goto(reader, &before_anchor, effects),
@@ -1634,6 +2462,9 @@ pub fn run_with_ephemeral_context(
                     &profile_influences,
                 ),
                 memory_updates: profile_memory_updates,
+                source_bindings: compiled
+                    .map(|compiled| compiled.bindings)
+                    .unwrap_or_default(),
             });
         }
     }
@@ -2171,6 +3002,7 @@ mod tests {
             &mut messages,
             &snapshot,
             None,
+            Vec::new(),
             vec![update.clone()],
             "answer with my profile",
             "2026-01-02T00:00:00Z",
@@ -2361,6 +3193,555 @@ mod tests {
         assert_eq!(react_out.trace[0].tool, "book.text");
         assert!(native_out.trace[0].result_digest.contains(r#""lid":"1.1""#));
         assert!(react_out.trace[0].result_digest.contains(r#""lid":"1.1""#));
+    }
+
+    #[test]
+    fn source_presentation_text_observation_creates_internal_binding() {
+        let b = book();
+        let evidence = EvidenceRange {
+            start_lid: "1.1".into(),
+            end_lid: "1.1".into(),
+            ranges: Vec::new(),
+        };
+        let digest = b
+            .resolve_source(&evidence, SOURCE_PRESENTATION_LOCALE, None)
+            .unwrap()
+            .evidence_text_digest;
+        let source_ref_id = stable_source_ref_id(&digest, 0, &[]);
+        let final_answer = format!("done[[source:{source_ref_id}]]");
+        let fake = FakeAdapter::new(
+            vec![
+                turn_calls(vec![call("read", "book.text", r#"{"lid":"1.1"}"#)]),
+                turn_calls(vec![call(
+                    "present",
+                    "source.present",
+                    r#"{"start_lid":"1.1"}"#,
+                )]),
+                turn_final(&final_answer),
+            ],
+            vec![],
+        );
+        let mut store = MemoryStore::open(tmp("source-presentation-text")).unwrap();
+        let mut reader = Reader::new(&b, DEFAULT_RADIUS);
+        let mut messages = new_session();
+
+        let out = run(
+            &b,
+            &mut store,
+            &mut reader,
+            &fake,
+            &mut messages,
+            "read and cite",
+            "t0",
+            OuterConfig::default(),
+        )
+        .unwrap();
+
+        assert_eq!(out.source_bindings.len(), 1);
+        assert_eq!(out.source_bindings[0].evidence_range.start_lid, "1.1");
+        let result = messages
+            .iter()
+            .find(|message| message.tool_call_id.as_deref() == Some("present"))
+            .and_then(|message| message.content.as_deref())
+            .unwrap();
+        assert!(result.contains("source_ref_id"));
+        assert!(result.contains("label"));
+        assert!(!result.contains("1.1"));
+        let public_json = serde_json::to_string(&out).unwrap();
+        assert!(!public_json.contains("source_bindings"));
+        assert!(!public_json.contains("evidence_range"));
+    }
+
+    #[test]
+    fn source_presentation_observes_filtered_query_and_synthesize_citations() {
+        let b = book();
+        let citation_evidence = EvidenceRange {
+            start_lid: "1.1".into(),
+            end_lid: "1.1".into(),
+            ranges: vec![SourceSelectedRange {
+                lid: "1.1".into(),
+                range: SourceTextRange { start: 0, end: 1 },
+            }],
+        };
+        let digest = b
+            .resolve_source(&citation_evidence, SOURCE_PRESENTATION_LOCALE, None)
+            .unwrap()
+            .evidence_text_digest;
+        let source_ref_id = stable_source_ref_id(&digest, 0, &[]);
+        let query_final = format!("query done[[source:{source_ref_id}]]");
+        let query = QueryAuditAdapter {
+            chats: RefCell::new(
+                vec![
+                    turn_calls(vec![call(
+                        "query",
+                        "book.query",
+                        r#"{"query":"command","intent":"definition","targets":["command"],"obligations":[{"requirement":"define"}],"anchor_lid":"1.1"}"#,
+                    )]),
+                    turn_calls(vec![call(
+                        "present-query",
+                        "source.present",
+                        r#"{"start_lid":"1.1","quote":"X"}"#,
+                    )]),
+                    turn_final(&query_final),
+                ]
+                .into(),
+            ),
+            seen_messages: RefCell::new(Vec::new()),
+        };
+        let mut query_store = MemoryStore::open(tmp("source-presentation-query")).unwrap();
+        let mut query_reader = Reader::new(&b, DEFAULT_RADIUS);
+        let mut query_messages = new_session();
+        let query_out = run(
+            &b,
+            &mut query_store,
+            &mut query_reader,
+            &query,
+            &mut query_messages,
+            "query and cite",
+            "t0",
+            OuterConfig::default(),
+        )
+        .unwrap();
+        assert_eq!(query_out.source_bindings.len(), 1);
+        assert_eq!(query_out.source_bindings[0].evidence_range.ranges.len(), 1);
+
+        let synth_final = format!("synthesize done[[source:{source_ref_id}]]");
+        let synth = FakeAdapter::new(
+            vec![
+                turn_calls(vec![call(
+                    "synthesize",
+                    "book.synthesize",
+                    r#"{"lids":["1.1"]}"#,
+                )]),
+                turn_calls(vec![call(
+                    "present-synthesize",
+                    "source.present",
+                    r#"{"start_lid":"1.1","quote":"X"}"#,
+                )]),
+                turn_final(&synth_final),
+            ],
+            vec![ParsedResponse {
+                sufficient: true,
+                answer: Some("answer".into()),
+                citations: vec![RawCitation {
+                    lid: "1.1".into(),
+                    text: "X".into(),
+                    role: "support".into(),
+                }],
+                model_supplement: vec![],
+            }],
+        );
+        let mut synth_store = MemoryStore::open(tmp("source-presentation-synthesize")).unwrap();
+        let mut synth_reader = Reader::new(&b, DEFAULT_RADIUS);
+        let mut synth_messages = new_session();
+        let synth_out = run(
+            &b,
+            &mut synth_store,
+            &mut synth_reader,
+            &synth,
+            &mut synth_messages,
+            "synthesize and cite",
+            "t0",
+            OuterConfig::default(),
+        )
+        .unwrap();
+        assert_eq!(synth_out.source_bindings.len(), 1);
+        assert_eq!(synth_out.source_bindings[0].evidence_range.ranges.len(), 1);
+    }
+
+    #[test]
+    fn source_presentation_verified_selection_seed_is_presentable() {
+        let b = book();
+        let selection_evidence = EvidenceRange {
+            start_lid: "1.1".into(),
+            end_lid: "1.1".into(),
+            ranges: vec![SourceSelectedRange {
+                lid: "1.1".into(),
+                range: SourceTextRange { start: 0, end: 1 },
+            }],
+        };
+        let digest = b
+            .resolve_source(&selection_evidence, SOURCE_PRESENTATION_LOCALE, None)
+            .unwrap()
+            .evidence_text_digest;
+        let source_ref_id = stable_source_ref_id(&digest, 0, &[]);
+        let final_answer = format!("selection done[[source:{source_ref_id}]]");
+        let mut store = MemoryStore::open(tmp("source-presentation-selection")).unwrap();
+        let snapshot =
+            store.project_reader_profile_snapshot(&SnapshotRequest::current(SnapshotContext {
+                book_id: Some(b.base.book_id.clone()),
+                content_profile: Some("technical_learning".into()),
+                now: Some("t0".into()),
+                ..Default::default()
+            }));
+        let fake = FakeAdapter::new(
+            vec![
+                turn_calls(vec![call(
+                    "present-selection",
+                    "source.present",
+                    r#"{"start_lid":"1.1","quote":"X"}"#,
+                )]),
+                turn_final(&final_answer),
+            ],
+            vec![],
+        );
+        let mut reader = Reader::new(&b, DEFAULT_RADIUS);
+        let mut messages = new_session();
+
+        let out = run_with_ephemeral_context(
+            &b,
+            &mut store,
+            &mut reader,
+            &fake,
+            &mut messages,
+            &snapshot,
+            None,
+            vec![selection_evidence],
+            vec![],
+            "explain selection",
+            "t0",
+            OuterConfig::default(),
+        )
+        .unwrap();
+
+        assert_eq!(out.source_bindings.len(), 1);
+    }
+
+    #[test]
+    fn source_presentation_rejects_context_route_state_error_and_unobserved_lid() {
+        let b = book();
+        let fake = FakeAdapter::new(
+            vec![
+                turn_calls(vec![
+                    call("context", "book.context", r#"{"lid":"1.1"}"#),
+                    call("route", "book.route_from", r#"{"at":"1.1"}"#),
+                    call("state", "reader.state", "{}"),
+                    call("missing", "book.text", r#"{"lid":"9.9"}"#),
+                ]),
+                turn_calls(vec![call(
+                    "present-denied",
+                    "source.present",
+                    r#"{"start_lid":"1.1"}"#,
+                )]),
+                turn_final("done"),
+            ],
+            vec![],
+        );
+        let mut store = MemoryStore::open(tmp("source-presentation-denied")).unwrap();
+        let mut reader = Reader::new(&b, DEFAULT_RADIUS);
+        let mut messages = new_session();
+
+        let out = run(
+            &b,
+            &mut store,
+            &mut reader,
+            &fake,
+            &mut messages,
+            "do not infer evidence",
+            "t0",
+            OuterConfig::default(),
+        )
+        .unwrap();
+
+        assert!(out.source_bindings.is_empty());
+        let denied = messages
+            .iter()
+            .find(|message| message.tool_call_id.as_deref() == Some("present-denied"))
+            .and_then(|message| message.content.as_deref())
+            .unwrap();
+        assert!(denied.contains("SOURCE_NOT_OBSERVED"));
+    }
+
+    #[test]
+    fn source_presentation_rejects_combining_non_contiguous_observations() {
+        let b = book_leaves(3);
+        let mut ledger = TurnEvidenceLedger::from_seed(
+            &b,
+            vec![
+                EvidenceRange {
+                    start_lid: "1.1".into(),
+                    end_lid: "1.1".into(),
+                    ranges: vec![SourceSelectedRange {
+                        lid: "1.1".into(),
+                        range: SourceTextRange { start: 0, end: 1 },
+                    }],
+                },
+                EvidenceRange {
+                    start_lid: "1.3".into(),
+                    end_lid: "1.3".into(),
+                    ranges: vec![SourceSelectedRange {
+                        lid: "1.3".into(),
+                        range: SourceTextRange { start: 0, end: 1 },
+                    }],
+                },
+            ],
+        )
+        .unwrap();
+
+        let error = ledger
+            .present(&b, r#"{"start_lid":"1.1","end_lid":"1.3"}"#)
+            .unwrap_err();
+
+        assert_eq!(error.error_code, "SOURCE_NOT_OBSERVED");
+        assert!(ledger.bindings().is_empty());
+    }
+
+    #[test]
+    fn source_presentation_is_optional_and_has_zero_binding_overhead() {
+        let b = book();
+        let fake = FakeAdapter::new(vec![turn_final("plain answer")], vec![]);
+        let mut store = MemoryStore::open(tmp("source-presentation-optional")).unwrap();
+        let mut reader = Reader::new(&b, DEFAULT_RADIUS);
+        let mut messages = new_session();
+
+        let out = run(
+            &b,
+            &mut store,
+            &mut reader,
+            &fake,
+            &mut messages,
+            "answer without source",
+            "t0",
+            OuterConfig::default(),
+        )
+        .unwrap();
+
+        assert_eq!(out.answer.as_deref(), Some("plain answer"));
+        assert!(out.source_bindings.is_empty());
+        assert_eq!(out.turns, 1);
+    }
+
+    #[test]
+    fn source_presentation_native_and_react_share_the_same_binding_gate() {
+        let b = book();
+        let evidence = EvidenceRange {
+            start_lid: "1.1".into(),
+            end_lid: "1.1".into(),
+            ranges: Vec::new(),
+        };
+        let digest = b
+            .resolve_source(&evidence, SOURCE_PRESENTATION_LOCALE, None)
+            .unwrap()
+            .evidence_text_digest;
+        let source_ref_id = stable_source_ref_id(&digest, 0, &[]);
+        let final_text = format!("done[[source:{source_ref_id}]]");
+        let react_final = serde_json::json!({"final": final_text.clone()}).to_string();
+        let run_once = |adapter: &dyn ModelAdapter, suffix: &str| {
+            let mut store =
+                MemoryStore::open(tmp(&format!("source-presentation-parity-{suffix}"))).unwrap();
+            let mut reader = Reader::new(&b, DEFAULT_RADIUS);
+            let mut messages = new_session();
+            run(
+                &b,
+                &mut store,
+                &mut reader,
+                adapter,
+                &mut messages,
+                "read and present",
+                "t0",
+                OuterConfig::default(),
+            )
+            .unwrap()
+        };
+        let native = FakeAdapter::new(
+            vec![
+                turn_calls(vec![call("read", "book.text", r#"{"lid":"1.1"}"#)]),
+                turn_calls(vec![call(
+                    "present",
+                    "source.present",
+                    r#"{"start_lid":"1.1"}"#,
+                )]),
+                turn_final(&final_text),
+            ],
+            vec![],
+        );
+        let react = ScriptedReActAdapter::new(
+            vec![
+                r#"{"tool_calls":[{"name":"book.text","arguments":{"lid":"1.1"}}]}"#,
+                r#"{"tool_calls":[{"name":"source.present","arguments":{"start_lid":"1.1"}}]}"#,
+                &react_final,
+            ],
+            vec![],
+        );
+
+        let native_out = run_once(&native, "native");
+        let react_out = run_once(&react, "react");
+
+        assert_eq!(native_out.source_bindings, react_out.source_bindings);
+        assert_eq!(native_out.source_bindings.len(), 1);
+        assert_eq!(native_out.trace.len(), 2);
+        assert_eq!(react_out.trace.len(), 2);
+    }
+
+    #[test]
+    fn source_presentation_tool_spec_exposes_only_coarse_location_and_optional_quote() {
+        let spec = tool_specs()
+            .into_iter()
+            .find(|spec| spec.name == "source.present")
+            .unwrap();
+
+        assert_eq!(
+            spec.parameters["required"],
+            serde_json::json!(["start_lid"])
+        );
+        assert!(spec.parameters["properties"].get("end_lid").is_some());
+        assert!(spec.parameters["properties"].get("quote").is_some());
+        assert!(spec.parameters["properties"].get("ranges").is_none());
+    }
+
+    fn source_binding_fixture(source_ref_id: &str, lid: &str) -> SourceBinding {
+        SourceBinding {
+            source_ref_id: source_ref_id.into(),
+            book_id: "book".into(),
+            evidence_range: EvidenceRange {
+                start_lid: lid.into(),
+                end_lid: lid.into(),
+                ranges: Vec::new(),
+            },
+            evidence_text_digest: format!("digest-{source_ref_id}"),
+            label_snapshot: format!("正文 · {source_ref_id}"),
+            preview_snapshot: format!("preview {source_ref_id}"),
+        }
+    }
+
+    #[test]
+    fn source_presentation_compiler_emits_typed_parts_merges_adjacent_refs_and_prunes_unused() {
+        let b = book();
+        let bindings = vec![
+            source_binding_fixture("ref_a", "1.1"),
+            source_binding_fixture("ref_b", "1.1"),
+            source_binding_fixture("ref_unused", "1.1"),
+        ];
+
+        let compiled = compile_agent_answer(
+            "First claim.[[source:ref_a]] [[source:ref_b]]\n\nNext paragraph.",
+            &bindings,
+            &b,
+        )
+        .unwrap();
+
+        assert_eq!(compiled.answer, "First claim.\n\nNext paragraph.");
+        assert_eq!(
+            compiled.view.parts,
+            vec![
+                AgentAnswerPart::Markdown {
+                    text: "First claim.".into(),
+                },
+                AgentAnswerPart::Sources {
+                    source_ref_ids: vec!["ref_a".into(), "ref_b".into()],
+                },
+                AgentAnswerPart::Markdown {
+                    text: "\n\nNext paragraph.".into(),
+                },
+            ]
+        );
+        assert_eq!(compiled.bindings.len(), 2);
+        assert_eq!(compiled.view.sources.len(), 2);
+        assert!(!compiled.answer.contains("[[source:"));
+    }
+
+    #[test]
+    fn source_presentation_compiler_accepts_plain_answer_without_sources() {
+        let compiled = compile_agent_answer("Plain answer.", &[], &book()).unwrap();
+
+        assert_eq!(compiled.answer, "Plain answer.");
+        assert_eq!(
+            compiled.view.parts,
+            vec![AgentAnswerPart::Markdown {
+                text: "Plain answer.".into(),
+            }]
+        );
+        assert!(compiled.view.sources.is_empty());
+        assert!(compiled.bindings.is_empty());
+    }
+
+    #[test]
+    fn source_presentation_compiler_rejects_unknown_bad_and_raw_lid_output() {
+        let b = book();
+        let binding = source_binding_fixture("ref_current", "1.1");
+        let cases = [
+            ("Unknown.[[source:ref_old]]", "UNKNOWN_SOURCE_REF"),
+            ("Broken.[[source:]]", "INVALID_SOURCE_MARKER"),
+            ("See LID 1.1 for details.", "RAW_LID_LEAK"),
+            ("See 1.1 for details.", "RAW_LID_LEAK"),
+        ];
+
+        for (answer, expected) in cases {
+            let error =
+                compile_agent_answer(answer, std::slice::from_ref(&binding), &b).unwrap_err();
+            assert_eq!(error.error_code, expected, "{answer}");
+        }
+    }
+
+    #[test]
+    fn source_presentation_invalid_answer_repairs_once_without_persisting_invalid_text() {
+        let b = book();
+        let fake = FakeAdapter::new(
+            vec![
+                turn_final("See LID 1.1 for details."),
+                turn_final("Clean repaired answer."),
+            ],
+            vec![],
+        );
+        let mut store = MemoryStore::open(tmp("source-presentation-repair")).unwrap();
+        let mut reader = Reader::new(&b, DEFAULT_RADIUS);
+        let mut messages = new_session();
+
+        let out = run(
+            &b,
+            &mut store,
+            &mut reader,
+            &fake,
+            &mut messages,
+            "answer safely",
+            "t0",
+            OuterConfig::default(),
+        )
+        .unwrap();
+
+        assert_eq!(out.answer.as_deref(), Some("Clean repaired answer."));
+        assert!(out.answer_view.is_some());
+        assert_eq!(out.turns, 2);
+        assert!(!out.incomplete);
+        assert!(out.warning.is_none());
+        let persisted = serde_json::to_string(&messages).unwrap();
+        assert!(!persisted.contains("LID 1.1"));
+        assert!(persisted.contains("Clean repaired answer."));
+    }
+
+    #[test]
+    fn source_presentation_second_invalid_answer_fails_closed_after_one_repair() {
+        let b = book();
+        let fake = FakeAdapter::new(
+            vec![
+                turn_final("See LID 1.1 for details."),
+                turn_final("Still points to node 1.1."),
+            ],
+            vec![],
+        );
+        let mut store = MemoryStore::open(tmp("source-presentation-fail-closed")).unwrap();
+        let mut reader = Reader::new(&b, DEFAULT_RADIUS);
+        let mut messages = new_session();
+
+        let out = run(
+            &b,
+            &mut store,
+            &mut reader,
+            &fake,
+            &mut messages,
+            "answer safely",
+            "t0",
+            OuterConfig::default(),
+        )
+        .unwrap();
+
+        assert!(out.incomplete);
+        assert_eq!(out.warning.as_deref(), Some("SOURCE_PRESENTATION_FAILED"));
+        assert_eq!(out.turns, 2);
+        assert!(out.source_bindings.is_empty());
+        let answer = out.answer.unwrap();
+        assert!(answer.contains("重新生成"));
+        assert!(!answer.contains("1.1"));
     }
 
     #[test]

@@ -5,6 +5,9 @@ import type { BookQueryRequest } from "./generated/BookQueryRequest";
 import type { QueryOutcome } from "./generated/QueryOutcome";
 import type { ToolError } from "./generated/ToolError";
 import type { OuterOutcome } from "./generated/OuterOutcome";
+import type { AgentAnswerPart } from "./generated/AgentAnswerPart";
+import type { AgentAnswerSource } from "./generated/AgentAnswerSource";
+import type { AgentAnswerView } from "./generated/AgentAnswerView";
 import type { AgentEffect } from "./generated/AgentEffect";
 import type { TraceStep } from "./generated/TraceStep";
 import type { QueryAudit } from "./generated/QueryAudit";
@@ -48,6 +51,9 @@ export type {
   BookQueryRequest,
   QueryOutcome,
   OuterOutcome,
+  AgentAnswerPart,
+  AgentAnswerSource,
+  AgentAnswerView,
   AgentEffect,
   TraceStep,
   QueryAudit,
@@ -676,16 +682,26 @@ export interface AskQuote {
   raw_quote?: string;
   resolved_quote?: string;
 }
+export interface AgentQuestionQuoteView {
+  label: string;
+  quote: string;
+  status?: SelectionResolution;
+}
 export interface AgentChatTurn {
+  turn_id: string;
+  user_turn_ordinal: number;
   user: string;
-  outcome: OuterOutcome;
-  question_anchor_lid: string | null;
-  question_quote: AskQuote | null;
+  status: "pending_assistant" | "completed" | "failed";
+  outcome?: OuterOutcome | null;
+  error?: { error_code: string; category: string; message: string } | null;
+  question_source_label: string | null;
+  question_quote: AgentQuestionQuoteView | null;
+  effect_labels: string[];
 }
 export interface AgentChatTurnSummary {
   user: string;
-  question_anchor_lid: string | null;
-  question_quote: AskQuote | null;
+  question_source_label: string | null;
+  question_quote: AgentQuestionQuoteView | null;
 }
 export interface AgentChatSessionSummary {
   id: string;
@@ -712,6 +728,19 @@ export interface AgentChatMeta {
   display_user?: string;
   question_anchor_lid?: string | null;
   question_quote?: AskQuote | null;
+}
+export interface SourcePopupView {
+  source_ref_id: string;
+  label: string;
+  highlighted_quote: string;
+  context_before: string;
+  context_after: string;
+  stale: boolean;
+  can_open_in_reader: boolean;
+}
+export interface SourceOpenView {
+  source_ref_id: string;
+  opened: boolean;
 }
 
 /** 携带 §4.4 分类信封的错误(category/error_code 供 UI 分流瞬时 vs 永久)。 */
@@ -896,4 +925,8 @@ export const api = {
     http<AgentHistoryResponse>("POST", "/agent/history/select", { session_id }),
   agentHistoryDelete: (session_id: string) =>
     http<AgentHistoryResponse>("POST", "/agent/history/delete", { session_id }),
+  agentSourceResolve: (turn_id: string, source_ref_id: string) =>
+    http<SourcePopupView>("POST", "/agent/source.resolve", { turn_id, source_ref_id }),
+  agentSourceOpen: (turn_id: string, source_ref_id: string) =>
+    http<SourceOpenView>("POST", "/agent/source.open", { turn_id, source_ref_id }),
 };

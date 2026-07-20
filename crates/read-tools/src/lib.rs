@@ -1399,6 +1399,68 @@ pub struct ToolError {
     pub message: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SourceTextRange {
+    pub start: u32,
+    pub end: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SourceSelectedRange {
+    pub lid: String,
+    pub range: SourceTextRange,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EvidenceRange {
+    pub start_lid: String,
+    pub end_lid: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ranges: Vec<SourceSelectedRange>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ResolvedSource {
+    pub label: String,
+    pub heading_path: Vec<String>,
+    pub preview: String,
+    pub evidence_text_digest: String,
+    pub highlighted_quote: String,
+    pub context_before: String,
+    pub context_after: String,
+}
+
+pub fn disambiguate_source_labels(sources: &mut [ResolvedSource]) {
+    let initial_labels: Vec<_> = sources.iter().map(|source| source.label.clone()).collect();
+    for index in 0..sources.len() {
+        if initial_labels
+            .iter()
+            .filter(|label| **label == initial_labels[index])
+            .count()
+            < 2
+        {
+            continue;
+        }
+        let kind_label = initial_labels[index]
+            .split_once(" · ")
+            .map(|(kind, _)| kind)
+            .unwrap_or(initial_labels[index].as_str());
+        for depth in 2..=sources[index].heading_path.len() {
+            let start = sources[index].heading_path.len() - depth;
+            let suffix = sources[index].heading_path[start..].join(" / ");
+            let unique = sources.iter().enumerate().all(|(other_index, other)| {
+                other_index == index
+                    || other.heading_path.len() < depth
+                    || other.heading_path[other.heading_path.len() - depth..].join(" / ") != suffix
+            });
+            if unique {
+                sources[index].label = format!("{kind_label} · {suffix}");
+                break;
+            }
+        }
+    }
+}
+
 /// book.manifest 树节点(确定性拓扑)`[ADR-0014]`。
 #[derive(Debug, Serialize, TS)]
 #[ts(export, export_to = "../../../packages/web/src/generated/")]
@@ -5025,6 +5087,281 @@ impl Book {
         Ok(String::from_utf16_lossy(&self.source_u16[start..end]))
     }
 
+    pub fn resolve_source(
+        &self,
+        evidence: &EvidenceRange,
+        locale: &str,
+        expected_digest: Option<&str>,
+    ) -> Result<ResolvedSource, ToolError> {
+        let leaves = self.source_leaves();
+        let leaf_positions: HashMap<&str, usize> = leaves
+            .iter()
+            .enumerate()
+            .map(|(index, node)| (node.lid.as_str(), index))
+            .collect();
+        let start_node = self
+            .node(&evidence.start_lid)
+            .map_err(|_| invalid_source_range("start_lid must identify readable source"))?;
+        let end_node = self
+            .node(&evidence.end_lid)
+            .map_err(|_| invalid_source_range("end_lid must identify readable source"))?;
+        let start_index = source_endpoint_leaf_index(start_node, &leaves, &leaf_positions, true)?;
+        let end_index = source_endpoint_leaf_index(end_node, &leaves, &leaf_positions, false)?;
+        if start_index > end_index || start_node.span.start > end_node.span.end {
+            return Err(invalid_source_range(
+                "start_lid must not follow end_lid in reading order",
+            ));
+        }
+
+        let selected = &leaves[start_index..=end_index];
+        let evidence_text = if evidence.ranges.is_empty() {
+            String::from_utf16_lossy(
+                self.source_u16
+                    .get(start_node.span.start..end_node.span.end)
+                    .ok_or_else(|| {
+                        invalid_source_range("source passage is outside canonical text")
+                    })?,
+            )
+        } else {
+            if !start_node.children.is_empty() || !end_node.children.is_empty() {
+                return Err(invalid_source_range(
+                    "explicit ranges require leaf start_lid and end_lid",
+                ));
+            }
+            self.validate_and_read_source_ranges(evidence, selected)?
+        };
+        if evidence_text.trim().is_empty() {
+            return Err(invalid_source_range("source evidence must contain text"));
+        }
+
+        let digest = source_evidence_digest(&self.base.book_id, evidence, &evidence_text);
+        if expected_digest.is_some_and(|expected| expected != digest) {
+            return Err(ToolError {
+                error_code: "SOURCE_STALE".into(),
+                category: "conflict".into(),
+                message: "source evidence no longer matches the stored digest".into(),
+            });
+        }
+
+        let heading_path = self.source_heading_path(start_node)?;
+        let kind_label = localized_source_kind(&start_node.kind, locale);
+        let label = heading_path
+            .last()
+            .map(|heading| format!("{kind_label} · {heading}"))
+            .unwrap_or_else(|| kind_label.to_string());
+        let highlighted_quote = evidence_text.trim().to_string();
+        let (context_before, context_after) = self.source_context(
+            evidence,
+            &leaves,
+            start_index,
+            end_index,
+            &highlighted_quote,
+        )?;
+
+        Ok(ResolvedSource {
+            label,
+            heading_path,
+            preview: source_preview(&highlighted_quote),
+            evidence_text_digest: digest,
+            highlighted_quote,
+            context_before,
+            context_after,
+        })
+    }
+
+    fn source_leaves(&self) -> Vec<&LidNode> {
+        let mut leaves: Vec<_> = self
+            .base
+            .lid_nodes
+            .iter()
+            .filter(|node| node.children.is_empty())
+            .collect();
+        leaves.sort_by(|left, right| {
+            left.span
+                .start
+                .cmp(&right.span.start)
+                .then_with(|| left.span.end.cmp(&right.span.end))
+                .then_with(|| left.path.cmp(&right.path))
+        });
+        leaves
+    }
+
+    fn source_node_u16(&self, node: &LidNode) -> Result<&[u16], ToolError> {
+        self.source_u16
+            .get(node.span.start..node.span.end)
+            .ok_or_else(|| invalid_source_range("source node span is outside canonical text"))
+    }
+
+    fn source_node_text(&self, node: &LidNode) -> Result<String, ToolError> {
+        Ok(String::from_utf16_lossy(self.source_node_u16(node)?))
+    }
+
+    fn validate_and_read_source_ranges(
+        &self,
+        evidence: &EvidenceRange,
+        selected: &[&LidNode],
+    ) -> Result<String, ToolError> {
+        if evidence.ranges.len() != selected.len() {
+            return Err(invalid_source_range(
+                "explicit source ranges must cover every leaf in the evidence passage",
+            ));
+        }
+
+        let mut text = String::new();
+        for (index, (range, node)) in evidence.ranges.iter().zip(selected.iter()).enumerate() {
+            if range.lid != node.lid {
+                return Err(invalid_source_range(
+                    "explicit source ranges must follow consecutive leaf reading order",
+                ));
+            }
+            let node_u16 = self.source_node_u16(node)?;
+            let start = range.range.start as usize;
+            let end = range.range.end as usize;
+            if start >= end
+                || end > node_u16.len()
+                || !is_utf16_boundary(node_u16, start)
+                || !is_utf16_boundary(node_u16, end)
+            {
+                return Err(invalid_source_range(
+                    "source range must be a non-empty UTF-16 interval inside its leaf",
+                ));
+            }
+
+            if selected.len() > 1 {
+                if index > 0 && !utf16_is_whitespace(&node_u16[..start]) {
+                    return Err(invalid_source_range(
+                        "only the first leaf may have a non-whitespace prefix outside evidence",
+                    ));
+                }
+                if index + 1 < selected.len() && !utf16_is_whitespace(&node_u16[end..]) {
+                    return Err(invalid_source_range(
+                        "only the last leaf may have a non-whitespace suffix outside evidence",
+                    ));
+                }
+            }
+            text.push_str(&String::from_utf16_lossy(&node_u16[start..end]));
+        }
+        Ok(text)
+    }
+
+    fn source_heading_path(&self, node: &LidNode) -> Result<Vec<String>, ToolError> {
+        let mut ancestors: Vec<_> = self
+            .base
+            .lid_nodes
+            .iter()
+            .filter(|ancestor| {
+                matches!(ancestor.kind, NodeKind::Chapter | NodeKind::Section)
+                    && path_is_prefix(&ancestor.path, &node.path)
+            })
+            .collect();
+        ancestors.sort_by_key(|node| node.path.len());
+        ancestors
+            .into_iter()
+            .map(|ancestor| {
+                self.source_node_text(ancestor)
+                    .map(|text| markdown_heading(&text))
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(|headings| headings.into_iter().flatten().collect())
+    }
+
+    fn source_context(
+        &self,
+        evidence: &EvidenceRange,
+        leaves: &[&LidNode],
+        start_index: usize,
+        end_index: usize,
+        highlighted_quote: &str,
+    ) -> Result<(String, String), ToolError> {
+        let boundary = self
+            .base
+            .lid_nodes
+            .iter()
+            .filter(|node| {
+                matches!(node.kind, NodeKind::Chapter | NodeKind::Section)
+                    && path_is_prefix(&node.path, &leaves[start_index].path)
+                    && path_is_prefix(&node.path, &leaves[end_index].path)
+            })
+            .max_by_key(|node| node.path.len());
+        let (boundary_start, boundary_end) = boundary
+            .map(|node| {
+                let indexes: Vec<_> = leaves
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, leaf)| path_is_prefix(&node.path, &leaf.path))
+                    .map(|(index, _)| index)
+                    .collect();
+                (
+                    indexes.first().copied().unwrap_or(start_index),
+                    indexes.last().copied().unwrap_or(end_index),
+                )
+            })
+            .unwrap_or((start_index, end_index));
+
+        let mut before = Vec::new();
+        let mut after = Vec::new();
+        if let Some(first_range) = evidence.ranges.first() {
+            let start_u16 = self.source_node_u16(leaves[start_index])?;
+            let prefix = String::from_utf16_lossy(&start_u16[..first_range.range.start as usize]);
+            if !prefix.is_empty() {
+                before.push(prefix);
+            }
+        }
+        if let Some(last_range) = evidence.ranges.last() {
+            let end_u16 = self.source_node_u16(leaves[end_index])?;
+            let suffix = String::from_utf16_lossy(&end_u16[last_range.range.end as usize..]);
+            if !suffix.is_empty() {
+                after.push(suffix);
+            }
+        }
+
+        let cjk = contains_cjk(highlighted_quote)
+            || boundary
+                .and_then(|node| self.source_node_text(node).ok())
+                .is_some_and(|text| contains_cjk(&text));
+        let target_min = if cjk { 300 } else { 120 };
+        let target_max = if cjk { 800 } else { 300 };
+        let hard_max = if cjk { 1200 } else { 500 };
+        let mut left = start_index.checked_sub(1);
+        let mut right = end_index + 1;
+        let mut prefer_left = true;
+        while source_window_measure(&before, highlighted_quote, &after, cjk) < target_min {
+            let mut added = false;
+            for choose_left in [prefer_left, !prefer_left] {
+                if choose_left {
+                    if let Some(index) = left.filter(|index| *index >= boundary_start) {
+                        before.insert(0, self.source_node_text(leaves[index])?);
+                        left = index.checked_sub(1);
+                        added = true;
+                        break;
+                    }
+                } else if right <= boundary_end {
+                    after.push(self.source_node_text(leaves[right])?);
+                    right += 1;
+                    added = true;
+                    break;
+                }
+            }
+            if !added {
+                break;
+            }
+            prefer_left = !prefer_left;
+            if source_window_measure(&before, highlighted_quote, &after, cjk) >= target_max {
+                break;
+            }
+        }
+
+        let before = before.concat().trim().to_string();
+        let after = after.concat().trim().to_string();
+        Ok(limit_source_context(
+            &before,
+            &after,
+            highlighted_quote,
+            cjk,
+            hard_max,
+        ))
+    }
+
     /// book.manifest():确定性拓扑 + 每 LID 统计(无 LLM、无"推荐路径/认知深度" `[ADR-0014]`)。
     pub fn manifest(&self) -> Manifest {
         // 锚定计数:实体/概念按 occurrences、断言按 source_lid 计到对应 LID。
@@ -5578,6 +5915,185 @@ impl Book {
 /// 物化路径父 LID:"11.18.4" → Some("11.18");"1" → None。
 fn parent_lid(lid: &str) -> Option<String> {
     lid.rfind('.').map(|i| lid[..i].to_string())
+}
+
+fn invalid_source_range(message: impl Into<String>) -> ToolError {
+    ToolError {
+        error_code: "INVALID_SOURCE_RANGE".into(),
+        category: "invalid_input".into(),
+        message: message.into(),
+    }
+}
+
+fn path_is_prefix(prefix: &[u32], path: &[u32]) -> bool {
+    prefix.len() <= path.len() && prefix.iter().zip(path).all(|(left, right)| left == right)
+}
+
+fn source_endpoint_leaf_index(
+    node: &LidNode,
+    leaves: &[&LidNode],
+    leaf_positions: &HashMap<&str, usize>,
+    first: bool,
+) -> Result<usize, ToolError> {
+    if let Some(index) = leaf_positions.get(node.lid.as_str()) {
+        return Ok(*index);
+    }
+    let descendants = leaves
+        .iter()
+        .enumerate()
+        .filter(|(_, leaf)| path_is_prefix(&node.path, &leaf.path))
+        .map(|(index, _)| index);
+    if first {
+        descendants.min()
+    } else {
+        descendants.max()
+    }
+    .ok_or_else(|| invalid_source_range("source container has no readable leaf"))
+}
+
+fn is_utf16_boundary(text: &[u16], index: usize) -> bool {
+    index == 0
+        || index == text.len()
+        || !((0xd800..=0xdbff).contains(&text[index - 1])
+            && (0xdc00..=0xdfff).contains(&text[index]))
+}
+
+fn utf16_is_whitespace(text: &[u16]) -> bool {
+    String::from_utf16_lossy(text)
+        .chars()
+        .all(char::is_whitespace)
+}
+
+fn markdown_heading(text: &str) -> Option<String> {
+    let trimmed = text.lines().find(|line| !line.trim().is_empty())?.trim();
+    let marker_len = trimmed.bytes().take_while(|byte| *byte == b'#').count();
+    if marker_len == 0 || marker_len > 6 {
+        return None;
+    }
+    let title = trimmed[marker_len..].trim();
+    (!title.is_empty()).then(|| title.trim_end_matches('#').trim().to_string())
+}
+
+fn localized_source_kind(kind: &NodeKind, locale: &str) -> &'static str {
+    let zh = locale.to_ascii_lowercase().starts_with("zh");
+    match (zh, kind) {
+        (true, NodeKind::Chapter) => "章节",
+        (true, NodeKind::Section) => "小节",
+        (true, NodeKind::Paragraph) => "正文",
+        (true, NodeKind::Code) => "代码",
+        (true, NodeKind::Table) => "表格",
+        (true, NodeKind::Image) => "图片",
+        (true, NodeKind::Formula) => "公式",
+        (false, NodeKind::Chapter) => "Chapter",
+        (false, NodeKind::Section) => "Section",
+        (false, NodeKind::Paragraph) => "Passage",
+        (false, NodeKind::Code) => "Code",
+        (false, NodeKind::Table) => "Table",
+        (false, NodeKind::Image) => "Figure",
+        (false, NodeKind::Formula) => "Formula",
+    }
+}
+
+fn source_evidence_digest(book_id: &str, evidence: &EvidenceRange, text: &str) -> String {
+    let mut hash = 0xcbf29ce484222325_u64;
+    let mut update = |part: &str| {
+        for byte in part.as_bytes().iter().chain(std::iter::once(&0_u8)) {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+    };
+    update(book_id);
+    update(&evidence.start_lid);
+    update(&evidence.end_lid);
+    for selected in &evidence.ranges {
+        update(&selected.lid);
+        update(&selected.range.start.to_string());
+        update(&selected.range.end.to_string());
+    }
+    update(text);
+    format!("source-fnv1a64-{hash:016x}")
+}
+
+fn source_preview(text: &str) -> String {
+    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut chars = normalized.chars();
+    let preview: String = chars.by_ref().take(160).collect();
+    if chars.next().is_some() {
+        format!("{preview}...")
+    } else {
+        preview
+    }
+}
+
+fn contains_cjk(text: &str) -> bool {
+    text.chars().any(|character| {
+        matches!(
+            character as u32,
+            0x3400..=0x4dbf | 0x4e00..=0x9fff | 0xf900..=0xfaff
+        )
+    })
+}
+
+fn source_text_measure(text: &str, cjk: bool) -> usize {
+    if cjk {
+        text.chars().count()
+    } else {
+        text.split_whitespace().count()
+    }
+}
+
+fn source_window_measure(
+    before: &[String],
+    highlighted_quote: &str,
+    after: &[String],
+    cjk: bool,
+) -> usize {
+    before
+        .iter()
+        .chain(after.iter())
+        .map(|part| source_text_measure(part, cjk))
+        .sum::<usize>()
+        + source_text_measure(highlighted_quote, cjk)
+}
+
+fn limit_source_context(
+    before: &str,
+    after: &str,
+    highlighted_quote: &str,
+    cjk: bool,
+    hard_max: usize,
+) -> (String, String) {
+    let remaining = hard_max.saturating_sub(source_text_measure(highlighted_quote, cjk));
+    let before_budget = remaining / 2;
+    let after_budget = remaining - before_budget;
+    (
+        take_source_units(before, before_budget, cjk, true),
+        take_source_units(after, after_budget, cjk, false),
+    )
+}
+
+fn take_source_units(text: &str, limit: usize, cjk: bool, from_end: bool) -> String {
+    if cjk {
+        let chars: Vec<_> = text.chars().collect();
+        if chars.len() <= limit {
+            return text.to_string();
+        }
+        if from_end {
+            chars[chars.len() - limit..].iter().collect()
+        } else {
+            chars[..limit].iter().collect()
+        }
+    } else {
+        let words: Vec<_> = text.split_whitespace().collect();
+        if words.len() <= limit {
+            return text.to_string();
+        }
+        if from_end {
+            words[words.len() - limit..].join(" ")
+        } else {
+            words[..limit].join(" ")
+        }
+    }
 }
 
 /// `edge_type → NavCategory` 固定确定性映射(Core,零 LLM)`[ADR-0034 决策5]`。
@@ -7756,5 +8272,409 @@ mod tests {
             "target_landmark_id": "landmark:b"
         });
         assert!(serde_json::from_value::<PaperArgumentRelation>(missing_evidence).is_err());
+    }
+
+    fn source_presentation_book() -> Book {
+        const SOURCE: &str = concat!(
+            "# Chapter One\n",
+            "Chapter intro gives broad context.\n",
+            "## Methods\n",
+            "Alpha evidence begins here.\n",
+            "Beta evidence continues here.\n",
+            "## Results\n",
+            "Gamma result follows.\n",
+            "Chapter closing context.\n",
+            "# Chapter Two\n",
+            "## Methods\n",
+            "Outside boundary.\n",
+        );
+
+        fn offset(source: &str, needle: &str) -> usize {
+            source[..source.find(needle).unwrap()]
+                .encode_utf16()
+                .count()
+        }
+
+        fn span(source: &str, text: &str) -> Span {
+            let start = offset(source, text);
+            Span {
+                start,
+                end: start + text.encode_utf16().count(),
+            }
+        }
+
+        let chapter_two_start = offset(SOURCE, "# Chapter Two\n");
+        let methods_start = offset(SOURCE, "## Methods\n");
+        let results_start = offset(SOURCE, "## Results\n");
+        let source_end = SOURCE.encode_utf16().count();
+        let base = ReadOnlyBase {
+            book_id: "source-presentation-book".into(),
+            lid_nodes: vec![
+                LidNode {
+                    lid: "1".into(),
+                    path: vec![1],
+                    kind: NodeKind::Chapter,
+                    span: Span {
+                        start: 0,
+                        end: chapter_two_start,
+                    },
+                    children: vec!["1.1".into(), "1.2".into(), "1.3".into()],
+                },
+                LidNode {
+                    lid: "1.1".into(),
+                    path: vec![1, 1],
+                    kind: NodeKind::Paragraph,
+                    span: span(SOURCE, "Chapter intro gives broad context.\n"),
+                    children: vec![],
+                },
+                LidNode {
+                    lid: "1.2".into(),
+                    path: vec![1, 2],
+                    kind: NodeKind::Section,
+                    span: Span {
+                        start: methods_start,
+                        end: results_start,
+                    },
+                    children: vec!["1.2.1".into(), "1.2.2".into()],
+                },
+                LidNode {
+                    lid: "1.2.1".into(),
+                    path: vec![1, 2, 1],
+                    kind: NodeKind::Paragraph,
+                    span: span(SOURCE, "Alpha evidence begins here.\n"),
+                    children: vec![],
+                },
+                LidNode {
+                    lid: "1.2.2".into(),
+                    path: vec![1, 2, 2],
+                    kind: NodeKind::Paragraph,
+                    span: span(SOURCE, "Beta evidence continues here.\n"),
+                    children: vec![],
+                },
+                LidNode {
+                    lid: "1.3".into(),
+                    path: vec![1, 3],
+                    kind: NodeKind::Section,
+                    span: Span {
+                        start: results_start,
+                        end: chapter_two_start,
+                    },
+                    children: vec!["1.3.1".into(), "1.3.2".into()],
+                },
+                LidNode {
+                    lid: "1.3.1".into(),
+                    path: vec![1, 3, 1],
+                    kind: NodeKind::Paragraph,
+                    span: span(SOURCE, "Gamma result follows.\n"),
+                    children: vec![],
+                },
+                LidNode {
+                    lid: "1.3.2".into(),
+                    path: vec![1, 3, 2],
+                    kind: NodeKind::Paragraph,
+                    span: span(SOURCE, "Chapter closing context.\n"),
+                    children: vec![],
+                },
+                LidNode {
+                    lid: "2".into(),
+                    path: vec![2],
+                    kind: NodeKind::Chapter,
+                    span: Span {
+                        start: chapter_two_start,
+                        end: source_end,
+                    },
+                    children: vec!["2.1".into()],
+                },
+                LidNode {
+                    lid: "2.1".into(),
+                    path: vec![2, 1],
+                    kind: NodeKind::Section,
+                    span: Span {
+                        start: offset(SOURCE, "## Methods\nOutside boundary.\n"),
+                        end: source_end,
+                    },
+                    children: vec!["2.1.1".into()],
+                },
+                LidNode {
+                    lid: "2.1.1".into(),
+                    path: vec![2, 1, 1],
+                    kind: NodeKind::Paragraph,
+                    span: span(SOURCE, "Outside boundary.\n"),
+                    children: vec![],
+                },
+            ],
+            graph_nodes: vec![],
+            graph_edges: vec![],
+        };
+        Book::new(base, SOURCE)
+    }
+
+    fn selected_source_range(lid: &str, start: u32, end: u32) -> SourceSelectedRange {
+        SourceSelectedRange {
+            lid: lid.into(),
+            range: SourceTextRange { start, end },
+        }
+    }
+
+    #[test]
+    fn source_presentation_resolves_original_heading_localized_kind_and_stable_digest() {
+        let book = source_presentation_book();
+        let evidence = EvidenceRange {
+            start_lid: "1.2.1".into(),
+            end_lid: "1.2.1".into(),
+            ranges: vec![selected_source_range("1.2.1", 0, 14)],
+        };
+
+        let first = book.resolve_source(&evidence, "zh-CN", None).unwrap();
+        let second = book.resolve_source(&evidence, "zh-CN", None).unwrap();
+
+        assert_eq!(first.label, "正文 · Methods");
+        assert_eq!(first.heading_path, vec!["Chapter One", "Methods"]);
+        assert_eq!(first.highlighted_quote, "Alpha evidence");
+        assert_eq!(first.preview, "Alpha evidence");
+        assert!(first
+            .context_after
+            .contains("Beta evidence continues here."));
+        assert!(!first.context_before.contains("Chapter intro"));
+        assert!(first.evidence_text_digest.starts_with("source-fnv1a64-"));
+        assert_eq!(first.evidence_text_digest, second.evidence_text_digest);
+    }
+
+    #[test]
+    fn source_presentation_accepts_adjacent_multi_lid_and_rejects_skipped_leaf() {
+        let book = source_presentation_book();
+        let adjacent = EvidenceRange {
+            start_lid: "1.2.1".into(),
+            end_lid: "1.2.2".into(),
+            ranges: vec![
+                selected_source_range("1.2.1", 0, 27),
+                selected_source_range("1.2.2", 0, 29),
+            ],
+        };
+        assert!(book.resolve_source(&adjacent, "en", None).is_ok());
+
+        let skipped = EvidenceRange {
+            start_lid: "1.2.1".into(),
+            end_lid: "1.3.1".into(),
+            ranges: vec![
+                selected_source_range("1.2.1", 0, 27),
+                selected_source_range("1.3.1", 0, 21),
+            ],
+        };
+        let error = book.resolve_source(&skipped, "en", None).unwrap_err();
+        assert_eq!(error.error_code, "INVALID_SOURCE_RANGE");
+    }
+
+    #[test]
+    fn source_presentation_accepts_cross_heading_continuity_and_bounds_context() {
+        let book = source_presentation_book();
+        let evidence = EvidenceRange {
+            start_lid: "1.2.2".into(),
+            end_lid: "1.3.1".into(),
+            ranges: vec![
+                selected_source_range("1.2.2", 0, 29),
+                selected_source_range("1.3.1", 0, 21),
+            ],
+        };
+
+        let resolved = book.resolve_source(&evidence, "en", None).unwrap();
+
+        assert!(resolved
+            .highlighted_quote
+            .contains("Beta evidence continues here."));
+        assert!(resolved.highlighted_quote.contains("Gamma result follows."));
+        assert!(resolved
+            .context_before
+            .contains("Chapter intro gives broad context."));
+        assert!(resolved.context_after.contains("Chapter closing context."));
+        assert!(!resolved.context_after.contains("Outside boundary."));
+    }
+
+    #[test]
+    fn source_presentation_preserves_structural_book_text_passage() {
+        let book = source_presentation_book();
+        let evidence = EvidenceRange {
+            start_lid: "1.2".into(),
+            end_lid: "1.2".into(),
+            ranges: vec![],
+        };
+
+        let resolved = book.resolve_source(&evidence, "zh-CN", None).unwrap();
+
+        assert_eq!(resolved.label, "小节 · Methods");
+        assert_eq!(
+            resolved.highlighted_quote,
+            book.text("1.2", None).unwrap().trim()
+        );
+        assert!(resolved.highlighted_quote.starts_with("## Methods"));
+        assert!(!resolved.context_before.contains("Chapter intro"));
+        assert!(!resolved.context_after.contains("Gamma result"));
+    }
+
+    #[test]
+    fn source_presentation_rejects_invalid_utf16_range() {
+        let book = source_presentation_book();
+        let evidence = EvidenceRange {
+            start_lid: "1.2.1".into(),
+            end_lid: "1.2.1".into(),
+            ranges: vec![selected_source_range("1.2.1", 0, 99)],
+        };
+
+        let error = book.resolve_source(&evidence, "en", None).unwrap_err();
+        assert_eq!(error.error_code, "INVALID_SOURCE_RANGE");
+    }
+
+    #[test]
+    fn source_presentation_rejects_digest_mismatch() {
+        let book = source_presentation_book();
+        let evidence = EvidenceRange {
+            start_lid: "1.2.1".into(),
+            end_lid: "1.2.1".into(),
+            ranges: vec![selected_source_range("1.2.1", 0, 14)],
+        };
+        let digest = book
+            .resolve_source(&evidence, "en", None)
+            .unwrap()
+            .evidence_text_digest;
+
+        assert!(book.resolve_source(&evidence, "en", Some(&digest)).is_ok());
+        let error = book
+            .resolve_source(&evidence, "en", Some("source-fnv1a64-deadbeef"))
+            .unwrap_err();
+        assert_eq!(error.error_code, "SOURCE_STALE");
+    }
+
+    #[test]
+    fn source_presentation_preserves_chinese_heading_and_falls_back_without_heading() {
+        let source = "# 第一章\n## 方法\n证据文本。\n";
+        let chapter_end = source.encode_utf16().count();
+        let section_start = "# 第一章\n".encode_utf16().count();
+        let leaf_start = "# 第一章\n## 方法\n".encode_utf16().count();
+        let titled = Book::new(
+            ReadOnlyBase {
+                book_id: "source-presentation-zh".into(),
+                lid_nodes: vec![
+                    LidNode {
+                        lid: "1".into(),
+                        path: vec![1],
+                        kind: NodeKind::Chapter,
+                        span: Span {
+                            start: 0,
+                            end: chapter_end,
+                        },
+                        children: vec!["1.1".into()],
+                    },
+                    LidNode {
+                        lid: "1.1".into(),
+                        path: vec![1, 1],
+                        kind: NodeKind::Section,
+                        span: Span {
+                            start: section_start,
+                            end: chapter_end,
+                        },
+                        children: vec!["1.1.1".into()],
+                    },
+                    LidNode {
+                        lid: "1.1.1".into(),
+                        path: vec![1, 1, 1],
+                        kind: NodeKind::Paragraph,
+                        span: Span {
+                            start: leaf_start,
+                            end: chapter_end,
+                        },
+                        children: vec![],
+                    },
+                ],
+                graph_nodes: vec![],
+                graph_edges: vec![],
+            },
+            source,
+        );
+        let resolved = titled
+            .resolve_source(
+                &EvidenceRange {
+                    start_lid: "1.1.1".into(),
+                    end_lid: "1.1.1".into(),
+                    ranges: vec![selected_source_range("1.1.1", 0, 5)],
+                },
+                "zh-CN",
+                None,
+            )
+            .unwrap();
+        assert_eq!(resolved.label, "正文 · 方法");
+        assert_eq!(resolved.heading_path, vec!["第一章", "方法"]);
+
+        let untitled = book()
+            .resolve_source(
+                &EvidenceRange {
+                    start_lid: "1.1".into(),
+                    end_lid: "1.1".into(),
+                    ranges: vec![],
+                },
+                "zh-CN",
+                None,
+            )
+            .unwrap();
+        assert_eq!(untitled.label, "正文");
+        assert!(untitled.heading_path.is_empty());
+    }
+
+    #[test]
+    fn source_presentation_disambiguates_duplicate_titles_with_parent_headings() {
+        let book = source_presentation_book();
+        let mut resolved = vec![
+            book.resolve_source(
+                &EvidenceRange {
+                    start_lid: "1.2.1".into(),
+                    end_lid: "1.2.1".into(),
+                    ranges: vec![],
+                },
+                "zh-CN",
+                None,
+            )
+            .unwrap(),
+            book.resolve_source(
+                &EvidenceRange {
+                    start_lid: "2.1.1".into(),
+                    end_lid: "2.1.1".into(),
+                    ranges: vec![],
+                },
+                "zh-CN",
+                None,
+            )
+            .unwrap(),
+        ];
+        assert_eq!(resolved[0].label, "正文 · Methods");
+        assert_eq!(resolved[1].label, "正文 · Methods");
+
+        disambiguate_source_labels(&mut resolved);
+
+        assert_eq!(resolved[0].label, "正文 · Chapter One / Methods");
+        assert_eq!(resolved[1].label, "正文 · Chapter Two / Methods");
+        assert!(!resolved.iter().any(|source| source.label.contains("1.2")));
+    }
+
+    #[test]
+    fn source_presentation_context_obeys_hard_word_limit_and_keeps_nearest_text() {
+        let before = (0..400)
+            .map(|index| format!("before{index}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let after = (0..400)
+            .map(|index| format!("after{index}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        let (limited_before, limited_after) =
+            limit_source_context(&before, &after, "evidence", false, 500);
+
+        assert_eq!(
+            source_text_measure(&limited_before, false)
+                + source_text_measure("evidence", false)
+                + source_text_measure(&limited_after, false),
+            500
+        );
+        assert!(limited_before.ends_with("before399"));
+        assert!(limited_after.starts_with("after0"));
     }
 }

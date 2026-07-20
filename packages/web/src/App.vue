@@ -5,9 +5,10 @@ import { api, ApiError } from "./api";
 import type {
   AgentChatSessionSummary,
   AgentChatTurn as StoredAgentChatTurn,
-  AskQuote,
   AgentEffect,
   AgentHistoryResponse,
+  AgentQuestionQuoteView,
+  AskQuote,
   BuildWorkbenchSnapshot,
   BuildStageId,
   BookLibraryEntry,
@@ -2383,12 +2384,15 @@ function clearAskDraft() {
 
 // ── agent 对话区(外层 E agent 主入口)`[ADR-0030]` ──
 interface ChatTurn {
+  turnId: string | null;
   user: string;
   outcome: OuterOutcome | null;
   pending: boolean;
   error?: string;
   questionAnchorLid: string | null;
-  questionQuote: AskDraft | null;
+  questionQuote: AgentQuestionQuoteView | null;
+  questionSelection: AskDraft | null;
+  effectLabels: string[];
 }
 type AskDraft = AskQuote;
 const chat = ref<ChatTurn[]>([]);
@@ -2488,20 +2492,36 @@ function toggleTrace(ti: number) {
   showTrace.value[ti] = !showTrace.value[ti];
 }
 
-function chatTurnFromHistory(turn: StoredAgentChatTurn): ChatTurn {
+function localQuestionQuoteView(draft: AskDraft): AgentQuestionQuoteView {
   return {
+    label: draft.status === "partial" ? "部分定位引用" : "引用来源",
+    quote: draft.quote,
+    status: draft.status,
+  };
+}
+
+function chatTurnFromHistory(turn: StoredAgentChatTurn, previous?: ChatTurn): ChatTurn {
+  const matchingPrevious = previous?.user === turn.user ? previous : undefined;
+  return {
+    turnId: turn.turn_id,
     user: turn.user,
-    outcome: turn.outcome,
-    pending: false,
-    questionAnchorLid: turn.question_anchor_lid,
+    outcome: turn.outcome ?? null,
+    pending: turn.status === "pending_assistant",
+    error: turn.error
+      ? `[${turn.error.category}] ${turn.error.error_code}: ${turn.error.message}`
+      : undefined,
+    questionAnchorLid: matchingPrevious?.questionAnchorLid ?? null,
     questionQuote: turn.question_quote ? { ...turn.question_quote } : null,
+    questionSelection: matchingPrevious?.questionSelection ?? null,
+    effectLabels: [...turn.effect_labels],
   };
 }
 
 function applyAgentHistory(history: AgentHistoryResponse) {
+  const previousChat = activeChatSessionId.value === history.active_session_id ? chat.value : [];
   activeChatSessionId.value = history.active_session_id;
   chatSessions.value = history.sessions;
-  chat.value = history.current.turns.map(chatTurnFromHistory);
+  chat.value = history.current.turns.map((turn, index) => chatTurnFromHistory(turn, previousChat[index]));
   handled.value = {};
   showTrace.value = {};
 }
@@ -2515,13 +2535,13 @@ function isGoto(e: AgentEffect): boolean {
   return e.kind === "Goto";
 }
 function effLabel(e: AgentEffect): string {
-  if (e.kind === "PaperMinimap") return `论文地图 · ${e.effect.reason}`;
-  if (e.kind === "PaperMinimapProposal") return `论文地图建议 · ${e.proposal.summary}`;
-  if (e.kind === "Goto") return `📖 翻到 ${e.after_anchor}`;
-  if (e.kind === "Highlight") return `🖍 高亮 ${e.lid}`;
-  if (e.kind === "Note") return `📝 笔记 ${e.lid}`;
-  if (e.kind === "Layout") return `布局版本 ${e.effect.before.rev} -> ${e.effect.after.rev}`;
-  return `布局调整提议 · ${e.proposal.actions.length} 项操作`;
+  if (e.kind === "PaperMinimap") return "论文地图已更新";
+  if (e.kind === "PaperMinimapProposal") return "论文地图建议";
+  if (e.kind === "Goto") return "跳转";
+  if (e.kind === "Highlight") return "高亮";
+  if (e.kind === "Note") return "笔记";
+  if (e.kind === "Layout") return "布局已更新";
+  return "布局调整建议";
 }
 function gotoBack(e: AgentEffect): string {
   return e.kind === "Goto" ? e.before_anchor : "";
@@ -2569,11 +2589,14 @@ async function submitAgentMessage(msg: string, displayUser: string, draft: AskDr
   if (sending.value) return;
   const questionAnchorLid = draft?.lid ?? selectedLid.value ?? viewport.value?.top_lid ?? null;
   const turn: ChatTurn = {
+    turnId: null,
     user: displayUser,
     outcome: null,
     pending: true,
     questionAnchorLid,
-    questionQuote: draft ? { ...draft } : null,
+    questionQuote: draft ? localQuestionQuoteView(draft) : null,
+    questionSelection: draft ? { ...draft } : null,
+    effectLabels: [],
   };
   chat.value.push(turn);
   sending.value = true;
@@ -2697,7 +2720,7 @@ async function keepEffect(ti: number, ei: number, e: AgentEffect) {
 }
 
 async function saveAgentSelection(turn: ChatTurn, text: string) {
-  const selectionContext = selectionContextForAgentNote(turn.questionQuote);
+  const selectionContext = selectionContextForAgentNote(turn.questionSelection);
   const anchor = selectionContext?.ranges[0]?.lid ?? turn.questionAnchorLid;
   const content = text.trim();
   if (!content || !anchor) return;
@@ -2719,6 +2742,14 @@ async function saveAgentSelection(turn: ChatTurn, text: string) {
     }
   } catch (e) {
     fail(e);
+  }
+}
+
+async function syncAfterAgentSourceOpen() {
+  try {
+    await syncViewport(true, true);
+  } catch (error) {
+    fail(error);
   }
 }
 
@@ -3405,6 +3436,7 @@ async function submitOpenBook(dir = bookPickerDir.value) {
         @undo-effect="undoEffect"
         @keep-effect="keepEffect"
         @save-answer-selection="saveAgentSelection"
+        @agent-source-opened="syncAfterAgentSourceOpen"
         @refresh-profile="refreshProfileSurface()"
         @mutate-profile="mutateProfile"
         @confirm-sensitive-profile="confirmSensitiveProfile"

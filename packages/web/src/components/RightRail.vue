@@ -1,8 +1,11 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from "vue";
-import { Undo2 } from "@lucide/vue";
+import { BookOpen, ExternalLink, Undo2, X } from "@lucide/vue";
+import { api } from "../api";
 import type {
+  AgentAnswerPart,
   AgentEffect,
+  AgentQuestionQuoteView,
   AskQuote,
   FormulaSemantics,
   HistoricalBackfillJobRequest,
@@ -14,6 +17,7 @@ import type {
   ProfileMemoryState,
   ProfileMemoryUpdate,
   ProfileUsageTrace,
+  SourcePopupView,
   TraceStep,
 } from "../api";
 import type { PdfAnnotationLocation } from "../pdf-annotation-projection";
@@ -24,13 +28,17 @@ import QueryAuditPanel from "./QueryAuditPanel.vue";
 type ContextTab = "agent" | "profile" | "trace" | "formula" | "notes";
 
 type AskDraft = AskQuote;
+type DisplayQuestionQuote = AskDraft | AgentQuestionQuoteView;
 interface ChatTurn {
+  turnId: string | null;
   user: string;
   outcome: OuterOutcome | null;
   pending: boolean;
   error?: string;
   questionAnchorLid: string | null;
-  questionQuote: AskDraft | null;
+  questionQuote: AgentQuestionQuoteView | null;
+  questionSelection: AskDraft | null;
+  effectLabels: string[];
 }
 interface ChatSessionSummary {
   id: string;
@@ -42,8 +50,8 @@ interface ChatSessionSummary {
 }
 interface ChatSessionTurnSummary {
   user: string;
-  question_anchor_lid: string | null;
-  question_quote: AskDraft | null;
+  question_source_label: string | null;
+  question_quote: AgentQuestionQuoteView | null;
 }
 
 const props = defineProps<{
@@ -100,6 +108,7 @@ const emit = defineEmits<{
   (e: "start-profile-backfill", request: HistoricalBackfillStartRequest): void;
   (e: "mutate-profile-backfill", action: "cancel" | "retry" | "clear", request: HistoricalBackfillJobRequest): void;
   (e: "undo-profile-update", turnIndex: number, updateIndex: number, update: ProfileMemoryUpdate): void;
+  (e: "agent-source-opened"): void;
 }>();
 
 const activeTab = ref<ContextTab>("agent");
@@ -148,7 +157,122 @@ watch(
 
 const answerSelection = ref<{ x: number; y: number; text: string; turn: ChatTurn } | null>(null);
 
+interface AgentSourcePopupState {
+  turnId: string;
+  sourceRefIds: string[];
+  activeSourceRefId: string;
+  sources: SourcePopupView[];
+  loading: boolean;
+  opening: boolean;
+  error: string | null;
+  left: number;
+  top: number;
+}
+
+const agentSourcePopup = ref<AgentSourcePopupState | null>(null);
+let sourceRequestSequence = 0;
+const activeAgentSource = computed(() => {
+  const popup = agentSourcePopup.value;
+  return popup?.sources.find((source) => source.source_ref_id === popup.activeSourceRefId) ?? null;
+});
+const agentSourcePopupStyle = computed(() => {
+  const popup = agentSourcePopup.value;
+  return popup ? { left: `${popup.left}px`, top: `${popup.top}px` } : {};
+});
+
+function answerParts(outcome: OuterOutcome): AgentAnswerPart[] {
+  return outcome.answer_view?.parts?.length
+    ? outcome.answer_view.parts
+    : outcome.answer
+      ? [{ kind: "markdown", text: outcome.answer }]
+      : [];
+}
+
+function sourceButtonLabel(outcome: OuterOutcome, sourceRefIds: string[]): string {
+  if (sourceRefIds.length !== 1) return `${sourceRefIds.length} 个来源`;
+  return outcome.answer_view?.sources.find((source) => source.source_ref_id === sourceRefIds[0])?.label
+    ?? "查看来源";
+}
+
+function markdownPartClass(parts: AgentAnswerPart[], index: number): Record<string, boolean> {
+  return {
+    "before-source": parts[index + 1]?.kind === "sources",
+    "after-source": parts[index - 1]?.kind === "sources",
+  };
+}
+
+function closeAgentSourcePopup() {
+  sourceRequestSequence += 1;
+  agentSourcePopup.value = null;
+}
+
+async function openAgentSources(turn: ChatTurn, sourceRefIds: string[], event: MouseEvent) {
+  if (!turn.turnId || sourceRefIds.length === 0) return;
+  const rect = (event.currentTarget as HTMLElement | null)?.getBoundingClientRect();
+  const popupWidth = 420;
+  const left = Math.min(
+    Math.max(rect?.left ?? 12, 12),
+    Math.max(12, window.innerWidth - popupWidth - 12),
+  );
+  const top = Math.min(Math.max((rect?.bottom ?? 52) + 8, 12), Math.max(12, window.innerHeight - 240));
+  const requestSequence = ++sourceRequestSequence;
+  agentSourcePopup.value = {
+    turnId: turn.turnId,
+    sourceRefIds: [...sourceRefIds],
+    activeSourceRefId: sourceRefIds[0],
+    sources: [],
+    loading: true,
+    opening: false,
+    error: null,
+    left,
+    top,
+  };
+  try {
+    const sources = await Promise.all(
+      sourceRefIds.map((sourceRefId) => api.agentSourceResolve(turn.turnId!, sourceRefId)),
+    );
+    if (requestSequence !== sourceRequestSequence || !agentSourcePopup.value) return;
+    agentSourcePopup.value.sources = sources;
+    agentSourcePopup.value.loading = false;
+  } catch (error) {
+    if (requestSequence !== sourceRequestSequence || !agentSourcePopup.value) return;
+    agentSourcePopup.value.loading = false;
+    agentSourcePopup.value.error = error instanceof Error ? error.message : String(error);
+  }
+}
+
+function selectAgentSource(sourceRefId: string) {
+  if (agentSourcePopup.value?.sources.some((source) => source.source_ref_id === sourceRefId)) {
+    agentSourcePopup.value.activeSourceRefId = sourceRefId;
+  }
+}
+
+async function openActiveAgentSourceInReader() {
+  const popup = agentSourcePopup.value;
+  const source = activeAgentSource.value;
+  if (!popup || !source || source.stale || !source.can_open_in_reader || popup.opening) return;
+  const requestSequence = sourceRequestSequence;
+  popup.opening = true;
+  popup.error = null;
+  try {
+    await api.agentSourceOpen(popup.turnId, source.source_ref_id);
+    if (requestSequence !== sourceRequestSequence) return;
+    closeAgentSourcePopup();
+    emit("agent-source-opened");
+  } catch (error) {
+    if (requestSequence !== sourceRequestSequence || !agentSourcePopup.value) return;
+    agentSourcePopup.value.opening = false;
+    agentSourcePopup.value.error = error instanceof Error ? error.message : String(error);
+  }
+}
+
+watch(() => props.activeChatSessionId, closeAgentSourcePopup);
+
 function onAnswerMouseUp(turn: ChatTurn) {
+  if (!turn.questionSelection && !turn.questionAnchorLid) {
+    answerSelection.value = null;
+    return;
+  }
   const sel = window.getSelection();
   if (!sel || sel.rangeCount === 0 || sel.isCollapsed) {
     answerSelection.value = null;
@@ -194,7 +318,8 @@ function leadingQuote(content: string): string | null {
   const quote = quoteLines.join(" ").replace(/\s+/g, " ").trim();
   return quote || null;
 }
-function askQuoteLabel(quote: AskQuote): string {
+function askQuoteLabel(quote: DisplayQuestionQuote): string {
+  if ("label" in quote) return quote.label;
   return quote.status === "partial" ? "部分定位引用" : "引用来源";
 }
 function annotationLocationLabel(record: MemoryRecord): string | null {
@@ -220,8 +345,8 @@ function excerpt(rec: MemoryRecord): string {
   const c = rec.content.replace(/\s+/g, " ").trim();
   return c.length > 120 ? `${c.slice(0, 120)}…` : c;
 }
-function turnAnchor(turn: ChatSessionTurnSummary): string | null {
-  return turn.question_anchor_lid ?? turn.question_quote?.lid ?? null;
+function turnSourceLabel(turn: ChatSessionTurnSummary): string | null {
+  return turn.question_source_label ?? turn.question_quote?.label ?? null;
 }
 function openHistorySession(sessionId: string) {
   if (!sessionId || sessionId === props.activeChatSessionId) return;
@@ -233,11 +358,6 @@ function openHistorySessionFromCard(sessionId: string, event: MouseEvent | Keybo
   if (target?.closest("button,a,input,textarea,select")) return;
   if (event instanceof KeyboardEvent) event.preventDefault();
   openHistorySession(sessionId);
-}
-function gotoHistoryAnchor(lid: string | null) {
-  if (!lid) return;
-  emit("goto", lid);
-  historyOpen.value = false;
 }
 function deleteHistorySession(sessionId: string) {
   if (!sessionId) return;
@@ -323,7 +443,6 @@ function influenceLabel(influence: ProfileUsageTrace["influences"][number]): str
           <div v-if="turn.questionQuote" class="turn-quote">
             <div class="turn-quote-head">
               <span>{{ askQuoteLabel(turn.questionQuote) }}</span>
-              <code>{{ turn.questionQuote.lid }}</code>
             </div>
             <blockquote>{{ turn.questionQuote.quote }}</blockquote>
           </div>
@@ -332,19 +451,38 @@ function influenceLabel(influence: ProfileUsageTrace["influences"][number]): str
           <p v-else-if="turn.error" class="incomplete">{{ turn.error }}</p>
 
           <div v-else-if="turn.outcome" class="a-msg">
-            <div v-if="turn.outcome.answer" class="ans-text md" @mouseup="onAnswerMouseUp(turn)" v-html="props.renderMarkdown(turn.outcome.answer)"></div>
+            <div v-if="answerParts(turn.outcome).length" class="ans-text md" @mouseup="onAnswerMouseUp(turn)">
+              <template v-for="(part, pi) in answerParts(turn.outcome)" :key="pi">
+                <div
+                  v-if="part.kind === 'markdown'"
+                  class="answer-markdown"
+                  :class="markdownPartClass(answerParts(turn.outcome), pi)"
+                  v-html="props.renderMarkdown(part.text)"
+                ></div>
+                <button
+                  v-else
+                  type="button"
+                  class="agent-source-button"
+                  :disabled="!turn.turnId"
+                  @click.stop="openAgentSources(turn, part.source_ref_ids, $event)"
+                >
+                  <BookOpen :size="14" aria-hidden="true" />
+                  <span>{{ sourceButtonLabel(turn.outcome, part.source_ref_ids) }}</span>
+                </button>
+              </template>
+            </div>
             <p v-else class="ans-text">暂无回答。</p>
             <p v-if="turn.outcome.incomplete" class="incomplete">未完成: {{ turn.outcome.warning ?? "上下文不足" }}</p>
 
             <div v-if="turn.outcome.effects.length" class="proposals">
               <p class="prop-h">建议变更</p>
               <div v-for="(eff, ei) in turn.outcome.effects" :key="ei" class="proposal">
-                <span class="prop-label">{{ props.effLabel(eff) }}</span>
+                <span class="prop-label">{{ turn.effectLabels?.[ei] ?? props.effLabel(eff) }}</span>
                 <template v-if="props.effState(ti, ei)">
                   <span class="done">{{ props.effState(ti, ei) }}</span>
                 </template>
                 <template v-else>
-                  <button v-if="props.isGoto(eff)" @click="emit('undo-effect', ti, ei, eff)">返回 {{ props.gotoBack(eff) }}</button>
+                  <button v-if="props.isGoto(eff)" @click="emit('undo-effect', ti, ei, eff)">返回原位置</button>
                   <template v-else>
                     <button v-if="props.showEffectPrimary(eff)" @click="emit('keep-effect', ti, ei, eff)">
                       {{ props.effectPrimaryLabel(eff) }}
@@ -416,8 +554,9 @@ function influenceLabel(influence: ProfileUsageTrace["influences"][number]): str
         <div v-if="props.askDraft" class="ask-draft">
           <div class="ask-draft-head">
             <span>{{ askQuoteLabel(props.askDraft) }}</span>
-            <code>{{ props.askDraft.lid }}</code>
-            <button title="清除引用来源" @click="emit('clear-ask')">×</button>
+            <button title="清除引用来源" aria-label="清除引用来源" @click="emit('clear-ask')">
+              <X :size="14" aria-hidden="true" />
+            </button>
           </div>
           <blockquote>{{ props.askDraft.quote }}</blockquote>
         </div>
@@ -594,15 +733,8 @@ function influenceLabel(influence: ProfileUsageTrace["influences"][number]): str
                 <li v-for="(turn, i) in session.turns" :key="`${session.id}:${i}`">
                   <p class="history-question">{{ compactText(turn.user, 180) }}</p>
                   <div class="history-anchor-row">
-                    <span>锚点</span>
-                    <code>{{ turnAnchor(turn) ?? "无" }}</code>
-                    <button
-                      v-if="turnAnchor(turn)"
-                      class="history-goto"
-                      @click.stop="gotoHistoryAnchor(turnAnchor(turn))"
-                    >
-                      跳转
-                    </button>
+                    <span>来源</span>
+                    <span class="history-source-label">{{ turnSourceLabel(turn) ?? "无" }}</span>
                   </div>
                 </li>
               </ol>
@@ -621,6 +753,68 @@ function influenceLabel(influence: ProfileUsageTrace["influences"][number]): str
             </article>
             <p v-if="props.chatSessions.length === 0" class="empty history-empty">暂无保存的对话历史。</p>
           </div>
+        </section>
+      </div>
+    </Teleport>
+
+    <Teleport to="body">
+      <div
+        v-if="agentSourcePopup"
+        class="agent-source-popup-layer"
+        @mousedown.self="closeAgentSourcePopup"
+      >
+        <section
+          class="agent-source-popup"
+          :style="agentSourcePopupStyle"
+          role="dialog"
+          aria-label="回答来源"
+        >
+          <header class="source-popup-head">
+            <div>
+              <span class="source-popup-kicker">回答来源</span>
+              <strong>{{ activeAgentSource?.label ?? "正在载入来源" }}</strong>
+            </div>
+            <button type="button" title="关闭来源" aria-label="关闭来源" @click="closeAgentSourcePopup">
+              <X :size="16" aria-hidden="true" />
+            </button>
+          </header>
+
+          <div v-if="agentSourcePopup.sources.length > 1" class="source-tabs" role="tablist" aria-label="来源列表">
+            <button
+              v-for="source in agentSourcePopup.sources"
+              :key="source.source_ref_id"
+              type="button"
+              role="tab"
+              :aria-selected="source.source_ref_id === agentSourcePopup.activeSourceRefId"
+              :class="{ active: source.source_ref_id === agentSourcePopup.activeSourceRefId }"
+              @click="selectAgentSource(source.source_ref_id)"
+            >
+              {{ source.label }}
+            </button>
+          </div>
+
+          <div class="source-popup-body">
+            <p v-if="agentSourcePopup.loading" class="source-loading">正在载入...</p>
+            <p v-else-if="agentSourcePopup.error" class="source-error">{{ agentSourcePopup.error }}</p>
+            <template v-else-if="activeAgentSource">
+              <p v-if="activeAgentSource.stale" class="source-stale">该来源已失效，以下为回答生成时保存的内容。</p>
+              <blockquote class="source-context">
+                <span class="source-context-before">{{ activeAgentSource.context_before }}</span><mark class="source-highlight">{{ activeAgentSource.highlighted_quote }}</mark><span class="source-context-after">{{ activeAgentSource.context_after }}</span>
+              </blockquote>
+            </template>
+          </div>
+
+          <footer class="source-popup-actions">
+            <button
+              type="button"
+              class="source-open-reader"
+              :disabled="!activeAgentSource || activeAgentSource.stale || !activeAgentSource.can_open_in_reader || agentSourcePopup.opening"
+              @click="openActiveAgentSourceInReader"
+            >
+              <ExternalLink :size="15" aria-hidden="true" />
+              <span>{{ agentSourcePopup.opening ? "正在打开..." : "在正文中查看" }}</span>
+            </button>
+          </footer>
         </section>
       </div>
     </Teleport>
@@ -903,24 +1097,8 @@ function influenceLabel(influence: ProfileUsageTrace["influences"][number]): str
   color: var(--steel);
   font-size: 0.76rem;
 }
-.history-anchor-row code {
-  border: 1px solid var(--hairline);
-  border-radius: 4px;
-  background: var(--surface);
+.history-source-label {
   color: var(--charcoal);
-  padding: 0.12rem 0.38rem;
-  font-family: var(--mono);
-  font-size: 0.74rem;
-}
-.history-goto {
-  margin-left: auto;
-  border: 1px solid var(--hairline);
-  border-radius: 999px;
-  background: var(--canvas);
-  color: var(--ink);
-  min-height: 36px;
-  padding: 0.36rem 0.78rem;
-  font-size: 0.76rem;
   font-weight: 600;
 }
 .history-card-actions {
@@ -997,6 +1175,41 @@ function influenceLabel(influence: ProfileUsageTrace["influences"][number]): str
   border: 1px solid var(--hairline-soft);
   border-radius: 8px;
   padding: 0.7rem 0.8rem;
+}
+.ans-text {
+  line-height: 1.58;
+}
+.answer-markdown {
+  display: contents;
+}
+.answer-markdown.before-source :deep(p:last-child),
+.answer-markdown.after-source :deep(p:first-child) {
+  display: inline;
+}
+.agent-source-button {
+  min-height: 26px;
+  max-width: 100%;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.28rem;
+  margin: 0 0.2rem 0.15rem;
+  border: 1px solid rgba(33, 112, 214, 0.32);
+  border-radius: 6px;
+  background: rgba(33, 112, 214, 0.08);
+  color: #1764c0;
+  padding: 0.18rem 0.42rem;
+  vertical-align: baseline;
+  font-size: 0.74rem;
+  font-weight: 650;
+  line-height: 1.25;
+}
+.agent-source-button:hover:not(:disabled) {
+  border-color: #1764c0;
+  background: rgba(33, 112, 214, 0.14);
+}
+.agent-source-button span {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 .pending,
 .empty {
@@ -1173,10 +1386,153 @@ function influenceLabel(influence: ProfileUsageTrace["influences"][number]): str
   text-transform: none;
 }
 .ask-draft-head button {
+  margin-left: auto;
   width: 24px;
   height: 24px;
   min-height: 24px;
   padding: 0;
+}
+.agent-source-popup-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 1250;
+}
+.agent-source-popup {
+  position: fixed;
+  width: min(420px, calc(100vw - 24px));
+  max-height: min(620px, calc(100vh - 24px));
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background: var(--canvas);
+  box-shadow: 0 16px 44px rgba(20, 28, 38, 0.22);
+}
+.source-popup-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+  border-bottom: 1px solid var(--hairline-soft);
+  padding: 0.78rem 0.85rem;
+}
+.source-popup-head > div {
+  min-width: 0;
+  display: grid;
+  gap: 0.16rem;
+}
+.source-popup-kicker {
+  color: var(--steel);
+  font-size: 0.7rem;
+  font-weight: 650;
+}
+.source-popup-head strong {
+  overflow-wrap: anywhere;
+  color: var(--ink);
+  font-size: 0.9rem;
+}
+.source-popup-head > button {
+  width: 30px;
+  height: 30px;
+  min-height: 30px;
+  flex: 0 0 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  padding: 0;
+}
+.source-tabs {
+  display: flex;
+  gap: 0.35rem;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--hairline-soft);
+  padding: 0.55rem 0.85rem;
+}
+.source-tabs button {
+  flex: 0 0 auto;
+  min-height: 32px;
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--steel);
+  padding: 0.32rem 0.58rem;
+  font-size: 0.74rem;
+}
+.source-tabs button.active {
+  border-color: #1764c0;
+  background: rgba(33, 112, 214, 0.08);
+  color: #1764c0;
+}
+.source-popup-body {
+  min-height: 8rem;
+  overflow-y: auto;
+  padding: 0.9rem;
+}
+.source-loading,
+.source-error,
+.source-stale {
+  margin: 0;
+  font-size: 0.8rem;
+}
+.source-loading {
+  color: var(--steel);
+}
+.source-error {
+  color: var(--brand-error);
+}
+.source-stale {
+  margin-bottom: 0.65rem;
+  border-left: 3px solid var(--reader-amber);
+  background: rgba(255, 193, 7, 0.1);
+  color: var(--charcoal);
+  padding: 0.48rem 0.58rem;
+}
+.source-context {
+  margin: 0;
+  color: var(--charcoal);
+  font-size: 0.88rem;
+  line-height: 1.72;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.source-highlight {
+  border-radius: 3px;
+  background: rgba(255, 210, 71, 0.48);
+  color: inherit;
+  padding: 0.06rem 0.08rem;
+}
+.source-popup-actions {
+  display: flex;
+  justify-content: flex-end;
+  border-top: 1px solid var(--hairline-soft);
+  padding: 0.7rem 0.85rem;
+}
+.source-open-reader {
+  min-height: 38px;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.38rem;
+  border-color: #1764c0;
+  border-radius: 6px;
+  background: #1764c0;
+  color: #fff;
+  padding: 0.48rem 0.72rem;
+  font-weight: 650;
+}
+.source-open-reader:disabled {
+  border-color: var(--hairline);
+  background: var(--hairline);
+  color: var(--muted);
+}
+
+@media (max-width: 700px) {
+  .agent-source-popup {
+    inset: auto 0 0 !important;
+    width: 100%;
+    max-height: 78dvh;
+    border-radius: 8px 8px 0 0;
+  }
 }
 .ask-draft blockquote {
   margin: 0;

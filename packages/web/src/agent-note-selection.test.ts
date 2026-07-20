@@ -67,7 +67,7 @@ describe("Agent answer selection Note provenance", () => {
     expect(selectionContextForAgentNote({ lid: "1.1", quote: "legacy" })).toBeUndefined();
 
     const app = readFileSync("src/App.vue", "utf8");
-    expect(app).toContain("selectionContextForAgentNote(turn.questionQuote)");
+    expect(app).toContain("selectionContextForAgentNote(turn.questionSelection)");
     expect(app).toContain("selection_context: selectionContext");
   });
 });

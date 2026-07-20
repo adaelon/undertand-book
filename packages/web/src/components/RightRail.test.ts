@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 import { flushPromises, mount } from "@vue/test-utils";
 import { readFileSync } from "node:fs";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import RightRail from "./RightRail.vue";
 
 const baseProps = {
@@ -29,6 +29,265 @@ const baseProps = {
 
 afterEach(() => {
   document.body.replaceChildren();
+  vi.unstubAllGlobals();
+});
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
+function sourceOutcome(stale = false) {
+  return {
+    answer: "First claim. Next claim.",
+    answer_view: {
+      parts: [
+        { kind: "markdown" as const, text: "First claim." },
+        { kind: "sources" as const, source_ref_ids: ["source_ref_a"] },
+        { kind: "markdown" as const, text: " Next claim." },
+        { kind: "sources" as const, source_ref_ids: ["source_ref_a", "source_ref_b"] },
+      ],
+      sources: [
+        { source_ref_id: "source_ref_a", label: "正文 · Methods" },
+        { source_ref_id: "source_ref_b", label: "正文 · Results" },
+      ],
+    },
+    incomplete: false,
+    warning: null,
+    turns: 3,
+    tokens_spent: 12,
+    effects: [{ kind: "Goto" as const, before_anchor: "1.1", after_anchor: "1.2" }],
+    trace: [],
+    profile_usage: {
+      snapshot_revision: 0,
+      injected_fact_ids: [],
+      claimed_used_fact_ids: [],
+      influences: [],
+    },
+    memory_updates: [],
+    stale,
+  };
+}
+
+describe("RightRail agent sources", () => {
+  it("renders inline single and grouped source buttons without visible LIDs", () => {
+    const wrapper = mount(RightRail, {
+      attachTo: document.body,
+      props: {
+        ...baseProps,
+        askDraft: null,
+        chat: [{
+          turnId: "turn-a",
+          user: "question",
+          outcome: sourceOutcome(),
+          pending: false,
+          questionAnchorLid: null,
+          questionQuote: { label: "正文 · Introduction", quote: "quoted text", status: "resolved" },
+          questionSelection: null,
+          effectLabels: ["跳转 · 正文 · Results"],
+        }],
+      },
+    });
+
+    const buttons = wrapper.findAll(".agent-source-button");
+    expect(buttons).toHaveLength(2);
+    expect(buttons[0].text()).toContain("正文 · Methods");
+    expect(buttons[1].text()).toContain("2 个来源");
+    expect(wrapper.get(".turn-quote-head").text()).toContain("正文 · Introduction");
+    expect(wrapper.get(".proposal .prop-label").text()).toBe("跳转 · 正文 · Results");
+    expect(wrapper.get(".agent-panel").text()).not.toContain("1.1");
+    expect(wrapper.get(".agent-panel").text()).not.toContain("1.2");
+  });
+
+  it("resolves on first click and opens the reader only from the secondary action", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      if (url.endsWith("/agent/source.resolve")) {
+        return new Response(JSON.stringify({
+          source_ref_id: body.source_ref_id,
+          label: "正文 · Methods",
+          highlighted_quote: "exact evidence",
+          context_before: "substantial context before",
+          context_after: "substantial context after",
+          stale: false,
+          can_open_in_reader: true,
+        }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ source_ref_id: body.source_ref_id, opened: true }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const wrapper = mount(RightRail, {
+      attachTo: document.body,
+      props: {
+        ...baseProps,
+        askDraft: null,
+        chat: [{
+          turnId: "turn-a",
+          user: "question",
+          outcome: sourceOutcome(),
+          pending: false,
+          questionAnchorLid: null,
+          questionQuote: null,
+          questionSelection: null,
+          effectLabels: [],
+        }],
+      },
+    });
+
+    await wrapper.findAll(".agent-source-button")[0].trigger("click");
+    await flushPromises();
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(fetchMock.mock.calls[0][0])).toContain("/agent/source.resolve");
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toEqual({
+      turn_id: "turn-a",
+      source_ref_id: "source_ref_a",
+    });
+    expect(document.body.querySelector(".agent-source-popup")?.textContent).toContain("exact evidence");
+    expect(document.body.querySelector(".source-context-before")?.textContent).toContain("substantial context before");
+    expect(wrapper.emitted("agent-source-opened")).toBeUndefined();
+
+    const open = document.body.querySelector<HTMLButtonElement>(".source-open-reader")!;
+    open.click();
+    await flushPromises();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(String(fetchMock.mock.calls[1][0])).toContain("/agent/source.open");
+    expect(wrapper.emitted("agent-source-opened")).toHaveLength(1);
+  });
+
+  it("shows stale snapshots and disables reader navigation", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      source_ref_id: "source_ref_a",
+      label: "正文 · Methods",
+      highlighted_quote: "saved preview",
+      context_before: "",
+      context_after: "",
+      stale: true,
+      can_open_in_reader: false,
+    }), { status: 200 })));
+    const wrapper = mount(RightRail, {
+      attachTo: document.body,
+      props: {
+        ...baseProps,
+        askDraft: null,
+        chat: [{
+          turnId: "turn-a",
+          user: "question",
+          outcome: sourceOutcome(true),
+          pending: false,
+          questionAnchorLid: null,
+          questionQuote: null,
+          questionSelection: null,
+          effectLabels: [],
+        }],
+      },
+    });
+
+    await wrapper.findAll(".agent-source-button")[0].trigger("click");
+    await flushPromises();
+
+    expect(document.body.querySelector(".source-stale")?.textContent).toContain("已失效");
+    expect(document.body.querySelector<HTMLButtonElement>(".source-open-reader")?.disabled).toBe(true);
+  });
+
+  it("keeps the newest source click and ignores a superseded late resolve", async () => {
+    const first = deferred<Response>();
+    const second = deferred<Response>();
+    const responses = [first, second];
+    vi.stubGlobal("fetch", vi.fn(() => responses.shift()!.promise));
+    const wrapper = mount(RightRail, {
+      attachTo: document.body,
+      props: {
+        ...baseProps,
+        askDraft: null,
+        chat: [{
+          turnId: "turn-a",
+          user: "question",
+          outcome: sourceOutcome(),
+          pending: false,
+          questionAnchorLid: null,
+          questionQuote: null,
+          questionSelection: null,
+          effectLabels: [],
+        }],
+      },
+    });
+
+    const source = wrapper.findAll(".agent-source-button")[0];
+    await source.trigger("click");
+    await source.trigger("click");
+    second.resolve(new Response(JSON.stringify({
+      source_ref_id: "source_ref_a",
+      label: "new source",
+      highlighted_quote: "new evidence",
+      context_before: "new before",
+      context_after: "new after",
+      stale: false,
+      can_open_in_reader: true,
+    }), { status: 200 }));
+    await flushPromises();
+    expect(document.body.querySelector(".agent-source-popup")?.textContent).toContain("new evidence");
+
+    first.resolve(new Response(JSON.stringify({
+      source_ref_id: "source_ref_a",
+      label: "old source",
+      highlighted_quote: "old evidence",
+      context_before: "old before",
+      context_after: "old after",
+      stale: false,
+      can_open_in_reader: true,
+    }), { status: 200 }));
+    await flushPromises();
+    expect(document.body.querySelector(".agent-source-popup")?.textContent).toContain("new evidence");
+    expect(document.body.querySelector(".agent-source-popup")?.textContent).not.toContain("old evidence");
+  });
+
+  it("does not restore a closed popup or emit navigation after a late open", async () => {
+    const pendingOpen = deferred<Response>();
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input).endsWith("/agent/source.open")) return pendingOpen.promise;
+      return new Response(JSON.stringify({
+        source_ref_id: "source_ref_a",
+        label: "source",
+        highlighted_quote: "evidence",
+        context_before: "before",
+        context_after: "after",
+        stale: false,
+        can_open_in_reader: true,
+      }), { status: 200 });
+    }));
+    const wrapper = mount(RightRail, {
+      attachTo: document.body,
+      props: {
+        ...baseProps,
+        askDraft: null,
+        chat: [{
+          turnId: "turn-a",
+          user: "question",
+          outcome: sourceOutcome(),
+          pending: false,
+          questionAnchorLid: null,
+          questionQuote: null,
+          questionSelection: null,
+          effectLabels: [],
+        }],
+      },
+    });
+
+    await wrapper.findAll(".agent-source-button")[0].trigger("click");
+    await flushPromises();
+    document.body.querySelector<HTMLButtonElement>(".source-open-reader")!.click();
+    await flushPromises();
+    document.body.querySelector<HTMLButtonElement>('.source-popup-head button[aria-label="关闭来源"]')!.click();
+    await flushPromises();
+    pendingOpen.resolve(new Response(JSON.stringify({ source_ref_id: "source_ref_a", opened: true }), { status: 200 }));
+    await flushPromises();
+
+    expect(document.body.querySelector(".agent-source-popup")).toBeNull();
+    expect(wrapper.emitted("agent-source-opened")).toBeUndefined();
+  });
 });
 
 describe("RightRail AskQuote", () => {
@@ -54,11 +313,14 @@ describe("RightRail AskQuote", () => {
     await wrapper.setProps({
       askDraft: null,
       chat: [{
+        turnId: null,
         user: "question",
         outcome: null,
         pending: false,
         questionAnchorLid: "1.1",
-        questionQuote: partial,
+        questionQuote: { label: "部分定位引用", quote: partial.quote, status: partial.status },
+        questionSelection: partial,
+        effectLabels: [],
       }],
     });
     expect(wrapper.get(".turn-quote").text()).toContain("部分定位");
@@ -140,11 +402,14 @@ describe("RightRail AskQuote", () => {
         askDraft: null,
         profileMemory,
         chat: [{
+          turnId: null,
           user: "remember this",
           pending: false,
           error: undefined,
           questionAnchorLid: "1.1",
           questionQuote: null,
+          questionSelection: null,
+          effectLabels: [],
           outcome: {
             answer: "done",
             incomplete: false,

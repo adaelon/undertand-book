@@ -15,6 +15,7 @@ flowchart LR
 - **server::host** owns sockets, worker threads, the global `AppState` mutex, Provider configuration snapshots, and lock boundaries.
 - **AppState** owns the active immutable `Book` plus mutable Reader, memory, and Agent session state.
 - **runtime::ProviderRegistry** constructs Native/ReAct model adapters; timeout-bound adapters apply the supplied duration to the actual HTTP request.
+- **read-tools source resolver** validates internal evidence ranges against canonical UTF-16 text and derives deterministic labels, previews, digests, and bounded local context. It does not alter any public `book.*` result.
 
 ## Major Data Flows
 
@@ -43,8 +44,31 @@ The web translation controller follows `IDLE -> LOADING -> READY | ERROR`. Every
 
 The translation surface is a sibling of the native PDF selection toolbar rather than part of its layout. On desktop it uses the frozen selection screen rectangle, clamps horizontally, and flips above the selection when there is insufficient space below. At narrow widths it becomes a viewport-bound bottom sheet. The original selection and toolbar remain visible in `READY`; while `LOADING`, existing selection actions are disabled but both the translation close action and the selection close action remain available.
 
+User-visible Agent sources begin with a deterministic read-tools projection:
+
+```text
+internal EvidenceRange
+  -> validate real leaf reading order and UTF-16 subranges
+  -> preserve continuous canonical text, including structural headings
+  -> choose the smallest common chapter/section context boundary
+  -> derive original-language heading path + localized kind
+  -> compute preview + stable evidence digest
+  -> ResolvedSource
+```
+
+Runtime now owns a per-turn evidence ledger around the common post-dispatch/pre-Tool-message point. Only server-validated selection ranges, gated `book.query` citations, filtered `book.synthesize` citations, and successful `book.text` reads enter the ledger. `source.present` can select only a covered continuous subset and creates a Rust-only `SourceBinding`; context, route, Reader state, failed tools, and arbitrary LIDs never enter the ledger. The binding is deliberately skipped by current `OuterOutcome` serialization until SR4 introduces a separate durable server contract.
+
+Final Agent prose passes through a shared Native/ReAct compiler before delivery. Controlled `[[source:<ref>]]` markers become typed Markdown/source parts, adjacent refs collapse into one source part, and unused temporary bindings are discarded. The compiler rejects unknown or cross-turn refs, malformed markers, and raw internal LIDs. One request-only, tool-free repair is allowed; a second invalid candidate is replaced by a typed fail-closed answer. Durable provider messages contain only the marker-free compatibility answer, while `answer_view` carries the opaque typed projection.
+
+Server history now separates its durable model from public Agent views. Each completed internal turn owns the pruned `SourceBinding` records needed for replay, but `AgentChatTurnView` exposes only opaque answer refs, semantic question labels, compact question quote data, and semantic effect labels. `/agent/source.resolve` revalidates the stored digest against the active canonical book; a mismatch returns only label/preview snapshots with navigation disabled. `/agent/source.open` repeats the same validation and performs the Reader command server-side, so the source API never accepts or returns a LID.
+
+`RightRail` renders `AgentAnswerView.parts` in order, placing a compact blue button directly after the Markdown span it supports. A single ref uses its deterministic semantic label; adjacent refs are one count button. The first click sends only `(turn_id, source_ref_id)` to `/agent/source.resolve` and leaves the Reader untouched. Desktop uses a viewport-clamped anchored dialog; screens at 700px or below use a viewport-bound bottom sheet. The dialog highlights the exact canonical evidence inside continuous bounded context, and only its explicit `source.open` action synchronizes the main Reader. A monotonically increasing request sequence prevents a late resolve/open response from restoring a closed or superseded popup. Question quote headers, effect rows, and history summaries consume semantic server labels; raw effect data remains available only to existing commands and the explicitly excluded trace surface.
+
+Legacy Agent answers are adapted only in the read path. A conservative Markdown-aware scanner recognizes the historical `[LID: real.node]` citation shape only outside fenced, indented, inline, and raw HTML code, escaped text, links, images, and reference definitions. It verifies the candidate against the active canonical book, derives a deterministic opaque ref, and builds the same typed answer view without mutating history. Bare numbers, invalid nodes, and ambiguous prose remain byte-for-byte visible. The source endpoints reconstruct the same temporary binding from turn/ref, so restart replay is stable; changing books or deleting the owning history makes the ref unavailable. Since old turns never stored a digest snapshot, this compatibility path intentionally binds only to a currently valid explicit node and does not invent stale recovery.
+
 ## Decision Index
 
+- **Runtime-owned user-visible source references**: [ADR-0086](adr/0086-runtime-owned-user-visible-source-references.md).
 - **PDF text-layer native selection lifecycle**: [ADR-0080](adr/0080-pdf-text-layer-native-selection-lifecycle.md).
 - **PDF selection mapping stability**: [ADR-0079](adr/0079-pdf-selection-banded-reading-order-and-conservative-resynchronization.md).
 - **PDF selection translation boundary**: [ADR-0078](adr/0078-pdf-selection-translation-ephemeral-lock-free-bilingual-projection.md).

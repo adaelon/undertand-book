@@ -7,6 +7,12 @@
 书的语义单元 URI 方案。深度可变的有序路径(层级随书真实结构而定),硬保证:① 全局唯一 ② 同级有序(可计算前后/邻接)③ 可双向跳原文。下游不得假设固定段数。
 状态:EXISTING(源自 需求文档-V2 §3.1)。
 
+## 用户可见来源引用 (user-visible source reference)
+普通用户在 Agent 对话和来源交互中看到的证据指代。它在系统内部绑定真实 LID,对外只表达可理解的来源标签、内容预览与精确跳转能力;标签必须由真实书树、节点类型与原文确定性派生,不由 LLM 自由命名。Agent 可以不产生来源;一旦产生,普通界面必须只消费 opaque ref 和用户标签。原始 LID 不属于普通用户界面,只可在显式诊断上下文中查看。来源呈现是受强制的边界契约,不依赖 Agent 自觉隐藏 LID。状态:NEW(见 [ADR-0086](docs/adr/0086-runtime-owned-user-visible-source-references.md))。
+
+## 本轮证据账本 (turn evidence ledger)
+Resident Agent 在当前用户回合内实际观察且通过现有结构闸的连续证据段集合。条目只来自用户已验证选区或证据型读取结果;视口、导航候选、错误恢复提示等仅含 LID 的状态不是证据。用户可见来源引用只能绑定本账本中的条目;账本随回合结束,不构成新的持久真相源。状态:NEW(见 [ADR-0086](docs/adr/0086-runtime-owned-user-visible-source-references.md))。
+
 ## 锚定 (anchor)
 节点 / 边 / 引用必须绑定到**真实存在的 LID**。基数按类型分裂 `[ADR-0010]`:**实体 / 概念锚定一个或多个 LID**(`occurrences`,贯穿全书的身份),**断言 / 引用锚定单个 LID**(`source_lid`)。未锚定或锚定到不存在 LID 的对象,一律由确定性闸丢弃。`citations[]` 只放真 LID 即此义。
 

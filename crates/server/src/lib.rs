@@ -18,8 +18,9 @@ use memory::{
     SelectionResolution, Sensitivity, SnapshotContext, SnapshotRequest,
 };
 use read_tools::{
-    Book, ContentProfileId, PaperLandmarkKind, PaperLexiconEntry, PaperMinimapBase,
-    PaperRegionKind, ReaderLayoutAction, ToolError,
+    disambiguate_source_labels, Book, ContentProfileId, EvidenceRange, PaperLandmarkKind,
+    PaperLexiconEntry, PaperMinimapBase, PaperRegionKind, ReaderLayoutAction, ResolvedSource,
+    SourceSelectedRange, SourceTextRange, ToolError,
 };
 use reader::{
     project_paper_minimap_lens, PaperMinimapActor, PaperMinimapApplyOutcome, PaperMinimapCommand,
@@ -32,8 +33,9 @@ use runtime::memory_policy::{
     MemoryPolicyRegistry, PaperPolicyContext, PolicyProjectionInput, PAPER_MEMORY_POLICY_ID,
 };
 use runtime::orchestrator::{
-    new_session, run_with_ephemeral_context, OuterConfig, OuterOutcome, ProfileMemoryUpdate,
-    ProfileMemoryUpdateKind, ProfileUsageTrace,
+    new_session, run_with_ephemeral_context, AgentAnswerPart, AgentAnswerSource, AgentAnswerView,
+    AgentEffect, OuterConfig, OuterOutcome, ProfileMemoryUpdate, ProfileMemoryUpdateKind,
+    ProfileUsageTrace, SourceBinding,
 };
 use runtime::profile_api::{
     historical_backfill_job_view, profile_governance_outcome_view, HistoricalBackfillJobRequest,
@@ -822,6 +824,8 @@ pub struct AgentChatTurn {
     pub error: Option<AgentTurnError>,
     pub question_anchor_lid: Option<String>,
     pub question_quote: Option<AskQuote>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_bindings: Vec<SourceBinding>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -851,10 +855,18 @@ pub struct AgentHistory {
 }
 
 #[derive(Debug, serde::Serialize)]
+pub struct AgentQuestionQuoteView {
+    pub label: String,
+    pub quote: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<SelectionResolution>,
+}
+
+#[derive(Debug, serde::Serialize)]
 pub struct AgentChatTurnSummary {
     pub user: String,
-    pub question_anchor_lid: Option<String>,
-    pub question_quote: Option<AskQuote>,
+    pub question_source_label: Option<String>,
+    pub question_quote: Option<AgentQuestionQuoteView>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -868,13 +880,28 @@ pub struct AgentChatSessionSummary {
 }
 
 #[derive(Debug, serde::Serialize)]
+pub struct AgentChatTurnView {
+    pub turn_id: String,
+    pub user_turn_ordinal: u64,
+    pub user: String,
+    pub status: AgentAssistantStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<OuterOutcome>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<AgentTurnError>,
+    pub question_source_label: Option<String>,
+    pub question_quote: Option<AgentQuestionQuoteView>,
+    pub effect_labels: Vec<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
 pub struct AgentChatSessionView {
     pub id: String,
     pub book_id: String,
     pub title: String,
     pub created_at: String,
     pub updated_at: String,
-    pub turns: Vec<AgentChatTurn>,
+    pub turns: Vec<AgentChatTurnView>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -882,6 +909,30 @@ pub struct AgentHistoryResponse {
     pub active_session_id: String,
     pub sessions: Vec<AgentChatSessionSummary>,
     pub current: AgentChatSessionView,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AgentSourceRequest {
+    turn_id: String,
+    source_ref_id: String,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct SourcePopupView {
+    pub source_ref_id: String,
+    pub label: String,
+    pub highlighted_quote: String,
+    pub context_before: String,
+    pub context_after: String,
+    pub stale: bool,
+    pub can_open_in_reader: bool,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct SourceOpenView {
+    pub source_ref_id: String,
+    pub opened: bool,
 }
 
 fn compact_title(text: &str) -> String {
@@ -935,6 +986,19 @@ fn validate_agent_turn(turn: &AgentChatTurn) -> Result<(), ToolError> {
             turn.turn_id
         )));
     }
+    let mut source_refs = HashSet::new();
+    for binding in &turn.source_bindings {
+        if binding.source_ref_id.trim().is_empty()
+            || binding.book_id.trim().is_empty()
+            || binding.evidence_text_digest.trim().is_empty()
+            || !source_refs.insert(binding.source_ref_id.as_str())
+        {
+            return Err(agent_history_internal(format!(
+                "agent turn {} has invalid source bindings",
+                turn.turn_id
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -973,6 +1037,16 @@ fn validate_agent_history(history: &AgentHistory) -> Result<(), ToolError> {
         }
         for turn in &session.turns {
             validate_agent_turn(turn)?;
+            if turn
+                .source_bindings
+                .iter()
+                .any(|binding| binding.book_id != session.book_id)
+            {
+                return Err(agent_history_internal(format!(
+                    "agent turn {} source binding belongs to another book",
+                    turn.turn_id
+                )));
+            }
             if !turn_ids.insert(turn.turn_id.clone()) {
                 return Err(agent_history_internal(format!(
                     "duplicate agent turn_id: {}",
@@ -1179,6 +1253,7 @@ fn precommit_agent_turn(
         error: None,
         question_anchor_lid,
         question_quote,
+        source_bindings: Vec::new(),
     });
     let turn_ref = AgentTurnRef {
         session_id: session.id.clone(),
@@ -1195,7 +1270,7 @@ fn finalize_agent_turn(
     state: &mut AppState,
     turn_ref: &AgentTurnRef,
     status: AgentAssistantStatus,
-    outcome: Option<OuterOutcome>,
+    mut outcome: Option<OuterOutcome>,
     error: Option<AgentTurnError>,
     now: &str,
 ) -> Result<(), ToolError> {
@@ -1217,6 +1292,10 @@ fn finalize_agent_turn(
         )));
     }
     turn.status = status;
+    turn.source_bindings = outcome
+        .as_mut()
+        .map(|outcome| std::mem::take(&mut outcome.source_bindings))
+        .unwrap_or_default();
     turn.outcome = outcome;
     turn.error = error;
     validate_agent_turn(turn)?;
@@ -1319,18 +1398,496 @@ pub fn ensure_agent_history_for_book(
     history.sessions[i].messages.clone()
 }
 
-fn session_view(s: &AgentChatSession) -> AgentChatSessionView {
+#[derive(Debug)]
+struct LegacyLidMarker {
+    start: usize,
+    end: usize,
+    lid: String,
+}
+
+#[derive(Debug)]
+struct LegacyAnswerProjection {
+    answer: String,
+    view: AgentAnswerView,
+    bindings: Vec<SourceBinding>,
+}
+
+fn markdown_fence_marker(line: &str) -> Option<(u8, usize, &str)> {
+    let bytes = line.as_bytes();
+    let mut indent = 0;
+    while indent < bytes.len() && indent < 4 && bytes[indent] == b' ' {
+        indent += 1;
+    }
+    if indent > 3 || indent >= bytes.len() || !matches!(bytes[indent], b'`' | b'~') {
+        return None;
+    }
+    let marker = bytes[indent];
+    let mut end = indent;
+    while end < bytes.len() && bytes[end] == marker {
+        end += 1;
+    }
+    let count = end - indent;
+    (count >= 3).then(|| (marker, count, &line[end..]))
+}
+
+fn markdown_fenced_code_ranges(markdown: &str) -> Vec<std::ops::Range<usize>> {
+    let mut ranges = Vec::new();
+    let mut fence: Option<(usize, u8, usize)> = None;
+    let mut offset = 0;
+    for line_with_ending in markdown.split_inclusive('\n') {
+        let line_end = offset + line_with_ending.len();
+        let line = line_with_ending
+            .strip_suffix('\n')
+            .unwrap_or(line_with_ending);
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        if let Some((start, marker, minimum)) = fence {
+            if markdown_fence_marker(line).is_some_and(|(candidate, count, rest)| {
+                candidate == marker && count >= minimum && rest.trim().is_empty()
+            }) {
+                ranges.push(start..line_end);
+                fence = None;
+            }
+        } else if let Some((marker, count, _)) = markdown_fence_marker(line) {
+            fence = Some((offset, marker, count));
+        }
+        offset = line_end;
+    }
+    if let Some((start, _, _)) = fence {
+        ranges.push(start..markdown.len());
+    }
+    ranges
+}
+
+fn markdown_indented_code_ranges(markdown: &str) -> Vec<std::ops::Range<usize>> {
+    let mut ranges = Vec::new();
+    let mut block_start = None;
+    let mut offset = 0;
+    for line_with_ending in markdown.split_inclusive('\n') {
+        let line_end = offset + line_with_ending.len();
+        let line = line_with_ending
+            .strip_suffix('\n')
+            .unwrap_or(line_with_ending);
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        let leading_spaces = line.bytes().take_while(|byte| *byte == b' ').count();
+        let is_indented = line.starts_with('\t') || leading_spaces >= 4;
+        if is_indented {
+            block_start.get_or_insert(offset);
+        } else if !line.trim().is_empty() {
+            if let Some(start) = block_start.take() {
+                ranges.push(start..offset);
+            }
+        }
+        offset = line_end;
+    }
+    if let Some(start) = block_start {
+        ranges.push(start..markdown.len());
+    }
+    ranges
+}
+
+fn markdown_html_code_ranges(markdown: &str) -> Vec<std::ops::Range<usize>> {
+    let lower = markdown.to_ascii_lowercase();
+    let mut ranges = Vec::new();
+    for tag in ["code", "pre"] {
+        let open_prefix = format!("<{tag}");
+        let close_prefix = format!("</{tag}");
+        let mut cursor = 0;
+        while let Some(relative_start) = lower[cursor..].find(&open_prefix) {
+            let start = cursor + relative_start;
+            let after_name = start + open_prefix.len();
+            if !lower[after_name..]
+                .chars()
+                .next()
+                .is_some_and(|character| character == '>' || character.is_ascii_whitespace())
+            {
+                cursor = after_name;
+                continue;
+            }
+            let Some(relative_open_end) = lower[after_name..].find('>') else {
+                ranges.push(start..markdown.len());
+                break;
+            };
+            let content_start = after_name + relative_open_end + 1;
+            let Some(relative_close) = lower[content_start..].find(&close_prefix) else {
+                ranges.push(start..markdown.len());
+                break;
+            };
+            let close_start = content_start + relative_close;
+            let close_after_name = close_start + close_prefix.len();
+            let Some(relative_close_end) = lower[close_after_name..].find('>') else {
+                ranges.push(start..markdown.len());
+                break;
+            };
+            let end = close_after_name + relative_close_end + 1;
+            ranges.push(start..end);
+            cursor = end;
+        }
+    }
+    ranges
+}
+
+fn range_containing(
+    ranges: &[std::ops::Range<usize>],
+    index: usize,
+) -> Option<&std::ops::Range<usize>> {
+    ranges
+        .iter()
+        .find(|range| range.start <= index && index < range.end)
+}
+
+fn markdown_inline_code_ranges(
+    markdown: &str,
+    fenced: &[std::ops::Range<usize>],
+) -> Vec<std::ops::Range<usize>> {
+    let bytes = markdown.as_bytes();
+    let mut ranges = Vec::new();
+    let mut cursor = 0;
+    while cursor < bytes.len() {
+        if let Some(range) = range_containing(fenced, cursor) {
+            cursor = range.end;
+            continue;
+        }
+        if bytes[cursor] != b'`' {
+            cursor += 1;
+            continue;
+        }
+        let start = cursor;
+        while cursor < bytes.len() && bytes[cursor] == b'`' {
+            cursor += 1;
+        }
+        let delimiter_len = cursor - start;
+        let mut probe = cursor;
+        let mut close = None;
+        while probe < bytes.len() {
+            if let Some(range) = range_containing(fenced, probe) {
+                probe = range.end;
+                continue;
+            }
+            if bytes[probe] != b'`' {
+                probe += 1;
+                continue;
+            }
+            let run_start = probe;
+            while probe < bytes.len() && bytes[probe] == b'`' {
+                probe += 1;
+            }
+            if probe - run_start == delimiter_len {
+                close = Some(probe);
+                break;
+            }
+        }
+        if let Some(end) = close {
+            ranges.push(start..end);
+            cursor = end;
+        }
+    }
+    ranges
+}
+
+fn marker_is_escaped(markdown: &str, start: usize) -> bool {
+    markdown[..start]
+        .chars()
+        .rev()
+        .take_while(|character| *character == '\\')
+        .count()
+        % 2
+        == 1
+}
+
+fn explicit_lid_marker(markdown: &str, start: usize) -> Option<(usize, String)> {
+    if markdown.as_bytes().get(start) != Some(&b'[') || marker_is_escaped(markdown, start) {
+        return None;
+    }
+    if markdown[..start].chars().next_back() == Some('!') {
+        return None;
+    }
+    let relative_end = markdown[start + 1..].find(']')?;
+    let end = start + 1 + relative_end + 1;
+    if end - start > 80 || markdown[start + 1..end - 1].contains(['\r', '\n']) {
+        return None;
+    }
+    let content = markdown[start + 1..end - 1].trim();
+    let prefix = content.get(..3)?;
+    if !prefix.eq_ignore_ascii_case("lid") {
+        return None;
+    }
+    let after_prefix = content[3..].trim_start();
+    let lid = after_prefix
+        .strip_prefix(':')
+        .or_else(|| after_prefix.strip_prefix('：'))?
+        .trim();
+    if lid.is_empty()
+        || !lid
+            .split('.')
+            .all(|component| !component.is_empty() && component.chars().all(|c| c.is_ascii_digit()))
+    {
+        return None;
+    }
+    let following = markdown[end..].trim_start();
+    if following.starts_with(['(', '[', ':', '：']) {
+        return None;
+    }
+    Some((end, lid.into()))
+}
+
+fn legacy_lid_markers(markdown: &str, book: &Book) -> Vec<LegacyLidMarker> {
+    let fenced = markdown_fenced_code_ranges(markdown);
+    let mut protected = fenced.clone();
+    protected.extend(markdown_inline_code_ranges(markdown, &fenced));
+    protected.extend(markdown_indented_code_ranges(markdown));
+    protected.extend(markdown_html_code_ranges(markdown));
+    protected.sort_by_key(|range| range.start);
+
+    let mut markers = Vec::new();
+    let mut cursor = 0;
+    while cursor < markdown.len() {
+        let Some(relative_start) = markdown[cursor..].find('[') else {
+            break;
+        };
+        let start = cursor + relative_start;
+        if let Some(range) = range_containing(&protected, start) {
+            cursor = range.end;
+            continue;
+        }
+        let Some((end, lid)) = explicit_lid_marker(markdown, start) else {
+            cursor = start + 1;
+            continue;
+        };
+        let evidence = EvidenceRange {
+            start_lid: lid.clone(),
+            end_lid: lid.clone(),
+            ranges: Vec::new(),
+        };
+        if book.resolve_source(&evidence, "zh-CN", None).is_ok() {
+            markers.push(LegacyLidMarker { start, end, lid });
+        }
+        cursor = end;
+    }
+    markers
+}
+
+fn stable_legacy_source_ref(turn_id: &str, lid: &str) -> String {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in format!("{turn_id}\u{1f}{lid}").bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("legacy_source_{hash:016x}")
+}
+
+fn push_legacy_markdown(parts: &mut Vec<AgentAnswerPart>, text: &str) {
+    if text.is_empty() {
+        return;
+    }
+    if let Some(AgentAnswerPart::Markdown { text: previous }) = parts.last_mut() {
+        previous.push_str(text);
+    } else {
+        parts.push(AgentAnswerPart::Markdown { text: text.into() });
+    }
+}
+
+fn legacy_answer_projection(
+    turn_id: &str,
+    outcome: &OuterOutcome,
+    book: &Book,
+) -> Option<LegacyAnswerProjection> {
+    if outcome.answer_view.is_some() {
+        return None;
+    }
+    let raw = outcome.answer.as_deref()?;
+    let markers = legacy_lid_markers(raw, book);
+    if markers.is_empty() {
+        return None;
+    }
+
+    let mut lids = Vec::<String>::new();
+    let mut resolved = Vec::<ResolvedSource>::new();
+    for marker in &markers {
+        if lids.contains(&marker.lid) {
+            continue;
+        }
+        let evidence = EvidenceRange {
+            start_lid: marker.lid.clone(),
+            end_lid: marker.lid.clone(),
+            ranges: Vec::new(),
+        };
+        let source = book
+            .resolve_source(&evidence, "zh-CN", None)
+            .expect("legacy markers were validated against the same immutable book");
+        lids.push(marker.lid.clone());
+        resolved.push(source);
+    }
+    disambiguate_source_labels(&mut resolved);
+
+    let mut sources = Vec::with_capacity(lids.len());
+    let mut bindings = Vec::with_capacity(lids.len());
+    for (lid, source) in lids.iter().zip(&resolved) {
+        let source_ref_id = stable_legacy_source_ref(turn_id, lid);
+        sources.push(AgentAnswerSource {
+            source_ref_id: source_ref_id.clone(),
+            label: source.label.clone(),
+        });
+        bindings.push(SourceBinding {
+            source_ref_id,
+            book_id: book.base.book_id.clone(),
+            evidence_range: EvidenceRange {
+                start_lid: lid.clone(),
+                end_lid: lid.clone(),
+                ranges: Vec::new(),
+            },
+            evidence_text_digest: source.evidence_text_digest.clone(),
+            label_snapshot: source.label.clone(),
+            preview_snapshot: source.preview.clone(),
+        });
+    }
+
+    let mut answer = String::new();
+    let mut parts = Vec::new();
+    let mut cursor = 0;
+    for marker in markers {
+        let markdown = &raw[cursor..marker.start];
+        answer.push_str(markdown);
+        let source_ref_id = stable_legacy_source_ref(turn_id, &marker.lid);
+        let merge_with_previous = markdown.trim().is_empty()
+            && matches!(parts.last(), Some(AgentAnswerPart::Sources { .. }));
+        if merge_with_previous {
+            if let Some(AgentAnswerPart::Sources { source_ref_ids }) = parts.last_mut() {
+                if !source_ref_ids.contains(&source_ref_id) {
+                    source_ref_ids.push(source_ref_id);
+                }
+            }
+        } else {
+            push_legacy_markdown(&mut parts, markdown);
+            parts.push(AgentAnswerPart::Sources {
+                source_ref_ids: vec![source_ref_id],
+            });
+        }
+        cursor = marker.end;
+    }
+    let tail = &raw[cursor..];
+    answer.push_str(tail);
+    push_legacy_markdown(&mut parts, tail);
+    Some(LegacyAnswerProjection {
+        answer,
+        view: AgentAnswerView { parts, sources },
+        bindings,
+    })
+}
+
+fn agent_location_label(book: &Book, lid: &str) -> Option<String> {
+    book.resolve_source(
+        &EvidenceRange {
+            start_lid: lid.into(),
+            end_lid: lid.into(),
+            ranges: Vec::new(),
+        },
+        "zh-CN",
+        None,
+    )
+    .ok()
+    .map(|source| source.label)
+}
+
+fn question_quote_view(book: &Book, quote: &AskQuote) -> AgentQuestionQuoteView {
+    let evidence = verified_question_evidence(book, Some(quote));
+    let mut labels: Vec<_> = evidence
+        .iter()
+        .filter_map(|range| book.resolve_source(range, "zh-CN", None).ok())
+        .map(|source| source.label)
+        .collect();
+    labels.dedup();
+    let label = match labels.len() {
+        0 => agent_location_label(book, &quote.lid).unwrap_or_else(|| "引用来源".into()),
+        1 => labels.pop().expect("length checked"),
+        count => format!("{count} 个来源"),
+    };
+    AgentQuestionQuoteView {
+        label,
+        quote: quote.quote.clone(),
+        status: quote.status,
+    }
+}
+
+fn question_source_label(book: &Book, turn: &AgentChatTurn) -> Option<String> {
+    turn.question_quote
+        .as_ref()
+        .map(|quote| question_quote_view(book, quote).label)
+        .or_else(|| {
+            turn.question_anchor_lid
+                .as_deref()
+                .and_then(|lid| agent_location_label(book, lid))
+        })
+}
+
+fn agent_effect_label(book: &Book, effect: &AgentEffect) -> String {
+    let with_location = |command: &str, lid: &str| {
+        agent_location_label(book, lid)
+            .map(|label| format!("{command} · {label}"))
+            .unwrap_or_else(|| command.into())
+    };
+    match effect {
+        AgentEffect::Goto { after_anchor, .. } => with_location("跳转", after_anchor),
+        AgentEffect::Highlight { lid, .. } => with_location("高亮", lid),
+        AgentEffect::Note { lid, .. } => with_location("笔记", lid),
+        AgentEffect::Layout { .. } => "阅读布局".into(),
+        AgentEffect::LayoutProposal { .. } => "布局建议".into(),
+        AgentEffect::PaperMinimap { .. } => "论文地图".into(),
+        AgentEffect::PaperMinimapProposal { .. } => "论文地图建议".into(),
+    }
+}
+
+fn turn_view(book: &Book, turn: &AgentChatTurn) -> AgentChatTurnView {
+    let question_quote = turn
+        .question_quote
+        .as_ref()
+        .map(|quote| question_quote_view(book, quote));
+    let question_source_label = question_quote
+        .as_ref()
+        .map(|quote| quote.label.clone())
+        .or_else(|| question_source_label(book, turn));
+    let effect_labels = turn
+        .outcome
+        .as_ref()
+        .map(|outcome| {
+            outcome
+                .effects
+                .iter()
+                .map(|effect| agent_effect_label(book, effect))
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut outcome = turn.outcome.clone();
+    if let Some(public_outcome) = outcome.as_mut() {
+        if let Some(legacy) = legacy_answer_projection(&turn.turn_id, public_outcome, book) {
+            public_outcome.answer = Some(legacy.answer);
+            public_outcome.answer_view = Some(legacy.view);
+        }
+    }
+    AgentChatTurnView {
+        turn_id: turn.turn_id.clone(),
+        user_turn_ordinal: turn.user_turn_ordinal,
+        user: turn.user.clone(),
+        status: turn.status,
+        outcome,
+        error: turn.error.clone(),
+        question_source_label,
+        question_quote,
+        effect_labels,
+    }
+}
+
+fn session_view(s: &AgentChatSession, book: &Book) -> AgentChatSessionView {
     AgentChatSessionView {
         id: s.id.clone(),
         book_id: s.book_id.clone(),
         title: s.title.clone(),
         created_at: s.created_at.clone(),
         updated_at: s.updated_at.clone(),
-        turns: s.turns.clone(),
+        turns: s.turns.iter().map(|turn| turn_view(book, turn)).collect(),
     }
 }
 
-fn session_summary(s: &AgentChatSession) -> AgentChatSessionSummary {
+fn session_summary(s: &AgentChatSession, book: &Book) -> AgentChatSessionSummary {
     AgentChatSessionSummary {
         id: s.id.clone(),
         title: s.title.clone(),
@@ -1342,8 +1899,11 @@ fn session_summary(s: &AgentChatSession) -> AgentChatSessionSummary {
             .iter()
             .map(|t| AgentChatTurnSummary {
                 user: t.user.clone(),
-                question_anchor_lid: t.question_anchor_lid.clone(),
-                question_quote: t.question_quote.clone(),
+                question_source_label: question_source_label(book, t),
+                question_quote: t
+                    .question_quote
+                    .as_ref()
+                    .map(|quote| question_quote_view(book, quote)),
             })
             .collect(),
     }
@@ -1369,20 +1929,21 @@ fn active_agent_session_index(history: &AgentHistory, book_id: &str) -> Option<u
 
 fn agent_history_response(
     history: &AgentHistory,
-    book_id: &str,
+    book: &Book,
 ) -> Result<AgentHistoryResponse, ToolError> {
+    let book_id = book.base.book_id.as_str();
     let i = active_agent_session_index(history, book_id).ok_or_else(|| {
         agent_history_internal(format!(
             "agent history has no session for current book: {book_id}"
         ))
     })?;
     let active_session_id = history.sessions[i].id.clone();
-    let current = session_view(&history.sessions[i]);
+    let current = session_view(&history.sessions[i], book);
     let mut sessions: Vec<AgentChatSessionSummary> = history
         .sessions
         .iter()
         .filter(|session| session.book_id == book_id)
-        .map(session_summary)
+        .map(|session| session_summary(session, book))
         .collect();
     sessions.sort_by(|a, b| {
         b.updated_at
@@ -1657,8 +2218,7 @@ pub fn route(state: &mut AppState, req: Req) -> Reply {
         if req.method != "GET" {
             return agent_history_method_not_allowed();
         }
-        let book_id = state.book.base.book_id.as_str();
-        return match agent_history_response(&state.agent_history, book_id) {
+        return match agent_history_response(&state.agent_history, &state.book) {
             Ok(response) => ok_json(&response),
             Err(error) => err_reply(&error),
         };
@@ -1674,6 +2234,18 @@ pub fn route(state: &mut AppState, req: Req) -> Reply {
             return agent_method_not_allowed();
         }
         return route_agent_history_delete(state, req.body, req.now);
+    }
+    if path == "/agent/source.resolve" {
+        if req.method != "POST" {
+            return agent_method_not_allowed();
+        }
+        return route_agent_source_resolve(state, req.body);
+    }
+    if path == "/agent/source.open" {
+        if req.method != "POST" {
+            return agent_method_not_allowed();
+        }
+        return route_agent_source_open(state, req.body, req.now);
     }
     if path == "/agent/chat" {
         if req.method != "POST" {
@@ -7696,6 +8268,49 @@ fn parse_question_quote(v: &serde_json::Value, book: &Book) -> Result<Option<Ask
     }))
 }
 
+fn verified_question_evidence(book: &Book, quote: Option<&AskQuote>) -> Vec<EvidenceRange> {
+    let Some(ranges) = quote.and_then(|quote| quote.ranges.as_ref()) else {
+        return Vec::new();
+    };
+    let mut evidence = Vec::new();
+    let mut current: Option<EvidenceRange> = None;
+    for selected in ranges {
+        let source_range = SourceSelectedRange {
+            lid: selected.lid.clone(),
+            range: SourceTextRange {
+                start: selected.range.start,
+                end: selected.range.end,
+            },
+        };
+        let mut candidate = current.clone().unwrap_or_else(|| EvidenceRange {
+            start_lid: selected.lid.clone(),
+            end_lid: selected.lid.clone(),
+            ranges: Vec::new(),
+        });
+        candidate.end_lid = selected.lid.clone();
+        candidate.ranges.push(source_range.clone());
+        if book.resolve_source(&candidate, "zh-CN", None).is_ok() {
+            current = Some(candidate);
+            continue;
+        }
+        if let Some(previous) = current.take() {
+            evidence.push(previous);
+        }
+        let single = EvidenceRange {
+            start_lid: selected.lid.clone(),
+            end_lid: selected.lid.clone(),
+            ranges: vec![source_range],
+        };
+        if book.resolve_source(&single, "zh-CN", None).is_ok() {
+            current = Some(single);
+        }
+    }
+    if let Some(current) = current {
+        evidence.push(current);
+    }
+    evidence
+}
+
 fn agent_question_with_provenance(message: &str, quote: Option<&AskQuote>) -> String {
     let Some(quote) = quote else {
         return message.to_string();
@@ -7900,6 +8515,7 @@ fn rejected_memory_outcome(
 ) -> OuterOutcome {
     OuterOutcome {
         answer: Some(message.into()),
+        answer_view: None,
         incomplete: false,
         warning: Some(error_code.into()),
         turns: 0,
@@ -7918,6 +8534,7 @@ fn rejected_memory_outcome(
             fact_ids: Vec::new(),
             message: Some(message.into()),
         }],
+        source_bindings: Vec::new(),
     }
 }
 
@@ -8696,6 +9313,132 @@ fn route_profile_backfill_action(
     }
 }
 
+fn parse_agent_source_request(body: &str) -> Result<AgentSourceRequest, Reply> {
+    let value = body_value(body)?;
+    let request: AgentSourceRequest = serde_json::from_value(value).map_err(|error| {
+        validation(
+            "INVALID_SOURCE_REQUEST",
+            &format!("agent source request is invalid: {error}"),
+        )
+    })?;
+    if request.turn_id.trim().is_empty() || request.source_ref_id.trim().is_empty() {
+        return Err(validation(
+            "INVALID_SOURCE_REQUEST",
+            "turn_id and source_ref_id must not be empty",
+        ));
+    }
+    Ok(request)
+}
+
+fn agent_source_binding(
+    state: &AppState,
+    request: &AgentSourceRequest,
+) -> Result<SourceBinding, ToolError> {
+    let turn = state
+        .agent_history
+        .sessions
+        .iter()
+        .filter(|session| session.book_id == state.book.base.book_id)
+        .flat_map(|session| session.turns.iter())
+        .find(|turn| turn.turn_id == request.turn_id);
+    let binding = turn.and_then(|turn| {
+        turn.source_bindings
+            .iter()
+            .find(|binding| binding.source_ref_id == request.source_ref_id)
+            .cloned()
+            .or_else(|| {
+                turn.outcome.as_ref().and_then(|outcome| {
+                    legacy_answer_projection(&turn.turn_id, outcome, &state.book).and_then(
+                        |projection| {
+                            projection
+                                .bindings
+                                .into_iter()
+                                .find(|binding| binding.source_ref_id == request.source_ref_id)
+                        },
+                    )
+                })
+            })
+    });
+    binding.ok_or_else(|| ToolError {
+        error_code: "SOURCE_REF_NOT_FOUND".into(),
+        category: "not_found".into(),
+        message: "source reference does not belong to this turn".into(),
+    })
+}
+
+fn route_agent_source_resolve(state: &AppState, body: &str) -> Reply {
+    let request = match parse_agent_source_request(body) {
+        Ok(request) => request,
+        Err(reply) => return reply,
+    };
+    let binding = match agent_source_binding(state, &request) {
+        Ok(binding) => binding,
+        Err(error) => return err_reply(&error),
+    };
+    match state.book.resolve_source(
+        &binding.evidence_range,
+        "zh-CN",
+        Some(&binding.evidence_text_digest),
+    ) {
+        Ok(source) => ok_json(&SourcePopupView {
+            source_ref_id: binding.source_ref_id,
+            label: source.label,
+            highlighted_quote: source.highlighted_quote,
+            context_before: source.context_before,
+            context_after: source.context_after,
+            stale: false,
+            can_open_in_reader: true,
+        }),
+        Err(_) => ok_json(&SourcePopupView {
+            source_ref_id: binding.source_ref_id,
+            label: binding.label_snapshot,
+            highlighted_quote: binding.preview_snapshot,
+            context_before: String::new(),
+            context_after: String::new(),
+            stale: true,
+            can_open_in_reader: false,
+        }),
+    }
+}
+
+fn route_agent_source_open(state: &mut AppState, body: &str, now: &str) -> Reply {
+    let request = match parse_agent_source_request(body) {
+        Ok(request) => request,
+        Err(reply) => return reply,
+    };
+    let binding = match agent_source_binding(state, &request) {
+        Ok(binding) => binding,
+        Err(error) => return err_reply(&error),
+    };
+    if state
+        .book
+        .resolve_source(
+            &binding.evidence_range,
+            "zh-CN",
+            Some(&binding.evidence_text_digest),
+        )
+        .is_err()
+    {
+        return err_reply(&ToolError {
+            error_code: "SOURCE_STALE".into(),
+            category: "conflict".into(),
+            message: "source text changed; reader navigation is disabled".into(),
+        });
+    }
+    if let Err(error) = state.reader.goto_lid(
+        &state.book,
+        &mut state.store,
+        &binding.evidence_range.start_lid,
+        now,
+    ) {
+        return err_reply(&error);
+    }
+    ok_json(&SourceOpenView {
+        source_ref_id: binding.source_ref_id,
+        opened: true,
+    })
+}
+
 /// `POST /agent/chat`(S10f)`[ADR-0030]`:外层 E agent 编排 loop,注入同一
 /// `book/store/reader/messages/adapter`(与前端共享视口、跨回合 messages)。body `{message}` →
 /// `OuterOutcome{answer, incomplete, effects, trace, ...}`;agent 动作即时驱动共享 reader 视口,
@@ -8731,6 +9474,7 @@ fn route_agent_chat(state: &mut AppState, body: &str, now: &str) -> Reply {
             "question_anchor_lid 必须等于 question_quote lid",
         );
     }
+    let initial_evidence = verified_question_evidence(&state.book, question_quote.as_ref());
     let memory_intent = scan_memory_intent(msg);
     if memory_intent.is_some() && classify_profile_privacy(msg) == ProfilePrivacyClass::Secret {
         if let Some(session_id) = state
@@ -8773,8 +9517,15 @@ fn route_agent_chat(state: &mut AppState, body: &str, now: &str) -> Reply {
         Ok(turn_ref) => turn_ref,
         Err(error) => return err_reply(&error),
     };
-    let result =
-        run_precommitted_agent_chat(state, msg, &agent_message, &current_book_id, &turn_ref, now);
+    let result = run_precommitted_agent_chat(
+        state,
+        msg,
+        &agent_message,
+        &current_book_id,
+        &turn_ref,
+        initial_evidence,
+        now,
+    );
     match result {
         Ok(outcome) => {
             if let Err(error) = finalize_agent_turn_completed(state, &turn_ref, &outcome, now) {
@@ -8803,6 +9554,7 @@ fn run_precommitted_agent_chat(
     agent_message: &str,
     current_book_id: &str,
     turn_ref: &AgentTurnRef,
+    initial_evidence: Vec<EvidenceRange>,
     now: &str,
 ) -> Result<OuterOutcome, ToolError> {
     let content_profile = current_content_profile(&state.book);
@@ -8970,6 +9722,7 @@ fn run_precommitted_agent_chat(
         &mut state.messages,
         &profile_snapshot,
         memory_context.as_deref(),
+        initial_evidence,
         memory_updates,
         agent_message,
         now,
@@ -9082,7 +9835,7 @@ fn route_agent_new(state: &mut AppState, now: &str) -> Reply {
         .insert(book_id.clone(), session.id.clone());
     let messages = session.messages.clone();
     candidate.sessions.push(session);
-    let response = match agent_history_response(&candidate, &book_id) {
+    let response = match agent_history_response(&candidate, &state.book) {
         Ok(response) => response,
         Err(error) => return err_reply(&error),
     };
@@ -9117,7 +9870,7 @@ fn route_agent_history_select(state: &mut AppState, body: &str) -> Reply {
         .active_by_book
         .insert(book_id.clone(), session_id.into());
     let messages = candidate.sessions[idx].messages.clone();
-    let response = match agent_history_response(&candidate, &book_id) {
+    let response = match agent_history_response(&candidate, &state.book) {
         Ok(response) => response,
         Err(error) => return err_reply(&error),
     };
@@ -9161,7 +9914,7 @@ fn route_agent_history_delete(state: &mut AppState, body: &str, now: &str) -> Re
     }
     let idx = ensure_active_agent_session(&mut candidate, &book_id, now);
     let messages = candidate.sessions[idx].messages.clone();
-    let response = match agent_history_response(&candidate, &book_id) {
+    let response = match agent_history_response(&candidate, &state.book) {
         Ok(response) => response,
         Err(error) => return err_reply(&error),
     };
@@ -13804,6 +14557,7 @@ mod tests {
                 }),
                 question_anchor_lid: None,
                 question_quote: None,
+                source_bindings: Vec::new(),
             })
             .collect();
         state.agent_history.sessions.push(AgentChatSession {
@@ -13834,6 +14588,7 @@ mod tests {
                 }),
                 question_anchor_lid: None,
                 question_quote: None,
+                source_bindings: Vec::new(),
             }],
             messages: new_session(),
         });
@@ -14353,6 +15108,344 @@ mod tests {
         assert_eq!(state.store.profile_facts().len(), fact_count);
     }
 
+    fn install_source_bound_turn(state: &mut AppState, history_path: PathBuf) -> (String, String) {
+        state.history_path = Some(history_path);
+        let evidence_range = EvidenceRange {
+            start_lid: "1.1".into(),
+            end_lid: "1.1".into(),
+            ranges: vec![SourceSelectedRange {
+                lid: "1.1".into(),
+                range: SourceTextRange { start: 0, end: 1 },
+            }],
+        };
+        let resolved = state
+            .book
+            .resolve_source(&evidence_range, "zh-CN", None)
+            .unwrap();
+        let source_ref_id = "source_ref_server_fixture".to_string();
+        let binding = runtime::orchestrator::SourceBinding {
+            source_ref_id: source_ref_id.clone(),
+            book_id: state.book.base.book_id.clone(),
+            evidence_range,
+            evidence_text_digest: resolved.evidence_text_digest,
+            label_snapshot: resolved.label.clone(),
+            preview_snapshot: resolved.preview,
+        };
+        let question_quote = AskQuote {
+            lid: "1.1".into(),
+            quote: "X".into(),
+            ranges: Some(vec![SelectedRange {
+                lid: "1.1".into(),
+                range: memory::TextRange { start: 0, end: 1 },
+            }]),
+            status: Some(SelectionResolution::Resolved),
+            raw_quote: Some("X".into()),
+            resolved_quote: Some("X".into()),
+        };
+        let book_id = state.book.base.book_id.clone();
+        let turn_ref = precommit_agent_turn(
+            state,
+            &book_id,
+            "Explain this".into(),
+            Some("1.1".into()),
+            Some(question_quote),
+            "2026-07-20T00:00:00Z",
+        )
+        .unwrap();
+        let outcome = OuterOutcome {
+            answer: Some("Claim.".into()),
+            answer_view: Some(runtime::orchestrator::AgentAnswerView {
+                parts: vec![
+                    runtime::orchestrator::AgentAnswerPart::Markdown {
+                        text: "Claim.".into(),
+                    },
+                    runtime::orchestrator::AgentAnswerPart::Sources {
+                        source_ref_ids: vec![source_ref_id.clone()],
+                    },
+                ],
+                sources: vec![runtime::orchestrator::AgentAnswerSource {
+                    source_ref_id: source_ref_id.clone(),
+                    label: resolved.label,
+                }],
+            }),
+            incomplete: false,
+            warning: None,
+            turns: 1,
+            tokens_spent: 1,
+            effects: Vec::new(),
+            trace: Vec::new(),
+            profile_usage: ProfileUsageTrace::default(),
+            memory_updates: Vec::new(),
+            source_bindings: vec![binding],
+        };
+        finalize_agent_turn_completed(state, &turn_ref, &outcome, "2026-07-20T00:00:01Z").unwrap();
+        (turn_ref.turn_id, source_ref_id)
+    }
+
+    fn install_legacy_source_turn(
+        state: &mut AppState,
+        history_path: PathBuf,
+        answer: &str,
+    ) -> String {
+        state.history_path = Some(history_path);
+        let book_id = state.book.base.book_id.clone();
+        let turn_ref = precommit_agent_turn(
+            state,
+            &book_id,
+            "Explain the cited evidence".into(),
+            None,
+            None,
+            "2026-07-20T00:00:00Z",
+        )
+        .unwrap();
+        let outcome = OuterOutcome {
+            answer: Some(answer.into()),
+            answer_view: None,
+            incomplete: false,
+            warning: None,
+            turns: 1,
+            tokens_spent: 1,
+            effects: Vec::new(),
+            trace: Vec::new(),
+            profile_usage: ProfileUsageTrace::default(),
+            memory_updates: Vec::new(),
+            source_bindings: Vec::new(),
+        };
+        finalize_agent_turn_completed(state, &turn_ref, &outcome, "2026-07-20T00:00:01Z").unwrap();
+        turn_ref.turn_id
+    }
+
+    #[test]
+    fn legacy_agent_source_projection_is_markdown_aware_restartable_and_read_only() {
+        let mut state = state_named("legacy-agent-source-projection");
+        let history_path = tmp("legacy-agent-source-projection-history");
+        let answer = r#"Supported claim. [LID: 1.1]
+
+Version 1.2 and bare 1.1 stay unchanged.
+
+`[LID: 1.1]`
+
+    [LID: 1.1]
+
+<code>[LID: 1.1]</code>
+
+<pre>
+[LID: 1.1]
+</pre>
+
+\[LID: 1.1]
+
+[LID: 1.1](https://example.com)
+
+[LID: 1.1]: https://example.com/reference
+
+[LID: 9.9]
+
+```text
+[LID: 1.1]
+```"#;
+        let turn_id = install_legacy_source_turn(&mut state, history_path.clone(), answer);
+        let persisted_before = std::fs::read(&history_path).unwrap();
+
+        let history = get(&mut state, "/agent/history");
+        assert_eq!(history.status, 200, "{}", history.body);
+        let public: serde_json::Value = serde_json::from_str(&history.body).unwrap();
+        let outcome = &public["current"]["turns"][0]["outcome"];
+        let parts = outcome["answer_view"]["parts"].as_array().unwrap();
+        let sources = outcome["answer_view"]["sources"].as_array().unwrap();
+        assert_eq!(sources.len(), 1);
+        assert_eq!(
+            parts
+                .iter()
+                .filter(|part| part["kind"] == "sources")
+                .count(),
+            1
+        );
+        assert!(outcome["answer"].as_str().unwrap().contains("Version 1.2"));
+        assert!(outcome["answer"].as_str().unwrap().contains("`[LID: 1.1]`"));
+        assert!(outcome["answer"].as_str().unwrap().contains("[LID: 9.9]"));
+        let source_ref_id = sources[0]["source_ref_id"].as_str().unwrap().to_string();
+        assert!(!source_ref_id.contains("1.1"));
+        assert_eq!(std::fs::read(&history_path).unwrap(), persisted_before);
+
+        let request = serde_json::json!({
+            "turn_id": turn_id,
+            "source_ref_id": source_ref_id,
+        })
+        .to_string();
+        let resolved = post(&mut state, "/agent/source.resolve", &request);
+        assert_eq!(resolved.status, 200, "{}", resolved.body);
+        assert!(!resolved.body.contains("1.1"));
+        assert_eq!(std::fs::read(&history_path).unwrap(), persisted_before);
+
+        state.agent_history = load_agent_history(&Some(history_path.clone())).unwrap();
+        let after_restart = post(&mut state, "/agent/source.resolve", &request);
+        assert_eq!(after_restart.status, 200, "{}", after_restart.body);
+        let opened_after_restart = post(&mut state, "/agent/source.open", &request);
+        assert_eq!(
+            opened_after_restart.status, 200,
+            "{}",
+            opened_after_restart.body
+        );
+        assert_eq!(std::fs::read(&history_path).unwrap(), persisted_before);
+    }
+
+    #[test]
+    fn legacy_agent_source_is_scoped_to_current_book_and_live_history() {
+        let mut switched = state_named("legacy-agent-source-book-switch");
+        let history_path = tmp("legacy-agent-source-book-switch-history");
+        let turn_id =
+            install_legacy_source_turn(&mut switched, history_path, "Supported claim. [LID: 1.1]");
+        let history = get(&mut switched, "/agent/history");
+        let public: serde_json::Value = serde_json::from_str(&history.body).unwrap();
+        let source_ref_id = public["current"]["turns"][0]["outcome"]["answer_view"]["sources"][0]
+            ["source_ref_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let request = serde_json::json!({
+            "turn_id": turn_id,
+            "source_ref_id": source_ref_id,
+        })
+        .to_string();
+
+        let other_book = write_multi_leaf_book("legacy-agent-source-other-book", "other-book", 1);
+        let opened = post(
+            &mut switched,
+            "/book/open",
+            &serde_json::json!({ "dir": other_book }).to_string(),
+        );
+        assert_eq!(opened.status, 200, "{}", opened.body);
+        let wrong_book = post(&mut switched, "/agent/source.resolve", &request);
+        assert_ne!(wrong_book.status, 200);
+        assert!(wrong_book.body.contains("SOURCE_REF_NOT_FOUND"));
+
+        let mut deleted = state_named("legacy-agent-source-delete");
+        let turn_id = install_legacy_source_turn(
+            &mut deleted,
+            tmp("legacy-agent-source-delete-history"),
+            "Supported claim. [LID: 1.1]",
+        );
+        let history = get(&mut deleted, "/agent/history");
+        let public: serde_json::Value = serde_json::from_str(&history.body).unwrap();
+        let session_id = public["active_session_id"].as_str().unwrap();
+        let source_ref_id = public["current"]["turns"][0]["outcome"]["answer_view"]["sources"][0]
+            ["source_ref_id"]
+            .as_str()
+            .unwrap();
+        let request = serde_json::json!({
+            "turn_id": turn_id,
+            "source_ref_id": source_ref_id,
+        })
+        .to_string();
+        let deletion = post(
+            &mut deleted,
+            "/agent/history/delete",
+            &serde_json::json!({ "session_id": session_id }).to_string(),
+        );
+        assert_eq!(deletion.status, 200, "{}", deletion.body);
+        let missing = post(&mut deleted, "/agent/source.resolve", &request);
+        assert_ne!(missing.status, 200);
+        assert!(missing.body.contains("SOURCE_REF_NOT_FOUND"));
+    }
+
+    #[test]
+    fn agent_source_history_persists_binding_but_public_view_is_opaque() {
+        let mut state = state_named("agent-source-history");
+        let history_path = tmp("agent-source-history-file");
+        let (turn_id, source_ref_id) = install_source_bound_turn(&mut state, history_path.clone());
+
+        let internal = &state.agent_history.sessions[0].turns[0];
+        assert_eq!(internal.source_bindings.len(), 1);
+        let persisted = std::fs::read_to_string(&history_path).unwrap();
+        assert!(persisted.contains("source_bindings"));
+        assert!(persisted.contains("start_lid"));
+
+        let response = get(&mut state, "/agent/history");
+        assert_eq!(response.status, 200, "{}", response.body);
+        let public: serde_json::Value = serde_json::from_str(&response.body).unwrap();
+        let turn = &public["current"]["turns"][0];
+        assert_eq!(turn["turn_id"], turn_id);
+        assert_eq!(turn["question_source_label"], "正文");
+        assert!(turn.get("question_anchor_lid").is_none());
+        assert!(turn["question_quote"].get("lid").is_none());
+        assert!(turn["question_quote"].get("ranges").is_none());
+        assert!(turn.get("source_bindings").is_none());
+        assert!(!response.body.contains("evidence_text_digest"));
+        assert!(response.body.contains(&source_ref_id));
+
+        let loaded = load_agent_history(&Some(history_path)).unwrap();
+        assert_eq!(loaded.sessions[0].turns[0].source_bindings.len(), 1);
+        state.agent_history = loaded;
+        let after_restart = post(
+            &mut state,
+            "/agent/source.resolve",
+            &serde_json::json!({
+                "turn_id": turn_id,
+                "source_ref_id": source_ref_id,
+            })
+            .to_string(),
+        );
+        assert_eq!(after_restart.status, 200, "{}", after_restart.body);
+    }
+
+    #[test]
+    fn agent_source_resolve_open_stale_and_wrong_owner_fail_closed() {
+        let mut state = state_named("agent-source-endpoints");
+        let history_path = tmp("agent-source-endpoints-file");
+        let (turn_id, source_ref_id) = install_source_bound_turn(&mut state, history_path);
+        let request = serde_json::json!({
+            "turn_id": turn_id,
+            "source_ref_id": source_ref_id,
+        })
+        .to_string();
+
+        let resolved = post(&mut state, "/agent/source.resolve", &request);
+        assert_eq!(resolved.status, 200, "{}", resolved.body);
+        let resolved_json: serde_json::Value = serde_json::from_str(&resolved.body).unwrap();
+        assert_eq!(resolved_json["highlighted_quote"], "X");
+        assert_eq!(resolved_json["stale"], false);
+        assert_eq!(resolved_json["can_open_in_reader"], true);
+        assert!(!resolved.body.contains("1.1"));
+
+        let opened = post(&mut state, "/agent/source.open", &request);
+        assert_eq!(opened.status, 200, "{}", opened.body);
+        assert!(!opened.body.contains("lid"));
+
+        let current_book_id = state.book.base.book_id.clone();
+        let second = precommit_agent_turn(
+            &mut state,
+            &current_book_id,
+            "another turn".into(),
+            None,
+            None,
+            "2026-07-20T00:01:00Z",
+        )
+        .unwrap();
+        let wrong_owner = serde_json::json!({
+            "turn_id": second.turn_id,
+            "source_ref_id": source_ref_id,
+        })
+        .to_string();
+        let rejected = post(&mut state, "/agent/source.resolve", &wrong_owner);
+        assert_ne!(rejected.status, 200);
+        assert!(rejected.body.contains("SOURCE_REF_NOT_FOUND"));
+
+        state.agent_history.sessions[0].turns[0].source_bindings[0].evidence_text_digest =
+            "source-fnv1a64-stale".into();
+        let stale = post(&mut state, "/agent/source.resolve", &request);
+        assert_eq!(stale.status, 200, "{}", stale.body);
+        let stale_json: serde_json::Value = serde_json::from_str(&stale.body).unwrap();
+        assert_eq!(stale_json["stale"], true);
+        assert_eq!(stale_json["can_open_in_reader"], false);
+        assert_eq!(stale_json["context_before"], "");
+        assert_eq!(stale_json["highlighted_quote"], "X");
+
+        let stale_open = post(&mut state, "/agent/source.open", &request);
+        assert_ne!(stale_open.status, 200);
+        assert!(stale_open.body.contains("SOURCE_STALE"));
+    }
+
     #[test]
     fn agent_history_new_select_delete_preserves_transcript_and_messages() {
         let mut s = state_named("agent-history");
@@ -14383,9 +15476,12 @@ mod tests {
         let old_id = history["active_session_id"].as_str().unwrap().to_string();
         assert_eq!(history["sessions"].as_array().unwrap().len(), 1);
         assert_eq!(
-            history["sessions"][0]["turns"][0]["question_anchor_lid"],
-            "1.1"
+            history["sessions"][0]["turns"][0]["question_source_label"],
+            "正文"
         );
+        assert!(history["sessions"][0]["turns"][0]
+            .get("question_anchor_lid")
+            .is_none());
         assert_eq!(history["current"]["turns"][0]["user"], "用户看到的问题");
         assert_eq!(history["current"]["turns"][0]["user_turn_ordinal"], 1);
         assert_eq!(history["current"]["turns"][0]["status"], "completed");
@@ -14398,6 +15494,13 @@ mod tests {
             history["current"]["turns"][0]["question_quote"]["quote"],
             "引用"
         );
+        assert_eq!(
+            history["current"]["turns"][0]["question_quote"]["label"],
+            "正文"
+        );
+        assert!(history["current"]["turns"][0]["question_quote"]
+            .get("lid")
+            .is_none());
         assert!(history["current"]["turns"][0]["question_quote"]
             .get("ranges")
             .is_none());
@@ -14872,6 +15975,7 @@ mod tests {
         let audit = query_run.audit.clone();
         let outer = OuterOutcome {
             answer: Some("resident answer".into()),
+            answer_view: None,
             incomplete: false,
             warning: None,
             turns: 1,
@@ -14890,6 +15994,7 @@ mod tests {
                 influences: Vec::new(),
             },
             memory_updates: Vec::new(),
+            source_bindings: Vec::new(),
         };
         let mut history = AgentHistory::default();
         let mut session = new_agent_session("book", "t0", 0);
@@ -14902,6 +16007,7 @@ mod tests {
             error: None,
             question_anchor_lid: Some("1.1".into()),
             question_quote: None,
+            source_bindings: Vec::new(),
         });
         history
             .active_by_book
@@ -14970,13 +16076,23 @@ mod tests {
         assert!(prompt.contains("unverified_raw_quote=\"RAW_DO_NOT_CITE\""));
         assert!(prompt.contains("raw quote 不能作为 citation"));
 
+        let internal_quote = s.agent_history.sessions[0].turns[0]
+            .question_quote
+            .as_ref()
+            .unwrap();
+        assert_eq!(internal_quote.ranges.as_ref().unwrap().len(), 2);
+        assert_eq!(internal_quote.raw_quote.as_deref(), Some("RAW_DO_NOT_CITE"));
+        assert_eq!(internal_quote.resolved_quote.as_deref(), Some("XX"));
+
         let history = get(&mut s, "/agent/history");
         let history: serde_json::Value = serde_json::from_str(&history.body).unwrap();
         let quote = &history["current"]["turns"][0]["question_quote"];
         assert_eq!(quote["status"], "partial");
-        assert_eq!(quote["ranges"].as_array().unwrap().len(), 2);
-        assert_eq!(quote["raw_quote"], "RAW_DO_NOT_CITE");
-        assert_eq!(quote["resolved_quote"], "XX");
+        assert_eq!(quote["label"], "正文");
+        assert_eq!(quote["quote"], "RAW_DO_NOT_CITE");
+        for hidden in ["lid", "ranges", "raw_quote", "resolved_quote"] {
+            assert!(quote.get(hidden).is_none(), "public quote leaked {hidden}");
+        }
     }
 
     fn selected_range(lid: &str, start: u32, end: u32) -> SelectedRange {
@@ -15312,6 +16428,35 @@ mod tests {
             validate_and_rebuild_selection_quote(&s.book, &ranges, "question_quote").unwrap();
 
         assert_eq!(canonical, "XX");
+    }
+
+    #[test]
+    fn source_presentation_verified_question_ranges_split_source_gaps() {
+        let state = state_named("source-presentation-question-seed");
+        let quote = AskQuote {
+            lid: "1.1".into(),
+            quote: "XX".into(),
+            ranges: Some(vec![
+                SelectedRange {
+                    lid: "1.1".into(),
+                    range: memory::TextRange { start: 0, end: 1 },
+                },
+                SelectedRange {
+                    lid: "1.1".into(),
+                    range: memory::TextRange { start: 2, end: 3 },
+                },
+            ]),
+            status: Some(SelectionResolution::Resolved),
+            raw_quote: Some("XX".into()),
+            resolved_quote: Some("XX".into()),
+        };
+
+        let evidence = verified_question_evidence(&state.book, Some(&quote));
+
+        assert_eq!(evidence.len(), 2);
+        assert_eq!(evidence[0].ranges[0].range.start, 0);
+        assert_eq!(evidence[1].ranges[0].range.start, 2);
+        assert!(verified_question_evidence(&state.book, None).is_empty());
     }
 
     #[test]
