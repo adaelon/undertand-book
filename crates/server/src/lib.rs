@@ -6972,27 +6972,36 @@ fn v2_selection_has_degraded_precision(
     policy: &PdfRuntimeProjectionPolicy,
     rects_by_page: &BTreeMap<usize, Vec<[f64; 4]>>,
     hits: &[SelectionCharHit],
+    raw_quote_complete: bool,
 ) -> bool {
     if policy.version != PdfRuntimeMapVersion::V2 {
         return false;
     }
-    let partial_hit = hits.iter().any(|hit| {
-        hit.lid
-            .as_deref()
-            .and_then(|lid| policy.entries.get(lid))
-            .is_some_and(|entry| entry.precision != PdfRuntimeProjectionPrecision::CharExact)
-    });
-    partial_hit
-        || policy.entries.values().any(|entry| {
-            entry.precision != PdfRuntimeProjectionPrecision::CharExact
-                && entry.regions.iter().any(|region| {
-                    rects_by_page.get(&region.page_index).is_some_and(|rects| {
-                        rects.iter().any(|selected| {
-                            selection_rect_intersects_region(*selected, region.bbox)
-                        })
-                    })
+    let exact_partial_lids = if raw_quote_complete {
+        hits.iter()
+            .filter_map(|hit| hit.lid.as_deref())
+            .filter(|lid| {
+                policy
+                    .entries
+                    .get(*lid)
+                    .is_some_and(|entry| entry.precision == PdfRuntimeProjectionPrecision::Partial)
+            })
+            .collect::<HashSet<_>>()
+    } else {
+        HashSet::new()
+    };
+    policy.entries.iter().any(|(lid, entry)| {
+        entry.precision != PdfRuntimeProjectionPrecision::CharExact
+            && !(entry.precision == PdfRuntimeProjectionPrecision::Partial
+                && exact_partial_lids.contains(lid.as_str()))
+            && entry.regions.iter().any(|region| {
+                rects_by_page.get(&region.page_index).is_some_and(|rects| {
+                    rects
+                        .iter()
+                        .any(|selected| selection_rect_intersects_region(*selected, region.bbox))
                 })
-        })
+            })
+    })
 }
 
 fn parse_pdf_rect(value: &serde_json::Value) -> Option<PdfPageRectDto> {
@@ -7477,9 +7486,12 @@ fn route_pdf_selection_resolve(book: &Book, book_dir: &Path, body: &serde_json::
         hits = filter_hits_to_raw_quote(hits, raw_quote);
     }
     let unmapped_hits = hits.iter().filter(|hit| hit.lid.is_none()).count();
-    let raw_quote_incomplete = policy.version == PdfRuntimeMapVersion::V2
-        && raw_quote.is_some_and(|quote| !raw_quote_fully_covered_by_hits(&hits, quote));
-    let degraded_precision = v2_selection_has_degraded_precision(&policy, &rects_by_page, &hits);
+    let raw_quote_complete = policy.version == PdfRuntimeMapVersion::V2
+        && raw_quote.is_some_and(|quote| raw_quote_fully_covered_by_hits(&hits, quote));
+    let raw_quote_incomplete =
+        policy.version == PdfRuntimeMapVersion::V2 && raw_quote.is_some() && !raw_quote_complete;
+    let degraded_precision =
+        v2_selection_has_degraded_precision(&policy, &rects_by_page, &hits, raw_quote_complete);
 
     let mut source_runs: Vec<(String, SourceSpanDto)> = Vec::new();
     for hit in &hits {
@@ -12692,6 +12704,35 @@ mod tests {
         let rejected = get(&mut s, "/book/pdf_source_map");
         assert_eq!(rejected.status, 400);
         assert!(rejected.body.contains("PDF_RUNTIME_ARTIFACT_INVALID"));
+    }
+
+    #[test]
+    fn pdf_runtime_v2_resolves_exact_subrange_inside_partial_entry() {
+        let mut s = state_named("pdf-runtime-v2-partial-exact-subrange");
+        write_pdf_runtime_artifacts(&mut s);
+        rewrite_pdf_runtime_artifacts_v2(&s, "partial", 2);
+
+        let resolved = post(
+            &mut s,
+            "/reader/pdf_selection.resolve",
+            r#"{"pageIndex":0,"raw_quote":"PD","rects":[{"bbox":[9.0,9.0,14.0,21.0]}]}"#,
+        );
+        let body: serde_json::Value = serde_json::from_str(&resolved.body).unwrap();
+        assert_eq!(body["status"], "resolved");
+        assert_eq!(
+            body["ranges"][0]["range"],
+            serde_json::json!({"start":0,"end":2})
+        );
+        assert_eq!(body["quote_markdown"], "XX");
+
+        let conservative_without_raw_quote = post(
+            &mut s,
+            "/reader/pdf_selection.resolve",
+            r#"{"pageIndex":0,"rects":[{"bbox":[9.0,9.0,14.0,21.0]}]}"#,
+        );
+        let body: serde_json::Value =
+            serde_json::from_str(&conservative_without_raw_quote.body).unwrap();
+        assert_eq!(body["status"], "partial");
     }
 
     #[test]
