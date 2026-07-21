@@ -1,12 +1,12 @@
-# SESSION_CHECKPOINT - 2026-07-21 12:50 +08:00
+# SESSION_CHECKPOINT - 2026-07-21 12:58 +08:00
 
 ## 新鲜度自检
-- 当前待冻结切片:PM1-PM4 plugin-provided current-book Book MCP。
+- 实现提交:`e07b580 feat(plugin): bundle current-book MCP`;另有 `CARGO_TARGET_DIR` 导出修复待提交。
 - plugin cachebuster:`0.1.0+codex.20260721044654`。
 - 旧 Setup 仍为 `dist/UnderstandBookSetup.exe`,35,667,957 bytes,SHA-256 `B5B075915D66E33CA74046BAC4BB4A719945F9C526FA7EA6C88844F9F965E7A3`;本切片尚未重编替换。
 
 ## 当前在做什么
-PM1-PM4 实现与主工作区验证已完成;下一步只暂存本切片文件、提交冻结快照,再从该提交的隔离 worktree 重编 Windows Setup。
+PM1-PM4 实现与主工作区验证已完成。隔离构建已通过 Web/Bun/Book MCP smoke,后续 Tauri 编译因 C 盘临时 target 空间不足失败;正在补导出脚本的标准 target 目录解析并改用 E 盘缓存重跑。
 
 ## 已验证
 1. `book_mcp` 选书优先级单测 5/5;`cargo test --workspace` 全绿。
@@ -15,8 +15,8 @@ PM1-PM4 实现与主工作区验证已完成;下一步只暂存本切片文件�
 4. 插件 manifest launcher stdio smoke 完成 `tools/list` + `book_search_text`;隔离 `CODEX_HOME` 经 Codex CLI 安装后显示 installed/enabled。
 
 ## 下一步(可直接接手)
-1. 精确暂存 PM 文件并提交;不得吸收用户既有 memory/profile/reader/server host/旧前端切片修改。
-2. 从冻结提交创建 detached worktree,离线 frozen install 后执行 Windows package。
+1. 提交 `export-installer.mjs` + 文档修复;不得吸收用户既有 dirty 文件。
+2. detached worktree 切到新提交,设置 `CARGO_TARGET_DIR=E:/allwork/download/agent/understand-book/target` 后重跑 Windows package。
 3. 核验 NSIS 中存在 `book-mcp.exe`,记录 Setup size/SHA-256/version,更新代码链路与本 checkpoint 后提交 release docs。
 
 ## 冷启动读序

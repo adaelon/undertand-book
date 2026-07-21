@@ -7,9 +7,11 @@ const repoRoot = path.resolve(desktopRoot, "..", "..");
 const debug = process.argv.includes("--debug");
 const profile = debug ? "debug" : "release";
 const config = JSON.parse(readFileSync(path.join(desktopRoot, "src-tauri", "tauri.conf.json"), "utf8"));
+const targetRoot = process.env.CARGO_TARGET_DIR
+  ? path.resolve(repoRoot, process.env.CARGO_TARGET_DIR)
+  : path.join(repoRoot, "target");
 const source = path.join(
-  repoRoot,
-  "target",
+  targetRoot,
   profile,
   "bundle",
   "nsis",
