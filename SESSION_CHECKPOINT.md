@@ -1,32 +1,31 @@
-# SESSION_CHECKPOINT - 2026-07-21 12:58 +08:00
+# SESSION_CHECKPOINT - 2026-07-21 13:13 +08:00
 
 ## 新鲜度自检
-- 实现提交:`e07b580 feat(plugin): bundle current-book MCP`;另有 `CARGO_TARGET_DIR` 导出修复待提交。
+- Setup 源码 commit:`167c804 fix(desktop): honor cargo target dir when exporting`;功能提交:`e07b580 feat(plugin): bundle current-book MCP`。
 - plugin cachebuster:`0.1.0+codex.20260721044654`。
-- 旧 Setup 仍为 `dist/UnderstandBookSetup.exe`,35,667,957 bytes,SHA-256 `B5B075915D66E33CA74046BAC4BB4A719945F9C526FA7EA6C88844F9F965E7A3`;本切片尚未重编替换。
+- 当前 Setup:`dist/UnderstandBookSetup.exe`,37,252,013 bytes,SHA-256 `D317DB822EA0A0BDA9A9A6BE7761899B99B24E8442F4CB1EEE2D8131276A14E1`,version 0.1.0。
 
 ## 当前在做什么
-PM1-PM4 实现与主工作区验证已完成。隔离构建已通过 Web/Bun/Book MCP smoke,后续 Tauri 编译因 C 盘临时 target 空间不足失败;正在补导出脚本的标准 target 目录解析并改用 E 盘缓存重跑。
+PM1-PM5 已实现、验证、提交并从 detached clean snapshot 重编 Windows Setup;只剩本 release 证据文档提交与临时 worktree 清理。
 
 ## 已验证
-1. `book_mcp` 选书优先级单测 5/5;`cargo test --workspace` 全绿。
-2. root/public plugin validator 与 release parity 全绿。
-3. release `book-mcp` 5,050,368 bytes,SHA-256 `82A5BD55DC2FE5A12CA67F73856C4CC8570DD6051AFAC3AE362A19440497D5F7`。
-4. 插件 manifest launcher stdio smoke 完成 `tools/list` + `book_search_text`;隔离 `CODEX_HOME` 经 Codex CLI 安装后显示 installed/enabled。
+1. `cargo test --workspace` 全绿;新增 `book_mcp` 选书单测 5/5。
+2. root/public plugin validator、release parity 与当前 Codex CLI 隔离安装全绿。
+3. plugin manifest launcher 通过 Reader session 绑定临时书并完成 tools/list + `book_search_text`。
+4. clean release `book-mcp.exe` 5,050,368 bytes,SHA-256 `D1C41E888194AD1FAADD123A712DBE9DC1B7DE1E02EA7A7A0824C89CFE7F1C1B`。
+5. NSIS bundle、隔离导出、最终 Setup 三份哈希一致;安装器未运行。
 
-## 下一步(可直接接手)
-1. 提交 `export-installer.mjs` + 文档修复;不得吸收用户既有 dirty 文件。
-2. detached worktree 切到新提交,设置 `CARGO_TARGET_DIR=E:/allwork/download/agent/understand-book/target` 后重跑 Windows package。
-3. 核验 NSIS 中存在 `book-mcp.exe`,记录 Setup size/SHA-256/version,更新代码链路与本 checkpoint 后提交 release docs。
+## 使用边界
+- 安装新 Setup 并在安装提示中同意 Codex plugin 后,新 Codex thread 自动加载 Book MCP;不再执行 `codex mcp add`。
+- MCP 启动时绑定 Reader 最后打开书;Reader 切书后需要新 Codex thread。
+- Git marketplace 仍是独立发布物;本地提交未 push 时,远端用户不会获得新 `.mcp.json`。
+
+## 未提交 / 不得触碰
+- 本 release 证据文档待提交;Setup 是 `.gitignore` 忽略产物。
+- 工作树仍有用户既有 memory/profile/reader/server host、旧前端切片和资料文件,不得吸收或恢复。
 
 ## 冷启动读序
 1. `docs/adr/0089-plugin-provided-current-book-mcp-and-setup-sidecar.md` - 启动、选书、隐私和发布决策。
 2. `docs/切片方案-Codex插件内置Book-MCP.md` - PM1-PM4 与完成定义。
 3. `docs/架构.md` 的 Plugin-provided current-book Book MCP 段 - 当前数据流。
-4. `docs/代码链路.md` 最后的 PM1-PM4 条目 - 文件、入口与验证证据。
-
-## 本会话决策摘要
-- Codex plugin 拥有 `.mcp.json` transport;不写全局 `[mcp_servers]`,避免 schema/config 漂移。
-- 单进程绑定一本书:CLI -> env -> Reader session;显式无效值 fail closed,切书后新线程重绑。
-- visitor MCP 只借 session 当前书路由指针,仍不读取 resident memory/profile/history/provider settings。
-- Setup 打包 binary,Git plugin 打包 manifest/launcher;公共 rollout 需二者都发布。
+4. `docs/代码链路.md` 最后的 PM1-PM5 条目 - 实现、验证与产物索引。
