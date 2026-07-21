@@ -1,29 +1,25 @@
 use crate::{err_reply, ok_json, validation, AppState, Reply};
+use book_tool_contracts::{
+    contracts, from_mcp_alias, input_schema, validate_input, BookToolId, BookToolInput,
+    GuideAction, GuideInput,
+};
 use read_tools::{RankedStep, ToolError};
 use runtime::{
     book_guide, parse_book_query_request, query, synthesize, BookGuideRequest, BookGuideResponse,
     BookGuideSessionContext,
 };
 use serde::Serialize;
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
 pub const DEFAULT_VISITOR_SESSION_TIMEOUT_MS: u128 = 30 * 60 * 1000;
 
-pub const TOOL_NAMES: &[&str] = &[
-    "book_manifest",
-    "book_text",
-    "book_context",
-    "book_concept",
-    "book_structure",
-    "book_guide_path",
-    "book_paper_metadata",
-    "book_paper_lexicon",
-    "book_paper_reading_guide",
-    "book_query",
-    "book_synthesize",
-    "book_guide",
-];
+pub fn tool_names() -> Vec<&'static str> {
+    contracts()
+        .iter()
+        .filter_map(|contract| contract.aliases.mcp)
+        .collect()
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct VisitorExchange {
@@ -126,173 +122,95 @@ pub fn parse_now_ms(now: &str) -> u128 {
 }
 
 pub fn tools_list_result() -> Value {
-    json!({
-        "tools": [
-            tool_schema("book_manifest", "Return the read-only book manifest.", json!({})),
-            tool_schema("book_text", "Return source text for a LID or LID range.", json!({
-                "lid": {"type": "string"},
-                "end_lid": {"type": "string"}
-            })),
-            tool_schema("book_context", "Return deterministic context around a LID.", json!({
-                "lid": {"type": "string"},
-                "granularity": {"type": "string"},
-                "k": {"type": "integer", "minimum": 0}
-            })),
-            tool_schema("book_concept", "Return occurrences and related entities for a concept.", json!({
-                "name": {"type": "string"}
-            })),
-            tool_schema("book_structure", "Return the public BookStructure projection for a LID.", json!({
-                "at": {"type": "string"}
-            })),
-            tool_schema("book_guide_path", "Return the public BookStructure guide path.", json!({
-                "at": {"type": "string"}
-            })),
-            tool_schema("book_paper_metadata", "Return the current single paper metadata projection.", json!({})),
-            tool_schema("book_paper_lexicon", "Return the current single paper lexicon projection.", json!({})),
-            tool_schema("book_paper_reading_guide", "Return the paper reading projection for the current single book.", json!({
-                "mode": {"type": "string", "enum": ["skim", "close", "deep"]},
-                "stage": {"type": "string", "enum": ["passive", "active", "critical", "creative"]}
-            })),
-            query_tool_schema(),
-            tool_schema("book_synthesize", "Synthesize explicit LIDs without expanding evidence scope.", json!({
-                "lids": {"type": "array", "items": {"type": "string"}},
-                "task": {"type": "string"}
-            })),
-            tool_schema("book_guide", "Open/refine/close an ephemeral visitor guide session.", json!({
-                "action": {"type": "string", "enum": ["guide", "close"]},
-                "session_id": {"type": "string"},
-                "intent": {"type": "string"},
-                "anchor_lid": {"type": "string"},
-                "feedback": {"type": "string"}
-            }))
-        ]
-    })
-}
-
-fn tool_schema(name: &str, description: &str, properties: Value) -> Value {
-    json!({
-        "name": name,
-        "description": description,
-        "inputSchema": {
-            "type": "object",
-            "properties": properties,
-            "additionalProperties": false
-        }
-    })
-}
-
-fn query_tool_schema() -> Value {
-    json!({
-        "name": "book_query",
-        "description": "Resolve explicit referents, reread their source LIDs, and answer atomic obligations.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string"},
-                "intent": {"type": "string", "enum": ["definition", "explanation", "relation", "comparison"]},
-                "targets": {"type": "array", "minItems": 1, "maxItems": 3, "items": {"type": "string"}},
-                "obligations": {
-                    "type": "array",
-                    "minItems": 1,
-                    "maxItems": 3,
-                    "items": {
-                        "type": "object",
-                        "properties": {"requirement": {"type": "string"}},
-                        "required": ["requirement"],
-                        "additionalProperties": false
-                    }
-                },
-                "anchor_lid": {"type": "string"}
-            },
-            "required": ["query", "intent", "targets", "obligations", "anchor_lid"],
-            "additionalProperties": false
-        }
-    })
+    let tools: Vec<_> = contracts()
+        .iter()
+        .filter_map(|contract| {
+            contract.aliases.mcp.map(|name| {
+                json!({
+                    "name": name,
+                    "description": contract.description,
+                    "inputSchema": input_schema(contract.id),
+                })
+            })
+        })
+        .collect();
+    json!({ "tools": tools })
 }
 
 pub fn dispatch_mcp_tool(state: &mut AppState, name: &str, arguments: Value, now: &str) -> Reply {
     let now_ms = parse_now_ms(now);
     state.visitor_sessions.gc_expired(now_ms);
 
-    match name {
-        "book_manifest" => ok_json(&state.book.manifest()),
-        "book_text" => route_book_text(state, &arguments),
-        "book_context" => route_book_context(state, &arguments),
-        "book_concept" => route_book_concept(state, &arguments),
-        "book_structure" => route_book_structure(state, &arguments),
-        "book_guide_path" => route_book_guide_path(state, &arguments),
-        "book_paper_metadata" => route_book_paper_metadata(state),
-        "book_paper_lexicon" => route_book_paper_lexicon(state),
-        "book_paper_reading_guide" => route_book_paper_reading_guide(state, &arguments),
-        "book_query" => route_book_query(state, &arguments),
-        "book_synthesize" => route_book_synthesize(state, &arguments),
-        "book_guide" => route_book_guide(state, &arguments, now_ms),
-        _ => mcp_tool_not_found(name),
+    let Some(id) = from_mcp_alias(name) else {
+        return mcp_tool_not_found(name);
+    };
+    if id == BookToolId::Query {
+        return route_book_query(state, &arguments);
+    }
+    let input = match validate_input(id, arguments) {
+        Ok(input) => input,
+        Err(error) => return validation(error.code, &error.message),
+    };
+    match (id, input) {
+        (BookToolId::Manifest, BookToolInput::Empty(_)) => ok_json(&state.book.manifest()),
+        (BookToolId::Text, BookToolInput::Text(input)) => route_book_text(state, input),
+        (BookToolId::SearchText, BookToolInput::SearchText(input)) => {
+            match state.book.search_text(&input) {
+                Ok(result) => ok_json(&result),
+                Err(error) => err_reply(&error),
+            }
+        }
+        (BookToolId::Context, BookToolInput::Context(input)) => route_book_context(state, input),
+        (BookToolId::Concept, BookToolInput::Concept(input)) => route_book_concept(state, input),
+        (BookToolId::Structure, BookToolInput::At(input)) => route_book_structure(state, input),
+        (BookToolId::GuidePath, BookToolInput::At(input)) => route_book_guide_path(state, input),
+        (BookToolId::PaperMetadata, BookToolInput::Empty(_)) => route_book_paper_metadata(state),
+        (BookToolId::PaperLexicon, BookToolInput::Empty(_)) => route_book_paper_lexicon(state),
+        (BookToolId::PaperReadingGuide, BookToolInput::PaperReadingGuide(input)) => {
+            route_book_paper_reading_guide(state, input)
+        }
+        (BookToolId::Synthesize, BookToolInput::Synthesize(input)) => {
+            route_book_synthesize(state, input)
+        }
+        (BookToolId::Guide, BookToolInput::Guide(input)) => route_book_guide(state, input, now_ms),
+        _ => validation(
+            "BOOK_TOOL_CONTRACT_INVALID",
+            "MCP Book tool resolved to an incompatible input contract",
+        ),
     }
 }
 
-fn route_book_text(state: &AppState, args: &Value) -> Reply {
-    let lid = match required_str(args, "lid") {
-        Ok(v) => v,
-        Err(r) => return r,
-    };
-    let end_lid = match optional_str(args, "end_lid") {
-        Ok(v) => v,
-        Err(r) => return r,
-    };
-    match state.book.text(&lid, end_lid.as_deref()) {
-        Ok(text) => ok_json(&json!({ "lid": lid, "text": text })),
+fn route_book_text(state: &AppState, input: book_tool_contracts::TextInput) -> Reply {
+    match state.book.text(&input.lid, input.end_lid.as_deref()) {
+        Ok(text) => ok_json(&json!({ "lid": input.lid, "text": text })),
         Err(e) => err_reply(&e),
     }
 }
 
-fn route_book_context(state: &AppState, args: &Value) -> Reply {
-    let lid = match required_str(args, "lid") {
-        Ok(v) => v,
-        Err(r) => return r,
-    };
-    let granularity = match optional_str(args, "granularity") {
-        Ok(v) => v,
-        Err(r) => return r,
-    };
-    let k = match optional_usize(args, "k") {
-        Ok(v) => v,
-        Err(r) => return r,
-    };
-    match state.book.context(&lid, granularity.as_deref(), k) {
+fn route_book_context(state: &AppState, input: book_tool_contracts::ContextInput) -> Reply {
+    let granularity = input.granularity.map(|value| value.as_str());
+    match state.book.context(&input.lid, granularity, input.k) {
         Ok(ctx) => ok_json(&ctx),
         Err(e) => err_reply(&e),
     }
 }
 
-fn route_book_concept(state: &AppState, args: &Value) -> Reply {
-    let name = match required_str(args, "name") {
-        Ok(v) => v,
-        Err(r) => return r,
-    };
-    match state.book.concept(&name) {
+fn route_book_concept(state: &AppState, input: book_tool_contracts::ConceptInput) -> Reply {
+    match state.book.concept(&input.name) {
         Ok(concept) => ok_json(&concept),
         Err(e) => err_reply(&e),
     }
 }
 
-fn route_book_structure(state: &AppState, args: &Value) -> Reply {
-    let at = match optional_str(args, "at") {
-        Ok(v) => v,
-        Err(r) => return r,
-    };
-    match state.book.structure(at.as_deref()) {
+fn route_book_structure(state: &AppState, input: book_tool_contracts::AtInput) -> Reply {
+    match state.book.structure(input.at.as_deref()) {
         Ok(projection) => ok_json(&projection),
         Err(e) => err_reply(&e),
     }
 }
 
-fn route_book_guide_path(state: &AppState, args: &Value) -> Reply {
-    let at = match optional_str(args, "at") {
-        Ok(v) => v,
-        Err(r) => return r,
-    };
-    match state.book.guide_path(at.as_deref()) {
+fn route_book_guide_path(state: &AppState, input: book_tool_contracts::AtInput) -> Reply {
+    match state.book.guide_path(input.at.as_deref()) {
         Ok(path) => ok_json(&path),
         Err(e) => err_reply(&e),
     }
@@ -306,18 +224,13 @@ fn route_book_paper_lexicon(state: &AppState) -> Reply {
     ok_json(&state.book.paper_lexicon_projection())
 }
 
-fn route_book_paper_reading_guide(state: &AppState, args: &Value) -> Reply {
-    let mode = match optional_str(args, "mode") {
-        Ok(v) => v,
-        Err(r) => return r,
-    };
-    let stage = match optional_str(args, "stage") {
-        Ok(v) => v,
-        Err(r) => return r,
-    };
+fn route_book_paper_reading_guide(
+    state: &AppState,
+    input: book_tool_contracts::PaperReadingGuideInput,
+) -> Reply {
     match state
         .book
-        .paper_reading_guide(mode.as_deref(), stage.as_deref())
+        .paper_reading_guide(Some(input.mode.as_str()), Some(input.stage.as_str()))
     {
         Ok(guide) => ok_json(&guide),
         Err(e) => err_reply(&e),
@@ -335,57 +248,34 @@ fn route_book_query(state: &AppState, args: &Value) -> Reply {
     }
 }
 
-fn route_book_synthesize(state: &AppState, args: &Value) -> Reply {
-    let lids = match required_string_array(args, "lids") {
-        Ok(v) => v,
-        Err(r) => return r,
-    };
-    let task = match optional_str(args, "task") {
-        Ok(v) => v,
-        Err(r) => return r,
-    };
-    match synthesize(&state.book, &lids, task.as_deref(), state.adapter.as_ref()) {
+fn route_book_synthesize(state: &AppState, input: book_tool_contracts::SynthesizeInput) -> Reply {
+    match synthesize(
+        &state.book,
+        &input.lids,
+        input.task.as_deref(),
+        state.adapter.as_ref(),
+    ) {
         Ok(resp) => ok_json(&resp),
         Err(e) => err_reply(&e),
     }
 }
 
-fn route_book_guide(state: &mut AppState, args: &Value, now_ms: u128) -> Reply {
-    let action = match optional_str(args, "action") {
-        Ok(Some(v)) => v,
-        Ok(None) => "guide".to_string(),
-        Err(r) => return r,
-    };
-    if action == "close" {
-        let session_id = match required_str(args, "session_id") {
-            Ok(v) => v,
-            Err(r) => return r,
-        };
+fn route_book_guide(state: &mut AppState, input: GuideInput, now_ms: u128) -> Reply {
+    if input.action == GuideAction::Close {
+        let session_id = input
+            .session_id
+            .expect("validated close action must have session_id");
         return match state.visitor_sessions.close(&session_id) {
             Some(_) => ok_json(&json!({ "ok": true, "closed": true, "session_id": session_id })),
             None => visitor_session_not_found(&session_id),
         };
     }
-    if action != "guide" {
-        return validation("INVALID_RANGE", "book_guide action 只支持 guide/close");
-    }
-
-    let intent = match required_str(args, "intent") {
-        Ok(v) => v,
-        Err(r) => return r,
-    };
-    let feedback = match optional_str(args, "feedback") {
-        Ok(v) => v,
-        Err(r) => return r,
-    };
-    let anchor_lid = match optional_str(args, "anchor_lid") {
-        Ok(v) => v,
-        Err(r) => return r,
-    };
-    let session_arg = match optional_str(args, "session_id") {
-        Ok(v) => v,
-        Err(r) => return r,
-    };
+    let intent = input
+        .intent
+        .expect("validated guide action must have intent");
+    let feedback = input.feedback;
+    let anchor_lid = input.anchor_lid;
+    let session_arg = input.session_id;
 
     let (session_id, opened) = match session_arg {
         Some(session_id) => {
@@ -501,63 +391,6 @@ fn update_session_after_guide(
             feedback,
         });
     }
-}
-
-fn object_args(args: &Value) -> Result<&Map<String, Value>, Reply> {
-    args.as_object()
-        .ok_or_else(|| validation("INVALID_RANGE", "MCP tool arguments 必须是 JSON object"))
-}
-
-fn required_str(args: &Value, key: &str) -> Result<String, Reply> {
-    let obj = object_args(args)?;
-    obj.get(key)
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .filter(|s| !s.trim().is_empty())
-        .ok_or_else(|| validation("INVALID_RANGE", &format!("缺少字符串参数 {key}")))
-}
-
-fn optional_str(args: &Value, key: &str) -> Result<Option<String>, Reply> {
-    let obj = object_args(args)?;
-    match obj.get(key) {
-        None | Some(Value::Null) => Ok(None),
-        Some(v) => v
-            .as_str()
-            .map(|s| Some(s.to_string()))
-            .ok_or_else(|| validation("INVALID_RANGE", &format!("{key} 必须是字符串"))),
-    }
-}
-
-fn optional_usize(args: &Value, key: &str) -> Result<Option<usize>, Reply> {
-    let obj = object_args(args)?;
-    match obj.get(key) {
-        None | Some(Value::Null) => Ok(None),
-        Some(v) => v
-            .as_u64()
-            .map(|n| Some(n as usize))
-            .ok_or_else(|| validation("INVALID_K", &format!("{key} 必须是非负整数"))),
-    }
-}
-
-fn required_string_array(args: &Value, key: &str) -> Result<Vec<String>, Reply> {
-    let obj = object_args(args)?;
-    let Some(arr) = obj.get(key).and_then(|v| v.as_array()) else {
-        return Err(validation(
-            "INVALID_RANGE",
-            &format!("缺少字符串数组参数 {key}"),
-        ));
-    };
-    let out: Vec<String> = arr
-        .iter()
-        .filter_map(|v| v.as_str().map(|s| s.to_string()))
-        .collect();
-    if out.len() != arr.len() {
-        return Err(validation(
-            "INVALID_RANGE",
-            &format!("{key} 必须全是字符串"),
-        ));
-    }
-    Ok(out)
 }
 
 fn mcp_tool_not_found(name: &str) -> Reply {
@@ -935,6 +768,93 @@ mod tests {
     }
 
     #[test]
+    fn mcp_tool_characterization() {
+        assert_eq!(
+            tool_names(),
+            vec![
+                "book_manifest",
+                "book_text",
+                "book_search_text",
+                "book_context",
+                "book_concept",
+                "book_structure",
+                "book_guide_path",
+                "book_paper_metadata",
+                "book_paper_lexicon",
+                "book_paper_reading_guide",
+                "book_query",
+                "book_synthesize",
+                "book_guide",
+            ]
+        );
+
+        let listed = tools_list_result();
+        let tools = listed["tools"].as_array().expect("MCP tools array");
+        let schema = |name: &str| {
+            &tools
+                .iter()
+                .find(|tool| tool["name"] == name)
+                .unwrap_or_else(|| panic!("missing MCP tool schema: {name}"))["inputSchema"]
+        };
+
+        for name in tool_names() {
+            assert_eq!(
+                schema(name)["additionalProperties"],
+                Value::Bool(false),
+                "MCP schemas reject unknown properties: {name}"
+            );
+        }
+        assert_eq!(
+            schema("book_query")["required"],
+            json!(["anchor_lid", "intent", "obligations", "query", "targets"])
+        );
+        assert_eq!(
+            schema("book_paper_reading_guide")["properties"]["mode"]["enum"],
+            json!(["skim", "close", "deep"])
+        );
+        assert_eq!(
+            schema("book_paper_reading_guide")["properties"]["stage"]["enum"],
+            json!(["passive", "active", "critical", "creative"])
+        );
+
+        // Alias differences are intentional transport projection; input contracts
+        // are now identical to the Resident registry projection.
+        for (name, required) in [
+            ("book_text", json!(["lid"])),
+            ("book_context", json!(["lid"])),
+            ("book_concept", json!(["name"])),
+            ("book_synthesize", json!(["lids"])),
+        ] {
+            assert_eq!(
+                schema(name)["required"],
+                required,
+                "required drift for {name}"
+            );
+        }
+        assert_eq!(
+            schema("book_context")["properties"]["granularity"]["enum"],
+            json!(["near", "mid", "far"])
+        );
+        assert_eq!(schema("book_search_text")["required"], json!(["query"]));
+        assert_eq!(
+            schema("book_search_text")["properties"]["match_mode"]["enum"],
+            json!(["exact", "normalized"])
+        );
+
+        let mut app = state(None);
+        assert_eq!(
+            dispatch_mcp_tool(&mut app, "book_text", json!({}), "1000").status,
+            400,
+            "schema and typed dispatch both require lid"
+        );
+        let text = dispatch_mcp_tool(&mut app, "book_text", json!({"lid": "1.1"}), "1001");
+        assert_eq!(text.status, 200);
+        let body: Value = serde_json::from_str(&text.body).expect("book_text JSON response");
+        assert_eq!(body["lid"], "1.1");
+        assert!(body["text"].is_string());
+    }
+
+    #[test]
     fn tier1_readonly_calls_do_not_create_visitor_session() {
         let mut s = state(None);
         assert_eq!(s.visitor_sessions.len(), 0);
@@ -943,8 +863,17 @@ mod tests {
             200
         );
         assert_eq!(s.visitor_sessions.len(), 0);
+        let search = dispatch_mcp_tool(
+            &mut s,
+            "book_search_text",
+            json!({"query":"AA", "page_size":1}),
+            "1001",
+        );
+        assert_eq!(search.status, 200);
+        assert!(search.body.contains("\"total_occurrences\":99"));
+        assert_eq!(s.visitor_sessions.len(), 0);
         assert_eq!(
-            dispatch_mcp_tool(&mut s, "book_structure", json!({"at":"1.1"}), "1001").status,
+            dispatch_mcp_tool(&mut s, "book_structure", json!({"at":"1.1"}), "1002").status,
             200
         );
         assert_eq!(s.visitor_sessions.len(), 0);

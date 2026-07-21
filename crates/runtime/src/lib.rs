@@ -1,6 +1,7 @@
 //! 模块 E 自建最小运行时。`book.query` 使用 referent-first typed mini-loop；
 //! `book.synthesize` 与其他工具保留各自明确的证据所有权。
 use base_schema::{GraphNodeType, LidNode, NodeKind};
+pub use book_tool_contracts::{BookQueryIntent, BookQueryRequest, QueryObligation};
 use memory::{BookReadingState, EngagementSignals};
 use read_tools::{
     fair_candidate_quotas, Book, CatalogRecallStrength, CatalogReferentKind, CatalogReferentSource,
@@ -306,33 +307,6 @@ pub struct SupplementOut {
     pub source: String,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, TS)]
-#[serde(rename_all = "snake_case")]
-#[ts(export, export_to = "../../../packages/web/src/generated/")]
-pub enum BookQueryIntent {
-    Definition,
-    Explanation,
-    Relation,
-    Comparison,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
-#[ts(export, export_to = "../../../packages/web/src/generated/")]
-pub struct QueryObligation {
-    pub requirement: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
-#[serde(deny_unknown_fields)]
-#[ts(export, export_to = "../../../packages/web/src/generated/")]
-pub struct BookQueryRequest {
-    pub query: String,
-    pub intent: BookQueryIntent,
-    pub targets: Vec<String>,
-    pub obligations: Vec<QueryObligation>,
-    pub anchor_lid: String,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct QueryBudgets {
     pub version: String,
@@ -606,73 +580,12 @@ pub enum QueryOutcome {
 }
 
 pub fn validate_book_query_request(request: &BookQueryRequest) -> Result<(), QueryOutcome> {
-    let mut missing_requirements = Vec::new();
-    let mut target_issues = Vec::new();
-    if request.query.trim().is_empty() {
-        missing_requirements.push("query".into());
-    }
-    if request.anchor_lid.trim().is_empty() {
-        missing_requirements.push("anchor_lid".into());
-    }
-    if request.targets.is_empty() {
-        missing_requirements.push("targets".into());
-    }
-    if request.obligations.is_empty() {
-        missing_requirements.push("obligations".into());
-    }
-
-    let target_range = match request.intent {
-        BookQueryIntent::Definition | BookQueryIntent::Explanation => 1..=3,
-        BookQueryIntent::Relation | BookQueryIntent::Comparison => 2..=3,
-    };
-    if !request.targets.is_empty() && !target_range.contains(&request.targets.len()) {
-        target_issues.push(format!(
-            "intent {:?} requires {} targets",
-            request.intent,
-            if matches!(
-                request.intent,
-                BookQueryIntent::Definition | BookQueryIntent::Explanation
-            ) {
-                "1..3"
-            } else {
-                "2..3"
-            }
-        ));
-    }
-    if request
-        .targets
-        .iter()
-        .any(|target| target.trim().is_empty())
-    {
-        target_issues.push("targets must not contain empty items".into());
-    }
-    let unique_targets: HashSet<String> = request
-        .targets
-        .iter()
-        .map(|target| target.trim().to_lowercase())
-        .collect();
-    if unique_targets.len() != request.targets.len() {
-        target_issues.push("targets must be unique".into());
-    }
-    if request.obligations.len() > 3 {
-        missing_requirements.push("obligations must contain 1..3 items".into());
-    }
-    if request
-        .obligations
-        .iter()
-        .any(|obligation| obligation.requirement.trim().is_empty())
-    {
-        missing_requirements.push("obligations must not contain empty requirements".into());
-    }
-
-    if missing_requirements.is_empty() && target_issues.is_empty() {
-        Ok(())
-    } else {
-        Err(QueryOutcome::InvalidPlan {
-            missing_requirements,
-            target_issues,
-        })
-    }
+    book_tool_contracts::validate_query_request(request).map_err(|issues| {
+        QueryOutcome::InvalidPlan {
+            missing_requirements: issues.missing_requirements,
+            target_issues: issues.target_issues,
+        }
+    })
 }
 
 pub fn parse_book_query_request(

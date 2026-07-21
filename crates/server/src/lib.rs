@@ -7,6 +7,10 @@
 //! 路由是**纯函数 `route(&mut AppState, Req) -> Reply`**(脱 socket 可单测,守 A2);
 //! socket 绑定 / worker 线程 / Mutex 锁 / 时间戳生成 / adapter 装配在 `main.rs`。
 //! 外层 E agent(S10f)、静态资源(S10e)留后续子切片。
+use book_tool_contracts::{
+    from_rest_alias, validate_input, BookToolId, BookToolInput, ContextInput,
+    PaperReadingGuideInput,
+};
 use memory::{
     classify_profile_fact_privacy, classify_profile_privacy, Anchor, Applicability,
     BackgroundClaim, CapabilityClaim, CollectionRuleMatcher, ConstraintClaim, ExplicitProfileFact,
@@ -48,7 +52,7 @@ use runtime::{
     Message, ModelAdapter, ParsedResponse, ProviderConfig, ProviderRegistry, ToolSpec,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsString;
 use std::io::Write;
@@ -1197,9 +1201,11 @@ where
     let path_exists = path.try_exists().map_err(|error| {
         agent_history_load_error(path, "read", format!("检查 history 路径失败: {error}"))
     })?;
-    let backup_exists = agent_history_backup_path(path).try_exists().map_err(|error| {
-        agent_history_load_error(path, "recovery", format!("检查 history 备份失败: {error}"))
-    })?;
+    let backup_exists = agent_history_backup_path(path)
+        .try_exists()
+        .map_err(|error| {
+            agent_history_load_error(path, "recovery", format!("检查 history 备份失败: {error}"))
+        })?;
     if !path_exists && !backup_exists {
         return Ok(AgentHistory::default());
     }
@@ -2406,8 +2412,7 @@ fn route_open_book(state: &mut AppState, body: &str, now: &str) -> Reply {
         return err_reply(&error);
     }
     let mut history_candidate = state.agent_history.clone();
-    let messages =
-        ensure_agent_history_for_book(&mut history_candidate, &book.base.book_id, now);
+    let messages = ensure_agent_history_for_book(&mut history_candidate, &book.base.book_id, now);
     if let Err(e) = commit_agent_history_candidate(state, history_candidate) {
         return err_reply(&e);
     }
@@ -2648,6 +2653,160 @@ fn reader_state_response(book: &Book, reader: &Reader) -> serde_json::Value {
     })
 }
 
+fn bind_rest_book_input(
+    id: BookToolId,
+    query: &HashMap<String, String>,
+) -> Result<BookToolInput, Reply> {
+    if id == BookToolId::SearchText {
+        return bind_rest_search_text_input(query);
+    }
+    let mut canonical = Map::new();
+    for (transport_key, value) in query {
+        let key = if id == BookToolId::Text && transport_key == "end" {
+            "end_lid"
+        } else {
+            transport_key.as_str()
+        };
+        let value = if id == BookToolId::Context && key == "k" {
+            match value.parse::<usize>() {
+                Ok(value) => json!(value),
+                Err(_) => return Err(validation("BOOK_TOOL_INPUT_INVALID", "k 须为非负整数")),
+            }
+        } else {
+            Value::String(value.clone())
+        };
+        canonical.insert(key.to_string(), value);
+    }
+    validate_input(id, Value::Object(canonical))
+        .map_err(|error| validation(error.code, &error.message))
+}
+
+fn bind_rest_search_text_input(query: &HashMap<String, String>) -> Result<BookToolInput, Reply> {
+    const ALLOWED: &[&str] = &[
+        "query",
+        "match_mode",
+        "within_lid",
+        "relative_lid",
+        "direction",
+        "order",
+        "cursor",
+        "page_size",
+    ];
+    if let Some(key) = query.keys().find(|key| !ALLOWED.contains(&key.as_str())) {
+        return Err(validation(
+            "BOOK_TOOL_INPUT_INVALID",
+            &format!("unknown search_text query parameter: {key}"),
+        ));
+    }
+
+    let relative_lid = query.get("relative_lid");
+    let direction = query.get("direction");
+    if relative_lid.is_some() != direction.is_some() {
+        return Err(validation(
+            "SEARCH_SCOPE_INVALID",
+            "relative_lid and direction must be provided together",
+        ));
+    }
+
+    let mut canonical = Map::new();
+    for key in ["query", "match_mode", "order", "cursor"] {
+        if let Some(value) = query.get(key) {
+            canonical.insert(key.into(), Value::String(value.clone()));
+        }
+    }
+    if let Some(value) = query.get("page_size") {
+        let page_size = value.parse::<usize>().map_err(|_| {
+            validation(
+                "BOOK_TOOL_INPUT_INVALID",
+                "page_size must be an unsigned integer",
+            )
+        })?;
+        canonical.insert("page_size".into(), json!(page_size));
+    }
+
+    let mut scope = Map::new();
+    if let Some(within_lid) = query.get("within_lid") {
+        scope.insert("within_lid".into(), Value::String(within_lid.clone()));
+    }
+    if let (Some(relative_lid), Some(direction)) = (relative_lid, direction) {
+        scope.insert(
+            "relative_to".into(),
+            json!({"lid": relative_lid, "direction": direction}),
+        );
+    }
+    if !scope.is_empty() {
+        canonical.insert("scope".into(), Value::Object(scope));
+    }
+
+    validate_input(BookToolId::SearchText, Value::Object(canonical))
+        .map_err(|error| validation(error.code, &error.message))
+}
+
+fn route_canonical_readonly_book_tool(book: &Book, id: BookToolId, input: BookToolInput) -> Reply {
+    match (id, input) {
+        (BookToolId::Manifest, BookToolInput::Empty(_)) => ok_json(&book.manifest()),
+        (BookToolId::Text, BookToolInput::Text(input)) => {
+            match book.text(&input.lid, input.end_lid.as_deref()) {
+                Ok(text) => ok_json(&json!({ "lid": input.lid, "text": text })),
+                Err(error) => err_reply(&error),
+            }
+        }
+        (BookToolId::SearchText, BookToolInput::SearchText(input)) => {
+            match book.search_text(&input) {
+                Ok(result) => ok_json(&result),
+                Err(error) => err_reply(&error),
+            }
+        }
+        (
+            BookToolId::Context,
+            BookToolInput::Context(ContextInput {
+                lid,
+                granularity,
+                k,
+            }),
+        ) => {
+            let granularity = granularity.map(|value| value.as_str());
+            match book.context(&lid, granularity, k) {
+                Ok(context) => ok_json(&context),
+                Err(error) => err_reply(&error),
+            }
+        }
+        (BookToolId::Concept, BookToolInput::Concept(input)) => match book.concept(&input.name) {
+            Ok(concept) => ok_json(&concept),
+            Err(error) => err_reply(&error),
+        },
+        (BookToolId::Structure, BookToolInput::At(input)) => {
+            match book.structure(input.at.as_deref()) {
+                Ok(projection) => ok_json(&projection),
+                Err(error) => err_reply(&error),
+            }
+        }
+        (BookToolId::GuidePath, BookToolInput::At(input)) => {
+            match book.guide_path(input.at.as_deref()) {
+                Ok(path) => ok_json(&path),
+                Err(error) => err_reply(&error),
+            }
+        }
+        (BookToolId::PaperMetadata, BookToolInput::Empty(_)) => {
+            ok_json(&book.paper_metadata_projection())
+        }
+        (BookToolId::PaperLexicon, BookToolInput::Empty(_)) => {
+            ok_json(&book.paper_lexicon_projection())
+        }
+        (
+            BookToolId::PaperReadingGuide,
+            BookToolInput::PaperReadingGuide(PaperReadingGuideInput { mode, stage }),
+        ) => match book.paper_reading_guide(Some(mode.as_str()), Some(stage.as_str())) {
+            Ok(guide) => ok_json(&guide),
+            Err(error) => err_reply(&error),
+        },
+        _ => validation(
+            "BOOK_TOOL_CONTRACT_INVALID",
+            "REST Book tool resolved to an incompatible input contract",
+        ),
+    }
+}
+
 /// `book.*` 只读叶子 → GET(S10a)。`store` 仅 route policy 使用(派生 BookReadingState 原始信号)。
 fn route_book(
     book: &Book,
@@ -2656,8 +2815,16 @@ fn route_book(
     leaf: &str,
     q: &HashMap<String, String>,
 ) -> Reply {
+    if let Some(id) = from_rest_alias(leaf) {
+        if !matches!(id, BookToolId::Query | BookToolId::Synthesize) {
+            let input = match bind_rest_book_input(id, q) {
+                Ok(input) => input,
+                Err(reply) => return reply,
+            };
+            return route_canonical_readonly_book_tool(book, id, input);
+        }
+    }
     match leaf {
-        "manifest" => ok_json(&book.manifest()),
         "library" => {
             let root = book_library_root(book_dir);
             let books = list_book_library(&root);
@@ -2668,41 +2835,6 @@ fn route_book(
         "source_manifest" => route_source_manifest(book_dir),
         "pdf_source_map" => route_pdf_source_map(book_dir),
         "paper_minimap" => ok_json(&book.paper_minimap()),
-        "text" => {
-            let Some(lid) = q.get("lid") else {
-                return validation("INVALID_RANGE", "book.text 需 lid 查询参数");
-            };
-            match book.text(lid, q.get("end").map(|s| s.as_str())) {
-                Ok(t) => ok_json(&json!({ "lid": lid, "text": t })),
-                Err(e) => err_reply(&e),
-            }
-        }
-        "context" => {
-            let Some(lid) = q.get("lid") else {
-                return validation("INVALID_RANGE", "book.context 需 lid 查询参数");
-            };
-            let k = match q.get("k") {
-                None => None,
-                Some(s) => match s.parse::<usize>() {
-                    Ok(n) => Some(n),
-                    Err(_) => return validation("INVALID_K", "k 须为非负整数"),
-                },
-            };
-            let granularity = q.get("granularity").map(|s| s.as_str());
-            match book.context(lid, granularity, k) {
-                Ok(c) => ok_json(&c),
-                Err(e) => err_reply(&e),
-            }
-        }
-        "concept" => {
-            let Some(name) = q.get("name") else {
-                return validation("INVALID_RANGE", "book.concept 需 name 查询参数");
-            };
-            match book.concept(name) {
-                Ok(c) => ok_json(&c),
-                Err(e) => err_reply(&e),
-            }
-        }
         "formula_semantics" => {
             let Some(lid) = q.get("lid") else {
                 return validation("INVALID_RANGE", "book.formula_semantics 需 lid 查询参数");
@@ -2716,23 +2848,6 @@ fn route_book(
                 }),
             }
         }
-        "structure" => match book.structure(q.get("at").map(|s| s.as_str())) {
-            Ok(p) => ok_json(&p),
-            Err(e) => err_reply(&e),
-        },
-        "guide_path" => match book.guide_path(q.get("at").map(|s| s.as_str())) {
-            Ok(p) => ok_json(&p),
-            Err(e) => err_reply(&e),
-        },
-        "paper_metadata" => ok_json(&book.paper_metadata_projection()),
-        "paper_lexicon" => ok_json(&book.paper_lexicon_projection()),
-        "paper_reading_guide" => match book.paper_reading_guide(
-            q.get("mode").map(|s| s.as_str()),
-            q.get("stage").map(|s| s.as_str()),
-        ) {
-            Ok(p) => ok_json(&p),
-            Err(e) => err_reply(&e),
-        },
         "route_from" => {
             let Some(at) = q.get("at") else {
                 return validation("INVALID_RANGE", "book.route_from 需 at 查询参数");
@@ -7831,18 +7946,22 @@ fn route_synthesize(state: &mut AppState, body: &str) -> Reply {
         Ok(v) => v,
         Err(reply) => return reply,
     };
-    let Some(arr) = v.get("lids").and_then(|x| x.as_array()) else {
-        return validation("INVALID_RANGE", "book.synthesize 需 lids 数组");
+    let input = match validate_input(BookToolId::Synthesize, v) {
+        Ok(BookToolInput::Synthesize(input)) => input,
+        Ok(_) => {
+            return validation(
+                "BOOK_TOOL_CONTRACT_INVALID",
+                "synthesize resolved to an incompatible input contract",
+            )
+        }
+        Err(error) => return validation(error.code, &error.message),
     };
-    let lids: Vec<String> = arr
-        .iter()
-        .filter_map(|x| x.as_str().map(String::from))
-        .collect();
-    if lids.len() != arr.len() {
-        return validation("INVALID_RANGE", "book.synthesize lids 必须全是字符串");
-    }
-    let task = v.get("task").and_then(|x| x.as_str());
-    match synthesize(&state.book, &lids, task, state.adapter.as_ref()) {
+    match synthesize(
+        &state.book,
+        &input.lids,
+        input.task.as_deref(),
+        state.adapter.as_ref(),
+    ) {
         Ok(resp) => ok_json(&resp),
         Err(e) => err_reply(&e),
     }
@@ -9963,9 +10082,7 @@ fn route_agent_history_delete(state: &mut AppState, body: &str, now: &str) -> Re
         );
     }
     candidate.pending_memory_ops.remove(session_id);
-    candidate
-        .pending_governance_mutations
-        .remove(session_id);
+    candidate.pending_governance_mutations.remove(session_id);
     if candidate
         .active_by_book
         .get(&book_id)
@@ -11113,7 +11230,9 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error.error_code, "STAGE_RUNNER_NOT_INSTALLED");
-        assert!(error.message.contains(&missing_configured.display().to_string()));
+        assert!(error
+            .message
+            .contains(&missing_configured.display().to_string()));
     }
 
     fn wait_for_job_status(book_dir: &Path, job_id: &str, expected: &str) -> serde_json::Value {
@@ -12695,10 +12814,8 @@ mod tests {
         write_pdf_runtime_artifacts(&mut s);
         rewrite_pdf_runtime_artifacts_v2(&s, "char_exact", 3);
         let source_map_path = s.book_dir.join("pdf_source_map.json");
-        let mut wrong_book_map: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(&source_map_path).unwrap(),
-        )
-        .unwrap();
+        let mut wrong_book_map: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&source_map_path).unwrap()).unwrap();
         wrong_book_map["book_id"] = serde_json::json!("another-book");
         std::fs::write(source_map_path, wrong_book_map.to_string()).unwrap();
         let rejected = get(&mut s, "/book/pdf_source_map");
@@ -13162,7 +13279,7 @@ mod tests {
         assert!(nf.body.contains("LID_NOT_FOUND"));
         let miss = get(&mut s, "/book/text");
         assert_eq!(miss.status, 400);
-        assert!(miss.body.contains("INVALID_RANGE"));
+        assert!(miss.body.contains("BOOK_TOOL_INPUT_INVALID"));
     }
 
     #[test]
@@ -13894,6 +14011,148 @@ mod tests {
         let r = post(&mut s, "/reader/goto", "{not json");
         assert_eq!(r.status, 400);
         assert!(r.body.contains("INVALID_RANGE"));
+    }
+
+    #[test]
+    fn book_tool_contract_has_schema_and_binding_parity() {
+        let resident = runtime::orchestrator::tool_specs();
+        let mcp_list = mcp::tools_list_result();
+        let mcp_tools = mcp_list["tools"].as_array().unwrap();
+        for contract in book_tool_contracts::contracts() {
+            let (Some(resident_alias), Some(mcp_alias)) =
+                (contract.aliases.resident, contract.aliases.mcp)
+            else {
+                continue;
+            };
+            let resident_schema = &resident
+                .iter()
+                .find(|tool| tool.name == resident_alias)
+                .unwrap_or_else(|| panic!("missing Resident alias {resident_alias}"))
+                .parameters;
+            let mcp_schema = &mcp_tools
+                .iter()
+                .find(|tool| tool["name"] == mcp_alias)
+                .unwrap_or_else(|| panic!("missing MCP alias {mcp_alias}"))["inputSchema"];
+            assert_eq!(
+                resident_schema, mcp_schema,
+                "schema drift for {resident_alias}"
+            );
+        }
+
+        let mut state = state_named("book-tool-contract-parity");
+        let rest = get(&mut state, "/book/text?lid=1.1&end=1.1");
+        let mcp = mcp::dispatch_mcp_tool(
+            &mut state,
+            "book_text",
+            json!({"lid": "1.1", "end_lid": "1.1"}),
+            "1000",
+        );
+        assert_eq!(rest.status, 200);
+        assert_eq!(rest.body, mcp.body);
+
+        let rest_invalid = get(&mut state, "/book/text?lid=1.1&unexpected=true");
+        let mcp_invalid = mcp::dispatch_mcp_tool(
+            &mut state,
+            "book_text",
+            json!({"lid": "1.1", "unexpected": true}),
+            "1001",
+        );
+        assert_eq!(rest_invalid.status, 400);
+        assert_eq!(mcp_invalid.status, 400);
+        assert!(rest_invalid.body.contains("BOOK_TOOL_INPUT_INVALID"));
+        assert!(mcp_invalid.body.contains("BOOK_TOOL_INPUT_INVALID"));
+    }
+
+    #[test]
+    fn search_text_rest_mcp_and_resident_contracts_have_parity() {
+        let mut state = state_named("search-text-parity");
+        state.book = Book::new(sample_base(), &"X".repeat(100));
+
+        let rest = get(
+            &mut state,
+            "/book/search_text?query=XX&match_mode=exact&within_lid=1.1&order=document&page_size=2",
+        );
+        let mcp = mcp::dispatch_mcp_tool(
+            &mut state,
+            "book_search_text",
+            json!({
+                "query":"XX",
+                "match_mode":"exact",
+                "scope":{"within_lid":"1.1"},
+                "order":"document",
+                "page_size":2
+            }),
+            "1000",
+        );
+        assert_eq!(rest.status, 200);
+        assert_eq!(rest.body, mcp.body);
+        let result: Value = serde_json::from_str(&rest.body).unwrap();
+        assert_eq!(result["total_occurrences"], 99);
+        assert_eq!(result["occurrences"][0]["ordinal"], 1);
+        assert_eq!(result["occurrences"][1]["ordinal"], 2);
+
+        let empty_intersection = get(
+            &mut state,
+            "/book/search_text?query=X&within_lid=1.1&relative_lid=1.1&direction=after",
+        );
+        assert_eq!(empty_intersection.status, 200);
+        assert!(empty_intersection.body.contains("\"total_occurrences\":0"));
+
+        let incomplete_relative = get(&mut state, "/book/search_text?query=X&relative_lid=1.1");
+        assert_eq!(incomplete_relative.status, 400);
+        assert!(incomplete_relative.body.contains("SEARCH_SCOPE_INVALID"));
+        let unknown = get(&mut state, "/book/search_text?query=X&scope=1.1");
+        assert_eq!(unknown.status, 400);
+        assert!(unknown.body.contains("BOOK_TOOL_INPUT_INVALID"));
+    }
+
+    #[test]
+    fn search_text_real_book_mcp_pages_match_the_core_result() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(".understand-book/quantification-essence");
+        let mut state = state_named("search-real-mcp");
+        state.book = Book::load(path.to_str().unwrap()).unwrap();
+        let query = r"\sqrt{2\ln N}";
+        let mut cursor: Option<String> = None;
+        let mut ordinals = Vec::new();
+        let mut ranges = Vec::new();
+
+        loop {
+            let arguments = if let Some(cursor) = &cursor {
+                json!({"query":query, "page_size":7, "cursor":cursor})
+            } else {
+                json!({"query":query, "page_size":7})
+            };
+            let canonical = match book_tool_contracts::validate_input(
+                BookToolId::SearchText,
+                arguments.clone(),
+            )
+            .unwrap()
+            {
+                BookToolInput::SearchText(input) => input,
+                _ => unreachable!(),
+            };
+            let core = state.book.search_text(&canonical).unwrap();
+            let reply = mcp::dispatch_mcp_tool(&mut state, "book_search_text", arguments, "1000");
+            assert_eq!(reply.status, 200);
+            let mcp: read_tools::SearchTextResult = serde_json::from_str(&reply.body).unwrap();
+            assert_eq!(mcp, core);
+            assert_eq!(mcp.total_occurrences, 32);
+            ordinals.extend(mcp.occurrences.iter().map(|occurrence| occurrence.ordinal));
+            ranges.extend(
+                mcp.occurrences
+                    .iter()
+                    .map(|occurrence| occurrence.source_range_utf16.clone()),
+            );
+            let Some(next) = mcp.next_cursor else {
+                break;
+            };
+            cursor = Some(next);
+        }
+        assert_eq!(ordinals, (1..=32).collect::<Vec<_>>());
+        assert_eq!(ranges.len(), 32);
+        assert_eq!(state.visitor_sessions.len(), 0);
     }
 
     // ── S10c book.query POST ────────────────────────────────
@@ -15822,12 +16081,7 @@ Version 1.2 and bare 1.1 stay unchanged.
         let mut state = state_named("agent-history-read-only");
         let history_path = tmp("agent-history-read-only-file");
         state.history_path = Some(history_path.clone());
-        let created = post_at(
-            &mut state,
-            "/agent/new",
-            "{}",
-            "2026-07-16T00:00:00Z",
-        );
+        let created = post_at(&mut state, "/agent/new", "{}", "2026-07-16T00:00:00Z");
         assert_eq!(created.status, 200, "{}", created.body);
 
         let bytes_before_get = std::fs::read(&history_path).unwrap();
@@ -15855,12 +16109,7 @@ Version 1.2 and bare 1.1 stay unchanged.
 
         let history_before_failed_mutation = serde_json::to_value(&state.agent_history).unwrap();
         let messages_before_failed_mutation = serde_json::to_value(&state.messages).unwrap();
-        let failed_mutation = post_at(
-            &mut state,
-            "/agent/new",
-            "{}",
-            "2026-07-16T00:01:00Z",
-        );
+        let failed_mutation = post_at(&mut state, "/agent/new", "{}", "2026-07-16T00:01:00Z");
         assert_eq!(failed_mutation.status, 500, "{}", failed_mutation.body);
         assert_eq!(
             serde_json::to_value(&state.agent_history).unwrap(),
@@ -15873,12 +16122,7 @@ Version 1.2 and bare 1.1 stay unchanged.
         assert_eq!(std::fs::read(&history_path).unwrap(), bytes_before_get);
 
         state.history_path = Some(history_path.clone());
-        let committed = post_at(
-            &mut state,
-            "/agent/new",
-            "{}",
-            "2026-07-16T00:02:00Z",
-        );
+        let committed = post_at(&mut state, "/agent/new", "{}", "2026-07-16T00:02:00Z");
         assert_eq!(committed.status, 200, "{}", committed.body);
         assert_ne!(std::fs::read(&history_path).unwrap(), bytes_before_get);
         assert_eq!(
@@ -16100,10 +16344,8 @@ Version 1.2 and bare 1.1 stay unchanged.
         )
         .unwrap();
 
-        let first = serde_json::to_value(
-            load_agent_history(&Some(history_path.clone())).unwrap(),
-        )
-        .unwrap();
+        let first =
+            serde_json::to_value(load_agent_history(&Some(history_path.clone())).unwrap()).unwrap();
         let second =
             serde_json::to_value(load_agent_history(&Some(history_path)).unwrap()).unwrap();
         assert_eq!(first["sessions"][0]["turns"][0]["user_turn_ordinal"], 1);
@@ -16202,8 +16444,7 @@ Version 1.2 and bare 1.1 stay unchanged.
         let incompatible_path = tmp("agent-history-load-incompatible-schema");
         std::fs::write(&incompatible_path, br#"{"sessions":"not-a-session-list"}"#).unwrap();
         let incompatible_before = std::fs::read(&incompatible_path).unwrap();
-        let incompatible_error =
-            load_agent_history(&Some(incompatible_path.clone())).unwrap_err();
+        let incompatible_error = load_agent_history(&Some(incompatible_path.clone())).unwrap_err();
         assert!(incompatible_error.message.contains("stage=decode"));
         assert_eq!(
             std::fs::read(&incompatible_path).unwrap(),

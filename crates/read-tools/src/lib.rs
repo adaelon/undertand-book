@@ -4,10 +4,20 @@
 use base_schema::{
     Direction, EdgeScope, FormulaSemantics, GraphNodeType, LidNode, NodeKind, ReadOnlyBase, Span,
 };
+use book_tool_contracts::{
+    SearchMatchMode, SearchOrder, SearchRelativeDirection, SearchTextInput, SearchTextScope,
+};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use ts_rs::TS;
+use unicode_casefold::UnicodeCaseFold;
+use unicode_normalization::char::{canonical_combining_class, compose, decompose_compatible};
+
+/// Versioned normalized-search semantics. Dependency or Unicode-data upgrades must change this
+/// value because it is bound into every search cursor's canonical request digest.
+pub const SEARCH_TEXT_NORMALIZATION_VERSION: &str =
+    "nfkc-u17.0.0_unicode-normalization-0.1.25__full-casefold-u9.0.0_unicode-casefold-0.2.0__nonturkic-crlf-whitespace-v1";
 
 // API DTO 的 ts-rs 导出目标(相对本 crate src/):前端类型契约单一真相源 `[ADR-0028 决策6]`。
 // 与 base-schema(导出到 packages/core)分置:DTO 落 packages/web,跨指的 base 类型由 ts-rs 算相对 import。
@@ -1428,6 +1438,175 @@ pub struct ResolvedSource {
     pub highlighted_quote: String,
     pub context_before: String,
     pub context_after: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub enum TextMatchType {
+    Exact,
+    Normalized,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct TextOccurrenceRange {
+    pub lid: String,
+    pub start_utf16: usize,
+    pub end_utf16: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct HeadingPathItem {
+    pub lid: String,
+    pub title: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct TextOccurrence {
+    pub ordinal: usize,
+    pub start_lid: String,
+    pub end_lid: String,
+    pub source_range_utf16: Span,
+    pub ranges: Vec<TextOccurrenceRange>,
+    pub heading_path: Vec<HeadingPathItem>,
+    pub excerpt: String,
+    pub match_type: TextMatchType,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct SearchSectionCount {
+    pub section_lid: String,
+    pub label: String,
+    pub count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ExactSearchResult {
+    pub source_revision: String,
+    pub exhaustive: bool,
+    pub total_occurrences: usize,
+    pub total_lids: usize,
+    pub occurrences: Vec<TextOccurrence>,
+    pub section_counts: Vec<SearchSectionCount>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct SearchTextResult {
+    pub version: String,
+    pub source_revision: String,
+    pub exhaustive: bool,
+    pub total_occurrences: usize,
+    pub total_lids: usize,
+    pub occurrences: Vec<TextOccurrence>,
+    pub section_counts: Vec<SearchSectionCount>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct MappedChar {
+    value: char,
+    source_start_utf16: usize,
+    source_end_utf16: usize,
+}
+
+#[derive(Debug, Clone)]
+struct MappedUnit {
+    value: u16,
+    source_start_utf16: usize,
+    source_end_utf16: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SearchCursorV1 {
+    version: String,
+    source_revision: String,
+    request_digest: String,
+    offset: usize,
+}
+
+enum PreparedTextSearch {
+    Exact {
+        query: Vec<u16>,
+        scope: Span,
+    },
+    Normalized {
+        source_units: Vec<MappedUnit>,
+        query: Vec<u16>,
+    },
+}
+
+impl PreparedTextSearch {
+    fn visit_matches(
+        &self,
+        source_u16: &[u16],
+        mut visitor: impl FnMut(Span) -> Result<bool, ToolError>,
+    ) -> Result<(), ToolError> {
+        match self {
+            Self::Exact { query, scope } => {
+                if query.len() <= scope.end.saturating_sub(scope.start) {
+                    let last_start = scope.end - query.len();
+                    for start in scope.start..=last_start {
+                        let end = start + query.len();
+                        if source_u16[start..end] == *query.as_slice()
+                            && !visitor(Span { start, end })?
+                        {
+                            break;
+                        }
+                    }
+                }
+            }
+            Self::Normalized {
+                source_units,
+                query,
+            } => {
+                let mut previous = None;
+                if query.len() <= source_units.len() {
+                    for start in 0..=source_units.len() - query.len() {
+                        let end = start + query.len();
+                        if !source_units[start..end]
+                            .iter()
+                            .map(|unit| unit.value)
+                            .eq(query.iter().copied())
+                        {
+                            continue;
+                        }
+                        let source_range = Span {
+                            start: source_units[start..end]
+                                .iter()
+                                .map(|unit| unit.source_start_utf16)
+                                .min()
+                                .expect("normalized match has mapped units"),
+                            end: source_units[start..end]
+                                .iter()
+                                .map(|unit| unit.source_end_utf16)
+                                .max()
+                                .expect("normalized match has mapped units"),
+                        };
+                        if previous.as_ref() == Some(&source_range) {
+                            continue;
+                        }
+                        previous = Some(source_range.clone());
+                        if !visitor(source_range)? {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+struct SearchAggregate {
+    total_occurrences: usize,
+    total_lids: usize,
+    section_counts: Vec<SearchSectionCount>,
 }
 
 pub fn disambiguate_source_labels(sources: &mut [ResolvedSource]) {
@@ -5186,6 +5365,553 @@ impl Book {
         leaves
     }
 
+    pub fn search_text_exact(
+        &self,
+        query: &str,
+        scope: Option<Span>,
+    ) -> Result<ExactSearchResult, ToolError> {
+        if query.trim().is_empty() {
+            return Err(search_error(
+                "SEARCH_QUERY_EMPTY",
+                "search query must contain non-whitespace text",
+            ));
+        }
+        let leaves = self.validated_search_leaves()?;
+        let scope = scope.unwrap_or(Span {
+            start: 0,
+            end: self.source_u16.len(),
+        });
+        if scope.start > scope.end
+            || scope.end > self.source_u16.len()
+            || !is_utf16_boundary(&self.source_u16, scope.start)
+            || !is_utf16_boundary(&self.source_u16, scope.end)
+        {
+            return Err(search_error(
+                "SEARCH_SCOPE_INVALID",
+                "search scope must be an in-bounds UTF-16 range",
+            ));
+        }
+
+        let query_u16: Vec<u16> = query.encode_utf16().collect();
+        let mut matches = Vec::new();
+        if query_u16.len() <= scope.end.saturating_sub(scope.start) {
+            let last_start = scope.end - query_u16.len();
+            for start in scope.start..=last_start {
+                let end = start + query_u16.len();
+                if self.source_u16[start..end] == query_u16 {
+                    matches.push(Span { start, end });
+                }
+            }
+        }
+        let source_revision = self.search_source_revision(&leaves)?;
+        self.build_search_scan(&leaves, source_revision, matches, TextMatchType::Exact)
+    }
+
+    pub fn search_text(&self, input: &SearchTextInput) -> Result<SearchTextResult, ToolError> {
+        let query_length = input.query.chars().count();
+        if input.query.trim().is_empty() {
+            return Err(search_error(
+                "SEARCH_QUERY_EMPTY",
+                "search query must contain non-whitespace text",
+            ));
+        }
+        if query_length > 4096 {
+            return Err(search_error(
+                "SEARCH_QUERY_TOO_LONG",
+                "search query must contain at most 4096 Unicode scalar values",
+            ));
+        }
+        if !(1..=50).contains(&input.page_size) {
+            return Err(search_error(
+                "BOOK_TOOL_INPUT_INVALID",
+                "page_size must be between 1 and 50",
+            ));
+        }
+
+        let scope = self.resolve_search_scope(input.scope.as_ref())?;
+        let leaves = self.validated_search_leaves()?;
+        let source_revision = self.search_source_revision(&leaves)?;
+        let request_digest = search_request_digest(input)?;
+        let offset = match input.cursor.as_deref() {
+            None => 0,
+            Some(cursor) => {
+                let cursor = decode_search_cursor(cursor)?;
+                if cursor.source_revision != source_revision {
+                    return Err(search_error(
+                        "SEARCH_CURSOR_STALE",
+                        "search cursor belongs to a different source revision",
+                    ));
+                }
+                if cursor.request_digest != request_digest {
+                    return Err(search_error(
+                        "SEARCH_CURSOR_MISMATCH",
+                        "search cursor does not match the canonical request",
+                    ));
+                }
+                cursor.offset
+            }
+        };
+
+        let prepared = self.prepare_text_search(&input.query, input.match_mode, scope)?;
+        let aggregate = self.aggregate_search_matches(&leaves, &prepared)?;
+        if offset > 0 && offset >= aggregate.total_occurrences {
+            return Err(search_error(
+                "SEARCH_CURSOR_INVALID",
+                "search cursor offset is outside the occurrence set",
+            ));
+        }
+
+        let end = offset
+            .saturating_add(input.page_size)
+            .min(aggregate.total_occurrences);
+        let (forward_start, forward_end) = match input.order {
+            SearchOrder::Document => (offset, end),
+            SearchOrder::ReverseDocument => (
+                aggregate.total_occurrences - end,
+                aggregate.total_occurrences - offset,
+            ),
+        };
+        let match_type = match input.match_mode {
+            SearchMatchMode::Exact => TextMatchType::Exact,
+            SearchMatchMode::Normalized => TextMatchType::Normalized,
+        };
+        let mut forward_index = 0;
+        let mut occurrences = Vec::with_capacity(end.saturating_sub(offset));
+        prepared.visit_matches(&self.source_u16, |source_range| {
+            if forward_index >= forward_end {
+                return Ok(false);
+            }
+            let current = forward_index;
+            forward_index += 1;
+            if current >= forward_start {
+                occurrences.push(self.search_occurrence(
+                    &leaves,
+                    source_range,
+                    match_type,
+                    current + 1,
+                )?);
+            }
+            Ok(true)
+        })?;
+        if input.order == SearchOrder::ReverseDocument {
+            occurrences.reverse();
+        }
+
+        let next_cursor = if end < aggregate.total_occurrences {
+            Some(encode_search_cursor(&SearchCursorV1 {
+                version: "search_text.v1".into(),
+                source_revision: source_revision.clone(),
+                request_digest,
+                offset: end,
+            })?)
+        } else {
+            None
+        };
+        Ok(SearchTextResult {
+            version: "search_text.v1".into(),
+            source_revision,
+            exhaustive: true,
+            total_occurrences: aggregate.total_occurrences,
+            total_lids: aggregate.total_lids,
+            occurrences,
+            section_counts: aggregate.section_counts,
+            next_cursor,
+        })
+    }
+
+    fn prepare_text_search(
+        &self,
+        query: &str,
+        match_mode: SearchMatchMode,
+        scope: Span,
+    ) -> Result<PreparedTextSearch, ToolError> {
+        if scope.start > scope.end
+            || scope.end > self.source_u16.len()
+            || !is_utf16_boundary(&self.source_u16, scope.start)
+            || !is_utf16_boundary(&self.source_u16, scope.end)
+        {
+            return Err(search_error(
+                "SEARCH_SCOPE_INVALID",
+                "search scope must be an in-bounds UTF-16 range",
+            ));
+        }
+        match match_mode {
+            SearchMatchMode::Exact => Ok(PreparedTextSearch::Exact {
+                query: query.encode_utf16().collect(),
+                scope,
+            }),
+            SearchMatchMode::Normalized => {
+                let source_units =
+                    normalize_mapped_units(&self.source_u16, scope.start, scope.end)?;
+                let query_u16: Vec<u16> = query.encode_utf16().collect();
+                let query_units = normalize_mapped_units(&query_u16, 0, query_u16.len())?;
+                let query = query_units
+                    .iter()
+                    .map(|unit| unit.value)
+                    .collect::<Vec<_>>();
+                if query.is_empty() {
+                    return Err(search_error(
+                        "SEARCH_QUERY_EMPTY",
+                        "normalized search query is empty",
+                    ));
+                }
+                Ok(PreparedTextSearch::Normalized {
+                    source_units,
+                    query,
+                })
+            }
+        }
+    }
+
+    fn aggregate_search_matches(
+        &self,
+        leaves: &[&LidNode],
+        prepared: &PreparedTextSearch,
+    ) -> Result<SearchAggregate, ToolError> {
+        let mut total_occurrences = 0usize;
+        let mut touched_leaves = vec![false; leaves.len()];
+        let mut leaf_sections = vec![None::<usize>; leaves.len()];
+        let mut section_counts: Vec<SearchSectionCount> = Vec::new();
+        prepared.visit_matches(&self.source_u16, |source_range| {
+            let leaf_range = search_match_leaf_range(leaves, &source_range)?;
+            total_occurrences += 1;
+            for index in leaf_range.clone() {
+                touched_leaves[index] = true;
+            }
+            let leaf_index = leaf_range.start;
+            if let Some(section_index) = leaf_sections[leaf_index] {
+                section_counts[section_index].count += 1;
+            } else {
+                let (section_lid, label) = self.search_section(leaves[leaf_index])?;
+                let section_index = if let Some(section_index) = section_counts
+                    .iter()
+                    .position(|section| section.section_lid == section_lid)
+                {
+                    section_counts[section_index].count += 1;
+                    section_index
+                } else {
+                    let section_index = section_counts.len();
+                    section_counts.push(SearchSectionCount {
+                        section_lid,
+                        label,
+                        count: 1,
+                    });
+                    section_index
+                };
+                leaf_sections[leaf_index] = Some(section_index);
+            }
+            Ok(true)
+        })?;
+        Ok(SearchAggregate {
+            total_occurrences,
+            total_lids: touched_leaves
+                .into_iter()
+                .filter(|touched| *touched)
+                .count(),
+            section_counts,
+        })
+    }
+
+    fn search_occurrence(
+        &self,
+        leaves: &[&LidNode],
+        source_range: Span,
+        match_type: TextMatchType,
+        ordinal: usize,
+    ) -> Result<TextOccurrence, ToolError> {
+        let leaf_range = search_match_leaf_range(leaves, &source_range)?;
+        let mut ranges = Vec::with_capacity(leaf_range.len());
+        for leaf in &leaves[leaf_range] {
+            let overlap_start = source_range.start.max(leaf.span.start);
+            let overlap_end = source_range.end.min(leaf.span.end);
+            ranges.push(TextOccurrenceRange {
+                lid: leaf.lid.clone(),
+                start_utf16: overlap_start - leaf.span.start,
+                end_utf16: overlap_end - leaf.span.start,
+            });
+        }
+        let first_range = ranges.first().expect("validated match intersects a leaf");
+        let last_range = ranges.last().expect("validated match intersects a leaf");
+        let start_node = self.node(&first_range.lid)?;
+        Ok(TextOccurrence {
+            ordinal,
+            start_lid: first_range.lid.clone(),
+            end_lid: last_range.lid.clone(),
+            heading_path: self.source_heading_path_items(start_node)?,
+            excerpt: self.search_excerpt(source_range.start, source_range.end),
+            source_range_utf16: source_range,
+            ranges,
+            match_type,
+        })
+    }
+
+    fn build_search_scan(
+        &self,
+        leaves: &[&LidNode],
+        source_revision: String,
+        matches: Vec<Span>,
+        match_type: TextMatchType,
+    ) -> Result<ExactSearchResult, ToolError> {
+        let mut occurrences = Vec::with_capacity(matches.len());
+        for source_range in matches {
+            let first_leaf = leaves.partition_point(|leaf| leaf.span.end <= source_range.start);
+            let mut ranges = Vec::new();
+            for leaf in leaves[first_leaf..]
+                .iter()
+                .take_while(|leaf| leaf.span.start < source_range.end)
+            {
+                let overlap_start = source_range.start.max(leaf.span.start);
+                let overlap_end = source_range.end.min(leaf.span.end);
+                if overlap_start < overlap_end {
+                    ranges.push(TextOccurrenceRange {
+                        lid: leaf.lid.clone(),
+                        start_utf16: overlap_start - leaf.span.start,
+                        end_utf16: overlap_end - leaf.span.start,
+                    });
+                }
+            }
+            let Some(first_range) = ranges.first() else {
+                return Err(search_error(
+                    "SEARCH_SOURCE_INVALID",
+                    "a non-whitespace match did not intersect any source leaf",
+                ));
+            };
+            let last_range = ranges.last().expect("non-empty occurrence ranges");
+            let start_node = self.node(&first_range.lid)?;
+            occurrences.push(TextOccurrence {
+                ordinal: occurrences.len() + 1,
+                start_lid: first_range.lid.clone(),
+                end_lid: last_range.lid.clone(),
+                heading_path: self.source_heading_path_items(start_node)?,
+                excerpt: self.search_excerpt(source_range.start, source_range.end),
+                source_range_utf16: source_range,
+                ranges,
+                match_type,
+            });
+        }
+
+        let total_lids = occurrences
+            .iter()
+            .flat_map(|occurrence| occurrence.ranges.iter().map(|range| range.lid.as_str()))
+            .collect::<HashSet<_>>()
+            .len();
+        let mut section_counts: Vec<SearchSectionCount> = Vec::new();
+        for occurrence in &occurrences {
+            let leaf = self.node(&occurrence.start_lid)?;
+            let (section_lid, label) = self.search_section(leaf)?;
+            if let Some(section) = section_counts
+                .iter_mut()
+                .find(|section| section.section_lid == section_lid)
+            {
+                section.count += 1;
+            } else {
+                section_counts.push(SearchSectionCount {
+                    section_lid,
+                    label,
+                    count: 1,
+                });
+            }
+        }
+
+        Ok(ExactSearchResult {
+            source_revision,
+            exhaustive: true,
+            total_occurrences: occurrences.len(),
+            total_lids,
+            occurrences,
+            section_counts,
+        })
+    }
+
+    fn resolve_search_scope(&self, scope: Option<&SearchTextScope>) -> Result<Span, ToolError> {
+        let mut resolved = Span {
+            start: 0,
+            end: self.source_u16.len(),
+        };
+        let Some(scope) = scope else {
+            return Ok(resolved);
+        };
+        if let Some(within_lid) = &scope.within_lid {
+            let node = self.node(within_lid).map_err(|_| {
+                search_error(
+                    "SEARCH_SCOPE_INVALID",
+                    format!("within_lid does not exist: {within_lid}"),
+                )
+            })?;
+            resolved.start = resolved.start.max(node.span.start);
+            resolved.end = resolved.end.min(node.span.end);
+        }
+        if let Some(relative) = &scope.relative_to {
+            let node = self.node(&relative.lid).map_err(|_| {
+                search_error(
+                    "SEARCH_SCOPE_INVALID",
+                    format!("relative_to lid does not exist: {}", relative.lid),
+                )
+            })?;
+            match relative.direction {
+                SearchRelativeDirection::Before => resolved.end = resolved.end.min(node.span.start),
+                SearchRelativeDirection::After => {
+                    resolved.start = resolved.start.max(node.span.end)
+                }
+            }
+        }
+        if resolved.start > resolved.end {
+            resolved.start = resolved.end;
+        }
+        Ok(resolved)
+    }
+
+    fn validated_search_leaves(&self) -> Result<Vec<&LidNode>, ToolError> {
+        let leaves = self.source_leaves();
+        let mut previous_end = 0;
+        for leaf in &leaves {
+            if leaf.span.start >= leaf.span.end
+                || leaf.span.end > self.source_u16.len()
+                || !is_utf16_boundary(&self.source_u16, leaf.span.start)
+                || !is_utf16_boundary(&self.source_u16, leaf.span.end)
+            {
+                return Err(search_error(
+                    "SEARCH_SOURCE_INVALID",
+                    format!("invalid UTF-16 source span for leaf {}", leaf.lid),
+                ));
+            }
+            if leaf.span.start < previous_end {
+                return Err(search_error(
+                    "SEARCH_SOURCE_INVALID",
+                    format!("overlapping source leaf span at {}", leaf.lid),
+                ));
+            }
+            if !utf16_is_whitespace(&self.source_u16[previous_end..leaf.span.start]) {
+                return Err(search_error(
+                    "SEARCH_SOURCE_INVALID",
+                    format!("non-whitespace source gap before leaf {}", leaf.lid),
+                ));
+            }
+            previous_end = leaf.span.end;
+        }
+        if !utf16_is_whitespace(&self.source_u16[previous_end..]) {
+            return Err(search_error(
+                "SEARCH_SOURCE_INVALID",
+                "non-whitespace source tail is not owned by a leaf",
+            ));
+        }
+        Ok(leaves)
+    }
+
+    fn search_source_revision(&self, leaves: &[&LidNode]) -> Result<String, ToolError> {
+        #[derive(Serialize)]
+        struct RevisionLeaf<'a> {
+            lid: &'a str,
+            path: &'a [u32],
+            span: &'a Span,
+        }
+
+        let source = String::from_utf16(&self.source_u16).map_err(|_| {
+            search_error(
+                "SEARCH_SOURCE_INVALID",
+                "canonical source is not valid UTF-16",
+            )
+        })?;
+        let partition: Vec<_> = leaves
+            .iter()
+            .map(|leaf| RevisionLeaf {
+                lid: &leaf.lid,
+                path: &leaf.path,
+                span: &leaf.span,
+            })
+            .collect();
+        let partition = serde_json::to_vec(&partition).map_err(|error| {
+            search_error(
+                "SEARCH_SOURCE_INVALID",
+                format!("cannot serialize source partition: {error}"),
+            )
+        })?;
+        let mut revision_material = Vec::with_capacity(source.len() + partition.len() + 1);
+        revision_material.extend_from_slice(source.as_bytes());
+        revision_material.push(0);
+        revision_material.extend_from_slice(&partition);
+        Ok(search_sha256_hex(&revision_material))
+    }
+
+    fn source_heading_path_items(&self, node: &LidNode) -> Result<Vec<HeadingPathItem>, ToolError> {
+        let mut ancestors: Vec<_> = self
+            .base
+            .lid_nodes
+            .iter()
+            .filter(|ancestor| {
+                matches!(ancestor.kind, NodeKind::Chapter | NodeKind::Section)
+                    && path_is_prefix(&ancestor.path, &node.path)
+            })
+            .collect();
+        ancestors.sort_by_key(|ancestor| ancestor.path.len());
+        let mut headings = Vec::new();
+        for ancestor in ancestors {
+            if let Some(title) = markdown_heading(&self.source_node_text(ancestor)?) {
+                headings.push(HeadingPathItem {
+                    lid: ancestor.lid.clone(),
+                    title,
+                });
+            }
+        }
+        Ok(headings)
+    }
+
+    fn search_section(&self, leaf: &LidNode) -> Result<(String, String), ToolError> {
+        let min_depth = self
+            .base
+            .lid_nodes
+            .iter()
+            .map(|node| node.path.len())
+            .min()
+            .ok_or_else(|| search_error("SEARCH_SOURCE_INVALID", "book has no LID nodes"))?;
+        let roots: Vec<_> = self
+            .base
+            .lid_nodes
+            .iter()
+            .filter(|node| node.path.len() == min_depth)
+            .collect();
+        let root = roots
+            .iter()
+            .copied()
+            .find(|root| path_is_prefix(&root.path, &leaf.path))
+            .ok_or_else(|| {
+                search_error(
+                    "SEARCH_SOURCE_INVALID",
+                    format!("leaf {} has no structural root", leaf.lid),
+                )
+            })?;
+        let section = if roots.len() == 1 && !root.children.is_empty() {
+            self.base
+                .lid_nodes
+                .iter()
+                .filter(|node| {
+                    node.path.len() == root.path.len() + 1
+                        && path_is_prefix(&root.path, &node.path)
+                        && path_is_prefix(&node.path, &leaf.path)
+                })
+                .min_by(|left, right| left.path.cmp(&right.path))
+                .unwrap_or(root)
+        } else {
+            root
+        };
+        let label = markdown_heading(&self.source_node_text(section)?)
+            .unwrap_or_else(|| section.lid.clone());
+        Ok((section.lid.clone(), label))
+    }
+
+    fn search_excerpt(&self, match_start: usize, match_end: usize) -> String {
+        const CONTEXT_UTF16: usize = 48;
+        let mut start = match_start.saturating_sub(CONTEXT_UTF16);
+        let mut end = (match_end + CONTEXT_UTF16).min(self.source_u16.len());
+        while start > 0 && !is_utf16_boundary(&self.source_u16, start) {
+            start -= 1;
+        }
+        while end < self.source_u16.len() && !is_utf16_boundary(&self.source_u16, end) {
+            end += 1;
+        }
+        String::from_utf16_lossy(&self.source_u16[start..end])
+    }
+
     fn source_node_u16(&self, node: &LidNode) -> Result<&[u16], ToolError> {
         self.source_u16
             .get(node.span.start..node.span.end)
@@ -5923,6 +6649,373 @@ fn invalid_source_range(message: impl Into<String>) -> ToolError {
         category: "invalid_input".into(),
         message: message.into(),
     }
+}
+
+fn search_error(code: &str, message: impl Into<String>) -> ToolError {
+    ToolError {
+        error_code: code.into(),
+        category: if code == "SEARCH_SOURCE_INVALID" {
+            "internal".into()
+        } else {
+            "validation".into()
+        },
+        message: message.into(),
+    }
+}
+
+fn search_match_leaf_range(
+    leaves: &[&LidNode],
+    source_range: &Span,
+) -> Result<std::ops::Range<usize>, ToolError> {
+    let start = leaves.partition_point(|leaf| leaf.span.end <= source_range.start);
+    let mut end = start;
+    while end < leaves.len() && leaves[end].span.start < source_range.end {
+        if source_range.start.max(leaves[end].span.start)
+            < source_range.end.min(leaves[end].span.end)
+        {
+            end += 1;
+        } else {
+            break;
+        }
+    }
+    if start == end {
+        return Err(search_error(
+            "SEARCH_SOURCE_INVALID",
+            "a non-whitespace match did not intersect any source leaf",
+        ));
+    }
+    Ok(start..end)
+}
+
+fn normalize_mapped_units(
+    source: &[u16],
+    start_utf16: usize,
+    end_utf16: usize,
+) -> Result<Vec<MappedUnit>, ToolError> {
+    let mut original = Vec::new();
+    let mut source_offset = start_utf16;
+    for decoded in char::decode_utf16(source[start_utf16..end_utf16].iter().copied()) {
+        let value = decoded.map_err(|_| {
+            search_error(
+                "SEARCH_SOURCE_INVALID",
+                "normalization input is not valid UTF-16",
+            )
+        })?;
+        let char_end = source_offset + value.len_utf16();
+        original.push(MappedChar {
+            value,
+            source_start_utf16: source_offset,
+            source_end_utf16: char_end,
+        });
+        source_offset = char_end;
+    }
+
+    let mut decomposed = Vec::new();
+    for mapped in original {
+        decompose_compatible(mapped.value, |value| {
+            decomposed.push(MappedChar {
+                value,
+                source_start_utf16: mapped.source_start_utf16,
+                source_end_utf16: mapped.source_end_utf16,
+            });
+        });
+    }
+
+    let mut ordered: Vec<MappedChar> = Vec::with_capacity(decomposed.len());
+    let mut pending_start = 0;
+    for mapped in decomposed {
+        if canonical_combining_class(mapped.value) == 0 {
+            ordered[pending_start..]
+                .sort_by_key(|candidate| canonical_combining_class(candidate.value));
+            ordered.push(mapped);
+            pending_start = ordered.len();
+        } else {
+            ordered.push(mapped);
+        }
+    }
+    ordered[pending_start..].sort_by_key(|candidate| canonical_combining_class(candidate.value));
+
+    let mut recomposed: Vec<MappedChar> = Vec::with_capacity(ordered.len());
+    let mut starter_index: Option<usize> = None;
+    let mut last_combining_class = 0;
+    for mapped in ordered {
+        let combining_class = canonical_combining_class(mapped.value);
+        if let Some(index) = starter_index {
+            if let Some(composed) = (last_combining_class == 0
+                || last_combining_class < combining_class)
+                .then(|| compose(recomposed[index].value, mapped.value))
+                .flatten()
+            {
+                recomposed[index].value = composed;
+                recomposed[index].source_start_utf16 = recomposed[index]
+                    .source_start_utf16
+                    .min(mapped.source_start_utf16);
+                recomposed[index].source_end_utf16 = recomposed[index]
+                    .source_end_utf16
+                    .max(mapped.source_end_utf16);
+                continue;
+            }
+        }
+        if combining_class == 0 {
+            starter_index = Some(recomposed.len());
+            last_combining_class = 0;
+        } else {
+            last_combining_class = combining_class;
+        }
+        recomposed.push(mapped);
+    }
+
+    let mut folded = Vec::new();
+    for mapped in recomposed {
+        for value in std::iter::once(mapped.value).case_fold() {
+            folded.push(MappedChar {
+                value,
+                source_start_utf16: mapped.source_start_utf16,
+                source_end_utf16: mapped.source_end_utf16,
+            });
+        }
+    }
+
+    let mut collapsed: Vec<MappedChar> = Vec::new();
+    for mut mapped in folded {
+        if mapped.value == '\r' {
+            mapped.value = '\n';
+        }
+        if mapped.value.is_whitespace() {
+            if let Some(previous) = collapsed.last_mut().filter(|value| value.value == ' ') {
+                previous.source_start_utf16 =
+                    previous.source_start_utf16.min(mapped.source_start_utf16);
+                previous.source_end_utf16 = previous.source_end_utf16.max(mapped.source_end_utf16);
+            } else {
+                mapped.value = ' ';
+                collapsed.push(mapped);
+            }
+        } else {
+            collapsed.push(mapped);
+        }
+    }
+
+    let mut units = Vec::new();
+    for mapped in collapsed {
+        let mut buffer = [0u16; 2];
+        for value in mapped.value.encode_utf16(&mut buffer).iter().copied() {
+            units.push(MappedUnit {
+                value,
+                source_start_utf16: mapped.source_start_utf16,
+                source_end_utf16: mapped.source_end_utf16,
+            });
+        }
+    }
+    Ok(units)
+}
+
+fn search_request_digest(input: &SearchTextInput) -> Result<String, ToolError> {
+    let mut canonical = input.clone();
+    canonical.cursor = None;
+    let bytes = serde_json::to_vec(&serde_json::json!({
+        "version": "search_text.v1",
+        "normalized_semantics": SEARCH_TEXT_NORMALIZATION_VERSION,
+        "request": canonical,
+    }))
+    .map_err(|error| {
+        search_error(
+            "SEARCH_CURSOR_INVALID",
+            format!("cannot serialize canonical search request: {error}"),
+        )
+    })?;
+    Ok(search_sha256_hex(&bytes))
+}
+
+fn encode_search_cursor(cursor: &SearchCursorV1) -> Result<String, ToolError> {
+    let payload = serde_json::to_vec(cursor).map_err(|error| {
+        search_error(
+            "SEARCH_CURSOR_INVALID",
+            format!("cannot serialize search cursor: {error}"),
+        )
+    })?;
+    Ok(format!(
+        "st1.{}.{}",
+        search_hex_encode(&payload),
+        search_sha256_hex(&payload)
+    ))
+}
+
+fn decode_search_cursor(cursor: &str) -> Result<SearchCursorV1, ToolError> {
+    let mut parts = cursor.split('.');
+    let (Some(prefix), Some(payload), Some(checksum), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return Err(search_error(
+            "SEARCH_CURSOR_INVALID",
+            "search cursor has an invalid envelope",
+        ));
+    };
+    if prefix != "st1" {
+        return Err(search_error(
+            "SEARCH_CURSOR_INVALID",
+            "search cursor version is not supported",
+        ));
+    }
+    let payload = search_hex_decode(payload)?;
+    if search_sha256_hex(&payload) != checksum {
+        return Err(search_error(
+            "SEARCH_CURSOR_INVALID",
+            "search cursor checksum is invalid",
+        ));
+    }
+    let cursor: SearchCursorV1 = serde_json::from_slice(&payload)
+        .map_err(|_| search_error("SEARCH_CURSOR_INVALID", "search cursor payload is invalid"))?;
+    if cursor.version != "search_text.v1" {
+        return Err(search_error(
+            "SEARCH_CURSOR_INVALID",
+            "search cursor payload version is not supported",
+        ));
+    }
+    Ok(cursor)
+}
+
+fn search_hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    output
+}
+
+fn search_hex_decode(value: &str) -> Result<Vec<u8>, ToolError> {
+    if value.len() % 2 != 0 {
+        return Err(search_error(
+            "SEARCH_CURSOR_INVALID",
+            "search cursor payload is not valid hex",
+        ));
+    }
+    let bytes = value.as_bytes();
+    let mut output = Vec::with_capacity(bytes.len() / 2);
+    for pair in bytes.chunks_exact(2) {
+        let Some(high) = search_hex_value(pair[0]) else {
+            return Err(search_error(
+                "SEARCH_CURSOR_INVALID",
+                "search cursor payload is not valid hex",
+            ));
+        };
+        let Some(low) = search_hex_value(pair[1]) else {
+            return Err(search_error(
+                "SEARCH_CURSOR_INVALID",
+                "search cursor payload is not valid hex",
+            ));
+        };
+        output.push((high << 4) | low);
+    }
+    Ok(output)
+}
+
+fn search_hex_value(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn search_sha256_hex(bytes: &[u8]) -> String {
+    const K: [u32; 64] = [
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
+        0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
+        0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
+        0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
+        0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
+        0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
+        0xc67178f2,
+    ];
+    let mut data = bytes.to_vec();
+    let bit_len = (data.len() as u64) * 8;
+    data.push(0x80);
+    while data.len() % 64 != 56 {
+        data.push(0);
+    }
+    data.extend_from_slice(&bit_len.to_be_bytes());
+
+    let mut hash: [u32; 8] = [
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
+        0x5be0cd19,
+    ];
+    for chunk in data.chunks_exact(64) {
+        let mut words = [0u32; 64];
+        for (index, word) in words.iter_mut().take(16).enumerate() {
+            let offset = index * 4;
+            *word = u32::from_be_bytes([
+                chunk[offset],
+                chunk[offset + 1],
+                chunk[offset + 2],
+                chunk[offset + 3],
+            ]);
+        }
+        for index in 16..64 {
+            let s0 = words[index - 15].rotate_right(7)
+                ^ words[index - 15].rotate_right(18)
+                ^ (words[index - 15] >> 3);
+            let s1 = words[index - 2].rotate_right(17)
+                ^ words[index - 2].rotate_right(19)
+                ^ (words[index - 2] >> 10);
+            words[index] = words[index - 16]
+                .wrapping_add(s0)
+                .wrapping_add(words[index - 7])
+                .wrapping_add(s1);
+        }
+
+        let mut a = hash[0];
+        let mut b = hash[1];
+        let mut c = hash[2];
+        let mut d = hash[3];
+        let mut e = hash[4];
+        let mut f = hash[5];
+        let mut g = hash[6];
+        let mut h = hash[7];
+        for index in 0..64 {
+            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
+            let choice = (e & f) ^ ((!e) & g);
+            let temp1 = h
+                .wrapping_add(s1)
+                .wrapping_add(choice)
+                .wrapping_add(K[index])
+                .wrapping_add(words[index]);
+            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
+            let majority = (a & b) ^ (a & c) ^ (b & c);
+            let temp2 = s0.wrapping_add(majority);
+            h = g;
+            g = f;
+            f = e;
+            e = d.wrapping_add(temp1);
+            d = c;
+            c = b;
+            b = a;
+            a = temp1.wrapping_add(temp2);
+        }
+        hash[0] = hash[0].wrapping_add(a);
+        hash[1] = hash[1].wrapping_add(b);
+        hash[2] = hash[2].wrapping_add(c);
+        hash[3] = hash[3].wrapping_add(d);
+        hash[4] = hash[4].wrapping_add(e);
+        hash[5] = hash[5].wrapping_add(f);
+        hash[6] = hash[6].wrapping_add(g);
+        hash[7] = hash[7].wrapping_add(h);
+    }
+
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(64);
+    for word in hash {
+        for byte in word.to_be_bytes() {
+            output.push(HEX[(byte >> 4) as usize] as char);
+            output.push(HEX[(byte & 0x0f) as usize] as char);
+        }
+    }
+    output
 }
 
 fn path_is_prefix(prefix: &[u32], path: &[u32]) -> bool {
@@ -8676,5 +9769,525 @@ mod tests {
         );
         assert!(limited_before.ends_with("before399"));
         assert!(limited_after.starts_with("after0"));
+    }
+}
+
+#[cfg(test)]
+mod search_text_exact_tests {
+    use super::*;
+    use base_schema::sample_base;
+
+    fn node(
+        lid: &str,
+        path: &[u32],
+        kind: NodeKind,
+        start: usize,
+        end: usize,
+        children: &[&str],
+    ) -> LidNode {
+        LidNode {
+            lid: lid.into(),
+            path: path.to_vec(),
+            kind,
+            span: Span { start, end },
+            children: children.iter().map(|child| (*child).into()).collect(),
+        }
+    }
+
+    fn search_book(source: &str, lid_nodes: Vec<LidNode>) -> Book {
+        let mut base = sample_base();
+        base.book_id = "search-text-exact".into();
+        base.lid_nodes = lid_nodes;
+        base.graph_nodes.clear();
+        base.graph_edges.clear();
+        Book::new(base, source)
+    }
+
+    #[test]
+    fn search_text_exact_counts_overlaps_and_uses_span_document_order() {
+        let book = search_book(
+            "aaaa",
+            vec![
+                node("1", &[1], NodeKind::Chapter, 0, 4, &["1.9", "1.10"]),
+                // Deliberately reverse base order; span/path define canonical order.
+                node("1.10", &[1, 10], NodeKind::Paragraph, 2, 4, &[]),
+                node("1.9", &[1, 9], NodeKind::Paragraph, 0, 2, &[]),
+            ],
+        );
+
+        let result = book.search_text_exact("aa", None).unwrap();
+        assert!(result.exhaustive);
+        assert_eq!(result.total_occurrences, 3);
+        assert_eq!(result.total_lids, 2);
+        assert_eq!(
+            result
+                .occurrences
+                .iter()
+                .map(|occurrence| (occurrence.ordinal, occurrence.source_range_utf16.clone()))
+                .collect::<Vec<_>>(),
+            vec![
+                (1, Span { start: 0, end: 2 }),
+                (2, Span { start: 1, end: 3 }),
+                (3, Span { start: 2, end: 4 }),
+            ]
+        );
+        assert_eq!(result.occurrences[0].start_lid, "1.9");
+        assert_eq!(result.occurrences[1].start_lid, "1.9");
+        assert_eq!(result.occurrences[1].end_lid, "1.10");
+        assert_eq!(result.occurrences[1].ranges.len(), 2);
+        assert_eq!(result.occurrences[2].start_lid, "1.10");
+        assert_eq!(result.section_counts[0].section_lid, "1.9");
+        assert_eq!(result.section_counts[0].count, 2);
+        assert_eq!(result.section_counts[1].section_lid, "1.10");
+        assert_eq!(result.section_counts[1].count, 1);
+    }
+
+    #[test]
+    fn search_text_exact_preserves_global_whitespace_gap_and_leaf_ranges() {
+        let book = search_book(
+            "ab cd",
+            vec![
+                node("1", &[1], NodeKind::Chapter, 0, 5, &["1.1", "1.2"]),
+                node("1.1", &[1, 1], NodeKind::Paragraph, 0, 2, &[]),
+                node("1.2", &[1, 2], NodeKind::Paragraph, 3, 5, &[]),
+            ],
+        );
+
+        let result = book.search_text_exact("b c", None).unwrap();
+        assert_eq!(result.total_occurrences, 1);
+        let occurrence = &result.occurrences[0];
+        assert_eq!(occurrence.source_range_utf16, Span { start: 1, end: 4 });
+        assert_eq!(
+            occurrence.ranges,
+            vec![
+                TextOccurrenceRange {
+                    lid: "1.1".into(),
+                    start_utf16: 1,
+                    end_utf16: 2,
+                },
+                TextOccurrenceRange {
+                    lid: "1.2".into(),
+                    start_utf16: 0,
+                    end_utf16: 1,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn search_text_exact_scope_and_utf16_offsets_are_stable() {
+        let source = "甲😀甲😀";
+        let book = search_book(
+            source,
+            vec![
+                node("1", &[1], NodeKind::Chapter, 0, 6, &["1.1"]),
+                node("1.1", &[1, 1], NodeKind::Paragraph, 0, 6, &[]),
+            ],
+        );
+
+        let all = book.search_text_exact("😀", None).unwrap();
+        assert_eq!(
+            all.occurrences
+                .iter()
+                .map(|occurrence| occurrence.source_range_utf16.clone())
+                .collect::<Vec<_>>(),
+            vec![Span { start: 1, end: 3 }, Span { start: 4, end: 6 }]
+        );
+        let scoped = book
+            .search_text_exact("😀", Some(Span { start: 3, end: 6 }))
+            .unwrap();
+        assert_eq!(scoped.total_occurrences, 1);
+        assert_eq!(scoped.occurrences[0].source_range_utf16.start, 4);
+
+        let invalid = book
+            .search_text_exact("😀", Some(Span { start: 2, end: 6 }))
+            .unwrap_err();
+        assert_eq!(invalid.error_code, "SEARCH_SCOPE_INVALID");
+    }
+
+    #[test]
+    fn search_text_exact_rejects_invalid_partition_and_stabilizes_revision() {
+        assert_eq!(
+            search_sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        let one_leaf = search_book(
+            "abcd",
+            vec![
+                node("1", &[1], NodeKind::Chapter, 0, 4, &["1.1"]),
+                node("1.1", &[1, 1], NodeKind::Paragraph, 0, 4, &[]),
+            ],
+        );
+        let two_leaves = search_book(
+            "abcd",
+            vec![
+                node("1", &[1], NodeKind::Chapter, 0, 4, &["1.1", "1.2"]),
+                node("1.1", &[1, 1], NodeKind::Paragraph, 0, 2, &[]),
+                node("1.2", &[1, 2], NodeKind::Paragraph, 2, 4, &[]),
+            ],
+        );
+        let empty = one_leaf.search_text_exact("missing", None).unwrap();
+        assert!(empty.exhaustive);
+        assert_eq!(empty.total_occurrences, 0);
+        assert_eq!(empty.total_lids, 0);
+        assert_ne!(
+            empty.source_revision,
+            two_leaves
+                .search_text_exact("missing", None)
+                .unwrap()
+                .source_revision
+        );
+        assert_eq!(
+            one_leaf
+                .search_text_exact("   ", None)
+                .unwrap_err()
+                .error_code,
+            "SEARCH_QUERY_EMPTY"
+        );
+
+        let non_whitespace_gap = search_book(
+            "aXb",
+            vec![
+                node("1", &[1], NodeKind::Chapter, 0, 3, &["1.1", "1.2"]),
+                node("1.1", &[1, 1], NodeKind::Paragraph, 0, 1, &[]),
+                node("1.2", &[1, 2], NodeKind::Paragraph, 2, 3, &[]),
+            ],
+        );
+        assert_eq!(
+            non_whitespace_gap
+                .search_text_exact("a", None)
+                .unwrap_err()
+                .error_code,
+            "SEARCH_SOURCE_INVALID"
+        );
+
+        let overlap = search_book(
+            "abc",
+            vec![
+                node("1", &[1], NodeKind::Chapter, 0, 3, &["1.1", "1.2"]),
+                node("1.1", &[1, 1], NodeKind::Paragraph, 0, 2, &[]),
+                node("1.2", &[1, 2], NodeKind::Paragraph, 1, 3, &[]),
+            ],
+        );
+        assert_eq!(
+            overlap.search_text_exact("a", None).unwrap_err().error_code,
+            "SEARCH_SOURCE_INVALID"
+        );
+    }
+
+    fn request(query: &str, match_mode: SearchMatchMode, page_size: usize) -> SearchTextInput {
+        SearchTextInput {
+            query: query.into(),
+            match_mode,
+            scope: None,
+            order: SearchOrder::Document,
+            cursor: None,
+            page_size,
+        }
+    }
+
+    #[test]
+    fn search_text_pagination_concatenates_the_complete_set_in_both_orders() {
+        let source = "x x x x x";
+        let end = source.encode_utf16().count();
+        let book = search_book(
+            source,
+            vec![
+                node("1", &[1], NodeKind::Chapter, 0, end, &["1.1"]),
+                node("1.1", &[1, 1], NodeKind::Paragraph, 0, end, &[]),
+            ],
+        );
+
+        for (order, expected) in [
+            (SearchOrder::Document, vec![1, 2, 3, 4, 5]),
+            (SearchOrder::ReverseDocument, vec![5, 4, 3, 2, 1]),
+        ] {
+            let mut input = request("x", SearchMatchMode::Exact, 2);
+            input.order = order;
+            let mut ordinals = Vec::new();
+            loop {
+                let page = book.search_text(&input).unwrap();
+                assert_eq!(page.version, "search_text.v1");
+                assert!(page.exhaustive);
+                assert_eq!(page.total_occurrences, 5);
+                ordinals.extend(page.occurrences.iter().map(|occurrence| occurrence.ordinal));
+                let Some(cursor) = page.next_cursor else {
+                    break;
+                };
+                input.cursor = Some(cursor);
+            }
+            assert_eq!(ordinals, expected);
+        }
+    }
+
+    #[test]
+    fn search_text_pagination_distinguishes_invalid_mismatch_and_stale_cursors() {
+        let source = "x x x";
+        let end = source.encode_utf16().count();
+        let book = search_book(
+            source,
+            vec![
+                node("1", &[1], NodeKind::Chapter, 0, end, &["1.1"]),
+                node("1.1", &[1, 1], NodeKind::Paragraph, 0, end, &[]),
+            ],
+        );
+        let input = request("x", SearchMatchMode::Exact, 1);
+        let cursor = book.search_text(&input).unwrap().next_cursor.unwrap();
+
+        let mut mismatch = request("x", SearchMatchMode::Exact, 2);
+        mismatch.cursor = Some(cursor.clone());
+        assert_eq!(
+            book.search_text(&mismatch).unwrap_err().error_code,
+            "SEARCH_CURSOR_MISMATCH"
+        );
+
+        let stale_book = search_book(
+            "x y x",
+            vec![
+                node("1", &[1], NodeKind::Chapter, 0, end, &["1.1"]),
+                node("1.1", &[1, 1], NodeKind::Paragraph, 0, end, &[]),
+            ],
+        );
+        let mut stale = input.clone();
+        stale.cursor = Some(cursor.clone());
+        assert_eq!(
+            stale_book.search_text(&stale).unwrap_err().error_code,
+            "SEARCH_CURSOR_STALE"
+        );
+
+        let mut invalid = input;
+        invalid.cursor = Some(format!("{cursor}0"));
+        assert_eq!(
+            book.search_text(&invalid).unwrap_err().error_code,
+            "SEARCH_CURSOR_INVALID"
+        );
+    }
+
+    #[test]
+    fn search_text_pagination_intersects_within_and_relative_scopes() {
+        let source = "one two one three one";
+        let end = source.encode_utf16().count();
+        let book = search_book(
+            source,
+            vec![
+                node("1", &[1], NodeKind::Chapter, 0, end, &["1.1", "1.2", "1.3"]),
+                node("1.1", &[1, 1], NodeKind::Paragraph, 0, 3, &[]),
+                node("1.2", &[1, 2], NodeKind::Paragraph, 4, 11, &[]),
+                node("1.3", &[1, 3], NodeKind::Paragraph, 12, end, &[]),
+            ],
+        );
+
+        let mut within = request("one", SearchMatchMode::Exact, 20);
+        within.scope = Some(SearchTextScope {
+            within_lid: Some("1.2".into()),
+            relative_to: None,
+        });
+        let result = book.search_text(&within).unwrap();
+        assert_eq!(result.total_occurrences, 1);
+        assert_eq!(result.occurrences[0].start_lid, "1.2");
+
+        let mut before = request("one", SearchMatchMode::Exact, 20);
+        before.scope = Some(SearchTextScope {
+            within_lid: None,
+            relative_to: Some(book_tool_contracts::SearchRelativeScope {
+                lid: "1.3".into(),
+                direction: SearchRelativeDirection::Before,
+            }),
+        });
+        assert_eq!(book.search_text(&before).unwrap().total_occurrences, 2);
+
+        let mut empty_intersection = request("one", SearchMatchMode::Exact, 20);
+        empty_intersection.scope = Some(SearchTextScope {
+            within_lid: Some("1.1".into()),
+            relative_to: Some(book_tool_contracts::SearchRelativeScope {
+                lid: "1.2".into(),
+                direction: SearchRelativeDirection::After,
+            }),
+        });
+        let empty = book.search_text(&empty_intersection).unwrap();
+        assert_eq!(empty.total_occurrences, 0);
+        assert!(empty.next_cursor.is_none());
+
+        within.scope.as_mut().unwrap().within_lid = Some("9.9".into());
+        assert_eq!(
+            book.search_text(&within).unwrap_err().error_code,
+            "SEARCH_SCOPE_INVALID"
+        );
+    }
+
+    #[test]
+    fn search_text_pagination_normalized_maps_nfkc_casefold_and_whitespace_to_source() {
+        assert_eq!(unicode_normalization::UNICODE_VERSION, (17, 0, 0));
+        assert_eq!(unicode_casefold::UNICODE_VERSION, (9, 0, 0));
+        assert!(SEARCH_TEXT_NORMALIZATION_VERSION.contains("u17.0.0"));
+        assert!(SEARCH_TEXT_NORMALIZATION_VERSION.contains("u9.0.0"));
+
+        use unicode_normalization::UnicodeNormalization;
+
+        let source = "Ａ Straße\r\n  CAFÉ e\u{301} 가";
+        let end = source.encode_utf16().count();
+        let book = search_book(
+            source,
+            vec![
+                node("1", &[1], NodeKind::Chapter, 0, end, &["1.1"]),
+                node("1.1", &[1, 1], NodeKind::Paragraph, 0, end, &[]),
+            ],
+        );
+
+        let expected = source
+            .nfkc()
+            .case_fold()
+            .collect::<String>()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let mapped =
+            normalize_mapped_units(&source.encode_utf16().collect::<Vec<_>>(), 0, end).unwrap();
+        assert_eq!(
+            String::from_utf16(&mapped.iter().map(|unit| unit.value).collect::<Vec<_>>()).unwrap(),
+            expected
+        );
+
+        let whole = book
+            .search_text(&request(
+                "a STRASSE   CAFÉ É 가",
+                SearchMatchMode::Normalized,
+                20,
+            ))
+            .unwrap();
+        assert_eq!(whole.total_occurrences, 1);
+        assert_eq!(
+            whole.occurrences[0].source_range_utf16,
+            Span { start: 0, end }
+        );
+        assert_eq!(
+            String::from_utf16(
+                &source.encode_utf16().collect::<Vec<_>>()[whole.occurrences[0]
+                    .source_range_utf16
+                    .start
+                    ..whole.occurrences[0].source_range_utf16.end]
+            )
+            .unwrap(),
+            source
+        );
+
+        let sharp_s = search_book(
+            "ß",
+            vec![
+                node("1", &[1], NodeKind::Chapter, 0, 1, &["1.1"]),
+                node("1.1", &[1, 1], NodeKind::Paragraph, 0, 1, &[]),
+            ],
+        );
+        assert_eq!(
+            sharp_s
+                .search_text(&request("s", SearchMatchMode::Normalized, 20))
+                .unwrap()
+                .total_occurrences,
+            1,
+            "case-fold expansion must not duplicate one original source range"
+        );
+
+        let combining = search_book(
+            "e\u{301}",
+            vec![
+                node("1", &[1], NodeKind::Chapter, 0, 2, &["1.1"]),
+                node("1.1", &[1, 1], NodeKind::Paragraph, 0, 2, &[]),
+            ],
+        );
+        let composed = combining
+            .search_text(&request("é", SearchMatchMode::Normalized, 20))
+            .unwrap();
+        assert_eq!(
+            composed.occurrences[0].source_range_utf16,
+            Span { start: 0, end: 2 }
+        );
+    }
+
+    #[test]
+    fn search_text_real_book_replays_all_formula_occurrences() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(".understand-book/quantification-essence");
+        assert!(
+            path.join("base.json").is_file(),
+            "real-book base is missing"
+        );
+        assert!(
+            path.join("source.txt").is_file(),
+            "real-book source is missing"
+        );
+        let book = Book::load(path.to_str().unwrap()).unwrap();
+        let query = r"\sqrt{2\ln N}";
+        let exact = book.search_text_exact(query, None).unwrap();
+        assert_eq!(exact.total_occurrences, 32);
+        assert_eq!(exact.occurrences[0].start_lid, "1.10.3.10");
+
+        let mut input = request(query, SearchMatchMode::Exact, 7);
+        let mut page_ranges = Vec::new();
+        let mut page_ordinals = Vec::new();
+        let mut pages = 0;
+        loop {
+            let page = book.search_text(&input).unwrap();
+            pages += 1;
+            assert_eq!(page.total_occurrences, 32);
+            assert_eq!(page.total_lids, exact.total_lids);
+            assert_eq!(page.section_counts, exact.section_counts);
+            page_ranges.extend(
+                page.occurrences
+                    .iter()
+                    .map(|occurrence| occurrence.source_range_utf16.clone()),
+            );
+            page_ordinals.extend(page.occurrences.iter().map(|occurrence| occurrence.ordinal));
+            let Some(cursor) = page.next_cursor else {
+                break;
+            };
+            input.cursor = Some(cursor);
+        }
+        assert_eq!(pages, 5);
+        assert_eq!(page_ordinals, (1..=32).collect::<Vec<_>>());
+        assert_eq!(
+            page_ranges,
+            exact
+                .occurrences
+                .iter()
+                .map(|occurrence| occurrence.source_range_utf16.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn search_text_release_5_mib_p95_is_under_one_second() {
+        if cfg!(debug_assertions) {
+            return;
+        }
+        const SOURCE_SIZE: usize = 5 * 1024 * 1024;
+        let source = "x".repeat(SOURCE_SIZE);
+        let book = search_book(
+            &source,
+            vec![
+                node("1", &[1], NodeKind::Chapter, 0, SOURCE_SIZE, &["1.1"]),
+                node("1.1", &[1, 1], NodeKind::Paragraph, 0, SOURCE_SIZE, &[]),
+            ],
+        );
+        let input = request("x", SearchMatchMode::Exact, 50);
+        let warmup = book.search_text(&input).unwrap();
+        assert_eq!(warmup.total_occurrences, SOURCE_SIZE);
+        assert_eq!(warmup.occurrences.len(), 50);
+
+        let mut elapsed = Vec::new();
+        for _ in 0..7 {
+            let started = std::time::Instant::now();
+            let result = book.search_text(&input).unwrap();
+            elapsed.push(started.elapsed());
+            assert_eq!(result.total_occurrences, SOURCE_SIZE);
+            assert_eq!(result.occurrences.len(), 50);
+        }
+        elapsed.sort_unstable();
+        let p95 = elapsed[(elapsed.len() * 95).div_ceil(100) - 1];
+        eprintln!("5 MiB exact search p95: {p95:?}");
+        assert!(
+            p95 < std::time::Duration::from_secs(1),
+            "5 MiB exact search p95 exceeded one second: {p95:?}"
+        );
     }
 }

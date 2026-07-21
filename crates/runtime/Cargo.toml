@@ -6,6 +6,7 @@ publish = false
 
 [dependencies]
 base-schema = { path = "../base-schema" }
+book-tool-contracts = { path = "../book-tool-contracts" }
 read-tools = { path = "../read-tools" }
 memory = { path = "../memory" }
 reader = { path = "../reader" }

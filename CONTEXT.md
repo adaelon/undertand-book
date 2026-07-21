@@ -168,7 +168,22 @@ E 的记忆所在。**独立于只读基座、用户私有、可变、跨书**�
 选区创建的 Note 可选携带的结构化来源上下文:保存 `resolved/partial` 状态、用户实际选择的 `raw_quote`、可验证的 `resolved_quote` 与按阅读顺序排列的完整 LID ranges。用户内容可保留 raw quote,但 citations 与精确投影只能使用 resolved quote/ranges。Note 的 `anchor.lid` 仍取首个 resolved LID用于语义定位和排序,PDF 行内标记取末 range 作为显示锚,citations 由 ranges 中的 LID 去重派生;普通旧 Note 无此字段且保持兼容。状态:BOUNDARY_CHANGE。
 
 ## Memory replace
-Note 内容编辑使用的原子替换命令:验证旧 `mem_id` 后只更新 content,默认继承 anchor、selection context、citations 与 layer;写入失败时旧记录保持不变。重新定位必须走显式“重新选择”并提交新的 selection context,不得把内容编辑伪装成锚点迁移。状态:NEW。
+Note 内容编辑使用的原子替换命令:验证旧 `mem_id` 后只更新 content,默认继承 anchor、selection context、note placement、citations 与 layer;写入失败时旧记录保持不变。带 quote source 的重新定位必须走显式“重新选择”并提交新的 selection context;无引用来源 Note 的正文迁移走独立 Note 原子重锚,两者都不得伪装成内容编辑。状态:BOUNDARY_CHANGE(见 [docs/adr/0074]、[docs/adr/0083])。
+
+## 无引用来源 Note (unquoted-source Note)
+同时不带结构化 `selection_context`、且正文首个非空 Markdown 行不是 blockquote (`>`) 的 Note。它不是引用选区标注;从正文块直接创建的普通 Note 也属于此类,但创建入口已经提供显式正文锚。状态:NEW(见 [docs/adr/0083])。
+
+## 待放置 Note (pending Note placement)
+用户从 Agent 回答截取无引用来源内容后形成的前端暂存草稿。它尚未写入 memory,只有在用户显式放入有效正文目标后才成为 Note;取消、切书或 Reader 卸载时丢弃。状态:NEW(见 [docs/adr/0083])。
+
+## Note 正文放置 (Note body placement)
+用户把无引用来源 Note 显式绑定到真实正文目标的持久语义。Markdown 目标是实际命中的 LID 块;PDF 目标是当前 PDF visual source map 中实际命中的 region,且两者的 placement LID 必须与 `anchor.lid` 一致。它决定展示位置,不替代 LID citation anchor。状态:NEW(见 [docs/adr/0083])。
+
+## PDF Note region placement
+无引用来源 Note 在 PDF 正文中的显式展示位置,由 `lid + source_map_version + source_map_config_hash + page_index + region_id` 标识。渲染时必须在同一映射身份下重新验证 region;映射失效或 region 缺失时只保留 Notes 列表,不得回退到 primary region、整 LID bbox 或邻近区域。状态:NEW(见 [docs/adr/0083])。
+
+## Note 原子重锚 (Note atomic reanchor)
+把已有无引用来源 Note 移到另一正文放置的一次性 memory mutation:新 placement、`anchor.lid`、citations 与内容寻址 `mem_id` 一起成功或一起失败,内容、layer 与既有审计语义保持。带 quote source 的 Note 仍走显式重新选择,不得使用本命令。状态:NEW(见 [docs/adr/0083])。
 
 ## 记忆引用锚定 (memory citation)
 记忆记录回溯到源位置的锚 `[ADR-0015]`,借自 Codex memory 的 `MemoryCitationEntry{path, line_range, note}`——把 Codex 的 `path:行号区间` 换成本项目的 **LID**:`citations:[{lid, book_id, note}]`。使 `memory.recall` 返回的每条记忆**可验证、可跳原文**,是引用红线([docs/adr/0004])在记忆层的延伸。区别于 book 的 `citations[]`(那是问答证据;此为记忆溯源)。状态:NEW(详见 [docs/adr/0015])。
@@ -181,11 +196,20 @@ Note 内容编辑使用的原子替换命令:验证旧 `mem_id` 后只更新 con
 阅读器的命令可寻址引擎。人类能做的每个阅读器动作都暴露为具名、可参数化、agent 可调用的命令;GUI 是其上一层渲染。E 及任意外部 agent 与人类走**同一命令面**(人机对称、无特供),agent-CLI 普适。**一套面、三命名空间**:`book.*`(只读内容查询 ②③)/ `reader.*`(可变 UI 控制)/ `memory.*`(记忆层读写)。硬边界:reader/memory 不得写只读基座。详见 [docs/adr/0007]。
 **命令面分层** `[ADR-0014]`:命令面即 agent 的 tool 集,按是否调 LLM 分两层——**确定性命令 = 叶子工具**(见下),**LLM 命令 = 自建最小运行时被无状态调一次的暴露**(`book.query/synthesize`,本身即 agent loop)。
 
+## BookToolContractRegistry
+Book 共同命令跨 Resident、REST、MCP 的版本化契约单一真相源:统一拥有 logical tool ID、typed input、JSON Schema、required/enum/default/validation、结果契约引用、surface aliases 与 capability tags。各表面可使用 `book.text`/`book_text`/`/book/text` 等不同 transport 名称,但只能投影同一逻辑契约;MCP 过滤 reader/memory/private 工具属于能力边界,不是 schema 漂移。完整住户 prompt 与外部 MCP 编排策略仍可不同。状态:NEW(设计已接受,实现见 [ADR-0088](docs/adr/0088-deterministic-text-occurrence-search-and-canonical-book-tool-contracts.md))。
+
 ## Reader UI Control Plane
 阅读器页面布局与面板状态的可命令化控制面,属于 `reader.*` 可变 UI 会话态。agent 不直接操作 DOM,只能发受控 `ReaderLayoutAction`(如 open/close/focus slot、切换 layout preset、pin evidence),由后端 session layout state 校验并产出可撤销 effect,前端按 profile registry 渲染同步状态。它不写 book truth、paper truth、BookStructure 或 memory。状态:NEW(详见 [docs/adr/0060])。
 
 ## 叶子工具 (leaf tool)
-确定性命令在"命令面即 agent tool 集"分层中的角色 `[ADR-0014]`:无 LLM、毫秒级、可组合的 primitive,agent loop 直接调它们捞素材。`book.manifest`(确定性拓扑)/ `book.context`(纯指针 near/mid/far,`{lid,layer,via}`)/ `book.text`(按 LID/区间取真原文)/ `book.concept`(概念全量 occurrences)即四个 book.* 叶子工具。区别于 LLM 命令(运行时暴露)。状态:NEW(详见 [docs/adr/0014])。
+确定性命令在"命令面即 agent tool 集"分层中的角色 `[ADR-0014]`:无 LLM、毫秒级、可组合的 primitive,agent loop 直接调它们捞素材。包括 `book.manifest`(确定性拓扑)、`book.context`(纯指针 near/mid/far,`{lid,layer,via}`)、`book.text`(按 LID/区间取真原文)、`book.concept`(概念全量 occurrences)与 `book.search_text`(正文 occurrence 完整定位)。区别于 LLM 命令(运行时暴露)。状态:BOUNDARY_CHANGE(基础定义见 [docs/adr/0014],全文定位扩展见 [ADR-0088](docs/adr/0088-deterministic-text-occurrence-search-and-canonical-book-tool-contracts.md))。
+
+## TextOccurrence (正文匹配 occurrence)
+`book.search_text` 在规范 `source.txt` 中找到的一次字面匹配,身份是一个非空全局 UTF-16 source range 及其按叶子分区拆出的连续 LID ranges。同一 LID 内重复出现分别计数,跨叶匹配仍只算一次,父 container 与子 leaf 不得重复计数。它不同于 graph concept 的 `occurrences:[LID...]`:前者是可证明完备的正文匹配实例,后者是构建期语义锚点集合。状态:NEW(已实现,见 [ADR-0088](docs/adr/0088-deterministic-text-occurrence-search-and-canonical-book-tool-contracts.md))。
+
+## book.search_text
+确定性全文定位叶子工具:在给定 query、exact/版本化 normalized mode 与可选 LID/相对 scope 内以两遍扫描计算完整 totals、再只物化当前 `TextOccurrence` 页面,返回全集总数、section counts、规范文档序页面和绑定 source revision 的稳定 cursor。`page_size` 只控制单页载荷,不把“全部”退化为 top-K;first/previous/nearest/all 都是全集上的投影。其 `exhaustive=true` 只保证 lexical exhaustive,不保证找齐语义改写或隐含讨论;语义解释继续用 `book.text/context/query/synthesize`。状态:NEW(已实现,见 [ADR-0088](docs/adr/0088-deterministic-text-occurrence-search-and-canonical-book-tool-contracts.md))。
 
 ## 段 (paragraph / 叶子块)
 切分的中间叶子单元 = 源格式的一个块级标记(md 段/列表项/引用块/代码块;epub p/li/blockquote/br)。**忠实映射源块的结构类型,不检测文学体裁**;诗行、对话轮靠块边界天然落位(非按体裁识别),裸 txt 退化到空行。切片0 的最深 LID 层。注:`code/table/image/formula` 四类块级标记是带类型的一等 **asset 叶子**(见下),非普通 paragraph;其中 formula 另有公式语义剖面。状态:NEW(详见 [docs/adr/0008/0029])。

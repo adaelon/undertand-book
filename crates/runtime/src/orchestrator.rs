@@ -9,12 +9,15 @@ use crate::{
     parse_book_query_request, query_run, synthesize, AssistantTurn, Message, ModelAdapter,
     QueryAudit, QueryOutcome, Role, ToolSpec,
 };
+use book_tool_contracts::{
+    contract_for, from_resident_alias, input_schema, validate_input, BookToolId, BookToolInput,
+};
 use memory::{Anchor, MemCitation, MemoryStore, ReaderProfileSnapshot, RecallQuery, SaveInput};
 use read_tools::{
     disambiguate_source_labels, Book, EvidenceRange, PaperLandmarkKind,
     PaperMinimapAvailabilityStatus, PaperRegion, ReaderLayoutAction, ReaderLayoutApplyOutcome,
-    ReaderLayoutEffect, ReaderLayoutProposal, ResolvedSource, SourceSelectedRange, SourceTextRange,
-    ToolError,
+    ReaderLayoutEffect, ReaderLayoutProposal, ResolvedSource, SearchTextResult,
+    SourceSelectedRange, SourceTextRange, TextOccurrence, ToolError,
 };
 use reader::{
     project_paper_minimap_lens, PaperMinimapActor, PaperMinimapApplyOutcome, PaperMinimapCommand,
@@ -329,9 +332,21 @@ struct PresentedSource {
     resolved: ResolvedSource,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EvidenceClaimKind {
+    SourceText,
+    LiteralOccurrence,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ObservedTurnEvidence {
+    range: EvidenceRange,
+    claim_kind: EvidenceClaimKind,
+}
+
 #[derive(Debug, Default)]
 struct TurnEvidenceLedger {
-    evidence: Vec<EvidenceRange>,
+    evidence: Vec<ObservedTurnEvidence>,
     presented: Vec<PresentedSource>,
 }
 
@@ -346,9 +361,33 @@ impl TurnEvidenceLedger {
     }
 
     fn observe(&mut self, evidence: EvidenceRange) {
-        if !self.evidence.contains(&evidence) {
-            self.evidence.push(evidence);
+        self.observe_with_claim(evidence, EvidenceClaimKind::SourceText);
+    }
+
+    fn observe_literal_occurrence(&mut self, evidence: EvidenceRange) {
+        self.observe_with_claim(evidence, EvidenceClaimKind::LiteralOccurrence);
+    }
+
+    fn observe_with_claim(&mut self, range: EvidenceRange, claim_kind: EvidenceClaimKind) {
+        if let Some(existing) = self
+            .evidence
+            .iter_mut()
+            .find(|evidence| evidence.range == range)
+        {
+            if claim_kind == EvidenceClaimKind::SourceText {
+                existing.claim_kind = EvidenceClaimKind::SourceText;
+            }
+            return;
         }
+        self.evidence
+            .push(ObservedTurnEvidence { range, claim_kind });
+    }
+
+    fn evidence_ranges(&self) -> Vec<EvidenceRange> {
+        self.evidence
+            .iter()
+            .map(|evidence| evidence.range.clone())
+            .collect()
     }
 
     fn present(&mut self, book: &Book, arguments: &str) -> Result<SourcePresentResult, ToolError> {
@@ -372,6 +411,7 @@ impl TurnEvidenceLedger {
         for evidence in self
             .evidence
             .iter()
+            .map(|evidence| &evidence.range)
             .filter(|evidence| evidence.start_lid == start_lid && evidence.end_lid == end_lid)
         {
             let resolved = book.resolve_source(evidence, SOURCE_PRESENTATION_LOCALE, None)?;
@@ -463,7 +503,7 @@ impl TurnEvidenceLedger {
         let mut observed: Vec<_> = self
             .evidence
             .iter()
-            .filter_map(|evidence| evidence_intervals(book, evidence))
+            .filter_map(|evidence| evidence_intervals(book, &evidence.range))
             .flatten()
             .collect();
         observed.sort_unstable();
@@ -681,8 +721,45 @@ fn observe_tool_evidence(
                 ledger.observe(evidence);
             }
         }
+        "book.search_text" => {
+            let Ok(result) = serde_json::from_str::<SearchTextResult>(result) else {
+                return;
+            };
+            for occurrence in result.occurrences {
+                let Some(evidence) = occurrence_evidence_range(&occurrence) else {
+                    continue;
+                };
+                if book
+                    .resolve_source(&evidence, SOURCE_PRESENTATION_LOCALE, None)
+                    .is_ok()
+                {
+                    ledger.observe_literal_occurrence(evidence);
+                }
+            }
+        }
         _ => {}
     }
+}
+
+fn occurrence_evidence_range(occurrence: &TextOccurrence) -> Option<EvidenceRange> {
+    let ranges = occurrence
+        .ranges
+        .iter()
+        .map(|range| {
+            Some(SourceSelectedRange {
+                lid: range.lid.clone(),
+                range: SourceTextRange {
+                    start: u32::try_from(range.start_utf16).ok()?,
+                    end: u32::try_from(range.end_utf16).ok()?,
+                },
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
+    (!ranges.is_empty()).then(|| EvidenceRange {
+        start_lid: occurrence.start_lid.clone(),
+        end_lid: occurrence.end_lid.clone(),
+        ranges,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -999,6 +1076,32 @@ impl AnswerProvenanceLedger {
                 );
             }
         }
+        if tool == "book.search_text" {
+            if let Some(scope) = value.get("scope") {
+                if let Some(locator) = scope.get("within_lid").and_then(serde_json::Value::as_str) {
+                    self.observe_internal_locator(
+                        locator,
+                        AnswerProvenanceChannel::ToolArgument {
+                            tool: tool.into(),
+                            field: "scope.within_lid".into(),
+                        },
+                    );
+                }
+                if let Some(locator) = scope
+                    .get("relative_to")
+                    .and_then(|relative| relative.get("lid"))
+                    .and_then(serde_json::Value::as_str)
+                {
+                    self.observe_internal_locator(
+                        locator,
+                        AnswerProvenanceChannel::ToolArgument {
+                            tool: tool.into(),
+                            field: "scope.relative_to.lid".into(),
+                        },
+                    );
+                }
+            }
+        }
         let array_fields: &[&str] = match tool {
             "book.synthesize" => &["lids"],
             "memory.save" => &["citations"],
@@ -1084,6 +1187,43 @@ impl AnswerProvenanceLedger {
                     return;
                 };
                 self.observe_result_array(tool, &value, "occurrences");
+            }
+            "book.search_text" => {
+                let Ok(result) = serde_json::from_str::<SearchTextResult>(result) else {
+                    return;
+                };
+                for occurrence in result.occurrences {
+                    for (field, locator) in [
+                        ("occurrences.start_lid", occurrence.start_lid.as_str()),
+                        ("occurrences.end_lid", occurrence.end_lid.as_str()),
+                    ] {
+                        self.observe_internal_locator(
+                            locator,
+                            AnswerProvenanceChannel::ToolResult {
+                                tool: tool.into(),
+                                field: field.into(),
+                            },
+                        );
+                    }
+                    for range in occurrence.ranges {
+                        self.observe_internal_locator(
+                            &range.lid,
+                            AnswerProvenanceChannel::ToolResult {
+                                tool: tool.into(),
+                                field: "occurrences.ranges.lid".into(),
+                            },
+                        );
+                    }
+                    for heading in occurrence.heading_path {
+                        self.observe_internal_locator(
+                            &heading.lid,
+                            AnswerProvenanceChannel::ToolResult {
+                                tool: tool.into(),
+                                field: "occurrences.heading_path.lid".into(),
+                            },
+                        );
+                    }
+                }
             }
             "book.route_from"
             | "book.unvisited_back"
@@ -1720,57 +1860,23 @@ pub fn tool_specs() -> Vec<ToolSpec> {
         description: description.into(),
         parameters,
     };
+    let book_s = |id: BookToolId| {
+        let contract = contract_for(id);
+        ToolSpec {
+            name: contract
+                .aliases
+                .resident
+                .expect("Resident Book tool must have a Resident alias")
+                .into(),
+            description: contract.description.into(),
+            parameters: input_schema(id),
+        }
+    };
     vec![
-        s(
-            "book.query",
-            "对显式 referent 做自含语义问答:先解析 targets,再围绕冻结指代读取来源证据。",
-            json!({
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "不依赖对话代词的自含问题"},
-                    "intent": {"type": "string", "enum": ["definition", "explanation", "relation", "comparison"]},
-                    "targets": {"type": "array", "minItems": 1, "maxItems": 3, "items": {"type": "string"}},
-                    "obligations": {
-                        "type": "array",
-                        "minItems": 1,
-                        "maxItems": 3,
-                        "items": {
-                            "type": "object",
-                            "properties": {"requirement": {"type": "string"}},
-                            "required": ["requirement"],
-                            "additionalProperties": false
-                        }
-                    },
-                    "anchor_lid": {"type": "string", "description": "同级排序先验,不是检索边界"}
-                },
-                "required": ["query", "intent", "targets", "obligations", "anchor_lid"],
-                "additionalProperties": false
-            }),
-        ),
-        s(
-            "book.synthesize",
-            "对调用方给定的离散 LID 集做综合;不外扩检索,返回 citations ⊆ 输入 lids 的综合回答。",
-            json!({
-                "type": "object",
-                "properties": {
-                    "lids": {"type": "array", "items": {"type": "string"}, "description": "要综合的 LID 列表"},
-                    "task": {"type": "string", "description": "可选综合任务"}
-                },
-                "required": ["lids"]
-            }),
-        ),
-        s(
-            "book.text",
-            "按 LID 或 LID 区间取真原文。",
-            json!({
-                "type": "object",
-                "properties": {
-                    "lid": {"type": "string"},
-                    "end_lid": {"type": "string", "description": "可选,取 [lid, end_lid] 区间"}
-                },
-                "required": ["lid"]
-            }),
-        ),
+        book_s(BookToolId::Query),
+        book_s(BookToolId::Synthesize),
+        book_s(BookToolId::SearchText),
+        book_s(BookToolId::Text),
         s(
             "source.present",
             "可选:把本轮已观察的连续书内证据转换为可放在相关句子后的用户可见来源。只传已观察的 LID;同一位置有多段证据时用原样 quote 消歧。返回 opaque source_ref_id、标签和预览,不返回 LID。",
@@ -1785,75 +1891,13 @@ pub fn tool_specs() -> Vec<ToolSpec> {
                 "additionalProperties": false
             }),
         ),
-        s(
-            "book.context",
-            "取某 LID 的上下文指针:near=树邻接+local 边,mid=near+概念/实体其他 occurrences,far=mid+long_range 边;不带原文,用 book.text 取内容。",
-            json!({
-                "type": "object",
-                "properties": {
-                    "lid": {"type": "string"},
-                    "granularity": {"type": "string", "enum": ["near", "mid", "far"], "description": "默认 near"},
-                    "k": {"type": "integer", "description": "可选 top-K"}
-                },
-                "required": ["lid"]
-            }),
-        ),
-        s(
-            "book.concept",
-            "按名查概念/实体,返回全量出现 LID + 关联实体。",
-            json!({
-                "type": "object",
-                "properties": {"name": {"type": "string"}},
-                "required": ["name"]
-            }),
-        ),
-        s(
-            "book.structure",
-            "BookStructure 结构投影:说明某 LID 在全书 spine/throughline/key_stop 中的结构意义。缺 at 时返回全书结构概览;缺 sidecar 时显式 unavailable。",
-            json!({
-                "type": "object",
-                "properties": {
-                    "at": {"type": "string", "description": "可选,当前位置或候选 LID"}
-                }
-            }),
-        ),
-        s(
-            "book.guide_path",
-            "BookStructure 宏观带读路线:按 spine 分段展开 key_stops,不理解自然语言、不读取 reader/memory。缺 sidecar 时显式 unavailable。",
-            json!({
-                "type": "object",
-                "properties": {
-                    "at": {"type": "string", "description": "可选,用于标记当前所在 spine 段"}
-                }
-            }),
-        ),
-        s(
-            "book.paper_reading_guide",
-            "PaperReadingGuide 只读投影:组合 paper metadata/lexicon、BookStructure、graph、discourse 与原文,返回论文十问、Codebook、摘要阅读辅助。不会新增或修改持久 truth。",
-            json!({
-                "type": "object",
-                "properties": {
-                    "mode": {"type": "string", "enum": ["skim", "close", "deep"], "description": "默认 skim"},
-                    "stage": {"type": "string", "enum": ["passive", "active", "critical", "creative"], "description": "默认 passive"}
-                }
-            }),
-        ),
-        s(
-            "book.paper_metadata",
-            "返回当前单篇 paper 的 metadata projection,保留 value/source/evidence_lids/confidence;缺 sidecar 时 explicit unavailable,不生成跨论文关系。",
-            json!({
-                "type": "object",
-                "properties": {}
-            }),
-        ),
-        s(
-            "book.paper_lexicon",
-            "返回当前单篇 paper 的 lexicon projection,用于术语/缩写/数据集候选对齐;缺 sidecar 时 explicit unavailable。",
-            json!({
-                "type": "object",
-                "properties": {}
-            }),
-        ),
+        book_s(BookToolId::Context),
+        book_s(BookToolId::Concept),
+        book_s(BookToolId::Structure),
+        book_s(BookToolId::GuidePath),
+        book_s(BookToolId::PaperReadingGuide),
+        book_s(BookToolId::PaperMetadata),
+        book_s(BookToolId::PaperLexicon),
         s(
             "profile.manifest",
             "返回当前 book 的 ProfileManifest;可选 profile_id=technical_learning|paper 读取 registry 中的显式 manifest。",
@@ -2046,14 +2090,17 @@ note/highlight 自动锚回 anchor 的 LID;context 可经 citations 锚回支撑
 }
 
 const SYSTEM_PROMPT: &str = "你是这本书的阅读 agent。显式概念/实体的语义问答经 book.query 取得带真 LID citation 的证据;\
-用 book.concept/context/text 定位与读原文。\
+用 book.search_text/concept/context/text 定位与读原文。\
 工具价值判断——先判断任务类型和证据缺口,只调用能减少当前不确定性的最小工具。\
+字面位置优先——用户问某段原话、公式、符号或精确写法『第一次在哪里/上一处下一处/全文所有出现』时,先调 book.search_text,不得先调 book.query。第一次用 exact + document + page_size=1;上一处用 before + reverse_document + page_size=1;下一处用 after + document + page_size=1。\
+『所有出现』必须沿 next_cursor 逐页读取到为空后才能声称完整;同一 request 不得重复同一 cursor,收到 AGENT_NO_PROGRESS 后停止重试并诚实说明未完成。search 的 exhaustive 只表示字面命中完整,不表示同义讨论或语义召回完整。\
+search occurrence 只证明该字面文本在对应位置出现;若回答含义、原因、推导、章节作用或前后关系,必须再用 book.text 读取命中 LID,必要时用 book.context 扩展,不能只凭 excerpt 作语义结论。book.query 返回 ambiguous/unresolved 时不得把 candidate_id 当成 book.concept 的 name 循环试探。\
 来源呈现是可选的,不要为了覆盖率强行补来源。只有当你想在回答中向用户呈现书内位置时,才对本轮已观察证据调用 source.present;将返回的 [[source:<source_ref_id>]] 放在相关句子后,不得把原始 LID 写进普通回答。\
 当用户给出『引用原文 [LID: ...]』并问『这段怎么理解/什么意思』时,引用文本本身是最高优先级证据:先直接解释引用;\
 必要时最多用 book.text(lid) 补完整原文、book.context(lid,near) 补近邻上下文、book.synthesize([lid]) 做受控综合。\
 不要把引用拆成一串关键词去批量调用 book.concept,也不要先用 book.query 做开放检索。\
 当问题指向当前阅读位置但没有引用时,先 reader.state() 取 anchor,再按缺口用 book.text(anchor)、book.context(anchor,near) 或 book.synthesize([anchor])。\
-当用户问明确概念『在哪里讲/有哪些出现』时,book.concept(name) 最高价值;概念不存在时不要换同义词连续试探超过两次,改为说明没在图谱中命中。\
+当用户问概念的语义讨论分布而没有给出精确字面写法时,book.concept(name) 最高价值;若给出原话/公式/精确写法则优先 book.search_text。概念不存在时不要把 graph candidate_id 当名称,也不要换同义词连续试探超过两次,改为说明没在图谱中命中。\
 当用户问显式概念/实体的定义、解释、关系或比较时,调用 book.query(query,intent,targets,obligations,anchor_lid):query 必须自含,targets 是明确 referent,obligations 是 1..3 个原子回答要求;不得把『它/这里/刚才』原样传入。\
 章节主旨/整篇贡献先用 book.structure/book.guide_path 或 book.paper_reading_guide 选 LID,再 book.synthesize;当前 passage 问题优先 book.text/book.context 或已知 LID 的 book.synthesize。\
 当用户问『这和前后文/别处什么关系』且已有 LID 时,先 book.context(lid,near/mid/far) 取指针,再对少量相关 LID 调 book.text 或 book.synthesize。\
@@ -2341,6 +2388,85 @@ fn execute_book_query(
     }
 }
 
+fn dispatch_resident_book_tool(
+    id: BookToolId,
+    args: serde_json::Value,
+    book: &Book,
+    adapter: &dyn ModelAdapter,
+) -> (String, Option<AgentEffect>) {
+    if id == BookToolId::Query {
+        let arguments = serde_json::to_string(&args).expect("parsed JSON must serialize");
+        let (body, _) = execute_book_query(&arguments, book, adapter);
+        return (body, None);
+    }
+
+    let input = match validate_input(id, args) {
+        Ok(input) => input,
+        Err(error) => return (err_json(error.code, "validation", &error.message), None),
+    };
+    let body = match (id, input) {
+        (BookToolId::Synthesize, BookToolInput::Synthesize(input)) => {
+            match synthesize(book, &input.lids, input.task.as_deref(), adapter) {
+                Ok(response) => to_json(&response),
+                Err(error) => to_json(&error),
+            }
+        }
+        (BookToolId::Text, BookToolInput::Text(input)) => {
+            match book.text(&input.lid, input.end_lid.as_deref()) {
+                Ok(text) => to_json(&serde_json::json!({ "lid": input.lid, "text": text })),
+                Err(error) => to_json(&error),
+            }
+        }
+        (BookToolId::SearchText, BookToolInput::SearchText(input)) => {
+            match book.search_text(&input) {
+                Ok(result) => to_json(&result),
+                Err(error) => to_json(&error),
+            }
+        }
+        (BookToolId::Context, BookToolInput::Context(input)) => {
+            let granularity = input.granularity.map(|value| value.as_str());
+            match book.context(&input.lid, granularity, input.k) {
+                Ok(context) => to_json(&context),
+                Err(error) => to_json(&error),
+            }
+        }
+        (BookToolId::Concept, BookToolInput::Concept(input)) => match book.concept(&input.name) {
+            Ok(concept) => to_json(&concept),
+            Err(error) => to_json(&error),
+        },
+        (BookToolId::Structure, BookToolInput::At(input)) => {
+            match book.structure(input.at.as_deref()) {
+                Ok(projection) => to_json(&projection),
+                Err(error) => to_json(&error),
+            }
+        }
+        (BookToolId::GuidePath, BookToolInput::At(input)) => {
+            match book.guide_path(input.at.as_deref()) {
+                Ok(path) => to_json(&path),
+                Err(error) => to_json(&error),
+            }
+        }
+        (BookToolId::PaperReadingGuide, BookToolInput::PaperReadingGuide(input)) => {
+            match book.paper_reading_guide(Some(input.mode.as_str()), Some(input.stage.as_str())) {
+                Ok(guide) => to_json(&guide),
+                Err(error) => to_json(&error),
+            }
+        }
+        (BookToolId::PaperMetadata, BookToolInput::Empty(_)) => {
+            to_json(&book.paper_metadata_projection())
+        }
+        (BookToolId::PaperLexicon, BookToolInput::Empty(_)) => {
+            to_json(&book.paper_lexicon_projection())
+        }
+        _ => err_json(
+            "BOOK_TOOL_CONTRACT_INVALID",
+            "internal",
+            "Resident Book tool resolved to an incompatible input contract",
+        ),
+    };
+    (body, None)
+}
+
 /// 执行一次工具调用,返回 `(喂回模型的结果 JSON, 可选可撤销 effect)` `[ADR-0015/0026/0030]`。
 /// 错误**不降级**:把 ToolError 信封原样回喂,模型据 recovery 自纠。
 /// agent 的 highlight/note 落 `session` 层(提议态,用户「保留」才升 long_term `[ADR-0030]`)。
@@ -2368,105 +2494,12 @@ fn dispatch(
             )
         }
     };
+    if let Some(id) = from_resident_alias(name) {
+        return dispatch_resident_book_tool(id, args, book, adapter);
+    }
     let sget = |k: &str| args.get(k).and_then(|v| v.as_str());
 
     match name {
-        "book.query" => {
-            let (body, _) = execute_book_query(arguments, book, adapter);
-            (body, None)
-        }
-        "book.synthesize" => {
-            let Some(arr) = args.get("lids").and_then(|v| v.as_array()) else {
-                return (
-                    err_json("INVALID_RANGE", "validation", "book.synthesize 需 lids"),
-                    None,
-                );
-            };
-            let lids: Vec<String> = arr
-                .iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect();
-            if lids.len() != arr.len() {
-                return (
-                    err_json(
-                        "INVALID_RANGE",
-                        "validation",
-                        "book.synthesize lids 必须全是字符串",
-                    ),
-                    None,
-                );
-            }
-            let task = args.get("task").and_then(|v| v.as_str());
-            let body = match synthesize(book, &lids, task, adapter) {
-                Ok(resp) => to_json(&resp),
-                Err(e) => to_json(&e),
-            };
-            (body, None)
-        }
-        "book.text" => {
-            let Some(lid) = sget("lid") else {
-                return (
-                    err_json("INVALID_RANGE", "validation", "book.text 需 lid"),
-                    None,
-                );
-            };
-            let body = match book.text(lid, sget("end_lid")) {
-                Ok(t) => to_json(&serde_json::json!({ "lid": lid, "text": t })),
-                Err(e) => to_json(&e),
-            };
-            (body, None)
-        }
-        "book.context" => {
-            let Some(lid) = sget("lid") else {
-                return (
-                    err_json("INVALID_RANGE", "validation", "book.context 需 lid"),
-                    None,
-                );
-            };
-            let k = args.get("k").and_then(|v| v.as_u64()).map(|u| u as usize);
-            let granularity = args.get("granularity").and_then(|v| v.as_str());
-            let body = match book.context(lid, granularity, k) {
-                Ok(c) => to_json(&c),
-                Err(e) => to_json(&e),
-            };
-            (body, None)
-        }
-        "book.concept" => {
-            let Some(n) = sget("name") else {
-                return (
-                    err_json("INVALID_RANGE", "validation", "book.concept 需 name"),
-                    None,
-                );
-            };
-            let body = match book.concept(n) {
-                Ok(c) => to_json(&c),
-                Err(e) => to_json(&e),
-            };
-            (body, None)
-        }
-        "book.structure" => {
-            let body = match book.structure(sget("at")) {
-                Ok(p) => to_json(&p),
-                Err(e) => to_json(&e),
-            };
-            (body, None)
-        }
-        "book.guide_path" => {
-            let body = match book.guide_path(sget("at")) {
-                Ok(p) => to_json(&p),
-                Err(e) => to_json(&e),
-            };
-            (body, None)
-        }
-        "book.paper_reading_guide" => {
-            let body = match book.paper_reading_guide(sget("mode"), sget("stage")) {
-                Ok(p) => to_json(&p),
-                Err(e) => to_json(&e),
-            };
-            (body, None)
-        }
-        "book.paper_metadata" => (to_json(&book.paper_metadata_projection()), None),
-        "book.paper_lexicon" => (to_json(&book.paper_lexicon_projection()), None),
         "profile.manifest" => {
             let body = match book.profile_manifest_by_id(sget("profile_id")) {
                 Ok(manifest) => to_json(&manifest),
@@ -2817,7 +2850,7 @@ fn opaque_tool_result_digest(result: &str) -> String {
     format!("tool-result-fnv1a64-{hash:016x}-bytes-{}", result.len())
 }
 
-fn compact_tool_locator_arguments(arguments: &str) -> serde_json::Value {
+fn compact_tool_locator_arguments(tool: &str, arguments: &str) -> serde_json::Value {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(arguments) else {
         return serde_json::json!({});
     };
@@ -2838,6 +2871,42 @@ fn compact_tool_locator_arguments(arguments: &str) -> serde_json::Value {
             compact.insert(field.into(), value.clone());
         }
     }
+    if tool == "book.search_text" {
+        for field in ["query", "match_mode", "order", "cursor"] {
+            if let Some(value) = object.get(field).filter(|value| value.is_string()) {
+                compact.insert(field.into(), value.clone());
+            }
+        }
+        if let Some(value) = object.get("page_size").filter(|value| value.is_u64()) {
+            compact.insert("page_size".into(), value.clone());
+        }
+        if let Some(scope) = object.get("scope").and_then(serde_json::Value::as_object) {
+            let mut compact_scope = serde_json::Map::new();
+            if let Some(value) = scope.get("within_lid").filter(|value| value.is_string()) {
+                compact_scope.insert("within_lid".into(), value.clone());
+            }
+            if let Some(relative) = scope
+                .get("relative_to")
+                .and_then(serde_json::Value::as_object)
+            {
+                let mut compact_relative = serde_json::Map::new();
+                for field in ["lid", "direction"] {
+                    if let Some(value) = relative.get(field).filter(|value| value.is_string()) {
+                        compact_relative.insert(field.into(), value.clone());
+                    }
+                }
+                if !compact_relative.is_empty() {
+                    compact_scope.insert(
+                        "relative_to".into(),
+                        serde_json::Value::Object(compact_relative),
+                    );
+                }
+            }
+            if !compact_scope.is_empty() {
+                compact.insert("scope".into(), serde_json::Value::Object(compact_scope));
+            }
+        }
+    }
     for field in [
         "lids",
         "citations",
@@ -2852,6 +2921,18 @@ fn compact_tool_locator_arguments(arguments: &str) -> serde_json::Value {
         }
     }
     serde_json::Value::Object(compact)
+}
+
+fn search_page_progress_key(arguments: &str) -> Option<(String, String)> {
+    let value = serde_json::from_str::<serde_json::Value>(arguments).ok()?;
+    let BookToolInput::SearchText(mut input) =
+        validate_input(BookToolId::SearchText, value).ok()?
+    else {
+        return None;
+    };
+    let cursor = input.cursor.take().unwrap_or_else(|| "<start>".into());
+    let request = serde_json::to_string(&input).ok()?;
+    Some((request, cursor))
 }
 
 fn historical_tool_receipt(
@@ -2873,10 +2954,10 @@ fn historical_tool_receipt(
     } else {
         HistoricalToolStatus::Ok
     };
-    let accepted_evidence = if status == HistoricalToolStatus::Ok {
+    let accepted_evidence = if status == HistoricalToolStatus::Ok && tool != "book.search_text" {
         let mut ledger = TurnEvidenceLedger::default();
         observe_tool_evidence(&mut ledger, tool, arguments, result, book);
-        ledger.evidence
+        ledger.evidence_ranges()
     } else {
         Vec::new()
     };
@@ -2889,7 +2970,7 @@ fn historical_tool_receipt(
     HistoricalToolReceipt {
         version: "historical_tool_receipt.v1".into(),
         tool: tool.into(),
-        locator_args: compact_tool_locator_arguments(arguments),
+        locator_args: compact_tool_locator_arguments(tool, arguments),
         status,
         error_code,
         accepted_evidence,
@@ -2918,8 +2999,11 @@ fn provider_history_projection(messages: &[Message], book: &Book) -> Vec<Message
                         original_call.id.clone(),
                         (original_call.name.clone(), original_call.arguments.clone()),
                     );
-                    projected_call.arguments =
-                        compact_tool_locator_arguments(&original_call.arguments).to_string();
+                    projected_call.arguments = compact_tool_locator_arguments(
+                        &original_call.name,
+                        &original_call.arguments,
+                    )
+                    .to_string();
                 }
             }
             Role::Tool => {
@@ -3178,6 +3262,7 @@ pub fn run_with_ephemeral_context(
     let mut profile_influences = BTreeSet::new();
     let mut evidence_ledger = TurnEvidenceLedger::from_seed(book, initial_evidence)?;
     let mut answer_provenance = AnswerProvenanceLedger::from_messages(messages);
+    let mut seen_search_pages: HashSet<(String, String)> = HashSet::new();
 
     loop {
         turns += 1;
@@ -3288,6 +3373,19 @@ pub fn run_with_ephemeral_context(
                     Err(error) => to_json(&error),
                 };
                 (result, None, None)
+            } else if tc.name == "book.search_text"
+                && search_page_progress_key(&tc.arguments)
+                    .is_some_and(|key| !seen_search_pages.insert(key))
+            {
+                (
+                    err_json(
+                        "AGENT_NO_PROGRESS",
+                        "validation",
+                        "book.search_text repeated the same cursor for the same request",
+                    ),
+                    None,
+                    None,
+                )
             } else {
                 let (result, effect) =
                     dispatch(&tc.name, &tc.arguments, book, store, reader, adapter, now);
@@ -4220,6 +4318,320 @@ mod tests {
     }
 
     #[test]
+    fn source_presentation_accepts_search_as_a_literal_occurrence_claim() {
+        let source = format!("needle{}", "X".repeat(94));
+        let b = Book::new(sample_base(), &source);
+        let search_input = match validate_input(
+            BookToolId::SearchText,
+            serde_json::json!({"query":"needle", "page_size":1}),
+        )
+        .unwrap()
+        {
+            BookToolInput::SearchText(input) => input,
+            _ => unreachable!(),
+        };
+        let search_result = b.search_text(&search_input).unwrap();
+        let evidence = occurrence_evidence_range(&search_result.occurrences[0]).unwrap();
+        let mut ledger = TurnEvidenceLedger::default();
+        observe_tool_evidence(
+            &mut ledger,
+            "book.search_text",
+            r#"{"query":"needle","page_size":1}"#,
+            &serde_json::to_string(&search_result).unwrap(),
+            &b,
+        );
+        assert_eq!(ledger.evidence.len(), 1);
+        assert_eq!(
+            ledger.evidence[0].claim_kind,
+            EvidenceClaimKind::LiteralOccurrence
+        );
+        assert_eq!(ledger.evidence[0].range, evidence);
+
+        let digest = b
+            .resolve_source(&evidence, SOURCE_PRESENTATION_LOCALE, None)
+            .unwrap()
+            .evidence_text_digest;
+        let source_ref_id = stable_source_ref_id(&digest, 0, &[]);
+        let final_answer = format!("这段字面文本在书中出现过。[[source:{source_ref_id}]]");
+        let fake = FakeAdapter::new(
+            vec![
+                turn_calls(vec![call(
+                    "search",
+                    "book.search_text",
+                    r#"{"query":"needle","page_size":1}"#,
+                )]),
+                turn_calls(vec![call(
+                    "present-search",
+                    "source.present",
+                    r#"{"start_lid":"1.1","quote":"needle"}"#,
+                )]),
+                turn_final(&final_answer),
+            ],
+            vec![],
+        );
+        let mut store = MemoryStore::open(tmp("source-presentation-search")).unwrap();
+        let mut reader = Reader::new(&b, DEFAULT_RADIUS);
+        let mut messages = new_session();
+
+        let out = run(
+            &b,
+            &mut store,
+            &mut reader,
+            &fake,
+            &mut messages,
+            "needle 第一次在哪里",
+            "t0",
+            OuterConfig::default(),
+        )
+        .unwrap();
+
+        assert_eq!(out.source_bindings.len(), 1);
+        assert_eq!(out.source_bindings[0].evidence_range, evidence);
+        assert_eq!(out.trace[0].tool, "book.search_text");
+        assert_eq!(out.trace[1].tool, "source.present");
+    }
+
+    #[test]
+    fn search_text_routing_consumes_all_pages_and_rejects_repeated_cursor() {
+        assert!(SYSTEM_PROMPT.contains("字面位置优先"));
+        assert!(SYSTEM_PROMPT.contains("不得先调 book.query"));
+        assert!(SYSTEM_PROMPT.contains("逐页读取到为空后才能声称完整"));
+        assert!(SYSTEM_PROMPT.contains("必须再用 book.text"));
+
+        let b = Book::new(sample_base(), &"X".repeat(100));
+        let first_input = match validate_input(
+            BookToolId::SearchText,
+            serde_json::json!({"query":"XX", "page_size":50}),
+        )
+        .unwrap()
+        {
+            BookToolInput::SearchText(input) => input,
+            _ => unreachable!(),
+        };
+        let first = b.search_text(&first_input).unwrap();
+        let cursor = first.next_cursor.unwrap();
+        let second_arguments = serde_json::json!({
+            "query":"XX", "page_size":50, "cursor":cursor
+        })
+        .to_string();
+        let adapter = FakeAdapter::new(
+            vec![
+                turn_calls(vec![call(
+                    "search-1",
+                    "book.search_text",
+                    r#"{"query":"XX","page_size":50}"#,
+                )]),
+                turn_calls(vec![call(
+                    "search-2",
+                    "book.search_text",
+                    &second_arguments,
+                )]),
+                turn_final("共找到 99 处字面命中。"),
+            ],
+            vec![],
+        );
+        let mut store = MemoryStore::open(tmp("search-routing-all")).unwrap();
+        let mut reader = Reader::new(&b, DEFAULT_RADIUS);
+        let mut messages = new_session();
+        let out = run(
+            &b,
+            &mut store,
+            &mut reader,
+            &adapter,
+            &mut messages,
+            "找出 XX 的所有出现",
+            "t0",
+            OuterConfig::default(),
+        )
+        .unwrap();
+        assert_eq!(out.trace.len(), 2);
+        assert!(out.trace.iter().all(|step| step.tool == "book.search_text"));
+        let last_result: serde_json::Value = serde_json::from_str(
+            messages
+                .iter()
+                .find(|message| message.tool_call_id.as_deref() == Some("search-2"))
+                .and_then(|message| message.content.as_deref())
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(last_result["total_occurrences"], 99);
+        assert!(last_result.get("next_cursor").is_none());
+
+        let repeated = FakeAdapter::new(
+            vec![
+                turn_calls(vec![call(
+                    "repeat-1",
+                    "book.search_text",
+                    r#"{"query":"X","page_size":1}"#,
+                )]),
+                turn_calls(vec![call(
+                    "repeat-2",
+                    "book.search_text",
+                    r#"{"query":"X","page_size":1}"#,
+                )]),
+                turn_final("分页没有推进，因此未声称结果完整。"),
+            ],
+            vec![],
+        );
+        let mut repeated_store = MemoryStore::open(tmp("search-routing-repeat")).unwrap();
+        let mut repeated_reader = Reader::new(&b, DEFAULT_RADIUS);
+        let mut repeated_messages = new_session();
+        let repeated_out = run(
+            &b,
+            &mut repeated_store,
+            &mut repeated_reader,
+            &repeated,
+            &mut repeated_messages,
+            "找出 X 的所有出现",
+            "t0",
+            OuterConfig::default(),
+        )
+        .unwrap();
+        assert!(repeated_out.trace[1]
+            .result_digest
+            .contains("AGENT_NO_PROGRESS"));
+    }
+
+    #[test]
+    fn search_text_real_book_first_all_and_layered_routing_replay() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(".understand-book/quantification-essence");
+        let b = Book::load(path.to_str().unwrap()).unwrap();
+        let query = r"\sqrt{2\ln N}";
+
+        let mut cursor = None;
+        let mut ordinals = Vec::new();
+        let mut first_lid = None;
+        loop {
+            let arguments = serde_json::json!({
+                "query": query,
+                "page_size": 7,
+                "cursor": cursor,
+            });
+            let (body, effect) = dispatch_resident_book_tool(
+                BookToolId::SearchText,
+                arguments,
+                &b,
+                &FakeAdapter::new(vec![], vec![]),
+            );
+            assert!(effect.is_none());
+            let page: SearchTextResult = serde_json::from_str(&body).unwrap();
+            assert_eq!(page.total_occurrences, 32);
+            first_lid.get_or_insert_with(|| page.occurrences[0].start_lid.clone());
+            ordinals.extend(page.occurrences.iter().map(|occurrence| occurrence.ordinal));
+            let Some(next) = page.next_cursor else {
+                break;
+            };
+            cursor = Some(next);
+        }
+        assert_eq!(first_lid.as_deref(), Some("1.10.3.10"));
+        assert_eq!(ordinals, (1..=32).collect::<Vec<_>>());
+
+        let first_input = match validate_input(
+            BookToolId::SearchText,
+            serde_json::json!({"query":query, "page_size":1}),
+        )
+        .unwrap()
+        {
+            BookToolInput::SearchText(input) => input,
+            _ => unreachable!(),
+        };
+        let first = b.search_text(&first_input).unwrap();
+        let evidence = occurrence_evidence_range(&first.occurrences[0]).unwrap();
+        let digest = b
+            .resolve_source(&evidence, SOURCE_PRESENTATION_LOCALE, None)
+            .unwrap()
+            .evidence_text_digest;
+        let source_ref_id = stable_source_ref_id(&digest, 0, &[]);
+        let search_arguments = serde_json::json!({"query":query, "page_size":1}).to_string();
+        let present_arguments = serde_json::json!({
+            "start_lid":"1.10.3.10", "quote":query
+        })
+        .to_string();
+        let first_adapter = FakeAdapter::new(
+            vec![
+                turn_calls(vec![call(
+                    "real-first-search",
+                    "book.search_text",
+                    &search_arguments,
+                )]),
+                turn_calls(vec![call(
+                    "real-first-present",
+                    "source.present",
+                    &present_arguments,
+                )]),
+                turn_final(&format!(
+                    "这条公式的第一次字面出现已定位。[[source:{source_ref_id}]]"
+                )),
+            ],
+            vec![],
+        );
+        let mut first_store = MemoryStore::open(tmp("search-real-first")).unwrap();
+        let mut first_reader = Reader::new(&b, DEFAULT_RADIUS);
+        let mut first_messages = new_session();
+        let first_out = run(
+            &b,
+            &mut first_store,
+            &mut first_reader,
+            &first_adapter,
+            &mut first_messages,
+            "这条公式第一处在哪里？",
+            "t0",
+            OuterConfig::default(),
+        )
+        .unwrap();
+        assert!(first_out.trace.len() <= 4);
+        assert_eq!(first_out.trace[0].tool, "book.search_text");
+        assert!(first_out.trace.iter().all(|step| step.tool != "book.query"));
+        assert_eq!(first_out.source_bindings[0].evidence_range, evidence);
+
+        let layered_adapter = FakeAdapter::new(
+            vec![
+                turn_calls(vec![call(
+                    "layer-search",
+                    "book.search_text",
+                    &search_arguments,
+                )]),
+                turn_calls(vec![call(
+                    "layer-text",
+                    "book.text",
+                    r#"{"lid":"1.10.3.10"}"#,
+                )]),
+                turn_calls(vec![call(
+                    "layer-context",
+                    "book.context",
+                    r#"{"lid":"1.10.3.10","granularity":"near"}"#,
+                )]),
+                turn_final("先定位公式，再读取所在原文与相邻结构后才能讨论两节的关联。"),
+            ],
+            vec![],
+        );
+        let mut layered_store = MemoryStore::open(tmp("search-real-layered")).unwrap();
+        let mut layered_reader = Reader::new(&b, DEFAULT_RADIUS);
+        let mut layered_messages = new_session();
+        let layered = run(
+            &b,
+            &mut layered_store,
+            &mut layered_reader,
+            &layered_adapter,
+            &mut layered_messages,
+            "第六节和第七节中这条公式如何关联？",
+            "t0",
+            OuterConfig::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            layered
+                .trace
+                .iter()
+                .map(|step| step.tool.as_str())
+                .collect::<Vec<_>>(),
+            vec!["book.search_text", "book.text", "book.context"]
+        );
+    }
+
+    #[test]
     fn source_presentation_observes_filtered_query_and_synthesize_citations() {
         let b = book();
         let citation_evidence = EvidenceRange {
@@ -4938,6 +5350,11 @@ user_question=\"这段怎么理解？\"",
                         "source.present",
                         r#"{"start_lid":"1.1","quote":"QUOTE_SECRET"}"#,
                     ),
+                    call(
+                        "search",
+                        "book.search_text",
+                        r#"{"query":"needle","match_mode":"exact","scope":{"within_lid":"1.1","relative_to":{"lid":"1.2","direction":"before"}},"order":"document","cursor":"st1.cursor","page_size":1,"secret":"SEARCH_ARG_SECRET"}"#,
+                    ),
                     call("error", "book.text", r#"{"lid":"9.9"}"#),
                     call("legacy", "legacy.tool", r#"{"lid":"9.9"}"#),
                 ],
@@ -4969,6 +5386,15 @@ user_question=\"这段怎么理解？\"",
                 ),
                 tool_calls: vec![],
                 tool_call_id: Some("present".into()),
+            },
+            Message {
+                role: Role::Tool,
+                content: Some(
+                    r#"{"version":"search_text.v1","source_revision":"rev","exhaustive":true,"total_occurrences":1,"total_lids":1,"occurrences":[{"excerpt":"SEARCH_SECRET_EXCERPT"}],"section_counts":[]}"#
+                        .into(),
+                ),
+                tool_calls: vec![],
+                tool_call_id: Some("search".into()),
             },
             Message {
                 role: Role::Tool,
@@ -5021,6 +5447,8 @@ user_question=\"这段怎么理解？\"",
             "TEXT_SECRET_BODY",
             "ARG_SECRET",
             "QUOTE_SECRET",
+            "SEARCH_ARG_SECRET",
+            "SEARCH_SECRET_EXCERPT",
             "ERROR_SECRET_BODY",
             "LEGACY_RAW_SECRET",
         ] {
@@ -5054,6 +5482,26 @@ user_question=\"这段怎么理解？\"",
         )
         .unwrap();
         assert_eq!(source_receipt.source_refs, vec!["source_ref_history"]);
+
+        let search_receipt: HistoricalToolReceipt = serde_json::from_str(
+            projected
+                .iter()
+                .find(|message| message.tool_call_id.as_deref() == Some("search"))
+                .and_then(|message| message.content.as_deref())
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(search_receipt.tool, "book.search_text");
+        assert!(search_receipt.accepted_evidence.is_empty());
+        assert_eq!(search_receipt.locator_args["query"], "needle");
+        assert_eq!(search_receipt.locator_args["match_mode"], "exact");
+        assert_eq!(search_receipt.locator_args["scope"]["within_lid"], "1.1");
+        assert_eq!(
+            search_receipt.locator_args["scope"]["relative_to"]["direction"],
+            "before"
+        );
+        assert_eq!(search_receipt.locator_args["cursor"], "st1.cursor");
+        assert_eq!(search_receipt.locator_args["page_size"], 1);
 
         let error_receipt: HistoricalToolReceipt = serde_json::from_str(
             projected
@@ -5672,6 +6120,194 @@ user_question=\"这段怎么理解？\"",
     }
 
     #[test]
+    fn book_tool_characterization() {
+        let specs = tool_specs();
+        let schema = |name: &str| {
+            &specs
+                .iter()
+                .find(|spec| spec.name == name)
+                .unwrap_or_else(|| panic!("missing resident tool spec: {name}"))
+                .parameters
+        };
+
+        let shared_resident_tools = [
+            "book.query",
+            "book.synthesize",
+            "book.search_text",
+            "book.text",
+            "book.context",
+            "book.concept",
+            "book.structure",
+            "book.guide_path",
+            "book.paper_reading_guide",
+            "book.paper_metadata",
+            "book.paper_lexicon",
+        ];
+        for name in shared_resident_tools {
+            assert!(
+                specs.iter().any(|spec| spec.name == name),
+                "resident surface lost {name}"
+            );
+        }
+        assert!(
+            specs.iter().all(|spec| spec.name != "book.manifest"),
+            "resident intentionally keeps the full manifest off the model-visible surface"
+        );
+
+        assert_eq!(
+            schema("book.query")["required"],
+            serde_json::json!(["anchor_lid", "intent", "obligations", "query", "targets"])
+        );
+        assert_eq!(
+            schema("book.query")["properties"]["intent"]["enum"],
+            serde_json::json!(["definition", "explanation", "relation", "comparison"])
+        );
+        assert_eq!(
+            schema("book.query")["additionalProperties"],
+            serde_json::Value::Bool(false)
+        );
+
+        for (name, required) in [
+            ("book.text", serde_json::json!(["lid"])),
+            ("book.context", serde_json::json!(["lid"])),
+            ("book.concept", serde_json::json!(["name"])),
+            ("book.synthesize", serde_json::json!(["lids"])),
+        ] {
+            assert_eq!(
+                schema(name)["required"],
+                required,
+                "required drift for {name}"
+            );
+            assert_eq!(
+                schema(name)["additionalProperties"],
+                serde_json::Value::Bool(false),
+                "canonical Resident schema must reject unknown fields for {name}"
+            );
+        }
+        assert_eq!(
+            schema("book.context")["properties"]["granularity"]["enum"],
+            serde_json::json!(["near", "mid", "far"])
+        );
+        assert_eq!(
+            schema("book.search_text")["required"],
+            serde_json::json!(["query"])
+        );
+        assert_eq!(
+            schema("book.search_text")["properties"]["match_mode"]["enum"],
+            serde_json::json!(["exact", "normalized"])
+        );
+        assert_eq!(
+            schema("book.paper_reading_guide")["properties"]["mode"]["enum"],
+            serde_json::json!(["skim", "close", "deep"])
+        );
+        assert_eq!(
+            schema("book.paper_reading_guide")["properties"]["stage"]["enum"],
+            serde_json::json!(["passive", "active", "critical", "creative"])
+        );
+
+        let valid_query = serde_json::json!({
+            "query": "What is alpha?",
+            "intent": "definition",
+            "targets": ["alpha"],
+            "obligations": [{"requirement": "Define alpha"}],
+            "anchor_lid": "1.1"
+        });
+        assert!(crate::parse_book_query_request(valid_query).is_ok());
+        assert!(crate::parse_book_query_request(serde_json::json!({
+            "query": "What is alpha?",
+            "intent": "definition",
+            "targets": [],
+            "obligations": [{"requirement": "Define alpha"}],
+            "anchor_lid": "1.1"
+        }))
+        .is_err());
+    }
+
+    #[test]
+    fn book_tool_contract_dispatches_canonical_inputs() {
+        let b = book();
+        let mut store = MemoryStore::open(tmp("book-tool-contract")).unwrap();
+        let mut reader = Reader::new(&b, DEFAULT_RADIUS);
+        let adapter = FakeAdapter::new(vec![], vec![]);
+
+        let (invalid, effect) = dispatch(
+            "book.text",
+            r#"{"lid":"1.1","unexpected":true}"#,
+            &b,
+            &mut store,
+            &mut reader,
+            &adapter,
+            "t0",
+        );
+        assert!(invalid.contains("BOOK_TOOL_INPUT_INVALID"));
+        assert!(effect.is_none());
+
+        let (text, effect) = dispatch(
+            "book.text",
+            r#"{"lid":"1.1"}"#,
+            &b,
+            &mut store,
+            &mut reader,
+            &adapter,
+            "t0",
+        );
+        let text: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(text["lid"], "1.1");
+        assert!(text["text"].is_string());
+        assert!(effect.is_none());
+
+        let (paper, effect) = dispatch(
+            "book.paper_reading_guide",
+            r#"{}"#,
+            &b,
+            &mut store,
+            &mut reader,
+            &adapter,
+            "t0",
+        );
+        assert!(paper.contains("\"available\":false"));
+        assert!(effect.is_none());
+    }
+
+    #[test]
+    fn search_text_tool_dispatches_the_canonical_contract() {
+        let b = Book::new(sample_base(), &"X".repeat(100));
+        let mut store = MemoryStore::open(tmp("search-text-tool")).unwrap();
+        let mut reader = Reader::new(&b, DEFAULT_RADIUS);
+        let adapter = FakeAdapter::new(vec![], vec![]);
+
+        let (body, effect) = dispatch(
+            "book.search_text",
+            r#"{"query":"XX","page_size":2}"#,
+            &b,
+            &mut store,
+            &mut reader,
+            &adapter,
+            "t0",
+        );
+        let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(body["version"], "search_text.v1");
+        assert_eq!(body["exhaustive"], true);
+        assert_eq!(body["total_occurrences"], 99);
+        assert_eq!(body["occurrences"][0]["ordinal"], 1);
+        assert_eq!(body["occurrences"][1]["ordinal"], 2);
+        assert!(body["next_cursor"].is_string());
+        assert!(effect.is_none());
+
+        let (invalid, effect) = dispatch(
+            "book.search_text",
+            r#"{"query":"X","page_size":0}"#,
+            &b,
+            &mut store,
+            &mut reader,
+            &adapter,
+            "t1",
+        );
+        assert!(invalid.contains("BOOK_TOOL_INPUT_INVALID"));
+        assert!(effect.is_none());
+    }
+
+    #[test]
     fn query_routing_keeps_document_and_passage_questions_on_owned_tools() {
         assert!(SYSTEM_PROMPT.contains(
             "章节主旨/整篇贡献先用 book.structure/book.guide_path 或 book.paper_reading_guide 选 LID,再 book.synthesize"
@@ -5689,7 +6325,7 @@ user_question=\"这段怎么理解？\"",
         assert!(query.description.contains("显式 referent"));
         assert_eq!(
             query.parameters["required"],
-            serde_json::json!(["query", "intent", "targets", "obligations", "anchor_lid"])
+            serde_json::json!(["anchor_lid", "intent", "obligations", "query", "targets"])
         );
         assert_eq!(
             query.parameters["additionalProperties"],
