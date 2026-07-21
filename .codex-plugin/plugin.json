@@ -1,6 +1,6 @@
 {
   "name": "understand-book",
-  "version": "0.1.0+codex.20260719112934",
+  "version": "0.1.0+codex.20260721044654",
   "description": "Build books and papers into evidence-anchored local reading workspaces.",
   "author": {
     "name": "Understand Book contributors"
@@ -14,6 +14,7 @@
     "LID"
   ],
   "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "Understand Book",
     "shortDescription": "Build evidence-anchored reading workspaces.",

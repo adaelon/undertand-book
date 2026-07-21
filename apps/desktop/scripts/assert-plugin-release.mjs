@@ -29,6 +29,36 @@ assert.deepEqual(
   rootManifest,
   "published plugin manifest must match the root Codex plugin manifest",
 );
+assert.equal(
+  rootManifest.mcpServers,
+  "./.mcp.json",
+  "plugin manifest must declare the companion MCP config",
+);
+
+const rootMcp = await readJson(".mcp.json");
+const releaseMcp = await readJson("plugins/understand-book/.mcp.json");
+assert.deepEqual(
+  releaseMcp,
+  rootMcp,
+  "published plugin MCP config must match the root plugin MCP config",
+);
+assert.deepEqual(
+  rootMcp.mcpServers?.book?.args,
+  ["/d", "/s", "/c", "scripts\\start-book-mcp.cmd"],
+  "Book MCP must launch through the plugin-owned Windows resolver",
+);
+assert.equal(rootMcp.mcpServers?.book?.cwd, ".", "Book MCP cwd must resolve from plugin root");
+
+const rootMcpLauncher = await readText("scripts/start-book-mcp.cmd");
+const releaseMcpLauncher = await readText("plugins/understand-book/scripts/start-book-mcp.cmd");
+assert.equal(
+  releaseMcpLauncher,
+  rootMcpLauncher,
+  "published Book MCP launcher must match the root plugin launcher",
+);
+for (const marker of ["UNDERSTAND_BOOK_MCP_BIN", "HKCU\\Software\\UnderstandBook", "book-mcp.exe"]) {
+  assert(rootMcpLauncher.includes(marker), `Book MCP launcher is missing resolver marker: ${marker}`);
+}
 
 const releaseSkill = await readText("plugins/understand-book/skills/build/SKILL.md");
 const protocolMarkers = [

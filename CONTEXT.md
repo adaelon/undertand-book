@@ -531,6 +531,12 @@ Build Workbench 背后的服务端控制层:负责把上传的 `paper.md/paper.p
 ## Codex plugin
 以 `.codex-plugin/plugin.json` 打包、由 Codex 安装和加载的本地预构建 harness 外壳。它通过 `$understand-book-build` 驱动现有确定性脚本与专用语义抽取契约,正常条件下一次调用完成、外部中断后按磁盘产物幂等续跑。paper 只消费 Build Workbench 已可信的混合阅读基座;非 paper 可从 Markdown/EPUB 原始输入开始。它不是 Web 内置模型 worker,不嵌入 Codex app-server,也不能绕过 artifact/hash/schema gate。状态:NEW(2026-07-11 §0.5)。
 
+## Book MCP Sidecar
+随 Windows Setup 安装、由 Codex plugin 声明和启动的只读本地 MCP 可执行程序。一个进程在启动时绑定一本可信 Book workspace,只投影 canonical Book tools;它不读取 resident memory、画像、Agent 历史或 Provider 设置。无显式书目录时可读取 Reader session 的当前书路由指针,但该指针不成为新的工具面。状态:NEW(详见 [docs/adr/0089])。
+
+## current-book MCP binding
+Book MCP 进程级的单书绑定:优先使用显式 CLI 目录,其次 `UNDERSTAND_BOOK_DIR`,最后使用 Reader 最近持久化且仍可加载的当前书。绑定在进程生命周期内不随 Reader 切书漂移;新 MCP 进程才重新解析。状态:NEW(详见 [docs/adr/0089])。
+
 ## Desktop Reader App
 把现有 Vue reader 与 Rust localhost REST host 封装为 Windows 桌面应用的产品表面。第一版使用 Tauri 2 + WebView2,保留同源 REST 契约,支持无当前书启动、默认书库和外部 `.understand-book/<book_id>` workspace 注册且不复制产物。状态:BOUNDARY_CHANGE(详见 [docs/adr/0068])。
 

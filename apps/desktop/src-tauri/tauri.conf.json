@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "identifier": "app.understandbook.reader",
   "build": {
-    "beforeBuildCommand": "pnpm -C ../../packages/web build && node scripts/build-sidecar.mjs && node scripts/smoke-workbench-sidecar.mjs && node scripts/prepare-resources.mjs",
+    "beforeBuildCommand": "pnpm -C ../../packages/web build && node scripts/build-sidecar.mjs && node scripts/smoke-workbench-sidecar.mjs && node scripts/build-book-mcp.mjs && node scripts/smoke-book-mcp-plugin.mjs && node scripts/prepare-resources.mjs",
     "frontendDist": "../../../packages/web/dist"
   },
   "app": {
@@ -16,7 +16,7 @@
   "bundle": {
     "active": true,
     "targets": ["nsis"],
-    "externalBin": ["binaries/understand-book-build"],
+    "externalBin": ["binaries/understand-book-build", "binaries/book-mcp"],
     "resources": ["resources/web-dist/**/*"],
     "windows": {
       "nsis": {

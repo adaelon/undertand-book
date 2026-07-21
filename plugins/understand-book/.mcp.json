@@ -1,0 +1,23 @@
+{
+  "mcpServers": {
+    "book": {
+      "type": "stdio",
+      "command": "cmd.exe",
+      "args": ["/d", "/s", "/c", "scripts\\start-book-mcp.cmd"],
+      "cwd": ".",
+      "env_vars": [
+        "UNDERSTAND_BOOK_MCP_BIN",
+        "UNDERSTAND_BOOK_DIR",
+        "UNDERSTAND_BOOK_MEMORY_DIR",
+        "UNDERSTAND_BOOK_PROVIDER",
+        "OPENCODE_API_KEY",
+        "OPENCODE_BASE_URL",
+        "FLUID_LLM_MODEL",
+        "USERPROFILE",
+        "HOME"
+      ],
+      "startup_timeout_sec": 10,
+      "tool_timeout_sec": 60
+    }
+  }
+}
