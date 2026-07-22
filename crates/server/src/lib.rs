@@ -53,7 +53,7 @@ use runtime::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::OsString;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
@@ -2119,6 +2119,8 @@ struct PdfSelectionResolveResponse {
     recovery_policy_version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     recovered_differences: Option<Vec<PdfSelectionRecoveryDifference>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recovered_difference_counts: Option<BTreeMap<PdfSelectionRecoveryDifference, usize>>,
     ranges: Vec<PdfSemanticRange>,
     quote_markdown: String,
 }
@@ -2145,6 +2147,8 @@ struct PdfRangeProjection {
     recovery_policy_version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     recovered_differences: Option<Vec<PdfSelectionRecoveryDifference>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recovered_difference_counts: Option<BTreeMap<PdfSelectionRecoveryDifference, usize>>,
     rects: Vec<ExactPdfRect>,
     #[serde(skip_serializing_if = "Option::is_none")]
     covered_range: Option<SourceSpanDto>,
@@ -7059,19 +7063,39 @@ fn filter_hits_to_raw_quote(hits: Vec<SelectionCharHit>, raw_quote: &str) -> Vec
         .collect()
 }
 
-const PDF_SELECTION_RECOVERY_POLICY_VERSION: &str = "pdf_selection_recovery.v1";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum PdfSelectionRecoveryDifference {
     LayoutWhitespace,
     HyphenRepresentation,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct PdfSelectionRecoveryPolicy {
+    version: &'static str,
+    accepted_differences: &'static [PdfSelectionRecoveryDifference],
+}
+
+const PDF_SELECTION_RECOVERY_ACCEPTED_DIFFERENCES: &[PdfSelectionRecoveryDifference] = &[
+    PdfSelectionRecoveryDifference::LayoutWhitespace,
+    PdfSelectionRecoveryDifference::HyphenRepresentation,
+];
+
+const PDF_SELECTION_RECOVERY_POLICY: PdfSelectionRecoveryPolicy = PdfSelectionRecoveryPolicy {
+    version: "pdf_selection_recovery.v1",
+    accepted_differences: PDF_SELECTION_RECOVERY_ACCEPTED_DIFFERENCES,
+};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PdfSelectionRecoveryReport {
+    differences: Vec<PdfSelectionRecoveryDifference>,
+    difference_counts: BTreeMap<PdfSelectionRecoveryDifference, usize>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum PdfSelectionRecoveryDecision {
     Exact,
-    Recovered(Vec<PdfSelectionRecoveryDifference>),
+    Recovered(PdfSelectionRecoveryReport),
     Incomplete,
 }
 
@@ -7091,22 +7115,55 @@ struct Utf16SelectionChar {
     end: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum PdfSelectionRecoveryOccurrence {
+    CanonicalUtf16(usize),
+    RawUtf16(usize),
+}
+
 #[derive(Debug, Default)]
 struct PdfSelectionRecoveryDifferences {
-    layout_whitespace: bool,
-    hyphen_representation: bool,
+    occurrences: BTreeMap<PdfSelectionRecoveryDifference, BTreeSet<PdfSelectionRecoveryOccurrence>>,
 }
 
 impl PdfSelectionRecoveryDifferences {
-    fn into_vec(self) -> Vec<PdfSelectionRecoveryDifference> {
-        let mut differences = Vec::new();
-        if self.layout_whitespace {
-            differences.push(PdfSelectionRecoveryDifference::LayoutWhitespace);
+    fn record(
+        &mut self,
+        difference: PdfSelectionRecoveryDifference,
+        occurrence: PdfSelectionRecoveryOccurrence,
+    ) {
+        self.occurrences
+            .entry(difference)
+            .or_default()
+            .insert(occurrence);
+    }
+
+    fn into_report(self) -> Option<PdfSelectionRecoveryReport> {
+        if self.occurrences.keys().any(|difference| {
+            !PDF_SELECTION_RECOVERY_POLICY
+                .accepted_differences
+                .contains(difference)
+        }) {
+            return None;
         }
-        if self.hyphen_representation {
-            differences.push(PdfSelectionRecoveryDifference::HyphenRepresentation);
-        }
-        differences
+        let difference_counts = PDF_SELECTION_RECOVERY_POLICY
+            .accepted_differences
+            .iter()
+            .filter_map(|difference| {
+                self.occurrences
+                    .get(difference)
+                    .map(|occurrences| (*difference, occurrences.len()))
+            })
+            .collect::<BTreeMap<_, _>>();
+        Some(PdfSelectionRecoveryReport {
+            differences: PDF_SELECTION_RECOVERY_POLICY
+                .accepted_differences
+                .iter()
+                .filter(|difference| difference_counts.contains_key(difference))
+                .copied()
+                .collect(),
+            difference_counts,
+        })
     }
 }
 
@@ -7161,7 +7218,12 @@ fn selection_text_recovery_differences(
                     .iter()
                     .map(|item| item.value))
             {
-                differences.layout_whitespace = true;
+                differences.record(
+                    PdfSelectionRecoveryDifference::LayoutWhitespace,
+                    PdfSelectionRecoveryOccurrence::CanonicalUtf16(
+                        canonical[canonical_run_start].start,
+                    ),
+                );
             }
             continue;
         }
@@ -7173,7 +7235,10 @@ fn selection_text_recovery_differences(
         if is_pdf_selection_recoverable_hyphen(raw_char.value)
             && is_pdf_selection_recoverable_hyphen(canonical_char.value)
         {
-            differences.hyphen_representation = true;
+            differences.record(
+                PdfSelectionRecoveryDifference::HyphenRepresentation,
+                PdfSelectionRecoveryOccurrence::CanonicalUtf16(canonical_char.start),
+            );
             raw_index += 1;
             canonical_index += 1;
             continue;
@@ -7188,8 +7253,8 @@ fn selection_text_recovery_differences(
                 .and_then(|index| raw.get(index))
                 .map(|item| item.value);
             let mut next_raw_index = raw_index + 1;
+            let raw_whitespace_start = next_raw_index;
             while next_raw_index < raw.len() && raw[next_raw_index].value.is_whitespace() {
-                differences.layout_whitespace = true;
                 next_raw_index += 1;
             }
             let next_raw = raw.get(next_raw_index).map(|item| item.value);
@@ -7199,7 +7264,16 @@ fn selection_text_recovery_differences(
             {
                 return None;
             }
-            differences.hyphen_representation = true;
+            if raw_whitespace_start < next_raw_index {
+                differences.record(
+                    PdfSelectionRecoveryDifference::LayoutWhitespace,
+                    PdfSelectionRecoveryOccurrence::RawUtf16(raw[raw_whitespace_start].start),
+                );
+            }
+            differences.record(
+                PdfSelectionRecoveryDifference::HyphenRepresentation,
+                PdfSelectionRecoveryOccurrence::RawUtf16(raw_char.start),
+            );
             raw_index = next_raw_index;
             continue;
         }
@@ -7339,7 +7413,12 @@ fn classify_pdf_selection_recovery(
             continue;
         }
         if item.value.is_whitespace() {
-            differences.layout_whitespace = true;
+            if index == 0 || covered[index - 1] || !canonical[index - 1].value.is_whitespace() {
+                differences.record(
+                    PdfSelectionRecoveryDifference::LayoutWhitespace,
+                    PdfSelectionRecoveryOccurrence::CanonicalUtf16(item.start),
+                );
+            }
             continue;
         }
         if is_pdf_selection_recoverable_hyphen(item.value)
@@ -7350,17 +7429,22 @@ fn classify_pdf_selection_recovery(
             && covered[index - 1]
             && covered[index + 1]
         {
-            differences.hyphen_representation = true;
+            differences.record(
+                PdfSelectionRecoveryDifference::HyphenRepresentation,
+                PdfSelectionRecoveryOccurrence::CanonicalUtf16(item.start),
+            );
             continue;
         }
         return PdfSelectionRecoveryDecision::Incomplete;
     }
 
-    let differences = differences.into_vec();
-    if differences.is_empty() {
+    let Some(report) = differences.into_report() else {
+        return PdfSelectionRecoveryDecision::Incomplete;
+    };
+    if report.differences.is_empty() {
         PdfSelectionRecoveryDecision::Exact
     } else {
-        PdfSelectionRecoveryDecision::Recovered(differences)
+        PdfSelectionRecoveryDecision::Recovered(report)
     }
 }
 
@@ -8024,19 +8108,26 @@ fn route_pdf_selection_resolve(book: &Book, book_dir: &Path, body: &serde_json::
         }
     });
     let recovered_differences = match &recovery_decision {
-        PdfSelectionRecoveryDecision::Recovered(differences) if status == "resolved" => {
-            Some(differences.clone())
+        PdfSelectionRecoveryDecision::Recovered(report) if status == "resolved" => {
+            Some(report.differences.clone())
+        }
+        _ => None,
+    };
+    let recovered_difference_counts = match &recovery_decision {
+        PdfSelectionRecoveryDecision::Recovered(report) if status == "resolved" => {
+            Some(report.difference_counts.clone())
         }
         _ => None,
     };
     let recovery_policy_version = recovered_differences
         .is_some()
-        .then(|| PDF_SELECTION_RECOVERY_POLICY_VERSION.to_string());
+        .then(|| PDF_SELECTION_RECOVERY_POLICY.version.to_string());
     ok_json(&PdfSelectionResolveResponse {
         status: status.into(),
         resolution_basis,
         recovery_policy_version,
         recovered_differences,
+        recovered_difference_counts,
         ranges,
         quote_markdown,
     })
@@ -8319,14 +8410,20 @@ fn route_pdf_ranges_project(book: &Book, book_dir: &Path, body: &serde_json::Val
             }
         });
         let recovered_differences = match &recovery_decision {
-            PdfSelectionRecoveryDecision::Recovered(differences) if status == "exact" => {
-                Some(differences.clone())
+            PdfSelectionRecoveryDecision::Recovered(report) if status == "exact" => {
+                Some(report.differences.clone())
+            }
+            _ => None,
+        };
+        let recovered_difference_counts = match &recovery_decision {
+            PdfSelectionRecoveryDecision::Recovered(report) if status == "exact" => {
+                Some(report.difference_counts.clone())
             }
             _ => None,
         };
         let recovery_policy_version = recovered_differences
             .is_some()
-            .then(|| PDF_SELECTION_RECOVERY_POLICY_VERSION.to_string());
+            .then(|| PDF_SELECTION_RECOVERY_POLICY.version.to_string());
         projections.push(PdfRangeProjection {
             lid: input_range.lid,
             range: input_range.range,
@@ -8334,6 +8431,7 @@ fn route_pdf_ranges_project(book: &Book, book_dir: &Path, body: &serde_json::Val
             resolution_basis,
             recovery_policy_version,
             recovered_differences,
+            recovered_difference_counts,
             rects,
             covered_range,
             terminal_rect,
@@ -13339,8 +13437,19 @@ mod tests {
     #[test]
     fn pdf_selection_recovery_classifier_accepts_exact_and_known_representation_gaps() {
         assert_eq!(
-            PDF_SELECTION_RECOVERY_POLICY_VERSION,
+            PDF_SELECTION_RECOVERY_POLICY.version,
             "pdf_selection_recovery.v1"
+        );
+        assert_eq!(
+            PDF_SELECTION_RECOVERY_POLICY.accepted_differences,
+            &[
+                PdfSelectionRecoveryDifference::LayoutWhitespace,
+                PdfSelectionRecoveryDifference::HyphenRepresentation,
+            ]
+        );
+        assert!(
+            serde_json::from_str::<PdfSelectionRecoveryDifference>("\"unknown_punctuation\"")
+                .is_err()
         );
 
         let exact_quote = "Exact source text.";
@@ -13375,10 +13484,16 @@ unchanged after training concludes";
                 &hits,
                 &PdfSelectionRecoveryEvidence::default(),
             ),
-            PdfSelectionRecoveryDecision::Recovered(vec![
-                PdfSelectionRecoveryDifference::LayoutWhitespace,
-                PdfSelectionRecoveryDifference::HyphenRepresentation,
-            ])
+            PdfSelectionRecoveryDecision::Recovered(PdfSelectionRecoveryReport {
+                differences: vec![
+                    PdfSelectionRecoveryDifference::LayoutWhitespace,
+                    PdfSelectionRecoveryDifference::HyphenRepresentation,
+                ],
+                difference_counts: BTreeMap::from([
+                    (PdfSelectionRecoveryDifference::LayoutWhitespace, 6),
+                    (PdfSelectionRecoveryDifference::HyphenRepresentation, 4),
+                ]),
+            })
         );
 
         let raw_discretionary = "feed-\nforward";
@@ -13394,10 +13509,16 @@ unchanged after training concludes";
                 &selection_recovery_hits(canonical_discretionary, |_, _| false),
                 &evidence,
             ),
-            PdfSelectionRecoveryDecision::Recovered(vec![
-                PdfSelectionRecoveryDifference::LayoutWhitespace,
-                PdfSelectionRecoveryDifference::HyphenRepresentation,
-            ])
+            PdfSelectionRecoveryDecision::Recovered(PdfSelectionRecoveryReport {
+                differences: vec![
+                    PdfSelectionRecoveryDifference::LayoutWhitespace,
+                    PdfSelectionRecoveryDifference::HyphenRepresentation,
+                ],
+                difference_counts: BTreeMap::from([
+                    (PdfSelectionRecoveryDifference::LayoutWhitespace, 1),
+                    (PdfSelectionRecoveryDifference::HyphenRepresentation, 1),
+                ]),
+            })
         );
     }
 
@@ -13532,7 +13653,11 @@ unchanged after training concludes";
         );
         assert_eq!(
             selected_body["recovery_policy_version"],
-            PDF_SELECTION_RECOVERY_POLICY_VERSION
+            PDF_SELECTION_RECOVERY_POLICY.version
+        );
+        assert_eq!(
+            selected_body["recovered_difference_counts"],
+            serde_json::json!({"hyphen_representation":1})
         );
         assert_eq!(selected_body["quote_markdown"], "feed-forward");
         assert_eq!(
@@ -13550,6 +13675,10 @@ unchanged after training concludes";
         assert_eq!(projection["status"], "exact");
         assert_eq!(projection["resolution_basis"], "recovered");
         assert_eq!(
+            projection["recovered_difference_counts"],
+            serde_json::json!({"hyphen_representation":1})
+        );
+        assert_eq!(
             projection["covered_range"],
             serde_json::json!({"start":0,"end":12})
         );
@@ -13566,6 +13695,9 @@ unchanged after training concludes";
         let selected_body: serde_json::Value = serde_json::from_str(&selected.body).unwrap();
         assert_eq!(selected_body["status"], "partial");
         assert!(selected_body["resolution_basis"].is_null());
+        assert!(selected_body["recovery_policy_version"].is_null());
+        assert!(selected_body["recovered_differences"].is_null());
+        assert!(selected_body["recovered_difference_counts"].is_null());
 
         let mut terminal = state_named("pdf-selection-recovery-terminal-gap");
         write_recovery_runtime_artifacts(&mut terminal, "feed-forward", &[4, 11]);
@@ -13576,6 +13708,23 @@ unchanged after training concludes";
         );
         let selected_body: serde_json::Value = serde_json::from_str(&selected.body).unwrap();
         assert_eq!(selected_body["status"], "partial");
+        assert!(selected_body["recovery_policy_version"].is_null());
+        assert!(selected_body["recovered_differences"].is_null());
+        assert!(selected_body["recovered_difference_counts"].is_null());
+
+        let mut exact = state_named("pdf-selection-recovery-exact");
+        write_recovery_runtime_artifacts(&mut exact, "stable", &[]);
+        let selected = post(
+            &mut exact,
+            "/reader/pdf_selection.resolve",
+            r#"{"pageIndex":0,"raw_quote":"stable","rects":[{"bbox":[9.0,9.0,40.0,21.0]}]}"#,
+        );
+        let selected_body: serde_json::Value = serde_json::from_str(&selected.body).unwrap();
+        assert_eq!(selected_body["status"], "resolved");
+        assert_eq!(selected_body["resolution_basis"], "exact");
+        assert!(selected_body["recovery_policy_version"].is_null());
+        assert!(selected_body["recovered_differences"].is_null());
+        assert!(selected_body["recovered_difference_counts"].is_null());
     }
 
     #[test]

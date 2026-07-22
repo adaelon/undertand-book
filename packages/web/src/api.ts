@@ -311,6 +311,7 @@ export interface PdfSelectionResolveResponse {
   resolution_basis?: SelectionResolutionBasis;
   recovery_policy_version?: "pdf_selection_recovery.v1";
   recovered_differences?: PdfSelectionRecoveryDifference[];
+  recovered_difference_counts?: Partial<Record<PdfSelectionRecoveryDifference, number>>;
   ranges: Array<{
     lid: string;
     range: TextRange;
@@ -332,6 +333,7 @@ export interface PdfRangesProjectResponse {
     resolution_basis?: SelectionResolutionBasis;
     recovery_policy_version?: "pdf_selection_recovery.v1";
     recovered_differences?: PdfSelectionRecoveryDifference[];
+    recovered_difference_counts?: Partial<Record<PdfSelectionRecoveryDifference, number>>;
     rects: Array<{
       pageIndex: number;
       bbox: [number, number, number, number];
