@@ -1,31 +1,32 @@
-# SESSION_CHECKPOINT - 2026-07-21 13:13 +08:00
+# SESSION_CHECKPOINT - 2026-07-22 17:52 +08:00
 
 ## 新鲜度自检
-- Setup 源码 commit:`167c804 fix(desktop): honor cargo target dir when exporting`;功能提交:`e07b580 feat(plugin): bundle current-book MCP`。
-- plugin cachebuster:`0.1.0+codex.20260721044654`。
-- 当前 Setup:`dist/UnderstandBookSetup.exe`,37,252,013 bytes,SHA-256 `D317DB822EA0A0BDA9A9A6BE7761899B99B24E8442F4CB1EEE2D8131276A14E1`,version 0.1.0。
+- 写入时最新 commit:`ed864cb feat(pdf): add full-book adaptation audit`；PR9 已验证完成，下一原子动作是提交 PR9 后进入 PR10。
+- 读入时先比较 `git log -3 --oneline`;若不一致,以 git 为准并重新核对本页未提交状态。
 
 ## 当前在做什么
-PM1-PM5 已实现、验证、提交并从 detached clean snapshot 重编 Windows Setup;只剩本 release 证据文档提交与临时 worktree 清理。
+PDF 选区全书适配 PR9 已实现并验证：Markdown adapter 已切换到 positioned CommonMark/GFM/math AST，真实书的无正文结构差异和 10 个 source-review proposal 已冻结；正式 source/base/maps 未修改。当前进入 PR10 来源实质差异复核与 LID 迁移。
 
-## 已验证
-1. `cargo test --workspace` 全绿;新增 `book_mcp` 选书单测 5/5。
-2. root/public plugin validator、release parity 与当前 Codex CLI 隔离安装全绿。
-3. plugin manifest launcher 通过 Reader session 绑定临时书并完成 tools/list + `book_search_text`。
-4. clean release `book-mcp.exe` 5,050,368 bytes,SHA-256 `D1C41E888194AD1FAADD123A712DBE9DC1B7DE1E02EA7A7A0824C89CFE7F1C1B`。
-5. NSIS bundle、隔离导出、最终 Setup 三份哈希一致;安装器未运行。
+## 下一步(可直接接手)
+1. 提交 PR9 精确暂存集；提交后把本页 freshness 更新为 PR9 commit hash。
+2. 读取 PR10 方案、ADR-0019/0020、`source-reconciliation.ts` 及现有 review/migration tests，先声明 source decision/migration 的最小边界。
+3. 以 `external-formula-dense-transformer-structure-audit.json` 的 10 个 proposal 和总账 A011 28 项建立 red review manifest；未经显式证据的项必须阻断候选发布。
+4. 构建新 book_id 的隔离 source/base 候选与 `lid_migration_map`；旧 source/base/记忆保持只读，禁止最近邻迁移。
+5. 跑 PR10 定向测试、Core typecheck/全量、真实 source review closure 与 PR8 migration audit；若仍有未复核项，工具能力可提交但 PR20 发布门保持红。
 
-## 使用边界
-- 安装新 Setup 并在安装提示中同意 Codex plugin 后,新 Codex thread 自动加载 Book MCP;不再执行 `codex mcp add`。
-- MCP 启动时绑定 Reader 最后打开书;Reader 切书后需要新 Codex thread。
-- Git marketplace 仍是独立发布物;本地提交未 push 时,远端用户不会获得新 `.mcp.json`。
-
-## 未提交 / 不得触碰
-- 本 release 证据文档待提交;Setup 是 `.gitignore` 忽略产物。
-- 工作树仍有用户既有 memory/profile/reader/server host、旧前端切片和资料文件,不得吸收或恢复。
+## 未提交 / 未完成
+- `SESSION_CHECKPOINT.md`:本次整页刷新，将随 PR9 提交；提交后需再次刷新 hash。
+- PR9 实现/测试/文档已完成但尚未提交；PR10-PR21 仍未实施。
+- 工作树另有用户既存 memory/profile/reader/server、前端阅读器切片、Note/画像文档和临时日志;不吸收、不恢复,每个 PR 提交前精确选文件。
 
 ## 冷启动读序
-1. `docs/adr/0089-plugin-provided-current-book-mcp-and-setup-sidecar.md` - 启动、选书、隐私和发布决策。
-2. `docs/切片方案-Codex插件内置Book-MCP.md` - PM1-PM4 与完成定义。
-3. `docs/架构.md` 的 Plugin-provided current-book Book MCP 段 - 当前数据流。
-4. `docs/代码链路.md` 最后的 PM1-PM5 条目 - 实现、验证与产物索引。
+1. `docs/切片方案-PDF选区全书适配闭环.md` 第 3-4 节 PR10 - source review、候选基座与退出判据。
+2. `docs/adr/0019-*.md` 与 `docs/adr/0020-*.md` - 基座替换和 LID migration 的冻结约束。
+3. `packages/core/src/source-reconciliation.ts` 与对应 tests - 现有来源复核/决策边界。
+4. `packages/core/test/fixtures/hybrid-foundation-goldset/v1/external-formula-dense-transformer-structure-audit.json` - PR9 冻结的真实结构差异和 review proposals。
+5. `packages/core/src/hybrid-foundation-goldset.ts` - PR8 migration map 审计入口。
+
+## 本会话决策摘要
+- PR9 引入 positioned mdast parser 和 source-review proposal，不修 source、不改 alignment unit/LCS/formula 白名单；真实结构快照为 2,075 -> 1,983 leaves、10 proposals、463 LID drift，SHA-256 `120762b3...ccb566`。
+- Core typecheck、定向 19/19、单 worker 全量 360/360 和正式 PR8 audit 均通过；默认多 worker 全量在本机只因三个既有 CLI 测试超时，三文件独跑与单 worker 全量均全绿。
+- PR10 只能消费已冻结 proposal/证据形成 reviewed decision 与确定性迁移，不得从 PDF 近似文本或模型输出自动补 source。

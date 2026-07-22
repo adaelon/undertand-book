@@ -1,6 +1,6 @@
 # 切片方案 - PDF 选区全书适配闭环
 
-> 状态:2026-07-22 PR8 已完成,PR9-PR21 待实施。
+> 状态:2026-07-22 PR8-PR9 已完成,PR10-PR21 待实施。
 > 问题源:[PDF 选区适配问题总账](PDF选区适配问题总账.md)。
 > 已完成前序:[PDF 选区可恢复定位](切片方案-pdf选区可恢复定位.md) PR1-PR7。
 > 决策边界:[ADR-0082](adr/0082-hybrid-foundation-semantic-unit-alignment-and-degraded-reader.md)、[ADR-0090](adr/0090-pdf-selection-recovered-resolution-and-versioned-discrepancy-policy.md)。
@@ -105,6 +105,8 @@ PR8_FULL_BOOK_BENCHMARK
 - **主要触达**:`packages/core/src/hybrid-foundation-goldset.ts`、`packages/core/scripts/run-hybrid-foundation-release-gate.ts`、external descriptor/new audit fixture。
 
 ### PR9 - Markdown 结构块与代码边界
+
+**状态**:`completed`。Core 已切换到带 UTF-16 source position 的 CommonMark/GFM/math AST；正式 source 不变，10 个 source-review proposal 与 463 个 LID 漂移输入已冻结给 PR10。
 
 - **做**:用具备 source-position 的成熟 Markdown parser/插件链替代 `md-adapter.ts` 中不断增长的行级猜测;保留现有 UTF-16 span,正确区分 heading、list item、fenced/indented code、inline/display formula、table 和 image。对缺 fence 的长代码清单只生成 source-review proposal,不自动改成 code。
 - **不做**:不修改 canonical source,不在 parser 中加入“E.4 后都是代码”这类书本特例,不改几何对齐。

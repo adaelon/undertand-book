@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { markdownToBlocks } from "../src/md-adapter";
+import { markdownToBlocks, parseMarkdownSourceBlocks } from "../src/md-adapter";
 import { segment } from "../src/segment";
 import { checkPartitionInvariant } from "../src/partition";
 
@@ -116,5 +116,126 @@ describe("SA2 markdown asset block recognition", () => {
     const report = checkPartitionInvariant(nodes, src);
     expect(report.ok).toBe(true);
     expect(nodes.filter((n) => n.kind === "image")).toHaveLength(1);
+  });
+
+  it("recognizes a raw HTML table block as one table asset", () => {
+    const src = [
+      "Before.",
+      "",
+      "<table><tr><th>A</th></tr><tr><td>$ x $</td></tr></table>",
+      "",
+      "After.",
+    ].join("\n");
+    const blocks = markdownToBlocks(src);
+    const table = blocks.find((block) => block.assetKind === "table");
+
+    expect(table).toMatchObject({
+      kind: "leaf",
+      assetKind: "table",
+      text: "<table><tr><th>A</th></tr><tr><td>$ x $</td></tr></table>",
+    });
+    expect(checkPartitionInvariant(segment(blocks), src)).toMatchObject({
+      ok: true,
+      coverage: 1,
+      violations: [],
+    });
+  });
+
+  it("uses parser source positions for headings, list items, fenced and indented code, tables, images, and math", () => {
+    const structured = [
+      "# Real heading",
+      "",
+      "- first item",
+      "- second item",
+      "",
+      "```python",
+      "# seed all",
+      "print('seeded')",
+      "```",
+      "",
+      "    # project",
+      "    projected = value",
+      "",
+      "| A | B |",
+      "| - | - |",
+      "| 1 | 2 |",
+      "",
+      "![plot](plot.png)",
+      "",
+      "$$",
+      "x = y + 1",
+      "$$",
+      "",
+      "Before $z$ after.",
+    ].join("\n");
+
+    const parsed = parseMarkdownSourceBlocks(structured);
+    expect(parsed.blocks.filter((block) => block.kind === "heading").map((block) => block.text)).toEqual([
+      "Real heading",
+    ]);
+    expect(parsed.blocks.filter((block) => block.assetKind === "code").map((block) => block.text)).toEqual([
+      "```python\n# seed all\nprint('seeded')\n```",
+      "    # project\n    projected = value",
+    ]);
+    expect(parsed.blocks.filter((block) => block.assetKind === "table")).toHaveLength(1);
+    expect(parsed.blocks.filter((block) => block.assetKind === "image")).toHaveLength(1);
+    expect(parsed.blocks.filter((block) => block.assetKind === "formula").map((block) => block.text)).toEqual([
+      "$$\nx = y + 1\n$$",
+      "$z$",
+    ]);
+    expect(parsed.blocks.filter((block) => block.text === "- first item" || block.text === "- second item"))
+      .toHaveLength(2);
+  });
+
+  it("keeps malformed nested dollar math intact and emits a source-review proposal", () => {
+    const malformed = "Before $ \\underline{\\text{can $ TC^0 $ remain intact?}} $ after.";
+    const parsed = parseMarkdownSourceBlocks(malformed);
+
+    expect(parsed.blocks).toEqual([{
+      kind: "leaf",
+      text: malformed,
+      span: { start: 0, end: malformed.length },
+    }]);
+    expect(parsed.review_proposals).toEqual([expect.objectContaining({
+      kind: "malformed_inline_math",
+      source_span: { start: 0, end: malformed.length },
+    })]);
+  });
+
+  it("proposes review for unfenced code-like listings without silently turning them into code assets", () => {
+    const unfenced = [
+      "### E.4 Toy Experiment",
+      "",
+      "import random",
+      "import numpy as np",
+      "def seed_all(seed):",
+      "    random.seed(seed)",
+      "",
+      "# seed all",
+      "seed_all(42)",
+    ].join("\n");
+    const parsed = parseMarkdownSourceBlocks(unfenced);
+
+    expect(parsed.review_proposals).toEqual(expect.arrayContaining([expect.objectContaining({
+      kind: "unfenced_code",
+      source_span: expect.objectContaining({ start: expect.any(Number), end: expect.any(Number) }),
+    })]));
+    expect(parsed.blocks.filter((block) => block.assetKind === "code")).toHaveLength(0);
+  });
+
+  it("keeps UTF-16 spans ordered, non-overlapping, and complete for every non-whitespace source unit", () => {
+    const mixed = "# 标题\r\n\r\n段落 😀 with $x$.\r\n\r\n- item\r\n\r\n```ts\r\nconst y = 1;\r\n```";
+    const parsed = parseMarkdownSourceBlocks(mixed);
+    const nodes = segment(parsed.blocks);
+    const report = checkPartitionInvariant(nodes, mixed);
+
+    expect(report).toMatchObject({ ok: true, coverage: 1, violations: [] });
+    for (let index = 1; index < parsed.blocks.length; index += 1) {
+      expect(parsed.blocks[index - 1].span.end).toBeLessThanOrEqual(parsed.blocks[index].span.start);
+    }
+    for (const block of parsed.blocks) {
+      if (block.kind === "heading") expect(block.text).toBe("标题");
+      else expect(block.text).toBe(mixed.slice(block.span.start, block.span.end));
+    }
   });
 });

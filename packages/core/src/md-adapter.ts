@@ -1,237 +1,258 @@
-﻿// markdown → 忠实块映射 SourceBlock[] `[ADR-0008/0029]`。
-// 规则:`#{1,6} ` 行 = heading(span 含 marker,保证无未分类字节);
-// fenced code / table / image / formula = 带 assetKind 的 leaf;其余非空行聚成普通 leaf 段。
-// span 用 JS 串下标(UTF-16 code unit),与 partition 检查同源、自洽。
+// Markdown -> faithful SourceBlock[] mapping `[ADR-0008/0029]`.
+// CommonMark/GFM/math parsing comes from micromark/mdast; all spans are parser
+// offsets in JavaScript UTF-16 units, which is the source/LID coordinate space.
+import type { Nodes, Parents, RootContent } from "mdast";
+import { fromMarkdown } from "mdast-util-from-markdown";
+import { gfmFromMarkdown } from "mdast-util-gfm";
+import { mathFromMarkdown } from "mdast-util-math";
+import { gfm } from "micromark-extension-gfm";
+import { math } from "micromark-extension-math";
 import { parse } from "node-html-parser";
-import type { AssetKind, SourceBlock, SourceImageRef } from "./segment";
+import type { AssetKind, SourceBlock, SourceImageRef, Span } from "./segment";
 
-interface Line {
+export interface MarkdownSourceReviewProposal {
+  kind: "malformed_inline_math" | "unfenced_code";
+  source_span: Span;
+  reason: string;
+}
+
+export interface MarkdownSourceBlockParseResult {
+  blocks: SourceBlock[];
+  review_proposals: MarkdownSourceReviewProposal[];
+}
+
+interface SourceLine {
   text: string;
   start: number;
   end: number;
 }
 
-function splitLines(src: string): Line[] {
-  const lines: Line[] = [];
-  let off = 0;
-  // 保留换行符,逐行带偏移
-  for (const raw of src.split(/(?<=\n)/)) {
-    lines.push({ text: raw, start: off, end: off + raw.length });
-    off += raw.length;
+function splitLines(source: string): SourceLine[] {
+  const lines: SourceLine[] = [];
+  let start = 0;
+  for (const raw of source.split(/(?<=\n)/u)) {
+    lines.push({ text: raw, start, end: start + raw.length });
+    start += raw.length;
   }
   return lines;
 }
 
-/** 该行去首尾空白后的内容区间 [contentStart, contentEnd)(空行返回 null) */
-function contentSpan(ln: Line): { start: number; end: number } | null {
-  const leading = ln.text.length - ln.text.replace(/^\s+/, "").length;
-  const trailing = ln.text.length - ln.text.replace(/\s+$/, "").length;
-  const start = ln.start + leading;
-  const end = ln.end - trailing;
-  return end > start ? { start, end } : null;
-}
-
-function lineLooksLikeTable(line: string): boolean {
-  const t = line.trim();
-  if (!t.startsWith("|") || !t.endsWith("|")) return false;
-  return (t.match(/\|/g) ?? []).length >= 3;
-}
-
-function parseImageLine(line: string): SourceImageRef | null {
-  const m = /^!\[([^\]]*)]\(([^)]+)\)$/.exec(line.trim());
-  return m ? { alt: m[1], src: m[2].trim() } : null;
-}
-
-function parseHtmlImageLine(line: string): SourceImageRef | null {
-  if (!/<img[\s>]/i.test(line)) return null;
-  const root = parse(line);
-  const img = root.querySelector("img");
-  const src = img?.getAttribute("src")?.trim();
-  if (!img || !src) return null;
-  const nonImageText = root.text.trim();
-  if (nonImageText) return null;
-  return { alt: img.getAttribute("alt") ?? "", src };
-}
-
-function standaloneInlineFormula(line: string): boolean {
-  return /^\$[^$\n]+\$$/.test(line.trim());
-}
-
-function isEscaped(s: string, index: number): boolean {
-  let slashCount = 0;
-  for (let i = index - 1; i >= 0 && s[i] === "\\"; i -= 1) slashCount += 1;
-  return slashCount % 2 === 1;
-}
-
-function inlineFormulaRanges(line: string): { start: number; end: number }[] {
-  const ranges: { start: number; end: number }[] = [];
-  let i = 0;
-  while (i < line.length) {
-    if (line.startsWith("$$", i) && !isEscaped(line, i)) {
-      const end = line.indexOf("$$", i + 2);
-      if (end >= 0) {
-        ranges.push({ start: i, end: end + 2 });
-        i = end + 2;
-        continue;
-      }
-      i += 2;
-      continue;
-    }
-    if (line[i] === "$" && line[i + 1] !== "$" && !isEscaped(line, i)) {
-      let found = false;
-      for (let j = i + 1; j < line.length; j += 1) {
-        if (line[j] === "$" && line[j + 1] !== "$" && line[j - 1] !== "$" && !isEscaped(line, j)) {
-          if (j > i + 1) ranges.push({ start: i, end: j + 1 });
-          i = j + 1;
-          found = true;
-          break;
-        }
-      }
-      if (!found) i += 1;
-      continue;
-    }
-    i += 1;
+function nodeSpan(node: Nodes): Span {
+  const start = node.position?.start.offset;
+  const end = node.position?.end.offset;
+  if (start === undefined || end === undefined || end < start) {
+    throw new Error(`Markdown parser node lacks a valid source position: ${node.type}`);
   }
-  return ranges;
+  return { start, end };
 }
 
-export function markdownToBlocks(src: string): SourceBlock[] {
+function blockSpan(node: RootContent, source: string): Span {
+  const span = nodeSpan(node);
+  if (node.type !== "code" || node.lang) return span;
+  const lineStart = source.lastIndexOf("\n", Math.max(0, span.start - 1)) + 1;
+  return source.slice(lineStart, span.start).trim().length === 0 ? { ...span, start: lineStart } : span;
+}
+
+function sourceBlock(
+  source: string,
+  span: Span,
+  options: { kind?: "heading"; level?: number; text?: string; assetKind?: AssetKind; image?: SourceImageRef } = {},
+): SourceBlock {
+  return {
+    kind: options.kind ?? "leaf",
+    ...(options.level ? { level: options.level } : {}),
+    ...(options.assetKind ? { assetKind: options.assetKind } : {}),
+    ...(options.image ? { image: options.image } : {}),
+    text: options.text ?? source.slice(span.start, span.end),
+    span,
+  };
+}
+
+function parseImageSource(raw: string): SourceImageRef | null {
+  const markdown = /^!\[([^\]]*)\]\(([^)]+)\)$/u.exec(raw.trim());
+  if (markdown) return { alt: markdown[1], src: markdown[2].trim() };
+  if (!/<img[\s>]/iu.test(raw)) return null;
+  const root = parse(raw);
+  const image = root.querySelector("img");
+  const src = image?.getAttribute("src")?.trim();
+  if (!image || !src || root.text.trim()) return null;
+  return { alt: image.getAttribute("alt") ?? "", src };
+}
+
+function isSingleRawHtmlTable(raw: string): boolean {
+  const trimmed = raw.trim();
+  if (!/^<table(?:\s|>)/iu.test(trimmed) || !/<\/table>$/iu.test(trimmed)) return false;
+  const root = parse(trimmed);
+  const tables = root.querySelectorAll("table");
+  return tables.length === 1 && tables[0].outerHTML.trim() === trimmed;
+}
+
+function plainText(node: Nodes): string {
+  if ("value" in node && typeof node.value === "string") return node.value;
+  if (node.type === "image") return node.alt ?? "";
+  if ("children" in node) return (node as Parents).children.map((child) => plainText(child)).join("");
+  return "";
+}
+
+function collectInlineMath(node: Nodes, result: Nodes[] = []): Nodes[] {
+  if (node.type === "inlineMath") result.push(node);
+  if ("children" in node) {
+    for (const child of (node as Parents).children) collectInlineMath(child, result);
+  }
+  return result;
+}
+
+function formulaMarkupIsBalanced(raw: string): boolean {
+  const open = /^(\${1,2})/u.exec(raw)?.[1];
+  if (!open || !raw.endsWith(open) || raw.length <= open.length * 2) return false;
+  const content = raw.slice(open.length, -open.length);
+  let braceDepth = 0;
+  for (let index = 0; index < content.length; index += 1) {
+    const escaped = index > 0 && content[index - 1] === "\\";
+    if (!escaped && content[index] === "$") return false;
+    if (!escaped && content[index] === "{") braceDepth += 1;
+    if (!escaped && content[index] === "}") {
+      braceDepth -= 1;
+      if (braceDepth < 0) return false;
+    }
+  }
+  return braceDepth === 0;
+}
+
+function projectInlineMathContainer(
+  node: RootContent,
+  source: string,
+  proposals: MarkdownSourceReviewProposal[],
+): SourceBlock[] {
+  const span = nodeSpan(node);
+  const formulas = collectInlineMath(node)
+    .map((formula) => nodeSpan(formula))
+    .sort((left, right) => left.start - right.start);
+  if (!formulas.length) return [sourceBlock(source, span)];
+  if (formulas.some((formula) => !formulaMarkupIsBalanced(source.slice(formula.start, formula.end)))) {
+    proposals.push({
+      kind: "malformed_inline_math",
+      source_span: span,
+      reason: "parser math nodes contain unbalanced braces or nested dollar delimiters",
+    });
+    return [sourceBlock(source, span)];
+  }
+
   const blocks: SourceBlock[] = [];
-  let para: { start: number; end: number; text: string } | null = null;
-  const lines = splitLines(src);
-
-  const flush = () => {
-    if (para) blocks.push({ kind: "leaf", text: para.text, span: { start: para.start, end: para.end } });
-    para = null;
-  };
-
-  const pushAsset = (assetKind: AssetKind, start: number, end: number, image?: SourceImageRef) => {
-    blocks.push({ kind: "leaf", assetKind, text: src.slice(start, end), image, span: { start, end } });
-  };
-
-  const appendPara = (start: number, end: number) => {
-    if (end <= start) return;
-    const text = src.slice(start, end);
-    if (!text.trim()) return;
-    if (!para) para = { start, end, text };
-    else {
-      para.end = end;
-      para.text += "\n" + text;
+  let cursor = span.start;
+  for (const formula of formulas) {
+    if (formula.start < cursor || formula.end > span.end) {
+      throw new Error(`Markdown parser produced overlapping inline math at ${formula.start}:${formula.end}`);
     }
-  };
-
-  for (let i = 0; i < lines.length; i += 1) {
-    const ln = lines[i];
-    const cs = contentSpan(ln);
-    if (!cs) {
-      flush();
-      continue;
-    } // 空行
-    const lineContent = src.slice(cs.start, cs.end);
-    const h = /^(#{1,6})\s+(.*\S)\s*$/.exec(lineContent);
-    if (h) {
-      flush();
-      // 标题 span 含 marker(整行内容区),text 取去 marker 的标题
-      blocks.push({ kind: "heading", level: h[1].length, text: h[2], span: cs });
-      continue;
+    if (source.slice(cursor, formula.start).trim()) {
+      blocks.push(sourceBlock(source, { start: cursor, end: formula.start }));
     }
+    blocks.push(sourceBlock(source, formula, { assetKind: "formula" }));
+    cursor = formula.end;
+  }
+  if (source.slice(cursor, span.end).trim()) blocks.push(sourceBlock(source, { start: cursor, end: span.end }));
+  return blocks;
+}
 
-    const fence = /^(```|~~~)/.exec(lineContent);
-    if (fence) {
-      flush();
-      let end = cs.end;
-      for (let j = i + 1; j < lines.length; j += 1) {
-        const endSpan = contentSpan(lines[j]);
-        end = endSpan?.end ?? lines[j].end;
-        if (endSpan && src.slice(endSpan.start, endSpan.end).startsWith(fence[1])) {
-          i = j;
-          break;
-        }
-        if (j === lines.length - 1) i = j;
-      }
-      pushAsset("code", cs.start, end);
-      continue;
+function projectRootNode(
+  node: RootContent,
+  source: string,
+  proposals: MarkdownSourceReviewProposal[],
+): SourceBlock[] {
+  const span = blockSpan(node, source);
+  if (node.type === "heading") {
+    return [sourceBlock(source, span, { kind: "heading", level: node.depth, text: plainText(node) })];
+  }
+  if (node.type === "code") return [sourceBlock(source, span, { assetKind: "code" })];
+  if (node.type === "table") return [sourceBlock(source, span, { assetKind: "table" })];
+  if (node.type === "math") {
+    if (!formulaMarkupIsBalanced(source.slice(span.start, span.end))) {
+      proposals.push({
+        kind: "malformed_inline_math",
+        source_span: span,
+        reason: "display math contains unbalanced braces or nested dollar delimiters",
+      });
+      return [sourceBlock(source, span)];
     }
+    return [sourceBlock(source, span, { assetKind: "formula" })];
+  }
+  if (node.type === "list") {
+    return node.children.flatMap((item) => projectInlineMathContainer(item, source, proposals));
+  }
+  if (node.type === "paragraph") {
+    const raw = source.slice(span.start, span.end);
+    const image = parseImageSource(raw);
+    if (image) return [sourceBlock(source, span, { assetKind: "image", image })];
+    return projectInlineMathContainer(node, source, proposals);
+  }
+  if (node.type === "image") {
+    return [sourceBlock(source, span, { assetKind: "image", image: { alt: node.alt ?? "", src: node.url } })];
+  }
+  if (node.type === "html") {
+    const raw = source.slice(span.start, span.end);
+    if (isSingleRawHtmlTable(raw)) return [sourceBlock(source, span, { assetKind: "table" })];
+    const image = parseImageSource(raw);
+    if (image) return [sourceBlock(source, span, { assetKind: "image", image })];
+  }
+  return [sourceBlock(source, span)];
+}
 
-    if (lineContent.startsWith("$$")) {
-      flush();
-      let end = cs.end;
-      if (!lineContent.endsWith("$$") || lineContent.length <= 2) {
-        for (let j = i + 1; j < lines.length; j += 1) {
-          const endSpan = contentSpan(lines[j]);
-          end = endSpan?.end ?? lines[j].end;
-          if (endSpan && src.slice(endSpan.start, endSpan.end).endsWith("$$")) {
-            i = j;
-            break;
-          }
-          if (j === lines.length - 1) i = j;
-        }
-      }
-      pushAsset("formula", cs.start, end);
-      continue;
-    }
+function codeLikeLine(line: string): boolean {
+  const value = line.replace(/[\r\n]+$/u, "");
+  const trimmed = value.trim();
+  if (!trimmed) return false;
+  return /^(?:from|import)\s+[A-Za-z_]/u.test(trimmed)
+    || /^(?:async\s+)?(?:def|class)\s+[A-Za-z_]/u.test(trimmed)
+    || /^(?:for|while|if|elif|else|return|yield|with|try|except|finally)\b/u.test(trimmed)
+    || /^[A-Za-z_][A-Za-z0-9_.\[\]]*\s*=\s*\S/u.test(trimmed)
+    || /^[A-Za-z_][A-Za-z0-9_.]*\([^)]*\)\s*$/u.test(trimmed)
+    || /^#\s*(?:seed|project|compute|train|plot|load|save|initialize|\[)/iu.test(trimmed)
+    || /^\s{2,}\S/u.test(value);
+}
 
-    if (lineContent === "$") {
-      flush();
-      let end = cs.end;
-      let closed = false;
-      for (let j = i + 1; j < lines.length; j += 1) {
-        const endSpan = contentSpan(lines[j]);
-        end = endSpan?.end ?? lines[j].end;
-        if (endSpan && src.slice(endSpan.start, endSpan.end) === "$") {
-          i = j;
-          closed = true;
-          break;
-        }
-        if (j === lines.length - 1) i = j;
-      }
-      if (closed) pushAsset("formula", cs.start, end);
-      else appendPara(cs.start, cs.end);
-      continue;
-    }
+function unfencedCodeProposals(
+  source: string,
+  parsedNodes: RootContent[],
+): MarkdownSourceReviewProposal[] {
+  const codeSpans = parsedNodes.filter((node) => node.type === "code").map((node) => blockSpan(node, source));
+  const candidates = splitLines(source)
+    .map((line, index) => ({ line, index }))
+    .filter(({ line }) => !codeSpans.some((span) => line.start >= span.start && line.start < span.end))
+    .filter(({ line }) => codeLikeLine(line.text));
+  const groups: typeof candidates[] = [];
+  for (const candidate of candidates) {
+    const current = groups.at(-1);
+    if (current && candidate.index - current.at(-1)!.index <= 2) current.push(candidate);
+    else groups.push([candidate]);
+  }
+  return groups.filter((group) => group.length >= 3).map((group) => ({
+    kind: "unfenced_code" as const,
+    source_span: { start: group[0].line.start, end: group.at(-1)!.line.end },
+    reason: "three or more nearby code-like lines occur outside a fenced or indented code node",
+  }));
+}
 
-    if (standaloneInlineFormula(lineContent)) {
-      flush();
-      pushAsset("formula", cs.start, cs.end);
-      continue;
-    }
-
-    const image = parseImageLine(lineContent) ?? parseHtmlImageLine(lineContent);
-    if (image) {
-      flush();
-      pushAsset("image", cs.start, cs.end, image);
-      continue;
-    }
-
-    if (lineLooksLikeTable(lineContent)) {
-      flush();
-      let end = cs.end;
-      for (let j = i + 1; j < lines.length; j += 1) {
-        const nextSpan = contentSpan(lines[j]);
-        if (!nextSpan) break;
-        const nextContent = src.slice(nextSpan.start, nextSpan.end);
-        if (!lineLooksLikeTable(nextContent)) break;
-        end = nextSpan.end;
-        i = j;
-      }
-      pushAsset("table", cs.start, end);
-      continue;
-    }
-
-    const inlineFormulas = inlineFormulaRanges(lineContent);
-    if (inlineFormulas.length) {
-      let cursor = 0;
-      for (const range of inlineFormulas) {
-        appendPara(cs.start + cursor, cs.start + range.start);
-        flush();
-        pushAsset("formula", cs.start + range.start, cs.start + range.end);
-        cursor = range.end;
-      }
-      appendPara(cs.start + cursor, cs.end);
-    } else {
-      appendPara(cs.start, cs.end);
+export function parseMarkdownSourceBlocks(source: string): MarkdownSourceBlockParseResult {
+  const tree = fromMarkdown(source, {
+    extensions: [gfm(), math()],
+    mdastExtensions: [gfmFromMarkdown(), mathFromMarkdown()],
+  });
+  const reviewProposals: MarkdownSourceReviewProposal[] = [];
+  const blocks = tree.children
+    .flatMap((node) => projectRootNode(node, source, reviewProposals))
+    .sort((left, right) => left.span.start - right.span.start || left.span.end - right.span.end);
+  for (let index = 1; index < blocks.length; index += 1) {
+    if (blocks[index].span.start < blocks[index - 1].span.end) {
+      throw new Error(`Markdown parser block spans overlap at ${blocks[index].span.start}`);
     }
   }
-  flush();
-  return blocks;
+  reviewProposals.push(...unfencedCodeProposals(source, tree.children));
+  reviewProposals.sort((left, right) => left.source_span.start - right.source_span.start
+    || left.source_span.end - right.source_span.end
+    || left.kind.localeCompare(right.kind));
+  return { blocks, review_proposals: reviewProposals };
+}
+
+export function markdownToBlocks(source: string): SourceBlock[] {
+  return parseMarkdownSourceBlocks(source).blocks;
 }

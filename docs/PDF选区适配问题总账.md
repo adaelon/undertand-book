@@ -350,3 +350,14 @@ Inspired by the discussion above,  $ \underline{\text{can we propose a new assoc
 - audit runner 同时报告 baseline/current/migration coverage、reason/precision/section/issue closure、错误页、formal/raw duplicate binding 和 selection capability matrix；删除、重复、改类、错页及错误显式迁移均使测试失败。
 - 正式 artifact 连续两次审计均为 `passed=true`，2,075 项全部 direct LID 命中，`wrong_page_count=0`，formal region/selection duplicate 均为 0；序列化输出 9,831 bytes，SHA-256 `db3891eff265680104c1efde28e6987dcdea015c9d0f5308e6df0ee7cd909334`。
 - 验证：Core typecheck、PR8/goldset 定向 7 tests、Core 全量 59 files / 352 tests 全绿。
+
+## 20. PR9 Markdown 结构块与代码边界
+
+**PR 状态**:`completed`；PDF-A001 至 PDF-A011 仍保持原状态，正式 `source.txt`、base、PDF maps 和 selection shards 均未修改。
+
+- `md-adapter` 已由行级正则切换为 `mdast-util-from-markdown + micromark CommonMark/GFM/math`，所有 parser offset 直接沿用 JavaScript UTF-16 source 坐标；heading、list item、fenced/indented code、Markdown/HTML table、image、inline/display formula 均由 AST node position 投影。
+- 缺 fence 的代码只生成 review proposal，不在 parser 中猜成 code；闭合 code 内的 `# seed all`/`# project` 保持 code 内容。损坏的嵌套 dollar math 保留为单一 paragraph leaf 并生成 `malformed_inline_math` proposal，不产出伪 formula span。
+- 真实结构快照冻结为 2,075 baseline leaves -> 1,983 candidate leaves，1,977 个 exact source-span match，463 个仅 LID 改变，98 个旧 leaf 移除、6 个候选 leaf 加入；候选种类为 code 2、formula 824、image 19、paragraph 1,136、table 2，source partition coverage 为 1。
+- 真实 review 输入共 10 项：1 个损坏公式区间和 9 个未围栏代码区间。候选顶层容器由旧 `1..8` 变为 `1..6`，说明代码伪章节与来源边界尚未获批准；这些变化只进入 PR10 复核清单，不写回正式基座。
+- 无正文结构清单连续两次 SHA-256 均为 `120762b322e8569078f1d6c9297f6e330ffc546577f156cfc0eb4b44a5ccb566`；source SHA-256 保持 `cb108cabb5198cf07820b5eb49e6d3094fdf870ae20b130c93539b721ed653c9`。
+- 验证：parser/segment/audit 定向 19 tests、Core typecheck、Core 单 worker 全量 60 files / 360 tests 全绿；正式旧 artifact 的 PR8 audit 继续 `passed=true`、2,075 项 direct LID、wrong-page/formal duplicate 均为 0。
