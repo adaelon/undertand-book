@@ -145,7 +145,14 @@ export interface TextRange {
 }
 export type SelectionResolution = "resolved" | "partial";
 export type SelectionResolutionBasis = "exact" | "recovered";
-export type PdfSelectionRecoveryDifference = "layout_whitespace" | "hyphen_representation";
+export type PdfSelectionRecoveryDifference =
+  | "layout_whitespace"
+  | "hyphen_representation"
+  | "formula_representation";
+
+export type PdfSelectionRecoveryPolicyVersion =
+  | "pdf_selection_recovery.v1"
+  | "pdf_selection_recovery.v2";
 export interface SelectedRange {
   lid: string;
   range: TextRange;
@@ -309,7 +316,7 @@ export type PdfSourceMap = PdfSourceMapV1 | PdfSourceMapV2;
 export interface PdfSelectionResolveResponse {
   status: "resolved" | "partial" | "unresolved";
   resolution_basis?: SelectionResolutionBasis;
-  recovery_policy_version?: "pdf_selection_recovery.v1";
+  recovery_policy_version?: PdfSelectionRecoveryPolicyVersion;
   recovered_differences?: PdfSelectionRecoveryDifference[];
   recovered_difference_counts?: Partial<Record<PdfSelectionRecoveryDifference, number>>;
   ranges: Array<{
@@ -331,7 +338,7 @@ export interface PdfRangesProjectResponse {
     range: TextRange;
     status: "exact" | "partial" | "unmapped";
     resolution_basis?: SelectionResolutionBasis;
-    recovery_policy_version?: "pdf_selection_recovery.v1";
+    recovery_policy_version?: PdfSelectionRecoveryPolicyVersion;
     recovered_differences?: PdfSelectionRecoveryDifference[];
     recovered_difference_counts?: Partial<Record<PdfSelectionRecoveryDifference, number>>;
     rects: Array<{

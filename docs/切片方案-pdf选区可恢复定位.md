@@ -132,6 +132,7 @@ raw quote + canonical source + mapped hits + layout evidence
 |---|---|---|---|---|
 | `layout_whitespace` | accepted | LID 1.19.84 的 6 个换行空格 | 字母缺失、分词歧义 | v1 |
 | `hyphen_representation` | accepted | 4 个 source/raw 一致的词内连字符与行末断词 fixture | en/em dash、数学减号、无行边界增删 | v1 |
+| `formula_representation` | accepted | Eq. 9 真书句的 4 个完整简单公式 source/display/glyph 闭环 | 缺下标字符、变量替换、部分公式选区、未知命令 | v2 |
 
 ## 10. PR6 - 真书重建与整版发布门
 
@@ -153,3 +154,12 @@ raw quote + canonical source + mapped hits + layout evidence
 | Real PDF | 旧 artifact recovered、新 artifact exact、桌面/移动物理拖选与安装包 smoke |
 
 禁止以“这次段落看起来正常”作为完成;必须同时证明白名单正例可恢复、语义反例不升级、保存后反向投影稳定。
+
+## 12. PR7 - 同基线阅读顺序与完整公式表示恢复
+
+- **Do**:保留与 spanning 分段处于同一视觉基线的右侧续段,并按横向顺序插入同一行;只为可确定性去除公式源标记且与唯一 PDF glyph 序列一致的完整简单公式生成 selection assignments 与 `formula_display_text`。
+- **Do**:Server 只在一次选区覆盖公式全部显示字符时扩展为完整公式 canonical range,用 `formula_representation` 记录 recovered;反向投影复用相同证据并以末个真实 glyph 作为公式 terminal rect。
+- **Do not**:不把 region evidence 升为字符证据,不接受未知 LaTeX 命令,不合成公式标记 bbox,不允许部分公式选区绕过 partial precision。
+- **Red**:同基线 `, where` 被丢弃后在下一页误锚;Eq. 9 原句跨 4 个公式返回 partial;缺下标字符或 `W -> X` 被升级。
+- **Green**:同基线分段顺序为左文本 -> 中间公式片段 -> 右续段;真书原句返回 `resolved/recovered`,4 次 `formula_representation`,9 个 canonical range 均能 exact 反向投影;两个语义反例保持 incomplete/partial。
+- **Done**:隔离真书连续两次 digest 一致并事务写回;Core/Web/Rust workspace、production build、Playwright PDF actions 与正式 artifact 回放全绿。

@@ -2089,9 +2089,11 @@ enum PdfRuntimeProjectionPrecision {
 
 #[derive(Debug, Clone)]
 struct PdfRuntimeEntryPolicy {
+    source_span: SourceSpanDto,
     precision: PdfRuntimeProjectionPrecision,
     exact_source_spans: Vec<SourceSpanDto>,
     regions: Vec<PdfPageRectDto>,
+    formula_display_text: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -7068,6 +7070,7 @@ fn filter_hits_to_raw_quote(hits: Vec<SelectionCharHit>, raw_quote: &str) -> Vec
 enum PdfSelectionRecoveryDifference {
     LayoutWhitespace,
     HyphenRepresentation,
+    FormulaRepresentation,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -7079,10 +7082,11 @@ struct PdfSelectionRecoveryPolicy {
 const PDF_SELECTION_RECOVERY_ACCEPTED_DIFFERENCES: &[PdfSelectionRecoveryDifference] = &[
     PdfSelectionRecoveryDifference::LayoutWhitespace,
     PdfSelectionRecoveryDifference::HyphenRepresentation,
+    PdfSelectionRecoveryDifference::FormulaRepresentation,
 ];
 
 const PDF_SELECTION_RECOVERY_POLICY: PdfSelectionRecoveryPolicy = PdfSelectionRecoveryPolicy {
-    version: "pdf_selection_recovery.v1",
+    version: "pdf_selection_recovery.v2",
     accepted_differences: PDF_SELECTION_RECOVERY_ACCEPTED_DIFFERENCES,
 };
 
@@ -7099,9 +7103,17 @@ enum PdfSelectionRecoveryDecision {
     Incomplete,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PdfFormulaRepresentationEvidence {
+    lid: String,
+    source_span: SourceSpanDto,
+    display_text: String,
+}
+
 #[derive(Debug, Default)]
 struct PdfSelectionRecoveryEvidence {
     discretionary_raw_hyphen_offsets_utf16: HashSet<usize>,
+    formula_representations: Vec<PdfFormulaRepresentationEvidence>,
 }
 
 fn is_pdf_selection_recoverable_hyphen(value: char) -> bool {
@@ -7181,6 +7193,104 @@ fn utf16_selection_chars(value: &str) -> Vec<Utf16SelectionChar> {
             }
         })
         .collect()
+}
+
+fn compact_formula_display(value: &str) -> String {
+    value
+        .chars()
+        .filter(|value| !value.is_whitespace())
+        .collect()
+}
+
+fn complete_formula_representations(
+    policy: &PdfRuntimeProjectionPolicy,
+    hits: &[SelectionCharHit],
+) -> Vec<PdfFormulaRepresentationEvidence> {
+    let mut evidence = policy
+        .entries
+        .iter()
+        .filter_map(|(lid, entry)| {
+            let display_text = entry.formula_display_text.as_ref()?;
+            let formula_hits = hits
+                .iter()
+                .filter(|hit| hit.lid.as_deref() == Some(lid.as_str()))
+                .collect::<Vec<_>>();
+            let (Some(first_exact), Some(last_exact), Some(first_hit), Some(last_hit)) = (
+                entry.exact_source_spans.first(),
+                entry.exact_source_spans.last(),
+                formula_hits.first(),
+                formula_hits.last(),
+            ) else {
+                return None;
+            };
+            let selected_display = formula_hits
+                .iter()
+                .map(|hit| hit.text.as_str())
+                .collect::<String>();
+            if compact_formula_display(&selected_display) != compact_formula_display(display_text)
+                || first_hit.source_span.start != first_exact.start
+                || last_hit.source_span.end != last_exact.end
+            {
+                return None;
+            }
+            Some(PdfFormulaRepresentationEvidence {
+                lid: lid.clone(),
+                source_span: entry.source_span,
+                display_text: display_text.clone(),
+            })
+        })
+        .collect::<Vec<_>>();
+    evidence.sort_by_key(|item| (item.source_span.start, item.source_span.end));
+    evidence
+}
+
+fn canonical_recovery_text(
+    canonical_quote: &str,
+    canonical_source_start: usize,
+    evidence: &PdfSelectionRecoveryEvidence,
+) -> Option<(String, Vec<usize>)> {
+    let canonical_source_end = canonical_source_start + canonical_quote.encode_utf16().count();
+    let mut cursor = 0usize;
+    let mut output = String::new();
+    let mut formula_occurrences = Vec::new();
+    for formula in &evidence.formula_representations {
+        if formula.source_span.end <= canonical_source_start
+            || formula.source_span.start >= canonical_source_end
+        {
+            continue;
+        }
+        if formula.source_span.start < canonical_source_start
+            || formula.source_span.end > canonical_source_end
+        {
+            return None;
+        }
+        let start = formula.source_span.start - canonical_source_start;
+        let end = formula.source_span.end - canonical_source_start;
+        if start < cursor {
+            return None;
+        }
+        output.push_str(&slice_utf16_lossy(canonical_quote, cursor, start));
+        output.push_str(&formula.display_text);
+        formula_occurrences.push(start);
+        cursor = end;
+    }
+    output.push_str(&slice_utf16_lossy(
+        canonical_quote,
+        cursor,
+        canonical_quote.encode_utf16().count(),
+    ));
+    Some((output, formula_occurrences))
+}
+
+fn formula_representation_covers(
+    evidence: &PdfSelectionRecoveryEvidence,
+    start: usize,
+    end: usize,
+) -> bool {
+    evidence
+        .formula_representations
+        .iter()
+        .any(|formula| formula.source_span.start <= start && formula.source_span.end >= end)
 }
 
 fn selection_text_recovery_differences(
@@ -7311,6 +7421,7 @@ fn pdf_selection_recovery_evidence(raw_quote: &str) -> PdfSelectionRecoveryEvide
     }
     PdfSelectionRecoveryEvidence {
         discretionary_raw_hyphen_offsets_utf16,
+        ..PdfSelectionRecoveryEvidence::default()
     }
 }
 
@@ -7365,11 +7476,22 @@ fn classify_pdf_selection_recovery(
     hits: &[SelectionCharHit],
     evidence: &PdfSelectionRecoveryEvidence,
 ) -> PdfSelectionRecoveryDecision {
-    let Some(mut differences) =
-        selection_text_recovery_differences(raw_quote, canonical_quote, evidence)
+    let Some((recovery_canonical_quote, formula_occurrences)) =
+        canonical_recovery_text(canonical_quote, canonical_source_start, evidence)
     else {
         return PdfSelectionRecoveryDecision::Incomplete;
     };
+    let Some(mut differences) =
+        selection_text_recovery_differences(raw_quote, &recovery_canonical_quote, evidence)
+    else {
+        return PdfSelectionRecoveryDecision::Incomplete;
+    };
+    for occurrence in formula_occurrences {
+        differences.record(
+            PdfSelectionRecoveryDifference::FormulaRepresentation,
+            PdfSelectionRecoveryOccurrence::CanonicalUtf16(occurrence),
+        );
+    }
     let canonical = utf16_selection_chars(canonical_quote);
     if canonical.is_empty() || hits.is_empty() || !selection_hits_match_raw_quote(raw_quote, hits) {
         return PdfSelectionRecoveryDecision::Incomplete;
@@ -7404,12 +7526,27 @@ fn classify_pdf_selection_recovery(
             })
         })
         .collect::<Vec<_>>();
-    if !covered.first().copied().unwrap_or(false) || !covered.last().copied().unwrap_or(false) {
+    let endpoint_is_covered = |index: usize| {
+        covered.get(index).copied().unwrap_or(false)
+            || canonical.get(index).is_some_and(|item| {
+                formula_representation_covers(
+                    evidence,
+                    canonical_source_start + item.start,
+                    canonical_source_start + item.end,
+                )
+            })
+    };
+    if !endpoint_is_covered(0) || !endpoint_is_covered(canonical.len().saturating_sub(1)) {
         return PdfSelectionRecoveryDecision::Incomplete;
     }
 
     for (index, item) in canonical.iter().enumerate() {
         if covered[index] {
+            continue;
+        }
+        let source_start = canonical_source_start + item.start;
+        let source_end = canonical_source_start + item.end;
+        if formula_representation_covers(evidence, source_start, source_end) {
             continue;
         }
         if item.value.is_whitespace() {
@@ -7468,6 +7605,7 @@ fn v2_selection_has_degraded_precision(
     rects_by_page: &BTreeMap<usize, Vec<[f64; 4]>>,
     hits: &[SelectionCharHit],
     raw_quote_complete: bool,
+    evidence: &PdfSelectionRecoveryEvidence,
 ) -> bool {
     if policy.version != PdfRuntimeMapVersion::V2 {
         return false;
@@ -7476,10 +7614,14 @@ fn v2_selection_has_degraded_precision(
         hits.iter()
             .filter_map(|hit| hit.lid.as_deref())
             .filter(|lid| {
-                policy
-                    .entries
-                    .get(*lid)
-                    .is_some_and(|entry| entry.precision == PdfRuntimeProjectionPrecision::Partial)
+                policy.entries.get(*lid).is_some_and(|entry| {
+                    entry.precision == PdfRuntimeProjectionPrecision::Partial
+                        && (entry.formula_display_text.is_none()
+                            || evidence
+                                .formula_representations
+                                .iter()
+                                .any(|formula| formula.lid.as_str() == *lid))
+                })
             })
             .collect::<HashSet<_>>()
     } else {
@@ -7707,13 +7849,32 @@ fn pdf_runtime_projection_policy(book_dir: &Path) -> Result<PdfRuntimeProjection
                 "unmapped entry claims PDF evidence: {lid}"
             )));
         }
+        let formula_display_text = if version == PdfRuntimeMapVersion::V2 {
+            entry
+                .get("formula_display_text")
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+        } else {
+            None
+        };
+        if formula_display_text.as_deref().is_some_and(str::is_empty)
+            || (formula_display_text.is_some()
+                && (precision != PdfRuntimeProjectionPrecision::Partial
+                    || exact_source_spans.is_empty()))
+        {
+            return Err(pdf_runtime_artifact_error(format!(
+                "formula display evidence must be non-empty partial character evidence: {lid}"
+            )));
+        }
         if entries
             .insert(
                 lid.clone(),
                 PdfRuntimeEntryPolicy {
+                    source_span,
                     precision,
                     exact_source_spans,
                     regions,
+                    formula_display_text,
                 },
             )
             .is_some()
@@ -7918,6 +8079,7 @@ fn quote_lid_range(book: &Book, lid: &str, range: SourceSpanDto) -> Result<Strin
 fn canonical_selection_quote(
     book: &Book,
     hits: &[SelectionCharHit],
+    evidence: &PdfSelectionRecoveryEvidence,
 ) -> Result<Option<(String, usize)>, ToolError> {
     let mapped = hits
         .iter()
@@ -7926,21 +8088,43 @@ fn canonical_selection_quote(
     let (Some(first), Some(last)) = (mapped.first(), mapped.last()) else {
         return Ok(None);
     };
-    if first.source_span.start >= last.source_span.end {
+    let first_source_start = first
+        .lid
+        .as_deref()
+        .and_then(|lid| {
+            evidence
+                .formula_representations
+                .iter()
+                .find(|item| item.lid == lid)
+        })
+        .map(|item| item.source_span.start)
+        .unwrap_or(first.source_span.start);
+    let last_source_end = last
+        .lid
+        .as_deref()
+        .and_then(|lid| {
+            evidence
+                .formula_representations
+                .iter()
+                .find(|item| item.lid == lid)
+        })
+        .map(|item| item.source_span.end)
+        .unwrap_or(last.source_span.end);
+    if first_source_start >= last_source_end {
         return Ok(None);
     }
     let first_lid = first.lid.as_deref().unwrap_or_default();
     let last_lid = last.lid.as_deref().unwrap_or_default();
     let first_lid_span = lid_span(book, first_lid)?;
     let source = book.text(first_lid, Some(last_lid))?;
-    let start = first.source_span.start.saturating_sub(first_lid_span.start);
-    let end = last.source_span.end.saturating_sub(first_lid_span.start);
+    let start = first_source_start.saturating_sub(first_lid_span.start);
+    let end = last_source_end.saturating_sub(first_lid_span.start);
     if start >= end || end > source.encode_utf16().count() {
         return Ok(None);
     }
     Ok(Some((
         slice_utf16_lossy(&source, start, end),
-        first.source_span.start,
+        first_source_start,
     )))
 }
 
@@ -8010,15 +8194,25 @@ fn route_pdf_selection_resolve(book: &Book, book_dir: &Path, body: &serde_json::
         hits = filter_hits_to_raw_quote(hits, raw_quote);
     }
     let unmapped_hits = hits.iter().filter(|hit| hit.lid.is_none()).count();
+    let mut recovery_evidence = raw_quote
+        .map(pdf_selection_recovery_evidence)
+        .unwrap_or_default();
+    if policy.version == PdfRuntimeMapVersion::V2 {
+        recovery_evidence.formula_representations =
+            complete_formula_representations(&policy, &hits);
+    }
     let recovery_decision = if policy.version == PdfRuntimeMapVersion::V2 {
-        match (raw_quote, canonical_selection_quote(book, &hits)) {
+        match (
+            raw_quote,
+            canonical_selection_quote(book, &hits, &recovery_evidence),
+        ) {
             (Some(raw_quote), Ok(Some((canonical_quote, source_start)))) => {
                 classify_pdf_selection_recovery(
                     raw_quote,
                     &canonical_quote,
                     source_start,
                     &hits,
-                    &pdf_selection_recovery_evidence(raw_quote),
+                    &recovery_evidence,
                 )
             }
             (_, Ok(None)) => PdfSelectionRecoveryDecision::Incomplete,
@@ -8034,8 +8228,13 @@ fn route_pdf_selection_resolve(book: &Book, book_dir: &Path, body: &serde_json::
     );
     let raw_quote_incomplete =
         policy.version == PdfRuntimeMapVersion::V2 && raw_quote.is_some() && !raw_quote_complete;
-    let degraded_precision =
-        v2_selection_has_degraded_precision(&policy, &rects_by_page, &hits, raw_quote_complete);
+    let degraded_precision = v2_selection_has_degraded_precision(
+        &policy,
+        &rects_by_page,
+        &hits,
+        raw_quote_complete,
+        &recovery_evidence,
+    );
     let bridge_recoverable_gaps = matches!(
         recovery_decision,
         PdfSelectionRecoveryDecision::Recovered(_)
@@ -8046,16 +8245,22 @@ fn route_pdf_selection_resolve(book: &Book, book_dir: &Path, body: &serde_json::
         let Some(lid) = &hit.lid else {
             continue;
         };
+        let hit_source_span = recovery_evidence
+            .formula_representations
+            .iter()
+            .find(|item| item.lid == *lid)
+            .map(|item| item.source_span)
+            .unwrap_or(hit.source_span);
         if let Some((run_lid, run_span)) = source_runs.last_mut() {
             let spans_touch =
-                hit.source_span.start <= run_span.end && hit.source_span.end >= run_span.start;
+                hit_source_span.start <= run_span.end && hit_source_span.end >= run_span.start;
             if run_lid == lid && (spans_touch || bridge_recoverable_gaps) {
-                run_span.start = run_span.start.min(hit.source_span.start);
-                run_span.end = run_span.end.max(hit.source_span.end);
+                run_span.start = run_span.start.min(hit_source_span.start);
+                run_span.end = run_span.end.max(hit_source_span.end);
                 continue;
             }
         }
-        source_runs.push((lid.clone(), hit.source_span));
+        source_runs.push((lid.clone(), hit_source_span));
     }
 
     let mut ranges = Vec::new();
@@ -8319,13 +8524,22 @@ fn route_pdf_ranges_project(book: &Book, book_dir: &Path, body: &serde_json::Val
             Ok(quote) => quote,
             Err(e) => return err_reply(&e),
         };
+        let mut recovery_evidence = PdfSelectionRecoveryEvidence::default();
+        if policy.version == PdfRuntimeMapVersion::V2 {
+            recovery_evidence.formula_representations =
+                complete_formula_representations(&policy, &hits);
+        }
+        let recovery_raw_quote =
+            canonical_recovery_text(&canonical_quote, target.start, &recovery_evidence)
+                .map(|(quote, _)| quote)
+                .unwrap_or_else(|| canonical_quote.clone());
         let recovery_decision = if policy.version == PdfRuntimeMapVersion::V2 {
             classify_pdf_selection_recovery(
-                &canonical_quote,
+                &recovery_raw_quote,
                 &canonical_quote,
                 target.start,
                 &hits,
-                &PdfSelectionRecoveryEvidence::default(),
+                &recovery_evidence,
             )
         } else {
             PdfSelectionRecoveryDecision::Incomplete
@@ -8359,7 +8573,14 @@ fn route_pdf_ranges_project(book: &Book, book_dir: &Path, body: &serde_json::Val
                     entry_precision,
                     PdfRuntimeProjectionPrecision::RegionExact
                         | PdfRuntimeProjectionPrecision::Unmapped
-                )) {
+                ))
+            || (policy.version == PdfRuntimeMapVersion::V2
+                && policy
+                    .entries
+                    .get(&input_range.lid)
+                    .is_some_and(|entry| entry.formula_display_text.is_some())
+                && recovery_evidence.formula_representations.is_empty())
+        {
             "unmapped"
         } else if (policy.version == PdfRuntimeMapVersion::V2 && recovery_exact)
             || (policy.version == PdfRuntimeMapVersion::V1 && exact)
@@ -8394,6 +8615,19 @@ fn route_pdf_ranges_project(book: &Book, book_dir: &Path, body: &serde_json::Val
                         page_index: hit.page_index,
                         bbox: hit.rect.bbox,
                         source_span: hit.source_span,
+                    })
+                    .or_else(|| {
+                        recovery_evidence
+                            .formula_representations
+                            .iter()
+                            .any(|formula| formula.source_span.end == target.end)
+                            .then(|| hits.last())
+                            .flatten()
+                            .map(|hit| ExactPdfRect {
+                                page_index: hit.page_index,
+                                bbox: hit.rect.bbox,
+                                source_span: hit.source_span,
+                            })
                     })
             })
             .flatten();
@@ -13434,17 +13668,161 @@ mod tests {
             .collect()
     }
 
+    fn formula_recovery_fixture() -> (
+        String,
+        String,
+        PdfRuntimeProjectionPolicy,
+        Vec<SelectionCharHit>,
+    ) {
+        let canonical = "rows $ W_{Ui}, W_{Di} $ define".to_string();
+        let raw = "rows WU i, WD i define".to_string();
+        let source_start = 10_000usize;
+        let formula_start = source_start + 5;
+        let formula_end = formula_start + "$ W_{Ui}, W_{Di} $".len();
+        let formula_offsets = [
+            (2, 'W'),
+            (5, 'U'),
+            (6, 'i'),
+            (8, ','),
+            (10, 'W'),
+            (13, 'D'),
+            (14, 'i'),
+        ];
+        let mut chars = vec![
+            (0, 'r', "text"),
+            (1, 'o', "text"),
+            (2, 'w', "text"),
+            (3, 's', "text"),
+        ];
+        chars.extend(
+            formula_offsets
+                .into_iter()
+                .map(|(offset, value)| (5 + offset, value, "formula")),
+        );
+        chars.extend(
+            "define".chars().enumerate().map(|(offset, value)| {
+                (formula_end - source_start + 1 + offset, value, "text-after")
+            }),
+        );
+        let hits = chars
+            .into_iter()
+            .enumerate()
+            .map(|(char_index, (offset, value, lid))| SelectionCharHit {
+                page_index: 3,
+                char_index,
+                text: value.to_string(),
+                lid: Some(lid.to_string()),
+                source_span: SourceSpanDto {
+                    start: source_start + offset,
+                    end: source_start + offset + 1,
+                },
+                rect: PdfPageRectDto {
+                    page_index: 3,
+                    bbox: [char_index as f64, 0.0, char_index as f64 + 1.0, 1.0],
+                },
+            })
+            .collect::<Vec<_>>();
+        let formula_exact_spans = formula_offsets
+            .into_iter()
+            .map(|(offset, _)| SourceSpanDto {
+                start: formula_start + offset,
+                end: formula_start + offset + 1,
+            })
+            .collect::<Vec<_>>();
+        let policy = PdfRuntimeProjectionPolicy {
+            version: PdfRuntimeMapVersion::V2,
+            book_id: "formula-recovery".into(),
+            config_hash: "cfg-formula-recovery".into(),
+            entries: HashMap::from([(
+                "formula".into(),
+                PdfRuntimeEntryPolicy {
+                    source_span: SourceSpanDto {
+                        start: formula_start,
+                        end: formula_end,
+                    },
+                    precision: PdfRuntimeProjectionPrecision::Partial,
+                    exact_source_spans: formula_exact_spans,
+                    regions: vec![PdfPageRectDto {
+                        page_index: 3,
+                        bbox: [4.0, 0.0, 12.0, 1.0],
+                    }],
+                    formula_display_text: Some("WU i, WD i".into()),
+                },
+            )]),
+        };
+        (canonical, raw, policy, hits)
+    }
+
+    fn write_formula_recovery_runtime_artifacts(s: &mut AppState) -> usize {
+        let formula = "$ W_{Ui}, W_{Di} $";
+        let source = format!("{formula}{}", "X".repeat(100 - formula.len()));
+        s.book = Book::new(sample_base(), &source);
+        s.reader = Reader::new(&s.book, DEFAULT_RADIUS);
+        write_pdf_runtime_artifacts(s);
+        rewrite_pdf_runtime_artifacts_v2(s, "partial", formula.len());
+
+        let formula_offsets = [2usize, 5, 6, 8, 10, 13, 14];
+        let source_map_path = s.book_dir.join("pdf_source_map.json");
+        let mut source_map: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&source_map_path).unwrap()).unwrap();
+        let entry = &mut source_map["entries"][0];
+        entry["source_span"] = serde_json::json!({"start":0,"end":formula.len()});
+        entry["exact_source_spans"] = serde_json::Value::Array(
+            formula_offsets
+                .iter()
+                .map(|offset| serde_json::json!({"start":offset,"end":offset + 1}))
+                .collect(),
+        );
+        entry["formula_display_text"] = serde_json::json!("WU i, WD i");
+        entry["regions"] = serde_json::json!([{
+            "region_id":"formula-region",
+            "pageIndex":0,
+            "bbox":[10.0,10.0,31.0,20.0]
+        }]);
+        std::fs::write(source_map_path, source_map.to_string()).unwrap();
+
+        let display = ['W', 'U', 'i', ',', 'W', 'D', 'i'];
+        let chars = display.into_iter().enumerate().map(|(char_index, value)| {
+            let left = 10.0 + char_index as f64 * 3.0;
+            serde_json::json!({
+                "char_index":char_index,
+                "text":value.to_string(),
+                "rect":{"pageIndex":0,"bbox":[left,10.0,left + 2.0,20.0]},
+                "source_span":{"start":formula_offsets[char_index],"end":formula_offsets[char_index] + 1},
+                "lid":"1.1"
+            })
+        }).collect::<Vec<_>>();
+        let selection_page_path = s
+            .book_dir
+            .join("pdf_selection_map")
+            .join("pages")
+            .join("0.json");
+        std::fs::write(
+            selection_page_path,
+            serde_json::json!({
+                "version":"pdf_selection_map_page.v2",
+                "book_id":s.book.base.book_id,
+                "pageIndex":0,
+                "chars":chars
+            })
+            .to_string(),
+        )
+        .unwrap();
+        formula.len()
+    }
+
     #[test]
     fn pdf_selection_recovery_classifier_accepts_exact_and_known_representation_gaps() {
         assert_eq!(
             PDF_SELECTION_RECOVERY_POLICY.version,
-            "pdf_selection_recovery.v1"
+            "pdf_selection_recovery.v2"
         );
         assert_eq!(
             PDF_SELECTION_RECOVERY_POLICY.accepted_differences,
             &[
                 PdfSelectionRecoveryDifference::LayoutWhitespace,
                 PdfSelectionRecoveryDifference::HyphenRepresentation,
+                PdfSelectionRecoveryDifference::FormulaRepresentation,
             ]
         );
         assert!(
@@ -13500,6 +13878,7 @@ unchanged after training concludes";
         let canonical_discretionary = "feedforward";
         let evidence = PdfSelectionRecoveryEvidence {
             discretionary_raw_hyphen_offsets_utf16: HashSet::from([4]),
+            ..PdfSelectionRecoveryEvidence::default()
         };
         assert_eq!(
             classify_pdf_selection_recovery(
@@ -13567,6 +13946,104 @@ unchanged after training concludes";
             ),
             PdfSelectionRecoveryDecision::Incomplete
         );
+    }
+
+    #[test]
+    fn pdf_selection_recovery_accepts_only_complete_formula_representation() {
+        let (canonical, raw, policy, hits) = formula_recovery_fixture();
+        let mut evidence = pdf_selection_recovery_evidence(&raw);
+        evidence.formula_representations = complete_formula_representations(&policy, &hits);
+        assert_eq!(
+            classify_pdf_selection_recovery(&raw, &canonical, 10_000, &hits, &evidence),
+            PdfSelectionRecoveryDecision::Recovered(PdfSelectionRecoveryReport {
+                differences: vec![
+                    PdfSelectionRecoveryDifference::LayoutWhitespace,
+                    PdfSelectionRecoveryDifference::FormulaRepresentation,
+                ],
+                difference_counts: BTreeMap::from([
+                    (PdfSelectionRecoveryDifference::LayoutWhitespace, 2),
+                    (PdfSelectionRecoveryDifference::FormulaRepresentation, 1),
+                ]),
+            })
+        );
+
+        let mut missing_subscript = hits.clone();
+        missing_subscript.remove(6);
+        let mut missing_evidence = pdf_selection_recovery_evidence("rows WU, WD i define");
+        missing_evidence.formula_representations =
+            complete_formula_representations(&policy, &missing_subscript);
+        assert_eq!(
+            classify_pdf_selection_recovery(
+                "rows WU, WD i define",
+                &canonical,
+                10_000,
+                &missing_subscript,
+                &missing_evidence,
+            ),
+            PdfSelectionRecoveryDecision::Incomplete
+        );
+
+        let mut changed_variable = hits.clone();
+        changed_variable[4].text = "X".into();
+        let mut changed_evidence = pdf_selection_recovery_evidence("rows XU i, WD i define");
+        changed_evidence.formula_representations =
+            complete_formula_representations(&policy, &changed_variable);
+        assert_eq!(
+            classify_pdf_selection_recovery(
+                "rows XU i, WD i define",
+                &canonical,
+                10_000,
+                &changed_variable,
+                &changed_evidence,
+            ),
+            PdfSelectionRecoveryDecision::Incomplete
+        );
+    }
+
+    #[test]
+    fn pdf_selection_formula_recovery_round_trips_and_rejects_changed_variables() {
+        let mut s = state_named("pdf-selection-formula-recovery-round-trip");
+        let formula_len = write_formula_recovery_runtime_artifacts(&mut s);
+        let selected = post(
+            &mut s,
+            "/reader/pdf_selection.resolve",
+            r#"{"pageIndex":0,"raw_quote":"WU i, WD i","rects":[{"bbox":[9.0,9.0,32.0,21.0]}]}"#,
+        );
+        let selected_body: serde_json::Value = serde_json::from_str(&selected.body).unwrap();
+        assert_eq!(selected_body["status"], "resolved", "{selected_body}");
+        assert_eq!(selected_body["resolution_basis"], "recovered");
+        assert_eq!(
+            selected_body["recovered_differences"],
+            serde_json::json!(["formula_representation"])
+        );
+        assert_eq!(selected_body["quote_markdown"], "$ W_{Ui}, W_{Di} $");
+        assert_eq!(
+            selected_body["ranges"][0]["range"],
+            serde_json::json!({"start":0,"end":formula_len})
+        );
+
+        let projected = post(
+            &mut s,
+            "/reader/pdf_ranges.project",
+            &serde_json::json!({"ranges":[{
+                "lid":"1.1",
+                "range":{"start":0,"end":formula_len}
+            }]})
+            .to_string(),
+        );
+        let projected_body: serde_json::Value = serde_json::from_str(&projected.body).unwrap();
+        let projection = &projected_body["projections"][0];
+        assert_eq!(projection["status"], "exact", "{projected_body}");
+        assert_eq!(projection["resolution_basis"], "recovered");
+        assert!(projection["terminal_rect"].is_object());
+
+        let changed = post(
+            &mut s,
+            "/reader/pdf_selection.resolve",
+            r#"{"pageIndex":0,"raw_quote":"XU i, WD i","rects":[{"bbox":[9.0,9.0,32.0,21.0]}]}"#,
+        );
+        let changed_body: serde_json::Value = serde_json::from_str(&changed.body).unwrap();
+        assert_eq!(changed_body["status"], "partial", "{changed_body}");
     }
 
     fn write_recovery_runtime_artifacts(
@@ -13815,6 +14292,92 @@ unchanged after training concludes";
         assert_eq!(projection["status"], "exact", "{projected_body}");
         assert_eq!(projection["resolution_basis"], expected_basis);
         assert!(projection["terminal_rect"].is_object());
+    }
+
+    #[test]
+    fn pdf_selection_recovery_real_book_replays_eq9_formula_sentence() {
+        let Ok(book_dir) = std::env::var("UB_PDF_SELECTION_REAL_BOOK_DIR") else {
+            eprintln!(
+                "PDF selection Eq. 9 real-book replay skipped: UB_PDF_SELECTION_REAL_BOOK_DIR is unset"
+            );
+            return;
+        };
+        let book_dir = PathBuf::from(book_dir);
+        let book = Book::load(book_dir.to_str().expect("real-book path must be UTF-8"))
+            .expect("PDF selection Eq. 9 real book must load");
+        let policy = pdf_runtime_projection_policy(&book_dir).expect("runtime policy must load");
+        let lids = (77..=85)
+            .map(|index| format!("1.19.86.57.{index}"))
+            .collect::<Vec<_>>();
+        let mut hits = Vec::new();
+        for lid in &lids {
+            let target = lid_span(&book, lid).expect("Eq. 9 sentence LID must exist");
+            hits.extend(
+                selection_chars_for_source_range(&book_dir, lid, target, &policy)
+                    .expect("Eq. 9 selection chars must load"),
+            );
+        }
+        hits.sort_by_key(|hit| (hit.page_index, hit.char_index));
+        assert!(!hits.is_empty());
+        assert!(hits.iter().all(|hit| hit.page_index == 6));
+        let rects = hits
+            .iter()
+            .map(|hit| {
+                serde_json::json!({
+                    "pageIndex":hit.page_index,
+                    "bbox":hit.rect.bbox,
+                })
+            })
+            .collect::<Vec<_>>();
+        let raw_quote = "which is consistent with Eq. 9, where the rows in two linear layers WU i, WD i define m memory keys ki and\nvalues vi, and the kernel function";
+        let selected = route_pdf_selection_resolve(
+            &book,
+            &book_dir,
+            &serde_json::json!({
+                "pageIndex":6,
+                "raw_quote":raw_quote,
+                "rects":rects,
+            }),
+        );
+        assert_eq!(selected.status, 200, "{}", selected.body);
+        let selected_body: serde_json::Value = serde_json::from_str(&selected.body).unwrap();
+        assert_eq!(selected_body["status"], "resolved", "{selected_body}");
+        assert_eq!(selected_body["resolution_basis"], "recovered");
+        assert_eq!(
+            selected_body["recovered_difference_counts"]["formula_representation"],
+            4
+        );
+        assert_eq!(
+            selected_body["ranges"].as_array().unwrap().len(),
+            lids.len()
+        );
+        assert_eq!(
+            selected_body["ranges"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|range| range["lid"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            lids.iter().map(String::as_str).collect::<Vec<_>>()
+        );
+
+        let projected = route_pdf_ranges_project(
+            &book,
+            &book_dir,
+            &serde_json::json!({"ranges":selected_body["ranges"]}),
+        );
+        assert_eq!(projected.status, 200, "{}", projected.body);
+        let projected_body: serde_json::Value = serde_json::from_str(&projected.body).unwrap();
+        assert!(
+            projected_body["projections"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|projection| {
+                    projection["status"] == "exact" && projection["terminal_rect"].is_object()
+                }),
+            "{projected_body}"
+        );
     }
 
     #[test]

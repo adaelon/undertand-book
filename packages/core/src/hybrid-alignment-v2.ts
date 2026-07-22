@@ -50,6 +50,7 @@ export interface HybridChildProjection {
     rect: { pageIndex: number; bbox: [number, number, number, number] };
     source_span: { start: number; end: number };
   }>;
+  formula_display_text?: string;
   primary_region?: PdfRegion;
   alignment: { unit_id: string; reason: string };
 }
@@ -235,22 +236,52 @@ function pageAlignmentLines(page: PdfGeometryPage): PdfAlignmentLine[] {
 
   const spanning = segments.filter((line) => line.column === 0).sort(visualOrder);
   const narrow = segments.filter((line) => line.column !== 0);
+  const companionsByBoundary = new Map<string, PdfAlignmentLine[]>();
+  const companionIds = new Set<string>();
+  for (const line of narrow) {
+    const lineHeight = line.bbox[3] - line.bbox[1];
+    const candidates = spanning
+      .filter((boundary) => {
+        const boundaryHeight = boundary.bbox[3] - boundary.bbox[1];
+        const rowHeight = Math.max(lineHeight, boundaryHeight);
+        const lineY = (line.bbox[1] + line.bbox[3]) / 2;
+        const boundaryY = (boundary.bbox[1] + boundary.bbox[3]) / 2;
+        const sameVisualRow = Math.abs(lineY - boundaryY) <= rowHeight * 1.25;
+        const continuesToRight = line.bbox[0] >= boundary.bbox[2] - rowHeight;
+        return sameVisualRow && continuesToRight;
+      })
+      .sort((leftBoundary, rightBoundary) => {
+        const gap = (boundary: PdfAlignmentLine) => Math.min(
+          Math.abs(line.bbox[0] - boundary.bbox[2]),
+          Math.abs(boundary.bbox[0] - line.bbox[2]),
+        );
+        return gap(leftBoundary) - gap(rightBoundary) || visualOrder(leftBoundary, rightBoundary);
+      });
+    const boundary = candidates[0];
+    if (!boundary) continue;
+    const companions = companionsByBoundary.get(boundary.alignment_line_id) ?? [];
+    companions.push(line);
+    companionsByBoundary.set(boundary.alignment_line_id, companions);
+    companionIds.add(line.alignment_line_id);
+  }
+  const zonedNarrow = narrow.filter((line) => !companionIds.has(line.alignment_line_id));
   const ordered: PdfAlignmentLine[] = [];
   let upperBoundary = Number.POSITIVE_INFINITY;
   for (const boundary of spanning) {
     const boundaryY = (boundary.bbox[1] + boundary.bbox[3]) / 2;
-    const zone = narrow.filter((line) => {
+    const zone = zonedNarrow.filter((line) => {
       const lineY = (line.bbox[1] + line.bbox[3]) / 2;
       return lineY < upperBoundary && lineY > boundaryY;
     });
     ordered.push(
       ...zone.filter((line) => line.column === 1).sort(visualOrder),
       ...zone.filter((line) => line.column === 2).sort(visualOrder),
-      boundary,
+      ...[boundary, ...(companionsByBoundary.get(boundary.alignment_line_id) ?? [])]
+        .sort((leftLine, rightLine) => leftLine.bbox[0] - rightLine.bbox[0] || visualOrder(leftLine, rightLine)),
     );
     upperBoundary = boundaryY;
   }
-  const tail = narrow.filter((line) => (line.bbox[1] + line.bbox[3]) / 2 < upperBoundary);
+  const tail = zonedNarrow.filter((line) => (line.bbox[1] + line.bbox[3]) / 2 < upperBoundary);
   ordered.push(
     ...tail.filter((line) => line.column === 1).sort(visualOrder),
     ...tail.filter((line) => line.column === 2).sort(visualOrder),
@@ -587,6 +618,78 @@ function formulaCharacterKeys(keys: PdfCharKey[]): PdfCharKey[] {
   return keys.filter((item) => item.key !== " " && !/^[_{}^$]$/u.test(item.key));
 }
 
+const FORMULA_PRESENTATION_COMMANDS = new Set([
+  "displaystyle", "textstyle", "scriptstyle", "scriptscriptstyle",
+  "left", "right", "limits", "nolimits", "quad", "qquad",
+]);
+
+const FORMULA_WRAPPER_COMMANDS = new Set([
+  "text", "textrm", "textit", "textbf", "mathrm", "mathbf", "mathit",
+  "mathsf", "mathtt", "mathbb", "mathcal", "operatorname", "boldsymbol",
+  "bm", "pmb",
+]);
+
+function formulaSourceCharacterKeys(
+  source: string,
+  span: { start: number; end: number },
+): Array<{ key: string; source_span: { start: number; end: number } }> | null {
+  const raw = source.slice(span.start, span.end);
+  if (!/^\s*\${1,2}/u.test(raw) || !/\${1,2}\s*$/u.test(raw)) return null;
+  const units: Array<{ key: string; source_span: { start: number; end: number } }> = [];
+  let braceDepth = 0;
+  for (let index = 0; index < raw.length;) {
+    const char = String.fromCodePoint(raw.codePointAt(index)!);
+    if (char === "\\") {
+      const command = /^\\([A-Za-z]+)/u.exec(raw.slice(index));
+      if (!command || (!FORMULA_PRESENTATION_COMMANDS.has(command[1]) && !FORMULA_WRAPPER_COMMANDS.has(command[1]))) {
+        return null;
+      }
+      index += command[0].length;
+      continue;
+    }
+    if (char === "{") {
+      braceDepth += 1;
+      index += char.length;
+      continue;
+    }
+    if (char === "}") {
+      braceDepth -= 1;
+      if (braceDepth < 0) return null;
+      index += char.length;
+      continue;
+    }
+    if (/^[\s_$^]$/u.test(char)) {
+      index += char.length;
+      continue;
+    }
+    const sourceSpan = { start: span.start + index, end: span.start + index + char.length };
+    for (const key of normalizedCharacterKeys(char)) {
+      if (key !== " " && !/^[_{}^$]$/u.test(key)) units.push({ key, source_span: sourceSpan });
+    }
+    index += char.length;
+  }
+  return braceDepth === 0 && units.length ? units : null;
+}
+
+function formulaDisplayText(allKeys: PdfCharKey[], formulaKeys: PdfCharKey[]): string {
+  const first = formulaKeys[0];
+  const last = formulaKeys.at(-1);
+  if (!first || !last) return "";
+  const firstIndex = allKeys.findIndex((item) => (
+    item.char.pageIndex === first.char.pageIndex && item.char.charIndex === first.char.charIndex
+  ));
+  const lastIndex = allKeys.findIndex((item) => (
+    item.char.pageIndex === last.char.pageIndex && item.char.charIndex === last.char.charIndex
+  ));
+  if (firstIndex < 0 || lastIndex < firstIndex) return "";
+  const matched = new Set(formulaKeys.map((item) => `${item.char.pageIndex}:${item.char.charIndex}`));
+  const display = allKeys.slice(firstIndex, lastIndex + 1);
+  if (display.some((item) => item.key !== " " && !matched.has(`${item.char.pageIndex}:${item.char.charIndex}`))) {
+    return "";
+  }
+  return display.map((item) => item.char.text).join("");
+}
+
 function projectionText(
   child: HybridAlignmentUnit["child_lids"][number],
   blockTextBySpan: Map<string, string>,
@@ -783,6 +886,23 @@ export function projectHybridAlignmentChildren(
       && nextLine.column === formulaLine.column,
     );
     const precision: PdfProjectionPrecision = boundedSamePageColumn ? "region_exact" : "partial";
+    const formulaSourceKeys = formulaSourceCharacterKeys(source, child.source_span);
+    const hasExactDisplaySource = Boolean(
+      formulaSourceKeys
+      && formulaSourceKeys.length === needle.length
+      && formulaSourceKeys.every((item, sourceIndex) => item.key === needle[sourceIndex]),
+    );
+    const displayText = formulaDisplayText(keys, range.chars);
+    if (boundedSamePageColumn && hasExactDisplaySource && displayText) {
+      const projection = textProjection(unit, child, {
+        ...range,
+        source_spans: formulaSourceKeys!.map((item) => item.source_span),
+      }, "partial");
+      projection.formula_display_text = displayText;
+      projection.alignment.reason = "complete simple formula display projection with source-markup gaps";
+      projections.set(child.lid, projection);
+      continue;
+    }
     projections.set(child.lid, {
       lid: child.lid,
       source_span: { ...child.source_span },

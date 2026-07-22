@@ -324,6 +324,7 @@ export const PdfSourceMapEntryV2Z = z.object({
   precision: PdfProjectionPrecisionV2Z,
   regions: z.array(PdfRegionZ),
   exact_source_spans: z.array(SpanZ),
+  formula_display_text: z.string().min(1).optional(),
   primary_region: PdfRegionZ.optional(),
   alignment: z.object({
     unit_id: z.string().min(1),
@@ -339,6 +340,9 @@ export const PdfSourceMapEntryV2Z = z.object({
   }
   if (entry.precision === "partial" && !entry.regions.length) {
     context.addIssue({ code: z.ZodIssueCode.custom, message: "partial requires at least one proven region" });
+  }
+  if (entry.formula_display_text && (entry.precision !== "partial" || !entry.exact_source_spans.length)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "formula display evidence requires partial precision and exact source spans" });
   }
   if (entry.precision === "unmapped" && (entry.regions.length || entry.exact_source_spans.length || entry.primary_region)) {
     context.addIssue({ code: z.ZodIssueCode.custom, message: "unmapped forbids regions, exact_source_spans, and primary_region" });

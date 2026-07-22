@@ -71,7 +71,7 @@ async function inlineFixture() {
 }
 
 describe("HF2-3 hybrid foundation v2 artifacts", () => {
-  it("builds schema-valid full-quality maps while keeping region-only formulas out of selection shards", async () => {
+  it("builds schema-valid full-quality maps while keeping unsupported formula displays region-only", async () => {
     const { source, pdfBytes, geometry } = await inlineFixture();
     const artifacts = buildHybridFoundationV2Candidate({
       book_id: "inline-v2",
@@ -102,6 +102,25 @@ describe("HF2-3 hybrid foundation v2 artifacts", () => {
       .map((entry) => entry.lid));
     expect(artifacts.pdf_selection_map_pages.flatMap((page) => page.chars)
       .every((char) => charExactLids.has(char.lid))).toBe(true);
+  });
+
+  it("serializes bounded simple formula display evidence into selection shards", () => {
+    const source = "# Formula\n\nBefore alpha $ m $ after beta.\n";
+    const artifacts = buildHybridFoundationV2Candidate({
+      book_id: "simple-formula-display-v2",
+      source_txt: source,
+      original_pdf_path: "paper.pdf",
+      original_pdf_sha256: sha256("simple-formula-display"),
+      pdf_geometry: geometryFromLines(["Formula", "Before alpha m after beta."]),
+    });
+
+    const formula = artifacts.pdf_source_map.entries.find((entry) => entry.formula_display_text)!;
+    expect(formula).toMatchObject({ precision: "partial", formula_display_text: "m" });
+    expect(formula.exact_source_spans.length).toBeGreaterThan(0);
+    expect(artifacts.pdf_selection_map_pages.flatMap((page) => page.chars)
+      .filter((char) => char.lid === formula.lid)
+      .map((char) => char.text)).toEqual(["m"]);
+    expect(() => assertHybridFoundationV2Integrity(artifacts)).not.toThrow();
   });
 
   it("round-trips a complete v2 disk set and rejects a tampered selection shard", async () => {

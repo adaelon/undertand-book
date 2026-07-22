@@ -86,6 +86,7 @@ export interface PdfSourceMapEntryV2 {
   precision: PdfProjectionPrecisionV2;
   regions: PdfRegion[];
   exact_source_spans: Array<{ start: number; end: number }>;
+  formula_display_text?: string;
   primary_region?: PdfRegion;
   alignment: { unit_id: string; reason: string; trace_id?: string };
 }

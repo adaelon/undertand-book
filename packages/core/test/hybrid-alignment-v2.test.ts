@@ -48,6 +48,48 @@ function geometryFromPages(pages: string[][]): PdfTextGeometry {
   };
 }
 
+function geometryFromPositionedLines(
+  lines: Array<{ text: string; bbox: [number, number, number, number] }>,
+): PdfTextGeometry {
+  let charIndex = 0;
+  const lineData = lines.map(({ text, bbox }, lineIndex) => {
+    const start = charIndex;
+    const values = Array.from(text);
+    const charWidth = (bbox[2] - bbox[0]) / Math.max(1, values.length);
+    const chars = values.map((value, offset) => ({
+      pageIndex: 0,
+      charIndex: charIndex++,
+      text: value,
+      bbox: [
+        bbox[0] + offset * charWidth,
+        bbox[1],
+        bbox[0] + (offset + 1) * charWidth,
+        bbox[3],
+      ] as [number, number, number, number],
+    }));
+    return { text, lineIndex, start, end: charIndex, bbox, chars };
+  });
+  return {
+    pages: [{
+      pageIndex: 0,
+      width: 600,
+      height: 240,
+      rotate: 0,
+      view: [0, 0, 600, 240],
+      words: [],
+      chars: lineData.flatMap((line) => line.chars),
+      lines: lineData.map((line) => ({
+        pageIndex: 0,
+        lineIndex: line.lineIndex,
+        text: line.text,
+        char_start: line.start,
+        char_end: line.end,
+        bbox: line.bbox,
+      })),
+    }],
+  };
+}
+
 async function licensedFixture(name: string) {
   const dir = path.join(FIXTURE_ROOT, name);
   const source = readFileSync(path.join(dir, "source.md"), "utf8");
@@ -74,6 +116,8 @@ describe("HF2-2 semantic-unit PDF alignment", () => {
       [133.9568888888889, 660, 150.85422222222223, 672],
       [156.48666666666668, 660, 224.07600000000002, 672],
     ]);
+    expect(projections[1].selection_assignments).toEqual([]);
+    expect(projections[1]).not.toHaveProperty("formula_display_text");
   });
 
   it("splits PDF.js merged two-column lines before locating and projecting children", async () => {
@@ -87,15 +131,15 @@ describe("HF2-2 semantic-unit PDF alignment", () => {
     expect(result.locations.every((location) => location.status === "located")).toBe(true);
     expect(formulaUnits).toHaveLength(2);
     expect(formulaProjections.map((projection) => projection.precision)).toEqual([
-      "char_exact", "region_exact", "char_exact",
-      "char_exact", "region_exact", "char_exact",
+      "char_exact", "partial", "char_exact",
+      "char_exact", "partial", "char_exact",
     ]);
     expect(new Set(formulaProjections.map((projection) => projection.primary_region?.bbox.join(","))).size).toBe(6);
     expect(formulaProjections.slice(0, 3).every((projection) => projection.primary_region!.bbox[2] < 320)).toBe(true);
     expect(formulaProjections.slice(3).every((projection) => projection.primary_region!.bbox[0] >= 320)).toBe(true);
   });
 
-  it("forms one display-formula context and emits a bounded region_exact formula", () => {
+  it("emits recoverable display evidence for a uniquely bounded simple formula", () => {
     const source = [
       "# Display Formula",
       "",
@@ -118,7 +162,16 @@ describe("HF2-2 semantic-unit PDF alignment", () => {
     ));
 
     expect(formulaUnit.child_lids.map((child) => child.kind)).toEqual(["text", "formula", "text"]);
-    expect(formula).toMatchObject({ precision: "region_exact", regions: [{ pageIndex: 0 }] });
+    expect(formula).toMatchObject({
+      precision: "partial",
+      formula_display_text: "x=y",
+      regions: [{ pageIndex: 0 }],
+      selection_assignments: [
+        expect.objectContaining({ text: "x" }),
+        expect.objectContaining({ text: "=" }),
+        expect.objectContaining({ text: "y" }),
+      ],
+    });
   });
 
   it("keeps a cross-page formula partial even when the full unit is located", () => {
@@ -140,6 +193,8 @@ describe("HF2-2 semantic-unit PDF alignment", () => {
     expect(result.locations[0].status).toBe("located");
     expect(formula.precision).toBe("partial");
     expect(formula.regions).toHaveLength(1);
+    expect(formula.selection_assignments).toEqual([]);
+    expect(formula).not.toHaveProperty("formula_display_text");
   });
 
   it("fails closed when a complete unit anchor is repeated", () => {
@@ -185,6 +240,29 @@ describe("HF2-2 semantic-unit PDF alignment", () => {
 
     expect(result.locations.map((location) => location.status)).toEqual(["located", "located"]);
     expect(result.locations[0].token_span!.end).toBeLessThanOrEqual(result.locations[1].token_span!.start);
+  });
+
+  it("retains a right continuation beside a spanning segment on the same baseline", () => {
+    const left = "The formula is W";
+    const middleLeft = "V ReLU";
+    const middleRight = "WK x";
+    const right = ", where x is the input,";
+    const lines = pdfAlignmentLines(geometryFromPositionedLines([
+      { text: left, bbox: [70, 200, 347, 212] },
+      { text: middleLeft, bbox: [339, 194, 375, 207] },
+      { text: middleRight, bbox: [381, 195, 407, 207] },
+      { text: right, bbox: [413, 200, 542, 212] },
+      { text: "left lower one", bbox: [70, 170, 180, 182] },
+      { text: "right lower one", bbox: [410, 170, 520, 182] },
+      { text: "left lower two", bbox: [70, 150, 180, 162] },
+      { text: "right lower two", bbox: [410, 150, 520, 162] },
+    ]));
+    const orderedText = lines.map((line) => line.text);
+
+    expect(orderedText).toContain(right);
+    expect(orderedText.indexOf(left)).toBeLessThan(orderedText.indexOf(middleLeft));
+    expect(orderedText.indexOf(middleLeft)).toBeLessThan(orderedText.indexOf(middleRight));
+    expect(orderedText.indexOf(middleRight)).toBeLessThan(orderedText.indexOf(right));
   });
 
   it("projects shared semantic hyphens instead of dropping their source assignments", () => {

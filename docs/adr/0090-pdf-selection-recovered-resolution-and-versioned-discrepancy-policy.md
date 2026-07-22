@@ -74,3 +74,17 @@ Extends: ADR-0074 and ADR-0082.
 
 **命门**:错误升级必须为零,旧 artifact recovered 与新 artifact exact 两条路径都须通过。
 **展开**:[PDF 选区可恢复定位切片方案](../切片方案-pdf选区可恢复定位.md)
+
+### §7 v2 完整简单公式表示差异
+
+**修订**:2026-07-22 接受 `formula_representation`,策略升级为 `pdf_selection_recovery.v2`。
+
+**决策**:只有源公式能确定性投影为同一可见字符序列、该序列在相邻精确文本锚之间唯一出现、且本次选区覆盖公式全部已证实 glyph 时,才允许把 LaTeX 源标记与 PDF 排版显示之间的差异判为 recovered。公式 entry 保持 `partial`,不得冒充普通 `char_exact`;canonical range 仍保存完整公式源码,PDF 只返回真实 glyph rect。
+
+**否决**:
+- 直接把 `region_exact` 公式开放给字符选区:区域存在不证明变量、下标或运算符完整。
+- 对任意 LaTeX 调用宽松文本化:未知命令、结构重排与可见装饰可能改变语义或阅读顺序。
+- 只比较覆盖率或公式首尾字符:中间缺下标、替换变量仍可能被误升级。
+
+**命门**:缺任一显示字符、变量/运算符变化、只选中公式一部分、PDF 暴露未映射的 `_ { } ^ $` 等实质字符、未知 LaTeX 命令或跨页锚点时必须 fail-closed。正例为真实 Eq. 9 句中的 `W_{Ui}, W_{Di}`、`m`、`\boldsymbol{k}_i`、`\boldsymbol{v}_i`;强制反例为缺下标字符与 `W -> X` 变量替换。
+**展开**:[PDF 选区可恢复定位切片方案](../切片方案-pdf选区可恢复定位.md)

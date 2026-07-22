@@ -138,9 +138,13 @@ export function resolveHybridProjectionConflicts(
   return {
     projections: projections.map((projection) => {
       if (!conflictedLids.has(projection.lid)) return projection;
-      const { primary_region: _primaryRegion, ...withoutPrimaryRegion } = projection;
+      const {
+        primary_region: _primaryRegion,
+        formula_display_text: _formulaDisplayText,
+        ...withoutDegradedEvidence
+      } = projection;
       return {
-        ...withoutPrimaryRegion,
+        ...withoutDegradedEvidence,
         precision: "unmapped",
         regions: [],
         exact_source_spans: [],
@@ -206,6 +210,7 @@ export function buildHybridFoundationV2Candidate(input: HybridFoundationV2Input)
       precision: projection.precision,
       regions: projection.regions,
       exact_source_spans: projection.exact_source_spans,
+      ...(projection.formula_display_text ? { formula_display_text: projection.formula_display_text } : {}),
       ...(projection.primary_region ? { primary_region: projection.primary_region } : {}),
       alignment: projection.alignment,
     };
@@ -294,7 +299,8 @@ export function buildHybridFoundationV2Candidate(input: HybridFoundationV2Input)
   }, 0);
   const exactFormulaCount = formulaBlocks.filter((block) => {
     const lid = lidBySpan.get(spanKey(block.span));
-    return lid ? projectionByLid.get(lid)?.precision === "region_exact" : false;
+    const projection = lid ? projectionByLid.get(lid) : undefined;
+    return projection?.precision === "region_exact" || Boolean(projection?.formula_display_text);
   }).length;
   const locatedHeadingCount = headingBlocks.filter((block) => {
     const lid = lidBySpan.get(spanKey(block.span));
