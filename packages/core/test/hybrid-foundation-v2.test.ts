@@ -71,7 +71,7 @@ async function inlineFixture() {
 }
 
 describe("HF2-3 hybrid foundation v2 artifacts", () => {
-  it("builds schema-valid full-quality maps while keeping unsupported formula displays region-only", async () => {
+  it("builds schema-valid degraded maps when formula glyph geometry is not trustworthy", async () => {
     const { source, pdfBytes, geometry } = await inlineFixture();
     const artifacts = buildHybridFoundationV2Candidate({
       book_id: "inline-v2",
@@ -89,17 +89,22 @@ describe("HF2-3 hybrid foundation v2 artifacts", () => {
     expect(() => assertHybridFoundationV2Integrity(artifacts)).not.toThrow();
     expect(artifacts.pdf_source_map.display_token_policy_version).toBe("pdf_display_token_policy.v1");
     expect(artifacts.pdf_source_map.formula_region_policy_version).toBe("pdf_formula_region_policy.v1");
+    expect(artifacts.pdf_source_map.formula_glyph_policy_version).toBe("pdf_formula_glyph_policy.v1");
     expect(artifacts.alignment_report.config.formula_source_ast_version).toBe("formula_source_ast.v1");
     expect(artifacts.alignment_report.config.formula_region_policy_version).toBe("pdf_formula_region_policy.v1");
+    expect(artifacts.alignment_report.config.formula_glyph_policy_version).toBe("pdf_formula_glyph_policy.v1");
     expect(artifacts.alignment_report.quality).toMatchObject({
-      tier: "full",
+      tier: "degraded",
       unit_location_ratio: 1,
       exact_text_span_ratio: 1,
-      exact_formula_ratio: 1,
+      exact_formula_ratio: 0,
       heading_location_ratio: 1,
     });
-    const formula = artifacts.pdf_source_map.entries.find((entry) => entry.precision === "region_exact")!;
+    const formula = artifacts.pdf_source_map.entries.find((entry) => (
+      entry.precision === "unmapped" && entry.alignment.reason.startsWith("formula glyph")
+    ))!;
     expect(formula.exact_source_spans).toEqual([]);
+    expect(formula.regions).toEqual([]);
     expect(artifacts.pdf_selection_map_pages.flatMap((page) => page.chars).some((char) => char.lid === formula.lid)).toBe(false);
     const charExactLids = new Set(artifacts.pdf_source_map.entries
       .filter((entry) => entry.precision === "char_exact")
@@ -179,6 +184,20 @@ describe("HF2-3 hybrid foundation v2 artifacts", () => {
     expect(() => assertHybridFoundationV2Integrity(artifacts)).toThrow(/formula region policy/i);
   });
 
+  it("rejects formula glyph policy drift across v2 artifacts", async () => {
+    const { source, pdfBytes, geometry } = await inlineFixture();
+    const artifacts = buildHybridFoundationV2Candidate({
+      book_id: "formula-glyph-policy-drift-v2",
+      source_txt: source,
+      original_pdf_path: "paper.pdf",
+      original_pdf_sha256: sha256(pdfBytes),
+      pdf_geometry: geometry,
+    });
+
+    delete artifacts.pdf_source_map.formula_glyph_policy_version;
+    expect(() => assertHybridFoundationV2Integrity(artifacts)).toThrow(/formula glyph policy/i);
+  });
+
   it("allows only the proven exact characters of a partial LID in selection shards", async () => {
     const { source, pdfBytes, geometry } = await inlineFixture();
     const artifacts = buildHybridFoundationV2Candidate({
@@ -256,8 +275,9 @@ describe("HF2-3 hybrid foundation v2 artifacts", () => {
       pdf_geometry: geometry,
     });
     const invalid = structuredClone(artifacts.pdf_source_map);
-    const formula = invalid.entries.find((entry) => entry.precision === "region_exact")!;
-    formula.exact_source_spans = [{ ...formula.source_span }];
+    const entry = invalid.entries.find((candidate) => candidate.regions.length > 0)!;
+    entry.precision = "region_exact";
+    entry.exact_source_spans = [{ ...entry.source_span }];
 
     expect(() => PdfSourceMapV2Z.parse(invalid)).toThrow(/region_exact/);
   });

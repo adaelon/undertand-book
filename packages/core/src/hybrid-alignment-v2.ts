@@ -4,6 +4,12 @@ import {
   type MarkdownDisplayRole,
   type MarkdownDisplaySegment,
 } from "./md-adapter";
+import {
+  buildFormulaGlyphPlan,
+  findFormulaGlyphMatches,
+  formulaGlyphKeys,
+  PDF_FORMULA_GLYPH_POLICY,
+} from "./formula-glyph-projection";
 import { parseFormulaSourceAst } from "./formula-source-ast";
 import type { PdfGeometryChar, PdfGeometryPage, PdfTextGeometry } from "./pdf-geometry";
 import type { PdfRegion } from "./pdf-source-map";
@@ -28,6 +34,8 @@ export const PDF_DISPLAY_TOKEN_POLICY = {
 export const PDF_FORMULA_REGION_POLICY = {
   version: "pdf_formula_region_policy.v1",
 } as const;
+
+export { PDF_FORMULA_GLYPH_POLICY };
 
 export interface HybridAlignmentUnit {
   unit_id: string;
@@ -810,6 +818,9 @@ interface FormulaRegionCandidate extends ProjectedKeyRange {
   child_index: number;
   lane: { pageIndex: number; column: PdfAlignmentLine["column"] };
   existing_display_eligible: boolean;
+  glyph_source_spans?: Array<{ start: number; end: number }>;
+  glyph_requires_geometry?: boolean;
+  region_reason?: string;
 }
 
 interface FormulaRegionChainEntry {
@@ -908,7 +919,15 @@ function uniqueMonotonicFormulaRegionChain(
 }
 
 function formulaCharacterKeys(keys: PdfCharKey[]): PdfCharKey[] {
-  return keys.filter((item) => item.key !== " " && !/^[_{}^$]$/u.test(item.key));
+  const chars = new Map<string, PdfCharKey>();
+  for (const item of keys) chars.set(`${item.char.pageIndex}:${item.char.charIndex}`, item);
+  return [...chars.values()].flatMap((item) => (
+    formulaGlyphKeys(item.char.text).map((key) => ({ ...item, key }))
+  )).filter((item) => item.key !== " ");
+}
+
+function legacyFormulaCharacterKeys(keys: PdfCharKey[]): PdfCharKey[] {
+  return formulaCharacterKeys(keys).filter((item) => !/^[_{}^$]$/u.test(item.key));
 }
 
 function formulaPageColumnLane(
@@ -936,7 +955,7 @@ function formulaSourceCharacterKeys(
   if (!formula.projectable) return null;
   const units: Array<{ key: string; source_span: { start: number; end: number } }> = [];
   for (const token of formula.visible_tokens) {
-    for (const key of normalizedCharacterKeys(token.value, "formula")) {
+    for (const key of formulaGlyphKeys(token.value)) {
       if (key !== " " && !/^[_{}^$]$/u.test(key)) units.push({ key, source_span: token.source_span });
     }
   }
@@ -1177,9 +1196,18 @@ export function projectHybridAlignmentChildren(
     const expectedLane = boundaryConflict ? undefined : previousLane ?? nextLane;
     const windowStart = previousRange?.end ?? 0;
     const windowEnd = nextRange?.start ?? keys.length;
-    const windowKeys = formulaCharacterKeys(keys.slice(windowStart, windowEnd));
+    const glyphPlan = buildFormulaGlyphPlan(source, child.source_span);
+    const windowKeys = glyphPlan.status === "supported"
+      ? formulaCharacterKeys(keys.slice(windowStart, windowEnd))
+      : legacyFormulaCharacterKeys(keys.slice(windowStart, windowEnd));
+    const glyphMatches = findFormulaGlyphMatches(glyphPlan, windowKeys.map((item) => ({
+      key: item.key,
+      pageIndex: item.char.pageIndex,
+      charIndex: item.char.charIndex,
+      bbox: item.char.bbox,
+    })));
     const sourceSignature = formulaSourceCharacterKeys(source, child.source_span)?.map((item) => item.key);
-    const legacyNeedle = normalizedCharacterKeys(projectionText(child, blockTextBySpan), "formula")
+    const legacyNeedle = formulaGlyphKeys(projectionText(child, blockTextBySpan))
       .filter((key) => key !== " " && !/^[_{}^$]$/u.test(key));
     const needle = sourceSignature ?? legacyNeedle;
     const occurrences = needle.length ? keyOccurrences(windowKeys, needle, 0) : [];
@@ -1187,13 +1215,48 @@ export function projectHybridAlignmentChildren(
     const legacyChars = legacyOccurrences.length === 1
       ? windowKeys.slice(legacyOccurrences[0], legacyOccurrences[0] + legacyNeedle.length)
       : [];
-    const rawCandidates = occurrences.map((start) => {
-      const chars = windowKeys.slice(start, start + needle.length);
+    const unsupportedObjectRegion = glyphPlan.status !== "supported"
+      && !occurrences.length
+      && unit.child_lids.length === 1
+      && windowKeys.length > 0
+      && Boolean(formulaPageColumnLane(windowKeys));
+    const rawMatches: Array<{
+      start: number;
+      end: number;
+      glyph_source_spans?: Array<{ start: number; end: number }>;
+      region_reason?: string;
+    }> = glyphPlan.status === "supported"
+      ? glyphMatches.matches.map((match) => ({
+          start: match.start,
+          end: match.end,
+          glyph_source_spans: match.source_spans,
+        }))
+      : unsupportedObjectRegion
+        ? [{
+            start: 0,
+            end: windowKeys.length,
+            region_reason: "unique formula object region for unsupported source AST",
+          }]
+        : occurrences.map((start) => ({ start, end: start + needle.length }));
+    const rawCandidates = rawMatches.map((match) => {
+      const chars = windowKeys.slice(match.start, match.end);
       const first = chars[0];
       const last = chars.at(-1);
-      const absoluteStart = first ? keys.indexOf(first) : -1;
-      const absoluteEnd = last ? keys.indexOf(last) + 1 : -1;
-      return { chars, absoluteStart, absoluteEnd, lane: formulaPageColumnLane(chars) };
+      const absoluteStart = first ? keys.findIndex((item) => (
+        item.char.pageIndex === first.char.pageIndex && item.char.charIndex === first.char.charIndex
+      )) : -1;
+      const absoluteLast = last ? keys.findIndex((item) => (
+        item.char.pageIndex === last.char.pageIndex && item.char.charIndex === last.char.charIndex
+      )) : -1;
+      const absoluteEnd = absoluteLast >= 0 ? absoluteLast + 1 : -1;
+      return {
+        chars,
+        absoluteStart,
+        absoluteEnd,
+        lane: formulaPageColumnLane(chars),
+        ...(match.glyph_source_spans ? { glyph_source_spans: match.glyph_source_spans } : {}),
+        ...(match.region_reason ? { region_reason: match.region_reason } : {}),
+      };
     });
     const candidates = boundaryConflict ? [] : rawCandidates.flatMap((candidate) => (
       candidate.lane
@@ -1209,13 +1272,22 @@ export function projectHybridAlignmentChildren(
             lane: candidate.lane,
             existing_display_eligible: legacyChars.length === candidate.chars.length
               && legacyChars.every((item, index) => item === candidate.chars[index]),
+            ...(candidate.glyph_source_spans ? {
+              glyph_source_spans: candidate.glyph_source_spans,
+              glyph_requires_geometry: glyphPlan.requires_geometry,
+            } : {}),
+            ...(candidate.region_reason ? { region_reason: candidate.region_reason } : {}),
           }]
         : []
     ));
     const rejection = boundaryConflict
       ? "formula region conflicts with adjacent page-column lanes"
-      : !occurrences.length
-        ? "formula has no unique bounded PDF gap"
+      : glyphPlan.status === "supported" && !glyphMatches.matches.length
+        ? glyphMatches.key_candidate_count && glyphMatches.geometry_rejection_count
+          ? "formula glyph geometry conflicts with source AST"
+          : "formula glyph projection has no complete structural match"
+        : glyphPlan.status !== "supported" && !occurrences.length && !unsupportedObjectRegion
+          ? "formula source AST structure is not glyph-projectable"
         : rawCandidates.some((candidate) => !candidate.lane)
           ? "formula signature crosses page-column lanes"
           : !candidates.length
@@ -1287,6 +1359,22 @@ export function projectHybridAlignmentChildren(
       && formulaSourceKeys.every((item, sourceIndex) => item.key === range.chars[sourceIndex].key),
     );
     const displayText = formulaDisplayText(keys, range.chars);
+    if (range.glyph_source_spans?.length === range.chars.length) {
+      const projection = textProjection(unit, child, {
+        ...range,
+        source_spans: range.glyph_source_spans,
+      }, "partial");
+      projection.formula_display_text = displayText || [...new Map(range.chars.map((item) => (
+        [`${item.char.pageIndex}:${item.char.charIndex}`, item.char.text]
+      ))).values()].join("");
+      projection.alignment.reason = range.glyph_requires_geometry
+        ? "complete structural formula glyph projection"
+        : range.existing_display_eligible && boundedSamePageColumn
+          ? "complete simple formula display projection with source-markup gaps"
+          : "complete formula glyph projection in unique formula region";
+      projections.set(child.lid, projection);
+      continue;
+    }
     if (range.existing_display_eligible && boundedSamePageColumn && hasExactDisplaySource && displayText) {
       const projection = textProjection(unit, child, {
         ...range,
@@ -1307,9 +1395,9 @@ export function projectHybridAlignmentChildren(
       ...(regions[0] ? { primary_region: regions[0] } : {}),
       alignment: {
         unit_id: unit.unit_id,
-        reason: boundedSamePageColumn
+        reason: range.region_reason ?? (boundedSamePageColumn
           ? "unique formula region bounded by exact same-page same-column text anchors"
-          : "unique formula region in one page-column lane",
+          : "unique formula region in one page-column lane"),
       },
     });
   }

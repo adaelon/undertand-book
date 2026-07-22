@@ -33,6 +33,16 @@ formula_source_ast.v1 visible signature
   -> policy-bound V2 map/report config hash
 ```
 
+The structural formula stage compiles the positioned formula AST into a closed set of visible glyph variants. Every glyph token retains its source span; scripts, fractions, roots, stacks, large-operator limits, accents, and braces add parent-child geometry constraints. A projection is emitted only for a complete contiguous token match with unique PDF character IDs and valid two-dimensional relations. The resulting formula remains `partial`: selection shards contain only proven glyph assignments, while invisible markup has no rectangle. Missing or changed glyphs, flat script geometry, cross-lane candidates, unknown commands, and duplicate ownership remain explicit failures.
+
+```text
+formula_source_ast.v1 nodes + pdf_formula_region_policy.v1 local window
+  -> pdf_formula_glyph_policy.v1 token variants and geometry constraints
+  -> complete unique glyph/source-span assignment
+  -> partial formula entry + exact glyph selection shard rows
+  -> Core map/report version parity + Server unknown-version rejection
+```
+
 Native PDF selection is owned by the public PDF.js `TextLayerBuilder` lifecycle. Each rendered page retains its builder until zoom, rerender, book switch, or unmount cancels it and removes the text-layer DOM. The builder's `.endOfContent` and selection-change contract stabilize browser caret placement at visual line and paragraph boundaries; the existing mouseup capture then forwards the resulting `Selection` without quote or rectangle heuristics.
 
 PDF selection translation follows a two-phase read-only flow:

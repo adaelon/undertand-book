@@ -101,6 +101,42 @@ function geometryFromPositionedLines(
   };
 }
 
+function geometryFromPositionedChars(
+  chars: Array<{ text: string; bbox: [number, number, number, number] }>,
+): PdfTextGeometry {
+  const geometryChars = chars.map((char, charIndex) => ({
+    pageIndex: 0,
+    charIndex,
+    text: char.text,
+    bbox: char.bbox,
+  }));
+  const bbox = geometryChars.reduce<[number, number, number, number]>((union, char) => ([
+    Math.min(union[0], char.bbox[0]),
+    Math.min(union[1], char.bbox[1]),
+    Math.max(union[2], char.bbox[2]),
+    Math.max(union[3], char.bbox[3]),
+  ]), [Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, 0, 0]);
+  return {
+    pages: [{
+      pageIndex: 0,
+      width: 600,
+      height: 240,
+      rotate: 0,
+      view: [0, 0, 600, 240],
+      words: [],
+      chars: geometryChars,
+      lines: [{
+        pageIndex: 0,
+        lineIndex: 0,
+        text: geometryChars.map((char) => char.text).join(""),
+        char_start: 0,
+        char_end: geometryChars.length,
+        bbox,
+      }],
+    }],
+  };
+}
+
 async function licensedFixture(name: string) {
   const dir = path.join(FIXTURE_ROOT, name);
   const source = readFileSync(path.join(dir, "source.md"), "utf8");
@@ -183,7 +219,7 @@ describe("HF2-2 semantic-unit PDF alignment", () => {
     });
     expect(reportText).not.toMatch(/source_text|raw_quote|excerpt/u);
   });
-  it("projects short inline-formula children independently inside one located unit", async () => {
+  it("keeps a literal flat underscore formula fail-closed without affecting adjacent text", async () => {
     const { source, geometry } = await licensedFixture("licensed-inline-formula");
     const result = alignHybridFoundationV2(source, geometry);
     const paragraph = result.units.find((unit) => unit.child_lids.some((child) => child.kind === "formula"))!;
@@ -193,12 +229,12 @@ describe("HF2-2 semantic-unit PDF alignment", () => {
     expect(result.locations.find((location) => location.unit.unit_id === paragraph.unit_id)?.status).toBe("located");
     expect(projections.map((projection) => projection.precision)).toEqual([
       "char_exact",
-      "region_exact",
+      "unmapped",
       "char_exact",
     ]);
     expect(projections.map((projection) => projection.primary_region?.bbox)).toEqual([
       [72, 660, 128.32444444444445, 672],
-      [133.9568888888889, 660, 150.85422222222223, 672],
+      undefined,
       [156.48666666666668, 660, 224.07600000000002, 672],
     ]);
     expect(projections[1].selection_assignments).toEqual([]);
@@ -267,12 +303,11 @@ describe("HF2-2 semantic-unit PDF alignment", () => {
 
     expect(formulaUnit.child_lids.map((child) => child.kind)).toEqual(["formula"]);
     expect(formula).toMatchObject({
-      precision: "region_exact",
+      precision: "partial",
       regions: [{ pageIndex: 0 }],
-      selection_assignments: [],
-      alignment: { reason: "unique formula region in one page-column lane" },
+      alignment: { reason: "complete formula glyph projection in unique formula region" },
     });
-    expect(formula).not.toHaveProperty("formula_display_text");
+    expect(formula?.selection_assignments).toHaveLength(3);
   });
 
   it.each([
@@ -290,11 +325,11 @@ describe("HF2-2 semantic-unit PDF alignment", () => {
     ));
 
     expect(formula).toMatchObject({
-      precision: "region_exact",
+      precision: "partial",
       regions: [{ pageIndex: 0 }],
-      selection_assignments: [],
-      alignment: { reason: "unique formula region in one page-column lane" },
+      alignment: { reason: "complete formula glyph projection in unique formula region" },
     });
+    expect(formula?.selection_assignments).toHaveLength(3);
   });
 
   it("uses a unique whole monotonic chain for repeated short formulas", () => {
@@ -310,11 +345,11 @@ describe("HF2-2 semantic-unit PDF alignment", () => {
     ));
 
     expect(unit.child_lids.map((child) => child.kind)).toEqual(["formula", "formula"]);
-    expect(formulas.map((projection) => projection.precision)).toEqual(["region_exact", "region_exact"]);
+    expect(formulas.map((projection) => projection.precision)).toEqual(["partial", "partial"]);
     expect(new Set(formulas.map((projection) => projection.primary_region?.bbox.join(","))).size).toBe(2);
   });
 
-  it("does not create source assignments for formula regions newly resolved by the whole chain", () => {
+  it("projects PR15 whole-chain formula regions without reusing a PDF glyph", () => {
     const source = "left anchor $n$ $n$ right anchor\n";
     const unit = formHybridAlignmentUnits(source)[0];
     const formulas = projectHybridAlignmentChildren(source, {
@@ -327,11 +362,114 @@ describe("HF2-2 semantic-unit PDF alignment", () => {
     ));
 
     expect(formulas).toHaveLength(2);
-    expect(formulas.every((projection) => (
-      projection.precision === "region_exact"
-      && projection.selection_assignments.length === 0
-      && projection.exact_source_spans.length === 0
-    ))).toBe(true);
+    expect(formulas.map((projection) => projection.precision)).toEqual(["partial", "partial"]);
+    expect(formulas.map((projection) => projection.selection_assignments.length)).toEqual([1, 1]);
+    expect(new Set(formulas.flatMap((projection) => (
+      projection.selection_assignments.map((assignment) => `${assignment.pageIndex}:${assignment.char_index}`)
+    ))).size).toBe(2);
+  });
+
+  it("projects structural formula glyphs onto positioned source tokens", () => {
+    const source = "$ x_i^2 + \\sqrt{y} $\n";
+    const unit = formHybridAlignmentUnits(source)[0];
+    const formula = projectHybridAlignmentChildren(source, {
+      unit,
+      status: "located",
+      reason: "test-proven structural formula region",
+      lines: pdfAlignmentLines(geometryFromPositionedChars([
+        { text: "x", bbox: [72, 120, 80, 132] },
+        { text: "i", bbox: [81, 112, 87, 120] },
+        { text: "2", bbox: [88, 132, 94, 140] },
+        { text: "+", bbox: [98, 120, 106, 132] },
+        { text: "√", bbox: [110, 120, 120, 136] },
+        { text: "y", bbox: [121, 120, 129, 132] },
+      ])),
+    })[0];
+
+    expect(formula).toMatchObject({
+      precision: "partial",
+      formula_display_text: "xi2+√y",
+      alignment: { reason: "complete structural formula glyph projection" },
+    });
+    expect(formula.selection_assignments.map((assignment) => assignment.text)).toEqual(["x", "i", "2", "+", "√", "y"]);
+    expect(formula.selection_assignments.find((assignment) => assignment.text === "√")?.source_span)
+      .toEqual({ start: source.indexOf("\\sqrt"), end: source.indexOf("\\sqrt") + "\\sqrt".length });
+  });
+
+  it("projects fraction arguments only when their two-dimensional lanes match the AST", () => {
+    const source = "$ \\frac{x}{y} $\n";
+    const unit = formHybridAlignmentUnits(source)[0];
+    const project = (numeratorY: number, denominatorY: number) => projectHybridAlignmentChildren(source, {
+      unit,
+      status: "located" as const,
+      reason: "test-proven fraction window",
+      lines: pdfAlignmentLines(geometryFromPositionedChars([
+        { text: "x", bbox: [82, numeratorY, 90, numeratorY + 10] },
+        { text: "y", bbox: [82, denominatorY, 90, denominatorY + 10] },
+      ])),
+    })[0];
+
+    expect(project(124, 108)).toMatchObject({
+      precision: "partial",
+      formula_display_text: "xy",
+      alignment: { reason: "complete structural formula glyph projection" },
+    });
+    expect(project(108, 124)).toMatchObject({
+      precision: "unmapped",
+      alignment: { reason: "formula glyph geometry conflicts with source AST" },
+    });
+  });
+
+  it.each([
+    ["missing subscript", "$ x_i $\n", [{ text: "x", bbox: [72, 120, 80, 132] }]],
+    ["changed variable", "$ x_i $\n", [
+      { text: "x", bbox: [72, 120, 80, 132] },
+      { text: "j", bbox: [81, 112, 87, 120] },
+    ]],
+    ["changed operator", "$ x+y $\n", [
+      { text: "x", bbox: [72, 120, 80, 132] },
+      { text: "-", bbox: [82, 120, 90, 132] },
+      { text: "y", bbox: [92, 120, 100, 132] },
+    ]],
+    ["flat subscript", "$ x_i $\n", [
+      { text: "x", bbox: [72, 120, 80, 132] },
+      { text: "i", bbox: [82, 120, 90, 132] },
+    ]],
+  ])("keeps %s formula evidence fail-closed", (_name, source, chars) => {
+    const unit = formHybridAlignmentUnits(source)[0];
+    const formula = projectHybridAlignmentChildren(source, {
+      unit,
+      status: "located",
+      reason: "test-proven invalid structural formula window",
+      lines: pdfAlignmentLines(geometryFromPositionedChars(chars as Array<{
+        text: string;
+        bbox: [number, number, number, number];
+      }>)),
+    })[0];
+
+    expect(formula.precision).toBe("unmapped");
+    expect(formula.selection_assignments).toEqual([]);
+    expect(formula.exact_source_spans).toEqual([]);
+  });
+
+  it("keeps a uniquely located unsupported standalone formula as object-only evidence", () => {
+    const source = "$$ \\begin{aligned}x&=y\\\\z&=w\\end{aligned} $$\n";
+    const unit = formHybridAlignmentUnits(source)[0];
+    const formula = projectHybridAlignmentChildren(source, {
+      unit,
+      status: "located",
+      reason: "test-proven standalone formula object",
+      lines: pdfAlignmentLines(geometryFromPages([["x = y", "z = w"]])),
+    })[0];
+
+    expect(unit.child_lids).toHaveLength(1);
+    expect(formula).toMatchObject({
+      precision: "region_exact",
+      alignment: { reason: "unique formula object region for unsupported source AST" },
+    });
+    expect(formula.regions).toHaveLength(2);
+    expect(formula.selection_assignments).toEqual([]);
+    expect(formula.exact_source_spans).toEqual([]);
   });
 
   it("fails closed when repeated formula signatures have multiple whole monotonic chains", () => {
@@ -395,11 +533,10 @@ describe("HF2-2 semantic-unit PDF alignment", () => {
     const formulaLocation = result.locations.find((location) => location.unit.unit_id === formulaUnit.unit_id)!;
 
     expect(formulaLocation.status).toBe("located");
-    expect(formula.precision).toBe("region_exact");
+    expect(formula.precision).toBe("partial");
     expect(formula.regions).toMatchObject([{ pageIndex: 0 }]);
-    expect(formula.selection_assignments).toEqual([]);
-    expect(formula.alignment.reason).toBe("unique formula region in one page-column lane");
-    expect(formula).not.toHaveProperty("formula_display_text");
+    expect(formula.selection_assignments).toHaveLength(3);
+    expect(formula.alignment.reason).toBe("complete formula glyph projection in unique formula region");
   });
 
   it("fails closed when a complete unit anchor is repeated", () => {

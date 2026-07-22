@@ -427,3 +427,14 @@ Inspired by the discussion above,  $ \underline{\text{can we propose a new assoc
 - approved source/PDF 对 A007 106 项的无正文回放为：57 `unique_region`、9 `existing_display_projection`、21 `explicit_structural_ambiguity`、12 `downstream_unit_locator`、6 `downstream_formula_glyph`、1 `reviewed_non_formula`。missing/unclassified、wrong-page、wrong-column、旧 anchor-lack reason、PR15 region assignment 与 cross-lane region 均为 0。
 - 79 个旧 region-only 中 58 个 successor 仍有可比较几何且 reviewed 页/栏全匹配；其余 21 个被明确分到 8 structural ambiguity、8 PR18 unit locator、5 PR16 glyph。27 个旧 anchor-lack 中 22 个已成为唯一 region、既有 display、明确歧义或 reviewed 改类，5 个进入显式下游 owner。
 - 无正文报告三跑字节一致，68,128 bytes，SHA-256 `df0edd211f49da6b0df54bdd8fbb57f75024685f0e0977548c519708600c4bbd`。验证覆盖单/双/无锚、重复短式整链、跨页/跨栏、assignment 隔离、policy 漂移与未知版本；Core 定向 4 files / 52 tests、全量 64 files / 402 tests、typecheck，Server 全量 180+5 tests 全绿。正式 source/base/maps/selection shards 未修改。
+
+## 27. PR16 复杂公式结构化 glyph 投影
+
+**PR 状态**:`completed`；PDF-A006 的字符串 no-gap/ambiguous 模型已退出，但 unit locator、跨公式 owner 冲突和真实 material mismatch 不在本 PR 抢占解决。正式 artifact 仍等待 PR20 原子重建。
+
+- `pdf_formula_glyph_policy.v1` 把 PR14 positioned AST 编译为一个或多个显式 glyph token 序列；每个 token 保留 source span 和有限 glyph alternatives。普通序列要求局部连续完整匹配，上下标、分数、根号、stack、求和/乘积 limits 与 accent/brace 额外要求 AST group 的二维 `above/right_of` 关系。
+- 一个 PDF glyph 只能出现一次并只能归属一个公式；不可见 LaTeX 标记不产生 bbox。缺下标、变量或运算符替换、错误二维 lane、未知命令和 PDF 暴露的 flat `_` 均不产生 assignment。仅当 unsupported standalone formula 是已唯一定位的单 child 且所有 glyph 同一 page/column 时，才允许对象级 `region_exact`；否则明确 unmapped。
+- approved source 的 830 个公式中 395 个得到 2,785 条 assignment：231 structural、123 既有 simple display、41 unique-region glyph projection。所有已投影项均为 `partial`，assignment source span、exact span、全局 glyph ownership、reviewed page/column 和 material-mismatch-upgrade 违规均为 0。
+- 其余 435 项逐项闭合为 `downstream_unit_locator=278`、`downstream_binding_conflict=53`、`explicit_lane_ambiguity=51`、`explicit_glyph_mismatch=52`、`unsupported_source_structure=1`。这表示有稳定 owner/拒绝原因，不表示用户选择已经可用；PR18 只能在唯一全局解存在时继续分配。
+- A006 旧基线 318 项经 PR10 migration 为 glyph projected 100、unit locator 133、binding 20、lane 28、mismatch 36、reviewed non-formula 1；missing/unclassified 均为 0。`formula has no unique bounded PDF gap`、旧 formula projection ambiguous 与 anchor-lack reason 在当前 830 项中全部为 0。
+- 无正文报告三跑均为 714,065 bytes，SHA-256 `5d22207e14cc4203151095bbb0142d9c4b53d3a7a1973d2f96e1383d438a000e`。Core 全量 66 files / 416 tests、typecheck，Server 181+5 tests 与 Rust fmt check 全绿；Core/Server policy 版本写入、漂移与未知版本均 fail-closed，正式 source/base/maps/selection shards 未修改。

@@ -128,3 +128,17 @@ Extends: ADR-0074 and ADR-0082.
 - 因 PR15 找到 region 就复用 simple-display source assignment：几何对象证据不证明 source token/glyph 一一对应。
 
 **命门**:多整链、跨 lane、相邻锚 lane 冲突必须 fail-closed；`formula has no unique bounded PDF gap` 继续归 PR16，unit 未定位继续归 PR18。所有有 region 的 A007 successor 必须与 reviewed page/column 一致，显式未知 locator policy 在 Core/Server 均拒绝。
+
+### §11 v1 结构化公式 glyph 投影
+
+**修订**:2026-07-23 注册构建期 `pdf_formula_glyph_policy.v1`；版本写入 V2 source map 与 alignment report config/hash，历史 V2 两侧缺字段仍可读取。
+
+**决策**:PR14 positioned AST 被编译为有限、显式的 glyph token variants，每个 token 保留 source span。普通序列必须在 PR15/PR12 局部窗口中完整连续匹配；上下标、分数、根号、stack、求和/乘积 limits、accent/brace 还必须满足 AST group 的二维 `above/right_of` 关系。每个 PDF character ID 在一个公式内和公式之间都只能有一个 owner；不可见 source markup 不生成 bbox。成功结果保持 `partial`，selection shard 只写经证明的 glyph/source assignment。
+
+**否决**:
+- 按字符串覆盖率、首尾 glyph 或最长子序列升级：会掩盖缺下标、变量替换和中间运算符变化。
+- 把任意 LaTeX command 删除后匹配：unknown command、结构重排和可见装饰没有等价证据。
+- 为二维结构只验证字符顺序：PDF 提取顺序不能证明 numerator/denominator、上下标或 limits 的视觉关系。
+- 让重复公式各自取第一个 match 或复用同一 PDF char：会制造跨 LID 双 owner。
+
+**命门**:缺 glyph、变量/运算符变化、flat script、错误上下 lane、跨 page/column、多个完整链、未知 AST 结构和重复 character ID 均 fail-closed。unsupported standalone formula 只有在 unit 已唯一定位、仅含该 child 且全部 glyph 同一 page/column 时才允许对象级 `region_exact`，并且仍不得生成 selection assignment。Core 拒绝 map/report 版本漂移，Server 拒绝显式未知 policy；历史缺字段 V2 只保持兼容读取。

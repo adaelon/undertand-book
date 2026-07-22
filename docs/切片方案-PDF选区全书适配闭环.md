@@ -1,6 +1,6 @@
 # 切片方案 - PDF 选区全书适配闭环
 
-> 状态:2026-07-23 PR8-PR15 已完成,PR16-PR21 待实施。
+> 状态:2026-07-23 PR8-PR16 已完成,PR17-PR21 待实施。
 > 问题源:[PDF 选区适配问题总账](PDF选区适配问题总账.md)。
 > 已完成前序:[PDF 选区可恢复定位](切片方案-pdf选区可恢复定位.md) PR1-PR7。
 > 决策边界:[ADR-0082](adr/0082-hybrid-foundation-semantic-unit-alignment-and-degraded-reader.md)、[ADR-0090](adr/0090-pdf-selection-recovered-resolution-and-versioned-discrepancy-policy.md)。
@@ -179,11 +179,14 @@ PR8_FULL_BOOK_BENCHMARK
 
 ### PR16 - 复杂公式结构化 glyph 投影
 
+**状态**:`completed`。`pdf_formula_glyph_policy.v1` 已把可证明公式 glyph 绑定到 positioned source token；不完整字形、错误二维关系、跨 lane 和候选冲突继续 fail-closed，并保留给 PR18/PR20 的显式 owner。
+
 - **做**:把 PR14 AST 可见 token 与 PR15 region 内 PDF glyph 建立结构约束匹配。普通序列用局部单调链;上下标、分数、根号、求和/乘积 limits、accent/brace 按 AST 父子关系和二维几何 lane 验证。每个 glyph/source token 一对一或有显式合字证据,不可见源标记不合成 bbox。
 - **不做**:不把公式渲染成图片再 OCR,不按字符串覆盖率升级,不让一个公式 token 争用另一公式 glyph。
 - **Red**:314 no-gap、4 ambiguous 和 216 个“仅受支持命令仍不可恢复”公式没有结构证据;部分公式选择仍因“必须整式”显示 partial。
 - **Green**:本书所有 PDF.js 可选 formula glyph 拥有 source token assignment;任意连续已映射子公式可 resolve/project;缺下标、变量替换、运算符变化和二维关系错误仍拒绝。
 - **完成判据**:公式 reason 中 `no unique bounded gap / projection ambiguous / anchor lack` 均为 0;无字符或不可解析公式以明确对象级 reason 留在 `region_exact`,且不影响相邻正文。
+- **完成证据**:approved source/PDF 的 830 个公式中，395 个公式产生 2,785 条 glyph assignment，全部为 `partial` 且 assignment source span、exact-span 覆盖、全局 PDF glyph ownership、reviewed page/column 校验均为 0 违规。其余 435 项闭合为 PR18 unit locator 278、binding conflict 53、lane ambiguity 51、glyph/material/geometry mismatch 52、unsupported source structure 1；没有按覆盖率升级。旧 A006 318 项经 migration 分类为 glyph projected 100、PR18 unit/binding 153、lane 28、mismatch 36、reviewed non-formula 1，missing/unclassified 为 0；三个旧公式 reason 均归零。无正文审计三跑字节一致，714,065 bytes，SHA-256 `5d22207e...38a000e`；缺下标、变量/运算符替换、错误分数/上下限 lane、未知命令和 flat underscore 反例继续拒绝。Core 全量 66 files / 416 tests、typecheck，Server 181+5 tests 与 Rust fmt check 全绿；正式 source/base/maps/selection shards 未修改。
 
 ### PR17 - Image 对象投影与文本隔离
 

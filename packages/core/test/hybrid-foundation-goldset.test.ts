@@ -30,6 +30,7 @@ describe("HF2-0 hybrid foundation goldset", () => {
       display_token_audit_path: "external-formula-dense-transformer-display-token-audit.json",
       formula_source_ast_audit_path: "external-formula-dense-transformer-formula-source-ast-audit.json",
       formula_region_audit_path: "external-formula-dense-transformer-formula-region-audit.json",
+      formula_glyph_audit_path: "external-formula-dense-transformer-formula-glyph-audit.json",
       requires_explicit_book_path: true,
     })]);
     for (const metadataPath of [
@@ -41,6 +42,7 @@ describe("HF2-0 hybrid foundation goldset", () => {
       manifest.external_benchmarks[0].display_token_audit_path,
       manifest.external_benchmarks[0].formula_source_ast_audit_path,
       manifest.external_benchmarks[0].formula_region_audit_path,
+      manifest.external_benchmarks[0].formula_glyph_audit_path,
     ]) {
       expect(metadataPath && readFileSync(path.join(GOLDSET_ROOT, metadataPath), "utf8").length).toBeGreaterThan(0);
     }
@@ -66,6 +68,9 @@ describe("HF2-0 hybrid foundation goldset", () => {
     "licensed-two-column-formula",
   ])("freezes the deterministic v1 failure for %s", async (fixtureId) => {
     const { expected, report } = await runLicensedGoldsetFixture(GOLDSET_ROOT, fixtureId);
+    const formulaGlyphQuality = fixtureId === "licensed-inline-formula"
+      ? { tier: "degraded", exact_formula_ratio: 0 }
+      : { tier: "full", exact_formula_ratio: 1 };
 
     expect(report.input_sha256).toEqual(expected.input_sha256);
     expect(report.v1).toMatchObject({
@@ -102,10 +107,10 @@ describe("HF2-0 hybrid foundation goldset", () => {
       },
       quality: {
         policy_version: "hybrid_quality_policy.v1",
-        tier: "full",
+        tier: formulaGlyphQuality.tier,
         unit_location_ratio: 1,
         exact_text_span_ratio: 1,
-        exact_formula_ratio: 1,
+        exact_formula_ratio: formulaGlyphQuality.exact_formula_ratio,
         heading_location_ratio: 1,
       },
       source_span_coverage_ratio: 1,
