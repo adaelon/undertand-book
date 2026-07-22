@@ -1,6 +1,6 @@
 # 切片方案 - PDF 选区全书适配闭环
 
-> 状态:2026-07-22 PR8-PR13 已完成,PR14-PR21 待实施。
+> 状态:2026-07-22 PR8-PR14 已完成,PR15-PR21 待实施。
 > 问题源:[PDF 选区适配问题总账](PDF选区适配问题总账.md)。
 > 已完成前序:[PDF 选区可恢复定位](切片方案-pdf选区可恢复定位.md) PR1-PR7。
 > 决策边界:[ADR-0082](adr/0082-hybrid-foundation-semantic-unit-alignment-and-degraded-reader.md)、[ADR-0090](adr/0090-pdf-selection-recovered-resolution-and-versioned-discrepancy-policy.md)。
@@ -159,11 +159,14 @@ PR8_FULL_BOOK_BENCHMARK
 
 ### PR14 - 公式 source AST 与透明 wrapper
 
+**状态**:`completed`。`latex-utensils` positioned AST 已替代公式字符串命令删除器；`formula_source_ast.v1` 区分透明 wrapper、layout、structural relation、glyph transform 与 unknown command，并进入新 V2 config hash。
+
 - **做**:采用成熟、可保留 source position 的 LaTeX parser,生成可见 token、结构关系和 source span;明确区分透明 wrapper、布局控制和产生/重排 glyph 的数学节点。`\underline/\text/\textit/\textbf` 仅在 AST 闭合且子 token 完整时透明;修复外层公式与内层 math delimiter 的结构分段。
 - **不做**:不继续扩 `FORMULA_WRAPPER_COMMANDS` 字符串删除器,不把 `frac/sum/sqrt/underbrace` 当透明命令,不接 PDF geometry。
 - **Red**:47 个 `\underline` formula 都没有 display evidence;损坏节点 `$.}} $` 仍存在;未知命令可因删字符串伪造可见文本。
 - **Green**:A001 用户句、多行/单行 underline、嵌套 text style 和中部子句均保留正确 source span;未闭合 brace、未知命令和真正数学变换进入结构节点而非被忽略。
 - **完成判据**:formula AST/token snapshot 与 roundtrip tests 全绿;47 个 underline 节点都有可解释 token 结果,但本 PR 不宣称几何已定位。
+- **完成证据**:approved source 中 47 个 A001 baseline 全部命中 migration：46 个 formula successor 均为 `transparent_wrapper_projectable`，1 个 PR10 `content_drift` 已审核修复为 paragraph；missing/invalid/unclassified/parser proposal 均为 0。无正文审计双跑字节一致，SHA-256 `2047b264...b62b5cf`。Core 定向 4 files / 49 tests、全量 63 files / 392 tests、typecheck 全绿；未修改正式 source/base/maps/selection shards，也未接 PR15 geometry。
 
 ### PR15 - 不依赖双侧正文的公式几何定位
 

@@ -4,6 +4,7 @@ import {
   type MarkdownDisplayRole,
   type MarkdownDisplaySegment,
 } from "./md-adapter";
+import { parseFormulaSourceAst } from "./formula-source-ast";
 import type { PdfGeometryChar, PdfGeometryPage, PdfTextGeometry } from "./pdf-geometry";
 import type { PdfRegion } from "./pdf-source-map";
 import { segment } from "./segment";
@@ -853,57 +854,19 @@ function formulaCharacterKeys(keys: PdfCharKey[]): PdfCharKey[] {
   return keys.filter((item) => item.key !== " " && !/^[_{}^$]$/u.test(item.key));
 }
 
-const FORMULA_PRESENTATION_COMMANDS = new Set([
-  "displaystyle", "textstyle", "scriptstyle", "scriptscriptstyle",
-  "left", "right", "limits", "nolimits", "quad", "qquad",
-]);
-
-const FORMULA_WRAPPER_COMMANDS = new Set([
-  "text", "textrm", "textit", "textbf", "mathrm", "mathbf", "mathit",
-  "mathsf", "mathtt", "mathbb", "mathcal", "operatorname", "boldsymbol",
-  "bm", "pmb",
-]);
-
 function formulaSourceCharacterKeys(
   source: string,
   span: { start: number; end: number },
 ): Array<{ key: string; source_span: { start: number; end: number } }> | null {
-  const raw = source.slice(span.start, span.end);
-  if (!/^\s*\${1,2}/u.test(raw) || !/\${1,2}\s*$/u.test(raw)) return null;
+  const formula = parseFormulaSourceAst(source, span);
+  if (!formula.projectable) return null;
   const units: Array<{ key: string; source_span: { start: number; end: number } }> = [];
-  let braceDepth = 0;
-  for (let index = 0; index < raw.length;) {
-    const char = String.fromCodePoint(raw.codePointAt(index)!);
-    if (char === "\\") {
-      const command = /^\\([A-Za-z]+)/u.exec(raw.slice(index));
-      if (!command || (!FORMULA_PRESENTATION_COMMANDS.has(command[1]) && !FORMULA_WRAPPER_COMMANDS.has(command[1]))) {
-        return null;
-      }
-      index += command[0].length;
-      continue;
+  for (const token of formula.visible_tokens) {
+    for (const key of normalizedCharacterKeys(token.value, "formula")) {
+      if (key !== " " && !/^[_{}^$]$/u.test(key)) units.push({ key, source_span: token.source_span });
     }
-    if (char === "{") {
-      braceDepth += 1;
-      index += char.length;
-      continue;
-    }
-    if (char === "}") {
-      braceDepth -= 1;
-      if (braceDepth < 0) return null;
-      index += char.length;
-      continue;
-    }
-    if (/^[\s_$^]$/u.test(char)) {
-      index += char.length;
-      continue;
-    }
-    const sourceSpan = { start: span.start + index, end: span.start + index + char.length };
-    for (const key of normalizedCharacterKeys(char, "formula")) {
-      if (key !== " " && !/^[_{}^$]$/u.test(key)) units.push({ key, source_span: sourceSpan });
-    }
-    index += char.length;
   }
-  return braceDepth === 0 && units.length ? units : null;
+  return units.length ? units : null;
 }
 
 function formulaDisplayText(allKeys: PdfCharKey[], formulaKeys: PdfCharKey[]): string {

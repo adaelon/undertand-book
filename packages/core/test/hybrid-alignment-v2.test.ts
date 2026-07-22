@@ -205,6 +205,25 @@ describe("HF2-2 semantic-unit PDF alignment", () => {
     expect(projections[1]).not.toHaveProperty("formula_display_text");
   });
 
+  it("projects transparent underline source tokens without deleting formula markup", () => {
+    const source = "Before words $ \\underline{\\text{visible phrase}} $ after words.\n";
+    const result = alignHybridFoundationV2(source, geometryFromPages([["Before words visible phrase after words."]]));
+    const formulaLid = result.units
+      .flatMap((unit) => unit.child_lids)
+      .find((child) => child.kind === "formula")!.lid;
+    const formula = result.projections.find((projection) => projection.lid === formulaLid)!;
+
+    expect(formula).toMatchObject({
+      precision: "partial",
+      formula_display_text: "visible phrase",
+      alignment: { reason: "complete simple formula display projection with source-markup gaps" },
+    });
+    expect(formula.exact_source_spans.length).toBeGreaterThan(0);
+    expect(formula.exact_source_spans.every((span) => (
+      span.start >= source.indexOf("visible") && span.end <= source.indexOf("phrase") + "phrase".length
+    ))).toBe(true);
+  });
+
   it("splits PDF.js merged two-column lines before locating and projecting children", async () => {
     const { source, geometry } = await licensedFixture("licensed-two-column-formula");
     const result = alignHybridFoundationV2(source, geometry);

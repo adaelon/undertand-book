@@ -88,6 +88,7 @@ describe("HF2-3 hybrid foundation v2 artifacts", () => {
     expect(SourceManifestV2Z.parse(artifacts.source_manifest)).toEqual(artifacts.source_manifest);
     expect(() => assertHybridFoundationV2Integrity(artifacts)).not.toThrow();
     expect(artifacts.pdf_source_map.display_token_policy_version).toBe("pdf_display_token_policy.v1");
+    expect(artifacts.alignment_report.config.formula_source_ast_version).toBe("formula_source_ast.v1");
     expect(artifacts.alignment_report.quality).toMatchObject({
       tier: "full",
       unit_location_ratio: 1,

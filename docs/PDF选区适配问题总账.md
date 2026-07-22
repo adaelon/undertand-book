@@ -10,7 +10,7 @@
 
 ## 2. PDF-A001 `\underline` 包装的普通文本被当作不可恢复公式
 
-**状态**：`confirmed`
+**状态**：`source-ast-classified`；46 个 successor 已有透明 wrapper token/source span，几何和正式选区闭合等待 PR15/PR16/PR20。
 
 **用户选区**：
 
@@ -404,3 +404,13 @@ Inspired by the discussion above,  $ \underline{\text{can we propose a new assoc
 - approved source/PDF 审计将 A002 八项闭合为 6 个 parser-role successor + 2 个 reviewed removal；23 个 whitespace 项为 17 个既有 `layout_whitespace` policy successor + 6 removed；28 个 punctuation/symbol 项为 11 accepted glyph representation + 9 material punctuation + 8 removed。missing successor 与 unclassified 均为 0。
 - 审计只保存 LID、migration、precision、reason、page 与分类，不保存正文；双跑和冻结 fixture SHA-256 均为 `fe35ffe871b20f3e9493f043f9655dea758a3a7e8ad34ec620d924e2f95b73f6`。
 - 验证：heading/list、apostrophe/ligature 正例与 code/formula/missing-colon/dash-minus 反例均受 fail-closed 门保护；Core 定向 5 files / 57 tests、全量 62 files / 384 tests、typecheck、Server 全量 179+5 tests 全绿。正式 source/base/maps/selection shards 未修改。
+
+## 25. PR14 公式 source AST 与透明 wrapper
+
+**PR 状态**:`completed`；PDF-A001 的 source 语法与 token span 已闭合，本 PR 不声称 formula region 或复杂二维 glyph 已定位，问题正式状态等待 PR15/PR16/PR20。
+
+- 新 `formula_source_ast.v1` 以 `latex-utensils` AST offset 为事实来源；wrapper/layout/上下标关系/glyph transform/unknown command 均保留为显式节点，不再扫描字符串删除反斜杠命令。
+- `underline/text/textit/textbf` 及既有简单样式只有在单参数 group 闭合、所有可见 token 有 UTF-16 source span 时才 projectable；text-mode 同级节点间仅当原始 gap 全为空白才恢复一个 display whitespace。
+- `frac/sum/sqrt/underbrace` 等产生或重排 glyph 的节点保留结构但 `projectable=false`；unknown command、嵌套 delimiter、缺 group 和 parser 宽容恢复均 fail-closed，交给 PR16 而非当透明命令忽略。
+- approved source 回放 A001 47 项：46 个 formula successor 全部 `transparent_wrapper_projectable`，1 个 `content_drift` 经 PR10 审核成为 paragraph；missing/invalid/unclassified/parser proposal 均为 0。审计不保存正文，双跑/fixture SHA-256 `2047b264274733183ec22a52c661d2f7697bbae040035e9e69d8295b1b62b5cf`。
+- 验证：AST contract 与 underline projector 先红后绿；Core 定向 4 files / 49 tests、全量 63 files / 392 tests、typecheck 与差异检查全绿。正式 source/base/maps/selection shards 未修改。

@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { markdownToBlocks } from "./md-adapter";
+import { FORMULA_SOURCE_AST_POLICY } from "./formula-source-ast";
 import {
   alignHybridFoundationV2,
   PDF_DISPLAY_TOKEN_POLICY,
@@ -221,6 +222,7 @@ export function buildHybridFoundationV2Candidate(input: HybridFoundationV2Input)
     coordinate_system: "pdf_user_space" as const,
     quality_policy_version: "hybrid_quality_policy.v1" as const,
     display_token_policy_version: PDF_DISPLAY_TOKEN_POLICY.version,
+    formula_source_ast_version: FORMULA_SOURCE_AST_POLICY.version,
   };
   const configHash = sha256(JSON.stringify(config));
   const pageRegionIndex: Record<string, string[]> = {};

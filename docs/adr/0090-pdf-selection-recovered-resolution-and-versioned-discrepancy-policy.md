@@ -101,3 +101,16 @@ Extends: ADR-0074 and ADR-0082.
 - 仅凭 coverage 把缺冒号/句点升级：缺失标点仍可能改变语义或引用内容。
 
 **命门**:parser role 不明、code 中引号/括号/减号、缺失标点、en/em/math minus 替换、跨产物 policy 漂移和未知版本均拒绝升级。真实书分类审计只证明类别归属，不改写当前 artifact precision；用户动作闭合仍受 PR14-PR20 发布门约束。
+
+### §9 v1 公式 source AST 与透明 wrapper
+
+**修订**:2026-07-22 注册构建期 `formula_source_ast.v1`，并把版本写入 V2 alignment config hash；历史 V2 report 可缺该字段。
+
+**决策**:公式 source 必须由成熟 LaTeX parser 产生带 offset 的 AST，再由本地版本化适配层分类。`underline/text/textit/textbf` 与既有简单样式仅在闭合单参数 group 和完整子 token span 下透明；layout command 与上下标保留结构关系。text-mode 空白只可由同级已定位节点间的纯 whitespace gap 恢复。
+
+**否决**:
+- 扩充 `FORMULA_WRAPPER_COMMANDS` 后逐字符删命令：无法证明参数边界，也会把未知/损坏命令伪装成正文。
+- 把 `frac/sum/sqrt/underbrace` 当 wrapper：这些节点产生或二维重排 glyph，必须由 PR16 做结构几何验证。
+- 接受 parser 自动恢复的缺 group：语法容错不是 source-display 等价证据。
+
+**命门**:unknown command、嵌套 math delimiter、缺 group、无位置 token、glyph transform 或不支持 AST node 均不得进入简单 source projection。PR14 的 projectable 只证明 source token，不证明 PR15 region、PR16 glyph assignment 或 PR20 正式发布。

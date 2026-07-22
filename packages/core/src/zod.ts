@@ -437,6 +437,7 @@ export const AlignmentReportV2Z = z.object({
     coordinate_system: z.literal("pdf_user_space"),
     quality_policy_version: z.literal("hybrid_quality_policy.v1"),
     display_token_policy_version: z.literal("pdf_display_token_policy.v1").optional(),
+    formula_source_ast_version: z.literal("formula_source_ast.v1").optional(),
   }),
   config_hash: z.string().regex(/^[a-f0-9]{64}$/u),
   integrity: HybridFoundationIntegrityV2Z,

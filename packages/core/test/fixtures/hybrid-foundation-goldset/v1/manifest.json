@@ -35,6 +35,7 @@
       "alignment_unit_audit_path": "external-formula-dense-transformer-alignment-unit-audit.json",
       "child_window_audit_path": "external-formula-dense-transformer-child-window-audit.json",
       "display_token_audit_path": "external-formula-dense-transformer-display-token-audit.json",
+      "formula_source_ast_audit_path": "external-formula-dense-transformer-formula-source-ast-audit.json",
       "requires_explicit_book_path": true
     }
   ]
