@@ -361,3 +361,15 @@ Inspired by the discussion above,  $ \underline{\text{can we propose a new assoc
 - 真实 review 输入共 10 项：1 个损坏公式区间和 9 个未围栏代码区间。候选顶层容器由旧 `1..8` 变为 `1..6`，说明代码伪章节与来源边界尚未获批准；这些变化只进入 PR10 复核清单，不写回正式基座。
 - 无正文结构清单连续两次 SHA-256 均为 `120762b322e8569078f1d6c9297f6e330ffc546577f156cfc0eb4b44a5ccb566`；source SHA-256 保持 `cb108cabb5198cf07820b5eb49e6d3094fdf870ae20b130c93539b721ed653c9`。
 - 验证：parser/segment/audit 定向 19 tests、Core typecheck、Core 单 worker 全量 60 files / 360 tests 全绿；正式旧 artifact 的 PR8 audit 继续 `passed=true`、2,075 项 direct LID、wrong-page/formal duplicate 均为 0。
+
+## 21. PR10 来源实质差异复核与 LID 迁移
+
+**PR 状态**:`completed`；A011 的来源决策已闭合，但 PDF-A001 至 PDF-A010 的映射行为仍保持原状态。正式旧 `source.txt`、base、PDF maps、selection shards 与旧记忆未修改。
+
+- 冻结 plan 覆盖全部 28 个 A011 与 PR9 的 1 个 `malformed_inline_math`、9 个 `unfenced_code` proposal，共 38 项；25 项为 `reviewed_repaired`，13 项为 `intentional_source_difference`。A011 内部为 15 repaired + 13 intentional，不存在未复核项。
+- 三个 repair 只消费 reviewed original Markdown 与 `arXiv:2505.19488v1` 官方 `appendix.tex` / `associative_mem.tex`；证据 SHA-256 为 `cb108c...653c9`、`f53620...0785b`、`8eb68b...94e1`。证据文件、旧 source slice 或 proposal 数量任一漂移都会使构建失败。
+- 新 `book_id=understanding-transformer-from-the-perspective-of-reviewed-v2` 的隔离候选为 1,981 nodes / 1,945 leaves；leaf kinds 为 code 2、formula 830、image 19、paragraph 1,092、table 2，顶层容器仅 `1`，parser review proposal 为 0，partition coverage 为 1。
+- 报告只将 `source_review_gate` 标为 approved；候选 scope 明确为 `structural_source_base`，语义图和正式 artifact 的发布门保持 `pending_pr20_rebuild`。
+- `lid_migration_map` 只按相同内容 span 或显式 repair 的旧区间血缘配对，不按文本相似度或最近 LID 猜测；结果为 stable 1,935、content_drift 10、removed 130，candidate 漏配与重复映射均为 0。
+- 隔离目录连续两次构建的 source/base/migration SHA-256 均为 `feb442870b9364e578c22b210b1ac6ed9ce098f59bd39ceb07806c741715af43` / `589c60a812238b2e9beb23c31c19a3f125086eaaf5997c229765f133fdaf7f3f` / `ead42b79890ceb606aa765b9f14e4127f24c65e20b775af76868722f957b94db`。
+- 验证：PR10 + parser/segment/structure audit 定向 24 tests、Core typecheck 与差异检查全绿；候选未替换正式 artifact，PR11 以后只允许消费这份 approved source snapshot，不得再暗改 source。

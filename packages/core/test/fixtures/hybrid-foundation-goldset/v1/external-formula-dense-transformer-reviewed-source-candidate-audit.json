@@ -1,0 +1,51 @@
+{
+  "version": "reviewed_source_candidate_report.v1",
+  "old_book_id": "understanding-transformer-from-the-perspective-of",
+  "new_book_id": "understanding-transformer-from-the-perspective-of-reviewed-v2",
+  "input_fingerprint": {
+    "source_sha256": "cb108cabb5198cf07820b5eb49e6d3094fdf870ae20b130c93539b721ed653c9",
+    "base_sha256": "ab77e0b26dbc380cb21137ccbbc803d7d94b6fb5130b251ea570f6cb5106dba1"
+  },
+  "plan_sha256": "7a146b101f095571ab4a8c98a20296979f5b12fb0cf4ff5057b00f1ea3633df9",
+  "output_fingerprint": {
+    "source_sha256": "feb442870b9364e578c22b210b1ac6ed9ce098f59bd39ceb07806c741715af43",
+    "base_sha256": "589c60a812238b2e9beb23c31c19a3f125086eaaf5997c229765f133fdaf7f3f",
+    "migration_sha256": "ead42b79890ceb606aa765b9f14e4127f24c65e20b775af76868722f957b94db"
+  },
+  "source_review_gate": "approved",
+  "candidate_scope": "structural_source_base",
+  "formal_release_gate": "pending_pr20_rebuild",
+  "decision_counts": {
+    "material_mismatch": 28,
+    "malformed_inline_math": 1,
+    "unfenced_code": 9
+  },
+  "repair_count": 3,
+  "parser_review_proposal_count": 0,
+  "partition": {
+    "ok": true,
+    "violations": [],
+    "coverage": 1
+  },
+  "candidate": {
+    "node_count": 1981,
+    "leaf_count": 1945,
+    "leaf_kind_counts": {
+      "code": 2,
+      "formula": 830,
+      "image": 19,
+      "paragraph": 1092,
+      "table": 2
+    },
+    "top_level_containers": [
+      "1"
+    ]
+  },
+  "migration": {
+    "stable": 1935,
+    "content_drift": 10,
+    "removed": 130,
+    "unexpected_candidate_count": 0,
+    "duplicate_candidate_count": 0
+  }
+}

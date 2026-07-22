@@ -22,8 +22,18 @@ describe("HF2-0 hybrid foundation goldset", () => {
     expect(manifest.fixtures.every((fixture) => fixture.license.spdx === "CC0-1.0")).toBe(true);
     expect(manifest.external_benchmarks).toEqual([expect.objectContaining({
       benchmark_id: "external-formula-dense-transformer",
+      structure_audit_path: "external-formula-dense-transformer-structure-audit.json",
+      reviewed_source_plan_path: "external-formula-dense-transformer-reviewed-source-plan.json",
+      reviewed_source_candidate_audit_path: "external-formula-dense-transformer-reviewed-source-candidate-audit.json",
       requires_explicit_book_path: true,
     })]);
+    for (const metadataPath of [
+      manifest.external_benchmarks[0].structure_audit_path,
+      manifest.external_benchmarks[0].reviewed_source_plan_path,
+      manifest.external_benchmarks[0].reviewed_source_candidate_audit_path,
+    ]) {
+      expect(metadataPath && readFileSync(path.join(GOLDSET_ROOT, metadataPath), "utf8").length).toBeGreaterThan(0);
+    }
     const descriptor = ExternalBenchmarkDescriptorZ.parse(JSON.parse(readFileSync(
       path.join(GOLDSET_ROOT, manifest.external_benchmarks[0].descriptor_path),
       "utf8",

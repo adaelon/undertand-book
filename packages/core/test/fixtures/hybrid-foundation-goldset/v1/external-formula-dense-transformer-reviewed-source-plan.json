@@ -1,0 +1,386 @@
+{
+  "version": "reviewed_source_repair_plan.v1",
+  "old_book_id": "understanding-transformer-from-the-perspective-of",
+  "new_book_id": "understanding-transformer-from-the-perspective-of-reviewed-v2",
+  "input_fingerprint": {
+    "source_sha256": "cb108cabb5198cf07820b5eb49e6d3094fdf870ae20b130c93539b721ed653c9",
+    "base_sha256": "ab77e0b26dbc380cb21137ccbbc803d7d94b6fb5130b251ea570f6cb5106dba1"
+  },
+  "evidence": [
+    {
+      "id": "reviewed-original-markdown",
+      "kind": "original_markdown",
+      "sha256": "cb108cabb5198cf07820b5eb49e6d3094fdf870ae20b130c93539b721ed653c9"
+    },
+    {
+      "id": "official-appendix-source",
+      "kind": "official_arxiv_source",
+      "revision": "arXiv:2505.19488v1/sections/appendix.tex",
+      "sha256": "f53620ace3c77b3011087c17c323aee383ea42712899e2d4dbc3bab0e9a0785b"
+    },
+    {
+      "id": "official-associative-memory-source",
+      "kind": "official_arxiv_source",
+      "revision": "arXiv:2505.19488v1/sections/associative_mem.tex",
+      "sha256": "8eb68b661d3901d4032e305ecbeb73d8377cd575316e580ea831d550a7c894e1"
+    }
+  ],
+  "decisions": [
+    {
+      "id": "material:1.19.86.45",
+      "category": "material_mismatch",
+      "baseline_lid": "1.19.86.45",
+      "status": "intentional_source_difference",
+      "evidence_id": "reviewed-original-markdown"
+    },
+    {
+      "id": "material:1.19.86.57.12",
+      "category": "material_mismatch",
+      "baseline_lid": "1.19.86.57.12",
+      "status": "intentional_source_difference",
+      "evidence_id": "reviewed-original-markdown"
+    },
+    {
+      "id": "material:1.19.86.58.70",
+      "category": "material_mismatch",
+      "baseline_lid": "1.19.86.58.70",
+      "status": "intentional_source_difference",
+      "evidence_id": "reviewed-original-markdown"
+    },
+    {
+      "id": "material:1.19.87.178",
+      "category": "material_mismatch",
+      "baseline_lid": "1.19.87.178",
+      "status": "intentional_source_difference",
+      "evidence_id": "reviewed-original-markdown"
+    },
+    {
+      "id": "material:1.19.87.191.169",
+      "category": "material_mismatch",
+      "baseline_lid": "1.19.87.191.169",
+      "status": "intentional_source_difference",
+      "evidence_id": "reviewed-original-markdown"
+    },
+    {
+      "id": "material:1.19.87.191.209",
+      "category": "material_mismatch",
+      "baseline_lid": "1.19.87.191.209",
+      "status": "reviewed_repaired",
+      "evidence_id": "official-associative-memory-source",
+      "repair_id": "repair-malformed-deltaformer-emphasis"
+    },
+    {
+      "id": "material:1.19.87.191.220",
+      "category": "material_mismatch",
+      "baseline_lid": "1.19.87.191.220",
+      "status": "intentional_source_difference",
+      "evidence_id": "reviewed-original-markdown"
+    },
+    {
+      "id": "material:1.19.87.191.226",
+      "category": "material_mismatch",
+      "baseline_lid": "1.19.87.191.226",
+      "status": "intentional_source_difference",
+      "evidence_id": "reviewed-original-markdown"
+    },
+    {
+      "id": "material:1.19.87.192.74",
+      "category": "material_mismatch",
+      "baseline_lid": "1.19.87.192.74",
+      "status": "intentional_source_difference",
+      "evidence_id": "reviewed-original-markdown"
+    },
+    {
+      "id": "material:1.19.87.192.78",
+      "category": "material_mismatch",
+      "baseline_lid": "1.19.87.192.78",
+      "status": "intentional_source_difference",
+      "evidence_id": "reviewed-original-markdown"
+    },
+    {
+      "id": "material:1.19.87.192.82",
+      "category": "material_mismatch",
+      "baseline_lid": "1.19.87.192.82",
+      "status": "intentional_source_difference",
+      "evidence_id": "reviewed-original-markdown"
+    },
+    {
+      "id": "material:1.20.3.35",
+      "category": "material_mismatch",
+      "baseline_lid": "1.20.3.35",
+      "status": "intentional_source_difference",
+      "evidence_id": "reviewed-original-markdown"
+    },
+    {
+      "id": "material:1.20.3.67",
+      "category": "material_mismatch",
+      "baseline_lid": "1.20.3.67",
+      "status": "intentional_source_difference",
+      "evidence_id": "reviewed-original-markdown"
+    },
+    {
+      "id": "material:1.23.80",
+      "category": "material_mismatch",
+      "baseline_lid": "1.23.80",
+      "status": "intentional_source_difference",
+      "evidence_id": "reviewed-original-markdown"
+    },
+    {
+      "id": "material:2.6",
+      "category": "material_mismatch",
+      "baseline_lid": "2.6",
+      "status": "reviewed_repaired",
+      "evidence_id": "official-appendix-source",
+      "repair_id": "repair-appendix-e4-listing"
+    },
+    {
+      "id": "material:4.2",
+      "category": "material_mismatch",
+      "baseline_lid": "4.2",
+      "status": "reviewed_repaired",
+      "evidence_id": "official-appendix-source",
+      "repair_id": "repair-appendix-e4-listing"
+    },
+    {
+      "id": "material:4.4",
+      "category": "material_mismatch",
+      "baseline_lid": "4.4",
+      "status": "reviewed_repaired",
+      "evidence_id": "official-appendix-source",
+      "repair_id": "repair-appendix-e4-listing"
+    },
+    {
+      "id": "material:5.2",
+      "category": "material_mismatch",
+      "baseline_lid": "5.2",
+      "status": "reviewed_repaired",
+      "evidence_id": "official-appendix-source",
+      "repair_id": "repair-appendix-e4-listing"
+    },
+    {
+      "id": "material:6.2",
+      "category": "material_mismatch",
+      "baseline_lid": "6.2",
+      "status": "reviewed_repaired",
+      "evidence_id": "official-appendix-source",
+      "repair_id": "repair-appendix-e4-listing"
+    },
+    {
+      "id": "material:6.3",
+      "category": "material_mismatch",
+      "baseline_lid": "6.3",
+      "status": "reviewed_repaired",
+      "evidence_id": "official-appendix-source",
+      "repair_id": "repair-appendix-e4-listing"
+    },
+    {
+      "id": "material:6.5",
+      "category": "material_mismatch",
+      "baseline_lid": "6.5",
+      "status": "reviewed_repaired",
+      "evidence_id": "official-appendix-source",
+      "repair_id": "repair-appendix-e4-listing"
+    },
+    {
+      "id": "material:6.6",
+      "category": "material_mismatch",
+      "baseline_lid": "6.6",
+      "status": "reviewed_repaired",
+      "evidence_id": "official-appendix-source",
+      "repair_id": "repair-appendix-e4-listing"
+    },
+    {
+      "id": "material:6.7",
+      "category": "material_mismatch",
+      "baseline_lid": "6.7",
+      "status": "reviewed_repaired",
+      "evidence_id": "official-appendix-source",
+      "repair_id": "repair-appendix-e4-listing"
+    },
+    {
+      "id": "material:6.8",
+      "category": "material_mismatch",
+      "baseline_lid": "6.8",
+      "status": "reviewed_repaired",
+      "evidence_id": "official-appendix-source",
+      "repair_id": "repair-appendix-e4-listing"
+    },
+    {
+      "id": "material:6.9",
+      "category": "material_mismatch",
+      "baseline_lid": "6.9",
+      "status": "reviewed_repaired",
+      "evidence_id": "official-appendix-source",
+      "repair_id": "repair-appendix-e4-listing"
+    },
+    {
+      "id": "material:6.11",
+      "category": "material_mismatch",
+      "baseline_lid": "6.11",
+      "status": "reviewed_repaired",
+      "evidence_id": "official-appendix-source",
+      "repair_id": "repair-appendix-e4-listing"
+    },
+    {
+      "id": "material:6.23",
+      "category": "material_mismatch",
+      "baseline_lid": "6.23",
+      "status": "reviewed_repaired",
+      "evidence_id": "official-appendix-source",
+      "repair_id": "repair-appendix-e4-listing"
+    },
+    {
+      "id": "material:7.2",
+      "category": "material_mismatch",
+      "baseline_lid": "7.2",
+      "status": "reviewed_repaired",
+      "evidence_id": "official-appendix-source",
+      "repair_id": "repair-appendix-e4-listing"
+    },
+    {
+      "id": "proposal:malformed_inline_math:58563:58846",
+      "category": "malformed_inline_math",
+      "source_span": {
+        "start": 58563,
+        "end": 58846
+      },
+      "status": "reviewed_repaired",
+      "evidence_id": "official-associative-memory-source",
+      "repair_id": "repair-malformed-deltaformer-emphasis"
+    },
+    {
+      "id": "proposal:unfenced_code:125884:126157",
+      "category": "unfenced_code",
+      "source_span": {
+        "start": 125884,
+        "end": 126157
+      },
+      "status": "reviewed_repaired",
+      "evidence_id": "official-appendix-source",
+      "repair_id": "repair-appendix-d3-listing"
+    },
+    {
+      "id": "proposal:unfenced_code:148438:149202",
+      "category": "unfenced_code",
+      "source_span": {
+        "start": 148438,
+        "end": 149202
+      },
+      "status": "reviewed_repaired",
+      "evidence_id": "official-appendix-source",
+      "repair_id": "repair-appendix-e4-listing"
+    },
+    {
+      "id": "proposal:unfenced_code:149358:149576",
+      "category": "unfenced_code",
+      "source_span": {
+        "start": 149358,
+        "end": 149576
+      },
+      "status": "reviewed_repaired",
+      "evidence_id": "official-appendix-source",
+      "repair_id": "repair-appendix-e4-listing"
+    },
+    {
+      "id": "proposal:unfenced_code:150065:152079",
+      "category": "unfenced_code",
+      "source_span": {
+        "start": 150065,
+        "end": 152079
+      },
+      "status": "reviewed_repaired",
+      "evidence_id": "official-appendix-source",
+      "repair_id": "repair-appendix-e4-listing"
+    },
+    {
+      "id": "proposal:unfenced_code:152645:153346",
+      "category": "unfenced_code",
+      "source_span": {
+        "start": 152645,
+        "end": 153346
+      },
+      "status": "reviewed_repaired",
+      "evidence_id": "official-appendix-source",
+      "repair_id": "repair-appendix-e4-listing"
+    },
+    {
+      "id": "proposal:unfenced_code:154645:154944",
+      "category": "unfenced_code",
+      "source_span": {
+        "start": 154645,
+        "end": 154944
+      },
+      "status": "reviewed_repaired",
+      "evidence_id": "official-appendix-source",
+      "repair_id": "repair-appendix-e4-listing"
+    },
+    {
+      "id": "proposal:unfenced_code:155390:156321",
+      "category": "unfenced_code",
+      "source_span": {
+        "start": 155390,
+        "end": 156321
+      },
+      "status": "reviewed_repaired",
+      "evidence_id": "official-appendix-source",
+      "repair_id": "repair-appendix-e4-listing"
+    },
+    {
+      "id": "proposal:unfenced_code:156324:156979",
+      "category": "unfenced_code",
+      "source_span": {
+        "start": 156324,
+        "end": 156979
+      },
+      "status": "reviewed_repaired",
+      "evidence_id": "official-appendix-source",
+      "repair_id": "repair-appendix-e4-listing"
+    },
+    {
+      "id": "proposal:unfenced_code:157258:158450",
+      "category": "unfenced_code",
+      "source_span": {
+        "start": 157258,
+        "end": 158450
+      },
+      "status": "reviewed_repaired",
+      "evidence_id": "official-appendix-source",
+      "repair_id": "repair-appendix-e4-listing"
+    }
+  ],
+  "repairs": [
+    {
+      "id": "repair-malformed-deltaformer-emphasis",
+      "kind": "official_latex_emphasis",
+      "source_span": {
+        "start": 58727,
+        "end": 58846
+      },
+      "source_span_sha256": "774ec480444c4591d736e767477f4d19986f87d96bf37adab115aadd282110a1",
+      "evidence_id": "official-associative-memory-source",
+      "evidence_content_sha256": "a163689e48f2d202a1b11b8fc5c590e8a89f64da7deac3e4991abb93667f3740"
+    },
+    {
+      "id": "repair-appendix-d3-listing",
+      "kind": "official_latex_listing",
+      "source_span": {
+        "start": 125884,
+        "end": 130230
+      },
+      "source_span_sha256": "2eafbe097edbac077d23473b1c72d3f85d96b499e083e9522dda99a3260b64d8",
+      "evidence_id": "official-appendix-source",
+      "evidence_content_sha256": "8dbd7322e7e3f9f5331b362675f9bf3c5199e8aaaaf33003df04b966623d721d"
+    },
+    {
+      "id": "repair-appendix-e4-listing",
+      "kind": "official_latex_listing",
+      "source_span": {
+        "start": 148438,
+        "end": 158977
+      },
+      "source_span_sha256": "beadbe9d7b9ec7831757401dc1185f7e75b06d3898c14acdee153e1a18a682b4",
+      "evidence_id": "official-appendix-source",
+      "evidence_content_sha256": "f003a976b4ddb0eb62f9c6d2f734e00539e6253452befb2550d414c84a1e040e"
+    }
+  ]
+}

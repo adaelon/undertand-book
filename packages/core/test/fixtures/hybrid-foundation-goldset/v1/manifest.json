@@ -29,6 +29,9 @@
     {
       "benchmark_id": "external-formula-dense-transformer",
       "descriptor_path": "external-formula-dense-transformer.json",
+      "structure_audit_path": "external-formula-dense-transformer-structure-audit.json",
+      "reviewed_source_plan_path": "external-formula-dense-transformer-reviewed-source-plan.json",
+      "reviewed_source_candidate_audit_path": "external-formula-dense-transformer-reviewed-source-candidate-audit.json",
       "requires_explicit_book_path": true
     }
   ]

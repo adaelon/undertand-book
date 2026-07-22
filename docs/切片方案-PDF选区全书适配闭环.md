@@ -1,6 +1,6 @@
 # 切片方案 - PDF 选区全书适配闭环
 
-> 状态:2026-07-22 PR8-PR9 已完成,PR10-PR21 待实施。
+> 状态:2026-07-22 PR8-PR10 已完成,PR11-PR21 待实施。
 > 问题源:[PDF 选区适配问题总账](PDF选区适配问题总账.md)。
 > 已完成前序:[PDF 选区可恢复定位](切片方案-pdf选区可恢复定位.md) PR1-PR7。
 > 决策边界:[ADR-0082](adr/0082-hybrid-foundation-semantic-unit-alignment-and-degraded-reader.md)、[ADR-0090](adr/0090-pdf-selection-recovered-resolution-and-versioned-discrepancy-policy.md)。
@@ -116,11 +116,13 @@ PR8_FULL_BOOK_BENCHMARK
 
 ### PR10 - 来源实质差异复核与 LID 迁移
 
+**状态**:`completed`。真实书 28 个 A011 与 10 个 PR9 proposal 已全部获得冻结决策；候选只消费 reviewed original Markdown 与 `arXiv:2505.19488v1` 官方 TeX，正式旧 source/base/maps/记忆均未修改。
 - **做**:把 A011 的 28 个 material mismatch、缺 fence 的代码清单和损坏公式分段送入 existing source reconciliation/review;只接受来自原 Markdown、论文官方补充材料或人工逐项确认的修复。以新 book_id 构建候选 canonical source/base,生成 `lid_migration_map` 和旧问题项到新 LID 的确定性映射。
 - **不做**:不从近似 PDF 文本或模型输出自动补字,不原地覆盖旧基座,不猜最近 LID,不把未确认差异转成 recovery 类别。
 - **Red**:A011 字母/数字缺口仍被当作映射 bug;代码伪章节污染 LID 树;旧 Note/Highlight 在结构变化后静默指向新邻居。
 - **Green**:28 项逐项得到 `reviewed_repaired | intentional_source_difference`;代码边界得到明确 review decision;stable/drift/removed migration 符合 ADR-0020,旧引用不被改写。
 - **完成判据**:若目标书仍有未复核 material mismatch,本 PR 可以提交工具能力但第 7 节发布门保持红;要宣布“本书全部解决”,28 项和代码清单必须全部复核完成。
+- **完成证据**:38 项决策为 25 `reviewed_repaired` + 13 `intentional_source_difference`；其中 A011 为 15 + 13。隔离双跑得到相同 `source/base/migration` SHA-256 `feb442...af43 / 589c60...f3f / ead42b...94db`；候选 1,945 leaves、2 个 code asset、0 parser proposal、partition coverage 1，迁移 `stable=1935 / content_drift=10 / removed=130` 且 candidate 漏配/重复均为 0。此处只批准 source review；语义图与正式发布仍明确等待 PR20 重建门。
 
 ### PR11 - 有界 alignment unit 构造
 
