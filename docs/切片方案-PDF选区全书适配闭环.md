@@ -1,6 +1,6 @@
 # 切片方案 - PDF 选区全书适配闭环
 
-> 状态:2026-07-22 PR8-PR10 已完成,PR11-PR21 待实施。
+> 状态:2026-07-22 PR8-PR11 已完成,PR12-PR21 待实施。
 > 问题源:[PDF 选区适配问题总账](PDF选区适配问题总账.md)。
 > 已完成前序:[PDF 选区可恢复定位](切片方案-pdf选区可恢复定位.md) PR1-PR7。
 > 决策边界:[ADR-0082](adr/0082-hybrid-foundation-semantic-unit-alignment-and-degraded-reader.md)、[ADR-0090](adr/0090-pdf-selection-recovered-resolution-and-versioned-discrepancy-policy.md)。
@@ -126,11 +126,14 @@ PR8_FULL_BOOK_BENCHMARK
 
 ### PR11 - 有界 alignment unit 构造
 
+**状态**:`completed`。approved source 的 1,945 leaves 被确定性分为 625 units；多 child 越界、结构边界违规、漏配与重复均为 0。PR8 正式旧书审计也已接入同一版本化 unit gate 并保持通过。
+
 - **做**:让 unit 只合并同一源 paragraph 内相邻的 text/formula children;heading、list block、code、table、image、caption 和 paragraph 边界均切断传播。加入版本化 guard:候选上限 `24 children / 1,200 UTF-16 units / 240 searchable tokens`;单个超限 child 作为 `oversize_singleton` 诊断,不得连带邻居。
 - **不做**:不拆 LID,不按 PDF 页码写死 source 边界,不提高 fuzzy 容忍,不改变 child projector。
 - **Red**:`unit-75/239/240/248/297/304` 仍形成 1,102-5,809 字符、29-84 children 的共享窗口。
 - **Green**:相同 source 两次构造 unit 边界一致;除显式 singleton 外无 unit 越过 guard;高风险 unit 被切为独立可定位片段,相邻段失败不再连坐。
 - **完成判据**:unit snapshot、inline formula、table/caption、code 和 cap boundary 测试全绿;PR8 报告中 `oversized_multi_child_unit_count=0`。
+- **完成证据**:真实候选 unit audit 三次与入库 fixture 字节一致，SHA-256 `d33cdd00...b5cbc5a`；625 units / 1,945 children，`within_guard=621`、`oversize_singleton=4`、`oversized_multi_child=0`、`boundary_violation=0`，最大多 child unit 为 24 children / 1,090 UTF-16 / 184 searchable tokens。正式旧书 PR8 audit 为 675 units / 1,983 children，新增 unit closure 全绿且整体 `passed=true`。本 PR 不改变 child projector；standalone display formula 在 PR15 前仍按已有证据保持 partial/unmapped。
 
 ### PR12 - child 局部单调窗口
 

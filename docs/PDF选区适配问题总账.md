@@ -373,3 +373,13 @@ Inspired by the discussion above,  $ \underline{\text{can we propose a new assoc
 - `lid_migration_map` 只按相同内容 span 或显式 repair 的旧区间血缘配对，不按文本相似度或最近 LID 猜测；结果为 stable 1,935、content_drift 10、removed 130，candidate 漏配与重复映射均为 0。
 - 隔离目录连续两次构建的 source/base/migration SHA-256 均为 `feb442870b9364e578c22b210b1ac6ed9ce098f59bd39ceb07806c741715af43` / `589c60a812238b2e9beb23c31c19a3f125086eaaf5997c229765f133fdaf7f3f` / `ead42b79890ceb606aa765b9f14e4127f24c65e20b775af76868722f957b94db`。
 - 验证：PR10 + parser/segment/structure audit 定向 24 tests、Core typecheck 与差异检查全绿；候选未替换正式 artifact，PR11 以后只允许消费这份 approved source snapshot，不得再暗改 source。
+
+## 22. PR11 有界 alignment unit 构造
+
+**PR 状态**:`completed`；PDF-A008 的“多 child unit 越过搜索 guard”根因已固定，但 unit 是否能唯一定位及 PDF-A004/A005 的 child 局部投影仍由 PR12 处理，不提前标为 `fixed`。
+
+- `hybrid_alignment_unit_policy.v1` 将多 child unit 限制为 `24 children / 1,200 UTF-16 / 240 searchable tokens`；只有同一 parser-proven paragraph/list-item context 内的相邻 text/formula 可合并，heading、code、table、image、display formula、caption与 paragraph/list-item 边界均切断传播。
+- 单个超限 leaf 不拆 LID，只产生 `oversize_singleton`；它不能携带相邻 child。共享分析器同时校验 leaf coverage、重复 LID、结构边界和 guard，PR8 全书 adaptation audit 将其作为 fail-closed gate。
+- approved source 的 1,945 leaves 确定性形成 625 units：621 个 within-guard、4 个 oversize singleton、0 个 oversized multi-child、0 个 boundary violation、0 个 coverage error；最大多 child unit 为 24 children / 1,090 UTF-16 / 184 searchable tokens。
+- 无正文 audit 三次与冻结 fixture 的 SHA-256 均为 `d33cdd00e4f3e9edac46f6efa9fe424269e40cf21112da4ec647b58c7b5cbc5a`。正式旧书 PR8 audit 在新增门下仍 `passed=true`：2,075 baseline/current leaves 全 direct，675 units / 1,983 children，`oversized_multi_child=0`、`boundary_violation=0`、`coverage_error=0`。
+- 验证：unit/aligner/parser/segment/goldset/adaptation 定向 45 tests、Core 单 worker 全量 62 files / 371 tests、typecheck 与差异检查全绿；PR11 不修改 source、locator/projector、fuzzy policy 或正式 artifact。standalone display formula 缺结构几何证据时仍 fail-closed，等待 PR15。

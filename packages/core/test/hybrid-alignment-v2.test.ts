@@ -139,7 +139,7 @@ describe("HF2-2 semantic-unit PDF alignment", () => {
     expect(formulaProjections.slice(3).every((projection) => projection.primary_region!.bbox[0] >= 320)).toBe(true);
   });
 
-  it("emits recoverable display evidence for a uniquely bounded simple formula", () => {
+  it("keeps a standalone display formula isolated until structural formula localization", () => {
     const source = [
       "# Display Formula",
       "",
@@ -161,17 +161,14 @@ describe("HF2-2 semantic-unit PDF alignment", () => {
       formulaUnit.child_lids.find((child) => child.kind === "formula")!.lid === projection.lid
     ));
 
-    expect(formulaUnit.child_lids.map((child) => child.kind)).toEqual(["text", "formula", "text"]);
+    expect(formulaUnit.child_lids.map((child) => child.kind)).toEqual(["formula"]);
     expect(formula).toMatchObject({
       precision: "partial",
-      formula_display_text: "x=y",
       regions: [{ pageIndex: 0 }],
-      selection_assignments: [
-        expect.objectContaining({ text: "x" }),
-        expect.objectContaining({ text: "=" }),
-        expect.objectContaining({ text: "y" }),
-      ],
+      selection_assignments: [],
+      alignment: { reason: "formula text is located but lacks same-page same-column anchors" },
     });
+    expect(formula).not.toHaveProperty("formula_display_text");
   });
 
   it("keeps a cross-page formula partial even when the full unit is located", () => {
@@ -187,10 +184,12 @@ describe("HF2-2 semantic-unit PDF alignment", () => {
       ["Before alpha beta gamma delta.", "x=y"],
       ["After epsilon zeta eta theta."],
     ]));
-    const formulaChild = result.units[0].child_lids.find((child) => child.kind === "formula")!;
+    const formulaUnit = result.units.find((unit) => unit.child_lids.some((child) => child.kind === "formula"))!;
+    const formulaChild = formulaUnit.child_lids.find((child) => child.kind === "formula")!;
     const formula = result.projections.find((projection) => projection.lid === formulaChild.lid)!;
+    const formulaLocation = result.locations.find((location) => location.unit.unit_id === formulaUnit.unit_id)!;
 
-    expect(result.locations[0].status).toBe("located");
+    expect(formulaLocation.status).toBe("located");
     expect(formula.precision).toBe("partial");
     expect(formula.regions).toHaveLength(1);
     expect(formula.selection_assignments).toEqual([]);

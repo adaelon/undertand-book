@@ -7,6 +7,7 @@ import {
   buildHybridFoundationV2Candidate,
   type HybridFoundationV2Artifacts,
 } from "./hybrid-foundation-v2";
+import { auditHybridAlignmentUnits, HYBRID_ALIGNMENT_UNIT_POLICY } from "./hybrid-alignment-v2";
 import { markdownToBlocks } from "./md-adapter";
 import { extractPdfTextGeometry } from "./pdf-geometry";
 import type { PdfProjectionPrecisionV2 } from "./pdf-source-map";
@@ -196,6 +197,7 @@ export const GoldsetManifestZ = z.object({
     structure_audit_path: z.string().min(1).optional(),
     reviewed_source_plan_path: z.string().min(1).optional(),
     reviewed_source_candidate_audit_path: z.string().min(1).optional(),
+    alignment_unit_audit_path: z.string().min(1).optional(),
     requires_explicit_book_path: z.literal(true),
   })),
 });
@@ -731,6 +733,10 @@ export function auditHybridFoundationAdaptation(input: AuditHybridFoundationAdap
   const precisionCountsMatch = sameJson(baseline.precision_counts, actualPrecisionCounts);
   const bindingCountsMatch = sameJson(baseline.binding_counts, actualBindings);
   const selectionCapabilitiesMatch = sameJson(baseline.selection_capability_matrix, actualCapabilities);
+  const alignmentUnitAudit = auditHybridAlignmentUnits(input.source);
+  const alignmentUnitCoverageErrorCount = alignmentUnitAudit.coverage.missing_lids.length
+    + alignmentUnitAudit.coverage.duplicate_lids.length
+    + alignmentUnitAudit.coverage.unexpected_lids.length;
   const passed = inputFingerprintMatches
     && configHashMatches
     && artifactLeafCoverageErrors.length === 0
@@ -741,7 +747,8 @@ export function auditHybridFoundationAdaptation(input: AuditHybridFoundationAdap
     && precisionCountsMatch
     && mismatchedSectionLids.length === 0
     && bindingCountsMatch
-    && selectionCapabilitiesMatch;
+    && selectionCapabilitiesMatch
+    && alignmentUnitAudit.passed;
 
   return {
     version: "hybrid_foundation_adaptation_audit.v1" as const,
@@ -796,6 +803,16 @@ export function auditHybridFoundationAdaptation(input: AuditHybridFoundationAdap
       expected: baseline.selection_capability_matrix,
       actual: actualCapabilities,
       counts_match: selectionCapabilitiesMatch,
+    },
+    alignment_unit_closure: {
+      policy_version: HYBRID_ALIGNMENT_UNIT_POLICY.version,
+      unit_count: alignmentUnitAudit.summary.unit_count,
+      child_count: alignmentUnitAudit.summary.child_count,
+      oversize_singleton_count: alignmentUnitAudit.summary.oversize_singleton_count,
+      oversized_multi_child_unit_count: alignmentUnitAudit.summary.oversized_multi_child_unit_count,
+      boundary_violation_count: alignmentUnitAudit.summary.boundary_violation_count,
+      coverage_error_count: alignmentUnitCoverageErrorCount,
+      passed: alignmentUnitAudit.passed,
     },
     artifact_leaf_coverage_errors: artifactLeafCoverageErrors,
     unexpected_current_lids: unexpectedCurrentLids,

@@ -19,6 +19,12 @@ export interface MarkdownSourceReviewProposal {
 export interface MarkdownSourceBlockParseResult {
   blocks: SourceBlock[];
   review_proposals: MarkdownSourceReviewProposal[];
+  alignment_contexts: MarkdownAlignmentContext[];
+}
+
+export interface MarkdownAlignmentContext {
+  kind: "paragraph" | "list_item";
+  source_span: Span;
 }
 
 interface SourceLine {
@@ -250,7 +256,19 @@ export function parseMarkdownSourceBlocks(source: string): MarkdownSourceBlockPa
   reviewProposals.sort((left, right) => left.source_span.start - right.source_span.start
     || left.source_span.end - right.source_span.end
     || left.kind.localeCompare(right.kind));
-  return { blocks, review_proposals: reviewProposals };
+  const alignmentContexts = tree.children.flatMap((node): MarkdownAlignmentContext[] => {
+    if (node.type === "paragraph") {
+      const span = nodeSpan(node);
+      return parseImageSource(source.slice(span.start, span.end))
+        ? []
+        : [{ kind: "paragraph", source_span: span }];
+    }
+    if (node.type === "list") {
+      return node.children.map((item) => ({ kind: "list_item", source_span: nodeSpan(item) }));
+    }
+    return [];
+  });
+  return { blocks, review_proposals: reviewProposals, alignment_contexts: alignmentContexts };
 }
 
 export function markdownToBlocks(source: string): SourceBlock[] {

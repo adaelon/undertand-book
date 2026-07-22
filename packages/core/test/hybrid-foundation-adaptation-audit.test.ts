@@ -144,6 +144,13 @@ describe("PR8 full-book adaptation audit", () => {
     const first = auditHybridFoundationAdaptation({ source, artifacts, baseline });
     expect(first.passed).toBe(true);
     expect(first.coverage).toMatchObject({ baseline_leaf_count: 2, current_leaf_count: 2, direct_lid_count: 2 });
+    expect(first.alignment_unit_closure).toMatchObject({
+      policy_version: "hybrid_alignment_unit_policy.v1",
+      oversized_multi_child_unit_count: 0,
+      boundary_violation_count: 0,
+      coverage_error_count: 0,
+      passed: true,
+    });
     expect(serializeHybridFoundationAdaptationAudit(first)).toBe(
       serializeHybridFoundationAdaptationAudit(auditHybridFoundationAdaptation({ source, artifacts, baseline })),
     );

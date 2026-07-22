@@ -1,4 +1,4 @@
-import { markdownToBlocks } from "./md-adapter";
+import { markdownToBlocks, parseMarkdownSourceBlocks, type MarkdownAlignmentContext } from "./md-adapter";
 import type { PdfGeometryChar, PdfGeometryPage, PdfTextGeometry } from "./pdf-geometry";
 import type { PdfRegion } from "./pdf-source-map";
 import { segment } from "./segment";
@@ -8,14 +8,51 @@ import type { SourceAlignmentEvidenceV1 } from "./source-alignment-evidence";
 export type HybridAlignmentChildKind = "text" | "formula" | "image" | "table" | "code";
 export type PdfProjectionPrecision = "char_exact" | "region_exact" | "partial" | "unmapped";
 
+export const HYBRID_ALIGNMENT_UNIT_POLICY = {
+  version: "hybrid_alignment_unit_policy.v1",
+  max_children: 24,
+  max_source_utf16: 1_200,
+  max_searchable_tokens: 240,
+} as const;
+
 export interface HybridAlignmentUnit {
   unit_id: string;
+  policy_version: typeof HYBRID_ALIGNMENT_UNIT_POLICY.version;
   source_span: { start: number; end: number };
+  diagnostic: "within_guard" | "oversize_singleton";
+  metrics: {
+    child_count: number;
+    source_utf16_length: number;
+    searchable_token_count: number;
+  };
   child_lids: Array<{
     lid: string;
     source_span: { start: number; end: number };
     kind: HybridAlignmentChildKind;
   }>;
+}
+
+export interface HybridAlignmentUnitAuditAnalysis {
+  units: HybridAlignmentUnit[];
+  passed: boolean;
+  summary: {
+    unit_count: number;
+    child_count: number;
+    within_guard_count: number;
+    oversize_singleton_count: number;
+    oversized_multi_child_unit_count: number;
+    boundary_violation_count: number;
+    max_child_count: number;
+    max_source_utf16_length: number;
+    max_searchable_token_count: number;
+  };
+  coverage: {
+    expected_leaf_count: number;
+    mapped_child_count: number;
+    missing_lids: string[];
+    duplicate_lids: string[];
+    unexpected_lids: string[];
+  };
 }
 
 export interface PdfAlignmentLine {
@@ -95,41 +132,125 @@ function childKind(assetKind: string | undefined): HybridAlignmentChildKind {
   return "text";
 }
 
-function hardUnitBoundary(block: ReturnType<typeof markdownToBlocks>[number]): boolean {
-  return block.kind === "heading" || Boolean(block.assetKind && block.assetKind !== "formula");
+function contextKey(context: MarkdownAlignmentContext): string {
+  return `${context.kind}:${spanKey(context.source_span)}`;
 }
 
 export function formHybridAlignmentUnits(source: string): HybridAlignmentUnit[] {
-  const blocks = markdownToBlocks(source).filter((block) => block.text.trim().length > 0);
+  const parsed = parseMarkdownSourceBlocks(source);
+  const blocks = parsed.blocks.filter((block) => block.text.trim().length > 0);
   const nodes = segment(blocks);
   const lidBySpan = new Map(nodes
     .filter((node) => node.children.length === 0)
     .map((node) => [spanKey(node.span), node.lid]));
+  const contexts = [...parsed.alignment_contexts]
+    .sort((left, right) => (left.source_span.end - left.source_span.start) - (right.source_span.end - right.source_span.start));
+  const blockContext = (block: typeof blocks[number]) => contexts.find((context) => (
+    context.source_span.start <= block.span.start && context.source_span.end >= block.span.end
+  ));
+  const groupMetrics = (group: typeof blocks) => ({
+    child_count: group.length,
+    source_utf16_length: group.at(-1)!.span.end - group[0].span.start,
+    searchable_token_count: alignmentTokens(group.map((block) => block.text).join(" ")).length,
+  });
+  const withinGuard = (group: typeof blocks) => {
+    const metrics = groupMetrics(group);
+    return metrics.child_count <= HYBRID_ALIGNMENT_UNIT_POLICY.max_children
+      && metrics.source_utf16_length <= HYBRID_ALIGNMENT_UNIT_POLICY.max_source_utf16
+      && metrics.searchable_token_count <= HYBRID_ALIGNMENT_UNIT_POLICY.max_searchable_tokens;
+  };
   const grouped: Array<typeof blocks> = [];
+  let current: typeof blocks = [];
+  let currentContextKey: string | undefined;
+  const flush = () => {
+    if (current.length) grouped.push(current);
+    current = [];
+    currentContextKey = undefined;
+  };
   for (const block of blocks) {
-    const current = grouped.at(-1);
-    const previous = current?.at(-1);
-    const gap = previous ? source.slice(previous.span.end, block.span.start) : "";
-    const touchesFormula = Boolean(previous && (previous.assetKind === "formula" || block.assetKind === "formula"));
-    const continuesFormulaContext = Boolean(
-      current
-      && previous
-      && !hardUnitBoundary(previous)
-      && !hardUnitBoundary(block)
-      && (touchesFormula || (!/\n\s*\n/u.test(gap) && current.some((item) => item.assetKind === "formula"))),
-    );
-    if (continuesFormulaContext) current!.push(block);
-    else grouped.push([block]);
+    const context = blockContext(block);
+    const key = context ? contextKey(context) : undefined;
+    if (!key) {
+      flush();
+      grouped.push([block]);
+      continue;
+    }
+    if (currentContextKey !== key) flush();
+    currentContextKey = key;
+    if (current.length && !withinGuard([...current, block])) flush();
+    currentContextKey = key;
+    current.push(block);
+    if (!withinGuard(current)) flush();
   }
-  return grouped.map((group, index) => ({
-    unit_id: `unit-${index + 1}`,
-    source_span: { start: group[0].span.start, end: group.at(-1)!.span.end },
-    child_lids: group.map((block) => ({
-      lid: lidBySpan.get(spanKey(block.span))!,
-      source_span: { ...block.span },
-      kind: childKind(block.assetKind),
-    })),
-  }));
+  flush();
+  return grouped.map((group, index) => {
+    const metrics = groupMetrics(group);
+    return {
+      unit_id: `unit-${index + 1}`,
+      policy_version: HYBRID_ALIGNMENT_UNIT_POLICY.version,
+      source_span: { start: group[0].span.start, end: group.at(-1)!.span.end },
+      diagnostic: !withinGuard(group) && group.length === 1 ? "oversize_singleton" : "within_guard",
+      metrics,
+      child_lids: group.map((block) => ({
+        lid: lidBySpan.get(spanKey(block.span))!,
+        source_span: { ...block.span },
+        kind: childKind(block.assetKind),
+      })),
+    };
+  });
+}
+
+export function auditHybridAlignmentUnits(source: string): HybridAlignmentUnitAuditAnalysis {
+  const parsed = parseMarkdownSourceBlocks(source);
+  const expectedLeaves = segment(parsed.blocks).filter((node) => node.children.length === 0);
+  const units = formHybridAlignmentUnits(source);
+  const children = units.flatMap((unit) => unit.child_lids);
+  const childLidCounts = new Map<string, number>();
+  for (const child of children) childLidCounts.set(child.lid, (childLidCounts.get(child.lid) ?? 0) + 1);
+  const expectedLids = new Set(expectedLeaves.map((leaf) => leaf.lid));
+  const actualLids = new Set(children.map((child) => child.lid));
+  const boundaryViolations = units.filter((unit) => {
+    if (unit.child_lids.length <= 1) return false;
+    return !parsed.alignment_contexts.some((context) => unit.child_lids.every((child) => (
+      context.source_span.start <= child.source_span.start && context.source_span.end >= child.source_span.end
+    )));
+  });
+  const oversizedMultiChildUnits = units.filter((unit) => unit.child_lids.length > 1 && (
+    unit.metrics.child_count > HYBRID_ALIGNMENT_UNIT_POLICY.max_children
+    || unit.metrics.source_utf16_length > HYBRID_ALIGNMENT_UNIT_POLICY.max_source_utf16
+    || unit.metrics.searchable_token_count > HYBRID_ALIGNMENT_UNIT_POLICY.max_searchable_tokens
+  ));
+  const coverage = {
+    expected_leaf_count: expectedLeaves.length,
+    mapped_child_count: children.length,
+    missing_lids: [...expectedLids].filter((lid) => !actualLids.has(lid)).sort(),
+    duplicate_lids: [...childLidCounts.entries()].filter(([, count]) => count > 1).map(([lid]) => lid).sort(),
+    unexpected_lids: [...actualLids].filter((lid) => !expectedLids.has(lid)).sort(),
+  };
+  return {
+    units,
+    passed: boundaryViolations.length === 0
+      && oversizedMultiChildUnits.length === 0
+      && coverage.missing_lids.length === 0
+      && coverage.duplicate_lids.length === 0
+      && coverage.unexpected_lids.length === 0,
+    summary: {
+      unit_count: units.length,
+      child_count: children.length,
+      within_guard_count: units.filter((unit) => unit.diagnostic === "within_guard").length,
+      oversize_singleton_count: units.filter((unit) => unit.diagnostic === "oversize_singleton").length,
+      oversized_multi_child_unit_count: oversizedMultiChildUnits.length,
+      boundary_violation_count: boundaryViolations.length,
+      max_child_count: Math.max(0, ...units.map((unit) => unit.metrics.child_count)),
+      max_source_utf16_length: Math.max(0, ...units
+        .filter((unit) => unit.child_lids.length > 1)
+        .map((unit) => unit.metrics.source_utf16_length)),
+      max_searchable_token_count: Math.max(0, ...units
+        .filter((unit) => unit.child_lids.length > 1)
+        .map((unit) => unit.metrics.searchable_token_count)),
+    },
+    coverage,
+  };
 }
 
 function median(values: number[]): number {
