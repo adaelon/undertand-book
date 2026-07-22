@@ -6,6 +6,7 @@ import { FORMULA_SOURCE_AST_POLICY } from "./formula-source-ast";
 import {
   alignHybridFoundationV2,
   PDF_ASSET_REGION_POLICY,
+  PDF_BINDING_OWNERSHIP_POLICY,
   PDF_DISPLAY_TOKEN_POLICY,
   PDF_FORMULA_GLYPH_POLICY,
   PDF_FORMULA_REGION_POLICY,
@@ -108,16 +109,13 @@ function duplicateRegionCount(entries: PdfSourceMapEntryV2[]): number {
   return [...lidsByRegion.values()].filter((lids) => lids.size > 1).length;
 }
 
-export interface HybridProjectionConflictResolution {
-  projections: HybridChildProjection[];
-  raw_duplicate_region_binding_count: number;
-  raw_duplicate_selection_binding_count: number;
-  conflicted_lid_count: number;
-}
-
-export function resolveHybridProjectionConflicts(
+function projectionConflictSummary(
   projections: HybridChildProjection[],
-): HybridProjectionConflictResolution {
+): {
+  duplicate_region_binding_count: number;
+  duplicate_selection_binding_count: number;
+  conflicted_lid_count: number;
+} {
   const regionOwners = new Map<string, Set<string>>();
   const selectionOwners = new Map<string, Set<string>>();
   for (const projection of projections) {
@@ -141,27 +139,8 @@ export function resolveHybridProjectionConflicts(
     ...duplicateSelections.flatMap((owners) => [...owners]),
   ]);
   return {
-    projections: projections.map((projection) => {
-      if (!conflictedLids.has(projection.lid)) return projection;
-      const {
-        primary_region: _primaryRegion,
-        formula_display_text: _formulaDisplayText,
-        ...withoutDegradedEvidence
-      } = projection;
-      return {
-        ...withoutDegradedEvidence,
-        precision: "unmapped",
-        regions: [],
-        exact_source_spans: [],
-        selection_assignments: [],
-        alignment: {
-          unit_id: projection.alignment.unit_id,
-          reason: "projection discarded because its PDF binding conflicts with another LID",
-        },
-      };
-    }),
-    raw_duplicate_region_binding_count: duplicateRegions.length,
-    raw_duplicate_selection_binding_count: duplicateSelections.length,
+    duplicate_region_binding_count: duplicateRegions.length,
+    duplicate_selection_binding_count: duplicateSelections.length,
     conflicted_lid_count: conflictedLids.size,
   };
 }
@@ -189,13 +168,12 @@ export function buildHybridFoundationV2Candidate(input: HybridFoundationV2Input)
   const currentEvidence = input.source_alignment_evidence
     ? acceptSourceAlignmentEvidence(input.source_alignment_evidence, expectedEvidenceFingerprint)
     : undefined;
-  const rawAlignment = alignHybridFoundationV2(
+  const alignment = alignHybridFoundationV2(
     input.source_txt,
     input.pdf_geometry,
     currentEvidence ?? undefined,
   );
-  const conflictResolution = resolveHybridProjectionConflicts(rawAlignment.projections);
-  const alignment = { ...rawAlignment, projections: conflictResolution.projections };
+  const projectionConflicts = projectionConflictSummary(alignment.projections);
   const projectionByLid = new Map(alignment.projections.map((projection) => [projection.lid, projection]));
   const entries: PdfSourceMapEntryV2[] = leafNodes.map((node) => {
     const projection = projectionByLid.get(node.lid);
@@ -229,6 +207,7 @@ export function buildHybridFoundationV2Candidate(input: HybridFoundationV2Input)
     formula_region_policy_version: PDF_FORMULA_REGION_POLICY.version,
     formula_glyph_policy_version: PDF_FORMULA_GLYPH_POLICY.version,
     asset_region_policy_version: PDF_ASSET_REGION_POLICY.version,
+    binding_ownership_policy_version: PDF_BINDING_OWNERSHIP_POLICY.version,
   };
   const configHash = sha256(JSON.stringify(config));
   const pageRegionIndex: Record<string, string[]> = {};
@@ -246,6 +225,7 @@ export function buildHybridFoundationV2Candidate(input: HybridFoundationV2Input)
     formula_region_policy_version: PDF_FORMULA_REGION_POLICY.version,
     formula_glyph_policy_version: PDF_FORMULA_GLYPH_POLICY.version,
     asset_region_policy_version: PDF_ASSET_REGION_POLICY.version,
+    binding_ownership_policy_version: PDF_BINDING_OWNERSHIP_POLICY.version,
     book_id: input.book_id,
     coordinate_system: pdfUserSpaceCoordinateSystem(),
     pages: input.pdf_geometry.pages.map((page) => ({
@@ -384,9 +364,22 @@ export function buildHybridFoundationV2Candidate(input: HybridFoundationV2Input)
       unmapped_leaf_count: entries.filter((entry) => entry.precision === "unmapped").length,
       duplicate_pdf_binding_count: duplicateRegionBindings,
       duplicate_selection_binding_count: duplicateSelectionBindings.size,
-      raw_duplicate_pdf_binding_count: conflictResolution.raw_duplicate_region_binding_count,
-      raw_duplicate_selection_binding_count: conflictResolution.raw_duplicate_selection_binding_count,
-      conflicted_lid_count: conflictResolution.conflicted_lid_count,
+      raw_duplicate_pdf_binding_count: projectionConflicts.duplicate_region_binding_count,
+      raw_duplicate_selection_binding_count: projectionConflicts.duplicate_selection_binding_count,
+      conflicted_lid_count: projectionConflicts.conflicted_lid_count,
+      binding_ownership_competing_region_binding_count:
+        alignment.binding_ownership.diagnostics.competing_region_binding_count,
+      binding_ownership_competing_selection_binding_count:
+        alignment.binding_ownership.diagnostics.competing_selection_binding_count,
+      binding_ownership_conflict_group_count: alignment.binding_ownership.diagnostics.conflict_group_count,
+      binding_ownership_unique_owner_group_count: alignment.binding_ownership.diagnostics.unique_owner_group_count,
+      binding_ownership_ambiguous_group_count: alignment.binding_ownership.diagnostics.ambiguous_group_count,
+      binding_ownership_rejected_candidate_count:
+        alignment.binding_ownership.diagnostics.rejected_candidate_count,
+      binding_ownership_decisions: alignment.binding_ownership.decisions,
+      binding_ownership_rejections: alignment.projections.flatMap((projection) => (
+        (projection.binding_rejections ?? []).map((rejection) => ({ lid: projection.lid, ...rejection }))
+      )),
       location_reason_counts: Object.fromEntries([...new Set(textAlignmentLocations.map((location) => location.reason))].map((reason) => [
         reason,
         textAlignmentLocations.filter((location) => location.reason === reason).length,
@@ -463,6 +456,24 @@ export function assertHybridFoundationV2Integrity(artifacts: HybridFoundationV2A
   if (artifacts.pdf_source_map.asset_region_policy_version
     !== report.config.asset_region_policy_version) {
     throw new Error("hybrid foundation v2 asset region policy versions differ");
+  }
+  if (artifacts.pdf_source_map.binding_ownership_policy_version
+    !== report.config.binding_ownership_policy_version) {
+    throw new Error("hybrid foundation v2 binding ownership policy versions differ");
+  }
+  const actualDuplicateRegions = duplicateRegionCount(artifacts.pdf_source_map.entries);
+  const selectionOwners = new Map<string, Set<string>>();
+  for (const page of artifacts.pdf_selection_map_pages) {
+    for (const assignment of page.chars) {
+      const key = `${page.pageIndex}:${assignment.char_index}`;
+      const owners = selectionOwners.get(key) ?? new Set<string>();
+      owners.add(assignment.lid);
+      selectionOwners.set(key, owners);
+    }
+  }
+  const actualDuplicateSelections = [...selectionOwners.values()].filter((owners) => owners.size > 1).length;
+  if (actualDuplicateRegions || actualDuplicateSelections) {
+    throw new Error("hybrid foundation v2 integrity failed: duplicate PDF binding");
   }
   const failed = Object.entries(report.integrity).filter(([, passed]) => !passed).map(([gate]) => gate);
   if (failed.length) throw new Error(`hybrid foundation v2 integrity failed: ${failed.join(", ")}`);

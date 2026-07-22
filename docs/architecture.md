@@ -54,6 +54,18 @@ PDF.js operator list + graphics transforms
   -> zero source assignments and zero selection-shard rows
 ```
 
+All projected child candidates pass through one versioned ownership stage before foundation artifacts are constructed. Shared region or selection resources form conflict components in source order. A unique complete glyph owner may exclude a partial candidate only when both have the same structural role; source order is evidence for a valid non-overlapping solution, never a tiebreaker. Cross-role conflicts, multiple complete owners, and otherwise equal solutions fail the whole component closed. Every rejected candidate records a competitor, the violated constraint, and the contested resources. The artifact integrity gate independently recomputes region and selection ownership, so a corrupted double owner cannot be hidden by stale report diagnostics.
+
+```text
+text/code/formula/image projection candidates
+  + source order + exclusive child windows + structural roles
+  + complete glyph ownership
+  -> pdf_binding_ownership_policy.v1 conflict components
+  -> unique accepted projections | whole-group ambiguous_binding
+  -> duplicate-free V2 map/selection shards
+  -> independently recomputed artifact integrity gate
+```
+
 Native PDF selection is owned by the public PDF.js `TextLayerBuilder` lifecycle. Each rendered page retains its builder until zoom, rerender, book switch, or unmount cancels it and removes the text-layer DOM. The builder's `.endOfContent` and selection-change contract stabilize browser caret placement at visual line and paragraph boundaries; the existing mouseup capture then forwards the resulting `Selection` without quote or rectangle heuristics.
 
 PDF selection translation follows a two-phase read-only flow:

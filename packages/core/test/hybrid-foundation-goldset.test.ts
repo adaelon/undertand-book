@@ -32,6 +32,7 @@ describe("HF2-0 hybrid foundation goldset", () => {
       formula_region_audit_path: "external-formula-dense-transformer-formula-region-audit.json",
       formula_glyph_audit_path: "external-formula-dense-transformer-formula-glyph-audit.json",
       image_object_audit_path: "external-formula-dense-transformer-image-object-audit.json",
+      binding_ownership_audit_path: "external-formula-dense-transformer-binding-ownership-audit.json",
       requires_explicit_book_path: true,
     })]);
     for (const metadataPath of [

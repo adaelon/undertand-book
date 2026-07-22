@@ -28,6 +28,9 @@ const UNIT_LOCATOR_REASONS = new Set([
 ]);
 const BINDING_REASONS = new Set([
   "formula region candidates do not form a unique monotonic chain",
+  "ambiguous_binding: multiple equal formula region chains",
+  "ambiguous_binding: formula candidates have no non-overlapping monotonic chain",
+  "binding_rejected: formula group has incomplete candidate set",
 ]);
 const LANE_REASONS = new Set([
   "formula region conflicts with adjacent page-column lanes",

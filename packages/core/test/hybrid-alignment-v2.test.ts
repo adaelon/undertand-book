@@ -665,7 +665,13 @@ describe("HF2-2 semantic-unit PDF alignment", () => {
     expect(formulas).toHaveLength(2);
     expect(formulas.every((projection) => (
       projection.precision === "unmapped"
-      && projection.alignment.reason === "formula region candidates do not form a unique monotonic chain"
+      && projection.alignment.reason === "ambiguous_binding: multiple equal formula region chains"
+      && projection.binding_candidate_count === projection.binding_rejections?.length
+      && projection.binding_rejections?.length
+      && projection.binding_rejections.every((rejection) => (
+        rejection.competitor_ids.length > 0
+        && rejection.constraint === "multiple_equal_monotonic_formula_chains"
+      ))
     ))).toBe(true);
   });
 
@@ -1005,11 +1011,17 @@ describe("HF2-2 semantic-unit PDF alignment", () => {
     ))).toEqual([
       expect.objectContaining({
         precision: "unmapped",
-        alignment: expect.objectContaining({ reason: "child exact anchors do not form a unique monotonic chain" }),
+        alignment: expect.objectContaining({ reason: "ambiguous_binding: multiple equal exact child chains" }),
+        binding_rejections: expect.arrayContaining([expect.objectContaining({
+          constraint: "multiple_equal_monotonic_exact_child_chains",
+        })]),
       }),
       expect.objectContaining({
         precision: "unmapped",
-        alignment: expect.objectContaining({ reason: "child exact anchors do not form a unique monotonic chain" }),
+        alignment: expect.objectContaining({ reason: "ambiguous_binding: multiple equal exact child chains" }),
+        binding_rejections: expect.arrayContaining([expect.objectContaining({
+          constraint: "multiple_equal_monotonic_exact_child_chains",
+        })]),
       }),
     ]);
   });

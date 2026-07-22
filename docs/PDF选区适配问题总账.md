@@ -242,7 +242,13 @@ Inspired by the discussion above,  $ \underline{\text{can we propose a new assoc
 
 ## 13. PDF-A009 binding 冲突
 
-11 个 raw projection 争用已分配的 PDF region/selection binding，正式构建正确地全部 fail-closed：公式 `1.19.87.191.170`, `.176`, `.195`, `.197`；paragraph `1.24.10.65`, `.66`, `.67`, `3.2`, `3.3`, `6.25`, `6.26`。前四个是重复出现的 `$n$` / `$TC^0$` 短式，后七个集中在代码清单，说明歧义主要来自短公式重复和代码 OCR/分块重叠。
+**状态**：`confirmed`；approved candidate 已闭合，正式 artifact 切换等待 PR20。
+
+旧基线有 11 个 raw projection 争用已分配的 PDF region/selection binding：公式 `1.19.87.191.170`, `.176`, `.195`, `.197`；paragraph `1.24.10.65`, `.66`, `.67`, `3.2`, `3.3`, `6.25`, `6.26`。前四个是重复出现的 `$n$` / `$TC^0$` 短式，后七个集中在代码清单。
+
+PR10 migration 与 PR16 结构 glyph 后，11 项已分为 3 个唯一公式 owner、1 个稳定 `ambiguous_binding` 短式、6 个 reviewed removed 和 1 个 reviewed content drift，不再依赖末端全部丢弃。approved source 当前另有 2 个跨 unit 竞争组：共 15 个 selection glyph，均为 local-window partial 候选越过边界后碰到相邻同角色 `char_exact` 完整 owner。`pdf_binding_ownership_policy.v1` 在 artifact 构造前排除这 2 个 partial 候选；若完整 owner 不唯一、结构角色不同或等证据解仍多于一个，则整个竞争组保持 `ambiguous_binding`，不按 LID、遍历顺序或 coverage 抢占。
+
+当前候选 resolved/formal duplicate region 与 selection binding 均为 0。418 个被拒的 text/formula/cross-unit 候选逐项记录 competitor、constraint 与 resource key，0 invalid、0 漏审；强制重复短公式继续 unmapped，人工双 owner 会由重新计算的 artifact integrity gate 拒绝。
 
 ## 14. 按阅读顺序的精度矩阵
 

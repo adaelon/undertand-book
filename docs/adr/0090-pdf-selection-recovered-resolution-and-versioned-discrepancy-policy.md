@@ -156,3 +156,17 @@ Extends: ADR-0074 and ADR-0082.
 - 把 image region 写入 selection shard：对象 region 没有 source character assignment，不能参与文本拖选。
 
 **命门**:无对象、重复对象、候选数量不等、跨页错误候选、缺一侧必要边界或存在多条对象链时必须 `asset_unmapped`。每个 PDF object 最多一个 image owner；Core 拒绝 map/report 版本漂移，Server 拒绝显式未知 policy，历史缺字段 V2 只保持兼容读取。
+
+### §13 v1 Binding 候选唯一归属
+
+**修订**:2026-07-23 注册构建期 `pdf_binding_ownership_policy.v1`；版本写入 V2 source map 与 alignment report config/hash，历史 V2 两侧缺字段仍可读取。
+
+**决策**:text、code、formula 与 image projection 在 artifact 构造前统一按共享 region/selection resource 形成竞争连通组。只有同结构角色且唯一的完整 child/formula glyph owner 可以排除 partial 候选；source order 与 exclusive child window 只验证非重叠解，不作为优先级。若仍有多个完整 owner、跨角色冲突或等证据解，整个竞争组 `ambiguous_binding`。每个真实被拒候选必须记录 competitor、constraint 与 resource keys。
+
+**否决**:
+- 继续先生成正式 projection、再在 foundation 末端把所有冲突 LID 一起清空：原因不可审计，也会误伤已有唯一 owner。
+- 按 LID、遍历先后、source 先后或最高 coverage 抢 binding：这些顺序或分数不证明 PDF glyph ownership。
+- 让正文完整 owner 淘汰 code/formula/image 候选：结构角色不一致时没有可比的所有权证据。
+- 删除 duplicate integrity gate：ownership solver 与 artifact 完整性必须是两道独立防线。
+
+**命门**:重复短式的多个完整单调链、跨角色共享 glyph、多个 complete owners 与相同 region owner 必须 fail-closed。写盘前 integrity 必须从实际 map/shards 重新计算 duplicate owner，不信任已有 report 布尔值；Core 拒绝 map/report policy 漂移，Server 拒绝显式未知版本。

@@ -21,7 +21,7 @@ describe("PR16 structural formula glyph projection", () => {
     const report = JSON.parse(reportText);
 
     expect(createHash("sha256").update(reportText).digest("hex"))
-      .toBe("5d22207e14cc4203151095bbb0142d9c4b53d3a7a1973d2f96e1383d438a000e");
+      .toBe("8ac70b52008b824b87428f0964de4f47b6ae176720223db66e39eb7c5aa2bab3");
     expect(report).toMatchObject({
       version: "formula_glyph_audit.v1",
       policy_version: "pdf_formula_glyph_policy.v1",

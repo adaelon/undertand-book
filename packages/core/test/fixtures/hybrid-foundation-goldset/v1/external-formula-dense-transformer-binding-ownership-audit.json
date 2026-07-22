@@ -1,0 +1,207 @@
+{
+  "version": "binding_ownership_audit.v1",
+  "policy_version": "pdf_binding_ownership_policy.v1",
+  "source_sha256": "feb442870b9364e578c22b210b1ac6ed9ce098f59bd39ceb07806c741715af43",
+  "pdf_sha256": "9391b89821c97dd14e66937fd71d22bfcfc72357f8023daddc6fc6334c68b9b0",
+  "reviewed_map_sha256": "7f06697533fd786a5644e2d6cc5771c11e0dea2553a64116faac82a4e7bafda2",
+  "passed": true,
+  "summary": {
+    "competing_region_binding_count": 0,
+    "competing_selection_binding_count": 15,
+    "resolved_duplicate_region_binding_count": 0,
+    "resolved_duplicate_selection_binding_count": 0,
+    "conflict_group_count": 2,
+    "unique_owner_group_count": 2,
+    "ambiguous_group_count": 0,
+    "rejected_candidate_count": 2,
+    "formal_duplicate_region_binding_count": 0,
+    "formal_duplicate_selection_binding_count": 0,
+    "audited_rejection_count": 418,
+    "invalid_rejection_count": 0,
+    "unaudited_rejection_projection_count": 0,
+    "rejection_constraint_counts": {
+      "complete_glyph_ownership": 2,
+      "incomplete_formula_candidate_chain": 34,
+      "multiple_equal_monotonic_exact_child_chains": 216,
+      "multiple_equal_monotonic_formula_chains": 166
+    },
+    "legacy_a009_count": 11,
+    "legacy_a009_classification_counts": {
+      "reviewed_content_drift": 1,
+      "reviewed_removed": 6,
+      "stable_ambiguous_binding": 1,
+      "unique_owner": 3
+    }
+  },
+  "ownership_groups": [
+    {
+      "group_id": "binding-group-1",
+      "status": "unique_owner",
+      "candidate_lids": [
+        "1.19.87.119.165",
+        "1.19.87.119.167",
+        "1.19.87.119.169"
+      ],
+      "accepted_lids": [
+        "1.19.87.119.167",
+        "1.19.87.119.169"
+      ],
+      "resource_keys": [
+        "selection:13:3249",
+        "selection:13:3256"
+      ],
+      "rejections": [
+        {
+          "candidate_id": "projection:1.19.87.119.165",
+          "competitor_ids": [
+            "projection:1.19.87.119.167",
+            "projection:1.19.87.119.169"
+          ],
+          "constraint": "complete_glyph_ownership",
+          "resource_keys": [
+            "selection:13:3249",
+            "selection:13:3256"
+          ]
+        }
+      ]
+    },
+    {
+      "group_id": "binding-group-2",
+      "status": "unique_owner",
+      "candidate_lids": [
+        "1.24.16.59",
+        "1.24.16.61"
+      ],
+      "accepted_lids": [
+        "1.24.16.61"
+      ],
+      "resource_keys": [
+        "selection:39:741",
+        "selection:39:742",
+        "selection:39:747",
+        "selection:39:764",
+        "selection:39:766",
+        "selection:39:773",
+        "selection:39:775",
+        "selection:39:776",
+        "selection:39:777",
+        "selection:39:778",
+        "selection:39:779",
+        "selection:39:780",
+        "selection:39:801"
+      ],
+      "rejections": [
+        {
+          "candidate_id": "projection:1.24.16.59",
+          "competitor_ids": [
+            "projection:1.24.16.61"
+          ],
+          "constraint": "complete_glyph_ownership",
+          "resource_keys": [
+            "selection:39:741",
+            "selection:39:742",
+            "selection:39:747",
+            "selection:39:764",
+            "selection:39:766",
+            "selection:39:773",
+            "selection:39:775",
+            "selection:39:776",
+            "selection:39:777",
+            "selection:39:778",
+            "selection:39:779",
+            "selection:39:780",
+            "selection:39:801"
+          ]
+        }
+      ]
+    }
+  ],
+  "legacy_a009_items": [
+    {
+      "baseline_lid": "1.19.87.191.170",
+      "migration_status": "stable",
+      "current_lid": "1.19.87.119.170",
+      "classification": "unique_owner",
+      "precision": "partial",
+      "reason": "complete simple formula display projection with source-markup gaps",
+      "rejection_count": 0,
+      "rejection_constraint_counts": {}
+    },
+    {
+      "baseline_lid": "1.19.87.191.176",
+      "migration_status": "stable",
+      "current_lid": "1.19.87.119.176",
+      "classification": "stable_ambiguous_binding",
+      "precision": "unmapped",
+      "reason": "ambiguous_binding: multiple equal formula region chains",
+      "rejection_count": 27,
+      "rejection_constraint_counts": {
+        "multiple_equal_monotonic_formula_chains": 27
+      }
+    },
+    {
+      "baseline_lid": "1.19.87.191.195",
+      "migration_status": "stable",
+      "current_lid": "1.19.87.119.195",
+      "classification": "unique_owner",
+      "precision": "partial",
+      "reason": "complete structural formula glyph projection",
+      "rejection_count": 0,
+      "rejection_constraint_counts": {}
+    },
+    {
+      "baseline_lid": "1.19.87.191.197",
+      "migration_status": "stable",
+      "current_lid": "1.19.87.119.197",
+      "classification": "unique_owner",
+      "precision": "partial",
+      "reason": "complete structural formula glyph projection",
+      "rejection_count": 0,
+      "rejection_constraint_counts": {}
+    },
+    {
+      "baseline_lid": "1.24.10.65",
+      "migration_status": "removed",
+      "classification": "reviewed_removed",
+      "precision": "char_exact",
+      "reason": "complete monotonic character projection inside located unit",
+      "rejection_count": 0,
+      "rejection_constraint_counts": {}
+    },
+    {
+      "baseline_lid": "1.24.10.66",
+      "migration_status": "content_drift",
+      "current_lid": "1.24.10.65",
+      "classification": "reviewed_content_drift",
+      "precision": "char_exact",
+      "reason": "complete monotonic character projection inside located unit",
+      "rejection_count": 0,
+      "rejection_constraint_counts": {}
+    },
+    {
+      "baseline_lid": "1.24.10.67",
+      "migration_status": "removed",
+      "classification": "reviewed_removed"
+    },
+    {
+      "baseline_lid": "3.2",
+      "migration_status": "removed",
+      "classification": "reviewed_removed"
+    },
+    {
+      "baseline_lid": "3.3",
+      "migration_status": "removed",
+      "classification": "reviewed_removed"
+    },
+    {
+      "baseline_lid": "6.25",
+      "migration_status": "removed",
+      "classification": "reviewed_removed"
+    },
+    {
+      "baseline_lid": "6.26",
+      "migration_status": "removed",
+      "classification": "reviewed_removed"
+    }
+  ]
+}

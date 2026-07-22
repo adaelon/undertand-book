@@ -5,6 +5,12 @@ import {
   type MarkdownDisplaySegment,
 } from "./md-adapter";
 import {
+  PDF_BINDING_OWNERSHIP_POLICY,
+  resolvePdfBindingOwnership,
+  type PdfBindingOwnershipResult,
+  type PdfBindingRejection,
+} from "./binding-ownership";
+import {
   buildFormulaGlyphPlan,
   findFormulaGlyphMatches,
   formulaGlyphKeys,
@@ -38,6 +44,7 @@ export const PDF_FORMULA_REGION_POLICY = {
 
 export { PDF_FORMULA_GLYPH_POLICY };
 export { PDF_ASSET_REGION_POLICY };
+export { PDF_BINDING_OWNERSHIP_POLICY };
 
 export interface HybridAlignmentUnit {
   unit_id: string;
@@ -113,6 +120,8 @@ export interface HybridChildProjection {
   }>;
   formula_display_text?: string;
   primary_region?: PdfRegion;
+  binding_candidate_count?: number;
+  binding_rejections?: PdfBindingRejection[];
   alignment: { unit_id: string; reason: string };
 }
 
@@ -1052,6 +1061,8 @@ export function projectHybridAlignmentChildren(
   location: LocatedHybridAlignmentUnit,
 ): HybridChildProjection[] {
   const unit = location.unit;
+  const bindingCandidateCounts = new Map<string, number>();
+  const bindingRejections = new Map<string, PdfBindingRejection[]>();
   const unmapped = (child: HybridAlignmentUnit["child_lids"][number], reason: string): HybridChildProjection => ({
     lid: child.lid,
     source_span: { ...child.source_span },
@@ -1059,6 +1070,8 @@ export function projectHybridAlignmentChildren(
     regions: [],
     exact_source_spans: [],
     selection_assignments: [],
+    ...(bindingCandidateCounts.has(child.lid) ? { binding_candidate_count: bindingCandidateCounts.get(child.lid) } : {}),
+    ...(bindingRejections.has(child.lid) ? { binding_rejections: bindingRejections.get(child.lid) } : {}),
     alignment: { unit_id: unit.unit_id, reason },
   });
   if (location.status !== "located") {
@@ -1090,8 +1103,24 @@ export function projectHybridAlignmentChildren(
   ));
   const exactChain = uniqueMonotonicExactChildChain(exactCandidates);
   if (exactChain.status === "ambiguous") {
+    const candidateIds = exactCandidates.map((candidate) => (
+      `text:${unit.child_lids[candidate.child_index].lid}:${candidate.start}:${candidate.end}`
+    ));
     for (const { child } of textChildren) {
-      rejections.set(child.lid, "child exact anchors do not form a unique monotonic chain");
+      const ownCandidates = exactCandidates.filter((candidate) => (
+        unit.child_lids[candidate.child_index].lid === child.lid
+      ));
+      bindingCandidateCounts.set(child.lid, ownCandidates.length);
+      bindingRejections.set(child.lid, ownCandidates.map((candidate) => {
+        const candidateId = `text:${child.lid}:${candidate.start}:${candidate.end}`;
+        return {
+          candidate_id: candidateId,
+          competitor_ids: candidateIds.filter((id) => id !== candidateId).slice(0, 1),
+          constraint: "multiple_equal_monotonic_exact_child_chains",
+          resource_keys: [`token-range:${candidate.start}:${candidate.end}`],
+        };
+      }));
+      rejections.set(child.lid, "ambiguous_binding: multiple equal exact child chains");
     }
   } else {
     for (const anchor of exactChain.chain) {
@@ -1305,9 +1334,20 @@ export function projectHybridAlignmentChildren(
     const incomplete = group.find((entry) => !entry.candidates.length);
     if (incomplete) {
       for (const entry of group) {
+        bindingCandidateCounts.set(entry.child.lid, entry.candidates.length);
+        if (entry.candidates.length) {
+          bindingRejections.set(entry.child.lid, entry.candidates.map((candidate) => ({
+            candidate_id: `formula:${entry.child.lid}:${candidate.lane.pageIndex}:${candidate.start}:${candidate.end}`,
+            competitor_ids: [`missing-formula-candidate:${incomplete.child.lid}`],
+            constraint: "incomplete_formula_candidate_chain",
+            resource_keys: candidate.chars.map((item) => (
+              `selection:${item.char.pageIndex}:${item.char.charIndex}`
+            )),
+          })));
+        }
         rejections.set(
           entry.child.lid,
-          entry.rejection ?? "formula region candidates do not form a unique monotonic chain",
+          entry.rejection ?? "binding_rejected: formula group has incomplete candidate set",
         );
       }
       continue;
@@ -1317,8 +1357,27 @@ export function projectHybridAlignmentChildren(
       candidates: entry.candidates,
     })));
     if (chain.status !== "unique") {
+      const candidateIds = group.flatMap((entry) => entry.candidates.map((candidate) => (
+        `formula:${entry.child.lid}:${candidate.lane.pageIndex}:${candidate.start}:${candidate.end}`
+      )));
       for (const entry of group) {
-        rejections.set(entry.child.lid, "formula region candidates do not form a unique monotonic chain");
+        bindingCandidateCounts.set(entry.child.lid, entry.candidates.length);
+        bindingRejections.set(entry.child.lid, entry.candidates.map((candidate) => {
+          const candidateId = `formula:${entry.child.lid}:${candidate.lane.pageIndex}:${candidate.start}:${candidate.end}`;
+          return {
+            candidate_id: candidateId,
+            competitor_ids: candidateIds.filter((id) => id !== candidateId).slice(0, 1),
+            constraint: chain.status === "ambiguous"
+              ? "multiple_equal_monotonic_formula_chains"
+              : "no_non_overlapping_monotonic_formula_chain",
+            resource_keys: candidate.chars.map((item) => (
+              `selection:${item.char.pageIndex}:${item.char.charIndex}`
+            )),
+          };
+        }));
+        rejections.set(entry.child.lid, chain.status === "ambiguous"
+          ? "ambiguous_binding: multiple equal formula region chains"
+          : "ambiguous_binding: formula candidates have no non-overlapping monotonic chain");
       }
       continue;
     }
@@ -1415,13 +1474,29 @@ export function alignHybridFoundationV2(
   units: HybridAlignmentUnit[];
   locations: LocatedHybridAlignmentUnit[];
   projections: HybridChildProjection[];
+  binding_ownership: Pick<PdfBindingOwnershipResult<HybridChildProjection>, "policy_version" | "decisions" | "diagnostics">;
 } {
   const units = formHybridAlignmentUnits(source);
   const locations = locateHybridAlignmentUnits(source, units, geometry, evidence);
-  const projections = locations.flatMap((location) => projectHybridAlignmentChildren(source, location));
+  const projections = projectImageObjectRegions(
+    units,
+    locations.flatMap((location) => projectHybridAlignmentChildren(source, location)),
+    geometry,
+  );
+  const childByLid = new Map(units.flatMap((unit) => unit.child_lids.map((child) => [child.lid, child] as const)));
+  const ownership = resolvePdfBindingOwnership(projections.map((projection, sourceOrder) => ({
+    kind: childByLid.get(projection.lid)?.kind ?? "unknown",
+    source_order: sourceOrder,
+    projection,
+  })));
   return {
     units,
     locations,
-    projections: projectImageObjectRegions(units, projections, geometry),
+    projections: ownership.projections,
+    binding_ownership: {
+      policy_version: ownership.policy_version,
+      decisions: ownership.decisions,
+      diagnostics: ownership.diagnostics,
+    },
   };
 }

@@ -1,6 +1,6 @@
 # 切片方案 - PDF 选区全书适配闭环
 
-> 状态:2026-07-23 PR8-PR17 已完成,PR18-PR21 待实施。
+> 状态:2026-07-23 PR8-PR18 已完成,PR19-PR21 待实施。
 > 问题源:[PDF 选区适配问题总账](PDF选区适配问题总账.md)。
 > 已完成前序:[PDF 选区可恢复定位](切片方案-pdf选区可恢复定位.md) PR1-PR7。
 > 决策边界:[ADR-0082](adr/0082-hybrid-foundation-semantic-unit-alignment-and-degraded-reader.md)、[ADR-0090](adr/0090-pdf-selection-recovered-resolution-and-versioned-discrepancy-policy.md)。
@@ -199,11 +199,14 @@ PR8_FULL_BOOK_BENCHMARK
 
 ### PR18 - Binding 冲突消除与候选归属
 
+**状态**:`completed`。`pdf_binding_ownership_policy.v1` 已把跨 unit 竞争前移到 artifact 构造之前；同角色完整 glyph owner 可排除 partial 候选，结构角色不同或等证据多解整组 fail-closed，末端整项丢弃器已退出正常路径。
+
 - **做**:在写 artifact 前汇总所有 child/formula/code candidates,按 source order、exclusive child window、结构角色和 glyph ownership 求唯一非重叠解;记录每个被拒候选的竞争者和约束。若仍有多个同分解,整组保持 fail-closed。
 - **不做**:不按先到先得、LID 顺序或最高 coverage 抢 binding,不删除重复检测 integrity gate。
 - **Red**:11 个 raw conflict 只能在末端全部丢弃;短公式和代码重叠没有可审计的前置归属原因。
 - **Green**:已有 11 项在前置结构/窗口修复后得到唯一 owner 或稳定 `ambiguous_binding` 结果;本书正式候选的 raw duplicate region/selection binding 均为 0。
 - **完成判据**:强制重复短式 fixture 仍 fail-closed;人为制造双 owner 时 integrity gate 必红;无末端“先生成再整体丢弃”的正常路径。
+- **完成证据**:approved source/PDF 的候选阶段有 0 个竞争 region、15 个竞争 selection glyph，分成 2 个唯一 ownership 组；2 个越界 partial 候选被同角色完整 glyph owner 排除，resolved/formal raw region 与 selection duplicate 均为 0。全部 418 个本地/跨 unit 被拒候选都有 competitor、constraint 与 resource key，0 invalid、0 漏审；旧 A009 11 项经 migration 闭合为 3 unique owner、1 stable `ambiguous_binding`、6 reviewed removed、1 reviewed content drift。无正文审计四跑均为 6,228 bytes / SHA-256 `ae431d40...c38e8a`；PR16 公式审计保持 395 个公式/2,785 assignments 与 53 个 binding conflict，仅细化为 30 个等解公式链和 23 个 incomplete chain reason。Core owning 6 files / 76 tests、单 worker 全量 69 files / 437 tests、typecheck，Server 183+5 tests 与 Rust fmt 全绿；正式 source/base/maps/selection shards 未修改。
 
 ### PR19 - Resolve/project 与 Web 能力闭环
 

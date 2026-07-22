@@ -204,6 +204,7 @@ export const GoldsetManifestZ = z.object({
     formula_region_audit_path: z.string().min(1).optional(),
     formula_glyph_audit_path: z.string().min(1).optional(),
     image_object_audit_path: z.string().min(1).optional(),
+    binding_ownership_audit_path: z.string().min(1).optional(),
     requires_explicit_book_path: z.literal(true),
   })),
 });

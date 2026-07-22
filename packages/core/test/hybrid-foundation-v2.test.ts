@@ -7,11 +7,9 @@ import { describe, expect, it } from "vitest";
 import {
   assertHybridFoundationV2Integrity,
   buildHybridFoundationV2Candidate,
-  resolveHybridProjectionConflicts,
   validateHybridFoundationV2ArtifactSet,
   writeHybridFoundationV2ArtifactSet,
 } from "../src/hybrid-foundation-v2";
-import type { HybridChildProjection } from "../src/hybrid-alignment-v2";
 import { extractPdfTextGeometry, type PdfTextGeometry } from "../src/pdf-geometry";
 import { reconcilePaperSource } from "../src/source-reconciliation";
 import {
@@ -91,10 +89,12 @@ describe("HF2-3 hybrid foundation v2 artifacts", () => {
     expect(artifacts.pdf_source_map.formula_region_policy_version).toBe("pdf_formula_region_policy.v1");
     expect(artifacts.pdf_source_map.formula_glyph_policy_version).toBe("pdf_formula_glyph_policy.v1");
     expect(artifacts.pdf_source_map.asset_region_policy_version).toBe("pdf_asset_region_policy.v1");
+    expect(artifacts.pdf_source_map.binding_ownership_policy_version).toBe("pdf_binding_ownership_policy.v1");
     expect(artifacts.alignment_report.config.formula_source_ast_version).toBe("formula_source_ast.v1");
     expect(artifacts.alignment_report.config.formula_region_policy_version).toBe("pdf_formula_region_policy.v1");
     expect(artifacts.alignment_report.config.formula_glyph_policy_version).toBe("pdf_formula_glyph_policy.v1");
     expect(artifacts.alignment_report.config.asset_region_policy_version).toBe("pdf_asset_region_policy.v1");
+    expect(artifacts.alignment_report.config.binding_ownership_policy_version).toBe("pdf_binding_ownership_policy.v1");
     expect(artifacts.alignment_report.quality).toMatchObject({
       tier: "degraded",
       unit_location_ratio: 1,
@@ -214,6 +214,37 @@ describe("HF2-3 hybrid foundation v2 artifacts", () => {
     expect(() => assertHybridFoundationV2Integrity(artifacts)).toThrow(/asset region policy/i);
   });
 
+  it("rejects binding ownership policy drift across v2 artifacts", async () => {
+    const { source, pdfBytes, geometry } = await inlineFixture();
+    const artifacts = buildHybridFoundationV2Candidate({
+      book_id: "binding-ownership-policy-drift-v2",
+      source_txt: source,
+      original_pdf_path: "paper.pdf",
+      original_pdf_sha256: sha256(pdfBytes),
+      pdf_geometry: geometry,
+    });
+
+    delete artifacts.pdf_source_map.binding_ownership_policy_version;
+    expect(() => assertHybridFoundationV2Integrity(artifacts)).toThrow(/binding ownership policy/i);
+  });
+
+  it("recomputes the duplicate-region integrity gate after an artificial double owner", async () => {
+    const { source, pdfBytes, geometry } = await inlineFixture();
+    const artifacts = buildHybridFoundationV2Candidate({
+      book_id: "binding-ownership-integrity-v2",
+      source_txt: source,
+      original_pdf_path: "paper.pdf",
+      original_pdf_sha256: sha256(pdfBytes),
+      pdf_geometry: geometry,
+    });
+    const entries = artifacts.pdf_source_map.entries.filter((entry) => entry.regions.length > 0);
+    expect(entries.length).toBeGreaterThan(1);
+    entries[1].regions = [{ ...entries[0].regions[0], region_id: `${entries[1].lid}-double-owner` }];
+    entries[1].primary_region = entries[1].regions[0];
+
+    expect(() => assertHybridFoundationV2Integrity(artifacts)).toThrow(/duplicate PDF binding/i);
+  });
+
   it("excludes image-only units from text quality and selection denominators", () => {
     const plainSource = "# Heading\n\nBefore anchor.\n\nAfter anchor.\n";
     const imageSource = "# Heading\n\nBefore anchor.\n\n![diagram](diagram.png)\n\nAfter anchor.\n";
@@ -331,37 +362,4 @@ describe("HF2-3 hybrid foundation v2 artifacts", () => {
     expect(() => PdfSourceMapV2Z.parse(invalid)).toThrow(/region_exact/);
   });
 
-  it("fails closed on ambiguous region and character ownership", () => {
-    const projection = (lid: string, sourceStart: number): HybridChildProjection => ({
-      lid,
-      source_span: { start: sourceStart, end: sourceStart + 1 },
-      precision: "char_exact",
-      regions: [{ region_id: `${lid}-region`, pageIndex: 0, bbox: [10, 20, 30, 40] }],
-      exact_source_spans: [{ start: sourceStart, end: sourceStart + 1 }],
-      selection_assignments: [{
-        pageIndex: 0,
-        char_index: 7,
-        text: "x",
-        rect: { pageIndex: 0, bbox: [10, 20, 30, 40] },
-        source_span: { start: sourceStart, end: sourceStart + 1 },
-      }],
-      primary_region: { region_id: `${lid}-region`, pageIndex: 0, bbox: [10, 20, 30, 40] },
-      alignment: { unit_id: `${lid}-unit`, reason: "test projection" },
-    });
-    const result = resolveHybridProjectionConflicts([projection("lid-a", 0), projection("lid-b", 2)]);
-
-    expect(result).toMatchObject({
-      raw_duplicate_region_binding_count: 1,
-      raw_duplicate_selection_binding_count: 1,
-      conflicted_lid_count: 2,
-    });
-    expect(result.projections).toEqual(result.projections.map((candidate) => expect.objectContaining({
-      precision: "unmapped",
-      regions: [],
-      exact_source_spans: [],
-      selection_assignments: [],
-      alignment: expect.objectContaining({ reason: expect.stringContaining("conflicts") }),
-    })));
-    expect(result.projections.every((candidate) => candidate.primary_region === undefined)).toBe(true);
-  });
 });
