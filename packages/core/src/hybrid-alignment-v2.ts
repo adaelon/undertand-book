@@ -537,6 +537,44 @@ function hasUnmatchedMaterialPdfKeys(keys: PdfCharKey[], pairs: Array<[number, n
   return false;
 }
 
+function sourceSpansWithLineBreakWhitespace(
+  sourceKeys: ReturnType<typeof sourceCharacterKeys>,
+  pdfKeys: PdfCharKey[],
+  pairs: Array<[number, number]>,
+): Array<{ start: number; end: number }> {
+  const spans = pairs.map(([sourceIndex]) => ({ ...sourceKeys[sourceIndex].source_span }));
+  for (let pairIndex = 0; pairIndex + 1 < pairs.length; pairIndex += 1) {
+    const [leftSourceIndex, leftPdfIndex] = pairs[pairIndex];
+    const [rightSourceIndex, rightPdfIndex] = pairs[pairIndex + 1];
+    if (rightSourceIndex <= leftSourceIndex + 1 || rightPdfIndex !== leftPdfIndex + 1) continue;
+    const skippedSource = sourceKeys.slice(leftSourceIndex + 1, rightSourceIndex);
+    if (!skippedSource.length || skippedSource.some((item) => item.key !== " ")) continue;
+    const left = pdfKeys[leftPdfIndex];
+    const right = pdfKeys[rightPdfIndex];
+    const leftLineStart = left.line.chars[0]?.bbox[0];
+    const rightLineStart = right.line.chars[0]?.bbox[0];
+    const lineHeight = Math.max(
+      left.char.bbox[3] - left.char.bbox[1],
+      right.char.bbox[3] - right.char.bbox[1],
+    );
+    const sameColumn = left.line.column === right.line.column || (
+      leftLineStart !== undefined
+      && rightLineStart !== undefined
+      && Math.abs(leftLineStart - rightLineStart) <= Math.max(2, lineHeight * 2)
+    );
+    if (
+      left.key === " "
+      || right.key === " "
+      || left.line.alignment_line_id === right.line.alignment_line_id
+      || left.line.pageIndex !== right.line.pageIndex
+      || !sameColumn
+      || right.line.lineIndex !== left.line.lineIndex + 1
+    ) continue;
+    spans[pairIndex].end = skippedSource.at(-1)!.source_span.end;
+  }
+  return spans;
+}
+
 function keyOccurrences(haystack: PdfCharKey[], needle: string[], startAt: number, endAt = haystack.length): number[] {
   const occurrences: number[] = [];
   for (let start = startAt; start <= endAt - needle.length; start += 1) {
@@ -683,7 +721,7 @@ export function projectHybridAlignmentChildren(
       start,
       end,
       chars: pairs.map(([, pdfIndex]) => remaining[pdfIndex]),
-      source_spans: pairs.map(([sourceIndex]) => sourceKeys[sourceIndex].source_span),
+      source_spans: sourceSpansWithLineBreakWhitespace(sourceKeys, remaining, pairs),
       has_unmatched_material_pdf: hasUnmatchedMaterialPdfKeys(remaining, pairs),
     };
     ranges.set(child.lid, range);

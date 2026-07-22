@@ -13728,6 +13728,96 @@ unchanged after training concludes";
     }
 
     #[test]
+    fn pdf_selection_recovery_real_book_artifact_replays_known_paragraph() {
+        let Ok(book_dir) = std::env::var("UB_PDF_SELECTION_REAL_BOOK_DIR") else {
+            eprintln!(
+                "PDF selection real-book replay skipped: UB_PDF_SELECTION_REAL_BOOK_DIR is unset"
+            );
+            return;
+        };
+        let expected_basis = std::env::var("UB_PDF_SELECTION_EXPECTED_BASIS")
+            .expect("UB_PDF_SELECTION_EXPECTED_BASIS must be exact or recovered");
+        assert!(matches!(expected_basis.as_str(), "exact" | "recovered"));
+
+        let book_dir = PathBuf::from(book_dir);
+        let book = Book::load(book_dir.to_str().expect("real-book path must be UTF-8"))
+            .expect("PDF selection real book must load");
+        let lid = "1.19.84";
+        let target = lid_span(&book, lid).expect("known paragraph LID must exist");
+        let policy = pdf_runtime_projection_policy(&book_dir).expect("runtime policy must load");
+        let hits = selection_chars_for_source_range(&book_dir, lid, target, &policy)
+            .expect("known paragraph selection chars must load");
+        assert!(!hits.is_empty());
+        let pages = hits
+            .iter()
+            .map(|hit| hit.page_index)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            pages.len(),
+            1,
+            "known paragraph must remain on one PDF page"
+        );
+        let page_index = *pages.iter().next().unwrap();
+        let raw_quote = book
+            .text(lid, None)
+            .expect("known paragraph source text must load");
+        let rects = hits
+            .iter()
+            .map(|hit| {
+                serde_json::json!({
+                    "pageIndex": hit.page_index,
+                    "bbox": hit.rect.bbox,
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let selected = route_pdf_selection_resolve(
+            &book,
+            &book_dir,
+            &serde_json::json!({
+                "pageIndex": page_index,
+                "raw_quote": raw_quote,
+                "rects": rects,
+            }),
+        );
+        assert_eq!(selected.status, 200, "{}", selected.body);
+        let selected_body: serde_json::Value = serde_json::from_str(&selected.body).unwrap();
+        assert_eq!(selected_body["status"], "resolved", "{selected_body}");
+        assert_eq!(selected_body["resolution_basis"], expected_basis);
+        assert_eq!(selected_body["quote_markdown"], raw_quote);
+        assert_eq!(selected_body["ranges"].as_array().unwrap().len(), 1);
+        assert_eq!(selected_body["ranges"][0]["lid"], lid);
+
+        if expected_basis == "recovered" {
+            assert_eq!(
+                selected_body["recovered_difference_counts"],
+                serde_json::json!({"layout_whitespace":6,"hyphen_representation":4})
+            );
+        } else {
+            assert!(selected_body["recovery_policy_version"].is_null());
+            assert!(selected_body["recovered_differences"].is_null());
+            assert!(selected_body["recovered_difference_counts"].is_null());
+        }
+
+        let projected = route_pdf_ranges_project(
+            &book,
+            &book_dir,
+            &serde_json::json!({
+                "ranges": [{
+                    "lid": lid,
+                    "range": selected_body["ranges"][0]["range"],
+                }],
+            }),
+        );
+        assert_eq!(projected.status, 200, "{}", projected.body);
+        let projected_body: serde_json::Value = serde_json::from_str(&projected.body).unwrap();
+        let projection = &projected_body["projections"][0];
+        assert_eq!(projection["status"], "exact", "{projected_body}");
+        assert_eq!(projection["resolution_basis"], expected_basis);
+        assert!(projection["terminal_rect"].is_object());
+    }
+
+    #[test]
     fn pdf_selection_splits_same_lid_source_gaps_into_exact_ranges() {
         let mut s = state_named("pdf-selection-source-gaps");
         write_pdf_runtime_artifacts(&mut s);

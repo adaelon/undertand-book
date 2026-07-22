@@ -232,10 +232,10 @@ async function installApiFixture(
         status: resolveStatus,
         ...(resolutionBasis ? {
           resolution_basis: resolutionBasis,
-          recovery_policy_version: "pdf_selection_recovery.v1",
-          recovered_differences: resolutionBasis === "recovered"
-            ? ["layout_whitespace", "hyphen_representation"]
-            : undefined,
+          ...(resolutionBasis === "recovered" ? {
+            recovery_policy_version: "pdf_selection_recovery.v1",
+            recovered_differences: ["layout_whitespace", "hyphen_representation"],
+          } : {}),
         } : {}),
         ranges: [{
           lid: "1.1",
@@ -283,10 +283,10 @@ async function installApiFixture(
           status: "exact",
           ...(resolutionBasis ? {
             resolution_basis: resolutionBasis,
-            recovery_policy_version: "pdf_selection_recovery.v1",
-            recovered_differences: resolutionBasis === "recovered"
-              ? ["layout_whitespace", "hyphen_representation"]
-              : undefined,
+            ...(resolutionBasis === "recovered" ? {
+              recovery_policy_version: "pdf_selection_recovery.v1",
+              recovered_differences: ["layout_whitespace", "hyphen_representation"],
+            } : {}),
           } : {}),
           rects: [{
             pageIndex: 0,
@@ -437,57 +437,64 @@ test("resolved real PDF selection performs three explicit actions and sends stru
   });
 });
 
-for (const viewport of [
-  { name: "desktop", width: 1440, height: 900 },
-  { name: "mobile", width: 390, height: 844 },
-] as const) {
-  test(`recovered real PDF selection keeps every action and refreshes as located on ${viewport.name}`, async ({ page }) => {
-    await page.setViewportSize({ width: viewport.width, height: viewport.height });
-    const calls = await installApiFixture(page, "resolved", 0, pdfFixture(), "recovered");
-    await page.goto("/");
+for (const resolutionBasis of ["exact", "recovered"] as const) {
+  for (const viewport of [
+    { name: "desktop", width: 1440, height: 900 },
+    { name: "mobile", width: 390, height: 844 },
+  ] as const) {
+    test(`${resolutionBasis} real PDF selection keeps every action and refreshes as located on ${viewport.name}`, async ({ page }) => {
+      await page.setViewportSize({ width: viewport.width, height: viewport.height });
+      const calls = await installApiFixture(page, "resolved", 0, pdfFixture(), resolutionBasis);
+      await page.goto("/");
 
-    await selectFixtureText(page, 0, 10);
-    let toolbar = page.locator(".pdf-selection-toolbar");
-    await expect(toolbar.locator(".pdf-selection-status")).toHaveCount(0);
-    await expect(toolbar.locator("button")).toHaveCount(5);
-    await toolbar.locator("button").nth(0).click();
-    await expect.poll(() => calls.highlights.length).toBe(1);
-    await expect(page.locator(".pdf-user-highlight")).toHaveCount(1);
+      await selectFixtureText(page, 0, 10);
+      let toolbar = page.locator(".pdf-selection-toolbar");
+      await expect(toolbar.locator(".pdf-selection-status")).toHaveCount(0);
+      await expect(toolbar.locator("button")).toHaveCount(5);
+      await toolbar.locator("button").nth(0).click();
+      await expect.poll(() => calls.highlights.length).toBe(1);
+      await expect(page.locator(".pdf-user-highlight")).toHaveCount(1);
 
-    await selectFixtureText(page, 0, 10);
-    toolbar = page.locator(".pdf-selection-toolbar");
-    await toolbar.locator("button").nth(1).click();
-    await expect(page.locator(".note-dialog")).toBeVisible();
-    await page.locator(".note-dialog .primary").click();
-    await expect.poll(() => calls.notes.length).toBe(1);
-    expect(calls.notes[0]).toMatchObject({
-      selection_context: {
-        status: "resolved",
-        resolution_basis: "recovered",
-      },
+      await selectFixtureText(page, 0, 10);
+      toolbar = page.locator(".pdf-selection-toolbar");
+      await toolbar.locator("button").nth(1).click();
+      await expect(page.locator(".note-dialog")).toBeVisible();
+      await page.locator(".note-dialog .primary").click();
+      await expect.poll(() => calls.notes.length).toBe(1);
+      expect(calls.notes[0]).toMatchObject({
+        selection_context: {
+          status: "resolved",
+          resolution_basis: resolutionBasis,
+        },
+      });
+      await expect(page.locator(".pdf-note-marker")).toHaveCount(1);
+
+      await page.reload();
+      await expect(page.locator(".pdf-text-layer span").first()).toHaveText(/Selectable PDF fixture/);
+      await expect(page.locator(".pdf-user-highlight")).toHaveCount(1);
+      await expect(page.locator(".pdf-note-marker")).toHaveCount(1);
+
+      await selectFixtureText(page, 0, 10);
+      toolbar = page.locator(".pdf-selection-toolbar");
+      await toolbar.locator("button").nth(3).click();
+      await expect.poll(() => calls.translations.length).toBe(1);
+      await expect(page.locator(".pdf-translation-surface")).toContainText("前馈网络");
+      await page.locator(".pdf-translation-head button").click();
+
+      await selectFixtureText(page, 0, 10);
+      toolbar = page.locator(".pdf-selection-toolbar");
+      await toolbar.locator("button").nth(2).click();
+      await page.locator(".agent-input textarea").fill(`Explain ${resolutionBasis} selection`);
+      await page.locator(".agent-input > button").click();
+      await expect.poll(() => calls.agent.length).toBe(1);
+      expect(calls.agent[0]).toMatchObject({
+        question_quote: {
+          status: "resolved",
+          resolution_basis: resolutionBasis,
+        },
+      });
     });
-    await expect(page.locator(".pdf-note-marker")).toHaveCount(1);
-
-    await selectFixtureText(page, 0, 10);
-    toolbar = page.locator(".pdf-selection-toolbar");
-    await toolbar.locator("button").nth(3).click();
-    await expect.poll(() => calls.translations.length).toBe(1);
-    await expect(page.locator(".pdf-translation-surface")).toContainText("前馈网络");
-    await page.locator(".pdf-translation-head button").click();
-
-    await selectFixtureText(page, 0, 10);
-    toolbar = page.locator(".pdf-selection-toolbar");
-    await toolbar.locator("button").nth(2).click();
-    await page.locator(".agent-input textarea").fill("Explain recovered selection");
-    await page.locator(".agent-input > button").click();
-    await expect.poll(() => calls.agent.length).toBe(1);
-    expect(calls.agent[0]).toMatchObject({
-      question_quote: {
-        status: "resolved",
-        resolution_basis: "recovered",
-      },
-    });
-  });
+  }
 }
 
 test("partial mobile selection hides persistence actions but keeps exact-subrange Ask explicit", async ({ page }) => {

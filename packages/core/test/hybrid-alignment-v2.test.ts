@@ -204,6 +204,76 @@ describe("HF2-2 semantic-unit PDF alignment", () => {
     }
   });
 
+  it("covers source word separators at proven same-column PDF line breaks", () => {
+    const source = "Alpha beta gamma delta.\n";
+    const result = alignHybridFoundationV2(source, geometryFromPages([[
+      "Alpha beta",
+      "gamma delta.",
+    ]]));
+    const projection = result.projections[0];
+    const lineBreakSpace = source.indexOf(" gamma");
+
+    expect(projection.precision).toBe("char_exact");
+    expect(projection.exact_source_spans).toEqual([{ start: 0, end: source.trim().length }]);
+    expect(projection.selection_assignments).toContainEqual(expect.objectContaining({
+      text: "a",
+      source_span: { start: lineBreakSpace - 1, end: lineBreakSpace + 1 },
+    }));
+  });
+
+  it("uses aligned line starts when a short continuation has a coarse column label", () => {
+    const source = "Alpha beta gamma delta.\n";
+    const geometry = geometryFromPages([[
+      "Alpha beta",
+      "gamma delta.",
+    ]]);
+    const unit = formHybridAlignmentUnits(source)[0];
+    const lines = pdfAlignmentLines(geometry);
+    lines[1] = { ...lines[1], column: lines[0].column === 0 ? 1 : 0 };
+    const projection = projectHybridAlignmentChildren(source, {
+      unit,
+      status: "located",
+      reason: "test-proven located lines",
+      lines,
+    })[0];
+
+    expect(projection.precision).toBe("char_exact");
+  });
+
+  it("does not cover a missing source separator without a proven line break", () => {
+    const source = "Alpha beta gamma delta.\n";
+    const sameLine = alignHybridFoundationV2(source, geometryFromPages([[
+      "Alpha betagamma delta.",
+    ]]));
+    const crossPage = alignHybridFoundationV2(source, geometryFromPages([
+      ["Alpha beta"],
+      ["gamma delta."],
+    ]));
+    const unit = formHybridAlignmentUnits(source)[0];
+    const lines = pdfAlignmentLines(geometryFromPages([[
+      "Alpha beta",
+      "gamma delta.",
+    ]]));
+    lines[1] = {
+      ...lines[1],
+      column: lines[0].column === 0 ? 1 : 0,
+      chars: lines[1].chars.map((char) => ({
+        ...char,
+        bbox: [char.bbox[0] + 250, char.bbox[1], char.bbox[2] + 250, char.bbox[3]],
+      })),
+    };
+    const crossColumn = projectHybridAlignmentChildren(source, {
+      unit,
+      status: "located",
+      reason: "test-proven located lines",
+      lines,
+    })[0];
+
+    expect(sameLine.projections[0].precision).not.toBe("char_exact");
+    expect(crossPage.projections[0].precision).not.toBe("char_exact");
+    expect(crossColumn.precision).toBe("partial");
+  });
+
   it("maps supported semantic hyphen representations onto the source hyphen", () => {
     const source = "A key-value pair.\n";
     const sourceOffset = source.indexOf("-");
