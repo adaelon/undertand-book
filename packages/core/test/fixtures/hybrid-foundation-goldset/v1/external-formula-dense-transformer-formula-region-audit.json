@@ -1,0 +1,2547 @@
+{
+  "version": "formula_region_audit.v1",
+  "policy_version": "pdf_formula_region_policy.v1",
+  "source_sha256": "feb442870b9364e578c22b210b1ac6ed9ce098f59bd39ceb07806c741715af43",
+  "pdf_sha256": "9391b89821c97dd14e66937fd71d22bfcfc72357f8023daddc6fc6334c68b9b0",
+  "reviewed_map_sha256": "7f06697533fd786a5644e2d6cc5771c11e0dea2553a64116faac82a4e7bafda2",
+  "passed": true,
+  "summary": {
+    "baseline_count": 106,
+    "reviewed_region_count": 79,
+    "anchor_lack_count": 27,
+    "missing_successor_count": 0,
+    "missing_reviewed_lane_count": 0,
+    "reviewed_region_with_geometry_count": 58,
+    "anchor_resolved_count": 22,
+    "unclassified_count": 0,
+    "wrong_page_count": 0,
+    "wrong_column_count": 0,
+    "legacy_anchor_lack_reason_count": 0,
+    "geometry_region_selection_assignment_count": 0,
+    "cross_lane_region_count": 0,
+    "classification_counts": {
+      "downstream_formula_glyph": 6,
+      "downstream_unit_locator": 12,
+      "existing_display_projection": 9,
+      "explicit_structural_ambiguity": 21,
+      "reviewed_non_formula": 1,
+      "unique_region": 57
+    },
+    "precision_counts": {
+      "char_exact": 1,
+      "partial": 9,
+      "region_exact": 57,
+      "unmapped": 39
+    },
+    "reason_counts": {
+      "alignment unit has ambiguous forward candidates": 2,
+      "alignment unit has no exact monotonic candidate": 10,
+      "complete monotonic character projection inside located unit": 1,
+      "complete simple formula display projection with source-markup gaps": 9,
+      "formula has no unique bounded PDF gap": 6,
+      "formula region candidates do not form a unique monotonic chain": 12,
+      "formula region conflicts with adjacent page-column lanes": 9,
+      "unique formula region bounded by exact same-page same-column text anchors": 44,
+      "unique formula region in one page-column lane": 13
+    }
+  },
+  "items": [
+    {
+      "baseline_lid": "1.5",
+      "migration_status": "stable",
+      "current_lid": "1.5",
+      "category": "reviewed_region",
+      "classification": "unique_region",
+      "expected_page_indexes": [
+        0
+      ],
+      "expected_columns": [
+        0
+      ],
+      "precision": "region_exact",
+      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "current_page_indexes": [
+        0
+      ],
+      "current_columns": [
+        0
+      ],
+      "region_count": 1,
+      "selection_assignment_count": 0,
+      "page_matches": true,
+      "column_matches": true
+    },
+    {
+      "baseline_lid": "1.18.19",
+      "migration_status": "stable",
+      "current_lid": "1.18.19",
+      "category": "anchor_lack",
+      "classification": "unique_region",
+      "expected_page_indexes": [
+        2
+      ],
+      "expected_columns": [
+        1
+      ],
+      "precision": "region_exact",
+      "reason": "unique formula region in one page-column lane",
+      "current_page_indexes": [
+        2
+      ],
+      "current_columns": [
+        1
+      ],
+      "region_count": 1,
+      "selection_assignment_count": 0,
+      "page_matches": true,
+      "column_matches": true
+    },
+    {
+      "baseline_lid": "1.19.18",
+      "migration_status": "stable",
+      "current_lid": "1.19.18",
+      "category": "reviewed_region",
+      "classification": "unique_region",
+      "expected_page_indexes": [
+        2
+      ],
+      "expected_columns": [
+        0
+      ],
+      "precision": "region_exact",
+      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "current_page_indexes": [
+        2
+      ],
+      "current_columns": [
+        0
+      ],
+      "region_count": 1,
+      "selection_assignment_count": 0,
+      "page_matches": true,
+      "column_matches": true
+    },
+    {
+      "baseline_lid": "1.19.20",
+      "migration_status": "stable",
+      "current_lid": "1.19.20",
+      "category": "reviewed_region",
+      "classification": "unique_region",
+      "expected_page_indexes": [
+        2
+      ],
+      "expected_columns": [
+        0
+      ],
+      "precision": "region_exact",
+      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "current_page_indexes": [
+        2
+      ],
+      "current_columns": [
+        0
+      ],
+      "region_count": 1,
+      "selection_assignment_count": 0,
+      "page_matches": true,
+      "column_matches": true
+    },
+    {
+      "baseline_lid": "1.19.22",
+      "migration_status": "stable",
+      "current_lid": "1.19.22",
+      "category": "reviewed_region",
+      "classification": "unique_region",
+      "expected_page_indexes": [
+        2
+      ],
+      "expected_columns": [
+        0
+      ],
+      "precision": "region_exact",
+      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "current_page_indexes": [
+        2
+      ],
+      "current_columns": [
+        0
+      ],
+      "region_count": 1,
+      "selection_assignment_count": 0,
+      "page_matches": true,
+      "column_matches": true
+    },
+    {
+      "baseline_lid": "1.19.49",
+      "migration_status": "stable",
+      "current_lid": "1.19.49",
+      "category": "reviewed_region",
+      "classification": "explicit_structural_ambiguity",
+      "expected_page_indexes": [
+        2
+      ],
+      "expected_columns": [
+        0
+      ],
+      "precision": "unmapped",
+      "reason": "formula region candidates do not form a unique monotonic chain",
+      "current_page_indexes": [],
+      "current_columns": [],
+      "region_count": 0,
+      "selection_assignment_count": 0,
+      "page_matches": null,
+      "column_matches": null
+    },
+    {
+      "baseline_lid": "1.19.71",
+      "migration_status": "stable",
+      "current_lid": "1.19.71",
+      "category": "reviewed_region",
+      "classification": "unique_region",
+      "expected_page_indexes": [
+        2
+      ],
+      "expected_columns": [
+        0
+      ],
+      "precision": "region_exact",
+      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "current_page_indexes": [
+        2
+      ],
+      "current_columns": [
+        0
+      ],
+      "region_count": 1,
+      "selection_assignment_count": 0,
+      "page_matches": true,
+      "column_matches": true
+    },
+    {
+      "baseline_lid": "1.19.81",
+      "migration_status": "stable",
+      "current_lid": "1.19.81",
+      "category": "reviewed_region",
+      "classification": "explicit_structural_ambiguity",
+      "expected_page_indexes": [
+        2
+      ],
+      "expected_columns": [
+        1
+      ],
+      "precision": "unmapped",
+      "reason": "formula region candidates do not form a unique monotonic chain",
+      "current_page_indexes": [],
+      "current_columns": [],
+      "region_count": 0,
+      "selection_assignment_count": 0,
+      "page_matches": null,
+      "column_matches": null
+    },
+    {
+      "baseline_lid": "1.19.86.29",
+      "migration_status": "stable",
+      "current_lid": "1.19.86.29",
+      "category": "anchor_lack",
+      "classification": "downstream_unit_locator",
+      "expected_page_indexes": [
+        3
+      ],
+      "expected_columns": [
+        2
+      ],
+      "precision": "unmapped",
+      "reason": "alignment unit has no exact monotonic candidate",
+      "current_page_indexes": [],
+      "current_columns": [],
+      "region_count": 0,
+      "selection_assignment_count": 0,
+      "page_matches": null,
+      "column_matches": null
+    },
+    {
+      "baseline_lid": "1.19.86.37",
+      "migration_status": "stable",
+      "current_lid": "1.19.86.37",
+      "category": "reviewed_region",
+      "classification": "unique_region",
+      "expected_page_indexes": [
+        3
+      ],
+      "expected_columns": [
+        0
+      ],
+      "precision": "region_exact",
+      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "current_page_indexes": [
+        3
+      ],
+      "current_columns": [
+        0
+      ],
+      "region_count": 1,
+      "selection_assignment_count": 0,
+      "page_matches": true,
+      "column_matches": true
+    },
+    {
+      "baseline_lid": "1.19.86.39",
+      "migration_status": "stable",
+      "current_lid": "1.19.86.39",
+      "category": "reviewed_region",
+      "classification": "unique_region",
+      "expected_page_indexes": [
+        3
+      ],
+      "expected_columns": [
+        0
+      ],
+      "precision": "region_exact",
+      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "current_page_indexes": [
+        3
+      ],
+      "current_columns": [
+        0
+      ],
+      "region_count": 1,
+      "selection_assignment_count": 0,
+      "page_matches": true,
+      "column_matches": true
+    },
+    {
+      "baseline_lid": "1.19.86.53",
+      "migration_status": "stable",
+      "current_lid": "1.19.86.53",
+      "category": "reviewed_region",
+      "classification": "unique_region",
+      "expected_page_indexes": [
+        4
+      ],
+      "expected_columns": [
+        1
+      ],
+      "precision": "region_exact",
+      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "current_page_indexes": [
+        4
+      ],
+      "current_columns": [
+        1
+      ],
+      "region_count": 1,
+      "selection_assignment_count": 0,
+      "page_matches": true,
+      "column_matches": true
+    },
+    {
+      "baseline_lid": "1.19.86.57.8",
+      "migration_status": "stable",
+      "current_lid": "1.19.86.57.8",
+      "category": "reviewed_region",
+      "classification": "unique_region",
+      "expected_page_indexes": [
+        4
+      ],
+      "expected_columns": [
+        0
+      ],
+      "precision": "region_exact",
+      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "current_page_indexes": [
+        4
+      ],
+      "current_columns": [
+        0
+      ],
+      "region_count": 1,
+      "selection_assignment_count": 0,
+      "page_matches": true,
+      "column_matches": true
+    },
+    {
+      "baseline_lid": "1.19.86.57.20",
+      "migration_status": "stable",
+      "current_lid": "1.19.86.57.20",
+      "category": "reviewed_region",
+      "classification": "unique_region",
+      "expected_page_indexes": [
+        4
+      ],
+      "expected_columns": [
+        2
+      ],
+      "precision": "region_exact",
+      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "current_page_indexes": [
+        4
+      ],
+      "current_columns": [
+        2
+      ],
+      "region_count": 1,
+      "selection_assignment_count": 0,
+      "page_matches": true,
+      "column_matches": true
+    },
+    {
+      "baseline_lid": "1.19.86.57.22",
+      "migration_status": "stable",
+      "current_lid": "1.19.86.57.22",
+      "category": "reviewed_region",
+      "classification": "unique_region",
+      "expected_page_indexes": [
+        4
+      ],
+      "expected_columns": [
+        0
+      ],
+      "precision": "region_exact",
+      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "current_page_indexes": [
+        4
+      ],
+      "current_columns": [
+        0
+      ],
+      "region_count": 1,
+      "selection_assignment_count": 0,
+      "page_matches": true,
+      "column_matches": true
+    },
+    {
+      "baseline_lid": "1.19.86.57.24",
+      "migration_status": "stable",
+      "current_lid": "1.19.86.57.24",
+      "category": "reviewed_region",
+      "classification": "unique_region",
+      "expected_page_indexes": [
+        4
+      ],
+      "expected_columns": [
+        0
+      ],
+      "precision": "region_exact",
+      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "current_page_indexes": [
+        4
+      ],
+      "current_columns": [
+        0
+      ],
+      "region_count": 1,
+      "selection_assignment_count": 0,
+      "page_matches": true,
+      "column_matches": true
+    },
+    {
+      "baseline_lid": "1.19.86.57.39",
+      "migration_status": "stable",
+      "current_lid": "1.19.86.57.39",
+      "category": "reviewed_region",
+      "classification": "unique_region",
+      "expected_page_indexes": [
+        5
+      ],
+      "expected_columns": [
+        0
+      ],
+      "precision": "region_exact",
+      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "current_page_indexes": [
+        5
+      ],
+      "current_columns": [
+        0
+      ],
+      "region_count": 1,
+      "selection_assignment_count": 0,
+      "page_matches": true,
+      "column_matches": true
+    },
+    {
+      "baseline_lid": "1.19.86.57.41",
+      "migration_status": "stable",
+      "current_lid": "1.19.86.57.41",
+      "category": "reviewed_region",
+      "classification": "unique_region",
+      "expected_page_indexes": [
+        5
+      ],
+      "expected_columns": [
+        0
+      ],
+      "precision": "region_exact",
+      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "current_page_indexes": [
+        5
+      ],
+      "current_columns": [
+        0
+      ],
+      "region_count": 1,
+      "selection_assignment_count": 0,
+      "page_matches": true,
+      "column_matches": true
+    },
+    {
+      "baseline_lid": "1.19.86.57.51",
+      "migration_status": "stable",
+      "current_lid": "1.19.86.57.51",
+      "category": "reviewed_region",
+      "classification": "unique_region",
+      "expected_page_indexes": [
+        5
+      ],
+      "expected_columns": [
+        0
+      ],
+      "precision": "region_exact",
+      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "current_page_indexes": [
+        5
+      ],
+      "current_columns": [
+        0
+      ],
+      "region_count": 1,
+      "selection_assignment_count": 0,
+      "page_matches": true,
+      "column_matches": true
+    },
+    {
+      "baseline_lid": "1.19.86.57.53",
+      "migration_status": "stable",
+      "current_lid": "1.19.86.57.53",
+      "category": "reviewed_region",
+      "classification": "unique_region",
+      "expected_page_indexes": [
+        5
+      ],
+      "expected_columns": [
+        0
+      ],
+      "precision": "region_exact",
+      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "current_page_indexes": [
+        5
+      ],
+      "current_columns": [
+        0
+      ],
+      "region_count": 1,
+      "selection_assignment_count": 0,
+      "page_matches": true,
+      "column_matches": true
+    },
+    {
+      "baseline_lid": "1.19.86.57.58",
+      "migration_status": "stable",
+      "current_lid": "1.19.86.57.58",
+      "category": "reviewed_region",
+      "classification": "unique_region",
+      "expected_page_indexes": [
+        5
+      ],
+      "expected_columns": [
+        0
+      ],
+      "precision": "region_exact",
+      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "current_page_indexes": [
+        5
+      ],
+      "current_columns": [
+        0
+      ],
+      "region_count": 1,
+      "selection_assignment_count": 0,
+      "page_matches": true,
+      "column_matches": true
+    },
+    {
+      "baseline_lid": "1.19.86.57.70",
+      "migration_status": "stable",
+      "current_lid": "1.19.86.57.70",
+      "category": "reviewed_region",
+      "classification": "unique_region",
+      "expected_page_indexes": [
+        5
+      ],
+      "expected_columns": [
+        2
+      ],
+      "precision": "region_exact",
+      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "current_page_indexes": [
+        5
+      ],
+      "current_columns": [
+        2
+      ],
+      "region_count": 1,
+      "selection_assignment_count": 0,
+      "page_matches": true,
+      "column_matches": true
+    },
+    {
+      "baseline_lid": "1.19.86.57.72",
+      "migration_status": "stable",
+      "current_lid": "1.19.86.57.72",
+      "category": "anchor_lack",
+      "classification": "explicit_structural_ambiguity",
+      "expected_page_indexes": [
+        5
+      ],
+      "expected_columns": [
+        0
+      ],
+      "precision": "unmapped",
+      "reason": "formula region conflicts with adjacent page-column lanes",
+      "current_page_indexes": [],
+      "current_columns": [],
+      "region_count": 0,
+      "selection_assignment_count": 0,
+      "page_matches": null,
+      "column_matches": null
+    },
+    {
+      "baseline_lid": "1.19.86.58.26",
+      "migration_status": "stable",
+      "current_lid": "1.19.86.58.26",
+      "category": "reviewed_region",
+      "classification": "unique_region",
+      "expected_page_indexes": [
+        7
+      ],
+      "expected_columns": [
+        0
+      ],
+      "precision": "region_exact",
+      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "current_page_indexes": [
+        7
+      ],
+      "current_columns": [
+        0
+      ],
+      "region_count": 1,
+      "selection_assignment_count": 0,
+      "page_matches": true,
+      "column_matches": true
+    },
+    {
+      "baseline_lid": "1.19.86.58.28",
+      "migration_status": "stable",
+      "current_lid": "1.19.86.58.28",
+      "category": "anchor_lack",
+      "classification": "unique_region",
+      "expected_page_indexes": [
+        7
+      ],
+      "expected_columns": [
+        2
+      ],
+      "precision": "region_exact",
+      "reason": "unique formula region in one page-column lane",
+      "current_page_indexes": [
+        7
+      ],
+      "current_columns": [
+        2
+      ],
+      "region_count": 1,
+      "selection_assignment_count": 0,
+      "page_matches": true,
+      "column_matches": true
+    },
+    {
+      "baseline_lid": "1.19.86.58.29",
+      "migration_status": "stable",
+      "current_lid": "1.19.86.58.29",
+      "category": "anchor_lack",
+      "classification": "unique_region",
+      "expected_page_indexes": [
+        7
+      ],
+      "expected_columns": [
+        2
+      ],
+      "precision": "region_exact",
+      "reason": "unique formula region in one page-column lane",
+      "current_page_indexes": [
+        7
+      ],
+      "current_columns": [
+        2
+      ],
+      "region_count": 1,
+      "selection_assignment_count": 0,
+      "page_matches": true,
+      "column_matches": true
+    },
+    {
+      "baseline_lid": "1.19.86.58.30",
+      "migration_status": "stable",
+      "current_lid": "1.19.86.58.30",
+      "category": "anchor_lack",
+      "classification": "unique_region",
+      "expected_page_indexes": [
+        7
+      ],
+      "expected_columns": [
+        2
+      ],
+      "precision": "region_exact",
+      "reason": "unique formula region in one page-column lane",
+      "current_page_indexes": [
+        7
+      ],
+      "current_columns": [
+        2
+      ],
+      "region_count": 1,
+      "selection_assignment_count": 0,
+      "page_matches": true,
+      "column_matches": true
+    },
+    {
+      "baseline_lid": "1.19.86.58.32",
+      "migration_status": "stable",
+      "current_lid": "1.19.86.58.32",
+      "category": "anchor_lack",
+      "classification": "unique_region",
+      "expected_page_indexes": [
+        7
+      ],
+      "expected_columns": [
+        2
+      ],
+      "precision": "region_exact",
+      "reason": "unique formula region in one page-column lane",
+      "current_page_indexes": [
+        7
+      ],
+      "current_columns": [
+        2
+      ],
+      "region_count": 1,
+      "selection_assignment_count": 0,
+      "page_matches": true,
+      "column_matches": true
+    },
+    {
+      "baseline_lid": "1.19.86.58.36",
+      "migration_status": "stable",
+      "current_lid": "1.19.86.58.36",
+      "category": "anchor_lack",
+      "classification": "explicit_structural_ambiguity",
+      "expected_page_indexes": [
+        7
+      ],
+      "expected_columns": [
+        0
+      ],
+      "precision": "unmapped",
+      "reason": "formula region candidates do not form a unique monotonic chain",
+      "current_page_indexes": [],
+      "current_columns": [],
+      "region_count": 0,
+      "selection_assignment_count": 0,
+      "page_matches": null,
+      "column_matches": null
+    },
+    {
+      "baseline_lid": "1.19.86.58.75",
+      "migration_status": "stable",
+      "current_lid": "1.19.86.58.75",
+      "category": "reviewed_region",
+      "classification": "unique_region",
+      "expected_page_indexes": [
+        8
+      ],
+      "expected_columns": [
+        1
+      ],
+      "precision": "region_exact",
+      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "current_page_indexes": [
+        8
+      ],
+      "current_columns": [
+        1
+      ],
+      "region_count": 1,
+      "selection_assignment_count": 0,
+      "page_matches": true,
+      "column_matches": true
+    },
+    {
+      "baseline_lid": "1.19.86.58.87",
+      "migration_status": "stable",
+      "current_lid": "1.19.86.58.87",
+      "category": "reviewed_region",
+      "classification": "unique_region",
+      "expected_page_indexes": [
+        8
+      ],
+      "expected_columns": [
+        0
+      ],
+      "precision": "region_exact",
+      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "current_page_indexes": [
+        8
+      ],
+      "current_columns": [
+        0
+      ],
+      "region_count": 1,
+      "selection_assignment_count": 0,
+      "page_matches": true,
+      "column_matches": true
+    },
+    {
+      "baseline_lid": "1.19.87.2",
+      "migration_status": "stable",
+      "current_lid": "1.19.87.2",
+      "category": "anchor_lack",
+      "classification": "unique_region",
+      "expected_page_indexes": [
+        9
+      ],
+      "expected_columns": [
+        0
+      ],
+      "precision": "region_exact",
+      "reason": "unique formula region in one page-column lane",
+      "current_page_indexes": [
+        9
+      ],
+      "current_columns": [
+        0
+      ],
+      "region_count": 1,
+      "selection_assignment_count": 0,
+      "page_matches": true,
+      "column_matches": true
+    },
+    {
+      "baseline_lid": "1.19.87.12",
+      "migration_status": "stable",
+      "current_lid": "1.19.87.12",
+      "category": "anchor_lack",
+      "classification": "explicit_structural_ambiguity",
+      "expected_page_indexes": [
+        9
+      ],
+      "expected_columns": [
+        0
+      ],
+      "precision": "unmapped",
+      "reason": "formula region conflicts with adjacent page-column lanes",
+      "current_page_indexes": [],
+      "current_columns": [],
+      "region_count": 0,
+      "selection_assignment_count": 0,
+      "page_matches": null,
+      "column_matches": null
+    },
+    {
+      "baseline_lid": "1.19.87.20",
+      "migration_status": "stable",
+      "current_lid": "1.19.87.20",
+      "category": "reviewed_region",
+      "classification": "unique_region",
+      "expected_page_indexes": [
+        9
+      ],
+      "expected_columns": [
+        0
+      ],
+      "precision": "region_exact",
+      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "current_page_indexes": [
+        9
+      ],
+      "current_columns": [
+        0
+      ],
+      "region_count": 1,
+      "selection_assignment_count": 0,
+      "page_matches": true,
+      "column_matches": true
+    },
+    {
+      "baseline_lid": "1.19.87.47",
+      "migration_status": "stable",
+      "current_lid": "1.19.87.47",
+      "category": "anchor_lack",
+      "classification": "explicit_structural_ambiguity",
+      "expected_page_indexes": [
+        9
+      ],
+      "expected_columns": [
+        1
+      ],
+      "precision": "unmapped",
+      "reason": "formula region conflicts with adjacent page-column lanes",
+      "current_page_indexes": [],
+      "current_columns": [],
+      "region_count": 0,
+      "selection_assignment_count": 0,
+      "page_matches": null,
+      "column_matches": null
+    },
+    {
+      "baseline_lid": "1.19.87.53",
+      "migration_status": "stable",
+      "current_lid": "1.19.87.53",
+      "category": "reviewed_region",
+      "classification": "unique_region",
+      "expected_page_indexes": [
+        9
+      ],
+      "expected_columns": [
+        0
+      ],
+      "precision": "region_exact",
+      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "current_page_indexes": [
+        9
+      ],
+      "current_columns": [
+        0
+      ],
+      "region_count": 1,
+      "selection_assignment_count": 0,
+      "page_matches": true,
+      "column_matches": true
+    },
+    {
+      "baseline_lid": "1.19.87.149",
+      "migration_status": "stable",
+      "current_lid": "1.19.87.77",
+      "category": "reviewed_region",
+      "classification": "downstream_unit_locator",
+      "expected_page_indexes": [
+        10
+      ],
+      "expected_columns": [
+        1
+      ],
+      "precision": "unmapped",
+      "reason": "alignment unit has no exact monotonic candidate",
+      "current_page_indexes": [],
+      "current_columns": [],
+      "region_count": 0,
+      "selection_assignment_count": 0,
+      "page_matches": null,
+      "column_matches": null
+    },
+    {
+      "baseline_lid": "1.19.87.156",
+      "migration_status": "stable",
+      "current_lid": "1.19.87.84",
+      "category": "anchor_lack",
+      "classification": "downstream_unit_locator",
+      "expected_page_indexes": [
+        10
+      ],
+      "expected_columns": [
+        2
+      ],
+      "precision": "unmapped",
+      "reason": "alignment unit has no exact monotonic candidate",
+      "current_page_indexes": [],
+      "current_columns": [],
+      "region_count": 0,
+      "selection_assignment_count": 0,
+      "page_matches": null,
+      "column_matches": null
+    },
+    {
+      "baseline_lid": "1.19.87.191.19",
+      "migration_status": "stable",
+      "current_lid": "1.19.87.119.19",
+      "category": "reviewed_region",
+      "classification": "unique_region",
+      "expected_page_indexes": [
+        11
+      ],
+      "expected_columns": [
+        0
+      ],
+      "precision": "region_exact",
+      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "current_page_indexes": [
+        11
+      ],
+      "current_columns": [
+        0
+      ],
+      "region_count": 1,
+      "selection_assignment_count": 0,
+      "page_matches": true,
+      "column_matches": true
+    },
+    {
+      "baseline_lid": "1.19.87.191.25",
+      "migration_status": "stable",
+      "current_lid": "1.19.87.119.25",
+      "category": "reviewed_region",
+      "classification": "existing_display_projection",
+      "expected_page_indexes": [
+        11
+      ],
+      "expected_columns": [
+        0
+      ],
+      "precision": "partial",
+      "reason": "complete simple formula display projection with source-markup gaps",
+      "current_page_indexes": [
+        11
+      ],
+      "current_columns": [
+        0
+      ],
+      "region_count": 2,
+      "selection_assignment_count": 101,
+      "page_matches": true,
+      "column_matches": true
+    },
+    {
+      "baseline_lid": "1.19.87.191.60",
+      "migration_status": "stable",
+      "current_lid": "1.19.87.119.60",
+      "category": "reviewed_region",
+      "classification": "unique_region",
+      "expected_page_indexes": [
+        12
+      ],
+      "expected_columns": [
+        0
+      ],
+      "precision": "region_exact",
+      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "current_page_indexes": [
+        12
+      ],
+      "current_columns": [
+        0
+      ],
+      "region_count": 1,
+      "selection_assignment_count": 0,
+      "page_matches": true,
+      "column_matches": true
+    },
+    {
+      "baseline_lid": "1.19.87.191.93",
+      "migration_status": "stable",
+      "current_lid": "1.19.87.119.93",
+      "category": "anchor_lack",
+      "classification": "unique_region",
+      "expected_page_indexes": [
+        12
+      ],
+      "expected_columns": [
+        0
+      ],
+      "precision": "region_exact",
+      "reason": "unique formula region in one page-column lane",
+      "current_page_indexes": [
+        12
+      ],
+      "current_columns": [
+        0
+      ],
+      "region_count": 1,
+      "selection_assignment_count": 0,
+      "page_matches": true,
+      "column_matches": true
+    },
+    {
+      "baseline_lid": "1.19.87.191.103",
+      "migration_status": "stable",
+      "current_lid": "1.19.87.119.103",
+      "category": "reviewed_region",
+      "classification": "unique_region",
+      "expected_page_indexes": [
+        12
+      ],
+      "expected_columns": [
+        0
+      ],
+      "precision": "region_exact",
+      "reason": "unique formula region in one page-column lane",
+      "current_page_indexes": [
+        12
+      ],
+      "current_columns": [
+        0
+      ],
+      "region_count": 1,
+      "selection_assignment_count": 0,
+      "page_matches": true,
+      "column_matches": true
+    },
+    {
+      "baseline_lid": "1.19.87.191.105",
+      "migration_status": "stable",
+      "current_lid": "1.19.87.119.105",
+      "category": "reviewed_region",
+      "classification": "unique_region",
+      "expected_page_indexes": [
+        12
+      ],
+      "expected_columns": [
+        0
+      ],
+      "precision": "region_exact",
+      "reason": "unique formula region in one page-column lane",
+      "current_page_indexes": [
+        12
+      ],
+      "current_columns": [
+        0
+      ],
+      "region_count": 1,
+      "selection_assignment_count": 0,
+      "page_matches": true,
+      "column_matches": true
+    },
+    {
+      "baseline_lid": "1.19.87.191.107",
+      "migration_status": "stable",
+      "current_lid": "1.19.87.119.107",
+      "category": "reviewed_region",
+      "classification": "unique_region",
+      "expected_page_indexes": [
+        12
+      ],
+      "expected_columns": [
+        0
+      ],
+      "precision": "region_exact",
+      "reason": "unique formula region in one page-column lane",
+      "current_page_indexes": [
+        12
+      ],
+      "current_columns": [
+        0
+      ],
+      "region_count": 1,
+      "selection_assignment_count": 0,
+      "page_matches": true,
+      "column_matches": true
+    },
+    {
+      "baseline_lid": "1.19.87.191.109",
+      "migration_status": "stable",
+      "current_lid": "1.19.87.119.109",
+      "category": "reviewed_region",
+      "classification": "unique_region",
+      "expected_page_indexes": [
+        12
+      ],
+      "expected_columns": [
+        0
+      ],
+      "precision": "region_exact",
+      "reason": "unique formula region in one page-column lane",
+      "current_page_indexes": [
+        12
+      ],
+      "current_columns": [
+        0
+      ],
+      "region_count": 1,
+      "selection_assignment_count": 0,
+      "page_matches": true,
+      "column_matches": true
+    },
+    {
+      "baseline_lid": "1.19.87.191.118",
+      "migration_status": "stable",
+      "current_lid": "1.19.87.119.118",
+      "category": "anchor_lack",
+      "classification": "explicit_structural_ambiguity",
+      "expected_page_indexes": [
+        12
+      ],
+      "expected_columns": [
+        1
+      ],
+      "precision": "unmapped",
+      "reason": "formula region candidates do not form a unique monotonic chain",
+      "current_page_indexes": [],
+      "current_columns": [],
+      "region_count": 0,
+      "selection_assignment_count": 0,
+      "page_matches": null,
+      "column_matches": null
+    },
+    {
+      "baseline_lid": "1.19.87.191.122",
+      "migration_status": "stable",
+      "current_lid": "1.19.87.119.122",
+      "category": "reviewed_region",
+      "classification": "explicit_structural_ambiguity",
+      "expected_page_indexes": [
+        12
+      ],
+      "expected_columns": [
+        0
+      ],
+      "precision": "unmapped",
+      "reason": "formula region candidates do not form a unique monotonic chain",
+      "current_page_indexes": [],
+      "current_columns": [],
+      "region_count": 0,
+      "selection_assignment_count": 0,
+      "page_matches": null,
+      "column_matches": null
+    },
+    {
+      "baseline_lid": "1.19.87.191.126",
+      "migration_status": "stable",
+      "current_lid": "1.19.87.119.126",
+      "category": "reviewed_region",
+      "classification": "explicit_structural_ambiguity",
+      "expected_page_indexes": [
+        12
+      ],
+      "expected_columns": [
+        0
+      ],
+      "precision": "unmapped",
+      "reason": "formula region candidates do not form a unique monotonic chain",
+      "current_page_indexes": [],
+      "current_columns": [],
+      "region_count": 0,
+      "selection_assignment_count": 0,
+      "page_matches": null,
+      "column_matches": null
+    },
+    {
+      "baseline_lid": "1.19.87.191.128",
+      "migration_status": "stable",
+      "current_lid": "1.19.87.119.128",
+      "category": "reviewed_region",
+      "classification": "explicit_structural_ambiguity",
+      "expected_page_indexes": [
+        12
+      ],
+      "expected_columns": [
+        0
+      ],
+      "precision": "unmapped",
+      "reason": "formula region candidates do not form a unique monotonic chain",
+      "current_page_indexes": [],
+      "current_columns": [],
+      "region_count": 0,
+      "selection_assignment_count": 0,
+      "page_matches": null,
+      "column_matches": null
+    },
+    {
+      "baseline_lid": "1.19.87.191.138",
+      "migration_status": "stable",
+      "current_lid": "1.19.87.119.138",
+      "category": "anchor_lack",
+      "classification": "explicit_structural_ambiguity",
+      "expected_page_indexes": [
+        13
+      ],
+      "expected_columns": [
+        1
+      ],
+      "precision": "unmapped",
+      "reason": "formula region conflicts with adjacent page-column lanes",
+      "current_page_indexes": [],
+      "current_columns": [],
+      "region_count": 0,
+      "selection_assignment_count": 0,
+      "page_matches": null,
+      "column_matches": null
+    },
+    {
+      "baseline_lid": "1.19.87.191.159",
+      "migration_status": "stable",
+      "current_lid": "1.19.87.119.159",
+      "category": "reviewed_region",
+      "classification": "downstream_unit_locator",
+      "expected_page_indexes": [
+        13
+      ],
+      "expected_columns": [
+        0
+      ],
+      "precision": "unmapped",
+      "reason": "alignment unit has no exact monotonic candidate",
+      "current_page_indexes": [],
+      "current_columns": [],
+      "region_count": 0,
+      "selection_assignment_count": 0,
+      "page_matches": null,
+      "column_matches": null
+    },
+    {
+      "baseline_lid": "1.19.87.191.161",
+      "migration_status": "stable",
+      "current_lid": "1.19.87.119.161",
+      "category": "reviewed_region",
+      "classification": "downstream_unit_locator",
+      "expected_page_indexes": [
+        13
+      ],
+      "expected_columns": [
+        0
+      ],
+      "precision": "unmapped",
+      "reason": "alignment unit has no exact monotonic candidate",
+      "current_page_indexes": [],
+      "current_columns": [],
+      "region_count": 0,
+      "selection_assignment_count": 0,
+      "page_matches": null,
+      "column_matches": null
+    },
+    {
+      "baseline_lid": "1.19.87.191.206",
+      "migration_status": "stable",
+      "current_lid": "1.19.87.119.206",
+      "category": "reviewed_region",
+      "classification": "unique_region",
+      "expected_page_indexes": [
+        14
+      ],
+      "expected_columns": [
+        0
+      ],
+      "precision": "region_exact",
+      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "current_page_indexes": [
+        14
+      ],
+      "current_columns": [
+        0
+      ],
+      "region_count": 1,
+      "selection_assignment_count": 0,
+      "page_matches": true,
+      "column_matches": true
+    },
+    {
+      "baseline_lid": "1.19.87.191.212",
+      "migration_status": "content_drift",
+      "current_lid": "1.19.87.119.211",
+      "category": "anchor_lack",
+      "classification": "reviewed_non_formula",
+      "expected_page_indexes": [
+        14
+      ],
+      "expected_columns": [
+        1
+      ],
+      "precision": "char_exact",
+      "reason": "complete monotonic character projection inside located unit",
+      "current_page_indexes": [
+        14
+      ],
+      "current_columns": [
+        0
+      ],
+      "region_count": 1,
+      "selection_assignment_count": 1,
+      "page_matches": null,
+      "column_matches": null
+    },
+    {
+      "baseline_lid": "1.19.87.191.216",
+      "migration_status": "stable",
+      "current_lid": "1.19.87.119.215",
+      "category": "anchor_lack",
+      "classification": "existing_display_projection",
+      "expected_page_indexes": [
+        14
+      ],
+      "expected_columns": [
+        1
+      ],
+      "precision": "partial",
+      "reason": "complete simple formula display projection with source-markup gaps",
+      "current_page_indexes": [
+        14
+      ],
+      "current_columns": [
+        1
+      ],
+      "region_count": 1,
+      "selection_assignment_count": 1,
+      "page_matches": true,
+      "column_matches": true
+    },
+    {
+      "baseline_lid": "1.19.87.192.10",
+      "migration_status": "stable",
+      "current_lid": "1.19.87.120.10",
+      "category": "reviewed_region",
+      "classification": "downstream_formula_glyph",
+      "expected_page_indexes": [
+        15
+      ],
+      "expected_columns": [
+        0
+      ],
+      "precision": "unmapped",
+      "reason": "formula has no unique bounded PDF gap",
+      "current_page_indexes": [],
+      "current_columns": [],
+      "region_count": 0,
+      "selection_assignment_count": 0,
+      "page_matches": null,
+      "column_matches": null
+    },
+    {
+      "baseline_lid": "1.19.87.192.22",
+      "migration_status": "stable",
+      "current_lid": "1.19.87.120.22",
+      "category": "reviewed_region",
+      "classification": "downstream_unit_locator",
+      "expected_page_indexes": [
+        15
+      ],
+      "expected_columns": [
+        0
+      ],
+      "precision": "unmapped",
+      "reason": "alignment unit has ambiguous forward candidates",
+      "current_page_indexes": [],
+      "current_columns": [],
+      "region_count": 0,
+      "selection_assignment_count": 0,
+      "page_matches": null,
+      "column_matches": null
+    },
+    {
+      "baseline_lid": "1.19.87.192.36",
+      "migration_status": "stable",
+      "current_lid": "1.19.87.120.36",
+      "category": "reviewed_region",
+      "classification": "downstream_formula_glyph",
+      "expected_page_indexes": [
+        15
+      ],
+      "expected_columns": [
+        0
+      ],
+      "precision": "unmapped",
+      "reason": "formula has no unique bounded PDF gap",
+      "current_page_indexes": [],
+      "current_columns": [],
+      "region_count": 0,
+      "selection_assignment_count": 0,
+      "page_matches": null,
+      "column_matches": null
+    },
+    {
+      "baseline_lid": "1.19.87.192.38",
+      "migration_status": "stable",
+      "current_lid": "1.19.87.120.38",
+      "category": "reviewed_region",
+      "classification": "downstream_formula_glyph",
+      "expected_page_indexes": [
+        15
+      ],
+      "expected_columns": [
+        0
+      ],
+      "precision": "unmapped",
+      "reason": "formula has no unique bounded PDF gap",
+      "current_page_indexes": [],
+      "current_columns": [],
+      "region_count": 0,
+      "selection_assignment_count": 0,
+      "page_matches": null,
+      "column_matches": null
+    },
+    {
+      "baseline_lid": "1.19.87.192.40",
+      "migration_status": "stable",
+      "current_lid": "1.19.87.120.40",
+      "category": "reviewed_region",
+      "classification": "downstream_formula_glyph",
+      "expected_page_indexes": [
+        15
+      ],
+      "expected_columns": [
+        0
+      ],
+      "precision": "unmapped",
+      "reason": "formula has no unique bounded PDF gap",
+      "current_page_indexes": [],
+      "current_columns": [],
+      "region_count": 0,
+      "selection_assignment_count": 0,
+      "page_matches": null,
+      "column_matches": null
+    },
+    {
+      "baseline_lid": "1.19.87.192.75",
+      "migration_status": "stable",
+      "current_lid": "1.19.87.120.75",
+      "category": "anchor_lack",
+      "classification": "downstream_unit_locator",
+      "expected_page_indexes": [
+        16
+      ],
+      "expected_columns": [
+        0
+      ],
+      "precision": "unmapped",
+      "reason": "alignment unit has ambiguous forward candidates",
+      "current_page_indexes": [],
+      "current_columns": [],
+      "region_count": 0,
+      "selection_assignment_count": 0,
+      "page_matches": null,
+      "column_matches": null
+    },
+    {
+      "baseline_lid": "1.20.3.11",
+      "migration_status": "stable",
+      "current_lid": "1.20.3.11",
+      "category": "anchor_lack",
+      "classification": "explicit_structural_ambiguity",
+      "expected_page_indexes": [
+        17
+      ],
+      "expected_columns": [
+        0
+      ],
+      "precision": "unmapped",
+      "reason": "formula region candidates do not form a unique monotonic chain",
+      "current_page_indexes": [],
+      "current_columns": [],
+      "region_count": 0,
+      "selection_assignment_count": 0,
+      "page_matches": null,
+      "column_matches": null
+    },
+    {
+      "baseline_lid": "1.20.3.30",
+      "migration_status": "stable",
+      "current_lid": "1.20.3.30",
+      "category": "reviewed_region",
+      "classification": "explicit_structural_ambiguity",
+      "expected_page_indexes": [
+        17
+      ],
+      "expected_columns": [
+        0
+      ],
+      "precision": "unmapped",
+      "reason": "formula region candidates do not form a unique monotonic chain",
+      "current_page_indexes": [],
+      "current_columns": [],
+      "region_count": 0,
+      "selection_assignment_count": 0,
+      "page_matches": null,
+      "column_matches": null
+    },
+    {
+      "baseline_lid": "1.20.3.40",
+      "migration_status": "stable",
+      "current_lid": "1.20.3.40",
+      "category": "reviewed_region",
+      "classification": "unique_region",
+      "expected_page_indexes": [
+        18
+      ],
+      "expected_columns": [
+        0
+      ],
+      "precision": "region_exact",
+      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "current_page_indexes": [
+        18
+      ],
+      "current_columns": [
+        0
+      ],
+      "region_count": 1,
+      "selection_assignment_count": 0,
+      "page_matches": true,
+      "column_matches": true
+    },
+    {
+      "baseline_lid": "1.20.3.43",
+      "migration_status": "stable",
+      "current_lid": "1.20.3.43",
+      "category": "reviewed_region",
+      "classification": "unique_region",
+      "expected_page_indexes": [
+        18
+      ],
+      "expected_columns": [
+        0
+      ],
+      "precision": "region_exact",
+      "reason": "unique formula region in one page-column lane",
+      "current_page_indexes": [
+        18
+      ],
+      "current_columns": [
+        0
+      ],
+      "region_count": 1,
+      "selection_assignment_count": 0,
+      "page_matches": true,
+      "column_matches": true
+    },
+    {
+      "baseline_lid": "1.20.3.70",
+      "migration_status": "stable",
+      "current_lid": "1.20.3.70",
+      "category": "reviewed_region",
+      "classification": "explicit_structural_ambiguity",
+      "expected_page_indexes": [
+        18
+      ],
+      "expected_columns": [
+        0
+      ],
+      "precision": "unmapped",
+      "reason": "formula region candidates do not form a unique monotonic chain",
+      "current_page_indexes": [],
+      "current_columns": [],
+      "region_count": 0,
+      "selection_assignment_count": 0,
+      "page_matches": null,
+      "column_matches": null
+    },
+    {
+      "baseline_lid": "1.20.4.30",
+      "migration_status": "stable",
+      "current_lid": "1.20.4.30",
+      "category": "reviewed_region",
+      "classification": "unique_region",
+      "expected_page_indexes": [
+        20
+      ],
+      "expected_columns": [
+        0
+      ],
+      "precision": "region_exact",
+      "reason": "unique formula region in one page-column lane",
+      "current_page_indexes": [
+        20
+      ],
+      "current_columns": [
+        0
+      ],
+      "region_count": 1,
+      "selection_assignment_count": 0,
+      "page_matches": true,
+      "column_matches": true
+    },
+    {
+      "baseline_lid": "1.23.6",
+      "migration_status": "stable",
+      "current_lid": "1.23.6",
+      "category": "anchor_lack",
+      "classification": "explicit_structural_ambiguity",
+      "expected_page_indexes": [
+        22
+      ],
+      "expected_columns": [
+        0,
+        1
+      ],
+      "precision": "unmapped",
+      "reason": "formula region conflicts with adjacent page-column lanes",
+      "current_page_indexes": [],
+      "current_columns": [],
+      "region_count": 0,
+      "selection_assignment_count": 0,
+      "page_matches": null,
+      "column_matches": null
+    },
+    {
+      "baseline_lid": "1.23.11",
+      "migration_status": "stable",
+      "current_lid": "1.23.11",
+      "category": "anchor_lack",
+      "classification": "explicit_structural_ambiguity",
+      "expected_page_indexes": [
+        22
+      ],
+      "expected_columns": [
+        0
+      ],
+      "precision": "unmapped",
+      "reason": "formula region conflicts with adjacent page-column lanes",
+      "current_page_indexes": [],
+      "current_columns": [],
+      "region_count": 0,
+      "selection_assignment_count": 0,
+      "page_matches": null,
+      "column_matches": null
+    },
+    {
+      "baseline_lid": "1.23.12",
+      "migration_status": "stable",
+      "current_lid": "1.23.12",
+      "category": "anchor_lack",
+      "classification": "explicit_structural_ambiguity",
+      "expected_page_indexes": [
+        22
+      ],
+      "expected_columns": [
+        1
+      ],
+      "precision": "unmapped",
+      "reason": "formula region conflicts with adjacent page-column lanes",
+      "current_page_indexes": [],
+      "current_columns": [],
+      "region_count": 0,
+      "selection_assignment_count": 0,
+      "page_matches": null,
+      "column_matches": null
+    },
+    {
+      "baseline_lid": "1.23.19",
+      "migration_status": "stable",
+      "current_lid": "1.23.19",
+      "category": "reviewed_region",
+      "classification": "existing_display_projection",
+      "expected_page_indexes": [
+        22
+      ],
+      "expected_columns": [
+        0
+      ],
+      "precision": "partial",
+      "reason": "complete simple formula display projection with source-markup gaps",
+      "current_page_indexes": [
+        22
+      ],
+      "current_columns": [
+        0
+      ],
+      "region_count": 2,
+      "selection_assignment_count": 25,
+      "page_matches": true,
+      "column_matches": true
+    },
+    {
+      "baseline_lid": "1.23.33",
+      "migration_status": "stable",
+      "current_lid": "1.23.33",
+      "category": "reviewed_region",
+      "classification": "existing_display_projection",
+      "expected_page_indexes": [
+        22
+      ],
+      "expected_columns": [
+        0
+      ],
+      "precision": "partial",
+      "reason": "complete simple formula display projection with source-markup gaps",
+      "current_page_indexes": [
+        22
+      ],
+      "current_columns": [
+        0
+      ],
+      "region_count": 1,
+      "selection_assignment_count": 25,
+      "page_matches": true,
+      "column_matches": true
+    },
+    {
+      "baseline_lid": "1.23.36",
+      "migration_status": "stable",
+      "current_lid": "1.23.36",
+      "category": "reviewed_region",
+      "classification": "existing_display_projection",
+      "expected_page_indexes": [
+        22
+      ],
+      "expected_columns": [
+        0
+      ],
+      "precision": "partial",
+      "reason": "complete simple formula display projection with source-markup gaps",
+      "current_page_indexes": [
+        22
+      ],
+      "current_columns": [
+        0
+      ],
+      "region_count": 1,
+      "selection_assignment_count": 48,
+      "page_matches": true,
+      "column_matches": true
+    },
+    {
+      "baseline_lid": "1.23.41",
+      "migration_status": "stable",
+      "current_lid": "1.23.41",
+      "category": "anchor_lack",
+      "classification": "explicit_structural_ambiguity",
+      "expected_page_indexes": [
+        22
+      ],
+      "expected_columns": [
+        1
+      ],
+      "precision": "unmapped",
+      "reason": "formula region candidates do not form a unique monotonic chain",
+      "current_page_indexes": [],
+      "current_columns": [],
+      "region_count": 0,
+      "selection_assignment_count": 0,
+      "page_matches": null,
+      "column_matches": null
+    },
+    {
+      "baseline_lid": "1.23.49",
+      "migration_status": "stable",
+      "current_lid": "1.23.49",
+      "category": "anchor_lack",
+      "classification": "explicit_structural_ambiguity",
+      "expected_page_indexes": [
+        23
+      ],
+      "expected_columns": [
+        0,
+        1
+      ],
+      "precision": "unmapped",
+      "reason": "formula region conflicts with adjacent page-column lanes",
+      "current_page_indexes": [],
+      "current_columns": [],
+      "region_count": 0,
+      "selection_assignment_count": 0,
+      "page_matches": null,
+      "column_matches": null
+    },
+    {
+      "baseline_lid": "1.23.52",
+      "migration_status": "stable",
+      "current_lid": "1.23.52",
+      "category": "reviewed_region",
+      "classification": "existing_display_projection",
+      "expected_page_indexes": [
+        23
+      ],
+      "expected_columns": [
+        0
+      ],
+      "precision": "partial",
+      "reason": "complete simple formula display projection with source-markup gaps",
+      "current_page_indexes": [
+        23
+      ],
+      "current_columns": [
+        0
+      ],
+      "region_count": 1,
+      "selection_assignment_count": 27,
+      "page_matches": true,
+      "column_matches": true
+    },
+    {
+      "baseline_lid": "1.23.63",
+      "migration_status": "stable",
+      "current_lid": "1.23.63",
+      "category": "reviewed_region",
+      "classification": "existing_display_projection",
+      "expected_page_indexes": [
+        23
+      ],
+      "expected_columns": [
+        0
+      ],
+      "precision": "partial",
+      "reason": "complete simple formula display projection with source-markup gaps",
+      "current_page_indexes": [
+        23
+      ],
+      "current_columns": [
+        0
+      ],
+      "region_count": 2,
+      "selection_assignment_count": 40,
+      "page_matches": true,
+      "column_matches": true
+    },
+    {
+      "baseline_lid": "1.23.100",
+      "migration_status": "stable",
+      "current_lid": "1.23.100",
+      "category": "reviewed_region",
+      "classification": "existing_display_projection",
+      "expected_page_indexes": [
+        24
+      ],
+      "expected_columns": [
+        0
+      ],
+      "precision": "partial",
+      "reason": "complete simple formula display projection with source-markup gaps",
+      "current_page_indexes": [
+        24
+      ],
+      "current_columns": [
+        0
+      ],
+      "region_count": 1,
+      "selection_assignment_count": 44,
+      "page_matches": true,
+      "column_matches": true
+    },
+    {
+      "baseline_lid": "1.23.113",
+      "migration_status": "stable",
+      "current_lid": "1.23.113",
+      "category": "anchor_lack",
+      "classification": "explicit_structural_ambiguity",
+      "expected_page_indexes": [
+        24
+      ],
+      "expected_columns": [
+        0,
+        1
+      ],
+      "precision": "unmapped",
+      "reason": "formula region conflicts with adjacent page-column lanes",
+      "current_page_indexes": [],
+      "current_columns": [],
+      "region_count": 0,
+      "selection_assignment_count": 0,
+      "page_matches": null,
+      "column_matches": null
+    },
+    {
+      "baseline_lid": "1.23.116",
+      "migration_status": "stable",
+      "current_lid": "1.23.116",
+      "category": "reviewed_region",
+      "classification": "existing_display_projection",
+      "expected_page_indexes": [
+        24
+      ],
+      "expected_columns": [
+        0
+      ],
+      "precision": "partial",
+      "reason": "complete simple formula display projection with source-markup gaps",
+      "current_page_indexes": [
+        24
+      ],
+      "current_columns": [
+        0
+      ],
+      "region_count": 1,
+      "selection_assignment_count": 40,
+      "page_matches": true,
+      "column_matches": true
+    },
+    {
+      "baseline_lid": "1.24.2.4",
+      "migration_status": "stable",
+      "current_lid": "1.24.2.4",
+      "category": "reviewed_region",
+      "classification": "unique_region",
+      "expected_page_indexes": [
+        25
+      ],
+      "expected_columns": [
+        0
+      ],
+      "precision": "region_exact",
+      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "current_page_indexes": [
+        25
+      ],
+      "current_columns": [
+        0
+      ],
+      "region_count": 1,
+      "selection_assignment_count": 0,
+      "page_matches": true,
+      "column_matches": true
+    },
+    {
+      "baseline_lid": "1.24.4.24",
+      "migration_status": "stable",
+      "current_lid": "1.24.4.24",
+      "category": "anchor_lack",
+      "classification": "downstream_unit_locator",
+      "expected_page_indexes": [
+        27
+      ],
+      "expected_columns": [
+        2
+      ],
+      "precision": "unmapped",
+      "reason": "alignment unit has no exact monotonic candidate",
+      "current_page_indexes": [],
+      "current_columns": [],
+      "region_count": 0,
+      "selection_assignment_count": 0,
+      "page_matches": null,
+      "column_matches": null
+    },
+    {
+      "baseline_lid": "1.24.6.10",
+      "migration_status": "stable",
+      "current_lid": "1.24.6.10",
+      "category": "anchor_lack",
+      "classification": "downstream_formula_glyph",
+      "expected_page_indexes": [
+        30
+      ],
+      "expected_columns": [
+        1
+      ],
+      "precision": "unmapped",
+      "reason": "formula has no unique bounded PDF gap",
+      "current_page_indexes": [],
+      "current_columns": [],
+      "region_count": 0,
+      "selection_assignment_count": 0,
+      "page_matches": null,
+      "column_matches": null
+    },
+    {
+      "baseline_lid": "1.24.10.3",
+      "migration_status": "stable",
+      "current_lid": "1.24.10.3",
+      "category": "reviewed_region",
+      "classification": "unique_region",
+      "expected_page_indexes": [
+        32
+      ],
+      "expected_columns": [
+        0
+      ],
+      "precision": "region_exact",
+      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "current_page_indexes": [
+        32
+      ],
+      "current_columns": [
+        0
+      ],
+      "region_count": 1,
+      "selection_assignment_count": 0,
+      "page_matches": true,
+      "column_matches": true
+    },
+    {
+      "baseline_lid": "1.24.10.7",
+      "migration_status": "stable",
+      "current_lid": "1.24.10.7",
+      "category": "reviewed_region",
+      "classification": "unique_region",
+      "expected_page_indexes": [
+        32
+      ],
+      "expected_columns": [
+        0
+      ],
+      "precision": "region_exact",
+      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "current_page_indexes": [
+        32
+      ],
+      "current_columns": [
+        0
+      ],
+      "region_count": 1,
+      "selection_assignment_count": 0,
+      "page_matches": true,
+      "column_matches": true
+    },
+    {
+      "baseline_lid": "1.24.12.5",
+      "migration_status": "stable",
+      "current_lid": "1.24.12.5",
+      "category": "reviewed_region",
+      "classification": "unique_region",
+      "expected_page_indexes": [
+        35
+      ],
+      "expected_columns": [
+        0
+      ],
+      "precision": "region_exact",
+      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "current_page_indexes": [
+        35
+      ],
+      "current_columns": [
+        0
+      ],
+      "region_count": 1,
+      "selection_assignment_count": 0,
+      "page_matches": true,
+      "column_matches": true
+    },
+    {
+      "baseline_lid": "1.24.12.54",
+      "migration_status": "stable",
+      "current_lid": "1.24.12.54",
+      "category": "reviewed_region",
+      "classification": "downstream_unit_locator",
+      "expected_page_indexes": [
+        35
+      ],
+      "expected_columns": [
+        0
+      ],
+      "precision": "unmapped",
+      "reason": "alignment unit has no exact monotonic candidate",
+      "current_page_indexes": [],
+      "current_columns": [],
+      "region_count": 0,
+      "selection_assignment_count": 0,
+      "page_matches": null,
+      "column_matches": null
+    },
+    {
+      "baseline_lid": "1.24.12.60",
+      "migration_status": "stable",
+      "current_lid": "1.24.12.60",
+      "category": "reviewed_region",
+      "classification": "downstream_unit_locator",
+      "expected_page_indexes": [
+        35
+      ],
+      "expected_columns": [
+        0
+      ],
+      "precision": "unmapped",
+      "reason": "alignment unit has no exact monotonic candidate",
+      "current_page_indexes": [],
+      "current_columns": [],
+      "region_count": 0,
+      "selection_assignment_count": 0,
+      "page_matches": null,
+      "column_matches": null
+    },
+    {
+      "baseline_lid": "1.24.12.66",
+      "migration_status": "stable",
+      "current_lid": "1.24.12.66",
+      "category": "reviewed_region",
+      "classification": "downstream_unit_locator",
+      "expected_page_indexes": [
+        35
+      ],
+      "expected_columns": [
+        0
+      ],
+      "precision": "unmapped",
+      "reason": "alignment unit has no exact monotonic candidate",
+      "current_page_indexes": [],
+      "current_columns": [],
+      "region_count": 0,
+      "selection_assignment_count": 0,
+      "page_matches": null,
+      "column_matches": null
+    },
+    {
+      "baseline_lid": "1.24.12.68",
+      "migration_status": "stable",
+      "current_lid": "1.24.12.68",
+      "category": "reviewed_region",
+      "classification": "downstream_unit_locator",
+      "expected_page_indexes": [
+        35
+      ],
+      "expected_columns": [
+        0
+      ],
+      "precision": "unmapped",
+      "reason": "alignment unit has no exact monotonic candidate",
+      "current_page_indexes": [],
+      "current_columns": [],
+      "region_count": 0,
+      "selection_assignment_count": 0,
+      "page_matches": null,
+      "column_matches": null
+    },
+    {
+      "baseline_lid": "1.24.13.10",
+      "migration_status": "stable",
+      "current_lid": "1.24.13.10",
+      "category": "reviewed_region",
+      "classification": "unique_region",
+      "expected_page_indexes": [
+        36
+      ],
+      "expected_columns": [
+        0
+      ],
+      "precision": "region_exact",
+      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "current_page_indexes": [
+        36
+      ],
+      "current_columns": [
+        0
+      ],
+      "region_count": 1,
+      "selection_assignment_count": 0,
+      "page_matches": true,
+      "column_matches": true
+    },
+    {
+      "baseline_lid": "1.24.14.4",
+      "migration_status": "stable",
+      "current_lid": "1.24.14.4",
+      "category": "reviewed_region",
+      "classification": "unique_region",
+      "expected_page_indexes": [
+        36
+      ],
+      "expected_columns": [
+        1
+      ],
+      "precision": "region_exact",
+      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "current_page_indexes": [
+        36
+      ],
+      "current_columns": [
+        1
+      ],
+      "region_count": 1,
+      "selection_assignment_count": 0,
+      "page_matches": true,
+      "column_matches": true
+    },
+    {
+      "baseline_lid": "1.24.16.20",
+      "migration_status": "stable",
+      "current_lid": "1.24.16.20",
+      "category": "reviewed_region",
+      "classification": "explicit_structural_ambiguity",
+      "expected_page_indexes": [
+        38
+      ],
+      "expected_columns": [
+        0
+      ],
+      "precision": "unmapped",
+      "reason": "formula region candidates do not form a unique monotonic chain",
+      "current_page_indexes": [],
+      "current_columns": [],
+      "region_count": 0,
+      "selection_assignment_count": 0,
+      "page_matches": null,
+      "column_matches": null
+    },
+    {
+      "baseline_lid": "1.24.16.29",
+      "migration_status": "stable",
+      "current_lid": "1.24.16.29",
+      "category": "reviewed_region",
+      "classification": "unique_region",
+      "expected_page_indexes": [
+        38
+      ],
+      "expected_columns": [
+        0
+      ],
+      "precision": "region_exact",
+      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "current_page_indexes": [
+        38
+      ],
+      "current_columns": [
+        0
+      ],
+      "region_count": 1,
+      "selection_assignment_count": 0,
+      "page_matches": true,
+      "column_matches": true
+    },
+    {
+      "baseline_lid": "1.24.16.31",
+      "migration_status": "stable",
+      "current_lid": "1.24.16.31",
+      "category": "reviewed_region",
+      "classification": "unique_region",
+      "expected_page_indexes": [
+        38
+      ],
+      "expected_columns": [
+        0
+      ],
+      "precision": "region_exact",
+      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "current_page_indexes": [
+        38
+      ],
+      "current_columns": [
+        0
+      ],
+      "region_count": 1,
+      "selection_assignment_count": 0,
+      "page_matches": true,
+      "column_matches": true
+    },
+    {
+      "baseline_lid": "1.24.16.72",
+      "migration_status": "stable",
+      "current_lid": "1.24.16.72",
+      "category": "reviewed_region",
+      "classification": "unique_region",
+      "expected_page_indexes": [
+        39
+      ],
+      "expected_columns": [
+        0
+      ],
+      "precision": "region_exact",
+      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "current_page_indexes": [
+        39
+      ],
+      "current_columns": [
+        0
+      ],
+      "region_count": 1,
+      "selection_assignment_count": 0,
+      "page_matches": true,
+      "column_matches": true
+    },
+    {
+      "baseline_lid": "1.24.16.74",
+      "migration_status": "stable",
+      "current_lid": "1.24.16.74",
+      "category": "reviewed_region",
+      "classification": "unique_region",
+      "expected_page_indexes": [
+        39
+      ],
+      "expected_columns": [
+        0
+      ],
+      "precision": "region_exact",
+      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "current_page_indexes": [
+        39
+      ],
+      "current_columns": [
+        0
+      ],
+      "region_count": 1,
+      "selection_assignment_count": 0,
+      "page_matches": true,
+      "column_matches": true
+    },
+    {
+      "baseline_lid": "1.24.16.81",
+      "migration_status": "stable",
+      "current_lid": "1.24.16.81",
+      "category": "reviewed_region",
+      "classification": "unique_region",
+      "expected_page_indexes": [
+        39
+      ],
+      "expected_columns": [
+        0
+      ],
+      "precision": "region_exact",
+      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "current_page_indexes": [
+        39
+      ],
+      "current_columns": [
+        0
+      ],
+      "region_count": 1,
+      "selection_assignment_count": 0,
+      "page_matches": true,
+      "column_matches": true
+    },
+    {
+      "baseline_lid": "1.24.17.7",
+      "migration_status": "stable",
+      "current_lid": "1.24.17.7",
+      "category": "reviewed_region",
+      "classification": "unique_region",
+      "expected_page_indexes": [
+        39
+      ],
+      "expected_columns": [
+        0
+      ],
+      "precision": "region_exact",
+      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "current_page_indexes": [
+        39
+      ],
+      "current_columns": [
+        0
+      ],
+      "region_count": 1,
+      "selection_assignment_count": 0,
+      "page_matches": true,
+      "column_matches": true
+    },
+    {
+      "baseline_lid": "1.24.17.11",
+      "migration_status": "stable",
+      "current_lid": "1.24.17.11",
+      "category": "reviewed_region",
+      "classification": "unique_region",
+      "expected_page_indexes": [
+        39
+      ],
+      "expected_columns": [
+        0
+      ],
+      "precision": "region_exact",
+      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "current_page_indexes": [
+        39
+      ],
+      "current_columns": [
+        0
+      ],
+      "region_count": 1,
+      "selection_assignment_count": 0,
+      "page_matches": true,
+      "column_matches": true
+    },
+    {
+      "baseline_lid": "1.24.17.24",
+      "migration_status": "stable",
+      "current_lid": "1.24.17.24",
+      "category": "reviewed_region",
+      "classification": "unique_region",
+      "expected_page_indexes": [
+        39
+      ],
+      "expected_columns": [
+        0
+      ],
+      "precision": "region_exact",
+      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "current_page_indexes": [
+        39
+      ],
+      "current_columns": [
+        0
+      ],
+      "region_count": 1,
+      "selection_assignment_count": 0,
+      "page_matches": true,
+      "column_matches": true
+    },
+    {
+      "baseline_lid": "1.24.17.28",
+      "migration_status": "stable",
+      "current_lid": "1.24.17.28",
+      "category": "reviewed_region",
+      "classification": "unique_region",
+      "expected_page_indexes": [
+        39
+      ],
+      "expected_columns": [
+        0
+      ],
+      "precision": "region_exact",
+      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "current_page_indexes": [
+        39
+      ],
+      "current_columns": [
+        0
+      ],
+      "region_count": 1,
+      "selection_assignment_count": 0,
+      "page_matches": true,
+      "column_matches": true
+    },
+    {
+      "baseline_lid": "1.24.17.30",
+      "migration_status": "stable",
+      "current_lid": "1.24.17.30",
+      "category": "reviewed_region",
+      "classification": "unique_region",
+      "expected_page_indexes": [
+        39
+      ],
+      "expected_columns": [
+        0
+      ],
+      "precision": "region_exact",
+      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "current_page_indexes": [
+        39
+      ],
+      "current_columns": [
+        0
+      ],
+      "region_count": 1,
+      "selection_assignment_count": 0,
+      "page_matches": true,
+      "column_matches": true
+    },
+    {
+      "baseline_lid": "8.7.5",
+      "migration_status": "stable",
+      "current_lid": "1.24.19.5",
+      "category": "reviewed_region",
+      "classification": "downstream_formula_glyph",
+      "expected_page_indexes": [
+        45
+      ],
+      "expected_columns": [
+        0
+      ],
+      "precision": "unmapped",
+      "reason": "formula has no unique bounded PDF gap",
+      "current_page_indexes": [],
+      "current_columns": [],
+      "region_count": 0,
+      "selection_assignment_count": 0,
+      "page_matches": null,
+      "column_matches": null
+    },
+    {
+      "baseline_lid": "8.7.22",
+      "migration_status": "stable",
+      "current_lid": "1.24.19.22",
+      "category": "reviewed_region",
+      "classification": "unique_region",
+      "expected_page_indexes": [
+        45
+      ],
+      "expected_columns": [
+        0
+      ],
+      "precision": "region_exact",
+      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "current_page_indexes": [
+        45
+      ],
+      "current_columns": [
+        0
+      ],
+      "region_count": 1,
+      "selection_assignment_count": 0,
+      "page_matches": true,
+      "column_matches": true
+    }
+  ]
+}

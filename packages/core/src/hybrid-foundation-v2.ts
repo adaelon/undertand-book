@@ -6,6 +6,7 @@ import { FORMULA_SOURCE_AST_POLICY } from "./formula-source-ast";
 import {
   alignHybridFoundationV2,
   PDF_DISPLAY_TOKEN_POLICY,
+  PDF_FORMULA_REGION_POLICY,
   type HybridChildProjection,
 } from "./hybrid-alignment-v2";
 import type { PdfTextGeometry } from "./pdf-geometry";
@@ -223,6 +224,7 @@ export function buildHybridFoundationV2Candidate(input: HybridFoundationV2Input)
     quality_policy_version: "hybrid_quality_policy.v1" as const,
     display_token_policy_version: PDF_DISPLAY_TOKEN_POLICY.version,
     formula_source_ast_version: FORMULA_SOURCE_AST_POLICY.version,
+    formula_region_policy_version: PDF_FORMULA_REGION_POLICY.version,
   };
   const configHash = sha256(JSON.stringify(config));
   const pageRegionIndex: Record<string, string[]> = {};
@@ -237,6 +239,7 @@ export function buildHybridFoundationV2Candidate(input: HybridFoundationV2Input)
   const pdfSourceMap: PdfSourceMapV2 = {
     version: "pdf_source_map.v2",
     display_token_policy_version: PDF_DISPLAY_TOKEN_POLICY.version,
+    formula_region_policy_version: PDF_FORMULA_REGION_POLICY.version,
     book_id: input.book_id,
     coordinate_system: pdfUserSpaceCoordinateSystem(),
     pages: input.pdf_geometry.pages.map((page) => ({
@@ -434,6 +437,10 @@ export function assertHybridFoundationV2Integrity(artifacts: HybridFoundationV2A
   if (artifacts.pdf_source_map.display_token_policy_version
     !== report.config.display_token_policy_version) {
     throw new Error("hybrid foundation v2 display token policy versions differ");
+  }
+  if (artifacts.pdf_source_map.formula_region_policy_version
+    !== report.config.formula_region_policy_version) {
+    throw new Error("hybrid foundation v2 formula region policy versions differ");
   }
   const failed = Object.entries(report.integrity).filter(([, passed]) => !passed).map(([gate]) => gate);
   if (failed.length) throw new Error(`hybrid foundation v2 integrity failed: ${failed.join(", ")}`);

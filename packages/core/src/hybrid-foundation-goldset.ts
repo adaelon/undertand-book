@@ -201,6 +201,7 @@ export const GoldsetManifestZ = z.object({
     child_window_audit_path: z.string().min(1).optional(),
     display_token_audit_path: z.string().min(1).optional(),
     formula_source_ast_audit_path: z.string().min(1).optional(),
+    formula_region_audit_path: z.string().min(1).optional(),
     requires_explicit_book_path: z.literal(true),
   })),
 });

@@ -243,7 +243,7 @@ describe("HF2-2 semantic-unit PDF alignment", () => {
     expect(formulaProjections.slice(3).every((projection) => projection.primary_region!.bbox[0] >= 320)).toBe(true);
   });
 
-  it("keeps a standalone display formula isolated until structural formula localization", () => {
+  it("locates a standalone display formula as a unique page-column region", () => {
     const source = [
       "# Display Formula",
       "",
@@ -267,15 +267,116 @@ describe("HF2-2 semantic-unit PDF alignment", () => {
 
     expect(formulaUnit.child_lids.map((child) => child.kind)).toEqual(["formula"]);
     expect(formula).toMatchObject({
-      precision: "partial",
+      precision: "region_exact",
       regions: [{ pageIndex: 0 }],
       selection_assignments: [],
-      alignment: { reason: "formula text is located but lacks same-page same-column anchors" },
+      alignment: { reason: "unique formula region in one page-column lane" },
     });
     expect(formula).not.toHaveProperty("formula_display_text");
   });
 
-  it("keeps a cross-page formula partial even when the full unit is located", () => {
+  it.each([
+    ["left", "alpha anchor $x=y$\n"],
+    ["right", "$x=y$ omega anchor\n"],
+  ])("locates a formula with only a %s text anchor", (_side, source) => {
+    const unit = formHybridAlignmentUnits(source)[0];
+    const formula = projectHybridAlignmentChildren(source, {
+      unit,
+      status: "located",
+      reason: "test-proven one-sided local window",
+      lines: pdfAlignmentLines(geometryFromPages([["alpha anchor x=y omega anchor"]])),
+    }).find((projection) => (
+      unit.child_lids.find((child) => child.lid === projection.lid)?.kind === "formula"
+    ));
+
+    expect(formula).toMatchObject({
+      precision: "region_exact",
+      regions: [{ pageIndex: 0 }],
+      selection_assignments: [],
+      alignment: { reason: "unique formula region in one page-column lane" },
+    });
+  });
+
+  it("uses a unique whole monotonic chain for repeated short formulas", () => {
+    const source = "$n$ $n$\n";
+    const unit = formHybridAlignmentUnits(source)[0];
+    const formulas = projectHybridAlignmentChildren(source, {
+      unit,
+      status: "located",
+      reason: "test-proven repeated formula window",
+      lines: pdfAlignmentLines(geometryFromPages([["n n"]])),
+    }).filter((projection) => (
+      unit.child_lids.find((child) => child.lid === projection.lid)?.kind === "formula"
+    ));
+
+    expect(unit.child_lids.map((child) => child.kind)).toEqual(["formula", "formula"]);
+    expect(formulas.map((projection) => projection.precision)).toEqual(["region_exact", "region_exact"]);
+    expect(new Set(formulas.map((projection) => projection.primary_region?.bbox.join(","))).size).toBe(2);
+  });
+
+  it("does not create source assignments for formula regions newly resolved by the whole chain", () => {
+    const source = "left anchor $n$ $n$ right anchor\n";
+    const unit = formHybridAlignmentUnits(source)[0];
+    const formulas = projectHybridAlignmentChildren(source, {
+      unit,
+      status: "located",
+      reason: "test-proven repeated formula window with bilateral text anchors",
+      lines: pdfAlignmentLines(geometryFromPages([["left anchor n n right anchor"]])),
+    }).filter((projection) => (
+      unit.child_lids.find((child) => child.lid === projection.lid)?.kind === "formula"
+    ));
+
+    expect(formulas).toHaveLength(2);
+    expect(formulas.every((projection) => (
+      projection.precision === "region_exact"
+      && projection.selection_assignments.length === 0
+      && projection.exact_source_spans.length === 0
+    ))).toBe(true);
+  });
+
+  it("fails closed when repeated formula signatures have multiple whole monotonic chains", () => {
+    const source = "$n$ $n$\n";
+    const unit = formHybridAlignmentUnits(source)[0];
+    const formulas = projectHybridAlignmentChildren(source, {
+      unit,
+      status: "located",
+      reason: "test-proven ambiguous formula window",
+      lines: pdfAlignmentLines(geometryFromPages([["n n n"]])),
+    }).filter((projection) => (
+      unit.child_lids.find((child) => child.lid === projection.lid)?.kind === "formula"
+    ));
+
+    expect(formulas).toHaveLength(2);
+    expect(formulas.every((projection) => (
+      projection.precision === "unmapped"
+      && projection.alignment.reason === "formula region candidates do not form a unique monotonic chain"
+    ))).toBe(true);
+  });
+
+  it.each([
+    ["pages", geometryFromPages([["x"], ["y"]])],
+    ["columns", geometryFromPositionedLines([
+      { text: "x", bbox: [72, 180, 78, 192] },
+      { text: "y", bbox: [360, 160, 366, 172] },
+    ])],
+  ])("refuses a formula signature that crosses page-column %s", (_kind, geometry) => {
+    const source = "$xy$\n";
+    const unit = formHybridAlignmentUnits(source)[0];
+    const formula = projectHybridAlignmentChildren(source, {
+      unit,
+      status: "located",
+      reason: "test-proven cross-lane window",
+      lines: pdfAlignmentLines(geometry),
+    })[0];
+
+    expect(formula).toMatchObject({
+      precision: "unmapped",
+      regions: [],
+      alignment: { reason: "formula signature crosses page-column lanes" },
+    });
+  });
+
+  it("locates a standalone formula when the following source block starts on another page", () => {
     const source = [
       "Before alpha beta gamma delta.",
       "",
@@ -294,9 +395,10 @@ describe("HF2-2 semantic-unit PDF alignment", () => {
     const formulaLocation = result.locations.find((location) => location.unit.unit_id === formulaUnit.unit_id)!;
 
     expect(formulaLocation.status).toBe("located");
-    expect(formula.precision).toBe("partial");
-    expect(formula.regions).toHaveLength(1);
+    expect(formula.precision).toBe("region_exact");
+    expect(formula.regions).toMatchObject([{ pageIndex: 0 }]);
     expect(formula.selection_assignments).toEqual([]);
+    expect(formula.alignment.reason).toBe("unique formula region in one page-column lane");
     expect(formula).not.toHaveProperty("formula_display_text");
   });
 

@@ -173,6 +173,8 @@ Inspired by the discussion above,  $ \underline{\text{can we propose a new assoc
 
 ## 11. PDF-A006/PDF-A007 公式适配缺口
 
+**状态**：`geometry-classified`；PR15 已移除双侧正文锚硬依赖并闭合 page/column region owner，复杂 glyph、未定位 unit 与正式发布仍分别等待 PR16、PR18、PR20。
+
 本书 867 个 formula 节点的完整核算：
 
 | 结果 | 数量 |
@@ -414,3 +416,14 @@ Inspired by the discussion above,  $ \underline{\text{can we propose a new assoc
 - `frac/sum/sqrt/underbrace` 等产生或重排 glyph 的节点保留结构但 `projectable=false`；unknown command、嵌套 delimiter、缺 group 和 parser 宽容恢复均 fail-closed，交给 PR16 而非当透明命令忽略。
 - approved source 回放 A001 47 项：46 个 formula successor 全部 `transparent_wrapper_projectable`，1 个 `content_drift` 经 PR10 审核成为 paragraph；missing/invalid/unclassified/parser proposal 均为 0。审计不保存正文，双跑/fixture SHA-256 `2047b264274733183ec22a52c661d2f7697bbae040035e9e69d8295b1b62b5cf`。
 - 验证：AST contract 与 underline projector 先红后绿；Core 定向 4 files / 49 tests、全量 63 files / 392 tests、typecheck 与差异检查全绿。正式 source/base/maps/selection shards 未修改。
+
+## 26. PR15 不依赖双侧正文的公式几何定位
+
+**PR 状态**:`completed`；PDF-A007 的几何边界与 owner 已闭合，但 PR15 不生成公式 source assignment，也不把 PR16 glyph 或 PR18 unit-locator 项提前标为已解决。
+
+- `pdf_formula_region_policy.v1` 只在 PR12 独占 child window 内枚举公式 signature；候选必须完整落在单一 page/column lane，并与已有单侧或双侧 child 边界不冲突。同一 window 内多个公式只有一条覆盖全部公式、source 顺序单调且 PDF 区间不重叠的完整链时才绑定。
+- standalone display、段首、段末和单侧正文锚不再降级为 `lacks same-page same-column anchors`。重复短式的整链唯一时可得到多个互不重叠 region；多条整链、跨页/跨栏 signature 或相邻锚 lane 冲突均返回具体 unmapped reason，不取最近候选。
+- PR15 新解出的 region 始终 `selection_assignments=[]`、`exact_source_spans=[]`。只有 PR15 前已经满足“单公式唯一 + 双侧同页同栏正文锚”的 simple-display 路径保留既有 source assignment；locator policy 进入 V2 map/report config hash，Core 拒绝两侧漂移，Server 拒绝显式未知版本并兼容历史缺字段 V2。
+- approved source/PDF 对 A007 106 项的无正文回放为：57 `unique_region`、9 `existing_display_projection`、21 `explicit_structural_ambiguity`、12 `downstream_unit_locator`、6 `downstream_formula_glyph`、1 `reviewed_non_formula`。missing/unclassified、wrong-page、wrong-column、旧 anchor-lack reason、PR15 region assignment 与 cross-lane region 均为 0。
+- 79 个旧 region-only 中 58 个 successor 仍有可比较几何且 reviewed 页/栏全匹配；其余 21 个被明确分到 8 structural ambiguity、8 PR18 unit locator、5 PR16 glyph。27 个旧 anchor-lack 中 22 个已成为唯一 region、既有 display、明确歧义或 reviewed 改类，5 个进入显式下游 owner。
+- 无正文报告三跑字节一致，68,128 bytes，SHA-256 `df0edd211f49da6b0df54bdd8fbb57f75024685f0e0977548c519708600c4bbd`。验证覆盖单/双/无锚、重复短式整链、跨页/跨栏、assignment 隔离、policy 漂移与未知版本；Core 定向 4 files / 52 tests、全量 64 files / 402 tests、typecheck，Server 全量 180+5 tests 全绿。正式 source/base/maps/selection shards 未修改。

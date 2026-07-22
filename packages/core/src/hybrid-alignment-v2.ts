@@ -25,6 +25,10 @@ export const PDF_DISPLAY_TOKEN_POLICY = {
   version: "pdf_display_token_policy.v1",
 } as const;
 
+export const PDF_FORMULA_REGION_POLICY = {
+  version: "pdf_formula_region_policy.v1",
+} as const;
+
 export interface HybridAlignmentUnit {
   unit_id: string;
   policy_version: typeof HYBRID_ALIGNMENT_UNIT_POLICY.version;
@@ -802,6 +806,17 @@ interface ExactChildAnchorCandidate {
   source_keys: ReturnType<typeof displayCharacterKeys>;
 }
 
+interface FormulaRegionCandidate extends ProjectedKeyRange {
+  child_index: number;
+  lane: { pageIndex: number; column: PdfAlignmentLine["column"] };
+  existing_display_eligible: boolean;
+}
+
+interface FormulaRegionChainEntry {
+  child_index: number;
+  candidates: FormulaRegionCandidate[];
+}
+
 function uniqueMonotonicExactChildChain(
   candidates: ExactChildAnchorCandidate[],
 ): { status: "none" | "unique" | "ambiguous"; chain: ExactChildAnchorCandidate[] } {
@@ -850,8 +865,67 @@ function uniqueMonotonicExactChildChain(
   return { status: "unique", chain: chain.reverse() };
 }
 
+function uniqueMonotonicFormulaRegionChain(
+  entries: FormulaRegionChainEntry[],
+): { status: "none" | "unique" | "ambiguous"; chain: FormulaRegionCandidate[] } {
+  const ordered = [...entries].sort((left, right) => left.child_index - right.child_index);
+  if (!ordered.length || ordered.some((entry) => !entry.candidates.length)) {
+    return { status: "none", chain: [] };
+  }
+  const pathCounts: number[][] = [];
+  const previousIndexes: number[][] = [];
+  for (let entryIndex = 0; entryIndex < ordered.length; entryIndex += 1) {
+    const current = ordered[entryIndex].candidates;
+    pathCounts.push(new Array<number>(current.length).fill(entryIndex === 0 ? 1 : 0));
+    previousIndexes.push(new Array<number>(current.length).fill(-1));
+    if (entryIndex === 0) continue;
+    const previous = ordered[entryIndex - 1].candidates;
+    for (let currentIndex = 0; currentIndex < current.length; currentIndex += 1) {
+      let count = 0;
+      let uniquePreviousIndex = -1;
+      for (let previousIndex = 0; previousIndex < previous.length; previousIndex += 1) {
+        if (previous[previousIndex].end > current[currentIndex].start) continue;
+        const previousCount = pathCounts[entryIndex - 1][previousIndex];
+        if (!previousCount) continue;
+        count = Math.min(2, count + previousCount);
+        uniquePreviousIndex = count === 1 && previousCount === 1 ? previousIndex : -1;
+      }
+      pathCounts[entryIndex][currentIndex] = count;
+      previousIndexes[entryIndex][currentIndex] = uniquePreviousIndex;
+    }
+  }
+  const finalCounts = pathCounts.at(-1)!;
+  const total = finalCounts.reduce((sum, count) => Math.min(2, sum + count), 0);
+  if (!total) return { status: "none", chain: [] };
+  if (total !== 1) return { status: "ambiguous", chain: [] };
+  const chain: FormulaRegionCandidate[] = [];
+  let candidateIndex = finalCounts.findIndex((count) => count === 1);
+  for (let entryIndex = ordered.length - 1; entryIndex >= 0; entryIndex -= 1) {
+    chain.push(ordered[entryIndex].candidates[candidateIndex]);
+    candidateIndex = previousIndexes[entryIndex][candidateIndex];
+  }
+  return { status: "unique", chain: chain.reverse() };
+}
+
 function formulaCharacterKeys(keys: PdfCharKey[]): PdfCharKey[] {
   return keys.filter((item) => item.key !== " " && !/^[_{}^$]$/u.test(item.key));
+}
+
+function formulaPageColumnLane(
+  chars: PdfCharKey[],
+): { pageIndex: number; column: PdfAlignmentLine["column"] } | null {
+  const first = chars[0]?.line;
+  if (!first || chars.some((item) => (
+    item.line.pageIndex !== first.pageIndex || item.line.column !== first.column
+  ))) return null;
+  return { pageIndex: first.pageIndex, column: first.column };
+}
+
+function samePageColumnLane(
+  left: { pageIndex: number; column: PdfAlignmentLine["column"] },
+  right: { pageIndex: number; column: PdfAlignmentLine["column"] },
+): boolean {
+  return left.pageIndex === right.pageIndex && left.column === right.column;
 }
 
 function formulaSourceCharacterKeys(
@@ -1075,32 +1149,124 @@ export function projectHybridAlignmentChildren(
       projections.set(child.lid, projection);
     }
   }
+  const formulaRanges = new Map<string, FormulaRegionCandidate>();
+  const formulaGroups = new Map<string, Array<{
+    child: HybridAlignmentUnit["child_lids"][number];
+    childIndex: number;
+    candidates: FormulaRegionCandidate[];
+    rejection?: string;
+  }>>();
+  for (let childIndex = 0; childIndex < unit.child_lids.length; childIndex += 1) {
+    const child = unit.child_lids[childIndex];
+    if (child.kind !== "formula") continue;
+    const previousIndex = [...unit.child_lids.keys()].reverse()
+      .find((index) => index < childIndex && ranges.has(unit.child_lids[index].lid));
+    const nextIndex = [...unit.child_lids.keys()]
+      .find((index) => index > childIndex && ranges.has(unit.child_lids[index].lid));
+    const previousRange = previousIndex === undefined ? undefined : ranges.get(unit.child_lids[previousIndex].lid);
+    const nextRange = nextIndex === undefined ? undefined : ranges.get(unit.child_lids[nextIndex].lid);
+    const previousLine = previousRange?.chars.at(-1)?.line;
+    const nextLine = nextRange?.chars[0]?.line;
+    const previousLane = previousLine
+      ? { pageIndex: previousLine.pageIndex, column: previousLine.column }
+      : undefined;
+    const nextLane = nextLine ? { pageIndex: nextLine.pageIndex, column: nextLine.column } : undefined;
+    const boundaryConflict = Boolean(
+      previousLane && nextLane && !samePageColumnLane(previousLane, nextLane),
+    );
+    const expectedLane = boundaryConflict ? undefined : previousLane ?? nextLane;
+    const windowStart = previousRange?.end ?? 0;
+    const windowEnd = nextRange?.start ?? keys.length;
+    const windowKeys = formulaCharacterKeys(keys.slice(windowStart, windowEnd));
+    const sourceSignature = formulaSourceCharacterKeys(source, child.source_span)?.map((item) => item.key);
+    const legacyNeedle = normalizedCharacterKeys(projectionText(child, blockTextBySpan), "formula")
+      .filter((key) => key !== " " && !/^[_{}^$]$/u.test(key));
+    const needle = sourceSignature ?? legacyNeedle;
+    const occurrences = needle.length ? keyOccurrences(windowKeys, needle, 0) : [];
+    const legacyOccurrences = legacyNeedle.length ? keyOccurrences(windowKeys, legacyNeedle, 0) : [];
+    const legacyChars = legacyOccurrences.length === 1
+      ? windowKeys.slice(legacyOccurrences[0], legacyOccurrences[0] + legacyNeedle.length)
+      : [];
+    const rawCandidates = occurrences.map((start) => {
+      const chars = windowKeys.slice(start, start + needle.length);
+      const first = chars[0];
+      const last = chars.at(-1);
+      const absoluteStart = first ? keys.indexOf(first) : -1;
+      const absoluteEnd = last ? keys.indexOf(last) + 1 : -1;
+      return { chars, absoluteStart, absoluteEnd, lane: formulaPageColumnLane(chars) };
+    });
+    const candidates = boundaryConflict ? [] : rawCandidates.flatMap((candidate) => (
+      candidate.lane
+      && candidate.absoluteStart >= 0
+      && candidate.absoluteEnd > candidate.absoluteStart
+      && (!expectedLane || samePageColumnLane(candidate.lane, expectedLane))
+        ? [{
+            child_index: childIndex,
+            start: candidate.absoluteStart,
+            end: candidate.absoluteEnd,
+            chars: candidate.chars,
+            source_spans: [],
+            lane: candidate.lane,
+            existing_display_eligible: legacyChars.length === candidate.chars.length
+              && legacyChars.every((item, index) => item === candidate.chars[index]),
+          }]
+        : []
+    ));
+    const rejection = boundaryConflict
+      ? "formula region conflicts with adjacent page-column lanes"
+      : !occurrences.length
+        ? "formula has no unique bounded PDF gap"
+        : rawCandidates.some((candidate) => !candidate.lane)
+          ? "formula signature crosses page-column lanes"
+          : !candidates.length
+            ? "formula region conflicts with adjacent page-column lanes"
+            : undefined;
+    const groupKey = `${previousIndex ?? -1}:${nextIndex ?? unit.child_lids.length}`;
+    formulaGroups.set(groupKey, [
+      ...(formulaGroups.get(groupKey) ?? []),
+      { child, childIndex, candidates, ...(rejection ? { rejection } : {}) },
+    ]);
+  }
+  for (const group of formulaGroups.values()) {
+    const incomplete = group.find((entry) => !entry.candidates.length);
+    if (incomplete) {
+      for (const entry of group) {
+        rejections.set(
+          entry.child.lid,
+          entry.rejection ?? "formula region candidates do not form a unique monotonic chain",
+        );
+      }
+      continue;
+    }
+    const chain = uniqueMonotonicFormulaRegionChain(group.map((entry) => ({
+      child_index: entry.childIndex,
+      candidates: entry.candidates,
+    })));
+    if (chain.status !== "unique") {
+      for (const entry of group) {
+        rejections.set(entry.child.lid, "formula region candidates do not form a unique monotonic chain");
+      }
+      continue;
+    }
+    for (const candidate of chain.chain) {
+      formulaRanges.set(unit.child_lids[candidate.child_index].lid, candidate);
+    }
+  }
   for (let index = 0; index < unit.child_lids.length; index += 1) {
     const child = unit.child_lids[index];
     if (child.kind !== "formula") continue;
+    const range = formulaRanges.get(child.lid);
+    if (!range) {
+      projections.set(child.lid, unmapped(
+        child,
+        rejections.get(child.lid) ?? "formula region candidates do not form a unique monotonic chain",
+      ));
+      continue;
+    }
     const previous = [...unit.child_lids.slice(0, index)].reverse().find((candidate) => ranges.has(candidate.lid));
     const next = unit.child_lids.slice(index + 1).find((candidate) => ranges.has(candidate.lid));
     const previousRange = previous ? ranges.get(previous.lid) : undefined;
     const nextRange = next ? ranges.get(next.lid) : undefined;
-    const startAt = previousRange?.end ?? 0;
-    const endAt = nextRange?.start ?? keys.length;
-    const gapKeys = formulaCharacterKeys(keys.slice(startAt, endAt));
-    const needle = normalizedCharacterKeys(projectionText(child, blockTextBySpan), "formula")
-      .filter((key) => key !== " " && !/^[_{}^$]$/u.test(key));
-    const occurrences = needle.length ? keyOccurrences(gapKeys, needle, 0) : [];
-    if (occurrences.length !== 1) {
-      projections.set(child.lid, unmapped(child, occurrences.length
-        ? "formula projection is ambiguous inside the located unit"
-        : "formula has no unique bounded PDF gap"));
-      continue;
-    }
-    const start = occurrences[0];
-    const range = {
-      start,
-      end: start + needle.length,
-      chars: gapKeys.slice(start, start + needle.length),
-      source_spans: [],
-    };
     const regions = regionsForKeyRange(range, `${unit.unit_id}-${child.lid}`);
     const previousLine = previousRange?.chars.at(-1)?.line;
     const nextLine = nextRange?.chars[0]?.line;
@@ -1114,15 +1280,14 @@ export function projectHybridAlignmentChildren(
       && previousLine.column === formulaLine.column
       && nextLine.column === formulaLine.column,
     );
-    const precision: PdfProjectionPrecision = boundedSamePageColumn ? "region_exact" : "partial";
     const formulaSourceKeys = formulaSourceCharacterKeys(source, child.source_span);
     const hasExactDisplaySource = Boolean(
       formulaSourceKeys
-      && formulaSourceKeys.length === needle.length
-      && formulaSourceKeys.every((item, sourceIndex) => item.key === needle[sourceIndex]),
+      && formulaSourceKeys.length === range.chars.length
+      && formulaSourceKeys.every((item, sourceIndex) => item.key === range.chars[sourceIndex].key),
     );
     const displayText = formulaDisplayText(keys, range.chars);
-    if (boundedSamePageColumn && hasExactDisplaySource && displayText) {
+    if (range.existing_display_eligible && boundedSamePageColumn && hasExactDisplaySource && displayText) {
       const projection = textProjection(unit, child, {
         ...range,
         source_spans: formulaSourceKeys!.map((item) => item.source_span),
@@ -1135,7 +1300,7 @@ export function projectHybridAlignmentChildren(
     projections.set(child.lid, {
       lid: child.lid,
       source_span: { ...child.source_span },
-      precision,
+      precision: "region_exact",
       regions,
       exact_source_spans: [],
       selection_assignments: [],
@@ -1144,7 +1309,7 @@ export function projectHybridAlignmentChildren(
         unit_id: unit.unit_id,
         reason: boundedSamePageColumn
           ? "unique formula region bounded by exact same-page same-column text anchors"
-          : "formula text is located but lacks same-page same-column anchors",
+          : "unique formula region in one page-column lane",
       },
     });
   }

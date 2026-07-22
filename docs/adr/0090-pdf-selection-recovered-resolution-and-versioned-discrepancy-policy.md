@@ -114,3 +114,17 @@ Extends: ADR-0074 and ADR-0082.
 - 接受 parser 自动恢复的缺 group：语法容错不是 source-display 等价证据。
 
 **命门**:unknown command、嵌套 math delimiter、缺 group、无位置 token、glyph transform 或不支持 AST node 均不得进入简单 source projection。PR14 的 projectable 只证明 source token，不证明 PR15 region、PR16 glyph assignment 或 PR20 正式发布。
+
+### §10 v1 公式 page-column region locator
+
+**修订**:2026-07-23 注册构建期 `pdf_formula_region_policy.v1`；版本写入 V2 source map 与 alignment report config/hash，历史 V2 两侧缺字段仍可读取。
+
+**决策**:公式 region 只能在 PR12 独占 child window 中由 source signature、source order、单一 page/column lane 与相邻已证明 child 边界共同确定。一个 window 含多个公式时，必须存在唯一一条覆盖全部公式、顺序单调且 PDF 区间不重叠的完整候选链。standalone、单侧、段首和段末不要求虚构另一侧正文锚；PR15 新定位只产生 `region_exact`，不产生 source assignment。
+
+**否决**:
+- 按最近 paragraph bbox 或最近同名公式猜 region：会把布局邻近误当公式对象证据。
+- 每个重复短式独立取第一个 occurrence：局部唯一不等于整链唯一，会使多个 LID 争用或错序。
+- 让 signature 跨页/跨栏串接：PDF key 连续不证明它们属于同一公式对象。
+- 因 PR15 找到 region 就复用 simple-display source assignment：几何对象证据不证明 source token/glyph 一一对应。
+
+**命门**:多整链、跨 lane、相邻锚 lane 冲突必须 fail-closed；`formula has no unique bounded PDF gap` 继续归 PR16，unit 未定位继续归 PR18。所有有 region 的 A007 successor 必须与 reviewed page/column 一致，显式未知 locator policy 在 Core/Server 均拒绝。

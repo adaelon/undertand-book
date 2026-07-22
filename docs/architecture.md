@@ -21,6 +21,18 @@ flowchart LR
 
 PH5 hybrid foundation construction first partitions each PDF page into top-to-bottom horizontal bands from normalized geometry, then applies the existing single/two-column order inside each band. Paragraph alignment keeps the 240-word local window as its primary path; after a miss it may resume only on one unique 6+ token anchor on the current or following page. Ambiguous or farther candidates remain unmapped, and recovered entries carry explicit lower-confidence provenance.
 
+Formula geometry is a separate, versioned projection stage. Inside each bounded semantic unit, proven text/code children establish non-overlapping local windows; formula signatures are then enumerated only within their window and only when every matched glyph belongs to one PDF page/column lane. Multiple formulas sharing a window bind only through one unique complete monotonic chain. Standalone and one-sided formulas can therefore produce region evidence without invented paragraph boxes, while repeated, cross-lane, or boundary-conflicting candidates remain explicitly unmapped. This stage never creates source assignments; formula token-to-glyph evidence is owned by the following structural formula stage.
+
+```text
+formula_source_ast.v1 visible signature
+  + PR12 exclusive child window
+  + PDF page/column alignment lines
+  -> pdf_formula_region_policy.v1 candidate lanes
+  -> unique complete monotonic chain
+  -> region_exact | explicit structural ambiguity
+  -> policy-bound V2 map/report config hash
+```
+
 Native PDF selection is owned by the public PDF.js `TextLayerBuilder` lifecycle. Each rendered page retains its builder until zoom, rerender, book switch, or unmount cancels it and removes the text-layer DOM. The builder's `.endOfContent` and selection-change contract stabilize browser caret placement at visual line and paragraph boundaries; the existing mouseup capture then forwards the resulting `Selection` without quote or rectangle heuristics.
 
 PDF selection translation follows a two-phase read-only flow:

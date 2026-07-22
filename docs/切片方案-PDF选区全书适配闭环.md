@@ -1,6 +1,6 @@
 # 切片方案 - PDF 选区全书适配闭环
 
-> 状态:2026-07-22 PR8-PR14 已完成,PR15-PR21 待实施。
+> 状态:2026-07-23 PR8-PR15 已完成,PR16-PR21 待实施。
 > 问题源:[PDF 选区适配问题总账](PDF选区适配问题总账.md)。
 > 已完成前序:[PDF 选区可恢复定位](切片方案-pdf选区可恢复定位.md) PR1-PR7。
 > 决策边界:[ADR-0082](adr/0082-hybrid-foundation-semantic-unit-alignment-and-degraded-reader.md)、[ADR-0090](adr/0090-pdf-selection-recovered-resolution-and-versioned-discrepancy-policy.md)。
@@ -173,8 +173,9 @@ PR8_FULL_BOOK_BENCHMARK
 - **做**:在 PR12 child window 内用 formula token signature、source order、page/column lane 和相邻对象边界定位公式。支持双侧、单侧、段首/段末和 standalone display formula;重复短式只有唯一全局单调链时才绑定。
 - **不做**:不生成 source assignment,不以邻接 paragraph bbox 代替公式 region,不跨页/跨栏猜最近候选。
 - **Red**:27 个 formula 因缺同页同栏双侧锚而 partial;79 个 region-only 与大量 no-gap 依赖邻居偶然成功。
-- **Green**:27 个 anchor-lack 项全部得到唯一 region 或明确结构歧义;79 个 region-only 的区域与人工页/栏标注一致;重复 `$n$/$TC^0$` fixture 保持 fail-closed 直到整链唯一。
-- **完成判据**:公式 region wrong-page/wrong-column 为 0;“lacks same-page same-column anchors” reason 在本书归零。
+- **Green**:27 个 anchor-lack baseline successor 全部得到唯一 region、明确结构歧义、reviewed 改类或显式下游 owner;79 个 region-only successor 有区域者必须与 reviewed 页/栏标注一致,其余只能进入 PR16 glyph 或 PR18 unit locator owner;重复 `$n$/$TC^0$` fixture 保持 fail-closed 直到整链唯一。
+- **完成判据**:公式 region wrong-page/wrong-column 为 0;“lacks same-page same-column anchors” reason 在本书归零;所有 successor 均有唯一分类,不得以 PR15 region 生成 source assignment。
+- **完成证据**:`pdf_formula_region_policy.v1` 在 PR12 child window 内按 source order、page/column lane 和唯一完整单调链定位；单侧/段首/段末/standalone 可独立产出 `region_exact`，跨页/跨栏、相邻锚 lane 冲突和多整链显式拒绝。approved source 的 106 个 A007 baseline 全部命中 migration：57 unique region、9 existing display projection、21 explicit structural ambiguity、12 PR18 unit locator、6 PR16 glyph、1 reviewed non-formula；missing/unclassified、wrong-page、wrong-column、legacy anchor-lack reason、PR15 region assignment 和 cross-lane region 均为 0。58 个原 region-only successor 保有可比较几何且页/栏全匹配，22 个 anchor-lack successor 已在本刀解析/明确歧义/审核改类，其余有显式下游 owner。无正文审计三跑字节一致，68,128 bytes，SHA-256 `df0edd21...00c4bbd`；Core 定向 4 files / 52 tests、全量 64 files / 402 tests、typecheck，Server 180+5 tests 全绿；正式 source/base/maps/selection shards 未修改。
 
 ### PR16 - 复杂公式结构化 glyph 投影
 

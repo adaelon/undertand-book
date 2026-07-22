@@ -88,7 +88,9 @@ describe("HF2-3 hybrid foundation v2 artifacts", () => {
     expect(SourceManifestV2Z.parse(artifacts.source_manifest)).toEqual(artifacts.source_manifest);
     expect(() => assertHybridFoundationV2Integrity(artifacts)).not.toThrow();
     expect(artifacts.pdf_source_map.display_token_policy_version).toBe("pdf_display_token_policy.v1");
+    expect(artifacts.pdf_source_map.formula_region_policy_version).toBe("pdf_formula_region_policy.v1");
     expect(artifacts.alignment_report.config.formula_source_ast_version).toBe("formula_source_ast.v1");
+    expect(artifacts.alignment_report.config.formula_region_policy_version).toBe("pdf_formula_region_policy.v1");
     expect(artifacts.alignment_report.quality).toMatchObject({
       tier: "full",
       unit_location_ratio: 1,
@@ -161,6 +163,20 @@ describe("HF2-3 hybrid foundation v2 artifacts", () => {
 
     delete artifacts.pdf_source_map.display_token_policy_version;
     expect(() => assertHybridFoundationV2Integrity(artifacts)).toThrow(/display token policy/i);
+  });
+
+  it("rejects formula region policy drift across v2 artifacts", async () => {
+    const { source, pdfBytes, geometry } = await inlineFixture();
+    const artifacts = buildHybridFoundationV2Candidate({
+      book_id: "formula-region-policy-drift-v2",
+      source_txt: source,
+      original_pdf_path: "paper.pdf",
+      original_pdf_sha256: sha256(pdfBytes),
+      pdf_geometry: geometry,
+    });
+
+    delete artifacts.pdf_source_map.formula_region_policy_version;
+    expect(() => assertHybridFoundationV2Integrity(artifacts)).toThrow(/formula region policy/i);
   });
 
   it("allows only the proven exact characters of a partial LID in selection shards", async () => {
