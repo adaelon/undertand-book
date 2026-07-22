@@ -2111,6 +2111,12 @@ struct PdfSemanticRange {
 #[derive(Debug, Serialize, PartialEq)]
 struct PdfSelectionResolveResponse {
     status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resolution_basis: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recovery_policy_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recovered_differences: Option<Vec<PdfSelectionRecoveryDifference>>,
     ranges: Vec<PdfSemanticRange>,
     quote_markdown: String,
 }
@@ -2131,6 +2137,12 @@ struct PdfRangeProjection {
     lid: String,
     range: SourceSpanDto,
     status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resolution_basis: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recovery_policy_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recovered_differences: Option<Vec<PdfSelectionRecoveryDifference>>,
     rects: Vec<ExactPdfRect>,
     #[serde(skip_serializing_if = "Option::is_none")]
     covered_range: Option<SourceSpanDto>,
@@ -7045,29 +7057,6 @@ fn filter_hits_to_raw_quote(hits: Vec<SelectionCharHit>, raw_quote: &str) -> Vec
         .collect()
 }
 
-fn raw_quote_fully_covered_by_hits(hits: &[SelectionCharHit], raw_quote: &str) -> bool {
-    let quote = normalized_selection_chars(raw_quote);
-    let hit_units = hits
-        .iter()
-        .enumerate()
-        .flat_map(|(index, hit)| {
-            normalized_selection_chars(&hit.text)
-                .into_iter()
-                .map(move |value| (index, value, hit.lid.is_some()))
-        })
-        .collect::<Vec<_>>();
-    let pairs = quote_hit_pairs(&quote, &hit_units);
-    let quote_non_whitespace = quote.iter().filter(|value| !value.is_whitespace()).count();
-    let matched_non_whitespace = pairs
-        .iter()
-        .map(|(quote_index, _)| *quote_index)
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .filter(|quote_index| !quote[*quote_index].is_whitespace())
-        .count();
-    quote_non_whitespace == 0 || matched_non_whitespace == quote_non_whitespace
-}
-
 const PDF_SELECTION_RECOVERY_POLICY_VERSION: &str = "pdf_selection_recovery.v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -7220,6 +7209,79 @@ fn selection_text_recovery_differences(
     Some(differences)
 }
 
+fn pdf_selection_recovery_evidence(raw_quote: &str) -> PdfSelectionRecoveryEvidence {
+    let raw = utf16_selection_chars(raw_quote);
+    let mut discretionary_raw_hyphen_offsets_utf16 = HashSet::new();
+    for (index, item) in raw.iter().enumerate() {
+        if !is_pdf_selection_recoverable_hyphen(item.value)
+            || index == 0
+            || !raw[index - 1].value.is_alphanumeric()
+        {
+            continue;
+        }
+        let mut next_index = index + 1;
+        let mut crossed_line_boundary = false;
+        while next_index < raw.len() && raw[next_index].value.is_whitespace() {
+            crossed_line_boundary |= matches!(raw[next_index].value, '\r' | '\n');
+            next_index += 1;
+        }
+        if crossed_line_boundary
+            && raw
+                .get(next_index)
+                .is_some_and(|next| next.value.is_alphanumeric())
+        {
+            discretionary_raw_hyphen_offsets_utf16.insert(item.start);
+        }
+    }
+    PdfSelectionRecoveryEvidence {
+        discretionary_raw_hyphen_offsets_utf16,
+    }
+}
+
+fn recovery_match_char(value: char) -> char {
+    if value.is_whitespace() {
+        ' '
+    } else if is_pdf_selection_recoverable_hyphen(value) {
+        '-'
+    } else {
+        value
+    }
+}
+
+fn selection_hits_match_raw_quote(raw_quote: &str, hits: &[SelectionCharHit]) -> bool {
+    let raw = raw_quote
+        .chars()
+        .map(recovery_match_char)
+        .collect::<Vec<_>>();
+    let hit_units = hits
+        .iter()
+        .enumerate()
+        .flat_map(|(index, hit)| {
+            hit.text
+                .chars()
+                .map(recovery_match_char)
+                .map(move |value| (index, value, hit.lid.is_some()))
+        })
+        .collect::<Vec<_>>();
+    let pairs = quote_hit_pairs(&raw, &hit_units);
+    let matched_raw = pairs
+        .iter()
+        .map(|(raw_index, _)| *raw_index)
+        .collect::<HashSet<_>>();
+    let matched_hits = pairs
+        .iter()
+        .map(|(_, hit_index)| *hit_index)
+        .collect::<HashSet<_>>();
+    raw.iter().enumerate().all(|(index, value)| {
+        value.is_whitespace()
+            || matched_raw.contains(&index)
+            || is_pdf_selection_recoverable_hyphen(*value)
+    }) && hit_units
+        .iter()
+        .enumerate()
+        .all(|(index, (_, value, _))| value.is_whitespace() || matched_hits.contains(&index))
+}
+
 fn classify_pdf_selection_recovery(
     raw_quote: &str,
     canonical_quote: &str,
@@ -7233,7 +7295,7 @@ fn classify_pdf_selection_recovery(
         return PdfSelectionRecoveryDecision::Incomplete;
     };
     let canonical = utf16_selection_chars(canonical_quote);
-    if canonical.is_empty() || hits.is_empty() {
+    if canonical.is_empty() || hits.is_empty() || !selection_hits_match_raw_quote(raw_quote, hits) {
         return PdfSelectionRecoveryDecision::Incomplete;
     }
     let canonical_source_end = canonical_source_start + canonical_quote.encode_utf16().count();
@@ -7266,15 +7328,7 @@ fn classify_pdf_selection_recovery(
             })
         })
         .collect::<Vec<_>>();
-    let first_material = canonical
-        .iter()
-        .position(|item| !item.value.is_whitespace());
-    let last_material = canonical
-        .iter()
-        .rposition(|item| !item.value.is_whitespace());
-    if first_material.is_none_or(|index| !covered[index])
-        || last_material.is_none_or(|index| !covered[index])
-    {
+    if !covered.first().copied().unwrap_or(false) || !covered.last().copied().unwrap_or(false) {
         return PdfSelectionRecoveryDecision::Incomplete;
     }
 
@@ -7775,6 +7829,35 @@ fn quote_lid_range(book: &Book, lid: &str, range: SourceSpanDto) -> Result<Strin
     Ok(slice_utf16_lossy(&text, range.start, range.end))
 }
 
+fn canonical_selection_quote(
+    book: &Book,
+    hits: &[SelectionCharHit],
+) -> Result<Option<(String, usize)>, ToolError> {
+    let mapped = hits
+        .iter()
+        .filter(|hit| hit.lid.is_some())
+        .collect::<Vec<_>>();
+    let (Some(first), Some(last)) = (mapped.first(), mapped.last()) else {
+        return Ok(None);
+    };
+    if first.source_span.start >= last.source_span.end {
+        return Ok(None);
+    }
+    let first_lid = first.lid.as_deref().unwrap_or_default();
+    let last_lid = last.lid.as_deref().unwrap_or_default();
+    let first_lid_span = lid_span(book, first_lid)?;
+    let source = book.text(first_lid, Some(last_lid))?;
+    let start = first.source_span.start.saturating_sub(first_lid_span.start);
+    let end = last.source_span.end.saturating_sub(first_lid_span.start);
+    if start >= end || end > source.encode_utf16().count() {
+        return Ok(None);
+    }
+    Ok(Some((
+        slice_utf16_lossy(&source, start, end),
+        first.source_span.start,
+    )))
+}
+
 fn route_pdf_selection_resolve(book: &Book, book_dir: &Path, body: &serde_json::Value) -> Reply {
     let manifest = match require_pdf_runtime_capability(book_dir, "resolve_pdf_selection") {
         Ok(manifest) => manifest,
@@ -7841,12 +7924,36 @@ fn route_pdf_selection_resolve(book: &Book, book_dir: &Path, body: &serde_json::
         hits = filter_hits_to_raw_quote(hits, raw_quote);
     }
     let unmapped_hits = hits.iter().filter(|hit| hit.lid.is_none()).count();
-    let raw_quote_complete = policy.version == PdfRuntimeMapVersion::V2
-        && raw_quote.is_some_and(|quote| raw_quote_fully_covered_by_hits(&hits, quote));
+    let recovery_decision = if policy.version == PdfRuntimeMapVersion::V2 {
+        match (raw_quote, canonical_selection_quote(book, &hits)) {
+            (Some(raw_quote), Ok(Some((canonical_quote, source_start)))) => {
+                classify_pdf_selection_recovery(
+                    raw_quote,
+                    &canonical_quote,
+                    source_start,
+                    &hits,
+                    &pdf_selection_recovery_evidence(raw_quote),
+                )
+            }
+            (_, Ok(None)) => PdfSelectionRecoveryDecision::Incomplete,
+            (_, Err(error)) => return err_reply(&error),
+            (None, _) => PdfSelectionRecoveryDecision::Incomplete,
+        }
+    } else {
+        PdfSelectionRecoveryDecision::Incomplete
+    };
+    let raw_quote_complete = matches!(
+        recovery_decision,
+        PdfSelectionRecoveryDecision::Exact | PdfSelectionRecoveryDecision::Recovered(_)
+    );
     let raw_quote_incomplete =
         policy.version == PdfRuntimeMapVersion::V2 && raw_quote.is_some() && !raw_quote_complete;
     let degraded_precision =
         v2_selection_has_degraded_precision(&policy, &rects_by_page, &hits, raw_quote_complete);
+    let bridge_recoverable_gaps = matches!(
+        recovery_decision,
+        PdfSelectionRecoveryDecision::Recovered(_)
+    );
 
     let mut source_runs: Vec<(String, SourceSpanDto)> = Vec::new();
     for hit in &hits {
@@ -7856,7 +7963,7 @@ fn route_pdf_selection_resolve(book: &Book, book_dir: &Path, body: &serde_json::
         if let Some((run_lid, run_span)) = source_runs.last_mut() {
             let spans_touch =
                 hit.source_span.start <= run_span.end && hit.source_span.end >= run_span.start;
-            if run_lid == lid && spans_touch {
+            if run_lid == lid && (spans_touch || bridge_recoverable_gaps) {
                 run_span.start = run_span.start.min(hit.source_span.start);
                 run_span.end = run_span.end.max(hit.source_span.end);
                 continue;
@@ -7907,8 +8014,27 @@ fn route_pdf_selection_resolve(book: &Book, book_dir: &Path, body: &serde_json::
     } else {
         "resolved"
     };
+    let resolution_basis = (status == "resolved").then(|| {
+        if bridge_recoverable_gaps {
+            "recovered".to_string()
+        } else {
+            "exact".to_string()
+        }
+    });
+    let recovered_differences = match &recovery_decision {
+        PdfSelectionRecoveryDecision::Recovered(differences) if status == "resolved" => {
+            Some(differences.clone())
+        }
+        _ => None,
+    };
+    let recovery_policy_version = recovered_differences
+        .is_some()
+        .then(|| PDF_SELECTION_RECOVERY_POLICY_VERSION.to_string());
     ok_json(&PdfSelectionResolveResponse {
         status: status.into(),
+        resolution_basis,
+        recovery_policy_version,
+        recovered_differences,
         ranges,
         quote_markdown,
     })
@@ -8096,6 +8222,21 @@ fn route_pdf_ranges_project(book: &Book, book_dir: &Path, body: &serde_json::Val
                 Ok(hits) => hits,
                 Err(e) => return err_reply(&e),
             };
+        let canonical_quote = match quote_lid_range(book, &input_range.lid, input_range.range) {
+            Ok(quote) => quote,
+            Err(e) => return err_reply(&e),
+        };
+        let recovery_decision = if policy.version == PdfRuntimeMapVersion::V2 {
+            classify_pdf_selection_recovery(
+                &canonical_quote,
+                &canonical_quote,
+                target.start,
+                &hits,
+                &PdfSelectionRecoveryEvidence::default(),
+            )
+        } else {
+            PdfSelectionRecoveryDecision::Incomplete
+        };
         let mut coverage_spans = hits.iter().map(|hit| hit.source_span).collect::<Vec<_>>();
         coverage_spans.sort_by_key(|span| (span.start, span.end));
         let mut cursor = target.start;
@@ -8111,6 +8252,14 @@ fn route_pdf_ranges_project(book: &Book, book_dir: &Path, body: &serde_json::Val
             }
         }
         let exact = cursor == target.end;
+        let recovered = matches!(
+            recovery_decision,
+            PdfSelectionRecoveryDecision::Recovered(_)
+        );
+        let recovery_exact = matches!(
+            recovery_decision,
+            PdfSelectionRecoveryDecision::Exact | PdfSelectionRecoveryDecision::Recovered(_)
+        );
         let status = if hits.is_empty()
             || (policy.version == PdfRuntimeMapVersion::V2
                 && matches!(
@@ -8119,18 +8268,21 @@ fn route_pdf_ranges_project(book: &Book, book_dir: &Path, body: &serde_json::Val
                         | PdfRuntimeProjectionPrecision::Unmapped
                 )) {
             "unmapped"
-        } else if exact
-            && !(policy.version == PdfRuntimeMapVersion::V2
-                && entry_precision == PdfRuntimeProjectionPrecision::Partial)
+        } else if (policy.version == PdfRuntimeMapVersion::V2 && recovery_exact)
+            || (policy.version == PdfRuntimeMapVersion::V1 && exact)
         {
             "exact"
         } else {
             "partial"
         };
-        let covered_range = (cursor > target.start).then_some(SourceSpanDto {
-            start: input_range.range.start,
-            end: input_range.range.start + (cursor - target.start),
-        });
+        let covered_range = if status == "exact" {
+            Some(input_range.range)
+        } else {
+            (cursor > target.start).then_some(SourceSpanDto {
+                start: input_range.range.start,
+                end: input_range.range.start + (cursor - target.start),
+            })
+        };
         let rects = hits
             .iter()
             .map(|hit| ExactPdfRect {
@@ -8152,10 +8304,34 @@ fn route_pdf_ranges_project(book: &Book, book_dir: &Path, body: &serde_json::Val
                     })
             })
             .flatten();
+        let status = if status == "exact" && terminal_rect.is_none() {
+            "partial"
+        } else {
+            status
+        };
+        let resolution_basis = (status == "exact").then(|| {
+            if recovered {
+                "recovered".to_string()
+            } else {
+                "exact".to_string()
+            }
+        });
+        let recovered_differences = match &recovery_decision {
+            PdfSelectionRecoveryDecision::Recovered(differences) if status == "exact" => {
+                Some(differences.clone())
+            }
+            _ => None,
+        };
+        let recovery_policy_version = recovered_differences
+            .is_some()
+            .then(|| PDF_SELECTION_RECOVERY_POLICY_VERSION.to_string());
         projections.push(PdfRangeProjection {
             lid: input_range.lid,
             range: input_range.range,
             status: status.into(),
+            resolution_basis,
+            recovery_policy_version,
+            recovered_differences,
             rects,
             covered_range,
             terminal_rect,
@@ -10894,6 +11070,12 @@ mod tests {
         std::fs::write(selection_dir.join("pages").join("0.json"), page.to_string()).unwrap();
     }
 
+    fn use_pdf_runtime_fixture_source(s: &mut AppState) {
+        let source = format!("PDF{}", "X".repeat(97));
+        s.book = Book::new(sample_base(), &source);
+        s.reader = Reader::new(&s.book, DEFAULT_RADIUS);
+    }
+
     fn rewrite_pdf_runtime_artifacts_v2(s: &AppState, precision: &str, exact_end: usize) {
         let source_map_path = s.book_dir.join("pdf_source_map.json");
         let mut source_map: serde_json::Value =
@@ -12958,6 +13140,7 @@ mod tests {
     #[test]
     fn pdf_runtime_v2_applies_entry_precision_without_regressing_v1() {
         let mut s = state_named("pdf-runtime-v2-precision");
+        use_pdf_runtime_fixture_source(&mut s);
         write_pdf_runtime_artifacts(&mut s);
         rewrite_pdf_runtime_artifacts_v2(&s, "char_exact", 3);
 
@@ -13066,6 +13249,7 @@ mod tests {
     #[test]
     fn pdf_runtime_v2_resolves_exact_subrange_inside_partial_entry() {
         let mut s = state_named("pdf-runtime-v2-partial-exact-subrange");
+        use_pdf_runtime_fixture_source(&mut s);
         write_pdf_runtime_artifacts(&mut s);
         rewrite_pdf_runtime_artifacts_v2(&s, "partial", 2);
 
@@ -13080,7 +13264,7 @@ mod tests {
             body["ranges"][0]["range"],
             serde_json::json!({"start":0,"end":2})
         );
-        assert_eq!(body["quote_markdown"], "XX");
+        assert_eq!(body["quote_markdown"], "PD");
 
         let conservative_without_raw_quote = post(
             &mut s,
@@ -13234,6 +13418,136 @@ unchanged after training concludes";
             ),
             PdfSelectionRecoveryDecision::Incomplete
         );
+    }
+
+    fn write_recovery_runtime_artifacts(
+        s: &mut AppState,
+        source_prefix: &str,
+        omitted_utf16_offsets: &[usize],
+    ) {
+        assert!(source_prefix.is_ascii());
+        assert!(source_prefix.len() < 100);
+        let source = format!("{source_prefix}{}", "X".repeat(100 - source_prefix.len()));
+        s.book = Book::new(sample_base(), &source);
+        s.reader = Reader::new(&s.book, DEFAULT_RADIUS);
+        write_pdf_runtime_artifacts(s);
+        rewrite_pdf_runtime_artifacts_v2(s, "partial", source_prefix.len());
+
+        let omitted = omitted_utf16_offsets
+            .iter()
+            .copied()
+            .collect::<HashSet<_>>();
+        let mut exact_spans = Vec::new();
+        let mut run_start = None;
+        for offset in 0..source_prefix.len() {
+            if omitted.contains(&offset) {
+                if let Some(start) = run_start.take() {
+                    exact_spans.push(serde_json::json!({"start":start,"end":offset}));
+                }
+            } else if run_start.is_none() {
+                run_start = Some(offset);
+            }
+        }
+        if let Some(start) = run_start {
+            exact_spans.push(serde_json::json!({"start":start,"end":source_prefix.len()}));
+        }
+        let source_map_path = s.book_dir.join("pdf_source_map.json");
+        let mut source_map: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&source_map_path).unwrap()).unwrap();
+        source_map["entries"][0]["exact_source_spans"] = serde_json::Value::Array(exact_spans);
+        std::fs::write(source_map_path, source_map.to_string()).unwrap();
+
+        let chars = source_prefix
+            .chars()
+            .enumerate()
+            .filter(|(offset, _)| !omitted.contains(offset))
+            .map(|(offset, value)| {
+                let left = 10.0 + offset as f64 * 2.0;
+                serde_json::json!({
+                    "char_index":offset,
+                    "text":value.to_string(),
+                    "rect":{"pageIndex":0,"bbox":[left,10.0,left + 1.5,20.0]},
+                    "source_span":{"start":offset,"end":offset + 1},
+                    "lid":"1.1"
+                })
+            })
+            .collect::<Vec<_>>();
+        let selection_page_path = s
+            .book_dir
+            .join("pdf_selection_map")
+            .join("pages")
+            .join("0.json");
+        let page = serde_json::json!({
+            "version":"pdf_selection_map_page.v2",
+            "book_id":s.book.base.book_id,
+            "pageIndex":0,
+            "chars":chars
+        });
+        std::fs::write(selection_page_path, page.to_string()).unwrap();
+    }
+
+    #[test]
+    fn pdf_selection_recovery_routes_round_trip_recovered_ranges_and_reject_material_gaps() {
+        let mut recovered = state_named("pdf-selection-recovered-round-trip");
+        write_recovery_runtime_artifacts(&mut recovered, "feed-forward", &[4]);
+        let selected = post(
+            &mut recovered,
+            "/reader/pdf_selection.resolve",
+            r#"{"pageIndex":0,"raw_quote":"feed-forward","rects":[{"bbox":[9.0,9.0,40.0,21.0]}]}"#,
+        );
+        let selected_body: serde_json::Value = serde_json::from_str(&selected.body).unwrap();
+        assert_eq!(selected_body["status"], "resolved");
+        assert_eq!(selected_body["resolution_basis"], "recovered");
+        assert_eq!(
+            selected_body["recovered_differences"],
+            serde_json::json!(["hyphen_representation"])
+        );
+        assert_eq!(
+            selected_body["recovery_policy_version"],
+            PDF_SELECTION_RECOVERY_POLICY_VERSION
+        );
+        assert_eq!(selected_body["quote_markdown"], "feed-forward");
+        assert_eq!(
+            selected_body["ranges"][0]["range"],
+            serde_json::json!({"start":0,"end":12})
+        );
+
+        let projected = post(
+            &mut recovered,
+            "/reader/pdf_ranges.project",
+            r#"{"ranges":[{"lid":"1.1","range":{"start":0,"end":12}}]}"#,
+        );
+        let projected_body: serde_json::Value = serde_json::from_str(&projected.body).unwrap();
+        let projection = &projected_body["projections"][0];
+        assert_eq!(projection["status"], "exact");
+        assert_eq!(projection["resolution_basis"], "recovered");
+        assert_eq!(
+            projection["covered_range"],
+            serde_json::json!({"start":0,"end":12})
+        );
+        assert_eq!(projection["rects"].as_array().unwrap().len(), 11);
+        assert!(projection["terminal_rect"].is_object());
+
+        let mut material = state_named("pdf-selection-recovery-material-gap");
+        write_recovery_runtime_artifacts(&mut material, "is not stable", &[3, 4, 5]);
+        let selected = post(
+            &mut material,
+            "/reader/pdf_selection.resolve",
+            r#"{"pageIndex":0,"raw_quote":"is not stable","rects":[{"bbox":[9.0,9.0,40.0,21.0]}]}"#,
+        );
+        let selected_body: serde_json::Value = serde_json::from_str(&selected.body).unwrap();
+        assert_eq!(selected_body["status"], "partial");
+        assert!(selected_body["resolution_basis"].is_null());
+
+        let mut terminal = state_named("pdf-selection-recovery-terminal-gap");
+        write_recovery_runtime_artifacts(&mut terminal, "feed-forward", &[4, 11]);
+        let selected = post(
+            &mut terminal,
+            "/reader/pdf_selection.resolve",
+            r#"{"pageIndex":0,"raw_quote":"feed-forward","rects":[{"bbox":[9.0,9.0,40.0,21.0]}]}"#,
+        );
+        let selected_body: serde_json::Value = serde_json::from_str(&selected.body).unwrap();
+        assert_eq!(selected_body["status"], "partial");
     }
 
     #[test]
