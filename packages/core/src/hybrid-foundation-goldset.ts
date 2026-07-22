@@ -9,6 +9,7 @@ import {
 } from "./hybrid-foundation-v2";
 import { markdownToBlocks } from "./md-adapter";
 import { extractPdfTextGeometry } from "./pdf-geometry";
+import type { PdfProjectionPrecisionV2 } from "./pdf-source-map";
 import { reconcilePaperSource } from "./source-reconciliation";
 
 const SpanZ = z.object({
@@ -51,8 +52,113 @@ export const GoldsetFixtureExpectedZ = z.object({
 
 export type GoldsetFixtureExpected = z.infer<typeof GoldsetFixtureExpectedZ>;
 
+const PdfProjectionPrecisionV2Z = z.enum(["char_exact", "region_exact", "partial", "unmapped"]);
+
+export const HybridFoundationAdaptationIssueIdZ = z.enum([
+  "PDF-A001",
+  "PDF-A002",
+  "PDF-A003",
+  "PDF-A004",
+  "PDF-A005",
+  "PDF-A006",
+  "PDF-A007",
+  "PDF-A008",
+  "PDF-A009",
+  "PDF-A010",
+  "PDF-A011",
+]);
+
+export type HybridFoundationAdaptationIssueId = z.infer<typeof HybridFoundationAdaptationIssueIdZ>;
+
+const PrecisionCountsZ = z.object({
+  char_exact: z.number().int().nonnegative(),
+  region_exact: z.number().int().nonnegative(),
+  partial: z.number().int().nonnegative(),
+  unmapped: z.number().int().nonnegative(),
+});
+
+const SelectionCapabilityCountsZ = z.object({
+  leaf_count: z.number().int().nonnegative(),
+  region_leaf_count: z.number().int().nonnegative(),
+  exact_span_leaf_count: z.number().int().nonnegative(),
+  selection_leaf_count: z.number().int().nonnegative(),
+  selection_character_count: z.number().int().nonnegative(),
+});
+
+const SelectionCapabilityMatrixZ = z.object({
+  char_exact: SelectionCapabilityCountsZ,
+  region_exact: SelectionCapabilityCountsZ,
+  partial: SelectionCapabilityCountsZ,
+  unmapped: SelectionCapabilityCountsZ,
+});
+
+const BindingCountsZ = z.object({
+  duplicate_region_binding_count: z.number().int().nonnegative(),
+  duplicate_selection_binding_count: z.number().int().nonnegative(),
+  raw_duplicate_region_binding_count: z.number().int().nonnegative(),
+  raw_duplicate_selection_binding_count: z.number().int().nonnegative(),
+  conflicted_lid_count: z.number().int().nonnegative(),
+});
+
+const IssueCountsZ = z.object({
+  "PDF-A001": z.number().int().nonnegative(),
+  "PDF-A002": z.number().int().nonnegative(),
+  "PDF-A003": z.number().int().nonnegative(),
+  "PDF-A004": z.number().int().nonnegative(),
+  "PDF-A005": z.number().int().nonnegative(),
+  "PDF-A006": z.number().int().nonnegative(),
+  "PDF-A007": z.number().int().nonnegative(),
+  "PDF-A008": z.number().int().nonnegative(),
+  "PDF-A009": z.number().int().nonnegative(),
+  "PDF-A010": z.number().int().nonnegative(),
+  "PDF-A011": z.number().int().nonnegative(),
+});
+
+export const HybridFoundationAdaptationLeafBaselineZ = z.object({
+  baseline_lid: z.string().min(1),
+  source_span: SpanZ,
+  source_span_sha256: z.string().regex(/^[a-f0-9]{64}$/u),
+  expected: z.object({
+    precision: PdfProjectionPrecisionV2Z,
+    projection_reason: z.string().min(1),
+    section_lid: z.string().min(1),
+    issue_ids: z.array(HybridFoundationAdaptationIssueIdZ),
+    page_indexes: z.array(z.number().int().nonnegative()),
+  }),
+});
+
+export type HybridFoundationAdaptationLeafBaseline = z.infer<typeof HybridFoundationAdaptationLeafBaselineZ>;
+
+export const HybridFoundationAdaptationBaselineZ = z.object({
+  version: z.literal("hybrid_foundation_adaptation_baseline.v1"),
+  input_fingerprint: z.object({
+    source_sha256: z.string().regex(/^[a-f0-9]{64}$/u),
+    pdf_sha256: z.string().regex(/^[a-f0-9]{64}$/u),
+    source_alignment_evidence_sha256: z.string().regex(/^[a-f0-9]{64}$/u).optional(),
+  }),
+  config_hash: z.string().regex(/^[a-f0-9]{64}$/u),
+  leaf_count: z.number().int().nonnegative(),
+  precision_counts: PrecisionCountsZ,
+  projection_reason_counts: z.record(z.number().int().nonnegative()),
+  issue_counts: IssueCountsZ,
+  section_stats: z.array(z.object({
+    section_lid: z.string().min(1),
+    leaf_count: z.number().int().nonnegative(),
+    precision_counts: PrecisionCountsZ,
+    projection_reason_counts: z.record(z.number().int().nonnegative()),
+  })),
+  binding_counts: BindingCountsZ,
+  selection_capability_matrix: SelectionCapabilityMatrixZ,
+  leaves: z.array(HybridFoundationAdaptationLeafBaselineZ),
+}).superRefine((baseline, context) => {
+  const errors = adaptationBaselineConsistencyErrors(baseline);
+  for (const error of errors) context.addIssue({ code: z.ZodIssueCode.custom, message: error });
+});
+
+export type HybridFoundationAdaptationBaseline = z.infer<typeof HybridFoundationAdaptationBaselineZ>;
+
 export const ExternalBenchmarkDescriptorZ = z.object({
-  version: z.literal("hybrid_foundation_external_benchmark.v1"),
+  version: z.literal("hybrid_foundation_external_benchmark.v2"),
   benchmark_id: z.string().min(1),
   book_id: z.string().min(1),
   input_sha256: z.object({ source: z.string().length(64), pdf: z.string().length(64) }),
@@ -68,6 +174,7 @@ export const ExternalBenchmarkDescriptorZ = z.object({
     mapped_heading_count: z.number().int().nonnegative(),
     mapped_heading_ratio: z.number().min(0).max(1),
   }),
+  expected_adaptation_v1: HybridFoundationAdaptationBaselineZ,
 });
 
 export type ExternalBenchmarkDescriptor = z.infer<typeof ExternalBenchmarkDescriptorZ>;
@@ -172,6 +279,533 @@ function mappedStatus(status: string): boolean {
 
 function ratio(numerator: number, denominator: number): number {
   return denominator ? numerator / denominator : 1;
+}
+
+const ADAPTATION_PRECISIONS: PdfProjectionPrecisionV2[] = [
+  "char_exact",
+  "region_exact",
+  "partial",
+  "unmapped",
+];
+
+function emptyPrecisionCounts(): Record<PdfProjectionPrecisionV2, number> {
+  return { char_exact: 0, region_exact: 0, partial: 0, unmapped: 0 };
+}
+
+function emptyIssueCounts(): Record<HybridFoundationAdaptationIssueId, number> {
+  return Object.fromEntries(HybridFoundationAdaptationIssueIdZ.options.map((issueId) => [issueId, 0])) as Record<
+    HybridFoundationAdaptationIssueId,
+    number
+  >;
+}
+
+function emptySelectionCapabilityMatrix(): z.infer<typeof SelectionCapabilityMatrixZ> {
+  const empty = (): z.infer<typeof SelectionCapabilityCountsZ> => ({
+    leaf_count: 0,
+    region_leaf_count: 0,
+    exact_span_leaf_count: 0,
+    selection_leaf_count: 0,
+    selection_character_count: 0,
+  });
+  return { char_exact: empty(), region_exact: empty(), partial: empty(), unmapped: empty() };
+}
+
+function countStrings(values: string[]): Record<string, number> {
+  const counts = new Map<string, number>();
+  for (const value of values) counts.set(value, (counts.get(value) ?? 0) + 1);
+  return Object.fromEntries([...counts.entries()].sort(([left], [right]) => left.localeCompare(right)));
+}
+
+function compareLids(left: string, right: string): number {
+  const leftParts = left.split(".").map(Number);
+  const rightParts = right.split(".").map(Number);
+  for (let index = 0; index < Math.max(leftParts.length, rightParts.length); index += 1) {
+    if (leftParts[index] === undefined) return -1;
+    if (rightParts[index] === undefined) return 1;
+    if (leftParts[index] !== rightParts[index]) return leftParts[index] - rightParts[index];
+  }
+  return 0;
+}
+
+function sameJson(left: unknown, right: unknown): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function pageIndexes(entry: HybridFoundationV2Artifacts["pdf_source_map"]["entries"][number]): number[] {
+  return [...new Set(entry.regions.map((region) => region.pageIndex))].sort((left, right) => left - right);
+}
+
+function sectionLidForLeaf(artifacts: HybridFoundationV2Artifacts, lid: string): string {
+  const containerLids = new Set(artifacts.base.lid_nodes
+    .filter((node) => node.children.length > 0)
+    .map((node) => node.lid));
+  const parts = lid.split(".");
+  for (let length = parts.length - 1; length > 0; length -= 1) {
+    const candidate = parts.slice(0, length).join(".");
+    if (containerLids.has(candidate)) return candidate;
+  }
+  return lid;
+}
+
+function selectionCapabilityMatrix(
+  artifacts: HybridFoundationV2Artifacts,
+): z.infer<typeof SelectionCapabilityMatrixZ> {
+  const charsByLid = new Map<string, number>();
+  for (const page of artifacts.pdf_selection_map_pages) {
+    for (const char of page.chars) charsByLid.set(char.lid, (charsByLid.get(char.lid) ?? 0) + 1);
+  }
+  const matrix = emptySelectionCapabilityMatrix();
+  for (const entry of artifacts.pdf_source_map.entries) {
+    const counts = matrix[entry.precision];
+    counts.leaf_count += 1;
+    if (entry.regions.length) counts.region_leaf_count += 1;
+    if (entry.exact_source_spans.length) counts.exact_span_leaf_count += 1;
+    const charCount = charsByLid.get(entry.lid) ?? 0;
+    if (charCount) counts.selection_leaf_count += 1;
+    counts.selection_character_count += charCount;
+  }
+  return matrix;
+}
+
+function bindingCounts(artifacts: HybridFoundationV2Artifacts): z.infer<typeof BindingCountsZ> {
+  const regionOwners = new Map<string, Set<string>>();
+  for (const entry of artifacts.pdf_source_map.entries) {
+    for (const region of entry.regions) {
+      const key = `${region.pageIndex}:${region.bbox.join(",")}`;
+      const owners = regionOwners.get(key) ?? new Set<string>();
+      owners.add(entry.lid);
+      regionOwners.set(key, owners);
+    }
+  }
+  const selectionBindings = new Set<string>();
+  let duplicateSelectionBindingCount = 0;
+  for (const page of artifacts.pdf_selection_map_pages) {
+    for (const char of page.chars) {
+      const key = `${page.pageIndex}:${char.char_index}`;
+      if (selectionBindings.has(key)) duplicateSelectionBindingCount += 1;
+      selectionBindings.add(key);
+    }
+  }
+  const diagnostics = artifacts.alignment_report.diagnostics as Record<string, unknown>;
+  return {
+    duplicate_region_binding_count: [...regionOwners.values()].filter((owners) => owners.size > 1).length,
+    duplicate_selection_binding_count: duplicateSelectionBindingCount,
+    raw_duplicate_region_binding_count: Number(diagnostics.raw_duplicate_pdf_binding_count ?? 0),
+    raw_duplicate_selection_binding_count: Number(diagnostics.raw_duplicate_selection_binding_count ?? 0),
+    conflicted_lid_count: Number(diagnostics.conflicted_lid_count ?? 0),
+  };
+}
+
+function sectionStatsFromLeaves(
+  leaves: HybridFoundationAdaptationLeafBaseline[],
+): HybridFoundationAdaptationBaseline["section_stats"] {
+  const sections = new Map<string, HybridFoundationAdaptationBaseline["section_stats"][number]>();
+  for (const leaf of leaves) {
+    const section = sections.get(leaf.expected.section_lid) ?? {
+      section_lid: leaf.expected.section_lid,
+      leaf_count: 0,
+      precision_counts: emptyPrecisionCounts(),
+      projection_reason_counts: {},
+    };
+    section.leaf_count += 1;
+    section.precision_counts[leaf.expected.precision] += 1;
+    section.projection_reason_counts[leaf.expected.projection_reason] =
+      (section.projection_reason_counts[leaf.expected.projection_reason] ?? 0) + 1;
+    sections.set(section.section_lid, section);
+  }
+  return [...sections.values()]
+    .sort((left, right) => compareLids(left.section_lid, right.section_lid))
+    .map((section) => ({
+      ...section,
+      projection_reason_counts: Object.fromEntries(Object.entries(section.projection_reason_counts)
+        .sort(([left], [right]) => left.localeCompare(right))),
+    }));
+}
+
+function aggregateAdaptationLeaves(leaves: HybridFoundationAdaptationLeafBaseline[]) {
+  const precisionCounts = emptyPrecisionCounts();
+  const issueCounts = emptyIssueCounts();
+  for (const leaf of leaves) {
+    precisionCounts[leaf.expected.precision] += 1;
+    for (const issueId of leaf.expected.issue_ids) issueCounts[issueId] += 1;
+  }
+  return {
+    precision_counts: precisionCounts,
+    projection_reason_counts: countStrings(leaves.map((leaf) => leaf.expected.projection_reason)),
+    issue_counts: issueCounts,
+    section_stats: sectionStatsFromLeaves(leaves),
+  };
+}
+
+function adaptationBaselineConsistencyErrors(baseline: {
+  leaf_count: number;
+  precision_counts: z.infer<typeof PrecisionCountsZ>;
+  projection_reason_counts: Record<string, number>;
+  issue_counts: z.infer<typeof IssueCountsZ>;
+  section_stats: HybridFoundationAdaptationBaseline["section_stats"];
+  leaves: HybridFoundationAdaptationLeafBaseline[];
+}): string[] {
+  const errors: string[] = [];
+  const lids = new Set<string>();
+  for (const leaf of baseline.leaves) {
+    if (lids.has(leaf.baseline_lid)) errors.push(`duplicate adaptation baseline LID: ${leaf.baseline_lid}`);
+    lids.add(leaf.baseline_lid);
+    if (!sameJson(leaf.expected.page_indexes, [...new Set(leaf.expected.page_indexes)].sort((a, b) => a - b))) {
+      errors.push(`adaptation baseline page indexes are not sorted and unique: ${leaf.baseline_lid}`);
+    }
+    const sortedIssues = [...new Set(leaf.expected.issue_ids)]
+      .sort((left, right) => HybridFoundationAdaptationIssueIdZ.options.indexOf(left)
+        - HybridFoundationAdaptationIssueIdZ.options.indexOf(right));
+    if (!sameJson(leaf.expected.issue_ids, sortedIssues)) {
+      errors.push(`adaptation baseline issue ids are not sorted and unique: ${leaf.baseline_lid}`);
+    }
+  }
+  const aggregate = aggregateAdaptationLeaves(baseline.leaves);
+  if (baseline.leaf_count !== baseline.leaves.length) errors.push("adaptation baseline leaf_count differs from leaves");
+  if (!sameJson(baseline.precision_counts, aggregate.precision_counts)) {
+    errors.push("adaptation baseline precision_counts differ from leaves");
+  }
+  if (!sameJson(baseline.projection_reason_counts, aggregate.projection_reason_counts)) {
+    errors.push("adaptation baseline projection_reason_counts differ from leaves");
+  }
+  if (!sameJson(baseline.issue_counts, aggregate.issue_counts)) {
+    errors.push("adaptation baseline issue_counts differ from leaves");
+  }
+  if (!sameJson(baseline.section_stats, aggregate.section_stats)) {
+    errors.push("adaptation baseline section_stats differ from leaves");
+  }
+  return errors;
+}
+
+export interface CreateHybridFoundationAdaptationBaselineInput {
+  source: string;
+  artifacts: HybridFoundationV2Artifacts;
+  issue_ids_by_lid?: Partial<Record<string, HybridFoundationAdaptationIssueId[]>>;
+}
+
+export function createHybridFoundationAdaptationBaseline(
+  input: CreateHybridFoundationAdaptationBaselineInput,
+): HybridFoundationAdaptationBaseline {
+  const entriesByLid = new Map(input.artifacts.pdf_source_map.entries.map((entry) => [entry.lid, entry]));
+  const leaves = input.artifacts.base.lid_nodes
+    .filter((node) => node.children.length === 0)
+    .map((node): HybridFoundationAdaptationLeafBaseline => {
+      const entry = entriesByLid.get(node.lid);
+      if (!entry) throw new Error(`adaptation baseline leaf has no source-map entry: ${node.lid}`);
+      const issueIds = [...new Set(input.issue_ids_by_lid?.[node.lid] ?? [])]
+        .sort((left, right) => HybridFoundationAdaptationIssueIdZ.options.indexOf(left)
+          - HybridFoundationAdaptationIssueIdZ.options.indexOf(right));
+      return {
+        baseline_lid: node.lid,
+        source_span: { ...entry.source_span },
+        source_span_sha256: sha256(input.source.slice(entry.source_span.start, entry.source_span.end)),
+        expected: {
+          precision: entry.precision,
+          projection_reason: entry.alignment.reason,
+          section_lid: sectionLidForLeaf(input.artifacts, node.lid),
+          issue_ids: issueIds,
+          page_indexes: pageIndexes(entry),
+        },
+      };
+    });
+  if (leaves.length !== input.artifacts.pdf_source_map.entries.length) {
+    throw new Error("adaptation baseline source map does not cover each leaf exactly once");
+  }
+  const aggregate = aggregateAdaptationLeaves(leaves);
+  return HybridFoundationAdaptationBaselineZ.parse({
+    version: "hybrid_foundation_adaptation_baseline.v1",
+    input_fingerprint: {
+      source_sha256: sha256(input.source),
+      pdf_sha256: input.artifacts.alignment_report.input_fingerprint.pdf_sha256,
+      ...(input.artifacts.alignment_report.input_fingerprint.source_alignment_evidence_sha256
+        ? { source_alignment_evidence_sha256: input.artifacts.alignment_report.input_fingerprint.source_alignment_evidence_sha256 }
+        : {}),
+    },
+    config_hash: input.artifacts.alignment_report.config_hash,
+    leaf_count: leaves.length,
+    ...aggregate,
+    binding_counts: bindingCounts(input.artifacts),
+    selection_capability_matrix: selectionCapabilityMatrix(input.artifacts),
+    leaves,
+  });
+}
+
+export const HybridFoundationAdaptationMigrationMapZ = z.record(z.object({
+  status: z.enum(["stable", "content_drift", "removed"]),
+  v2_lid: z.string().min(1).optional(),
+}).superRefine((migration, context) => {
+  if (migration.status !== "removed" && !migration.v2_lid) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: `${migration.status} migration requires v2_lid` });
+  }
+  if (migration.status === "removed" && migration.v2_lid) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "removed migration forbids v2_lid" });
+  }
+}));
+
+export type HybridFoundationAdaptationMigrationMap = z.infer<typeof HybridFoundationAdaptationMigrationMapZ>;
+
+interface AdaptationCurrentLeaf {
+  lid: string;
+  source_span: { start: number; end: number };
+  source_span_sha256: string;
+  precision: PdfProjectionPrecisionV2;
+  projection_reason: string;
+  section_lid: string;
+  page_indexes: number[];
+}
+
+export interface AuditHybridFoundationAdaptationInput {
+  source: string;
+  artifacts: HybridFoundationV2Artifacts;
+  baseline: HybridFoundationAdaptationBaseline;
+  lid_migration_map?: HybridFoundationAdaptationMigrationMap;
+}
+
+export function auditHybridFoundationAdaptation(input: AuditHybridFoundationAdaptationInput) {
+  const baseline = HybridFoundationAdaptationBaselineZ.parse(input.baseline);
+  const migrationMap = HybridFoundationAdaptationMigrationMapZ.parse(input.lid_migration_map ?? {});
+  const baseLeafLids = new Set(input.artifacts.base.lid_nodes
+    .filter((node) => node.children.length === 0)
+    .map((node) => node.lid));
+  const sourceMapLids = new Set(input.artifacts.pdf_source_map.entries.map((entry) => entry.lid));
+  const artifactLeafCoverageErrors = [
+    ...[...baseLeafLids].filter((lid) => !sourceMapLids.has(lid)).map((lid) => `missing source-map entry:${lid}`),
+    ...[...sourceMapLids].filter((lid) => !baseLeafLids.has(lid)).map((lid) => `source-map entry is not a leaf:${lid}`),
+  ].sort();
+  const currentLeaves: AdaptationCurrentLeaf[] = input.artifacts.pdf_source_map.entries.map((entry) => ({
+    lid: entry.lid,
+    source_span: { ...entry.source_span },
+    source_span_sha256: sha256(input.source.slice(entry.source_span.start, entry.source_span.end)),
+    precision: entry.precision,
+    projection_reason: entry.alignment.reason,
+    section_lid: sectionLidForLeaf(input.artifacts, entry.lid),
+    page_indexes: pageIndexes(entry),
+  }));
+  const currentByLid = new Map(currentLeaves.map((leaf) => [leaf.lid, leaf]));
+  const currentByHash = new Map<string, AdaptationCurrentLeaf[]>();
+  for (const leaf of currentLeaves) {
+    const candidates = currentByHash.get(leaf.source_span_sha256) ?? [];
+    candidates.push(leaf);
+    currentByHash.set(leaf.source_span_sha256, candidates);
+  }
+
+  const usedCurrentLids = new Set<string>();
+  const failures: Array<{ baseline_lid: string; current_lid?: string; codes: string[] }> = [];
+  const matches = new Map<string, AdaptationCurrentLeaf>();
+  let directLidCount = 0;
+  let migrationMapCount = 0;
+  let sourceHashMigrationCount = 0;
+  let removedByMigrationCount = 0;
+  let missingBaselineCount = 0;
+  let wrongPageCount = 0;
+  let reasonMismatchCount = 0;
+  let precisionMismatchCount = 0;
+  let sectionMismatchCount = 0;
+
+  for (const expected of baseline.leaves) {
+    let actual: AdaptationCurrentLeaf | undefined;
+    let matchKind: "direct" | "migration_map" | "source_hash" | "removed" | "missing" = "missing";
+    const migration = migrationMap[expected.baseline_lid];
+    const direct = currentByLid.get(expected.baseline_lid);
+    if (direct && direct.source_span_sha256 === expected.source_span_sha256) {
+      actual = direct;
+      matchKind = "direct";
+    } else {
+      if (migration?.status === "removed") {
+        matchKind = "removed";
+      } else if (migration?.v2_lid) {
+        actual = currentByLid.get(migration.v2_lid);
+        if (actual) matchKind = "migration_map";
+      }
+      if (!migration && !actual && matchKind !== "removed") {
+        const candidates = (currentByHash.get(expected.source_span_sha256) ?? [])
+          .filter((candidate) => !usedCurrentLids.has(candidate.lid));
+        if (candidates.length === 1) {
+          actual = candidates[0];
+          matchKind = actual.lid === expected.baseline_lid ? "direct" : "source_hash";
+        }
+      }
+    }
+
+    if (matchKind === "removed") {
+      removedByMigrationCount += 1;
+      continue;
+    }
+    if (!actual || usedCurrentLids.has(actual.lid)) {
+      missingBaselineCount += 1;
+      failures.push({ baseline_lid: expected.baseline_lid, codes: ["missing_or_ambiguous_successor"] });
+      continue;
+    }
+    usedCurrentLids.add(actual.lid);
+    matches.set(expected.baseline_lid, actual);
+    if (matchKind === "direct") directLidCount += 1;
+    if (matchKind === "migration_map") migrationMapCount += 1;
+    if (matchKind === "source_hash") sourceHashMigrationCount += 1;
+
+    const codes: string[] = [];
+    if (matchKind === "direct" && !sameJson(actual.source_span, expected.source_span)) codes.push("source_span_changed");
+    if (
+      matchKind === "migration_map"
+      && migration?.status === "stable"
+      && actual.source_span_sha256 !== expected.source_span_sha256
+    ) codes.push("stable_migration_source_hash_changed");
+    if (actual.precision !== expected.expected.precision) {
+      codes.push("precision_changed");
+      precisionMismatchCount += 1;
+    }
+    if (actual.projection_reason !== expected.expected.projection_reason) {
+      codes.push("projection_reason_changed");
+      reasonMismatchCount += 1;
+    }
+    if (actual.section_lid !== expected.expected.section_lid) {
+      codes.push("section_changed");
+      sectionMismatchCount += 1;
+    }
+    if (!sameJson(actual.page_indexes, expected.expected.page_indexes)) {
+      codes.push("page_indexes_changed");
+      wrongPageCount += 1;
+    }
+    if (codes.length) failures.push({ baseline_lid: expected.baseline_lid, current_lid: actual.lid, codes });
+  }
+
+  const unexpectedCurrentLids = currentLeaves
+    .filter((leaf) => !usedCurrentLids.has(leaf.lid))
+    .map((leaf) => leaf.lid)
+    .sort(compareLids);
+  const actualProjectionReasonCounts = countStrings(currentLeaves.map((leaf) => leaf.projection_reason));
+  const actualPrecisionCounts = emptyPrecisionCounts();
+  for (const leaf of currentLeaves) actualPrecisionCounts[leaf.precision] += 1;
+  const actualSectionStats = sectionStatsFromLeaves(currentLeaves.map((leaf) => ({
+    baseline_lid: leaf.lid,
+    source_span: leaf.source_span,
+    source_span_sha256: leaf.source_span_sha256,
+    expected: {
+      precision: leaf.precision,
+      projection_reason: leaf.projection_reason,
+      section_lid: leaf.section_lid,
+      issue_ids: [],
+      page_indexes: leaf.page_indexes,
+    },
+  })));
+  const mismatchedSectionLids = [...new Set([
+    ...baseline.section_stats.map((section) => section.section_lid),
+    ...actualSectionStats.map((section) => section.section_lid),
+  ])].filter((sectionLid) => !sameJson(
+    baseline.section_stats.find((section) => section.section_lid === sectionLid),
+    actualSectionStats.find((section) => section.section_lid === sectionLid),
+  )).sort(compareLids);
+
+  const issueClosure = Object.fromEntries(HybridFoundationAdaptationIssueIdZ.options.map((issueId) => {
+    const expectedLeaves = baseline.leaves.filter((leaf) => leaf.expected.issue_ids.includes(issueId));
+    const actualLeaves = expectedLeaves.map((leaf) => matches.get(leaf.baseline_lid)).filter(Boolean) as AdaptationCurrentLeaf[];
+    return [issueId, {
+      baseline_leaf_count: expectedLeaves.length,
+      matched_leaf_count: actualLeaves.length,
+      precision_counts: ADAPTATION_PRECISIONS.reduce((counts, precision) => ({
+        ...counts,
+        [precision]: actualLeaves.filter((leaf) => leaf.precision === precision).length,
+      }), {} as Record<PdfProjectionPrecisionV2, number>),
+      projection_reason_counts: countStrings(actualLeaves.map((leaf) => leaf.projection_reason)),
+    }];
+  })) as Record<HybridFoundationAdaptationIssueId, {
+    baseline_leaf_count: number;
+    matched_leaf_count: number;
+    precision_counts: Record<PdfProjectionPrecisionV2, number>;
+    projection_reason_counts: Record<string, number>;
+  }>;
+
+  const actualBindings = bindingCounts(input.artifacts);
+  const actualCapabilities = selectionCapabilityMatrix(input.artifacts);
+  const inputFingerprintMatches = sameJson(baseline.input_fingerprint, {
+    source_sha256: sha256(input.source),
+    pdf_sha256: input.artifacts.alignment_report.input_fingerprint.pdf_sha256,
+    ...(input.artifacts.alignment_report.input_fingerprint.source_alignment_evidence_sha256
+      ? { source_alignment_evidence_sha256: input.artifacts.alignment_report.input_fingerprint.source_alignment_evidence_sha256 }
+      : {}),
+  });
+  const configHashMatches = baseline.config_hash === input.artifacts.alignment_report.config_hash;
+  const reasonCountsMatch = sameJson(baseline.projection_reason_counts, actualProjectionReasonCounts);
+  const precisionCountsMatch = sameJson(baseline.precision_counts, actualPrecisionCounts);
+  const bindingCountsMatch = sameJson(baseline.binding_counts, actualBindings);
+  const selectionCapabilitiesMatch = sameJson(baseline.selection_capability_matrix, actualCapabilities);
+  const passed = inputFingerprintMatches
+    && configHashMatches
+    && artifactLeafCoverageErrors.length === 0
+    && missingBaselineCount === 0
+    && unexpectedCurrentLids.length === 0
+    && failures.length === 0
+    && reasonCountsMatch
+    && precisionCountsMatch
+    && mismatchedSectionLids.length === 0
+    && bindingCountsMatch
+    && selectionCapabilitiesMatch;
+
+  return {
+    version: "hybrid_foundation_adaptation_audit.v1" as const,
+    benchmark_id: "external-formula-dense-transformer",
+    book_id: input.artifacts.base.book_id,
+    passed,
+    input_closure: {
+      input_fingerprint_matches: inputFingerprintMatches,
+      config_hash_matches: configHashMatches,
+    },
+    coverage: {
+      baseline_leaf_count: baseline.leaf_count,
+      current_leaf_count: currentLeaves.length,
+      matched_baseline_count: matches.size + removedByMigrationCount,
+      direct_lid_count: directLidCount,
+      migration_map_count: migrationMapCount,
+      source_hash_migration_count: sourceHashMigrationCount,
+      removed_by_migration_count: removedByMigrationCount,
+      missing_baseline_count: missingBaselineCount,
+      unexpected_current_count: unexpectedCurrentLids.length,
+      artifact_leaf_coverage_error_count: artifactLeafCoverageErrors.length,
+    },
+    reason_closure: {
+      expected: baseline.projection_reason_counts,
+      actual: actualProjectionReasonCounts,
+      counts_match: reasonCountsMatch,
+      mismatched_leaf_count: reasonMismatchCount,
+      unexpected_reasons: Object.keys(actualProjectionReasonCounts)
+        .filter((reason) => baseline.projection_reason_counts[reason] === undefined)
+        .sort(),
+    },
+    precision_closure: {
+      expected: baseline.precision_counts,
+      actual: actualPrecisionCounts,
+      counts_match: precisionCountsMatch,
+      mismatched_leaf_count: precisionMismatchCount,
+    },
+    section_closure: {
+      expected_section_count: baseline.section_stats.length,
+      actual_section_count: actualSectionStats.length,
+      mismatched_leaf_count: sectionMismatchCount,
+      mismatched_section_lids: mismatchedSectionLids,
+    },
+    issue_closure: issueClosure,
+    wrong_page_count: wrongPageCount,
+    binding_closure: {
+      expected: baseline.binding_counts,
+      actual: actualBindings,
+      counts_match: bindingCountsMatch,
+    },
+    selection_capability_closure: {
+      expected: baseline.selection_capability_matrix,
+      actual: actualCapabilities,
+      counts_match: selectionCapabilitiesMatch,
+    },
+    artifact_leaf_coverage_errors: artifactLeafCoverageErrors,
+    unexpected_current_lids: unexpectedCurrentLids,
+    failures: failures.sort((left, right) => compareLids(left.baseline_lid, right.baseline_lid)),
+  };
+}
+
+export type HybridFoundationAdaptationAuditReport = ReturnType<typeof auditHybridFoundationAdaptation>;
+
+export function serializeHybridFoundationAdaptationAudit(
+  report: HybridFoundationAdaptationAuditReport,
+): string {
+  return `${JSON.stringify(report, null, 2)}\n`;
 }
 
 function artifactHashes(artifacts: HybridFoundationArtifacts): Record<string, string> {
