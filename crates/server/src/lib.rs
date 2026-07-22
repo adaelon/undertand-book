@@ -19,7 +19,7 @@ use memory::{
     ProfileGovernanceOutcomeKind, ProfilePayload, ProfilePayloadKind, ProfilePrivacyClass,
     ProfileResolutionContext, ProfileScope, ProfileStatus, RecallQuery, ReplaceInput,
     ReviewJobStatus, ReviewSessionCursor, SaveInput, SelectedRange, SelectionContext,
-    SelectionResolution, Sensitivity, SnapshotContext, SnapshotRequest,
+    SelectionResolution, SelectionResolutionBasis, Sensitivity, SnapshotContext, SnapshotRequest,
 };
 use read_tools::{
     disambiguate_source_labels, Book, ContentProfileId, EvidenceRange, PaperLandmarkKind,
@@ -788,6 +788,8 @@ pub struct AskQuote {
     pub ranges: Option<Vec<SelectedRange>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<SelectionResolution>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution_basis: Option<SelectionResolutionBasis>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub raw_quote: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -8785,15 +8787,22 @@ fn parse_question_quote(v: &serde_json::Value, book: &Book) -> Result<Option<Ask
             "question_quote lid/quote 不得为空",
         ));
     }
-    let has_extended = ["ranges", "status", "raw_quote", "resolved_quote"]
-        .iter()
-        .any(|field| q.get(*field).is_some());
+    let has_extended = [
+        "ranges",
+        "status",
+        "resolution_basis",
+        "raw_quote",
+        "resolved_quote",
+    ]
+    .iter()
+    .any(|field| q.get(*field).is_some());
     if !has_extended {
         return Ok(Some(AskQuote {
             lid: lid.into(),
             quote: quote.into(),
             ranges: None,
             status: None,
+            resolution_basis: None,
             raw_quote: None,
             resolved_quote: None,
         }));
@@ -8820,6 +8829,24 @@ fn parse_question_quote(v: &serde_json::Value, book: &Book) -> Result<Option<Ask
                 "question_quote status 必须是 resolved 或 partial",
             )
         })?;
+    let resolution_basis = q
+        .get("resolution_basis")
+        .filter(|value| !value.is_null())
+        .map(|value| {
+            serde_json::from_value::<SelectionResolutionBasis>(value.clone()).map_err(|_| {
+                validation(
+                    "INVALID_SELECTION_CONTEXT",
+                    "question_quote resolution_basis 必须是 exact 或 recovered",
+                )
+            })
+        })
+        .transpose()?;
+    if status != SelectionResolution::Resolved && resolution_basis.is_some() {
+        return Err(validation(
+            "INVALID_SELECTION_CONTEXT",
+            "question_quote resolution_basis 只允许用于 resolved 选区",
+        ));
+    }
     let raw_quote = q["raw_quote"].as_str().ok_or_else(|| {
         validation(
             "INVALID_SELECTION_CONTEXT",
@@ -8858,6 +8885,7 @@ fn parse_question_quote(v: &serde_json::Value, book: &Book) -> Result<Option<Ask
         quote: quote.into(),
         ranges: Some(ranges),
         status: Some(status),
+        resolution_basis,
         raw_quote: Some(raw_quote.into()),
         resolved_quote: Some(resolved_quote.into()),
     }))
@@ -16188,6 +16216,7 @@ unchanged after training concludes";
                 range: memory::TextRange { start: 0, end: 1 },
             }]),
             status: Some(SelectionResolution::Resolved),
+            resolution_basis: None,
             raw_quote: Some("X".into()),
             resolved_quote: Some("X".into()),
         };
@@ -17321,6 +17350,61 @@ Version 1.2 and bare 1.1 stay unchanged.
         }
     }
 
+    #[test]
+    fn agent_chat_preserves_recovered_basis_and_rejects_it_for_partial_selection() {
+        let mut recovered = state_named("agent-selection-recovered-basis");
+        recovered.adapter = Box::new(ChatStubAdapter::scripted(vec![AssistantTurn {
+            text: Some("recovered selection answer".into()),
+            tool_calls: vec![],
+            usage_total_tokens: Some(3),
+        }]));
+        let reply = post(
+            &mut recovered,
+            "/agent/chat",
+            r#"{
+                "message":"explain",
+                "question_quote":{
+                    "lid":"1",
+                    "quote":"X",
+                    "status":"resolved",
+                    "resolution_basis":"recovered",
+                    "raw_quote":"X",
+                    "resolved_quote":"X",
+                    "ranges":[{"lid":"1","range":{"start":0,"end":1}}]
+                }
+            }"#,
+        );
+        assert_eq!(reply.status, 200, "{}", reply.body);
+        assert_eq!(
+            recovered.agent_history.sessions[0].turns[0]
+                .question_quote
+                .as_ref()
+                .unwrap()
+                .resolution_basis,
+            Some(SelectionResolutionBasis::Recovered)
+        );
+
+        let mut partial = state_named("agent-selection-partial-basis");
+        let reply = post(
+            &mut partial,
+            "/agent/chat",
+            r#"{
+                "message":"explain",
+                "question_quote":{
+                    "lid":"1",
+                    "quote":"X",
+                    "status":"partial",
+                    "resolution_basis":"recovered",
+                    "raw_quote":"X",
+                    "resolved_quote":"X",
+                    "ranges":[{"lid":"1","range":{"start":0,"end":1}}]
+                }
+            }"#,
+        );
+        assert_eq!(reply.status, 400, "{}", reply.body);
+        assert!(reply.body.contains("INVALID_SELECTION_CONTEXT"));
+    }
+
     fn selected_range(lid: &str, start: u32, end: u32) -> SelectedRange {
         SelectedRange {
             lid: lid.into(),
@@ -17673,6 +17757,7 @@ Version 1.2 and bare 1.1 stay unchanged.
                 },
             ]),
             status: Some(SelectionResolution::Resolved),
+            resolution_basis: None,
             raw_quote: Some("XX".into()),
             resolved_quote: Some("XX".into()),
         };

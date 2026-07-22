@@ -2206,6 +2206,7 @@ async function copyPdfSelectionTranslation(markdown: string) {
 function selectionContextOf(draft: PdfSelectionDraft): SelectionContext {
   return {
     status: draft.status,
+    ...(draft.resolution_basis ? { resolution_basis: draft.resolution_basis } : {}),
     raw_quote: draft.raw_quote,
     resolved_quote: draft.resolved_quote,
     ranges: draft.ranges,
@@ -2465,6 +2466,7 @@ function askPdfSelection() {
     quote,
     ranges: draft.ranges,
     status: draft.status,
+    ...(draft.resolution_basis ? { resolution_basis: draft.resolution_basis } : {}),
     raw_quote: draft.raw_quote,
     resolved_quote: draft.resolved_quote,
   };

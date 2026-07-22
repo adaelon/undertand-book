@@ -144,12 +144,15 @@ export interface TextRange {
   end: number;
 }
 export type SelectionResolution = "resolved" | "partial";
+export type SelectionResolutionBasis = "exact" | "recovered";
+export type PdfSelectionRecoveryDifference = "layout_whitespace" | "hyphen_representation";
 export interface SelectedRange {
   lid: string;
   range: TextRange;
 }
 export interface SelectionContext {
   status: SelectionResolution;
+  resolution_basis?: SelectionResolutionBasis;
   raw_quote: string;
   resolved_quote: string;
   ranges: SelectedRange[];
@@ -305,6 +308,9 @@ export interface PdfSourceMapV2 extends PdfSourceMapBase {
 export type PdfSourceMap = PdfSourceMapV1 | PdfSourceMapV2;
 export interface PdfSelectionResolveResponse {
   status: "resolved" | "partial" | "unresolved";
+  resolution_basis?: SelectionResolutionBasis;
+  recovery_policy_version?: "pdf_selection_recovery.v1";
+  recovered_differences?: PdfSelectionRecoveryDifference[];
   ranges: Array<{
     lid: string;
     range: TextRange;
@@ -323,6 +329,9 @@ export interface PdfRangesProjectResponse {
     lid: string;
     range: TextRange;
     status: "exact" | "partial" | "unmapped";
+    resolution_basis?: SelectionResolutionBasis;
+    recovery_policy_version?: "pdf_selection_recovery.v1";
+    recovered_differences?: PdfSelectionRecoveryDifference[];
     rects: Array<{
       pageIndex: number;
       bbox: [number, number, number, number];
@@ -679,6 +688,7 @@ export interface AskQuote {
   quote: string;
   ranges?: SelectedRange[];
   status?: SelectionResolution;
+  resolution_basis?: SelectionResolutionBasis;
   raw_quote?: string;
   resolved_quote?: string;
 }

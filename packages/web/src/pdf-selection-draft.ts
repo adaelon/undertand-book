@@ -54,6 +54,7 @@ export function usePdfSelectionDraft(
         draft: {
           request_id: capture.request_id,
           status: response.status,
+          ...(response.resolution_basis ? { resolution_basis: response.resolution_basis } : {}),
           raw_quote: capture.raw_quote,
           resolved_quote: response.quote_markdown,
           ranges: response.ranges.map((selected) => ({

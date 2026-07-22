@@ -8,6 +8,7 @@ const questionQuote: AskQuote = {
   lid: "1.1",
   quote: "source quote",
   status: "resolved",
+  resolution_basis: "recovered",
   raw_quote: "source quote",
   resolved_quote: "source quote",
   ranges: [
@@ -21,6 +22,7 @@ describe("Agent answer selection Note provenance", () => {
     const selectionContext = selectionContextForAgentNote(questionQuote);
     expect(selectionContext).toEqual({
       status: "resolved",
+      resolution_basis: "recovered",
       raw_quote: "source quote",
       resolved_quote: "source quote",
       ranges: questionQuote.ranges,

@@ -107,6 +107,13 @@ pub enum SelectionResolution {
     Partial,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SelectionResolutionBasis {
+    Exact,
+    Recovered,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SelectedRange {
     pub lid: String,
@@ -116,6 +123,8 @@ pub struct SelectedRange {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SelectionContext {
     pub status: SelectionResolution,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution_basis: Option<SelectionResolutionBasis>,
     pub raw_quote: String,
     pub resolved_quote: String,
     pub ranges: Vec<SelectedRange>,
@@ -218,6 +227,11 @@ fn validate_selection_context(input: &SaveInput) -> Result<(), ToolError> {
     if input.mem_type != "note" {
         return Err(invalid_selection_context(
             "selection_context 只允许用于 note".into(),
+        ));
+    }
+    if context.status != SelectionResolution::Resolved && context.resolution_basis.is_some() {
+        return Err(invalid_selection_context(
+            "selection_context.resolution_basis 只允许用于 resolved 选区".into(),
         ));
     }
     let Some(first) = context.ranges.first() else {
@@ -886,6 +900,7 @@ mod tests {
     fn selection_context() -> SelectionContext {
         SelectionContext {
             status: SelectionResolution::Resolved,
+            resolution_basis: None,
             raw_quote: "raw PDF quote".into(),
             resolved_quote: "resolved quote".into(),
             ranges: vec![
@@ -1215,6 +1230,49 @@ mod tests {
     }
 
     #[test]
+    fn selection_context_resolution_basis_is_backward_compatible_and_fail_closed() {
+        let legacy: SelectionContext = serde_json::from_value(serde_json::json!({
+            "status": "resolved",
+            "raw_quote": "legacy raw",
+            "resolved_quote": "legacy resolved",
+            "ranges": [{ "lid": "1.1", "range": { "start": 0, "end": 6 } }]
+        }))
+        .unwrap();
+        assert_eq!(legacy.resolution_basis, None);
+
+        let recovered: SelectionContext = serde_json::from_value(serde_json::json!({
+            "status": "resolved",
+            "resolution_basis": "recovered",
+            "raw_quote": "feed-forward",
+            "resolved_quote": "feed-forward",
+            "ranges": [{ "lid": "1.1", "range": { "start": 0, "end": 12 } }]
+        }))
+        .unwrap();
+        assert_eq!(
+            recovered.resolution_basis,
+            Some(SelectionResolutionBasis::Recovered)
+        );
+
+        let path = tmp("partial-selection-context-basis");
+        let mut store = MemoryStore::open(&path).unwrap();
+        let mut input = note_input("bookA", "1.1", "partial note");
+        input.selection_context = Some(SelectionContext {
+            status: SelectionResolution::Partial,
+            resolution_basis: Some(SelectionResolutionBasis::Recovered),
+            raw_quote: "raw".into(),
+            resolved_quote: "source".into(),
+            ranges: vec![SelectedRange {
+                lid: "1.1".into(),
+                range: TextRange { start: 0, end: 3 },
+            }],
+        });
+        assert_eq!(
+            store.save(input, "t0").unwrap_err().error_code,
+            "INVALID_SELECTION_CONTEXT"
+        );
+    }
+
+    #[test]
     fn selection_context_rejects_non_note_empty_ranges_invalid_ranges_and_anchor_mismatch() {
         let path = tmp("invalid-selection-context");
         let mut store = MemoryStore::open(&path).unwrap();
@@ -1283,6 +1341,7 @@ mod tests {
         let old = store.save(note_input("bookA", "1.1", "旧内容"), "t0").unwrap();
         let context = SelectionContext {
             status: SelectionResolution::Partial,
+            resolution_basis: None,
             raw_quote: "new raw".into(),
             resolved_quote: "new resolved".into(),
             ranges: vec![

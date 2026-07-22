@@ -13,6 +13,17 @@ describe("pdfSelectionCapabilities", () => {
     });
   });
 
+  it("uses the same warning-free action matrix for recovered resolved selections", () => {
+    expect(pdfSelectionCapabilities("resolved")).toMatchObject({
+      canHighlight: true,
+      canNote: true,
+      canAsk: true,
+      canTranslate: true,
+      nativeCopyOnly: false,
+      statusLabel: null,
+    });
+  });
+
   it("limits partial selections to exact-subrange Ask and raw-text translation", () => {
     expect(pdfSelectionCapabilities("partial")).toEqual({
       canHighlight: false,

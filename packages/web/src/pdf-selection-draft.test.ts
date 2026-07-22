@@ -60,6 +60,21 @@ describe("usePdfSelectionDraft", () => {
     expect(controller.state.value).toEqual({ phase: "idle", capture: null, draft: null, error: null });
   });
 
+  it("preserves recovered resolution diagnostics without changing resolved status", async () => {
+    const controller = usePdfSelectionDraft(async () => ({
+      ...response("resolved"),
+      resolution_basis: "recovered",
+      recovery_policy_version: "pdf_selection_recovery.v1",
+      recovered_differences: ["layout_whitespace", "hyphen_representation"],
+    }));
+
+    await controller.capture(capture("recovered"));
+    expect(controller.state.value.draft).toMatchObject({
+      status: "resolved",
+      resolution_basis: "recovered",
+    });
+  });
+
   it("drops late responses and preserves the newest request", async () => {
     const first = deferred<PdfSelectionResolveResponse>();
     const second = deferred<PdfSelectionResolveResponse>();

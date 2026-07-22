@@ -342,6 +342,26 @@ describe("RightRail agent sources", () => {
 });
 
 describe("RightRail AskQuote", () => {
+  it("shows recovered resolved provenance as an ordinary citation", async () => {
+    const recovered = {
+      lid: "1.1",
+      quote: "feed-forward",
+      status: "resolved" as const,
+      resolution_basis: "recovered" as const,
+      raw_quote: "feed-forward",
+      resolved_quote: "feed-forward",
+      ranges: [{ lid: "1.1", range: { start: 0, end: 12 } }],
+    };
+    const wrapper = mount(RightRail, {
+      attachTo: document.body,
+      props: { ...baseProps, askDraft: recovered },
+    });
+
+    await flushPromises();
+    expect(wrapper.get(".ask-draft").text()).not.toContain("部分定位");
+    expect(wrapper.get(".ask-draft blockquote").text()).toBe("feed-forward");
+  });
+
   it("shows partial provenance while preserving the user-visible raw quote", async () => {
     const partial = {
       lid: "1.1",

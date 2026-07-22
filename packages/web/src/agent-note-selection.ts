@@ -13,6 +13,9 @@ export function selectionContextForAgentNote(
   }
   return {
     status: questionQuote.status,
+    ...(questionQuote.resolution_basis
+      ? { resolution_basis: questionQuote.resolution_basis }
+      : {}),
     raw_quote: questionQuote.raw_quote,
     resolved_quote: questionQuote.resolved_quote,
     ranges: questionQuote.ranges.map((selected) => ({
