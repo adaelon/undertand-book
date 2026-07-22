@@ -7068,6 +7068,246 @@ fn raw_quote_fully_covered_by_hits(hits: &[SelectionCharHit], raw_quote: &str) -
     quote_non_whitespace == 0 || matched_non_whitespace == quote_non_whitespace
 }
 
+const PDF_SELECTION_RECOVERY_POLICY_VERSION: &str = "pdf_selection_recovery.v1";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum PdfSelectionRecoveryDifference {
+    LayoutWhitespace,
+    HyphenRepresentation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PdfSelectionRecoveryDecision {
+    Exact,
+    Recovered(Vec<PdfSelectionRecoveryDifference>),
+    Incomplete,
+}
+
+#[derive(Debug, Default)]
+struct PdfSelectionRecoveryEvidence {
+    discretionary_raw_hyphen_offsets_utf16: HashSet<usize>,
+}
+
+fn is_pdf_selection_recoverable_hyphen(value: char) -> bool {
+    matches!(value, '\u{002d}' | '\u{00ad}' | '\u{2010}' | '\u{2011}')
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Utf16SelectionChar {
+    value: char,
+    start: usize,
+    end: usize,
+}
+
+#[derive(Debug, Default)]
+struct PdfSelectionRecoveryDifferences {
+    layout_whitespace: bool,
+    hyphen_representation: bool,
+}
+
+impl PdfSelectionRecoveryDifferences {
+    fn into_vec(self) -> Vec<PdfSelectionRecoveryDifference> {
+        let mut differences = Vec::new();
+        if self.layout_whitespace {
+            differences.push(PdfSelectionRecoveryDifference::LayoutWhitespace);
+        }
+        if self.hyphen_representation {
+            differences.push(PdfSelectionRecoveryDifference::HyphenRepresentation);
+        }
+        differences
+    }
+}
+
+fn utf16_selection_chars(value: &str) -> Vec<Utf16SelectionChar> {
+    let mut offset = 0usize;
+    value
+        .chars()
+        .map(|value| {
+            let start = offset;
+            offset += value.len_utf16();
+            Utf16SelectionChar {
+                value,
+                start,
+                end: offset,
+            }
+        })
+        .collect()
+}
+
+fn selection_text_recovery_differences(
+    raw_quote: &str,
+    canonical_quote: &str,
+    evidence: &PdfSelectionRecoveryEvidence,
+) -> Option<PdfSelectionRecoveryDifferences> {
+    let raw = utf16_selection_chars(raw_quote);
+    let canonical = utf16_selection_chars(canonical_quote);
+    let mut differences = PdfSelectionRecoveryDifferences::default();
+    let mut raw_index = 0usize;
+    let mut canonical_index = 0usize;
+
+    while raw_index < raw.len() && canonical_index < canonical.len() {
+        let raw_char = raw[raw_index];
+        let canonical_char = canonical[canonical_index];
+        if raw_char.value.is_whitespace() || canonical_char.value.is_whitespace() {
+            if !raw_char.value.is_whitespace() || !canonical_char.value.is_whitespace() {
+                return None;
+            }
+            let raw_run_start = raw_index;
+            let canonical_run_start = canonical_index;
+            while raw_index < raw.len() && raw[raw_index].value.is_whitespace() {
+                raw_index += 1;
+            }
+            while canonical_index < canonical.len()
+                && canonical[canonical_index].value.is_whitespace()
+            {
+                canonical_index += 1;
+            }
+            if raw[raw_run_start..raw_index]
+                .iter()
+                .map(|item| item.value)
+                .ne(canonical[canonical_run_start..canonical_index]
+                    .iter()
+                    .map(|item| item.value))
+            {
+                differences.layout_whitespace = true;
+            }
+            continue;
+        }
+        if raw_char.value == canonical_char.value {
+            raw_index += 1;
+            canonical_index += 1;
+            continue;
+        }
+        if is_pdf_selection_recoverable_hyphen(raw_char.value)
+            && is_pdf_selection_recoverable_hyphen(canonical_char.value)
+        {
+            differences.hyphen_representation = true;
+            raw_index += 1;
+            canonical_index += 1;
+            continue;
+        }
+        if is_pdf_selection_recoverable_hyphen(raw_char.value)
+            && evidence
+                .discretionary_raw_hyphen_offsets_utf16
+                .contains(&raw_char.start)
+        {
+            let previous_raw = raw_index
+                .checked_sub(1)
+                .and_then(|index| raw.get(index))
+                .map(|item| item.value);
+            let mut next_raw_index = raw_index + 1;
+            while next_raw_index < raw.len() && raw[next_raw_index].value.is_whitespace() {
+                differences.layout_whitespace = true;
+                next_raw_index += 1;
+            }
+            let next_raw = raw.get(next_raw_index).map(|item| item.value);
+            if !previous_raw.is_some_and(char::is_alphanumeric)
+                || !next_raw.is_some_and(char::is_alphanumeric)
+                || !canonical_char.value.is_alphanumeric()
+            {
+                return None;
+            }
+            differences.hyphen_representation = true;
+            raw_index = next_raw_index;
+            continue;
+        }
+        return None;
+    }
+    if raw_index != raw.len() || canonical_index != canonical.len() {
+        return None;
+    }
+    Some(differences)
+}
+
+fn classify_pdf_selection_recovery(
+    raw_quote: &str,
+    canonical_quote: &str,
+    canonical_source_start: usize,
+    hits: &[SelectionCharHit],
+    evidence: &PdfSelectionRecoveryEvidence,
+) -> PdfSelectionRecoveryDecision {
+    let Some(mut differences) =
+        selection_text_recovery_differences(raw_quote, canonical_quote, evidence)
+    else {
+        return PdfSelectionRecoveryDecision::Incomplete;
+    };
+    let canonical = utf16_selection_chars(canonical_quote);
+    if canonical.is_empty() || hits.is_empty() {
+        return PdfSelectionRecoveryDecision::Incomplete;
+    }
+    let canonical_source_end = canonical_source_start + canonical_quote.encode_utf16().count();
+    let mut previous_pdf_position: Option<(usize, usize)> = None;
+    let mut previous_source_start = None;
+    for hit in hits {
+        if hit.lid.is_none()
+            || hit.source_span.start < canonical_source_start
+            || hit.source_span.end > canonical_source_end
+            || hit.source_span.start >= hit.source_span.end
+            || previous_pdf_position.is_some_and(|(page_index, char_index)| {
+                hit.page_index < page_index
+                    || (hit.page_index == page_index && hit.char_index <= char_index)
+            })
+            || previous_source_start.is_some_and(|start| hit.source_span.start <= start)
+        {
+            return PdfSelectionRecoveryDecision::Incomplete;
+        }
+        previous_pdf_position = Some((hit.page_index, hit.char_index));
+        previous_source_start = Some(hit.source_span.start);
+    }
+
+    let covered = canonical
+        .iter()
+        .map(|item| {
+            let start = canonical_source_start + item.start;
+            let end = canonical_source_start + item.end;
+            hits.iter().any(|hit| {
+                hit.lid.is_some() && hit.source_span.start <= start && hit.source_span.end >= end
+            })
+        })
+        .collect::<Vec<_>>();
+    let first_material = canonical
+        .iter()
+        .position(|item| !item.value.is_whitespace());
+    let last_material = canonical
+        .iter()
+        .rposition(|item| !item.value.is_whitespace());
+    if first_material.is_none_or(|index| !covered[index])
+        || last_material.is_none_or(|index| !covered[index])
+    {
+        return PdfSelectionRecoveryDecision::Incomplete;
+    }
+
+    for (index, item) in canonical.iter().enumerate() {
+        if covered[index] {
+            continue;
+        }
+        if item.value.is_whitespace() {
+            differences.layout_whitespace = true;
+            continue;
+        }
+        if is_pdf_selection_recoverable_hyphen(item.value)
+            && index > 0
+            && index + 1 < canonical.len()
+            && canonical[index - 1].value.is_alphanumeric()
+            && canonical[index + 1].value.is_alphanumeric()
+            && covered[index - 1]
+            && covered[index + 1]
+        {
+            differences.hyphen_representation = true;
+            continue;
+        }
+        return PdfSelectionRecoveryDecision::Incomplete;
+    }
+
+    let differences = differences.into_vec();
+    if differences.is_empty() {
+        PdfSelectionRecoveryDecision::Exact
+    } else {
+        PdfSelectionRecoveryDecision::Recovered(differences)
+    }
+}
+
 fn selection_rect_intersects_region(selected: [f64; 4], region: [f64; 4]) -> bool {
     let selected_left = selected[0].min(selected[2]);
     let selected_right = selected[0].max(selected[2]);
@@ -12850,6 +13090,150 @@ mod tests {
         let body: serde_json::Value =
             serde_json::from_str(&conservative_without_raw_quote.body).unwrap();
         assert_eq!(body["status"], "partial");
+    }
+
+    fn selection_recovery_hits(
+        canonical_quote: &str,
+        omit: impl Fn(usize, char) -> bool,
+    ) -> Vec<SelectionCharHit> {
+        let mut source_offset = 0usize;
+        canonical_quote
+            .chars()
+            .enumerate()
+            .filter_map(|(char_index, value)| {
+                let start = source_offset;
+                source_offset += value.len_utf16();
+                if omit(char_index, value) {
+                    return None;
+                }
+                Some(SelectionCharHit {
+                    page_index: 3,
+                    char_index,
+                    text: value.to_string(),
+                    lid: Some("1.19.84".into()),
+                    source_span: SourceSpanDto {
+                        start: 10_000 + start,
+                        end: 10_000 + source_offset,
+                    },
+                    rect: PdfPageRectDto {
+                        page_index: 3,
+                        bbox: [char_index as f64, 0.0, char_index as f64 + 1.0, 1.0],
+                    },
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn pdf_selection_recovery_classifier_accepts_exact_and_known_representation_gaps() {
+        assert_eq!(
+            PDF_SELECTION_RECOVERY_POLICY_VERSION,
+            "pdf_selection_recovery.v1"
+        );
+
+        let exact_quote = "Exact source text.";
+        assert_eq!(
+            classify_pdf_selection_recovery(
+                exact_quote,
+                exact_quote,
+                10_000,
+                &selection_recovery_hits(exact_quote, |_, _| false),
+                &PdfSelectionRecoveryEvidence::default(),
+            ),
+            PdfSelectionRecoveryDecision::Exact
+        );
+
+        let raw_quote = "Although both the attention layer and the feed-forward network (FFN) maintain memory that can be\n\
+categorized as associative memory, they differ in terms of the lifespan of the stored information. Specifically,\n\
+the attention layer maintains a short-term contextual memory organized in an associative manner. During\n\
+inference, this memory, known as the key-value (KV) cache, is discarded once inference is completed. In\n\
+contrast, the FFN maintains a persistent, long-term associative memory. This memory is compressed via\n\
+gradient descent during training and encodes knowledge relevant to the training dataset. Typically, it remains\n\
+unchanged after training concludes";
+        let canonical_quote = raw_quote.replace('\n', " ");
+        let raw_chars = raw_quote.chars().collect::<Vec<_>>();
+        let hits = selection_recovery_hits(&canonical_quote, |index, value| {
+            raw_chars[index] == '\n' || is_pdf_selection_recoverable_hyphen(value)
+        });
+        assert_eq!(
+            classify_pdf_selection_recovery(
+                raw_quote,
+                &canonical_quote,
+                10_000,
+                &hits,
+                &PdfSelectionRecoveryEvidence::default(),
+            ),
+            PdfSelectionRecoveryDecision::Recovered(vec![
+                PdfSelectionRecoveryDifference::LayoutWhitespace,
+                PdfSelectionRecoveryDifference::HyphenRepresentation,
+            ])
+        );
+
+        let raw_discretionary = "feed-\nforward";
+        let canonical_discretionary = "feedforward";
+        let evidence = PdfSelectionRecoveryEvidence {
+            discretionary_raw_hyphen_offsets_utf16: HashSet::from([4]),
+        };
+        assert_eq!(
+            classify_pdf_selection_recovery(
+                raw_discretionary,
+                canonical_discretionary,
+                10_000,
+                &selection_recovery_hits(canonical_discretionary, |_, _| false),
+                &evidence,
+            ),
+            PdfSelectionRecoveryDecision::Recovered(vec![
+                PdfSelectionRecoveryDifference::LayoutWhitespace,
+                PdfSelectionRecoveryDifference::HyphenRepresentation,
+            ])
+        );
+    }
+
+    #[test]
+    fn pdf_selection_recovery_classifier_rejects_material_or_ambiguous_gaps() {
+        for (quote, omitted) in [
+            ("is not stable", "not"),
+            ("value \u{2212} loss", "\u{2212}"),
+            ("left\u{2014}right", "\u{2014}"),
+        ] {
+            let omitted_chars = omitted.chars().collect::<HashSet<_>>();
+            let hits = selection_recovery_hits(quote, |_, value| omitted_chars.contains(&value));
+            assert_eq!(
+                classify_pdf_selection_recovery(
+                    quote,
+                    quote,
+                    10_000,
+                    &hits,
+                    &PdfSelectionRecoveryEvidence::default(),
+                ),
+                PdfSelectionRecoveryDecision::Incomplete,
+                "quote={quote}"
+            );
+        }
+
+        assert_eq!(
+            classify_pdf_selection_recovery(
+                "resign",
+                "re-sign",
+                10_000,
+                &selection_recovery_hits("re-sign", |_, _| false),
+                &PdfSelectionRecoveryEvidence::default(),
+            ),
+            PdfSelectionRecoveryDecision::Incomplete
+        );
+
+        let mut non_monotonic = selection_recovery_hits("ordered", |_, _| false);
+        non_monotonic.swap(2, 3);
+        assert_eq!(
+            classify_pdf_selection_recovery(
+                "ordered",
+                "ordered",
+                10_000,
+                &non_monotonic,
+                &PdfSelectionRecoveryEvidence::default(),
+            ),
+            PdfSelectionRecoveryDecision::Incomplete
+        );
     }
 
     #[test]
