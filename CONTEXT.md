@@ -453,6 +453,9 @@ Source reconciliation 为 Hybrid alignment unit 持久化的输入指纹绑定�
 ## PDF projection precision
 每个子 LID 的 PDF 投影等级:`char_exact` 可支持字符级引用、复制和标注,`region_exact` 只支持导航或公式对象标记,`partial` 只允许显式受限操作,`unmapped` 只保留 PDF 原生选择/复制。单元级 bbox 不得冒充子 LID 的字符几何。状态:NEW(见 [docs/adr/0082])。
 
+## PDF selection resolution basis
+PDF 原生选区在 `resolved | partial | unresolved` 能力状态之外的正交解析依据。`exact` 表示所选字符均有已证实字符映射;`recovered` 表示唯一、单调的选区只存在版本化白名单内的表示差异,用户仍按已定位使用,但诊断不得冒充逐字符 exact。初始白名单仅含布局空白与连字符类表示差异;新增类别必须有真实失败样本、反例测试和确定性回归证据,不得按覆盖率阈值自动放宽。状态:NEW(见 [ADR-0090](docs/adr/0090-pdf-selection-recovered-resolution-and-versioned-discrepancy-policy.md))。
+
 ## Hybrid foundation integrity gate
 混合阅读基座的二元安全门禁,校验输入指纹、artifact/hash/schema、LID/页身份、bbox 边界、单调顺序和无重复绑定;任一失败都使阶段失败且不得替换旧产物。它不包含覆盖率或质量阈值。状态:NEW(见 [docs/adr/0082])。
 
