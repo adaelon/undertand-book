@@ -7768,6 +7768,17 @@ fn pdf_runtime_projection_policy(book_dir: &Path) -> Result<PdfRuntimeProjection
                 )))
             }
         }
+        match map
+            .get("asset_region_policy_version")
+            .and_then(|value| value.as_str())
+        {
+            None | Some("pdf_asset_region_policy.v1") => {}
+            Some(policy_version) => {
+                return Err(pdf_runtime_artifact_error(format!(
+                    "unsupported PDF asset region policy version: {policy_version}"
+                )))
+            }
+        }
     }
     let book_id = map
         .get("book_id")
@@ -13699,6 +13710,26 @@ mod tests {
         assert_eq!(rejected.status, 400);
         assert!(rejected.body.contains("PDF_RUNTIME_ARTIFACT_INVALID"));
         assert!(rejected.body.contains("formula glyph policy"));
+    }
+
+    #[test]
+    fn pdf_runtime_v2_rejects_unknown_asset_region_policy_version() {
+        let mut s = state_named("pdf-runtime-v2-asset-region-policy");
+        use_pdf_runtime_fixture_source(&mut s);
+        write_pdf_runtime_artifacts(&mut s);
+        rewrite_pdf_runtime_artifacts_v2(&s, "char_exact", 3);
+
+        let source_map_path = s.book_dir.join("pdf_source_map.json");
+        let mut source_map: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&source_map_path).unwrap()).unwrap();
+        source_map["asset_region_policy_version"] =
+            serde_json::json!("pdf_asset_region_policy.v999");
+        std::fs::write(source_map_path, source_map.to_string()).unwrap();
+
+        let rejected = get(&mut s, "/book/pdf_source_map");
+        assert_eq!(rejected.status, 400);
+        assert!(rejected.body.contains("PDF_RUNTIME_ARTIFACT_INVALID"));
+        assert!(rejected.body.contains("asset region policy"));
     }
 
     #[test]

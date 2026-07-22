@@ -1,0 +1,779 @@
+{
+  "version": "image_object_audit.v1",
+  "policy_version": "pdf_asset_region_policy.v1",
+  "source_sha256": "feb442870b9364e578c22b210b1ac6ed9ce098f59bd39ceb07806c741715af43",
+  "pdf_sha256": "9391b89821c97dd14e66937fd71d22bfcfc72357f8023daddc6fc6334c68b9b0",
+  "reviewed_map_sha256": "7f06697533fd786a5644e2d6cc5771c11e0dea2553a64116faac82a4e7bafda2",
+  "passed": true,
+  "summary": {
+    "image_count": 19,
+    "image_only_unit_count": 19,
+    "asset_region_exact_count": 19,
+    "asset_unmapped_count": 0,
+    "unclassified_count": 0,
+    "invalid_evidence_count": 0,
+    "duplicate_object_ownership_count": 0,
+    "selection_assignment_count": 0,
+    "exact_source_span_count": 0,
+    "wrong_page_count": 0,
+    "wrong_column_count": 0,
+    "legacy_projection_reason_count": 0,
+    "legacy_a010_image_count": 19,
+    "classification_counts": {
+      "asset_region_exact": 19
+    },
+    "precision_counts": {
+      "region_exact": 19
+    },
+    "reason_counts": {
+      "asset_region_exact: unique PDF object chain inside proven source-order anchors": 6,
+      "asset_region_exact: unique remaining PDF object chain between proven neighboring asset bindings": 1,
+      "asset_region_exact: unique same-page PDF object above an adjacent proven caption anchor": 12
+    }
+  },
+  "image_items": [
+    {
+      "lid": "1.19.87.119.187",
+      "baseline_lids": [
+        "1.19.87.191.187"
+      ],
+      "source_span": {
+        "start": 57228,
+        "end": 57635
+      },
+      "classification": "asset_region_exact",
+      "precision": "region_exact",
+      "reason": "asset_region_exact: unique PDF object chain inside proven source-order anchors",
+      "region_count": 1,
+      "selection_assignment_count": 0,
+      "exact_source_span_count": 0,
+      "matched_object_ids": [
+        "14:0"
+      ],
+      "regions_in_bounds": true,
+      "evidence_valid": true,
+      "current_page_indexes": [
+        14
+      ],
+      "current_columns": [
+        0
+      ],
+      "expected_page_indexes": [],
+      "expected_columns": [],
+      "page_matches": null,
+      "column_matches": null
+    },
+    {
+      "lid": "1.19.87.120.63",
+      "baseline_lids": [
+        "1.19.87.192.63"
+      ],
+      "source_span": {
+        "start": 64418,
+        "end": 64825
+      },
+      "classification": "asset_region_exact",
+      "precision": "region_exact",
+      "reason": "asset_region_exact: unique PDF object chain inside proven source-order anchors",
+      "region_count": 1,
+      "selection_assignment_count": 0,
+      "exact_source_span_count": 0,
+      "matched_object_ids": [
+        "16:0"
+      ],
+      "regions_in_bounds": true,
+      "evidence_valid": true,
+      "current_page_indexes": [
+        16
+      ],
+      "current_columns": [
+        0
+      ],
+      "expected_page_indexes": [],
+      "expected_columns": [],
+      "page_matches": null,
+      "column_matches": null
+    },
+    {
+      "lid": "1.20.3.2",
+      "baseline_lids": [
+        "1.20.3.2"
+      ],
+      "source_span": {
+        "start": 68502,
+        "end": 68909
+      },
+      "classification": "asset_region_exact",
+      "precision": "region_exact",
+      "reason": "asset_region_exact: unique PDF object chain inside proven source-order anchors",
+      "region_count": 1,
+      "selection_assignment_count": 0,
+      "exact_source_span_count": 0,
+      "matched_object_ids": [
+        "17:0"
+      ],
+      "regions_in_bounds": true,
+      "evidence_valid": true,
+      "current_page_indexes": [
+        17
+      ],
+      "current_columns": [
+        0
+      ],
+      "expected_page_indexes": [],
+      "expected_columns": [],
+      "page_matches": null,
+      "column_matches": null
+    },
+    {
+      "lid": "1.20.3.12",
+      "baseline_lids": [
+        "1.20.3.12"
+      ],
+      "source_span": {
+        "start": 69845,
+        "end": 70253
+      },
+      "classification": "asset_region_exact",
+      "precision": "region_exact",
+      "reason": "asset_region_exact: unique same-page PDF object above an adjacent proven caption anchor",
+      "region_count": 1,
+      "selection_assignment_count": 0,
+      "exact_source_span_count": 0,
+      "matched_object_ids": [
+        "17:1"
+      ],
+      "regions_in_bounds": true,
+      "evidence_valid": true,
+      "current_page_indexes": [
+        17
+      ],
+      "current_columns": [
+        1
+      ],
+      "expected_page_indexes": [],
+      "expected_columns": [],
+      "page_matches": null,
+      "column_matches": null
+    },
+    {
+      "lid": "1.20.3.14",
+      "baseline_lids": [
+        "1.20.3.14"
+      ],
+      "source_span": {
+        "start": 70275,
+        "end": 70683
+      },
+      "classification": "asset_region_exact",
+      "precision": "region_exact",
+      "reason": "asset_region_exact: unique remaining PDF object chain between proven neighboring asset bindings",
+      "region_count": 1,
+      "selection_assignment_count": 0,
+      "exact_source_span_count": 0,
+      "matched_object_ids": [
+        "17:2"
+      ],
+      "regions_in_bounds": true,
+      "evidence_valid": true,
+      "current_page_indexes": [
+        17
+      ],
+      "current_columns": [
+        2
+      ],
+      "expected_page_indexes": [],
+      "expected_columns": [],
+      "page_matches": null,
+      "column_matches": null
+    },
+    {
+      "lid": "1.20.3.17",
+      "baseline_lids": [
+        "1.20.3.17"
+      ],
+      "source_span": {
+        "start": 70780,
+        "end": 71189
+      },
+      "classification": "asset_region_exact",
+      "precision": "region_exact",
+      "reason": "asset_region_exact: unique same-page PDF object above an adjacent proven caption anchor",
+      "region_count": 1,
+      "selection_assignment_count": 0,
+      "exact_source_span_count": 0,
+      "matched_object_ids": [
+        "17:3"
+      ],
+      "regions_in_bounds": true,
+      "evidence_valid": true,
+      "current_page_indexes": [
+        17
+      ],
+      "current_columns": [
+        2
+      ],
+      "expected_page_indexes": [],
+      "expected_columns": [],
+      "page_matches": null,
+      "column_matches": null
+    },
+    {
+      "lid": "1.20.3.20",
+      "baseline_lids": [
+        "1.20.3.20"
+      ],
+      "source_span": {
+        "start": 71296,
+        "end": 71705
+      },
+      "classification": "asset_region_exact",
+      "precision": "region_exact",
+      "reason": "asset_region_exact: unique PDF object chain inside proven source-order anchors",
+      "region_count": 1,
+      "selection_assignment_count": 0,
+      "exact_source_span_count": 0,
+      "matched_object_ids": [
+        "17:4"
+      ],
+      "regions_in_bounds": true,
+      "evidence_valid": true,
+      "current_page_indexes": [
+        17
+      ],
+      "current_columns": [
+        1
+      ],
+      "expected_page_indexes": [],
+      "expected_columns": [],
+      "page_matches": null,
+      "column_matches": null
+    },
+    {
+      "lid": "1.20.3.23",
+      "baseline_lids": [
+        "1.20.3.23"
+      ],
+      "source_span": {
+        "start": 71821,
+        "end": 72230
+      },
+      "classification": "asset_region_exact",
+      "precision": "region_exact",
+      "reason": "asset_region_exact: unique PDF object chain inside proven source-order anchors",
+      "region_count": 1,
+      "selection_assignment_count": 0,
+      "exact_source_span_count": 0,
+      "matched_object_ids": [
+        "17:5"
+      ],
+      "regions_in_bounds": true,
+      "evidence_valid": true,
+      "current_page_indexes": [
+        17
+      ],
+      "current_columns": [
+        2
+      ],
+      "expected_page_indexes": [],
+      "expected_columns": [],
+      "page_matches": null,
+      "column_matches": null
+    },
+    {
+      "lid": "1.20.3.26",
+      "baseline_lids": [
+        "1.20.3.26"
+      ],
+      "source_span": {
+        "start": 72343,
+        "end": 72753
+      },
+      "classification": "asset_region_exact",
+      "precision": "region_exact",
+      "reason": "asset_region_exact: unique PDF object chain inside proven source-order anchors",
+      "region_count": 1,
+      "selection_assignment_count": 0,
+      "exact_source_span_count": 0,
+      "matched_object_ids": [
+        "17:6"
+      ],
+      "regions_in_bounds": true,
+      "evidence_valid": true,
+      "current_page_indexes": [
+        17
+      ],
+      "current_columns": [
+        2
+      ],
+      "expected_page_indexes": [],
+      "expected_columns": [],
+      "page_matches": null,
+      "column_matches": null
+    },
+    {
+      "lid": "1.20.3.74",
+      "baseline_lids": [
+        "1.20.3.74"
+      ],
+      "source_span": {
+        "start": 77183,
+        "end": 77592
+      },
+      "classification": "asset_region_exact",
+      "precision": "region_exact",
+      "reason": "asset_region_exact: unique same-page PDF object above an adjacent proven caption anchor",
+      "region_count": 1,
+      "selection_assignment_count": 0,
+      "exact_source_span_count": 0,
+      "matched_object_ids": [
+        "18:0"
+      ],
+      "regions_in_bounds": true,
+      "evidence_valid": true,
+      "current_page_indexes": [
+        18
+      ],
+      "current_columns": [
+        1
+      ],
+      "expected_page_indexes": [],
+      "expected_columns": [],
+      "page_matches": null,
+      "column_matches": null
+    },
+    {
+      "lid": "1.20.3.76",
+      "baseline_lids": [
+        "1.20.3.76"
+      ],
+      "source_span": {
+        "start": 77619,
+        "end": 78028
+      },
+      "classification": "asset_region_exact",
+      "precision": "region_exact",
+      "reason": "asset_region_exact: unique same-page PDF object above an adjacent proven caption anchor",
+      "region_count": 1,
+      "selection_assignment_count": 0,
+      "exact_source_span_count": 0,
+      "matched_object_ids": [
+        "18:1"
+      ],
+      "regions_in_bounds": true,
+      "evidence_valid": true,
+      "current_page_indexes": [
+        18
+      ],
+      "current_columns": [
+        2
+      ],
+      "expected_page_indexes": [],
+      "expected_columns": [],
+      "page_matches": null,
+      "column_matches": null
+    },
+    {
+      "lid": "1.20.3.78",
+      "baseline_lids": [
+        "1.20.3.78"
+      ],
+      "source_span": {
+        "start": 78055,
+        "end": 78465
+      },
+      "classification": "asset_region_exact",
+      "precision": "region_exact",
+      "reason": "asset_region_exact: unique same-page PDF object above an adjacent proven caption anchor",
+      "region_count": 1,
+      "selection_assignment_count": 0,
+      "exact_source_span_count": 0,
+      "matched_object_ids": [
+        "18:2"
+      ],
+      "regions_in_bounds": true,
+      "evidence_valid": true,
+      "current_page_indexes": [
+        18
+      ],
+      "current_columns": [
+        2
+      ],
+      "expected_page_indexes": [],
+      "expected_columns": [],
+      "page_matches": null,
+      "column_matches": null
+    },
+    {
+      "lid": "1.20.3.87",
+      "baseline_lids": [
+        "1.20.3.87"
+      ],
+      "source_span": {
+        "start": 79181,
+        "end": 79588
+      },
+      "classification": "asset_region_exact",
+      "precision": "region_exact",
+      "reason": "asset_region_exact: unique same-page PDF object above an adjacent proven caption anchor",
+      "region_count": 1,
+      "selection_assignment_count": 0,
+      "exact_source_span_count": 0,
+      "matched_object_ids": [
+        "19:0"
+      ],
+      "regions_in_bounds": true,
+      "evidence_valid": true,
+      "current_page_indexes": [
+        19
+      ],
+      "current_columns": [
+        1
+      ],
+      "expected_page_indexes": [],
+      "expected_columns": [],
+      "page_matches": null,
+      "column_matches": null
+    },
+    {
+      "lid": "1.20.3.89",
+      "baseline_lids": [
+        "1.20.3.89"
+      ],
+      "source_span": {
+        "start": 79620,
+        "end": 80027
+      },
+      "classification": "asset_region_exact",
+      "precision": "region_exact",
+      "reason": "asset_region_exact: unique same-page PDF object above an adjacent proven caption anchor",
+      "region_count": 1,
+      "selection_assignment_count": 0,
+      "exact_source_span_count": 0,
+      "matched_object_ids": [
+        "19:1"
+      ],
+      "regions_in_bounds": true,
+      "evidence_valid": true,
+      "current_page_indexes": [
+        19
+      ],
+      "current_columns": [
+        2
+      ],
+      "expected_page_indexes": [],
+      "expected_columns": [],
+      "page_matches": null,
+      "column_matches": null
+    },
+    {
+      "lid": "1.20.4.25",
+      "baseline_lids": [
+        "1.20.4.25"
+      ],
+      "source_span": {
+        "start": 83640,
+        "end": 84047
+      },
+      "classification": "asset_region_exact",
+      "precision": "region_exact",
+      "reason": "asset_region_exact: unique same-page PDF object above an adjacent proven caption anchor",
+      "region_count": 1,
+      "selection_assignment_count": 0,
+      "exact_source_span_count": 0,
+      "matched_object_ids": [
+        "20:0"
+      ],
+      "regions_in_bounds": true,
+      "evidence_valid": true,
+      "current_page_indexes": [
+        20
+      ],
+      "current_columns": [
+        1
+      ],
+      "expected_page_indexes": [],
+      "expected_columns": [],
+      "page_matches": null,
+      "column_matches": null
+    },
+    {
+      "lid": "1.20.4.27",
+      "baseline_lids": [
+        "1.20.4.27"
+      ],
+      "source_span": {
+        "start": 84069,
+        "end": 84477
+      },
+      "classification": "asset_region_exact",
+      "precision": "region_exact",
+      "reason": "asset_region_exact: unique same-page PDF object above an adjacent proven caption anchor",
+      "region_count": 1,
+      "selection_assignment_count": 0,
+      "exact_source_span_count": 0,
+      "matched_object_ids": [
+        "20:1"
+      ],
+      "regions_in_bounds": true,
+      "evidence_valid": true,
+      "current_page_indexes": [
+        20
+      ],
+      "current_columns": [
+        2
+      ],
+      "expected_page_indexes": [],
+      "expected_columns": [],
+      "page_matches": null,
+      "column_matches": null
+    },
+    {
+      "lid": "1.24.16.65",
+      "baseline_lids": [
+        "1.24.16.65"
+      ],
+      "source_span": {
+        "start": 144061,
+        "end": 144468
+      },
+      "classification": "asset_region_exact",
+      "precision": "region_exact",
+      "reason": "asset_region_exact: unique same-page PDF object above an adjacent proven caption anchor",
+      "region_count": 1,
+      "selection_assignment_count": 0,
+      "exact_source_span_count": 0,
+      "matched_object_ids": [
+        "39:0"
+      ],
+      "regions_in_bounds": true,
+      "evidence_valid": true,
+      "current_page_indexes": [
+        39
+      ],
+      "current_columns": [
+        1
+      ],
+      "expected_page_indexes": [],
+      "expected_columns": [],
+      "page_matches": null,
+      "column_matches": null
+    },
+    {
+      "lid": "1.24.16.67",
+      "baseline_lids": [
+        "1.24.16.67"
+      ],
+      "source_span": {
+        "start": 144495,
+        "end": 144902
+      },
+      "classification": "asset_region_exact",
+      "precision": "region_exact",
+      "reason": "asset_region_exact: unique same-page PDF object above an adjacent proven caption anchor",
+      "region_count": 1,
+      "selection_assignment_count": 0,
+      "exact_source_span_count": 0,
+      "matched_object_ids": [
+        "39:1"
+      ],
+      "regions_in_bounds": true,
+      "evidence_valid": true,
+      "current_page_indexes": [
+        39
+      ],
+      "current_columns": [
+        2
+      ],
+      "expected_page_indexes": [],
+      "expected_columns": [],
+      "page_matches": null,
+      "column_matches": null
+    },
+    {
+      "lid": "1.24.16.69",
+      "baseline_lids": [
+        "1.24.16.69"
+      ],
+      "source_span": {
+        "start": 144929,
+        "end": 145337
+      },
+      "classification": "asset_region_exact",
+      "precision": "region_exact",
+      "reason": "asset_region_exact: unique same-page PDF object above an adjacent proven caption anchor",
+      "region_count": 1,
+      "selection_assignment_count": 0,
+      "exact_source_span_count": 0,
+      "matched_object_ids": [
+        "39:2"
+      ],
+      "regions_in_bounds": true,
+      "evidence_valid": true,
+      "current_page_indexes": [
+        39
+      ],
+      "current_columns": [
+        2
+      ],
+      "expected_page_indexes": [],
+      "expected_columns": [],
+      "page_matches": null,
+      "column_matches": null
+    }
+  ],
+  "legacy_a010_image_items": [
+    {
+      "baseline_lid": "1.19.87.191.187",
+      "migration_status": "stable",
+      "current_lid": "1.19.87.119.187",
+      "classification": "asset_region_exact",
+      "precision": "region_exact",
+      "reason": "asset_region_exact: unique PDF object chain inside proven source-order anchors"
+    },
+    {
+      "baseline_lid": "1.19.87.192.63",
+      "migration_status": "stable",
+      "current_lid": "1.19.87.120.63",
+      "classification": "asset_region_exact",
+      "precision": "region_exact",
+      "reason": "asset_region_exact: unique PDF object chain inside proven source-order anchors"
+    },
+    {
+      "baseline_lid": "1.20.3.2",
+      "migration_status": "stable",
+      "current_lid": "1.20.3.2",
+      "classification": "asset_region_exact",
+      "precision": "region_exact",
+      "reason": "asset_region_exact: unique PDF object chain inside proven source-order anchors"
+    },
+    {
+      "baseline_lid": "1.20.3.12",
+      "migration_status": "stable",
+      "current_lid": "1.20.3.12",
+      "classification": "asset_region_exact",
+      "precision": "region_exact",
+      "reason": "asset_region_exact: unique same-page PDF object above an adjacent proven caption anchor"
+    },
+    {
+      "baseline_lid": "1.20.3.14",
+      "migration_status": "stable",
+      "current_lid": "1.20.3.14",
+      "classification": "asset_region_exact",
+      "precision": "region_exact",
+      "reason": "asset_region_exact: unique remaining PDF object chain between proven neighboring asset bindings"
+    },
+    {
+      "baseline_lid": "1.20.3.17",
+      "migration_status": "stable",
+      "current_lid": "1.20.3.17",
+      "classification": "asset_region_exact",
+      "precision": "region_exact",
+      "reason": "asset_region_exact: unique same-page PDF object above an adjacent proven caption anchor"
+    },
+    {
+      "baseline_lid": "1.20.3.20",
+      "migration_status": "stable",
+      "current_lid": "1.20.3.20",
+      "classification": "asset_region_exact",
+      "precision": "region_exact",
+      "reason": "asset_region_exact: unique PDF object chain inside proven source-order anchors"
+    },
+    {
+      "baseline_lid": "1.20.3.23",
+      "migration_status": "stable",
+      "current_lid": "1.20.3.23",
+      "classification": "asset_region_exact",
+      "precision": "region_exact",
+      "reason": "asset_region_exact: unique PDF object chain inside proven source-order anchors"
+    },
+    {
+      "baseline_lid": "1.20.3.26",
+      "migration_status": "stable",
+      "current_lid": "1.20.3.26",
+      "classification": "asset_region_exact",
+      "precision": "region_exact",
+      "reason": "asset_region_exact: unique PDF object chain inside proven source-order anchors"
+    },
+    {
+      "baseline_lid": "1.20.3.74",
+      "migration_status": "stable",
+      "current_lid": "1.20.3.74",
+      "classification": "asset_region_exact",
+      "precision": "region_exact",
+      "reason": "asset_region_exact: unique same-page PDF object above an adjacent proven caption anchor"
+    },
+    {
+      "baseline_lid": "1.20.3.76",
+      "migration_status": "stable",
+      "current_lid": "1.20.3.76",
+      "classification": "asset_region_exact",
+      "precision": "region_exact",
+      "reason": "asset_region_exact: unique same-page PDF object above an adjacent proven caption anchor"
+    },
+    {
+      "baseline_lid": "1.20.3.78",
+      "migration_status": "stable",
+      "current_lid": "1.20.3.78",
+      "classification": "asset_region_exact",
+      "precision": "region_exact",
+      "reason": "asset_region_exact: unique same-page PDF object above an adjacent proven caption anchor"
+    },
+    {
+      "baseline_lid": "1.20.3.87",
+      "migration_status": "stable",
+      "current_lid": "1.20.3.87",
+      "classification": "asset_region_exact",
+      "precision": "region_exact",
+      "reason": "asset_region_exact: unique same-page PDF object above an adjacent proven caption anchor"
+    },
+    {
+      "baseline_lid": "1.20.3.89",
+      "migration_status": "stable",
+      "current_lid": "1.20.3.89",
+      "classification": "asset_region_exact",
+      "precision": "region_exact",
+      "reason": "asset_region_exact: unique same-page PDF object above an adjacent proven caption anchor"
+    },
+    {
+      "baseline_lid": "1.20.4.25",
+      "migration_status": "stable",
+      "current_lid": "1.20.4.25",
+      "classification": "asset_region_exact",
+      "precision": "region_exact",
+      "reason": "asset_region_exact: unique same-page PDF object above an adjacent proven caption anchor"
+    },
+    {
+      "baseline_lid": "1.20.4.27",
+      "migration_status": "stable",
+      "current_lid": "1.20.4.27",
+      "classification": "asset_region_exact",
+      "precision": "region_exact",
+      "reason": "asset_region_exact: unique same-page PDF object above an adjacent proven caption anchor"
+    },
+    {
+      "baseline_lid": "1.24.16.65",
+      "migration_status": "stable",
+      "current_lid": "1.24.16.65",
+      "classification": "asset_region_exact",
+      "precision": "region_exact",
+      "reason": "asset_region_exact: unique same-page PDF object above an adjacent proven caption anchor"
+    },
+    {
+      "baseline_lid": "1.24.16.67",
+      "migration_status": "stable",
+      "current_lid": "1.24.16.67",
+      "classification": "asset_region_exact",
+      "precision": "region_exact",
+      "reason": "asset_region_exact: unique same-page PDF object above an adjacent proven caption anchor"
+    },
+    {
+      "baseline_lid": "1.24.16.69",
+      "migration_status": "stable",
+      "current_lid": "1.24.16.69",
+      "classification": "asset_region_exact",
+      "precision": "region_exact",
+      "reason": "asset_region_exact: unique same-page PDF object above an adjacent proven caption anchor"
+    }
+  ]
+}

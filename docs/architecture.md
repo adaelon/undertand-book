@@ -43,6 +43,17 @@ formula_source_ast.v1 nodes + pdf_formula_region_policy.v1 local window
   -> Core map/report version parity + Server unknown-version rejection
 ```
 
+Image geometry is a separate object-only projection stage. PDF.js operator lists are interpreted with their graphics-state transforms to expose raster, inline, mask, and vector Form bounding boxes in PDF user space. Source image order, proven text/formula boundaries, adjacent same-page caption geometry, and already-proven neighboring asset bindings may establish one unique object chain. No image pixels, alt text, OCR output, nearest-object heuristic, caption box, or full-page box participates. An accepted image produces a region-only entry; an ambiguous or absent object remains explicitly unmapped. Image-only units are excluded from text location quality and never contribute rows to a selection shard.
+
+```text
+PDF.js operator list + graphics transforms
+  -> image/Form object bboxes
+  + source image order + proven caption/text/asset anchors
+  -> pdf_asset_region_policy.v1 unique object chain
+  -> asset region_exact | asset_unmapped
+  -> zero source assignments and zero selection-shard rows
+```
+
 Native PDF selection is owned by the public PDF.js `TextLayerBuilder` lifecycle. Each rendered page retains its builder until zoom, rerender, book switch, or unmount cancels it and removes the text-layer DOM. The builder's `.endOfContent` and selection-change contract stabilize browser caret placement at visual line and paragraph boundaries; the existing mouseup capture then forwards the resulting `Selection` without quote or rectangle heuristics.
 
 PDF selection translation follows a two-phase read-only flow:

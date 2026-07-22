@@ -142,3 +142,17 @@ Extends: ADR-0074 and ADR-0082.
 - 让重复公式各自取第一个 match 或复用同一 PDF char：会制造跨 LID 双 owner。
 
 **命门**:缺 glyph、变量/运算符变化、flat script、错误上下 lane、跨 page/column、多个完整链、未知 AST 结构和重复 character ID 均 fail-closed。unsupported standalone formula 只有在 unit 已唯一定位、仅含该 child 且全部 glyph 同一 page/column 时才允许对象级 `region_exact`，并且仍不得生成 selection assignment。Core 拒绝 map/report 版本漂移，Server 拒绝显式未知 policy；历史缺字段 V2 只保持兼容读取。
+
+### §12 v1 Image 对象 region 与文本隔离
+
+**修订**:2026-07-23 注册构建期 `pdf_asset_region_policy.v1`；版本写入 V2 source map 与 alignment report config/hash，历史 V2 两侧缺字段仍可读取。
+
+**决策**:image leaf 只消费 PDF.js operator list 提取并变换到 PDF user space 的 image/inline/mask/Form bbox。绑定必须由 source image 顺序和以下唯一证据之一成立：前后已证明 source anchor 内等量完整对象链；相邻同页 caption 上方、横向重叠且阈值内的唯一对象；两个已证明 asset binding 之间等量唯一剩余对象链。成功只产生对象级 `region_exact`，不产生 exact source span 或 selection assignment。image-only unit 独立计数，不进入 text location quality 和 reason 分母。
+
+**否决**:
+- OCR 图片文字或用 Markdown alt 搜索 PDF：会把内容相似误当对象 ownership，且引入未版本化识别误差。
+- 取最近对象、第一对象或按 draw order 强配：局部距离与绘制顺序不证明 source image 对应关系。
+- 把 caption bbox 或整页 bbox 当 image region：会扩大导航/高亮区域并污染相邻正文选择。
+- 把 image region 写入 selection shard：对象 region 没有 source character assignment，不能参与文本拖选。
+
+**命门**:无对象、重复对象、候选数量不等、跨页错误候选、缺一侧必要边界或存在多条对象链时必须 `asset_unmapped`。每个 PDF object 最多一个 image owner；Core 拒绝 map/report 版本漂移，Server 拒绝显式未知 policy，历史缺字段 V2 只保持兼容读取。

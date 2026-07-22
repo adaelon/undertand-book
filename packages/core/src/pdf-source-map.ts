@@ -96,6 +96,7 @@ export interface PdfSourceMapV2 {
   display_token_policy_version?: "pdf_display_token_policy.v1";
   formula_region_policy_version?: "pdf_formula_region_policy.v1";
   formula_glyph_policy_version?: "pdf_formula_glyph_policy.v1";
+  asset_region_policy_version?: "pdf_asset_region_policy.v1";
   book_id: string;
   coordinate_system: PdfSourceMap["coordinate_system"];
   pages: PdfPageMeta[];

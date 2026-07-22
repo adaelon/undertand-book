@@ -38,6 +38,7 @@
       "formula_source_ast_audit_path": "external-formula-dense-transformer-formula-source-ast-audit.json",
       "formula_region_audit_path": "external-formula-dense-transformer-formula-region-audit.json",
       "formula_glyph_audit_path": "external-formula-dense-transformer-formula-glyph-audit.json",
+      "image_object_audit_path": "external-formula-dense-transformer-image-object-audit.json",
       "requires_explicit_book_path": true
     }
   ]

@@ -5,6 +5,7 @@ import { markdownToBlocks } from "./md-adapter";
 import { FORMULA_SOURCE_AST_POLICY } from "./formula-source-ast";
 import {
   alignHybridFoundationV2,
+  PDF_ASSET_REGION_POLICY,
   PDF_DISPLAY_TOKEN_POLICY,
   PDF_FORMULA_GLYPH_POLICY,
   PDF_FORMULA_REGION_POLICY,
@@ -227,6 +228,7 @@ export function buildHybridFoundationV2Candidate(input: HybridFoundationV2Input)
     formula_source_ast_version: FORMULA_SOURCE_AST_POLICY.version,
     formula_region_policy_version: PDF_FORMULA_REGION_POLICY.version,
     formula_glyph_policy_version: PDF_FORMULA_GLYPH_POLICY.version,
+    asset_region_policy_version: PDF_ASSET_REGION_POLICY.version,
   };
   const configHash = sha256(JSON.stringify(config));
   const pageRegionIndex: Record<string, string[]> = {};
@@ -243,6 +245,7 @@ export function buildHybridFoundationV2Candidate(input: HybridFoundationV2Input)
     display_token_policy_version: PDF_DISPLAY_TOKEN_POLICY.version,
     formula_region_policy_version: PDF_FORMULA_REGION_POLICY.version,
     formula_glyph_policy_version: PDF_FORMULA_GLYPH_POLICY.version,
+    asset_region_policy_version: PDF_ASSET_REGION_POLICY.version,
     book_id: input.book_id,
     coordinate_system: pdfUserSpaceCoordinateSystem(),
     pages: input.pdf_geometry.pages.map((page) => ({
@@ -317,8 +320,14 @@ export function buildHybridFoundationV2Candidate(input: HybridFoundationV2Input)
     const lid = lidBySpan.get(spanKey(block.span));
     return lid ? projectionByLid.get(lid)?.precision !== "unmapped" : false;
   }).length;
+  const textAlignmentLocations = alignment.locations.filter((location) => (
+    location.unit.child_lids.some((child) => child.kind !== "image")
+  ));
   const metrics = {
-    unit_location_ratio: ratio(alignment.locations.filter((location) => location.status === "located").length, alignment.units.length),
+    unit_location_ratio: ratio(
+      textAlignmentLocations.filter((location) => location.status === "located").length,
+      textAlignmentLocations.length,
+    ),
     exact_text_span_ratio: ratio(exactTextLength, textLength),
     exact_formula_ratio: ratio(exactFormulaCount, formulaBlocks.length),
     heading_location_ratio: ratio(locatedHeadingCount, headingBlocks.length),
@@ -369,16 +378,18 @@ export function buildHybridFoundationV2Candidate(input: HybridFoundationV2Input)
     },
     diagnostics: {
       leaf_count: leafNodes.length,
-      located_unit_count: alignment.locations.filter((location) => location.status === "located").length,
+      text_alignment_unit_count: textAlignmentLocations.length,
+      located_unit_count: textAlignmentLocations.filter((location) => location.status === "located").length,
+      image_only_unit_count: alignment.locations.length - textAlignmentLocations.length,
       unmapped_leaf_count: entries.filter((entry) => entry.precision === "unmapped").length,
       duplicate_pdf_binding_count: duplicateRegionBindings,
       duplicate_selection_binding_count: duplicateSelectionBindings.size,
       raw_duplicate_pdf_binding_count: conflictResolution.raw_duplicate_region_binding_count,
       raw_duplicate_selection_binding_count: conflictResolution.raw_duplicate_selection_binding_count,
       conflicted_lid_count: conflictResolution.conflicted_lid_count,
-      location_reason_counts: Object.fromEntries([...new Set(alignment.locations.map((location) => location.reason))].map((reason) => [
+      location_reason_counts: Object.fromEntries([...new Set(textAlignmentLocations.map((location) => location.reason))].map((reason) => [
         reason,
-        alignment.locations.filter((location) => location.reason === reason).length,
+        textAlignmentLocations.filter((location) => location.reason === reason).length,
       ])),
       projection_reason_counts: Object.fromEntries([...new Set(alignment.projections.map((projection) => projection.alignment.reason))].map((reason) => [
         reason,
@@ -448,6 +459,10 @@ export function assertHybridFoundationV2Integrity(artifacts: HybridFoundationV2A
   if (artifacts.pdf_source_map.formula_glyph_policy_version
     !== report.config.formula_glyph_policy_version) {
     throw new Error("hybrid foundation v2 formula glyph policy versions differ");
+  }
+  if (artifacts.pdf_source_map.asset_region_policy_version
+    !== report.config.asset_region_policy_version) {
+    throw new Error("hybrid foundation v2 asset region policy versions differ");
   }
   const failed = Object.entries(report.integrity).filter(([, passed]) => !passed).map(([gate]) => gate);
   if (failed.length) throw new Error(`hybrid foundation v2 integrity failed: ${failed.join(", ")}`);

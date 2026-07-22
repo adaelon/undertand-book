@@ -11,6 +11,7 @@ import {
   PDF_FORMULA_GLYPH_POLICY,
 } from "./formula-glyph-projection";
 import { parseFormulaSourceAst } from "./formula-source-ast";
+import { PDF_ASSET_REGION_POLICY, projectImageObjectRegions } from "./image-object-projection";
 import type { PdfGeometryChar, PdfGeometryPage, PdfTextGeometry } from "./pdf-geometry";
 import type { PdfRegion } from "./pdf-source-map";
 import { segment } from "./segment";
@@ -36,6 +37,7 @@ export const PDF_FORMULA_REGION_POLICY = {
 } as const;
 
 export { PDF_FORMULA_GLYPH_POLICY };
+export { PDF_ASSET_REGION_POLICY };
 
 export interface HybridAlignmentUnit {
   unit_id: string;
@@ -1416,9 +1418,10 @@ export function alignHybridFoundationV2(
 } {
   const units = formHybridAlignmentUnits(source);
   const locations = locateHybridAlignmentUnits(source, units, geometry, evidence);
+  const projections = locations.flatMap((location) => projectHybridAlignmentChildren(source, location));
   return {
     units,
     locations,
-    projections: locations.flatMap((location) => projectHybridAlignmentChildren(source, location)),
+    projections: projectImageObjectRegions(units, projections, geometry),
   };
 }

@@ -438,3 +438,13 @@ Inspired by the discussion above,  $ \underline{\text{can we propose a new assoc
 - 其余 435 项逐项闭合为 `downstream_unit_locator=278`、`downstream_binding_conflict=53`、`explicit_lane_ambiguity=51`、`explicit_glyph_mismatch=52`、`unsupported_source_structure=1`。这表示有稳定 owner/拒绝原因，不表示用户选择已经可用；PR18 只能在唯一全局解存在时继续分配。
 - A006 旧基线 318 项经 PR10 migration 为 glyph projected 100、unit locator 133、binding 20、lane 28、mismatch 36、reviewed non-formula 1；missing/unclassified 均为 0。`formula has no unique bounded PDF gap`、旧 formula projection ambiguous 与 anchor-lack reason 在当前 830 项中全部为 0。
 - 无正文报告三跑均为 714,065 bytes，SHA-256 `5d22207e14cc4203151095bbb0142d9c4b53d3a7a1973d2f96e1383d438a000e`。Core 全量 66 files / 416 tests、typecheck，Server 181+5 tests 与 Rust fmt check 全绿；Core/Server policy 版本写入、漂移与未知版本均 fail-closed，正式 source/base/maps/selection shards 未修改。
+
+## 28. PR17 Image 对象投影与文本隔离
+
+**PR 状态**:`completed`；PDF-A010 的 19 个 image successor 已退出通用文本 no-searchable 模型，54 个 code successor 不在本刀改类。正式 artifact 仍等待 PR20 原子重建。
+
+- `pdf-geometry.ts` 现在从 PDF.js operator list 提取 image XObject、inline image、image mask 与 vector Form 的 PDF user-space bbox；Form 只在不含嵌套 image 且有实际 path/显式 bbox 时成为对象候选，避免容器与内部 raster 双计数。
+- `pdf_asset_region_policy.v1` 只接受三类唯一证明：前后已证明 source anchor 间等量完整对象链、相邻同页 caption 上方且横向重叠的单对象、两个已证明 asset binding 间等量唯一剩余对象链。重复对象、无对象、caption-only、跨页错误候选和多解均为 `asset_unmapped`；不 OCR、不搜索 alt、不取最近对象、不使用 caption/整页 bbox。
+- image projection 只产生 `region_exact` 或 `unmapped`，始终 `selection_assignments=[]`、`exact_source_spans=[]`。image-only unit 不进入 text `unit_location_ratio` 与 location reason 分母，另以 `image_only_unit_count` 诊断；正文 selection shard 在插图前后保持相同 glyph 序列。
+- approved source/PDF 的 19 个 image 全部 `asset_region_exact`：6 anchor-window、12 caption、1 neighboring-asset gap。A010 migration 精确得到 19 image；0 unclassified/invalid、0 duplicate object ownership、0 wrong page/column、0 selection assignment/exact span、0 旧 `alignment unit has no searchable tokens` projection reason。
+- 无正文报告三跑均为 22,203 bytes，SHA-256 `f5901ac38244bc46676017de583b9bdbd311dc981f6c1487a5411495bbc2298b`。image XObject、vector Form、row-order jitter、重复对象、caption-only、无对象、跨页与 quality/selection 隔离均有先红后绿 fixture；策略进入 V2 map/report config hash，Core 拒绝漂移，Server 拒绝显式未知版本并兼容历史缺字段 V2。Core 全量 67 files / 431 tests、typecheck，Server 182+5 tests、Rust fmt 与 offline frozen install 全绿；正式 source/base/maps/selection shards 未修改。

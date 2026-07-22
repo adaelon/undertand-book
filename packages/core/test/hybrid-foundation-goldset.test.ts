@@ -31,6 +31,7 @@ describe("HF2-0 hybrid foundation goldset", () => {
       formula_source_ast_audit_path: "external-formula-dense-transformer-formula-source-ast-audit.json",
       formula_region_audit_path: "external-formula-dense-transformer-formula-region-audit.json",
       formula_glyph_audit_path: "external-formula-dense-transformer-formula-glyph-audit.json",
+      image_object_audit_path: "external-formula-dense-transformer-image-object-audit.json",
       requires_explicit_book_path: true,
     })]);
     for (const metadataPath of [
@@ -43,6 +44,7 @@ describe("HF2-0 hybrid foundation goldset", () => {
       manifest.external_benchmarks[0].formula_source_ast_audit_path,
       manifest.external_benchmarks[0].formula_region_audit_path,
       manifest.external_benchmarks[0].formula_glyph_audit_path,
+      manifest.external_benchmarks[0].image_object_audit_path,
     ]) {
       expect(metadataPath && readFileSync(path.join(GOLDSET_ROOT, metadataPath), "utf8").length).toBeGreaterThan(0);
     }

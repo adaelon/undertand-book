@@ -137,6 +137,15 @@ function geometryFromPositionedChars(
   };
 }
 
+function geometryWithObjects(
+  lines: Array<{ text: string; bbox: [number, number, number, number] }>,
+  objects: NonNullable<PdfTextGeometry["pages"][number]["objects"]>,
+): PdfTextGeometry {
+  const geometry = geometryFromPositionedLines(lines);
+  geometry.pages[0].objects = objects;
+  return geometry;
+}
+
 async function licensedFixture(name: string) {
   const dir = path.join(FIXTURE_ROOT, name);
   const source = readFileSync(path.join(dir, "source.md"), "utf8");
@@ -145,6 +154,175 @@ async function licensedFixture(name: string) {
 }
 
 describe("HF2-2 semantic-unit PDF alignment", () => {
+  it("projects a uniquely bounded image XObject without selection assignments", () => {
+    const source = "Before anchor.\n\n![diagram](diagram.png)\n\nFigure caption.\n\nAfter anchor.\n";
+    const result = alignHybridFoundationV2(source, geometryWithObjects([
+      { text: "Before anchor.", bbox: [70, 210, 180, 222] },
+      { text: "Figure caption.", bbox: [90, 70, 190, 82] },
+      { text: "After anchor.", bbox: [70, 40, 170, 52] },
+    ], [{ pageIndex: 0, objectIndex: 0, kind: "image_xobject", bbox: [80, 95, 220, 190] }]));
+    const image = result.projections.find((projection) => (
+      result.units.some((unit) => unit.child_lids.some((child) => child.kind === "image" && child.lid === projection.lid))
+    ))!;
+
+    expect(image).toMatchObject({
+      precision: "region_exact",
+      regions: [{ pageIndex: 0, bbox: [80, 95, 220, 190] }],
+      exact_source_spans: [],
+      selection_assignments: [],
+      alignment: { reason: expect.stringMatching(/^asset_region_exact:/u) },
+    });
+  });
+
+  it("projects a uniquely bounded vector-only figure Form XObject", () => {
+    const source = "Before anchor.\n\n![diagram](diagram.svg)\n\nFigure caption.\n";
+    const result = alignHybridFoundationV2(source, geometryWithObjects([
+      { text: "Before anchor.", bbox: [70, 210, 180, 222] },
+      { text: "Figure caption.", bbox: [90, 70, 190, 82] },
+    ], [{ pageIndex: 0, objectIndex: 0, kind: "form_xobject", bbox: [80, 95, 220, 190] }]));
+    const imageLid = result.units.flatMap((unit) => unit.child_lids).find((child) => child.kind === "image")!.lid;
+
+    expect(result.projections.find((projection) => projection.lid === imageLid)).toMatchObject({
+      precision: "region_exact",
+      alignment: { reason: expect.stringMatching(/^asset_region_exact:/u) },
+    });
+  });
+
+  it("binds a same-row image group by source order despite small bbox jitter", () => {
+    const source = [
+      "Before anchor.",
+      "",
+      "![first](first.png)",
+      "",
+      "![second](second.png)",
+      "",
+      "![third](third.png)",
+      "",
+      "After anchor.",
+      "",
+    ].join("\n");
+    const result = alignHybridFoundationV2(source, geometryWithObjects([
+      { text: "Before anchor.", bbox: [70, 210, 180, 222] },
+      { text: "After anchor.", bbox: [70, 40, 170, 52] },
+    ], [
+      { pageIndex: 0, objectIndex: 0, kind: "image_xobject", bbox: [230, 100, 300, 160] },
+      { pageIndex: 0, objectIndex: 1, kind: "image_xobject", bbox: [80, 99, 150, 159] },
+      { pageIndex: 0, objectIndex: 2, kind: "image_xobject", bbox: [155, 101, 225, 161] },
+    ]));
+    const imageLids = result.units.flatMap((unit) => unit.child_lids)
+      .filter((child) => child.kind === "image")
+      .map((child) => child.lid);
+
+    expect(imageLids.map((lid) => result.projections.find((projection) => projection.lid === lid)!))
+      .toMatchObject([
+        { precision: "region_exact", primary_region: { bbox: [80, 99, 150, 159] } },
+        { precision: "region_exact", primary_region: { bbox: [155, 101, 225, 161] } },
+        { precision: "region_exact", primary_region: { bbox: [230, 100, 300, 160] } },
+      ]);
+  });
+
+  it("fills one unique asset-order gap between proven neighboring image bindings", () => {
+    const source = [
+      "Before anchor.",
+      "",
+      "![first](first.png)",
+      "",
+      "First caption.",
+      "",
+      "![second](second.png)",
+      "",
+      "Caption absent from PDF.",
+      "",
+      "![third](third.png)",
+      "",
+      "Third caption.",
+      "",
+      "After anchor.",
+      "",
+    ].join("\n");
+    const result = alignHybridFoundationV2(source, geometryWithObjects([
+      { text: "Before anchor.", bbox: [70, 210, 180, 222] },
+      { text: "First caption.", bbox: [85, 70, 145, 82] },
+      { text: "Third caption.", bbox: [245, 70, 305, 82] },
+      { text: "After anchor.", bbox: [70, 40, 170, 52] },
+    ], [
+      { pageIndex: 0, objectIndex: 0, kind: "image_xobject", bbox: [80, 100, 150, 160] },
+      { pageIndex: 0, objectIndex: 1, kind: "image_xobject", bbox: [155, 100, 225, 160] },
+      { pageIndex: 0, objectIndex: 2, kind: "image_xobject", bbox: [230, 100, 300, 160] },
+    ]));
+    const imageLids = result.units.flatMap((unit) => unit.child_lids)
+      .filter((child) => child.kind === "image")
+      .map((child) => child.lid);
+
+    expect(imageLids.map((lid) => result.projections.find((projection) => projection.lid === lid)!))
+      .toMatchObject([
+        { precision: "region_exact", primary_region: { bbox: [80, 100, 150, 160] } },
+        { precision: "region_exact", primary_region: { bbox: [155, 100, 225, 160] } },
+        { precision: "region_exact", primary_region: { bbox: [230, 100, 300, 160] } },
+      ]);
+  });
+
+  it("keeps surrounding text selection identical when image leaves are inserted", () => {
+    const withoutImage = alignHybridFoundationV2(
+      "Before anchor.\n\nAfter anchor.\n",
+      geometryFromPositionedLines([
+        { text: "Before anchor.", bbox: [70, 210, 180, 222] },
+        { text: "After anchor.", bbox: [70, 40, 170, 52] },
+      ]),
+    );
+    const withImage = alignHybridFoundationV2(
+      "Before anchor.\n\n![diagram](diagram.png)\n\nAfter anchor.\n",
+      geometryWithObjects([
+        { text: "Before anchor.", bbox: [70, 210, 180, 222] },
+        { text: "After anchor.", bbox: [70, 40, 170, 52] },
+      ], [{ pageIndex: 0, objectIndex: 0, kind: "image_xobject", bbox: [80, 95, 220, 190] }]),
+    );
+    const textEvidence = (result: typeof withImage) => result.projections
+      .filter((projection) => projection.selection_assignments.length > 0)
+      .map((projection) => ({
+        precision: projection.precision,
+        pdf_chars: projection.selection_assignments.map((assignment) => (
+          `${assignment.pageIndex}:${assignment.char_index}:${assignment.text}`
+        )),
+      }));
+
+    expect(textEvidence(withImage)).toEqual(textEvidence(withoutImage));
+  });
+
+  it("fails closed when repeated image objects fit the same caption anchor", () => {
+    const source = "Before anchor.\n\n![icon](icon.png)\n\nFigure caption.\n";
+    const result = alignHybridFoundationV2(source, geometryWithObjects([
+      { text: "Before anchor.", bbox: [70, 210, 180, 222] },
+      { text: "Figure caption.", bbox: [90, 70, 190, 82] },
+    ], [
+      { pageIndex: 0, objectIndex: 0, kind: "image_xobject", bbox: [80, 95, 150, 150] },
+      { pageIndex: 0, objectIndex: 1, kind: "image_xobject", bbox: [120, 95, 200, 150] },
+    ]));
+    const imageLid = result.units.flatMap((unit) => unit.child_lids).find((child) => child.kind === "image")!.lid;
+
+    expect(result.projections.find((projection) => projection.lid === imageLid)).toMatchObject({
+      precision: "unmapped",
+      regions: [],
+      alignment: { reason: expect.stringMatching(/^asset_unmapped:/u) },
+    });
+  });
+
+  it.each([
+    ["caption-only", []],
+    ["cross-page object", [{ pageIndex: 0, objectIndex: 0, kind: "image_xobject" as const, bbox: [80, 20, 220, 90] as [number, number, number, number] }]],
+  ])("fails closed for %s image evidence", (_case, objects) => {
+    const source = "Before anchor.\n\n![missing](missing.png)\n\nFigure caption.\n";
+    const geometry = geometryFromPages([["Before anchor."], ["Figure caption."]]);
+    geometry.pages[0].objects = objects;
+    const result = alignHybridFoundationV2(source, geometry);
+    const imageLid = result.units.flatMap((unit) => unit.child_lids).find((child) => child.kind === "image")!.lid;
+
+    expect(result.projections.find((projection) => projection.lid === imageLid)).toMatchObject({
+      precision: "unmapped",
+      alignment: { reason: expect.stringMatching(/^asset_unmapped:/u) },
+    });
+  });
+
   it("requires explicit source, PDF, descriptor, and migration inputs for child-window audit", async () => {
     await expect(runHybridChildWindowAuditCli([])).rejects.toThrow("--source requires an explicit path");
   });

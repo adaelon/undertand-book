@@ -1,6 +1,6 @@
 # 切片方案 - PDF 选区全书适配闭环
 
-> 状态:2026-07-23 PR8-PR16 已完成,PR17-PR21 待实施。
+> 状态:2026-07-23 PR8-PR17 已完成,PR18-PR21 待实施。
 > 问题源:[PDF 选区适配问题总账](PDF选区适配问题总账.md)。
 > 已完成前序:[PDF 选区可恢复定位](切片方案-pdf选区可恢复定位.md) PR1-PR7。
 > 决策边界:[ADR-0082](adr/0082-hybrid-foundation-semantic-unit-alignment-and-degraded-reader.md)、[ADR-0090](adr/0090-pdf-selection-recovered-resolution-and-versioned-discrepancy-policy.md)。
@@ -195,6 +195,7 @@ PR8_FULL_BOOK_BENCHMARK
 - **Red**:19 个 image-only unit 以“no searchable tokens”混入 text unmapped,并可能扩大相邻选择的 degraded region。
 - **Green**:19 项全部转为 `asset_region_exact | asset_unmapped`;相邻正文选区不因图片 region partial;图片 LID 导航只在唯一 region 时启用。
 - **完成判据**:image XObject、vector-only figure、重复图标、caption-only 和无图对象 fixtures 全绿;文本质量分母与选择能力不受 image 数量影响。
+- **完成证据**:`pdf_asset_region_policy.v1` 从 PDF.js operator list 提取 raster/image mask/inline image 与 vector Form 的真实 bbox，以 source image 顺序、已证明前后锚、同页 caption 横向重叠和已绑定 asset 间唯一剩余对象链做 fail-closed 绑定。approved source/PDF 的 19 个 image successor 全部为 `asset_region_exact`：6 个 source-order anchor window、12 个唯一 caption candidate、1 个相邻 asset 唯一缺口；A010 migration 精确筛出 19 image，0 missing/unclassified、0 invalid evidence、0 duplicate object owner、0 wrong page/column、0 selection assignment、0 exact source span、0 legacy no-searchable projection reason。image-only unit 从 text location quality denominator 与 reason 统计排除，正文 selection glyph 在插图前后字节等价；region 永不进入 selection shard。无正文审计三跑均为 22,203 bytes，SHA-256 `f5901ac3...c2298b`；Core 全量 67 files / 431 tests、typecheck，Server 182+5 tests、Rust fmt 与 offline frozen install 全绿；正式 source/base/maps/selection shards 未修改。
 
 ### PR18 - Binding 冲突消除与候选归属
 
