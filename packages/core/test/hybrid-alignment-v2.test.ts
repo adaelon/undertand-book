@@ -5,6 +5,8 @@ import { describe, expect, it } from "vitest";
 import {
   alignHybridFoundationV2,
   formHybridAlignmentUnits,
+  pdfAlignmentLines,
+  projectHybridAlignmentChildren,
 } from "../src/hybrid-alignment-v2";
 import { extractPdfTextGeometry, type PdfTextGeometry } from "../src/pdf-geometry";
 
@@ -183,5 +185,87 @@ describe("HF2-2 semantic-unit PDF alignment", () => {
 
     expect(result.locations.map((location) => location.status)).toEqual(["located", "located"]);
     expect(result.locations[0].token_span!.end).toBeLessThanOrEqual(result.locations[1].token_span!.start);
+  });
+
+  it("projects shared semantic hyphens instead of dropping their source assignments", () => {
+    const sentence = "The feed-forward short-term key-value and long-term memories differ.";
+    const source = `${sentence}\n`;
+    const result = alignHybridFoundationV2(source, geometryFromPages([[sentence]]));
+    const projection = result.projections[0];
+    const hyphenOffsets = Array.from(source.matchAll(/-/gu), (match) => match.index);
+
+    expect(projection.precision).toBe("char_exact");
+    expect(hyphenOffsets).toHaveLength(4);
+    for (const offset of hyphenOffsets) {
+      expect(projection.selection_assignments).toContainEqual(expect.objectContaining({
+        text: "-",
+        source_span: { start: offset, end: offset + 1 },
+      }));
+    }
+  });
+
+  it("maps supported semantic hyphen representations onto the source hyphen", () => {
+    const source = "A key-value pair.\n";
+    const sourceOffset = source.indexOf("-");
+    for (const pdfHyphen of ["-", "\u00ad", "\u2010", "\u2011"]) {
+      const result = alignHybridFoundationV2(
+        source,
+        geometryFromPages([[`A key${pdfHyphen}value pair.`]]),
+      );
+      expect(result.projections[0].precision, pdfHyphen.codePointAt(0)?.toString(16)).toBe("char_exact");
+      expect(result.projections[0].selection_assignments).toContainEqual(expect.objectContaining({
+        text: pdfHyphen,
+        source_span: { start: sourceOffset, end: sourceOffset + 1 },
+      }));
+    }
+  });
+
+  it("ignores only a proven PDF line-end discretionary hyphen", () => {
+    const source = "A hyphenated method remains reliable.\n";
+    const geometry = geometryFromPages([[
+      "A hyphen-",
+      "ated method remains reliable.",
+    ]]);
+    const unit = formHybridAlignmentUnits(source)[0];
+    const projection = projectHybridAlignmentChildren(source, {
+      unit,
+      status: "located",
+      reason: "test-proven located lines",
+      lines: pdfAlignmentLines(geometry),
+    })[0];
+
+    expect(projection.precision).toBe("char_exact");
+    expect(projection.selection_assignments.some((assignment) => assignment.text === "-")).toBe(false);
+    expect(projection.exact_source_spans).toEqual([{ start: 0, end: source.trim().length }]);
+  });
+
+  it("keeps internal PDF hyphens and dash or minus changes fail-closed", () => {
+    const fixtures = [
+      "A hyphen-ated method remains reliable.",
+      "A hyphen–ated method remains reliable.",
+      "A hyphen—ated method remains reliable.",
+      "A hyphen−ated method remains reliable.",
+    ];
+    for (const pdfText of fixtures) {
+      const source = "A hyphenated method remains reliable.\n";
+      const result = alignHybridFoundationV2(source, geometryFromPages([[pdfText]]));
+      expect(result.projections[0].precision, pdfText).toBe("partial");
+    }
+  });
+
+  it("preserves matching en dash, em dash, and mathematical minus characters", () => {
+    const sentence = "alpha–beta—gamma − delta";
+    const source = `${sentence}\n`;
+    const result = alignHybridFoundationV2(source, geometryFromPages([[sentence]]));
+    const projection = result.projections[0];
+
+    expect(projection.precision).toBe("char_exact");
+    for (const symbol of ["–", "—", "−"]) {
+      const offset = source.indexOf(symbol);
+      expect(projection.selection_assignments).toContainEqual(expect.objectContaining({
+        text: symbol,
+        source_span: { start: offset, end: offset + 1 },
+      }));
+    }
   });
 });

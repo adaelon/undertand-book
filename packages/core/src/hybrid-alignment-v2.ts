@@ -70,6 +70,7 @@ interface ProjectedKeyRange {
   end: number;
   chars: PdfCharKey[];
   source_spans: Array<{ start: number; end: number }>;
+  has_unmatched_material_pdf?: boolean;
 }
 
 function spanKey(span: { start: number; end: number }): string {
@@ -416,9 +417,14 @@ export function locateHybridAlignmentUnits(
 
 function normalizedCharacterKeys(value: string): string[] {
   const keys: string[] = [];
-  for (const char of value.normalize("NFKC").toLocaleLowerCase("en-US")) {
-    if (/^[\p{Pd}\u00ad]$/u.test(char)) continue;
-    keys.push(/^\s$/u.test(char) ? " " : char);
+  for (const rawChar of value) {
+    if (/^[\u002d\u00ad\u2010\u2011]$/u.test(rawChar)) {
+      keys.push("-");
+      continue;
+    }
+    for (const char of rawChar.normalize("NFKC").toLocaleLowerCase("en-US")) {
+      keys.push(/^\s$/u.test(char) ? " " : char);
+    }
   }
   return keys;
 }
@@ -500,6 +506,35 @@ function pdfCharKeys(lines: PdfAlignmentLine[]): PdfCharKey[] {
   return lines.flatMap((line) => line.chars.flatMap((char) => (
     normalizedCharacterKeys(char.text).map((key) => ({ key, char, line }))
   )));
+}
+
+function isDiscretionaryLineEndHyphen(keys: PdfCharKey[], index: number): boolean {
+  const current = keys[index];
+  if (!current || !/^[\u002d\u00ad\u2010\u2011]$/u.test(current.char.text)) return false;
+  const previous = [...keys.slice(0, index)].reverse()
+    .find((item) => item.key !== " " && item.line.alignment_line_id === current.line.alignment_line_id);
+  const following = keys.slice(index + 1).find((item) => item.key !== " ");
+  if (!previous || !following || following.line.alignment_line_id === current.line.alignment_line_id) return false;
+  if (keys.slice(index + 1).some((item) => (
+    item.key !== " " && item.line.alignment_line_id === current.line.alignment_line_id
+  ))) return false;
+  return current.line.pageIndex === following.line.pageIndex
+    && current.line.column === following.line.column
+    && following.line.lineIndex > current.line.lineIndex
+    && /^[\p{L}\p{N}]$/u.test(previous.key)
+    && /^[\p{L}\p{N}]$/u.test(following.key);
+}
+
+function hasUnmatchedMaterialPdfKeys(keys: PdfCharKey[], pairs: Array<[number, number]>): boolean {
+  if (!pairs.length) return false;
+  const matched = new Set(pairs.map(([, pdfIndex]) => pdfIndex));
+  const start = pairs[0][1];
+  const end = pairs.at(-1)![1];
+  for (let index = start; index <= end; index += 1) {
+    if (matched.has(index) || keys[index].key === " " || isDiscretionaryLineEndHyphen(keys, index)) continue;
+    return true;
+  }
+  return false;
 }
 
 function keyOccurrences(haystack: PdfCharKey[], needle: string[], startAt: number, endAt = haystack.length): number[] {
@@ -627,6 +662,7 @@ export function projectHybridAlignmentChildren(
         end: start + sourceKeys.length,
         chars: keys.slice(start, start + sourceKeys.length),
         source_spans: sourceKeys.map((item) => item.source_span),
+        has_unmatched_material_pdf: false,
       });
       cursor = start + sourceKeys.length;
       continue;
@@ -648,6 +684,7 @@ export function projectHybridAlignmentChildren(
       end,
       chars: pairs.map(([, pdfIndex]) => remaining[pdfIndex]),
       source_spans: pairs.map(([sourceIndex]) => sourceKeys[sourceIndex].source_span),
+      has_unmatched_material_pdf: hasUnmatchedMaterialPdfKeys(remaining, pairs),
     };
     ranges.set(child.lid, range);
     cursor = range.end;
@@ -664,7 +701,7 @@ export function projectHybridAlignmentChildren(
         unit,
         child,
         range,
-        exactLength === fullLength ? "char_exact" : "partial",
+        exactLength === fullLength && !range.has_unmatched_material_pdf ? "char_exact" : "partial",
       ));
     }
   }
