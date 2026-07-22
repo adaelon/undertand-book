@@ -1,0 +1,671 @@
+{
+  "version": "hybrid_display_token_audit.v1",
+  "policy_version": "pdf_display_token_policy.v1",
+  "source_sha256": "feb442870b9364e578c22b210b1ac6ed9ce098f59bd39ceb07806c741715af43",
+  "pdf_sha256": "9391b89821c97dd14e66937fd71d22bfcfc72357f8023daddc6fc6334c68b9b0",
+  "passed": true,
+  "summary": {
+    "unit_count": 625,
+    "projection_count": 1945,
+    "unclassified_count": 0
+  },
+  "categories": {
+    "markdown_roles": {
+      "baseline_count": 8,
+      "replayed_count": 6,
+      "removed_count": 2,
+      "missing_successor_count": 0,
+      "classification_counts": {
+        "accepted_parser_role_display": 6,
+        "reviewed_source_removed": 2
+      },
+      "precision_counts": {
+        "char_exact": 2,
+        "partial": 1,
+        "unmapped": 3
+      },
+      "items": [
+        {
+          "baseline_lid": "1.1",
+          "migration_status": "stable",
+          "current_lid": "1.1",
+          "status": "replayed",
+          "classification": "accepted_parser_role_display",
+          "parser_roles": [
+            "heading"
+          ],
+          "precision": "partial",
+          "reason": "partial monotonic character projection inside located unit",
+          "page_indexes": [
+            0
+          ]
+        },
+        {
+          "baseline_lid": "1.19.87.160",
+          "migration_status": "stable",
+          "current_lid": "1.19.87.88",
+          "status": "replayed",
+          "classification": "accepted_parser_role_display",
+          "parser_roles": [
+            "list_item"
+          ],
+          "precision": "unmapped",
+          "reason": "child has no exclusive local PDF window",
+          "page_indexes": []
+        },
+        {
+          "baseline_lid": "1.19.87.165",
+          "migration_status": "stable",
+          "current_lid": "1.19.87.93",
+          "status": "replayed",
+          "classification": "accepted_parser_role_display",
+          "parser_roles": [
+            "list_item"
+          ],
+          "precision": "unmapped",
+          "reason": "child has no exclusive local PDF window",
+          "page_indexes": []
+        },
+        {
+          "baseline_lid": "1.19.87.191.3",
+          "migration_status": "stable",
+          "current_lid": "1.19.87.119.3",
+          "status": "replayed",
+          "classification": "accepted_parser_role_display",
+          "parser_roles": [
+            "list_item"
+          ],
+          "precision": "char_exact",
+          "reason": "complete monotonic character projection inside located unit",
+          "page_indexes": [
+            11
+          ]
+        },
+        {
+          "baseline_lid": "1.19.87.191.82",
+          "migration_status": "stable",
+          "current_lid": "1.19.87.119.82",
+          "status": "replayed",
+          "classification": "accepted_parser_role_display",
+          "parser_roles": [
+            "list_item"
+          ],
+          "precision": "char_exact",
+          "reason": "complete monotonic character projection inside located unit",
+          "page_indexes": [
+            12
+          ]
+        },
+        {
+          "baseline_lid": "1.19.87.191.85",
+          "migration_status": "stable",
+          "current_lid": "1.19.87.119.85",
+          "status": "replayed",
+          "classification": "accepted_parser_role_display",
+          "parser_roles": [
+            "list_item"
+          ],
+          "precision": "unmapped",
+          "reason": "child exact anchors do not form a unique monotonic chain",
+          "page_indexes": []
+        },
+        {
+          "baseline_lid": "7.1",
+          "migration_status": "removed",
+          "status": "removed",
+          "classification": "reviewed_source_removed"
+        },
+        {
+          "baseline_lid": "8.1",
+          "migration_status": "removed",
+          "status": "removed",
+          "classification": "reviewed_source_removed"
+        }
+      ]
+    },
+    "punctuation_symbols": {
+      "baseline_count": 28,
+      "replayed_count": 20,
+      "removed_count": 8,
+      "missing_successor_count": 0,
+      "classification_counts": {
+        "accepted_glyph_representation": 11,
+        "material_punctuation_difference": 9,
+        "reviewed_source_removed": 8
+      },
+      "precision_counts": {
+        "char_exact": 11,
+        "partial": 2,
+        "unmapped": 7
+      },
+      "items": [
+        {
+          "baseline_lid": "1.18.3",
+          "migration_status": "stable",
+          "current_lid": "1.18.3",
+          "status": "replayed",
+          "classification": "accepted_glyph_representation",
+          "precision": "char_exact",
+          "reason": "complete monotonic character projection inside located unit",
+          "page_indexes": [
+            0
+          ]
+        },
+        {
+          "baseline_lid": "1.18.12",
+          "migration_status": "stable",
+          "current_lid": "1.18.12",
+          "status": "replayed",
+          "classification": "accepted_glyph_representation",
+          "precision": "char_exact",
+          "reason": "complete monotonic character projection inside located unit",
+          "page_indexes": [
+            1
+          ]
+        },
+        {
+          "baseline_lid": "1.18.13",
+          "migration_status": "stable",
+          "current_lid": "1.18.13",
+          "status": "replayed",
+          "classification": "material_punctuation_difference",
+          "precision": "unmapped",
+          "reason": "child has no exclusive local PDF window",
+          "page_indexes": []
+        },
+        {
+          "baseline_lid": "1.19.86.57.60",
+          "migration_status": "stable",
+          "current_lid": "1.19.86.57.60",
+          "status": "replayed",
+          "classification": "accepted_glyph_representation",
+          "precision": "char_exact",
+          "reason": "complete monotonic character projection inside located unit",
+          "page_indexes": [
+            5
+          ]
+        },
+        {
+          "baseline_lid": "1.19.86.57.90",
+          "migration_status": "stable",
+          "current_lid": "1.19.86.57.90",
+          "status": "replayed",
+          "classification": "accepted_glyph_representation",
+          "precision": "char_exact",
+          "reason": "complete monotonic character projection inside located unit",
+          "page_indexes": [
+            6
+          ]
+        },
+        {
+          "baseline_lid": "1.19.86.58.10",
+          "migration_status": "stable",
+          "current_lid": "1.19.86.58.10",
+          "status": "replayed",
+          "classification": "accepted_glyph_representation",
+          "precision": "char_exact",
+          "reason": "complete monotonic character projection inside located unit",
+          "page_indexes": [
+            6
+          ]
+        },
+        {
+          "baseline_lid": "1.19.87.191.78",
+          "migration_status": "stable",
+          "current_lid": "1.19.87.119.78",
+          "status": "replayed",
+          "classification": "accepted_glyph_representation",
+          "precision": "char_exact",
+          "reason": "complete monotonic character projection inside located unit",
+          "page_indexes": [
+            12
+          ]
+        },
+        {
+          "baseline_lid": "1.19.87.191.133",
+          "migration_status": "stable",
+          "current_lid": "1.19.87.119.133",
+          "status": "replayed",
+          "classification": "accepted_glyph_representation",
+          "precision": "char_exact",
+          "reason": "complete monotonic character projection inside located unit",
+          "page_indexes": [
+            13
+          ]
+        },
+        {
+          "baseline_lid": "1.19.87.192.2",
+          "migration_status": "stable",
+          "current_lid": "1.19.87.120.2",
+          "status": "replayed",
+          "classification": "material_punctuation_difference",
+          "precision": "unmapped",
+          "reason": "child has no exclusive local PDF window",
+          "page_indexes": []
+        },
+        {
+          "baseline_lid": "1.20.3.46",
+          "migration_status": "stable",
+          "current_lid": "1.20.3.46",
+          "status": "replayed",
+          "classification": "material_punctuation_difference",
+          "precision": "unmapped",
+          "reason": "child exact anchors do not form a unique monotonic chain",
+          "page_indexes": []
+        },
+        {
+          "baseline_lid": "1.21.3",
+          "migration_status": "stable",
+          "current_lid": "1.21.3",
+          "status": "replayed",
+          "classification": "accepted_glyph_representation",
+          "precision": "char_exact",
+          "reason": "complete monotonic character projection inside located unit",
+          "page_indexes": [
+            20
+          ]
+        },
+        {
+          "baseline_lid": "1.23.8",
+          "migration_status": "stable",
+          "current_lid": "1.23.8",
+          "status": "replayed",
+          "classification": "accepted_glyph_representation",
+          "precision": "char_exact",
+          "reason": "complete monotonic character projection inside located unit",
+          "page_indexes": [
+            22
+          ]
+        },
+        {
+          "baseline_lid": "1.23.47",
+          "migration_status": "stable",
+          "current_lid": "1.23.47",
+          "status": "replayed",
+          "classification": "material_punctuation_difference",
+          "precision": "unmapped",
+          "reason": "alignment unit has no exact monotonic candidate",
+          "page_indexes": []
+        },
+        {
+          "baseline_lid": "1.23.53",
+          "migration_status": "stable",
+          "current_lid": "1.23.53",
+          "status": "replayed",
+          "classification": "material_punctuation_difference",
+          "precision": "partial",
+          "reason": "child-local projection contains unmatched material PDF",
+          "page_indexes": [
+            23
+          ]
+        },
+        {
+          "baseline_lid": "1.23.64",
+          "migration_status": "stable",
+          "current_lid": "1.23.64",
+          "status": "replayed",
+          "classification": "material_punctuation_difference",
+          "precision": "partial",
+          "reason": "child-local projection contains unmatched material PDF",
+          "page_indexes": [
+            23
+          ]
+        },
+        {
+          "baseline_lid": "1.23.79",
+          "migration_status": "stable",
+          "current_lid": "1.23.79",
+          "status": "replayed",
+          "classification": "material_punctuation_difference",
+          "precision": "unmapped",
+          "reason": "child has no exclusive local PDF window",
+          "page_indexes": []
+        },
+        {
+          "baseline_lid": "1.23.88",
+          "migration_status": "stable",
+          "current_lid": "1.23.88",
+          "status": "replayed",
+          "classification": "material_punctuation_difference",
+          "precision": "unmapped",
+          "reason": "child has no exclusive local PDF window",
+          "page_indexes": []
+        },
+        {
+          "baseline_lid": "1.24.8.15",
+          "migration_status": "stable",
+          "current_lid": "1.24.8.15",
+          "status": "replayed",
+          "classification": "accepted_glyph_representation",
+          "precision": "char_exact",
+          "reason": "complete monotonic character projection inside located unit",
+          "page_indexes": [
+            31
+          ]
+        },
+        {
+          "baseline_lid": "1.24.10.20",
+          "migration_status": "stable",
+          "current_lid": "1.24.10.20",
+          "status": "replayed",
+          "classification": "accepted_glyph_representation",
+          "precision": "char_exact",
+          "reason": "complete monotonic character projection inside located unit",
+          "page_indexes": [
+            32
+          ]
+        },
+        {
+          "baseline_lid": "1.24.16.62",
+          "migration_status": "stable",
+          "current_lid": "1.24.16.62",
+          "status": "replayed",
+          "classification": "material_punctuation_difference",
+          "precision": "unmapped",
+          "reason": "child has no exclusive local PDF window",
+          "page_indexes": []
+        },
+        {
+          "baseline_lid": "2.5",
+          "migration_status": "removed",
+          "status": "removed",
+          "classification": "reviewed_source_removed"
+        },
+        {
+          "baseline_lid": "4.3",
+          "migration_status": "removed",
+          "status": "removed",
+          "classification": "reviewed_source_removed"
+        },
+        {
+          "baseline_lid": "6.19",
+          "migration_status": "removed",
+          "status": "removed",
+          "classification": "reviewed_source_removed"
+        },
+        {
+          "baseline_lid": "6.22",
+          "migration_status": "removed",
+          "status": "removed",
+          "classification": "reviewed_source_removed"
+        },
+        {
+          "baseline_lid": "6.28",
+          "migration_status": "removed",
+          "status": "removed",
+          "classification": "reviewed_source_removed"
+        },
+        {
+          "baseline_lid": "6.30",
+          "migration_status": "removed",
+          "status": "removed",
+          "classification": "reviewed_source_removed"
+        },
+        {
+          "baseline_lid": "8.2",
+          "migration_status": "removed",
+          "status": "removed",
+          "classification": "reviewed_source_removed"
+        },
+        {
+          "baseline_lid": "8.3",
+          "migration_status": "removed",
+          "status": "removed",
+          "classification": "reviewed_source_removed"
+        }
+      ]
+    },
+    "layout_whitespace": {
+      "baseline_count": 23,
+      "replayed_count": 17,
+      "removed_count": 6,
+      "missing_successor_count": 0,
+      "classification_counts": {
+        "accepted_layout_whitespace_policy": 17,
+        "reviewed_source_removed": 6
+      },
+      "precision_counts": {
+        "partial": 15,
+        "unmapped": 2
+      },
+      "items": [
+        {
+          "baseline_lid": "1.19.80",
+          "migration_status": "stable",
+          "current_lid": "1.19.80",
+          "status": "replayed",
+          "classification": "accepted_layout_whitespace_policy",
+          "precision": "unmapped",
+          "reason": "child exact anchors do not form a unique monotonic chain",
+          "page_indexes": []
+        },
+        {
+          "baseline_lid": "1.19.86.57.21",
+          "migration_status": "stable",
+          "current_lid": "1.19.86.57.21",
+          "status": "replayed",
+          "classification": "accepted_layout_whitespace_policy",
+          "precision": "partial",
+          "reason": "partial monotonic character projection inside located unit",
+          "page_indexes": [
+            4
+          ]
+        },
+        {
+          "baseline_lid": "1.19.86.57.33",
+          "migration_status": "stable",
+          "current_lid": "1.19.86.57.33",
+          "status": "replayed",
+          "classification": "accepted_layout_whitespace_policy",
+          "precision": "partial",
+          "reason": "partial monotonic character projection inside located unit",
+          "page_indexes": [
+            4
+          ]
+        },
+        {
+          "baseline_lid": "1.19.86.58.20",
+          "migration_status": "stable",
+          "current_lid": "1.19.86.58.20",
+          "status": "replayed",
+          "classification": "accepted_layout_whitespace_policy",
+          "precision": "partial",
+          "reason": "partial monotonic character projection inside located unit",
+          "page_indexes": [
+            7
+          ]
+        },
+        {
+          "baseline_lid": "1.19.87.50",
+          "migration_status": "stable",
+          "current_lid": "1.19.87.50",
+          "status": "replayed",
+          "classification": "accepted_layout_whitespace_policy",
+          "precision": "partial",
+          "reason": "partial monotonic character projection inside located unit",
+          "page_indexes": [
+            9
+          ]
+        },
+        {
+          "baseline_lid": "1.19.87.191.8",
+          "migration_status": "stable",
+          "current_lid": "1.19.87.119.8",
+          "status": "replayed",
+          "classification": "accepted_layout_whitespace_policy",
+          "precision": "partial",
+          "reason": "partial monotonic character projection inside located unit",
+          "page_indexes": [
+            11
+          ]
+        },
+        {
+          "baseline_lid": "1.19.87.191.13",
+          "migration_status": "stable",
+          "current_lid": "1.19.87.119.13",
+          "status": "replayed",
+          "classification": "accepted_layout_whitespace_policy",
+          "precision": "unmapped",
+          "reason": "child has no exclusive local PDF window",
+          "page_indexes": []
+        },
+        {
+          "baseline_lid": "1.19.87.191.47",
+          "migration_status": "stable",
+          "current_lid": "1.19.87.119.47",
+          "status": "replayed",
+          "classification": "accepted_layout_whitespace_policy",
+          "precision": "partial",
+          "reason": "partial monotonic character projection inside located unit",
+          "page_indexes": [
+            12
+          ]
+        },
+        {
+          "baseline_lid": "1.23.24",
+          "migration_status": "stable",
+          "current_lid": "1.23.24",
+          "status": "replayed",
+          "classification": "accepted_layout_whitespace_policy",
+          "precision": "partial",
+          "reason": "child-local projection contains unmatched material PDF",
+          "page_indexes": [
+            22
+          ]
+        },
+        {
+          "baseline_lid": "1.23.37",
+          "migration_status": "stable",
+          "current_lid": "1.23.37",
+          "status": "replayed",
+          "classification": "accepted_layout_whitespace_policy",
+          "precision": "partial",
+          "reason": "partial monotonic character projection inside located unit",
+          "page_indexes": [
+            22
+          ]
+        },
+        {
+          "baseline_lid": "1.23.107",
+          "migration_status": "stable",
+          "current_lid": "1.23.107",
+          "status": "replayed",
+          "classification": "accepted_layout_whitespace_policy",
+          "precision": "partial",
+          "reason": "partial monotonic character projection inside located unit",
+          "page_indexes": [
+            24
+          ]
+        },
+        {
+          "baseline_lid": "1.24.7.2",
+          "migration_status": "stable",
+          "current_lid": "1.24.7.2",
+          "status": "replayed",
+          "classification": "accepted_layout_whitespace_policy",
+          "precision": "partial",
+          "reason": "partial monotonic character projection inside located unit",
+          "page_indexes": [
+            31
+          ]
+        },
+        {
+          "baseline_lid": "1.24.9.6",
+          "migration_status": "stable",
+          "current_lid": "1.24.9.6",
+          "status": "replayed",
+          "classification": "accepted_layout_whitespace_policy",
+          "precision": "partial",
+          "reason": "child-local projection contains unmatched material PDF",
+          "page_indexes": [
+            32
+          ]
+        },
+        {
+          "baseline_lid": "1.24.10.52",
+          "migration_status": "stable",
+          "current_lid": "1.24.10.52",
+          "status": "replayed",
+          "classification": "accepted_layout_whitespace_policy",
+          "precision": "partial",
+          "reason": "partial monotonic character projection inside located unit",
+          "page_indexes": [
+            32
+          ]
+        },
+        {
+          "baseline_lid": "1.24.13.7",
+          "migration_status": "stable",
+          "current_lid": "1.24.13.7",
+          "status": "replayed",
+          "classification": "accepted_layout_whitespace_policy",
+          "precision": "partial",
+          "reason": "partial monotonic character projection inside located unit",
+          "page_indexes": [
+            36
+          ]
+        },
+        {
+          "baseline_lid": "1.24.13.11",
+          "migration_status": "stable",
+          "current_lid": "1.24.13.11",
+          "status": "replayed",
+          "classification": "accepted_layout_whitespace_policy",
+          "precision": "partial",
+          "reason": "child-local projection contains unmatched material PDF",
+          "page_indexes": [
+            36
+          ]
+        },
+        {
+          "baseline_lid": "1.24.17.21",
+          "migration_status": "stable",
+          "current_lid": "1.24.17.21",
+          "status": "replayed",
+          "classification": "accepted_layout_whitespace_policy",
+          "precision": "partial",
+          "reason": "partial monotonic character projection inside located unit",
+          "page_indexes": [
+            39
+          ]
+        },
+        {
+          "baseline_lid": "6.4",
+          "migration_status": "removed",
+          "status": "removed",
+          "classification": "reviewed_source_removed"
+        },
+        {
+          "baseline_lid": "6.13",
+          "migration_status": "removed",
+          "status": "removed",
+          "classification": "reviewed_source_removed"
+        },
+        {
+          "baseline_lid": "6.14",
+          "migration_status": "removed",
+          "status": "removed",
+          "classification": "reviewed_source_removed"
+        },
+        {
+          "baseline_lid": "6.18",
+          "migration_status": "removed",
+          "status": "removed",
+          "classification": "reviewed_source_removed"
+        },
+        {
+          "baseline_lid": "6.29",
+          "migration_status": "removed",
+          "status": "removed",
+          "classification": "reviewed_source_removed"
+        },
+        {
+          "baseline_lid": "8.4",
+          "migration_status": "removed",
+          "status": "removed",
+          "classification": "reviewed_source_removed"
+        }
+      ]
+    }
+  }
+}

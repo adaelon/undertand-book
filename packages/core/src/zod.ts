@@ -350,6 +350,7 @@ export const PdfSourceMapEntryV2Z = z.object({
 });
 export const PdfSourceMapV2Z = z.object({
   version: z.literal("pdf_source_map.v2"),
+  display_token_policy_version: z.literal("pdf_display_token_policy.v1").optional(),
   book_id: z.string().min(1),
   coordinate_system: PdfCoordinateSystemZ,
   pages: z.array(PdfPageMetaZ),
@@ -435,6 +436,7 @@ export const AlignmentReportV2Z = z.object({
     algorithm: z.literal("semantic_unit_projection_v2"),
     coordinate_system: z.literal("pdf_user_space"),
     quality_policy_version: z.literal("hybrid_quality_policy.v1"),
+    display_token_policy_version: z.literal("pdf_display_token_policy.v1").optional(),
   }),
   config_hash: z.string().regex(/^[a-f0-9]{64}$/u),
   integrity: HybridFoundationIntegrityV2Z,

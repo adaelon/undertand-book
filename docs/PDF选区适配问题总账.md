@@ -121,7 +121,7 @@ Inspired by the discussion above,  $ \underline{\text{can we propose a new assoc
 
 ## 6. PDF-A002 Markdown 控制符未与可见文本分层
 
-**状态**：`confirmed`
+**状态**：`implementation-classified`；结构角色已闭合，正式选区发布等待 PR20。
 
 标题 source 保留 `#`，PDF 只显示标题文字；列表 source 使用 `-`，PDF 显示 `•`。这些字符不是正文语义缺失，但当前 recovery policy 只认识布局空白、排版连字符和完整简单公式，因此 raw quote 与 canonical quote 无法闭合。
 
@@ -133,7 +133,7 @@ Inspired by the discussion above,  $ \underline{\text{can we propose a new assoc
 
 ## 7. PDF-A003 标点和 glyph 表示未覆盖
 
-**状态**：`confirmed`, 具体字符类别 `needs-replay`
+**状态**：`implementation-classified`；28 个标点项已逐项进入 accepted representation / material punctuation / reviewed removal，正式发布等待 PR19/PR20。
 
 28 个 paragraph 的 source exact spans 缺口只含标点/符号，常见为 ASCII apostrophe 对 PDF 弯引号、ASCII hyphen 对 en dash、冒号/句点缺 hit，以及代码字符串引号/括号。它们不能合并成一个“忽略标点”规则：词内 apostrophe、负号、范围 dash、代码引号的语义不同。
 
@@ -394,3 +394,13 @@ Inspired by the discussion above,  $ \underline{\text{can we propose a new assoc
 - approved source audit 回放 A004 54 项：51 个迁移 successor、3 个 explicit removed、0 missing；结果 6 char-exact、15 local material partial、30 explicit unmapped。A005 129 项全部 successor 回放、0 missing：29 char-exact、5 partial、95 explicit unmapped。
 - 全书 625 units / 1,945 projections 的 source-order assignment 检查得到 `wrong_window_assignment_count=0`，旧 `child has no deterministic projection inside the located unit` reason 为 0。无正文报告双跑和 fixture SHA-256 均为 `bfdba059f610077ca360bcd25881eb5dda6a6277525a2a472a14d51b64b4d60a`。
 - 验证：重复 chain、失败 child、共享 unresolved window characterization 均先红后绿；aligner/unit/foundation/goldset 定向 39 tests、Core 单 worker 全量 62 files / 376 tests、typecheck 与差异检查全绿。本 PR 不改 representation allowlist、unit locator、formula projector 或正式 artifact。
+
+## 24. PR13 Markdown 可见表示与 glyph 等价分类
+
+**PR 状态**:`completed`；PDF-A002/PDF-A003 的表示类别已经闭合，但本 PR 不把分类结果当作 precision 升级。公式、child window 或运行时往返仍不完整的 successor 继续 fail-closed，正式问题状态等待 PR14-PR20 收口。
+
+- `parseMarkdownSourceBlocks` 现在从 positioned mdast 输出带 UTF-16 source span 的 `prose | heading | list_item | code` display segment；heading/list marker 只有 parser role 证明后才不进入可见字符，code 始终走严格字符规则。
+- `pdf_display_token_policy.v1` 只在 prose 中接受弯/直单双引号、NFKC ligature 与既有连字符表示；冒号/句点缺失、en/em/math minus 替换及 code 标点差异保持 material。Core source map/report 的策略版本必须一致，Server 接受旧 V2 缺字段产物，但拒绝任何显式未知版本。
+- approved source/PDF 审计将 A002 八项闭合为 6 个 parser-role successor + 2 个 reviewed removal；23 个 whitespace 项为 17 个既有 `layout_whitespace` policy successor + 6 removed；28 个 punctuation/symbol 项为 11 accepted glyph representation + 9 material punctuation + 8 removed。missing successor 与 unclassified 均为 0。
+- 审计只保存 LID、migration、precision、reason、page 与分类，不保存正文；双跑和冻结 fixture SHA-256 均为 `fe35ffe871b20f3e9493f043f9655dea758a3a7e8ad34ec620d924e2f95b73f6`。
+- 验证：heading/list、apostrophe/ligature 正例与 code/formula/missing-colon/dash-minus 反例均受 fail-closed 门保护；Core 定向 5 files / 57 tests、全量 62 files / 384 tests、typecheck、Server 全量 179+5 tests 全绿。正式 source/base/maps/selection shards 未修改。

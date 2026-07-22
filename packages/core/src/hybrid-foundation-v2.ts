@@ -4,6 +4,7 @@ import path from "node:path";
 import { markdownToBlocks } from "./md-adapter";
 import {
   alignHybridFoundationV2,
+  PDF_DISPLAY_TOKEN_POLICY,
   type HybridChildProjection,
 } from "./hybrid-alignment-v2";
 import type { PdfTextGeometry } from "./pdf-geometry";
@@ -219,6 +220,7 @@ export function buildHybridFoundationV2Candidate(input: HybridFoundationV2Input)
     algorithm: "semantic_unit_projection_v2" as const,
     coordinate_system: "pdf_user_space" as const,
     quality_policy_version: "hybrid_quality_policy.v1" as const,
+    display_token_policy_version: PDF_DISPLAY_TOKEN_POLICY.version,
   };
   const configHash = sha256(JSON.stringify(config));
   const pageRegionIndex: Record<string, string[]> = {};
@@ -232,6 +234,7 @@ export function buildHybridFoundationV2Candidate(input: HybridFoundationV2Input)
   }
   const pdfSourceMap: PdfSourceMapV2 = {
     version: "pdf_source_map.v2",
+    display_token_policy_version: PDF_DISPLAY_TOKEN_POLICY.version,
     book_id: input.book_id,
     coordinate_system: pdfUserSpaceCoordinateSystem(),
     pages: input.pdf_geometry.pages.map((page) => ({
@@ -426,6 +429,10 @@ export function assertHybridFoundationV2Integrity(artifacts: HybridFoundationV2A
   PdfSelectionMapManifestV2Z.parse(artifacts.pdf_selection_map_manifest);
   artifacts.pdf_selection_map_pages.forEach((page) => PdfSelectionMapPageShardV2Z.parse(page));
   const report = AlignmentReportV2Z.parse(artifacts.alignment_report);
+  if (artifacts.pdf_source_map.display_token_policy_version
+    !== report.config.display_token_policy_version) {
+    throw new Error("hybrid foundation v2 display token policy versions differ");
+  }
   const failed = Object.entries(report.integrity).filter(([, passed]) => !passed).map(([gate]) => gate);
   if (failed.length) throw new Error(`hybrid foundation v2 integrity failed: ${failed.join(", ")}`);
 }

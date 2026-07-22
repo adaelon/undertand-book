@@ -93,6 +93,7 @@ export interface PdfSourceMapEntryV2 {
 
 export interface PdfSourceMapV2 {
   version: "pdf_source_map.v2";
+  display_token_policy_version?: "pdf_display_token_policy.v1";
   book_id: string;
   coordinate_system: PdfSourceMap["coordinate_system"];
   pages: PdfPageMeta[];

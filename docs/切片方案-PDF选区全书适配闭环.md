@@ -1,6 +1,6 @@
 # 切片方案 - PDF 选区全书适配闭环
 
-> 状态:2026-07-22 PR8-PR12 已完成,PR13-PR21 待实施。
+> 状态:2026-07-22 PR8-PR13 已完成,PR14-PR21 待实施。
 > 问题源:[PDF 选区适配问题总账](PDF选区适配问题总账.md)。
 > 已完成前序:[PDF 选区可恢复定位](切片方案-pdf选区可恢复定位.md) PR1-PR7。
 > 决策边界:[ADR-0082](adr/0082-hybrid-foundation-semantic-unit-alignment-and-degraded-reader.md)、[ADR-0090](adr/0090-pdf-selection-recovered-resolution-and-versioned-discrepancy-policy.md)。
@@ -148,11 +148,14 @@ PR8_FULL_BOOK_BENCHMARK
 
 ### PR13 - Markdown 可见表示与 glyph 等价微切片
 
+**状态**:`completed`。display token 只由 positioned Markdown role 产生，prose/code 使用不同等价策略；`pdf_display_token_policy.v1` 已写入 Core 新产物并由 Server 对显式未知版本 fail-closed。
+
 - **做**:建立带 source span 的 display token 投影。heading `#` 是不可见结构标记,list `-` 与 PDF bullet 只在 parser 已证明的 list-marker role 下等价;正文 whitespace 使用既有换行证据。对 A003 的 28 项先真实 replay,再按 apostrophe、dash、ligature、标点缺失等类别各开 `PR13.x` 微切片并逐类登记 policy version。
 - **不做**:不忽略任意 Markdown 字符或所有标点;code 中 `#`,引号、括号和减号始终是 material;缺句点/冒号若没有 glyph 证据不得 recovered。
 - **Red**:heading 3、list 5 和 punctuation/symbol 28 仍混成 generic partial;代码标点可被 prose 规则误放行。
 - **Green**:A002 八项按结构角色闭合;23 个 whitespace 项逐项 replay;A003 28 项分别进入 accepted representation 或 A011 material mismatch,不再存在“punctuation/symbol”未决大桶。
 - **完成判据**:每个 accepted 类别有 1 个真实正例和至少 2 个语义反例;unknown role/category fail-closed;Server recovery policy 与 Core display token 版本相互校验。
+- **完成证据**:approved source/PDF 无正文审计双跑一致，SHA-256 `fe35ffe8...b73f6`。A002 为 6 个 parser-role successor + 2 个 reviewed removal；28 个 punctuation/symbol 为 11 accepted glyph representation + 9 material punctuation + 8 removed；23 个 whitespace 为 17 个既有 `layout_whitespace` policy successor + 6 removed；missing/unclassified 均为 0。分类闭合不改写当前 precision，仍受公式/window 门影响的项继续 fail-closed，交由 PR14-PR19。Core 定向 5 files / 57 tests、全量 62 files / 384 tests、typecheck 与 Server 179+5 tests 全绿。
 
 ### PR14 - 公式 source AST 与透明 wrapper
 

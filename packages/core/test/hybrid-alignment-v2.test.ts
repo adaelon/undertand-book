@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { runHybridChildWindowAuditCli } from "../scripts/run-hybrid-child-window-audit";
+import { runHybridDisplayTokenAuditCli } from "../scripts/run-hybrid-display-token-audit";
 import {
   alignHybridFoundationV2,
   formHybridAlignmentUnits,
@@ -16,6 +17,10 @@ const FIXTURE_ROOT = path.resolve(fileURLToPath(new URL("fixtures/hybrid-foundat
 const REAL_CHILD_WINDOW_AUDIT = path.join(
   FIXTURE_ROOT,
   "external-formula-dense-transformer-child-window-audit.json",
+);
+const REAL_DISPLAY_TOKEN_AUDIT = path.join(
+  FIXTURE_ROOT,
+  "external-formula-dense-transformer-display-token-audit.json",
 );
 
 function geometryFromPages(pages: string[][]): PdfTextGeometry {
@@ -108,6 +113,10 @@ describe("HF2-2 semantic-unit PDF alignment", () => {
     await expect(runHybridChildWindowAuditCli([])).rejects.toThrow("--source requires an explicit path");
   });
 
+  it("requires explicit source, PDF, descriptor, and migration inputs for display-token audit", async () => {
+    await expect(runHybridDisplayTokenAuditCli([])).rejects.toThrow("--source requires an explicit path");
+  });
+
   it("freezes the migrated A004/A005 child-window replay without source text", () => {
     const reportText = readFileSync(REAL_CHILD_WINDOW_AUDIT, "utf8");
     const report = JSON.parse(reportText);
@@ -127,6 +136,49 @@ describe("HF2-2 semantic-unit PDF alignment", () => {
       issues: {
         "PDF-A004": { baseline_count: 54, replayed_count: 51, removed_count: 3, missing_successor_count: 0 },
         "PDF-A005": { baseline_count: 129, replayed_count: 129, removed_count: 0, missing_successor_count: 0 },
+      },
+    });
+    expect(reportText).not.toMatch(/source_text|raw_quote|excerpt/u);
+  });
+
+  it("freezes the migrated A002/A003 display-token classification without source text", () => {
+    const reportText = readFileSync(REAL_DISPLAY_TOKEN_AUDIT, "utf8");
+    const report = JSON.parse(reportText);
+
+    expect(createHash("sha256").update(reportText).digest("hex"))
+      .toBe("fe35ffe871b20f3e9493f043f9655dea758a3a7e8ad34ec620d924e2f95b73f6");
+    expect(report).toMatchObject({
+      version: "hybrid_display_token_audit.v1",
+      policy_version: "pdf_display_token_policy.v1",
+      source_sha256: "feb442870b9364e578c22b210b1ac6ed9ce098f59bd39ceb07806c741715af43",
+      passed: true,
+      summary: { unit_count: 625, projection_count: 1945, unclassified_count: 0 },
+      categories: {
+        markdown_roles: {
+          baseline_count: 8,
+          replayed_count: 6,
+          removed_count: 2,
+          missing_successor_count: 0,
+          classification_counts: { accepted_parser_role_display: 6, reviewed_source_removed: 2 },
+        },
+        punctuation_symbols: {
+          baseline_count: 28,
+          replayed_count: 20,
+          removed_count: 8,
+          missing_successor_count: 0,
+          classification_counts: {
+            accepted_glyph_representation: 11,
+            material_punctuation_difference: 9,
+            reviewed_source_removed: 8,
+          },
+        },
+        layout_whitespace: {
+          baseline_count: 23,
+          replayed_count: 17,
+          removed_count: 6,
+          missing_successor_count: 0,
+          classification_counts: { accepted_layout_whitespace_policy: 17, reviewed_source_removed: 6 },
+        },
       },
     });
     expect(reportText).not.toMatch(/source_text|raw_quote|excerpt/u);
@@ -446,6 +498,59 @@ describe("HF2-2 semantic-unit PDF alignment", () => {
         text: symbol,
         source_span: { start: offset, end: offset + 1 },
       }));
+    }
+  });
+
+  it("projects parser-proven heading and list markers as non-visible structure", () => {
+    const source = "# Heading title\n\n- Listed item\n";
+    const result = alignHybridFoundationV2(source, geometryFromPages([["Heading title", "• Listed item"]]));
+
+    expect(result.projections.map((projection) => projection.precision)).toEqual(["char_exact", "char_exact"]);
+    expect(result.projections[0].exact_source_spans[0].start).toBe(source.indexOf("Heading"));
+    expect(result.projections[1].exact_source_spans[0].start).toBe(source.indexOf("Listed"));
+  });
+
+  it("accepts prose typography but keeps the same substitutions material in code", () => {
+    const proseSource = "The model's efficient office.\n";
+    const prose = alignHybridFoundationV2(proseSource, geometryFromPages([["The model’s eﬃcient office."]]));
+    const codeSource = "```python\nprint('office')\n```\n";
+    const code = alignHybridFoundationV2(codeSource, geometryFromPages([["print(’office’) "]]));
+
+    expect(prose.projections[0]).toMatchObject({ precision: "char_exact" });
+    expect(code.projections[0].precision).not.toBe("char_exact");
+  });
+
+  it("keeps compatibility characters and case material in code", () => {
+    const ligatureSource = "```text\nffi\n```\n";
+    const ligature = alignHybridFoundationV2(ligatureSource, geometryFromPages([["ﬃ"]]));
+    const caseSource = "```text\nAlpha\n```\n";
+    const letterCase = alignHybridFoundationV2(caseSource, geometryFromPages([["alpha"]]));
+
+    expect(ligature.projections[0].precision).not.toBe("char_exact");
+    expect(letterCase.projections[0].precision).not.toBe("char_exact");
+  });
+
+  it("keeps prose quote equivalence out of formula projection", () => {
+    const source = "value $x'$ tail\n";
+    const result = alignHybridFoundationV2(source, geometryFromPages([["value x’ tail"]]));
+    const formulaLid = result.units
+      .flatMap((unit) => unit.child_lids)
+      .find((child) => child.kind === "formula")?.lid;
+    const formula = result.projections.find((projection) => projection.lid === formulaLid);
+
+    expect(formula?.precision).not.toBe("region_exact");
+  });
+
+  it("keeps missing punctuation and dash or minus substitutions fail-closed", () => {
+    const fixtures = [
+      ["A result:\n", "A result"],
+      ["alpha-beta\n", "alpha–beta"],
+      ["alpha-beta\n", "alpha—beta"],
+      ["alpha-beta\n", "alpha−beta"],
+    ] as const;
+    for (const [source, pdf] of fixtures) {
+      expect(alignHybridFoundationV2(source, geometryFromPages([[pdf]])).projections[0].precision, pdf)
+        .not.toBe("char_exact");
     }
   });
 

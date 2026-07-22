@@ -88,3 +88,16 @@ Extends: ADR-0074 and ADR-0082.
 
 **命门**:缺任一显示字符、变量/运算符变化、只选中公式一部分、PDF 暴露未映射的 `_ { } ^ $` 等实质字符、未知 LaTeX 命令或跨页锚点时必须 fail-closed。正例为真实 Eq. 9 句中的 `W_{Ui}, W_{Di}`、`m`、`\boldsymbol{k}_i`、`\boldsymbol{v}_i`;强制反例为缺下标字符与 `W -> X` 变量替换。
 **展开**:[PDF 选区可恢复定位切片方案](../切片方案-pdf选区可恢复定位.md)
+
+### §8 v1 Markdown display token 与 glyph 等价
+
+**修订**:2026-07-22 注册构建期 `pdf_display_token_policy.v1`；它不扩大运行时 `pdf_selection_recovery.v2` 的 accepted differences。
+
+**决策**:Markdown 结构字符是否可见只由 positioned parser role 决定；heading/list marker 可从 display token 中排除，code 不继承 prose 规则。prose 字符仅接受弯/直单双引号、限定 hyphen 表示与 Unicode NFKC ligature 的逐字符等价；策略版本写入新 V2 source map 与 alignment report config，二者漂移或 Server 遇到显式未知版本时 fail-closed。历史 V2 两侧均缺字段时保持只读兼容。
+
+**否决**:
+- 删除所有 Markdown 标点或按首字符猜 heading/list：会吞掉 code 与正文实质字符。
+- 忽略任意 Unicode dash：会混同范围 dash、em dash、数学负号和减法运算符。
+- 仅凭 coverage 把缺冒号/句点升级：缺失标点仍可能改变语义或引用内容。
+
+**命门**:parser role 不明、code 中引号/括号/减号、缺失标点、en/em/math minus 替换、跨产物 policy 漂移和未知版本均拒绝升级。真实书分类审计只证明类别归属，不改写当前 artifact precision；用户动作闭合仍受 PR14-PR20 发布门约束。

@@ -1,4 +1,9 @@
-import { markdownToBlocks, parseMarkdownSourceBlocks, type MarkdownAlignmentContext } from "./md-adapter";
+import {
+  parseMarkdownSourceBlocks,
+  type MarkdownAlignmentContext,
+  type MarkdownDisplayRole,
+  type MarkdownDisplaySegment,
+} from "./md-adapter";
 import type { PdfGeometryChar, PdfGeometryPage, PdfTextGeometry } from "./pdf-geometry";
 import type { PdfRegion } from "./pdf-source-map";
 import { segment } from "./segment";
@@ -13,6 +18,10 @@ export const HYBRID_ALIGNMENT_UNIT_POLICY = {
   max_children: 24,
   max_source_utf16: 1_200,
   max_searchable_tokens: 240,
+} as const;
+
+export const PDF_DISPLAY_TOKEN_POLICY = {
+  version: "pdf_display_token_policy.v1",
 } as const;
 
 export interface HybridAlignmentUnit {
@@ -423,6 +432,21 @@ function unitSearchText(
   return unit.child_lids.map((child) => blockTextBySpan.get(spanKey(child.source_span)) ?? "").join(" ");
 }
 
+function displayTextByBlockSpan(
+  blocks: ReturnType<typeof parseMarkdownSourceBlocks>["blocks"],
+  displaySegments: MarkdownDisplaySegment[],
+): Map<string, string> {
+  return new Map(blocks.map((block) => {
+    const visible = displaySegments
+      .filter((segment) => (
+        segment.source_span.start >= block.span.start && segment.source_span.end <= block.span.end
+      ))
+      .map((segment) => segment.display_text)
+      .join("");
+    return [spanKey(block.span), visible || block.text];
+  }));
+}
+
 function tokenOccurrences(haystack: OrderedToken[], needle: string[], startAt: number): Array<{ start: number; end: number }> {
   const occurrences: Array<{ start: number; end: number }> = [];
   for (let start = startAt; start <= haystack.length - needle.length; start += 1) {
@@ -486,8 +510,8 @@ export function locateHybridAlignmentUnits(
   geometry: PdfTextGeometry,
   evidence?: SourceAlignmentEvidenceV1,
 ): LocatedHybridAlignmentUnit[] {
-  const blocks = markdownToBlocks(source);
-  const blockTextBySpan = new Map(blocks.map((block) => [spanKey(block.span), block.text]));
+  const parsed = parseMarkdownSourceBlocks(source);
+  const blockTextBySpan = displayTextByBlockSpan(parsed.blocks, parsed.display_segments);
   const lines = pdfAlignmentLines(geometry);
   const tokens: OrderedToken[] = lines.flatMap((line) => alignmentTokens(line.text).map((token) => ({ token, line })));
   const locations: LocatedHybridAlignmentUnit[] = [];
@@ -567,11 +591,26 @@ export function locateHybridAlignmentUnits(
   return locations;
 }
 
-function normalizedCharacterKeys(value: string): string[] {
+function normalizedCharacterKeys(
+  value: string,
+  role: MarkdownDisplayRole | "formula" = "prose",
+): string[] {
   const keys: string[] = [];
   for (const rawChar of value) {
+    if (role === "code") {
+      keys.push(rawChar);
+      continue;
+    }
     if (/^[\u002d\u00ad\u2010\u2011]$/u.test(rawChar)) {
       keys.push("-");
+      continue;
+    }
+    if (role !== "formula" && /^[\u0027\u2018\u2019]$/u.test(rawChar)) {
+      keys.push("'");
+      continue;
+    }
+    if (role !== "formula" && /^[\u0022\u201c\u201d]$/u.test(rawChar)) {
+      keys.push("\"");
       continue;
     }
     for (const char of rawChar.normalize("NFKC").toLocaleLowerCase("en-US")) {
@@ -581,15 +620,35 @@ function normalizedCharacterKeys(value: string): string[] {
   return keys;
 }
 
-function sourceCharacterKeys(source: string, span: { start: number; end: number }) {
+function displayCharacterKeys(
+  source: string,
+  child: HybridAlignmentUnit["child_lids"][number],
+  displaySegments: MarkdownDisplaySegment[],
+) {
   const units: Array<{ key: string; source_span: { start: number; end: number } }> = [];
-  let offset = span.start;
-  for (const char of source.slice(span.start, span.end)) {
-    const sourceSpan = { start: offset, end: offset + char.length };
-    for (const key of normalizedCharacterKeys(char)) units.push({ key, source_span: sourceSpan });
-    offset += char.length;
+  const segments = displaySegments.filter((segment) => (
+    segment.source_span.start >= child.source_span.start && segment.source_span.end <= child.source_span.end
+  ));
+  for (const segment of segments) {
+    const raw = source.slice(segment.source_span.start, segment.source_span.end);
+    const relativeStart = raw === segment.display_text
+      ? 0
+      : raw.indexOf(segment.display_text) >= 0 && raw.indexOf(segment.display_text, raw.indexOf(segment.display_text) + 1) < 0
+        ? raw.indexOf(segment.display_text)
+        : -1;
+    if (relativeStart < 0) continue;
+    let offset = segment.source_span.start + relativeStart;
+    for (const char of segment.display_text) {
+      const sourceSpan = { start: offset, end: offset + char.length };
+      for (const key of normalizedCharacterKeys(char, segment.role)) units.push({ key, source_span: sourceSpan });
+      offset += char.length;
+    }
   }
-  return units;
+  const firstVisible = units.findIndex((unit) => unit.key !== " ");
+  if (firstVisible < 0) return [];
+  let lastVisible = units.length - 1;
+  while (lastVisible > firstVisible && units[lastVisible].key === " ") lastVisible -= 1;
+  return units.slice(firstVisible, lastVisible + 1);
 }
 
 function alignmentPairs<T extends { key: string }, U extends { key: string }>(
@@ -654,9 +713,9 @@ function mergeSourceSpans(spans: Array<{ start: number; end: number }>) {
   return merged;
 }
 
-function pdfCharKeys(lines: PdfAlignmentLine[]): PdfCharKey[] {
+function pdfCharKeys(lines: PdfAlignmentLine[], role: MarkdownDisplayRole | "formula" = "prose"): PdfCharKey[] {
   return lines.flatMap((line) => line.chars.flatMap((char) => (
-    normalizedCharacterKeys(char.text).map((key) => ({ key, char, line }))
+    normalizedCharacterKeys(char.text, role).map((key) => ({ key, char, line }))
   )));
 }
 
@@ -690,7 +749,7 @@ function hasUnmatchedMaterialPdfKeys(keys: PdfCharKey[], pairs: Array<[number, n
 }
 
 function sourceSpansWithLineBreakWhitespace(
-  sourceKeys: ReturnType<typeof sourceCharacterKeys>,
+  sourceKeys: ReturnType<typeof displayCharacterKeys>,
   pdfKeys: PdfCharKey[],
   pairs: Array<[number, number]>,
 ): Array<{ start: number; end: number }> {
@@ -739,7 +798,7 @@ interface ExactChildAnchorCandidate {
   child_index: number;
   start: number;
   end: number;
-  source_keys: ReturnType<typeof sourceCharacterKeys>;
+  source_keys: ReturnType<typeof displayCharacterKeys>;
 }
 
 function uniqueMonotonicExactChildChain(
@@ -839,7 +898,7 @@ function formulaSourceCharacterKeys(
       continue;
     }
     const sourceSpan = { start: span.start + index, end: span.start + index + char.length };
-    for (const key of normalizedCharacterKeys(char)) {
+    for (const key of normalizedCharacterKeys(char, "formula")) {
       if (key !== " " && !/^[_{}^$]$/u.test(key)) units.push({ key, source_span: sourceSpan });
     }
     index += char.length;
@@ -872,19 +931,6 @@ function projectionText(
 ): string {
   const text = blockTextBySpan.get(spanKey(child.source_span)) ?? "";
   return child.kind === "formula" ? sourceComparisonText(text) : text.trim();
-}
-
-function exactContentSpan(
-  source: string,
-  child: HybridAlignmentUnit["child_lids"][number],
-  blockTextBySpan: Map<string, string>,
-): { start: number; end: number } {
-  const raw = source.slice(child.source_span.start, child.source_span.end);
-  const text = (blockTextBySpan.get(spanKey(child.source_span)) ?? raw).trim();
-  const offset = raw.indexOf(text);
-  return offset >= 0
-    ? { start: child.source_span.start + offset, end: child.source_span.start + offset + text.length }
-    : { ...child.source_span };
 }
 
 function regionsForKeyRange(range: ProjectedKeyRange, prefix: string): PdfRegion[] {
@@ -960,15 +1006,19 @@ export function projectHybridAlignmentChildren(
   if (location.status !== "located") {
     return unit.child_lids.map((child) => unmapped(child, location.reason));
   }
-  const blocks = markdownToBlocks(source);
-  const blockTextBySpan = new Map(blocks.map((block) => [spanKey(block.span), block.text]));
-  const keys = pdfCharKeys(location.lines);
+  const parsed = parseMarkdownSourceBlocks(source);
+  const blockTextBySpan = displayTextByBlockSpan(parsed.blocks, parsed.display_segments);
+  const hasCodeDisplay = parsed.display_segments.some((segment) => (
+    segment.role === "code"
+    && segment.source_span.start >= unit.source_span.start
+    && segment.source_span.end <= unit.source_span.end
+  ));
+  const keys = pdfCharKeys(location.lines, hasCodeDisplay ? "code" : "prose");
   const ranges = new Map<string, ProjectedKeyRange>();
   const rejections = new Map<string, string>();
   const textChildren = unit.child_lids.flatMap((child, childIndex) => {
     if (child.kind === "formula" || child.kind === "image" || child.kind === "table") return [];
-    const childContentSpan = exactContentSpan(source, child, blockTextBySpan);
-    const sourceKeys = sourceCharacterKeys(source, childContentSpan);
+    const sourceKeys = displayCharacterKeys(source, child, parsed.display_segments);
     return sourceKeys.length ? [{ child, childIndex, sourceKeys }] : [];
   });
   const exactCandidates = textChildren.flatMap(({ childIndex, sourceKeys }) => (
@@ -1046,9 +1096,10 @@ export function projectHybridAlignmentChildren(
   for (const child of unit.child_lids) {
     const range = ranges.get(child.lid);
     if (range) {
-      const childContentSpan = exactContentSpan(source, child, blockTextBySpan);
       const exactLength = mergeSourceSpans(range.source_spans).reduce((sum, span) => sum + span.end - span.start, 0);
-      const fullLength = childContentSpan.end - childContentSpan.start;
+      const sourceKeys = textChildren.find((candidate) => candidate.child.lid === child.lid)?.sourceKeys ?? [];
+      const fullLength = mergeSourceSpans(sourceKeys.map((item) => item.source_span))
+        .reduce((sum, span) => sum + span.end - span.start, 0);
       const projection = textProjection(
         unit,
         child,
@@ -1071,7 +1122,7 @@ export function projectHybridAlignmentChildren(
     const startAt = previousRange?.end ?? 0;
     const endAt = nextRange?.start ?? keys.length;
     const gapKeys = formulaCharacterKeys(keys.slice(startAt, endAt));
-    const needle = normalizedCharacterKeys(projectionText(child, blockTextBySpan))
+    const needle = normalizedCharacterKeys(projectionText(child, blockTextBySpan), "formula")
       .filter((key) => key !== " " && !/^[_{}^$]$/u.test(key));
     const occurrences = needle.length ? keyOccurrences(gapKeys, needle, 0) : [];
     if (occurrences.length !== 1) {

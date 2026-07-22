@@ -20,11 +20,20 @@ export interface MarkdownSourceBlockParseResult {
   blocks: SourceBlock[];
   review_proposals: MarkdownSourceReviewProposal[];
   alignment_contexts: MarkdownAlignmentContext[];
+  display_segments: MarkdownDisplaySegment[];
 }
 
 export interface MarkdownAlignmentContext {
   kind: "paragraph" | "list_item";
   source_span: Span;
+}
+
+export type MarkdownDisplayRole = "prose" | "heading" | "list_item" | "code";
+
+export interface MarkdownDisplaySegment {
+  role: MarkdownDisplayRole;
+  source_span: Span;
+  display_text: string;
 }
 
 interface SourceLine {
@@ -106,6 +115,30 @@ function collectInlineMath(node: Nodes, result: Nodes[] = []): Nodes[] {
     for (const child of (node as Parents).children) collectInlineMath(child, result);
   }
   return result;
+}
+
+function collectDisplaySegments(
+  node: Nodes,
+  source: string,
+  role: MarkdownDisplayRole,
+): MarkdownDisplaySegment[] {
+  if (node.type === "inlineMath" || node.type === "math" || node.type === "image") return [];
+  if (node.type === "text") {
+    return [{ role, source_span: nodeSpan(node), display_text: node.value }];
+  }
+  if (node.type === "inlineCode" || node.type === "code") {
+    const outer = nodeSpan(node);
+    const raw = source.slice(outer.start, outer.end);
+    const offset = raw.indexOf(node.value);
+    if (offset < 0 || raw.indexOf(node.value, offset + 1) >= 0) return [];
+    return [{
+      role: "code",
+      source_span: { start: outer.start + offset, end: outer.start + offset + node.value.length },
+      display_text: node.value,
+    }];
+  }
+  if (!("children" in node)) return [];
+  return (node as Parents).children.flatMap((child) => collectDisplaySegments(child, source, role));
 }
 
 function formulaMarkupIsBalanced(raw: string): boolean {
@@ -268,7 +301,22 @@ export function parseMarkdownSourceBlocks(source: string): MarkdownSourceBlockPa
     }
     return [];
   });
-  return { blocks, review_proposals: reviewProposals, alignment_contexts: alignmentContexts };
+  const displaySegments = tree.children.flatMap((node): MarkdownDisplaySegment[] => {
+    if (node.type === "heading") return collectDisplaySegments(node, source, "heading");
+    if (node.type === "list") {
+      return node.children.flatMap((item) => collectDisplaySegments(item, source, "list_item"));
+    }
+    if (node.type === "code") return collectDisplaySegments(node, source, "code");
+    if (node.type === "paragraph") return collectDisplaySegments(node, source, "prose");
+    return [];
+  }).sort((left, right) => left.source_span.start - right.source_span.start
+    || left.source_span.end - right.source_span.end);
+  return {
+    blocks,
+    review_proposals: reviewProposals,
+    alignment_contexts: alignmentContexts,
+    display_segments: displaySegments,
+  };
 }
 
 export function markdownToBlocks(source: string): SourceBlock[] {
