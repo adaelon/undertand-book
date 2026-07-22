@@ -1,7 +1,9 @@
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
+import { runHybridChildWindowAuditCli } from "../scripts/run-hybrid-child-window-audit";
 import {
   alignHybridFoundationV2,
   formHybridAlignmentUnits,
@@ -11,6 +13,10 @@ import {
 import { extractPdfTextGeometry, type PdfTextGeometry } from "../src/pdf-geometry";
 
 const FIXTURE_ROOT = path.resolve(fileURLToPath(new URL("fixtures/hybrid-foundation-goldset/v1", import.meta.url)));
+const REAL_CHILD_WINDOW_AUDIT = path.join(
+  FIXTURE_ROOT,
+  "external-formula-dense-transformer-child-window-audit.json",
+);
 
 function geometryFromPages(pages: string[][]): PdfTextGeometry {
   return {
@@ -98,6 +104,33 @@ async function licensedFixture(name: string) {
 }
 
 describe("HF2-2 semantic-unit PDF alignment", () => {
+  it("requires explicit source, PDF, descriptor, and migration inputs for child-window audit", async () => {
+    await expect(runHybridChildWindowAuditCli([])).rejects.toThrow("--source requires an explicit path");
+  });
+
+  it("freezes the migrated A004/A005 child-window replay without source text", () => {
+    const reportText = readFileSync(REAL_CHILD_WINDOW_AUDIT, "utf8");
+    const report = JSON.parse(reportText);
+
+    expect(createHash("sha256").update(reportText).digest("hex"))
+      .toBe("bfdba059f610077ca360bcd25881eb5dda6a6277525a2a472a14d51b64b4d60a");
+    expect(report).toMatchObject({
+      version: "hybrid_child_window_audit.v1",
+      source_sha256: "feb442870b9364e578c22b210b1ac6ed9ce098f59bd39ceb07806c741715af43",
+      passed: true,
+      summary: {
+        unit_count: 625,
+        projection_count: 1945,
+        wrong_window_assignment_count: 0,
+        legacy_shared_cursor_reason_count: 0,
+      },
+      issues: {
+        "PDF-A004": { baseline_count: 54, replayed_count: 51, removed_count: 3, missing_successor_count: 0 },
+        "PDF-A005": { baseline_count: 129, replayed_count: 129, removed_count: 0, missing_successor_count: 0 },
+      },
+    });
+    expect(reportText).not.toMatch(/source_text|raw_quote|excerpt/u);
+  });
   it("projects short inline-formula children independently inside one located unit", async () => {
     const { source, geometry } = await licensedFixture("licensed-inline-formula");
     const result = alignHybridFoundationV2(source, geometry);
@@ -414,5 +447,67 @@ describe("HF2-2 semantic-unit PDF alignment", () => {
         source_span: { start: offset, end: offset + 1 },
       }));
     }
+  });
+
+  it("fails closed when text anchors have more than one global monotonic chain", () => {
+    const source = "repeat $x$ tail\n";
+    const unit = formHybridAlignmentUnits(source)[0];
+    const projections = projectHybridAlignmentChildren(source, {
+      unit,
+      status: "located",
+      reason: "test-proven repeated local window",
+      lines: pdfAlignmentLines(geometryFromPages([["repeat x tail repeat x tail"]])),
+    });
+
+    expect(projections.filter((projection) => (
+      unit.child_lids.find((child) => child.lid === projection.lid)?.kind === "text"
+    ))).toEqual([
+      expect.objectContaining({
+        precision: "unmapped",
+        alignment: expect.objectContaining({ reason: "child exact anchors do not form a unique monotonic chain" }),
+      }),
+      expect.objectContaining({
+        precision: "unmapped",
+        alignment: expect.objectContaining({ reason: "child exact anchors do not form a unique monotonic chain" }),
+      }),
+    ]);
+  });
+
+  it("does not let a failed child advance or consume the following exact anchor", () => {
+    const source = "alpha $x$ impossible $y$ omega\n";
+    const unit = formHybridAlignmentUnits(source)[0];
+    const projections = projectHybridAlignmentChildren(source, {
+      unit,
+      status: "located",
+      reason: "test-proven child-local windows",
+      lines: pdfAlignmentLines(geometryFromPages([["alpha x q y omega"]])),
+    });
+    const text = projections.filter((projection) => (
+      unit.child_lids.find((child) => child.lid === projection.lid)?.kind === "text"
+    ));
+
+    expect(text.map((projection) => projection.precision)).toEqual(["char_exact", "unmapped", "char_exact"]);
+    expect(text[1].alignment.reason).toBe("child has no deterministic projection inside its local PDF window");
+    expect(text[2].selection_assignments.map((assignment) => assignment.text).join("")).toBe("omega");
+  });
+
+  it("refuses LCS when adjacent unresolved children would share one PDF window", () => {
+    const source = "alphaished $x$ betaish\n";
+    const unit = formHybridAlignmentUnits(source)[0];
+    const projections = projectHybridAlignmentChildren(source, {
+      unit,
+      status: "located",
+      reason: "test-proven shared unresolved window",
+      lines: pdfAlignmentLines(geometryFromPages([["alphaXished x betaXish"]])),
+    });
+    const text = projections.filter((projection) => (
+      unit.child_lids.find((child) => child.lid === projection.lid)?.kind === "text"
+    ));
+
+    expect(text).toHaveLength(2);
+    expect(text.every((projection) => (
+      projection.precision === "unmapped"
+      && projection.alignment.reason === "child has no exclusive local PDF window"
+    ))).toBe(true);
   });
 });

@@ -1,6 +1,6 @@
 # 切片方案 - PDF 选区全书适配闭环
 
-> 状态:2026-07-22 PR8-PR11 已完成,PR12-PR21 待实施。
+> 状态:2026-07-22 PR8-PR12 已完成,PR13-PR21 待实施。
 > 问题源:[PDF 选区适配问题总账](PDF选区适配问题总账.md)。
 > 已完成前序:[PDF 选区可恢复定位](切片方案-pdf选区可恢复定位.md) PR1-PR7。
 > 决策边界:[ADR-0082](adr/0082-hybrid-foundation-semantic-unit-alignment-and-degraded-reader.md)、[ADR-0090](adr/0090-pdf-selection-recovered-resolution-and-versioned-discrepancy-policy.md)。
@@ -137,11 +137,14 @@ PR8_FULL_BOOK_BENCHMARK
 
 ### PR12 - child 局部单调窗口
 
+**状态**:`completed`。exact child anchors 由唯一最大单调非重叠链决定；未锚 child 只在相邻 anchors 的独占局部窗内运行 LCS，多 child 共享未分割窗口时整体 fail-closed。
+
 - **做**:在 located unit 内先建立唯一强 child anchors,再用相邻已证实 anchor 划分 PDF key window;每个 child 只在自己的 window 内产生 exact/LCS candidates,以全局单调非重叠链选择唯一解。child 失败不推进共享 cursor,material PDF key 不得跨窗被 LCS 吞掉。
 - **不做**:不新增表示白名单,不让 coverage 最高者自动胜出,不让前后 child 继承失败 child 的区域。
 - **Red**:A004 的 54 个 paragraph 可跨 11-359 个额外字符仍产出 partial assignment;A005 的 129 个 child 在 unit 已定位时被 cursor 挤空。
 - **Green**:wrong-window assignment 为 0;A004 每项变为局部 exact/明确 material mismatch;A005 每项得到独立候选或稳定具体拒绝原因,长度不再决定是否被丢弃。
 - **完成判据**:合成重复短句、脚注、相邻栏、公式夹段和 129 项真实 audit 回放全绿;`has_unmatched_material_pdf` 不再来自跨 child 漂移。
+- **完成证据**:approved source replay 覆盖 A004 全部 54 项（51 successor + 3 个 PR10 explicit removed）与 A005 全部 129 successor；`wrong_window_assignment_count=0`、旧共享 cursor reason 为 0。A004 successor 为 6 exact / 15 local material partial / 30 explicit unmapped；A005 为 29 exact / 5 partial / 95 explicit unmapped，没有用 coverage winner 强行升级。无正文报告双跑与 fixture SHA-256 均为 `bfdba059...b4d60a`。
 
 ### PR13 - Markdown 可见表示与 glyph 等价微切片
 

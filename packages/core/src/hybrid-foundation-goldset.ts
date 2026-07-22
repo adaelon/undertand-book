@@ -198,6 +198,7 @@ export const GoldsetManifestZ = z.object({
     reviewed_source_plan_path: z.string().min(1).optional(),
     reviewed_source_candidate_audit_path: z.string().min(1).optional(),
     alignment_unit_audit_path: z.string().min(1).optional(),
+    child_window_audit_path: z.string().min(1).optional(),
     requires_explicit_book_path: z.literal(true),
   })),
 });

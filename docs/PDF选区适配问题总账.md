@@ -383,3 +383,14 @@ Inspired by the discussion above,  $ \underline{\text{can we propose a new assoc
 - approved source 的 1,945 leaves 确定性形成 625 units：621 个 within-guard、4 个 oversize singleton、0 个 oversized multi-child、0 个 boundary violation、0 个 coverage error；最大多 child unit 为 24 children / 1,090 UTF-16 / 184 searchable tokens。
 - 无正文 audit 三次与冻结 fixture 的 SHA-256 均为 `d33cdd00e4f3e9edac46f6efa9fe424269e40cf21112da4ec647b58c7b5cbc5a`。正式旧书 PR8 audit 在新增门下仍 `passed=true`：2,075 baseline/current leaves 全 direct，675 units / 1,983 children，`oversized_multi_child=0`、`boundary_violation=0`、`coverage_error=0`。
 - 验证：unit/aligner/parser/segment/goldset/adaptation 定向 45 tests、Core 单 worker 全量 62 files / 371 tests、typecheck 与差异检查全绿；PR11 不修改 source、locator/projector、fuzzy policy 或正式 artifact。standalone display formula 缺结构几何证据时仍 fail-closed，等待 PR15。
+
+## 23. PR12 child 局部单调窗口
+
+**PR 状态**:`completed`；PDF-A004/PDF-A005 的跨 child 搜索与共享 cursor 根因已闭合。仍因真实 source/PDF 表示差异、unit 定位或公式证据不足而降级的 successor 保持 fail-closed，等待 PR13-PR18 对应 owner slice，故问题总状态暂不提前改为 `fixed`。
+
+- text/code 的所有 exact occurrences 先进入全局动态规划；只有唯一最大、source 顺序单调且 PDF 区间不重叠的链可成为 strong anchors。重复短句存在两条同优链时整组拒绝，不取第一个或最高 coverage 候选。
+- 未锚 child 按最近前后 strong anchor 分组。一个 anchor interval 只有一个未解析 child 时才允许局部 LCS；两个以上 child 共享同一未分割区间时以 `child has no exclusive local PDF window` 拒绝。失败 child 不改变其他 child 的边界或游标。
+- 局部 LCS 的 PDF material gap 显式标为 `child-local projection contains unmatched material PDF`；不再沿用会把跨 child 漂移混入 generic partial 的共享 remaining-buffer 原因。
+- approved source audit 回放 A004 54 项：51 个迁移 successor、3 个 explicit removed、0 missing；结果 6 char-exact、15 local material partial、30 explicit unmapped。A005 129 项全部 successor 回放、0 missing：29 char-exact、5 partial、95 explicit unmapped。
+- 全书 625 units / 1,945 projections 的 source-order assignment 检查得到 `wrong_window_assignment_count=0`，旧 `child has no deterministic projection inside the located unit` reason 为 0。无正文报告双跑和 fixture SHA-256 均为 `bfdba059f610077ca360bcd25881eb5dda6a6277525a2a472a14d51b64b4d60a`。
+- 验证：重复 chain、失败 child、共享 unresolved window characterization 均先红后绿；aligner/unit/foundation/goldset 定向 39 tests、Core 单 worker 全量 62 files / 376 tests、typecheck 与差异检查全绿。本 PR 不改 representation allowlist、unit locator、formula projector 或正式 artifact。

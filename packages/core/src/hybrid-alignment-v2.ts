@@ -735,6 +735,61 @@ function keyOccurrences(haystack: PdfCharKey[], needle: string[], startAt: numbe
   return occurrences;
 }
 
+interface ExactChildAnchorCandidate {
+  child_index: number;
+  start: number;
+  end: number;
+  source_keys: ReturnType<typeof sourceCharacterKeys>;
+}
+
+function uniqueMonotonicExactChildChain(
+  candidates: ExactChildAnchorCandidate[],
+): { status: "none" | "unique" | "ambiguous"; chain: ExactChildAnchorCandidate[] } {
+  if (!candidates.length) return { status: "none", chain: [] };
+  const ordered = [...candidates].sort((left, right) => (
+    left.child_index - right.child_index || left.start - right.start || left.end - right.end
+  ));
+  const bestLengths = new Array<number>(ordered.length).fill(1);
+  const pathCounts = new Array<number>(ordered.length).fill(1);
+  const previousIndexes = new Array<number>(ordered.length).fill(-1);
+  for (let currentIndex = 0; currentIndex < ordered.length; currentIndex += 1) {
+    let bestPreviousLength = 0;
+    let bestPreviousCount = 0;
+    let uniquePreviousIndex = -1;
+    for (let previousIndex = 0; previousIndex < currentIndex; previousIndex += 1) {
+      const previous = ordered[previousIndex];
+      const current = ordered[currentIndex];
+      if (previous.child_index >= current.child_index || previous.end > current.start) continue;
+      if (bestLengths[previousIndex] > bestPreviousLength) {
+        bestPreviousLength = bestLengths[previousIndex];
+        bestPreviousCount = pathCounts[previousIndex];
+        uniquePreviousIndex = pathCounts[previousIndex] === 1 ? previousIndex : -1;
+      } else if (bestLengths[previousIndex] === bestPreviousLength) {
+        bestPreviousCount = Math.min(2, bestPreviousCount + pathCounts[previousIndex]);
+        uniquePreviousIndex = -1;
+      }
+    }
+    if (bestPreviousLength) {
+      bestLengths[currentIndex] = bestPreviousLength + 1;
+      pathCounts[currentIndex] = Math.min(2, bestPreviousCount);
+      previousIndexes[currentIndex] = uniquePreviousIndex;
+    }
+  }
+  const bestLength = Math.max(...bestLengths);
+  const bestEndpoints = ordered
+    .map((candidate, index) => ({ candidate, index }))
+    .filter(({ index }) => bestLengths[index] === bestLength);
+  const pathCount = bestEndpoints.reduce((sum, { index }) => Math.min(2, sum + pathCounts[index]), 0);
+  if (pathCount !== 1) return { status: "ambiguous", chain: [] };
+  const chain: ExactChildAnchorCandidate[] = [];
+  let cursor = bestEndpoints[0].index;
+  while (cursor >= 0) {
+    chain.push(ordered[cursor]);
+    cursor = previousIndexes[cursor];
+  }
+  return { status: "unique", chain: chain.reverse() };
+}
+
 function formulaCharacterKeys(keys: PdfCharKey[]): PdfCharKey[] {
   return keys.filter((item) => item.key !== " " && !/^[_{}^$]$/u.test(item.key));
 }
@@ -909,47 +964,82 @@ export function projectHybridAlignmentChildren(
   const blockTextBySpan = new Map(blocks.map((block) => [spanKey(block.span), block.text]));
   const keys = pdfCharKeys(location.lines);
   const ranges = new Map<string, ProjectedKeyRange>();
-  let cursor = 0;
-  for (let childIndex = 0; childIndex < unit.child_lids.length; childIndex += 1) {
-    const child = unit.child_lids[childIndex];
-    if (child.kind === "formula" || child.kind === "image" || child.kind === "table") continue;
+  const rejections = new Map<string, string>();
+  const textChildren = unit.child_lids.flatMap((child, childIndex) => {
+    if (child.kind === "formula" || child.kind === "image" || child.kind === "table") return [];
     const childContentSpan = exactContentSpan(source, child, blockTextBySpan);
     const sourceKeys = sourceCharacterKeys(source, childContentSpan);
-    if (!sourceKeys.length) continue;
-    const directOccurrences = keyOccurrences(keys, sourceKeys.map((item) => item.key), cursor);
-    if (directOccurrences.length) {
-      const start = directOccurrences[0];
-      ranges.set(child.lid, {
+    return sourceKeys.length ? [{ child, childIndex, sourceKeys }] : [];
+  });
+  const exactCandidates = textChildren.flatMap(({ childIndex, sourceKeys }) => (
+    keyOccurrences(keys, sourceKeys.map((item) => item.key), 0)
+      .map((start): ExactChildAnchorCandidate => ({
+        child_index: childIndex,
         start,
         end: start + sourceKeys.length,
-        chars: keys.slice(start, start + sourceKeys.length),
-        source_spans: sourceKeys.map((item) => item.source_span),
+        source_keys: sourceKeys,
+      }))
+  ));
+  const exactChain = uniqueMonotonicExactChildChain(exactCandidates);
+  if (exactChain.status === "ambiguous") {
+    for (const { child } of textChildren) {
+      rejections.set(child.lid, "child exact anchors do not form a unique monotonic chain");
+    }
+  } else {
+    for (const anchor of exactChain.chain) {
+      const child = unit.child_lids[anchor.child_index];
+      ranges.set(child.lid, {
+        start: anchor.start,
+        end: anchor.end,
+        chars: keys.slice(anchor.start, anchor.end),
+        source_spans: anchor.source_keys.map((item) => item.source_span),
         has_unmatched_material_pdf: false,
       });
-      cursor = start + sourceKeys.length;
-      continue;
     }
-    const nextTextChild = unit.child_lids.slice(childIndex + 1)
-      .find((candidate) => candidate.kind === "text" || candidate.kind === "code");
-    const nextText = nextTextChild ? projectionText(nextTextChild, blockTextBySpan) : "";
-    const nextNeedle = normalizedCharacterKeys(nextText);
-    const nextOccurrence = nextNeedle.length ? keyOccurrences(keys, nextNeedle, cursor)[0] : undefined;
-    const remaining = keys.slice(cursor, nextOccurrence ?? keys.length);
-    const pairs = alignmentPairs(sourceKeys, remaining);
-    const matchedSourceIndexes = new Set(pairs.map(([sourceIndex]) => sourceIndex));
-    const coverage = matchedSourceIndexes.size / sourceKeys.length;
-    if (coverage < 0.5 || !pairs.length) continue;
-    const start = cursor + pairs[0][1];
-    const end = cursor + pairs.at(-1)![1] + 1;
-    const range = {
-      start,
-      end,
-      chars: pairs.map(([, pdfIndex]) => remaining[pdfIndex]),
-      source_spans: sourceSpansWithLineBreakWhitespace(sourceKeys, remaining, pairs),
-      has_unmatched_material_pdf: hasUnmatchedMaterialPdfKeys(remaining, pairs),
-    };
-    ranges.set(child.lid, range);
-    cursor = range.end;
+  }
+
+  if (exactChain.status !== "ambiguous") {
+    const unresolvedGroups = new Map<string, typeof textChildren>();
+    for (const item of textChildren.filter(({ child }) => !ranges.has(child.lid))) {
+      const previousAnchor = [...textChildren]
+        .reverse()
+        .find((candidate) => candidate.childIndex < item.childIndex && ranges.has(candidate.child.lid));
+      const nextAnchor = textChildren
+        .find((candidate) => candidate.childIndex > item.childIndex && ranges.has(candidate.child.lid));
+      const key = `${previousAnchor?.childIndex ?? -1}:${nextAnchor?.childIndex ?? unit.child_lids.length}`;
+      unresolvedGroups.set(key, [...(unresolvedGroups.get(key) ?? []), item]);
+    }
+    for (const group of unresolvedGroups.values()) {
+      if (group.length !== 1) {
+        for (const { child } of group) rejections.set(child.lid, "child has no exclusive local PDF window");
+        continue;
+      }
+      const item = group[0];
+      const previousAnchor = [...textChildren]
+        .reverse()
+        .find((candidate) => candidate.childIndex < item.childIndex && ranges.has(candidate.child.lid));
+      const nextAnchor = textChildren
+        .find((candidate) => candidate.childIndex > item.childIndex && ranges.has(candidate.child.lid));
+      const windowStart = previousAnchor ? ranges.get(previousAnchor.child.lid)!.end : 0;
+      const windowEnd = nextAnchor ? ranges.get(nextAnchor.child.lid)!.start : keys.length;
+      const localKeys = keys.slice(windowStart, windowEnd);
+      const pairs = alignmentPairs(item.sourceKeys, localKeys);
+      const matchedSourceIndexes = new Set(pairs.map(([sourceIndex]) => sourceIndex));
+      const coverage = matchedSourceIndexes.size / item.sourceKeys.length;
+      if (coverage < 0.5 || !pairs.length) {
+        rejections.set(item.child.lid, "child has no deterministic projection inside its local PDF window");
+        continue;
+      }
+      const start = windowStart + pairs[0][1];
+      const end = windowStart + pairs.at(-1)![1] + 1;
+      ranges.set(item.child.lid, {
+        start,
+        end,
+        chars: pairs.map(([, pdfIndex]) => localKeys[pdfIndex]),
+        source_spans: sourceSpansWithLineBreakWhitespace(item.sourceKeys, localKeys, pairs),
+        has_unmatched_material_pdf: hasUnmatchedMaterialPdfKeys(localKeys, pairs),
+      });
+    }
   }
 
   const projections = new Map<string, HybridChildProjection>();
@@ -959,12 +1049,16 @@ export function projectHybridAlignmentChildren(
       const childContentSpan = exactContentSpan(source, child, blockTextBySpan);
       const exactLength = mergeSourceSpans(range.source_spans).reduce((sum, span) => sum + span.end - span.start, 0);
       const fullLength = childContentSpan.end - childContentSpan.start;
-      projections.set(child.lid, textProjection(
+      const projection = textProjection(
         unit,
         child,
         range,
         exactLength === fullLength && !range.has_unmatched_material_pdf ? "char_exact" : "partial",
-      ));
+      );
+      if (range.has_unmatched_material_pdf) {
+        projection.alignment.reason = "child-local projection contains unmatched material PDF";
+      }
+      projections.set(child.lid, projection);
     }
   }
   for (let index = 0; index < unit.child_lids.length; index += 1) {
@@ -1041,7 +1135,7 @@ export function projectHybridAlignmentChildren(
     });
   }
   return unit.child_lids.map((child) => projections.get(child.lid)
-    ?? unmapped(child, "child has no deterministic projection inside the located unit"));
+    ?? unmapped(child, rejections.get(child.lid) ?? "child has no deterministic projection inside its local PDF window"));
 }
 
 export function alignHybridFoundationV2(

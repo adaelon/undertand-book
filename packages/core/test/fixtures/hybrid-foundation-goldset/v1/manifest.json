@@ -33,6 +33,7 @@
       "reviewed_source_plan_path": "external-formula-dense-transformer-reviewed-source-plan.json",
       "reviewed_source_candidate_audit_path": "external-formula-dense-transformer-reviewed-source-candidate-audit.json",
       "alignment_unit_audit_path": "external-formula-dense-transformer-alignment-unit-audit.json",
+      "child_window_audit_path": "external-formula-dense-transformer-child-window-audit.json",
       "requires_explicit_book_path": true
     }
   ]
