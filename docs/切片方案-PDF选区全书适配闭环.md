@@ -1,6 +1,6 @@
 # 切片方案 - PDF 选区全书适配闭环
 
-> 状态:2026-07-23 PR8-PR19 已完成,PR20-PR21 待实施。
+> 状态:2026-07-23 PR8-PR21 已全部完成；reviewed v2 已发布，Windows Setup SHA-256 为 `D72ECC07400B3726951EB684586831BE084DF2A8B171FCDD61062949E9F4BEEE`。
 > 问题源:[PDF 选区适配问题总账](PDF选区适配问题总账.md)。
 > 已完成前序:[PDF 选区可恢复定位](切片方案-pdf选区可恢复定位.md) PR1-PR7。
 > 决策边界:[ADR-0082](adr/0082-hybrid-foundation-semantic-unit-alignment-and-degraded-reader.md)、[ADR-0090](adr/0090-pdf-selection-recovered-resolution-and-versioned-discrepancy-policy.md)。
@@ -230,9 +230,12 @@ PR8_FULL_BOOK_BENCHMARK
 
 ### PR21 - 提交与 Windows Setup 发布
 
+**状态**：`completed`。Setup 只从 detached `396ac99` 与同一 frozen lockfile 的已安装依赖树构建；主工作区 dirty 文件未进入产物。
+
 - **做**:只从 PR8-PR20 已提交的 clean frozen snapshot 构建 Setup;运行 plugin/release parity、Web production build、build/MCP sidecar smoke、Rust release 和 NSIS;记录 commit、size、SHA-256 和 version。
 - **不做**:不吸收主工作区无关 dirty 文件,不在 Setup 构建中修测试,不启动安装器。
 - **完成判据**:release gate 全绿;bundle/export/final Setup 字节与 hash 一致;`docs/代码链路.md`、问题总账 fixed 状态和 checkpoint 全部指向最终 commit/artifact。
+- **完成证据**:plugin parity `0.1.0+codex.20260721044654`、release config、Node/Bun v2 parity、compiled workbench sidecar、Book MCP launcher、Web production build、Rust release 与 NSIS 全绿。bundle、detached export 和最终 `dist/UnderstandBookSetup.exe` 均为 37,352,338 bytes / SHA-256 `D72ECC07400B3726951EB684586831BE084DF2A8B171FCDD61062949E9F4BEEE`，file/product version `0.1.0`，`NotSigned` 且未启动。构建后 worktree 恢复 clean `396ac99`。
 
 ## 5. 问题覆盖矩阵
 

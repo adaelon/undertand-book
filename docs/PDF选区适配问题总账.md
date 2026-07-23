@@ -494,3 +494,12 @@ PR10 migration 与 PR16 结构 glyph 后，11 项已分为 3 个唯一公式 own
 - 语义图只迁移 `stable` anchor：877 nodes / 1,003 edges -> 800 / 929；stable refs 1,731，content-drift 16、removed 109 不猜迁。旧图 digest `1fd30097046afae2e6132ec2ff20b0da125d2238b50fb1cc1fa6139bc4463e70` 与旧 artifact digest `bcc7c04a716a390f2919b787683f74722abc0992ebc4cbba4baf6aee92cd3fd2` 发布前后不变。
 - 原子发布复用 per-book lock + revision journal applier；transaction `release-cc056062004a7d8a` 在 revision 12 `committed` 后才把隐藏 sibling staging rename 为新版本目录。新图 digest 为 `842b3ee5d4ee2521ad103b56529efca12a68a7b598309f487f69639c14afbc72`。
 - 发布后旧版与新版真实 PDF 选区测试均通过；新版本 A001/复杂公式可见范围保持 `resolved/recovered -> exact project`。Core 69 files / 439 tests + typecheck、Rust workspace、Server 185、Web 26 files / 150 tests + typecheck/build、Playwright 11（desktop + 390px）和 Rust fmt 全绿。
+
+## 31. PR21 Windows Setup 发布
+
+**PR 状态**：`completed`。A001-A011 的 `fixed` 总账、PR20 reviewed v2 运行时代码和全部 fail-closed 门已进入从 clean frozen commit `396ac99` 构建的 Windows Setup；主工作区的 memory/profile/reader/server host 与前端阅读器 dirty 修改未进入安装包。
+
+- plugin release parity `0.1.0+codex.20260721044654`、release config、Node/Bun automatic-build v2 parity、compiled workbench source/hybrid/automatic smoke、Book MCP manifest launcher smoke、Web production build、Rust release 与 Tauri NSIS 全部通过。
+- NSIS bundle、detached worktree export 与最终 `dist/UnderstandBookSetup.exe` 三者均为 37,352,338 bytes，SHA-256 `D72ECC07400B3726951EB684586831BE084DF2A8B171FCDD61062949E9F4BEEE`，file/product version `0.1.0`。
+- packaged `understand-book-build.exe` 为 104,346,112 bytes / SHA-256 `6155E4528E971796127831D6B814210F7518DC2F538C0A9AECCEE1755414C9B8`；`book-mcp.exe` 为 5,052,416 bytes / SHA-256 `27146E3A8F6D3EFF188DD5B42ABB67724C0EDA10B13DAE397221E1F99946D2A9`。各自与 Tauri release 目录副本一致。
+- Setup 签名状态为 `NotSigned`，未启动安装器。打包后 Tauri 的行尾探测已恢复，detached worktree 最终 `git diff --exit-code` 为 0 且 HEAD 仍为 `396ac99`。
