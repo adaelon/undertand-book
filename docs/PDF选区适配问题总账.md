@@ -10,7 +10,7 @@
 
 ## 2. PDF-A001 `\underline` 包装的普通文本被当作不可恢复公式
 
-**状态**：`candidate-round-trip-closed`；46 个 successor 已有透明 wrapper token/source span，PR19 隔离候选已闭合真实 resolve/project，正式 artifact 切换等待 PR20。
+**状态**：`fixed`；46 个 successor 已有透明 wrapper token/source span，PR19 闭合真实 resolve/project，PR20 已发布 reviewed v2 新书版本。
 
 **用户选区**：
 
@@ -123,7 +123,7 @@ Inspired by the discussion above,  $ \underline{\text{can we propose a new assoc
 
 ## 6. PDF-A002 Markdown 控制符未与可见文本分层
 
-**状态**：`implementation-classified`；结构角色已闭合，正式选区发布等待 PR20。
+**状态**：`fixed`；结构角色与 code 边界已闭合并随 reviewed v2 新书版本发布。
 
 标题 source 保留 `#`，PDF 只显示标题文字；列表 source 使用 `-`，PDF 显示 `•`。这些字符不是正文语义缺失，但当前 recovery policy 只认识布局空白、排版连字符和完整简单公式，因此 raw quote 与 canonical quote 无法闭合。
 
@@ -135,7 +135,7 @@ Inspired by the discussion above,  $ \underline{\text{can we propose a new assoc
 
 ## 7. PDF-A003 标点和 glyph 表示未覆盖
 
-**状态**：`implementation-classified`；28 个标点项已逐项进入 accepted representation / material punctuation / reviewed removal，PR19 运行时能力已闭合，正式发布等待 PR20。
+**状态**：`fixed`；28 个标点项已逐项进入 accepted representation / material punctuation / reviewed removal，accepted 类别已发布，material 类别继续 intentional fail-closed。
 
 28 个 paragraph 的 source exact spans 缺口只含标点/符号，常见为 ASCII apostrophe 对 PDF 弯引号、ASCII hyphen 对 en dash、冒号/句点缺 hit，以及代码字符串引号/括号。它们不能合并成一个“忽略标点”规则：词内 apostrophe、负号、范围 dash、代码引号的语义不同。
 
@@ -145,7 +145,7 @@ Inspired by the discussion above,  $ \underline{\text{can we propose a new assoc
 
 ## 8. PDF-A004 partial LCS 跨过实质 PDF 字符
 
-**状态**：`confirmed`
+**状态**：`fixed`；跨 child/window 的 LCS 漂移已消除，剩余 local material mismatch 不再升级。
 
 54 个 paragraph 的 trimmed source 已被 `exact_source_spans` 100% 覆盖，precision 仍为 partial，说明降级来自 `has_unmatched_material_pdf`。从 PDF.js 原始字符流重放后：8 个未在逐行检查中发现额外 material char，4 个跨 1-2 个，5 个跨 3-10 个，21 个跨 11-50 个，16 个跨 50 个以上。后两档共 37 个，不是可忽略排版噪声，而是 LCS 在宽 unit 内把一个 child 的字符配到后续正文、公式、脚注或相邻列。
 
@@ -155,7 +155,7 @@ Inspired by the discussion above,  $ \underline{\text{can we propose a new assoc
 
 ## 9. PDF-A011 source 实质字符没有 glyph 证据
 
-**状态**：`confirmed`
+**状态**：`fixed`；28 项均已有 approved canonical decision，其中 15 项 repaired、13 项明确记录为 intentional source difference。
 
 28 个 partial paragraph 的未覆盖 source 字符包含字母或数字，不是空白、Markdown 标记或纯标点。正文样本包括 `1.19.86.57.12` 的大段字母缺失、`1.19.87.191.209` 的 `^0`、`1.19.87.192.74` 的 `z` 和 `1.19.87.192.82` 的整段后缀；代码区则集中表现为 OCR/空格化 source 与 PDF code glyph 序列不同。
 
@@ -165,7 +165,7 @@ Inspired by the discussion above,  $ \underline{\text{can we propose a new assoc
 
 ## 10. PDF-A005 located unit 内的 child 被丢弃
 
-**状态**：`confirmed`
+**状态**：`fixed`；共享 cursor 已退出，129 项均得到局部结果或具体 material/ambiguity owner。
 
 129 个 paragraph 所在 unit 已成功定位，但 child 没有达到 50% LCS coverage、没有 source keys，或被前序 cursor/next-text 边界挤空，最终没有任何 region/selection assignment。长度分布为：`0-2=7`, `3-5=10`, `6-10=12`, `11-30=19`, `>30=81`。因此不能把该问题解释为“短句不够唯一”；多数是正常长段落。
 
@@ -175,7 +175,7 @@ Inspired by the discussion above,  $ \underline{\text{can we propose a new assoc
 
 ## 11. PDF-A006/PDF-A007 公式适配缺口
 
-**状态**：`geometry-classified`；PR15 已移除双侧正文锚硬依赖并闭合 page/column region owner，复杂 glyph、未定位 unit 与正式发布仍分别等待 PR16、PR18、PR20。
+**状态**：`fixed`；双侧正文锚硬依赖、旧公式 gap/ambiguity 模型与可见子公式往返均已退出，无法唯一证明的结构差异继续 intentional fail-closed。
 
 本书 867 个 formula 节点的完整核算：
 
@@ -201,6 +201,8 @@ Inspired by the discussion above,  $ \underline{\text{can we propose a new assoc
 **region-only 的 79 个公式**：`1.5`, `1.19.18`, `1.19.20`, `1.19.22`, `1.19.49`, `1.19.71`, `1.19.81`, `1.19.86.37`, `1.19.86.39`, `1.19.86.53`, `1.19.86.57.8`, `1.19.86.57.20`, `1.19.86.57.22`, `1.19.86.57.24`, `1.19.86.57.39`, `1.19.86.57.41`, `1.19.86.57.51`, `1.19.86.57.53`, `1.19.86.57.58`, `1.19.86.57.70`, `1.19.86.58.26`, `1.19.86.58.75`, `1.19.86.58.87`, `1.19.87.20`, `1.19.87.53`, `1.19.87.149`, `1.19.87.191.19`, `1.19.87.191.25`, `1.19.87.191.60`, `1.19.87.191.103`, `1.19.87.191.105`, `1.19.87.191.107`, `1.19.87.191.109`, `1.19.87.191.122`, `1.19.87.191.126`, `1.19.87.191.128`, `1.19.87.191.159`, `1.19.87.191.161`, `1.19.87.191.206`, `1.19.87.192.10`, `1.19.87.192.22`, `1.19.87.192.36`, `1.19.87.192.38`, `1.19.87.192.40`, `1.20.3.30`, `1.20.3.40`, `1.20.3.43`, `1.20.3.70`, `1.20.4.30`, `1.23.19`, `1.23.33`, `1.23.36`, `1.23.52`, `1.23.63`, `1.23.100`, `1.23.116`, `1.24.2.4`, `1.24.10.3`, `1.24.10.7`, `1.24.12.5`, `1.24.12.54`, `1.24.12.60`, `1.24.12.66`, `1.24.12.68`, `1.24.13.10`, `1.24.14.4`, `1.24.16.20`, `1.24.16.29`, `1.24.16.31`, `1.24.16.72`, `1.24.16.74`, `1.24.16.81`, `1.24.17.7`, `1.24.17.11`, `1.24.17.24`, `1.24.17.28`, `1.24.17.30`, `8.7.5`, `8.7.22`。
 
 ## 12. PDF-A008 全部未定位 alignment units
+
+**状态**：`fixed`；多 child unit guard、唯一 monotonic locator 与下游 owner 已闭合，剩余无唯一候选项均有稳定拒绝原因。
 
 19 个 image-only unit 没有 searchable token，属于 asset 投影缺失：`unit-108`, `121`, `133`, `136`, `138`, `140`, `142`, `144`, `146`, `152`, `154`, `156`, `161`, `163`, `171`, `173`, `306`, `308`, `310`。
 
@@ -244,7 +246,7 @@ Inspired by the discussion above,  $ \underline{\text{can we propose a new assoc
 
 ## 13. PDF-A009 binding 冲突
 
-**状态**：`confirmed`；approved candidate 已闭合，正式 artifact 切换等待 PR20。
+**状态**：`fixed`；候选 ownership 与重复完整性门已随 reviewed v2 新书版本发布。
 
 旧基线有 11 个 raw projection 争用已分配的 PDF region/selection binding：公式 `1.19.87.191.170`, `.176`, `.195`, `.197`；paragraph `1.24.10.65`, `.66`, `.67`, `3.2`, `3.3`, `6.25`, `6.26`。前四个是重复出现的 `$n$` / `$TC^0$` 短式，后七个集中在代码清单。
 
@@ -467,3 +469,28 @@ PR10 migration 与 PR16 结构 glyph 后，11 项已分为 3 个唯一公式 own
 - recovery 仅补充“raw 或 canonical 单侧存在的内部布局空白”；边界空白、内容/顺序变化及 terminal 缺口继续 fail-closed。Server 诊断稳定为 `material_or_ambiguous | insufficient_visible_evidence | no_source_glyph`，Web 只据 `resolved | partial | unresolved` 与该诊断决定动作和短状态文案。
 - 隔离候选真实回放覆盖 A001 完整跨表示句、wrapper 中段、复杂公式子范围；三者 resolve 均 `resolved/recovered`，project 全部 `exact`、range 全覆盖、terminal glyph 存在。强制缺字、变量替换、缺 terminal 与无 source glyph 仍受限。
 - 验证：Server 全量 185 tests，真实候选环境测试 1/1，Memory selection-context 6 tests，Web 26 files / 150 tests、typecheck/production build，PDF.js Playwright 11 tests（desktop + 390px）及 Rust fmt 全绿。截图 `docs/screenshots/hf2-reader-partial-mobile.png` 复核状态和动作无重叠。
+
+## 30. PR20 reviewed v2 全书发布闭环
+
+**PR 状态**：`completed`。新版本发布到 `.understand-book/understanding-transformer-from-the-perspective-of-reviewed-v2`；旧书目录、旧语义图与旧记忆均未被覆盖。
+
+| 问题 | 最终状态 | 发布处置 |
+|---|---|---|
+| PDF-A001 | `fixed` | 46 个透明 wrapper successor 与真实跨 text/formula/text、wrapper 中段、复杂公式子范围完成 resolve -> project |
+| PDF-A002 | `fixed` | heading/list marker 仅按 parser role 处理，code marker 保持 material |
+| PDF-A003 | `fixed` | accepted glyph representation 已版本化；缺标点、minus/code 差异仍 intentional fail-closed |
+| PDF-A004 | `fixed` | child-local 单调窗口使 wrong-window assignment 为 0 |
+| PDF-A005 | `fixed` | 共享 cursor 丢 child 路径退出，全部 baseline 有结果或具体 owner |
+| PDF-A006 | `fixed` | 旧 no-gap/ambiguous reason 归零；结构 glyph assignment 或显式 mismatch owner 闭合 |
+| PDF-A007 | `fixed` | 双侧正文锚限制退出，最终 106 项 0 unclassified、0 wrong page/column |
+| PDF-A008 | `fixed` | 0 oversized multi-child，未定位 successor 均有确定性 owner/reason |
+| PDF-A009 | `fixed` | formal region/selection duplicate 均为 0，强制多解继续 fail-closed |
+| PDF-A010 | `fixed` | 19 image 全部独立 asset region；code 不再污染章节树或使用 prose 等价 |
+| PDF-A011 | `fixed` | 28 项全部 approved：15 repaired、13 intentional source difference，无未复核项 |
+
+- 发布输入 SHA-256：旧 source `cb108cabb5198cf07820b5eb49e6d3094fdf870ae20b130c93539b721ed653c9`；approved source `feb442870b9364e578c22b210b1ac6ed9ce098f59bd39ceb07806c741715af43`；PDF `9391b89821c97dd14e66937fd71d22bfcfc72357f8023daddc6fc6334c68b9b0`；migration `ead42b79890ceb606aa765b9f14e4127f24c65e20b775af76868722f957b94db`。
+- 相同输入双构建 artifact digest 均为 `cc056062004a7d8a72c176e70cfd0616ebf803ace67dcd1da4998276438e19e9`。PR8 coverage 为 baseline 2,075 / matched 2,075 / current 1,945；direct 1,499、migration map 446、removed 130，missing/unexpected/artifact coverage error 与 unknown projection reason 均为 0。
+- 最终 A007 审计为 106 项：`glyph_projected=34`、`existing_display_projection=34`、`explicit_structural_ambiguity=13`、`downstream_unit_locator=12`、`downstream_binding_conflict=7`、`downstream_formula_glyph=5`、`reviewed_non_formula=1`；0 missing/unclassified/wrong-page/wrong-column/cross-lane。
+- 语义图只迁移 `stable` anchor：877 nodes / 1,003 edges -> 800 / 929；stable refs 1,731，content-drift 16、removed 109 不猜迁。旧图 digest `1fd30097046afae2e6132ec2ff20b0da125d2238b50fb1cc1fa6139bc4463e70` 与旧 artifact digest `bcc7c04a716a390f2919b787683f74722abc0992ebc4cbba4baf6aee92cd3fd2` 发布前后不变。
+- 原子发布复用 per-book lock + revision journal applier；transaction `release-cc056062004a7d8a` 在 revision 12 `committed` 后才把隐藏 sibling staging rename 为新版本目录。新图 digest 为 `842b3ee5d4ee2521ad103b56529efca12a68a7b598309f487f69639c14afbc72`。
+- 发布后旧版与新版真实 PDF 选区测试均通过；新版本 A001/复杂公式可见范围保持 `resolved/recovered -> exact project`。Core 69 files / 439 tests + typecheck、Rust workspace、Server 185、Web 26 files / 150 tests + typecheck/build、Playwright 11（desktop + 390px）和 Rust fmt 全绿。

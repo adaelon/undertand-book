@@ -13,6 +13,7 @@ import {
   applyHybridFoundationArtifactSet,
   hybridFoundationArtifactSetDigest,
   mergeHybridFoundationBase,
+  migrateHybridFoundationVersionBase,
   recoverHybridFoundationArtifactApplications,
   semanticGraphDigest,
 } from "../src/hybrid-foundation-apply";
@@ -89,6 +90,88 @@ describe("hybrid foundation semantic graph ownership", () => {
     const danglingEdge = base();
     danglingEdge.graph_edges[0] = { ...danglingEdge.graph_edges[0], target: "claim:missing" };
     expect(() => mergeHybridFoundationBase(danglingEdge, base())).toThrow(/graph edge endpoint/i);
+  });
+
+  it("migrates only stable graph anchors into an independent book version", () => {
+    const official = base();
+    official.graph_nodes.push({
+      id: "concept:drift",
+      type: "concept",
+      name: "Drift",
+      occurrences: ["1.2"],
+      source_lid: null,
+    });
+    official.lid_nodes.push({
+      lid: "1.2",
+      path: [1, 2],
+      kind: "paragraph",
+      span: { start: 20, end: 30 },
+      children: [],
+    });
+    official.graph_edges.push({
+      source: "concept:drift",
+      target: "concept:alpha",
+      type: "related_to",
+      direction: "undirected",
+      scope: "local",
+      weight: 1,
+    });
+    const candidate = base();
+    candidate.book_id = "paper-a-v2";
+    candidate.lid_nodes[1] = { ...candidate.lid_nodes[1], lid: "1.9", path: [1, 9] };
+    candidate.lid_nodes[0] = { ...candidate.lid_nodes[0], children: ["1.9"] };
+    candidate.graph_nodes = [];
+    candidate.graph_edges = [];
+
+    const migrated = migrateHybridFoundationVersionBase(official, candidate, {
+      "1.1": { status: "stable", v2_lid: "1.9" },
+      "1.2": { status: "content_drift", v2_lid: "1.10" },
+    });
+
+    expect(migrated.base.book_id).toBe("paper-a-v2");
+    expect(migrated.base.graph_nodes).toEqual([
+      {
+        id: "concept:alpha",
+        type: "concept",
+        name: "Alpha",
+        occurrences: ["1.9"],
+        source_lid: null,
+      },
+      {
+        id: "claim:1.1:result",
+        type: "claim",
+        name: "Result",
+        occurrences: [],
+        source_lid: "1.9",
+      },
+    ]);
+    expect(migrated.base.graph_edges).toEqual(base().graph_edges);
+    expect(migrated.summary).toEqual({
+      source_node_count: 3,
+      migrated_node_count: 2,
+      dropped_node_count: 1,
+      source_edge_count: 2,
+      migrated_edge_count: 1,
+      dropped_edge_count: 1,
+      stable_anchor_count: 2,
+      content_drift_anchor_count: 1,
+      removed_anchor_count: 0,
+    });
+  });
+
+  it("rejects missing, removed-target, and unknown graph migrations", () => {
+    const candidate = base();
+    candidate.book_id = "paper-a-v2";
+    candidate.graph_nodes = [];
+    candidate.graph_edges = [];
+
+    expect(() => migrateHybridFoundationVersionBase(base(), candidate, {})).toThrow(/migration.*1\.1/i);
+    expect(() => migrateHybridFoundationVersionBase(base(), candidate, {
+      "1.1": { status: "stable", v2_lid: "9.9" },
+    })).toThrow(/candidate LID/i);
+    expect(() => migrateHybridFoundationVersionBase(base(), candidate, {
+      "1.1": { status: "unknown" as "stable", v2_lid: "1.1" },
+    })).toThrow(/status/i);
   });
 });
 

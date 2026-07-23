@@ -221,9 +221,12 @@ PR8_FULL_BOOK_BENCHMARK
 
 ### PR20 - 真书候选重建与原子切换
 
+**状态**：`completed`。reviewed v2 作为独立 sibling book version 发布；旧书、旧图和旧记忆保持只读不变。
+
 - **做**:在隔离目录从 PR10 approved source snapshot 连续重建两次;运行 PR8 全书 audit、Core/Server/Web/Rust 全量回归和真实 PDF.js 选区矩阵。若 source/LID 变化,先验证新基座与 migration map,再通过 existing journal applier 原子切换用户选择的新书版本。
 - **不做**:不直接覆盖当前正式 artifact,不沿用旧 hash 下的总账数字,不因 exact ratio 上升忽略错页、冲突或未分类项。
 - **完成判据**:第 7 节除 Setup 外全部为绿;两次 candidate digest 相同;旧基座/旧记忆仍可读;正式切换后 artifact、manifest、selection shards、semantic graph 和 migration identity 全闭合。
+- **完成证据**:双构建 digest 均为 `cc056062...3e19e9`；PR8 baseline 2,075 / matched 2,075 / current 1,945，missing/unexpected/unknown reason 均为 0。wrong-page/column、formal duplicate region/selection 与 material-mismatch upgrade 均为 0。semantic graph 仅迁移 stable anchor，877/1,003 -> 800/929；旧 artifact/graph digest 发布前后不变。`release-cc056062004a7d8a` journal revision 12 committed 后发布 `understanding-transformer-from-the-perspective-of-reviewed-v2`。Core 69 files / 439 tests、Rust workspace、Server 185、Web 150、Playwright 11 与真实新旧书回放全绿。
 
 ### PR21 - 提交与 Windows Setup 发布
 

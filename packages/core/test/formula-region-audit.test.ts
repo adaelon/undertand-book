@@ -16,12 +16,12 @@ describe("PR15 formula page-column region localization", () => {
     await expect(runFormulaRegionAuditCli([])).rejects.toThrow(/--source requires an explicit path/u);
   });
 
-  it("freezes migrated A007 page-column outcomes without source text", () => {
+  it("freezes final migrated A007 page-column outcomes without source text", () => {
     const reportText = readFileSync(REAL_FORMULA_REGION_AUDIT, "utf8");
     const report = JSON.parse(reportText);
 
     expect(createHash("sha256").update(reportText).digest("hex"))
-      .toBe("df0edd211f49da6b0df54bdd8fbb57f75024685f0e0977548c519708600c4bbd");
+      .toBe("6745cfd046580b395b7590361bc78d8bdc5409e93303a4afa56f545c6a8d5a22");
     expect(report).toMatchObject({
       version: "formula_region_audit.v1",
       policy_version: "pdf_formula_region_policy.v1",
@@ -33,8 +33,8 @@ describe("PR15 formula page-column region localization", () => {
         anchor_lack_count: 27,
         missing_successor_count: 0,
         missing_reviewed_lane_count: 0,
-        reviewed_region_with_geometry_count: 58,
-        anchor_resolved_count: 22,
+        reviewed_region_with_geometry_count: 59,
+        anchor_resolved_count: 21,
         unclassified_count: 0,
         wrong_page_count: 0,
         wrong_column_count: 0,
@@ -42,12 +42,13 @@ describe("PR15 formula page-column region localization", () => {
         geometry_region_selection_assignment_count: 0,
         cross_lane_region_count: 0,
         classification_counts: {
-          downstream_formula_glyph: 6,
+          downstream_binding_conflict: 7,
+          downstream_formula_glyph: 5,
           downstream_unit_locator: 12,
-          existing_display_projection: 9,
-          explicit_structural_ambiguity: 21,
+          existing_display_projection: 34,
+          explicit_structural_ambiguity: 13,
+          glyph_projected: 34,
           reviewed_non_formula: 1,
-          unique_region: 57,
         },
       },
     });

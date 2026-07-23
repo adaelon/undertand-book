@@ -11,8 +11,8 @@
     "anchor_lack_count": 27,
     "missing_successor_count": 0,
     "missing_reviewed_lane_count": 0,
-    "reviewed_region_with_geometry_count": 58,
-    "anchor_resolved_count": 22,
+    "reviewed_region_with_geometry_count": 59,
+    "anchor_resolved_count": 21,
     "unclassified_count": 0,
     "wrong_page_count": 0,
     "wrong_column_count": 0,
@@ -20,29 +20,30 @@
     "geometry_region_selection_assignment_count": 0,
     "cross_lane_region_count": 0,
     "classification_counts": {
-      "downstream_formula_glyph": 6,
+      "downstream_binding_conflict": 7,
+      "downstream_formula_glyph": 5,
       "downstream_unit_locator": 12,
-      "existing_display_projection": 9,
-      "explicit_structural_ambiguity": 21,
-      "reviewed_non_formula": 1,
-      "unique_region": 57
+      "existing_display_projection": 34,
+      "explicit_structural_ambiguity": 13,
+      "glyph_projected": 34,
+      "reviewed_non_formula": 1
     },
     "precision_counts": {
       "char_exact": 1,
-      "partial": 9,
-      "region_exact": 57,
-      "unmapped": 39
+      "partial": 68,
+      "unmapped": 37
     },
     "reason_counts": {
       "alignment unit has ambiguous forward candidates": 2,
       "alignment unit has no exact monotonic candidate": 10,
+      "ambiguous_binding: multiple equal formula region chains": 4,
+      "binding_rejected: formula group has incomplete candidate set": 7,
+      "complete formula glyph projection in unique formula region": 3,
       "complete monotonic character projection inside located unit": 1,
-      "complete simple formula display projection with source-markup gaps": 9,
-      "formula has no unique bounded PDF gap": 6,
-      "formula region candidates do not form a unique monotonic chain": 12,
-      "formula region conflicts with adjacent page-column lanes": 9,
-      "unique formula region bounded by exact same-page same-column text anchors": 44,
-      "unique formula region in one page-column lane": 13
+      "complete simple formula display projection with source-markup gaps": 34,
+      "complete structural formula glyph projection": 31,
+      "formula glyph projection has no complete structural match": 5,
+      "formula region conflicts with adjacent page-column lanes": 9
     }
   },
   "items": [
@@ -51,15 +52,15 @@
       "migration_status": "stable",
       "current_lid": "1.5",
       "category": "reviewed_region",
-      "classification": "unique_region",
+      "classification": "existing_display_projection",
       "expected_page_indexes": [
         0
       ],
       "expected_columns": [
         0
       ],
-      "precision": "region_exact",
-      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "precision": "partial",
+      "reason": "complete simple formula display projection with source-markup gaps",
       "current_page_indexes": [
         0
       ],
@@ -67,7 +68,7 @@
         0
       ],
       "region_count": 1,
-      "selection_assignment_count": 0,
+      "selection_assignment_count": 1,
       "page_matches": true,
       "column_matches": true
     },
@@ -76,15 +77,15 @@
       "migration_status": "stable",
       "current_lid": "1.18.19",
       "category": "anchor_lack",
-      "classification": "unique_region",
+      "classification": "glyph_projected",
       "expected_page_indexes": [
         2
       ],
       "expected_columns": [
         1
       ],
-      "precision": "region_exact",
-      "reason": "unique formula region in one page-column lane",
+      "precision": "partial",
+      "reason": "complete formula glyph projection in unique formula region",
       "current_page_indexes": [
         2
       ],
@@ -92,7 +93,7 @@
         1
       ],
       "region_count": 1,
-      "selection_assignment_count": 0,
+      "selection_assignment_count": 1,
       "page_matches": true,
       "column_matches": true
     },
@@ -101,15 +102,15 @@
       "migration_status": "stable",
       "current_lid": "1.19.18",
       "category": "reviewed_region",
-      "classification": "unique_region",
+      "classification": "glyph_projected",
       "expected_page_indexes": [
         2
       ],
       "expected_columns": [
         0
       ],
-      "precision": "region_exact",
-      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "precision": "partial",
+      "reason": "complete structural formula glyph projection",
       "current_page_indexes": [
         2
       ],
@@ -117,7 +118,7 @@
         0
       ],
       "region_count": 1,
-      "selection_assignment_count": 0,
+      "selection_assignment_count": 5,
       "page_matches": true,
       "column_matches": true
     },
@@ -126,15 +127,15 @@
       "migration_status": "stable",
       "current_lid": "1.19.20",
       "category": "reviewed_region",
-      "classification": "unique_region",
+      "classification": "glyph_projected",
       "expected_page_indexes": [
         2
       ],
       "expected_columns": [
         0
       ],
-      "precision": "region_exact",
-      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "precision": "partial",
+      "reason": "complete structural formula glyph projection",
       "current_page_indexes": [
         2
       ],
@@ -142,7 +143,7 @@
         0
       ],
       "region_count": 1,
-      "selection_assignment_count": 0,
+      "selection_assignment_count": 5,
       "page_matches": true,
       "column_matches": true
     },
@@ -151,15 +152,15 @@
       "migration_status": "stable",
       "current_lid": "1.19.22",
       "category": "reviewed_region",
-      "classification": "unique_region",
+      "classification": "glyph_projected",
       "expected_page_indexes": [
         2
       ],
       "expected_columns": [
         0
       ],
-      "precision": "region_exact",
-      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "precision": "partial",
+      "reason": "complete structural formula glyph projection",
       "current_page_indexes": [
         2
       ],
@@ -167,7 +168,7 @@
         0
       ],
       "region_count": 1,
-      "selection_assignment_count": 0,
+      "selection_assignment_count": 8,
       "page_matches": true,
       "column_matches": true
     },
@@ -184,7 +185,7 @@
         0
       ],
       "precision": "unmapped",
-      "reason": "formula region candidates do not form a unique monotonic chain",
+      "reason": "ambiguous_binding: multiple equal formula region chains",
       "current_page_indexes": [],
       "current_columns": [],
       "region_count": 0,
@@ -197,15 +198,15 @@
       "migration_status": "stable",
       "current_lid": "1.19.71",
       "category": "reviewed_region",
-      "classification": "unique_region",
+      "classification": "existing_display_projection",
       "expected_page_indexes": [
         2
       ],
       "expected_columns": [
         0
       ],
-      "precision": "region_exact",
-      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "precision": "partial",
+      "reason": "complete simple formula display projection with source-markup gaps",
       "current_page_indexes": [
         2
       ],
@@ -213,7 +214,7 @@
         0
       ],
       "region_count": 1,
-      "selection_assignment_count": 0,
+      "selection_assignment_count": 4,
       "page_matches": true,
       "column_matches": true
     },
@@ -222,7 +223,7 @@
       "migration_status": "stable",
       "current_lid": "1.19.81",
       "category": "reviewed_region",
-      "classification": "explicit_structural_ambiguity",
+      "classification": "downstream_binding_conflict",
       "expected_page_indexes": [
         2
       ],
@@ -230,7 +231,7 @@
         1
       ],
       "precision": "unmapped",
-      "reason": "formula region candidates do not form a unique monotonic chain",
+      "reason": "binding_rejected: formula group has incomplete candidate set",
       "current_page_indexes": [],
       "current_columns": [],
       "region_count": 0,
@@ -264,15 +265,15 @@
       "migration_status": "stable",
       "current_lid": "1.19.86.37",
       "category": "reviewed_region",
-      "classification": "unique_region",
+      "classification": "glyph_projected",
       "expected_page_indexes": [
         3
       ],
       "expected_columns": [
         0
       ],
-      "precision": "region_exact",
-      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "precision": "partial",
+      "reason": "complete structural formula glyph projection",
       "current_page_indexes": [
         3
       ],
@@ -280,7 +281,7 @@
         0
       ],
       "region_count": 1,
-      "selection_assignment_count": 0,
+      "selection_assignment_count": 6,
       "page_matches": true,
       "column_matches": true
     },
@@ -289,15 +290,15 @@
       "migration_status": "stable",
       "current_lid": "1.19.86.39",
       "category": "reviewed_region",
-      "classification": "unique_region",
+      "classification": "glyph_projected",
       "expected_page_indexes": [
         3
       ],
       "expected_columns": [
         0
       ],
-      "precision": "region_exact",
-      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "precision": "partial",
+      "reason": "complete structural formula glyph projection",
       "current_page_indexes": [
         3
       ],
@@ -305,7 +306,7 @@
         0
       ],
       "region_count": 1,
-      "selection_assignment_count": 0,
+      "selection_assignment_count": 6,
       "page_matches": true,
       "column_matches": true
     },
@@ -314,15 +315,15 @@
       "migration_status": "stable",
       "current_lid": "1.19.86.53",
       "category": "reviewed_region",
-      "classification": "unique_region",
+      "classification": "glyph_projected",
       "expected_page_indexes": [
         4
       ],
       "expected_columns": [
         1
       ],
-      "precision": "region_exact",
-      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "precision": "partial",
+      "reason": "complete structural formula glyph projection",
       "current_page_indexes": [
         4
       ],
@@ -330,7 +331,7 @@
         1
       ],
       "region_count": 1,
-      "selection_assignment_count": 0,
+      "selection_assignment_count": 4,
       "page_matches": true,
       "column_matches": true
     },
@@ -339,15 +340,15 @@
       "migration_status": "stable",
       "current_lid": "1.19.86.57.8",
       "category": "reviewed_region",
-      "classification": "unique_region",
+      "classification": "glyph_projected",
       "expected_page_indexes": [
         4
       ],
       "expected_columns": [
         0
       ],
-      "precision": "region_exact",
-      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "precision": "partial",
+      "reason": "complete structural formula glyph projection",
       "current_page_indexes": [
         4
       ],
@@ -355,7 +356,7 @@
         0
       ],
       "region_count": 1,
-      "selection_assignment_count": 0,
+      "selection_assignment_count": 15,
       "page_matches": true,
       "column_matches": true
     },
@@ -364,15 +365,15 @@
       "migration_status": "stable",
       "current_lid": "1.19.86.57.20",
       "category": "reviewed_region",
-      "classification": "unique_region",
+      "classification": "existing_display_projection",
       "expected_page_indexes": [
         4
       ],
       "expected_columns": [
         2
       ],
-      "precision": "region_exact",
-      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "precision": "partial",
+      "reason": "complete simple formula display projection with source-markup gaps",
       "current_page_indexes": [
         4
       ],
@@ -380,7 +381,7 @@
         2
       ],
       "region_count": 1,
-      "selection_assignment_count": 0,
+      "selection_assignment_count": 3,
       "page_matches": true,
       "column_matches": true
     },
@@ -389,15 +390,15 @@
       "migration_status": "stable",
       "current_lid": "1.19.86.57.22",
       "category": "reviewed_region",
-      "classification": "unique_region",
+      "classification": "existing_display_projection",
       "expected_page_indexes": [
         4
       ],
       "expected_columns": [
         0
       ],
-      "precision": "region_exact",
-      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "precision": "partial",
+      "reason": "complete simple formula display projection with source-markup gaps",
       "current_page_indexes": [
         4
       ],
@@ -405,7 +406,7 @@
         0
       ],
       "region_count": 1,
-      "selection_assignment_count": 0,
+      "selection_assignment_count": 1,
       "page_matches": true,
       "column_matches": true
     },
@@ -414,15 +415,15 @@
       "migration_status": "stable",
       "current_lid": "1.19.86.57.24",
       "category": "reviewed_region",
-      "classification": "unique_region",
+      "classification": "glyph_projected",
       "expected_page_indexes": [
         4
       ],
       "expected_columns": [
         0
       ],
-      "precision": "region_exact",
-      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "precision": "partial",
+      "reason": "complete structural formula glyph projection",
       "current_page_indexes": [
         4
       ],
@@ -430,7 +431,7 @@
         0
       ],
       "region_count": 1,
-      "selection_assignment_count": 0,
+      "selection_assignment_count": 3,
       "page_matches": true,
       "column_matches": true
     },
@@ -439,15 +440,15 @@
       "migration_status": "stable",
       "current_lid": "1.19.86.57.39",
       "category": "reviewed_region",
-      "classification": "unique_region",
+      "classification": "glyph_projected",
       "expected_page_indexes": [
         5
       ],
       "expected_columns": [
         0
       ],
-      "precision": "region_exact",
-      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "precision": "partial",
+      "reason": "complete structural formula glyph projection",
       "current_page_indexes": [
         5
       ],
@@ -455,7 +456,7 @@
         0
       ],
       "region_count": 1,
-      "selection_assignment_count": 0,
+      "selection_assignment_count": 5,
       "page_matches": true,
       "column_matches": true
     },
@@ -464,15 +465,15 @@
       "migration_status": "stable",
       "current_lid": "1.19.86.57.41",
       "category": "reviewed_region",
-      "classification": "unique_region",
+      "classification": "existing_display_projection",
       "expected_page_indexes": [
         5
       ],
       "expected_columns": [
         0
       ],
-      "precision": "region_exact",
-      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "precision": "partial",
+      "reason": "complete simple formula display projection with source-markup gaps",
       "current_page_indexes": [
         5
       ],
@@ -480,7 +481,7 @@
         0
       ],
       "region_count": 1,
-      "selection_assignment_count": 0,
+      "selection_assignment_count": 1,
       "page_matches": true,
       "column_matches": true
     },
@@ -489,15 +490,15 @@
       "migration_status": "stable",
       "current_lid": "1.19.86.57.51",
       "category": "reviewed_region",
-      "classification": "unique_region",
+      "classification": "glyph_projected",
       "expected_page_indexes": [
         5
       ],
       "expected_columns": [
         0
       ],
-      "precision": "region_exact",
-      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "precision": "partial",
+      "reason": "complete structural formula glyph projection",
       "current_page_indexes": [
         5
       ],
@@ -505,7 +506,7 @@
         0
       ],
       "region_count": 1,
-      "selection_assignment_count": 0,
+      "selection_assignment_count": 8,
       "page_matches": true,
       "column_matches": true
     },
@@ -514,15 +515,15 @@
       "migration_status": "stable",
       "current_lid": "1.19.86.57.53",
       "category": "reviewed_region",
-      "classification": "unique_region",
+      "classification": "glyph_projected",
       "expected_page_indexes": [
         5
       ],
       "expected_columns": [
         0
       ],
-      "precision": "region_exact",
-      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "precision": "partial",
+      "reason": "complete structural formula glyph projection",
       "current_page_indexes": [
         5
       ],
@@ -530,7 +531,7 @@
         0
       ],
       "region_count": 1,
-      "selection_assignment_count": 0,
+      "selection_assignment_count": 5,
       "page_matches": true,
       "column_matches": true
     },
@@ -539,15 +540,15 @@
       "migration_status": "stable",
       "current_lid": "1.19.86.57.58",
       "category": "reviewed_region",
-      "classification": "unique_region",
+      "classification": "existing_display_projection",
       "expected_page_indexes": [
         5
       ],
       "expected_columns": [
         0
       ],
-      "precision": "region_exact",
-      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "precision": "partial",
+      "reason": "complete simple formula display projection with source-markup gaps",
       "current_page_indexes": [
         5
       ],
@@ -555,7 +556,7 @@
         0
       ],
       "region_count": 1,
-      "selection_assignment_count": 0,
+      "selection_assignment_count": 1,
       "page_matches": true,
       "column_matches": true
     },
@@ -564,15 +565,15 @@
       "migration_status": "stable",
       "current_lid": "1.19.86.57.70",
       "category": "reviewed_region",
-      "classification": "unique_region",
+      "classification": "glyph_projected",
       "expected_page_indexes": [
         5
       ],
       "expected_columns": [
         2
       ],
-      "precision": "region_exact",
-      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "precision": "partial",
+      "reason": "complete structural formula glyph projection",
       "current_page_indexes": [
         5
       ],
@@ -580,7 +581,7 @@
         2
       ],
       "region_count": 1,
-      "selection_assignment_count": 0,
+      "selection_assignment_count": 4,
       "page_matches": true,
       "column_matches": true
     },
@@ -610,15 +611,15 @@
       "migration_status": "stable",
       "current_lid": "1.19.86.58.26",
       "category": "reviewed_region",
-      "classification": "unique_region",
+      "classification": "glyph_projected",
       "expected_page_indexes": [
         7
       ],
       "expected_columns": [
         0
       ],
-      "precision": "region_exact",
-      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "precision": "partial",
+      "reason": "complete structural formula glyph projection",
       "current_page_indexes": [
         7
       ],
@@ -626,7 +627,7 @@
         0
       ],
       "region_count": 1,
-      "selection_assignment_count": 0,
+      "selection_assignment_count": 10,
       "page_matches": true,
       "column_matches": true
     },
@@ -635,15 +636,15 @@
       "migration_status": "stable",
       "current_lid": "1.19.86.58.28",
       "category": "anchor_lack",
-      "classification": "unique_region",
+      "classification": "glyph_projected",
       "expected_page_indexes": [
         7
       ],
       "expected_columns": [
         2
       ],
-      "precision": "region_exact",
-      "reason": "unique formula region in one page-column lane",
+      "precision": "partial",
+      "reason": "complete structural formula glyph projection",
       "current_page_indexes": [
         7
       ],
@@ -651,7 +652,7 @@
         2
       ],
       "region_count": 1,
-      "selection_assignment_count": 0,
+      "selection_assignment_count": 25,
       "page_matches": true,
       "column_matches": true
     },
@@ -660,15 +661,15 @@
       "migration_status": "stable",
       "current_lid": "1.19.86.58.29",
       "category": "anchor_lack",
-      "classification": "unique_region",
+      "classification": "glyph_projected",
       "expected_page_indexes": [
         7
       ],
       "expected_columns": [
         2
       ],
-      "precision": "region_exact",
-      "reason": "unique formula region in one page-column lane",
+      "precision": "partial",
+      "reason": "complete structural formula glyph projection",
       "current_page_indexes": [
         7
       ],
@@ -676,7 +677,7 @@
         2
       ],
       "region_count": 1,
-      "selection_assignment_count": 0,
+      "selection_assignment_count": 25,
       "page_matches": true,
       "column_matches": true
     },
@@ -685,15 +686,15 @@
       "migration_status": "stable",
       "current_lid": "1.19.86.58.30",
       "category": "anchor_lack",
-      "classification": "unique_region",
+      "classification": "glyph_projected",
       "expected_page_indexes": [
         7
       ],
       "expected_columns": [
         2
       ],
-      "precision": "region_exact",
-      "reason": "unique formula region in one page-column lane",
+      "precision": "partial",
+      "reason": "complete structural formula glyph projection",
       "current_page_indexes": [
         7
       ],
@@ -701,7 +702,7 @@
         2
       ],
       "region_count": 1,
-      "selection_assignment_count": 0,
+      "selection_assignment_count": 25,
       "page_matches": true,
       "column_matches": true
     },
@@ -710,15 +711,15 @@
       "migration_status": "stable",
       "current_lid": "1.19.86.58.32",
       "category": "anchor_lack",
-      "classification": "unique_region",
+      "classification": "glyph_projected",
       "expected_page_indexes": [
         7
       ],
       "expected_columns": [
         2
       ],
-      "precision": "region_exact",
-      "reason": "unique formula region in one page-column lane",
+      "precision": "partial",
+      "reason": "complete structural formula glyph projection",
       "current_page_indexes": [
         7
       ],
@@ -726,7 +727,7 @@
         2
       ],
       "region_count": 1,
-      "selection_assignment_count": 0,
+      "selection_assignment_count": 27,
       "page_matches": true,
       "column_matches": true
     },
@@ -743,7 +744,7 @@
         0
       ],
       "precision": "unmapped",
-      "reason": "formula region candidates do not form a unique monotonic chain",
+      "reason": "ambiguous_binding: multiple equal formula region chains",
       "current_page_indexes": [],
       "current_columns": [],
       "region_count": 0,
@@ -756,15 +757,15 @@
       "migration_status": "stable",
       "current_lid": "1.19.86.58.75",
       "category": "reviewed_region",
-      "classification": "unique_region",
+      "classification": "existing_display_projection",
       "expected_page_indexes": [
         8
       ],
       "expected_columns": [
         1
       ],
-      "precision": "region_exact",
-      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "precision": "partial",
+      "reason": "complete simple formula display projection with source-markup gaps",
       "current_page_indexes": [
         8
       ],
@@ -772,7 +773,7 @@
         1
       ],
       "region_count": 1,
-      "selection_assignment_count": 0,
+      "selection_assignment_count": 21,
       "page_matches": true,
       "column_matches": true
     },
@@ -781,15 +782,15 @@
       "migration_status": "stable",
       "current_lid": "1.19.86.58.87",
       "category": "reviewed_region",
-      "classification": "unique_region",
+      "classification": "glyph_projected",
       "expected_page_indexes": [
         8
       ],
       "expected_columns": [
         0
       ],
-      "precision": "region_exact",
-      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "precision": "partial",
+      "reason": "complete structural formula glyph projection",
       "current_page_indexes": [
         8
       ],
@@ -797,7 +798,7 @@
         0
       ],
       "region_count": 1,
-      "selection_assignment_count": 0,
+      "selection_assignment_count": 2,
       "page_matches": true,
       "column_matches": true
     },
@@ -806,15 +807,15 @@
       "migration_status": "stable",
       "current_lid": "1.19.87.2",
       "category": "anchor_lack",
-      "classification": "unique_region",
+      "classification": "glyph_projected",
       "expected_page_indexes": [
         9
       ],
       "expected_columns": [
         0
       ],
-      "precision": "region_exact",
-      "reason": "unique formula region in one page-column lane",
+      "precision": "partial",
+      "reason": "complete formula glyph projection in unique formula region",
       "current_page_indexes": [
         9
       ],
@@ -822,7 +823,7 @@
         0
       ],
       "region_count": 1,
-      "selection_assignment_count": 0,
+      "selection_assignment_count": 30,
       "page_matches": true,
       "column_matches": true
     },
@@ -852,15 +853,15 @@
       "migration_status": "stable",
       "current_lid": "1.19.87.20",
       "category": "reviewed_region",
-      "classification": "unique_region",
+      "classification": "existing_display_projection",
       "expected_page_indexes": [
         9
       ],
       "expected_columns": [
         0
       ],
-      "precision": "region_exact",
-      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "precision": "partial",
+      "reason": "complete simple formula display projection with source-markup gaps",
       "current_page_indexes": [
         9
       ],
@@ -868,7 +869,7 @@
         0
       ],
       "region_count": 1,
-      "selection_assignment_count": 0,
+      "selection_assignment_count": 5,
       "page_matches": true,
       "column_matches": true
     },
@@ -898,15 +899,15 @@
       "migration_status": "stable",
       "current_lid": "1.19.87.53",
       "category": "reviewed_region",
-      "classification": "unique_region",
+      "classification": "existing_display_projection",
       "expected_page_indexes": [
         9
       ],
       "expected_columns": [
         0
       ],
-      "precision": "region_exact",
-      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "precision": "partial",
+      "reason": "complete simple formula display projection with source-markup gaps",
       "current_page_indexes": [
         9
       ],
@@ -914,7 +915,7 @@
         0
       ],
       "region_count": 1,
-      "selection_assignment_count": 0,
+      "selection_assignment_count": 5,
       "page_matches": true,
       "column_matches": true
     },
@@ -965,15 +966,15 @@
       "migration_status": "stable",
       "current_lid": "1.19.87.119.19",
       "category": "reviewed_region",
-      "classification": "unique_region",
+      "classification": "existing_display_projection",
       "expected_page_indexes": [
         11
       ],
       "expected_columns": [
         0
       ],
-      "precision": "region_exact",
-      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "precision": "partial",
+      "reason": "complete simple formula display projection with source-markup gaps",
       "current_page_indexes": [
         11
       ],
@@ -981,7 +982,7 @@
         0
       ],
       "region_count": 1,
-      "selection_assignment_count": 0,
+      "selection_assignment_count": 7,
       "page_matches": true,
       "column_matches": true
     },
@@ -1015,15 +1016,15 @@
       "migration_status": "stable",
       "current_lid": "1.19.87.119.60",
       "category": "reviewed_region",
-      "classification": "unique_region",
+      "classification": "glyph_projected",
       "expected_page_indexes": [
         12
       ],
       "expected_columns": [
         0
       ],
-      "precision": "region_exact",
-      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "precision": "partial",
+      "reason": "complete structural formula glyph projection",
       "current_page_indexes": [
         12
       ],
@@ -1031,7 +1032,7 @@
         0
       ],
       "region_count": 1,
-      "selection_assignment_count": 0,
+      "selection_assignment_count": 5,
       "page_matches": true,
       "column_matches": true
     },
@@ -1040,15 +1041,15 @@
       "migration_status": "stable",
       "current_lid": "1.19.87.119.93",
       "category": "anchor_lack",
-      "classification": "unique_region",
+      "classification": "glyph_projected",
       "expected_page_indexes": [
         12
       ],
       "expected_columns": [
         0
       ],
-      "precision": "region_exact",
-      "reason": "unique formula region in one page-column lane",
+      "precision": "partial",
+      "reason": "complete formula glyph projection in unique formula region",
       "current_page_indexes": [
         12
       ],
@@ -1056,7 +1057,7 @@
         0
       ],
       "region_count": 1,
-      "selection_assignment_count": 0,
+      "selection_assignment_count": 22,
       "page_matches": true,
       "column_matches": true
     },
@@ -1065,15 +1066,15 @@
       "migration_status": "stable",
       "current_lid": "1.19.87.119.103",
       "category": "reviewed_region",
-      "classification": "unique_region",
+      "classification": "glyph_projected",
       "expected_page_indexes": [
         12
       ],
       "expected_columns": [
         0
       ],
-      "precision": "region_exact",
-      "reason": "unique formula region in one page-column lane",
+      "precision": "partial",
+      "reason": "complete structural formula glyph projection",
       "current_page_indexes": [
         12
       ],
@@ -1081,7 +1082,7 @@
         0
       ],
       "region_count": 1,
-      "selection_assignment_count": 0,
+      "selection_assignment_count": 7,
       "page_matches": true,
       "column_matches": true
     },
@@ -1090,15 +1091,15 @@
       "migration_status": "stable",
       "current_lid": "1.19.87.119.105",
       "category": "reviewed_region",
-      "classification": "unique_region",
+      "classification": "glyph_projected",
       "expected_page_indexes": [
         12
       ],
       "expected_columns": [
         0
       ],
-      "precision": "region_exact",
-      "reason": "unique formula region in one page-column lane",
+      "precision": "partial",
+      "reason": "complete structural formula glyph projection",
       "current_page_indexes": [
         12
       ],
@@ -1106,7 +1107,7 @@
         0
       ],
       "region_count": 1,
-      "selection_assignment_count": 0,
+      "selection_assignment_count": 7,
       "page_matches": true,
       "column_matches": true
     },
@@ -1115,15 +1116,15 @@
       "migration_status": "stable",
       "current_lid": "1.19.87.119.107",
       "category": "reviewed_region",
-      "classification": "unique_region",
+      "classification": "glyph_projected",
       "expected_page_indexes": [
         12
       ],
       "expected_columns": [
         0
       ],
-      "precision": "region_exact",
-      "reason": "unique formula region in one page-column lane",
+      "precision": "partial",
+      "reason": "complete structural formula glyph projection",
       "current_page_indexes": [
         12
       ],
@@ -1131,7 +1132,7 @@
         0
       ],
       "region_count": 1,
-      "selection_assignment_count": 0,
+      "selection_assignment_count": 2,
       "page_matches": true,
       "column_matches": true
     },
@@ -1140,15 +1141,15 @@
       "migration_status": "stable",
       "current_lid": "1.19.87.119.109",
       "category": "reviewed_region",
-      "classification": "unique_region",
+      "classification": "glyph_projected",
       "expected_page_indexes": [
         12
       ],
       "expected_columns": [
         0
       ],
-      "precision": "region_exact",
-      "reason": "unique formula region in one page-column lane",
+      "precision": "partial",
+      "reason": "complete structural formula glyph projection",
       "current_page_indexes": [
         12
       ],
@@ -1156,7 +1157,7 @@
         0
       ],
       "region_count": 1,
-      "selection_assignment_count": 0,
+      "selection_assignment_count": 2,
       "page_matches": true,
       "column_matches": true
     },
@@ -1165,7 +1166,7 @@
       "migration_status": "stable",
       "current_lid": "1.19.87.119.118",
       "category": "anchor_lack",
-      "classification": "explicit_structural_ambiguity",
+      "classification": "downstream_binding_conflict",
       "expected_page_indexes": [
         12
       ],
@@ -1173,7 +1174,7 @@
         1
       ],
       "precision": "unmapped",
-      "reason": "formula region candidates do not form a unique monotonic chain",
+      "reason": "binding_rejected: formula group has incomplete candidate set",
       "current_page_indexes": [],
       "current_columns": [],
       "region_count": 0,
@@ -1186,7 +1187,7 @@
       "migration_status": "stable",
       "current_lid": "1.19.87.119.122",
       "category": "reviewed_region",
-      "classification": "explicit_structural_ambiguity",
+      "classification": "downstream_binding_conflict",
       "expected_page_indexes": [
         12
       ],
@@ -1194,7 +1195,7 @@
         0
       ],
       "precision": "unmapped",
-      "reason": "formula region candidates do not form a unique monotonic chain",
+      "reason": "binding_rejected: formula group has incomplete candidate set",
       "current_page_indexes": [],
       "current_columns": [],
       "region_count": 0,
@@ -1207,7 +1208,7 @@
       "migration_status": "stable",
       "current_lid": "1.19.87.119.126",
       "category": "reviewed_region",
-      "classification": "explicit_structural_ambiguity",
+      "classification": "downstream_binding_conflict",
       "expected_page_indexes": [
         12
       ],
@@ -1215,7 +1216,7 @@
         0
       ],
       "precision": "unmapped",
-      "reason": "formula region candidates do not form a unique monotonic chain",
+      "reason": "binding_rejected: formula group has incomplete candidate set",
       "current_page_indexes": [],
       "current_columns": [],
       "region_count": 0,
@@ -1228,7 +1229,7 @@
       "migration_status": "stable",
       "current_lid": "1.19.87.119.128",
       "category": "reviewed_region",
-      "classification": "explicit_structural_ambiguity",
+      "classification": "downstream_binding_conflict",
       "expected_page_indexes": [
         12
       ],
@@ -1236,7 +1237,7 @@
         0
       ],
       "precision": "unmapped",
-      "reason": "formula region candidates do not form a unique monotonic chain",
+      "reason": "binding_rejected: formula group has incomplete candidate set",
       "current_page_indexes": [],
       "current_columns": [],
       "region_count": 0,
@@ -1312,15 +1313,15 @@
       "migration_status": "stable",
       "current_lid": "1.19.87.119.206",
       "category": "reviewed_region",
-      "classification": "unique_region",
+      "classification": "existing_display_projection",
       "expected_page_indexes": [
         14
       ],
       "expected_columns": [
         0
       ],
-      "precision": "region_exact",
-      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "precision": "partial",
+      "reason": "complete simple formula display projection with source-markup gaps",
       "current_page_indexes": [
         14
       ],
@@ -1328,7 +1329,7 @@
         0
       ],
       "region_count": 1,
-      "selection_assignment_count": 0,
+      "selection_assignment_count": 3,
       "page_matches": true,
       "column_matches": true
     },
@@ -1395,7 +1396,7 @@
         0
       ],
       "precision": "unmapped",
-      "reason": "formula has no unique bounded PDF gap",
+      "reason": "formula glyph projection has no complete structural match",
       "current_page_indexes": [],
       "current_columns": [],
       "region_count": 0,
@@ -1437,7 +1438,7 @@
         0
       ],
       "precision": "unmapped",
-      "reason": "formula has no unique bounded PDF gap",
+      "reason": "formula glyph projection has no complete structural match",
       "current_page_indexes": [],
       "current_columns": [],
       "region_count": 0,
@@ -1458,7 +1459,7 @@
         0
       ],
       "precision": "unmapped",
-      "reason": "formula has no unique bounded PDF gap",
+      "reason": "formula glyph projection has no complete structural match",
       "current_page_indexes": [],
       "current_columns": [],
       "region_count": 0,
@@ -1479,7 +1480,7 @@
         0
       ],
       "precision": "unmapped",
-      "reason": "formula has no unique bounded PDF gap",
+      "reason": "formula glyph projection has no complete structural match",
       "current_page_indexes": [],
       "current_columns": [],
       "region_count": 0,
@@ -1521,7 +1522,7 @@
         0
       ],
       "precision": "unmapped",
-      "reason": "formula region candidates do not form a unique monotonic chain",
+      "reason": "ambiguous_binding: multiple equal formula region chains",
       "current_page_indexes": [],
       "current_columns": [],
       "region_count": 0,
@@ -1534,36 +1535,40 @@
       "migration_status": "stable",
       "current_lid": "1.20.3.30",
       "category": "reviewed_region",
-      "classification": "explicit_structural_ambiguity",
+      "classification": "glyph_projected",
       "expected_page_indexes": [
         17
       ],
       "expected_columns": [
         0
       ],
-      "precision": "unmapped",
-      "reason": "formula region candidates do not form a unique monotonic chain",
-      "current_page_indexes": [],
-      "current_columns": [],
-      "region_count": 0,
-      "selection_assignment_count": 0,
-      "page_matches": null,
-      "column_matches": null
+      "precision": "partial",
+      "reason": "complete structural formula glyph projection",
+      "current_page_indexes": [
+        17
+      ],
+      "current_columns": [
+        0
+      ],
+      "region_count": 1,
+      "selection_assignment_count": 5,
+      "page_matches": true,
+      "column_matches": true
     },
     {
       "baseline_lid": "1.20.3.40",
       "migration_status": "stable",
       "current_lid": "1.20.3.40",
       "category": "reviewed_region",
-      "classification": "unique_region",
+      "classification": "glyph_projected",
       "expected_page_indexes": [
         18
       ],
       "expected_columns": [
         0
       ],
-      "precision": "region_exact",
-      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "precision": "partial",
+      "reason": "complete structural formula glyph projection",
       "current_page_indexes": [
         18
       ],
@@ -1571,7 +1576,7 @@
         0
       ],
       "region_count": 1,
-      "selection_assignment_count": 0,
+      "selection_assignment_count": 5,
       "page_matches": true,
       "column_matches": true
     },
@@ -1580,15 +1585,15 @@
       "migration_status": "stable",
       "current_lid": "1.20.3.43",
       "category": "reviewed_region",
-      "classification": "unique_region",
+      "classification": "glyph_projected",
       "expected_page_indexes": [
         18
       ],
       "expected_columns": [
         0
       ],
-      "precision": "region_exact",
-      "reason": "unique formula region in one page-column lane",
+      "precision": "partial",
+      "reason": "complete structural formula glyph projection",
       "current_page_indexes": [
         18
       ],
@@ -1596,7 +1601,7 @@
         0
       ],
       "region_count": 1,
-      "selection_assignment_count": 0,
+      "selection_assignment_count": 2,
       "page_matches": true,
       "column_matches": true
     },
@@ -1613,7 +1618,7 @@
         0
       ],
       "precision": "unmapped",
-      "reason": "formula region candidates do not form a unique monotonic chain",
+      "reason": "ambiguous_binding: multiple equal formula region chains",
       "current_page_indexes": [],
       "current_columns": [],
       "region_count": 0,
@@ -1626,15 +1631,15 @@
       "migration_status": "stable",
       "current_lid": "1.20.4.30",
       "category": "reviewed_region",
-      "classification": "unique_region",
+      "classification": "glyph_projected",
       "expected_page_indexes": [
         20
       ],
       "expected_columns": [
         0
       ],
-      "precision": "region_exact",
-      "reason": "unique formula region in one page-column lane",
+      "precision": "partial",
+      "reason": "complete structural formula glyph projection",
       "current_page_indexes": [
         20
       ],
@@ -1642,7 +1647,7 @@
         0
       ],
       "region_count": 1,
-      "selection_assignment_count": 0,
+      "selection_assignment_count": 5,
       "page_matches": true,
       "column_matches": true
     },
@@ -1790,7 +1795,7 @@
       "migration_status": "stable",
       "current_lid": "1.23.41",
       "category": "anchor_lack",
-      "classification": "explicit_structural_ambiguity",
+      "classification": "downstream_binding_conflict",
       "expected_page_indexes": [
         22
       ],
@@ -1798,7 +1803,7 @@
         1
       ],
       "precision": "unmapped",
-      "reason": "formula region candidates do not form a unique monotonic chain",
+      "reason": "binding_rejected: formula group has incomplete candidate set",
       "current_page_indexes": [],
       "current_columns": [],
       "region_count": 0,
@@ -1955,15 +1960,15 @@
       "migration_status": "stable",
       "current_lid": "1.24.2.4",
       "category": "reviewed_region",
-      "classification": "unique_region",
+      "classification": "existing_display_projection",
       "expected_page_indexes": [
         25
       ],
       "expected_columns": [
         0
       ],
-      "precision": "region_exact",
-      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "precision": "partial",
+      "reason": "complete simple formula display projection with source-markup gaps",
       "current_page_indexes": [
         25
       ],
@@ -1971,7 +1976,7 @@
         0
       ],
       "region_count": 1,
-      "selection_assignment_count": 0,
+      "selection_assignment_count": 1,
       "page_matches": true,
       "column_matches": true
     },
@@ -2001,36 +2006,40 @@
       "migration_status": "stable",
       "current_lid": "1.24.6.10",
       "category": "anchor_lack",
-      "classification": "downstream_formula_glyph",
+      "classification": "glyph_projected",
       "expected_page_indexes": [
         30
       ],
       "expected_columns": [
         1
       ],
-      "precision": "unmapped",
-      "reason": "formula has no unique bounded PDF gap",
-      "current_page_indexes": [],
-      "current_columns": [],
-      "region_count": 0,
-      "selection_assignment_count": 0,
-      "page_matches": null,
-      "column_matches": null
+      "precision": "partial",
+      "reason": "complete structural formula glyph projection",
+      "current_page_indexes": [
+        30
+      ],
+      "current_columns": [
+        1
+      ],
+      "region_count": 1,
+      "selection_assignment_count": 11,
+      "page_matches": true,
+      "column_matches": true
     },
     {
       "baseline_lid": "1.24.10.3",
       "migration_status": "stable",
       "current_lid": "1.24.10.3",
       "category": "reviewed_region",
-      "classification": "unique_region",
+      "classification": "glyph_projected",
       "expected_page_indexes": [
         32
       ],
       "expected_columns": [
         0
       ],
-      "precision": "region_exact",
-      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "precision": "partial",
+      "reason": "complete structural formula glyph projection",
       "current_page_indexes": [
         32
       ],
@@ -2038,7 +2047,7 @@
         0
       ],
       "region_count": 1,
-      "selection_assignment_count": 0,
+      "selection_assignment_count": 10,
       "page_matches": true,
       "column_matches": true
     },
@@ -2047,15 +2056,15 @@
       "migration_status": "stable",
       "current_lid": "1.24.10.7",
       "category": "reviewed_region",
-      "classification": "unique_region",
+      "classification": "existing_display_projection",
       "expected_page_indexes": [
         32
       ],
       "expected_columns": [
         0
       ],
-      "precision": "region_exact",
-      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "precision": "partial",
+      "reason": "complete simple formula display projection with source-markup gaps",
       "current_page_indexes": [
         32
       ],
@@ -2063,7 +2072,7 @@
         0
       ],
       "region_count": 1,
-      "selection_assignment_count": 0,
+      "selection_assignment_count": 3,
       "page_matches": true,
       "column_matches": true
     },
@@ -2072,15 +2081,15 @@
       "migration_status": "stable",
       "current_lid": "1.24.12.5",
       "category": "reviewed_region",
-      "classification": "unique_region",
+      "classification": "existing_display_projection",
       "expected_page_indexes": [
         35
       ],
       "expected_columns": [
         0
       ],
-      "precision": "region_exact",
-      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "precision": "partial",
+      "reason": "complete simple formula display projection with source-markup gaps",
       "current_page_indexes": [
         35
       ],
@@ -2088,7 +2097,7 @@
         0
       ],
       "region_count": 1,
-      "selection_assignment_count": 0,
+      "selection_assignment_count": 6,
       "page_matches": true,
       "column_matches": true
     },
@@ -2181,15 +2190,15 @@
       "migration_status": "stable",
       "current_lid": "1.24.13.10",
       "category": "reviewed_region",
-      "classification": "unique_region",
+      "classification": "existing_display_projection",
       "expected_page_indexes": [
         36
       ],
       "expected_columns": [
         0
       ],
-      "precision": "region_exact",
-      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "precision": "partial",
+      "reason": "complete simple formula display projection with source-markup gaps",
       "current_page_indexes": [
         36
       ],
@@ -2197,7 +2206,7 @@
         0
       ],
       "region_count": 1,
-      "selection_assignment_count": 0,
+      "selection_assignment_count": 4,
       "page_matches": true,
       "column_matches": true
     },
@@ -2206,15 +2215,15 @@
       "migration_status": "stable",
       "current_lid": "1.24.14.4",
       "category": "reviewed_region",
-      "classification": "unique_region",
+      "classification": "existing_display_projection",
       "expected_page_indexes": [
         36
       ],
       "expected_columns": [
         1
       ],
-      "precision": "region_exact",
-      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "precision": "partial",
+      "reason": "complete simple formula display projection with source-markup gaps",
       "current_page_indexes": [
         36
       ],
@@ -2222,7 +2231,7 @@
         1
       ],
       "region_count": 1,
-      "selection_assignment_count": 0,
+      "selection_assignment_count": 5,
       "page_matches": true,
       "column_matches": true
     },
@@ -2231,7 +2240,7 @@
       "migration_status": "stable",
       "current_lid": "1.24.16.20",
       "category": "reviewed_region",
-      "classification": "explicit_structural_ambiguity",
+      "classification": "downstream_binding_conflict",
       "expected_page_indexes": [
         38
       ],
@@ -2239,7 +2248,7 @@
         0
       ],
       "precision": "unmapped",
-      "reason": "formula region candidates do not form a unique monotonic chain",
+      "reason": "binding_rejected: formula group has incomplete candidate set",
       "current_page_indexes": [],
       "current_columns": [],
       "region_count": 0,
@@ -2252,15 +2261,15 @@
       "migration_status": "stable",
       "current_lid": "1.24.16.29",
       "category": "reviewed_region",
-      "classification": "unique_region",
+      "classification": "existing_display_projection",
       "expected_page_indexes": [
         38
       ],
       "expected_columns": [
         0
       ],
-      "precision": "region_exact",
-      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "precision": "partial",
+      "reason": "complete simple formula display projection with source-markup gaps",
       "current_page_indexes": [
         38
       ],
@@ -2268,7 +2277,7 @@
         0
       ],
       "region_count": 1,
-      "selection_assignment_count": 0,
+      "selection_assignment_count": 4,
       "page_matches": true,
       "column_matches": true
     },
@@ -2277,15 +2286,15 @@
       "migration_status": "stable",
       "current_lid": "1.24.16.31",
       "category": "reviewed_region",
-      "classification": "unique_region",
+      "classification": "existing_display_projection",
       "expected_page_indexes": [
         38
       ],
       "expected_columns": [
         0
       ],
-      "precision": "region_exact",
-      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "precision": "partial",
+      "reason": "complete simple formula display projection with source-markup gaps",
       "current_page_indexes": [
         38
       ],
@@ -2293,7 +2302,7 @@
         0
       ],
       "region_count": 1,
-      "selection_assignment_count": 0,
+      "selection_assignment_count": 8,
       "page_matches": true,
       "column_matches": true
     },
@@ -2302,15 +2311,15 @@
       "migration_status": "stable",
       "current_lid": "1.24.16.72",
       "category": "reviewed_region",
-      "classification": "unique_region",
+      "classification": "glyph_projected",
       "expected_page_indexes": [
         39
       ],
       "expected_columns": [
         0
       ],
-      "precision": "region_exact",
-      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "precision": "partial",
+      "reason": "complete structural formula glyph projection",
       "current_page_indexes": [
         39
       ],
@@ -2318,7 +2327,7 @@
         0
       ],
       "region_count": 1,
-      "selection_assignment_count": 0,
+      "selection_assignment_count": 2,
       "page_matches": true,
       "column_matches": true
     },
@@ -2327,15 +2336,15 @@
       "migration_status": "stable",
       "current_lid": "1.24.16.74",
       "category": "reviewed_region",
-      "classification": "unique_region",
+      "classification": "glyph_projected",
       "expected_page_indexes": [
         39
       ],
       "expected_columns": [
         0
       ],
-      "precision": "region_exact",
-      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "precision": "partial",
+      "reason": "complete structural formula glyph projection",
       "current_page_indexes": [
         39
       ],
@@ -2343,7 +2352,7 @@
         0
       ],
       "region_count": 1,
-      "selection_assignment_count": 0,
+      "selection_assignment_count": 2,
       "page_matches": true,
       "column_matches": true
     },
@@ -2352,15 +2361,15 @@
       "migration_status": "stable",
       "current_lid": "1.24.16.81",
       "category": "reviewed_region",
-      "classification": "unique_region",
+      "classification": "existing_display_projection",
       "expected_page_indexes": [
         39
       ],
       "expected_columns": [
         0
       ],
-      "precision": "region_exact",
-      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "precision": "partial",
+      "reason": "complete simple formula display projection with source-markup gaps",
       "current_page_indexes": [
         39
       ],
@@ -2368,7 +2377,7 @@
         0
       ],
       "region_count": 1,
-      "selection_assignment_count": 0,
+      "selection_assignment_count": 9,
       "page_matches": true,
       "column_matches": true
     },
@@ -2377,15 +2386,15 @@
       "migration_status": "stable",
       "current_lid": "1.24.17.7",
       "category": "reviewed_region",
-      "classification": "unique_region",
+      "classification": "existing_display_projection",
       "expected_page_indexes": [
         39
       ],
       "expected_columns": [
         0
       ],
-      "precision": "region_exact",
-      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "precision": "partial",
+      "reason": "complete simple formula display projection with source-markup gaps",
       "current_page_indexes": [
         39
       ],
@@ -2393,7 +2402,7 @@
         0
       ],
       "region_count": 1,
-      "selection_assignment_count": 0,
+      "selection_assignment_count": 9,
       "page_matches": true,
       "column_matches": true
     },
@@ -2402,15 +2411,15 @@
       "migration_status": "stable",
       "current_lid": "1.24.17.11",
       "category": "reviewed_region",
-      "classification": "unique_region",
+      "classification": "existing_display_projection",
       "expected_page_indexes": [
         39
       ],
       "expected_columns": [
         0
       ],
-      "precision": "region_exact",
-      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "precision": "partial",
+      "reason": "complete simple formula display projection with source-markup gaps",
       "current_page_indexes": [
         39
       ],
@@ -2418,7 +2427,7 @@
         0
       ],
       "region_count": 1,
-      "selection_assignment_count": 0,
+      "selection_assignment_count": 8,
       "page_matches": true,
       "column_matches": true
     },
@@ -2427,15 +2436,15 @@
       "migration_status": "stable",
       "current_lid": "1.24.17.24",
       "category": "reviewed_region",
-      "classification": "unique_region",
+      "classification": "existing_display_projection",
       "expected_page_indexes": [
         39
       ],
       "expected_columns": [
         0
       ],
-      "precision": "region_exact",
-      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "precision": "partial",
+      "reason": "complete simple formula display projection with source-markup gaps",
       "current_page_indexes": [
         39
       ],
@@ -2443,7 +2452,7 @@
         0
       ],
       "region_count": 1,
-      "selection_assignment_count": 0,
+      "selection_assignment_count": 8,
       "page_matches": true,
       "column_matches": true
     },
@@ -2452,15 +2461,15 @@
       "migration_status": "stable",
       "current_lid": "1.24.17.28",
       "category": "reviewed_region",
-      "classification": "unique_region",
+      "classification": "existing_display_projection",
       "expected_page_indexes": [
         39
       ],
       "expected_columns": [
         0
       ],
-      "precision": "region_exact",
-      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "precision": "partial",
+      "reason": "complete simple formula display projection with source-markup gaps",
       "current_page_indexes": [
         39
       ],
@@ -2468,7 +2477,7 @@
         0
       ],
       "region_count": 1,
-      "selection_assignment_count": 0,
+      "selection_assignment_count": 4,
       "page_matches": true,
       "column_matches": true
     },
@@ -2477,15 +2486,15 @@
       "migration_status": "stable",
       "current_lid": "1.24.17.30",
       "category": "reviewed_region",
-      "classification": "unique_region",
+      "classification": "existing_display_projection",
       "expected_page_indexes": [
         39
       ],
       "expected_columns": [
         0
       ],
-      "precision": "region_exact",
-      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "precision": "partial",
+      "reason": "complete simple formula display projection with source-markup gaps",
       "current_page_indexes": [
         39
       ],
@@ -2493,7 +2502,7 @@
         0
       ],
       "region_count": 1,
-      "selection_assignment_count": 0,
+      "selection_assignment_count": 3,
       "page_matches": true,
       "column_matches": true
     },
@@ -2510,7 +2519,7 @@
         0
       ],
       "precision": "unmapped",
-      "reason": "formula has no unique bounded PDF gap",
+      "reason": "formula glyph projection has no complete structural match",
       "current_page_indexes": [],
       "current_columns": [],
       "region_count": 0,
@@ -2523,15 +2532,15 @@
       "migration_status": "stable",
       "current_lid": "1.24.19.22",
       "category": "reviewed_region",
-      "classification": "unique_region",
+      "classification": "existing_display_projection",
       "expected_page_indexes": [
         45
       ],
       "expected_columns": [
         0
       ],
-      "precision": "region_exact",
-      "reason": "unique formula region bounded by exact same-page same-column text anchors",
+      "precision": "partial",
+      "reason": "complete simple formula display projection with source-markup gaps",
       "current_page_indexes": [
         45
       ],
@@ -2539,7 +2548,7 @@
         0
       ],
       "region_count": 1,
-      "selection_assignment_count": 0,
+      "selection_assignment_count": 5,
       "page_matches": true,
       "column_matches": true
     }

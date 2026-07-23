@@ -184,3 +184,17 @@ Extends: ADR-0074 and ADR-0082.
 - Web 按 raw quote、coverage 或诊断文案自行开放动作：citation/annotation 能力必须由 Server canonical evidence 决定。
 
 **命门**:多字符 assignment、catalog/display 漂移、缺任一中间非空白 glyph、变量/运算符替换、边界空白差异、source target 缺 terminal glyph、无 source assignment 和 ambiguity 均 fail-closed。单侧 raw/canonical 空白只有位于已证明 glyph chain 内部才可视为 layout whitespace；正式书发布仍必须通过 PR20 双重候选重建与原子切换。
+
+### §15 Reviewed source 的独立书版本发布
+
+**修订**:2026-07-23 规定 PR10 reviewed source 只能发布为独立 `book_id` 的 sibling directory；旧书不做 in-place source/LID 升级。
+
+**决策**:发布门必须先校验 review report 与 old/approved source、old/approved base、PDF、migration map 的内容 hash，在同一固定 config 下构建两个候选并要求完整 artifact-set digest 相同。PR8 baseline/current coverage、PR11-PR18 owner audits、已知 projection reason 集、wrong page/column、duplicate owner 和 material mismatch upgrade 必须全部闭合。语义图仅按显式 `stable` migration 移动 occurrence/source anchor；`content_drift` 与 `removed` 留在旧版本，不按相似文本或最近 LID 猜迁。候选先经既有 lock + revision journal applier 在隐藏 sibling staging 中组成完整集合，验证后才 rename 为新书目录。
+
+**否决**:
+- 直接覆盖旧书 source/base/maps：会让旧记忆、citation 和 semantic graph 的 `book_id + LID` identity 失真。
+- 把 `content_drift` 或 removed anchor 迁到最近 successor：文字或位置相近不证明同一语义声明。
+- 只比较质量比例或一次构建成功就发布：比例上升不能发现非确定性、错页、冲突和新增未分类 reason。
+- 绕过 journal applier 逐文件复制正式 artifact：进程中断会暴露混合版本，且丢失可恢复 transaction evidence。
+
+**命门**:新旧 `book_id` 相同、任一旧图 anchor 缺显式 migration、stable target 不存在、候选图预带内容、双 digest 不同、coverage/reason/owner/mismatch 任一失败或 staged support hash 不符时都必须在目录 rename 前中止。已存在的新版本目录只在完整验证且 digest 与候选相同时允许幂等返回。

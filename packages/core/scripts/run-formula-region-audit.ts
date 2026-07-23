@@ -22,6 +22,15 @@ const STRUCTURAL_AMBIGUITY_REASONS = new Set([
   "formula region candidates do not form a unique monotonic chain",
   "formula signature crosses page-column lanes",
   "formula region conflicts with adjacent page-column lanes",
+  "ambiguous_binding: multiple equal formula region chains",
+]);
+const GLYPH_PROJECTED_REASONS = new Set([
+  "complete formula glyph projection in unique formula region",
+  "complete structural formula glyph projection",
+]);
+const DOWNSTREAM_FORMULA_GLYPH_REASONS = new Set([
+  "formula has no unique bounded PDF gap",
+  "formula glyph projection has no complete structural match",
 ]);
 
 function requiredPath(args: string[], name: string): string {
@@ -147,8 +156,16 @@ export async function runFormulaRegionAuditCli(args: string[]) {
             ].includes(projection.alignment.reason)
             ? "downstream_unit_locator"
             : projection.precision === "unmapped"
-                && projection.alignment.reason === "formula has no unique bounded PDF gap"
+                && DOWNSTREAM_FORMULA_GLYPH_REASONS.has(projection.alignment.reason)
               ? "downstream_formula_glyph"
+              : projection.precision === "unmapped"
+                  && projection.alignment.reason === "binding_rejected: formula group has incomplete candidate set"
+                ? "downstream_binding_conflict"
+                : projection.precision === "partial"
+                    && GLYPH_PROJECTED_REASONS.has(projection.alignment.reason)
+                    && projection.regions.length
+                    && currentLanes.length === 1
+                  ? "glyph_projected"
               : projection.precision === "partial"
                   && projection.alignment.reason === "complete simple formula display projection with source-markup gaps"
                   && projection.regions.length
@@ -158,7 +175,8 @@ export async function runFormulaRegionAuditCli(args: string[]) {
             ? "unique_region"
             : "unclassified";
     const hasComparableFormulaRegion = classification === "unique_region"
-      || classification === "existing_display_projection";
+      || classification === "existing_display_projection"
+      || classification === "glyph_projected";
     return {
       baseline_lid: leaf.baseline_lid,
       migration_status: migration?.status ?? "direct",
@@ -201,16 +219,19 @@ export async function runFormulaRegionAuditCli(args: string[]) {
   const unclassifiedCount = items.filter((item) => ![
     "unique_region",
     "existing_display_projection",
+    "glyph_projected",
     "explicit_structural_ambiguity",
     "downstream_unit_locator",
     "downstream_formula_glyph",
+    "downstream_binding_conflict",
     "reviewed_non_formula",
   ].includes(item.classification)).length;
   const reviewedRegionWithGeometryCount = regionItems.filter((item) => [
-    "unique_region", "existing_display_projection",
+    "unique_region", "existing_display_projection", "glyph_projected",
   ].includes(item.classification)).length;
   const anchorResolvedCount = anchorItems.filter((item) => [
-    "unique_region", "existing_display_projection", "explicit_structural_ambiguity", "reviewed_non_formula",
+    "unique_region", "existing_display_projection", "glyph_projected", "explicit_structural_ambiguity",
+    "reviewed_non_formula",
   ].includes(item.classification)).length;
   const report = {
     version: "formula_region_audit.v1",

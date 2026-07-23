@@ -461,6 +461,99 @@ export function semanticGraphDigest(base: ReadOnlyBase): string {
     .digest("hex");
 }
 
+export interface HybridFoundationVersionMigration {
+  status: "stable" | "content_drift" | "removed";
+  v2_lid?: string;
+}
+
+export type HybridFoundationVersionMigrationMap = Record<string, HybridFoundationVersionMigration>;
+
+export interface HybridFoundationVersionGraphMigrationSummary {
+  source_node_count: number;
+  migrated_node_count: number;
+  dropped_node_count: number;
+  source_edge_count: number;
+  migrated_edge_count: number;
+  dropped_edge_count: number;
+  stable_anchor_count: number;
+  content_drift_anchor_count: number;
+  removed_anchor_count: number;
+}
+
+export function migrateHybridFoundationVersionBase(
+  official: ReadOnlyBase,
+  candidate: ReadOnlyBase,
+  migrationMap: HybridFoundationVersionMigrationMap,
+): { base: ReadOnlyBase; summary: HybridFoundationVersionGraphMigrationSummary } {
+  if (official.book_id === candidate.book_id) {
+    throw new Error("hybrid foundation version migration requires an independent book id");
+  }
+  if (candidate.graph_nodes.length || candidate.graph_edges.length) {
+    throw new Error("hybrid foundation version candidate must not contain an unaudited semantic graph");
+  }
+  const candidateLids = new Set(candidate.lid_nodes.map((node) => node.lid));
+  if (candidateLids.size !== candidate.lid_nodes.length) {
+    throw new Error("candidate LID identity contains duplicates");
+  }
+  let stableAnchorCount = 0;
+  let contentDriftAnchorCount = 0;
+  let removedAnchorCount = 0;
+  const migrateAnchor = (lid: string): string | null => {
+    const migration = migrationMap[lid];
+    if (!migration) throw new Error(`semantic graph migration is missing for ${lid}`);
+    if (migration.status === "content_drift") {
+      contentDriftAnchorCount += 1;
+      return null;
+    }
+    if (migration.status === "removed") {
+      removedAnchorCount += 1;
+      return null;
+    }
+    if (migration.status !== "stable") {
+      throw new Error(`semantic graph migration has unknown status for ${lid}`);
+    }
+    if (!migration.v2_lid || !candidateLids.has(migration.v2_lid)) {
+      throw new Error(`stable semantic graph migration targets an unknown candidate LID: ${lid}`);
+    }
+    stableAnchorCount += 1;
+    return migration.v2_lid;
+  };
+
+  const graphNodes = official.graph_nodes.flatMap((node) => {
+    const occurrences = [...new Set(node.occurrences.flatMap((lid) => {
+      const migrated = migrateAnchor(lid);
+      return migrated ? [migrated] : [];
+    }))];
+    const sourceLid = node.source_lid ? migrateAnchor(node.source_lid) : null;
+    if (node.type === "claim" ? !sourceLid : occurrences.length === 0) return [];
+    return [{ ...node, occurrences, source_lid: sourceLid }];
+  });
+  const graphNodeIds = new Set(graphNodes.map((node) => node.id));
+  const graphEdges = official.graph_edges.filter((edge) => (
+    graphNodeIds.has(edge.source) && graphNodeIds.has(edge.target)
+  ));
+  const base = ReadOnlyBaseZ.parse({
+    ...candidate,
+    graph_nodes: graphNodes,
+    graph_edges: graphEdges,
+  });
+  validateSemanticGraph(base, candidateLids);
+  return {
+    base,
+    summary: {
+      source_node_count: official.graph_nodes.length,
+      migrated_node_count: graphNodes.length,
+      dropped_node_count: official.graph_nodes.length - graphNodes.length,
+      source_edge_count: official.graph_edges.length,
+      migrated_edge_count: graphEdges.length,
+      dropped_edge_count: official.graph_edges.length - graphEdges.length,
+      stable_anchor_count: stableAnchorCount,
+      content_drift_anchor_count: contentDriftAnchorCount,
+      removed_anchor_count: removedAnchorCount,
+    },
+  };
+}
+
 export function validateSemanticGraph(base: ReadOnlyBase, candidateLids: Set<string>): void {
   const graphIds = new Set<string>();
   for (const node of base.graph_nodes) {
