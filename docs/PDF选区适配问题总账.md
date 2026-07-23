@@ -10,7 +10,7 @@
 
 ## 2. PDF-A001 `\underline` 包装的普通文本被当作不可恢复公式
 
-**状态**：`source-ast-classified`；46 个 successor 已有透明 wrapper token/source span，几何和正式选区闭合等待 PR15/PR16/PR20。
+**状态**：`candidate-round-trip-closed`；46 个 successor 已有透明 wrapper token/source span，PR19 隔离候选已闭合真实 resolve/project，正式 artifact 切换等待 PR20。
 
 **用户选区**：
 
@@ -48,6 +48,8 @@ Inspired by the discussion above,  $ \underline{\text{can we propose a new assoc
 **修复边界**：不能只把 `underline` 追加到字符串白名单后宣告完成。应把“保持可见字符序列的透明排版 wrapper”与“改变语义/生成 glyph 的数学命令”分层；前者只有在括号闭合、整段 glyph 唯一单调匹配、完整选择和反向投影均成立时才可 recovered。缺字符、变量改变、部分 wrapper 选择、嵌套边界损坏仍须 `partial`。
 
 **必须回归**：本条完整选区；`\underline{\text{...}}` 多行与单行；仅选择问句中部；PDF 少一个字符；source 改一个单词；嵌套 `\textit`；未闭合花括号；包含真正数学变换的 wrapper。
+
+**PR19 候选回放**：approved source SHA-256 `feb442870b9364e578c22b210b1ac6ed9ce098f59bd39ceb07806c741715af43` 与原 PDF SHA-256 `9391b89821c97dd14e66937fd71d22bfcfc72357f8023daddc6fc6334c68b9b0` 在隔离目录重建。A001 successor `1.19.87.119.24/.25/.26` 上，完整用户句跨 text/formula/text 选择为 `resolved/recovered`；wrapper 中段 source `47461-47522` 同样 resolved；两者保存后 project 均为 `exact`、`covered_range == range` 且存在 terminal glyph。复杂公式 `1.19.73` 的 `ϕ(k)⊤ϕ(q)` 子范围 source `10880-10927` 亦完成同一往返。该证据只证明 PR19 runtime 闭环，正式目录仍保留旧 artifact，不能提前沿用候选计数或标为最终 `fixed`。
 
 ## 3. 全书审计基线
 
@@ -133,7 +135,7 @@ Inspired by the discussion above,  $ \underline{\text{can we propose a new assoc
 
 ## 7. PDF-A003 标点和 glyph 表示未覆盖
 
-**状态**：`implementation-classified`；28 个标点项已逐项进入 accepted representation / material punctuation / reviewed removal，正式发布等待 PR19/PR20。
+**状态**：`implementation-classified`；28 个标点项已逐项进入 accepted representation / material punctuation / reviewed removal，PR19 运行时能力已闭合，正式发布等待 PR20。
 
 28 个 paragraph 的 source exact spans 缺口只含标点/符号，常见为 ASCII apostrophe 对 PDF 弯引号、ASCII hyphen 对 en dash、冒号/句点缺 hit，以及代码字符串引号/括号。它们不能合并成一个“忽略标点”规则：词内 apostrophe、负号、范围 dash、代码引号的语义不同。
 
@@ -343,6 +345,7 @@ PR10 migration 与 PR16 结构 glyph 后，11 项已分为 3 个唯一公式 own
 | child/公式投影 | `packages/core/src/hybrid-alignment-v2.ts::projectHybridAlignmentChildren` |
 | 透明公式命令门 | `packages/core/src/hybrid-alignment-v2.ts::formulaSourceCharacterKeys` |
 | 完整公式恢复门 | `crates/server/src/lib.rs::complete_formula_representations` |
+| 公式 assignment catalog | `crates/server/src/lib.rs::formula_assignment_catalog_for_hits` |
 | partial 判定 | `crates/server/src/lib.rs::v2_selection_has_degraded_precision` |
 
 ## 18. 审计限制
@@ -454,3 +457,13 @@ PR10 migration 与 PR16 结构 glyph 后，11 项已分为 3 个唯一公式 own
 - image projection 只产生 `region_exact` 或 `unmapped`，始终 `selection_assignments=[]`、`exact_source_spans=[]`。image-only unit 不进入 text `unit_location_ratio` 与 location reason 分母，另以 `image_only_unit_count` 诊断；正文 selection shard 在插图前后保持相同 glyph 序列。
 - approved source/PDF 的 19 个 image 全部 `asset_region_exact`：6 anchor-window、12 caption、1 neighboring-asset gap。A010 migration 精确得到 19 image；0 unclassified/invalid、0 duplicate object ownership、0 wrong page/column、0 selection assignment/exact span、0 旧 `alignment unit has no searchable tokens` projection reason。
 - 无正文报告三跑均为 22,203 bytes，SHA-256 `f5901ac38244bc46676017de583b9bdbd311dc981f6c1487a5411495bbc2298b`。image XObject、vector Form、row-order jitter、重复对象、caption-only、无对象、跨页与 quality/selection 隔离均有先红后绿 fixture；策略进入 V2 map/report config hash，Core 拒绝漂移，Server 拒绝显式未知版本并兼容历史缺字段 V2。Core 全量 67 files / 431 tests、typecheck，Server 182+5 tests、Rust fmt 与 offline frozen install 全绿；正式 source/base/maps/selection shards 未修改。
+
+## 29. PR19 可见选区 Resolve/Project 闭环
+
+**PR 状态**:`completed`；Server/Web 对 approved candidate 的可见范围往返已闭合。正式书仍使用旧 artifact，A001-A011 只有 PR20 原子切换与全书发布门通过后才能更新为最终 `fixed | intentional`。
+
+- `complete_formula_representations` 不再要求整式选择，而是用同一 LID 的完整 selection-shard assignment catalog 验证 display text、glyph identity、source 顺序及中间非空白字符，再按非空白 ordinal 重建连续子公式的 canonical source span；任一 glyph 多字符、缺中间 glyph、变量替换或 catalog/display 不一致均拒绝。
+- resolve 与 project 都通过 `formula_assignment_catalog_for_hits` 消费同一 assignment 证据。只有完整覆盖 canonical target 且最后一个 source 字符有对应 glyph 时 project 才返回 `exact` 和 terminal rect；不使用 region overlap、source-map fallback 或 Web 侧猜测。
+- recovery 仅补充“raw 或 canonical 单侧存在的内部布局空白”；边界空白、内容/顺序变化及 terminal 缺口继续 fail-closed。Server 诊断稳定为 `material_or_ambiguous | insufficient_visible_evidence | no_source_glyph`，Web 只据 `resolved | partial | unresolved` 与该诊断决定动作和短状态文案。
+- 隔离候选真实回放覆盖 A001 完整跨表示句、wrapper 中段、复杂公式子范围；三者 resolve 均 `resolved/recovered`，project 全部 `exact`、range 全覆盖、terminal glyph 存在。强制缺字、变量替换、缺 terminal 与无 source glyph 仍受限。
+- 验证：Server 全量 185 tests，真实候选环境测试 1/1，Memory selection-context 6 tests，Web 26 files / 150 tests、typecheck/production build，PDF.js Playwright 11 tests（desktop + 390px）及 Rust fmt 全绿。截图 `docs/screenshots/hf2-reader-partial-mobile.png` 复核状态和动作无重叠。

@@ -2137,6 +2137,7 @@ const pdfSelectionState = pdfSelectionSession.state;
 const pdfSelectionTranslationState = pdfSelectionTranslation.state;
 const pdfSelectionCapabilities = computed(() => getPdfSelectionCapabilities(
   pdfSelectionState.value.draft?.status ?? "unresolved",
+  pdfSelectionState.value.draft?.diagnostic,
 ));
 const showPdfTranslationSettings = computed(() =>
   desktopHost.value

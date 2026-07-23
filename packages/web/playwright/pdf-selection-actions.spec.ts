@@ -230,6 +230,7 @@ async function installApiFixture(
       }
       return json(route, {
         status: resolveStatus,
+        ...(resolveStatus === "partial" ? { diagnostic: "material_or_ambiguous" } : {}),
         ...(resolutionBasis ? {
           resolution_basis: resolutionBasis,
           ...(resolutionBasis === "recovered" ? {
@@ -507,7 +508,7 @@ test("partial mobile selection hides persistence actions but keeps exact-subrang
   await expect(quality).toContainText("66.3%");
   await selectFixtureText(page, 0, 10);
   const toolbar = page.locator(".pdf-selection-toolbar");
-  await expect(toolbar).toContainText("部分定位，仅精确子区间可用于问 AI");
+  await expect(toolbar).toContainText("存在缺字或歧义");
   await expect(toolbar.getByTitle("高亮")).toHaveCount(0);
   await expect(toolbar.getByTitle("笔记")).toHaveCount(0);
   await expect(toolbar.getByTitle("问 AI")).toBeEnabled();

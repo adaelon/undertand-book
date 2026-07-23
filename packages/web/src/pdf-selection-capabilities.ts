@@ -1,3 +1,5 @@
+import type { PdfSelectionDiagnostic } from "./api";
+
 export type PdfSelectionCapabilityStatus = "resolved" | "partial" | "unresolved";
 
 export interface PdfSelectionCapabilities {
@@ -9,7 +11,10 @@ export interface PdfSelectionCapabilities {
   statusLabel: string | null;
 }
 
-export function pdfSelectionCapabilities(status: PdfSelectionCapabilityStatus): PdfSelectionCapabilities {
+export function pdfSelectionCapabilities(
+  status: PdfSelectionCapabilityStatus,
+  diagnostic?: PdfSelectionDiagnostic,
+): PdfSelectionCapabilities {
   if (status === "resolved") {
     return {
       canHighlight: true,
@@ -27,7 +32,11 @@ export function pdfSelectionCapabilities(status: PdfSelectionCapabilityStatus): 
       canAsk: true,
       canTranslate: true,
       nativeCopyOnly: false,
-      statusLabel: "部分定位，仅精确子区间可用于问 AI",
+      statusLabel: diagnostic === "material_or_ambiguous"
+        ? "存在缺字或歧义"
+        : diagnostic === "insufficient_visible_evidence"
+          ? "选区证据不足"
+          : "部分定位，仅精确子区间可用于问 AI",
     };
   }
   return {

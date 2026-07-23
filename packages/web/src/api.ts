@@ -153,6 +153,10 @@ export type PdfSelectionRecoveryDifference =
 export type PdfSelectionRecoveryPolicyVersion =
   | "pdf_selection_recovery.v1"
   | "pdf_selection_recovery.v2";
+export type PdfSelectionDiagnostic =
+  | "material_or_ambiguous"
+  | "insufficient_visible_evidence"
+  | "no_source_glyph";
 export interface SelectedRange {
   lid: string;
   range: TextRange;
@@ -315,6 +319,7 @@ export interface PdfSourceMapV2 extends PdfSourceMapBase {
 export type PdfSourceMap = PdfSourceMapV1 | PdfSourceMapV2;
 export interface PdfSelectionResolveResponse {
   status: "resolved" | "partial" | "unresolved";
+  diagnostic?: PdfSelectionDiagnostic;
   resolution_basis?: SelectionResolutionBasis;
   recovery_policy_version?: PdfSelectionRecoveryPolicyVersion;
   recovered_differences?: PdfSelectionRecoveryDifference[];
@@ -337,6 +342,7 @@ export interface PdfRangesProjectResponse {
     lid: string;
     range: TextRange;
     status: "exact" | "partial" | "unmapped";
+    diagnostic?: PdfSelectionDiagnostic;
     resolution_basis?: SelectionResolutionBasis;
     recovery_policy_version?: PdfSelectionRecoveryPolicyVersion;
     recovered_differences?: PdfSelectionRecoveryDifference[];

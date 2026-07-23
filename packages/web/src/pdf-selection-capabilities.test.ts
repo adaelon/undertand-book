@@ -25,13 +25,18 @@ describe("pdfSelectionCapabilities", () => {
   });
 
   it("limits partial selections to exact-subrange Ask and raw-text translation", () => {
-    expect(pdfSelectionCapabilities("partial")).toEqual({
+    expect(pdfSelectionCapabilities("partial", "material_or_ambiguous")).toEqual({
       canHighlight: false,
       canNote: false,
       canAsk: true,
       canTranslate: true,
       nativeCopyOnly: false,
-      statusLabel: "部分定位，仅精确子区间可用于问 AI",
+      statusLabel: "存在缺字或歧义",
+    });
+    expect(pdfSelectionCapabilities("partial", "insufficient_visible_evidence")).toMatchObject({
+      canHighlight: false,
+      canNote: false,
+      statusLabel: "选区证据不足",
     });
   });
 

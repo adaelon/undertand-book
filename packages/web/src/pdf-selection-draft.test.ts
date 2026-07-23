@@ -75,6 +75,19 @@ describe("usePdfSelectionDraft", () => {
     });
   });
 
+  it("preserves fail-closed diagnostics for partial selections", async () => {
+    const controller = usePdfSelectionDraft(async () => ({
+      ...response("partial"),
+      diagnostic: "material_or_ambiguous",
+    }));
+
+    await controller.capture(capture("material"));
+    expect(controller.state.value.draft).toMatchObject({
+      status: "partial",
+      diagnostic: "material_or_ambiguous",
+    });
+  });
+
   it("drops late responses and preserves the newest request", async () => {
     const first = deferred<PdfSelectionResolveResponse>();
     const second = deferred<PdfSelectionResolveResponse>();

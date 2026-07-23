@@ -1,6 +1,6 @@
 # 切片方案 - PDF 选区全书适配闭环
 
-> 状态:2026-07-23 PR8-PR18 已完成,PR19-PR21 待实施。
+> 状态:2026-07-23 PR8-PR19 已完成,PR20-PR21 待实施。
 > 问题源:[PDF 选区适配问题总账](PDF选区适配问题总账.md)。
 > 已完成前序:[PDF 选区可恢复定位](切片方案-pdf选区可恢复定位.md) PR1-PR7。
 > 决策边界:[ADR-0082](adr/0082-hybrid-foundation-semantic-unit-alignment-and-degraded-reader.md)、[ADR-0090](adr/0090-pdf-selection-recovered-resolution-and-versioned-discrepancy-policy.md)。
@@ -210,11 +210,14 @@ PR8_FULL_BOOK_BENCHMARK
 
 ### PR19 - Resolve/project 与 Web 能力闭环
 
+**状态**:`completed`。运行时现在只按 selection-shard glyph assignment 重建连续可见范围；resolve/project 共用公式 assignment catalog 与 terminal glyph 约束，Web 只消费 Server capability/diagnostic，不自行推断恢复规则。
+
 - **做**:Server 从 display-token/formula-token assignments 重建用户实际可见 canonical ranges,允许任意连续已映射子句/子公式;resolve 与 range project 共用同一证据和 terminal glyph。Web 只按 `resolved | partial | unresolved` 能力显示动作,并把真正 material mismatch/ambiguous 诊断与可恢复表示差异区分。
 - **不做**:不把 `region_exact` 相交本身作为一票 partial,不在 Web 猜 recovery,不为无 source token glyph 开启 Highlight/Note/Ask citation。
 - **Red**:A001 完整句、任意 wrapper 中部、复杂公式子选区和跨 text/formula 选区仍被 region precision 强制 partial;保存后反向投影结果不同。
 - **Green**:总账三个用户原句以及新增各类别真实选区均 `resolved`;Highlight/Note/Ask/Translate 可用且刷新回显;真正缺字、歧义和无 source glyph 选择保持受限。
 - **完成判据**:Rust route、Memory roundtrip、Web capability/component 和 PDF.js Playwright desktop/390px 全绿;resolve -> save -> project 是幂等闭环。
+- **完成证据**:approved source/PDF 隔离候选上，A001 完整跨 text/formula/text 句、wrapper 中段和复杂公式 `ϕ(k)⊤ϕ(q)` 三类真实可见范围均 `resolved/recovered`，反向 projection 对全部 range 返回 `exact`、完整 `covered_range` 和同一 terminal glyph；缺字/变量替换/缺 terminal 仍为 `material_or_ambiguous`，无 source glyph 为 `no_source_glyph`。Server 全量 185 tests、Memory selection-context 6 tests、Web 26 files / 150 tests、typecheck/production build、PDF.js Playwright 11 tests（desktop + 390px）与 Rust fmt 全绿；390px 截图确认状态和动作无重叠。正式 artifact 未在本刀切换，归 PR20。
 
 ### PR20 - 真书候选重建与原子切换
 

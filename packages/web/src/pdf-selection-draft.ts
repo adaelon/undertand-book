@@ -1,5 +1,6 @@
 import { ref } from "vue";
 import type {
+  PdfSelectionDiagnostic,
   PdfSelectionResolveResponse,
   SelectionContext,
 } from "./api";
@@ -14,6 +15,7 @@ export interface PdfSelectionCapture {
 export interface PdfSelectionDraft extends SelectionContext {
   request_id: string;
   screen_rect: PdfSelectionCapture["screen_rect"];
+  diagnostic?: PdfSelectionDiagnostic;
 }
 
 export type PdfSelectionPhase = "idle" | "resolving" | "ready" | "saving" | "error";
@@ -54,6 +56,7 @@ export function usePdfSelectionDraft(
         draft: {
           request_id: capture.request_id,
           status: response.status,
+          ...(response.diagnostic ? { diagnostic: response.diagnostic } : {}),
           ...(response.resolution_basis ? { resolution_basis: response.resolution_basis } : {}),
           raw_quote: capture.raw_quote,
           resolved_quote: response.quote_markdown,

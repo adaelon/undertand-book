@@ -2116,6 +2116,8 @@ struct PdfSemanticRange {
 struct PdfSelectionResolveResponse {
     status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    diagnostic: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     resolution_basis: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     recovery_policy_version: Option<String>,
@@ -2143,6 +2145,8 @@ struct PdfRangeProjection {
     lid: String,
     range: SourceSpanDto,
     status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    diagnostic: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     resolution_basis: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -7205,38 +7209,125 @@ fn compact_formula_display(value: &str) -> String {
 fn complete_formula_representations(
     policy: &PdfRuntimeProjectionPolicy,
     hits: &[SelectionCharHit],
+    formula_assignment_catalog: &[SelectionCharHit],
 ) -> Vec<PdfFormulaRepresentationEvidence> {
     let mut evidence = policy
         .entries
         .iter()
         .filter_map(|(lid, entry)| {
             let display_text = entry.formula_display_text.as_ref()?;
-            let formula_hits = hits
+            let selected_hits = hits
                 .iter()
                 .filter(|hit| hit.lid.as_deref() == Some(lid.as_str()))
                 .collect::<Vec<_>>();
-            let (Some(first_exact), Some(last_exact), Some(first_hit), Some(last_hit)) = (
-                entry.exact_source_spans.first(),
-                entry.exact_source_spans.last(),
-                formula_hits.first(),
-                formula_hits.last(),
-            ) else {
-                return None;
-            };
-            let selected_display = formula_hits
+            let all_hits = formula_assignment_catalog
                 .iter()
-                .map(|hit| hit.text.as_str())
-                .collect::<String>();
-            if compact_formula_display(&selected_display) != compact_formula_display(display_text)
-                || first_hit.source_span.start != first_exact.start
-                || last_hit.source_span.end != last_exact.end
+                .filter(|hit| hit.lid.as_deref() == Some(lid.as_str()))
+                .collect::<Vec<_>>();
+            if selected_hits.is_empty()
+                || all_hits.is_empty()
+                || compact_formula_display(
+                    &all_hits
+                        .iter()
+                        .map(|hit| hit.text.as_str())
+                        .collect::<String>(),
+                ) != compact_formula_display(display_text)
             {
                 return None;
             }
+            let same_assignment = |left: &SelectionCharHit, right: &SelectionCharHit| {
+                left.page_index == right.page_index
+                    && left.char_index == right.char_index
+                    && left.source_span == right.source_span
+            };
+            let selected_positions = selected_hits
+                .iter()
+                .map(|selected| {
+                    all_hits
+                        .iter()
+                        .position(|candidate| same_assignment(selected, candidate))
+                })
+                .collect::<Option<Vec<_>>>()?;
+            if selected_positions.windows(2).any(|pair| pair[0] >= pair[1]) {
+                return None;
+            }
+            let selected_position_set = selected_positions.iter().copied().collect::<HashSet<_>>();
+            let non_whitespace_positions = all_hits
+                .iter()
+                .enumerate()
+                .filter_map(|(index, hit)| {
+                    (!compact_formula_display(&hit.text).is_empty()).then_some(index)
+                })
+                .collect::<Vec<_>>();
+            if all_hits
+                .iter()
+                .any(|hit| compact_formula_display(&hit.text).chars().count() > 1)
+            {
+                return None;
+            }
+            let selected_non_whitespace_positions = non_whitespace_positions
+                .iter()
+                .copied()
+                .filter(|index| selected_position_set.contains(index))
+                .collect::<Vec<_>>();
+            let (Some(first_position), Some(last_position)) = (
+                selected_non_whitespace_positions.first().copied(),
+                selected_non_whitespace_positions.last().copied(),
+            ) else {
+                return None;
+            };
+            if non_whitespace_positions
+                .iter()
+                .copied()
+                .filter(|index| *index >= first_position && *index <= last_position)
+                .any(|index| !selected_position_set.contains(&index))
+            {
+                return None;
+            }
+            let covers_complete_display = non_whitespace_positions
+                .iter()
+                .all(|index| selected_position_set.contains(index));
+            let source_span = if covers_complete_display {
+                entry.source_span
+            } else {
+                SourceSpanDto {
+                    start: all_hits[first_position].source_span.start,
+                    end: all_hits[last_position].source_span.end,
+                }
+            };
+            if source_span.start >= source_span.end
+                || source_span.start < entry.source_span.start
+                || source_span.end > entry.source_span.end
+            {
+                return None;
+            }
+            let selected_display = if covers_complete_display {
+                display_text.clone()
+            } else {
+                let first_ordinal = non_whitespace_positions
+                    .iter()
+                    .position(|index| *index == first_position)?;
+                let last_ordinal = non_whitespace_positions
+                    .iter()
+                    .position(|index| *index == last_position)?;
+                let mut ordinal = 0usize;
+                display_text
+                    .chars()
+                    .filter(|value| {
+                        if value.is_whitespace() {
+                            ordinal > first_ordinal && ordinal <= last_ordinal
+                        } else {
+                            let keep = ordinal >= first_ordinal && ordinal <= last_ordinal;
+                            ordinal += 1;
+                            keep
+                        }
+                    })
+                    .collect::<String>()
+            };
             Some(PdfFormulaRepresentationEvidence {
                 lid: lid.clone(),
-                source_span: entry.source_span,
-                display_text: display_text.clone(),
+                source_span,
+                display_text: selected_display,
             })
         })
         .collect::<Vec<_>>();
@@ -7308,9 +7399,6 @@ fn selection_text_recovery_differences(
         let raw_char = raw[raw_index];
         let canonical_char = canonical[canonical_index];
         if raw_char.value.is_whitespace() || canonical_char.value.is_whitespace() {
-            if !raw_char.value.is_whitespace() || !canonical_char.value.is_whitespace() {
-                return None;
-            }
             let raw_run_start = raw_index;
             let canonical_run_start = canonical_index;
             while raw_index < raw.len() && raw[raw_index].value.is_whitespace() {
@@ -7321,18 +7409,33 @@ fn selection_text_recovery_differences(
             {
                 canonical_index += 1;
             }
-            if raw[raw_run_start..raw_index]
-                .iter()
-                .map(|item| item.value)
-                .ne(canonical[canonical_run_start..canonical_index]
-                    .iter()
-                    .map(|item| item.value))
+            let raw_has_whitespace = raw_run_start < raw_index;
+            let canonical_has_whitespace = canonical_run_start < canonical_index;
+            if raw_run_start == 0
+                || canonical_run_start == 0
+                || raw_index == raw.len()
+                || canonical_index == canonical.len()
             {
+                return None;
+            }
+            let whitespace_differs = !raw_has_whitespace
+                || !canonical_has_whitespace
+                || raw[raw_run_start..raw_index]
+                    .iter()
+                    .map(|item| item.value)
+                    .ne(canonical[canonical_run_start..canonical_index]
+                        .iter()
+                        .map(|item| item.value));
+            if whitespace_differs {
                 differences.record(
                     PdfSelectionRecoveryDifference::LayoutWhitespace,
-                    PdfSelectionRecoveryOccurrence::CanonicalUtf16(
-                        canonical[canonical_run_start].start,
-                    ),
+                    if canonical_has_whitespace {
+                        PdfSelectionRecoveryOccurrence::CanonicalUtf16(
+                            canonical[canonical_run_start].start,
+                        )
+                    } else {
+                        PdfSelectionRecoveryOccurrence::RawUtf16(raw[raw_run_start].start)
+                    },
                 );
             }
             continue;
@@ -8255,8 +8358,13 @@ fn route_pdf_selection_resolve(book: &Book, book_dir: &Path, body: &serde_json::
         .map(pdf_selection_recovery_evidence)
         .unwrap_or_default();
     if policy.version == PdfRuntimeMapVersion::V2 {
+        let formula_assignment_catalog =
+            match formula_assignment_catalog_for_hits(book_dir, &policy, &hits) {
+                Ok(catalog) => catalog,
+                Err(error) => return err_reply(&error),
+            };
         recovery_evidence.formula_representations =
-            complete_formula_representations(&policy, &hits);
+            complete_formula_representations(&policy, &hits, &formula_assignment_catalog);
     }
     let recovery_decision = if policy.version == PdfRuntimeMapVersion::V2 {
         match (
@@ -8384,8 +8492,15 @@ fn route_pdf_selection_resolve(book: &Book, book_dir: &Path, body: &serde_json::
     let recovery_policy_version = recovered_differences
         .is_some()
         .then(|| PDF_SELECTION_RECOVERY_POLICY.version.to_string());
+    let diagnostic = match status {
+        "partial" if raw_quote.is_none() => Some("insufficient_visible_evidence".to_string()),
+        "partial" => Some("material_or_ambiguous".to_string()),
+        "unresolved" => Some("no_source_glyph".to_string()),
+        _ => None,
+    };
     ok_json(&PdfSelectionResolveResponse {
         status: status.into(),
+        diagnostic,
         resolution_basis,
         recovery_policy_version,
         recovered_differences,
@@ -8518,6 +8633,38 @@ fn selection_chars_for_source_range(
     Ok(hits)
 }
 
+fn formula_assignment_catalog_for_hits(
+    book_dir: &Path,
+    policy: &PdfRuntimeProjectionPolicy,
+    hits: &[SelectionCharHit],
+) -> Result<Vec<SelectionCharHit>, ToolError> {
+    let lids = hits
+        .iter()
+        .filter_map(|hit| hit.lid.as_deref())
+        .filter(|lid| {
+            policy
+                .entries
+                .get(*lid)
+                .is_some_and(|entry| entry.formula_display_text.is_some())
+        })
+        .collect::<BTreeSet<_>>();
+    let mut catalog = Vec::new();
+    for lid in lids {
+        let entry = policy
+            .entries
+            .get(lid)
+            .expect("selected formula LID exists");
+        catalog.extend(selection_chars_for_source_range(
+            book_dir,
+            lid,
+            entry.source_span,
+            policy,
+        )?);
+    }
+    catalog.sort_by_key(|hit| (hit.page_index, hit.char_index));
+    Ok(catalog)
+}
+
 fn route_pdf_ranges_project(book: &Book, book_dir: &Path, body: &serde_json::Value) -> Reply {
     let manifest = match require_pdf_runtime_capability(book_dir, "project_ranges_to_pdf") {
         Ok(manifest) => manifest,
@@ -8583,8 +8730,13 @@ fn route_pdf_ranges_project(book: &Book, book_dir: &Path, body: &serde_json::Val
         };
         let mut recovery_evidence = PdfSelectionRecoveryEvidence::default();
         if policy.version == PdfRuntimeMapVersion::V2 {
+            let formula_assignment_catalog =
+                match formula_assignment_catalog_for_hits(book_dir, &policy, &hits) {
+                    Ok(catalog) => catalog,
+                    Err(error) => return err_reply(&error),
+                };
             recovery_evidence.formula_representations =
-                complete_formula_representations(&policy, &hits);
+                complete_formula_representations(&policy, &hits, &formula_assignment_catalog);
         }
         let recovery_raw_quote =
             canonical_recovery_text(&canonical_quote, target.start, &recovery_evidence)
@@ -8715,10 +8867,16 @@ fn route_pdf_ranges_project(book: &Book, book_dir: &Path, body: &serde_json::Val
         let recovery_policy_version = recovered_differences
             .is_some()
             .then(|| PDF_SELECTION_RECOVERY_POLICY.version.to_string());
+        let diagnostic = match status {
+            "partial" => Some("material_or_ambiguous".to_string()),
+            "unmapped" => Some("no_source_glyph".to_string()),
+            _ => None,
+        };
         projections.push(PdfRangeProjection {
             lid: input_range.lid,
             range: input_range.range,
             status: status.into(),
+            diagnostic,
             resolution_basis,
             recovery_policy_version,
             recovered_differences,
@@ -14056,6 +14214,29 @@ unchanged after training concludes";
                 ]),
             })
         );
+
+        for (raw_quote, canonical_quote) in [
+            ("the advantages", "theadvantages"),
+            ("theadvantages", "the advantages"),
+        ] {
+            assert_eq!(
+                classify_pdf_selection_recovery(
+                    raw_quote,
+                    canonical_quote,
+                    10_000,
+                    &selection_recovery_hits(canonical_quote, |_, value| value.is_whitespace()),
+                    &PdfSelectionRecoveryEvidence::default(),
+                ),
+                PdfSelectionRecoveryDecision::Recovered(PdfSelectionRecoveryReport {
+                    differences: vec![PdfSelectionRecoveryDifference::LayoutWhitespace],
+                    difference_counts: BTreeMap::from([(
+                        PdfSelectionRecoveryDifference::LayoutWhitespace,
+                        1,
+                    )]),
+                }),
+                "raw={raw_quote} canonical={canonical_quote}"
+            );
+        }
     }
 
     #[test]
@@ -14106,10 +14287,10 @@ unchanged after training concludes";
     }
 
     #[test]
-    fn pdf_selection_recovery_accepts_only_complete_formula_representation() {
+    fn pdf_selection_recovery_accepts_complete_and_assignment_bounded_formula_representation() {
         let (canonical, raw, policy, hits) = formula_recovery_fixture();
         let mut evidence = pdf_selection_recovery_evidence(&raw);
-        evidence.formula_representations = complete_formula_representations(&policy, &hits);
+        evidence.formula_representations = complete_formula_representations(&policy, &hits, &hits);
         assert_eq!(
             classify_pdf_selection_recovery(&raw, &canonical, 10_000, &hits, &evidence),
             PdfSelectionRecoveryDecision::Recovered(PdfSelectionRecoveryReport {
@@ -14124,11 +14305,42 @@ unchanged after training concludes";
             })
         );
 
+        let formula_hits = hits
+            .iter()
+            .filter(|hit| hit.lid.as_deref() == Some("formula"))
+            .cloned()
+            .collect::<Vec<_>>();
+        for (selected, raw_quote, canonical_quote) in [
+            (formula_hits[0..3].to_vec(), "WU i", "W_{Ui"),
+            (formula_hits[4..7].to_vec(), "WD i", "W_{Di"),
+        ] {
+            let mut selected_evidence = pdf_selection_recovery_evidence(raw_quote);
+            selected_evidence.formula_representations =
+                complete_formula_representations(&policy, &selected, &formula_hits);
+            assert_eq!(
+                classify_pdf_selection_recovery(
+                    raw_quote,
+                    canonical_quote,
+                    selected.first().unwrap().source_span.start,
+                    &selected,
+                    &selected_evidence,
+                ),
+                PdfSelectionRecoveryDecision::Recovered(PdfSelectionRecoveryReport {
+                    differences: vec![PdfSelectionRecoveryDifference::FormulaRepresentation],
+                    difference_counts: BTreeMap::from([(
+                        PdfSelectionRecoveryDifference::FormulaRepresentation,
+                        1,
+                    )]),
+                }),
+                "raw_quote={raw_quote}"
+            );
+        }
+
         let mut missing_subscript = hits.clone();
         missing_subscript.remove(6);
         let mut missing_evidence = pdf_selection_recovery_evidence("rows WU, WD i define");
         missing_evidence.formula_representations =
-            complete_formula_representations(&policy, &missing_subscript);
+            complete_formula_representations(&policy, &missing_subscript, &hits);
         assert_eq!(
             classify_pdf_selection_recovery(
                 "rows WU, WD i define",
@@ -14144,7 +14356,7 @@ unchanged after training concludes";
         changed_variable[4].text = "X".into();
         let mut changed_evidence = pdf_selection_recovery_evidence("rows XU i, WD i define");
         changed_evidence.formula_representations =
-            complete_formula_representations(&policy, &changed_variable);
+            complete_formula_representations(&policy, &changed_variable, &hits);
         assert_eq!(
             classify_pdf_selection_recovery(
                 "rows XU i, WD i define",
@@ -14198,6 +14410,61 @@ unchanged after training concludes";
             &mut s,
             "/reader/pdf_selection.resolve",
             r#"{"pageIndex":0,"raw_quote":"XU i, WD i","rects":[{"bbox":[9.0,9.0,32.0,21.0]}]}"#,
+        );
+        let changed_body: serde_json::Value = serde_json::from_str(&changed.body).unwrap();
+        assert_eq!(changed_body["status"], "partial", "{changed_body}");
+        assert_eq!(changed_body["diagnostic"], "material_or_ambiguous");
+    }
+
+    #[test]
+    fn pdf_selection_formula_visible_subrange_round_trips_with_the_same_terminal_glyph() {
+        let mut s = state_named("pdf-selection-formula-visible-subrange");
+        write_formula_recovery_runtime_artifacts(&mut s);
+
+        let selected = post(
+            &mut s,
+            "/reader/pdf_selection.resolve",
+            r#"{"pageIndex":0,"raw_quote":"WU i","rects":[{"bbox":[9.0,9.0,19.0,21.0]}]}"#,
+        );
+        let selected_body: serde_json::Value = serde_json::from_str(&selected.body).unwrap();
+        assert_eq!(selected_body["status"], "resolved", "{selected_body}");
+        assert_eq!(selected_body["resolution_basis"], "recovered");
+        assert_eq!(
+            selected_body["recovered_differences"],
+            serde_json::json!(["formula_representation"])
+        );
+        assert_eq!(
+            selected_body["ranges"],
+            serde_json::json!([{
+                "lid":"1.1",
+                "range":{"start":2,"end":7},
+                "source_span":{"start":2,"end":7},
+                "quote_markdown":"W_{Ui"
+            }])
+        );
+
+        let projected = post(
+            &mut s,
+            "/reader/pdf_ranges.project",
+            r#"{"ranges":[{"lid":"1.1","range":{"start":2,"end":7}}]}"#,
+        );
+        let projected_body: serde_json::Value = serde_json::from_str(&projected.body).unwrap();
+        let projection = &projected_body["projections"][0];
+        assert_eq!(projection["status"], "exact", "{projected_body}");
+        assert_eq!(projection["resolution_basis"], "recovered");
+        assert_eq!(
+            projection["covered_range"],
+            serde_json::json!({"start":2,"end":7})
+        );
+        assert_eq!(
+            projection["terminal_rect"]["source_span"],
+            serde_json::json!({"start":6,"end":7})
+        );
+
+        let changed = post(
+            &mut s,
+            "/reader/pdf_selection.resolve",
+            r#"{"pageIndex":0,"raw_quote":"WX i","rects":[{"bbox":[9.0,9.0,19.0,21.0]}]}"#,
         );
         let changed_body: serde_json::Value = serde_json::from_str(&changed.body).unwrap();
         assert_eq!(changed_body["status"], "partial", "{changed_body}");
@@ -14328,6 +14595,7 @@ unchanged after training concludes";
         );
         let selected_body: serde_json::Value = serde_json::from_str(&selected.body).unwrap();
         assert_eq!(selected_body["status"], "partial");
+        assert_eq!(selected_body["diagnostic"], "material_or_ambiguous");
         assert!(selected_body["resolution_basis"].is_null());
         assert!(selected_body["recovery_policy_version"].is_null());
         assert!(selected_body["recovered_differences"].is_null());
@@ -14342,6 +14610,7 @@ unchanged after training concludes";
         );
         let selected_body: serde_json::Value = serde_json::from_str(&selected.body).unwrap();
         assert_eq!(selected_body["status"], "partial");
+        assert_eq!(selected_body["diagnostic"], "material_or_ambiguous");
         assert!(selected_body["recovery_policy_version"].is_null());
         assert!(selected_body["recovered_differences"].is_null());
         assert!(selected_body["recovered_difference_counts"].is_null());
@@ -14535,6 +14804,102 @@ unchanged after training concludes";
                 }),
             "{projected_body}"
         );
+    }
+
+    #[test]
+    fn pdf_selection_visible_ranges_real_book_round_trip() {
+        let Ok(book_dir) = std::env::var("UB_PDF_SELECTION_REAL_BOOK_DIR") else {
+            eprintln!(
+                "PDF visible-range real-book replay skipped: UB_PDF_SELECTION_REAL_BOOK_DIR is unset"
+            );
+            return;
+        };
+        let book_dir = PathBuf::from(book_dir);
+        let book = Book::load(book_dir.to_str().expect("real-book path must be UTF-8"))
+            .expect("PDF visible-range real book must load");
+        let policy = pdf_runtime_projection_policy(&book_dir).expect("runtime policy must load");
+        let cases = [
+            (
+                "a001-full-cross-representation",
+                "Inspired by the discussion above, can we propose a new associative memory model that integrates the advantages of both the kernel trick and the delta rule? Such a model would achieve more intelligent memory update management while simultaneously ensuring high memory recall accuracy.",
+                vec![
+                    ("1.19.87.119.24", SourceSpanDto { start: 47392, end: 47425 }),
+                    ("1.19.87.119.25", SourceSpanDto { start: 47427, end: 47571 }),
+                    ("1.19.87.119.26", SourceSpanDto { start: 47572, end: 47699 }),
+                ],
+            ),
+            (
+                "a001-wrapper-middle",
+                "a new associative memory model that integrates the advantages",
+                vec![("1.19.87.119.25", SourceSpanDto { start: 47461, end: 47522 })],
+            ),
+            (
+                "complex-formula-subrange",
+                "ϕ(k)⊤ϕ(q)",
+                vec![("1.19.73", SourceSpanDto { start: 10880, end: 10927 })],
+            ),
+        ];
+
+        for (name, raw_quote, targets) in cases {
+            let mut hits = Vec::new();
+            for (lid, target) in &targets {
+                hits.extend(
+                    selection_chars_for_source_range(&book_dir, lid, *target, &policy)
+                        .unwrap_or_else(|error| {
+                            panic!("{name}: selection chars failed: {}", error.message)
+                        }),
+                );
+            }
+            hits.sort_by_key(|hit| (hit.page_index, hit.char_index));
+            assert!(!hits.is_empty(), "{name}: expected glyph assignments");
+            let rects = hits
+                .iter()
+                .map(|hit| {
+                    serde_json::json!({
+                        "pageIndex":hit.page_index,
+                        "bbox":hit.rect.bbox,
+                    })
+                })
+                .collect::<Vec<_>>();
+            let selected = route_pdf_selection_resolve(
+                &book,
+                &book_dir,
+                &serde_json::json!({
+                    "raw_quote":raw_quote,
+                    "rects":rects,
+                }),
+            );
+            assert_eq!(selected.status, 200, "{name}: {}", selected.body);
+            let selected_body: serde_json::Value = serde_json::from_str(&selected.body).unwrap();
+            assert_eq!(
+                selected_body["status"], "resolved",
+                "{name}: {selected_body}"
+            );
+            assert_eq!(selected_body["resolution_basis"], "recovered", "{name}");
+            assert_eq!(
+                selected_body["ranges"].as_array().unwrap().len(),
+                targets.len(),
+                "{name}: {selected_body}"
+            );
+
+            let projected = route_pdf_ranges_project(
+                &book,
+                &book_dir,
+                &serde_json::json!({"ranges":selected_body["ranges"]}),
+            );
+            assert_eq!(projected.status, 200, "{name}: {}", projected.body);
+            let projected_body: serde_json::Value = serde_json::from_str(&projected.body).unwrap();
+            let projections = projected_body["projections"].as_array().unwrap();
+            assert_eq!(projections.len(), targets.len(), "{name}: {projected_body}");
+            assert!(
+                projections.iter().all(|projection| {
+                    projection["status"] == "exact"
+                        && projection["terminal_rect"].is_object()
+                        && projection["covered_range"] == projection["range"]
+                }),
+                "{name}: {projected_body}"
+            );
+        }
     }
 
     #[test]
@@ -14755,6 +15120,7 @@ unchanged after training concludes";
         let body: serde_json::Value = serde_json::from_str(&partial.body).unwrap();
         let projection = &body["projections"][0];
         assert_eq!(projection["status"], "partial");
+        assert_eq!(projection["diagnostic"], "material_or_ambiguous");
         assert_eq!(
             projection["covered_range"],
             serde_json::json!({"start":0,"end":1})
@@ -14800,6 +15166,7 @@ unchanged after training concludes";
         );
         let body: serde_json::Value = serde_json::from_str(&unmapped.body).unwrap();
         assert_eq!(body["projections"][0]["status"], "unmapped");
+        assert_eq!(body["projections"][0]["diagnostic"], "no_source_glyph");
         assert_eq!(body["projections"][0]["rects"], serde_json::json!([]));
         assert!(body["projections"][0]["covered_range"].is_null());
         assert!(body["projections"][0]["terminal_rect"].is_null());

@@ -170,3 +170,17 @@ Extends: ADR-0074 and ADR-0082.
 - 删除 duplicate integrity gate：ownership solver 与 artifact 完整性必须是两道独立防线。
 
 **命门**:重复短式的多个完整单调链、跨角色共享 glyph、多个 complete owners 与相同 region owner 必须 fail-closed。写盘前 integrity 必须从实际 map/shards 重新计算 duplicate owner，不信任已有 report 布尔值；Core 拒绝 map/report policy 漂移，Server 拒绝显式未知版本。
+
+### §14 Assignment-bounded 可见范围与共享反向投影
+
+**修订**:2026-07-23 允许 `pdf_selection_recovery.v2` 在完整 selection-shard assignment catalog 内恢复连续子公式，并为 resolve/project 暴露同源 capability diagnostic；不新增或放宽 artifact policy。
+
+**决策**:公式可见范围不再要求选择完整公式，但必须先验证该 LID 的全部 assignment 非空白序列与 `formula_display_text` 完全一致，再证明本次命中的 glyph identity 按 catalog 严格递增，且两个端点之间不存在未选中的实质 glyph。visible display window 只按已验证的非空白 ordinal 从完整 display text 切出，canonical range 使用首末 selected assignment 的 source span。resolve 与 project 必须调用同一 catalog/recovery 逻辑；project 的 `exact` 还要求 target 全覆盖且 terminal rect 对应 target 最后一个 source 字符。Web 只消费 `resolved | partial | unresolved` 和 Server 的 `material_or_ambiguous | insufficient_visible_evidence | no_source_glyph`，不得复刻恢复判断。
+
+**否决**:
+- 因选择矩形与 `region_exact` 相交就恢复：对象区域不证明选中了哪些 source token。
+- 按公式字符串搜索或首尾字符切子式：重复字符和二维提取顺序会制造错误 source span。
+- project 复用 source-map bbox 或取最后一个可用 glyph：会让保存后的 range 看似可见但没有真实 terminal ownership。
+- Web 按 raw quote、coverage 或诊断文案自行开放动作：citation/annotation 能力必须由 Server canonical evidence 决定。
+
+**命门**:多字符 assignment、catalog/display 漂移、缺任一中间非空白 glyph、变量/运算符替换、边界空白差异、source target 缺 terminal glyph、无 source assignment 和 ambiguity 均 fail-closed。单侧 raw/canonical 空白只有位于已证明 glyph chain 内部才可视为 layout whitespace；正式书发布仍必须通过 PR20 双重候选重建与原子切换。
