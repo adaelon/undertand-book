@@ -122,6 +122,41 @@ describe("RightRail agent sources", () => {
     expect(notices[0].text()).toBe("未完成: 上下文不足");
   });
 
+  it("distinguishes compaction, physical capacity, and tool-turn stop reasons", () => {
+    const warnings = [
+      ["COMPACTION_FAILED", "上下文整理失败，请重试"],
+      ["ACTIVE_CONTEXT_EXHAUSTED", "当前内容超过模型可处理范围"],
+      ["TURN_LIMIT_EXCEEDED", "本轮工具调用次数已达上限"],
+    ] as const;
+    const wrapper = mount(RightRail, {
+      attachTo: document.body,
+      props: {
+        ...baseProps,
+        askDraft: null,
+        chat: warnings.map(([warning], index) => ({
+          turnId: `turn-warning-${index}`,
+          user: `question ${index}`,
+          outcome: {
+            ...sourceOutcome(),
+            answer_view: undefined,
+            incomplete: true,
+            warning,
+          },
+          pending: false,
+          questionAnchorLid: null,
+          questionQuote: null,
+          questionSelection: null,
+          effectLabels: [],
+        })),
+      },
+    });
+
+    expect(wrapper.findAll(".incomplete").map((notice) => notice.text())).toEqual(
+      warnings.map(([, label]) => `未完成: ${label}`),
+    );
+    expect(wrapper.text()).not.toContain("上下文不足");
+  });
+
   it("renders inline single and grouped source buttons without visible LIDs", () => {
     const wrapper = mount(RightRail, {
       attachTo: document.body,

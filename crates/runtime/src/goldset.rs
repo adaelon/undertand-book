@@ -441,8 +441,8 @@ pub fn run_topk_replay(
 mod tests {
     use super::*;
     use crate::{
-        AdapterError, AssistantTurn, BookQueryIntent, CompletionRequest, Message, ParsedResponse,
-        QueryObligation, ToolSpec,
+        AdapterError, AgentRequestPlan, AssistantTurn, BookQueryIntent, CompletionRequest,
+        ParsedResponse, QueryObligation,
     };
     use base_schema::sample_base;
     use read_tools::{PaperLexiconEntry, PaperLexiconSidecar, ProfileArtifactHeader};
@@ -583,7 +583,7 @@ mod tests {
             }))
         }
 
-        fn chat(&self, _: &[Message], _: &[ToolSpec]) -> Result<AssistantTurn, AdapterError> {
+        fn chat(&self, _: &AgentRequestPlan) -> Result<AssistantTurn, AdapterError> {
             unimplemented!("goldset calls the inner typed query only")
         }
     }

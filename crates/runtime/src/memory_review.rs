@@ -82,11 +82,10 @@ pub struct HistoricalBackfillInput {
 
 impl HistoricalBackfillInput {
     pub fn review_input(&self) -> Result<ReviewInput, AdapterError> {
-        let from_turn_exclusive = self
-            .turn
-            .user_turn_ordinal
-            .checked_sub(1)
-            .ok_or_else(|| invalid_output("historical backfill turn ordinal must be positive"))?;
+        let from_turn_exclusive =
+            self.turn.user_turn_ordinal.checked_sub(1).ok_or_else(|| {
+                invalid_output("historical backfill turn ordinal must be positive")
+            })?;
         let input = ReviewInput {
             job_id: self.job_id.clone(),
             session_id: self.session_id.clone(),
@@ -457,7 +456,7 @@ fn invalid_output(message: impl Into<String>) -> AdapterError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AssistantTurn, ParsedResponse, ToolSpec};
+    use crate::{AgentRequestPlan, AssistantTurn, ParsedResponse};
     use std::sync::{Arc, Mutex};
 
     struct StructuredAdapter {
@@ -475,11 +474,7 @@ mod tests {
             Ok(self.output.clone())
         }
 
-        fn chat(
-            &self,
-            _messages: &[crate::Message],
-            _tools: &[ToolSpec],
-        ) -> Result<AssistantTurn, AdapterError> {
+        fn chat(&self, _request: &AgentRequestPlan) -> Result<AssistantTurn, AdapterError> {
             Err(invalid_output("chat is not used by review extraction"))
         }
     }

@@ -11,13 +11,38 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 use ts_rs::TS;
 
+pub mod agent_prompt;
+pub mod agent_request_audit;
+pub mod auto_compaction;
+pub mod compaction;
+pub mod context_fragment;
 pub mod goldset;
 pub mod memory_intent;
 pub mod memory_policy;
 pub mod memory_review;
+pub mod model_runtime;
 pub mod orchestrator;
 pub mod profile_api;
 pub mod profile_context;
+pub mod tool_exposure;
+pub mod tool_registry;
+pub mod tool_result;
+
+pub use auto_compaction::{
+    ActiveContextBudget, CompactionCheckpointSink, EphemeralCompactionCheckpointSink,
+    ACTIVE_CONTEXT_EXHAUSTED, COMPACTION_FAILED, LEGACY_CONTEXT_BUDGET_EXCEEDED,
+    TURN_LIMIT_EXCEEDED,
+};
+pub use compaction::{
+    compact_with_adapter, prepare_compaction, project_compaction_checkpoint_messages,
+    validate_persisted_checkpoint, AllowedSupersession, CompactionCheckpoint, CompactionDraft,
+    CompactionError, CompactionLimits, CompactionPhase, CompactionRequest, EvidenceRef,
+    PendingEffectRef, PreparedCompaction, SourceCoverage, SourceDisposition, SourcedCheckpointItem,
+};
+pub use model_runtime::{
+    AgentRequestPlan, InstructionAssetRef, InstructionModule, ModelRuntimeCatalog,
+    ModelRuntimeProfile, ProviderToolProtocol, ToolChoice,
+};
 
 /// 证据集:lid → 真原文(BTreeMap 保证确定性顺序)。
 pub type EvidenceSet = BTreeMap<String, String>;
@@ -157,9 +182,22 @@ impl ProviderRegistry {
     }
 
     pub fn adapter_from_config(cfg: ProviderConfig) -> Box<dyn ModelAdapter + Send> {
+        Self::adapter_from_config_with_runtime_profile(cfg, None)
+    }
+
+    pub fn adapter_from_config_with_runtime_profile(
+        cfg: ProviderConfig,
+        runtime_profile: Option<ModelRuntimeProfile>,
+    ) -> Box<dyn ModelAdapter + Send> {
         match cfg.mode {
-            ProviderMode::Native => Box::new(NativeAdapter::from_config(cfg)),
-            ProviderMode::ReAct => Box::new(ReActAdapter::from_config(cfg)),
+            ProviderMode::Native => Box::new(NativeAdapter::from_config_with_runtime_profile(
+                cfg,
+                runtime_profile,
+            )),
+            ProviderMode::ReAct => Box::new(ReActAdapter::from_config_with_runtime_profile(
+                cfg,
+                runtime_profile,
+            )),
         }
     }
 
@@ -254,8 +292,10 @@ pub trait ModelAdapter {
         })?;
         structured_json_from_content(&answer)
     }
-    fn chat(&self, messages: &[Message], tools: &[ToolSpec])
-        -> Result<AssistantTurn, AdapterError>;
+    fn model_runtime_profile(&self) -> ModelRuntimeProfile {
+        ModelRuntimeCatalog::default().resolve("unknown-model", ProviderToolProtocol::Native, None)
+    }
+    fn chat(&self, request: &AgentRequestPlan) -> Result<AssistantTurn, AdapterError>;
 }
 
 /// Message → OpenAI 请求体 JSON(assistant tool_calls / tool 结果按 OpenAI 形拼)。
@@ -2464,28 +2504,43 @@ pub struct NativeAdapter {
     api_key: String,
     base_url: String,
     model: String,
+    runtime_profile: ModelRuntimeProfile,
     request_timeout: Option<std::time::Duration>,
 }
 
 impl NativeAdapter {
     pub fn from_config(cfg: ProviderConfig) -> NativeAdapter {
-        NativeAdapter {
-            api_key: cfg.api_key,
-            base_url: cfg.base_url,
-            model: cfg.model,
-            request_timeout: None,
-        }
+        Self::from_config_with_runtime_profile(cfg, None)
+    }
+
+    pub fn from_config_with_runtime_profile(
+        cfg: ProviderConfig,
+        runtime_profile: Option<ModelRuntimeProfile>,
+    ) -> NativeAdapter {
+        Self::from_config_with_protocol(cfg, ProviderToolProtocol::Native, runtime_profile, None)
     }
 
     pub fn from_config_with_timeout(
         cfg: ProviderConfig,
         timeout: std::time::Duration,
     ) -> NativeAdapter {
+        Self::from_config_with_protocol(cfg, ProviderToolProtocol::Native, None, Some(timeout))
+    }
+
+    fn from_config_with_protocol(
+        cfg: ProviderConfig,
+        protocol: ProviderToolProtocol,
+        runtime_profile: Option<ModelRuntimeProfile>,
+        request_timeout: Option<std::time::Duration>,
+    ) -> NativeAdapter {
+        let resolved_profile =
+            ModelRuntimeCatalog::default().resolve(&cfg.model, protocol, runtime_profile);
         NativeAdapter {
             api_key: cfg.api_key,
             base_url: cfg.base_url,
             model: cfg.model,
-            request_timeout: Some(timeout),
+            runtime_profile: resolved_profile,
+            request_timeout,
         }
     }
 
@@ -2888,7 +2943,11 @@ fn react_message_to_json(m: &Message) -> serde_json::Value {
     }
 }
 
-fn build_react_system(tools: &[ToolSpec]) -> String {
+fn build_react_system(
+    tools: &[ToolSpec],
+    tool_choice: ToolChoice,
+    parallel_tool_calls: bool,
+) -> String {
     let tool_list: Vec<serde_json::Value> = tools
         .iter()
         .map(|t| {
@@ -2899,13 +2958,82 @@ fn build_react_system(tools: &[ToolSpec]) -> String {
             })
         })
         .collect();
+    let tool_call_instruction = if tool_choice == ToolChoice::None || tools.is_empty() {
+        "本轮工具调用已禁用;不得输出 tool_calls,必须输出 final。".to_string()
+    } else {
+        let example_tool = tools
+            .iter()
+            .find(|tool| tool.name.starts_with("book."))
+            .unwrap_or(&tools[0]);
+        let example = serde_json::json!({
+            "tool_calls": [{
+                "name": example_tool.name,
+                "arguments": schema_example(&example_tool.parameters),
+            }]
+        });
+        format!(
+            "若要调用工具,只输出本轮列表中的精确 name,形状示例(值须按当前任务替换): {}",
+            example
+        )
+    };
     format!(
-        "你所在的 provider 没有原生 tool-calling。你必须每回合只输出一个 JSON 对象,不要 markdown。\n\
-         若要调用工具,输出: {{\"tool_calls\":[{{\"name\":\"book.text\",\"arguments\":{{\"lid\":\"1.1\"}}}}]}}\n\
+        "你所在的 provider 没有原生 tool-calling。tool_choice={};parallel_tool_calls={}。你必须每回合只输出一个 JSON 对象,不要 markdown。\n\
+         {}\n\
          若要最终回答,输出: {{\"final\":\"回答文本\"}}\n\
          工具只能从以下列表选择,arguments 必须符合对应 JSON Schema:\n{}",
+        tool_choice.as_provider_value(),
+        parallel_tool_calls,
+        tool_call_instruction,
         serde_json::to_string_pretty(&tool_list).unwrap_or_else(|_| "[]".into())
     )
+}
+
+fn schema_example(schema: &serde_json::Value) -> serde_json::Value {
+    if let Some(options) = schema
+        .get("enum")
+        .and_then(serde_json::Value::as_array)
+        .filter(|options| !options.is_empty())
+    {
+        return options[0].clone();
+    }
+    for alternatives in ["oneOf", "anyOf"] {
+        if let Some(first) = schema
+            .get(alternatives)
+            .and_then(serde_json::Value::as_array)
+            .and_then(|options| options.first())
+        {
+            return schema_example(first);
+        }
+    }
+    match schema.get("type").and_then(serde_json::Value::as_str) {
+        Some("object") => {
+            let properties = schema
+                .get("properties")
+                .and_then(serde_json::Value::as_object);
+            let required = schema
+                .get("required")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(serde_json::Value::as_str);
+            let mut example = serde_json::Map::new();
+            for name in required {
+                let value = properties
+                    .and_then(|properties| properties.get(name))
+                    .map(schema_example)
+                    .unwrap_or(serde_json::Value::Null);
+                example.insert(name.to_string(), value);
+            }
+            serde_json::Value::Object(example)
+        }
+        Some("array") => serde_json::Value::Array(Vec::new()),
+        Some("integer") | Some("number") => schema
+            .get("minimum")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!(0)),
+        Some("boolean") => serde_json::Value::Bool(false),
+        _ => serde_json::Value::String("1.1".into()),
+    }
 }
 
 pub struct ReActAdapter {
@@ -2914,8 +3042,20 @@ pub struct ReActAdapter {
 
 impl ReActAdapter {
     pub fn from_config(cfg: ProviderConfig) -> ReActAdapter {
+        Self::from_config_with_runtime_profile(cfg, None)
+    }
+
+    pub fn from_config_with_runtime_profile(
+        cfg: ProviderConfig,
+        runtime_profile: Option<ModelRuntimeProfile>,
+    ) -> ReActAdapter {
         ReActAdapter {
-            native: NativeAdapter::from_config(cfg),
+            native: NativeAdapter::from_config_with_protocol(
+                cfg,
+                ProviderToolProtocol::ReAct,
+                runtime_profile,
+                None,
+            ),
         }
     }
 
@@ -2924,7 +3064,12 @@ impl ReActAdapter {
         timeout: std::time::Duration,
     ) -> ReActAdapter {
         ReActAdapter {
-            native: NativeAdapter::from_config_with_timeout(cfg, timeout),
+            native: NativeAdapter::from_config_with_protocol(
+                cfg,
+                ProviderToolProtocol::ReAct,
+                None,
+                Some(timeout),
+            ),
         }
     }
 
@@ -2936,6 +3081,10 @@ impl ReActAdapter {
 }
 
 impl ModelAdapter for NativeAdapter {
+    fn model_runtime_profile(&self) -> ModelRuntimeProfile {
+        self.runtime_profile.clone()
+    }
+
     fn complete(&self, req: CompletionRequest) -> Result<ParsedResponse, AdapterError> {
         let system = format!("{}\n\n{}", req.system, OUTPUT_CONTRACT);
         let body = serde_json::json!({
@@ -2969,41 +3118,8 @@ impl ModelAdapter for NativeAdapter {
     }
 
     /// 外层多轮 tool-calling:带 `tools` schema 请求,解析 `assistant.tool_calls` + `usage` `[ADR-0026]`。
-    fn chat(
-        &self,
-        messages: &[Message],
-        tools: &[ToolSpec],
-    ) -> Result<AssistantTurn, AdapterError> {
-        let mut used_tool_names = HashSet::new();
-        let mut provider_to_internal = BTreeMap::new();
-        let mut internal_to_provider = BTreeMap::new();
-        let tool_specs: Vec<serde_json::Value> = tools
-            .iter()
-            .enumerate()
-            .map(|(idx, t)| {
-                let provider_name = provider_tool_name(&t.name, idx, &mut used_tool_names);
-                provider_to_internal.insert(provider_name.clone(), t.name.clone());
-                internal_to_provider.insert(t.name.clone(), provider_name.clone());
-                serde_json::json!({
-                    "type": "function",
-                    "function": {
-                        "name": provider_name,
-                        "description": t.description,
-                        "parameters": t.parameters,
-                    },
-                })
-            })
-            .collect();
-        let msgs: Vec<serde_json::Value> = messages
-            .iter()
-            .map(|m| native_message_to_json(m, &internal_to_provider))
-            .collect();
-        let body = serde_json::json!({
-            "model": self.model,
-            "messages": msgs,
-            "tools": tool_specs,
-            "temperature": 0,
-        });
+    fn chat(&self, request: &AgentRequestPlan) -> Result<AssistantTurn, AdapterError> {
+        let (body, provider_to_internal) = native_chat_request_projection(&self.model, request);
         let v = self.post_chat_completions(body)?;
         let msg = &v["choices"][0]["message"];
         let text = msg["content"]
@@ -3037,7 +3153,52 @@ impl ModelAdapter for NativeAdapter {
     }
 }
 
+fn native_chat_request_projection(
+    model: &str,
+    request: &AgentRequestPlan,
+) -> (serde_json::Value, BTreeMap<String, String>) {
+    let mut used_tool_names = HashSet::new();
+    let mut provider_to_internal = BTreeMap::new();
+    let mut internal_to_provider = BTreeMap::new();
+    let tool_specs: Vec<serde_json::Value> = request
+        .tools
+        .iter()
+        .enumerate()
+        .map(|(idx, t)| {
+            let provider_name = provider_tool_name(&t.name, idx, &mut used_tool_names);
+            provider_to_internal.insert(provider_name.clone(), t.name.clone());
+            internal_to_provider.insert(t.name.clone(), provider_name.clone());
+            serde_json::json!({
+                "type": "function",
+                "function": {
+                    "name": provider_name,
+                    "description": t.description,
+                    "parameters": t.parameters,
+                },
+            })
+        })
+        .collect();
+    let msgs: Vec<serde_json::Value> = request
+        .ordered_messages()
+        .iter()
+        .map(|m| native_message_to_json(m, &internal_to_provider))
+        .collect();
+    let body = serde_json::json!({
+        "model": model,
+        "messages": msgs,
+        "tools": tool_specs,
+        "tool_choice": request.tool_choice.as_provider_value(),
+        "parallel_tool_calls": request.parallel_tool_calls,
+        "temperature": 0,
+    });
+    (body, provider_to_internal)
+}
+
 impl ModelAdapter for ReActAdapter {
+    fn model_runtime_profile(&self) -> ModelRuntimeProfile {
+        self.native.runtime_profile.clone()
+    }
+
     fn complete(&self, req: CompletionRequest) -> Result<ParsedResponse, AdapterError> {
         let system = format!("{}\n\n{}", req.system, OUTPUT_CONTRACT);
         let body = serde_json::json!({
@@ -3059,25 +3220,30 @@ impl ModelAdapter for ReActAdapter {
         self.native.complete_structured(req)
     }
 
-    fn chat(
-        &self,
-        messages: &[Message],
-        tools: &[ToolSpec],
-    ) -> Result<AssistantTurn, AdapterError> {
-        let mut msgs = Vec::with_capacity(messages.len() + 1);
-        msgs.push(serde_json::json!({
-            "role": "system",
-            "content": build_react_system(tools),
-        }));
-        msgs.extend(messages.iter().map(react_message_to_json));
-        let body = serde_json::json!({
-            "model": self.native.model,
-            "messages": msgs,
-            "temperature": 0,
-        });
+    fn chat(&self, request: &AgentRequestPlan) -> Result<AssistantTurn, AdapterError> {
+        let body = react_chat_request_projection(&self.native.model, request);
         let v = self.native.post_chat_completions(body)?;
         parse_react_assistant_turn(response_message_content(&v)?)
     }
+}
+
+fn react_chat_request_projection(model: &str, request: &AgentRequestPlan) -> serde_json::Value {
+    let messages = request.ordered_messages();
+    let mut msgs = Vec::with_capacity(messages.len() + 1);
+    msgs.push(serde_json::json!({
+        "role": "system",
+        "content": build_react_system(
+            &request.tools,
+            request.tool_choice,
+            request.parallel_tool_calls,
+        ),
+    }));
+    msgs.extend(messages.iter().map(react_message_to_json));
+    serde_json::json!({
+        "model": model,
+        "messages": msgs,
+        "temperature": 0,
+    })
 }
 
 /// technical_learning 教学整形后的有序前沿分组 `[ADR-0037]`。
@@ -3486,7 +3652,7 @@ mod tests {
                 })
         }
 
-        fn chat(&self, _: &[Message], _: &[ToolSpec]) -> Result<AssistantTurn, AdapterError> {
+        fn chat(&self, _: &AgentRequestPlan) -> Result<AssistantTurn, AdapterError> {
             unimplemented!("resolver tests do not use outer chat")
         }
     }
@@ -3506,7 +3672,7 @@ mod tests {
                     message: "fake 脚本耗尽".into(),
                 })
         }
-        fn chat(&self, _: &[Message], _: &[ToolSpec]) -> Result<AssistantTurn, AdapterError> {
+        fn chat(&self, _: &AgentRequestPlan) -> Result<AssistantTurn, AdapterError> {
             unimplemented!("query 内层测的 FakeAdapter 不涉及外层 chat")
         }
     }
@@ -3529,7 +3695,7 @@ mod tests {
                     message: "recording fake 脚本耗尽".into(),
                 })
         }
-        fn chat(&self, _: &[Message], _: &[ToolSpec]) -> Result<AssistantTurn, AdapterError> {
+        fn chat(&self, _: &AgentRequestPlan) -> Result<AssistantTurn, AdapterError> {
             unimplemented!("synthesize 测不涉及外层 chat")
         }
     }
@@ -4470,6 +4636,216 @@ mod tests {
         assert!(provider_tool_name(&"a".repeat(80), 3, &mut used).len() <= 64);
     }
 
+    #[test]
+    fn agent_request_plan_native_and_react_request_snapshots_are_provider_equivalent() {
+        let profile = ModelRuntimeCatalog::default().resolve(
+            "snapshot-model",
+            ProviderToolProtocol::Native,
+            None,
+        );
+        let plan = AgentRequestPlan::for_agent_turn(
+            profile,
+            &[
+                Message::system("base instructions"),
+                Message::user("question"),
+            ],
+            &[ToolSpec {
+                name: "book.text".into(),
+                description: "Read text".into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {"lid": {"type": "string"}},
+                    "required": ["lid"],
+                }),
+            }],
+        );
+
+        let (native, provider_to_internal) =
+            native_chat_request_projection("snapshot-model", &plan);
+        assert_eq!(
+            native,
+            serde_json::json!({
+                "model": "snapshot-model",
+                "messages": [
+                    {"role": "system", "content": "base instructions"},
+                    {"role": "user", "content": "question"},
+                ],
+                "tools": [{
+                    "type": "function",
+                    "function": {
+                        "name": "book_text",
+                        "description": "Read text",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"lid": {"type": "string"}},
+                            "required": ["lid"],
+                        },
+                    },
+                }],
+                "tool_choice": "auto",
+                "parallel_tool_calls": false,
+                "temperature": 0,
+            })
+        );
+        assert_eq!(
+            provider_to_internal.get("book_text").map(String::as_str),
+            Some("book.text")
+        );
+
+        let react = react_chat_request_projection("snapshot-model", &plan);
+        assert_eq!(react["model"], "snapshot-model");
+        assert_eq!(react["temperature"], 0);
+        let react_messages = react["messages"].as_array().unwrap();
+        assert_eq!(react_messages.len(), 3);
+        let protocol = react_messages[0]["content"].as_str().unwrap();
+        assert!(protocol.starts_with(
+            "你所在的 provider 没有原生 tool-calling。tool_choice=auto;parallel_tool_calls=false。"
+        ));
+        assert!(protocol.contains("\"name\": \"book.text\""));
+        assert!(protocol.contains("\"required\": ["));
+        assert_eq!(
+            react_messages[1],
+            serde_json::json!({"role": "system", "content": "base instructions"})
+        );
+        assert_eq!(
+            react_messages[2],
+            serde_json::json!({"role": "user", "content": "question"})
+        );
+        assert!(react.get("tools").is_none());
+    }
+
+    #[test]
+    fn react_protocol_example_uses_only_currently_sampled_tools() {
+        let context = ToolSpec {
+            name: "book.context".into(),
+            description: "Read nearby structure".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "lid": {"type": "string"},
+                    "granularity": {"type": "string", "enum": ["near"]}
+                },
+                "required": ["lid", "granularity"]
+            }),
+        };
+        let protocol = build_react_system(&[context], ToolChoice::Auto, false);
+        assert!(protocol.contains(r#""name":"book.context""#));
+        assert!(!protocol.contains("book.text"));
+        assert!(protocol.contains(r#""granularity":"near""#));
+
+        let no_tools = build_react_system(&[], ToolChoice::None, false);
+        assert!(no_tools.contains("不得输出 tool_calls"));
+        assert!(!no_tools.contains("book.text"));
+    }
+
+    #[test]
+    fn provider_equivalence_compaction_uses_one_prompt_schema_and_validator() {
+        let messages = vec![
+            Message::system("base"),
+            Message::user(format!("old task {}", "u".repeat(8_000))),
+            Message {
+                role: Role::Assistant,
+                content: Some(format!("old progress {}", "a".repeat(8_000))),
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+            },
+        ];
+        let prepared = prepare_compaction(
+            CompactionPhase::PreTurn,
+            &messages,
+            &messages,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            BTreeMap::new(),
+        )
+        .unwrap();
+        let item_id = "item.provider-equivalence".to_string();
+        let source_item_ids = prepared
+            .request()
+            .eligible_items
+            .iter()
+            .map(|item| item.source_item_id.clone())
+            .collect::<Vec<_>>();
+        let draft = CompactionDraft {
+            active_goal: vec![SourcedCheckpointItem {
+                item_id: item_id.clone(),
+                text: "Continue the preserved task.".into(),
+                source_item_ids: source_item_ids.clone(),
+                evidence_refs: Vec::new(),
+            }],
+            progress: Vec::new(),
+            decisions: Vec::new(),
+            user_constraints: Vec::new(),
+            open_obligations: Vec::new(),
+            unresolved_ambiguities: Vec::new(),
+            critical_facts: Vec::new(),
+            critical_examples: Vec::new(),
+            next_steps: Vec::new(),
+            source_coverage: source_item_ids
+                .iter()
+                .map(|source_item_id| SourceCoverage {
+                    source_item_id: source_item_id.clone(),
+                    disposition: SourceDisposition::Compacted,
+                    target_item_ids: vec![item_id.clone()],
+                    reason: None,
+                })
+                .collect(),
+        };
+        let content = serde_json::to_string(&draft).unwrap();
+        let response = serde_json::json!({
+            "choices": [{"message": {"content": content}}]
+        })
+        .to_string();
+        let mut checkpoints = Vec::new();
+
+        for mode in [ProviderMode::Native, ProviderMode::ReAct] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let addr = listener.local_addr().unwrap();
+            let scripted_response = response.clone();
+            let handle = std::thread::spawn(move || {
+                let mut stream = accept_with_timeout(&listener);
+                let request = read_http_request(&mut stream);
+                let wire = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    scripted_response.len(),
+                    scripted_response
+                );
+                stream.write_all(wire.as_bytes()).unwrap();
+                request
+            });
+            let config = ProviderConfig {
+                mode,
+                api_key: "test-key".into(),
+                base_url: format!("http://{addr}"),
+                model: "unknown-provider-model".into(),
+            };
+            let adapter: Box<dyn ModelAdapter> = match mode {
+                ProviderMode::Native => Box::new(NativeAdapter::from_config(config)),
+                ProviderMode::ReAct => Box::new(ReActAdapter::from_config(config)),
+            };
+            let checkpoint = compact_with_adapter(
+                adapter.as_ref(),
+                &adapter.model_runtime_profile(),
+                &prepared,
+                CompactionLimits {
+                    generation_input_limit_tokens: 100_000,
+                    target_active_tokens: 100_000,
+                },
+            )
+            .unwrap();
+            let request = handle.join().unwrap();
+            assert!(request.contains("agent-compaction.generation.v1"));
+            assert!(request.contains(r#""response_format":{"type":"json_object"}"#));
+            assert!(!request.contains(r#""tools":"#));
+            assert!(!adapter.model_runtime_profile().supports_continuation);
+            checkpoints.push(checkpoint);
+        }
+
+        assert_eq!(checkpoints[0], checkpoints[1]);
+    }
+
     fn accept_with_timeout(listener: &TcpListener) -> TcpStream {
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
@@ -4716,38 +5092,36 @@ mod tests {
             base_url: format!("http://{addr}"),
             model: "test-model".into(),
         });
-        let out = adapter
-            .chat(
-                &[
-                    Message::user("show text"),
-                    Message {
-                        role: Role::Assistant,
-                        content: None,
-                        tool_calls: vec![ToolCall {
-                            id: "call_prev".into(),
-                            name: "book.text".into(),
-                            arguments: "{}".into(),
-                        }],
-                        tool_call_id: None,
-                    },
-                    Message {
-                        role: Role::Tool,
-                        content: Some("previous result".into()),
-                        tool_calls: vec![],
-                        tool_call_id: Some("call_prev".into()),
-                    },
-                ],
-                &[ToolSpec {
+        let messages = [
+            Message::user("show text"),
+            Message {
+                role: Role::Assistant,
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "call_prev".into(),
                     name: "book.text".into(),
-                    description: "Read text by lid".into(),
-                    parameters: serde_json::json!({
-                        "type": "object",
-                        "properties": {"lid": {"type": "string"}},
-                        "required": ["lid"],
-                    }),
+                    arguments: "{}".into(),
                 }],
-            )
-            .unwrap();
+                tool_call_id: None,
+            },
+            Message {
+                role: Role::Tool,
+                content: Some("previous result".into()),
+                tool_calls: vec![],
+                tool_call_id: Some("call_prev".into()),
+            },
+        ];
+        let tools = [ToolSpec {
+            name: "book.text".into(),
+            description: "Read text by lid".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {"lid": {"type": "string"}},
+                "required": ["lid"],
+            }),
+        }];
+        let plan = AgentRequestPlan::for_ad_hoc(adapter.model_runtime_profile(), &messages, &tools);
+        let out = adapter.chat(&plan).unwrap();
 
         handle.join().unwrap();
         assert_eq!(out.tool_calls.len(), 1);

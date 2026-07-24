@@ -1749,6 +1749,7 @@ mod tests {
                     })
                     .collect(),
                 messages: new_session(),
+                compaction_checkpoint: None,
             })
             .collect();
         Arc::new(Mutex::new(AppState {

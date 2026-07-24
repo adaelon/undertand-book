@@ -503,7 +503,7 @@ fn invalid_intent(message: impl Into<String>) -> ToolError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AdapterError, AssistantTurn, ParsedResponse, ToolSpec};
+    use crate::{AdapterError, AgentRequestPlan, AssistantTurn, ParsedResponse};
     use memory::{Confidence, EvidenceRef, PreferenceClaim};
     use std::cell::{Cell, RefCell};
     use std::collections::VecDeque;
@@ -539,11 +539,7 @@ mod tests {
                 })
         }
 
-        fn chat(
-            &self,
-            _messages: &[crate::Message],
-            _tools: &[ToolSpec],
-        ) -> Result<AssistantTurn, AdapterError> {
+        fn chat(&self, _request: &AgentRequestPlan) -> Result<AssistantTurn, AdapterError> {
             Err(AdapterError {
                 message: "chat is not used".into(),
             })

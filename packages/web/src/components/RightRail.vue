@@ -190,7 +190,18 @@ function answerParts(outcome: OuterOutcome): AgentAnswerPart[] {
 
 function incompleteNotice(outcome: OuterOutcome): string | null {
   if (!outcome.incomplete || !outcome.warning) return null;
-  return outcome.warning === "CONTEXT_BUDGET_EXCEEDED" ? "上下文不足" : outcome.warning;
+  switch (outcome.warning) {
+    case "CONTEXT_BUDGET_EXCEEDED":
+      return "上下文不足";
+    case "COMPACTION_FAILED":
+      return "上下文整理失败，请重试";
+    case "ACTIVE_CONTEXT_EXHAUSTED":
+      return "当前内容超过模型可处理范围";
+    case "TURN_LIMIT_EXCEEDED":
+      return "本轮工具调用次数已达上限";
+    default:
+      return outcome.warning;
+  }
 }
 
 function sourceButtonLabel(outcome: OuterOutcome, sourceRefIds: string[]): string {

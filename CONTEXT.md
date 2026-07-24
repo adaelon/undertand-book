@@ -22,6 +22,30 @@ Resident Agent 在当前用户回合内实际观察且通过现有结构闸的�
 ## Provider 历史投影 (provider history projection)
 从持久对话消息生成本次模型请求上下文的只读投影。已完成历史 Tool 消息变为历史 Tool 回执,当前活动回合工具结果保持完整;投影追溯适用于旧会话但不改写持久历史、公开历史 View 或轨迹 UI。状态:NEW(见 [ADR-0087](docs/adr/0087-provenance-aware-answer-delivery-and-compact-provider-history.md))。
 
+## 模型运行时配置 (model runtime profile)
+某一模型在 Resident Agent 中适用的版本化能力与约束集合,包括基础指令、上下文窗口、输出预留、原生工具/continuation 能力、工具 schema 预算、结果截断策略以及压缩生成/消费资产。它在一个用户回合开始时解析并冻结,不是由 Provider adapter 临时猜测的参数集合。状态:NEW(见 [ADR-0091](docs/adr/0091-model-aware-agent-request-tool-exposure-and-active-context-budget.md))。
+
+## Agent 请求计划 (agent request plan)
+一次模型采样所需的 Provider 无关结构,分别承载基础指令、结构化消息、模型可见工具、工具选择模式和活动上下文状态。Provider adapter 只能把该计划映射为线协议,不得自行增删业务指令或工具。状态:NEW(见 [ADR-0091](docs/adr/0091-model-aware-agent-request-tool-exposure-and-active-context-budget.md))。
+
+## 上下文片段账本 (context fragment ledger)
+以稳定 key、内容 revision、生命周期 scope 和角色管理模型可见动态上下文的回合级账本。相同 key 在一个请求投影中最多保留一个活动 revision;敏感的回合冻结片段可参与请求但不因此进入持久会话。状态:NEW(见 [ADR-0091](docs/adr/0091-model-aware-agent-request-tool-exposure-and-active-context-budget.md))。
+
+## 工具暴露计划 (tool exposure plan)
+从完整工具注册表按模型能力、内容 profile、权限、证据状态和本回合激活集派生出的模型可见工具集合。它只决定模型能看到和调用什么,不改变工具契约或执行器。状态:NEW(见 [ADR-0091](docs/adr/0091-model-aware-agent-request-tool-exposure-and-active-context-budget.md))。
+
+## 延迟工具发现 (deferred tool discovery)
+模型通过一个只读元数据检索工具查找当前未直接暴露的工具,命中项只在后续采样中加入本回合工具暴露计划。发现动作不执行目标工具、不提升权限,也不让 hidden 工具变为可见。状态:NEW(见 [ADR-0091](docs/adr/0091-model-aware-agent-request-tool-exposure-and-active-context-budget.md))。
+
+## 活动上下文预算 (active context budget)
+一次模型请求中可实际容纳的输入预算,由模型上下文窗口扣除输出预留和安全余量得到。它约束当前请求投影并在高水位触发自动上下文压缩;跨请求累计的 Provider token 只表示成本,不属于活动上下文预算。状态:BOUNDARY_CHANGE(见 [ADR-0091](docs/adr/0091-model-aware-agent-request-tool-exposure-and-active-context-budget.md),修订 [ADR-0026](docs/adr/0026-外层E编排loop-原生toolcalling-adapter扩chat-双重停机usage口径-memory独立json落盘.md))。
+
+## 自动上下文压缩 (automatic context compaction)
+活动上下文达到模型高水位时,系统把旧历史转换为一个可验证且带来源覆盖的语义压缩检查点,以该检查点原子替换模型请求中的旧历史并在同一用户回合继续。它保留原始持久消息;当前用户原文、已验证选区和未完成工具链不经摘要。旧消息只有在检查点覆盖后才能退出活动投影,不得通过无语义替代的删除或截断制造空间。状态:NEW(见 [ADR-0091](docs/adr/0091-model-aware-agent-request-tool-exposure-and-active-context-budget.md))。
+
+## 压缩检查点 (compaction checkpoint)
+从一段旧活动历史派生的、带来源覆盖的类型化任务交接状态。它保存继续任务所需的当前目标、已完成进展、关键决定、用户约束、未决义务、未解歧义、关键事实、关键示例和下一步,但不保存思维过程,不成为新的事实源,也不包含由运行时账本重新注入的敏感上下文。检查点中的语义条目只能引用输入中已存在的历史 item 和证据 ref;未通过来源覆盖与引用校验时不得替代旧活动历史。状态:NEW(见 [ADR-0091](docs/adr/0091-model-aware-agent-request-tool-exposure-and-active-context-budget.md))。
+
 ## 回答交付诊断 (answer delivery diagnostic)
 来源边界校验在初次回答和唯一一次修复后产生的服务端结构记录,只含错误码、触发值、匹配形态与来源通道。它不保存回答候选全文或思维链,不进入 Provider 历史、公开历史 View 或轨迹 UI。状态:NEW(见 [ADR-0087](docs/adr/0087-provenance-aware-answer-delivery-and-compact-provider-history.md))。
 

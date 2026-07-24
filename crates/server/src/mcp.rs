@@ -540,8 +540,8 @@ mod tests {
     use reader::{Reader, DEFAULT_RADIUS};
     use runtime::orchestrator::new_session;
     use runtime::{
-        AdapterError, AssistantTurn, CompletionRequest, Message, ModelAdapter, ParsedResponse,
-        RawCitation, ToolSpec,
+        AdapterError, AgentRequestPlan, AssistantTurn, CompletionRequest, ModelAdapter,
+        ParsedResponse, RawCitation,
     };
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
@@ -594,11 +594,7 @@ mod tests {
             }
         }
 
-        fn chat(
-            &self,
-            _messages: &[Message],
-            _tools: &[ToolSpec],
-        ) -> Result<AssistantTurn, AdapterError> {
+        fn chat(&self, _request: &AgentRequestPlan) -> Result<AssistantTurn, AdapterError> {
             Err(AdapterError {
                 message: "not used".into(),
             })
@@ -620,11 +616,7 @@ mod tests {
             })
         }
 
-        fn chat(
-            &self,
-            _messages: &[Message],
-            _tools: &[ToolSpec],
-        ) -> Result<AssistantTurn, AdapterError> {
+        fn chat(&self, _request: &AgentRequestPlan) -> Result<AssistantTurn, AdapterError> {
             Err(AdapterError {
                 message: "not used".into(),
             })
