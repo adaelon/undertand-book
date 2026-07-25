@@ -5,14 +5,23 @@ import type { AutomaticBuildStage, AutomaticBuildTarget, BuildTargetRefV2 } from
 import {
   assertActiveAutomaticBuildLease,
   readAutomaticBuildLease,
-  type AutomaticBuildTaskLeaseV1,
+  type AutomaticBuildTaskHeartbeatV1,
+  type AutomaticBuildTaskLease,
+  type AutomaticBuildTaskStartV1,
 } from "./automatic-build-lease";
-import { automaticBuildTaskStoreRoot } from "./automatic-build-task-store";
+import {
+  listAutomaticBuildStoredAttempts,
+  type AutomaticBuildExecutionIdentityV1,
+  type AutomaticBuildStoredAttemptV1,
+} from "./automatic-build-task-store";
+import type { WorkUnitDescriptorV2, WorkUnitKind } from "./stage-work-unit";
 
 export interface AutomaticBuildUsageReceiptV1 {
   version: "automatic_build_usage_receipt.v1";
   source: "native" | "executor_reported" | "unavailable";
   model?: string;
+  reasoning_effort?: string;
+  harness_release?: string;
   input_tokens?: number;
   cached_input_tokens?: number;
   output_tokens?: number;
@@ -54,6 +63,66 @@ interface PercentilesV1 {
   p95: number | null;
 }
 
+interface ObservedPercentilesV1 extends PercentilesV1 {
+  observed_attempts: number;
+  unavailable_attempts: number;
+}
+
+interface ProvenanceDimensionSummaryV1 {
+  known_attempts: number;
+  unavailable_attempts: number;
+  coverage: number;
+  values: string[];
+}
+
+export type AutomaticBuildLifecycleEventKind =
+  | "lease_reserved"
+  | "executor_started"
+  | "heartbeat"
+  | "input_finished"
+  | "candidate_submitted"
+  | "writer_failed"
+  | "task_failed"
+  | "task_committed"
+  | "lease_expired";
+
+export interface AutomaticBuildLifecycleEventV1 {
+  version: "automatic_build_lifecycle_event.v1";
+  kind: AutomaticBuildLifecycleEventKind;
+  task_ref: string;
+  stage: AutomaticBuildStage;
+  work_unit_id: string;
+  physical_attempt: number;
+  execution_identity?: AutomaticBuildExecutionIdentityV1;
+  observed_at: string;
+  diagnostic_code?: string;
+  submit_revision?: number;
+  provenance: {
+    model: string;
+    reasoning_effort: string;
+    harness_release: string;
+  };
+}
+
+export interface AutomaticBuildPerformanceSampleV1 {
+  sample_id: string;
+  stage: AutomaticBuildStage;
+  kind: WorkUnitKind;
+  router_version: string;
+  model: string;
+  reasoning_effort: string;
+  harness_release: string;
+  service_ms: number;
+}
+
+export interface AutomaticBuildPerformanceHistoryV1 {
+  version: "automatic_build_performance_history.v1";
+  revision_digest?: string;
+  samples: AutomaticBuildPerformanceSampleV1[];
+  lease_count: number;
+  semantic_attempt_count: number;
+}
+
 export interface AutomaticBuildStageMetricsSummaryV1 {
   version: "automatic_build_stage_metrics_summary.v1";
   target_ref: BuildTargetRefV2;
@@ -93,6 +162,36 @@ export interface AutomaticBuildStageMetricsSummaryV1 {
     rate: number | null;
   };
   diagnostic_counts: Record<string, number>;
+  lifecycle_counts: {
+    lease_issued: number;
+    lease_expired: number;
+    executor_started: number;
+    heartbeat: number;
+    input_finished: number;
+    candidate_submitted: number;
+    writer_failed: number;
+    task_failed: number;
+    task_committed: number;
+  };
+  execution_counts: {
+    physical_attempts: number;
+    semantic_attempts: number;
+    lease_epochs: number;
+    submit_revisions: number;
+  };
+  phase_latency: {
+    dispatch_wait_ms: ObservedPercentilesV1;
+    reserve_wait_ms: ObservedPercentilesV1;
+    running_executor_ms: ObservedPercentilesV1;
+    writer_ms: ObservedPercentilesV1;
+    unobserved_interval_ms: ObservedPercentilesV1;
+  };
+  provenance: {
+    model: ProvenanceDimensionSummaryV1;
+    reasoning_effort: ProvenanceDimensionSummaryV1;
+    harness_release: ProvenanceDimensionSummaryV1;
+  };
+  performance_history: AutomaticBuildPerformanceHistoryV1;
   digest: string;
 }
 
@@ -142,7 +241,7 @@ function nonNegativeInteger(value: unknown, field: string): number {
   return Number(value);
 }
 
-function taskRef(lease: AutomaticBuildTaskLeaseV1): string {
+function taskRef(lease: AutomaticBuildTaskLease): string {
   return `${lease.target_ref.book_id}:${lease.stage}:${lease.work_unit_id}:${lease.attempt}`;
 }
 
@@ -186,6 +285,11 @@ export function readAutomaticBuildUsageReceipt(leaseRef: string): AutomaticBuild
   }
   if (receipt.model !== undefined && (typeof receipt.model !== "string" || !receipt.model.trim())) {
     throw new Error("usage.model must be a non-empty string when provided");
+  }
+  for (const field of ["reasoning_effort", "harness_release"] as const) {
+    if (receipt[field] !== undefined && (typeof receipt[field] !== "string" || !receipt[field]!.trim())) {
+      throw new Error(`usage.${field} must be a non-empty string when provided`);
+    }
   }
   if (receipt.estimate !== undefined) {
     if (typeof receipt.estimate.method !== "string" || !/(?:^|[._-])v\d+$/.test(receipt.estimate.method)) {
@@ -262,7 +366,9 @@ export function persistAutomaticBuildTaskMetrics(
     ...(terminal.diagnostic_code ? { diagnostic_code: terminal.diagnostic_code } : {}),
     usage: {
       source: usageReceipt.source,
-      ...(usageReceipt.model ? { model: usageReceipt.model } : {}),
+      model: usageReceipt.model ?? "unavailable",
+      reasoning_effort: usageReceipt.reasoning_effort ?? "unavailable",
+      harness_release: usageReceipt.harness_release ?? "unavailable",
       ...(usageReceipt.input_tokens !== undefined ? { input_tokens: usageReceipt.input_tokens } : {}),
       ...(usageReceipt.cached_input_tokens !== undefined ? { cached_input_tokens: usageReceipt.cached_input_tokens } : {}),
       ...(usageReceipt.output_tokens !== undefined ? { output_tokens: usageReceipt.output_tokens } : {}),
@@ -284,37 +390,291 @@ function percentiles(values: number[]): PercentilesV1 {
   return { p50: percentile(values, 0.5), p95: percentile(values, 0.95) };
 }
 
-function readStageMetrics(target: AutomaticBuildTarget, stage: AutomaticBuildStage): AutomaticBuildTaskMetricsV1[] {
-  const stageRoot = path.join(automaticBuildTaskStoreRoot(target), stage);
-  if (!existsSync(stageRoot)) return [];
-  const metrics: AutomaticBuildTaskMetricsV1[] = [];
-  for (const taskEntry of readdirSync(stageRoot, { withFileTypes: true })) {
-    if (!taskEntry.isDirectory()) continue;
-    const attemptsRoot = path.join(stageRoot, taskEntry.name, "attempts");
-    if (!existsSync(attemptsRoot)) continue;
-    for (const attemptEntry of readdirSync(attemptsRoot, { withFileTypes: true })) {
-      if (!attemptEntry.isDirectory()) continue;
-      const file = path.join(attemptsRoot, attemptEntry.name, "metrics.json");
-      if (!existsSync(file)) continue;
-      const value = readJson<AutomaticBuildTaskMetricsV1>(file);
-      if (value.version !== "automatic_build_task_metrics.v1" || value.stage !== stage) {
-        throw new Error(`invalid automatic build task metrics: ${file}`);
-      }
-      metrics.push(value);
+interface AutomaticBuildSubmissionV1 {
+  version: "automatic_build_submission.v1";
+  started_at: string;
+}
+
+interface AutomaticBuildTerminalRecord {
+  state?: "committed" | "retryable_failure";
+  diagnostic_code?: string;
+  committed_at?: string;
+  failed_at?: string;
+}
+
+interface AutomaticBuildAttemptResult {
+  version: "automatic_build_attempt_event.v2";
+  outcome: "failure" | "success" | "reset";
+  diagnostic?: string;
+  created_at: string;
+}
+
+interface AutomaticBuildSubmitRevisionRecord {
+  version: "automatic_build_submit_revision.v1";
+  submit_revision: number;
+  created_at: string;
+}
+
+interface AutomaticBuildAttemptFacts {
+  stored: AutomaticBuildStoredAttemptV1;
+  lease?: AutomaticBuildTaskLease;
+  start?: AutomaticBuildTaskStartV1;
+  heartbeat?: AutomaticBuildTaskHeartbeatV1;
+  heartbeats: AutomaticBuildTaskHeartbeatV1[];
+  input?: AutomaticBuildInputObservationV1;
+  submission?: AutomaticBuildSubmissionV1;
+  failure?: AutomaticBuildTerminalRecord;
+  receipt?: AutomaticBuildTerminalRecord;
+  result?: AutomaticBuildAttemptResult;
+  metrics?: AutomaticBuildTaskMetricsV1;
+  submit_revisions: AutomaticBuildSubmitRevisionRecord[];
+  usage: AutomaticBuildUsageReceiptV1;
+}
+
+function readOptionalJson<T>(dir: string, name: string): T | undefined {
+  const file = path.join(dir, name);
+  return existsSync(file) ? readJson<T>(file) : undefined;
+}
+
+function usageFromMetrics(metrics: AutomaticBuildTaskMetricsV1): AutomaticBuildUsageReceiptV1 {
+  return {
+    version: "automatic_build_usage_receipt.v1",
+    source: metrics.usage.source,
+    ...(metrics.usage.model && metrics.usage.model !== "unavailable" ? { model: metrics.usage.model } : {}),
+    ...(metrics.usage.reasoning_effort && metrics.usage.reasoning_effort !== "unavailable"
+      ? { reasoning_effort: metrics.usage.reasoning_effort }
+      : {}),
+    ...(metrics.usage.harness_release && metrics.usage.harness_release !== "unavailable"
+      ? { harness_release: metrics.usage.harness_release }
+      : {}),
+    ...(metrics.usage.input_tokens !== undefined ? { input_tokens: metrics.usage.input_tokens } : {}),
+    ...(metrics.usage.cached_input_tokens !== undefined ? { cached_input_tokens: metrics.usage.cached_input_tokens } : {}),
+    ...(metrics.usage.output_tokens !== undefined ? { output_tokens: metrics.usage.output_tokens } : {}),
+    ...(metrics.estimate ? { estimate: metrics.estimate } : {}),
+  };
+}
+
+function readAttemptFacts(target: AutomaticBuildTarget, stage: AutomaticBuildStage): AutomaticBuildAttemptFacts[] {
+  return listAutomaticBuildStoredAttempts(target, stage).map((stored) => {
+    const lease = readOptionalJson<AutomaticBuildTaskLease>(stored.attempt_dir, "lease.json");
+    if (lease && (!(["automatic_build_task_lease.v1", "automatic_build_task_lease.v2"] as string[])
+      .includes(lease.version) || lease.stage !== stage || lease.work_unit_id !== stored.work_unit_id
+      || lease.attempt !== stored.physical_attempt)) {
+      throw new Error(`invalid automatic build lease metrics source: ${stored.attempt_dir}`);
     }
+    const metrics = readOptionalJson<AutomaticBuildTaskMetricsV1>(stored.attempt_dir, "metrics.json");
+    if (metrics && (metrics.version !== "automatic_build_task_metrics.v1" || metrics.stage !== stage
+      || metrics.work_unit_id !== stored.work_unit_id || metrics.attempt !== stored.physical_attempt)) {
+      throw new Error(`invalid automatic build task metrics: ${stored.attempt_dir}`);
+    }
+    const revisionsDir = path.join(stored.attempt_dir, "submit-revisions");
+    const submitRevisions = existsSync(revisionsDir)
+      ? readdirSync(revisionsDir, { withFileTypes: true })
+          .filter((entry) => entry.isFile() && /^\d+\.json$/.test(entry.name))
+          .map((entry) => readJson<AutomaticBuildSubmitRevisionRecord>(path.join(revisionsDir, entry.name)))
+          .sort((left, right) => left.submit_revision - right.submit_revision)
+      : [];
+    for (const revision of submitRevisions) {
+      if (revision.version !== "automatic_build_submit_revision.v1"
+        || !Number.isSafeInteger(revision.submit_revision) || revision.submit_revision < 1) {
+        throw new Error(`invalid automatic build submit revision metrics source: ${revisionsDir}`);
+      }
+    }
+    const start = readOptionalJson<AutomaticBuildTaskStartV1>(stored.attempt_dir, "start.json");
+    const heartbeat = readOptionalJson<AutomaticBuildTaskHeartbeatV1>(stored.attempt_dir, "heartbeat.json");
+    const heartbeatHistoryDir = path.join(stored.attempt_dir, "heartbeats");
+    const heartbeatHistory = existsSync(heartbeatHistoryDir)
+      ? readdirSync(heartbeatHistoryDir, { withFileTypes: true })
+          .filter((entry) => entry.isFile() && entry.name.endsWith(".json"))
+          .map((entry) => readJson<AutomaticBuildTaskHeartbeatV1>(path.join(heartbeatHistoryDir, entry.name)))
+      : [];
+    const heartbeats = [...heartbeatHistory,
+      ...(heartbeat && !heartbeatHistory.some((item) => item.updated_at === heartbeat.updated_at
+        && item.expires_at === heartbeat.expires_at && item.lease_token === heartbeat.lease_token)
+        ? [heartbeat]
+        : []),
+    ].sort((left, right) => timestampMs(left.updated_at, "heartbeat.updated_at")
+      - timestampMs(right.updated_at, "heartbeat.updated_at"));
+    const input = readOptionalJson<AutomaticBuildInputObservationV1>(stored.attempt_dir, "input-observation.json");
+    const submission = readOptionalJson<AutomaticBuildSubmissionV1>(stored.attempt_dir, "submission.json");
+    const failure = readOptionalJson<AutomaticBuildTerminalRecord>(stored.attempt_dir, "failure.json");
+    const receipt = readOptionalJson<AutomaticBuildTerminalRecord>(stored.attempt_dir, "receipt.json");
+    const result = readOptionalJson<AutomaticBuildAttemptResult>(stored.attempt_dir, "result.json");
+    const usage = metrics ? usageFromMetrics(metrics) : readAutomaticBuildUsageReceipt(path.join(stored.attempt_dir, "lease.json"));
+    return {
+      stored,
+      ...(lease ? { lease } : {}),
+      ...(start ? { start } : {}),
+      ...(heartbeat ? { heartbeat } : {}),
+      heartbeats,
+      ...(input ? { input } : {}),
+      ...(submission ? { submission } : {}),
+      ...(failure ? { failure } : {}),
+      ...(receipt ? { receipt } : {}),
+      ...(result ? { result } : {}),
+      ...(metrics ? { metrics } : {}),
+      submit_revisions: submitRevisions,
+      usage,
+    };
+  });
+}
+
+function attemptTaskRef(target: AutomaticBuildTarget, facts: AutomaticBuildAttemptFacts): string {
+  return facts.lease
+    ? taskRef(facts.lease)
+    : `${target.book_id}:${facts.stored.stage}:${facts.stored.work_unit_id}:${facts.stored.physical_attempt}`;
+}
+
+function provenanceFor(facts: AutomaticBuildAttemptFacts): AutomaticBuildLifecycleEventV1["provenance"] {
+  return {
+    model: facts.usage.model ?? "unavailable",
+    reasoning_effort: facts.usage.reasoning_effort ?? "unavailable",
+    harness_release: facts.usage.harness_release ?? "unavailable",
+  };
+}
+
+function attemptExpiry(facts: AutomaticBuildAttemptFacts): string | undefined {
+  if (!facts.lease) return undefined;
+  if (facts.heartbeat && facts.start) return facts.heartbeat.expires_at;
+  if (facts.start) return facts.start.run_expires_at;
+  return facts.lease.version === "automatic_build_task_lease.v2"
+    ? facts.lease.reserve_expires_at
+    : facts.lease.expires_at;
+}
+
+function terminalAt(facts: AutomaticBuildAttemptFacts): string | undefined {
+  return facts.receipt?.committed_at
+    ?? facts.failure?.failed_at
+    ?? facts.result?.created_at;
+}
+
+function isExpired(facts: AutomaticBuildAttemptFacts, now: string): boolean {
+  const expiry = attemptExpiry(facts);
+  return Boolean(expiry && !terminalAt(facts) && timestampMs(now, "now") >= timestampMs(expiry!, "lease_expiry"));
+}
+
+export function readAutomaticBuildLifecycleEvents(
+  target: AutomaticBuildTarget,
+  stage: AutomaticBuildStage,
+  options: { now?: string } = {},
+): AutomaticBuildLifecycleEventV1[] {
+  const now = options.now ?? new Date().toISOString();
+  timestampMs(now, "now");
+  const events: AutomaticBuildLifecycleEventV1[] = [];
+  for (const facts of readAttemptFacts(target, stage)) {
+    const common = {
+      version: "automatic_build_lifecycle_event.v1" as const,
+      task_ref: attemptTaskRef(target, facts),
+      stage,
+      work_unit_id: facts.stored.work_unit_id,
+      physical_attempt: facts.stored.physical_attempt,
+      ...(facts.stored.execution_identity ? { execution_identity: facts.stored.execution_identity } : {}),
+      provenance: provenanceFor(facts),
+    };
+    const add = (kind: AutomaticBuildLifecycleEventKind, observedAt: string, extra: Partial<AutomaticBuildLifecycleEventV1> = {}) => {
+      events.push({ ...common, kind, observed_at: observedAt, ...extra });
+    };
+    if (facts.lease) add("lease_reserved", facts.lease.version === "automatic_build_task_lease.v2"
+      ? facts.lease.reserved_at : facts.lease.issued_at);
+    if (facts.start) add("executor_started", facts.start.started_at);
+    for (const heartbeat of facts.heartbeats) add("heartbeat", heartbeat.updated_at);
+    if (facts.input) add("input_finished", facts.input.finished_at);
+    if (facts.submit_revisions.length) {
+      for (const revision of facts.submit_revisions) {
+        add("candidate_submitted", revision.created_at, { submit_revision: revision.submit_revision });
+      }
+    } else if (facts.submission) {
+      add("candidate_submitted", facts.submission.started_at);
+    }
+    if (facts.failure) {
+      add(facts.failure.diagnostic_code === "writer_failed" ? "writer_failed" : "task_failed",
+        facts.failure.failed_at ?? terminalAt(facts)!,
+        facts.failure.diagnostic_code ? { diagnostic_code: facts.failure.diagnostic_code } : {});
+    } else if (facts.result?.outcome === "failure") {
+      add("task_failed", facts.result.created_at,
+        facts.result.diagnostic ? { diagnostic_code: facts.result.diagnostic } : {});
+    }
+    if (facts.receipt?.committed_at) add("task_committed", facts.receipt.committed_at);
+    else if (facts.result?.outcome === "success") add("task_committed", facts.result.created_at);
+    if (isExpired(facts, now)) add("lease_expired", attemptExpiry(facts)!);
   }
-  return metrics.sort((left, right) => left.task_ref.localeCompare(right.task_ref));
+  return events.sort((left, right) => timestampMs(left.observed_at, "lifecycle.observed_at")
+    - timestampMs(right.observed_at, "lifecycle.observed_at")
+    || left.task_ref.localeCompare(right.task_ref)
+    || left.kind.localeCompare(right.kind)
+    || (left.submit_revision ?? 0) - (right.submit_revision ?? 0));
 }
 
 function digest(value: unknown): string {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
 }
 
+function observedPercentiles(values: number[], attemptCount: number): ObservedPercentilesV1 {
+  return {
+    ...percentiles(values),
+    observed_attempts: values.length,
+    unavailable_attempts: attemptCount - values.length,
+  };
+}
+
+function provenanceDimension(values: Array<string | undefined>): ProvenanceDimensionSummaryV1 {
+  const known = values.filter((value): value is string => Boolean(value && value !== "unavailable"));
+  return {
+    known_attempts: known.length,
+    unavailable_attempts: values.length - known.length,
+    coverage: values.length ? known.length / values.length : 0,
+    values: [...new Set(known)].sort(),
+  };
+}
+
+function buildPerformanceHistory(
+  target: AutomaticBuildTarget,
+  attempts: AutomaticBuildAttemptFacts[],
+  workUnits: WorkUnitDescriptorV2[],
+): AutomaticBuildPerformanceHistoryV1 {
+  const descriptors = new Map(workUnits.map((unit) => [unit.work_unit_id, unit]));
+  const samples: AutomaticBuildPerformanceSampleV1[] = [];
+  for (const attempt of attempts) {
+    const descriptor = descriptors.get(attempt.stored.work_unit_id);
+    const end = terminalAt(attempt);
+    const provenance = provenanceFor(attempt);
+    if (!descriptor || !attempt.start || !end
+      || Object.values(provenance).some((value) => value === "unavailable")) continue;
+    samples.push({
+      sample_id: attemptTaskRef(target, attempt),
+      stage: attempt.stored.stage,
+      kind: descriptor.kind,
+      router_version: descriptor.policy_fingerprint.router_version,
+      model: provenance.model,
+      reasoning_effort: provenance.reasoning_effort,
+      harness_release: provenance.harness_release,
+      service_ms: durationMs(attempt.start.started_at, end, "performance.service_ms"),
+    });
+  }
+  samples.sort((left, right) => left.stage.localeCompare(right.stage)
+    || left.kind.localeCompare(right.kind)
+    || left.sample_id.localeCompare(right.sample_id));
+  const semanticAttempts = new Set(attempts.flatMap((attempt) => attempt.stored.execution_identity
+    ? [`${attempt.stored.work_unit_id}:${attempt.stored.execution_identity.semantic_attempt}`]
+    : [])).size;
+  const identity = {
+    version: "automatic_build_performance_history.v1" as const,
+    samples,
+    lease_count: attempts.filter((attempt) => attempt.lease).length,
+    semantic_attempt_count: semanticAttempts,
+  };
+  return { ...identity, revision_digest: digest(identity) };
+}
+
 export function buildAutomaticBuildStageMetricsSummary(
   target: AutomaticBuildTarget,
   stage: AutomaticBuildStage,
+  options: { now?: string; work_units?: WorkUnitDescriptorV2[] } = {},
 ): AutomaticBuildStageMetricsSummaryV1 {
-  const metrics = readStageMetrics(target, stage);
+  const now = options.now ?? new Date().toISOString();
+  timestampMs(now, "now");
+  const attempts = readAttemptFacts(target, stage);
+  const metrics = attempts.flatMap((attempt) => attempt.metrics ? [attempt.metrics] : []);
   const statusCounts: AutomaticBuildStageMetricsSummaryV1["status_counts"] = {
     committed: 0,
     skipped: 0,
@@ -333,48 +693,95 @@ export function buildAutomaticBuildStageMetricsSummary(
   const estimateMethods = new Set<string>();
   let emptyKnown = 0;
   let emptyAttempts = 0;
-  for (const item of metrics) {
-    statusCounts[item.status] += 1;
-    if (item.diagnostic_code) diagnosticCounts[item.diagnostic_code] = (diagnosticCounts[item.diagnostic_code] ?? 0) + 1;
-    const hasInput = item.usage.input_tokens !== undefined;
-    const hasOutput = item.usage.output_tokens !== undefined;
-    const hasAny = hasInput || hasOutput || item.usage.cached_input_tokens !== undefined;
+  for (const attempt of attempts) {
+    const committed = attempt.receipt?.state === "committed"
+      || attempt.result?.outcome === "success"
+      || (!attempt.receipt && !attempt.result && attempt.metrics?.status === "committed");
+    const failed = Boolean(attempt.failure)
+      || attempt.result?.outcome === "failure"
+      || (!attempt.failure && !attempt.result && attempt.metrics?.status === "retryable_failure");
+    if (committed) statusCounts.committed += 1;
+    if (failed) statusCounts.retryable_failure += 1;
+    if (attempt.metrics?.status === "skipped") statusCounts.skipped += 1;
+    if (attempt.metrics?.status === "needs_user") statusCounts.needs_user += 1;
+    const diagnostic = attempt.failure?.diagnostic_code
+      ?? attempt.metrics?.diagnostic_code
+      ?? (attempt.result?.outcome === "failure" ? attempt.result.diagnostic : undefined);
+    if (diagnostic) diagnosticCounts[diagnostic] = (diagnosticCounts[diagnostic] ?? 0) + 1;
+    const hasInput = attempt.usage.input_tokens !== undefined;
+    const hasOutput = attempt.usage.output_tokens !== undefined;
+    const hasAny = hasInput || hasOutput || attempt.usage.cached_input_tokens !== undefined;
     if (hasInput && hasOutput) fullyKnown += 1;
     else if (hasAny) partiallyKnown += 1;
     else unavailable += 1;
-    inputTokens += item.usage.input_tokens ?? 0;
-    cachedInputTokens += item.usage.cached_input_tokens ?? 0;
-    outputTokens += item.usage.output_tokens ?? 0;
-    if (item.estimate) {
-      estimateMethods.add(item.estimate.method);
-      estimateInput += item.estimate.input_tokens;
-      estimateOutput += item.estimate.output_tokens;
+    inputTokens += attempt.usage.input_tokens ?? 0;
+    cachedInputTokens += attempt.usage.cached_input_tokens ?? 0;
+    outputTokens += attempt.usage.output_tokens ?? 0;
+    if (attempt.usage.estimate) {
+      estimateMethods.add(attempt.usage.estimate.method);
+      estimateInput += attempt.usage.estimate.input_tokens;
+      estimateOutput += attempt.usage.estimate.output_tokens;
     }
-    if (item.status === "committed" && item.output_items !== undefined) {
+    if (committed && attempt.metrics?.output_items !== undefined) {
       emptyKnown += 1;
-      if (item.output_items === 0) emptyAttempts += 1;
+      if (attempt.metrics.output_items === 0) emptyAttempts += 1;
     }
   }
+  const events = readAutomaticBuildLifecycleEvents(target, stage, { now });
+  const eventCount = (kind: AutomaticBuildLifecycleEventKind) => events.filter((event) => event.kind === kind).length;
+  const reserveWait: number[] = [];
+  const runningExecutor: number[] = [];
+  const writer: number[] = [];
+  const unobserved: number[] = [];
+  for (const attempt of attempts) {
+    if (!attempt.lease) continue;
+    const reservedAt = attempt.lease.version === "automatic_build_task_lease.v2"
+      ? attempt.lease.reserved_at
+      : attempt.lease.issued_at;
+    const expiry = isExpired(attempt, now) ? attemptExpiry(attempt) : undefined;
+    const end = terminalAt(attempt) ?? expiry;
+    const reserveEnd = attempt.start?.started_at ?? end;
+    const runningEnd = attempt.start ? attempt.submission?.started_at ?? end : undefined;
+    if (reserveEnd) reserveWait.push(durationMs(reservedAt, reserveEnd, "reserve_wait_ms"));
+    if (attempt.start && runningEnd) {
+      runningExecutor.push(durationMs(attempt.start.started_at, runningEnd, "running_executor_ms"));
+    }
+    if (attempt.submission && end) writer.push(durationMs(attempt.submission.started_at, end, "writer_ms"));
+    if (end && reserveEnd) {
+      const total = durationMs(reservedAt, end, "observed_attempt_ms");
+      const observedReserve = durationMs(reservedAt, reserveEnd, "reserve_wait_ms");
+      const observedRunning = attempt.start && runningEnd
+        ? durationMs(attempt.start.started_at, runningEnd, "running_executor_ms")
+        : 0;
+      const observedWriter = attempt.submission
+        ? durationMs(attempt.submission.started_at, end, "writer_ms")
+        : 0;
+      unobserved.push(Math.max(0, total - observedReserve - observedRunning - observedWriter));
+    }
+  }
+  const semanticAttempts = new Set(attempts.flatMap((attempt) => attempt.stored.execution_identity
+    ? [`${attempt.stored.work_unit_id}:${attempt.stored.execution_identity.semantic_attempt}`]
+    : [])).size;
   const core = {
     version: "automatic_build_stage_metrics_summary.v1" as const,
     target_ref: target.target_ref,
     stage,
-    attempt_count: metrics.length,
-    work_unit_count: new Set(metrics.map((item) => item.work_unit_id)).size,
+    attempt_count: attempts.length,
+    work_unit_count: new Set(attempts.map((attempt) => attempt.stored.work_unit_id)).size,
     status_counts: statusCounts,
     retry_count: statusCounts.retryable_failure,
     bytes: {
       input_total: metrics.reduce((sum, item) => sum + item.input_bytes, 0),
       output_total: metrics.reduce((sum, item) => sum + item.output_bytes, 0),
-      output_average: metrics.length
-        ? metrics.reduce((sum, item) => sum + item.output_bytes, 0) / metrics.length
+      output_average: attempts.length
+        ? metrics.reduce((sum, item) => sum + item.output_bytes, 0) / attempts.length
         : 0,
     },
     usage: {
       fully_known_attempts: fullyKnown,
       partially_known_attempts: partiallyKnown,
       unavailable_attempts: unavailable,
-      known_usage_coverage: metrics.length ? (fullyKnown + partiallyKnown) / metrics.length : 0,
+      known_usage_coverage: attempts.length ? (fullyKnown + partiallyKnown) / attempts.length : 0,
       input_tokens: inputTokens,
       cached_input_tokens: cachedInputTokens,
       output_tokens: outputTokens,
@@ -396,6 +803,36 @@ export function buildAutomaticBuildStageMetricsSummary(
       rate: emptyKnown ? emptyAttempts / emptyKnown : null,
     },
     diagnostic_counts: Object.fromEntries(Object.entries(diagnosticCounts).sort(([left], [right]) => left.localeCompare(right))),
+    lifecycle_counts: {
+      lease_issued: eventCount("lease_reserved"),
+      lease_expired: eventCount("lease_expired"),
+      executor_started: eventCount("executor_started"),
+      heartbeat: eventCount("heartbeat"),
+      input_finished: eventCount("input_finished"),
+      candidate_submitted: eventCount("candidate_submitted"),
+      writer_failed: eventCount("writer_failed"),
+      task_failed: eventCount("task_failed") + eventCount("writer_failed"),
+      task_committed: eventCount("task_committed"),
+    },
+    execution_counts: {
+      physical_attempts: attempts.length,
+      semantic_attempts: semanticAttempts,
+      lease_epochs: attempts.filter((attempt) => attempt.stored.execution_identity).length,
+      submit_revisions: attempts.reduce((sum, attempt) => sum + attempt.submit_revisions.length, 0),
+    },
+    phase_latency: {
+      dispatch_wait_ms: observedPercentiles([], attempts.length),
+      reserve_wait_ms: observedPercentiles(reserveWait, attempts.length),
+      running_executor_ms: observedPercentiles(runningExecutor, attempts.length),
+      writer_ms: observedPercentiles(writer, attempts.length),
+      unobserved_interval_ms: observedPercentiles(unobserved, attempts.length),
+    },
+    provenance: {
+      model: provenanceDimension(attempts.map((attempt) => attempt.usage.model)),
+      reasoning_effort: provenanceDimension(attempts.map((attempt) => attempt.usage.reasoning_effort)),
+      harness_release: provenanceDimension(attempts.map((attempt) => attempt.usage.harness_release)),
+    },
+    performance_history: buildPerformanceHistory(target, attempts, options.work_units ?? []),
   };
   return { ...core, digest: digest(core) };
 }
@@ -403,8 +840,9 @@ export function buildAutomaticBuildStageMetricsSummary(
 export function writeAutomaticBuildStageMetricsSummary(
   target: AutomaticBuildTarget,
   stage: AutomaticBuildStage,
+  options: { now?: string; work_units?: WorkUnitDescriptorV2[] } = {},
 ): AutomaticBuildStageMetricsSummaryV1 {
-  const summary = buildAutomaticBuildStageMetricsSummary(target, stage);
+  const summary = buildAutomaticBuildStageMetricsSummary(target, stage, options);
   writeJsonAtomic(automaticBuildStageMetricsSummaryPath(target, stage), summary);
   return summary;
 }

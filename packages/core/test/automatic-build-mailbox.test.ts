@@ -9,6 +9,7 @@ import {
   submitAutomaticBuildCandidate,
 } from "../src/automatic-build-mailbox";
 import { claimAutomaticBuildTask } from "../src/automatic-build-lease";
+import { readAutomaticBuildAttemptRecord } from "../src/automatic-build-task-store";
 import { resolveAutomaticBuildTarget } from "../src/build-orchestrator";
 
 function fixture() {
@@ -32,6 +33,67 @@ function candidateFile(root: string, value: unknown, name = "candidate-source.js
 }
 
 describe("automatic build task mailbox", () => {
+  it("normalizes no-BOM and single-BOM UTF-8 candidates to the same payload", () => {
+    const noBom = fixture();
+    const withBom = fixture();
+    const payload = JSON.stringify({ nodes: [], edges: [] });
+    const noBomSource = path.join(noBom.root, "candidate-no-bom.json");
+    const bomSource = path.join(withBom.root, "candidate-bom.json");
+    writeFileSync(noBomSource, Buffer.from(payload, "utf8"));
+    writeFileSync(bomSource, Buffer.concat([
+      Buffer.from([0xef, 0xbb, 0xbf]),
+      Buffer.from(payload, "utf8"),
+    ]));
+
+    const noBomRecord = stageAutomaticBuildCandidate(
+      noBom.target,
+      noBom.claim.lease_ref,
+      noBom.claim.lease.token,
+      noBomSource,
+      { now: "2026-07-19T00:00:01.000Z" },
+    );
+    const bomRecord = stageAutomaticBuildCandidate(
+      withBom.target,
+      withBom.claim.lease_ref,
+      withBom.claim.lease.token,
+      bomSource,
+      { now: "2026-07-19T00:00:01.000Z" },
+    );
+
+    expect(bomRecord.candidate_sha256).toBe(noBomRecord.candidate_sha256);
+    expect(bomRecord.size_bytes).toBe(noBomRecord.size_bytes);
+    expect(readFileSync(noBomRecord.candidate_path)).toEqual(Buffer.from(payload, "utf8"));
+    expect(readFileSync(bomRecord.candidate_path)).toEqual(Buffer.from(payload, "utf8"));
+  });
+
+  it("rejects UTF-16 and non-BOM leading garbage", () => {
+    const utf16 = fixture();
+    const leadingGarbage = fixture();
+    const payload = JSON.stringify({ nodes: [], edges: [] });
+    const utf16Source = path.join(utf16.root, "candidate-utf16.json");
+    const garbageSource = path.join(leadingGarbage.root, "candidate-leading-garbage.json");
+    writeFileSync(utf16Source, Buffer.concat([
+      Buffer.from([0xff, 0xfe]),
+      Buffer.from(payload, "utf16le"),
+    ]));
+    writeFileSync(garbageSource, `garbage${payload}`, "utf8");
+
+    expect(() => stageAutomaticBuildCandidate(
+      utf16.target,
+      utf16.claim.lease_ref,
+      utf16.claim.lease.token,
+      utf16Source,
+      { now: "2026-07-19T00:00:01.000Z" },
+    )).toThrow("valid UTF-8 JSON");
+    expect(() => stageAutomaticBuildCandidate(
+      leadingGarbage.target,
+      leadingGarbage.claim.lease_ref,
+      leadingGarbage.claim.lease.token,
+      garbageSource,
+      { now: "2026-07-19T00:00:01.000Z" },
+    )).toThrow("valid UTF-8 JSON");
+  });
+
   it("stages only bounded valid JSON and rejects submit paths outside the attempt", () => {
     const { root, target, claim } = fixture();
     const invalid = path.join(root, "invalid.json");
@@ -63,6 +125,26 @@ describe("automatic build task mailbox", () => {
       () => ({ artifact_path: path.join(root, "artifact.json") }),
       { now: "2026-07-19T00:00:02.000Z" },
     )).toThrow("candidate path");
+  });
+
+  it("does not record a submit revision for an expired lease", () => {
+    const { root, target, claim } = fixture();
+    const staged = stageAutomaticBuildCandidate(
+      target,
+      claim.lease_ref,
+      claim.lease.token,
+      candidateFile(root, { nodes: [], edges: [] }),
+      { now: "2026-07-19T00:00:01.000Z" },
+    );
+    expect(() => submitAutomaticBuildCandidate(
+      target,
+      claim.lease_ref,
+      claim.lease.token,
+      staged.candidate_path,
+      () => ({ artifact_path: path.join(root, "artifact.json") }),
+      { now: "2026-07-19T00:01:00.000Z" },
+    )).toThrow("expired");
+    expect(readAutomaticBuildAttemptRecord(target, "pass1", "0")).toMatchObject({ submit_revision: 0 });
   });
 
   it("commits once, replays the same receipt, and rejects changed candidate bytes", () => {
@@ -101,6 +183,11 @@ describe("automatic build task mailbox", () => {
 
     expect(second).toEqual(first);
     expect(writes).toBe(1);
+    expect(readAutomaticBuildAttemptRecord(target, "pass1", "0")).toMatchObject({
+      semantic_attempt: 1,
+      lease_epoch: 1,
+      submit_revision: 2,
+    });
     expect(stageAutomaticBuildCandidate(
       target,
       claim.lease_ref,
@@ -158,6 +245,11 @@ describe("automatic build task mailbox", () => {
       },
       { now: "2026-07-19T00:00:03.000Z" },
     );
+    expect(readAutomaticBuildAttemptRecord(target, "pass1", "0")).toMatchObject({
+      semantic_attempt: 1,
+      lease_epoch: 1,
+      submit_revision: 2,
+    });
     expect(inspectAutomaticBuildTask(target, claim.lease_ref, claim.lease.token)).toEqual(receipt);
 
     const other = fixture();

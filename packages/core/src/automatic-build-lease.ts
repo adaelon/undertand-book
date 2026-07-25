@@ -13,13 +13,20 @@ import type { AutomaticBuildStage, AutomaticBuildTarget, BuildTargetRefV2 } from
 import {
   automaticBuildTaskAttemptDirectory,
   automaticBuildTaskStoreRoot,
+  nextAutomaticBuildExecutionIdentity,
   readAutomaticBuildAttemptRecord,
+  readAutomaticBuildExecutionIdentity,
+  recordAutomaticBuildExecutionIdentity,
+  type AutomaticBuildExecutionIdentityV1,
 } from "./automatic-build-task-store";
 import {
   freezeAutomaticBuildStagePolicy,
   type AutomaticBuildTaskPolicyBindingV1,
   type ExtractionPolicyFingerprintV1,
 } from "./semantic-artifact";
+
+const DEFAULT_RESERVE_TTL_MS = 600_000;
+const DEFAULT_RUN_TTL_MS = 1_800_000;
 
 export interface AutomaticBuildTaskLeaseV1 {
   version: "automatic_build_task_lease.v1";
@@ -35,6 +42,39 @@ export interface AutomaticBuildTaskLeaseV1 {
   policy_fingerprint?: ExtractionPolicyFingerprintV1;
 }
 
+export interface AutomaticBuildTaskLeaseV2 {
+  version: "automatic_build_task_lease.v2";
+  target_ref: BuildTargetRefV2;
+  stage: AutomaticBuildStage;
+  work_unit_id: string;
+  attempt: number;
+  phase: "reserved";
+  owner: string;
+  token: string;
+  reserved_at: string;
+  reserve_expires_at: string;
+  issued_at: string;
+  expires_at: string;
+  input_hash?: string;
+  policy_fingerprint?: ExtractionPolicyFingerprintV1;
+}
+
+export type AutomaticBuildTaskLease = AutomaticBuildTaskLeaseV1 | AutomaticBuildTaskLeaseV2;
+
+export interface AutomaticBuildTaskStartV1 {
+  version: "automatic_build_task_start.v1";
+  target_ref: BuildTargetRefV2;
+  stage: AutomaticBuildStage;
+  work_unit_id: string;
+  physical_attempt: number;
+  phase: "running";
+  owner: string;
+  lease_token: string;
+  execution_identity: AutomaticBuildExecutionIdentityV1;
+  started_at: string;
+  run_expires_at: string;
+}
+
 export interface AutomaticBuildTaskHeartbeatV1 {
   version: "automatic_build_task_heartbeat.v1";
   lease_token: string;
@@ -47,12 +87,31 @@ export interface AutomaticBuildLeaseOptions {
   owner: string;
   now?: string;
   ttl_ms?: number;
+  reserve_ttl_ms?: number;
   binding?: AutomaticBuildTaskPolicyBindingV1;
+  max_semantic_attempts?: number;
+  max_lease_epochs?: number;
 }
 
 export type AutomaticBuildClaimResult =
-  | { status: "leased"; lease_ref: string; lease: AutomaticBuildTaskLeaseV1 }
-  | { status: "already_leased"; lease_ref: string; lease: AutomaticBuildTaskLeaseV1 };
+  | {
+      status: "leased";
+      lease_ref: string;
+      lease: AutomaticBuildTaskLease;
+      execution_identity: AutomaticBuildExecutionIdentityV1;
+    }
+  | {
+      status: "already_leased";
+      lease_ref: string;
+      lease: AutomaticBuildTaskLease;
+      execution_identity: AutomaticBuildExecutionIdentityV1;
+    }
+  | { status: "retry_exhausted"; semantic_attempt: number }
+  | { status: "executor_instability"; semantic_attempt: number; lease_epoch: number };
+
+export type AutomaticBuildClaimInspection =
+  | { status: "ready"; execution_identity: AutomaticBuildExecutionIdentityV1 }
+  | Exclude<AutomaticBuildClaimResult, { status: "leased" }>;
 
 function readJson<T>(file: string): T {
   return JSON.parse(readFileSync(file, "utf8")) as T;
@@ -90,9 +149,51 @@ function assertLeasePath(target: AutomaticBuildTarget, leaseRef: string): string
   return resolved;
 }
 
-function effectiveExpiry(leaseRef: string, lease: AutomaticBuildTaskLeaseV1): string {
+function startPath(leaseRef: string): string {
+  return path.join(path.dirname(leaseRef), "start.json");
+}
+
+function readAutomaticBuildStart(
+  target: AutomaticBuildTarget,
+  leaseRef: string,
+  lease: AutomaticBuildTaskLease,
+): AutomaticBuildTaskStartV1 | undefined {
+  const file = startPath(leaseRef);
+  if (!existsSync(file)) return undefined;
+  const start = readJson<AutomaticBuildTaskStartV1>(file);
+  const identity = readAutomaticBuildExecutionIdentity(
+    target,
+    lease.stage,
+    lease.work_unit_id,
+    lease.attempt,
+  );
+  if (start.version !== "automatic_build_task_start.v1"
+    || !sameTargetRef(start.target_ref, lease.target_ref)
+    || start.stage !== lease.stage
+    || start.work_unit_id !== lease.work_unit_id
+    || start.physical_attempt !== lease.attempt
+    || start.owner !== lease.owner
+    || start.lease_token !== lease.token
+    || !identity
+    || start.execution_identity.semantic_attempt !== identity.semantic_attempt
+    || start.execution_identity.lease_epoch !== identity.lease_epoch) {
+    throw new Error(`invalid automatic build start: ${file}`);
+  }
+  return start;
+}
+
+function effectiveExpiry(target: AutomaticBuildTarget, leaseRef: string, lease: AutomaticBuildTaskLease): string {
+  const start = readAutomaticBuildStart(target, leaseRef, lease);
+  const phaseExpiry = start
+    ? start.run_expires_at
+    : lease.version === "automatic_build_task_lease.v2"
+      ? lease.reserve_expires_at
+      : lease.expires_at;
   const heartbeatPath = path.join(path.dirname(leaseRef), "heartbeat.json");
-  if (!existsSync(heartbeatPath)) return lease.expires_at;
+  if (!existsSync(heartbeatPath)) return phaseExpiry;
+  if (!start && lease.version === "automatic_build_task_lease.v2") {
+    throw new Error(`automatic build heartbeat requires a running lease: ${heartbeatPath}`);
+  }
   const heartbeat = readJson<AutomaticBuildTaskHeartbeatV1>(heartbeatPath);
   if (heartbeat.version !== "automatic_build_task_heartbeat.v1"
     || heartbeat.lease_token !== lease.token
@@ -116,6 +217,13 @@ function writeHeartbeatAtomic(file: string, heartbeat: AutomaticBuildTaskHeartbe
     rmSync(file);
     renameSync(temp, file);
   }
+}
+
+function appendHeartbeatObservation(leaseRef: string, heartbeat: AutomaticBuildTaskHeartbeatV1): void {
+  const directory = path.join(path.dirname(leaseRef), "heartbeats");
+  mkdirSync(directory, { recursive: true });
+  const file = path.join(directory, `${heartbeat.updated_at.replace(/[:.]/g, "-")}-${randomUUID()}.json`);
+  writeFileSync(file, `${JSON.stringify(heartbeat, null, 2)}\n`, { encoding: "utf8", flag: "wx" });
 }
 
 function taskAttemptsDirectory(
@@ -146,11 +254,40 @@ function activeLeaseAt(
   target: AutomaticBuildTarget,
   leaseRef: string,
   now: string,
-): AutomaticBuildTaskLeaseV1 | undefined {
-  const lease = readJson<AutomaticBuildTaskLeaseV1>(leaseRef);
-  if (lease.version !== "automatic_build_task_lease.v1") throw new Error(`invalid automatic build lease: ${leaseRef}`);
+): AutomaticBuildTaskLease | undefined {
+  const lease = readJson<AutomaticBuildTaskLease>(leaseRef);
+  if (!(["automatic_build_task_lease.v1", "automatic_build_task_lease.v2"] as string[]).includes(lease.version)) {
+    throw new Error(`invalid automatic build lease: ${leaseRef}`);
+  }
   if (!sameTargetRef(lease.target_ref, target.target_ref) || terminalEventExists(leaseRef)) return undefined;
-  return timeMs(now, "now") < timeMs(effectiveExpiry(leaseRef, lease), "expires_at") ? lease : undefined;
+  return timeMs(now, "now") < timeMs(effectiveExpiry(target, leaseRef, lease), "expires_at") ? lease : undefined;
+}
+
+export function inspectAutomaticBuildTaskClaim(
+  target: AutomaticBuildTarget,
+  stage: AutomaticBuildStage,
+  workUnitId: string,
+  options: Pick<AutomaticBuildLeaseOptions, "now" | "max_semantic_attempts" | "max_lease_epochs"> = {},
+): AutomaticBuildClaimInspection {
+  const now = options.now ?? new Date().toISOString();
+  timeMs(now, "now");
+  for (const entry of attemptDirectories(target, stage, workUnitId)) {
+    if (!entry.lease_ref) continue;
+    const active = activeLeaseAt(target, entry.lease_ref, now);
+    if (!active) continue;
+    const executionIdentity = readAutomaticBuildExecutionIdentity(target, stage, workUnitId, active.attempt);
+    if (!executionIdentity) throw new Error(`active lease is missing execution identity: ${entry.lease_ref}`);
+    return {
+      status: "already_leased",
+      lease_ref: entry.lease_ref,
+      lease: active,
+      execution_identity: executionIdentity,
+    };
+  }
+  return nextAutomaticBuildExecutionIdentity(target, stage, workUnitId, {
+    max_semantic_attempts: options.max_semantic_attempts ?? 3,
+    max_lease_epochs: options.max_lease_epochs ?? 3,
+  });
 }
 
 export function assertActiveAutomaticBuildLease(
@@ -158,11 +295,11 @@ export function assertActiveAutomaticBuildLease(
   leaseRef: string,
   token: string,
   now = new Date().toISOString(),
-): AutomaticBuildTaskLeaseV1 {
+): AutomaticBuildTaskLease {
   const lease = readAutomaticBuildLease(target, leaseRef, token);
   const resolved = assertLeasePath(target, leaseRef);
   if (terminalEventExists(resolved)) throw new Error(`automatic build lease is already terminal: ${resolved}`);
-  if (timeMs(now, "now") >= timeMs(effectiveExpiry(resolved, lease), "expires_at")) {
+  if (timeMs(now, "now") >= timeMs(effectiveExpiry(target, resolved, lease), "expires_at")) {
     throw new Error(`automatic build lease expired: ${resolved}`);
   }
   return lease;
@@ -172,15 +309,61 @@ export function readAutomaticBuildLease(
   target: AutomaticBuildTarget,
   leaseRef: string,
   token: string,
-): AutomaticBuildTaskLeaseV1 {
+): AutomaticBuildTaskLease {
   const resolved = assertLeasePath(target, leaseRef);
   if (!existsSync(resolved)) throw new Error(`automatic build lease does not exist: ${resolved}`);
-  const lease = readJson<AutomaticBuildTaskLeaseV1>(resolved);
-  if (lease.version !== "automatic_build_task_lease.v1" || !sameTargetRef(lease.target_ref, target.target_ref)) {
+  const lease = readJson<AutomaticBuildTaskLease>(resolved);
+  if (!(["automatic_build_task_lease.v1", "automatic_build_task_lease.v2"] as string[]).includes(lease.version)
+    || !sameTargetRef(lease.target_ref, target.target_ref)) {
     throw new Error(`automatic build lease target mismatch: ${resolved}`);
   }
   if (lease.token !== token) throw new Error(`automatic build lease token mismatch: ${resolved}`);
   return lease;
+}
+
+export function startAutomaticBuildLease(
+  target: AutomaticBuildTarget,
+  leaseRef: string,
+  token: string,
+  options: { now?: string; run_ttl_ms?: number } = {},
+): AutomaticBuildTaskStartV1 {
+  const resolved = assertLeasePath(target, leaseRef);
+  const lease = readAutomaticBuildLease(target, resolved, token);
+  const existing = readAutomaticBuildStart(target, resolved, lease);
+  if (existing) return existing;
+  const times = leaseTimes(options.now, options.run_ttl_ms ?? DEFAULT_RUN_TTL_MS);
+  assertActiveAutomaticBuildLease(target, resolved, token, times.now);
+  const executionIdentity = readAutomaticBuildExecutionIdentity(
+    target,
+    lease.stage,
+    lease.work_unit_id,
+    lease.attempt,
+  );
+  if (!executionIdentity) throw new Error(`automatic build start is missing execution identity: ${resolved}`);
+  const start: AutomaticBuildTaskStartV1 = {
+    version: "automatic_build_task_start.v1",
+    target_ref: lease.target_ref,
+    stage: lease.stage,
+    work_unit_id: lease.work_unit_id,
+    physical_attempt: lease.attempt,
+    phase: "running",
+    owner: lease.owner,
+    lease_token: lease.token,
+    execution_identity: executionIdentity,
+    started_at: times.now,
+    run_expires_at: times.expires_at,
+  };
+  const file = startPath(resolved);
+  try {
+    writeFileSync(file, `${JSON.stringify(start, null, 2)}\n`, { encoding: "utf8", flag: "wx" });
+    return start;
+  } catch (error) {
+    const code = error && typeof error === "object" && "code" in error ? String(error.code) : "";
+    if (code !== "EEXIST") throw error;
+    const raced = readAutomaticBuildStart(target, resolved, lease);
+    if (!raced) throw error;
+    return raced;
+  }
 }
 
 export function heartbeatAutomaticBuildLease(
@@ -189,9 +372,13 @@ export function heartbeatAutomaticBuildLease(
   token: string,
   options: { now?: string; ttl_ms?: number } = {},
 ): AutomaticBuildTaskHeartbeatV1 {
-  const times = leaseTimes(options.now, options.ttl_ms);
+  const times = leaseTimes(options.now, options.ttl_ms ?? DEFAULT_RUN_TTL_MS);
   const resolved = assertLeasePath(target, leaseRef);
-  const lease = assertActiveAutomaticBuildLease(target, resolved, token, times.now);
+  const lease = readAutomaticBuildLease(target, resolved, token);
+  if (!readAutomaticBuildStart(target, resolved, lease)) {
+    throw new Error(`automatic build heartbeat requires a running lease: ${resolved}`);
+  }
+  assertActiveAutomaticBuildLease(target, resolved, token, times.now);
   const heartbeat: AutomaticBuildTaskHeartbeatV1 = {
     version: "automatic_build_task_heartbeat.v1",
     lease_token: lease.token,
@@ -200,6 +387,7 @@ export function heartbeatAutomaticBuildLease(
     expires_at: times.expires_at,
   };
   writeHeartbeatAtomic(path.join(path.dirname(resolved), "heartbeat.json"), heartbeat);
+  appendHeartbeatObservation(resolved, heartbeat);
   return heartbeat;
 }
 
@@ -210,32 +398,32 @@ export function claimAutomaticBuildTask(
   options: AutomaticBuildLeaseOptions,
 ): AutomaticBuildClaimResult {
   if (!options.owner) throw new Error("lease owner must not be empty");
-  const times = leaseTimes(options.now, options.ttl_ms);
+  const times = leaseTimes(options.now, options.reserve_ttl_ms ?? options.ttl_ms ?? DEFAULT_RESERVE_TTL_MS);
   if (options.binding) {
     if (stage === "paper_reading_guide") throw new Error("paper_reading_guide does not accept semantic task bindings");
     freezeAutomaticBuildStagePolicy(target, stage, options.binding.policy_fingerprint, times.now);
   }
   for (let retry = 0; retry < 8; retry += 1) {
     const directories = attemptDirectories(target, stage, workUnitId);
-    for (const entry of directories) {
-      if (!entry.lease_ref) continue;
-      const active = activeLeaseAt(target, entry.lease_ref, times.now);
-      if (active) return { status: "already_leased", lease_ref: entry.lease_ref, lease: active };
-    }
+    const inspection = inspectAutomaticBuildTaskClaim(target, stage, workUnitId, options);
+    if (inspection.status !== "ready") return inspection;
     const persisted = readAutomaticBuildAttemptRecord(target, stage, workUnitId);
     const maxDirectoryAttempt = directories.at(-1)?.attempt ?? 0;
     const attempt = Math.max(maxDirectoryAttempt, persisted?.last_attempt ?? 0) + 1;
     const attemptDir = automaticBuildTaskAttemptDirectory(target, stage, workUnitId, attempt);
     mkdirSync(attemptDir, { recursive: true });
     const leaseRef = path.join(attemptDir, "lease.json");
-    const lease: AutomaticBuildTaskLeaseV1 = {
-      version: "automatic_build_task_lease.v1",
+    const lease: AutomaticBuildTaskLeaseV2 = {
+      version: "automatic_build_task_lease.v2",
       target_ref: target.target_ref,
       stage,
       work_unit_id: workUnitId,
       attempt,
+      phase: "reserved",
       owner: options.owner,
       token: randomUUID(),
+      reserved_at: times.now,
+      reserve_expires_at: times.expires_at,
       issued_at: times.now,
       expires_at: times.expires_at,
       ...(options.binding ? {
@@ -245,7 +433,15 @@ export function claimAutomaticBuildTask(
     };
     try {
       writeFileSync(leaseRef, `${JSON.stringify(lease, null, 2)}\n`, { encoding: "utf8", flag: "wx" });
-      return { status: "leased", lease_ref: leaseRef, lease };
+      const executionIdentity = recordAutomaticBuildExecutionIdentity(
+        target,
+        stage,
+        workUnitId,
+        attempt,
+        inspection.execution_identity,
+        times.now,
+      );
+      return { status: "leased", lease_ref: leaseRef, lease, execution_identity: executionIdentity };
     } catch (error) {
       const code = error && typeof error === "object" && "code" in error ? String(error.code) : "";
       if (code !== "EEXIST") throw error;

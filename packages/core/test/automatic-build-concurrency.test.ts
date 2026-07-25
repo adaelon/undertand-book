@@ -6,13 +6,22 @@ import {
   buildAutomaticBuildPreflight,
   type AutomaticBuildBudgetLimitsV1,
 } from "../src/automatic-build-budget";
+import {
+  planAutomaticBuildExecutorDispatches,
+  selectAutomaticBuildDispatchRefill,
+} from "../src/automatic-build-dispatch";
 import { submitAutomaticBuildCandidate } from "../src/automatic-build-mailbox";
 import { readAutomaticBuildAttemptSnapshot } from "../src/automatic-build-task-store";
 import { resolveAutomaticBuildTarget } from "../src/build-orchestrator";
 import { resolveContentProfile } from "../src/content-profile";
 import { automaticBuildExtractionPolicy } from "../src/semantic-artifact";
 import { buildWorkUnitCost, createWorkUnitDescriptor, type WorkUnitDescriptorV2 } from "../src/stage-work-unit";
-import { automaticBuildNext, automaticBuildPlan } from "../../../skills/build/automatic-build";
+import {
+  automaticBuildDispatchFinish,
+  automaticBuildDispatchNext,
+  automaticBuildNext,
+  automaticBuildPlan,
+} from "../../../skills/build/automatic-build";
 
 const targetRef = {
   version: "build_target_ref.v2" as const,
@@ -78,6 +87,7 @@ async function fakeExecutorRun(workerSlots: 1 | 2 | 3, reduceAfterFirst = false)
     }
     planDigests.add(plan.preflight.plan_digest);
     const next = automaticBuildNext(source, root, 3, {
+      protocol: "automatic_build_protocol.v2",
       owner: `fake-dispatcher-${workerSlots}`,
       now: `2026-07-19T00:00:${String(round).padStart(2, "0")}.000Z`,
       lease_ttl_ms: 60_000,
@@ -147,6 +157,127 @@ async function fakeExecutorRun(workerSlots: 1 | 2 | 3, reduceAfterFirst = false)
 }
 
 describe("automatic build safe concurrent execution", () => {
+  it("refills a free worker immediately without waiting for slower active dispatches", () => {
+    const units = Array.from({ length: 16 }, (_, index) => descriptor(`refill-${index}`, 10));
+    const plan = planAutomaticBuildExecutorDispatches({
+      target_ref: targetRef,
+      stage: "pass1",
+      work_units: units,
+      pending_ids: units.map((unit) => unit.work_unit_id),
+      available_agent_slots: 3,
+    });
+    expect(plan.dispatches).toHaveLength(4);
+    const initial = plan.selected_dispatch_ids;
+    const refill = selectAutomaticBuildDispatchRefill(plan, {
+      active_dispatch_ids: initial.slice(1),
+      completed_dispatch_ids: [initial[0]],
+      available_agent_slots: 3,
+    });
+    expect(refill).toEqual([plan.dispatches[3].dispatch_id]);
+  });
+
+  it("refills from the accepted runtime plan while slower dispatches remain active", () => {
+    const root = mkdtempSync(path.join(tmpdir(), "understand-book-runtime-refill-"));
+    const source = path.join(root, "concurrency-guide.md");
+    writeFileSync(source, [
+      "# Runtime refill guide",
+      ...Array.from({ length: 1_300 }, (_, index) => (
+        `Paragraph ${index + 1} contains stable semantic evidence for runtime refill.`
+      )),
+    ].join("\n\n"), "utf8");
+    const target = resolveAutomaticBuildTarget(source, root);
+    const refillBudget: AutomaticBuildBudgetLimitsV1 = {
+      ...budget,
+      max_tasks: 10_000,
+      max_total_score: 1_000_000_000,
+      max_estimated_total_tokens: 1_000_000_000,
+      max_batch_score: 1_000_000_000,
+      max_parallel_cost: 1_000_000_000,
+    };
+    const initialPlan = automaticBuildPlan(source, root, {
+      requested_workers: 3,
+      available_agent_slots: 3,
+      budget: refillBudget,
+    });
+    if (!initialPlan.preflight || initialPlan.preflight.dispatch_plan.dispatches.length < 4) {
+      throw new Error("expected at least four executor dispatches");
+    }
+    const initial = automaticBuildNext(source, root, 3, {
+      owner: "runtime-refill",
+      now: "2026-07-25T03:00:00.000Z",
+      budget: refillBudget,
+      available_agent_slots: 3,
+      accepted_plan_digest: initialPlan.preflight.plan_digest,
+      executor_dispatches: true,
+    });
+    if (!("dispatches" in initial.action) || !initial.action.dispatches) {
+      throw new Error("expected initial dispatch handoff");
+    }
+    expect(initial.action.dispatches).toHaveLength(3);
+    for (const slow of initial.action.dispatches.slice(1)) {
+      expect(automaticBuildDispatchNext(source, root, slow.manifest.stage, slow.manifest.dispatch_id, {
+        dispatch_run_id: slow.dispatch_run_id,
+        now: "2026-07-25T03:00:01.000Z",
+      }).action.kind).toBe("task");
+    }
+    const fastest = initial.action.dispatches[0].manifest;
+    let step = automaticBuildDispatchNext(source, root, fastest.stage, fastest.dispatch_id, {
+      now: "2026-07-25T03:00:01.000Z",
+    });
+    let second = 2;
+    while (step.action.kind === "task") {
+      const task = step.action.task;
+      writeFileSync(task.candidate_path, JSON.stringify({
+        content_hash: task.descriptor.input_hash,
+        nodes: [],
+        edges: [],
+      }), "utf8");
+      const artifactPath = path.join(target.workspace_dir, ".build", "pass1", `${task.task_id}.json`);
+      submitAutomaticBuildCandidate(
+        target,
+        task.lease_ref,
+        task.lease.token,
+        task.candidate_path,
+        (candidatePath) => {
+          mkdirSync(path.dirname(artifactPath), { recursive: true });
+          writeFileSync(artifactPath, readFileSync(candidatePath));
+          return { artifact_path: artifactPath, output_counts: { nodes: 0, edges: 0 } };
+        },
+        { now: task.lease.issued_at, completed_at: task.lease.issued_at },
+      );
+      step = automaticBuildDispatchNext(source, root, fastest.stage, fastest.dispatch_id, {
+        now: `2026-07-25T03:00:${String(second).padStart(2, "0")}.000Z`,
+      });
+      second += 1;
+    }
+    expect(step.action.kind).toBe("finish");
+    automaticBuildDispatchFinish(source, root, fastest.stage, fastest.dispatch_id, {
+      now: "2026-07-25T03:00:30.000Z",
+    });
+
+    const refillPlan = automaticBuildPlan(source, root, {
+      requested_workers: 3,
+      available_agent_slots: 1,
+      budget: refillBudget,
+    });
+    if (!refillPlan.preflight) throw new Error("expected refill preflight");
+    const refill = automaticBuildNext(source, root, 3, {
+      owner: "runtime-refill",
+      now: "2026-07-25T03:00:31.000Z",
+      budget: refillBudget,
+      available_agent_slots: 1,
+      accepted_plan_digest: refillPlan.preflight.plan_digest,
+      executor_dispatches: true,
+    });
+    if (!("dispatches" in refill.action) || !refill.action.dispatches) {
+      throw new Error("expected refill dispatch handoff");
+    }
+    expect(refill.action.dispatches).toHaveLength(1);
+    expect(refill.action.dispatches[0].manifest.dispatch_id).toBe(
+      initialPlan.preflight.dispatch_plan.dispatches[3].dispatch_id,
+    );
+  });
+
   it("caps workers by live slots, hard limit three, and parallel cost without changing plan identity", () => {
     const units = [descriptor("a", 10), descriptor("b", 20), descriptor("c", 30), descriptor("d", 40)];
     const base = {

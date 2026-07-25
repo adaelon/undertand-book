@@ -72,8 +72,12 @@ if (command === "prompt") {
   }
   process.stdout.write(prompt);
 } else if ([
+  "protocol-doctor",
   "plan",
   "next",
+  "dispatch.next",
+  "dispatch.inspect",
+  "dispatch.finish",
   "audit-legacy",
   "migration-mode",
   "quality",
@@ -101,6 +105,6 @@ if (command === "prompt") {
 } else if (command === "workbench-stage") {
   await runScript("workbench-stage-runner.ts", forwardedArgs(1));
 } else {
-  console.error("usage: understand-book-build <plan|next|audit-legacy|migration-mode|quality|metrics|record-attempt|heartbeat|candidate|submit|legacy-submit|fail|inspect|input|write|close|run-script|prompt|workbench-stage> [...args]");
+  console.error("usage: understand-book-build <protocol-doctor|plan|next|dispatch.next|dispatch.inspect|dispatch.finish|audit-legacy|migration-mode|quality|metrics|record-attempt|heartbeat|candidate|submit|legacy-submit|fail|inspect|input|write|close|run-script|prompt|workbench-stage> [...args]");
   process.exit(2);
 }

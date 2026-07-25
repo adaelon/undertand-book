@@ -1,77 +1,56 @@
-# SESSION_CHECKPOINT - 2026-07-24
+# SESSION_CHECKPOINT - 2026-07-25 BP8 收口
 
-## Freshness
+## 新鲜度自检
 
-- Latest committed slice: `a93efc6 build(desktop): release reviewed pdf setup`.
-- Setup source snapshot: detached clean `396ac99 feat(pdf): publish reviewed foundation version`.
-- On resume, compare `git log -4 --oneline`; if HEAD differs, re-audit this checkpoint against Git.
+- 写入时基线 commit:`2df1af3 feat(agent): govern requests and compact active context`。
+- BP1-BP8 合并在包含本页的同一个 commit；冷启动先以 `git log --oneline -3` 和 `git show --stat HEAD` 核对本页。
 
-## Current Goal
+## 当前完成状态
 
-Complete: AP1-AP10 from `docs/切片方案-Agent提示词与工具上下文治理.md` under ADR-0091 are implemented and verified. Preserve the main worktree's unrelated Rust/Reader/frontend-document edits and temporary artifacts.
+主线 `docs/切片方案-一键预构建租约与调度性能治理.md` 的 BP1-BP8 已全部实现、验证并落档。生产新 claim 默认已从 `automatic_build_protocol.v2` 切换为 `automatic_build_protocol.v2_dispatch`；旧 v2 仍可显式选择，只读续建既有 task/artifact，不迁移、不重写。
 
-## Agent Request Governance Progress
+已完成能力包括 candidate UTF-8/BOM 止血、三维执行身份、reserved/running lease、append-only 生命周期与 provenance、deterministic dispatch planner、multi-task executor handoff、墙钟预算/adaptive TTL/动态补位，以及 BP8 canonical protocol parity、protocol doctor 和 packaged/plugin release。
 
-- AP0: ADR-0091, implementation slices, compact generation/consumption prompt v1, source coverage gates and terminology are frozen in docs.
-- AP1: `AgentRequestAudit` samples each provider-neutral chat request without bodies, separates active input estimates, schema/body bytes and cumulative billed usage, and observes the current 27-tool surface.
-- AP1 isolation: `OuterOutcome.request_audit` is `serde/TS skip`; tests prove it is absent from HTTP replies, persisted AgentHistory, public history Views and generated TypeScript contracts.
-- AP1 verification: `cargo test -p runtime agent_request_audit` (2 passed) and `cargo test -p server agent_request_audit` (1 passed). Five synthetic fixtures are deterministic and contain no real-book text.
-- AP2: `ModelRuntimeCatalog` resolves explicit override > exact/prefix catalog > versioned fallback; `ModelAdapter::chat` now accepts only a turn-frozen `AgentRequestPlan` with explicit instructions/input/tools/tool choice/parallel capability and active-context status.
-- AP2 parity: Native explicitly sends auto/none plus `parallel_tool_calls=false`; ReAct consumes the same plan through its compatibility protocol. The existing `SYSTEM_PROMPT`, 27-tool exposure, stop semantics and warnings are unchanged.
-- AP2 verification: `cargo test -p runtime agent_request_plan` (4 passed), Runtime full 182, Server full 186 plus book_mcp 5, AP1 regression, fmt and diff checks all passed.
-- AP3: `ContextFragmentLedger` now owns keyed latest-revision projection for `reader.profile_snapshot`, `memory.operation_result` and `reader.paper_minimap_agent_context`; wrappers are turn-frozen and never appended to durable messages/history.
-- AP3 privacy/identity: unchanged profile content reuses the same revision, changed content replaces it once, paper minimap state does not drift mid-loop, and durable user messages now keep the raw question without embedded map JSON.
-- AP3 verification: `cargo test -p runtime context_fragment` (4 passed), `cargo test -p server profile_snapshot` (3 passed), Runtime full 184, Server full 187 plus book_mcp 5, fmt/diff checks all passed.
-- AP4: `ToolRegistry` now hard-gates the private 27-spec declaration against duplicate names/handlers, missing handlers and Book alias/schema drift; every entry carries one typed handler, validator, capability set, result policy and parallel permission.
-- AP4 dispatch: the live loop resolves model calls through the frozen registry and dispatches by `ToolHandlerId`; Native/ReAct receive `visible_specs()` from that same registry. The old hidden `book.manifest` dispatch bypass is closed, while all 27 visible schemas and sequential execution remain unchanged.
-- AP4 verification: `cargo test -p runtime tool_registry` (4 passed), `cargo test -p runtime book_tool_characterization` (1 passed), Runtime full 188/188 and Rust fmt passed.
-- AP5: `ToolExposurePlan` classifies the now 28-entry registry (27 prior tools plus `tool.search`) as direct/deferred/hidden from content profile, permissions, turn evidence and the frozen model schema budget. Ordinary local explanation exposes exactly 8 core read/source/discovery schemas.
-- AP5 discovery: `tool.search` searches canonical registration metadata only, activates at most 6 deferred tools per call, never returns hidden tools and takes effect only in the next sampling. Calls not present in the sampled plan fail with `TOOL_NOT_EXPOSED`, including same-batch attempts after discovery.
-- AP5 budget/isolation: direct tools are capped at 8; direct + activated schemas use the same JSON-array byte accounting as `AgentRequestAudit`; activated state is turn-local and is not persisted. Parallel execution remains disabled.
-- AP5 verification: `cargo test -p runtime tool_exposure` (5 passed), Runtime full 193/193, Server full 187/187 plus book_mcp 5/5, Rust fmt and targeted diff checks passed.
-- AP6 prompt assets: the monolithic `SYSTEM_PROMPT` is removed. `agent_prompt.rs` owns inherited base instructions plus versioned evidence/source/discovery/navigation/Reader/paper/memory/profile/finish modules, selected from the current sampled tool capabilities. `AgentRequestPlan.instruction_assets` records the exact base/module revisions sent to both providers.
-- AP6 auto/bookkeeping: nonempty tool surfaces remain explicit `tool_choice=auto`, sufficient quoted passages can finish with zero calls, and the model no longer receives a forced `book.query -> memory.save(type=qa)` chain. Successful queries are observed and idempotently persisted as QA by Runtime without a model-visible memory call or trace step.
-- AP6 no-progress: a canonical tool name/JSON-arguments fingerprint is keyed by evidence, activated tools, Reader state and Memory projection revision. Each completed call records before/after signatures, so an immediate same-argument or same-cursor retry fails with `AGENT_NO_PROGRESS` while a real intervening state change remains callable.
-- AP6 constraints: source presentation/LID validation, sampled-tool visibility, sequential dispatch, explicit Reader effects and reducer-owned proposals are unchanged. Tests cover zero-tool quoted explanation, the Eq.9 one-read gap, reordered identical arguments, Runtime QA recording and conditional policy modules.
-- AP6 verification: `cargo test -p runtime agent_tool_policy` (7 passed), `cargo test -p runtime source_presentation` (14 passed), Runtime full 200/200, Server full 187/187 plus book_mcp 5/5, Rust fmt and diff checks passed.
-- AP7 projection: `tool_result.rs` wraps every active handler result in `tool_result_envelope.v1`; typed output policies cap individual bodies and a 48 KiB active-turn ledger retains fresh bodies through the next sample, then evicts only the oldest already-sampled body under pressure. Raw tool JSON remains byte-preserved in durable messages and trace digests.
-- AP7 continuation/evidence: `book.text` cuts only at complete leaf-LID boundaries and emits a callable next range; context-truncated search emits a refine call while native pagination remains a distinct cursor continuation. Query/paper/profile/error have specialized bounded projectors. Only projected `model_body` enters the existing evidence whitelist; receipts and omitted tails cannot authorize source delivery.
-- AP7 verification: `cargo test -p runtime tool_result_projection` (7 passed), Runtime full 207/207, Server full 187/187 plus book_mcp 5/5, Rust fmt and diff checks all passed.
-- AP8 engine: `compaction.rs` owns `CompactionRequest -> CompactionDraft -> CompactionCheckpoint`, exact generation/consumption prompt assets, deterministic source/history/window identities, complete-turn chunking, current/incomplete raw retention, strict schema/coverage/reference/supersession/open-state validation and transitive hierarchical merge coverage. Only the draft is model-owned; compaction uses structured completion with no business tools or sensitive context bodies.
-- AP8 projection/persistence: validated checkpoints project as synthetic system context in `base -> latest fragments -> checkpoint -> raw/new suffix` order. `AgentChatSession.compaction_checkpoint` is a private sidecar field excluded from public history views; candidate install is atomic, durable messages remain byte-equivalent, stale/failed checkpoints change neither memory nor disk, and restart resumes sampling from the sidecar.
-- AP8 verification: `cargo test -p runtime compaction_checkpoint` (7 passed), `cargo test -p server agent_compaction_checkpoint` (1 passed), Runtime full 214/214, Server full 188/188 plus book_mcp 5/5, Rust fmt and diff checks all passed.
-- AP9 automatic trigger: every planned sampling is measured as active input + output reserve + safety margin. Profile high water runs pre-turn compact before appending the new user message or mid-turn compact after Tool results; successful install rebuilds current fragments/checkpoint/raw suffix and continues the same business turn.
-- AP9 stop semantics: cumulative billed usage is telemetry-only. Draft/validation/install failures are `COMPACTION_FAILED`, noncompactable or post-checkpoint physical overflow is `ACTIVE_CONTEXT_EXHAUSTED`, and tool-loop exhaustion is `TURN_LIMIT_EXCEEDED`; only legacy stored `CONTEXT_BUDGET_EXCEEDED` renders as context shortage.
-- AP9 persistence/UI: Server installs raw messages plus private checkpoint through an atomic sink; all typed warnings survive persistence/restart/public history. RightRail distinguishes compaction failure, physical capacity and turn limit. Compaction is absent from business Tool trace, request audit and turn count.
-- AP9 verification: `auto_compaction` 6/6, `active_context_budget` 1/1, `agent_warning_projection` 1/1; Runtime full 220/220; Server full 189/189 plus book_mcp 5/5; Web 26 files / 151 tests; Rust fmt/diff checks passed.
-- AP10 provider parity: Native/ReAct consume the same sampled `AgentRequestPlan`; call/result/error/stop fixtures share Runtime semantics, compaction paths share one `CompactionDraft` schema/validator, and unknown models fail closed instead of inheriting guessed continuation or remote-compaction capability. ReAct protocol examples now come only from the current sampled tools; empty, unexposed or parallel provider output cannot become a false successful null answer.
-- AP10 verified-selection convergence: server-resolved canonical selection text is current evidence. If more evidence is needed, the first sampling exposes only `book.context`, the second only `book.text`, and Runtime accepts at most one evidence call per response. After two calls it exits tool protocol and validates provider-neutral `selection_answer_synthesis.v1` JSON; DSML leakage or repeated contract violations fail closed.
-- AP10 real-provider replay: on Transformer book LID `1.19.86.58.18`, Native answered the Chinese normalization question in 3 samplings after exactly `book.context` + `book.text`; ReAct answered in 1 sampling with zero calls. Both finished with no warning and no profile, memory or navigation activity.
-- AP10 verification: `cargo test --workspace`, Rust fmt, Web 26 files / 151 tests and typecheck/build passed. Real exhaustive search returned 32 matches over 5 pages; real source delivery remained stable across restart without mutating history/book. Node/Bun v2 parity, plugin parity, workbench sidecar, packaged Book MCP, Rust release and NSIS passed.
-- AP10 Setup: `dist/UnderstandBookSetup.exe`, 37,599,143 bytes, SHA-256 `AD0119C3FECB4B6C93CE3937AE8835B24CF2934A0F4B2A9EF9E0A1DE213AF0C0`, built 2026-07-24 14:08:53 +08:00.
+冻结总顺序仍是 `BP1-BP9 -> IP1-IP10 -> BP10`。下一实施切片是 BP9；不得提前做真实模型默认切换、router 迁移或历史删除。
 
-## Completed PR20 Evidence
+## BP8 验收真相
 
-- Reviewed book version: `.understand-book/understanding-transformer-from-the-perspective-of-reviewed-v2`.
-- Approved source/PDF/migration SHA-256: `feb442870b9364e578c22b210b1ac6ed9ce098f59bd39ceb07806c741715af43` / `9391b89821c97dd14e66937fd71d22bfcfc72357f8023daddc6fc6334c68b9b0` / `ead42b79890ceb606aa765b9f14e4127f24c65e20b775af76868722f957b94db`.
-- Dual candidate digest: `cc056062004a7d8a72c176e70cfd0616ebf803ace67dcd1da4998276438e19e9` for both builds.
-- PR8 coverage: baseline/matched 2,075/2,075; current 1,945; direct 1,499; map 446; removed 130; missing/unexpected/unknown reason 0.
-- Wrong page/column, formal duplicate region/selection and material mismatch upgrade: all 0.
-- Stable-only graph migration: 877 nodes / 1,003 edges -> 800 / 929. Old artifact and graph digests stayed unchanged.
-- Publication transaction `release-cc056062004a7d8a`, journal revision 12, committed before sibling directory rename.
-- Core 69 files / 439 tests + typecheck; Rust workspace and fmt; Server 185; Web 26 files / 150 tests + typecheck/build; Playwright 11; old/new real-book selection round trips all passed.
+- `pnpm -C packages/core test -- automatic-build`:13 files / 74 tests passed。
+- `pnpm -C packages/core typecheck`:passed。
+- 重编 packaged sidecar 后 `node apps/desktop/scripts/smoke-automatic-build-parity.mjs`:plan/doctor/next/dispatch/lease/receipt canonical byte parity、默认 dispatch、旧 v2 rollback passed。
+- plugin cachebuster:`0.1.0+codex.20260725065404`；repo public、personal source、installed cache skill SHA-256 均为 `0587066c6ad2161f9b0ebc6fdcc3d50d4684fe9424c5c36607ebfdbc3fb71934`。
+- 已安装 cache:`C:\Users\Lenovo\.codex\plugins\cache\personal\understand-book\0.1.0+codex.20260725065404`；旧 source 可恢复备份:`C:\Users\Lenovo\plugins\understand-book-backup-20260725065404`。
+- 真实 Quantification packaged doctor 只读审计:Pass1 `46 fresh / 0 pending`；sidecar `3 fresh / 398 pending -> 65 dispatches`；`70` persisted attempts 均为 `legacy_inferred`；`49` v2 artifacts fresh。
+- 全 workspace `517` 文件摘要前后均为 `F6148DCE49A9529DC8AF1C90FBBBB1C5B36FE744A4DA4F3713B70A50D5873FD4`，doctor 未 claim、未写 state。
 
-## Completed PR21 Evidence
+## 关键入口
 
-- Source commit: clean detached `396ac99`; final release documentation commit: `a93efc6`.
-- Plugin parity `0.1.0+codex.20260721044654`, release config, Node/Bun v2 parity, compiled workbench sidecar, Book MCP launcher, Web build, Rust release and NSIS all passed.
-- NSIS bundle, detached export and final `dist/UnderstandBookSetup.exe`: 37,352,338 bytes; SHA-256 `D72ECC07400B3726951EB684586831BE084DF2A8B171FCDD61062949E9F4BEEE`; file/product version `0.1.0`; `NotSigned`.
-- Workbench sidecar: 104,346,112 bytes / SHA-256 `6155E4528E971796127831D6B814210F7518DC2F538C0A9AECCEE1755414C9B8`.
-- Book MCP: 5,052,416 bytes / SHA-256 `27146E3A8F6D3EFF188DD5B42ABB67724C0EDA10B13DAE397221E1F99946D2A9`.
-- Installer was not started. Detached worktree was restored to clean `396ac99` after Tauri generation.
+1. `packages/core/src/automatic-build-protocol.ts` - release v2、claim protocol resolver、canonical JSON。
+2. `packages/core/src/automatic-build-dispatch.ts` - deterministic manifest planner、refill selector。
+3. `packages/core/src/automatic-build-dispatch-runtime.ts` - accepted plan、run progress、task-by-task claim、bounded receipt。
+4. `packages/core/src/automatic-build-budget.ts` - lifetime/remaining/scheduled cost、wall-clock evaluation、adaptive TTL。
+5. `packages/core/src/automatic-build-task-store.ts`、`automatic-build-lease.ts`、`automatic-build-metrics.ts` - execution identity、phase lease、canonical lifecycle/provenance。
+6. `skills/build/automatic-build.ts` - plan/next/dispatch CLI、protocol doctor、canonical stdout。
+7. `skills/build/sidecar-entry.ts`、`apps/desktop/scripts/smoke-automatic-build-parity.mjs` - packaged entry 与 byte parity gate。
+8. `apps/desktop/scripts/assert-plugin-release.mjs` - public/installed plugin release hash gate。
 
-## Worktree Constraints
+## 下一步
 
-- C drive has 0 bytes free. Every Cargo/Node/package command must set workspace `TEMP/TMP`; use an E-drive `CARGO_TARGET_DIR`.
-- Main worktree has user-owned changes in base-schema/memory/profile/reader/runtime/server host and the frontend reader slice document. Preserve and do not stage them.
-- `SESSION_CHECKPOINT.md` is intentionally the uncommitted hot-start file; all PR21 release docs are committed in `a93efc6`.
+1. BP9 在隔离 benchmark namespace 使用真实 harness/model 回放固定 Quantification source/profile/policy。
+2. 核对 Pass1 与 sidecar 的 quality floor、agent starts、dispatch wait、wall-clock prediction、恢复和 candidate 隔离。
+3. BP9 只产性能发布结论，不覆盖当前 workspace、不切默认模型、不用 fake executor 冒充真实结果。
+4. BP9 完成后再按冻结顺序进入 IP1-IP10；BP10 模型 A/B 最后进行。
+
+## 冷启动读取顺序
+
+1. `docs/切片方案-一键预构建租约与调度性能治理.md` - BP8 actual validation 与 BP9 gate。
+2. `docs/adr/0092-phase-aware-automatic-build-leases-and-executor-dispatch-bundles.md` - lease、dispatch、预算与发布边界。
+3. `docs/代码链路.md` 最后的 BP5-BP8 条目 - 已实现符号与验证入口。
+4. `packages/core/src/automatic-build-protocol.ts`、`skills/build/automatic-build.ts` - 当前 production contract。
+5. `docs/切片方案-需求驱动渐进式预构建.md` §6-§7 - BP9 后的 IP 顺序。
+
+## 工作区边界
+
+- 本轮 commit 只应包含 BP1-BP8 的 Core、build skill、sidecar smoke/release、ADR/方案/复盘、架构、代码链路和 checkpoint 文件。
+- `CONTEXT.md` 同时含 ADR-0092/0093 与其他用户改动；只允许精确暂存 BP 对应 hunk，不能整文件暂存。
+- 工作区还有用户拥有的 schema/memory/reader/runtime/server/frontend、IP 文档和临时文件；不得清理、回退或提交。

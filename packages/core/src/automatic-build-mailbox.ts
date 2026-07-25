@@ -8,18 +8,22 @@ import {
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
+import { TextDecoder } from "node:util";
 import type { AutomaticBuildTarget } from "./build-orchestrator";
 import {
   assertActiveAutomaticBuildLease,
   readAutomaticBuildLease,
-  type AutomaticBuildTaskLeaseV1,
+  type AutomaticBuildTaskLease,
 } from "./automatic-build-lease";
 import {
   persistAutomaticBuildTaskMetrics,
   readAutomaticBuildUsageReceipt,
   type AutomaticBuildTaskMetricsV1,
 } from "./automatic-build-metrics";
-import { recordAutomaticBuildAttemptEvent } from "./automatic-build-task-store";
+import {
+  recordAutomaticBuildAttemptEvent,
+  recordAutomaticBuildSubmitRevision,
+} from "./automatic-build-task-store";
 import {
   buildSemanticArtifactEnvelope,
   writeSemanticArtifactEnvelopeFile,
@@ -28,6 +32,8 @@ import {
 
 const DEFAULT_MAX_CANDIDATE_BYTES = 4 * 1024 * 1024;
 const MAX_RECEIPT_BYTES = 4_096;
+const UTF8_BOM = Buffer.from([0xef, 0xbb, 0xbf]);
+const UTF8_DECODER = new TextDecoder("utf-8", { fatal: true });
 
 export interface AutomaticBuildCandidateRecordV1 {
   version: "automatic_build_candidate_record.v1";
@@ -45,8 +51,8 @@ export interface AutomaticBuildTaskReceiptV1 {
   version: "automatic_build_task_receipt.v1";
   task_ref: string;
   state: "committed" | "retryable_failure";
-  target_ref: AutomaticBuildTaskLeaseV1["target_ref"];
-  stage: AutomaticBuildTaskLeaseV1["stage"];
+  target_ref: AutomaticBuildTaskLease["target_ref"];
+  stage: AutomaticBuildTaskLease["stage"];
   work_unit_id: string;
   attempt: number;
   candidate_sha256?: string;
@@ -64,7 +70,7 @@ export interface AutomaticBuildTaskInspectionV1 {
   version: "automatic_build_task_inspection.v1";
   task_ref: string;
   state: "leased";
-  stage: AutomaticBuildTaskLeaseV1["stage"];
+  stage: AutomaticBuildTaskLease["stage"];
   work_unit_id: string;
   attempt: number;
   candidate_sha256?: string;
@@ -78,7 +84,7 @@ function readJson<T>(file: string): T {
   return JSON.parse(readFileSync(file, "utf8")) as T;
 }
 
-function taskRef(lease: AutomaticBuildTaskLeaseV1): string {
+function taskRef(lease: AutomaticBuildTaskLease): string {
   return `${lease.target_ref.book_id}:${lease.stage}:${lease.work_unit_id}:${lease.attempt}`;
 }
 
@@ -94,7 +100,16 @@ function writeJsonAtomic(file: string, value: unknown): void {
   }
 }
 
-function candidateInfo(candidatePath: string, maxBytes = DEFAULT_MAX_CANDIDATE_BYTES): AutomaticBuildCandidateRecordV1 {
+interface AutomaticBuildCandidatePayload {
+  record: AutomaticBuildCandidateRecordV1;
+  payload_bytes: Buffer;
+  had_bom: boolean;
+}
+
+function readCandidatePayload(
+  candidatePath: string,
+  maxBytes = DEFAULT_MAX_CANDIDATE_BYTES,
+): AutomaticBuildCandidatePayload {
   if (!existsSync(candidatePath) || !statSync(candidatePath).isFile()) {
     throw new Error(`candidate file does not exist: ${candidatePath}`);
   }
@@ -102,17 +117,32 @@ function candidateInfo(candidatePath: string, maxBytes = DEFAULT_MAX_CANDIDATE_B
   if (bytes.byteLength > maxBytes) {
     throw new Error(`candidate exceeds ${maxBytes} bytes: ${bytes.byteLength}`);
   }
+  const hadBom = bytes.subarray(0, UTF8_BOM.byteLength).equals(UTF8_BOM);
+  const payloadBytes = hadBom ? bytes.subarray(UTF8_BOM.byteLength) : bytes;
   try {
-    JSON.parse(bytes.toString("utf8").replace(/^\uFEFF/, ""));
+    JSON.parse(UTF8_DECODER.decode(payloadBytes));
   } catch {
-    throw new Error(`candidate must contain valid JSON: ${candidatePath}`);
+    throw new Error(`candidate must contain valid UTF-8 JSON (valid JSON required): ${candidatePath}`);
   }
   return {
-    version: "automatic_build_candidate_record.v1",
-    candidate_path: path.resolve(candidatePath),
-    candidate_sha256: sha256(bytes),
-    size_bytes: bytes.byteLength,
+    record: {
+      version: "automatic_build_candidate_record.v1",
+      candidate_path: path.resolve(candidatePath),
+      candidate_sha256: sha256(payloadBytes),
+      size_bytes: payloadBytes.byteLength,
+    },
+    payload_bytes: payloadBytes,
+    had_bom: hadBom,
   };
+}
+
+function candidateInfo(candidatePath: string, maxBytes = DEFAULT_MAX_CANDIDATE_BYTES): AutomaticBuildCandidateRecordV1 {
+  return readCandidatePayload(candidatePath, maxBytes).record;
+}
+
+function normalizeCandidatePayload(candidate: AutomaticBuildCandidatePayload): void {
+  if (!candidate.had_bom) return;
+  writeFileSync(candidate.record.candidate_path, candidate.payload_bytes);
 }
 
 function expectedCandidatePath(leaseRef: string): string {
@@ -140,7 +170,7 @@ function ensureReceiptBounded(receipt: AutomaticBuildTaskReceiptV1): void {
   if (bytes > MAX_RECEIPT_BYTES) throw new Error(`task receipt exceeds ${MAX_RECEIPT_BYTES} bytes: ${bytes}`);
 }
 
-function recordTerminalSuccess(target: AutomaticBuildTarget, lease: AutomaticBuildTaskLeaseV1, committedAt: string): void {
+function recordTerminalSuccess(target: AutomaticBuildTarget, lease: AutomaticBuildTaskLease, committedAt: string): void {
   recordAutomaticBuildAttemptEvent(target, {
     stage: lease.stage,
     work_unit_id: lease.work_unit_id,
@@ -172,23 +202,27 @@ export function stageAutomaticBuildCandidate(
   options: { max_bytes?: number; now?: string } = {},
 ): AutomaticBuildCandidateRecordV1 {
   readAutomaticBuildLease(target, leaseRef, token);
-  const source = candidateInfo(path.resolve(sourcePath), options.max_bytes);
+  const source = readCandidatePayload(path.resolve(sourcePath), options.max_bytes);
   const destination = expectedCandidatePath(leaseRef);
   if (existsSync(destination)) {
-    const existing = candidateInfo(destination, options.max_bytes);
-    if (existing.candidate_sha256 === source.candidate_sha256) return existing;
+    const existing = readCandidatePayload(destination, options.max_bytes);
+    if (existing.record.candidate_sha256 === source.record.candidate_sha256) {
+      normalizeCandidatePayload(existing);
+      return existing.record;
+    }
     throw new Error(`candidate already exists with a different hash: ${destination}`);
   }
   assertActiveAutomaticBuildLease(target, leaseRef, token, options.now);
   try {
-    writeFileSync(destination, readFileSync(source.candidate_path), { flag: "wx" });
+    writeFileSync(destination, source.payload_bytes, { flag: "wx" });
   } catch (error) {
     const code = error && typeof error === "object" && "code" in error ? String(error.code) : "";
     if (code !== "EEXIST") throw error;
-    const existing = candidateInfo(destination, options.max_bytes);
-    if (existing.candidate_sha256 !== source.candidate_sha256) {
+    const existing = readCandidatePayload(destination, options.max_bytes);
+    if (existing.record.candidate_sha256 !== source.record.candidate_sha256) {
       throw new Error(`candidate already exists with a different hash: ${destination}`);
     }
+    normalizeCandidatePayload(existing);
   }
   const staged = candidateInfo(destination, options.max_bytes);
   writeJsonAtomic(path.join(path.dirname(destination), "validation.json"), {
@@ -209,18 +243,34 @@ export function submitAutomaticBuildCandidate(
   options: { now?: string; completed_at?: string } = {},
 ): AutomaticBuildTaskReceiptV1 {
   const lease = readAutomaticBuildLease(target, leaseRef, token);
-  const candidate = candidateInfo(assertCandidatePath(leaseRef, candidatePath));
+  const candidatePayload = readCandidatePayload(assertCandidatePath(leaseRef, candidatePath));
+  const candidate = candidatePayload.record;
   const existingReceiptPath = receiptPath(leaseRef);
   if (existsSync(existingReceiptPath)) {
     const existing = readJson<AutomaticBuildTaskReceiptV1>(existingReceiptPath);
     if (existing.candidate_sha256 !== candidate.candidate_sha256) {
       throw new Error(`candidate hash does not match committed receipt: ${candidate.candidate_sha256}`);
     }
+    recordAutomaticBuildSubmitRevision(target, {
+      stage: lease.stage,
+      work_unit_id: lease.work_unit_id,
+      physical_attempt: lease.attempt,
+      candidate_sha256: candidate.candidate_sha256,
+      ...(options.now ? { created_at: options.now } : {}),
+    });
     recordTerminalSuccess(target, lease, existing.committed_at ?? new Date().toISOString());
     return existing;
   }
   const usage = readAutomaticBuildUsageReceipt(leaseRef);
   assertActiveAutomaticBuildLease(target, leaseRef, token, options.now);
+  recordAutomaticBuildSubmitRevision(target, {
+    stage: lease.stage,
+    work_unit_id: lease.work_unit_id,
+    physical_attempt: lease.attempt,
+    candidate_sha256: candidate.candidate_sha256,
+    ...(options.now ? { created_at: options.now } : {}),
+  });
+  normalizeCandidatePayload(candidatePayload);
   const submissionPath = path.join(path.dirname(path.resolve(leaseRef)), "submission.json");
   const submission = {
     version: "automatic_build_submission.v1",

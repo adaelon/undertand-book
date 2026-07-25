@@ -3,16 +3,25 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { failAutomaticBuildTask, submitAutomaticBuildCandidate } from "../src/automatic-build-mailbox";
-import { claimAutomaticBuildTask } from "../src/automatic-build-lease";
+import {
+  claimAutomaticBuildTask,
+  heartbeatAutomaticBuildLease,
+  startAutomaticBuildLease,
+} from "../src/automatic-build-lease";
 import {
   automaticBuildStageMetricsSummaryPath,
   automaticBuildTaskMetricsPath,
   automaticBuildUsageReceiptPath,
+  buildAutomaticBuildStageMetricsSummary,
+  readAutomaticBuildLifecycleEvents,
   readAutomaticBuildUsageReceipt,
   recordAutomaticBuildInputObservation,
   writeAutomaticBuildStageMetricsSummary,
 } from "../src/automatic-build-metrics";
 import { resolveAutomaticBuildTarget, type AutomaticBuildTarget } from "../src/build-orchestrator";
+import { resolveContentProfile } from "../src/content-profile";
+import { automaticBuildExtractionPolicy } from "../src/semantic-artifact";
+import { buildWorkUnitCost, createWorkUnitDescriptor } from "../src/stage-work-unit";
 
 function fixture() {
   const root = mkdtempSync(path.join(tmpdir(), "understand-book-metrics-"));
@@ -32,6 +41,10 @@ function claim(target: AutomaticBuildTarget, taskId: string) {
 }
 
 function observeInput(target: AutomaticBuildTarget, lease: ReturnType<typeof claim>, inputBytes: number) {
+  startAutomaticBuildLease(target, lease.lease_ref, lease.lease.token, {
+    now: "2026-07-19T00:00:00.500Z",
+    run_ttl_ms: 60_000,
+  });
   return recordAutomaticBuildInputObservation(target, lease.lease_ref, lease.lease.token, {
     started_at: "2026-07-19T00:00:01.000Z",
     finished_at: "2026-07-19T00:00:01.200Z",
@@ -93,6 +106,8 @@ describe("automatic build task metrics", () => {
       version: "automatic_build_usage_receipt.v1",
       source: "native",
       model: "codex-test",
+      reasoning_effort: "high",
+      harness_release: "codex-2026.07",
       input_tokens: 120,
       cached_input_tokens: 30,
       output_tokens: 40,
@@ -124,6 +139,7 @@ describe("automatic build task metrics", () => {
       input_tokens: 0,
     }), "utf8");
     expect(() => readAutomaticBuildUsageReceipt(invalid.lease_ref)).toThrow("unavailable usage");
+    rmSync(path.dirname(invalid.lease_ref), { recursive: true });
 
     const first = writeAutomaticBuildStageMetricsSummary(target, "pass1");
     expect(first).toMatchObject({
@@ -149,12 +165,151 @@ describe("automatic build task metrics", () => {
       diagnostic_counts: { executor_failed: 1 },
     });
     expect(first.latency.writer_ms).toEqual({ p50: 250, p95: 250 });
+    expect(first.phase_latency).toMatchObject({
+      dispatch_wait_ms: { p50: null, p95: null, observed_attempts: 0, unavailable_attempts: 3 },
+      reserve_wait_ms: { p50: 500, p95: 500, observed_attempts: 3, unavailable_attempts: 0 },
+      running_executor_ms: { p50: 2_500, p95: 2_500, observed_attempts: 3, unavailable_attempts: 0 },
+      writer_ms: { p50: 250, p95: 250, observed_attempts: 2, unavailable_attempts: 1 },
+      unobserved_interval_ms: { p50: 0, p95: 0, observed_attempts: 3, unavailable_attempts: 0 },
+    });
+    expect(first.provenance).toMatchObject({
+      model: { known_attempts: 1, unavailable_attempts: 2, coverage: 1 / 3, values: ["codex-test"] },
+      reasoning_effort: { known_attempts: 1, unavailable_attempts: 2, coverage: 1 / 3, values: ["high"] },
+      harness_release: { known_attempts: 1, unavailable_attempts: 2, coverage: 1 / 3, values: ["codex-2026.07"] },
+    });
 
     const summaryPath = automaticBuildStageMetricsSummaryPath(target, "pass1");
     expect(existsSync(summaryPath)).toBe(true);
     rmSync(summaryPath);
     const rebuilt = writeAutomaticBuildStageMetricsSummary(target, "pass1");
     expect(rebuilt.digest).toBe(first.digest);
+  });
+
+  it("rebuilds attempts and all terminal failures from the canonical file union without metrics", () => {
+    const { target } = fixture();
+    const expired = claim(target, "expired-without-metrics");
+    for (let index = 0; index < 10; index += 1) {
+      const failed = claim(target, `failure-${index}`);
+      startAutomaticBuildLease(target, failed.lease_ref, failed.lease.token, {
+        now: "2026-07-19T00:00:00.100Z",
+        run_ttl_ms: 60_000,
+      });
+      failAutomaticBuildTask(target, failed.lease_ref, failed.lease.token, {
+        diagnostic_code: "executor_failed",
+        message: `failure ${index}`,
+        now: "2026-07-19T00:00:01.000Z",
+      });
+      rmSync(automaticBuildTaskMetricsPath(failed.lease_ref));
+    }
+
+    const summary = buildAutomaticBuildStageMetricsSummary(target, "pass1", {
+      now: "2026-07-19T00:01:00.000Z",
+    });
+    expect(summary).toMatchObject({
+      attempt_count: 11,
+      work_unit_count: 11,
+      status_counts: { committed: 0, skipped: 0, retryable_failure: 10, needs_user: 0 },
+      retry_count: 10,
+      lifecycle_counts: {
+        lease_issued: 11,
+        lease_expired: 1,
+        executor_started: 10,
+        task_failed: 10,
+        task_committed: 0,
+      },
+      execution_counts: {
+        physical_attempts: 11,
+        semantic_attempts: 11,
+        lease_epochs: 11,
+        submit_revisions: 0,
+      },
+    });
+    expect(summary.diagnostic_counts).toEqual({ executor_failed: 10 });
+    const events = readAutomaticBuildLifecycleEvents(target, "pass1", {
+      now: "2026-07-19T00:01:00.000Z",
+    });
+    expect(events.filter((event) => event.kind === "lease_reserved")).toHaveLength(11);
+    expect(events.filter((event) => event.kind === "lease_expired")).toHaveLength(1);
+    expect(events.filter((event) => event.kind === "task_failed")).toHaveLength(10);
+    expect(events.find((event) => event.kind === "lease_expired")).toMatchObject({
+      work_unit_id: expired.lease.work_unit_id,
+      execution_identity: { semantic_attempt: 1, lease_epoch: 1, submit_revision: 0 },
+    });
+  });
+
+  it("keeps every running heartbeat as an append-only lifecycle observation", () => {
+    const { target } = fixture();
+    const leased = claim(target, "heartbeat-history");
+    startAutomaticBuildLease(target, leased.lease_ref, leased.lease.token, {
+      now: "2026-07-19T00:00:00.100Z",
+      run_ttl_ms: 60_000,
+    });
+    heartbeatAutomaticBuildLease(target, leased.lease_ref, leased.lease.token, {
+      now: "2026-07-19T00:00:01.000Z",
+      ttl_ms: 60_000,
+    });
+    heartbeatAutomaticBuildLease(target, leased.lease_ref, leased.lease.token, {
+      now: "2026-07-19T00:00:02.000Z",
+      ttl_ms: 60_000,
+    });
+    const summary = buildAutomaticBuildStageMetricsSummary(target, "pass1", {
+      now: "2026-07-19T00:00:03.000Z",
+    });
+    expect(summary.lifecycle_counts.heartbeat).toBe(2);
+    expect(readAutomaticBuildLifecycleEvents(target, "pass1", {
+      now: "2026-07-19T00:00:03.000Z",
+    }).filter((event) => event.kind === "heartbeat").map((event) => event.observed_at)).toEqual([
+      "2026-07-19T00:00:01.000Z",
+      "2026-07-19T00:00:02.000Z",
+    ]);
+  });
+
+  it("emits matched performance samples only when descriptor and full executor provenance are proven", () => {
+    const { root, target } = fixture();
+    const leased = claim(target, "performance-history");
+    observeInput(target, leased, 100);
+    writeFileSync(automaticBuildUsageReceiptPath(leased.lease_ref), JSON.stringify({
+      version: "automatic_build_usage_receipt.v1",
+      source: "native",
+      model: "codex-luna-high",
+      reasoning_effort: "high",
+      harness_release: "codex-2026.07",
+      input_tokens: 100,
+      output_tokens: 20,
+    }), "utf8");
+    submit(root, target, leased, candidate(leased, { nodes: [{ id: "1" }] }), { nodes: 1 });
+    const descriptor = createWorkUnitDescriptor({
+      target: target.target_ref,
+      stage: "pass1",
+      work_unit_id: "performance-history",
+      kind: "pass1_window",
+      input_hash: "a".repeat(64),
+      policy_fingerprint: automaticBuildExtractionPolicy(
+        "pass1",
+        resolveContentProfile("technical_learning"),
+        "full",
+      ),
+      evidence_lids: ["1.1"],
+      cost: buildWorkUnitCost({ estimated_input_tokens: 100, visible_lids: 1, expected_output_items: 1 }),
+    });
+    const summary = buildAutomaticBuildStageMetricsSummary(target, "pass1", {
+      now: "2026-07-19T00:00:04.000Z",
+      work_units: [descriptor],
+    });
+    expect(summary.performance_history).toMatchObject({
+      version: "automatic_build_performance_history.v1",
+      lease_count: 1,
+      semantic_attempt_count: 1,
+      samples: [{
+        stage: "pass1",
+        kind: "pass1_window",
+        router_version: descriptor.policy_fingerprint.router_version,
+        model: "codex-luna-high",
+        reasoning_effort: "high",
+        harness_release: "codex-2026.07",
+        service_ms: 2_750,
+      }],
+    });
   });
 
   it("keeps concurrent task metrics in independent attempt directories", async () => {

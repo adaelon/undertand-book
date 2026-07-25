@@ -36,6 +36,7 @@ function acceptedNext(
   });
   if (!plan.preflight) return automaticBuildNext(targetInput, rootDir, maxParallel, options);
   return automaticBuildNext(targetInput, rootDir, maxParallel, {
+    protocol: "automatic_build_protocol.v2",
     ...options,
     accepted_plan_digest: plan.preflight.plan_digest,
   });
@@ -177,12 +178,13 @@ describe("automatic build attempt policy", () => {
       const task = result.action.tasks[0];
       if (!("input_command" in task)) throw new Error("expected generated task commands");
       expect(task.input_command.slice(0, 3)).toEqual([process.env.UNDERSTAND_BOOK_SIDECAR_SELF, "input", path.resolve(workspace)]);
+      expect(task.candidate_command.slice(0, 3)).toEqual([process.env.UNDERSTAND_BOOK_SIDECAR_SELF, "candidate", path.resolve(workspace)]);
+      expect(task.candidate_command).toContain("{candidate_source}");
       expect(task.submit_command.slice(0, 3)).toEqual([process.env.UNDERSTAND_BOOK_SIDECAR_SELF, "submit", path.resolve(workspace)]);
       expect(task.inspect_command.slice(0, 3)).toEqual([process.env.UNDERSTAND_BOOK_SIDECAR_SELF, "inspect", path.resolve(workspace)]);
       expect(task.fail_command.slice(0, 3)).toEqual([process.env.UNDERSTAND_BOOK_SIDECAR_SELF, "fail", path.resolve(workspace)]);
       expect(task.usage_path).toContain("usage.json");
       expect(task).not.toHaveProperty("write_command");
-      expect(task).not.toHaveProperty("candidate_command");
       expect(task).not.toHaveProperty("record_failure_command");
       expect(task).not.toHaveProperty("record_success_command");
 

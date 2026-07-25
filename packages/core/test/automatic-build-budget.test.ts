@@ -1,11 +1,15 @@
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  adaptiveAutomaticBuildRunTtlMs,
   buildAutomaticBuildPreflight,
+  listScheduleAutomaticBuildWallClock,
   selectAutomaticBuildCostBatch,
   type AutomaticBuildBudgetLimitsV1,
+  type AutomaticBuildExecutorProvenanceV1,
+  type AutomaticBuildWallBudgetV1,
 } from "../src/automatic-build-budget";
 import { resolveContentProfile } from "../src/content-profile";
 import { automaticBuildExtractionPolicy } from "../src/semantic-artifact";
@@ -49,6 +53,138 @@ const generousBudget: AutomaticBuildBudgetLimitsV1 = {
 };
 
 describe("automatic build preflight budget and cost scheduler", () => {
+  it("uses remaining work for execution gates while preserving lifetime and scheduled cost", () => {
+    const units = Array.from({ length: 10 }, (_, index) => unit(`unit-${index}`, 100 + index, 1, 0));
+    const remaining = units.at(-1)!;
+    const result = buildAutomaticBuildPreflight({
+      target_ref: target,
+      stage: "pass1",
+      work_units: units,
+      pending_ids: [remaining.work_unit_id],
+      quality_profile: "full",
+      requested_workers: 3,
+      available_agent_slots: 3,
+      budget: {
+        ...generousBudget,
+        max_tasks: 2,
+        max_total_score: remaining.cost.score,
+        max_estimated_total_tokens: 1_000,
+      },
+    });
+
+    expect(result.budget.status).toBe("within_budget");
+    expect(result.cost_scope).toMatchObject({
+      lifetime: { work_units: 10 },
+      remaining: { work_units: 1, score: remaining.cost.score },
+      scheduled: { work_units: 1, dispatches: 1, agent_starts: 1 },
+    });
+    expect(result.cost_scope.lifetime.score).toBeGreaterThan(result.cost_scope.remaining.score);
+  });
+
+  it("predicts wall clock with matched history and binds history changes only to evaluation identity", () => {
+    const units = Array.from({ length: 8 }, (_, index) => unit(`history-${index}`, 100, 1, 0));
+    const executor: AutomaticBuildExecutorProvenanceV1 = {
+      model: "codex-luna-high",
+      reasoning_effort: "high",
+      harness_release: "codex-2026.07",
+    };
+    const wallBudget: AutomaticBuildWallBudgetV1 = {
+      version: "automatic_build_wall_budget.v1",
+      max_wall_clock_minutes: 120,
+      max_agent_starts: 10,
+      max_duplicate_lease_ratio: 0.05,
+      on_exceed: "needs_user",
+    };
+    const samples = [600_000, 800_000, 1_000_000, 1_200_000].map((serviceMs, index) => ({
+      sample_id: `sample-${index}`,
+      stage: "pass1" as const,
+      kind: "pass1_window" as const,
+      router_version: policy.router_version,
+      model: executor.model,
+      reasoning_effort: executor.reasoning_effort,
+      harness_release: executor.harness_release,
+      service_ms: serviceMs,
+    }));
+    const input = {
+      target_ref: target,
+      stage: "pass1" as const,
+      work_units: units,
+      pending_ids: units.map((item) => item.work_unit_id),
+      quality_profile: "full" as const,
+      requested_workers: 2,
+      available_agent_slots: 2,
+      budget: generousBudget,
+      wall_budget: wallBudget,
+      executor_provenance: executor,
+      historical_performance: {
+        version: "automatic_build_performance_history.v1" as const,
+        samples,
+        lease_count: 10,
+        semantic_attempt_count: 10,
+      },
+    };
+    const first = buildAutomaticBuildPreflight(input);
+    const changed = buildAutomaticBuildPreflight({
+      ...input,
+      historical_performance: {
+        ...input.historical_performance,
+        samples: input.historical_performance.samples.map((sample, index) => index === 3
+          ? { ...sample, service_ms: 1_300_000 }
+          : sample),
+      },
+    });
+
+    expect(first.wall_clock).toMatchObject({
+      confidence: {
+        level: "matched",
+        sample_count: 4,
+        model_match: true,
+        policy_match: true,
+        harness_match: true,
+      },
+      duplicate_lease_ratio: 0,
+      budget: { status: "within_budget", violations: [] },
+    });
+    expect(first.wall_clock.predicted.remaining.p50_ms).toBeGreaterThan(0);
+    expect(first.wall_clock.predicted.remaining.p95_ms)
+      .toBeGreaterThanOrEqual(first.wall_clock.predicted.remaining.p50_ms);
+    expect(first.wall_clock.adaptive_run_ttl_ms_by_kind.pass1_window).toBe(1_800_000);
+    expect(first.descriptor_plan_digest).toBe(changed.descriptor_plan_digest);
+    expect(first.plan_digest).toBe(changed.plan_digest);
+    expect(first.preflight_evaluation_digest).not.toBe(changed.preflight_evaluation_digest);
+  });
+
+  it("fails closed on an unmatched agent-start budget and exposes deterministic scheduling goldsets", () => {
+    expect(listScheduleAutomaticBuildWallClock([10, 9, 8, 7], 2)).toBe(17);
+    expect(adaptiveAutomaticBuildRunTtlMs(5 * 60_000)).toBe(15 * 60_000);
+    expect(adaptiveAutomaticBuildRunTtlMs(20 * 60_000)).toBe(30 * 60_000);
+    expect(adaptiveAutomaticBuildRunTtlMs(50 * 60_000)).toBe(60 * 60_000);
+
+    const units = Array.from({ length: 9 }, (_, index) => unit(`low-${index}`, 100, 1, 0));
+    const result = buildAutomaticBuildPreflight({
+      target_ref: target,
+      stage: "pass1",
+      work_units: units,
+      pending_ids: units.map((item) => item.work_unit_id),
+      quality_profile: "full",
+      requested_workers: 3,
+      available_agent_slots: 3,
+      budget: generousBudget,
+      wall_budget: {
+        version: "automatic_build_wall_budget.v1",
+        max_agent_starts: 1,
+        on_exceed: "needs_user",
+      },
+    });
+    expect(result.wall_clock).toMatchObject({
+      confidence: { level: "low", sample_count: 0 },
+      budget: {
+        status: "low_confidence",
+        violations: [{ code: "max_agent_starts", actual: 3, limit: 1 }],
+      },
+    });
+  });
+
   it("reports a stable cost/token distribution and keeps partial exact usage separate", () => {
     const units = [unit("tiny", 3, 1, 0), unit("outlier", 8_000, 80, 39, 80)];
     const input = {
@@ -164,6 +300,7 @@ describe("automatic build preflight budget and cost scheduler", () => {
     expect(existsSync(taskRoot)).toBe(false);
 
     const accepted = automaticBuildNext(source, root, 3, {
+      protocol: "automatic_build_protocol.v2",
       budget: generousBudget,
       accepted_plan_digest: plan.preflight.plan_digest,
       owner: "budget-test",
@@ -175,5 +312,114 @@ describe("automatic build preflight budget and cost scheduler", () => {
     expect(existsSync(taskRoot)).toBe(true);
     const acceptance = path.join(root, ".understand-book", "guide", ".build", "automatic-build", "v2", "preflight", "pass1", `${plan.preflight.plan_digest}.json`);
     expect(JSON.parse(readFileSync(acceptance, "utf8"))).toMatchObject({ plan_digest: plan.preflight.plan_digest, quality_profile: "full" });
+  });
+
+  it("returns low_confidence_wall_budget before claim when unmatched agent starts exceed the limit", () => {
+    const root = mkdtempSync(path.join(tmpdir(), "understand-book-wall-budget-gate-"));
+    const source = path.join(root, "guide.md");
+    writeFileSync(source, [
+      "# Guide",
+      ...Array.from({ length: 320 }, (_, index) => `Paragraph ${index} carries semantic evidence for wall planning.`),
+    ].join("\n\n"), "utf8");
+    const wallBudget: AutomaticBuildWallBudgetV1 = {
+      version: "automatic_build_wall_budget.v1",
+      max_agent_starts: 0,
+      on_exceed: "needs_user",
+    };
+    const plan = automaticBuildPlan(source, root, {
+      budget: generousBudget,
+      wall_budget: wallBudget,
+      requested_workers: 3,
+      available_agent_slots: 3,
+    });
+    if (!plan.preflight) throw new Error("expected wall-budget preflight");
+    const next = automaticBuildNext(source, root, 3, {
+      budget: generousBudget,
+      wall_budget: wallBudget,
+      accepted_plan_digest: plan.preflight.plan_digest,
+      accepted_evaluation_digest: plan.preflight.preflight_evaluation_digest,
+      available_agent_slots: 3,
+    });
+    expect(next.action).toMatchObject({
+      kind: "needs_user",
+      reason: "low_confidence_wall_budget",
+      plan_digest: plan.preflight.plan_digest,
+      preflight_evaluation_digest: plan.preflight.preflight_evaluation_digest,
+    });
+    const taskRoot = path.join(root, ".understand-book", "guide", ".build", "automatic-build", "v2", "tasks");
+    expect(existsSync(taskRoot)).toBe(false);
+  });
+
+  it("requires the current evaluation digest and forwards a matched adaptive run TTL", () => {
+    const root = mkdtempSync(path.join(tmpdir(), "understand-book-adaptive-ttl-"));
+    const source = path.join(root, "guide.md");
+    writeFileSync(source, "# Guide\n\nA semantic paragraph for adaptive lease history.\n", "utf8");
+    const workspace = path.join(root, ".understand-book", "guide");
+    const summaryPath = path.join(workspace, ".build", "automatic-build", "v2", "metrics", "pass1.json");
+    mkdirSync(path.dirname(summaryPath), { recursive: true });
+    const executor: AutomaticBuildExecutorProvenanceV1 = {
+      model: "codex-luna-high",
+      reasoning_effort: "high",
+      harness_release: "codex-2026.07",
+    };
+    writeFileSync(summaryPath, JSON.stringify({
+      version: "automatic_build_stage_metrics_summary.v1",
+      usage: { known_usage_coverage: 0, input_tokens: 0, output_tokens: 0 },
+      performance_history: {
+        version: "automatic_build_performance_history.v1",
+        samples: [{
+          sample_id: "pass1-history",
+          stage: "pass1",
+          kind: "pass1_window",
+          router_version: policy.router_version,
+          ...executor,
+          service_ms: 600_000,
+        }],
+        lease_count: 1,
+        semantic_attempt_count: 1,
+      },
+    }), "utf8");
+    const wallBudget: AutomaticBuildWallBudgetV1 = {
+      version: "automatic_build_wall_budget.v1",
+      max_wall_clock_minutes: 60,
+      max_agent_starts: 10,
+      on_exceed: "needs_user",
+    };
+    const plan = automaticBuildPlan(source, root, {
+      budget: generousBudget,
+      wall_budget: wallBudget,
+      executor_provenance: executor,
+      requested_workers: 1,
+      available_agent_slots: 1,
+    });
+    if (!plan.preflight) throw new Error("expected adaptive preflight");
+    expect(plan.preflight.wall_clock.adaptive_run_ttl_ms_by_kind.pass1_window).toBe(900_000);
+    const changed = automaticBuildNext(source, root, 1, {
+      budget: generousBudget,
+      wall_budget: wallBudget,
+      executor_provenance: executor,
+      accepted_plan_digest: plan.preflight.plan_digest,
+      accepted_evaluation_digest: "stale-evaluation",
+      available_agent_slots: 1,
+    });
+    expect(changed.action).toMatchObject({ kind: "needs_user", reason: "evaluation_changed" });
+    const taskRoot = path.join(workspace, ".build", "automatic-build", "v2", "tasks");
+    expect(existsSync(taskRoot)).toBe(false);
+
+    const accepted = automaticBuildNext(source, root, 1, {
+      protocol: "automatic_build_protocol.v2",
+      budget: generousBudget,
+      wall_budget: wallBudget,
+      executor_provenance: executor,
+      accepted_plan_digest: plan.preflight.plan_digest,
+      accepted_evaluation_digest: plan.preflight.preflight_evaluation_digest,
+      available_agent_slots: 1,
+    });
+    if (accepted.action.kind !== "extract" || !accepted.action.tasks) throw new Error("expected adaptive extract");
+    const task = accepted.action.tasks[0];
+    if (!("input_command" in task)) throw new Error("expected leased input command");
+    expect(task.input_command).toContain("900000");
+    expect("evaluation_acceptance_path" in accepted.action && accepted.action.evaluation_acceptance_path)
+      .toContain("evaluations");
   });
 });

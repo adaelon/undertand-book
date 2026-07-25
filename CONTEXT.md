@@ -555,6 +555,24 @@ Build Workbench 背后的服务端控制层:负责把上传的 `paper.md/paper.p
 ## 一键预构建 (guided automatic prebuild)
 用户用一个命令授权 build orchestrator 自动推进适用阶段 DAG 的预构建方式。paper 的来源对齐与混合阅读基座仍由 Build Workbench 完成,一键命令从可信基座继续;非 paper 可从 Markdown/EPUB 原始输入开始。orchestrator 只在构建方向必须由用户裁决、需要额外权限或自动修复耗尽时暂停;普通阶段选择、执行器选择和恢复细节不暴露为用户工作。阶段是否完成仍只由 `.build/<stage>` artifact/hash/schema gate 判定,job、orchestrator 或 executor 的自述不能替代。状态:BOUNDARY_CHANGE(2026-07-11 §0.5)。
 
+## 分阶段任务租约 (phase-aware task lease)
+一键预构建中语义任务所有权的限时凭证,区分等待专用 executor 接管的 `reserved` 阶段与已经开始处理输入的 `running` 阶段,两阶段拥有独立截止时间。租约只控制任务执行权和中断恢复,不证明语义产物完成;正常任务必须依靠保守运行期限即可完成,heartbeat 只延长仍匹配 target/source/policy/owner 的活动运行租约。状态:BOUNDARY_CHANGE(见 [ADR-0092](docs/adr/0092-phase-aware-automatic-build-leases-and-executor-dispatch-bundles.md))。
+
+## 语义尝试 (semantic attempt)
+同一 policy-bound work unit 为生成有效语义候选而进行的一轮模型推理。只有 schema、evidence、provider 或语义输出失败并需要重新生成候选时才递增;executor 未接管、租约过期或相同候选的编码重传不得伪装成新的语义尝试。状态:BOUNDARY_CHANGE(见 [ADR-0092](docs/adr/0092-phase-aware-automatic-build-leases-and-executor-dispatch-bundles.md))。
+
+## 租约世代 (lease epoch)
+同一语义尝试因 owner、进程、heartbeat 或调度中断而重新领取时递增的执行所有权世代。每个世代有独立 token 与阶段时间线;过期世代永久不能 submit,但不消耗语义尝试上限。状态:NEW(见 [ADR-0092](docs/adr/0092-phase-aware-automatic-build-leases-and-executor-dispatch-bundles.md))。
+
+## 提交修订 (submit revision)
+同一活动租约内对同一语义候选执行确定性编码修复或幂等重传的序号。它不得改变候选语义、input hash 或 policy identity;一旦需要重新推理,必须进入新的语义尝试。状态:NEW(见 [ADR-0092](docs/adr/0092-phase-aware-automatic-build-leases-and-executor-dispatch-bundles.md))。
+
+## Executor 调度执行包 (executor dispatch bundle)
+Build Engine Sidecar 把多个既有、同 target/stage/policy/kind 的 work unit 临时排给一个专用 executor session 的调度信封。Executor 逐个激活任务租约,每个 work unit 仍保留独立 input、candidate mailbox、receipt、失败恢复和 artifact identity;执行包不是新的语义 work unit,也不把多个输入合成一次模型判断。状态:NEW(见 [ADR-0092](docs/adr/0092-phase-aware-automatic-build-leases-and-executor-dispatch-bundles.md))。
+
+## Executor 调度运行 (executor dispatch run)
+同一确定性 `dispatch_id` 的一次有界执行周期,由独立 `dispatch_run_id` 标识。Planner identity、work unit 和 artifact freshness 不随运行重试改变;semantic failure、executor interruption 或恢复重排后可为相同 manifest 创建新的 run-scoped mailbox,旧 run 的 progress/receipt 保持 append-only 且不得吞掉新 run。状态:NEW(见 [ADR-0092](docs/adr/0092-phase-aware-automatic-build-leases-and-executor-dispatch-bundles.md))。
+
 ## Codex plugin
 以 `.codex-plugin/plugin.json` 打包、由 Codex 安装和加载的本地预构建 harness 外壳。它通过 `$understand-book-build` 驱动现有确定性脚本与专用语义抽取契约,正常条件下一次调用完成、外部中断后按磁盘产物幂等续跑。paper 只消费 Build Workbench 已可信的混合阅读基座;非 paper 可从 Markdown/EPUB 原始输入开始。它不是 Web 内置模型 worker,不嵌入 Codex app-server,也不能绕过 artifact/hash/schema gate。状态:NEW(2026-07-11 §0.5)。
 

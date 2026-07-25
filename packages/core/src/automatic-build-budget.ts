@@ -1,7 +1,16 @@
 import { createHash } from "node:crypto";
 import type { AutomaticBuildStage, BuildTargetRefV2 } from "./build-orchestrator";
 import type { ExtractionPolicyFingerprintV1, ExtractionQualityProfile } from "./semantic-artifact";
-import { workUnitPlanDigest, type WorkUnitDescriptorV2 } from "./stage-work-unit";
+import { workUnitPlanDigest, type WorkUnitDescriptorV2, type WorkUnitKind } from "./stage-work-unit";
+import {
+  planAutomaticBuildExecutorDispatches,
+  type AutomaticBuildExecutorDispatchManifestV1,
+  type AutomaticBuildExecutorDispatchPlanV1,
+} from "./automatic-build-dispatch";
+import type {
+  AutomaticBuildPerformanceHistoryV1,
+  AutomaticBuildPerformanceSampleV1,
+} from "./automatic-build-metrics";
 
 export interface AutomaticBuildBudgetLimitsV1 {
   version: "automatic_build_budget_limits.v1";
@@ -28,6 +37,35 @@ export interface AutomaticBuildHistoricalUsageV1 {
   exact_output_tokens: number;
 }
 
+export interface AutomaticBuildExecutorProvenanceV1 {
+  model: string;
+  reasoning_effort: string;
+  harness_release: string;
+}
+
+export interface AutomaticBuildWallBudgetV1 {
+  version: "automatic_build_wall_budget.v1";
+  max_wall_clock_minutes?: number;
+  max_agent_starts?: number;
+  max_duplicate_lease_ratio?: number;
+  on_exceed: "needs_user" | "stop";
+}
+
+export interface AutomaticBuildCostScopeV1 {
+  work_units: number;
+  dispatches: number;
+  agent_starts: number;
+  score: number;
+  estimated_input_tokens: number;
+  estimated_total_tokens_upper: number;
+}
+
+export interface AutomaticBuildWallBudgetViolationV1 {
+  code: "max_wall_clock_minutes" | "max_agent_starts" | "max_duplicate_lease_ratio";
+  actual: number;
+  limit: number;
+}
+
 interface NumericDistributionV1 {
   total: number;
   min: number | null;
@@ -48,6 +86,7 @@ export interface AutomaticBuildPreflightV1 {
   stage: AutomaticBuildStage;
   descriptor_plan_digest: string;
   plan_digest: string;
+  preflight_evaluation_digest: string;
   quality_profile: ExtractionQualityProfile;
   policy_fingerprint: ExtractionPolicyFingerprintV1;
   policy_digest: string;
@@ -72,6 +111,34 @@ export interface AutomaticBuildPreflightV1 {
     total_upper: number;
   };
   historical_usage?: AutomaticBuildHistoricalUsageV1;
+  dispatch_plan: AutomaticBuildExecutorDispatchPlanV1;
+  cost_scope: {
+    lifetime: AutomaticBuildCostScopeV1;
+    remaining: AutomaticBuildCostScopeV1;
+    scheduled: AutomaticBuildCostScopeV1;
+  };
+  wall_clock: {
+    predicted: {
+      lifetime: { p50_ms: number; p95_ms: number; agent_starts: number };
+      remaining: { p50_ms: number; p95_ms: number; agent_starts: number };
+      scheduled: { p50_ms: number; p95_ms: number; agent_starts: number };
+    };
+    confidence: {
+      level: "matched" | "low";
+      sample_count: number;
+      model_match: boolean;
+      policy_match: boolean;
+      harness_match: boolean;
+      history_revision_digest: string;
+    };
+    adaptive_run_ttl_ms_by_kind: Partial<Record<WorkUnitKind, number>>;
+    duplicate_lease_ratio: number | null;
+    budget: {
+      limits?: AutomaticBuildWallBudgetV1;
+      status: "within_budget" | "exceeded" | "low_confidence";
+      violations: AutomaticBuildWallBudgetViolationV1[];
+    };
+  };
   worker_plan: {
     requested_workers: number;
     available_agent_slots: number;
@@ -155,6 +222,104 @@ function validateHistoricalUsage(input: AutomaticBuildHistoricalUsageV1 | undefi
   };
 }
 
+export function adaptiveAutomaticBuildRunTtlMs(serviceP95Ms: number): number {
+  const service = nonNegativeSafeInteger(serviceP95Ms, "service_p95_ms");
+  return Math.min(60 * 60_000, Math.max(15 * 60_000, Math.ceil(service * 1.5)));
+}
+
+export function listScheduleAutomaticBuildWallClock(durations: number[], workers: number): number {
+  if (!Number.isSafeInteger(workers) || workers < 1) throw new Error("wall clock workers must be a positive safe integer");
+  const lanes = Array.from({ length: workers }, () => 0);
+  for (const [index, rawDuration] of durations.entries()) {
+    const duration = nonNegativeSafeInteger(rawDuration, `wall_clock.duration.${index}`);
+    let lane = 0;
+    for (let candidate = 1; candidate < lanes.length; candidate += 1) {
+      if (lanes[candidate] < lanes[lane]) lane = candidate;
+    }
+    lanes[lane] += duration;
+  }
+  return Math.max(...lanes);
+}
+
+function validateWallBudget(input: AutomaticBuildWallBudgetV1 | undefined): AutomaticBuildWallBudgetV1 | undefined {
+  if (!input) return undefined;
+  if (input.version !== "automatic_build_wall_budget.v1") throw new Error("unsupported automatic build wall budget version");
+  if (!['needs_user', 'stop'].includes(input.on_exceed)) throw new Error("unsupported wall budget exceed action");
+  const maxWallClockMinutes = input.max_wall_clock_minutes;
+  if (maxWallClockMinutes !== undefined && (!Number.isFinite(maxWallClockMinutes) || maxWallClockMinutes < 0)) {
+    throw new Error("wall_budget.max_wall_clock_minutes must be non-negative");
+  }
+  const maxAgentStarts = input.max_agent_starts;
+  if (maxAgentStarts !== undefined) nonNegativeSafeInteger(maxAgentStarts, "wall_budget.max_agent_starts");
+  const maxDuplicateLeaseRatio = input.max_duplicate_lease_ratio;
+  if (maxDuplicateLeaseRatio !== undefined
+    && (!Number.isFinite(maxDuplicateLeaseRatio) || maxDuplicateLeaseRatio < 0 || maxDuplicateLeaseRatio > 1)) {
+    throw new Error("wall_budget.max_duplicate_lease_ratio must be between 0 and 1");
+  }
+  return {
+    version: input.version,
+    ...(maxWallClockMinutes !== undefined ? { max_wall_clock_minutes: maxWallClockMinutes } : {}),
+    ...(maxAgentStarts !== undefined ? { max_agent_starts: maxAgentStarts } : {}),
+    ...(maxDuplicateLeaseRatio !== undefined ? { max_duplicate_lease_ratio: maxDuplicateLeaseRatio } : {}),
+    on_exceed: input.on_exceed,
+  };
+}
+
+function validateExecutorProvenance(
+  input: AutomaticBuildExecutorProvenanceV1 | undefined,
+): AutomaticBuildExecutorProvenanceV1 | undefined {
+  if (!input) return undefined;
+  for (const [field, value] of Object.entries(input)) {
+    if (typeof value !== "string" || !value.trim()) throw new Error(`executor_provenance.${field} must not be empty`);
+  }
+  return input;
+}
+
+function validatePerformanceHistory(
+  input: AutomaticBuildPerformanceHistoryV1 | undefined,
+): { history?: AutomaticBuildPerformanceHistoryV1; digest: string } {
+  if (!input) return { digest: sha256(stableJson({ version: "automatic_build_performance_history.none" })) };
+  if (input.version !== "automatic_build_performance_history.v1") {
+    throw new Error("unsupported automatic build performance history version");
+  }
+  nonNegativeSafeInteger(input.lease_count, "historical_performance.lease_count");
+  nonNegativeSafeInteger(input.semantic_attempt_count, "historical_performance.semantic_attempt_count");
+  for (const [index, sample] of input.samples.entries()) {
+    nonNegativeSafeInteger(sample.service_ms, `historical_performance.samples.${index}.service_ms`);
+    for (const field of ["sample_id", "router_version", "model", "reasoning_effort", "harness_release"] as const) {
+      if (!sample[field]) throw new Error(`historical_performance.samples.${index}.${field} must not be empty`);
+    }
+  }
+  const identity = {
+    version: input.version,
+    samples: [...input.samples].sort((left, right) => left.sample_id.localeCompare(right.sample_id)),
+    lease_count: input.lease_count,
+    semantic_attempt_count: input.semantic_attempt_count,
+  };
+  const computed = sha256(stableJson(identity));
+  return { history: { ...identity, revision_digest: computed }, digest: computed };
+}
+
+function upperTokenEstimate(units: WorkUnitDescriptorV2[]): number {
+  const inputTokens = units.reduce((sum, unit) => sum + unit.cost.estimated_input_tokens, 0);
+  const outputItems = units.reduce((sum, unit) => sum + unit.cost.expected_output_items, 0);
+  return inputTokens + outputItems * 192 + units.length * 128;
+}
+
+function costScope(
+  units: WorkUnitDescriptorV2[],
+  dispatches: AutomaticBuildExecutorDispatchManifestV1[],
+): AutomaticBuildCostScopeV1 {
+  return {
+    work_units: units.length,
+    dispatches: dispatches.length,
+    agent_starts: dispatches.length,
+    score: units.reduce((sum, unit) => sum + unit.cost.score, 0),
+    estimated_input_tokens: units.reduce((sum, unit) => sum + unit.cost.estimated_input_tokens, 0),
+    estimated_total_tokens_upper: upperTokenEstimate(units),
+  };
+}
+
 export function buildAutomaticBuildPreflight(input: {
   target_ref: BuildTargetRefV2;
   stage: AutomaticBuildStage;
@@ -165,6 +330,9 @@ export function buildAutomaticBuildPreflight(input: {
   available_agent_slots?: number;
   budget: AutomaticBuildBudgetLimitsV1;
   historical_metrics?: AutomaticBuildHistoricalUsageV1;
+  wall_budget?: AutomaticBuildWallBudgetV1;
+  executor_provenance?: AutomaticBuildExecutorProvenanceV1;
+  historical_performance?: AutomaticBuildPerformanceHistoryV1;
 }): AutomaticBuildPreflightV1 {
   const budget = validateBudget(input.budget);
   if (!Number.isSafeInteger(input.requested_workers) || input.requested_workers < 1) {
@@ -183,6 +351,7 @@ export function buildAutomaticBuildPreflight(input: {
   }
   if (policy.quality_profile !== input.quality_profile) throw new Error("preflight quality profile does not match work-unit policy");
   const pendingSet = new Set(input.pending_ids);
+  const pendingEligible = eligible.filter((unit) => pendingSet.has(unit.work_unit_id));
   const scores = eligible.map((unit) => unit.cost.score);
   const inputTokens = eligible.map((unit) => unit.cost.estimated_input_tokens);
   const scoreDistribution = distribution(scores);
@@ -192,17 +361,139 @@ export function buildAutomaticBuildPreflight(input: {
   const outputTokensUpper = outputItems * 192 + eligible.length * 128;
   const totalLower = inputDistribution.total + outputTokensLower;
   const totalUpper = inputDistribution.total + outputTokensUpper;
-  const violations: AutomaticBuildBudgetViolationV1[] = [];
-  const checks: Array<[AutomaticBuildBudgetViolationV1["code"], number, number]> = [
-    ["max_tasks", eligible.length, budget.max_tasks],
-    ["max_total_score", scoreDistribution.total, budget.max_total_score],
-    ["max_estimated_total_tokens", totalUpper, budget.max_estimated_total_tokens],
-    ["max_batch_score", scoreDistribution.max ?? 0, budget.max_batch_score],
-    ["max_parallel_cost", scoreDistribution.max ?? 0, budget.max_parallel_cost],
-  ];
-  for (const [code, actual, limit] of checks) if (actual > limit) violations.push({ code, actual, limit });
   const descriptorPlanDigest = workUnitPlanDigest(input.work_units);
   const policyDigest = sha256(stableJson(policy));
+  const executorProvenance = validateExecutorProvenance(input.executor_provenance);
+  const historicalPerformance = validatePerformanceHistory(input.historical_performance);
+  const matchingSamples = (kind: WorkUnitKind): AutomaticBuildPerformanceSampleV1[] => {
+    if (!executorProvenance) return [];
+    return historicalPerformance.history?.samples.filter((sample) => sample.stage === input.stage
+      && sample.kind === kind
+      && sample.router_version === policy.router_version
+      && sample.model === executorProvenance.model
+      && sample.reasoning_effort === executorProvenance.reasoning_effort
+      && sample.harness_release === executorProvenance.harness_release) ?? [];
+  };
+  const kinds = [...new Set(pendingEligible.map((unit) => unit.kind))];
+  const kindPredictions = new Map<WorkUnitKind, { p50: number; p95: number; samples: AutomaticBuildPerformanceSampleV1[] }>();
+  for (const kind of new Set(eligible.map((unit) => unit.kind))) {
+    const samples = matchingSamples(kind);
+    const services = samples.map((sample) => sample.service_ms).sort((left, right) => left - right);
+    kindPredictions.set(kind, {
+      p50: percentile(services, 0.5) ?? 300_000,
+      p95: percentile(services, 0.95) ?? 300_000,
+      samples,
+    });
+  }
+  const predictedService = Object.fromEntries(eligible.map((unit) => [
+    unit.work_unit_id,
+    kindPredictions.get(unit.kind)!.p95,
+  ]));
+  const dispatchPlan = planAutomaticBuildExecutorDispatches({
+    target_ref: input.target_ref,
+    stage: input.stage,
+    work_units: input.work_units,
+    pending_ids: input.pending_ids,
+    predicted_service_ms: predictedService,
+    available_agent_slots: availableAgentSlots,
+  });
+  const lifetimeDispatchPlan = planAutomaticBuildExecutorDispatches({
+    target_ref: input.target_ref,
+    stage: input.stage,
+    work_units: input.work_units,
+    pending_ids: eligible.map((unit) => unit.work_unit_id),
+    predicted_service_ms: predictedService,
+  });
+  const plannedWorkers = Math.min(input.requested_workers, 3);
+  const scheduledDispatches = dispatchPlan.dispatches.slice(0, plannedWorkers);
+  const scheduledIds = new Set(scheduledDispatches.flatMap((dispatch) => dispatch.ordered_work_unit_ids));
+  const scheduledUnits = pendingEligible.filter((unit) => scheduledIds.has(unit.work_unit_id));
+  const dispatchScore = (dispatch: AutomaticBuildExecutorDispatchManifestV1) => dispatch.ordered_work_unit_ids
+    .reduce((sum, id) => sum + (pendingEligible.find((unit) => unit.work_unit_id === id)?.cost.score ?? 0), 0);
+  const violations: AutomaticBuildBudgetViolationV1[] = [];
+  const remainingScore = pendingEligible.reduce((sum, unit) => sum + unit.cost.score, 0);
+  const remainingUpperTokens = upperTokenEstimate(pendingEligible);
+  const maxDispatchScore = dispatchPlan.dispatches.reduce((max, dispatch) => Math.max(max, dispatchScore(dispatch)), 0);
+  const parallelDispatchScore = scheduledDispatches.reduce((sum, dispatch) => sum + dispatchScore(dispatch), 0);
+  const checks: Array<[AutomaticBuildBudgetViolationV1["code"], number, number]> = [
+    ["max_tasks", pendingEligible.length, budget.max_tasks],
+    ["max_total_score", remainingScore, budget.max_total_score],
+    ["max_estimated_total_tokens", remainingUpperTokens, budget.max_estimated_total_tokens],
+    ["max_batch_score", maxDispatchScore, budget.max_batch_score],
+    ["max_parallel_cost", parallelDispatchScore, budget.max_parallel_cost],
+  ];
+  for (const [code, actual, limit] of checks) if (actual > limit) violations.push({ code, actual, limit });
+  const lifetimeScope = costScope(eligible, lifetimeDispatchPlan.dispatches);
+  const remainingScope = costScope(pendingEligible, dispatchPlan.dispatches);
+  const scheduledScope = costScope(scheduledUnits, scheduledDispatches);
+  const dispatchDuration = (dispatch: AutomaticBuildExecutorDispatchManifestV1, quantile: "p50" | "p95") => (
+    kindPredictions.get(dispatch.kind)![quantile] * dispatch.ordered_work_unit_ids.length
+  );
+  const forecast = (dispatches: AutomaticBuildExecutorDispatchManifestV1[]) => ({
+    p50_ms: listScheduleAutomaticBuildWallClock(
+      dispatches.map((dispatch) => dispatchDuration(dispatch, "p50")),
+      plannedWorkers,
+    ),
+    p95_ms: listScheduleAutomaticBuildWallClock(
+      dispatches.map((dispatch) => dispatchDuration(dispatch, "p95")),
+      plannedWorkers,
+    ),
+    agent_starts: dispatches.length,
+  });
+  const predicted = {
+    lifetime: forecast(lifetimeDispatchPlan.dispatches),
+    remaining: forecast(dispatchPlan.dispatches),
+    scheduled: forecast(scheduledDispatches),
+  };
+  const matchedSamples = kinds.flatMap((kind) => kindPredictions.get(kind)!.samples);
+  const matched = Boolean(executorProvenance) && kinds.every((kind) => kindPredictions.get(kind)!.samples.length > 0);
+  const confidence = {
+    level: matched ? "matched" as const : "low" as const,
+    sample_count: new Set(matchedSamples.map((sample) => sample.sample_id)).size,
+    model_match: matched,
+    policy_match: matched,
+    harness_match: matched,
+    history_revision_digest: historicalPerformance.digest,
+  };
+  const adaptiveRunTtl = Object.fromEntries(kinds.map((kind) => [
+    kind,
+    kindPredictions.get(kind)!.samples.length
+      ? adaptiveAutomaticBuildRunTtlMs(kindPredictions.get(kind)!.p95)
+      : 1_800_000,
+  ])) as Partial<Record<WorkUnitKind, number>>;
+  const duplicateLeaseRatio = historicalPerformance.history?.lease_count
+    ? Math.max(0, historicalPerformance.history.lease_count - historicalPerformance.history.semantic_attempt_count)
+      / historicalPerformance.history.lease_count
+    : null;
+  const wallBudget = validateWallBudget(input.wall_budget);
+  const wallViolations: AutomaticBuildWallBudgetViolationV1[] = [];
+  if (wallBudget?.max_wall_clock_minutes !== undefined
+    && predicted.remaining.p95_ms > wallBudget.max_wall_clock_minutes * 60_000) {
+    wallViolations.push({
+      code: "max_wall_clock_minutes",
+      actual: predicted.remaining.p95_ms / 60_000,
+      limit: wallBudget.max_wall_clock_minutes,
+    });
+  }
+  if (wallBudget?.max_agent_starts !== undefined
+    && predicted.remaining.agent_starts > wallBudget.max_agent_starts) {
+    wallViolations.push({
+      code: "max_agent_starts",
+      actual: predicted.remaining.agent_starts,
+      limit: wallBudget.max_agent_starts,
+    });
+  }
+  if (wallBudget?.max_duplicate_lease_ratio !== undefined && duplicateLeaseRatio !== null
+    && duplicateLeaseRatio > wallBudget.max_duplicate_lease_ratio) {
+    wallViolations.push({
+      code: "max_duplicate_lease_ratio",
+      actual: duplicateLeaseRatio,
+      limit: wallBudget.max_duplicate_lease_ratio,
+    });
+  }
+  const wallStatus = wallViolations.length
+    ? confidence.level === "low" ? "low_confidence" as const : "exceeded" as const
+    : "within_budget" as const;
   const digestIdentity = {
     version: "automatic_build_preflight.v1",
     target_ref: input.target_ref,
@@ -215,17 +506,30 @@ export function buildAutomaticBuildPreflight(input: {
   };
   const historicalUsage = validateHistoricalUsage(input.historical_metrics);
   const workerLimit = Math.min(input.requested_workers, availableAgentSlots, 3);
-  const pendingEligible = eligible.filter((unit) => pendingSet.has(unit.work_unit_id));
   const parallelBatch = selectAutomaticBuildCostBatch(pendingEligible, {
     max_tasks: workerLimit,
     max_total_score: Math.min(budget.max_batch_score, budget.max_parallel_cost),
   });
+  const evaluationIdentity = {
+    version: "automatic_build_preflight_evaluation.v1",
+    descriptor_plan_digest: descriptorPlanDigest,
+    dispatch_plan_digest: dispatchPlan.dispatch_plan_digest,
+    executor_provenance: executorProvenance ?? "unavailable",
+    wall_budget: wallBudget ?? null,
+    cost_scope: { lifetime: lifetimeScope, remaining: remainingScope, scheduled: scheduledScope },
+    predicted,
+    confidence,
+    adaptive_run_ttl_ms_by_kind: adaptiveRunTtl,
+    duplicate_lease_ratio: duplicateLeaseRatio,
+    wall_violations: wallViolations,
+  };
   return {
     version: "automatic_build_preflight.v1",
     target_ref: input.target_ref,
     stage: input.stage,
     descriptor_plan_digest: descriptorPlanDigest,
     plan_digest: sha256(stableJson(digestIdentity)),
+    preflight_evaluation_digest: sha256(stableJson(evaluationIdentity)),
     quality_profile: input.quality_profile,
     policy_fingerprint: policy,
     policy_digest: policyDigest,
@@ -257,6 +561,19 @@ export function buildAutomaticBuildPreflight(input: {
       total_upper: totalUpper,
     },
     ...(historicalUsage ? { historical_usage: historicalUsage } : {}),
+    dispatch_plan: dispatchPlan,
+    cost_scope: { lifetime: lifetimeScope, remaining: remainingScope, scheduled: scheduledScope },
+    wall_clock: {
+      predicted,
+      confidence,
+      adaptive_run_ttl_ms_by_kind: adaptiveRunTtl,
+      duplicate_lease_ratio: duplicateLeaseRatio,
+      budget: {
+        ...(wallBudget ? { limits: wallBudget } : {}),
+        status: wallStatus,
+        violations: wallViolations,
+      },
+    },
     worker_plan: {
       requested_workers: input.requested_workers,
       available_agent_slots: availableAgentSlots,

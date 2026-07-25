@@ -21,6 +21,10 @@ contract,也不得在普通 stage 边界停下等待用户继续。
      `understand-book-build.exe`。
    - 仅插件开发/非 Windows 环境允许回退 Node:若缺少 `node_modules/tsx`,在插件根运行
      `pnpm install --frozen-lockfile`;依赖失败则报告阻塞,不得伪造构建。
+   - 安装或升级 sidecar 后先运行
+     `<understand-book-build.exe> protocol-doctor <target> --plugin-root <插件根目录>`。只消费
+     `automatic_build_protocol_doctor.v1`;它必须报告 `status=compatible`、
+     `production_default=automatic_build_protocol.v2_dispatch` 与 `dry_run_mutates_state=false`。
 2. 每次进入一个可能需要模型抽取的 stage,先用与后续 `next` 完全相同的
    `--max-parallel`、`--quality-profile` 和预算参数执行只读 preflight。`--max-parallel`
    是已接受计划允许的 worker 上限(最多 3);`--available-agent-slots` 是此刻真正空闲的专用
@@ -32,36 +36,69 @@ contract,也不得在普通 stage 边界停下等待用户继续。
    ```
 
    只消费 stdout 的 `automatic_build_plan.v1` JSON。`preflight=null` 表示下一步不需要模型,
-   直接执行 `next`;否则先检查 work-unit 数量、成本分布、估算 Token 区间、质量策略、预算状态和
-   worker plan。`preflight.budget.status=exceeded` 时停止并报告
-   `needs_user(budget_exceeded)`,不得 claim。预算内则冻结并传回 `plan_digest`:
+   直接执行 `next`;否则先检查 work-unit 数量、lifetime/remaining/scheduled 成本、估算 Token
+   区间、墙钟 P50/P95、agent starts、confidence、质量策略、预算状态和 worker plan。
+   `preflight.budget.status=exceeded` 时停止并报告 `needs_user(budget_exceeded)`,不得 claim。
+   配置墙钟预算时还必须冻结 `preflight_evaluation_digest`;`low_confidence` 或 `exceeded`
+   分别停止为 `needs_user(low_confidence_wall_budget)` 或 `needs_user(wall_budget_exceeded)`。
+   预算内则把 plan 与 evaluation 两个 digest 原样传回:
 
    ```text
-   <understand-book-build.exe> next <target> --plugin-root <插件根目录> [相同策略/预算] --max-parallel <1..3> --available-agent-slots <当前值> --accepted-plan <plan_digest>
-   node node_modules/tsx/dist/cli.mjs skills/build/automatic-build.ts next <target> [相同策略/预算] --max-parallel <1..3> --available-agent-slots <当前值> --accepted-plan <plan_digest>
+   <understand-book-build.exe> next <target> --plugin-root <插件根目录> [相同策略/预算] --max-parallel <1..3> --available-agent-slots <当前值> --accepted-plan <plan_digest> [--accepted-evaluation <preflight_evaluation_digest>]
+   node node_modules/tsx/dist/cli.mjs skills/build/automatic-build.ts next <target> [相同策略/预算] --max-parallel <1..3> --available-agent-slots <当前值> --accepted-plan <plan_digest> [--accepted-evaluation <preflight_evaluation_digest>]
    ```
 
    `available_agent_slots` 不进入 plan identity,因此槽位缩减不会使已接受 digest 漂移;
    `worker_plan.max_workers=min(requested,available,3,max_parallel_cost 容量)`。0 槽位返回
-   `needs_user(executor_unavailable)`;plan 不创建 task、attempt 或 lease 状态。
+   `needs_user(executor_unavailable)`;plan 不创建 task、attempt 或 lease 状态。使用性能历史时,
+   `--executor-model`、`--executor-reasoning-effort`、`--executor-harness-release` 必须三者同时提供;
+   历史只在 stage/kind/router 与这三项 provenance 全匹配时参与预测和 adaptive TTL。
+
+   BP8 起 `automatic_build_protocol.v2_dispatch` 是新 claim 的生产默认:`next` 不预领 task,
+   而是持久化已接受的完整 dispatch plan 并返回 `action.kind=dispatch`;后续补位必须继续传
+   相同 accepted plan/evaluation。`--executor-dispatches` 只保留为兼容别名。若需要回滚到
+   一任务一 executor,必须显式传 `--protocol automatic_build_protocol.v2`;该回滚读取同一 v2
+   task/artifact 状态,不迁移、不重写已发布 artifact,也不得用于绕过 dispatch 故障诊断。
 
 3. 只消费 stdout 的 `automatic_build_next.v1` JSON:
-   - `action.kind=extract`:若没有可用专用 subagent/multi-agent 槽位,立即停止并报告
+   - `action.kind=dispatch`:启动数必须等于 `action.dispatches.length` 的专用 subagent,不得按
+     manifest 内 task 数启动。每个 subagent 只接收同一个 extractor prompt 与一个
+     `automatic_build_dispatch_executor.v1` 信封,并独占其 `dispatch_run_id`。它循环执行
+     `next_command`,每次最多收到一个 `action.kind=task` 信封;该 task 的 input/candidate/usage/
+     submit/fail/heartbeat 契约与下面的单任务路径完全相同。task terminal 后必须丢弃 candidate
+     body 再执行下一次 `dispatch.next`;semantic failure 已有 bounded task receipt 时继续下一 task。
+     `waiting` 只按 `retry_after_ms` 等待;`finish` 原样执行 `finish_command`;`finished` 只向 root
+     返回 `automatic_build_executor_dispatch_receipt.v1`。executor/命令/进程基础设施失败时立即
+     执行 `interrupt_command`,不得继续 manifest 后缀。root 只核对
+     `receipt_aggregation.expected_receipts/max_total_bytes`,不得接收 manifest 内逐任务 candidate。
+     任一 dispatch receipt 返回后,root 按真实空闲槽位重新 plan/next;运行时从同一持久化 plan
+     排除 active/finished dispatch 并立即补下一 manifest,不等待慢 worker。
+   - `action.kind=extract`:只出现在显式旧 v2 回滚路径。若没有可用专用 subagent/multi-agent 槽位,立即停止并报告
      `needs_user(executor_unavailable)`,不得由 root 代跑模型。若有
      `extractor_prompt_command`,读取 prompt;否则读取 `extractor_prompt`。随后按可用槽位启动
      专用 subagent,每个只接收 prompt 与一个 `automatic_build_executor.v1` 信封。启动数必须等于
      `action.tasks.length`,不得超过 `worker_plan.max_workers`:
 
      ```text
-     task_id / attempt_number / lease_ref
-     input_command / candidate_path / usage_path / submit_command
+     task_id / attempt_number(= semantic_attempt) / execution_identity / lease_ref
+     input_command / candidate_path / candidate_command / usage_path / submit_command
      heartbeat_command / fail_command / inspect_command
      ```
 
-     subagent 必须自行执行 `input_command`,把该 stdout 作为唯一抽取输入;模型候选必须由
-     subagent 直接写入 `candidate_path`;若 harness 提供原生或 executor-reported usage receipt,按
+     新 claim 先进入 10 分钟 `reserved` phase。`input_command` 的第一个副作用必须 create-only
+     创建 `start.json`,从该时刻开始独立的 30 分钟 `running` deadline;重复 input start 读取同一记录。
+     `heartbeat_command` 只允许延长 token、owner、target、stage、work unit 和 execution identity
+     均匹配且未 terminal 的 running lease,不得延长 reserved 或过期 lease。
+
+     subagent 必须自行执行 `input_command`,把该 stdout 作为唯一抽取输入;模型候选先写入同一
+     task mailbox 下的私有 source 文件,再把 `candidate_command` 中的 `{candidate_source}` 替换为
+     该路径并执行。helper 只接受 UTF-8 no-BOM 或单 BOM JSON,并把 `candidate_path` 规范化为
+     UTF-8 no-BOM;禁止用 PowerShell 5.1 的 `Set-Content -Encoding UTF8` 直接写
+     `candidate_path`。若 harness 提供原生或 executor-reported usage receipt,按
      `automatic_build_usage_receipt.v1` 写入 `usage_path`,否则不创建该文件。`source=unavailable`
-     时禁止写任何精确 Token 字段,estimate 必须使用独立的带版本 method。随后自行执行
+     时禁止写任何精确 Token 字段,estimate 必须使用独立的带版本 method。可证明时同时记录
+     `model`、`reasoning_effort` 与 `harness_release`;不可证明时保持缺失,由 summary 显式计入
+     `unavailable` 和覆盖率,不得猜测。随后自行执行
      `submit_command`。成功时只向 root 返回
      submit stdout 的 `automatic_build_task_receipt.v1`;失败时自行执行 `fail_command` 并只返回
      failure receipt。root 只把本批最多 3 个 bounded receipt 组成临时 receipt 列表,核对
@@ -75,7 +112,9 @@ contract,也不得在普通 stage 边界停下等待用户继续。
      `automatic_build_stage_quality_report.v1`;close 会在事务发布前重新计算并把报告写入
      `.build/automatic-build/v2/quality/<stage>.json`,不得绕过或手改报告。
    - `action.kind=needs_user`:停止自动 loop。预算类展示 `reason`、stage、plan digest 与
-     violations;`preflight_required` 表示尚未确认当前计划;`plan_changed` 表示 descriptor、质量、
+     violations;`preflight_required` 表示尚未确认当前计划;`evaluation_required` 或
+     `evaluation_changed` 表示墙钟评估尚未接受或性能历史已经变化;`low_confidence_wall_budget`
+     表示缺少匹配历史且墙钟门禁不能安全放行;`plan_changed` 表示 descriptor、质量、
      policy、预算或 worker 请求已变化,必须回到步骤 2 重新 plan。`legacy_migration_required`
      必须展示只读 audit 与 `legacy_resume/v2_rebuild` 两个命令,等待用户显式选择;root 不得代选。
      `legacy_resume_selected` 只能转回冻结的 production v1 contract,其结果始终标
@@ -83,7 +122,7 @@ contract,也不得在普通 stage 边界停下等待用户继续。
      selected quality floor violations,不得用全叶锚定率、LLM 自评或 `--allow-partial` 覆盖。重试耗尽时展示 task id、
      最后诊断与 `reset_commands`;只有用户确认重试后才能执行 reset。
    - `action.kind=done`:报告 workspace 路径和已完成阶段,结束 goal。
-4. 每批 write 或 stage close 后立即回到步骤 2 重新生成当前 pending 集合的 preflight。磁盘 `.build/<stage>` 是唯一续建真相;
+4. 每个 dispatch receipt、每批 write 或 stage close 后立即回到步骤 2 重新生成当前 pending 集合的 preflight。磁盘 `.build/<stage>` 是唯一续建真相;
    不依赖对话记忆判断 done/pending。
 
 硬边界:

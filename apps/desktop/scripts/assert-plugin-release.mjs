@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -62,6 +63,9 @@ for (const marker of ["UNDERSTAND_BOOK_MCP_BIN", "HKCU\\Software\\UnderstandBook
 
 const releaseSkill = await readText("plugins/understand-book/skills/build/SKILL.md");
 const protocolMarkers = [
+  "automatic_build_protocol.v2_dispatch",
+  "protocol-doctor",
+  "--protocol automatic_build_protocol.v2",
   "automatic_build_plan.v1",
   "--accepted-plan",
   "--available-agent-slots",
@@ -82,10 +86,25 @@ for (const marker of protocolMarkers) {
   );
 }
 
+const releaseSkillSha256 = createHash("sha256").update(releaseSkill).digest("hex");
+const installedPluginRoot = process.env.UNDERSTAND_BOOK_INSTALLED_PLUGIN_ROOT;
+if (installedPluginRoot) {
+  const installedSkill = await readFile(path.join(installedPluginRoot, "skills", "build", "SKILL.md"), "utf8");
+  assert.equal(
+    createHash("sha256").update(installedSkill).digest("hex"),
+    releaseSkillSha256,
+    "installed build skill must match the published source snapshot hash",
+  );
+}
+
 const sidecarEntry = await readText("skills/build/sidecar-entry.ts");
 for (const command of [
+  "protocol-doctor",
   "plan",
   "next",
+  "dispatch.next",
+  "dispatch.inspect",
+  "dispatch.finish",
   "audit-legacy",
   "migration-mode",
   "quality",
@@ -107,4 +126,4 @@ for (const command of [
   );
 }
 
-console.log(`plugin release parity ok: ${releaseManifest.version}`);
+console.log(`plugin release parity ok: ${releaseManifest.version} skill_sha256=${releaseSkillSha256}`);
