@@ -1,6 +1,6 @@
 ---
 name: understand-book-build
-description: Build or resume a Markdown/EPUB book or trusted paper Workbench workspace with one Codex invocation.
+description: Build or resume a book workspace, optionally from a confirmed natural-language reading goal shared with the Reader.
 ---
 
 # $understand-book-build
@@ -9,13 +9,16 @@ Run the deterministic automatic-build v2 loop until `done`, `needs_user`, or an 
 failure. Do not stop at ordinary stage boundaries, substitute generic summaries for extractor
 output, or treat conversation memory as build state.
 
-## Resolve the build engine
+## Resolve the Reader controller and build engine
 
 1. Resolve `understand-book-build.exe` in this order:
    - use `UNDERSTAND_BOOK_BUILD_EXE` when it names an existing file;
    - on Windows, read `InstallDir` from `HKCU\Software\UnderstandBook` and use the executable in
      that directory;
    - otherwise tell the user to install the Understand Book desktop reader.
+   Resolve `UnderstandBook.exe` from `UNDERSTAND_BOOK_DESKTOP_EXE` when set, otherwise from the
+   same `InstallDir`. It owns the reader-private intent controller; the build sidecar must not
+   duplicate that store.
 2. Do not install Node, Bun, Cargo, or another runtime as an implicit fallback. The released plugin
    is driven by the packaged build engine.
 3. After installing or upgrading the engine, run
@@ -23,9 +26,36 @@ output, or treat conversation memory as build state.
    `automatic_build_protocol_doctor.v1`; require `status=compatible`,
    `production_default=automatic_build_protocol.v2_dispatch`, and `dry_run_mutates_state=false`.
 
+## Choose the entry mode
+
+- **No natural-language goal:** preserve the explicit full-build behavior below. Run `legacy-plan`
+  once and execute the confirmed `standard_deep` plan.
+- **Natural-language goal:** the target must already be an immediately readable workspace inside
+  the Reader library or explicitly registered by Reader. A raw Markdown/EPUB file or untrusted
+  paper draft is `needs_user(foundation_required)`; do not fabricate a goal plan for it.
+
+For a new goal, send exactly one `codex_build_intent_command.v1` JSON envelope to
+`UnderstandBook.exe --codex-build-intent` over stdin. Put only the maintenance flag in argv; never
+put `user_goal` in argv, an environment variable, a temporary/public workspace file, stdout, or
+stderr. The envelope has `operation=draft`, an absolute `target.workspace_dir`, and
+`input={user_goal,budget?}`. Consume only `codex_build_intent_response.v1`.
+
+Show the user the projected goal kind, scope, desired artifacts, public stage closure, reuse,
+create, excluded items, token/wall-clock estimate, budget, `plan_id`, and `plan_digest`. Then stop as
+`needs_user(plan_confirmation_required)`. Do not run `legacy-plan`, `plan`, `next`, or private
+artifact work before explicit approval of that exact digest.
+
+After the user approves, first call the same stdin controller with `operation=status` and the shown
+`plan_id`. If its current digest/status differs, show the current projection and stop for a new
+confirmation. Otherwise send `operation=confirm` with the exact `plan_id + plan_digest`; require
+`confirmation_source=codex_conversation`, retain the returned private `build_plan_path`, and enter
+the automatic-build loop. Reader-side confirmation is also valid when `status` reports the exact
+plan already confirmed. A rejection uses `operation=reject`; never infer confirmation from “build
+it” text that preceded the displayed plan.
+
 ## Automatic-build v2 loop
 
-This skill invocation is the explicit legacy full-build command. Before protocol preflight, map it
+Only the no-goal entry is the explicit legacy full-build command. Before protocol preflight, map it
 once to a confirmed `standard_deep` BuildPlan:
 
 ```text
@@ -45,7 +75,7 @@ one accepted plan. `--max-parallel` is in `1..3`; `--available-agent-slots` is i
 1. Run preflight:
 
    ```text
-   <build-exe> plan <target> --plugin-root <this-plugin-root> --max-parallel <1..3> --available-agent-slots <0..3> [quality and budget flags]
+   <build-exe> plan <target> --plugin-root <this-plugin-root> --build-plan <build_plan_path> --max-parallel <1..3> --available-agent-slots <0..3> [quality and budget flags]
    ```
 
    Parse only the `automatic_build_plan.v1` JSON from stdout. Planning is read-only: it must not
@@ -60,7 +90,7 @@ one accepted plan. `--max-parallel` is in `1..3`; `--available-agent-slots` is i
 2. Run the accepted step:
 
    ```text
-   <build-exe> next <target> --plugin-root <this-plugin-root> --max-parallel <1..3> --available-agent-slots <current> [same quality and budget flags] [--accepted-plan <plan_digest>] [--accepted-evaluation <preflight_evaluation_digest>]
+   <build-exe> next <target> --plugin-root <this-plugin-root> --build-plan <build_plan_path> --max-parallel <1..3> --available-agent-slots <current> [same quality and budget flags] [--accepted-plan <plan_digest>] [--accepted-evaluation <preflight_evaluation_digest>]
    ```
 
    Parse only the `automatic_build_next.v1` JSON from stdout. A change to the target, descriptors,
@@ -146,11 +176,40 @@ one accepted plan. `--max-parallel` is in `1..3`; `--available-agent-slots` is i
        never override them with LLM self-review or `--allow-partial`.
      - retry exhaustion: show task ids, last diagnostics, and reset commands. Execute reset only
        after explicit user confirmation.
-   - `done`: report the workspace and completed stages, then end the invocation.
+   - `done`: for `standard_deep`, report the workspace and end. For a confirmed `goal_directed`
+     plan, continue into the private artifact loop below.
 
 4. Return to `plan` immediately after every dispatch receipt, submitted batch, or closed stage. `.build/<stage>` plus
    the v2 task/lease/mailbox state is the only resume truth. Attempt counts and completion state
    must never be reconstructed from conversation history.
+
+## Private goal artifact loop
+
+After the public closure reaches `done`, call the Desktop stdin controller with
+`operation=artifact.prepare` and the confirmed `plan_id`. Consume only
+`intent_artifact_prepare_response.v1`. An empty `handoff.tasks` means every declared private
+artifact is accepted; report completion and end. Otherwise process the returned opaque handoffs in
+bounded waves using the currently available dedicated subagent slots. Finish the whole returned
+wave before preparing retries, so one failing artifact cannot starve an untouched sibling.
+
+Give each dedicated subagent only `workspace_dir`, `task_path`, and the Desktop controller path.
+The root must never read the task file or receive its contents. The subagent:
+
+1. calls `artifact.inspect`, then reads its own private `task.json`;
+2. uses only the task's goal, scope, output contract, validation rules, allowed evidence LIDs, and
+   the canonical Book tools/artifacts to create an `intent_artifact_candidate.v1`;
+3. writes UTF-8 no-BOM JSON only to the sibling `candidate.json`, preserving every identity field
+   from the task and placing generated records only under `payload`;
+4. sends `operation=artifact.submit` with only `task_path` over stdin and returns only the bounded
+   `intent_artifact_mailbox_receipt.v1` to root;
+5. on model/process/schema failure, sends `operation=artifact.fail` with a path-safe diagnostic
+   code and returns only its body-free retry receipt.
+
+The root validates receipt count, state, task/artifact identity, and the confirmed plan digest,
+discards the receipt list, then calls `artifact.prepare` again. Reuse pending attempts after an
+interruption; accepted artifacts are omitted deterministically, failed artifacts get a bounded new
+attempt, and stale source/plan/task identity fails closed. Candidate payloads, raw goals, quotes,
+LID lists, and accepted bodies must never cross from a dedicated subagent into the root context.
 
 ## Hard boundaries
 

@@ -567,6 +567,12 @@ Build Workbench 背后的服务端控制层:负责把上传的 `paper.md/paper.p
 ## BuildPlan
 由已确认 `BuildIntent` 或用户显式选择 `standard_deep` 编译出的版本化构建决策 artifact,列出目标产物、依赖闭包、可复用与新增工作、明确不生成项、token/墙钟估计及预算上限。Planner 或 LLM 只能产生 draft;确定性 validator 必须校验 profile capability、依赖、LID scope、隐私与 digest,用户确认 `plan_digest` 后 orchestrator 才能执行昂贵工作。它不是 semantic truth,预算或依赖漂移超过已确认边界时必须回到 `needs_user`。状态:NEW(见 [ADR-0093](docs/adr/0093-intent-confirmed-progressive-prebuild-and-reader-private-goal-artifacts.md))。
 
+## Codex 构建意图入口 (Codex build-intent entry)
+Codex plugin 面向同一 reader-private `BuildIntent/BuildPlan` 权威提供的对话入口:用户在 Codex 陈述目标后,Desktop-owned stdin controller 在显式目标 workspace 上生成可审阅 draft;Codex 或 Reader 只能按当前 `plan_digest` 显式确认,随后由一键预构建执行公共依赖闭包与私有目标产物。它不复制私有 store,不经 Visitor/Book MCP 暴露 intent,不把原始目标写入命令行参数、stdout/stderr 或公共书目录。状态:BOUNDARY_CHANGE(见 [ADR-0093](docs/adr/0093-intent-confirmed-progressive-prebuild-and-reader-private-goal-artifacts.md))。
+
+## Codex 会话确认 (Codex conversation confirmation)
+用户在 Codex 对话中审阅当前计划摘要后,对精确 `plan_id + plan_digest` 作出的显式构建授权,持久化来源为 `codex_conversation`。它与 `reader_ui` 具有相同计划门禁,不能预先授权未知计划、复用旧 digest 或由 agent 代替用户确认;旧完整构建兼容来源仍为 `explicit_legacy_command`。状态:NEW(见 [ADR-0093](docs/adr/0093-intent-confirmed-progressive-prebuild-and-reader-private-goal-artifacts.md))。
+
 ## 目标产物层 (intent artifact overlay)
 围绕单个已确认 `BuildIntent` 生成、只供 resident reader 消费的 reader-private 产物集合。每个产物必须绑定 source fingerprint、`intent_digest`、`plan_digest`、输出 schema 与真实 LID evidence,并与公共 graph、profile sidecar、BookStructure 和书目录根 artifact 物理隔离;目标改变时只取代对应 overlay,不得使仍 fresh 的公共基础层或标准语义层失效。Visitor、Book MCP 与 build-workbench 的非授权会话不得读取。状态:NEW(见 [ADR-0093](docs/adr/0093-intent-confirmed-progressive-prebuild-and-reader-private-goal-artifacts.md))。
 
@@ -589,7 +595,7 @@ Build Engine Sidecar 把多个既有、同 target/stage/policy/kind 的 work uni
 同一确定性 `dispatch_id` 的一次有界执行周期,由独立 `dispatch_run_id` 标识。Planner identity、work unit 和 artifact freshness 不随运行重试改变;semantic failure、executor interruption 或恢复重排后可为相同 manifest 创建新的 run-scoped mailbox,旧 run 的 progress/receipt 保持 append-only 且不得吞掉新 run。状态:NEW(见 [ADR-0092](docs/adr/0092-phase-aware-automatic-build-leases-and-executor-dispatch-bundles.md))。
 
 ## Codex plugin
-以 `.codex-plugin/plugin.json` 打包、由 Codex 安装和加载的本地预构建 harness 外壳。它通过 `$understand-book-build` 驱动现有确定性脚本与专用语义抽取契约,正常条件下一次调用完成、外部中断后按磁盘产物幂等续跑。paper 只消费 Build Workbench 已可信的混合阅读基座;非 paper 可从 Markdown/EPUB 原始输入开始。它不是 Web 内置模型 worker,不嵌入 Codex app-server,也不能绕过 artifact/hash/schema gate。状态:NEW(2026-07-11 §0.5)。
+以 `.codex-plugin/plugin.json` 打包、由 Codex 安装和加载的本地预构建 harness 外壳。它通过 `$understand-book-build` 驱动现有确定性脚本与专用语义抽取契约,并可经 Codex 构建意图入口读写 Desktop-owned 的同一 reader-private 计划;正常条件下一次已确认执行完成、外部中断后按磁盘产物幂等续跑。paper 只消费 Build Workbench 已可信的混合阅读基座;非 paper 可从 Markdown/EPUB 原始输入开始。它不是 Web 内置模型 worker,不嵌入 Codex app-server,不经 Visitor/Book MCP 读取私有计划,也不能绕过 plan/artifact/hash/schema gate。状态:BOUNDARY_CHANGE(2026-07-26 IP11)。
 
 ## Book MCP Sidecar
 随 Windows Setup 安装、由 Codex plugin 声明和启动的只读本地 MCP 可执行程序。一个进程在启动时绑定一本可信 Book workspace,只投影 canonical Book tools;它不读取 resident memory、画像、Agent 历史或 Provider 设置。无显式书目录时可读取 Reader session 的当前书路由指针,但该指针不成为新的工具面。状态:NEW(详见 [docs/adr/0089])。

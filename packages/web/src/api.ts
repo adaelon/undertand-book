@@ -424,7 +424,7 @@ export interface BuildPlanV1 {
   budget: { max_total_tokens?: number; max_wall_clock_minutes?: number; on_exceed: "needs_user" };
   status: "draft" | "confirmed" | "superseded" | "stale_source" | "completed";
   plan_digest: string;
-  confirmation_source?: "reader_ui" | "explicit_legacy_command";
+  confirmation_source?: "reader_ui" | "codex_conversation" | "explicit_legacy_command";
   created_at: string;
   confirmed_at?: string;
 }
@@ -521,7 +521,7 @@ export interface IntentBuildAblationReportV1 {
       plan_id: string;
       revision: number;
       plan_digest: string;
-      confirmation_source: "reader_ui" | "explicit_legacy_command";
+      confirmation_source: "reader_ui" | "codex_conversation" | "explicit_legacy_command";
       intent_id?: string;
     }>;
     estimate: { token_lower: number; token_upper: number; unknown_item_count: number };

@@ -129,6 +129,10 @@ fn prepare_artifacts(state: &AppState, body: &str, now: &str) -> Result<Value, T
             "artifact preparation requires the active confirmed plan",
         ));
     }
+    store.read_active_overlay_artifacts(
+        &state.book.base.book_id,
+        &current_source_fingerprint(state)?,
+    )?;
     let (available_lids, resolved_scope_lids) = artifact_scope(state, &intent)?;
     let handoff = run_artifact_core(&json!({
         "version": "intent_artifact_mailbox_command.v1",
@@ -327,6 +331,15 @@ fn estimate(state: &AppState, body: &str) -> Result<Value, ToolError> {
 }
 
 fn confirm(state: &mut AppState, body: &str, now: &str) -> Result<Value, ToolError> {
+    confirm_with_source(state, body, now, "reader_ui")
+}
+
+fn confirm_with_source(
+    state: &mut AppState,
+    body: &str,
+    now: &str,
+    confirmation_source: &str,
+) -> Result<Value, ToolError> {
     let input = parse_body(body)?;
     let plan_id = required_string(&input, "plan_id")?;
     let plan_digest = required_string(&input, "plan_digest")?;
@@ -350,7 +363,7 @@ fn confirm(state: &mut AppState, body: &str, now: &str) -> Result<Value, ToolErr
             "plan_id": plan_id,
             "plan_digest": plan_digest,
             "at": now,
-            "confirmation_source": "reader_ui",
+            "confirmation_source": confirmation_source,
         }
     }))?;
     persist_selection(state, &confirmed)?;
@@ -1043,6 +1056,144 @@ fn response(state: &AppState, selection: Value) -> Result<Value, ToolError> {
         "selection": selection,
         "inspection": private_store(state)?.inspect_redacted(&state.book.base.book_id)?,
     }))
+}
+
+fn codex_selection(state: &AppState, input: &Value) -> Result<Option<Value>, ToolError> {
+    reject_unknown_fields(input, &["plan_id"])?;
+    let store = private_store(state)?;
+    let inspection = store.inspect_redacted(&state.book.base.book_id)?;
+    let plan_id = if let Some(plan_id) = input.get("plan_id") {
+        Some(
+            plan_id
+                .as_str()
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| {
+                    error(
+                        INTENT_BUILD_INVALID,
+                        "validation",
+                        "plan_id must be a non-blank string",
+                    )
+                })?
+                .to_string(),
+        )
+    } else {
+        let drafts = inspection
+            .plans
+            .iter()
+            .filter(|plan| plan.status == "draft")
+            .collect::<Vec<_>>();
+        if drafts.len() > 1 {
+            return Err(error(
+                "CODEX_BUILD_INTENT_AMBIGUOUS",
+                "needs_user",
+                "multiple current draft plans exist; select an explicit plan_id",
+            ));
+        }
+        drafts
+            .first()
+            .map(|plan| plan.plan_id.clone())
+            .or_else(|| {
+                inspection
+                    .active_overlay
+                    .as_ref()
+                    .map(|active| active.plan_id.clone())
+            })
+            .or_else(|| {
+                inspection
+                    .plans
+                    .iter()
+                    .filter(|plan| matches!(plan.status.as_str(), "confirmed" | "completed"))
+                    .max_by_key(|plan| plan.revision)
+                    .map(|plan| plan.plan_id.clone())
+            })
+    };
+    let Some(plan_id) = plan_id else {
+        return Ok(None);
+    };
+    let plan = store.read_plan(&state.book.base.book_id, &plan_id)?;
+    let intent = read_plan_intent(&store, &state.book.base.book_id, &plan)?;
+    selection_from_artifacts(plan, intent).map(Some)
+}
+
+fn codex_response(state: &AppState, selection: Option<Value>) -> Result<Value, ToolError> {
+    let store = private_store(state)?;
+    let (projection, build_plan_path) = if let Some(selection) = selection {
+        let plan_id = selection
+            .get("plan")
+            .and_then(|plan| plan.get("plan_id"))
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                error(
+                    INTENT_BUILD_INVALID,
+                    "validation",
+                    "Codex selection has no BuildPlan identity",
+                )
+            })?;
+        let path = store.build_plan_path(&state.book.base.book_id, plan_id)?;
+        (
+            run_core(&json!({ "operation": "project_codex", "selection": selection }))?,
+            Value::String(path.to_string_lossy().into_owned()),
+        )
+    } else {
+        (Value::Null, Value::Null)
+    };
+    Ok(json!({
+        "version": "codex_build_intent_response.v1",
+        "projection": projection,
+        "build_plan_path": build_plan_path,
+        "inspection": store.inspect_redacted(&state.book.base.book_id)?,
+    }))
+}
+
+pub(super) fn run_codex_command(
+    state: &mut AppState,
+    operation: &str,
+    input: Value,
+    now: &str,
+) -> Result<Value, ToolError> {
+    synchronize_active_source(state)?;
+    match operation {
+        "draft" => {
+            reject_unknown_fields(&input, &["user_goal", "budget"])?;
+            let mut body = input;
+            body["mode"] = json!("goal_directed");
+            let drafted = draft(state, &body.to_string(), now)?;
+            codex_response(state, drafted.get("selection").cloned())
+        }
+        "status" => codex_response(state, codex_selection(state, &input)?),
+        "confirm" => {
+            reject_unknown_fields(&input, &["plan_id", "plan_digest"])?;
+            let confirmed =
+                confirm_with_source(state, &input.to_string(), now, "codex_conversation")?;
+            codex_response(state, confirmed.get("selection").cloned())
+        }
+        "reject" => {
+            reject_unknown_fields(&input, &["plan_id"])?;
+            let rejected = reject(state, &input.to_string())?;
+            codex_response(state, rejected.get("selection").cloned())
+        }
+        "artifact.prepare" => {
+            reject_unknown_fields(&input, &["plan_id"])?;
+            prepare_artifacts(state, &input.to_string(), now)
+        }
+        "artifact.submit" => {
+            reject_unknown_fields(&input, &["task_path"])?;
+            submit_artifact(state, &input.to_string(), now)
+        }
+        "artifact.fail" => {
+            reject_unknown_fields(&input, &["task_path", "diagnostic_code", "message"])?;
+            fail_artifact(state, &input.to_string(), now)
+        }
+        "artifact.inspect" => {
+            reject_unknown_fields(&input, &["task_path"])?;
+            inspect_artifact(state, &input.to_string())
+        }
+        _ => Err(error(
+            "CODEX_BUILD_INTENT_OPERATION_INVALID",
+            "validation",
+            "unsupported Codex build-intent operation",
+        )),
+    }
 }
 
 fn private_store(state: &AppState) -> Result<IntentArtifactStore, ToolError> {

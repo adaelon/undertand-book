@@ -110,3 +110,16 @@ Change type: 边界重构。
 **命门**:显式调用旧“完整预构建”命令可记录为 `standard_deep` 的 `explicit_legacy_command` 确认来源;导入、打开或恢复旧书不能自动创建该确认。
 **何时回头**:兼容窗口结束且使用数据证明旧命令已无调用时,删除映射前单独发布迁移说明。
 **展开**:[ADR-0067](0067-codex-plugin-one-command-prebuild.md)
+
+## §9 Codex 与 Reader 共用计划权威
+
+**决策**:Codex 与 Reader 共用唯一私有计划。
+
+**否决**:
+- 在 plugin 复制 intent store:会产生双写、ACL 与 active overlay 分叉。
+- 通过 Visitor/Book MCP 暴露私有计划:破坏 resident/visitor 边界。
+- 将 Codex 目标静默映射为完整深读:丢失范围、产物与预算确认。
+
+**命门**:Desktop-owned stdin controller 只接受可信 workspace,原始目标不进 argv/stdout,确认必须绑定当前 `plan_id + plan_digest`。
+**何时回头**:引入账户或远程执行器时,重新定义 controller 身份、传输认证与删除传播。
+**展开**:[IP11](../切片方案-需求驱动渐进式预构建.md#ip11---codex-与-reader-共享意图入口)

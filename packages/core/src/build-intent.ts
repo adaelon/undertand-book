@@ -288,7 +288,7 @@ const BuildPlanShapeZ = z.object({
   budget: BuildPlanBudgetV1Z,
   status: BuildPlanStatusZ,
   plan_digest: Sha256Z,
-  confirmation_source: z.enum(["reader_ui", "explicit_legacy_command"]).optional(),
+  confirmation_source: z.enum(["reader_ui", "codex_conversation", "explicit_legacy_command"]).optional(),
   created_at: IsoDateTimeZ,
   confirmed_at: IsoDateTimeZ.optional(),
 }).strict();

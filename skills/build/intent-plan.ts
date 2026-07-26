@@ -4,6 +4,7 @@ import path from "node:path";
 import {
   confirmBuildIntentSelection,
   draftBuildIntentSelection,
+  projectCodexBuildIntentSelection,
   redactBuildIntentSelection,
   rejectBuildIntentSelection,
   markBuildIntentSelectionStale,
@@ -37,6 +38,7 @@ type IntentPlanRequest =
     }
   | { operation: "reject"; selection: BuildIntentSelectionV1 }
   | { operation: "redact"; selection: BuildIntentSelectionV1 }
+  | { operation: "project_codex"; selection: BuildIntentSelectionV1 }
   | { operation: "supersede"; selection: BuildIntentSelectionV1 }
   | { operation: "stale_source"; selection: BuildIntentSelectionV1 }
   | { operation: "inspect_freshness"; target: IntentPlanFreshnessTargetV1 };
@@ -114,6 +116,8 @@ function run(request: IntentPlanRequest): unknown {
       return rejectBuildIntentSelection(request.selection);
     case "redact":
       return redactBuildIntentSelection(request.selection);
+    case "project_codex":
+      return projectCodexBuildIntentSelection(request.selection);
     case "supersede":
       return supersedeBuildIntentSelection(request.selection);
     case "stale_source":

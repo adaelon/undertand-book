@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { canonicalBuildJson } from "../../packages/core/src/build-intent";
 import type { BuildIntentV1, BuildPlanV1 } from "../../packages/core/src/build-intent";
@@ -161,6 +161,29 @@ function artifactDirectory(privateRoot: string, task: IntentArtifactTaskEnvelope
   );
 }
 
+function artifactAlreadyCommitted(
+  privateRoot: string,
+  task: IntentArtifactTaskEnvelopeV1,
+): boolean {
+  const directory = artifactDirectory(privateRoot, task);
+  if (!existsSync(path.join(directory, "accepted.json"))) return false;
+  const attemptsDirectory = path.join(directory, "attempts");
+  const latest = readdirSync(attemptsDirectory, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && /^\d{6}$/u.test(entry.name))
+    .map((entry) => entry.name)
+    .sort()
+    .at(-1);
+  if (!latest) throw new Error("accepted intent artifact has no task attempt");
+  const inspection = inspectIntentArtifactTaskAttempt({
+    private_root: privateRoot,
+    task_path: path.join(attemptsDirectory, latest, "task.json"),
+  });
+  if (inspection.state !== "committed" || inspection.task_id !== task.task_id) {
+    throw new Error("accepted intent artifact does not match the current task");
+  }
+  return true;
+}
+
 export function prepareIntentArtifactMailboxes(
   input: PrepareIntentArtifactMailboxInput,
 ): IntentArtifactTaskBatchHandoffV1 {
@@ -176,13 +199,15 @@ export function prepareIntentArtifactMailboxes(
     intent_id: input.intent.intent_id,
     plan_id: input.plan.plan_id,
     plan_digest: input.plan.plan_digest,
-    tasks: tasks.map((task) => openIntentArtifactTaskAttempt({
-      private_root: input.private_root,
-      artifact_directory: artifactDirectory(input.private_root, task),
-      task,
-      created_at: input.created_at,
-      ...(input.max_attempts === undefined ? {} : { max_attempts: input.max_attempts }),
-    })),
+    tasks: tasks
+      .filter((task) => !artifactAlreadyCommitted(input.private_root, task))
+      .map((task) => openIntentArtifactTaskAttempt({
+        private_root: input.private_root,
+        artifact_directory: artifactDirectory(input.private_root, task),
+        task,
+        created_at: input.created_at,
+        ...(input.max_attempts === undefined ? {} : { max_attempts: input.max_attempts }),
+      })),
   };
 }
 

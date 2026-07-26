@@ -292,6 +292,21 @@ describe("IP7 reader-private task-owned artifact mailbox", () => {
       input: { private_root: f.privateRoot, task_path: taskPath },
     });
     expect(inspect).toEqual(submit);
+    const resumed = runIntentArtifactMailboxCommand({
+      version: "intent_artifact_mailbox_command.v1",
+      operation: "prepare",
+      input: {
+        private_root: f.privateRoot,
+        intent: f.intent,
+        plan: f.plan,
+        available_lids: availableLids,
+        resolved_scope_lids: resolvedScopeLids,
+        created_at: "1785037440000",
+      },
+    }) as { tasks: Array<{ artifact_id: string }> };
+    expect(resumed.tasks).toEqual([
+      expect.objectContaining({ artifact_id: f.tasks[1].artifact.artifact_id }),
+    ]);
     expect((submit as { terminal_at: string }).terminal_at).toBe("2026-07-26T03:43:00.000Z");
     for (const output of [prepared, submit, inspect]) {
       const serialized = JSON.stringify(output);

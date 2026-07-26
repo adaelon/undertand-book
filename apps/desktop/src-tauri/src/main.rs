@@ -3,11 +3,17 @@ mod plugin_manager;
 
 use library_settings::{LibrarySettingsStore, PersistedProviderSettings};
 use plugin_manager::{PluginConfig, PluginManager, PluginState};
-use runtime::ProviderConfig;
+use runtime::{ModelAdapter, ProviderConfig, ProviderRegistry};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use server::host::{start_server, RunningServer, ServerHostConfig};
+use server::{
+    run_codex_build_intent_command, CodexBuildIntentControllerConfig, UnconfiguredAdapter,
+};
+use std::io::Read;
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{Manager, RunEvent, State, WebviewUrl, WebviewWindowBuilder};
 
 struct DesktopServer {
@@ -36,6 +42,23 @@ struct DesktopProviderStatus {
     base_url: String,
     model: String,
     api_key_configured: bool,
+}
+
+const CODEX_BUILD_INTENT_REQUEST_MAX_BYTES: usize = 64 * 1024;
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CodexBuildIntentCommand {
+    version: String,
+    operation: String,
+    target: CodexBuildIntentTarget,
+    input: Value,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CodexBuildIntentTarget {
+    workspace_dir: PathBuf,
 }
 
 fn persisted_provider_config(
@@ -90,8 +113,147 @@ fn plugin_manager() -> Result<PluginManager, String> {
     Ok(PluginManager::new(PluginConfig::from_environment(receipt)))
 }
 
+fn read_codex_build_intent_command(reader: impl Read) -> Result<CodexBuildIntentCommand, String> {
+    let mut body = Vec::new();
+    reader
+        .take((CODEX_BUILD_INTENT_REQUEST_MAX_BYTES + 1) as u64)
+        .read_to_end(&mut body)
+        .map_err(|_| "failed to read Codex build-intent request from stdin".to_string())?;
+    if body.len() > CODEX_BUILD_INTENT_REQUEST_MAX_BYTES {
+        return Err("Codex build-intent request exceeds 64 KiB".into());
+    }
+    let command: CodexBuildIntentCommand = serde_json::from_slice(&body)
+        .map_err(|error| format!("Codex build-intent request is invalid JSON: {error}"))?;
+    if command.version != "codex_build_intent_command.v1" {
+        return Err("unsupported Codex build-intent command version".into());
+    }
+    if !command.target.workspace_dir.is_absolute() {
+        return Err("Codex build-intent workspace_dir must be absolute".into());
+    }
+    Ok(command)
+}
+
+fn codex_build_intent_adapter(
+    settings: &LibrarySettingsStore,
+) -> Result<Box<dyn ModelAdapter + Send>, String> {
+    if let Some(settings) = settings.provider_settings()? {
+        return persisted_provider_config(&settings).map(ProviderRegistry::adapter_from_config);
+    }
+    Ok(ProviderConfig::from_env()
+        .map(ProviderRegistry::adapter_from_config)
+        .unwrap_or_else(|_| Box::new(UnconfiguredAdapter)))
+}
+
+fn codex_build_intent_now() -> String {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0)
+        .to_string()
+}
+
+fn redact_codex_private_text(message: &str, private_goal: Option<&str>) -> String {
+    let Some(goal) = private_goal.filter(|goal| !goal.is_empty()) else {
+        return message.to_string();
+    };
+    let redacted = message.replace(goal, "[redacted]");
+    let escaped = serde_json::to_string(goal).unwrap_or_default();
+    let escaped = escaped
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .unwrap_or(&escaped);
+    if escaped.is_empty() {
+        redacted
+    } else {
+        redacted.replace(escaped, "[redacted]")
+    }
+}
+
+fn handle_codex_build_intent_command() -> i32 {
+    let command = match read_codex_build_intent_command(std::io::stdin().lock()) {
+        Ok(command) => command,
+        Err(message) => {
+            eprintln!(
+                "{}",
+                serde_json::json!({
+                    "error_code": "CODEX_BUILD_INTENT_REQUEST_INVALID",
+                    "category": "validation",
+                    "message": message,
+                })
+            );
+            return 2;
+        }
+    };
+    let private_goal = command
+        .input
+        .get("user_goal")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let Some(local_app_data) = std::env::var_os("LOCALAPPDATA").map(PathBuf::from) else {
+        eprintln!(
+            "{}",
+            serde_json::json!({
+                "error_code": "CODEX_BUILD_INTENT_SETTINGS_UNAVAILABLE",
+                "category": "unavailable",
+                "message": "LOCALAPPDATA is unavailable",
+            })
+        );
+        return 2;
+    };
+    load_desktop_provider_env(&local_app_data);
+    let settings =
+        LibrarySettingsStore::new(local_app_data.join("UnderstandBook").join("settings.json"));
+    let documents = std::env::var_os("USERPROFILE")
+        .map(PathBuf::from)
+        .map(|path| path.join("Documents").join("UnderstandBook"))
+        .unwrap_or_else(|| local_app_data.join("UnderstandBook").join("library"));
+    let result = (|| {
+        let library_root = settings.initial_root(&documents)?;
+        let adapter = codex_build_intent_adapter(&settings)?;
+        run_codex_build_intent_command(
+            CodexBuildIntentControllerConfig {
+                book_dir: command.target.workspace_dir,
+                library_root,
+                intent_store_root: None,
+            },
+            adapter,
+            &command.operation,
+            command.input,
+            &codex_build_intent_now(),
+        )
+        .map_err(|error| serde_json::to_string(&error).unwrap_or_else(|_| {
+            r#"{"error_code":"CODEX_BUILD_INTENT_FAILED","category":"internal","message":"Codex build-intent command failed"}"#.into()
+        }))
+    })();
+    match result {
+        Ok(response) => match serde_json::to_string(&response) {
+            Ok(response) => {
+                println!("{response}");
+                0
+            }
+            Err(_) => {
+                eprintln!(
+                    "{}",
+                    r#"{"error_code":"CODEX_BUILD_INTENT_SERIALIZE_FAILED","category":"internal","message":"Codex build-intent response serialization failed"}"#
+                );
+                2
+            }
+        },
+        Err(error) => {
+            eprintln!(
+                "{}",
+                redact_codex_private_text(&error, private_goal.as_deref())
+            );
+            2
+        }
+    }
+}
+
 fn handle_maintenance_command() -> Option<i32> {
     let command = std::env::args().nth(1);
+    if command.as_deref() == Some("--codex-build-intent") {
+        return Some(handle_codex_build_intent_command());
+    }
     let (status, failure_states) = match command.as_deref() {
         Some("--codex-plugin-status") => (plugin_manager().map(|manager| manager.status()), false),
         Some("--install-codex-plugin") => (plugin_manager().map(|manager| manager.install()), true),
@@ -305,6 +467,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Cursor;
 
     #[test]
     fn provider_status_never_serializes_the_api_key() {
@@ -320,5 +483,42 @@ mod tests {
 
         assert!(!json.contains("super-secret"));
         assert!(json.contains("\"api_key_configured\":true"));
+    }
+
+    #[test]
+    fn codex_build_intent_command_is_strict_and_never_uses_argv_for_goal() {
+        let workspace = std::env::current_dir().unwrap();
+        let parsed = read_codex_build_intent_command(Cursor::new(
+            serde_json::json!({
+                "version": "codex_build_intent_command.v1",
+                "operation": "draft",
+                "target": { "workspace_dir": workspace },
+                "input": { "user_goal": "private goal" },
+            })
+            .to_string(),
+        ))
+        .unwrap();
+        assert_eq!(parsed.operation, "draft");
+        assert_eq!(parsed.input["user_goal"], "private goal");
+
+        let unknown = serde_json::json!({
+            "version": "codex_build_intent_command.v1",
+            "operation": "status",
+            "target": { "workspace_dir": workspace },
+            "input": {},
+            "raw_goal": "must be rejected",
+        })
+        .to_string();
+        assert!(read_codex_build_intent_command(Cursor::new(unknown)).is_err());
+        let private_goal = "line one\nline two";
+        let provider_error = format!(
+            r#"{{"message":"provider echoed {}"}}"#,
+            serde_json::to_string(private_goal)
+                .unwrap()
+                .trim_matches('"')
+        );
+        let redacted = redact_codex_private_text(&provider_error, Some(private_goal));
+        assert!(!redacted.contains("line one"));
+        assert!(redacted.contains("[redacted]"));
     }
 }

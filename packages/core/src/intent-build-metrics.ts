@@ -29,7 +29,7 @@ const PlanRefZ = z.object({
   plan_id: PathSafeIdZ,
   revision: z.number().int().safe().positive(),
   plan_digest: Sha256Z,
-  confirmation_source: z.enum(["reader_ui", "explicit_legacy_command"]),
+  confirmation_source: z.enum(["reader_ui", "codex_conversation", "explicit_legacy_command"]),
   intent_id: PathSafeIdZ.optional(),
 }).strict();
 

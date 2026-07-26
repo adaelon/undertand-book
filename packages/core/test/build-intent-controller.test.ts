@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import {
   confirmBuildIntentSelection,
   draftBuildIntentSelection,
+  projectCodexBuildIntentSelection,
   redactBuildIntentSelection,
   rejectBuildIntentSelection,
 } from "../src/build-intent-controller";
@@ -105,6 +106,55 @@ describe("IP5 resident build-intent controller", () => {
     expect(confirmed.decision_request?.status).toBe("answered");
     expect(JSON.stringify(redactBuildIntentSelection(confirmed))).not.toContain(rawGoal);
     expect(rejectBuildIntentSelection(draft).plan?.status).toBe("superseded");
+  });
+
+  it("projects an auditable Codex plan without the private raw goal", () => {
+    const rawGoal = "PRIVATE_CODEX_GOAL_DO_NOT_RETURN";
+    const draft = draftBuildIntentSelection({
+      mode: "goal_directed",
+      target,
+      now,
+      user_goal: rawGoal,
+      candidate: {
+        version: "build_intent_planner_candidate.v1",
+        goal_kind: "compare",
+        source_scope: { whole_book: false, lids: ["2.1"], sections: [] },
+        desired_artifacts: ["comparison_table"],
+        usage_horizon: "project",
+      },
+    });
+    const projection = projectCodexBuildIntentSelection(draft);
+    expect(projection).toMatchObject({
+      version: "codex_build_intent_plan.v1",
+      mode: "goal_directed",
+      intent: {
+        intent_id: draft.intent?.intent_id,
+        intent_digest: draft.intent_digest,
+        goal_kind: "compare",
+        source_scope: { whole_book: false, lids: ["2.1"], sections: [] },
+        desired_artifacts: ["comparison_table"],
+      },
+      plan: {
+        plan_id: draft.plan?.plan_id,
+        plan_digest: draft.plan?.plan_digest,
+        create: draft.plan?.create,
+        reuse: draft.plan?.reuse,
+        estimate: draft.plan?.estimate,
+        budget: draft.plan?.budget,
+      },
+      decision_request: draft.decision_request,
+    });
+    const serialized = JSON.stringify(projection);
+    expect(serialized).not.toContain(rawGoal);
+    expect(serialized).not.toContain("user_goal");
+
+    const confirmed = confirmBuildIntentSelection(draft, {
+      plan_id: draft.plan!.plan_id,
+      plan_digest: draft.plan!.plan_digest,
+      at: now,
+      confirmation_source: "codex_conversation",
+    });
+    expect(confirmed.plan?.confirmation_source).toBe("codex_conversation");
   });
 
   it("projects V1 workbench decisions into stage-scoped V2 without changing V1", () => {

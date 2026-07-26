@@ -10,6 +10,7 @@
     "test:book-mcp-plugin": "node scripts/smoke-book-mcp-plugin.mjs",
     "test:automatic-build-parity": "node scripts/smoke-automatic-build-parity.mjs",
     "test:intent-metrics-parity": "node scripts/smoke-intent-build-metrics.mjs",
+    "test:codex-build-intent": "node scripts/smoke-codex-build-intent.mjs",
     "test:plugin-release": "node scripts/assert-plugin-release.mjs",
     "package:windows": "node scripts/assert-plugin-release.mjs && node scripts/assert-release-config.mjs && tauri build --bundles nsis && node scripts/export-installer.mjs"
   },

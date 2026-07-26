@@ -80,6 +80,13 @@ const protocolMarkers = [
   "executor_unavailable",
   "legacy_migration_required",
   "quality_gate_failed",
+  "codex_build_intent_command.v1",
+  "codex_build_intent_response.v1",
+  "codex_conversation",
+  "plan_confirmation_required",
+  "artifact.prepare",
+  "intent_artifact_mailbox_receipt.v1",
+  "UnderstandBook.exe",
 ];
 for (const marker of protocolMarkers) {
   assert(

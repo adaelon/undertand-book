@@ -1,6 +1,6 @@
 ---
 name: understand-book-build
-description: Build or resume a book (EPUB/Markdown) or trusted paper Workbench workspace into a complete evidence-anchored reading base with one Codex invocation.
+description: Build or resume a book workspace, optionally from a confirmed natural-language reading goal shared with the Reader.
 ---
 
 # $understand-book-build
@@ -19,9 +19,11 @@ contract,也不得在普通 stage 边界停下等待用户继续。
    - 若 `UNDERSTAND_BOOK_BUILD_EXE` 指向存在的文件,使用它。
    - Windows 安装版读取 `HKCU\Software\UnderstandBook` 的 `InstallDir`,使用同目录下的
      `understand-book-build.exe`。
+   - 意图控制器优先使用 `UNDERSTAND_BOOK_DESKTOP_EXE`,否则使用同一 `InstallDir` 下的
+     `UnderstandBook.exe`;它拥有 reader-private store,build sidecar 不得复制该 store。
    - 仅插件开发/非 Windows 环境允许回退 Node:若缺少 `node_modules/tsx`,在插件根运行
      `pnpm install --frozen-lockfile`;依赖失败则报告阻塞,不得伪造构建。
-   - 本 skill 调用就是显式旧“完整预构建”命令。先运行
+   - 无自然语言目标时,本 skill 调用才是显式旧“完整预构建”命令。先运行
      `<understand-book-build.exe> legacy-plan <target> --root <root> [策略与预算参数]`,只消费
      `explicit_legacy_build_plan.v1`,要求 plan 为已确认 `standard_deep` 且
      `confirmation_source=explicit_legacy_command`,并保留 `build_plan_path`。打开、导入或恢复书籍
@@ -30,6 +32,26 @@ contract,也不得在普通 stage 边界停下等待用户继续。
      `<understand-book-build.exe> protocol-doctor <target> --plugin-root <插件根目录> --build-plan <build_plan_path>`。只消费
      `automatic_build_protocol_doctor.v1`;它必须报告 `status=compatible`、
      `production_default=automatic_build_protocol.v2_dispatch` 与 `dry_run_mutates_state=false`。
+
+### 自然语言目标的两步确认
+
+有自然语言目标时,target 必须是 Reader 书库内或由 Reader 显式登记、且已有 `base.json` 与
+`source.txt` 的立即可读 workspace。原始 Markdown/EPUB 或尚未完成可信 foundation 的 paper 返回
+`needs_user(foundation_required)`,不得伪造 goal plan。
+
+首次调用只把一个 `codex_build_intent_command.v1` JSON envelope 经 stdin 送给
+`UnderstandBook.exe --codex-build-intent`:argv 只能包含维护命令 flag;`user_goal` 不得进入 argv、
+环境变量、临时/公共 workspace 文件、stdout 或 stderr。envelope 固定
+`operation=draft + absolute target.workspace_dir + input.{user_goal,budget?}`。只消费
+`codex_build_intent_response.v1`,向用户展示 goal kind、scope、目标成果、公共 closure、reuse、
+create、excluded、token/墙钟估计、budget、`plan_id + plan_digest`,然后停止为
+`needs_user(plan_confirmation_required)`;此时禁止运行 `legacy-plan/plan/next` 或私有成果任务。
+
+用户确认后,先对所展示 `plan_id` 执行 stdin `operation=status`;若 Reader 已 replan、source 变化、
+status/digest 不同或存在歧义 draft,展示当前投影并重新等待确认。完全一致时再发送
+`operation=confirm + exact plan_id + plan_digest`,要求结果来源为 `codex_conversation`,保留返回的
+reader-private `build_plan_path`,然后才进入下方公共 automatic-build loop。Reader 已确认同一精确
+plan 也可直接继续。用户拒绝时调用 `operation=reject`;不得把展示计划之前的“构建它”当确认。
 2. 每次进入一个可能需要模型抽取的 stage,先用与后续 `next` 完全相同的
    `--max-parallel`、`--quality-profile` 和预算参数执行只读 preflight。`--max-parallel`
    是已接受计划允许的 worker 上限(最多 3);`--available-agent-slots` 是此刻真正空闲的专用
@@ -126,9 +148,30 @@ contract,也不得在普通 stage 边界停下等待用户继续。
      `legacy_policy_unknown`,不得继续 v2 loop。`quality_gate_failed` 必须分别展示 integrity 与
      selected quality floor violations,不得用全叶锚定率、LLM 自评或 `--allow-partial` 覆盖。重试耗尽时展示 task id、
      最后诊断与 `reset_commands`;只有用户确认重试后才能执行 reset。
-   - `action.kind=done`:报告 workspace 路径和已完成阶段,结束 goal。
+   - `action.kind=done`:若为 `standard_deep`,报告 workspace 路径和已完成阶段并结束;若为已确认
+     `goal_directed`,继续执行下方 reader-private 成果 loop。
 4. 每个 dispatch receipt、每批 write 或 stage close 后立即回到步骤 2 重新生成当前 pending 集合的 preflight。磁盘 `.build/<stage>` 是唯一续建真相;
    不依赖对话记忆判断 done/pending。
+
+### reader-private 目标成果 loop
+
+公共 closure `done` 后,经 Desktop stdin controller 调用 `operation=artifact.prepare + confirmed
+plan_id`,只消费 `intent_artifact_prepare_response.v1`。`handoff.tasks=[]` 表示全部声明成果已
+accepted,此时才报告完成。否则按当前专用 subagent 槽位分波处理 opaque handoff;必须处理完本次
+返回的整批 tasks 后再 prepare retry,避免失败成果饿死未处理兄弟成果。
+
+root 每个 subagent 只给 `workspace_dir/task_path/Desktop controller path`,不得读取 task 或接收其
+正文。专用 subagent 先调用 `artifact.inspect`,自行读取私有 `task.json`,仅依照其中 goal、scope、
+output contract、validation rules、allowed evidence LIDs 与 canonical Book 工具/产物生成
+`intent_artifact_candidate.v1`;完整复制 task identity,生成记录只放 `payload`,以 UTF-8 no-BOM
+写 sibling `candidate.json`。随后经 stdin 调用 `operation=artifact.submit`,只把 body-free
+`intent_artifact_mailbox_receipt.v1` 返回 root。模型/进程/schema 失败时调用
+`operation=artifact.fail + path-safe diagnostic_code`,只返回 retry receipt。
+
+root 只校验 receipt 数、state、task/artifact identity 与 confirmed plan digest,丢弃 receipt 列表后
+再次 prepare。中断后复用 pending attempt;accepted artifact 会被确定性排除;failed artifact 新开
+有界 attempt;stale source/plan/task fail closed。candidate payload、raw goal、quote、LID 列表与
+accepted body 都不得从专用 subagent 回到 root context。
 
 硬边界:
 - paper 必须先在 Build Workbench 完成 source reconciliation 与 hybrid foundation;本 skill

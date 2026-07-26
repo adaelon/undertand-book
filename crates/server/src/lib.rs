@@ -101,6 +101,97 @@ pub struct AppState {
     pub workbench_loaded_revision: Option<String>,
 }
 
+pub struct CodexBuildIntentControllerConfig {
+    pub book_dir: PathBuf,
+    pub library_root: PathBuf,
+    pub intent_store_root: Option<PathBuf>,
+}
+
+fn trusted_codex_workspace(book_dir: &Path, library_root: &Path) -> Result<PathBuf, ToolError> {
+    if !book_dir.is_absolute() {
+        return Err(ToolError {
+            error_code: "CODEX_BUILD_TARGET_INVALID".into(),
+            category: "validation".into(),
+            message: "Codex build target must be an absolute workspace path".into(),
+        });
+    }
+    let workspace = book_dir.canonicalize().map_err(|error| ToolError {
+        error_code: "CODEX_BUILD_TARGET_UNAVAILABLE".into(),
+        category: "not_found".into(),
+        message: format!("Codex build target cannot be resolved: {error}"),
+    })?;
+    let root = library_root.canonicalize().map_err(|error| ToolError {
+        error_code: "CODEX_BUILD_LIBRARY_UNAVAILABLE".into(),
+        category: "unavailable".into(),
+        message: format!("Reader library root cannot be resolved: {error}"),
+    })?;
+    let registered = read_library_registry(&root).workspaces.iter().any(|entry| {
+        Path::new(entry)
+            .canonicalize()
+            .is_ok_and(|registered| registered == workspace)
+    });
+    if !workspace.starts_with(&root) && !registered {
+        return Err(ToolError {
+            error_code: "CODEX_BUILD_TARGET_UNTRUSTED".into(),
+            category: "permission".into(),
+            message: "Codex build target is not inside or registered with the Reader library"
+                .into(),
+        });
+    }
+    Ok(book_dir.to_path_buf())
+}
+
+pub fn run_codex_build_intent_command(
+    config: CodexBuildIntentControllerConfig,
+    adapter: Box<dyn ModelAdapter + Send>,
+    operation: &str,
+    input: Value,
+    now: &str,
+) -> Result<Value, ToolError> {
+    let book_dir = trusted_codex_workspace(&config.book_dir, &config.library_root)?;
+    let book_dir_text = book_dir.to_str().ok_or_else(|| ToolError {
+        error_code: "CODEX_BUILD_TARGET_INVALID".into(),
+        category: "validation".into(),
+        message: "Codex build target path is not valid UTF-8".into(),
+    })?;
+    let book = Book::load(book_dir_text).map_err(|message| ToolError {
+        error_code: "CODEX_BUILD_FOUNDATION_REQUIRED".into(),
+        category: "needs_user".into(),
+        message: format!("Codex build target is not immediately readable: {message}"),
+    })?;
+    let reader = Reader::new(&book, DEFAULT_RADIUS);
+    let store = MemoryStore::unavailable(
+        book_dir.join(".codex-controller-memory-disabled"),
+        ToolError {
+            error_code: "CODEX_CONTROLLER_MEMORY_DISABLED".into(),
+            category: "permission".into(),
+            message: "Codex build-intent controller does not access Reader memory".into(),
+        },
+        now,
+    );
+    let intent_store_root = match config.intent_store_root {
+        Some(root) => Some(root),
+        None => Some(intent_build_store::IntentArtifactStore::default_root()?),
+    };
+    let mut state = AppState {
+        book_dir,
+        library_root: Some(config.library_root),
+        book,
+        reader,
+        store,
+        intent_store_root,
+        adapter,
+        messages: new_session(),
+        session_path: None,
+        history_path: None,
+        agent_history: AgentHistory::default(),
+        profile_context_cache: runtime::profile_context::ProfileContextCache::default(),
+        visitor_sessions: mcp::VisitorSessions::default(),
+        workbench_loaded_revision: None,
+    };
+    build_intent_api::run_codex_command(&mut state, operation, input, now)
+}
+
 const PAPER_MINIMAP_OVERLAY_STORE_VERSION: &str = "paper_minimap_overlays.v1";
 const PAPER_MINIMAP_LOCALIZATION_CACHE_VERSION: &str = "paper_minimap_localizations.v1";
 const PAPER_MINIMAP_LOCALIZATION_LOCALE: &str = "zh-CN";
@@ -15804,6 +15895,177 @@ unchanged after training concludes";
         assert!(!status.body.contains("PRIVATE_GOAL_SENTINEL"));
         assert!(!status.body.contains("EDITED_PRIVATE_GOAL_SENTINEL"));
         assert!(status.body.contains(&intent_id));
+    }
+
+    #[test]
+    fn codex_build_intent_uses_the_reader_private_plan_and_returns_no_raw_goal() {
+        let mut state = state_named("codex-build-intent-shared-store");
+        state.adapter = Box::new(MemoryFlowAdapter {
+            structured_outputs: RefCell::new(VecDeque::from([json!({
+                "version": "build_intent_planner_candidate.v1",
+                "goal_kind": "compare",
+                "source_scope": { "whole_book": false, "lids": ["1.1"], "sections": [] },
+                "desired_artifacts": ["comparison_table"],
+                "usage_horizon": "project"
+            })])),
+            chat_answers: RefCell::new(VecDeque::new()),
+            structured_calls: Arc::new(Mutex::new(0)),
+            seen_messages: Arc::new(Mutex::new(Vec::new())),
+        });
+        let raw_goal = "PRIVATE_CODEX_CONTROLLER_GOAL";
+        let drafted = build_intent_api::run_codex_command(
+            &mut state,
+            "draft",
+            json!({ "user_goal": raw_goal }),
+            "2026-07-26T08:00:00.000Z",
+        )
+        .unwrap();
+        let body = serde_json::to_string(&drafted).unwrap();
+        assert!(!body.contains(raw_goal));
+        assert!(!body.contains("user_goal"));
+        assert_eq!(
+            drafted["projection"]["version"],
+            "codex_build_intent_plan.v1"
+        );
+        let plan_id = drafted["projection"]["plan"]["plan_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let plan_digest = drafted["projection"]["plan"]["plan_digest"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(Path::new(drafted["build_plan_path"].as_str().unwrap()).is_file());
+
+        let mismatched = build_intent_api::run_codex_command(
+            &mut state,
+            "confirm",
+            json!({ "plan_id": plan_id, "plan_digest": "f".repeat(64) }),
+            "2026-07-26T08:01:00.000Z",
+        )
+        .unwrap_err();
+        assert_eq!(
+            mismatched.error_code,
+            intent_build_store::INTENT_BUILD_CONFLICT
+        );
+
+        let confirmed = build_intent_api::run_codex_command(
+            &mut state,
+            "confirm",
+            json!({ "plan_id": plan_id, "plan_digest": plan_digest }),
+            "2026-07-26T08:02:00.000Z",
+        )
+        .unwrap();
+        assert_eq!(
+            confirmed["projection"]["plan"]["confirmation_source"],
+            "codex_conversation"
+        );
+        let reader_status: Value =
+            serde_json::from_str(&get(&mut state, "/build_intent/status").body).unwrap();
+        assert_eq!(reader_status["inspection"], confirmed["inspection"]);
+        assert_eq!(
+            reader_status["inspection"]["active_overlay"]["plan_id"],
+            plan_id
+        );
+        let prepared = build_intent_api::run_codex_command(
+            &mut state,
+            "artifact.prepare",
+            json!({ "plan_id": plan_id }),
+            "2026-07-26T08:03:00.000Z",
+        )
+        .unwrap();
+        let prepared_body = serde_json::to_string(&prepared).unwrap();
+        assert!(!prepared_body.contains(raw_goal));
+        assert!(!prepared_body.contains("allowed_evidence_lids"));
+        assert_eq!(
+            prepared["handoff"]["version"],
+            "intent_artifact_task_batch_handoff.v1"
+        );
+        assert_eq!(prepared["handoff"]["tasks"].as_array().unwrap().len(), 1);
+        let task_path = PathBuf::from(
+            prepared["handoff"]["tasks"][0]["task_path"]
+                .as_str()
+                .unwrap(),
+        );
+        let task: Value =
+            serde_json::from_str(&std::fs::read_to_string(&task_path).unwrap()).unwrap();
+        let candidate = json!({
+            "version": "intent_artifact_candidate.v1",
+            "task_id": task["task_id"],
+            "book_id": task["book_id"],
+            "source_fingerprint": task["source_fingerprint"],
+            "intent_id": task["intent_id"],
+            "intent_digest": task["intent_digest"],
+            "plan_id": task["plan_id"],
+            "plan_digest": task["plan_digest"],
+            "artifact_id": task["artifact"]["artifact_id"],
+            "artifact_type": task["artifact"]["artifact_type"],
+            "payload": {
+                "rows": [{
+                    "subject": "Shared controller result",
+                    "dimensions": { "finding": "accepted through the private mailbox" },
+                    "evidence_lids": ["1.1"]
+                }]
+            }
+        });
+        std::fs::write(
+            task_path.parent().unwrap().join("candidate.json"),
+            candidate.to_string(),
+        )
+        .unwrap();
+        let submitted = build_intent_api::run_codex_command(
+            &mut state,
+            "artifact.submit",
+            json!({ "task_path": task_path }),
+            "2026-07-26T08:04:00.000Z",
+        )
+        .unwrap();
+        assert_eq!(submitted["receipt"]["state"], "committed");
+        assert!(!serde_json::to_string(&submitted)
+            .unwrap()
+            .contains("Shared controller result"));
+
+        let reader_artifacts: Value =
+            serde_json::from_str(&get(&mut state, "/build_intent/artifacts").body).unwrap();
+        assert_eq!(
+            reader_artifacts["overlay"]["artifacts"][0]["state"],
+            "accepted"
+        );
+        assert_eq!(
+            reader_artifacts["overlay"]["artifacts"][0]["payload"]["rows"][0]["subject"],
+            "Shared controller result"
+        );
+        let resumed = build_intent_api::run_codex_command(
+            &mut state,
+            "artifact.prepare",
+            json!({ "plan_id": plan_id }),
+            "2026-07-26T08:05:00.000Z",
+        )
+        .unwrap();
+        assert!(resumed["handoff"]["tasks"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn codex_build_target_requires_reader_library_membership_or_registration() {
+        let parent = tmp_dir("codex-build-target-trust");
+        let library = parent.join(".understand-book");
+        let inside = library.join("inside-book");
+        let outside = tmp_dir("codex-build-target-external");
+        std::fs::create_dir_all(&inside).unwrap();
+
+        assert_eq!(trusted_codex_workspace(&inside, &library).unwrap(), inside);
+        let denied = trusted_codex_workspace(&outside, &library).unwrap_err();
+        assert_eq!(denied.error_code, "CODEX_BUILD_TARGET_UNTRUSTED");
+
+        std::fs::write(
+            library_registry_path(&library),
+            json!({ "workspaces": [outside] }).to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            trusted_codex_workspace(&outside, &library).unwrap(),
+            outside
+        );
     }
 
     #[test]

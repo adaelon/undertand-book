@@ -91,6 +91,23 @@ export interface RedactedBuildIntentSelectionV1 {
   decision_request: BuildDecisionRequestV2 | null;
 }
 
+export interface CodexBuildIntentPlanV1 {
+  version: "codex_build_intent_plan.v1";
+  mode: BuildMode;
+  intent: null | {
+    intent_id: string;
+    revision: number;
+    status: BuildIntentV1["status"];
+    intent_digest: string;
+    goal_kind: BuildIntentV1["goal_kind"];
+    source_scope: BuildIntentV1["source_scope"];
+    desired_artifacts: BuildIntentV1["desired_artifacts"];
+    usage_horizon: BuildIntentV1["usage_horizon"];
+  };
+  plan: BuildPlanV1 | null;
+  decision_request: BuildDecisionRequestV2 | null;
+}
+
 export interface ReplannedBuildIntentSelectionV1 {
   version: "replanned_build_intent_selection.v1";
   previous: BuildIntentSelectionV1;
@@ -355,6 +372,27 @@ export function redactBuildIntentSelection(input: BuildIntentSelectionV1): Redac
       recipe_id: plan.recipe_id,
       plan_digest: plan.plan_digest,
     } : null,
+    decision_request: input.decision_request,
+  };
+}
+
+export function projectCodexBuildIntentSelection(input: BuildIntentSelectionV1): CodexBuildIntentPlanV1 {
+  const intent = input.intent ? validateBuildIntentV1(input.intent) : null;
+  const plan = input.plan ? validateBuildPlanV1(input.plan) : null;
+  return {
+    version: "codex_build_intent_plan.v1",
+    mode: input.mode,
+    intent: intent ? {
+      intent_id: intent.intent_id,
+      revision: intent.revision,
+      status: intent.status,
+      intent_digest: computeBuildIntentDigest(intent),
+      goal_kind: intent.goal_kind,
+      source_scope: intent.source_scope,
+      desired_artifacts: intent.desired_artifacts,
+      usage_horizon: intent.usage_horizon,
+    } : null,
+    plan,
     decision_request: input.decision_request,
   };
 }

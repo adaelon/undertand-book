@@ -263,6 +263,13 @@ impl IntentArtifactStore {
         read_required_json(&path, "plan")
     }
 
+    pub fn build_plan_path(&self, book_id: &str, plan_id: &str) -> Result<PathBuf, ToolError> {
+        self.ensure_private()?;
+        let path = self.plan_path(book_id, plan_id)?;
+        read_required_json(&path, "plan")?;
+        Ok(path)
+    }
+
     pub fn inspect_redacted(
         &self,
         book_id: &str,
