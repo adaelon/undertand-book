@@ -16,6 +16,7 @@ import {
 } from "../src/automatic-build-mailbox";
 import { readAutomaticBuildAttemptSnapshot } from "../src/automatic-build-task-store";
 import { resolveAutomaticBuildTarget } from "../src/build-orchestrator";
+import { confirmedStandardBuildPlan } from "./helpers/confirmed-build-plan";
 
 const REPO_ROOT = path.resolve(process.cwd(), "..", "..");
 const EXTRACTOR_PROMPTS = [
@@ -70,7 +71,8 @@ describe("automatic build Codex executor handoff", () => {
     const previous = process.env.UNDERSTAND_BOOK_SIDECAR_SELF;
     process.env.UNDERSTAND_BOOK_SIDECAR_SELF = "C:\\Program Files\\Understand Book\\understand-book-build.exe";
     try {
-      const plan = automaticBuildPlan(source, root, { requested_workers: 1 });
+      const buildPlan = confirmedStandardBuildPlan(source, root);
+      const plan = automaticBuildPlan(source, root, { requested_workers: 1, build_plan: buildPlan });
       if (!plan.preflight) throw new Error("expected handoff preflight");
       const result = automaticBuildNext(source, root, 1, {
         protocol: "automatic_build_protocol.v2",
@@ -78,6 +80,7 @@ describe("automatic build Codex executor handoff", () => {
         now: "2026-07-19T00:00:00.000Z",
         lease_ttl_ms: 60_000,
         accepted_plan_digest: plan.preflight.plan_digest,
+        build_plan: buildPlan,
       });
       expect(result.action.kind).toBe("extract");
       if (!("tasks" in result.action) || !result.action.tasks) {
@@ -135,13 +138,15 @@ describe("automatic build Codex executor handoff", () => {
     const previous = process.env.UNDERSTAND_BOOK_SIDECAR_SELF;
     delete process.env.UNDERSTAND_BOOK_SIDECAR_SELF;
     try {
-      const plan = automaticBuildPlan(source, root, { requested_workers: 1 });
+      const buildPlan = confirmedStandardBuildPlan(source, root);
+      const plan = automaticBuildPlan(source, root, { requested_workers: 1, build_plan: buildPlan });
       if (!plan.preflight) throw new Error("expected handoff preflight");
       const result = automaticBuildNext(source, root, 1, {
         protocol: "automatic_build_protocol.v2",
         owner: "handoff-test",
         now: "2026-07-19T00:00:00.000Z",
         accepted_plan_digest: plan.preflight.plan_digest,
+        build_plan: buildPlan,
       });
       if (result.action.kind !== "extract" || !result.action.tasks) throw new Error("expected executor task");
       const task = result.action.tasks[0];
@@ -171,7 +176,12 @@ describe("automatic build Codex executor handoff", () => {
     const root = mkdtempSync(path.join(tmpdir(), "understand-book-dispatch-handoff-"));
     const source = path.join(root, "guide.md");
     writeFileSync(source, dispatchSource(), "utf8");
-    const plan = automaticBuildPlan(source, root, { requested_workers: 2, available_agent_slots: 2 });
+    const buildPlan = confirmedStandardBuildPlan(source, root);
+    const plan = automaticBuildPlan(source, root, {
+      requested_workers: 2,
+      available_agent_slots: 2,
+      build_plan: buildPlan,
+    });
     if (!plan.preflight) throw new Error("expected dispatch preflight");
     const next = automaticBuildNext(source, root, 2, {
       owner: "dispatch-handoff",
@@ -179,6 +189,7 @@ describe("automatic build Codex executor handoff", () => {
       accepted_plan_digest: plan.preflight.plan_digest,
       available_agent_slots: 2,
       executor_dispatches: true,
+      build_plan: buildPlan,
     });
     expect(next.action.kind).toBe("dispatch");
     if (!("dispatches" in next.action) || !next.action.dispatches) throw new Error("expected dispatch handoff");
@@ -194,6 +205,7 @@ describe("automatic build Codex executor handoff", () => {
       accepted_plan_digest: plan.preflight.plan_digest,
       available_agent_slots: 2,
       executor_dispatches: true,
+      build_plan: buildPlan,
     });
     if (!("dispatches" in replayed.action) || !replayed.action.dispatches) {
       throw new Error("expected idempotent dispatch replay before claim");
@@ -223,7 +235,12 @@ describe("automatic build Codex executor handoff", () => {
     const root = mkdtempSync(path.join(tmpdir(), "understand-book-dispatch-receipt-"));
     const source = path.join(root, "guide.md");
     writeFileSync(source, dispatchSource(), "utf8");
-    const plan = automaticBuildPlan(source, root, { requested_workers: 1, available_agent_slots: 1 });
+    const buildPlan = confirmedStandardBuildPlan(source, root);
+    const plan = automaticBuildPlan(source, root, {
+      requested_workers: 1,
+      available_agent_slots: 1,
+      build_plan: buildPlan,
+    });
     if (!plan.preflight) throw new Error("expected dispatch preflight");
     const next = automaticBuildNext(source, root, 1, {
       owner: "dispatch-receipt",
@@ -231,6 +248,7 @@ describe("automatic build Codex executor handoff", () => {
       accepted_plan_digest: plan.preflight.plan_digest,
       available_agent_slots: 1,
       executor_dispatches: true,
+      build_plan: buildPlan,
     });
     if (!("dispatches" in next.action) || !next.action.dispatches) throw new Error("expected dispatch handoff");
     const manifest = next.action.dispatches[0].manifest;
@@ -274,7 +292,12 @@ describe("automatic build Codex executor handoff", () => {
     const root = mkdtempSync(path.join(tmpdir(), "understand-book-dispatch-interrupt-"));
     const source = path.join(root, "guide.md");
     writeFileSync(source, dispatchSource(), "utf8");
-    const plan = automaticBuildPlan(source, root, { requested_workers: 1, available_agent_slots: 1 });
+    const buildPlan = confirmedStandardBuildPlan(source, root);
+    const plan = automaticBuildPlan(source, root, {
+      requested_workers: 1,
+      available_agent_slots: 1,
+      build_plan: buildPlan,
+    });
     if (!plan.preflight) throw new Error("expected dispatch preflight");
     const next = automaticBuildNext(source, root, 1, {
       owner: "dispatch-interrupt",
@@ -282,6 +305,7 @@ describe("automatic build Codex executor handoff", () => {
       accepted_plan_digest: plan.preflight.plan_digest,
       available_agent_slots: 1,
       executor_dispatches: true,
+      build_plan: buildPlan,
     });
     if (!("dispatches" in next.action) || !next.action.dispatches) throw new Error("expected dispatch handoff");
     const manifest = next.action.dispatches[0].manifest;
@@ -309,13 +333,19 @@ describe("automatic build Codex executor handoff", () => {
     const previous = process.env.UNDERSTAND_BOOK_SIDECAR_SELF;
     process.env.UNDERSTAND_BOOK_SIDECAR_SELF = "C:\\Program Files\\Understand Book\\understand-book-build.exe";
     try {
-      const plan = automaticBuildPlan(source, root, { requested_workers: 1, available_agent_slots: 1 });
+      const buildPlan = confirmedStandardBuildPlan(source, root);
+      const plan = automaticBuildPlan(source, root, {
+        requested_workers: 1,
+        available_agent_slots: 1,
+        build_plan: buildPlan,
+      });
       if (!plan.preflight) throw new Error("expected dispatch preflight");
       const next = automaticBuildNext(source, root, 1, {
         now: "2026-07-25T02:30:00.000Z",
         accepted_plan_digest: plan.preflight.plan_digest,
         available_agent_slots: 1,
         executor_dispatches: true,
+        build_plan: buildPlan,
       });
       if (!("dispatches" in next.action) || !next.action.dispatches) throw new Error("expected dispatch handoff");
       const envelope = next.action.dispatches[0];

@@ -3,16 +3,20 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { fileURLToPath } from "node:url";
 
 const desktopRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const repoRoot = path.resolve(desktopRoot, "..", "..");
+const tsx = path.join(repoRoot, "node_modules", "tsx", "dist", "cli.mjs");
+const buildPlanFixture = path.join(desktopRoot, "scripts", "write-confirmed-build-plan-fixture.ts");
 const sidecar = path.join(
   desktopRoot,
   "src-tauri",
   "binaries",
   `understand-book-build-x86_64-pc-windows-msvc${process.platform === "win32" ? ".exe" : ""}`,
 );
+const legacyClaimProtocolArgs = ["--protocol", "automatic_build_protocol.v2"];
 
 function simplePdf(text) {
   const stream = `BT /F1 12 Tf 72 100 Td (${text}) Tj ET\n`;
@@ -50,6 +54,26 @@ const fingerprint = {
   config_hash: "sidecar-smoke-v1",
 };
 const canonicalSource = "Hello PDF\n";
+const confirmedBuildPlanPaths = new Map();
+
+function confirmedBuildPlanArgs(target, rootDir) {
+  const key = `${path.resolve(target)}\n${path.resolve(rootDir)}`;
+  let output = confirmedBuildPlanPaths.get(key);
+  if (!output) {
+    output = path.join(smokeRoot, ".confirmed-build-plans", `${sha256(key).slice(0, 16)}.json`);
+    const result = spawnSync(process.execPath, [tsx, buildPlanFixture, target, rootDir, output], {
+      cwd: repoRoot,
+      encoding: "utf8",
+      timeout: 60_000,
+    });
+    if (result.error) throw result.error;
+    if (result.status !== 0) {
+      throw new Error(`confirmed build plan fixture failed (${result.status}):\n${result.stdout}\n${result.stderr}`);
+    }
+    confirmedBuildPlanPaths.set(key, output);
+  }
+  return ["--build-plan", output];
+}
 
 function runnerToken(stage, runId) {
   return `${jobId}:${runId}:${stage}`;
@@ -121,10 +145,15 @@ function spawnSidecarJson(args, label) {
 }
 
 function spawnAcceptedNext(target, args, label) {
-  const { value: plan } = spawnSidecarJson(["plan", target, ...args], `${label} plan`);
+  const rootIndex = args.indexOf("--root");
+  const rootDir = rootIndex >= 0 ? args[rootIndex + 1] : process.cwd();
+  const plannedArgs = args.includes("--build-plan")
+    ? args
+    : [...args, ...confirmedBuildPlanArgs(target, rootDir)];
+  const { value: plan } = spawnSidecarJson(["plan", target, ...plannedArgs], `${label} plan`);
   const nextArgs = plan.preflight
-    ? ["next", target, ...args, "--accepted-plan", plan.preflight.plan_digest]
-    : ["next", target, ...args];
+    ? ["next", target, ...plannedArgs, "--accepted-plan", plan.preflight.plan_digest]
+    : ["next", target, ...plannedArgs];
   return spawnSidecarJson(nextArgs, label);
 }
 
@@ -207,7 +236,12 @@ try {
     })}`);
   }
   const automaticTarget = path.join(workspace, "source.txt");
-  const automaticArgs = ["--root", smokeRoot, "--max-parallel", "1"];
+  const automaticArgs = [
+    "--root", smokeRoot,
+    "--max-parallel", "1",
+    ...legacyClaimProtocolArgs,
+    ...confirmedBuildPlanArgs(automaticTarget, smokeRoot),
+  ];
   const taskStoreRoot = path.join(workspace, ".build", "automatic-build", "v2", "tasks");
   const { value: preflightPlan } = spawnSidecarJson(
     ["plan", automaticTarget, ...automaticArgs],
@@ -245,7 +279,17 @@ try {
   const extractedPlans = competingPlans.filter((plan) => plan.action?.kind === "extract");
   const waitingPlans = competingPlans.filter((plan) => plan.action?.kind === "waiting");
   if (extractedPlans.length !== 1 || waitingPlans.length !== 2) {
-    throw new Error(`automatic build claim was not exclusive: ${JSON.stringify(competingPlans)}`);
+    const claimSummary = competingPlans.map((plan) => ({
+      kind: plan.action?.kind,
+      reason: plan.action?.reason,
+      tasks: plan.action?.tasks?.map((task) => ({
+        task_id: task.task_id,
+        owner: task.lease?.owner,
+        attempt: task.lease?.attempt,
+        lease_ref: task.lease_ref,
+      })),
+    }));
+    throw new Error(`automatic build claim was not exclusive: ${JSON.stringify(claimSummary)}`);
   }
   const next = extractedPlans[0];
   const task = next.action?.tasks?.[0];
@@ -375,7 +419,7 @@ try {
     || semanticArtifact.provenance?.attempt !== 2
     || semanticArtifact.provenance?.executor !== retryTask.lease.owner
     || sha256(readFileSync(semanticArtifactPath)) !== receipt.artifact_sha256
-    || JSON.stringify(policyLock.policy_fingerprint) !== JSON.stringify(retryTask.lease.policy_fingerprint)
+    || !isDeepStrictEqual(policyLock.policy_fingerprint, retryTask.lease.policy_fingerprint)
     || !/^[a-f0-9]{64}$/.test(policyLock.policy_digest ?? "")
   ) {
     throw new Error(`automatic build semantic artifact was not policy-bound: ${JSON.stringify(semanticArtifact)}`);
@@ -486,7 +530,7 @@ try {
   writeFileSync(semanticArtifactPath, JSON.stringify(semanticArtifact, null, 2), "utf8");
   const { result: staleResult, value: stalePlan } = spawnAcceptedNext(
     workspace,
-    ["--root", smokeRoot, "--max-parallel", "1"],
+    ["--root", smokeRoot, "--max-parallel", "1", ...legacyClaimProtocolArgs],
     "automatic build policy drift smoke",
   );
   if (stalePlan.action?.kind !== "extract" || stalePlan.action?.stage !== "pass1") {
@@ -502,6 +546,8 @@ try {
     "--max-parallel", "3",
     "--available-agent-slots", "3",
     "--max-parallel-cost", "2000000",
+    ...legacyClaimProtocolArgs,
+    ...confirmedBuildPlanArgs(concurrencySource, smokeRoot),
   ];
   const { value: concurrencyPlan } = spawnSidecarJson(
     ["plan", concurrencySource, ...concurrencyArgs],
@@ -535,6 +581,8 @@ try {
     "--max-parallel", "3",
     "--available-agent-slots", "0",
     "--max-parallel-cost", "2000000",
+    ...legacyClaimProtocolArgs,
+    ...confirmedBuildPlanArgs(concurrencySource, smokeRoot),
     "--accepted-plan", concurrencyPlan.preflight.plan_digest,
   ], "automatic build AP14 no-slot smoke");
   if (noSlotNext.action?.reason !== "executor_unavailable") {
@@ -581,7 +629,12 @@ try {
 
   const legacySource = path.join(smokeRoot, "sidecar-legacy.md");
   writeFileSync(legacySource, "# Legacy\n\nA source-fresh legacy paragraph.\n", "utf8");
-  const legacyArgs = ["--root", smokeRoot, "--max-parallel", "1", "--available-agent-slots", "1"];
+  const legacyArgs = [
+    "--root", smokeRoot,
+    "--max-parallel", "1",
+    "--available-agent-slots", "1",
+    ...confirmedBuildPlanArgs(legacySource, smokeRoot),
+  ];
   const { value: legacyPlan } = spawnSidecarJson(
     ["plan", legacySource, ...legacyArgs],
     "automatic build AP15 legacy plan smoke",

@@ -15,6 +15,7 @@ import { resolveContentProfile } from "../src/content-profile";
 import { automaticBuildExtractionPolicy } from "../src/semantic-artifact";
 import { buildWorkUnitCost, createWorkUnitDescriptor, type WorkUnitDescriptorV2 } from "../src/stage-work-unit";
 import { automaticBuildNext, automaticBuildPlan } from "../../../skills/build/automatic-build";
+import { confirmedStandardBuildPlan } from "./helpers/confirmed-build-plan";
 
 const target = {
   version: "build_target_ref.v2" as const,
@@ -270,11 +271,13 @@ describe("automatic build preflight budget and cost scheduler", () => {
     const root = mkdtempSync(path.join(tmpdir(), "understand-book-budget-gate-"));
     const source = path.join(root, "guide.md");
     writeFileSync(source, "# Guide\n\nA compact source paragraph for deterministic planning.\n", "utf8");
+    const buildPlan = confirmedStandardBuildPlan(source, root);
 
     const plan = automaticBuildPlan(source, root, {
       budget: generousBudget,
       requested_workers: 3,
       quality_profile: "full",
+      build_plan: buildPlan,
     });
     if (!plan.preflight) throw new Error("expected model-work preflight");
     const taskRoot = path.join(root, ".understand-book", "guide", ".build", "automatic-build", "v2", "tasks");
@@ -282,19 +285,25 @@ describe("automatic build preflight budget and cost scheduler", () => {
     expect(plan.preflight.worker_plan.max_workers).toBe(1);
     expect(existsSync(taskRoot)).toBe(false);
 
-    const unaccepted = automaticBuildNext(source, root, 3, { budget: generousBudget, quality_profile: "full" });
+    const unaccepted = automaticBuildNext(source, root, 3, {
+      budget: generousBudget,
+      quality_profile: "full",
+      build_plan: buildPlan,
+    });
     expect(unaccepted.action).toMatchObject({ kind: "needs_user", reason: "preflight_required" });
     expect(existsSync(taskRoot)).toBe(false);
 
     const rejectedPlan = automaticBuildPlan(source, root, {
       budget: { ...generousBudget, max_total_score: 0 },
       quality_profile: "full",
+      build_plan: buildPlan,
     });
     if (!rejectedPlan.preflight) throw new Error("expected rejected model-work preflight");
     const rejected = automaticBuildNext(source, root, 3, {
       budget: { ...generousBudget, max_total_score: 0 },
       accepted_plan_digest: rejectedPlan.preflight.plan_digest,
       quality_profile: "full",
+      build_plan: buildPlan,
     });
     expect(rejected.action).toMatchObject({ kind: "needs_user", reason: "budget_exceeded" });
     expect(existsSync(taskRoot)).toBe(false);
@@ -306,6 +315,7 @@ describe("automatic build preflight budget and cost scheduler", () => {
       owner: "budget-test",
       now: "2026-07-19T00:00:00.000Z",
       quality_profile: "full",
+      build_plan: buildPlan,
     });
     expect(accepted.action).toMatchObject({ kind: "extract", tasks: [{ lease: { owner: "budget-test" } }] });
     expect("tasks" in accepted.action && accepted.action.tasks).toHaveLength(1);
@@ -326,11 +336,13 @@ describe("automatic build preflight budget and cost scheduler", () => {
       max_agent_starts: 0,
       on_exceed: "needs_user",
     };
+    const buildPlan = confirmedStandardBuildPlan(source, root);
     const plan = automaticBuildPlan(source, root, {
       budget: generousBudget,
       wall_budget: wallBudget,
       requested_workers: 3,
       available_agent_slots: 3,
+      build_plan: buildPlan,
     });
     if (!plan.preflight) throw new Error("expected wall-budget preflight");
     const next = automaticBuildNext(source, root, 3, {
@@ -339,6 +351,7 @@ describe("automatic build preflight budget and cost scheduler", () => {
       accepted_plan_digest: plan.preflight.plan_digest,
       accepted_evaluation_digest: plan.preflight.preflight_evaluation_digest,
       available_agent_slots: 3,
+      build_plan: buildPlan,
     });
     expect(next.action).toMatchObject({
       kind: "needs_user",
@@ -385,12 +398,14 @@ describe("automatic build preflight budget and cost scheduler", () => {
       max_agent_starts: 10,
       on_exceed: "needs_user",
     };
+    const buildPlan = confirmedStandardBuildPlan(source, root);
     const plan = automaticBuildPlan(source, root, {
       budget: generousBudget,
       wall_budget: wallBudget,
       executor_provenance: executor,
       requested_workers: 1,
       available_agent_slots: 1,
+      build_plan: buildPlan,
     });
     if (!plan.preflight) throw new Error("expected adaptive preflight");
     expect(plan.preflight.wall_clock.adaptive_run_ttl_ms_by_kind.pass1_window).toBe(900_000);
@@ -401,6 +416,7 @@ describe("automatic build preflight budget and cost scheduler", () => {
       accepted_plan_digest: plan.preflight.plan_digest,
       accepted_evaluation_digest: "stale-evaluation",
       available_agent_slots: 1,
+      build_plan: buildPlan,
     });
     expect(changed.action).toMatchObject({ kind: "needs_user", reason: "evaluation_changed" });
     const taskRoot = path.join(workspace, ".build", "automatic-build", "v2", "tasks");
@@ -414,6 +430,7 @@ describe("automatic build preflight budget and cost scheduler", () => {
       accepted_plan_digest: plan.preflight.plan_digest,
       accepted_evaluation_digest: plan.preflight.preflight_evaluation_digest,
       available_agent_slots: 1,
+      build_plan: buildPlan,
     });
     if (accepted.action.kind !== "extract" || !accepted.action.tasks) throw new Error("expected adaptive extract");
     const task = accepted.action.tasks[0];

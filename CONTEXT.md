@@ -553,7 +553,22 @@ paper workspace 的主界面由来源信任与 Hybrid foundation integrity gate 
 Build Workbench 背后的服务端控制层:负责把上传的 `paper.md/paper.pdf` 固化为未信任输入 manifest,按 fingerprint 创建/复用 `.build/jobs/<job_id>.json`,启动 Codex/opencode/Claude/manual 等 executor adapter,把 stdout/stderr/heartbeat/权限请求/用户决策写成 job events,并在每次阶段结束后重新运行确定性 artifact gate。它只能驱动构建,不能绕过 `.build/<stage>` artifact/hash/schema gate。状态:NEW(见 `docs/切片方案-paper-pdf-first-hybrid.md` PH12-PH18)。
 
 ## 一键预构建 (guided automatic prebuild)
-用户用一个命令授权 build orchestrator 自动推进适用阶段 DAG 的预构建方式。paper 的来源对齐与混合阅读基座仍由 Build Workbench 完成,一键命令从可信基座继续;非 paper 可从 Markdown/EPUB 原始输入开始。orchestrator 只在构建方向必须由用户裁决、需要额外权限或自动修复耗尽时暂停;普通阶段选择、执行器选择和恢复细节不暴露为用户工作。阶段是否完成仍只由 `.build/<stage>` artifact/hash/schema gate 判定,job、orchestrator 或 executor 的自述不能替代。状态:BOUNDARY_CHANGE(2026-07-11 §0.5)。
+用户用一个命令授权 build orchestrator 执行已确认 `BuildPlan` 的预构建方式。paper 的来源对齐与立即可读基础层仍由 Build Workbench 完成,非 paper 可从 Markdown/EPUB 原始输入生成基础层;尚无计划时不得把导入或打开一本书解释为全量语义构建授权。`standard_deep` 是当前完整产物的默认配方选项,只有用户显式选择或显式调用兼容命令时才进入确认计划。orchestrator 只在计划确认、预算漂移、额外权限或自动修复耗尽时暂停;普通阶段、执行器和恢复细节不暴露为用户工作。阶段完成仍只由 artifact/hash/schema gate 判定。状态:BOUNDARY_CHANGE(见 [ADR-0093](docs/adr/0093-intent-confirmed-progressive-prebuild-and-reader-private-goal-artifacts.md),修订 [ADR-0067](docs/adr/0067-codex-plugin-one-command-prebuild.md) 的“全预构建”默认范围)。
+
+## 立即可读基础层 (immediate readable foundation)
+书籍导入后、第一次昂贵语义模型调用前形成的公共确定性基座。它至少包含可信 canonical source、LID、`book.text` 所需基座与词法检索输入;paper 还要求 source reconciliation 与 Hybrid foundation integrity gate 通过。Reader 是否可进入只依赖此层的信任与完整性,不得等待 Pass1、Pass2、BookStructure 或目标产物。状态:NEW(见 [ADR-0093](docs/adr/0093-intent-confirmed-progressive-prebuild-and-reader-private-goal-artifacts.md))。
+
+## 标准语义配方 (standard semantic recipe)
+以 `content_profile` 固定规则生成可跨阅读目标复用的公共语义层。`technical_learning` 当前包含 Pass1、profile sidecar、Pass2 与 BookStructure;`paper` 另含 paper metadata、paper lexicon 与 PaperReadingGuide。其配方 id 为 `standard_deep`,是产品提供的默认深读模板,不是导入后的默认执行授权;输入不得包含 `BuildIntent` 或 reader-private memory。状态:NEW(见 [ADR-0093](docs/adr/0093-intent-confirmed-progressive-prebuild-and-reader-private-goal-artifacts.md))。
+
+## BuildIntent
+用户围绕当前书显式陈述并确认的版本化构建目标,记录目标、作用范围、期望产物、使用期限、来源 fingerprint 与隐私级别。自然语言原文只能作为 draft 输入,不得直接改变 source/LID/content profile、公共 Pass1/Pass2 prompt、BookStructure 或标准语义 artifact freshness;未确认、已取代或来源过期的 intent 不得授权模型构建。它属于 reader-private 状态,不是 Book truth、ReaderProfile 推断或 memory 自动结论。状态:NEW(见 [ADR-0093](docs/adr/0093-intent-confirmed-progressive-prebuild-and-reader-private-goal-artifacts.md))。
+
+## BuildPlan
+由已确认 `BuildIntent` 或用户显式选择 `standard_deep` 编译出的版本化构建决策 artifact,列出目标产物、依赖闭包、可复用与新增工作、明确不生成项、token/墙钟估计及预算上限。Planner 或 LLM 只能产生 draft;确定性 validator 必须校验 profile capability、依赖、LID scope、隐私与 digest,用户确认 `plan_digest` 后 orchestrator 才能执行昂贵工作。它不是 semantic truth,预算或依赖漂移超过已确认边界时必须回到 `needs_user`。状态:NEW(见 [ADR-0093](docs/adr/0093-intent-confirmed-progressive-prebuild-and-reader-private-goal-artifacts.md))。
+
+## 目标产物层 (intent artifact overlay)
+围绕单个已确认 `BuildIntent` 生成、只供 resident reader 消费的 reader-private 产物集合。每个产物必须绑定 source fingerprint、`intent_digest`、`plan_digest`、输出 schema 与真实 LID evidence,并与公共 graph、profile sidecar、BookStructure 和书目录根 artifact 物理隔离;目标改变时只取代对应 overlay,不得使仍 fresh 的公共基础层或标准语义层失效。Visitor、Book MCP 与 build-workbench 的非授权会话不得读取。状态:NEW(见 [ADR-0093](docs/adr/0093-intent-confirmed-progressive-prebuild-and-reader-private-goal-artifacts.md))。
 
 ## 分阶段任务租约 (phase-aware task lease)
 一键预构建中语义任务所有权的限时凭证,区分等待专用 executor 接管的 `reserved` 阶段与已经开始处理输入的 `running` 阶段,两阶段拥有独立截止时间。租约只控制任务执行权和中断恢复,不证明语义产物完成;正常任务必须依靠保守运行期限即可完成,heartbeat 只延长仍匹配 target/source/policy/owner 的活动运行租约。状态:BOUNDARY_CHANGE(见 [ADR-0092](docs/adr/0092-phase-aware-automatic-build-leases-and-executor-dispatch-bundles.md))。

@@ -1,7 +1,13 @@
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { canonicalBuildJson, validateBuildPlanV1, type BuildPlanV1 } from "./build-intent";
 import type { AutomaticBuildStage, AutomaticBuildTarget, BuildTargetRefV2 } from "./build-orchestrator";
+import {
+  buildPlanUsageRef,
+  validateIntentBuildUsageEventV1,
+  type IntentBuildUsageEventV1,
+} from "./intent-build-metrics";
 import {
   assertActiveAutomaticBuildLease,
   readAutomaticBuildLease,
@@ -203,6 +209,56 @@ export interface AutomaticBuildTerminalMetricsInput {
   output_items?: number;
   diagnostic_code?: string;
   usage?: AutomaticBuildUsageReceiptV1;
+}
+
+export function automaticBuildTaskMetricsUsageEvent(input: {
+  plan: BuildPlanV1;
+  metrics: AutomaticBuildTaskMetricsV1;
+  occurred_at: string;
+}): IntentBuildUsageEventV1 | null {
+  if (input.metrics.status === "skipped") return null;
+  const plan = validateBuildPlanV1(input.plan);
+  const identity = createHash("sha256").update(canonicalBuildJson({
+    plan_digest: plan.plan_digest,
+    task_ref: input.metrics.task_ref,
+    stage: input.metrics.stage,
+    work_unit_id: input.metrics.work_unit_id,
+    attempt: input.metrics.attempt,
+  }), "utf8").digest("hex").slice(0, 32);
+  return validateIntentBuildUsageEventV1({
+    version: "intent_build_usage_event.v1",
+    event_id: `automatic-cost-${identity}`,
+    book_id: plan.book_id,
+    mode: plan.recipe_id,
+    occurred_at: input.occurred_at,
+    kind: "cost_observed",
+    plan: buildPlanUsageRef(plan),
+    attempt_id: `automatic-attempt-${identity}`,
+    outcome: input.metrics.status,
+    wall_clock_ms: input.metrics.queue_ms
+      + input.metrics.lease_wait_ms
+      + (input.metrics.executor_ms ?? 0)
+      + input.metrics.writer_ms,
+    usage: {
+      source: input.metrics.usage.source,
+      ...(input.metrics.usage.input_tokens === undefined
+        ? {}
+        : { input_tokens: input.metrics.usage.input_tokens }),
+      ...(input.metrics.usage.cached_input_tokens === undefined
+        ? {}
+        : { cached_input_tokens: input.metrics.usage.cached_input_tokens }),
+      ...(input.metrics.usage.output_tokens === undefined
+        ? {}
+        : { output_tokens: input.metrics.usage.output_tokens }),
+      ...(input.metrics.estimate === undefined
+        ? {}
+        : {
+            estimate_method: input.metrics.estimate.method,
+            estimated_input_tokens: input.metrics.estimate.input_tokens,
+            estimated_output_tokens: input.metrics.estimate.output_tokens,
+          }),
+    },
+  });
 }
 
 function readJson<T>(file: string): T {

@@ -1,0 +1,40 @@
+{
+  "legacy_stage": {
+    "version": "build_decision_request.v2",
+    "decision_id": "decision-stage-001",
+    "job_id": "job-001",
+    "scope": {
+      "kind": "stage",
+      "stage": "source_reconciliation"
+    },
+    "kind": "source_reconciliation_mode",
+    "options": [
+      {
+        "id": "review",
+        "label": "Review source"
+      }
+    ],
+    "status": "pending"
+  },
+  "build_plan": {
+    "version": "build_decision_request.v2",
+    "decision_id": "decision-plan-001",
+    "scope": {
+      "kind": "build_plan",
+      "plan_id": "plan-001",
+      "plan_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "kind": "build_intent_plan",
+    "options": [
+      {
+        "id": "confirm",
+        "label": "Confirm plan"
+      },
+      {
+        "id": "reject",
+        "label": "Keep reading"
+      }
+    ],
+    "status": "pending"
+  }
+}

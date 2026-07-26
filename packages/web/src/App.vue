@@ -9,6 +9,8 @@ import type {
   AgentHistoryResponse,
   AgentQuestionQuoteView,
   AskQuote,
+  BuildIntentSelectionV1,
+  BuildIntentMode,
   BuildWorkbenchSnapshot,
   BuildStageId,
   BookLibraryEntry,
@@ -18,6 +20,8 @@ import type {
   HistoricalBackfillJobRequest,
   HistoricalBackfillStartRequest,
   HistoricalBackfillStateView,
+  IntentArtifactOverlayV1,
+  IntentBuildReaderUsageKind,
   MemoryRecord,
   OuterOutcome,
   PaperMinimapApplyOutcome,
@@ -97,6 +101,7 @@ import {
 } from "./surface-selection";
 import TopBar from "./components/TopBar.vue";
 import BuildWorkbenchPane from "./components/BuildWorkbenchPane.vue";
+import BuildIntentPane from "./components/BuildIntentPane.vue";
 import FileDropField from "./components/FileDropField.vue";
 import LeftRail from "./components/LeftRail.vue";
 import PdfReaderPane from "./components/PdfReaderPane.vue";
@@ -128,6 +133,15 @@ const buildWorkbenchError = ref<string | null>(null);
 const buildWorkbenchConfirming = ref(false);
 const buildWorkbenchImporting = ref(false);
 const buildWorkbenchActioning = ref(false);
+const buildIntentOpen = ref(false);
+const buildIntentSelection = ref<BuildIntentSelectionV1 | null>(null);
+const buildIntentBusy = ref(false);
+const buildIntentError = ref<string | null>(null);
+let buildIntentRequestSeq = 0;
+const intentArtifacts = ref<IntentArtifactOverlayV1 | null>(null);
+const intentArtifactsLoading = ref(false);
+const intentArtifactsError = ref<string | null>(null);
+let intentArtifactRequestSeq = 0;
 const sourceReviewLlmSuggestions = ref<Record<string, SourceReviewLlmSuggestion>>({});
 const sourceReviewLlmAnalyzingBlockId = ref<string | null>(null);
 const sourceReviewLlmErrors = ref<Record<string, string>>({});
@@ -1824,9 +1838,131 @@ async function openBuildWorkbench() {
   appSurface.value = "workbench";
 }
 
+async function openBuildIntent() {
+  buildIntentOpen.value = true;
+  buildIntentError.value = null;
+  const request = ++buildIntentRequestSeq;
+  try {
+    await api.buildIntentStatus();
+  } catch (error) {
+    if (request === buildIntentRequestSeq) buildIntentError.value = errorMessage(error);
+  }
+}
+
+function closeBuildIntent() {
+  buildIntentOpen.value = false;
+}
+
+let intentUsageEventSequence = 0;
+
+function nextIntentUsageEventId(kind: IntentBuildReaderUsageKind): string {
+  const nonce = typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID()
+    : `${Date.now()}-${++intentUsageEventSequence}`;
+  return `${kind}-${nonce}`;
+}
+
+function recordIntentUsage(kind: IntentBuildReaderUsageKind, artifactId?: string) {
+  void api.intentUsageEvent({
+    event_id: nextIntentUsageEventId(kind),
+    occurred_at: new Date().toISOString(),
+    kind,
+    ...(artifactId ? { artifact_id: artifactId } : {}),
+  }).catch(() => undefined);
+}
+
+async function refreshIntentArtifacts(): Promise<boolean> {
+  const request = ++intentArtifactRequestSeq;
+  intentArtifactsLoading.value = true;
+  intentArtifactsError.value = null;
+  try {
+    const response = await api.intentArtifacts();
+    if (request === intentArtifactRequestSeq) intentArtifacts.value = response.overlay;
+    return request === intentArtifactRequestSeq;
+  } catch (error) {
+    if (request !== intentArtifactRequestSeq) return false;
+    if (error instanceof ApiError && error.status === 404) {
+      intentArtifacts.value = null;
+    } else {
+      intentArtifactsError.value = "暂时无法读取目标成果";
+    }
+    return false;
+  } finally {
+    if (request === intentArtifactRequestSeq) intentArtifactsLoading.value = false;
+  }
+}
+
+async function openIntentArtifacts() {
+  if (!await refreshIntentArtifacts()) return;
+  for (const artifact of intentArtifacts.value?.artifacts ?? []) {
+    if (artifact.state === "accepted") recordIntentUsage("artifact_opened", artifact.artifact_id);
+  }
+}
+
+async function draftBuildIntent(payload: {
+  mode: BuildIntentMode;
+  user_goal?: string;
+  edit_plan_id?: string;
+}) {
+  const request = ++buildIntentRequestSeq;
+  buildIntentBusy.value = true;
+  buildIntentError.value = null;
+  try {
+    const response = payload.edit_plan_id && payload.mode === "goal_directed"
+      ? await api.buildIntentEdit({
+          plan_id: payload.edit_plan_id,
+          user_goal: payload.user_goal,
+        })
+      : await api.buildIntentDraft({
+          mode: payload.mode,
+          user_goal: payload.user_goal,
+        });
+    if (request === buildIntentRequestSeq) buildIntentSelection.value = response.selection;
+  } catch (error) {
+    if (request === buildIntentRequestSeq) buildIntentError.value = errorMessage(error);
+  } finally {
+    if (request === buildIntentRequestSeq) buildIntentBusy.value = false;
+  }
+}
+
+async function confirmBuildIntent(payload: { plan_id: string; plan_digest: string }) {
+  const request = ++buildIntentRequestSeq;
+  buildIntentBusy.value = true;
+  buildIntentError.value = null;
+  try {
+    const response = await api.buildIntentConfirm(payload.plan_id, payload.plan_digest);
+    if (request === buildIntentRequestSeq) {
+      buildIntentSelection.value = response.selection;
+      void refreshIntentArtifacts();
+    }
+  } catch (error) {
+    if (request === buildIntentRequestSeq) buildIntentError.value = errorMessage(error);
+  } finally {
+    if (request === buildIntentRequestSeq) buildIntentBusy.value = false;
+  }
+}
+
+async function rejectBuildIntent(payload: { plan_id: string }) {
+  const request = ++buildIntentRequestSeq;
+  buildIntentBusy.value = true;
+  buildIntentError.value = null;
+  try {
+    const response = await api.buildIntentReject(payload.plan_id);
+    if (request === buildIntentRequestSeq) buildIntentSelection.value = response.selection;
+  } catch (error) {
+    if (request === buildIntentRequestSeq) buildIntentError.value = errorMessage(error);
+  } finally {
+    if (request === buildIntentRequestSeq) buildIntentBusy.value = false;
+  }
+}
+
 async function init() {
   try {
     appSurface.value = "loading";
+    intentArtifactRequestSeq += 1;
+    intentArtifacts.value = null;
+    intentArtifactsLoading.value = false;
+    intentArtifactsError.value = null;
     const desktop = await api.desktopStatus().catch((error) => {
       if (error instanceof ApiError && error.status === 404) return null;
       throw error;
@@ -1873,6 +2009,8 @@ async function init() {
     await refreshAgentHistory();
     await refreshProfileSurface();
     appSurface.value = "reader";
+    recordIntentUsage("reader_ready");
+    void refreshIntentArtifacts();
   } catch (e) {
     appSurface.value = buildWorkbenchSnapshot.value?.readiness.route === "workbench" ? "workbench" : "reader";
     fail(e);
@@ -2916,6 +3054,11 @@ function resetBookSessionUi() {
   buildWorkbenchConfirming.value = false;
   buildWorkbenchImporting.value = false;
   buildWorkbenchActioning.value = false;
+  buildIntentRequestSeq += 1;
+  buildIntentOpen.value = false;
+  buildIntentSelection.value = null;
+  buildIntentBusy.value = false;
+  buildIntentError.value = null;
   sourceReviewLlmSuggestions.value = {};
   sourceReviewLlmAnalyzingBlockId.value = null;
   sourceReviewLlmErrors.value = {};
@@ -2999,6 +3142,8 @@ async function submitOpenBook(dir = bookPickerDir.value) {
       :anchor-lid="readingAnchorLid"
       :debug-open="debugOpen"
       :left-rail-open="leftRailOpen"
+      :build-intent-open="buildIntentOpen"
+      :build-intent-available="appSurface === 'reader'"
       :workbench-available="appSurface === 'reader' && workbenchAvailable(buildWorkbenchSnapshot)"
       :desktop-host="desktopHost"
       @new-chat="newChat"
@@ -3006,6 +3151,7 @@ async function submitOpenBook(dir = bookPickerDir.value) {
       @open-book="openBook"
       @open-settings="openDesktopSettings"
       @toggle-left-rail="leftRailOpen = !leftRailOpen"
+      @open-build-intent="openBuildIntent"
       @toggle-debug="debugOpen = !debugOpen"
     />
 
@@ -3428,6 +3574,9 @@ async function submitOpenBook(dir = bookPickerDir.value) {
         :profile-backfill-error="profileBackfillError"
         :profile-backfill-notice="profileBackfillNotice"
         :profile-update-states="profileUpdateStates"
+        :intent-artifacts="intentArtifacts"
+        :intent-artifacts-loading="intentArtifactsLoading"
+        :intent-artifacts-error="intentArtifactsError"
         @send-agent="sendAgent"
         @new-chat="newChat"
         @select-chat="selectChat"
@@ -3446,8 +3595,22 @@ async function submitOpenBook(dir = bookPickerDir.value) {
         @start-profile-backfill="startProfileBackfill"
         @mutate-profile-backfill="mutateProfileBackfill"
         @undo-profile-update="undoProfileUpdate"
+        @refresh-artifacts="refreshIntentArtifacts"
+        @open-artifacts="openIntentArtifacts"
+        @artifact-cited="recordIntentUsage('artifact_cited', $event)"
       />
     </div>
+
+    <BuildIntentPane
+      v-if="appSurface === 'reader' && buildIntentOpen"
+      :selection="buildIntentSelection"
+      :busy="buildIntentBusy"
+      :error="buildIntentError"
+      @close="closeBuildIntent"
+      @draft="draftBuildIntent"
+      @confirm="confirmBuildIntent"
+      @reject="rejectBuildIntent"
+    />
 
     <div
       v-if="pdfSelectionState.capture && (pdfSelectionState.phase === 'error' || pdfSelectionState.draft)"

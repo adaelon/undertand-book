@@ -44,6 +44,7 @@ fn main() {
         book,
         reader,
         store,
+        intent_store_root: None,
         adapter,
         messages: new_session(),
         session_path: None,

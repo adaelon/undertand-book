@@ -7,6 +7,9 @@
 //! 路由是**纯函数 `route(&mut AppState, Req) -> Reply`**(脱 socket 可单测,守 A2);
 //! socket 绑定 / worker 线程 / Mutex 锁 / 时间戳生成 / adapter 装配在 `main.rs`。
 //! 外层 E agent(S10f)、静态资源(S10e)留后续子切片。
+mod build_intent_api;
+pub mod intent_build_store;
+
 use book_tool_contracts::{
     from_rest_alias, validate_input, BookToolId, BookToolInput, ContextInput,
     PaperReadingGuideInput,
@@ -78,6 +81,8 @@ pub struct AppState {
     pub book: Book,
     pub reader: Reader,
     pub store: MemoryStore,
+    /// Resident-only root for private build intents. Visitor/MCP hosts always set `None`.
+    pub intent_store_root: Option<PathBuf>,
     pub adapter: Box<dyn ModelAdapter + Send>,
     /// 外层 E agent 的当前会话 messages(S10f `[ADR-0030]`)。`/agent/chat` 跨回合累积;
     /// `/agent/new`/history select 会切换到另一份可恢复 session。
@@ -2248,6 +2253,9 @@ struct PdfRangesProjectResponse {
 /// `reader.*`/`memory.*`→POST 可变),端点名 = 命令名,错误原样透传 §4.4 信封。
 pub fn route(state: &mut AppState, req: Req) -> Reply {
     let (path, q) = parse_query(req.url);
+    if let Some(action) = path.strip_prefix("/build_intent/") {
+        return build_intent_api::route_build_intent(state, action, req.method, req.body, req.now);
+    }
     if path == "/desktop/status" {
         if req.method != "GET" {
             return method_not_allowed();
@@ -12027,10 +12035,14 @@ mod tests {
         let book = Book::new(sample_base(), &src);
         let reader = Reader::new(&book, DEFAULT_RADIUS);
         let store = MemoryStore::open(tmp(mem)).unwrap();
+        let book_dir = tmp_dir(&format!("book-dir-{mem}"));
+        std::fs::create_dir_all(&book_dir).unwrap();
+        std::fs::write(book_dir.join("source.txt"), &src).unwrap();
         // 桩固定引用首叶 "1.1"；typed query 的 anchor 由请求显式提供。
         let adapter = Box::new(StubAdapter { lid: "1.1".into() });
         AppState {
-            book_dir: tmp_dir(&format!("book-dir-{mem}")),
+            intent_store_root: Some(book_dir.join("private-build-intents")),
+            book_dir,
             library_root: None,
             book,
             reader,
@@ -15492,6 +15504,7 @@ unchanged after training concludes";
             book,
             reader,
             store,
+            intent_store_root: None,
             adapter,
             messages: new_session(),
             session_path: None,
@@ -15581,6 +15594,872 @@ unchanged after training concludes";
         // 错方法:POST 到 book.* / GET 到 reader.* → 405
         assert_eq!(post(&mut s, "/book/manifest", "{}").status, 405);
         assert_eq!(get(&mut s, "/reader/goto").status, 405);
+    }
+
+    #[test]
+    fn build_intent_standard_draft_estimate_and_exact_confirmation_are_resident_only() {
+        let mut s = state_named("build-intent-standard");
+        let drafted = post_at(
+            &mut s,
+            "/build_intent/draft",
+            r#"{"mode":"standard_deep"}"#,
+            "2026-07-25T10:00:00.000Z",
+        );
+        assert_eq!(drafted.status, 200, "{}", drafted.body);
+        let response: Value = serde_json::from_str(&drafted.body).unwrap();
+        let plan_id = response["selection"]["plan"]["plan_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let plan_digest = response["selection"]["plan"]["plan_digest"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let estimate = post(
+            &mut s,
+            "/build_intent/estimate",
+            &json!({ "plan_id": plan_id }).to_string(),
+        );
+        assert_eq!(estimate.status, 200, "{}", estimate.body);
+        assert!(estimate.body.contains("build_plan_estimate_response.v1"));
+
+        let mismatched = post_at(
+            &mut s,
+            "/build_intent/confirm",
+            &json!({ "plan_id": plan_id, "plan_digest": "0".repeat(64) }).to_string(),
+            "2026-07-25T10:01:00.000Z",
+        );
+        assert_eq!(mismatched.status, 409, "{}", mismatched.body);
+
+        let confirmed = post_at(
+            &mut s,
+            "/build_intent/confirm",
+            &json!({ "plan_id": plan_id, "plan_digest": plan_digest }).to_string(),
+            "2026-07-25T10:01:00.000Z",
+        );
+        assert_eq!(confirmed.status, 200, "{}", confirmed.body);
+        assert_eq!(
+            serde_json::from_str::<Value>(&confirmed.body).unwrap()["selection"]["plan"]["status"],
+            "confirmed"
+        );
+
+        let reader_ready = post_at(
+            &mut s,
+            "/build_intent/usage.event",
+            r#"{"event_id":"standard-reader-ready","occurred_at":"2026-07-25T10:01:00.250Z","kind":"reader_ready"}"#,
+            "2026-07-25T10:01:00.250Z",
+        );
+        assert_eq!(reader_ready.status, 200, "{}", reader_ready.body);
+        for (event_id, attempt_id, outcome, input_tokens, output_tokens) in [
+            (
+                "standard-cost-failed",
+                "standard-attempt-1",
+                "retryable_failure",
+                30,
+                10,
+            ),
+            (
+                "standard-cost-committed",
+                "standard-attempt-2",
+                "committed",
+                50,
+                20,
+            ),
+        ] {
+            let cost = post_at(
+                &mut s,
+                "/build_intent/usage.cost",
+                &json!({
+                    "event_id": event_id,
+                    "occurred_at": if outcome == "committed" { "2026-07-25T10:03:00.000Z" } else { "2026-07-25T10:02:00.000Z" },
+                    "plan_id": plan_id,
+                    "attempt_id": attempt_id,
+                    "outcome": outcome,
+                    "wall_clock_ms": 2_000,
+                    "usage": { "source": "native", "input_tokens": input_tokens, "output_tokens": output_tokens }
+                })
+                .to_string(),
+                "2026-07-25T10:03:00.000Z",
+            );
+            assert_eq!(cost.status, 200, "{}", cost.body);
+        }
+        let usage = get_at(&mut s, "/build_intent/usage", "2026-07-26T10:00:00.000Z");
+        assert_eq!(usage.status, 200, "{}", usage.body);
+        let usage: Value = serde_json::from_str(&usage.body).unwrap();
+        assert_eq!(usage["event_count"], 4);
+        assert_eq!(usage["modes"][1]["actual"]["attempt_count"], 2);
+        assert_eq!(usage["modes"][1]["actual"]["input_tokens"], 80);
+        assert_eq!(usage["modes"][1]["actual"]["output_tokens"], 30);
+        assert_eq!(
+            usage["modes"][1]["actual"]["outcome_counts"]["retryable_failure"],
+            1
+        );
+        assert_eq!(
+            usage["modes"][1]["actual"]["outcome_counts"]["committed"],
+            1
+        );
+
+        s.intent_store_root = None;
+        let denied = get(&mut s, "/build_intent/status");
+        assert_eq!(denied.status, 403, "{}", denied.body);
+        assert!(denied.body.contains("READER_PRIVATE_STORAGE_UNAVAILABLE"));
+    }
+
+    #[test]
+    fn build_intent_goal_uses_structured_planner_and_status_stays_redacted() {
+        let mut s = state_named("build-intent-private-goal");
+        let structured_calls = Arc::new(Mutex::new(0usize));
+        s.adapter = Box::new(MemoryFlowAdapter {
+            structured_outputs: RefCell::new(VecDeque::from([json!({
+                "version": "build_intent_planner_candidate.v1",
+                "goal_kind": "compare",
+                "source_scope": { "whole_book": false, "lids": ["1.1"], "sections": [] },
+                "desired_artifacts": ["comparison_table"],
+                "usage_horizon": "project"
+            })])),
+            chat_answers: RefCell::new(VecDeque::new()),
+            structured_calls: structured_calls.clone(),
+            seen_messages: Arc::new(Mutex::new(Vec::new())),
+        });
+        let private_goal = "PRIVATE_GOAL_SENTINEL compare the competing claims";
+        let drafted = post_at(
+            &mut s,
+            "/build_intent/draft",
+            &json!({ "mode": "goal_directed", "user_goal": private_goal }).to_string(),
+            "2026-07-25T11:00:00.000Z",
+        );
+        assert_eq!(drafted.status, 200, "{}", drafted.body);
+        assert_eq!(*structured_calls.lock().unwrap(), 1);
+        let response: Value = serde_json::from_str(&drafted.body).unwrap();
+        let intent_id = response["selection"]["intent"]["intent_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let plan_id = response["selection"]["plan"]["plan_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let stored =
+            intent_build_store::IntentArtifactStore::open(s.intent_store_root.as_ref().unwrap())
+                .unwrap()
+                .read_intent(&s.book.base.book_id, &intent_id)
+                .unwrap();
+        assert_eq!(stored["user_goal"], private_goal);
+
+        s.adapter = Box::new(UnconfiguredAdapter);
+        let invalid_edit = post_at(
+            &mut s,
+            "/build_intent/edit",
+            &json!({
+                "plan_id": plan_id,
+                "candidate": {
+                    "version": "build_intent_planner_candidate.v1",
+                    "goal_kind": "compare",
+                    "source_scope": { "whole_book": false, "lids": ["9.9"], "sections": [] },
+                    "desired_artifacts": ["comparison_table"],
+                    "usage_horizon": "project"
+                }
+            })
+            .to_string(),
+            "2026-07-25T11:00:30.000Z",
+        );
+        assert_eq!(invalid_edit.status, 400, "{}", invalid_edit.body);
+        assert_eq!(*structured_calls.lock().unwrap(), 1);
+        assert_eq!(
+            intent_build_store::IntentArtifactStore::open(s.intent_store_root.as_ref().unwrap())
+                .unwrap()
+                .read_intent(&s.book.base.book_id, &intent_id)
+                .unwrap()["revision"],
+            1
+        );
+
+        let edited_goal = "EDITED_PRIVATE_GOAL_SENTINEL compare only the selected claim";
+        let edited = post_at(
+            &mut s,
+            "/build_intent/edit",
+            &json!({ "plan_id": plan_id, "user_goal": edited_goal }).to_string(),
+            "2026-07-25T11:01:00.000Z",
+        );
+        assert_eq!(edited.status, 200, "{}", edited.body);
+        assert_eq!(*structured_calls.lock().unwrap(), 1);
+        assert_eq!(
+            serde_json::from_str::<Value>(&edited.body).unwrap()["selection"]["intent"]["revision"],
+            2
+        );
+
+        let rejected = post(
+            &mut s,
+            "/build_intent/reject",
+            &json!({ "plan_id": plan_id }).to_string(),
+        );
+        assert_eq!(rejected.status, 200, "{}", rejected.body);
+        assert_eq!(
+            serde_json::from_str::<Value>(&rejected.body).unwrap()["selection"]["plan"]["status"],
+            "superseded"
+        );
+
+        let status = get(&mut s, "/build_intent/status");
+        assert_eq!(status.status, 200, "{}", status.body);
+        assert!(!status.body.contains("PRIVATE_GOAL_SENTINEL"));
+        assert!(!status.body.contains("EDITED_PRIVATE_GOAL_SENTINEL"));
+        assert!(status.body.contains(&intent_id));
+    }
+
+    #[test]
+    fn build_intent_provider_failure_does_not_write_a_default_plan() {
+        let mut s = state_named("build-intent-provider-failure");
+        s.adapter = Box::new(UnconfiguredAdapter);
+        let response = post_at(
+            &mut s,
+            "/build_intent/draft",
+            r#"{"mode":"goal_directed","user_goal":"build a concept map"}"#,
+            "2026-07-25T12:00:00.000Z",
+        );
+        assert_eq!(response.status, 502, "{}", response.body);
+        assert!(response.body.contains("BUILD_INTENT_PROVIDER_ERROR"));
+        let status = get(&mut s, "/build_intent/status");
+        let body: Value = serde_json::from_str(&status.body).unwrap();
+        assert_eq!(body["inspection"]["intents"], json!([]));
+        assert_eq!(body["inspection"]["plans"], json!([]));
+    }
+
+    #[test]
+    fn build_intent_replan_supersedes_active_and_hard_delete_removes_task_mailboxes() {
+        let mut s = state_named("build-intent-ip8-replan-delete");
+        let public_policy = s
+            .book_dir
+            .join(".build/automatic-build/v2/tasks/pass1/unit-0/policy.json");
+        std::fs::create_dir_all(public_policy.parent().unwrap()).unwrap();
+        std::fs::write(&public_policy, "ORIGINAL_PUBLIC_TASK_POLICY_SENTINEL").unwrap();
+        s.adapter = Box::new(MemoryFlowAdapter {
+            structured_outputs: RefCell::new(VecDeque::from([
+                json!({
+                    "version": "build_intent_planner_candidate.v1",
+                    "goal_kind": "analyze",
+                    "source_scope": { "whole_book": false, "lids": ["1.1"], "sections": [] },
+                    "desired_artifacts": ["timeline"],
+                    "usage_horizon": "project"
+                }),
+                json!({
+                    "version": "build_intent_planner_candidate.v1",
+                    "goal_kind": "analyze",
+                    "source_scope": { "whole_book": false, "lids": ["1.1"], "sections": [] },
+                    "desired_artifacts": ["concept_map"],
+                    "usage_horizon": "project"
+                }),
+            ])),
+            chat_answers: RefCell::new(VecDeque::new()),
+            structured_calls: Arc::new(Mutex::new(0)),
+            seen_messages: Arc::new(Mutex::new(Vec::new())),
+        });
+        let first = post_at(
+            &mut s,
+            "/build_intent/draft",
+            r#"{"mode":"goal_directed","user_goal":"first private goal"}"#,
+            "2026-07-26T04:30:00.000Z",
+        );
+        assert_eq!(first.status, 200, "{}", first.body);
+        let first: Value = serde_json::from_str(&first.body).unwrap();
+        let first_intent_id = first["selection"]["intent"]["intent_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let first_plan_id = first["selection"]["plan"]["plan_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let confirmed = post_at(
+            &mut s,
+            "/build_intent/confirm",
+            &json!({
+                "plan_id": first_plan_id,
+                "plan_digest": first["selection"]["plan"]["plan_digest"],
+            })
+            .to_string(),
+            "2026-07-26T04:31:00.000Z",
+        );
+        assert_eq!(confirmed.status, 200, "{}", confirmed.body);
+
+        let second = post_at(
+            &mut s,
+            "/build_intent/draft",
+            r#"{"mode":"goal_directed","user_goal":"second private goal"}"#,
+            "2026-07-26T04:32:00.000Z",
+        );
+        assert_eq!(second.status, 200, "{}", second.body);
+        let second: Value = serde_json::from_str(&second.body).unwrap();
+        let second_intent_id = second["selection"]["intent"]["intent_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let second_plan_id = second["selection"]["plan"]["plan_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(second["selection"]["intent"]["revision"], 2);
+        assert_eq!(second["selection"]["plan"]["revision"], 2);
+        assert_eq!(
+            second["selection"]["intent"]["supersedes_intent_id"],
+            first_intent_id
+        );
+        let before_confirm: Value =
+            serde_json::from_str(&get(&mut s, "/build_intent/status").body).unwrap();
+        assert!(before_confirm["inspection"]["intents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|intent| intent["intent_id"] == first_intent_id
+                && intent["revision"] == 1
+                && intent["status"] == "confirmed"));
+
+        let second_confirmed = post_at(
+            &mut s,
+            "/build_intent/confirm",
+            &json!({
+                "plan_id": second_plan_id,
+                "plan_digest": second["selection"]["plan"]["plan_digest"],
+            })
+            .to_string(),
+            "2026-07-26T04:33:00.000Z",
+        );
+        assert_eq!(second_confirmed.status, 200, "{}", second_confirmed.body);
+        let status: Value =
+            serde_json::from_str(&get(&mut s, "/build_intent/status").body).unwrap();
+        assert_eq!(
+            status["inspection"]["active_overlay"]["intent_id"],
+            second_intent_id
+        );
+        assert!(status["inspection"]["intents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(
+                |intent| intent["intent_id"] == first_intent_id && intent["status"] == "superseded"
+            ));
+        assert!(status["inspection"]["plans"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|plan| plan["plan_id"] == first_plan_id && plan["status"] == "superseded"));
+
+        let prepared = post_at(
+            &mut s,
+            "/build_intent/artifact.prepare",
+            &json!({ "plan_id": second_plan_id }).to_string(),
+            "2026-07-26T04:34:00.000Z",
+        );
+        assert_eq!(prepared.status, 200, "{}", prepared.body);
+        let prepared: Value = serde_json::from_str(&prepared.body).unwrap();
+        let task_path = PathBuf::from(
+            prepared["handoff"]["tasks"][0]["task_path"]
+                .as_str()
+                .unwrap(),
+        );
+        let candidate_path = task_path.parent().unwrap().join("candidate.json");
+        std::fs::write(&candidate_path, "PRIVATE_DELETE_CANDIDATE_SENTINEL").unwrap();
+        assert!(task_path.exists() && candidate_path.exists());
+
+        let deleted = post(
+            &mut s,
+            "/build_intent/delete",
+            &json!({ "intent_id": second_intent_id }).to_string(),
+        );
+        assert_eq!(deleted.status, 200, "{}", deleted.body);
+        let deleted: Value = serde_json::from_str(&deleted.body).unwrap();
+        assert_eq!(deleted["deleted"], true);
+        assert_eq!(deleted["deleted_usage_event_count"], 1);
+        assert!(deleted["inspection"]["active_overlay"].is_null());
+        assert!(!task_path.exists());
+        assert!(!candidate_path.exists());
+        assert_eq!(
+            std::fs::read_to_string(&public_policy).unwrap(),
+            "ORIGINAL_PUBLIC_TASK_POLICY_SENTINEL"
+        );
+        let usage_after_delete = get_at(&mut s, "/build_intent/usage", "2026-07-26T04:40:00.000Z");
+        assert_eq!(
+            usage_after_delete.status, 200,
+            "{}",
+            usage_after_delete.body
+        );
+        assert!(!usage_after_delete.body.contains(&second_intent_id));
+        assert!(usage_after_delete.body.contains(&first_intent_id));
+        assert_eq!(
+            post(
+                &mut s,
+                "/build_intent/delete",
+                &json!({ "intent_id": second_intent_id }).to_string(),
+            )
+            .status,
+            200
+        );
+        assert_eq!(
+            post(
+                &mut s,
+                "/build_intent/delete",
+                &json!({ "intent_id": first_intent_id, "candidate": "forbidden" }).to_string(),
+            )
+            .status,
+            400
+        );
+    }
+
+    #[test]
+    fn build_intent_source_change_hides_overlay_and_preserves_stale_replan_lineage() {
+        let mut s = state_named("build-intent-ip8-stale-source");
+        s.adapter = Box::new(MemoryFlowAdapter {
+            structured_outputs: RefCell::new(VecDeque::from([
+                json!({
+                    "version": "build_intent_planner_candidate.v1",
+                    "goal_kind": "analyze",
+                    "source_scope": { "whole_book": false, "lids": ["1.1"], "sections": [] },
+                    "desired_artifacts": ["timeline"],
+                    "usage_horizon": "project"
+                }),
+                json!({
+                    "version": "build_intent_planner_candidate.v1",
+                    "goal_kind": "analyze",
+                    "source_scope": { "whole_book": false, "lids": ["1.1"], "sections": [] },
+                    "desired_artifacts": ["concept_map"],
+                    "usage_horizon": "project"
+                }),
+            ])),
+            chat_answers: RefCell::new(VecDeque::new()),
+            structured_calls: Arc::new(Mutex::new(0)),
+            seen_messages: Arc::new(Mutex::new(Vec::new())),
+        });
+        let draft = post_at(
+            &mut s,
+            "/build_intent/draft",
+            r#"{"mode":"goal_directed","user_goal":"source-bound goal"}"#,
+            "2026-07-26T05:00:00.000Z",
+        );
+        assert_eq!(draft.status, 200, "{}", draft.body);
+        let draft: Value = serde_json::from_str(&draft.body).unwrap();
+        let intent_id = draft["selection"]["intent"]["intent_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let confirmed = post_at(
+            &mut s,
+            "/build_intent/confirm",
+            &json!({
+                "plan_id": draft["selection"]["plan"]["plan_id"],
+                "plan_digest": draft["selection"]["plan"]["plan_digest"],
+            })
+            .to_string(),
+            "2026-07-26T05:01:00.000Z",
+        );
+        assert_eq!(confirmed.status, 200, "{}", confirmed.body);
+        assert_eq!(get(&mut s, "/build_intent/artifacts").status, 200);
+
+        std::fs::write(s.book_dir.join("source.txt"), "changed source identity").unwrap();
+        let hidden = get(&mut s, "/build_intent/artifacts");
+        assert_eq!(hidden.status, 404, "{}", hidden.body);
+        let status: Value =
+            serde_json::from_str(&get(&mut s, "/build_intent/status").body).unwrap();
+        assert!(status["inspection"]["active_overlay"].is_null());
+        assert!(status["inspection"]["intents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|intent| intent["intent_id"] == intent_id && intent["status"] == "stale_source"));
+        assert!(status["inspection"]["plans"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|plan| plan["status"] == "stale_source"));
+
+        let replanned = post_at(
+            &mut s,
+            "/build_intent/draft",
+            r#"{"mode":"goal_directed","user_goal":"goal for changed source"}"#,
+            "2026-07-26T05:02:00.000Z",
+        );
+        assert_eq!(replanned.status, 200, "{}", replanned.body);
+        let replanned: Value = serde_json::from_str(&replanned.body).unwrap();
+        assert_eq!(replanned["selection"]["intent"]["revision"], 2);
+        assert_eq!(
+            replanned["selection"]["intent"]["supersedes_intent_id"],
+            intent_id
+        );
+        assert_ne!(
+            replanned["selection"]["intent"]["source_fingerprint"],
+            draft["selection"]["intent"]["source_fingerprint"]
+        );
+        let reconfirmed = post_at(
+            &mut s,
+            "/build_intent/confirm",
+            &json!({
+                "plan_id": replanned["selection"]["plan"]["plan_id"],
+                "plan_digest": replanned["selection"]["plan"]["plan_digest"],
+            })
+            .to_string(),
+            "2026-07-26T05:03:00.000Z",
+        );
+        assert_eq!(reconfirmed.status, 200, "{}", reconfirmed.body);
+        let reconfirmed: Value = serde_json::from_str(&reconfirmed.body).unwrap();
+        let status: Value =
+            serde_json::from_str(&get(&mut s, "/build_intent/status").body).unwrap();
+        assert_eq!(
+            status["inspection"]["active_overlay"]["intent_id"],
+            reconfirmed["selection"]["intent"]["intent_id"]
+        );
+        assert!(status["inspection"]["intents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|intent| intent["intent_id"] == intent_id && intent["status"] == "stale_source"));
+    }
+
+    #[test]
+    fn build_intent_source_change_invalidates_an_unconfirmed_draft_before_confirm() {
+        let mut s = state_named("build-intent-ip8-stale-draft");
+        let drafted = post_at(
+            &mut s,
+            "/build_intent/draft",
+            r#"{"mode":"standard_deep"}"#,
+            "2026-07-26T05:05:00.000Z",
+        );
+        assert_eq!(drafted.status, 200, "{}", drafted.body);
+        let drafted: Value = serde_json::from_str(&drafted.body).unwrap();
+        std::fs::write(s.book_dir.join("source.txt"), "changed before confirmation").unwrap();
+        let rejected = post_at(
+            &mut s,
+            "/build_intent/confirm",
+            &json!({
+                "plan_id": drafted["selection"]["plan"]["plan_id"],
+                "plan_digest": drafted["selection"]["plan"]["plan_digest"],
+            })
+            .to_string(),
+            "2026-07-26T05:06:00.000Z",
+        );
+        assert_eq!(rejected.status, 409, "{}", rejected.body);
+        let status: Value =
+            serde_json::from_str(&get(&mut s, "/build_intent/status").body).unwrap();
+        assert!(status["inspection"]["active_overlay"].is_null());
+        assert_eq!(status["inspection"]["plans"][0]["status"], "stale_source");
+    }
+
+    #[test]
+    fn build_intent_standard_confirmation_supersedes_and_clears_a_private_overlay() {
+        let mut s = state_named("build-intent-ip8-standard-clears-overlay");
+        s.adapter = Box::new(MemoryFlowAdapter {
+            structured_outputs: RefCell::new(VecDeque::from([json!({
+                "version": "build_intent_planner_candidate.v1",
+                "goal_kind": "analyze",
+                "source_scope": { "whole_book": false, "lids": ["1.1"], "sections": [] },
+                "desired_artifacts": ["timeline"],
+                "usage_horizon": "project"
+            })])),
+            chat_answers: RefCell::new(VecDeque::new()),
+            structured_calls: Arc::new(Mutex::new(0)),
+            seen_messages: Arc::new(Mutex::new(Vec::new())),
+        });
+        let goal = post_at(
+            &mut s,
+            "/build_intent/draft",
+            r#"{"mode":"goal_directed","user_goal":"private goal before standard"}"#,
+            "2026-07-26T05:10:00.000Z",
+        );
+        let goal: Value = serde_json::from_str(&goal.body).unwrap();
+        let goal_intent_id = goal["selection"]["intent"]["intent_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let goal_confirmed = post_at(
+            &mut s,
+            "/build_intent/confirm",
+            &json!({
+                "plan_id": goal["selection"]["plan"]["plan_id"],
+                "plan_digest": goal["selection"]["plan"]["plan_digest"],
+            })
+            .to_string(),
+            "2026-07-26T05:11:00.000Z",
+        );
+        assert_eq!(goal_confirmed.status, 200, "{}", goal_confirmed.body);
+
+        let standard = post_at(
+            &mut s,
+            "/build_intent/draft",
+            r#"{"mode":"standard_deep"}"#,
+            "2026-07-26T05:12:00.000Z",
+        );
+        assert_eq!(standard.status, 200, "{}", standard.body);
+        let standard: Value = serde_json::from_str(&standard.body).unwrap();
+        let standard_confirmed = post_at(
+            &mut s,
+            "/build_intent/confirm",
+            &json!({
+                "plan_id": standard["selection"]["plan"]["plan_id"],
+                "plan_digest": standard["selection"]["plan"]["plan_digest"],
+            })
+            .to_string(),
+            "2026-07-26T05:13:00.000Z",
+        );
+        assert_eq!(
+            standard_confirmed.status, 200,
+            "{}",
+            standard_confirmed.body
+        );
+        let status: Value =
+            serde_json::from_str(&get(&mut s, "/build_intent/status").body).unwrap();
+        assert!(status["inspection"]["active_overlay"].is_null());
+        assert!(status["inspection"]["intents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(
+                |intent| intent["intent_id"] == goal_intent_id && intent["status"] == "superseded"
+            ));
+        assert_eq!(get(&mut s, "/build_intent/artifacts").status, 404);
+    }
+
+    #[test]
+    fn resident_intent_artifact_mailbox_projects_only_the_active_overlay() {
+        let mut s = state_named("intent-artifact-resident");
+        let private_root = tmp_dir("intent-artifact-resident-private");
+        s.intent_store_root = Some(private_root.clone());
+        s.adapter = Box::new(MemoryFlowAdapter {
+            structured_outputs: RefCell::new(VecDeque::from([json!({
+                "version": "build_intent_planner_candidate.v1",
+                "goal_kind": "compare",
+                "source_scope": { "whole_book": false, "lids": ["1.1"], "sections": [] },
+                "desired_artifacts": ["comparison_table", "timeline"],
+                "usage_horizon": "project"
+            })])),
+            chat_answers: RefCell::new(VecDeque::new()),
+            structured_calls: Arc::new(Mutex::new(0)),
+            seen_messages: Arc::new(Mutex::new(Vec::new())),
+        });
+        let private_goal = "PRIVATE_SERVER_GOAL_SENTINEL compare the approaches";
+        let drafted = post_at(
+            &mut s,
+            "/build_intent/draft",
+            &json!({ "mode": "goal_directed", "user_goal": private_goal }).to_string(),
+            "2026-07-26T04:00:00.000Z",
+        );
+        assert_eq!(drafted.status, 200, "{}", drafted.body);
+        let drafted: Value = serde_json::from_str(&drafted.body).unwrap();
+        let plan_id = drafted["selection"]["plan"]["plan_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let plan_digest = drafted["selection"]["plan"]["plan_digest"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let confirmed = post_at(
+            &mut s,
+            "/build_intent/confirm",
+            &json!({ "plan_id": plan_id, "plan_digest": plan_digest }).to_string(),
+            "2026-07-26T04:01:00.000Z",
+        );
+        assert_eq!(confirmed.status, 200, "{}", confirmed.body);
+
+        let pending = get(&mut s, "/build_intent/artifacts");
+        assert_eq!(pending.status, 200, "{}", pending.body);
+        let pending_body: Value = serde_json::from_str(&pending.body).unwrap();
+        assert_eq!(pending_body["overlay"]["artifacts"][0]["state"], "pending");
+        assert_eq!(pending_body["overlay"]["artifacts"][1]["state"], "pending");
+        assert!(!pending.body.contains(private_goal));
+
+        let prepared = post_at(
+            &mut s,
+            "/build_intent/artifact.prepare",
+            &json!({ "plan_id": plan_id }).to_string(),
+            "2026-07-26T04:02:00.000Z",
+        );
+        assert_eq!(prepared.status, 200, "{}", prepared.body);
+        assert!(!prepared.body.contains(private_goal));
+        assert!(!prepared.body.contains("output_contract"));
+        assert!(!prepared.body.contains("allowed_evidence_lids"));
+        let prepared_body: Value = serde_json::from_str(&prepared.body).unwrap();
+        let task_path = prepared_body["handoff"]["tasks"][0]["task_path"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let failed_task_path = prepared_body["handoff"]["tasks"][1]["task_path"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let task: Value =
+            serde_json::from_str(&std::fs::read_to_string(&task_path).unwrap()).unwrap();
+        let private_body = "PRIVATE_SERVER_ARTIFACT_SENTINEL";
+        let candidate = json!({
+            "version": "intent_artifact_candidate.v1",
+            "task_id": task["task_id"],
+            "book_id": task["book_id"],
+            "source_fingerprint": task["source_fingerprint"],
+            "intent_id": task["intent_id"],
+            "intent_digest": task["intent_digest"],
+            "plan_id": task["plan_id"],
+            "plan_digest": task["plan_digest"],
+            "artifact_id": task["artifact"]["artifact_id"],
+            "artifact_type": task["artifact"]["artifact_type"],
+            "payload": {
+                "rows": [{
+                    "subject": "Method A",
+                    "dimensions": { "summary": private_body },
+                    "evidence_lids": ["1.1"]
+                }]
+            }
+        });
+        std::fs::write(
+            Path::new(&task_path)
+                .parent()
+                .unwrap()
+                .join("candidate.json"),
+            candidate.to_string(),
+        )
+        .unwrap();
+
+        let submitted = post_at(
+            &mut s,
+            "/build_intent/artifact.submit",
+            &json!({ "task_path": task_path }).to_string(),
+            "2026-07-26T04:03:00.000Z",
+        );
+        assert_eq!(submitted.status, 200, "{}", submitted.body);
+        assert!(submitted.body.contains("\"state\":\"committed\""));
+        assert!(!submitted.body.contains(private_goal));
+        assert!(!submitted.body.contains(private_body));
+        assert!(!submitted.body.contains("evidence_lids"));
+
+        let inspected = post(
+            &mut s,
+            "/build_intent/artifact.inspect",
+            &json!({ "task_path": task_path }).to_string(),
+        );
+        assert_eq!(inspected.status, 200, "{}", inspected.body);
+        assert!(!inspected.body.contains(private_goal));
+        assert!(!inspected.body.contains(private_body));
+
+        let private_failure = "PRIVATE_SERVER_FAILURE_SENTINEL with private excerpt";
+        let failed = post_at(
+            &mut s,
+            "/build_intent/artifact.fail",
+            &json!({
+                "task_path": failed_task_path,
+                "diagnostic_code": "provider_unavailable",
+                "message": private_failure,
+            })
+            .to_string(),
+            "2026-07-26T04:04:00.000Z",
+        );
+        assert_eq!(failed.status, 200, "{}", failed.body);
+        assert!(failed.body.contains("retryable_failure"));
+        assert!(!failed.body.contains(private_failure));
+        let failed_inspection = post(
+            &mut s,
+            "/build_intent/artifact.inspect",
+            &json!({ "task_path": failed_task_path }).to_string(),
+        );
+        assert_eq!(failed_inspection.status, 200, "{}", failed_inspection.body);
+        assert!(!failed_inspection.body.contains(private_failure));
+
+        let outside_task = tmp_dir("intent-artifact-outside-root").join("task.json");
+        std::fs::create_dir_all(outside_task.parent().unwrap()).unwrap();
+        std::fs::write(&outside_task, "PRIVATE_OUTSIDE_TASK_SENTINEL").unwrap();
+        let outside = post(
+            &mut s,
+            "/build_intent/artifact.inspect",
+            &json!({ "task_path": outside_task }).to_string(),
+        );
+        assert_eq!(outside.status, 400, "{}", outside.body);
+        assert!(!outside.body.contains("PRIVATE_OUTSIDE_TASK_SENTINEL"));
+        let injected_body = post(
+            &mut s,
+            "/build_intent/artifact.inspect",
+            &json!({
+                "task_path": task_path,
+                "candidate_body": "PRIVATE_HTTP_CANDIDATE_SENTINEL"
+            })
+            .to_string(),
+        );
+        assert_eq!(injected_body.status, 400, "{}", injected_body.body);
+        assert!(!injected_body
+            .body
+            .contains("PRIVATE_HTTP_CANDIDATE_SENTINEL"));
+
+        let projected = get(&mut s, "/build_intent/artifacts");
+        assert_eq!(projected.status, 200, "{}", projected.body);
+        let projected_body: Value = serde_json::from_str(&projected.body).unwrap();
+        assert_eq!(
+            projected_body["overlay"]["artifacts"][0]["payload"]["rows"][0]["dimensions"]
+                ["summary"],
+            private_body
+        );
+        assert_eq!(
+            projected_body["overlay"]["artifacts"][1]["state"],
+            "pending"
+        );
+        let artifact_id = task["artifact"]["artifact_id"].as_str().unwrap();
+        for (event_id, kind, occurred_at) in [
+            (
+                "artifact-open-event",
+                "artifact_opened",
+                "2026-07-26T04:05:00.000Z",
+            ),
+            (
+                "artifact-cite-event",
+                "artifact_cited",
+                "2026-07-26T04:06:00.000Z",
+            ),
+        ] {
+            let usage_event = post_at(
+                &mut s,
+                "/build_intent/usage.event",
+                &json!({
+                    "event_id": event_id,
+                    "occurred_at": occurred_at,
+                    "kind": kind,
+                    "artifact_id": artifact_id,
+                })
+                .to_string(),
+                occurred_at,
+            );
+            assert_eq!(usage_event.status, 200, "{}", usage_event.body);
+        }
+        let artifact_cost = post_at(
+            &mut s,
+            "/build_intent/usage.cost",
+            &json!({
+                "event_id": "artifact-cost-event",
+                "occurred_at": "2026-07-26T04:02:30.000Z",
+                "plan_id": task["plan_id"],
+                "artifact_id": artifact_id,
+                "attempt_id": "artifact-attempt-1",
+                "outcome": "committed",
+                "wall_clock_ms": 2_500,
+                "usage": { "source": "executor_reported", "input_tokens": 21, "cached_input_tokens": 3, "output_tokens": 8 },
+            })
+            .to_string(),
+            "2026-07-26T04:06:00.000Z",
+        );
+        assert_eq!(artifact_cost.status, 200, "{}", artifact_cost.body);
+        let usage = get_at(&mut s, "/build_intent/usage", "2026-07-26T04:07:00.000Z");
+        assert_eq!(usage.status, 200, "{}", usage.body);
+        assert!(!usage.body.contains(private_goal));
+        assert!(!usage.body.contains(private_body));
+        assert!(!usage.body.contains(private_failure));
+        assert!(!usage.body.contains("evidence_lids"));
+        let usage: Value = serde_json::from_str(&usage.body).unwrap();
+        assert_eq!(usage["modes"][2]["consumption_7d"]["accepted_artifacts"], 1);
+        assert_eq!(usage["modes"][2]["consumption_7d"]["opened_artifacts"], 1);
+        assert_eq!(usage["modes"][2]["consumption_7d"]["cited_artifacts"], 1);
+        assert_eq!(usage["modes"][2]["artifact_costs"][0]["input_tokens"], 21);
+        let status = get(&mut s, "/build_intent/status");
+        assert!(!status.body.contains(private_goal));
+        assert!(!status.body.contains(private_body));
+        assert!(!status.body.contains(private_failure));
+        assert!(!s.book_dir.join("artifacts").exists());
+
+        s.intent_store_root = None;
+        let denied = get(&mut s, "/build_intent/artifacts");
+        assert_eq!(denied.status, 403, "{}", denied.body);
+        assert!(denied.body.contains("READER_PRIVATE_STORAGE_UNAVAILABLE"));
+        assert!(!denied.body.contains(private_body));
     }
 
     #[test]
@@ -16454,6 +17333,7 @@ unchanged after training concludes";
             book,
             reader,
             store,
+            intent_store_root: None,
             adapter,
             messages: new_session(),
             session_path: None,

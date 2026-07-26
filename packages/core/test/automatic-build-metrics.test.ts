@@ -10,6 +10,7 @@ import {
 } from "../src/automatic-build-lease";
 import {
   automaticBuildStageMetricsSummaryPath,
+  automaticBuildTaskMetricsUsageEvent,
   automaticBuildTaskMetricsPath,
   automaticBuildUsageReceiptPath,
   buildAutomaticBuildStageMetricsSummary,
@@ -18,6 +19,7 @@ import {
   recordAutomaticBuildInputObservation,
   writeAutomaticBuildStageMetricsSummary,
 } from "../src/automatic-build-metrics";
+import { attachBuildPlanDigest } from "../src/build-intent";
 import { resolveAutomaticBuildTarget, type AutomaticBuildTarget } from "../src/build-orchestrator";
 import { resolveContentProfile } from "../src/content-profile";
 import { automaticBuildExtractionPolicy } from "../src/semantic-artifact";
@@ -76,6 +78,84 @@ function submit(
 }
 
 describe("automatic build task metrics", () => {
+  it("bridges terminal automatic metrics into a body-free plan cost event", () => {
+    const plan = attachBuildPlanDigest({
+      version: "build_plan.v1",
+      plan_id: "plan-standard",
+      revision: 1,
+      book_id: "metrics-book",
+      source_fingerprint: "source-a",
+      content_profile: { id: "technical_learning", version: "technical_learning_v0" },
+      recipe_id: "standard_deep",
+      public_stage_closure: ["pass1"],
+      private_artifacts: [],
+      reuse: [],
+      create: ["public.foundation"],
+      excluded: [],
+      estimate: {
+        input_tokens: { lower: 10, upper: 20, coverage: 1 },
+        output_tokens: { lower: 5, upper: 10, coverage: 1 },
+        wall_clock_minutes: { confidence: "none" },
+        unknown_stages: [],
+        historical_match: { stage: false, policy: false, model: false, harness: false, sample_count: 0 },
+      },
+      budget: { on_exceed: "needs_user" },
+      status: "confirmed",
+      confirmation_source: "reader_ui",
+      created_at: "2026-07-26T07:59:00.000Z",
+      confirmed_at: "2026-07-26T07:59:30.000Z",
+    });
+    const metrics = {
+      version: "automatic_build_task_metrics.v1" as const,
+      task_ref: "pass1/task-1/attempt-2",
+      stage: "pass1" as const,
+      work_unit_id: "task-1",
+      attempt: 2,
+      queue_ms: 5,
+      lease_wait_ms: 10,
+      executor_ms: 20,
+      writer_ms: 4,
+      input_bytes: 100,
+      output_bytes: 20,
+      status: "retryable_failure" as const,
+      diagnostic_code: "provider_failed",
+      usage: {
+        source: "executor_reported" as const,
+        model: "private-model-detail",
+        reasoning_effort: "high",
+        harness_release: "harness-private-detail",
+        input_tokens: 30,
+        output_tokens: 9,
+      },
+      estimate: { method: "executor_estimate.v1", input_tokens: 35, output_tokens: 10 },
+    };
+    const event = automaticBuildTaskMetricsUsageEvent({
+      plan,
+      metrics,
+      occurred_at: "2026-07-26T08:00:00.000Z",
+    });
+    expect(event).toMatchObject({
+      mode: "standard_deep",
+      kind: "cost_observed",
+      outcome: "retryable_failure",
+      wall_clock_ms: 39,
+      usage: {
+        source: "executor_reported",
+        input_tokens: 30,
+        output_tokens: 9,
+        estimate_method: "executor_estimate.v1",
+        estimated_input_tokens: 35,
+        estimated_output_tokens: 10,
+      },
+    });
+    expect(JSON.stringify(event)).not.toMatch(/private-model-detail|harness-private-detail|task_ref|work_unit_id/u);
+    expect(automaticBuildTaskMetricsUsageEvent({
+      plan,
+      metrics: { ...metrics, status: "skipped" },
+      occurred_at: "2026-07-26T08:00:00.000Z",
+    })).toBeNull();
+  });
+
   it("keeps unavailable exact usage unknown while preserving measured bytes and timing", () => {
     const { root, target } = fixture();
     const lease = claim(target, "missing-usage");

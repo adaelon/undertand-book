@@ -21,8 +21,13 @@ contract,也不得在普通 stage 边界停下等待用户继续。
      `understand-book-build.exe`。
    - 仅插件开发/非 Windows 环境允许回退 Node:若缺少 `node_modules/tsx`,在插件根运行
      `pnpm install --frozen-lockfile`;依赖失败则报告阻塞,不得伪造构建。
-   - 安装或升级 sidecar 后先运行
-     `<understand-book-build.exe> protocol-doctor <target> --plugin-root <插件根目录>`。只消费
+   - 本 skill 调用就是显式旧“完整预构建”命令。先运行
+     `<understand-book-build.exe> legacy-plan <target> --root <root> [策略与预算参数]`,只消费
+     `explicit_legacy_build_plan.v1`,要求 plan 为已确认 `standard_deep` 且
+     `confirmation_source=explicit_legacy_command`,并保留 `build_plan_path`。打开、导入或恢复书籍
+     不属于该调用,不得运行 `legacy-plan`;既有 SidecarPlan 也不得代替顶层 BuildPlan。
+   - 安装或升级 sidecar 后运行
+     `<understand-book-build.exe> protocol-doctor <target> --plugin-root <插件根目录> --build-plan <build_plan_path>`。只消费
      `automatic_build_protocol_doctor.v1`;它必须报告 `status=compatible`、
      `production_default=automatic_build_protocol.v2_dispatch` 与 `dry_run_mutates_state=false`。
 2. 每次进入一个可能需要模型抽取的 stage,先用与后续 `next` 完全相同的
@@ -31,8 +36,8 @@ contract,也不得在普通 stage 边界停下等待用户继续。
    subagent/multi-agent 槽位,必须在每次 `plan/next` 前按 harness 事实重算:
 
    ```text
-   <understand-book-build.exe> plan <target> --plugin-root <插件根目录> --max-parallel <1..3> --available-agent-slots <0..3> [策略与预算参数]
-   node node_modules/tsx/dist/cli.mjs skills/build/automatic-build.ts plan <target> --max-parallel <1..3> --available-agent-slots <0..3> [策略与预算参数]
+   <understand-book-build.exe> plan <target> --plugin-root <插件根目录> --build-plan <build_plan_path> --max-parallel <1..3> --available-agent-slots <0..3> [策略与预算参数]
+   node node_modules/tsx/dist/cli.mjs skills/build/automatic-build.ts plan <target> --build-plan <build_plan_path> --max-parallel <1..3> --available-agent-slots <0..3> [策略与预算参数]
    ```
 
    只消费 stdout 的 `automatic_build_plan.v1` JSON。`preflight=null` 表示下一步不需要模型,
@@ -44,8 +49,8 @@ contract,也不得在普通 stage 边界停下等待用户继续。
    预算内则把 plan 与 evaluation 两个 digest 原样传回:
 
    ```text
-   <understand-book-build.exe> next <target> --plugin-root <插件根目录> [相同策略/预算] --max-parallel <1..3> --available-agent-slots <当前值> --accepted-plan <plan_digest> [--accepted-evaluation <preflight_evaluation_digest>]
-   node node_modules/tsx/dist/cli.mjs skills/build/automatic-build.ts next <target> [相同策略/预算] --max-parallel <1..3> --available-agent-slots <当前值> --accepted-plan <plan_digest> [--accepted-evaluation <preflight_evaluation_digest>]
+   <understand-book-build.exe> next <target> --plugin-root <插件根目录> --build-plan <build_plan_path> [相同策略/预算] --max-parallel <1..3> --available-agent-slots <当前值> --accepted-plan <plan_digest> [--accepted-evaluation <preflight_evaluation_digest>]
+   node node_modules/tsx/dist/cli.mjs skills/build/automatic-build.ts next <target> --build-plan <build_plan_path> [相同策略/预算] --max-parallel <1..3> --available-agent-slots <当前值> --accepted-plan <plan_digest> [--accepted-evaluation <preflight_evaluation_digest>]
    ```
 
    `available_agent_slots` 不进入 plan identity,因此槽位缩减不会使已接受 digest 漂移;

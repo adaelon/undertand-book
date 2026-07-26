@@ -264,10 +264,10 @@ export const DEFAULT_SIDECAR_OPTIONS: SidecarPlanOption[] = [
   },
 ];
 
-function optionFor(targetView: SidecarTargetView): SidecarPlanOption {
+export function sidecarPlanOptionFor(targetView: SidecarTargetView): SidecarPlanOption {
   const option = DEFAULT_SIDECAR_OPTIONS.find((item) => item.target_view === targetView);
   if (!option) throw new Error(`unsupported sidecar target view: ${targetView}`);
-  return option;
+  return structuredClone(option);
 }
 
 function inferTargetView(request: string): SidecarTargetView {
@@ -313,7 +313,7 @@ function buildFormDraft(intent: SidecarBuildIntent): SidecarFormDraft {
 export function draftSidecarPlan(input: DraftSidecarPlanInput): SidecarPlan {
   if (!input.user_request.trim()) throw new Error("sidecar plan requires a user_request");
   const targetView = input.target_view ?? inferTargetView(input.user_request);
-  const option = optionFor(targetView);
+  const option = sidecarPlanOptionFor(targetView);
   const outputContract: SidecarOutputContract = {
     sidecar_id: sidecarId(input.book_id, targetView, input.user_request),
     ...option.output_contract,

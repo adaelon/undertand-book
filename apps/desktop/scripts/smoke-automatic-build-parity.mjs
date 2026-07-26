@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { cpSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -77,7 +77,37 @@ function restoreSnapshot() {
 
 try {
   writeFileSync(source, "# Parity\n\nA deterministic semantic paragraph.\n", "utf8");
-  const common = [source, "--root", root, "--max-parallel", "3", "--available-agent-slots", "2"];
+  const implicitLegacyDir = path.join(
+    root,
+    ".understand-book",
+    "parity",
+    ".build",
+    "automatic-build",
+    "v2",
+    "legacy-plans",
+  );
+  if (existsSync(implicitLegacyDir)) {
+    throw new Error(`opening the target implicitly created a legacy plan: ${implicitLegacyDir}`);
+  }
+  const legacyArgs = [source, "--root", root, "--now", "2026-07-25T06:59:00.000Z"];
+  const nodeLegacy = runNode("legacy-plan", legacyArgs, "Node explicit legacy plan");
+  const sidecarLegacy = runSidecar("legacy-plan", legacyArgs, "sidecar explicit legacy plan");
+  assertBytesEqual(nodeLegacy, sidecarLegacy, "explicit_legacy_build_plan.v1");
+  const buildPlan = sidecarLegacy.value.build_plan_path;
+  const persistedLegacy = JSON.parse(readFileSync(buildPlan, "utf8"));
+  if (sidecarLegacy.value.invocation !== "explicit_full_build"
+    || persistedLegacy.recipe_id !== "standard_deep"
+    || persistedLegacy.status !== "confirmed"
+    || persistedLegacy.confirmation_source !== "explicit_legacy_command") {
+    throw new Error(`explicit legacy command did not persist the required standard confirmation: ${sidecarLegacy.stdout}`);
+  }
+  const common = [
+    source,
+    "--root", root,
+    "--max-parallel", "3",
+    "--available-agent-slots", "2",
+    "--build-plan", buildPlan,
+  ];
 
   const nodePlan = runNode("plan", common, "Node plan");
   const sidecarPlan = runSidecar("plan", common, "sidecar plan");
@@ -182,7 +212,7 @@ try {
     throw new Error(`packaged sidecar did not retain explicit v2 task resume: ${rollback.stdout}`);
   }
 
-  console.log("automatic build BP8 canonical Node/Bun parity, protocol doctor, dispatch lease/receipt, and v2 rollback smoke passed");
+  console.log("automatic build IP8 explicit-legacy mapping, canonical Node/Bun parity, protocol doctor, dispatch lease/receipt, and v2 rollback smoke passed");
 } finally {
   rmSync(root, { recursive: true, force: true });
   rmSync(backupContainer, { recursive: true, force: true });

@@ -73,6 +73,7 @@ if (command === "prompt") {
   process.stdout.write(prompt);
 } else if ([
   "protocol-doctor",
+  "legacy-plan",
   "plan",
   "next",
   "dispatch.next",
@@ -104,7 +105,16 @@ if (command === "prompt") {
   await runScript(script, forwardedArgs(2));
 } else if (command === "workbench-stage") {
   await runScript("workbench-stage-runner.ts", forwardedArgs(1));
+} else if (command === "intent.plan") {
+  prepare("intent-plan.ts", forwardedArgs(1));
+  await import("./intent-plan");
+} else if (command === "intent.artifact") {
+  prepare("intent-artifact.ts", forwardedArgs(1));
+  await import("./intent-artifact");
+} else if (command === "intent.metrics") {
+  prepare("intent-metrics.ts", forwardedArgs(1));
+  await import("./intent-metrics");
 } else {
-  console.error("usage: understand-book-build <protocol-doctor|plan|next|dispatch.next|dispatch.inspect|dispatch.finish|audit-legacy|migration-mode|quality|metrics|record-attempt|heartbeat|candidate|submit|legacy-submit|fail|inspect|input|write|close|run-script|prompt|workbench-stage> [...args]");
+  console.error("usage: understand-book-build <legacy-plan|protocol-doctor|plan|next|dispatch.next|dispatch.inspect|dispatch.finish|audit-legacy|migration-mode|quality|metrics|record-attempt|heartbeat|candidate|submit|legacy-submit|fail|inspect|input|write|close|run-script|prompt|workbench-stage|intent.plan|intent.artifact|intent.metrics> [...args]");
   process.exit(2);
 }

@@ -723,6 +723,7 @@ mod tests {
             book,
             reader,
             store: MemoryStore::open(tmp("memory")).unwrap(),
+            intent_store_root: None,
             adapter: Box::new(StubAdapter),
             messages: new_session(),
             session_path: None,
@@ -757,6 +758,9 @@ mod tests {
         assert!(!names.contains(&"book_route_to".to_string()));
         assert!(!names.iter().any(|n| n.contains("cross_paper")));
         assert!(!names.iter().any(|n| n.contains("corpus")));
+        assert!(!names.iter().any(|n| n.contains("intent")));
+        assert!(!names.iter().any(|n| n.contains("artifact")));
+        assert!(!names.iter().any(|n| n.contains("overlay")));
     }
 
     #[test]

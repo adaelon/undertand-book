@@ -20,6 +20,7 @@ import { automaticBuildExtractionPolicy, buildSemanticArtifactEnvelope, writeSem
 import { buildWorkUnitCost, createWorkUnitDescriptor } from "../src/stage-work-unit";
 import { automaticBuildStageArtifactPath } from "../src/automatic-build-quality";
 import { automaticBuildNext } from "../../../skills/build/automatic-build";
+import { confirmedStandardBuildPlan } from "./helpers/confirmed-build-plan";
 
 const targetRef = {
   version: "build_target_ref.v2" as const,
@@ -142,7 +143,10 @@ describe("automatic build versioned quality and migration gates", () => {
       }));
     }
 
-    const next = automaticBuildNext(source, root, 1, { quality_profile: "full" });
+    const next = automaticBuildNext(source, root, 1, {
+      quality_profile: "full",
+      build_plan: confirmedStandardBuildPlan(source, root),
+    });
     expect(next.action).toMatchObject({
       kind: "needs_user",
       reason: "quality_gate_failed",
@@ -187,7 +191,8 @@ describe("automatic build versioned quality and migration gates", () => {
       schema_valid_artifacts: 1,
       legacy_resume_allowed: false,
     });
-    expect(automaticBuildNext(source, root, 1).action).toMatchObject({
+    const buildPlan = confirmedStandardBuildPlan(source, root);
+    expect(automaticBuildNext(source, root, 1, { build_plan: buildPlan }).action).toMatchObject({
       kind: "needs_user",
       reason: "legacy_migration_required",
       stage: "pass1",
@@ -199,7 +204,10 @@ describe("automatic build versioned quality and migration gates", () => {
     expect(readFileSync(legacyPath, "utf8")).toBe(legacyBytes);
     expect(existsSync(path.join(decision.legacy_snapshot_path!, "manifest.json"))).toBe(true);
     expect(readFileSync(path.join(decision.legacy_snapshot_path!, ".build", "pass1", "0.json"), "utf8")).toBe(legacyBytes);
-    expect(automaticBuildNext(source, root, 1).action).toMatchObject({ kind: "needs_user", reason: "preflight_required" });
+    expect(automaticBuildNext(source, root, 1, { build_plan: buildPlan }).action).toMatchObject({
+      kind: "needs_user",
+      reason: "preflight_required",
+    });
   });
 
   it("keeps legacy_resume out of v2 completion", () => {
@@ -214,7 +222,9 @@ describe("automatic build versioned quality and migration gates", () => {
     writeFileSync(legacyPath, JSON.stringify({ content_hash: descriptor.input_hash, nodes: [], edges: [] }), "utf8");
     selectAutomaticBuildMigrationMode(target, "legacy_resume", "2026-07-19T00:00:00.000Z");
 
-    expect(automaticBuildNext(source, root, 1).action).toMatchObject({
+    expect(automaticBuildNext(source, root, 1, {
+      build_plan: confirmedStandardBuildPlan(source, root),
+    }).action).toMatchObject({
       kind: "needs_user",
       reason: "legacy_resume_selected",
       policy_status: "legacy_policy_unknown",

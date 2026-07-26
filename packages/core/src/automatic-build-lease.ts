@@ -27,6 +27,9 @@ import {
 
 const DEFAULT_RESERVE_TTL_MS = 600_000;
 const DEFAULT_RUN_TTL_MS = 1_800_000;
+const CLAIM_PUBLICATION_WAIT_MS = 250;
+const CLAIM_PUBLICATION_POLL_MS = 5;
+const claimPublicationWaiter = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
 
 export interface AutomaticBuildTaskLeaseV1 {
   version: "automatic_build_task_lease.v1";
@@ -250,6 +253,14 @@ function attemptDirectories(
     .sort((left, right) => left.attempt - right.attempt);
 }
 
+function waitForClaimPublication(leaseRef: string): boolean {
+  const deadline = Date.now() + CLAIM_PUBLICATION_WAIT_MS;
+  while (!existsSync(leaseRef) && Date.now() < deadline) {
+    Atomics.wait(claimPublicationWaiter, 0, 0, CLAIM_PUBLICATION_POLL_MS);
+  }
+  return existsSync(leaseRef);
+}
+
 function activeLeaseAt(
   target: AutomaticBuildTarget,
   leaseRef: string,
@@ -404,15 +415,23 @@ export function claimAutomaticBuildTask(
     freezeAutomaticBuildStagePolicy(target, stage, options.binding.policy_fingerprint, times.now);
   }
   for (let retry = 0; retry < 8; retry += 1) {
-    const directories = attemptDirectories(target, stage, workUnitId);
-    const inspection = inspectAutomaticBuildTaskClaim(target, stage, workUnitId, options);
-    if (inspection.status !== "ready") return inspection;
+    let directories = attemptDirectories(target, stage, workUnitId);
+    const unpublished = directories.at(-1);
+    if (unpublished && !unpublished.lease_ref) {
+      waitForClaimPublication(path.join(
+        automaticBuildTaskAttemptDirectory(target, stage, workUnitId, unpublished.attempt),
+        "lease.json",
+      ));
+      directories = attemptDirectories(target, stage, workUnitId);
+    }
     const persisted = readAutomaticBuildAttemptRecord(target, stage, workUnitId);
     const maxDirectoryAttempt = directories.at(-1)?.attempt ?? 0;
     const attempt = Math.max(maxDirectoryAttempt, persisted?.last_attempt ?? 0) + 1;
     const attemptDir = automaticBuildTaskAttemptDirectory(target, stage, workUnitId, attempt);
-    mkdirSync(attemptDir, { recursive: true });
+    mkdirSync(path.dirname(attemptDir), { recursive: true });
     const leaseRef = path.join(attemptDir, "lease.json");
+    const inspection = inspectAutomaticBuildTaskClaim(target, stage, workUnitId, options);
+    if (inspection.status !== "ready") return inspection;
     const lease: AutomaticBuildTaskLeaseV2 = {
       version: "automatic_build_task_lease.v2",
       target_ref: target.target_ref,
@@ -432,7 +451,7 @@ export function claimAutomaticBuildTask(
       } : {}),
     };
     try {
-      writeFileSync(leaseRef, `${JSON.stringify(lease, null, 2)}\n`, { encoding: "utf8", flag: "wx" });
+      mkdirSync(attemptDir);
       const executionIdentity = recordAutomaticBuildExecutionIdentity(
         target,
         stage,
@@ -441,6 +460,7 @@ export function claimAutomaticBuildTask(
         inspection.execution_identity,
         times.now,
       );
+      writeFileSync(leaseRef, `${JSON.stringify(lease, null, 2)}\n`, { encoding: "utf8", flag: "wx" });
       return { status: "leased", lease_ref: leaseRef, lease, execution_identity: executionIdentity };
     } catch (error) {
       const code = error && typeof error === "object" && "code" in error ? String(error.code) : "";

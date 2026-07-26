@@ -1,15 +1,19 @@
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import {
   buildAutomaticBuildSnapshot,
+  inspectAutomaticBuildStageFreshness,
   nextAutomaticBuildAction,
+  nextPlannedAutomaticBuildAction,
   resolveAutomaticBuildTarget,
   type AutomaticBuildStage,
   type AutomaticBuildTarget,
 } from "../../packages/core/src/build-orchestrator";
+import type { BuildPlanV1 } from "../../packages/core/src/build-intent";
+import { mapLegacyBuildInvocation } from "../../packages/core/src/build-intent-controller";
 import {
   readAutomaticBuildAttemptSnapshot,
   listAutomaticBuildStoredAttempts,
@@ -36,6 +40,7 @@ import {
 import {
   automaticBuildStageMetricsSummaryPath,
   automaticBuildUsageReceiptPath,
+  buildAutomaticBuildStageMetricsSummary,
   recordAutomaticBuildInputObservation,
   type AutomaticBuildStageMetricsSummaryV1,
   writeAutomaticBuildStageMetricsSummary,
@@ -44,10 +49,13 @@ import type { ExtractionQualityProfile } from "../../packages/core/src/semantic-
 import {
   buildAutomaticBuildPreflight,
   DEFAULT_AUTOMATIC_BUILD_BUDGET,
+  evaluateAutomaticBuildPlanBudget,
   selectAutomaticBuildCostBatch,
   type AutomaticBuildBudgetLimitsV1,
   type AutomaticBuildExecutorProvenanceV1,
   type AutomaticBuildHistoricalUsageV1,
+  type AutomaticBuildPlanActualUsageV1,
+  type AutomaticBuildPlanBudgetEvaluationV1,
   type AutomaticBuildPreflightV1,
   type AutomaticBuildWallBudgetV1,
 } from "../../packages/core/src/automatic-build-budget";
@@ -114,6 +122,7 @@ export interface AutomaticBuildNextOptions {
   accepted_evaluation_digest?: string;
   protocol?: AutomaticBuildClaimProtocol;
   executor_dispatches?: boolean;
+  build_plan?: BuildPlanV1;
 }
 
 export interface AutomaticBuildPlanOptions {
@@ -123,6 +132,7 @@ export interface AutomaticBuildPlanOptions {
   executor_provenance?: AutomaticBuildExecutorProvenanceV1;
   requested_workers?: number;
   available_agent_slots?: number;
+  build_plan?: BuildPlanV1;
 }
 
 interface StageCommands {
@@ -283,16 +293,68 @@ function historicalPerformanceForStage(
   return metrics.performance_history;
 }
 
+function actualUsageForBuildPlan(
+  target: AutomaticBuildTarget,
+  plan: BuildPlanV1,
+  snapshot: ReturnType<typeof buildAutomaticBuildSnapshot>,
+  now: string,
+): AutomaticBuildPlanActualUsageV1 {
+  let attempts = 0;
+  let knownAttempts = 0;
+  let exactInputTokens = 0;
+  let exactOutputTokens = 0;
+  for (const stage of plan.public_stage_closure as AutomaticBuildStage[]) {
+    const stageState = snapshot.stages.find((item) => item.stage === stage);
+    const summary = buildAutomaticBuildStageMetricsSummary(target, stage, {
+      now,
+      work_units: stageState?.work_units ?? [],
+    });
+    const stageAttempts = summary.usage.fully_known_attempts
+      + summary.usage.partially_known_attempts
+      + summary.usage.unavailable_attempts;
+    attempts += stageAttempts;
+    knownAttempts += summary.usage.fully_known_attempts + summary.usage.partially_known_attempts;
+    exactInputTokens += summary.usage.input_tokens;
+    exactOutputTokens += summary.usage.output_tokens;
+  }
+  return {
+    known_usage_coverage: attempts ? knownAttempts / attempts : 0,
+    exact_input_tokens: exactInputTokens,
+    exact_output_tokens: exactOutputTokens,
+  };
+}
+
+function buildPlanBudgetEvaluation(
+  target: AutomaticBuildTarget,
+  plan: BuildPlanV1,
+  snapshot: ReturnType<typeof buildAutomaticBuildSnapshot>,
+  now: string,
+  preflight?: AutomaticBuildPreflightV1,
+): AutomaticBuildPlanBudgetEvaluationV1 {
+  return evaluateAutomaticBuildPlanBudget({
+    plan,
+    actual_usage: actualUsageForBuildPlan(target, plan, snapshot, now),
+    ...(preflight ? {
+      current_forecast: {
+        estimated_total_tokens_upper: preflight.cost_scope.remaining.estimated_total_tokens_upper,
+        wall_clock_p95_minutes: preflight.wall_clock.predicted.remaining.p95_ms / 60_000,
+        preflight_evaluation_digest: preflight.preflight_evaluation_digest,
+      },
+    } : {}),
+  });
+}
+
 function preflightForAction(
   target: AutomaticBuildTarget,
   snapshot: ReturnType<typeof buildAutomaticBuildSnapshot>,
-  action: ReturnType<typeof nextAutomaticBuildAction>,
+  action: ReturnType<typeof nextAutomaticBuildAction> | ReturnType<typeof nextPlannedAutomaticBuildAction>,
   requestedWorkers: number,
   availableAgentSlots: number,
   qualityProfile: ExtractionQualityProfile,
   budget: AutomaticBuildBudgetLimitsV1,
   wallBudget?: AutomaticBuildWallBudgetV1,
   executorProvenance?: AutomaticBuildExecutorProvenanceV1,
+  buildPlan?: BuildPlanV1,
 ): AutomaticBuildPreflightV1 | undefined {
   if (action.kind !== "extract") return undefined;
   const stage = snapshot.stages.find((item) => item.stage === action.stage);
@@ -312,6 +374,7 @@ function preflightForAction(
     ...(historicalPerformance ? { historical_performance: historicalPerformance } : {}),
     ...(wallBudget ? { wall_budget: wallBudget } : {}),
     ...(executorProvenance ? { executor_provenance: executorProvenance } : {}),
+    ...(buildPlan ? { build_plan: buildPlan } : {}),
   });
 }
 
@@ -330,6 +393,7 @@ function persistAutomaticBuildPlanAcceptance(
     descriptor_plan_digest: preflight.descriptor_plan_digest,
     policy_digest: preflight.policy_digest,
     quality_profile: preflight.quality_profile,
+    ...(preflight.build_plan ? { build_plan: preflight.build_plan } : {}),
     budget: preflight.budget.limits,
     accepted_at: acceptedAt,
   };
@@ -342,7 +406,8 @@ function persistAutomaticBuildPlanAcceptance(
     const existing = JSON.parse(readFileSync(file, "utf8")) as typeof value;
     if (existing.plan_digest !== value.plan_digest
       || existing.policy_digest !== value.policy_digest
-      || existing.quality_profile !== value.quality_profile) {
+      || existing.quality_profile !== value.quality_profile
+      || JSON.stringify(existing.build_plan ?? null) !== JSON.stringify(value.build_plan ?? null)) {
       throw new Error(`automatic build plan acceptance conflicts with current preflight: ${file}`);
     }
   }
@@ -398,7 +463,11 @@ export function automaticBuildPlan(
   const availableAgentSlots = options.available_agent_slots ?? requestedWorkers;
   const budget = options.budget ?? DEFAULT_AUTOMATIC_BUILD_BUDGET;
   const snapshot = buildAutomaticBuildSnapshot(target, { quality_profile: qualityProfile });
-  const nextAction = nextAutomaticBuildAction(snapshot, Number.MAX_SAFE_INTEGER);
+  const nextAction = options.build_plan
+    ? nextPlannedAutomaticBuildAction(snapshot, options.build_plan, Number.MAX_SAFE_INTEGER, {
+        quality_profile: qualityProfile,
+      })
+    : nextAutomaticBuildAction(snapshot, Number.MAX_SAFE_INTEGER);
   const preflight = preflightForAction(
     target,
     snapshot,
@@ -409,6 +478,7 @@ export function automaticBuildPlan(
     budget,
     options.wall_budget,
     options.executor_provenance,
+    options.build_plan,
   );
   return {
     version: "automatic_build_plan.v1",
@@ -417,6 +487,57 @@ export function automaticBuildPlan(
     snapshot,
     next_action: nextAction,
     preflight: preflight ?? null,
+  };
+}
+
+export function prepareExplicitLegacyBuildPlan(
+  targetInput: string,
+  rootDir: string,
+  options: { now?: string; budget?: BuildPlanV1["budget"] } = {},
+) {
+  const target = resolveAutomaticBuildTarget(targetInput, rootDir);
+  const now = options.now ?? new Date().toISOString();
+  const snapshot = buildAutomaticBuildSnapshot(target, { quality_profile: "full" });
+  const selection = mapLegacyBuildInvocation({
+    invocation: "explicit_full_build",
+    target: {
+      book_id: target.book_id,
+      source_fingerprint: target.target_ref.input_fingerprint,
+      content_profile: target.profile_id === "paper"
+        ? { id: "paper", version: "paper_v0" }
+        : { id: "technical_learning", version: "technical_learning_v0" },
+      public_freshness: inspectAutomaticBuildStageFreshness(snapshot, { quality_profile: "full" }),
+    },
+    now,
+    ...(options.budget ? { budget: options.budget } : {}),
+  });
+  if (!selection?.plan) throw new Error("explicit legacy full build did not compile a BuildPlan");
+  const invocationId = createHash("sha256")
+    .update(canonicalAutomaticBuildJson({ target: target.target_ref, now }), "utf8")
+    .digest("hex")
+    .slice(0, 16);
+  const directory = path.join(target.workspace_dir, ".build", "automatic-build", "v2", "legacy-plans");
+  const buildPlanPath = path.join(directory, `${invocationId}.json`);
+  mkdirSync(directory, { recursive: true });
+  try {
+    writeFileSync(buildPlanPath, `${canonicalAutomaticBuildJson(selection.plan)}\n`, {
+      encoding: "utf8",
+      flag: "wx",
+    });
+  } catch (error) {
+    const code = error && typeof error === "object" && "code" in error ? String(error.code) : "";
+    if (code !== "EEXIST") throw error;
+    const existing = JSON.parse(readFileSync(buildPlanPath, "utf8")) as BuildPlanV1;
+    if (canonicalAutomaticBuildJson(existing) !== canonicalAutomaticBuildJson(selection.plan)) {
+      throw new Error(`explicit legacy BuildPlan conflicts with its invocation record: ${buildPlanPath}`);
+    }
+  }
+  return {
+    version: "explicit_legacy_build_plan.v1" as const,
+    invocation: "explicit_full_build" as const,
+    target_ref: target.target_ref,
+    build_plan_path: buildPlanPath,
+    plan: selection.plan,
   };
 }
 
@@ -432,10 +553,33 @@ function expandAction(
   acceptedPlanDigest?: string,
   acceptedEvaluationDigest?: string,
   executorDispatches = false,
+  buildPlan?: BuildPlanV1,
 ) {
   if (!Number.isInteger(maxParallel) || maxParallel < 1) throw new Error("maxParallel must be a positive integer");
   const snapshot = buildAutomaticBuildSnapshot(target, { quality_profile: qualityProfile });
-  const action = nextAutomaticBuildAction(snapshot, Number.MAX_SAFE_INTEGER);
+  const action = nextPlannedAutomaticBuildAction(snapshot, buildPlan, Number.MAX_SAFE_INTEGER, {
+    quality_profile: qualityProfile,
+  });
+  if (action.kind === "needs_user") return { snapshot, action };
+  if (!buildPlan) throw new Error("planned automatic action is missing its BuildPlan");
+  const settledPlanBudget = action.kind === "extract"
+    ? undefined
+    : buildPlanBudgetEvaluation(target, buildPlan, snapshot, leaseOptions.now);
+  if (settledPlanBudget?.status === "exceeded") {
+    return {
+      snapshot,
+      plan_budget: settledPlanBudget,
+      action: {
+        kind: "needs_user" as const,
+        reason: "plan_budget_exceeded" as const,
+        plan_id: buildPlan.plan_id,
+        plan_digest: buildPlan.plan_digest,
+        violations: settledPlanBudget.violations,
+        receipt_digest: settledPlanBudget.receipt_digest,
+        message: "actual usage plus remaining forecast exceeds the confirmed BuildPlan budget",
+      },
+    };
+  }
   if (action.kind === "extract") {
     const targetInput = targetCommandInput(target);
     const legacyAudit = auditAutomaticBuildLegacy(target, action.stage);
@@ -534,7 +678,26 @@ function expandAction(
       budget,
       wallBudget,
       executorProvenance,
+      buildPlan,
     )!;
+    const planBudget = buildPlanBudgetEvaluation(target, buildPlan, snapshot, leaseOptions.now, preflight);
+    if (planBudget.status === "exceeded") {
+      return {
+        snapshot,
+        preflight,
+        plan_budget: planBudget,
+        action: {
+          kind: "needs_user" as const,
+          reason: "plan_budget_exceeded" as const,
+          stage: action.stage,
+          plan_id: buildPlan.plan_id,
+          plan_digest: buildPlan.plan_digest,
+          violations: planBudget.violations,
+          receipt_digest: planBudget.receipt_digest,
+          message: "actual usage plus remaining forecast exceeds the confirmed BuildPlan budget",
+        },
+      };
+    }
     if (preflight.budget.status === "exceeded") {
       return {
         snapshot,
@@ -752,6 +915,7 @@ function expandAction(
       return {
         snapshot,
         preflight,
+        plan_budget: planBudget,
         action: {
           kind: "dispatch" as const,
           stage: action.stage,
@@ -824,6 +988,7 @@ function expandAction(
     return {
       snapshot,
       preflight,
+      plan_budget: planBudget,
       action: {
         ...action,
         task_ids: claims.map((claim) => claim.task_id),
@@ -905,6 +1070,7 @@ function expandAction(
       if (qualityReport.gate_status !== "passed") {
         return {
           snapshot,
+          plan_budget: settledPlanBudget,
           quality_report: qualityReport,
           action: {
             kind: "needs_user",
@@ -918,6 +1084,7 @@ function expandAction(
       }
       return {
         snapshot,
+        plan_budget: settledPlanBudget,
         quality_report: qualityReport,
         action: {
           ...action,
@@ -933,6 +1100,7 @@ function expandAction(
     }
     return {
       snapshot,
+      plan_budget: settledPlanBudget,
       action: {
         ...action,
         cwd: target.root_dir,
@@ -945,7 +1113,7 @@ function expandAction(
       },
     };
   }
-  return { snapshot, action };
+  return { snapshot, plan_budget: settledPlanBudget, action };
 }
 
 function valueArg(argv: string[], name: string): string | undefined {
@@ -987,6 +1155,7 @@ export function automaticBuildNext(
       options.accepted_plan_digest,
       options.accepted_evaluation_digest,
       protocol === AUTOMATIC_BUILD_EXECUTOR_DISPATCH_PROTOCOL_V1,
+      options.build_plan,
     ),
   };
 }
@@ -1271,11 +1440,40 @@ function claimProtocolFromArgs(argv: string[]): AutomaticBuildClaimProtocol | un
   return resolveAutomaticBuildClaimProtocol(requested, dispatchAlias);
 }
 
+function buildPlanFromArgs(argv: string[]): BuildPlanV1 | undefined {
+  const requested = valueArg(argv, "--build-plan");
+  if (!requested) return undefined;
+  const file = path.resolve(requested);
+  return JSON.parse(readFileSync(file, "utf8")) as BuildPlanV1;
+}
+
 const argv = process.argv.slice(2);
-if (argv[0] === "protocol-doctor") {
+if (argv[0] === "legacy-plan") {
   const targetInput = argv[1];
   if (!targetInput) {
-    console.error("usage: tsx skills/build/automatic-build.ts protocol-doctor <target> [--root <dir>] [--max-parallel <n>]");
+    console.error("usage: tsx skills/build/automatic-build.ts legacy-plan <target> [--root <dir>] [--now <ISO timestamp>] [budget flags]");
+    process.exit(2);
+  }
+  printAutomaticBuildJson(prepareExplicitLegacyBuildPlan(
+    targetInput,
+    path.resolve(valueArg(argv, "--root") ?? process.cwd()),
+    {
+      ...(valueArg(argv, "--now") ? { now: valueArg(argv, "--now") } : {}),
+      budget: {
+        ...(valueArg(argv, "--max-estimated-total-tokens")
+          ? { max_total_tokens: Number(valueArg(argv, "--max-estimated-total-tokens")) }
+          : {}),
+        ...(valueArg(argv, "--max-wall-clock-minutes")
+          ? { max_wall_clock_minutes: Number(valueArg(argv, "--max-wall-clock-minutes")) }
+          : {}),
+        on_exceed: "needs_user",
+      },
+    },
+  ));
+} else if (argv[0] === "protocol-doctor") {
+  const targetInput = argv[1];
+  if (!targetInput) {
+    console.error("usage: tsx skills/build/automatic-build.ts protocol-doctor <target> [--root <dir>] [--max-parallel <n>] [--build-plan <confirmed-plan.json>]");
     process.exit(2);
   }
   const rootDir = path.resolve(valueArg(argv, "--root") ?? process.cwd());
@@ -1287,11 +1485,12 @@ if (argv[0] === "protocol-doctor") {
     requested_workers: requestedWorkers,
     available_agent_slots: nonNegativeIntegerArg(argv, "--available-agent-slots", requestedWorkers),
     quality_profile: qualityProfileFromArgs(argv),
+    build_plan: buildPlanFromArgs(argv),
   }));
 } else if (argv[0] === "plan") {
   const targetInput = argv[1];
   if (!targetInput) {
-    console.error("usage: tsx skills/build/automatic-build.ts plan <target> [--root <dir>] [--max-parallel <n>] [budget flags]");
+    console.error("usage: tsx skills/build/automatic-build.ts plan <target> [--root <dir>] [--max-parallel <n>] [--build-plan <confirmed-plan.json>] [budget flags]");
     process.exit(2);
   }
   const rootDir = path.resolve(valueArg(argv, "--root") ?? process.cwd());
@@ -1303,11 +1502,12 @@ if (argv[0] === "protocol-doctor") {
     requested_workers: requestedWorkers,
     available_agent_slots: nonNegativeIntegerArg(argv, "--available-agent-slots", requestedWorkers),
     quality_profile: qualityProfileFromArgs(argv),
+    build_plan: buildPlanFromArgs(argv),
   }));
 } else if (argv[0] === "next") {
   const targetInput = argv[1];
   if (!targetInput) {
-    console.error("usage: tsx skills/build/automatic-build.ts next <target> [--root <dir>] [--max-parallel <n>]");
+    console.error("usage: tsx skills/build/automatic-build.ts next <target> [--root <dir>] [--max-parallel <n>] --build-plan <confirmed-plan.json>");
     process.exit(2);
   }
   const rootDir = path.resolve(valueArg(argv, "--root") ?? process.cwd());
@@ -1328,6 +1528,7 @@ if (argv[0] === "protocol-doctor") {
     accepted_plan_digest: valueArg(argv, "--accepted-plan"),
     accepted_evaluation_digest: valueArg(argv, "--accepted-evaluation"),
     protocol: claimProtocolFromArgs(argv),
+    build_plan: buildPlanFromArgs(argv),
   }));
 } else if (["dispatch.next", "dispatch.inspect", "dispatch.finish"].includes(argv[0] ?? "")) {
   const operation = argv[0];

@@ -11,6 +11,7 @@ import type {
   HistoricalBackfillJobRequest,
   HistoricalBackfillStartRequest,
   HistoricalBackfillStateView,
+  IntentArtifactOverlayV1,
   MemoryRecord,
   OuterOutcome,
   ProfileGovernanceActionRequest,
@@ -24,8 +25,9 @@ import type { PdfAnnotationLocation } from "../pdf-annotation-projection";
 import { rangeToMarkdown } from "../selection";
 import ProfileMemoryPanel from "./ProfileMemoryPanel.vue";
 import QueryAuditPanel from "./QueryAuditPanel.vue";
+import IntentArtifactPanel from "./IntentArtifactPanel.vue";
 
-type ContextTab = "agent" | "profile" | "trace" | "formula" | "notes";
+type ContextTab = "agent" | "artifacts" | "profile" | "trace" | "formula" | "notes";
 
 type AskDraft = AskQuote;
 type DisplayQuestionQuote = AskDraft | AgentQuestionQuoteView;
@@ -88,6 +90,9 @@ const props = defineProps<{
   profileBackfillError?: string | null;
   profileBackfillNotice?: string | null;
   profileUpdateStates?: Record<string, string>;
+  intentArtifacts?: IntentArtifactOverlayV1 | null;
+  intentArtifactsLoading?: boolean;
+  intentArtifactsError?: string | null;
 }>();
 const emit = defineEmits<{
   (e: "update:agentInput", value: string): void;
@@ -109,6 +114,9 @@ const emit = defineEmits<{
   (e: "mutate-profile-backfill", action: "cancel" | "retry" | "clear", request: HistoricalBackfillJobRequest): void;
   (e: "undo-profile-update", turnIndex: number, updateIndex: number, update: ProfileMemoryUpdate): void;
   (e: "agent-source-opened"): void;
+  (e: "refresh-artifacts"): void;
+  (e: "open-artifacts"): void;
+  (e: "artifact-cited", artifactId: string): void;
 }>();
 
 const activeTab = ref<ContextTab>("agent");
@@ -118,6 +126,7 @@ const transcriptRef = ref<HTMLElement | null>(null);
 const agentInputRef = ref<HTMLTextAreaElement | null>(null);
 const tabs: { id: ContextTab; label: string }[] = [
   { id: "agent", label: "问答" },
+  { id: "artifacts", label: "成果" },
   { id: "profile", label: "画像" },
   { id: "trace", label: "轨迹" },
   { id: "formula", label: "公式" },
@@ -127,6 +136,9 @@ const noteCount = computed(() => props.contextNotes.length + props.contextHighli
 const profileAttentionCount = computed(() => (
   (props.profileMemory?.pending_candidates.length ?? 0)
   + (props.profileMemory?.status.pending_sensitive_confirmation ? 1 : 0)
+));
+const artifactAcceptedCount = computed(() => (
+  props.intentArtifacts?.artifacts.filter((artifact) => artifact.state === "accepted").length ?? 0
 ));
 watch(() => props.askDraft, async (draft) => {
   if (!draft) return;
@@ -383,6 +395,7 @@ function deleteHistorySession(sessionId: string) {
 function selectTab(tab: ContextTab) {
   activeTab.value = tab;
   if (tab === "profile") emit("refresh-profile");
+  if (tab === "artifacts") emit("open-artifacts");
 }
 
 function memoryUpdateLabel(update: ProfileMemoryUpdate): string {
@@ -435,6 +448,9 @@ function influenceLabel(influence: ProfileUsageTrace["influences"][number]): str
         {{ tab.label }}
         <span v-if="tab.id === 'profile' && profileAttentionCount" class="tab-badge">
           {{ profileAttentionCount }}
+        </span>
+        <span v-if="tab.id === 'artifacts' && artifactAcceptedCount" class="tab-badge">
+          {{ artifactAcceptedCount }}
         </span>
       </button>
     </div>
@@ -590,6 +606,17 @@ function influenceLabel(influence: ProfileUsageTrace["influences"][number]): str
           {{ props.sending ? "..." : "发送" }}
         </button>
       </div>
+    </section>
+
+    <section v-show="activeTab === 'artifacts'" class="tab-panel artifact-panel">
+      <IntentArtifactPanel
+        :overlay="props.intentArtifacts"
+        :loading="props.intentArtifactsLoading"
+        :error="props.intentArtifactsError"
+        @refresh="emit('refresh-artifacts')"
+        @goto="emit('goto', $event)"
+        @cite="emit('artifact-cited', $event)"
+      />
     </section>
 
     <section v-show="activeTab === 'profile'" class="tab-panel profile-panel">
@@ -854,7 +881,7 @@ function influenceLabel(influence: ProfileUsageTrace["influences"][number]): str
 .context-tabs {
   flex: 0 0 auto;
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 0;
   padding: 0.75rem 0.75rem 0;
 }
@@ -914,6 +941,10 @@ function influenceLabel(influence: ProfileUsageTrace["influences"][number]): str
   padding: 1rem 1rem 0.7rem;
 }
 .profile-panel {
+  overflow: hidden;
+}
+.artifact-panel {
+  min-width: 0;
   overflow: hidden;
 }
 .chat-actions {

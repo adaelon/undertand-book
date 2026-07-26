@@ -360,6 +360,208 @@ export interface PdfRangesProjectResponse {
     };
   }>;
 }
+export type BuildIntentMode = "read_now" | "standard_deep" | "goal_directed";
+export type IntentArtifactType = "timeline" | "concept_map" | "comparison_table" | "argument_map";
+export interface BuildIntentPlannerCandidateV1 {
+  version: "build_intent_planner_candidate.v1";
+  goal_kind: "learn" | "analyze" | "compare" | "write" | "reference" | "other";
+  source_scope: { whole_book: boolean; lids: string[]; sections: string[] };
+  desired_artifacts: IntentArtifactType[];
+  usage_horizon: "one_off" | "project" | "long_term";
+}
+export interface BuildIntentV1 extends Omit<BuildIntentPlannerCandidateV1, "version"> {
+  version: "build_intent.v1";
+  intent_id: string;
+  revision: number;
+  book_id: string;
+  source_fingerprint: string;
+  content_profile: { id: "technical_learning"; version: "technical_learning_v0" } | { id: "paper"; version: "paper_v0" };
+  user_goal: string;
+  privacy: "reader_private";
+  status: "draft" | "confirmed" | "superseded" | "stale_source" | "deleted";
+  created_at: string;
+  confirmed_at?: string;
+  supersedes_intent_id?: string;
+}
+export interface BuildPlanEstimateV1 {
+  input_tokens: { lower: number; upper: number; coverage: number };
+  output_tokens: { lower: number; upper: number; coverage: number };
+  wall_clock_minutes: { p50?: number; p95?: number; confidence: "none" | "low" | "medium" | "high" };
+  unknown_stages: string[];
+  historical_match: { stage: boolean; policy: boolean; model: boolean; harness: boolean; sample_count: number };
+}
+export interface BuildDecisionRequestV2 {
+  version: "build_decision_request.v2";
+  decision_id: string;
+  job_id?: string;
+  scope: { kind: "stage"; stage: BuildStageId } | { kind: "build_plan"; plan_id: string; plan_digest: string };
+  kind: "build_intent_plan" | BuildDecisionRequest["kind"];
+  options: Array<{ id: string; label: string; description?: string }>;
+  status: "pending" | "answered";
+}
+export interface BuildPlanV1 {
+  version: "build_plan.v1";
+  plan_id: string;
+  revision: number;
+  book_id: string;
+  source_fingerprint: string;
+  content_profile: BuildIntentV1["content_profile"];
+  recipe_id: "standard_deep" | "goal_directed";
+  intent_id?: string;
+  intent_digest?: string;
+  public_stage_closure: string[];
+  private_artifacts: Array<{
+    artifact_id: string;
+    artifact_type: IntentArtifactType;
+    source_scope: BuildIntentPlannerCandidateV1["source_scope"];
+    required_public_capabilities: string[];
+    evidence_policy: "lid_required";
+  }>;
+  reuse: Array<{ artifact: string; freshness_digest: string }>;
+  create: string[];
+  excluded: Array<{ artifact: string; reason: string }>;
+  estimate: BuildPlanEstimateV1;
+  budget: { max_total_tokens?: number; max_wall_clock_minutes?: number; on_exceed: "needs_user" };
+  status: "draft" | "confirmed" | "superseded" | "stale_source" | "completed";
+  plan_digest: string;
+  confirmation_source?: "reader_ui" | "explicit_legacy_command";
+  created_at: string;
+  confirmed_at?: string;
+}
+export interface BuildIntentSelectionV1 {
+  version: "build_intent_selection.v1";
+  mode: BuildIntentMode;
+  intent: BuildIntentV1 | null;
+  intent_digest: string | null;
+  plan: BuildPlanV1 | null;
+  estimate_input: unknown | null;
+  decision_request: BuildDecisionRequestV2 | null;
+}
+export interface IntentBuildInspectionV1 {
+  version: "intent_build_inspection.v1";
+  book_id: string;
+  store_revision: number;
+  intents: Array<{ intent_id: string; revision: number; status: BuildIntentV1["status"]; source_fingerprint: string }>;
+  plans: Array<{ plan_id: string; revision: number; status: BuildPlanV1["status"]; plan_digest: string; intent_id?: string }>;
+  active_overlay?: { intent_id: string; plan_id: string };
+}
+export interface BuildIntentResponseV1 {
+  version: "build_intent_response.v1";
+  selection: BuildIntentSelectionV1;
+  inspection: IntentBuildInspectionV1;
+}
+export interface BuildIntentStatusResponseV1 {
+  version: "build_intent_status_response.v1";
+  inspection: IntentBuildInspectionV1;
+}
+export interface IntentTimelinePayloadV1 {
+  items: Array<{ id: string; label: string; order_hint?: string; evidence_lids: string[] }>;
+}
+export interface IntentConceptMapPayloadV1 {
+  nodes: Array<{ id: string; label: string; evidence_lids: string[] }>;
+  links: Array<{ source: string; target: string; relation: string; evidence_lids: string[] }>;
+}
+export interface IntentComparisonTablePayloadV1 {
+  rows: Array<{ subject: string; dimensions: Record<string, unknown>; evidence_lids: string[] }>;
+}
+export type IntentArgumentRole = "problem" | "method" | "evidence" | "result" | "limitation" | "future_work";
+export interface IntentArgumentMapPayloadV1 {
+  claims: Array<{ id: string; claim: string; role: IntentArgumentRole; evidence_lids: string[] }>;
+  relations: Array<{ source: string; target: string; relation: string; evidence_lids: string[] }>;
+}
+type PendingIntentArtifactProjectionV1 = {
+  artifact_id: string;
+  state: "pending";
+  payload?: never;
+  payload_digest?: never;
+  accepted_at?: never;
+};
+type AcceptedIntentArtifactProjectionV1<TType extends IntentArtifactType, TPayload> = {
+  artifact_id: string;
+  artifact_type: TType;
+  state: "accepted";
+  payload: TPayload;
+  payload_digest: string;
+  accepted_at: string;
+};
+export type IntentArtifactProjectionV1 =
+  | (PendingIntentArtifactProjectionV1 & { artifact_type: IntentArtifactType })
+  | AcceptedIntentArtifactProjectionV1<"timeline", IntentTimelinePayloadV1>
+  | AcceptedIntentArtifactProjectionV1<"concept_map", IntentConceptMapPayloadV1>
+  | AcceptedIntentArtifactProjectionV1<"comparison_table", IntentComparisonTablePayloadV1>
+  | AcceptedIntentArtifactProjectionV1<"argument_map", IntentArgumentMapPayloadV1>;
+export interface IntentArtifactOverlayV1 {
+  version: "intent_artifact_overlay.v1";
+  book_id: string;
+  intent_id: string;
+  plan_id: string;
+  plan_digest: string;
+  artifacts: IntentArtifactProjectionV1[];
+}
+export interface IntentArtifactOverlayResponseV1 {
+  version: "intent_artifact_overlay_response.v1";
+  overlay: IntentArtifactOverlayV1;
+}
+export type IntentBuildReaderUsageKind = "reader_ready" | "artifact_opened" | "artifact_cited";
+export interface IntentBuildUsageAppendResultV1 {
+  version: "intent_build_usage_append_result.v1";
+  event_id: string;
+  disposition: "created" | "existing";
+}
+export interface IntentBuildAblationReportV1 {
+  version: "intent_build_ablation_report.v1";
+  book_id: string;
+  as_of: string;
+  window_days: number;
+  event_count: number;
+  modes: Array<{
+    mode: BuildIntentMode;
+    selection_count: number;
+    plan_revisions: Array<{
+      plan_id: string;
+      revision: number;
+      plan_digest: string;
+      confirmation_source: "reader_ui" | "explicit_legacy_command";
+      intent_id?: string;
+    }>;
+    estimate: { token_lower: number; token_upper: number; unknown_item_count: number };
+    actual: {
+      attempt_count: number;
+      outcome_counts: Record<"committed" | "retryable_failure" | "needs_user" | "cancelled", number>;
+      known_usage_attempts: number;
+      unavailable_usage_attempts: number;
+      known_usage_coverage: number;
+      input_tokens: number;
+      cached_input_tokens: number;
+      output_tokens: number;
+      estimated_input_tokens: number;
+      estimated_output_tokens: number;
+      wall_clock_ms: number;
+    };
+    timing: { first_readable_ms: number | null; first_goal_artifact_ms: number | null };
+    consumption_7d: {
+      accepted_artifacts: number;
+      opened_artifacts: number;
+      cited_artifacts: number;
+      open_rate: number | null;
+      citation_rate: number | null;
+      open_events: number;
+      citation_events: number;
+    };
+    artifact_costs: Array<{
+      artifact_type: IntentArtifactType;
+      attempt_count: number;
+      committed_attempts: number;
+      failed_or_cancelled_attempts: number;
+      input_tokens: number;
+      cached_input_tokens: number;
+      output_tokens: number;
+      wall_clock_ms: number;
+    }>;
+  }>;
+  privacy: { raw_goal: false; artifact_body: false; lid_or_quote: false; user_profile: false };
+  digest: string;
+}
 export type BuildRoute = "reader" | "workbench";
 export type BuildReadinessStatus = "trusted_book" | "missing" | "incomplete" | "needs_review" | "stale_input";
 export type BuildStageStatus = "blocked" | "missing" | "done" | "needs_review" | "stale" | "incomplete";
@@ -834,6 +1036,39 @@ export const api = {
     http<HistoricalBackfillStateView>("POST", "/profile/backfill/retry", request),
   profileBackfillClear: (request: HistoricalBackfillJobRequest) =>
     http<HistoricalBackfillStateView>("POST", "/profile/backfill/clear", request),
+  buildIntentStatus: () =>
+    http<BuildIntentStatusResponseV1>("GET", "/build_intent/status"),
+  buildIntentDraft: (payload: {
+    mode: BuildIntentMode;
+    user_goal?: string;
+    budget?: BuildPlanV1["budget"];
+  }) => http<BuildIntentResponseV1>("POST", "/build_intent/draft", payload),
+  buildIntentEdit: (payload: {
+    plan_id: string;
+    user_goal?: string;
+    candidate?: BuildIntentPlannerCandidateV1;
+    budget?: BuildPlanV1["budget"];
+  }) => http<BuildIntentResponseV1>("POST", "/build_intent/edit", payload),
+  buildIntentEstimate: (plan_id: string) =>
+    http<{ version: "build_plan_estimate_response.v1"; plan_id: string; plan_digest: string; estimate: BuildPlanEstimateV1 }>(
+      "POST",
+      "/build_intent/estimate",
+      { plan_id },
+    ),
+  buildIntentConfirm: (plan_id: string, plan_digest: string) =>
+    http<BuildIntentResponseV1>("POST", "/build_intent/confirm", { plan_id, plan_digest }),
+  buildIntentReject: (plan_id: string) =>
+    http<BuildIntentResponseV1>("POST", "/build_intent/reject", { plan_id }),
+  intentArtifacts: () =>
+    http<IntentArtifactOverlayResponseV1>("GET", "/build_intent/artifacts"),
+  intentUsage: () =>
+    http<IntentBuildAblationReportV1>("GET", "/build_intent/usage"),
+  intentUsageEvent: (payload: {
+    event_id: string;
+    occurred_at: string;
+    kind: IntentBuildReaderUsageKind;
+    artifact_id?: string;
+  }) => http<IntentBuildUsageAppendResultV1>("POST", "/build_intent/usage.event", payload),
   text: (lid: string, end?: string) =>
     http<BookText>("GET", `/book/text${qs({ lid, end })}`),
   structure: (at?: string) => http<StructureProjection>("GET", `/book/structure${qs({ at })}`),

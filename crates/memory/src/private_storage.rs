@@ -41,14 +41,18 @@ impl ReaderPrivateStorageGate {
             ))
         })
     }
+
+    pub fn secure_file(path: &Path) -> Result<(), ToolError> {
+        platform::secure_file(path).map_err(|error| {
+            private_storage_error(format!(
+                "reader-private file permissions cannot be enforced or verified: {error}"
+            ))
+        })
+    }
 }
 
 pub(crate) fn secure_private_file(path: &Path) -> Result<(), ToolError> {
-    platform::secure_file(path).map_err(|error| {
-        private_storage_error(format!(
-            "reader-private file permissions cannot be enforced or verified: {error}"
-        ))
-    })
+    ReaderPrivateStorageGate::secure_file(path)
 }
 
 fn private_storage_error(message: impl Into<String>) -> ToolError {

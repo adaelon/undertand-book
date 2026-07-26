@@ -1,6 +1,6 @@
 {
   "name": "@understand-book/desktop",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "scripts": {
     "tauri": "tauri",
@@ -9,6 +9,7 @@
     "test:workbench-sidecar": "node scripts/smoke-workbench-sidecar.mjs",
     "test:book-mcp-plugin": "node scripts/smoke-book-mcp-plugin.mjs",
     "test:automatic-build-parity": "node scripts/smoke-automatic-build-parity.mjs",
+    "test:intent-metrics-parity": "node scripts/smoke-intent-build-metrics.mjs",
     "test:plugin-release": "node scripts/assert-plugin-release.mjs",
     "package:windows": "node scripts/assert-plugin-release.mjs && node scripts/assert-release-config.mjs && tauri build --bundles nsis && node scripts/export-installer.mjs"
   },

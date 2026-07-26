@@ -25,6 +25,19 @@ output, or treat conversation memory as build state.
 
 ## Automatic-build v2 loop
 
+This skill invocation is the explicit legacy full-build command. Before protocol preflight, map it
+once to a confirmed `standard_deep` BuildPlan:
+
+```text
+<build-exe> legacy-plan <target> --root <root> [quality and budget flags]
+```
+
+Consume only `explicit_legacy_build_plan.v1`, require
+`plan.confirmation_source=explicit_legacy_command`, and retain `build_plan_path`. Add
+`--build-plan <build_plan_path>` to every `protocol-doctor`, `plan`, and `next` command below.
+Opening, importing, or resuming a book is not this invocation and must never run `legacy-plan`.
+An existing SidecarPlan is a stage option only and must not be substituted for this BuildPlan.
+
 Recompute the number of currently available dedicated subagent slots before every `plan` and
 `next`. Keep the same target, quality profile, budget flags, and `--max-parallel` request throughout
 one accepted plan. `--max-parallel` is in `1..3`; `--available-agent-slots` is in `0..3`.

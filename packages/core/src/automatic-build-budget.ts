@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { validateBuildPlanV1, type BuildPlanV1 } from "./build-intent";
 import type { AutomaticBuildStage, BuildTargetRefV2 } from "./build-orchestrator";
 import type { ExtractionPolicyFingerprintV1, ExtractionQualityProfile } from "./semantic-artifact";
 import { workUnitPlanDigest, type WorkUnitDescriptorV2, type WorkUnitKind } from "./stage-work-unit";
@@ -85,6 +86,7 @@ export interface AutomaticBuildPreflightV1 {
   target_ref: BuildTargetRefV2;
   stage: AutomaticBuildStage;
   descriptor_plan_digest: string;
+  build_plan?: { plan_id: string; revision: number; plan_digest: string };
   plan_digest: string;
   preflight_evaluation_digest: string;
   quality_profile: ExtractionQualityProfile;
@@ -159,6 +161,41 @@ export interface AutomaticBuildCostBatchV1 {
   units: WorkUnitDescriptorV2[];
   total_score: number;
   deferred_ids: string[];
+}
+
+export interface AutomaticBuildPlanActualUsageV1 {
+  known_usage_coverage: number;
+  exact_input_tokens: number;
+  exact_output_tokens: number;
+}
+
+export interface AutomaticBuildPlanCurrentForecastV1 {
+  estimated_total_tokens_upper: number;
+  wall_clock_p95_minutes: number;
+  preflight_evaluation_digest?: string;
+}
+
+export interface AutomaticBuildPlanBudgetViolationV1 {
+  code: "max_total_tokens" | "max_wall_clock_minutes";
+  actual: number;
+  limit: number;
+}
+
+export interface AutomaticBuildPlanBudgetEvaluationV1 {
+  version: "automatic_build_plan_budget_evaluation.v1";
+  plan_id: string;
+  plan_digest: string;
+  status: "within_budget" | "exceeded";
+  known_usage_coverage: number;
+  actual_input_tokens: number;
+  actual_output_tokens: number;
+  actual_total_tokens: number;
+  remaining_forecast_tokens_upper: number;
+  projected_total_tokens_upper: number;
+  projected_wall_clock_p95_minutes: number;
+  violations: AutomaticBuildPlanBudgetViolationV1[];
+  preflight_evaluation_digest?: string;
+  receipt_digest: string;
 }
 
 function stableJson(value: unknown): string {
@@ -300,6 +337,69 @@ function validatePerformanceHistory(
   return { history: { ...identity, revision_digest: computed }, digest: computed };
 }
 
+export function evaluateAutomaticBuildPlanBudget(input: {
+  plan: BuildPlanV1;
+  actual_usage: AutomaticBuildPlanActualUsageV1;
+  current_forecast?: AutomaticBuildPlanCurrentForecastV1;
+}): AutomaticBuildPlanBudgetEvaluationV1 {
+  const plan = validateBuildPlanV1(input.plan);
+  const usage = input.actual_usage;
+  if (!Number.isFinite(usage.known_usage_coverage)
+    || usage.known_usage_coverage < 0
+    || usage.known_usage_coverage > 1) {
+    throw new Error("plan actual usage coverage must be between 0 and 1");
+  }
+  const actualInput = nonNegativeSafeInteger(usage.exact_input_tokens, "plan.actual_input_tokens");
+  const actualOutput = nonNegativeSafeInteger(usage.exact_output_tokens, "plan.actual_output_tokens");
+  const actualTotal = actualInput + actualOutput;
+  if (!Number.isSafeInteger(actualTotal)) throw new Error("plan actual token total exceeds the safe integer range");
+  const currentForecastTokens = input.current_forecast
+    ? nonNegativeSafeInteger(
+        input.current_forecast.estimated_total_tokens_upper,
+        "plan.current_forecast.estimated_total_tokens_upper",
+      )
+    : 0;
+  const currentForecastWall = input.current_forecast?.wall_clock_p95_minutes ?? 0;
+  if (!Number.isFinite(currentForecastWall) || currentForecastWall < 0) {
+    throw new Error("plan current forecast wall clock must be non-negative");
+  }
+  const planEstimateUpper = plan.estimate.input_tokens.upper + plan.estimate.output_tokens.upper;
+  if (!Number.isSafeInteger(planEstimateUpper)) throw new Error("plan estimate token total exceeds the safe integer range");
+  const remainingForecast = Math.max(currentForecastTokens, Math.max(0, planEstimateUpper - actualTotal));
+  const projectedTotal = actualTotal + remainingForecast;
+  if (!Number.isSafeInteger(projectedTotal)) throw new Error("plan projected token total exceeds the safe integer range");
+  const projectedWall = Math.max(plan.estimate.wall_clock_minutes.p95 ?? 0, currentForecastWall);
+  const violations: AutomaticBuildPlanBudgetViolationV1[] = [];
+  if (plan.budget.max_total_tokens !== undefined && projectedTotal > plan.budget.max_total_tokens) {
+    violations.push({ code: "max_total_tokens", actual: projectedTotal, limit: plan.budget.max_total_tokens });
+  }
+  if (plan.budget.max_wall_clock_minutes !== undefined && projectedWall > plan.budget.max_wall_clock_minutes) {
+    violations.push({
+      code: "max_wall_clock_minutes",
+      actual: projectedWall,
+      limit: plan.budget.max_wall_clock_minutes,
+    });
+  }
+  const identity = {
+    version: "automatic_build_plan_budget_evaluation.v1" as const,
+    plan_id: plan.plan_id,
+    plan_digest: plan.plan_digest,
+    status: violations.length ? "exceeded" as const : "within_budget" as const,
+    known_usage_coverage: usage.known_usage_coverage,
+    actual_input_tokens: actualInput,
+    actual_output_tokens: actualOutput,
+    actual_total_tokens: actualTotal,
+    remaining_forecast_tokens_upper: remainingForecast,
+    projected_total_tokens_upper: projectedTotal,
+    projected_wall_clock_p95_minutes: projectedWall,
+    violations,
+    ...(input.current_forecast?.preflight_evaluation_digest
+      ? { preflight_evaluation_digest: input.current_forecast.preflight_evaluation_digest }
+      : {}),
+  };
+  return { ...identity, receipt_digest: sha256(stableJson(identity)) };
+}
+
 function upperTokenEstimate(units: WorkUnitDescriptorV2[]): number {
   const inputTokens = units.reduce((sum, unit) => sum + unit.cost.estimated_input_tokens, 0);
   const outputItems = units.reduce((sum, unit) => sum + unit.cost.expected_output_items, 0);
@@ -333,8 +433,15 @@ export function buildAutomaticBuildPreflight(input: {
   wall_budget?: AutomaticBuildWallBudgetV1;
   executor_provenance?: AutomaticBuildExecutorProvenanceV1;
   historical_performance?: AutomaticBuildPerformanceHistoryV1;
+  build_plan?: BuildPlanV1;
 }): AutomaticBuildPreflightV1 {
   const budget = validateBudget(input.budget);
+  const buildPlan = input.build_plan ? validateBuildPlanV1(input.build_plan) : undefined;
+  const buildPlanBinding = buildPlan ? {
+    plan_id: buildPlan.plan_id,
+    revision: buildPlan.revision,
+    plan_digest: buildPlan.plan_digest,
+  } : undefined;
   if (!Number.isSafeInteger(input.requested_workers) || input.requested_workers < 1) {
     throw new Error("requested_workers must be a positive safe integer");
   }
@@ -501,6 +608,7 @@ export function buildAutomaticBuildPreflight(input: {
     descriptor_plan_digest: descriptorPlanDigest,
     quality_profile: input.quality_profile,
     policy_digest: policyDigest,
+    build_plan: buildPlanBinding ?? null,
     budget,
     requested_workers: input.requested_workers,
   };
@@ -513,6 +621,7 @@ export function buildAutomaticBuildPreflight(input: {
   const evaluationIdentity = {
     version: "automatic_build_preflight_evaluation.v1",
     descriptor_plan_digest: descriptorPlanDigest,
+    build_plan: buildPlanBinding ?? null,
     dispatch_plan_digest: dispatchPlan.dispatch_plan_digest,
     executor_provenance: executorProvenance ?? "unavailable",
     wall_budget: wallBudget ?? null,
@@ -528,6 +637,7 @@ export function buildAutomaticBuildPreflight(input: {
     target_ref: input.target_ref,
     stage: input.stage,
     descriptor_plan_digest: descriptorPlanDigest,
+    ...(buildPlanBinding ? { build_plan: buildPlanBinding } : {}),
     plan_digest: sha256(stableJson(digestIdentity)),
     preflight_evaluation_digest: sha256(stableJson(evaluationIdentity)),
     quality_profile: input.quality_profile,

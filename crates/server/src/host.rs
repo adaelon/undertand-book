@@ -1,3 +1,4 @@
+use crate::intent_build_store::IntentArtifactStore;
 use crate::{
     agent_history_review_cursors, ensure_agent_history_for_book, load_agent_history, load_session,
     mcp::VisitorSessions, prepare_selection_translation, route, route_book_asset_file,
@@ -429,8 +430,7 @@ impl ReviewCoordinator {
                 &job.book_id == current_book_id
                     && matches!(
                         job.status,
-                        HistoricalBackfillJobStatus::Queued
-                            | HistoricalBackfillJobStatus::Running
+                        HistoricalBackfillJobStatus::Queued | HistoricalBackfillJobStatus::Running
                     )
             })
             .count()
@@ -635,12 +635,7 @@ impl ReviewCoordinator {
                     "HISTORICAL_BACKFILL_PROVIDER_UNCONFIGURED",
                     "historical backfill provider is not configured",
                 );
-                mark_historical_backfill_retryable(
-                    &mut state.store,
-                    &running,
-                    &error,
-                    &moment,
-                )?;
+                mark_historical_backfill_retryable(&mut state.store, &running, &error, &moment)?;
                 return Err(error);
             }
             let input = match copy_historical_backfill_input(&state, &running) {
@@ -799,9 +794,7 @@ fn historical_backfill_job_is_running(store: &MemoryStore, job_id: &str) -> bool
     store
         .historical_backfill_jobs()
         .iter()
-        .any(|job| {
-            job.job_id == job_id && job.status == HistoricalBackfillJobStatus::Running
-        })
+        .any(|job| job.job_id == job_id && job.status == HistoricalBackfillJobStatus::Running)
 }
 
 fn mark_historical_backfill_retryable(
@@ -1104,9 +1097,7 @@ fn start_server_with_memory_path(
             })?;
         store
             .resume_review_jobs(&review_cursors, &startup_now)
-            .map_err(|error| {
-                format!("failed to resume memory review jobs: {}", error.message)
-            })?;
+            .map_err(|error| format!("failed to resume memory review jobs: {}", error.message))?;
         store
             .resume_interrupted_historical_backfill_jobs(&startup_now)
             .map_err(|error| {
@@ -1127,6 +1118,7 @@ fn start_server_with_memory_path(
         book,
         reader,
         store,
+        intent_store_root: IntentArtifactStore::default_root().ok(),
         adapter,
         messages,
         session_path,
@@ -1355,6 +1347,8 @@ fn is_api_url(url: &str) -> bool {
         || path.starts_with("/agent/")
         || path.starts_with("/profile/")
         || path.starts_with("/desktop/")
+        || path.starts_with("/build_intent/")
+        || path.starts_with("/build_workbench/")
 }
 
 fn static_response(dist: &Path, method: &str, url: &str) -> Option<StaticReply> {
@@ -1693,7 +1687,10 @@ mod tests {
         let error = result.err().expect("history failure must block startup");
 
         assert!(error.contains("stage=decode"), "{error}");
-        assert!(error.contains(&history_path.display().to_string()), "{error}");
+        assert!(
+            error.contains(&history_path.display().to_string()),
+            "{error}"
+        );
         assert!(!error.contains("failed to bind"), "{error}");
         assert_eq!(std::fs::read(&history_path).unwrap(), source);
         assert!(!history_path.with_extension("replace.tmp").exists());
@@ -1758,6 +1755,7 @@ mod tests {
             book,
             reader,
             store,
+            intent_store_root: None,
             adapter: Box::new(UnconfiguredAdapter),
             messages: new_session(),
             session_path: None,
@@ -1807,6 +1805,7 @@ mod tests {
             book,
             reader,
             store,
+            intent_store_root: None,
             adapter: Box::new(UnconfiguredAdapter),
             messages: new_session(),
             session_path: None,
@@ -2010,6 +2009,9 @@ mod tests {
     fn api_paths_are_not_static_fallback_candidates() {
         assert!(is_api_url("/api/book/manifest"));
         assert!(is_api_url("/api/profile/manifest"));
+        assert!(is_api_url("/build_intent/status"));
+        assert!(is_api_url("/api/build_intent/artifacts"));
+        assert!(is_api_url("/build_workbench/job.status"));
         assert!(!is_api_url("/assets/index.js"));
     }
 
@@ -2148,7 +2150,10 @@ mod tests {
                 state.store.profile_facts()[0].capture,
                 ProfileFactCapture::HistoricalBackfill
             );
-            assert_eq!(state.store.profile_facts()[0].source, FactSource::UserStated);
+            assert_eq!(
+                state.store.profile_facts()[0].source,
+                FactSource::UserStated
+            );
         }
 
         let second = coordinator.run_one_backfill("20").unwrap().unwrap();
@@ -2225,7 +2230,10 @@ mod tests {
             state.store.historical_backfill_jobs()[0].status,
             HistoricalBackfillJobStatus::Cancelled
         );
-        assert_eq!(state.store.historical_backfill_jobs()[0].processed_through, 0);
+        assert_eq!(
+            state.store.historical_backfill_jobs()[0].processed_through,
+            0
+        );
         assert!(state.store.profile_facts().is_empty());
     }
 
@@ -2258,10 +2266,7 @@ mod tests {
         );
 
         assert_eq!(
-            coordinator
-                .run_one_backfill("10")
-                .unwrap_err()
-                .error_code,
+            coordinator.run_one_backfill("10").unwrap_err().error_code,
             "HISTORICAL_BACKFILL_PROVIDER_UNCONFIGURED"
         );
         assert_eq!(calls.load(Ordering::SeqCst), 0);

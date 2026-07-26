@@ -14,6 +14,7 @@ import {
 } from "../src/automatic-build-task-store";
 import { resolveAutomaticBuildTarget } from "../src/build-orchestrator";
 import { automaticBuildNext, automaticBuildPlan, type AutomaticBuildNextOptions } from "../../../skills/build/automatic-build";
+import { confirmedStandardBuildPlan } from "./helpers/confirmed-build-plan";
 
 const T0 = "2026-07-19T00:00:00.000Z";
 
@@ -25,11 +26,17 @@ function targetFixture() {
 }
 
 function acceptedNext(source: string, root: string, options: AutomaticBuildNextOptions) {
-  const plan = automaticBuildPlan(source, root, { requested_workers: 1, quality_profile: options.quality_profile });
+  const buildPlan = options.build_plan ?? confirmedStandardBuildPlan(source, root);
+  const plan = automaticBuildPlan(source, root, {
+    requested_workers: 1,
+    quality_profile: options.quality_profile,
+    build_plan: buildPlan,
+  });
   if (!plan.preflight) throw new Error("expected lease preflight");
   return automaticBuildNext(source, root, 1, {
     protocol: "automatic_build_protocol.v2",
     ...options,
+    build_plan: buildPlan,
     accepted_plan_digest: plan.preflight.plan_digest,
   });
 }

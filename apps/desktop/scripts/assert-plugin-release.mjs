@@ -65,6 +65,8 @@ const releaseSkill = await readText("plugins/understand-book/skills/build/SKILL.
 const protocolMarkers = [
   "automatic_build_protocol.v2_dispatch",
   "protocol-doctor",
+  "legacy-plan",
+  "explicit_legacy_command",
   "--protocol automatic_build_protocol.v2",
   "automatic_build_plan.v1",
   "--accepted-plan",
@@ -99,6 +101,7 @@ if (installedPluginRoot) {
 
 const sidecarEntry = await readText("skills/build/sidecar-entry.ts");
 for (const command of [
+  "legacy-plan",
   "protocol-doctor",
   "plan",
   "next",
@@ -119,6 +122,9 @@ for (const command of [
   "input",
   "write",
   "close",
+  "intent.plan",
+  "intent.artifact",
+  "intent.metrics",
 ]) {
   assert(
     sidecarEntry.includes(`\"${command}\"`),

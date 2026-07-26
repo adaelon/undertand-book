@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Settings } from "@lucide/vue";
+import { ListChecks, Settings } from "@lucide/vue";
 
 defineProps<{
   chapterTitle: string;
@@ -7,6 +7,8 @@ defineProps<{
   anchorLid: string | null;
   debugOpen: boolean;
   leftRailOpen: boolean;
+  buildIntentOpen: boolean;
+  buildIntentAvailable: boolean;
   workbenchAvailable: boolean;
   desktopHost: boolean;
 }>();
@@ -15,6 +17,7 @@ const emit = defineEmits<{
   (e: "open-book"): void;
   (e: "toggle-left-rail"): void;
   (e: "toggle-debug"): void;
+  (e: "open-build-intent"): void;
   (e: "open-workbench"): void;
   (e: "open-settings"): void;
 }>();
@@ -30,7 +33,17 @@ const emit = defineEmits<{
       <span class="progress">{{ progressPct }}%</span>
       <button class="ghost-pill" :class="{ active: leftRailOpen }" @click="emit('toggle-left-rail')">目录</button>
       <button class="ghost-pill" @click="emit('new-chat')">新对话</button>
-      <button v-if="workbenchAvailable" class="ghost-pill" @click="emit('open-workbench')">构建工作台</button>
+      <button
+        v-if="buildIntentAvailable"
+        class="topbar-icon-button"
+        :class="{ active: buildIntentOpen }"
+        title="构建方案"
+        aria-label="打开构建方案"
+        @click="emit('open-build-intent')"
+      >
+        <ListChecks :size="17" :stroke-width="1.8" aria-hidden="true" />
+      </button>
+      <button v-if="workbenchAvailable" class="ghost-pill" @click="emit('open-workbench')">高级构建</button>
       <button class="ghost-pill" @click="emit('open-book')">打开书</button>
       <button
         v-if="desktopHost"

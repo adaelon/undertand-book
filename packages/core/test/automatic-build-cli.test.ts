@@ -17,6 +17,7 @@ import { splitWindows } from "../src/window";
 import { buildPass1Artifact } from "../src/build-resume";
 import { resolveContentProfile } from "../src/content-profile";
 import { automaticBuildExtractionPolicy, buildSemanticArtifactEnvelope } from "../src/semantic-artifact";
+import { confirmedStandardBuildPlan } from "./helpers/confirmed-build-plan";
 
 function writeJson(file: string, value: unknown): void {
   mkdirSync(path.dirname(file), { recursive: true });
@@ -29,15 +30,18 @@ function acceptedNext(
   maxParallel = 5,
   options: AutomaticBuildNextOptions = {},
 ) {
+  const buildPlan = options.build_plan ?? confirmedStandardBuildPlan(targetInput, rootDir);
   const plan = automaticBuildPlan(targetInput, rootDir, {
     requested_workers: maxParallel,
     quality_profile: options.quality_profile,
     budget: options.budget,
+    build_plan: buildPlan,
   });
-  if (!plan.preflight) return automaticBuildNext(targetInput, rootDir, maxParallel, options);
+  if (!plan.preflight) return automaticBuildNext(targetInput, rootDir, maxParallel, { ...options, build_plan: buildPlan });
   return automaticBuildNext(targetInput, rootDir, maxParallel, {
     protocol: "automatic_build_protocol.v2",
     ...options,
+    build_plan: buildPlan,
     accepted_plan_digest: plan.preflight.plan_digest,
   });
 }
@@ -110,7 +114,9 @@ describe("automatic build attempt policy", () => {
       recordAutomaticBuildAttempt(target, "pass1", "0", "failure", `gate failure ${attempt}`);
     }
 
-    expect(automaticBuildNext(source, root)).toMatchObject({
+    expect(automaticBuildNext(source, root, 5, {
+      build_plan: confirmedStandardBuildPlan(source, root),
+    })).toMatchObject({
       action: {
         kind: "needs_user",
         reason: "retry_exhausted",
@@ -192,7 +198,9 @@ describe("automatic build attempt policy", () => {
       for (let attempt = 1; attempt <= 3; attempt += 1) {
         recordAutomaticBuildAttempt(target, "pass1", "0", "failure", `gate failure ${attempt}`);
       }
-      const exhausted = automaticBuildNext(source, root, 1);
+      const exhausted = automaticBuildNext(source, root, 1, {
+        build_plan: confirmedStandardBuildPlan(source, root),
+      });
       expect(exhausted.action.kind).toBe("needs_user");
       if (!("reset_commands" in exhausted.action)) throw new Error("expected reset commands");
       const resetCommands = exhausted.action.reset_commands;
@@ -237,7 +245,9 @@ describe("automatic build attempt policy", () => {
     const previous = process.env.UNDERSTAND_BOOK_SIDECAR_SELF;
     process.env.UNDERSTAND_BOOK_SIDECAR_SELF = "C:\\Program Files\\Understand Book\\understand-book-build.exe";
     try {
-      const result = automaticBuildNext(workspace, root, 1);
+      const result = automaticBuildNext(workspace, root, 1, {
+        build_plan: confirmedStandardBuildPlan(workspace, root),
+      });
       expect(result.action).toMatchObject({ kind: "close_stage", stage: "pass1" });
       if (!("command" in result.action)) throw new Error("expected close command");
       expect(result.action.command.slice(0, 4)).toEqual([

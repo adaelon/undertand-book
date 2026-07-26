@@ -1,0 +1,91 @@
+{
+  "intent": {
+    "version": "build_intent.v1",
+    "intent_id": "intent-001",
+    "revision": 1,
+    "book_id": "paper-a",
+    "source_fingerprint": "source-a",
+    "content_profile": {
+      "id": "paper",
+      "version": "paper_v0"
+    },
+    "user_goal": "Compare the datasets and methods.",
+    "goal_kind": "compare",
+    "source_scope": {
+      "whole_book": false,
+      "lids": ["1.1", "2.1"],
+      "sections": []
+    },
+    "desired_artifacts": ["comparison_table"],
+    "usage_horizon": "project",
+    "privacy": "reader_private",
+    "status": "draft",
+    "created_at": "2026-07-25T00:00:00.000Z"
+  },
+  "intent_identity_json": "{\"book_id\":\"paper-a\",\"content_profile\":{\"id\":\"paper\",\"version\":\"paper_v0\"},\"desired_artifacts\":[\"comparison_table\"],\"goal_kind\":\"compare\",\"intent_id\":\"intent-001\",\"privacy\":\"reader_private\",\"revision\":1,\"source_fingerprint\":\"source-a\",\"source_scope\":{\"lids\":[\"1.1\",\"2.1\"],\"sections\":[],\"whole_book\":false},\"usage_horizon\":\"project\",\"user_goal\":\"Compare the datasets and methods.\",\"version\":\"build_intent.v1\"}",
+  "intent_digest": "b5404637333c495b209e1674e6d169b7f530c304f965874559dda75fa53ce8fe",
+  "plan": {
+    "version": "build_plan.v1",
+    "plan_id": "plan-001",
+    "revision": 1,
+    "book_id": "paper-a",
+    "source_fingerprint": "source-a",
+    "content_profile": {
+      "id": "paper",
+      "version": "paper_v0"
+    },
+    "recipe_id": "goal_directed",
+    "intent_id": "intent-001",
+    "intent_digest": "b5404637333c495b209e1674e6d169b7f530c304f965874559dda75fa53ce8fe",
+    "public_stage_closure": [],
+    "private_artifacts": [
+      {
+        "artifact_id": "artifact-001",
+        "artifact_type": "comparison_table",
+        "source_scope": {
+          "whole_book": false,
+          "lids": ["1.1", "2.1"],
+          "sections": []
+        },
+        "required_public_capabilities": ["foundation.lid"],
+        "evidence_policy": "lid_required"
+      }
+    ],
+    "reuse": [
+      {
+        "artifact": "public.foundation",
+        "freshness_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    ],
+    "create": ["private.comparison_table"],
+    "excluded": [
+      {
+        "artifact": "public.book_structure",
+        "reason": "not required"
+      }
+    ],
+    "estimate": {
+      "input_tokens": { "lower": 1000, "upper": 2000, "coverage": 0.8 },
+      "output_tokens": { "lower": 200, "upper": 500, "coverage": 0.6 },
+      "wall_clock_minutes": { "p50": 10, "p95": 20, "confidence": "low" },
+      "unknown_stages": [],
+      "historical_match": {
+        "stage": true,
+        "policy": true,
+        "model": false,
+        "harness": false,
+        "sample_count": 3
+      }
+    },
+    "budget": {
+      "max_total_tokens": 120000,
+      "max_wall_clock_minutes": 30,
+      "on_exceed": "needs_user"
+    },
+    "status": "draft",
+    "plan_digest": "e57489b637d3b0ceffa239268c55349133619d5bcdd896dd5b6608a2c0cdf270",
+    "created_at": "2026-07-25T00:01:00.000Z"
+  },
+  "plan_identity_json": "{\"budget\":{\"max_total_tokens\":120000,\"max_wall_clock_minutes\":30,\"on_exceed\":\"needs_user\"},\"content_profile\":{\"id\":\"paper\",\"version\":\"paper_v0\"},\"create\":[\"private.comparison_table\"],\"excluded\":[{\"artifact\":\"public.book_structure\",\"reason\":\"not required\"}],\"intent_digest\":\"b5404637333c495b209e1674e6d169b7f530c304f965874559dda75fa53ce8fe\",\"private_artifacts\":[{\"artifact_id\":\"artifact-001\",\"artifact_type\":\"comparison_table\",\"evidence_policy\":\"lid_required\",\"required_public_capabilities\":[\"foundation.lid\"],\"source_scope\":{\"lids\":[\"1.1\",\"2.1\"],\"sections\":[],\"whole_book\":false}}],\"public_stage_closure\":[],\"recipe_id\":\"goal_directed\",\"reuse\":[{\"artifact\":\"public.foundation\",\"freshness_digest\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}],\"source_fingerprint\":\"source-a\"}",
+  "plan_digest": "e57489b637d3b0ceffa239268c55349133619d5bcdd896dd5b6608a2c0cdf270"
+}

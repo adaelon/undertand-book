@@ -22,6 +22,7 @@ import {
   automaticBuildNext,
   automaticBuildPlan,
 } from "../../../skills/build/automatic-build";
+import { confirmedStandardBuildPlan } from "./helpers/confirmed-build-plan";
 
 const targetRef = {
   version: "build_target_ref.v2" as const,
@@ -72,6 +73,7 @@ async function fakeExecutorRun(workerSlots: 1 | 2 | 3, reduceAfterFirst = false)
   const batchSizes: number[] = [];
   const planDigests = new Set<string>();
   let receiptCount = 0;
+  const buildPlan = confirmedStandardBuildPlan(source, root);
 
   for (let round = 0; round < 20; round += 1) {
     const liveSlots = reduceAfterFirst && round > 0 ? 1 : workerSlots;
@@ -80,6 +82,7 @@ async function fakeExecutorRun(workerSlots: 1 | 2 | 3, reduceAfterFirst = false)
       available_agent_slots: liveSlots,
       quality_profile: "full",
       budget,
+      build_plan: buildPlan,
     });
     if (!plan.preflight) {
       expect(plan.next_action).toMatchObject({ kind: "close_stage", stage: "pass1" });
@@ -95,6 +98,7 @@ async function fakeExecutorRun(workerSlots: 1 | 2 | 3, reduceAfterFirst = false)
       budget,
       available_agent_slots: liveSlots,
       accepted_plan_digest: plan.preflight.plan_digest,
+      build_plan: buildPlan,
     });
     expect(next.action.kind).toBe("extract");
     if (next.action.kind !== "extract" || !next.action.tasks) throw new Error("expected concurrent extract batch");
@@ -194,10 +198,12 @@ describe("automatic build safe concurrent execution", () => {
       max_batch_score: 1_000_000_000,
       max_parallel_cost: 1_000_000_000,
     };
+    const buildPlan = confirmedStandardBuildPlan(source, root);
     const initialPlan = automaticBuildPlan(source, root, {
       requested_workers: 3,
       available_agent_slots: 3,
       budget: refillBudget,
+      build_plan: buildPlan,
     });
     if (!initialPlan.preflight || initialPlan.preflight.dispatch_plan.dispatches.length < 4) {
       throw new Error("expected at least four executor dispatches");
@@ -209,6 +215,7 @@ describe("automatic build safe concurrent execution", () => {
       available_agent_slots: 3,
       accepted_plan_digest: initialPlan.preflight.plan_digest,
       executor_dispatches: true,
+      build_plan: buildPlan,
     });
     if (!("dispatches" in initial.action) || !initial.action.dispatches) {
       throw new Error("expected initial dispatch handoff");
@@ -259,6 +266,7 @@ describe("automatic build safe concurrent execution", () => {
       requested_workers: 3,
       available_agent_slots: 1,
       budget: refillBudget,
+      build_plan: buildPlan,
     });
     if (!refillPlan.preflight) throw new Error("expected refill preflight");
     const refill = automaticBuildNext(source, root, 3, {
@@ -268,6 +276,7 @@ describe("automatic build safe concurrent execution", () => {
       available_agent_slots: 1,
       accepted_plan_digest: refillPlan.preflight.plan_digest,
       executor_dispatches: true,
+      build_plan: buildPlan,
     });
     if (!("dispatches" in refill.action) || !refill.action.dispatches) {
       throw new Error("expected refill dispatch handoff");
@@ -311,16 +320,19 @@ describe("automatic build safe concurrent execution", () => {
     const root = mkdtempSync(path.join(tmpdir(), "understand-book-no-slots-"));
     const source = path.join(root, "guide.md");
     writeFileSync(source, "# Guide\n\nA semantic paragraph.\n", "utf8");
+    const buildPlan = confirmedStandardBuildPlan(source, root);
     const plan = automaticBuildPlan(source, root, {
       requested_workers: 3,
       available_agent_slots: 0,
       budget,
+      build_plan: buildPlan,
     });
     if (!plan.preflight) throw new Error("expected no-slot preflight");
     const next = automaticBuildNext(source, root, 3, {
       available_agent_slots: 0,
       budget,
       accepted_plan_digest: plan.preflight.plan_digest,
+      build_plan: buildPlan,
     });
     expect(next.action).toMatchObject({ kind: "needs_user", reason: "executor_unavailable", stage: "pass1" });
     expect(() => readAutomaticBuildAttemptSnapshot(resolveAutomaticBuildTarget(source, root))).not.toThrow();

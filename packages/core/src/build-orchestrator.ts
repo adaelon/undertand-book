@@ -2,6 +2,15 @@ import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import { deriveBookId } from "./book-id";
+import {
+  canonicalBuildJson,
+  computeBuildPlanDigest,
+  validateBuildPlanV1,
+  type BuildPlanDigestSource,
+  type BuildPlanV1,
+} from "./build-intent";
+import { standardDeepStageClosure } from "./build-capability";
+import { BUILD_STAGE_DAG, type BuildStageId } from "./build-workbench";
 import { assertTrustedPaperProjectionSource } from "./paper-projection-chain";
 import { resolveContentProfile, type ContentProfileId } from "./content-profile";
 import { markdownToBlocks } from "./md-adapter";
@@ -34,6 +43,7 @@ import {
 } from "./book-structure";
 import {
   automaticBuildExtractionPolicy,
+  extractionPolicyDigest,
   inspectSemanticArtifact,
   type AutomaticBuildTaskPolicyBindingV1,
   type ExtractionQualityProfile,
@@ -99,6 +109,42 @@ export interface AutomaticBuildSnapshot {
   stages: AutomaticBuildStageState[];
 }
 
+export interface AutomaticBuildStageFreshnessInspectionV1 {
+  version: "automatic_build_stage_freshness.v1";
+  artifact: `public.${AutomaticBuildStage}`;
+  stage: AutomaticBuildStage;
+  fresh: boolean;
+  freshness_digest?: string;
+}
+
+export function inspectAutomaticBuildStageFreshness(
+  snapshot: AutomaticBuildSnapshot,
+  options: { quality_profile?: ExtractionQualityProfile } = {},
+): AutomaticBuildStageFreshnessInspectionV1[] {
+  const profile = resolveContentProfile(snapshot.target.profile_id);
+  const qualityProfile = options.quality_profile ?? "full";
+  return snapshot.stages.map((state) => {
+    const policyDigest = state.stage === "paper_reading_guide"
+      ? createHash("sha256").update("paper_reading_guide_verification.v1", "utf8").digest("hex")
+      : extractionPolicyDigest(automaticBuildExtractionPolicy(state.stage, profile, qualityProfile));
+    const freshnessDigest = state.closed
+      ? createHash("sha256").update(canonicalBuildJson({
+          version: "automatic_build_stage_freshness_identity.v1",
+          target: snapshot.target.target_ref,
+          stage: state.stage,
+          policy_digest: policyDigest,
+        }), "utf8").digest("hex")
+      : undefined;
+    return {
+      version: "automatic_build_stage_freshness.v1",
+      artifact: `public.${state.stage}`,
+      stage: state.stage,
+      fresh: state.closed,
+      ...(freshnessDigest ? { freshness_digest: freshnessDigest } : {}),
+    };
+  });
+}
+
 interface LoadedAutomaticBook {
   source: string;
   lidNodes: ReturnType<typeof segment>;
@@ -118,6 +164,27 @@ export type AutomaticBuildAction =
     }
   | { kind: "close_stage"; stage: AutomaticBuildStage }
   | { kind: "done"; book_id: string; workspace_dir: string };
+
+export type AutomaticBuildPlanGateReason =
+  | "build_plan_required"
+  | "build_plan_invalid"
+  | "build_plan_unconfirmed"
+  | "build_plan_digest_drift"
+  | "build_plan_book_drift"
+  | "build_plan_source_drift"
+  | "build_plan_profile_drift"
+  | "build_plan_policy_drift"
+  | "build_plan_closure_drift"
+  | "build_plan_freshness_drift";
+
+export interface AutomaticBuildPlanGateAction {
+  kind: "needs_user";
+  reason: AutomaticBuildPlanGateReason;
+  message: string;
+  plan_id?: string;
+  plan_digest?: string;
+  stage?: AutomaticBuildStage;
+}
 
 const EXTRACTORS: Partial<Record<AutomaticBuildStage, SemanticExtractor>> = {
   pass1: "pass1-local-extractor",
@@ -744,6 +811,151 @@ export function buildAutomaticBuildSnapshot(
     stages.push(stageState("paper_reading_guide", [], paperGuideVerificationFresh(target.workspace_dir)));
   }
   return { target, stages };
+}
+
+function planGateAction(
+  reason: AutomaticBuildPlanGateReason,
+  message: string,
+  plan?: Partial<BuildPlanV1>,
+  stage?: AutomaticBuildStage,
+): AutomaticBuildPlanGateAction {
+  return {
+    kind: "needs_user",
+    reason,
+    message,
+    ...(typeof plan?.plan_id === "string" ? { plan_id: plan.plan_id } : {}),
+    ...(typeof plan?.plan_digest === "string" ? { plan_digest: plan.plan_digest } : {}),
+    ...(stage ? { stage } : {}),
+  };
+}
+
+function validatedExecutionPlan(input: unknown): BuildPlanV1 | AutomaticBuildPlanGateAction {
+  if (input === undefined || input === null) {
+    return planGateAction("build_plan_required", "confirm a BuildPlan before advancing automatic model work");
+  }
+  try {
+    return validateBuildPlanV1(input);
+  } catch {
+    const record = input && typeof input === "object" ? input as Partial<BuildPlanV1> : undefined;
+    if (record && typeof record.plan_digest === "string") {
+      try {
+        const expected = computeBuildPlanDigest(record as BuildPlanDigestSource);
+        if (expected !== record.plan_digest) {
+          return planGateAction(
+            "build_plan_digest_drift",
+            "the BuildPlan digest does not match its current identity",
+            record,
+          );
+        }
+      } catch {
+        // The structural validation error below is the actionable boundary.
+      }
+    }
+    return planGateAction("build_plan_invalid", "the BuildPlan contract is invalid", record);
+  }
+}
+
+function validateExecutionClosure(plan: BuildPlanV1): AutomaticBuildStage[] | AutomaticBuildPlanGateAction {
+  const expectedStandard = standardDeepStageClosure(plan.content_profile);
+  const selected = plan.public_stage_closure;
+  if (plan.recipe_id === "standard_deep") {
+    if (canonicalBuildJson(selected) !== canonicalBuildJson(expectedStandard)) {
+      return planGateAction(
+        "build_plan_closure_drift",
+        "standard_deep must use the exact current profile stage closure",
+        plan,
+      );
+    }
+  } else {
+    const selectedSet = new Set(selected);
+    const ordered = expectedStandard.filter((stage) => selectedSet.has(stage));
+    const knownAndOrdered = canonicalBuildJson(selected) === canonicalBuildJson(ordered);
+    const dependenciesClosed = selected.every((stage) => BUILD_STAGE_DAG[stage as BuildStageId]
+      && BUILD_STAGE_DAG[stage as BuildStageId].depends_on.every((dependency) => (
+        !expectedStandard.includes(dependency as AutomaticBuildStage) || selectedSet.has(dependency as AutomaticBuildStage)
+      )));
+    if (!knownAndOrdered || !dependenciesClosed) {
+      return planGateAction(
+        "build_plan_closure_drift",
+        "goal_directed public stages must be a stable dependency-closed subset of the current profile DAG",
+        plan,
+      );
+    }
+  }
+
+  const closureArtifacts = new Set(selected.map((stage) => `public.${stage}`));
+  const classified = [
+    ...plan.reuse.map((item) => item.artifact),
+    ...plan.create,
+  ];
+  const unexpectedPublic = classified.find((artifact) => (
+    artifact.startsWith("public.")
+    && artifact !== "public.foundation"
+    && !closureArtifacts.has(artifact)
+  ));
+  const missingClassification = [...closureArtifacts].find((artifact) => !classified.includes(artifact));
+  if (unexpectedPublic || missingClassification) {
+    return planGateAction(
+      "build_plan_closure_drift",
+      "BuildPlan public reuse/create buckets must exactly classify the declared stage closure",
+      plan,
+    );
+  }
+  return selected as AutomaticBuildStage[];
+}
+
+export function nextPlannedAutomaticBuildAction(
+  snapshot: AutomaticBuildSnapshot,
+  planInput: unknown,
+  maxParallel = 5,
+  options: { quality_profile?: ExtractionQualityProfile } = {},
+): AutomaticBuildAction | AutomaticBuildPlanGateAction {
+  const validated = validatedExecutionPlan(planInput);
+  if ("kind" in validated) return validated;
+  const plan = validated;
+  if (plan.status !== "confirmed") {
+    return planGateAction("build_plan_unconfirmed", "automatic build requires a confirmed BuildPlan", plan);
+  }
+  if (plan.book_id !== snapshot.target.book_id) {
+    return planGateAction("build_plan_book_drift", "BuildPlan book_id does not match the current target", plan);
+  }
+  if (plan.source_fingerprint !== snapshot.target.target_ref.input_fingerprint) {
+    return planGateAction("build_plan_source_drift", "BuildPlan source fingerprint is stale", plan);
+  }
+  const profile = resolveContentProfile(snapshot.target.profile_id);
+  if (plan.content_profile.id !== profile.id || plan.content_profile.version !== profile.profile_version) {
+    return planGateAction("build_plan_profile_drift", "BuildPlan content profile is stale", plan);
+  }
+  const qualityProfile = options.quality_profile ?? "full";
+  if (plan.public_stage_closure.length && qualityProfile !== "full") {
+    return planGateAction(
+      "build_plan_policy_drift",
+      "confirmed public BuildPlans execute the full quality policy",
+      plan,
+    );
+  }
+  const closure = validateExecutionClosure(plan);
+  if (!Array.isArray(closure)) return closure;
+
+  const freshness = new Map(inspectAutomaticBuildStageFreshness(snapshot, { quality_profile: qualityProfile })
+    .map((inspection) => [inspection.artifact, inspection]));
+  for (const reused of plan.reuse) {
+    if (!reused.artifact.startsWith("public.") || reused.artifact === "public.foundation") continue;
+    const inspection = freshness.get(reused.artifact as `public.${AutomaticBuildStage}`);
+    if (!inspection?.fresh || inspection.freshness_digest !== reused.freshness_digest) {
+      return planGateAction(
+        "build_plan_freshness_drift",
+        `declared reusable artifact is no longer fresh: ${reused.artifact}`,
+        plan,
+        inspection?.stage,
+      );
+    }
+  }
+  const allowed = new Set(closure);
+  return nextAutomaticBuildAction({
+    ...snapshot,
+    stages: snapshot.stages.filter((stage) => allowed.has(stage.stage)),
+  }, maxParallel);
 }
 
 export function nextAutomaticBuildAction(snapshot: AutomaticBuildSnapshot, maxParallel = 5): AutomaticBuildAction {

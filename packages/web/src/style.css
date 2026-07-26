@@ -131,6 +131,11 @@ body {
   color: var(--apple-ink);
   border-color: var(--hairline);
 }
+.topbar-icon-button.active {
+  border-color: var(--brand-green);
+  background: var(--reader-coral-soft);
+  color: var(--apple-ink);
+}
 
 .banner {
   margin: 0;

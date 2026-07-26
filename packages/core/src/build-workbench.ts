@@ -8,6 +8,7 @@ import {
   type BuildInputFingerprint,
   type SourceReconciliationReport,
 } from "./source-reconciliation";
+import type { BuildDecisionRequestV2 } from "./build-intent";
 
 export type BuildStageId =
   | "source_reconciliation"
@@ -108,6 +109,20 @@ export interface BuildDecisionRequest {
   answer?: string;
   created_at: string;
   resolved_at?: string;
+}
+
+export function projectLegacyBuildDecisionRequestV2(
+  request: BuildDecisionRequest,
+): BuildDecisionRequestV2 {
+  return {
+    version: "build_decision_request.v2",
+    decision_id: request.decision_id,
+    job_id: request.job_id,
+    scope: { kind: "stage", stage: request.stage },
+    kind: request.kind,
+    options: request.options.map((option) => ({ ...option })),
+    status: request.status,
+  };
 }
 
 export interface ExecutorPermissionRequest {

@@ -14,6 +14,7 @@ use ts_rs::TS;
 pub mod agent_prompt;
 pub mod agent_request_audit;
 pub mod auto_compaction;
+pub mod build_intent;
 pub mod compaction;
 pub mod context_fragment;
 pub mod goldset;

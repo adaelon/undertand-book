@@ -16,6 +16,7 @@ import {
   automaticBuildPlan,
   automaticBuildProtocolDoctor,
 } from "../../../skills/build/automatic-build";
+import { confirmedStandardBuildPlan } from "./helpers/confirmed-build-plan";
 
 function fixture() {
   const root = mkdtempSync(path.join(tmpdir(), "understand-book-bp8-release-"));
@@ -72,9 +73,11 @@ describe("automatic build BP8 production release", () => {
 
   it("defaults accepted work to dispatch while preserving explicit v2 task resume", () => {
     const current = fixture();
+    const currentBuildPlan = confirmedStandardBuildPlan(current.source, current.root);
     const currentPlan = automaticBuildPlan(current.source, current.root, {
       requested_workers: 1,
       available_agent_slots: 1,
+      build_plan: currentBuildPlan,
     });
     if (!currentPlan.preflight) throw new Error("expected current preflight");
     expect(currentPlan.protocol).toBe(AUTOMATIC_BUILD_EXECUTOR_DISPATCH_PROTOCOL_V1);
@@ -82,6 +85,7 @@ describe("automatic build BP8 production release", () => {
       accepted_plan_digest: currentPlan.preflight.plan_digest,
       available_agent_slots: 1,
       now: "2026-07-25T09:00:00.000Z",
+      build_plan: currentBuildPlan,
     });
     expect(currentNext).toMatchObject({
       protocol: AUTOMATIC_BUILD_EXECUTOR_DISPATCH_PROTOCOL_V1,
@@ -98,7 +102,11 @@ describe("automatic build BP8 production release", () => {
     ))).toBe(false);
 
     const rollback = fixture();
-    const rollbackPlan = automaticBuildPlan(rollback.source, rollback.root, { requested_workers: 1 });
+    const rollbackBuildPlan = confirmedStandardBuildPlan(rollback.source, rollback.root);
+    const rollbackPlan = automaticBuildPlan(rollback.source, rollback.root, {
+      requested_workers: 1,
+      build_plan: rollbackBuildPlan,
+    });
     if (!rollbackPlan.preflight) throw new Error("expected rollback preflight");
     const rollbackNext = automaticBuildNext(rollback.source, rollback.root, 1, {
       protocol: AUTOMATIC_BUILD_PROTOCOL_V2,
@@ -106,6 +114,7 @@ describe("automatic build BP8 production release", () => {
       available_agent_slots: 1,
       owner: "bp8-rollback-owner",
       now: "2026-07-25T09:00:00.000Z",
+      build_plan: rollbackBuildPlan,
     });
     expect(rollbackNext).toMatchObject({
       protocol: AUTOMATIC_BUILD_PROTOCOL_V2,
@@ -115,19 +124,22 @@ describe("automatic build BP8 production release", () => {
 
   it("audits existing v2 task state without mutating it", () => {
     const { root, source } = fixture();
-    const plan = automaticBuildPlan(source, root, { requested_workers: 1 });
+    const buildPlan = confirmedStandardBuildPlan(source, root);
+    const plan = automaticBuildPlan(source, root, { requested_workers: 1, build_plan: buildPlan });
     if (!plan.preflight) throw new Error("expected doctor preflight");
     automaticBuildNext(source, root, 1, {
       protocol: AUTOMATIC_BUILD_PROTOCOL_V2,
       accepted_plan_digest: plan.preflight.plan_digest,
       owner: "bp8-existing-v2-owner",
       now: "2026-07-25T09:00:00.000Z",
+      build_plan: buildPlan,
     });
     const workspace = path.join(root, ".understand-book", "guide");
     const before = fileSnapshot(workspace);
     const doctor = automaticBuildProtocolDoctor(source, root, {
       requested_workers: 1,
       available_agent_slots: 1,
+      build_plan: buildPlan,
     });
     expect(doctor).toMatchObject({
       version: "automatic_build_protocol_doctor.v1",

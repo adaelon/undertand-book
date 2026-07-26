@@ -646,4 +646,43 @@ describe("RightRail AskQuote", () => {
     expect(panel.text()).toContain("seed: 1.1");
     expect(panel.text()).toContain("citations=true");
   });
+
+  it("opens the active target artifacts without coupling their refresh or evidence navigation to chat", async () => {
+    const wrapper = mount(RightRail, {
+      props: {
+        ...baseProps,
+        askDraft: null,
+        intentArtifacts: {
+          version: "intent_artifact_overlay.v1" as const,
+          book_id: "book-private",
+          intent_id: "intent-private",
+          plan_id: "plan-private",
+          plan_digest: "f".repeat(64),
+          artifacts: [{
+            artifact_id: "timeline-1",
+            artifact_type: "timeline" as const,
+            state: "accepted" as const,
+            payload_digest: "e".repeat(64),
+            accepted_at: "2026-07-26T02:00:00.000Z",
+            payload: {
+              items: [{ id: "event-1", label: "First event", evidence_lids: ["4.2"] }],
+            },
+          }],
+        },
+      },
+    });
+
+    const artifactsTab = wrapper.findAll(".tab").find((tab) => tab.text().includes("成果"));
+    expect(artifactsTab?.text()).toContain("1");
+    await artifactsTab!.trigger("click");
+
+    expect(wrapper.emitted("open-artifacts")).toHaveLength(1);
+    expect(wrapper.emitted("refresh-artifacts")).toBeUndefined();
+    expect(wrapper.get(".intent-artifact-panel").isVisible()).toBe(true);
+    await wrapper.get('button[data-lid="4.2"]').trigger("click");
+    expect(wrapper.emitted("goto")?.at(-1)).toEqual(["4.2"]);
+    expect(wrapper.emitted("artifact-cited")?.at(-1)).toEqual(["timeline-1"]);
+    expect(wrapper.get(".artifact-panel").text()).not.toContain("book-private");
+    expect(wrapper.get(".artifact-panel").text()).not.toContain("plan-private");
+  });
 });

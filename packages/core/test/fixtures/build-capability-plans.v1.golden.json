@@ -1,0 +1,458 @@
+[
+  {
+    "profile": "technical_learning",
+    "mode": "read_now",
+    "estimate_input": null,
+    "plan": null
+  },
+  {
+    "profile": "technical_learning",
+    "mode": "standard_deep",
+    "estimate_input": {
+      "version": "build_plan_estimate_input.v1",
+      "source_fingerprint": "source-technical_learning",
+      "content_profile": {
+        "id": "technical_learning",
+        "version": "technical_learning_v0"
+      },
+      "public_stages_to_create": [
+        "profile_sidecar",
+        "pass2",
+        "book_structure"
+      ],
+      "private_capabilities_to_create": [],
+      "reused_artifacts": [
+        "public.pass1"
+      ]
+    },
+    "plan": {
+      "plan_id": "plan-technical_learning-standard_deep",
+      "recipe_id": "standard_deep",
+      "public_stage_closure": [
+        "pass1",
+        "profile_sidecar",
+        "pass2",
+        "book_structure"
+      ],
+      "private_artifacts": [],
+      "reuse": [
+        {
+          "artifact": "public.pass1",
+          "freshness_digest": "1a59af4e64e7d342d39d5729b1aa77e8de568546f5074832c15fe7088746227c"
+        }
+      ],
+      "create": [
+        "public.profile_sidecar",
+        "public.pass2",
+        "public.book_structure"
+      ],
+      "excluded": [
+        {
+          "artifact": "private.timeline",
+          "reason": "not selected by standard_deep"
+        },
+        {
+          "artifact": "private.concept_map",
+          "reason": "not selected by standard_deep"
+        },
+        {
+          "artifact": "private.comparison_table",
+          "reason": "not selected by standard_deep"
+        },
+        {
+          "artifact": "private.argument_map",
+          "reason": "not selected by standard_deep"
+        }
+      ],
+      "estimate": {
+        "input_tokens": {
+          "lower": 0,
+          "upper": 0,
+          "coverage": 0
+        },
+        "output_tokens": {
+          "lower": 0,
+          "upper": 0,
+          "coverage": 0
+        },
+        "wall_clock_minutes": {
+          "confidence": "none"
+        },
+        "unknown_stages": [
+          "profile_sidecar",
+          "pass2",
+          "book_structure"
+        ],
+        "historical_match": {
+          "stage": false,
+          "policy": false,
+          "model": false,
+          "harness": false,
+          "sample_count": 0
+        }
+      },
+      "budget": {
+        "max_total_tokens": 100000,
+        "on_exceed": "needs_user"
+      },
+      "plan_digest": "56336ac621402cb41adcc0db69063ea0e7b726041df2d56214870bb9795de9d5"
+    }
+  },
+  {
+    "profile": "technical_learning",
+    "mode": "goal_directed",
+    "estimate_input": {
+      "version": "build_plan_estimate_input.v1",
+      "source_fingerprint": "source-technical_learning",
+      "content_profile": {
+        "id": "technical_learning",
+        "version": "technical_learning_v0"
+      },
+      "public_stages_to_create": [],
+      "private_capabilities_to_create": [
+        "private.timeline",
+        "private.comparison_table"
+      ],
+      "reused_artifacts": [
+        "public.foundation"
+      ],
+      "source_scope": {
+        "whole_book": false,
+        "lids": [
+          "1.1",
+          "2.1"
+        ],
+        "sections": []
+      }
+    },
+    "plan": {
+      "plan_id": "plan-technical_learning-goal_directed",
+      "recipe_id": "goal_directed",
+      "public_stage_closure": [],
+      "private_artifacts": [
+        {
+          "artifact_id": "artifact-timeline-f3a5db6e9d8c",
+          "artifact_type": "timeline",
+          "source_scope": {
+            "whole_book": false,
+            "lids": [
+              "1.1",
+              "2.1"
+            ],
+            "sections": []
+          },
+          "required_public_capabilities": [
+            "foundation.lid"
+          ],
+          "evidence_policy": "lid_required"
+        },
+        {
+          "artifact_id": "artifact-comparison_table-5426825e4047",
+          "artifact_type": "comparison_table",
+          "source_scope": {
+            "whole_book": false,
+            "lids": [
+              "1.1",
+              "2.1"
+            ],
+            "sections": []
+          },
+          "required_public_capabilities": [
+            "foundation.lid"
+          ],
+          "evidence_policy": "lid_required"
+        }
+      ],
+      "reuse": [
+        {
+          "artifact": "public.foundation",
+          "freshness_digest": "395e8ae38b3f6d8a1d21fa3416b5fffe38e33cda24f2329b7ce6a346337a62af"
+        }
+      ],
+      "create": [
+        "private.timeline",
+        "private.comparison_table"
+      ],
+      "excluded": [
+        {
+          "artifact": "public.standard_deep",
+          "reason": "not required by selected capabilities"
+        },
+        {
+          "artifact": "private.concept_map",
+          "reason": "not required by selected capabilities"
+        },
+        {
+          "artifact": "private.argument_map",
+          "reason": "not required by selected capabilities"
+        }
+      ],
+      "estimate": {
+        "input_tokens": {
+          "lower": 0,
+          "upper": 0,
+          "coverage": 0
+        },
+        "output_tokens": {
+          "lower": 0,
+          "upper": 0,
+          "coverage": 0
+        },
+        "wall_clock_minutes": {
+          "confidence": "none"
+        },
+        "unknown_stages": [
+          "private.timeline",
+          "private.comparison_table"
+        ],
+        "historical_match": {
+          "stage": false,
+          "policy": false,
+          "model": false,
+          "harness": false,
+          "sample_count": 0
+        }
+      },
+      "budget": {
+        "max_total_tokens": 100000,
+        "on_exceed": "needs_user"
+      },
+      "plan_digest": "c3a00f4be33d83c181b9956a6fda0505bf0bf612c125df10e07e1d710307230d"
+    }
+  },
+  {
+    "profile": "paper",
+    "mode": "read_now",
+    "estimate_input": null,
+    "plan": null
+  },
+  {
+    "profile": "paper",
+    "mode": "standard_deep",
+    "estimate_input": {
+      "version": "build_plan_estimate_input.v1",
+      "source_fingerprint": "source-paper",
+      "content_profile": {
+        "id": "paper",
+        "version": "paper_v0"
+      },
+      "public_stages_to_create": [
+        "paper_lexicon",
+        "profile_sidecar",
+        "pass2",
+        "book_structure",
+        "paper_reading_guide"
+      ],
+      "private_capabilities_to_create": [],
+      "reused_artifacts": [
+        "public.pass1",
+        "public.paper_metadata"
+      ]
+    },
+    "plan": {
+      "plan_id": "plan-paper-standard_deep",
+      "recipe_id": "standard_deep",
+      "public_stage_closure": [
+        "pass1",
+        "paper_metadata",
+        "paper_lexicon",
+        "profile_sidecar",
+        "pass2",
+        "book_structure",
+        "paper_reading_guide"
+      ],
+      "private_artifacts": [],
+      "reuse": [
+        {
+          "artifact": "public.pass1",
+          "freshness_digest": "ab278f81fa1223eaffbbae83ad1466833d96731d41dcd6450a825a17cdd11630"
+        },
+        {
+          "artifact": "public.paper_metadata",
+          "freshness_digest": "1143ff79168329fe8b00f1d7acca13d217a080747bab0e79fe83926ba66e0149"
+        }
+      ],
+      "create": [
+        "public.paper_lexicon",
+        "public.profile_sidecar",
+        "public.pass2",
+        "public.book_structure",
+        "public.paper_reading_guide"
+      ],
+      "excluded": [
+        {
+          "artifact": "private.timeline",
+          "reason": "not selected by standard_deep"
+        },
+        {
+          "artifact": "private.concept_map",
+          "reason": "not selected by standard_deep"
+        },
+        {
+          "artifact": "private.comparison_table",
+          "reason": "not selected by standard_deep"
+        },
+        {
+          "artifact": "private.argument_map",
+          "reason": "not selected by standard_deep"
+        }
+      ],
+      "estimate": {
+        "input_tokens": {
+          "lower": 0,
+          "upper": 0,
+          "coverage": 0
+        },
+        "output_tokens": {
+          "lower": 0,
+          "upper": 0,
+          "coverage": 0
+        },
+        "wall_clock_minutes": {
+          "confidence": "none"
+        },
+        "unknown_stages": [
+          "paper_lexicon",
+          "profile_sidecar",
+          "pass2",
+          "book_structure",
+          "paper_reading_guide"
+        ],
+        "historical_match": {
+          "stage": false,
+          "policy": false,
+          "model": false,
+          "harness": false,
+          "sample_count": 0
+        }
+      },
+      "budget": {
+        "max_total_tokens": 100000,
+        "on_exceed": "needs_user"
+      },
+      "plan_digest": "6353c28ce6270e0674f152d70f9ce1bcc4a97eac39c4b710c23e310149e6d539"
+    }
+  },
+  {
+    "profile": "paper",
+    "mode": "goal_directed",
+    "estimate_input": {
+      "version": "build_plan_estimate_input.v1",
+      "source_fingerprint": "source-paper",
+      "content_profile": {
+        "id": "paper",
+        "version": "paper_v0"
+      },
+      "public_stages_to_create": [],
+      "private_capabilities_to_create": [
+        "private.concept_map",
+        "private.argument_map"
+      ],
+      "reused_artifacts": [
+        "public.foundation"
+      ],
+      "source_scope": {
+        "whole_book": false,
+        "lids": [
+          "1.1",
+          "2.1"
+        ],
+        "sections": []
+      }
+    },
+    "plan": {
+      "plan_id": "plan-paper-goal_directed",
+      "recipe_id": "goal_directed",
+      "public_stage_closure": [],
+      "private_artifacts": [
+        {
+          "artifact_id": "artifact-concept_map-dc7954b0a82b",
+          "artifact_type": "concept_map",
+          "source_scope": {
+            "whole_book": false,
+            "lids": [
+              "1.1",
+              "2.1"
+            ],
+            "sections": []
+          },
+          "required_public_capabilities": [
+            "foundation.lid"
+          ],
+          "evidence_policy": "lid_required"
+        },
+        {
+          "artifact_id": "artifact-argument_map-602edf392cc9",
+          "artifact_type": "argument_map",
+          "source_scope": {
+            "whole_book": false,
+            "lids": [
+              "1.1",
+              "2.1"
+            ],
+            "sections": []
+          },
+          "required_public_capabilities": [
+            "foundation.lid"
+          ],
+          "evidence_policy": "lid_required"
+        }
+      ],
+      "reuse": [
+        {
+          "artifact": "public.foundation",
+          "freshness_digest": "aae7f575d0c03999d8a497bc5ad8f4cb1ec6ba3f727d12381cf34e7bb2a99dee"
+        }
+      ],
+      "create": [
+        "private.concept_map",
+        "private.argument_map"
+      ],
+      "excluded": [
+        {
+          "artifact": "public.standard_deep",
+          "reason": "not required by selected capabilities"
+        },
+        {
+          "artifact": "private.timeline",
+          "reason": "not required by selected capabilities"
+        },
+        {
+          "artifact": "private.comparison_table",
+          "reason": "not required by selected capabilities"
+        }
+      ],
+      "estimate": {
+        "input_tokens": {
+          "lower": 0,
+          "upper": 0,
+          "coverage": 0
+        },
+        "output_tokens": {
+          "lower": 0,
+          "upper": 0,
+          "coverage": 0
+        },
+        "wall_clock_minutes": {
+          "confidence": "none"
+        },
+        "unknown_stages": [
+          "private.concept_map",
+          "private.argument_map"
+        ],
+        "historical_match": {
+          "stage": false,
+          "policy": false,
+          "model": false,
+          "harness": false,
+          "sample_count": 0
+        }
+      },
+      "budget": {
+        "max_total_tokens": 100000,
+        "on_exceed": "needs_user"
+      },
+      "plan_digest": "6bf4b1010545ca00e61462860f82c841d49c3e3479ad6d7ab1d30b9f1dabfc4a"
+    }
+  }
+]
