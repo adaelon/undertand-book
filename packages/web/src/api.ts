@@ -261,6 +261,66 @@ export interface SourceManifestV2 {
   };
   alignment_quality?: PdfAlignmentQuality;
 }
+
+const PDF_CAPABILITY_STATUSES = new Set<PdfCapabilityStatus>([
+  "unavailable",
+  "available",
+  "degraded",
+  "stale",
+  "failed",
+]);
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isPdfCapability(value: unknown): value is PdfCapability {
+  if (!isRecord(value) || !PDF_CAPABILITY_STATUSES.has(value.status as PdfCapabilityStatus)) {
+    return false;
+  }
+  return ["reason", "artifact_path", "report_path", "config_hash"]
+    .every((key) => value[key] === undefined || typeof value[key] === "string");
+}
+
+function parseSourceManifestV2(value: unknown): SourceManifestV2 | null {
+  if (!isRecord(value) || value.version !== "source_manifest.v2" || typeof value.book_id !== "string") {
+    return null;
+  }
+  const source = value.canonical_source;
+  if (
+    !isRecord(source)
+    || source.kind !== "reconciled_markdown"
+    || source.path !== "source.txt"
+    || source.citation_anchor !== "lid"
+    || typeof source.sha256 !== "string"
+  ) {
+    return null;
+  }
+  const capabilities = value.capabilities;
+  if (
+    !isRecord(capabilities)
+    || !isPdfCapability(capabilities.view_pdf)
+    || !isPdfCapability(capabilities.project_lid_to_pdf)
+    || !isPdfCapability(capabilities.resolve_pdf_selection)
+    || !isPdfCapability(capabilities.project_ranges_to_pdf)
+  ) {
+    return null;
+  }
+  const originalPdf = value.original_pdf;
+  if (
+    originalPdf !== undefined
+    && (
+      !isRecord(originalPdf)
+      || typeof originalPdf.path !== "string"
+      || typeof originalPdf.sha256 !== "string"
+      || originalPdf.citation_anchor !== false
+      || (originalPdf.fingerprint !== undefined && typeof originalPdf.fingerprint !== "string")
+    )
+  ) {
+    return null;
+  }
+  return value as unknown as SourceManifestV2;
+}
 export interface PdfPageRect {
   pageIndex: number;
   bbox: [number, number, number, number];
@@ -1018,7 +1078,9 @@ export const api = {
   bookLibrary: () => http<BookLibraryResponse>("GET", "/book/library"),
   assetManifest: () => http<AssetManifest>("GET", "/book/asset_manifest"),
   buildWorkbench: () => http<BuildWorkbenchSnapshot>("GET", "/book/build_workbench"),
-  sourceManifest: () => http<SourceManifestV2>("GET", "/book/source_manifest"),
+  sourceManifest: async () => parseSourceManifestV2(
+    await http<unknown>("GET", "/book/source_manifest"),
+  ),
   pdfSourceMap: () => http<PdfSourceMap>("GET", "/book/pdf_source_map"),
   paperMinimap: () => http<PaperMinimapBase>("GET", "/book/paper_minimap"),
   pdfOriginalUrl: () => `${BASE}/book/pdf/original`,

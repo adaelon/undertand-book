@@ -361,12 +361,13 @@ const progressPct = computed(() => {
 function pdfCapabilityUsable(status: string | undefined): boolean {
   return status === "available" || status === "degraded";
 }
-const pdfReaderAvailable = computed(() =>
-  sourceManifest.value?.capabilities.view_pdf.status === "available"
-  && !!sourceManifest.value.original_pdf
-  && !!pdfSourceMap.value
-  && pdfCapabilityUsable(sourceManifest.value.capabilities.project_lid_to_pdf.status),
-);
+const pdfReaderAvailable = computed(() => {
+  const manifest = sourceManifest.value;
+  return manifest?.capabilities?.view_pdf?.status === "available"
+    && !!manifest.original_pdf
+    && !!pdfSourceMap.value
+    && pdfCapabilityUsable(manifest.capabilities.project_lid_to_pdf?.status);
+});
 const pdfEntryByLid = computed(() => new Map((pdfSourceMap.value?.entries ?? []).map((entry) => [entry.lid, entry])));
 const pdfMappedLids = computed(() => new Set(
   (pdfSourceMap.value?.entries ?? []).filter(pdfEntryHasRegion).map((entry) => entry.lid),
@@ -1204,7 +1205,7 @@ async function refreshPdfAnnotationProjection(records: MemoryRecord[]) {
   pdfAnnotationProjectionError.value = null;
   if (
     !pdfReaderAvailable.value
-    || !pdfCapabilityUsable(sourceManifest.value?.capabilities.project_ranges_to_pdf.status)
+    || !pdfCapabilityUsable(sourceManifest.value?.capabilities?.project_ranges_to_pdf?.status)
   ) {
     pdfAnnotationProjection.value = EMPTY_PDF_ANNOTATION_PROJECTION;
     return;
@@ -1509,6 +1510,7 @@ async function loadPdfRuntimeArtifacts() {
   try {
     const manifest = await api.sourceManifest();
     sourceManifest.value = manifest;
+    if (!manifest) return;
     if (
       manifest.capabilities.view_pdf.status === "available"
       && pdfCapabilityUsable(manifest.capabilities.project_lid_to_pdf.status)
