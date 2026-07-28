@@ -23,6 +23,7 @@ import {
   type ProjectedHighlight,
   type ProjectedNoteMarker,
 } from "../pdf-annotation-projection";
+import { resolvePdfNotePlacementTarget } from "../pdf-note-placement";
 import type { PdfSelectionCapture } from "../pdf-selection-draft";
 import NoteCard from "./NoteCard.vue";
 
@@ -37,10 +38,12 @@ const props = withDefaults(defineProps<{
   annotationProjection?: PdfUserAnnotationProjection;
   annotationError?: string | null;
   renderMarkdown?: (source: string) => string;
+  notePlacementActive?: boolean;
 }>(), {
   annotationProjection: () => EMPTY_PDF_ANNOTATION_PROJECTION,
   annotationError: null,
   renderMarkdown: (source: string) => source,
+  notePlacementActive: false,
 });
 
 const emit = defineEmits<{
@@ -55,6 +58,7 @@ const emit = defineEmits<{
   (e: "reselect-note", note: MemoryRecord): void;
   (e: "delete-highlight", highlight: MemoryRecord): void;
   (e: "reselect-highlight", highlight: MemoryRecord): void;
+  (e: "note-placement-target", target: { entry: PdfSourceMapEntry; region: PdfRegion }): void;
 }>();
 
 type PdfDocument = Awaited<ReturnType<typeof pdfjsLib.getDocument>["promise"]>;
@@ -97,6 +101,9 @@ const renderStates = ref<Record<number, PageRenderState>>({});
 const annotationSurface = ref<AnnotationSurface | null>(null);
 const noteMarkersVisible = ref(true);
 const zoom = ref(1);
+const notePlacementCandidate = ref<{ entry: PdfSourceMapEntry; region: PdfRegion } | null>(null);
+const notePlacementFeedback = ref<string | null>(null);
+let notePlacementFeedbackTimer: number | null = null;
 let loadingTask: ReturnType<typeof pdfjsLib.getDocument> | null = null;
 let observer: IntersectionObserver | null = null;
 let renderToken = 0;
@@ -247,6 +254,7 @@ function scheduleViewportChange() {
 }
 
 function onViewportScroll() {
+  notePlacementCandidate.value = null;
   scheduleViewportChange();
   emit("viewport-interaction");
 }
@@ -335,6 +343,58 @@ function regionContains(region: PdfRegion, point: { x: number; y: number }): boo
   return point.x >= x1 && point.x <= x2 && point.y >= y1 && point.y <= y2;
 }
 
+function clearNotePlacementFeedback() {
+  if (notePlacementFeedbackTimer !== null) window.clearTimeout(notePlacementFeedbackTimer);
+  notePlacementFeedbackTimer = null;
+  notePlacementFeedback.value = null;
+}
+
+function showNotePlacementFeedback(message: string) {
+  clearNotePlacementFeedback();
+  notePlacementFeedback.value = message;
+  notePlacementFeedbackTimer = window.setTimeout(() => {
+    notePlacementFeedbackTimer = null;
+    notePlacementFeedback.value = null;
+  }, 1400);
+}
+
+function resolveNotePlacementAt(pageIndex: number, event: PointerEvent) {
+  const pageEl = pageEls.get(pageIndex);
+  if (!props.notePlacementActive || !props.sourceMap || !pageEl) return null;
+  return resolvePdfNotePlacementTarget(
+    props.sourceMap,
+    pageIndex,
+    event,
+    pageEl.getBoundingClientRect(),
+  );
+}
+
+function onPagePointerMove(pageIndex: number, event: PointerEvent) {
+  const resolution = resolveNotePlacementAt(pageIndex, event);
+  notePlacementCandidate.value = resolution?.status === "resolved"
+    ? { entry: resolution.entry, region: resolution.region }
+    : null;
+}
+
+function onPagePointerLeave() {
+  notePlacementCandidate.value = null;
+}
+
+function onPagePointerUp(pageIndex: number, event: PointerEvent) {
+  const resolution = resolveNotePlacementAt(pageIndex, event);
+  if (!resolution) return;
+  if (resolution.status === "resolved") {
+    clearNotePlacementFeedback();
+    notePlacementCandidate.value = { entry: resolution.entry, region: resolution.region };
+    emit("note-placement-target", notePlacementCandidate.value);
+    return;
+  }
+  notePlacementCandidate.value = null;
+  showNotePlacementFeedback(resolution.status === "ambiguous"
+    ? "该位置重叠多个正文目标，请点选更明确的位置。"
+    : "未命中可放置的 PDF 正文区域。");
+}
+
 function hitEntry(pageIndex: number, event: MouseEvent): PdfSourceMapEntry | null {
   const point = pointToPdf(pageIndex, event);
   if (!point) return null;
@@ -395,6 +455,7 @@ function openHighlightSurface(highlight: ProjectedHighlight, event: MouseEvent) 
 }
 
 function onPageClick(pageIndex: number, event: MouseEvent) {
+  if (props.notePlacementActive) return;
   const selection = window.getSelection();
   if (selection && !selection.isCollapsed) return;
   emit("selection-cancel");
@@ -444,6 +505,10 @@ function markerStyle(marker: PdfNoteMarkerLayout) {
 function emitNoteReselect(note: MemoryRecord) {
   emit("reselect-note", note);
   closeAnnotationSurface();
+}
+
+function noteReselectLabel(note: MemoryRecord): string {
+  return note.note_placement?.kind === "pdf_region" ? "移动" : "重新选择位置";
 }
 
 function emitHighlightReselect(highlight: MemoryRecord) {
@@ -580,6 +645,7 @@ async function setZoom(next: number) {
   if (clamped === zoom.value || pdfLoading.value) return;
   const anchor = captureZoomAnchor();
   closeAnnotationSurface();
+  notePlacementCandidate.value = null;
   emit("selection-cancel");
   zoom.value = clamped;
   renderToken += 1;
@@ -723,6 +789,7 @@ function rectsOverlap(left: DOMRect, right: DOMRect): boolean {
 }
 
 function capturePdfSelection() {
+  if (props.notePlacementActive) return;
   const selection = window.getSelection();
   if (!selection || selection.isCollapsed) return;
   const rawQuote = selection.toString();
@@ -774,6 +841,8 @@ watch(
   () => [props.pdfUrl, props.sourceMap?.config_hash] as const,
   () => {
     emit("selection-cancel");
+    notePlacementCandidate.value = null;
+    clearNotePlacementFeedback();
     if (props.pdfUrl && props.sourceMap) void loadPdfDocument();
   },
   { immediate: true },
@@ -800,11 +869,20 @@ watch(
   },
 );
 
+watch(
+  () => props.notePlacementActive,
+  (active) => {
+    notePlacementCandidate.value = null;
+    if (!active) clearNotePlacementFeedback();
+  },
+);
+
 window.addEventListener("resize", scheduleViewportChange);
 window.addEventListener("keydown", onSelectionKeydown);
 
 onBeforeUnmount(() => {
   renderToken += 1;
+  clearNotePlacementFeedback();
   if (viewportFrame !== null) window.cancelAnimationFrame(viewportFrame);
   window.removeEventListener("resize", scheduleViewportChange);
   window.removeEventListener("keydown", onSelectionKeydown);
@@ -895,6 +973,9 @@ onBeforeUnmount(() => {
         :class="{ active: page.pageIndex === activePageIndex }"
         :data-page-index="page.pageIndex"
         :style="pageShellStyle(page)"
+        @pointermove="onPagePointerMove(page.pageIndex, $event)"
+        @pointerleave="onPagePointerLeave"
+        @pointerup="onPagePointerUp(page.pageIndex, $event)"
         @click="onPageClick(page.pageIndex, $event)"
       >
         <canvas :ref="(el) => setCanvasRef(page.pageIndex, el)" class="pdf-page-canvas"></canvas>
@@ -906,6 +987,13 @@ onBeforeUnmount(() => {
             class="pdf-user-highlight"
             :data-mem-id="item.highlight.mem_id"
             :style="projectedRectStyle(page, item.rect.bbox)"
+          ></span>
+          <span
+            v-if="props.notePlacementActive && notePlacementCandidate?.region.pageIndex === page.pageIndex"
+            class="pdf-note-placement-candidate"
+            :data-lid="notePlacementCandidate.entry.lid"
+            :data-region-id="notePlacementCandidate.region.region_id"
+            :style="projectedRectStyle(page, notePlacementCandidate.region.bbox)"
           ></span>
           <button
             v-for="marker in noteMarkersForPage(page)"
@@ -928,6 +1016,14 @@ onBeforeUnmount(() => {
       </section>
       <p v-if="!props.sourceMap?.pages.length" class="pdf-empty">暂无 PDF 映射。</p>
     </div>
+
+    <p
+      v-if="props.notePlacementActive && notePlacementFeedback"
+      class="pdf-note-placement-feedback"
+      role="status"
+    >
+      {{ notePlacementFeedback }}
+    </p>
 
     <footer v-if="props.activeLid && !activeEntry" class="pdf-map-foot">
       <button @click="props.activeLid && emit('focus-source', { lid: props.activeLid, quote: null })">打开来源正文</button>
@@ -962,11 +1058,11 @@ onBeforeUnmount(() => {
             />
             <button
               class="pdf-annotation-reselect"
-              title="重新选择位置"
+              :title="noteReselectLabel(note)"
               @click="emitNoteReselect(note)"
             >
               <ScanText :size="15" />
-              重新选择位置
+              {{ noteReselectLabel(note) }}
             </button>
           </div>
         </div>
@@ -991,6 +1087,7 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .pdf-reader-pane {
+  position: relative;
   min-width: 0;
   min-height: 0;
   display: grid;
@@ -1105,6 +1202,9 @@ onBeforeUnmount(() => {
   content-visibility: auto;
   contain-intrinsic-size: 720px 940px;
 }
+.pdf-reader-pane:has(.pdf-note-placement-candidate) .pdf-page-shell {
+  cursor: crosshair;
+}
 .pdf-page-shell.active {
   border-color: var(--reader-coral);
 }
@@ -1197,6 +1297,32 @@ onBeforeUnmount(() => {
   background: rgba(246, 204, 74, 0.34);
   border: 0;
   border-radius: 2px;
+  pointer-events: none;
+}
+.pdf-note-placement-candidate {
+  position: absolute;
+  box-sizing: border-box;
+  border: 2px solid var(--reader-coral);
+  border-radius: 3px;
+  background: rgba(182, 83, 59, 0.14);
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.72);
+  pointer-events: none;
+}
+.pdf-note-placement-feedback {
+  position: absolute;
+  z-index: 7;
+  left: 50%;
+  bottom: 1rem;
+  max-width: min(90%, 34rem);
+  margin: 0;
+  padding: 0.5rem 0.75rem;
+  transform: translateX(-50%);
+  border: 1px solid rgba(182, 83, 59, 0.4);
+  border-radius: 8px;
+  background: rgba(255, 250, 245, 0.96);
+  box-shadow: 0 4px 14px rgba(42, 36, 31, 0.14);
+  color: var(--ink);
+  font-size: 0.78rem;
   pointer-events: none;
 }
 .pdf-note-marker {

@@ -177,6 +177,9 @@ async function installApiFixture(
     if (path === "/api/book/asset_manifest") {
       return json(route, { version: "asset_manifest.v1", book_id: "pdf-selection-actions", images: [] });
     }
+    if (path === "/api/book/source_fingerprint") {
+      return json(route, { book_id: "pdf-selection-actions", source_fingerprint: "source" });
+    }
     if (path === "/api/book/source_manifest") {
       return json(route, {
         version: "source_manifest.v2",
@@ -386,7 +389,7 @@ async function dragBetweenTextOffsets(page: Page, text: string, start: number, e
   await page.mouse.up();
 }
 
-test("resolved real PDF selection performs three explicit actions and sends structured AskQuote", async ({ page }) => {
+test("resolved real PDF selection performs three explicit actions and sends structured AskQuote", async ({ page }, testInfo) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   const calls = await installApiFixture(page, "resolved");
   await page.goto("/");
@@ -394,7 +397,7 @@ test("resolved real PDF selection performs three explicit actions and sends stru
   const quality = page.locator(".alignment-quality-bar");
   await quality.locator("summary").click();
   await expect(quality).toContainText("66.3%");
-  await page.screenshot({ path: "../../docs/screenshots/hf2-reader-degraded-desktop.png", fullPage: true });
+  await page.screenshot({ path: testInfo.outputPath("hf2-reader-degraded-desktop.png"), fullPage: true });
   await quality.locator("summary").click();
 
   await selectFixtureText(page, 0, 10);
@@ -409,12 +412,12 @@ test("resolved real PDF selection performs three explicit actions and sends stru
   await page.locator(".note-dialog .primary").click();
   await expect.poll(() => calls.notes.length).toBe(1);
   expect(calls.notes[0]).toMatchObject({
-    anchor_lid: "1.1",
     selection_context: {
       status: "resolved",
       ranges: [{ lid: "1.1", range: { start: 0, end: 10 } }],
     },
   });
+  expect(calls.notes[0]).not.toHaveProperty("anchor_lid");
   await expect(page.locator(".pdf-note-marker")).toHaveCount(1);
 
   await selectFixtureText(page, 0, 10);
@@ -498,7 +501,7 @@ for (const resolutionBasis of ["exact", "recovered"] as const) {
   }
 }
 
-test("partial mobile selection hides persistence actions but keeps exact-subrange Ask explicit", async ({ page }) => {
+test("partial mobile selection hides persistence actions but keeps exact-subrange Ask explicit", async ({ page }, testInfo) => {
   await page.setViewportSize({ width: 390, height: 844 });
   const calls = await installApiFixture(page, "partial");
   await page.goto("/");
@@ -518,7 +521,7 @@ test("partial mobile selection hides persistence actions but keeps exact-subrang
   expect((toolbarBox?.x ?? 0) + (toolbarBox?.width ?? 0)).toBeLessThanOrEqual(382);
   expect(statusBox?.x).toBeGreaterThanOrEqual(8);
   expect((statusBox?.x ?? 0) + (statusBox?.width ?? 0)).toBeLessThanOrEqual(382);
-  await page.screenshot({ path: "../../docs/screenshots/hf2-reader-partial-mobile.png", fullPage: true });
+  await page.screenshot({ path: testInfo.outputPath("hf2-reader-partial-mobile.png"), fullPage: true });
   await toolbar.getByTitle("问 AI").click();
   await expect(page.locator(".ask-draft")).toContainText("部分定位");
   expect(calls.highlights).toHaveLength(0);

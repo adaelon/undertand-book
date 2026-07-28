@@ -3,6 +3,7 @@ import { computed, nextTick, onMounted, ref, watch } from "vue";
 import type { FormulaSemantics, ImageAssetManifestEntry, MemoryRecord } from "../api";
 import type { Manifest } from "../api";
 import NoteCard from "./NoteCard.vue";
+import { resolveMarkdownNotePlacementTarget } from "../markdown-note-placement";
 
 type NodeKind = Manifest["tree"][number]["kind"];
 export interface Segment {
@@ -17,6 +18,7 @@ const props = defineProps<{
   segments: Segment[];
   viewportAnchor: string | null;
   selectedLid: string | null;
+  notePlacementActive?: boolean;
   renderSeg: (seg: Segment) => string;
   renderMarkdown: (source: string) => string;
   markdownHeadingLevel: (seg: Segment) => number | null;
@@ -53,6 +55,9 @@ const emit = defineEmits<{
   (e: "scroll-edge", direction: "up" | "down"): void;
   (e: "current-lid", lid: string): void;
   (e: "viewport-interaction"): void;
+  (e: "note-placement-pointer", event: PointerEvent): void;
+  (e: "note-placement-target", target: { lid: string }): void;
+  (e: "note-placement-invalid"): void;
 }>();
 
 const notesByLid = computed(() => {
@@ -116,6 +121,8 @@ function markdownHeadingClass(seg: Segment): Record<string, boolean> {
 }
 
 const pane = ref<HTMLElement | null>(null);
+const placementCandidateLid = ref<string | null>(null);
+const validPlacementLids = computed(() => new Set(props.segments.map((segment) => segment.lid)));
 const edgePx = 2;
 const preloadScreens = 2;
 let pendingCheck = false;
@@ -249,6 +256,31 @@ function onKeydown(event: KeyboardEvent) {
   void scheduleScrollStateCheck();
 }
 
+function markdownPlacementTarget(event: PointerEvent): { lid: string } | null {
+  const root = pane.value;
+  return root
+    ? resolveMarkdownNotePlacementTarget(event, root, validPlacementLids.value)
+    : null;
+}
+
+function onPointerMove(event: PointerEvent) {
+  if (!props.notePlacementActive) return;
+  placementCandidateLid.value = markdownPlacementTarget(event)?.lid ?? null;
+}
+
+function onPointerLeave() {
+  placementCandidateLid.value = null;
+}
+
+function onPointerUp(event: PointerEvent) {
+  if (!props.notePlacementActive) return;
+  emit("note-placement-pointer", event);
+  const target = markdownPlacementTarget(event);
+  placementCandidateLid.value = target?.lid ?? null;
+  if (target) emit("note-placement-target", target);
+  else emit("note-placement-invalid");
+}
+
 function lidElement(lid: string): HTMLElement | null {
   const el = pane.value;
   if (!el) return null;
@@ -302,6 +334,10 @@ defineExpose({ captureScrollAnchor, restoreScrollAnchor, scrollLidIntoView });
 onMounted(() => {
   void scheduleScrollStateCheck();
 });
+watch(() => props.notePlacementActive, (active) => {
+  if (!active) placementCandidateLid.value = null;
+});
+
 watch(
   () => {
     const first = props.segments[0]?.lid ?? "";
@@ -322,6 +358,9 @@ watch(
     @scroll.passive="onScroll"
     @wheel="onWheel"
     @pointerdown="emit('viewport-interaction')"
+    @pointermove="onPointerMove"
+    @pointerleave="onPointerLeave"
+    @pointerup="onPointerUp"
     @keydown="onKeydown"
   >
     <article class="prose" @mouseup="emit('prose-mouse-up')">
@@ -337,6 +376,7 @@ watch(
                   anchor: seg.lid === props.viewportAnchor,
                   selected: seg.lid === props.selectedLid,
                   hl: props.isHighlighted(seg.lid),
+                  'note-placement-candidate': seg.lid === placementCandidateLid,
                 }"
                 title="查看公式语义剖面"
                 @click.stop="emit('open-formula', seg)"
@@ -351,6 +391,7 @@ watch(
                   anchor: seg.lid === props.viewportAnchor,
                   selected: seg.lid === props.selectedLid,
                   hl: props.isHighlighted(seg.lid),
+                  'note-placement-candidate': seg.lid === placementCandidateLid,
                 }"
                 @click="emit('select', seg.lid)"
                 v-html="props.renderSeg(seg)"
@@ -363,6 +404,7 @@ watch(
                   anchor: seg.lid === props.viewportAnchor,
                   selected: seg.lid === props.selectedLid,
                   hl: props.isHighlighted(seg.lid),
+                  'note-placement-candidate': seg.lid === placementCandidateLid,
                 }"
                 @click="emit('select', seg.lid)"
                 v-html="props.renderSeg(seg)"
@@ -400,6 +442,7 @@ watch(
               anchor: item.segment.lid === props.viewportAnchor,
               selected: item.segment.lid === props.selectedLid,
               hl: props.isHighlighted(item.segment.lid),
+              'note-placement-candidate': item.segment.lid === placementCandidateLid,
               ['heading-' + item.segment.kind]: item.segment.kind === 'chapter' || item.segment.kind === 'section',
               ...markdownHeadingClass(item.segment),
             }"
@@ -420,6 +463,7 @@ watch(
             anchor: item.segment.lid === props.viewportAnchor,
             selected: item.segment.lid === props.selectedLid,
             hl: props.isHighlighted(item.segment.lid),
+            'note-placement-candidate': item.segment.lid === placementCandidateLid,
           }]"
           @click="emit('select', item.segment.lid)"
         >

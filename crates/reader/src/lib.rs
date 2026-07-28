@@ -5,7 +5,10 @@
 //! viewport = **叶序滑动窗口**(anchor 所在叶为中心,按全书叶 LID 顺序取前后 radius 个;scroll 沿叶序移动)。
 //! 切片0 不做 openPanel/closePanel 面板系统、真 GUI、段内字符 range(停 LID 粒度)。
 //! 时间戳由调用方注入(确定性可测,守 A2);错误复用 `ToolError` 信封,禁宽松降级 `[ADR-0015]`。
-use memory::{Anchor, MemoryStore, RecallQuery, SaveInput, TextRange};
+use memory::{
+    Anchor, MemoryStore, NoteBodyPlacement, NoteSaveStatus, PromoteInput, RecallQuery, SaveInput,
+    TextRange,
+};
 use read_tools::{
     Book, LayoutRegion, LayoutSize, PaperArgumentRelation, PaperArgumentSlot, PaperLandmark,
     PaperLandmarkKind, PaperMinimapAvailabilityStatus, PaperMinimapBase, PaperMinimapRelation,
@@ -50,6 +53,7 @@ pub struct HighlightEffect {
 pub struct NoteEffect {
     pub ok: bool,
     pub note_id: String,
+    pub status: NoteSaveStatus,
 }
 
 /// reader.state() 只读会话态(供 agent 中途接入 / 人手动操作后 re-sync `[ADR-0015]`)。
@@ -1821,6 +1825,7 @@ impl Reader {
                 content: frag,
                 range: range_rec,
                 selection_context: None,
+                note_placement: None,
                 citations: None, // memory 自动派生锚回 lid 的 citation
                 source_session_id,
             },
@@ -1846,7 +1851,7 @@ impl Reader {
         now: &str,
     ) -> Result<NoteEffect, ToolError> {
         book.text(lid, None)?; // 仅校验 LID 真实存在(锚定红线),不取原文
-        let saved = store.save(
+        let outcome = store.save_note(
             SaveInput {
                 mem_id: None,
                 mem_type: "note".into(),
@@ -1859,15 +1864,29 @@ impl Reader {
                 content: text.to_string(),
                 range: None,
                 selection_context: None,
+                note_placement: Some(NoteBodyPlacement::LidBlock {
+                    source_fingerprint: book.source_fingerprint().to_string(),
+                    lid: lid.to_string(),
+                }),
                 citations: None,
                 source_session_id: None,
             },
             now,
         )?;
+        let status = outcome.status;
+        let mut record = outcome.record;
+        if layer == "long_term" && status == NoteSaveStatus::Existing && record.layer == "session" {
+            record = store.promote(PromoteInput {
+                mem_id: record.mem_id,
+                from_layer: "session".into(),
+                to_layer: "long_term".into(),
+            })?;
+        }
         self.selection = Some(lid.to_string());
         Ok(NoteEffect {
             ok: true,
-            note_id: saved.mem_id,
+            note_id: record.mem_id,
+            status,
         })
     }
 
@@ -2660,10 +2679,7 @@ mod tests {
             .note(&b, &mut store, "1.2", "note", "long_term", "t3")
             .unwrap_err();
 
-        assert_eq!(
-            error.error_code,
-            memory::READER_PRIVATE_STORAGE_UNAVAILABLE
-        );
+        assert_eq!(error.error_code, memory::READER_PRIVATE_STORAGE_UNAVAILABLE);
         assert!(!path.exists());
     }
 

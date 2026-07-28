@@ -4,6 +4,7 @@ import type {
   PdfSourceMap,
   TextRange,
 } from "./api";
+import { pdfNotePlacementEntryIsEligible } from "./pdf-note-placement";
 
 export type PdfAnnotationLocation = "exact" | "partial" | "unmapped" | "not_applicable";
 export type PdfBBox = [number, number, number, number];
@@ -46,6 +47,12 @@ export interface PdfProjectionBatch {
   records: MemoryRecord[];
   requests: Array<{ lid: string; range: TextRange }>;
   targets: PdfProjectionTarget[];
+  body_placement_context: PdfBodyPlacementProjectionContext;
+}
+
+export interface PdfBodyPlacementProjectionContext {
+  source_fingerprint: string | null;
+  source_map: PdfSourceMap | null;
 }
 
 export interface OverlayRect {
@@ -70,7 +77,15 @@ export const EMPTY_PDF_ANNOTATION_PROJECTION: PdfUserAnnotationProjection = {
   location_by_mem_id: {},
 };
 
-export function buildPdfProjectionBatch(records: MemoryRecord[]): PdfProjectionBatch {
+const EMPTY_PDF_BODY_PLACEMENT_CONTEXT: PdfBodyPlacementProjectionContext = {
+  source_fingerprint: null,
+  source_map: null,
+};
+
+export function buildPdfProjectionBatch(
+  records: MemoryRecord[],
+  bodyPlacementContext: PdfBodyPlacementProjectionContext = EMPTY_PDF_BODY_PLACEMENT_CONTEXT,
+): PdfProjectionBatch {
   const targets: PdfProjectionTarget[] = [];
   for (const record of records) {
     const lid = record.anchor.lid?.trim();
@@ -102,6 +117,7 @@ export function buildPdfProjectionBatch(records: MemoryRecord[]): PdfProjectionB
     records,
     targets,
     requests: targets.map((target) => ({ lid: target.lid, range: target.range })),
+    body_placement_context: bodyPlacementContext,
   };
 }
 
@@ -177,9 +193,53 @@ function locationOf(statuses: PdfAnnotationLocation[]): PdfAnnotationLocation {
   return "partial";
 }
 
+function projectPdfBodyPlacement(
+  record: MemoryRecord,
+  context: PdfBodyPlacementProjectionContext,
+): ProjectedNoteMarker | null {
+  const placement = record.note_placement;
+  const sourceMap = context.source_map;
+  if (
+    record.type !== "note"
+    || record.selection_context
+    || placement?.kind !== "pdf_region"
+    || !context.source_fingerprint
+    || !sourceMap
+    || placement.source_fingerprint !== context.source_fingerprint
+    || placement.source_map_version !== sourceMap.version
+    || placement.source_map_config_hash !== sourceMap.config_hash
+    || record.anchor.lid !== placement.lid
+    || !sourceMap.pages.some((page) => page.pageIndex === placement.page_index)
+  ) return null;
+
+  const targets = sourceMap.entries.flatMap((entry) => {
+    if (entry.lid !== placement.lid || !pdfNotePlacementEntryIsEligible(entry)) return [];
+    return entry.regions
+      .filter((region) =>
+        region.pageIndex === placement.page_index
+        && region.region_id === placement.region_id)
+      .map((region) => ({ entry, region }));
+  });
+  if (targets.length !== 1) return null;
+  const { region } = targets[0];
+  return {
+    terminal_key: [
+      "pdf-region",
+      sourceMap.version,
+      sourceMap.config_hash,
+      region.pageIndex,
+      placement.lid,
+      region.region_id,
+    ].join(":"),
+    anchor_rect: { pageIndex: region.pageIndex, bbox: region.bbox },
+    notes: [record],
+  };
+}
+
 export function projectPdfAnnotations(
   batch: PdfProjectionBatch,
   response: PdfRangesProjectResponse,
+  bodyPlacementContext: PdfBodyPlacementProjectionContext = batch.body_placement_context,
 ): PdfUserAnnotationProjection {
   const resultByRecord = new Map<string, Array<{
     target: PdfProjectionTarget;
@@ -206,6 +266,18 @@ export function projectPdfAnnotations(
   const markersByTerminal = new Map<string, ProjectedNoteMarker>();
 
   for (const record of batch.records) {
+    if (record.type === "note" && record.note_placement?.kind === "pdf_region") {
+      const marker = projectPdfBodyPlacement(record, bodyPlacementContext);
+      if (marker) {
+        const existing = markersByTerminal.get(marker.terminal_key);
+        if (existing) existing.notes.push(record);
+        else markersByTerminal.set(marker.terminal_key, marker);
+        locationByMemId[record.mem_id] = "exact";
+      } else {
+        locationByMemId[record.mem_id] = "unmapped";
+      }
+      continue;
+    }
     const results = resultByRecord.get(record.mem_id) ?? [];
     const statuses = results.map((result) => result.status);
     let location = locationOf(statuses);

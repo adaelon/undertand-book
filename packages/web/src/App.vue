@@ -23,6 +23,7 @@ import type {
   IntentArtifactOverlayV1,
   IntentBuildReaderUsageKind,
   MemoryRecord,
+  NoteBodyPlacement,
   OuterOutcome,
   PaperMinimapApplyOutcome,
   PaperMinimapCommand,
@@ -30,6 +31,7 @@ import type {
   PaperMinimapLocalization,
   PaperMinimapStateResponse,
   PaperViewportPosition,
+  PdfRegion,
   PdfSourceMap,
   PdfSourceMapEntry,
   ProfileManifest,
@@ -86,6 +88,17 @@ import {
 } from "./reader-navigation";
 import { recallBookAnnotations } from "./reader-annotations";
 import { selectionContextForAgentNote } from "./agent-note-selection";
+import {
+  createPlacedNote,
+  isMarkdownInlineNote,
+  notePlacementCapability,
+  reanchorPlacedNote,
+  reconcilePlacedNoteCreate,
+  reconcilePlacedNoteReanchor,
+  type NotePlacementState,
+  type NotePlacementSurface,
+  useNotePlacementController,
+} from "./note-placement";
 import {
   getSourceReviewAutoRerunRequest,
   runSourceReviewLlmBatch,
@@ -368,6 +381,33 @@ const pdfReaderAvailable = computed(() => {
     && !!pdfSourceMap.value
     && pdfCapabilityUsable(manifest.capabilities.project_lid_to_pdf?.status);
 });
+const NOTE_PLACEMENT_CAPABILITIES = {
+  markdown: true,
+  pdf: true,
+} as const;
+const noteSourceFingerprint = ref<string | null>(null);
+const notePlacementController = useNotePlacementController();
+const notePlacementState = notePlacementController.state;
+type SavingNotePlacement = Extract<NotePlacementState, { phase: "saving" }>;
+const notePlacementSurface = computed<NotePlacementSurface>(() => pdfReaderAvailable.value ? "pdf" : "markdown");
+const unquotedNotePlacementAvailable = computed(() =>
+  notePlacementCapability(notePlacementSurface.value, NOTE_PLACEMENT_CAPABILITIES),
+);
+watch(
+  notePlacementSurface,
+  (surface) => {
+    const current = notePlacementState.value;
+    if (current.phase !== "placing") return;
+    notePlacementController.synchronizeContext({
+      book_id: current.book_id,
+      surface_kind: surface,
+      source_fingerprint: current.source_fingerprint,
+    });
+  },
+);
+watch(appSurface, (surface) => {
+  if (surface !== "reader") notePlacementController.cancel();
+});
 const pdfEntryByLid = computed(() => new Map((pdfSourceMap.value?.entries ?? []).map((entry) => [entry.lid, entry])));
 const pdfMappedLids = computed(() => new Set(
   (pdfSourceMap.value?.entries ?? []).filter(pdfEntryHasRegion).map((entry) => entry.lid),
@@ -401,7 +441,11 @@ const visibleNotes = computed(() => {
   const visible = segments.value.map((seg) => seg.lid);
   const order = new Map(visible.map((lid, idx) => [lid, idx]));
   return annotations.value
-    .filter((r) => r.type === "note" && !!r.anchor.lid && order.has(r.anchor.lid))
+    .filter((r) =>
+      !!r.anchor.lid
+      && order.has(r.anchor.lid)
+      && isMarkdownInlineNote(r, noteSourceFingerprint.value)
+    )
     .sort((a, b) => (order.get(a.anchor.lid ?? "") ?? 0) - (order.get(b.anchor.lid ?? "") ?? 0));
 });
 function layoutRevNumber(value: number | bigint): number {
@@ -1100,14 +1144,15 @@ async function saveNote() {
         content,
         selection_context: ed.selectionContext ?? undefined,
       });
-    } else {
+    } else if (ed.selectionContext) {
       await api.save({
         type: "note",
-        anchor_lid: ed.lid,
         content,
         layer: ed.layer,
-        selection_context: ed.selectionContext ?? undefined,
+        selection_context: ed.selectionContext,
       });
+    } else {
+      await api.note(ed.lid, content);
     }
     noteEditor.value = null;
     await refreshAnnotations();
@@ -1210,7 +1255,10 @@ async function refreshPdfAnnotationProjection(records: MemoryRecord[]) {
     pdfAnnotationProjection.value = EMPTY_PDF_ANNOTATION_PROJECTION;
     return;
   }
-  const batch = buildPdfProjectionBatch(records);
+  const batch = buildPdfProjectionBatch(records, {
+    source_fingerprint: noteSourceFingerprint.value,
+    source_map: pdfSourceMap.value,
+  });
   if (!batch.requests.length) {
     pdfAnnotationProjection.value = projectPdfAnnotations(batch, { projections: [] });
     return;
@@ -1226,17 +1274,18 @@ async function refreshPdfAnnotationProjection(records: MemoryRecord[]) {
   }
 }
 
-async function refreshAnnotations() {
+async function refreshAnnotations(): Promise<MemoryRecord[]> {
   const bookId = buildWorkbenchSnapshot.value?.book_id;
   if (!bookId) {
     annotations.value = [];
     resetPdfAnnotationProjection();
-    return;
+    return [];
   }
   const records = await recallBookAnnotations(bookId, api.recall);
-  if (buildWorkbenchSnapshot.value?.book_id !== bookId) return;
+  if (buildWorkbenchSnapshot.value?.book_id !== bookId) return records;
   annotations.value = records;
   await refreshPdfAnnotationProjection(records);
+  return records;
 }
 
 type SegmentLoadMode = "replace" | "append" | "prepend";
@@ -1999,6 +2048,11 @@ async function init() {
     }
     const m = await api.manifest();
     const assets = await api.assetManifest();
+    const noteSource = await api.sourceFingerprint();
+    if (buildWorkbenchSnapshot.value?.book_id !== noteSource.book_id) {
+      throw new Error("Note source identity does not match the active book");
+    }
+    noteSourceFingerprint.value = noteSource.source_fingerprint;
     await loadPdfRuntimeArtifacts();
     kindByLid.value = new Map(m.tree.map((n) => [n.lid, n.kind]));
     imageAssetByLid.value = new Map(assets.images.map((img) => [img.lid, img]));
@@ -2144,6 +2198,7 @@ onMounted(init);
 onBeforeUnmount(() => {
   if (paperPositionSyncTimer !== null) window.clearTimeout(paperPositionSyncTimer);
   if (profileBackfillPollTimer !== null) window.clearTimeout(profileBackfillPollTimer);
+  notePlacementController.cancel();
   pdfSelectionTranslation.invalidate("unmount");
 });
 
@@ -2362,6 +2417,10 @@ function completePdfSelectionAction() {
 }
 
 function reselectPdfNote(note: MemoryRecord) {
+  if (!note.selection_context && note.note_placement?.kind === "pdf_region") {
+    void startNotePlacement(note);
+    return;
+  }
   pdfSelectionTranslation.invalidate("existing-action");
   pdfSelectionSession.cancel();
   pdfReselectTarget.value = { kind: "note", record: note };
@@ -2381,7 +2440,14 @@ interface MarkdownSelectedRange {
   start: number;
   end: number;
 }
-const hlPopover = ref<{ x: number; y: number; anchorLid: string; ranges: MarkdownSelectedRange[]; text: string } | null>(null);
+interface MarkdownSelectionPopover {
+  x: number;
+  y: number;
+  anchorLid: string;
+  ranges: MarkdownSelectedRange[];
+  text: string;
+}
+const hlPopover = ref<MarkdownSelectionPopover | null>(null);
 
 function lidElementOf(node: Node | null): HTMLElement | null {
   const el = node && node.nodeType === 3 ? node.parentElement : (node as HTMLElement | null);
@@ -2435,6 +2501,223 @@ function onSelectSeg(lid: string) {
   currentReadingLid.value = lid;
   sourceFocus.value = null;
   queuePaperSelection(lid);
+}
+
+function onMarkdownNotePlacementInvalid() {
+  if (notePlacementState.value.phase === "placing") {
+    banner.value = "这里不是可放置的正文目标，请点选真实正文块。";
+  }
+}
+
+function notePlacementBookIsCurrent(saving: SavingNotePlacement): boolean {
+  return buildWorkbenchSnapshot.value?.book_id === saving.original_book_id;
+}
+
+async function handleExplicitNotePlacementFailure(
+  saving: SavingNotePlacement,
+  error: ApiError,
+) {
+  if (!notePlacementBookIsCurrent(saving)) {
+    notePlacementController.saveFailed(error);
+    notePlacementController.cancel();
+    return;
+  }
+  let records: MemoryRecord[] | null = null;
+  try {
+    records = await refreshAnnotations();
+  } catch {
+    // The mutation response is authoritative; a failed refresh must not change its classification.
+  }
+  if (!notePlacementBookIsCurrent(saving)) {
+    notePlacementController.saveFailed(error);
+    notePlacementController.cancel();
+    return;
+  }
+  notePlacementController.saveFailed(error);
+  if (saving.record && records && !records.some((record) => record.mem_id === saving.record?.mem_id)) {
+    notePlacementController.cancel();
+    banner.value = "这条 Note 已被其他操作更新，请从最新笔记重新发起放置。";
+    return;
+  }
+  if (error.errorCode === "STALE_NOTE_SOURCE" || error.errorCode === "STALE_PDF_NOTE_PLACEMENT") {
+    try {
+      const source = await api.sourceFingerprint();
+      const nextPdfMap = saving.surface_kind === "pdf" ? await api.pdfSourceMap() : null;
+      if (!notePlacementBookIsCurrent(saving)
+        || source.book_id !== saving.original_book_id
+        || notePlacementSurface.value !== saving.surface_kind
+        || (saving.surface_kind === "pdf" && nextPdfMap?.book_id !== source.book_id)) {
+        notePlacementController.cancel();
+        return;
+      }
+      if (nextPdfMap) pdfSourceMap.value = nextPdfMap;
+      if (saving.draft) {
+        noteSourceFingerprint.value = source.source_fingerprint;
+        notePlacementController.createDraft({
+          ...saving.draft,
+          source_fingerprint: source.source_fingerprint,
+        });
+      } else if (saving.record && records) {
+        const authoritative = records.find((record) => record.mem_id === saving.record?.mem_id);
+        if (authoritative) {
+          noteSourceFingerprint.value = source.source_fingerprint;
+          notePlacementController.startRecord({
+            record: authoritative,
+            book_id: source.book_id,
+            surface_kind: saving.surface_kind,
+            source_fingerprint: source.source_fingerprint,
+          });
+        }
+      }
+    } catch {
+      // Keep the prior placing session; reopening the book will refresh the source identity.
+    }
+  }
+  fail(error);
+}
+
+async function reconcileUncertainNotePlacement(
+  saving: SavingNotePlacement,
+  error: unknown,
+) {
+  notePlacementController.reconcileRequired(errorMessage(error));
+  if (!notePlacementBookIsCurrent(saving)) {
+    notePlacementController.reconciled("missing");
+    return;
+  }
+  let records: MemoryRecord[];
+  try {
+    records = await refreshAnnotations();
+  } catch (refreshError) {
+    if (!notePlacementBookIsCurrent(saving)) {
+      notePlacementController.reconciled("missing");
+      return;
+    }
+    notePlacementController.reconciled("retry");
+    fail(refreshError);
+    return;
+  }
+  if (!notePlacementBookIsCurrent(saving)) {
+    notePlacementController.reconciled("missing");
+    return;
+  }
+  const reconciliation = saving.draft
+    ? reconcilePlacedNoteCreate(saving.draft, saving.target, records)
+    : saving.record
+      ? reconcilePlacedNoteReanchor(saving.record, saving.target, records)
+      : { outcome: "missing" as const };
+  notePlacementController.reconciled(reconciliation.outcome);
+  if (reconciliation.outcome === "committed") {
+    selectedLid.value = saving.target.lid;
+    banner.value = saving.subject.kind === "record"
+      ? "已从磁盘确认 Note 的新正文位置。"
+      : "已从磁盘确认 Note 保存成功。";
+  } else if (reconciliation.outcome === "retry") {
+    banner.value = "未确认写入成功，已保留放置内容；请重新选择正文目标。";
+  } else {
+    banner.value = "原 Note 已被其他操作更新，请从最新笔记重新发起放置。";
+  }
+}
+
+function sameNotePlacement(left: NoteBodyPlacement | null | undefined, right: NoteBodyPlacement): boolean {
+  if (!left || left.kind !== right.kind) return false;
+  if (left.kind === "lid_block" && right.kind === "lid_block") {
+    return left.source_fingerprint === right.source_fingerprint && left.lid === right.lid;
+  }
+  if (left.kind !== "pdf_region" || right.kind !== "pdf_region") return false;
+  return left.source_fingerprint === right.source_fingerprint
+    && left.lid === right.lid
+    && left.source_map_version === right.source_map_version
+    && left.source_map_config_hash === right.source_map_config_hash
+    && left.page_index === right.page_index
+    && left.region_id === right.region_id;
+}
+
+async function submitNotePlacementTarget(placement: NoteBodyPlacement) {
+  const current = notePlacementState.value;
+  if (current.phase !== "placing"
+    || placement.source_fingerprint !== current.source_fingerprint
+    || (current.surface_kind === "markdown" && placement.kind !== "lid_block")
+    || (current.surface_kind === "pdf" && placement.kind !== "pdf_region")) return;
+  if (sameNotePlacement(current.record?.note_placement, placement)) {
+    banner.value = "这条 Note 已在该正文位置，请选择其他目标。";
+    return;
+  }
+  const saving = notePlacementController.beginSaving(placement);
+  if (!saving) return;
+  try {
+    const result = saving.draft
+      ? await createPlacedNote(saving.draft, placement, {
+          save: (input) => api.save(input),
+          promote: (memId) => api.promote(memId),
+        })
+      : saving.record
+        ? await reanchorPlacedNote(saving.record, placement, {
+            reanchor: (memId, nextPlacement) => api.reanchor(memId, nextPlacement),
+          })
+        : null;
+    notePlacementController.saveSucceeded();
+    if (!result || !notePlacementBookIsCurrent(saving)) return;
+    try {
+      await refreshAnnotations();
+    } catch (refreshError) {
+      if (!notePlacementBookIsCurrent(saving)) return;
+      fail(refreshError);
+      return;
+    }
+    if (!notePlacementBookIsCurrent(saving)) return;
+    selectedLid.value = placement.lid;
+    banner.value = saving.subject.kind === "record"
+      ? saving.record?.note_placement
+        ? "Note 已移动到新的正文位置。"
+        : "旧 Note 已放置到正文。"
+      : "promoted" in result && result.promoted
+        ? "已将 Agent 提议提升为长期 Note。"
+        : "status" in result && result.status === "EXISTING"
+          ? "这条 Note 已存在。"
+          : "Note 已放置到正文。";
+  } catch (error) {
+    if (error instanceof ApiError) {
+      await handleExplicitNotePlacementFailure(saving, error);
+    } else {
+      await reconcileUncertainNotePlacement(saving, error);
+    }
+  }
+}
+
+async function onMarkdownNotePlacementTarget(target: { lid: string }) {
+  const current = notePlacementState.value;
+  if (current.phase !== "placing" || current.surface_kind !== "markdown") return;
+  await submitNotePlacementTarget({
+    kind: "lid_block",
+    source_fingerprint: current.source_fingerprint,
+    lid: target.lid,
+  });
+}
+
+async function onPdfNotePlacementTarget(target: { entry: PdfSourceMapEntry; region: PdfRegion }) {
+  const current = notePlacementState.value;
+  const map = pdfSourceMap.value;
+  if (current.phase !== "placing" || current.surface_kind !== "pdf" || !map) return;
+  const targetIsCurrent = map.entries.some((entry) =>
+    entry.lid === target.entry.lid
+    && entry.regions.some((region) =>
+      region.pageIndex === target.region.pageIndex
+      && region.region_id === target.region.region_id
+      && region.bbox.every((coordinate, index) => coordinate === target.region.bbox[index])));
+  if (!targetIsCurrent || map.book_id !== current.book_id) {
+    banner.value = "PDF 映射已变化，请重新选择正文区域。";
+    return;
+  }
+  await submitNotePlacementTarget({
+    kind: "pdf_region",
+    source_fingerprint: current.source_fingerprint,
+    lid: target.entry.lid,
+    source_map_version: map.version,
+    source_map_config_hash: map.config_hash,
+    page_index: target.region.pageIndex,
+    region_id: target.region.region_id,
+  });
 }
 
 function onCurrentLid(lid: string) {
@@ -2500,6 +2783,18 @@ async function confirmHighlight() {
     fail(e);
   }
 }
+function markdownSelectionContext(popover: MarkdownSelectionPopover): SelectionContext {
+  return {
+    status: "resolved",
+    resolution_basis: "exact",
+    raw_quote: popover.text,
+    resolved_quote: popover.text,
+    ranges: popover.ranges.map((range) => ({
+      lid: range.lid,
+      range: { start: range.start, end: range.end },
+    })),
+  };
+}
 function noteSelection() {
   const p = hlPopover.value;
   if (!p) return;
@@ -2507,7 +2802,7 @@ function noteSelection() {
   selectedLid.value = p.anchorLid;
   hlPopover.value = null;
   window.getSelection()?.removeAllRanges();
-  openNewNote(p.anchorLid, quote ? `> ${quote}` : "");
+  openNewNote(p.anchorLid, quote ? `> ${quote}` : "", markdownSelectionContext(p));
 }
 function askSelection() {
   const p = hlPopover.value;
@@ -2822,7 +3117,7 @@ async function undoEffect(ti: number, ei: number, e: AgentEffect) {
   }
 }
 
-// 提议「保留」(Highlight/Note):同内容以 long_term 再 save → 同 mem_id upsert 升级层。
+// 提议「保留」:Note 按当前 mem_id 原子 promote；Highlight 保持既有 long_term save 语义。
 async function keepEffect(ti: number, ei: number, e: AgentEffect) {
   if (e.kind === "PaperMinimap") return;
   if (e.kind === "Goto" || e.kind === "Layout") return;
@@ -2844,17 +3139,18 @@ async function keepEffect(ti: number, ei: number, e: AgentEffect) {
       handled.value[effKey(ti, ei)] = "已应用";
       return;
     }
-    let content = e.kind === "Note" ? e.text : "";
-    if (e.kind === "Highlight") {
+    if (e.kind === "Note") {
+      await api.promote(e.mem_id);
+    } else if (e.kind === "Highlight") {
       const recs = await api.recall({ layer: "session" });
-      content = recs.find((r) => r.mem_id === e.mem_id)?.content ?? "";
+      const content = recs.find((r) => r.mem_id === e.mem_id)?.content ?? "";
+      await api.save({
+        type: "highlight",
+        anchor_lid: e.lid,
+        content,
+        layer: "long_term",
+      });
     }
-    await api.save({
-      type: e.kind === "Highlight" ? "highlight" : "note",
-      anchor_lid: e.lid,
-      content,
-      layer: "long_term",
-    });
     await refreshAnnotations();
     handled.value[effKey(ti, ei)] = "已保留";
   } catch (err) {
@@ -2862,13 +3158,93 @@ async function keepEffect(ti: number, ei: number, e: AgentEffect) {
   }
 }
 
+function notePlacementDraftId(): string {
+  const random = globalThis.crypto?.randomUUID?.()
+    ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  return `note-placement-${random}`;
+}
+
+function cancelNotePlacement() {
+  if (notePlacementController.cancel()) banner.value = "已取消正文放置。";
+}
+
+async function startNotePlacement(note: MemoryRecord) {
+  const surface = notePlacementSurface.value;
+  if (!unquotedNotePlacementAvailable.value) return;
+  const placementSurface = note.note_placement?.kind === "pdf_region" ? "pdf" : "markdown";
+  if (note.selection_context || (note.note_placement && placementSurface !== surface)) {
+    banner.value = note.selection_context
+      ? "引用型 Note 请使用重新选择，不能移动到正文位置。"
+      : "Note 不能跨阅读格式移动。";
+    return;
+  }
+  try {
+    banner.value = "";
+    const source = await api.sourceFingerprint();
+    if (notePlacementSurface.value !== surface
+      || buildWorkbenchSnapshot.value?.book_id !== source.book_id) {
+      banner.value = "阅读上下文已变化，请重新发起 Note 放置。";
+      return;
+    }
+    noteSourceFingerprint.value = source.source_fingerprint;
+    const started = notePlacementController.startRecord({
+      record: note,
+      book_id: source.book_id,
+      surface_kind: surface,
+      source_fingerprint: source.source_fingerprint,
+    });
+    const targetLabel = surface === "pdf" ? "PDF 正文区域" : "正文块";
+    banner.value = started
+      ? note.note_placement
+        ? `请选择新的${targetLabel}移动这条 Note。`
+        : `请选择${targetLabel}放置这条旧 Note。`
+      : "这条 Note 不能在当前阅读表面放置。";
+  } catch (error) {
+    fail(error);
+  }
+}
+
 async function saveAgentSelection(turn: ChatTurn, text: string) {
   const selectionContext = selectionContextForAgentNote(turn.questionSelection);
-  const anchor = selectionContext?.ranges[0]?.lid ?? turn.questionAnchorLid;
   const content = text.trim();
-  if (!content || !anchor) return;
+  if (!content) return;
   const sourceQuote = turn.questionQuote?.quote.replace(/\s+/g, " ").trim();
   const noteContent = sourceQuote ? `> ${sourceQuote}\n\n${content}` : content;
+  if (!selectionContext) {
+    if (!unquotedNotePlacementAvailable.value) {
+      banner.value = "当前阅读表面尚未启用无引用 Note 正文放置。";
+      return;
+    }
+    try {
+      banner.value = "";
+      const surface = notePlacementSurface.value;
+      const source = await api.sourceFingerprint();
+      if (surface !== notePlacementSurface.value
+        || buildWorkbenchSnapshot.value?.book_id !== source.book_id
+        || !notePlacementCapability(surface, NOTE_PLACEMENT_CAPABILITIES)) {
+        banner.value = "阅读表面已变化，请重新选择 Agent 摘录。";
+        return;
+      }
+      noteSourceFingerprint.value = source.source_fingerprint;
+      const created = notePlacementController.createDraft({
+        draft_id: notePlacementDraftId(),
+        book_id: source.book_id,
+        surface_kind: surface,
+        source_fingerprint: source.source_fingerprint,
+        content: noteContent,
+        origin: { kind: "agent_answer", chat_session_id: activeChatSessionId.value },
+      });
+      const targetLabel = surface === "pdf" ? "PDF 正文区域" : "正文中的真实段落";
+      banner.value = created
+        ? `请选择${targetLabel}放置这条 Note。`
+        : "当前 Note 正在提交或核对，暂时不能替换。";
+    } catch (e) {
+      fail(e);
+    }
+    return;
+  }
+  const anchor = selectionContext.ranges[0]?.lid ?? turn.questionAnchorLid;
+  if (!anchor) return;
   try {
     banner.value = "";
     await api.save({
@@ -3068,6 +3444,7 @@ function resetBookSessionUi() {
   sourceManifest.value = null;
   pdfSourceMap.value = null;
   pdfRuntimeError.value = null;
+  noteSourceFingerprint.value = null;
   outlineItems.value = [];
   titleByLid.value = new Map();
   viewport.value = null;
@@ -3075,6 +3452,7 @@ function resetBookSessionUi() {
   annotations.value = [];
   resetPdfAnnotationProjection();
   cancelPdfSelectionDraftFor("book-switch");
+  notePlacementController.cancel();
   noteEditor.value = null;
   selectedLid.value = null;
   currentReadingLid.value = null;
@@ -3488,6 +3866,7 @@ async function submitOpenBook(dir = bookPickerDir.value) {
         :annotation-projection="pdfAnnotationProjection"
         :annotation-error="pdfAnnotationProjectionError"
         :render-markdown="renderMarkdown"
+        :note-placement-active="notePlacementState.phase === 'placing' && notePlacementSurface === 'pdf'"
         @goto="doGoto"
         @viewport-change="onPdfViewportChange"
         @focus-source="focusLocalSource"
@@ -3499,6 +3878,7 @@ async function submitOpenBook(dir = bookPickerDir.value) {
         @reselect-note="reselectPdfNote"
         @delete-highlight="deleteHighlight"
         @reselect-highlight="reselectPdfHighlight"
+        @note-placement-target="onPdfNotePlacementTarget"
       />
 
       <ReaderPane
@@ -3507,6 +3887,7 @@ async function submitOpenBook(dir = bookPickerDir.value) {
         :segments="segments"
         :viewport-anchor="readingAnchorLid"
         :selected-lid="selectedLid"
+        :note-placement-active="notePlacementState.phase === 'placing' && notePlacementSurface === 'markdown'"
         :render-seg="renderSeg"
         :render-markdown="renderMarkdown"
         :markdown-heading-level="markdownHeadingLevel"
@@ -3522,6 +3903,8 @@ async function submitOpenBook(dir = bookPickerDir.value) {
         @prose-mouse-up="onProseMouseUp"
         @current-lid="onCurrentLid"
         @viewport-interaction="clearOutlineNavigation"
+        @note-placement-target="onMarkdownNotePlacementTarget"
+        @note-placement-invalid="onMarkdownNotePlacementInvalid"
         @scroll-edge="onScrollEdge"
         @highlight-block="highlightBlock"
         @note-block="noteBlock"
@@ -3548,6 +3931,9 @@ async function submitOpenBook(dir = bookPickerDir.value) {
         :chat-sessions="chatSessions"
         :active-chat-session-id="activeChatSessionId"
         :sending="sending"
+        :unquoted-note-placement-available="unquotedNotePlacementAvailable"
+        :note-placement-surface="notePlacementSurface"
+        :note-source-fingerprint="noteSourceFingerprint"
         :show-trace="showTrace"
         :latest-trace="latestTrace"
         :selected-lid="selectedLid"
@@ -3590,6 +3976,7 @@ async function submitOpenBook(dir = bookPickerDir.value) {
         @undo-effect="undoEffect"
         @keep-effect="keepEffect"
         @save-answer-selection="saveAgentSelection"
+        @place-note="startNotePlacement"
         @agent-source-opened="syncAfterAgentSourceOpen"
         @refresh-profile="refreshProfileSurface()"
         @mutate-profile="mutateProfile"
@@ -3602,6 +3989,20 @@ async function submitOpenBook(dir = bookPickerDir.value) {
         @artifact-cited="recordIntentUsage('artifact_cited', $event)"
       />
     </div>
+
+    <aside
+      v-if="notePlacementState.phase !== 'idle'"
+      class="note-placement-status"
+      role="status"
+      aria-live="polite"
+    >
+      <span v-if="notePlacementState.phase === 'placing'">
+        请选择{{ notePlacementSurface === "pdf" ? " PDF 正文区域" : "正文中的真实段落" }}放置 Note。
+      </span>
+      <span v-else-if="notePlacementState.phase === 'saving'">正在保存 Note...</span>
+      <span v-else>正在核对 Note 是否已保存...</span>
+      <button v-if="notePlacementState.phase === 'placing'" @click="cancelNotePlacement">取消</button>
+    </aside>
 
     <BuildIntentPane
       v-if="appSurface === 'reader' && buildIntentOpen"
@@ -4683,5 +5084,31 @@ async function submitOpenBook(dir = bookPickerDir.value) {
   background: var(--accent);
   color: #fff;
   border-color: var(--accent);
+}
+.reader-pane [data-lid].note-placement-candidate {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+  background: rgba(116, 86, 55, 0.1);
+  cursor: crosshair;
+}
+.note-placement-status {
+  position: fixed;
+  left: 50%;
+  bottom: 1.25rem;
+  transform: translateX(-50%);
+  z-index: 80;
+  width: min(34rem, calc(100vw - 2rem));
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.75rem 0.9rem;
+  border: 1px solid var(--hairline);
+  border-radius: 10px;
+  background: var(--canvas);
+  box-shadow: 0 8px 28px rgba(34, 31, 27, 0.16);
+}
+.note-placement-status button {
+  flex: 0 0 auto;
 }
 </style>

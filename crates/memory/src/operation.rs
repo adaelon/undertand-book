@@ -493,6 +493,7 @@ fn insert_evidence_record(
         content: evidence_text.into(),
         range: None,
         selection_context: None,
+        note_placement: None,
         citations: Vec::new(),
         usage: Usage {
             count: 1,
@@ -678,6 +679,7 @@ mod tests {
                         content: "forged".into(),
                         range: None,
                         selection_context: None,
+                        note_placement: None,
                         citations: None,
                         source_session_id: None,
                     },

@@ -117,4 +117,71 @@ describe("ReaderPane Note rendering", () => {
     expect(wrapper.emitted("viewport-interaction")).toHaveLength(1);
     wrapper.unmount();
   });
+
+  it("emits placement input only from Pointer Events while placement is active", async () => {
+    const wrapper = mount(ReaderPane, {
+      props: {
+        segments: [segment("1.1", "paragraph")],
+        viewportAnchor: null,
+        selectedLid: null,
+        notePlacementActive: false,
+        renderSeg: (value) => value.text,
+        renderMarkdown: (source) => source,
+        markdownHeadingLevel: () => null,
+        isAsset: () => false,
+        isHighlighted: () => false,
+        highlightsOf: () => [],
+        highlightCardsOf: () => [],
+        visibleNotes: [],
+        hlExcerpt: () => "",
+        imageMeta: () => null,
+        imageAsset: () => null,
+      },
+    });
+
+    await wrapper.get('[data-lid="1.1"]').trigger("pointerup");
+    expect(wrapper.emitted("note-placement-pointer")).toBeUndefined();
+
+    await wrapper.setProps({ notePlacementActive: true });
+    await wrapper.get('[data-lid="1.1"]').trigger("pointerup");
+    expect(wrapper.emitted("note-placement-pointer")).toHaveLength(1);
+    expect(wrapper.emitted("note-placement-target")?.at(-1)).toEqual([{ lid: "1.1" }]);
+    wrapper.unmount();
+  });
+
+  it("previews and submits a real target at 390px while rejecting toolbar controls", async () => {
+    Object.defineProperty(window, "innerWidth", { value: 390, configurable: true });
+    const wrapper = mount(ReaderPane, {
+      props: {
+        segments: [segment("1.1", "paragraph")],
+        viewportAnchor: null,
+        selectedLid: "1.1",
+        notePlacementActive: true,
+        renderSeg: (value) => value.text,
+        renderMarkdown: (source) => source,
+        markdownHeadingLevel: () => null,
+        isAsset: () => false,
+        isHighlighted: () => false,
+        highlightsOf: () => [],
+        highlightCardsOf: () => [],
+        visibleNotes: [],
+        hlExcerpt: () => "",
+        imageMeta: () => null,
+        imageAsset: () => null,
+      },
+    });
+    const body = wrapper.get('[data-lid="1.1"]');
+
+    await body.trigger("pointermove", { pointerType: "touch" });
+    expect(body.classes()).toContain("note-placement-candidate");
+    await body.trigger("pointerup", { pointerType: "touch" });
+    expect(wrapper.emitted("note-placement-target")?.at(-1)).toEqual([{ lid: "1.1" }]);
+
+    const action = wrapper.get(".block-actions button");
+    await action.trigger("pointermove", { pointerType: "touch" });
+    expect(body.classes()).not.toContain("note-placement-candidate");
+    await action.trigger("pointerup", { pointerType: "touch" });
+    expect(wrapper.emitted("note-placement-invalid")).toHaveLength(1);
+    wrapper.unmount();
+  });
 });

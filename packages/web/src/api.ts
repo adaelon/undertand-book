@@ -137,6 +137,7 @@ export interface HighlightEffect {
 export interface NoteEffect {
   ok: boolean;
   note_id: string;
+  status: NoteSaveStatus;
 }
 /** 段内字符区间(高亮选区,UTF-16 偏移,相对该 LID 文本)`[ADR-0031]`。 */
 export interface TextRange {
@@ -168,6 +169,22 @@ export interface SelectionContext {
   resolved_quote: string;
   ranges: SelectedRange[];
 }
+export type NoteBodyPlacement =
+  | {
+      kind: "lid_block";
+      source_fingerprint: string;
+      lid: string;
+    }
+  | {
+      kind: "pdf_region";
+      source_fingerprint: string;
+      lid: string;
+      source_map_version: "pdf_source_map.v1" | "pdf_source_map.v2";
+      source_map_config_hash: string;
+      page_index: number;
+      region_id: string;
+    };
+export type NoteSaveStatus = "CREATED" | "EXISTING";
 /** memory 记录(符 V3 §4.3;JSON 字段 `type` = Rust mem_type 的 serde rename)。 */
 export interface MemoryRecord {
   mem_id: string;
@@ -178,7 +195,16 @@ export interface MemoryRecord {
   content: string;
   range?: TextRange | null; // 高亮段内区间;note / 整段高亮为空 `[ADR-0031]`
   selection_context?: SelectionContext | null;
+  note_placement?: NoteBodyPlacement | null;
   source_session_id?: string | null;
+}
+export interface NoteSaveOutcome {
+  status: NoteSaveStatus;
+  record: MemoryRecord;
+}
+export interface SourceFingerprintResponse {
+  book_id: string;
+  source_fingerprint: string;
 }
 export interface BookText {
   lid: string;
@@ -1081,6 +1107,7 @@ export const api = {
   sourceManifest: async () => parseSourceManifestV2(
     await http<unknown>("GET", "/book/source_manifest"),
   ),
+  sourceFingerprint: () => http<SourceFingerprintResponse>("GET", "/book/source_fingerprint"),
   pdfSourceMap: () => http<PdfSourceMap>("GET", "/book/pdf_source_map"),
   paperMinimap: () => http<PaperMinimapBase>("GET", "/book/paper_minimap"),
   pdfOriginalUrl: () => `${BASE}/book/pdf/original`,
@@ -1232,8 +1259,19 @@ export const api = {
   // ── memory.*(POST)──
   recall: (q: { book_id?: string; lid?: string; type?: string; layer?: string; text?: string } = {}) =>
     http<MemoryRecord[]>("POST", "/memory/recall", q),
-  save: (r: { type: string; anchor_lid: string; content: string; layer?: string; selection_context?: SelectionContext }) =>
-    http<MemoryRecord>("POST", "/memory/save", r),
+  save: (r: {
+    type: string;
+    anchor_lid?: string;
+    content: string;
+    layer?: string;
+    selection_context?: SelectionContext;
+    note_placement?: NoteBodyPlacement;
+    source_session_id?: string;
+  }) => http<MemoryRecord | NoteSaveOutcome>("POST", "/memory/save", r),
+  reanchor: (mem_id: string, note_placement: NoteBodyPlacement) =>
+    http<MemoryRecord>("POST", "/memory/reanchor", { mem_id, note_placement }),
+  promote: (mem_id: string, from = "session", to = "long_term") =>
+    http<MemoryRecord>("POST", "/memory/promote", { mem_id, from, to }),
   replace: (r: { mem_id: string; content: string; selection_context?: SelectionContext }) =>
     http<MemoryRecord>("POST", "/memory/replace", r),
   delete: (mem_id: string) => http<{ ok: boolean }>("POST", "/memory/delete", { mem_id }),

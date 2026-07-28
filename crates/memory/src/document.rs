@@ -5,7 +5,8 @@ use crate::ReviewState;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
-pub const MEMORY_SCHEMA_VERSION: u32 = 2;
+pub const MEMORY_SCHEMA_VERSION: u32 = 3;
+pub(crate) const PREVIOUS_MEMORY_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MemoryDocument {
@@ -48,6 +49,18 @@ impl MemoryDocument {
             exclusions: Vec::new(),
             governance_state: ProfileGovernanceState::default(),
         }
+    }
+
+    pub(crate) fn migrate_from_v2(mut self) -> Result<MemoryDocument, String> {
+        if self.schema_version != PREVIOUS_MEMORY_SCHEMA_VERSION {
+            return Err(format!(
+                "无法从 memory schema_version {} 迁移到 {}",
+                self.schema_version, MEMORY_SCHEMA_VERSION
+            ));
+        }
+        self.schema_version = MEMORY_SCHEMA_VERSION;
+        self.validate()?;
+        Ok(self)
     }
 
     pub(crate) fn validate(&self) -> Result<(), String> {

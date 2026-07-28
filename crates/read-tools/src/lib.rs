@@ -26,6 +26,7 @@ pub const SEARCH_TEXT_NORMALIZATION_VERSION: &str =
 pub struct Book {
     pub base: ReadOnlyBase,
     source_u16: Vec<u16>,
+    source_fingerprint: String,
     lid_idx: HashMap<String, usize>,
     node_idx: HashMap<String, usize>,
     formula_semantics: Vec<FormulaSemantics>,
@@ -3106,6 +3107,7 @@ impl Book {
 
     pub fn new(base: ReadOnlyBase, source: &str) -> Book {
         let source_u16: Vec<u16> = source.encode_utf16().collect();
+        let source_fingerprint = search_sha256_hex(source.as_bytes());
         let lid_idx = base
             .lid_nodes
             .iter()
@@ -3121,6 +3123,7 @@ impl Book {
         Book {
             base,
             source_u16,
+            source_fingerprint,
             lid_idx,
             node_idx,
             formula_semantics: Vec::new(),
@@ -3130,6 +3133,11 @@ impl Book {
             paper_lexicon: None,
             paper_minimap_artifacts: PaperMinimapArtifacts::default(),
         }
+    }
+
+    /// SHA-256 of the canonical `source.txt` bytes loaded into this Book.
+    pub fn source_fingerprint(&self) -> &str {
+        &self.source_fingerprint
     }
 
     pub fn with_formula_semantics(mut self, formula_semantics: Vec<FormulaSemantics>) -> Book {

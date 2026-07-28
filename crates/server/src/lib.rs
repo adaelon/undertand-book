@@ -17,12 +17,14 @@ use book_tool_contracts::{
 use memory::{
     classify_profile_fact_privacy, classify_profile_privacy, Anchor, Applicability,
     BackgroundClaim, CapabilityClaim, CollectionRuleMatcher, ConstraintClaim, ExplicitProfileFact,
-    GoalClaim, HistoricalBackfillRange, MemoryOp, MemoryOpOutcome, MemoryStore, PendingTurnRef,
-    PreferenceClaim, ProfileGovernanceAction, ProfileGovernanceMutation, ProfileGovernanceOutcome,
+    GoalClaim, HistoricalBackfillRange, MemoryOp, MemoryOpOutcome, MemoryStore, NoteBodyPlacement,
+    NoteSaveOutcome, NoteSaveStatus, PdfSourceMapVersion, PendingTurnRef, PreferenceClaim,
+    ProfileGovernanceAction, ProfileGovernanceMutation, ProfileGovernanceOutcome,
     ProfileGovernanceOutcomeKind, ProfilePayload, ProfilePayloadKind, ProfilePrivacyClass,
-    ProfileResolutionContext, ProfileScope, ProfileStatus, RecallQuery, ReplaceInput,
-    ReviewJobStatus, ReviewSessionCursor, SaveInput, SelectedRange, SelectionContext,
-    SelectionResolution, SelectionResolutionBasis, Sensitivity, SnapshotContext, SnapshotRequest,
+    ProfileResolutionContext, ProfileScope, ProfileStatus, PromoteInput, ReanchorInput,
+    RecallQuery, ReplaceInput, ReviewJobStatus, ReviewSessionCursor, SaveInput, SelectedRange,
+    SelectionContext, SelectionResolution, SelectionResolutionBasis, Sensitivity, SnapshotContext,
+    SnapshotRequest,
 };
 use read_tools::{
     disambiguate_source_labels, Book, ContentProfileId, EvidenceRange, PaperLandmarkKind,
@@ -2258,6 +2260,7 @@ struct PdfRuntimeEntryPolicy {
     precision: PdfRuntimeProjectionPrecision,
     exact_source_spans: Vec<SourceSpanDto>,
     regions: Vec<PdfPageRectDto>,
+    placement_regions: Vec<(String, PdfPageRectDto)>,
     formula_display_text: Option<String>,
 }
 
@@ -3017,6 +3020,7 @@ fn route_book(
         }
     }
     match leaf {
+        "source_fingerprint" => route_source_fingerprint(book, book_dir),
         "library" => {
             let root = book_library_root(book_dir);
             let books = list_book_library(&root);
@@ -6443,6 +6447,147 @@ fn source_manifest_value(book_dir: &Path) -> Result<serde_json::Value, ToolError
     )
 }
 
+fn current_note_source_fingerprint(book_dir: &Path) -> Result<String, ToolError> {
+    let source = std::fs::read(book_dir.join("source.txt")).map_err(|error| ToolError {
+        error_code: "STALE_NOTE_SOURCE".into(),
+        category: "conflict".into(),
+        message: format!("current canonical source.txt cannot be read: {error}"),
+    })?;
+    Ok(sha256_hex(&source))
+}
+
+fn stale_note_source(expected: &str, actual: &str) -> ToolError {
+    ToolError {
+        error_code: "STALE_NOTE_SOURCE".into(),
+        category: "conflict".into(),
+        message: format!("Note source fingerprint is stale: expected {expected}, current {actual}"),
+    }
+}
+
+fn stale_pdf_note_placement(message: impl Into<String>) -> ToolError {
+    ToolError {
+        error_code: "STALE_PDF_NOTE_PLACEMENT".into(),
+        category: "conflict".into(),
+        message: message.into(),
+    }
+}
+
+fn validate_note_body_placement(
+    book: &Book,
+    book_dir: &Path,
+    placement: &NoteBodyPlacement,
+) -> Result<(), ToolError> {
+    let current_fingerprint = current_note_source_fingerprint(book_dir)?;
+    if book.source_fingerprint() != current_fingerprint {
+        return Err(stale_note_source(
+            book.source_fingerprint(),
+            &current_fingerprint,
+        ));
+    }
+    if placement.source_fingerprint() != current_fingerprint {
+        return Err(stale_note_source(
+            placement.source_fingerprint(),
+            &current_fingerprint,
+        ));
+    }
+    book.text(placement.lid(), None)?;
+
+    let NoteBodyPlacement::PdfRegion {
+        source_map_version,
+        source_map_config_hash,
+        page_index,
+        region_id,
+        ..
+    } = placement
+    else {
+        return Ok(());
+    };
+
+    let manifest = require_pdf_runtime_capability(book_dir, "project_lid_to_pdf")
+        .map_err(|error| stale_pdf_note_placement(error.message))?;
+    let manifest_source = manifest
+        .get("canonical_source")
+        .and_then(|value| value.get("sha256"))
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| stale_pdf_note_placement("source manifest has no canonical source hash"))?;
+    if manifest_source != current_fingerprint {
+        return Err(stale_pdf_note_placement(
+            "PDF source map was built for a different canonical source",
+        ));
+    }
+    let policy = pdf_runtime_projection_policy(book_dir)
+        .map_err(|error| stale_pdf_note_placement(error.message))?;
+    validate_pdf_runtime_policy_identity(
+        &policy,
+        &manifest,
+        &book.base.book_id,
+        "project_lid_to_pdf",
+    )
+    .map_err(|error| stale_pdf_note_placement(error.message))?;
+    let version_matches = matches!(
+        (source_map_version, policy.version),
+        (PdfSourceMapVersion::V1, PdfRuntimeMapVersion::V1)
+            | (PdfSourceMapVersion::V2, PdfRuntimeMapVersion::V2)
+    );
+    if !version_matches || source_map_config_hash != &policy.config_hash {
+        return Err(stale_pdf_note_placement(
+            "PDF Note placement map version/config is stale",
+        ));
+    }
+    let eligible = |entry: &PdfRuntimeEntryPolicy| match policy.version {
+        PdfRuntimeMapVersion::V1 => entry.precision == PdfRuntimeProjectionPrecision::CharExact,
+        PdfRuntimeMapVersion::V2 => matches!(
+            entry.precision,
+            PdfRuntimeProjectionPrecision::CharExact | PdfRuntimeProjectionPrecision::RegionExact
+        ),
+    };
+    let candidates = policy
+        .entries
+        .iter()
+        .filter(|(_, entry)| eligible(entry))
+        .filter(|(_, entry)| {
+            entry
+                .placement_regions
+                .iter()
+                .any(|(candidate_id, region)| {
+                    candidate_id == region_id && region.page_index == *page_index as usize
+                })
+        })
+        .map(|(lid, _)| lid.as_str())
+        .collect::<Vec<_>>();
+    if candidates.len() > 1 {
+        return Err(ToolError {
+            error_code: "AMBIGUOUS_NOTE_TARGET".into(),
+            category: "conflict".into(),
+            message: format!(
+                "PDF Note region resolves to multiple LIDs: {}",
+                candidates.join(",")
+            ),
+        });
+    }
+    let Some(entry) = policy.entries.get(placement.lid()) else {
+        return Err(stale_pdf_note_placement(
+            "PDF Note placement LID is absent from the current source map",
+        ));
+    };
+    if !eligible(entry) || candidates.as_slice() != [placement.lid()] {
+        return Err(stale_pdf_note_placement(
+            "PDF Note placement region or precision is no longer valid",
+        ));
+    }
+    Ok(())
+}
+
+fn route_source_fingerprint(book: &Book, book_dir: &Path) -> Reply {
+    match current_note_source_fingerprint(book_dir) {
+        Ok(source_fingerprint) => ok_json(&json!({
+            "book_id": book.base.book_id,
+            "source_fingerprint": source_fingerprint
+        })),
+        Err(error) => err_reply(&error),
+    }
+}
+
 fn route_source_manifest(book_dir: &Path) -> Reply {
     match source_manifest_value(book_dir) {
         Ok(value) => ok_json(&value),
@@ -6686,12 +6831,242 @@ fn mime_for_asset(path: &Path) -> &'static str {
 
 /// `reader.*`/`memory.*` 可变命令 → POST(S10b)。reader.* 返 effect;
 /// highlight/note 委托 memory.save(标注单源);memory.* 直读写记忆层。
+fn invalid_note_request(error_code: &str, message: impl Into<String>) -> ToolError {
+    ToolError {
+        error_code: error_code.into(),
+        category: "validation".into(),
+        message: message.into(),
+    }
+}
+
+fn parse_optional_note_placement(value: &Value) -> Result<Option<NoteBodyPlacement>, ToolError> {
+    match value.get("note_placement") {
+        None | Some(Value::Null) => Ok(None),
+        Some(placement) => serde_json::from_value(placement.clone())
+            .map(Some)
+            .map_err(|error| {
+                invalid_note_request(
+                    "INVALID_NOTE_PLACEMENT",
+                    format!("memory Note placement is invalid: {error}"),
+                )
+            }),
+    }
+}
+
+fn parse_optional_selection_context(value: &Value) -> Result<Option<SelectionContext>, ToolError> {
+    match value.get("selection_context") {
+        None | Some(Value::Null) => Ok(None),
+        Some(context) => serde_json::from_value(context.clone())
+            .map(Some)
+            .map_err(|error| {
+                invalid_note_request(
+                    "INVALID_SELECTION_CONTEXT",
+                    format!("memory selection_context is invalid: {error}"),
+                )
+            }),
+    }
+}
+
+fn save_user_note(
+    state: &mut AppState,
+    value: &Value,
+    now: &str,
+) -> Result<NoteSaveOutcome, ToolError> {
+    let content = value
+        .get("content")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            invalid_note_request("INVALID_MEMORY_TYPE", "memory.save Note requires content")
+        })?;
+    if value
+        .get("layer")
+        .and_then(Value::as_str)
+        .is_some_and(|layer| layer != "long_term")
+    {
+        return Err(invalid_note_request(
+            "INVALID_NOTE_PLACEMENT",
+            "user-created Notes must use the long_term layer",
+        ));
+    }
+
+    let selection_context = parse_optional_selection_context(value)?;
+    let note_placement = parse_optional_note_placement(value)?;
+    match (&selection_context, &note_placement) {
+        (Some(_), Some(_)) => {
+            return Err(invalid_note_request(
+                "INVALID_NOTE_PLACEMENT",
+                "new Notes cannot contain both selection_context and note_placement",
+            ))
+        }
+        (None, None) => {
+            return Err(invalid_note_request(
+                "NOTE_PLACEMENT_REQUIRED",
+                "new Notes require exactly one of selection_context or note_placement",
+            ))
+        }
+        _ => {}
+    }
+    let supplied_anchor = value.get("anchor_lid").and_then(Value::as_str);
+    if note_placement.is_some() && (supplied_anchor.is_some() || value.get("citations").is_some()) {
+        return Err(invalid_note_request(
+            "INVALID_NOTE_PLACEMENT",
+            "body-placed Notes accept note_placement only; anchor and citations are derived",
+        ));
+    }
+    if let Some(placement) = &note_placement {
+        validate_note_body_placement(&state.book, &state.book_dir, placement)?;
+    }
+    if let Some(context) = &selection_context {
+        for range in &context.ranges {
+            state.book.text(&range.lid, None)?;
+        }
+    }
+    let anchor_lid = note_placement
+        .as_ref()
+        .map(NoteBodyPlacement::lid)
+        .or_else(|| {
+            selection_context
+                .as_ref()
+                .and_then(|context| context.ranges.first())
+                .map(|range| range.lid.as_str())
+        })
+        .or(supplied_anchor)
+        .map(str::to_string);
+    let source_session_id = value
+        .get("source_session_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string);
+    let mut outcome = state.store.save_note(
+        SaveInput {
+            mem_id: None,
+            mem_type: "note".into(),
+            layer: "long_term".into(),
+            book_id: state.book.base.book_id.clone(),
+            anchor: Anchor {
+                lid: anchor_lid,
+                concept: None,
+            },
+            content: content.into(),
+            range: None,
+            selection_context,
+            note_placement,
+            citations: None,
+            source_session_id,
+        },
+        now,
+    )?;
+    if outcome.status == NoteSaveStatus::Existing && outcome.record.layer == "session" {
+        outcome.record = state.store.promote(PromoteInput {
+            mem_id: outcome.record.mem_id,
+            from_layer: "session".into(),
+            to_layer: "long_term".into(),
+        })?;
+    }
+    Ok(outcome)
+}
+
+fn route_user_note_save(state: &mut AppState, value: &Value, now: &str) -> Reply {
+    match save_user_note(state, value, now) {
+        Ok(outcome) => ok_json(&outcome),
+        Err(error) => err_reply(&error),
+    }
+}
+
+fn route_note_reanchor(state: &mut AppState, value: &Value) -> Reply {
+    let Some(mem_id) = value.get("mem_id").and_then(Value::as_str) else {
+        return validation("INVALID_NOTE_PLACEMENT", "memory.reanchor requires mem_id");
+    };
+    if value.get("anchor_lid").is_some() || value.get("citations").is_some() {
+        return validation(
+            "INVALID_NOTE_PLACEMENT",
+            "memory.reanchor accepts note_placement only",
+        );
+    }
+    let placement = match parse_optional_note_placement(value) {
+        Ok(Some(placement)) => placement,
+        Ok(None) => {
+            return validation(
+                "INVALID_NOTE_PLACEMENT",
+                "memory.reanchor requires note_placement",
+            )
+        }
+        Err(error) => return err_reply(&error),
+    };
+    if let Some(record) = state
+        .store
+        .recall(&RecallQuery::default())
+        .into_iter()
+        .find(|record| record.mem_id == mem_id)
+    {
+        if record.book_id != state.book.base.book_id {
+            return validation(
+                "INVALID_NOTE_PLACEMENT",
+                "memory.reanchor target belongs to another book",
+            );
+        }
+        if record.mem_type != "note" || record.selection_context.is_some() {
+            return validation(
+                "NOTE_REANCHOR_NOT_ALLOWED",
+                "only body-placed or legacy Notes can be reanchored",
+            );
+        }
+    }
+    if let Err(error) = validate_note_body_placement(&state.book, &state.book_dir, &placement) {
+        return err_reply(&error);
+    }
+    match state.store.reanchor(ReanchorInput {
+        mem_id: mem_id.into(),
+        note_placement: placement,
+    }) {
+        Ok(record) => ok_json(&record),
+        Err(error) => err_reply(&error),
+    }
+}
+
+fn route_memory_promote(state: &mut AppState, value: &Value) -> Reply {
+    let Some(mem_id) = value.get("mem_id").and_then(Value::as_str) else {
+        return validation("INVALID_MEMORY_PROMOTE", "memory.promote requires mem_id");
+    };
+    let from_layer = value
+        .get("from")
+        .and_then(Value::as_str)
+        .unwrap_or("session");
+    let to_layer = value
+        .get("to")
+        .and_then(Value::as_str)
+        .unwrap_or("long_term");
+    if from_layer != "session" || to_layer != "long_term" {
+        return validation(
+            "INVALID_MEMORY_PROMOTE",
+            "memory.promote only supports session to long_term",
+        );
+    }
+    match state.store.promote(PromoteInput {
+        mem_id: mem_id.into(),
+        from_layer: from_layer.into(),
+        to_layer: to_layer.into(),
+    }) {
+        Ok(record) => ok_json(&record),
+        Err(error) => err_reply(&error),
+    }
+}
+
 fn route_mut(state: &mut AppState, path: &str, body: &str, now: &str) -> Reply {
     let v = match body_value(body) {
         Ok(v) => v,
         Err(reply) => return reply,
     };
     let sget = |k: &str| v.get(k).and_then(|x| x.as_str());
+    if path == "/memory/save" && sget("type") == Some("note") {
+        return route_user_note_save(state, &v, now);
+    }
+    if path == "/memory/reanchor" {
+        return route_note_reanchor(state, &v);
+    }
+    if path == "/memory/promote" {
+        return route_memory_promote(state, &v);
+    }
     match path {
         "/reader/paper_minimap.localize" => route_paper_minimap_localize(state),
         "/reader/paper_minimap.state" => {
@@ -6917,6 +7292,16 @@ fn route_mut(state: &mut AppState, path: &str, body: &str, now: &str) -> Reply {
             let (Some(lid), Some(text)) = (sget("lid"), sget("text")) else {
                 return validation("INVALID_RANGE", "reader.note 需 lid + text");
             };
+            let current_fingerprint = match current_note_source_fingerprint(&state.book_dir) {
+                Ok(fingerprint) => fingerprint,
+                Err(error) => return err_reply(&error),
+            };
+            if current_fingerprint != state.book.source_fingerprint() {
+                return err_reply(&stale_note_source(
+                    state.book.source_fingerprint(),
+                    &current_fingerprint,
+                ));
+            }
             match state
                 .reader
                 .note(&state.book, &mut state.store, lid, text, "long_term", now)
@@ -7009,6 +7394,7 @@ fn route_mut(state: &mut AppState, path: &str, body: &str, now: &str) -> Reply {
                 content: content.into(),
                 range: None, // memory.save 直存(note / agent 高亮保留)无段内 range;人段内高亮走 reader.highlight `[ADR-0031]`
                 selection_context,
+                note_placement: None,
                 citations: None,
                 source_session_id: None,
             };
@@ -8146,21 +8532,41 @@ fn pdf_runtime_projection_policy(book_dir: &Path) -> Result<PdfRuntimeProjection
                 "PDF source map exact span is outside its LID: {lid}"
             )));
         }
-        let regions = entry
+        let raw_regions = entry
             .get("regions")
             .and_then(|value| value.as_array())
             .ok_or_else(|| {
                 pdf_runtime_artifact_error(format!("PDF source map entry has no regions: {lid}"))
-            })?
-            .iter()
-            .map(|value| {
-                parse_pdf_rect(value).ok_or_else(|| {
+            })?;
+        let mut regions = Vec::with_capacity(raw_regions.len());
+        let mut placement_regions: Vec<(String, PdfPageRectDto)> =
+            Vec::with_capacity(raw_regions.len());
+        for value in raw_regions {
+            let region = parse_pdf_rect(value).ok_or_else(|| {
+                pdf_runtime_artifact_error(format!(
+                    "PDF source map entry has an invalid region: {lid}"
+                ))
+            })?;
+            let region_id = value
+                .get("region_id")
+                .and_then(|value| value.as_str())
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| {
                     pdf_runtime_artifact_error(format!(
-                        "PDF source map entry has an invalid region: {lid}"
+                        "PDF source map entry region has no region_id: {lid}"
                     ))
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+                })?
+                .to_string();
+            if placement_regions.iter().any(|(existing_id, existing)| {
+                existing_id == &region_id && existing.page_index == region.page_index
+            }) {
+                return Err(pdf_runtime_artifact_error(format!(
+                    "duplicate PDF source map region identity for {lid}: {region_id}"
+                )));
+            }
+            placement_regions.push((region_id, region));
+            regions.push(region);
+        }
         if version == PdfRuntimeMapVersion::V2
             && precision == PdfRuntimeProjectionPrecision::RegionExact
             && !exact_source_spans.is_empty()
@@ -8202,6 +8608,7 @@ fn pdf_runtime_projection_policy(book_dir: &Path) -> Result<PdfRuntimeProjection
                     precision,
                     exact_source_spans,
                     regions,
+                    placement_regions,
                     formula_display_text,
                 },
             )
@@ -11842,6 +12249,27 @@ mod tests {
         s.reader = Reader::new(&s.book, DEFAULT_RADIUS);
     }
 
+    fn write_note_pdf_route_artifacts(s: &mut AppState) -> String {
+        let source = format!("PDF{}", "X".repeat(97));
+        use_pdf_runtime_fixture_source(s);
+        std::fs::write(s.book_dir.join("source.txt"), &source).unwrap();
+        write_pdf_runtime_artifacts(s);
+        let source_fingerprint = current_note_source_fingerprint(&s.book_dir).unwrap();
+
+        let manifest_path = s.book_dir.join("source_manifest.json");
+        let mut manifest: Value =
+            serde_json::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
+        manifest["canonical_source"]["sha256"] = json!(source_fingerprint);
+        std::fs::write(&manifest_path, manifest.to_string()).unwrap();
+
+        let source_map_path = s.book_dir.join("pdf_source_map.json");
+        let mut source_map: Value =
+            serde_json::from_str(&std::fs::read_to_string(&source_map_path).unwrap()).unwrap();
+        source_map["entries"][0]["status"] = json!("word_mapped");
+        std::fs::write(source_map_path, source_map.to_string()).unwrap();
+        source_fingerprint
+    }
+
     fn rewrite_pdf_runtime_artifacts_v2(s: &AppState, precision: &str, exact_end: usize) {
         let source_map_path = s.book_dir.join("pdf_source_map.json");
         let mut source_map: serde_json::Value =
@@ -12452,11 +12880,13 @@ mod tests {
     }
 
     fn wait_for_job_status(book_dir: &Path, job_id: &str, expected: &str) -> serde_json::Value {
-        for _ in 0..400 {
+        let mut last_status = serde_json::Value::Null;
+        for _ in 0..1200 {
             let job: serde_json::Value = serde_json::from_str(
                 &std::fs::read_to_string(job_file_path(book_dir, job_id)).unwrap(),
             )
             .unwrap();
+            last_status = job["status"].clone();
             if job["status"] == expected {
                 return job;
             }
@@ -12465,7 +12895,7 @@ mod tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(25));
         }
-        panic!("timed out waiting for job {job_id} status {expected}");
+        panic!("timed out waiting for job {job_id} status {expected}; last status: {last_status}");
     }
 
     // ── S10a book.* GET(回归)────────────────────────────────
@@ -12510,7 +12940,17 @@ mod tests {
         let saved = post(
             &mut state,
             "/memory/save",
-            r#"{"type":"note","anchor_lid":"1.1","content":"blocked"}"#,
+            &json!({
+                "type": "note",
+                "content": "blocked",
+                "selection_context": {
+                    "status": "resolved",
+                    "raw_quote": "XX",
+                    "resolved_quote": "XX",
+                    "ranges": [{"lid":"1.1","range":{"start":0,"end":2}}]
+                }
+            })
+            .to_string(),
         );
         assert_eq!(saved.status, 403);
         assert!(saved
@@ -14280,6 +14720,7 @@ mod tests {
                         page_index: 3,
                         bbox: [4.0, 0.0, 12.0, 1.0],
                     }],
+                    placement_regions: Vec::new(),
                     formula_display_text: Some("WU i, WD i".into()),
                 },
             )]),
@@ -17201,45 +17642,410 @@ unchanged after training concludes";
         let sv = post(
             &mut s,
             "/memory/save",
-            r#"{"type":"note","anchor_lid":"1.1","content":"闭包即对象"}"#,
+            &json!({
+                "type": "note",
+                "content": "闭包即对象",
+                "selection_context": {
+                    "status": "resolved",
+                    "raw_quote": "XX",
+                    "resolved_quote": "XX",
+                    "ranges": [{"lid":"1.1","range":{"start":0,"end":2}}]
+                }
+            })
+            .to_string(),
         );
-        assert_eq!(sv.status, 200);
-        assert!(sv.body.contains("mem_id"));
-        assert!(sv.body.contains("\"lid\":\"1.1\"")); // citation 自动锚回
+        assert_eq!(sv.status, 200, "{}", sv.body);
+        let saved: Value = serde_json::from_str(&sv.body).unwrap();
+        assert_eq!(saved["status"], "CREATED");
+        assert!(saved["record"]["mem_id"].is_string());
+        assert_eq!(saved["record"]["citations"][0]["lid"], "1.1");
         let rc = post(&mut s, "/memory/recall", r#"{"text":"闭包"}"#);
         assert_eq!(rc.status, 200);
         assert!(rc.body.contains("闭包即对象"));
     }
 
     #[test]
-    fn memory_save_selection_context_roundtrips_and_validates_anchor() {
+    fn memory_save_selection_context_roundtrips_and_validates_lids() {
         let mut s = state_named("mem-selection-context");
-        let body = r#"{
-          "type":"note","anchor_lid":"1.1","content":"跨段笔记",
-          "selection_context":{
-            "status":"resolved","raw_quote":"raw","resolved_quote":"resolved",
-            "ranges":[
-              {"lid":"1.1","range":{"start":0,"end":2}},
-              {"lid":"1.2","range":{"start":3,"end":5}},
-              {"lid":"1.1","range":{"start":8,"end":9}}
-            ]
-          }
-        }"#;
-        let saved = post(&mut s, "/memory/save", body);
-        assert_eq!(saved.status, 200);
+        let body = json!({
+            "type": "note",
+            "content": "跨段笔记",
+            "selection_context": {
+                "status": "resolved",
+                "raw_quote": "raw",
+                "resolved_quote": "resolved",
+                "ranges": [
+                    {"lid":"1.1","range":{"start":0,"end":2}},
+                    {"lid":"1.1","range":{"start":3,"end":5}}
+                ]
+            }
+        });
+        let saved = post(&mut s, "/memory/save", &body.to_string());
+        assert_eq!(saved.status, 200, "{}", saved.body);
         let value: serde_json::Value = serde_json::from_str(&saved.body).unwrap();
-        assert_eq!(value["selection_context"]["status"], "resolved");
-        assert_eq!(value["citations"][0]["lid"], "1.1");
-        assert_eq!(value["citations"][1]["lid"], "1.2");
-        assert_eq!(value["citations"].as_array().unwrap().len(), 2);
+        assert_eq!(value["record"]["selection_context"]["status"], "resolved");
+        assert_eq!(value["record"]["citations"][0]["lid"], "1.1");
+        assert_eq!(value["record"]["citations"].as_array().unwrap().len(), 1);
 
-        let invalid = post(
+        let mut invalid_body = body;
+        invalid_body["selection_context"]["ranges"][1]["lid"] = json!("9.9");
+        let invalid = post(&mut s, "/memory/save", &invalid_body.to_string());
+        assert_eq!(invalid.status, 404);
+        assert!(invalid.body.contains("LID_NOT_FOUND"));
+    }
+
+    #[test]
+    fn note_body_placement_markdown_routes_fail_closed_and_reanchor_atomically() {
+        let mut s = state_named("note-placement-markdown-routes");
+        let source = format!("{}{}", "A".repeat(10), "B".repeat(10));
+        s.book = Book::new(
+            multi_leaf_base("note-placement-markdown-routes", 2),
+            &source,
+        );
+        s.reader = Reader::new(&s.book, DEFAULT_RADIUS);
+        std::fs::write(s.book_dir.join("source.txt"), &source).unwrap();
+        let source_fingerprint = current_note_source_fingerprint(&s.book_dir).unwrap();
+
+        let fingerprint = get(&mut s, "/book/source_fingerprint");
+        assert_eq!(fingerprint.status, 200, "{}", fingerprint.body);
+        let fingerprint: Value = serde_json::from_str(&fingerprint.body).unwrap();
+        assert_eq!(fingerprint["book_id"], s.book.base.book_id);
+        assert_eq!(fingerprint["source_fingerprint"], source_fingerprint);
+
+        let anchor_only = post(
             &mut s,
             "/memory/save",
-            &body.replace("\"anchor_lid\":\"1.1\"", "\"anchor_lid\":\"9.9\""),
+            r#"{"type":"note","anchor_lid":"1.1","content":"not placed"}"#,
         );
-        assert_eq!(invalid.status, 400);
-        assert!(invalid.body.contains("INVALID_SELECTION_CONTEXT"));
+        assert_eq!(anchor_only.status, 400, "{}", anchor_only.body);
+        assert!(anchor_only.body.contains("NOTE_PLACEMENT_REQUIRED"));
+        assert!(s.store.recall(&RecallQuery::default()).is_empty());
+
+        let first_placement = json!({
+            "kind": "lid_block",
+            "source_fingerprint": source_fingerprint,
+            "lid": "1.1"
+        });
+        let create_body = json!({
+            "type": "note",
+            "content": "placed markdown note",
+            "note_placement": first_placement
+        });
+        let created = post(&mut s, "/memory/save", &create_body.to_string());
+        assert_eq!(created.status, 200, "{}", created.body);
+        let created: Value = serde_json::from_str(&created.body).unwrap();
+        assert_eq!(created["status"], "CREATED");
+        assert_eq!(created["record"]["layer"], "long_term");
+        assert_eq!(created["record"]["anchor"]["lid"], "1.1");
+        assert_eq!(created["record"]["citations"][0]["lid"], "1.1");
+        assert_eq!(created["record"]["note_placement"], first_placement);
+        let old_id = created["record"]["mem_id"].as_str().unwrap().to_string();
+
+        let duplicate = post(&mut s, "/memory/save", &create_body.to_string());
+        assert_eq!(duplicate.status, 200, "{}", duplicate.body);
+        let duplicate: Value = serde_json::from_str(&duplicate.body).unwrap();
+        assert_eq!(duplicate["status"], "EXISTING");
+        assert_eq!(duplicate["record"]["mem_id"], old_id);
+        assert_eq!(s.store.recall(&RecallQuery::default()).len(), 1);
+
+        let mixed = post(
+            &mut s,
+            "/memory/save",
+            &json!({
+                "type": "note",
+                "anchor_lid": "1.1",
+                "content": "mixed authority",
+                "note_placement": first_placement
+            })
+            .to_string(),
+        );
+        assert_eq!(mixed.status, 400, "{}", mixed.body);
+        assert!(mixed.body.contains("INVALID_NOTE_PLACEMENT"));
+
+        let both_note_kinds = post(
+            &mut s,
+            "/memory/save",
+            &json!({
+                "type": "note",
+                "content": "two note authorities",
+                "selection_context": {
+                    "status": "resolved",
+                    "raw_quote": "AA",
+                    "resolved_quote": "AA",
+                    "ranges": [{"lid":"1.1","range":{"start":0,"end":2}}]
+                },
+                "note_placement": first_placement
+            })
+            .to_string(),
+        );
+        assert_eq!(both_note_kinds.status, 400, "{}", both_note_kinds.body);
+        assert!(both_note_kinds.body.contains("INVALID_NOTE_PLACEMENT"));
+
+        let stale = post(
+            &mut s,
+            "/memory/save",
+            &json!({
+                "type": "note",
+                "content": "stale source",
+                "note_placement": {
+                    "kind": "lid_block",
+                    "source_fingerprint": "0".repeat(64),
+                    "lid": "1.1"
+                }
+            })
+            .to_string(),
+        );
+        assert_eq!(stale.status, 409, "{}", stale.body);
+        assert!(stale.body.contains("STALE_NOTE_SOURCE"));
+
+        let missing_lid = post(
+            &mut s,
+            "/memory/save",
+            &json!({
+                "type": "note",
+                "content": "missing target",
+                "note_placement": {
+                    "kind": "lid_block",
+                    "source_fingerprint": source_fingerprint,
+                    "lid": "9.9"
+                }
+            })
+            .to_string(),
+        );
+        assert_eq!(missing_lid.status, 404, "{}", missing_lid.body);
+        assert!(missing_lid.body.contains("LID_NOT_FOUND"));
+        assert_eq!(s.store.recall(&RecallQuery::default()).len(), 1);
+
+        let second_placement = json!({
+            "kind": "lid_block",
+            "source_fingerprint": source_fingerprint,
+            "lid": "1.2"
+        });
+        let reanchored = post(
+            &mut s,
+            "/memory/reanchor",
+            &json!({"mem_id":old_id,"note_placement":second_placement}).to_string(),
+        );
+        assert_eq!(reanchored.status, 200, "{}", reanchored.body);
+        let reanchored: Value = serde_json::from_str(&reanchored.body).unwrap();
+        assert_ne!(reanchored["mem_id"], old_id);
+        assert_eq!(reanchored["content"], "placed markdown note");
+        assert_eq!(reanchored["anchor"]["lid"], "1.2");
+        assert_eq!(reanchored["note_placement"], second_placement);
+        let records = s.store.recall(&RecallQuery::default());
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].mem_id, reanchored["mem_id"]);
+
+        let selection_note = post(
+            &mut s,
+            "/memory/save",
+            &json!({
+                "type": "note",
+                "content": "selection-backed note",
+                "selection_context": {
+                    "status": "resolved",
+                    "raw_quote": "AA",
+                    "resolved_quote": "AA",
+                    "ranges": [{"lid":"1.1","range":{"start":0,"end":2}}]
+                }
+            })
+            .to_string(),
+        );
+        assert_eq!(selection_note.status, 200, "{}", selection_note.body);
+        let selection_note: Value = serde_json::from_str(&selection_note.body).unwrap();
+        let selection_note_id = selection_note["record"]["mem_id"].as_str().unwrap();
+        let selection_reanchor = post(
+            &mut s,
+            "/memory/reanchor",
+            &json!({
+                "mem_id": selection_note_id,
+                "note_placement": second_placement
+            })
+            .to_string(),
+        );
+        assert_eq!(
+            selection_reanchor.status, 400,
+            "{}",
+            selection_reanchor.body
+        );
+        assert!(selection_reanchor
+            .body
+            .contains("NOTE_REANCHOR_NOT_ALLOWED"));
+
+        let agent_note = s
+            .reader
+            .note(
+                &s.book,
+                &mut s.store,
+                "1.1",
+                "agent proposal",
+                "session",
+                "t-agent",
+            )
+            .unwrap();
+        assert_eq!(agent_note.status, NoteSaveStatus::Created);
+        let promoted = post(
+            &mut s,
+            "/memory/promote",
+            &json!({"mem_id":agent_note.note_id}).to_string(),
+        );
+        assert_eq!(promoted.status, 200, "{}", promoted.body);
+        let promoted: Value = serde_json::from_str(&promoted.body).unwrap();
+        assert_eq!(promoted["mem_id"], agent_note.note_id);
+        assert_eq!(promoted["layer"], "long_term");
+
+        let direct = post(
+            &mut s,
+            "/reader/note",
+            r#"{"lid":"1.2","text":"direct reader note"}"#,
+        );
+        assert_eq!(direct.status, 200, "{}", direct.body);
+        let direct: Value = serde_json::from_str(&direct.body).unwrap();
+        assert_eq!(direct["status"], "CREATED");
+        let direct_record = s
+            .store
+            .recall(&RecallQuery::default())
+            .into_iter()
+            .find(|record| record.mem_id == direct["note_id"])
+            .unwrap();
+        assert_eq!(direct_record.layer, "long_term");
+        assert_eq!(direct_record.note_placement.unwrap().lid(), "1.2");
+
+        let records_before_stale_book = s.store.recall(&RecallQuery::default()).len();
+        std::fs::write(s.book_dir.join("source.txt"), format!("{source}changed")).unwrap();
+        let changed_source_fingerprint = current_note_source_fingerprint(&s.book_dir).unwrap();
+        let stale_loaded_book = post(
+            &mut s,
+            "/memory/save",
+            &json!({
+                "type": "note",
+                "content": "new source with stale loaded LIDs",
+                "note_placement": {
+                    "kind": "lid_block",
+                    "source_fingerprint": changed_source_fingerprint,
+                    "lid": "1.1"
+                }
+            })
+            .to_string(),
+        );
+        assert_eq!(stale_loaded_book.status, 409, "{}", stale_loaded_book.body);
+        assert!(stale_loaded_book.body.contains("STALE_NOTE_SOURCE"));
+        assert_eq!(
+            s.store.recall(&RecallQuery::default()).len(),
+            records_before_stale_book
+        );
+    }
+
+    #[test]
+    fn note_body_placement_pdf_route_fixture_validates_map_region_precision_and_ambiguity() {
+        let mut s = state_named("note-placement-pdf-routes");
+        let source_fingerprint = write_note_pdf_route_artifacts(&mut s);
+        let placement = json!({
+            "kind": "pdf_region",
+            "source_fingerprint": source_fingerprint,
+            "lid": "1.1",
+            "source_map_version": "pdf_source_map.v1",
+            "source_map_config_hash": "cfg-a",
+            "page_index": 0,
+            "region_id": "r1"
+        });
+        let created = post(
+            &mut s,
+            "/memory/save",
+            &json!({
+                "type": "note",
+                "content": "placed PDF note",
+                "note_placement": placement
+            })
+            .to_string(),
+        );
+        assert_eq!(created.status, 200, "{}", created.body);
+        let created: Value = serde_json::from_str(&created.body).unwrap();
+        assert_eq!(created["status"], "CREATED");
+        assert_eq!(created["record"]["note_placement"], placement);
+        assert_eq!(s.store.recall(&RecallQuery::default()).len(), 1);
+
+        let stale_source = post(
+            &mut s,
+            "/memory/save",
+            &json!({
+                "type": "note",
+                "content": "stale PDF source",
+                "note_placement": {
+                    "kind": "pdf_region",
+                    "source_fingerprint": "0".repeat(64),
+                    "lid": "1.1",
+                    "source_map_version": "pdf_source_map.v1",
+                    "source_map_config_hash": "cfg-a",
+                    "page_index": 0,
+                    "region_id": "r1"
+                }
+            })
+            .to_string(),
+        );
+        assert_eq!(stale_source.status, 409, "{}", stale_source.body);
+        assert!(stale_source.body.contains("STALE_NOTE_SOURCE"));
+
+        let stale_map = post(
+            &mut s,
+            "/memory/save",
+            &json!({
+                "type": "note",
+                "content": "stale PDF map",
+                "note_placement": {
+                    "kind": "pdf_region",
+                    "source_fingerprint": source_fingerprint,
+                    "lid": "1.1",
+                    "source_map_version": "pdf_source_map.v1",
+                    "source_map_config_hash": "old-cfg",
+                    "page_index": 0,
+                    "region_id": "r1"
+                }
+            })
+            .to_string(),
+        );
+        assert_eq!(stale_map.status, 409, "{}", stale_map.body);
+        assert!(stale_map.body.contains("STALE_PDF_NOTE_PLACEMENT"));
+
+        let source_map_path = s.book_dir.join("pdf_source_map.json");
+        let mut source_map: Value =
+            serde_json::from_str(&std::fs::read_to_string(&source_map_path).unwrap()).unwrap();
+        source_map["entries"][0]["status"] = json!("line_fallback");
+        std::fs::write(&source_map_path, source_map.to_string()).unwrap();
+        let fallback = post(
+            &mut s,
+            "/memory/save",
+            &json!({
+                "type": "note",
+                "content": "fallback PDF region",
+                "note_placement": placement
+            })
+            .to_string(),
+        );
+        assert_eq!(fallback.status, 409, "{}", fallback.body);
+        assert!(fallback.body.contains("STALE_PDF_NOTE_PLACEMENT"));
+
+        source_map["entries"][0]["status"] = json!("word_mapped");
+        let mut ambiguous_entry = source_map["entries"][0].clone();
+        ambiguous_entry["lid"] = json!("1");
+        source_map["entries"]
+            .as_array_mut()
+            .unwrap()
+            .push(ambiguous_entry);
+        std::fs::write(&source_map_path, source_map.to_string()).unwrap();
+        let ambiguous = post(
+            &mut s,
+            "/memory/save",
+            &json!({
+                "type": "note",
+                "content": "ambiguous PDF region",
+                "note_placement": placement
+            })
+            .to_string(),
+        );
+        assert_eq!(ambiguous.status, 409, "{}", ambiguous.body);
+        assert!(ambiguous.body.contains("AMBIGUOUS_NOTE_TARGET"));
+        assert_eq!(s.store.recall(&RecallQuery::default()).len(), 1);
     }
 
     #[test]
@@ -17256,10 +18062,21 @@ unchanged after training concludes";
         let saved = post(
             &mut s,
             "/memory/save",
-            r#"{"type":"note","anchor_lid":"1.1","content":"旧内容"}"#,
+            &json!({
+                "type": "note",
+                "content": "旧内容",
+                "selection_context": {
+                    "status": "resolved",
+                    "raw_quote": "XX",
+                    "resolved_quote": "XX",
+                    "ranges": [{"lid":"1.1","range":{"start":0,"end":2}}]
+                }
+            })
+            .to_string(),
         );
-        assert_eq!(saved.status, 200);
-        let old: serde_json::Value = serde_json::from_str(&saved.body).unwrap();
+        assert_eq!(saved.status, 200, "{}", saved.body);
+        let outcome: serde_json::Value = serde_json::from_str(&saved.body).unwrap();
+        let old = &outcome["record"];
         let old_id = old["mem_id"].as_str().unwrap();
 
         let replaced = post(
@@ -17295,11 +18112,21 @@ unchanged after training concludes";
         let sv = post(
             &mut s,
             "/memory/save",
-            r#"{"type":"note","anchor_lid":"1.1","content":"删我"}"#,
+            &json!({
+                "type": "note",
+                "content": "删我",
+                "selection_context": {
+                    "status": "resolved",
+                    "raw_quote": "XX",
+                    "resolved_quote": "XX",
+                    "ranges": [{"lid":"1.1","range":{"start":0,"end":2}}]
+                }
+            })
+            .to_string(),
         );
-        assert_eq!(sv.status, 200);
+        assert_eq!(sv.status, 200, "{}", sv.body);
         let v: serde_json::Value = serde_json::from_str(&sv.body).unwrap();
-        let mem_id = v["mem_id"].as_str().unwrap();
+        let mem_id = v["record"]["mem_id"].as_str().unwrap();
         let del = post(
             &mut s,
             "/memory/delete",
@@ -18758,6 +19585,7 @@ unchanged after training concludes";
                     content: "Can you explain this again?".into(),
                     range: None,
                     selection_context: None,
+                    note_placement: None,
                     citations: None,
                     source_session_id: None,
                 },

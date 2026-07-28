@@ -46,7 +46,7 @@ async function expectInsideViewport(page: Page, selector: string, width: number,
   expect(box!.y + box!.height).toBeLessThanOrEqual(height);
 }
 
-test("desktop source stays inline and opens an anchored popup before reader navigation", async ({ page }) => {
+test("desktop source stays inline and opens an anchored popup before reader navigation", async ({ page }, testInfo) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   const calls = await installSourceRoutes(page);
   await page.goto("/agent-source-visual.html");
@@ -77,14 +77,14 @@ test("desktop source stays inline and opens an anchored popup before reader navi
     }),
   }));
   expect(overflow).toEqual({ horizontal: false, actions: false });
-  await page.screenshot({ path: "../../docs/screenshots/agent-source-desktop.png", fullPage: true });
+  await page.screenshot({ path: testInfo.outputPath("agent-source-desktop.png"), fullPage: true });
 
   await page.getByRole("button", { name: "在正文中查看" }).click();
   await expect(page.getByTestId("reader-status")).toHaveText("已在正文中打开来源");
   expect(calls).toEqual(["resolve", "open"]);
 });
 
-test("mobile source popup is a viewport-bound bottom sheet", async ({ page }) => {
+test("mobile source popup is a viewport-bound bottom sheet", async ({ page }, testInfo) => {
   await page.setViewportSize({ width: 390, height: 844 });
   const calls = await installSourceRoutes(page);
   await page.goto("/agent-source-visual.html");
@@ -104,5 +104,5 @@ test("mobile source popup is a viewport-bound bottom sheet", async ({ page }) =>
     (nodes) => nodes.some((node) => node.scrollWidth > node.clientWidth + 1),
   );
   expect(textOverflow).toBe(false);
-  await page.screenshot({ path: "../../docs/screenshots/agent-source-mobile.png", fullPage: true });
+  await page.screenshot({ path: testInfo.outputPath("agent-source-mobile.png"), fullPage: true });
 });

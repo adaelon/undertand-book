@@ -36,7 +36,7 @@ async function expectRegionLabelsSeparated(locator: Locator) {
   expect(failures).toEqual([]);
 }
 
-test("desktop expansion preserves the PDF surface", async ({ page }) => {
+test("desktop expansion preserves the PDF surface", async ({ page }, testInfo) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto("/paper-minimap-visual.html");
   const pdf = page.getByTestId("pdf-surface");
@@ -84,10 +84,10 @@ test("desktop expansion preserves the PDF surface", async ({ page }) => {
     ".paper-map-relations > div > span",
     "[data-testid='argument-status']",
   ].join(",")));
-  await page.screenshot({ path: "../../docs/screenshots/paper-minimap-chinese-desktop.png", fullPage: true });
+  await page.screenshot({ path: testInfo.outputPath("paper-minimap-chinese-desktop.png"), fullPage: true });
 });
 
-test("mobile expansion stays inside the viewport as an overlay", async ({ page }) => {
+test("mobile expansion stays inside the viewport as an overlay", async ({ page }, testInfo) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/paper-minimap-visual.html?arguments=empty");
   await page.locator(".paper-map-toggle").click();
@@ -109,5 +109,5 @@ test("mobile expansion stays inside the viewport as an overlay", async ({ page }
     "[data-testid='argument-status']",
   ].join(",")));
   await expect(page.locator(".paper-map-shell")).toHaveCSS("overflow-y", "auto");
-  await page.screenshot({ path: "../../docs/screenshots/paper-minimap-chinese-mobile.png", fullPage: true });
+  await page.screenshot({ path: testInfo.outputPath("paper-minimap-chinese-mobile.png"), fullPage: true });
 });

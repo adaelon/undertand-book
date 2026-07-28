@@ -62,6 +62,9 @@ const props = defineProps<{
   activeChatSessionId: string;
   agentInput: string;
   sending: boolean;
+  unquotedNotePlacementAvailable?: boolean;
+  notePlacementSurface?: "markdown" | "pdf";
+  noteSourceFingerprint?: string | null;
   showTrace: Record<string, boolean>;
   latestTrace: TraceStep[];
   selectedLid: string | null;
@@ -105,6 +108,7 @@ const emit = defineEmits<{
   (e: "undo-effect", turnIndex: number, effectIndex: number, effect: AgentEffect): void;
   (e: "keep-effect", turnIndex: number, effectIndex: number, effect: AgentEffect): void;
   (e: "save-answer-selection", turn: ChatTurn, text: string): void;
+  (e: "place-note", note: MemoryRecord): void;
   (e: "goto", lid: string): void;
   (e: "focus-source", source: { lid: string; quote: string | null }): void;
   (e: "refresh-profile"): void;
@@ -297,7 +301,7 @@ async function openActiveAgentSourceInReader() {
 watch(() => props.activeChatSessionId, closeAgentSourcePopup);
 
 function onAnswerMouseUp(turn: ChatTurn) {
-  if (!turn.questionSelection && !turn.questionAnchorLid) {
+  if (!turn.questionSelection && !props.unquotedNotePlacementAvailable) {
     answerSelection.value = null;
     return;
   }
@@ -361,10 +365,38 @@ function notePreviewMarkdown(note: MemoryRecord): string {
   const body = note.content.replace(/^>.*(\n>.*)*\n*/m, "").trim();
   return body || note.content.trim();
 }
+function noteSourceLid(note: MemoryRecord): string | null {
+  if (note.selection_context) return note.anchor.lid ?? null;
+  if (note.note_placement?.kind !== "lid_block"
+    || note.note_placement.source_fingerprint !== props.noteSourceFingerprint
+    || note.anchor.lid !== note.note_placement.lid) {
+    return null;
+  }
+  return note.note_placement.lid;
+}
+function canFocusNoteSource(note: MemoryRecord): boolean {
+  return noteSourceLid(note) !== null;
+}
 function noteSourceLabel(note: MemoryRecord): string {
-  const quote = leadingQuote(note.content);
-  if (quote) return "引用来源";
-  return note.anchor.lid ? "跳到来源" : "无来源";
+  if (note.selection_context) return "引用来源";
+  if (!note.note_placement) return "无法定位";
+  if (note.note_placement.kind === "pdf_region") {
+    return props.annotationLocation?.[note.mem_id] === "exact" ? "PDF 正文" : "无法定位";
+  }
+  if (note.note_placement.source_fingerprint !== props.noteSourceFingerprint) return "来源已变更";
+  return note.anchor.lid === note.note_placement.lid ? "跳到来源" : "无法定位";
+}
+function notePlacementActionLabel(note: MemoryRecord): string | null {
+  if (!props.unquotedNotePlacementAvailable || note.selection_context) return null;
+  if (!note.note_placement) return "放置到正文";
+  const surface = props.notePlacementSurface ?? "markdown";
+  if ((surface === "markdown" && note.note_placement.kind !== "lid_block")
+    || (surface === "pdf" && note.note_placement.kind !== "pdf_region")) return null;
+  if (note.note_placement.source_fingerprint !== props.noteSourceFingerprint) return "重新放置";
+  if (note.note_placement.kind === "pdf_region") {
+    return props.annotationLocation?.[note.mem_id] === "exact" ? "移动" : "重新放置";
+  }
+  return "移动";
 }
 function isLongNote(note: MemoryRecord): boolean {
   return note.content.length > 360 || note.content.split("\n").length > 8;
@@ -698,7 +730,13 @@ function influenceLabel(influence: ProfileUsageTrace["influences"][number]): str
         </div>
       </div>
       <div v-if="noteCount" class="memory-list">
-        <details v-for="note in props.contextNotes" :key="note.mem_id" class="memory-card note-memory-card" :open="notesExpanded">
+        <details
+          v-for="note in props.contextNotes"
+          :key="note.mem_id"
+          class="memory-card note-memory-card"
+          :data-mem-id="note.mem_id"
+          :open="notesExpanded"
+        >
           <summary class="memory-meta note-memory-summary">
             <span class="memory-kind-with-location">
               笔记
@@ -707,17 +745,27 @@ function influenceLabel(influence: ProfileUsageTrace["influences"][number]): str
               </small>
             </span>
             <button
-              v-if="note.anchor.lid"
+              v-if="canFocusNoteSource(note)"
               class="note-source-button"
-              @click.prevent.stop="emit('focus-source', { lid: note.anchor.lid, quote: leadingQuote(note.content) })"
+              @click.prevent.stop="emit('focus-source', { lid: noteSourceLid(note)!, quote: leadingQuote(note.content) })"
             >
               {{ noteSourceLabel(note) }}
             </button>
-            <code v-else>无来源</code>
+            <code v-else>{{ noteSourceLabel(note) }}</code>
             <em>展开/收起</em>
             <div class="note-preview md" v-html="props.renderMarkdown(notePreviewMarkdown(note))"></div>
           </summary>
           <div class="md" v-html="props.renderMarkdown(note.content)"></div>
+          <button
+            v-if="notePlacementActionLabel(note)"
+            type="button"
+            class="note-placement-action"
+            data-note-placement-action
+            :data-mem-id="note.mem_id"
+            @click="emit('place-note', note)"
+          >
+            {{ notePlacementActionLabel(note) }}
+          </button>
         </details>
         <article v-for="hl in props.contextHighlights" :key="hl.mem_id" class="memory-card highlight-card">
           <div class="memory-meta">
@@ -1696,6 +1744,15 @@ function influenceLabel(influence: ProfileUsageTrace["influences"][number]): str
   text-transform: none;
 }
 .note-source-button:hover {
+  color: var(--ink);
+}
+.note-placement-action {
+  width: 100%;
+  min-height: 44px;
+  margin-top: 0.65rem;
+  border: 1px solid var(--hairline);
+  border-radius: 7px;
+  background: var(--surface);
   color: var(--ink);
 }
 .note-memory-summary {

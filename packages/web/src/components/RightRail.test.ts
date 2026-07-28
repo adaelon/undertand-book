@@ -10,6 +10,8 @@ const baseProps = {
   activeChatSessionId: "chat-1",
   agentInput: "",
   sending: false,
+  unquotedNotePlacementAvailable: false,
+  askDraft: null,
   showTrace: {},
   latestTrace: [],
   selectedLid: "1.1",
@@ -30,6 +32,62 @@ const baseProps = {
 afterEach(() => {
   document.body.replaceChildren();
   vi.unstubAllGlobals();
+});
+
+describe("RightRail Note placement actions", () => {
+  it("offers Markdown move for body Notes and placement for legacy, but never for selection or PDF Notes", async () => {
+    const currentSource = "a".repeat(64);
+    const note = (memId: string, overrides: Record<string, unknown> = {}) => ({
+      mem_id: memId,
+      type: "note",
+      layer: "long_term",
+      book_id: "book-a",
+      anchor: { lid: "1.1" },
+      content: `${memId} body`,
+      ...overrides,
+    });
+    const body = note("body", {
+      note_placement: { kind: "lid_block", source_fingerprint: currentSource, lid: "1.1" },
+    });
+    const stale = note("stale", {
+      note_placement: { kind: "lid_block", source_fingerprint: "b".repeat(64), lid: "1.1" },
+    });
+    const legacy = note("legacy");
+    const selected = note("selected", {
+      selection_context: { status: "resolved", raw_quote: "x", resolved_quote: "x", ranges: [] },
+    });
+    const pdf = note("pdf", {
+      note_placement: {
+        kind: "pdf_region",
+        source_fingerprint: currentSource,
+        lid: "1.1",
+        source_map_version: "pdf_source_map.v1",
+        source_map_config_hash: "cfg",
+        page_index: 0,
+        region_id: "r1",
+      },
+    });
+    const wrapper = mount(RightRail, {
+      props: {
+        ...baseProps,
+        unquotedNotePlacementAvailable: true,
+        noteSourceFingerprint: currentSource,
+        contextNotes: [body, stale, legacy, selected, pdf],
+      },
+    });
+
+    await wrapper.findAll("button.tab").find((button) => button.text().includes("笔记"))!.trigger("click");
+    const actions = wrapper.findAll("[data-note-placement-action]");
+    expect(actions.map((button) => button.attributes("data-mem-id"))).toEqual(["body", "stale", "legacy"]);
+    expect(actions.map((button) => button.text())).toEqual(["移动", "重新放置", "放置到正文"]);
+
+    await actions[1]!.trigger("click");
+    expect(wrapper.emitted("place-note")?.[0]).toEqual([stale]);
+    expect(wrapper.find('[data-mem-id="legacy"] .note-source-button').exists()).toBe(false);
+    expect(wrapper.find('[data-mem-id="stale"] .note-source-button').exists()).toBe(false);
+    expect(wrapper.find('[data-mem-id="body"] .note-source-button').exists()).toBe(true);
+    expect(wrapper.find('[data-mem-id="selected"] .note-source-button').exists()).toBe(true);
+  });
 });
 
 function deferred<T>() {

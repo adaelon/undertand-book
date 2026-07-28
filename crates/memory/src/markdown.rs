@@ -693,6 +693,7 @@ mod tests {
             content: content.into(),
             range: None,
             selection_context: None,
+            note_placement: None,
             citations: None,
             source_session_id: None,
         }

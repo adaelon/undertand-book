@@ -27,7 +27,9 @@ use crate::{
     ToolSpec,
 };
 use book_tool_contracts::{contract_for, input_schema, validate_input, BookToolId, BookToolInput};
-use memory::{Anchor, MemCitation, MemoryStore, ReaderProfileSnapshot, RecallQuery, SaveInput};
+use memory::{
+    Anchor, MemCitation, MemoryStore, NoteSaveStatus, ReaderProfileSnapshot, RecallQuery, SaveInput,
+};
 use read_tools::{
     disambiguate_source_labels, Book, EvidenceRange, PaperLandmarkKind,
     PaperMinimapAvailabilityStatus, PaperRegion, ReaderLayoutAction, ReaderLayoutApplyOutcome,
@@ -2576,6 +2578,16 @@ fn dispatch_registered(
                     None,
                 );
             };
+            if ty == "note" {
+                return (
+                    err_json(
+                        "NOTE_PLACEMENT_REQUIRED",
+                        "validation",
+                        "memory.save cannot create a Note from anchor_lid alone; use reader.note",
+                    ),
+                    None,
+                );
+            }
             let layer = if ty == "position" {
                 "session"
             } else {
@@ -2608,6 +2620,7 @@ fn dispatch_registered(
                 content: content.into(),
                 range: None,
                 selection_context: None,
+                note_placement: None,
                 citations,
                 source_session_id: None,
             };
@@ -2685,12 +2698,12 @@ fn dispatch_registered(
             };
             match reader.note(book, store, lid, text, "session", now) {
                 Ok(e) => {
-                    let eff = AgentEffect::Note {
+                    let effect = (e.status == NoteSaveStatus::Created).then(|| AgentEffect::Note {
                         mem_id: e.note_id.clone(),
                         lid: lid.to_string(),
                         text: text.to_string(),
-                    };
-                    (to_json(&e), Some(eff))
+                    });
+                    (to_json(&e), effect)
                 }
                 Err(e) => (to_json(&e), None),
             }
@@ -3058,6 +3071,7 @@ fn record_query_observation(
             content: question.into(),
             range: None,
             selection_context: None,
+            note_placement: None,
             citations: None,
             source_session_id: None,
         },
@@ -6012,7 +6026,7 @@ user_question=\"explain normalization\"";
         assert!(persisted.contains("PROFILE_FACT_NOT_IN_SNAPSHOT"));
     }
 
-    // 多跳收敛:chat 调 book.query(触发内层 complete)→ chat 调 memory.save → chat 终答。
+    // 多跳收敛:chat 调 book.query(触发内层 complete)→ chat 调 reader.note → chat 终答。
     #[test]
     fn multihop_query_then_save_then_finish() {
         let b = book();
@@ -6024,11 +6038,11 @@ user_question=\"explain normalization\"";
                     "book.query",
                     r#"{"query":"命令模式是什么?","intent":"definition","targets":["命令模式"],"obligations":[{"requirement":"给出命令模式的定义"}],"anchor_lid":"1.1"}"#,
                 )]),
-                turn_calls(vec![discovery_call("discover-save", "memory.save", 1)]),
+                turn_calls(vec![discovery_call("discover-save", "reader.note", 1)]),
                 turn_calls(vec![call(
                     "c2",
-                    "memory.save",
-                    r#"{"type":"note","anchor_lid":"1.1","content":"命令=对象化的调用"}"#,
+                    "reader.note",
+                    r#"{"lid":"1.1","text":"命令=对象化的调用"}"#,
                 )]),
                 turn_final("命令模式把请求封装成对象。"),
             ],
@@ -6060,7 +6074,7 @@ user_question=\"explain normalization\"";
         assert!(!out.incomplete);
         assert_eq!(out.answer.as_deref(), Some("命令模式把请求封装成对象。"));
         assert_eq!(out.turns, 4);
-        // memory.save 真落库 + citation 自动锚回 1.1
+        // reader.note 真落库 + citation 自动锚回 1.1
         let recalled = store.recall(&RecallQuery::default());
         assert_eq!(recalled.len(), 1);
         assert_eq!(recalled[0].citations[0].lid, "1.1");

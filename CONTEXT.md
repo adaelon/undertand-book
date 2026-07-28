@@ -195,19 +195,22 @@ E 的记忆所在。**独立于只读基座、用户私有、可变、跨书**�
 Note 内容编辑使用的原子替换命令:验证旧 `mem_id` 后只更新 content,默认继承 anchor、selection context、note placement、citations 与 layer;写入失败时旧记录保持不变。带 quote source 的重新定位必须走显式“重新选择”并提交新的 selection context;无引用来源 Note 的正文迁移走独立 Note 原子重锚,两者都不得伪装成内容编辑。状态:BOUNDARY_CHANGE(见 [docs/adr/0074]、[docs/adr/0083])。
 
 ## 无引用来源 Note (unquoted-source Note)
-同时不带结构化 `selection_context`、且正文首个非空 Markdown 行不是 blockquote (`>`) 的 Note。它不是引用选区标注;从正文块直接创建的普通 Note 也属于此类,但创建入口已经提供显式正文锚。状态:NEW(见 [docs/adr/0083])。
+不带结构化 `selection_context` 的 Note;正文中的 blockquote (`>`) 只是内容展示,不证明引用来源也不决定记录类型。新记录必须带显式 Note 正文放置,二者皆无只允许作为未知旧类型兼容读取。状态:BOUNDARY_CHANGE(见 [docs/adr/0083])。
 
-## 待放置 Note (pending Note placement)
-用户从 Agent 回答截取无引用来源内容后形成的前端暂存草稿。它尚未写入 memory,只有在用户显式放入有效正文目标后才成为 Note;取消、切书或 Reader 卸载时丢弃。状态:NEW(见 [docs/adr/0083])。
+## Note 放置草稿 (NotePlacementDraft)
+用户从 Agent 回答截取无引用来源内容后形成、尚未写入 memory 的单个短生命周期草稿,绑定当前书、阅读表面与来源指纹。有效目标提交成功后转成 Note;取消、新草稿、切书或关闭 Reader 时丢弃,写入失败或结果待确认时暂留。状态:BOUNDARY_CHANGE(见 [docs/adr/0083])。
+
+## Note 放置会话 (Note placement session)
+用户把 Note 放置草稿首次绑定或把已有无引用来源 Note 移到正文目标的单一临时交互控制器。首版仅由 Pointer Events 点选真实目标;Markdown 与 PDF 会话严格隔离,提交前最新操作可抢占,提交后不可取消或替换。状态:BOUNDARY_CHANGE(见 [docs/adr/0083])。
 
 ## Note 正文放置 (Note body placement)
-用户把无引用来源 Note 显式绑定到真实正文目标的持久语义。Markdown 目标是实际命中的 LID 块;PDF 目标是当前 PDF visual source map 中实际命中的 region,且两者的 placement LID 必须与 `anchor.lid` 一致。它决定展示位置,不替代 LID citation anchor。状态:NEW(见 [docs/adr/0083])。
+用户把无引用来源 Note 显式绑定到当前 canonical source 中真实正文目标的持久语义,分为 Markdown `lid_block` 与 PDF `pdf_region` 两种不可跨格式迁移的类型。正文放置连同 `source_fingerprint` 是唯一位置权威,`anchor.lid`、citations 与内容寻址 `mem_id` 都从它派生。状态:BOUNDARY_CHANGE(见 [docs/adr/0083])。
 
 ## PDF Note region placement
-无引用来源 Note 在 PDF 正文中的显式展示位置,由 `lid + source_map_version + source_map_config_hash + page_index + region_id` 标识。渲染时必须在同一映射身份下重新验证 region;映射失效或 region 缺失时只保留 Notes 列表,不得回退到 primary region、整 LID bbox 或邻近区域。状态:NEW(见 [docs/adr/0083])。
+无引用来源 Note 在 PDF 正文中的显式对象位置,由 `source_fingerprint + lid + source_map_version + source_map_config_hash + page_index + region_id` 标识。渲染时必须复验同一来源与映射身份;任一失效时只保留 Notes 列表,不得回退到 primary region、整 LID bbox 或邻近区域。状态:BOUNDARY_CHANGE(见 [docs/adr/0083])。
 
 ## Note 原子重锚 (Note atomic reanchor)
-把已有无引用来源 Note 移到另一正文放置的一次性 memory mutation:新 placement、`anchor.lid`、citations 与内容寻址 `mem_id` 一起成功或一起失败,内容、layer 与既有审计语义保持。带 quote source 的 Note 仍走显式重新选择,不得使用本命令。状态:NEW(见 [docs/adr/0083])。
+把已有无引用来源 Note 移到另一正文放置的一次性 memory mutation:placement、`anchor.lid`、citations 与内容寻址 `mem_id` 原子改变,content、layer、generated_at、usage 与 source session 保持。成功后旧 ID 失效,碰撞或失败时原记录不变;当前不设稳定 `note_id`,带 quote source 的 Note 仍走显式重新选择。状态:BOUNDARY_CHANGE(见 [docs/adr/0083])。
 
 ## 记忆引用锚定 (memory citation)
 记忆记录回溯到源位置的锚 `[ADR-0015]`,借自 Codex memory 的 `MemoryCitationEntry{path, line_range, note}`——把 Codex 的 `path:行号区间` 换成本项目的 **LID**:`citations:[{lid, book_id, note}]`。使 `memory.recall` 返回的每条记忆**可验证、可跳原文**,是引用红线([docs/adr/0004])在记忆层的延伸。区别于 book 的 `citations[]`(那是问答证据;此为记忆溯源)。状态:NEW(详见 [docs/adr/0015])。
