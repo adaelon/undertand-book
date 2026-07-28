@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import {
   automaticBuildNext,
   automaticBuildPlan,
+  captureBuildProcessOutput,
   recordAutomaticBuildAttempt,
   type AutomaticBuildNextOptions,
 } from "../../../skills/build/automatic-build";
@@ -104,6 +105,20 @@ function writeTrustedPaperWorkspace(root: string): string {
 }
 
 describe("automatic build attempt policy", () => {
+  it("captures stage output larger than spawnSync's default pipe buffer", () => {
+    const outputBytes = 2 * 1024 * 1024 + 17;
+    const result = captureBuildProcessOutput(
+      process.execPath,
+      ["-e", `process.stdout.write("x".repeat(${outputBytes})); process.stderr.write("capture-ok")`],
+      process.cwd(),
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(result.status).toBe(0);
+    expect(Buffer.byteLength(result.stdout)).toBe(outputBytes);
+    expect(result.stderr).toBe("capture-ok");
+  });
+
   it("persists failures across next calls and requires the user after three attempts", () => {
     const root = mkdtempSync(path.join(tmpdir(), "understand-book-attempts-"));
     const source = path.join(root, "retry-guide.md");

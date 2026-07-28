@@ -1,7 +1,8 @@
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import {
   buildAutomaticBuildSnapshot,
@@ -172,6 +173,49 @@ function targetCommandInput(target: AutomaticBuildTarget): string {
   return target.kind === "paper_workspace" ? target.target_ref.workspace_dir : target.source_path;
 }
 
+export interface CapturedBuildProcessOutput {
+  error?: Error;
+  status: number | null;
+  stdout: string;
+  stderr: string;
+}
+
+export function captureBuildProcessOutput(
+  command: string,
+  args: string[],
+  cwd: string,
+): CapturedBuildProcessOutput {
+  const captureDir = mkdtempSync(path.join(tmpdir(), "understand-book-stage-capture-"));
+  const stdoutPath = path.join(captureDir, "stdout");
+  const stderrPath = path.join(captureDir, "stderr");
+  let stdoutFd: number | undefined;
+  let stderrFd: number | undefined;
+
+  try {
+    stdoutFd = openSync(stdoutPath, "w");
+    stderrFd = openSync(stderrPath, "w");
+    const result = spawnSync(command, args, {
+      cwd,
+      stdio: ["ignore", stdoutFd, stderrFd],
+      windowsHide: true,
+    });
+    closeSync(stdoutFd);
+    stdoutFd = undefined;
+    closeSync(stderrFd);
+    stderrFd = undefined;
+    return {
+      ...(result.error ? { error: result.error } : {}),
+      status: result.status,
+      stdout: readFileSync(stdoutPath, "utf8"),
+      stderr: readFileSync(stderrPath, "utf8"),
+    };
+  } finally {
+    if (stdoutFd !== undefined) closeSync(stdoutFd);
+    if (stderrFd !== undefined) closeSync(stderrFd);
+    rmSync(captureDir, { recursive: true, force: true });
+  }
+}
+
 function forwardStageScript(
   target: AutomaticBuildTarget,
   script: string,
@@ -179,9 +223,9 @@ function forwardStageScript(
   capture = false,
 ): { stdout: string; stderr: string } {
   const [command, ...commandArgs] = scriptCommand(script, args);
-  const result = spawnSync(command, commandArgs, capture
-    ? { cwd: target.root_dir, encoding: "utf8" }
-    : { cwd: target.root_dir, stdio: "inherit", encoding: "utf8" });
+  const result = capture
+    ? captureBuildProcessOutput(command, commandArgs, target.root_dir)
+    : spawnSync(command, commandArgs, { cwd: target.root_dir, stdio: "inherit", encoding: "utf8" });
   if (result.error) throw result.error;
   if (result.status !== 0) {
     throw new Error(`stage script ${script} failed (${result.status ?? 1}): ${result.stderr ?? ""}`);
