@@ -30,9 +30,22 @@ output, or treat conversation memory as build state.
 
 - **No natural-language goal:** preserve the explicit full-build behavior below. Run `legacy-plan`
   once and execute the confirmed `standard_deep` plan.
-- **Natural-language goal:** the target must already be an immediately readable workspace inside
-  the Reader library or explicitly registered by Reader. A raw Markdown/EPUB file or untrusted
-  paper draft is `needs_user(foundation_required)`; do not fabricate a goal plan for it.
+- **Natural-language goal:** a target file is not a workspace. A raw Markdown/EPUB file or an
+  untrusted paper draft is `needs_user(foundation_required)` and must first be imported or built by
+  Reader. For an absolute workspace directory inside the Reader library or explicitly registered
+  by Reader, do not preflight its content profile or foundation from the filesystem; send the
+  controller draft below.
+
+The Desktop controller response is the only authority for whether foundation is required. Stop as
+`needs_user(foundation_required)` only when `UnderstandBook.exe --codex-build-intent` returns
+`error_code=CODEX_BUILD_FOUNDATION_REQUIRED`. Otherwise consume its
+`codex_build_intent_response.v1` projection even when paper-only Workbench artifacts are absent.
+Do not inspect `.build/input/manifest.json`, `source_manifest.json` source kind, PDF files, optional
+paper sidecars, or workspace names to infer `paper` or invent a foundation gate. In particular, a
+missing `.build/input/manifest.json` is normal for an immediately readable `technical_learning`
+Markdown/EPUB workspace and must never trigger Paper Build Workbench instructions. Do not claim
+that the engine identified a target as paper unless the controller projection explicitly reports
+`content_profile.id=paper`.
 
 For a new goal, send exactly one `codex_build_intent_command.v1` JSON envelope to
 `UnderstandBook.exe --codex-build-intent` over stdin. Put only the maintenance flag in argv; never
@@ -218,6 +231,9 @@ LID lists, and accepted bodies must never cross from a dedicated subagent into t
 - A paper must already have trusted source reconciliation and hybrid foundation artifacts from the
   desktop Build Workbench. This plugin verifies and consumes them; it does not replace the
   human-reviewed foundation.
+- Paper-specific Workbench recovery applies only when the user explicitly supplied a paper draft
+  or the Desktop controller reports `content_profile.id=paper`; missing Workbench artifacts are not
+  a content-profile classifier.
 - Markdown and EPUB inputs run the full applicable pipeline from the source file.
 - Dedicated subagents are mandatory for semantic extraction. Missing capacity is
   `needs_user(executor_unavailable)`, not permission to generate empty nodes, generic sidecars, or
