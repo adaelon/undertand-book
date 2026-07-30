@@ -114,6 +114,10 @@ interface AcceptedIntentArtifactV2 {
 
 `RestrictedSchemaV1` 只允许有界 object/array、string/number/boolean/null、required、enum 和长度/数值上限;禁止 `$ref`、递归、任意正则执行、远程 schema、函数和渲染代码。BuildPlan 的每个 private artifact 保存完整 Blueprint snapshot、`blueprint_digest`、scope 与 public dependency closure;因此 Registry 后续变化不能改变已确认计划。
 
+新建 `origin=one_off` 规划候选时,自由文本 string 的 `search_fields` 必须使用 `text`;
+`keyword` 只允许表达 enum 等有界精确类别。该规划门不追溯收紧既有 Plan/accepted Blueprint
+快照,旧 digest 继续只读兼容;重新规划时才按新规则拒绝误配。
+
 该边界必须通过新版本落地:`BuildIntentV2` 不再保存固定 `desired_artifacts` 枚举,`BuildPlanV2.private_artifacts[]` 改存 `BuildPlanPrivateArtifactV2`。不得原地改变 V1 canonical JSON 或 digest 语义;既有 V1 Intent/Plan 继续按四个内置 Blueprint 适配读取和执行,新 draft 只写 V2。
 
 ```ts

@@ -34,6 +34,7 @@ describe("Codex-owned build planning skill v2", () => {
         "draft.candidate",
         "BUILD_PLANNING_CONTEXT_DRIFT",
         "CODEX_BUILD_INTENT_V2_REQUIRED",
+        "free-form string",
         "Never fall back to `codex_build_intent_command.v1`",
       ]) {
         expect(skill, `${relativePath} missing ${marker}`).toContain(marker);

@@ -16810,6 +16810,22 @@ unchanged after training concludes";
         let context =
             build_intent_api::run_codex_command(&mut codex, "planning.context", json!({}), now)
                 .unwrap();
+        let mut invalid_candidate = candidate.clone();
+        invalid_candidate["artifacts"][2]["blueprint"]["search_fields"][0]["analyzer"] =
+            json!("keyword");
+        let invalid = build_intent_api::run_codex_command(
+            &mut codex,
+            "draft.candidate",
+            json!({
+                "user_goal": goal,
+                "planning_context_digest": context["context_digest"],
+                "candidate": invalid_candidate
+            }),
+            now,
+        )
+        .unwrap_err();
+        assert_eq!(invalid.error_code, intent_build_store::INTENT_BUILD_INVALID);
+
         let drafted = build_intent_api::run_codex_command(
             &mut codex,
             "draft.candidate",

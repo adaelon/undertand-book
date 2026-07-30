@@ -605,6 +605,27 @@ export function validateArtifactBlueprintV1(input: unknown): ArtifactBlueprintV1
   return blueprint;
 }
 
+export function validatePlannerOneOffArtifactBlueprintV1(input: unknown): ArtifactBlueprintV1 {
+  const blueprint = validateArtifactBlueprintV1(input);
+  if (blueprint.origin !== "one_off") {
+    throw new Error("planner one-off ArtifactBlueprint must have one_off origin");
+  }
+  blueprint.search_fields.forEach((field, index) => {
+    const target = resolveBlueprintField(
+      blueprint.record_schema,
+      blueprint.relation_schema,
+      field.path,
+      `$blueprint.search_fields[${index}].path`,
+    );
+    if (field.analyzer === "keyword" && target.type === "string" && target.enum === undefined) {
+      throw new Error(
+        `$blueprint.search_fields[${index}] cannot use keyword for a free-form string; use text`,
+      );
+    }
+  });
+  return blueprint;
+}
+
 export function computeArtifactBlueprintDigest(input: unknown): string {
   const blueprint = validateArtifactBlueprintV1(input);
   return createHash("sha256").update(canonicalBuildJson(blueprint), "utf8").digest("hex");

@@ -43,7 +43,13 @@ type IntentBlueprintRegistryCommandV1 =
   | {
       version: "artifact_blueprint_registry_command.v1";
       operation: "resolve";
-      input: { private_root: string; blueprint_id: string; blueprint_version: string; one_off?: unknown };
+      input: {
+        private_root: string;
+        blueprint_id: string;
+        blueprint_version: string;
+        one_off?: unknown;
+        planning_candidate?: true;
+      };
     };
 
 function object(input: unknown, field: string): Record<string, unknown> {
@@ -92,9 +98,16 @@ function parseCommand(input: unknown): IntentBlueprintRegistryCommandV1 {
       const keys = Object.keys(body).sort();
       const required = ["private_root", "blueprint_id", "blueprint_version"].sort();
       const withOneOff = [...required, "one_off"].sort();
+      const withPlanningCandidate = [...required, "planning_candidate"].sort();
+      const withOneOffPlanningCandidate = [...required, "one_off", "planning_candidate"].sort();
       if (canonicalBuildJson(keys) !== canonicalBuildJson(required)
-        && canonicalBuildJson(keys) !== canonicalBuildJson(withOneOff)) {
+        && canonicalBuildJson(keys) !== canonicalBuildJson(withOneOff)
+        && canonicalBuildJson(keys) !== canonicalBuildJson(withPlanningCandidate)
+        && canonicalBuildJson(keys) !== canonicalBuildJson(withOneOffPlanningCandidate)) {
         throw new Error("resolve input has unrecognized or missing keys");
+      }
+      if (body.planning_candidate !== undefined && body.planning_candidate !== true) {
+        throw new Error("resolve planning_candidate must be true when provided");
       }
       break;
     }

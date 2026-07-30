@@ -89,6 +89,7 @@ const protocolMarkers = [
   "draft.candidate",
   "BUILD_PLANNING_CONTEXT_DRIFT",
   "CODEX_BUILD_INTENT_V2_REQUIRED",
+  "free-form string",
   "Never fall back to `codex_build_intent_command.v1`",
   "codex_conversation",
   "plan_confirmation_required",

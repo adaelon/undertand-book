@@ -73,6 +73,8 @@ stderr 或用户可见计划;不得记录或复述完整 candidate。
    - 匹配时优先复用 Registry,不强套。不匹配时设计 `origin=one_off` 的
      `artifact_blueprint.v1`,shape 只能来自 `allowed_shapes`;schema 必须有界、closed 且逐记录 LID evidence,
      禁止 code、`$ref`、递归、regex、remote schema 与额外字段。
+   - `search_fields` 中自由文本(`free-form string`,如 topic/title/question/claim)必须使用
+     `analyzer=text`;`analyzer=keyword` 只用于 enum 等有界精确类别,不得用于自然语言主题短语。
    - candidate 不得包含 raw goal、解释、plan id/digest、public stages 或 Reader-private path;Codex 不得
      伪造 Reader plan identity。
 

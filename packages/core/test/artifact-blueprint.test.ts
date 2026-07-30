@@ -7,6 +7,7 @@ import {
   computeArtifactBlueprintDigest,
   getSystemArtifactBlueprintV1,
   validateArtifactBlueprintV1,
+  validatePlannerOneOffArtifactBlueprintV1,
   validateRestrictedSchemaValueV1,
   type ArtifactBlueprintV1,
   type LegacyIntentArtifactTypeV1,
@@ -247,6 +248,44 @@ describe("ArtifactBlueprintV1", () => {
       done: false,
       code: "() => unsafe",
     })).toThrow(/additional/i);
+  });
+
+  it("requires text search for free-form strings in newly planned one-off Blueprints", () => {
+    const legacyFreeFormKeyword: ArtifactBlueprintV1 = {
+      ...validBlueprint(),
+      blueprint_id: "one-off.interview_questions",
+      title: "Interview questions",
+      record_schema: {
+        type: "object",
+        properties: {
+          topic: { type: "string", max_length: 400 },
+        },
+        required: ["topic"],
+        additional_properties: false,
+        max_properties: 1,
+      },
+      search_fields: [{ path: "/topic", weight: 10, analyzer: "keyword" }],
+      summary_fields: ["/topic"],
+    };
+
+    expect(validateArtifactBlueprintV1(legacyFreeFormKeyword)).toEqual(legacyFreeFormKeyword);
+    expect(() => validatePlannerOneOffArtifactBlueprintV1(legacyFreeFormKeyword))
+      .toThrow(/free-form string.*text/i);
+
+    const boundedKeyword: ArtifactBlueprintV1 = {
+      ...legacyFreeFormKeyword,
+      record_schema: {
+        ...legacyFreeFormKeyword.record_schema,
+        properties: {
+          topic: {
+            type: "string",
+            max_length: 32,
+            enum: ["architecture", "inference", "training"],
+          },
+        },
+      },
+    };
+    expect(validatePlannerOneOffArtifactBlueprintV1(boundedKeyword)).toEqual(boundedKeyword);
   });
 
   it("computes one canonical digest for semantically identical key order", () => {

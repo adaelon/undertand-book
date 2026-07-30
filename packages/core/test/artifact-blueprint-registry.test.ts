@@ -143,7 +143,31 @@ describe("user-private ArtifactBlueprint registry", () => {
       blueprint_id: oneOff.blueprint_id,
       blueprint_version: oneOff.blueprint_version,
       one_off: oneOff,
+      planning_candidate: true,
     })).toMatchObject({ source: "one_off", blueprint: oneOff });
+
+    const legacyFreeFormKeyword = candidate({
+      blueprint_id: "one-off.legacy_exact_actions",
+      origin: "one_off",
+      search_fields: [{ path: "/action", weight: 10, analyzer: "keyword" }],
+    });
+    expect(resolveArtifactBlueprintV1({
+      private_root: root,
+      blueprint_id: legacyFreeFormKeyword.blueprint_id,
+      blueprint_version: legacyFreeFormKeyword.blueprint_version,
+      one_off: legacyFreeFormKeyword,
+    })).toMatchObject({ source: "one_off", blueprint: legacyFreeFormKeyword });
+    expect(() => runIntentBlueprintRegistryCommand({
+      version: "artifact_blueprint_registry_command.v1",
+      operation: "resolve",
+      input: {
+        private_root: root,
+        blueprint_id: legacyFreeFormKeyword.blueprint_id,
+        blueprint_version: legacyFreeFormKeyword.blueprint_version,
+        one_off: legacyFreeFormKeyword,
+        planning_candidate: true,
+      },
+    })).toThrow(/free-form string.*text/i);
 
     const maliciousFallback = candidate({
       blueprint_id: "system.timeline",

@@ -114,6 +114,12 @@ fn free_text_candidate_is_strict_registry_data_and_does_not_echo_raw_goal() {
         candidate.artifacts[0].blueprint_id,
         "system.comparison_table"
     );
+    assert!(adapter.requests.borrow()[0]
+        .system
+        .contains("free-form string search field"));
+    assert!(adapter.requests.borrow()[0]
+        .system
+        .contains("analyzer=text"));
 }
 
 #[test]

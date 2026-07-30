@@ -80,7 +80,9 @@ echo or restate the complete candidate.
    match. Otherwise provide a complete `origin=one_off` `artifact_blueprint.v1` whose shape is in
    `allowed_shapes`, whose restricted schemas are bounded and closed, and whose records require LID
    evidence. Do not use code, `$ref`, recursion, regex, remote schemas, extra keys, raw goal text,
-   explanations, public stages, plan identities, or Reader-private paths.
+   explanations, public stages, plan identities, or Reader-private paths. Every free-form string
+   search field such as topic, title, question, or claim must use `analyzer=text`; reserve
+   `analyzer=keyword` for bounded exact categories such as enums, never natural-language topics.
 
 3. Send one protected stdin envelope with `version=codex_build_intent_command.v2`,
    `operation=draft.candidate`, the same absolute workspace, and

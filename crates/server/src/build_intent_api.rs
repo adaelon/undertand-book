@@ -1077,7 +1077,7 @@ fn compile_candidate_draft(
         ));
     }
     validate_candidate_against_current_state(state, user_goal, &candidate)?;
-    let resolved_blueprints = resolve_candidate_blueprints(state, &candidate)?;
+    let resolved_blueprints = resolve_candidate_blueprints(state, &candidate, true)?;
     let mut core_input = build_core_draft_input(state, "goal_directed", now)?;
     if let Some(identity) = revision_identity {
         core_input["intent_id"] = json!(identity.intent_id.clone());
@@ -1166,6 +1166,7 @@ fn blueprint_registry_summaries(
 fn resolve_candidate_blueprints(
     state: &AppState,
     candidate: &BuildIntentPlannerCandidateV2,
+    planning_candidate: bool,
 ) -> Result<Vec<Value>, ToolError> {
     let private_root = private_store(state)?.root().to_path_buf();
     candidate
@@ -1179,6 +1180,9 @@ fn resolve_candidate_blueprints(
             });
             if let Some(blueprint) = artifact.blueprint.as_ref() {
                 input["one_off"] = blueprint.clone();
+            }
+            if planning_candidate {
+                input["planning_candidate"] = json!(true);
             }
             let resolution = run_blueprint_core(&json!({
                 "version": "artifact_blueprint_registry_command.v1",
@@ -1238,7 +1242,7 @@ fn validate_plan_blueprints_current(state: &AppState, plan: &Value) -> Result<()
             ],
             usage_horizon: "one_off".into(),
         };
-        let resolution = resolve_candidate_blueprints(state, &candidate)
+        let resolution = resolve_candidate_blueprints(state, &candidate, false)
             .map_err(|_| {
                 error(
                     "BUILD_PLAN_BLUEPRINT_DRIFT",

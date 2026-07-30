@@ -13,6 +13,7 @@ import {
   SYSTEM_ARTIFACT_BLUEPRINT_REGISTRY_V1,
   computeArtifactBlueprintDigest,
   validateArtifactBlueprintV1,
+  validatePlannerOneOffArtifactBlueprintV1,
   type ArtifactBlueprintV1,
 } from "./artifact-blueprint";
 import { canonicalBuildJson, validatePathSafeBuildId } from "./build-intent";
@@ -578,7 +579,11 @@ export function resolveArtifactBlueprintV1(input: {
   blueprint_id: string;
   blueprint_version: string;
   one_off?: unknown;
+  planning_candidate?: true;
 }): ArtifactBlueprintResolutionV1 {
+  if (input.planning_candidate !== undefined && input.planning_candidate !== true) {
+    throw new Error("planning_candidate must be true when provided");
+  }
   const blueprintId = validatePathSafeBuildId(input.blueprint_id, "blueprint_id");
   const blueprintVersion = validatePathSafeBuildId(input.blueprint_version, "blueprint_version");
   const system = getSystemEntry(blueprintId, blueprintVersion);
@@ -602,7 +607,9 @@ export function resolveArtifactBlueprintV1(input: {
     };
   }
   if (input.one_off === undefined) throw new Error("ArtifactBlueprint candidate was not found and no one-off was provided");
-  const oneOff = validateArtifactBlueprintV1(input.one_off);
+  const oneOff = input.planning_candidate === true
+    ? validatePlannerOneOffArtifactBlueprintV1(input.one_off)
+    : validateArtifactBlueprintV1(input.one_off);
   if (oneOff.origin !== "one_off") throw new Error("one-off fallback must have one_off origin");
   if (oneOff.blueprint_id !== blueprintId || oneOff.blueprint_version !== blueprintVersion) {
     throw new Error("one-off fallback identity must match the requested ArtifactBlueprint");

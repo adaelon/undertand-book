@@ -158,6 +158,48 @@ fn golden_scores_lock_phrase_weight_coverage_and_chinese_ngrams() {
 }
 
 #[test]
+fn free_form_topic_text_matches_a_natural_partial_query_while_keyword_stays_exact() {
+    let topic = "KV Cache 与 Prompt Cache 友好架构";
+    let snapshot = snapshot(vec![
+        item(
+            "artifact-topic-text",
+            blueprint(
+                "Interview questions",
+                &[("/topic", 10, ArtifactSearchAnalyzer::Text)],
+                &["/topic"],
+            ),
+            vec![record(
+                "question-text",
+                json!({"topic": topic, "analyzer": "text"}),
+                &["1.1"],
+            )],
+            vec![],
+        ),
+        item(
+            "artifact-topic-keyword",
+            blueprint(
+                "Interview questions",
+                &[("/topic", 10, ArtifactSearchAnalyzer::Keyword)],
+                &["/topic"],
+            ),
+            vec![record(
+                "question-keyword",
+                json!({"topic": topic, "analyzer": "keyword"}),
+                &["1.2"],
+            )],
+            vec![],
+        ),
+    ]);
+
+    let partial = search(&snapshot, "KV cache", 3);
+    assert_eq!(partial["hits"].as_array().unwrap().len(), 1);
+    assert_eq!(partial["hits"][0]["data"]["analyzer"], "text");
+
+    let exact = search(&snapshot, topic, 3);
+    assert_eq!(exact["hits"].as_array().unwrap().len(), 2);
+}
+
+#[test]
 fn relation_fields_find_both_endpoints_and_explain_the_match() {
     let snapshot = snapshot(vec![item(
         "artifact-relations",
