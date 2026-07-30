@@ -55,7 +55,7 @@ const PlannerArtifactCandidateV2Z = z.object({
   }
 });
 
-const PlannerCandidateV2Z = z.object({
+export const BuildIntentPlannerCandidateV2Z = z.object({
   version: z.literal("build_intent_planner_candidate.v2"),
   goal_kind: z.enum(["learn", "analyze", "compare", "write", "reference", "other"]),
   source_scope: z.object({
@@ -67,7 +67,7 @@ const PlannerCandidateV2Z = z.object({
   usage_horizon: z.enum(["one_off", "project", "long_term"]),
 }).strict();
 
-export type BuildIntentPlannerCandidateV2 = z.infer<typeof PlannerCandidateV2Z>;
+export type BuildIntentPlannerCandidateV2 = z.infer<typeof BuildIntentPlannerCandidateV2Z>;
 
 export interface BuildIntentTargetV1 {
   book_id: string;
@@ -214,7 +214,7 @@ function decisionFor(plan: BuildPlanAny): BuildDecisionRequestV2 {
 }
 
 export function validateBuildIntentPlannerCandidate(input: unknown): BuildIntentPlannerCandidateV2 {
-  const candidate = PlannerCandidateV2Z.parse(input);
+  const candidate = BuildIntentPlannerCandidateV2Z.parse(input);
   const identities = candidate.artifacts.map((artifact) => `${artifact.blueprint_id}\u0000${artifact.blueprint_version}`);
   if (new Set(identities).size !== identities.length) {
     throw new Error("planner candidate contains a duplicate ArtifactBlueprint identity and version");

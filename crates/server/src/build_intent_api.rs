@@ -3,10 +3,13 @@ use crate::intent_build_store::{
     INTENT_BUILD_NOT_FOUND,
 };
 use crate::{err_reply, method_not_allowed, ok_json, sha256_hex, workspace_root, AppState, Reply};
+use base_schema::NodeKind;
 use read_tools::{ContentProfileId, ToolError};
 use runtime::build_intent::{
-    plan_build_intent_candidate, validate_build_intent_planner_candidate,
-    ArtifactBlueprintPlannerSummaryV1, BuildIntentPlannerCandidateV2, BuildIntentPlannerRequest,
+    build_planning_context_v1, plan_build_intent_candidate,
+    validate_build_intent_planner_candidate, ArtifactBlueprintPlannerSummaryV1,
+    BuildIntentPlannerCandidateV2, BuildIntentPlannerRequest, BuildPlanningContextInputV1,
+    BuildPlanningContextV1,
 };
 use serde_json::{json, Value};
 use std::ffi::OsString;
@@ -21,6 +24,13 @@ struct CoreIntentCommand {
     program: PathBuf,
     prefix_args: Vec<OsString>,
     current_dir: PathBuf,
+}
+
+struct DraftRevisionIdentity {
+    intent_id: String,
+    plan_id: String,
+    intent_revision: u64,
+    plan_revision: u64,
 }
 
 pub(super) fn route_build_intent(
@@ -226,6 +236,7 @@ fn inspect_artifact(state: &AppState, body: &str) -> Result<Value, ToolError> {
 
 fn draft(state: &mut AppState, body: &str, now: &str) -> Result<Value, ToolError> {
     let input = parse_body(body)?;
+    reject_unknown_fields(&input, &["mode", "user_goal", "budget"])?;
     let mode = required_string(&input, "mode")?;
     if !matches!(mode, "read_now" | "standard_deep" | "goal_directed") {
         return Err(error(
@@ -234,33 +245,33 @@ fn draft(state: &mut AppState, body: &str, now: &str) -> Result<Value, ToolError
             "unknown build mode",
         ));
     }
-    let candidate = if mode == "goal_directed" {
-        let user_goal = required_string(&input, "user_goal")?;
-        Some(plan_candidate(state, user_goal)?)
-    } else {
-        None
-    };
-    let mut core_input = build_core_draft_input(state, mode, now)?;
     if mode == "goal_directed" {
-        apply_active_replan_identity(state, &mut core_input)?;
+        let user_goal = required_string(&input, "user_goal")?;
+        let candidate = plan_candidate(state, user_goal)?;
+        return compile_candidate_draft(
+            state,
+            user_goal,
+            candidate,
+            input.get("budget"),
+            None,
+            None,
+            "reader_provider",
+            now,
+        );
     }
+    let mut core_input = build_core_draft_input(state, mode, now)?;
     copy_optional(&input, &mut core_input, "budget");
-    if let Some(candidate) = candidate {
-        let resolved_blueprints = resolve_candidate_blueprints(state, &candidate)?;
-        copy_optional(&input, &mut core_input, "user_goal");
-        core_input["candidate"] = serde_json::to_value(candidate).map_err(internal_json)?;
-        core_input["resolved_blueprints"] = Value::Array(resolved_blueprints);
-    }
     let selection = run_core(&json!({ "operation": "draft", "input": core_input }))?;
     persist_selection(state, &selection)?;
     if mode == "read_now" {
         append_plan_selected_usage(state, &selection, now)?;
     }
-    response(state, selection)
+    response(state, selection, "deterministic")
 }
 
 fn edit(state: &mut AppState, body: &str, now: &str) -> Result<Value, ToolError> {
     let input = parse_body(body)?;
+    reject_unknown_fields(&input, &["plan_id", "user_goal", "budget"])?;
     let plan_id = required_string(&input, "plan_id")?;
     let store = private_store(state)?;
     let plan = store.read_plan(&state.book.base.book_id, plan_id)?;
@@ -289,10 +300,6 @@ fn edit(state: &mut AppState, body: &str, now: &str) -> Result<Value, ToolError>
             "only a draft intent can be edited",
         ));
     }
-    let candidate = input
-        .get("candidate")
-        .cloned()
-        .unwrap_or(candidate_from_stored_selection(&intent, &plan)?);
     let user_goal = input
         .get("user_goal")
         .cloned()
@@ -301,20 +308,23 @@ fn edit(state: &mut AppState, body: &str, now: &str) -> Result<Value, ToolError>
         .as_str()
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| error(INTENT_BUILD_INVALID, "validation", "user_goal is required"))?;
-    let candidate = validate_edit_candidate(state, user_goal_text, candidate)?;
-    let resolved_blueprints = resolve_candidate_blueprints(state, &candidate)?;
-    let mut core_input = build_core_draft_input(state, "goal_directed", now)?;
-    core_input["user_goal"] = user_goal;
-    core_input["candidate"] = serde_json::to_value(candidate).map_err(internal_json)?;
-    core_input["resolved_blueprints"] = Value::Array(resolved_blueprints);
-    core_input["intent_id"] = json!(intent_id);
-    core_input["plan_id"] = json!(plan_id);
-    core_input["intent_revision"] = json!(required_revision(&intent)? + 1);
-    core_input["plan_revision"] = json!(required_revision(&plan)? + 1);
-    copy_optional(&input, &mut core_input, "budget");
-    let selection = run_core(&json!({ "operation": "draft", "input": core_input }))?;
-    persist_selection(state, &selection)?;
-    response(state, selection)
+    let candidate = plan_candidate(state, user_goal_text)?;
+    let revision_identity = DraftRevisionIdentity {
+        intent_id: intent_id.to_string(),
+        plan_id: plan_id.to_string(),
+        intent_revision: required_revision(&intent)? + 1,
+        plan_revision: required_revision(&plan)? + 1,
+    };
+    compile_candidate_draft(
+        state,
+        user_goal_text,
+        candidate,
+        input.get("budget"),
+        None,
+        Some(&revision_identity),
+        "reader_provider",
+        now,
+    )
 }
 
 fn estimate(state: &AppState, body: &str) -> Result<Value, ToolError> {
@@ -369,7 +379,7 @@ fn confirm_with_source(
     persist_selection(state, &confirmed)?;
     activate_confirmed_selection(state, &confirmed)?;
     append_plan_selected_usage(state, &confirmed, now)?;
-    response(state, confirmed)
+    response(state, confirmed, "stored_plan")
 }
 
 fn reject(state: &mut AppState, body: &str) -> Result<Value, ToolError> {
@@ -388,7 +398,7 @@ fn reject(state: &mut AppState, body: &str) -> Result<Value, ToolError> {
     let selection = selection_from_artifacts(plan, intent)?;
     let rejected = run_core(&json!({ "operation": "reject", "selection": selection }))?;
     persist_selection(state, &rejected)?;
-    response(state, rejected)
+    response(state, rejected, "stored_plan")
 }
 
 fn delete_intent(state: &AppState, body: &str) -> Result<Value, ToolError> {
@@ -987,19 +997,43 @@ fn plan_candidate(
     )
 }
 
-fn validate_edit_candidate(
+fn current_planning_context(state: &AppState) -> Result<BuildPlanningContextV1, ToolError> {
+    let source_fingerprint = current_source_fingerprint(state)?;
+    let profile = match state.book.content_profile_id() {
+        ContentProfileId::TechnicalLearning => "technical_learning",
+        ContentProfileId::Paper => "paper",
+    };
+    let available_lids = state
+        .book
+        .base
+        .lid_nodes
+        .iter()
+        .map(|node| node.lid.as_str())
+        .collect::<Vec<_>>();
+    let available_sections = state
+        .book
+        .base
+        .lid_nodes
+        .iter()
+        .filter(|node| matches!(&node.kind, NodeKind::Chapter | NodeKind::Section))
+        .map(|node| node.lid.as_str())
+        .collect::<Vec<_>>();
+    let blueprints = blueprint_registry_summaries(state)?;
+    build_planning_context_v1(&BuildPlanningContextInputV1 {
+        book_id: &state.book.base.book_id,
+        source_fingerprint: &source_fingerprint,
+        content_profile: profile,
+        available_lids: &available_lids,
+        available_sections: &available_sections,
+        available_blueprints: &blueprints,
+    })
+}
+
+fn validate_candidate_against_current_state(
     state: &AppState,
     user_goal: &str,
-    candidate: Value,
-) -> Result<BuildIntentPlannerCandidateV2, ToolError> {
-    let candidate: BuildIntentPlannerCandidateV2 =
-        serde_json::from_value(candidate).map_err(|_| {
-            error(
-                "BUILD_INTENT_CANDIDATE_INVALID",
-                "validation",
-                "edited candidate does not match the strict planner schema",
-            )
-        })?;
+    candidate: &BuildIntentPlannerCandidateV2,
+) -> Result<(), ToolError> {
     let lids = state
         .book
         .base
@@ -1013,7 +1047,7 @@ fn validate_edit_candidate(
     };
     let blueprints = blueprint_registry_summaries(state)?;
     validate_build_intent_planner_candidate(
-        &candidate,
+        candidate,
         &BuildIntentPlannerRequest {
             user_goal,
             content_profile: profile,
@@ -1021,8 +1055,55 @@ fn validate_edit_candidate(
             available_sections: &[],
             available_blueprints: &blueprints,
         },
-    )?;
-    Ok(candidate)
+    )
+}
+
+fn compile_candidate_draft(
+    state: &mut AppState,
+    user_goal: &str,
+    candidate: BuildIntentPlannerCandidateV2,
+    budget: Option<&Value>,
+    expected_context_digest: Option<&str>,
+    revision_identity: Option<&DraftRevisionIdentity>,
+    planning_source: &str,
+    now: &str,
+) -> Result<Value, ToolError> {
+    let initial_context = current_planning_context(state)?;
+    if expected_context_digest.is_some_and(|expected| expected != initial_context.context_digest) {
+        return Err(error(
+            "BUILD_PLANNING_CONTEXT_DRIFT",
+            "needs_user",
+            "the BuildPlanningContext changed; inspect the current context and plan again",
+        ));
+    }
+    validate_candidate_against_current_state(state, user_goal, &candidate)?;
+    let resolved_blueprints = resolve_candidate_blueprints(state, &candidate)?;
+    let mut core_input = build_core_draft_input(state, "goal_directed", now)?;
+    if let Some(identity) = revision_identity {
+        core_input["intent_id"] = json!(identity.intent_id.clone());
+        core_input["plan_id"] = json!(identity.plan_id.clone());
+        core_input["intent_revision"] = json!(identity.intent_revision);
+        core_input["plan_revision"] = json!(identity.plan_revision);
+    } else {
+        apply_active_replan_identity(state, &mut core_input)?;
+    }
+    core_input["user_goal"] = json!(user_goal);
+    core_input["candidate"] = serde_json::to_value(candidate).map_err(internal_json)?;
+    core_input["resolved_blueprints"] = Value::Array(resolved_blueprints);
+    if let Some(budget) = budget {
+        core_input["budget"] = budget.clone();
+    }
+    let selection = run_core(&json!({ "operation": "draft", "input": core_input }))?;
+    let final_context = current_planning_context(state)?;
+    if final_context.context_digest != initial_context.context_digest {
+        return Err(error(
+            "BUILD_PLANNING_CONTEXT_DRIFT",
+            "needs_user",
+            "the BuildPlanningContext changed during candidate compilation; inspect and plan again",
+        ));
+    }
+    persist_selection(state, &selection)?;
+    response(state, selection, planning_source)
 }
 
 fn blueprint_registry_summaries(
@@ -1114,69 +1195,6 @@ fn resolve_candidate_blueprints(
             Ok(resolution)
         })
         .collect()
-}
-
-fn candidate_from_stored_selection(intent: &Value, plan: &Value) -> Result<Value, ToolError> {
-    let artifacts = plan
-        .get("private_artifacts")
-        .and_then(Value::as_array)
-        .ok_or_else(|| {
-            error(
-                INTENT_BUILD_INVALID,
-                "validation",
-                "stored plan artifacts are invalid",
-            )
-        })?;
-    let selected = if plan.get("version").and_then(Value::as_str) == Some("build_plan.v2") {
-        artifacts
-            .iter()
-            .map(|artifact| {
-                let blueprint = artifact.get("blueprint").ok_or_else(|| {
-                    error(
-                        INTENT_BUILD_INVALID,
-                        "validation",
-                        "stored V2 plan has no Blueprint snapshot",
-                    )
-                })?;
-                let source = required_string(blueprint, "origin")?;
-                let mut selected = json!({
-                    "source": source,
-                    "blueprint_id": required_string(blueprint, "blueprint_id")?,
-                    "blueprint_version": required_string(blueprint, "blueprint_version")?,
-                });
-                if source == "one_off" {
-                    selected["blueprint"] = blueprint.clone();
-                }
-                Ok(selected)
-            })
-            .collect::<Result<Vec<_>, ToolError>>()?
-    } else {
-        artifacts
-            .iter()
-            .map(|artifact| {
-                let artifact_type = required_string(artifact, "artifact_type")?;
-                if artifact_type == "custom" {
-                    return Err(error(
-                        INTENT_BUILD_INVALID,
-                        "validation",
-                        "legacy custom artifact has no deterministic Blueprint adapter",
-                    ));
-                }
-                Ok(json!({
-                    "source": "system",
-                    "blueprint_id": format!("system.{artifact_type}"),
-                    "blueprint_version": "1.0.0",
-                }))
-            })
-            .collect::<Result<Vec<_>, ToolError>>()?
-    };
-    Ok(json!({
-        "version": "build_intent_planner_candidate.v2",
-        "goal_kind": intent.get("goal_kind").cloned().unwrap_or(Value::Null),
-        "source_scope": intent.get("source_scope").cloned().unwrap_or(Value::Null),
-        "artifacts": selected,
-        "usage_horizon": intent.get("usage_horizon").cloned().unwrap_or(Value::Null),
-    }))
 }
 
 fn validate_plan_blueprints_current(state: &AppState, plan: &Value) -> Result<(), ToolError> {
@@ -1306,9 +1324,10 @@ fn persist_selection(state: &AppState, selection: &Value) -> Result<(), ToolErro
     Ok(())
 }
 
-fn response(state: &AppState, selection: Value) -> Result<Value, ToolError> {
+fn response(state: &AppState, selection: Value, planning_source: &str) -> Result<Value, ToolError> {
     Ok(json!({
         "version": RESPONSE_VERSION,
+        "planning_source": planning_source,
         "selection": selection,
         "inspection": private_store(state)?.inspect_redacted(&state.book.base.book_id)?,
     }))
@@ -1407,8 +1426,53 @@ pub(super) fn run_codex_command(
     input: Value,
     now: &str,
 ) -> Result<Value, ToolError> {
-    synchronize_active_source(state)?;
+    if operation != "planning.context" {
+        synchronize_active_source(state)?;
+    }
     match operation {
+        "planning.context" => {
+            reject_unknown_fields(&input, &[])?;
+            serde_json::to_value(current_planning_context(state)?).map_err(internal_json)
+        }
+        "draft.candidate" => {
+            reject_unknown_fields(
+                &input,
+                &[
+                    "user_goal",
+                    "planning_context_digest",
+                    "candidate",
+                    "budget",
+                ],
+            )?;
+            let user_goal = required_string(&input, "user_goal")?;
+            let context_digest = required_string(&input, "planning_context_digest")?;
+            let candidate: BuildIntentPlannerCandidateV2 =
+                serde_json::from_value(input.get("candidate").cloned().ok_or_else(|| {
+                    error(
+                        "BUILD_INTENT_CANDIDATE_INVALID",
+                        "validation",
+                        "candidate is required",
+                    )
+                })?)
+                .map_err(|_| {
+                    error(
+                        "BUILD_INTENT_CANDIDATE_INVALID",
+                        "validation",
+                        "candidate does not match the strict planner schema",
+                    )
+                })?;
+            let drafted = compile_candidate_draft(
+                state,
+                user_goal,
+                candidate,
+                input.get("budget"),
+                Some(context_digest),
+                None,
+                "codex",
+                now,
+            )?;
+            codex_response(state, drafted.get("selection").cloned())
+        }
         "draft" => {
             reject_unknown_fields(&input, &["user_goal", "budget"])?;
             let mut body = input;

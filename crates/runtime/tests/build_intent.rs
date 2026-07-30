@@ -1,6 +1,7 @@
 use runtime::build_intent::{
-    plan_build_intent_candidate, validate_build_decision_request_v2,
-    ArtifactBlueprintPlannerSummaryV1, BuildIntentPlannerRequest,
+    build_planning_context_v1, plan_build_intent_candidate, validate_build_decision_request_v2,
+    validate_build_planning_context_v1, ArtifactBlueprintPlannerSummaryV1,
+    BuildIntentPlannerRequest, BuildPlanningContextInputV1, BuildPlanningContextV1,
 };
 use runtime::{
     AdapterError, AgentRequestPlan, AssistantTurn, CompletionRequest, ModelAdapter, ParsedResponse,
@@ -222,5 +223,51 @@ fn rust_decision_contract_matches_the_core_golden_and_rejects_scope_confusion() 
             .unwrap_err()
             .error_code,
         "BUILD_DECISION_INVALID"
+    );
+}
+
+#[test]
+fn rust_planning_context_matches_the_core_golden_and_is_registry_order_independent() {
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../../../packages/core/test/fixtures/build-planning-context.v1.golden.json"
+    ))
+    .unwrap();
+    let input = &fixture["input"];
+    let lids = input["available_lids"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_str().unwrap())
+        .collect::<Vec<_>>();
+    let sections = input["available_sections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_str().unwrap())
+        .collect::<Vec<_>>();
+    let mut blueprints: Vec<ArtifactBlueprintPlannerSummaryV1> =
+        serde_json::from_value(input["blueprint_registry"].clone()).unwrap();
+    blueprints.reverse();
+    let context = build_planning_context_v1(&BuildPlanningContextInputV1 {
+        book_id: input["target"]["book_id"].as_str().unwrap(),
+        source_fingerprint: input["target"]["source_fingerprint"].as_str().unwrap(),
+        content_profile: input["target"]["content_profile"].as_str().unwrap(),
+        available_lids: &lids,
+        available_sections: &sections,
+        available_blueprints: &blueprints,
+    })
+    .unwrap();
+    let expected: BuildPlanningContextV1 =
+        serde_json::from_value(fixture["context"].clone()).unwrap();
+    assert_eq!(context, expected);
+    validate_build_planning_context_v1(&context).unwrap();
+
+    let mut drifted = context;
+    drifted.context_digest = "f".repeat(64);
+    assert_eq!(
+        validate_build_planning_context_v1(&drifted)
+            .unwrap_err()
+            .error_code,
+        "BUILD_PLANNING_CONTEXT_INVALID"
     );
 }

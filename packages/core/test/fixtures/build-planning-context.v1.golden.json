@@ -1,0 +1,110 @@
+{
+  "input": {
+    "target": {
+      "book_id": "reader-book",
+      "source_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "content_profile": "technical_learning"
+    },
+    "available_lids": ["1.1", "1.2", "2.1"],
+    "available_sections": ["Introduction", "Methods"],
+    "blueprint_registry": [
+      {
+        "source": "user_private",
+        "blueprint_id": "private.study_cards",
+        "blueprint_version": "1.0.0",
+        "digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "title": "Study cards",
+        "purpose": "Review evidence-backed study prompts.",
+        "shape": "collection",
+        "key_fields": ["answer", "question"]
+      },
+      {
+        "source": "system",
+        "blueprint_id": "system.comparison_table",
+        "blueprint_version": "1.0.0",
+        "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "title": "Comparison table",
+        "purpose": "Compare evidence-backed subjects.",
+        "shape": "table",
+        "key_fields": ["dimensions", "subject"]
+      }
+    ]
+  },
+  "context": {
+    "version": "build_planning_context.v1",
+    "target": {
+      "book_id": "reader-book",
+      "source_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "content_profile": "technical_learning"
+    },
+    "scope_catalog": {
+      "available_lids": ["1.1", "1.2", "2.1"],
+      "available_lid_count": 3,
+      "available_sections": ["Introduction", "Methods"],
+      "available_section_count": 2,
+      "truncated": false,
+      "whole_book_allowed": true
+    },
+    "blueprint_registry": [
+      {
+        "source": "system",
+        "blueprint_id": "system.comparison_table",
+        "blueprint_version": "1.0.0",
+        "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "title": "Comparison table",
+        "purpose": "Compare evidence-backed subjects.",
+        "shape": "table",
+        "key_fields": ["dimensions", "subject"]
+      },
+      {
+        "source": "user_private",
+        "blueprint_id": "private.study_cards",
+        "blueprint_version": "1.0.0",
+        "digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "title": "Study cards",
+        "purpose": "Review evidence-backed study prompts.",
+        "shape": "collection",
+        "key_fields": ["answer", "question"]
+      }
+    ],
+    "blueprint_registry_count": 2,
+    "blueprint_registry_truncated": false,
+    "candidate_contract": {
+      "version": "build_intent_planner_candidate.v2",
+      "max_artifacts": 16,
+      "allowed_shapes": ["collection", "table", "graph", "sequence", "document"],
+      "one_off_blueprint_version": "artifact_blueprint.v1"
+    },
+    "context_digest": "13135cf9f01bb296712d3d04b3bd20a3bc159cf1d36016f29761db35da8f93e9"
+  },
+  "commands": {
+    "planning_context": {
+      "version": "codex_build_intent_command.v2",
+      "operation": "planning.context",
+      "target": { "workspace_dir": "E:\\reader-library\\reader-book" },
+      "input": {}
+    },
+    "draft_candidate": {
+      "version": "codex_build_intent_command.v2",
+      "operation": "draft.candidate",
+      "target": { "workspace_dir": "E:\\reader-library\\reader-book" },
+      "input": {
+        "user_goal": "Compare the approaches",
+        "planning_context_digest": "13135cf9f01bb296712d3d04b3bd20a3bc159cf1d36016f29761db35da8f93e9",
+        "candidate": {
+          "version": "build_intent_planner_candidate.v2",
+          "goal_kind": "compare",
+          "source_scope": { "whole_book": true, "lids": [], "sections": [] },
+          "artifacts": [
+            {
+              "source": "system",
+              "blueprint_id": "system.comparison_table",
+              "blueprint_version": "1.0.0"
+            }
+          ],
+          "usage_horizon": "project"
+        }
+      }
+    }
+  }
+}

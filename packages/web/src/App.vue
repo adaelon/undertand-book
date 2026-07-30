@@ -11,6 +11,7 @@ import type {
   AskQuote,
   BuildIntentSelection,
   BuildIntentMode,
+  BuildPlanningSource,
   BuildWorkbenchSnapshot,
   BuildStageId,
   BookLibraryEntry,
@@ -148,6 +149,7 @@ const buildWorkbenchImporting = ref(false);
 const buildWorkbenchActioning = ref(false);
 const buildIntentOpen = ref(false);
 const buildIntentSelection = ref<BuildIntentSelection | null>(null);
+const buildIntentPlanningSource = ref<BuildPlanningSource | null>(null);
 const buildIntentBusy = ref(false);
 const buildIntentError = ref<string | null>(null);
 let buildIntentRequestSeq = 0;
@@ -1968,7 +1970,10 @@ async function draftBuildIntent(payload: {
           mode: payload.mode,
           user_goal: payload.user_goal,
         });
-    if (request === buildIntentRequestSeq) buildIntentSelection.value = response.selection;
+    if (request === buildIntentRequestSeq) {
+      buildIntentSelection.value = response.selection;
+      buildIntentPlanningSource.value = response.planning_source;
+    }
   } catch (error) {
     if (request === buildIntentRequestSeq) buildIntentError.value = errorMessage(error);
   } finally {
@@ -1984,6 +1989,7 @@ async function confirmBuildIntent(payload: { plan_id: string; plan_digest: strin
     const response = await api.buildIntentConfirm(payload.plan_id, payload.plan_digest);
     if (request === buildIntentRequestSeq) {
       buildIntentSelection.value = response.selection;
+      buildIntentPlanningSource.value = response.planning_source;
       void refreshIntentArtifacts();
     }
   } catch (error) {
@@ -1999,7 +2005,10 @@ async function rejectBuildIntent(payload: { plan_id: string }) {
   buildIntentError.value = null;
   try {
     const response = await api.buildIntentReject(payload.plan_id);
-    if (request === buildIntentRequestSeq) buildIntentSelection.value = response.selection;
+    if (request === buildIntentRequestSeq) {
+      buildIntentSelection.value = response.selection;
+      buildIntentPlanningSource.value = response.planning_source;
+    }
   } catch (error) {
     if (request === buildIntentRequestSeq) buildIntentError.value = errorMessage(error);
   } finally {
@@ -3435,6 +3444,7 @@ function resetBookSessionUi() {
   buildIntentRequestSeq += 1;
   buildIntentOpen.value = false;
   buildIntentSelection.value = null;
+  buildIntentPlanningSource.value = null;
   buildIntentBusy.value = false;
   buildIntentError.value = null;
   sourceReviewLlmSuggestions.value = {};
@@ -4007,6 +4017,7 @@ async function submitOpenBook(dir = bookPickerDir.value) {
     <BuildIntentPane
       v-if="appSurface === 'reader' && buildIntentOpen"
       :selection="buildIntentSelection"
+      :planning-source="buildIntentPlanningSource"
       :busy="buildIntentBusy"
       :error="buildIntentError"
       @close="closeBuildIntent"

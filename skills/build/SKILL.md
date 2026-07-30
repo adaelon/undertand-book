@@ -33,25 +33,75 @@ contract,也不得在普通 stage 边界停下等待用户继续。
      `automatic_build_protocol_doctor.v1`;它必须报告 `status=compatible`、
      `production_default=automatic_build_protocol.v2_dispatch` 与 `dry_run_mutates_state=false`。
 
-### 自然语言目标的两步确认
+### 自然语言目标的 v2 规划与两步确认
 
-有自然语言目标时,target 必须是 Reader 书库内或由 Reader 显式登记、且已有 `base.json` 与
-`source.txt` 的立即可读 workspace。原始 Markdown/EPUB 或尚未完成可信 foundation 的 paper 返回
-`needs_user(foundation_required)`,不得伪造 goal plan。
+有自然语言目标时,target 文件不是 workspace。原始 Markdown/EPUB 或不可信 paper draft 返回
+`needs_user(foundation_required)`,先由 Reader 导入/构建。对 Reader 书库内或由 Reader 显式登记的
+绝对 workspace,不得从文件名、`.build/input/manifest.json`、PDF 或可选 paper sidecar 猜 profile/
+foundation;只有 Desktop controller 可返回 `CODEX_BUILD_FOUNDATION_REQUIRED`。
 
-首次调用只把一个 `codex_build_intent_command.v1` JSON envelope 经 stdin 送给
-`UnderstandBook.exe --codex-build-intent`:argv 只能包含维护命令 flag;`user_goal` 不得进入 argv、
-环境变量、临时/公共 workspace 文件、stdout 或 stderr。envelope 固定
-`operation=draft + absolute target.workspace_dir + input.{user_goal,budget?}`。只消费
-`codex_build_intent_response.v1`,向用户展示 goal kind、scope、目标成果、公共 closure、reuse、
-create、excluded、token/墙钟估计、budget、`plan_id + plan_digest`,然后停止为
-`needs_user(plan_confirmation_required)`;此时禁止运行 `legacy-plan/plan/next` 或私有成果任务。
+所有 controller 调用都只在 argv 放 `--codex-build-intent`,并通过进程 stdin 写入恰好一个 JSON
+envelope。不得把 raw goal 或 candidate 放进 argv、环境变量、shell 插值、临时/公共文件、stdout、
+stderr 或用户可见计划;不得记录或复述完整 candidate。
 
-用户确认后,先对所展示 `plan_id` 执行 stdin `operation=status`;若 Reader 已 replan、source 变化、
-status/digest 不同或存在歧义 draft,展示当前投影并重新等待确认。完全一致时再发送
-`operation=confirm + exact plan_id + plan_digest`,要求结果来源为 `codex_conversation`,保留返回的
-reader-private `build_plan_path`,然后才进入下方公共 automatic-build loop。Reader 已确认同一精确
-plan 也可直接继续。用户拒绝时调用 `operation=reject`;不得把展示计划之前的“构建它”当确认。
+1. 先发送 v2 capability/context 请求,此时不得发送 raw goal:
+
+   ```json
+   {"version":"codex_build_intent_command.v2","operation":"planning.context","target":{"workspace_dir":"<absolute>"},"input":{}}
+   ```
+
+   只消费 exactly-one `codex_build_intent_result.v2`。成功响应必须是
+   `status=ok + response.version=build_planning_context.v1`;读取 target、scope catalog、Registry summaries、
+   candidate contract 与 `context_digest`。若正常退出却没有该 v2 envelope、报告 unsupported version/
+   capability,或返回旧协议正文,停止为 `needs_user(CODEX_BUILD_INTENT_V2_REQUIRED)` 并提示升级 Desktop/
+   重装 plugin。Never fall back to `codex_build_intent_command.v1`；新 goal 入口不得调用 v1 raw-goal
+   `draft`,也不得调用 Reader provider。
+
+2. 当前 Codex 直接根据用户目标与该 context 构造一个 strict
+   `build_intent_planner_candidate.v2`:
+
+   ```text
+   version / goal_kind
+   source_scope={whole_book,lids,sections}
+   artifacts=[registry selection | one_off ArtifactBlueprintV1]
+   usage_horizon
+   ```
+
+   - `artifacts` 为 `0..candidate_contract.max_artifacts`,identity+version 唯一。Registry 选择只能逐字使用
+     context 中列出的 `source/blueprint_id/blueprint_version`;列表截断时不得猜隐藏项。
+   - scope 只能使用 context 给出的 LID/section 样本或 `whole_book=true`;不得发明未展示的细粒度锚。
+   - 匹配时优先复用 Registry,不强套。不匹配时设计 `origin=one_off` 的
+     `artifact_blueprint.v1`,shape 只能来自 `allowed_shapes`;schema 必须有界、closed 且逐记录 LID evidence,
+     禁止 code、`$ref`、递归、regex、remote schema 与额外字段。
+   - candidate 不得包含 raw goal、解释、plan id/digest、public stages 或 Reader-private path;Codex 不得
+     伪造 Reader plan identity。
+
+3. 用同一受保护 stdin 通道发送:
+
+   ```text
+   version=codex_build_intent_command.v2
+   operation=draft.candidate
+   target.workspace_dir=<same absolute workspace>
+   input={user_goal,planning_context_digest,candidate,budget?}
+   ```
+
+   只消费 exactly-one `codex_build_intent_result.v2`。若 `error_code=BUILD_PLANNING_CONTEXT_DRIFT`,立即
+   丢弃旧 context/candidate,重新执行 `planning.context` 并重新规划;禁止重交旧 candidate。candidate/
+   Blueprint 校验失败时按结构化 phase 修正或报告,不得删项伪装成功。缺 v2 能力仍返回
+   `CODEX_BUILD_INTENT_V2_REQUIRED`,不做 v1 fallback。
+
+4. 成功结果的 `response.version` 必须为 `codex_build_intent_response.v1`,其
+   `response.projection.version` 必须为 `codex_build_intent_plan.v2`。向用户展示 projection 的 goal
+   kind、scope、artifact summaries、public closure、reuse/create/excluded、token/墙钟估计、budget、
+   `plan_id + plan_digest`,然后停止为 `needs_user(plan_confirmation_required)`;确认前禁止运行
+   `legacy-plan/plan/next` 或私有成果任务。
+
+用户确认后,仍使用 `codex_build_intent_command.v2` 对已展示 `plan_id` 执行 `operation=status`;若
+Reader 已 replan、source/context 变化或 status/digest 不同,展示当前 Reader 投影并重新等待确认。
+完全一致时发送 `operation=confirm + exact plan_id + plan_digest`,要求返回
+`confirmation_source=codex_conversation`,保留 reader-private `build_plan_path`,然后才进入下方公共
+automatic-build loop。Reader 已确认同一精确 plan 也可继续。用户拒绝时发送 v2
+`operation=reject`;不得把展示计划之前的“构建它”当确认。
 2. 每次进入一个可能需要模型抽取的 stage,先用与后续 `next` 完全相同的
    `--max-parallel`、`--quality-profile` 和预算参数执行只读 preflight。`--max-parallel`
    是已接受计划允许的 worker 上限(最多 3);`--available-agent-slots` 是此刻真正空闲的专用

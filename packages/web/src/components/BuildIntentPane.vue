@@ -4,6 +4,7 @@ import { computed, ref, watch } from "vue";
 import type {
   BuildIntentMode,
   BuildIntentSelection,
+  BuildPlanningSource,
   BuildPlanV1,
   BuildPlanV2,
   IntentArtifactType,
@@ -11,6 +12,7 @@ import type {
 
 const props = defineProps<{
   selection: BuildIntentSelection | null;
+  planningSource: BuildPlanningSource | null;
   busy: boolean;
   error: string | null;
 }>();
@@ -39,6 +41,17 @@ const modeOptions: Array<{ id: BuildIntentMode; label: string }> = [
   { id: "standard_deep", label: "标准深读" },
   { id: "goal_directed", label: "围绕目标" },
 ];
+
+const planningSourceLabels: Record<BuildPlanningSource, string> = {
+  reader_provider: "Reader 本地模型",
+  codex: "Codex",
+  deterministic: "确定性系统方案",
+  stored_plan: "已有方案",
+};
+
+const planningSourceLabel = computed(() => (
+  props.planningSource ? planningSourceLabels[props.planningSource] : null
+));
 
 const artifactLabels: Record<IntentArtifactType, string> = {
   timeline: "时间线",
@@ -247,6 +260,11 @@ function reject() {
             <h3>预计投入</h3>
             <span :data-status="currentPlan.status">{{ currentPlan.status === "confirmed" ? "已确认" : "待确认" }}</span>
           </div>
+          <p
+            v-if="planningSourceLabel"
+            class="planning-source"
+            :data-planning-source="props.planningSource"
+          >规划来源：{{ planningSourceLabel }}</p>
           <dl class="estimate-grid">
             <div>
               <dt>Token</dt>
@@ -464,6 +482,7 @@ function reject() {
 }
 .pane-error,
 .pane-notice,
+.planning-source,
 .unknown-estimate {
   margin: 0.7rem 0 0;
   font-size: 0.78rem;
@@ -475,6 +494,9 @@ function reject() {
 .pane-notice,
 .unknown-estimate {
   color: var(--steel);
+}
+.planning-source {
+  color: var(--slate);
 }
 .plan-section {
   min-width: 0;

@@ -447,6 +447,7 @@ export interface PdfRangesProjectResponse {
   }>;
 }
 export type BuildIntentMode = "read_now" | "standard_deep" | "goal_directed";
+export type BuildPlanningSource = "reader_provider" | "codex" | "deterministic" | "stored_plan";
 export type IntentArtifactType = "timeline" | "concept_map" | "comparison_table" | "argument_map";
 export interface BuildIntentPlannerCandidateV1 {
   version: "build_intent_planner_candidate.v1";
@@ -603,6 +604,7 @@ export interface IntentBuildInspectionV1 {
 }
 export interface BuildIntentResponseV1 {
   version: "build_intent_response.v1";
+  planning_source: BuildPlanningSource;
   selection: BuildIntentSelection;
   inspection: IntentBuildInspectionV1;
 }
@@ -1236,7 +1238,6 @@ export const api = {
   buildIntentEdit: (payload: {
     plan_id: string;
     user_goal?: string;
-    candidate?: BuildIntentPlannerCandidateV1 | BuildIntentPlannerCandidateV2;
     budget?: BuildPlanV1["budget"];
   }) => http<BuildIntentResponseV1>("POST", "/build_intent/edit", payload),
   buildIntentEstimate: (plan_id: string) =>

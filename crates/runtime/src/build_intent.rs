@@ -2,6 +2,7 @@ use crate::{CompletionRequest, ModelAdapter};
 use read_tools::ToolError;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 
 const MAX_GOAL_CHARS: usize = 4_096;
@@ -62,6 +63,274 @@ pub struct BuildIntentPlannerCandidateV2 {
     pub source_scope: BuildIntentSourceScopeCandidateV1,
     pub artifacts: Vec<BuildIntentPlannerArtifactCandidateV2>,
     pub usage_horizon: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct BuildPlanningContextInputV1<'a> {
+    pub book_id: &'a str,
+    pub source_fingerprint: &'a str,
+    pub content_profile: &'a str,
+    pub available_lids: &'a [&'a str],
+    pub available_sections: &'a [&'a str],
+    pub available_blueprints: &'a [ArtifactBlueprintPlannerSummaryV1],
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct BuildPlanningTargetV1 {
+    pub book_id: String,
+    pub source_fingerprint: String,
+    pub content_profile: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct BuildPlanningScopeCatalogV1 {
+    pub available_lids: Vec<String>,
+    pub available_lid_count: usize,
+    pub available_sections: Vec<String>,
+    pub available_section_count: usize,
+    pub truncated: bool,
+    pub whole_book_allowed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct BuildPlanningCandidateContractV1 {
+    pub version: String,
+    pub max_artifacts: usize,
+    pub allowed_shapes: Vec<String>,
+    pub one_off_blueprint_version: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct BuildPlanningContextBodyV1 {
+    pub version: String,
+    pub target: BuildPlanningTargetV1,
+    pub scope_catalog: BuildPlanningScopeCatalogV1,
+    pub blueprint_registry: Vec<ArtifactBlueprintPlannerSummaryV1>,
+    pub blueprint_registry_count: usize,
+    pub blueprint_registry_truncated: bool,
+    pub candidate_contract: BuildPlanningCandidateContractV1,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct BuildPlanningContextV1 {
+    pub version: String,
+    pub target: BuildPlanningTargetV1,
+    pub scope_catalog: BuildPlanningScopeCatalogV1,
+    pub blueprint_registry: Vec<ArtifactBlueprintPlannerSummaryV1>,
+    pub blueprint_registry_count: usize,
+    pub blueprint_registry_truncated: bool,
+    pub candidate_contract: BuildPlanningCandidateContractV1,
+    pub context_digest: String,
+}
+
+impl BuildPlanningContextV1 {
+    fn body(&self) -> BuildPlanningContextBodyV1 {
+        BuildPlanningContextBodyV1 {
+            version: self.version.clone(),
+            target: self.target.clone(),
+            scope_catalog: self.scope_catalog.clone(),
+            blueprint_registry: self.blueprint_registry.clone(),
+            blueprint_registry_count: self.blueprint_registry_count,
+            blueprint_registry_truncated: self.blueprint_registry_truncated,
+            candidate_contract: self.candidate_contract.clone(),
+        }
+    }
+}
+
+pub fn build_planning_context_v1(
+    input: &BuildPlanningContextInputV1<'_>,
+) -> Result<BuildPlanningContextV1, ToolError> {
+    validate_planning_context_input(input)?;
+    let mut registry = input.available_blueprints.to_vec();
+    for summary in &mut registry {
+        summary.key_fields.sort();
+    }
+    registry.sort_by(|left, right| {
+        (
+            &left.source,
+            &left.blueprint_id,
+            &left.blueprint_version,
+            &left.digest,
+        )
+            .cmp(&(
+                &right.source,
+                &right.blueprint_id,
+                &right.blueprint_version,
+                &right.digest,
+            ))
+    });
+    let scope_truncated = input.available_lids.len() > MAX_SCOPE_ITEMS
+        || input.available_sections.len() > MAX_SCOPE_ITEMS;
+    let registry_count = registry.len();
+    let registry_truncated = registry_count > MAX_BLUEPRINT_SUMMARIES;
+    let body = BuildPlanningContextBodyV1 {
+        version: "build_planning_context.v1".into(),
+        target: BuildPlanningTargetV1 {
+            book_id: input.book_id.into(),
+            source_fingerprint: input.source_fingerprint.into(),
+            content_profile: input.content_profile.into(),
+        },
+        scope_catalog: BuildPlanningScopeCatalogV1 {
+            available_lids: bounded_scope_catalog(input.available_lids)
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            available_lid_count: input.available_lids.len(),
+            available_sections: bounded_scope_catalog(input.available_sections)
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            available_section_count: input.available_sections.len(),
+            truncated: scope_truncated,
+            whole_book_allowed: true,
+        },
+        blueprint_registry: bounded_blueprint_registry(&registry)
+            .into_iter()
+            .cloned()
+            .collect(),
+        blueprint_registry_count: registry_count,
+        blueprint_registry_truncated: registry_truncated,
+        candidate_contract: BuildPlanningCandidateContractV1 {
+            version: "build_intent_planner_candidate.v2".into(),
+            max_artifacts: MAX_BLUEPRINTS_PER_PLAN,
+            allowed_shapes: ["collection", "table", "graph", "sequence", "document"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            one_off_blueprint_version: "artifact_blueprint.v1".into(),
+        },
+    };
+    let context = BuildPlanningContextV1 {
+        version: body.version.clone(),
+        target: body.target.clone(),
+        scope_catalog: body.scope_catalog.clone(),
+        blueprint_registry: body.blueprint_registry.clone(),
+        blueprint_registry_count: body.blueprint_registry_count,
+        blueprint_registry_truncated: body.blueprint_registry_truncated,
+        candidate_contract: body.candidate_contract.clone(),
+        context_digest: build_planning_context_digest(&body)?,
+    };
+    validate_build_planning_context_v1(&context)?;
+    Ok(context)
+}
+
+pub fn validate_build_planning_context_v1(
+    context: &BuildPlanningContextV1,
+) -> Result<(), ToolError> {
+    if context.version != "build_planning_context.v1"
+        || !path_safe(&context.target.book_id)
+        || !sha256(&context.target.source_fingerprint)
+        || !matches!(
+            context.target.content_profile.as_str(),
+            "technical_learning" | "paper"
+        )
+        || context.scope_catalog.available_lids.len() > MAX_SCOPE_ITEMS
+        || context.scope_catalog.available_sections.len() > MAX_SCOPE_ITEMS
+        || context.scope_catalog.available_lid_count < context.scope_catalog.available_lids.len()
+        || context.scope_catalog.available_section_count
+            < context.scope_catalog.available_sections.len()
+        || context.scope_catalog.truncated
+            != (context.scope_catalog.available_lid_count
+                > context.scope_catalog.available_lids.len()
+                || context.scope_catalog.available_section_count
+                    > context.scope_catalog.available_sections.len())
+        || !context.scope_catalog.whole_book_allowed
+        || !all_unique(
+            context
+                .scope_catalog
+                .available_lids
+                .iter()
+                .map(String::as_str),
+        )
+        || !all_unique(
+            context
+                .scope_catalog
+                .available_sections
+                .iter()
+                .map(String::as_str),
+        )
+        || context
+            .scope_catalog
+            .available_lids
+            .iter()
+            .any(|lid| !valid_lid(lid) || lid.len() > 128)
+        || context
+            .scope_catalog
+            .available_sections
+            .iter()
+            .any(|section| section.trim().is_empty() || section.chars().count() > 256)
+        || context.blueprint_registry.len() > MAX_BLUEPRINT_SUMMARIES
+        || context.blueprint_registry_count < context.blueprint_registry.len()
+        || context.blueprint_registry_truncated
+            != (context.blueprint_registry_count > context.blueprint_registry.len())
+        || context.candidate_contract.version != "build_intent_planner_candidate.v2"
+        || context.candidate_contract.max_artifacts != MAX_BLUEPRINTS_PER_PLAN
+        || context.candidate_contract.allowed_shapes
+            != ["collection", "table", "graph", "sequence", "document"]
+        || context.candidate_contract.one_off_blueprint_version != "artifact_blueprint.v1"
+    {
+        return Err(invalid_context("BuildPlanningContext fields are invalid"));
+    }
+    validate_blueprint_summaries(&context.blueprint_registry).map_err(|_| {
+        invalid_context("BuildPlanningContext Blueprint Registry summaries are invalid")
+    })?;
+    let mut canonical_registry = context.blueprint_registry.clone();
+    for summary in &mut canonical_registry {
+        let mut sorted = summary.key_fields.clone();
+        sorted.sort();
+        if summary.key_fields != sorted {
+            return Err(invalid_context(
+                "BuildPlanningContext key_fields are not canonical",
+            ));
+        }
+    }
+    canonical_registry.sort_by(|left, right| {
+        (
+            &left.source,
+            &left.blueprint_id,
+            &left.blueprint_version,
+            &left.digest,
+        )
+            .cmp(&(
+                &right.source,
+                &right.blueprint_id,
+                &right.blueprint_version,
+                &right.digest,
+            ))
+    });
+    if context.blueprint_registry != canonical_registry {
+        return Err(invalid_context(
+            "BuildPlanningContext Registry order is not canonical",
+        ));
+    }
+    let digest = build_planning_context_digest(&context.body())?;
+    if context.context_digest != digest {
+        return Err(invalid_context(
+            "BuildPlanningContext digest does not match its canonical body",
+        ));
+    }
+    Ok(())
+}
+
+fn build_planning_context_digest(body: &BuildPlanningContextBodyV1) -> Result<String, ToolError> {
+    let value = serde_json::to_value(body).map_err(|error| {
+        invalid_context(format!(
+            "BuildPlanningContext cannot be serialized: {error}"
+        ))
+    })?;
+    let canonical = serde_json::to_string(&value).map_err(|error| {
+        invalid_context(format!(
+            "BuildPlanningContext cannot be canonicalized: {error}"
+        ))
+    })?;
+    let mut digest = Sha256::new();
+    digest.update(canonical.as_bytes());
+    Ok(format!("{:x}", digest.finalize()))
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -185,22 +454,57 @@ fn validate_request(request: &BuildIntentPlannerRequest<'_>) -> Result<(), ToolE
     if !matches!(request.content_profile, "technical_learning" | "paper") {
         return Err(invalid_candidate("unknown content_profile"));
     }
+    validate_blueprint_summaries(request.available_blueprints)?;
+    Ok(())
+}
+
+fn validate_planning_context_input(
+    input: &BuildPlanningContextInputV1<'_>,
+) -> Result<(), ToolError> {
+    if !path_safe(input.book_id)
+        || !sha256(input.source_fingerprint)
+        || !matches!(input.content_profile, "technical_learning" | "paper")
+        || !all_unique(input.available_lids.iter().copied())
+        || !all_unique(input.available_sections.iter().copied())
+        || input
+            .available_lids
+            .iter()
+            .any(|lid| !valid_lid(lid) || lid.len() > 128)
+        || input
+            .available_sections
+            .iter()
+            .any(|section| section.trim().is_empty() || section.chars().count() > 256)
+    {
+        return Err(invalid_context("BuildPlanningContext input is invalid"));
+    }
+    validate_blueprint_summaries(input.available_blueprints)
+        .map_err(|_| invalid_context("BuildPlanningContext Blueprint summaries are invalid"))
+}
+
+fn validate_blueprint_summaries(
+    blueprints: &[ArtifactBlueprintPlannerSummaryV1],
+) -> Result<(), ToolError> {
     let mut identities = HashSet::new();
-    for blueprint in request.available_blueprints {
+    for blueprint in blueprints {
+        let mut fields = HashSet::new();
         if !matches!(blueprint.source.as_str(), "system" | "user_private")
             || !path_safe(&blueprint.blueprint_id)
             || !path_safe(&blueprint.blueprint_version)
             || !sha256(&blueprint.digest)
             || blueprint.title.trim().is_empty()
+            || blueprint.title.chars().count() > 256
             || blueprint.purpose.trim().is_empty()
+            || blueprint.purpose.chars().count() > 1_024
             || !matches!(
                 blueprint.shape.as_str(),
                 "collection" | "table" | "graph" | "sequence" | "document"
             )
-            || blueprint
-                .key_fields
-                .iter()
-                .any(|field| field.trim().is_empty())
+            || blueprint.key_fields.len() > 64
+            || blueprint.key_fields.iter().any(|field| {
+                field.trim().is_empty()
+                    || field.chars().count() > 128
+                    || !fields.insert(field.as_str())
+            })
             || !identities.insert((
                 blueprint.source.as_str(),
                 blueprint.blueprint_id.as_str(),
@@ -447,6 +751,14 @@ fn invalid_candidate(message: impl Into<String>) -> ToolError {
 fn invalid_decision(message: impl Into<String>) -> ToolError {
     ToolError {
         error_code: "BUILD_DECISION_INVALID".into(),
+        category: "validation".into(),
+        message: message.into(),
+    }
+}
+
+fn invalid_context(message: impl Into<String>) -> ToolError {
+    ToolError {
+        error_code: "BUILD_PLANNING_CONTEXT_INVALID".into(),
         category: "validation".into(),
         message: message.into(),
     }

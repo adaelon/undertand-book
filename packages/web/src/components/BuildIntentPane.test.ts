@@ -1,7 +1,12 @@
 // @vitest-environment happy-dom
 import { mount } from "@vue/test-utils";
 import { describe, expect, it } from "vitest";
-import type { BuildIntentSelection, BuildIntentSelectionV1, BuildIntentSelectionV2 } from "../api";
+import type {
+  BuildIntentSelection,
+  BuildIntentSelectionV1,
+  BuildIntentSelectionV2,
+  BuildPlanningSource,
+} from "../api";
 import BuildIntentPane from "./BuildIntentPane.vue";
 
 const digest = "a".repeat(64);
@@ -118,9 +123,12 @@ function blueprintSelection(): BuildIntentSelectionV2 {
   };
 }
 
-function mountPane(current: BuildIntentSelection | null = null) {
+function mountPane(
+  current: BuildIntentSelection | null = null,
+  planningSource: BuildPlanningSource | null = null,
+) {
   return mount(BuildIntentPane, {
-    props: { selection: current, busy: false, error: null },
+    props: { selection: current, planningSource, busy: false, error: null },
   });
 }
 
@@ -137,6 +145,21 @@ describe("BuildIntentPane", () => {
     await wrapper.get('[data-mode="read_now"]').trigger("click");
     await wrapper.get('[data-action="draft"]').trigger("click");
     expect(wrapper.emitted("draft")?.[0]?.[0]).toEqual({ mode: "read_now" });
+    expect(wrapper.find('[data-action="confirm"]').exists()).toBe(false);
+  });
+
+  it("keeps Reader provider failure explicit without inventing a fallback plan", () => {
+    const wrapper = mount(BuildIntentPane, {
+      props: {
+        selection: null,
+        planningSource: null,
+        busy: false,
+        error: "Reader 规划服务暂不可用，请检查 Provider 设置后重试。",
+      },
+    });
+
+    expect(wrapper.get(".pane-error").text()).toContain("Provider 设置");
+    expect(wrapper.find(".estimate-section").exists()).toBe(false);
     expect(wrapper.find('[data-action="confirm"]').exists()).toBe(false);
   });
 
@@ -177,7 +200,8 @@ describe("BuildIntentPane", () => {
   });
 
   it("summarizes a V2 Blueprint without exposing raw schema JSON", () => {
-    const wrapper = mountPane(blueprintSelection());
+    const wrapper = mountPane(blueprintSelection(), "reader_provider");
+    expect(wrapper.get('[data-planning-source="reader_provider"]').text()).toContain("Reader 本地模型");
     expect(wrapper.text()).toContain("证据比较矩阵");
     expect(wrapper.text()).toContain("按共同维度比较实现策略");
     expect(wrapper.text()).toContain("表格");
@@ -186,5 +210,13 @@ describe("BuildIntentPane", () => {
     expect(wrapper.text()).toContain("最多 120 条记录");
     expect(wrapper.text()).toContain("24,000 字符");
     expect(wrapper.text()).not.toContain("additional_properties");
+  });
+
+  it("renders stored-plan response provenance without changing the selection", () => {
+    const current = blueprintSelection();
+    const wrapper = mountPane(current, "stored_plan");
+
+    expect(wrapper.get('[data-planning-source="stored_plan"]').text()).toContain("已有方案");
+    expect(wrapper.props("selection")).toStrictEqual(current);
   });
 });

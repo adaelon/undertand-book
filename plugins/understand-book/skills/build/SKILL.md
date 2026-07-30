@@ -33,38 +33,78 @@ output, or treat conversation memory as build state.
 - **Natural-language goal:** a target file is not a workspace. A raw Markdown/EPUB file or an
   untrusted paper draft is `needs_user(foundation_required)` and must first be imported or built by
   Reader. For an absolute workspace directory inside the Reader library or explicitly registered
-  by Reader, do not preflight its content profile or foundation from the filesystem; send the
-  controller draft below.
+  by Reader, use the v2 context-to-candidate flow below.
 
 The Desktop controller response is the only authority for whether foundation is required. Stop as
 `needs_user(foundation_required)` only when `UnderstandBook.exe --codex-build-intent` returns
-`error_code=CODEX_BUILD_FOUNDATION_REQUIRED`. Otherwise consume its
-`codex_build_intent_response.v1` projection even when paper-only Workbench artifacts are absent.
-Do not inspect `.build/input/manifest.json`, `source_manifest.json` source kind, PDF files, optional
-paper sidecars, or workspace names to infer `paper` or invent a foundation gate. In particular, a
-missing `.build/input/manifest.json` is normal for an immediately readable `technical_learning`
-Markdown/EPUB workspace and must never trigger Paper Build Workbench instructions. Do not claim
-that the engine identified a target as paper unless the controller projection explicitly reports
-`content_profile.id=paper`.
+`error_code=CODEX_BUILD_FOUNDATION_REQUIRED`. Do not inspect `.build/input/manifest.json`,
+`source_manifest.json` source kind, PDFs, optional paper sidecars, or workspace names to infer a
+profile or invent a foundation gate. A missing `.build/input/manifest.json` is normal for an
+immediately readable `technical_learning` Markdown/EPUB workspace.
 
-For a new goal, send exactly one `codex_build_intent_command.v1` JSON envelope to
-`UnderstandBook.exe --codex-build-intent` over stdin. Put only the maintenance flag in argv; never
-put `user_goal` in argv, an environment variable, a temporary/public workspace file, stdout, or
-stderr. The envelope has `operation=draft`, an absolute `target.workspace_dir`, and
-`input={user_goal,budget?}`. Consume only `codex_build_intent_response.v1`.
+## Plan a natural-language goal with protocol v2
 
-Show the user the projected goal kind, scope, desired artifacts, public stage closure, reuse,
-create, excluded items, token/wall-clock estimate, budget, `plan_id`, and `plan_digest`. Then stop as
-`needs_user(plan_confirmation_required)`. Do not run `legacy-plan`, `plan`, `next`, or private
-artifact work before explicit approval of that exact digest.
+For every controller call, put only `--codex-build-intent` in argv and write exactly one JSON
+envelope to process stdin. Never put the raw goal or candidate in argv, environment variables,
+shell interpolation, temporary/public files, stdout, stderr, logs, or the user-visible plan. Do not
+echo or restate the complete candidate.
 
-After the user approves, first call the same stdin controller with `operation=status` and the shown
-`plan_id`. If its current digest/status differs, show the current projection and stop for a new
-confirmation. Otherwise send `operation=confirm` with the exact `plan_id + plan_digest`; require
-`confirmation_source=codex_conversation`, retain the returned private `build_plan_path`, and enter
-the automatic-build loop. Reader-side confirmation is also valid when `status` reports the exact
-plan already confirmed. A rejection uses `operation=reject`; never infer confirmation from “build
-it” text that preceded the displayed plan.
+1. Probe capability and read current context without sending the goal:
+
+   ```json
+   {"version":"codex_build_intent_command.v2","operation":"planning.context","target":{"workspace_dir":"<absolute>"},"input":{}}
+   ```
+
+   Consume exactly one `codex_build_intent_result.v2`. Success requires `status=ok` and
+   `response.version=build_planning_context.v1`. Read its target, bounded scope catalog, Blueprint
+   Registry summaries, candidate contract, and `context_digest`. If a normally exited controller
+   emits no valid v2 result, reports an unsupported version/capability, or emits a legacy response,
+   stop as `needs_user(CODEX_BUILD_INTENT_V2_REQUIRED)` and tell the user to upgrade Desktop and
+   reinstall the plugin. Never fall back to `codex_build_intent_command.v1`; the new goal entry must
+   not call the Reader provider or its raw-goal `draft` operation.
+
+2. The current Codex directly creates one strict `build_intent_planner_candidate.v2` from the user
+   goal and that context:
+
+   ```text
+   version / goal_kind
+   source_scope={whole_book,lids,sections}
+   artifacts=[registry selection | one_off ArtifactBlueprintV1]
+   usage_horizon
+   ```
+
+   `artifacts` contains zero through `candidate_contract.max_artifacts` unique identity/version
+   entries. A Registry selection must copy an advertised `source`, `blueprint_id`, and
+   `blueprint_version` exactly; never guess an entry hidden by truncation. Scope may use only shown
+   LID/section samples or `whole_book=true`. Prefer a matching Registry Blueprint without forcing a
+   match. Otherwise provide a complete `origin=one_off` `artifact_blueprint.v1` whose shape is in
+   `allowed_shapes`, whose restricted schemas are bounded and closed, and whose records require LID
+   evidence. Do not use code, `$ref`, recursion, regex, remote schemas, extra keys, raw goal text,
+   explanations, public stages, plan identities, or Reader-private paths.
+
+3. Send one protected stdin envelope with `version=codex_build_intent_command.v2`,
+   `operation=draft.candidate`, the same absolute workspace, and
+   `input={user_goal,planning_context_digest,candidate,budget?}`. Consume exactly one
+   `codex_build_intent_result.v2`. On `BUILD_PLANNING_CONTEXT_DRIFT`, discard both old context and
+   candidate, call `planning.context` again, and plan again; never resubmit the stale candidate.
+   Correct or report candidate/Blueprint failures by their structured phase without silently
+   dropping an artifact. Missing v2 capability remains `CODEX_BUILD_INTENT_V2_REQUIRED`, never a v1
+   fallback.
+
+4. Success requires `response.version=codex_build_intent_response.v1` and nested
+   `response.projection.version=codex_build_intent_plan.v2`. Show the projection's goal kind, scope,
+   artifact summaries, public stage closure, reuse, create, excluded items, token/wall-clock
+   estimate, budget, `plan_id`, and `plan_digest`. Then stop as
+   `needs_user(plan_confirmation_required)`. Do not run `legacy-plan`, `plan`, `next`, or private
+   artifact work before approval of that exact digest.
+
+After approval, send a v2 `operation=status` for the shown `plan_id`. If current digest/status
+differs, show the current Reader projection and stop for a new confirmation. Otherwise send v2
+`operation=confirm` with the exact `plan_id + plan_digest`; require
+`confirmation_source=codex_conversation`, retain the private `build_plan_path`, and enter the
+automatic-build loop. Reader-side confirmation is valid when status reports that exact plan already
+confirmed. Rejection uses v2 `operation=reject`; never infer confirmation from text that preceded
+the displayed plan.
 
 ## Automatic-build v2 loop
 

@@ -16176,6 +16176,7 @@ unchanged after training concludes";
             response["selection"]["version"],
             "build_intent_selection.v2"
         );
+        assert_eq!(response["planning_source"], "deterministic");
         assert!(response["selection"]["intent"].is_null());
         assert_eq!(response["selection"]["plan"]["version"], "build_plan.v2");
         assert!(response["selection"]["plan"]["private_artifacts"]
@@ -16310,6 +16311,7 @@ unchanged after training concludes";
             response["selection"]["version"],
             "build_intent_selection.v2"
         );
+        assert_eq!(response["planning_source"], "reader_provider");
         assert_eq!(
             response["selection"]["intent"]["version"],
             "build_intent.v2"
@@ -16369,6 +16371,22 @@ unchanged after training concludes";
             1
         );
 
+        s.adapter = Box::new(MemoryFlowAdapter {
+            structured_outputs: RefCell::new(VecDeque::from([json!({
+                "version": "build_intent_planner_candidate.v2",
+                "goal_kind": "compare",
+                "source_scope": { "whole_book": false, "lids": ["1.1"], "sections": [] },
+                "artifacts": [{
+                    "source": "system",
+                    "blueprint_id": "system.comparison_table",
+                    "blueprint_version": "1.0.0"
+                }],
+                "usage_horizon": "project"
+            })])),
+            chat_answers: RefCell::new(VecDeque::new()),
+            structured_calls: structured_calls.clone(),
+            seen_messages: Arc::new(Mutex::new(Vec::new())),
+        });
         let edited_goal = "EDITED_PRIVATE_GOAL_SENTINEL compare only the selected claim";
         let edited = post_at(
             &mut s,
@@ -16377,11 +16395,10 @@ unchanged after training concludes";
             "2026-07-25T11:01:00.000Z",
         );
         assert_eq!(edited.status, 200, "{}", edited.body);
-        assert_eq!(*structured_calls.lock().unwrap(), 1);
-        assert_eq!(
-            serde_json::from_str::<Value>(&edited.body).unwrap()["selection"]["intent"]["revision"],
-            2
-        );
+        assert_eq!(*structured_calls.lock().unwrap(), 2);
+        let edited: Value = serde_json::from_str(&edited.body).unwrap();
+        assert_eq!(edited["planning_source"], "reader_provider");
+        assert_eq!(edited["selection"]["intent"]["revision"], 2);
 
         let rejected = post(
             &mut s,
@@ -16603,6 +16620,339 @@ unchanged after training concludes";
     }
 
     #[test]
+    fn codex_planning_context_is_read_only_bounded_current_and_provider_free() {
+        fn tree_snapshot(root: &Path) -> BTreeMap<String, Vec<u8>> {
+            fn walk(root: &Path, cursor: &Path, output: &mut BTreeMap<String, Vec<u8>>) {
+                if !cursor.exists() {
+                    return;
+                }
+                let mut entries = std::fs::read_dir(cursor)
+                    .unwrap()
+                    .map(|entry| entry.unwrap())
+                    .collect::<Vec<_>>();
+                entries.sort_by_key(|entry| entry.file_name());
+                for entry in entries {
+                    let path = entry.path();
+                    if entry.file_type().unwrap().is_dir() {
+                        walk(root, &path, output);
+                    } else {
+                        output.insert(
+                            path.strip_prefix(root)
+                                .unwrap()
+                                .to_string_lossy()
+                                .into_owned(),
+                            std::fs::read(path).unwrap(),
+                        );
+                    }
+                }
+            }
+            let mut output = BTreeMap::new();
+            walk(root, root, &mut output);
+            output
+        }
+
+        let mut state = state_named("codex-planning-context-readonly");
+        state.adapter = Box::new(UnconfiguredAdapter);
+        let private_root = state.intent_store_root.clone().unwrap();
+        let store = intent_build_store::IntentArtifactStore::open(&private_root).unwrap();
+        let revision_before = store
+            .inspect_redacted(&state.book.base.book_id)
+            .unwrap()
+            .store_revision;
+        let files_before = tree_snapshot(&private_root);
+
+        let first = build_intent_api::run_codex_command(
+            &mut state,
+            "planning.context",
+            json!({}),
+            "2026-07-30T09:00:00.000Z",
+        )
+        .unwrap();
+        let second = build_intent_api::run_codex_command(
+            &mut state,
+            "planning.context",
+            json!({}),
+            "2026-07-30T09:01:00.000Z",
+        )
+        .unwrap();
+        assert_eq!(first, second);
+        assert_eq!(first["version"], "build_planning_context.v1");
+        assert_eq!(first["target"]["book_id"], state.book.base.book_id);
+        assert_eq!(first["candidate_contract"]["max_artifacts"], 16);
+        assert!(first["blueprint_registry"].as_array().unwrap().len() >= 4);
+        assert!(
+            first["scope_catalog"]["available_lids"]
+                .as_array()
+                .unwrap()
+                .len()
+                <= 128
+        );
+        let serialized = serde_json::to_string(&first).unwrap();
+        assert!(!serialized.contains("user_goal"));
+        assert!(!serialized.contains(&private_root.to_string_lossy().to_string()));
+        assert_eq!(tree_snapshot(&private_root), files_before);
+        assert_eq!(
+            store
+                .inspect_redacted(&state.book.base.book_id)
+                .unwrap()
+                .store_revision,
+            revision_before
+        );
+
+        let original_source = std::fs::read(state.book_dir.join("source.txt")).unwrap();
+        std::fs::write(
+            state.book_dir.join("source.txt"),
+            [original_source.as_slice(), b"current-state-drift"].concat(),
+        )
+        .unwrap();
+        let drifted = build_intent_api::run_codex_command(
+            &mut state,
+            "planning.context",
+            json!({}),
+            "2026-07-30T09:02:00.000Z",
+        )
+        .unwrap();
+        assert_ne!(first["context_digest"], drifted["context_digest"]);
+        std::fs::write(state.book_dir.join("source.txt"), original_source).unwrap();
+
+        let base = multi_leaf_base("planning-context-large-book", 1_981);
+        let source = "X".repeat(19_810);
+        state.book = Book::new(base, &source);
+        state.reader = Reader::new(&state.book, DEFAULT_RADIUS);
+        std::fs::write(state.book_dir.join("source.txt"), source).unwrap();
+        let large = build_intent_api::run_codex_command(
+            &mut state,
+            "planning.context",
+            json!({}),
+            "2026-07-30T09:03:00.000Z",
+        )
+        .unwrap();
+        assert_eq!(large["scope_catalog"]["available_lid_count"], 1_982);
+        assert_eq!(
+            large["scope_catalog"]["available_lids"]
+                .as_array()
+                .unwrap()
+                .len(),
+            128
+        );
+        assert_eq!(large["scope_catalog"]["truncated"], true);
+        assert_eq!(
+            build_intent_api::run_codex_command(
+                &mut state,
+                "planning.context",
+                json!({ "user_goal": "forbidden" }),
+                "2026-07-30T09:04:00.000Z",
+            )
+            .unwrap_err()
+            .error_code,
+            intent_build_store::INTENT_BUILD_INVALID
+        );
+    }
+
+    #[test]
+    fn codex_candidate_and_reader_provider_share_one_six_artifact_compiler() {
+        fn one_off(id: &str, title: &str) -> Value {
+            json!({
+                "version": "artifact_blueprint.v1",
+                "blueprint_id": id,
+                "blueprint_version": "1.0.0",
+                "origin": "one_off",
+                "title": title,
+                "purpose": format!("Organize evidence-backed {title} records for the confirmed goal."),
+                "shape": "collection",
+                "record_schema": {
+                    "type": "object",
+                    "properties": {
+                        "item": { "type": "string", "min_length": 1, "max_length": 400 }
+                    },
+                    "required": ["item"],
+                    "additional_properties": false,
+                    "max_properties": 1
+                },
+                "routing": {
+                    "use_when": [format!("The question needs {title}.")],
+                    "avoid_when": ["The user requests source-only evidence."],
+                    "covered_topics": [title],
+                    "scope_label": "whole book"
+                },
+                "search_fields": [{ "path": "/item", "weight": 10, "analyzer": "text" }],
+                "summary_fields": ["/item"],
+                "evidence_policy": { "required_per_record": true, "anchor": "lid" },
+                "limits": { "max_records": 32, "max_relations": 0, "max_text_chars": 12_800 }
+            })
+        }
+
+        let one_offs = [
+            one_off("one-off.cb3.questions", "study questions"),
+            one_off("one-off.cb3.terms", "term cards"),
+            one_off("one-off.cb3.steps", "implementation steps"),
+            one_off("one-off.cb3.checks", "verification checks"),
+        ];
+        let candidate = json!({
+            "version": "build_intent_planner_candidate.v2",
+            "goal_kind": "write",
+            "source_scope": { "whole_book": true, "lids": [], "sections": [] },
+            "artifacts": [
+                { "source": "system", "blueprint_id": "system.concept_map", "blueprint_version": "1.0.0" },
+                { "source": "system", "blueprint_id": "system.comparison_table", "blueprint_version": "1.0.0" },
+                { "source": "one_off", "blueprint_id": "one-off.cb3.questions", "blueprint_version": "1.0.0", "blueprint": one_offs[0] },
+                { "source": "one_off", "blueprint_id": "one-off.cb3.terms", "blueprint_version": "1.0.0", "blueprint": one_offs[1] },
+                { "source": "one_off", "blueprint_id": "one-off.cb3.steps", "blueprint_version": "1.0.0", "blueprint": one_offs[2] },
+                { "source": "one_off", "blueprint_id": "one-off.cb3.checks", "blueprint_version": "1.0.0", "blueprint": one_offs[3] }
+            ],
+            "usage_horizon": "project"
+        });
+        let goal = "Create six complementary study artifacts";
+        let now = "2026-07-30T10:00:00.000Z";
+
+        let mut codex = state_named("cb3-codex-six-artifacts");
+        codex.adapter = Box::new(UnconfiguredAdapter);
+        let context =
+            build_intent_api::run_codex_command(&mut codex, "planning.context", json!({}), now)
+                .unwrap();
+        let drafted = build_intent_api::run_codex_command(
+            &mut codex,
+            "draft.candidate",
+            json!({
+                "user_goal": goal,
+                "planning_context_digest": context["context_digest"],
+                "candidate": candidate,
+                "budget": { "max_total_tokens": 24_000, "on_exceed": "needs_user" }
+            }),
+            now,
+        )
+        .unwrap();
+        assert_eq!(
+            drafted["projection"]["plan"]["artifact_summaries"]
+                .as_array()
+                .unwrap()
+                .len(),
+            6
+        );
+        let plan: Value = serde_json::from_str(
+            &std::fs::read_to_string(drafted["build_plan_path"].as_str().unwrap()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(plan["private_artifacts"].as_array().unwrap().len(), 6);
+        assert_eq!(
+            plan["private_artifacts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|artifact| artifact["artifact_id"].as_str().unwrap())
+                .collect::<HashSet<_>>()
+                .len(),
+            6
+        );
+
+        let parity_candidate = json!({
+            "version": "build_intent_planner_candidate.v2",
+            "goal_kind": "compare",
+            "source_scope": { "whole_book": true, "lids": [], "sections": [] },
+            "artifacts": [
+                { "source": "system", "blueprint_id": "system.concept_map", "blueprint_version": "1.0.0" },
+                { "source": "system", "blueprint_id": "system.comparison_table", "blueprint_version": "1.0.0" }
+            ],
+            "usage_horizon": "project"
+        });
+        let calls = Arc::new(Mutex::new(0));
+        let mut reader = state_named("cb3-reader-parity");
+        reader.adapter = Box::new(MemoryFlowAdapter {
+            structured_outputs: RefCell::new(VecDeque::from([parity_candidate.clone()])),
+            chat_answers: RefCell::new(VecDeque::new()),
+            structured_calls: calls.clone(),
+            seen_messages: Arc::new(Mutex::new(Vec::new())),
+        });
+        let reader_draft = post_at(
+            &mut reader,
+            "/build_intent/draft",
+            &json!({ "mode": "goal_directed", "user_goal": goal }).to_string(),
+            now,
+        );
+        assert_eq!(reader_draft.status, 200, "{}", reader_draft.body);
+        let reader_draft: Value = serde_json::from_str(&reader_draft.body).unwrap();
+        assert_eq!(reader_draft["planning_source"], "reader_provider");
+        assert_eq!(*calls.lock().unwrap(), 1);
+
+        let mut codex_parity = state_named("cb3-codex-parity");
+        codex_parity.adapter = Box::new(UnconfiguredAdapter);
+        let parity_context = build_intent_api::run_codex_command(
+            &mut codex_parity,
+            "planning.context",
+            json!({}),
+            now,
+        )
+        .unwrap();
+        let codex_draft = build_intent_api::run_codex_command(
+            &mut codex_parity,
+            "draft.candidate",
+            json!({
+                "user_goal": goal,
+                "planning_context_digest": parity_context["context_digest"],
+                "candidate": parity_candidate
+            }),
+            now,
+        )
+        .unwrap();
+        for field in ["plan_id", "plan_digest"] {
+            assert_eq!(
+                reader_draft["selection"]["plan"][field],
+                codex_draft["projection"]["plan"][field]
+            );
+        }
+        assert_eq!(
+            reader_draft["selection"]["intent"]["intent_id"],
+            codex_draft["projection"]["intent"]["intent_id"]
+        );
+        assert_eq!(
+            reader_draft["selection"]["intent_digest"],
+            codex_draft["projection"]["intent"]["intent_digest"]
+        );
+    }
+
+    #[test]
+    fn codex_candidate_rejects_context_drift_before_persisting_a_plan() {
+        let mut state = state_named("cb3-context-drift");
+        state.adapter = Box::new(UnconfiguredAdapter);
+        let context = build_intent_api::run_codex_command(
+            &mut state,
+            "planning.context",
+            json!({}),
+            "2026-07-30T10:10:00.000Z",
+        )
+        .unwrap();
+        std::fs::write(state.book_dir.join("source.txt"), "changed current source").unwrap();
+        let error = build_intent_api::run_codex_command(
+            &mut state,
+            "draft.candidate",
+            json!({
+                "user_goal": "Analyze the current book",
+                "planning_context_digest": context["context_digest"],
+                "candidate": {
+                    "version": "build_intent_planner_candidate.v2",
+                    "goal_kind": "analyze",
+                    "source_scope": { "whole_book": true, "lids": [], "sections": [] },
+                    "artifacts": [],
+                    "usage_horizon": "one_off"
+                }
+            }),
+            "2026-07-30T10:11:00.000Z",
+        )
+        .unwrap_err();
+        assert_eq!(error.error_code, "BUILD_PLANNING_CONTEXT_DRIFT");
+        assert_eq!(error.category, "needs_user");
+        let inspection = intent_build_store::IntentArtifactStore::open(
+            state.intent_store_root.as_ref().unwrap(),
+        )
+        .unwrap()
+        .inspect_redacted(&state.book.base.book_id)
+        .unwrap();
+        assert!(inspection.intents.is_empty());
+        assert!(inspection.plans.is_empty());
+        assert_eq!(inspection.store_revision, 0);
+    }
+
+    #[test]
     fn codex_build_target_requires_reader_library_membership_or_registration() {
         let parent = tmp_dir("codex-build-target-trust");
         let library = parent.join(".understand-book");
@@ -16641,6 +16991,57 @@ unchanged after training concludes";
         let body: Value = serde_json::from_str(&status.body).unwrap();
         assert_eq!(body["inspection"]["intents"], json!([]));
         assert_eq!(body["inspection"]["plans"], json!([]));
+    }
+
+    #[test]
+    fn reader_build_intent_http_cannot_submit_a_candidate() {
+        let candidate = json!({
+            "version": "build_intent_planner_candidate.v2",
+            "goal_kind": "analyze",
+            "source_scope": { "whole_book": true, "lids": [], "sections": [] },
+            "artifacts": [],
+            "usage_horizon": "one_off"
+        });
+        let mut state = state_named("cb6-reader-candidate-denied");
+        state.adapter = Box::new(UnconfiguredAdapter);
+
+        for (route, body) in [
+            (
+                "/build_intent/draft",
+                json!({
+                    "mode": "goal_directed",
+                    "user_goal": "analyze the book",
+                    "candidate": candidate.clone()
+                }),
+            ),
+            (
+                "/build_intent/edit",
+                json!({
+                    "plan_id": "plan-not-used",
+                    "user_goal": "analyze the book",
+                    "candidate": candidate.clone()
+                }),
+            ),
+        ] {
+            let response = post_at(
+                &mut state,
+                route,
+                &body.to_string(),
+                "2026-07-30T11:00:00.000Z",
+            );
+            assert_eq!(response.status, 400, "{}", response.body);
+            assert!(response.body.contains("INTENT_BUILD_INVALID"));
+        }
+
+        let inspection = intent_build_store::IntentArtifactStore::open(
+            state.intent_store_root.as_ref().unwrap(),
+        )
+        .unwrap()
+        .inspect_redacted(&state.book.base.book_id)
+        .unwrap();
+        assert_eq!(inspection.store_revision, 0);
+        assert!(inspection.intents.is_empty());
+        assert!(inspection.plans.is_empty());
     }
 
     #[test]
