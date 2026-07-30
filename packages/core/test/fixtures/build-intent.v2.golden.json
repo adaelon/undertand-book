@@ -1,0 +1,177 @@
+{
+  "version": "build_intent.v2.golden",
+  "intent": {
+    "version": "build_intent.v2",
+    "intent_id": "intent-001",
+    "revision": 1,
+    "book_id": "paper-a",
+    "source_fingerprint": "source-a",
+    "content_profile": {
+      "id": "paper",
+      "version": "paper_v0"
+    },
+    "user_goal": "private v2 goal",
+    "goal_kind": "analyze",
+    "source_scope": {
+      "whole_book": false,
+      "lids": ["1.1"],
+      "sections": []
+    },
+    "usage_horizon": "project",
+    "privacy": "reader_private",
+    "status": "confirmed",
+    "created_at": "2026-07-29T12:00:00.000Z",
+    "confirmed_at": "2026-07-29T12:01:00.000Z"
+  },
+  "intent_digest": "c3ce64d4d01d44a98b0e989bb62f4d7081f8b9500f040ad9f2a9d726a0a88473",
+  "plan": {
+    "version": "build_plan.v2",
+    "plan_id": "plan-001",
+    "revision": 1,
+    "book_id": "paper-a",
+    "source_fingerprint": "source-a",
+    "content_profile": {
+      "id": "paper",
+      "version": "paper_v0"
+    },
+    "recipe_id": "goal_directed",
+    "intent_id": "intent-001",
+    "intent_digest": "c3ce64d4d01d44a98b0e989bb62f4d7081f8b9500f040ad9f2a9d726a0a88473",
+    "public_stage_closure": [],
+    "private_artifacts": [
+      {
+        "artifact_id": "artifact-f39f1e71e29588025c0d",
+        "source_scope": {
+          "whole_book": false,
+          "lids": ["1.1"],
+          "sections": []
+        },
+        "blueprint": {
+          "version": "artifact_blueprint.v1",
+          "blueprint_id": "system.timeline",
+          "blueprint_version": "1.0.0",
+          "origin": "system",
+          "title": "Timeline",
+          "purpose": "Order evidence-backed events or stages from the selected source scope.",
+          "shape": "sequence",
+          "record_schema": {
+            "type": "object",
+            "properties": {
+              "label": {
+                "type": "string",
+                "min_length": 1,
+                "max_length": 4000
+              },
+              "order_hint": {
+                "type": "string",
+                "min_length": 1,
+                "max_length": 400
+              }
+            },
+            "required": ["label"],
+            "additional_properties": false,
+            "max_properties": 2
+          },
+          "routing": {
+            "use_when": [
+              "The question depends on chronology, stages, or ordered change."
+            ],
+            "avoid_when": [
+              "The question asks only for a static definition."
+            ],
+            "covered_topics": ["chronology", "stages", "ordered change"],
+            "scope_label": "confirmed build source scope"
+          },
+          "search_fields": [
+            {
+              "path": "/label",
+              "weight": 10,
+              "analyzer": "text"
+            },
+            {
+              "path": "/order_hint",
+              "weight": 4,
+              "analyzer": "keyword"
+            }
+          ],
+          "summary_fields": ["/label", "/order_hint"],
+          "evidence_policy": {
+            "required_per_record": true,
+            "anchor": "lid"
+          },
+          "limits": {
+            "max_records": 10000,
+            "max_relations": 0,
+            "max_text_chars": 2000000
+          }
+        },
+        "blueprint_digest": "a24d6ff58721c5e64519b1637111f761a037eabf52320e3088504b18857ee37a",
+        "required_public_capabilities": ["foundation.lid"]
+      }
+    ],
+    "reuse": [
+      {
+        "artifact": "public.foundation",
+        "freshness_digest": "f99f68411ba18b4483cbb525d6d01d009d059765669165cda56789b3b65b6cba"
+      }
+    ],
+    "create": ["private.artifact-f39f1e71e29588025c0d"],
+    "excluded": [
+      {
+        "artifact": "public.standard_deep",
+        "reason": "not required by selected blueprints"
+      }
+    ],
+    "estimate": {
+      "input_tokens": {
+        "lower": 0,
+        "upper": 0,
+        "coverage": 0
+      },
+      "output_tokens": {
+        "lower": 0,
+        "upper": 0,
+        "coverage": 0
+      },
+      "wall_clock_minutes": {
+        "confidence": "none"
+      },
+      "unknown_stages": ["private.artifact-f39f1e71e29588025c0d"],
+      "historical_match": {
+        "stage": false,
+        "policy": false,
+        "model": false,
+        "harness": false,
+        "sample_count": 0
+      }
+    },
+    "budget": {
+      "max_total_tokens": 20000,
+      "on_exceed": "needs_user"
+    },
+    "status": "confirmed",
+    "plan_digest": "7412fb915d4bae4ab9c3f34518be4b12eef8ddf8677f0124998c3167c4401c27",
+    "confirmation_source": "reader_ui",
+    "created_at": "2026-07-29T12:00:00.000Z",
+    "confirmed_at": "2026-07-29T12:01:00.000Z"
+  },
+  "payload": {
+    "version": "artifact_instance.v2",
+    "blueprint_digest": "a24d6ff58721c5e64519b1637111f761a037eabf52320e3088504b18857ee37a",
+    "records": [
+      {
+        "record_id": "event-1",
+        "data": {
+          "label": "PRIVATE_V2_ARTIFACT_SENTINEL",
+          "order_hint": "1"
+        },
+        "evidence_lids": ["1.1"]
+      }
+    ]
+  },
+  "payload_digest": "623c7f14b7945636229e30d51d44c09d2b05d631f4698e6cc3b734c819c5acf5",
+  "canonical_number_cases": {
+    "values": [0.000001, 1e-7, 100000000000000000000, 1e+21, 333333333.3333333],
+    "json": "[0.000001,1e-7,100000000000000000000,1e+21,333333333.3333333]"
+  }
+}

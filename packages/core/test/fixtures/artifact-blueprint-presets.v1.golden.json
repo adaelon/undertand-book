@@ -1,0 +1,180 @@
+{
+  "version": "artifact_blueprint_presets.v1.golden",
+  "cases": [
+    {
+      "artifact_type": "timeline",
+      "blueprint_id": "system.timeline",
+      "blueprint_digest": "a24d6ff58721c5e64519b1637111f761a037eabf52320e3088504b18857ee37a",
+      "legacy_payload": {
+        "items": [
+          {
+            "id": "event-1",
+            "label": "First event",
+            "order_hint": "1",
+            "evidence_lids": ["1.1"]
+          }
+        ]
+      },
+      "mapped_records": [
+        {
+          "record_id": "event-1",
+          "data": {
+            "label": "First event",
+            "order_hint": "1"
+          },
+          "evidence_lids": ["1.1"]
+        }
+      ],
+      "mapped_relations": []
+    },
+    {
+      "artifact_type": "concept_map",
+      "blueprint_id": "system.concept_map",
+      "blueprint_digest": "4910a7dc1c0aceaa6ee85fd207f987d5ca8f545ab9db3cfd57a57dd4276c9b13",
+      "legacy_payload": {
+        "nodes": [
+          {
+            "id": "concept-a",
+            "label": "Concept A",
+            "evidence_lids": ["1.1"]
+          },
+          {
+            "id": "concept-b",
+            "label": "Concept B",
+            "evidence_lids": ["1.2"]
+          }
+        ],
+        "links": [
+          {
+            "source": "concept-a",
+            "target": "concept-b",
+            "relation": "enables",
+            "evidence_lids": ["1.2"]
+          }
+        ]
+      },
+      "mapped_records": [
+        {
+          "record_id": "concept-a",
+          "data": {
+            "label": "Concept A"
+          },
+          "evidence_lids": ["1.1"]
+        },
+        {
+          "record_id": "concept-b",
+          "data": {
+            "label": "Concept B"
+          },
+          "evidence_lids": ["1.2"]
+        }
+      ],
+      "mapped_relations": [
+        {
+          "relation_id": "concept-a:enables:concept-b",
+          "source": "concept-a",
+          "target": "concept-b",
+          "data": {
+            "relation": "enables"
+          },
+          "evidence_lids": ["1.2"]
+        }
+      ]
+    },
+    {
+      "artifact_type": "comparison_table",
+      "blueprint_id": "system.comparison_table",
+      "blueprint_digest": "4a331d3b090d20a4a60f354f0637501d88502539a0dbc8cfad6238900c282ff8",
+      "legacy_payload": {
+        "rows": [
+          {
+            "subject": "Method A",
+            "dimensions": {
+              "mechanism": "retrieval",
+              "tradeoff": "latency"
+            },
+            "evidence_lids": ["1.1"]
+          }
+        ]
+      },
+      "mapped_records": [
+        {
+          "record_id": "row-1",
+          "data": {
+            "subject": "Method A",
+            "dimensions": [
+              {
+                "name": "mechanism",
+                "value_json": "\"retrieval\""
+              },
+              {
+                "name": "tradeoff",
+                "value_json": "\"latency\""
+              }
+            ]
+          },
+          "evidence_lids": ["1.1"]
+        }
+      ],
+      "mapped_relations": []
+    },
+    {
+      "artifact_type": "argument_map",
+      "blueprint_id": "system.argument_map",
+      "blueprint_digest": "0120579090f458afa1cf9236630fb5e2b4ecee887ff21659fa2b65faf5d1dfa9",
+      "legacy_payload": {
+        "claims": [
+          {
+            "id": "claim-a",
+            "claim": "The method improves recall.",
+            "role": "result",
+            "evidence_lids": ["1.1"]
+          },
+          {
+            "id": "claim-b",
+            "claim": "The evaluation is narrow.",
+            "role": "limitation",
+            "evidence_lids": ["1.2"]
+          }
+        ],
+        "relations": [
+          {
+            "source": "claim-b",
+            "target": "claim-a",
+            "relation": "qualifies",
+            "evidence_lids": ["1.2"]
+          }
+        ]
+      },
+      "mapped_records": [
+        {
+          "record_id": "claim-a",
+          "data": {
+            "claim": "The method improves recall.",
+            "role": "result"
+          },
+          "evidence_lids": ["1.1"]
+        },
+        {
+          "record_id": "claim-b",
+          "data": {
+            "claim": "The evaluation is narrow.",
+            "role": "limitation"
+          },
+          "evidence_lids": ["1.2"]
+        }
+      ],
+      "mapped_relations": [
+        {
+          "relation_id": "claim-b:qualifies:claim-a",
+          "source": "claim-b",
+          "target": "claim-a",
+          "data": {
+            "relation": "qualifies"
+          },
+          "evidence_lids": ["1.2"]
+        }
+      ]
+    }
+  ]
+}

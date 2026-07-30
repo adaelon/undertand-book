@@ -8,6 +8,7 @@ import {
   redactBuildIntentSelection,
   rejectBuildIntentSelection,
 } from "../src/build-intent-controller";
+import { computeArtifactBlueprintDigest, getSystemArtifactBlueprintV1 } from "../src/artifact-blueprint";
 import { BuildDecisionRequestV2Z } from "../src/build-intent";
 import { projectLegacyBuildDecisionRequestV2 } from "../src/build-workbench";
 
@@ -19,10 +20,36 @@ const target = {
 };
 const now = "2026-07-25T10:00:00.000Z";
 
+function candidate(artifacts: Array<"timeline" | "concept_map" | "comparison_table" | "argument_map">) {
+  return {
+    version: "build_intent_planner_candidate.v2" as const,
+    goal_kind: "compare" as const,
+    source_scope: { whole_book: true, lids: [] as string[], sections: [] as string[] },
+    artifacts: artifacts.map((artifact) => ({
+      source: "system" as const,
+      blueprint_id: `system.${artifact}`,
+      blueprint_version: "1.0.0",
+    })),
+    usage_horizon: "project" as const,
+  };
+}
+
+function resolutions(artifacts: Array<"timeline" | "concept_map" | "comparison_table" | "argument_map">) {
+  return artifacts.map((artifact) => {
+    const preset = getSystemArtifactBlueprintV1(artifact);
+    return {
+      version: "artifact_blueprint_resolution.v1" as const,
+      source: "system" as const,
+      blueprint: preset.blueprint,
+      digest: preset.digest,
+    };
+  });
+}
+
 describe("IP5 resident build-intent controller", () => {
   it("keeps read-now and standard-deep deterministic without a private intent", () => {
     expect(draftBuildIntentSelection({ mode: "read_now", target, now })).toEqual({
-      version: "build_intent_selection.v1",
+      version: "build_intent_selection.v2",
       mode: "read_now",
       intent: null,
       intent_digest: null,
@@ -41,37 +68,42 @@ describe("IP5 resident build-intent controller", () => {
     });
   });
 
-  it("compiles only validated registry candidates and rejects custom or unknown capabilities", () => {
+  it("compiles zero or more validated Blueprint selections and rejects resolution drift", () => {
+    const selected = ["comparison_table", "argument_map"] as const;
     const selection = draftBuildIntentSelection({
       mode: "goal_directed",
       target,
       now,
       user_goal: "Compare the two approaches for my private report",
-      candidate: {
-        version: "build_intent_planner_candidate.v1",
-        goal_kind: "compare",
-        source_scope: { whole_book: true, lids: [], sections: [] },
-        desired_artifacts: ["comparison_table", "argument_map"],
-        usage_horizon: "project",
-      },
+      candidate: candidate([...selected]),
+      resolved_blueprints: resolutions([...selected]),
     });
-    expect(selection.intent).toMatchObject({ privacy: "reader_private", desired_artifacts: ["comparison_table", "argument_map"] });
-    expect(selection.plan).toMatchObject({ recipe_id: "goal_directed", create: expect.arrayContaining(["private.comparison_table", "private.argument_map"]) });
-    for (const desired_artifacts of [["custom"], ["unknown"]]) {
-      expect(() => draftBuildIntentSelection({
-        mode: "goal_directed",
-        target,
-        now,
-        user_goal: "private raw goal",
-        candidate: {
-          version: "build_intent_planner_candidate.v1",
-          goal_kind: "other",
-          source_scope: { whole_book: true, lids: [], sections: [] },
-          desired_artifacts,
-          usage_horizon: "one_off",
-        },
-      })).toThrow(/capability|artifact|registry/i);
-    }
+    expect(selection.intent).toMatchObject({ version: "build_intent.v2", privacy: "reader_private" });
+    expect(selection.intent).not.toHaveProperty("desired_artifacts");
+    expect(selection.plan).toMatchObject({
+      version: "build_plan.v2",
+      recipe_id: "goal_directed",
+      private_artifacts: [
+        { blueprint: { blueprint_id: "system.comparison_table" } },
+        { blueprint: { blueprint_id: "system.argument_map" } },
+      ],
+    });
+    expect(draftBuildIntentSelection({
+      mode: "goal_directed",
+      target,
+      now,
+      user_goal: "No additional artifact is useful",
+      candidate: candidate([]),
+      resolved_blueprints: [],
+    }).plan?.private_artifacts).toEqual([]);
+    expect(() => draftBuildIntentSelection({
+      mode: "goal_directed",
+      target,
+      now,
+      user_goal: "private raw goal",
+      candidate: candidate(["timeline"]),
+      resolved_blueprints: resolutions(["concept_map"]),
+    })).toThrow(/Blueprint|resolution|identity/i);
   });
 
   it("binds confirmation to the exact current digest and redacts raw goal from status metadata", () => {
@@ -81,13 +113,8 @@ describe("IP5 resident build-intent controller", () => {
       target,
       now,
       user_goal: rawGoal,
-      candidate: {
-        version: "build_intent_planner_candidate.v1",
-        goal_kind: "analyze",
-        source_scope: { whole_book: true, lids: [], sections: [] },
-        desired_artifacts: ["concept_map"],
-        usage_horizon: "long_term",
-      },
+      candidate: { ...candidate(["concept_map"]), goal_kind: "analyze", usage_horizon: "long_term" },
+      resolved_blueprints: resolutions(["concept_map"]),
     });
     expect(() => confirmBuildIntentSelection(draft, {
       plan_id: draft.plan!.plan_id,
@@ -108,6 +135,43 @@ describe("IP5 resident build-intent controller", () => {
     expect(rejectBuildIntentSelection(draft).plan?.status).toBe("superseded");
   });
 
+  it("accepts a deterministically validated one-off Blueprint draft", () => {
+    const oneOff = {
+      ...getSystemArtifactBlueprintV1("timeline").blueprint,
+      blueprint_id: "one-off.implementation_steps",
+      origin: "one_off" as const,
+      title: "Implementation steps",
+      purpose: "Track evidence-backed implementation steps for this goal.",
+    };
+    const draft = draftBuildIntentSelection({
+      mode: "goal_directed",
+      target,
+      now,
+      user_goal: "Turn the book into an implementation sequence",
+      candidate: {
+        version: "build_intent_planner_candidate.v2",
+        goal_kind: "write",
+        source_scope: { whole_book: true, lids: [], sections: [] },
+        artifacts: [{
+          source: "one_off",
+          blueprint_id: oneOff.blueprint_id,
+          blueprint_version: oneOff.blueprint_version,
+          blueprint: oneOff,
+        }],
+        usage_horizon: "one_off",
+      },
+      resolved_blueprints: [{
+        version: "artifact_blueprint_resolution.v1",
+        source: "one_off",
+        blueprint: oneOff,
+        digest: computeArtifactBlueprintDigest(oneOff),
+      }],
+    });
+    expect(draft.plan?.private_artifacts[0]).toMatchObject({
+      blueprint: { blueprint_id: "one-off.implementation_steps", origin: "one_off" },
+    });
+  });
+
   it("projects an auditable Codex plan without the private raw goal", () => {
     const rawGoal = "PRIVATE_CODEX_GOAL_DO_NOT_RETURN";
     const draft = draftBuildIntentSelection({
@@ -116,23 +180,20 @@ describe("IP5 resident build-intent controller", () => {
       now,
       user_goal: rawGoal,
       candidate: {
-        version: "build_intent_planner_candidate.v1",
-        goal_kind: "compare",
+        ...candidate(["comparison_table"]),
         source_scope: { whole_book: false, lids: ["2.1"], sections: [] },
-        desired_artifacts: ["comparison_table"],
-        usage_horizon: "project",
       },
+      resolved_blueprints: resolutions(["comparison_table"]),
     });
     const projection = projectCodexBuildIntentSelection(draft);
     expect(projection).toMatchObject({
-      version: "codex_build_intent_plan.v1",
+      version: "codex_build_intent_plan.v2",
       mode: "goal_directed",
       intent: {
         intent_id: draft.intent?.intent_id,
         intent_digest: draft.intent_digest,
         goal_kind: "compare",
         source_scope: { whole_book: false, lids: ["2.1"], sections: [] },
-        desired_artifacts: ["comparison_table"],
       },
       plan: {
         plan_id: draft.plan?.plan_id,
@@ -141,6 +202,12 @@ describe("IP5 resident build-intent controller", () => {
         reuse: draft.plan?.reuse,
         estimate: draft.plan?.estimate,
         budget: draft.plan?.budget,
+        artifact_summaries: [{
+          title: "Comparison table",
+          purpose: expect.any(String),
+          shape: "table",
+          reuse_source: "system",
+        }],
       },
       decision_request: draft.decision_request,
     });

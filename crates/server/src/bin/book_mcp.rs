@@ -3,7 +3,9 @@ use read_tools::{Book, ToolError};
 use reader::{Reader, DEFAULT_RADIUS};
 use runtime::orchestrator::new_session;
 use runtime::{ModelAdapter, ProviderRegistry};
-use server::mcp::{handle_jsonrpc_message, VisitorSessions};
+use server::mcp::{
+    handle_jsonrpc_message, ArtifactSnapshotReadPort, BookMcpArtifactReadPort, VisitorSessions,
+};
 use server::{load_session, AppState, UnconfiguredAdapter};
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
@@ -38,6 +40,10 @@ fn main() {
         Ok(adapter) => adapter,
         Err(_) => Box::new(UnconfiguredAdapter),
     };
+    let mcp_artifact_read_port =
+        BookMcpArtifactReadPort::from_default(dir.clone(), book.base.book_id.clone())
+            .ok()
+            .map(|port| Box::new(port) as Box<dyn ArtifactSnapshotReadPort>);
     let mut state = AppState {
         book_dir: dir,
         library_root: None,
@@ -45,6 +51,7 @@ fn main() {
         reader,
         store,
         intent_store_root: None,
+        mcp_artifact_read_port,
         adapter,
         messages: new_session(),
         session_path: None,

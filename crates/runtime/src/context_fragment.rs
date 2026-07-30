@@ -6,6 +6,7 @@ pub const CONTEXT_FRAGMENT_VERSION: &str = "context_fragment.v1";
 pub const READER_PROFILE_FRAGMENT_KEY: &str = "reader.profile_snapshot";
 pub const MEMORY_OPERATION_FRAGMENT_KEY: &str = "memory.operation_result";
 pub const PAPER_MINIMAP_FRAGMENT_KEY: &str = "reader.paper_minimap_agent_context";
+pub const ARTIFACT_ROUTING_FRAGMENT_KEY: &str = "reader.artifact_routing_cards";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FragmentScope {

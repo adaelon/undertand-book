@@ -1,4 +1,9 @@
 use crate::ToolSpec;
+use artifact_tools::{
+    aliases as artifact_aliases, artifact_list_input_schema, artifact_read_input_schema,
+    artifact_search_input_schema, validate_artifact_list_input, validate_artifact_read_input,
+    validate_artifact_search_input, ArtifactToolId,
+};
 use book_tool_contracts::{
     contract_for, from_resident_alias, input_schema, validate_input, BookToolId,
 };
@@ -9,6 +14,7 @@ use std::fmt;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ToolHandlerId {
     Book(BookToolId),
+    Artifact(ArtifactToolId),
     ToolSearch,
     SourcePresent,
     ProfileManifest,
@@ -29,12 +35,15 @@ pub enum ToolHandlerId {
 }
 
 impl ToolHandlerId {
-    pub const ALL: [ToolHandlerId; 28] = [
+    pub const ALL: [ToolHandlerId; 31] = [
         ToolHandlerId::Book(BookToolId::Query),
         ToolHandlerId::Book(BookToolId::Synthesize),
         ToolHandlerId::Book(BookToolId::SearchText),
         ToolHandlerId::Book(BookToolId::Text),
         ToolHandlerId::ToolSearch,
+        ToolHandlerId::Artifact(ArtifactToolId::List),
+        ToolHandlerId::Artifact(ArtifactToolId::Search),
+        ToolHandlerId::Artifact(ArtifactToolId::Read),
         ToolHandlerId::SourcePresent,
         ToolHandlerId::Book(BookToolId::Context),
         ToolHandlerId::Book(BookToolId::Concept),
@@ -66,6 +75,7 @@ impl ToolHandlerId {
                 .aliases
                 .resident
                 .expect("registered Book handler must have a Resident alias"),
+            ToolHandlerId::Artifact(id) => artifact_aliases(id).resident,
             ToolHandlerId::ToolSearch => "tool.search",
             ToolHandlerId::SourcePresent => "source.present",
             ToolHandlerId::ProfileManifest => "profile.manifest",
@@ -90,6 +100,15 @@ impl ToolHandlerId {
         if let Some(id) = from_resident_alias(name) {
             return Some(ToolHandlerId::Book(id));
         }
+        for id in [
+            ArtifactToolId::List,
+            ArtifactToolId::Search,
+            ArtifactToolId::Read,
+        ] {
+            if artifact_aliases(id).resident == name {
+                return Some(ToolHandlerId::Artifact(id));
+            }
+        }
         Self::ALL
             .iter()
             .copied()
@@ -103,6 +122,7 @@ pub enum ToolCapability {
     BookRead,
     BookSearch,
     BookQuery,
+    ArtifactRead,
     SourcePresentation,
     Navigation,
     ProfileRead,
@@ -120,6 +140,7 @@ impl ToolCapability {
             Self::BookRead => "book_read",
             Self::BookSearch => "book_search",
             Self::BookQuery => "book_query",
+            Self::ArtifactRead => "artifact_read",
             Self::SourcePresentation => "source_presentation",
             Self::Navigation => "navigation",
             Self::ProfileRead => "profile_read",
@@ -135,6 +156,7 @@ impl ToolCapability {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolValidatorId {
     BookContract(BookToolId),
+    ArtifactContract(ArtifactToolId),
     SourcePresentation,
     ProfileUsage,
     JsonSchema,
@@ -145,6 +167,7 @@ pub enum ToolResultPolicy {
     ToolDiscovery,
     QueryResponse,
     EvidenceProjection,
+    ArtifactProjection,
     SourceReference,
     NavigationProjection,
     ProfileProjection,
@@ -165,6 +188,7 @@ impl ToolOutputPolicy {
     fn for_result(result_policy: ToolResultPolicy) -> Self {
         let max_model_body_bytes = match result_policy {
             ToolResultPolicy::QueryResponse | ToolResultPolicy::EvidenceProjection => 16 * 1024,
+            ToolResultPolicy::ArtifactProjection => 12 * 1024,
             ToolResultPolicy::ProfileProjection => 12 * 1024,
             ToolResultPolicy::NavigationProjection
             | ToolResultPolicy::MemoryProjection
@@ -213,6 +237,16 @@ impl ToolRegistration {
         match self.validator {
             ToolValidatorId::BookContract(id) => {
                 validate_input(id, value).map_err(|error| ToolArgumentError {
+                    message: error.message,
+                })?;
+            }
+            ToolValidatorId::ArtifactContract(id) => {
+                let result = match id {
+                    ArtifactToolId::List => validate_artifact_list_input(value).map(|_| ()),
+                    ArtifactToolId::Search => validate_artifact_search_input(value).map(|_| ()),
+                    ArtifactToolId::Read => validate_artifact_read_input(value).map(|_| ()),
+                };
+                result.map_err(|error| ToolArgumentError {
                     message: error.message,
                 })?;
             }
@@ -273,6 +307,18 @@ impl ToolRegistry {
                 if spec.parameters != input_schema(id) {
                     return Err(ToolRegistryError::new(format!(
                         "Book tool schema drift: {name}"
+                    )));
+                }
+            }
+            if let ToolHandlerId::Artifact(id) = handler {
+                let expected = match id {
+                    ArtifactToolId::List => artifact_list_input_schema(),
+                    ArtifactToolId::Search => artifact_search_input_schema(),
+                    ArtifactToolId::Read => artifact_read_input_schema(),
+                };
+                if spec.parameters != expected {
+                    return Err(ToolRegistryError::new(format!(
+                        "artifact tool schema drift: {name}"
                     )));
                 }
             }
@@ -395,6 +441,12 @@ fn registration_for(spec: ToolSpec, handler: ToolHandlerId) -> ToolRegistration 
                 parallelism,
             )
         }
+        Handler::Artifact(id) => (
+            ToolValidatorId::ArtifactContract(id),
+            vec![Capability::ArtifactRead],
+            ResultPolicy::ArtifactProjection,
+            Parallelism::SequentialOnly,
+        ),
         Handler::ToolSearch => (
             ToolValidatorId::JsonSchema,
             vec![Capability::Discovery],

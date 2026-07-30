@@ -1,5 +1,6 @@
 use crate::tool_registry::{ToolCapability, ToolHandlerId, ToolRegistry};
 use crate::{ModelRuntimeProfile, ToolSpec};
+use artifact_tools::ArtifactToolId;
 use book_tool_contracts::BookToolId;
 use read_tools::ContentProfileId;
 use serde::{Deserialize, Serialize};
@@ -38,6 +39,58 @@ pub struct ToolExposureContext {
     pub content_profile: ContentProfileId,
     pub permissions: ToolPermissions,
     pub has_turn_evidence: bool,
+    pub artifact: ArtifactExposureContext,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArtifactExposurePhase {
+    NoOverlay,
+    Routable,
+    SearchHit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ArtifactExposureContext {
+    pub phase: ArtifactExposurePhase,
+    pub initial_search_available: bool,
+}
+
+impl ArtifactExposureContext {
+    pub const fn no_overlay() -> Self {
+        Self {
+            phase: ArtifactExposurePhase::NoOverlay,
+            initial_search_available: false,
+        }
+    }
+
+    pub const fn routable() -> Self {
+        Self {
+            phase: ArtifactExposurePhase::Routable,
+            initial_search_available: true,
+        }
+    }
+
+    pub const fn search_hit() -> Self {
+        Self {
+            phase: ArtifactExposurePhase::SearchHit,
+            initial_search_available: false,
+        }
+    }
+
+    pub const fn search_exhausted() -> Self {
+        Self {
+            phase: ArtifactExposurePhase::Routable,
+            initial_search_available: false,
+        }
+    }
+
+    fn has_overlay(self) -> bool {
+        self.phase != ArtifactExposurePhase::NoOverlay
+    }
+
+    fn replaces_book_synthesize(self) -> bool {
+        self.initial_search_available || self.phase == ArtifactExposurePhase::SearchHit
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -64,6 +117,11 @@ pub enum ToolExposureReason {
     Activated,
     DirectLimit,
     SchemaBudget,
+    ArtifactOverlayUnavailable,
+    ArtifactRoutable,
+    ArtifactSearchHit,
+    ArtifactCallBudget,
+    ArtifactReplaced,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -341,6 +399,27 @@ fn classify(
 
     match handler {
         Handler::ToolSearch => (Disposition::Direct, Reason::Discovery),
+        Handler::Artifact(_) if !context.artifact.has_overlay() => {
+            (Disposition::Hidden, Reason::ArtifactOverlayUnavailable)
+        }
+        Handler::Artifact(ArtifactToolId::List) => {
+            (Disposition::Deferred, Reason::ArtifactRoutable)
+        }
+        Handler::Artifact(ArtifactToolId::Search) if context.artifact.initial_search_available => {
+            (Disposition::Direct, Reason::ArtifactRoutable)
+        }
+        Handler::Artifact(ArtifactToolId::Search) => {
+            (Disposition::Hidden, Reason::ArtifactCallBudget)
+        }
+        Handler::Artifact(ArtifactToolId::Read)
+            if context.artifact.phase == ArtifactExposurePhase::SearchHit =>
+        {
+            (Disposition::Direct, Reason::ArtifactSearchHit)
+        }
+        Handler::Artifact(ArtifactToolId::Read) => (Disposition::Hidden, Reason::ArtifactRoutable),
+        Handler::Book(BookToolId::Synthesize) if context.artifact.replaces_book_synthesize() => {
+            (Disposition::Deferred, Reason::ArtifactReplaced)
+        }
         Handler::Book(
             BookToolId::Query
             | BookToolId::Synthesize
@@ -416,6 +495,7 @@ fn direct_priority(handler: ToolHandlerId) -> usize {
         ToolHandlerId::Book(BookToolId::Concept) => 4,
         ToolHandlerId::Book(BookToolId::Query) => 5,
         ToolHandlerId::Book(BookToolId::Synthesize) => 6,
+        ToolHandlerId::Artifact(ArtifactToolId::Search | ArtifactToolId::Read) => 6,
         ToolHandlerId::SourcePresent => 7,
         _ => usize::MAX,
     }
@@ -505,6 +585,7 @@ mod tests {
             content_profile,
             permissions: ToolPermissions::default(),
             has_turn_evidence: false,
+            artifact: ArtifactExposureContext::no_overlay(),
         }
     }
 
@@ -704,5 +785,66 @@ mod tests {
             .iter()
             .filter(|entry| entry.exposed)
             .all(|entry| entry.reason != ToolExposureReason::SchemaBudget));
+    }
+
+    #[test]
+    fn artifact_exposure_replaces_synthesize_without_exceeding_the_direct_budget() {
+        let registry = resident_tool_registry();
+        let model = model();
+        let state = ToolExposureState::default();
+
+        let no_overlay = ToolExposurePlan::build(
+            &registry,
+            &model,
+            &context(ContentProfileId::TechnicalLearning),
+            &state,
+        );
+        for name in ["artifact.list", "artifact.search", "artifact.read"] {
+            assert_eq!(
+                no_overlay.entry(name).unwrap().disposition,
+                ToolExposureDisposition::Hidden
+            );
+            assert!(!no_overlay.is_visible(name));
+        }
+
+        let mut routable_context = context(ContentProfileId::TechnicalLearning);
+        routable_context.artifact = ArtifactExposureContext::routable();
+        let routable = ToolExposurePlan::build(&registry, &model, &routable_context, &state);
+        assert_eq!(
+            routable.entry("artifact.list").unwrap().disposition,
+            ToolExposureDisposition::Deferred
+        );
+        assert_eq!(
+            routable.entry("artifact.search").unwrap().disposition,
+            ToolExposureDisposition::Direct
+        );
+        assert_eq!(
+            routable.entry("artifact.read").unwrap().disposition,
+            ToolExposureDisposition::Hidden
+        );
+        assert!(routable.is_visible("artifact.search"));
+        assert!(!routable.is_visible("book.synthesize"));
+        assert!(
+            routable
+                .entries
+                .iter()
+                .filter(|entry| entry.disposition == ToolExposureDisposition::Direct)
+                .count()
+                <= DEFAULT_DIRECT_TOOL_LIMIT
+        );
+
+        let mut hit_context = context(ContentProfileId::TechnicalLearning);
+        hit_context.artifact = ArtifactExposureContext::search_hit();
+        let hit = ToolExposurePlan::build(&registry, &model, &hit_context, &state);
+        assert!(!hit.is_visible("artifact.search"));
+        assert!(hit.is_visible("artifact.read"));
+        assert!(!hit.is_visible("book.synthesize"));
+
+        let mut exhausted_context = context(ContentProfileId::TechnicalLearning);
+        exhausted_context.artifact = ArtifactExposureContext::search_exhausted();
+        let exhausted = ToolExposurePlan::build(&registry, &model, &exhausted_context, &state);
+        assert!(!exhausted.is_visible("artifact.search"));
+        assert!(!exhausted.is_visible("artifact.read"));
+        assert!(exhausted.is_visible("book.synthesize"));
     }
 }

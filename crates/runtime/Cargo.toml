@@ -5,6 +5,7 @@ edition = "2021"
 publish = false
 
 [dependencies]
+artifact-tools = { path = "../artifact-tools" }
 base-schema = { path = "../base-schema" }
 book-tool-contracts = { path = "../book-tool-contracts" }
 read-tools = { path = "../read-tools" }

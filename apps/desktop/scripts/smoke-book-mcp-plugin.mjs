@@ -25,8 +25,10 @@ if (!server || server.command !== "cmd.exe" || server.cwd !== ".") {
 const root = mkdtempSync(path.join(tmpdir(), "understand-book-mcp-plugin-smoke-"));
 const bookDir = path.join(root, "book");
 const memoryDir = path.join(root, "memory");
+const privateDir = path.join(root, "private");
 mkdirSync(bookDir, { recursive: true });
 mkdirSync(memoryDir, { recursive: true });
+mkdirSync(privateDir, { recursive: true });
 writeFileSync(path.join(bookDir, "source.txt"), "alpha beta alpha", "utf8");
 writeFileSync(path.join(bookDir, "base.json"), JSON.stringify({
   book_id: "plugin-mcp-smoke",
@@ -51,6 +53,7 @@ try {
       ...process.env,
       UNDERSTAND_BOOK_MCP_BIN: binary,
       UNDERSTAND_BOOK_MEMORY_DIR: memoryDir,
+      UNDERSTAND_BOOK_PRIVATE_DIR: privateDir,
     };
     delete childEnv.UNDERSTAND_BOOK_DIR;
     const child = spawn(server.command, server.args, {
@@ -78,7 +81,7 @@ try {
         buffer = buffer.slice(newline + 1);
         if (!line) continue;
         const message = JSON.parse(line);
-        if (message.error || message.result?.isError) {
+        if (message.error) {
           child.kill();
           reject(new Error(`Book MCP plugin error: ${line}`));
           return;
@@ -90,17 +93,45 @@ try {
             reject(new Error(`book_search_text missing from tools/list: ${line}`));
             return;
           }
+          for (const artifactTool of ["artifact_list", "artifact_search", "artifact_read"]) {
+            if (!names.includes(artifactTool)) {
+              child.kill();
+              reject(new Error(`${artifactTool} missing from tools/list: ${line}`));
+              return;
+            }
+          }
           listed = true;
           child.stdin.write(`${JSON.stringify({
             jsonrpc: "2.0",
             id: 2,
             method: "tools/call",
             params: {
+              name: "artifact_list",
+              arguments: {},
+            },
+          })}\n`);
+        } else if (message.id === 2) {
+          if (!message.result?.isError
+            || message.result?.structuredContent?.error_code !== "ARTIFACT_OVERLAY_UNAVAILABLE") {
+            child.kill();
+            reject(new Error(`unexpected artifact_list unavailable result: ${line}`));
+            return;
+          }
+          child.stdin.write(`${JSON.stringify({
+            jsonrpc: "2.0",
+            id: 3,
+            method: "tools/call",
+            params: {
               name: "book_search_text",
               arguments: { query: "alpha", page_size: 10 },
             },
           })}\n`);
-        } else if (message.id === 2) {
+        } else if (message.id === 3) {
+          if (message.result?.isError) {
+            child.kill();
+            reject(new Error(`Book MCP plugin error: ${line}`));
+            return;
+          }
           const page = message.result?.structuredContent;
           if (page?.total_occurrences !== 2 || page?.occurrences?.length !== 2) {
             child.kill();
@@ -119,7 +150,12 @@ try {
         reject(new Error(JSON.stringify({ code, listed, complete, stderr })));
         return;
       }
-      resolve({ tool: "book_search_text", total: 2, binding: "reader-session" });
+      resolve({
+        tool: "book_search_text",
+        total: 2,
+        binding: "reader-session",
+        artifactUnavailable: true,
+      });
     });
     child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" })}\n`);
   });

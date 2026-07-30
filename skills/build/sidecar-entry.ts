@@ -114,7 +114,10 @@ if (command === "prompt") {
 } else if (command === "intent.metrics") {
   prepare("intent-metrics.ts", forwardedArgs(1));
   await import("./intent-metrics");
+} else if (command === "intent.blueprint") {
+  prepare("intent-blueprint.ts", forwardedArgs(1));
+  await import("./intent-blueprint");
 } else {
-  console.error("usage: understand-book-build <legacy-plan|protocol-doctor|plan|next|dispatch.next|dispatch.inspect|dispatch.finish|audit-legacy|migration-mode|quality|metrics|record-attempt|heartbeat|candidate|submit|legacy-submit|fail|inspect|input|write|close|run-script|prompt|workbench-stage|intent.plan|intent.artifact|intent.metrics> [...args]");
+  console.error("usage: understand-book-build <legacy-plan|protocol-doctor|plan|next|dispatch.next|dispatch.inspect|dispatch.finish|audit-legacy|migration-mode|quality|metrics|record-attempt|heartbeat|candidate|submit|legacy-submit|fail|inspect|input|write|close|run-script|prompt|workbench-stage|intent.plan|intent.artifact|intent.metrics|intent.blueprint> [...args]");
   process.exit(2);
 }

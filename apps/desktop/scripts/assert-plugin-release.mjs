@@ -132,6 +132,7 @@ for (const command of [
   "intent.plan",
   "intent.artifact",
   "intent.metrics",
+  "intent.blueprint",
 ]) {
   assert(
     sidecarEntry.includes(`\"${command}\"`),

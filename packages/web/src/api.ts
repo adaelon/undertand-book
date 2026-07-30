@@ -469,6 +469,56 @@ export interface BuildIntentV1 extends Omit<BuildIntentPlannerCandidateV1, "vers
   confirmed_at?: string;
   supersedes_intent_id?: string;
 }
+export type ArtifactBlueprintOrigin = "system" | "user_private" | "one_off";
+export type ArtifactBlueprintShape = "collection" | "table" | "graph" | "sequence" | "document";
+export interface ArtifactBlueprintV1 {
+  version: "artifact_blueprint.v1";
+  blueprint_id: string;
+  blueprint_version: string;
+  origin: ArtifactBlueprintOrigin;
+  title: string;
+  purpose: string;
+  shape: ArtifactBlueprintShape;
+  record_schema: {
+    type: "object";
+    properties: Record<string, unknown>;
+    required: string[];
+    additional_properties: false;
+    max_properties: number;
+  };
+  relation_schema?: unknown;
+  routing: { use_when: string[]; avoid_when: string[]; covered_topics: string[]; scope_label: string };
+  search_fields: Array<{ path: string; weight: number; analyzer: "text" | "keyword" }>;
+  summary_fields: string[];
+  evidence_policy: { required_per_record: true; anchor: "lid" };
+  limits: { max_records: number; max_relations: number; max_text_chars: number };
+}
+export interface BuildIntentPlannerCandidateV2 {
+  version: "build_intent_planner_candidate.v2";
+  goal_kind: BuildIntentPlannerCandidateV1["goal_kind"];
+  source_scope: BuildIntentPlannerCandidateV1["source_scope"];
+  artifacts: Array<{
+    source: ArtifactBlueprintOrigin;
+    blueprint_id: string;
+    blueprint_version: string;
+    blueprint?: ArtifactBlueprintV1;
+  }>;
+  usage_horizon: BuildIntentPlannerCandidateV1["usage_horizon"];
+}
+export interface BuildIntentV2 extends Omit<BuildIntentPlannerCandidateV2, "version" | "artifacts"> {
+  version: "build_intent.v2";
+  intent_id: string;
+  revision: number;
+  book_id: string;
+  source_fingerprint: string;
+  content_profile: BuildIntentV1["content_profile"];
+  user_goal: string;
+  privacy: "reader_private";
+  status: BuildIntentV1["status"];
+  created_at: string;
+  confirmed_at?: string;
+  supersedes_intent_id?: string;
+}
 export interface BuildPlanEstimateV1 {
   input_tokens: { lower: number; upper: number; coverage: number };
   output_tokens: { lower: number; upper: number; coverage: number };
@@ -514,6 +564,16 @@ export interface BuildPlanV1 {
   created_at: string;
   confirmed_at?: string;
 }
+export interface BuildPlanV2 extends Omit<BuildPlanV1, "version" | "private_artifacts"> {
+  version: "build_plan.v2";
+  private_artifacts: Array<{
+    artifact_id: string;
+    source_scope: BuildIntentPlannerCandidateV1["source_scope"];
+    blueprint: ArtifactBlueprintV1;
+    blueprint_digest: string;
+    required_public_capabilities: string[];
+  }>;
+}
 export interface BuildIntentSelectionV1 {
   version: "build_intent_selection.v1";
   mode: BuildIntentMode;
@@ -523,6 +583,16 @@ export interface BuildIntentSelectionV1 {
   estimate_input: unknown | null;
   decision_request: BuildDecisionRequestV2 | null;
 }
+export interface BuildIntentSelectionV2 {
+  version: "build_intent_selection.v2";
+  mode: BuildIntentMode;
+  intent: BuildIntentV2 | null;
+  intent_digest: string | null;
+  plan: BuildPlanV2 | null;
+  estimate_input: unknown | null;
+  decision_request: BuildDecisionRequestV2 | null;
+}
+export type BuildIntentSelection = BuildIntentSelectionV1 | BuildIntentSelectionV2;
 export interface IntentBuildInspectionV1 {
   version: "intent_build_inspection.v1";
   book_id: string;
@@ -533,7 +603,7 @@ export interface IntentBuildInspectionV1 {
 }
 export interface BuildIntentResponseV1 {
   version: "build_intent_response.v1";
-  selection: BuildIntentSelectionV1;
+  selection: BuildIntentSelection;
   inspection: IntentBuildInspectionV1;
 }
 export interface BuildIntentStatusResponseV1 {
@@ -555,27 +625,58 @@ export interface IntentArgumentMapPayloadV1 {
   claims: Array<{ id: string; claim: string; role: IntentArgumentRole; evidence_lids: string[] }>;
   relations: Array<{ source: string; target: string; relation: string; evidence_lids: string[] }>;
 }
+export type IntentArtifactCompatibilityType = IntentArtifactType | "custom";
+export interface IntentArtifactDisplayBlueprintV1 {
+  title: string;
+  purpose: string;
+  shape: ArtifactBlueprintShape;
+  summary_fields: string[];
+}
+export interface IntentArtifactInstanceRecordV2 {
+  record_id: string;
+  data: Record<string, unknown>;
+  evidence_lids: string[];
+}
+export interface IntentArtifactInstanceRelationV2 {
+  relation_id: string;
+  source: string;
+  target: string;
+  data: Record<string, unknown>;
+  evidence_lids: string[];
+}
+export interface IntentArtifactInstanceV2 {
+  version: "artifact_instance.v2";
+  blueprint_digest?: string;
+  records: IntentArtifactInstanceRecordV2[];
+  relations?: IntentArtifactInstanceRelationV2[];
+}
+export type IntentArtifactPayload =
+  | IntentTimelinePayloadV1
+  | IntentConceptMapPayloadV1
+  | IntentComparisonTablePayloadV1
+  | IntentArgumentMapPayloadV1
+  | IntentArtifactInstanceV2;
 type PendingIntentArtifactProjectionV1 = {
   artifact_id: string;
+  artifact_type: IntentArtifactCompatibilityType;
   state: "pending";
+  blueprint?: IntentArtifactDisplayBlueprintV1;
   payload?: never;
   payload_digest?: never;
   accepted_at?: never;
 };
-type AcceptedIntentArtifactProjectionV1<TType extends IntentArtifactType, TPayload> = {
+type AcceptedIntentArtifactProjectionV1 = {
   artifact_id: string;
-  artifact_type: TType;
+  artifact_type: IntentArtifactCompatibilityType;
   state: "accepted";
-  payload: TPayload;
+  blueprint?: IntentArtifactDisplayBlueprintV1;
+  payload: IntentArtifactPayload;
   payload_digest: string;
   accepted_at: string;
 };
 export type IntentArtifactProjectionV1 =
-  | (PendingIntentArtifactProjectionV1 & { artifact_type: IntentArtifactType })
-  | AcceptedIntentArtifactProjectionV1<"timeline", IntentTimelinePayloadV1>
-  | AcceptedIntentArtifactProjectionV1<"concept_map", IntentConceptMapPayloadV1>
-  | AcceptedIntentArtifactProjectionV1<"comparison_table", IntentComparisonTablePayloadV1>
-  | AcceptedIntentArtifactProjectionV1<"argument_map", IntentArgumentMapPayloadV1>;
+  | PendingIntentArtifactProjectionV1
+  | AcceptedIntentArtifactProjectionV1;
 export interface IntentArtifactOverlayV1 {
   version: "intent_artifact_overlay.v1";
   book_id: string;
@@ -1135,7 +1236,7 @@ export const api = {
   buildIntentEdit: (payload: {
     plan_id: string;
     user_goal?: string;
-    candidate?: BuildIntentPlannerCandidateV1;
+    candidate?: BuildIntentPlannerCandidateV1 | BuildIntentPlannerCandidateV2;
     budget?: BuildPlanV1["budget"];
   }) => http<BuildIntentResponseV1>("POST", "/build_intent/edit", payload),
   buildIntentEstimate: (plan_id: string) =>

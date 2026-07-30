@@ -10,6 +10,7 @@
 mod build_intent_api;
 pub mod intent_build_store;
 
+use artifact_tools::{ArtifactAccessSnapshot, ARTIFACT_OVERLAY_UNAVAILABLE};
 use book_tool_contracts::{
     from_rest_alias, validate_input, BookToolId, BookToolInput, ContextInput,
     PaperReadingGuideInput,
@@ -45,9 +46,10 @@ use runtime::memory_policy::{
     MemoryPolicyRegistry, PaperPolicyContext, PolicyProjectionInput, PAPER_MEMORY_POLICY_ID,
 };
 use runtime::orchestrator::{
-    new_session, run_with_context_fragments_and_checkpoint_sink, AgentAnswerPart,
-    AgentAnswerSource, AgentAnswerView, AgentEffect, AnswerDeliveryDiagnostics, OuterConfig,
-    OuterOutcome, ProfileMemoryUpdate, ProfileMemoryUpdateKind, ProfileUsageTrace, SourceBinding,
+    new_session, run_with_turn_resources_and_checkpoint_sink, AgentAnswerPart, AgentAnswerSource,
+    AgentAnswerView, AgentEffect, AnswerDeliveryDiagnostics, OuterConfig, OuterOutcome,
+    ProfileMemoryUpdate, ProfileMemoryUpdateKind, ProfileUsageTrace, ResidentTurnResources,
+    SourceBinding,
 };
 use runtime::profile_api::{
     historical_backfill_job_view, profile_governance_outcome_view, HistoricalBackfillJobRequest,
@@ -85,6 +87,8 @@ pub struct AppState {
     pub store: MemoryStore,
     /// Resident-only root for private build intents. Visitor/MCP hosts always set `None`.
     pub intent_store_root: Option<PathBuf>,
+    /// Book MCP-only read port for current active + accepted artifacts. It never exposes write APIs.
+    pub mcp_artifact_read_port: Option<Box<dyn mcp::ArtifactSnapshotReadPort>>,
     pub adapter: Box<dyn ModelAdapter + Send>,
     /// 外层 E agent 的当前会话 messages(S10f `[ADR-0030]`)。`/agent/chat` 跨回合累积;
     /// `/agent/new`/history select 会切换到另一份可恢复 session。
@@ -182,6 +186,7 @@ pub fn run_codex_build_intent_command(
         reader,
         store,
         intent_store_root,
+        mcp_artifact_read_port: None,
         adapter,
         messages: new_session(),
         session_path: None,
@@ -11302,6 +11307,28 @@ fn route_agent_chat(state: &mut AppState, body: &str, now: &str) -> Reply {
     }
 }
 
+fn freeze_resident_artifact_snapshot(
+    state: &AppState,
+    current_book_id: &str,
+) -> Result<Option<ArtifactAccessSnapshot>, ToolError> {
+    let Some(store_root) = state.intent_store_root.as_ref() else {
+        return Ok(None);
+    };
+    let store = intent_build_store::IntentArtifactStore::open(store_root)?;
+    match store
+        .read_active_artifact_access_snapshot(current_book_id, state.book.source_fingerprint())
+    {
+        Ok(snapshot) => Ok(Some(snapshot)),
+        Err(error)
+            if error.error_code == ARTIFACT_OVERLAY_UNAVAILABLE
+                || error.error_code == intent_build_store::INTENT_BUILD_CONFLICT =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 fn run_precommitted_agent_chat(
     state: &mut AppState,
     msg: &str,
@@ -11311,6 +11338,7 @@ fn run_precommitted_agent_chat(
     initial_evidence: Vec<EvidenceRange>,
     now: &str,
 ) -> Result<OuterOutcome, ToolError> {
+    let artifact_snapshot = freeze_resident_artifact_snapshot(state, current_book_id)?;
     let content_profile = current_content_profile(&state.book);
     let profile_context = ProfileResolutionContext {
         book_id: Some(current_book_id.into()),
@@ -11481,18 +11509,21 @@ fn run_precommitted_agent_chat(
         agent_history: &mut state.agent_history,
         session_id: &turn_ref.session_id,
     };
-    run_with_context_fragments_and_checkpoint_sink(
+    let mut turn_resources =
+        ResidentTurnResources::new(context_fragments, initial_evidence, memory_updates);
+    if let Some(snapshot) = artifact_snapshot {
+        turn_resources = turn_resources.with_artifact_snapshot(snapshot);
+    }
+    run_with_turn_resources_and_checkpoint_sink(
         &state.book,
         &mut state.store,
         &mut state.reader,
         state.adapter.as_ref(),
         &mut state.messages,
         &profile_snapshot,
-        &context_fragments,
+        &turn_resources,
         active_checkpoint.as_ref(),
         &mut checkpoint_sink,
-        initial_evidence,
-        memory_updates,
         agent_message,
         now,
         OuterConfig::default(),
@@ -12561,6 +12592,7 @@ mod tests {
         let adapter = Box::new(StubAdapter { lid: "1.1".into() });
         AppState {
             intent_store_root: Some(book_dir.join("private-build-intents")),
+            mcp_artifact_read_port: None,
             book_dir,
             library_root: None,
             book,
@@ -16037,6 +16069,7 @@ unchanged after training concludes";
             reader,
             store,
             intent_store_root: None,
+            mcp_artifact_read_port: None,
             adapter,
             messages: new_session(),
             session_path: None,
@@ -16139,6 +16172,15 @@ unchanged after training concludes";
         );
         assert_eq!(drafted.status, 200, "{}", drafted.body);
         let response: Value = serde_json::from_str(&drafted.body).unwrap();
+        assert_eq!(
+            response["selection"]["version"],
+            "build_intent_selection.v2"
+        );
+        assert!(response["selection"]["intent"].is_null());
+        assert_eq!(response["selection"]["plan"]["version"], "build_plan.v2");
+        assert!(response["selection"]["plan"]["private_artifacts"]
+            .as_array()
+            .is_some_and(Vec::is_empty));
         let plan_id = response["selection"]["plan"]["plan_id"]
             .as_str()
             .unwrap()
@@ -16264,6 +16306,27 @@ unchanged after training concludes";
         assert_eq!(drafted.status, 200, "{}", drafted.body);
         assert_eq!(*structured_calls.lock().unwrap(), 1);
         let response: Value = serde_json::from_str(&drafted.body).unwrap();
+        assert_eq!(
+            response["selection"]["version"],
+            "build_intent_selection.v2"
+        );
+        assert_eq!(
+            response["selection"]["intent"]["version"],
+            "build_intent.v2"
+        );
+        assert!(response["selection"]["intent"]
+            .get("desired_artifacts")
+            .is_none());
+        assert_eq!(response["selection"]["plan"]["version"], "build_plan.v2");
+        assert_eq!(
+            response["selection"]["plan"]["private_artifacts"][0]["blueprint"]["blueprint_id"],
+            "system.comparison_table"
+        );
+        assert!(
+            response["selection"]["plan"]["private_artifacts"][0]["blueprint_digest"]
+                .as_str()
+                .is_some_and(|value| value.len() == 64)
+        );
         let intent_id = response["selection"]["intent"]["intent_id"]
             .as_str()
             .unwrap()
@@ -16339,6 +16402,111 @@ unchanged after training concludes";
     }
 
     #[test]
+    fn build_intent_v2_allows_zero_blueprints_and_confirms_the_same_budgeted_digest() {
+        let mut state = state_named("build-intent-zero-blueprints");
+        state.adapter = Box::new(MemoryFlowAdapter {
+            structured_outputs: RefCell::new(VecDeque::from([json!({
+                "version": "build_intent_planner_candidate.v2",
+                "goal_kind": "reference",
+                "source_scope": { "whole_book": true, "lids": [], "sections": [] },
+                "artifacts": [],
+                "usage_horizon": "one_off"
+            })])),
+            chat_answers: RefCell::new(VecDeque::new()),
+            structured_calls: Arc::new(Mutex::new(0)),
+            seen_messages: Arc::new(Mutex::new(Vec::new())),
+        });
+        let drafted = post_at(
+            &mut state,
+            "/build_intent/draft",
+            &json!({
+                "mode": "goal_directed",
+                "user_goal": "Use the book directly without an extra artifact",
+                "budget": { "max_total_tokens": 1000, "on_exceed": "needs_user" }
+            })
+            .to_string(),
+            "2026-07-29T12:00:00.000Z",
+        );
+        assert_eq!(drafted.status, 200, "{}", drafted.body);
+        let drafted: Value = serde_json::from_str(&drafted.body).unwrap();
+        assert_eq!(drafted["selection"]["plan"]["version"], "build_plan.v2");
+        assert!(drafted["selection"]["plan"]["private_artifacts"]
+            .as_array()
+            .is_some_and(Vec::is_empty));
+        assert_eq!(
+            drafted["selection"]["plan"]["budget"]["max_total_tokens"],
+            1000
+        );
+        let confirmed = post_at(
+            &mut state,
+            "/build_intent/confirm",
+            &json!({
+                "plan_id": drafted["selection"]["plan"]["plan_id"],
+                "plan_digest": drafted["selection"]["plan"]["plan_digest"],
+            })
+            .to_string(),
+            "2026-07-29T12:01:00.000Z",
+        );
+        assert_eq!(confirmed.status, 200, "{}", confirmed.body);
+        let artifacts: Value =
+            serde_json::from_str(&get(&mut state, "/build_intent/artifacts").body).unwrap();
+        assert!(artifacts["overlay"]["artifacts"]
+            .as_array()
+            .is_some_and(Vec::is_empty));
+    }
+
+    #[test]
+    fn build_intent_v2_rejects_blueprint_snapshot_drift_before_confirmation() {
+        let mut state = state_named("build-intent-blueprint-drift");
+        state.adapter = Box::new(MemoryFlowAdapter {
+            structured_outputs: RefCell::new(VecDeque::from([json!({
+                "version": "build_intent_planner_candidate.v2",
+                "goal_kind": "compare",
+                "source_scope": { "whole_book": true, "lids": [], "sections": [] },
+                "artifacts": [{
+                    "source": "system",
+                    "blueprint_id": "system.comparison_table",
+                    "blueprint_version": "1.0.0"
+                }],
+                "usage_horizon": "project"
+            })])),
+            chat_answers: RefCell::new(VecDeque::new()),
+            structured_calls: Arc::new(Mutex::new(0)),
+            seen_messages: Arc::new(Mutex::new(Vec::new())),
+        });
+        let drafted = build_intent_api::run_codex_command(
+            &mut state,
+            "draft",
+            json!({ "user_goal": "Compare the implementation choices" }),
+            "2026-07-29T12:10:00.000Z",
+        )
+        .unwrap();
+        let plan_id = drafted["projection"]["plan"]["plan_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let plan_digest = drafted["projection"]["plan"]["plan_digest"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let path = PathBuf::from(drafted["build_plan_path"].as_str().unwrap());
+        let mut stored: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        stored["private_artifacts"][0]["blueprint"]["title"] = json!("Drifted title");
+        std::fs::write(&path, stored.to_string()).unwrap();
+
+        let rejected = build_intent_api::run_codex_command(
+            &mut state,
+            "confirm",
+            json!({ "plan_id": plan_id, "plan_digest": plan_digest }),
+            "2026-07-29T12:11:00.000Z",
+        )
+        .unwrap_err();
+        assert_eq!(rejected.error_code, "BUILD_PLAN_BLUEPRINT_DRIFT");
+        assert_eq!(rejected.category, "needs_user");
+    }
+
+    #[test]
     fn codex_build_intent_uses_the_reader_private_plan_and_returns_no_raw_goal() {
         let mut state = state_named("codex-build-intent-shared-store");
         state.adapter = Box::new(MemoryFlowAdapter {
@@ -16366,8 +16534,15 @@ unchanged after training concludes";
         assert!(!body.contains("user_goal"));
         assert_eq!(
             drafted["projection"]["version"],
-            "codex_build_intent_plan.v1"
+            "codex_build_intent_plan.v2"
         );
+        assert_eq!(
+            drafted["projection"]["plan"]["artifact_summaries"][0]["title"],
+            "Comparison table"
+        );
+        assert!(drafted["projection"]["plan"]["private_artifacts"]
+            .as_array()
+            .is_some_and(Vec::is_empty));
         let plan_id = drafted["projection"]["plan"]["plan_id"]
             .as_str()
             .unwrap()
@@ -16415,75 +16590,16 @@ unchanged after training concludes";
             "2026-07-26T08:03:00.000Z",
         )
         .unwrap();
-        let prepared_body = serde_json::to_string(&prepared).unwrap();
-        assert!(!prepared_body.contains(raw_goal));
-        assert!(!prepared_body.contains("allowed_evidence_lids"));
         assert_eq!(
             prepared["handoff"]["version"],
             "intent_artifact_task_batch_handoff.v1"
         );
         assert_eq!(prepared["handoff"]["tasks"].as_array().unwrap().len(), 1);
-        let task_path = PathBuf::from(
-            prepared["handoff"]["tasks"][0]["task_path"]
-                .as_str()
-                .unwrap(),
-        );
-        let task: Value =
-            serde_json::from_str(&std::fs::read_to_string(&task_path).unwrap()).unwrap();
-        let candidate = json!({
-            "version": "intent_artifact_candidate.v1",
-            "task_id": task["task_id"],
-            "book_id": task["book_id"],
-            "source_fingerprint": task["source_fingerprint"],
-            "intent_id": task["intent_id"],
-            "intent_digest": task["intent_digest"],
-            "plan_id": task["plan_id"],
-            "plan_digest": task["plan_digest"],
-            "artifact_id": task["artifact"]["artifact_id"],
-            "artifact_type": task["artifact"]["artifact_type"],
-            "payload": {
-                "rows": [{
-                    "subject": "Shared controller result",
-                    "dimensions": { "finding": "accepted through the private mailbox" },
-                    "evidence_lids": ["1.1"]
-                }]
-            }
-        });
-        std::fs::write(
-            task_path.parent().unwrap().join("candidate.json"),
-            candidate.to_string(),
-        )
-        .unwrap();
-        let submitted = build_intent_api::run_codex_command(
-            &mut state,
-            "artifact.submit",
-            json!({ "task_path": task_path }),
-            "2026-07-26T08:04:00.000Z",
-        )
-        .unwrap();
-        assert_eq!(submitted["receipt"]["state"], "committed");
-        assert!(!serde_json::to_string(&submitted)
-            .unwrap()
-            .contains("Shared controller result"));
-
-        let reader_artifacts: Value =
-            serde_json::from_str(&get(&mut state, "/build_intent/artifacts").body).unwrap();
-        assert_eq!(
-            reader_artifacts["overlay"]["artifacts"][0]["state"],
-            "accepted"
-        );
-        assert_eq!(
-            reader_artifacts["overlay"]["artifacts"][0]["payload"]["rows"][0]["subject"],
-            "Shared controller result"
-        );
-        let resumed = build_intent_api::run_codex_command(
-            &mut state,
-            "artifact.prepare",
-            json!({ "plan_id": plan_id }),
-            "2026-07-26T08:05:00.000Z",
-        )
-        .unwrap();
-        assert!(resumed["handoff"]["tasks"].as_array().unwrap().is_empty());
+        let prepared_body = serde_json::to_string(&prepared).unwrap();
+        assert!(!prepared_body.contains(raw_goal));
+        assert!(!prepared_body.contains("user_goal"));
+        assert!(!prepared_body.contains("output_contract"));
+        assert!(!prepared_body.contains("allowed_evidence_lids"));
     }
 
     #[test]
@@ -16990,7 +17106,7 @@ unchanged after training concludes";
             serde_json::from_str(&std::fs::read_to_string(&task_path).unwrap()).unwrap();
         let private_body = "PRIVATE_SERVER_ARTIFACT_SENTINEL";
         let candidate = json!({
-            "version": "intent_artifact_candidate.v1",
+            "version": "intent_artifact_candidate.v2",
             "task_id": task["task_id"],
             "book_id": task["book_id"],
             "source_fingerprint": task["source_fingerprint"],
@@ -16999,11 +17115,16 @@ unchanged after training concludes";
             "plan_id": task["plan_id"],
             "plan_digest": task["plan_digest"],
             "artifact_id": task["artifact"]["artifact_id"],
-            "artifact_type": task["artifact"]["artifact_type"],
+            "blueprint_digest": task["artifact"]["blueprint_digest"],
             "payload": {
-                "rows": [{
-                    "subject": "Method A",
-                    "dimensions": { "summary": private_body },
+                "version": "artifact_instance.v2",
+                "blueprint_digest": task["artifact"]["blueprint_digest"],
+                "records": [{
+                    "record_id": "row-1",
+                    "data": {
+                        "subject": "Method A",
+                        "dimensions": [{ "name": "summary", "value_json": format!("\"{private_body}\"") }]
+                    },
                     "evidence_lids": ["1.1"]
                 }]
             }
@@ -17028,6 +17149,29 @@ unchanged after training concludes";
         assert!(!submitted.body.contains(private_goal));
         assert!(!submitted.body.contains(private_body));
         assert!(!submitted.body.contains("evidence_lids"));
+
+        let seen_artifact_prompt = Arc::new(Mutex::new(Vec::new()));
+        s.adapter = Box::new(ChatRecordingAdapter {
+            seen_messages: Arc::clone(&seen_artifact_prompt),
+        });
+        let chat = post(
+            &mut s,
+            "/agent/chat",
+            r#"{"message":"Compare Method A using the confirmed artifact"}"#,
+        );
+        assert_eq!(chat.status, 200, "{}", chat.body);
+        let provider_prompt =
+            serde_json::to_string(&seen_artifact_prompt.lock().unwrap().as_slice()).unwrap();
+        assert!(provider_prompt.contains("artifact_routing_cards.v1"));
+        assert!(provider_prompt.contains("artifact.search"));
+        assert!(!provider_prompt.contains(private_goal));
+        assert!(!provider_prompt.contains(private_body));
+        let persisted_messages = serde_json::to_string(&s.messages).unwrap();
+        let persisted_history = serde_json::to_string(&s.agent_history).unwrap();
+        assert!(!persisted_messages.contains("artifact_routing_cards.v1"));
+        assert!(!persisted_history.contains("artifact_routing_cards.v1"));
+        assert!(!persisted_messages.contains(private_body));
+        assert!(!persisted_history.contains(private_body));
 
         let inspected = post(
             &mut s,
@@ -17089,9 +17233,9 @@ unchanged after training concludes";
         assert_eq!(projected.status, 200, "{}", projected.body);
         let projected_body: Value = serde_json::from_str(&projected.body).unwrap();
         assert_eq!(
-            projected_body["overlay"]["artifacts"][0]["payload"]["rows"][0]["dimensions"]
-                ["summary"],
-            private_body
+            projected_body["overlay"]["artifacts"][0]["payload"]["records"][0]["data"]
+                ["dimensions"][0]["value_json"],
+            format!("\"{private_body}\"")
         );
         assert_eq!(
             projected_body["overlay"]["artifacts"][1]["state"],
@@ -18423,6 +18567,7 @@ unchanged after training concludes";
             reader,
             store,
             intent_store_root: None,
+            mcp_artifact_read_port: None,
             adapter,
             messages: new_session(),
             session_path: None,

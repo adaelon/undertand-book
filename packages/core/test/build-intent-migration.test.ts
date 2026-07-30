@@ -5,6 +5,7 @@ import {
   mapLegacyBuildInvocation,
   replanBuildIntentSelection,
 } from "../src/build-intent-controller";
+import { getSystemArtifactBlueprintV1 } from "../src/artifact-blueprint";
 
 const NOW = "2026-07-26T04:00:00.000Z";
 const LATER = "2026-07-26T04:10:00.000Z";
@@ -27,12 +28,26 @@ function target(source_fingerprint = "source-v1") {
 
 function candidate(artifact: "timeline" | "concept_map" = "timeline") {
   return {
-    version: "build_intent_planner_candidate.v1" as const,
+    version: "build_intent_planner_candidate.v2" as const,
     goal_kind: "analyze" as const,
     source_scope: { whole_book: true, lids: [], sections: [] },
-    desired_artifacts: [artifact],
+    artifacts: [{
+      source: "system" as const,
+      blueprint_id: `system.${artifact}`,
+      blueprint_version: "1.0.0",
+    }],
     usage_horizon: "project" as const,
   };
+}
+
+function resolutions(artifact: "timeline" | "concept_map" = "timeline") {
+  const preset = getSystemArtifactBlueprintV1(artifact);
+  return [{
+    version: "artifact_blueprint_resolution.v1" as const,
+    source: "system" as const,
+    blueprint: preset.blueprint,
+    digest: preset.digest,
+  }];
 }
 
 function confirmedGoal() {
@@ -42,6 +57,7 @@ function confirmedGoal() {
     now: NOW,
     user_goal: "Build a private timeline",
     candidate: candidate(),
+    resolved_blueprints: resolutions(),
   });
   return confirmBuildIntentSelection(draft, {
     plan_id: draft.plan!.plan_id,
@@ -60,6 +76,7 @@ describe("IP8 replan and legacy migration contracts", () => {
       now: LATER,
       user_goal: "Build a private concept map",
       candidate: candidate("concept_map"),
+      resolved_blueprints: resolutions("concept_map"),
     });
 
     expect(result.previous.intent?.status).toBe("superseded");
@@ -72,7 +89,7 @@ describe("IP8 replan and legacy migration contracts", () => {
     });
     expect(result.current.intent?.intent_id).not.toBe(previous.intent?.intent_id);
     expect(result.current.plan).toMatchObject({ revision: 2, public_stage_closure: [] });
-    expect(result.current.plan?.create).toEqual(["private.concept_map"]);
+    expect(result.current.plan?.create).toEqual([expect.stringMatching(/^private\.artifact-/u)]);
     expect(result.current.plan?.create).not.toContain("public.pass1");
   });
 
@@ -83,6 +100,7 @@ describe("IP8 replan and legacy migration contracts", () => {
       now: LATER,
       user_goal: "Rebuild against the changed source",
       candidate: candidate("concept_map"),
+      resolved_blueprints: resolutions("concept_map"),
     });
 
     expect(result.previous.intent?.status).toBe("stale_source");

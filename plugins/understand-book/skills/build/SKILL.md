@@ -197,9 +197,11 @@ The root must never read the task file or receive its contents. The subagent:
 
 1. calls `artifact.inspect`, then reads its own private `task.json`;
 2. uses only the task's goal, scope, output contract, validation rules, allowed evidence LIDs, and
-   the canonical Book tools/artifacts to create an `intent_artifact_candidate.v1`;
-3. writes UTF-8 no-BOM JSON only to the sibling `candidate.json`, preserving every identity field
-   from the task and placing generated records only under `payload`;
+   the canonical Book tools/artifacts to create an `intent_artifact_candidate.v2`;
+3. writes UTF-8 no-BOM JSON only to the sibling `candidate.json`, preserving every task identity
+   field plus `blueprint_digest` and placing generated content only under
+   `payload={version:"artifact_instance.v2",blueprint_digest,records,relations?}`; every record and
+   relation must match its task Blueprint schema and carry at least one allowed evidence LID;
 4. sends `operation=artifact.submit` with only `task_path` over stdin and returns only the bounded
    `intent_artifact_mailbox_receipt.v1` to root;
 5. on model/process/schema failure, sends `operation=artifact.fail` with a path-safe diagnostic

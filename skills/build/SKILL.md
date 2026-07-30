@@ -163,7 +163,9 @@ accepted,此时才报告完成。否则按当前专用 subagent 槽位分波处�
 root 每个 subagent 只给 `workspace_dir/task_path/Desktop controller path`,不得读取 task 或接收其
 正文。专用 subagent 先调用 `artifact.inspect`,自行读取私有 `task.json`,仅依照其中 goal、scope、
 output contract、validation rules、allowed evidence LIDs 与 canonical Book 工具/产物生成
-`intent_artifact_candidate.v1`;完整复制 task identity,生成记录只放 `payload`,以 UTF-8 no-BOM
+`intent_artifact_candidate.v2`;完整复制 task identity 与 `blueprint_digest`,生成内容只放在
+`payload={version:"artifact_instance.v2",blueprint_digest,records,relations?}`。每条 record/relation
+分别使用 task Blueprint 的 record/relation schema,并携带至少一个 allowed evidence LID;以 UTF-8 no-BOM
 写 sibling `candidate.json`。随后经 stdin 调用 `operation=artifact.submit`,只把 body-free
 `intent_artifact_mailbox_receipt.v1` 返回 root。模型/进程/schema 失败时调用
 `operation=artifact.fail + path-safe diagnostic_code`,只返回 retry receipt。

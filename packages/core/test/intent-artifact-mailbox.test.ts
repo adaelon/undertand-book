@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -18,11 +19,13 @@ import {
   submitIntentArtifactTaskAttempt,
 } from "../src/intent-artifact-mailbox";
 import {
+  adaptIntentArtifactPayloadV1,
   compileIntentArtifactTasks,
-  type IntentArtifactCandidateV1,
-  type IntentArtifactTaskEnvelopeV1,
+  type IntentArtifactCandidateV2,
+  type IntentArtifactTaskEnvelopeV2,
 } from "../src/intent-artifact";
 import { runIntentArtifactMailboxCommand } from "../../../skills/build/intent-artifact";
+import { canonicalBuildJson } from "../src/build-intent";
 
 const availableLids = ["1.1", "1.2", "2.1"];
 const resolvedScopeLids = ["1.1", "1.2"];
@@ -73,7 +76,7 @@ function fixture() {
     available_lids: availableLids,
     resolved_scope_lids: resolvedScopeLids,
   });
-  const directory = (task: IntentArtifactTaskEnvelopeV1) => path.join(
+  const directory = (task: IntentArtifactTaskEnvelopeV2) => path.join(
     privateRoot,
     task.book_id,
     "artifacts",
@@ -83,9 +86,10 @@ function fixture() {
   return { privateRoot, ...selection, tasks, directory };
 }
 
-function candidate(task: IntentArtifactTaskEnvelopeV1, payload: unknown): IntentArtifactCandidateV1 {
+function candidate(task: IntentArtifactTaskEnvelopeV2, payload: unknown): IntentArtifactCandidateV2 {
+  if (task.artifact.artifact_type === "custom") throw new Error("expected a legacy system Blueprint");
   return {
-    version: "intent_artifact_candidate.v1",
+    version: "intent_artifact_candidate.v2",
     task_id: task.task_id,
     book_id: task.book_id,
     source_fingerprint: task.source_fingerprint,
@@ -94,8 +98,8 @@ function candidate(task: IntentArtifactTaskEnvelopeV1, payload: unknown): Intent
     plan_id: task.plan_id,
     plan_digest: task.plan_digest,
     artifact_id: task.artifact.artifact_id,
-    artifact_type: task.artifact.artifact_type,
-    payload,
+    blueprint_digest: task.artifact.blueprint_digest,
+    payload: adaptIntentArtifactPayloadV1(task.artifact.artifact_type, payload),
   };
 }
 
@@ -248,6 +252,8 @@ describe("IP7 reader-private task-owned artifact mailbox", () => {
       "utf8",
     );
     expect(() => submitIntentArtifactTaskAttempt(submitInput(f, handoff.task_path))).toThrow(/task_id/i);
+    expect(existsSync(path.join(path.dirname(handoff.task_path), "failure.json"))).toBe(true);
+    expect(existsSync(path.join(f.directory(timeline), "accepted.json"))).toBe(false);
   });
 
   it("runs prepare, submit, and inspect through one stdin-safe Sidecar command surface", () => {
@@ -321,6 +327,49 @@ describe("IP7 reader-private task-owned artifact mailbox", () => {
       operation: "inspect",
       input: { private_root: f.privateRoot, task_path: taskPath, candidate_body: "PRIVATE_SIDECAR_BODY" },
     })).toThrow(/unrecognized keys/i);
+  });
+
+  it("omits a digest-valid accepted v1 body through the read-only preset adapter", () => {
+    const f = fixture();
+    const [timeline, concept] = f.tasks;
+    const legacyPayload = {
+      items: [{ id: "legacy-event", label: "PRIVATE_LEGACY_BODY", evidence_lids: ["1.1"] }],
+    };
+    const legacyPayloadDigest = createHash("sha256")
+      .update(canonicalBuildJson(legacyPayload), "utf8")
+      .digest("hex");
+    mkdirSync(f.directory(timeline), { recursive: true });
+    writeFileSync(path.join(f.directory(timeline), "accepted.json"), JSON.stringify({
+      version: "intent_artifact_accepted.v1",
+      task_id: timeline.task_id,
+      book_id: timeline.book_id,
+      source_fingerprint: timeline.source_fingerprint,
+      intent_id: timeline.intent_id,
+      intent_digest: timeline.intent_digest,
+      plan_id: timeline.plan_id,
+      plan_digest: timeline.plan_digest,
+      artifact_id: timeline.artifact.artifact_id,
+      artifact_type: "timeline",
+      payload: legacyPayload,
+      payload_digest: legacyPayloadDigest,
+      accepted_at: "2026-07-26T01:02:00.000Z",
+    }), "utf8");
+
+    const prepared = runIntentArtifactMailboxCommand({
+      version: "intent_artifact_mailbox_command.v1",
+      operation: "prepare",
+      input: {
+        private_root: f.privateRoot,
+        intent: f.intent,
+        plan: f.plan,
+        available_lids: availableLids,
+        resolved_scope_lids: resolvedScopeLids,
+        created_at: "2026-07-26T01:03:00.000Z",
+      },
+    }) as { tasks: Array<{ artifact_id: string }> };
+    expect(prepared.tasks).toEqual([
+      expect.objectContaining({ artifact_id: concept.artifact.artifact_id }),
+    ]);
   });
 
   it("never trusts an executor-authored receipt as a root-safe projection", () => {

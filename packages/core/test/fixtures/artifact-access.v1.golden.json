@@ -1,0 +1,31 @@
+{
+  "version": "artifact_access.v1.golden",
+  "scope": {
+    "book_id": "paper-a",
+    "source_fingerprint": "source-a",
+    "overlay_identity": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "artifacts": [
+    {
+      "artifact_id": "artifact-001",
+      "blueprint_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "payload_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    {
+      "artifact_id": "artifact-002",
+      "blueprint_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "payload_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    }
+  ],
+  "expected": {
+    "overlay_revision": "91c19f83eeac8623715b4a62260fb4347e32692408ad13a92b271a92de1f9276",
+    "artifact_refs": [
+      "ar1_Q1-pyi0VUSFMCFaTVhvrjkb-",
+      "ar1_JbVeONYs82Jbdq93cbrlIeI1"
+    ],
+    "record_ref": "rr1_aYaJQ1yDzB1TywJ7-1OwljMO",
+    "relation_ref": "rl1_ysSlaICTfTv8jZeDOf2WtTrH",
+    "list_cursor_after_1": "ac1_AAAAAAAAAAHeDjSeN-wUByesf-nEnWUe",
+    "read_cursor_after_1": "ac1_AAAAAAAAAAHyj_XyaFYQsONEabMoji5r"
+  }
+}

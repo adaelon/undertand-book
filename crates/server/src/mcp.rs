@@ -1,9 +1,18 @@
+use crate::intent_build_store::IntentArtifactStore;
 use crate::{err_reply, ok_json, validation, AppState, Reply};
+use artifact_tools::{
+    artifact_list_input_schema, artifact_read_input_schema, artifact_search_input_schema,
+    validate_artifact_list_input, validate_artifact_read_input, validate_artifact_search_input,
+    ArtifactAccessSnapshot, ArtifactToolError, ArtifactToolId, ARTIFACT_CURSOR_INVALID,
+    ARTIFACT_LIST_MCP_ALIAS, ARTIFACT_OVERLAY_UNAVAILABLE, ARTIFACT_READ_MCP_ALIAS,
+    ARTIFACT_RECORD_REF_INVALID, ARTIFACT_REF_INVALID, ARTIFACT_RESULT_TOO_LARGE,
+    ARTIFACT_SEARCH_MCP_ALIAS, ARTIFACT_SNAPSHOT_INVALID, ARTIFACT_TOOL_INPUT_INVALID,
+};
 use book_tool_contracts::{
     contracts, from_mcp_alias, input_schema, validate_input, BookToolId, BookToolInput,
     GuideAction, GuideInput,
 };
-use read_tools::{RankedStep, ToolError};
+use read_tools::{Book, RankedStep, ToolError};
 use runtime::{
     book_guide, parse_book_query_request, query, synthesize, BookGuideRequest, BookGuideResponse,
     BookGuideSessionContext,
@@ -11,14 +20,85 @@ use runtime::{
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 pub const DEFAULT_VISITOR_SESSION_TIMEOUT_MS: u128 = 30 * 60 * 1000;
 
+const ARTIFACT_MCP_TOOLS: [(ArtifactToolId, &str, &str); 3] = [
+    (
+        ArtifactToolId::List,
+        ARTIFACT_LIST_MCP_ALIAS,
+        "List bounded Routing Cards for the current active accepted artifact overlay.",
+    ),
+    (
+        ArtifactToolId::Search,
+        ARTIFACT_SEARCH_MCP_ALIAS,
+        "Search current active accepted artifacts with deterministic bounded lexical ranking.",
+    ),
+    (
+        ArtifactToolId::Read,
+        ARTIFACT_READ_MCP_ALIAS,
+        "Read bounded records from a current active accepted artifact by opaque reference.",
+    ),
+];
+
+pub trait ArtifactSnapshotReadPort: Send {
+    fn read_current_snapshot(&self) -> Result<ArtifactAccessSnapshot, ToolError>;
+}
+
+pub struct BookMcpArtifactReadPort {
+    book_dir: PathBuf,
+    bound_book_id: String,
+    store_root: PathBuf,
+}
+
+impl BookMcpArtifactReadPort {
+    pub fn new(book_dir: PathBuf, bound_book_id: String, store_root: PathBuf) -> Self {
+        Self {
+            book_dir,
+            bound_book_id,
+            store_root,
+        }
+    }
+
+    pub fn from_default(book_dir: PathBuf, bound_book_id: String) -> Result<Self, ToolError> {
+        Ok(Self::new(
+            book_dir,
+            bound_book_id,
+            IntentArtifactStore::default_root()?,
+        ))
+    }
+}
+
+impl ArtifactSnapshotReadPort for BookMcpArtifactReadPort {
+    fn read_current_snapshot(&self) -> Result<ArtifactAccessSnapshot, ToolError> {
+        let book_dir = self.book_dir.to_str().ok_or_else(|| {
+            artifact_overlay_unavailable("bound Book MCP directory is not valid UTF-8")
+        })?;
+        let current_book = Book::load(book_dir).map_err(|error| {
+            artifact_overlay_unavailable(format!(
+                "bound Book MCP source is not currently readable: {error}"
+            ))
+        })?;
+        if current_book.base.book_id != self.bound_book_id {
+            return Err(artifact_overlay_unavailable(
+                "bound Book MCP directory now resolves to a different book",
+            ));
+        }
+        IntentArtifactStore::open(&self.store_root)?.read_active_artifact_access_snapshot(
+            &self.bound_book_id,
+            current_book.source_fingerprint(),
+        )
+    }
+}
+
 pub fn tool_names() -> Vec<&'static str> {
-    contracts()
+    let mut names = contracts()
         .iter()
         .filter_map(|contract| contract.aliases.mcp)
-        .collect()
+        .collect::<Vec<_>>();
+    names.extend(ARTIFACT_MCP_TOOLS.iter().map(|(_, name, _)| *name));
+    names
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -122,7 +202,7 @@ pub fn parse_now_ms(now: &str) -> u128 {
 }
 
 pub fn tools_list_result() -> Value {
-    let tools: Vec<_> = contracts()
+    let mut tools: Vec<_> = contracts()
         .iter()
         .filter_map(|contract| {
             contract.aliases.mcp.map(|name| {
@@ -134,12 +214,23 @@ pub fn tools_list_result() -> Value {
             })
         })
         .collect();
+    tools.extend(ARTIFACT_MCP_TOOLS.iter().map(|(id, name, description)| {
+        json!({
+            "name": name,
+            "description": description,
+            "inputSchema": artifact_input_schema(*id),
+        })
+    }));
     json!({ "tools": tools })
 }
 
 pub fn dispatch_mcp_tool(state: &mut AppState, name: &str, arguments: Value, now: &str) -> Reply {
     let now_ms = parse_now_ms(now);
     state.visitor_sessions.gc_expired(now_ms);
+
+    if let Some(id) = artifact_tool_from_mcp_alias(name) {
+        return dispatch_artifact_tool(state, id, arguments);
+    }
 
     let Some(id) = from_mcp_alias(name) else {
         return mcp_tool_not_found(name);
@@ -177,6 +268,101 @@ pub fn dispatch_mcp_tool(state: &mut AppState, name: &str, arguments: Value, now
             "BOOK_TOOL_CONTRACT_INVALID",
             "MCP Book tool resolved to an incompatible input contract",
         ),
+    }
+}
+
+fn artifact_tool_from_mcp_alias(name: &str) -> Option<ArtifactToolId> {
+    ARTIFACT_MCP_TOOLS
+        .iter()
+        .find_map(|(id, alias, _)| (*alias == name).then_some(*id))
+}
+
+fn artifact_input_schema(id: ArtifactToolId) -> Value {
+    match id {
+        ArtifactToolId::List => artifact_list_input_schema(),
+        ArtifactToolId::Search => artifact_search_input_schema(),
+        ArtifactToolId::Read => artifact_read_input_schema(),
+    }
+}
+
+fn dispatch_artifact_tool(state: &AppState, id: ArtifactToolId, arguments: Value) -> Reply {
+    match id {
+        ArtifactToolId::List => {
+            let input = match validate_artifact_list_input(arguments) {
+                Ok(input) => input,
+                Err(error) => return err_reply(&artifact_tool_error(error)),
+            };
+            let snapshot = match current_artifact_snapshot(state) {
+                Ok(snapshot) => snapshot,
+                Err(error) => return err_reply(&error),
+            };
+            match snapshot.list(input) {
+                Ok(result) => ok_json(&result),
+                Err(error) => err_reply(&artifact_tool_error(error)),
+            }
+        }
+        ArtifactToolId::Search => {
+            let input = match validate_artifact_search_input(arguments) {
+                Ok(input) => input,
+                Err(error) => return err_reply(&artifact_tool_error(error)),
+            };
+            let snapshot = match current_artifact_snapshot(state) {
+                Ok(snapshot) => snapshot,
+                Err(error) => return err_reply(&error),
+            };
+            match snapshot.search(input) {
+                Ok(result) => ok_json(&result),
+                Err(error) => err_reply(&artifact_tool_error(error)),
+            }
+        }
+        ArtifactToolId::Read => {
+            let input = match validate_artifact_read_input(arguments) {
+                Ok(input) => input,
+                Err(error) => return err_reply(&artifact_tool_error(error)),
+            };
+            let snapshot = match current_artifact_snapshot(state) {
+                Ok(snapshot) => snapshot,
+                Err(error) => return err_reply(&error),
+            };
+            match snapshot.read(input) {
+                Ok(result) => ok_json(&result),
+                Err(error) => err_reply(&artifact_tool_error(error)),
+            }
+        }
+    }
+}
+
+fn current_artifact_snapshot(state: &AppState) -> Result<ArtifactAccessSnapshot, ToolError> {
+    state
+        .mcp_artifact_read_port
+        .as_ref()
+        .ok_or_else(|| artifact_overlay_unavailable("Book MCP has no current artifact overlay"))?
+        .read_current_snapshot()
+}
+
+fn artifact_tool_error(error: ArtifactToolError) -> ToolError {
+    let category = match error.code {
+        ARTIFACT_TOOL_INPUT_INVALID
+        | ARTIFACT_REF_INVALID
+        | ARTIFACT_RECORD_REF_INVALID
+        | ARTIFACT_CURSOR_INVALID => "validation",
+        ARTIFACT_RESULT_TOO_LARGE => "budget",
+        ARTIFACT_OVERLAY_UNAVAILABLE => "unavailable",
+        ARTIFACT_SNAPSHOT_INVALID => "data",
+        _ => "internal",
+    };
+    ToolError {
+        error_code: error.code.into(),
+        category: category.into(),
+        message: error.message,
+    }
+}
+
+fn artifact_overlay_unavailable(message: impl Into<String>) -> ToolError {
+    ToolError {
+        error_code: ARTIFACT_OVERLAY_UNAVAILABLE.into(),
+        category: "unavailable".into(),
+        message: message.into(),
     }
 }
 
@@ -528,6 +714,10 @@ fn jsonrpc_error(id: Value, code: i64, message: impl Into<String>, data: Value) 
 mod tests {
     use super::*;
     use crate::UnconfiguredAdapter;
+    use artifact_tools::{
+        ArtifactSearchAnalyzer, ArtifactSnapshotBlueprint, ArtifactSnapshotItem,
+        ArtifactSnapshotRecord, ArtifactSnapshotScope, ArtifactSnapshotSearchField,
+    };
     use base_schema::{
         Direction, EdgeScope, GraphEdge, GraphNode, GraphNodeType, LidNode, NodeKind, ReadOnlyBase,
         Span,
@@ -544,11 +734,29 @@ mod tests {
         ParsedResponse, RawCitation,
     };
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     struct StubAdapter;
     struct CompleteRecordingAdapter {
         requests: Arc<Mutex<Vec<CompletionRequest>>>,
+    }
+
+    struct StubArtifactPort {
+        calls: Arc<AtomicUsize>,
+        rotate_after_first: bool,
+    }
+
+    impl ArtifactSnapshotReadPort for StubArtifactPort {
+        fn read_current_snapshot(&self) -> Result<ArtifactAccessSnapshot, ToolError> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            let revision = if self.rotate_after_first && call > 0 {
+                'd'
+            } else {
+                'c'
+            };
+            artifact_snapshot(revision)
+        }
     }
 
     impl ModelAdapter for StubAdapter {
@@ -724,6 +932,7 @@ mod tests {
             reader,
             store: MemoryStore::open(tmp("memory")).unwrap(),
             intent_store_root: None,
+            mcp_artifact_read_port: None,
             adapter: Box::new(StubAdapter),
             messages: new_session(),
             session_path: None,
@@ -735,6 +944,45 @@ mod tests {
                 .unwrap_or_default(),
             workbench_loaded_revision: None,
         }
+    }
+
+    fn artifact_snapshot(revision: char) -> Result<ArtifactAccessSnapshot, ToolError> {
+        ArtifactAccessSnapshot::new(
+            ArtifactSnapshotScope {
+                book_id: "mcp-book".into(),
+                source_fingerprint: format!("source-{revision}"),
+                overlay_identity: revision.to_string().repeat(64),
+            },
+            vec![ArtifactSnapshotItem {
+                artifact_id: "private-artifact-id".into(),
+                payload_digest: revision.to_string().repeat(64),
+                blueprint: ArtifactSnapshotBlueprint {
+                    blueprint_digest: "a".repeat(64),
+                    title: "Cardiac index".into(),
+                    purpose: "Find cardiac mechanisms.".into(),
+                    use_when: vec!["the question concerns cardiac mechanisms".into()],
+                    avoid_when: vec!["the user requests source text only".into()],
+                    covered_topics: vec!["cardiac biology".into()],
+                    scope_label: "confirmed scope".into(),
+                    search_fields: vec![ArtifactSnapshotSearchField {
+                        path: "/label".into(),
+                        weight: 10,
+                        analyzer: ArtifactSearchAnalyzer::Text,
+                    }],
+                    summary_fields: vec!["/label".into()],
+                },
+                records: vec![ArtifactSnapshotRecord {
+                    record_id: "private-record-id".into(),
+                    data: json!({"label": "Cardiac splicing", "detail": "accepted artifact"})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                    evidence_lids: vec!["1.1".into()],
+                }],
+                relations: vec![],
+            }],
+        )
+        .map_err(artifact_tool_error)
     }
 
     #[test]
@@ -759,7 +1007,10 @@ mod tests {
         assert!(!names.iter().any(|n| n.contains("cross_paper")));
         assert!(!names.iter().any(|n| n.contains("corpus")));
         assert!(!names.iter().any(|n| n.contains("intent")));
-        assert!(!names.iter().any(|n| n.contains("artifact")));
+        assert!(names.contains(&"artifact_list".to_string()));
+        assert!(names.contains(&"artifact_search".to_string()));
+        assert!(names.contains(&"artifact_read".to_string()));
+        assert!(!names.contains(&"artifact_write".to_string()));
         assert!(!names.iter().any(|n| n.contains("overlay")));
     }
 
@@ -781,6 +1032,9 @@ mod tests {
                 "book_query",
                 "book_synthesize",
                 "book_guide",
+                "artifact_list",
+                "artifact_search",
+                "artifact_read",
             ]
         );
 
@@ -836,6 +1090,9 @@ mod tests {
             schema("book_search_text")["properties"]["match_mode"]["enum"],
             json!(["exact", "normalized"])
         );
+        assert_eq!(schema("artifact_list")["additionalProperties"], false);
+        assert_eq!(schema("artifact_search")["required"], json!(["query"]));
+        assert_eq!(schema("artifact_read")["required"], json!(["artifact_ref"]));
 
         let mut app = state(None);
         assert_eq!(
@@ -848,6 +1105,99 @@ mod tests {
         let body: Value = serde_json::from_str(&text.body).expect("book_text JSON response");
         assert_eq!(body["lid"], "1.1");
         assert!(body["text"].is_string());
+    }
+
+    #[test]
+    fn artifact_tools_fail_closed_when_overlay_is_unavailable() {
+        let mut app = state(None);
+        for (name, arguments) in [
+            ("artifact_list", json!({})),
+            ("artifact_search", json!({"query": "cardiac"})),
+            ("artifact_read", json!({"artifact_ref": "ar1_missing"})),
+        ] {
+            let reply = dispatch_mcp_tool(&mut app, name, arguments, "1000");
+            assert_eq!(reply.status, 503, "{name}: {}", reply.body);
+            let body: Value = serde_json::from_str(&reply.body).unwrap();
+            assert_eq!(body["error_code"], "ARTIFACT_OVERLAY_UNAVAILABLE");
+        }
+
+        let invalid = dispatch_mcp_tool(&mut app, "artifact_list", json!({"write": true}), "1001");
+        assert_eq!(invalid.status, 400, "{}", invalid.body);
+        let invalid_body: Value = serde_json::from_str(&invalid.body).unwrap();
+        assert_eq!(invalid_body["error_code"], "ARTIFACT_TOOL_INPUT_INVALID");
+
+        let write = dispatch_mcp_tool(&mut app, "artifact_write", json!({}), "1002");
+        assert_eq!(write.status, 404);
+        assert!(write.body.contains("TOOL_NOT_FOUND"));
+    }
+
+    #[test]
+    fn artifact_tools_use_the_shared_executor_and_reread_snapshot_per_call() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut app = state(None);
+        app.mcp_artifact_read_port = Some(Box::new(StubArtifactPort {
+            calls: Arc::clone(&calls),
+            rotate_after_first: false,
+        }));
+
+        let listed = dispatch_mcp_tool(&mut app, "artifact_list", json!({}), "1000");
+        assert_eq!(listed.status, 200, "{}", listed.body);
+        let listed: Value = serde_json::from_str(&listed.body).unwrap();
+        let artifact_ref = listed["artifacts"][0]["artifact_ref"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(!listed.to_string().contains("private-artifact-id"));
+
+        let searched = dispatch_mcp_tool(
+            &mut app,
+            "artifact_search",
+            json!({"query": "cardiac splicing"}),
+            "1001",
+        );
+        assert_eq!(searched.status, 200, "{}", searched.body);
+        let searched: Value = serde_json::from_str(&searched.body).unwrap();
+        let record_ref = searched["hits"][0]["record_ref"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(searched["hits"][0]["data"]["label"], "Cardiac splicing");
+        assert!(!searched.to_string().contains("private-record-id"));
+
+        let read = dispatch_mcp_tool(
+            &mut app,
+            "artifact_read",
+            json!({"artifact_ref": artifact_ref, "record_refs": [record_ref]}),
+            "1002",
+        );
+        assert_eq!(read.status, 200, "{}", read.body);
+        let read: Value = serde_json::from_str(&read.body).unwrap();
+        assert_eq!(read["records"][0]["data"]["detail"], "accepted artifact");
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn artifact_refs_fail_closed_after_the_current_snapshot_changes() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut app = state(None);
+        app.mcp_artifact_read_port = Some(Box::new(StubArtifactPort {
+            calls: Arc::clone(&calls),
+            rotate_after_first: true,
+        }));
+
+        let listed = dispatch_mcp_tool(&mut app, "artifact_list", json!({}), "1000");
+        let listed: Value = serde_json::from_str(&listed.body).unwrap();
+        let old_artifact_ref = listed["artifacts"][0]["artifact_ref"].clone();
+        let stale_read = dispatch_mcp_tool(
+            &mut app,
+            "artifact_read",
+            json!({"artifact_ref": old_artifact_ref}),
+            "1001",
+        );
+        assert_eq!(stale_read.status, 400, "{}", stale_read.body);
+        let stale_read: Value = serde_json::from_str(&stale_read.body).unwrap();
+        assert_eq!(stale_read["error_code"], "ARTIFACT_REF_INVALID");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
     #[test]
@@ -1079,6 +1429,19 @@ mod tests {
         .unwrap();
         assert_eq!(resp["id"], 1);
         assert_eq!(resp["result"]["isError"], false);
+
+        let unavailable = handle_jsonrpc_message(
+            &mut s,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"artifact_list","arguments":{}}}"#,
+            "1001",
+        )
+        .unwrap();
+        assert_eq!(unavailable["id"], 2);
+        assert_eq!(unavailable["result"]["isError"], true);
+        assert_eq!(
+            unavailable["result"]["structuredContent"]["error_code"],
+            ARTIFACT_OVERLAY_UNAVAILABLE
+        );
     }
 
     #[test]

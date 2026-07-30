@@ -10,12 +10,12 @@ import {
 } from "../src/build-intent";
 import {
   acceptIntentArtifactCandidate,
+  adaptIntentArtifactPayloadV1,
   compileIntentArtifactTasks,
   projectIntentArtifactTaskHandoff,
-  type IntentArtifactCandidateV1,
-  type IntentArtifactTaskEnvelopeV1,
+  type IntentArtifactCandidateV2,
+  type IntentArtifactTaskEnvelopeV2,
 } from "../src/intent-artifact";
-import { sidecarPlanOptionFor } from "../src/sidecar-plan";
 
 const availableLids = ["1.1", "1.2", "2.1"];
 const resolvedScopeLids = ["1.1", "1.2"];
@@ -93,9 +93,14 @@ const payloadByType = {
   },
 } as const;
 
-function candidate(task: IntentArtifactTaskEnvelopeV1, payload: unknown): IntentArtifactCandidateV1 {
+function legacyType(task: IntentArtifactTaskEnvelopeV2) {
+  if (task.artifact.artifact_type === "custom") throw new Error("expected a legacy system Blueprint");
+  return task.artifact.artifact_type;
+}
+
+function candidate(task: IntentArtifactTaskEnvelopeV2, payload: unknown): IntentArtifactCandidateV2 {
   return {
-    version: "intent_artifact_candidate.v1",
+    version: "intent_artifact_candidate.v2",
     task_id: task.task_id,
     book_id: task.book_id,
     source_fingerprint: task.source_fingerprint,
@@ -104,15 +109,15 @@ function candidate(task: IntentArtifactTaskEnvelopeV1, payload: unknown): Intent
     plan_id: task.plan_id,
     plan_digest: task.plan_digest,
     artifact_id: task.artifact.artifact_id,
-    artifact_type: task.artifact.artifact_type,
-    payload,
+    blueprint_digest: task.artifact.blueprint_digest,
+    payload: adaptIntentArtifactPayloadV1(legacyType(task), payload),
   };
 }
 
 function accept(
-  task: IntentArtifactTaskEnvelopeV1,
+  task: IntentArtifactTaskEnvelopeV2,
   payload: unknown,
-  overrides: Partial<IntentArtifactCandidateV1> = {},
+  overrides: Partial<IntentArtifactCandidateV2> = {},
 ) {
   const { intent, plan } = confirmedSelection();
   return acceptIntentArtifactCandidate({
@@ -142,22 +147,27 @@ describe("IP7 reader-private intent artifact gate", () => {
     expect(compiled.every((task) => task.plan_digest === plan.plan_digest)).toBe(true);
     expect(compiled.every((task) => task.allowed_evidence_lids.join(",") === resolvedScopeLids.join(","))).toBe(true);
     for (const task of compiled) {
-      const contract = sidecarPlanOptionFor(task.artifact.artifact_type).output_contract;
-      expect(task.output_contract).toEqual(contract);
-      expect(task.validation_rules).toEqual(sidecarPlanOptionFor(task.artifact.artifact_type).validation_rules);
+      expect(task.version).toBe("intent_artifact_task_envelope.v2");
+      expect(task.output_contract).toEqual({
+        version: "artifact_instance_output_contract.v2",
+        payload_version: "artifact_instance.v2",
+        blueprint_digest: task.artifact.blueprint_digest,
+      });
+      expect(task.validation_rules).toContain("record_and_relation_data_match_restricted_schema");
       expect(task.user_goal).toBe(intent.user_goal);
     }
   });
 
   it("accepts all four stable schemas and returns a bounded body-free receipt", () => {
     for (const task of tasks().tasks) {
-      const result = accept(task, payloadByType[task.artifact.artifact_type]);
+      const artifactType = legacyType(task);
+      const result = accept(task, payloadByType[artifactType]);
       expect(result.accepted).toMatchObject({
-        version: "intent_artifact_accepted.v1",
+        version: "intent_artifact_accepted.v2",
         task_id: task.task_id,
         artifact_id: task.artifact.artifact_id,
-        artifact_type: task.artifact.artifact_type,
-        payload: payloadByType[task.artifact.artifact_type],
+        blueprint_digest: task.artifact.blueprint_digest,
+        payload: { version: "artifact_instance.v2", blueprint_digest: task.artifact.blueprint_digest },
       });
       expect(result.receipt).toMatchObject({
         version: "intent_artifact_task_receipt.v1",
@@ -186,7 +196,7 @@ describe("IP7 reader-private intent artifact gate", () => {
     expect(() => accept(concept, {
       nodes: [{ id: "known", label: "Known", evidence_lids: ["1.1"] }],
       links: [{ source: "known", target: "missing", relation: "points", evidence_lids: ["1.1"] }],
-    })).toThrow(/reference existing nodes/i);
+    })).toThrow(/reference an existing record/i);
   });
 
   it("rejects stale source/intent/plan identity and non-contract candidate fields", () => {
@@ -195,7 +205,7 @@ describe("IP7 reader-private intent artifact gate", () => {
     expect(() => accept(task, payload, { source_fingerprint: "source-old" })).toThrow(/source_fingerprint/i);
     expect(() => accept(task, payload, { intent_digest: "a".repeat(64) })).toThrow(/intent_digest/i);
     expect(() => accept(task, payload, { plan_digest: "b".repeat(64) })).toThrow(/plan_digest/i);
-    expect(() => accept(task, payload, { artifact_type: "concept_map" })).toThrow(/artifact_type/i);
+    expect(() => accept(task, payload, { blueprint_digest: "c".repeat(64) })).toThrow(/blueprint_digest/i);
     expect(() => acceptIntentArtifactCandidate({
       task,
       candidate: { ...candidate(task, payload), candidate_path: "C:/public/candidate.json" },

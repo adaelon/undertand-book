@@ -1,0 +1,68 @@
+html,
+body,
+#app {
+  min-width: 320px;
+  min-height: 100%;
+  margin: 0;
+}
+
+body {
+  background: #e9edf2;
+}
+
+.intent-artifact-visual {
+  box-sizing: border-box;
+  width: min(100%, 680px);
+  min-width: 0;
+  margin: 0 auto;
+  padding: 28px;
+}
+
+.visual-heading {
+  min-width: 0;
+  margin-bottom: 16px;
+}
+
+.visual-heading p {
+  margin: 0 0 4px;
+  color: #607080;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+.visual-heading h1 {
+  margin: 0 0 8px;
+  color: #20252b;
+  font-size: 24px;
+}
+
+.visual-heading span {
+  color: #607080;
+  font-size: 12px;
+}
+
+.visual-panel {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid #c9d0d8;
+  border-radius: 10px;
+  background: #fff;
+  box-shadow: 0 8px 26px rgb(32 37 43 / 10%);
+}
+
+.visual-panel .intent-artifact-panel {
+  box-sizing: border-box;
+  height: auto;
+}
+
+@media (max-width: 640px) {
+  .intent-artifact-visual {
+    width: 100%;
+    padding: 14px 10px 24px;
+  }
+
+  .visual-heading h1 {
+    font-size: 20px;
+  }
+}

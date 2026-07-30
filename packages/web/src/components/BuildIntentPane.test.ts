@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 import { mount } from "@vue/test-utils";
 import { describe, expect, it } from "vitest";
-import type { BuildIntentSelectionV1 } from "../api";
+import type { BuildIntentSelection, BuildIntentSelectionV1, BuildIntentSelectionV2 } from "../api";
 import BuildIntentPane from "./BuildIntentPane.vue";
 
 const digest = "a".repeat(64);
@@ -72,7 +72,53 @@ function selection(): BuildIntentSelectionV1 {
   };
 }
 
-function mountPane(current: BuildIntentSelectionV1 | null = null) {
+function blueprintSelection(): BuildIntentSelectionV2 {
+  const current = selection();
+  return {
+    ...current,
+    version: "build_intent_selection.v2",
+    intent: {
+      ...current.intent!,
+      version: "build_intent.v2",
+      goal_kind: "compare",
+      source_scope: { whole_book: false, lids: ["1.1"], sections: [] },
+      usage_horizon: "project",
+    },
+    plan: {
+      ...current.plan!,
+      version: "build_plan.v2",
+      private_artifacts: [{
+        artifact_id: "artifact-blueprint",
+        source_scope: { whole_book: false, lids: ["1.1"], sections: [] },
+        blueprint_digest: "d".repeat(64),
+        required_public_capabilities: ["foundation.lid"],
+        blueprint: {
+          version: "artifact_blueprint.v1",
+          blueprint_id: "system.comparison_table",
+          blueprint_version: "1.0.0",
+          origin: "system",
+          title: "证据比较矩阵",
+          purpose: "按共同维度比较实现策略。",
+          shape: "table",
+          record_schema: {
+            type: "object",
+            properties: { subject: {}, dimensions: {} },
+            required: ["subject", "dimensions"],
+            additional_properties: false,
+            max_properties: 2,
+          },
+          routing: { use_when: ["比较"], avoid_when: [], covered_topics: ["实现"], scope_label: "当前范围" },
+          search_fields: [{ path: "/subject", weight: 10, analyzer: "text" }],
+          summary_fields: ["/subject"],
+          evidence_policy: { required_per_record: true, anchor: "lid" },
+          limits: { max_records: 120, max_relations: 0, max_text_chars: 24_000 },
+        },
+      }],
+    },
+  };
+}
+
+function mountPane(current: BuildIntentSelection | null = null) {
   return mount(BuildIntentPane, {
     props: { selection: current, busy: false, error: null },
   });
@@ -128,5 +174,17 @@ describe("BuildIntentPane", () => {
     await wrapper.get('[data-action="close"]').trigger("click");
     expect(wrapper.emitted("reject")?.[0]?.[0]).toEqual({ plan_id: "plan-001" });
     expect(wrapper.emitted("close")).toHaveLength(1);
+  });
+
+  it("summarizes a V2 Blueprint without exposing raw schema JSON", () => {
+    const wrapper = mountPane(blueprintSelection());
+    expect(wrapper.text()).toContain("证据比较矩阵");
+    expect(wrapper.text()).toContain("按共同维度比较实现策略");
+    expect(wrapper.text()).toContain("表格");
+    expect(wrapper.text()).toContain("subject、dimensions");
+    expect(wrapper.text()).toContain("系统预设");
+    expect(wrapper.text()).toContain("最多 120 条记录");
+    expect(wrapper.text()).toContain("24,000 字符");
+    expect(wrapper.text()).not.toContain("additional_properties");
   });
 });

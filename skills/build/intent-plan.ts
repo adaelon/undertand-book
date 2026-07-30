@@ -9,7 +9,7 @@ import {
   rejectBuildIntentSelection,
   markBuildIntentSelectionStale,
   supersedeBuildIntentSelection,
-  type BuildIntentSelectionV1,
+  type BuildIntentSelection,
   type DraftBuildIntentSelectionInput,
 } from "../../packages/core/src/build-intent-controller";
 import { canonicalBuildJson } from "../../packages/core/src/build-intent";
@@ -33,14 +33,14 @@ type IntentPlanRequest =
   | { operation: "draft"; input: DraftBuildIntentSelectionInput }
   | {
       operation: "confirm";
-      selection: BuildIntentSelectionV1;
+      selection: BuildIntentSelection;
       confirmation: Parameters<typeof confirmBuildIntentSelection>[1];
     }
-  | { operation: "reject"; selection: BuildIntentSelectionV1 }
-  | { operation: "redact"; selection: BuildIntentSelectionV1 }
-  | { operation: "project_codex"; selection: BuildIntentSelectionV1 }
-  | { operation: "supersede"; selection: BuildIntentSelectionV1 }
-  | { operation: "stale_source"; selection: BuildIntentSelectionV1 }
+  | { operation: "reject"; selection: BuildIntentSelection }
+  | { operation: "redact"; selection: BuildIntentSelection }
+  | { operation: "project_codex"; selection: BuildIntentSelection }
+  | { operation: "supersede"; selection: BuildIntentSelection }
+  | { operation: "stale_source"; selection: BuildIntentSelection }
   | { operation: "inspect_freshness"; target: IntentPlanFreshnessTargetV1 };
 
 function readRequest(): IntentPlanRequest {

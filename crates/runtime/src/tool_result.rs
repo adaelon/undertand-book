@@ -437,6 +437,7 @@ fn project_structured(
         ToolResultPolicy::NavigationProjection => {
             &["warnings", "frontier", "route", "questions", "key_stops"][..]
         }
+        ToolResultPolicy::ArtifactProjection => &["relations", "records", "hits", "artifacts"][..],
         _ => &[
             "warnings",
             "entries",

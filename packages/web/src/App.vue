@@ -9,7 +9,7 @@ import type {
   AgentHistoryResponse,
   AgentQuestionQuoteView,
   AskQuote,
-  BuildIntentSelectionV1,
+  BuildIntentSelection,
   BuildIntentMode,
   BuildWorkbenchSnapshot,
   BuildStageId,
@@ -147,7 +147,7 @@ const buildWorkbenchConfirming = ref(false);
 const buildWorkbenchImporting = ref(false);
 const buildWorkbenchActioning = ref(false);
 const buildIntentOpen = ref(false);
-const buildIntentSelection = ref<BuildIntentSelectionV1 | null>(null);
+const buildIntentSelection = ref<BuildIntentSelection | null>(null);
 const buildIntentBusy = ref(false);
 const buildIntentError = ref<string | null>(null);
 let buildIntentRequestSeq = 0;

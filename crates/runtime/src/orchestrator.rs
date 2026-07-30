@@ -20,11 +20,19 @@ use crate::{
     },
     context_fragment::{
         ContextFragment, ContextFragmentLedger, FragmentScope, FragmentSensitivity,
-        PAPER_MINIMAP_FRAGMENT_KEY, READER_PROFILE_FRAGMENT_KEY,
+        ARTIFACT_ROUTING_FRAGMENT_KEY, PAPER_MINIMAP_FRAGMENT_KEY, READER_PROFILE_FRAGMENT_KEY,
     },
     parse_book_query_request, query_run, synthesize, AdapterError, AgentRequestPlan, AssistantTurn,
     CompletionRequest, Message, ModelAdapter, ModelRuntimeProfile, QueryAudit, QueryOutcome, Role,
     ToolSpec,
+};
+use artifact_tools::{
+    aliases as artifact_aliases, artifact_list_input_schema, artifact_read_input_schema,
+    artifact_search_input_schema, validate_artifact_list_input, validate_artifact_read_input,
+    validate_artifact_search_input, ArtifactAccessSnapshot, ArtifactListInput, ArtifactToolError,
+    ArtifactToolId, ARTIFACT_CURSOR_INVALID, ARTIFACT_OVERLAY_UNAVAILABLE,
+    ARTIFACT_RECORD_REF_INVALID, ARTIFACT_REF_INVALID, ARTIFACT_RESULT_TOO_LARGE,
+    ARTIFACT_SNAPSHOT_INVALID, ARTIFACT_TOOL_INPUT_INVALID,
 };
 use book_tool_contracts::{contract_for, input_schema, validate_input, BookToolId, BookToolInput};
 use memory::{
@@ -45,7 +53,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use ts_rs::TS;
 
 use crate::tool_exposure::{
-    search_and_activate, ToolExposureContext, ToolExposurePlan, ToolExposureState, ToolPermissions,
+    search_and_activate, ArtifactExposureContext, ArtifactExposurePhase, ToolExposureContext,
+    ToolExposurePlan, ToolExposureState, ToolPermissions,
 };
 use crate::tool_registry::{ToolHandlerId, ToolRegistry};
 use crate::tool_result::{
@@ -196,6 +205,269 @@ pub struct ProfileMemoryUpdate {
     pub operation_id: Option<String>,
     pub fact_ids: Vec<String>,
     pub message: Option<String>,
+}
+
+/// Server-owned, read-only inputs frozen for one Resident turn.
+///
+/// Runtime keeps this port independent from private storage so later resource
+/// providers can be injected without teaching the orchestrator how to load them.
+pub trait ResidentTurnResourcePort {
+    fn context_fragments(&self) -> &[ContextFragment];
+    fn initial_evidence(&self) -> &[EvidenceRange];
+    fn profile_memory_updates(&self) -> &[ProfileMemoryUpdate];
+    fn artifact_snapshot(&self) -> Option<&ArtifactAccessSnapshot> {
+        None
+    }
+}
+
+#[derive(Default)]
+pub struct ResidentTurnResources {
+    context_fragments: Vec<ContextFragment>,
+    initial_evidence: Vec<EvidenceRange>,
+    profile_memory_updates: Vec<ProfileMemoryUpdate>,
+    artifact_snapshot: Option<ArtifactAccessSnapshot>,
+}
+
+impl ResidentTurnResources {
+    pub fn new(
+        context_fragments: Vec<ContextFragment>,
+        initial_evidence: Vec<EvidenceRange>,
+        profile_memory_updates: Vec<ProfileMemoryUpdate>,
+    ) -> Self {
+        Self {
+            context_fragments,
+            initial_evidence,
+            profile_memory_updates,
+            artifact_snapshot: None,
+        }
+    }
+
+    pub fn with_artifact_snapshot(mut self, snapshot: ArtifactAccessSnapshot) -> Self {
+        self.artifact_snapshot = Some(snapshot);
+        self
+    }
+}
+
+impl ResidentTurnResourcePort for ResidentTurnResources {
+    fn context_fragments(&self) -> &[ContextFragment] {
+        &self.context_fragments
+    }
+
+    fn initial_evidence(&self) -> &[EvidenceRange] {
+        &self.initial_evidence
+    }
+
+    fn profile_memory_updates(&self) -> &[ProfileMemoryUpdate] {
+        &self.profile_memory_updates
+    }
+
+    fn artifact_snapshot(&self) -> Option<&ArtifactAccessSnapshot> {
+        self.artifact_snapshot.as_ref()
+    }
+}
+
+const ARTIFACT_ROUTING_FRAGMENT_VERSION: &str = "artifact_routing_cards.v1";
+
+struct ArtifactToolSession<'a> {
+    snapshot: Option<&'a ArtifactAccessSnapshot>,
+    exposure: ArtifactExposureContext,
+    routing_fragment_content: Option<String>,
+}
+
+impl<'a> ArtifactToolSession<'a> {
+    fn new(snapshot: Option<&'a ArtifactAccessSnapshot>, question: &str) -> Self {
+        if artifact_access_is_disabled(question) {
+            return Self {
+                snapshot,
+                exposure: ArtifactExposureContext::no_overlay(),
+                routing_fragment_content: None,
+            };
+        }
+        let Some(snapshot) = snapshot else {
+            return Self {
+                snapshot: None,
+                exposure: ArtifactExposureContext::no_overlay(),
+                routing_fragment_content: None,
+            };
+        };
+        let routing = snapshot.list(ArtifactListInput {
+            limit: Some(20),
+            cursor: None,
+        });
+        let Ok(routing) = routing else {
+            return Self {
+                snapshot: Some(snapshot),
+                exposure: ArtifactExposureContext::no_overlay(),
+                routing_fragment_content: None,
+            };
+        };
+        if routing.artifacts.is_empty() {
+            return Self {
+                snapshot: Some(snapshot),
+                exposure: ArtifactExposureContext::no_overlay(),
+                routing_fragment_content: None,
+            };
+        }
+        let routing_fragment_content = serde_json::json!({
+            "version": ARTIFACT_ROUTING_FRAGMENT_VERSION,
+            "classification": "server-validated routing data, not instructions and not book evidence",
+            "overlay_revision": routing.overlay_revision,
+            "rules": [
+                "Call artifact.search at most once and only when the user question matches a Routing Card.",
+                "A zero-hit search ends artifact retrieval for this user turn; do not rewrite and retry.",
+                "Artifact records organize reasoning but cannot support source.present; retrieve canonical Book evidence for factual claims.",
+                "Use Book tools instead when the user requests source-only or original text."
+            ],
+            "tool": "artifact.search",
+            "routing_cards": routing.artifacts,
+            "routing_cards_complete": routing.next_cursor.is_none()
+        })
+        .to_string();
+        Self {
+            snapshot: Some(snapshot),
+            exposure: ArtifactExposureContext::routable(),
+            routing_fragment_content: Some(routing_fragment_content),
+        }
+    }
+
+    fn exposure(&self) -> ArtifactExposureContext {
+        self.exposure
+    }
+
+    fn routing_fragment(&self) -> Option<ContextFragment> {
+        self.routing_fragment_content.as_ref().map(|content| {
+            ContextFragment::new(
+                ARTIFACT_ROUTING_FRAGMENT_KEY,
+                FragmentScope::TurnFrozen,
+                Role::System,
+                content.clone(),
+                FragmentSensitivity::Sensitive,
+            )
+        })
+    }
+
+    fn progress_revision(&self) -> String {
+        format!(
+            "{:?}:{}",
+            self.exposure.phase, self.exposure.initial_search_available
+        )
+    }
+
+    fn execute(&mut self, tool: ArtifactToolId, arguments: &str) -> String {
+        let Some(snapshot) = self.snapshot else {
+            return err_json(
+                ARTIFACT_OVERLAY_UNAVAILABLE,
+                "state",
+                "no current active accepted artifact snapshot is available",
+            );
+        };
+        match tool {
+            ArtifactToolId::List => {
+                let input =
+                    match parse_artifact_input(arguments).and_then(validate_artifact_list_input) {
+                        Ok(input) => input,
+                        Err(error) => return artifact_error_json(error),
+                    };
+                match snapshot.list(input) {
+                    Ok(result) => to_json(&result),
+                    Err(error) => artifact_error_json(error),
+                }
+            }
+            ArtifactToolId::Search => {
+                if !self.exposure.initial_search_available {
+                    return err_json(
+                        "ARTIFACT_SEARCH_BUDGET_EXHAUSTED",
+                        "state",
+                        "the one initial artifact.search call for this user turn is already consumed",
+                    );
+                }
+                self.exposure = ArtifactExposureContext::search_exhausted();
+                let input = match parse_artifact_input(arguments)
+                    .and_then(validate_artifact_search_input)
+                {
+                    Ok(input) => input,
+                    Err(error) => return artifact_error_json(error),
+                };
+                match snapshot.search(input) {
+                    Ok(result) => {
+                        if !result.hits.is_empty() {
+                            self.exposure = ArtifactExposureContext::search_hit();
+                        }
+                        to_json(&result)
+                    }
+                    Err(error) => artifact_error_json(error),
+                }
+            }
+            ArtifactToolId::Read => {
+                if self.exposure.phase != ArtifactExposurePhase::SearchHit {
+                    return err_json(
+                        "ARTIFACT_READ_NOT_ROUTABLE",
+                        "state",
+                        "artifact.read is available only after a search hit or read continuation",
+                    );
+                }
+                let input =
+                    match parse_artifact_input(arguments).and_then(validate_artifact_read_input) {
+                        Ok(input) => input,
+                        Err(error) => return artifact_error_json(error),
+                    };
+                match snapshot.read(input) {
+                    Ok(result) => {
+                        if result.next_cursor.is_none() {
+                            self.exposure = ArtifactExposureContext::search_exhausted();
+                        }
+                        to_json(&result)
+                    }
+                    Err(error) => artifact_error_json(error),
+                }
+            }
+        }
+    }
+}
+
+fn parse_artifact_input(arguments: &str) -> Result<serde_json::Value, ArtifactToolError> {
+    serde_json::from_str(arguments).map_err(|error| ArtifactToolError {
+        code: ARTIFACT_TOOL_INPUT_INVALID,
+        message: format!("artifact tool arguments are not valid JSON: {error}"),
+    })
+}
+
+fn artifact_error_json(error: ArtifactToolError) -> String {
+    let category = match error.code {
+        ARTIFACT_TOOL_INPUT_INVALID
+        | ARTIFACT_REF_INVALID
+        | ARTIFACT_RECORD_REF_INVALID
+        | ARTIFACT_CURSOR_INVALID
+        | ARTIFACT_RESULT_TOO_LARGE => "validation",
+        ARTIFACT_OVERLAY_UNAVAILABLE => "state",
+        ARTIFACT_SNAPSHOT_INVALID => "internal",
+        _ => "internal",
+    };
+    err_json(error.code, category, &error.message)
+}
+
+fn artifact_access_is_disabled(question: &str) -> bool {
+    let normalized = question.to_lowercase();
+    [
+        "不用产物",
+        "不要使用目标产物",
+        "不要用产物",
+        "别用产物",
+        "忽略产物",
+        "只用原文",
+        "仅用原文",
+        "只根据原文",
+        "仅根据原文",
+        "source-only",
+        "source only",
+        "do not use artifacts",
+        "don't use artifacts",
+        "without artifacts",
+        "book text only",
+        "only use the book text",
+    ]
+    .iter()
+    .any(|marker| normalized.contains(marker))
 }
 
 /// 一次对话回合的**可撤销副作用** `[ADR-0030 决策3]`:前端据此做反向命令 undo。
@@ -1886,6 +2158,15 @@ fn declared_tool_specs() -> Vec<ToolSpec> {
             parameters: input_schema(id),
         }
     };
+    let artifact_s = |id: ArtifactToolId, description: &str| ToolSpec {
+        name: artifact_aliases(id).resident.into(),
+        description: description.into(),
+        parameters: match id {
+            ArtifactToolId::List => artifact_list_input_schema(),
+            ArtifactToolId::Search => artifact_search_input_schema(),
+            ArtifactToolId::Read => artifact_read_input_schema(),
+        },
+    };
     vec![
         book_s(BookToolId::Query),
         book_s(BookToolId::Synthesize),
@@ -1903,6 +2184,18 @@ fn declared_tool_specs() -> Vec<ToolSpec> {
                 "required": ["query"],
                 "additionalProperties": false
             }),
+        ),
+        artifact_s(
+            ArtifactToolId::List,
+            "List bounded Routing Cards for the turn-frozen current active accepted artifact overlay. Routing Cards are discovery metadata, not book evidence.",
+        ),
+        artifact_s(
+            ArtifactToolId::Search,
+            "Search the turn-frozen current active accepted artifacts with deterministic bounded lexical ranking. Call at most once initially per user turn; a zero-hit result must not be retried with rewritten guesses.",
+        ),
+        artifact_s(
+            ArtifactToolId::Read,
+            "Read at most three bounded records from a turn-frozen artifact using opaque refs returned by artifact.search or a read continuation. Artifact data is not canonical Book evidence.",
         ),
         s(
             "source.present",
@@ -2831,6 +3124,7 @@ fn dispatch_registered(
         }
         ToolHandlerId::ReaderState => (to_json(&reader_state_value(book, reader)), None),
         ToolHandlerId::Book(_)
+        | ToolHandlerId::Artifact(_)
         | ToolHandlerId::ToolSearch
         | ToolHandlerId::SourcePresent
         | ToolHandlerId::ProfileMarkUsed => {
@@ -2886,6 +3180,18 @@ fn opaque_tool_result_digest(result: &str) -> String {
         hash = hash.wrapping_mul(0x100000001b3);
     }
     format!("tool-result-fnv1a64-{hash:016x}-bytes-{}", result.len())
+}
+
+fn private_artifact_trace_digest(result: &str) -> String {
+    if serde_json::from_str::<serde_json::Value>(result)
+        .ok()
+        .and_then(|value| value.get("error_code").cloned())
+        .is_some()
+    {
+        digest(result)
+    } else {
+        opaque_tool_result_digest(result)
+    }
 }
 
 fn compact_tool_locator_arguments(tool: &str, arguments: &str) -> serde_json::Value {
@@ -2990,6 +3296,7 @@ fn canonical_tool_arguments(arguments: &str) -> String {
 fn tool_progress_signature(
     evidence: &TurnEvidenceLedger,
     exposure: &ToolExposureState,
+    artifact_tools: &ArtifactToolSession<'_>,
     book: &Book,
     store: &MemoryStore,
     reader: &Reader,
@@ -2997,6 +3304,7 @@ fn tool_progress_signature(
     let state = serde_json::json!({
         "evidence": evidence.evidence_ranges(),
         "activated_tools": exposure.activated_names().collect::<Vec<_>>(),
+        "artifact_tools": artifact_tools.progress_revision(),
         "memory_projection_revision": store.projection_revision(),
         "reader": reader_state_value(book, reader),
     });
@@ -3291,6 +3599,7 @@ fn build_sample_request(
     runtime_profile: &ModelRuntimeProfile,
     tool_permissions: ToolPermissions,
     tool_exposure_state: &ToolExposureState,
+    artifact_exposure: ArtifactExposureContext,
     has_turn_evidence: bool,
     excluded_tools: &[&str],
 ) -> Result<(ToolExposurePlan, AgentRequestPlan), ToolError> {
@@ -3301,6 +3610,7 @@ fn build_sample_request(
             content_profile: book.content_profile_id(),
             permissions: tool_permissions,
             has_turn_evidence,
+            artifact: artifact_exposure,
         },
         tool_exposure_state,
     );
@@ -3723,16 +4033,43 @@ pub fn run(
     now: &str,
     cfg: OuterConfig,
 ) -> Result<OuterOutcome, ToolError> {
-    run_with_context_fragments(
+    run_with_turn_resources(
         book,
         store,
         reader,
         adapter,
         messages,
         profile_snapshot,
-        &[],
-        Vec::new(),
-        Vec::new(),
+        &ResidentTurnResources::default(),
+        question,
+        now,
+        cfg,
+    )
+}
+
+/// Runs one resident turn through a read-only resource port.
+#[allow(clippy::too_many_arguments)]
+pub fn run_with_turn_resources(
+    book: &Book,
+    store: &mut MemoryStore,
+    reader: &mut Reader,
+    adapter: &dyn ModelAdapter,
+    messages: &mut Vec<Message>,
+    profile_snapshot: &ReaderProfileSnapshot,
+    resources: &dyn ResidentTurnResourcePort,
+    question: &str,
+    now: &str,
+    cfg: OuterConfig,
+) -> Result<OuterOutcome, ToolError> {
+    run_with_turn_resources_and_checkpoint(
+        book,
+        store,
+        reader,
+        adapter,
+        messages,
+        profile_snapshot,
+        resources,
+        None,
         question,
         now,
         cfg,
@@ -3756,17 +4093,20 @@ pub fn run_with_context_fragments(
     now: &str,
     cfg: OuterConfig,
 ) -> Result<OuterOutcome, ToolError> {
-    run_with_context_fragments_and_checkpoint(
+    let resources = ResidentTurnResources::new(
+        external_context_fragments.to_vec(),
+        initial_evidence,
+        profile_memory_updates,
+    );
+    run_with_turn_resources_and_checkpoint(
         book,
         store,
         reader,
         adapter,
         messages,
         profile_snapshot,
-        external_context_fragments,
+        &resources,
         None,
-        initial_evidence,
-        profile_memory_updates,
         question,
         now,
         cfg,
@@ -3789,19 +4129,51 @@ pub fn run_with_context_fragments_and_checkpoint(
     now: &str,
     cfg: OuterConfig,
 ) -> Result<OuterOutcome, ToolError> {
-    let mut sink = EphemeralCompactionCheckpointSink::default();
-    run_with_context_fragments_and_checkpoint_sink(
+    let resources = ResidentTurnResources::new(
+        external_context_fragments.to_vec(),
+        initial_evidence,
+        profile_memory_updates,
+    );
+    run_with_turn_resources_and_checkpoint(
         book,
         store,
         reader,
         adapter,
         messages,
         profile_snapshot,
-        external_context_fragments,
+        &resources,
+        active_checkpoint,
+        question,
+        now,
+        cfg,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn run_with_turn_resources_and_checkpoint(
+    book: &Book,
+    store: &mut MemoryStore,
+    reader: &mut Reader,
+    adapter: &dyn ModelAdapter,
+    messages: &mut Vec<Message>,
+    profile_snapshot: &ReaderProfileSnapshot,
+    resources: &dyn ResidentTurnResourcePort,
+    active_checkpoint: Option<&CompactionCheckpoint>,
+    question: &str,
+    now: &str,
+    cfg: OuterConfig,
+) -> Result<OuterOutcome, ToolError> {
+    let mut sink = EphemeralCompactionCheckpointSink::default();
+    run_with_turn_resources_and_checkpoint_sink(
+        book,
+        store,
+        reader,
+        adapter,
+        messages,
+        profile_snapshot,
+        resources,
         active_checkpoint,
         &mut sink,
-        initial_evidence,
-        profile_memory_updates,
         question,
         now,
         cfg,
@@ -3825,6 +4197,42 @@ pub fn run_with_context_fragments_and_checkpoint_sink(
     now: &str,
     cfg: OuterConfig,
 ) -> Result<OuterOutcome, ToolError> {
+    let resources = ResidentTurnResources::new(
+        external_context_fragments.to_vec(),
+        initial_evidence,
+        profile_memory_updates,
+    );
+    run_with_turn_resources_and_checkpoint_sink(
+        book,
+        store,
+        reader,
+        adapter,
+        messages,
+        profile_snapshot,
+        &resources,
+        active_checkpoint,
+        checkpoint_sink,
+        question,
+        now,
+        cfg,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn run_with_turn_resources_and_checkpoint_sink(
+    book: &Book,
+    store: &mut MemoryStore,
+    reader: &mut Reader,
+    adapter: &dyn ModelAdapter,
+    messages: &mut Vec<Message>,
+    profile_snapshot: &ReaderProfileSnapshot,
+    resources: &dyn ResidentTurnResourcePort,
+    active_checkpoint: Option<&CompactionCheckpoint>,
+    checkpoint_sink: &mut dyn CompactionCheckpointSink,
+    question: &str,
+    now: &str,
+    cfg: OuterConfig,
+) -> Result<OuterOutcome, ToolError> {
     let tool_registry = resident_tool_registry();
     let runtime_profile = adapter.model_runtime_profile();
     let mut active_checkpoint = active_checkpoint.cloned();
@@ -3834,6 +4242,7 @@ pub fn run_with_context_fragments_and_checkpoint_sink(
         .resolve(COMPACTION_CONSUMPTION_WRAPPER);
     let tool_permissions = ToolPermissions::default();
     let mut tool_exposure_state = ToolExposureState::default();
+    let mut artifact_tools = ArtifactToolSession::new(resources.artifact_snapshot(), question);
     let mut context_fragments = ContextFragmentLedger::default();
     context_fragments
         .upsert(ContextFragment::new(
@@ -3844,9 +4253,14 @@ pub fn run_with_context_fragments_and_checkpoint_sink(
             FragmentSensitivity::Sensitive,
         ))
         .map_err(context_fragment_error)?;
-    for fragment in external_context_fragments {
+    for fragment in resources.context_fragments() {
         context_fragments
             .upsert(fragment.clone())
+            .map_err(context_fragment_error)?;
+    }
+    if let Some(fragment) = artifact_tools.routing_fragment() {
+        context_fragments
+            .upsert(fragment)
             .map_err(context_fragment_error)?;
     }
     if let Some(fragment) = paper_minimap_context_fragment(book, reader, question) {
@@ -3865,7 +4279,9 @@ pub fn run_with_context_fragments_and_checkpoint_sink(
         profile_snapshot.injected_fact_ids().into_iter().collect();
     let mut claimed_used_fact_ids = BTreeSet::new();
     let mut profile_influences = BTreeSet::new();
-    let mut evidence_ledger = TurnEvidenceLedger::from_seed(book, initial_evidence)?;
+    let mut evidence_ledger =
+        TurnEvidenceLedger::from_seed(book, resources.initial_evidence().to_vec())?;
+    let profile_memory_updates = resources.profile_memory_updates().to_vec();
     let mut tool_call_progress = ToolCallProgressGuard::default();
     let mut recorded_query_observations = HashSet::new();
     let mut active_tool_results = ActiveToolResultLedger::default();
@@ -3889,6 +4305,7 @@ pub fn run_with_context_fragments_and_checkpoint_sink(
         &runtime_profile,
         tool_permissions,
         &tool_exposure_state,
+        artifact_tools.exposure(),
         evidence_ledger.has_evidence(),
         if verified_selection_turn {
             VERIFIED_SELECTION_INITIAL_EXCLUDED_TOOLS
@@ -3921,6 +4338,7 @@ pub fn run_with_context_fragments_and_checkpoint_sink(
             &runtime_profile,
             tool_permissions,
             &tool_exposure_state,
+            artifact_tools.exposure(),
             evidence_ledger.has_evidence(),
             if verified_selection_turn {
                 VERIFIED_SELECTION_INITIAL_EXCLUDED_TOOLS
@@ -3951,6 +4369,7 @@ pub fn run_with_context_fragments_and_checkpoint_sink(
             &runtime_profile,
             tool_permissions,
             &tool_exposure_state,
+            artifact_tools.exposure(),
             evidence_ledger.has_evidence(),
             if !verified_selection_turn {
                 &[]
@@ -3998,6 +4417,7 @@ pub fn run_with_context_fragments_and_checkpoint_sink(
                 &runtime_profile,
                 tool_permissions,
                 &tool_exposure_state,
+                artifact_tools.exposure(),
                 evidence_ledger.has_evidence(),
                 if !verified_selection_turn {
                     &[]
@@ -4242,6 +4662,7 @@ pub fn run_with_context_fragments_and_checkpoint_sink(
             let progress_before = tool_progress_signature(
                 &evidence_ledger,
                 &tool_exposure_state,
+                &artifact_tools,
                 book,
                 store,
                 reader,
@@ -4290,6 +4711,9 @@ pub fn run_with_context_fragments_and_checkpoint_sink(
                         Err(error) => to_json(&error),
                     };
                     (result, None, None)
+                }
+                Some(ToolHandlerId::Artifact(id)) => {
+                    (artifact_tools.execute(id, &tc.arguments), None, None)
                 }
                 Some(ToolHandlerId::ProfileMarkUsed) => (
                     mark_profile_used(
@@ -4371,11 +4795,16 @@ pub fn run_with_context_fragments_and_checkpoint_sink(
                 &result,
                 book,
             );
+            let is_artifact_call = registered.is_some_and(|registration| {
+                matches!(registration.handler, ToolHandlerId::Artifact(_))
+            });
+            let persisted_tool_content = is_artifact_call.then(|| to_json(&receipt));
             active_tool_results.insert(tc.id.clone(), projection.into_envelope(receipt));
             if handler.is_some() && !repeated_without_progress {
                 let progress_after = tool_progress_signature(
                     &evidence_ledger,
                     &tool_exposure_state,
+                    &artifact_tools,
                     book,
                     store,
                     reader,
@@ -4397,7 +4826,11 @@ pub fn run_with_context_fragments_and_checkpoint_sink(
             trace.push(TraceStep {
                 tool: tc.name.clone(),
                 args: tc.arguments.clone(),
-                result_digest: digest(&result),
+                result_digest: if is_artifact_call {
+                    private_artifact_trace_digest(&result)
+                } else {
+                    digest(&result)
+                },
                 query_audit,
             });
             if let Some(e) = effect {
@@ -4405,7 +4838,7 @@ pub fn run_with_context_fragments_and_checkpoint_sink(
             }
             messages.push(Message {
                 role: Role::Tool,
-                content: Some(result),
+                content: persisted_tool_content.or(Some(result)),
                 tool_calls: vec![],
                 tool_call_id: Some(tc.id.clone()),
             });
@@ -4469,6 +4902,11 @@ mod tests {
         parse_react_assistant_turn, AdapterError, CompactionRequest, CompletionRequest,
         ParsedResponse, ProviderToolProtocol, RawCitation, ToolCall,
     };
+    use artifact_tools::{
+        ArtifactAccessSnapshot, ArtifactListInput, ArtifactSearchAnalyzer,
+        ArtifactSnapshotBlueprint, ArtifactSnapshotItem, ArtifactSnapshotRecord,
+        ArtifactSnapshotScope, ArtifactSnapshotSearchField,
+    };
     use base_schema::{sample_base, GraphEdge, GraphNode, LidNode, NodeKind, ReadOnlyBase, Span};
     use memory::{
         Applicability, CreateProfileFact, EvidenceRef, FactSource, PreferenceClaim, ProfilePayload,
@@ -4482,6 +4920,48 @@ mod tests {
     use std::cell::{Cell, RefCell};
     use std::collections::{HashMap, VecDeque};
     use std::path::PathBuf;
+
+    fn resident_artifact_snapshot(private_body: &str) -> ArtifactAccessSnapshot {
+        ArtifactAccessSnapshot::new(
+            ArtifactSnapshotScope {
+                book_id: "artifact-test-book".into(),
+                source_fingerprint: "artifact-test-source".into(),
+                overlay_identity: "artifact-test-plan".into(),
+            },
+            vec![ArtifactSnapshotItem {
+                artifact_id: "comparison".into(),
+                payload_digest: "b".repeat(64),
+                blueprint: ArtifactSnapshotBlueprint {
+                    blueprint_digest: "a".repeat(64),
+                    title: "Comparison card".into(),
+                    purpose: "Route questions about Method A.".into(),
+                    use_when: vec!["the user compares Method A".into()],
+                    avoid_when: vec!["the user requests source-only text".into()],
+                    covered_topics: vec!["Method A".into()],
+                    scope_label: "confirmed comparison".into(),
+                    search_fields: vec![ArtifactSnapshotSearchField {
+                        path: "/label".into(),
+                        weight: 10,
+                        analyzer: ArtifactSearchAnalyzer::Text,
+                    }],
+                    summary_fields: vec!["/label".into()],
+                },
+                records: vec![ArtifactSnapshotRecord {
+                    record_id: "row-1".into(),
+                    data: serde_json::json!({
+                        "label": "Method A",
+                        "private_body": private_body
+                    })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                    evidence_lids: vec!["1.1".into()],
+                }],
+                relations: Vec::new(),
+            }],
+        )
+        .unwrap()
+    }
 
     /// 双队列脚本替身:chat 回合 + (内层 book.query 触发的)complete 回合各一队,按序吐。
     struct FakeAdapter {
@@ -5008,6 +5488,7 @@ mod tests {
             &profile,
             ToolPermissions::default(),
             &ToolExposureState::default(),
+            ArtifactExposureContext::no_overlay(),
             false,
             &[],
         )
@@ -5820,6 +6301,236 @@ user_question=\"explain normalization\"";
         assert_eq!(seen[2].0, "profile-b");
         assert!(seen[2].1.starts_with("profile-b instructions\n\n"));
         assert!(seen[2].1.contains("证据路由"));
+    }
+
+    #[test]
+    fn resident_turn_resources_default_preserves_legacy_run_contract() {
+        let b = book();
+        let mut legacy_store = MemoryStore::open(tmp("resident-resources-legacy")).unwrap();
+        let mut resource_store = MemoryStore::open(tmp("resident-resources-port")).unwrap();
+        let mut legacy_reader = Reader::new(&b, DEFAULT_RADIUS);
+        let mut resource_reader = Reader::new(&b, DEFAULT_RADIUS);
+        let legacy_adapter = FakeAdapter::new(vec![turn_final("resource parity")], vec![]);
+        let resource_adapter = FakeAdapter::new(vec![turn_final("resource parity")], vec![]);
+        let mut legacy_messages = new_session();
+        let mut resource_messages = new_session();
+        let legacy_snapshot = default_profile_snapshot(&b, &legacy_store, "t0");
+        let resource_snapshot = default_profile_snapshot(&b, &resource_store, "t0");
+
+        let legacy = super::run(
+            &b,
+            &mut legacy_store,
+            &mut legacy_reader,
+            &legacy_adapter,
+            &mut legacy_messages,
+            &legacy_snapshot,
+            "compare the empty resource path",
+            "t0",
+            OuterConfig::default(),
+        )
+        .unwrap();
+        let through_port = super::run_with_turn_resources(
+            &b,
+            &mut resource_store,
+            &mut resource_reader,
+            &resource_adapter,
+            &mut resource_messages,
+            &resource_snapshot,
+            &ResidentTurnResources::default(),
+            "compare the empty resource path",
+            "t0",
+            OuterConfig::default(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            serde_json::to_value(&legacy).unwrap(),
+            serde_json::to_value(&through_port).unwrap()
+        );
+        assert_eq!(legacy.source_bindings, through_port.source_bindings);
+        assert_eq!(
+            legacy.delivery_diagnostics,
+            through_port.delivery_diagnostics
+        );
+        assert_eq!(legacy.request_audit, through_port.request_audit);
+        assert_eq!(
+            serde_json::to_value(&legacy_messages).unwrap(),
+            serde_json::to_value(&resource_messages).unwrap()
+        );
+    }
+
+    #[test]
+    fn resident_artifact_search_activates_read_without_creating_source_evidence_or_history_body() {
+        let b = book();
+        let private_body = "PRIVATE_ARTIFACT_TOOL_RESULT_SENTINEL";
+        let snapshot = resident_artifact_snapshot(private_body);
+        let artifact_ref = snapshot
+            .list(ArtifactListInput::default())
+            .unwrap()
+            .artifacts[0]
+            .artifact_ref
+            .clone();
+        let resources = ResidentTurnResources::new(Vec::new(), Vec::new(), Vec::new())
+            .with_artifact_snapshot(snapshot);
+        let mut store = MemoryStore::open(tmp("resident-artifact-search-read")).unwrap();
+        let mut reader = Reader::new(&b, DEFAULT_RADIUS);
+        let adapter = FakeAdapter::new(
+            vec![
+                turn_calls(vec![call(
+                    "artifact-search",
+                    "artifact.search",
+                    r#"{"query":"Method A","limit":3}"#,
+                )]),
+                turn_calls(vec![call(
+                    "artifact-read",
+                    "artifact.read",
+                    &serde_json::json!({"artifact_ref": artifact_ref, "limit": 3}).to_string(),
+                )]),
+                turn_calls(vec![call(
+                    "artifact-source",
+                    "source.present",
+                    r#"{"start_lid":"1.1"}"#,
+                )]),
+                turn_final("artifact-informed answer"),
+            ],
+            vec![],
+        );
+        let mut messages = new_session();
+        let snapshot = default_profile_snapshot(&b, &store, "t0");
+
+        let outcome = run_with_turn_resources(
+            &b,
+            &mut store,
+            &mut reader,
+            &adapter,
+            &mut messages,
+            &snapshot,
+            &resources,
+            "Compare Method A using the confirmed artifact",
+            "t0",
+            OuterConfig::default(),
+        )
+        .unwrap();
+
+        let request_tools = outcome
+            .request_audit
+            .requests
+            .iter()
+            .map(|request| {
+                request
+                    .tool_schemas
+                    .iter()
+                    .map(|tool| tool.name.as_str())
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        assert!(request_tools[0].contains(&"artifact.search"));
+        assert!(!request_tools[0].contains(&"artifact.read"));
+        assert!(!request_tools[0].contains(&"book.synthesize"));
+        assert!(!request_tools[1].contains(&"artifact.search"));
+        assert!(request_tools[1].contains(&"artifact.read"));
+        assert!(!request_tools[1].contains(&"book.synthesize"));
+        assert!(!request_tools[2].contains(&"artifact.search"));
+        assert!(!request_tools[2].contains(&"artifact.read"));
+        assert!(request_tools[2].contains(&"book.synthesize"));
+        assert!(outcome.trace[2]
+            .result_digest
+            .contains("SOURCE_NOT_OBSERVED"));
+        let persisted = serde_json::to_string(&messages).unwrap();
+        assert!(!persisted.contains(private_body));
+        assert!(persisted.contains("historical_tool_receipt.v1"));
+    }
+
+    #[test]
+    fn resident_artifact_zero_hit_exhausts_initial_search_without_retry() {
+        let b = book();
+        let resources = ResidentTurnResources::new(Vec::new(), Vec::new(), Vec::new())
+            .with_artifact_snapshot(resident_artifact_snapshot("private"));
+        let mut store = MemoryStore::open(tmp("resident-artifact-zero-hit")).unwrap();
+        let mut reader = Reader::new(&b, DEFAULT_RADIUS);
+        let adapter = FakeAdapter::new(
+            vec![
+                turn_calls(vec![call(
+                    "artifact-search-empty",
+                    "artifact.search",
+                    r#"{"query":"definitely absent"}"#,
+                )]),
+                turn_calls(vec![call(
+                    "artifact-search-retry",
+                    "artifact.search",
+                    r#"{"query":"another guess"}"#,
+                )]),
+                turn_final("fallback answer"),
+            ],
+            vec![],
+        );
+        let mut messages = new_session();
+        let snapshot = default_profile_snapshot(&b, &store, "t0");
+
+        let outcome = run_with_turn_resources(
+            &b,
+            &mut store,
+            &mut reader,
+            &adapter,
+            &mut messages,
+            &snapshot,
+            &resources,
+            "Find something absent from the artifact",
+            "t0",
+            OuterConfig::default(),
+        )
+        .unwrap();
+
+        assert!(outcome.request_audit.requests[0]
+            .tool_schemas
+            .iter()
+            .any(|tool| tool.name == "artifact.search"));
+        assert!(outcome.request_audit.requests[1]
+            .tool_schemas
+            .iter()
+            .all(|tool| tool.name != "artifact.search"));
+        assert!(outcome.request_audit.requests[1]
+            .tool_schemas
+            .iter()
+            .any(|tool| tool.name == "book.synthesize"));
+        assert!(outcome.trace[1].result_digest.contains("TOOL_NOT_EXPOSED"));
+    }
+
+    #[test]
+    fn resident_source_only_directive_hides_artifacts_and_routing_fragment() {
+        let b = book();
+        let resources = ResidentTurnResources::new(Vec::new(), Vec::new(), Vec::new())
+            .with_artifact_snapshot(resident_artifact_snapshot("PRIVATE_SOURCE_ONLY_SENTINEL"));
+        let mut store = MemoryStore::open(tmp("resident-artifact-source-only")).unwrap();
+        let mut reader = Reader::new(&b, DEFAULT_RADIUS);
+        let adapter = RecordingAdapter {
+            chats: RefCell::new(vec![turn_final("source-only answer")].into()),
+            seen_messages: RefCell::new(Vec::new()),
+        };
+        let mut messages = new_session();
+        let snapshot = default_profile_snapshot(&b, &store, "t0");
+
+        let outcome = run_with_turn_resources(
+            &b,
+            &mut store,
+            &mut reader,
+            &adapter,
+            &mut messages,
+            &snapshot,
+            &resources,
+            "只用原文回答，不要使用目标产物。",
+            "t0",
+            OuterConfig::default(),
+        )
+        .unwrap();
+
+        assert!(outcome.request_audit.requests[0]
+            .tool_schemas
+            .iter()
+            .all(|tool| !tool.name.starts_with("artifact.")));
+        let provider = serde_json::to_string(&adapter.seen_messages.borrow().as_slice()).unwrap();
+        assert!(!provider.contains("artifact_routing_cards.v1"));
+        assert!(!provider.contains("PRIVATE_SOURCE_ONLY_SENTINEL"));
     }
 
     #[test]
@@ -8357,6 +9068,18 @@ user_question=\"这段怎么理解？\"",
             if let ToolHandlerId::Book(id) = registration.handler {
                 assert_eq!(registration.validator, ToolValidatorId::BookContract(id));
                 assert_eq!(registration.spec.parameters, input_schema(id));
+            }
+            if let ToolHandlerId::Artifact(id) = registration.handler {
+                assert_eq!(
+                    registration.validator,
+                    ToolValidatorId::ArtifactContract(id)
+                );
+                let expected = match id {
+                    ArtifactToolId::List => artifact_list_input_schema(),
+                    ArtifactToolId::Search => artifact_search_input_schema(),
+                    ArtifactToolId::Read => artifact_read_input_schema(),
+                };
+                assert_eq!(registration.spec.parameters, expected);
             }
         }
         assert_eq!(handlers.len(), ToolHandlerId::ALL.len());

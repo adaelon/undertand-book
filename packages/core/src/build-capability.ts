@@ -1,5 +1,10 @@
 import { createHash } from "node:crypto";
 import {
+  computeArtifactBlueprintDigest,
+  validateArtifactBlueprintV1,
+} from "./artifact-blueprint";
+import type { ArtifactBlueprintResolutionV1 } from "./artifact-blueprint-registry";
+import {
   attachBuildPlanDigest,
   canonicalBuildJson,
   computeBuildIntentDigest,
@@ -14,6 +19,13 @@ import {
   type BuildSourceScope,
   type IntentArtifactType,
 } from "./build-intent";
+import {
+  attachBuildPlanDigestV2,
+  computeBuildIntentDigestV2,
+  validateBuildIntentV2,
+  type BuildIntentV2,
+  type BuildPlanV2,
+} from "./build-intent-v2";
 import type { AutomaticBuildStageFreshnessInspectionV1, AutomaticBuildStage } from "./build-orchestrator";
 import { BUILD_STAGE_DAG, type BuildStageId } from "./build-workbench";
 import { sidecarPlanOptionFor, type SidecarPlanOption } from "./sidecar-plan";
@@ -224,6 +236,45 @@ export interface BuildModeCompilationV1 {
   estimate_input?: BuildPlanEstimateInputV1;
 }
 
+export interface BuildPlanEstimateInputV2 {
+  version: "build_plan_estimate_input.v2";
+  source_fingerprint: string;
+  content_profile: BuildContentProfile;
+  public_stages_to_create: AutomaticBuildStage[];
+  private_blueprints_to_create: Array<{
+    artifact_id: string;
+    blueprint_digest: string;
+    shape: string;
+    max_records: number;
+    max_relations: number;
+    max_text_chars: number;
+  }>;
+  reused_artifacts: string[];
+  source_scope?: BuildSourceScope;
+}
+
+export interface CompileBuildModeV2Input {
+  mode: BuildMode;
+  book_id: string;
+  source_fingerprint: string;
+  content_profile: BuildContentProfile;
+  plan_id: string;
+  revision: number;
+  created_at: string;
+  budget: BuildPlanBudgetV1;
+  public_freshness: AutomaticBuildStageFreshnessInspectionV1[];
+  estimate?: BuildPlanEstimateV1;
+  intent?: unknown;
+  selected_blueprints?: ArtifactBlueprintResolutionV1[];
+}
+
+export interface BuildModeCompilationV2 {
+  version: "build_mode_compilation.v2";
+  mode: BuildMode;
+  plan?: BuildPlanV2;
+  estimate_input?: BuildPlanEstimateInputV2;
+}
+
 function sha256(value: unknown): string {
   return createHash("sha256").update(canonicalBuildJson(value), "utf8").digest("hex");
 }
@@ -417,6 +468,170 @@ export function compileBuildMode(
   });
   return {
     version: "build_mode_compilation.v1",
+    mode: input.mode,
+    plan,
+    estimate_input: estimateInput,
+  };
+}
+
+function validateSelectedBlueprints(
+  inputs: readonly ArtifactBlueprintResolutionV1[],
+): ArtifactBlueprintResolutionV1[] {
+  const selected: ArtifactBlueprintResolutionV1[] = [];
+  const identities = new Set<string>();
+  for (const input of inputs) {
+    if (input.version !== "artifact_blueprint_resolution.v1") {
+      throw new Error("unsupported ArtifactBlueprint resolution version");
+    }
+    const blueprint = validateArtifactBlueprintV1(input.blueprint);
+    const digest = computeArtifactBlueprintDigest(blueprint);
+    if (input.digest !== digest) throw new Error("ArtifactBlueprint resolution digest mismatch");
+    if (input.source !== blueprint.origin) {
+      throw new Error("ArtifactBlueprint resolution source does not match snapshot origin");
+    }
+    const identity = `${blueprint.blueprint_id}\u0000${blueprint.blueprint_version}`;
+    if (identities.has(identity)) throw new Error("duplicate selected ArtifactBlueprint identity and version");
+    identities.add(identity);
+    selected.push({
+      version: "artifact_blueprint_resolution.v1",
+      source: input.source,
+      blueprint,
+      digest,
+    });
+  }
+  return selected;
+}
+
+function unknownEstimateV2(input: BuildPlanEstimateInputV2): BuildPlanEstimateV1 {
+  return {
+    input_tokens: { lower: 0, upper: 0, coverage: 0 },
+    output_tokens: { lower: 0, upper: 0, coverage: 0 },
+    wall_clock_minutes: { confidence: "none" },
+    unknown_stages: [
+      ...input.public_stages_to_create,
+      ...input.private_blueprints_to_create.map((artifact) => `private.${artifact.artifact_id}`),
+    ],
+    historical_match: { stage: false, policy: false, model: false, harness: false, sample_count: 0 },
+  };
+}
+
+export function compileBuildModeV2(input: CompileBuildModeV2Input): BuildModeCompilationV2 {
+  validateBuildCapabilityRegistry(BUILD_CAPABILITY_REGISTRY);
+  const contentProfile = validateBuildContentProfile(input.content_profile);
+  validatePathSafeBuildId(input.book_id, "book_id");
+  validatePathSafeBuildId(input.plan_id, "plan_id");
+  if (typeof input.source_fingerprint !== "string" || !input.source_fingerprint.trim()) {
+    throw new Error("source_fingerprint must be a non-empty string");
+  }
+  if (!( ["read_now", "standard_deep", "goal_directed"] as string[]).includes(input.mode)) {
+    throw new Error(`unsupported build mode: ${String(input.mode)}`);
+  }
+  if (input.mode === "read_now") {
+    if (input.intent !== undefined || input.selected_blueprints?.length) {
+      throw new Error("read_now cannot carry an intent or ArtifactBlueprint selection");
+    }
+    return { version: "build_mode_compilation.v2", mode: "read_now" };
+  }
+
+  const freshness = validateFreshness(input.public_freshness);
+  let intent: BuildIntentV2 | undefined;
+  let selectedBlueprints: ArtifactBlueprintResolutionV1[] = [];
+  let publicStages: AutomaticBuildStage[] = [];
+  if (input.mode === "standard_deep") {
+    if (input.intent !== undefined || input.selected_blueprints?.length) {
+      throw new Error("standard_deep cannot carry a private intent or ArtifactBlueprint selection");
+    }
+    publicStages = standardDeepStageClosure(contentProfile);
+  } else {
+    intent = validateBuildIntentV2(input.intent);
+    if (intent.book_id !== input.book_id
+      || intent.source_fingerprint !== input.source_fingerprint
+      || !sameProfile(intent.content_profile, contentProfile)) {
+      throw new Error("BuildIntent identity does not match the BuildPlan target");
+    }
+    selectedBlueprints = validateSelectedBlueprints(input.selected_blueprints ?? []);
+  }
+
+  const reusedPublic = publicStages.flatMap((stage) => {
+    const artifact = `public.${stage}`;
+    const inspection = freshness.get(artifact);
+    return inspection?.fresh && inspection.freshness_digest
+      ? [{ artifact, freshness_digest: inspection.freshness_digest }]
+      : [];
+  });
+  const publicCreate = publicStages
+    .map((stage) => `public.${stage}`)
+    .filter((artifact) => !freshness.get(artifact)?.fresh);
+  const intentDigest = intent ? computeBuildIntentDigestV2(intent) : undefined;
+  const privateArtifacts = intent && intentDigest
+    ? selectedBlueprints.map((resolution, index) => ({
+        artifact_id: `artifact-${sha256({
+          intent_digest: intentDigest,
+          blueprint_digest: resolution.digest,
+          index,
+        }).slice(0, 20)}`,
+        source_scope: intent!.source_scope,
+        blueprint: resolution.blueprint,
+        blueprint_digest: resolution.digest,
+        required_public_capabilities: ["foundation.lid"],
+      }))
+    : [];
+  const foundationReuse = input.mode === "goal_directed" && privateArtifacts.length
+    ? [{
+        artifact: "public.foundation",
+        freshness_digest: sha256({
+          version: "foundation_lid_freshness.v1",
+          source_fingerprint: input.source_fingerprint,
+          content_profile: contentProfile,
+        }),
+      }]
+    : [];
+  const reuse = [...foundationReuse, ...reusedPublic];
+  const privateCreate = privateArtifacts.map((artifact) => `private.${artifact.artifact_id}`);
+  const create = [...publicCreate, ...privateCreate];
+  const excluded = input.mode === "standard_deep"
+    ? PRIVATE_ARTIFACT_TYPES.map((artifact) => ({
+        artifact: `private.${artifact}`,
+        reason: "not selected by standard_deep",
+      }))
+    : [{ artifact: "public.standard_deep", reason: "not required by selected blueprints" }];
+  const estimateInput: BuildPlanEstimateInputV2 = {
+    version: "build_plan_estimate_input.v2",
+    source_fingerprint: input.source_fingerprint,
+    content_profile: contentProfile,
+    public_stages_to_create: publicStages.filter((stage) => publicCreate.includes(`public.${stage}`)),
+    private_blueprints_to_create: privateArtifacts.map((artifact) => ({
+      artifact_id: artifact.artifact_id,
+      blueprint_digest: artifact.blueprint_digest,
+      shape: artifact.blueprint.shape,
+      max_records: artifact.blueprint.limits.max_records,
+      max_relations: artifact.blueprint.limits.max_relations,
+      max_text_chars: artifact.blueprint.limits.max_text_chars,
+    })),
+    reused_artifacts: reuse.map((artifact) => artifact.artifact),
+    ...(intent ? { source_scope: intent.source_scope } : {}),
+  };
+  const plan = attachBuildPlanDigestV2({
+    version: "build_plan.v2",
+    plan_id: input.plan_id,
+    revision: input.revision,
+    book_id: input.book_id,
+    source_fingerprint: input.source_fingerprint,
+    content_profile: contentProfile,
+    recipe_id: input.mode,
+    ...(intent && intentDigest ? { intent_id: intent.intent_id, intent_digest: intentDigest } : {}),
+    public_stage_closure: publicStages,
+    private_artifacts: privateArtifacts,
+    reuse,
+    create,
+    excluded,
+    estimate: input.estimate ?? unknownEstimateV2(estimateInput),
+    budget: input.budget,
+    status: "draft",
+    created_at: input.created_at,
+  });
+  return {
+    version: "build_mode_compilation.v2",
     mode: input.mode,
     plan,
     estimate_input: estimateInput,

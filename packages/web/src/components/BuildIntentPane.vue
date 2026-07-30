@@ -3,13 +3,14 @@ import { Check, RefreshCw, X, XCircle } from "@lucide/vue";
 import { computed, ref, watch } from "vue";
 import type {
   BuildIntentMode,
-  BuildIntentSelectionV1,
+  BuildIntentSelection,
   BuildPlanV1,
+  BuildPlanV2,
   IntentArtifactType,
 } from "../api";
 
 const props = defineProps<{
-  selection: BuildIntentSelectionV1 | null;
+  selection: BuildIntentSelection | null;
   busy: boolean;
   error: string | null;
 }>();
@@ -89,6 +90,7 @@ const scopeText = computed(() => {
 });
 
 function friendlyBuildItem(value: string): string {
+  if (value.startsWith("private.artifact-")) return "目标产物";
   return buildItemLabels[value] ?? "其他阅读产物";
 }
 
@@ -96,17 +98,64 @@ function artifactLabel(value: IntentArtifactType): string {
   return artifactLabels[value];
 }
 
+type PlanArtifact = BuildPlanV1["private_artifacts"][number] | BuildPlanV2["private_artifacts"][number];
+
+function isBlueprintArtifact(artifact: PlanArtifact): artifact is BuildPlanV2["private_artifacts"][number] {
+  return "blueprint" in artifact;
+}
+
+function artifactTitle(artifact: PlanArtifact): string {
+  return isBlueprintArtifact(artifact) ? artifact.blueprint.title : artifactLabel(artifact.artifact_type);
+}
+
+function artifactPurpose(artifact: PlanArtifact): string {
+  return isBlueprintArtifact(artifact) ? artifact.blueprint.purpose : "按已确认目标生成的证据型阅读产物。";
+}
+
+function artifactShape(artifact: PlanArtifact): string {
+  if (!isBlueprintArtifact(artifact)) return "内置结构";
+  const labels: Record<BuildPlanV2["private_artifacts"][number]["blueprint"]["shape"], string> = {
+    collection: "集合",
+    table: "表格",
+    graph: "关系图",
+    sequence: "序列",
+    document: "文档",
+  };
+  return labels[artifact.blueprint.shape];
+}
+
+function artifactFields(artifact: PlanArtifact): string {
+  if (!isBlueprintArtifact(artifact)) return "由内置合同定义";
+  return Object.keys(artifact.blueprint.record_schema.properties).join("、") || "无正文栏位";
+}
+
+function artifactOrigin(artifact: PlanArtifact): string {
+  if (!isBlueprintArtifact(artifact)) return "系统预设（V1 适配）";
+  return {
+    system: "系统预设",
+    user_private: "私有复用",
+    one_off: "本次设计",
+  }[artifact.blueprint.origin];
+}
+
+function artifactCost(artifact: PlanArtifact): string {
+  if (!isBlueprintArtifact(artifact)) return "计入方案总预算";
+  const { max_records, max_relations, max_text_chars } = artifact.blueprint.limits;
+  const relationText = max_relations ? `，最多 ${numberText(max_relations)} 条关系` : "";
+  return `最多 ${numberText(max_records)} 条记录${relationText}，正文 ${numberText(max_text_chars)} 字符`;
+}
+
 function numberText(value: number): string {
   return new Intl.NumberFormat("zh-CN").format(value);
 }
 
-function tokenText(estimate: BuildPlanV1["estimate"]): string {
+function tokenText(estimate: BuildPlanV1["estimate"] | BuildPlanV2["estimate"]): string {
   const lower = estimate.input_tokens.lower + estimate.output_tokens.lower;
   const upper = estimate.input_tokens.upper + estimate.output_tokens.upper;
   return lower === upper ? numberText(lower) : `${numberText(lower)}–${numberText(upper)}`;
 }
 
-function wallText(estimate: BuildPlanV1["estimate"]): string {
+function wallText(estimate: BuildPlanV1["estimate"] | BuildPlanV2["estimate"]): string {
   const { p50, p95, confidence } = estimate.wall_clock_minutes;
   if (confidence === "none" || p50 === undefined) return "暂无可靠历史";
   if (p95 === undefined || p95 === p50) return `约 ${numberText(p50)} 分钟`;
@@ -230,8 +279,17 @@ function reject() {
               class="artifact-row"
               :title="artifact.artifact_id"
             >
-              <strong>{{ artifactLabel(artifact.artifact_type) }}</strong>
-              <span>{{ artifact.source_scope.whole_book ? "全书" : scopeText }}</span>
+              <div class="artifact-heading">
+                <strong>{{ artifactTitle(artifact) }}</strong>
+                <span>{{ artifact.source_scope.whole_book ? "全书" : scopeText }}</span>
+              </div>
+              <p>{{ artifactPurpose(artifact) }}</p>
+              <dl class="artifact-contract">
+                <div><dt>形态</dt><dd>{{ artifactShape(artifact) }}</dd></div>
+                <div><dt>关键字段</dt><dd>{{ artifactFields(artifact) }}</dd></div>
+                <div><dt>来源</dt><dd>{{ artifactOrigin(artifact) }}</dd></div>
+                <div><dt>成本上限</dt><dd>{{ artifactCost(artifact) }}</dd></div>
+              </dl>
             </li>
           </ul>
         </section>
@@ -475,23 +533,47 @@ function reject() {
 }
 .artifact-row {
   min-width: 0;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.65rem;
   padding: 0.48rem 0.55rem;
   border-left: 3px solid var(--reader-teal);
   background: var(--surface-soft);
   overflow-wrap: anywhere;
 }
-.artifact-row strong,
-.artifact-row span {
+.artifact-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.65rem;
+}
+.artifact-heading strong,
+.artifact-heading span {
   min-width: 0;
   font-size: 0.78rem;
 }
-.artifact-row span {
+.artifact-heading span {
   color: var(--steel);
   text-align: right;
+}
+.artifact-row > p {
+  margin: 0.35rem 0 0;
+  color: var(--slate);
+  font-size: 0.74rem;
+  line-height: 1.4;
+}
+.artifact-contract {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.38rem 0.6rem;
+  margin: 0.5rem 0 0;
+}
+.artifact-contract dt {
+  color: var(--steel);
+  font-size: 0.66rem;
+}
+.artifact-contract dd {
+  margin: 0.12rem 0 0;
+  color: var(--ink);
+  font-size: 0.71rem;
+  overflow-wrap: anywhere;
 }
 .change-section {
   display: grid;

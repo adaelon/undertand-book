@@ -6,7 +6,7 @@ use crate::{err_reply, method_not_allowed, ok_json, sha256_hex, workspace_root, 
 use read_tools::{ContentProfileId, ToolError};
 use runtime::build_intent::{
     plan_build_intent_candidate, validate_build_intent_planner_candidate,
-    BuildIntentPlannerCandidateV1, BuildIntentPlannerRequest,
+    ArtifactBlueprintPlannerSummaryV1, BuildIntentPlannerCandidateV2, BuildIntentPlannerRequest,
 };
 use serde_json::{json, Value};
 use std::ffi::OsString;
@@ -246,8 +246,10 @@ fn draft(state: &mut AppState, body: &str, now: &str) -> Result<Value, ToolError
     }
     copy_optional(&input, &mut core_input, "budget");
     if let Some(candidate) = candidate {
+        let resolved_blueprints = resolve_candidate_blueprints(state, &candidate)?;
         copy_optional(&input, &mut core_input, "user_goal");
         core_input["candidate"] = serde_json::to_value(candidate).map_err(internal_json)?;
+        core_input["resolved_blueprints"] = Value::Array(resolved_blueprints);
     }
     let selection = run_core(&json!({ "operation": "draft", "input": core_input }))?;
     persist_selection(state, &selection)?;
@@ -287,15 +289,10 @@ fn edit(state: &mut AppState, body: &str, now: &str) -> Result<Value, ToolError>
             "only a draft intent can be edited",
         ));
     }
-    let candidate = input.get("candidate").cloned().unwrap_or_else(|| {
-        json!({
-            "version": "build_intent_planner_candidate.v1",
-            "goal_kind": intent.get("goal_kind").cloned().unwrap_or(Value::Null),
-            "source_scope": intent.get("source_scope").cloned().unwrap_or(Value::Null),
-            "desired_artifacts": intent.get("desired_artifacts").cloned().unwrap_or(Value::Null),
-            "usage_horizon": intent.get("usage_horizon").cloned().unwrap_or(Value::Null),
-        })
-    });
+    let candidate = input
+        .get("candidate")
+        .cloned()
+        .unwrap_or(candidate_from_stored_selection(&intent, &plan)?);
     let user_goal = input
         .get("user_goal")
         .cloned()
@@ -305,9 +302,11 @@ fn edit(state: &mut AppState, body: &str, now: &str) -> Result<Value, ToolError>
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| error(INTENT_BUILD_INVALID, "validation", "user_goal is required"))?;
     let candidate = validate_edit_candidate(state, user_goal_text, candidate)?;
+    let resolved_blueprints = resolve_candidate_blueprints(state, &candidate)?;
     let mut core_input = build_core_draft_input(state, "goal_directed", now)?;
     core_input["user_goal"] = user_goal;
-    core_input["candidate"] = candidate;
+    core_input["candidate"] = serde_json::to_value(candidate).map_err(internal_json)?;
+    core_input["resolved_blueprints"] = Value::Array(resolved_blueprints);
     core_input["intent_id"] = json!(intent_id);
     core_input["plan_id"] = json!(plan_id);
     core_input["intent_revision"] = json!(required_revision(&intent)? + 1);
@@ -354,6 +353,7 @@ fn confirm_with_source(
             "confirmation plan id or digest does not match the current draft",
         ));
     }
+    validate_plan_blueprints_current(state, &plan)?;
     let intent = read_plan_intent(&store, &state.book.base.book_id, &plan)?;
     let selection = selection_from_artifacts(plan, intent)?;
     let confirmed = run_core(&json!({
@@ -452,9 +452,31 @@ fn usage_artifact_ref(plan: &Value, artifact_id: &str) -> Result<Value, ToolErro
                 "artifact does not belong to the selected plan",
             )
         })?;
+    let artifact_type = if plan.get("version").and_then(Value::as_str) == Some("build_plan.v2") {
+        match artifact
+            .get("blueprint")
+            .and_then(|blueprint| blueprint.get("blueprint_id"))
+            .and_then(Value::as_str)
+        {
+            Some("system.timeline") => "timeline",
+            Some("system.concept_map") => "concept_map",
+            Some("system.comparison_table") => "comparison_table",
+            Some("system.argument_map") => "argument_map",
+            Some(_) => "custom",
+            None => {
+                return Err(error(
+                    INTENT_BUILD_INVALID,
+                    "validation",
+                    "stored V2 plan artifact has no Blueprint identity",
+                ))
+            }
+        }
+    } else {
+        required_string(artifact, "artifact_type")?
+    };
     Ok(json!({
         "artifact_id": artifact_id,
-        "artifact_type": required_string(artifact, "artifact_type")?,
+        "artifact_type": artifact_type,
     }))
 }
 
@@ -940,7 +962,7 @@ fn artifact_scope(
 fn plan_candidate(
     state: &AppState,
     user_goal: &str,
-) -> Result<runtime::build_intent::BuildIntentPlannerCandidateV1, ToolError> {
+) -> Result<runtime::build_intent::BuildIntentPlannerCandidateV2, ToolError> {
     let lids = state
         .book
         .base
@@ -952,6 +974,7 @@ fn plan_candidate(
         ContentProfileId::TechnicalLearning => "technical_learning",
         ContentProfileId::Paper => "paper",
     };
+    let blueprints = blueprint_registry_summaries(state)?;
     plan_build_intent_candidate(
         state.adapter.as_ref(),
         &BuildIntentPlannerRequest {
@@ -959,6 +982,7 @@ fn plan_candidate(
             content_profile: profile,
             available_lids: &lids,
             available_sections: &[],
+            available_blueprints: &blueprints,
         },
     )
 }
@@ -967,8 +991,8 @@ fn validate_edit_candidate(
     state: &AppState,
     user_goal: &str,
     candidate: Value,
-) -> Result<Value, ToolError> {
-    let candidate: BuildIntentPlannerCandidateV1 =
+) -> Result<BuildIntentPlannerCandidateV2, ToolError> {
+    let candidate: BuildIntentPlannerCandidateV2 =
         serde_json::from_value(candidate).map_err(|_| {
             error(
                 "BUILD_INTENT_CANDIDATE_INVALID",
@@ -987,6 +1011,7 @@ fn validate_edit_candidate(
         ContentProfileId::TechnicalLearning => "technical_learning",
         ContentProfileId::Paper => "paper",
     };
+    let blueprints = blueprint_registry_summaries(state)?;
     validate_build_intent_planner_candidate(
         &candidate,
         &BuildIntentPlannerRequest {
@@ -994,12 +1019,243 @@ fn validate_edit_candidate(
             content_profile: profile,
             available_lids: &lids,
             available_sections: &[],
+            available_blueprints: &blueprints,
         },
     )?;
-    serde_json::to_value(candidate).map_err(internal_json)
+    Ok(candidate)
+}
+
+fn blueprint_registry_summaries(
+    state: &AppState,
+) -> Result<Vec<ArtifactBlueprintPlannerSummaryV1>, ToolError> {
+    let registry = run_blueprint_core(&json!({
+        "version": "artifact_blueprint_registry_command.v1",
+        "operation": "list",
+        "input": { "private_root": private_store(state)?.root() },
+    }))?;
+    let mut summaries = Vec::new();
+    for field in ["system_presets", "user_candidates"] {
+        let entries = registry
+            .get(field)
+            .and_then(Value::as_array)
+            .ok_or_else(|| {
+                error(
+                    INTENT_BUILD_INVALID,
+                    "validation",
+                    "ArtifactBlueprint Registry returned an invalid list",
+                )
+            })?;
+        for entry in entries {
+            if entry.get("status").and_then(Value::as_str) != Some("active") {
+                continue;
+            }
+            let blueprint = entry.get("blueprint").ok_or_else(|| {
+                error(
+                    INTENT_BUILD_INVALID,
+                    "validation",
+                    "ArtifactBlueprint Registry entry has no snapshot",
+                )
+            })?;
+            let properties = blueprint
+                .get("record_schema")
+                .and_then(|schema| schema.get("properties"))
+                .and_then(Value::as_object)
+                .ok_or_else(|| {
+                    error(
+                        INTENT_BUILD_INVALID,
+                        "validation",
+                        "ArtifactBlueprint Registry entry has no record fields",
+                    )
+                })?;
+            summaries.push(ArtifactBlueprintPlannerSummaryV1 {
+                source: required_string(entry, "source")?.into(),
+                blueprint_id: required_string(blueprint, "blueprint_id")?.into(),
+                blueprint_version: required_string(blueprint, "blueprint_version")?.into(),
+                digest: required_string(entry, "digest")?.into(),
+                title: required_string(blueprint, "title")?.into(),
+                purpose: required_string(blueprint, "purpose")?.into(),
+                shape: required_string(blueprint, "shape")?.into(),
+                key_fields: properties.keys().cloned().collect(),
+            });
+        }
+    }
+    Ok(summaries)
+}
+
+fn resolve_candidate_blueprints(
+    state: &AppState,
+    candidate: &BuildIntentPlannerCandidateV2,
+) -> Result<Vec<Value>, ToolError> {
+    let private_root = private_store(state)?.root().to_path_buf();
+    candidate
+        .artifacts
+        .iter()
+        .map(|artifact| {
+            let mut input = json!({
+                "private_root": private_root,
+                "blueprint_id": artifact.blueprint_id,
+                "blueprint_version": artifact.blueprint_version,
+            });
+            if let Some(blueprint) = artifact.blueprint.as_ref() {
+                input["one_off"] = blueprint.clone();
+            }
+            let resolution = run_blueprint_core(&json!({
+                "version": "artifact_blueprint_registry_command.v1",
+                "operation": "resolve",
+                "input": input,
+            }))?;
+            if resolution.get("source").and_then(Value::as_str) != Some(artifact.source.as_str()) {
+                return Err(error(
+                    INTENT_BUILD_INVALID,
+                    "validation",
+                    "ArtifactBlueprint resolution source does not match the planner selection",
+                ));
+            }
+            Ok(resolution)
+        })
+        .collect()
+}
+
+fn candidate_from_stored_selection(intent: &Value, plan: &Value) -> Result<Value, ToolError> {
+    let artifacts = plan
+        .get("private_artifacts")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            error(
+                INTENT_BUILD_INVALID,
+                "validation",
+                "stored plan artifacts are invalid",
+            )
+        })?;
+    let selected = if plan.get("version").and_then(Value::as_str) == Some("build_plan.v2") {
+        artifacts
+            .iter()
+            .map(|artifact| {
+                let blueprint = artifact.get("blueprint").ok_or_else(|| {
+                    error(
+                        INTENT_BUILD_INVALID,
+                        "validation",
+                        "stored V2 plan has no Blueprint snapshot",
+                    )
+                })?;
+                let source = required_string(blueprint, "origin")?;
+                let mut selected = json!({
+                    "source": source,
+                    "blueprint_id": required_string(blueprint, "blueprint_id")?,
+                    "blueprint_version": required_string(blueprint, "blueprint_version")?,
+                });
+                if source == "one_off" {
+                    selected["blueprint"] = blueprint.clone();
+                }
+                Ok(selected)
+            })
+            .collect::<Result<Vec<_>, ToolError>>()?
+    } else {
+        artifacts
+            .iter()
+            .map(|artifact| {
+                let artifact_type = required_string(artifact, "artifact_type")?;
+                if artifact_type == "custom" {
+                    return Err(error(
+                        INTENT_BUILD_INVALID,
+                        "validation",
+                        "legacy custom artifact has no deterministic Blueprint adapter",
+                    ));
+                }
+                Ok(json!({
+                    "source": "system",
+                    "blueprint_id": format!("system.{artifact_type}"),
+                    "blueprint_version": "1.0.0",
+                }))
+            })
+            .collect::<Result<Vec<_>, ToolError>>()?
+    };
+    Ok(json!({
+        "version": "build_intent_planner_candidate.v2",
+        "goal_kind": intent.get("goal_kind").cloned().unwrap_or(Value::Null),
+        "source_scope": intent.get("source_scope").cloned().unwrap_or(Value::Null),
+        "artifacts": selected,
+        "usage_horizon": intent.get("usage_horizon").cloned().unwrap_or(Value::Null),
+    }))
+}
+
+fn validate_plan_blueprints_current(state: &AppState, plan: &Value) -> Result<(), ToolError> {
+    if plan.get("version").and_then(Value::as_str) != Some("build_plan.v2") {
+        return Ok(());
+    }
+    let artifacts = plan
+        .get("private_artifacts")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            error(
+                INTENT_BUILD_INVALID,
+                "validation",
+                "stored V2 plan artifacts are invalid",
+            )
+        })?;
+    for artifact in artifacts {
+        let blueprint = artifact.get("blueprint").ok_or_else(|| {
+            error(
+                INTENT_BUILD_INVALID,
+                "validation",
+                "stored V2 plan has no Blueprint snapshot",
+            )
+        })?;
+        let source = required_string(blueprint, "origin")?;
+        let mut candidate = BuildIntentPlannerCandidateV2 {
+            version: "build_intent_planner_candidate.v2".into(),
+            goal_kind: "other".into(),
+            source_scope: runtime::build_intent::BuildIntentSourceScopeCandidateV1 {
+                whole_book: true,
+                lids: Vec::new(),
+                sections: Vec::new(),
+            },
+            artifacts: vec![
+                runtime::build_intent::BuildIntentPlannerArtifactCandidateV2 {
+                    source: source.into(),
+                    blueprint_id: required_string(blueprint, "blueprint_id")?.into(),
+                    blueprint_version: required_string(blueprint, "blueprint_version")?.into(),
+                    blueprint: (source == "one_off").then(|| blueprint.clone()),
+                },
+            ],
+            usage_horizon: "one_off".into(),
+        };
+        let resolution = resolve_candidate_blueprints(state, &candidate)
+            .map_err(|_| {
+                error(
+                    "BUILD_PLAN_BLUEPRINT_DRIFT",
+                    "needs_user",
+                    "the current ArtifactBlueprint Registry no longer matches this draft plan",
+                )
+            })?
+            .pop()
+            .expect("one Blueprint resolution");
+        candidate.artifacts.clear();
+        if resolution.get("digest") != artifact.get("blueprint_digest")
+            || resolution.get("blueprint") != Some(blueprint)
+        {
+            return Err(error(
+                "BUILD_PLAN_BLUEPRINT_DRIFT",
+                "needs_user",
+                "the current ArtifactBlueprint snapshot or digest changed; replan before confirmation",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn selection_from_artifacts(plan: Value, intent: Option<Value>) -> Result<Value, ToolError> {
+    let selection_version = match plan.get("version").and_then(Value::as_str) {
+        Some("build_plan.v2") => "build_intent_selection.v2",
+        Some("build_plan.v1") => "build_intent_selection.v1",
+        _ => {
+            return Err(error(
+                INTENT_BUILD_INVALID,
+                "validation",
+                "stored BuildPlan version is unsupported",
+            ))
+        }
+    };
     let recipe = required_string(&plan, "recipe_id")?;
     let plan_id = required_string(&plan, "plan_id")?;
     let plan_digest = required_string(&plan, "plan_digest")?;
@@ -1008,7 +1264,7 @@ fn selection_from_artifacts(plan: Value, intent: Option<Value>) -> Result<Value,
         .and_then(Value::as_str)
         .unwrap_or("draft");
     Ok(json!({
-        "version": "build_intent_selection.v1",
+        "version": selection_version,
         "mode": recipe,
         "intent": intent,
         "intent_digest": plan.get("intent_digest").cloned().unwrap_or(Value::Null),
@@ -1219,6 +1475,10 @@ fn resolve_metrics_core_command() -> Result<CoreIntentCommand, ToolError> {
     resolve_named_core_command("intent.metrics", "intent-metrics.ts")
 }
 
+fn resolve_blueprint_core_command() -> Result<CoreIntentCommand, ToolError> {
+    resolve_named_core_command("intent.blueprint", "intent-blueprint.ts")
+}
+
 fn resolve_named_core_command(
     packaged_subcommand: &str,
     development_script: &str,
@@ -1297,6 +1557,11 @@ fn run_artifact_core(request: &Value) -> Result<Value, ToolError> {
 
 fn run_metrics_core(request: &Value) -> Result<Value, ToolError> {
     let command = resolve_metrics_core_command()?;
+    run_core_command(command, request)
+}
+
+fn run_blueprint_core(request: &Value) -> Result<Value, ToolError> {
+    let command = resolve_blueprint_core_command()?;
     run_core_command(command, request)
 }
 

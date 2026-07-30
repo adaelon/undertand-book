@@ -1,5 +1,6 @@
 use runtime::build_intent::{
-    plan_build_intent_candidate, validate_build_decision_request_v2, BuildIntentPlannerRequest,
+    plan_build_intent_candidate, validate_build_decision_request_v2,
+    ArtifactBlueprintPlannerSummaryV1, BuildIntentPlannerRequest,
 };
 use runtime::{
     AdapterError, AgentRequestPlan, AssistantTurn, CompletionRequest, ModelAdapter, ParsedResponse,
@@ -53,55 +54,89 @@ impl ModelAdapter for StructuredAdapter {
     }
 }
 
-fn request<'a>(goal: &'a str) -> BuildIntentPlannerRequest<'a> {
+fn registry() -> Vec<ArtifactBlueprintPlannerSummaryV1> {
+    vec![
+        ArtifactBlueprintPlannerSummaryV1 {
+            source: "system".into(),
+            blueprint_id: "system.comparison_table".into(),
+            blueprint_version: "1.0.0".into(),
+            digest: "a".repeat(64),
+            title: "Comparison table".into(),
+            purpose: "Compare subjects across shared dimensions.".into(),
+            shape: "table".into(),
+            key_fields: vec!["subject".into(), "dimensions".into()],
+        },
+        ArtifactBlueprintPlannerSummaryV1 {
+            source: "system".into(),
+            blueprint_id: "system.argument_map".into(),
+            blueprint_version: "1.0.0".into(),
+            digest: "b".repeat(64),
+            title: "Argument map".into(),
+            purpose: "Represent claims and argumentative relations.".into(),
+            shape: "graph".into(),
+            key_fields: vec!["claim".into(), "role".into()],
+        },
+    ]
+}
+
+fn request<'a>(
+    goal: &'a str,
+    blueprints: &'a [ArtifactBlueprintPlannerSummaryV1],
+) -> BuildIntentPlannerRequest<'a> {
     BuildIntentPlannerRequest {
         user_goal: goal,
         content_profile: "technical_learning",
         available_lids: &["1.1", "1.2"],
         available_sections: &["Methods", "Results"],
+        available_blueprints: blueprints,
     }
 }
 
 #[test]
 fn free_text_candidate_is_strict_registry_data_and_does_not_echo_raw_goal() {
     let raw = "PRIVATE_RAW_GOAL_DO_NOT_LOG";
+    let blueprints = registry();
     let adapter = StructuredAdapter::output(json!({
-        "version": "build_intent_planner_candidate.v1",
+        "version": "build_intent_planner_candidate.v2",
         "goal_kind": "compare",
         "source_scope": { "whole_book": false, "lids": ["1.1"], "sections": [] },
-        "desired_artifacts": ["comparison_table", "argument_map"],
+        "artifacts": [
+            { "source": "system", "blueprint_id": "system.comparison_table", "blueprint_version": "1.0.0" },
+            { "source": "system", "blueprint_id": "system.argument_map", "blueprint_version": "1.0.0" }
+        ],
         "usage_horizon": "project"
     }));
-    let candidate = plan_build_intent_candidate(&adapter, &request(raw)).unwrap();
+    let candidate = plan_build_intent_candidate(&adapter, &request(raw, &blueprints)).unwrap();
     let encoded = serde_json::to_string(&candidate).unwrap();
     assert!(!encoded.contains(raw));
     assert_eq!(
-        candidate.desired_artifacts,
-        vec!["comparison_table", "argument_map"]
+        candidate.artifacts[0].blueprint_id,
+        "system.comparison_table"
     );
 }
 
 #[test]
 fn unknown_custom_and_out_of_scope_values_fail_closed() {
+    let blueprints = registry();
     for value in [
         json!({
-            "version": "build_intent_planner_candidate.v1",
+            "version": "build_intent_planner_candidate.v2",
             "goal_kind": "analyze",
             "source_scope": { "whole_book": true, "lids": [], "sections": [] },
-            "desired_artifacts": ["custom"],
+            "artifacts": [{ "source": "system", "blueprint_id": "system.unknown", "blueprint_version": "1.0.0" }],
             "usage_horizon": "one_off"
         }),
         json!({
-            "version": "build_intent_planner_candidate.v1",
+            "version": "build_intent_planner_candidate.v2",
             "goal_kind": "analyze",
             "source_scope": { "whole_book": false, "lids": ["9.9"], "sections": [] },
-            "desired_artifacts": ["concept_map"],
+            "artifacts": [],
             "usage_horizon": "one_off"
         }),
     ] {
         let error = plan_build_intent_candidate(
             &StructuredAdapter::output(value),
-            &request("Analyze privately"),
+            &request("Analyze privately", &blueprints),
         )
         .unwrap_err();
         assert_eq!(error.error_code, "BUILD_INTENT_CANDIDATE_INVALID");
@@ -110,9 +145,10 @@ fn unknown_custom_and_out_of_scope_values_fail_closed() {
 
 #[test]
 fn provider_failure_is_explicit_and_never_defaults_to_a_capability() {
+    let blueprints = registry();
     let error = plan_build_intent_candidate(
         &StructuredAdapter::failure("provider unavailable"),
-        &request("Make something useful"),
+        &request("Make something useful", &blueprints),
     )
     .unwrap_err();
     assert_eq!(error.error_code, "BUILD_INTENT_PROVIDER_ERROR");
@@ -126,17 +162,19 @@ fn large_book_catalog_is_bounded_for_the_provider_but_scope_validation_uses_the_
         .collect::<Vec<_>>();
     let available_lids = owned_lids.iter().map(String::as_str).collect::<Vec<_>>();
     let adapter = StructuredAdapter::output(json!({
-        "version": "build_intent_planner_candidate.v1",
+        "version": "build_intent_planner_candidate.v2",
         "goal_kind": "analyze",
         "source_scope": { "whole_book": false, "lids": ["1.1500"], "sections": [] },
-        "desired_artifacts": ["concept_map"],
+        "artifacts": [],
         "usage_horizon": "project"
     }));
+    let blueprints = registry();
     let request = BuildIntentPlannerRequest {
         user_goal: "Analyze the evidence near LID 1.1500",
         content_profile: "technical_learning",
         available_lids: &available_lids,
         available_sections: &[],
+        available_blueprints: &blueprints,
     };
 
     let candidate = plan_build_intent_candidate(&adapter, &request).unwrap();
@@ -155,6 +193,10 @@ fn large_book_catalog_is_bounded_for_the_provider_but_scope_validation_uses_the_
         128
     );
     assert_eq!(provider_request["scope_catalog"]["truncated"], true);
+    assert_eq!(
+        provider_request["blueprint_registry"][0]["blueprint_id"],
+        "system.comparison_table"
+    );
     assert_eq!(
         provider_request["scope_catalog"]["available_lids"][0],
         "1.1"

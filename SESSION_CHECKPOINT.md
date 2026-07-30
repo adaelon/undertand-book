@@ -1,44 +1,36 @@
-# SESSION_CHECKPOINT - 2026-07-26 16:47 +08:00
+# SESSION_CHECKPOINT - 2026-07-30 08:35 +08:00
 
 ## 新鲜度自检
 
-- IP11 功能 commit:`a8fcb35 feat(build): share Reader build intent with Codex IP11`,已推送 `origin/main`。
-- 本页与 Setup 代码链路作为独立发布证据 commit;读入时运行 `git log --oneline -3`,以 Git 最新 hash 为准。
-- desktop/package/bundle 四个版本源均为 `0.2.0`;发布插件为 `0.1.0+codex.20260726080400`。
+- 写入时最新提交:`e81e334 feat(notes): add explicit body placement`。
+- 读入时运行 `git log --oneline -3`;若不同,以 Git 与工作区 diff 为准。
 
 ## 当前在做什么
 
-IP1-IP9、IP11 已完成并发布源码,IP10 仍待实施。IP11 让 Codex 经 Desktop stdin controller 与 Reader 共用唯一 private BuildIntent/BuildPlan,精确确认 `plan_id + plan_digest` 后复用 BP8 公共构建与 IP7 私有成果 mailbox;无 goal 的 legacy build 不变。
-
-`dist/UnderstandBookSetup.exe` 已从 detached clean `a8fcb35` 重编并覆盖旧 IP1-IP9 本地产物。当前机器已安装的旧插件不会因打包自动热更新;运行新 Setup 或后续按正确 marketplace 源重装后,需新开 Codex thread 加载 IP11 skill。
-
-## 发布证据
-
-- Setup:37,810,189 bytes;SHA-256 `240077F6D2DF62BEFEA718C6A2D7AAE851A046E305979E465052CDEE15908DBA`;file/product version `0.2.0`;`NotSigned`。
-- NSIS bundle、detached export、主工作区最终 Setup 三者大小和 SHA-256 完全一致;安装器未启动。
-- `pnpm -C apps/desktop package:windows` 0 退出;plugin/release gates、Web production build、compiled workbench smoke、Book MCP smoke、Rust release 与 NSIS 均通过。
-- IP11 实现验证:Core/Web 全量、Server 207+5、Desktop 17、Codex Desktop stdin 真进程 smoke 与 legacy automatic-build parity 均通过。
+AA0-AA11 已实现并完成发布面收口,代码与文档仍未提交;Blueprint Registry、V2 Plan/Instance gate、Reader 五形态、Resident/MCP current snapshot 读取和两本真书 release audit 已形成完整闭环。
 
 ## 下一步(可直接接手)
 
-1. 分发或手测时运行 `dist/UnderstandBookSetup.exe`,并以本页 SHA-256 复核。
-2. 验证 Codex IP11 时安装新 Setup,新开 thread 后用 `$understand-book-build <trusted-workspace> <goal>` 检查 draft -> exact confirm -> build -> private artifact loop。
-3. 产品切片继续时从 `docs/切片方案-需求驱动渐进式预构建.md` 的 IP10 开始,不要重做 IP1-IP9/IP11。
+1. 运行 `Get-Content -Raw apps/desktop/scripts/smoke-artifact-access.mjs`,复核新增且尚未跟踪的 AA11 audit 脚本。
+2. 运行 `git diff -- docs/切片方案-需求驱动产物Blueprint与Agent访问.md docs/架构.md docs/代码链路.md SESSION_CHECKPOINT.md`,复核 AA11 文档收口 diff。
+3. 依据 `docs/代码链路.md` 的 AA1-AA11 触达清单生成显式 staging 文件列表,排除 NP0R-NP4、书籍、截图、日志、`.tmp-*` 与其他用户文件。
+4. 若准备发布,以 `UNDERSTAND_BOOK_DESKTOP_EXE=<current UnderstandBook.exe>` 运行 `node apps/desktop/scripts/smoke-artifact-access.mjs`,并以 `UNDERSTAND_BOOK_MARKETPLACE_SOURCE=adaelon/undertand-book` 运行 `node apps/desktop/scripts/assert-release-config.mjs`。
+5. 若准备提交,按 AA1-AA11 切片边界分别提交;不要把既有 Note-placement 工作混入。
 
 ## 未提交 / 未完成
 
-- IP11/Setup:无未提交实现;`dist/UnderstandBookSetup.exe` 是 Git 忽略的本地发布产物。
-- 用户既有 tracked:base-schema roundtrip、memory lib/profile/review、reader lib、runtime profile_api 与前端阅读器切片方案;不得回退或纳入后续切片提交。
-- 用户未跟踪书籍、方案/ADR、截图、日志和临时目录仍归用户所有;不得批量清理。
+- AA1-AA11:Core/Runtime/Server/Web/plugin/docs 与新增 `crates/artifact-tools/`、`apps/desktop/scripts/smoke-artifact-access.mjs` 全部实现、验证并完成文档收口,待显式 staging/commit。
+- AA11 真书 audit:technical_learning `quantification-essence` 2757 LIDs、paper `understanding-transformer-from-the-perspective-of-reviewed-v2` 1981 LIDs;两书均 `release_gate=pass`,相关 Resident 各 5 回合/25 tokens/1 search/1 read/1 `book.text`/1 `source.present`,无关与禁用均 0 artifact 调用,最终 wall clock 280/3618 ms,MCP delete 前各 11 calls。
+- AA11 异常矩阵:replan old ref=`ARTIFACT_REF_INVALID`;source stale=`INTENT_BUILD_CONFLICT`;delete/no-overlay=`ARTIFACT_OVERLAY_UNAVAILABLE`;Reader/Resident/MCP 均只读 current active + accepted,private goal/body 泄漏 0。
+- 验证:Artifact Tools 15/15;Runtime 232/232 + integration 5/5(仅过滤已知真书 LID 基线);Server 220/220 + Book MCP 5/5;Web 37 files / 208 tests + typecheck/build;packaged parity、release-config、`cargo fmt --all -- --check`、`git diff --check` 全绿。
+- Core 串行全量 535/538;剩余 3 条只有固定 wall-clock timeout 且无断言差异。dispatch/profile 冷跑已绿;handoff 仅 Node/tsx 冷启动约 5.34 s 超过既有 5 s。按 A2 未修改无关测试或门槛。
+- 既有 NP0R-NP4 goal-owned 代码/文档仍未提交;边界见 `docs/切片方案-无引用Note显式正文放置.md` 与 `docs/代码链路.md` 的 NP1a-NP4。
+- 其他书籍、截图、日志、临时目录及用户工作不属于 AA0-AA11,不得清理、覆盖或纳入提交。
 
 ## 冷启动读序
 
-1. `docs/切片方案-需求驱动渐进式预构建.md` IP11 与 ADR-0093 §9 - 冻结边界。
-2. `docs/代码链路.md` 最后的 IP11.1-IP11.5 与 IP11 clean Setup - 实现/发布证据。
-3. `docs/架构.md` Codex/Reader shared build intent 图 - 主数据流。
-4. `apps/desktop/src-tauri/src/main.rs`、`crates/server/src/build_intent_api.rs`、`skills/build/SKILL.md` - controller 与 skill 入口。
-
-## 本会话决策摘要
-
-- IP11 shared authority:Codex/Reader 共用 Reader-private plan store,raw goal 不进入 argv/stdout/stderr/Visitor/MCP;见 ADR-0093 §9。
-- 发布边界:功能固定为 `a8fcb35`,Setup 只从该 clean snapshot 构建,用户 dirty files 不进入提交或打包输入。
+1. `docs/切片方案-需求驱动产物Blueprint与Agent访问.md` - FrozenIntent、AA0-AA11 状态、真书统计与发布判定。
+2. `docs/adr/0094-codex-designed-artifact-blueprints-and-versioned-registry.md`、`docs/adr/0095-active-artifact-read-surface-and-book-mcp-boundary.md` 与 `CONTEXT.md` 的 Blueprint/目标产物术语。
+3. `apps/desktop/scripts/smoke-artifact-access.mjs` - 两本真书、三消费面、异常矩阵与 audit JSON 的可复放权威。
+4. `crates/artifact-tools/`、`crates/server/src/intent_build_store.rs::read_active_overlay_state`、Runtime `ArtifactToolSession` 与 MCP dispatch - current snapshot 执行链。
+5. `docs/架构.md` 的 AA6-AA11 章节与 `docs/代码链路.md` 最后的 AA11 - 架构、隐私边界、运行统计和验证证据。

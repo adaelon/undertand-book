@@ -565,10 +565,22 @@ Build Workbench 背后的服务端控制层:负责把上传的 `paper.md/paper.p
 以 `content_profile` 固定规则生成可跨阅读目标复用的公共语义层。`technical_learning` 当前包含 Pass1、profile sidecar、Pass2 与 BookStructure;`paper` 另含 paper metadata、paper lexicon 与 PaperReadingGuide。其配方 id 为 `standard_deep`,是产品提供的默认深读模板,不是导入后的默认执行授权;输入不得包含 `BuildIntent` 或 reader-private memory。状态:NEW(见 [ADR-0093](docs/adr/0093-intent-confirmed-progressive-prebuild-and-reader-private-goal-artifacts.md))。
 
 ## BuildIntent
-用户围绕当前书显式陈述并确认的版本化构建目标,记录目标、作用范围、期望产物、使用期限、来源 fingerprint 与隐私级别。自然语言原文只能作为 draft 输入,不得直接改变 source/LID/content profile、公共 Pass1/Pass2 prompt、BookStructure 或标准语义 artifact freshness;未确认、已取代或来源过期的 intent 不得授权模型构建。它属于 reader-private 状态,不是 Book truth、ReaderProfile 推断或 memory 自动结论。状态:NEW(见 [ADR-0093](docs/adr/0093-intent-confirmed-progressive-prebuild-and-reader-private-goal-artifacts.md))。
+用户围绕当前书显式陈述并确认的版本化构建目标,记录目标、作用范围、期望输出、使用期限、来源 fingerprint 与隐私级别。自然语言原文只能作为 draft 输入,不得直接改变 source/LID/content profile、公共 Pass1/Pass2 prompt、BookStructure 或标准语义 artifact freshness;未确认、已取代或来源过期的 intent 不得授权模型构建。它属于 reader-private 状态,不是 Book truth、ReaderProfile 推断或 memory 自动结论;具体生成 0..N 个什么数据型产物由 Codex 在 BuildPlan 阶段选择或设计 `ArtifactBlueprint`,不要求目标先映射到固定产物类型。状态:BOUNDARY_CHANGE(见 [ADR-0093](docs/adr/0093-intent-confirmed-progressive-prebuild-and-reader-private-goal-artifacts.md)、[ADR-0094](docs/adr/0094-codex-designed-artifact-blueprints-and-versioned-registry.md))。
 
 ## BuildPlan
-由已确认 `BuildIntent` 或用户显式选择 `standard_deep` 编译出的版本化构建决策 artifact,列出目标产物、依赖闭包、可复用与新增工作、明确不生成项、token/墙钟估计及预算上限。Planner 或 LLM 只能产生 draft;确定性 validator 必须校验 profile capability、依赖、LID scope、隐私与 digest,用户确认 `plan_digest` 后 orchestrator 才能执行昂贵工作。它不是 semantic truth,预算或依赖漂移超过已确认边界时必须回到 `needs_user`。状态:NEW(见 [ADR-0093](docs/adr/0093-intent-confirmed-progressive-prebuild-and-reader-private-goal-artifacts.md))。
+由已确认 `BuildIntent` 或用户显式选择 `standard_deep` 编译出的版本化构建决策 artifact,列出目标产物、所用 `ArtifactBlueprint` 与 digest、依赖闭包、可复用与新增工作、明确不生成项、token/墙钟估计及预算上限。Planner 或 LLM 只能产生 draft;确定性 validator 必须校验 blueprint、profile capability、依赖、LID scope、隐私与 digest,用户一次确认绑定 blueprint digest 的 `plan_digest` 后 orchestrator 才能执行昂贵工作。它不是 semantic truth,预算、依赖或 blueprint 漂移超过已确认边界时必须回到 `needs_user`。状态:BOUNDARY_CHANGE(见 [ADR-0093](docs/adr/0093-intent-confirmed-progressive-prebuild-and-reader-private-goal-artifacts.md)、[ADR-0094](docs/adr/0094-codex-designed-artifact-blueprints-and-versioned-registry.md))。
+
+## ArtifactBlueprint
+Codex 为一个目标产物选择或设计的版本化数据元合同,冻结用途、通用展示形态、受限 record/relation schema、可搜索与摘要字段、Routing Card、逐记录 LID 证据策略及规模上限。它不携带书中内容、任意可执行代码或自定义渲染器;`blueprint_digest` 参与 `plan_digest`,Runtime 只按受限 DSL 与确定性 gate 验收。现有 timeline、concept map、comparison table、argument map 降为内置 Blueprint,不再构成封闭类型枚举。状态:NEW(见 [ADR-0094](docs/adr/0094-codex-designed-artifact-blueprints-and-versioned-registry.md))。
+
+## ArtifactBlueprint Registry
+按稳定 identity、版本、状态和 canonical digest 管理 `ArtifactBlueprint` 的注册表。系统层随软件发布内置通用 Blueprint;用户私有层只保存 Codex 基于真实目标形成的 schema 候选及使用记录,不保存书中内容,可跨相似目标复用;候选只有经人工评审才可晋升为系统预设。Registry 为空不阻塞 Codex 设计一次性 Blueprint。状态:NEW(见 [ADR-0094](docs/adr/0094-codex-designed-artifact-blueprints-and-versioned-registry.md))。
+
+## ArtifactRoutingCard
+语义字段随 `ArtifactBlueprint` 确认并冻结、实例计数由 accepted payload 确定性补全的有界路由卡,描述产物的 title、purpose、`use_when`、`avoid_when`、covered topics、scope label、可搜索字段和记录数,用于判断当前问题是否值得调用产物工具。它不是书源证据,不得证明书中事实,也不得包含原始用户目标、BuildIntent 或 BuildPlan 正文。状态:NEW(见 [ADR-0095](docs/adr/0095-active-artifact-read-surface-and-book-mcp-boundary.md))。
+
+## ArtifactAccessSnapshot
+Resident Agent 在一个用户回合开始时冻结的 active + accepted 目标产物读取视图,包含 overlay revision、Routing Cards、blueprint/payload identity 和只读记录访问能力。该回合内 `artifact.search/read` 必须保持同一 revision;目标 replan、换源、失效或删除不能让一次工具循环跨 overlay 混读。Book MCP 每次工具调用独立解析同等门禁的当前 snapshot。状态:NEW(见 [ADR-0095](docs/adr/0095-active-artifact-read-surface-and-book-mcp-boundary.md))。
 
 ## Codex 构建意图入口 (Codex build-intent entry)
 Codex plugin 面向同一 reader-private `BuildIntent/BuildPlan` 权威提供的对话入口:用户在 Codex 陈述目标后,Desktop-owned stdin controller 在显式目标 workspace 上生成可审阅 draft;Codex 或 Reader 只能按当前 `plan_digest` 显式确认,随后由一键预构建执行公共依赖闭包与私有目标产物。它不复制私有 store,不经 Visitor/Book MCP 暴露 intent,不把原始目标写入命令行参数、stdout/stderr 或公共书目录。状态:BOUNDARY_CHANGE(见 [ADR-0093](docs/adr/0093-intent-confirmed-progressive-prebuild-and-reader-private-goal-artifacts.md))。
@@ -577,7 +589,7 @@ Codex plugin 面向同一 reader-private `BuildIntent/BuildPlan` 权威提供的
 用户在 Codex 对话中审阅当前计划摘要后,对精确 `plan_id + plan_digest` 作出的显式构建授权,持久化来源为 `codex_conversation`。它与 `reader_ui` 具有相同计划门禁,不能预先授权未知计划、复用旧 digest 或由 agent 代替用户确认;旧完整构建兼容来源仍为 `explicit_legacy_command`。状态:NEW(见 [ADR-0093](docs/adr/0093-intent-confirmed-progressive-prebuild-and-reader-private-goal-artifacts.md))。
 
 ## 目标产物层 (intent artifact overlay)
-围绕单个已确认 `BuildIntent` 生成、只供 resident reader 消费的 reader-private 产物集合。每个产物必须绑定 source fingerprint、`intent_digest`、`plan_digest`、输出 schema 与真实 LID evidence,并与公共 graph、profile sidecar、BookStructure 和书目录根 artifact 物理隔离;目标改变时只取代对应 overlay,不得使仍 fresh 的公共基础层或标准语义层失效。Visitor、Book MCP 与 build-workbench 的非授权会话不得读取。状态:NEW(见 [ADR-0093](docs/adr/0093-intent-confirmed-progressive-prebuild-and-reader-private-goal-artifacts.md))。
+围绕单个已确认 `BuildIntent` 生成、物理上位于 reader-private store 的数据型产物集合。每个产物必须绑定 source fingerprint、`intent_digest`、`plan_digest`、`blueprint_digest`、受限输出 schema 与真实 LID evidence,并与公共 graph、profile sidecar、BookStructure 和书目录根 artifact 物理隔离;目标改变时只取代对应 overlay,不得使仍 fresh 的公共基础层或标准语义层失效。Resident Reader/Agent 与绑定该书的 Book MCP 只可读取当前 active + accepted snapshot;Intent、Plan、candidate、failure、历史 overlay、原始目标和执行记录仍不可见。状态:BOUNDARY_CHANGE(见 [ADR-0093](docs/adr/0093-intent-confirmed-progressive-prebuild-and-reader-private-goal-artifacts.md)、[ADR-0095](docs/adr/0095-active-artifact-read-surface-and-book-mcp-boundary.md))。
 
 ## 分阶段任务租约 (phase-aware task lease)
 一键预构建中语义任务所有权的限时凭证,区分等待专用 executor 接管的 `reserved` 阶段与已经开始处理输入的 `running` 阶段,两阶段拥有独立截止时间。租约只控制任务执行权和中断恢复,不证明语义产物完成;正常任务必须依靠保守运行期限即可完成,heartbeat 只延长仍匹配 target/source/policy/owner 的活动运行租约。状态:BOUNDARY_CHANGE(见 [ADR-0092](docs/adr/0092-phase-aware-automatic-build-leases-and-executor-dispatch-bundles.md))。
@@ -601,7 +613,7 @@ Build Engine Sidecar 把多个既有、同 target/stage/policy/kind 的 work uni
 以 `.codex-plugin/plugin.json` 打包、由 Codex 安装和加载的本地预构建 harness 外壳。它通过 `$understand-book-build` 驱动现有确定性脚本与专用语义抽取契约,并可经 Codex 构建意图入口读写 Desktop-owned 的同一 reader-private 计划;正常条件下一次已确认执行完成、外部中断后按磁盘产物幂等续跑。paper 只消费 Build Workbench 已可信的混合阅读基座;非 paper 可从 Markdown/EPUB 原始输入开始。它不是 Web 内置模型 worker,不嵌入 Codex app-server,不经 Visitor/Book MCP 读取私有计划,也不能绕过 plan/artifact/hash/schema gate。状态:BOUNDARY_CHANGE(2026-07-26 IP11)。
 
 ## Book MCP Sidecar
-随 Windows Setup 安装、由 Codex plugin 声明和启动的只读本地 MCP 可执行程序。一个进程在启动时绑定一本可信 Book workspace,只投影 canonical Book tools;它不读取 resident memory、画像、Agent 历史或 Provider 设置。无显式书目录时可读取 Reader session 的当前书路由指针,但该指针不成为新的工具面。状态:NEW(详见 [docs/adr/0089])。
+随 Windows Setup 安装、由 Codex plugin 声明和启动的只读本地 MCP 可执行程序。一个进程在启动时绑定一本可信 Book workspace,静态投影 canonical Book tools 与通用 artifact list/search/read 工具;artifact 调用只能读取同一 OS 用户、同一本书的 current active + accepted snapshot。它不读取 BuildIntent、BuildPlan、candidate、历史 overlay、resident memory、画像、Agent 历史或 Provider 设置。无显式书目录时可读取 Reader session 的当前书路由指针,但该指针不成为新的工具面。状态:BOUNDARY_CHANGE(详见 [docs/adr/0089]、[ADR-0095](docs/adr/0095-active-artifact-read-surface-and-book-mcp-boundary.md))。
 
 ## current-book MCP binding
 Book MCP 进程级的单书绑定:优先使用显式 CLI 目录,其次 `UNDERSTAND_BOOK_DIR`,最后使用 Reader 最近持久化且仍可加载的当前书。绑定在进程生命周期内不随 Reader 切书漂移;新 MCP 进程才重新解析。状态:NEW(详见 [docs/adr/0089])。

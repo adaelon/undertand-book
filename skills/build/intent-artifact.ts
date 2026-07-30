@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { canonicalBuildJson } from "../../packages/core/src/build-intent";
-import type { BuildIntentV1, BuildPlanV1 } from "../../packages/core/src/build-intent";
+import type { BuildIntentAny, BuildPlanAny } from "../../packages/core/src/build-intent-v2";
 import {
   failIntentArtifactTaskAttempt,
   inspectIntentArtifactTaskAttempt,
@@ -13,15 +13,17 @@ import {
 } from "../../packages/core/src/intent-artifact-mailbox";
 import {
   compileIntentArtifactTasks,
-  type IntentArtifactTaskEnvelopeV1,
+  projectAcceptedIntentArtifactV1AsV2,
+  type AcceptedIntentArtifactV1,
+  type IntentArtifactTaskEnvelopeV2,
 } from "../../packages/core/src/intent-artifact";
 
 const MAX_STDIN_BYTES = 16 * 1024 * 1024;
 
 export interface PrepareIntentArtifactMailboxInput {
   private_root: string;
-  intent: BuildIntentV1;
-  plan: BuildPlanV1;
+  intent: BuildIntentAny;
+  plan: BuildPlanAny;
   available_lids: string[];
   resolved_scope_lids: string[];
   created_at: string;
@@ -151,7 +153,7 @@ export function runIntentArtifactMailboxCommand(input: unknown): unknown {
   }
 }
 
-function artifactDirectory(privateRoot: string, task: IntentArtifactTaskEnvelopeV1): string {
+function artifactDirectory(privateRoot: string, task: IntentArtifactTaskEnvelopeV2): string {
   return path.join(
     privateRoot,
     task.book_id,
@@ -163,10 +165,27 @@ function artifactDirectory(privateRoot: string, task: IntentArtifactTaskEnvelope
 
 function artifactAlreadyCommitted(
   privateRoot: string,
-  task: IntentArtifactTaskEnvelopeV1,
+  task: IntentArtifactTaskEnvelopeV2,
 ): boolean {
   const directory = artifactDirectory(privateRoot, task);
-  if (!existsSync(path.join(directory, "accepted.json"))) return false;
+  const acceptedPath = path.join(directory, "accepted.json");
+  if (!existsSync(acceptedPath)) return false;
+  const accepted = JSON.parse(readFileSync(acceptedPath, "utf8")) as Record<string, unknown>;
+  if (accepted.version === "intent_artifact_accepted.v1") {
+    const projected = projectAcceptedIntentArtifactV1AsV2(accepted as unknown as AcceptedIntentArtifactV1);
+    if (projected.task_id !== task.task_id
+      || projected.book_id !== task.book_id
+      || projected.source_fingerprint !== task.source_fingerprint
+      || projected.intent_id !== task.intent_id
+      || projected.intent_digest !== task.intent_digest
+      || projected.plan_id !== task.plan_id
+      || projected.plan_digest !== task.plan_digest
+      || projected.artifact_id !== task.artifact.artifact_id
+      || projected.blueprint_digest !== task.artifact.blueprint_digest) {
+      throw new Error("accepted v1 intent artifact does not match the current adapted task");
+    }
+    return true;
+  }
   const attemptsDirectory = path.join(directory, "attempts");
   const latest = readdirSync(attemptsDirectory, { withFileTypes: true })
     .filter((entry) => entry.isDirectory() && /^\d{6}$/u.test(entry.name))

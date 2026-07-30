@@ -1,0 +1,55 @@
+{
+  "version": "artifact_search.v1.golden",
+  "cases": [
+    {
+      "query": "cardiac splicing",
+      "expected": [
+        {
+          "label": "Cardiac splicing",
+          "score": 5000071001000000,
+          "matched_fields": [
+            "/label",
+            "routing.covered_topics",
+            "routing.title",
+            "routing.use_when"
+          ],
+          "matched_terms": ["cardiac", "splicing"]
+        },
+        {
+          "label": "Unrelated",
+          "score": 5000041001000000,
+          "matched_fields": [
+            "/detail",
+            "routing.covered_topics",
+            "routing.title",
+            "routing.use_when"
+          ],
+          "matched_terms": ["cardiac", "splicing"]
+        },
+        {
+          "label": "Cardiac remodeling",
+          "score": 2000035001000000,
+          "matched_fields": [
+            "/detail",
+            "/label",
+            "routing.covered_topics",
+            "routing.title",
+            "routing.use_when"
+          ],
+          "matched_terms": ["cardiac", "splicing"]
+        }
+      ]
+    },
+    {
+      "query": "心脏诊断",
+      "expected": [
+        {
+          "label": "心脏可变剪接用于诊断",
+          "score": 2000008000400000,
+          "matched_fields": ["/label"],
+          "matched_terms": ["心脏", "诊断"]
+        }
+      ]
+    }
+  ]
+}
