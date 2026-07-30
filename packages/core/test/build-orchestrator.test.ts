@@ -106,6 +106,23 @@ function writeTechnicalLearningWorkspace(root: string, bookId = "guide"): {
 }
 
 describe("automatic build orchestrator", () => {
+  it("uses an explicit book id before falling back to the source filename slug", () => {
+    const root = tempDir();
+    const source = path.join(root, "renamed-import.md");
+    writeFileSync(source, "# Renamed import\n\nA deterministic source.\n", "utf8");
+    mkdirSync(path.join(root, ".understand-book", "stable-guide", ".build"), { recursive: true });
+
+    expect(resolveAutomaticBuildTarget(source, root, { book_id: "stable-guide" })).toMatchObject({
+      book_id: "stable-guide",
+      workspace_dir: path.join(path.resolve(root), ".understand-book", "stable-guide"),
+      source_path: path.resolve(source),
+    });
+    expect(resolveAutomaticBuildTarget(source, root)).toMatchObject({
+      book_id: "renamed-import",
+      workspace_dir: path.join(path.resolve(root), ".understand-book", "renamed-import"),
+    });
+  });
+
   it("resolves an existing technical-learning workspace and its source.txt without a Workbench manifest", () => {
     const root = tempDir();
     const { workspace, sourceFile, source } = writeTechnicalLearningWorkspace(root);

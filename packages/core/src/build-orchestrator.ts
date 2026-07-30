@@ -87,6 +87,10 @@ export interface AutomaticBuildTarget {
   target_ref: BuildTargetRefV2;
 }
 
+export interface AutomaticBuildTargetResolutionOptions {
+  book_id?: string;
+}
+
 export interface BuildTargetRefV2 {
   version: "build_target_ref.v2";
   workspace_dir: string;
@@ -584,6 +588,11 @@ function targetFromWorkspace(workspaceInput: string): AutomaticBuildTarget {
   throw new Error(`book workspace 缺少可验证的 content profile: ${workspaceDir}`);
 }
 
+function hasAutomaticBuildWorkspaceIdentity(workspaceDir: string): boolean {
+  return existsSync(path.join(workspaceDir, ".build", "input", "manifest.json"))
+    || existsSync(path.join(workspaceDir, "profile_metadata.json"));
+}
+
 function containingBuildWorkspaceSource(sourcePath: string): string | undefined {
   if (path.basename(sourcePath).toLowerCase() !== "source.txt") return undefined;
   const workspaceDir = path.dirname(sourcePath);
@@ -612,18 +621,50 @@ function paperWorkspaceCandidates(sourceFile: string, rootDir: string): string[]
   return matches;
 }
 
-export function resolveAutomaticBuildTarget(targetInput: string, rootDir = process.cwd()): AutomaticBuildTarget {
-  const explicitWorkspace = path.join(path.resolve(rootDir), ".understand-book", targetInput);
+export function resolveAutomaticBuildTarget(
+  targetInput: string,
+  rootDir = process.cwd(),
+  options: AutomaticBuildTargetResolutionOptions = {},
+): AutomaticBuildTarget {
+  const resolvedRoot = path.resolve(rootDir);
+  const stableBookId = options.book_id === undefined
+    ? undefined
+    : deriveBookId(targetInput, options.book_id);
+  const stableWorkspace = stableBookId
+    ? path.join(resolvedRoot, ".understand-book", stableBookId)
+    : undefined;
+  if (
+    stableWorkspace
+    && existsSync(stableWorkspace)
+    && statSync(stableWorkspace).isDirectory()
+    && hasAutomaticBuildWorkspaceIdentity(stableWorkspace)
+  ) {
+    return targetFromWorkspace(stableWorkspace);
+  }
+
+  const explicitWorkspace = path.join(resolvedRoot, ".understand-book", targetInput);
   const targetPath = existsSync(explicitWorkspace) ? explicitWorkspace : path.resolve(rootDir, targetInput);
-  if (existsSync(targetPath) && statSync(targetPath).isDirectory()) return targetFromWorkspace(targetPath);
+  if (existsSync(targetPath) && statSync(targetPath).isDirectory()) {
+    const target = targetFromWorkspace(targetPath);
+    if (stableBookId && target.book_id !== stableBookId) {
+      throw new Error(`build target book_id ${target.book_id} does not match explicit book_id ${stableBookId}`);
+    }
+    return target;
+  }
   if (!existsSync(targetPath) || !statSync(targetPath).isFile()) {
     throw new Error(`build target 不存在: ${targetPath}`);
   }
 
   const containingWorkspace = containingBuildWorkspaceSource(targetPath);
-  if (containingWorkspace) return targetFromWorkspace(containingWorkspace);
+  if (containingWorkspace) {
+    const target = targetFromWorkspace(containingWorkspace);
+    if (stableBookId && target.book_id !== stableBookId) {
+      throw new Error(`build target book_id ${target.book_id} does not match explicit book_id ${stableBookId}`);
+    }
+    return target;
+  }
 
-  const matches = paperWorkspaceCandidates(targetPath, path.resolve(rootDir));
+  const matches = stableBookId ? [] : paperWorkspaceCandidates(targetPath, resolvedRoot);
   if (matches.length > 1) {
     throw new Error(`paper 输入匹配到多个 Workbench workspace，请显式指定 book id 或 workspace 路径: ${matches.join(", ")}`);
   }
@@ -632,13 +673,13 @@ export function resolveAutomaticBuildTarget(targetInput: string, rootDir = proce
     throw new Error("paper PDF 未匹配到可信 Workbench workspace，请先在预构建工作台完成来源对齐与混合阅读基座");
   }
 
-  const bookId = deriveBookId(targetPath);
-  const workspaceDir = path.join(path.resolve(rootDir), ".understand-book", bookId);
+  const bookId = stableBookId ?? deriveBookId(targetPath);
+  const workspaceDir = path.join(resolvedRoot, ".understand-book", bookId);
   return {
     kind: "source_file",
     profile_id: "technical_learning",
     book_id: bookId,
-    root_dir: path.resolve(rootDir),
+    root_dir: resolvedRoot,
     workspace_dir: workspaceDir,
     source_path: targetPath,
     target_ref: {

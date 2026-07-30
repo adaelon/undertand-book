@@ -12,6 +12,7 @@ import {
   resolveAutomaticBuildTarget,
   type AutomaticBuildStage,
   type AutomaticBuildTarget,
+  type AutomaticBuildTargetResolutionOptions,
 } from "../../packages/core/src/build-orchestrator";
 import type { BuildPlanV1 } from "../../packages/core/src/build-intent";
 import { mapLegacyBuildInvocation } from "../../packages/core/src/build-intent-controller";
@@ -109,7 +110,7 @@ const AUTOMATIC_BUILD_STAGES: AutomaticBuildStage[] = [
   "paper_reading_guide",
 ];
 
-export interface AutomaticBuildNextOptions {
+export interface AutomaticBuildNextOptions extends AutomaticBuildTargetResolutionOptions {
   owner?: string;
   now?: string;
   lease_ttl_ms?: number;
@@ -126,7 +127,7 @@ export interface AutomaticBuildNextOptions {
   build_plan?: BuildPlanV1;
 }
 
-export interface AutomaticBuildPlanOptions {
+export interface AutomaticBuildPlanOptions extends AutomaticBuildTargetResolutionOptions {
   quality_profile?: ExtractionQualityProfile;
   budget?: AutomaticBuildBudgetLimitsV1;
   wall_budget?: AutomaticBuildWallBudgetV1;
@@ -171,6 +172,10 @@ function stageScriptArgs(target: AutomaticBuildTarget): string[] {
 
 function targetCommandInput(target: AutomaticBuildTarget): string {
   return target.kind === "paper_workspace" ? target.target_ref.workspace_dir : target.source_path;
+}
+
+function targetResolutionCommandArgs(target: AutomaticBuildTarget): string[] {
+  return ["--root", target.root_dir, "--book-id", target.book_id];
 }
 
 export interface CapturedBuildProcessOutput {
@@ -501,7 +506,7 @@ export function automaticBuildPlan(
   rootDir: string,
   options: AutomaticBuildPlanOptions = {},
 ) {
-  const target = resolveAutomaticBuildTarget(targetInput, rootDir);
+  const target = resolveAutomaticBuildTarget(targetInput, rootDir, { book_id: options.book_id });
   const qualityProfile = options.quality_profile ?? "full";
   const requestedWorkers = options.requested_workers ?? 1;
   const availableAgentSlots = options.available_agent_slots ?? requestedWorkers;
@@ -537,9 +542,9 @@ export function automaticBuildPlan(
 export function prepareExplicitLegacyBuildPlan(
   targetInput: string,
   rootDir: string,
-  options: { now?: string; budget?: BuildPlanV1["budget"] } = {},
+  options: { now?: string; budget?: BuildPlanV1["budget"]; book_id?: string } = {},
 ) {
-  const target = resolveAutomaticBuildTarget(targetInput, rootDir);
+  const target = resolveAutomaticBuildTarget(targetInput, rootDir, { book_id: options.book_id });
   const now = options.now ?? new Date().toISOString();
   const snapshot = buildAutomaticBuildSnapshot(target, { quality_profile: "full" });
   const selection = mapLegacyBuildInvocation({
@@ -639,10 +644,12 @@ function expandAction(
             stage: action.stage,
             policy_status: legacyAudit.policy_status,
             message: "legacy artifacts require an explicit legacy_resume or v2_rebuild decision before v2 claim",
-            audit_command: scriptCommand("automatic-build.ts", ["audit-legacy", targetInput, action.stage, "--root", target.root_dir]),
+            audit_command: scriptCommand("automatic-build.ts", [
+              "audit-legacy", targetInput, action.stage, ...targetResolutionCommandArgs(target),
+            ]),
             migration_commands: (["legacy_resume", "v2_rebuild"] as const).map((mode) => scriptCommand(
               "automatic-build.ts",
-              ["migration-mode", targetInput, mode, "--root", target.root_dir],
+              ["migration-mode", targetInput, mode, ...targetResolutionCommandArgs(target)],
             )),
           },
         };
@@ -677,7 +684,7 @@ function expandAction(
           message: `semantic extraction failed ${MAX_ATTEMPTS} times; inspect diagnostics before resetting`,
           reset_commands: exhausted.map((item) => scriptCommand("automatic-build.ts", [
             "record-attempt", targetInput, action.stage, item.task_id, "reset",
-            "--root", target.root_dir,
+            ...targetResolutionCommandArgs(target),
             "--attempt", String(item.last_attempt),
             "--event-id", `${action.stage}:${item.task_id}:${item.last_attempt}:reset`,
           ])),
@@ -931,20 +938,20 @@ function expandAction(
           cwd: target.root_dir,
           next_command: scriptCommand("automatic-build.ts", [
             "dispatch.next", targetInput, action.stage, manifest.dispatch_id,
-            "--dispatch-run", dispatchRunId, "--root", target.root_dir,
+            "--dispatch-run", dispatchRunId, ...targetResolutionCommandArgs(target),
           ]),
           inspect_command: scriptCommand("automatic-build.ts", [
             "dispatch.inspect", targetInput, action.stage, manifest.dispatch_id,
-            "--dispatch-run", dispatchRunId, "--root", target.root_dir,
+            "--dispatch-run", dispatchRunId, ...targetResolutionCommandArgs(target),
           ]),
           finish_command: scriptCommand("automatic-build.ts", [
             "dispatch.finish", targetInput, action.stage, manifest.dispatch_id,
-            "--dispatch-run", dispatchRunId, "--root", target.root_dir,
+            "--dispatch-run", dispatchRunId, ...targetResolutionCommandArgs(target),
           ]),
           interrupt_command: scriptCommand("automatic-build.ts", [
             "dispatch.finish", targetInput, action.stage, manifest.dispatch_id,
             "--dispatch-run", dispatchRunId, "--terminal-reason", "executor_interrupted",
-            "--root", target.root_dir,
+            ...targetResolutionCommandArgs(target),
           ]),
           accounting: {
             work_units: manifest.ordered_work_unit_ids.length,
@@ -1078,28 +1085,28 @@ function expandAction(
             usage_path: automaticBuildUsageReceiptPath(claim.lease_ref),
             input_command: scriptCommand("automatic-build.ts", [
               "input", targetInput, action.stage, taskId,
-              "--root", target.root_dir, "--run-ttl-ms", String(runTtlMs), ...leaseArgs,
+              ...targetResolutionCommandArgs(target), "--run-ttl-ms", String(runTtlMs), ...leaseArgs,
             ]),
             candidate_command: scriptCommand("automatic-build.ts", [
               "candidate", targetInput, action.stage, taskId, "{candidate_source}",
-              "--root", target.root_dir, ...leaseArgs,
+              ...targetResolutionCommandArgs(target), ...leaseArgs,
             ]),
             submit_command: scriptCommand("automatic-build.ts", [
               "submit", targetInput, action.stage, taskId,
-              "--root", target.root_dir, ...leaseArgs,
+              ...targetResolutionCommandArgs(target), ...leaseArgs,
             ]),
             fail_command: scriptCommand("automatic-build.ts", [
               "fail", targetInput, action.stage, taskId,
               "--diagnostic-code", "{diagnostic_code}", "--message", "{diagnostic}",
-              "--root", target.root_dir, ...leaseArgs,
+              ...targetResolutionCommandArgs(target), ...leaseArgs,
             ]),
             inspect_command: scriptCommand("automatic-build.ts", [
               "inspect", targetInput, action.stage, taskId,
-              "--root", target.root_dir, ...leaseArgs,
+              ...targetResolutionCommandArgs(target), ...leaseArgs,
             ]),
             heartbeat_command: scriptCommand("automatic-build.ts", [
               "heartbeat", targetInput, action.stage, taskId,
-              "--root", target.root_dir, ...leaseArgs,
+              ...targetResolutionCommandArgs(target), ...leaseArgs,
             ]),
           };
         }),
@@ -1136,7 +1143,7 @@ function expandAction(
           cwd: target.root_dir,
           command: scriptCommand("automatic-build.ts", [
             "close", targetCommandInput(target), action.stage,
-            "--root", target.root_dir,
+            ...targetResolutionCommandArgs(target),
             "--quality-profile", qualityProfile,
           ]),
         },
@@ -1149,7 +1156,7 @@ function expandAction(
         ...action,
         cwd: target.root_dir,
         command: scriptCommand("automatic-build.ts", [
-          "close", targetCommandInput(target), action.stage, "--root", target.root_dir,
+          "close", targetCommandInput(target), action.stage, ...targetResolutionCommandArgs(target),
         ]),
         ...(action.stage === "paper_reading_guide"
           ? { verification_path: path.join(target.workspace_dir, ".build", "paper-reading-guide", "verification.json") }
@@ -1175,7 +1182,7 @@ export function automaticBuildNext(
   maxParallel = 5,
   options: AutomaticBuildNextOptions = {},
 ) {
-  const target = resolveAutomaticBuildTarget(targetInput, rootDir);
+  const target = resolveAutomaticBuildTarget(targetInput, rootDir, { book_id: options.book_id });
   const protocol = resolveAutomaticBuildClaimProtocol(options.protocol, options.executor_dispatches === true);
   const leaseOptions = {
     owner: options.owner ?? `automatic-build:${process.pid}:${randomUUID()}`,
@@ -1209,7 +1216,7 @@ export function automaticBuildProtocolDoctor(
   rootDir: string,
   options: AutomaticBuildPlanOptions = {},
 ) {
-  const target = resolveAutomaticBuildTarget(targetInput, rootDir);
+  const target = resolveAutomaticBuildTarget(targetInput, rootDir, { book_id: options.book_id });
   const plan = automaticBuildPlan(targetInput, rootDir, options);
   const attempts = AUTOMATIC_BUILD_STAGES.flatMap((stage) => listAutomaticBuildStoredAttempts(target, stage));
   const currentExecutionIdentities = attempts.filter(
@@ -1281,9 +1288,9 @@ export function automaticBuildDispatchNext(
   rootDir: string,
   stage: AutomaticBuildStage,
   dispatchId: string,
-  options: { now?: string; dispatch_run_id?: string } = {},
+  options: { now?: string; dispatch_run_id?: string; book_id?: string } = {},
 ) {
-  const target = resolveAutomaticBuildTarget(targetInput, rootDir);
+  const target = resolveAutomaticBuildTarget(targetInput, rootDir, { book_id: options.book_id });
   const persisted = readAutomaticBuildDispatch(target, stage, dispatchId, options.dispatch_run_id);
   const snapshot = buildAutomaticBuildSnapshot(target, {
     quality_profile: persisted.manifest.policy_fingerprint.quality_profile,
@@ -1314,7 +1321,7 @@ export function automaticBuildDispatchNext(
         kind: "finish" as const,
         task_receipts: advanced.task_receipts,
         finish_command: scriptCommand("automatic-build.ts", [
-          "dispatch.finish", targetCommandInput(target), stage, dispatchId, "--root", target.root_dir,
+          "dispatch.finish", targetCommandInput(target), stage, dispatchId, ...targetResolutionCommandArgs(target),
           "--dispatch-run", persisted.dispatch_run_id,
         ]),
       },
@@ -1360,25 +1367,25 @@ export function automaticBuildDispatchNext(
         usage_path: automaticBuildUsageReceiptPath(claim.lease_ref),
         input_command: scriptCommand("automatic-build.ts", [
           "input", targetCommandInput(target), stage, taskId,
-          "--root", target.root_dir, "--run-ttl-ms", String(advanced.persisted.run_ttl_ms), ...leaseArgs,
+          ...targetResolutionCommandArgs(target), "--run-ttl-ms", String(advanced.persisted.run_ttl_ms), ...leaseArgs,
         ]),
         candidate_command: scriptCommand("automatic-build.ts", [
           "candidate", targetCommandInput(target), stage, taskId, "{candidate_source}",
-          "--root", target.root_dir, ...leaseArgs,
+          ...targetResolutionCommandArgs(target), ...leaseArgs,
         ]),
         submit_command: scriptCommand("automatic-build.ts", [
-          "submit", targetCommandInput(target), stage, taskId, "--root", target.root_dir, ...leaseArgs,
+          "submit", targetCommandInput(target), stage, taskId, ...targetResolutionCommandArgs(target), ...leaseArgs,
         ]),
         fail_command: scriptCommand("automatic-build.ts", [
           "fail", targetCommandInput(target), stage, taskId,
           "--diagnostic-code", "{diagnostic_code}", "--message", "{diagnostic}",
-          "--root", target.root_dir, ...leaseArgs,
+          ...targetResolutionCommandArgs(target), ...leaseArgs,
         ]),
         inspect_command: scriptCommand("automatic-build.ts", [
-          "inspect", targetCommandInput(target), stage, taskId, "--root", target.root_dir, ...leaseArgs,
+          "inspect", targetCommandInput(target), stage, taskId, ...targetResolutionCommandArgs(target), ...leaseArgs,
         ]),
         heartbeat_command: scriptCommand("automatic-build.ts", [
-          "heartbeat", targetCommandInput(target), stage, taskId, "--root", target.root_dir, ...leaseArgs,
+          "heartbeat", targetCommandInput(target), stage, taskId, ...targetResolutionCommandArgs(target), ...leaseArgs,
         ]),
       },
     },
@@ -1390,9 +1397,9 @@ export function automaticBuildDispatchInspect(
   rootDir: string,
   stage: AutomaticBuildStage,
   dispatchId: string,
-  options: { now?: string; dispatch_run_id?: string } = {},
+  options: { now?: string; dispatch_run_id?: string; book_id?: string } = {},
 ) {
-  const target = resolveAutomaticBuildTarget(targetInput, rootDir);
+  const target = resolveAutomaticBuildTarget(targetInput, rootDir, { book_id: options.book_id });
   return inspectAutomaticBuildDispatch(target, stage, dispatchId, options.now, options.dispatch_run_id);
 }
 
@@ -1405,9 +1412,10 @@ export function automaticBuildDispatchFinish(
     terminal_reason?: AutomaticBuildExecutorDispatchReceiptV1["terminal_reason"];
     now?: string;
     dispatch_run_id?: string;
+    book_id?: string;
   } = {},
 ) {
-  const target = resolveAutomaticBuildTarget(targetInput, rootDir);
+  const target = resolveAutomaticBuildTarget(targetInput, rootDir, { book_id: options.book_id });
   return finishAutomaticBuildDispatch(target, stage, dispatchId, options);
 }
 
@@ -1491,6 +1499,14 @@ function buildPlanFromArgs(argv: string[]): BuildPlanV1 | undefined {
   return JSON.parse(readFileSync(file, "utf8")) as BuildPlanV1;
 }
 
+function resolveAutomaticBuildTargetFromArgs(
+  targetInput: string,
+  rootDir: string,
+  argv: string[],
+): AutomaticBuildTarget {
+  return resolveAutomaticBuildTarget(targetInput, rootDir, { book_id: valueArg(argv, "--book-id") });
+}
+
 const argv = process.argv.slice(2);
 if (argv[0] === "legacy-plan") {
   const targetInput = argv[1];
@@ -1503,6 +1519,7 @@ if (argv[0] === "legacy-plan") {
     path.resolve(valueArg(argv, "--root") ?? process.cwd()),
     {
       ...(valueArg(argv, "--now") ? { now: valueArg(argv, "--now") } : {}),
+      ...(valueArg(argv, "--book-id") ? { book_id: valueArg(argv, "--book-id") } : {}),
       budget: {
         ...(valueArg(argv, "--max-estimated-total-tokens")
           ? { max_total_tokens: Number(valueArg(argv, "--max-estimated-total-tokens")) }
@@ -1530,6 +1547,7 @@ if (argv[0] === "legacy-plan") {
     available_agent_slots: nonNegativeIntegerArg(argv, "--available-agent-slots", requestedWorkers),
     quality_profile: qualityProfileFromArgs(argv),
     build_plan: buildPlanFromArgs(argv),
+    book_id: valueArg(argv, "--book-id"),
   }));
 } else if (argv[0] === "plan") {
   const targetInput = argv[1];
@@ -1547,6 +1565,7 @@ if (argv[0] === "legacy-plan") {
     available_agent_slots: nonNegativeIntegerArg(argv, "--available-agent-slots", requestedWorkers),
     quality_profile: qualityProfileFromArgs(argv),
     build_plan: buildPlanFromArgs(argv),
+    book_id: valueArg(argv, "--book-id"),
   }));
 } else if (argv[0] === "next") {
   const targetInput = argv[1];
@@ -1573,6 +1592,7 @@ if (argv[0] === "legacy-plan") {
     accepted_evaluation_digest: valueArg(argv, "--accepted-evaluation"),
     protocol: claimProtocolFromArgs(argv),
     build_plan: buildPlanFromArgs(argv),
+    book_id: valueArg(argv, "--book-id"),
   }));
 } else if (["dispatch.next", "dispatch.inspect", "dispatch.finish"].includes(argv[0] ?? "")) {
   const operation = argv[0];
@@ -1587,11 +1607,13 @@ if (argv[0] === "legacy-plan") {
     printAutomaticBuildJson(automaticBuildDispatchNext(targetInput, rootDir, stage, dispatchId, {
       ...(valueArg(argv, "--now") ? { now: valueArg(argv, "--now") } : {}),
       ...(valueArg(argv, "--dispatch-run") ? { dispatch_run_id: valueArg(argv, "--dispatch-run") } : {}),
+      book_id: valueArg(argv, "--book-id"),
     }));
   } else if (operation === "dispatch.inspect") {
     printAutomaticBuildJson(automaticBuildDispatchInspect(targetInput, rootDir, stage, dispatchId, {
       ...(valueArg(argv, "--now") ? { now: valueArg(argv, "--now") } : {}),
       ...(valueArg(argv, "--dispatch-run") ? { dispatch_run_id: valueArg(argv, "--dispatch-run") } : {}),
+      book_id: valueArg(argv, "--book-id"),
     }));
   } else {
     const terminalReason = valueArg(argv, "--terminal-reason");
@@ -1604,6 +1626,7 @@ if (argv[0] === "legacy-plan") {
         : {}),
       ...(valueArg(argv, "--now") ? { now: valueArg(argv, "--now") } : {}),
       ...(valueArg(argv, "--dispatch-run") ? { dispatch_run_id: valueArg(argv, "--dispatch-run") } : {}),
+      book_id: valueArg(argv, "--book-id"),
     }));
   }
 } else if (argv[0] === "audit-legacy") {
@@ -1614,7 +1637,7 @@ if (argv[0] === "legacy-plan") {
     process.exit(2);
   }
   const rootDir = path.resolve(valueArg(argv, "--root") ?? process.cwd());
-  const target = resolveAutomaticBuildTarget(targetInput, rootDir);
+  const target = resolveAutomaticBuildTargetFromArgs(targetInput, rootDir, argv);
   printAutomaticBuildJson(auditAutomaticBuildLegacy(target, stageValue as AutomaticBuildStage | undefined));
 } else if (argv[0] === "migration-mode") {
   const [targetInput, modeValue] = argv.slice(1, 3);
@@ -1623,7 +1646,7 @@ if (argv[0] === "legacy-plan") {
     process.exit(2);
   }
   const rootDir = path.resolve(valueArg(argv, "--root") ?? process.cwd());
-  const target = resolveAutomaticBuildTarget(targetInput, rootDir);
+  const target = resolveAutomaticBuildTargetFromArgs(targetInput, rootDir, argv);
   printAutomaticBuildJson(selectAutomaticBuildMigrationMode(
     target,
     modeValue as AutomaticBuildMigrationMode,
@@ -1637,7 +1660,7 @@ if (argv[0] === "legacy-plan") {
     process.exit(2);
   }
   const rootDir = path.resolve(valueArg(argv, "--root") ?? process.cwd());
-  const target = resolveAutomaticBuildTarget(targetInput, rootDir);
+  const target = resolveAutomaticBuildTargetFromArgs(targetInput, rootDir, argv);
   const snapshot = buildAutomaticBuildSnapshot(target, { quality_profile: qualityProfileFromArgs(argv) });
   const stageState = snapshot.stages.find((stage) => stage.stage === stageValue);
   if (!stageState) throw new Error(`quality stage is not reachable in the current snapshot: ${stageValue}`);
@@ -1649,7 +1672,7 @@ if (argv[0] === "legacy-plan") {
     process.exit(2);
   }
   const rootDir = path.resolve(valueArg(argv, "--root") ?? process.cwd());
-  const target = resolveAutomaticBuildTarget(targetInput, rootDir);
+  const target = resolveAutomaticBuildTargetFromArgs(targetInput, rootDir, argv);
   const metricsSnapshot = buildAutomaticBuildSnapshot(target, { quality_profile: qualityProfileFromArgs(argv) });
   const metricsStage = metricsSnapshot.stages.find((stage) => stage.stage === stageValue);
   printAutomaticBuildJson(writeAutomaticBuildStageMetricsSummary(
@@ -1665,7 +1688,7 @@ if (argv[0] === "legacy-plan") {
     process.exit(2);
   }
   const rootDir = path.resolve(valueArg(argv, "--root") ?? process.cwd());
-  const target = resolveAutomaticBuildTarget(targetInput, rootDir);
+  const target = resolveAutomaticBuildTargetFromArgs(targetInput, rootDir, argv);
   const attemptValue = valueArg(argv, "--attempt");
   const attempt = attemptValue === undefined ? undefined : Number(attemptValue);
   if (attempt !== undefined && (!Number.isInteger(attempt) || attempt < 1)) {
@@ -1697,7 +1720,7 @@ if (argv[0] === "legacy-plan") {
     process.exit(2);
   }
   const rootDir = path.resolve(valueArg(argv, "--root") ?? process.cwd());
-  const target = resolveAutomaticBuildTarget(targetInput, rootDir);
+  const target = resolveAutomaticBuildTargetFromArgs(targetInput, rootDir, argv);
   const heartbeat = heartbeatAutomaticBuildLease(target, leaseRef, leaseToken, {
     ...(valueArg(argv, "--now") ? { now: valueArg(argv, "--now") } : {}),
     ...(valueArg(argv, "--ttl-ms") ? { ttl_ms: Number(valueArg(argv, "--ttl-ms")) } : {}),
@@ -1716,7 +1739,7 @@ if (argv[0] === "legacy-plan") {
     process.exit(2);
   }
   const rootDir = path.resolve(valueArg(argv, "--root") ?? process.cwd());
-  const target = resolveAutomaticBuildTarget(targetInput, rootDir);
+  const target = resolveAutomaticBuildTargetFromArgs(targetInput, rootDir, argv);
   const stage = stageValue as AutomaticBuildStage;
   const now = valueArg(argv, "--now");
   if (operation === "candidate") {
@@ -1758,7 +1781,7 @@ if (argv[0] === "legacy-plan") {
     process.exit(2);
   }
   const rootDir = path.resolve(valueArg(argv, "--root") ?? process.cwd());
-  const target = resolveAutomaticBuildTarget(targetInput, rootDir);
+  const target = resolveAutomaticBuildTargetFromArgs(targetInput, rootDir, argv);
   const leaseRef = valueArg(argv, "--lease-ref");
   const leaseToken = valueArg(argv, "--lease-token");
   if (Boolean(leaseRef) !== Boolean(leaseToken)) throw new Error("lease_ref and lease_token must be provided together");

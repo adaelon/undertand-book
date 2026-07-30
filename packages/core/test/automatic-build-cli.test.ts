@@ -10,7 +10,7 @@ import {
   type AutomaticBuildNextOptions,
 } from "../../../skills/build/automatic-build";
 import { resolveAutomaticBuildTarget, type AutomaticBuildTarget } from "../src/build-orchestrator";
-import { buildSourceManifestV2 } from "../src/source-manifest";
+import { buildSourceManifest, buildSourceManifestV2 } from "../src/source-manifest";
 import { emptyReconciliationSummary, sha256Text } from "../src/source-reconciliation";
 import { markdownToBlocks } from "../src/md-adapter";
 import { segment } from "../src/segment";
@@ -102,6 +102,28 @@ function writeTrustedPaperWorkspace(root: string): string {
     },
   });
   return workspace;
+}
+
+function writeTechnicalLearningWorkspace(
+  root: string,
+  bookId = "stable-guide",
+  sourceFilename = "renamed-import.md",
+): { workspace: string; source: string } {
+  const workspace = path.join(root, ".understand-book", bookId);
+  const source = path.join(root, sourceFilename);
+  const body = "# Stable guide\n\nA deterministic technical learning source.\n";
+  mkdirSync(workspace, { recursive: true });
+  writeFileSync(source, body, "utf8");
+  writeFileSync(path.join(workspace, "source.txt"), body, "utf8");
+  writeJson(path.join(workspace, "base.json"), { book_id: bookId, lid_nodes: [], graph_nodes: [], graph_edges: [] });
+  writeJson(path.join(workspace, "source_manifest.json"), buildSourceManifest({
+    book_id: bookId,
+    source_path: source,
+  }));
+  writeJson(path.join(workspace, "profile_metadata.json"), {
+    header: { book_id: bookId, profile_id: "technical_learning" },
+  });
+  return { workspace, source };
 }
 
 describe("automatic build attempt policy", () => {
@@ -228,6 +250,80 @@ describe("automatic build attempt policy", () => {
     } finally {
       if (previous === undefined) delete process.env.UNDERSTAND_BOOK_SIDECAR_SELF;
       else process.env.UNDERSTAND_BOOK_SIDECAR_SELF = previous;
+    }
+  });
+
+  it("propagates and prefers an existing technical workspace book id when the source filename differs", () => {
+    const root = mkdtempSync(path.join(tmpdir(), "understand-book-technical-target-"));
+    const { workspace, source } = writeTechnicalLearningWorkspace(root);
+    const previous = process.env.UNDERSTAND_BOOK_SIDECAR_SELF;
+    process.env.UNDERSTAND_BOOK_SIDECAR_SELF = "C:\\Program Files\\Understand Book\\understand-book-build.exe";
+    try {
+      const result = acceptedNext(workspace, root, 1);
+      expect(result.action.kind).toBe("extract");
+      if (result.action.kind !== "extract") throw new Error("expected extract action");
+      if (!result.action.tasks) throw new Error("expected extract tasks");
+      const task = result.action.tasks[0];
+      if (!("input_command" in task)) throw new Error("expected generated task commands");
+
+      for (const command of [
+        task.input_command,
+        task.candidate_command,
+        task.submit_command,
+        task.fail_command,
+        task.inspect_command,
+        task.heartbeat_command,
+      ]) {
+        const commandBookIdIndex = command.indexOf("--book-id");
+        expect(command.slice(commandBookIdIndex, commandBookIdIndex + 2)).toEqual(["--book-id", "stable-guide"]);
+      }
+      const bookIdIndex = task.input_command.indexOf("--book-id");
+      expect(task.input_command).toContain(path.resolve(source));
+
+      const resolved = resolveAutomaticBuildTarget(source, root, { book_id: task.input_command[bookIdIndex + 1] });
+      expect(resolved).toMatchObject({
+        book_id: "stable-guide",
+        workspace_dir: path.resolve(workspace),
+        source_path: path.resolve(source),
+      });
+    } finally {
+      if (previous === undefined) delete process.env.UNDERSTAND_BOOK_SIDECAR_SELF;
+      else process.env.UNDERSTAND_BOOK_SIDECAR_SELF = previous;
+    }
+  });
+
+  it("propagates the resolved book id through executor dispatch commands", () => {
+    const root = mkdtempSync(path.join(tmpdir(), "understand-book-dispatch-target-"));
+    const source = path.join(root, "dispatch-guide.md");
+    writeFileSync(source, "# Dispatch guide\n\nA compact source paragraph.\n", "utf8");
+    const buildPlan = confirmedStandardBuildPlan(source, root);
+    const plan = automaticBuildPlan(source, root, {
+      requested_workers: 1,
+      available_agent_slots: 1,
+      build_plan: buildPlan,
+    });
+    if (!plan.preflight) throw new Error("expected automatic build preflight");
+
+    const result = automaticBuildNext(source, root, 1, {
+      owner: "dispatch-book-id-test",
+      now: "2026-07-30T14:00:00.000Z",
+      available_agent_slots: 1,
+      accepted_plan_digest: plan.preflight.plan_digest,
+      executor_dispatches: true,
+      build_plan: buildPlan,
+    });
+    if (!("dispatches" in result.action) || !result.action.dispatches) {
+      throw new Error("expected executor dispatch handoff");
+    }
+    expect(result.action.dispatches).toHaveLength(1);
+    for (const command of [
+      result.action.dispatches[0].next_command,
+      result.action.dispatches[0].inspect_command,
+      result.action.dispatches[0].finish_command,
+      result.action.dispatches[0].interrupt_command,
+    ]) {
+      const bookIdIndex = command.indexOf("--book-id");
+      expect(command.slice(bookIdIndex, bookIdIndex + 2)).toEqual(["--book-id", "dispatch-guide"]);
     }
   });
 
