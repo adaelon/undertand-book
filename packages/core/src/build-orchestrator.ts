@@ -205,6 +205,22 @@ interface WorkbenchInputManifestLike {
   };
 }
 
+interface WorkspaceProfileMetadataLike {
+  header?: {
+    book_id?: string;
+    profile_id?: string;
+  };
+}
+
+interface TechnicalLearningSourceManifestLike {
+  book_id?: string;
+  canonical_source?: {
+    kind?: string;
+    path?: string;
+    truth_file?: string;
+  };
+}
+
 function readJson<T>(file: string): T {
   return JSON.parse(readFileSync(file, "utf8")) as T;
 }
@@ -476,6 +492,98 @@ function paperTargetFromWorkspace(workspaceInput: string): AutomaticBuildTarget 
   }
 }
 
+function workspaceLocation(workspaceInput: string): {
+  workspaceDir: string;
+  libraryDir: string;
+  rootDir: string;
+  bookId: string;
+} {
+  const workspaceDir = path.resolve(workspaceInput);
+  const libraryDir = path.dirname(workspaceDir);
+  if (path.basename(libraryDir) !== ".understand-book") {
+    throw new Error(`book workspace 必须位于 .understand-book/<book_id>: ${workspaceDir}`);
+  }
+  return {
+    workspaceDir,
+    libraryDir,
+    rootDir: path.dirname(libraryDir),
+    bookId: path.basename(workspaceDir),
+  };
+}
+
+function technicalLearningTargetFromWorkspace(workspaceInput: string): AutomaticBuildTarget {
+  const { workspaceDir, rootDir, bookId } = workspaceLocation(workspaceInput);
+  const profilePath = path.join(workspaceDir, "profile_metadata.json");
+  const sourceManifestPath = path.join(workspaceDir, "source_manifest.json");
+  const sourceTxtPath = path.join(workspaceDir, "source.txt");
+  const basePath = path.join(workspaceDir, "base.json");
+  for (const required of [profilePath, sourceManifestPath, sourceTxtPath, basePath]) {
+    if (!existsSync(required) || !statSync(required).isFile()) {
+      throw new Error(`technical_learning workspace 缺少立即可读基础文件: ${required}`);
+    }
+  }
+
+  const profile = readJson<WorkspaceProfileMetadataLike>(profilePath);
+  if (profile.header?.book_id !== bookId || profile.header.profile_id !== "technical_learning") {
+    throw new Error(`technical_learning workspace profile identity 不一致: ${profilePath}`);
+  }
+  const sourceManifest = readJson<TechnicalLearningSourceManifestLike>(sourceManifestPath);
+  if (
+    sourceManifest.book_id !== bookId
+    || !sourceManifest.canonical_source
+    || !(sourceManifest.canonical_source.kind === "markdown" || sourceManifest.canonical_source.kind === "epub")
+    || sourceManifest.canonical_source.truth_file !== "source.txt"
+  ) {
+    throw new Error(`technical_learning workspace source manifest 不合法: ${sourceManifestPath}`);
+  }
+
+  const declaredSource = sourceManifest.canonical_source.path
+    ? path.resolve(workspaceDir, sourceManifest.canonical_source.path)
+    : null;
+  const sourcePath = declaredSource && existsSync(declaredSource) && statSync(declaredSource).isFile()
+    ? declaredSource
+    : sourceTxtPath;
+  if (sourcePath !== sourceTxtPath) {
+    const declaredCanonicalSource = loadAutomaticBook(sourcePath).source;
+    const trustedCanonicalSource = readFileSync(sourceTxtPath, "utf8");
+    if (declaredCanonicalSource !== trustedCanonicalSource) {
+      throw new Error(`technical_learning workspace canonical source 已漂移: ${sourcePath}`);
+    }
+  }
+
+  return {
+    kind: "source_file",
+    profile_id: "technical_learning",
+    book_id: bookId,
+    root_dir: rootDir,
+    workspace_dir: workspaceDir,
+    source_path: sourcePath,
+    target_ref: {
+      version: "build_target_ref.v2",
+      workspace_dir: workspaceDir,
+      book_id: bookId,
+      profile_id: "technical_learning",
+      input_fingerprint: sha256File(sourcePath),
+    },
+  };
+}
+
+function targetFromWorkspace(workspaceInput: string): AutomaticBuildTarget {
+  const workspaceDir = path.resolve(workspaceInput);
+  const workbenchManifestPath = path.join(workspaceDir, ".build", "input", "manifest.json");
+  if (existsSync(workbenchManifestPath)) return paperTargetFromWorkspace(workspaceDir);
+
+  const profilePath = path.join(workspaceDir, "profile_metadata.json");
+  if (existsSync(profilePath)) {
+    const profile = readJson<WorkspaceProfileMetadataLike>(profilePath);
+    if (profile.header?.profile_id === "technical_learning") {
+      return technicalLearningTargetFromWorkspace(workspaceDir);
+    }
+    if (profile.header?.profile_id === "paper") return paperTargetFromWorkspace(workspaceDir);
+  }
+  throw new Error(`book workspace 缺少可验证的 content profile: ${workspaceDir}`);
+}
+
 function containingBuildWorkspaceSource(sourcePath: string): string | undefined {
   if (path.basename(sourcePath).toLowerCase() !== "source.txt") return undefined;
   const workspaceDir = path.dirname(sourcePath);
@@ -507,13 +615,13 @@ function paperWorkspaceCandidates(sourceFile: string, rootDir: string): string[]
 export function resolveAutomaticBuildTarget(targetInput: string, rootDir = process.cwd()): AutomaticBuildTarget {
   const explicitWorkspace = path.join(path.resolve(rootDir), ".understand-book", targetInput);
   const targetPath = existsSync(explicitWorkspace) ? explicitWorkspace : path.resolve(rootDir, targetInput);
-  if (existsSync(targetPath) && statSync(targetPath).isDirectory()) return paperTargetFromWorkspace(targetPath);
+  if (existsSync(targetPath) && statSync(targetPath).isDirectory()) return targetFromWorkspace(targetPath);
   if (!existsSync(targetPath) || !statSync(targetPath).isFile()) {
     throw new Error(`build target 不存在: ${targetPath}`);
   }
 
   const containingWorkspace = containingBuildWorkspaceSource(targetPath);
-  if (containingWorkspace) return paperTargetFromWorkspace(containingWorkspace);
+  if (containingWorkspace) return targetFromWorkspace(containingWorkspace);
 
   const matches = paperWorkspaceCandidates(targetPath, path.resolve(rootDir));
   if (matches.length > 1) {

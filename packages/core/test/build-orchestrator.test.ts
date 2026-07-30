@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
@@ -10,7 +10,7 @@ import {
   type AutomaticBuildTarget,
   type AutomaticBuildSnapshot,
 } from "../src/build-orchestrator";
-import { buildSourceManifestV2 } from "../src/source-manifest";
+import { buildSourceManifest, buildSourceManifestV2 } from "../src/source-manifest";
 import { emptyReconciliationSummary, sha256Text } from "../src/source-reconciliation";
 import { markdownToBlocks } from "../src/md-adapter";
 import { segment } from "../src/segment";
@@ -76,7 +76,75 @@ function writeTrustedPaperWorkspace(root: string, bookId = "paper-a"): string {
   return dir;
 }
 
+function writeTechnicalLearningWorkspace(root: string, bookId = "guide"): {
+  workspace: string;
+  sourceFile: string;
+  source: string;
+} {
+  const workspace = path.join(root, ".understand-book", bookId);
+  const sourceFile = path.join(root, `${bookId}.md`);
+  const source = "# Guide\n\nA deterministic technical learning source.\n";
+  mkdirSync(workspace, { recursive: true });
+  writeFileSync(sourceFile, source, "utf8");
+  writeFileSync(path.join(workspace, "source.txt"), source, "utf8");
+  writeJson(path.join(workspace, "base.json"), { book_id: bookId, lid_nodes: [], graph_nodes: [], graph_edges: [] });
+  writeJson(path.join(workspace, "source_manifest.json"), buildSourceManifest({
+    book_id: bookId,
+    source_path: sourceFile,
+  }));
+  writeJson(path.join(workspace, "profile_metadata.json"), {
+    header: {
+      book_id: bookId,
+      book_version: "v1",
+      profile_id: "technical_learning",
+      profile_version: "technical_learning_v0",
+      core_schema_version: "core_v0",
+      generated_at: "1970-01-01T00:00:00.000Z",
+    },
+  });
+  return { workspace, sourceFile, source };
+}
+
 describe("automatic build orchestrator", () => {
+  it("resolves an existing technical-learning workspace and its source.txt without a Workbench manifest", () => {
+    const root = tempDir();
+    const { workspace, sourceFile, source } = writeTechnicalLearningWorkspace(root);
+
+    const expected = {
+      kind: "source_file",
+      book_id: "guide",
+      profile_id: "technical_learning",
+      root_dir: path.resolve(root),
+      workspace_dir: path.resolve(workspace),
+      source_path: path.resolve(sourceFile),
+      target_ref: {
+        version: "build_target_ref.v2",
+        workspace_dir: path.resolve(workspace),
+        book_id: "guide",
+        profile_id: "technical_learning",
+        input_fingerprint: sha256Text(source),
+      },
+    };
+    expect(resolveAutomaticBuildTarget(workspace, root)).toEqual(expected);
+    expect(resolveAutomaticBuildTarget("guide", root)).toEqual(expected);
+    expect(resolveAutomaticBuildTarget(path.join(workspace, "source.txt"), root)).toEqual(expected);
+  });
+
+  it("falls back to the workspace truth file when the imported technical source is unavailable", () => {
+    const root = tempDir();
+    const { workspace, sourceFile, source } = writeTechnicalLearningWorkspace(root, "portable-guide");
+    unlinkSync(sourceFile);
+
+    expect(resolveAutomaticBuildTarget(workspace, root)).toMatchObject({
+      kind: "source_file",
+      book_id: "portable-guide",
+      profile_id: "technical_learning",
+      workspace_dir: path.resolve(workspace),
+      source_path: path.join(path.resolve(workspace), "source.txt"),
+      target_ref: { input_fingerprint: sha256Text(source) },
+    });
+  });
+
   it("resolves an explicit trusted paper workspace and starts after the foundation", () => {
     const root = tempDir();
     const workspace = writeTrustedPaperWorkspace(root);
@@ -117,7 +185,7 @@ describe("automatic build orchestrator", () => {
     mkdirSync(path.dirname(source), { recursive: true });
     writeFileSync(source, "# Orphan\n", "utf8");
 
-    expect(() => resolveAutomaticBuildTarget(source, root)).toThrow("Workbench input manifest");
+    expect(() => resolveAutomaticBuildTarget(source, root)).toThrow("缺少可验证的 content profile");
   });
 
   it("rejects a paper workspace whose trusted foundation is incomplete", () => {
