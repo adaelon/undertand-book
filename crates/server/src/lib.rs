@@ -2867,10 +2867,17 @@ fn bind_rest_book_input(
         } else {
             transport_key.as_str()
         };
-        let value = if id == BookToolId::Context && key == "k" {
+        let value = if (id == BookToolId::Context && key == "k")
+            || (id == BookToolId::Concept && key == "limit")
+        {
             match value.parse::<usize>() {
                 Ok(value) => json!(value),
-                Err(_) => return Err(validation("BOOK_TOOL_INPUT_INVALID", "k 须为非负整数")),
+                Err(_) => {
+                    return Err(validation(
+                        "BOOK_TOOL_INPUT_INVALID",
+                        &format!("{key} 须为非负整数"),
+                    ))
+                }
             }
         } else {
             Value::String(value.clone())
@@ -2971,10 +2978,12 @@ fn route_canonical_readonly_book_tool(book: &Book, id: BookToolId, input: BookTo
                 Err(error) => err_reply(&error),
             }
         }
-        (BookToolId::Concept, BookToolInput::Concept(input)) => match book.concept(&input.name) {
-            Ok(concept) => ok_json(&concept),
-            Err(error) => err_reply(&error),
-        },
+        (BookToolId::Concept, BookToolInput::Concept(input)) => {
+            match book.concept_candidates(&input.query, input.anchor_lid.as_deref(), input.limit) {
+                Ok(concept) => ok_json(&concept),
+                Err(error) => err_reply(&error),
+            }
+        }
         (BookToolId::Structure, BookToolInput::At(input)) => {
             match book.structure(input.at.as_deref()) {
                 Ok(projection) => ok_json(&projection),
@@ -16027,12 +16036,35 @@ unchanged after training concludes";
     }
 
     #[test]
-    fn context_and_concept() {
+    fn context_contract() {
         let mut s = state_named("ctx");
         assert_eq!(get(&mut s, "/book/context?lid=1.1").status, 200);
         assert_eq!(get(&mut s, "/book/context?lid=1.1&k=abc").status, 400);
-        assert_eq!(get(&mut s, "/book/concept?name=command").status, 200);
-        assert_eq!(get(&mut s, "/book/concept?name=nope").status, 404);
+    }
+
+    #[test]
+    fn book_concept_v2_rest_contract_and_dispatch() {
+        let mut state = state_named("book-concept-v2-rest");
+        let response = get(&mut state, "/book/concept?query=command");
+        assert_eq!(response.status, 200, "{}", response.body);
+        let body: Value = serde_json::from_str(&response.body).unwrap();
+        assert_eq!(body["version"], "book_concept.v2");
+        assert_eq!(body["returned_count"], 1);
+        assert_eq!(body["candidates"][0]["name"], "command");
+
+        for path in [
+            "/book/concept?name=command",
+            "/book/concept?query=command&limit=abc",
+            "/book/concept?query=command&limit=0",
+            "/book/concept?query=command&limit=51",
+        ] {
+            assert_eq!(get(&mut state, path).status, 400, "{path}");
+        }
+        assert_eq!(get(&mut state, "/book/concept?query=nope").status, 404);
+        assert_eq!(
+            get(&mut state, "/book/concept?query=command&anchor_lid=9.9").status,
+            404
+        );
     }
 
     #[test]

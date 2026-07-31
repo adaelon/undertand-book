@@ -1774,9 +1774,9 @@ pub struct Concept {
 }
 
 pub const BOOK_CONCEPT_V2_VERSION: &str = "book_concept.v2";
-pub const DEFAULT_CONCEPT_CANDIDATE_LIMIT: usize = 12;
-pub const MAX_CONCEPT_CANDIDATE_LIMIT: usize = 50;
-pub const MAX_CONCEPT_QUERY_CHARS: usize = 4096;
+pub const DEFAULT_CONCEPT_CANDIDATE_LIMIT: usize = book_tool_contracts::DEFAULT_CONCEPT_LIMIT;
+pub const MAX_CONCEPT_CANDIDATE_LIMIT: usize = book_tool_contracts::MAX_CONCEPT_LIMIT;
+pub const MAX_CONCEPT_QUERY_CHARS: usize = book_tool_contracts::MAX_CONCEPT_QUERY_CHARS;
 const MAX_CONCEPT_PREVIEWS: usize = 2;
 const MAX_CONCEPT_PREVIEW_CHARS: usize = 180;
 

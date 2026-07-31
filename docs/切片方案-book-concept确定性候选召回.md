@@ -2,7 +2,7 @@
 
 > 定位:把按展示名称精确寻址的 `book.concept` 升级为全书确定性候选发现工具，让外层 Agent 在无 MCP 内置 LLM 的情况下找到用户不会准确复述名称的图谱节点。
 > 冻结决策:[ADR-0097](adr/0097-book-concept-deterministic-candidate-recall.md)。
-> 状态:BC0-BC2 已完成；BC3-BC5 待实施。
+> 状态:BC0-BC3 已完成；BC4-BC5 待实施。
 
 ## 0. 对齐确认单
 
@@ -231,7 +231,7 @@ BC0 docs [本次完成]
 
 **Verify**:`cargo test -p read-tools concept_candidates_v2`;`cargo test -p read-tools referent_catalog`。
 
-## 9. BC3 - v2 合同与三表面原子切换 [Contracts/Runtime/Server]
+## 9. BC3 - v2 合同与三表面原子切换 [Contracts/Runtime/Server]（完成 2026-07-31）
 
 **Do**:把 canonical `ConceptInput`、schema 和 validator 升级到 v2；Resident `book.concept`、MCP `book_concept`、REST concept route 同时派发到候选内核；更新 result contract version 和相关生成/fixture。
 

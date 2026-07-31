@@ -382,7 +382,10 @@ fn route_book_context(state: &AppState, input: book_tool_contracts::ContextInput
 }
 
 fn route_book_concept(state: &AppState, input: book_tool_contracts::ConceptInput) -> Reply {
-    match state.book.concept(&input.name) {
+    match state
+        .book
+        .concept_candidates(&input.query, input.anchor_lid.as_deref(), input.limit)
+    {
         Ok(concept) => ok_json(&concept),
         Err(e) => err_reply(&e),
     }
@@ -1072,7 +1075,7 @@ mod tests {
         for (name, required) in [
             ("book_text", json!(["lid"])),
             ("book_context", json!(["lid"])),
-            ("book_concept", json!(["name"])),
+            ("book_concept", json!(["query"])),
             ("book_synthesize", json!(["lids"])),
         ] {
             assert_eq!(
@@ -1088,8 +1091,11 @@ mod tests {
                 .keys()
                 .map(String::as_str)
                 .collect::<Vec<_>>(),
-            vec!["name"]
+            vec!["anchor_lid", "limit", "query"]
         );
+        assert_eq!(schema("book_concept")["properties"]["limit"]["default"], 12);
+        assert_eq!(schema("book_concept")["properties"]["limit"]["minimum"], 1);
+        assert_eq!(schema("book_concept")["properties"]["limit"]["maximum"], 50);
         assert_eq!(
             schema("book_context")["properties"]["granularity"]["enum"],
             json!(["near", "mid", "far"])
@@ -1114,6 +1120,39 @@ mod tests {
         let body: Value = serde_json::from_str(&text.body).expect("book_text JSON response");
         assert_eq!(body["lid"], "1.1");
         assert!(body["text"].is_string());
+    }
+
+    #[test]
+    fn book_concept_v2_mcp_contract_and_dispatch() {
+        let mut app = state(None);
+        let response =
+            dispatch_mcp_tool(&mut app, "book_concept", json!({"query": "alpha"}), "1000");
+        assert_eq!(response.status, 200, "{}", response.body);
+        let body: Value = serde_json::from_str(&response.body).unwrap();
+        assert_eq!(body["version"], "book_concept.v2");
+        assert_eq!(body["returned_count"], 1);
+        assert_eq!(body["candidates"][0]["name"], "alpha");
+
+        for invalid in [
+            json!({"name": "command"}),
+            json!({"query": "command", "limit": 0}),
+            json!({"query": "command", "limit": 51}),
+        ] {
+            assert_eq!(
+                dispatch_mcp_tool(&mut app, "book_concept", invalid, "1001").status,
+                400
+            );
+        }
+        assert_eq!(
+            dispatch_mcp_tool(
+                &mut app,
+                "book_concept",
+                json!({"query": "not-present"}),
+                "1002",
+            )
+            .status,
+            404
+        );
     }
 
     #[test]

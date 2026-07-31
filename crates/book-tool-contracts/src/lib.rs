@@ -1,6 +1,6 @@
 use schemars::{gen::SchemaGenerator, JsonSchema};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::collections::HashSet;
 use ts_rs::TS;
 
@@ -90,7 +90,7 @@ const CONTRACTS: &[BookToolContract] = &[
         "按名查概念/实体,返回全量出现 LID + 关联实体。",
         "Resolve an indexed concept or entity name.",
         "Do not use for arbitrary literal full-text search.",
-        "book_concept.v1",
+        "book_concept.v2",
     ),
     contract(
         BookToolId::Structure,
@@ -275,8 +275,16 @@ pub struct ContextInput {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ConceptInput {
-    pub name: String,
+    pub query: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor_lid: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
 }
+
+pub const DEFAULT_CONCEPT_LIMIT: usize = 12;
+pub const MAX_CONCEPT_LIMIT: usize = 50;
+pub const MAX_CONCEPT_QUERY_CHARS: usize = 4096;
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -566,13 +574,28 @@ pub fn input_schema(id: BookToolId) -> Value {
         BookToolId::Text => schema_value::<TextInput>(),
         BookToolId::SearchText => search_text_input_schema(),
         BookToolId::Context => schema_value::<ContextInput>(),
-        BookToolId::Concept => schema_value::<ConceptInput>(),
+        BookToolId::Concept => concept_input_schema(),
         BookToolId::Structure | BookToolId::GuidePath => schema_value::<AtInput>(),
         BookToolId::PaperReadingGuide => schema_value::<PaperReadingGuideInput>(),
         BookToolId::Query => schema_value::<BookQueryRequest>(),
         BookToolId::Synthesize => schema_value::<SynthesizeInput>(),
         BookToolId::Guide => schema_value::<GuideInput>(),
     }
+}
+
+pub fn concept_input_schema() -> Value {
+    let mut schema = schema_value::<ConceptInput>();
+    if let Some(limit) = schema
+        .get_mut("properties")
+        .and_then(Value::as_object_mut)
+        .and_then(|properties| properties.get_mut("limit"))
+        .and_then(Value::as_object_mut)
+    {
+        limit.insert("default".into(), json!(DEFAULT_CONCEPT_LIMIT));
+        limit.insert("minimum".into(), json!(1));
+        limit.insert("maximum".into(), json!(MAX_CONCEPT_LIMIT));
+    }
+    schema
 }
 
 fn schema_value<T: JsonSchema>() -> Value {
@@ -720,7 +743,23 @@ fn validate_semantics(
             require_non_empty("lid", &input.lid)?;
         }
         (BookToolId::Concept, BookToolInput::Concept(input)) => {
-            require_non_empty("name", &input.name)?;
+            require_non_empty("query", &input.query)?;
+            if input.query.chars().count() > MAX_CONCEPT_QUERY_CHARS {
+                return Err(invalid(format!(
+                    "query must contain at most {MAX_CONCEPT_QUERY_CHARS} Unicode scalar values"
+                )));
+            }
+            if let Some(anchor_lid) = &input.anchor_lid {
+                require_non_empty("anchor_lid", anchor_lid)?;
+            }
+            if input
+                .limit
+                .is_some_and(|limit| !(1..=MAX_CONCEPT_LIMIT).contains(&limit))
+            {
+                return Err(invalid(format!(
+                    "limit must be between 1 and {MAX_CONCEPT_LIMIT}"
+                )));
+            }
         }
         (BookToolId::Structure | BookToolId::GuidePath, BookToolInput::At(input)) => {
             if let Some(at) = &input.at {
@@ -930,16 +969,16 @@ mod tests {
     }
 
     #[test]
-    fn concept_v1_contract_characterization() {
+    fn concept_v2_contract_and_validation() {
         let contract = contract_for(BookToolId::Concept);
         assert_eq!(contract.aliases.resident, Some("book.concept"));
         assert_eq!(contract.aliases.mcp, Some("book_concept"));
         assert_eq!(contract.aliases.rest, Some("concept"));
-        assert_eq!(contract.result_contract, "book_concept.v1");
+        assert_eq!(contract.result_contract, "book_concept.v2");
 
         let schema = input_schema(BookToolId::Concept);
         assert_eq!(schema["additionalProperties"], false);
-        assert_eq!(schema["required"], json!(["name"]));
+        assert_eq!(schema["required"], json!(["query"]));
         assert_eq!(
             schema["properties"]
                 .as_object()
@@ -947,15 +986,33 @@ mod tests {
                 .keys()
                 .map(String::as_str)
                 .collect::<Vec<_>>(),
-            vec!["name"]
+            vec!["anchor_lid", "limit", "query"]
         );
+        assert_eq!(schema["properties"]["limit"]["default"], 12);
+        assert_eq!(schema["properties"]["limit"]["minimum"], 1);
+        assert_eq!(schema["properties"]["limit"]["maximum"], 50);
         assert_eq!(
-            validate_input(BookToolId::Concept, json!({"name": "command"})).unwrap(),
+            validate_input(BookToolId::Concept, json!({"query": "command"})).unwrap(),
             BookToolInput::Concept(ConceptInput {
-                name: "command".into()
+                query: "command".into(),
+                anchor_lid: None,
+                limit: None,
             })
         );
-        assert!(validate_input(BookToolId::Concept, json!({"query": "command"})).is_err());
+        for invalid in [
+            json!({"name": "command"}),
+            json!({"query": " "}),
+            json!({"query": "command", "anchor_lid": " "}),
+            json!({"query": "command", "limit": 0}),
+            json!({"query": "command", "limit": 51}),
+        ] {
+            assert!(validate_input(BookToolId::Concept, invalid).is_err());
+        }
+        assert!(validate_input(
+            BookToolId::Concept,
+            json!({"query": "x".repeat(MAX_CONCEPT_QUERY_CHARS + 1)})
+        )
+        .is_err());
     }
 
     #[test]

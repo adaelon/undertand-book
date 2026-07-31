@@ -1469,7 +1469,14 @@ impl AnswerProvenanceLedger {
                 let Ok(value) = serde_json::from_str::<serde_json::Value>(result) else {
                     return;
                 };
-                self.observe_result_array(tool, &value, "occurrences");
+                if let Some(candidates) = value
+                    .get("candidates")
+                    .and_then(serde_json::Value::as_array)
+                {
+                    for candidate in candidates {
+                        self.observe_result_array(tool, candidate, "occurrences");
+                    }
+                }
             }
             "book.search_text" => {
                 let Ok(result) = serde_json::from_str::<SearchTextResult>(result) else {
@@ -2714,10 +2721,12 @@ fn dispatch_resident_book_tool(
                 Err(error) => to_json(&error),
             }
         }
-        (BookToolId::Concept, BookToolInput::Concept(input)) => match book.concept(&input.name) {
-            Ok(concept) => to_json(&concept),
-            Err(error) => to_json(&error),
-        },
+        (BookToolId::Concept, BookToolInput::Concept(input)) => {
+            match book.concept_candidates(&input.query, input.anchor_lid.as_deref(), input.limit) {
+                Ok(candidates) => to_json(&candidates),
+                Err(error) => to_json(&error),
+            }
+        }
         (BookToolId::Structure, BookToolInput::At(input)) => {
             match book.structure(input.at.as_deref()) {
                 Ok(projection) => to_json(&projection),
@@ -9201,7 +9210,7 @@ user_question=\"这段怎么理解？\"",
         for (name, required) in [
             ("book.text", serde_json::json!(["lid"])),
             ("book.context", serde_json::json!(["lid"])),
-            ("book.concept", serde_json::json!(["name"])),
+            ("book.concept", serde_json::json!(["query"])),
             ("book.synthesize", serde_json::json!(["lids"])),
         ] {
             assert_eq!(
@@ -9252,6 +9261,60 @@ user_question=\"这段怎么理解？\"",
             "anchor_lid": "1.1"
         }))
         .is_err());
+    }
+
+    #[test]
+    fn concept_tool_v2_contract_and_dispatch() {
+        let specs = tool_specs();
+        let schema = &specs
+            .iter()
+            .find(|spec| spec.name == "book.concept")
+            .unwrap()
+            .parameters;
+        assert_eq!(schema["required"], serde_json::json!(["query"]));
+        assert_eq!(schema["additionalProperties"], false);
+        assert_eq!(
+            schema["properties"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["anchor_lid", "limit", "query"]
+        );
+        assert_eq!(schema["properties"]["limit"]["default"], 12);
+        assert_eq!(schema["properties"]["limit"]["minimum"], 1);
+        assert_eq!(schema["properties"]["limit"]["maximum"], 50);
+
+        let adapter = FakeAdapter::new(Vec::new(), Vec::new());
+        let (body, effect) = dispatch_resident_book_tool(
+            BookToolId::Concept,
+            serde_json::json!({"query": "command"}),
+            &book(),
+            &adapter,
+        );
+        assert!(effect.is_none());
+        let result: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(result["version"], "book_concept.v2");
+        assert_eq!(result["returned_count"], 1);
+        assert_eq!(result["candidates"][0]["name"], "command");
+        assert_eq!(result["candidates"][0]["match_tier"], "exact_label");
+
+        for invalid in [
+            serde_json::json!({"name": "command"}),
+            serde_json::json!({"query": "command", "limit": 0}),
+        ] {
+            let (body, _) =
+                dispatch_resident_book_tool(BookToolId::Concept, invalid, &book(), &adapter);
+            assert!(body.contains("BOOK_TOOL_INPUT_INVALID"));
+        }
+        let (missing, _) = dispatch_resident_book_tool(
+            BookToolId::Concept,
+            serde_json::json!({"query": "not-present"}),
+            &book(),
+            &adapter,
+        );
+        assert!(missing.contains("CONCEPT_NOT_FOUND"));
     }
 
     #[test]
