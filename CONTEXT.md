@@ -55,6 +55,21 @@ Resident Agent 在当前用户回合内实际观察且通过现有结构闸的�
 ## occurrences(出现锚点集)
 实体 / 概念节点的多锚点字段:该身份在书中出现过的全部 LID 列表。跨窗口同一实体靠 `id = entity:{normalized-name}` 归并为一个节点,各窗口贡献的 LID 并入 occurrences。直接兑现 `book.concept` 的"出现 LID 列表"。状态:NEW(详见 [docs/adr/0010])。
 
+## 图谱节点展示标签 (graph node display label)
+`GraphNode.name` 中面向人类阅读的节点名称。它表达节点在图谱中的语义内容,可以是“模型与脚手架的消长关系”这类描述性短语;它不是用户必须准确复述的公开寻址键,也不承担自然语言指代解析职责。状态:NEW(2026-07-31 `book.concept` 可发现性 Grill 共识)。
+
+## 概念查询候选集 (concept query candidate set)
+根据用户的自然语言表述召回的、带稳定节点身份与正文证据的相关概念 / 实体节点集合。候选之间可以是同义对象,也可以是同一主题的不同侧面;该集合用于后续按问题意图选择证据,不要求预先收敛成唯一节点,也不等同于最终回答。状态:NEW(2026-07-31 `book.concept` 可发现性 Grill 共识)。
+
+## 概念候选选择权 (concept candidate selection ownership)
+概念查询候选的语义取舍属于看到用户完整问题的调用方 Agent。`book.concept` 只做确定性候选召回与证据回传,不在工具内部调用 LLM 决定候选是否回答了用户意图;调用方可选择一个或多个候选,再读取其正文证据。状态:NEW(2026-07-31 `book.concept` 可发现性 Grill 共识)。
+
+## 概念候选正文召回 (concept occurrence-text recall)
+概念查询除节点稳定身份与展示标签外,还可用节点 occurrences 所锚定的正文做确定性候选召回。正文命中说明“查询词出现在该节点的证据位置”,召回强度低于节点标签直接命中,且不自动证明该节点符合用户最终意图。状态:NEW(2026-07-31 `book.concept` 可发现性 Grill 共识)。
+
+## 全书概念召回 (global concept recall)
+概念查询的候选全集来自整本书的概念 / 实体图谱,不受当前 Reader 视口或某个 anchor 附近范围限制。可选位置只能在匹配强度相同的候选之间参与排序,不得过滤候选或使附近节点覆盖远处更准确的节点;位置相关扩展属于 `book.context`。状态:NEW(2026-07-31 `book.concept` 可发现性 Grill 共识)。
+
 ## Pass1 / Pass2(语义边两遍抽取)
 构建期抽语义边的两个串行阶段 `[ADR-0010]`:**Pass1**(`pass1-local-extractor`)逐窗口抽实体/断言节点 + 局部边,merge 后确定性投影出全局目录;**Pass2**(`pass2-longrange-linker`)带全量全局目录逐窗口抽长程边、不产节点。两遍之间是**硬串行屏障**(全部 Pass1 完成→沉淀完整目录→才开 Pass2),因长程边两端可跨全书任意远窗口、Pass2 须见全量目录。各遍内 5 并发。状态:NEW(详见 [docs/adr/0010])。
 
