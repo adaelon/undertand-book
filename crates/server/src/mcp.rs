@@ -1082,6 +1082,15 @@ mod tests {
             );
         }
         assert_eq!(
+            schema("book_concept")["properties"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["name"]
+        );
+        assert_eq!(
             schema("book_context")["properties"]["granularity"]["enum"],
             json!(["near", "mid", "far"])
         );

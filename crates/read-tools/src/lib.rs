@@ -8430,6 +8430,29 @@ mod tests {
     }
 
     #[test]
+    fn referent_catalog_characterization_preserves_context_only_anchor_order() {
+        let book = referent_catalog_book();
+        let context_only_ids = |anchor: &str| {
+            book.referent_catalog(anchor)
+                .unwrap()
+                .search("target", 20)
+                .into_iter()
+                .filter(|candidate| candidate.recall_strength == CatalogRecallStrength::ContextOnly)
+                .map(|candidate| candidate.candidate_id)
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            context_only_ids("1.1"),
+            vec!["concept:SameName", "concept:nearby", "paper_term:rag"]
+        );
+        assert_eq!(
+            context_only_ids("2.2"),
+            vec!["paper_term:rag", "concept:SameName", "concept:nearby"]
+        );
+    }
+
+    #[test]
     fn candidate_preview_enforces_fair_topk_and_match_centered_caps() {
         let book = referent_catalog_book();
         let candidates = book.referent_catalog("1.1").unwrap().search("RAG", 12);
@@ -8487,9 +8510,20 @@ mod tests {
 
     #[test]
     fn concept_found_and_missing() {
-        let b = book();
+        let mut b = book();
+        b.base.graph_nodes.push(GraphNode {
+            id: "concept:command-duplicate".into(),
+            node_type: GraphNodeType::Concept,
+            name: "command".into(),
+            occurrences: vec!["1.2".into()],
+            source_lid: None,
+        });
         let c = b.concept("command").unwrap();
         assert_eq!(c.occurrences, vec!["1.1".to_string()]);
+        assert_eq!(
+            b.concept("Command").unwrap_err().error_code,
+            "CONCEPT_NOT_FOUND"
+        );
         assert_eq!(
             b.concept("不存在").unwrap_err().error_code,
             "CONCEPT_NOT_FOUND"

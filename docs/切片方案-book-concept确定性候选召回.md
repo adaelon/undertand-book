@@ -2,7 +2,7 @@
 
 > 定位:把按展示名称精确寻址的 `book.concept` 升级为全书确定性候选发现工具，让外层 Agent 在无 MCP 内置 LLM 的情况下找到用户不会准确复述名称的图谱节点。
 > 冻结决策:[ADR-0097](adr/0097-book-concept-deterministic-candidate-recall.md)。
-> 状态:BC0 文档冻结已完成；BC1-BC5 待实施。
+> 状态:BC0-BC1 已完成；BC2-BC5 待实施。
 
 ## 0. 对齐确认单
 
@@ -211,7 +211,7 @@ BC0 docs [本次完成]
 
 **Verify**:`git diff --check -- docs/adr/0097-book-concept-deterministic-candidate-recall.md docs/切片方案-book-concept确定性候选召回.md`。
 
-## 7. BC1 - v1 与 `book.query` characterization [Tests]
+## 7. BC1 - v1 与 `book.query` characterization [Tests]（完成 2026-07-31）
 
 **Do**:冻结当前 `Book::concept` 精确成功/失败、`ConceptInput {name}` 三表面 schema、`ReferentCatalog` 排序，以及 `book.query` PlanGate/probe/selected binding 的代表 fixture。
 

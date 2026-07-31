@@ -4210,6 +4210,47 @@ mod tests {
     }
 
     #[test]
+    fn referent_characterization_records_plan_gate_and_selected_binding() {
+        let fits = fits_with(&[("concept:eta", "semantic_match")]);
+        let adapter = StructuredResolverAdapter::new(vec![
+            resolver_response(&fits, &[]),
+            supported_response(
+                "eta represents learnability",
+                "2.1",
+                "learnability is represented by eta",
+            ),
+        ]);
+        let request = definition_request("what is learnability", "learnability");
+        let run = query_run_with_budgets(
+            &resolver_book(),
+            &request,
+            &adapter,
+            &QueryBudgets::default(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            run.audit.plan_gate,
+            QueryPlanGateAudit {
+                valid: true,
+                missing_requirements: Vec::new(),
+                target_issues: Vec::new(),
+            }
+        );
+        assert!(run.audit.probes.is_empty());
+        assert_eq!(
+            run.audit.selected_bindings,
+            vec![QuerySelectedBindingAudit {
+                target_index: 0,
+                candidate_id: "concept:eta".into(),
+                round: 0,
+                rank: 1,
+            }]
+        );
+        assert_eq!(run.audit.outcome_status, "complete");
+    }
+
+    #[test]
     fn trend_resolves_strategy_not_drift() {
         let fits = fits_with(&[("concept:trend_strategy", "direct_match")]);
         let adapter = StructuredResolverAdapter::new(vec![
@@ -4286,6 +4327,36 @@ mod tests {
     }
 
     #[test]
+    fn referent_characterization_caps_probes_and_preserves_unresolved_failure() {
+        let rejected = fits_with(&[]);
+        let adapter = StructuredResolverAdapter::new(vec![
+            resolver_response(
+                &rejected,
+                &["eta", "learnability", "可学习性", "forbidden-fourth"],
+            ),
+            resolver_response(&rejected, &[]),
+        ]);
+        let request = definition_request("unknown referent", "unknown referent");
+        let budgets = QueryBudgets::default();
+        let mut audit = QueryAudit::new(&request, &budgets);
+
+        assert!(matches!(
+            resolve_referents(&resolver_book(), &request, &adapter, &budgets, &mut audit).unwrap(),
+            ResolutionStage::Terminal(QueryOutcome::Unresolved { .. })
+        ));
+        assert_eq!(audit.probes, vec!["eta", "learnability", "可学习性"]);
+        assert_eq!(
+            audit
+                .candidate_rounds
+                .iter()
+                .map(|round| round.round)
+                .collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+        assert_eq!(audit.model_calls, 2);
+    }
+
+    #[test]
     fn plan_gate_rejects_missing_target_or_obligation_without_retrieval() {
         let adapter = StructuredResolverAdapter::new(Vec::new());
         let request = BookQueryRequest {
@@ -4298,6 +4369,52 @@ mod tests {
             ResolutionStage::Terminal(QueryOutcome::InvalidPlan { .. })
         ));
         assert!(adapter.prompts.borrow().is_empty());
+    }
+
+    #[test]
+    fn referent_characterization_rejects_invalid_plan_before_provider_call() {
+        let adapter = StructuredResolverAdapter::new(Vec::new());
+        let request = BookQueryRequest {
+            targets: Vec::new(),
+            obligations: Vec::new(),
+            ..definition_request("what is eta", "eta")
+        };
+        let budgets = QueryBudgets::default();
+        let mut audit = QueryAudit::new(&request, &budgets);
+
+        assert!(matches!(
+            resolve_referents(&resolver_book(), &request, &adapter, &budgets, &mut audit).unwrap(),
+            ResolutionStage::Terminal(QueryOutcome::InvalidPlan { .. })
+        ));
+        assert!(!audit.plan_gate.valid);
+        assert!(!audit.plan_gate.missing_requirements.is_empty());
+        assert!(audit.plan_gate.target_issues.is_empty());
+        assert_eq!(audit.model_calls, 0);
+        assert!(adapter.prompts.borrow().is_empty());
+    }
+
+    #[test]
+    fn referent_characterization_preserves_ambiguous_failure() {
+        let fits = fits_with(&[
+            ("concept:eta", "semantic_match"),
+            ("concept:mu", "plausible"),
+        ]);
+        let adapter = StructuredResolverAdapter::new(vec![resolver_response(&fits, &[])]);
+        let request = definition_request("what is learnability", "learnability");
+
+        let ResolutionStage::Terminal(QueryOutcome::Ambiguous { target, candidates }) =
+            resolve_for_test(&resolver_book(), &request, &adapter).unwrap()
+        else {
+            panic!("expected ambiguous outcome");
+        };
+        assert_eq!(target, "learnability");
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| candidate.candidate_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["concept:eta", "concept:mu"]
+        );
     }
 
     #[test]

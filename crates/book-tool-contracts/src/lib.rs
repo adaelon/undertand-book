@@ -930,6 +930,35 @@ mod tests {
     }
 
     #[test]
+    fn concept_v1_contract_characterization() {
+        let contract = contract_for(BookToolId::Concept);
+        assert_eq!(contract.aliases.resident, Some("book.concept"));
+        assert_eq!(contract.aliases.mcp, Some("book_concept"));
+        assert_eq!(contract.aliases.rest, Some("concept"));
+        assert_eq!(contract.result_contract, "book_concept.v1");
+
+        let schema = input_schema(BookToolId::Concept);
+        assert_eq!(schema["additionalProperties"], false);
+        assert_eq!(schema["required"], json!(["name"]));
+        assert_eq!(
+            schema["properties"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["name"]
+        );
+        assert_eq!(
+            validate_input(BookToolId::Concept, json!({"name": "command"})).unwrap(),
+            BookToolInput::Concept(ConceptInput {
+                name: "command".into()
+            })
+        );
+        assert!(validate_input(BookToolId::Concept, json!({"query": "command"})).is_err());
+    }
+
+    #[test]
     fn search_text_contract_applies_defaults_and_rejects_invalid_bounds() {
         let contract = contract_for(BookToolId::SearchText);
         assert_eq!(contract.aliases.resident, Some("book.search_text"));
