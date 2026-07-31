@@ -1049,6 +1049,13 @@ mod tests {
                 .find(|tool| tool["name"] == name)
                 .unwrap_or_else(|| panic!("missing MCP tool schema: {name}"))["inputSchema"]
         };
+        let concept_description = tools
+            .iter()
+            .find(|tool| tool["name"] == "book_concept")
+            .and_then(|tool| tool["description"].as_str())
+            .expect("book_concept description");
+        assert!(concept_description.contains("候选"));
+        assert!(concept_description.contains("book.text"));
 
         for name in tool_names() {
             assert_eq!(

@@ -2,7 +2,7 @@
 
 > 定位:把按展示名称精确寻址的 `book.concept` 升级为全书确定性候选发现工具，让外层 Agent 在无 MCP 内置 LLM 的情况下找到用户不会准确复述名称的图谱节点。
 > 冻结决策:[ADR-0097](adr/0097-book-concept-deterministic-candidate-recall.md)。
-> 状态:BC0-BC3 已完成；BC4-BC5 待实施。
+> 状态:BC0-BC4 已完成；BC5 待实施。
 
 ## 0. 对齐确认单
 
@@ -241,7 +241,7 @@ BC0 docs [本次完成]
 
 **Verify**:`cargo test -p book-tool-contracts concept`;`cargo test -p runtime concept_tool`;`cargo test -p server book_concept`。
 
-## 10. BC4 - Agent 使用策略与隔离回归 [Runtime/Server]
+## 10. BC4 - Agent 使用策略与隔离回归 [Runtime/Server]（完成 2026-07-31）
 
 **Do**:更新 canonical tool description 与 Resident/MCP 使用提示：concept 用于候选发现，Agent 选择后必须调用 `book.text`；加入无 Provider MCP smoke、结果预算和 `book.query` 全量回归。
 

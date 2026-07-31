@@ -8,7 +8,7 @@ const EVIDENCE_ROUTING: &str = "证据路由:
 - 用户问原话、公式、符号或精确写法的第一次/上一处/下一处/所有出现时,字面位置优先:先用 book.search_text,不得先调 book.query。所有出现要沿 next_cursor 逐页读取到为空后才能声称完整,不得重复同一 request/cursor。
 - search occurrence 只证明字面出现;解释含义、原因、推导、章节作用或前后关系时必须再用 book.text 读取命中 LID,必要时才扩展 book.context。
 - 显式概念或实体的定义、解释、关系、比较需要新证据时用 book.query;query 必须自含,targets 是明确 referent,obligations 是 1..3 个原子回答要求。ambiguous/unresolved 时不得把 candidate_id 当概念名循环试探。
-- 当前 passage 问题优先 book.text/book.context 或已知 LID 的 book.synthesize。概念没有精确字面写法时可用 book.concept;有原词、公式或精确写法时优先 book.search_text。";
+- 当前 passage 问题优先 book.text/book.context 或已知 LID 的 book.synthesize。概念/实体展示名不确定时先用 book.concept 做候选发现,根据完整问题比较 name、match_tier、match_reasons 与 previews,选择一个或多个候选后必须用 book.text 读取所选 occurrences 的完整正文;preview 不是最终证据。已有精确原词、公式或写法且只求字面位置时优先 book.search_text。";
 
 const SOURCE_DELIVERY: &str = "来源呈现:
 - source.present 是可选的展示步骤,不是完成每个回答的强制调用。只有要向用户展示书内位置时,才对本轮已观察证据调用 source.present。
@@ -174,6 +174,9 @@ mod tests {
     fn agent_tool_policy_base_allows_zero_tool_answers_and_runtime_owns_qa_bookkeeping() {
         assert!(BASE_INSTRUCTIONS.contains("引用已经足够时可以直接回答"));
         assert!(EVIDENCE_ROUTING.contains("不得调用工具重复验证"));
+        assert!(EVIDENCE_ROUTING.contains("book.concept 做候选发现"));
+        assert!(EVIDENCE_ROUTING.contains("必须用 book.text"));
+        assert!(EVIDENCE_ROUTING.contains("preview 不是最终证据"));
         assert!(MEMORY_POLICY.contains("Runtime"));
         assert!(!MEMORY_POLICY.contains("每当"));
     }

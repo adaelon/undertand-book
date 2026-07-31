@@ -87,9 +87,9 @@ const CONTRACTS: &[BookToolContract] = &[
         Some("book.concept"),
         Some("book_concept"),
         Some("concept"),
-        "按名查概念/实体,返回全量出现 LID + 关联实体。",
-        "Resolve an indexed concept or entity name.",
-        "Do not use for arbitrary literal full-text search.",
+        "确定性召回全书 concept/entity 候选,返回匹配原因、有限 preview 与完整 occurrences;调用方选择候选后必须用 book.text 读取完整证据。",
+        "Discover concept or entity candidates when the user may not know the graph display label.",
+        "Do not treat previews as final evidence or silently select a candidate; read chosen occurrence LIDs with book.text.",
         "book_concept.v2",
     ),
     contract(
@@ -975,6 +975,11 @@ mod tests {
         assert_eq!(contract.aliases.mcp, Some("book_concept"));
         assert_eq!(contract.aliases.rest, Some("concept"));
         assert_eq!(contract.result_contract, "book_concept.v2");
+        assert!(contract.description.contains("候选"));
+        assert!(contract.description.contains("book.text"));
+        assert!(contract.use_when.contains("candidates"));
+        assert!(contract.do_not_use_when.contains("previews"));
+        assert!(contract.do_not_use_when.contains("silently select"));
 
         let schema = input_schema(BookToolId::Concept);
         assert_eq!(schema["additionalProperties"], false);

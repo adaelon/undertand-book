@@ -4916,7 +4916,9 @@ mod tests {
         ArtifactSnapshotBlueprint, ArtifactSnapshotItem, ArtifactSnapshotRecord,
         ArtifactSnapshotScope, ArtifactSnapshotSearchField,
     };
-    use base_schema::{sample_base, GraphEdge, GraphNode, LidNode, NodeKind, ReadOnlyBase, Span};
+    use base_schema::{
+        sample_base, GraphEdge, GraphNode, GraphNodeType, LidNode, NodeKind, ReadOnlyBase, Span,
+    };
     use memory::{
         Applicability, CreateProfileFact, EvidenceRef, FactSource, PreferenceClaim, ProfilePayload,
         ProfileScope, Sensitivity, SnapshotContext, SnapshotRequest,
@@ -5744,6 +5746,95 @@ mod tests {
         assert_eq!(out.trace.len(), 1);
         assert_eq!(out.trace[0].tool, "book.text");
         assert!(!out.incomplete);
+    }
+
+    #[test]
+    fn concept_routing_agent_selects_candidate_then_reads_full_occurrence() {
+        let mut b = book();
+        b.base.graph_nodes.push(GraphNode {
+            id: "concept:command-detail".into(),
+            node_type: GraphNodeType::Concept,
+            name: "command detail".into(),
+            occurrences: vec!["1.2".into()],
+            source_lid: None,
+        });
+        let mut store = MemoryStore::open(tmp("concept-routing-candidate-to-text")).unwrap();
+        let adapter = RecordingAdapter {
+            chats: RefCell::new(
+                vec![
+                    turn_calls(vec![call(
+                        "concept-candidates",
+                        "book.concept",
+                        r#"{"query":"command"}"#,
+                    )]),
+                    turn_calls(vec![call(
+                        "chosen-occurrence",
+                        "book.text",
+                        r#"{"lid":"1.1"}"#,
+                    )]),
+                    turn_final("command is explained by the selected full occurrence"),
+                ]
+                .into(),
+            ),
+            seen_messages: RefCell::new(Vec::new()),
+        };
+        let mut reader = Reader::new(&b, DEFAULT_RADIUS);
+        let mut messages = new_session();
+
+        let out = run(
+            &b,
+            &mut store,
+            &mut reader,
+            &adapter,
+            &mut messages,
+            "Which command concept is relevant, and what does its source say?",
+            "t0",
+            OuterConfig::default(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            out.trace
+                .iter()
+                .map(|step| step.tool.as_str())
+                .collect::<Vec<_>>(),
+            vec!["book.concept", "book.text"]
+        );
+        assert!(out.trace[0].result_digest.contains("book_concept.v2"));
+        assert!(!out.incomplete);
+
+        let seen = adapter.seen_messages.borrow();
+        let concept_sampling = seen
+            .get(1)
+            .expect("second sampling must receive concept candidates");
+        let envelope: serde_json::Value = concept_sampling
+            .iter()
+            .find(|message| message.tool_call_id.as_deref() == Some("concept-candidates"))
+            .and_then(|message| message.content.as_deref())
+            .map(serde_json::from_str)
+            .transpose()
+            .unwrap()
+            .expect("concept tool result envelope");
+        assert_eq!(envelope["version"], "tool_result_envelope.v1");
+        assert_eq!(envelope["truncated"], false);
+        assert_eq!(envelope["model_body"]["version"], "book_concept.v2");
+        assert_eq!(envelope["model_body"]["returned_count"], 2);
+        assert_eq!(
+            envelope["model_body"]["candidates"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        let concept_policy = resident_tool_registry()
+            .registration("book.concept")
+            .expect("concept registration")
+            .output_policy;
+        assert_eq!(concept_policy.max_model_body_bytes, 16 * 1024);
+        assert!(
+            serde_json::to_vec(&envelope["model_body"]).unwrap().len()
+                <= concept_policy.max_model_body_bytes
+        );
     }
 
     #[test]
@@ -9266,11 +9357,13 @@ user_question=\"这段怎么理解？\"",
     #[test]
     fn concept_tool_v2_contract_and_dispatch() {
         let specs = tool_specs();
-        let schema = &specs
+        let concept = specs
             .iter()
             .find(|spec| spec.name == "book.concept")
-            .unwrap()
-            .parameters;
+            .unwrap();
+        assert!(concept.description.contains("候选"));
+        assert!(concept.description.contains("book.text"));
+        let schema = &concept.parameters;
         assert_eq!(schema["required"], serde_json::json!(["query"]));
         assert_eq!(schema["additionalProperties"], false);
         assert_eq!(
