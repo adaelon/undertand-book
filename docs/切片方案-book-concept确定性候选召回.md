@@ -2,7 +2,7 @@
 
 > 定位:把按展示名称精确寻址的 `book.concept` 升级为全书确定性候选发现工具，让外层 Agent 在无 MCP 内置 LLM 的情况下找到用户不会准确复述名称的图谱节点。
 > 冻结决策:[ADR-0097](adr/0097-book-concept-deterministic-candidate-recall.md)。
-> 状态:BC0-BC1 已完成；BC2-BC5 待实施。
+> 状态:BC0-BC2 已完成；BC3-BC5 待实施。
 
 ## 0. 对齐确认单
 
@@ -221,7 +221,7 @@ BC0 docs [本次完成]
 
 **Verify**:`cargo test -p read-tools concept_found_and_missing`;`cargo test -p runtime referent`;`cargo test -p server mcp_tool_characterization`。
 
-## 8. BC2 - 确定性候选内核 [ReadTools]
+## 8. BC2 - 确定性候选内核 [ReadTools]（完成 2026-07-31）
 
 **Do**:在 `read-tools` 增加 v2 内部候选 API；实现 graph-only 全书召回、严格 tier、全量 occurrences、有界 preview、计数/截断和零候选错误；必要时以行为不变方式抽取共享 matcher。
 

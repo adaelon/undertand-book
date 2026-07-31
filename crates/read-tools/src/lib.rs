@@ -1773,6 +1773,70 @@ pub struct Concept {
     pub related_entities: Vec<String>,
 }
 
+pub const BOOK_CONCEPT_V2_VERSION: &str = "book_concept.v2";
+pub const DEFAULT_CONCEPT_CANDIDATE_LIMIT: usize = 12;
+pub const MAX_CONCEPT_CANDIDATE_LIMIT: usize = 50;
+pub const MAX_CONCEPT_QUERY_CHARS: usize = 4096;
+const MAX_CONCEPT_PREVIEWS: usize = 2;
+const MAX_CONCEPT_PREVIEW_CHARS: usize = 180;
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub enum ConceptCandidateKind {
+    Concept,
+    Entity,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub enum ConceptMatchTier {
+    OccurrenceText,
+    ApproximateLabel,
+    LabelToken,
+    ExactLabel,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct ConceptPreview {
+    pub lid: String,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct ConceptCandidate {
+    pub node_id: String,
+    pub kind: ConceptCandidateKind,
+    pub name: String,
+    pub occurrences: Vec<String>,
+    pub match_tier: ConceptMatchTier,
+    pub matched_terms: Vec<String>,
+    pub match_reasons: Vec<String>,
+    pub previews: Vec<ConceptPreview>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct ConceptCandidateSet {
+    pub version: String,
+    pub query: String,
+    pub matched_count: usize,
+    pub returned_count: usize,
+    pub truncated: bool,
+    pub candidates: Vec<ConceptCandidate>,
+}
+
+#[derive(Debug)]
+struct RankedConceptCandidate {
+    candidate: ConceptCandidate,
+    query_term_coverage: u32,
+    distinct_matched_terms: usize,
+    anchor_distance: usize,
+}
+
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum CatalogRecallStrength {
@@ -1860,9 +1924,12 @@ fn lexical_tokens(value: &str) -> Vec<String> {
 
 #[derive(Debug, Default)]
 struct LexicalAnalysis {
+    query_terms: Vec<String>,
+    exact_label: bool,
     legacy_exact_label: bool,
     label_terms: Vec<String>,
     approximate_label_terms: Vec<String>,
+    occurrence_terms: Vec<String>,
     occurrence_hit_count: usize,
 }
 
@@ -1880,14 +1947,18 @@ fn analyze_lexical_match(
     aliases: &[String],
     occurrence_texts: &[String],
 ) -> LexicalAnalysis {
+    let query_sequence = lexical_tokens(target);
     let query_terms = unique_lexical_tokens(target);
     let target_tokens: BTreeSet<String> = query_terms.iter().cloned().collect();
     let target_joined = target_tokens.iter().cloned().collect::<Vec<_>>().join(" ");
+    let query_joined = query_sequence.join(" ");
     let mut label_tokens = BTreeSet::new();
+    let mut exact_label = false;
     let mut legacy_exact_label = false;
     for field in labels.iter().chain(aliases) {
         let tokens = lexical_tokens(field);
         let joined = tokens.join(" ");
+        exact_label |= !joined.is_empty() && joined == query_joined;
         legacy_exact_label |= !joined.is_empty() && joined == target_joined;
         label_tokens.extend(tokens);
     }
@@ -1915,11 +1986,21 @@ fn analyze_lexical_match(
         .iter()
         .filter(|token| target_tokens.contains(*token))
         .count();
+    let occurrence_token_set: BTreeSet<&str> =
+        occurrence_tokens.iter().map(String::as_str).collect();
+    let occurrence_terms = query_terms
+        .iter()
+        .filter(|term| occurrence_token_set.contains(term.as_str()))
+        .cloned()
+        .collect();
 
     LexicalAnalysis {
+        query_terms,
+        exact_label,
         legacy_exact_label,
         label_terms,
         approximate_label_terms,
+        occurrence_terms,
         occurrence_hit_count,
     }
 }
@@ -1969,6 +2050,49 @@ fn lexical_match(
         );
     }
     (CatalogRecallStrength::None, 0, Vec::new())
+}
+
+fn concept_match(
+    analysis: &LexicalAnalysis,
+) -> Option<(ConceptMatchTier, Vec<String>, Vec<String>)> {
+    let (tier, matched_terms, reason) = if analysis.exact_label {
+        (
+            ConceptMatchTier::ExactLabel,
+            analysis.query_terms.clone(),
+            "exact_label",
+        )
+    } else if !analysis.label_terms.is_empty() {
+        (
+            ConceptMatchTier::LabelToken,
+            analysis.label_terms.clone(),
+            "label_token",
+        )
+    } else if !analysis.approximate_label_terms.is_empty() {
+        (
+            ConceptMatchTier::ApproximateLabel,
+            analysis.approximate_label_terms.clone(),
+            "approximate_label",
+        )
+    } else if !analysis.occurrence_terms.is_empty() {
+        (
+            ConceptMatchTier::OccurrenceText,
+            analysis.occurrence_terms.clone(),
+            "occurrence_text",
+        )
+    } else {
+        return None;
+    };
+    Some((tier, matched_terms, vec![reason.into()]))
+}
+
+fn query_term_coverage(matched_terms: usize, query_terms: usize) -> u32 {
+    if query_terms == 0 {
+        return 0;
+    }
+    u32::try_from(matched_terms)
+        .unwrap_or(u32::MAX)
+        .saturating_mul(1_000)
+        / u32::try_from(query_terms).unwrap_or(u32::MAX).max(1)
 }
 
 fn sentence_or_centered_excerpt(text: &str, target: &str, cap: usize) -> String {
@@ -3239,6 +3363,199 @@ impl Book {
         Ok(ReferentCatalog {
             book: self,
             anchor_lid: anchor_lid.into(),
+        })
+    }
+
+    fn ordered_concept_occurrences(&self, lids: &[String]) -> Vec<String> {
+        let mut seen = HashSet::new();
+        let mut occurrences = lids
+            .iter()
+            .filter(|lid| seen.insert((*lid).clone()))
+            .cloned()
+            .collect::<Vec<_>>();
+        occurrences.sort_by(|left, right| {
+            self.lid_idx
+                .get(left)
+                .copied()
+                .unwrap_or(usize::MAX)
+                .cmp(&self.lid_idx.get(right).copied().unwrap_or(usize::MAX))
+                .then_with(|| left.cmp(right))
+        });
+        occurrences
+    }
+
+    fn concept_anchor_distance(
+        &self,
+        anchor_index: Option<usize>,
+        occurrences: &[String],
+    ) -> usize {
+        let Some(anchor_index) = anchor_index else {
+            return usize::MAX;
+        };
+        occurrences
+            .iter()
+            .filter_map(|lid| self.lid_idx.get(lid).copied())
+            .map(|index| index.abs_diff(anchor_index))
+            .min()
+            .unwrap_or(usize::MAX)
+    }
+
+    fn concept_previews(
+        &self,
+        query: &str,
+        occurrences: &[String],
+        anchor_index: Option<usize>,
+    ) -> Vec<ConceptPreview> {
+        let query_terms: BTreeSet<String> = unique_lexical_tokens(query).into_iter().collect();
+        let mut entries = occurrences
+            .iter()
+            .filter_map(|lid| {
+                self.text(lid, None).ok().map(|text| {
+                    let matched = lexical_tokens(&text)
+                        .iter()
+                        .any(|token| query_terms.contains(token));
+                    let distance =
+                        self.concept_anchor_distance(anchor_index, std::slice::from_ref(lid));
+                    let document_index = self.lid_idx.get(lid).copied().unwrap_or(usize::MAX);
+                    (matched, distance, document_index, lid.clone(), text)
+                })
+            })
+            .collect::<Vec<_>>();
+        entries.sort_by(|left, right| {
+            right
+                .0
+                .cmp(&left.0)
+                .then_with(|| left.1.cmp(&right.1))
+                .then_with(|| left.2.cmp(&right.2))
+                .then_with(|| left.3.cmp(&right.3))
+        });
+        entries
+            .into_iter()
+            .take(MAX_CONCEPT_PREVIEWS)
+            .map(|(_, _, _, lid, text)| ConceptPreview {
+                lid,
+                text: sentence_or_centered_excerpt(&text, query, MAX_CONCEPT_PREVIEW_CHARS),
+            })
+            .collect()
+    }
+
+    /// Deterministic graph-only concept/entity candidate recall `[ADR-0097]`.
+    /// The caller owns semantic selection and must read full evidence through `book.text`.
+    pub fn concept_candidates(
+        &self,
+        query: &str,
+        anchor_lid: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<ConceptCandidateSet, ToolError> {
+        let query = query.trim();
+        let query_chars = query.chars().count();
+        if query_chars == 0 || query_chars > MAX_CONCEPT_QUERY_CHARS {
+            return Err(ToolError {
+                error_code: "BOOK_TOOL_INPUT_INVALID".into(),
+                category: "validation".into(),
+                message: format!(
+                    "concept query must contain 1..={MAX_CONCEPT_QUERY_CHARS} Unicode scalar values"
+                ),
+            });
+        }
+        let limit = limit.unwrap_or(DEFAULT_CONCEPT_CANDIDATE_LIMIT);
+        if !(1..=MAX_CONCEPT_CANDIDATE_LIMIT).contains(&limit) {
+            return Err(ToolError {
+                error_code: "BOOK_TOOL_INPUT_INVALID".into(),
+                category: "validation".into(),
+                message: format!(
+                    "concept limit must be between 1 and {MAX_CONCEPT_CANDIDATE_LIMIT}"
+                ),
+            });
+        }
+        let anchor_index = match anchor_lid {
+            Some(lid) => {
+                self.node(lid)?;
+                self.lid_idx.get(lid).copied()
+            }
+            None => None,
+        };
+
+        let mut ranked = Vec::new();
+        for node in self.base.graph_nodes.iter().filter(|node| {
+            matches!(
+                node.node_type,
+                GraphNodeType::Concept | GraphNodeType::Entity
+            )
+        }) {
+            let occurrences = self.ordered_concept_occurrences(&node.occurrences);
+            let occurrence_texts = occurrences
+                .iter()
+                .filter_map(|lid| self.text(lid, None).ok())
+                .collect::<Vec<_>>();
+            let analysis = analyze_lexical_match(
+                query,
+                std::slice::from_ref(&node.name),
+                &[],
+                &occurrence_texts,
+            );
+            let Some((match_tier, matched_terms, match_reasons)) = concept_match(&analysis) else {
+                continue;
+            };
+            let distinct_matched_terms = matched_terms.len();
+            ranked.push(RankedConceptCandidate {
+                query_term_coverage: query_term_coverage(
+                    distinct_matched_terms,
+                    analysis.query_terms.len(),
+                ),
+                distinct_matched_terms,
+                anchor_distance: self.concept_anchor_distance(anchor_index, &occurrences),
+                candidate: ConceptCandidate {
+                    node_id: node.id.clone(),
+                    kind: if node.node_type == GraphNodeType::Concept {
+                        ConceptCandidateKind::Concept
+                    } else {
+                        ConceptCandidateKind::Entity
+                    },
+                    name: node.name.clone(),
+                    previews: self.concept_previews(query, &occurrences, anchor_index),
+                    occurrences,
+                    match_tier,
+                    matched_terms,
+                    match_reasons,
+                },
+            });
+        }
+        ranked.sort_by(|left, right| {
+            right
+                .candidate
+                .match_tier
+                .cmp(&left.candidate.match_tier)
+                .then_with(|| right.query_term_coverage.cmp(&left.query_term_coverage))
+                .then_with(|| {
+                    right
+                        .distinct_matched_terms
+                        .cmp(&left.distinct_matched_terms)
+                })
+                .then_with(|| left.anchor_distance.cmp(&right.anchor_distance))
+                .then_with(|| left.candidate.node_id.cmp(&right.candidate.node_id))
+        });
+        let matched_count = ranked.len();
+        if matched_count == 0 {
+            return Err(ToolError {
+                error_code: "CONCEPT_NOT_FOUND".into(),
+                category: "not_found".into(),
+                message: format!("未找到相关概念/实体候选: {query}"),
+            });
+        }
+        ranked.truncate(limit);
+        let candidates = ranked
+            .into_iter()
+            .map(|ranked| ranked.candidate)
+            .collect::<Vec<_>>();
+        let returned_count = candidates.len();
+        Ok(ConceptCandidateSet {
+            version: BOOK_CONCEPT_V2_VERSION.into(),
+            query: query.into(),
+            matched_count,
+            returned_count,
+            truncated: matched_count > returned_count,
+            candidates,
         })
     }
 
@@ -8349,6 +8666,63 @@ mod tests {
         assert_eq!(err.error_code, "INVALID_GRANULARITY");
         assert_eq!(err.category, "validation");
     }
+
+    fn concept_candidate_book(texts: &[(&str, &str)], graph_nodes: Vec<GraphNode>) -> Book {
+        let mut source = String::new();
+        let mut lid_nodes = Vec::new();
+        let mut offset = 0usize;
+        for (index, (lid, text)) in texts.iter().enumerate() {
+            let start = offset;
+            source.push_str(text);
+            offset += text.encode_utf16().count();
+            lid_nodes.push(LidNode {
+                lid: (*lid).into(),
+                path: vec![u32::try_from(index + 1).unwrap()],
+                kind: NodeKind::Paragraph,
+                span: Span { start, end: offset },
+                children: Vec::new(),
+            });
+        }
+        Book::new(
+            ReadOnlyBase {
+                book_id: "concept-candidates-v2".into(),
+                lid_nodes,
+                graph_nodes,
+                graph_edges: Vec::new(),
+            },
+            &source,
+        )
+    }
+
+    fn concept_candidate_node(
+        id: &str,
+        node_type: GraphNodeType,
+        name: &str,
+        occurrences: &[&str],
+    ) -> GraphNode {
+        GraphNode {
+            id: id.into(),
+            node_type,
+            name: name.into(),
+            occurrences: occurrences.iter().map(|lid| (*lid).into()).collect(),
+            source_lid: None,
+        }
+    }
+
+    fn scale_candidate_book(count: usize) -> Book {
+        let nodes = (0..count)
+            .map(|index| {
+                concept_candidate_node(
+                    &format!("concept:scale-{index:02}"),
+                    GraphNodeType::Concept,
+                    "scale",
+                    &["1.1"],
+                )
+            })
+            .collect();
+        concept_candidate_book(&[("1.1", "scale evidence")], nodes)
+    }
+
     fn referent_catalog_book() -> Book {
         let texts = vec![
             "The nearby paragraph mentions target only as context.".to_string(),
@@ -8571,6 +8945,254 @@ mod tests {
         assert_eq!(
             b.concept("不存在").unwrap_err().error_code,
             "CONCEPT_NOT_FOUND"
+        );
+    }
+
+    #[test]
+    fn concept_candidates_v2_enforces_strict_tiers_graph_scope_and_stable_identity() {
+        let repeated = format!("{} alpha {}", "x".repeat(220), "y".repeat(220));
+        let book = concept_candidate_book(
+            &[
+                ("1.1", "alpha single context"),
+                ("1.2", &repeated),
+                ("1.3", "far source without a lexical match"),
+                ("1.4", "模型增强后 harness 会收缩"),
+            ],
+            vec![
+                concept_candidate_node(
+                    "concept:exact",
+                    GraphNodeType::Concept,
+                    "alpha",
+                    &["1.3", "1.1", "1.1"],
+                ),
+                concept_candidate_node(
+                    "entity:token",
+                    GraphNodeType::Entity,
+                    "alpha gamma",
+                    &["1.3"],
+                ),
+                concept_candidate_node(
+                    "concept:approx",
+                    GraphNodeType::Concept,
+                    "alphabetical",
+                    &["1.3"],
+                ),
+                concept_candidate_node(
+                    "concept:a-context",
+                    GraphNodeType::Concept,
+                    "delta",
+                    &["1.1"],
+                ),
+                concept_candidate_node(
+                    "concept:z-repeat",
+                    GraphNodeType::Concept,
+                    "epsilon",
+                    &["1.2"],
+                ),
+                concept_candidate_node(
+                    "concept:harness",
+                    GraphNodeType::Concept,
+                    "模型与脚手架的消长关系",
+                    &["1.4"],
+                ),
+                concept_candidate_node("claim:alpha", GraphNodeType::Claim, "alpha", &["1.1"]),
+            ],
+        );
+
+        let result = book.concept_candidates("ALPHA!!!", None, Some(50)).unwrap();
+        assert_eq!(result.version, BOOK_CONCEPT_V2_VERSION);
+        assert_eq!(result.query, "ALPHA!!!");
+        assert_eq!(result.matched_count, 5);
+        assert_eq!(result.returned_count, 5);
+        assert!(!result.truncated);
+        assert_eq!(
+            result
+                .candidates
+                .iter()
+                .map(|candidate| candidate.node_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "concept:exact",
+                "entity:token",
+                "concept:approx",
+                "concept:a-context",
+                "concept:z-repeat",
+            ]
+        );
+        assert_eq!(
+            result
+                .candidates
+                .iter()
+                .map(|candidate| candidate.match_tier)
+                .collect::<Vec<_>>(),
+            vec![
+                ConceptMatchTier::ExactLabel,
+                ConceptMatchTier::LabelToken,
+                ConceptMatchTier::ApproximateLabel,
+                ConceptMatchTier::OccurrenceText,
+                ConceptMatchTier::OccurrenceText,
+            ]
+        );
+        assert_eq!(result.candidates[0].occurrences, vec!["1.1", "1.3"]);
+        assert_eq!(result.candidates[0].previews.len(), 2);
+        assert_eq!(result.candidates[1].kind, ConceptCandidateKind::Entity);
+        assert_eq!(result.candidates[0].match_reasons, vec!["exact_label"]);
+        assert!(result.candidates.iter().all(|candidate| {
+            candidate.matched_terms == vec!["alpha"]
+                && candidate.match_reasons.len() == 1
+                && candidate.previews.len() <= MAX_CONCEPT_PREVIEWS
+                && candidate
+                    .previews
+                    .iter()
+                    .all(|preview| preview.text.chars().count() <= MAX_CONCEPT_PREVIEW_CHARS)
+        }));
+        let repeated_preview = result
+            .candidates
+            .iter()
+            .find(|candidate| candidate.node_id == "concept:z-repeat")
+            .unwrap()
+            .previews
+            .first()
+            .unwrap();
+        assert!(repeated_preview.text.contains("alpha"));
+
+        assert_eq!(
+            book.concept_candidates("concept:exact", None, None)
+                .unwrap_err()
+                .error_code,
+            "CONCEPT_NOT_FOUND"
+        );
+        let cjk = book.concept_candidates("脚手架", None, None).unwrap();
+        assert_eq!(cjk.candidates[0].node_id, "concept:harness");
+        assert_eq!(
+            cjk.candidates[0].match_tier,
+            ConceptMatchTier::ApproximateLabel
+        );
+        assert_eq!(
+            book.concept_candidates("🧪", None, None)
+                .unwrap_err()
+                .error_code,
+            "CONCEPT_NOT_FOUND"
+        );
+
+        let paper_backed = referent_catalog_book();
+        let rag = paper_backed
+            .concept_candidates("RAG", None, Some(50))
+            .unwrap();
+        assert!(rag
+            .candidates
+            .iter()
+            .any(|candidate| candidate.node_id == "concept:RAG"));
+        assert!(rag
+            .candidates
+            .iter()
+            .all(|candidate| !candidate.node_id.starts_with("paper_term:")));
+    }
+
+    #[test]
+    fn concept_candidates_v2_uses_anchor_only_after_lexical_quality() {
+        let book = concept_candidate_book(
+            &[
+                ("1.1", "alpha once"),
+                ("1.2", "alpha alpha alpha alpha"),
+                ("1.3", "no match here"),
+            ],
+            vec![
+                concept_candidate_node(
+                    "concept:far-exact",
+                    GraphNodeType::Concept,
+                    "alpha",
+                    &["1.3"],
+                ),
+                concept_candidate_node(
+                    "concept:a-context",
+                    GraphNodeType::Concept,
+                    "delta",
+                    &["1.1"],
+                ),
+                concept_candidate_node(
+                    "concept:z-context",
+                    GraphNodeType::Concept,
+                    "epsilon",
+                    &["1.2"],
+                ),
+            ],
+        );
+
+        for anchor in ["1.1", "1.2"] {
+            let result = book
+                .concept_candidates("alpha", Some(anchor), Some(50))
+                .unwrap();
+            assert_eq!(result.candidates[0].node_id, "concept:far-exact");
+        }
+        let near_first = book
+            .concept_candidates("alpha", Some("1.1"), Some(50))
+            .unwrap();
+        assert_eq!(near_first.candidates[1].node_id, "concept:a-context");
+        assert_eq!(near_first.candidates[2].node_id, "concept:z-context");
+        let repeated_first = book
+            .concept_candidates("alpha", Some("1.2"), Some(50))
+            .unwrap();
+        assert_eq!(repeated_first.candidates[1].node_id, "concept:z-context");
+        assert_eq!(repeated_first.candidates[2].node_id, "concept:a-context");
+    }
+
+    #[test]
+    fn concept_candidates_v2_enforces_counts_limits_and_validation() {
+        let single = scale_candidate_book(1)
+            .concept_candidates("scale", None, None)
+            .unwrap();
+        assert_eq!((single.matched_count, single.returned_count), (1, 1));
+        assert!(!single.truncated);
+
+        let thirteen = scale_candidate_book(13)
+            .concept_candidates("scale", None, None)
+            .unwrap();
+        assert_eq!((thirteen.matched_count, thirteen.returned_count), (13, 12));
+        assert!(thirteen.truncated);
+
+        let fifty = scale_candidate_book(50)
+            .concept_candidates("scale", None, Some(50))
+            .unwrap();
+        assert_eq!((fifty.matched_count, fifty.returned_count), (50, 50));
+        assert!(!fifty.truncated);
+
+        let fifty_one_book = scale_candidate_book(51);
+        let fifty_one = fifty_one_book
+            .concept_candidates("scale", None, Some(50))
+            .unwrap();
+        assert_eq!(
+            (fifty_one.matched_count, fifty_one.returned_count),
+            (51, 50)
+        );
+        assert!(fifty_one.truncated);
+        assert_eq!(
+            fifty_one_book
+                .concept_candidates("scale", None, Some(1))
+                .unwrap()
+                .returned_count,
+            1
+        );
+        for invalid_limit in [0, 51] {
+            let error = fifty_one_book
+                .concept_candidates("scale", None, Some(invalid_limit))
+                .unwrap_err();
+            assert_eq!(error.error_code, "BOOK_TOOL_INPUT_INVALID");
+            assert_eq!(error.category, "validation");
+        }
+        for invalid_query in [" ".to_string(), "x".repeat(MAX_CONCEPT_QUERY_CHARS + 1)] {
+            let error = fifty_one_book
+                .concept_candidates(&invalid_query, None, None)
+                .unwrap_err();
+            assert_eq!(error.error_code, "BOOK_TOOL_INPUT_INVALID");
+            assert_eq!(error.category, "validation");
+        }
+        assert_eq!(
+            fifty_one_book
+                .concept_candidates("scale", Some("9.9"), None)
+                .unwrap_err()
+                .error_code,
+            "LID_NOT_FOUND"
         );
     }
 
