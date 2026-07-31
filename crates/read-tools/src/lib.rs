@@ -1858,40 +1858,45 @@ fn lexical_tokens(value: &str) -> Vec<String> {
     tokens
 }
 
-fn lexical_match(
+#[derive(Debug, Default)]
+struct LexicalAnalysis {
+    legacy_exact_label: bool,
+    label_terms: Vec<String>,
+    approximate_label_terms: Vec<String>,
+    occurrence_hit_count: usize,
+}
+
+fn unique_lexical_tokens(value: &str) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    lexical_tokens(value)
+        .into_iter()
+        .filter(|token| seen.insert(token.clone()))
+        .collect()
+}
+
+fn analyze_lexical_match(
     target: &str,
     labels: &[String],
     aliases: &[String],
     occurrence_texts: &[String],
-) -> (CatalogRecallStrength, u32, Vec<String>) {
-    let target_tokens: BTreeSet<String> = lexical_tokens(target).into_iter().collect();
+) -> LexicalAnalysis {
+    let query_terms = unique_lexical_tokens(target);
+    let target_tokens: BTreeSet<String> = query_terms.iter().cloned().collect();
     let target_joined = target_tokens.iter().cloned().collect::<Vec<_>>().join(" ");
     let mut label_tokens = BTreeSet::new();
-    let mut exact_full = false;
+    let mut legacy_exact_label = false;
     for field in labels.iter().chain(aliases) {
         let tokens = lexical_tokens(field);
         let joined = tokens.join(" ");
-        exact_full |= !joined.is_empty() && joined == target_joined;
+        legacy_exact_label |= !joined.is_empty() && joined == target_joined;
         label_tokens.extend(tokens);
     }
-    let direct_overlap = target_tokens.intersection(&label_tokens).count();
-    if exact_full || direct_overlap > 0 {
-        return (
-            CatalogRecallStrength::Direct,
-            9_000
-                + u32::try_from(direct_overlap)
-                    .unwrap_or(u32::MAX)
-                    .saturating_mul(100)
-                + u32::from(exact_full) * 900,
-            vec![if exact_full {
-                "exact label or alias".into()
-            } else {
-                "direct label token".into()
-            }],
-        );
-    }
-
-    let approximate_overlap = target_tokens
+    let label_terms = query_terms
+        .iter()
+        .filter(|term| label_tokens.contains(*term))
+        .cloned()
+        .collect();
+    let approximate_label_terms = query_terms
         .iter()
         .filter(|target_token| {
             target_token.chars().count() > 1
@@ -1900,7 +1905,50 @@ fn lexical_match(
                         || target_token.contains(label_token.as_str())
                 })
         })
+        .cloned()
+        .collect();
+    let occurrence_tokens = occurrence_texts
+        .iter()
+        .flat_map(|text| lexical_tokens(text))
+        .collect::<Vec<_>>();
+    let occurrence_hit_count = occurrence_tokens
+        .iter()
+        .filter(|token| target_tokens.contains(*token))
         .count();
+
+    LexicalAnalysis {
+        legacy_exact_label,
+        label_terms,
+        approximate_label_terms,
+        occurrence_hit_count,
+    }
+}
+
+fn lexical_match(
+    target: &str,
+    labels: &[String],
+    aliases: &[String],
+    occurrence_texts: &[String],
+) -> (CatalogRecallStrength, u32, Vec<String>) {
+    let analysis = analyze_lexical_match(target, labels, aliases, occurrence_texts);
+    let direct_overlap = analysis.label_terms.len();
+    if analysis.legacy_exact_label || direct_overlap > 0 {
+        return (
+            CatalogRecallStrength::Direct,
+            9_000
+                + u32::try_from(direct_overlap)
+                    .unwrap_or(u32::MAX)
+                    .saturating_mul(100)
+                + u32::from(analysis.legacy_exact_label) * 900,
+            vec![if analysis.legacy_exact_label {
+                "exact label or alias".into()
+            } else {
+                "direct label token".into()
+            }],
+        );
+    }
+
+    let approximate_overlap = analysis.approximate_label_terms.len();
     if approximate_overlap > 0 {
         return (
             CatalogRecallStrength::Approximate,
@@ -1912,11 +1960,7 @@ fn lexical_match(
         );
     }
 
-    let context_hits = occurrence_texts
-        .iter()
-        .flat_map(|text| lexical_tokens(text))
-        .filter(|token| target_tokens.contains(token))
-        .count();
+    let context_hits = analysis.occurrence_hit_count;
     if context_hits > 0 {
         return (
             CatalogRecallStrength::ContextOnly,
