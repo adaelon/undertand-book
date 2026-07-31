@@ -2,7 +2,7 @@
 
 > 定位:把按展示名称精确寻址的 `book.concept` 升级为全书确定性候选发现工具，让外层 Agent 在无 MCP 内置 LLM 的情况下找到用户不会准确复述名称的图谱节点。
 > 冻结决策:[ADR-0097](adr/0097-book-concept-deterministic-candidate-recall.md)。
-> 状态:BC0-BC4 已完成；BC5 待实施。
+> 状态:BC0-BC5 已完成；功能发布面已收口，正式发布门仍被 §11 所列既有非任务基线阻断。
 
 ## 0. 对齐确认单
 
@@ -251,15 +251,23 @@ BC0 docs [本次完成]
 
 **Verify**:`cargo test -p runtime concept_routing`;`cargo test -p server mcp`;`cargo test -p runtime query`；MCP stdio smoke。
 
-## 11. BC5 - 真书回放与发布门 [Cross-cutting]
+## 11. BC5 - 真书回放与发布门 [Cross-cutting]（完成 2026-07-31）
 
-**Do**:用当前 `quantification-essence` 构建产物冻结 `harness` gold case，验证候选包含“模型与脚手架的消长关系”、排序原因、完整 occurrence 和后续 `book.text`；执行三表面 parity 与 workspace 回归。
+**Do**:用实际包含目标节点的 `ai-agent-engineering` 构建产物冻结 `harness` gold case，验证候选包含“模型与脚手架的消长关系”、排序原因、完整 occurrence 和后续 `book.text`；执行三表面 parity 与 workspace 回归。原计划所写 `quantification-essence` 不含该节点，已按 source/base 事实校正 fixture，不放宽 matcher。
 
 **Do not**:不把真书候选数量写进 Prompt 或跨版本常量，不以 LLM 自评代替结构断言，不因 gold 失败放宽 tier 或静默 fallback。
 
 **Done**:同一 source revision 下 Core/Resident/MCP 候选顺序与计数一致；无 Provider 可完成 concept→text；所有 query characterization 仍绿；文档链路已更新。
 
 **Verify**:专用 real-book smoke；`cargo test --workspace`;`pnpm test`;`pnpm build`;`git diff --check`。
+
+验证结果:
+
+- `smoke-concept-v2-real-book.mjs` 固定 `ai-agent-engineering` 的 base SHA-256 `19654e1586b37d5366ada1bd62e90e19ab6dd00842484ba60a4d3e7c6d9e1472`、source SHA-256 `54bc5704d440c74631088fa2f321ee653aa2d8538ae1571279db474ba962d664`；Resident/REST/MCP 的 `模型 脚手架` 同序 12 候选，目标首位，Resident trace 为 `book.concept -> book.text`。
+- 宽查询 `harness, limit=50` 得到 82/50/truncated，`concept:model_harness_tradeoff` 位于 index 48，`occurrence_text` 指向 `1.6.8.13.12`；完整原文经 `book.text` 命中。
+- BC 专属 ReadTools/Contracts/Runtime/Server 与 `book.query` characterization 全绿；Web 37 files/210 tests、`pnpm build` 全绿。
+- `cargo test --workspace` 的唯一失败是既有 `search_text_real_book_replays_all_formula_occurrences`：旧 gold `1.10.3.10` 与当前 `quantification-essence` 产物 `1.9.3.10` 错配，不属于 BC5，不在本切片改写。
+- 原始 `pnpm test` 为 543/551，8 个失败均为 automatic-build / paper router / profile router 的固定 wall-clock timeout；同 8 files 单 worker 复放 50/50 全绿。未提高 timeout 或修改无关测试；正式发布门保留阻断状态。
 
 ## 12. 测试矩阵
 
