@@ -856,11 +856,11 @@ export function buildAutomaticBuildSnapshot(
   const pass2 = computePass2Status(packets, pass2Meta);
   const pass2Closed = profileArtifactMatches(path.join(target.workspace_dir, "pass2_audit.json"), target);
   stages.push(stageState("pass2", pass2.pending, pass2Closed, pass2WorkUnits));
-  if (pass2.pending.length || !pass2Closed) return { target, stages };
-
-  const pass2Audit = readJson<Parameters<typeof buildBookStructureUnitSources>[0]["pass2Audit"]>(
-    path.join(target.workspace_dir, "pass2_audit.json"),
-  );
+  const pass2Audit = pass2Closed
+    ? readJson<NonNullable<Parameters<typeof buildBookStructureUnitSources>[0]["pass2Audit"]>>(
+        path.join(target.workspace_dir, "pass2_audit.json"),
+      )
+    : undefined;
   const unitSources = buildBookStructureUnitSources({
     lidNodes: loaded.lidNodes,
     source: loaded.source,
@@ -1008,10 +1008,13 @@ function validateExecutionClosure(plan: BuildPlanV1): AutomaticBuildStage[] | Au
   const expectedStandard = standardDeepStageClosure(plan.content_profile);
   const selected = plan.public_stage_closure;
   if (plan.recipe_id === "standard_deep") {
-    if (canonicalBuildJson(selected) !== canonicalBuildJson(expectedStandard)) {
+    const expectedSelected = standardDeepStageClosure(plan.content_profile, {
+      pass2: selected.includes("pass2") ? "enabled" : "disabled",
+    });
+    if (canonicalBuildJson(selected) !== canonicalBuildJson(expectedSelected)) {
       return planGateAction(
         "build_plan_closure_drift",
-        "standard_deep must use the exact current profile stage closure",
+        "standard_deep must use an exact current profile stage closure with its confirmed Pass2 choice",
         plan,
       );
     }

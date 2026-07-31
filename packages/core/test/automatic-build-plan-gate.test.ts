@@ -62,7 +62,12 @@ function snapshot(
 
 function confirmedStandardPlan(
   current: AutomaticBuildSnapshot,
-  options: { source_fingerprint?: string; content_profile?: BuildContentProfile; max_total_tokens?: number } = {},
+  options: {
+    source_fingerprint?: string;
+    content_profile?: BuildContentProfile;
+    max_total_tokens?: number;
+    pass2?: "enabled" | "disabled";
+  } = {},
 ): BuildPlanV1 {
   const draft = compileBuildMode({
     mode: "standard_deep",
@@ -76,6 +81,7 @@ function confirmedStandardPlan(
       ...(options.max_total_tokens !== undefined ? { max_total_tokens: options.max_total_tokens } : {}),
       on_exceed: "needs_user",
     },
+    ...(options.pass2 ? { pass2: options.pass2 } : {}),
     public_freshness: inspectAutomaticBuildStageFreshness(current),
   }).plan!;
   return transitionBuildPlan(draft, "confirmed", { at: NOW, confirmation_source: "reader_ui" });
@@ -189,6 +195,22 @@ describe("IP4 confirmed BuildPlan execution gate", () => {
       kind: "done",
       book_id: "book-a",
       workspace_dir: "C:/library/book-a",
+    });
+  });
+
+  it("advances from profile sidecar directly to BookStructure when Pass2 is disabled", () => {
+    const current = snapshot("technical_learning", [
+      { stage: "pass1", closed: true },
+      { stage: "profile_sidecar", closed: true },
+      { stage: "pass2", closed: false },
+      { stage: "book_structure", closed: false },
+    ]);
+    const plan = confirmedStandardPlan(current, { pass2: "disabled" });
+
+    expect(plan.public_stage_closure).toEqual(["pass1", "profile_sidecar", "book_structure"]);
+    expect(nextPlannedAutomaticBuildAction(current, plan, 3)).toMatchObject({
+      kind: "extract",
+      stage: "book_structure",
     });
   });
 

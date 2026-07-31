@@ -4,6 +4,7 @@ import {
   compileBuildMode,
   compileBuildModeV2,
   type BuildMode,
+  type Pass2PlanChoice,
   type BuildPlanEstimateInputV1,
   type BuildPlanEstimateInputV2,
 } from "./build-capability";
@@ -448,6 +449,7 @@ export function mapLegacyBuildInvocation(input: {
   target: BuildIntentTargetV1;
   now: string;
   budget?: BuildPlanBudgetV1;
+  pass2?: Pass2PlanChoice;
 }): BuildIntentSelectionV1 | null {
   if (input.invocation !== "explicit_full_build") return null;
   const draftInput: DraftBuildIntentSelectionInput = {
@@ -466,6 +468,7 @@ export function mapLegacyBuildInvocation(input: {
     revision: 1,
     created_at: input.now,
     budget: input.budget ?? { on_exceed: "needs_user" },
+    ...(input.pass2 ? { pass2: input.pass2 } : {}),
     public_freshness: input.target.public_freshness,
   });
   const plan = validateBuildPlanV1(compilation.plan);

@@ -31,6 +31,7 @@ import { BUILD_STAGE_DAG, type BuildStageId } from "./build-workbench";
 import { sidecarPlanOptionFor, type SidecarPlanOption } from "./sidecar-plan";
 
 export type BuildMode = "read_now" | "standard_deep" | "goal_directed";
+export type Pass2PlanChoice = "enabled" | "disabled";
 export type PrivateBuildArtifactType = Exclude<IntentArtifactType, "custom">;
 export type PrivateBuildCapabilityId = `private.${PrivateBuildArtifactType}`;
 export type BuildCapabilityId = "public.standard_deep" | PrivateBuildCapabilityId;
@@ -106,8 +107,8 @@ export const BUILD_CAPABILITY_REGISTRY: BuildCapabilityRegistry = deepFreeze({
     visibility: "public",
     supported_profiles: ["technical_learning", "paper"],
     profile_entry_stages: {
-      technical_learning: ["book_structure"],
-      paper: ["paper_metadata", "paper_lexicon", "paper_reading_guide"],
+      technical_learning: ["pass2", "book_structure"],
+      paper: ["paper_metadata", "paper_lexicon", "pass2", "paper_reading_guide"],
     },
     required_public_capabilities: ["foundation.lid"],
     validation_rules: ["current_build_stage_dag", "goal_agnostic_public_policy"],
@@ -156,10 +157,14 @@ function closureFromRegistry(
 
 export function standardDeepStageClosure(
   contentProfileInput: BuildContentProfile,
+  options: { pass2?: Pass2PlanChoice } = {},
   registry: BuildCapabilityRegistry = BUILD_CAPABILITY_REGISTRY,
 ): AutomaticBuildStage[] {
   const contentProfile = validateBuildContentProfile(contentProfileInput);
-  return closureFromRegistry(contentProfile, registry);
+  const pass2 = options.pass2 ?? "enabled";
+  if (pass2 !== "enabled" && pass2 !== "disabled") throw new Error(`unsupported Pass2 plan choice: ${String(pass2)}`);
+  const closure = closureFromRegistry(contentProfile, registry);
+  return pass2 === "enabled" ? closure : closure.filter((stage) => stage !== "pass2");
 }
 
 export function validateBuildCapabilityRegistry(input: unknown): BuildCapabilityRegistry {
@@ -227,6 +232,7 @@ export interface CompileBuildModeInput {
   estimate?: BuildPlanEstimateV1;
   intent?: unknown;
   requested_capability_ids?: string[];
+  pass2?: Pass2PlanChoice;
 }
 
 export interface BuildModeCompilationV1 {
@@ -266,6 +272,7 @@ export interface CompileBuildModeV2Input {
   estimate?: BuildPlanEstimateV1;
   intent?: unknown;
   selected_blueprints?: ArtifactBlueprintResolutionV1[];
+  pass2?: Pass2PlanChoice;
 }
 
 export interface BuildModeCompilationV2 {
@@ -355,8 +362,8 @@ export function compileBuildMode(
     throw new Error(`unsupported build mode: ${String(input.mode)}`);
   }
   if (input.mode === "read_now") {
-    if (input.intent !== undefined || input.requested_capability_ids?.length) {
-      throw new Error("read_now cannot carry an intent or build capability selection");
+    if (input.intent !== undefined || input.requested_capability_ids?.length || input.pass2 !== undefined) {
+      throw new Error("read_now cannot carry an intent, build capability, or Pass2 selection");
     }
     return { version: "build_mode_compilation.v1", mode: "read_now" };
   }
@@ -365,12 +372,14 @@ export function compileBuildMode(
   let intent: BuildIntentV1 | undefined;
   let privateCapabilityIds: PrivateBuildCapabilityId[] = [];
   let publicStages: AutomaticBuildStage[] = [];
+  const pass2Choice = input.pass2 ?? "enabled";
   if (input.mode === "standard_deep") {
     if (input.intent !== undefined || input.requested_capability_ids?.length) {
       throw new Error("standard_deep cannot carry a private intent or capability selection");
     }
-    publicStages = standardDeepStageClosure(contentProfile, registry);
+    publicStages = standardDeepStageClosure(contentProfile, { pass2: pass2Choice }, registry);
   } else {
+    if (input.pass2 !== undefined) throw new Error("goal_directed cannot carry a Pass2 selection");
     intent = validateBuildIntentV1(input.intent);
     if (
       intent.book_id !== input.book_id
@@ -390,16 +399,25 @@ export function compileBuildMode(
     }
   }
 
+  const pass2WillChange = input.mode === "standard_deep"
+    && pass2Choice === "enabled"
+    && !freshness.get("public.pass2")?.fresh;
+  const invalidatedByPass2 = new Set<AutomaticBuildStage>(
+    pass2WillChange ? ["book_structure", "paper_reading_guide"] : [],
+  );
   const reusedPublic = publicStages.flatMap((stage) => {
     const artifact = `public.${stage}`;
     const inspection = freshness.get(artifact);
-    return inspection?.fresh && inspection.freshness_digest
+    return inspection?.fresh && inspection.freshness_digest && !invalidatedByPass2.has(stage)
       ? [{ artifact, freshness_digest: inspection.freshness_digest }]
       : [];
   });
   const publicCreate = publicStages
     .map((stage) => `public.${stage}`)
-    .filter((artifact) => !freshness.get(artifact)?.fresh);
+    .filter((artifact) => {
+      const stage = artifact.slice("public.".length) as AutomaticBuildStage;
+      return !freshness.get(artifact)?.fresh || invalidatedByPass2.has(stage);
+    });
   const foundationReuse = input.mode === "goal_directed"
     ? [{
         artifact: "public.foundation",
@@ -413,7 +431,11 @@ export function compileBuildMode(
   const privateCreate = [...privateCapabilityIds];
   const reuse = [...foundationReuse, ...reusedPublic];
   const create = [...publicCreate, ...privateCreate];
-  const excluded = (Object.keys(registry) as BuildCapabilityId[])
+  const excluded = [
+    ...(input.mode === "standard_deep" && pass2Choice === "disabled"
+      ? [{ artifact: "public.pass2", reason: "disabled by the confirmed standard_deep plan" }]
+      : []),
+    ...(Object.keys(registry) as BuildCapabilityId[])
     .filter((id) => {
       if (input.mode === "standard_deep") return id !== "public.standard_deep";
       return id === "public.standard_deep" || !privateCapabilityIds.includes(id as PrivateBuildCapabilityId);
@@ -423,7 +445,8 @@ export function compileBuildMode(
       reason: input.mode === "standard_deep"
         ? "not selected by standard_deep"
         : "not required by selected capabilities",
-    }));
+    })),
+  ];
   const estimateInput: BuildPlanEstimateInputV1 = {
     version: "build_plan_estimate_input.v1",
     source_fingerprint: input.source_fingerprint,
@@ -527,8 +550,8 @@ export function compileBuildModeV2(input: CompileBuildModeV2Input): BuildModeCom
     throw new Error(`unsupported build mode: ${String(input.mode)}`);
   }
   if (input.mode === "read_now") {
-    if (input.intent !== undefined || input.selected_blueprints?.length) {
-      throw new Error("read_now cannot carry an intent or ArtifactBlueprint selection");
+    if (input.intent !== undefined || input.selected_blueprints?.length || input.pass2 !== undefined) {
+      throw new Error("read_now cannot carry an intent, ArtifactBlueprint, or Pass2 selection");
     }
     return { version: "build_mode_compilation.v2", mode: "read_now" };
   }
@@ -537,12 +560,14 @@ export function compileBuildModeV2(input: CompileBuildModeV2Input): BuildModeCom
   let intent: BuildIntentV2 | undefined;
   let selectedBlueprints: ArtifactBlueprintResolutionV1[] = [];
   let publicStages: AutomaticBuildStage[] = [];
+  const pass2Choice = input.pass2 ?? "enabled";
   if (input.mode === "standard_deep") {
     if (input.intent !== undefined || input.selected_blueprints?.length) {
       throw new Error("standard_deep cannot carry a private intent or ArtifactBlueprint selection");
     }
-    publicStages = standardDeepStageClosure(contentProfile);
+    publicStages = standardDeepStageClosure(contentProfile, { pass2: pass2Choice });
   } else {
+    if (input.pass2 !== undefined) throw new Error("goal_directed cannot carry a Pass2 selection");
     intent = validateBuildIntentV2(input.intent);
     if (intent.book_id !== input.book_id
       || intent.source_fingerprint !== input.source_fingerprint
@@ -552,16 +577,25 @@ export function compileBuildModeV2(input: CompileBuildModeV2Input): BuildModeCom
     selectedBlueprints = validateSelectedBlueprints(input.selected_blueprints ?? []);
   }
 
+  const pass2WillChange = input.mode === "standard_deep"
+    && pass2Choice === "enabled"
+    && !freshness.get("public.pass2")?.fresh;
+  const invalidatedByPass2 = new Set<AutomaticBuildStage>(
+    pass2WillChange ? ["book_structure", "paper_reading_guide"] : [],
+  );
   const reusedPublic = publicStages.flatMap((stage) => {
     const artifact = `public.${stage}`;
     const inspection = freshness.get(artifact);
-    return inspection?.fresh && inspection.freshness_digest
+    return inspection?.fresh && inspection.freshness_digest && !invalidatedByPass2.has(stage)
       ? [{ artifact, freshness_digest: inspection.freshness_digest }]
       : [];
   });
   const publicCreate = publicStages
     .map((stage) => `public.${stage}`)
-    .filter((artifact) => !freshness.get(artifact)?.fresh);
+    .filter((artifact) => {
+      const stage = artifact.slice("public.".length) as AutomaticBuildStage;
+      return !freshness.get(artifact)?.fresh || invalidatedByPass2.has(stage);
+    });
   const intentDigest = intent ? computeBuildIntentDigestV2(intent) : undefined;
   const privateArtifacts = intent && intentDigest
     ? selectedBlueprints.map((resolution, index) => ({
@@ -590,10 +624,15 @@ export function compileBuildModeV2(input: CompileBuildModeV2Input): BuildModeCom
   const privateCreate = privateArtifacts.map((artifact) => `private.${artifact.artifact_id}`);
   const create = [...publicCreate, ...privateCreate];
   const excluded = input.mode === "standard_deep"
-    ? PRIVATE_ARTIFACT_TYPES.map((artifact) => ({
-        artifact: `private.${artifact}`,
-        reason: "not selected by standard_deep",
-      }))
+    ? [
+        ...(pass2Choice === "disabled"
+          ? [{ artifact: "public.pass2", reason: "disabled by the confirmed standard_deep plan" }]
+          : []),
+        ...PRIVATE_ARTIFACT_TYPES.map((artifact) => ({
+          artifact: `private.${artifact}`,
+          reason: "not selected by standard_deep",
+        })),
+      ]
     : [{ artifact: "public.standard_deep", reason: "not required by selected blueprints" }];
   const estimateInput: BuildPlanEstimateInputV2 = {
     version: "build_plan_estimate_input.v2",

@@ -30,7 +30,7 @@ export interface BookStructureBuildContext extends LoadedBook {
   base: ReadOnlyBase;
   discourseIndex: TechnicalLearningDiscourseIndex;
   formulaSemantics: FormulaSemantics[];
-  pass2Audit: Pass2BuildAuditSidecar;
+  pass2Audit?: Pass2BuildAuditSidecar;
   unitSources: BookStructureUnitSource[];
   contentProfile: ContentProfileDefinition;
 }
@@ -75,13 +75,12 @@ export function loadBookStructureBuildContext(
   requireFile(basePath, "base.json");
   requireFile(discoursePath, "discourse_index.json (run profile-sidecar-batch first)");
   requireFile(formulaPath, "formula_semantics.json (run profile-sidecar-batch first)");
-  requireFile(pass2Path, "pass2_audit.json (run pass2-batch first)");
 
   const base = readJson<ReadOnlyBase>(basePath);
   const discourseIndex = readJson<TechnicalLearningDiscourseIndex>(discoursePath);
   const formulaSidecar = readJson<{ items?: FormulaSemantics[] } | FormulaSemantics[]>(formulaPath);
   const formulaSemantics = Array.isArray(formulaSidecar) ? formulaSidecar : formulaSidecar.items ?? [];
-  const pass2Audit = readJson<Pass2BuildAuditSidecar>(pass2Path);
+  const pass2Audit = existsSync(pass2Path) ? readJson<Pass2BuildAuditSidecar>(pass2Path) : undefined;
   const resolvedContentProfile = contentProfile ?? TECHNICAL_LEARNING_PROFILE;
   const unitSources = buildBookStructureUnitSources({
     lidNodes: loaded.lidNodes,
@@ -90,7 +89,7 @@ export function loadBookStructureBuildContext(
     graphEdges: base.graph_edges,
     discourseIndex,
     formulaSemantics,
-    pass2Audit,
+    ...(pass2Audit ? { pass2Audit } : {}),
     contentProfile: resolvedContentProfile,
   });
 
@@ -103,7 +102,7 @@ export function loadBookStructureBuildContext(
     base,
     discourseIndex,
     formulaSemantics,
-    pass2Audit,
+    ...(pass2Audit ? { pass2Audit } : {}),
     unitSources,
     contentProfile: resolvedContentProfile,
   };

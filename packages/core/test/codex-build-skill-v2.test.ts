@@ -40,6 +40,9 @@ describe("Codex-owned build planning skill v2", () => {
         expect(skill, `${relativePath} missing ${marker}`).toContain(marker);
       }
       expect(skill.indexOf("planning.context")).toBeLessThan(skill.indexOf("draft.candidate"));
+      expect(skill).toContain("pass2=enabled|disabled");
+      expect(skill).toContain("--pass2 <enabled|disabled>");
+      expect(skill.indexOf("pass2=enabled|disabled")).toBeLessThan(skill.indexOf("legacy-plan <target>"));
     }
   });
 

@@ -24,7 +24,7 @@ import {
 } from "./book-structure-common";
 
 const args = process.argv.slice(2);
-const VALUE_FLAGS = new Set(["--paper-subtype"]);
+const VALUE_FLAGS = new Set(["--paper-subtype", "--pass2"]);
 const BOOL_FLAGS = new Set(["--allow-partial", "--run", "--seed-book-structure-smoke", "--skip-reading-guide-smoke"]);
 const opts: Record<string, string | undefined> = {};
 const positional: string[] = [];
@@ -46,9 +46,12 @@ for (let i = 0; i < args.length; i++) {
 
 const bookDir = positional[0];
 const paperSubtype = opts["--paper-subtype"] ?? "research_article";
-if (!bookDir || (paperSubtype !== "research_article" && paperSubtype !== "survey")) {
+const pass2 = opts["--pass2"] ?? "enabled";
+if (!bookDir
+  || (paperSubtype !== "research_article" && paperSubtype !== "survey")
+  || (pass2 !== "enabled" && pass2 !== "disabled")) {
   console.error(
-    "usage: tsx skills/build/paper-projection-chain.ts <.understand-book/book_id> [--paper-subtype research_article|survey] [--allow-partial] [--run] [--seed-book-structure-smoke] [--skip-reading-guide-smoke]",
+    "usage: tsx skills/build/paper-projection-chain.ts <.understand-book/book_id> [--paper-subtype research_article|survey] [--pass2 enabled|disabled] [--allow-partial] [--run] [--seed-book-structure-smoke] [--skip-reading-guide-smoke]",
   );
   process.exit(2);
 }
@@ -121,6 +124,7 @@ function seedBookStructureSmokeArtifacts(plan: PaperProjectionChainPlan): void {
 const plan = buildPaperProjectionChainPlan(bookDir, {
   allow_partial: bools.has("--allow-partial"),
   paper_subtype: paperSubtype,
+  pass2,
 });
 const planDir = path.join(plan.book_dir, ".build", "paper-projection-chain");
 mkdirSync(planDir, { recursive: true });

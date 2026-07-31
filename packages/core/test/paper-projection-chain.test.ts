@@ -99,6 +99,23 @@ describe("PH8 paper projection chain", () => {
     });
   });
 
+  it("can omit Pass2 while retaining BookStructure with no audit input requirement", () => {
+    const dir = tempDir();
+    writeTrustedBook(dir);
+
+    const plan = buildPaperProjectionChainPlan(dir, { pass2: "disabled" });
+
+    expect(plan.stages.map((stage) => stage.stage)).toEqual([
+      "paper_metadata",
+      "paper_lexicon",
+      "profile_sidecar",
+      "book_structure",
+      "paper_reading_guide",
+    ]);
+    const bookStructure = plan.stages.find((stage) => stage.stage === "book_structure")!;
+    expect(bookStructure.required_inputs.some((input) => input.endsWith("pass2_audit.json"))).toBe(false);
+  });
+
   it("rejects stale canonical source hashes before planning projections", () => {
     const dir = tempDir();
     writeTrustedBook(dir, "Trusted source.\n");

@@ -180,6 +180,19 @@ describe("IP3 capability registry and deterministic BuildPlan compiler", () => {
       "book_structure",
       "paper_reading_guide",
     ]);
+    expect(standardDeepStageClosure(profile("technical_learning"), { pass2: "disabled" })).toEqual([
+      "pass1",
+      "profile_sidecar",
+      "book_structure",
+    ]);
+    expect(standardDeepStageClosure(profile("paper"), { pass2: "disabled" })).toEqual([
+      "pass1",
+      "paper_metadata",
+      "paper_lexicon",
+      "profile_sidecar",
+      "book_structure",
+      "paper_reading_guide",
+    ]);
 
     const paperFreshness = inspectAutomaticBuildStageFreshness(
       snapshot("paper", ["pass1", "paper_metadata"]),
@@ -206,6 +219,54 @@ describe("IP3 capability registry and deterministic BuildPlan compiler", () => {
       "public.book_structure",
       "public.paper_reading_guide",
     ]);
+
+    const withoutPass2 = compileBuildMode({
+      mode: "standard_deep",
+      pass2: "disabled",
+      book_id: "book-technical-no-pass2",
+      source_fingerprint: "source-technical-no-pass2",
+      content_profile: profile("technical_learning"),
+      plan_id: "plan-technical-no-pass2",
+      revision: 1,
+      created_at: NOW,
+      budget: { on_exceed: "needs_user" },
+      public_freshness: [],
+    });
+    expect(withoutPass2.plan?.public_stage_closure).toEqual([
+      "pass1",
+      "profile_sidecar",
+      "book_structure",
+    ]);
+    expect(withoutPass2.plan?.create).toEqual([
+      "public.pass1",
+      "public.profile_sidecar",
+      "public.book_structure",
+    ]);
+    expect(withoutPass2.plan?.excluded).toContainEqual({
+      artifact: "public.pass2",
+      reason: "disabled by the confirmed standard_deep plan",
+    });
+
+    const stalePass2WithFreshStructure = inspectAutomaticBuildStageFreshness(
+      snapshot("technical_learning", ["pass1", "profile_sidecar", "book_structure"]),
+    );
+    const enablingPass2 = compileBuildMode({
+      mode: "standard_deep",
+      pass2: "enabled",
+      book_id: "book-technical-enable-pass2",
+      source_fingerprint: "source-technical_learning",
+      content_profile: profile("technical_learning"),
+      plan_id: "plan-technical-enable-pass2",
+      revision: 1,
+      created_at: NOW,
+      budget: { on_exceed: "needs_user" },
+      public_freshness: stalePass2WithFreshStructure,
+    });
+    expect(enablingPass2.plan?.reuse.map((artifact) => artifact.artifact)).toEqual([
+      "public.pass1",
+      "public.profile_sidecar",
+    ]);
+    expect(enablingPass2.plan?.create).toEqual(["public.pass2", "public.book_structure"]);
   });
 
   it("reuses the four SidecarPlan contracts as private lid-required overlays", () => {

@@ -153,4 +153,26 @@ describe("AA3 BuildIntentV2 and BuildPlanV2", () => {
       }],
     });
   });
+
+  it("binds a disabled Pass2 choice into a V2 standard-deep plan", () => {
+    const compiled = compileBuildModeV2({
+      mode: "standard_deep",
+      pass2: "disabled",
+      book_id: "book-v2-no-pass2",
+      source_fingerprint: "source-v2-no-pass2",
+      content_profile: { id: "technical_learning", version: "technical_learning_v0" },
+      plan_id: "plan-v2-no-pass2",
+      revision: 1,
+      created_at: NOW,
+      budget: { on_exceed: "needs_user" },
+      public_freshness: [],
+    });
+
+    expect(compiled.plan?.public_stage_closure).toEqual(["pass1", "profile_sidecar", "book_structure"]);
+    expect(compiled.plan?.create).toEqual(["public.pass1", "public.profile_sidecar", "public.book_structure"]);
+    expect(compiled.plan?.excluded).toContainEqual({
+      artifact: "public.pass2",
+      reason: "disabled by the confirmed standard_deep plan",
+    });
+  });
 });

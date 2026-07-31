@@ -70,4 +70,21 @@ describe("IP8 explicit legacy full-build compatibility", () => {
     });
     expect(validateBuildPlanV1(JSON.parse(readFileSync(result.build_plan_path, "utf8")))).toEqual(result.plan);
   });
+
+  it("binds an explicit disabled Pass2 choice into the persisted standard closure", () => {
+    const root = mkdtempSync(path.join(tmpdir(), "understand-book-ip8-no-pass2-"));
+    const workspace = writeTechnicalLearningWorkspace(root);
+
+    const result = prepareExplicitLegacyBuildPlan(workspace, root, {
+      now: "2026-07-31T08:15:00.000Z",
+      pass2: "disabled",
+    });
+
+    expect(result.plan.public_stage_closure).toEqual(["pass1", "profile_sidecar", "book_structure"]);
+    expect(result.plan.excluded).toContainEqual({
+      artifact: "public.pass2",
+      reason: "disabled by the confirmed standard_deep plan",
+    });
+    expect(validateBuildPlanV1(JSON.parse(readFileSync(result.build_plan_path, "utf8")))).toEqual(result.plan);
+  });
 });

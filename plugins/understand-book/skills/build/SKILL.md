@@ -9,6 +9,20 @@ Run the deterministic automatic-build v2 loop until `done`, `needs_user`, or an 
 failure. Do not stop at ordinary stage boundaries, substitute generic summaries for extractor
 output, or treat conversation memory as build state.
 
+## Confirm the Pass2 choice
+
+Before creating any `standard_deep` plan, ask the user whether to run Pass2 long-range relation
+extraction. Explain that enabling it adds cross-section semantic links and extra model cost, while
+disabling it still builds BookStructure from Pass1 plus profile sidecars. Record the answer exactly
+as `pass2=enabled|disabled`; do not infer it from "full build", prior conversations, or existing
+artifacts. If the user has not answered, stop as `needs_user(pass2_choice_required)`.
+
+Bind that answer by passing `--pass2 <enabled|disabled>` to `legacy-plan` and verify that the shown
+`public_stage_closure` includes `pass2` only for `enabled`. An existing accepted Pass2 audit may
+still enrich BookStructure when Pass2 is not scheduled; absence of that audit must not block
+BookStructure. Do not ask this question for a goal-directed plan whose public closure does not
+contain BookStructure.
+
 ## Resolve the Reader controller and build engine
 
 1. Resolve `understand-book-build.exe` in this order:
@@ -114,7 +128,7 @@ Only the no-goal entry is the explicit legacy full-build command. Before protoco
 once to a confirmed `standard_deep` BuildPlan:
 
 ```text
-<build-exe> legacy-plan <target> --root <root> [quality and budget flags]
+<build-exe> legacy-plan <target> --root <root> --pass2 <enabled|disabled> [quality and budget flags]
 ```
 
 Consume only `explicit_legacy_build_plan.v1`, require

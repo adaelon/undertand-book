@@ -15,6 +15,18 @@ description: Build or resume a book workspace, optionally from a confirmed natur
 `needs_user`,或发生已耗尽自动修复的明确失败。不得只解释命令、只打印计划、只写 executor
 contract,也不得在普通 stage 边界停下等待用户继续。
 
+### Pass2 选择门禁
+
+创建任何 `standard_deep` 计划前,必须询问用户是否运行 Pass2 长程关系抽取:启用会增加跨章节
+语义边与模型成本;禁用仍以 Pass1 + profile sidecar 构建 BookStructure。把回答严格记录为
+`pass2=enabled|disabled`,不得从“完整构建”、旧对话或磁盘已有产物推断。尚未回答时停止为
+`needs_user(pass2_choice_required)`。
+
+把选择通过 `--pass2 <enabled|disabled>` 传给 `legacy-plan`,并核对展示的
+`public_stage_closure` 仅在 enabled 时包含 `pass2`。已有且通过门禁的 Pass2 audit 即使本计划不调度
+Pass2 也可继续增强 BookStructure;没有 audit 不得阻塞 BookStructure。若 goal-directed 计划的公共
+闭包不含 BookStructure,不询问本问题。
+
 1. 定位本插件根目录(含 `.codex-plugin/plugin.json`)和确定性构建 sidecar:
    - 若 `UNDERSTAND_BOOK_BUILD_EXE` 指向存在的文件,使用它。
    - Windows 安装版读取 `HKCU\Software\UnderstandBook` 的 `InstallDir`,使用同目录下的
@@ -24,7 +36,7 @@ contract,也不得在普通 stage 边界停下等待用户继续。
    - 仅插件开发/非 Windows 环境允许回退 Node:若缺少 `node_modules/tsx`,在插件根运行
      `pnpm install --frozen-lockfile`;依赖失败则报告阻塞,不得伪造构建。
    - 无自然语言目标时,本 skill 调用才是显式旧“完整预构建”命令。先运行
-     `<understand-book-build.exe> legacy-plan <target> --root <root> [策略与预算参数]`,只消费
+     `<understand-book-build.exe> legacy-plan <target> --root <root> --pass2 <enabled|disabled> [策略与预算参数]`,只消费
      `explicit_legacy_build_plan.v1`,要求 plan 为已确认 `standard_deep` 且
      `confirmation_source=explicit_legacy_command`,并保留 `build_plan_path`。打开、导入或恢复书籍
      不属于该调用,不得运行 `legacy-plan`;既有 SidecarPlan 也不得代替顶层 BuildPlan。
@@ -336,7 +348,7 @@ build-time harness 能力的一部分;TS 脚本只负责状态、输入、写盘
 3. **Pass1 局部抽取**:`packages/core/src/pass1-input.ts` 把每窗口组装成带 LID 标注的正文 → subagent `pass1-local-extractor`(5 并发,见 `agents/`)逐窗口出 `{nodes, edges(local)}` · S3 ✓骨架 `[ADR-0010]`
 4. **merge + 确定性图谱闸**(`packages/core/src/merge.ts:mergeAndGate`;按类型合并 occurrences + 悬空丢不重建 + 最小连坐 + 可观测报告 · S3 ✓ `[ADR-0011]`)
 5. **全局目录确定性投影**(`packages/core/src/catalog.ts:projectCatalog` · S3 ✓ `[ADR-0010]`)
-6. **PB6 profile sidecar + Pass2 长程边**:subagent `profile-sidecar-extractor` 产 `discourse_index.json` / `formula_semantics.json`;subagent `pass2-longrange-linker` 逐候选分类 long_range 边。
+6. **PB6 profile sidecar + 可选 Pass2 长程边**:subagent `profile-sidecar-extractor` 产 `discourse_index.json` / `formula_semantics.json`;仅在确认计划启用 Pass2 时由 `pass2-longrange-linker` 逐候选分类 long_range 边。
 7. **PB7 BookStructure 结构地图**:subagent `book-structure-extractor` 先逐结构单元产 unit cards,再 stitching 出 `spine + throughlines + key_stops`,经 gate 固化 `book_structure.json`。
 8. **自检闸 + 固化只读基座**(分区不变式 + 锚定率 ≥90%,产 `.understand-book/` · 下一刀)
 
@@ -469,7 +481,7 @@ TEXT
 
 ## Pass2 长程边编排 `[PB3 + PB6]`
 
-> Pass2 必须在 Pass1 `pass1-batch` 与 PB6 `profile-sidecar-batch` 都收口后运行。它从正式 `base.json`、`discourse_index.json`、`formula_semantics.json` 装配 work packet,不再从临时 candidate JSON 读取 discourse/formula。PP6 起 `--content-profile paper` 也可执行 Pass2,并使用扩展后的 paper edge contracts。
+> 仅在已确认 BuildPlan 启用 Pass2 时运行本趟。启用后仍必须等待 Pass1 `pass1-batch` 与 PB6 `profile-sidecar-batch` 都收口;它从正式 `base.json`、`discourse_index.json`、`formula_semantics.json` 装配 work packet,不再从临时 candidate JSON 读取 discourse/formula。PP6 起 `--content-profile paper` 也可执行 Pass2,并使用扩展后的 paper edge contracts。
 
 ```text
 1. tsx skills/build/pass2-status.ts <book> [--book-id <id>]
@@ -500,11 +512,11 @@ PP6 paper edge types:
 
 ## BookStructure 结构地图编排 `[PB7]`
 
-> BookStructure 必须在 `profile-sidecar-batch` 与 `pass2-batch` 都收口后运行。它只从公共书基座与 profile artifacts 装配输入,不读取 reader_profile / memory / note / highlight / 当前用户问题。PP7 起 `--content-profile paper` 会在 unit/stitch packet 中携带 `PAPER_BOOK_STRUCTURE_RULES`,但输出仍是共享 `book_structure.json`。
+> BookStructure 必须在 `profile-sidecar-batch` 收口后运行;Pass2 是可选增强,计划启用时须等 `pass2-batch` 收口,未启用且无 `pass2_audit.json` 时使用空长程边输入。它只从公共书基座与 profile artifacts 装配输入,不读取 reader_profile / memory / note / highlight / 当前用户问题。PP7 起 `--content-profile paper` 会在 unit/stitch packet 中携带 `PAPER_BOOK_STRUCTURE_RULES`,但输出仍是共享 `book_structure.json`。
 
 ```text
 1. tsx skills/build/book-structure-status.ts <book> [--book-id <id>]
-   -> 根据 `base.json` / `discourse_index.json` / `formula_semantics.json` / `pass2_audit.json`
+   -> 根据必需的 `base.json` / `discourse_index.json` / `formula_semantics.json` 与可选的 `pass2_audit.json`
       重算结构单元 unit jobs,按 content hash 检查 `.build/book-structure/units/<lid>.json`
 2. 对每个 pending unit job:
    a. tsx skills/build/book-structure-input.ts <book> unit:<lid> [--book-id <id>]

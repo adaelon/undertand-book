@@ -47,6 +47,7 @@ export interface PaperProjectionChainPlan {
 export interface BuildPaperProjectionChainPlanOptions {
   allow_partial?: boolean;
   paper_subtype?: "research_article" | "survey";
+  pass2?: "enabled" | "disabled";
 }
 
 export interface TrustedPaperProjectionSource {
@@ -161,6 +162,7 @@ export function buildPaperProjectionChainPlan(
   const trusted = assertTrustedPaperProjectionSource(bookDir);
   const paperSubtype = options.paper_subtype ?? "research_article";
   const allowPartial = options.allow_partial ?? false;
+  const pass2 = options.pass2 ?? "enabled";
   const sourcePath = trusted.trusted_source_path;
   const bookRoot = trusted.book_dir;
   const buildRoot = path.join(bookRoot, ".build");
@@ -200,7 +202,7 @@ export function buildPaperProjectionChainPlan(
       [path.join(bookRoot, "discourse_index.json"), path.join(bookRoot, "formula_semantics.json")],
       true,
     ),
-    batchStage(
+    ...(pass2 === "enabled" ? [batchStage(
       "pass2",
       "skills/build/pass2-batch.ts",
       sourcePath,
@@ -210,7 +212,7 @@ export function buildPaperProjectionChainPlan(
       [...commonRequired, path.join(bookRoot, "discourse_index.json"), path.join(bookRoot, "formula_semantics.json")],
       [path.join(bookRoot, "long_range_candidates.json"), path.join(bookRoot, "base.json"), path.join(bookRoot, "pass2_audit.json")],
       true,
-    ),
+    )] : []),
     batchStage(
       "book_structure",
       "skills/build/book-structure-batch.ts",
@@ -222,7 +224,7 @@ export function buildPaperProjectionChainPlan(
         ...commonRequired,
         path.join(bookRoot, "discourse_index.json"),
         path.join(bookRoot, "formula_semantics.json"),
-        path.join(bookRoot, "pass2_audit.json"),
+        ...(pass2 === "enabled" ? [path.join(bookRoot, "pass2_audit.json")] : []),
         path.join(buildRoot, "book-structure"),
       ],
       [path.join(bookRoot, "book_structure.json")],

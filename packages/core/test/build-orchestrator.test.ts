@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
@@ -253,6 +253,135 @@ describe("automatic build orchestrator", () => {
     };
 
     expect(nextAutomaticBuildAction(snapshot)).toEqual({ kind: "close_stage", stage: "pass1" });
+  });
+
+  it("exposes BookStructure without Pass2 and invalidates it when a Pass2 audit arrives later", () => {
+    const root = tempDir();
+    const { workspace, sourceFile, source } = writeTechnicalLearningWorkspace(root, "optional-pass2");
+    const target = resolveAutomaticBuildTarget(workspace, root);
+    const lidNodes = segment(markdownToBlocks(source));
+    const byLid = new Map(lidNodes.map((node) => [node.lid, node]));
+    const windows = splitWindows(lidNodes, source);
+    const profile = resolveContentProfile("technical_learning");
+    for (const window of windows) {
+      writeJson(
+        path.join(workspace, ".build", "pass1", `${window.id}.json`),
+        pass1Envelope(target, window.id, buildPass1Artifact(window, byLid, source, { nodes: [], edges: [] }, profile)),
+      );
+    }
+    writeJson(path.join(workspace, "long_range_candidates.json"), { candidates: [] });
+
+    const sidecarSnapshot = buildAutomaticBuildSnapshot(target);
+    const sidecarStage = sidecarSnapshot.stages.find((stage) => stage.stage === "profile_sidecar")!;
+    for (const unit of sidecarStage.pending_work_units ?? []) {
+      writeJson(path.join(workspace, ".build", "profile-sidecar", `${unit.work_unit_id}.json`), buildSemanticArtifactEnvelope({
+        target: target.target_ref,
+        stage: "profile_sidecar",
+        work_unit_id: unit.work_unit_id,
+        input_hash: unit.input_hash,
+        policy_fingerprint: unit.policy_fingerprint,
+        provenance: { executor: "test", model: "codex-test", attempt: 1, generated_at: "2026-07-31T00:00:00.000Z" },
+        payload: { content_hash: unit.input_hash, discourse_items: [], formula_semantics: [] },
+      }));
+    }
+    const header = { book_id: target.book_id, profile_id: target.profile_id };
+    writeJson(path.join(workspace, "discourse_index.json"), { header, items: [] });
+    writeJson(path.join(workspace, "formula_semantics.json"), { header, items: [] });
+
+    const snapshot = buildAutomaticBuildSnapshot(target);
+    expect(existsSync(path.join(workspace, "pass2_audit.json"))).toBe(false);
+    expect(snapshot.stages.find((stage) => stage.stage === "pass2")).toMatchObject({ closed: false });
+    const bookStructure = snapshot.stages.find((stage) => stage.stage === "book_structure");
+    expect(bookStructure?.pending_work_units?.length).toBeGreaterThan(0);
+    expect(bookStructure?.pending_work_units?.every((unit) => unit.cost.candidate_count === 0)).toBe(true);
+    expect(target.source_path).toBe(path.resolve(sourceFile));
+
+    const unitWork = bookStructure?.pending_work_units ?? [];
+    for (const unit of unitWork) {
+      const unitLid = unit.work_unit_id.slice("unit:".length);
+      writeJson(
+        path.join(workspace, ".build", "book-structure", "units", `${unitLid}.json`),
+        buildSemanticArtifactEnvelope({
+          target: target.target_ref,
+          stage: "book_structure",
+          work_unit_id: unit.work_unit_id,
+          input_hash: unit.input_hash,
+          policy_fingerprint: unit.policy_fingerprint,
+          provenance: { executor: "test", model: "codex-test", attempt: 1, generated_at: "2026-07-31T00:00:00.000Z" },
+          payload: {
+            content_hash: unit.input_hash,
+            output: {
+              unit_card: {
+                unit_lid: unitLid,
+                role: "setup",
+                summary: { text: "Structure before Pass2.", evidence_lids: [unit.evidence_lids[0]] },
+                candidate_key_stops: [],
+                depends_on: [],
+                evidence_lids: unit.evidence_lids,
+              },
+            },
+          },
+        }),
+      );
+    }
+
+    const stitchSnapshot = buildAutomaticBuildSnapshot(target);
+    const stitch = stitchSnapshot.stages
+      .find((stage) => stage.stage === "book_structure")
+      ?.pending_work_units?.find((unit) => unit.work_unit_id === "stitch");
+    expect(stitch).toBeDefined();
+    writeJson(
+      path.join(workspace, ".build", "book-structure", "stitch.json"),
+      buildSemanticArtifactEnvelope({
+        target: target.target_ref,
+        stage: "book_structure",
+        work_unit_id: "stitch",
+        input_hash: stitch!.input_hash,
+        policy_fingerprint: stitch!.policy_fingerprint,
+        provenance: { executor: "test", model: "codex-test", attempt: 1, generated_at: "2026-07-31T00:00:00.000Z" },
+        payload: {
+          content_hash: stitch!.input_hash,
+          output: { spine: [], throughlines: [], key_stops: [] },
+        },
+      }),
+    );
+    writeJson(path.join(workspace, "book_structure.json"), {
+      header,
+      spine: [],
+      throughlines: [],
+      key_stops: [],
+    });
+    expect(buildAutomaticBuildSnapshot(target).stages.find((stage) => stage.stage === "book_structure")).toMatchObject({
+      closed: true,
+      pending_tasks: [],
+    });
+
+    const evidenceLid = unitWork[0].evidence_lids[0];
+    writeJson(path.join(workspace, "pass2_audit.json"), {
+      header,
+      accepted: [{
+        candidate_id: "late-pass2-edge",
+        source: "concept:source",
+        target: "concept:target",
+        type: "builds_on",
+        source_evidence_lids: [evidenceLid],
+        target_evidence_lids: [evidenceLid],
+        evidence_lids: [evidenceLid],
+        support_level: "explicit",
+        rationale: "A late accepted Pass2 edge changes the BookStructure input.",
+      }],
+      pending: [],
+      rejected: [],
+      gate_dropped: [],
+    });
+
+    const enrichedSnapshot = buildAutomaticBuildSnapshot(target);
+    expect(enrichedSnapshot.stages.find((stage) => stage.stage === "pass2")).toMatchObject({ closed: true });
+    const staleStructure = enrichedSnapshot.stages.find((stage) => stage.stage === "book_structure");
+    expect(staleStructure?.closed).toBe(false);
+    expect(staleStructure?.pending_work_units?.some((unit) => (
+      unit.work_unit_id.startsWith("unit:") && unit.cost.candidate_count === 1
+    ))).toBe(true);
   });
 
   it("reopens Pass1 when fresh artifacts disagree with the closed base graph", () => {

@@ -34,7 +34,7 @@ export const BUILD_STAGE_DAG: Record<BuildStageId, BuildStageNode> = {
   paper_lexicon: { id: "paper_lexicon", depends_on: ["pass1"] },
   profile_sidecar: { id: "profile_sidecar", depends_on: ["pass1"] },
   pass2: { id: "pass2", depends_on: ["profile_sidecar"] },
-  book_structure: { id: "book_structure", depends_on: ["pass2"] },
+  book_structure: { id: "book_structure", depends_on: ["profile_sidecar"] },
   paper_reading_guide: { id: "paper_reading_guide", depends_on: ["book_structure"] },
 };
 

@@ -15,6 +15,7 @@ import {
   type AutomaticBuildTargetResolutionOptions,
 } from "../../packages/core/src/build-orchestrator";
 import type { BuildPlanV1 } from "../../packages/core/src/build-intent";
+import type { Pass2PlanChoice } from "../../packages/core/src/build-capability";
 import { mapLegacyBuildInvocation } from "../../packages/core/src/build-intent-controller";
 import {
   readAutomaticBuildAttemptSnapshot,
@@ -542,7 +543,12 @@ export function automaticBuildPlan(
 export function prepareExplicitLegacyBuildPlan(
   targetInput: string,
   rootDir: string,
-  options: { now?: string; budget?: BuildPlanV1["budget"]; book_id?: string } = {},
+  options: {
+    now?: string;
+    budget?: BuildPlanV1["budget"];
+    book_id?: string;
+    pass2?: Pass2PlanChoice;
+  } = {},
 ) {
   const target = resolveAutomaticBuildTarget(targetInput, rootDir, { book_id: options.book_id });
   const now = options.now ?? new Date().toISOString();
@@ -559,10 +565,11 @@ export function prepareExplicitLegacyBuildPlan(
     },
     now,
     ...(options.budget ? { budget: options.budget } : {}),
+    ...(options.pass2 ? { pass2: options.pass2 } : {}),
   });
   if (!selection?.plan) throw new Error("explicit legacy full build did not compile a BuildPlan");
   const invocationId = createHash("sha256")
-    .update(canonicalAutomaticBuildJson({ target: target.target_ref, now }), "utf8")
+    .update(canonicalAutomaticBuildJson({ target: target.target_ref, now, pass2: options.pass2 ?? "enabled" }), "utf8")
     .digest("hex")
     .slice(0, 16);
   const directory = path.join(target.workspace_dir, ".build", "automatic-build", "v2", "legacy-plans");
@@ -1499,6 +1506,14 @@ function buildPlanFromArgs(argv: string[]): BuildPlanV1 | undefined {
   return JSON.parse(readFileSync(file, "utf8")) as BuildPlanV1;
 }
 
+function pass2ChoiceFromArgs(argv: string[]): Pass2PlanChoice {
+  const choice = valueArg(argv, "--pass2") ?? "enabled";
+  if (choice !== "enabled" && choice !== "disabled") {
+    throw new Error(`--pass2 must be enabled or disabled, got: ${choice}`);
+  }
+  return choice;
+}
+
 function resolveAutomaticBuildTargetFromArgs(
   targetInput: string,
   rootDir: string,
@@ -1511,7 +1526,7 @@ const argv = process.argv.slice(2);
 if (argv[0] === "legacy-plan") {
   const targetInput = argv[1];
   if (!targetInput) {
-    console.error("usage: tsx skills/build/automatic-build.ts legacy-plan <target> [--root <dir>] [--now <ISO timestamp>] [budget flags]");
+    console.error("usage: tsx skills/build/automatic-build.ts legacy-plan <target> [--root <dir>] [--now <ISO timestamp>] [--pass2 enabled|disabled] [budget flags]");
     process.exit(2);
   }
   printAutomaticBuildJson(prepareExplicitLegacyBuildPlan(
@@ -1520,6 +1535,7 @@ if (argv[0] === "legacy-plan") {
     {
       ...(valueArg(argv, "--now") ? { now: valueArg(argv, "--now") } : {}),
       ...(valueArg(argv, "--book-id") ? { book_id: valueArg(argv, "--book-id") } : {}),
+      pass2: pass2ChoiceFromArgs(argv),
       budget: {
         ...(valueArg(argv, "--max-estimated-total-tokens")
           ? { max_total_tokens: Number(valueArg(argv, "--max-estimated-total-tokens")) }
