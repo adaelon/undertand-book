@@ -1,4 +1,5 @@
 import bookStructurePrompt from "../../agents/book-structure-extractor.md";
+import dispatchExecutorPrompt from "../../agents/automatic-build-dispatch-executor.md";
 import canvasGeometry from "@napi-rs/canvas/geometry.js";
 import paperLexiconPrompt from "../../agents/paper-lexicon-extractor.md";
 import paperMetadataPrompt from "../../agents/paper-metadata-extractor.md";
@@ -6,6 +7,11 @@ import pass1Prompt from "../../agents/pass1-local-extractor.md";
 import pass2Prompt from "../../agents/pass2-longrange-linker.md";
 import "pdfjs-dist/legacy/build/pdf.worker.mjs";
 import profileSidecarPrompt from "../../agents/profile-sidecar-extractor.md";
+import {
+  AUTOMATIC_BUILD_EXECUTOR_PROMPT_MODES,
+  composeAutomaticBuildExecutorPrompt,
+  type AutomaticBuildExecutorPromptMode,
+} from "./executor-prompt";
 
 if (!globalThis.DOMMatrix) globalThis.DOMMatrix = canvasGeometry.DOMMatrix as typeof DOMMatrix;
 
@@ -65,12 +71,29 @@ async function runScript(script: string, args: string[]): Promise<void> {
 }
 
 if (command === "prompt") {
-  const prompt = argv[1] ? PROMPTS[argv[1]] : undefined;
+  const promptName = argv[1] ?? "";
+  const prompt = PROMPTS[promptName];
   if (!prompt) {
-    console.error(`unsupported extractor prompt: ${argv[1] ?? ""}`);
+    console.error(`unsupported extractor prompt: ${promptName}`);
     process.exit(2);
   }
-  process.stdout.write(prompt);
+  if (argv.length === 2) {
+    process.stdout.write(prompt);
+  } else {
+    const mode = argv[2] === "--executor-protocol" ? argv[3] : undefined;
+    if (argv.length !== 4
+      || !mode
+      || !(AUTOMATIC_BUILD_EXECUTOR_PROMPT_MODES as readonly string[]).includes(mode)) {
+      console.error("usage: understand-book-build prompt <extractor-name> [--executor-protocol dispatch|task]");
+      process.exit(2);
+    }
+    process.stdout.write(composeAutomaticBuildExecutorPrompt({
+      mode: mode as AutomaticBuildExecutorPromptMode,
+      extractor_name: promptName,
+      extractor_prompt: prompt,
+      protocol_wrapper: mode === "dispatch" ? dispatchExecutorPrompt : "",
+    }));
+  }
 } else if ([
   "protocol-doctor",
   "legacy-plan",

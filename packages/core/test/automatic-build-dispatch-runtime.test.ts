@@ -9,6 +9,7 @@ import {
   persistAutomaticBuildDispatch,
 } from "../src/automatic-build-dispatch-runtime";
 import { planAutomaticBuildExecutorDispatches } from "../src/automatic-build-dispatch";
+import { claimAutomaticBuildTask } from "../src/automatic-build-lease";
 import { failAutomaticBuildTask, submitAutomaticBuildCandidate } from "../src/automatic-build-mailbox";
 import {
   listAutomaticBuildStoredAttempts,
@@ -82,6 +83,26 @@ function commit(
   );
   expect(receipt.candidate_sha256).toBe(createHash("sha256").update(candidate).digest("hex"));
   return receipt;
+}
+
+function seedSemanticFailure(
+  target: ReturnType<typeof resolveAutomaticBuildTarget>,
+  workUnitId: string,
+  owner: string,
+  claimedAt: string,
+  failedAt: string,
+) {
+  const claim = claimAutomaticBuildTask(target, "profile_sidecar", workUnitId, {
+    owner,
+    now: claimedAt,
+    reserve_ttl_ms: 60_000,
+    max_semantic_attempts: 3,
+  });
+  if (claim.status !== "leased") throw new Error(`expected seed lease for ${workUnitId}`);
+  return failAutomaticBuildTask(target, claim.lease_ref, claim.lease.token, {
+    diagnostic_code: "semantic_invalid",
+    now: failedAt,
+  });
 }
 
 describe("automatic build executor dispatch runtime", () => {
@@ -238,5 +259,113 @@ describe("automatic build executor dispatch runtime", () => {
     expect(retried.status).toBe("leased");
     if (retried.status !== "leased") throw new Error("expected retry dispatch lease");
     expect(retried.claim.execution_identity.semantic_attempt).toBe(2);
+  });
+
+  it("partially finishes task_failure only after a terminal exhausted task and preserves the exact suffix", () => {
+    const { target, descriptors, manifest, bindings } = fixture();
+    const firstId = manifest.ordered_work_unit_ids[0];
+    seedSemanticFailure(target, firstId, "seed-failure-1", "2026-07-25T07:00:00.000Z", "2026-07-25T07:00:01.000Z");
+    seedSemanticFailure(target, firstId, "seed-failure-2", "2026-07-25T07:01:00.000Z", "2026-07-25T07:01:01.000Z");
+    persistAutomaticBuildDispatch(target, manifest, {
+      owner: `dispatch-exhausted:${manifest.dispatch_id}`,
+      created_at: "2026-07-25T07:02:00.000Z",
+      reserve_ttl_ms: 60_000,
+      run_ttl_ms: 1_800_000,
+    });
+    const third = advanceAutomaticBuildDispatch(target, "profile_sidecar", manifest.dispatch_id, {
+      descriptors,
+      task_bindings: bindings,
+      now: "2026-07-25T07:02:01.000Z",
+      max_semantic_attempts: 3,
+    });
+    if (third.status !== "leased") throw new Error("expected third semantic lease");
+    failAutomaticBuildTask(target, third.claim.lease_ref, third.claim.lease.token, {
+      diagnostic_code: "semantic_invalid",
+      now: "2026-07-25T07:02:02.000Z",
+    });
+    expect(advanceAutomaticBuildDispatch(target, "profile_sidecar", manifest.dispatch_id, {
+      descriptors,
+      task_bindings: bindings,
+      now: "2026-07-25T07:02:03.000Z",
+      max_semantic_attempts: 3,
+    })).toMatchObject({ status: "retry_exhausted", work_unit_id: firstId });
+    const receipt = finishAutomaticBuildDispatch(target, "profile_sidecar", manifest.dispatch_id, {
+      terminal_reason: "task_failure",
+      now: "2026-07-25T07:02:04.000Z",
+    });
+    expect(receipt.task_receipts).toHaveLength(1);
+    expect(receipt.unclaimed_work_unit_ids).toEqual(manifest.ordered_work_unit_ids.slice(1));
+  });
+
+  it("rejects task_failure without a canonical retryable failure receipt", () => {
+    const { target, manifest } = fixture();
+    persistAutomaticBuildDispatch(target, manifest, {
+      owner: `dispatch-no-failure:${manifest.dispatch_id}`,
+      created_at: "2026-07-25T08:00:00.000Z",
+      reserve_ttl_ms: 60_000,
+      run_ttl_ms: 1_800_000,
+    });
+    expect(() => finishAutomaticBuildDispatch(target, "profile_sidecar", manifest.dispatch_id, {
+      terminal_reason: "task_failure",
+      now: "2026-07-25T08:00:01.000Z",
+    })).toThrow("canonical retryable failure");
+  });
+
+  it("rejects task_failure while a dispatch lease is active", () => {
+    const { target, descriptors, manifest, bindings } = fixture();
+    persistAutomaticBuildDispatch(target, manifest, {
+      owner: `dispatch-active:${manifest.dispatch_id}`,
+      created_at: "2026-07-25T09:00:00.000Z",
+      reserve_ttl_ms: 60_000,
+      run_ttl_ms: 1_800_000,
+    });
+    const first = advanceAutomaticBuildDispatch(target, "profile_sidecar", manifest.dispatch_id, {
+      descriptors,
+      task_bindings: bindings,
+      now: "2026-07-25T09:00:01.000Z",
+    });
+    if (first.status !== "leased") throw new Error("expected first lease");
+    failAutomaticBuildTask(target, first.claim.lease_ref, first.claim.lease.token, {
+      diagnostic_code: "semantic_invalid",
+      now: "2026-07-25T09:00:02.000Z",
+    });
+    const active = advanceAutomaticBuildDispatch(target, "profile_sidecar", manifest.dispatch_id, {
+      descriptors,
+      task_bindings: bindings,
+      now: "2026-07-25T09:00:03.000Z",
+    });
+    if (active.status !== "leased") throw new Error("expected active suffix lease");
+    expect(() => finishAutomaticBuildDispatch(target, "profile_sidecar", manifest.dispatch_id, {
+      terminal_reason: "task_failure",
+      now: "2026-07-25T09:00:04.000Z",
+    })).toThrow("active lease");
+  });
+
+  it("rejects task_failure when the remaining work is not a strict unclaimed suffix", () => {
+    const { target, manifest } = fixture();
+    const owner = `dispatch-gap:${manifest.dispatch_id}`;
+    persistAutomaticBuildDispatch(target, manifest, {
+      owner,
+      created_at: "2026-07-25T10:00:00.000Z",
+      reserve_ttl_ms: 1_000,
+      run_ttl_ms: 1_800_000,
+    });
+    seedSemanticFailure(
+      target,
+      manifest.ordered_work_unit_ids[0],
+      owner,
+      "2026-07-25T10:00:01.000Z",
+      "2026-07-25T10:00:01.500Z",
+    );
+    const gap = claimAutomaticBuildTask(target, "profile_sidecar", manifest.ordered_work_unit_ids[2], {
+      owner,
+      now: "2026-07-25T10:00:02.000Z",
+      reserve_ttl_ms: 1_000,
+    });
+    if (gap.status !== "leased") throw new Error("expected out-of-order gap lease");
+    expect(() => finishAutomaticBuildDispatch(target, "profile_sidecar", manifest.dispatch_id, {
+      terminal_reason: "task_failure",
+      now: "2026-07-25T10:00:04.000Z",
+    })).toThrow("strict unclaimed suffix");
   });
 });

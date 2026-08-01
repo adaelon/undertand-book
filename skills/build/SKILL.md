@@ -153,8 +153,13 @@ automatic-build loop。Reader 已确认同一精确 plan 也可继续。用户�
 
 3. 只消费 stdout 的 `automatic_build_next.v1` JSON:
    - `action.kind=dispatch`:启动数必须等于 `action.dispatches.length` 的专用 subagent,不得按
-     manifest 内 task 数启动。每个 subagent 只接收同一个 extractor prompt 与一个
-     `automatic_build_dispatch_executor.v1` 信封,并独占其 `dispatch_run_id`。它循环执行
+     manifest 内 task 数启动。每个 dispatch 必须提供 `executor_handoff`,其私有文件是一个
+     `automatic_build_dispatch_executor_handoff.v1`,只含完整 extractor prompt 与一个
+     `automatic_build_dispatch_executor.v1` 信封。root 先核对文件存在、`byte_length` 与 SHA-256,
+     再用短 `spawn_agent` 调用只发送 handoff 绝对路径、摘要与“读取后执行”的固定指令;禁止把
+     完整 prompt/envelope 内联进 tool payload、聊天或 stdout。缺少/漂移的 handoff 停止为
+     `needs_user(executor_handoff_required)`,不得回退成长调用。subagent 本地重验摘要、读取恰好一个
+     prompt+envelope 并独占其 `dispatch_run_id`。它循环执行
      `next_command`,每次最多收到一个 `action.kind=task` 信封;该 task 的 input/candidate/usage/
      submit/fail/heartbeat 契约与下面的单任务路径完全相同。task terminal 后必须丢弃 candidate
      body 再执行下一次 `dispatch.next`;semantic failure 已有 bounded task receipt 时继续下一 task。

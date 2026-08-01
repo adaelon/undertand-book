@@ -92,6 +92,7 @@ import {
   selectAutomaticBuildDispatchHandoff,
   type AutomaticBuildExecutorDispatchReceiptV1,
 } from "../../packages/core/src/automatic-build-dispatch-runtime";
+import { composeAutomaticBuildExecutorPrompt } from "./executor-prompt";
 
 const PLUGIN_ROOT = process.env.UNDERSTAND_BOOK_PLUGIN_ROOT
   ? path.resolve(process.env.UNDERSTAND_BOOK_PLUGIN_ROOT)
@@ -101,6 +102,7 @@ const MAX_ATTEMPTS = 3;
 const MAX_LEASE_EPOCHS = 3;
 const DEFAULT_RESERVE_TTL_MS = 600_000;
 const DEFAULT_RUN_TTL_MS = 1_800_000;
+const MAX_DISPATCH_EXECUTOR_HANDOFF_BYTES = 262_144;
 const AUTOMATIC_BUILD_STAGES: AutomaticBuildStage[] = [
   "pass1",
   "paper_metadata",
@@ -163,6 +165,68 @@ function scriptCommand(script: string, args: string[]): string[] {
       : [sidecar, "run-script", script, ...args];
   }
   return [process.execPath, TSX_CLI, path.join(PLUGIN_ROOT, "skills", "build", script), ...args];
+}
+
+function executorPromptCommand(prompt: string, mode: "dispatch" | "task"): string[] {
+  const args = [prompt, "--executor-protocol", mode];
+  const sidecar = process.env.UNDERSTAND_BOOK_SIDECAR_SELF;
+  return sidecar
+    ? [sidecar, "prompt", ...args]
+    : [process.execPath, TSX_CLI, path.join(PLUGIN_ROOT, "skills", "build", "executor-prompt-cli.ts"), ...args];
+}
+
+function completeExecutorPrompt(prompt: string): string {
+  return composeAutomaticBuildExecutorPrompt({
+    mode: "dispatch",
+    extractor_name: prompt,
+    extractor_prompt: readFileSync(path.join(PLUGIN_ROOT, "agents", prompt), "utf8"),
+    protocol_wrapper: readFileSync(
+      path.join(PLUGIN_ROOT, "agents", "automatic-build-dispatch-executor.md"),
+      "utf8",
+    ),
+  });
+}
+
+function persistDispatchExecutorHandoff(
+  manifestPath: string,
+  prompt: string,
+  envelope: object,
+): {
+  version: "automatic_build_dispatch_executor_handoff_ref.v1";
+  path: string;
+  sha256: string;
+  byte_length: number;
+} {
+  const completePrompt = completeExecutorPrompt(prompt);
+  const handoff = {
+    version: "automatic_build_dispatch_executor_handoff.v1" as const,
+    prompt_sha256: createHash("sha256").update(completePrompt, "utf8").digest("hex"),
+    prompt: completePrompt,
+    envelope,
+  };
+  const bytes = Buffer.from(`${canonicalAutomaticBuildJson(handoff)}\n`, "utf8");
+  if (bytes.byteLength > MAX_DISPATCH_EXECUTOR_HANDOFF_BYTES) {
+    throw new Error(
+      `dispatch executor handoff exceeds ${MAX_DISPATCH_EXECUTOR_HANDOFF_BYTES} bytes: ${bytes.byteLength}`,
+    );
+  }
+  const handoffPath = path.join(path.dirname(manifestPath), "executor-handoff.json");
+  try {
+    writeFileSync(handoffPath, bytes, { flag: "wx" });
+  } catch (error) {
+    const code = error && typeof error === "object" && "code" in error ? String(error.code) : "";
+    if (code !== "EEXIST") throw error;
+    const existing = readFileSync(handoffPath);
+    if (!existing.equals(bytes)) {
+      throw new Error(`dispatch executor handoff conflicts with its run identity: ${handoffPath}`);
+    }
+  }
+  return {
+    version: "automatic_build_dispatch_executor_handoff_ref.v1",
+    path: handoffPath,
+    sha256: createHash("sha256").update(bytes).digest("hex"),
+    byte_length: bytes.byteLength,
+  };
 }
 
 function stageScriptArgs(target: AutomaticBuildTarget): string[] {
@@ -860,6 +924,7 @@ function expandAction(
     }
     const spec = STAGE_COMMANDS[action.stage];
     if (!spec.input || !spec.write || !spec.prompt) throw new Error(`stage ${action.stage} is not a semantic extraction stage`);
+    const promptName = spec.prompt;
     const allPendingUnits = action.work_units ?? [];
     const scheduled = selectAutomaticBuildCostBatch(allPendingUnits, {
       max_tasks: allPendingUnits.length,
@@ -937,7 +1002,7 @@ function expandAction(
           run_ttl_ms: runTtlMs,
           dispatch_run_id: dispatchRunId,
         });
-        return {
+        const envelope = {
           version: "automatic_build_dispatch_executor.v1" as const,
           manifest,
           dispatch_run_id: dispatchRunId,
@@ -968,6 +1033,14 @@ function expandAction(
             ),
           },
         };
+        return {
+          ...envelope,
+          executor_handoff: persistDispatchExecutorHandoff(
+            persisted.manifest_path,
+            promptName,
+            envelope,
+          ),
+        };
       });
       const dispatchedIds = new Set(selectedDispatches.flatMap((dispatch) => dispatch.ordered_work_unit_ids));
       return {
@@ -980,12 +1053,7 @@ function expandAction(
           plan_acceptance_path: acceptancePath,
           ...(evaluationAcceptancePath ? { evaluation_acceptance_path: evaluationAcceptancePath } : {}),
           cwd: target.root_dir,
-          extractor_prompt: process.env.UNDERSTAND_BOOK_SIDECAR_SELF
-            ? undefined
-            : path.join(PLUGIN_ROOT, "agents", spec.prompt),
-          extractor_prompt_command: process.env.UNDERSTAND_BOOK_SIDECAR_SELF
-            ? [process.env.UNDERSTAND_BOOK_SIDECAR_SELF, "prompt", spec.prompt]
-            : undefined,
+          extractor_prompt_command: executorPromptCommand(promptName, "dispatch"),
           dispatches,
           dispatch_plan_digest: handoff.persisted_plan.dispatch_plan.dispatch_plan_digest,
           active_dispatch_ids: handoff.active_dispatch_ids,
@@ -1345,12 +1413,19 @@ export function automaticBuildDispatchNext(
     };
   }
   if (advanced.status === "retry_exhausted" || advanced.status === "executor_instability") {
+    const terminalReason = advanced.status === "retry_exhausted"
+      ? "task_failure"
+      : "executor_interrupted";
     return {
       ...base,
       action: {
-        kind: "needs_user" as const,
+        kind: "finish" as const,
         reason: advanced.status,
         work_unit_id: advanced.work_unit_id,
+        finish_command: scriptCommand("automatic-build.ts", [
+          "dispatch.finish", targetCommandInput(target), stage, dispatchId, ...targetResolutionCommandArgs(target),
+          "--dispatch-run", persisted.dispatch_run_id, "--terminal-reason", terminalReason,
+        ]),
       },
     };
   }

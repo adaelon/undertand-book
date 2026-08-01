@@ -631,6 +631,26 @@ export function advanceAutomaticBuildDispatch(
   }
   const now = input.now ?? new Date().toISOString();
   const progress = refreshProgress(target, persisted, now);
+  const lastProgress = progress.at(-1);
+  if (lastProgress?.task_receipt.state === "retryable_failure") {
+    const failedInspection = inspectAutomaticBuildTaskClaim(
+      target,
+      stage,
+      lastProgress.work_unit_id,
+      {
+        now,
+        max_semantic_attempts: input.max_semantic_attempts,
+        max_lease_epochs: input.max_lease_epochs,
+      },
+    );
+    if (failedInspection.status === "retry_exhausted") {
+      return {
+        status: "retry_exhausted",
+        persisted,
+        work_unit_id: lastProgress.work_unit_id,
+      };
+    }
+  }
   if (progress.length === persisted.manifest.ordered_work_unit_ids.length) {
     return { status: "ready_to_finish", persisted, task_receipts: progress.map((item) => item.task_receipt) };
   }
@@ -734,10 +754,35 @@ export function finishAutomaticBuildDispatch(
   const now = options.now ?? new Date().toISOString();
   const progress = refreshProgress(target, persisted, now);
   const interrupted = options.terminal_reason === "executor_interrupted";
-  if (!interrupted && progress.length !== persisted.manifest.ordered_work_unit_ids.length) {
+  const incomplete = progress.length !== persisted.manifest.ordered_work_unit_ids.length;
+  const hasFailure = progress.some((item) => item.task_receipt.state === "retryable_failure");
+  const unclaimedWorkUnitIds = persisted.manifest.ordered_work_unit_ids.filter(
+    (workUnitId) => !taskWasClaimed(target, persisted, workUnitId),
+  );
+  if (options.terminal_reason === "task_failure") {
+    if (!hasFailure) {
+      throw new Error(`dispatch task_failure requires a canonical retryable failure receipt: ${dispatchId}`);
+    }
+    if (incomplete) {
+      const failedCurrent = progress.at(-1)?.task_receipt.state === "retryable_failure";
+      if (!failedCurrent) {
+        throw new Error(`dispatch task_failure requires the current failed work unit to be terminal: ${dispatchId}`);
+      }
+      const activeWorkUnitIds = persisted.manifest.ordered_work_unit_ids.filter((workUnitId) => (
+        inspectAutomaticBuildTaskClaim(target, stage, workUnitId, { now }).status === "already_leased"
+      ));
+      if (activeWorkUnitIds.length) {
+        throw new Error(`dispatch task_failure cannot finish with an active lease: ${activeWorkUnitIds.join(",")}`);
+      }
+      const expectedSuffix = persisted.manifest.ordered_work_unit_ids.slice(progress.length);
+      if (expectedSuffix.length !== unclaimedWorkUnitIds.length
+        || expectedSuffix.some((workUnitId, index) => unclaimedWorkUnitIds[index] !== workUnitId)) {
+        throw new Error(`dispatch task_failure requires a strict unclaimed suffix: ${dispatchId}`);
+      }
+    }
+  } else if (!interrupted && incomplete) {
     throw new Error(`dispatch has unfinished work units: ${dispatchId}`);
   }
-  const hasFailure = progress.some((item) => item.task_receipt.state === "retryable_failure");
   const terminalReason = interrupted ? "executor_interrupted" : hasFailure ? "task_failure" : "complete";
   if (options.terminal_reason && options.terminal_reason !== terminalReason) {
     throw new Error(`dispatch terminal reason must be ${terminalReason}: ${dispatchId}`);
@@ -749,9 +794,7 @@ export function finishAutomaticBuildDispatch(
     target_ref: target.target_ref,
     stage,
     task_receipts: progress.map((item) => item.task_receipt),
-    unclaimed_work_unit_ids: persisted.manifest.ordered_work_unit_ids.filter(
-      (workUnitId) => !taskWasClaimed(target, persisted, workUnitId),
-    ),
+    unclaimed_work_unit_ids: unclaimedWorkUnitIds,
     terminal_reason: terminalReason,
     finished_at: now,
   };

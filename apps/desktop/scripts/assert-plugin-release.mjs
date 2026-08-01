@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
@@ -77,6 +78,9 @@ const protocolMarkers = [
   "submit_command",
   "automatic_build_task_receipt.v1",
   "receipt_aggregation",
+  "automatic_build_dispatch_executor_handoff.v1",
+  "executor_handoff",
+  "short `spawn_agent` call",
   "executor_unavailable",
   "legacy_migration_required",
   "quality_gate_failed",
@@ -150,6 +154,41 @@ for (const command of [
     sidecarEntry.includes(`\"${command}\"`),
     `packaged build sidecar is missing command: ${command}`,
   );
+}
+
+const dispatchWrapper = await readText("agents/automatic-build-dispatch-executor.md");
+for (const marker of [
+  "automatic_build_dispatch_executor.v1",
+  "action.kind=task",
+  "action.kind=waiting",
+  "action.kind=finish",
+  "action.kind=finished",
+  "Never return candidate JSON to the caller",
+]) {
+  assert(dispatchWrapper.includes(marker), `dispatch executor wrapper is missing marker: ${marker}`);
+}
+assert(
+  sidecarEntry.includes("automatic-build-dispatch-executor.md"),
+  "packaged build sidecar must import the dispatch executor wrapper asset",
+);
+const sidecarBinary = path.join(
+  repoRoot,
+  "apps",
+  "desktop",
+  "src-tauri",
+  "binaries",
+  "understand-book-build-x86_64-pc-windows-msvc.exe",
+);
+const packagedPrompt = spawnSync(sidecarBinary, [
+  "prompt",
+  "pass1-local-extractor.md",
+  "--executor-protocol",
+  "dispatch",
+], { encoding: "utf8" });
+assert.equal(packagedPrompt.status, 0, `packaged executor prompt failed: ${packagedPrompt.stderr}`);
+assert.equal(packagedPrompt.stderr, "", "packaged executor prompt must reserve stderr for diagnostics");
+for (const marker of ["automatic_build_dispatch_executor.v1", "automatic_build_executor.v1"]) {
+  assert(packagedPrompt.stdout.includes(marker), `packaged executor prompt is missing marker: ${marker}`);
 }
 
 console.log(`plugin release parity ok: ${releaseManifest.version} skill_sha256=${releaseSkillSha256}`);

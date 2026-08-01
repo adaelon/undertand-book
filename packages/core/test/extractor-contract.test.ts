@@ -24,6 +24,23 @@ function diagnosticOf(run: () => unknown) {
 }
 
 describe("automatic build extractor contracts", () => {
+  it("binds every semantic policy hash to the raw extractor prompt bytes", () => {
+    const fixtures = [
+      ["pass1", "pass1-local-extractor.md", "technical_learning"],
+      ["paper_metadata", "paper-metadata-extractor.md", "paper"],
+      ["paper_lexicon", "paper-lexicon-extractor.md", "paper"],
+      ["profile_sidecar", "profile-sidecar-extractor.md", "technical_learning"],
+      ["pass2", "pass2-longrange-linker.md", "technical_learning"],
+      ["book_structure", "book-structure-extractor.md", "technical_learning"],
+    ] as const;
+    for (const [stage, promptName, profileId] of fixtures) {
+      const prompt = readFileSync(path.join(REPO_ROOT, "agents", promptName), "utf8");
+      const policy = automaticBuildExtractionPolicy(stage, resolveContentProfile(profileId), "full");
+      expect(policy.prompt_sha256, promptName)
+        .toBe(createHash("sha256").update(prompt).digest("hex"));
+    }
+  });
+
   it("rejects task-22 metadata reference strings with a stable bounded diagnostic", () => {
     const diagnostic = diagnosticOf(() => parseExtractorCandidate("paper_metadata", {
       paper_metadata: {

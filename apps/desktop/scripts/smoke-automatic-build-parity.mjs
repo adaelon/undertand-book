@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -9,6 +10,7 @@ const repoRoot = path.resolve(desktopRoot, "..", "..");
 const sidecar = path.join(desktopRoot, "src-tauri", "binaries", "understand-book-build-x86_64-pc-windows-msvc.exe");
 const tsx = path.join(repoRoot, "node_modules", "tsx", "dist", "cli.mjs");
 const automaticBuild = path.join(repoRoot, "skills", "build", "automatic-build.ts");
+const executorPromptCli = path.join(repoRoot, "skills", "build", "executor-prompt-cli.ts");
 const root = mkdtempSync(path.join(tmpdir(), "understand-book-bp8-parity-"));
 const backupContainer = mkdtempSync(path.join(tmpdir(), "understand-book-bp8-parity-backup-"));
 const backupRoot = path.join(backupContainer, "snapshot");
@@ -51,6 +53,14 @@ function assertBytesEqual(left, right, label) {
   }
 }
 
+function runText(command, args, label) {
+  const result = spawnSync(command, args, { cwd: repoRoot, encoding: "utf8", timeout: 60_000 });
+  if (result.error) throw result.error;
+  if (result.status !== 0) throw new Error(`${label} failed (${result.status}):\n${result.stdout}\n${result.stderr}`);
+  if (result.stderr !== "") throw new Error(`${label} emitted stderr:\n${result.stderr}`);
+  return result.stdout;
+}
+
 function redactSecrets(value, secrets) {
   if (typeof value === "string") {
     return secrets.reduce((text, secret) => text.split(secret).join("<lease-token>"), value);
@@ -76,6 +86,16 @@ function restoreSnapshot() {
 }
 
 try {
+  const promptArgs = ["pass1-local-extractor.md", "--executor-protocol", "dispatch"];
+  const nodePrompt = runText(process.execPath, [tsx, executorPromptCli, ...promptArgs], "Node executor prompt");
+  const sidecarPrompt = runText(sidecar, ["prompt", ...promptArgs], "sidecar executor prompt");
+  if (nodePrompt !== sidecarPrompt) {
+    throw new Error("Node/sidecar complete executor prompt bytes diverged");
+  }
+  for (const marker of ["automatic_build_dispatch_executor.v1", "automatic_build_executor.v1"]) {
+    if (!nodePrompt.includes(marker)) throw new Error(`complete executor prompt is missing marker: ${marker}`);
+  }
+
   writeFileSync(source, "# Parity\n\nA deterministic semantic paragraph.\n", "utf8");
   const implicitLegacyDir = path.join(
     root,
@@ -104,6 +124,7 @@ try {
   const common = [
     source,
     "--root", root,
+    "--plugin-root", repoRoot,
     "--max-parallel", "3",
     "--available-agent-slots", "2",
     "--build-plan", buildPlan,
@@ -146,6 +167,22 @@ try {
   }
   if (existsSync(taskRoot)) throw new Error(`dispatch handoff claimed task state: ${taskRoot}`);
   const envelope = nodeDispatch.value.action.dispatches[0];
+  const executorHandoff = envelope.executor_handoff;
+  if (executorHandoff?.version !== "automatic_build_dispatch_executor_handoff_ref.v1") {
+    throw new Error(`dispatch action is missing the short executor handoff: ${nodeDispatch.stdout}`);
+  }
+  const handoffBytes = readFileSync(executorHandoff.path);
+  if (handoffBytes.byteLength !== executorHandoff.byte_length
+    || createHash("sha256").update(handoffBytes).digest("hex") !== executorHandoff.sha256) {
+    throw new Error(`dispatch executor handoff ref does not match its bytes: ${executorHandoff.path}`);
+  }
+  const handoff = JSON.parse(handoffBytes.toString("utf8"));
+  if (handoff.version !== "automatic_build_dispatch_executor_handoff.v1"
+    || handoff.envelope?.dispatch_run_id !== envelope.dispatch_run_id
+    || !handoff.prompt?.includes("automatic_build_dispatch_executor.v1")
+    || !handoff.prompt?.includes("automatic_build_executor.v1")) {
+    throw new Error(`dispatch executor handoff content is incomplete: ${executorHandoff.path}`);
+  }
   const dispatchArgs = [
     source,
     nodeDispatch.value.action.stage,

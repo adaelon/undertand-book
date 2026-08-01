@@ -180,8 +180,15 @@ one accepted plan. `--max-parallel` is in `1..3`; `--available-agent-slots` is i
 3. Handle `action.kind` exactly:
 
    - `dispatch`: launch exactly `action.dispatches.length` dedicated subagents, one per manifest,
-     rather than one per work unit. Give each subagent the extractor prompt and one
-     `automatic_build_dispatch_executor.v1` envelope with its explicit `dispatch_run_id`. The
+     rather than one per work unit. Require each dispatch's `executor_handoff` reference to point
+     to one private `automatic_build_dispatch_executor_handoff.v1` containing the complete extractor
+     prompt and exactly one `automatic_build_dispatch_executor.v1` envelope. The root verifies the
+     file, `byte_length`, and SHA-256, then makes a short `spawn_agent` call containing only the
+     absolute handoff path, digest, and a fixed read-and-execute instruction. Never inline the full
+     prompt or envelope in a tool payload, chat, or stdout. A missing or drifting handoff is
+     `needs_user(executor_handoff_required)`, never permission to fall back to a long call. The
+     subagent revalidates the digest locally, reads exactly that prompt and envelope, and owns the
+     explicit `dispatch_run_id`. The
      subagent loops `next_command`, which may return at most one `task` envelope at a time. Execute
      that task with the same input/candidate/usage/submit/fail/heartbeat contract below, discard its
      candidate body after the terminal task receipt, and call `dispatch.next` again. Continue after
