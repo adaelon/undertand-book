@@ -15,6 +15,12 @@ description: Build or resume a book workspace, optionally from a confirmed natur
 `needs_user`,或发生已耗尽自动修复的明确失败。不得只解释命令、只打印计划、只写 executor
 contract,也不得在普通 stage 边界停下等待用户继续。
 
+同一显式全书调用只允许执行一次 `legacy-plan`。首次成功后必须把返回的绝对
+`build_plan_path` 作为本次 loop 与后续中断恢复的持久身份，所有 `protocol-doctor/plan/next`
+都复用它。executor interruption 后先读 dispatch receipt、执行 inspect/replan，再继续同一路径；
+不得为普通 resume 重建等价 legacy plan。若新 task 无法从持久 checkpoint/handoff 恢复唯一
+`build_plan_path`，停止为 `needs_user(build_plan_path_required)`，不得再次运行 `legacy-plan`。
+
 ### Pass2 选择门禁
 
 创建任何 `standard_deep` 计划前,必须询问用户是否运行 Pass2 长程关系抽取:启用会增加跨章节
@@ -44,6 +50,10 @@ Pass2 也可继续增强 BookStructure;没有 audit 不得阻塞 BookStructure�
      `<understand-book-build.exe> protocol-doctor <target> --plugin-root <插件根目录> --build-plan <build_plan_path>`。只消费
      `automatic_build_protocol_doctor.v1`;它必须报告 `status=compatible`、
      `production_default=automatic_build_protocol.v2_dispatch` 与 `dry_run_mutates_state=false`。
+     同时要求 `checks.prompt_provider.status=compatible` 且六个 extractor 全部列入
+     `checked_extractors`、`checks.handoff_preparation.status=compatible`、
+     `checks.plugin_shape.agents_required=false`；任一 check incompatible 时只按其
+     allowlisted `diagnostic_code` 停止，不得继续 plan/next 或转述原始异常。
 
 ### 自然语言目标的 v2 规划与两步确认
 
@@ -156,8 +166,13 @@ automatic-build loop。Reader 已确认同一精确 plan 也可继续。用户�
      manifest 内 task 数启动。每个 dispatch 必须提供 `executor_handoff`,其私有文件是一个
      `automatic_build_dispatch_executor_handoff.v1`,只含完整 extractor prompt 与一个
      `automatic_build_dispatch_executor.v1` 信封。root 先核对文件存在、`byte_length` 与 SHA-256,
-     再用短 `spawn_agent` 调用只发送 handoff 绝对路径、摘要与“读取后执行”的固定指令;禁止把
-     完整 prompt/envelope 内联进 tool payload、聊天或 stdout。缺少/漂移的 handoff 停止为
+     并证明 `executor_handoff.path` 的 resolved absolute path 位于
+     `envelope.manifest.target_ref.workspace_dir` 内。随后计算
+     `handoff_relative_path = path.relative(action.cwd, executor_handoff.path)`;结果必须非空、
+     非 absolute、不得包含 `..` 逃逸且 UTF-8 不超过 1024 bytes。短 `spawn_agent` payload
+     只允许 `handoff_relative_path`、SHA-256、`byte_length` 与固定“读取、重验、执行、只返回有界
+     receipt”指令；禁止 absolute/source/book path、prompt、envelope、candidate、原始命令清单或
+     tool output。缺少/漂移/越界的 handoff 停止为
      `needs_user(executor_handoff_required)`,不得回退成长调用。subagent 本地重验摘要、读取恰好一个
      prompt+envelope 并独占其 `dispatch_run_id`。它循环执行
      `next_command`,每次最多收到一个 `action.kind=task` 信封;该 task 的 input/candidate/usage/
@@ -169,6 +184,16 @@ automatic-build loop。Reader 已确认同一精确 plan 也可继续。用户�
      `receipt_aggregation.expected_receipts/max_total_bytes`,不得接收 manifest 内逐任务 candidate。
      任一 dispatch receipt 返回后,root 按真实空闲槽位重新 plan/next;运行时从同一持久化 plan
      排除 active/finished dispatch 并立即补下一 manifest,不等待慢 worker。
+     新生成的 `executor_interrupted` receipt 必须携带
+     `automatic_build_executor_interruption.v1`;只接受 allowlisted diagnostic/reporter/command
+     role,严禁 raw stderr、异常栈或命令正文。若 subagent 未能自行收口,root supervisor 先执行
+     `inspect_command`,再把 `interrupt_command` 的占位符替换为有证据的枚举值;证据不足用
+     `unknown`,不得从聊天正文猜 task 成败。按 receipt 的确定性 `phase` 汇报:
+     `before_first_claim`/ `between_tasks` 不消耗 semantic attempt 或 lease epoch;
+     `task_reserved`/ `task_running` 复用同一 semantic attempt,恢复时只推进 lease epoch;
+     用户可见汇报必须把前者写成“零语义尝试、零 lease epoch 消耗”，租约中断写出当前
+     semantic attempt 与下一 lease epoch。只有 canonical failure 才使用“语义重试/重试耗尽”;
+     `task_failure` 才属于语义重试。历史无 interruption 字段的 v1 receipt 只读兼容。
    - `action.kind=extract`:只出现在显式旧 v2 回滚路径。若没有可用专用 subagent/multi-agent 槽位,立即停止并报告
      `needs_user(executor_unavailable)`,不得由 root 代跑模型。若有
      `extractor_prompt_command`,读取 prompt;否则读取 `extractor_prompt`。随后按可用槽位启动

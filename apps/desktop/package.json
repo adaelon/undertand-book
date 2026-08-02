@@ -12,7 +12,7 @@
     "test:intent-metrics-parity": "node scripts/smoke-intent-build-metrics.mjs",
     "test:codex-build-intent": "node scripts/smoke-codex-build-intent.mjs",
     "test:plugin-release": "node scripts/assert-plugin-release.mjs",
-    "package:windows": "node scripts/assert-plugin-release.mjs && node scripts/assert-release-config.mjs && tauri build --bundles nsis && node scripts/export-installer.mjs"
+    "package:windows": "node scripts/smoke-automatic-build-parity.mjs && node scripts/assert-plugin-release.mjs --automatic-build-parity-prechecked && node scripts/assert-release-config.mjs && tauri build --bundles nsis && node scripts/export-installer.mjs"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.0.0"

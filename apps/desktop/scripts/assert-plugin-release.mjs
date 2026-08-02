@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -23,6 +24,21 @@ assert.deepEqual(entry.source, {
   source: "local",
   path: "./plugins/understand-book",
 }, "marketplace must publish plugins/understand-book");
+const releasePluginRoot = path.join(repoRoot, "plugins", "understand-book");
+assert(
+  !existsSync(path.join(releasePluginRoot, "agents")),
+  "published Codex plugin must remain thin and must not contain agents/",
+);
+
+const desktopPackage = await readJson("apps/desktop/package.json");
+assert(
+  desktopPackage.scripts?.["package:windows"]?.includes("smoke-automatic-build-parity.mjs"),
+  "package:windows must gate on the thin-plugin automatic-build parity smoke",
+);
+assert(
+  desktopPackage.scripts?.["package:windows"]?.includes("assert-plugin-release.mjs"),
+  "package:windows must gate on the plugin release assertion",
+);
 
 const rootManifest = await readJson(".codex-plugin/plugin.json");
 const releaseManifest = await readJson("plugins/understand-book/.codex-plugin/plugin.json");
@@ -81,6 +97,14 @@ const protocolMarkers = [
   "automatic_build_dispatch_executor_handoff.v1",
   "executor_handoff",
   "short `spawn_agent` call",
+  "automatic_build_executor_interruption.v1",
+  "before_first_claim",
+  "consume neither a semantic attempt nor a lease epoch",
+  "run `legacy-plan` exactly once",
+  "path.relative(action.cwd, executor_handoff.path)",
+  "handoff_relative_path",
+  "zero semantic attempts and zero lease epochs",
+  "Only a canonical failure",
   "executor_unavailable",
   "legacy_migration_required",
   "quality_gate_failed",
@@ -119,6 +143,19 @@ if (installedPluginRoot) {
     createHash("sha256").update(installedSkill).digest("hex"),
     releaseSkillSha256,
     "installed build skill must match the published source snapshot hash",
+  );
+  assert(
+    !existsSync(path.join(installedPluginRoot, "agents")),
+    "installed Codex plugin must remain thin and must not contain agents/",
+  );
+  const installedManifest = JSON.parse(await readFile(
+    path.join(installedPluginRoot, ".codex-plugin", "plugin.json"),
+    "utf8",
+  ));
+  assert.equal(
+    installedManifest.version,
+    releaseManifest.version,
+    "installed plugin cachebuster must match the published release snapshot",
   );
 }
 
@@ -185,10 +222,23 @@ const packagedPrompt = spawnSync(sidecarBinary, [
   "--executor-protocol",
   "dispatch",
 ], { encoding: "utf8" });
+assert.ifError(packagedPrompt.error);
 assert.equal(packagedPrompt.status, 0, `packaged executor prompt failed: ${packagedPrompt.stderr}`);
 assert.equal(packagedPrompt.stderr, "", "packaged executor prompt must reserve stderr for diagnostics");
 for (const marker of ["automatic_build_dispatch_executor.v1", "automatic_build_executor.v1"]) {
   assert(packagedPrompt.stdout.includes(marker), `packaged executor prompt is missing marker: ${marker}`);
+}
+
+if (!process.argv.includes("--automatic-build-parity-prechecked")) {
+  const parity = spawnSync(process.execPath, [
+    path.join(scriptDir, "smoke-automatic-build-parity.mjs"),
+  ], { cwd: repoRoot, encoding: "utf8", timeout: 90_000 });
+  assert.ifError(parity.error);
+  assert.equal(
+    parity.status,
+    0,
+    `thin-plugin accepted-next parity failed:\n${parity.stdout}\n${parity.stderr}`,
+  );
 }
 
 console.log(`plugin release parity ok: ${releaseManifest.version} skill_sha256=${releaseSkillSha256}`);

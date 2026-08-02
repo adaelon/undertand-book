@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -17,6 +17,12 @@ import {
 } from "../src/automatic-build-mailbox";
 import { claimAutomaticBuildTask } from "../src/automatic-build-lease";
 import { readAutomaticBuildAttemptSnapshot } from "../src/automatic-build-task-store";
+import {
+  automaticBuildDispatchManifestPath,
+  automaticBuildDispatchRunId,
+  persistAutomaticBuildDispatchPlan,
+  prepareAutomaticBuildDispatch,
+} from "../src/automatic-build-dispatch-runtime";
 import { resolveAutomaticBuildTarget } from "../src/build-orchestrator";
 import { confirmedStandardBuildPlan } from "./helpers/confirmed-build-plan";
 
@@ -63,6 +69,32 @@ function commitDispatchTask(
     },
     { now: task.lease.issued_at, completed_at: task.lease.issued_at },
   );
+}
+
+function seedLegacyManifestOnly(
+  source: string,
+  root: string,
+  plan: ReturnType<typeof automaticBuildPlan>,
+  createdAt: string,
+) {
+  if (!plan.preflight) throw new Error("expected dispatch preflight");
+  const target = resolveAutomaticBuildTarget(source, root);
+  persistAutomaticBuildDispatchPlan(
+    target,
+    plan.preflight.plan_digest,
+    plan.preflight.dispatch_plan,
+    createdAt,
+  );
+  const manifest = plan.preflight.dispatch_plan.dispatches[0];
+  const publication = prepareAutomaticBuildDispatch(target, manifest, {
+    owner: `legacy-dispatch:${manifest.dispatch_id}`,
+    created_at: createdAt,
+    reserve_ttl_ms: 60_000,
+    run_ttl_ms: 1_800_000,
+  });
+  mkdirSync(path.dirname(publication.manifest_path), { recursive: true });
+  writeFileSync(publication.manifest_path, `${JSON.stringify(publication.prepared, null, 2)}\n`, "utf8");
+  return { target, manifest, publication };
 }
 
 describe("automatic build Codex executor handoff", () => {
@@ -288,6 +320,14 @@ describe("automatic build Codex executor handoff", () => {
         },
       });
       expect(handoff.envelope).not.toHaveProperty("executor_handoff");
+      expect(handoff.envelope.interrupt_command).toEqual(expect.arrayContaining([
+        "--interruption-code",
+        "{diagnostic_code}",
+        "--interruption-reporter",
+        "{reporter}",
+        "--interruption-command-role",
+        "{last_command_role}",
+      ]));
       expect(handoff.prompt).toContain("automatic_build_dispatch_executor.v1");
       expect(handoff.prompt).toContain("automatic_build_executor.v1");
       expect(JSON.stringify(handoff)).not.toContain("PRIVATE_CANDIDATE_MARKER");
@@ -320,6 +360,183 @@ describe("automatic build Codex executor handoff", () => {
       if (previous === undefined) delete process.env.UNDERSTAND_BOOK_SIDECAR_SELF;
       else process.env.UNDERSTAND_BOOK_SIDECAR_SELF = previous;
     }
+  });
+
+  it("does not publish a dispatch manifest when handoff preparation conflicts", () => {
+    const root = mkdtempSync(path.join(tmpdir(), "understand-book-handoff-conflict-"));
+    const source = path.join(root, "guide.md");
+    writeFileSync(source, dispatchSource(), "utf8");
+    const buildPlan = confirmedStandardBuildPlan(source, root);
+    const plan = automaticBuildPlan(source, root, {
+      requested_workers: 1,
+      available_agent_slots: 1,
+      build_plan: buildPlan,
+    });
+    if (!plan.preflight) throw new Error("expected dispatch preflight");
+    const manifest = plan.preflight.dispatch_plan.dispatches[0];
+    const now = "2026-08-02T01:00:00.000Z";
+    const target = resolveAutomaticBuildTarget(source, root);
+    const manifestPath = automaticBuildDispatchManifestPath(
+      target,
+      manifest.stage,
+      manifest.dispatch_id,
+      automaticBuildDispatchRunId(now),
+    );
+    mkdirSync(path.dirname(manifestPath), { recursive: true });
+    writeFileSync(path.join(path.dirname(manifestPath), "executor-handoff.json"), "conflicting handoff\n", "utf8");
+
+    expect(() => automaticBuildNext(source, root, 1, {
+      now,
+      accepted_plan_digest: plan.preflight?.plan_digest,
+      available_agent_slots: 1,
+      build_plan: buildPlan,
+    })).toThrow("dispatch executor handoff conflicts");
+    expect(existsSync(manifestPath)).toBe(false);
+    expect(() => automaticBuildDispatchInspect(
+      source,
+      root,
+      manifest.stage,
+      manifest.dispatch_id,
+      { dispatch_run_id: automaticBuildDispatchRunId(now) },
+    )).toThrow("does not exist");
+  });
+
+  it("retires an unclaimed legacy manifest-only run and publishes a fresh run", () => {
+    const root = mkdtempSync(path.join(tmpdir(), "understand-book-legacy-unclaimed-"));
+    const source = path.join(root, "guide.md");
+    writeFileSync(source, "# Guide\n\nA compact semantic paragraph.\n", "utf8");
+    const buildPlan = confirmedStandardBuildPlan(source, root);
+    const plan = automaticBuildPlan(source, root, {
+      requested_workers: 1,
+      available_agent_slots: 1,
+      build_plan: buildPlan,
+    });
+    const legacy = seedLegacyManifestOnly(source, root, plan, "2026-08-02T03:00:00.000Z");
+    const next = automaticBuildNext(source, root, 1, {
+      now: "2026-08-02T03:01:00.000Z",
+      accepted_plan_digest: plan.preflight?.plan_digest,
+      available_agent_slots: 1,
+      build_plan: buildPlan,
+    });
+    if (!("dispatches" in next.action) || !next.action.dispatches) {
+      throw new Error("expected recovered dispatch handoff");
+    }
+    expect(next.action.dispatches[0].dispatch_run_id).not.toBe(
+      legacy.publication.prepared.dispatch_run_id,
+    );
+    const legacyReceipt = JSON.parse(readFileSync(
+      path.join(path.dirname(legacy.publication.manifest_path), "receipt.json"),
+      "utf8",
+    ));
+    expect(legacyReceipt).toMatchObject({
+      terminal_reason: "executor_interrupted",
+      task_receipts: [],
+      unclaimed_work_unit_ids: legacy.manifest.ordered_work_unit_ids,
+      interruption: {
+        version: "automatic_build_executor_interruption.v1",
+        diagnostic_code: "legacy_handoff_missing",
+        phase: "before_first_claim",
+        reporter: "build_engine",
+        last_command_role: "unknown",
+        last_completed_ordinal: -1,
+      },
+    });
+  });
+
+  it("stops on a claimed legacy manifest-only run instead of backfilling a handoff", () => {
+    const root = mkdtempSync(path.join(tmpdir(), "understand-book-legacy-claimed-"));
+    const source = path.join(root, "guide.md");
+    writeFileSync(source, "# Guide\n\nA compact semantic paragraph.\n", "utf8");
+    const buildPlan = confirmedStandardBuildPlan(source, root);
+    const plan = automaticBuildPlan(source, root, {
+      requested_workers: 1,
+      available_agent_slots: 1,
+      build_plan: buildPlan,
+    });
+    const legacy = seedLegacyManifestOnly(source, root, plan, "2026-08-02T04:00:00.000Z");
+    const firstWorkUnitId = legacy.manifest.ordered_work_unit_ids[0];
+    const claim = claimAutomaticBuildTask(legacy.target, legacy.manifest.stage, firstWorkUnitId, {
+      owner: legacy.publication.prepared.owner,
+      now: "2026-08-02T04:00:01.000Z",
+      reserve_ttl_ms: 60_000,
+    });
+    if (claim.status !== "leased") throw new Error("expected legacy owner claim");
+    const next = automaticBuildNext(source, root, 1, {
+      now: "2026-08-02T04:01:00.000Z",
+      accepted_plan_digest: plan.preflight?.plan_digest,
+      available_agent_slots: 1,
+      build_plan: buildPlan,
+    });
+    expect(next.action).toMatchObject({
+      kind: "needs_user",
+      reason: "legacy_partial_dispatch_run",
+      dispatch_id: legacy.manifest.dispatch_id,
+      dispatch_run_id: legacy.publication.prepared.dispatch_run_id,
+      has_claim_or_progress: true,
+    });
+    expect(existsSync(path.join(path.dirname(legacy.publication.manifest_path), "executor-handoff.json")))
+      .toBe(false);
+  });
+
+  it("rejects a published run after its handoff bytes drift", () => {
+    const root = mkdtempSync(path.join(tmpdir(), "understand-book-handoff-drift-"));
+    const source = path.join(root, "guide.md");
+    writeFileSync(source, dispatchSource(), "utf8");
+    const buildPlan = confirmedStandardBuildPlan(source, root);
+    const plan = automaticBuildPlan(source, root, {
+      requested_workers: 1,
+      available_agent_slots: 1,
+      build_plan: buildPlan,
+    });
+    const next = automaticBuildNext(source, root, 1, {
+      now: "2026-08-02T05:00:00.000Z",
+      accepted_plan_digest: plan.preflight?.plan_digest,
+      available_agent_slots: 1,
+      build_plan: buildPlan,
+    });
+    if (!("dispatches" in next.action) || !next.action.dispatches) throw new Error("expected dispatch");
+    const envelope = next.action.dispatches[0];
+    writeFileSync(envelope.executor_handoff.path, "{}\n", "utf8");
+    expect(() => automaticBuildDispatchInspect(
+      source,
+      root,
+      envelope.manifest.stage,
+      envelope.manifest.dispatch_id,
+      { dispatch_run_id: envelope.dispatch_run_id },
+    )).toThrow("handoff digest mismatch");
+  });
+
+  it("reads a historical manifest without an embedded ref when its handoff is valid", () => {
+    const root = mkdtempSync(path.join(tmpdir(), "understand-book-historical-handoff-"));
+    const source = path.join(root, "guide.md");
+    writeFileSync(source, "# Guide\n\nA compact semantic paragraph.\n", "utf8");
+    const buildPlan = confirmedStandardBuildPlan(source, root);
+    const plan = automaticBuildPlan(source, root, {
+      requested_workers: 1,
+      available_agent_slots: 1,
+      build_plan: buildPlan,
+    });
+    const next = automaticBuildNext(source, root, 1, {
+      now: "2026-08-02T05:30:00.000Z",
+      accepted_plan_digest: plan.preflight?.plan_digest,
+      available_agent_slots: 1,
+      build_plan: buildPlan,
+    });
+    if (!("dispatches" in next.action) || !next.action.dispatches) throw new Error("expected dispatch");
+    const envelope = next.action.dispatches[0];
+    const persisted = JSON.parse(readFileSync(envelope.manifest_path, "utf8"));
+    delete persisted.executor_handoff;
+    writeFileSync(envelope.manifest_path, `${JSON.stringify(persisted, null, 2)}\n`, "utf8");
+    expect(automaticBuildDispatchInspect(
+      source,
+      root,
+      envelope.manifest.stage,
+      envelope.manifest.dispatch_id,
+      { dispatch_run_id: envelope.dispatch_run_id },
+    )).toMatchObject({
+      state: "active",
+      next_work_unit_id: envelope.manifest.ordered_work_unit_ids[0],
+    });
   });
 
   it("continues after semantic failure and returns a bounded candidate-free dispatch receipt", () => {
@@ -486,6 +703,14 @@ describe("automatic build Codex executor handoff", () => {
     expect(terminal.action.kind).toBe("finish");
     if (terminal.action.kind !== "finish") throw new Error("expected executor-interrupted finish action");
     expect(terminal.action.finish_command).toContain("executor_interrupted");
+    expect(terminal.action.finish_command).toEqual(expect.arrayContaining([
+      "--interruption-code",
+      "executor_lost",
+      "--interruption-reporter",
+      "build_engine",
+      "--interruption-command-role",
+      "dispatch_next",
+    ]));
   });
 
   it("finishes an interrupted dispatch without claiming its remaining tasks", () => {
@@ -516,8 +741,18 @@ describe("automatic build Codex executor handoff", () => {
     const receipt = automaticBuildDispatchFinish(source, root, manifest.stage, manifest.dispatch_id, {
       terminal_reason: "executor_interrupted",
       now: "2026-07-25T02:00:02.000Z",
+      interruption: {
+        diagnostic_code: "harness_cancelled",
+        reporter: "root_supervisor",
+        last_command_role: "dispatch_next",
+      },
     });
     expect(receipt.unclaimed_work_unit_ids).toEqual(manifest.ordered_work_unit_ids.slice(1));
+    expect(receipt.interruption).toMatchObject({
+      phase: "task_reserved",
+      active_work_unit_id: manifest.ordered_work_unit_ids[0],
+      last_completed_ordinal: -1,
+    });
     const target = resolveAutomaticBuildTarget(source, root);
     expect(Object.keys(readAutomaticBuildAttemptSnapshot(target).stages.pass1 ?? {})).toEqual([
       manifest.ordered_work_unit_ids[0],
@@ -526,7 +761,7 @@ describe("automatic build Codex executor handoff", () => {
     expect(automaticBuildDispatchNext(source, root, manifest.stage, manifest.dispatch_id).action.kind).toBe("finished");
   });
 
-  it("emits self-contained packaged dispatch commands with an explicit run identity", () => {
+  it("fails closed when the configured packaged prompt provider is unavailable", () => {
     const root = mkdtempSync(path.join(tmpdir(), "understand-book-packaged-dispatch-"));
     const source = path.join(root, "guide.md");
     writeFileSync(source, dispatchSource(), "utf8");
@@ -547,24 +782,14 @@ describe("automatic build Codex executor handoff", () => {
         executor_dispatches: true,
         build_plan: buildPlan,
       });
-      if (!("dispatches" in next.action) || !next.action.dispatches) throw new Error("expected dispatch handoff");
-      const envelope = next.action.dispatches[0];
       expect(next.protocol).toBe("automatic_build_protocol.v2_dispatch");
-      expect(envelope.dispatch_run_id).toMatch(/^run-/);
-      expect(envelope.next_command.slice(0, 2)).toEqual([process.env.UNDERSTAND_BOOK_SIDECAR_SELF, "dispatch.next"]);
-      expect(envelope.inspect_command.slice(0, 2)).toEqual([process.env.UNDERSTAND_BOOK_SIDECAR_SELF, "dispatch.inspect"]);
-      expect(envelope.finish_command.slice(0, 2)).toEqual([process.env.UNDERSTAND_BOOK_SIDECAR_SELF, "dispatch.finish"]);
-      expect(envelope.next_command).toContain("--dispatch-run");
-      expect(envelope.next_command).toContain(envelope.dispatch_run_id);
-      expect(next.action).not.toHaveProperty("extractor_prompt");
-      if (!("extractor_prompt_command" in next.action)) throw new Error("expected packaged prompt command");
-      expect(next.action.extractor_prompt_command).toEqual([
-        process.env.UNDERSTAND_BOOK_SIDECAR_SELF,
-        "prompt",
-        "pass1-local-extractor.md",
-        "--executor-protocol",
-        "dispatch",
-      ]);
+      expect(next.action).toMatchObject({
+        kind: "needs_user",
+        reason: "executor_prompt_unavailable",
+        diagnostic_code: "prompt_provider_unavailable",
+        prompt_source: "packaged_sidecar",
+      });
+      expect(JSON.stringify(next.action)).not.toContain(process.env.UNDERSTAND_BOOK_SIDECAR_SELF);
     } finally {
       if (previous === undefined) delete process.env.UNDERSTAND_BOOK_SIDECAR_SELF;
       else process.env.UNDERSTAND_BOOK_SIDECAR_SELF = previous;
@@ -593,12 +818,28 @@ describe("automatic build Codex executor handoff", () => {
     expect(skill).toContain("executor_handoff");
     expect(skill).toContain("subagent,不得按");
     expect(skill).toContain("interrupt_command");
+    expect(skill).toContain("automatic_build_executor_interruption.v1");
+    expect(skill).toContain("before_first_claim");
+    expect(skill).toContain("不消耗 semantic attempt 或 lease epoch");
+    expect(skill).toContain("同一显式全书调用只允许执行一次 `legacy-plan`");
+    expect(skill).toContain("path.relative(action.cwd, executor_handoff.path)");
+    expect(skill).toContain("handoff_relative_path");
+    expect(skill).toContain("零语义尝试、零 lease epoch");
+    expect(skill).toContain("只有 canonical failure");
     expect(pluginSkill).toContain("candidate_command");
     expect(pluginSkill).toContain("PowerShell 5.1");
     expect(pluginSkill).toContain("automatic_build_dispatch_executor.v1");
     expect(pluginSkill).toContain("automatic_build_dispatch_executor_handoff.v1");
     expect(pluginSkill).toContain("executor_handoff");
     expect(pluginSkill).toContain("interrupt_command");
+    expect(pluginSkill).toContain("automatic_build_executor_interruption.v1");
+    expect(pluginSkill).toContain("before_first_claim");
+    expect(pluginSkill).toContain("consume neither a semantic attempt nor a lease epoch");
+    expect(pluginSkill).toContain("run `legacy-plan` exactly once");
+    expect(pluginSkill).toContain("path.relative(action.cwd, executor_handoff.path)");
+    expect(pluginSkill).toContain("handoff_relative_path");
+    expect(pluginSkill).toContain("zero semantic attempts and zero lease epochs");
+    expect(pluginSkill).toContain("Only a canonical failure");
 
     for (const prompt of EXTRACTOR_PROMPTS) {
       const content = readFileSync(path.join(REPO_ROOT, "agents", prompt), "utf8");

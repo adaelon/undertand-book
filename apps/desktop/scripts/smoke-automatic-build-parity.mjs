@@ -14,8 +14,18 @@ const executorPromptCli = path.join(repoRoot, "skills", "build", "executor-promp
 const root = mkdtempSync(path.join(tmpdir(), "understand-book-bp8-parity-"));
 const backupContainer = mkdtempSync(path.join(tmpdir(), "understand-book-bp8-parity-backup-"));
 const backupRoot = path.join(backupContainer, "snapshot");
+const thinPluginRoot = path.join(backupContainer, "thin-plugin");
 const source = path.join(root, "parity.md");
-const nodeEnvironment = { ...process.env, UNDERSTAND_BOOK_SIDECAR_SELF: sidecar };
+const nodeEnvironment = {
+  ...process.env,
+  UNDERSTAND_BOOK_PLUGIN_ROOT: thinPluginRoot,
+  UNDERSTAND_BOOK_SIDECAR_SELF: sidecar,
+};
+const nodeSourceThinEnvironment = {
+  ...process.env,
+  UNDERSTAND_BOOK_PLUGIN_ROOT: thinPluginRoot,
+};
+delete nodeSourceThinEnvironment.UNDERSTAND_BOOK_SIDECAR_SELF;
 
 function stableJson(value) {
   if (value === null || typeof value !== "object") return JSON.stringify(value);
@@ -86,6 +96,10 @@ function restoreSnapshot() {
 }
 
 try {
+  cpSync(path.join(repoRoot, "plugins", "understand-book"), thinPluginRoot, { recursive: true });
+  if (existsSync(path.join(thinPluginRoot, "agents"))) {
+    throw new Error(`release plugin fixture must remain thin: ${thinPluginRoot}`);
+  }
   const promptArgs = ["pass1-local-extractor.md", "--executor-protocol", "dispatch"];
   const nodePrompt = runText(process.execPath, [tsx, executorPromptCli, ...promptArgs], "Node executor prompt");
   const sidecarPrompt = runText(sidecar, ["prompt", ...promptArgs], "sidecar executor prompt");
@@ -124,7 +138,7 @@ try {
   const common = [
     source,
     "--root", root,
-    "--plugin-root", repoRoot,
+    "--plugin-root", thinPluginRoot,
     "--max-parallel", "3",
     "--available-agent-slots", "2",
     "--build-plan", buildPlan,
@@ -143,6 +157,27 @@ try {
   assertBytesEqual(nodeDoctor, sidecarDoctor, "automatic_build_protocol_doctor.v1");
   if (nodeDoctor.value.status !== "compatible" || nodeDoctor.value.target_state?.dry_run_mutates_state !== false) {
     throw new Error(`protocol doctor did not report read-only compatibility: ${nodeDoctor.stdout}`);
+  }
+  if (sidecarDoctor.value.checks?.prompt_provider?.source !== "packaged_sidecar"
+    || sidecarDoctor.value.checks.prompt_provider.checked_extractors?.length !== 6
+    || sidecarDoctor.value.checks?.handoff_preparation?.status !== "compatible"
+    || sidecarDoctor.value.checks?.plugin_shape?.thin_plugin !== true
+    || sidecarDoctor.value.checks?.plugin_shape?.agents_required !== false) {
+    throw new Error(`packaged thin-plugin doctor did not exercise prompt/handoff preparation: ${sidecarDoctor.stdout}`);
+  }
+  const thinNodeDoctor = run(
+    process.execPath,
+    [tsx, automaticBuild, "protocol-doctor", ...common],
+    "Node thin-plugin protocol doctor",
+    nodeSourceThinEnvironment,
+  );
+  if (thinNodeDoctor.value.status !== "incompatible"
+    || thinNodeDoctor.value.checks?.prompt_provider?.source !== "node_source"
+    || thinNodeDoctor.value.checks?.prompt_provider?.diagnostic_code !== "prompt_provider_unavailable"
+    || thinNodeDoctor.value.checks?.plugin_shape?.status !== "incompatible"
+    || thinNodeDoctor.value.checks?.plugin_shape?.thin_plugin !== true
+    || thinNodeDoctor.value.target_state?.dry_run_mutates_state !== false) {
+    throw new Error(`Node thin-plugin doctor did not fail closed: ${thinNodeDoctor.stdout}`);
   }
 
   const nodeNext = runNode("next", common, "Node unaccepted next");
@@ -198,6 +233,28 @@ try {
   }
 
   cpSync(root, backupRoot, { recursive: true });
+  const interruptArgs = [
+    ...dispatchArgs,
+    "--terminal-reason", "executor_interrupted",
+    "--interruption-code", "harness_cancelled",
+    "--interruption-reporter", "root_supervisor",
+    "--interruption-command-role", "dispatch_next",
+    "--now", "2026-07-25T07:00:00.500Z",
+  ];
+  const nodeInterrupt = runNode("dispatch.finish", interruptArgs, "Node pre-claim interruption");
+  restoreSnapshot();
+  const sidecarInterrupt = runSidecar("dispatch.finish", interruptArgs, "sidecar pre-claim interruption");
+  assertBytesEqual(nodeInterrupt, sidecarInterrupt, "automatic_build_executor_interruption.v1");
+  if (sidecarInterrupt.value.terminal_reason !== "executor_interrupted"
+    || sidecarInterrupt.value.interruption?.phase !== "before_first_claim"
+    || sidecarInterrupt.value.interruption?.last_completed_ordinal !== -1
+    || sidecarInterrupt.value.task_receipts?.length !== 0
+    || Buffer.byteLength(sidecarInterrupt.stdout) > 16_384
+    || /stderr|stack|candidate_payload/u.test(sidecarInterrupt.stdout)) {
+    throw new Error(`pre-claim interruption receipt is invalid: ${sidecarInterrupt.stdout}`);
+  }
+
+  restoreSnapshot();
   const claimArgs = [...dispatchArgs, "--now", "2026-07-25T07:00:01.000Z"];
   const nodeClaim = runNode("dispatch.next", claimArgs, "Node dispatch claim");
   if (nodeClaim.value.action?.kind !== "task") throw new Error(`Node dispatch did not claim a task: ${nodeClaim.stdout}`);

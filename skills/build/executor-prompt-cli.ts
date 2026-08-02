@@ -26,7 +26,9 @@ interface ExecutorPromptCliIo {
 
 class ExecutorPromptCliUsageError extends Error {}
 
-function isExtractorPromptName(value: string): value is AutomaticBuildExtractorPromptName {
+export function isAutomaticBuildExtractorPromptName(
+  value: string,
+): value is AutomaticBuildExtractorPromptName {
   return (AUTOMATIC_BUILD_EXTRACTOR_PROMPT_NAMES as readonly string[]).includes(value);
 }
 
@@ -35,7 +37,7 @@ function parseExecutorPromptArgs(argv: string[]): {
   mode: AutomaticBuildExecutorPromptMode;
 } {
   const extractorName = argv[0] ?? "";
-  if (!isExtractorPromptName(extractorName)) {
+  if (!isAutomaticBuildExtractorPromptName(extractorName)) {
     throw new ExecutorPromptCliUsageError(`unsupported extractor prompt: ${extractorName}`);
   }
   if (argv.length === 1) return { extractor_name: extractorName, mode: "task" };

@@ -6,10 +6,11 @@ import { describe, expect, it } from "vitest";
 import {
   advanceAutomaticBuildDispatch,
   finishAutomaticBuildDispatch,
-  persistAutomaticBuildDispatch,
+  persistAutomaticBuildDispatch as persistAutomaticBuildDispatchRuntime,
+  prepareAutomaticBuildDispatch,
 } from "../src/automatic-build-dispatch-runtime";
 import { planAutomaticBuildExecutorDispatches } from "../src/automatic-build-dispatch";
-import { claimAutomaticBuildTask } from "../src/automatic-build-lease";
+import { claimAutomaticBuildTask, startAutomaticBuildLease } from "../src/automatic-build-lease";
 import { failAutomaticBuildTask, submitAutomaticBuildCandidate } from "../src/automatic-build-mailbox";
 import {
   listAutomaticBuildStoredAttempts,
@@ -58,6 +59,39 @@ function fixture() {
     policy_fingerprint: descriptor.policy_fingerprint,
   }]));
   return { root, target, descriptors, manifest: plan.dispatches[0], bindings };
+}
+
+function persistAutomaticBuildDispatch(
+  target: Parameters<typeof persistAutomaticBuildDispatchRuntime>[0],
+  manifest: Parameters<typeof persistAutomaticBuildDispatchRuntime>[1],
+  options: Omit<Parameters<typeof persistAutomaticBuildDispatchRuntime>[2], "executor_handoff">,
+): ReturnType<typeof persistAutomaticBuildDispatchRuntime> {
+  const publication = prepareAutomaticBuildDispatch(target, manifest, options);
+  const prompt = "# Runtime fixture executor prompt\nautomatic_build_dispatch_executor.v1\n";
+  const handoff = {
+    version: "automatic_build_dispatch_executor_handoff.v1",
+    prompt_sha256: createHash("sha256").update(prompt, "utf8").digest("hex"),
+    prompt,
+    envelope: {
+      version: "automatic_build_dispatch_executor.v1",
+      manifest,
+      dispatch_run_id: publication.prepared.dispatch_run_id,
+      manifest_path: publication.manifest_path,
+    },
+  };
+  const bytes = Buffer.from(`${JSON.stringify(handoff)}\n`, "utf8");
+  const handoffPath = path.join(path.dirname(publication.manifest_path), "executor-handoff.json");
+  mkdirSync(path.dirname(handoffPath), { recursive: true });
+  writeFileSync(handoffPath, bytes, { flag: "wx" });
+  return persistAutomaticBuildDispatchRuntime(target, manifest, {
+    ...options,
+    executor_handoff: {
+      version: "automatic_build_dispatch_executor_handoff_ref.v1",
+      path: handoffPath,
+      sha256: createHash("sha256").update(bytes).digest("hex"),
+      byte_length: bytes.byteLength,
+    },
+  });
 }
 
 function commit(
@@ -169,9 +203,19 @@ describe("automatic build executor dispatch runtime", () => {
     const interrupted = finishAutomaticBuildDispatch(target, "profile_sidecar", manifest.dispatch_id, {
       terminal_reason: "executor_interrupted",
       now: "2026-07-25T05:00:04.500Z",
+      interruption: {
+        diagnostic_code: "executor_lost",
+        reporter: "executor",
+        last_command_role: "dispatch_next",
+      },
     });
     expect(interrupted.task_receipts).toHaveLength(3);
     expect(interrupted.unclaimed_work_unit_ids).toEqual(manifest.ordered_work_unit_ids.slice(4));
+    expect(interrupted.interruption).toMatchObject({
+      phase: "task_reserved",
+      last_completed_ordinal: 2,
+      active_work_unit_id: manifest.ordered_work_unit_ids[3],
+    });
     expect(Object.keys(readAutomaticBuildAttemptSnapshot(target).stages.profile_sidecar ?? {})).toEqual(
       manifest.ordered_work_unit_ids.slice(0, 4),
     );
@@ -204,6 +248,171 @@ describe("automatic build executor dispatch runtime", () => {
     expect(manifest.ordered_work_unit_ids.slice(4).some((workUnitId) => (
       readAutomaticBuildAttemptSnapshot(target).stages.profile_sidecar?.[workUnitId]
     ))).toBe(false);
+  });
+
+  it("records a bounded structured interruption before the first task claim", () => {
+    const { target, manifest } = fixture();
+    persistAutomaticBuildDispatch(target, manifest, {
+      owner: `dispatch-before-claim:${manifest.dispatch_id}`,
+      created_at: "2026-08-02T02:00:00.000Z",
+      reserve_ttl_ms: 60_000,
+      run_ttl_ms: 1_800_000,
+    });
+    const receipt = finishAutomaticBuildDispatch(target, "profile_sidecar", manifest.dispatch_id, {
+      terminal_reason: "executor_interrupted",
+      now: "2026-08-02T02:00:01.000Z",
+      interruption: {
+        diagnostic_code: "harness_cancelled",
+        reporter: "root_supervisor",
+        last_command_role: "dispatch_next",
+      },
+    });
+    expect(receipt).toMatchObject({
+      terminal_reason: "executor_interrupted",
+      task_receipts: [],
+      interruption: {
+        version: "automatic_build_executor_interruption.v1",
+        diagnostic_code: "harness_cancelled",
+        phase: "before_first_claim",
+        reporter: "root_supervisor",
+        last_command_role: "dispatch_next",
+        last_completed_ordinal: -1,
+        observed_at: "2026-08-02T02:00:01.000Z",
+      },
+    });
+    expect(Buffer.byteLength(JSON.stringify(receipt))).toBeLessThanOrEqual(16_384);
+  });
+
+  it("derives a running interruption from the persisted task start", () => {
+    const { target, descriptors, manifest, bindings } = fixture();
+    persistAutomaticBuildDispatch(target, manifest, {
+      owner: `dispatch-running:${manifest.dispatch_id}`,
+      created_at: "2026-08-02T02:10:00.000Z",
+      reserve_ttl_ms: 60_000,
+      run_ttl_ms: 1_000,
+    });
+    const claimed = advanceAutomaticBuildDispatch(target, "profile_sidecar", manifest.dispatch_id, {
+      descriptors,
+      task_bindings: bindings,
+      now: "2026-08-02T02:10:01.000Z",
+    });
+    if (claimed.status !== "leased") throw new Error("expected running interruption lease");
+    startAutomaticBuildLease(target, claimed.claim.lease_ref, claimed.claim.lease.token, {
+      now: "2026-08-02T02:10:01.100Z",
+      run_ttl_ms: 1_000,
+    });
+    const receipt = finishAutomaticBuildDispatch(target, "profile_sidecar", manifest.dispatch_id, {
+      terminal_reason: "executor_interrupted",
+      now: "2026-08-02T02:10:01.500Z",
+      interruption: {
+        diagnostic_code: "command_nonzero_exit",
+        reporter: "executor",
+        last_command_role: "task_input",
+      },
+    });
+    expect(receipt.interruption).toMatchObject({
+      phase: "task_running",
+      last_completed_ordinal: -1,
+      active_work_unit_id: manifest.ordered_work_unit_ids[0],
+    });
+    expect(claimed.claim.execution_identity).toMatchObject({
+      semantic_attempt: 1,
+      lease_epoch: 1,
+    });
+  });
+
+  it("derives a between-tasks interruption after a committed prefix", () => {
+    const { target, descriptors, manifest, bindings } = fixture();
+    persistAutomaticBuildDispatch(target, manifest, {
+      owner: `dispatch-between:${manifest.dispatch_id}`,
+      created_at: "2026-08-02T02:20:00.000Z",
+      reserve_ttl_ms: 60_000,
+      run_ttl_ms: 1_800_000,
+    });
+    const first = advanceAutomaticBuildDispatch(target, "profile_sidecar", manifest.dispatch_id, {
+      descriptors,
+      task_bindings: bindings,
+      now: "2026-08-02T02:20:01.000Z",
+    });
+    if (first.status !== "leased") throw new Error("expected first between-tasks lease");
+    commit(target, first, 0);
+    const receipt = finishAutomaticBuildDispatch(target, "profile_sidecar", manifest.dispatch_id, {
+      terminal_reason: "executor_interrupted",
+      now: "2026-08-02T02:20:02.000Z",
+      interruption: {
+        diagnostic_code: "harness_cancelled",
+        reporter: "root_supervisor",
+        last_command_role: "dispatch_next",
+      },
+    });
+    expect(receipt.interruption).toMatchObject({
+      phase: "between_tasks",
+      last_completed_ordinal: 0,
+    });
+    expect(receipt.interruption).not.toHaveProperty("active_work_unit_id");
+    expect(receipt.unclaimed_work_unit_ids).toEqual(manifest.ordered_work_unit_ids.slice(1));
+  });
+
+  it("rejects missing, unbounded, or non-allowlisted interruption input", () => {
+    const { target, manifest } = fixture();
+    persistAutomaticBuildDispatch(target, manifest, {
+      owner: `dispatch-invalid-interruption:${manifest.dispatch_id}`,
+      created_at: "2026-08-02T02:30:00.000Z",
+      reserve_ttl_ms: 60_000,
+      run_ttl_ms: 1_800_000,
+    });
+    expect(() => finishAutomaticBuildDispatch(target, "profile_sidecar", manifest.dispatch_id, {
+      terminal_reason: "executor_interrupted",
+      now: "2026-08-02T02:30:01.000Z",
+    })).toThrow("requires interruption diagnostics");
+    expect(() => finishAutomaticBuildDispatch(target, "profile_sidecar", manifest.dispatch_id, {
+      terminal_reason: "executor_interrupted",
+      now: "2026-08-02T02:30:01.000Z",
+      interruption: {
+        diagnostic_code: "command_nonzero_exit",
+        reporter: "executor",
+        last_command_role: "dispatch_next",
+        stderr: "PRIVATE RAW STDERR",
+      } as NonNullable<Parameters<typeof finishAutomaticBuildDispatch>[3]>["interruption"] & { stderr: string },
+    })).toThrow("unsupported fields");
+    expect(() => finishAutomaticBuildDispatch(target, "profile_sidecar", manifest.dispatch_id, {
+      terminal_reason: "executor_interrupted",
+      now: "2026-08-02T02:30:01.000Z",
+      interruption: {
+        diagnostic_code: "private_exception",
+        reporter: "executor",
+        last_command_role: "dispatch_next",
+      } as unknown as NonNullable<Parameters<typeof finishAutomaticBuildDispatch>[3]>["interruption"],
+    })).toThrow("not allowlisted");
+  });
+
+  it("keeps a historical interrupted v1 receipt without diagnostics readable", () => {
+    const { target, manifest } = fixture();
+    const publication = persistAutomaticBuildDispatch(target, manifest, {
+      owner: `dispatch-legacy-receipt:${manifest.dispatch_id}`,
+      created_at: "2026-08-02T02:40:00.000Z",
+      reserve_ttl_ms: 60_000,
+      run_ttl_ms: 1_800_000,
+    });
+    const historical = {
+      version: "automatic_build_executor_dispatch_receipt.v1",
+      dispatch_id: manifest.dispatch_id,
+      dispatch_run_id: publication.persisted.dispatch_run_id,
+      target_ref: target.target_ref,
+      stage: "profile_sidecar",
+      task_receipts: [],
+      unclaimed_work_unit_ids: [...manifest.ordered_work_unit_ids],
+      terminal_reason: "executor_interrupted",
+      finished_at: "2026-08-02T02:40:01.000Z",
+    };
+    writeFileSync(
+      path.join(path.dirname(publication.manifest_path), "receipt.json"),
+      `${JSON.stringify(historical, null, 2)}\n`,
+      "utf8",
+    );
+    const replay = finishAutomaticBuildDispatch(target, "profile_sidecar", manifest.dispatch_id);
+    expect(replay).toMatchObject(historical);
+    expect(replay.interruption).toBeUndefined();
   });
 
   it("uses a new dispatch run when a failed one-task manifest keeps the same planner identity", () => {

@@ -144,6 +144,29 @@ describe("automatic build BP8 production release", () => {
     expect(doctor).toMatchObject({
       version: "automatic_build_protocol_doctor.v1",
       status: "compatible",
+      checks: {
+        prompt_provider: {
+          status: "compatible",
+          source: "node_source",
+          checked_extractors: [
+            "pass1-local-extractor.md",
+            "paper-metadata-extractor.md",
+            "paper-lexicon-extractor.md",
+            "profile-sidecar-extractor.md",
+            "pass2-longrange-linker.md",
+            "book-structure-extractor.md",
+          ],
+        },
+        handoff_preparation: {
+          status: "compatible",
+          byte_length: expect.any(Number),
+        },
+        plugin_shape: {
+          status: "compatible",
+          thin_plugin: false,
+          agents_required: false,
+        },
+      },
       production_default: AUTOMATIC_BUILD_EXECUTOR_DISPATCH_PROTOCOL_V1,
       target_state: {
         persisted_task_attempts: 1,
@@ -153,6 +176,47 @@ describe("automatic build BP8 production release", () => {
     });
     expect(doctor.target_state.pending_dispatches).toBeGreaterThan(0);
     expect(fileSnapshot(workspace)).toEqual(before);
+  });
+
+  it("reports an unavailable packaged prompt provider as incompatible without mutating state", () => {
+    const { root, source } = fixture();
+    const buildPlan = confirmedStandardBuildPlan(source, root);
+    const workspace = path.join(root, ".understand-book", "guide");
+    const before = fileSnapshot(workspace);
+    const previous = process.env.UNDERSTAND_BOOK_SIDECAR_SELF;
+    process.env.UNDERSTAND_BOOK_SIDECAR_SELF = path.join(root, "missing-understand-book-build.exe");
+    try {
+      const doctor = automaticBuildProtocolDoctor(source, root, {
+        requested_workers: 1,
+        available_agent_slots: 1,
+        build_plan: buildPlan,
+      });
+      expect(doctor).toMatchObject({
+        version: "automatic_build_protocol_doctor.v1",
+        status: "incompatible",
+        checks: {
+          prompt_provider: {
+            status: "incompatible",
+            source: "packaged_sidecar",
+            diagnostic_code: "prompt_provider_unavailable",
+          },
+          handoff_preparation: {
+            status: "incompatible",
+            diagnostic_code: "prompt_provider_unavailable",
+          },
+          plugin_shape: {
+            status: "compatible",
+            agents_required: false,
+          },
+        },
+        target_state: { dry_run_mutates_state: false },
+      });
+      expect(fileSnapshot(workspace)).toEqual(before);
+      expect(JSON.stringify(doctor)).not.toContain("missing-understand-book-build.exe");
+    } finally {
+      if (previous === undefined) delete process.env.UNDERSTAND_BOOK_SIDECAR_SELF;
+      else process.env.UNDERSTAND_BOOK_SIDECAR_SELF = previous;
+    }
   });
 
   it("keeps the Codex manifest on one cachebuster suffix", () => {

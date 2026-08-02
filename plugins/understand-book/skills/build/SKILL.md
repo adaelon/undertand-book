@@ -9,6 +9,14 @@ Run the deterministic automatic-build v2 loop until `done`, `needs_user`, or an 
 failure. Do not stop at ordinary stage boundaries, substitute generic summaries for extractor
 output, or treat conversation memory as build state.
 
+For one explicit full-build invocation, run `legacy-plan` exactly once. Persist the returned
+absolute `build_plan_path` as the identity for the loop and every interruption recovery, and pass
+that same path to every `protocol-doctor`, `plan`, and `next`. After an executor interruption,
+read the dispatch receipt and inspect/replan against disk; never create an equivalent legacy plan
+for an ordinary resume. If a new task cannot recover one unique `build_plan_path` from its durable
+checkpoint or handoff, stop as `needs_user(build_plan_path_required)` instead of running
+`legacy-plan` again.
+
 ## Confirm the Pass2 choice
 
 Before creating any `standard_deep` plan, ask the user whether to run Pass2 long-range relation
@@ -39,6 +47,10 @@ contain BookStructure.
    `<build-exe> protocol-doctor <target> --plugin-root <this-plugin-root>`. Consume only
    `automatic_build_protocol_doctor.v1`; require `status=compatible`,
    `production_default=automatic_build_protocol.v2_dispatch`, and `dry_run_mutates_state=false`.
+   Also require `checks.prompt_provider.status=compatible` with all six extractor names in
+   `checked_extractors`, `checks.handoff_preparation.status=compatible`, and
+   `checks.plugin_shape.agents_required=false`. If any check is incompatible, stop on its
+   allowlisted `diagnostic_code`; do not continue to plan/next or relay a raw exception.
 
 ## Choose the entry mode
 
@@ -183,9 +195,15 @@ one accepted plan. `--max-parallel` is in `1..3`; `--available-agent-slots` is i
      rather than one per work unit. Require each dispatch's `executor_handoff` reference to point
      to one private `automatic_build_dispatch_executor_handoff.v1` containing the complete extractor
      prompt and exactly one `automatic_build_dispatch_executor.v1` envelope. The root verifies the
-     file, `byte_length`, and SHA-256, then makes a short `spawn_agent` call containing only the
-     absolute handoff path, digest, and a fixed read-and-execute instruction. Never inline the full
-     prompt or envelope in a tool payload, chat, or stdout. A missing or drifting handoff is
+     file, `byte_length`, and SHA-256, and proves that the resolved absolute
+     `executor_handoff.path` is inside `envelope.manifest.target_ref.workspace_dir`. It then
+     computes `handoff_relative_path = path.relative(action.cwd, executor_handoff.path)`; the
+     result must be non-empty, non-absolute, contain no `..` escape, and be at most 1024 UTF-8
+     bytes. The short `spawn_agent` call may carry a payload containing only
+     `handoff_relative_path`, SHA-256, `byte_length`, and a fixed
+     read/revalidate/execute/return-bounded-receipt instruction. It must
+     not contain an absolute source or book path, prompt, envelope, candidate, raw command list, or
+     tool output. A missing, drifting, or escaping handoff is
      `needs_user(executor_handoff_required)`, never permission to fall back to a long call. The
      subagent revalidates the digest locally, reads exactly that prompt and envelope, and owns the
      explicit `dispatch_run_id`. The
@@ -198,6 +216,19 @@ one accepted plan. `--max-parallel` is in `1..3`; `--available-agent-slots` is i
      `automatic_build_executor_dispatch_receipt.v1` to the root. The root validates only the
      dispatch receipt count and byte limits, then replans with live slots so the next persisted
      manifest can refill a free worker without waiting for slower active dispatches.
+     Every newly written `executor_interrupted` receipt must include
+     `automatic_build_executor_interruption.v1` with only allowlisted diagnostics, reporter, and
+     command role; raw stderr, exception stacks, and command text are forbidden. If the subagent
+     cannot close itself, the root supervisor runs `inspect_command` first and then substitutes
+     evidence-backed enum values into `interrupt_command`, using `unknown` rather than inferring
+     task outcome from chat. Report recovery by its durable `phase`: `before_first_claim` and
+     `between_tasks` consume neither a semantic attempt nor a lease epoch; `task_reserved` and
+     `task_running` keep the same semantic attempt and advance only the next lease epoch; only
+     `task_failure` is a semantic retry. User-visible reporting calls the first case “zero semantic attempts and zero lease epochs
+     consumed” and reports the current semantic attempt
+     plus next lease epoch for a leased interruption. Only a canonical failure may be called a
+     semantic retry or retry exhaustion. Historical v1 receipts without interruption remain
+     read-only compatible.
    - `extract`: this is only the explicit v2 rollback path. Require dedicated subagent slots. The number launched must equal
      `action.tasks.length` and must not exceed `worker_plan.max_workers`. Read
      `extractor_prompt_command` when supplied, otherwise use `extractor_prompt`. Give each subagent

@@ -30,8 +30,20 @@ may receive global `needs_user(...)` only after it replans from durable task and
 ## Failure and privacy boundary
 
 If a command cannot start, exits unexpectedly, or infrastructure prevents the loop from
-continuing, execute `envelope.interrupt_command` immediately and return only its bounded dispatch
-receipt. Do not substitute `executor_interrupted` for a semantic task failure or retry exhaustion.
+continuing, replace the three placeholders in `envelope.interrupt_command` and execute it
+immediately:
+
+- `{diagnostic_code}`: use only `command_start_failed`, `command_nonzero_exit`,
+  `command_output_invalid`, `harness_cancelled`, `executor_lost`, or `unknown`; use
+  `unknown` when the evidence does not prove a narrower code.
+- `{reporter}`: use `executor` in this session. A root supervisor that closes a lost executor
+  uses `root_supervisor`; the build engine alone uses `build_engine`.
+- `{last_command_role}`: use only `dispatch_next`, `task_input`, `candidate_stage`,
+  `task_submit`, `dispatch_finish`, or `unknown`.
+
+Return only the bounded dispatch receipt. Never put raw stderr, exception text, stack traces,
+command text, task input, or candidate content into the interruption command or receipt. Do not
+substitute `executor_interrupted` for a semantic task failure or retry exhaustion.
 
 Candidate source and candidate JSON stay in the task mailbox named by the task envelope.
 Never return candidate JSON to the caller. Never copy, summarize, cache, print, or forward candidate

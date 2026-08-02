@@ -84,15 +84,23 @@ import {
 } from "../../packages/core/src/automatic-build-protocol";
 import {
   advanceAutomaticBuildDispatch,
+  AutomaticBuildLegacyPartialDispatchRunError,
   automaticBuildDispatchRunId,
   finishAutomaticBuildDispatch,
   inspectAutomaticBuildDispatch,
+  prepareAutomaticBuildDispatch,
   persistAutomaticBuildDispatch,
   readAutomaticBuildDispatch,
   selectAutomaticBuildDispatchHandoff,
   type AutomaticBuildExecutorDispatchReceiptV1,
+  type AutomaticBuildExecutorInterruptionInputV1,
 } from "../../packages/core/src/automatic-build-dispatch-runtime";
-import { composeAutomaticBuildExecutorPrompt } from "./executor-prompt";
+import type { AutomaticBuildExecutorPromptMode } from "./executor-prompt";
+import {
+  AUTOMATIC_BUILD_EXTRACTOR_PROMPT_NAMES,
+  isAutomaticBuildExtractorPromptName,
+  type AutomaticBuildExtractorPromptName,
+} from "./executor-prompt-cli";
 
 const PLUGIN_ROOT = process.env.UNDERSTAND_BOOK_PLUGIN_ROOT
   ? path.resolve(process.env.UNDERSTAND_BOOK_PLUGIN_ROOT)
@@ -102,6 +110,7 @@ const MAX_ATTEMPTS = 3;
 const MAX_LEASE_EPOCHS = 3;
 const DEFAULT_RESERVE_TTL_MS = 600_000;
 const DEFAULT_RUN_TTL_MS = 1_800_000;
+const MAX_AUTOMATIC_BUILD_EXECUTOR_PROMPT_BYTES = 65_536;
 const MAX_DISPATCH_EXECUTOR_HANDOFF_BYTES = 262_144;
 const AUTOMATIC_BUILD_STAGES: AutomaticBuildStage[] = [
   "pass1",
@@ -144,7 +153,7 @@ interface StageCommands {
   input?: string;
   write?: string;
   close: string | null;
-  prompt?: string;
+  prompt?: AutomaticBuildExtractorPromptName;
 }
 
 const STAGE_COMMANDS: Record<AutomaticBuildStage, StageCommands> = {
@@ -175,32 +184,98 @@ function executorPromptCommand(prompt: string, mode: "dispatch" | "task"): strin
     : [process.execPath, TSX_CLI, path.join(PLUGIN_ROOT, "skills", "build", "executor-prompt-cli.ts"), ...args];
 }
 
-function completeExecutorPrompt(prompt: string): string {
-  return composeAutomaticBuildExecutorPrompt({
-    mode: "dispatch",
-    extractor_name: prompt,
-    extractor_prompt: readFileSync(path.join(PLUGIN_ROOT, "agents", prompt), "utf8"),
-    protocol_wrapper: readFileSync(
-      path.join(PLUGIN_ROOT, "agents", "automatic-build-dispatch-executor.md"),
-      "utf8",
-    ),
-  });
-}
+export type AutomaticBuildPromptSource = "packaged_sidecar" | "node_source";
 
-function persistDispatchExecutorHandoff(
-  manifestPath: string,
-  prompt: string,
-  envelope: object,
-): {
-  version: "automatic_build_dispatch_executor_handoff_ref.v1";
-  path: string;
+export type AutomaticBuildExecutorPromptDiagnosticCode =
+  | "prompt_provider_unavailable"
+  | "prompt_provider_output_invalid"
+  | "prompt_contract_invalid";
+
+export interface ResolvedAutomaticBuildExecutorPromptV1 {
+  version: "resolved_automatic_build_executor_prompt.v1";
+  extractor_name: AutomaticBuildExtractorPromptName;
+  mode: AutomaticBuildExecutorPromptMode;
+  source: AutomaticBuildPromptSource;
+  bytes: Uint8Array;
   sha256: string;
   byte_length: number;
-} {
-  const completePrompt = completeExecutorPrompt(prompt);
+}
+
+export class AutomaticBuildExecutorPromptResolutionError extends Error {
+  readonly name = "AutomaticBuildExecutorPromptResolutionError";
+
+  constructor(
+    readonly diagnostic_code: AutomaticBuildExecutorPromptDiagnosticCode,
+    readonly source: AutomaticBuildPromptSource,
+  ) {
+    super(`automatic build executor prompt resolution failed: ${diagnostic_code}`);
+  }
+}
+
+export function resolveAutomaticBuildExecutorPrompt(
+  extractorName: AutomaticBuildExtractorPromptName,
+  mode: AutomaticBuildExecutorPromptMode,
+): ResolvedAutomaticBuildExecutorPromptV1 {
+  if (!isAutomaticBuildExtractorPromptName(extractorName)) {
+    throw new AutomaticBuildExecutorPromptResolutionError("prompt_contract_invalid", "node_source");
+  }
+  const source: AutomaticBuildPromptSource = process.env.UNDERSTAND_BOOK_SIDECAR_SELF
+    ? "packaged_sidecar"
+    : "node_source";
+  const [command, ...args] = executorPromptCommand(extractorName, mode);
+  const output = captureBuildProcessOutput(command, args, PLUGIN_ROOT);
+  if (output.error || output.status !== 0) {
+    throw new AutomaticBuildExecutorPromptResolutionError("prompt_provider_unavailable", source);
+  }
+  if (output.stderr !== "") {
+    throw new AutomaticBuildExecutorPromptResolutionError("prompt_provider_output_invalid", source);
+  }
+  const bytes = Buffer.from(output.stdout, "utf8");
+  if (bytes.byteLength === 0 || bytes.byteLength > MAX_AUTOMATIC_BUILD_EXECUTOR_PROMPT_BYTES) {
+    throw new AutomaticBuildExecutorPromptResolutionError("prompt_provider_output_invalid", source);
+  }
+  const requiredMarkers = mode === "dispatch"
+    ? [
+      "automatic_build_dispatch_executor.v1",
+      "automatic_build_executor.v1",
+      "action.kind=task",
+      "action.kind=waiting",
+      "action.kind=finish",
+      "action.kind=finished",
+      "interrupt_command",
+      "Never return candidate JSON to the caller",
+    ]
+    : ["automatic_build_executor.v1", "candidate_path", "submit_command", "fail_command"];
+  if (output.stdout.includes("\0") || requiredMarkers.some((marker) => !output.stdout.includes(marker))) {
+    throw new AutomaticBuildExecutorPromptResolutionError("prompt_contract_invalid", source);
+  }
+  return {
+    version: "resolved_automatic_build_executor_prompt.v1",
+    extractor_name: extractorName,
+    mode,
+    source,
+    bytes,
+    sha256: createHash("sha256").update(bytes).digest("hex"),
+    byte_length: bytes.byteLength,
+  };
+}
+
+function buildDispatchExecutorHandoffBytes(
+  resolvedPrompt: ResolvedAutomaticBuildExecutorPromptV1,
+  envelope: object,
+): Buffer {
+  const envelopeRecord = envelope as { version?: unknown; dispatch_run_id?: unknown; executor_handoff?: unknown };
+  if (resolvedPrompt.mode !== "dispatch"
+    || envelopeRecord.version !== "automatic_build_dispatch_executor.v1"
+    || typeof envelopeRecord.dispatch_run_id !== "string"
+    || !envelopeRecord.dispatch_run_id
+    || envelopeRecord.executor_handoff !== undefined) {
+    throw new Error("invalid dispatch executor envelope for handoff");
+  }
+  const completePrompt = Buffer.from(resolvedPrompt.bytes).toString("utf8");
   const handoff = {
     version: "automatic_build_dispatch_executor_handoff.v1" as const,
-    prompt_sha256: createHash("sha256").update(completePrompt, "utf8").digest("hex"),
+    prompt_sha256: resolvedPrompt.sha256,
     prompt: completePrompt,
     envelope,
   };
@@ -210,7 +285,22 @@ function persistDispatchExecutorHandoff(
       `dispatch executor handoff exceeds ${MAX_DISPATCH_EXECUTOR_HANDOFF_BYTES} bytes: ${bytes.byteLength}`,
     );
   }
+  return bytes;
+}
+
+function persistDispatchExecutorHandoff(
+  manifestPath: string,
+  resolvedPrompt: ResolvedAutomaticBuildExecutorPromptV1,
+  envelope: object,
+): {
+  version: "automatic_build_dispatch_executor_handoff_ref.v1";
+  path: string;
+  sha256: string;
+  byte_length: number;
+} {
+  const bytes = buildDispatchExecutorHandoffBytes(resolvedPrompt, envelope);
   const handoffPath = path.join(path.dirname(manifestPath), "executor-handoff.json");
+  mkdirSync(path.dirname(handoffPath), { recursive: true });
   try {
     writeFileSync(handoffPath, bytes, { flag: "wx" });
   } catch (error) {
@@ -956,12 +1046,31 @@ function expandAction(
       ? persistAutomaticBuildEvaluationAcceptance(target, preflight, leaseOptions.now)
       : undefined;
     if (executorDispatches) {
-      const handoff = selectAutomaticBuildDispatchHandoff(target, {
-        accepted_plan_digest: preflight.plan_digest,
-        current_dispatch_plan: preflight.dispatch_plan,
-        available_new_executor_slots: preflight.worker_plan.max_workers,
-        created_at: leaseOptions.now,
-      });
+      let handoff: ReturnType<typeof selectAutomaticBuildDispatchHandoff>;
+      try {
+        handoff = selectAutomaticBuildDispatchHandoff(target, {
+          accepted_plan_digest: preflight.plan_digest,
+          current_dispatch_plan: preflight.dispatch_plan,
+          available_new_executor_slots: preflight.worker_plan.max_workers,
+          created_at: leaseOptions.now,
+        });
+      } catch (error) {
+        if (!(error instanceof AutomaticBuildLegacyPartialDispatchRunError)) throw error;
+        return {
+          snapshot,
+          preflight,
+          plan_budget: planBudget,
+          action: {
+            kind: "needs_user" as const,
+            reason: "legacy_partial_dispatch_run",
+            stage: error.prepared.manifest.stage,
+            dispatch_id: error.prepared.manifest.dispatch_id,
+            dispatch_run_id: error.prepared.dispatch_run_id,
+            has_claim_or_progress: error.has_claim_or_progress,
+            message: "a legacy manifest-only dispatch has claimed progress and requires explicit recovery inspection",
+          },
+        };
+      }
       const selectedDispatches = handoff.selected_manifests;
       const dispatchRunId = automaticBuildDispatchRunId(handoff.persisted_plan.created_at);
       if (!selectedDispatches.length) {
@@ -991,11 +1100,31 @@ function expandAction(
         };
       }
       const descriptorById = new Map(allPendingUnits.map((descriptor) => [descriptor.work_unit_id, descriptor]));
+      let resolvedPrompt: ResolvedAutomaticBuildExecutorPromptV1;
+      try {
+        resolvedPrompt = resolveAutomaticBuildExecutorPrompt(promptName, "dispatch");
+      } catch (error) {
+        if (!(error instanceof AutomaticBuildExecutorPromptResolutionError)) throw error;
+        return {
+          snapshot,
+          preflight,
+          plan_budget: planBudget,
+          action: {
+            kind: "needs_user" as const,
+            reason: "executor_prompt_unavailable",
+            stage: action.stage,
+            plan_digest: preflight.plan_digest,
+            diagnostic_code: error.diagnostic_code,
+            prompt_source: error.source,
+            message: "the executor prompt provider is unavailable; run protocol-doctor before retrying",
+          },
+        };
+      }
       const dispatches = selectedDispatches.map((manifest) => {
         const runTtlMs = leaseOptions.run_ttl_ms
           ?? preflight.wall_clock.adaptive_run_ttl_ms_by_kind[manifest.kind]
           ?? DEFAULT_RUN_TTL_MS;
-        const persisted = persistAutomaticBuildDispatch(target, manifest, {
+        const publication = prepareAutomaticBuildDispatch(target, manifest, {
           owner: `automatic-build-dispatch:${manifest.dispatch_id}:${dispatchRunId}`,
           created_at: leaseOptions.now,
           reserve_ttl_ms: leaseOptions.reserve_ttl_ms,
@@ -1006,7 +1135,7 @@ function expandAction(
           version: "automatic_build_dispatch_executor.v1" as const,
           manifest,
           dispatch_run_id: dispatchRunId,
-          manifest_path: persisted.manifest_path,
+          manifest_path: publication.manifest_path,
           cwd: target.root_dir,
           next_command: scriptCommand("automatic-build.ts", [
             "dispatch.next", targetInput, action.stage, manifest.dispatch_id,
@@ -1023,6 +1152,9 @@ function expandAction(
           interrupt_command: scriptCommand("automatic-build.ts", [
             "dispatch.finish", targetInput, action.stage, manifest.dispatch_id,
             "--dispatch-run", dispatchRunId, "--terminal-reason", "executor_interrupted",
+            "--interruption-code", "{diagnostic_code}",
+            "--interruption-reporter", "{reporter}",
+            "--interruption-command-role", "{last_command_role}",
             ...targetResolutionCommandArgs(target),
           ]),
           accounting: {
@@ -1033,13 +1165,22 @@ function expandAction(
             ),
           },
         };
+        const executorHandoff = persistDispatchExecutorHandoff(
+          publication.manifest_path,
+          resolvedPrompt,
+          envelope,
+        );
+        persistAutomaticBuildDispatch(target, manifest, {
+          owner: publication.prepared.owner,
+          created_at: publication.prepared.created_at,
+          reserve_ttl_ms: publication.prepared.reserve_ttl_ms,
+          run_ttl_ms: publication.prepared.run_ttl_ms,
+          dispatch_run_id: publication.prepared.dispatch_run_id,
+          executor_handoff: executorHandoff,
+        });
         return {
           ...envelope,
-          executor_handoff: persistDispatchExecutorHandoff(
-            persisted.manifest_path,
-            promptName,
-            envelope,
-          ),
+          executor_handoff: executorHandoff,
         };
       });
       const dispatchedIds = new Set(selectedDispatches.flatMap((dispatch) => dispatch.ordered_work_unit_ids));
@@ -1301,6 +1442,74 @@ export function automaticBuildProtocolDoctor(
     (attempt) => attempt.execution_identity?.identity_source === "legacy_inferred",
   ).length;
   const legacyAudit = auditAutomaticBuildLegacy(target);
+  const checkedExtractors: string[] = [];
+  const resolvedDispatchPrompts: ResolvedAutomaticBuildExecutorPromptV1[] = [];
+  let promptSource: AutomaticBuildPromptSource = process.env.UNDERSTAND_BOOK_SIDECAR_SELF
+    ? "packaged_sidecar"
+    : "node_source";
+  let promptDiagnostic: AutomaticBuildExecutorPromptDiagnosticCode | undefined;
+  for (const extractorName of AUTOMATIC_BUILD_EXTRACTOR_PROMPT_NAMES) {
+    try {
+      const dispatchPrompt = resolveAutomaticBuildExecutorPrompt(extractorName, "dispatch");
+      const taskPrompt = resolveAutomaticBuildExecutorPrompt(extractorName, "task");
+      if (dispatchPrompt.source !== taskPrompt.source) {
+        throw new AutomaticBuildExecutorPromptResolutionError(
+          "prompt_contract_invalid",
+          dispatchPrompt.source,
+        );
+      }
+      promptSource = dispatchPrompt.source;
+      resolvedDispatchPrompts.push(dispatchPrompt);
+      checkedExtractors.push(extractorName);
+    } catch (error) {
+      if (!(error instanceof AutomaticBuildExecutorPromptResolutionError)) throw error;
+      promptSource = error.source;
+      promptDiagnostic = error.diagnostic_code;
+      break;
+    }
+  }
+  let handoffByteLength: number | undefined;
+  let handoffDiagnostic: AutomaticBuildExecutorPromptDiagnosticCode | "handoff_preparation_failed"
+    | undefined = promptDiagnostic;
+  if (!promptDiagnostic) {
+    try {
+      handoffByteLength = Math.max(...resolvedDispatchPrompts.map((resolvedPrompt, index) => (
+        buildDispatchExecutorHandoffBytes(resolvedPrompt, {
+          version: "automatic_build_dispatch_executor.v1",
+          dispatch_run_id: `doctor-synthetic-${index}`,
+          manifest_path: `in-memory://doctor/${index}/manifest.json`,
+        }).byteLength
+      )));
+    } catch {
+      handoffDiagnostic = "handoff_preparation_failed";
+    }
+  }
+  const thinPlugin = !existsSync(path.join(PLUGIN_ROOT, "agents"));
+  const pluginShapeCompatible = promptSource === "packaged_sidecar" || !thinPlugin;
+  const checks = {
+    prompt_provider: {
+      status: promptDiagnostic ? "incompatible" as const : "compatible" as const,
+      source: promptSource,
+      checked_extractors: checkedExtractors,
+      ...(promptDiagnostic ? { diagnostic_code: promptDiagnostic } : {}),
+    },
+    handoff_preparation: {
+      status: handoffDiagnostic ? "incompatible" as const : "compatible" as const,
+      ...(handoffByteLength !== undefined ? { byte_length: handoffByteLength } : {}),
+      ...(handoffDiagnostic ? { diagnostic_code: handoffDiagnostic } : {}),
+    },
+    plugin_shape: {
+      status: pluginShapeCompatible ? "compatible" as const : "incompatible" as const,
+      thin_plugin: thinPlugin,
+      agents_required: false as const,
+      ...(!pluginShapeCompatible ? { diagnostic_code: "plugin_shape_incompatible" as const } : {}),
+    },
+  };
+  const doctorStatus = checks.prompt_provider.status === "compatible"
+    && checks.handoff_preparation.status === "compatible"
+    && checks.plugin_shape.status === "compatible"
+    ? "compatible" as const
+    : "incompatible" as const;
   const stages = plan.snapshot.stages.map((stage) => {
     const totalWorkUnits = stage.work_units?.length ?? stage.pending_tasks.length;
     return {
@@ -1316,7 +1525,8 @@ export function automaticBuildProtocolDoctor(
   });
   return {
     version: "automatic_build_protocol_doctor.v1" as const,
-    status: "compatible" as const,
+    status: doctorStatus,
+    checks,
     production_default: AUTOMATIC_BUILD_PRODUCTION_DEFAULT,
     release: AUTOMATIC_BUILD_RELEASE_V2,
     protocol_capabilities: [
@@ -1425,6 +1635,13 @@ export function automaticBuildDispatchNext(
         finish_command: scriptCommand("automatic-build.ts", [
           "dispatch.finish", targetCommandInput(target), stage, dispatchId, ...targetResolutionCommandArgs(target),
           "--dispatch-run", persisted.dispatch_run_id, "--terminal-reason", terminalReason,
+          ...(terminalReason === "executor_interrupted"
+            ? [
+              "--interruption-code", "executor_lost",
+              "--interruption-reporter", "build_engine",
+              "--interruption-command-role", "dispatch_next",
+            ]
+            : []),
         ]),
       },
     };
@@ -1492,6 +1709,7 @@ export function automaticBuildDispatchFinish(
   dispatchId: string,
   options: {
     terminal_reason?: AutomaticBuildExecutorDispatchReceiptV1["terminal_reason"];
+    interruption?: AutomaticBuildExecutorInterruptionInputV1;
     now?: string;
     dispatch_run_id?: string;
     book_id?: string;
@@ -1711,10 +1929,21 @@ if (argv[0] === "legacy-plan") {
     if (terminalReason && !["complete", "task_failure", "executor_interrupted"].includes(terminalReason)) {
       throw new Error("--terminal-reason must be complete|task_failure|executor_interrupted");
     }
+    const interruptionCode = valueArg(argv, "--interruption-code");
+    const interruptionReporter = valueArg(argv, "--interruption-reporter");
+    const interruptionCommandRole = valueArg(argv, "--interruption-command-role");
+    const interruption = interruptionCode || interruptionReporter || interruptionCommandRole
+      ? {
+          diagnostic_code: (interruptionCode ?? "") as AutomaticBuildExecutorInterruptionInputV1["diagnostic_code"],
+          reporter: (interruptionReporter ?? "") as AutomaticBuildExecutorInterruptionInputV1["reporter"],
+          last_command_role: (interruptionCommandRole ?? "") as AutomaticBuildExecutorInterruptionInputV1["last_command_role"],
+        }
+      : undefined;
     printAutomaticBuildJson(automaticBuildDispatchFinish(targetInput, rootDir, stage, dispatchId, {
       ...(terminalReason
         ? { terminal_reason: terminalReason as AutomaticBuildExecutorDispatchReceiptV1["terminal_reason"] }
         : {}),
+      ...(interruption ? { interruption } : {}),
       ...(valueArg(argv, "--now") ? { now: valueArg(argv, "--now") } : {}),
       ...(valueArg(argv, "--dispatch-run") ? { dispatch_run_id: valueArg(argv, "--dispatch-run") } : {}),
       book_id: valueArg(argv, "--book-id"),
