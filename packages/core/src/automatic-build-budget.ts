@@ -1,8 +1,19 @@
 import { createHash } from "node:crypto";
 import { validateBuildPlanV1, type BuildPlanV1 } from "./build-intent";
 import type { AutomaticBuildStage, BuildTargetRefV2 } from "./build-orchestrator";
-import type { ExtractionPolicyFingerprintV1, ExtractionQualityProfile } from "./semantic-artifact";
-import { workUnitPlanDigest, type WorkUnitDescriptorV2, type WorkUnitKind } from "./stage-work-unit";
+import type {
+  AutomaticBuildTaskPolicyBinding,
+  ExtractionPolicyFingerprintV1,
+  ExtractionQualityProfile,
+} from "./semantic-artifact";
+import {
+  isWorkUnitDescriptorV3,
+  validateWorkUnitDescriptorV3,
+  validateWorkUnitTaskPolicyBinding,
+  workUnitPlanDigest,
+  type WorkUnitDescriptor,
+  type WorkUnitKind,
+} from "./stage-work-unit";
 import {
   planAutomaticBuildExecutorDispatches,
   type AutomaticBuildExecutorDispatchManifestV1,
@@ -90,7 +101,8 @@ export interface AutomaticBuildPreflightV1 {
   plan_digest: string;
   preflight_evaluation_digest: string;
   quality_profile: ExtractionQualityProfile;
-  policy_fingerprint: ExtractionPolicyFingerprintV1;
+  policy_fingerprint?: ExtractionPolicyFingerprintV1;
+  policy_set_digest?: string;
   policy_digest: string;
   work_units: {
     total: number;
@@ -158,7 +170,7 @@ export interface AutomaticBuildPreflightV1 {
 }
 
 export interface AutomaticBuildCostBatchV1 {
-  units: WorkUnitDescriptorV2[];
+  units: WorkUnitDescriptor[];
   total_score: number;
   deferred_ids: string[];
 }
@@ -400,14 +412,14 @@ export function evaluateAutomaticBuildPlanBudget(input: {
   return { ...identity, receipt_digest: sha256(stableJson(identity)) };
 }
 
-function upperTokenEstimate(units: WorkUnitDescriptorV2[]): number {
+function upperTokenEstimate(units: WorkUnitDescriptor[]): number {
   const inputTokens = units.reduce((sum, unit) => sum + unit.cost.estimated_input_tokens, 0);
   const outputItems = units.reduce((sum, unit) => sum + unit.cost.expected_output_items, 0);
   return inputTokens + outputItems * 192 + units.length * 128;
 }
 
 function costScope(
-  units: WorkUnitDescriptorV2[],
+  units: WorkUnitDescriptor[],
   dispatches: AutomaticBuildExecutorDispatchManifestV1[],
 ): AutomaticBuildCostScopeV1 {
   return {
@@ -423,7 +435,8 @@ function costScope(
 export function buildAutomaticBuildPreflight(input: {
   target_ref: BuildTargetRefV2;
   stage: AutomaticBuildStage;
-  work_units: WorkUnitDescriptorV2[];
+  work_units: WorkUnitDescriptor[];
+  task_bindings?: Record<string, AutomaticBuildTaskPolicyBinding>;
   pending_ids: string[];
   quality_profile: ExtractionQualityProfile;
   requested_workers: number;
@@ -452,11 +465,38 @@ export function buildAutomaticBuildPreflight(input: {
   const eligible = input.work_units.filter((unit) => !unit.deterministic_skip);
   if (!eligible.length) throw new Error(`preflight requires eligible model work: ${input.stage}`);
   if (eligible.some((unit) => unit.stage !== input.stage)) throw new Error("preflight work unit stage mismatch");
+  const v3Units = eligible.filter(isWorkUnitDescriptorV3);
+  if (v3Units.length && v3Units.length !== eligible.length) {
+    throw new Error(`preflight stage cannot mix v2 and v3 descriptor generations: ${input.stage}`);
+  }
+  const policySetDigests = new Set<string>();
+  for (const unit of eligible) {
+    if (isWorkUnitDescriptorV3(unit)) {
+      validateWorkUnitDescriptorV3(unit);
+      const binding = input.task_bindings?.[unit.work_unit_id];
+      if (!binding) throw new Error(`preflight v3 work unit is missing its proof-bound task binding: ${unit.work_unit_id}`);
+      validateWorkUnitTaskPolicyBinding(unit, binding);
+      if (!("policy_set_digest" in binding)) {
+        throw new Error(`preflight v3 work unit is missing its policy-set authority: ${unit.work_unit_id}`);
+      }
+      policySetDigests.add(binding.policy_set_digest);
+    } else if (input.task_bindings?.[unit.work_unit_id]) {
+      validateWorkUnitTaskPolicyBinding(unit, input.task_bindings[unit.work_unit_id]);
+    }
+  }
   const policy = eligible[0].policy_fingerprint;
-  if (eligible.some((unit) => !samePolicy(unit.policy_fingerprint, policy))) {
+  const policySetDigest = v3Units.length
+    ? [...policySetDigests][0]
+    : undefined;
+  if (v3Units.length && policySetDigests.size !== 1) {
+    throw new Error(`preflight v3 stage must use exactly one policy-set digest: ${input.stage}`);
+  }
+  if (!v3Units.length && eligible.some((unit) => !samePolicy(unit.policy_fingerprint, policy))) {
     throw new Error(`preflight stage contains mixed policy fingerprints: ${input.stage}`);
   }
-  if (policy.quality_profile !== input.quality_profile) throw new Error("preflight quality profile does not match work-unit policy");
+  if (eligible.some((unit) => unit.policy_fingerprint.quality_profile !== input.quality_profile)) {
+    throw new Error("preflight quality profile does not match work-unit policy");
+  }
   const pendingSet = new Set(input.pending_ids);
   const pendingEligible = eligible.filter((unit) => pendingSet.has(unit.work_unit_id));
   const scores = eligible.map((unit) => unit.cost.score);
@@ -469,14 +509,16 @@ export function buildAutomaticBuildPreflight(input: {
   const totalLower = inputDistribution.total + outputTokensLower;
   const totalUpper = inputDistribution.total + outputTokensUpper;
   const descriptorPlanDigest = workUnitPlanDigest(input.work_units);
-  const policyDigest = sha256(stableJson(policy));
+  const policyDigest = policySetDigest ?? sha256(stableJson(policy));
   const executorProvenance = validateExecutorProvenance(input.executor_provenance);
   const historicalPerformance = validatePerformanceHistory(input.historical_performance);
   const matchingSamples = (kind: WorkUnitKind): AutomaticBuildPerformanceSampleV1[] => {
     if (!executorProvenance) return [];
+    const kindPolicy = eligible.find((unit) => unit.kind === kind)?.policy_fingerprint;
+    if (!kindPolicy) return [];
     return historicalPerformance.history?.samples.filter((sample) => sample.stage === input.stage
       && sample.kind === kind
-      && sample.router_version === policy.router_version
+      && sample.router_version === kindPolicy.router_version
       && sample.model === executorProvenance.model
       && sample.reasoning_effort === executorProvenance.reasoning_effort
       && sample.harness_release === executorProvenance.harness_release) ?? [];
@@ -503,6 +545,7 @@ export function buildAutomaticBuildPreflight(input: {
     pending_ids: input.pending_ids,
     predicted_service_ms: predictedService,
     available_agent_slots: availableAgentSlots,
+    ...(input.task_bindings ? { task_bindings: input.task_bindings } : {}),
   });
   const lifetimeDispatchPlan = planAutomaticBuildExecutorDispatches({
     target_ref: input.target_ref,
@@ -510,6 +553,7 @@ export function buildAutomaticBuildPreflight(input: {
     work_units: input.work_units,
     pending_ids: eligible.map((unit) => unit.work_unit_id),
     predicted_service_ms: predictedService,
+    ...(input.task_bindings ? { task_bindings: input.task_bindings } : {}),
   });
   const plannedWorkers = Math.min(input.requested_workers, 3);
   const scheduledDispatches = dispatchPlan.dispatches.slice(0, plannedWorkers);
@@ -641,7 +685,9 @@ export function buildAutomaticBuildPreflight(input: {
     plan_digest: sha256(stableJson(digestIdentity)),
     preflight_evaluation_digest: sha256(stableJson(evaluationIdentity)),
     quality_profile: input.quality_profile,
-    policy_fingerprint: policy,
+    ...(policySetDigest
+      ? { policy_set_digest: policySetDigest }
+      : { policy_fingerprint: policy }),
     policy_digest: policyDigest,
     work_units: {
       total: input.work_units.length,
@@ -702,7 +748,7 @@ export function buildAutomaticBuildPreflight(input: {
 }
 
 export function selectAutomaticBuildCostBatch(
-  units: WorkUnitDescriptorV2[],
+  units: WorkUnitDescriptor[],
   limits: { max_tasks: number; max_total_score: number },
 ): AutomaticBuildCostBatchV1 {
   const maxTasks = nonNegativeSafeInteger(limits.max_tasks, "batch.max_tasks");
@@ -710,7 +756,7 @@ export function selectAutomaticBuildCostBatch(
   const ordered = [...units]
     .filter((unit) => !unit.deterministic_skip)
     .sort((left, right) => left.cost.score - right.cost.score || left.work_unit_id.localeCompare(right.work_unit_id));
-  const selected: WorkUnitDescriptorV2[] = [];
+  const selected: WorkUnitDescriptor[] = [];
   let totalScore = 0;
   for (const unit of ordered) {
     if (selected.length >= maxTasks) break;

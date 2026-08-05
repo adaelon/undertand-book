@@ -4,8 +4,12 @@ import canvasGeometry from "@napi-rs/canvas/geometry.js";
 import paperLexiconPrompt from "../../agents/paper-lexicon-extractor.md";
 import paperMetadataPrompt from "../../agents/paper-metadata-extractor.md";
 import pass1Prompt from "../../agents/pass1-local-extractor.md";
+import pass1SourceFragmentPrompt from "../../agents/pass1-source-fragment-extractor.md";
+import pass1LidStitcherPrompt from "../../agents/pass1-lid-stitcher.md";
 import pass2Prompt from "../../agents/pass2-longrange-linker.md";
 import "pdfjs-dist/legacy/build/pdf.worker.mjs";
+import profileSidecarDiscourseFragmentPrompt from "../../agents/profile-sidecar-discourse-fragment-extractor.md";
+import profileSidecarDiscourseReducerPrompt from "../../agents/profile-sidecar-discourse-reducer.md";
 import profileSidecarPrompt from "../../agents/profile-sidecar-extractor.md";
 import {
   AUTOMATIC_BUILD_EXECUTOR_PROMPT_MODES,
@@ -23,7 +27,11 @@ const PROMPTS: Record<string, string> = {
   "paper-lexicon-extractor.md": paperLexiconPrompt,
   "paper-metadata-extractor.md": paperMetadataPrompt,
   "pass1-local-extractor.md": pass1Prompt,
+  "pass1-source-fragment-extractor.md": pass1SourceFragmentPrompt,
+  "pass1-lid-stitcher.md": pass1LidStitcherPrompt,
   "pass2-longrange-linker.md": pass2Prompt,
+  "profile-sidecar-discourse-fragment-extractor.md": profileSidecarDiscourseFragmentPrompt,
+  "profile-sidecar-discourse-reducer.md": profileSidecarDiscourseReducerPrompt,
   "profile-sidecar-extractor.md": profileSidecarPrompt,
 };
 

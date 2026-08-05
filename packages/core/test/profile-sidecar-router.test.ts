@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -6,6 +7,7 @@ import { describe, expect, it } from "vitest";
 import { resolveAutomaticBuildTarget } from "../src/build-orchestrator";
 import { resolveContentProfile } from "../src/content-profile";
 import { markdownToBlocks } from "../src/md-adapter";
+import { renderProfileSidecarModelInput } from "../src/model-input-renderer";
 import {
   buildProfileSidecarSemanticArtifact,
   computeProfileSidecarRoutingStatus,
@@ -180,10 +182,12 @@ describe("profile sidecar semantic-unit routers", () => {
 
     const discourseInput = run("profile-sidecar-input.ts", [discourse.work_unit_id]);
     expect(discourseInput.status, discourseInput.stderr).toBe(0);
-    expect(discourseInput.stdout).toContain("unit_kind: profile_sidecar_discourse");
+    expect(discourseInput.stdout).toBe(renderProfileSidecarModelInput(discourse));
+    expect(discourse.rendered_input_sha256).toBe(createHash("sha256").update(discourseInput.stdout).digest("hex"));
     const formulaInput = run("profile-sidecar-input.ts", [formula.work_unit_id]);
     expect(formulaInput.status, formulaInput.stderr).toBe(0);
-    expect(formulaInput.stdout).toContain("unit_kind: profile_sidecar_formula");
+    expect(formulaInput.stdout).toBe(renderProfileSidecarModelInput(formula));
+    expect(formula.rendered_input_sha256).toBe(createHash("sha256").update(formulaInput.stdout).digest("hex"));
     const skippedInput = run("profile-sidecar-input.ts", [skippedId]);
     expect(skippedInput.status).toBe(1);
     expect(skippedInput.stderr).toContain("not model-eligible");
@@ -216,6 +220,11 @@ describe("profile sidecar semantic-unit routers", () => {
     expect(status.stdout).toContain("done=2");
     const batch = run("profile-sidecar-batch.ts", ["--allow-partial"]);
     expect(batch.status, batch.stderr).toBe(0);
+    expect(JSON.parse(batch.stdout)).toMatchObject({
+      version: "automatic_build_stage_batch_result.v1",
+      stage: "profile_sidecar",
+      publication: { receipt_ref: expect.stringMatching(/receipt\.json$/u) },
+    });
     const discoursePath = path.join(root, ".understand-book", "profile-sidecar-semantic-units", "discourse_index.json");
     const formulaPath = path.join(root, ".understand-book", "profile-sidecar-semantic-units", "formula_semantics.json");
     expect(existsSync(discoursePath)).toBe(true);

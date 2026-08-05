@@ -1,36 +1,48 @@
-# SESSION_CHECKPOINT - 2026-07-30 08:35 +08:00
+# SESSION_CHECKPOINT — 2026-08-05 17:43 +08:00
 
 ## 新鲜度自检
 
-- 写入时最新提交:`e81e334 feat(notes): add explicit body placement`。
-- 读入时运行 `git log --oneline -3`;若不同,以 Git 与工作区 diff 为准。
+- 写入基线：`2e78108 fix(build): close installed executor handoff reliability`。
+- 本文件与 BR1–BR10 同属一个待生成提交，提交无法在自身内容中嵌入最终 hash；读入时以 `git log --oneline -3` 中包含本文件的 `feat(build): close BR1-BR10 routable recovery` 为准。
+- 写入边界为 86 个 BR 文件（55 个 tracked 变更、31 个新增文件）；其余用户旁支不得从 HEAD 重建、覆盖、清理或纳入 BR 提交。
 
 ## 当前在做什么
 
-AA0-AA11 已实现并完成发布面收口,代码与文档仍未提交;Blueprint Registry、V2 Plan/Instance gate、Reader 五形态、Resident/MCP current snapshot 读取和两本真书 release audit 已形成完整闭环。
+BR1–BR10 已闭合并由本 checkpoint 所在提交统一收口：预算可路由模型工作单元、v3 production routing、quality-v2、结构化 recovery、事务 publication、严格 close/replan、Node/Sidecar parity 与 thin-plugin release contract 均已完成。BR11 未授权、未启动。
 
-## 下一步(可直接接手)
+## 下一步（可直接接手）
 
-1. 运行 `Get-Content -Raw apps/desktop/scripts/smoke-artifact-access.mjs`,复核新增且尚未跟踪的 AA11 audit 脚本。
-2. 运行 `git diff -- docs/切片方案-需求驱动产物Blueprint与Agent访问.md docs/架构.md docs/代码链路.md SESSION_CHECKPOINT.md`,复核 AA11 文档收口 diff。
-3. 依据 `docs/代码链路.md` 的 AA1-AA11 触达清单生成显式 staging 文件列表,排除 NP0R-NP4、书籍、截图、日志、`.tmp-*` 与其他用户文件。
-4. 若准备发布,以 `UNDERSTAND_BOOK_DESKTOP_EXE=<current UnderstandBook.exe>` 运行 `node apps/desktop/scripts/smoke-artifact-access.mjs`,并以 `UNDERSTAND_BOOK_MARKETPLACE_SOURCE=adaelon/undertand-book` 运行 `node apps/desktop/scripts/assert-release-config.mjs`。
-5. 若准备提交,按 AA1-AA11 切片边界分别提交;不要把既有 Note-placement 工作混入。
+1. 运行 `git log --oneline -3`，确认 HEAD 为本 checkpoint 所在的 BR1–BR10 提交。
+2. 运行 `git status --short`，确认 BR1–BR10 无残留；只应看到提交边界外的用户旁支、书籍、日志和临时项。
+3. 只有用户明确授权 BR11 后，先用 `git rev-parse HEAD` 冻结 exact SHA，再按切片方案 BR11 在隔离 clean worktree 构建 Windows Setup。
+4. BR11 安装唯一 cachebuster 后，从新 Codex task 加载安装态 thin plugin；不得从当前脏工作区直接发布。
+5. 在受保护副本重放真实触发 EPUB，并用 deterministic synthetic fixture 跑到 `done`；不得修改原书、原 workspace 或降低 full 质量门。
 
 ## 未提交 / 未完成
 
-- AA1-AA11:Core/Runtime/Server/Web/plugin/docs 与新增 `crates/artifact-tools/`、`apps/desktop/scripts/smoke-artifact-access.mjs` 全部实现、验证并完成文档收口,待显式 staging/commit。
-- AA11 真书 audit:technical_learning `quantification-essence` 2757 LIDs、paper `understanding-transformer-from-the-perspective-of-reviewed-v2` 1981 LIDs;两书均 `release_gate=pass`,相关 Resident 各 5 回合/25 tokens/1 search/1 read/1 `book.text`/1 `source.present`,无关与禁用均 0 artifact 调用,最终 wall clock 280/3618 ms,MCP delete 前各 11 calls。
-- AA11 异常矩阵:replan old ref=`ARTIFACT_REF_INVALID`;source stale=`INTENT_BUILD_CONFLICT`;delete/no-overlay=`ARTIFACT_OVERLAY_UNAVAILABLE`;Reader/Resident/MCP 均只读 current active + accepted,private goal/body 泄漏 0。
-- 验证:Artifact Tools 15/15;Runtime 232/232 + integration 5/5(仅过滤已知真书 LID 基线);Server 220/220 + Book MCP 5/5;Web 37 files / 208 tests + typecheck/build;packaged parity、release-config、`cargo fmt --all -- --check`、`git diff --check` 全绿。
-- Core 串行全量 535/538;剩余 3 条只有固定 wall-clock timeout 且无断言差异。dispatch/profile 冷跑已绿;handoff 仅 Node/tsx 冷启动约 5.34 s 超过既有 5 s。按 A2 未修改无关测试或门槛。
-- 既有 NP0R-NP4 goal-owned 代码/文档仍未提交;边界见 `docs/切片方案-无引用Note显式正文放置.md` 与 `docs/代码链路.md` 的 NP1a-NP4。
-- 其他书籍、截图、日志、临时目录及用户工作不属于 AA0-AA11,不得清理、覆盖或纳入提交。
+- BR1–BR10：无；应全部位于本 checkpoint 所在提交。
+- 用户旁支：6 个 tracked 改动（`crates/base-schema`、`crates/memory`、`crates/runtime` 与两份既有方案文档）及其他 untracked 书籍、handoff、日志、临时目录；均有意排除并受保护。
+- BR11：clean-SHA Setup、安装态 thin plugin、隔离真书回放与合成全闭包尚未实施。
+
+## 已验证
+
+- `git diff --check` 通过，仅有仓库既有 LF→CRLF 提示。
+- 本次提交前复验：5 个 BR10 release/close/handoff/routability 文件、33/33 用例通过；Core typecheck 通过。
+- BR10 定向：release/close 15/15；Profile/release 17/17；handoff+routability 18/18；Core typecheck 通过。
+- Sidecar 重建、十项 prompt 的 task/dispatch Node/Bun 字节 parity、plan/doctor/next/dispatch smoke、plugin release assertion 与 release-config/build-order assertion 均通过。
+- Core 全量 104/104 文件、663/663 用例通过（单 worker，374.97 秒）；root/public skill SHA-256 均为 `78d17d6bba135fb5bae2b511db9b19174d39f41613e27c519ab903ec9b266b46`。
 
 ## 冷启动读序
 
-1. `docs/切片方案-需求驱动产物Blueprint与Agent访问.md` - FrozenIntent、AA0-AA11 状态、真书统计与发布判定。
-2. `docs/adr/0094-codex-designed-artifact-blueprints-and-versioned-registry.md`、`docs/adr/0095-active-artifact-read-surface-and-book-mcp-boundary.md` 与 `CONTEXT.md` 的 Blueprint/目标产物术语。
-3. `apps/desktop/scripts/smoke-artifact-access.mjs` - 两本真书、三消费面、异常矩阵与 audit JSON 的可复放权威。
-4. `crates/artifact-tools/`、`crates/server/src/intent_build_store.rs::read_active_overlay_state`、Runtime `ArtifactToolSession` 与 MCP dispatch - current snapshot 执行链。
-5. `docs/架构.md` 的 AA6-AA11 章节与 `docs/代码链路.md` 最后的 AA11 - 架构、隐私边界、运行统计和验证证据。
+1. `docs/adr/0100-budget-routable-model-work-units-and-truthful-build-recovery.md` — 六项冻结决策与禁区。
+2. `docs/切片方案-预算可路由模型工作单元与构建恢复闭环.md` 的 BR10–BR11 与 §6 — release 完成态和下一授权边界。
+3. `CONTEXT.md` 的“预算可路由性 / 模型输入片 / effect 返回·错误分类+recovery” — 术语权威。
+4. `docs/architecture.md` 的 release v3、close coordinator 与 Pass1/Profile production v3 — 当前组件边界。
+5. `docs/代码链路.md` 最近 BR10-A–BR10-D — release、Sidecar、skill 与回归账本。
+6. `packages/core/src/{automatic-build-protocol,automatic-build-close,automatic-build-legacy,semantic-artifact}.ts`、`skills/build/automatic-build.ts` 与 release/handoff/routability tests — 核心证明链。
+7. `skills/build/SKILL.md`、`plugins/understand-book/skills/build/SKILL.md` 与 `apps/desktop/scripts/{build-sidecar,smoke-automatic-build-parity,assert-plugin-release,assert-release-config}.mjs` — 薄插件与发布门。
+
+## 本会话决策摘要
+
+- BR1–BR10 以代码链路为权威合并为一个提交；BR11 和全部用户旁支排除。
+- checkpoint 与目标代码同 commit 时，以包含它的 HEAD 为新鲜度权威，避免伪造不可自引用的提交 hash。

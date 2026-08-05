@@ -15,12 +15,27 @@ import { buildTechnicalLearningDiscourseIndex, type TechnicalLearningDiscourseIt
 import { buildLidToWindowIndex, buildLongRangeCandidates, gatePass2BuildOutput, type Pass2LlmOutput } from "../../packages/core/src/pass2-build";
 import { deriveBookId } from "../../packages/core/src/book-id";
 import { computeBuildStatus, type Pass1Artifact } from "../../packages/core/src/build-resume";
-import { semanticArtifactPayload } from "../../packages/core/src/semantic-artifact";
+import {
+  semanticArtifactPayload,
+  type ExtractionQualityProfile,
+} from "../../packages/core/src/semantic-artifact";
 import { contentProfileUsage, parseContentProfileArgsOrExit } from "./content-profile-options";
 import { loadBookWindows, windowById } from "./load-book";
 import { assertTrustedPaperProjectionSource } from "../../packages/core/src/paper-projection-chain";
 import path from "node:path";
-import { publishAutomaticBuildArtifactSet } from "../../packages/core/src/automatic-build-publication";
+import {
+  buildAutomaticBuildStageBatchResult,
+  publishAutomaticBuildArtifactSet,
+} from "../../packages/core/src/automatic-build-publication";
+import {
+  buildAutomaticBuildSnapshot,
+  resolveAutomaticBuildTarget,
+} from "../../packages/core/src/build-orchestrator";
+import {
+  assertPass1ShadowCandidatePath,
+  readPass1ShadowTask,
+  writePass1ShadowFinalCandidate,
+} from "../../packages/core/src/pass1-reduction";
 
 const parsedProfile = parseContentProfileArgsOrExit(process.argv.slice(2), { allowPaperExecution: true });
 const argv = parsedProfile.argv;
@@ -32,6 +47,10 @@ const VALUE_FLAGS = new Set([
   "--original-pdf",
   "--pdf-source-map",
   "--preserve-foundation",
+  "--shadow-generation",
+  "--shadow-final",
+  "--production-generation",
+  "--quality-profile",
 ]);
 const opts: Record<string, string | undefined> = {};
 let allowPartial = false;
@@ -54,10 +73,38 @@ const pass2OutputPath = opts["--pass2-output"];
 const originalPdfPath = opts["--original-pdf"];
 const pdfSourceMapPath = opts["--pdf-source-map"];
 const preserveFoundationPath = opts["--preserve-foundation"];
+const shadowGeneration = opts["--shadow-generation"];
+const shadowFinal = opts["--shadow-final"];
+const productionGeneration = opts["--production-generation"];
+const productionQualityProfile = opts["--quality-profile"] ?? "full";
+if (!( ["full", "balanced", "sparse"] as string[]).includes(productionQualityProfile)) {
+  throw new Error(`unsupported --quality-profile ${productionQualityProfile}`);
+}
+if (Boolean(shadowGeneration) !== Boolean(shadowFinal)) {
+  console.error("--shadow-generation and --shadow-final must be provided together");
+  process.exit(2);
+}
+if (productionGeneration && (shadowGeneration || shadowFinal)) {
+  throw new Error("--production-generation cannot be combined with --shadow-generation/--shadow-final");
+}
 
 const { source, blocks, lidNodes, byLid, windows } = loadBookWindows(book);
 const bookId = deriveBookId(book, opts["--book-id"]);
 const outputDir = path.resolve(`.understand-book/${bookId}`);
+if (shadowGeneration && shadowFinal) {
+  if (allowPartial) throw new Error("--allow-partial is not valid for a shadow final candidate");
+  const target = resolveAutomaticBuildTarget(book, process.cwd(), { book_id: bookId });
+  const task = readPass1ShadowTask(target, shadowGeneration, shadowFinal);
+  const result = writePass1ShadowFinalCandidate({ target, source, task });
+  console.log(JSON.stringify({
+    version: result.version,
+    work_unit_id: result.work_unit_id,
+    window_id: result.window_id,
+    candidate_path: result.candidate_path,
+    candidate_sha256: result.candidate_sha256,
+  }));
+  process.exit(0);
+}
 if (preserveFoundationPath) {
   if (parsedProfile.contentProfile.id !== "paper") {
     throw new Error("--preserve-foundation is only valid for content_profile=paper");
@@ -74,9 +121,55 @@ if (preserveFoundationPath) {
 // 消费 `.build/pass1/<id>.json`:逐窗读已落产物(缺文件=不入 map)
 const pass1Dir = `.understand-book/${bookId}/.build/pass1`;
 const artifacts = new Map<number, Pass1Artifact>();
-for (const w of windows) {
-  const f = `${pass1Dir}/${w.id}.json`;
-  if (existsSync(f)) artifacts.set(w.id, semanticArtifactPayload<Pass1Artifact>(JSON.parse(readFileSync(f, "utf8"))));
+if (productionGeneration) {
+  if (allowPartial) throw new Error("--allow-partial is not valid for a production v3 generation");
+  const target = resolveAutomaticBuildTarget(book, process.cwd(), { book_id: bookId });
+  if (path.resolve(target.workspace_dir) !== outputDir) {
+    throw new Error("production Pass1 target does not match its resolved output workspace");
+  }
+  const snapshot = buildAutomaticBuildSnapshot(target, {
+    quality_profile: productionQualityProfile as ExtractionQualityProfile,
+  });
+  const stage = snapshot.stages.find((candidate) => candidate.stage === "pass1");
+  if (!stage?.policy_set || stage.policy_set.policy_set_digest !== productionGeneration) {
+    throw new Error("production Pass1 generation does not match the current policy set");
+  }
+  if (stage.pending_tasks.length) {
+    throw new Error("production Pass1 generation still has pending work units");
+  }
+  const contributors = stage.quality_routing?.public_contributors ?? [];
+  if (!contributors.length) throw new Error("production Pass1 generation has no public contributors");
+  for (const contributor of contributors) {
+    const generation = stage.generation_tasks?.[contributor.work_unit_id];
+    if (generation?.kind !== "pass1") {
+      throw new Error(`production Pass1 contributor has no frozen task: ${contributor.work_unit_id}`);
+    }
+    const task = readPass1ShadowTask(target, productionGeneration, contributor.work_unit_id);
+    const result = writePass1ShadowFinalCandidate({ target, source, task });
+    const candidatePath = assertPass1ShadowCandidatePath({
+      target,
+      task,
+      candidate_path: result.candidate_path,
+    });
+    const candidate = JSON.parse(readFileSync(candidatePath, "utf8")) as Pass1Artifact;
+    if (typeof candidate.content_hash !== "string"
+      || !Array.isArray(candidate.nodes)
+      || !Array.isArray(candidate.edges)) {
+      throw new Error(`production Pass1 public candidate is invalid: ${contributor.work_unit_id}`);
+    }
+    if (artifacts.has(result.window_id)) {
+      throw new Error(`production Pass1 window has duplicate public contributors: ${result.window_id}`);
+    }
+    artifacts.set(result.window_id, candidate);
+  }
+  if (artifacts.size !== windows.length) {
+    throw new Error("production Pass1 contributors do not cover every current window");
+  }
+} else {
+  for (const w of windows) {
+    const f = `${pass1Dir}/${w.id}.json`;
+    if (existsSync(f)) artifacts.set(w.id, semanticArtifactPayload<Pass1Artifact>(JSON.parse(readFileSync(f, "utf8"))));
+  }
 }
 // 续建判定:存在性 + content-hash 校验(陈旧/缺失=pending)
 const { done, pending } = computeBuildStatus(windows, byLid, source, artifacts, parsedProfile.contentProfile);
@@ -183,42 +276,47 @@ if (sourceManifest) publicArtifacts["source_manifest.json"] = JSON.stringify(sou
 if (formulaSidecar) publicArtifacts["formula_semantics.json"] = JSON.stringify(formulaSidecar.sidecar, null, 2);
 if (discourseSidecar) publicArtifacts["discourse_index.json"] = JSON.stringify(discourseSidecar.sidecar, null, 2);
 if (pass2Gated) publicArtifacts["pass2_audit.json"] = JSON.stringify(pass2Gated.audit, null, 2);
-publishAutomaticBuildArtifactSet({ workspace_dir: dir, stage: "pass1", artifacts: publicArtifacts });
+const publicationReceipt = publishAutomaticBuildArtifactSet({
+  workspace_dir: dir,
+  stage: "pass1",
+  artifacts: publicArtifacts,
+});
 if (preserveFoundationPath) assertTrustedPaperProjectionSource(outputDir);
 
-console.log(`[pass1-batch] ${book}  bookId=${bookId}  content_profile=${parsedProfile.contentProfile.id}${allowPartial && pending.length ? "  [--allow-partial]" : ""}`);
-console.log(`  窗口=${windows.length}  done=${done.length}  pending=${pending.length}  全书叶子=${lidNodes.filter((n) => n.children.length === 0).length}`);
-console.log(`  抽取输入: nodes=${outputs.reduce((s, o) => s + o.nodes.length, 0)} edges=${outputs.reduce((s, o) => s + o.edges.length, 0)}`);
-console.log(`  merge 合并: 节点合并=${report.nodesMerged} 边去重=${report.edgesDeduped}`);
-console.log(`  闸后: nodes=${report.nodesOut} edges=${report.edgesOut} 目录=${catalog.length}`);
-console.log(`  丢弃: 节点=${report.droppedNodes.length} 边=${report.droppedEdges.length} 剔除occ=${report.prunedOccurrences.length}`);
-console.log(`  锚定率(全书分母)=${(report.anchorRate * 100).toFixed(4)}%`);
-console.log(`  锚定率(已抽窗口分母,${sampledAnchored}/${sampledLeaves.size})=${(sampledRate * 100).toFixed(2)}%`);
-console.log(`  基座固化: ${dir}/base.json  (zod 校验通过)`);
-console.log(`  profile metadata: ${dir}/profile_metadata.json`);
+console.error(`[pass1-batch] ${book}  bookId=${bookId}  content_profile=${parsedProfile.contentProfile.id}${allowPartial && pending.length ? "  [--allow-partial]" : ""}`);
+console.error(`  窗口=${windows.length}  done=${done.length}  pending=${pending.length}  全书叶子=${lidNodes.filter((n) => n.children.length === 0).length}`);
+console.error(`  抽取输入: nodes=${outputs.reduce((s, o) => s + o.nodes.length, 0)} edges=${outputs.reduce((s, o) => s + o.edges.length, 0)}`);
+console.error(`  merge 合并: 节点合并=${report.nodesMerged} 边去重=${report.edgesDeduped}`);
+console.error(`  闸后: nodes=${report.nodesOut} edges=${report.edgesOut} 目录=${catalog.length}`);
+console.error(`  丢弃: 节点=${report.droppedNodes.length} 边=${report.droppedEdges.length} 剔除occ=${report.prunedOccurrences.length}`);
+console.error(`  锚定率(全书分母)=${(report.anchorRate * 100).toFixed(4)}%`);
+console.error(`  锚定率(已抽窗口分母,${sampledAnchored}/${sampledLeaves.size})=${(sampledRate * 100).toFixed(2)}%`);
+console.error(`  基座固化: ${dir}/base.json  (zod 校验通过)`);
+console.error(`  profile metadata: ${dir}/profile_metadata.json`);
 if (sourceManifest) {
-  console.log(
+  console.error(
     `  source manifest: ${dir}/source_manifest.json canonical=${sourceManifest.canonical_source.kind} pdf_attachments=${sourceManifest.attachments.length}`,
   );
 } else {
-  console.log(`  source manifest: ${dir}/source_manifest.json preserved reconciled foundation`);
+  console.error(`  source manifest: ${dir}/source_manifest.json preserved reconciled foundation`);
 }
-console.log(
+console.error(
   `  asset manifest: ${dir}/asset_manifest.json images=${assetManifest.images.length} available=${assetManifest.images.filter((img) => img.status === "available").length}`,
 );
 if (formulaSidecar) {
-  console.log(
+  console.error(
     `  formula semantics: ${dir}/formula_semantics.json items=${formulaSidecar.sidecar.items.length} pending=${formulaSidecar.pending.length}`,
   );
 }
 if (discourseSidecar) {
-  console.log(
+  console.error(
     `  discourse index: ${dir}/discourse_index.json items=${discourseSidecar.sidecar.items.length} dropped=${discourseSidecar.dropped.length}`,
   );
 }
-console.log(`  long_range candidates: ${dir}/long_range_candidates.json candidates=${candidateIndex.candidates.length}`);
+console.error(`  long_range candidates: ${dir}/long_range_candidates.json candidates=${candidateIndex.candidates.length}`);
 if (pass2Gated) {
-  console.log(
+  console.error(
     `  pass2 audit: ${dir}/pass2_audit.json long_range_edges=${pass2Gated.edges.length} accepted=${pass2Gated.audit.accepted.length} pending=${pass2Gated.audit.pending.length} rejected=${pass2Gated.audit.rejected.length} gate_dropped=${pass2Gated.audit.gate_dropped.length}`,
   );
 }
+process.stdout.write(`${JSON.stringify(buildAutomaticBuildStageBatchResult(publicationReceipt))}\n`);

@@ -21,9 +21,15 @@ import {
 } from "./automatic-build-task-store";
 import {
   freezeAutomaticBuildStagePolicy,
-  type AutomaticBuildTaskPolicyBindingV1,
+  isAutomaticBuildTaskPolicyBindingV2,
+  type AutomaticBuildTaskPolicyBinding,
   type ExtractionPolicyFingerprintV1,
 } from "./semantic-artifact";
+import {
+  isWorkUnitDescriptorV3,
+  validateWorkUnitTaskPolicyBinding,
+  type WorkUnitDescriptor,
+} from "./stage-work-unit";
 
 const DEFAULT_RESERVE_TTL_MS = 600_000;
 const DEFAULT_RUN_TTL_MS = 1_800_000;
@@ -42,6 +48,8 @@ export interface AutomaticBuildTaskLeaseV1 {
   issued_at: string;
   expires_at: string;
   input_hash?: string;
+  proof_digest?: string;
+  policy_set_digest?: string;
   policy_fingerprint?: ExtractionPolicyFingerprintV1;
 }
 
@@ -59,6 +67,8 @@ export interface AutomaticBuildTaskLeaseV2 {
   issued_at: string;
   expires_at: string;
   input_hash?: string;
+  proof_digest?: string;
+  policy_set_digest?: string;
   policy_fingerprint?: ExtractionPolicyFingerprintV1;
 }
 
@@ -91,7 +101,9 @@ export interface AutomaticBuildLeaseOptions {
   now?: string;
   ttl_ms?: number;
   reserve_ttl_ms?: number;
-  binding?: AutomaticBuildTaskPolicyBindingV1;
+  binding?: AutomaticBuildTaskPolicyBinding;
+  descriptor?: WorkUnitDescriptor;
+  policy_generation?: "v2_compatible" | "v3_only";
   max_semantic_attempts?: number;
   max_lease_epochs?: number;
 }
@@ -140,6 +152,30 @@ function sameTargetRef(left: BuildTargetRefV2, right: BuildTargetRefV2): boolean
     && left.book_id === right.book_id
     && left.profile_id === right.profile_id
     && left.input_fingerprint === right.input_fingerprint;
+}
+
+export function automaticBuildTaskPolicyBindingFromLease(
+  lease: AutomaticBuildTaskLease,
+): AutomaticBuildTaskPolicyBinding | undefined {
+  const hasInputHash = lease.input_hash !== undefined;
+  const hasPolicy = lease.policy_fingerprint !== undefined;
+  const hasProof = lease.proof_digest !== undefined;
+  const hasPolicySet = lease.policy_set_digest !== undefined;
+  if (!hasInputHash && !hasPolicy && !hasProof && !hasPolicySet) return undefined;
+  if (!hasInputHash || !hasPolicy || hasProof !== hasPolicySet) {
+    throw new Error("automatic build lease contains a partial task policy binding");
+  }
+  return hasProof
+    ? {
+        input_hash: lease.input_hash!,
+        proof_digest: lease.proof_digest!,
+        policy_set_digest: lease.policy_set_digest!,
+        policy_fingerprint: lease.policy_fingerprint!,
+      }
+    : {
+        input_hash: lease.input_hash!,
+        policy_fingerprint: lease.policy_fingerprint!,
+      };
 }
 
 function assertLeasePath(target: AutomaticBuildTarget, leaseRef: string): string {
@@ -271,6 +307,7 @@ function activeLeaseAt(
     throw new Error(`invalid automatic build lease: ${leaseRef}`);
   }
   if (!sameTargetRef(lease.target_ref, target.target_ref) || terminalEventExists(leaseRef)) return undefined;
+  automaticBuildTaskPolicyBindingFromLease(lease);
   return timeMs(now, "now") < timeMs(effectiveExpiry(target, leaseRef, lease), "expires_at") ? lease : undefined;
 }
 
@@ -329,6 +366,7 @@ export function readAutomaticBuildLease(
     throw new Error(`automatic build lease target mismatch: ${resolved}`);
   }
   if (lease.token !== token) throw new Error(`automatic build lease token mismatch: ${resolved}`);
+  automaticBuildTaskPolicyBindingFromLease(lease);
   return lease;
 }
 
@@ -410,9 +448,32 @@ export function claimAutomaticBuildTask(
 ): AutomaticBuildClaimResult {
   if (!options.owner) throw new Error("lease owner must not be empty");
   const times = leaseTimes(options.now, options.reserve_ttl_ms ?? options.ttl_ms ?? DEFAULT_RESERVE_TTL_MS);
+  if (Boolean(options.binding) !== Boolean(options.descriptor)) {
+    if (options.binding && !isAutomaticBuildTaskPolicyBindingV2(options.binding)) {
+      // Historical v2 callers predate descriptor-bound claiming. Preserve that
+      // exact path while requiring every v3 claim to carry both values.
+    } else {
+      throw new Error("v3 automatic build claims require both descriptor and task policy binding");
+    }
+  }
+  if (options.descriptor && options.binding) {
+    if (options.descriptor.stage !== stage || options.descriptor.work_unit_id !== workUnitId
+      || !sameTargetRef(options.descriptor.target, target.target_ref)) {
+      throw new Error("automatic build claim descriptor identity mismatch");
+    }
+    validateWorkUnitTaskPolicyBinding(options.descriptor, options.binding);
+  }
+  if (options.policy_generation === "v3_only"
+    && (!options.descriptor || !options.binding
+      || !isWorkUnitDescriptorV3(options.descriptor)
+      || !isAutomaticBuildTaskPolicyBindingV2(options.binding))) {
+    throw new Error("policy_generation_migration_required: v3 release forbids new v2 claims");
+  }
   if (options.binding) {
     if (stage === "paper_reading_guide") throw new Error("paper_reading_guide does not accept semantic task bindings");
-    freezeAutomaticBuildStagePolicy(target, stage, options.binding.policy_fingerprint, times.now);
+    if (!isAutomaticBuildTaskPolicyBindingV2(options.binding)) {
+      freezeAutomaticBuildStagePolicy(target, stage, options.binding.policy_fingerprint, times.now);
+    }
   }
   for (let retry = 0; retry < 8; retry += 1) {
     let directories = attemptDirectories(target, stage, workUnitId);
@@ -447,6 +508,10 @@ export function claimAutomaticBuildTask(
       expires_at: times.expires_at,
       ...(options.binding ? {
         input_hash: options.binding.input_hash,
+        ...(isAutomaticBuildTaskPolicyBindingV2(options.binding) ? {
+          proof_digest: options.binding.proof_digest,
+          policy_set_digest: options.binding.policy_set_digest,
+        } : {}),
         policy_fingerprint: options.binding.policy_fingerprint,
       } : {}),
     };

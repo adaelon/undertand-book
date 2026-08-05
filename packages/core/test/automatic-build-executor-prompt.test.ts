@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
   AUTOMATIC_BUILD_EXECUTOR_PROMPT_SEPARATOR,
@@ -7,10 +8,11 @@ import {
 } from "../../../skills/build/executor-prompt";
 import {
   AUTOMATIC_BUILD_EXTRACTOR_PROMPT_NAMES,
+  AUTOMATIC_BUILD_SHADOW_EXTRACTOR_PROMPT_NAMES,
   runAutomaticBuildExecutorPromptCli,
 } from "../../../skills/build/executor-prompt-cli";
 
-const REPO_ROOT = path.resolve(process.cwd(), "..", "..");
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 
 describe("automatic build executor prompt", () => {
   it("composes one deterministic dispatch wrapper and one semantic prompt", () => {
@@ -61,6 +63,29 @@ describe("automatic build executor prompt", () => {
       expect(stdout).toContain(wrapper.replace(/(?:\r\n|\n|\r)+$/u, ""));
       expect(stdout).not.toContain(REPO_ROOT);
       expect(stdout.endsWith("\n")).toBe(true);
+    }
+  });
+
+  it("activates every BR8 fragment/reducer prompt in the production set", () => {
+    expect(AUTOMATIC_BUILD_EXTRACTOR_PROMPT_NAMES).toEqual(expect.arrayContaining([
+      "pass1-source-fragment-extractor.md",
+      "pass1-lid-stitcher.md",
+      "profile-sidecar-discourse-fragment-extractor.md",
+      "profile-sidecar-discourse-reducer.md",
+    ]));
+    expect(AUTOMATIC_BUILD_SHADOW_EXTRACTOR_PROMPT_NAMES).toEqual([]);
+    for (const extractorName of AUTOMATIC_BUILD_EXTRACTOR_PROMPT_NAMES) {
+      const expected = readFileSync(path.join(REPO_ROOT, "agents", extractorName), "utf8")
+        .replace(/(?:\r\n|\n|\r)+$/u, "");
+      let stdout = "";
+      let stderr = "";
+      const status = runAutomaticBuildExecutorPromptCli([extractorName], {
+        write_stdout: (text) => { stdout += text; },
+        write_stderr: (text) => { stderr += text; },
+      });
+      expect(status, stderr).toBe(0);
+      expect(stderr).toBe("");
+      expect(stdout).toBe(`${expected}\n`);
     }
   });
 

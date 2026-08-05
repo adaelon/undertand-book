@@ -1,3 +1,7 @@
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { spawnSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 import { markdownToBlocks } from "../src/md-adapter";
 import { segment } from "../src/segment";
@@ -7,6 +11,7 @@ import { buildProfiledPass1Input } from "../src/pass1-profile-input";
 import { resolveContentProfile } from "../src/content-profile";
 import { buildPass1Artifact, computeBuildStatus } from "../src/build-resume";
 import type { Pass1Output } from "../src/merge";
+import { renderPass1ModelInput } from "../src/model-input-renderer";
 
 const md = "# Paper\n\nWe define RAG as retrieval augmented generation.\n\nThe method improves recall.";
 const nodes = segment(markdownToBlocks(md));
@@ -18,6 +23,26 @@ describe("PP4 profiled Pass1 input", () => {
   it("keeps technical_learning Pass1 input byte-for-byte unchanged", () => {
     const profile = resolveContentProfile("technical_learning");
     expect(buildProfiledPass1Input(window0, byLid, md, profile)).toEqual(buildPass1Input(window0, byLid, md));
+  });
+
+  it("keeps the Core Pass1 renderer byte-identical to emit-input stdout", () => {
+    const root = mkdtempSync(path.join(tmpdir(), "understand-book-pass1-renderer-"));
+    const sourcePath = path.join(root, "paper.md");
+    writeFileSync(sourcePath, md, "utf8");
+    const repoRoot = path.resolve(process.cwd(), "..", "..");
+    const result = spawnSync(process.execPath, [
+      path.join(repoRoot, "node_modules", "tsx", "dist", "cli.mjs"),
+      path.join(repoRoot, "skills", "build", "emit-input.ts"),
+      sourcePath,
+      "0",
+      "--book-id",
+      "pass1-renderer",
+      "--content-profile",
+      "technical_learning",
+    ], { cwd: root, encoding: "utf8" });
+    expect(result.status, result.stderr).toBe(0);
+    const profile = resolveContentProfile("technical_learning");
+    expect(result.stdout).toBe(renderPass1ModelInput(buildProfiledPass1Input(window0, byLid, md, profile)));
   });
 
   it("adds paper rule-pack instructions while preserving LID-marked source text", () => {

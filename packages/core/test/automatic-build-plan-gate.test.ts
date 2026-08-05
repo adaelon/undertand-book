@@ -18,6 +18,7 @@ import {
 } from "../src/build-orchestrator";
 import { evaluateAutomaticBuildPlanBudget } from "../src/automatic-build-budget";
 import { automaticBuildNext } from "../../../skills/build/automatic-build";
+import { confirmedStandardBuildPlan } from "./helpers/confirmed-build-plan";
 
 const NOW = "2026-07-25T09:00:00.000Z";
 
@@ -247,5 +248,37 @@ describe("IP4 confirmed BuildPlan execution gate", () => {
     const result = automaticBuildNext(source, root, 1);
     expect(result.action).toMatchObject({ kind: "needs_user", reason: "build_plan_required" });
     expect(existsSync(path.join(root, ".understand-book", "guide", ".build", "automatic-build", "v2", "tasks"))).toBe(false);
+  });
+
+  it("projects a changed confirmed BuildPlan budget as bounded recovery before claim", () => {
+    const root = mkdtempSync(path.join(tmpdir(), "understand-book-plan-budget-change-"));
+    const source = path.join(root, "guide.md");
+    writeFileSync(source, "# Guide\n\nA source paragraph whose model work exceeds one token.\n", "utf8");
+    const buildPlan = confirmedStandardBuildPlan(source, root, {
+      budget: { max_total_tokens: 1, on_exceed: "needs_user" },
+    });
+    const result = automaticBuildNext(source, root, 1, { build_plan: buildPlan });
+
+    expect(result.action).toMatchObject({
+      kind: "needs_user",
+      reason: "build_plan_budget_changed",
+      stage: "pass1",
+      recovery: {
+        version: "automatic_build_recovery.v1",
+        phase: "preflight",
+        code: "build_plan_budget_changed",
+        stage: "pass1",
+        recovery_actions: ["reconfirm_build_plan"],
+      },
+    });
+    expect(existsSync(path.join(
+      root,
+      ".understand-book",
+      "guide",
+      ".build",
+      "automatic-build",
+      "v2",
+      "tasks",
+    ))).toBe(false);
   });
 });

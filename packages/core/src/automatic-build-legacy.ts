@@ -11,6 +11,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
+import { canonicalAutomaticBuildJson } from "./automatic-build-protocol";
 import {
   buildAutomaticBuildSnapshot,
   type AutomaticBuildStage,
@@ -68,6 +69,36 @@ const STAGE_DIRECTORIES: Array<[AutomaticBuildStage, string]> = [
   ["book_structure", "book-structure"],
 ];
 
+export function automaticBuildLegacyStageArtifactPath(
+  target: AutomaticBuildTarget,
+  stage: AutomaticBuildStage,
+  workUnitId: string,
+): string {
+  if (!workUnitId || Buffer.byteLength(workUnitId, "utf8") > 512) {
+    throw new Error("legacy artifact work_unit_id must be a non-empty bounded string");
+  }
+  const relativeDir = STAGE_DIRECTORIES.find(([candidate]) => candidate === stage)?.[1];
+  if (!relativeDir) throw new Error(`unsupported legacy artifact stage: ${stage}`);
+  const stageRoot = path.join(target.workspace_dir, ".build", relativeDir);
+  const insideStageRoot = (candidate: string): string => {
+    const relative = path.relative(path.resolve(stageRoot), path.resolve(candidate));
+    if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) {
+      throw new Error("legacy artifact work_unit_id escapes its stage directory");
+    }
+    return candidate;
+  };
+  if (stage === "book_structure") {
+    if (workUnitId === "stitch") return insideStageRoot(path.join(stageRoot, "stitch.json"));
+    if (workUnitId.startsWith("unit:")) {
+      return insideStageRoot(path.join(stageRoot, "units", `${workUnitId.slice("unit:".length)}.json`));
+    }
+  }
+  if (workUnitId.includes("/") || workUnitId.includes("\\") || workUnitId === "." || workUnitId === "..") {
+    throw new Error("legacy artifact work_unit_id must not contain path separators");
+  }
+  return insideStageRoot(path.join(stageRoot, `${workUnitId}.json`));
+}
+
 function sha256(bytes: Uint8Array | string): string {
   return createHash("sha256").update(bytes).digest("hex");
 }
@@ -81,6 +112,50 @@ function filesRecursive(root: string): string[] {
     else if (entry.isFile() && entry.name.endsWith(".json")) files.push(item);
   }
   return files.sort();
+}
+
+function descriptorInputHashesFromMigrationReceipts(
+  target: AutomaticBuildTarget,
+): Map<string, Set<string>> {
+  const hashes = new Map<string, Set<string>>();
+  const migrationRoot = path.join(target.workspace_dir, ".build", "automatic-build", "v3", "migrations");
+  for (const file of filesRecursive(migrationRoot)) {
+    try {
+      const value = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
+      if (value.version !== "automatic_build_policy_migration_receipt.v1"
+        || typeof value.receipt_digest !== "string"
+        || typeof value.stage !== "string"
+        || typeof value.work_unit_id !== "string"
+        || typeof value.current_input_hash !== "string") {
+        continue;
+      }
+      const targetRef = value.target_ref;
+      if (!targetRef || typeof targetRef !== "object") continue;
+      const receiptTarget = targetRef as Record<string, unknown>;
+      if (receiptTarget.version !== target.target_ref.version
+        || typeof receiptTarget.workspace_dir !== "string"
+        || path.resolve(receiptTarget.workspace_dir) !== path.resolve(target.target_ref.workspace_dir)
+        || receiptTarget.book_id !== target.target_ref.book_id
+        || receiptTarget.profile_id !== target.target_ref.profile_id
+        || receiptTarget.input_fingerprint !== target.target_ref.input_fingerprint
+        || !STAGE_DIRECTORIES.some(([candidate]) => candidate === value.stage)
+        || !value.work_unit_id
+        || Buffer.byteLength(value.work_unit_id, "utf8") > 512
+        || !/^[a-f0-9]{64}$/u.test(value.current_input_hash)) {
+        continue;
+      }
+      const { receipt_digest: receiptDigest, ...core } = value;
+      const actualDigest = sha256(canonicalAutomaticBuildJson(core).slice(0, -1));
+      if (receiptDigest !== actualDigest) continue;
+      const key = `${value.stage}:${value.work_unit_id}`;
+      const candidates = hashes.get(key) ?? new Set<string>();
+      candidates.add(value.current_input_hash);
+      hashes.set(key, candidates);
+    } catch {
+      // Invalid or unrelated private receipts cannot establish descriptor identity.
+    }
+  }
+  return hashes;
 }
 
 function inferWorkUnitId(stage: AutomaticBuildStage, stageRoot: string, file: string): string {
@@ -106,17 +181,30 @@ function legacyShapeValid(stage: AutomaticBuildStage, value: unknown): boolean {
 export function auditAutomaticBuildLegacy(
   target: AutomaticBuildTarget,
   stage?: AutomaticBuildStage,
+  options: { inspect_current_descriptors?: boolean } = {},
 ): AutomaticBuildLegacyAuditV1 {
   const artifacts: AutomaticBuildLegacyArtifactAuditV1[] = [];
-  let descriptorByStageAndId = new Map<string, { input_hash: string }>();
-  try {
-    const snapshot = buildAutomaticBuildSnapshot(target, { quality_profile: "full" });
-    descriptorByStageAndId = new Map(snapshot.stages.flatMap((stageState) =>
-      (stageState.work_units ?? []).map((unit) => [`${stageState.stage}:${unit.work_unit_id}`, unit] as const),
-    ));
-  } catch {
-    // Audit remains useful with unknown freshness when a legacy target cannot build a current descriptor plan.
+  const descriptorHashes = descriptorInputHashesFromMigrationReceipts(target);
+  if (options.inspect_current_descriptors !== false) {
+    try {
+      const snapshot = buildAutomaticBuildSnapshot(target, { quality_profile: "full" });
+      for (const stageState of snapshot.stages) {
+        for (const unit of stageState.work_units ?? []) {
+          const key = `${stageState.stage}:${unit.work_unit_id}`;
+          const candidates = descriptorHashes.get(key) ?? new Set<string>();
+          candidates.add(unit.input_hash);
+          descriptorHashes.set(key, candidates);
+        }
+      }
+    } catch {
+      // Audit remains useful with unknown freshness when a legacy target cannot build a current descriptor plan.
+    }
   }
+  const descriptorByStageAndId = new Map(
+    [...descriptorHashes.entries()]
+      .filter(([, candidates]) => candidates.size === 1)
+      .map(([key, candidates]) => [key, { input_hash: [...candidates][0] }] as const),
+  );
   for (const [candidateStage, relativeDir] of STAGE_DIRECTORIES) {
     if (stage && candidateStage !== stage) continue;
     const stageRoot = path.join(target.workspace_dir, ".build", relativeDir);
@@ -258,7 +346,13 @@ export function selectAutomaticBuildMigrationMode(
   if (!Number.isFinite(Date.parse(selectedAt))) throw new Error("selected_at must be an ISO timestamp");
   const audit = auditAutomaticBuildLegacy(target);
   if (mode === "legacy_resume" && !audit.legacy_resume_allowed) {
-    throw new Error("legacy_resume requires source-fresh, shape-valid legacy artifacts with known descriptor identity");
+    throw new Error(
+      "legacy_resume requires source-fresh, shape-valid legacy artifacts with known descriptor identity "
+      + `(source_stale_artifacts=${audit.source_stale_artifacts}, `
+      + `source_unknown_artifacts=${audit.source_unknown_artifacts}, `
+      + `schema_invalid_artifacts=${audit.schema_invalid_artifacts}, `
+      + `invalid_artifacts=${audit.invalid_artifacts})`,
+    );
   }
   const decision: AutomaticBuildMigrationDecisionV1 = {
     version: "automatic_build_migration_decision.v1",

@@ -1,9 +1,16 @@
 import { createHash } from "node:crypto";
 import type { AutomaticBuildStage, BuildTargetRefV2 } from "./build-orchestrator";
-import type { ExtractionPolicyFingerprintV1 } from "./semantic-artifact";
+import type {
+  AutomaticBuildTaskPolicyBinding,
+  AutomaticBuildTaskPolicyBindingV2,
+  ExtractionPolicyFingerprintV1,
+} from "./semantic-artifact";
 import {
+  isWorkUnitDescriptorV3,
+  validateWorkUnitDescriptorV3,
+  validateWorkUnitTaskPolicyBinding,
   workUnitPlanDigest,
-  type WorkUnitDescriptorV2,
+  type WorkUnitDescriptor,
   type WorkUnitKind,
 } from "./stage-work-unit";
 
@@ -19,8 +26,12 @@ export interface AutomaticBuildDispatchLimitsV1 {
 
 export const AUTOMATIC_BUILD_DISPATCH_LIMITS: Record<WorkUnitKind, AutomaticBuildDispatchLimitsV1> = {
   pass1_window: { max_units: 4, max_input_tokens: 50_000, max_predicted_service_ms: MAX_DISPATCH_SERVICE_MS },
+  pass1_source_slice: { max_units: 4, max_input_tokens: 50_000, max_predicted_service_ms: MAX_DISPATCH_SERVICE_MS },
+  pass1_lid_stitch: { max_units: 4, max_input_tokens: 50_000, max_predicted_service_ms: MAX_DISPATCH_SERVICE_MS },
   profile_sidecar_formula: { max_units: 8, max_input_tokens: 4_000, max_predicted_service_ms: MAX_DISPATCH_SERVICE_MS },
   profile_sidecar_discourse: { max_units: 4, max_input_tokens: 6_000, max_predicted_service_ms: MAX_DISPATCH_SERVICE_MS },
+  profile_sidecar_discourse_fragment: { max_units: 4, max_input_tokens: 6_000, max_predicted_service_ms: MAX_DISPATCH_SERVICE_MS },
+  profile_sidecar_discourse_reduce: { max_units: 4, max_input_tokens: 6_000, max_predicted_service_ms: MAX_DISPATCH_SERVICE_MS },
   profile_sidecar_window_v1: { max_units: 1, max_input_tokens: OTHER_KIND_MAX_INPUT_TOKENS, max_predicted_service_ms: MAX_DISPATCH_SERVICE_MS },
   metadata_region: { max_units: 1, max_input_tokens: OTHER_KIND_MAX_INPUT_TOKENS, max_predicted_service_ms: MAX_DISPATCH_SERVICE_MS },
   lexicon_candidate_batch: { max_units: 1, max_input_tokens: OTHER_KIND_MAX_INPUT_TOKENS, max_predicted_service_ms: MAX_DISPATCH_SERVICE_MS },
@@ -39,6 +50,7 @@ export interface AutomaticBuildExecutorDispatchManifestV1 {
   kind: WorkUnitKind;
   policy_fingerprint: ExtractionPolicyFingerprintV1;
   ordered_work_unit_ids: string[];
+  task_bindings?: Record<string, AutomaticBuildTaskPolicyBindingV2>;
   limits: AutomaticBuildDispatchLimitsV1;
   accounting: {
     estimated_input_tokens: number;
@@ -86,7 +98,7 @@ function nonNegativeInteger(value: number, field: string): number {
 }
 
 function predictedService(
-  unit: WorkUnitDescriptorV2,
+  unit: WorkUnitDescriptor,
   predictions: Readonly<Record<string, number>> | undefined,
 ): number {
   return nonNegativeInteger(
@@ -100,9 +112,10 @@ function dispatchFor(
   stage: AutomaticBuildStage,
   kind: WorkUnitKind,
   policy: ExtractionPolicyFingerprintV1,
-  units: WorkUnitDescriptorV2[],
+  units: WorkUnitDescriptor[],
   limits: AutomaticBuildDispatchLimitsV1,
   predictions: Readonly<Record<string, number>> | undefined,
+  taskBindings: Readonly<Record<string, AutomaticBuildTaskPolicyBinding>> | undefined,
 ): AutomaticBuildExecutorDispatchManifestV1 {
   const estimatedInputTokens = units.reduce((sum, unit) => sum + unit.cost.estimated_input_tokens, 0);
   const predictedServiceMs = units.reduce((sum, unit) => sum + predictedService(unit, predictions), 0);
@@ -113,6 +126,15 @@ function dispatchFor(
     kind,
     policy_fingerprint: policy,
     ordered_work_unit_ids: units.map((unit) => unit.work_unit_id),
+    ...(isWorkUnitDescriptorV3(units[0]) ? {
+      task_bindings: Object.fromEntries(units.map((unit) => {
+        const binding = taskBindings?.[unit.work_unit_id];
+        if (!binding || !("proof_digest" in binding) || !("policy_set_digest" in binding)) {
+          throw new Error(`v3 dispatch is missing a proof-bound task binding: ${unit.work_unit_id}`);
+        }
+        return [unit.work_unit_id, binding];
+      })),
+    } : {}),
     limits,
   };
   return {
@@ -128,8 +150,9 @@ function dispatchFor(
 export function planAutomaticBuildExecutorDispatches(input: {
   target_ref: BuildTargetRefV2;
   stage: AutomaticBuildStage;
-  work_units: WorkUnitDescriptorV2[];
+  work_units: WorkUnitDescriptor[];
   pending_ids: string[];
+  task_bindings?: Readonly<Record<string, AutomaticBuildTaskPolicyBinding>>;
   predicted_service_ms?: Readonly<Record<string, number>>;
   available_agent_slots?: number;
 }): AutomaticBuildExecutorDispatchPlanV1 {
@@ -140,6 +163,14 @@ export function planAutomaticBuildExecutorDispatches(input: {
     descriptorIds.add(unit.work_unit_id);
     if (unit.stage !== input.stage) throw new Error(`dispatch work unit stage mismatch: ${unit.work_unit_id}`);
     if (!sameIdentity(unit.target, input.target_ref)) throw new Error(`dispatch work unit target mismatch: ${unit.work_unit_id}`);
+    if (isWorkUnitDescriptorV3(unit)) {
+      validateWorkUnitDescriptorV3(unit);
+      const binding = input.task_bindings?.[unit.work_unit_id];
+      if (!binding) throw new Error(`v3 dispatch work unit is missing its task binding: ${unit.work_unit_id}`);
+      validateWorkUnitTaskPolicyBinding(unit, binding);
+    } else if (input.task_bindings?.[unit.work_unit_id]) {
+      validateWorkUnitTaskPolicyBinding(unit, input.task_bindings[unit.work_unit_id]);
+    }
   }
   const pendingSet = new Set<string>();
   for (const id of input.pending_ids) {
@@ -152,11 +183,14 @@ export function planAutomaticBuildExecutorDispatches(input: {
     key: string;
     kind: WorkUnitKind;
     policy: ExtractionPolicyFingerprintV1;
-    units: WorkUnitDescriptorV2[];
+    units: WorkUnitDescriptor[];
   }> = [];
   const byKey = new Map<string, (typeof groups)[number]>();
   for (const unit of pending) {
-    const key = `${unit.kind}:${sha256(unit.policy_fingerprint)}`;
+    const binding = input.task_bindings?.[unit.work_unit_id];
+    const aggregationRole = isWorkUnitDescriptorV3(unit) ? unit.aggregation?.role ?? "none" : "v2";
+    const policySetDigest = binding && "policy_set_digest" in binding ? binding.policy_set_digest : "v1";
+    const key = `${unit.version}:${unit.kind}:${aggregationRole}:${policySetDigest}:${sha256(unit.policy_fingerprint)}`;
     let group = byKey.get(key);
     if (!group) {
       group = { key, kind: unit.kind, policy: unit.policy_fingerprint, units: [] };
@@ -168,7 +202,7 @@ export function planAutomaticBuildExecutorDispatches(input: {
   const dispatches: AutomaticBuildExecutorDispatchManifestV1[] = [];
   for (const group of groups) {
     const limits = AUTOMATIC_BUILD_DISPATCH_LIMITS[group.kind];
-    let current: WorkUnitDescriptorV2[] = [];
+    let current: WorkUnitDescriptor[] = [];
     let currentTokens = 0;
     let currentService = 0;
     const flush = () => {
@@ -181,6 +215,7 @@ export function planAutomaticBuildExecutorDispatches(input: {
         current,
         limits,
         input.predicted_service_ms,
+        input.task_bindings,
       ));
       current = [];
       currentTokens = 0;

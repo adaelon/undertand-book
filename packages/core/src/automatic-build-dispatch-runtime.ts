@@ -16,8 +16,13 @@ import {
   type AutomaticBuildExecutorDispatchManifestV1,
   type AutomaticBuildExecutorDispatchPlanV1,
 } from "./automatic-build-dispatch";
-import type { AutomaticBuildTaskPolicyBindingV1 } from "./semantic-artifact";
-import type { WorkUnitDescriptorV2 } from "./stage-work-unit";
+import type { AutomaticBuildTaskPolicyBinding } from "./semantic-artifact";
+import {
+  isWorkUnitDescriptorV3,
+  validateWorkUnitDescriptorV3,
+  validateWorkUnitTaskPolicyBinding,
+  type WorkUnitDescriptor,
+} from "./stage-work-unit";
 
 const MAX_DISPATCH_RECEIPT_BYTES = 16_384;
 const MAX_DISPATCH_EXECUTOR_HANDOFF_BYTES = 262_144;
@@ -152,7 +157,7 @@ export type AutomaticBuildDispatchAdvanceResult =
   | {
       status: "leased";
       persisted: AutomaticBuildPersistedDispatchV1;
-      descriptor: WorkUnitDescriptorV2;
+      descriptor: WorkUnitDescriptor;
       claim: Extract<AutomaticBuildClaimResult, { status: "leased" }>;
     }
   | {
@@ -813,9 +818,10 @@ function refreshProgress(
 
 function validateDescriptors(
   persisted: AutomaticBuildPersistedDispatchV1,
-  descriptors: WorkUnitDescriptorV2[],
+  descriptors: WorkUnitDescriptor[],
+  taskBindings: Record<string, AutomaticBuildTaskPolicyBinding>,
   fromOrdinal: number,
-): Map<string, WorkUnitDescriptorV2> {
+): Map<string, WorkUnitDescriptor> {
   const byId = new Map(descriptors.map((descriptor) => [descriptor.work_unit_id, descriptor]));
   for (const workUnitId of persisted.manifest.ordered_work_unit_ids.slice(fromOrdinal)) {
     const descriptor = byId.get(workUnitId);
@@ -826,6 +832,24 @@ function validateDescriptors(
       || stableJson(descriptor.policy_fingerprint) !== stableJson(persisted.manifest.policy_fingerprint)) {
       throw new Error(`dispatch descriptor identity changed: ${persisted.manifest.stage}/${workUnitId}`);
     }
+    if (isWorkUnitDescriptorV3(descriptor)) {
+      const binding = taskBindings[workUnitId];
+      if (!binding) {
+        throw new Error(`dispatch task is missing policy binding: ${persisted.manifest.stage}/${workUnitId}`);
+      }
+      validateWorkUnitTaskPolicyBinding(descriptor, binding);
+      validateWorkUnitDescriptorV3(descriptor);
+      const persistedBinding = persisted.manifest.task_bindings?.[workUnitId];
+      if (!persistedBinding || stableJson(persistedBinding) !== stableJson(binding)) {
+        throw new Error(`dispatch v3 task binding changed: ${persisted.manifest.stage}/${workUnitId}`);
+      }
+    } else {
+      const binding = taskBindings[workUnitId];
+      if (binding) validateWorkUnitTaskPolicyBinding(descriptor, binding);
+      if (persisted.manifest.task_bindings?.[workUnitId]) {
+        throw new Error(`dispatch v2 task unexpectedly carries a v3 binding: ${persisted.manifest.stage}/${workUnitId}`);
+      }
+    }
   }
   return byId;
 }
@@ -835,8 +859,8 @@ export function advanceAutomaticBuildDispatch(
   stage: AutomaticBuildStage,
   dispatchId: string,
   input: {
-    descriptors: WorkUnitDescriptorV2[];
-    task_bindings: Record<string, AutomaticBuildTaskPolicyBindingV1>;
+    descriptors: WorkUnitDescriptor[];
+    task_bindings: Record<string, AutomaticBuildTaskPolicyBinding>;
     dispatch_run_id?: string;
     now?: string;
     max_semantic_attempts?: number;
@@ -877,7 +901,7 @@ export function advanceAutomaticBuildDispatch(
   if (progress.length === persisted.manifest.ordered_work_unit_ids.length) {
     return { status: "ready_to_finish", persisted, task_receipts: progress.map((item) => item.task_receipt) };
   }
-  const descriptors = validateDescriptors(persisted, input.descriptors, progress.length);
+  const descriptors = validateDescriptors(persisted, input.descriptors, input.task_bindings, progress.length);
   const workUnitId = persisted.manifest.ordered_work_unit_ids[progress.length];
   const descriptor = descriptors.get(workUnitId)!;
   const binding = input.task_bindings[workUnitId];
@@ -903,6 +927,8 @@ export function advanceAutomaticBuildDispatch(
     now,
     reserve_ttl_ms: persisted.reserve_ttl_ms,
     binding,
+    descriptor,
+    ...(isWorkUnitDescriptorV3(descriptor) ? { policy_generation: "v3_only" as const } : {}),
     max_semantic_attempts: input.max_semantic_attempts,
     max_lease_epochs: input.max_lease_epochs,
   });

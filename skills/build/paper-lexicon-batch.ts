@@ -14,7 +14,10 @@ import { PaperLexiconZ } from "../../packages/core/src/zod";
 import { contentProfileUsage, parsePaperContentProfileArgsOrExit } from "./content-profile-options";
 import { loadBookWindows } from "./load-book";
 import { semanticArtifactPayload } from "../../packages/core/src/semantic-artifact";
-import { publishAutomaticBuildArtifactSet } from "../../packages/core/src/automatic-build-publication";
+import {
+  buildAutomaticBuildStageBatchResult,
+  publishAutomaticBuildArtifactSet,
+} from "../../packages/core/src/automatic-build-publication";
 
 const parsedProfile = parsePaperContentProfileArgsOrExit(process.argv.slice(2), "paper lexicon build");
 const argv = parsedProfile.argv;
@@ -58,12 +61,13 @@ PaperLexiconZ.parse(paperLexicon);
 
 const outDir = `.understand-book/${bookId}`;
 mkdirSync(outDir, { recursive: true });
-publishAutomaticBuildArtifactSet({
+const publicationReceipt = publishAutomaticBuildArtifactSet({
   workspace_dir: outDir,
   stage: "paper_lexicon",
   artifacts: { "paper_lexicon.json": JSON.stringify(paperLexicon, null, 2) },
 });
 
-console.log(`[paper-lexicon-batch] ${book}  bookId=${bookId}  content_profile=${parsedProfile.contentProfile.id}${allowPartial && status.pending ? "  [--allow-partial]" : ""}`);
-console.log(`  clusters=${status.analysis.clusters.length} batches=${status.eligible} skipped_windows=${status.skipped} done=${status.committed} pending=${status.pending}`);
-console.log(`  paper_lexicon.json entries=${paperLexicon.entries.length}`);
+console.error(`[paper-lexicon-batch] ${book}  bookId=${bookId}  content_profile=${parsedProfile.contentProfile.id}${allowPartial && status.pending ? "  [--allow-partial]" : ""}`);
+console.error(`  clusters=${status.analysis.clusters.length} batches=${status.eligible} skipped_windows=${status.skipped} done=${status.committed} pending=${status.pending}`);
+console.error(`  paper_lexicon.json entries=${paperLexicon.entries.length}`);
+process.stdout.write(`${JSON.stringify(buildAutomaticBuildStageBatchResult(publicationReceipt))}\n`);

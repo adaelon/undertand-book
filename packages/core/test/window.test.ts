@@ -6,6 +6,7 @@ import { markdownToBlocks } from "../src/md-adapter";
 import { segment } from "../src/segment";
 import type { LidNode } from "../src/generated/LidNode";
 import { splitWindows, estimateTokens, type WindowBudget, type Window } from "../src/window";
+import { routeModelInputSlices } from "../src/model-input-slice";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const sampleSrc = readFileSync(resolve(here, "fixtures/sample.md"), "utf8");
@@ -112,5 +113,34 @@ describe("S2 窗口切分 [ADR-0009]", () => {
     expect(over.length).toBeGreaterThan(0);
     for (const w of over) expect(w.leafLids.length).toBe(1); // 单叶,未腰斩
     assertLeafPartition(n, windows);
+  });
+
+  it("Window.overBudget 只作结构诊断,不能替代模型输入片的预算证明", () => {
+    const md = "# 章一\n\n" + "这是一个超长的段落".repeat(20);
+    const n = segment(markdownToBlocks(md));
+    const byLid = new Map(n.map((node) => [node.lid, node]));
+    const [window] = splitWindows(n, md, { maxInputTokens: 5, maxLeavesSoft: 1 }).filter((item) => item.overBudget);
+    const leaf = byLid.get(window.leafLids[0])!;
+    const routed = routeModelInputSlices({
+      source: md,
+      source_fingerprint: "window-over-budget-v1",
+      parent: leaf,
+      budget: {
+        router_version: "window_execution_test.v1",
+        prompt_sha256: "0".repeat(64),
+        stage_body_limit_tokens: 5,
+        executor_context_floor_tokens: 100,
+        prompt_reserve_tokens: 0,
+        protocol_reserve_tokens: 0,
+        output_reserve_tokens: 0,
+        safety_margin_tokens: 0,
+      },
+      render: ({ core }) => core,
+    });
+    expect(routed.status).toBe("routed");
+    if (routed.status === "routed") {
+      expect(routed.slices.length).toBeGreaterThan(1);
+      expect(routed.slices.every((item) => item.proof.status === "within_limit")).toBe(true);
+    }
   });
 });

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -6,6 +7,7 @@ import { describe, expect, it } from "vitest";
 import { resolveAutomaticBuildTarget } from "../src/build-orchestrator";
 import { resolveContentProfile } from "../src/content-profile";
 import { markdownToBlocks } from "../src/md-adapter";
+import { renderPaperLexiconModelInput } from "../src/model-input-renderer";
 import {
   buildPaperLexiconCandidateArtifact,
   computePaperLexiconRoutingStatus,
@@ -162,8 +164,8 @@ describe("paper lexicon candidate router", () => {
 
     const emitted = run("paper-lexicon-input.ts", [packet.work_unit_id]);
     expect(emitted.status, emitted.stderr).toBe(0);
-    expect(emitted.stdout).toContain("PAPER_LEXICON_CANDIDATE_BATCH");
-    expect(emitted.stdout).toContain(`work_unit_id: ${packet.work_unit_id}`);
+    expect(emitted.stdout).toBe(renderPaperLexiconModelInput(packet));
+    expect(packet.rendered_input_sha256).toBe(createHash("sha256").update(emitted.stdout).digest("hex"));
 
     const skipped = run("paper-lexicon-input.ts", [skippedId]);
     expect(skipped.status).toBe(1);
@@ -184,6 +186,11 @@ describe("paper lexicon candidate router", () => {
 
     const batch = run("paper-lexicon-batch.ts", ["--allow-partial"]);
     expect(batch.status, batch.stderr).toBe(0);
+    expect(JSON.parse(batch.stdout)).toMatchObject({
+      version: "automatic_build_stage_batch_result.v1",
+      stage: "paper_lexicon",
+      publication: { receipt_ref: expect.stringMatching(/receipt\.json$/u) },
+    });
     const publicArtifact = path.join(root, ".understand-book", "paper-lexicon-routing", "paper_lexicon.json");
     expect(existsSync(publicArtifact)).toBe(true);
     const lexicon = JSON.parse(readFileSync(publicArtifact, "utf8"));

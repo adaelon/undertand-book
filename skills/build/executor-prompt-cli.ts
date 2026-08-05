@@ -12,12 +12,23 @@ export const AUTOMATIC_BUILD_EXTRACTOR_PROMPT_NAMES = [
   "paper-metadata-extractor.md",
   "paper-lexicon-extractor.md",
   "profile-sidecar-extractor.md",
+  "pass1-source-fragment-extractor.md",
+  "pass1-lid-stitcher.md",
+  "profile-sidecar-discourse-fragment-extractor.md",
+  "profile-sidecar-discourse-reducer.md",
   "pass2-longrange-linker.md",
   "book-structure-extractor.md",
 ] as const;
 
+export const AUTOMATIC_BUILD_SHADOW_EXTRACTOR_PROMPT_NAMES = [] as const;
+
+const AUTOMATIC_BUILD_SUPPORTED_EXTRACTOR_PROMPT_NAMES = [
+  ...AUTOMATIC_BUILD_EXTRACTOR_PROMPT_NAMES,
+  ...AUTOMATIC_BUILD_SHADOW_EXTRACTOR_PROMPT_NAMES,
+] as const;
+
 export type AutomaticBuildExtractorPromptName =
-  (typeof AUTOMATIC_BUILD_EXTRACTOR_PROMPT_NAMES)[number];
+  (typeof AUTOMATIC_BUILD_SUPPORTED_EXTRACTOR_PROMPT_NAMES)[number];
 
 interface ExecutorPromptCliIo {
   write_stdout: (text: string) => void;
@@ -29,7 +40,7 @@ class ExecutorPromptCliUsageError extends Error {}
 export function isAutomaticBuildExtractorPromptName(
   value: string,
 ): value is AutomaticBuildExtractorPromptName {
-  return (AUTOMATIC_BUILD_EXTRACTOR_PROMPT_NAMES as readonly string[]).includes(value);
+  return (AUTOMATIC_BUILD_SUPPORTED_EXTRACTOR_PROMPT_NAMES as readonly string[]).includes(value);
 }
 
 function parseExecutorPromptArgs(argv: string[]): {

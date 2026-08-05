@@ -12,11 +12,13 @@ import { TextDecoder } from "node:util";
 import type { AutomaticBuildTarget } from "./build-orchestrator";
 import {
   assertActiveAutomaticBuildLease,
+  automaticBuildTaskPolicyBindingFromLease,
   readAutomaticBuildLease,
   type AutomaticBuildTaskLease,
 } from "./automatic-build-lease";
 import {
   persistAutomaticBuildTaskMetrics,
+  readAutomaticBuildInputObservation,
   readAutomaticBuildUsageReceipt,
   type AutomaticBuildTaskMetricsV1,
 } from "./automatic-build-metrics";
@@ -26,6 +28,8 @@ import {
 } from "./automatic-build-task-store";
 import {
   buildSemanticArtifactEnvelope,
+  buildSemanticArtifactEnvelopeV3,
+  semanticArtifactMatches,
   writeSemanticArtifactEnvelopeFile,
   type SemanticBuildStage,
 } from "./semantic-artifact";
@@ -243,6 +247,15 @@ export function submitAutomaticBuildCandidate(
   options: { now?: string; completed_at?: string } = {},
 ): AutomaticBuildTaskReceiptV1 {
   const lease = readAutomaticBuildLease(target, leaseRef, token);
+  const taskBinding = automaticBuildTaskPolicyBindingFromLease(lease);
+  if (taskBinding && "proof_digest" in taskBinding) {
+    const observation = readAutomaticBuildInputObservation(leaseRef);
+    if (!observation || observation.version !== "automatic_build_input_observation.v2"
+      || observation.input_sha256 !== taskBinding.input_hash
+      || observation.proof_digest !== taskBinding.proof_digest) {
+      throw new Error("v3 candidate submission requires a matching proof-bound input observation");
+    }
+  }
   const candidatePayload = readCandidatePayload(assertCandidatePath(leaseRef, candidatePath));
   const candidate = candidatePayload.record;
   const existingReceiptPath = receiptPath(leaseRef);
@@ -297,18 +310,15 @@ export function submitAutomaticBuildCandidate(
       throw new Error(`writer did not produce an artifact: ${artifactPath}`);
     }
     const committedAt = options.completed_at ?? (options.now ? options.now : new Date().toISOString());
-    if (Boolean(lease.input_hash) !== Boolean(lease.policy_fingerprint)) {
-      throw new Error("semantic task lease must bind input_hash and policy_fingerprint together");
-    }
-    if (lease.input_hash && lease.policy_fingerprint) {
+    if (taskBinding) {
       if (lease.stage === "paper_reading_guide") throw new Error("paper_reading_guide cannot emit a semantic task artifact");
       const payload = JSON.parse(readFileSync(artifactPath, "utf8").replace(/^\uFEFF/, "")) as unknown;
-      writeSemanticArtifactEnvelopeFile(artifactPath, buildSemanticArtifactEnvelope({
+      const envelopeInput = {
         target: lease.target_ref,
         stage: lease.stage as SemanticBuildStage,
         work_unit_id: lease.work_unit_id,
-        input_hash: lease.input_hash,
-        policy_fingerprint: lease.policy_fingerprint,
+        input_hash: taskBinding.input_hash,
+        policy_fingerprint: taskBinding.policy_fingerprint,
         provenance: {
           executor: lease.owner,
           ...(usage.model ? { model: usage.model } : {}),
@@ -316,7 +326,32 @@ export function submitAutomaticBuildCandidate(
           generated_at: committedAt,
         },
         payload,
-      }));
+      };
+      const writerAlreadyProducedV3 = "proof_digest" in taskBinding
+        && payload
+        && typeof payload === "object"
+        && (payload as { version?: unknown }).version === "semantic_task_artifact.v3";
+      if (writerAlreadyProducedV3) {
+        if (!semanticArtifactMatches(payload, {
+          target: lease.target_ref,
+          stage: lease.stage as SemanticBuildStage,
+          work_unit_id: lease.work_unit_id,
+          input_hash: taskBinding.input_hash,
+          proof_digest: taskBinding.proof_digest,
+          policy_set_digest: taskBinding.policy_set_digest,
+          policy_fingerprint: taskBinding.policy_fingerprint,
+        })) {
+          throw new Error("v3 writer artifact does not match its proof-bound lease");
+        }
+      } else {
+        writeSemanticArtifactEnvelopeFile(artifactPath, "proof_digest" in taskBinding
+          ? buildSemanticArtifactEnvelopeV3({
+              ...envelopeInput,
+              proof_digest: taskBinding.proof_digest,
+              policy_set_digest: taskBinding.policy_set_digest,
+            })
+          : buildSemanticArtifactEnvelope(envelopeInput));
+      }
     }
     const metrics = persistAutomaticBuildTaskMetrics(target, leaseRef, token, {
       status: "committed",

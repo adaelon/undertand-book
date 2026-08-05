@@ -1,6 +1,7 @@
 // PP2 paper metadata input: same window text as Pass1 plus requested metadata fields.
 //   tsx skills/build/paper-metadata-input.ts <book.md|epub> <windowId> [--book-id <id>] --content-profile paper
 import { analyzePaperMetadataCandidates } from "../../packages/core/src/paper-metadata-router";
+import { renderPaperMetadataModelInput } from "../../packages/core/src/model-input-renderer";
 import { contentProfileUsage, parsePaperContentProfileArgsOrExit } from "./content-profile-options";
 import { loadBookWindows, windowById } from "./load-book";
 
@@ -27,14 +28,7 @@ if (!input) {
   throw new Error(`paper metadata window ${id} is not model-eligible: ${skipped?.code ?? "not_in_plan"}`);
 }
 
-console.log("PAPER_METADATA_CANDIDATE");
-console.log(`window_id: ${input.window_id}`);
-console.log(`visible_lids: ${JSON.stringify(input.visible_lids)}`);
-console.log(`signal_types: ${JSON.stringify(input.signal_types)}`);
-console.log(`requested_fields: ${JSON.stringify(input.requested_fields)}`);
-console.log("");
-console.log("TEXT");
-console.log(input.text);
+process.stdout.write(renderPaperMetadataModelInput(input));
 process.stderr.write(
   `[paper-metadata-input] window ${id}: content_profile=${parsedProfile.contentProfile.id} lids=${input.visible_lids.length}\n`,
 );

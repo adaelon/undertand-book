@@ -1,4 +1,4 @@
-﻿---
+---
 name: profile-sidecar-extractor
 description: profile sidecar extractor. One independent pass over a routed discourse group or grounded formula unit. It does not produce graph nodes, graph edges, Pass2 long_range edges, or raw explanations.
 ---

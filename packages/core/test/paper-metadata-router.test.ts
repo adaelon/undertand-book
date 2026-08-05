@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -6,6 +7,7 @@ import { describe, expect, it } from "vitest";
 import { resolveAutomaticBuildTarget } from "../src/build-orchestrator";
 import { resolveContentProfile } from "../src/content-profile";
 import { markdownToBlocks } from "../src/md-adapter";
+import { renderPaperMetadataModelInput } from "../src/model-input-renderer";
 import {
   computePaperMetadataRoutingStatus,
   routePaperMetadataWorkUnits,
@@ -147,6 +149,9 @@ describe("paper metadata candidate router", () => {
   });
 
   it("keeps input/write/status/batch on the same routed eligibility and deterministic merge", () => {
+    const routedInput = fixture();
+    const routed = routePaperMetadataWorkUnits({ ...routedInput, policy_fingerprint: routedInput.policy });
+    const routedPacket = routed.packets["0"];
     const root = mkdtempSync(path.join(tmpdir(), "understand-book-metadata-router-cli-"));
     const repoRoot = path.resolve(process.cwd(), "..", "..");
     const tsx = path.join(repoRoot, "node_modules", "tsx", "dist", "cli.mjs");
@@ -159,8 +164,8 @@ describe("paper metadata candidate router", () => {
 
     const input = run("paper-metadata-input.ts", ["0"]);
     expect(input.status, input.stderr).toBe(0);
-    expect(input.stdout).toContain("PAPER_METADATA_CANDIDATE");
-    expect(input.stdout).toContain('signal_types: ["front_matter"]');
+    expect(input.stdout).toBe(renderPaperMetadataModelInput(routedPacket));
+    expect(routedPacket.rendered_input_sha256).toBe(createHash("sha256").update(input.stdout).digest("hex"));
 
     const skippedInput = run("paper-metadata-input.ts", ["1"]);
     expect(skippedInput.status).toBe(1);
@@ -178,7 +183,15 @@ describe("paper metadata candidate router", () => {
 
     const batch = run("paper-metadata-batch.ts", ["--allow-partial"]);
     expect(batch.status, batch.stderr).toBe(0);
-    expect(batch.stdout).toContain("deterministic_references=1");
+    expect(JSON.parse(batch.stdout)).toMatchObject({
+      version: "automatic_build_stage_batch_result.v1",
+      stage: "paper_metadata",
+      publication: {
+        transaction_id: expect.stringMatching(/^[a-f0-9]{64}$/u),
+        receipt_ref: expect.stringMatching(/receipt\.json$/u),
+      },
+    });
+    expect(batch.stderr).toContain("deterministic_references=1");
     const publicArtifact = path.join(root, ".understand-book", "paper-metadata-routing", "paper_metadata.json");
     expect(existsSync(publicArtifact)).toBe(true);
     const metadata = JSON.parse(readFileSync(publicArtifact, "utf8"));

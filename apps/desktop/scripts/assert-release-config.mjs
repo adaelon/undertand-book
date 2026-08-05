@@ -16,12 +16,30 @@ if (!publicGit) {
 
 const desktopRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const config = JSON.parse(readFileSync(path.join(desktopRoot, "src-tauri", "tauri.conf.json"), "utf8"));
+for (const externalBinary of ["binaries/understand-book-build", "binaries/book-mcp"]) {
+  assert(
+    config.bundle?.externalBin?.includes(externalBinary),
+    `Windows Setup must package the external binary: ${externalBinary}`,
+  );
+}
 assert(
-  config.bundle?.externalBin?.includes("binaries/book-mcp"),
-  "Windows Setup must package the Book MCP sidecar",
+  config.bundle?.resources?.includes("resources/web-dist/**/*"),
+  "Windows Setup must package the prepared web resources",
 );
-assert(
-  config.build?.beforeBuildCommand?.includes("build-book-mcp.mjs")
-    && config.build.beforeBuildCommand.includes("smoke-book-mcp-plugin.mjs"),
-  "Windows Setup must build and smoke the plugin-provided Book MCP before bundling",
-);
+
+const beforeBuildCommand = config.build?.beforeBuildCommand ?? "";
+const requiredBuildSteps = [
+  "pnpm -C ../../packages/web build",
+  "node scripts/build-sidecar.mjs",
+  "node scripts/smoke-workbench-sidecar.mjs",
+  "node scripts/build-book-mcp.mjs",
+  "node scripts/smoke-book-mcp-plugin.mjs",
+  "node scripts/prepare-resources.mjs",
+];
+let previousIndex = -1;
+for (const step of requiredBuildSteps) {
+  const index = beforeBuildCommand.indexOf(step);
+  assert(index >= 0, `Windows Setup beforeBuildCommand is missing: ${step}`);
+  assert(index > previousIndex, `Windows Setup beforeBuildCommand is out of order at: ${step}`);
+  previousIndex = index;
+}

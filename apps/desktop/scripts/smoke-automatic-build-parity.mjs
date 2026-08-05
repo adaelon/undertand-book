@@ -16,6 +16,18 @@ const backupContainer = mkdtempSync(path.join(tmpdir(), "understand-book-bp8-par
 const backupRoot = path.join(backupContainer, "snapshot");
 const thinPluginRoot = path.join(backupContainer, "thin-plugin");
 const source = path.join(root, "parity.md");
+const extractorPromptNames = [
+  "pass1-local-extractor.md",
+  "paper-metadata-extractor.md",
+  "paper-lexicon-extractor.md",
+  "profile-sidecar-extractor.md",
+  "pass1-source-fragment-extractor.md",
+  "pass1-lid-stitcher.md",
+  "profile-sidecar-discourse-fragment-extractor.md",
+  "profile-sidecar-discourse-reducer.md",
+  "pass2-longrange-linker.md",
+  "book-structure-extractor.md",
+];
 const nodeEnvironment = {
   ...process.env,
   UNDERSTAND_BOOK_PLUGIN_ROOT: thinPluginRoot,
@@ -100,14 +112,26 @@ try {
   if (existsSync(path.join(thinPluginRoot, "agents"))) {
     throw new Error(`release plugin fixture must remain thin: ${thinPluginRoot}`);
   }
-  const promptArgs = ["pass1-local-extractor.md", "--executor-protocol", "dispatch"];
-  const nodePrompt = runText(process.execPath, [tsx, executorPromptCli, ...promptArgs], "Node executor prompt");
-  const sidecarPrompt = runText(sidecar, ["prompt", ...promptArgs], "sidecar executor prompt");
-  if (nodePrompt !== sidecarPrompt) {
-    throw new Error("Node/sidecar complete executor prompt bytes diverged");
-  }
-  for (const marker of ["automatic_build_dispatch_executor.v1", "automatic_build_executor.v1"]) {
-    if (!nodePrompt.includes(marker)) throw new Error(`complete executor prompt is missing marker: ${marker}`);
+  for (const promptName of extractorPromptNames) {
+    for (const mode of ["task", "dispatch"]) {
+      const promptArgs = [promptName, "--executor-protocol", mode];
+      const nodePrompt = runText(
+        process.execPath,
+        [tsx, executorPromptCli, ...promptArgs],
+        `Node ${mode} prompt ${promptName}`,
+      );
+      const sidecarPrompt = runText(sidecar, ["prompt", ...promptArgs], `sidecar ${mode} prompt ${promptName}`);
+      if (nodePrompt !== sidecarPrompt) {
+        throw new Error(`Node/sidecar ${mode} prompt bytes diverged: ${promptName}`);
+      }
+      if (mode === "dispatch") {
+        for (const marker of ["automatic_build_dispatch_executor.v1", "automatic_build_executor.v1"]) {
+          if (!nodePrompt.includes(marker)) {
+            throw new Error(`complete executor prompt is missing marker ${marker}: ${promptName}`);
+          }
+        }
+      }
+    }
   }
 
   writeFileSync(source, "# Parity\n\nA deterministic semantic paragraph.\n", "utf8");
@@ -154,12 +178,12 @@ try {
 
   const nodeDoctor = runNode("protocol-doctor", common, "Node protocol doctor");
   const sidecarDoctor = runSidecar("protocol-doctor", common, "sidecar protocol doctor");
-  assertBytesEqual(nodeDoctor, sidecarDoctor, "automatic_build_protocol_doctor.v1");
+  assertBytesEqual(nodeDoctor, sidecarDoctor, "automatic_build_protocol_doctor.v2");
   if (nodeDoctor.value.status !== "compatible" || nodeDoctor.value.target_state?.dry_run_mutates_state !== false) {
     throw new Error(`protocol doctor did not report read-only compatibility: ${nodeDoctor.stdout}`);
   }
   if (sidecarDoctor.value.checks?.prompt_provider?.source !== "packaged_sidecar"
-    || sidecarDoctor.value.checks.prompt_provider.checked_extractors?.length !== 6
+    || sidecarDoctor.value.checks.prompt_provider.checked_extractors?.length !== extractorPromptNames.length
     || sidecarDoctor.value.checks?.handoff_preparation?.status !== "compatible"
     || sidecarDoctor.value.checks?.plugin_shape?.thin_plugin !== true
     || sidecarDoctor.value.checks?.plugin_shape?.agents_required !== false) {

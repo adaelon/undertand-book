@@ -1,14 +1,24 @@
 import { createHash } from "node:crypto";
 import type { BuildTargetRefV2 } from "./build-orchestrator";
+import {
+  blockedAutomaticBuildRoute,
+  createAutomaticBuildRecoveryEnvelope,
+  readyAutomaticBuildRoute,
+  type AutomaticBuildRouteResult,
+} from "./automatic-build-recovery";
 import type { Pass1ArtifactMeta } from "./build-resume";
 import type { ContentProfileDefinition } from "./content-profile";
 import type { LidNode } from "./generated/LidNode";
+import { inspectRenderedModelInput } from "./model-input-renderer";
 import {
   renderProfileSidecarDiscourseText,
   type ProfileSidecarArtifact,
   type ProfileSidecarExtractionOutput,
 } from "./profile-sidecar-build";
-import type { ExtractionPolicyFingerprintV1 } from "./semantic-artifact";
+import {
+  extractionPolicyDigest,
+  type ExtractionPolicyFingerprintV1,
+} from "./semantic-artifact";
 import {
   buildWorkUnitCost,
   createWorkUnitDescriptor,
@@ -32,7 +42,9 @@ export interface ProfileSidecarSemanticPacketV2 {
   formula_lids: string[];
   text: string;
   estimated_input_tokens: number;
+  estimated_rendered_tokens: number;
   input_hash: string;
+  rendered_input_sha256: string;
 }
 
 export interface ProfileSidecarRoutingAccountingV1 {
@@ -72,6 +84,19 @@ export interface ProfileSidecarRoutingStatus {
 
 export interface ProfileSidecarCandidateStatus extends ProfileSidecarRoutingStatus {
   analysis: ProfileSidecarRoutingAnalysis;
+}
+
+export class ProfileSidecarRoutingBudgetBlock extends Error {
+  readonly name = "ProfileSidecarRoutingBudgetBlock";
+
+  constructor(
+    readonly work_unit_id: string,
+    readonly evidence_lids: string[],
+    readonly estimated_tokens: number,
+    readonly limit_tokens: number,
+  ) {
+    super("profile sidecar routing requires a budget-routable policy generation");
+  }
 }
 
 function stableJson(value: unknown): string {
@@ -133,10 +158,13 @@ function buildPacket(input: {
     formula_lids: input.formulaLids,
     text: input.text,
   };
+  const rendered = inspectRenderedModelInput({ kind: input.unitKind, input: identity });
   return {
     ...identity,
     estimated_input_tokens: estimateTokens(stableJson(identity)),
+    estimated_rendered_tokens: rendered.estimated_tokens,
     input_hash: sha256(stableJson(identity)),
+    rendered_input_sha256: rendered.sha256,
   };
 }
 
@@ -154,6 +182,7 @@ function discoursePackets(input: {
   contentProfile: ContentProfileDefinition;
   maxGroupLids: number;
   maxInputTokens: number;
+  allowOverLimitPackets: boolean;
 }): { packets: ProfileSidecarSemanticPacketV2[]; skips: ProfileSidecarRoutingAnalysis["skips"]; eligible: number; skipped: number } {
   const packets: ProfileSidecarSemanticPacketV2[] = [];
   const skips: ProfileSidecarRoutingAnalysis["skips"] = {};
@@ -192,8 +221,16 @@ function discoursePackets(input: {
         formulaLids: [],
         text: renderProfileSidecarDiscourseText(input.contentProfile, baseText),
       });
-      if (packet.estimated_input_tokens > input.maxInputTokens) {
-        throw new Error(`discourse paragraph group exceeds input budget: ${workUnitId}`);
+      if (packet.estimated_rendered_tokens > input.maxInputTokens && !input.allowOverLimitPackets) {
+        const bodyEstimate = current.length === 1
+          ? estimateTokens(nodeText(input.byLid.get(current[0])!, input.source))
+          : packet.estimated_rendered_tokens;
+        throw new ProfileSidecarRoutingBudgetBlock(
+          workUnitId,
+          [...current],
+          bodyEstimate,
+          input.maxInputTokens,
+        );
       }
       packets.push(packet);
       current = [];
@@ -297,6 +334,7 @@ export function analyzeProfileSidecarSemanticUnits(input: {
   content_profile: ContentProfileDefinition;
   max_discourse_group_lids?: number;
   max_discourse_input_tokens?: number;
+  allow_over_limit_packets?: boolean;
 }): ProfileSidecarRoutingAnalysis {
   const maxGroupLids = input.max_discourse_group_lids ?? DEFAULT_DISCOURSE_GROUP_LIDS;
   const maxInputTokens = input.max_discourse_input_tokens ?? DEFAULT_DISCOURSE_INPUT_TOKENS;
@@ -309,6 +347,7 @@ export function analyzeProfileSidecarSemanticUnits(input: {
     contentProfile: input.content_profile,
     maxGroupLids,
     maxInputTokens,
+    allowOverLimitPackets: input.allow_over_limit_packets === true,
   });
   const formula = formulaPackets(input);
   const packetList = [...discourse.packets, ...formula.packets];
@@ -375,6 +414,32 @@ export function routeProfileSidecarWorkUnits(input: {
     work_units,
     plan_digest: workUnitPlanDigest(work_units),
   };
+}
+
+export function routeProfileSidecarWorkUnitsWithRecovery(input: Parameters<
+  typeof routeProfileSidecarWorkUnits
+>[0]): AutomaticBuildRouteResult<ProfileSidecarRoutingPlan> {
+  try {
+    return readyAutomaticBuildRoute(routeProfileSidecarWorkUnits(input));
+  } catch (error) {
+    if (!(error instanceof ProfileSidecarRoutingBudgetBlock)) throw error;
+    return blockedAutomaticBuildRoute(createAutomaticBuildRecoveryEnvelope({
+      phase: "routing",
+      code: "policy_generation_migration_required",
+      stage: "profile_sidecar",
+      target_ref: input.target,
+      router_version: PROFILE_SIDECAR_ROUTER_VERSION,
+      policy_digest: extractionPolicyDigest(input.policy_fingerprint),
+      affected_work_units: [{
+        work_unit_id: error.work_unit_id,
+        evidence_lids: error.evidence_lids,
+        estimated_tokens: error.estimated_tokens,
+        limit_tokens: error.limit_tokens,
+      }],
+      retryable: false,
+      recovery_actions: ["migrate_policy"],
+    }));
+  }
 }
 
 function statusForUnits(

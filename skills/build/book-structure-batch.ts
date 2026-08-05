@@ -5,7 +5,10 @@ import { buildBookStructureSidecar } from "../../packages/core/src/book-structur
 import { buildReproducibleProfileArtifactHeader } from "../../packages/core/src/profile-artifact";
 import { BookStructureSidecarZ } from "../../packages/core/src/zod";
 import { computeCurrentBookStructureStatus, loadBookStructureBuildContext, parseBookStructureArgs } from "./book-structure-common";
-import { publishAutomaticBuildArtifactSet } from "../../packages/core/src/automatic-build-publication";
+import {
+  buildAutomaticBuildStageBatchResult,
+  publishAutomaticBuildArtifactSet,
+} from "../../packages/core/src/automatic-build-publication";
 
 const { book, override, contentProfile } = parseBookStructureArgs(process.argv.slice(2));
 if (!book) {
@@ -32,13 +35,14 @@ const result = buildBookStructureSidecar(header, stitchArtifact.output, ctx.lidN
 BookStructureSidecarZ.parse(result.sidecar);
 mkdirSync(ctx.baseDir, { recursive: true });
 const outPath = `${ctx.baseDir}/book_structure.json`;
-publishAutomaticBuildArtifactSet({
+const publicationReceipt = publishAutomaticBuildArtifactSet({
   workspace_dir: ctx.baseDir,
   stage: "book_structure",
   artifacts: { "book_structure.json": JSON.stringify(result.sidecar, null, 2) },
 });
 
-console.log(`[book-structure-batch] ${book}  bookId=${ctx.bookId}  content_profile=${contentProfile.id}`);
-console.log(`  units=${ctx.unitSources.length} stitch=done`);
-console.log(`  book_structure.json spine=${result.sidecar.spine.length} throughlines=${result.sidecar.throughlines.length} key_stops=${result.sidecar.key_stops.length} dropped=${result.dropped.length}`);
-console.log(`  wrote: ${outPath}`);
+console.error(`[book-structure-batch] ${book}  bookId=${ctx.bookId}  content_profile=${contentProfile.id}`);
+console.error(`  units=${ctx.unitSources.length} stitch=done`);
+console.error(`  book_structure.json spine=${result.sidecar.spine.length} throughlines=${result.sidecar.throughlines.length} key_stops=${result.sidecar.key_stops.length} dropped=${result.dropped.length}`);
+console.error(`  wrote: ${outPath}`);
+process.stdout.write(`${JSON.stringify(buildAutomaticBuildStageBatchResult(publicationReceipt))}\n`);

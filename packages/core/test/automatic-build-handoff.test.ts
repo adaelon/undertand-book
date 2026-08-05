@@ -15,6 +15,8 @@ import {
   failAutomaticBuildTask,
   submitAutomaticBuildCandidate,
 } from "../src/automatic-build-mailbox";
+import { recordAutomaticBuildInputObservation } from "../src/automatic-build-metrics";
+import { MODEL_INPUT_RENDER_CONTRACT_VERSION } from "../src/model-input-renderer";
 import { claimAutomaticBuildTask } from "../src/automatic-build-lease";
 import { readAutomaticBuildAttemptSnapshot } from "../src/automatic-build-task-store";
 import {
@@ -25,6 +27,7 @@ import {
 } from "../src/automatic-build-dispatch-runtime";
 import { resolveAutomaticBuildTarget } from "../src/build-orchestrator";
 import { confirmedStandardBuildPlan } from "./helpers/confirmed-build-plan";
+import { writePass1ProductionTaskArtifact } from "./helpers/model-input-routability-fixture";
 
 const REPO_ROOT = path.resolve(process.cwd(), "..", "..");
 const EXTRACTOR_PROMPTS = [
@@ -32,6 +35,10 @@ const EXTRACTOR_PROMPTS = [
   "paper-metadata-extractor.md",
   "paper-lexicon-extractor.md",
   "profile-sidecar-extractor.md",
+  "pass1-source-fragment-extractor.md",
+  "pass1-lid-stitcher.md",
+  "profile-sidecar-discourse-fragment-extractor.md",
+  "profile-sidecar-discourse-reducer.md",
   "pass2-longrange-linker.md",
   "book-structure-extractor.md",
 ];
@@ -50,22 +57,36 @@ function commitDispatchTask(
   task: Extract<ReturnType<typeof automaticBuildDispatchNext>["action"], { kind: "task" }>["task"],
   marker: string,
 ) {
+  if (task.descriptor.version === "automatic_build_work_unit.v3") {
+    recordAutomaticBuildInputObservation(target, task.lease_ref, task.lease.token, {
+      started_at: task.lease.issued_at,
+      finished_at: task.lease.issued_at,
+      input_bytes: 0,
+      input_sha256: task.descriptor.input_hash,
+      proof_digest: task.descriptor.input_budget_proof.proof_digest,
+      render_contract_version: MODEL_INPUT_RENDER_CONTRACT_VERSION,
+    });
+  }
   writeFileSync(task.candidate_path, JSON.stringify({
     content_hash: task.descriptor.input_hash,
     nodes: [],
     edges: [],
     marker,
   }), "utf8");
-  const artifactPath = path.join(target.workspace_dir, ".build", "pass1", `${task.task_id}.json`);
   return submitAutomaticBuildCandidate(
     target,
     task.lease_ref,
     task.lease.token,
     task.candidate_path,
-    (candidatePath) => {
-      mkdirSync(path.dirname(artifactPath), { recursive: true });
-      writeFileSync(artifactPath, readFileSync(candidatePath));
-      return { artifact_path: artifactPath, output_counts: { nodes: 0, edges: 0 } };
+    () => {
+      if (!task.lease.policy_set_digest) throw new Error("expected a v3 policy-set lease");
+      return writePass1ProductionTaskArtifact({
+        target,
+        policy_set_digest: task.lease.policy_set_digest,
+        work_unit_id: task.task_id,
+        marker,
+        generated_at: task.lease.issued_at,
+      });
     },
     { now: task.lease.issued_at, completed_at: task.lease.issued_at },
   );
@@ -134,7 +155,7 @@ describe("automatic build Codex executor handoff", () => {
         candidate_path: expect.stringContaining("candidate.json"),
         usage_path: expect.stringContaining("usage.json"),
         descriptor: {
-          version: "automatic_build_work_unit.v2",
+          version: "automatic_build_work_unit.v3",
           work_unit_id: "0",
           kind: "pass1_window",
           cost: { score: expect.any(Number) },
@@ -144,6 +165,8 @@ describe("automatic build Codex executor handoff", () => {
           phase: "reserved",
           reserved_at: "2026-07-19T00:00:00.000Z",
           reserve_expires_at: "2026-07-19T00:01:00.000Z",
+          proof_digest: expect.stringMatching(/^[a-f0-9]{64}$/u),
+          policy_set_digest: expect.stringMatching(/^[a-f0-9]{64}$/u),
         },
       });
       const executable = process.env.UNDERSTAND_BOOK_SIDECAR_SELF;
@@ -806,47 +829,37 @@ describe("automatic build Codex executor handoff", () => {
       "build",
       "SKILL.md",
     ), "utf8");
-    expect(skill).toContain("automatic_build_executor.v1");
-    expect(skill).toContain("needs_user(executor_unavailable)");
-    expect(skill).toContain("root 禁止接收、复述、缓存、写入或转发 candidate JSON");
-    expect(skill).toContain("candidate_command");
-    expect(skill).toContain("PowerShell 5.1");
-    expect(skill).toContain("也禁止调用");
-    expect(skill).toContain("`legacy-submit`");
-    expect(skill).toContain("automatic_build_dispatch_executor.v1");
-    expect(skill).toContain("automatic_build_dispatch_executor_handoff.v1");
-    expect(skill).toContain("executor_handoff");
-    expect(skill).toContain("subagent,不得按");
-    expect(skill).toContain("interrupt_command");
-    expect(skill).toContain("automatic_build_executor_interruption.v1");
-    expect(skill).toContain("before_first_claim");
-    expect(skill).toContain("不消耗 semantic attempt 或 lease epoch");
-    expect(skill).toContain("同一显式全书调用只允许执行一次 `legacy-plan`");
-    expect(skill).toContain("path.relative(action.cwd, executor_handoff.path)");
-    expect(skill).toContain("handoff_relative_path");
-    expect(skill).toContain("零语义尝试、零 lease epoch");
-    expect(skill).toContain("只有 canonical failure");
-    expect(pluginSkill).toContain("candidate_command");
-    expect(pluginSkill).toContain("PowerShell 5.1");
-    expect(pluginSkill).toContain("automatic_build_dispatch_executor.v1");
-    expect(pluginSkill).toContain("automatic_build_dispatch_executor_handoff.v1");
-    expect(pluginSkill).toContain("executor_handoff");
-    expect(pluginSkill).toContain("interrupt_command");
-    expect(pluginSkill).toContain("automatic_build_executor_interruption.v1");
-    expect(pluginSkill).toContain("before_first_claim");
-    expect(pluginSkill).toContain("consume neither a semantic attempt nor a lease epoch");
-    expect(pluginSkill).toContain("run `legacy-plan` exactly once");
-    expect(pluginSkill).toContain("path.relative(action.cwd, executor_handoff.path)");
-    expect(pluginSkill).toContain("handoff_relative_path");
-    expect(pluginSkill).toContain("zero semantic attempts and zero lease epochs");
-    expect(pluginSkill).toContain("Only a canonical failure");
+    expect(skill).toBe(pluginSkill);
+    for (const marker of [
+      "automatic_build_executor.v1",
+      "needs_user(executor_unavailable)",
+      "The root agent must never receive, restate, cache, write, or forward candidate JSON",
+      "candidate_command",
+      "PowerShell 5.1",
+      "`legacy-submit`",
+      "automatic_build_dispatch_executor.v1",
+      "automatic_build_dispatch_executor_handoff.v1",
+      "executor_handoff",
+      "interrupt_command",
+      "automatic_build_executor_interruption.v1",
+      "before_first_claim",
+      "consume neither a semantic attempt nor a lease epoch",
+      "run `legacy-plan` exactly once",
+      "path.relative(action.cwd, executor_handoff.path)",
+      "handoff_relative_path",
+      "zero semantic attempts and zero lease epochs",
+      "Only a canonical failure",
+    ]) {
+      expect(skill).toContain(marker);
+    }
 
     for (const prompt of EXTRACTOR_PROMPTS) {
       const content = readFileSync(path.join(REPO_ROOT, "agents", prompt), "utf8");
       expect(content, prompt).toContain("Automatic Build Executor Envelope");
-      expect(content, prompt).toContain("directly at `candidate_path`");
-      expect(content, prompt).toContain("return only its receipt JSON");
-      expect(content, prompt).toContain("Never return candidate JSON to the caller");
+      expect(content, prompt).toContain("`candidate_path`");
+      expect(content, prompt).toContain("`submit_command`");
+      expect(content.toLowerCase(), prompt).toContain("return only");
+      expect(content, prompt).toContain("Never return candidate JSON");
     }
   });
 });

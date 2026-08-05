@@ -14,7 +14,10 @@ import { PaperMetadataZ } from "../../packages/core/src/zod";
 import { contentProfileUsage, parsePaperContentProfileArgsOrExit } from "./content-profile-options";
 import { loadBookWindows } from "./load-book";
 import { semanticArtifactPayload } from "../../packages/core/src/semantic-artifact";
-import { publishAutomaticBuildArtifactSet } from "../../packages/core/src/automatic-build-publication";
+import {
+  buildAutomaticBuildStageBatchResult,
+  publishAutomaticBuildArtifactSet,
+} from "../../packages/core/src/automatic-build-publication";
 
 const parsedProfile = parsePaperContentProfileArgsOrExit(process.argv.slice(2));
 const argv = parsedProfile.argv;
@@ -62,13 +65,14 @@ PaperMetadataZ.parse(paperMetadata);
 
 const outDir = `.understand-book/${bookId}`;
 mkdirSync(outDir, { recursive: true });
-publishAutomaticBuildArtifactSet({
+const publicationReceipt = publishAutomaticBuildArtifactSet({
   workspace_dir: outDir,
   stage: "paper_metadata",
   artifacts: { "paper_metadata.json": JSON.stringify(paperMetadata, null, 2) },
 });
 
-console.log(`[paper-metadata-batch] ${book}  bookId=${bookId}  content_profile=${parsedProfile.contentProfile.id}${allowPartial && status.pending ? "  [--allow-partial]" : ""}`);
-console.log(`  windows=${status.total} eligible=${status.eligible} skipped=${status.skipped} done=${status.committed} pending=${status.pending}`);
-console.log(`  deterministic_references=${status.analysis.deterministic_metadata.references?.value.length ?? 0}`);
-console.log(`  paper_metadata.json fields=${Object.keys(paperMetadata).filter((key) => key !== "header").length}`);
+console.error(`[paper-metadata-batch] ${book}  bookId=${bookId}  content_profile=${parsedProfile.contentProfile.id}${allowPartial && status.pending ? "  [--allow-partial]" : ""}`);
+console.error(`  windows=${status.total} eligible=${status.eligible} skipped=${status.skipped} done=${status.committed} pending=${status.pending}`);
+console.error(`  deterministic_references=${status.analysis.deterministic_metadata.references?.value.length ?? 0}`);
+console.error(`  paper_metadata.json fields=${Object.keys(paperMetadata).filter((key) => key !== "header").length}`);
+process.stdout.write(`${JSON.stringify(buildAutomaticBuildStageBatchResult(publicationReceipt))}\n`);

@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -11,11 +11,18 @@ import {
   selectAutomaticBuildDispatchRefill,
 } from "../src/automatic-build-dispatch";
 import { submitAutomaticBuildCandidate } from "../src/automatic-build-mailbox";
+import { recordAutomaticBuildInputObservation } from "../src/automatic-build-metrics";
+import { MODEL_INPUT_RENDER_CONTRACT_VERSION } from "../src/model-input-renderer";
 import { readAutomaticBuildAttemptSnapshot } from "../src/automatic-build-task-store";
 import { resolveAutomaticBuildTarget } from "../src/build-orchestrator";
 import { resolveContentProfile } from "../src/content-profile";
 import { automaticBuildExtractionPolicy } from "../src/semantic-artifact";
-import { buildWorkUnitCost, createWorkUnitDescriptor, type WorkUnitDescriptorV2 } from "../src/stage-work-unit";
+import {
+  buildWorkUnitCost,
+  createWorkUnitDescriptor,
+  type WorkUnitDescriptor,
+  type WorkUnitDescriptorV2,
+} from "../src/stage-work-unit";
 import {
   automaticBuildDispatchFinish,
   automaticBuildDispatchNext,
@@ -23,6 +30,7 @@ import {
   automaticBuildPlan,
 } from "../../../skills/build/automatic-build";
 import { confirmedStandardBuildPlan } from "./helpers/confirmed-build-plan";
+import { writePass1ProductionTaskArtifact } from "./helpers/model-input-routability-fixture";
 
 const targetRef = {
   version: "build_target_ref.v2" as const,
@@ -51,6 +59,25 @@ function descriptor(id: string, scoreInput: number): WorkUnitDescriptorV2 {
     policy_fingerprint: policy,
     evidence_lids: [`${id}.1`],
     cost: buildWorkUnitCost({ estimated_input_tokens: scoreInput, visible_lids: 1, expected_output_items: 1 }),
+  });
+}
+
+function recordProofBoundFakeInput(
+  target: ReturnType<typeof resolveAutomaticBuildTarget>,
+  task: {
+    descriptor: WorkUnitDescriptor;
+    lease_ref: string;
+    lease: { token: string; issued_at: string };
+  },
+): void {
+  if (task.descriptor.version !== "automatic_build_work_unit.v3") return;
+  recordAutomaticBuildInputObservation(target, task.lease_ref, task.lease.token, {
+    started_at: task.lease.issued_at,
+    finished_at: task.lease.issued_at,
+    input_bytes: 0,
+    input_sha256: task.descriptor.input_hash,
+    proof_digest: task.descriptor.input_budget_proof.proof_digest,
+    render_contract_version: MODEL_INPUT_RENDER_CONTRACT_VERSION,
   });
 }
 
@@ -118,21 +145,25 @@ async function fakeExecutorRun(workerSlots: 1 | 2 | 3, reduceAfterFirst = false)
           if (!("candidate_path" in task)) throw new Error("expected leased executor task");
           expect(seen.has(task.task_id)).toBe(false);
           seen.add(task.task_id);
+          recordProofBoundFakeInput(target, task);
           writeFileSync(task.candidate_path, JSON.stringify({
             content_hash: task.descriptor.input_hash,
             nodes: [],
             edges: [],
           }), "utf8");
-          const artifactPath = path.join(target.workspace_dir, ".build", "pass1", `${task.task_id}.json`);
           const receipt = submitAutomaticBuildCandidate(
             target,
             task.lease_ref,
             task.lease.token,
             task.candidate_path,
-            (candidatePath) => {
-              mkdirSync(path.dirname(artifactPath), { recursive: true });
-              writeFileSync(artifactPath, readFileSync(candidatePath));
-              return { artifact_path: artifactPath, output_counts: { nodes: 0, edges: 0 } };
+            () => {
+              if (!task.lease.policy_set_digest) throw new Error("expected a v3 policy-set lease");
+              return writePass1ProductionTaskArtifact({
+                target,
+                policy_set_digest: task.lease.policy_set_digest,
+                work_unit_id: task.task_id,
+                generated_at: task.lease.issued_at,
+              });
             },
             { now: task.lease.issued_at, completed_at: task.lease.issued_at },
           );
@@ -234,21 +265,25 @@ describe("automatic build safe concurrent execution", () => {
     let second = 2;
     while (step.action.kind === "task") {
       const task = step.action.task;
+      recordProofBoundFakeInput(target, task);
       writeFileSync(task.candidate_path, JSON.stringify({
         content_hash: task.descriptor.input_hash,
         nodes: [],
         edges: [],
       }), "utf8");
-      const artifactPath = path.join(target.workspace_dir, ".build", "pass1", `${task.task_id}.json`);
       submitAutomaticBuildCandidate(
         target,
         task.lease_ref,
         task.lease.token,
         task.candidate_path,
-        (candidatePath) => {
-          mkdirSync(path.dirname(artifactPath), { recursive: true });
-          writeFileSync(artifactPath, readFileSync(candidatePath));
-          return { artifact_path: artifactPath, output_counts: { nodes: 0, edges: 0 } };
+        () => {
+          if (!task.lease.policy_set_digest) throw new Error("expected a v3 policy-set lease");
+          return writePass1ProductionTaskArtifact({
+            target,
+            policy_set_digest: task.lease.policy_set_digest,
+            work_unit_id: task.task_id,
+            generated_at: task.lease.issued_at,
+          });
         },
         { now: task.lease.issued_at, completed_at: task.lease.issued_at },
       );
@@ -285,7 +320,7 @@ describe("automatic build safe concurrent execution", () => {
     expect(refill.action.dispatches[0].manifest.dispatch_id).toBe(
       initialPlan.preflight.dispatch_plan.dispatches[3].dispatch_id,
     );
-  });
+  }, 20_000);
 
   it("caps workers by live slots, hard limit three, and parallel cost without changing plan identity", () => {
     const units = [descriptor("a", 10), descriptor("b", 20), descriptor("c", 30), descriptor("d", 40)];

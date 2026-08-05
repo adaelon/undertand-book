@@ -2,6 +2,7 @@ import type { BuildTargetRefV2 } from "./build-orchestrator";
 import type { Pass1ArtifactMeta } from "./build-resume";
 import { pass1ContentHash } from "./build-resume";
 import type { LidNode } from "./generated/LidNode";
+import { inspectRenderedModelInput } from "./model-input-renderer";
 import {
   buildPaperMetadataWindowInput,
   type PaperMetadataFields,
@@ -34,6 +35,8 @@ export type PaperMetadataSignalType = (typeof PAPER_METADATA_SIGNAL_TYPES)[numbe
 export interface PaperMetadataCandidatePacket extends PaperMetadataWindowInput {
   work_unit_id: string;
   signal_types: PaperMetadataSignalType[];
+  estimated_rendered_tokens: number;
+  rendered_input_sha256: string;
 }
 
 export interface PaperMetadataRoutingAnalysis {
@@ -303,11 +306,17 @@ export function analyzePaperMetadataCandidates(input: {
     const windowSignals = signals.get(window.id);
     if (windowSignals?.requestedFields.size) {
       const base = buildPaperMetadataWindowInput(window, input.byLid, input.source);
-      packets[String(window.id)] = {
+      const packet = {
         ...base,
         work_unit_id: String(window.id),
         signal_types: orderedSignals(windowSignals.signalTypes),
         requested_fields: orderedFields(windowSignals.requestedFields),
+      };
+      const rendered = inspectRenderedModelInput({ kind: "metadata_region", input: packet });
+      packets[String(window.id)] = {
+        ...packet,
+        estimated_rendered_tokens: rendered.estimated_tokens,
+        rendered_input_sha256: rendered.sha256,
       };
       continue;
     }

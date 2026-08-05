@@ -5,6 +5,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   AUTOMATIC_BUILD_QUALITY_GOLDSET,
+  collectAutomaticBuildStageQuality,
   evaluateAutomaticBuildQualityFloor,
   evaluateAutomaticBuildStageQuality,
 } from "../src/automatic-build-quality";
@@ -16,11 +17,14 @@ import {
 import { publishAutomaticBuildArtifactSet } from "../src/automatic-build-publication";
 import { buildAutomaticBuildSnapshot, resolveAutomaticBuildTarget } from "../src/build-orchestrator";
 import { resolveContentProfile } from "../src/content-profile";
-import { automaticBuildExtractionPolicy, buildSemanticArtifactEnvelope, writeSemanticArtifactEnvelopeFile } from "../src/semantic-artifact";
+import { automaticBuildExtractionPolicy, buildSemanticArtifactEnvelope } from "../src/semantic-artifact";
 import { buildWorkUnitCost, createWorkUnitDescriptor } from "../src/stage-work-unit";
-import { automaticBuildStageArtifactPath } from "../src/automatic-build-quality";
 import { automaticBuildNext } from "../../../skills/build/automatic-build";
 import { confirmedStandardBuildPlan } from "./helpers/confirmed-build-plan";
+import {
+  createSyntheticRoutabilityFixture,
+  writeSyntheticPass1ProductionGeneration,
+} from "./helpers/model-input-routability-fixture";
 
 const targetRef = {
   version: "build_target_ref.v2" as const,
@@ -119,42 +123,35 @@ describe("automatic build versioned quality and migration gates", () => {
     expect(legacy).toMatchObject({ gate_status: "integrity_failed", integrity: { legacy_artifacts: 1, policy_status: "legacy_policy_unknown" } });
   });
 
-  it("blocks automatic close when complete v2 work stays below the eligible-unit floor", () => {
-    const root = mkdtempSync(path.join(tmpdir(), "understand-book-quality-close-"));
-    const source = path.join(root, "guide.md");
-    writeFileSync(source, [
-      "# Guide",
-      ...Array.from({ length: 320 }, (_, index) => `Paragraph ${index + 1} carries a source fact.`),
-    ].join("\n\n"), "utf8");
-    const target = resolveAutomaticBuildTarget(source, root);
-    const stage = buildAutomaticBuildSnapshot(target, { quality_profile: "full" }).stages[0];
-    for (const descriptor of stage.work_units ?? []) {
-      if (descriptor.deterministic_skip) continue;
-      const file = automaticBuildStageArtifactPath(target, "pass1", descriptor.work_unit_id);
-      mkdirSync(path.dirname(file), { recursive: true });
-      writeSemanticArtifactEnvelopeFile(file, buildSemanticArtifactEnvelope({
-        target: target.target_ref,
-        stage: "pass1",
-        work_unit_id: descriptor.work_unit_id,
-        input_hash: descriptor.input_hash,
-        policy_fingerprint: descriptor.policy_fingerprint,
-        provenance: { executor: "fake", model: "codex-fake-v1", attempt: 1, generated_at: "2026-07-19T00:00:00.000Z" },
-        payload: { content_hash: descriptor.input_hash, nodes: [], edges: [] },
-      }));
-    }
+  it("blocks automatic close when complete v3 generation stays below the eligible-unit floor", () => {
+    const fixture = createSyntheticRoutabilityFixture(200);
+    writeSyntheticPass1ProductionGeneration(fixture);
+    const stage = buildAutomaticBuildSnapshot(
+      fixture.target,
+      { quality_profile: "full" },
+    ).stages[0];
+    expect(stage.pending_tasks).toEqual([]);
+    const report = collectAutomaticBuildStageQuality(fixture.target, stage, "full");
+    expect(report).toMatchObject({
+      version: "automatic_build_stage_quality_report.v2",
+      gate_status: "quality_below_floor",
+      integrity: { status: "passed" },
+      quality: { status: "below_floor" },
+    });
 
-    const next = automaticBuildNext(source, root, 1, {
+    const next = automaticBuildNext(fixture.source_file, fixture.root, 1, {
       quality_profile: "full",
-      build_plan: confirmedStandardBuildPlan(source, root),
+      build_plan: confirmedStandardBuildPlan(fixture.source_file, fixture.root),
     });
     expect(next.action).toMatchObject({
       kind: "needs_user",
       reason: "quality_gate_failed",
       stage: "pass1",
       gate_status: "quality_below_floor",
+      quality_report: { version: "automatic_build_stage_quality_report.v2" },
     });
-    expect(existsSync(path.join(target.workspace_dir, "base.json"))).toBe(false);
-  });
+    expect(existsSync(path.join(fixture.target.workspace_dir, "base.json"))).toBe(false);
+  }, 30_000);
 
   it("binds quality boundaries to the checked-in CC0 goldset digest", () => {
     const file = path.join(__dirname, "fixtures", "automatic-build-quality-goldset.v1.json");
@@ -177,6 +174,7 @@ describe("automatic build versioned quality and migration gates", () => {
     const source = path.join(root, "guide.md");
     writeFileSync(source, "# Guide\n\nA semantic paragraph.\n", "utf8");
     const target = resolveAutomaticBuildTarget(source, root);
+    const buildPlan = confirmedStandardBuildPlan(source, root);
     const legacyPath = path.join(target.workspace_dir, ".build", "pass1", "0.json");
     mkdirSync(path.dirname(legacyPath), { recursive: true });
     const legacyBytes = JSON.stringify({ content_hash: "legacy-source-only", nodes: [], edges: [] });
@@ -188,14 +186,35 @@ describe("automatic build versioned quality and migration gates", () => {
       policy_status: "legacy_policy_unknown",
       invalid_artifacts: 0,
       source_stale_artifacts: 1,
+      source_unknown_artifacts: 0,
       schema_valid_artifacts: 1,
       legacy_resume_allowed: false,
     });
-    const buildPlan = confirmedStandardBuildPlan(source, root);
+    expect(audit.artifacts).toMatchObject([{
+      work_unit_id: "0",
+      source_freshness: "stale",
+    }]);
+    expect(() => selectAutomaticBuildMigrationMode(
+      target,
+      "legacy_resume",
+      "2026-07-19T00:00:00.000Z",
+    )).toThrow(
+      "source_stale_artifacts=1, source_unknown_artifacts=0, schema_invalid_artifacts=0, invalid_artifacts=0",
+    );
     expect(automaticBuildNext(source, root, 1, { build_plan: buildPlan }).action).toMatchObject({
       kind: "needs_user",
-      reason: "legacy_migration_required",
+      reason: "automatic_build_routing_blocked",
       stage: "pass1",
+      recovery: {
+        version: "automatic_build_recovery.v1",
+        phase: "migration",
+        code: "policy_generation_migration_required",
+        stage: "pass1",
+        router_version: "pass1_window.v1",
+        affected_work_units: [{ work_unit_id: "0" }],
+        retryable: false,
+        recovery_actions: ["migrate_policy"],
+      },
     });
 
     const decision = selectAutomaticBuildMigrationMode(target, "v2_rebuild", "2026-07-19T00:00:00.000Z");
@@ -206,7 +225,14 @@ describe("automatic build versioned quality and migration gates", () => {
     expect(readFileSync(path.join(decision.legacy_snapshot_path!, ".build", "pass1", "0.json"), "utf8")).toBe(legacyBytes);
     expect(automaticBuildNext(source, root, 1, { build_plan: buildPlan }).action).toMatchObject({
       kind: "needs_user",
-      reason: "preflight_required",
+      reason: "automatic_build_routing_blocked",
+      stage: "pass1",
+      recovery: {
+        version: "automatic_build_recovery.v1",
+        phase: "migration",
+        code: "policy_generation_migration_required",
+        recovery_actions: ["migrate_policy"],
+      },
     });
   });
 
@@ -215,19 +241,41 @@ describe("automatic build versioned quality and migration gates", () => {
     const source = path.join(root, "guide.md");
     writeFileSync(source, "# Guide\n\nA semantic paragraph.\n", "utf8");
     const target = resolveAutomaticBuildTarget(source, root);
+    const buildPlan = confirmedStandardBuildPlan(source, root);
     const legacyPath = path.join(target.workspace_dir, ".build", "pass1", "0.json");
     mkdirSync(path.dirname(legacyPath), { recursive: true });
     const descriptor = buildAutomaticBuildSnapshot(target, { quality_profile: "full" }).stages[0].work_units?.[0];
     if (!descriptor) throw new Error("expected legacy resume descriptor");
     writeFileSync(legacyPath, JSON.stringify({ content_hash: descriptor.input_hash, nodes: [], edges: [] }), "utf8");
+    expect(auditAutomaticBuildLegacy(target)).toMatchObject({
+      source_fresh_artifacts: 1,
+      source_stale_artifacts: 0,
+      source_unknown_artifacts: 0,
+      schema_valid_artifacts: 1,
+      legacy_resume_allowed: true,
+      artifacts: [{
+        work_unit_id: "0",
+        source_freshness: "fresh",
+      }],
+    });
     selectAutomaticBuildMigrationMode(target, "legacy_resume", "2026-07-19T00:00:00.000Z");
 
     expect(automaticBuildNext(source, root, 1, {
-      build_plan: confirmedStandardBuildPlan(source, root),
+      build_plan: buildPlan,
     }).action).toMatchObject({
       kind: "needs_user",
-      reason: "legacy_resume_selected",
-      policy_status: "legacy_policy_unknown",
+      reason: "automatic_build_routing_blocked",
+      stage: "pass1",
+      recovery: {
+        version: "automatic_build_recovery.v1",
+        phase: "migration",
+        code: "policy_generation_migration_required",
+        stage: "pass1",
+        router_version: "pass1_window.v1",
+        affected_work_units: [{ work_unit_id: "0" }],
+        retryable: false,
+        recovery_actions: ["migrate_policy"],
+      },
     });
   });
 

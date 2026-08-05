@@ -45,10 +45,12 @@ contain BookStructure.
    is driven by the packaged build engine.
 3. After installing or upgrading the engine, run
    `<build-exe> protocol-doctor <target> --plugin-root <this-plugin-root>`. Consume only
-   `automatic_build_protocol_doctor.v1`; require `status=compatible`,
+   `automatic_build_protocol_doctor.v2`; require `status=compatible`,
+   `release.version=automatic_build_release.v3`,
    `production_default=automatic_build_protocol.v2_dispatch`, and `dry_run_mutates_state=false`.
-   Also require `checks.prompt_provider.status=compatible` with all six extractor names in
-   `checked_extractors`, `checks.handoff_preparation.status=compatible`, and
+   Require `checks.release_contract.status=compatible`, compatible recovery/close readers, and
+   `checks.prompt_provider.status=compatible` with all ten extractor names in
+   `checked_extractors`. Also require `checks.handoff_preparation.status=compatible` and
    `checks.plugin_shape.agents_required=false`. If any check is incompatible, stop on its
    allowlisted `diagnostic_code`; do not continue to plan/next or relay a raw exception.
 
@@ -267,8 +269,16 @@ one accepted plan. `--max-parallel` is in `1..3`; `--available-agent-slots` is i
    - `waiting`: wait no longer than `retry_after_ms`, then return to preflight. Do not duplicate an
      active lease.
    - `close_stage`: execute `command` exactly. Never append `--allow-partial`. A semantic close must
-     carry a passing `automatic_build_stage_quality_report.v1`; the engine recomputes it before
-     transactional publication.
+     carry a passing `automatic_build_stage_quality_report.v2`; the engine recomputes it before
+     transactional publication. Parse stdout as exactly one strict
+     `automatic_build_stage_close_result.v1` with `status=closed` and `next=replan`, or the
+     verification-only equivalent with `status=verified` and `next=replan`. Immediately return to
+     `plan/next`; a closed stage is never whole-build completion. If close returns
+     `automatic_build_recovery.v1`, branch only on its allowlisted `code`, `retryable`, and
+     `recovery_actions`; never expose raw stderr, exception text, stack, or command text.
+     `reconfirm_build_plan` always requires fresh user confirmation. Follow `retry_plan` only when
+     `retryable=true`; follow `migrate_policy` only when the engine emits an executable migration
+     action, never merely because the name appears in `recovery_actions`.
    - `needs_user`: stop and show the structured reason and recovery commands. In particular:
      - `executor_unavailable`: report the required dedicated capacity; never let the root emulate a
        subagent.

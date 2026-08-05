@@ -5,15 +5,48 @@ import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, 
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import {
+  automaticBuildExtractorForWorkUnitKind,
   buildAutomaticBuildSnapshot,
   inspectAutomaticBuildStageFreshness,
   nextAutomaticBuildAction,
   nextPlannedAutomaticBuildAction,
+  routeAutomaticBuildSnapshot,
   resolveAutomaticBuildTarget,
   type AutomaticBuildStage,
+  type AutomaticBuildStageState,
   type AutomaticBuildTarget,
   type AutomaticBuildTargetResolutionOptions,
+  type SemanticExtractor,
 } from "../../packages/core/src/build-orchestrator";
+import {
+  createAutomaticBuildRecoveryEnvelope,
+  parseAutomaticBuildRecoveryEnvelope,
+  type AutomaticBuildRecoveryEnvelopeV1,
+} from "../../packages/core/src/automatic-build-recovery";
+import {
+  closeAutomaticBuildStage,
+  parseAutomaticBuildStageCloseResult,
+  verifyAutomaticBuildStageClose,
+} from "../../packages/core/src/automatic-build-close";
+import type { AutomaticBuildPublicationStage } from "../../packages/core/src/automatic-build-publication";
+import {
+  createAutomaticBuildStagePolicySet,
+  freezeAutomaticBuildStagePolicySet,
+  validateAutomaticBuildStagePolicySet,
+} from "../../packages/core/src/automatic-build-policy-generation";
+import {
+  freezePass1ShadowTask,
+  pass1ModelSlicePolicyMembers,
+  pass1ShadowTaskPath,
+  pass1ShadowTaskPrivateDirectory,
+} from "../../packages/core/src/pass1-reduction";
+import {
+  freezeProfileSidecarDiscourseShadowTask,
+  freezeProfileSidecarSemanticFastPathTask,
+  profileSidecarMapReducePolicyMembers,
+  profileSidecarDiscourseShadowTaskPath,
+  profileSidecarDiscourseShadowTaskPrivateDirectory,
+} from "../../packages/core/src/profile-sidecar-reduction";
 import type { BuildPlanV1 } from "../../packages/core/src/build-intent";
 import type { Pass2PlanChoice } from "../../packages/core/src/build-capability";
 import { mapLegacyBuildInvocation } from "../../packages/core/src/build-intent-controller";
@@ -26,6 +59,7 @@ import {
 } from "../../packages/core/src/automatic-build-task-store";
 import {
   assertActiveAutomaticBuildLease,
+  automaticBuildTaskPolicyBindingFromLease,
   claimAutomaticBuildTask,
   heartbeatAutomaticBuildLease,
   inspectAutomaticBuildTaskClaim,
@@ -33,6 +67,17 @@ import {
   startAutomaticBuildLease,
   type AutomaticBuildTaskLease,
 } from "../../packages/core/src/automatic-build-lease";
+import {
+  inspectRenderedModelInput,
+  MODEL_INPUT_RENDER_CONTRACT_VERSION,
+  type ModelInputRenderRequest,
+} from "../../packages/core/src/model-input-renderer";
+import {
+  evaluateModelInputBudget,
+  MODEL_INPUT_ESTIMATOR_VERSION,
+  verifyModelInputBudgetProof,
+} from "../../packages/core/src/model-input-budget";
+import type { WorkUnitDescriptor, WorkUnitKind } from "../../packages/core/src/stage-work-unit";
 import {
   failAutomaticBuildTask,
   inspectAutomaticBuildTask,
@@ -48,7 +93,11 @@ import {
   type AutomaticBuildStageMetricsSummaryV1,
   writeAutomaticBuildStageMetricsSummary,
 } from "../../packages/core/src/automatic-build-metrics";
-import type { ExtractionQualityProfile } from "../../packages/core/src/semantic-artifact";
+import {
+  automaticBuildGenerationArtifactPath,
+  type ExtractionQualityProfile,
+  type SemanticBuildStage,
+} from "../../packages/core/src/semantic-artifact";
 import {
   buildAutomaticBuildPreflight,
   DEFAULT_AUTOMATIC_BUILD_BUDGET,
@@ -71,14 +120,17 @@ import {
 import {
   automaticBuildStageQualityReportPath,
   collectAutomaticBuildStageQuality,
-  writeAutomaticBuildStageQualityReport,
 } from "../../packages/core/src/automatic-build-quality";
 import {
   canonicalAutomaticBuildJson,
+  AUTOMATIC_BUILD_ACTIVE_RELEASE,
   AUTOMATIC_BUILD_EXECUTOR_DISPATCH_PROTOCOL_V1,
+  AUTOMATIC_BUILD_MODEL_INPUT_BUDGET_V1,
   AUTOMATIC_BUILD_PRODUCTION_DEFAULT,
   AUTOMATIC_BUILD_PROTOCOL_V2,
-  AUTOMATIC_BUILD_RELEASE_V2,
+  AUTOMATIC_BUILD_RELEASE_POLICY_MEMBERS_V1,
+  AUTOMATIC_BUILD_RELEASE_V3,
+  AUTOMATIC_BUILD_ROUTING_RELEASE,
   resolveAutomaticBuildClaimProtocol,
   type AutomaticBuildClaimProtocol,
 } from "../../packages/core/src/automatic-build-protocol";
@@ -96,6 +148,7 @@ import {
   type AutomaticBuildExecutorInterruptionInputV1,
 } from "../../packages/core/src/automatic-build-dispatch-runtime";
 import type { AutomaticBuildExecutorPromptMode } from "./executor-prompt";
+import { resolveContentProfile } from "../../packages/core/src/content-profile";
 import {
   AUTOMATIC_BUILD_EXTRACTOR_PROMPT_NAMES,
   isAutomaticBuildExtractorPromptName,
@@ -153,18 +206,25 @@ interface StageCommands {
   input?: string;
   write?: string;
   close: string | null;
-  prompt?: AutomaticBuildExtractorPromptName;
 }
 
 const STAGE_COMMANDS: Record<AutomaticBuildStage, StageCommands> = {
-  pass1: { input: "emit-input.ts", write: "pass1-write.ts", close: "pass1-batch.ts", prompt: "pass1-local-extractor.md" },
-  paper_metadata: { input: "paper-metadata-input.ts", write: "paper-metadata-write.ts", close: "paper-metadata-batch.ts", prompt: "paper-metadata-extractor.md" },
-  paper_lexicon: { input: "paper-lexicon-input.ts", write: "paper-lexicon-write.ts", close: "paper-lexicon-batch.ts", prompt: "paper-lexicon-extractor.md" },
-  profile_sidecar: { input: "profile-sidecar-input.ts", write: "profile-sidecar-write.ts", close: "profile-sidecar-batch.ts", prompt: "profile-sidecar-extractor.md" },
-  pass2: { input: "pass2-input.ts", write: "pass2-write.ts", close: "pass2-batch.ts", prompt: "pass2-longrange-linker.md" },
-  book_structure: { input: "book-structure-input.ts", write: "book-structure-write.ts", close: "book-structure-batch.ts", prompt: "book-structure-extractor.md" },
+  pass1: { input: "emit-input.ts", write: "pass1-write.ts", close: "pass1-batch.ts" },
+  paper_metadata: { input: "paper-metadata-input.ts", write: "paper-metadata-write.ts", close: "paper-metadata-batch.ts" },
+  paper_lexicon: { input: "paper-lexicon-input.ts", write: "paper-lexicon-write.ts", close: "paper-lexicon-batch.ts" },
+  profile_sidecar: { input: "profile-sidecar-input.ts", write: "profile-sidecar-write.ts", close: "profile-sidecar-batch.ts" },
+  pass2: { input: "pass2-input.ts", write: "pass2-write.ts", close: "pass2-batch.ts" },
+  book_structure: { input: "book-structure-input.ts", write: "book-structure-write.ts", close: "book-structure-batch.ts" },
   paper_reading_guide: { close: null },
 };
+
+function extractorPromptName(extractor: SemanticExtractor): AutomaticBuildExtractorPromptName {
+  const promptName = `${extractor}.md`;
+  if (!isAutomaticBuildExtractorPromptName(promptName)) {
+    throw new Error(`automatic build extractor has no registered prompt: ${extractor}`);
+  }
+  return promptName;
+}
 
 function scriptCommand(script: string, args: string[]): string[] {
   const sidecar = process.env.UNDERSTAND_BOOK_SIDECAR_SELF;
@@ -195,6 +255,15 @@ export interface ResolvedAutomaticBuildExecutorPromptV1 {
   version: "resolved_automatic_build_executor_prompt.v1";
   extractor_name: AutomaticBuildExtractorPromptName;
   mode: AutomaticBuildExecutorPromptMode;
+  source: AutomaticBuildPromptSource;
+  bytes: Uint8Array;
+  sha256: string;
+  byte_length: number;
+}
+
+export interface ResolvedAutomaticBuildPromptAssetV1 {
+  version: "resolved_automatic_build_prompt_asset.v1";
+  extractor_name: AutomaticBuildExtractorPromptName;
   source: AutomaticBuildPromptSource;
   bytes: Uint8Array;
   sha256: string;
@@ -253,6 +322,48 @@ export function resolveAutomaticBuildExecutorPrompt(
     version: "resolved_automatic_build_executor_prompt.v1",
     extractor_name: extractorName,
     mode,
+    source,
+    bytes,
+    sha256: createHash("sha256").update(bytes).digest("hex"),
+    byte_length: bytes.byteLength,
+  };
+}
+
+export function resolveAutomaticBuildPromptAsset(
+  extractorName: AutomaticBuildExtractorPromptName,
+): ResolvedAutomaticBuildPromptAssetV1 {
+  if (!isAutomaticBuildExtractorPromptName(extractorName)) {
+    throw new AutomaticBuildExecutorPromptResolutionError("prompt_contract_invalid", "node_source");
+  }
+  const source: AutomaticBuildPromptSource = process.env.UNDERSTAND_BOOK_SIDECAR_SELF
+    ? "packaged_sidecar"
+    : "node_source";
+  let bytes: Buffer;
+  if (source === "packaged_sidecar") {
+    const sidecar = process.env.UNDERSTAND_BOOK_SIDECAR_SELF!;
+    const output = captureBuildProcessOutput(sidecar, ["prompt", extractorName], PLUGIN_ROOT);
+    if (output.error || output.status !== 0) {
+      throw new AutomaticBuildExecutorPromptResolutionError("prompt_provider_unavailable", source);
+    }
+    if (output.stderr !== "") {
+      throw new AutomaticBuildExecutorPromptResolutionError("prompt_provider_output_invalid", source);
+    }
+    bytes = Buffer.from(output.stdout, "utf8");
+  } else {
+    try {
+      bytes = readFileSync(path.join(PLUGIN_ROOT, "agents", extractorName));
+    } catch {
+      throw new AutomaticBuildExecutorPromptResolutionError("prompt_provider_unavailable", source);
+    }
+  }
+  if (bytes.byteLength === 0
+    || bytes.byteLength > MAX_AUTOMATIC_BUILD_EXECUTOR_PROMPT_BYTES
+    || bytes.includes(0)) {
+    throw new AutomaticBuildExecutorPromptResolutionError("prompt_provider_output_invalid", source);
+  }
+  return {
+    version: "resolved_automatic_build_prompt_asset.v1",
+    extractor_name: extractorName,
     source,
     bytes,
     sha256: createHash("sha256").update(bytes).digest("hex"),
@@ -417,9 +528,69 @@ export function runAutomaticBuildStageWriter(
   stage: AutomaticBuildStage,
   taskId: string,
   candidatePath: string,
+  generation?: {
+    policy_set_digest: string;
+    attempt: number;
+    executor: string;
+    generated_at: string;
+  },
 ): AutomaticBuildWriterResult {
   const script = STAGE_COMMANDS[stage].write;
   if (!script) throw new Error(`stage ${stage} does not support write`);
+  const generationStage = stage === "pass1" || stage === "profile_sidecar" ? stage : undefined;
+  const generationTaskPath = generation && generationStage
+    ? generationStage === "pass1"
+      ? pass1ShadowTaskPath(target, generation.policy_set_digest, taskId)
+      : profileSidecarDiscourseShadowTaskPath(target, generation.policy_set_digest, taskId)
+    : undefined;
+  if (generation && (!generationStage || !generationTaskPath || !existsSync(generationTaskPath))) {
+    throw new Error(`policy_generation_conflict: frozen v3 generation task is unavailable: ${stage}/${taskId}`);
+  }
+  if (generation && generationStage && generationTaskPath && existsSync(generationTaskPath)) {
+    const directory = generationStage === "pass1"
+      ? pass1ShadowTaskPrivateDirectory(target, generation.policy_set_digest, taskId)
+      : profileSidecarDiscourseShadowTaskPrivateDirectory(
+          target,
+          generation.policy_set_digest,
+          taskId,
+        );
+    const shadowCandidatePath = path.join(directory, "candidate.json");
+    const candidateBytes = readFileSync(candidatePath);
+    mkdirSync(directory, { recursive: true });
+    try {
+      writeFileSync(shadowCandidatePath, candidateBytes, { flag: "wx" });
+    } catch (error) {
+      const code = error && typeof error === "object" && "code" in error ? String(error.code) : "";
+      if (code !== "EEXIST" || !readFileSync(shadowCandidatePath).equals(candidateBytes)) throw error;
+    }
+    forwardStageScript(
+      target,
+      script,
+      [
+        target.source_path,
+        taskId,
+        shadowCandidatePath,
+        ...stageScriptArgs(target).slice(1),
+        "--shadow-generation",
+        generation.policy_set_digest,
+        "--attempt",
+        String(generation.attempt),
+        "--generated-at",
+        generation.generated_at,
+        "--executor",
+        generation.executor,
+      ],
+      true,
+    );
+    return {
+      artifact_path: automaticBuildGenerationArtifactPath(
+        target,
+        generationStage,
+        generation.policy_set_digest,
+        taskId,
+      ),
+    };
+  }
   forwardStageScript(
     target,
     script,
@@ -569,6 +740,7 @@ function preflightForAction(
     target_ref: target.target_ref,
     stage: action.stage,
     work_units: stage.work_units,
+    ...(stage.task_bindings ? { task_bindings: stage.task_bindings } : {}),
     pending_ids: stage.pending_tasks,
     quality_profile: qualityProfile,
     requested_workers: requestedWorkers,
@@ -580,6 +752,60 @@ function preflightForAction(
     ...(executorProvenance ? { executor_provenance: executorProvenance } : {}),
     ...(buildPlan ? { build_plan: buildPlan } : {}),
   });
+}
+
+function automaticBuildRecoveryAction(recovery: AutomaticBuildRecoveryEnvelopeV1) {
+  return {
+    kind: "needs_user" as const,
+    reason: "automatic_build_routing_blocked" as const,
+    ...(recovery.stage ? { stage: recovery.stage } : {}),
+    recovery,
+    message: "automatic build routing is blocked; follow an allowlisted recovery action before claiming work",
+  };
+}
+
+function buildPlanBudgetRecoveryAction(input: {
+  target: AutomaticBuildTarget;
+  snapshot: ReturnType<typeof buildAutomaticBuildSnapshot>;
+  build_plan: BuildPlanV1;
+  plan_budget: AutomaticBuildPlanBudgetEvaluationV1;
+  stage?: AutomaticBuildStage;
+  preflight?: AutomaticBuildPreflightV1;
+}) {
+  const stageState = input.stage
+    ? input.snapshot.stages.find((candidate) => candidate.stage === input.stage)
+    : undefined;
+  const affected = stageState?.pending_work_units ?? stageState?.work_units ?? [];
+  const recovery = createAutomaticBuildRecoveryEnvelope({
+    phase: "preflight",
+    code: "build_plan_budget_changed",
+    ...(input.stage ? { stage: input.stage } : {}),
+    target_ref: input.target.target_ref,
+    ...(input.preflight ? {
+      policy_digest: input.preflight.policy_digest,
+      ...(input.preflight.policy_fingerprint
+        ? { router_version: input.preflight.policy_fingerprint.router_version }
+        : {}),
+    } : {}),
+    affected_work_units: affected.map((unit) => ({
+      work_unit_id: unit.work_unit_id,
+      evidence_lids: unit.evidence_lids,
+      estimated_tokens: unit.cost.estimated_input_tokens,
+    })),
+    retryable: false,
+    recovery_actions: ["reconfirm_build_plan"],
+  });
+  return {
+    kind: "needs_user" as const,
+    reason: "build_plan_budget_changed" as const,
+    ...(input.stage ? { stage: input.stage } : {}),
+    plan_id: input.build_plan.plan_id,
+    plan_digest: input.build_plan.plan_digest,
+    violations: input.plan_budget.violations,
+    receipt_digest: input.plan_budget.receipt_digest,
+    recovery,
+    message: "actual usage plus remaining forecast changed beyond the confirmed BuildPlan budget",
+  };
 }
 
 function persistAutomaticBuildPlanAcceptance(
@@ -596,6 +822,7 @@ function persistAutomaticBuildPlanAcceptance(
     plan_digest: preflight.plan_digest,
     descriptor_plan_digest: preflight.descriptor_plan_digest,
     policy_digest: preflight.policy_digest,
+    ...(preflight.policy_set_digest ? { policy_set_digest: preflight.policy_set_digest } : {}),
     quality_profile: preflight.quality_profile,
     ...(preflight.build_plan ? { build_plan: preflight.build_plan } : {}),
     budget: preflight.budget.limits,
@@ -666,7 +893,19 @@ export function automaticBuildPlan(
   const requestedWorkers = options.requested_workers ?? 1;
   const availableAgentSlots = options.available_agent_slots ?? requestedWorkers;
   const budget = options.budget ?? DEFAULT_AUTOMATIC_BUILD_BUDGET;
-  const snapshot = buildAutomaticBuildSnapshot(target, { quality_profile: qualityProfile });
+  const snapshotRoute = routeAutomaticBuildSnapshot(target, { quality_profile: qualityProfile });
+  if (snapshotRoute.status === "blocked") {
+    return {
+      version: "automatic_build_plan.v1",
+      protocol: AUTOMATIC_BUILD_PRODUCTION_DEFAULT,
+      release: AUTOMATIC_BUILD_ACTIVE_RELEASE,
+      routing_release: AUTOMATIC_BUILD_ROUTING_RELEASE,
+      snapshot: { target, stages: [] },
+      next_action: automaticBuildRecoveryAction(snapshotRoute.recovery),
+      preflight: null,
+    };
+  }
+  const snapshot = snapshotRoute.value;
   const nextAction = options.build_plan
     ? nextPlannedAutomaticBuildAction(snapshot, options.build_plan, Number.MAX_SAFE_INTEGER, {
         quality_profile: qualityProfile,
@@ -687,7 +926,8 @@ export function automaticBuildPlan(
   return {
     version: "automatic_build_plan.v1",
     protocol: AUTOMATIC_BUILD_PRODUCTION_DEFAULT,
-    release: AUTOMATIC_BUILD_RELEASE_V2,
+    release: AUTOMATIC_BUILD_ACTIVE_RELEASE,
+    routing_release: AUTOMATIC_BUILD_ROUTING_RELEASE,
     snapshot,
     next_action: nextAction,
     preflight: preflight ?? null,
@@ -751,6 +991,32 @@ export function prepareExplicitLegacyBuildPlan(
   };
 }
 
+function freezeAutomaticBuildGenerationTask(
+  target: AutomaticBuildTarget,
+  stageState: AutomaticBuildStageState,
+  workUnitId: string,
+): void {
+  if (!stageState.policy_set) return;
+  freezeAutomaticBuildStagePolicySet(target, stageState.policy_set);
+  const generationTask = stageState.generation_tasks?.[workUnitId];
+  if (!generationTask) {
+    throw new Error(`v3 production work unit is missing its frozen generation task: ${stageState.stage}/${workUnitId}`);
+  }
+  if (generationTask.kind === "pass1") {
+    freezePass1ShadowTask(target, generationTask.task);
+    return;
+  }
+  if (generationTask.kind === "profile_sidecar_discourse") {
+    freezeProfileSidecarDiscourseShadowTask(target, generationTask.task);
+    return;
+  }
+  if (generationTask.kind === "profile_sidecar_fast_path") {
+    freezeProfileSidecarSemanticFastPathTask(target, generationTask.task);
+    return;
+  }
+  throw new Error(`unsupported v3 production generation task: ${stageState.stage}/${workUnitId}`);
+}
+
 function expandAction(
   target: AutomaticBuildTarget,
   maxParallel: number,
@@ -766,7 +1032,14 @@ function expandAction(
   buildPlan?: BuildPlanV1,
 ) {
   if (!Number.isInteger(maxParallel) || maxParallel < 1) throw new Error("maxParallel must be a positive integer");
-  const snapshot = buildAutomaticBuildSnapshot(target, { quality_profile: qualityProfile });
+  const snapshotRoute = routeAutomaticBuildSnapshot(target, { quality_profile: qualityProfile });
+  if (snapshotRoute.status === "blocked") {
+    return {
+      snapshot: { target, stages: [] },
+      action: automaticBuildRecoveryAction(snapshotRoute.recovery),
+    };
+  }
+  const snapshot = snapshotRoute.value;
   const action = nextPlannedAutomaticBuildAction(snapshot, buildPlan, Number.MAX_SAFE_INTEGER, {
     quality_profile: qualityProfile,
   });
@@ -779,18 +1052,17 @@ function expandAction(
     return {
       snapshot,
       plan_budget: settledPlanBudget,
-      action: {
-        kind: "needs_user" as const,
-        reason: "plan_budget_exceeded" as const,
-        plan_id: buildPlan.plan_id,
-        plan_digest: buildPlan.plan_digest,
-        violations: settledPlanBudget.violations,
-        receipt_digest: settledPlanBudget.receipt_digest,
-        message: "actual usage plus remaining forecast exceeds the confirmed BuildPlan budget",
-      },
+      action: buildPlanBudgetRecoveryAction({
+        target,
+        snapshot,
+        build_plan: buildPlan,
+        plan_budget: settledPlanBudget,
+      }),
     };
   }
   if (action.kind === "extract") {
+    const productionStageState = snapshot.stages.find((stage) => stage.stage === action.stage);
+    if (!productionStageState) throw new Error(`automatic stage state is missing: ${action.stage}`);
     const targetInput = targetCommandInput(target);
     const legacyAudit = auditAutomaticBuildLegacy(target, action.stage);
     if (legacyAudit.legacy_artifacts || legacyAudit.invalid_artifacts) {
@@ -898,16 +1170,14 @@ function expandAction(
         snapshot,
         preflight,
         plan_budget: planBudget,
-        action: {
-          kind: "needs_user" as const,
-          reason: "plan_budget_exceeded" as const,
+        action: buildPlanBudgetRecoveryAction({
+          target,
+          snapshot,
+          build_plan: buildPlan,
+          plan_budget: planBudget,
           stage: action.stage,
-          plan_id: buildPlan.plan_id,
-          plan_digest: buildPlan.plan_digest,
-          violations: planBudget.violations,
-          receipt_digest: planBudget.receipt_digest,
-          message: "actual usage plus remaining forecast exceeds the confirmed BuildPlan budget",
-        },
+          preflight,
+        }),
       };
     }
     if (preflight.budget.status === "exceeded") {
@@ -1013,8 +1283,8 @@ function expandAction(
       };
     }
     const spec = STAGE_COMMANDS[action.stage];
-    if (!spec.input || !spec.write || !spec.prompt) throw new Error(`stage ${action.stage} is not a semantic extraction stage`);
-    const promptName = spec.prompt;
+    if (!spec.input || !spec.write) throw new Error(`stage ${action.stage} is not a semantic extraction stage`);
+    const promptName = extractorPromptName(action.extractor);
     const allPendingUnits = action.work_units ?? [];
     const scheduled = selectAutomaticBuildCostBatch(allPendingUnits, {
       max_tasks: allPendingUnits.length,
@@ -1100,9 +1370,22 @@ function expandAction(
         };
       }
       const descriptorById = new Map(allPendingUnits.map((descriptor) => [descriptor.work_unit_id, descriptor]));
-      let resolvedPrompt: ResolvedAutomaticBuildExecutorPromptV1;
+      const dispatchPrompts = new Map<string, {
+        prompt_name: AutomaticBuildExtractorPromptName;
+        resolved: ResolvedAutomaticBuildExecutorPromptV1;
+      }>();
+      if (action.stage === "paper_reading_guide") {
+        throw new Error("paper_reading_guide cannot produce semantic executor dispatches");
+      }
       try {
-        resolvedPrompt = resolveAutomaticBuildExecutorPrompt(promptName, "dispatch");
+        for (const manifest of selectedDispatches) {
+          const manifestExtractor = automaticBuildExtractorForWorkUnitKind(action.stage, manifest.kind);
+          const manifestPromptName = extractorPromptName(manifestExtractor);
+          dispatchPrompts.set(manifest.dispatch_id, {
+            prompt_name: manifestPromptName,
+            resolved: resolveAutomaticBuildExecutorPrompt(manifestPromptName, "dispatch"),
+          });
+        }
       } catch (error) {
         if (!(error instanceof AutomaticBuildExecutorPromptResolutionError)) throw error;
         return {
@@ -1120,7 +1403,16 @@ function expandAction(
           },
         };
       }
+      for (const manifest of selectedDispatches) {
+        for (const workUnitId of manifest.ordered_work_unit_ids) {
+          freezeAutomaticBuildGenerationTask(target, productionStageState, workUnitId);
+        }
+      }
       const dispatches = selectedDispatches.map((manifest) => {
+        const dispatchPrompt = dispatchPrompts.get(manifest.dispatch_id);
+        if (!dispatchPrompt) {
+          throw new Error(`automatic build dispatch is missing its extractor prompt: ${manifest.dispatch_id}`);
+        }
         const runTtlMs = leaseOptions.run_ttl_ms
           ?? preflight.wall_clock.adaptive_run_ttl_ms_by_kind[manifest.kind]
           ?? DEFAULT_RUN_TTL_MS;
@@ -1167,7 +1459,7 @@ function expandAction(
         };
         const executorHandoff = persistDispatchExecutorHandoff(
           publication.manifest_path,
-          resolvedPrompt,
+          dispatchPrompt.resolved,
           envelope,
         );
         persistAutomaticBuildDispatch(target, manifest, {
@@ -1194,7 +1486,10 @@ function expandAction(
           plan_acceptance_path: acceptancePath,
           ...(evaluationAcceptancePath ? { evaluation_acceptance_path: evaluationAcceptancePath } : {}),
           cwd: target.root_dir,
-          extractor_prompt_command: executorPromptCommand(promptName, "dispatch"),
+          extractor_prompt_command: executorPromptCommand(
+            dispatchPrompts.get(selectedDispatches[0].dispatch_id)?.prompt_name ?? promptName,
+            "dispatch",
+          ),
           dispatches,
           dispatch_plan_digest: handoff.persisted_plan.dispatch_plan.dispatch_plan_digest,
           active_dispatch_ids: handoff.active_dispatch_ids,
@@ -1217,7 +1512,7 @@ function expandAction(
     }
     const claims: Array<{
       task_id: string;
-      descriptor: (typeof allPendingUnits)[number];
+      descriptor: WorkUnitDescriptor;
       status: "leased";
       lease_ref: string;
       lease: AutomaticBuildTaskLease;
@@ -1228,11 +1523,16 @@ function expandAction(
       const taskId = descriptor.work_unit_id;
       const binding = action.task_bindings?.[taskId];
       if (!binding) throw new Error(`automatic semantic task is missing policy binding: ${action.stage}/${taskId}`);
+      freezeAutomaticBuildGenerationTask(target, productionStageState, taskId);
       const claim = claimAutomaticBuildTask(target, action.stage, taskId, {
         owner: leaseOptions.owner,
         now: leaseOptions.now,
         reserve_ttl_ms: leaseOptions.reserve_ttl_ms,
         binding,
+        descriptor,
+        ...(descriptor.version === "automatic_build_work_unit.v3"
+          ? { policy_generation: "v3_only" as const }
+          : {}),
       });
       if (claim.status === "leased") {
         claims.push({ task_id: taskId, descriptor, ...claim });
@@ -1278,9 +1578,9 @@ function expandAction(
         cwd: target.root_dir,
         extractor_prompt: process.env.UNDERSTAND_BOOK_SIDECAR_SELF
           ? undefined
-          : path.join(PLUGIN_ROOT, "agents", spec.prompt),
+          : path.join(PLUGIN_ROOT, "agents", promptName),
         extractor_prompt_command: process.env.UNDERSTAND_BOOK_SIDECAR_SELF
-          ? [process.env.UNDERSTAND_BOOK_SIDECAR_SELF, "prompt", spec.prompt]
+          ? [process.env.UNDERSTAND_BOOK_SIDECAR_SELF, "prompt", promptName]
           : undefined,
         tasks: claims.map((claim) => {
           const taskId = claim.task_id;
@@ -1409,7 +1709,8 @@ export function automaticBuildNext(
   return {
     version: "automatic_build_next.v1",
     protocol,
-    release: AUTOMATIC_BUILD_RELEASE_V2,
+    release: AUTOMATIC_BUILD_ACTIVE_RELEASE,
+    routing_release: AUTOMATIC_BUILD_ROUTING_RELEASE,
     ...expandAction(
       target,
       maxParallel,
@@ -1427,13 +1728,366 @@ export function automaticBuildNext(
   };
 }
 
+type AutomaticBuildReleaseDoctorDiagnosticCode =
+  | AutomaticBuildExecutorPromptDiagnosticCode
+  | "release_policy_set_invalid"
+  | "release_prompt_hash_mismatch"
+  | "release_renderer_invalid"
+  | "release_budget_proof_invalid"
+  | "release_recovery_reader_invalid"
+  | "release_close_reader_invalid"
+  | "release_contract_invalid";
+
+class AutomaticBuildReleaseDoctorError extends Error {
+  readonly name = "AutomaticBuildReleaseDoctorError";
+
+  constructor(readonly diagnostic_code: AutomaticBuildReleaseDoctorDiagnosticCode) {
+    super(`automatic build release doctor failed: ${diagnostic_code}`);
+  }
+}
+
+function syntheticModelInputRequest(
+  kind: (typeof AUTOMATIC_BUILD_RELEASE_POLICY_MEMBERS_V1)[number]["kind"],
+  profileId: string,
+): ModelInputRenderRequest {
+  const core = "Synthetic semantic evidence.";
+  const span = { start: 0, end: core.length };
+  const artifactHash = "a".repeat(64);
+  switch (kind) {
+    case "pass1_window":
+      return { kind, input: { text: "[LID 1]\nSynthetic whole semantic input.\n" } };
+    case "pass1_source_slice":
+      return {
+        kind,
+        input: {
+          version: "model_input_slice_render_context.v1",
+          content_profile_id: profileId,
+          parent_lid: "1",
+          ordinal: 0,
+          boundary_kind: "whole_lid",
+          core_span_utf16: span,
+          context_span_utf16: span,
+          context_before: "",
+          core,
+          context_after: "",
+          core_sha256: createHash("sha256").update(core, "utf8").digest("hex"),
+        },
+      };
+    case "pass1_lid_stitch":
+      return {
+        kind,
+        input: {
+          version: "pass1_lid_stitch_input.v1",
+          work_unit_id: "release-doctor-pass1-final",
+          window_id: 1,
+          reducer_level: 1,
+          group_ordinal: 0,
+          role: "final",
+          source_unit_range: { start_ordinal: 0, end_ordinal_exclusive: 1 },
+          children: [{
+            work_unit_id: "release-doctor-pass1-child",
+            artifact_hash: artifactHash,
+            source_unit_range: { start_ordinal: 0, end_ordinal_exclusive: 1 },
+            payload: { version: "pass1_shadow_graph_artifact.v1", nodes: [], edges: [] },
+          }],
+        },
+      };
+    case "profile_sidecar_discourse":
+    case "profile_sidecar_formula":
+      return {
+        kind,
+        input: {
+          work_unit_id: `release-doctor-${kind}`,
+          unit_kind: kind,
+          visible_lids: ["1"],
+          formula_lids: kind === "profile_sidecar_formula" ? ["1"] : [],
+          text: "[LID 1]\nSynthetic profile semantic input.\n",
+        },
+      };
+    case "profile_sidecar_discourse_fragment":
+      return {
+        kind,
+        input: {
+          version: "model_input_slice_render_context.v1",
+          content_profile_id: profileId,
+          parent_lid: "1",
+          ordinal: 0,
+          boundary_kind: "whole_lid",
+          core_span_utf16: span,
+          context_span_utf16: span,
+          context_before: "",
+          core,
+          context_after: "",
+        },
+      };
+    case "profile_sidecar_discourse_reduce":
+      return {
+        kind,
+        input: {
+          version: "profile_sidecar_discourse_reduction_input.v1",
+          work_unit_id: "release-doctor-profile-final",
+          parent_lid: "1",
+          reducer_level: 1,
+          group_ordinal: 0,
+          role: "final",
+          source_slice_range: { start_ordinal: 0, end_ordinal_exclusive: 1 },
+          children: [{
+            work_unit_id: "release-doctor-profile-child",
+            artifact_hash: artifactHash,
+            source_slice_range: { start_ordinal: 0, end_ordinal_exclusive: 1 },
+            payload: {
+              version: "profile_sidecar_discourse_observation.v1",
+              parent_lid: "1",
+              source_slice_ordinal: 0,
+            },
+          }],
+        },
+      };
+  }
+}
+
+function buildAutomaticBuildReleaseContractCheck(profileId: AutomaticBuildTarget["profile_id"]) {
+  const profile = resolveContentProfile(profileId);
+  const syntheticTarget = {
+    version: "build_target_ref.v2" as const,
+    workspace_dir: "<automatic-build-release-doctor>",
+    book_id: "release-doctor",
+    profile_id: profile.id,
+    input_fingerprint: "1".repeat(64),
+  };
+  const policySets = [
+    createAutomaticBuildStagePolicySet({
+      target_ref: syntheticTarget,
+      stage: "pass1",
+      members: pass1ModelSlicePolicyMembers(profile, "full"),
+      frozen_at: AUTOMATIC_BUILD_ROUTING_RELEASE.activated_at,
+    }),
+    createAutomaticBuildStagePolicySet({
+      target_ref: syntheticTarget,
+      stage: "profile_sidecar",
+      members: profileSidecarMapReducePolicyMembers(profile, "full"),
+      frozen_at: AUTOMATIC_BUILD_ROUTING_RELEASE.activated_at,
+    }),
+  ];
+  const expectedByIdentity = new Map(AUTOMATIC_BUILD_RELEASE_POLICY_MEMBERS_V1.map((member) => [
+    `${member.stage}:${member.kind}`,
+    member,
+  ]));
+  const promptAssets = new Map<string, ResolvedAutomaticBuildPromptAssetV1>();
+  const reports: Array<{
+    stage: SemanticBuildStage;
+    policy_set_digest: string;
+    members: Array<{
+      kind: WorkUnitKind;
+      extractor: string;
+      prompt_name: string;
+      prompt_source: AutomaticBuildPromptSource;
+      prompt_sha256: string;
+      prompt_bytes: number;
+      schema_version: string;
+      router_version: string;
+      rendered_input_sha256: string;
+      estimated_tokens: number;
+      proof_digest: string;
+    }>;
+  }> = [];
+  let provenMembers = 0;
+  let recoveryReaderStatus: "compatible" | "incompatible" = "incompatible";
+  let closeReaderStatus: "compatible" | "incompatible" = "incompatible";
+  try {
+    if (MODEL_INPUT_RENDER_CONTRACT_VERSION !== AUTOMATIC_BUILD_RELEASE_V3.model_input.render_contract
+      || MODEL_INPUT_ESTIMATOR_VERSION !== AUTOMATIC_BUILD_RELEASE_V3.model_input.estimator
+      || canonicalAutomaticBuildJson(AUTOMATIC_BUILD_MODEL_INPUT_BUDGET_V1)
+        !== canonicalAutomaticBuildJson(AUTOMATIC_BUILD_RELEASE_V3.model_input.budget)) {
+      throw new AutomaticBuildReleaseDoctorError("release_renderer_invalid");
+    }
+    const seen = new Set<string>();
+    for (const uncheckedPolicySet of policySets) {
+      let policySet;
+      try {
+        policySet = validateAutomaticBuildStagePolicySet(uncheckedPolicySet);
+      } catch {
+        throw new AutomaticBuildReleaseDoctorError("release_policy_set_invalid");
+      }
+      const members: (typeof reports)[number]["members"] = [];
+      for (const member of policySet.members) {
+        const identity = `${policySet.stage}:${member.kind}`;
+        const expected = expectedByIdentity.get(identity);
+        if (!expected || seen.has(identity)) {
+          throw new AutomaticBuildReleaseDoctorError("release_policy_set_invalid");
+        }
+        seen.add(identity);
+        const policy = member.policy_fingerprint;
+        const promptName = extractorPromptName(member.extractor);
+        if (member.extractor !== expected.extractor
+          || promptName !== expected.prompt_name
+          || policy.stage_policy_version !== expected.stage_policy_version
+          || policy.router_version !== expected.router_version
+          || policy.prompt_sha256 !== expected.prompt_sha256
+          || policy.schema_version !== expected.schema_version
+          || policy.profile_id !== profile.id
+          || policy.profile_version !== profile.profile_version
+          || policy.quality_profile !== "full") {
+          throw new AutomaticBuildReleaseDoctorError("release_policy_set_invalid");
+        }
+        let promptAsset = promptAssets.get(promptName);
+        if (!promptAsset) {
+          try {
+            promptAsset = resolveAutomaticBuildPromptAsset(promptName);
+          } catch (error) {
+            if (error instanceof AutomaticBuildExecutorPromptResolutionError) {
+              throw new AutomaticBuildReleaseDoctorError(error.diagnostic_code);
+            }
+            throw error;
+          }
+          promptAssets.set(promptName, promptAsset);
+        }
+        if (promptAsset.sha256 !== expected.prompt_sha256) {
+          throw new AutomaticBuildReleaseDoctorError("release_prompt_hash_mismatch");
+        }
+        const rendered = inspectRenderedModelInput(syntheticModelInputRequest(expected.kind, profile.id));
+        if (rendered.render_contract_version !== MODEL_INPUT_RENDER_CONTRACT_VERSION) {
+          throw new AutomaticBuildReleaseDoctorError("release_renderer_invalid");
+        }
+        const evaluated = evaluateModelInputBudget({
+          ...AUTOMATIC_BUILD_MODEL_INPUT_BUDGET_V1,
+          rendered_input: rendered.text,
+          router_version: policy.router_version,
+          prompt_sha256: policy.prompt_sha256,
+        });
+        if (evaluated.status !== "within_limit") {
+          throw new AutomaticBuildReleaseDoctorError("release_budget_proof_invalid");
+        }
+        try {
+          verifyModelInputBudgetProof(rendered.text, evaluated.proof);
+        } catch {
+          throw new AutomaticBuildReleaseDoctorError("release_budget_proof_invalid");
+        }
+        if (evaluated.proof.estimator_version !== MODEL_INPUT_ESTIMATOR_VERSION
+          || evaluated.proof.render_contract_version !== MODEL_INPUT_RENDER_CONTRACT_VERSION
+          || evaluated.proof.rendered_input_sha256 !== rendered.sha256) {
+          throw new AutomaticBuildReleaseDoctorError("release_budget_proof_invalid");
+        }
+        provenMembers += 1;
+        members.push({
+          kind: member.kind,
+          extractor: member.extractor,
+          prompt_name: promptName,
+          prompt_source: promptAsset.source,
+          prompt_sha256: promptAsset.sha256,
+          prompt_bytes: promptAsset.byte_length,
+          schema_version: policy.schema_version,
+          router_version: policy.router_version,
+          rendered_input_sha256: rendered.sha256,
+          estimated_tokens: rendered.estimated_tokens,
+          proof_digest: evaluated.proof.proof_digest,
+        });
+      }
+      reports.push({ stage: policySet.stage, policy_set_digest: policySet.policy_set_digest, members });
+    }
+    if (seen.size !== AUTOMATIC_BUILD_RELEASE_POLICY_MEMBERS_V1.length) {
+      throw new AutomaticBuildReleaseDoctorError("release_policy_set_invalid");
+    }
+    try {
+      parseAutomaticBuildRecoveryEnvelope(createAutomaticBuildRecoveryEnvelope({
+        phase: "routing",
+        code: "budget_proof_invalid",
+        stage: "pass1",
+        target_ref: syntheticTarget,
+        router_version: AUTOMATIC_BUILD_ROUTING_RELEASE.pass1_router,
+        policy_digest: reports[0].policy_set_digest,
+        affected_work_units: [{
+          work_unit_id: "release-doctor-pass1",
+          evidence_lids: ["1"],
+          estimated_tokens: 1,
+          limit_tokens: AUTOMATIC_BUILD_MODEL_INPUT_BUDGET_V1.stage_body_limit_tokens,
+        }],
+        retryable: true,
+        recovery_actions: ["retry_plan"],
+      }));
+      recoveryReaderStatus = "compatible";
+    } catch {
+      throw new AutomaticBuildReleaseDoctorError("release_recovery_reader_invalid");
+    }
+    try {
+      parseAutomaticBuildStageCloseResult({
+        version: "automatic_build_stage_close_result.v1",
+        status: "closed",
+        stage: "pass1",
+        target: {
+          book_id: syntheticTarget.book_id,
+          profile_id: syntheticTarget.profile_id,
+          input_fingerprint: syntheticTarget.input_fingerprint,
+        },
+        quality: { report_digest: "2".repeat(64), gate_status: "passed" },
+        publication: { transaction_id: "3".repeat(64), receipt_digest: "4".repeat(64) },
+        postcondition: {
+          stage_closed: true,
+          policy_set_digest: "5".repeat(64),
+          coverage_digest: "6".repeat(64),
+          freshness_digest: "7".repeat(64),
+          public_artifact_set_digest: "8".repeat(64),
+        },
+        next: "replan",
+      });
+      closeReaderStatus = "compatible";
+    } catch {
+      throw new AutomaticBuildReleaseDoctorError("release_close_reader_invalid");
+    }
+    return {
+      status: "compatible" as const,
+      profile_id: profile.id,
+      policy_sets: reports,
+      model_input: {
+        render_contract: MODEL_INPUT_RENDER_CONTRACT_VERSION,
+        estimator: MODEL_INPUT_ESTIMATOR_VERSION,
+        proven_members: provenMembers,
+      },
+      readers: {
+        recovery: {
+          version: AUTOMATIC_BUILD_RELEASE_V3.recovery_envelope,
+          status: recoveryReaderStatus,
+        },
+        close: {
+          version: AUTOMATIC_BUILD_RELEASE_V3.close_result,
+          status: closeReaderStatus,
+        },
+      },
+    };
+  } catch (error) {
+    const diagnosticCode = error instanceof AutomaticBuildReleaseDoctorError
+      ? error.diagnostic_code
+      : "release_contract_invalid";
+    return {
+      status: "incompatible" as const,
+      profile_id: profile.id,
+      policy_sets: reports,
+      model_input: {
+        render_contract: MODEL_INPUT_RENDER_CONTRACT_VERSION,
+        estimator: MODEL_INPUT_ESTIMATOR_VERSION,
+        proven_members: provenMembers,
+      },
+      readers: {
+        recovery: {
+          version: AUTOMATIC_BUILD_RELEASE_V3.recovery_envelope,
+          status: recoveryReaderStatus,
+        },
+        close: {
+          version: AUTOMATIC_BUILD_RELEASE_V3.close_result,
+          status: closeReaderStatus,
+        },
+      },
+      diagnostic_code: diagnosticCode,
+    };
+  }
+}
+
 export function automaticBuildProtocolDoctor(
   targetInput: string,
   rootDir: string,
   options: AutomaticBuildPlanOptions = {},
 ) {
   const target = resolveAutomaticBuildTarget(targetInput, rootDir, { book_id: options.book_id });
-  const plan = automaticBuildPlan(targetInput, rootDir, options);
   const attempts = AUTOMATIC_BUILD_STAGES.flatMap((stage) => listAutomaticBuildStoredAttempts(target, stage));
   const currentExecutionIdentities = attempts.filter(
     (attempt) => attempt.execution_identity?.identity_source === "native",
@@ -1441,7 +2095,10 @@ export function automaticBuildProtocolDoctor(
   const legacyInferredExecutionIdentities = attempts.filter(
     (attempt) => attempt.execution_identity?.identity_source === "legacy_inferred",
   ).length;
-  const legacyAudit = auditAutomaticBuildLegacy(target);
+  const legacyAudit = auditAutomaticBuildLegacy(target, undefined, {
+    inspect_current_descriptors: false,
+  });
+  const releaseContract = buildAutomaticBuildReleaseContractCheck(target.profile_id);
   const checkedExtractors: string[] = [];
   const resolvedDispatchPrompts: ResolvedAutomaticBuildExecutorPromptV1[] = [];
   let promptSource: AutomaticBuildPromptSource = process.env.UNDERSTAND_BOOK_SIDECAR_SELF
@@ -1487,6 +2144,7 @@ export function automaticBuildProtocolDoctor(
   const thinPlugin = !existsSync(path.join(PLUGIN_ROOT, "agents"));
   const pluginShapeCompatible = promptSource === "packaged_sidecar" || !thinPlugin;
   const checks = {
+    release_contract: releaseContract,
     prompt_provider: {
       status: promptDiagnostic ? "incompatible" as const : "compatible" as const,
       source: promptSource,
@@ -1505,36 +2163,25 @@ export function automaticBuildProtocolDoctor(
       ...(!pluginShapeCompatible ? { diagnostic_code: "plugin_shape_incompatible" as const } : {}),
     },
   };
-  const doctorStatus = checks.prompt_provider.status === "compatible"
+  const doctorStatus = checks.release_contract.status === "compatible"
+    && checks.prompt_provider.status === "compatible"
     && checks.handoff_preparation.status === "compatible"
     && checks.plugin_shape.status === "compatible"
     ? "compatible" as const
     : "incompatible" as const;
-  const stages = plan.snapshot.stages.map((stage) => {
-    const totalWorkUnits = stage.work_units?.length ?? stage.pending_tasks.length;
-    return {
-      stage: stage.stage,
-      closed: stage.closed,
-      total_work_units: totalWorkUnits,
-      fresh_work_units: Math.max(0, totalWorkUnits - stage.pending_tasks.length),
-      pending_work_units: stage.pending_tasks.length,
-      fresh_v2_artifacts: legacyAudit.artifacts.filter((artifact) => artifact.stage === stage.stage
-        && artifact.format === "v2"
-        && artifact.source_freshness === "fresh").length,
-    };
-  });
   return {
-    version: "automatic_build_protocol_doctor.v1" as const,
+    version: "automatic_build_protocol_doctor.v2" as const,
     status: doctorStatus,
     checks,
     production_default: AUTOMATIC_BUILD_PRODUCTION_DEFAULT,
-    release: AUTOMATIC_BUILD_RELEASE_V2,
+    release: AUTOMATIC_BUILD_ACTIVE_RELEASE,
+    routing_release: AUTOMATIC_BUILD_ROUTING_RELEASE,
     protocol_capabilities: [
       {
         protocol: AUTOMATIC_BUILD_EXECUTOR_DISPATCH_PROTOCOL_V1,
         readable: true,
         new_claims: true,
-        resume: "dispatch_and_v2_task_state" as const,
+        resume: "dispatch_and_v3_task_state" as const,
       },
       {
         protocol: AUTOMATIC_BUILD_PROTOCOL_V2,
@@ -1543,7 +2190,7 @@ export function automaticBuildProtocolDoctor(
         resume: "explicit_task_executor_rollback" as const,
       },
       {
-        protocol: AUTOMATIC_BUILD_RELEASE_V2.readable_protocols[2],
+        protocol: AUTOMATIC_BUILD_ACTIVE_RELEASE.readable_protocols[2],
         readable: true,
         new_claims: false,
         resume: "explicit_legacy_migration_only" as const,
@@ -1551,11 +2198,6 @@ export function automaticBuildProtocolDoctor(
     ],
     target_ref: target.target_ref,
     target_state: {
-      stages,
-      fresh_work_units: stages.reduce((sum, stage) => sum + stage.fresh_work_units, 0),
-      pending_work_units: stages.reduce((sum, stage) => sum + stage.pending_work_units, 0),
-      fresh_v2_artifacts: stages.reduce((sum, stage) => sum + stage.fresh_v2_artifacts, 0),
-      pending_dispatches: plan.preflight?.dispatch_plan.dispatches.length ?? 0,
       persisted_task_attempts: attempts.length,
       current_execution_identities: currentExecutionIdentities,
       legacy_inferred_execution_identities: legacyInferredExecutionIdentities,
@@ -2070,12 +2712,27 @@ if (argv[0] === "legacy-plan") {
     const candidate = operation === "legacy-submit"
       ? stageAutomaticBuildCandidate(target, leaseRef, leaseToken, sourceCandidate!, { ...(now ? { now } : {}) })
       : { candidate_path: path.join(path.dirname(leaseRef), "candidate.json") };
+    const submitLease = readAutomaticBuildLease(target, leaseRef, leaseToken);
+    const submitBinding = automaticBuildTaskPolicyBindingFromLease(submitLease);
     printAutomaticBuildJson(submitAutomaticBuildCandidate(
       target,
       leaseRef,
       leaseToken,
       candidate.candidate_path,
-      (candidatePath) => runAutomaticBuildStageWriter(target, stage, taskId, candidatePath),
+      (candidatePath) => runAutomaticBuildStageWriter(
+        target,
+        stage,
+        taskId,
+        candidatePath,
+        submitBinding && "proof_digest" in submitBinding
+          ? {
+              policy_set_digest: submitBinding.policy_set_digest,
+              attempt: submitLease.attempt,
+              executor: submitLease.owner,
+              generated_at: now ?? new Date().toISOString(),
+            }
+          : undefined,
+      ),
       { ...(now ? { now } : {}) },
     ));
   } else if (operation === "fail") {
@@ -2104,20 +2761,48 @@ if (argv[0] === "legacy-plan") {
   const target = resolveAutomaticBuildTargetFromArgs(targetInput, rootDir, argv);
   const leaseRef = valueArg(argv, "--lease-ref");
   const leaseToken = valueArg(argv, "--lease-token");
+  let productionGenerationDigest: string | undefined;
+  let closeProductionGenerationDigest: string | undefined;
   if (Boolean(leaseRef) !== Boolean(leaseToken)) throw new Error("lease_ref and lease_token must be provided together");
   if (leaseRef && leaseToken && operation !== "close") {
+    if (operation === "input") {
+      startAutomaticBuildLease(target, leaseRef, leaseToken, {
+        ...(valueArg(argv, "--now") ? { now: valueArg(argv, "--now") } : {}),
+        run_ttl_ms: Number(valueArg(argv, "--run-ttl-ms") ?? String(DEFAULT_RUN_TTL_MS)),
+      });
+    }
     const leaseState = operation === "input"
-      ? startAutomaticBuildLease(target, leaseRef, leaseToken, {
-          ...(valueArg(argv, "--now") ? { now: valueArg(argv, "--now") } : {}),
-          run_ttl_ms: Number(valueArg(argv, "--run-ttl-ms") ?? String(DEFAULT_RUN_TTL_MS)),
-        })
+      ? readAutomaticBuildLease(target, leaseRef, leaseToken)
       : assertActiveAutomaticBuildLease(target, leaseRef, leaseToken, valueArg(argv, "--now"));
     if (leaseState.stage !== stageValue || leaseState.work_unit_id !== taskId) {
       throw new Error(`stage command does not match lease identity: ${stageValue}/${taskId}`);
     }
+    if ("policy_set_digest" in leaseState && leaseState.policy_set_digest) {
+      const generationTaskPath = stageValue === "pass1"
+        ? pass1ShadowTaskPath(target, leaseState.policy_set_digest, taskId!)
+        : stageValue === "profile_sidecar"
+          ? profileSidecarDiscourseShadowTaskPath(target, leaseState.policy_set_digest, taskId!)
+          : undefined;
+      if (!generationTaskPath || !existsSync(generationTaskPath)) {
+        throw new Error(`policy_generation_conflict: frozen v3 generation task is unavailable: ${stageValue}/${taskId}`);
+      }
+      productionGenerationDigest = leaseState.policy_set_digest;
+    }
   }
+  let verifiedClose = false;
   if (operation === "close" && stageValue === "paper_reading_guide") {
-    forwardStageScript(target, "verify-paper-reading-guide.ts", [target.workspace_dir]);
+    const verification = forwardStageScript(
+      target,
+      "verify-paper-reading-guide.ts",
+      [target.workspace_dir],
+      true,
+    );
+    if (verification.stdout) process.stderr.write(verification.stdout);
+    if (verification.stderr) process.stderr.write(verification.stderr);
+    const result = verifyAutomaticBuildStageClose(target);
+    printAutomaticBuildJson(result);
+    verifiedClose = result.version === "automatic_build_stage_verification_result.v1";
+    if (!verifiedClose) process.exitCode = 1;
   } else {
     const spec = STAGE_COMMANDS[stageValue];
     const script = operation === "close" ? spec.close : operation === "input" ? spec.input : spec.write;
@@ -2126,15 +2811,11 @@ if (argv[0] === "legacy-plan") {
       const snapshot = buildAutomaticBuildSnapshot(target, { quality_profile: qualityProfileFromArgs(argv) });
       const stageState = snapshot.stages.find((stage) => stage.stage === stageValue);
       if (!stageState) throw new Error(`quality stage is not reachable in the current snapshot: ${stageValue}`);
-      const report = collectAutomaticBuildStageQuality(target, stageState, qualityProfileFromArgs(argv));
-      writeAutomaticBuildStageQualityReport(target, report);
-      if (report.gate_status !== "passed") {
-        throw new Error(`quality_gate_failed:${JSON.stringify({
-          stage: stageValue,
-          gate_status: report.gate_status,
-          digest: report.digest,
-          violations: [...report.integrity.violations, ...report.quality.violations],
-        })}`);
+      if (stageState.policy_set) {
+        if (stageValue !== "pass1" && stageValue !== "profile_sidecar") {
+          throw new Error(`v3 production close is not supported for stage ${stageValue}`);
+        }
+        closeProductionGenerationDigest = stageState.policy_set.policy_set_digest;
       }
     }
     const args = operation === "close"
@@ -2142,17 +2823,55 @@ if (argv[0] === "legacy-plan") {
       : operation === "input"
         ? [target.source_path, taskId!, ...stageScriptArgs(target).slice(1)]
         : [target.source_path, taskId!, outputJson!, ...stageScriptArgs(target).slice(1)];
+    if (productionGenerationDigest && operation !== "close") {
+      args.push("--shadow-generation", productionGenerationDigest);
+    }
+    if (closeProductionGenerationDigest && operation === "close") {
+      args.push(
+        "--production-generation", closeProductionGenerationDigest,
+        "--quality-profile", qualityProfileFromArgs(argv),
+      );
+    }
     if (operation === "close" && stageValue === "pass1" && target.kind === "paper_workspace") {
       args.push("--preserve-foundation", target.workspace_dir);
     }
-    if (operation === "input" && leaseRef && leaseToken) {
+    if (operation === "close") {
+      const outcome = closeAutomaticBuildStage({
+        target,
+        stage: stageValue as AutomaticBuildPublicationStage,
+        quality_profile: qualityProfileFromArgs(argv),
+        run_batch: () => {
+          const batch = forwardStageScript(target, script, args, true);
+          if (batch.stderr) process.stderr.write(batch.stderr);
+          return batch;
+        },
+      });
+      printAutomaticBuildJson(outcome);
+      verifiedClose = outcome.version === "automatic_build_stage_close_result.v1";
+      if (!verifiedClose) process.exitCode = 1;
+    } else if (operation === "input" && leaseRef && leaseToken) {
       const startedAt = valueArg(argv, "--now") ?? new Date().toISOString();
       const result = forwardStageScript(target, script, args, true);
       const finishedAt = valueArg(argv, "--now") ?? new Date().toISOString();
+      const lease = readAutomaticBuildLease(target, leaseRef, leaseToken);
+      const binding = automaticBuildTaskPolicyBindingFromLease(lease);
+      const inputSha256 = createHash("sha256").update(result.stdout, "utf8").digest("hex");
+      if (binding && "proof_digest" in binding && inputSha256 !== binding.input_hash) {
+        failAutomaticBuildTask(target, leaseRef, leaseToken, {
+          diagnostic_code: "budget_proof_invalid",
+          ...(valueArg(argv, "--now") ? { now: valueArg(argv, "--now") } : {}),
+        });
+        throw new Error("budget_proof_invalid");
+      }
       recordAutomaticBuildInputObservation(target, leaseRef, leaseToken, {
         started_at: startedAt,
         finished_at: finishedAt,
         input_bytes: Buffer.byteLength(result.stdout),
+        ...(binding && "proof_digest" in binding ? {
+          input_sha256: inputSha256,
+          proof_digest: binding.proof_digest,
+          render_contract_version: MODEL_INPUT_RENDER_CONTRACT_VERSION,
+        } : {}),
       });
       process.stdout.write(result.stdout);
       process.stderr.write(result.stderr);
@@ -2160,7 +2879,7 @@ if (argv[0] === "legacy-plan") {
       forwardStageScript(target, script, args);
     }
   }
-  if (operation === "close") {
+  if (operation === "close" && verifiedClose) {
     const metricsSnapshot = buildAutomaticBuildSnapshot(target, { quality_profile: qualityProfileFromArgs(argv) });
     const metricsStage = metricsSnapshot.stages.find((stage) => stage.stage === stageValue);
     writeAutomaticBuildStageMetricsSummary(target, stageValue, { work_units: metricsStage?.work_units ?? [] });

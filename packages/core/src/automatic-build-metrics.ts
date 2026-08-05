@@ -10,6 +10,7 @@ import {
 } from "./intent-build-metrics";
 import {
   assertActiveAutomaticBuildLease,
+  automaticBuildTaskPolicyBindingFromLease,
   readAutomaticBuildLease,
   type AutomaticBuildTaskHeartbeatV1,
   type AutomaticBuildTaskLease,
@@ -20,7 +21,7 @@ import {
   type AutomaticBuildExecutionIdentityV1,
   type AutomaticBuildStoredAttemptV1,
 } from "./automatic-build-task-store";
-import type { WorkUnitDescriptorV2, WorkUnitKind } from "./stage-work-unit";
+import type { WorkUnitDescriptor, WorkUnitKind } from "./stage-work-unit";
 
 export interface AutomaticBuildUsageReceiptV1 {
   version: "automatic_build_usage_receipt.v1";
@@ -44,6 +45,20 @@ export interface AutomaticBuildInputObservationV1 {
   finished_at: string;
   input_bytes: number;
 }
+
+export interface AutomaticBuildInputObservationV2 {
+  version: "automatic_build_input_observation.v2";
+  started_at: string;
+  finished_at: string;
+  input_bytes: number;
+  input_sha256: string;
+  proof_digest: string;
+  render_contract_version: string;
+}
+
+export type AutomaticBuildInputObservation =
+  | AutomaticBuildInputObservationV1
+  | AutomaticBuildInputObservationV2;
 
 export interface AutomaticBuildTaskMetricsV1 {
   version: "automatic_build_task_metrics.v1";
@@ -361,16 +376,47 @@ export function recordAutomaticBuildInputObservation(
   target: AutomaticBuildTarget,
   leaseRef: string,
   token: string,
-  input: Omit<AutomaticBuildInputObservationV1, "version">,
-): AutomaticBuildInputObservationV1 {
+  input: Omit<AutomaticBuildInputObservationV1, "version"> & {
+    input_sha256?: string;
+    proof_digest?: string;
+    render_contract_version?: string;
+  },
+): AutomaticBuildInputObservation {
   const lease = assertActiveAutomaticBuildLease(target, leaseRef, token, input.finished_at);
   durationMs(input.started_at, input.finished_at, "input_observation");
-  const observation: AutomaticBuildInputObservationV1 = {
-    version: "automatic_build_input_observation.v1",
-    started_at: input.started_at,
-    finished_at: input.finished_at,
-    input_bytes: nonNegativeInteger(input.input_bytes, "input_bytes"),
-  };
+  const binding = automaticBuildTaskPolicyBindingFromLease(lease);
+  const isV3 = binding !== undefined && "proof_digest" in binding;
+  if (isV3) {
+    if (!input.input_sha256 || !input.proof_digest || !input.render_contract_version) {
+      throw new Error("v3 input observation requires input hash, proof digest, and render contract version");
+    }
+    if (!/^[a-f0-9]{64}$/.test(input.input_sha256)
+      || !/^[a-f0-9]{64}$/.test(input.proof_digest)) {
+      throw new Error("v3 input observation hashes must be lowercase SHA-256 digests");
+    }
+    if (input.input_sha256 !== binding.input_hash || input.proof_digest !== binding.proof_digest) {
+      throw new Error("v3 input observation drifted from the leased task binding");
+    }
+  } else if (input.input_sha256 !== undefined || input.proof_digest !== undefined
+    || input.render_contract_version !== undefined) {
+    throw new Error("v2 input observation cannot add v3 proof fields");
+  }
+  const observation: AutomaticBuildInputObservation = isV3
+    ? {
+        version: "automatic_build_input_observation.v2",
+        started_at: input.started_at,
+        finished_at: input.finished_at,
+        input_bytes: nonNegativeInteger(input.input_bytes, "input_bytes"),
+        input_sha256: input.input_sha256!,
+        proof_digest: input.proof_digest!,
+        render_contract_version: input.render_contract_version!,
+      }
+    : {
+        version: "automatic_build_input_observation.v1",
+        started_at: input.started_at,
+        finished_at: input.finished_at,
+        input_bytes: nonNegativeInteger(input.input_bytes, "input_bytes"),
+      };
   const file = automaticBuildInputObservationPath(leaseRef);
   try {
     writeFileSync(file, `${JSON.stringify(observation, null, 2)}\n`, { encoding: "utf8", flag: "wx" });
@@ -378,12 +424,42 @@ export function recordAutomaticBuildInputObservation(
   } catch (error) {
     const code = error && typeof error === "object" && "code" in error ? String(error.code) : "";
     if (code !== "EEXIST") throw error;
-    const existing = readJson<AutomaticBuildInputObservationV1>(file);
-    if (existing.version !== observation.version || existing.input_bytes !== observation.input_bytes) {
+    const existing = readAutomaticBuildInputObservation(leaseRef)!;
+    const sameInputIdentity = existing.version === observation.version
+      && existing.input_bytes === observation.input_bytes
+      && (existing.version === "automatic_build_input_observation.v1"
+        || (observation.version === "automatic_build_input_observation.v2"
+          && existing.input_sha256 === observation.input_sha256
+          && existing.proof_digest === observation.proof_digest
+          && existing.render_contract_version === observation.render_contract_version));
+    if (!sameInputIdentity) {
       throw new Error(`input observation conflicts with the current attempt: ${taskRef(lease)}`);
     }
     return existing;
   }
+}
+
+export function readAutomaticBuildInputObservation(
+  leaseRef: string,
+): AutomaticBuildInputObservation | undefined {
+  const file = automaticBuildInputObservationPath(leaseRef);
+  if (!existsSync(file)) return undefined;
+  const input = readJson<AutomaticBuildInputObservation>(file);
+  if (!(input.version === "automatic_build_input_observation.v1"
+    || input.version === "automatic_build_input_observation.v2")) {
+    throw new Error(`invalid automatic build input observation: ${file}`);
+  }
+  durationMs(input.started_at, input.finished_at, "input_observation");
+  nonNegativeInteger(input.input_bytes, "input_bytes");
+  if (input.version === "automatic_build_input_observation.v2") {
+    if (!/^[a-f0-9]{64}$/.test(input.input_sha256)
+      || !/^[a-f0-9]{64}$/.test(input.proof_digest)
+      || !input.render_contract_version
+      || Buffer.byteLength(input.render_contract_version, "utf8") > 256) {
+      throw new Error(`invalid automatic build v2 input observation: ${file}`);
+    }
+  }
+  return input;
 }
 
 export function persistAutomaticBuildTaskMetrics(
@@ -393,11 +469,7 @@ export function persistAutomaticBuildTaskMetrics(
   terminal: AutomaticBuildTerminalMetricsInput,
 ): AutomaticBuildTaskMetricsV1 {
   const lease = readAutomaticBuildLease(target, leaseRef, token);
-  const inputPath = automaticBuildInputObservationPath(leaseRef);
-  const input = existsSync(inputPath) ? readJson<AutomaticBuildInputObservationV1>(inputPath) : undefined;
-  if (input && input.version !== "automatic_build_input_observation.v1") {
-    throw new Error(`invalid automatic build input observation: ${inputPath}`);
-  }
+  const input = readAutomaticBuildInputObservation(leaseRef);
   const usageReceipt = terminal.usage ?? readAutomaticBuildUsageReceipt(leaseRef);
   const executorEnd = terminal.writer_started_at ?? terminal.terminal_at;
   const metrics: AutomaticBuildTaskMetricsV1 = {
@@ -477,7 +549,7 @@ interface AutomaticBuildAttemptFacts {
   start?: AutomaticBuildTaskStartV1;
   heartbeat?: AutomaticBuildTaskHeartbeatV1;
   heartbeats: AutomaticBuildTaskHeartbeatV1[];
-  input?: AutomaticBuildInputObservationV1;
+  input?: AutomaticBuildInputObservation;
   submission?: AutomaticBuildSubmissionV1;
   failure?: AutomaticBuildTerminalRecord;
   receipt?: AutomaticBuildTerminalRecord;
@@ -518,6 +590,7 @@ function readAttemptFacts(target: AutomaticBuildTarget, stage: AutomaticBuildSta
       || lease.attempt !== stored.physical_attempt)) {
       throw new Error(`invalid automatic build lease metrics source: ${stored.attempt_dir}`);
     }
+    if (lease) automaticBuildTaskPolicyBindingFromLease(lease);
     const metrics = readOptionalJson<AutomaticBuildTaskMetricsV1>(stored.attempt_dir, "metrics.json");
     if (metrics && (metrics.version !== "automatic_build_task_metrics.v1" || metrics.stage !== stage
       || metrics.work_unit_id !== stored.work_unit_id || metrics.attempt !== stored.physical_attempt)) {
@@ -551,7 +624,7 @@ function readAttemptFacts(target: AutomaticBuildTarget, stage: AutomaticBuildSta
         : []),
     ].sort((left, right) => timestampMs(left.updated_at, "heartbeat.updated_at")
       - timestampMs(right.updated_at, "heartbeat.updated_at"));
-    const input = readOptionalJson<AutomaticBuildInputObservationV1>(stored.attempt_dir, "input-observation.json");
+    const input = readAutomaticBuildInputObservation(path.join(stored.attempt_dir, "lease.json"));
     const submission = readOptionalJson<AutomaticBuildSubmissionV1>(stored.attempt_dir, "submission.json");
     const failure = readOptionalJson<AutomaticBuildTerminalRecord>(stored.attempt_dir, "failure.json");
     const receipt = readOptionalJson<AutomaticBuildTerminalRecord>(stored.attempt_dir, "receipt.json");
@@ -686,7 +759,7 @@ function provenanceDimension(values: Array<string | undefined>): ProvenanceDimen
 function buildPerformanceHistory(
   target: AutomaticBuildTarget,
   attempts: AutomaticBuildAttemptFacts[],
-  workUnits: WorkUnitDescriptorV2[],
+  workUnits: WorkUnitDescriptor[],
 ): AutomaticBuildPerformanceHistoryV1 {
   const descriptors = new Map(workUnits.map((unit) => [unit.work_unit_id, unit]));
   const samples: AutomaticBuildPerformanceSampleV1[] = [];
@@ -725,7 +798,7 @@ function buildPerformanceHistory(
 export function buildAutomaticBuildStageMetricsSummary(
   target: AutomaticBuildTarget,
   stage: AutomaticBuildStage,
-  options: { now?: string; work_units?: WorkUnitDescriptorV2[] } = {},
+  options: { now?: string; work_units?: WorkUnitDescriptor[] } = {},
 ): AutomaticBuildStageMetricsSummaryV1 {
   const now = options.now ?? new Date().toISOString();
   timestampMs(now, "now");
@@ -896,7 +969,7 @@ export function buildAutomaticBuildStageMetricsSummary(
 export function writeAutomaticBuildStageMetricsSummary(
   target: AutomaticBuildTarget,
   stage: AutomaticBuildStage,
-  options: { now?: string; work_units?: WorkUnitDescriptorV2[] } = {},
+  options: { now?: string; work_units?: WorkUnitDescriptor[] } = {},
 ): AutomaticBuildStageMetricsSummaryV1 {
   const summary = buildAutomaticBuildStageMetricsSummary(target, stage, options);
   writeJsonAtomic(automaticBuildStageMetricsSummaryPath(target, stage), summary);

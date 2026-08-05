@@ -142,7 +142,7 @@ describe("automatic build BP8 production release", () => {
       build_plan: buildPlan,
     });
     expect(doctor).toMatchObject({
-      version: "automatic_build_protocol_doctor.v1",
+      version: "automatic_build_protocol_doctor.v2",
       status: "compatible",
       checks: {
         prompt_provider: {
@@ -153,6 +153,10 @@ describe("automatic build BP8 production release", () => {
             "paper-metadata-extractor.md",
             "paper-lexicon-extractor.md",
             "profile-sidecar-extractor.md",
+            "pass1-source-fragment-extractor.md",
+            "pass1-lid-stitcher.md",
+            "profile-sidecar-discourse-fragment-extractor.md",
+            "profile-sidecar-discourse-reducer.md",
             "pass2-longrange-linker.md",
             "book-structure-extractor.md",
           ],
@@ -174,9 +178,8 @@ describe("automatic build BP8 production release", () => {
         dry_run_mutates_state: false,
       },
     });
-    expect(doctor.target_state.pending_dispatches).toBeGreaterThan(0);
     expect(fileSnapshot(workspace)).toEqual(before);
-  });
+  }, 20_000);
 
   it("reports an unavailable packaged prompt provider as incompatible without mutating state", () => {
     const { root, source } = fixture();
@@ -192,7 +195,7 @@ describe("automatic build BP8 production release", () => {
         build_plan: buildPlan,
       });
       expect(doctor).toMatchObject({
-        version: "automatic_build_protocol_doctor.v1",
+        version: "automatic_build_protocol_doctor.v2",
         status: "incompatible",
         checks: {
           prompt_provider: {

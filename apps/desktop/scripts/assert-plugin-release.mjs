@@ -78,9 +78,19 @@ for (const marker of ["UNDERSTAND_BOOK_MCP_BIN", "HKCU\\Software\\UnderstandBook
   assert(rootMcpLauncher.includes(marker), `Book MCP launcher is missing resolver marker: ${marker}`);
 }
 
+const rootSkill = await readText("skills/build/SKILL.md");
 const releaseSkill = await readText("plugins/understand-book/skills/build/SKILL.md");
+assert.equal(
+  releaseSkill,
+  rootSkill,
+  "published build skill must match the root build skill byte-for-byte",
+);
 const protocolMarkers = [
   "automatic_build_protocol.v2_dispatch",
+  "automatic_build_protocol_doctor.v2",
+  "automatic_build_release.v3",
+  "checks.release_contract.status=compatible",
+  "all ten extractor names",
   "protocol-doctor",
   "legacy-plan",
   "explicit_legacy_command",
@@ -108,6 +118,13 @@ const protocolMarkers = [
   "executor_unavailable",
   "legacy_migration_required",
   "quality_gate_failed",
+  "automatic_build_stage_close_result.v1",
+  "status=closed",
+  "next=replan",
+  "automatic_build_recovery.v1",
+  "reconfirm_build_plan",
+  "retry_plan",
+  "migrate_policy",
   "codex_build_intent_command.v2",
   "codex_build_intent_result.v2",
   "codex_build_intent_response.v1",

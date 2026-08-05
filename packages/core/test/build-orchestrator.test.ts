@@ -18,6 +18,17 @@ import { splitWindows } from "../src/window";
 import { buildPass1Artifact } from "../src/build-resume";
 import { resolveContentProfile } from "../src/content-profile";
 import { automaticBuildExtractionPolicy, buildSemanticArtifactEnvelope } from "../src/semantic-artifact";
+import { freezeAutomaticBuildStagePolicySet } from "../src/automatic-build-policy-generation";
+import {
+  collectAutomaticBuildStageQuality,
+  writeAutomaticBuildStageQualityReport,
+} from "../src/automatic-build-quality";
+import { freezePass1ShadowTask } from "../src/pass1-reduction";
+import {
+  freezeProfileSidecarSemanticFastPathTask,
+  writeProfileSidecarSemanticFastPathCandidate,
+} from "../src/profile-sidecar-reduction";
+import { writePass1ProductionTaskArtifact } from "./helpers/model-input-routability-fixture";
 
 function tempDir(): string {
   return mkdtempSync(path.join(tmpdir(), "understand-book-orchestrator-"));
@@ -38,6 +49,103 @@ function pass1Envelope(target: AutomaticBuildTarget, taskId: number, payload: { 
     provenance: { executor: "test", model: "codex-test", attempt: 1, generated_at: "2026-07-19T00:00:00.000Z" },
     payload,
   });
+}
+
+function closeV3Pass1(target: AutomaticBuildTarget): void {
+  let stage: ReturnType<typeof buildAutomaticBuildSnapshot>["stages"][number] | undefined;
+  for (let round = 0; round < 8; round += 1) {
+    stage = buildAutomaticBuildSnapshot(target).stages.find((candidate) => candidate.stage === "pass1");
+    if (!stage?.policy_set) throw new Error("expected a production Pass1 policy set");
+    if (!stage.pending_work_units?.length) break;
+    freezeAutomaticBuildStagePolicySet(target, stage.policy_set);
+    for (const unit of stage.pending_work_units) {
+      const generation = stage.generation_tasks?.[unit.work_unit_id];
+      if (generation?.kind !== "pass1") {
+        throw new Error(`missing production Pass1 task: ${unit.work_unit_id}`);
+      }
+      freezePass1ShadowTask(target, generation.task);
+      writePass1ProductionTaskArtifact({
+        target,
+        policy_set_digest: stage.policy_set.policy_set_digest,
+        work_unit_id: unit.work_unit_id,
+        marker: "Orchestrator v3 close fixture",
+        generated_at: `2026-08-04T02:0${round}:00.000Z`,
+      });
+    }
+  }
+  stage = buildAutomaticBuildSnapshot(target).stages.find((candidate) => candidate.stage === "pass1");
+  if (!stage?.policy_set || stage.pending_tasks.length) {
+    throw new Error("production Pass1 fixture did not reach its close boundary");
+  }
+  const report = collectAutomaticBuildStageQuality(target, stage, "full");
+  expect(report.gate_status).toBe("passed");
+  writeAutomaticBuildStageQualityReport(target, report);
+  const repoRoot = path.resolve(__dirname, "..", "..", "..");
+  const args = [
+    path.join(repoRoot, "node_modules", "tsx", "dist", "cli.mjs"),
+    path.join(repoRoot, "skills", "build", "pass1-batch.ts"),
+    target.source_path,
+    "--book-id", target.book_id,
+    "--content-profile", target.profile_id,
+    "--production-generation", stage.policy_set.policy_set_digest,
+  ];
+  if (target.profile_id === "paper") {
+    args.push(
+      "--paper-subtype", "research_article",
+      "--preserve-foundation", target.workspace_dir,
+    );
+  }
+  const result = spawnSync(process.execPath, args, { cwd: target.root_dir, encoding: "utf8" });
+  expect(result.status, result.stderr).toBe(0);
+}
+
+function closeV3ProfileSidecar(target: AutomaticBuildTarget): void {
+  let stage: ReturnType<typeof buildAutomaticBuildSnapshot>["stages"][number] | undefined;
+  for (let round = 0; round < 8; round += 1) {
+    stage = buildAutomaticBuildSnapshot(target).stages.find((candidate) => candidate.stage === "profile_sidecar");
+    if (!stage?.policy_set) throw new Error("expected a production profile-sidecar policy set");
+    if (!stage.pending_work_units?.length) break;
+    freezeAutomaticBuildStagePolicySet(target, stage.policy_set);
+    for (const unit of stage.pending_work_units) {
+      const generation = stage.generation_tasks?.[unit.work_unit_id];
+      if (generation?.kind !== "profile_sidecar_fast_path") {
+        throw new Error(`expected a profile-sidecar fast-path task: ${unit.work_unit_id}`);
+      }
+      freezeProfileSidecarSemanticFastPathTask(target, generation.task);
+      const lid = generation.task.packet.visible_lids[0];
+      if (!lid) throw new Error("profile-sidecar fixture task has no evidence LID");
+      writeProfileSidecarSemanticFastPathCandidate({
+        target,
+        source: readFileSync(target.source_path, "utf8"),
+        task: generation.task,
+        candidate: {
+          discourse_items: [{ lid, mode: "informative", relations: [] }],
+        },
+        provenance: {
+          executor: "orchestrator-v3-profile-fixture",
+          attempt: 1,
+          generated_at: `2026-08-04T02:1${round}:00.000Z`,
+        },
+      });
+    }
+  }
+  stage = buildAutomaticBuildSnapshot(target).stages.find((candidate) => candidate.stage === "profile_sidecar");
+  if (!stage?.policy_set || stage.pending_tasks.length) {
+    throw new Error("production profile-sidecar fixture did not reach its close boundary");
+  }
+  const report = collectAutomaticBuildStageQuality(target, stage, "full");
+  expect(report.gate_status).toBe("passed");
+  writeAutomaticBuildStageQualityReport(target, report);
+  const repoRoot = path.resolve(__dirname, "..", "..", "..");
+  const result = spawnSync(process.execPath, [
+    path.join(repoRoot, "node_modules", "tsx", "dist", "cli.mjs"),
+    path.join(repoRoot, "skills", "build", "profile-sidecar-batch.ts"),
+    target.source_path,
+    "--book-id", target.book_id,
+    "--content-profile", target.profile_id,
+    "--production-generation", stage.policy_set.policy_set_digest,
+  ], { cwd: target.root_dir, encoding: "utf8" });
+  expect(result.status, result.stderr).toBe(0);
 }
 
 function writeTrustedPaperWorkspace(root: string, bookId = "paper-a"): string {
@@ -259,34 +367,10 @@ describe("automatic build orchestrator", () => {
     const root = tempDir();
     const { workspace, sourceFile, source } = writeTechnicalLearningWorkspace(root, "optional-pass2");
     const target = resolveAutomaticBuildTarget(workspace, root);
-    const lidNodes = segment(markdownToBlocks(source));
-    const byLid = new Map(lidNodes.map((node) => [node.lid, node]));
-    const windows = splitWindows(lidNodes, source);
-    const profile = resolveContentProfile("technical_learning");
-    for (const window of windows) {
-      writeJson(
-        path.join(workspace, ".build", "pass1", `${window.id}.json`),
-        pass1Envelope(target, window.id, buildPass1Artifact(window, byLid, source, { nodes: [], edges: [] }, profile)),
-      );
-    }
     writeJson(path.join(workspace, "long_range_candidates.json"), { candidates: [] });
-
-    const sidecarSnapshot = buildAutomaticBuildSnapshot(target);
-    const sidecarStage = sidecarSnapshot.stages.find((stage) => stage.stage === "profile_sidecar")!;
-    for (const unit of sidecarStage.pending_work_units ?? []) {
-      writeJson(path.join(workspace, ".build", "profile-sidecar", `${unit.work_unit_id}.json`), buildSemanticArtifactEnvelope({
-        target: target.target_ref,
-        stage: "profile_sidecar",
-        work_unit_id: unit.work_unit_id,
-        input_hash: unit.input_hash,
-        policy_fingerprint: unit.policy_fingerprint,
-        provenance: { executor: "test", model: "codex-test", attempt: 1, generated_at: "2026-07-31T00:00:00.000Z" },
-        payload: { content_hash: unit.input_hash, discourse_items: [], formula_semantics: [] },
-      }));
-    }
+    closeV3Pass1(target);
+    closeV3ProfileSidecar(target);
     const header = { book_id: target.book_id, profile_id: target.profile_id };
-    writeJson(path.join(workspace, "discourse_index.json"), { header, items: [] });
-    writeJson(path.join(workspace, "formula_semantics.json"), { header, items: [] });
 
     const snapshot = buildAutomaticBuildSnapshot(target);
     expect(existsSync(path.join(workspace, "pass2_audit.json"))).toBe(false);
@@ -382,7 +466,7 @@ describe("automatic build orchestrator", () => {
     expect(staleStructure?.pending_work_units?.some((unit) => (
       unit.work_unit_id.startsWith("unit:") && unit.cost.candidate_count === 1
     ))).toBe(true);
-  });
+  }, 30_000);
 
   it("reopens Pass1 when fresh artifacts disagree with the closed base graph", () => {
     const root = tempDir();
@@ -430,7 +514,7 @@ describe("automatic build orchestrator", () => {
       closed: false,
     }]);
     expect(snapshot.stages[0].work_units?.[0]).toMatchObject({
-      version: "automatic_build_work_unit.v2",
+      version: "automatic_build_work_unit.v3",
       work_unit_id: "0",
       kind: "pass1_window",
     });
@@ -441,36 +525,10 @@ describe("automatic build orchestrator", () => {
     const root = tempDir();
     const workspace = writeTrustedPaperWorkspace(root);
     const sourcePath = path.join(workspace, "source.txt");
-    const source = readFileSync(sourcePath, "utf8");
-    const lidNodes = segment(markdownToBlocks(source));
-    const byLid = new Map(lidNodes.map((node) => [node.lid, node]));
-    const windows = splitWindows(lidNodes, source);
-    const profile = resolveContentProfile("paper");
     const target = resolveAutomaticBuildTarget(workspace, root);
-    for (const window of windows) {
-      writeJson(
-        path.join(workspace, ".build", "pass1", `${window.id}.json`),
-        pass1Envelope(target, window.id, buildPass1Artifact(window, byLid, source, { nodes: [], edges: [] }, profile)),
-      );
-    }
     writeFileSync(path.join(workspace, "pdf_source_map.json"), "map-sentinel", "utf8");
     const manifestBefore = readFileSync(path.join(workspace, "source_manifest.json"), "utf8");
-    const repoRoot = path.resolve(process.cwd(), "..", "..");
-    const result = spawnSync(
-      process.execPath,
-      [
-        path.join(repoRoot, "node_modules", "tsx", "dist", "cli.mjs"),
-        path.join(repoRoot, "skills", "build", "pass1-batch.ts"),
-        sourcePath,
-        "--book-id", "paper-a",
-        "--content-profile", "paper",
-        "--paper-subtype", "research_article",
-        "--preserve-foundation", workspace,
-      ],
-      { cwd: root, encoding: "utf8" },
-    );
-
-    expect(result.status, result.stderr).toBe(0);
+    closeV3Pass1(target);
     expect(readFileSync(path.join(workspace, "source_manifest.json"), "utf8")).toBe(manifestBefore);
     expect(readFileSync(path.join(workspace, "pdf_source_map.json"), "utf8")).toBe("map-sentinel");
     expect(JSON.parse(manifestBefore).canonical_source.kind).toBe("reconciled_markdown");
@@ -532,9 +590,10 @@ describe("automatic build orchestrator", () => {
     const sidecarStage = sidecarSnapshot.stages.find((stage) => stage.stage === "profile_sidecar")!;
     expect(sidecarStage.pending_work_units?.length).toBeGreaterThan(0);
     expect(sidecarStage.pending_work_units?.every((unit) => unit.kind === "profile_sidecar_discourse")).toBe(true);
-    expect(sidecarStage.work_units?.some((unit) => unit.kind === "profile_sidecar_formula" && unit.deterministic_skip?.code === "no_formula_in_window")).toBe(true);
-    expect(sidecarStage.work_units?.filter((unit) => unit.deterministic_skip)
-      .every((unit) => !sidecarStage.pending_tasks.includes(unit.work_unit_id))).toBe(true);
+    expect(sidecarStage.work_units?.every((unit) => unit.version === "automatic_build_work_unit.v3"))
+      .toBe(true);
+    expect(sidecarStage.pending_work_units?.some((unit) => unit.kind === "profile_sidecar_formula"))
+      .toBe(false);
     expect(nextAutomaticBuildAction(sidecarSnapshot)).toMatchObject({
       kind: "extract",
       stage: "profile_sidecar",

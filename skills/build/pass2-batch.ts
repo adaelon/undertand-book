@@ -7,7 +7,10 @@ import { computePass2Status, type Pass2Artifact } from "../../packages/core/src/
 import { Pass2BuildAuditSidecarZ, ReadOnlyBaseZ } from "../../packages/core/src/zod";
 import { loadPass2BuildContext, parseBookArgs } from "./pass2-common";
 import { semanticArtifactPayload } from "../../packages/core/src/semantic-artifact";
-import { publishAutomaticBuildArtifactSet } from "../../packages/core/src/automatic-build-publication";
+import {
+  buildAutomaticBuildStageBatchResult,
+  publishAutomaticBuildArtifactSet,
+} from "../../packages/core/src/automatic-build-publication";
 
 const { book, override, allowPartial, contentProfile } = parseBookArgs(process.argv.slice(2));
 if (!book) {
@@ -50,7 +53,7 @@ const localEdges = ctx.base.graph_edges.filter((edge) => edge.scope !== "long_ra
 const base = { ...ctx.base, graph_edges: [...localEdges, ...gated.edges] };
 ReadOnlyBaseZ.parse(base);
 mkdirSync(ctx.baseDir, { recursive: true });
-publishAutomaticBuildArtifactSet({
+const publicationReceipt = publishAutomaticBuildArtifactSet({
   workspace_dir: ctx.baseDir,
   stage: "pass2",
   artifacts: {
@@ -60,10 +63,11 @@ publishAutomaticBuildArtifactSet({
   },
 });
 
-console.log(`[pass2-batch] ${book}  bookId=${ctx.bookId}  content_profile=${contentProfile.id}${allowPartial && status.pending.length ? "  [--allow-partial]" : ""}`);
-console.log(`  windows=${ctx.windows.length} candidates=${ctx.candidateIndex.candidates.length} done=${status.done.length} pending=${status.pending.length} skipped=${status.skipped.length}`);
-console.log(`  classifier output: accepted=${output.accepted_edges.length} pending=${output.pending_edges.length} rejected=${output.rejected_candidates.length}`);
-console.log(`  gate: long_range_edges=${gated.edges.length} accepted=${gated.audit.accepted.length} pending=${gated.audit.pending.length} rejected=${gated.audit.rejected.length} gate_dropped=${gated.audit.gate_dropped.length}`);
-console.log(`  wrote: ${ctx.baseDir}/long_range_candidates.json`);
-console.log(`  wrote: ${ctx.baseDir}/base.json`);
-console.log(`  wrote: ${ctx.baseDir}/pass2_audit.json`);
+console.error(`[pass2-batch] ${book}  bookId=${ctx.bookId}  content_profile=${contentProfile.id}${allowPartial && status.pending.length ? "  [--allow-partial]" : ""}`);
+console.error(`  windows=${ctx.windows.length} candidates=${ctx.candidateIndex.candidates.length} done=${status.done.length} pending=${status.pending.length} skipped=${status.skipped.length}`);
+console.error(`  classifier output: accepted=${output.accepted_edges.length} pending=${output.pending_edges.length} rejected=${output.rejected_candidates.length}`);
+console.error(`  gate: long_range_edges=${gated.edges.length} accepted=${gated.audit.accepted.length} pending=${gated.audit.pending.length} rejected=${gated.audit.rejected.length} gate_dropped=${gated.audit.gate_dropped.length}`);
+console.error(`  wrote: ${ctx.baseDir}/long_range_candidates.json`);
+console.error(`  wrote: ${ctx.baseDir}/base.json`);
+console.error(`  wrote: ${ctx.baseDir}/pass2_audit.json`);
+process.stdout.write(`${JSON.stringify(buildAutomaticBuildStageBatchResult(publicationReceipt))}\n`);

@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type { BuildTargetRefV2 } from "./build-orchestrator";
 import { pass1ContentHash, type Pass1ArtifactMeta } from "./build-resume";
 import type { LidNode } from "./generated/LidNode";
+import { inspectRenderedModelInput } from "./model-input-renderer";
 import {
   buildPaperLexiconSidecar,
   normalizePaperLexiconKey,
@@ -56,7 +57,9 @@ export interface PaperLexiconCandidatePacketV2 {
   requested_term_types: PaperTermType[];
   text: string;
   estimated_input_tokens: number;
+  estimated_rendered_tokens: number;
   input_hash: string;
+  rendered_input_sha256: string;
 }
 
 export interface PaperLexiconRoutingAnalysis {
@@ -402,7 +405,7 @@ function packetText(clusters: PaperLexiconCandidateClusterV1[], byLid: Map<strin
 }
 
 function packetTokenEstimate(clusters: PaperLexiconCandidateClusterV1[], byLid: Map<string, LidNode>, source: string): number {
-  return buildPacket(clusters, byLid, source).estimated_input_tokens;
+  return buildPacket(clusters, byLid, source).estimated_rendered_tokens;
 }
 
 function buildPacket(
@@ -423,10 +426,13 @@ function buildPacket(
     text: context.text,
   };
   const estimatedInputTokens = estimateTokens(stableJson(identity));
+  const rendered = inspectRenderedModelInput({ kind: "lexicon_candidate_batch", input: identity });
   return {
     ...identity,
     estimated_input_tokens: estimatedInputTokens,
+    estimated_rendered_tokens: rendered.estimated_tokens,
     input_hash: sha256(stableJson(identity)),
+    rendered_input_sha256: rendered.sha256,
   };
 }
 

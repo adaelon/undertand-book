@@ -99,6 +99,12 @@ Resident Agent 在当前用户回合内实际观察且通过现有结构闸的�
 ## 窗口预算 (window budget)
 界定一个窗口能装多少的双约束:**输入硬闸**(正文 token ≤ 上下文窗口 × 安全系数 − 指令/目录/输出预留,放不下必拆)+ **输出软闸**(单窗口预期节点/边软上限,超则再拆)。具体数字留切片0实测。详见 [docs/adr/0009]。
 
+## 预算可路由性 (budget routability)
+计划生成的每个最小模型工作单元在进入执行器前,必然不超过其版本化输入硬闸。它约束的是单次模型输入,不同于 BuildPlan 总预算或 dispatch 聚合上限;LID 继续作为证据坐标,不得为适配模型窗口而改写。状态:BOUNDARY_CHANGE(见 [ADR-0100](docs/adr/0100-budget-routable-model-work-units-and-truthful-build-recovery.md))。
+
+## 模型输入片 (model input slice)
+从 canonical source 中一个或多个 LID 的受校验区间确定性派生、只供单次模型执行的内部输入单位。它不创建段落或 LID,不改变 EPUB/Markdown/PDF 对齐与引用身份;同一 LID 的 core 区间须完整且不重不漏,可见 overlap 不计覆盖,语义结果最终仍归回原 LID。状态:BOUNDARY_CHANGE(见 [ADR-0100](docs/adr/0100-budget-routable-model-work-units-and-truthful-build-recovery.md))。
+
 ## 融合批次 (fused batch)
 把多个相邻小窗口打包进一次 subagent 抽取调用以省开销;产出仍按各原窗口的 LID 区间拆回。借自 U-A 的 fused-batch。状态:NEW(详见 [docs/adr/0009])。
 
