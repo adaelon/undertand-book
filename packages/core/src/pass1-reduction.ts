@@ -1255,7 +1255,10 @@ function renderStitchTaskInput(target: AutomaticBuildTarget, task: Pass1ShadowTa
       work_unit_id: dependency.task.descriptor.work_unit_id,
       artifact_hash: dependency.artifact.artifact_hash,
       source_unit_range: { ...dependency.payload.source_unit_range },
-      payload: dependency.payload,
+      payload: {
+        nodes: dependency.payload.nodes,
+        edges: dependency.payload.edges,
+      },
     })),
   });
 }
@@ -1501,7 +1504,7 @@ export function routePass1StitchLevel(input: {
       source_unit_range: child.payload.source_unit_range,
     }));
     const workUnitId = `pass1-window-${input.window_id}-${role}-${digest({
-      version: "pass1_lid_stitch_identity.v1",
+      version: "pass1_lid_stitch_identity.v2",
       window_id: input.window_id,
       reducer_level: reducerLevel,
       group_ordinal: groupOrdinal,
@@ -1512,7 +1515,10 @@ export function routePass1StitchLevel(input: {
       work_unit_id: child.work_unit.descriptor.work_unit_id,
       artifact_hash: child.artifact.artifact_hash,
       source_unit_range: { ...child.payload.source_unit_range },
-      payload: child.payload,
+      payload: {
+        nodes: child.payload.nodes,
+        edges: child.payload.edges,
+      },
     }));
     const renderInput: Pass1LidStitchRenderInputV1 = {
       version: "pass1_lid_stitch_input.v1",

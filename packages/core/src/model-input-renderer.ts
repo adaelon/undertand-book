@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 import type { BookStructureStitchPacket, BookStructureUnitSource } from "./book-structure";
+import type { GraphEdge } from "./generated/GraphEdge";
+import type { GraphNode } from "./generated/GraphNode";
 import type { PaperMetadataCandidatePacket } from "./paper-metadata-router";
 import type { PaperLexiconCandidatePacketV2 } from "./paper-lexicon-router";
 import type { Pass1Input } from "./pass1-input";
@@ -26,7 +28,10 @@ export interface Pass1LidStitchRenderChildV1 {
     start_ordinal: number;
     end_ordinal_exclusive: number;
   };
-  payload: unknown;
+  payload: {
+    nodes: GraphNode[];
+    edges: GraphEdge[];
+  };
 }
 
 export interface Pass1LidStitchRenderInputV1 {

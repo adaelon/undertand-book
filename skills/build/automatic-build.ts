@@ -1788,7 +1788,7 @@ function syntheticModelInputRequest(
             work_unit_id: "release-doctor-pass1-child",
             artifact_hash: artifactHash,
             source_unit_range: { start_ordinal: 0, end_ordinal_exclusive: 1 },
-            payload: { version: "pass1_shadow_graph_artifact.v1", nodes: [], edges: [] },
+            payload: { nodes: [], edges: [] },
           }],
         },
       };

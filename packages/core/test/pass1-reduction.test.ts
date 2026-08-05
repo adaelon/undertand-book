@@ -147,6 +147,55 @@ function verifiedChild(unit: Pass1ShadowWorkUnitV1): Pass1ShadowVerifiedChildV1 
   });
 }
 
+function realisticGraphChild(
+  unit: Pass1ShadowWorkUnitV1,
+  childOrdinal: number,
+  nodeCount: number,
+  edgeCount: number,
+): Pass1ShadowVerifiedChildV1 {
+  const lid = unit.route.evidence_lids[0];
+  const nodes = Array.from({ length: nodeCount }, (_, nodeOrdinal): GraphNode => ({
+    id: `concept:synthetic_${childOrdinal}_${nodeOrdinal}_${"x".repeat(18)}`,
+    type: "concept",
+    name: "图".repeat(10),
+    occurrences: [lid],
+    source_lid: null,
+  }));
+  const edges = Array.from({ length: edgeCount }, (_, edgeOrdinal): GraphEdge => ({
+    source: nodes[edgeOrdinal % nodes.length].id,
+    target: nodes[(edgeOrdinal + 1) % nodes.length].id,
+    type: "explains",
+    direction: "directed",
+    scope: "local",
+    weight: 0.8,
+  }));
+  const payload: Pass1ShadowGraphArtifactV1 = {
+    version: PASS1_SHADOW_GRAPH_ARTIFACT_VERSION,
+    window_id: unit.route.window_id,
+    role: unit.route.role,
+    source_unit_range: { ...unit.route.source_unit_range },
+    evidence_lids: [...unit.route.evidence_lids],
+    nodes,
+    edges,
+  };
+  const artifact = buildSemanticArtifactEnvelopeV3({
+    target: unit.descriptor.target,
+    stage: "pass1",
+    work_unit_id: unit.descriptor.work_unit_id,
+    input_hash: unit.descriptor.input_hash,
+    proof_digest: unit.descriptor.input_budget_proof.proof_digest,
+    policy_set_digest: POLICY_SET_DIGEST,
+    policy_fingerprint: unit.descriptor.policy_fingerprint,
+    provenance: PROVENANCE,
+    payload,
+  });
+  return verifyPass1ShadowArtifact({
+    work_unit: unit,
+    artifact,
+    policy_set_digest: POLICY_SET_DIGEST,
+  });
+}
+
 function preparedFragmentUnits(count: number): {
   source: string;
   parent: LidNode;
@@ -488,6 +537,52 @@ describe("Pass1 dormant fragment/stitch routing", () => {
       }
     }
     expect(forward.levels.at(-1)![0].route.role).toBe("final");
+  });
+
+  it("routes a realistic four-child final stitch without charging duplicate child route metadata", () => {
+    const prepared = preparedFragmentUnits(4);
+    const graphSizes = [[1, 0], [22, 18], [16, 12], [21, 20]] as const;
+    const children = prepared.units.map((unit, index) => realisticGraphChild(
+      unit,
+      index,
+      graphSizes[index][0],
+      graphSizes[index][1],
+    ));
+    const routed = routePass1StitchLevel({
+      target: prepared.units[0].descriptor.target,
+      window_id: 0,
+      source_unit_count: prepared.units.length,
+      children,
+      policy_set_digest: POLICY_SET_DIGEST,
+      policy: pass1LidStitchPolicy(resolveContentProfile("technical_learning")),
+      budget: BUDGET,
+    });
+
+    expect(routed).toMatchObject({ status: "routed" });
+    if (routed.status !== "routed") return;
+    expect(routed.role).toBe("final");
+    expect(routed.units).toHaveLength(1);
+    const unit = routed.units[0];
+    if (unit.route.role !== "final") throw new Error("expected one final stitch unit");
+    const legacyInput = {
+      version: "pass1_lid_stitch_input.v1",
+      work_unit_id: unit.descriptor.work_unit_id,
+      window_id: unit.route.window_id,
+      reducer_level: unit.route.reducer_level,
+      group_ordinal: unit.route.group_ordinal,
+      role: unit.route.role,
+      source_unit_range: unit.route.source_unit_range,
+      children: children.map((child) => ({
+        work_unit_id: child.work_unit.descriptor.work_unit_id,
+        artifact_hash: child.artifact.artifact_hash,
+        source_unit_range: child.payload.source_unit_range,
+        payload: child.payload,
+      })),
+    };
+    expect(estimateTokens(`${JSON.stringify(legacyInput)}\n`))
+      .toBeGreaterThan(BUDGET.stage_body_limit_tokens);
+    expect(routed.units[0].descriptor.input_budget_proof.estimated_rendered_tokens)
+      .toBeLessThanOrEqual(BUDGET.stage_body_limit_tokens);
   });
 
   it("fails closed on child gaps, duplicates, stale artifacts, invalid proofs, and invalid candidate writes", () => {
