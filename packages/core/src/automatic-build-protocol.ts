@@ -15,7 +15,7 @@ export const AUTOMATIC_BUILD_ROUTING_RELEASE = {
 };
 
 export const AUTOMATIC_BUILD_MODEL_INPUT_BUDGET_V1 = {
-  stage_body_limit_tokens: 5_000,
+  stage_body_limit_tokens: 6_000,
   executor_context_floor_tokens: 8_192,
   prompt_reserve_tokens: 512,
   protocol_reserve_tokens: 256,

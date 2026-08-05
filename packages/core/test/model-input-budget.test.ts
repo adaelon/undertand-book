@@ -1,10 +1,12 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
+import { AUTOMATIC_BUILD_MODEL_INPUT_BUDGET_V1 } from "../src/automatic-build-protocol";
 import {
   evaluateModelInputBudget,
   verifyModelInputBudgetProof,
   type ModelInputBudgetRequestV1,
 } from "../src/model-input-budget";
+import { DEFAULT_DISCOURSE_INPUT_TOKENS } from "../src/profile-sidecar-router";
 import { buildWorkUnitCostFromBudgetProof } from "../src/stage-work-unit";
 
 const PROMPT_SHA = createHash("sha256").update("prompt").digest("hex");
@@ -25,6 +27,37 @@ function request(overrides: Partial<ModelInputBudgetRequestV1> = {}): ModelInput
 }
 
 describe("model input budget proof", () => {
+  it("routes a 5,025-token production body and blocks one estimated token above 6,000", () => {
+    expect(AUTOMATIC_BUILD_MODEL_INPUT_BUDGET_V1.stage_body_limit_tokens).toBe(6_000);
+    expect(DEFAULT_DISCOURSE_INPUT_TOKENS)
+      .toBe(AUTOMATIC_BUILD_MODEL_INPUT_BUDGET_V1.stage_body_limit_tokens);
+
+    const within = evaluateModelInputBudget({
+      rendered_input: "x".repeat(20_100),
+      router_version: "production_budget_regression.v1",
+      prompt_sha256: PROMPT_SHA,
+      ...AUTOMATIC_BUILD_MODEL_INPUT_BUDGET_V1,
+    });
+    expect(within.status).toBe("within_limit");
+    if (within.status !== "within_limit") throw new Error("expected production proof");
+    expect(within.proof).toMatchObject({
+      estimated_rendered_tokens: 5_025,
+      effective_body_limit_tokens: 6_000,
+    });
+
+    const over = evaluateModelInputBudget({
+      rendered_input: "x".repeat(24_001),
+      router_version: "production_budget_regression.v1",
+      prompt_sha256: PROMPT_SHA,
+      ...AUTOMATIC_BUILD_MODEL_INPUT_BUDGET_V1,
+    });
+    expect(over).toMatchObject({
+      status: "over_limit",
+      estimated_rendered_tokens: 6_001,
+      effective_body_limit_tokens: 6_000,
+    });
+  });
+
   it("passes exactly at the effective limit and blocks one estimated token above it", () => {
     const exact = evaluateModelInputBudget(request());
     expect(exact.status).toBe("within_limit");

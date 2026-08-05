@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { AUTOMATIC_BUILD_MODEL_INPUT_BUDGET_V1 } from "./automatic-build-protocol";
 import type { BuildTargetRefV2 } from "./build-orchestrator";
 import {
   blockedAutomaticBuildRoute,
@@ -29,7 +30,8 @@ import { estimateTokens, type Window } from "./window";
 
 export const PROFILE_SIDECAR_ROUTER_VERSION = "profile_sidecar_semantic_units.v2" as const;
 export const DEFAULT_DISCOURSE_GROUP_LIDS = 12;
-export const DEFAULT_DISCOURSE_INPUT_TOKENS = 5_000;
+export const DEFAULT_DISCOURSE_INPUT_TOKENS =
+  AUTOMATIC_BUILD_MODEL_INPUT_BUDGET_V1.stage_body_limit_tokens;
 
 export type ProfileSidecarSemanticUnitKind = "profile_sidecar_discourse" | "profile_sidecar_formula";
 

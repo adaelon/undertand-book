@@ -286,7 +286,8 @@ function assertNoActiveLegacyGenerationLease(
   }));
 }
 
-const AUTOMATIC_BUILD_SHADOW_STAGE_INPUT_LIMIT_TOKENS = 5_000;
+const AUTOMATIC_BUILD_SHADOW_STAGE_INPUT_LIMIT_TOKENS =
+  AUTOMATIC_BUILD_MODEL_INPUT_BUDGET_V1.stage_body_limit_tokens;
 const AUTOMATIC_BUILD_V3_MODEL_BUDGET = AUTOMATIC_BUILD_MODEL_INPUT_BUDGET_V1;
 
 function canonicalSourceFingerprint(source: string): string {
