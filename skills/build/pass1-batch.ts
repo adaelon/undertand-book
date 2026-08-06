@@ -31,6 +31,7 @@ import {
   buildAutomaticBuildSnapshot,
   resolveAutomaticBuildTarget,
 } from "../../packages/core/src/build-orchestrator";
+import { collectAutomaticBuildStageQuality } from "../../packages/core/src/automatic-build-quality";
 import {
   assertPass1ShadowCandidatePath,
   readPass1ShadowTask,
@@ -121,6 +122,8 @@ if (preserveFoundationPath) {
 // 消费 `.build/pass1/<id>.json`:逐窗读已落产物(缺文件=不入 map)
 const pass1Dir = `.understand-book/${bookId}/.build/pass1`;
 const artifacts = new Map<number, Pass1Artifact>();
+let done: number[];
+let pending: number[];
 if (productionGeneration) {
   if (allowPartial) throw new Error("--allow-partial is not valid for a production v3 generation");
   const target = resolveAutomaticBuildTarget(book, process.cwd(), { book_id: bookId });
@@ -165,14 +168,30 @@ if (productionGeneration) {
   if (artifacts.size !== windows.length) {
     throw new Error("production Pass1 contributors do not cover every current window");
   }
+  const qualityReport = collectAutomaticBuildStageQuality(
+    target,
+    stage,
+    productionQualityProfile as ExtractionQualityProfile,
+  );
+  if (qualityReport.gate_status !== "passed") {
+    throw new Error(`production Pass1 quality gate did not pass: ${qualityReport.gate_status}`);
+  }
+  done = windows.map((window) => window.id);
+  pending = [];
 } else {
   for (const w of windows) {
     const f = `${pass1Dir}/${w.id}.json`;
     if (existsSync(f)) artifacts.set(w.id, semanticArtifactPayload<Pass1Artifact>(JSON.parse(readFileSync(f, "utf8"))));
   }
+  // Legacy resume artifacts use the original whole-window body hash as their freshness proof.
+  ({ done, pending } = computeBuildStatus(
+    windows,
+    byLid,
+    source,
+    artifacts,
+    parsedProfile.contentProfile,
+  ));
 }
-// 续建判定:存在性 + content-hash 校验(陈旧/缺失=pending)
-const { done, pending } = computeBuildStatus(windows, byLid, source, artifacts, parsedProfile.contentProfile);
 if (pending.length && !allowPartial) {
   console.error(`[pass1-batch] 拒绝收口:${pending.length}/${windows.length} 窗 pending(缺窗=缺节点=图不完整)`);
   console.error(`  pending ids: ${pending.join(",")}`);

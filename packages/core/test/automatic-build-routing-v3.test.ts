@@ -531,6 +531,64 @@ describe("BR8 production v3 routing release", () => {
     expect(resumed.snapshot.stages.some((stage) => stage.stage === "profile_sidecar")).toBe(true);
   }, 30_000);
 
+  it("publishes a fragmented Pass1 window from its final v3 stitch contributor", () => {
+    const fixture = createSyntheticRoutabilityFixture();
+    writeSyntheticPass1ProductionGeneration(fixture, { grounded: true });
+    const buildPlan = confirmedStandardBuildPlan(fixture.source_file, fixture.root);
+    const planned = automaticBuildPlan(fixture.source_file, fixture.root, {
+      requested_workers: 1,
+      available_agent_slots: 1,
+      build_plan: buildPlan,
+    });
+    const pass1 = planned.snapshot.stages.find((stage) => stage.stage === "pass1");
+    const contributor = pass1?.quality_routing?.public_contributors[0];
+    if (!pass1?.policy_set || !contributor) {
+      throw new Error("expected one completed fragmented Pass1 contributor");
+    }
+    const task = readPass1ShadowTask(
+      fixture.target,
+      pass1.policy_set.policy_set_digest,
+      contributor.work_unit_id,
+    );
+    expect(task.route.role).toBe("final");
+    const finalCandidate = writePass1ShadowFinalCandidate({
+      target: fixture.target,
+      source: fixture.source,
+      task,
+    });
+    const legacyWholeWindowHash = buildPass1Artifact(
+      fixture.windows[0],
+      fixture.by_lid,
+      fixture.source,
+      { nodes: [], edges: [] },
+      resolveContentProfile("technical_learning"),
+    ).content_hash;
+    expect(finalCandidate.candidate.content_hash).not.toBe(legacyWholeWindowHash);
+
+    const closing = automaticBuildNext(fixture.source_file, fixture.root, 1, {
+      owner: "br8-fragmented-pass1-close",
+      now: "2026-08-04T00:37:00.000Z",
+      available_agent_slots: 1,
+      build_plan: buildPlan,
+    });
+    if (closing.action.kind !== "close_stage" || !("command" in closing.action)) {
+      throw new Error("expected a fragmented v3 Pass1 close command");
+    }
+    const [command, ...args] = closing.action.command;
+    const close = spawnSync(command, args, {
+      cwd: closing.action.cwd,
+      encoding: "utf8",
+      timeout: 20_000,
+    });
+    expect(close.status, close.stderr).toBe(0);
+    expect(JSON.parse(close.stdout)).toMatchObject({
+      version: "automatic_build_stage_close_result.v1",
+      status: "closed",
+      stage: "pass1",
+      next: "replan",
+    });
+  }, 30_000);
+
   it("routes a real 6,992-token profile paragraph through production fragment/reduce", () => {
     const fixture = createSyntheticRoutabilityFixture();
     closeSyntheticPass1(fixture);
