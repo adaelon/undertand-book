@@ -14,7 +14,9 @@ import type { LidNode } from "./generated/LidNode";
 import {
   evaluateModelInputBudget,
   verifyModelInputBudgetProof,
+  type ModelInputBudgetProofV1,
   type ModelInputBudgetRequestV1,
+  type ModelInputOverLimitV1,
 } from "./model-input-budget";
 import {
   renderPass1LidStitchModelInput,
@@ -22,6 +24,7 @@ import {
   renderPass1SourceFragmentModelInput,
   type Pass1LidStitchRenderChildV1,
   type Pass1LidStitchRenderInputV1,
+  type Pass1LidStitchRenderNodeV1,
 } from "./model-input-renderer";
 import {
   routeModelInputSlices,
@@ -62,6 +65,7 @@ export const PASS1_SOURCE_FRAGMENT_SCHEMA_VERSION = "pass1_source_fragment_outpu
 export const PASS1_LID_STITCH_SCHEMA_VERSION = "pass1_lid_stitch_output.v1" as const;
 export const PASS1_SHADOW_GRAPH_ARTIFACT_VERSION = "pass1_shadow_graph_artifact.v1" as const;
 export const PASS1_STITCH_MAX_CHILDREN = 8 as const;
+export const PASS1_STITCH_BOUNDARY_PROJECTION_VERSION = "pass1_stitch_boundary_projection.v1" as const;
 export const PASS1_SOURCE_FRAGMENT_EXTRACTOR = "pass1-source-fragment-extractor" as const;
 export const PASS1_LID_STITCHER = "pass1-lid-stitcher" as const;
 export const PASS1_SOURCE_FRAGMENT_PROMPT_NAME = "pass1-source-fragment-extractor.md" as const;
@@ -1238,29 +1242,191 @@ function readStitchDependencies(
   return dependencies;
 }
 
-function renderStitchTaskInput(target: AutomaticBuildTarget, task: Pass1ShadowTaskV1): string {
+interface Pass1StitchProjectionSourceV1 {
+  work_unit_id: string;
+  artifact_hash: string;
+  source_unit_range: Pass1SourceUnitRangeV1;
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+}
+
+type Pass1StitchProjectedRenderV1 =
+  | {
+      status: "within_limit";
+      input: Pass1LidStitchRenderInputV1;
+      rendered_input: string;
+      proof: ModelInputBudgetProofV1;
+    }
+  | {
+      status: "over_limit";
+      evaluation: ModelInputOverLimitV1;
+      reason: ModelInputUnsplittableDraftV1["reason"];
+    };
+
+function compareStableText(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function boundaryProjectionNodes(source: Pass1StitchProjectionSourceV1): Pass1LidStitchRenderNodeV1[] {
+  const degree = new Map<string, number>();
+  for (const edge of source.edges) {
+    degree.set(edge.source, (degree.get(edge.source) ?? 0) + 1);
+    degree.set(edge.target, (degree.get(edge.target) ?? 0) + 1);
+  }
+  const typeRank: Record<GraphNode["type"], number> = { claim: 0, concept: 1, entity: 2 };
+  return source.nodes.map((node) => ({
+    id: node.id,
+    type: node.type,
+    name: node.name,
+  })).sort((left, right) =>
+    (degree.get(left.id) ?? 0) - (degree.get(right.id) ?? 0)
+    || typeRank[left.type] - typeRank[right.type]
+    || compareStableText(left.id, right.id)
+    || compareStableText(left.name, right.name));
+}
+
+function pass1BudgetFromProof(proof: ModelInputBudgetProofV1): Pass1BudgetV1 {
+  return {
+    stage_body_limit_tokens: proof.stage_body_limit_tokens,
+    executor_context_floor_tokens: proof.executor_context_floor_tokens,
+    prompt_reserve_tokens: proof.prompt_reserve_tokens,
+    protocol_reserve_tokens: proof.protocol_reserve_tokens,
+    output_reserve_tokens: proof.output_reserve_tokens,
+    safety_margin_tokens: proof.safety_margin_tokens,
+  };
+}
+
+function buildBoundedStitchProjection(input: {
+  work_unit_id: string;
+  window_id: number;
+  reducer_level: number;
+  group_ordinal: number;
+  role: "stitch" | "final";
+  source_unit_range: Pass1SourceUnitRangeV1;
+  children: Pass1StitchProjectionSourceV1[];
+  policy: ExtractionPolicyFingerprintV1;
+  budget: Pass1BudgetV1;
+}): Pass1StitchProjectedRenderV1 {
+  const rankedNodes = input.children.map(boundaryProjectionNodes);
+  const selectedNodes: Pass1LidStitchRenderNodeV1[][] = input.children.map(() => []);
+  const render = () => {
+    const renderInput: Pass1LidStitchRenderInputV1 = {
+      version: "pass1_lid_stitch_input.v1",
+      work_unit_id: input.work_unit_id,
+      window_id: input.window_id,
+      reducer_level: input.reducer_level,
+      group_ordinal: input.group_ordinal,
+      role: input.role,
+      source_unit_range: { ...input.source_unit_range },
+      children: input.children.map((child, index): Pass1LidStitchRenderChildV1 => ({
+        work_unit_id: child.work_unit_id,
+        artifact_hash: child.artifact_hash,
+        source_unit_range: { ...child.source_unit_range },
+        payload: {
+          nodes: [...selectedNodes[index]],
+          edges: [],
+        },
+      })),
+    };
+    const renderedInput = renderPass1LidStitchModelInput(renderInput);
+    const evaluation = evaluateModelInputBudget({
+      ...input.budget,
+      rendered_input: renderedInput,
+      router_version: input.policy.router_version,
+      prompt_sha256: input.policy.prompt_sha256,
+    });
+    return { input: renderInput, rendered_input: renderedInput, evaluation };
+  };
+
+  let current = render();
+  if (current.evaluation.status === "over_limit") {
+    return {
+      status: "over_limit",
+      evaluation: current.evaluation,
+      reason: "renderer_fixed_overhead",
+    };
+  }
+
+  const cursors = rankedNodes.map(() => 0);
+  for (const [index, nodes] of rankedNodes.entries()) {
+    if (!nodes.length) continue;
+    selectedNodes[index].push(nodes[0]);
+    const attempted = render();
+    if (attempted.evaluation.status === "over_limit") {
+      selectedNodes[index].pop();
+      return {
+        status: "over_limit",
+        evaluation: attempted.evaluation,
+        reason: "no_safe_boundary",
+      };
+    }
+    cursors[index] = 1;
+    current = attempted;
+  }
+
+  let hasCandidates = true;
+  while (hasCandidates) {
+    hasCandidates = false;
+    for (const [index, nodes] of rankedNodes.entries()) {
+      const cursor = cursors[index];
+      if (cursor >= nodes.length) continue;
+      hasCandidates = true;
+      selectedNodes[index].push(nodes[cursor]);
+      cursors[index] += 1;
+      const attempted = render();
+      if (attempted.evaluation.status === "over_limit") {
+        selectedNodes[index].pop();
+        continue;
+      }
+      current = attempted;
+    }
+  }
+
+  if (current.evaluation.status !== "within_limit") {
+    throw new Error("pass1 stitch boundary projection lost its within-limit proof");
+  }
+  return {
+    status: "within_limit",
+    input: current.input,
+    rendered_input: current.rendered_input,
+    proof: current.evaluation.proof,
+  };
+}
+
+function stitchTaskProjection(
+  target: AutomaticBuildTarget,
+  task: Pass1ShadowTaskV1,
+): Pass1StitchProjectedRenderV1 & { dependencies?: Pass1ShadowDependencyV1[] } {
   if (task.route.role !== "stitch" && task.route.role !== "final") {
     throw new Error("pass1 stitch renderer requires a stitch/final task");
   }
   const dependencies = readStitchDependencies(target, task);
-  return renderPass1LidStitchModelInput({
-    version: "pass1_lid_stitch_input.v1",
+  const projected = buildBoundedStitchProjection({
     work_unit_id: task.descriptor.work_unit_id,
     window_id: task.route.window_id,
     reducer_level: task.route.reducer_level,
     group_ordinal: task.route.group_ordinal,
     role: task.route.role,
-    source_unit_range: { ...task.route.source_unit_range },
+    source_unit_range: task.route.source_unit_range,
     children: dependencies.map((dependency) => ({
       work_unit_id: dependency.task.descriptor.work_unit_id,
       artifact_hash: dependency.artifact.artifact_hash,
-      source_unit_range: { ...dependency.payload.source_unit_range },
-      payload: {
-        nodes: dependency.payload.nodes,
-        edges: dependency.payload.edges,
-      },
+      source_unit_range: dependency.payload.source_unit_range,
+      nodes: dependency.payload.nodes,
+      edges: dependency.payload.edges,
     })),
+    policy: task.descriptor.policy_fingerprint,
+    budget: pass1BudgetFromProof(task.descriptor.input_budget_proof),
   });
+  return { ...projected, dependencies };
+}
+
+function renderStitchTaskInput(target: AutomaticBuildTarget, task: Pass1ShadowTaskV1): string {
+  const projected = stitchTaskProjection(target, task);
+  if (projected.status === "over_limit") {
+    throw new Error("pass1 frozen stitch boundary projection exceeds its budget proof");
+  }
+  return projected.rendered_input;
 }
 
 export function replayPass1ShadowInput(input: {
@@ -1283,6 +1449,29 @@ export function replayPass1ShadowInput(input: {
     throw new Error("pass1 shadow input hash drifted from its descriptor");
   }
   return { descriptor: task.descriptor, rendered_input: renderedInput, route: task.route };
+}
+
+function assertStitchEdgesCrossAdjacentProjections(
+  candidate: Pass1LidStitchCandidateV1,
+  renderInput: Pass1LidStitchRenderInputV1,
+): void {
+  const memberships = new Map<string, number[]>();
+  for (const [childIndex, child] of renderInput.children.entries()) {
+    for (const node of child.payload.nodes) {
+      const indexes = memberships.get(node.id) ?? [];
+      indexes.push(childIndex);
+      memberships.set(node.id, indexes);
+    }
+  }
+  for (const [edgeIndex, edge] of candidate.edges.entries()) {
+    const sourceChildren = memberships.get(edge.source) ?? [];
+    const targetChildren = memberships.get(edge.target) ?? [];
+    const crossesAdjacentChildren = sourceChildren.some((sourceIndex) =>
+      targetChildren.some((targetIndex) => Math.abs(sourceIndex - targetIndex) === 1));
+    if (!crossesAdjacentChildren) {
+      throw new Error(`pass1 stitch edge ${edgeIndex} is outside adjacent child boundary projections`);
+    }
+  }
 }
 
 function artifactPayloadForCandidate(input: {
@@ -1308,9 +1497,14 @@ function artifactPayloadForCandidate(input: {
     });
     output = gateOutput({ nodes: parsed.nodes, edges: parsed.edges }, route.evidence_lids);
   } else {
-    const dependencies = readStitchDependencies(input.target, input.task);
-    const nodeIds = dependencies.flatMap((dependency) => dependency.payload.nodes.map((node) => node.id));
+    const projected = stitchTaskProjection(input.target, input.task);
+    if (projected.status === "over_limit" || !projected.dependencies) {
+      throw new Error("pass1 stitch boundary projection is not replayable");
+    }
+    const dependencies = projected.dependencies;
+    const nodeIds = projected.input.children.flatMap((child) => child.payload.nodes.map((node) => node.id));
     const candidate = parsePass1LidStitchCandidate(input.candidate, nodeIds);
+    assertStitchEdgesCrossAdjacentProjections(candidate, projected.input);
     const merged = mergeAndGate([
       ...dependencies.map((dependency) => ({
         nodes: dependency.payload.nodes,
@@ -1455,6 +1649,7 @@ function stitchBlock(input: {
   evidence_lid: string;
   estimated_tokens: number;
   limit_tokens: number;
+  reason: ModelInputUnsplittableDraftV1["reason"];
 }): Pass1StitchRouteResultV1 {
   return {
     status: "blocked",
@@ -1464,12 +1659,61 @@ function stitchBlock(input: {
       code: "model_input_unsplittable",
       parent_lid: input.evidence_lid,
       lid_kind: "paragraph",
-      reason: "renderer_fixed_overhead",
+      reason: input.reason,
       estimated_tokens: input.estimated_tokens,
       limit_tokens: input.limit_tokens,
       retryable: false,
     },
   };
+}
+
+function projectedStitchGroup(input: {
+  window_id: number;
+  reducer_level: number;
+  group_ordinal: number;
+  role: "stitch" | "final";
+  group: Pass1ShadowVerifiedChildV1[];
+  policy: ExtractionPolicyFingerprintV1;
+  budget: Pass1BudgetV1;
+}) {
+  const first = input.group[0].payload.source_unit_range;
+  const last = input.group.at(-1)!.payload.source_unit_range;
+  const sourceUnitRange = {
+    start_ordinal: first.start_ordinal,
+    end_ordinal_exclusive: last.end_ordinal_exclusive,
+  };
+  const childIdentity = input.group.map((child) => ({
+    work_unit_id: child.work_unit.descriptor.work_unit_id,
+    artifact_hash: child.artifact.artifact_hash,
+    source_unit_range: child.payload.source_unit_range,
+  }));
+  const workUnitId = `pass1-window-${input.window_id}-${input.role}-${digest({
+    version: "pass1_lid_stitch_identity.v3",
+    boundary_projection_version: PASS1_STITCH_BOUNDARY_PROJECTION_VERSION,
+    window_id: input.window_id,
+    reducer_level: input.reducer_level,
+    group_ordinal: input.group_ordinal,
+    role: input.role,
+    children: childIdentity,
+  })}`;
+  const projection = buildBoundedStitchProjection({
+    work_unit_id: workUnitId,
+    window_id: input.window_id,
+    reducer_level: input.reducer_level,
+    group_ordinal: input.group_ordinal,
+    role: input.role,
+    source_unit_range: sourceUnitRange,
+    children: input.group.map((child) => ({
+      work_unit_id: child.work_unit.descriptor.work_unit_id,
+      artifact_hash: child.artifact.artifact_hash,
+      source_unit_range: child.payload.source_unit_range,
+      nodes: child.payload.nodes,
+      edges: child.payload.edges,
+    })),
+    policy: input.policy,
+    budget: input.budget,
+  });
+  return { sourceUnitRange, childIdentity, workUnitId, projection };
 }
 
 export function routePass1StitchLevel(input: {
@@ -1485,67 +1729,79 @@ export function routePass1StitchLevel(input: {
   assertSha256(input.policy_set_digest, "policy_set_digest");
   const children = orderedChildren(input);
   const reducerLevel = nextReducerLevel(children);
-  const role = children.length <= PASS1_STITCH_MAX_CHILDREN ? "final" : "stitch";
   const groups: Pass1ShadowVerifiedChildV1[][] = [];
-  for (let index = 0; index < children.length; index += PASS1_STITCH_MAX_CHILDREN) {
-    groups.push(children.slice(index, index + PASS1_STITCH_MAX_CHILDREN));
-  }
-  const units: Pass1ShadowWorkUnitV1[] = [];
-  for (const [groupOrdinal, group] of groups.entries()) {
-    const first = group[0].payload.source_unit_range;
-    const last = group.at(-1)!.payload.source_unit_range;
-    const sourceUnitRange = {
-      start_ordinal: first.start_ordinal,
-      end_ordinal_exclusive: last.end_ordinal_exclusive,
-    };
-    const childIdentity = group.map((child) => ({
-      work_unit_id: child.work_unit.descriptor.work_unit_id,
-      artifact_hash: child.artifact.artifact_hash,
-      source_unit_range: child.payload.source_unit_range,
-    }));
-    const workUnitId = `pass1-window-${input.window_id}-${role}-${digest({
-      version: "pass1_lid_stitch_identity.v2",
-      window_id: input.window_id,
-      reducer_level: reducerLevel,
-      group_ordinal: groupOrdinal,
-      role,
-      children: childIdentity,
-    })}`;
-    const renderChildren: Pass1LidStitchRenderChildV1[] = group.map((child) => ({
-      work_unit_id: child.work_unit.descriptor.work_unit_id,
-      artifact_hash: child.artifact.artifact_hash,
-      source_unit_range: { ...child.payload.source_unit_range },
-      payload: {
-        nodes: child.payload.nodes,
-        edges: child.payload.edges,
-      },
-    }));
-    const renderInput: Pass1LidStitchRenderInputV1 = {
-      version: "pass1_lid_stitch_input.v1",
-      work_unit_id: workUnitId,
-      window_id: input.window_id,
-      reducer_level: reducerLevel,
-      group_ordinal: groupOrdinal,
-      role,
-      source_unit_range: sourceUnitRange,
-      children: renderChildren,
-    };
-    const renderedInput = renderPass1LidStitchModelInput(renderInput);
-    const evaluated = evaluateModelInputBudget({
-      ...input.budget,
-      rendered_input: renderedInput,
-      router_version: input.policy.router_version,
-      prompt_sha256: input.policy.prompt_sha256,
-    });
-    const evidenceLids = uniqueEvidenceLids(group.flatMap((child) => child.payload.evidence_lids));
-    if (evaluated.status === "over_limit") {
+  let childCursor = 0;
+  while (childCursor < children.length) {
+    const remaining = children.length - childCursor;
+    const maxCandidateSize = Math.min(PASS1_STITCH_MAX_CHILDREN, remaining);
+    let selectedSize = 0;
+    let firstRejected: Extract<Pass1StitchProjectedRenderV1, { status: "over_limit" }> | undefined;
+    for (let candidateSize = 1; candidateSize <= maxCandidateSize; candidateSize += 1) {
+      const candidate = projectedStitchGroup({
+        window_id: input.window_id,
+        reducer_level: reducerLevel,
+        group_ordinal: groups.length,
+        role: "stitch",
+        group: children.slice(childCursor, childCursor + candidateSize),
+        policy: input.policy,
+        budget: input.budget,
+      });
+      if (candidate.projection.status === "over_limit") {
+        firstRejected = candidate.projection;
+        break;
+      }
+      selectedSize = candidateSize;
+    }
+    if (selectedSize === 0 || (selectedSize === 1 && remaining > 1)) {
+      const rejected = firstRejected;
+      if (!rejected) throw new Error("pass1 stitch boundary projection did not make reduction progress");
       return stitchBlock({
-        evidence_lid: evidenceLids[0],
-        estimated_tokens: evaluated.estimated_rendered_tokens,
-        limit_tokens: evaluated.effective_body_limit_tokens,
+        evidence_lid: children[childCursor].payload.evidence_lids[0],
+        estimated_tokens: rejected.evaluation.estimated_rendered_tokens,
+        limit_tokens: rejected.evaluation.effective_body_limit_tokens,
+        reason: rejected.reason,
       });
     }
-    const proof = evaluated.proof;
+    if (remaining - selectedSize === 1) {
+      if (selectedSize <= 2) {
+        const rejected = firstRejected;
+        if (!rejected) throw new Error("pass1 stitch byte packing would strand a singleton child");
+        return stitchBlock({
+          evidence_lid: children[childCursor].payload.evidence_lids[0],
+          estimated_tokens: rejected.evaluation.estimated_rendered_tokens,
+          limit_tokens: rejected.evaluation.effective_body_limit_tokens,
+          reason: rejected.reason,
+        });
+      }
+      selectedSize -= 1;
+    }
+    groups.push(children.slice(childCursor, childCursor + selectedSize));
+    childCursor += selectedSize;
+  }
+  const role = groups.length === 1 ? "final" : "stitch";
+  const units: Pass1ShadowWorkUnitV1[] = [];
+  for (const [groupOrdinal, group] of groups.entries()) {
+    const projected = projectedStitchGroup({
+      window_id: input.window_id,
+      reducer_level: reducerLevel,
+      group_ordinal: groupOrdinal,
+      role,
+      group,
+      policy: input.policy,
+      budget: input.budget,
+    });
+    const evidenceLids = uniqueEvidenceLids(group.flatMap((child) => child.payload.evidence_lids));
+    if (projected.projection.status === "over_limit") {
+      return stitchBlock({
+        evidence_lid: evidenceLids[0],
+        estimated_tokens: projected.projection.evaluation.estimated_rendered_tokens,
+        limit_tokens: projected.projection.evaluation.effective_body_limit_tokens,
+        reason: projected.projection.reason,
+      });
+    }
+    const { childIdentity, sourceUnitRange, workUnitId } = projected;
+    const renderedInput = projected.projection.rendered_input;
+    const proof = projected.projection.proof;
     const route: Pass1ShadowRouteV1 = {
       role,
       window_id: input.window_id,

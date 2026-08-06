@@ -485,7 +485,7 @@ function pass1RoutingRecovery(input: {
       limit_tokens: input.limit_tokens,
     }],
     retryable: false,
-    recovery_actions: ["upgrade_executor"],
+    recovery_actions: ["migrate_policy"],
   });
 }
 

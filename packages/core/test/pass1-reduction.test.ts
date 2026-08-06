@@ -51,6 +51,7 @@ import {
   buildSemanticArtifactEnvelope,
   buildSemanticArtifactEnvelopeV3,
   freezeAutomaticBuildStagePolicy,
+  writeAutomaticBuildGenerationArtifact,
   type SemanticArtifactEnvelopeV3,
   type SemanticArtifactProvenanceV2,
 } from "../src/semantic-artifact";
@@ -74,6 +75,10 @@ const BUDGET: Omit<ModelInputBudgetRequestV1, "rendered_input" | "router_version
   protocol_reserve_tokens: 256,
   output_reserve_tokens: 1_024,
   safety_margin_tokens: 256,
+};
+const PRODUCTION_STITCH_BUDGET = {
+  ...BUDGET,
+  stage_body_limit_tokens: 6_000,
 };
 const TINY_BUDGET = {
   stage_body_limit_tokens: 1,
@@ -152,12 +157,14 @@ function realisticGraphChild(
   childOrdinal: number,
   nodeCount: number,
   edgeCount: number,
+  policySetDigest = POLICY_SET_DIGEST,
+  nodeNameLength = 10,
 ): Pass1ShadowVerifiedChildV1 {
   const lid = unit.route.evidence_lids[0];
   const nodes = Array.from({ length: nodeCount }, (_, nodeOrdinal): GraphNode => ({
     id: `concept:synthetic_${childOrdinal}_${nodeOrdinal}_${"x".repeat(18)}`,
     type: "concept",
-    name: "图".repeat(10),
+    name: "图".repeat(nodeNameLength),
     occurrences: [lid],
     source_lid: null,
   }));
@@ -184,7 +191,7 @@ function realisticGraphChild(
     work_unit_id: unit.descriptor.work_unit_id,
     input_hash: unit.descriptor.input_hash,
     proof_digest: unit.descriptor.input_budget_proof.proof_digest,
-    policy_set_digest: POLICY_SET_DIGEST,
+    policy_set_digest: policySetDigest,
     policy_fingerprint: unit.descriptor.policy_fingerprint,
     provenance: PROVENANCE,
     payload,
@@ -192,7 +199,7 @@ function realisticGraphChild(
   return verifyPass1ShadowArtifact({
     work_unit: unit,
     artifact,
-    policy_set_digest: POLICY_SET_DIGEST,
+    policy_set_digest: policySetDigest,
   });
 }
 
@@ -539,9 +546,42 @@ describe("Pass1 dormant fragment/stitch routing", () => {
     expect(forward.levels.at(-1)![0].route.role).toBe("final");
   });
 
-  it("routes a realistic four-child final stitch without charging duplicate child route metadata", () => {
+  it("packs stitch groups by rendered boundary bytes before the eight-child ceiling", () => {
+    const prepared = preparedFragmentUnits(8);
+    const children = prepared.units.map((unit, index) => realisticGraphChild(
+      unit,
+      index,
+      1,
+      0,
+      POLICY_SET_DIGEST,
+      1_024,
+    ));
+    const routed = routePass1StitchLevel({
+      target: prepared.units[0].descriptor.target,
+      window_id: 0,
+      source_unit_count: prepared.units.length,
+      children,
+      policy_set_digest: POLICY_SET_DIGEST,
+      policy: pass1LidStitchPolicy(resolveContentProfile("technical_learning")),
+      budget: PRODUCTION_STITCH_BUDGET,
+    });
+
+    expect(routed).toMatchObject({ status: "routed", role: "stitch" });
+    if (routed.status !== "routed") return;
+    expect(routed.units.length).toBeGreaterThan(1);
+    expect(routed.units.reduce((count, unit) => {
+      if (unit.descriptor.input_basis.kind !== "artifact_reduction") return count;
+      expect(unit.descriptor.input_basis.dependency_artifacts.length).toBeGreaterThanOrEqual(2);
+      expect(unit.descriptor.input_basis.dependency_artifacts.length).toBeLessThan(8);
+      expect(unit.descriptor.input_budget_proof.estimated_rendered_tokens)
+        .toBeLessThanOrEqual(PRODUCTION_STITCH_BUDGET.stage_body_limit_tokens);
+      return count + unit.descriptor.input_basis.dependency_artifacts.length;
+    }, 0)).toBe(8);
+  });
+
+  it("routes the real 86-node/77-edge four-child shape through a bounded boundary projection", () => {
     const prepared = preparedFragmentUnits(4);
-    const graphSizes = [[1, 0], [22, 18], [16, 12], [21, 20]] as const;
+    const graphSizes = [[18, 17], [23, 21], [22, 20], [23, 19]] as const;
     const children = prepared.units.map((unit, index) => realisticGraphChild(
       unit,
       index,
@@ -555,7 +595,7 @@ describe("Pass1 dormant fragment/stitch routing", () => {
       children,
       policy_set_digest: POLICY_SET_DIGEST,
       policy: pass1LidStitchPolicy(resolveContentProfile("technical_learning")),
-      budget: BUDGET,
+      budget: PRODUCTION_STITCH_BUDGET,
     });
 
     expect(routed).toMatchObject({ status: "routed" });
@@ -564,6 +604,16 @@ describe("Pass1 dormant fragment/stitch routing", () => {
     expect(routed.units).toHaveLength(1);
     const unit = routed.units[0];
     if (unit.route.role !== "final") throw new Error("expected one final stitch unit");
+    const rendered = JSON.parse(unit.rendered_input) as {
+      children: Array<{ payload: { nodes: Array<Record<string, unknown>>; edges: GraphEdge[] } }>;
+    };
+    expect(rendered.children.flatMap((child) => child.payload.nodes)).toHaveLength(86);
+    expect(rendered.children.flatMap((child) => child.payload.nodes))
+      .toEqual(expect.arrayContaining([expect.objectContaining({ id: expect.any(String), name: expect.any(String) })]));
+    expect(rendered.children.flatMap((child) => child.payload.nodes)
+      .every((node) => Object.keys(node).sort().join(",") === "id,name,type"))
+      .toBe(true);
+    expect(rendered.children.flatMap((child) => child.payload.edges).length).toBeLessThan(77);
     const legacyInput = {
       version: "pass1_lid_stitch_input.v1",
       work_unit_id: unit.descriptor.work_unit_id,
@@ -580,9 +630,85 @@ describe("Pass1 dormant fragment/stitch routing", () => {
       })),
     };
     expect(estimateTokens(`${JSON.stringify(legacyInput)}\n`))
-      .toBeGreaterThan(BUDGET.stage_body_limit_tokens);
+      .toBeGreaterThan(PRODUCTION_STITCH_BUDGET.stage_body_limit_tokens);
     expect(routed.units[0].descriptor.input_budget_proof.estimated_rendered_tokens)
-      .toBeLessThanOrEqual(BUDGET.stage_body_limit_tokens);
+      .toBeLessThanOrEqual(PRODUCTION_STITCH_BUDGET.stage_body_limit_tokens);
+  });
+
+  it("deterministically merges the complete 86-node/77-edge graph behind the bounded final projection", () => {
+    const prepared = preparedFragmentUnits(4);
+    const profile = resolveContentProfile("technical_learning");
+    const targetRef = prepared.units[0].descriptor.target;
+    const target: AutomaticBuildTarget = {
+      kind: "source_file",
+      profile_id: targetRef.profile_id,
+      book_id: targetRef.book_id,
+      root_dir: path.dirname(path.dirname(targetRef.workspace_dir)),
+      workspace_dir: targetRef.workspace_dir,
+      source_path: path.join(path.dirname(targetRef.workspace_dir), "synthetic.md"),
+      target_ref: targetRef,
+    };
+    const policySet = freezeAutomaticBuildStagePolicySet(
+      target,
+      createAutomaticBuildStagePolicySet({
+        target_ref: targetRef,
+        stage: "pass1",
+        members: pass1ModelSlicePolicyMembers(profile),
+        frozen_at: "2026-08-06T01:00:00.000Z",
+      }),
+    );
+    const graphSizes = [[18, 17], [23, 21], [22, 20], [23, 19]] as const;
+    const children = prepared.units.map((unit, index) => {
+      const task = createPass1ShadowTask({
+        work_unit: unit,
+        source_fingerprint: sha256(prepared.source),
+        policy_set_digest: policySet.policy_set_digest,
+        source_unit_count: prepared.units.length,
+      });
+      freezePass1ShadowTask(target, task);
+      const child = realisticGraphChild(
+        unit,
+        index,
+        graphSizes[index][0],
+        graphSizes[index][1],
+        policySet.policy_set_digest,
+      );
+      writeAutomaticBuildGenerationArtifact(target, child.artifact);
+      return child;
+    });
+    const routed = routePass1StitchLevel({
+      target: targetRef,
+      window_id: 0,
+      source_unit_count: prepared.units.length,
+      children,
+      policy_set_digest: policySet.policy_set_digest,
+      policy: pass1LidStitchPolicy(profile),
+      budget: PRODUCTION_STITCH_BUDGET,
+    });
+    if (routed.status !== "routed" || routed.units.length !== 1 || routed.units[0].route.role !== "final") {
+      throw new Error("expected one bounded Pass1 final projection");
+    }
+    const finalTask = createPass1ShadowTask({
+      work_unit: routed.units[0],
+      source_fingerprint: sha256(prepared.source),
+      policy_set_digest: policySet.policy_set_digest,
+      source_unit_count: prepared.units.length,
+    });
+    freezePass1ShadowTask(target, finalTask);
+    const written = writePass1ShadowCandidate({
+      target,
+      source: prepared.source,
+      task: finalTask,
+      candidate: { version: PASS1_LID_STITCH_SCHEMA_VERSION, edges: [] },
+      provenance: PROVENANCE,
+    });
+    const envelope = JSON.parse(readFileSync(written.artifact_path, "utf8")) as SemanticArtifactEnvelopeV3<
+      Pass1ShadowGraphArtifactV1
+    >;
+    expect(envelope.payload.nodes).toHaveLength(86);
+    expect(envelope.payload.edges).toHaveLength(77);
+    expect(buildPass1ShadowFinalCandidate({ target, source: prepared.source, task: finalTask }))
+      .toMatchObject({ nodes: { length: 86 }, edges: { length: 77 } });
   });
 
   it("fails closed on child gaps, duplicates, stale artifacts, invalid proofs, and invalid candidate writes", () => {

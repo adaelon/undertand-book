@@ -21,6 +21,12 @@ export interface Pass1SourceFragmentRenderInputV1 extends ModelInputSliceRenderC
   core_sha256: string;
 }
 
+export interface Pass1LidStitchRenderNodeV1 {
+  id: GraphNode["id"];
+  type: GraphNode["type"];
+  name: GraphNode["name"];
+}
+
 export interface Pass1LidStitchRenderChildV1 {
   work_unit_id: string;
   artifact_hash: string;
@@ -29,7 +35,7 @@ export interface Pass1LidStitchRenderChildV1 {
     end_ordinal_exclusive: number;
   };
   payload: {
-    nodes: GraphNode[];
+    nodes: Pass1LidStitchRenderNodeV1[];
     edges: GraphEdge[];
   };
 }
