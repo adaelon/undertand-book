@@ -47,7 +47,7 @@ async function expectInsideViewport(page: Page, selector: string, width: number,
 }
 
 test("desktop source stays inline and opens an anchored popup before reader navigation", async ({ page }, testInfo) => {
-  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.setViewportSize({ width: 1440, height: 640 });
   const calls = await installSourceRoutes(page);
   await page.goto("/agent-source-visual.html");
 
@@ -67,7 +67,15 @@ test("desktop source stays inline and opens an anchored popup before reader navi
   await expect(popup.locator("mark")).toHaveText(evidence);
   await expect(page.getByTestId("reader-status")).toHaveText("保持当前阅读位置");
   expect(calls).toEqual(["resolve"]);
-  await expectInsideViewport(page, ".agent-source-popup", 1440, 900);
+  await expectInsideViewport(page, ".agent-source-popup", 1440, 640);
+
+  const popupBox = await popup.boundingBox();
+  expect(popupBox).not.toBeNull();
+  const popupIsBesideButton = (
+    popupBox!.x + popupBox!.width <= buttonBox!.x - 8
+    || popupBox!.x >= buttonBox!.x + buttonBox!.width + 8
+  );
+  expect(popupIsBesideButton).toBe(true);
 
   const overflow = await popup.evaluate((node) => ({
     horizontal: node.scrollWidth > node.clientWidth + 1,

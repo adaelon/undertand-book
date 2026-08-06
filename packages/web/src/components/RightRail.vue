@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { BookOpen, ExternalLink, Undo2, X } from "@lucide/vue";
 import { api } from "../api";
 import type {
@@ -186,7 +186,14 @@ interface AgentSourcePopupState {
 }
 
 const agentSourcePopup = ref<AgentSourcePopupState | null>(null);
+const agentSourcePopupRef = ref<HTMLElement | null>(null);
 let sourceRequestSequence = 0;
+let agentSourceAnchor: HTMLElement | null = null;
+const SOURCE_POPUP_MARGIN = 12;
+const SOURCE_POPUP_GAP = 8;
+const SOURCE_POPUP_WIDTH = 420;
+const SOURCE_POPUP_INITIAL_HEIGHT = 240;
+const SOURCE_POPUP_BOTTOM_SHEET_MAX_WIDTH = 700;
 const activeAgentSource = computed(() => {
   const popup = agentSourcePopup.value;
   return popup?.sources.find((source) => source.source_ref_id === popup.activeSourceRefId) ?? null;
@@ -236,17 +243,66 @@ function markdownPartClass(parts: AgentAnswerPart[], index: number): Record<stri
 function closeAgentSourcePopup() {
   sourceRequestSequence += 1;
   agentSourcePopup.value = null;
+  agentSourceAnchor = null;
 }
+
+function clampToRange(value: number, minimum: number, maximum: number): number {
+  return Math.min(Math.max(value, minimum), Math.max(minimum, maximum));
+}
+
+function positionAgentSourcePopup() {
+  const popup = agentSourcePopup.value;
+  const popupElement = agentSourcePopupRef.value;
+  const anchor = agentSourceAnchor;
+  if (!popup || !popupElement || !anchor || window.innerWidth <= SOURCE_POPUP_BOTTOM_SHEET_MAX_WIDTH) return;
+
+  const anchorRect = anchor.getBoundingClientRect();
+  const popupRect = popupElement.getBoundingClientRect();
+  const popupWidth = popupRect.width || Math.min(SOURCE_POPUP_WIDTH, window.innerWidth - (SOURCE_POPUP_MARGIN * 2));
+  const popupHeight = popupRect.height || SOURCE_POPUP_INITIAL_HEIGHT;
+  const leftCandidate = anchorRect.left - SOURCE_POPUP_GAP - popupWidth;
+  const rightCandidate = anchorRect.right + SOURCE_POPUP_GAP;
+  const leftFits = leftCandidate >= SOURCE_POPUP_MARGIN;
+  const rightFits = rightCandidate + popupWidth <= window.innerWidth - SOURCE_POPUP_MARGIN;
+
+  let left: number;
+  if (leftFits) {
+    left = leftCandidate;
+  } else if (rightFits) {
+    left = rightCandidate;
+  } else {
+    const spaceOnLeft = anchorRect.left - SOURCE_POPUP_GAP - SOURCE_POPUP_MARGIN;
+    const spaceOnRight = window.innerWidth - SOURCE_POPUP_MARGIN - anchorRect.right - SOURCE_POPUP_GAP;
+    left = spaceOnLeft >= spaceOnRight ? leftCandidate : rightCandidate;
+  }
+
+  popup.left = clampToRange(
+    left,
+    SOURCE_POPUP_MARGIN,
+    window.innerWidth - SOURCE_POPUP_MARGIN - popupWidth,
+  );
+  popup.top = clampToRange(
+    anchorRect.top,
+    SOURCE_POPUP_MARGIN,
+    window.innerHeight - SOURCE_POPUP_MARGIN - popupHeight,
+  );
+}
+
+async function refreshAgentSourcePopupPosition() {
+  await nextTick();
+  positionAgentSourcePopup();
+}
+
+function onAgentSourceViewportResize() {
+  void refreshAgentSourcePopupPosition();
+}
+
+window.addEventListener("resize", onAgentSourceViewportResize);
+onBeforeUnmount(() => window.removeEventListener("resize", onAgentSourceViewportResize));
 
 async function openAgentSources(turn: ChatTurn, sourceRefIds: string[], event: MouseEvent) {
   if (!turn.turnId || sourceRefIds.length === 0) return;
-  const rect = (event.currentTarget as HTMLElement | null)?.getBoundingClientRect();
-  const popupWidth = 420;
-  const left = Math.min(
-    Math.max(rect?.left ?? 12, 12),
-    Math.max(12, window.innerWidth - popupWidth - 12),
-  );
-  const top = Math.min(Math.max((rect?.bottom ?? 52) + 8, 12), Math.max(12, window.innerHeight - 240));
+  agentSourceAnchor = event.currentTarget as HTMLElement | null;
   const requestSequence = ++sourceRequestSequence;
   agentSourcePopup.value = {
     turnId: turn.turnId,
@@ -256,9 +312,10 @@ async function openAgentSources(turn: ChatTurn, sourceRefIds: string[], event: M
     loading: true,
     opening: false,
     error: null,
-    left,
-    top,
+    left: SOURCE_POPUP_MARGIN,
+    top: SOURCE_POPUP_MARGIN,
   };
+  await refreshAgentSourcePopupPosition();
   try {
     const sources = await Promise.all(
       sourceRefIds.map((sourceRefId) => api.agentSourceResolve(turn.turnId!, sourceRefId)),
@@ -266,16 +323,19 @@ async function openAgentSources(turn: ChatTurn, sourceRefIds: string[], event: M
     if (requestSequence !== sourceRequestSequence || !agentSourcePopup.value) return;
     agentSourcePopup.value.sources = sources;
     agentSourcePopup.value.loading = false;
+    await refreshAgentSourcePopupPosition();
   } catch (error) {
     if (requestSequence !== sourceRequestSequence || !agentSourcePopup.value) return;
     agentSourcePopup.value.loading = false;
     agentSourcePopup.value.error = error instanceof Error ? error.message : String(error);
+    await refreshAgentSourcePopupPosition();
   }
 }
 
 function selectAgentSource(sourceRefId: string) {
   if (agentSourcePopup.value?.sources.some((source) => source.source_ref_id === sourceRefId)) {
     agentSourcePopup.value.activeSourceRefId = sourceRefId;
+    void refreshAgentSourcePopupPosition();
   }
 }
 
@@ -857,6 +917,7 @@ function influenceLabel(influence: ProfileUsageTrace["influences"][number]): str
         @mousedown.self="closeAgentSourcePopup"
       >
         <section
+          ref="agentSourcePopupRef"
           class="agent-source-popup"
           :style="agentSourcePopupStyle"
           role="dialog"
