@@ -320,7 +320,8 @@ export function nextAutomaticBuildExecutionIdentity(
     };
   }
   const lastState = states.at(-1)!;
-  const lastIdentity = inferredIdentities(states).at(-1)!;
+  const identities = inferredIdentities(states);
+  const lastIdentity = identities.at(-1)!;
   if (lastState.result?.outcome === "failure") {
     if (!lastState.reset && lastIdentity.semantic_attempt >= limits.max_semantic_attempts) {
       return { status: "retry_exhausted", semantic_attempt: lastIdentity.semantic_attempt };
@@ -337,7 +338,16 @@ export function nextAutomaticBuildExecutionIdentity(
       },
     };
   }
-  if (lastIdentity.lease_epoch >= limits.max_lease_epochs) {
+  let recoveryWindowStartEpoch = 0;
+  for (let index = states.length - 1; index >= 0; index -= 1) {
+    const identity = identities[index];
+    if (identity.semantic_attempt !== lastIdentity.semantic_attempt) break;
+    if (states[index].reset) {
+      recoveryWindowStartEpoch = identity.lease_epoch;
+      break;
+    }
+  }
+  if (lastIdentity.lease_epoch - recoveryWindowStartEpoch >= limits.max_lease_epochs) {
     return {
       status: "executor_instability",
       semantic_attempt: lastIdentity.semantic_attempt,

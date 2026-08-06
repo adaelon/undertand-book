@@ -210,7 +210,7 @@ describe("automatic build task mailbox", () => {
     )).toThrow("candidate hash");
   });
 
-  it("persists writer diagnostics, permits a controlled retry, and round-trips inspect/fail receipts", () => {
+  it("persists writer diagnostics as a terminal semantic failure and round-trips inspect/fail receipts", () => {
     const { root, target, claim } = fixture();
     const staged = stageAutomaticBuildCandidate(
       target,
@@ -219,38 +219,43 @@ describe("automatic build task mailbox", () => {
       candidateFile(root, { nodes: [], edges: [] }),
       { now: "2026-07-19T00:00:01.000Z" },
     );
-    expect(() => submitAutomaticBuildCandidate(
+    const writerFailure = submitAutomaticBuildCandidate(
       target,
       claim.lease_ref,
       claim.lease.token,
       staged.candidate_path,
       () => { throw new Error("schema failure at /nodes"); },
       { now: "2026-07-19T00:00:02.000Z" },
-    )).toThrow("schema failure");
+    );
+    expect(writerFailure).toMatchObject({
+      state: "retryable_failure",
+      diagnostic_code: "writer_failed",
+      candidate_sha256: staged.candidate_sha256,
+    });
     expect(inspectAutomaticBuildTask(target, claim.lease_ref, claim.lease.token)).toMatchObject({
       state: "retryable_failure",
       diagnostic_code: "writer_failed",
       candidate_sha256: staged.candidate_sha256,
     });
-
-    const artifact = path.join(root, "artifact-after-retry.json");
-    const receipt = submitAutomaticBuildCandidate(
-      target,
-      claim.lease_ref,
-      claim.lease.token,
-      staged.candidate_path,
-      () => {
-        writeFileSync(artifact, JSON.stringify({ content_hash: "hash-b" }), "utf8");
-        return { artifact_path: artifact };
-      },
-      { now: "2026-07-19T00:00:03.000Z" },
-    );
+    expect(JSON.parse(readFileSync(path.join(path.dirname(claim.lease_ref), "result.json"), "utf8"))).toMatchObject({
+      outcome: "failure",
+      diagnostic: "schema failure at /nodes",
+    });
     expect(readAutomaticBuildAttemptRecord(target, "pass1", "0")).toMatchObject({
+      failures: 1,
       semantic_attempt: 1,
       lease_epoch: 1,
-      submit_revision: 2,
+      submit_revision: 1,
     });
-    expect(inspectAutomaticBuildTask(target, claim.lease_ref, claim.lease.token)).toEqual(receipt);
+    const retry = claimAutomaticBuildTask(target, "pass1", "0", {
+      owner: "mailbox-retry",
+      now: "2026-07-19T00:00:03.000Z",
+      ttl_ms: 60_000,
+    });
+    expect(retry).toMatchObject({
+      status: "leased",
+      execution_identity: { semantic_attempt: 2, lease_epoch: 1, submit_revision: 0 },
+    });
 
     const other = fixture();
     const failed = failAutomaticBuildTask(

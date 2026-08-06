@@ -336,5 +336,69 @@ describe("automatic build task lease", () => {
       reason: "executor_instability",
       tasks: [{ task_id: "0", status: "executor_instability", semantic_attempt: 1, lease_epoch: 3 }],
     });
+    if (!("reset_commands" in blocked.action)) throw new Error("expected executor reset commands");
+    const resetCommand = blocked.action.reset_commands?.[0];
+    if (!resetCommand) throw new Error("expected executor reset command");
+    const commandIndex = resetCommand.indexOf("record-attempt");
+    expect(resetCommand.slice(commandIndex, commandIndex + 5)).toEqual([
+      "record-attempt",
+      source,
+      "pass1",
+      "0",
+      "reset",
+    ]);
+    expect(resetCommand).toContain("--attempt");
+    expect(resetCommand).toContain("3");
+    expect(resetCommand).toContain("pass1:0:3:reset");
+  });
+
+  it("opens a fresh lease recovery window after an approved reset", () => {
+    const { target } = targetFixture();
+    for (let epoch = 1; epoch <= 3; epoch += 1) {
+      const result = claimAutomaticBuildTask(target, "pass1", "0", {
+        owner: `root-${epoch}`,
+        now: `2026-07-19T00:00:0${epoch - 1}.000Z`,
+        ttl_ms: 1_000,
+        max_lease_epochs: 3,
+      });
+      expect(result).toMatchObject({
+        status: "leased",
+        execution_identity: { semantic_attempt: 1, lease_epoch: epoch },
+      });
+    }
+    expect(claimAutomaticBuildTask(target, "pass1", "0", {
+      owner: "root-blocked",
+      now: "2026-07-19T00:00:03.000Z",
+      ttl_ms: 1_000,
+      max_lease_epochs: 3,
+    })).toMatchObject({ status: "executor_instability", semantic_attempt: 1, lease_epoch: 3 });
+
+    recordAutomaticBuildAttemptEvent(target, {
+      stage: "pass1",
+      work_unit_id: "0",
+      attempt: 3,
+      event_id: "pass1:0:3:reset",
+      outcome: "reset",
+      created_at: "2026-07-19T00:00:03.100Z",
+    });
+
+    for (let leaseEpoch = 4; leaseEpoch <= 6; leaseEpoch += 1) {
+      const result = claimAutomaticBuildTask(target, "pass1", "0", {
+        owner: `root-${leaseEpoch}`,
+        now: `2026-07-19T00:00:0${leaseEpoch}.000Z`,
+        ttl_ms: 1_000,
+        max_lease_epochs: 3,
+      });
+      expect(result).toMatchObject({
+        status: "leased",
+        execution_identity: { semantic_attempt: 1, lease_epoch: leaseEpoch },
+      });
+    }
+    expect(claimAutomaticBuildTask(target, "pass1", "0", {
+      owner: "root-blocked-again",
+      now: "2026-07-19T00:00:07.000Z",
+      ttl_ms: 1_000,
+      max_lease_epochs: 3,
+    })).toMatchObject({ status: "executor_instability", semantic_attempt: 1, lease_epoch: 6 });
   });
 });

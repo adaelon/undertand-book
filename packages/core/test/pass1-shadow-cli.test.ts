@@ -11,6 +11,7 @@ import { resolveContentProfile } from "../src/content-profile";
 import type { GraphEdge } from "../src/generated/GraphEdge";
 import type { GraphNode } from "../src/generated/GraphNode";
 import type { ModelInputBudgetRequestV1 } from "../src/model-input-budget";
+import type { Pass1LidStitchRenderInputV1 } from "../src/model-input-renderer";
 import {
   PASS1_LID_STITCH_PROMPT_NAME,
   PASS1_LID_STITCH_PROMPT_SHA256,
@@ -101,12 +102,44 @@ function initialCandidate(unit: Pass1ShadowWorkUnitV1): unknown {
   };
 }
 
-function stitchCandidate(children: Pass1ShadowVerifiedChildV1[]): unknown {
-  const nodeIds = [...new Set(children.flatMap((child) => child.payload.nodes.map((node) => node.id)))];
+function stitchRenderInput(unit: Pass1ShadowWorkUnitV1): Pass1LidStitchRenderInputV1 {
+  if (unit.route.role !== "stitch" && unit.route.role !== "final") {
+    throw new Error("expected a Pass1 stitch work unit");
+  }
+  return JSON.parse(unit.rendered_input) as Pass1LidStitchRenderInputV1;
+}
+
+function projectedEdge(
+  input: Pass1LidStitchRenderInputV1,
+  minimumChildDistance: number,
+  maximumChildDistance: number,
+): GraphEdge | undefined {
+  for (const [sourceIndex, sourceChild] of input.children.entries()) {
+    for (let targetIndex = sourceIndex + minimumChildDistance;
+      targetIndex < input.children.length && targetIndex <= sourceIndex + maximumChildDistance;
+      targetIndex += 1) {
+      for (const sourceNode of sourceChild.payload.nodes) {
+        const targetNode = input.children[targetIndex].payload.nodes.find((node) => node.id !== sourceNode.id);
+        if (targetNode) return edge(sourceNode.id, targetNode.id);
+      }
+    }
+  }
+  return undefined;
+}
+
+function stitchCandidate(unit: Pass1ShadowWorkUnitV1): unknown {
+  const candidateEdge = projectedEdge(stitchRenderInput(unit), 1, 1);
   return {
     version: PASS1_LID_STITCH_SCHEMA_VERSION,
-    edges: nodeIds.length > 1 ? [edge(nodeIds[0], nodeIds.at(-1)!)] : [],
+    edges: candidateEdge ? [candidateEdge] : [],
   };
+}
+
+function nonAdjacentStitchCandidate(unit: Pass1ShadowWorkUnitV1): unknown | undefined {
+  const candidateEdge = projectedEdge(stitchRenderInput(unit), 2, Number.MAX_SAFE_INTEGER);
+  return candidateEdge
+    ? { version: PASS1_LID_STITCH_SCHEMA_VERSION, edges: [candidateEdge] }
+    : undefined;
 }
 
 function runPass1Cli(input: {
@@ -321,11 +354,7 @@ describe("Pass1 shadow CLI", () => {
           policy_set_digest: policySet.policy_set_digest,
           source_unit_count: routed.units.length,
         });
-        const unitChildren = children.filter((child) => (
-          child.payload.source_unit_range.start_ordinal >= unit.route.source_unit_range.start_ordinal
-          && child.payload.source_unit_range.end_ordinal_exclusive <= unit.route.source_unit_range.end_ordinal_exclusive
-        ));
-        const candidate = stitchCandidate(unitChildren);
+        const candidate = stitchCandidate(unit);
         if (unit.route.role === "final") {
           finalUnit = unit;
           finalTask = task;
@@ -383,6 +412,25 @@ describe("Pass1 shadow CLI", () => {
           );
           mkdirSync(candidateDirectory, { recursive: true });
           finalCandidatePath = path.join(candidateDirectory, "candidate.json");
+          const nonAdjacentCandidate = nonAdjacentStitchCandidate(unit);
+          expect(nonAdjacentCandidate).toBeDefined();
+          if (nonAdjacentCandidate) {
+            writeFileSync(finalCandidatePath, JSON.stringify(nonAdjacentCandidate), "utf8");
+            const nonAdjacentWrite = runPass1Cli({
+              root: fixture.root,
+              source_file: fixture.source_file,
+              script: "pass1-write.ts",
+              args: [
+                unit.descriptor.work_unit_id,
+                finalCandidatePath,
+                "--book-id", fixture.target.book_id,
+                "--shadow-generation", policySet.policy_set_digest,
+                "--generated-at", PROVENANCE.generated_at,
+              ],
+            });
+            expect(nonAdjacentWrite.status).toBe(1);
+            expect(nonAdjacentWrite.stderr).toMatch(/outside adjacent child boundary projections/i);
+          }
           writeFileSync(finalCandidatePath, JSON.stringify(candidate), "utf8");
           const finalWrite = runPass1Cli({
             root: fixture.root,

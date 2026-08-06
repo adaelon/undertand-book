@@ -407,8 +407,16 @@ export function submitAutomaticBuildCandidate(
     } satisfies AutomaticBuildTaskReceiptV1;
     ensureReceiptBounded(failureReceipt);
     writeJsonAtomic(failurePath(leaseRef), failureReceipt);
-    rmSync(submissionPath, { force: true });
-    throw error;
+    recordAutomaticBuildAttemptEvent(target, {
+      stage: lease.stage,
+      work_unit_id: lease.work_unit_id,
+      attempt: lease.attempt,
+      event_id: `${lease.stage}:${lease.work_unit_id}:${lease.attempt}:failure`,
+      outcome: "failure",
+      diagnostic: message,
+      created_at: failedAt,
+    });
+    return failureReceipt;
   }
 }
 

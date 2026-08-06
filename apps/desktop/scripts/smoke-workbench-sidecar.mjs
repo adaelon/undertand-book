@@ -304,10 +304,12 @@ try {
     || path.resolve(task.input_command[2]) !== canonicalWorkspace
     || task?.submit_command?.[1] !== "submit"
     || path.resolve(task.submit_command[2]) !== canonicalWorkspace
-    || task?.descriptor?.version !== "automatic_build_work_unit.v2"
+    || task?.descriptor?.version !== "automatic_build_work_unit.v3"
     || task.descriptor.work_unit_id !== task.task_id
     || task.descriptor.kind !== "pass1_window"
     || task.descriptor.input_hash !== task.lease.input_hash
+    || task.descriptor.input_budget_proof?.proof_digest !== task.lease.proof_digest
+    || task.lease.policy_set_digest !== next.action.task_bindings?.[task.task_id]?.policy_set_digest
     || JSON.stringify(task.descriptor.policy_fingerprint) !== JSON.stringify(task.lease.policy_fingerprint)
     || task.descriptor.target?.input_fingerprint !== next.snapshot.target.target_ref.input_fingerprint
     || !(task.descriptor.cost?.score > 0)
@@ -344,7 +346,16 @@ try {
   spawnGenerated(retryTask.input_command);
   const candidateSource = path.join(smokeRoot, "pass1-candidate.json");
   const candidateOnlyMarker = "AP5_CANDIDATE_ONLY_MARKER";
-  writeFileSync(candidateSource, JSON.stringify({ nodes: [], edges: [], executor_marker: candidateOnlyMarker }), "utf8");
+  writeFileSync(candidateSource, JSON.stringify({
+    nodes: [{
+      id: "concept:ap5-candidate-only-marker",
+      type: "concept",
+      name: candidateOnlyMarker,
+      occurrences: [visibleLid],
+      source_lid: null,
+    }],
+    edges: [],
+  }), "utf8");
   writeFileSync(retryTask.candidate_path, readFileSync(candidateSource));
   const submitResult = spawnGenerated(retryTask.submit_command);
   const receipt = JSON.parse(submitResult.stdout);
@@ -394,33 +405,52 @@ try {
   );
   const firstAttempt = JSON.parse(readFileSync(path.join(taskAttempts, "0001", "result.json"), "utf8"));
   const secondAttempt = JSON.parse(readFileSync(path.join(taskAttempts, "0002", "result.json"), "utf8"));
+  const semanticArtifactPath = typeof receipt.artifact_path === "string"
+    ? path.resolve(receipt.artifact_path)
+    : "";
+  const semanticArtifactRelative = semanticArtifactPath
+    ? path.relative(canonicalWorkspace, semanticArtifactPath)
+    : "";
   if (
     firstAttempt.outcome !== "failure"
     || secondAttempt.outcome !== "success"
     || !existsSync(path.join(taskAttempts, "0002", "candidate.json"))
     || !existsSync(path.join(taskAttempts, "0002", "receipt.json"))
-    || !existsSync(path.join(workspace, ".build", "pass1", `${task.task_id}.json`))
+    || !semanticArtifactPath
+    || semanticArtifactRelative.startsWith("..")
+    || path.isAbsolute(semanticArtifactRelative)
+    || !existsSync(semanticArtifactPath)
     || existsSync(path.join(workspace, ".build", "automatic-build", "attempts.json"))
     || existsSync(path.join(smokeRoot, ".understand-book", "source"))
   ) {
     throw new Error("automatic build attempt events were not isolated in the canonical paper workspace");
   }
-  const semanticArtifactPath = path.join(workspace, ".build", "pass1", `${task.task_id}.json`);
   const semanticArtifact = JSON.parse(readFileSync(semanticArtifactPath, "utf8"));
-  const policyLock = JSON.parse(readFileSync(path.join(
-    workspace, ".build", "automatic-build", "v2", "policies", "pass1.json",
+  const policySet = JSON.parse(readFileSync(path.join(
+    workspace,
+    ".build",
+    "automatic-build",
+    "v3",
+    "policies",
+    "pass1",
+    retryTask.lease.policy_set_digest,
+    "policy.json",
   ), "utf8"));
+  const policySetMember = policySet.members?.find((member) => member.kind === retryTask.descriptor.kind);
   if (
-    semanticArtifact.version !== "semantic_task_artifact.v2"
+    semanticArtifact.version !== "semantic_task_artifact.v3"
     || semanticArtifact.stage !== "pass1"
     || semanticArtifact.work_unit_id !== task.task_id
-    || semanticArtifact.input_hash !== semanticArtifact.payload?.content_hash
+    || semanticArtifact.input_hash !== retryTask.descriptor.input_hash
+    || semanticArtifact.proof_digest !== retryTask.lease.proof_digest
+    || semanticArtifact.policy_set_digest !== retryTask.lease.policy_set_digest
     || semanticArtifact.policy_fingerprint?.quality_profile !== "full"
     || semanticArtifact.provenance?.attempt !== 2
     || semanticArtifact.provenance?.executor !== retryTask.lease.owner
     || sha256(readFileSync(semanticArtifactPath)) !== receipt.artifact_sha256
-    || !isDeepStrictEqual(policyLock.policy_fingerprint, retryTask.lease.policy_fingerprint)
-    || !/^[a-f0-9]{64}$/.test(policyLock.policy_digest ?? "")
+    || policySet.version !== "automatic_build_stage_policy_set.v2"
+    || policySet.policy_set_digest !== retryTask.lease.policy_set_digest
+    || !isDeepStrictEqual(policySetMember?.policy_fingerprint, retryTask.lease.policy_fingerprint)
   ) {
     throw new Error(`automatic build semantic artifact was not policy-bound: ${JSON.stringify(semanticArtifact)}`);
   }
@@ -528,13 +558,19 @@ try {
   }
   semanticArtifact.policy_fingerprint = { ...semanticArtifact.policy_fingerprint, schema_version: "pass1_output.v999" };
   writeFileSync(semanticArtifactPath, JSON.stringify(semanticArtifact, null, 2), "utf8");
-  const { result: staleResult, value: stalePlan } = spawnAcceptedNext(
-    workspace,
-    ["--root", smokeRoot, "--max-parallel", "1", ...legacyClaimProtocolArgs],
+  const { result: staleResult, value: stalePlan } = spawnSidecarJson(
+    ["plan", automaticTarget, ...automaticArgs],
     "automatic build policy drift smoke",
   );
-  if (stalePlan.action?.kind !== "extract" || stalePlan.action?.stage !== "pass1") {
-    throw new Error(`policy drift did not reopen only the stale semantic stage: ${staleResult.stdout}`);
+  if (
+    stalePlan.next_action?.kind !== "needs_user"
+    || stalePlan.next_action?.reason !== "automatic_build_routing_blocked"
+    || stalePlan.next_action?.recovery?.code !== "policy_generation_conflict"
+    || stalePlan.next_action.recovery.stage !== "pass1"
+    || stalePlan.next_action.recovery.retryable !== false
+    || JSON.stringify(stalePlan.next_action.recovery.recovery_actions) !== JSON.stringify(["migrate_policy"])
+  ) {
+    throw new Error(`policy drift did not fail closed with structured recovery: ${staleResult.stdout}`);
   }
   const concurrencySource = path.join(smokeRoot, "sidecar-concurrency.md");
   writeFileSync(concurrencySource, [
@@ -590,6 +626,7 @@ try {
   }
   const submitEmptyTasks = (tasks) => {
     for (const task of tasks) {
+      spawnGenerated(task.input_command);
       writeFileSync(task.candidate_path, JSON.stringify({ nodes: [], edges: [] }), "utf8");
       const receipt = JSON.parse(spawnGenerated(task.submit_command).stdout);
       if (receipt.state !== "committed" || Object.hasOwn(receipt, "payload")) {
@@ -649,6 +686,7 @@ try {
     nodes: [],
     edges: [],
   }), "utf8");
+  const legacyArtifactBytes = readFileSync(legacyArtifactPath, "utf8");
   const { value: legacyAudit } = spawnSidecarJson(
     ["audit-legacy", legacySource, "pass1", "--root", smokeRoot],
     "automatic build AP15 legacy audit smoke",
@@ -667,7 +705,11 @@ try {
     || legacyAudit.source_fresh_artifacts !== 1
     || legacyAudit.schema_valid_artifacts !== 1
     || legacyAudit.policy_status !== "legacy_policy_unknown"
-    || migrationRequired.action?.reason !== "legacy_migration_required"
+    || migrationRequired.action?.reason !== "automatic_build_routing_blocked"
+    || migrationRequired.action?.recovery?.code !== "policy_generation_migration_required"
+    || migrationRequired.action.recovery.retryable !== false
+    || JSON.stringify(migrationRequired.action.recovery.recovery_actions) !== JSON.stringify(["migrate_policy"])
+    || readFileSync(legacyArtifactPath, "utf8") !== legacyArtifactBytes
   ) {
     throw new Error(`compiled AP15 legacy audit was not fail-closed: ${JSON.stringify({ legacyAudit, migrationRequired })}`);
   }
@@ -679,12 +721,23 @@ try {
     ["next", legacySource, ...legacyArgs],
     "automatic build AP15 v2 rebuild resume smoke",
   );
+  const snapshottedLegacyArtifact = path.join(
+    migrationDecision.legacy_snapshot_path,
+    ".build",
+    "pass1",
+    `${legacyDescriptor.work_unit_id}.json`,
+  );
   if (
     migrationDecision.mode !== "v2_rebuild"
     || !existsSync(path.join(migrationDecision.legacy_snapshot_path, "manifest.json"))
-    || rebuildNext.action?.reason !== "preflight_required"
+    || readFileSync(snapshottedLegacyArtifact, "utf8") !== legacyArtifactBytes
+    || readFileSync(legacyArtifactPath, "utf8") !== legacyArtifactBytes
+    || rebuildNext.action?.reason !== "automatic_build_routing_blocked"
+    || rebuildNext.action?.recovery?.code !== "policy_generation_migration_required"
+    || rebuildNext.action.recovery.retryable !== false
+    || JSON.stringify(rebuildNext.action.recovery.recovery_actions) !== JSON.stringify(["migrate_policy"])
   ) {
-    throw new Error(`compiled AP15 v2 rebuild did not preserve legacy before resume: ${JSON.stringify({ migrationDecision, rebuildNext })}`);
+    throw new Error(`compiled AP15 v2 rebuild did not preserve legacy before policy migration: ${JSON.stringify({ migrationDecision, rebuildNext })}`);
   }
   console.log("workbench sidecar source + hybrid v2 + automatic target/attempt store smoke passed");
 } finally {

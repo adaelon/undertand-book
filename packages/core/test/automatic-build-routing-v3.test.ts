@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
@@ -29,6 +29,7 @@ import {
 } from "../src/semantic-artifact";
 import {
   assertPass1ShadowCandidatePath,
+  pass1ShadowTaskPrivateDirectory,
   readPass1ShadowTask,
   writePass1ShadowFinalCandidate,
 } from "../src/pass1-reduction";
@@ -290,6 +291,67 @@ describe("BR8 production v3 routing release", () => {
     expect(resumedPass1?.pending_work_units).toEqual([]);
     expect(resumedPass1?.work_units?.some((unit) => unit.kind === "pass1_lid_stitch"))
       .toBe(false);
+  }, 30_000);
+
+  it("keeps retry candidates isolated after an earlier writer failure", () => {
+    const fixture = createSyntheticRoutabilityFixture(200);
+    const buildPlan = confirmedStandardBuildPlan(fixture.source_file, fixture.root);
+    const plan = automaticBuildPlan(fixture.source_file, fixture.root, {
+      requested_workers: 1,
+      available_agent_slots: 1,
+      build_plan: buildPlan,
+    });
+    if (!plan.preflight) throw new Error("expected BR8 retry isolation preflight");
+    const next = automaticBuildNext(fixture.source_file, fixture.root, 1, {
+      protocol: AUTOMATIC_BUILD_PROTOCOL_V2,
+      owner: "br8-shadow-retry-isolation",
+      now: "2026-08-04T00:25:00.000Z",
+      accepted_plan_digest: plan.preflight.plan_digest,
+      available_agent_slots: 1,
+      build_plan: buildPlan,
+    });
+    if (next.action.kind !== "extract"
+      || !("tasks" in next.action)
+      || !next.action.tasks?.length) {
+      throw new Error("expected a leased BR8 retry-isolation task");
+    }
+    const task = next.action.tasks[0];
+    if (!("lease" in task) || !task.lease.policy_set_digest) {
+      throw new Error("expected a proof-bound retry-isolation lease");
+    }
+    const invalidCandidate = path.join(fixture.root, "pass1-invalid-retry-candidate.json");
+    const validCandidate = path.join(fixture.root, "pass1-valid-retry-candidate.json");
+    writeFileSync(invalidCandidate, JSON.stringify({ nodes: "invalid", edges: [] }), "utf8");
+    writeFileSync(validCandidate, JSON.stringify({ nodes: [], edges: [] }), "utf8");
+    const generation = {
+      policy_set_digest: task.lease.policy_set_digest,
+      executor: task.lease.owner,
+      generated_at: "2026-08-04T00:25:01.000Z",
+    };
+
+    expect(() => runAutomaticBuildStageWriter(
+      fixture.target,
+      "pass1",
+      task.task_id,
+      invalidCandidate,
+      { ...generation, attempt: 1 },
+    )).toThrow();
+    expect(() => runAutomaticBuildStageWriter(
+      fixture.target,
+      "pass1",
+      task.task_id,
+      validCandidate,
+      { ...generation, attempt: 2, generated_at: "2026-08-04T00:25:02.000Z" },
+    )).not.toThrow();
+
+    const mailbox = pass1ShadowTaskPrivateDirectory(
+      fixture.target,
+      task.lease.policy_set_digest,
+      task.task_id,
+    );
+    const stagedCandidates = readdirSync(mailbox, { recursive: true })
+      .filter((entry) => String(entry).endsWith("candidate.json"));
+    expect(stagedCandidates).toHaveLength(2);
   }, 30_000);
 
   it("adopts an exact v2 whole-window artifact without a model claim and projects a direct public candidate", () => {

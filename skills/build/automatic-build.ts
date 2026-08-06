@@ -523,6 +523,20 @@ function stageArtifactPath(
   }
 }
 
+function shadowCandidatePath(directory: string, attempt: number, candidateBytes: Buffer): string {
+  if (!Number.isSafeInteger(attempt) || attempt < 1) {
+    throw new Error("shadow candidate attempt must be a positive safe integer");
+  }
+  const candidateSha256 = createHash("sha256").update(candidateBytes).digest("hex");
+  return path.join(
+    directory,
+    "attempts",
+    String(attempt).padStart(6, "0"),
+    candidateSha256,
+    "candidate.json",
+  );
+}
+
 export function runAutomaticBuildStageWriter(
   target: AutomaticBuildTarget,
   stage: AutomaticBuildStage,
@@ -554,14 +568,14 @@ export function runAutomaticBuildStageWriter(
           generation.policy_set_digest,
           taskId,
         );
-    const shadowCandidatePath = path.join(directory, "candidate.json");
     const candidateBytes = readFileSync(candidatePath);
-    mkdirSync(directory, { recursive: true });
+    const candidatePathForExecution = shadowCandidatePath(directory, generation.attempt, candidateBytes);
+    mkdirSync(path.dirname(candidatePathForExecution), { recursive: true });
     try {
-      writeFileSync(shadowCandidatePath, candidateBytes, { flag: "wx" });
+      writeFileSync(candidatePathForExecution, candidateBytes, { flag: "wx" });
     } catch (error) {
       const code = error && typeof error === "object" && "code" in error ? String(error.code) : "";
-      if (code !== "EEXIST" || !readFileSync(shadowCandidatePath).equals(candidateBytes)) throw error;
+      if (code !== "EEXIST" || !readFileSync(candidatePathForExecution).equals(candidateBytes)) throw error;
     }
     forwardStageScript(
       target,
@@ -569,7 +583,7 @@ export function runAutomaticBuildStageWriter(
       [
         target.source_path,
         taskId,
-        shadowCandidatePath,
+        candidatePathForExecution,
         ...stageScriptArgs(target).slice(1),
         "--shadow-generation",
         generation.policy_set_digest,
@@ -1127,6 +1141,7 @@ function expandAction(
     const executionBlockers = action.task_ids
       .map((taskId) => ({
         task_id: taskId,
+        last_attempt: attempts[taskId]?.last_attempt ?? 0,
         inspection: inspectAutomaticBuildTaskClaim(target, action.stage, taskId, {
           now: leaseOptions.now,
           max_semantic_attempts: MAX_ATTEMPTS,
@@ -1139,6 +1154,15 @@ function expandAction(
       const reason = executionBlockers.some((item) => item.inspection.status === "retry_exhausted")
         ? "retry_exhausted"
         : "executor_instability";
+      const resetCommands = executionBlockers.map(({ task_id, last_attempt }) => {
+        if (last_attempt < 1) throw new Error(`execution blocker is missing attempt state: ${action.stage}/${task_id}`);
+        return scriptCommand("automatic-build.ts", [
+          "record-attempt", targetInput, action.stage, task_id, "reset",
+          ...targetResolutionCommandArgs(target),
+          "--attempt", String(last_attempt),
+          "--event-id", `${action.stage}:${task_id}:${last_attempt}:reset`,
+        ]);
+      });
       return {
         snapshot,
         action: {
@@ -1146,6 +1170,7 @@ function expandAction(
           reason,
           stage: action.stage,
           tasks: executionBlockers.map(({ task_id, inspection }) => ({ task_id, ...inspection })),
+          reset_commands: resetCommands,
           message: reason === "retry_exhausted"
             ? `semantic extraction failed ${MAX_ATTEMPTS} times; inspect diagnostics before resetting`
             : `task lease recovery exceeded ${MAX_LEASE_EPOCHS} epochs; inspect executor stability before resetting`,
