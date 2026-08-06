@@ -21,6 +21,17 @@ function note(memId: string, lid: string, content: string): MemoryRecord {
 }
 
 describe("ReaderPane Note rendering", () => {
+  it("keeps passive anchor and selected states visually neutral", () => {
+    const styles = readFileSync("src/style.css", "utf8");
+
+    expect(styles).not.toContain(".prose p.anchor");
+    expect(styles).not.toContain(".prose p.selected");
+    expect(styles).not.toContain(".flow-text.anchor");
+    expect(styles).not.toContain(".flow-text.selected");
+    expect(styles).toContain(".prose p.hl");
+    expect(styles).toContain(".flow-text.hl");
+  });
+
   it("keeps flow and single notes behaviorally identical", async () => {
     const short = note("note-short", "1.1", "> quoted source\n\nShort **body**");
     const long = note("note-long", "2.1", `> long source\n\n${"x".repeat(400)}`);

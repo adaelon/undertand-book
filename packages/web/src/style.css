@@ -614,16 +614,6 @@ body {
   font-size: 1rem;
   font-weight: 600;
 }
-.prose p.anchor {
-  border-left: 2px solid var(--reader-coral);
-  padding-left: 0.95rem;
-  margin-left: -1.1rem;
-}
-.prose p.selected {
-  background: var(--reader-coral-soft);
-  border-radius: 8px;
-  box-shadow: -0.5rem 0 0 var(--reader-coral-soft), 0.5rem 0 0 var(--reader-coral-soft);
-}
 .prose p.hl {
   background: rgba(247, 228, 165, 0.46);
 }
@@ -632,17 +622,6 @@ body {
 }
 .flow-text {
   cursor: pointer;
-}
-.flow-text.anchor,
-.formula-open.anchor,
-.formula-inline-source.anchor {
-  box-shadow: inset 0 -2px 0 var(--reader-coral);
-}
-.flow-text.selected,
-.formula-open.selected,
-.formula-inline-source.selected {
-  background: var(--reader-coral-soft);
-  border-radius: 4px;
 }
 .flow-text.hl,
 .formula-open.hl,
@@ -1240,10 +1219,6 @@ input:focus {
     width: calc(100% - 1.5rem);
     padding: 1.25rem 0 2.5rem;
     font-size: 1rem;
-  }
-  .prose p.anchor {
-    margin-left: -0.55rem;
-    padding-left: 0.5rem;
   }
   .asset-source,
   .md pre {
