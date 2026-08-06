@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -247,6 +248,19 @@ describe("BR7 model-input routability", () => {
       },
       target_state: { dry_run_mutates_state: false },
     });
+
+    const repoRoot = path.resolve(process.cwd(), "..", "..");
+    const productionBatch = spawnSync(process.execPath, [
+      path.join(repoRoot, "node_modules", "tsx", "dist", "cli.mjs"),
+      path.join(repoRoot, "skills", "build", "profile-sidecar-batch.ts"),
+      fixture.source_file,
+      "--book-id", fixture.target.book_id,
+      "--content-profile", fixture.target.profile_id,
+      "--production-generation", profile!.policy_set!.policy_set_digest,
+    ], { cwd: fixture.root, encoding: "utf8" });
+    expect(productionBatch.status).toBe(1);
+    expect(productionBatch.stderr).toContain("production profile-sidecar generation still has pending work units");
+    expect(productionBatch.stderr).not.toContain("ProfileSidecarRoutingBudgetBlock");
 
     const next = automaticBuildNext(fixture.source_file, fixture.root, 1, {
       build_plan: buildPlan,

@@ -84,7 +84,14 @@ if (shadowGeneration && shadowFinal) {
 } else {
   const bookId = deriveBookId(book, override);
   const buildDir = `.understand-book/${bookId}/.build/profile-sidecar`;
-  const initial = computeProfileSidecarCandidateStatus({ windows, byLid, source, content_profile: parsedProfile.contentProfile, existing: new Map() });
+  const initial = computeProfileSidecarCandidateStatus({
+    windows,
+    byLid,
+    source,
+    content_profile: parsedProfile.contentProfile,
+    existing: new Map(),
+    allow_over_limit_packets: Boolean(productionGeneration),
+  });
   const discourseItems: TechnicalLearningDiscourseItem[] = [];
   const formulaCandidates: FormulaSemanticsBuildCandidate[] = [];
   let committed: number;

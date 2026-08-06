@@ -481,8 +481,12 @@ export function computeProfileSidecarCandidateStatus(input: {
   source: string;
   content_profile: ContentProfileDefinition;
   existing: ReadonlyMap<string, Pass1ArtifactMeta>;
+  allow_over_limit_packets?: boolean;
 }): ProfileSidecarCandidateStatus {
-  const analysis = analyzeProfileSidecarSemanticUnits(input);
+  const analysis = analyzeProfileSidecarSemanticUnits({
+    ...input,
+    allow_over_limit_packets: input.allow_over_limit_packets,
+  });
   const units = [
     ...Object.values(analysis.packets).map((packet) => ({ work_unit_id: packet.work_unit_id, input_hash: packet.input_hash })),
     ...Object.entries(analysis.skips).map(([workUnitId, skip]) => ({ work_unit_id: workUnitId, input_hash: skip.input_hash, deterministic_skip: skip })),
