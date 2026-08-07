@@ -335,4 +335,66 @@ describe("BuildWorkbenchPane source review", () => {
     await enterReader?.trigger("click");
     expect(wrapper.emitted("enter-reader")).toHaveLength(1);
   });
+
+  it("keeps manifest-backed inputs visible without asking for the same files again", async () => {
+    const imported = snapshot();
+    imported.input = {
+      manifest: {
+        version: "workbench_input_manifest.v1",
+        book_id: "paper-a",
+        profile_id: "paper",
+        display_title: "Paper A",
+        created_at: "1",
+        updated_at: "2",
+        inputs: {
+          paper_md: {
+            path: "paper.md",
+            sha256: "md",
+            size_bytes: 123,
+            source: "uploaded_text",
+            original_path: null,
+          },
+          paper_pdf: {
+            path: "paper.pdf",
+            sha256: "pdf",
+            size_bytes: 456,
+            source: "uploaded_base64",
+            original_path: null,
+          },
+        },
+        config_hash: "cfg",
+        fingerprint: { paper_md_sha256: "md", paper_pdf_sha256: "pdf", config_hash: "cfg" },
+        trusted: false,
+      },
+      fingerprint: { paper_md_sha256: "md", paper_pdf_sha256: "pdf", config_hash: "cfg" },
+      ready: true,
+    };
+
+    const wrapper = mount(BuildWorkbenchPane, {
+      props: {
+        snapshot: imported,
+        loading: false,
+        error: null,
+        confirming: false,
+        importing: false,
+        actioning: false,
+        pdfUrl: "/book/pdf/original",
+      },
+      global: { stubs: { SourceReviewPdfPage: true } },
+    });
+
+    expect(wrapper.text()).toContain("Paper A · 123B MD · 456B PDF");
+    expect(wrapper.text()).toContain("无需重新选择");
+    expect(wrapper.findAll(".file-drop-field")).toHaveLength(0);
+
+    const replaceButton = wrapper.findAll("button").find((button) => button.text() === "更换输入");
+    expect(replaceButton).toBeDefined();
+    await replaceButton?.trigger("click");
+    expect(wrapper.findAll(".file-drop-field")).toHaveLength(2);
+    expect(wrapper.text()).not.toContain("书籍 ID");
+
+    const cancelButton = wrapper.findAll("button").find((button) => button.text() === "取消更换");
+    await cancelButton?.trigger("click");
+    expect(wrapper.findAll(".file-drop-field")).toHaveLength(0);
+  });
 });

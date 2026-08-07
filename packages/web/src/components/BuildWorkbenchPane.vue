@@ -99,13 +99,13 @@ const importMode = ref<"upload" | "path">("upload");
 const importError = ref<string | null>(null);
 const importFields = reactive({
   target_dir: "",
-  book_id: "",
   display_title: "",
   paper_md_path: "",
   paper_pdf_path: "",
 });
 const paperMdFile = ref<File | null>(null);
 const paperPdfFile = ref<File | null>(null);
+const replacingInput = ref(false);
 const selectedStage = ref<BuildStageId>("source_reconciliation");
 const selectedExecutor = ref<ExecutorId>("codex");
 const selectedAdapterMode = ref<WorkbenchAdapterMode>("builtin");
@@ -191,6 +191,13 @@ const canEnterReader = computed(() => (
 ));
 const selectedStageReadiness = computed(() => props.snapshot?.readiness.stages[selectedStage.value] ?? null);
 let foundationAutoSelectedForBook: string | null = null;
+
+watch(
+  () => props.snapshot?.input.manifest?.updated_at,
+  (next, previous) => {
+    if (next && next !== previous) finishInputReplacement();
+  },
+);
 
 watch(
   () => [
@@ -433,6 +440,27 @@ function optionalText(value: string): string | undefined {
   return trimmed ? trimmed : undefined;
 }
 
+function resetInputDraft() {
+  importError.value = null;
+  importFields.target_dir = "";
+  importFields.display_title = "";
+  importFields.paper_md_path = "";
+  importFields.paper_pdf_path = "";
+  paperMdFile.value = null;
+  paperPdfFile.value = null;
+}
+
+function beginInputReplacement() {
+  resetInputDraft();
+  importFields.display_title = currentInputManifest.value?.display_title ?? "";
+  replacingInput.value = true;
+}
+
+function finishInputReplacement() {
+  replacingInput.value = false;
+  resetInputDraft();
+}
+
 function readFileAsText(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -466,7 +494,6 @@ async function importWorkbenchInput() {
     paper_pdf_base64?: string;
   } = {
     target_dir: optionalText(importFields.target_dir),
-    book_id: optionalText(importFields.book_id),
     display_title: optionalText(importFields.display_title),
   };
   try {
@@ -651,56 +678,63 @@ function draftSidecarPlan() {
           <code>PDF {{ props.snapshot.input.fingerprint.paper_pdf_sha256.slice(0, 12) }}</code>
           <code>配置 {{ props.snapshot.input.fingerprint.config_hash.slice(0, 12) }}</code>
         </div>
-        <div class="import-mode">
-          <label><input v-model="importMode" type="radio" value="upload" /> 上传文件</label>
-          <label><input v-model="importMode" type="radio" value="path" /> 服务器路径</label>
+        <div v-if="currentInputManifest && !replacingInput" class="input-ready-state">
+          <p>Markdown 与 PDF 已保存在当前工作区，无需重新选择。</p>
+          <button :disabled="props.importing" @click="beginInputReplacement">更换输入</button>
         </div>
-        <div class="input-grid">
-          <label>
-            <span>草稿工作区</span>
-            <input v-model="importFields.target_dir" placeholder="留空则使用当前工作区" />
-          </label>
-          <label>
-            <span>书籍 ID</span>
-            <input v-model="importFields.book_id" placeholder="留空自动沿用目录名" />
-          </label>
-          <label>
-            <span>显示标题</span>
-            <input v-model="importFields.display_title" placeholder="留空自动生成" />
-          </label>
-        </div>
-        <div v-if="importMode === 'upload'" class="file-input-grid">
-          <FileDropField
-            v-model="paperMdFile"
-            label="paper.md"
-            accept=".md,text/markdown,text/plain"
-            accept-label=".md"
-            kind="markdown"
-            :disabled="props.importing"
-          />
-          <FileDropField
-            v-model="paperPdfFile"
-            label="paper.pdf"
-            accept="application/pdf,.pdf"
-            accept-label=".pdf"
-            kind="pdf"
-            :disabled="props.importing"
-          />
-        </div>
-        <div v-else class="input-grid">
-          <label>
-            <span>paper.md 路径</span>
-            <input v-model="importFields.paper_md_path" placeholder="E:\\papers\\paper.md" />
-          </label>
-          <label>
-            <span>paper.pdf 路径</span>
-            <input v-model="importFields.paper_pdf_path" placeholder="E:\\papers\\paper.pdf" />
-          </label>
-        </div>
-        <p v-if="importError" class="workbench-error">{{ importError }}</p>
-        <button class="primary-action" :disabled="props.importing" @click="importWorkbenchInput">
-          {{ props.importing ? "导入中" : "导入输入" }}
-        </button>
+        <template v-else>
+          <div class="import-mode">
+            <label><input v-model="importMode" type="radio" value="upload" /> 上传文件</label>
+            <label><input v-model="importMode" type="radio" value="path" /> 服务器路径</label>
+          </div>
+          <div class="input-grid">
+            <label>
+              <span>草稿工作区</span>
+              <input v-model="importFields.target_dir" placeholder="留空则使用当前工作区" />
+            </label>
+            <label>
+              <span>显示标题</span>
+              <input v-model="importFields.display_title" placeholder="留空自动生成" />
+            </label>
+          </div>
+          <div v-if="importMode === 'upload'" class="file-input-grid">
+            <FileDropField
+              v-model="paperMdFile"
+              label="paper.md"
+              accept=".md,text/markdown,text/plain"
+              accept-label=".md"
+              kind="markdown"
+              :disabled="props.importing"
+            />
+            <FileDropField
+              v-model="paperPdfFile"
+              label="paper.pdf"
+              accept="application/pdf,.pdf"
+              accept-label=".pdf"
+              kind="pdf"
+              :disabled="props.importing"
+            />
+          </div>
+          <div v-else class="input-grid">
+            <label>
+              <span>paper.md 路径</span>
+              <input v-model="importFields.paper_md_path" placeholder="E:\\papers\\paper.md" />
+            </label>
+            <label>
+              <span>paper.pdf 路径</span>
+              <input v-model="importFields.paper_pdf_path" placeholder="E:\\papers\\paper.pdf" />
+            </label>
+          </div>
+          <p v-if="importError" class="workbench-error">{{ importError }}</p>
+          <div class="action-row">
+            <button v-if="currentInputManifest" :disabled="props.importing" @click="finishInputReplacement">
+              取消更换
+            </button>
+            <button class="primary-action" :disabled="props.importing" @click="importWorkbenchInput">
+              {{ props.importing ? "导入中" : (currentInputManifest ? "确认更换" : "导入输入") }}
+            </button>
+          </div>
+        </template>
       </section>
 
       <section class="workbench-section">
@@ -1070,6 +1104,21 @@ function draftSidecarPlan() {
   display: grid;
   gap: 0.7rem;
 }
+.input-ready-state {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  border: 1px solid var(--hairline-soft);
+  border-radius: 8px;
+  background: var(--surface-code);
+  padding: 0.7rem 0.75rem;
+}
+.input-ready-state p {
+  margin: 0;
+  color: var(--slate);
+  font-size: 0.8rem;
+}
 .fingerprint-grid,
 .input-grid,
 .import-mode,
@@ -1092,7 +1141,7 @@ function draftSidecarPlan() {
   white-space: nowrap;
 }
 .input-grid {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 .file-input-grid {
   display: grid;
@@ -1307,6 +1356,7 @@ function draftSidecarPlan() {
   .workbench-head,
   .workbench-flows,
   .section-headline,
+  .input-ready-state,
   .source-review-override {
     display: grid;
   }

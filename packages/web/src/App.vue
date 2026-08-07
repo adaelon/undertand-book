@@ -2,6 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { FolderOpen, Highlighter, Languages, MessageSquareText, RotateCcw, Save, Sparkles, X } from "@lucide/vue";
 import { api, ApiError } from "./api";
+import { generateBookIdFromTitle } from "./book-id";
 import type {
   AgentChatSessionSummary,
   AgentChatTurn as StoredAgentChatTurn,
@@ -281,7 +282,7 @@ const bookPickerBooks = ref<BookLibraryEntry[]>([]);
 const bookPickerDir = ref("");
 const bookPickerMode = ref<"open" | "create">("open");
 const newBookTitle = ref("");
-const newBookId = ref("");
+const generatedNewBookId = computed(() => generateBookIdFromTitle(newBookTitle.value));
 const newBookMarkdown = ref<File | null>(null);
 const newBookPdf = ref<File | null>(null);
 const openingBook = ref(false);
@@ -3344,21 +3345,11 @@ function switchBookPickerMode(mode: "open" | "create") {
   bookPickerError.value = null;
 }
 
-function slugifyBookId(value: string): string {
-  return value
-    .toLowerCase()
-    .replace(/[\s_.]+/g, "-")
-    .replace(/[^a-z0-9-]/g, "")
-    .replace(/-+/g, "-")
-    .replace(/^-|-$/g, "");
-}
-
 function selectNewBookMarkdown(file: File | null) {
   newBookMarkdown.value = file;
   if (!file) return;
   const inferredTitle = file.name.replace(/\.md$/i, "");
   if (!newBookTitle.value.trim()) newBookTitle.value = inferredTitle;
-  if (!newBookId.value.trim()) newBookId.value = slugifyBookId(inferredTitle);
 }
 
 function readLocalFileAsText(file: File): Promise<string> {
@@ -3383,11 +3374,12 @@ function readLocalFileAsBase64(file: File): Promise<string> {
 }
 
 async function submitCreateBook() {
-  const bookId = newBookId.value.trim();
+  const title = newBookTitle.value.trim();
+  const bookId = generatedNewBookId.value;
   const markdown = newBookMarkdown.value;
   const pdf = newBookPdf.value;
-  if (!bookId) {
-    bookPickerError.value = "请输入由小写字母、数字和连字符组成的书 ID。";
+  if (!title || !bookId) {
+    bookPickerError.value = "请输入论文标题，书 ID 将由系统自动生成。";
     return;
   }
   if (!markdown || !pdf) {
@@ -3399,8 +3391,8 @@ async function submitCreateBook() {
     banner.value = "";
     bookPickerError.value = null;
     const snapshot = await api.createBook({
-      book_id: bookId,
-      display_title: newBookTitle.value.trim() || markdown.name.replace(/\.md$/i, ""),
+      book_id: generatedNewBookId.value,
+      display_title: title,
       paper_md_text: await readLocalFileAsText(markdown),
       paper_pdf_base64: await readLocalFileAsBase64(pdf),
     });
@@ -3410,7 +3402,6 @@ async function submitCreateBook() {
     bookPickerOpen.value = false;
     bookPickerMode.value = "open";
     newBookTitle.value = "";
-    newBookId.value = "";
     newBookMarkdown.value = null;
     newBookPdf.value = null;
   } catch (e) {
@@ -3742,17 +3733,18 @@ async function submitOpenBook(dir = bookPickerDir.value) {
           <div class="book-create-grid">
             <label>
               <span>标题</span>
-              <input v-model="newBookTitle" :disabled="openingBook" placeholder="论文标题" />
-            </label>
-            <label>
-              <span>书 ID</span>
               <input
-                v-model="newBookId"
+                v-model="newBookTitle"
                 :disabled="openingBook"
-                placeholder="paper-title"
-                autocomplete="off"
+                placeholder="论文标题"
                 @keydown.enter.prevent="submitCreateBook"
               />
+            </label>
+            <label>
+              <span>书 ID（自动生成）</span>
+              <output class="book-create-generated-id" :title="generatedNewBookId">
+                {{ generatedNewBookId || "输入标题后自动生成" }}
+              </output>
             </label>
             <FileDropField
               :model-value="newBookMarkdown"
@@ -3789,10 +3781,10 @@ async function submitOpenBook(dir = bookPickerDir.value) {
           <button
             v-else
             class="primary-action"
-            :disabled="openingBook || !newBookId.trim() || !newBookMarkdown || !newBookPdf"
+            :disabled="openingBook || !newBookTitle.trim() || !generatedNewBookId || !newBookMarkdown || !newBookPdf"
             @click="submitCreateBook"
           >
-            {{ openingBook ? "创建中" : "创建并构建" }}
+            {{ openingBook ? "创建中" : "创建并进入工作台" }}
           </button>
         </footer>
       </section>
@@ -4707,6 +4699,24 @@ async function submitOpenBook(dir = bookPickerDir.value) {
   color: var(--ink);
   padding: 0.55rem 0.7rem;
   font-size: 0.84rem;
+}
+.book-create-generated-id {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  min-height: 42px;
+  box-sizing: border-box;
+  overflow: hidden;
+  border: 1px solid var(--hairline-soft);
+  border-radius: 8px;
+  background: var(--surface-code);
+  color: var(--slate);
+  padding: 0.62rem 0.7rem;
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .book-picker-input-row button,
 .book-picker-actions button {
