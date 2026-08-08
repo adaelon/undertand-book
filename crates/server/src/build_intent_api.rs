@@ -2,7 +2,10 @@ use crate::intent_build_store::{
     ActiveIntentOverlayV1, IntentArtifactStore, INTENT_BUILD_CONFLICT, INTENT_BUILD_INVALID,
     INTENT_BUILD_NOT_FOUND,
 };
-use crate::{err_reply, method_not_allowed, ok_json, sha256_hex, workspace_root, AppState, Reply};
+use crate::{
+    err_reply, method_not_allowed, ok_json, read_workbench_input_manifest, sha256_hex,
+    workspace_root, AppState, Reply,
+};
 use base_schema::NodeKind;
 use read_tools::{ContentProfileId, ToolError};
 use runtime::build_intent::{
@@ -733,7 +736,7 @@ fn append_usage_event(state: &AppState, event: Value) -> Result<Value, ToolError
 }
 
 fn build_core_draft_input(state: &AppState, mode: &str, now: &str) -> Result<Value, ToolError> {
-    let (profile_id, profile_version) = match state.book.content_profile_id() {
+    let (profile_id, profile_version) = match current_content_profile_id(state)? {
         ContentProfileId::TechnicalLearning => ("technical_learning", "technical_learning_v0"),
         ContentProfileId::Paper => ("paper", "paper_v0"),
     };
@@ -980,7 +983,7 @@ fn plan_candidate(
         .iter()
         .map(|node| node.lid.as_str())
         .collect::<Vec<_>>();
-    let profile = match state.book.content_profile_id() {
+    let profile = match current_content_profile_id(state)? {
         ContentProfileId::TechnicalLearning => "technical_learning",
         ContentProfileId::Paper => "paper",
     };
@@ -997,9 +1000,48 @@ fn plan_candidate(
     )
 }
 
+fn current_content_profile_id(state: &AppState) -> Result<ContentProfileId, ToolError> {
+    let Some(manifest) = read_workbench_input_manifest(&state.book_dir)? else {
+        return Ok(state.book.content_profile_id());
+    };
+    let manifest_book_id = manifest
+        .get("book_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            error(
+                "WORKBENCH_INPUT_MANIFEST_INVALID",
+                "validation",
+                "Workbench input manifest has no book_id",
+            )
+        })?;
+    if manifest_book_id != state.book.base.book_id {
+        return Err(error(
+            "WORKBENCH_INPUT_MANIFEST_INVALID",
+            "conflict",
+            "Workbench input manifest book_id does not match the readable workspace",
+        ));
+    }
+    if !manifest.get("fingerprint").is_some_and(Value::is_object) {
+        return Err(error(
+            "WORKBENCH_INPUT_MANIFEST_INVALID",
+            "validation",
+            "Workbench input manifest has no fingerprint",
+        ));
+    }
+    match manifest.get("profile_id").and_then(Value::as_str) {
+        Some("paper") => Ok(ContentProfileId::Paper),
+        _ => Err(error(
+            "WORKBENCH_INPUT_MANIFEST_INVALID",
+            "validation",
+            "Workbench input manifest must declare profile_id=paper",
+        )),
+    }
+}
+
 fn current_planning_context(state: &AppState) -> Result<BuildPlanningContextV1, ToolError> {
     let source_fingerprint = current_source_fingerprint(state)?;
-    let profile = match state.book.content_profile_id() {
+    let profile = match current_content_profile_id(state)? {
         ContentProfileId::TechnicalLearning => "technical_learning",
         ContentProfileId::Paper => "paper",
     };
@@ -1041,7 +1083,7 @@ fn validate_candidate_against_current_state(
         .iter()
         .map(|node| node.lid.as_str())
         .collect::<Vec<_>>();
-    let profile = match state.book.content_profile_id() {
+    let profile = match current_content_profile_id(state)? {
         ContentProfileId::TechnicalLearning => "technical_learning",
         ContentProfileId::Paper => "paper",
     };

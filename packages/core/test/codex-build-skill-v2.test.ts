@@ -21,6 +21,19 @@ function readSkill(relativePath: string): string {
 }
 
 describe("Codex-owned build planning skill v2", () => {
+  it("routes ordinary prebuild work to the standard plan before opening Reader planning", () => {
+    for (const relativePath of SKILL_PATHS) {
+      const skill = readSkill(relativePath);
+      const route = skill.indexOf("## Choose the planning route first");
+      const naturalGoal = skill.indexOf("### Natural-language reading goal");
+      expect(route, `${relativePath} has no entry routing gate`).toBeGreaterThanOrEqual(0);
+      expect(route).toBeLessThan(naturalGoal);
+      expect(skill).toContain("Ordinary prebuild is the default");
+      expect(skill).toContain("Do not call `planning.context`");
+      expect(skill).toContain("<build-exe> legacy-plan <target>");
+    }
+  });
+
   it("requires context then candidate and forbids a v1 raw-goal fallback in both skill snapshots", () => {
     for (const relativePath of SKILL_PATHS) {
       const skill = readSkill(relativePath);

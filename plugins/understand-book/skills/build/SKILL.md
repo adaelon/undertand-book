@@ -5,7 +5,7 @@ description: Build or resume a book workspace, optionally from a confirmed natur
 
 # $understand-book-build
 
-Plan the user's reading goal, obtain an explicitly confirmed `BuildPlan`, and then let the
+Choose the request's planning route, obtain an explicitly confirmed `BuildPlan`, and then let the
 deterministic Build Engine drive execution until it returns `DONE` or a real user boundary. The
 root Codex owns semantic planning, user conversation, live agent-slot observation, and harness
 lifecycle only. It does not interpret the internal build state machine.
@@ -21,6 +21,24 @@ lifecycle only. It does not interpret the internal build state machine.
 - The root never reads, receives, summarizes, caches, or forwards semantic input or candidate JSON.
 - Conversation memory is not build state. Re-enter through the same confirmed plan and invocation;
   code rereads durable state on every step.
+
+## Choose the planning route first
+
+Ordinary prebuild is the default. A request to build, prebuild, finish, or resume a book/paper
+workspace uses the explicit `standard_deep` route unless the user also states a concrete reading
+goal and asks the build to produce goal-specific results. A title, subject description, workspace
+path, or request to “build this paper” is not by itself a natural-language reading goal.
+
+- **Ordinary prebuild or resume:** use **Explicit standard deep build** below. When an existing
+  confirmed `build_plan_path` or invocation can be recovered, resume it instead of creating a new
+  plan. Do not call `planning.context`, launch `UnderstandBook.exe --codex-build-intent`, or open or
+  inspect a Reader-private build plan for this route.
+- **Explicit reading goal:** only when the user asks to plan the build around a stated reading goal,
+  use **Natural-language reading goal** below. The goal route may call the Desktop controller and
+  produce reader-private artifacts.
+
+Do this classification before either plan-authoring surface is called. Never reinterpret an
+ordinary prebuild request as a reading goal merely because the workspace contains a paper.
 
 ## Resolve the installed Reader and Build Engine
 
@@ -42,17 +60,27 @@ of planning: do not parse, edit, duplicate, or replace the plan in chat.
 
 Before authoring a `standard_deep` plan, ask whether Pass2 long-range relation extraction is enabled
 or disabled. Enabling Pass2 adds cross-section semantic links and model cost; disabling it still
-builds BookStructure from Pass1 and profile sidecars. Also ask for any budget limit that changes
-authorization. Use the installed code-owned plan-authoring surface to show the exact stage closure,
+builds BookStructure from Pass1 and profile sidecars. Record the answer exactly as
+`pass2=enabled|disabled`; do not infer it from “full build,” old conversations, existing artifacts,
+or the workspace profile. Also ask for any budget limit that changes authorization.
+
+For a new standard plan, call the installed code-owned surface directly:
+
+```text
+<build-exe> legacy-plan <target> --root <root> --pass2 <enabled|disabled> [budget flags]
+```
+
+Consume only `explicit_legacy_build_plan.v1`. Show its exact stage closure,
 reuse/create/excluded work, token and wall-clock estimate, budget, `plan_id`, and `plan_digest`.
 Require explicit confirmation of that exact projection before accepting its `build_plan_path`.
 Never infer Pass2, budget approval, or plan confirmation from “full build,” old conversations, or
-existing artifacts. If no unique confirmed plan path is available, stop as
+existing artifacts. Keep the returned path opaque and reuse it for interruption recovery; never
+create another standard plan merely to resume. If no unique confirmed plan path is available, stop as
 `needs_user(plan_confirmation_required)`.
 
 ### Natural-language reading goal
 
-A natural-language goal must be planned against an absolute workspace already trusted by Reader.
+A natural-language goal must be explicit and planned against an absolute workspace already trusted by Reader.
 The Desktop controller response is the only authority for whether foundation is required. Stop as
 `needs_user(foundation_required)` only when `UnderstandBook.exe --codex-build-intent` returns
 `error_code=CODEX_BUILD_FOUNDATION_REQUIRED`. Do not inspect `.build/input/manifest.json`, source

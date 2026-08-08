@@ -16782,6 +16782,87 @@ unchanged after training concludes";
     }
 
     #[test]
+    fn codex_planning_context_prefers_workbench_manifest_profile_before_paper_sidecars_exist() {
+        let mut state = state_named("codex-planning-context-workbench-profile");
+        state.adapter = Box::new(UnconfiguredAdapter);
+        assert_eq!(
+            state.book.content_profile_id(),
+            ContentProfileId::TechnicalLearning,
+            "the fixture intentionally has no paper sidecars"
+        );
+
+        let manifest_path = state.book_dir.join(WORKBENCH_INPUT_MANIFEST_RELATIVE);
+        std::fs::create_dir_all(manifest_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            manifest_path,
+            serde_json::to_vec_pretty(&json!({
+                "version": "workbench_input_manifest.v1",
+                "book_id": state.book.base.book_id,
+                "profile_id": "paper",
+                "fingerprint": {
+                    "paper_md_sha256": "a".repeat(64),
+                    "paper_pdf_sha256": "b".repeat(64),
+                    "config_hash": "c".repeat(64)
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let context = build_intent_api::run_codex_command(
+            &mut state,
+            "planning.context",
+            json!({}),
+            "2026-08-08T16:00:00.000Z",
+        )
+        .unwrap();
+
+        assert_eq!(context["target"]["content_profile"], "paper");
+    }
+
+    #[test]
+    fn codex_planning_context_rejects_invalid_workbench_profile_authority() {
+        let mut state = state_named("codex-planning-context-invalid-workbench-profile");
+        state.adapter = Box::new(UnconfiguredAdapter);
+        let manifest_path = state.book_dir.join(WORKBENCH_INPUT_MANIFEST_RELATIVE);
+        std::fs::create_dir_all(manifest_path.parent().unwrap()).unwrap();
+        let book_id = state.book.base.book_id.clone();
+        let fingerprint = json!({ "config_hash": "c".repeat(64) });
+        let invalid_manifests = [
+            json!({
+                "profile_id": "paper",
+                "fingerprint": fingerprint
+            }),
+            json!({
+                "book_id": "another-book",
+                "profile_id": "paper",
+                "fingerprint": fingerprint
+            }),
+            json!({
+                "book_id": book_id,
+                "profile_id": "paper"
+            }),
+            json!({
+                "book_id": book_id,
+                "profile_id": "technical_learning",
+                "fingerprint": fingerprint
+            }),
+        ];
+
+        for manifest in invalid_manifests {
+            std::fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+            let error = build_intent_api::run_codex_command(
+                &mut state,
+                "planning.context",
+                json!({}),
+                "2026-08-08T16:01:00.000Z",
+            )
+            .unwrap_err();
+            assert_eq!(error.error_code, "WORKBENCH_INPUT_MANIFEST_INVALID");
+        }
+    }
+
+    #[test]
     fn codex_candidate_and_reader_provider_share_one_six_artifact_compiler() {
         fn one_off(id: &str, title: &str) -> Value {
             json!({
