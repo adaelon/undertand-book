@@ -147,7 +147,11 @@ import {
   type AutomaticBuildExecutorDispatchReceiptV1,
   type AutomaticBuildExecutorInterruptionInputV1,
 } from "../../packages/core/src/automatic-build-dispatch-runtime";
-import type { AutomaticBuildExecutorPromptMode } from "./executor-prompt";
+import { issueAutomaticBuildOpaqueHandoff } from "../../packages/core/src/automatic-build-executor-session";
+import {
+  composeAutomaticBuildExecutorPrompt,
+  type AutomaticBuildExecutorPromptMode,
+} from "./executor-prompt";
 import { resolveContentProfile } from "../../packages/core/src/content-profile";
 import {
   AUTOMATIC_BUILD_EXTRACTOR_PROMPT_NAMES,
@@ -187,6 +191,7 @@ export interface AutomaticBuildNextOptions extends AutomaticBuildTargetResolutio
   available_agent_slots?: number;
   accepted_plan_digest?: string;
   accepted_evaluation_digest?: string;
+  accepted_plan_budget_receipt_digest?: string;
   protocol?: AutomaticBuildClaimProtocol;
   executor_dispatches?: boolean;
   build_plan?: BuildPlanV1;
@@ -291,31 +296,49 @@ export function resolveAutomaticBuildExecutorPrompt(
   const source: AutomaticBuildPromptSource = process.env.UNDERSTAND_BOOK_SIDECAR_SELF
     ? "packaged_sidecar"
     : "node_source";
-  const [command, ...args] = executorPromptCommand(extractorName, mode);
-  const output = captureBuildProcessOutput(command, args, PLUGIN_ROOT);
-  if (output.error || output.status !== 0) {
-    throw new AutomaticBuildExecutorPromptResolutionError("prompt_provider_unavailable", source);
+  let prompt: string;
+  if (source === "node_source") {
+    try {
+      prompt = composeAutomaticBuildExecutorPrompt({
+        mode,
+        extractor_name: extractorName,
+        extractor_prompt: readFileSync(path.join(PLUGIN_ROOT, "agents", extractorName), "utf8"),
+        protocol_wrapper: mode === "dispatch"
+          ? readFileSync(path.join(PLUGIN_ROOT, "agents", "automatic-build-dispatch-executor.md"), "utf8")
+          : "",
+      });
+    } catch {
+      throw new AutomaticBuildExecutorPromptResolutionError("prompt_provider_unavailable", source);
+    }
+  } else {
+    const [command, ...args] = executorPromptCommand(extractorName, mode);
+    const output = captureBuildProcessOutput(command, args, PLUGIN_ROOT);
+    if (output.error || output.status !== 0) {
+      throw new AutomaticBuildExecutorPromptResolutionError("prompt_provider_unavailable", source);
+    }
+    if (output.stderr !== "") {
+      throw new AutomaticBuildExecutorPromptResolutionError("prompt_provider_output_invalid", source);
+    }
+    prompt = output.stdout;
   }
-  if (output.stderr !== "") {
-    throw new AutomaticBuildExecutorPromptResolutionError("prompt_provider_output_invalid", source);
-  }
-  const bytes = Buffer.from(output.stdout, "utf8");
+  const bytes = Buffer.from(prompt, "utf8");
   if (bytes.byteLength === 0 || bytes.byteLength > MAX_AUTOMATIC_BUILD_EXECUTOR_PROMPT_BYTES) {
     throw new AutomaticBuildExecutorPromptResolutionError("prompt_provider_output_invalid", source);
   }
   const requiredMarkers = mode === "dispatch"
     ? [
-      "automatic_build_dispatch_executor.v1",
+      "automatic_build_executor_session.v1",
       "automatic_build_executor.v1",
-      "action.kind=task",
-      "action.kind=waiting",
-      "action.kind=finish",
-      "action.kind=finished",
-      "interrupt_command",
+      "opaque_handoff_ref",
+      "executor.open",
+      "action.kind=GENERATE",
+      "action.kind=WAIT",
+      "action.kind=DONE",
+      "executor.session",
       "Never return candidate JSON to the caller",
     ]
     : ["automatic_build_executor.v1", "candidate_path", "submit_command", "fail_command"];
-  if (output.stdout.includes("\0") || requiredMarkers.some((marker) => !output.stdout.includes(marker))) {
+  if (prompt.includes("\0") || requiredMarkers.some((marker) => !prompt.includes(marker))) {
     throw new AutomaticBuildExecutorPromptResolutionError("prompt_contract_invalid", source);
   }
   return {
@@ -612,6 +635,103 @@ export function runAutomaticBuildStageWriter(
     true,
   );
   return { artifact_path: stageArtifactPath(target, stage, taskId) };
+}
+
+export function runAutomaticBuildTaskInput(
+  target: AutomaticBuildTarget,
+  stage: AutomaticBuildStage,
+  taskId: string,
+  leaseRef: string,
+  leaseToken: string,
+  options: { now?: string; run_ttl_ms?: number } = {},
+): { stdout: string; stderr: string } {
+  startAutomaticBuildLease(target, leaseRef, leaseToken, {
+    ...(options.now ? { now: options.now } : {}),
+    run_ttl_ms: options.run_ttl_ms ?? DEFAULT_RUN_TTL_MS,
+  });
+  const lease = readAutomaticBuildLease(target, leaseRef, leaseToken);
+  if (lease.stage !== stage || lease.work_unit_id !== taskId) {
+    throw new Error(`stage command does not match lease identity: ${stage}/${taskId}`);
+  }
+
+  let productionGenerationDigest: string | undefined;
+  if ("policy_set_digest" in lease && lease.policy_set_digest) {
+    const generationTaskPath = stage === "pass1"
+      ? pass1ShadowTaskPath(target, lease.policy_set_digest, taskId)
+      : stage === "profile_sidecar"
+        ? profileSidecarDiscourseShadowTaskPath(target, lease.policy_set_digest, taskId)
+        : undefined;
+    if (!generationTaskPath || !existsSync(generationTaskPath)) {
+      throw new Error(`policy_generation_conflict: frozen v3 generation task is unavailable: ${stage}/${taskId}`);
+    }
+    productionGenerationDigest = lease.policy_set_digest;
+  }
+
+  const script = STAGE_COMMANDS[stage].input;
+  if (!script) throw new Error(`stage ${stage} does not support input`);
+  const args = [target.source_path, taskId, ...stageScriptArgs(target).slice(1)];
+  if (productionGenerationDigest) {
+    args.push("--shadow-generation", productionGenerationDigest);
+  }
+  const startedAt = options.now ?? new Date().toISOString();
+  const result = forwardStageScript(target, script, args, true);
+  const finishedAt = options.now ?? new Date().toISOString();
+  const binding = automaticBuildTaskPolicyBindingFromLease(lease);
+  const inputSha256 = createHash("sha256").update(result.stdout, "utf8").digest("hex");
+  if (binding && "proof_digest" in binding && inputSha256 !== binding.input_hash) {
+    failAutomaticBuildTask(target, leaseRef, leaseToken, {
+      diagnostic_code: "budget_proof_invalid",
+      ...(options.now ? { now: options.now } : {}),
+    });
+    throw new Error("budget_proof_invalid");
+  }
+  recordAutomaticBuildInputObservation(target, leaseRef, leaseToken, {
+    started_at: startedAt,
+    finished_at: finishedAt,
+    input_bytes: Buffer.byteLength(result.stdout),
+    ...(binding && "proof_digest" in binding ? {
+      input_sha256: inputSha256,
+      proof_digest: binding.proof_digest,
+      render_contract_version: MODEL_INPUT_RENDER_CONTRACT_VERSION,
+    } : {}),
+  });
+  return result;
+}
+
+export function submitAutomaticBuildTaskCandidate(
+  target: AutomaticBuildTarget,
+  stage: AutomaticBuildStage,
+  taskId: string,
+  leaseRef: string,
+  leaseToken: string,
+  options: { now?: string } = {},
+) {
+  const lease = readAutomaticBuildLease(target, leaseRef, leaseToken);
+  if (lease.stage !== stage || lease.work_unit_id !== taskId) {
+    throw new Error(`stage command does not match lease identity: ${stage}/${taskId}`);
+  }
+  const binding = automaticBuildTaskPolicyBindingFromLease(lease);
+  return submitAutomaticBuildCandidate(
+    target,
+    leaseRef,
+    leaseToken,
+    path.join(path.dirname(leaseRef), "candidate.json"),
+    (candidatePath) => runAutomaticBuildStageWriter(
+      target,
+      stage,
+      taskId,
+      candidatePath,
+      binding && "proof_digest" in binding
+        ? {
+            policy_set_digest: binding.policy_set_digest,
+            attempt: lease.attempt,
+            executor: lease.owner,
+            generated_at: options.now ?? new Date().toISOString(),
+          }
+        : undefined,
+    ),
+    { ...(options.now ? { now: options.now } : {}) },
+  );
 }
 
 export function recordAutomaticBuildAttempt(
@@ -1042,6 +1162,7 @@ function expandAction(
   executorProvenance?: AutomaticBuildExecutorProvenanceV1,
   acceptedPlanDigest?: string,
   acceptedEvaluationDigest?: string,
+  acceptedPlanBudgetReceiptDigest?: string,
   executorDispatches = false,
   buildPlan?: BuildPlanV1,
 ) {
@@ -1062,7 +1183,8 @@ function expandAction(
   const settledPlanBudget = action.kind === "extract"
     ? undefined
     : buildPlanBudgetEvaluation(target, buildPlan, snapshot, leaseOptions.now);
-  if (settledPlanBudget?.status === "exceeded") {
+  if (settledPlanBudget?.status === "exceeded"
+    && acceptedPlanBudgetReceiptDigest !== settledPlanBudget.receipt_digest) {
     return {
       snapshot,
       plan_budget: settledPlanBudget,
@@ -1190,7 +1312,8 @@ function expandAction(
       buildPlan,
     )!;
     const planBudget = buildPlanBudgetEvaluation(target, buildPlan, snapshot, leaseOptions.now, preflight);
-    if (planBudget.status === "exceeded") {
+    if (planBudget.status === "exceeded"
+      && acceptedPlanBudgetReceiptDigest !== planBudget.receipt_digest) {
       return {
         snapshot,
         preflight,
@@ -1495,9 +1618,22 @@ function expandAction(
           dispatch_run_id: publication.prepared.dispatch_run_id,
           executor_handoff: executorHandoff,
         });
+        const opaqueHandoff = issueAutomaticBuildOpaqueHandoff({
+          target,
+          kind: "public_dispatch",
+          owner_identity: {
+            version: "automatic_build_dispatch_owner_identity.v1",
+            stage: manifest.stage,
+            dispatch_id: manifest.dispatch_id,
+            dispatch_run_id: dispatchRunId,
+          },
+          executor_handoff: executorHandoff,
+          issued_at: leaseOptions.now,
+        });
         return {
           ...envelope,
           executor_handoff: executorHandoff,
+          opaque_handoff_ref: opaqueHandoff.opaque_handoff_ref,
         };
       });
       const dispatchedIds = new Set(selectedDispatches.flatMap((dispatch) => dispatch.ordered_work_unit_ids));
@@ -1747,10 +1883,58 @@ export function automaticBuildNext(
       options.executor_provenance,
       options.accepted_plan_digest,
       options.accepted_evaluation_digest,
+      options.accepted_plan_budget_receipt_digest,
       protocol === AUTOMATIC_BUILD_EXECUTOR_DISPATCH_PROTOCOL_V1,
       options.build_plan,
     ),
   };
+}
+
+export function runAutomaticBuildCloseStage(
+  targetInput: string,
+  rootDir: string,
+  stage: AutomaticBuildStage,
+  options: {
+    quality_profile?: ExtractionQualityProfile;
+    book_id?: string;
+  } = {},
+) {
+  const target = resolveAutomaticBuildTarget(targetInput, rootDir, { book_id: options.book_id });
+  const qualityProfile = options.quality_profile ?? "full";
+  if (stage === "paper_reading_guide") {
+    forwardStageScript(target, "verify-paper-reading-guide.ts", [target.workspace_dir], true);
+    return verifyAutomaticBuildStageClose(target);
+  }
+
+  const script = STAGE_COMMANDS[stage].close;
+  if (!script) throw new Error(`stage ${stage} does not support close`);
+  const snapshot = buildAutomaticBuildSnapshot(target, { quality_profile: qualityProfile });
+  const stageState = snapshot.stages.find((candidate) => candidate.stage === stage);
+  if (!stageState) throw new Error(`quality stage is not reachable in the current snapshot: ${stage}`);
+
+  let productionGenerationDigest: string | undefined;
+  if (stageState.policy_set) {
+    if (stage !== "pass1" && stage !== "profile_sidecar") {
+      throw new Error(`v3 production close is not supported for stage ${stage}`);
+    }
+    productionGenerationDigest = stageState.policy_set.policy_set_digest;
+  }
+  const args = stageScriptArgs(target);
+  if (productionGenerationDigest) {
+    args.push(
+      "--production-generation", productionGenerationDigest,
+      "--quality-profile", qualityProfile,
+    );
+  }
+  if (stage === "pass1" && target.kind === "paper_workspace") {
+    args.push("--preserve-foundation", target.workspace_dir);
+  }
+  return closeAutomaticBuildStage({
+    target,
+    stage,
+    quality_profile: qualityProfile,
+    run_batch: () => forwardStageScript(target, script, args, true),
+  });
 }
 
 type AutomaticBuildReleaseDoctorDiagnosticCode =
@@ -2734,30 +2918,15 @@ if (argv[0] === "legacy-plan") {
       ...(now ? { now } : {}),
     }));
   } else if (operation === "submit" || operation === "legacy-submit") {
-    const candidate = operation === "legacy-submit"
-      ? stageAutomaticBuildCandidate(target, leaseRef, leaseToken, sourceCandidate!, { ...(now ? { now } : {}) })
-      : { candidate_path: path.join(path.dirname(leaseRef), "candidate.json") };
-    const submitLease = readAutomaticBuildLease(target, leaseRef, leaseToken);
-    const submitBinding = automaticBuildTaskPolicyBindingFromLease(submitLease);
-    printAutomaticBuildJson(submitAutomaticBuildCandidate(
+    if (operation === "legacy-submit") {
+      stageAutomaticBuildCandidate(target, leaseRef, leaseToken, sourceCandidate!, { ...(now ? { now } : {}) });
+    }
+    printAutomaticBuildJson(submitAutomaticBuildTaskCandidate(
       target,
+      stage,
+      taskId,
       leaseRef,
       leaseToken,
-      candidate.candidate_path,
-      (candidatePath) => runAutomaticBuildStageWriter(
-        target,
-        stage,
-        taskId,
-        candidatePath,
-        submitBinding && "proof_digest" in submitBinding
-          ? {
-              policy_set_digest: submitBinding.policy_set_digest,
-              attempt: submitLease.attempt,
-              executor: submitLease.owner,
-              generated_at: now ?? new Date().toISOString(),
-            }
-          : undefined,
-      ),
       { ...(now ? { now } : {}) },
     ));
   } else if (operation === "fail") {
@@ -2789,16 +2958,8 @@ if (argv[0] === "legacy-plan") {
   let productionGenerationDigest: string | undefined;
   let closeProductionGenerationDigest: string | undefined;
   if (Boolean(leaseRef) !== Boolean(leaseToken)) throw new Error("lease_ref and lease_token must be provided together");
-  if (leaseRef && leaseToken && operation !== "close") {
-    if (operation === "input") {
-      startAutomaticBuildLease(target, leaseRef, leaseToken, {
-        ...(valueArg(argv, "--now") ? { now: valueArg(argv, "--now") } : {}),
-        run_ttl_ms: Number(valueArg(argv, "--run-ttl-ms") ?? String(DEFAULT_RUN_TTL_MS)),
-      });
-    }
-    const leaseState = operation === "input"
-      ? readAutomaticBuildLease(target, leaseRef, leaseToken)
-      : assertActiveAutomaticBuildLease(target, leaseRef, leaseToken, valueArg(argv, "--now"));
+  if (leaseRef && leaseToken && operation === "write") {
+    const leaseState = assertActiveAutomaticBuildLease(target, leaseRef, leaseToken, valueArg(argv, "--now"));
     if (leaseState.stage !== stageValue || leaseState.work_unit_id !== taskId) {
       throw new Error(`stage command does not match lease identity: ${stageValue}/${taskId}`);
     }
@@ -2875,28 +3036,9 @@ if (argv[0] === "legacy-plan") {
       verifiedClose = outcome.version === "automatic_build_stage_close_result.v1";
       if (!verifiedClose) process.exitCode = 1;
     } else if (operation === "input" && leaseRef && leaseToken) {
-      const startedAt = valueArg(argv, "--now") ?? new Date().toISOString();
-      const result = forwardStageScript(target, script, args, true);
-      const finishedAt = valueArg(argv, "--now") ?? new Date().toISOString();
-      const lease = readAutomaticBuildLease(target, leaseRef, leaseToken);
-      const binding = automaticBuildTaskPolicyBindingFromLease(lease);
-      const inputSha256 = createHash("sha256").update(result.stdout, "utf8").digest("hex");
-      if (binding && "proof_digest" in binding && inputSha256 !== binding.input_hash) {
-        failAutomaticBuildTask(target, leaseRef, leaseToken, {
-          diagnostic_code: "budget_proof_invalid",
-          ...(valueArg(argv, "--now") ? { now: valueArg(argv, "--now") } : {}),
-        });
-        throw new Error("budget_proof_invalid");
-      }
-      recordAutomaticBuildInputObservation(target, leaseRef, leaseToken, {
-        started_at: startedAt,
-        finished_at: finishedAt,
-        input_bytes: Buffer.byteLength(result.stdout),
-        ...(binding && "proof_digest" in binding ? {
-          input_sha256: inputSha256,
-          proof_digest: binding.proof_digest,
-          render_contract_version: MODEL_INPUT_RENDER_CONTRACT_VERSION,
-        } : {}),
+      const result = runAutomaticBuildTaskInput(target, stageValue, taskId!, leaseRef, leaseToken, {
+        ...(valueArg(argv, "--now") ? { now: valueArg(argv, "--now") } : {}),
+        run_ttl_ms: Number(valueArg(argv, "--run-ttl-ms") ?? String(DEFAULT_RUN_TTL_MS)),
       });
       process.stdout.write(result.stdout);
       process.stderr.write(result.stderr);

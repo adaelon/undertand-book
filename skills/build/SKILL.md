@@ -5,346 +5,183 @@ description: Build or resume a book workspace, optionally from a confirmed natur
 
 # $understand-book-build
 
-Run the deterministic automatic-build v2 loop until `done`, `needs_user`, or an exhausted external
-failure. Do not stop at ordinary stage boundaries, substitute generic summaries for extractor
-output, or treat conversation memory as build state.
+Plan the user's reading goal, obtain an explicitly confirmed `BuildPlan`, and then let the
+deterministic Build Engine drive execution until it returns `DONE` or a real user boundary. The
+root Codex owns semantic planning, user conversation, live agent-slot observation, and harness
+lifecycle only. It does not interpret the internal build state machine.
 
-For one explicit full-build invocation, run `legacy-plan` exactly once. Persist the returned
-absolute `build_plan_path` as the identity for the loop and every interruption recovery, and pass
-that same path to every `protocol-doctor`, `plan`, and `next`. After an executor interruption,
-read the dispatch receipt and inspect/replan against disk; never create an equivalent legacy plan
-for an ordinary resume. If a new task cannot recover one unique `build_plan_path` from its durable
-checkpoint or handoff, stop as `needs_user(build_plan_path_required)` instead of running
-`legacy-plan` again.
+## Authority and privacy boundary
 
-## Confirm the Pass2 choice
+- Reader/Core owns the current source, content profile, Blueprint validation, plan identity, and
+  reader-private store.
+- `build.step` owns protocol compatibility, preflight, budgets, dispatch state, leases, retries,
+  stage close/publication, private artifact attempts, and completion.
+- A dedicated executor owns one opaque semantic session. It sees semantic input and writes a
+  candidate through the code-owned session sink.
+- The root never reads, receives, summarizes, caches, or forwards semantic input or candidate JSON.
+- Conversation memory is not build state. Re-enter through the same confirmed plan and invocation;
+  code rereads durable state on every step.
 
-Before creating any `standard_deep` plan, ask the user whether to run Pass2 long-range relation
-extraction. Explain that enabling it adds cross-section semantic links and extra model cost, while
-disabling it still builds BookStructure from Pass1 plus profile sidecars. Record the answer exactly
-as `pass2=enabled|disabled`; do not infer it from "full build", prior conversations, or existing
-artifacts. If the user has not answered, stop as `needs_user(pass2_choice_required)`.
-
-Bind that answer by passing `--pass2 <enabled|disabled>` to `legacy-plan` and verify that the shown
-`public_stage_closure` includes `pass2` only for `enabled`. An existing accepted Pass2 audit may
-still enrich BookStructure when Pass2 is not scheduled; absence of that audit must not block
-BookStructure. Do not ask this question for a goal-directed plan whose public closure does not
-contain BookStructure.
-
-## Resolve the Reader controller and build engine
+## Resolve the installed Reader and Build Engine
 
 1. Resolve `understand-book-build.exe` in this order:
    - use `UNDERSTAND_BOOK_BUILD_EXE` when it names an existing file;
-   - on Windows, read `InstallDir` from `HKCU\Software\UnderstandBook` and use the executable in
-     that directory;
-   - otherwise tell the user to install the Understand Book desktop reader.
-   Resolve `UnderstandBook.exe` from `UNDERSTAND_BOOK_DESKTOP_EXE` when set, otherwise from the
-   same `InstallDir`. It owns the reader-private intent controller; the build sidecar must not
-   duplicate that store.
-2. Do not install Node, Bun, Cargo, or another runtime as an implicit fallback. The released plugin
-   is driven by the packaged build engine.
-3. After installing or upgrading the engine, run
-   `<build-exe> protocol-doctor <target> --plugin-root <this-plugin-root>`. Consume only
-   `automatic_build_protocol_doctor.v2`; require `status=compatible`,
-   `release.version=automatic_build_release.v3`,
-   `production_default=automatic_build_protocol.v2_dispatch`, and `dry_run_mutates_state=false`.
-   Require `checks.release_contract.status=compatible`, compatible recovery/close readers, and
-   `checks.prompt_provider.status=compatible` with all ten extractor names in
-   `checked_extractors`. Also require `checks.handoff_preparation.status=compatible` and
-   `checks.plugin_shape.agents_required=false`. If any check is incompatible, stop on its
-   allowlisted `diagnostic_code`; do not continue to plan/next or relay a raw exception.
+   - on Windows, read `InstallDir` from `HKCU\Software\UnderstandBook` and use the executable there;
+   - otherwise tell the user to install or repair Understand Book.
+2. Resolve `UnderstandBook.exe` from `UNDERSTAND_BOOK_DESKTOP_EXE` when set, otherwise from the same
+   `InstallDir`. It is the only controller for reader-private intent planning.
+3. Do not install Node, Bun, Cargo, or another runtime as an implicit fallback. Do not fall back to
+   old build commands when the packaged entry reports an incompatible installation.
 
-## Choose the entry mode
+## Establish one confirmed plan
 
-- **No natural-language goal:** preserve the explicit full-build behavior below. Run `legacy-plan`
-  once and execute the confirmed `standard_deep` plan.
-- **Natural-language goal:** a target file is not a workspace. A raw Markdown/EPUB file or an
-  untrusted paper draft is `needs_user(foundation_required)` and must first be imported or built by
-  Reader. For an absolute workspace directory inside the Reader library or explicitly registered
-  by Reader, use the v2 context-to-candidate flow below.
+Execution requires one current, code-issued `build_plan_path`. Treat that path as an opaque output
+of planning: do not parse, edit, duplicate, or replace the plan in chat.
 
+### Explicit standard deep build
+
+Before authoring a `standard_deep` plan, ask whether Pass2 long-range relation extraction is enabled
+or disabled. Enabling Pass2 adds cross-section semantic links and model cost; disabling it still
+builds BookStructure from Pass1 and profile sidecars. Also ask for any budget limit that changes
+authorization. Use the installed code-owned plan-authoring surface to show the exact stage closure,
+reuse/create/excluded work, token and wall-clock estimate, budget, `plan_id`, and `plan_digest`.
+Require explicit confirmation of that exact projection before accepting its `build_plan_path`.
+Never infer Pass2, budget approval, or plan confirmation from “full build,” old conversations, or
+existing artifacts. If no unique confirmed plan path is available, stop as
+`needs_user(plan_confirmation_required)`.
+
+### Natural-language reading goal
+
+A natural-language goal must be planned against an absolute workspace already trusted by Reader.
 The Desktop controller response is the only authority for whether foundation is required. Stop as
 `needs_user(foundation_required)` only when `UnderstandBook.exe --codex-build-intent` returns
-`error_code=CODEX_BUILD_FOUNDATION_REQUIRED`. Do not inspect `.build/input/manifest.json`,
-`source_manifest.json` source kind, PDFs, optional paper sidecars, or workspace names to infer a
-profile or invent a foundation gate. A missing `.build/input/manifest.json` is normal for an
-immediately readable `technical_learning` Markdown/EPUB workspace.
+`error_code=CODEX_BUILD_FOUNDATION_REQUIRED`. Do not inspect `.build/input/manifest.json`, source
+manifests, PDFs, optional sidecars, or workspace names to invent a profile or foundation gate.
 
-## Plan a natural-language goal with protocol v2
+For every controller call, put only `--codex-build-intent` in argv and send exactly one JSON object
+on stdin. Never place the raw goal or candidate in argv, environment variables, shell interpolation,
+public files, stdout, stderr, logs, or the displayed plan.
 
-For every controller call, put only `--codex-build-intent` in argv and write exactly one JSON
-envelope to process stdin. Never put the raw goal or candidate in argv, environment variables,
-shell interpolation, temporary/public files, stdout, stderr, logs, or the user-visible plan. Do not
-echo or restate the complete candidate.
-
-1. Probe capability and read current context without sending the goal:
+1. Request current planning context:
 
    ```json
    {"version":"codex_build_intent_command.v2","operation":"planning.context","target":{"workspace_dir":"<absolute>"},"input":{}}
    ```
 
-   Consume exactly one `codex_build_intent_result.v2`. Success requires `status=ok` and
-   `response.version=build_planning_context.v1`. Read its target, bounded scope catalog, Blueprint
-   Registry summaries, candidate contract, and `context_digest`. If a normally exited controller
-   emits no valid v2 result, reports an unsupported version/capability, or emits a legacy response,
-   stop as `needs_user(CODEX_BUILD_INTENT_V2_REQUIRED)` and tell the user to upgrade Desktop and
-   reinstall the plugin. Never fall back to `codex_build_intent_command.v1`; the new goal entry must
-   not call the Reader provider or its raw-goal `draft` operation.
+   Consume one `codex_build_intent_result.v2` whose response is
+   `build_planning_context.v1`. Read only its bounded scope catalog, Blueprint Registry summaries,
+   candidate contract, and `context_digest`. If v2 is unavailable, stop as
+   `needs_user(CODEX_BUILD_INTENT_V2_REQUIRED)`. Never fall back to `codex_build_intent_command.v1`.
 
-2. The current Codex directly creates one strict `build_intent_planner_candidate.v2` from the user
-   goal and that context:
+2. Create one strict `build_intent_planner_candidate.v2` from the explicit goal and current
+   context. Select advertised Registry identities exactly or provide a complete bounded one-off
+   `artifact_blueprint.v1`; never guess a truncated entry. Scope may use only shown LIDs/sections or
+   `whole_book=true`. Every free-form string search field such as topic, title, question, or claim
+   uses `analyzer=text`; bounded exact categories may use `analyzer=keyword`. Do not add code,
+   recursion, remote schemas, raw goal text, plan identities, or Reader-private paths.
 
-   ```text
-   version / goal_kind
-   source_scope={whole_book,lids,sections}
-   artifacts=[registry selection | one_off ArtifactBlueprintV1]
-   usage_horizon
-   ```
+3. Send `codex_build_intent_command.v2` with `operation=draft.candidate` and
+   `input={user_goal,planning_context_digest,candidate,budget?}` over protected stdin. On
+   `BUILD_PLANNING_CONTEXT_DRIFT`, discard the old context and candidate, call `planning.context`
+   again, and replan. Do not silently drop a requested artifact or invoke a second planner.
 
-   `artifacts` contains zero through `candidate_contract.max_artifacts` unique identity/version
-   entries. A Registry selection must copy an advertised `source`, `blueprint_id`, and
-   `blueprint_version` exactly; never guess an entry hidden by truncation. Scope may use only shown
-   LID/section samples or `whole_book=true`. Prefer a matching Registry Blueprint without forcing a
-   match. Otherwise provide a complete `origin=one_off` `artifact_blueprint.v1` whose shape is in
-   `allowed_shapes`, whose restricted schemas are bounded and closed, and whose records require LID
-   evidence. Do not use code, `$ref`, recursion, regex, remote schemas, extra keys, raw goal text,
-   explanations, public stages, plan identities, or Reader-private paths. Every free-form string
-   search field such as topic, title, question, or claim must use `analyzer=text`; reserve
-   `analyzer=keyword` for bounded exact categories such as enums, never natural-language topics.
+4. Require `codex_build_intent_response.v1` with a `codex_build_intent_plan.v2` projection. Show the
+   goal kind, scope, artifact summaries, public stage closure, reuse/create/excluded work, estimates,
+   budget, `plan_id`, and `plan_digest`, then stop as `needs_user(plan_confirmation_required)`.
+   After approval, re-read status; if identity drifted, show the new projection and reconfirm.
+   Otherwise confirm the exact identity with `confirmation_source=codex_conversation` and retain
+   the returned private `build_plan_path` without displaying it.
 
-3. Send one protected stdin envelope with `version=codex_build_intent_command.v2`,
-   `operation=draft.candidate`, the same absolute workspace, and
-   `input={user_goal,planning_context_digest,candidate,budget?}`. Consume exactly one
-   `codex_build_intent_result.v2`. On `BUILD_PLANNING_CONTEXT_DRIFT`, discard both old context and
-   candidate, call `planning.context` again, and plan again; never resubmit the stale candidate.
-   Correct or report candidate/Blueprint failures by their structured phase without silently
-   dropping an artifact. Missing v2 capability remains `CODEX_BUILD_INTENT_V2_REQUIRED`, never a v1
-   fallback.
+## Start or recover the deterministic driver
 
-4. Success requires `response.version=codex_build_intent_response.v1` and nested
-   `response.projection.version=codex_build_intent_plan.v2`. Show the projection's goal kind, scope,
-   artifact summaries, public stage closure, reuse, create, excluded items, token/wall-clock
-   estimate, budget, `plan_id`, and `plan_digest`. Then stop as
-   `needs_user(plan_confirmation_required)`. Do not run `legacy-plan`, `plan`, `next`, or private
-   artifact work before approval of that exact digest.
+Send exactly one bounded stdin object to `<build-exe> build.step`. For a new confirmed plan, create
+the invocation:
 
-After approval, send a v2 `operation=status` for the shown `plan_id`. If current digest/status
-differs, show the current Reader projection and stop for a new confirmation. Otherwise send v2
-`operation=confirm` with the exact `plan_id + plan_digest`; require
-`confirmation_source=codex_conversation`, retain the private `build_plan_path`, and enter the
-automatic-build loop. Reader-side confirmation is valid when status reports that exact plan already
-confirmed. Rejection uses v2 `operation=reject`; never infer confirmation from text that preceded
-the displayed plan.
-
-## Automatic-build v2 loop
-
-Only the no-goal entry is the explicit legacy full-build command. Before protocol preflight, map it
-once to a confirmed `standard_deep` BuildPlan:
-
-```text
-<build-exe> legacy-plan <target> --root <root> --pass2 <enabled|disabled> [quality and budget flags]
+```json
+{
+  "version": "automatic_build_invocation_create.v1",
+  "target_input": "<target>",
+  "root_dir": "<root>",
+  "build_plan_path": "<confirmed opaque path>",
+  "quality_profile": "full",
+  "max_parallel": 1,
+  "created_at": "<ISO-8601>",
+  "budget": "<optional versioned budget>",
+  "wall_budget": "<optional versioned wall budget>",
+  "executor_provenance": "<optional proven provenance>"
+}
 ```
 
-Consume only `explicit_legacy_build_plan.v1`, require
-`plan.confirmation_source=explicit_legacy_command`, and retain `build_plan_path`. Add
-`--build-plan <build_plan_path>` to every `protocol-doctor`, `plan`, and `next` command below.
-Opening, importing, or resuming a book is not this invocation and must never run `legacy-plan`.
-An existing SidecarPlan is a stage option only and must not be substituted for this BuildPlan.
+Omit optional fields rather than sending placeholders. `max_parallel` is fixed in `1..3` for the
+invocation. Consume only `automatic_build_invocation_ref.v1` and retain its `invocation_ref` in the
+task checkpoint. Recreating the exact same request is idempotent; changing target, plan, quality,
+budget, or requested parallelism starts a different invocation and may require new confirmation.
 
-Recompute the number of currently available dedicated subagent slots before every `plan` and
-`next`. Keep the same target, quality profile, budget flags, and `--max-parallel` request throughout
-one accepted plan. `--max-parallel` is in `1..3`; `--available-agent-slots` is in `0..3`.
+Before every step, count currently available dedicated subagent slots and send:
 
-1. Run preflight:
+```json
+{
+  "version": "automatic_build_step_request.v1",
+  "invocation_ref": "<opaque invocation ref>",
+  "available_agent_slots": 0
+}
+```
 
-   ```text
-   <build-exe> plan <target> --plugin-root <this-plugin-root> --build-plan <build_plan_path> --max-parallel <1..3> --available-agent-slots <0..3> [quality and budget flags]
-   ```
+`available_agent_slots` is live capacity in `0..3`; it is not remembered from a previous turn. A
+fresh user choice is added only as
+`decision={request_id:<returned id>,choice_id:<selected returned id>}`. Never send a digest,
+receipt body, command, path inspection result, or reconstructed stage status.
 
-   Parse only the `automatic_build_plan.v1` JSON from stdout. Planning is read-only: it must not
-   create task, attempt, or lease state. If `preflight` is null, continue to `next` without an
-   accepted digest. Inspect lifetime, remaining, and scheduled cost plus wall-clock P50/P95,
-   agent starts, confidence, and `worker_plan.max_workers`. If `preflight.budget.status` is
-   `exceeded`, report `needs_user(budget_exceeded)` without claiming work. When a wall budget is
-   configured, also retain `preflight.preflight_evaluation_digest`; low-confidence or exceeded
-   wall budgets stop before claim as `needs_user(low_confidence_wall_budget)` or
-   `needs_user(wall_budget_exceeded)`. Otherwise retain `preflight.plan_digest`.
+## Four-action loop
 
-2. Run the accepted step:
+Consume only `automatic_build_step.v1`. Handle its action exactly and call `build.step` again after
+the external boundary is resolved:
 
-   ```text
-   <build-exe> next <target> --plugin-root <this-plugin-root> --build-plan <build_plan_path> --max-parallel <1..3> --available-agent-slots <current> [same quality and budget flags] [--accepted-plan <plan_digest>] [--accepted-evaluation <preflight_evaluation_digest>]
-   ```
+- `SPAWN_EXECUTORS`: launch exactly one dedicated subagent for every returned
+  `opaque_handoff_ref`, subject only to the refs already bounded by the driver. The spawn payload is
+  the ref plus this fixed instruction: “Open this ref with the packaged Build Engine, follow the
+  `executor.open` / `executor.session` protocol, and return only bounded lifecycle state.” Do not
+  add a target path, prompt, task input, hash, command list, receipt, or candidate. An executor final
+  is only a harness lifecycle observation; after it ends, call `build.step` and trust durable state.
+- `WAIT`: wait only `retry_after_ms`, then recompute live slots and call `build.step` again. Do not
+  duplicate an active executor or lease.
+- `NEEDS_USER`: show the returned `reason`, `message`, optional `projection`, and choices exactly.
+  Never invent or broaden choices. If choices are present, wait for the user and return the selected
+  `request_id + choice_id` in the next step. If choices are empty, report the external blocker and
+  do not manufacture a decision.
+- `DONE`: report only the returned completion summary and end. This covers both public stages and
+  any declared reader-private artifacts; the root has no separate private-artifact loop.
 
-   Parse only the `automatic_build_next.v1` JSON from stdout. A change to the target, descriptors,
-   quality policy, budget policy, or requested worker limit invalidates the accepted plan and
-   requires a fresh `plan`. A changed performance-history evaluation requires a newly accepted
-   evaluation digest but does not change descriptor or artifact identity. A change only to
-   available slots does not change plan identity. Performance history is usable only when
-   `--executor-model`, `--executor-reasoning-effort`, and `--executor-harness-release` are all
-   supplied and exactly match stage, kind, router, and recorded provenance.
+Continue across ordinary executor completions, stage boundaries, retries, and internal recovery.
+Stop only at `NEEDS_USER`, `DONE`, explicit user interruption, or a packaged-engine failure for
+which no structured action exists. Never emulate a dedicated executor in the root.
 
-   `automatic_build_protocol.v2_dispatch` is the BP8 production default for new claims. `next`
-   persists the accepted full dispatch plan and returns `action.kind=dispatch` without claiming its
-   tasks. `--executor-dispatches` remains only as a compatibility alias. A task-per-executor rollback
-   must explicitly pass `--protocol automatic_build_protocol.v2`; it reads the same v2 task and
-   artifact state without migrating or rewriting already published artifacts, and it must not be
-   used to bypass dispatch diagnostics.
+## Dedicated executor contract
 
-3. Handle `action.kind` exactly:
+Each subagent receives one `opaque_handoff_ref` and follows the
+`automatic_build_executor_session.v1` protocol in the dedicated executor instructions:
 
-   - `dispatch`: launch exactly `action.dispatches.length` dedicated subagents, one per manifest,
-     rather than one per work unit. Require each dispatch's `executor_handoff` reference to point
-     to one private `automatic_build_dispatch_executor_handoff.v1` containing the complete extractor
-     prompt and exactly one `automatic_build_dispatch_executor.v1` envelope. The root verifies the
-     file, `byte_length`, and SHA-256, and proves that the resolved absolute
-     `executor_handoff.path` is inside `envelope.manifest.target_ref.workspace_dir`. It then
-     computes `handoff_relative_path = path.relative(action.cwd, executor_handoff.path)`; the
-     result must be non-empty, non-absolute, contain no `..` escape, and be at most 1024 UTF-8
-     bytes. The short `spawn_agent` call may carry a payload containing only
-     `handoff_relative_path`, SHA-256, `byte_length`, and a fixed
-     read/revalidate/execute/return-bounded-receipt instruction. It must
-     not contain an absolute source or book path, prompt, envelope, candidate, raw command list, or
-     tool output. A missing, drifting, or escaping handoff is
-     `needs_user(executor_handoff_required)`, never permission to fall back to a long call. The
-     subagent revalidates the digest locally, reads exactly that prompt and envelope, and owns the
-     explicit `dispatch_run_id`. The
-     subagent loops `next_command`, which may return at most one `task` envelope at a time. Execute
-     that task with the same input/candidate/usage/submit/fail/heartbeat contract below, discard its
-     candidate body after the terminal task receipt, and call `dispatch.next` again. Continue after
-     a semantic task failure; on executor, process, or command infrastructure failure, execute
-     `interrupt_command` immediately and stop the manifest suffix. For `waiting`, wait only
-     `retry_after_ms`; for `finish`, execute `finish_command`; for `finished`, return only the bounded
-     `automatic_build_executor_dispatch_receipt.v1` to the root. The root validates only the
-     dispatch receipt count and byte limits, then replans with live slots so the next persisted
-     manifest can refill a free worker without waiting for slower active dispatches.
-     Every newly written `executor_interrupted` receipt must include
-     `automatic_build_executor_interruption.v1` with only allowlisted diagnostics, reporter, and
-     command role; raw stderr, exception stacks, and command text are forbidden. If the subagent
-     cannot close itself, the root supervisor runs `inspect_command` first and then substitutes
-     evidence-backed enum values into `interrupt_command`, using `unknown` rather than inferring
-     task outcome from chat. Report recovery by its durable `phase`: `before_first_claim` and
-     `between_tasks` consume neither a semantic attempt nor a lease epoch; `task_reserved` and
-     `task_running` keep the same semantic attempt and advance only the next lease epoch; only
-     `task_failure` is a semantic retry. User-visible reporting calls the first case “zero semantic attempts and zero lease epochs
-     consumed” and reports the current semantic attempt
-     plus next lease epoch for a leased interruption. Only a canonical failure may be called a
-     semantic retry or retry exhaustion. Historical v1 receipts without interruption remain
-     read-only compatible.
-   - `extract`: this is only the explicit v2 rollback path. Require dedicated subagent slots. The number launched must equal
-     `action.tasks.length` and must not exceed `worker_plan.max_workers`. Read
-     `extractor_prompt_command` when supplied, otherwise use `extractor_prompt`. Give each subagent
-     only that complete prompt and one `automatic_build_executor.v1` envelope containing:
+```text
+executor.open(ref)
+  -> GENERATE: produce one strict candidate privately; send it through executor.session; continue
+  -> WAIT: wait retry_after_ms; reopen the same ref
+  -> DONE: return only committed | retryable_failure | interrupted
+```
 
-     ```text
-     task_id / attempt_number(= semantic_attempt) / execution_identity / lease_ref
-     input_command / candidate_path / candidate_command / usage_path / submit_command
-     heartbeat_command / fail_command / inspect_command
-     ```
-
-     A new claim first enters a 10-minute `reserved` phase. The first side effect of
-     `input_command` must create `start.json` with create-only semantics and begin an independent
-     30-minute `running` deadline; repeated input starts read the same record. `heartbeat_command`
-     may extend only a nonterminal running lease whose token, owner, target, stage, work unit, and
-     execution identity all match. It must never extend a reserved or expired lease.
-
-     Each subagent executes `input_command` and treats its stdout as the only extraction input. It
-     writes the model result to a private source file in the same task mailbox, replaces
-     `{candidate_source}` in `candidate_command` with that path, and executes the command. The
-     helper accepts only UTF-8 no-BOM or single-BOM JSON and normalizes `candidate_path` to UTF-8
-     no-BOM. Never use PowerShell 5.1 `Set-Content -Encoding UTF8` directly for `candidate_path`.
-     The root agent must never receive, restate, cache, write, or forward candidate JSON. When native or executor-reported usage is
-     available, the subagent writes an `automatic_build_usage_receipt.v1` to `usage_path`.
-     Otherwise it leaves that path absent; `source=unavailable` must not contain exact token fields.
-     When proven, the receipt also records `model`, `reasoning_effort`, and `harness_release`;
-     missing provenance stays absent and the summary reports it explicitly as unavailable with
-     separate coverage. These values must never be guessed.
-     The subagent then executes `submit_command`. On success it returns only the bounded
-     `automatic_build_task_receipt.v1` from submit stdout. On failure it executes `fail_command` and
-     returns only the failure receipt. It uses `heartbeat_command` for long work.
-
-     The root validates the temporary receipt list against
-     `receipt_aggregation.expected_receipts` and `receipt_aggregation.max_total_bytes`, discards the
-     list, and returns to preflight. It must not call the `legacy-submit` compatibility command.
-   - `waiting`: wait no longer than `retry_after_ms`, then return to preflight. Do not duplicate an
-     active lease.
-   - `close_stage`: execute `command` exactly. Never append `--allow-partial`. A semantic close must
-     carry a passing `automatic_build_stage_quality_report.v2`; the engine recomputes it before
-     transactional publication. Parse stdout as exactly one strict
-     `automatic_build_stage_close_result.v1` with `status=closed` and `next=replan`, or the
-     verification-only equivalent with `status=verified` and `next=replan`. Immediately return to
-     `plan/next`; a closed stage is never whole-build completion. If close returns
-     `automatic_build_recovery.v1`, branch only on its allowlisted `code`, `retryable`, and
-     `recovery_actions`; never expose raw stderr, exception text, stack, or command text.
-     `reconfirm_build_plan` always requires fresh user confirmation. Follow `retry_plan` only when
-     `retryable=true`; follow `migrate_policy` only when the engine emits an executable migration
-     action, never merely because the name appears in `recovery_actions`.
-   - `needs_user`: stop and show the structured reason and recovery commands. In particular:
-     - `executor_unavailable`: report the required dedicated capacity; never let the root emulate a
-       subagent.
-     - `preflight_required` or `plan_changed`: return to `plan`; do not claim stale work.
-     - `evaluation_required` or `evaluation_changed`: return to `plan` and accept the current
-       `preflight_evaluation_digest`; do not claim against stale performance history.
-     - `low_confidence_wall_budget` or `wall_budget_exceeded`: show the wall-clock violations and
-       confidence data; do not claim work.
-     - `legacy_migration_required`: show the read-only audit plus the `legacy_resume` and
-       `v2_rebuild` commands and wait for an explicit user choice.
-     - `quality_gate_failed`: show integrity and selected quality-floor violations separately;
-       never override them with LLM self-review or `--allow-partial`.
-     - retry exhaustion: show task ids, last diagnostics, and reset commands. Execute reset only
-       after explicit user confirmation.
-   - `done`: for `standard_deep`, report the workspace and end. For a confirmed `goal_directed`
-     plan, continue into the private artifact loop below.
-
-4. Return to `plan` immediately after every dispatch receipt, submitted batch, or closed stage. `.build/<stage>` plus
-   the v2 task/lease/mailbox state is the only resume truth. Attempt counts and completion state
-   must never be reconstructed from conversation history.
-
-## Private goal artifact loop
-
-After the public closure reaches `done`, call the Desktop stdin controller with
-`operation=artifact.prepare` and the confirmed `plan_id`. Consume only
-`intent_artifact_prepare_response.v1`. An empty `handoff.tasks` means every declared private
-artifact is accepted; report completion and end. Otherwise process the returned opaque handoffs in
-bounded waves using the currently available dedicated subagent slots. Finish the whole returned
-wave before preparing retries, so one failing artifact cannot starve an untouched sibling.
-
-Give each dedicated subagent only `workspace_dir`, `task_path`, and the Desktop controller path.
-The root must never read the task file or receive its contents. The subagent:
-
-1. calls `artifact.inspect`, then reads its own private `task.json`;
-2. uses only the task's goal, scope, output contract, validation rules, allowed evidence LIDs, and
-   the canonical Book tools/artifacts to create an `intent_artifact_candidate.v2`;
-3. writes UTF-8 no-BOM JSON only to the sibling `candidate.json`, preserving every task identity
-   field plus `blueprint_digest` and placing generated content only under
-   `payload={version:"artifact_instance.v2",blueprint_digest,records,relations?}`; every record and
-   relation must match its task Blueprint schema and carry at least one allowed evidence LID;
-4. sends `operation=artifact.submit` with only `task_path` over stdin and returns only the bounded
-   `intent_artifact_mailbox_receipt.v1` to root;
-5. on model/process/schema failure, sends `operation=artifact.fail` with a path-safe diagnostic
-   code and returns only its body-free retry receipt.
-
-The root validates receipt count, state, task/artifact identity, and the confirmed plan digest,
-discards the receipt list, then calls `artifact.prepare` again. Reuse pending attempts after an
-interruption; accepted artifacts are omitted deterministically, failed artifacts get a bounded new
-attempt, and stale source/plan/task identity fails closed. Candidate payloads, raw goals, quotes,
-LID lists, and accepted bodies must never cross from a dedicated subagent into the root context.
+The ref is not a filesystem path and must not be decoded or inspected. The session code performs
+all path, length, hash, schema, identity, mailbox, lease, receipt, writer, quality, and retry gates.
+The semantic extractor prompts remain byte-stable and use their ordinary strict-JSON output branch;
+the session does not supply the old command envelope. Candidate bytes stay in the executor-private
+temporary source and code-owned mailbox. Never return candidate JSON to the caller.
 
 ## Hard boundaries
 
-- A paper must already have trusted source reconciliation and hybrid foundation artifacts from the
-  desktop Build Workbench. This plugin verifies and consumes them; it does not replace the
-  human-reviewed foundation.
-- Paper-specific Workbench recovery applies only when the user explicitly supplied a paper draft
-  or the Desktop controller reports `content_profile.id=paper`; missing Workbench artifacts are not
-  a content-profile classifier.
-- Markdown and EPUB inputs run the full applicable pipeline from the source file.
-- Dedicated subagents are mandatory for semantic extraction. Missing capacity is
-  `needs_user(executor_unavailable)`, not permission to generate empty nodes, generic sidecars, or
-  reject-all classifications.
-- Automatic repair permits at most three total attempts per task. The durable attempt ledger,
-  leases, mailbox, and receipts are authoritative.
-- Legacy or mixed artifacts must pass `audit-legacy` and an explicit migration choice before v2
-  claims. `v2_rebuild` snapshots old artifacts; it does not delete or relabel them in place.
-- Public artifacts are published only when the complete policy-bound candidate set passes integrity
-  and quality gates. Failed publication preserves the previous public set.
+- Dedicated subagents are mandatory for semantic generation; missing capacity is represented by a
+  structured driver action, never permission to synthesize empty or generic artifacts in root.
+- Paper foundation remains owned by Build Workbench and Reader. This skill cannot bypass source
+  reconciliation or artifact gates.
+- The engine's durable plan, invocation, dispatch/task session, mailbox, receipt, and artifact state
+  are the only resume truth.
+- Do not expose raw stderr, stack traces, internal commands, absolute private paths, prompt bodies,
+  task input, raw goals, LID allowlists, candidate bodies, or accepted private bodies to root chat.
+- Do not change extractor prompt bytes as part of this orchestration protocol.

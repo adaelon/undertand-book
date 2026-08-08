@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
   automaticBuildDispatchFinish,
@@ -29,7 +30,7 @@ import { resolveAutomaticBuildTarget } from "../src/build-orchestrator";
 import { confirmedStandardBuildPlan } from "./helpers/confirmed-build-plan";
 import { writePass1ProductionTaskArtifact } from "./helpers/model-input-routability-fixture";
 
-const REPO_ROOT = path.resolve(process.cwd(), "..", "..");
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const EXTRACTOR_PROMPTS = [
   "pass1-local-extractor.md",
   "paper-metadata-extractor.md",
@@ -227,7 +228,7 @@ describe("automatic build Codex executor handoff", () => {
       if (previous === undefined) delete process.env.UNDERSTAND_BOOK_SIDECAR_SELF;
       else process.env.UNDERSTAND_BOOK_SIDECAR_SELF = previous;
     }
-  });
+  }, 15_000);
 
   it("hands off one executor per dispatch and claims its tasks strictly one at a time", () => {
     const root = mkdtempSync(path.join(tmpdir(), "understand-book-dispatch-handoff-"));
@@ -351,7 +352,8 @@ describe("automatic build Codex executor handoff", () => {
         "--interruption-command-role",
         "{last_command_role}",
       ]));
-      expect(handoff.prompt).toContain("automatic_build_dispatch_executor.v1");
+      expect(handoff.prompt).toContain("automatic_build_executor_session.v1");
+      expect(handoff.prompt).not.toContain("automatic_build_dispatch_executor.v1");
       expect(handoff.prompt).toContain("automatic_build_executor.v1");
       expect(JSON.stringify(handoff)).not.toContain("PRIVATE_CANDIDATE_MARKER");
       if (!("extractor_prompt_command" in next.action) || !next.action.extractor_prompt_command) {
@@ -365,13 +367,13 @@ describe("automatic build Codex executor handoff", () => {
       expect(run.status, run.stderr).toBe(0);
       expect(run.stderr).toBe("");
       for (const marker of [
-        "automatic_build_dispatch_executor.v1",
+        "automatic_build_executor_session.v1",
         "automatic_build_executor.v1",
-        "action.kind=task",
-        "action.kind=waiting",
-        "action.kind=finish",
-        "action.kind=finished",
-        "interrupt_command",
+        "executor.open",
+        "action.kind=GENERATE",
+        "action.kind=WAIT",
+        "action.kind=DONE",
+        "executor.session",
         "Never return candidate JSON to the caller",
       ]) {
         expect(run.stdout).toContain(marker);
@@ -819,7 +821,7 @@ describe("automatic build Codex executor handoff", () => {
     }
   });
 
-  it("freezes receipt-only execution in the skill and every specialized extractor", () => {
+  it("publishes the build.step four-action loop and executor session protocol without manual choreography", () => {
     const skill = readFileSync(path.join(REPO_ROOT, "skills", "build", "SKILL.md"), "utf8");
     const pluginSkill = readFileSync(path.join(
       REPO_ROOT,
@@ -831,26 +833,70 @@ describe("automatic build Codex executor handoff", () => {
     ), "utf8");
     expect(skill).toBe(pluginSkill);
     for (const marker of [
-      "automatic_build_executor.v1",
-      "needs_user(executor_unavailable)",
-      "The root agent must never receive, restate, cache, write, or forward candidate JSON",
-      "candidate_command",
-      "PowerShell 5.1",
-      "`legacy-submit`",
-      "automatic_build_dispatch_executor.v1",
-      "automatic_build_dispatch_executor_handoff.v1",
-      "executor_handoff",
-      "interrupt_command",
-      "automatic_build_executor_interruption.v1",
-      "before_first_claim",
-      "consume neither a semantic attempt nor a lease epoch",
-      "run `legacy-plan` exactly once",
-      "path.relative(action.cwd, executor_handoff.path)",
-      "handoff_relative_path",
-      "zero semantic attempts and zero lease epochs",
-      "Only a canonical failure",
+      "automatic_build_invocation_create.v1",
+      "automatic_build_step_request.v1",
+      "SPAWN_EXECUTORS",
+      "WAIT",
+      "NEEDS_USER",
+      "DONE",
+      "available_agent_slots",
+      "opaque_handoff_ref",
+      "retry_after_ms",
+      "executor.open",
+      "executor.session",
+      "planning.context",
+      "draft.candidate",
+      "plan_confirmation_required",
+      "The root never reads, receives, summarizes, caches, or forwards semantic input or candidate JSON.",
     ]) {
       expect(skill).toContain(marker);
+    }
+    for (const removedMarker of [
+      "run `legacy-plan` exactly once",
+      "automatic_build_plan.v1",
+      "automatic_build_next.v1",
+      "path.relative(action.cwd, executor_handoff.path)",
+      "handoff_relative_path",
+      "receipt_aggregation.expected_receipts",
+      "input_command",
+      "candidate_command",
+      "submit_command",
+      "fail_command",
+      "close_stage",
+      "automatic_build_stage_close_result.v1",
+      "automatic_build_recovery.v1",
+      "artifact.prepare",
+      "intent_artifact_mailbox_receipt.v1",
+    ]) {
+      expect(skill).not.toContain(removedMarker);
+    }
+
+    const executor = readFileSync(
+      path.join(REPO_ROOT, "agents", "automatic-build-dispatch-executor.md"),
+      "utf8",
+    );
+    for (const marker of [
+      "automatic_build_executor_session.v1",
+      "opaque_handoff_ref",
+      "executor.open",
+      "GENERATE",
+      "executor.session",
+      "WAIT",
+      "DONE",
+      "Never return candidate JSON to the caller",
+    ]) {
+      expect(executor).toContain(marker);
+    }
+    for (const removedMarker of [
+      "automatic_build_dispatch_executor.v1",
+      "next_command",
+      "input_command",
+      "candidate_command",
+      "submit_command",
+      "fail_command",
+      "interrupt_command",
+    ]) {
+      expect(executor).not.toContain(removedMarker);
     }
 
     for (const prompt of EXTRACTOR_PROMPTS) {

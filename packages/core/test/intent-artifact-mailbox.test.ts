@@ -18,6 +18,7 @@ import {
   openIntentArtifactTaskAttempt,
   submitIntentArtifactTaskAttempt,
 } from "../src/intent-artifact-mailbox";
+import * as intentArtifactMailboxModule from "../src/intent-artifact-mailbox";
 import {
   adaptIntentArtifactPayloadV1,
   compileIntentArtifactTasks,
@@ -29,6 +30,30 @@ import { canonicalBuildJson } from "../src/build-intent";
 
 const availableLids = ["1.1", "1.2", "2.1"];
 const resolvedScopeLids = ["1.1", "1.2"];
+
+interface IntentArtifactCandidateSinkModule {
+  stageIntentArtifactTaskCandidate?: (input: {
+    private_root: string;
+    task_path: string;
+    candidate_path: string;
+    max_candidate_bytes?: number;
+  }) => {
+    version: "intent_artifact_candidate_staging.v1";
+    candidate_sha256: string;
+    byte_length: number;
+  };
+}
+
+function expectedPrivateCandidateSink() {
+  const sink = (intentArtifactMailboxModule as unknown as IntentArtifactCandidateSinkModule)
+    .stageIntentArtifactTaskCandidate;
+  if (typeof sink !== "function") {
+    throw new Error(
+      "S4_RED_PRIVATE_CANDIDATE_SINK_UNAVAILABLE: stageIntentArtifactTaskCandidate is not exported",
+    );
+  }
+  return sink;
+}
 
 function confirmedSelection(): { intent: BuildIntentV1; plan: BuildPlanV1 } {
   const draftIntent = validateBuildIntentV1({
@@ -178,6 +203,44 @@ describe("IP7 reader-private task-owned artifact mailbox", () => {
       items: [{ id: "event-2", label: "Conflicting body", evidence_lids: ["1.2"] }],
     })), "utf8");
     expect(() => submitIntentArtifactTaskAttempt(submitInput(f, handoff.task_path))).toThrow(/candidate hash/i);
+  });
+
+  it("stages executor candidate bytes into the task-owned mailbox with idempotent replay and conflict rejection", () => {
+    const stageCandidate = expectedPrivateCandidateSink();
+    const f = fixture();
+    const task = f.tasks[0];
+    const handoff = openIntentArtifactTaskAttempt({
+      private_root: f.privateRoot,
+      artifact_directory: f.directory(task),
+      task,
+      created_at: "2026-07-26T01:02:00.000Z",
+    });
+    const source = path.join(f.privateRoot, "executor-private-source.json");
+    writeFileSync(source, `${JSON.stringify(candidate(task, {
+      items: [{ id: "event-staged", label: "PRIVATE_STAGED_BODY", evidence_lids: ["1.1"] }],
+    }))}\n`, "utf8");
+
+    const input = {
+      private_root: f.privateRoot,
+      task_path: handoff.task_path,
+      candidate_path: source,
+    };
+    const first = stageCandidate(input);
+    expect(stageCandidate(input)).toEqual(first);
+    expect(first).toMatchObject({
+      version: "intent_artifact_candidate_staging.v1",
+      candidate_sha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
+    });
+    expect(first.byte_length).toBeGreaterThan(0);
+    expect(readFileSync(path.join(path.dirname(handoff.task_path), "candidate.json"), "utf8"))
+      .toContain("PRIVATE_STAGED_BODY");
+    expect(JSON.stringify(first)).not.toContain("PRIVATE_STAGED_BODY");
+    expect(JSON.stringify(first)).not.toContain(f.privateRoot);
+
+    const conflict = path.join(f.privateRoot, "executor-private-conflict.json");
+    writeFileSync(conflict, "{\"different\":true}\n", "utf8");
+    expect(() => stageCandidate({ ...input, candidate_path: conflict }))
+      .toThrow(/candidate.*different|conflict/i);
   });
 
   it("records private failure detail, retries in a new attempt, and leaves sibling artifacts untouched", () => {

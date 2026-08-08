@@ -1,5 +1,13 @@
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  writeFileSync,
+} from "node:fs";
 import path from "node:path";
 import {
   claimAutomaticBuildTask,
@@ -26,6 +34,7 @@ import {
 
 const MAX_DISPATCH_RECEIPT_BYTES = 16_384;
 const MAX_DISPATCH_EXECUTOR_HANDOFF_BYTES = 262_144;
+const MAX_DISPATCH_EXECUTOR_PROMPT_BYTES = 65_536;
 
 export const AUTOMATIC_BUILD_EXECUTOR_INTERRUPTION_DIAGNOSTIC_CODES = [
   "command_start_failed",
@@ -197,6 +206,55 @@ function sameTargetRef(left: BuildTargetRefV2, right: BuildTargetRefV2): boolean
     && left.input_fingerprint === right.input_fingerprint;
 }
 
+function pathIdentity(value: string): string {
+  const resolved = path.resolve(value);
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+function samePath(left: string, right: string): boolean {
+  return pathIdentity(left) === pathIdentity(right);
+}
+
+function isOutside(root: string, candidate: string): boolean {
+  const relative = path.relative(root, candidate);
+  return relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative);
+}
+
+function assertRegularFileWithinWorkspace(
+  workspaceDir: string,
+  file: string,
+  field: string,
+): string {
+  const workspace = path.resolve(workspaceDir);
+  const resolved = path.resolve(file);
+  if (samePath(workspace, resolved) || isOutside(workspace, resolved)) {
+    throw new Error(`${field} escapes the build workspace`);
+  }
+  const workspaceStat = lstatSync(workspace);
+  if (!workspaceStat.isDirectory() || workspaceStat.isSymbolicLink()) {
+    throw new Error(`${field} workspace must be a real directory without symlinks`);
+  }
+  let cursor = workspace;
+  const parts = path.relative(workspace, resolved).split(path.sep).filter(Boolean);
+  for (const [index, part] of parts.entries()) {
+    cursor = path.join(cursor, part);
+    const stat = lstatSync(cursor);
+    if (stat.isSymbolicLink()) throw new Error(`${field} path must not contain a symlink`);
+    if (index < parts.length - 1 && !stat.isDirectory()) {
+      throw new Error(`${field} parent must be a directory`);
+    }
+    if (index === parts.length - 1 && !stat.isFile()) {
+      throw new Error(`${field} must be a regular file`);
+    }
+  }
+  const realWorkspace = realpathSync.native(workspace);
+  const realFile = realpathSync.native(resolved);
+  if (samePath(realWorkspace, realFile) || isOutside(realWorkspace, realFile)) {
+    throw new Error(`${field} realpath escapes the build workspace`);
+  }
+  return realFile;
+}
+
 function positiveInteger(value: number, field: string): number {
   if (!Number.isSafeInteger(value) || value < 1) throw new Error(`${field} must be a positive safe integer`);
   return value;
@@ -347,7 +405,8 @@ function validateDispatchExecutorHandoff(
     prepared.dispatch_run_id,
   );
   if (ref.version !== "automatic_build_dispatch_executor_handoff_ref.v1"
-    || path.resolve(ref.path) !== path.resolve(expectedPath)
+    || !path.isAbsolute(ref.path)
+    || !samePath(ref.path, expectedPath)
     || !/^[a-f0-9]{64}$/u.test(ref.sha256)
     || !Number.isSafeInteger(ref.byte_length)
     || ref.byte_length < 1
@@ -355,7 +414,12 @@ function validateDispatchExecutorHandoff(
     || !existsSync(expectedPath)) {
     throw new Error(`invalid dispatch executor handoff ref: ${prepared.manifest.dispatch_id}`);
   }
-  const bytes = readFileSync(expectedPath);
+  const realHandoffPath = assertRegularFileWithinWorkspace(
+    target.workspace_dir,
+    expectedPath,
+    "dispatch executor handoff",
+  );
+  const bytes = readFileSync(realHandoffPath);
   if (bytes.byteLength !== ref.byte_length
     || createHash("sha256").update(bytes).digest("hex") !== ref.sha256) {
     throw new Error(`dispatch executor handoff digest mismatch: ${prepared.manifest.dispatch_id}`);
@@ -373,24 +437,30 @@ function validateDispatchExecutorHandoff(
     };
   };
   try {
-    handoff = JSON.parse(bytes.toString("utf8")) as typeof handoff;
+    if (bytes.includes(0) || (bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf)) {
+      throw new Error("dispatch executor handoff encoding is invalid");
+    }
+    handoff = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) as typeof handoff;
   } catch {
     throw new Error(`invalid dispatch executor handoff JSON: ${prepared.manifest.dispatch_id}`);
   }
   if (handoff.version !== "automatic_build_dispatch_executor_handoff.v1"
     || typeof handoff.prompt !== "string"
+    || !handoff.prompt
+    || handoff.prompt.includes("\0")
+    || Buffer.byteLength(handoff.prompt, "utf8") > MAX_DISPATCH_EXECUTOR_PROMPT_BYTES
     || typeof handoff.prompt_sha256 !== "string"
     || createHash("sha256").update(handoff.prompt, "utf8").digest("hex") !== handoff.prompt_sha256
     || handoff.envelope?.version !== "automatic_build_dispatch_executor.v1"
     || handoff.envelope.dispatch_run_id !== prepared.dispatch_run_id
-    || path.resolve(handoff.envelope.manifest_path ?? "") !== path.resolve(
+    || !samePath(handoff.envelope.manifest_path ?? "", (
       automaticBuildDispatchManifestPath(
         target,
         prepared.manifest.stage,
         prepared.manifest.dispatch_id,
         prepared.dispatch_run_id,
-      ),
-    )
+      )
+    ))
     || stableJson(handoff.envelope.manifest) !== stableJson(prepared.manifest)
     || handoff.envelope.executor_handoff !== undefined) {
     throw new Error(`invalid dispatch executor handoff content: ${prepared.manifest.dispatch_id}`);
@@ -693,13 +763,39 @@ export function readAutomaticBuildDispatch(
   if (!resolvedRunId) throw new Error(`automatic build dispatch has no runtime: ${stage}/${dispatchId}`);
   const file = automaticBuildDispatchManifestPath(target, stage, dispatchId, resolvedRunId);
   if (!existsSync(file)) throw new Error(`automatic build dispatch does not exist: ${file}`);
+  const realManifestPath = assertRegularFileWithinWorkspace(
+    target.workspace_dir,
+    file,
+    "automatic build dispatch manifest",
+  );
   return validatePersistedDispatch(
     target,
     stage,
     dispatchId,
     resolvedRunId,
-    readJson<AutomaticBuildPersistedDispatchV1>(file),
+    readJson<AutomaticBuildPersistedDispatchV1>(realManifestPath),
   );
+}
+
+export function validateAutomaticBuildDispatchHandoff(
+  target: AutomaticBuildTarget,
+  input: {
+    stage: AutomaticBuildStage;
+    dispatch_id: string;
+    dispatch_run_id: string;
+    executor_handoff: AutomaticBuildDispatchExecutorHandoffRefV1;
+  },
+): AutomaticBuildPersistedDispatchV1 {
+  const persisted = readAutomaticBuildDispatch(
+    target,
+    input.stage,
+    input.dispatch_id,
+    input.dispatch_run_id,
+  );
+  if (stableJson(persisted.executor_handoff) !== stableJson(input.executor_handoff)) {
+    throw new Error(`dispatch executor handoff identity changed: ${input.dispatch_id}`);
+  }
+  return persisted;
 }
 
 function compactTaskReceipt(receipt: AutomaticBuildTaskReceiptV1): AutomaticBuildDispatchTaskReceiptV1 {

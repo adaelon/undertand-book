@@ -86,45 +86,18 @@ assert.equal(
   "published build skill must match the root build skill byte-for-byte",
 );
 const protocolMarkers = [
-  "automatic_build_protocol.v2_dispatch",
-  "automatic_build_protocol_doctor.v2",
-  "automatic_build_release.v3",
-  "checks.release_contract.status=compatible",
-  "all ten extractor names",
-  "protocol-doctor",
-  "legacy-plan",
-  "explicit_legacy_command",
-  "--protocol automatic_build_protocol.v2",
-  "automatic_build_plan.v1",
-  "--accepted-plan",
-  "--available-agent-slots",
-  "worker_plan.max_workers",
-  "candidate_path",
-  "usage_path",
-  "submit_command",
-  "automatic_build_task_receipt.v1",
-  "receipt_aggregation",
-  "automatic_build_dispatch_executor_handoff.v1",
-  "executor_handoff",
-  "short `spawn_agent` call",
-  "automatic_build_executor_interruption.v1",
-  "before_first_claim",
-  "consume neither a semantic attempt nor a lease epoch",
-  "run `legacy-plan` exactly once",
-  "path.relative(action.cwd, executor_handoff.path)",
-  "handoff_relative_path",
-  "zero semantic attempts and zero lease epochs",
-  "Only a canonical failure",
-  "executor_unavailable",
-  "legacy_migration_required",
-  "quality_gate_failed",
-  "automatic_build_stage_close_result.v1",
-  "status=closed",
-  "next=replan",
-  "automatic_build_recovery.v1",
-  "reconfirm_build_plan",
-  "retry_plan",
-  "migrate_policy",
+  "automatic_build_invocation_create.v1",
+  "automatic_build_step_request.v1",
+  "SPAWN_EXECUTORS",
+  "WAIT",
+  "NEEDS_USER",
+  "DONE",
+  "available_agent_slots",
+  "opaque_handoff_ref",
+  "retry_after_ms",
+  "executor.open",
+  "executor.session",
+  "The root never reads, receives, summarizes, caches, or forwards semantic input or candidate JSON.",
   "codex_build_intent_command.v2",
   "codex_build_intent_result.v2",
   "codex_build_intent_response.v1",
@@ -141,14 +114,34 @@ const protocolMarkers = [
   "CODEX_BUILD_FOUNDATION_REQUIRED",
   "The Desktop controller response is the only authority for whether foundation is required",
   "Do not inspect `.build/input/manifest.json`",
-  "artifact.prepare",
-  "intent_artifact_mailbox_receipt.v1",
   "UnderstandBook.exe",
 ];
 for (const marker of protocolMarkers) {
   assert(
     releaseSkill.includes(marker),
     `published build skill is missing automatic-build v2 marker: ${marker}`,
+  );
+}
+for (const removedMarker of [
+  "run `legacy-plan` exactly once",
+  "automatic_build_plan.v1",
+  "automatic_build_next.v1",
+  "path.relative(action.cwd, executor_handoff.path)",
+  "handoff_relative_path",
+  "receipt_aggregation.expected_receipts",
+  "input_command",
+  "candidate_command",
+  "submit_command",
+  "fail_command",
+  "close_stage",
+  "automatic_build_stage_close_result.v1",
+  "automatic_build_recovery.v1",
+  "artifact.prepare",
+  "intent_artifact_mailbox_receipt.v1",
+]) {
+  assert(
+    !releaseSkill.includes(removedMarker),
+    `published build skill still contains removed manual protocol marker: ${removedMarker}`,
   );
 }
 
@@ -178,27 +171,9 @@ if (installedPluginRoot) {
 
 const sidecarEntry = await readText("skills/build/sidecar-entry.ts");
 for (const command of [
-  "legacy-plan",
-  "protocol-doctor",
-  "plan",
-  "next",
-  "dispatch.next",
-  "dispatch.inspect",
-  "dispatch.finish",
-  "audit-legacy",
-  "migration-mode",
-  "quality",
-  "metrics",
-  "record-attempt",
-  "heartbeat",
-  "candidate",
-  "submit",
-  "legacy-submit",
-  "fail",
-  "inspect",
-  "input",
-  "write",
-  "close",
+  "build.step",
+  "executor.open",
+  "executor.session",
   "intent.plan",
   "intent.artifact",
   "intent.metrics",
@@ -212,14 +187,30 @@ for (const command of [
 
 const dispatchWrapper = await readText("agents/automatic-build-dispatch-executor.md");
 for (const marker of [
-  "automatic_build_dispatch_executor.v1",
-  "action.kind=task",
-  "action.kind=waiting",
-  "action.kind=finish",
-  "action.kind=finished",
+  "automatic_build_executor_session.v1",
+  "opaque_handoff_ref",
+  "executor.open",
+  "GENERATE",
+  "executor.session",
+  "WAIT",
+  "DONE",
   "Never return candidate JSON to the caller",
 ]) {
   assert(dispatchWrapper.includes(marker), `dispatch executor wrapper is missing marker: ${marker}`);
+}
+for (const removedMarker of [
+  "automatic_build_dispatch_executor.v1",
+  "next_command",
+  "input_command",
+  "candidate_command",
+  "submit_command",
+  "fail_command",
+  "interrupt_command",
+]) {
+  assert(
+    !dispatchWrapper.includes(removedMarker),
+    `dispatch executor wrapper still contains removed command marker: ${removedMarker}`,
+  );
 }
 assert(
   sidecarEntry.includes("automatic-build-dispatch-executor.md"),
@@ -242,7 +233,14 @@ const packagedPrompt = spawnSync(sidecarBinary, [
 assert.ifError(packagedPrompt.error);
 assert.equal(packagedPrompt.status, 0, `packaged executor prompt failed: ${packagedPrompt.stderr}`);
 assert.equal(packagedPrompt.stderr, "", "packaged executor prompt must reserve stderr for diagnostics");
-for (const marker of ["automatic_build_dispatch_executor.v1", "automatic_build_executor.v1"]) {
+for (const marker of [
+  "automatic_build_executor_session.v1",
+  "executor.open",
+  "action.kind=GENERATE",
+  "action.kind=WAIT",
+  "action.kind=DONE",
+  "automatic_build_executor.v1",
+]) {
   assert(packagedPrompt.stdout.includes(marker), `packaged executor prompt is missing marker: ${marker}`);
 }
 

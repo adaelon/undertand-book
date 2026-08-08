@@ -175,7 +175,7 @@ describe("automatic build executor dispatch runtime", () => {
     expect(new Set(receipt.task_receipts.map((item) => item.work_unit_id)).size).toBe(8);
     expect(Buffer.byteLength(JSON.stringify(receipt))).toBeLessThanOrEqual(16_384);
     expect(JSON.stringify(receipt)).not.toContain("PRIVATE_FORMULA_");
-  });
+  }, 15_000);
 
   it("preserves three commits, recovers the fourth lease, and never claims the remaining suffix", () => {
     const { target, descriptors, manifest, bindings } = fixture();

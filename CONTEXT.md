@@ -636,6 +636,12 @@ Build Engine Sidecar 把多个既有、同 target/stage/policy/kind 的 work uni
 ## Executor 调度运行 (executor dispatch run)
 同一确定性 `dispatch_id` 的一次有界执行周期,由独立 `dispatch_run_id` 标识。Planner identity、work unit 和 artifact freshness 不随运行重试改变;semantic failure、executor interruption 或恢复重排后可为相同 manifest 创建新的 run-scoped mailbox,旧 run 的 progress/receipt 保持 append-only 且不得吞掉新 run。状态:NEW(见 [ADR-0092](docs/adr/0092-phase-aware-automatic-build-leases-and-executor-dispatch-bundles.md))。
 
+## Opaque handoff ref
+由确定性预构建代码签发、供 root Codex 原样转交给专用 executor 的有界 ASCII locator。它不等同于文件路径,不暴露 workspace、dispatch、attempt、hash 或 mailbox identity；其真实绑定只由代码私下持久化并在消费点重验。状态:NEW(见 [ADR-0101](docs/adr/0101-deterministic-prebuild-protocol-ownership-and-codex-semantic-boundary.md))。
+
+## Executor open
+专用 executor 用 opaque handoff ref 开启语义执行会话的原子消费边界。它在返回任何语义输入或取得任务执行权前,由代码完成 ref、路径、handoff、prompt、manifest、dispatch identity 与当前终态的重验；无效或漂移输入必须失败关闭且不得创建语义尝试。状态:NEW(见 [ADR-0101](docs/adr/0101-deterministic-prebuild-protocol-ownership-and-codex-semantic-boundary.md))。
+
 ## Codex plugin
 以 `.codex-plugin/plugin.json` 打包、由 Codex 安装和加载的本地预构建 harness 外壳。它通过 `$understand-book-build` 驱动现有确定性脚本与专用语义抽取契约,并可经 Codex 构建意图入口读写 Desktop-owned 的同一 reader-private 计划;正常条件下一次已确认执行完成、外部中断后按磁盘产物幂等续跑。paper 只消费 Build Workbench 已可信的混合阅读基座;非 paper 可从 Markdown/EPUB 原始输入开始。它不是 Web 内置模型 worker,不嵌入 Codex app-server,不经 Visitor/Book MCP 读取私有计划,也不能绕过 plan/artifact/hash/schema gate。状态:BOUNDARY_CHANGE(2026-07-26 IP11)。
 

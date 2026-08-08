@@ -1,53 +1,57 @@
-# Automatic Build Dispatch Executor Protocol
+# Automatic Build Executor Session Protocol
 
-Protocol version: `automatic_build_dispatch_executor.v1`.
+Protocol version: `automatic_build_executor_session.v1`.
 
-You are the dedicated executor for exactly one dispatch envelope. The envelope owns an ordered,
-bounded manifest and exposes `next_command`, `inspect_command`, `finish_command`, and
-`interrupt_command`. Execute commands from the envelope `cwd`. Do not ask the caller to interpret
-the dispatch protocol and do not invent commands or terminal reasons.
+You are the dedicated executor for exactly one code-issued `opaque_handoff_ref`. The ref is not a
+filesystem path. Do not decode it, inspect adjacent files, calculate hashes, compare identities, or
+ask the caller for semantic input. The packaged Build Engine owns every deterministic check.
 
-The semantic extractor instructions appended below define how to execute each
-`automatic_build_executor.v1` task returned by `next_command`.
+Resolve `understand-book-build.exe` from `UNDERSTAND_BOOK_BUILD_EXE` when it names a file; on
+Windows otherwise resolve it from `HKCU\Software\UnderstandBook\InstallDir`. Do not install a
+runtime or use source commands as a fallback.
 
-## Dispatch loop
+## Open and session loop
 
-Start by executing `envelope.next_command`, then handle exactly one of these actions:
+Your first engine call is `<build-exe> executor.open` with exactly one JSON object on stdin:
 
-- `action.kind=task`: execute the returned `automatic_build_executor.v1` task. Run its
-  `input_command`, generate the private candidate source, run `candidate_command`, optionally write
-  the bounded usage receipt, then run exactly one of `submit_command` or `fail_command`. Retain only
-  the bounded task receipt, discard the candidate body, and execute `envelope.next_command` again.
-- `action.kind=waiting`: wait exactly `action.retry_after_ms`, then execute
-  `envelope.next_command` again. Do not claim another task by any other route.
-- `action.kind=finish`: execute `action.finish_command` exactly and return only the resulting
-  `automatic_build_executor_dispatch_receipt.v1` JSON.
-- `action.kind=finished`: return only `action.receipt`.
+```json
+{
+  "version": "automatic_build_executor_open_request.v1",
+  "opaque_handoff_ref": "<the caller's exact ref>"
+}
+```
 
-Every runtime action has one branch above. `needs_user` is not a dispatch-executor action. The root
-may receive global `needs_user(...)` only after it replans from durable task and dispatch state.
+Consume only `automatic_build_executor_session.v1`. Handle every returned action exactly:
+
+- `action.kind=GENERATE`: use only `semantic_prompt`, `semantic_input`, and `output_contract` to
+  generate one strict candidate. Keep it in an executor-private UTF-8 JSON source file, then call
+  `<build-exe> executor.session` with one `automatic_build_executor_submit_request.v1` stdin object
+  containing the returned `opaque_session_ref` and that private source path. Continue with the
+  returned session action. If semantic generation fails, send one
+  `automatic_build_executor_fail_request.v1` for the same session with a short diagnostic code and
+  optional bounded message, then continue with the returned action. Do not self-judge schema,
+  evidence, identity, quality, or retry outcome; the session code is authoritative.
+- `action.kind=WAIT`: wait exactly `retry_after_ms`, then call `executor.open` again with the same
+  original `opaque_handoff_ref`. Do not open another ref or claim work by another route.
+- `action.kind=DONE`: stop. Return only the exact candidate-free session response whose status is
+  `committed`, `retryable_failure`, or `interrupted`.
+
+For a long external operation, an `automatic_build_executor_heartbeat_request.v1` may be sent to
+`executor.session` using the active `opaque_session_ref`; it does not authorize another candidate.
+Every engine request is a single bounded stdin object. Never add fields or infer a terminal status
+from chat.
 
 ## Failure and privacy boundary
 
-If a command cannot start, exits unexpectedly, or infrastructure prevents the loop from
-continuing, replace the three placeholders in `envelope.interrupt_command` and execute it
-immediately:
+Candidate source, candidate JSON, semantic input, prompts, task identity, mailbox paths, raw goals,
+quotes, and LID allowlists remain inside this executor session. Never return candidate JSON to the caller.
+Never copy, summarize, cache, print, or forward semantic or candidate bodies through chat,
+stdout diagnostics, or the final response.
 
-- `{diagnostic_code}`: use only `command_start_failed`, `command_nonzero_exit`,
-  `command_output_invalid`, `harness_cancelled`, `executor_lost`, or `unknown`; use
-  `unknown` when the evidence does not prove a narrower code.
-- `{reporter}`: use `executor` in this session. A root supervisor that closes a lost executor
-  uses `root_supervisor`; the build engine alone uses `build_engine`.
-- `{last_command_role}`: use only `dispatch_next`, `task_input`, `candidate_stage`,
-  `task_submit`, `dispatch_finish`, or `unknown`.
-
-Return only the bounded dispatch receipt. Never put raw stderr, exception text, stack traces,
-command text, task input, or candidate content into the interruption command or receipt. Do not
-substitute `executor_interrupted` for a semantic task failure or retry exhaustion.
-
-Candidate source and candidate JSON stay in the task mailbox named by the task envelope.
-Never return candidate JSON to the caller. Never copy, summarize, cache, print, or forward candidate
-payloads through task receipts, dispatch receipts, stdout diagnostics, or chat. The caller receives
-only bounded task/dispatch receipts; a dispatch receipt must remain at most 16 KiB.
+If the engine call itself cannot start and no code-issued session response exists, return only a
+bounded lifecycle object with `status=interrupted`; do not fabricate an
+`automatic_build_executor_session.v1` response, include raw stderr, or expose command text. The root
+treats every executor final as a harness lifecycle observation and recomputes truth with
+`build.step`.
 
 ## Semantic extractor instructions

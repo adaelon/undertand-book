@@ -125,10 +125,21 @@ try {
         throw new Error(`Node/sidecar ${mode} prompt bytes diverged: ${promptName}`);
       }
       if (mode === "dispatch") {
-        for (const marker of ["automatic_build_dispatch_executor.v1", "automatic_build_executor.v1"]) {
+        for (const marker of [
+          "automatic_build_executor_session.v1",
+          "automatic_build_executor.v1",
+          "executor.open",
+          "action.kind=GENERATE",
+          "action.kind=WAIT",
+          "action.kind=DONE",
+          "executor.session",
+        ]) {
           if (!nodePrompt.includes(marker)) {
             throw new Error(`complete executor prompt is missing marker ${marker}: ${promptName}`);
           }
+        }
+        if (nodePrompt.includes("automatic_build_dispatch_executor.v1")) {
+          throw new Error(`complete executor prompt retains obsolete dispatch marker: ${promptName}`);
         }
       }
     }
@@ -238,7 +249,8 @@ try {
   const handoff = JSON.parse(handoffBytes.toString("utf8"));
   if (handoff.version !== "automatic_build_dispatch_executor_handoff.v1"
     || handoff.envelope?.dispatch_run_id !== envelope.dispatch_run_id
-    || !handoff.prompt?.includes("automatic_build_dispatch_executor.v1")
+    || !handoff.prompt?.includes("automatic_build_executor_session.v1")
+    || handoff.prompt?.includes("automatic_build_dispatch_executor.v1")
     || !handoff.prompt?.includes("automatic_build_executor.v1")) {
     throw new Error(`dispatch executor handoff content is incomplete: ${executorHandoff.path}`);
   }

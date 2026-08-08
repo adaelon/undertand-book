@@ -89,6 +89,17 @@ export interface IntentArtifactTaskAttemptInspectionV1 {
   created_at: string;
 }
 
+export interface IntentArtifactTaskAttemptExecutionContextV1 {
+  version: "intent_artifact_task_attempt_execution_context.v1";
+  private_root: string;
+  artifact_directory: string;
+  attempt_directory: string;
+  task_path: string;
+  candidate_path: string;
+  task: IntentArtifactTaskEnvelopeV2;
+  attempt: number;
+}
+
 export interface OpenIntentArtifactTaskAttemptInput {
   private_root: string;
   artifact_directory: string;
@@ -126,6 +137,13 @@ interface AttemptPaths {
 interface CandidateFile {
   value: unknown;
   sha256: string;
+  bytes: Buffer;
+}
+
+export interface IntentArtifactCandidateStagingV1 {
+  version: "intent_artifact_candidate_staging.v1";
+  candidate_sha256: string;
+  byte_length: number;
 }
 
 function sha256(value: string | Uint8Array): string {
@@ -328,10 +346,64 @@ function readCandidate(file: string, maxBytes: number): CandidateFile {
     ? bytes.subarray(UTF8_BOM.byteLength)
     : bytes;
   try {
-    return { value: JSON.parse(UTF8_DECODER.decode(payload)), sha256: sha256(payload) };
+    return {
+      value: JSON.parse(UTF8_DECODER.decode(payload)),
+      sha256: sha256(payload),
+      bytes: payload,
+    };
   } catch (error) {
     throw new Error("candidate must contain valid UTF-8 JSON", { cause: error });
   }
+}
+
+function candidateStaging(candidate: CandidateFile): IntentArtifactCandidateStagingV1 {
+  return {
+    version: "intent_artifact_candidate_staging.v1",
+    candidate_sha256: candidate.sha256,
+    byte_length: candidate.bytes.byteLength,
+  };
+}
+
+export function stageIntentArtifactTaskCandidate(input: {
+  private_root: string;
+  task_path: string;
+  candidate_path: string;
+  max_candidate_bytes?: number;
+}): IntentArtifactCandidateStagingV1 {
+  const paths = resolveAttemptPaths(input.private_root, input.task_path);
+  const { task, attempt } = readTask(paths);
+  if (existsSync(paths.failurePath)) {
+    readStoredReceipt(paths, task, attempt, "retryable_failure");
+    throw new Error("intent artifact attempt already failed; open a retry attempt");
+  }
+  const maxBytes = input.max_candidate_bytes ?? DEFAULT_MAX_CANDIDATE_BYTES;
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) {
+    throw new Error("max_candidate_bytes must be a positive safe integer");
+  }
+  const source = readCandidate(path.resolve(input.candidate_path), maxBytes);
+  if (existsSync(paths.candidatePath)) {
+    const existing = readCandidate(paths.candidatePath, maxBytes);
+    if (existing.sha256 !== source.sha256) {
+      throw new Error("intent artifact candidate already exists with a different hash");
+    }
+    return candidateStaging(existing);
+  }
+  if (existsSync(paths.receiptPath)) {
+    readStoredReceipt(paths, task, attempt, "committed");
+    throw new Error("committed intent artifact attempt is missing its candidate mailbox");
+  }
+  try {
+    writeFileSync(paths.candidatePath, source.bytes, { flag: "wx", mode: 0o600 });
+  } catch (error) {
+    const code = error && typeof error === "object" && "code" in error ? String(error.code) : "";
+    if (code !== "EEXIST") throw error;
+    const existing = readCandidate(paths.candidatePath, maxBytes);
+    if (existing.sha256 !== source.sha256) {
+      throw new Error("intent artifact candidate already exists with a different hash");
+    }
+    return candidateStaging(existing);
+  }
+  return candidateStaging(source);
 }
 
 export function openIntentArtifactTaskAttempt(
@@ -465,6 +537,24 @@ export function inspectIntentArtifactTaskAttempt(input: {
     artifact_type: task.artifact.artifact_type,
     attempt: attempt.attempt,
     created_at: attempt.created_at,
+  };
+}
+
+export function readIntentArtifactTaskAttemptExecutionContext(input: {
+  private_root: string;
+  task_path: string;
+}): IntentArtifactTaskAttemptExecutionContextV1 {
+  const paths = resolveAttemptPaths(input.private_root, input.task_path);
+  const { task, attempt } = readTask(paths);
+  return {
+    version: "intent_artifact_task_attempt_execution_context.v1",
+    private_root: paths.privateRoot,
+    artifact_directory: paths.artifactDirectory,
+    attempt_directory: paths.attemptDirectory,
+    task_path: paths.taskPath,
+    candidate_path: paths.candidatePath,
+    task,
+    attempt: attempt.attempt,
   };
 }
 
