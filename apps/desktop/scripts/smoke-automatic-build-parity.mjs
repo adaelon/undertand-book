@@ -38,6 +38,9 @@ const nodeSourceThinEnvironment = {
   UNDERSTAND_BOOK_PLUGIN_ROOT: thinPluginRoot,
 };
 delete nodeSourceThinEnvironment.UNDERSTAND_BOOK_SIDECAR_SELF;
+const packagedDefaultEnvironment = { ...process.env };
+delete packagedDefaultEnvironment.UNDERSTAND_BOOK_PLUGIN_ROOT;
+delete packagedDefaultEnvironment.UNDERSTAND_BOOK_SIDECAR_SELF;
 
 function stableJson(value) {
   if (value === null || typeof value !== "object") return JSON.stringify(value);
@@ -65,8 +68,8 @@ function runNode(operation, args, label) {
   return run(process.execPath, [tsx, automaticBuild, operation, ...args], label, nodeEnvironment);
 }
 
-function runSidecar(operation, args, label) {
-  return run(sidecar, [operation, ...args], label);
+function runSidecar(operation, args, label, env = process.env) {
+  return run(sidecar, [operation, ...args], label, env);
 }
 
 function assertBytesEqual(left, right, label) {
@@ -199,6 +202,21 @@ try {
     || sidecarDoctor.value.checks?.plugin_shape?.thin_plugin !== true
     || sidecarDoctor.value.checks?.plugin_shape?.agents_required !== false) {
     throw new Error(`packaged thin-plugin doctor did not exercise prompt/handoff preparation: ${sidecarDoctor.stdout}`);
+  }
+  const sidecarDefaultRootDoctor = runSidecar("protocol-doctor", [
+    source,
+    "--root", root,
+    "--max-parallel", "3",
+    "--available-agent-slots", "2",
+    "--build-plan", buildPlan,
+  ], "sidecar protocol doctor without plugin root", packagedDefaultEnvironment);
+  if (sidecarDefaultRootDoctor.value.status !== "compatible"
+    || sidecarDefaultRootDoctor.value.checks?.prompt_provider?.source !== "packaged_sidecar"
+    || sidecarDefaultRootDoctor.value.checks.prompt_provider.checked_extractors?.length !== extractorPromptNames.length
+    || sidecarDefaultRootDoctor.value.checks?.handoff_preparation?.status !== "compatible") {
+    throw new Error(
+      `packaged sidecar required an external plugin root for prompt preparation: ${sidecarDefaultRootDoctor.stdout}`,
+    );
   }
   const thinNodeDoctor = run(
     process.execPath,

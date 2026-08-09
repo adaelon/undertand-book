@@ -312,7 +312,7 @@ export function resolveAutomaticBuildExecutorPrompt(
     }
   } else {
     const [command, ...args] = executorPromptCommand(extractorName, mode);
-    const output = captureBuildProcessOutput(command, args, PLUGIN_ROOT);
+    const output = captureBuildProcessOutput(command, args, path.dirname(path.resolve(command)));
     if (output.error || output.status !== 0) {
       throw new AutomaticBuildExecutorPromptResolutionError("prompt_provider_unavailable", source);
     }
@@ -364,7 +364,11 @@ export function resolveAutomaticBuildPromptAsset(
   let bytes: Buffer;
   if (source === "packaged_sidecar") {
     const sidecar = process.env.UNDERSTAND_BOOK_SIDECAR_SELF!;
-    const output = captureBuildProcessOutput(sidecar, ["prompt", extractorName], PLUGIN_ROOT);
+    const output = captureBuildProcessOutput(
+      sidecar,
+      ["prompt", extractorName],
+      path.dirname(path.resolve(sidecar)),
+    );
     if (output.error || output.status !== 0) {
       throw new AutomaticBuildExecutorPromptResolutionError("prompt_provider_unavailable", source);
     }
