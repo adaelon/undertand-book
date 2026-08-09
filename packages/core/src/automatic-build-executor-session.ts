@@ -2032,9 +2032,8 @@ function readStdinRequest(): unknown {
   if (!bytes.byteLength || bytes.byteLength > MAX_STDIN_BYTES || bytes.includes(0)) {
     throw new Error("executor session stdin is empty or exceeds its byte limit");
   }
-  if (bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) {
-    throw new Error("executor session stdin must not contain a BOM");
-  }
+  // TextDecoder consumes one leading UTF-8 BOM, matching Windows PowerShell 5.1 native pipelines.
+  // Additional BOMs remain U+FEFF and are rejected by JSON.parse below.
   return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) as unknown;
 }
 

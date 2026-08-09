@@ -888,7 +888,7 @@ describe("S0 deterministic automatic-build driver protocol", () => {
     expectRootSafeStep(response, [value.root, value.buildPlanPath, "driver-receipt-"]);
   }, 30_000);
 
-  it("runs invocation creation and build.step through a bounded stdin command", () => {
+  it("runs driver commands and accepts a PowerShell-style UTF-8 BOM on executor stdin", () => {
     const value = fixture("stdin-command");
     const env = {
       ...process.env,
@@ -926,15 +926,16 @@ describe("S0 deterministic automatic-build driver protocol", () => {
     expect(response.action.kind).toBe("SPAWN_EXECUTORS");
     expectRootSafeStep(response, [value.root, value.source, value.buildPlanPath]);
     if (response.action.kind !== "SPAWN_EXECUTORS") throw new Error("expected an executor ref");
+    const executorOpenRequest = Buffer.from(`${JSON.stringify({
+      version: "automatic_build_executor_open_request.v1",
+      opaque_handoff_ref: response.action.executors[0].opaque_handoff_ref,
+      now: "2026-08-08T05:25:01.000Z",
+    })}\n`, "utf8");
     const opened = spawnSync(process.execPath, [TSX_CLI, EXECUTOR_SESSION_CLI], {
       cwd: REPO_ROOT,
       env,
       encoding: "utf8",
-      input: `${JSON.stringify({
-        version: "automatic_build_executor_open_request.v1",
-        opaque_handoff_ref: response.action.executors[0].opaque_handoff_ref,
-        now: "2026-08-08T05:25:01.000Z",
-      })}\n`,
+      input: Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), executorOpenRequest]),
       timeout: 30_000,
       maxBuffer: 4 * 1024 * 1024,
     });
