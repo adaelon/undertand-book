@@ -19,6 +19,7 @@ import type {
 } from "../src/automatic-build-budget";
 import { recordAutomaticBuildInputObservation } from "../src/automatic-build-metrics";
 import { submitAutomaticBuildCandidate } from "../src/automatic-build-mailbox";
+import { startAutomaticBuildLease } from "../src/automatic-build-lease";
 import {
   failAutomaticBuildExecutorSession,
   openAutomaticBuildExecutorSession,
@@ -503,6 +504,127 @@ describe("S0 deterministic automatic-build driver protocol", () => {
     });
     expect(replayed).toEqual(response);
   });
+
+  it("resumes an expired running dispatch without republishing its manifest", () => {
+    const value = fixture("expired-public-dispatch");
+    const plan = automaticBuildPlan(value.source, value.root, {
+      requested_workers: 1,
+      available_agent_slots: 1,
+      build_plan: value.buildPlan,
+    });
+    if (!plan.preflight) throw new Error("expected expired-dispatch preflight");
+    const first = automaticBuildNext(value.source, value.root, 1, {
+      now: "2026-08-08T05:01:00.000Z",
+      lease_ttl_ms: 1_000,
+      run_ttl_ms: 1_000,
+      accepted_plan_digest: plan.preflight.plan_digest,
+      available_agent_slots: 1,
+      executor_dispatches: true,
+      build_plan: value.buildPlan,
+    });
+    if (!("dispatches" in first.action) || !first.action.dispatches?.length) {
+      throw new Error("expected initial persisted dispatch");
+    }
+    const firstEnvelope = first.action.dispatches[0];
+    const target = resolveAutomaticBuildTarget(value.source, value.root);
+    const claimed = automaticBuildDispatchNext(
+      value.source,
+      value.root,
+      firstEnvelope.manifest.stage,
+      firstEnvelope.manifest.dispatch_id,
+      { dispatch_run_id: firstEnvelope.dispatch_run_id, now: "2026-08-08T05:01:01.000Z" },
+    );
+    if (claimed.action.kind !== "task") throw new Error("expected initial dispatch task");
+    startAutomaticBuildLease(target, claimed.action.task.lease_ref, claimed.action.task.lease.token, {
+      now: "2026-08-08T05:01:01.100Z",
+      run_ttl_ms: 1_000,
+    });
+    const originalManifest = readFileSync(firstEnvelope.manifest_path, "utf8");
+
+    const resumed = automaticBuildNext(value.source, value.root, 1, {
+      now: "2026-08-08T05:01:03.000Z",
+      lease_ttl_ms: 1_000,
+      run_ttl_ms: 2_000,
+      accepted_plan_digest: plan.preflight.plan_digest,
+      available_agent_slots: 1,
+      executor_dispatches: true,
+      build_plan: value.buildPlan,
+    });
+    if (!("dispatches" in resumed.action) || !resumed.action.dispatches?.length) {
+      throw new Error("expected resumed persisted dispatch");
+    }
+    const resumedEnvelope = resumed.action.dispatches[0];
+    expect(resumedEnvelope.manifest.dispatch_id).toBe(firstEnvelope.manifest.dispatch_id);
+    expect(resumedEnvelope.dispatch_run_id).toBe(firstEnvelope.dispatch_run_id);
+    expect(resumedEnvelope.manifest_path).toBe(firstEnvelope.manifest_path);
+    expect(readFileSync(firstEnvelope.manifest_path, "utf8")).toBe(originalManifest);
+
+    const reclaimed = automaticBuildDispatchNext(
+      value.source,
+      value.root,
+      resumedEnvelope.manifest.stage,
+      resumedEnvelope.manifest.dispatch_id,
+      { dispatch_run_id: resumedEnvelope.dispatch_run_id, now: "2026-08-08T05:01:03.100Z" },
+    );
+    if (reclaimed.action.kind !== "task") throw new Error("expected reclaimed dispatch task");
+    expect(reclaimed.action.task.task_id).toBe(claimed.action.task.task_id);
+    expect(reclaimed.action.task.execution_identity.lease_epoch).toBe(2);
+  }, 30_000);
+
+  it("rejects expired dispatch re-entry when the persisted owner identity conflicts", () => {
+    const value = fixture("expired-public-dispatch-owner-conflict");
+    const plan = automaticBuildPlan(value.source, value.root, {
+      requested_workers: 1,
+      available_agent_slots: 1,
+      build_plan: value.buildPlan,
+    });
+    if (!plan.preflight) throw new Error("expected owner-conflict preflight");
+    const acceptedPlanDigest = plan.preflight.plan_digest;
+    const first = automaticBuildNext(value.source, value.root, 1, {
+      now: "2026-08-08T05:11:00.000Z",
+      lease_ttl_ms: 1_000,
+      run_ttl_ms: 1_000,
+      accepted_plan_digest: acceptedPlanDigest,
+      available_agent_slots: 1,
+      executor_dispatches: true,
+      build_plan: value.buildPlan,
+    });
+    if (!("dispatches" in first.action) || !first.action.dispatches?.length) {
+      throw new Error("expected initial owner-conflict dispatch");
+    }
+    const firstEnvelope = first.action.dispatches[0];
+    const target = resolveAutomaticBuildTarget(value.source, value.root);
+    const claimed = automaticBuildDispatchNext(
+      value.source,
+      value.root,
+      firstEnvelope.manifest.stage,
+      firstEnvelope.manifest.dispatch_id,
+      { dispatch_run_id: firstEnvelope.dispatch_run_id, now: "2026-08-08T05:11:01.000Z" },
+    );
+    if (claimed.action.kind !== "task") throw new Error("expected owner-conflict dispatch task");
+    startAutomaticBuildLease(target, claimed.action.task.lease_ref, claimed.action.task.lease.token, {
+      now: "2026-08-08T05:11:01.100Z",
+      run_ttl_ms: 1_000,
+    });
+    const persisted = JSON.parse(readFileSync(firstEnvelope.manifest_path, "utf8")) as {
+      owner: string;
+      [key: string]: unknown;
+    };
+    writeFileSync(firstEnvelope.manifest_path, `${JSON.stringify({
+      ...persisted,
+      owner: `${persisted.owner}:foreign`,
+    }, null, 2)}\n`, "utf8");
+
+    expect(() => automaticBuildNext(value.source, value.root, 1, {
+      now: "2026-08-08T05:11:03.000Z",
+      lease_ttl_ms: 1_000,
+      run_ttl_ms: 2_000,
+      accepted_plan_digest: acceptedPlanDigest,
+      available_agent_slots: 1,
+      executor_dispatches: true,
+      build_plan: value.buildPlan,
+    })).toThrow("persisted dispatch identity conflicts with selected plan");
+  }, 30_000);
 
   it("rejects a stale decision after BuildPlan drift without caller-supplied digests", async () => {
     const driver = expectedDriver();

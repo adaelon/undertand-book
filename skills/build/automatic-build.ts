@@ -1570,11 +1570,19 @@ function expandAction(
           ?? DEFAULT_RUN_TTL_MS;
         const publication = prepareAutomaticBuildDispatch(target, manifest, {
           owner: `automatic-build-dispatch:${manifest.dispatch_id}:${dispatchRunId}`,
-          created_at: leaseOptions.now,
+          created_at: handoff.persisted_plan.created_at,
           reserve_ttl_ms: leaseOptions.reserve_ttl_ms,
           run_ttl_ms: runTtlMs,
           dispatch_run_id: dispatchRunId,
         });
+        const existingDispatch = existsSync(publication.manifest_path)
+          ? readAutomaticBuildDispatch(target, manifest.stage, manifest.dispatch_id, dispatchRunId)
+          : undefined;
+        if (existingDispatch
+          && (canonicalAutomaticBuildJson(existingDispatch.manifest) !== canonicalAutomaticBuildJson(manifest)
+            || existingDispatch.owner !== publication.prepared.owner)) {
+          throw new Error(`persisted dispatch identity conflicts with selected plan: ${publication.manifest_path}`);
+        }
         const envelope = {
           version: "automatic_build_dispatch_executor.v1" as const,
           manifest,
@@ -1609,19 +1617,21 @@ function expandAction(
             ),
           },
         };
-        const executorHandoff = persistDispatchExecutorHandoff(
-          publication.manifest_path,
-          dispatchPrompt.resolved,
-          envelope,
-        );
-        persistAutomaticBuildDispatch(target, manifest, {
-          owner: publication.prepared.owner,
-          created_at: publication.prepared.created_at,
-          reserve_ttl_ms: publication.prepared.reserve_ttl_ms,
-          run_ttl_ms: publication.prepared.run_ttl_ms,
-          dispatch_run_id: publication.prepared.dispatch_run_id,
-          executor_handoff: executorHandoff,
-        });
+        const executorHandoff = existingDispatch?.executor_handoff ?? (() => {
+          const preparedHandoff = persistDispatchExecutorHandoff(
+            publication.manifest_path,
+            dispatchPrompt.resolved,
+            envelope,
+          );
+          return persistAutomaticBuildDispatch(target, manifest, {
+            owner: publication.prepared.owner,
+            created_at: publication.prepared.created_at,
+            reserve_ttl_ms: publication.prepared.reserve_ttl_ms,
+            run_ttl_ms: publication.prepared.run_ttl_ms,
+            dispatch_run_id: publication.prepared.dispatch_run_id,
+            executor_handoff: preparedHandoff,
+          }).persisted.executor_handoff;
+        })();
         const opaqueHandoff = issueAutomaticBuildOpaqueHandoff({
           target,
           kind: "public_dispatch",
