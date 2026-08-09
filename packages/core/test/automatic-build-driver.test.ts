@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   automaticBuildDispatchFinish,
   automaticBuildDispatchNext,
@@ -503,6 +503,46 @@ describe("S0 deterministic automatic-build driver protocol", () => {
       available_agent_slots: 1,
     });
     expect(replayed).toEqual(response);
+  });
+
+  it("lets a fresh invocation reuse an expired dispatch opaque handoff", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-08-08T05:00:00.000Z"));
+      const driver = expectedDriver();
+      const value = fixture("fresh-invocation-handoff-reuse");
+      const firstInvocation = await createInvocation(driver, value, {
+        created_at: "2026-08-08T05:00:00.000Z",
+      });
+      const first = await driver.automaticBuildStep({
+        version: "automatic_build_step_request.v1",
+        invocation_ref: firstInvocation.invocation_ref,
+        available_agent_slots: 1,
+      });
+      if (first.action.kind !== "SPAWN_EXECUTORS") {
+        throw new Error("expected the first invocation to publish an executor handoff");
+      }
+
+      vi.setSystemTime(new Date("2026-08-09T05:00:00.000Z"));
+      const freshInvocation = await createInvocation(driver, value, {
+        created_at: "2026-08-09T05:00:00.000Z",
+      });
+      expect(freshInvocation.invocation_ref).not.toBe(firstInvocation.invocation_ref);
+
+      const resumed = await driver.automaticBuildStep({
+        version: "automatic_build_step_request.v1",
+        invocation_ref: freshInvocation.invocation_ref,
+        available_agent_slots: 1,
+      });
+      expect(resumed.action.kind).toBe("SPAWN_EXECUTORS");
+      if (resumed.action.kind !== "SPAWN_EXECUTORS") {
+        throw new Error("expected the fresh invocation to reuse the expired dispatch handoff");
+      }
+      expect(resumed.action.executors).toEqual(first.action.executors);
+      expectRootSafeStep(resumed, [value.root, value.source, value.buildPlanPath]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("resumes an expired running dispatch without republishing its manifest", () => {

@@ -1199,7 +1199,10 @@ function dispatchHandoffRefs(
         handoff_digest: handoffDigest,
       },
     };
-    writeCreateOnly(recordFile("handoff-projections", opaqueHandoffRef), projection);
+    writeCreateOnly(recordFile(
+      path.join("handoff-projections", invocation.invocation_ref),
+      opaqueHandoffRef,
+    ), projection);
     const dispatchProjection: AutomaticBuildDriverDispatchProjectionV1 = {
       version: "automatic_build_driver_dispatch_projection.v1",
       invocation_ref: invocation.invocation_ref,
