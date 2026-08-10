@@ -1,6 +1,6 @@
 # Executor Bootstrap 角色注入与发布闭环切片方案
 
-状态:实施中；EB0-EB1 已完成，EB2-EB7 待实施。
+状态:实施中；EB0-EB2 已完成，EB3-EB7 待实施。
 
 冻结决策:[ADR-0102](adr/0102-dedicated-executor-bootstrap-role-isolation-and-distribution.md)。修订边界:[ADR-0101](adr/0101-deterministic-prebuild-protocol-ownership-and-codex-semantic-boundary.md)。关联实现:[build skill](../skills/build/SKILL.md)、[automatic build driver](../skills/build/automatic-build-driver.ts)、[executor wrapper](../agents/automatic-build-dispatch-executor.md)、[release assertion](../apps/desktop/scripts/assert-plugin-release.mjs)。
 
@@ -338,6 +338,8 @@ spawn default dedicated subagent
 **完成判据**:新增断言只因 bootstrap/注册/selector 缺失而红；旧 Engine/session 行为无新增失败。
 
 ### EB2 Custom agent 与发布模板
+
+状态:完成，2026-08-10；项目 agent、根 asset 与发布 asset 已按 canonical wrapper 全文投影，三份 TOML 精确字节一致。
 
 **做**:以 canonical wrapper 为正文权威，新增可直接加载的项目 custom agent 和插件 asset 模板。
 
