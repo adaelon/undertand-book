@@ -2,6 +2,7 @@
 
 Status: Accepted, 2026-08-08.
 Extends: ADR-0067, ADR-0084, ADR-0092, ADR-0096, ADR-0099 and ADR-0100.
+Amended by: [ADR-0102](0102-dedicated-executor-bootstrap-role-isolation-and-distribution.md) for spawned executor role-instruction publication.
 Change type: 边界重构。
 
 当前 `$understand-book-build` 仍要求 Codex root 或 executor subagent 解析固定协议、查文件、比较路径与摘要、聚合 receipt，并手工推进 `protocol-doctor -> plan -> next -> close -> replan`。这些客观判断与 Build Engine、Desktop/Core 已有 gate 重复，既消耗 harness 上下文，也把可恢复构建错误暴露为提示词执行风险。实施顺序见[切片方案](../切片方案-预构建确定性确认收口.md)。

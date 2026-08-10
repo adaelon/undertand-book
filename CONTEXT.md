@@ -642,6 +642,12 @@ Build Engine Sidecar 把多个既有、同 target/stage/policy/kind 的 work uni
 ## Executor open
 专用 executor 用 opaque handoff ref 开启语义执行会话的原子消费边界。它在返回任何语义输入或取得任务执行权前,由代码完成 ref、路径、handoff、prompt、manifest、dispatch identity 与当前终态的重验；无效或漂移输入必须失败关闭且不得创建语义尝试。状态:NEW(见 [ADR-0101](docs/adr/0101-deterministic-prebuild-protocol-ownership-and-codex-semantic-boundary.md))。
 
+## Executor bootstrap contract
+专用 executor 在消费 opaque handoff ref 之前必须已经获得的版本化角色指令,精确定义 Build Engine 解析、`executor.open/executor.session` 循环、action 分支、candidate 私有边界与有界终态。它不是 semantic prompt、root build skill 或一句启动提示,不得依赖当前工作目录发现源码后再推断。状态:NEW(见 [ADR-0102](docs/adr/0102-dedicated-executor-bootstrap-role-isolation-and-distribution.md))。
+
+## Executor role registration
+把版本化 executor custom-agent 模板显式安装到个人或项目 Codex agent 配置、使其成为可选 `agent_type` 的所有权边界。注册必须幂等,同名异 digest 时失败关闭且不覆盖;插件携带 TOML asset 不等于宿主已自动注册该角色。状态:NEW(见 [ADR-0102](docs/adr/0102-dedicated-executor-bootstrap-role-isolation-and-distribution.md))。
+
 ## Codex plugin
 以 `.codex-plugin/plugin.json` 打包、由 Codex 安装和加载的本地预构建 harness 外壳。它通过 `$understand-book-build` 驱动现有确定性脚本与专用语义抽取契约,并可经 Codex 构建意图入口读写 Desktop-owned 的同一 reader-private 计划;正常条件下一次已确认执行完成、外部中断后按磁盘产物幂等续跑。paper 只消费 Build Workbench 已可信的混合阅读基座;非 paper 可从 Markdown/EPUB 原始输入开始。它不是 Web 内置模型 worker,不嵌入 Codex app-server,不经 Visitor/Book MCP 读取私有计划,也不能绕过 plan/artifact/hash/schema gate。状态:BOUNDARY_CHANGE(2026-07-26 IP11)。
 
