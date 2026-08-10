@@ -17,8 +17,16 @@ async function readText(relativePath) {
   return readFile(path.join(repoRoot, relativePath), "utf8");
 }
 
+function normalizeLineEndings(text) {
+  return text.replace(/\r\n?|\n/gu, "\n");
+}
+
 function normalizeContract(text) {
-  return text.replace(/\r\n?|\n/gu, "\n").replace(/\n+$/u, "");
+  return normalizeLineEndings(text).replace(/\n+$/u, "");
+}
+
+function canonicalTextSha256(text) {
+  return createHash("sha256").update(normalizeLineEndings(text)).digest("hex");
 }
 
 function expectedDeveloperInstructionsAssignment(wrapper) {
@@ -159,7 +167,8 @@ assert(
   "executor bootstrap must delete private candidate sources after every terminal engine call",
 );
 assert(
-  projectExecutorAgent.includes(expectedDeveloperInstructionsAssignment(canonicalExecutorWrapper)),
+  normalizeLineEndings(projectExecutorAgent)
+    .includes(expectedDeveloperInstructionsAssignment(canonicalExecutorWrapper)),
   "executor custom-agent developer_instructions must contain the full canonical bootstrap body",
 );
 
@@ -293,12 +302,12 @@ for (const removedMarker of [
   );
 }
 
-const releaseSkillSha256 = createHash("sha256").update(releaseSkill).digest("hex");
+const releaseSkillSha256 = canonicalTextSha256(releaseSkill);
 const installedPluginRoot = process.env.UNDERSTAND_BOOK_INSTALLED_PLUGIN_ROOT;
 if (installedPluginRoot) {
   const installedSkill = await readFile(path.join(installedPluginRoot, "skills", "build", "SKILL.md"), "utf8");
   assert.equal(
-    createHash("sha256").update(installedSkill).digest("hex"),
+    canonicalTextSha256(installedSkill),
     releaseSkillSha256,
     "installed build skill must match the published source snapshot hash",
   );
@@ -322,11 +331,11 @@ if (installedPluginRoot) {
     );
   }
   assert.equal(
-    await readFile(
+    normalizeLineEndings(await readFile(
       path.join(installedPluginRoot, "assets", "codex-agents", "understand-book-executor.toml"),
       "utf8",
-    ),
-    releaseExecutorAgentTemplate,
+    )),
+    normalizeLineEndings(releaseExecutorAgentTemplate),
     "installed executor agent template must match the published release snapshot",
   );
   const installedManifest = JSON.parse(await readFile(
