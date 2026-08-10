@@ -166,11 +166,28 @@ Consume only `automatic_build_step.v1`. Handle its action exactly and call `buil
 the external boundary is resolved:
 
 - `SPAWN_EXECUTORS`: launch exactly one dedicated subagent for every returned
-  `opaque_handoff_ref`, subject only to the refs already bounded by the driver. The spawn payload is
-  the ref plus this fixed instruction: “Open this ref with the packaged Build Engine, follow the
-  `executor.open` / `executor.session` protocol, and return only bounded lifecycle state.” Do not
-  add a target path, prompt, task input, hash, command list, receipt, or candidate. An executor final
-  is only a harness lifecycle observation; after it ends, call `build.step` and trust durable state.
+  `opaque_handoff_ref`, subject only to the refs already bounded by the driver. Choose its bootstrap
+  provider in this strict order:
+  1. If the spawn tool advertises `agent_type=understand_book_executor`, select that custom agent
+     explicitly and give it only this payload, with the returned ref substituted exactly:
+     ```text
+     Process exactly this code-issued opaque handoff ref and return only bounded lifecycle state:
+     <opaque_handoff_ref>
+     ```
+  2. Otherwise, if `$understand-book-executor` is advertised, launch a default dedicated subagent
+     and give it only this fallback payload, with the returned ref substituted exactly:
+     ```text
+     Use $understand-book-executor for exactly this opaque handoff ref:
+     <opaque_handoff_ref>
+     Return only the bounded lifecycle state defined by that skill.
+     Do not use $understand-book-build inside this subagent.
+     ```
+  3. If neither provider is advertised, do not launch an unbound generic subagent and never emulate
+     the executor in root. Treat the boundary as `interrupted/bootstrap_unavailable`, then call
+     `build.step` again and trust its durable result.
+  The ref is the only dynamic spawn data in either provider path. Do not add a target path, prompt,
+  task input, hash, command list, receipt, or candidate. An executor final is only a harness
+  lifecycle observation; after it ends, call `build.step` and trust durable state.
 - `WAIT`: wait only `retry_after_ms`, then recompute live slots and call `build.step` again. Do not
   duplicate an active executor or lease.
 - `NEEDS_USER`: show the returned `reason`, `message`, optional `projection`, and choices exactly.

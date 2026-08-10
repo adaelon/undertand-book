@@ -1,6 +1,6 @@
 # Executor Bootstrap 角色注入与发布闭环切片方案
 
-状态:实施中；EB0-EB4 已完成，EB5-EB7 待实施。
+状态:实施中；EB0-EB5 已完成，EB6-EB7 待实施。
 
 冻结决策:[ADR-0102](adr/0102-dedicated-executor-bootstrap-role-isolation-and-distribution.md)。修订边界:[ADR-0101](adr/0101-deterministic-prebuild-protocol-ownership-and-codex-semantic-boundary.md)。关联实现:[build skill](../skills/build/SKILL.md)、[automatic build driver](../skills/build/automatic-build-driver.ts)、[executor wrapper](../agents/automatic-build-dispatch-executor.md)、[release assertion](../apps/desktop/scripts/assert-plugin-release.mjs)。
 
@@ -416,6 +416,8 @@ spawn default dedicated subagent
 **完成判据**:回退 provider 存在、digest、职责隔离和薄插件形态断言转绿。
 
 ### EB5 Root 显式 provider 选择
+
+状态:完成，2026-08-10；根/发布 build skill 已按 custom-agent-first、executor-skill-only fallback、双 provider 缺失失败关闭的顺序精确投影，旧 unbound generic spawn 指令已删除。
 
 **做**:把 `SPAWN_EXECUTORS` 固定指令改为 custom-agent-first 选择，仅在该 `agent_type` 未广告时调用 executor skill。
 
