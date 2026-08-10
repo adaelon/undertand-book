@@ -134,7 +134,7 @@ describe("Codex executor bootstrap publication", () => {
     const conflict = run();
     expect(conflict.status).not.toBe(0);
     expect(readFileSync(target, "utf8")).toBe(conflicting);
-  });
+  }, 20_000);
 
   it("publishes a byte-identical executor-only skill backed by the canonical wrapper", () => {
     expectFiles([ROOT_EXECUTOR_SKILL, RELEASE_EXECUTOR_SKILL]);

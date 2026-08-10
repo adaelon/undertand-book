@@ -1,6 +1,6 @@
 # Executor Bootstrap 角色注入与发布闭环切片方案
 
-状态:实施中；EB0-EB2 已完成，EB3-EB7 待实施。
+状态:实施中；EB0-EB3 已完成，EB4-EB7 待实施。
 
 冻结决策:[ADR-0102](adr/0102-dedicated-executor-bootstrap-role-isolation-and-distribution.md)。修订边界:[ADR-0101](adr/0101-deterministic-prebuild-protocol-ownership-and-codex-semantic-boundary.md)。关联实现:[build skill](../skills/build/SKILL.md)、[automatic build driver](../skills/build/automatic-build-driver.ts)、[executor wrapper](../agents/automatic-build-dispatch-executor.md)、[release assertion](../apps/desktop/scripts/assert-plugin-release.mjs)。
 
@@ -362,6 +362,8 @@ spawn default dedicated subagent
 **完成判据**:TOML 形状、全文 digest、三投影 parity 与职责隔离断言转绿；新 Codex task 在本项目显示 `understand_book_executor` 为可选 `agent_type`。
 
 ### EB3 显式注册适配层
+
+状态:完成，2026-08-10；显式注册脚本与 skill 已完成根/发布精确投影，Windows absent/same/conflict 三态合同绿色。
 
 **做**:提供只在用户明确请求时运行的 personal/project agent 注册路径。
 
