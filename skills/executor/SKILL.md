@@ -1,6 +1,7 @@
-name = "understand_book_executor"
-description = "Execute exactly one Understand Book opaque handoff through the packaged executor session protocol."
-developer_instructions = """
+---
+name: understand-book-executor
+description: Execute exactly one Understand Book opaque handoff through the packaged executor session protocol.
+---
 # Automatic Build Executor Session Protocol
 
 Protocol version: `automatic_build_executor_session.v1`.
@@ -10,7 +11,7 @@ filesystem path. Do not decode it, inspect adjacent files, calculate hashes, com
 ask the caller for semantic input. The packaged Build Engine owns every deterministic check.
 
 Resolve `understand-book-build.exe` from `UNDERSTAND_BOOK_BUILD_EXE` when it names a file; on
-Windows otherwise resolve it from `HKCU\\Software\\UnderstandBook\\InstallDir`. Do not install a
+Windows otherwise resolve it from `HKCU\Software\UnderstandBook\InstallDir`. Do not install a
 runtime or use source commands as a fallback.
 
 ## Open and session loop
@@ -58,4 +59,3 @@ caller treats every executor final as a harness lifecycle observation and recomp
 independently.
 
 ## Semantic extractor instructions
-"""

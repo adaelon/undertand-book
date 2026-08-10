@@ -50,8 +50,8 @@ stdout diagnostics, or the final response.
 
 If the engine call itself cannot start and no code-issued session response exists, return only a
 bounded lifecycle object with `status=interrupted`; do not fabricate an
-`automatic_build_executor_session.v1` response, include raw stderr, or expose command text. The root
-treats every executor final as a harness lifecycle observation and recomputes truth with
-`build.step`.
+`automatic_build_executor_session.v1` response, include raw stderr, or expose command text. The
+caller treats every executor final as a harness lifecycle observation and recomputes durable truth
+independently.
 
 ## Semantic extractor instructions

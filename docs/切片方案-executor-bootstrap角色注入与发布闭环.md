@@ -1,6 +1,6 @@
 # Executor Bootstrap 角色注入与发布闭环切片方案
 
-状态:实施中；EB0-EB3 已完成，EB4-EB7 待实施。
+状态:实施中；EB0-EB4 已完成，EB5-EB7 待实施。
 
 冻结决策:[ADR-0102](adr/0102-dedicated-executor-bootstrap-role-isolation-and-distribution.md)。修订边界:[ADR-0101](adr/0101-deterministic-prebuild-protocol-ownership-and-codex-semantic-boundary.md)。关联实现:[build skill](../skills/build/SKILL.md)、[automatic build driver](../skills/build/automatic-build-driver.ts)、[executor wrapper](../agents/automatic-build-dispatch-executor.md)、[release assertion](../apps/desktop/scripts/assert-plugin-release.mjs)。
 
@@ -389,12 +389,18 @@ spawn default dedicated subagent
 
 ### EB4 Executor-only skill 回退
 
+状态:完成，2026-08-10；根/发布 fallback skill 已精确投影 canonical wrapper，canonical 正文中唯一的 root-specific `build.step` 措辞已收缩为 caller 独立重算 durable truth，并同步所有 agent/skill 投影。
+
 **做**:新增只承载 bootstrap contract 的回退 skill，保证未注册 custom agent 的当前 task 仍无需 `--help`/搜索源码。
 
 **触达**:
 
 - 新增 `skills/executor/SKILL.md`
 - 新增 `plugins/understand-book/skills/executor/SKILL.md`
+- `agents/automatic-build-dispatch-executor.md`
+- `.codex/agents/understand-book-executor.toml`
+- `assets/codex-agents/understand-book-executor.toml`
+- `plugins/understand-book/assets/codex-agents/understand-book-executor.toml`
 - `apps/desktop/scripts/assert-plugin-release.mjs`
 - EB1 contract tests
 
