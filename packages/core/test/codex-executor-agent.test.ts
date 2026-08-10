@@ -17,6 +17,12 @@ import { describe, expect, it } from "vitest";
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const EXECUTOR_AGENT_DESCRIPTION =
   "Execute exactly one Understand Book opaque handoff through the packaged executor session protocol.";
+const EXECUTOR_SKILL_PROHIBITION =
+  "Do not activate `$understand-book-build`, `$understand-book-executor`, or any other skill; "
+  + "this role already carries the complete bootstrap contract.";
+const EXECUTOR_CANDIDATE_CLEANUP =
+  "Delete every executor-private candidate source in a finally-equivalent cleanup immediately "
+  + "after its submit or fail call, before continuing or returning.";
 
 const PROJECT_AGENT = ".codex/agents/understand-book-executor.toml";
 const ROOT_AGENT_TEMPLATE = "assets/codex-agents/understand-book-executor.toml";
@@ -77,6 +83,8 @@ describe("Codex executor bootstrap publication", () => {
     expect(projectAgent).not.toMatch(/^model(?:_reasoning_effort)?\s*=/mu);
 
     const wrapper = readText("agents/automatic-build-dispatch-executor.md");
+    expect(wrapper).toContain(EXECUTOR_SKILL_PROHIBITION);
+    expect(wrapper).toContain(EXECUTOR_CANDIDATE_CLEANUP);
     expect(projectAgent).toContain(expectedDeveloperInstructionsAssignment(wrapper));
     expect(contractSha256(wrapper)).toMatch(/^[a-f0-9]{64}$/u);
   });

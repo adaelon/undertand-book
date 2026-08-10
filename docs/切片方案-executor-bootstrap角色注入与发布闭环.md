@@ -1,6 +1,6 @@
 # Executor Bootstrap 角色注入与发布闭环切片方案
 
-状态:实施中；EB0-EB5 已完成，EB6-EB7 待实施。
+状态:实施中；EB0-EB6 已完成，EB7 待实施。
 
 冻结决策:[ADR-0102](adr/0102-dedicated-executor-bootstrap-role-isolation-and-distribution.md)。修订边界:[ADR-0101](adr/0101-deterministic-prebuild-protocol-ownership-and-codex-semantic-boundary.md)。关联实现:[build skill](../skills/build/SKILL.md)、[automatic build driver](../skills/build/automatic-build-driver.ts)、[executor wrapper](../agents/automatic-build-dispatch-executor.md)、[release assertion](../apps/desktop/scripts/assert-plugin-release.mjs)。
 
@@ -474,6 +474,12 @@ node apps/desktop/scripts/assert-plugin-release.mjs
 - Custom-agent 路径可观测到显式 `agent_type`，不激活/读取任何 build 或 executor skill。
 - Skill 回退只激活/读取 executor skill，不激活 root build skill。
 - 两者都不运行 Build Engine `--help`，不 `rg`/搜索 `automatic_build_executor`、`opaque_handoff_ref` 或 wrapper，不访问 repo `agents/`、`packages/core/src` 或当前源码根。
+
+**验收记录（2026-08-10）**:
+
+- Installed-state 自动门、skill-only 回退、registration conflict-no-overwrite 与中断后 durable recovery 均通过；验收只保留 bounded lifecycle、canonical artifact/receipt 与哈希/计数，不落盘语义输入、candidate 或私有路径。
+- Custom-agent 单 ref 与双 ref wave 的 executor 全部返回 `DONE/committed`，无 replacement/retry；保留 trace 的负向扫描未发现 skill 激活、源码搜索或 wrapper 探测，首个 Engine 边界均为 `executor.open`，其后才进入 session，私有候选在 finally-equivalent cleanup 后删除。
+- 双 ref wave 后仅执行一次 `automatic_build_step_request.v1`；driver 返回 `SPAWN_EXECUTORS` 且仅含两个 opaque handoff，root 按验收停点未启动后续 wave，证明 post-wave action 仍由 durable driver 决定且未扩张 root 语义面。
 
 **完成判据**:自动门、主路径单/双 executor、skill 回退、注册冲突、中断恢复和 trace 负向扫描全部通过；最终状态同时由 `DONE` 与 canonical artifact/receipt 证明。
 

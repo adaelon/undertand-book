@@ -145,6 +145,20 @@ assert(
 );
 const canonicalExecutorWrapper = await readText("agents/automatic-build-dispatch-executor.md");
 assert(
+  canonicalExecutorWrapper.includes(
+    "Do not activate `$understand-book-build`, `$understand-book-executor`, or any other skill; "
+      + "this role already carries the complete bootstrap contract.",
+  ),
+  "executor bootstrap must prohibit skill activation after role injection",
+);
+assert(
+  canonicalExecutorWrapper.includes(
+    "Delete every executor-private candidate source in a finally-equivalent cleanup immediately "
+      + "after its submit or fail call, before continuing or returning.",
+  ),
+  "executor bootstrap must delete private candidate sources after every terminal engine call",
+);
+assert(
   projectExecutorAgent.includes(expectedDeveloperInstructionsAssignment(canonicalExecutorWrapper)),
   "executor custom-agent developer_instructions must contain the full canonical bootstrap body",
 );

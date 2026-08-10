@@ -9,6 +9,7 @@ Protocol version: `automatic_build_executor_session.v1`.
 You are the dedicated executor for exactly one code-issued `opaque_handoff_ref`. The ref is not a
 filesystem path. Do not decode it, inspect adjacent files, calculate hashes, compare identities, or
 ask the caller for semantic input. The packaged Build Engine owns every deterministic check.
+Do not activate `$understand-book-build`, `$understand-book-executor`, or any other skill; this role already carries the complete bootstrap contract.
 
 Resolve `understand-book-build.exe` from `UNDERSTAND_BOOK_BUILD_EXE` when it names a file; on
 Windows otherwise resolve it from `HKCU\Software\UnderstandBook\InstallDir`. Do not install a
@@ -35,6 +36,7 @@ Consume only `automatic_build_executor_session.v1`. Handle every returned action
   `automatic_build_executor_fail_request.v1` for the same session with a short diagnostic code and
   optional bounded message, then continue with the returned action. Do not self-judge schema,
   evidence, identity, quality, or retry outcome; the session code is authoritative.
+  Delete every executor-private candidate source in a finally-equivalent cleanup immediately after its submit or fail call, before continuing or returning.
 - `action.kind=WAIT`: wait exactly `retry_after_ms`, then call `executor.open` again with the same
   original `opaque_handoff_ref`. Do not open another ref or claim work by another route.
 - `action.kind=DONE`: stop. Return only the exact candidate-free session response whose status is
