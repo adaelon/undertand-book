@@ -17,6 +17,27 @@ async function readText(relativePath) {
   return readFile(path.join(repoRoot, relativePath), "utf8");
 }
 
+function normalizeContract(text) {
+  return text.replace(/\r\n?|\n/gu, "\n").replace(/\n+$/u, "");
+}
+
+function expectedDeveloperInstructionsAssignment(wrapper) {
+  const escaped = normalizeContract(wrapper).replace(/\\/gu, "\\\\");
+  return `developer_instructions = """\n${escaped}\n"""`;
+}
+
+function skillBody(skill) {
+  const normalized = skill.replace(/\r\n?/gu, "\n");
+  assert(normalized.startsWith("---\n"), "executor skill must start with YAML frontmatter");
+  const closing = normalized.indexOf("\n---\n", 4);
+  assert(closing > 0, "executor skill frontmatter must have a closing delimiter");
+  return normalizeContract(normalized.slice(closing + 5));
+}
+
+function assertPublishedFile(relativePath, message) {
+  assert(existsSync(path.join(repoRoot, ...relativePath.split("/"))), message);
+}
+
 const marketplace = await readJson(".agents/plugins/marketplace.json");
 const entry = marketplace.plugins?.find((plugin) => plugin.name === "understand-book");
 assert(entry, "marketplace must publish the understand-book plugin");
@@ -28,6 +49,10 @@ const releasePluginRoot = path.join(repoRoot, "plugins", "understand-book");
 assert(
   !existsSync(path.join(releasePluginRoot, "agents")),
   "published Codex plugin must remain thin and must not contain agents/",
+);
+assert(
+  !existsSync(path.join(releasePluginRoot, ".codex", "agents")),
+  "published Codex plugin must not claim that .codex/agents is auto-registered",
 );
 
 const desktopPackage = await readJson("apps/desktop/package.json");
@@ -85,6 +110,115 @@ assert.equal(
   rootSkill,
   "published build skill must match the root build skill byte-for-byte",
 );
+
+const executorAgentPaths = [
+  ".codex/agents/understand-book-executor.toml",
+  "assets/codex-agents/understand-book-executor.toml",
+  "plugins/understand-book/assets/codex-agents/understand-book-executor.toml",
+];
+for (const relativePath of executorAgentPaths) {
+  assertPublishedFile(relativePath, `executor custom-agent publication is missing: ${relativePath}`);
+}
+const projectExecutorAgent = await readText(executorAgentPaths[0]);
+const rootExecutorAgentTemplate = await readText(executorAgentPaths[1]);
+const releaseExecutorAgentTemplate = await readText(executorAgentPaths[2]);
+assert.equal(
+  rootExecutorAgentTemplate,
+  projectExecutorAgent,
+  "root executor agent template must match the project custom agent byte-for-byte",
+);
+assert.equal(
+  releaseExecutorAgentTemplate,
+  projectExecutorAgent,
+  "published executor agent template must match the project custom agent byte-for-byte",
+);
+assert.match(projectExecutorAgent, /^name\s*=\s*"understand_book_executor"\s*$/mu);
+assert(
+  projectExecutorAgent.includes(
+    'description = "Execute exactly one Understand Book opaque handoff through the packaged executor session protocol."',
+  ),
+  "executor custom agent must carry the bounded single-handoff description",
+);
+assert(
+  !/^model(?:_reasoning_effort)?\s*=/mu.test(projectExecutorAgent),
+  "executor custom agent must inherit model and reasoning settings",
+);
+const canonicalExecutorWrapper = await readText("agents/automatic-build-dispatch-executor.md");
+assert(
+  projectExecutorAgent.includes(expectedDeveloperInstructionsAssignment(canonicalExecutorWrapper)),
+  "executor custom-agent developer_instructions must contain the full canonical bootstrap body",
+);
+
+const rootRegisterScriptPath = "scripts/register-executor-agent.ps1";
+const releaseRegisterScriptPath = "plugins/understand-book/scripts/register-executor-agent.ps1";
+const rootRegisterSkillPath = "skills/register-executor/SKILL.md";
+const releaseRegisterSkillPath = "plugins/understand-book/skills/register-executor/SKILL.md";
+for (const relativePath of [
+  rootRegisterScriptPath,
+  releaseRegisterScriptPath,
+  rootRegisterSkillPath,
+  releaseRegisterSkillPath,
+]) {
+  assertPublishedFile(relativePath, `executor agent registration projection is missing: ${relativePath}`);
+}
+assert.equal(
+  await readText(releaseRegisterScriptPath),
+  await readText(rootRegisterScriptPath),
+  "published executor registration script must match the root script byte-for-byte",
+);
+assert.equal(
+  await readText(releaseRegisterSkillPath),
+  await readText(rootRegisterSkillPath),
+  "published executor registration skill must match the root skill byte-for-byte",
+);
+
+const rootExecutorSkillPath = "skills/executor/SKILL.md";
+const releaseExecutorSkillPath = "plugins/understand-book/skills/executor/SKILL.md";
+for (const relativePath of [rootExecutorSkillPath, releaseExecutorSkillPath]) {
+  assertPublishedFile(relativePath, `executor-only skill projection is missing: ${relativePath}`);
+}
+const rootExecutorSkill = await readText(rootExecutorSkillPath);
+const releaseExecutorSkill = await readText(releaseExecutorSkillPath);
+assert.equal(
+  releaseExecutorSkill,
+  rootExecutorSkill,
+  "published executor-only skill must match the root skill byte-for-byte",
+);
+assert.match(rootExecutorSkill, /^name:\s*understand-book-executor\s*$/mu);
+assert.equal(
+  skillBody(rootExecutorSkill),
+  normalizeContract(canonicalExecutorWrapper),
+  "executor-only skill body must equal the normalized canonical bootstrap body",
+);
+for (const forbidden of ["BuildIntent", "BuildPlan", "build.step", "planning.context", "draft.candidate"]) {
+  assert(
+    !rootExecutorSkill.includes(forbidden),
+    `executor-only skill must not contain root orchestration marker: ${forbidden}`,
+  );
+}
+
+assert(
+  /agent_type\s*=\s*understand_book_executor/u.test(rootSkill),
+  "build skill must explicitly select agent_type=understand_book_executor when advertised",
+);
+for (const marker of [
+  "$understand-book-executor",
+  "Do not use $understand-book-build inside this subagent.",
+  "bootstrap_unavailable",
+]) {
+  assert(rootSkill.includes(marker), `build skill is missing executor provider marker: ${marker}`);
+}
+assert(
+  !/Open this ref with the packaged Build Engine,\s+follow the\s+`executor\.open`\s*\/\s*`executor\.session`\s+protocol/u
+    .test(rootSkill),
+  "build skill must not retain the unbound generic executor spawn instruction",
+);
+assert(
+  rootSkill.search(/agent_type\s*=\s*understand_book_executor/u)
+    < rootSkill.indexOf("$understand-book-executor"),
+  "build skill must place the custom-agent provider before the executor skill fallback",
+);
+
 const protocolMarkers = [
   "automatic_build_invocation_create.v1",
   "automatic_build_step_request.v1",
@@ -157,6 +291,29 @@ if (installedPluginRoot) {
   assert(
     !existsSync(path.join(installedPluginRoot, "agents")),
     "installed Codex plugin must remain thin and must not contain agents/",
+  );
+  assert(
+    !existsSync(path.join(installedPluginRoot, ".codex", "agents")),
+    "installed Codex plugin must not claim that .codex/agents is auto-registered",
+  );
+  for (const relativePath of [
+    "assets/codex-agents/understand-book-executor.toml",
+    "scripts/register-executor-agent.ps1",
+    "skills/register-executor/SKILL.md",
+    "skills/executor/SKILL.md",
+  ]) {
+    assert(
+      existsSync(path.join(installedPluginRoot, ...relativePath.split("/"))),
+      `installed Codex plugin is missing executor bootstrap projection: ${relativePath}`,
+    );
+  }
+  assert.equal(
+    await readFile(
+      path.join(installedPluginRoot, "assets", "codex-agents", "understand-book-executor.toml"),
+      "utf8",
+    ),
+    releaseExecutorAgentTemplate,
+    "installed executor agent template must match the published release snapshot",
   );
   const installedManifest = JSON.parse(await readFile(
     path.join(installedPluginRoot, ".codex-plugin", "plugin.json"),

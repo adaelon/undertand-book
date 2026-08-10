@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -14,7 +15,32 @@ import {
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 
+function normalizeBootstrapContract(text: string): string {
+  return text.replace(/\r\n?|\n/gu, "\n").replace(/\n+$/u, "");
+}
+
 describe("automatic build executor prompt", () => {
+  it("keeps one complete canonical bootstrap body for future role projections", () => {
+    const wrapper = normalizeBootstrapContract(readFileSync(
+      path.join(REPO_ROOT, "agents", "automatic-build-dispatch-executor.md"),
+      "utf8",
+    ));
+    for (const marker of [
+      "automatic_build_executor_session.v1",
+      "Your first engine call is `<build-exe> executor.open`",
+      "action.kind=GENERATE",
+      "action.kind=WAIT",
+      "action.kind=DONE",
+      "Never return candidate JSON to the caller",
+      "do not fabricate an",
+    ]) {
+      expect(wrapper).toContain(marker);
+    }
+    expect(wrapper.split("# Automatic Build Executor Session Protocol")).toHaveLength(2);
+    expect(wrapper.split("## Semantic extractor instructions")).toHaveLength(2);
+    expect(createHash("sha256").update(wrapper).digest("hex")).toMatch(/^[a-f0-9]{64}$/u);
+  });
+
   it("composes one deterministic dispatch wrapper and one semantic prompt", () => {
     const input = {
       mode: "dispatch" as const,

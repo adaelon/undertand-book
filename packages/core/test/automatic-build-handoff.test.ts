@@ -908,4 +908,38 @@ describe("automatic build Codex executor handoff", () => {
       expect(content, prompt).toContain("Never return candidate JSON");
     }
   });
+
+  it("EB1 contract: selects the custom executor agent before the bounded skill fallback", () => {
+    const skill = readFileSync(path.join(REPO_ROOT, "skills", "build", "SKILL.md"), "utf8");
+    const pluginSkill = readFileSync(path.join(
+      REPO_ROOT,
+      "plugins",
+      "understand-book",
+      "skills",
+      "build",
+      "SKILL.md",
+    ), "utf8");
+    expect(pluginSkill).toBe(skill);
+
+    const customAgentIndex = skill.search(/agent_type\s*=\s*understand_book_executor/u);
+    const fallbackIndex = skill.indexOf("$understand-book-executor");
+    expect({
+      custom_agent_provider: customAgentIndex >= 0,
+      executor_skill_fallback: fallbackIndex >= 0,
+      root_skill_prohibited_in_executor: skill.includes(
+        "Do not use $understand-book-build inside this subagent.",
+      ),
+      bootstrap_unavailable_is_bounded: skill.includes("bootstrap_unavailable"),
+      generic_unbound_spawn_removed: !/Open this ref with the packaged Build Engine,\s+follow the\s+`executor\.open`\s*\/\s*`executor\.session`\s+protocol/u
+        .test(skill),
+      custom_agent_precedes_fallback: customAgentIndex >= 0 && fallbackIndex > customAgentIndex,
+    }).toEqual({
+      custom_agent_provider: true,
+      executor_skill_fallback: true,
+      root_skill_prohibited_in_executor: true,
+      bootstrap_unavailable_is_bounded: true,
+      generic_unbound_spawn_removed: true,
+      custom_agent_precedes_fallback: true,
+    });
+  });
 });
