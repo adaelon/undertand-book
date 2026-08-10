@@ -1,6 +1,6 @@
 # Executor Bootstrap 角色注入与发布闭环切片方案
 
-状态:实施中；EB0-EB6 已完成，EB7 待实施。
+状态:已完成；EB0-EB7 已全部通过确定性门，EB6 保留安装态双路径黑盒证据，EB7 以唯一 cachebuster 的隔离 clean-install 收口发布与文档。
 
 冻结决策:[ADR-0102](adr/0102-dedicated-executor-bootstrap-role-isolation-and-distribution.md)。修订边界:[ADR-0101](adr/0101-deterministic-prebuild-protocol-ownership-and-codex-semantic-boundary.md)。关联实现:[build skill](../skills/build/SKILL.md)、[automatic build driver](../skills/build/automatic-build-driver.ts)、[executor wrapper](../agents/automatic-build-dispatch-executor.md)、[release assertion](../apps/desktop/scripts/assert-plugin-release.mjs)。
 
@@ -483,7 +483,7 @@ node apps/desktop/scripts/assert-plugin-release.mjs
 
 **完成判据**:自动门、主路径单/双 executor、skill 回退、注册冲突、中断恢复和 trace 负向扫描全部通过；最终状态同时由 `DONE` 与 canonical artifact/receipt 证明。
 
-### EB7 发布与文档收口
+### EB7 发布与文档收口（完成 2026-08-10）
 
 **做**:更新 plugin cachebuster/marketplace/安装态快照，记录双路径真实 trace，并同步架构与代码链路。
 
@@ -500,6 +500,13 @@ node apps/desktop/scripts/assert-plugin-release.mjs
 **不做**:不覆盖用户不同 digest 的 custom agent 配置，不删除历史 handoff/session/receipt，不改 accepted artifact。
 
 **完成判据**:新 task 加载的是新 cachebuster；发布快照含 agent 模板、注册 skill/script、build skill 与 executor 回退 skill，仍无可被误解为原生注册的顶层 `agents/`/`.codex/agents/`；EB6 证据可从干净安装复现；架构与代码链路指向真实实现。
+
+**验收记录（2026-08-10）**:
+
+- plugin-creator cachebuster helper 将 root/published manifest 同步提升为 `0.1.0+codex.20260810085702`；两份 JSON 字节一致且只含一个 `+codex.` 后缀。
+- 从 published thin plugin 构造隔离本地 marketplace，在独立 `CODEX_HOME` clean-install；CLI、installed manifest 与 deterministic `prompt-input` 投影均命中新 cachebuster，build/executor/register skill 被广告，投影不含源码仓库路径。
+- Installed agent 模板、注册脚本/skill、build skill、executor fallback 与发布快照逐字一致；项目态显式注册产物与 installed 模板 SHA-256 一致，安装根继续不含顶层 `agents/`/`.codex/agents/`。
+- plugin validator、installed-root `assert-plugin-release.mjs`（含 thin-plugin parity）、Core 聚焦矩阵 6 files / 59 tests、Core typecheck 与 diff 门通过；installed build skill SHA-256 为 `77b022e3f8d948a3bde83b7695c6683a46c28e4afb57439ba96246390c1abf70`。
 
 ## 5. 依赖与提交边界
 
