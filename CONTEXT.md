@@ -32,7 +32,7 @@ Resident Agent 在当前用户回合内实际观察且通过现有结构闸的�
 以稳定 key、内容 revision、生命周期 scope 和角色管理模型可见动态上下文的回合级账本。相同 key 在一个请求投影中最多保留一个活动 revision;敏感的回合冻结片段可参与请求但不因此进入持久会话。状态:NEW(见 [ADR-0091](docs/adr/0091-model-aware-agent-request-tool-exposure-and-active-context-budget.md))。
 
 ## 工具暴露计划 (tool exposure plan)
-从完整工具注册表按模型能力、内容 profile、权限、证据状态和本回合激活集派生出的模型可见工具集合。它只决定模型能看到和调用什么,不改变工具契约或执行器。状态:NEW(见 [ADR-0091](docs/adr/0091-model-aware-agent-request-tool-exposure-and-active-context-budget.md))。
+从完整工具注册表按模型能力、内容 profile、权限、证据状态和本回合激活集派生出的模型可见工具集合。本回合激活集既可由显式用户意图在首轮前确定性建立,也可由延迟工具发现扩展;两条路径都只改变可见能力,不执行工具或 Reader 副作用。状态:BOUNDARY_CHANGE(见 [ADR-0091](docs/adr/0091-model-aware-agent-request-tool-exposure-and-active-context-budget.md)、[ADR-0104](docs/adr/0104-intent-seeded-guided-reading-tool-exposure-and-resident-navigation-policy.md))。
 
 ## 延迟工具发现 (deferred tool discovery)
 模型通过一个只读元数据检索工具查找当前未直接暴露的工具,命中项只在后续采样中加入本回合工具暴露计划。发现动作不执行目标工具、不提升权限,也不让 hidden 工具变为可见。状态:NEW(见 [ADR-0091](docs/adr/0091-model-aware-agent-request-tool-exposure-and-active-context-budget.md))。

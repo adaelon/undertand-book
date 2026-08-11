@@ -53,8 +53,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use ts_rs::TS;
 
 use crate::tool_exposure::{
-    search_and_activate, ArtifactExposureContext, ArtifactExposurePhase, ToolExposureContext,
-    ToolExposurePlan, ToolExposureState, ToolPermissions,
+    classify_turn_intent, search_and_activate, seed_turn_tool_activations, ArtifactExposureContext,
+    ArtifactExposurePhase, ToolExposureContext, ToolExposurePlan, ToolExposureState,
+    ToolPermissions,
 };
 use crate::tool_registry::{ToolHandlerId, ToolRegistry};
 use crate::tool_result::{
@@ -4290,6 +4291,18 @@ pub fn run_with_turn_resources_and_checkpoint_sink(
     let mut profile_influences = BTreeSet::new();
     let mut evidence_ledger =
         TurnEvidenceLedger::from_seed(book, resources.initial_evidence().to_vec())?;
+    let turn_intent_hints = classify_turn_intent(question);
+    seed_turn_tool_activations(
+        &turn_intent_hints,
+        &tool_registry,
+        &ToolExposureContext {
+            content_profile: book.content_profile_id(),
+            permissions: tool_permissions,
+            has_turn_evidence: evidence_ledger.has_evidence(),
+            artifact: artifact_tools.exposure(),
+        },
+        &mut tool_exposure_state,
+    );
     let profile_memory_updates = resources.profile_memory_updates().to_vec();
     let mut tool_call_progress = ToolCallProgressGuard::default();
     let mut recorded_query_observations = HashSet::new();
@@ -4907,9 +4920,15 @@ mod tests {
     use super::*;
     use crate::compaction::CONTEXT_COMPACTION_ITEM_VERSION;
     use crate::{
-        agent_prompt::canonical_policy_text, model_runtime::InstructionAsset,
+        agent_prompt::canonical_policy_text,
+        guided_read_replay::{
+            build_guided_read_route_replay_receipt, parse_and_verify_guided_read_route_replay,
+            serialize_verified_guided_read_route_replay,
+        },
+        model_runtime::InstructionAsset,
         parse_react_assistant_turn, AdapterError, CompactionRequest, CompletionRequest,
-        ParsedResponse, ProviderToolProtocol, RawCitation, ToolCall,
+        ParsedResponse, ProviderConfig, ProviderRegistry, ProviderToolProtocol, RawCitation,
+        ToolCall,
     };
     use artifact_tools::{
         ArtifactAccessSnapshot, ArtifactListInput, ArtifactSearchAnalyzer,
@@ -4924,8 +4943,10 @@ mod tests {
         ProfileScope, Sensitivity, SnapshotContext, SnapshotRequest,
     };
     use read_tools::{
-        ContentProfileId, LayoutRegion, LayoutSize, LayoutSizeKind, ReaderLayoutAction,
-        ReaderLayoutEffect, ReaderLayoutState,
+        AnchoredText, BookStructureKeyStop, BookStructureKeyStopType, BookStructureSidecar,
+        BookStructureSpineRole, BookStructureSpineUnit, ContentProfileId, LayoutRegion, LayoutSize,
+        LayoutSizeKind, ProfileArtifactHeader, ReaderLayoutAction, ReaderLayoutEffect,
+        ReaderLayoutState,
     };
     use reader::DEFAULT_RADIUS;
     use std::cell::{Cell, RefCell};
@@ -4986,6 +5007,15 @@ mod tests {
     struct RecordingAdapter {
         chats: RefCell<VecDeque<AssistantTurn>>,
         seen_messages: RefCell<Vec<Vec<Message>>>,
+    }
+    struct RequestPlanRecordingAdapter {
+        chats: RefCell<VecDeque<AssistantTurn>>,
+        completes: RefCell<VecDeque<ParsedResponse>>,
+        seen_plans: RefCell<Vec<AgentRequestPlan>>,
+    }
+    struct RealProviderRecordingAdapter {
+        inner: Box<dyn ModelAdapter + Send>,
+        seen_plans: RefCell<Vec<AgentRequestPlan>>,
     }
     struct ProfileChangingAdapter {
         profile_reads: Cell<usize>,
@@ -5100,6 +5130,68 @@ mod tests {
                 .ok_or_else(|| AdapterError {
                     message: "recording chat script exhausted".into(),
                 })
+        }
+    }
+
+    impl RequestPlanRecordingAdapter {
+        fn new(chats: Vec<AssistantTurn>, completes: Vec<ParsedResponse>) -> Self {
+            Self {
+                chats: RefCell::new(chats.into()),
+                completes: RefCell::new(completes.into()),
+                seen_plans: RefCell::new(Vec::new()),
+            }
+        }
+    }
+
+    impl ModelAdapter for RequestPlanRecordingAdapter {
+        fn complete(&self, _req: CompletionRequest) -> Result<ParsedResponse, AdapterError> {
+            self.completes
+                .borrow_mut()
+                .pop_front()
+                .ok_or_else(|| AdapterError {
+                    message: "request-plan recording complete script exhausted".into(),
+                })
+        }
+
+        fn chat(&self, request: &AgentRequestPlan) -> Result<AssistantTurn, AdapterError> {
+            self.seen_plans.borrow_mut().push(request.clone());
+            self.chats
+                .borrow_mut()
+                .pop_front()
+                .ok_or_else(|| AdapterError {
+                    message: "request-plan recording chat script exhausted".into(),
+                })
+        }
+    }
+
+    impl RealProviderRecordingAdapter {
+        fn new(inner: Box<dyn ModelAdapter + Send>) -> Self {
+            Self {
+                inner,
+                seen_plans: RefCell::new(Vec::new()),
+            }
+        }
+    }
+
+    impl ModelAdapter for RealProviderRecordingAdapter {
+        fn complete(&self, request: CompletionRequest) -> Result<ParsedResponse, AdapterError> {
+            self.inner.complete(request)
+        }
+
+        fn complete_structured(
+            &self,
+            request: CompletionRequest,
+        ) -> Result<serde_json::Value, AdapterError> {
+            self.inner.complete_structured(request)
+        }
+
+        fn model_runtime_profile(&self) -> ModelRuntimeProfile {
+            self.inner.model_runtime_profile()
+        }
+
+        fn chat(&self, request: &AgentRequestPlan) -> Result<AssistantTurn, AdapterError> {
+            self.seen_plans.borrow_mut().push(request.clone());
+            self.inner.chat(request)
         }
     }
 
@@ -5651,6 +5743,40 @@ mod tests {
             },
             &"X".repeat(n * 10),
         )
+    }
+
+    fn guided_read_book() -> Book {
+        book_leaves(3).with_book_structure(Some(BookStructureSidecar {
+            header: ProfileArtifactHeader {
+                book_id: "bookL".into(),
+                book_version: "v1".into(),
+                profile_id: "technical_learning".into(),
+                profile_version: "technical_learning_v1".into(),
+                core_schema_version: "core_v1".into(),
+                generated_at: "t0".into(),
+            },
+            spine: vec![BookStructureSpineUnit {
+                lid: "1".into(),
+                role: BookStructureSpineRole::Foundation,
+                summary: AnchoredText {
+                    text: "The chapter establishes a three-step foundation.".into(),
+                    evidence_lids: vec!["1.1".into(), "1.2".into()],
+                },
+                key_stop_ids: vec!["foundation-next".into()],
+                depends_on: Vec::new(),
+            }],
+            throughlines: Vec::new(),
+            key_stops: vec![BookStructureKeyStop {
+                id: "foundation-next".into(),
+                lid: "1.2".into(),
+                stop_type: BookStructureKeyStopType::Definition,
+                title: Some("Next foundation".into()),
+                reason: AnchoredText {
+                    text: "This is the next definition to stop at.".into(),
+                    evidence_lids: vec!["1.2".into()],
+                },
+            }],
+        }))
     }
     fn tmp(name: &str) -> PathBuf {
         let p = std::env::temp_dir().join(format!("ub-orch-test-{name}.json"));
@@ -8779,24 +8905,37 @@ user_question=\"这段怎么理解？\"",
         assert!(err.message.contains("ReAct 输出抽不到合法 JSON 对象"));
     }
 
-    // P3-1 带读骨架:一个停靠点回合走通 reader.state → book.route_from → reader.gotoLid → book.synthesize → 终答。
-    // 测的是带读管道串得通(确定性、回归保护),非 prompt 智能(后者靠真 LLM 手动验)。
+    // GR3 单停靠点结构回归:Fake script 只固定调用选择;正确性由 request、trace、route 与 effect 断言给出。
     #[test]
-    fn guided_read_one_stop_pipeline() {
-        let b = book_leaves(3);
+    fn guided_read_one_stop_pipeline_records_agent_request_plan_and_reader_effect() {
+        let b = guided_read_book();
         let mut store = MemoryStore::open(tmp("guided")).unwrap();
-        let fake = FakeAdapter::new(
+        let adapter = RequestPlanRecordingAdapter::new(
             vec![
-                turn_calls(vec![discovery_call(
-                    "discover-guided-read",
-                    "reader.state book.route_from reader.gotoLid",
-                    3,
-                )]),
-                turn_calls(vec![call("c1", "reader.state", "{}")]),
-                turn_calls(vec![call("c2", "book.route_from", r#"{"at":"1.1"}"#)]),
-                turn_calls(vec![call("c3", "reader.gotoLid", r#"{"lid":"1.2"}"#)]),
+                turn_calls(vec![call("state", "reader.state", "{}")]),
+                turn_calls(vec![call("structure", "book.structure", r#"{"at":"1.1"}"#)]),
                 turn_calls(vec![call(
-                    "c4",
+                    "guide-path",
+                    "book.guide_path",
+                    r#"{"at":"1.1"}"#,
+                )]),
+                turn_calls(vec![call(
+                    "guided-frontier",
+                    "book.guided_route_from",
+                    r#"{"at":"1.1"}"#,
+                )]),
+                turn_calls(vec![call(
+                    "candidate-text",
+                    "book.text",
+                    r#"{"lid":"1.2"}"#,
+                )]),
+                turn_calls(vec![call(
+                    "goto-stop",
+                    "reader.gotoLid",
+                    r#"{"lid":"1.2"}"#,
+                )]),
+                turn_calls(vec![call(
+                    "synthesize-stop",
                     "book.synthesize",
                     r#"{"lids":["1.1","1.2"]}"#,
                 )]),
@@ -8827,7 +8966,7 @@ user_question=\"这段怎么理解？\"",
             &b,
             &mut store,
             &mut reader,
-            &fake,
+            &adapter,
             &mut messages,
             "带我读这一章",
             "t0",
@@ -8835,11 +8974,94 @@ user_question=\"这段怎么理解？\"",
         )
         .unwrap();
         assert!(!out.incomplete);
-        assert_eq!(out.turns, 6);
+        assert_eq!(out.turns, 8);
         assert_eq!(
             out.answer.as_deref(),
             Some("这一段承接上一段。继续顺读,还是想回看/深入/要例子?")
         );
+
+        let plans = adapter.seen_plans.borrow();
+        let first_plan = plans.first().expect("guided read must sample once");
+        assert!(first_plan.instruction_assets.iter().any(|asset| {
+            asset.asset_id == "resident-agent.policy.navigation" && asset.revision == "v3"
+        }));
+        let first_tool_names = first_plan
+            .tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            first_tool_names,
+            vec![
+                "book.query",
+                "book.synthesize",
+                "book.search_text",
+                "book.text",
+                "tool.search",
+                "source.present",
+                "book.context",
+                "book.concept",
+                "book.structure",
+                "book.guide_path",
+                "book.route_from",
+                "book.guided_route_from",
+                "book.unvisited_back",
+                "book.route_to",
+                "reader.gotoLid",
+                "reader.state",
+            ]
+        );
+        for excluded in [
+            "book_guide",
+            "reader.scroll",
+            "reader.highlight",
+            "reader.note",
+            "reader.layout.apply",
+            "reader.paper_minimap.apply",
+        ] {
+            assert!(!first_tool_names.contains(&excluded));
+        }
+
+        let final_plan = plans
+            .last()
+            .expect("final sampling must observe all tool results");
+        let model_body = |call_id: &str| {
+            final_plan
+                .input
+                .iter()
+                .find(|message| message.tool_call_id.as_deref() == Some(call_id))
+                .and_then(|message| message.content.as_deref())
+                .map(serde_json::from_str::<serde_json::Value>)
+                .transpose()
+                .unwrap()
+                .and_then(|envelope| envelope.get("model_body").cloned())
+                .unwrap_or_else(|| panic!("missing model body for {call_id}"))
+        };
+        let guide_path = model_body("guide-path");
+        let guided_frontier = model_body("guided-frontier");
+        assert!(guide_path["segments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|segment| {
+                segment["key_stops"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|stop| stop["lid"] == "1.2")
+            }));
+        assert!(guided_frontier["groups"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|group| {
+                group["steps"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|step| step["lid"] == "1.2")
+            }));
+
         // 视口跳转按回合首尾合并成单条 Goto(1.1 → 1.2),可撤销
         assert_eq!(out.effects.len(), 1);
         match &out.effects[0] {
@@ -8852,18 +9074,192 @@ user_question=\"这段怎么理解？\"",
             }
             other => panic!("期望 Goto,得到 {other:?}"),
         }
-        // 带读管道工具序列:state → route_from → gotoLid → synthesize
+        // 已命中首轮不 discovery;先结构/路线与候选原文自检,再唯一 goto 与双点 synthesize。
         let tools: Vec<&str> = out.trace.iter().map(|t| t.tool.as_str()).collect();
         assert_eq!(
             tools,
             vec![
-                "tool.search",
                 "reader.state",
-                "book.route_from",
+                "book.structure",
+                "book.guide_path",
+                "book.guided_route_from",
+                "book.text",
                 "reader.gotoLid",
                 "book.synthesize"
             ]
         );
+        assert!(!tools.contains(&"tool.search"));
+        assert!(!tools.contains(&"book_guide"));
+        let goto_steps = out
+            .trace
+            .iter()
+            .filter(|step| step.tool == "reader.gotoLid")
+            .collect::<Vec<_>>();
+        assert_eq!(goto_steps.len(), 1);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&goto_steps[0].args).unwrap()["lid"],
+            "1.2"
+        );
+        let synthesize = out
+            .trace
+            .iter()
+            .find(|step| step.tool == "book.synthesize")
+            .expect("single-stop guided read must synthesize");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&synthesize.args).unwrap()["lids"],
+            serde_json::json!(["1.1", "1.2"])
+        );
+    }
+
+    #[test]
+    fn guided_read_plain_summary_does_not_seed_or_create_goto() {
+        let b = guided_read_book();
+        let mut store = MemoryStore::open(tmp("guided-summary-no-goto")).unwrap();
+        let adapter = RequestPlanRecordingAdapter::new(
+            vec![turn_final("本章依次建立、展开并收束核心概念。")],
+            Vec::new(),
+        );
+        let mut reader = Reader::new(&b, 1);
+        let before = reader.state().viewport.anchor_lid;
+        let mut messages = new_session();
+
+        let out = run(
+            &b,
+            &mut store,
+            &mut reader,
+            &adapter,
+            &mut messages,
+            "总结本章",
+            "t0",
+            OuterConfig::default(),
+        )
+        .unwrap();
+
+        assert!(!out.incomplete);
+        assert!(out.trace.is_empty());
+        assert!(out.effects.is_empty());
+        assert_eq!(reader.state().viewport.anchor_lid, before);
+        let plans = adapter.seen_plans.borrow();
+        let first_tool_names = plans[0]
+            .tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>();
+        assert!(!first_tool_names.contains(&"reader.gotoLid"));
+        assert!(!first_tool_names.contains(&"book.guide_path"));
+    }
+
+    #[test]
+    #[ignore = "requires a real book plus configured Provider credentials"]
+    fn guided_read_real_provider_replay() {
+        const START_LID: &str = "1.8.1";
+        const EXPECTED_STOP_LID: &str = "1.8.2";
+        const INCIDENT_PROMPT: &str = "带我读 1.8.1";
+
+        let book_dir = std::env::var("UB_GUIDED_READ_REAL_BOOK_DIR")
+            .expect("set UB_GUIDED_READ_REAL_BOOK_DIR for the GR4 release replay");
+        let expected_stop = std::env::var("UB_GUIDED_READ_EXPECTED_STOP_LID")
+            .expect("set UB_GUIDED_READ_EXPECTED_STOP_LID=1.8.2 for the GR4 release replay");
+        assert_eq!(
+            expected_stop, EXPECTED_STOP_LID,
+            "GR4 freezes the accident replay target at 1.8.2"
+        );
+
+        let book = Book::load(&book_dir).expect("GR4 real guided-reading book must load");
+        for lid in [START_LID, EXPECTED_STOP_LID] {
+            assert!(
+                book.base.lid_nodes.iter().any(|node| node.lid == lid),
+                "GR4 real guided-reading book is missing {lid}"
+            );
+        }
+        let guide_path = book
+            .guide_path(Some(START_LID))
+            .expect("GR4 real book guide path must be readable");
+        assert!(
+            guide_path.segments.iter().any(|segment| segment
+                .key_stops
+                .iter()
+                .any(|stop| stop.lid == EXPECTED_STOP_LID)),
+            "GR4 real book guide path must contain key stop 1.8.2"
+        );
+
+        let provider_config = ProviderConfig::from_env()
+            .expect("configure OPENCODE_API_KEY/BASE_URL and FLUID_LLM_MODEL for GR4");
+        let provider_mode = provider_config.mode;
+        let provider_model = provider_config.model.clone();
+        let adapter = RealProviderRecordingAdapter::new(ProviderRegistry::adapter_from_config(
+            provider_config,
+        ));
+
+        let store_path = tmp("guided-read-real-provider-replay");
+        let mut store = MemoryStore::open(&store_path).expect("open isolated GR4 MemoryStore");
+        // Width 1 makes the requested leaf the viewport anchor; wider windows
+        // intentionally anchor at their center and would shift this fixture.
+        let mut reader = Reader::new(&book, 1);
+        reader
+            .goto_lid(&book, &mut store, START_LID, "gr4-setup")
+            .expect("position isolated Reader at the accident start LID");
+        assert_eq!(reader.state().viewport.anchor_lid, START_LID);
+        let mut messages = new_session();
+        let outcome = run(
+            &book,
+            &mut store,
+            &mut reader,
+            &adapter,
+            &mut messages,
+            INCIDENT_PROMPT,
+            "gr4-replay",
+            OuterConfig::default(),
+        )
+        .expect("real Provider guided-reading replay must complete");
+
+        let plans = adapter.seen_plans.borrow();
+        let receipt = build_guided_read_route_replay_receipt(
+            &book,
+            provider_mode,
+            &provider_model,
+            INCIDENT_PROMPT,
+            START_LID,
+            &expected_stop,
+            &plans,
+            &outcome,
+        )
+        .unwrap_or_else(|error| {
+            let trace_tools = outcome
+                .trace
+                .iter()
+                .map(|step| step.tool.as_str())
+                .collect::<Vec<_>>();
+            let first_tools = plans
+                .first()
+                .map(|plan| {
+                    plan.tools
+                        .iter()
+                        .map(|tool| tool.name.as_str())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            panic!(
+                "GR4 guided-reading replay verifier rejected the real turn: {error}; trace_tools={trace_tools:?}; first_tools={first_tools:?}"
+            )
+        });
+        let serialized = serialize_verified_guided_read_route_replay(&receipt)
+            .expect("serialize verified GR4 replay receipt");
+        assert_eq!(
+            parse_and_verify_guided_read_route_replay(&serialized)
+                .expect("offline replay verifier must accept the serialized receipt"),
+            receipt
+        );
+
+        if let Ok(path) = std::env::var("UB_GUIDED_READ_REPLAY_RECEIPT_PATH") {
+            std::fs::write(&path, &serialized)
+                .unwrap_or_else(|error| panic!("write GR4 replay receipt to {path}: {error}"));
+        }
+        println!("{serialized}");
+
+        drop(plans);
+        drop(store);
+        let _ = std::fs::remove_file(store_path);
     }
 
     // max_turns 触顶与活动上下文容量是不同停机原因。
@@ -9204,6 +9600,167 @@ user_question=\"这段怎么理解？\"",
     }
 
     #[test]
+    fn turn_intent_guided_read_seeds_first_tool_exposure_request_without_mutation() {
+        let b = book();
+        let mut store = MemoryStore::open(tmp("turn-intent-guided-read-first-request")).unwrap();
+        let mut reader = Reader::new(&b, DEFAULT_RADIUS);
+        let reader_before = serde_json::to_string(&reader.state()).unwrap();
+        let document_revision_before = store.document_revision();
+        let projection_revision_before = store.projection_revision();
+        let fake = FakeAdapter::new(vec![turn_final("ready for one stop")], vec![]);
+        let mut messages = new_session();
+
+        let out = run(
+            &b,
+            &mut store,
+            &mut reader,
+            &fake,
+            &mut messages,
+            "带我读 1.8.1",
+            "t0",
+            OuterConfig::default(),
+        )
+        .unwrap();
+
+        let first_tool_names = out.request_audit.requests[0]
+            .tool_schemas
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            first_tool_names,
+            vec![
+                "book.query",
+                "book.synthesize",
+                "book.search_text",
+                "book.text",
+                "tool.search",
+                "source.present",
+                "book.context",
+                "book.concept",
+                "book.structure",
+                "book.guide_path",
+                "book.route_from",
+                "book.guided_route_from",
+                "book.unvisited_back",
+                "book.route_to",
+                "reader.gotoLid",
+                "reader.state",
+            ]
+        );
+        for excluded in [
+            "book_guide",
+            "reader.scroll",
+            "reader.highlight",
+            "reader.note",
+            "reader.layout.apply",
+            "reader.paper_minimap.apply",
+        ] {
+            assert!(!first_tool_names.contains(&excluded));
+        }
+        assert!(out.trace.is_empty());
+        assert!(out.effects.is_empty());
+        assert!(out.memory_updates.is_empty());
+        assert_eq!(
+            serde_json::to_string(&reader.state()).unwrap(),
+            reader_before
+        );
+        assert_eq!(store.document_revision(), document_revision_before);
+        assert_eq!(store.projection_revision(), projection_revision_before);
+    }
+
+    #[test]
+    fn turn_intent_active_context_budget_includes_seeded_tool_exposure() {
+        let b = book();
+        let mut store = MemoryStore::open(tmp("turn-intent-seeded-active-context")).unwrap();
+        let mut reader = Reader::new(&b, DEFAULT_RADIUS);
+        let question = "带我读 1.8.1";
+        let snapshot = default_profile_snapshot(&b, &store, "t0");
+        let mut context_fragments = ContextFragmentLedger::default();
+        context_fragments
+            .upsert(ContextFragment::new(
+                READER_PROFILE_FRAGMENT_KEY,
+                FragmentScope::TurnFrozen,
+                Role::System,
+                snapshot.to_prompt_data(),
+                FragmentSensitivity::Sensitive,
+            ))
+            .unwrap();
+        let mut planned_messages = new_session();
+        planned_messages.push(Message::user(question));
+        let mut profile = compaction_profile("turn-intent-seeded-active-context");
+        profile.output_reserve_tokens = 0;
+        profile.safety_margin_tokens = 0;
+        profile.compaction.high_watermark_ratio = 1.0;
+        let registry = resident_tool_registry();
+        let (_, legacy_unseeded_plan) = build_sample_request(
+            &planned_messages,
+            &context_fragments,
+            &b,
+            &ActiveToolResultLedger::default(),
+            None,
+            COMPACTION_CONSUMPTION_WRAPPER,
+            &registry,
+            &profile,
+            ToolPermissions::default(),
+            &ToolExposureState::default(),
+            ArtifactExposureContext::no_overlay(),
+            false,
+            &[],
+        )
+        .unwrap();
+        profile.context_window_tokens = legacy_unseeded_plan
+            .active_context
+            .estimated_input_tokens
+            .saturating_add(1);
+        let (_, legacy_unseeded_plan) = build_sample_request(
+            &planned_messages,
+            &context_fragments,
+            &b,
+            &ActiveToolResultLedger::default(),
+            None,
+            COMPACTION_CONSUMPTION_WRAPPER,
+            &registry,
+            &profile,
+            ToolPermissions::default(),
+            &ToolExposureState::default(),
+            ArtifactExposureContext::no_overlay(),
+            false,
+            &[],
+        )
+        .unwrap();
+        assert!(legacy_unseeded_plan.active_context.fits);
+
+        let adapter = AutoCompactionAdapter::new(profile, Vec::new());
+        let reader_before = serde_json::to_string(&reader.state()).unwrap();
+        let messages_before = serde_json::to_string(&new_session()).unwrap();
+        let mut messages = new_session();
+        let mut sink = EphemeralCompactionCheckpointSink::default();
+        let error = run_with_checkpoint_sink(
+            &b,
+            &mut store,
+            &mut reader,
+            &adapter,
+            &mut messages,
+            &mut sink,
+            question,
+            "t0",
+            OuterConfig::default(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.error_code, ACTIVE_CONTEXT_EXHAUSTED);
+        assert_eq!(serde_json::to_string(&messages).unwrap(), messages_before);
+        assert_eq!(
+            serde_json::to_string(&reader.state()).unwrap(),
+            reader_before
+        );
+        assert!(sink.installed.is_none());
+        assert!(adapter.compaction_requests.borrow().is_empty());
+        assert!(adapter.seen_messages.borrow().is_empty());
+    }
+
+    #[test]
     fn tool_exposure_activation_applies_only_to_the_next_sampling() {
         let b = book();
         let mut store = MemoryStore::open(tmp("tool-exposure-next-sampling")).unwrap();
@@ -9497,9 +10054,8 @@ user_question=\"这段怎么理解？\"",
     #[test]
     fn query_routing_keeps_document_and_passage_questions_on_owned_tools() {
         let policy = canonical_policy_text();
-        assert!(policy.contains(
-            "章节主旨或整篇贡献先用 book.structure/book.guide_path 或 book.paper_reading_guide"
-        ));
+        assert!(policy.contains("普通章节摘要不因本策略强制调用导航工具"));
+        assert!(policy.contains("显式带读不是章节摘要"));
         assert!(policy.contains(
             "当前 passage 问题优先 book.text/book.context 或已知 LID 的 book.synthesize"
         ));

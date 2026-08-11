@@ -18,6 +18,7 @@ pub mod build_intent;
 pub mod compaction;
 pub mod context_fragment;
 pub mod goldset;
+pub mod guided_read_replay;
 pub mod memory_intent;
 pub mod memory_policy;
 pub mod memory_review;
@@ -4828,6 +4829,65 @@ mod tests {
         assert_eq!(
             react_messages[2],
             serde_json::json!({"role": "user", "content": "question"})
+        );
+        assert!(react.get("tools").is_none());
+    }
+
+    #[test]
+    fn resident_navigation_policy_native_and_react_request_plan_snapshots() {
+        let profile = ModelRuntimeCatalog::default().resolve(
+            "snapshot-model",
+            ProviderToolProtocol::Native,
+            None,
+        );
+        let tools = vec![ToolSpec {
+            name: "book.text".into(),
+            description: "Read text".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {"lid": {"type": "string"}},
+                "required": ["lid"],
+            }),
+        }];
+        let modules = agent_prompt::policy_modules_for_tools(&tools);
+        let plan = AgentRequestPlan::for_agent_turn_with_modules(
+            profile,
+            &[
+                Message::system("base instructions"),
+                Message::user("ordinary explanation"),
+            ],
+            &tools,
+            &modules,
+        );
+
+        assert_eq!(
+            plan.instruction_assets
+                .iter()
+                .filter(|asset| asset.asset_id == "resident-agent.policy.navigation")
+                .count(),
+            1
+        );
+        assert_eq!(
+            plan.instruction_assets
+                .iter()
+                .find(|asset| asset.asset_id == "resident-agent.policy.navigation")
+                .map(|asset| asset.revision.as_str()),
+            Some("v3")
+        );
+        assert!(plan.instructions.contains("显式带读不是章节摘要"));
+
+        let (native, _) = native_chat_request_projection("snapshot-model", &plan);
+        assert_eq!(
+            native["messages"][0]["content"].as_str(),
+            Some(plan.instructions.as_str())
+        );
+
+        let react = react_chat_request_projection("snapshot-model", &plan);
+        let react_messages = react["messages"].as_array().unwrap();
+        assert_eq!(react_messages.len(), 3);
+        assert_eq!(
+            react_messages[1]["content"].as_str(),
+            Some(plan.instructions.as_str())
         );
         assert!(react.get("tools").is_none());
     }

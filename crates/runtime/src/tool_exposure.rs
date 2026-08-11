@@ -8,8 +8,68 @@ use std::collections::{BTreeSet, HashSet};
 
 pub const TOOL_EXPOSURE_PLAN_VERSION: &str = "tool_exposure_plan.v1";
 pub const TOOL_SEARCH_RESULT_VERSION: &str = "tool_search_result.v1";
+pub const TURN_INTENT_CLASSIFIER_VERSION: &str = "turn_intent_classifier.v1";
 pub const DEFAULT_DIRECT_TOOL_LIMIT: usize = 8;
 pub const MAX_DISCOVERY_ACTIVATIONS: usize = 6;
+
+const EXPLICIT_GUIDED_READ_PHRASES_V1: [&str; 8] = [
+    "带我读",
+    "带着我读",
+    "陪我读",
+    "一步步讲",
+    "接着带我读",
+    "接着讲这一节",
+    "guide me through",
+    "walk me through",
+];
+
+const EXPLICIT_GUIDED_READ_NEGATIONS_V1: [&str; 22] = [
+    "不要带我读",
+    "不用带我读",
+    "别带我读",
+    "不要带着我读",
+    "不用带着我读",
+    "别带着我读",
+    "不要陪我读",
+    "不用陪我读",
+    "别陪我读",
+    "不要一步步讲",
+    "不用一步步讲",
+    "别一步步讲",
+    "不要接着带我读",
+    "不用接着带我读",
+    "别接着带我读",
+    "不要接着讲这一节",
+    "不用接着讲这一节",
+    "别接着讲这一节",
+    "don't guide me through",
+    "do not guide me through",
+    "don't walk me through",
+    "do not walk me through",
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum TurnIntentHint {
+    ExplicitGuidedRead,
+}
+
+pub fn classify_turn_intent(question: &str) -> BTreeSet<TurnIntentHint> {
+    let normalized = question.trim().to_lowercase();
+    if normalized.is_empty()
+        || EXPLICIT_GUIDED_READ_NEGATIONS_V1
+            .iter()
+            .any(|phrase| normalized.contains(phrase))
+    {
+        return BTreeSet::new();
+    }
+
+    EXPLICIT_GUIDED_READ_PHRASES_V1
+        .iter()
+        .any(|phrase| normalized.contains(phrase))
+        .then_some(TurnIntentHint::ExplicitGuidedRead)
+        .into_iter()
+        .collect()
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ToolPermissions {
@@ -149,6 +209,33 @@ impl ToolExposureState {
 
     fn activate(&mut self, name: &str) {
         self.activated.insert(name.to_string());
+    }
+}
+
+pub fn seed_turn_tool_activations(
+    hints: &BTreeSet<TurnIntentHint>,
+    registry: &ToolRegistry,
+    context: &ToolExposureContext,
+    state: &mut ToolExposureState,
+) {
+    if !hints.contains(&TurnIntentHint::ExplicitGuidedRead) {
+        return;
+    }
+
+    for registration in registry.registrations() {
+        let is_guided_navigation = registration
+            .capabilities
+            .contains(&ToolCapability::Navigation)
+            || matches!(
+                registration.handler,
+                ToolHandlerId::ReaderState | ToolHandlerId::ReaderGotoLid
+            );
+        if !is_guided_navigation {
+            continue;
+        }
+        if classify(registration.handler, context).0 == ToolExposureDisposition::Deferred {
+            state.activate(&registration.spec.name);
+        }
     }
 }
 
@@ -574,7 +661,7 @@ fn search_score(
 mod tests {
     use super::*;
     use crate::orchestrator::resident_tool_registry;
-    use crate::ProviderToolProtocol;
+    use crate::{ModelRuntimeCatalog, ProviderToolProtocol};
 
     fn model() -> ModelRuntimeProfile {
         ModelRuntimeProfile::fallback("test-model", ProviderToolProtocol::Native)
@@ -594,6 +681,172 @@ mod tests {
             .iter()
             .map(|spec| spec.name.as_str())
             .collect()
+    }
+
+    #[test]
+    fn turn_intent_v1_classifies_only_the_frozen_guided_read_phrases() {
+        assert_eq!(TURN_INTENT_CLASSIFIER_VERSION, "turn_intent_classifier.v1");
+        for question in [
+            "带我读 1.8.1",
+            "请带着我读这一节",
+            "陪我读第二章",
+            "这部分请一步步讲",
+            "接着带我读",
+            "接着讲这一节",
+            "  GUIDE ME THROUGH chapter 2  ",
+            "Walk Me Through this proof",
+        ] {
+            assert_eq!(
+                classify_turn_intent(question),
+                BTreeSet::from([TurnIntentHint::ExplicitGuidedRead]),
+                "question={question:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn turn_intent_v1_prioritizes_negation_and_rejects_summary_or_read_aloud() {
+        for question in [
+            "不要带我读",
+            "不用带我读这一章",
+            "别带我读，直接总结",
+            "不要带着我读",
+            "不用陪我读",
+            "别一步步讲",
+            "不要接着带我读",
+            "不用接着讲这一节",
+            "Don't guide me through this chapter",
+            "Do not walk me through this proof",
+            "总结本章",
+            "本章讲了什么",
+            "read this aloud",
+            "解释 1.8.1",
+            "",
+            "   ",
+        ] {
+            assert!(
+                classify_turn_intent(question).is_empty(),
+                "question={question:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn turn_intent_seeded_exposure_is_complete_profile_gated_and_budgeted() {
+        let registry = resident_tool_registry();
+        let catalog = ModelRuntimeCatalog::default();
+        let hints = classify_turn_intent("带我读 1.8.1");
+        let core_navigation = [
+            "book.structure",
+            "book.guide_path",
+            "book.route_from",
+            "book.guided_route_from",
+            "book.unvisited_back",
+            "book.route_to",
+            "reader.gotoLid",
+            "reader.state",
+        ];
+
+        for protocol in [ProviderToolProtocol::Native, ProviderToolProtocol::ReAct] {
+            for model_id in ["glm-5.1", "gpt-5", "unknown-model"] {
+                let runtime_profile = catalog.resolve(model_id, protocol, None);
+                for content_profile in
+                    [ContentProfileId::TechnicalLearning, ContentProfileId::Paper]
+                {
+                    let is_paper = content_profile == ContentProfileId::Paper;
+                    let exposure_context = context(content_profile.clone());
+                    let mut state = ToolExposureState::default();
+                    seed_turn_tool_activations(&hints, &registry, &exposure_context, &mut state);
+                    let plan = ToolExposurePlan::build(
+                        &registry,
+                        &runtime_profile,
+                        &exposure_context,
+                        &state,
+                    );
+
+                    for name in core_navigation {
+                        assert!(
+                            plan.is_visible(name),
+                            "profile={} protocol={protocol:?} content_profile={content_profile:?} missing={name}",
+                            runtime_profile.profile_id
+                        );
+                    }
+                    assert_eq!(plan.is_visible("book.paper_reading_guide"), is_paper);
+                    assert!(plan.schema_bytes <= plan.schema_budget_bytes);
+                    assert!(plan.entry("book_guide").is_none());
+                    for excluded in [
+                        "reader.scroll",
+                        "reader.highlight",
+                        "reader.note",
+                        "reader.layout.apply",
+                        "reader.paper_minimap.apply",
+                        "memory.save",
+                        "memory.recall",
+                        "profile.manifest",
+                    ] {
+                        assert!(!state.is_activated(excluded), "unexpected seed={excluded}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn turn_intent_seed_respects_reader_permissions_and_content_profile() {
+        let registry = resident_tool_registry();
+        let hints = classify_turn_intent("guide me through chapter 3");
+        let mut denied = context(ContentProfileId::TechnicalLearning);
+        denied.permissions.allow_reader_read = false;
+        denied.permissions.allow_reader_write = false;
+        let mut state = ToolExposureState::default();
+
+        seed_turn_tool_activations(&hints, &registry, &denied, &mut state);
+        let plan = ToolExposurePlan::build(&registry, &model(), &denied, &state);
+
+        assert!(plan.is_visible("book.structure"));
+        assert!(plan.is_visible("book.guide_path"));
+        assert!(!state.is_activated("reader.state"));
+        assert!(!state.is_activated("reader.gotoLid"));
+        assert_eq!(
+            plan.entry("reader.state").unwrap().disposition,
+            ToolExposureDisposition::Hidden
+        );
+        assert_eq!(
+            plan.entry("reader.gotoLid").unwrap().disposition,
+            ToolExposureDisposition::Hidden
+        );
+        assert!(!state.is_activated("book.paper_reading_guide"));
+    }
+
+    #[test]
+    fn turn_intent_negative_and_summary_keep_the_initial_eight_tool_golden() {
+        let registry = resident_tool_registry();
+        let runtime_profile = model();
+        let exposure_context = context(ContentProfileId::TechnicalLearning);
+        let expected = vec![
+            "book.query",
+            "book.synthesize",
+            "book.search_text",
+            "book.text",
+            "tool.search",
+            "source.present",
+            "book.context",
+            "book.concept",
+        ];
+
+        for question in ["别带我读", "总结本章", "本章讲了什么", "read this aloud"] {
+            let mut state = ToolExposureState::default();
+            seed_turn_tool_activations(
+                &classify_turn_intent(question),
+                &registry,
+                &exposure_context,
+                &mut state,
+            );
+            let plan =
+                ToolExposurePlan::build(&registry, &runtime_profile, &exposure_context, &state);
+            assert_eq!(visible_names(&plan), expected, "question={question:?}");
+            assert_eq!(state.activated_names().count(), 0);
+        }
     }
 
     #[test]

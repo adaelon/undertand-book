@@ -18,10 +18,15 @@ const TOOL_DISCOVERY: &str = "能力发现:
 - 当前工具列表只包含本次 sampling 可直接使用的能力。缺少完成任务所需工具时调用 tool.search。
 - tool.search 只返回元数据并激活能力;新激活工具从下一次 sampling 才可见,不得在同一批 tool_calls 中立即调用。每次只发现当前任务真正需要的最少能力。";
 
+const NAVIGATION_REVISION: &str = "v3";
 const NAVIGATION: &str = "导航与带读:
-- 章节主旨或整篇贡献先用 book.structure/book.guide_path 或 book.paper_reading_guide 选择真 LID,再用 book.synthesize;route_from/guided_route_from/route_to/unvisited_back 只用于导航、带读、前置与路径,不是普通解释工具。
-- 主动带读先用 reader.state 取得当前 anchor,再看结构或路线,每回合只前进一个真实停靠点;必须用 reader.gotoLid 真正跳转后再解释。
-- 对无具体指向的“没懂”,先用 book.unvisited_back 检查未读前置。为空时原地换讲法;非空时先建议回看,用户再次没懂再真正跳转。未读前置只能来自工具结果。";
+- 普通引用解释继续按证据路由回答,普通章节摘要不因本策略强制调用导航工具。只有用户显式要求“带我读/一步步讲/接着讲”才进入带读流程;显式带读不是章节摘要,仅定位或读到一处原文后不得直接终答。
+- 显式带读必须严格串行:先用 reader.state 取得当前 anchor,再调用 book.structure 看结构地图,再调用 book.guide_path 取宏观路线;只有这三步依次完成后,才可按需用 book.guided_route_from 取得局部教学前沿。不得把 book.guide_path 或 route 工具放到 book.structure 之前,也不得把这些步骤并行批量调用;route_from/guided_route_from/route_to/unvisited_back 只用于导航、带读、前置与路径,不是普通解释工具。
+- 从 guide path、key stop 或 guided frontier 选出下一停靠点后,必须先对“即将 goto 的同一目标 LID”调用 book.text 或 book.context 并等待真实结果,随后才可 reader.gotoLid 到该 LID;只读取当前 anchor 或其他 LID 不算候选自检,不得编造目标。
+- 必须用 reader.gotoLid 真正跳转后再解释;一次用户回合只能有一次改变 anchor 的 reader.gotoLid 调用,并只形成一个合并后的 Goto effect。
+- 跳转后用 book.synthesize 只综合当前与新停靠点,讲完立即停下等待用户反馈,不得一次覆盖剩余路线。
+- 对无具体指向的“没懂”,先用 book.unvisited_back 检查未读前置。为空时原地换讲法;非空时先建议回看,用户再次没懂再真正跳转。未读前置只能来自工具结果。
+- 所需导航能力当前不可见时,用 tool.search 发现并激活最小能力,等待下一次 sampling 再调用,不得退化为 search_text/text 后一次性总结。";
 
 const READER_EFFECTS: &str = "Reader 副作用:
 - 用户要求翻页、跳转、高亮、记笔记、布局或论文工作台操作时,必须真实调用对应 reader 工具,不能只用文字声称完成。
@@ -88,21 +93,11 @@ pub fn policy_modules_for_tools(tools: &[ToolSpec]) -> Vec<InstructionModule> {
             TOOL_DISCOVERY,
         ));
     }
-    if has_any(
-        &names,
-        &[
-            "book.structure",
-            "book.guide_path",
-            "book.paper_reading_guide",
-            "book.route_from",
-            "book.guided_route_from",
-            "book.unvisited_back",
-            "book.route_to",
-            "reader.state",
-        ],
-    ) {
-        modules.push(module("resident-agent.policy.navigation", NAVIGATION));
-    }
+    modules.push(InstructionModule::new(
+        "resident-agent.policy.navigation",
+        NAVIGATION_REVISION,
+        NAVIGATION,
+    ));
     if has_any(
         &names,
         &[
@@ -177,6 +172,19 @@ mod tests {
         assert!(EVIDENCE_ROUTING.contains("book.concept 做候选发现"));
         assert!(EVIDENCE_ROUTING.contains("必须用 book.text"));
         assert!(EVIDENCE_ROUTING.contains("preview 不是最终证据"));
+        assert!(NAVIGATION.contains("显式带读不是章节摘要"));
+        assert!(NAVIGATION.contains("普通章节摘要不因本策略强制调用导航工具"));
+        assert!(NAVIGATION.contains("reader.state"));
+        assert!(NAVIGATION.contains("book.structure 看结构地图"));
+        assert!(NAVIGATION.contains("book.guide_path 取宏观路线"));
+        assert!(NAVIGATION.contains("必须严格串行"));
+        assert!(NAVIGATION.contains("不得把 book.guide_path"));
+        assert!(NAVIGATION.contains("book.text 或 book.context"));
+        assert!(NAVIGATION.contains("即将 goto 的同一目标 LID"));
+        assert!(NAVIGATION.contains("只读取当前 anchor"));
+        assert!(NAVIGATION.contains("一次用户回合只能有一次改变 anchor"));
+        assert!(NAVIGATION.contains("只综合当前与新停靠点"));
+        assert!(NAVIGATION.contains("tool.search"));
         assert!(MEMORY_POLICY.contains("Runtime"));
         assert!(!MEMORY_POLICY.contains("每当"));
     }
@@ -198,6 +206,7 @@ mod tests {
                 "resident-agent.policy.evidence-routing",
                 "resident-agent.policy.source-delivery",
                 "resident-agent.policy.tool-discovery",
+                "resident-agent.policy.navigation",
                 "resident-agent.policy.finish",
             ]
         );
@@ -215,5 +224,19 @@ mod tests {
         assert!(activated_ids.contains(&"resident-agent.policy.reader-effects"));
         assert!(activated_ids.contains(&"resident-agent.policy.memory"));
         assert!(!activated_ids.contains(&"resident-agent.policy.paper-workbench"));
+        assert_eq!(
+            activated_ids
+                .iter()
+                .filter(|asset_id| **asset_id == "resident-agent.policy.navigation")
+                .count(),
+            1
+        );
+        assert_eq!(
+            activated
+                .iter()
+                .find(|module| module.asset_id == "resident-agent.policy.navigation")
+                .map(|module| module.revision.as_str()),
+            Some(NAVIGATION_REVISION)
+        );
     }
 }
