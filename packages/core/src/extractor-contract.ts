@@ -1,4 +1,6 @@
+import { createHash } from "node:crypto";
 import { z, type ZodTypeAny } from "zod";
+import { canonicalAutomaticBuildJson } from "./automatic-build-protocol";
 import { METADATA_SOURCES, type PaperMetadataExtractionOutput } from "./paper-metadata";
 import { PAPER_TERM_TYPES, type PaperLexiconExtractionOutput } from "./paper-lexicon";
 import type { ProfileSidecarExtractionOutput } from "./profile-sidecar-build";
@@ -14,6 +16,245 @@ export const EXTRACTOR_CONTRACT_SCHEMA_VERSIONS = {
 export interface ExtractorContractContext {
   allowed_evidence_lids: string[];
   formula_lids?: string[];
+}
+
+export interface ExtractorFieldContractV1 {
+  field: string;
+  required: boolean;
+  nullable: boolean;
+  enum_values?: readonly string[];
+  min_length?: number;
+  max_length?: number;
+  min_value?: number;
+  max_value?: number;
+  profile_hints?: Readonly<Record<string, readonly string[]>>;
+}
+
+export const AUTOMATIC_BUILD_FAILURE_CATEGORIES = [
+  "schema",
+  "evidence",
+  "provider",
+  "executor",
+  "budget",
+  "internal",
+] as const;
+
+export type AutomaticBuildFailureCategory = typeof AUTOMATIC_BUILD_FAILURE_CATEGORIES[number];
+
+export type AutomaticBuildRequiredRecovery =
+  | "publish_new_policy_scope"
+  | "change_evidence_or_policy_scope"
+  | "replan_budget"
+  | "confirm_transient_retry"
+  | "recover_executor"
+  | "forward_fix"
+  | "inspect_legacy_failure";
+
+export interface AutomaticBuildFailureDiagnosticV2 {
+  version: "automatic_build_failure_diagnostic.v2";
+  category: AutomaticBuildFailureCategory;
+  code: string;
+  json_pointer?: string;
+  expected?: string;
+  diagnostic_digest: string;
+}
+
+export interface AutomaticBuildFailureDiagnosticInputV2 {
+  category: AutomaticBuildFailureCategory;
+  code: string;
+  json_pointer?: string;
+  expected?: string;
+}
+
+const AUTOMATIC_BUILD_FAILURE_CODES: Record<AutomaticBuildFailureCategory, ReadonlySet<string>> = {
+  schema: new Set([
+    "schema_invalid",
+    "semantic_invalid",
+    "semantic_output_invalid",
+  ]),
+  evidence: new Set([
+    "evidence_required",
+    "evidence_out_of_scope",
+    "defined_at_not_occurrence",
+    "relation_evidence_incomplete",
+    "formula_lid_not_eligible",
+    "composition_source_mismatch",
+  ]),
+  provider: new Set([
+    "provider_unavailable",
+    "provider_timeout",
+    "provider_rate_limited",
+    "provider_overloaded",
+    "provider_failed",
+  ]),
+  executor: new Set([
+    "executor_failed",
+    "executor_instability",
+    "executor_lost",
+    "command_start_failed",
+    "command_nonzero_exit",
+    "harness_cancelled",
+    "private_exception",
+    "legacy_handoff_missing",
+  ]),
+  budget: new Set([
+    "budget_proof_invalid",
+    "budget_exceeded",
+    "low_confidence_wall_budget",
+    "wall_budget_exceeded",
+  ]),
+  internal: new Set([
+    "writer_failed",
+    "legacy_unclassified",
+    "multiple_failure_causes",
+    "internal_error",
+  ]),
+};
+
+const TRANSIENT_PROVIDER_FAILURE_CODES = new Set([
+  "provider_unavailable",
+  "provider_timeout",
+  "provider_rate_limited",
+  "provider_overloaded",
+]);
+const SHA256 = /^[a-f0-9]{64}$/u;
+const MAX_FAILURE_CODE_BYTES = 128;
+const MAX_FAILURE_POINTER_BYTES = 512;
+const MAX_FAILURE_EXPECTED_BYTES = 512;
+const EXTRACTOR_ERROR_PREFIX = "ExtractorContractError: ";
+const MAX_EXTRACTOR_ERROR_TRANSPORT_BYTES = 65_536;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function boundedFailureString(value: unknown, label: string, maxBytes: number): string {
+  if (typeof value !== "string" || !value || value.includes("\0")
+    || Buffer.byteLength(value, "utf8") > maxBytes) {
+    throw new Error(`${label} is invalid`);
+  }
+  return value;
+}
+
+function summarizeFailureString(value: string, maxBytes: number): string {
+  if (Buffer.byteLength(value, "utf8") <= maxBytes) return value;
+  let summary = value;
+  while (summary && Buffer.byteLength(`${summary}...`, "utf8") > maxBytes) {
+    summary = summary.slice(0, -1);
+  }
+  return `${summary}...`;
+}
+
+function failureCategoryForCode(code: string): AutomaticBuildFailureCategory | undefined {
+  return AUTOMATIC_BUILD_FAILURE_CATEGORIES.find((category) => (
+    AUTOMATIC_BUILD_FAILURE_CODES[category].has(code)
+  ));
+}
+
+export function createAutomaticBuildFailureDiagnostic(
+  input: AutomaticBuildFailureDiagnosticInputV2,
+): AutomaticBuildFailureDiagnosticV2 {
+  if (!AUTOMATIC_BUILD_FAILURE_CATEGORIES.includes(input.category)) {
+    throw new Error("automatic build failure category is invalid");
+  }
+  const code = boundedFailureString(input.code, "automatic build failure code", MAX_FAILURE_CODE_BYTES);
+  if (!AUTOMATIC_BUILD_FAILURE_CODES[input.category].has(code)) {
+    throw new Error(`automatic build failure code is not allowlisted for ${input.category}`);
+  }
+  const jsonPointer = input.json_pointer === undefined
+    ? undefined
+    : boundedFailureString(input.json_pointer, "automatic build failure json_pointer", MAX_FAILURE_POINTER_BYTES);
+  if (jsonPointer !== undefined && !jsonPointer.startsWith("/")) {
+    throw new Error("automatic build failure json_pointer must be an absolute JSON pointer");
+  }
+  const expected = input.expected === undefined
+    ? undefined
+    : boundedFailureString(input.expected, "automatic build failure expected", MAX_FAILURE_EXPECTED_BYTES);
+  const identity = {
+    version: "automatic_build_failure_diagnostic.v2" as const,
+    category: input.category,
+    code,
+    ...(jsonPointer === undefined ? {} : { json_pointer: jsonPointer }),
+    ...(expected === undefined ? {} : { expected }),
+  };
+  return {
+    ...identity,
+    diagnostic_digest: createHash("sha256")
+      .update(canonicalAutomaticBuildJson(identity))
+      .digest("hex"),
+  };
+}
+
+export function validateAutomaticBuildFailureDiagnostic(
+  value: unknown,
+): AutomaticBuildFailureDiagnosticV2 {
+  if (!isRecord(value)) throw new Error("automatic build failure diagnostic must be an object");
+  const allowed = new Set([
+    "version",
+    "category",
+    "code",
+    "json_pointer",
+    "expected",
+    "diagnostic_digest",
+  ]);
+  if (Object.keys(value).some((key) => !allowed.has(key))
+    || value.version !== "automatic_build_failure_diagnostic.v2"
+    || typeof value.category !== "string"
+    || !AUTOMATIC_BUILD_FAILURE_CATEGORIES.includes(value.category as AutomaticBuildFailureCategory)
+    || typeof value.code !== "string"
+    || typeof value.diagnostic_digest !== "string"
+    || !SHA256.test(value.diagnostic_digest)) {
+    throw new Error("automatic build failure diagnostic identity is invalid");
+  }
+  const canonical = createAutomaticBuildFailureDiagnostic({
+    category: value.category as AutomaticBuildFailureCategory,
+    code: value.code,
+    ...(value.json_pointer === undefined ? {} : { json_pointer: value.json_pointer as string }),
+    ...(value.expected === undefined ? {} : { expected: value.expected as string }),
+  });
+  if (canonical.diagnostic_digest !== value.diagnostic_digest) {
+    throw new Error("automatic build failure diagnostic digest mismatch");
+  }
+  return canonical;
+}
+
+export function automaticBuildFailureDiagnosticFromCode(
+  code: unknown,
+): AutomaticBuildFailureDiagnosticV2 {
+  if (typeof code === "string") {
+    const category = failureCategoryForCode(code);
+    if (category) return createAutomaticBuildFailureDiagnostic({ category, code });
+  }
+  return createAutomaticBuildFailureDiagnostic({ category: "internal", code: "writer_failed" });
+}
+
+export function legacyAutomaticBuildFailureDiagnostic(): AutomaticBuildFailureDiagnosticV2 {
+  return createAutomaticBuildFailureDiagnostic({ category: "internal", code: "legacy_unclassified" });
+}
+
+export function requiredRecoveryForAutomaticBuildFailure(
+  diagnostic: AutomaticBuildFailureDiagnosticV2,
+): AutomaticBuildRequiredRecovery {
+  const value = validateAutomaticBuildFailureDiagnostic(diagnostic);
+  switch (value.category) {
+    case "schema": return "publish_new_policy_scope";
+    case "evidence": return "change_evidence_or_policy_scope";
+    case "budget": return "replan_budget";
+    case "executor": return "recover_executor";
+    case "provider": return TRANSIENT_PROVIDER_FAILURE_CODES.has(value.code)
+      ? "confirm_transient_retry"
+      : "forward_fix";
+    case "internal": return value.code === "legacy_unclassified"
+      ? "inspect_legacy_failure"
+      : "forward_fix";
+  }
+}
+
+export function isAutomaticBuildTransientProviderFailure(
+  diagnostic: AutomaticBuildFailureDiagnosticV2,
+): boolean {
+  const value = validateAutomaticBuildFailureDiagnostic(diagnostic);
+  return value.category === "provider" && TRANSIENT_PROVIDER_FAILURE_CODES.has(value.code);
 }
 
 export interface ExtractorContractDiagnosticV1 {
@@ -32,11 +273,63 @@ export interface ExtractorContractDiagnosticV1 {
 
 export class ExtractorContractError extends Error {
   readonly diagnostic: ExtractorContractDiagnosticV1;
+  readonly failure_diagnostic: AutomaticBuildFailureDiagnosticV2;
 
   constructor(diagnostic: ExtractorContractDiagnosticV1) {
     super(JSON.stringify(diagnostic));
     this.name = "ExtractorContractError";
     this.diagnostic = diagnostic;
+    this.failure_diagnostic = automaticBuildFailureDiagnosticFromExtractorDiagnostic(diagnostic);
+  }
+}
+
+function automaticBuildFailureDiagnosticFromExtractorDiagnostic(
+  diagnostic: ExtractorContractDiagnosticV1,
+): AutomaticBuildFailureDiagnosticV2 {
+  const category = failureCategoryForCode(diagnostic.code);
+  if (category !== "schema" && category !== "evidence") {
+    return createAutomaticBuildFailureDiagnostic({ category: "internal", code: "writer_failed" });
+  }
+  return createAutomaticBuildFailureDiagnostic({
+    category,
+    code: diagnostic.code,
+    json_pointer: summarizeFailureString(diagnostic.json_pointer, MAX_FAILURE_POINTER_BYTES),
+    expected: summarizeFailureString(diagnostic.expected, MAX_FAILURE_EXPECTED_BYTES),
+  });
+}
+
+export function automaticBuildFailureDiagnosticFromError(
+  error: unknown,
+): AutomaticBuildFailureDiagnosticV2 {
+  if (error instanceof ExtractorContractError) return error.failure_diagnostic;
+  if (isRecord(error) && "failure_diagnostic" in error) {
+    try {
+      return validateAutomaticBuildFailureDiagnostic(error.failure_diagnostic);
+    } catch {
+      // Unknown or forged error objects remain an internal writer failure.
+    }
+  }
+  return createAutomaticBuildFailureDiagnostic({ category: "internal", code: "writer_failed" });
+}
+
+export function parseExtractorContractErrorFromStderr(stderr: unknown): ExtractorContractError | undefined {
+  if (typeof stderr !== "string") return undefined;
+  const line = stderr.split(/\r?\n/u).find((candidate) => candidate.startsWith(EXTRACTOR_ERROR_PREFIX));
+  if (!line) return undefined;
+  const payload = line.slice(EXTRACTOR_ERROR_PREFIX.length);
+  if (!payload || Buffer.byteLength(payload, "utf8") > MAX_EXTRACTOR_ERROR_TRANSPORT_BYTES) return undefined;
+  try {
+    const value = JSON.parse(payload) as unknown;
+    if (!isRecord(value)
+      || value.version !== "automatic_build_extractor_diagnostic.v1"
+      || typeof value.code !== "string"
+      || typeof value.json_pointer !== "string"
+      || typeof value.expected !== "string") return undefined;
+    const category = failureCategoryForCode(value.code);
+    if (category !== "schema" && category !== "evidence") return undefined;
+    return new ExtractorContractError(value as unknown as ExtractorContractDiagnosticV1);
+  } catch {
+    return undefined;
   }
 }
 
@@ -102,20 +395,183 @@ const relationTypes = [
   "elaborates", "exemplifies", "explains", "causes", "results_in", "contrasts", "concedes", "supports",
   "rebuts", "summarizes", "restates", "prepares", "continues", "answers", "depends_on",
 ] as const;
+
+export const PROFILE_SIDECAR_FIELD_CONTRACTS_V1 = [
+  {
+    field: "mode",
+    required: true,
+    nullable: false,
+    enum_values: discourseModes,
+  },
+  {
+    field: "local_function",
+    required: false,
+    nullable: false,
+    enum_values: localFunctions,
+    profile_hints: {
+      paper: [
+        "research_question",
+        "hypothesis",
+        "related_work",
+        "method_description",
+        "experiment_setup",
+        "evidence_report",
+        "result_interpretation",
+        "limitation",
+        "future_work",
+      ],
+    },
+  },
+  {
+    field: "rhetorical_move",
+    required: false,
+    nullable: false,
+    enum_values: rhetoricalMoves,
+    profile_hints: {
+      paper: [
+        "problem_framing",
+        "related_work_positioning",
+        "method_setup",
+        "experiment_report",
+        "result_claim",
+        "limitation_acknowledgement",
+        "future_work_projection",
+      ],
+    },
+  },
+  {
+    field: "local_summary",
+    required: false,
+    nullable: false,
+    min_length: 1,
+    max_length: 200,
+  },
+  {
+    field: "relation.type",
+    required: true,
+    nullable: false,
+    enum_values: relationTypes,
+  },
+  {
+    field: "relation.family",
+    required: false,
+    nullable: false,
+    enum_values: ["temporal", "contingency", "comparison", "expansion"],
+  },
+  {
+    field: "relation.direction",
+    required: true,
+    nullable: false,
+    enum_values: ["backward", "forward", "lateral"],
+  },
+  {
+    field: "relation.confidence",
+    required: true,
+    nullable: false,
+    min_value: 0,
+    max_value: 1,
+  },
+] as const satisfies readonly ExtractorFieldContractV1[];
+
+function validateExtractorFieldContract(contract: ExtractorFieldContractV1): void {
+  if (!contract.field || contract.field.includes("\0")) {
+    throw new Error("extractor field contract field is invalid");
+  }
+  if (contract.enum_values !== undefined) {
+    if (!contract.enum_values.length
+      || contract.enum_values.some((value) => !value || value.includes("\0"))
+      || new Set(contract.enum_values).size !== contract.enum_values.length) {
+      throw new Error(`extractor field contract enum is invalid: ${contract.field}`);
+    }
+  }
+  const stringBounds = contract.min_length !== undefined || contract.max_length !== undefined;
+  const numberBounds = contract.min_value !== undefined || contract.max_value !== undefined;
+  if (stringBounds && (numberBounds || contract.enum_values !== undefined)) {
+    throw new Error(`extractor field contract mixes incompatible constraints: ${contract.field}`);
+  }
+  if (contract.min_length !== undefined
+    && (!Number.isSafeInteger(contract.min_length) || contract.min_length < 0)) {
+    throw new Error(`extractor field contract min_length is invalid: ${contract.field}`);
+  }
+  if (contract.max_length !== undefined
+    && (!Number.isSafeInteger(contract.max_length) || contract.max_length < 0)) {
+    throw new Error(`extractor field contract max_length is invalid: ${contract.field}`);
+  }
+  if (contract.min_length !== undefined && contract.max_length !== undefined
+    && contract.min_length > contract.max_length) {
+    throw new Error(`extractor field contract length bounds are invalid: ${contract.field}`);
+  }
+  if (contract.min_value !== undefined && !Number.isFinite(contract.min_value)) {
+    throw new Error(`extractor field contract min_value is invalid: ${contract.field}`);
+  }
+  if (contract.max_value !== undefined && !Number.isFinite(contract.max_value)) {
+    throw new Error(`extractor field contract max_value is invalid: ${contract.field}`);
+  }
+  if (contract.min_value !== undefined && contract.max_value !== undefined
+    && contract.min_value > contract.max_value) {
+    throw new Error(`extractor field contract numeric bounds are invalid: ${contract.field}`);
+  }
+  if (contract.profile_hints !== undefined) {
+    if (contract.enum_values === undefined) {
+      throw new Error(`extractor field contract hints require an enum: ${contract.field}`);
+    }
+    const members = new Set(contract.enum_values);
+    for (const [profile, hints] of Object.entries(contract.profile_hints)) {
+      if (!profile || !hints.length || hints.some((hint) => !members.has(hint))) {
+        throw new Error(`extractor field contract profile hints are invalid: ${contract.field}/${profile}`);
+      }
+    }
+  }
+}
+
+function extractorFieldSchema(contract: ExtractorFieldContractV1): ZodTypeAny {
+  validateExtractorFieldContract(contract);
+  let schema: ZodTypeAny;
+  if (contract.enum_values !== undefined) {
+    schema = z.enum([
+      contract.enum_values[0]!,
+      ...contract.enum_values.slice(1),
+    ] as [string, ...string[]]);
+  } else if (contract.min_value !== undefined || contract.max_value !== undefined) {
+    let numberSchema = z.number();
+    if (contract.min_value !== undefined) numberSchema = numberSchema.min(contract.min_value);
+    if (contract.max_value !== undefined) numberSchema = numberSchema.max(contract.max_value);
+    schema = numberSchema;
+  } else {
+    let stringSchema = z.string();
+    if (contract.min_length !== undefined) stringSchema = stringSchema.min(contract.min_length);
+    if (contract.max_length !== undefined) stringSchema = stringSchema.max(contract.max_length);
+    schema = stringSchema;
+  }
+  if (contract.nullable) schema = schema.nullable();
+  if (!contract.required) schema = schema.optional();
+  return schema;
+}
+
+const profileSidecarFieldContracts: ReadonlyMap<string, ExtractorFieldContractV1> = new Map(
+  PROFILE_SIDECAR_FIELD_CONTRACTS_V1.map((contract) => [contract.field, contract]),
+);
+
+function profileSidecarFieldSchema(field: string): ZodTypeAny {
+  const contract = profileSidecarFieldContracts.get(field);
+  if (!contract) throw new Error(`profile sidecar field contract is missing: ${field}`);
+  return extractorFieldSchema(contract);
+}
+
 const relation = z.object({
   target_lid: nonEmptyString,
-  type: z.enum(relationTypes),
-  family: z.enum(["temporal", "contingency", "comparison", "expansion"]).optional(),
-  direction: z.enum(["backward", "forward", "lateral"]),
-  confidence: z.number().min(0).max(1),
+  type: profileSidecarFieldSchema("relation.type"),
+  family: profileSidecarFieldSchema("relation.family"),
+  direction: profileSidecarFieldSchema("relation.direction"),
+  confidence: profileSidecarFieldSchema("relation.confidence"),
   evidence_lids: lidArray,
 }).strict();
 const discourseItem = z.object({
   lid: nonEmptyString,
-  mode: z.enum(discourseModes),
-  local_function: z.enum(localFunctions).optional(),
-  rhetorical_move: z.enum(rhetoricalMoves).optional(),
-  local_summary: nonEmptyString.max(200).optional(),
+  mode: profileSidecarFieldSchema("mode"),
+  local_function: profileSidecarFieldSchema("local_function"),
+  rhetorical_move: profileSidecarFieldSchema("rhetorical_move"),
+  local_summary: profileSidecarFieldSchema("local_summary"),
   relations: z.array(relation),
 }).strict();
 const formulaParameter = z.object({
@@ -154,6 +610,7 @@ interface ExtractorContractDefinition {
   schema_version: string;
   schema: ZodTypeAny;
   example: unknown;
+  field_contracts?: readonly ExtractorFieldContractV1[];
   constraints: string[];
   invariants: string[];
 }
@@ -218,6 +675,7 @@ const CONTRACTS: Record<ContractedExtractorStage, ExtractorContractDefinition> =
   profile_sidecar: {
     schema_version: EXTRACTOR_CONTRACT_SCHEMA_VERSIONS.profile_sidecar,
     schema: profileSidecarOutput,
+    field_contracts: PROFILE_SIDECAR_FIELD_CONTRACTS_V1,
     example: {
       discourse_items: [{
         lid: "3.2.1",
@@ -242,12 +700,7 @@ const CONTRACTS: Record<ContractedExtractorStage, ExtractorContractDefinition> =
         context_links: [{ target_lid: "3.2.3", relation: "explained_by", description: "上下文解释公式。", evidence_lids: ["3.2.4", "3.2.3"] }],
       }],
     },
-    constraints: [
-      `mode is one of: ${discourseModes.join(" | ")}.`,
-      `local_function is one of: ${localFunctions.join(" | ")}.`,
-      `rhetorical_move is one of: ${rhetoricalMoves.join(" | ")}.`,
-      `relation.type is one of: ${relationTypes.join(" | ")}; confidence is 0..1.`,
-    ],
+    constraints: [],
     invariants: [
       "A profile_sidecar_discourse unit emits only discourse_items; a profile_sidecar_formula unit emits only formula_semantics.",
       "All discourse and relation evidence LIDs must be visible; relation evidence includes source lid and target_lid.",
@@ -461,6 +914,36 @@ export function parseExtractorCandidate(
 
 export function renderExtractorContractMarkdown(stage: ContractedExtractorStage): string {
   const contract = CONTRACTS[stage];
+  const fieldContracts = contract.field_contracts ?? [];
+  const fieldConstraints = fieldContracts.flatMap((fieldContract) => {
+    validateExtractorFieldContract(fieldContract);
+    return [
+      `- ${fieldContract.field}.required=${fieldContract.required}`,
+      `- ${fieldContract.field}.nullable=${fieldContract.nullable}`,
+      ...(fieldContract.enum_values === undefined
+        ? []
+        : [`- ${fieldContract.field}.enum_values=${fieldContract.enum_values.join(" | ")}`]),
+      ...(fieldContract.min_length === undefined
+        ? []
+        : [`- ${fieldContract.field}.min_length=${fieldContract.min_length}`]),
+      ...(fieldContract.max_length === undefined
+        ? []
+        : [`- ${fieldContract.field}.max_length=${fieldContract.max_length}`]),
+      ...(fieldContract.min_value === undefined
+        ? []
+        : [`- ${fieldContract.field}.min_value=${fieldContract.min_value}`]),
+      ...(fieldContract.max_value === undefined
+        ? []
+        : [`- ${fieldContract.field}.max_value=${fieldContract.max_value}`]),
+    ];
+  });
+  const profileHints = fieldContracts.flatMap((fieldContract) => (
+    Object.entries(fieldContract.profile_hints ?? {})
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([profile, hints]) => (
+          `- ${fieldContract.field}.profile_hints.${profile}=${hints.join(" | ")}`
+        ))
+  ));
   return [
     "<!-- BEGIN GENERATED EXTRACTOR CONTRACT -->",
     `## Machine Contract: ${contract.schema_version}`,
@@ -472,6 +955,8 @@ export function renderExtractorContractMarkdown(stage: ContractedExtractorStage)
     "```",
     "",
     "Field constraints:",
+    ...fieldConstraints,
+    ...profileHints,
     ...contract.constraints.map((item) => `- ${item}`),
     "",
     "Cross-field invariants:",

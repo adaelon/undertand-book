@@ -44,39 +44,13 @@ Rules:
 
 ## Step A - Discourse Classification
 
-Only for `profile_sidecar_discourse`:for every eligible paragraph LID in `visible_lids`, emit one discourse item with:
-- `lid`
-- `mode`
-- optional `local_function`
-- optional `rhetorical_move`
-- optional `local_summary`
-- `relations: []` for now
+Only for `profile_sidecar_discourse`:for every eligible paragraph LID in `visible_lids`, emit one discourse item. Classify what the paragraph is doing, add a grounded local summary when useful, and initialize its relations for Step B. The generated Machine Contract below is the sole authority for exact field names, enum membership, required/nullable rules, bounds, and profile-specific hints.
 
 `local_summary` must summarize what this LID actually says or does in context. Do not use generic phrases such as "explains the current topic", "continues the discussion", or "provides information" unless the source text itself is that generic.
 
-Closed enums:
-
-```text
-mode: informative | argumentative | procedural | descriptive | meta
-
-local_function: definition | description | classification | explanation |
-  cause | effect | example | counterexample | comparison | contrast |
-  procedure_step | application | warning | limitation | question |
-  answer | summary | research_question | hypothesis | related_work |
-  method_description | experiment_setup | evidence_report |
-  result_interpretation | future_work | transition
-
-rhetorical_move: chapter_setup | problem_framing | prerequisite |
-  main_point | concept_elaboration | worked_example | case_analysis |
-  argument_support | objection | resolution | recap | abstract_summary |
-  related_work_positioning | method_setup | experiment_report |
-  result_claim | limitation_acknowledgement | future_work_projection |
-  bridge_to_next
-```
-
 `local_function` means what the paragraph is doing, not its topic.
 
-For paper profile, prefer paper discourse functions such as `problem_framing`, `related_work_positioning`, `method_description`, `experiment_setup`, `evidence_report`, `result_interpretation`, `limitation`, and `future_work`. These labels are paragraph functions, not final proof of the paper argument. Omit low-confidence labels.
+For paper profile, apply the generated field-specific hints without moving a label into a different field. These labels are paragraph roles, not final proof of the paper argument. Omit low-confidence labels.
 
 ## Step B - Local Discourse Relations
 
@@ -88,18 +62,6 @@ Relation rules:
 - `target_lid` must be in `visible_lids`.
 - `evidence_lids` must include both the source item `lid` and `target_lid`.
 - Weak or uncertain relations should be omitted.
-
-Closed relation enums:
-
-```text
-type: elaborates | exemplifies | explains | causes | results_in |
-  contrasts | concedes | supports | rebuts | summarizes | restates |
-  prepares | continues | answers | depends_on
-
-family: temporal | contingency | comparison | expansion
-
-direction: backward | forward | lateral
-```
 
 ## Step C - FormulaSemantics Candidates
 
@@ -226,10 +188,34 @@ The writer validates this exact shape before semantic gating:
 ```
 
 Field constraints:
-- mode is one of: informative | argumentative | procedural | descriptive | meta.
-- local_function is one of: definition | description | classification | explanation | cause | effect | example | counterexample | comparison | contrast | procedure_step | application | warning | limitation | question | answer | summary | research_question | hypothesis | related_work | method_description | experiment_setup | evidence_report | result_interpretation | future_work | transition.
-- rhetorical_move is one of: chapter_setup | problem_framing | prerequisite | main_point | concept_elaboration | worked_example | case_analysis | argument_support | objection | resolution | recap | abstract_summary | related_work_positioning | method_setup | experiment_report | result_claim | limitation_acknowledgement | future_work_projection | bridge_to_next.
-- relation.type is one of: elaborates | exemplifies | explains | causes | results_in | contrasts | concedes | supports | rebuts | summarizes | restates | prepares | continues | answers | depends_on; confidence is 0..1.
+- mode.required=true
+- mode.nullable=false
+- mode.enum_values=informative | argumentative | procedural | descriptive | meta
+- local_function.required=false
+- local_function.nullable=false
+- local_function.enum_values=definition | description | classification | explanation | cause | effect | example | counterexample | comparison | contrast | procedure_step | application | warning | limitation | question | answer | summary | research_question | hypothesis | related_work | method_description | experiment_setup | evidence_report | result_interpretation | future_work | transition
+- rhetorical_move.required=false
+- rhetorical_move.nullable=false
+- rhetorical_move.enum_values=chapter_setup | problem_framing | prerequisite | main_point | concept_elaboration | worked_example | case_analysis | argument_support | objection | resolution | recap | abstract_summary | related_work_positioning | method_setup | experiment_report | result_claim | limitation_acknowledgement | future_work_projection | bridge_to_next
+- local_summary.required=false
+- local_summary.nullable=false
+- local_summary.min_length=1
+- local_summary.max_length=200
+- relation.type.required=true
+- relation.type.nullable=false
+- relation.type.enum_values=elaborates | exemplifies | explains | causes | results_in | contrasts | concedes | supports | rebuts | summarizes | restates | prepares | continues | answers | depends_on
+- relation.family.required=false
+- relation.family.nullable=false
+- relation.family.enum_values=temporal | contingency | comparison | expansion
+- relation.direction.required=true
+- relation.direction.nullable=false
+- relation.direction.enum_values=backward | forward | lateral
+- relation.confidence.required=true
+- relation.confidence.nullable=false
+- relation.confidence.min_value=0
+- relation.confidence.max_value=1
+- local_function.profile_hints.paper=research_question | hypothesis | related_work | method_description | experiment_setup | evidence_report | result_interpretation | limitation | future_work
+- rhetorical_move.profile_hints.paper=problem_framing | related_work_positioning | method_setup | experiment_report | result_claim | limitation_acknowledgement | future_work_projection
 
 Cross-field invariants:
 - A profile_sidecar_discourse unit emits only discourse_items; a profile_sidecar_formula unit emits only formula_semantics.

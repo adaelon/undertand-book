@@ -33,6 +33,7 @@ import {
   inspectAutomaticBuildTask,
   stageAutomaticBuildCandidate,
 } from "./automatic-build-mailbox";
+import { automaticBuildFailureDiagnosticFromCode } from "./extractor-contract";
 import {
   failIntentArtifactTaskAttempt,
   inspectIntentArtifactTaskAttempt,
@@ -1800,6 +1801,7 @@ export function failAutomaticBuildExecutorSession(
 ): AutomaticBuildExecutorSessionResponseV1 {
   const now = input.now === undefined ? new Date().toISOString() : isoTimestamp(input.now, "now");
   const diagnosticCode = boundedString(input.diagnostic_code, "diagnostic_code", 256);
+  const failureDiagnostic = automaticBuildFailureDiagnosticFromCode(diagnosticCode);
   const message = input.message === undefined
     ? undefined
     : boundedString(input.message, "message", 2_048);
@@ -1827,8 +1829,7 @@ export function failAutomaticBuildExecutorSession(
       resolved.task_session.lease_ref,
       resolved.task_session.lease_token,
       {
-        diagnostic_code: diagnosticCode,
-        ...(message ? { message } : {}),
+        failure_diagnostic: failureDiagnostic,
         now,
       },
     );

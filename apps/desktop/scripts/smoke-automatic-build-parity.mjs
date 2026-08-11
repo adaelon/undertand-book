@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -15,6 +15,11 @@ const root = mkdtempSync(path.join(tmpdir(), "understand-book-bp8-parity-"));
 const backupContainer = mkdtempSync(path.join(tmpdir(), "understand-book-bp8-parity-backup-"));
 const backupRoot = path.join(backupContainer, "snapshot");
 const thinPluginRoot = path.join(backupContainer, "thin-plugin");
+const blackBoxCwd = path.join(backupContainer, "black-box-cwd");
+const installedPluginRoot = process.env.UNDERSTAND_BOOK_INSTALLED_PLUGIN_ROOT;
+const pluginSnapshotRoot = installedPluginRoot
+  ? path.resolve(installedPluginRoot)
+  : path.join(repoRoot, "plugins", "understand-book");
 const source = path.join(root, "parity.md");
 const extractorPromptNames = [
   "pass1-local-extractor.md",
@@ -41,6 +46,7 @@ delete nodeSourceThinEnvironment.UNDERSTAND_BOOK_SIDECAR_SELF;
 const packagedDefaultEnvironment = { ...process.env };
 delete packagedDefaultEnvironment.UNDERSTAND_BOOK_PLUGIN_ROOT;
 delete packagedDefaultEnvironment.UNDERSTAND_BOOK_SIDECAR_SELF;
+mkdirSync(blackBoxCwd, { recursive: true });
 
 function stableJson(value) {
   if (value === null || typeof value !== "object") return JSON.stringify(value);
@@ -52,8 +58,8 @@ function stableJson(value) {
     .join(",")}}`;
 }
 
-function run(command, args, label, env = process.env) {
-  const result = spawnSync(command, args, { cwd: repoRoot, encoding: "utf8", timeout: 60_000, env });
+function run(command, args, label, env = process.env, cwd = repoRoot) {
+  const result = spawnSync(command, args, { cwd, encoding: "utf8", timeout: 60_000, env });
   if (result.error) throw result.error;
   if (result.status !== 0) throw new Error(`${label} failed (${result.status}):\n${result.stdout}\n${result.stderr}`);
   const value = JSON.parse(result.stdout);
@@ -69,7 +75,7 @@ function runNode(operation, args, label) {
 }
 
 function runSidecar(operation, args, label, env = process.env) {
-  return run(sidecar, [operation, ...args], label, env);
+  return run(sidecar, [operation, ...args], label, env, blackBoxCwd);
 }
 
 function assertBytesEqual(left, right, label) {
@@ -78,12 +84,24 @@ function assertBytesEqual(left, right, label) {
   }
 }
 
-function runText(command, args, label) {
-  const result = spawnSync(command, args, { cwd: repoRoot, encoding: "utf8", timeout: 60_000 });
+function runText(command, args, label, cwd = repoRoot) {
+  const result = spawnSync(command, args, { cwd, encoding: "utf8", timeout: 60_000 });
   if (result.error) throw result.error;
   if (result.status !== 0) throw new Error(`${label} failed (${result.status}):\n${result.stdout}\n${result.stderr}`);
   if (result.stderr !== "") throw new Error(`${label} emitted stderr:\n${result.stderr}`);
   return result.stdout;
+}
+
+function runBytes(command, args, label, cwd = repoRoot) {
+  const result = spawnSync(command, args, { cwd, encoding: null, timeout: 60_000 });
+  if (result.error) throw result.error;
+  if (result.status !== 0) {
+    throw new Error(`${label} failed (${result.status}):\n${result.stdout?.toString("utf8")}\n${result.stderr?.toString("utf8")}`);
+  }
+  if (result.stderr?.byteLength) {
+    throw new Error(`${label} emitted stderr:\n${result.stderr.toString("utf8")}`);
+  }
+  return Buffer.from(result.stdout ?? []);
 }
 
 function redactSecrets(value, secrets) {
@@ -111,11 +129,50 @@ function restoreSnapshot() {
 }
 
 try {
-  cpSync(path.join(repoRoot, "plugins", "understand-book"), thinPluginRoot, { recursive: true });
-  if (existsSync(path.join(thinPluginRoot, "agents"))) {
-    throw new Error(`release plugin fixture must remain thin: ${thinPluginRoot}`);
+  if (!existsSync(path.join(pluginSnapshotRoot, ".codex-plugin", "plugin.json"))) {
+    throw new Error(`plugin snapshot is missing its manifest: ${pluginSnapshotRoot}`);
+  }
+  if (installedPluginRoot) {
+    const relativeToRepo = path.relative(repoRoot, pluginSnapshotRoot);
+    if (!relativeToRepo.startsWith("..") && !path.isAbsolute(relativeToRepo)) {
+      throw new Error(`installed plugin root must not resolve inside the source repository: ${pluginSnapshotRoot}`);
+    }
+    const releaseManifest = JSON.parse(readFileSync(
+      path.join(repoRoot, "plugins", "understand-book", ".codex-plugin", "plugin.json"),
+      "utf8",
+    ));
+    const installedManifest = JSON.parse(readFileSync(
+      path.join(pluginSnapshotRoot, ".codex-plugin", "plugin.json"),
+      "utf8",
+    ));
+    if (installedManifest.version !== releaseManifest.version) {
+      throw new Error(
+        `installed plugin cachebuster does not match the release snapshot: `
+        + `${installedManifest.version} != ${releaseManifest.version}`,
+      );
+    }
+  }
+  cpSync(pluginSnapshotRoot, thinPluginRoot, { recursive: true });
+  for (const forbidden of ["agents", path.join(".codex", "agents"), "packages", "apps"]) {
+    if (existsSync(path.join(thinPluginRoot, forbidden))) {
+      throw new Error(`thin plugin fixture contains source-only path ${forbidden}: ${thinPluginRoot}`);
+    }
   }
   for (const promptName of extractorPromptNames) {
+    const sourcePromptBytes = readFileSync(path.join(repoRoot, "agents", promptName));
+    const sidecarPromptBytes = runBytes(
+      sidecar,
+      ["prompt", promptName],
+      `sidecar raw prompt ${promptName}`,
+      blackBoxCwd,
+    );
+    if (!sourcePromptBytes.equals(sidecarPromptBytes)) {
+      throw new Error(
+        `Node/sidecar raw prompt bytes diverged: ${promptName} `
+        + `node=${createHash("sha256").update(sourcePromptBytes).digest("hex")} `
+        + `sidecar=${createHash("sha256").update(sidecarPromptBytes).digest("hex")}`,
+      );
+    }
     for (const mode of ["task", "dispatch"]) {
       const promptArgs = [promptName, "--executor-protocol", mode];
       const nodePrompt = runText(
@@ -123,7 +180,12 @@ try {
         [tsx, executorPromptCli, ...promptArgs],
         `Node ${mode} prompt ${promptName}`,
       );
-      const sidecarPrompt = runText(sidecar, ["prompt", ...promptArgs], `sidecar ${mode} prompt ${promptName}`);
+      const sidecarPrompt = runText(
+        sidecar,
+        ["prompt", ...promptArgs],
+        `sidecar ${mode} prompt ${promptName}`,
+        blackBoxCwd,
+      );
       if (nodePrompt !== sidecarPrompt) {
         throw new Error(`Node/sidecar ${mode} prompt bytes diverged: ${promptName}`);
       }
@@ -360,7 +422,10 @@ try {
     throw new Error(`packaged sidecar did not retain explicit v2 task resume: ${rollback.stdout}`);
   }
 
-  console.log("automatic build IP8 explicit-legacy mapping, canonical Node/Bun parity, protocol doctor, dispatch lease/receipt, and v2 rollback smoke passed");
+  console.log(
+    `automatic build IP8 ${installedPluginRoot ? "installed" : "release"} thin-plugin, outside-repo `
+    + "canonical Node/Bun parity, protocol doctor, dispatch lease/receipt, and v2 rollback smoke passed",
+  );
 } finally {
   rmSync(root, { recursive: true, force: true });
   rmSync(backupContainer, { recursive: true, force: true });

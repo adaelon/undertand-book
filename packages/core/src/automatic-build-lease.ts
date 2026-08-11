@@ -10,14 +10,18 @@ import {
 } from "node:fs";
 import path from "node:path";
 import type { AutomaticBuildStage, AutomaticBuildTarget, BuildTargetRefV2 } from "./build-orchestrator";
+import type { AutomaticBuildFailureDiagnosticV2 } from "./extractor-contract";
 import {
   automaticBuildTaskAttemptDirectory,
   automaticBuildTaskStoreRoot,
+  createAutomaticBuildAttemptScope,
   nextAutomaticBuildExecutionIdentity,
   readAutomaticBuildAttemptRecord,
   readAutomaticBuildExecutionIdentity,
   recordAutomaticBuildExecutionIdentity,
-  type AutomaticBuildExecutionIdentityV1,
+  validateAutomaticBuildAttemptScope,
+  type AutomaticBuildAttemptScopeV1,
+  type AutomaticBuildExecutionIdentity,
 } from "./automatic-build-task-store";
 import {
   freezeAutomaticBuildStagePolicy,
@@ -51,6 +55,7 @@ export interface AutomaticBuildTaskLeaseV1 {
   proof_digest?: string;
   policy_set_digest?: string;
   policy_fingerprint?: ExtractionPolicyFingerprintV1;
+  attempt_scope_digest?: string;
 }
 
 export interface AutomaticBuildTaskLeaseV2 {
@@ -70,6 +75,7 @@ export interface AutomaticBuildTaskLeaseV2 {
   proof_digest?: string;
   policy_set_digest?: string;
   policy_fingerprint?: ExtractionPolicyFingerprintV1;
+  attempt_scope_digest?: string;
 }
 
 export type AutomaticBuildTaskLease = AutomaticBuildTaskLeaseV1 | AutomaticBuildTaskLeaseV2;
@@ -83,7 +89,7 @@ export interface AutomaticBuildTaskStartV1 {
   phase: "running";
   owner: string;
   lease_token: string;
-  execution_identity: AutomaticBuildExecutionIdentityV1;
+  execution_identity: AutomaticBuildExecutionIdentity;
   started_at: string;
   run_expires_at: string;
 }
@@ -108,24 +114,56 @@ export interface AutomaticBuildLeaseOptions {
   max_lease_epochs?: number;
 }
 
+export interface AutomaticBuildClaimInspectionOptions {
+  now?: string;
+  binding?: AutomaticBuildTaskPolicyBinding;
+  descriptor?: WorkUnitDescriptor;
+  attempt_scope?: AutomaticBuildAttemptScopeV1;
+  policy_generation?: "v2_compatible" | "v3_only";
+  max_semantic_attempts?: number;
+  max_lease_epochs?: number;
+}
+
 export type AutomaticBuildClaimResult =
   | {
       status: "leased";
       lease_ref: string;
       lease: AutomaticBuildTaskLease;
-      execution_identity: AutomaticBuildExecutionIdentityV1;
+      execution_identity: AutomaticBuildExecutionIdentity;
     }
   | {
       status: "already_leased";
       lease_ref: string;
       lease: AutomaticBuildTaskLease;
-      execution_identity: AutomaticBuildExecutionIdentityV1;
+      execution_identity: AutomaticBuildExecutionIdentity;
     }
-  | { status: "retry_exhausted"; semantic_attempt: number }
-  | { status: "executor_instability"; semantic_attempt: number; lease_epoch: number };
+  | {
+      status: "retry_exhausted";
+      semantic_attempt: number;
+      attempt_scope_digest?: string;
+      failure_diagnostic?: AutomaticBuildFailureDiagnosticV2;
+    }
+  | {
+      status: "executor_instability";
+      semantic_attempt: number;
+      lease_epoch: number;
+      attempt_scope_digest?: string;
+    }
+  | {
+      status: "policy_generation_conflict" | "policy_generation_migration_required";
+      lease_ref: string;
+      lease: AutomaticBuildTaskLease;
+      requested_attempt_scope_digest: string;
+      active_attempt_scope_digest?: string;
+    }
+  | {
+      status: "policy_generation_migration_required";
+      requested_attempt_scope_digest: string;
+      reason: "legacy_attempt_scope_ambiguous";
+    };
 
 export type AutomaticBuildClaimInspection =
-  | { status: "ready"; execution_identity: AutomaticBuildExecutionIdentityV1 }
+  | { status: "ready"; execution_identity: AutomaticBuildExecutionIdentity }
   | Exclude<AutomaticBuildClaimResult, { status: "leased" }>;
 
 function readJson<T>(file: string): T {
@@ -178,6 +216,99 @@ export function automaticBuildTaskPolicyBindingFromLease(
       };
 }
 
+export function automaticBuildAttemptScopeFromLease(
+  lease: AutomaticBuildTaskLease,
+): AutomaticBuildAttemptScopeV1 | undefined {
+  const binding = automaticBuildTaskPolicyBindingFromLease(lease);
+  if (!binding || !isAutomaticBuildTaskPolicyBindingV2(binding)) {
+    if (lease.attempt_scope_digest !== undefined) {
+      throw new Error("automatic build lease attempt scope requires a complete v3 task binding");
+    }
+    return undefined;
+  }
+  const scope = createAutomaticBuildAttemptScope({
+    target_ref: lease.target_ref,
+    stage: lease.stage,
+    work_unit_id: lease.work_unit_id,
+    task_binding: binding,
+  });
+  if (lease.attempt_scope_digest !== undefined
+    && lease.attempt_scope_digest !== scope.attempt_scope_digest) {
+    throw new Error("automatic build lease attempt scope digest mismatch");
+  }
+  return scope;
+}
+
+function resolveRequestedAttemptScope(
+  target: AutomaticBuildTarget,
+  stage: AutomaticBuildStage,
+  workUnitId: string,
+  options: AutomaticBuildClaimInspectionOptions,
+  requireDescriptorBinding: boolean,
+): AutomaticBuildAttemptScopeV1 | undefined {
+  if (Boolean(options.binding) !== Boolean(options.descriptor)) {
+    const legacyV2Claim = requireDescriptorBinding
+      && options.binding
+      && !isAutomaticBuildTaskPolicyBindingV2(options.binding);
+    const scopedInspection = !requireDescriptorBinding
+      && options.binding
+      && isAutomaticBuildTaskPolicyBindingV2(options.binding);
+    if (!legacyV2Claim && !scopedInspection) {
+      throw new Error("v3 automatic build claims require both descriptor and task policy binding");
+    }
+  }
+  if (options.descriptor && options.binding) {
+    if (options.descriptor.stage !== stage || options.descriptor.work_unit_id !== workUnitId
+      || !sameTargetRef(options.descriptor.target, target.target_ref)) {
+      throw new Error("automatic build claim descriptor identity mismatch");
+    }
+    validateWorkUnitTaskPolicyBinding(options.descriptor, options.binding);
+  }
+  const descriptorScope = options.descriptor
+    && options.binding
+    && isWorkUnitDescriptorV3(options.descriptor)
+    && isAutomaticBuildTaskPolicyBindingV2(options.binding)
+    ? createAutomaticBuildAttemptScope({
+        target_ref: target.target_ref,
+        stage,
+        work_unit_id: workUnitId,
+        task_binding: options.binding,
+      })
+    : undefined;
+  const bindingScope = !options.descriptor
+    && options.binding
+    && isAutomaticBuildTaskPolicyBindingV2(options.binding)
+    ? createAutomaticBuildAttemptScope({
+        target_ref: target.target_ref,
+        stage,
+        work_unit_id: workUnitId,
+        task_binding: options.binding,
+      })
+    : undefined;
+  const suppliedScope = options.attempt_scope
+    ? validateAutomaticBuildAttemptScope(options.attempt_scope, {
+        target_ref: target.target_ref,
+        stage,
+        work_unit_id: workUnitId,
+      })
+    : undefined;
+  const derivedScope = descriptorScope ?? bindingScope;
+  if (derivedScope && suppliedScope
+    && derivedScope.attempt_scope_digest !== suppliedScope.attempt_scope_digest) {
+    throw new Error("automatic build claim attempt scope does not match descriptor binding");
+  }
+  const scope = derivedScope ?? suppliedScope;
+  if (options.policy_generation === "v3_only"
+    && (!scope
+      || (requireDescriptorBinding
+        && (!options.descriptor || !options.binding
+          || !isWorkUnitDescriptorV3(options.descriptor)
+          || !isAutomaticBuildTaskPolicyBindingV2(options.binding))))) {
+    throw new Error("policy_generation_migration_required: v3 release forbids unscoped claims");
+  }
+  return scope;
+}
+
 function assertLeasePath(target: AutomaticBuildTarget, leaseRef: string): string {
   const root = path.resolve(automaticBuildTaskStoreRoot(target));
   const resolved = path.resolve(leaseRef);
@@ -214,8 +345,12 @@ function readAutomaticBuildStart(
     || start.owner !== lease.owner
     || start.lease_token !== lease.token
     || !identity
+    || start.execution_identity.version !== identity.version
     || start.execution_identity.semantic_attempt !== identity.semantic_attempt
-    || start.execution_identity.lease_epoch !== identity.lease_epoch) {
+    || start.execution_identity.lease_epoch !== identity.lease_epoch
+    || (start.execution_identity.version === "automatic_build_execution_identity.v2"
+      && identity.version === "automatic_build_execution_identity.v2"
+      && start.execution_identity.attempt_scope_digest !== identity.attempt_scope_digest)) {
     throw new Error(`invalid automatic build start: ${file}`);
   }
   return start;
@@ -308,6 +443,7 @@ function activeLeaseAt(
   }
   if (!sameTargetRef(lease.target_ref, target.target_ref) || terminalEventExists(leaseRef)) return undefined;
   automaticBuildTaskPolicyBindingFromLease(lease);
+  automaticBuildAttemptScopeFromLease(lease);
   return timeMs(now, "now") < timeMs(effectiveExpiry(target, leaseRef, lease), "expires_at") ? lease : undefined;
 }
 
@@ -315,16 +451,33 @@ export function inspectAutomaticBuildTaskClaim(
   target: AutomaticBuildTarget,
   stage: AutomaticBuildStage,
   workUnitId: string,
-  options: Pick<AutomaticBuildLeaseOptions, "now" | "max_semantic_attempts" | "max_lease_epochs"> = {},
+  options: AutomaticBuildClaimInspectionOptions = {},
 ): AutomaticBuildClaimInspection {
   const now = options.now ?? new Date().toISOString();
   timeMs(now, "now");
+  const requestedScope = resolveRequestedAttemptScope(target, stage, workUnitId, options, false);
   for (const entry of attemptDirectories(target, stage, workUnitId)) {
     if (!entry.lease_ref) continue;
     const active = activeLeaseAt(target, entry.lease_ref, now);
     if (!active) continue;
     const executionIdentity = readAutomaticBuildExecutionIdentity(target, stage, workUnitId, active.attempt);
     if (!executionIdentity) throw new Error(`active lease is missing execution identity: ${entry.lease_ref}`);
+    if (requestedScope) {
+      const activeScope = automaticBuildAttemptScopeFromLease(active);
+      if (!activeScope || activeScope.attempt_scope_digest !== requestedScope.attempt_scope_digest) {
+        return {
+          status: activeScope ? "policy_generation_conflict" : "policy_generation_migration_required",
+          lease_ref: entry.lease_ref,
+          lease: active,
+          requested_attempt_scope_digest: requestedScope.attempt_scope_digest,
+          ...(activeScope ? { active_attempt_scope_digest: activeScope.attempt_scope_digest } : {}),
+        };
+      }
+      if (executionIdentity.version !== "automatic_build_execution_identity.v2"
+        || executionIdentity.attempt_scope_digest !== requestedScope.attempt_scope_digest) {
+        throw new Error(`active lease execution identity scope mismatch: ${entry.lease_ref}`);
+      }
+    }
     return {
       status: "already_leased",
       lease_ref: entry.lease_ref,
@@ -335,6 +488,7 @@ export function inspectAutomaticBuildTaskClaim(
   return nextAutomaticBuildExecutionIdentity(target, stage, workUnitId, {
     max_semantic_attempts: options.max_semantic_attempts ?? 3,
     max_lease_epochs: options.max_lease_epochs ?? 3,
+    ...(requestedScope ? { attempt_scope: requestedScope } : {}),
   });
 }
 
@@ -367,6 +521,7 @@ export function readAutomaticBuildLease(
   }
   if (lease.token !== token) throw new Error(`automatic build lease token mismatch: ${resolved}`);
   automaticBuildTaskPolicyBindingFromLease(lease);
+  automaticBuildAttemptScopeFromLease(lease);
   return lease;
 }
 
@@ -448,27 +603,7 @@ export function claimAutomaticBuildTask(
 ): AutomaticBuildClaimResult {
   if (!options.owner) throw new Error("lease owner must not be empty");
   const times = leaseTimes(options.now, options.reserve_ttl_ms ?? options.ttl_ms ?? DEFAULT_RESERVE_TTL_MS);
-  if (Boolean(options.binding) !== Boolean(options.descriptor)) {
-    if (options.binding && !isAutomaticBuildTaskPolicyBindingV2(options.binding)) {
-      // Historical v2 callers predate descriptor-bound claiming. Preserve that
-      // exact path while requiring every v3 claim to carry both values.
-    } else {
-      throw new Error("v3 automatic build claims require both descriptor and task policy binding");
-    }
-  }
-  if (options.descriptor && options.binding) {
-    if (options.descriptor.stage !== stage || options.descriptor.work_unit_id !== workUnitId
-      || !sameTargetRef(options.descriptor.target, target.target_ref)) {
-      throw new Error("automatic build claim descriptor identity mismatch");
-    }
-    validateWorkUnitTaskPolicyBinding(options.descriptor, options.binding);
-  }
-  if (options.policy_generation === "v3_only"
-    && (!options.descriptor || !options.binding
-      || !isWorkUnitDescriptorV3(options.descriptor)
-      || !isAutomaticBuildTaskPolicyBindingV2(options.binding))) {
-    throw new Error("policy_generation_migration_required: v3 release forbids new v2 claims");
-  }
+  const attemptScope = resolveRequestedAttemptScope(target, stage, workUnitId, options, true);
   if (options.binding) {
     if (stage === "paper_reading_guide") throw new Error("paper_reading_guide does not accept semantic task bindings");
     if (!isAutomaticBuildTaskPolicyBindingV2(options.binding)) {
@@ -514,6 +649,7 @@ export function claimAutomaticBuildTask(
         } : {}),
         policy_fingerprint: options.binding.policy_fingerprint,
       } : {}),
+      ...(attemptScope ? { attempt_scope_digest: attemptScope.attempt_scope_digest } : {}),
     };
     try {
       mkdirSync(attemptDir);
@@ -525,6 +661,10 @@ export function claimAutomaticBuildTask(
         inspection.execution_identity,
         times.now,
       );
+      if (attemptScope && (executionIdentity.version !== "automatic_build_execution_identity.v2"
+        || executionIdentity.attempt_scope_digest !== attemptScope.attempt_scope_digest)) {
+        throw new Error("automatic build scoped claim produced an inconsistent execution identity");
+      }
       writeFileSync(leaseRef, `${JSON.stringify(lease, null, 2)}\n`, { encoding: "utf8", flag: "wx" });
       return { status: "leased", lease_ref: leaseRef, lease, execution_identity: executionIdentity };
     } catch (error) {

@@ -32,6 +32,25 @@ import {
 } from "../../packages/core/src/build-orchestrator";
 import { canonicalAutomaticBuildJson } from "../../packages/core/src/automatic-build-protocol";
 import {
+  createAutomaticBuildAttemptScope,
+  prepareAutomaticBuildRetryRecovery,
+  readAutomaticBuildRetryBoundary,
+  recordAutomaticBuildRetryRecovery,
+} from "../../packages/core/src/automatic-build-task-store";
+import {
+  validateAutomaticBuildRetryBoundary,
+  type AutomaticBuildRetryBoundaryV1,
+} from "../../packages/core/src/automatic-build-attempt-recovery";
+import {
+  createAutomaticBuildFailureDiagnostic,
+  legacyAutomaticBuildFailureDiagnostic,
+  requiredRecoveryForAutomaticBuildFailure,
+  validateAutomaticBuildFailureDiagnostic,
+  type AutomaticBuildFailureCategory,
+  type AutomaticBuildFailureDiagnosticV2,
+  type AutomaticBuildRequiredRecovery,
+} from "../../packages/core/src/extractor-contract";
+import {
   automaticBuildNext,
   automaticBuildPlan,
   automaticBuildProtocolDoctor,
@@ -60,6 +79,10 @@ const FORBIDDEN_ROOT_FIELDS = new Set([
   "receipt_body",
   "receipt",
   "receipts",
+  "failure_diagnostic",
+  "diagnostic_digest",
+  "json_pointer",
+  "expected",
   "plan_digest",
   "plan_id",
   "policy_set_digest",
@@ -94,6 +117,7 @@ const USER_DECISION_REASONS = new Set<AutomaticBuildUserDecisionReasonV1>([
   "legacy_migration_required",
   "quality_gate_failed",
   "retry_exhausted",
+  "recovery_not_satisfied",
   "executor_instability",
   "installation_incompatible",
 ]);
@@ -110,12 +134,16 @@ export type AutomaticBuildUserDecisionReasonV1 =
   | "legacy_migration_required"
   | "quality_gate_failed"
   | "retry_exhausted"
+  | "recovery_not_satisfied"
   | "executor_instability"
   | "installation_incompatible";
 
 export interface AutomaticBuildUserDecisionProjectionV1 {
-  category: AutomaticBuildUserDecisionReasonV1;
+  category: AutomaticBuildUserDecisionReasonV1 | AutomaticBuildFailureCategory;
+  code?: string;
   stage?: AutomaticBuildStage;
+  work_unit_count?: number;
+  required_recovery?: AutomaticBuildRequiredRecovery;
   violations?: Array<{ code: string; actual: number; limit: number }>;
   confidence?: "high" | "medium" | "low";
   gate_status?: string;
@@ -195,6 +223,8 @@ interface DecisionBoundaryV1 {
   stage?: AutomaticBuildStage;
   projection?: AutomaticBuildUserDecisionProjectionV1;
   plan_budget_receipt_digest?: string;
+  attempt_scopes?: Array<{ work_unit_id: string; attempt_scope_digest: string }>;
+  retry_boundaries?: Array<AutomaticBuildRetryBoundaryV1 & { work_unit_id: string }>;
 }
 
 interface AutomaticBuildDecisionRequestRecordV1 extends DecisionBoundaryV1 {
@@ -753,6 +783,7 @@ function externalReason(internalReason: string): AutomaticBuildUserDecisionReaso
       return "legacy_migration_required";
     case "quality_gate_failed": return "quality_gate_failed";
     case "retry_exhausted": return "retry_exhausted";
+    case "recovery_not_satisfied": return "recovery_not_satisfied";
     case "executor_instability": return "executor_instability";
     case "executor_prompt_unavailable":
     case "protocol_incompatible":
@@ -774,6 +805,7 @@ function userMessage(reason: AutomaticBuildUserDecisionReasonV1): string {
     case "legacy_migration_required": return "Legacy build state requires an explicit migration choice.";
     case "quality_gate_failed": return "The stage quality gate failed and publication remains closed.";
     case "retry_exhausted": return "Semantic retries are exhausted and require explicit recovery.";
+    case "recovery_not_satisfied": return "The bound terminal state does not satisfy same-scope retry recovery.";
     case "executor_instability": return "Executor lease recovery is exhausted and requires explicit recovery.";
     case "installation_incompatible": return "The installed build runtime is incompatible with this protocol.";
   }
@@ -811,10 +843,11 @@ function choicesFor(reason: AutomaticBuildUserDecisionReasonV1) {
       ];
     case "quality_gate_failed":
     case "retry_exhausted":
+    case "recovery_not_satisfied":
     case "executor_instability":
       return [{
         choice_id: "retry_current",
-        label: "Retry after recovery",
+        label: "Validate recovery and retry",
         consequence: "Re-read durable state after the required recovery action is complete.",
       }];
     default:
@@ -828,11 +861,58 @@ function safeStage(value: unknown): AutomaticBuildStage | undefined {
     : undefined;
 }
 
+function failureProjectionFor(
+  reason: AutomaticBuildUserDecisionReasonV1,
+  action: Record<string, unknown>,
+): {
+  diagnostic: AutomaticBuildFailureDiagnosticV2;
+  work_unit_count: number;
+  required_recovery: AutomaticBuildRequiredRecovery;
+} | undefined {
+  if (reason !== "retry_exhausted" && reason !== "executor_instability") return undefined;
+  const tasks = Array.isArray(action.tasks) ? action.tasks : [];
+  const workUnitCount = tasks.length;
+  let diagnostic: AutomaticBuildFailureDiagnosticV2;
+  if (reason === "executor_instability") {
+    diagnostic = createAutomaticBuildFailureDiagnostic({
+      category: "executor",
+      code: "executor_instability",
+    });
+  } else {
+    const diagnostics = tasks.flatMap((task) => {
+      if (!isRecord(task) || task.status !== "retry_exhausted" || task.failure_diagnostic === undefined) return [];
+      try {
+        return [validateAutomaticBuildFailureDiagnostic(task.failure_diagnostic)];
+      } catch {
+        return [];
+      }
+    });
+    if (!diagnostics.length) {
+      diagnostic = legacyAutomaticBuildFailureDiagnostic();
+    } else if (diagnostics.every((item) => (
+      item.category === diagnostics[0].category && item.code === diagnostics[0].code
+    ))) {
+      diagnostic = diagnostics[0];
+    } else {
+      diagnostic = createAutomaticBuildFailureDiagnostic({
+        category: "internal",
+        code: "multiple_failure_causes",
+      });
+    }
+  }
+  return {
+    diagnostic,
+    work_unit_count: workUnitCount,
+    required_recovery: requiredRecoveryForAutomaticBuildFailure(diagnostic),
+  };
+}
+
 function projectionFor(
   reason: AutomaticBuildUserDecisionReasonV1,
   action: Record<string, unknown>,
 ): AutomaticBuildUserDecisionProjectionV1 {
   const stage = safeStage(action.stage);
+  const failure = failureProjectionFor(reason, action);
   const violations = Array.isArray(action.violations)
     ? action.violations.flatMap((item) => {
         if (!isRecord(item) || typeof item.code !== "string" || Buffer.byteLength(item.code, "utf8") > 128
@@ -848,12 +928,67 @@ function projectionFor(
     ? action.gate_status
     : undefined;
   return {
-    category: reason,
+    category: failure?.diagnostic.category ?? reason,
+    ...(failure ? { code: failure.diagnostic.code } : {}),
     ...(stage ? { stage } : {}),
+    ...(failure ? {
+      work_unit_count: failure.work_unit_count,
+      required_recovery: failure.required_recovery,
+    } : {}),
     ...(violations?.length ? { violations } : {}),
     ...(confidence ? { confidence } : {}),
     ...(gateStatus ? { gate_status: gateStatus } : {}),
   };
+}
+
+function attemptScopesForAction(
+  action: Record<string, unknown>,
+): Array<{ work_unit_id: string; attempt_scope_digest: string }> | undefined {
+  if (!Array.isArray(action.tasks)) return undefined;
+  const scopes = action.tasks.flatMap((task) => {
+    if (!isRecord(task)
+      || typeof task.task_id !== "string"
+      || !task.task_id
+      || Buffer.byteLength(task.task_id, "utf8") > 512
+      || typeof task.attempt_scope_digest !== "string"
+      || !SHA256.test(task.attempt_scope_digest)) return [];
+    return [{ work_unit_id: task.task_id, attempt_scope_digest: task.attempt_scope_digest }];
+  }).sort((left, right) => left.work_unit_id.localeCompare(right.work_unit_id));
+  if (!scopes.length) return undefined;
+  for (let index = 1; index < scopes.length; index += 1) {
+    if (scopes[index - 1].work_unit_id === scopes[index].work_unit_id) {
+      throw new Error("automatic build decision contains duplicate attempt scopes");
+    }
+  }
+  return scopes;
+}
+
+function retryBoundariesForAction(
+  action: Record<string, unknown>,
+): Array<AutomaticBuildRetryBoundaryV1 & { work_unit_id: string }> | undefined {
+  if (!Array.isArray(action.tasks)) return undefined;
+  const boundaries = action.tasks.flatMap((task) => {
+    if (!isRecord(task)
+      || typeof task.task_id !== "string"
+      || !task.task_id
+      || Buffer.byteLength(task.task_id, "utf8") > 512
+      || task.retry_boundary === undefined) return [];
+    try {
+      return [{
+        work_unit_id: task.task_id,
+        ...validateAutomaticBuildRetryBoundary(task.retry_boundary),
+      }];
+    } catch {
+      throw new Error("automatic build decision contains an invalid retry boundary");
+    }
+  }).sort((left, right) => left.work_unit_id.localeCompare(right.work_unit_id));
+  if (!boundaries.length) return undefined;
+  for (let index = 1; index < boundaries.length; index += 1) {
+    if (boundaries[index - 1].work_unit_id === boundaries[index].work_unit_id) {
+      throw new Error("automatic build decision contains duplicate retry boundaries");
+    }
+  }
+  return boundaries;
 }
 
 function boundaryFromAction(
@@ -867,6 +1002,8 @@ function boundaryFromAction(
     && SHA256.test(action.receipt_digest)
     ? action.receipt_digest
     : undefined;
+  const attemptScopes = attemptScopesForAction(action);
+  const retryBoundaries = retryBoundariesForAction(action);
   return {
     reason,
     internal_reason: internalReason,
@@ -874,6 +1011,8 @@ function boundaryFromAction(
     ...(stage ? { stage } : {}),
     projection: projectionFor(reason, action),
     ...(planBudgetReceiptDigest ? { plan_budget_receipt_digest: planBudgetReceiptDigest } : {}),
+    ...(attemptScopes ? { attempt_scopes: attemptScopes } : {}),
+    ...(retryBoundaries ? { retry_boundaries: retryBoundaries } : {}),
   };
 }
 
@@ -914,6 +1053,8 @@ function requestIdFor(
     stage: boundary.stage ?? null,
     projection: boundary.projection ?? null,
     plan_budget_receipt_digest: boundary.plan_budget_receipt_digest ?? null,
+    attempt_scopes: boundary.attempt_scopes ?? null,
+    retry_boundaries: boundary.retry_boundaries ?? null,
     choices,
   })}`;
 }
@@ -936,6 +1077,8 @@ function issueBoundary(
     ...(boundary.plan_budget_receipt_digest ? {
       plan_budget_receipt_digest: boundary.plan_budget_receipt_digest,
     } : {}),
+    ...(boundary.attempt_scopes ? { attempt_scopes: boundary.attempt_scopes } : {}),
+    ...(boundary.retry_boundaries ? { retry_boundaries: boundary.retry_boundaries } : {}),
     choices,
   };
   writeCreateOnly(requestRecordPath(requestId), record);
@@ -966,7 +1109,7 @@ function readDecisionRequest(requestId: string): AutomaticBuildDecisionRequestRe
       "state",
       "choices",
     ],
-    ["stage", "projection", "plan_budget_receipt_digest"],
+    ["stage", "projection", "plan_budget_receipt_digest", "attempt_scopes", "retry_boundaries"],
   );
   if (value.version !== "automatic_build_decision_request_record.v1"
     || value.request_id !== requestId
@@ -1009,6 +1152,61 @@ function readDecisionRequest(requestId: string): AutomaticBuildDecisionRequestRe
     && (typeof planBudgetReceiptDigest !== "string" || !SHA256.test(planBudgetReceiptDigest))) {
     throw new Error("automatic build decision request budget receipt is invalid");
   }
+  const attemptScopes = value.attempt_scopes === undefined
+    ? undefined
+    : (() => {
+        if (!Array.isArray(value.attempt_scopes)) {
+          throw new Error("automatic build decision request attempt scopes are invalid");
+        }
+        const scopes = value.attempt_scopes.map((scope) => {
+          if (!isRecord(scope)) throw new Error("automatic build decision request attempt scope is invalid");
+          exactKeys(scope, ["work_unit_id", "attempt_scope_digest"]);
+          const workUnitId = boundedString(scope.work_unit_id, "attempt scope work_unit_id", 512);
+          if (typeof scope.attempt_scope_digest !== "string" || !SHA256.test(scope.attempt_scope_digest)) {
+            throw new Error("automatic build decision request attempt scope digest is invalid");
+          }
+          return { work_unit_id: workUnitId, attempt_scope_digest: scope.attempt_scope_digest };
+        });
+        if (scopes.some((scope, index) => index > 0
+          && scopes[index - 1].work_unit_id >= scope.work_unit_id)) {
+          throw new Error("automatic build decision request attempt scopes are not canonical");
+        }
+        return scopes;
+      })();
+  const retryBoundaries = value.retry_boundaries === undefined
+    ? undefined
+    : (() => {
+        if (!Array.isArray(value.retry_boundaries)) {
+          throw new Error("automatic build decision request retry boundaries are invalid");
+        }
+        const boundaries = value.retry_boundaries.map((entry) => {
+          if (!isRecord(entry)) throw new Error("automatic build decision request retry boundary is invalid");
+          exactKeys(entry, [
+            "work_unit_id",
+            "version",
+            "attempt_scope_digest",
+            "exhausted_semantic_attempt",
+            "terminal_receipt_sha256",
+            "diagnostic_digest",
+            "required_recovery",
+          ]);
+          const workUnitId = boundedString(entry.work_unit_id, "retry boundary work_unit_id", 512);
+          const boundary = validateAutomaticBuildRetryBoundary({
+            version: entry.version,
+            attempt_scope_digest: entry.attempt_scope_digest,
+            exhausted_semantic_attempt: entry.exhausted_semantic_attempt,
+            terminal_receipt_sha256: entry.terminal_receipt_sha256,
+            diagnostic_digest: entry.diagnostic_digest,
+            required_recovery: entry.required_recovery,
+          });
+          return { work_unit_id: workUnitId, ...boundary };
+        });
+        if (boundaries.some((boundary, index) => index > 0
+          && boundaries[index - 1].work_unit_id >= boundary.work_unit_id)) {
+          throw new Error("automatic build decision request retry boundaries are not canonical");
+        }
+        return boundaries;
+      })();
   if (value.projection !== undefined && !isRecord(value.projection)) {
     throw new Error("automatic build decision request projection is invalid");
   }
@@ -1026,6 +1224,8 @@ function readDecisionRequest(requestId: string): AutomaticBuildDecisionRequestRe
     ...(typeof planBudgetReceiptDigest === "string" ? {
       plan_budget_receipt_digest: planBudgetReceiptDigest,
     } : {}),
+    ...(attemptScopes ? { attempt_scopes: attemptScopes } : {}),
+    ...(retryBoundaries ? { retry_boundaries: retryBoundaries } : {}),
     choices,
   };
   const expected = `abreq1_${sha256({
@@ -1037,6 +1237,8 @@ function readDecisionRequest(requestId: string): AutomaticBuildDecisionRequestRe
     stage: record.stage ?? null,
     projection: record.projection ?? null,
     plan_budget_receipt_digest: record.plan_budget_receipt_digest ?? null,
+    attempt_scopes: record.attempt_scopes ?? null,
+    retry_boundaries: record.retry_boundaries ?? null,
     choices: record.choices,
   })}`;
   if (expected !== requestId) throw new Error("automatic build decision request digest is invalid");
@@ -1047,13 +1249,14 @@ function persistDecisionReceipt(
   invocation: AutomaticBuildInvocationRecordV1,
   request: AutomaticBuildDecisionRequestRecordV1,
   choiceId: string,
+  appliedState: DriverStateIdentityV1 = request.state,
 ): void {
   const receipt: AutomaticBuildDecisionReceiptV1 = {
     version: "automatic_build_decision_receipt.v1",
     invocation_ref: invocation.invocation_ref,
     request_id: request.request_id,
     choice_id: choiceId,
-    state: request.state,
+    state: appliedState,
   };
   writeCreateOnly(decisionReceiptPath(invocation.invocation_ref, request.request_id), receipt);
 }
@@ -1129,6 +1332,118 @@ function sameOptional(left: string | undefined, right: string | undefined): bool
   return left === right;
 }
 
+function currentAttemptScopeDigest(
+  current: DriverState,
+  stage: AutomaticBuildStage,
+  workUnitId: string,
+): string | undefined {
+  const stageState = current.plan_result.snapshot.stages.find((candidate) => candidate.stage === stage);
+  const descriptor = stageState?.work_units?.find((unit) => unit.work_unit_id === workUnitId);
+  const binding = stageState?.task_bindings?.[workUnitId];
+  if (!descriptor
+    || descriptor.version !== "automatic_build_work_unit.v3"
+    || !binding
+    || !("proof_digest" in binding)
+    || !("policy_set_digest" in binding)) return undefined;
+  return createAutomaticBuildAttemptScope({
+    target_ref: descriptor.target,
+    stage: descriptor.stage,
+    work_unit_id: descriptor.work_unit_id,
+    task_binding: binding,
+  }).attempt_scope_digest;
+}
+
+function retryAttemptScopeChanged(
+  request: AutomaticBuildDecisionRequestRecordV1,
+  current: DriverState,
+): boolean {
+  if ((request.reason !== "retry_exhausted" && request.reason !== "executor_instability")
+    || !request.attempt_scopes?.length
+    || !request.stage) return false;
+  let changed = false;
+  for (const previous of request.attempt_scopes) {
+    const currentScopeDigest = currentAttemptScopeDigest(current, request.stage, previous.work_unit_id);
+    if (!currentScopeDigest) return false;
+    changed ||= currentScopeDigest !== previous.attempt_scope_digest;
+  }
+  return changed;
+}
+
+function retryBoundaryMatches(
+  left: AutomaticBuildRetryBoundaryV1,
+  right: AutomaticBuildRetryBoundaryV1,
+): boolean {
+  return left.version === right.version
+    && left.attempt_scope_digest === right.attempt_scope_digest
+    && left.exhausted_semantic_attempt === right.exhausted_semantic_attempt
+    && left.terminal_receipt_sha256 === right.terminal_receipt_sha256
+    && left.diagnostic_digest === right.diagnostic_digest
+    && left.required_recovery === right.required_recovery;
+}
+
+function unresolvedRetryResponse(
+  request: AutomaticBuildDecisionRequestRecordV1,
+  reason: "plan_changed" | "recovery_not_satisfied",
+): AutomaticBuildStepResponseV1 {
+  return finalizeResponse({
+    version: "automatic_build_step.v1",
+    action: {
+      kind: "NEEDS_USER",
+      request_id: request.request_id,
+      reason,
+      message: userMessage(reason),
+      choices: reason === "recovery_not_satisfied" ? request.choices : [],
+      ...(request.projection ? { projection: request.projection } : {}),
+    },
+  });
+}
+
+type PreparedRetryRecovery = {
+  target: ReturnType<typeof resolveAutomaticBuildTarget>;
+  input: Parameters<typeof prepareAutomaticBuildRetryRecovery>[1];
+};
+
+function prepareRetryRecoveries(
+  invocation: AutomaticBuildInvocationRecordV1,
+  request: AutomaticBuildDecisionRequestRecordV1,
+  current: DriverState,
+): { status: "ready"; recoveries: PreparedRetryRecovery[] }
+  | { status: "stale" | "not_satisfied" } {
+  if (request.reason !== "retry_exhausted" || !request.stage || !request.retry_boundaries?.length) {
+    return { status: "not_satisfied" };
+  }
+  const target = resolveAutomaticBuildTarget(invocation.input.target_input, invocation.input.root_dir);
+  const recoveries: PreparedRetryRecovery[] = [];
+  for (const previous of request.retry_boundaries) {
+    const currentScopeDigest = currentAttemptScopeDigest(current, request.stage, previous.work_unit_id);
+    if (!currentScopeDigest || currentScopeDigest !== previous.attempt_scope_digest) {
+      return { status: "stale" };
+    }
+    const currentBoundary = readAutomaticBuildRetryBoundary(
+      target,
+      request.stage,
+      previous.work_unit_id,
+      currentScopeDigest,
+    );
+    if (!currentBoundary || !retryBoundaryMatches(previous, currentBoundary)) {
+      return { status: "stale" };
+    }
+    if (currentBoundary.required_recovery !== "authorize_transient_retry") {
+      return { status: "not_satisfied" };
+    }
+    const input: Parameters<typeof prepareAutomaticBuildRetryRecovery>[1] = {
+      ...currentBoundary,
+      stage: request.stage,
+      work_unit_id: previous.work_unit_id,
+      decision_request_id: request.request_id,
+      created_at: invocation.input.created_at,
+    };
+    prepareAutomaticBuildRetryRecovery(target, input);
+    recoveries.push({ target, input });
+  }
+  return { status: "ready", recoveries };
+}
+
 function applyDecision(
   invocation: AutomaticBuildInvocationRecordV1,
   decision: NonNullable<AutomaticBuildStepRequestV1["decision"]>,
@@ -1139,19 +1454,39 @@ function applyDecision(
     throw new Error("automatic build decision belongs to a different invocation");
   }
   const identity = stateIdentity(current);
-  if (request.state.build_plan_digest !== identity.build_plan_digest
-    || !sameOptional(request.state.preflight_plan_digest, identity.preflight_plan_digest)) {
-    return issueBoundary(invocation, syntheticBoundary("plan_changed", "plan_changed", current));
-  }
-  if (!sameOptional(request.state.preflight_evaluation_digest, identity.preflight_evaluation_digest)) {
-    const wallStatus = current.plan_result.preflight?.wall_clock.budget.status;
-    const reason = wallStatus === "low_confidence" ? "low_confidence_wall_budget" : "wall_budget_exceeded";
-    return issueBoundary(invocation, syntheticBoundary(reason, reason, current));
-  }
   if (!request.choices.some((choice) => choice.choice_id === decision.choice_id)) {
     throw new Error("automatic build decision choice is not allowed");
   }
-  persistDecisionReceipt(invocation, request, decision.choice_id);
+  const scopeChanged = decision.choice_id === "retry_current"
+    && retryAttemptScopeChanged(request, current);
+  if (request.state.build_plan_digest !== identity.build_plan_digest
+    || (!scopeChanged
+      && !sameOptional(request.state.preflight_plan_digest, identity.preflight_plan_digest))) {
+    if (decision.choice_id === "retry_current") return unresolvedRetryResponse(request, "plan_changed");
+    return issueBoundary(invocation, syntheticBoundary("plan_changed", "plan_changed", current));
+  }
+  if (!scopeChanged
+    && !sameOptional(request.state.preflight_evaluation_digest, identity.preflight_evaluation_digest)) {
+    const wallStatus = current.plan_result.preflight?.wall_clock.budget.status;
+    const reason = wallStatus === "low_confidence" ? "low_confidence_wall_budget" : "wall_budget_exceeded";
+    if (decision.choice_id === "retry_current") return unresolvedRetryResponse(request, "plan_changed");
+    return issueBoundary(invocation, syntheticBoundary(reason, reason, current));
+  }
+  let retryRecoveries: PreparedRetryRecovery[] = [];
+  if (decision.choice_id === "retry_current" && request.reason === "retry_exhausted" && !scopeChanged) {
+    const prepared = prepareRetryRecoveries(invocation, request, current);
+    if (prepared.status !== "ready") {
+      return unresolvedRetryResponse(
+        request,
+        prepared.status === "stale" ? "plan_changed" : "recovery_not_satisfied",
+      );
+    }
+    retryRecoveries = prepared.recoveries;
+  }
+  for (const recovery of retryRecoveries) {
+    recordAutomaticBuildRetryRecovery(recovery.target, recovery.input);
+  }
+  persistDecisionReceipt(invocation, request, decision.choice_id, identity);
   if (request.reason === "plan_changed" || request.reason === "plan_confirmation_required") {
     authorizePlan(invocation, request.request_id, decision.choice_id, identity.build_plan_digest);
   }

@@ -11,6 +11,7 @@ import {
 import { claimAutomaticBuildTask } from "../src/automatic-build-lease";
 import { readAutomaticBuildAttemptRecord } from "../src/automatic-build-task-store";
 import { resolveAutomaticBuildTarget } from "../src/build-orchestrator";
+import { parseExtractorCandidate } from "../src/extractor-contract";
 
 function fixture() {
   const root = mkdtempSync(path.join(tmpdir(), "understand-book-mailbox-"));
@@ -210,7 +211,7 @@ describe("automatic build task mailbox", () => {
     )).toThrow("candidate hash");
   });
 
-  it("persists writer diagnostics as a terminal semantic failure and round-trips inspect/fail receipts", () => {
+  it("persists typed bounded failure diagnostics and safely dual-reads legacy receipts", () => {
     const { root, target, claim } = fixture();
     const staged = stageAutomaticBuildCandidate(
       target,
@@ -224,25 +225,43 @@ describe("automatic build task mailbox", () => {
       claim.lease_ref,
       claim.lease.token,
       staged.candidate_path,
-      () => { throw new Error("schema failure at /nodes"); },
+      () => parseExtractorCandidate("profile_sidecar", {
+        discourse_items: [{
+          lid: "3.1",
+          mode: "informative",
+          local_summary: `PRIVATE_CANDIDATE_${"S".repeat(201)}`,
+          relations: [],
+        }],
+      }, { allowed_evidence_lids: ["3.1"], formula_lids: [] }) as never,
       { now: "2026-07-19T00:00:02.000Z" },
     );
     expect(writerFailure).toMatchObject({
+      version: "automatic_build_task_receipt.v2",
       state: "retryable_failure",
-      diagnostic_code: "writer_failed",
       candidate_sha256: staged.candidate_sha256,
+      failure_diagnostic: {
+        version: "automatic_build_failure_diagnostic.v2",
+        category: "schema",
+        code: "schema_invalid",
+        json_pointer: "/discourse_items/0/local_summary",
+      },
     });
+    expect(writerFailure).not.toHaveProperty("message");
+    expect(writerFailure).not.toHaveProperty("diagnostic_code");
+    expect(Buffer.byteLength(JSON.stringify(writerFailure))).toBeLessThanOrEqual(4_096);
     expect(inspectAutomaticBuildTask(target, claim.lease_ref, claim.lease.token)).toMatchObject({
       state: "retryable_failure",
-      diagnostic_code: "writer_failed",
+      failure_diagnostic: { category: "schema", code: "schema_invalid" },
       candidate_sha256: staged.candidate_sha256,
     });
     expect(JSON.parse(readFileSync(path.join(path.dirname(claim.lease_ref), "result.json"), "utf8"))).toMatchObject({
+      version: "automatic_build_attempt_event.v3",
       outcome: "failure",
-      diagnostic: "schema failure at /nodes",
+      failure_diagnostic: { category: "schema", code: "schema_invalid" },
     });
     expect(readAutomaticBuildAttemptRecord(target, "pass1", "0")).toMatchObject({
       failures: 1,
+      last_failure_diagnostic: { category: "schema", code: "schema_invalid" },
       semantic_attempt: 1,
       lease_epoch: 1,
       submit_revision: 1,
@@ -257,16 +276,121 @@ describe("automatic build task mailbox", () => {
       execution_identity: { semantic_attempt: 2, lease_epoch: 1, submit_revision: 0 },
     });
 
+    const enumFailure = fixture();
+    const enumCandidate = stageAutomaticBuildCandidate(
+      enumFailure.target,
+      enumFailure.claim.lease_ref,
+      enumFailure.claim.lease.token,
+      candidateFile(enumFailure.root, { nodes: [], edges: [] }),
+      { now: "2026-07-19T00:00:01.000Z" },
+    );
+    const enumReceipt = submitAutomaticBuildCandidate(
+      enumFailure.target,
+      enumFailure.claim.lease_ref,
+      enumFailure.claim.lease.token,
+      enumCandidate.candidate_path,
+      () => parseExtractorCandidate("profile_sidecar", {
+        discourse_items: [{
+          lid: "3.1",
+          mode: "informative",
+          local_function: "problem_framing",
+          local_summary: "PRIVATE_ENUM_CANDIDATE",
+          relations: [],
+        }],
+      }, { allowed_evidence_lids: ["3.1"], formula_lids: [] }) as never,
+      { now: "2026-07-19T00:00:02.000Z" },
+    );
+    expect(enumReceipt).toMatchObject({
+      failure_diagnostic: {
+        category: "schema",
+        code: "schema_invalid",
+        json_pointer: "/discourse_items/0/local_function",
+      },
+    });
+    expect(JSON.stringify(enumReceipt)).not.toMatch(/problem_framing|PRIVATE_ENUM_CANDIDATE/u);
+
     const other = fixture();
     const failed = failAutomaticBuildTask(
       other.target,
       other.claim.lease_ref,
       other.claim.lease.token,
-      { diagnostic_code: "executor_failed", message: "provider unavailable", now: "2026-07-19T00:00:01.000Z" },
+      {
+        diagnostic_code: "provider_unavailable",
+        message: "PRIVATE_PROVIDER_MESSAGE",
+        now: "2026-07-19T00:00:01.000Z",
+      },
     );
-    expect(failed).toMatchObject({ state: "retryable_failure", diagnostic_code: "executor_failed" });
-    expect(JSON.parse(readFileSync(path.join(path.dirname(other.claim.lease_ref), "failure.json"), "utf8"))).toMatchObject({
-      diagnostic_code: "executor_failed",
+    expect(failed).toMatchObject({
+      version: "automatic_build_task_receipt.v2",
+      state: "retryable_failure",
+      failure_diagnostic: { category: "provider", code: "provider_unavailable" },
     });
+    expect(JSON.stringify(failed)).not.toContain("PRIVATE_PROVIDER_MESSAGE");
+    expect(JSON.parse(readFileSync(path.join(path.dirname(other.claim.lease_ref), "failure.json"), "utf8"))).toMatchObject({
+      failure_diagnostic: { category: "provider", code: "provider_unavailable" },
+    });
+
+    const executor = fixture();
+    const executorFailure = failAutomaticBuildTask(
+      executor.target,
+      executor.claim.lease_ref,
+      executor.claim.lease.token,
+      {
+        diagnostic_code: "executor_failed",
+        message: "PRIVATE_EXECUTOR_MESSAGE",
+        now: "2026-07-19T00:00:01.000Z",
+      },
+    );
+    expect(executorFailure).toMatchObject({
+      failure_diagnostic: { category: "executor", code: "executor_failed" },
+    });
+    expect(JSON.stringify(executorFailure)).not.toContain("PRIVATE_EXECUTOR_MESSAGE");
+
+    const unknown = fixture();
+    const unknownCandidate = stageAutomaticBuildCandidate(
+      unknown.target,
+      unknown.claim.lease_ref,
+      unknown.claim.lease.token,
+      candidateFile(unknown.root, { nodes: [], edges: [] }),
+      { now: "2026-07-19T00:00:01.000Z" },
+    );
+    const unknownFailure = submitAutomaticBuildCandidate(
+      unknown.target,
+      unknown.claim.lease_ref,
+      unknown.claim.lease.token,
+      unknownCandidate.candidate_path,
+      () => { throw new Error(`PRIVATE_UNKNOWN_WRITER_FAILURE at ${unknown.root}`); },
+      { now: "2026-07-19T00:00:02.000Z" },
+    );
+    expect(unknownFailure).toMatchObject({
+      failure_diagnostic: { category: "internal", code: "writer_failed" },
+    });
+    expect(JSON.stringify(unknownFailure)).not.toContain("PRIVATE_UNKNOWN_WRITER_FAILURE");
+    expect(JSON.stringify(unknownFailure)).not.toContain(unknown.root);
+
+    const legacy = fixture();
+    const legacyFailurePath = path.join(path.dirname(legacy.claim.lease_ref), "failure.json");
+    writeFileSync(legacyFailurePath, `${JSON.stringify({
+      version: "automatic_build_task_receipt.v1",
+      task_ref: "legacy-task-ref",
+      state: "retryable_failure",
+      target_ref: legacy.claim.lease.target_ref,
+      stage: legacy.claim.lease.stage,
+      work_unit_id: legacy.claim.lease.work_unit_id,
+      attempt: legacy.claim.lease.attempt,
+      diagnostic_code: "writer_failed",
+      message: "PRIVATE_LEGACY_FAILURE_MESSAGE",
+      failed_at: "2026-07-19T00:00:01.000Z",
+    }, null, 2)}\n`, "utf8");
+    const legacyProjection = inspectAutomaticBuildTask(
+      legacy.target,
+      legacy.claim.lease_ref,
+      legacy.claim.lease.token,
+    );
+    expect(legacyProjection).toMatchObject({
+      state: "retryable_failure",
+      failure_diagnostic: { category: "internal", code: "legacy_unclassified" },
+    });
+    expect(JSON.stringify(legacyProjection)).not.toContain("PRIVATE_LEGACY_FAILURE_MESSAGE");
   });
 });

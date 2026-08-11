@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import bookStructurePrompt from "../../agents/book-structure-extractor.md";
 import dispatchExecutorPrompt from "../../agents/automatic-build-dispatch-executor.md";
 import canvasGeometry from "@napi-rs/canvas/geometry.js";
@@ -11,6 +12,7 @@ import "pdfjs-dist/legacy/build/pdf.worker.mjs";
 import profileSidecarDiscourseFragmentPrompt from "../../agents/profile-sidecar-discourse-fragment-extractor.md";
 import profileSidecarDiscourseReducerPrompt from "../../agents/profile-sidecar-discourse-reducer.md";
 import profileSidecarPrompt from "../../agents/profile-sidecar-extractor.md";
+import { AUTOMATIC_BUILD_RELEASE_POLICY_MEMBERS_V1 } from "../../packages/core/src/automatic-build-protocol";
 import {
   AUTOMATIC_BUILD_EXECUTOR_PROMPT_MODES,
   composeAutomaticBuildExecutorPrompt,
@@ -34,6 +36,21 @@ const PROMPTS: Record<string, string> = {
   "profile-sidecar-discourse-reducer.md": profileSidecarDiscourseReducerPrompt,
   "profile-sidecar-extractor.md": profileSidecarPrompt,
 };
+
+function releaseValidatedPrompt(promptName: string, prompt: string): string {
+  const releaseHashes = new Set(AUTOMATIC_BUILD_RELEASE_POLICY_MEMBERS_V1
+    .filter((member) => member.prompt_name === promptName)
+    .map((member) => member.prompt_sha256));
+  if (releaseHashes.size > 1) {
+    throw new Error("packaged extractor prompt has conflicting release hashes");
+  }
+  const expected = releaseHashes.values().next().value as string | undefined;
+  if (expected !== undefined
+    && createHash("sha256").update(prompt, "utf8").digest("hex") !== expected) {
+    throw new Error("packaged extractor prompt does not match its release hash");
+  }
+  return prompt;
+}
 
 function forwardedArgs(offset: number): string[] {
   return argv.slice(offset);
@@ -80,9 +97,16 @@ async function runScript(script: string, args: string[]): Promise<void> {
 
 if (command === "prompt") {
   const promptName = argv[1] ?? "";
-  const prompt = PROMPTS[promptName];
-  if (!prompt) {
+  const registeredPrompt = PROMPTS[promptName];
+  if (!registeredPrompt) {
     console.error(`unsupported extractor prompt: ${promptName}`);
+    process.exit(2);
+  }
+  let prompt = registeredPrompt;
+  try {
+    prompt = releaseValidatedPrompt(promptName, registeredPrompt);
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : "packaged extractor prompt validation failed");
     process.exit(2);
   }
   if (argv.length === 2) {

@@ -374,6 +374,10 @@ describe("automatic build public executor session S3", () => {
       .stages[failedValue.envelope.manifest.stage] ?? {};
     expect(Object.values(failedAttempts)[0]).toMatchObject({
       failures: 1,
+      last_failure_diagnostic: {
+        category: "schema",
+        code: "semantic_output_invalid",
+      },
       semantic_attempt: 1,
       lease_epoch: 1,
     });

@@ -15,6 +15,7 @@ import {
 import { resolveAutomaticBuildTarget } from "../src/build-orchestrator";
 import { automaticBuildNext, automaticBuildPlan, type AutomaticBuildNextOptions } from "../../../skills/build/automatic-build";
 import { confirmedStandardBuildPlan } from "./helpers/confirmed-build-plan";
+import { profileSidecarPolicyScopeFixture } from "./fixtures/profile-sidecar-contract-drift/policy-scope";
 
 const T0 = "2026-07-19T00:00:00.000Z";
 
@@ -283,6 +284,63 @@ describe("automatic build task lease", () => {
     })).toMatchObject({ status: "retry_exhausted", semantic_attempt: 3 });
   });
 
+  it("starts a changed policy scope at semantic attempt one without rewriting physical history", () => {
+    const { target } = targetFixture();
+    const fixture = profileSidecarPolicyScopeFixture(target);
+
+    for (let semanticAttempt = 1; semanticAttempt <= 3; semanticAttempt += 1) {
+      const claim = claimAutomaticBuildTask(
+        target,
+        fixture.descriptor.stage,
+        fixture.descriptor.work_unit_id,
+        {
+          owner: `scope-a-owner-${semanticAttempt}`,
+          now: `2026-08-10T01:00:0${semanticAttempt}.000Z`,
+          descriptor: fixture.descriptor,
+          binding: fixture.scope_a.task_binding,
+          policy_generation: "v3_only",
+          max_semantic_attempts: 3,
+        },
+      );
+      if (claim.status !== "leased") throw new Error(`expected scope A attempt ${semanticAttempt}`);
+      recordAutomaticBuildAttemptEvent(target, {
+        stage: fixture.descriptor.stage,
+        work_unit_id: fixture.descriptor.work_unit_id,
+        attempt: claim.lease.attempt,
+        event_id: `profile-sidecar-policy-a:${claim.lease.attempt}:failure`,
+        outcome: "failure",
+        diagnostic: "synthetic schema_invalid",
+        created_at: `2026-08-10T01:00:0${semanticAttempt}.100Z`,
+      });
+    }
+
+    expect(claimAutomaticBuildTask(
+      target,
+      fixture.descriptor.stage,
+      fixture.descriptor.work_unit_id,
+      {
+        owner: "scope-b-owner-1",
+        now: "2026-08-10T01:00:04.000Z",
+        descriptor: fixture.descriptor,
+        binding: fixture.scope_b.task_binding,
+        policy_generation: "v3_only",
+        max_semantic_attempts: 3,
+      },
+    )).toMatchObject({
+      status: "leased",
+      lease: {
+        attempt: 4,
+        attempt_scope_digest: fixture.scope_b.attempt_scope_digest,
+      },
+      execution_identity: {
+        version: "automatic_build_execution_identity.v2",
+        semantic_attempt: 1,
+        lease_epoch: 1,
+        attempt_scope_digest: fixture.scope_b.attempt_scope_digest,
+      },
+    });
+  });
+
   it("does not reissue active work from next and recovers exactly one new attempt", () => {
     const { root, source } = targetFixture();
     const first = acceptedNext(source, root, { owner: "root-a", now: T0, lease_ttl_ms: 1_000 });
@@ -336,20 +394,7 @@ describe("automatic build task lease", () => {
       reason: "executor_instability",
       tasks: [{ task_id: "0", status: "executor_instability", semantic_attempt: 1, lease_epoch: 3 }],
     });
-    if (!("reset_commands" in blocked.action)) throw new Error("expected executor reset commands");
-    const resetCommand = blocked.action.reset_commands?.[0];
-    if (!resetCommand) throw new Error("expected executor reset command");
-    const commandIndex = resetCommand.indexOf("record-attempt");
-    expect(resetCommand.slice(commandIndex, commandIndex + 5)).toEqual([
-      "record-attempt",
-      source,
-      "pass1",
-      "0",
-      "reset",
-    ]);
-    expect(resetCommand).toContain("--attempt");
-    expect(resetCommand).toContain("3");
-    expect(resetCommand).toContain("pass1:0:3:reset");
+    expect(blocked.action).not.toHaveProperty("reset_commands");
   });
 
   it("opens a fresh lease recovery window after an approved reset", () => {

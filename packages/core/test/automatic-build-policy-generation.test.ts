@@ -33,8 +33,10 @@ import {
   automaticBuildExtractionPolicy,
   buildSemanticArtifactEnvelope,
   buildSemanticArtifactEnvelopeV3,
+  extractionPolicyDigest,
   freezeAutomaticBuildStagePolicy,
   writeAutomaticBuildGenerationArtifact,
+  type ExtractionPolicyFingerprintV1,
 } from "../src/semantic-artifact";
 import {
   buildWorkUnitCost,
@@ -66,18 +68,22 @@ function treeDigest(root: string): string {
   return sha256(JSON.stringify(identities));
 }
 
-function fixture(label: string) {
+function fixture(label: string, policies?: {
+  oldPolicy: ExtractionPolicyFingerprintV1;
+  currentPolicy: ExtractionPolicyFingerprintV1;
+}) {
   const root = mkdtempSync(path.join(tmpdir(), `understand-book-policy-generation-${label}-`));
   const source = path.join(root, "guide.md");
   writeFileSync(source, "# Guide\n\nA canonical paragraph.\n", "utf8");
   const target = resolveAutomaticBuildTarget(source, root);
-  const oldPolicy = automaticBuildExtractionPolicy(
+  const defaultPolicy = automaticBuildExtractionPolicy(
     "profile_sidecar",
     resolveContentProfile("technical_learning"),
     "full",
   );
-  const currentPolicy = {
-    ...oldPolicy,
+  const oldPolicy = policies?.oldPolicy ?? defaultPolicy;
+  const currentPolicy = policies?.currentPolicy ?? {
+    ...defaultPolicy,
     router_version: "profile_sidecar_semantic_units.v3",
   };
   const policySet = createAutomaticBuildStagePolicySet({
@@ -209,6 +215,66 @@ function modelCurrent(descriptor: WorkUnitDescriptorV3, renderedInput: string): 
 }
 
 describe("automatic build policy generation and selective migration", () => {
+  it("keeps policy v1 history immutable and requires rebuild for profile_sidecar_policy.v2", () => {
+    const currentPolicy = automaticBuildExtractionPolicy(
+      "profile_sidecar",
+      resolveContentProfile("technical_learning"),
+      "full",
+    );
+    const oldPolicy = {
+      ...currentPolicy,
+      stage_policy_version: "profile_sidecar_policy.v1",
+      prompt_sha256: "0a56b04e68fc4fc86ae292eb0a57f59d2c85bd9b27e61e7da2d3b5c503da297a",
+    };
+    const input = fixture("profile-policy-v2", { oldPolicy, currentPolicy });
+    const oldPolicySet = createAutomaticBuildStagePolicySet({
+      target_ref: input.target.target_ref,
+      stage: "profile_sidecar",
+      members: input.policySet.members.map((member) => ({
+        ...member,
+        policy_fingerprint: oldPolicy,
+      })),
+      frozen_at: input.policySet.frozen_at,
+    });
+    expect(currentPolicy.stage_policy_version).toBe("profile_sidecar_policy.v2");
+    expect(extractionPolicyDigest(oldPolicy)).not.toBe(extractionPolicyDigest(currentPolicy));
+    expect(oldPolicySet.policy_set_digest).not.toBe(input.policySet.policy_set_digest);
+
+    const rendered = "PROFILE_SIDECAR_INPUT\n[LID 1.1]\nA canonical paragraph.\n";
+    const previousDescriptor = oldDescriptor(input, "policy-v1-discourse", rendered);
+    const previousArtifactPath = writeOldArtifact(input, previousDescriptor);
+    const previousArtifactBytes = readFileSync(previousArtifactPath);
+    const descriptor = currentDescriptor(input, "policy-v2-discourse", rendered);
+    const frozen = freezeAutomaticBuildStagePolicySet(input.target, input.policySet);
+    const migration = recordAutomaticBuildPolicyMigration({
+      target: input.target,
+      stage: "profile_sidecar",
+      from_policy_digest: input.oldLock.policy_digest,
+      policy_set: frozen,
+      current: modelCurrent(descriptor, rendered),
+      previous: {
+        descriptor: previousDescriptor,
+        rendered_input: rendered,
+        artifact_path: previousArtifactPath,
+      },
+      now: "2026-08-11T03:00:00.000Z",
+    });
+    expect(migration).toMatchObject({
+      decision: "rebuild",
+      reason: "semantic_policy_changed",
+      from_policy_digest: extractionPolicyDigest(oldPolicy),
+      to_policy_set_digest: frozen.policy_set_digest,
+    });
+    expect(readFileSync(previousArtifactPath)).toEqual(previousArtifactBytes);
+    expect(resolveAutomaticBuildPolicyGeneration({
+      target: input.target,
+      stage: "profile_sidecar",
+      from_policy_digest: input.oldLock.policy_digest,
+      policy_set_digest: frozen.policy_set_digest,
+      current_units: [modelCurrent(descriptor, rendered)],
+    })).toMatchObject({ status: "pending", pending_rebuild_units: [descriptor.work_unit_id] });
+  });
+
   it("freezes canonical policy sets and adopts exact v2 artifacts without mutating v2 history", () => {
     const input = fixture("adopt");
     const rendered = "PROFILE_SIDECAR_INPUT\n[LID 1.1]\nA canonical paragraph.\n";
@@ -466,7 +532,7 @@ describe("automatic build policy generation and selective migration", () => {
       policy_generation: "v3_only",
       binding: taskPolicyBindingForWorkUnit(forbiddenV2),
       descriptor: forbiddenV2,
-    })).toThrow(/v3 release forbids new v2 claims/);
+    })).toThrow(/policy_generation_migration_required: v3 release forbids unscoped claims/);
   });
 
   it("fails closed on unverifiable old bytes and conflicting create-only decisions", () => {

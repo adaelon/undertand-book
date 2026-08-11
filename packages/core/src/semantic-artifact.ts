@@ -8,6 +8,7 @@ import type {
 } from "./build-orchestrator";
 import type { ContentProfileDefinition } from "./content-profile";
 import { EXTRACTOR_CONTRACT_SCHEMA_VERSIONS } from "./extractor-contract";
+import { PROFILE_SIDECAR_POLICY_V2 } from "./automatic-build-protocol";
 import { routerVersionForStage } from "./stage-work-unit";
 
 export type SemanticBuildStage = Exclude<AutomaticBuildStage, "paper_reading_guide">;
@@ -124,9 +125,9 @@ const STAGE_POLICIES: Record<SemanticBuildStage, {
     schema_version: EXTRACTOR_CONTRACT_SCHEMA_VERSIONS.paper_lexicon,
   },
   profile_sidecar: {
-    stage_policy_version: "profile_sidecar_policy.v1",
+    stage_policy_version: PROFILE_SIDECAR_POLICY_V2.stage_policy_version,
     router_version: routerVersionForStage("profile_sidecar"),
-    prompt_sha256: "0a56b04e68fc4fc86ae292eb0a57f59d2c85bd9b27e61e7da2d3b5c503da297a",
+    prompt_sha256: PROFILE_SIDECAR_POLICY_V2.prompt_sha256,
     schema_version: EXTRACTOR_CONTRACT_SCHEMA_VERSIONS.profile_sidecar,
   },
   pass2: {

@@ -27,6 +27,13 @@ import {
   recordAutomaticBuildSubmitRevision,
 } from "./automatic-build-task-store";
 import {
+  automaticBuildFailureDiagnosticFromCode,
+  automaticBuildFailureDiagnosticFromError,
+  legacyAutomaticBuildFailureDiagnostic,
+  validateAutomaticBuildFailureDiagnostic,
+  type AutomaticBuildFailureDiagnosticV2,
+} from "./extractor-contract";
+import {
   buildSemanticArtifactEnvelope,
   buildSemanticArtifactEnvelopeV3,
   semanticArtifactMatches,
@@ -59,6 +66,7 @@ export interface AutomaticBuildTaskReceiptV1 {
   stage: AutomaticBuildTaskLease["stage"];
   work_unit_id: string;
   attempt: number;
+  attempt_scope_digest?: string;
   candidate_sha256?: string;
   artifact_path?: string;
   artifact_sha256?: string;
@@ -70,6 +78,14 @@ export interface AutomaticBuildTaskReceiptV1 {
   metrics?: AutomaticBuildTaskMetricsV1;
 }
 
+export interface AutomaticBuildTaskReceiptV2
+  extends Omit<AutomaticBuildTaskReceiptV1, "version" | "diagnostic_code" | "message"> {
+  version: "automatic_build_task_receipt.v2";
+  failure_diagnostic?: AutomaticBuildFailureDiagnosticV2;
+}
+
+export type AutomaticBuildTaskReceipt = AutomaticBuildTaskReceiptV1 | AutomaticBuildTaskReceiptV2;
+
 export interface AutomaticBuildTaskInspectionV1 {
   version: "automatic_build_task_inspection.v1";
   task_ref: string;
@@ -77,6 +93,7 @@ export interface AutomaticBuildTaskInspectionV1 {
   stage: AutomaticBuildTaskLease["stage"];
   work_unit_id: string;
   attempt: number;
+  attempt_scope_digest?: string;
   candidate_sha256?: string;
 }
 
@@ -169,9 +186,42 @@ function failurePath(leaseRef: string): string {
   return path.join(path.dirname(path.resolve(leaseRef)), "failure.json");
 }
 
-function ensureReceiptBounded(receipt: AutomaticBuildTaskReceiptV1): void {
+function ensureReceiptBounded(receipt: AutomaticBuildTaskReceiptV2): void {
   const bytes = Buffer.byteLength(JSON.stringify(receipt));
   if (bytes > MAX_RECEIPT_BYTES) throw new Error(`task receipt exceeds ${MAX_RECEIPT_BYTES} bytes: ${bytes}`);
+}
+
+export function normalizeAutomaticBuildTaskReceipt(
+  receipt: AutomaticBuildTaskReceipt,
+): AutomaticBuildTaskReceiptV2 {
+  if (receipt.version === "automatic_build_task_receipt.v2") {
+    if (receipt.state === "retryable_failure") {
+      if (!receipt.failure_diagnostic) throw new Error("v2 failure receipt is missing its typed diagnostic");
+      return {
+        ...receipt,
+        failure_diagnostic: validateAutomaticBuildFailureDiagnostic(receipt.failure_diagnostic),
+      };
+    }
+    if (receipt.failure_diagnostic !== undefined) {
+      throw new Error("committed task receipt contains a failure diagnostic");
+    }
+    return receipt;
+  }
+  if (receipt.version !== "automatic_build_task_receipt.v1") {
+    throw new Error("automatic build task receipt version is unsupported");
+  }
+  const { diagnostic_code: _diagnosticCode, message: _message, version: _version, ...safe } = receipt;
+  return {
+    ...safe,
+    version: "automatic_build_task_receipt.v2",
+    ...(receipt.state === "retryable_failure"
+      ? { failure_diagnostic: legacyAutomaticBuildFailureDiagnostic() }
+      : {}),
+  };
+}
+
+export function readAutomaticBuildTaskReceiptFile(file: string): AutomaticBuildTaskReceiptV2 {
+  return normalizeAutomaticBuildTaskReceipt(readJson<AutomaticBuildTaskReceipt>(file));
 }
 
 function recordTerminalSuccess(target: AutomaticBuildTarget, lease: AutomaticBuildTaskLease, committedAt: string): void {
@@ -245,7 +295,7 @@ export function submitAutomaticBuildCandidate(
   candidatePath: string,
   writer: (candidatePath: string) => AutomaticBuildWriterResult,
   options: { now?: string; completed_at?: string } = {},
-): AutomaticBuildTaskReceiptV1 {
+): AutomaticBuildTaskReceiptV2 {
   const lease = readAutomaticBuildLease(target, leaseRef, token);
   const taskBinding = automaticBuildTaskPolicyBindingFromLease(lease);
   if (taskBinding && "proof_digest" in taskBinding) {
@@ -260,9 +310,12 @@ export function submitAutomaticBuildCandidate(
   const candidate = candidatePayload.record;
   const existingReceiptPath = receiptPath(leaseRef);
   if (existsSync(existingReceiptPath)) {
-    const existing = readJson<AutomaticBuildTaskReceiptV1>(existingReceiptPath);
+    const existing = readAutomaticBuildTaskReceiptFile(existingReceiptPath);
     if (existing.candidate_sha256 !== candidate.candidate_sha256) {
       throw new Error(`candidate hash does not match committed receipt: ${candidate.candidate_sha256}`);
+    }
+    if (existing.attempt_scope_digest !== lease.attempt_scope_digest) {
+      throw new Error("committed receipt attempt scope does not match its lease");
     }
     recordAutomaticBuildSubmitRevision(target, {
       stage: lease.stage,
@@ -299,7 +352,7 @@ export function submitAutomaticBuildCandidate(
     if (existing.candidate_sha256 !== candidate.candidate_sha256) {
       throw new Error(`submission candidate hash conflict: ${submissionPath}`);
     }
-    if (existsSync(existingReceiptPath)) return readJson<AutomaticBuildTaskReceiptV1>(existingReceiptPath);
+    if (existsSync(existingReceiptPath)) return readAutomaticBuildTaskReceiptFile(existingReceiptPath);
     throw new Error(`candidate submission is already in progress: ${submissionPath}`);
   }
 
@@ -361,14 +414,15 @@ export function submitAutomaticBuildCandidate(
       ...(result.output_counts ? { output_items: outputItemCount(result.output_counts) } : {}),
       usage,
     });
-    const receipt: AutomaticBuildTaskReceiptV1 = {
-      version: "automatic_build_task_receipt.v1",
+    const receipt: AutomaticBuildTaskReceiptV2 = {
+      version: "automatic_build_task_receipt.v2",
       task_ref: taskRef(lease),
       state: "committed",
       target_ref: lease.target_ref,
       stage: lease.stage,
       work_unit_id: lease.work_unit_id,
       attempt: lease.attempt,
+      ...(lease.attempt_scope_digest ? { attempt_scope_digest: lease.attempt_scope_digest } : {}),
       candidate_sha256: candidate.candidate_sha256,
       artifact_path: artifactPath,
       artifact_sha256: sha256(readFileSync(artifactPath)),
@@ -381,30 +435,30 @@ export function submitAutomaticBuildCandidate(
     recordTerminalSuccess(target, lease, committedAt);
     return receipt;
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const failureDiagnostic = automaticBuildFailureDiagnosticFromError(error);
     const failedAt = options.completed_at ?? (options.now ? options.now : new Date().toISOString());
     const metrics = persistAutomaticBuildTaskMetrics(target, leaseRef, token, {
       status: "retryable_failure",
       terminal_at: failedAt,
       writer_started_at: submission.started_at,
       output_bytes: candidate.size_bytes,
-      diagnostic_code: "writer_failed",
+      diagnostic_code: failureDiagnostic.code,
       usage,
     });
     const failureReceipt = {
-      version: "automatic_build_task_receipt.v1",
+      version: "automatic_build_task_receipt.v2",
       task_ref: taskRef(lease),
       state: "retryable_failure",
       target_ref: lease.target_ref,
       stage: lease.stage,
       work_unit_id: lease.work_unit_id,
       attempt: lease.attempt,
+      ...(lease.attempt_scope_digest ? { attempt_scope_digest: lease.attempt_scope_digest } : {}),
       candidate_sha256: candidate.candidate_sha256,
-      diagnostic_code: "writer_failed",
-      message,
+      failure_diagnostic: failureDiagnostic,
       failed_at: failedAt,
       metrics,
-    } satisfies AutomaticBuildTaskReceiptV1;
+    } satisfies AutomaticBuildTaskReceiptV2;
     ensureReceiptBounded(failureReceipt);
     writeJsonAtomic(failurePath(leaseRef), failureReceipt);
     recordAutomaticBuildAttemptEvent(target, {
@@ -413,7 +467,7 @@ export function submitAutomaticBuildCandidate(
       attempt: lease.attempt,
       event_id: `${lease.stage}:${lease.work_unit_id}:${lease.attempt}:failure`,
       outcome: "failure",
-      diagnostic: message,
+      failure_diagnostic: failureDiagnostic,
       created_at: failedAt,
     });
     return failureReceipt;
@@ -424,10 +478,19 @@ export function failAutomaticBuildTask(
   target: AutomaticBuildTarget,
   leaseRef: string,
   token: string,
-  input: { diagnostic_code: string; message?: string; now?: string },
-): AutomaticBuildTaskReceiptV1 {
+  input: {
+    diagnostic_code?: string;
+    failure_diagnostic?: AutomaticBuildFailureDiagnosticV2;
+    /** @deprecated Free text is accepted for V1 callers but is never persisted. */
+    message?: string;
+    now?: string;
+  },
+): AutomaticBuildTaskReceiptV2 {
   const now = input.now ?? new Date().toISOString();
   const lease = assertActiveAutomaticBuildLease(target, leaseRef, token, now);
+  const failureDiagnostic = input.failure_diagnostic
+    ? validateAutomaticBuildFailureDiagnostic(input.failure_diagnostic)
+    : automaticBuildFailureDiagnosticFromCode(input.diagnostic_code);
   const usage = readAutomaticBuildUsageReceipt(leaseRef);
   const candidatePath = expectedCandidatePath(leaseRef);
   const candidate = existsSync(candidatePath) ? candidateInfo(candidatePath) : undefined;
@@ -435,19 +498,19 @@ export function failAutomaticBuildTask(
     status: "retryable_failure",
     terminal_at: now,
     output_bytes: candidate?.size_bytes ?? 0,
-    diagnostic_code: input.diagnostic_code,
+    diagnostic_code: failureDiagnostic.code,
     usage,
   });
-  const receipt: AutomaticBuildTaskReceiptV1 = {
-    version: "automatic_build_task_receipt.v1",
+  const receipt: AutomaticBuildTaskReceiptV2 = {
+    version: "automatic_build_task_receipt.v2",
     task_ref: taskRef(lease),
     state: "retryable_failure",
     target_ref: lease.target_ref,
     stage: lease.stage,
     work_unit_id: lease.work_unit_id,
     attempt: lease.attempt,
-    diagnostic_code: input.diagnostic_code,
-    ...(input.message ? { message: input.message } : {}),
+    ...(lease.attempt_scope_digest ? { attempt_scope_digest: lease.attempt_scope_digest } : {}),
+    failure_diagnostic: failureDiagnostic,
     failed_at: now,
     metrics,
   };
@@ -459,7 +522,7 @@ export function failAutomaticBuildTask(
     attempt: lease.attempt,
     event_id: `${lease.stage}:${lease.work_unit_id}:${lease.attempt}:failure`,
     outcome: "failure",
-    diagnostic: input.message ?? input.diagnostic_code,
+    failure_diagnostic: failureDiagnostic,
     created_at: now,
   });
   return receipt;
@@ -469,10 +532,10 @@ export function inspectAutomaticBuildTask(
   target: AutomaticBuildTarget,
   leaseRef: string,
   token: string,
-): AutomaticBuildTaskReceiptV1 | AutomaticBuildTaskInspectionV1 {
+): AutomaticBuildTaskReceiptV2 | AutomaticBuildTaskInspectionV1 {
   const lease = readAutomaticBuildLease(target, leaseRef, token);
-  if (existsSync(receiptPath(leaseRef))) return readJson<AutomaticBuildTaskReceiptV1>(receiptPath(leaseRef));
-  if (existsSync(failurePath(leaseRef))) return readJson<AutomaticBuildTaskReceiptV1>(failurePath(leaseRef));
+  if (existsSync(receiptPath(leaseRef))) return readAutomaticBuildTaskReceiptFile(receiptPath(leaseRef));
+  if (existsSync(failurePath(leaseRef))) return readAutomaticBuildTaskReceiptFile(failurePath(leaseRef));
   const candidatePath = expectedCandidatePath(leaseRef);
   return {
     version: "automatic_build_task_inspection.v1",
@@ -481,6 +544,7 @@ export function inspectAutomaticBuildTask(
     stage: lease.stage,
     work_unit_id: lease.work_unit_id,
     attempt: lease.attempt,
+    ...(lease.attempt_scope_digest ? { attempt_scope_digest: lease.attempt_scope_digest } : {}),
     ...(existsSync(candidatePath) ? { candidate_sha256: candidateInfo(candidatePath).candidate_sha256 } : {}),
   };
 }

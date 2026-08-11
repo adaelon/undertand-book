@@ -305,6 +305,12 @@ for (const removedMarker of [
 const releaseSkillSha256 = canonicalTextSha256(releaseSkill);
 const installedPluginRoot = process.env.UNDERSTAND_BOOK_INSTALLED_PLUGIN_ROOT;
 if (installedPluginRoot) {
+  const installedRoot = path.resolve(installedPluginRoot);
+  const relativeToRepo = path.relative(repoRoot, installedRoot);
+  assert(
+    relativeToRepo.startsWith("..") || path.isAbsolute(relativeToRepo),
+    "installed plugin root must not resolve inside the source repository",
+  );
   const installedSkill = await readFile(path.join(installedPluginRoot, "skills", "build", "SKILL.md"), "utf8");
   assert.equal(
     canonicalTextSha256(installedSkill),
@@ -319,6 +325,12 @@ if (installedPluginRoot) {
     !existsSync(path.join(installedPluginRoot, ".codex", "agents")),
     "installed Codex plugin must not claim that .codex/agents is auto-registered",
   );
+  for (const sourceOnlyPath of ["packages", "apps", "node_modules", ".git"]) {
+    assert(
+      !existsSync(path.join(installedPluginRoot, sourceOnlyPath)),
+      `installed Codex plugin must not contain source-only path: ${sourceOnlyPath}`,
+    );
+  }
   for (const relativePath of [
     "assets/codex-agents/understand-book-executor.toml",
     "scripts/register-executor-agent.ps1",

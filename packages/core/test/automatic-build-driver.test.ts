@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -18,17 +18,21 @@ import type {
   AutomaticBuildWallBudgetV1,
 } from "../src/automatic-build-budget";
 import { recordAutomaticBuildInputObservation } from "../src/automatic-build-metrics";
-import { submitAutomaticBuildCandidate } from "../src/automatic-build-mailbox";
-import { startAutomaticBuildLease } from "../src/automatic-build-lease";
+import { failAutomaticBuildTask, submitAutomaticBuildCandidate } from "../src/automatic-build-mailbox";
+import { claimAutomaticBuildTask, startAutomaticBuildLease } from "../src/automatic-build-lease";
 import {
   failAutomaticBuildExecutorSession,
   openAutomaticBuildExecutorSession,
   submitAutomaticBuildExecutorCandidate,
   type AutomaticBuildExecutorSessionResponseV1,
 } from "../src/automatic-build-executor-session";
-import { readAutomaticBuildAttemptSnapshot } from "../src/automatic-build-task-store";
+import {
+  automaticBuildTaskStoreRoot,
+  readAutomaticBuildAttemptSnapshot,
+} from "../src/automatic-build-task-store";
 import { resolveAutomaticBuildTarget } from "../src/build-orchestrator";
 import { resolveContentProfile } from "../src/content-profile";
+import { createAutomaticBuildFailureDiagnostic } from "../src/extractor-contract";
 import {
   transitionBuildIntent,
   transitionBuildPlan,
@@ -170,6 +174,10 @@ const FORBIDDEN_ROOT_FIELDS = new Set([
   "receipt_body",
   "receipt",
   "receipts",
+  "failure_diagnostic",
+  "diagnostic_digest",
+  "json_pointer",
+  "expected",
   "plan_digest",
   "plan_id",
   "policy_set_digest",
@@ -484,6 +492,109 @@ function commitDispatchTask(
   );
 }
 
+function taskTreeDigest(target: ReturnType<typeof resolveAutomaticBuildTarget>): string {
+  const root = automaticBuildTaskStoreRoot(target);
+  const hash = createHash("sha256");
+  const visit = (directory: string): void => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })
+      .sort((left, right) => left.name.localeCompare(right.name))) {
+      const file = path.join(directory, entry.name);
+      const relative = path.relative(root, file).replaceAll("\\", "/");
+      if (entry.isDirectory()) {
+        hash.update(`D:${relative}\n`);
+        visit(file);
+      } else if (entry.isFile()) {
+        hash.update(`F:${relative}\n`);
+        hash.update(readFileSync(file));
+      } else {
+        throw new Error(`unexpected synthetic task-tree entry: ${relative}`);
+      }
+    }
+  };
+  if (existsSync(root)) visit(root);
+  return hash.digest("hex");
+}
+
+function exhaustFirstPublicTask(
+  value: ReturnType<typeof fixture>,
+  failureDiagnostic = createAutomaticBuildFailureDiagnostic({
+    category: "schema",
+    code: "schema_invalid",
+    json_pointer: "/discourse_items/0/local_summary",
+    expected: "string length <= 200",
+  }),
+): void {
+  const plan = automaticBuildPlan(value.source, value.root, {
+    requested_workers: 1,
+    available_agent_slots: 1,
+    build_plan: value.buildPlan,
+  });
+  if (!plan.preflight) throw new Error("expected retry-boundary preflight");
+  const target = resolveAutomaticBuildTarget(value.source, value.root);
+  const stage = plan.snapshot.stages.find((candidate) => candidate.stage === "pass1");
+  const descriptor = stage?.work_units?.[0];
+  const binding = descriptor ? stage?.task_bindings?.[descriptor.work_unit_id] : undefined;
+  if (!descriptor || descriptor.version !== "automatic_build_work_unit.v3" || !binding) {
+    throw new Error("expected a proof-bound synthetic Pass1 work unit");
+  }
+  for (let semanticAttempt = 1; semanticAttempt <= 3; semanticAttempt += 1) {
+    const claim = claimAutomaticBuildTask(target, "pass1", descriptor.work_unit_id, {
+      owner: `driver-scope-a-${semanticAttempt}`,
+      now: `2026-08-10T02:00:0${semanticAttempt}.000Z`,
+      descriptor,
+      binding,
+      policy_generation: "v3_only",
+      max_semantic_attempts: 3,
+    });
+    if (claim.status !== "leased") throw new Error(`expected synthetic scope A task ${semanticAttempt}`);
+    failAutomaticBuildTask(target, claim.lease_ref, claim.lease.token, {
+      failure_diagnostic: failureDiagnostic,
+      now: `2026-08-10T02:00:0${semanticAttempt}.100Z`,
+    });
+  }
+}
+
+async function exhaustedRetryBoundary(
+  driver: AutomaticBuildDriverModule,
+  value: ReturnType<typeof fixture>,
+  createdAt: string,
+  options: {
+    failure_diagnostic?: ReturnType<typeof createAutomaticBuildFailureDiagnostic>;
+    expected_projection?: Record<string, unknown>;
+  } = {},
+) {
+  exhaustFirstPublicTask(value, options.failure_diagnostic);
+  const invocation = await createInvocation(driver, value, { created_at: createdAt });
+  const exhausted = await driver.automaticBuildStep({
+    version: "automatic_build_step_request.v1",
+    invocation_ref: invocation.invocation_ref,
+    available_agent_slots: 1,
+  });
+  expect(exhausted.action).toMatchObject({
+    kind: "NEEDS_USER",
+    reason: "retry_exhausted",
+    choices: [{ choice_id: "retry_current", label: "Validate recovery and retry" }],
+    projection: options.expected_projection ?? {
+      category: "schema",
+      code: "schema_invalid",
+      stage: "pass1",
+      work_unit_count: 1,
+      required_recovery: "publish_new_policy_scope",
+    },
+  });
+  expect(JSON.stringify(exhausted)).not.toMatch(/diagnostic_digest|json_pointer|expected|synthetic schema_invalid/u);
+  expectRootSafeStep(exhausted, [value.root, value.source, value.buildPlanPath, "PRIVATE_DRIVER_INPUT"]);
+  const retryDecision = firstDecision(exhausted);
+  expect(retryDecision.choice_id).toBe("retry_current");
+  const target = resolveAutomaticBuildTarget(value.source, value.root);
+  return {
+    invocation,
+    retryDecision,
+    target,
+    exhaustedTreeDigest: taskTreeDigest(target),
+  };
+}
+
 describe("S0 deterministic automatic-build driver protocol", () => {
   it("returns only the four root actions and never exposes internal or semantic fields", async () => {
     const driver = expectedDriver();
@@ -734,6 +845,255 @@ describe("S0 deterministic automatic-build driver protocol", () => {
     });
     expect(replayed).toEqual(continued);
   });
+
+  it("keeps deterministic retry_current side-effect free while the policy scope is unchanged", async () => {
+    const previousRegistryRoot = process.env.UNDERSTAND_BOOK_AUTOMATIC_BUILD_DRIVER_ROOT;
+    const value = fixture("deterministic-retry");
+    process.env.UNDERSTAND_BOOK_AUTOMATIC_BUILD_DRIVER_ROOT = path.join(value.root, "driver-registry");
+    try {
+      const driver = expectedDriver();
+      const { invocation, retryDecision, target, exhaustedTreeDigest } = await exhaustedRetryBoundary(
+        driver,
+        value,
+        "2026-08-10T02:00:10.000Z",
+      );
+      const stillBlocked = await driver.automaticBuildStep({
+        version: "automatic_build_step_request.v1",
+        invocation_ref: invocation.invocation_ref,
+        available_agent_slots: 1,
+        decision: retryDecision,
+      });
+      expect(stillBlocked.action).toMatchObject({
+        kind: "NEEDS_USER",
+        reason: "recovery_not_satisfied",
+        projection: {
+          category: "schema",
+          code: "schema_invalid",
+          required_recovery: "publish_new_policy_scope",
+        },
+      });
+      expect(taskTreeDigest(target)).toBe(exhaustedTreeDigest);
+      expect(existsSync(path.join(
+        value.root,
+        "driver-registry",
+        "decisions",
+        invocation.invocation_ref,
+        `${retryDecision.request_id}.json`,
+      ))).toBe(false);
+    } finally {
+      if (previousRegistryRoot === undefined) {
+        delete process.env.UNDERSTAND_BOOK_AUTOMATIC_BUILD_DRIVER_ROOT;
+      } else {
+        process.env.UNDERSTAND_BOOK_AUTOMATIC_BUILD_DRIVER_ROOT = previousRegistryRoot;
+      }
+    }
+  }, 30_000);
+
+  it("writes one terminal-bound recovery receipt for an allowlisted transient retry_current", async () => {
+    const previousRegistryRoot = process.env.UNDERSTAND_BOOK_AUTOMATIC_BUILD_DRIVER_ROOT;
+    const value = fixture("transient-retry");
+    process.env.UNDERSTAND_BOOK_AUTOMATIC_BUILD_DRIVER_ROOT = path.join(value.root, "driver-registry");
+    try {
+      const driver = expectedDriver();
+      const providerDiagnostic = createAutomaticBuildFailureDiagnostic({
+        category: "provider",
+        code: "provider_timeout",
+      });
+      const { invocation, retryDecision, target } = await exhaustedRetryBoundary(
+        driver,
+        value,
+        "2026-08-10T02:05:10.000Z",
+        {
+          failure_diagnostic: providerDiagnostic,
+          expected_projection: {
+            category: "provider",
+            code: "provider_timeout",
+            stage: "pass1",
+            work_unit_count: 1,
+            required_recovery: "confirm_transient_retry",
+          },
+        },
+      );
+      const recovered = await driver.automaticBuildStep({
+        version: "automatic_build_step_request.v1",
+        invocation_ref: invocation.invocation_ref,
+        available_agent_slots: 1,
+        decision: retryDecision,
+      });
+      expect(recovered.action.kind).toBe("SPAWN_EXECUTORS");
+      expectRootSafeStep(recovered, [value.root, value.source, value.buildPlanPath]);
+
+      const taskRoot = automaticBuildTaskStoreRoot(target);
+      const recoveryFiles = readdirSync(taskRoot, { recursive: true })
+        .map(String)
+        .filter((entry) => entry.replaceAll("\\", "/").endsWith("/recovery.json"));
+      expect(recoveryFiles).toHaveLength(1);
+      const receipt = JSON.parse(readFileSync(path.join(taskRoot, recoveryFiles[0]), "utf8")) as Record<string, unknown>;
+      expect(receipt).toMatchObject({
+        version: "automatic_build_retry_recovery.v1",
+        decision_request_id: retryDecision.request_id,
+        action: "open_same_scope_retry_window",
+        diagnostic_digest: providerDiagnostic.diagnostic_digest,
+      });
+      const failureFiles = readdirSync(taskRoot, { recursive: true })
+        .map(String)
+        .filter((entry) => entry.replaceAll("\\", "/").endsWith("/failure.json"))
+        .sort();
+      const resultFiles = readdirSync(taskRoot, { recursive: true })
+        .map(String)
+        .filter((entry) => entry.replaceAll("\\", "/").endsWith("/result.json"))
+        .sort();
+      expect(receipt.terminal_receipt_sha256).toBe(
+        createHash("sha256").update(readFileSync(path.join(taskRoot, failureFiles.at(-1)!))).digest("hex"),
+      );
+      expect(receipt.terminal_receipt_sha256).not.toBe(
+        createHash("sha256").update(readFileSync(path.join(taskRoot, resultFiles.at(-1)!))).digest("hex"),
+      );
+      expect(readdirSync(taskRoot, { recursive: true }).map(String)
+        .filter((entry) => entry.replaceAll("\\", "/").endsWith("/reset.json"))).toHaveLength(0);
+    } finally {
+      if (previousRegistryRoot === undefined) {
+        delete process.env.UNDERSTAND_BOOK_AUTOMATIC_BUILD_DRIVER_ROOT;
+      } else {
+        process.env.UNDERSTAND_BOOK_AUTOMATIC_BUILD_DRIVER_ROOT = previousRegistryRoot;
+      }
+    }
+  }, 30_000);
+
+  it("rejects terminal receipt drift without persisting a decision or recovery effect", async () => {
+    const previousRegistryRoot = process.env.UNDERSTAND_BOOK_AUTOMATIC_BUILD_DRIVER_ROOT;
+    const value = fixture("stale-terminal-retry");
+    process.env.UNDERSTAND_BOOK_AUTOMATIC_BUILD_DRIVER_ROOT = path.join(value.root, "driver-registry");
+    try {
+      const driver = expectedDriver();
+      const { invocation, retryDecision, target } = await exhaustedRetryBoundary(
+        driver,
+        value,
+        "2026-08-10T02:07:10.000Z",
+      );
+      const taskRoot = automaticBuildTaskStoreRoot(target);
+      const failureFiles = readdirSync(taskRoot, { recursive: true })
+        .map(String)
+        .filter((entry) => entry.replaceAll("\\", "/").endsWith("/failure.json"))
+        .sort();
+      const terminalPath = path.join(taskRoot, failureFiles.at(-1)!);
+      const terminal = JSON.parse(readFileSync(terminalPath, "utf8")) as Record<string, unknown>;
+      writeFileSync(terminalPath, `${JSON.stringify(terminal)}\n`, "utf8");
+      const driftedTreeDigest = taskTreeDigest(target);
+
+      const rejected = await driver.automaticBuildStep({
+        version: "automatic_build_step_request.v1",
+        invocation_ref: invocation.invocation_ref,
+        available_agent_slots: 1,
+        decision: retryDecision,
+      });
+      expect(rejected.action).toMatchObject({
+        kind: "NEEDS_USER",
+        reason: "plan_changed",
+        choices: [],
+      });
+      expect(taskTreeDigest(target)).toBe(driftedTreeDigest);
+      expect(readdirSync(taskRoot, { recursive: true }).map(String)
+        .filter((entry) => entry.replaceAll("\\", "/").endsWith("/recovery.json"))).toHaveLength(0);
+      expect(existsSync(path.join(
+        value.root,
+        "driver-registry",
+        "decisions",
+        invocation.invocation_ref,
+        `${retryDecision.request_id}.json`,
+      ))).toBe(false);
+    } finally {
+      if (previousRegistryRoot === undefined) {
+        delete process.env.UNDERSTAND_BOOK_AUTOMATIC_BUILD_DRIVER_ROOT;
+      } else {
+        process.env.UNDERSTAND_BOOK_AUTOMATIC_BUILD_DRIVER_ROOT = previousRegistryRoot;
+      }
+    }
+  }, 30_000);
+
+  it("replans retry_current when the complete policy scope changes", async () => {
+    const previousRegistryRoot = process.env.UNDERSTAND_BOOK_AUTOMATIC_BUILD_DRIVER_ROOT;
+    const value = fixture("policy-scope-retry");
+    const registryRoot = path.join(value.root, "driver-registry");
+    process.env.UNDERSTAND_BOOK_AUTOMATIC_BUILD_DRIVER_ROOT = registryRoot;
+    try {
+      const driver = expectedDriver();
+      const { invocation, retryDecision, target, exhaustedTreeDigest } = await exhaustedRetryBoundary(
+        driver,
+        value,
+        "2026-08-10T02:10:10.000Z",
+      );
+
+      const originalSemanticArtifact = await vi.importActual<typeof import("../src/semantic-artifact")>(
+        "../src/semantic-artifact",
+      );
+      vi.doMock("../src/semantic-artifact", () => ({
+        ...originalSemanticArtifact,
+        automaticBuildExtractionPolicy: (
+          ...args: Parameters<typeof originalSemanticArtifact.automaticBuildExtractionPolicy>
+        ) => {
+          const policy = originalSemanticArtifact.automaticBuildExtractionPolicy(...args);
+          if (args[0] !== "pass1") return policy;
+          return {
+            ...policy,
+            stage_policy_version: "pass1_policy.synthetic_scope_b",
+            prompt_sha256: createHash("sha256")
+              .update(`${policy.prompt_sha256}:synthetic-scope-b`)
+              .digest("hex"),
+          };
+        },
+      }));
+      vi.doMock("../../../skills/build/automatic-build", async () => {
+        const actual = await vi.importActual<typeof import("../../../skills/build/automatic-build")>(
+          "../../../skills/build/automatic-build",
+        );
+        return {
+          ...actual,
+          // SR2 isolates attempt-scope replanning from the SR5 forward-release
+          // parity gate; the synthetic prompt digest is intentionally unpublished.
+          automaticBuildProtocolDoctor: () => ({ status: "compatible" as const }),
+        };
+      });
+      vi.resetModules();
+      const policyBDriver = await import("../../../skills/build/automatic-build-driver");
+      const replanned = policyBDriver.automaticBuildStep({
+        version: "automatic_build_step_request.v1",
+        invocation_ref: invocation.invocation_ref,
+        available_agent_slots: 1,
+        decision: retryDecision,
+      });
+
+      expect({
+        kind: replanned.action.kind,
+        ...(replanned.action.kind === "NEEDS_USER" ? { reason: replanned.action.reason } : {}),
+      }).toEqual({ kind: "SPAWN_EXECUTORS" });
+      const requestRecord = JSON.parse(readFileSync(
+        path.join(registryRoot, "requests", `${retryDecision.request_id}.json`),
+        "utf8",
+      )) as Record<string, unknown>;
+      const decisionReceipt = JSON.parse(readFileSync(
+        path.join(registryRoot, "decisions", invocation.invocation_ref, `${retryDecision.request_id}.json`),
+        "utf8",
+      )) as Record<string, unknown>;
+      expect(decisionReceipt).toMatchObject({
+        version: "automatic_build_decision_receipt.v1",
+        invocation_ref: invocation.invocation_ref,
+        request_id: retryDecision.request_id,
+        choice_id: "retry_current",
+      });
+      expect(decisionReceipt.state).not.toEqual(requestRecord.state);
+      expect(taskTreeDigest(target)).toBe(exhaustedTreeDigest);
+    } finally {
+      vi.doUnmock("../src/semantic-artifact");
+      vi.doUnmock("../../../skills/build/automatic-build");
+      vi.resetModules();
+      if (previousRegistryRoot === undefined) {
+        delete process.env.UNDERSTAND_BOOK_AUTOMATIC_BUILD_DRIVER_ROOT;
+      } else {
+        process.env.UNDERSTAND_BOOK_AUTOMATIC_BUILD_DRIVER_ROOT = previousRegistryRoot;
+      }
+    }
+  }, 30_000);
 
   it("reissues a bounded user projection when wall-clock evaluation drifts", async () => {
     const driver = expectedDriver();

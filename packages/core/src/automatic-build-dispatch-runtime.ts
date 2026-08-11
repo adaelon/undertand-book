@@ -14,8 +14,12 @@ import {
   inspectAutomaticBuildTaskClaim,
   type AutomaticBuildClaimResult,
 } from "./automatic-build-lease";
-import type { AutomaticBuildTaskReceiptV1 } from "./automatic-build-mailbox";
 import {
+  readAutomaticBuildTaskReceiptFile,
+  type AutomaticBuildTaskReceiptV2,
+} from "./automatic-build-mailbox";
+import {
+  createAutomaticBuildAttemptScope,
   listAutomaticBuildStoredAttempts,
 } from "./automatic-build-task-store";
 import type { AutomaticBuildStage, AutomaticBuildTarget, BuildTargetRefV2 } from "./build-orchestrator";
@@ -134,6 +138,7 @@ export interface AutomaticBuildDispatchTaskReceiptV1 {
   state: "committed" | "retryable_failure";
   work_unit_id: string;
   attempt: number;
+  attempt_scope_digest?: string;
   candidate_sha256?: string;
   artifact_sha256?: string;
   diagnostic_code?: string;
@@ -186,7 +191,11 @@ export type AutomaticBuildDispatchAdvanceResult =
       receipt: AutomaticBuildExecutorDispatchReceiptV1;
     }
   | {
-      status: "retry_exhausted" | "executor_instability";
+      status:
+        | "retry_exhausted"
+        | "executor_instability"
+        | "policy_generation_conflict"
+        | "policy_generation_migration_required";
       persisted: AutomaticBuildPersistedDispatchV1;
       work_unit_id: string;
     };
@@ -660,8 +669,16 @@ function dispatchPlanRuntimeState(
     const progress = refreshProgress(target, persisted, now);
     const nextWorkUnitId = dispatch.ordered_work_unit_ids[progress.length];
     if (!nextWorkUnitId) continue;
-    const inspection = inspectAutomaticBuildTaskClaim(target, dispatch.stage, nextWorkUnitId, { now });
-    if (inspection.status === "already_leased") active.push(dispatch.dispatch_id);
+    const binding = dispatch.task_bindings?.[nextWorkUnitId];
+    const inspection = inspectAutomaticBuildTaskClaim(target, dispatch.stage, nextWorkUnitId, {
+      now,
+      ...(binding ? { binding, policy_generation: "v3_only" as const } : {}),
+    });
+    if ([
+      "already_leased",
+      "policy_generation_conflict",
+      "policy_generation_migration_required",
+    ].includes(inspection.status)) active.push(dispatch.dispatch_id);
   }
   return { active_dispatch_ids: active, completed_dispatch_ids: completed };
 }
@@ -798,7 +815,7 @@ export function validateAutomaticBuildDispatchHandoff(
   return persisted;
 }
 
-function compactTaskReceipt(receipt: AutomaticBuildTaskReceiptV1): AutomaticBuildDispatchTaskReceiptV1 {
+function compactTaskReceipt(receipt: AutomaticBuildTaskReceiptV2): AutomaticBuildDispatchTaskReceiptV1 {
   const terminalAt = receipt.committed_at ?? receipt.failed_at;
   if (!terminalAt) throw new Error(`terminal task receipt is missing terminal time: ${receipt.task_ref}`);
   return {
@@ -807,9 +824,10 @@ function compactTaskReceipt(receipt: AutomaticBuildTaskReceiptV1): AutomaticBuil
     state: receipt.state,
     work_unit_id: receipt.work_unit_id,
     attempt: receipt.attempt,
+    ...(receipt.attempt_scope_digest ? { attempt_scope_digest: receipt.attempt_scope_digest } : {}),
     ...(receipt.candidate_sha256 ? { candidate_sha256: receipt.candidate_sha256 } : {}),
     ...(receipt.artifact_sha256 ? { artifact_sha256: receipt.artifact_sha256 } : {}),
-    ...(receipt.diagnostic_code ? { diagnostic_code: receipt.diagnostic_code } : {}),
+    ...(receipt.failure_diagnostic ? { diagnostic_code: receipt.failure_diagnostic.code } : {}),
     terminal_at: terminalAt,
   };
 }
@@ -819,22 +837,36 @@ function terminalReceiptAfterDispatch(
   persisted: AutomaticBuildPersistedDispatchV1,
   workUnitId: string,
 ): AutomaticBuildDispatchTaskReceiptV1 | undefined {
+  const binding = persisted.manifest.task_bindings?.[workUnitId];
+  const expectedScope = binding ? createAutomaticBuildAttemptScope({
+    target_ref: target.target_ref,
+    stage: persisted.manifest.stage,
+    work_unit_id: workUnitId,
+    task_binding: binding,
+  }) : undefined;
   const attempts = listAutomaticBuildStoredAttempts(target, persisted.manifest.stage)
     .filter((attempt) => attempt.work_unit_id === workUnitId)
+    .filter((attempt) => !expectedScope
+      || (attempt.execution_identity?.version === "automatic_build_execution_identity.v2"
+        && attempt.execution_identity.attempt_scope_digest === expectedScope.attempt_scope_digest))
     .sort((left, right) => right.physical_attempt - left.physical_attempt);
   for (const attempt of attempts) {
     for (const name of ["receipt.json", "failure.json"] as const) {
       const file = path.join(attempt.attempt_dir, name);
       if (!existsSync(file)) continue;
-      const receipt = readJson<AutomaticBuildTaskReceiptV1>(file);
+      const receipt = readAutomaticBuildTaskReceiptFile(file);
       const terminalAt = receipt.committed_at ?? receipt.failed_at;
-      if (receipt.version !== "automatic_build_task_receipt.v1"
+      if (receipt.version !== "automatic_build_task_receipt.v2"
         || receipt.stage !== persisted.manifest.stage
         || receipt.work_unit_id !== workUnitId
         || receipt.attempt !== attempt.physical_attempt
         || !sameTargetRef(receipt.target_ref, target.target_ref)
         || !terminalAt) {
         throw new Error(`invalid automatic build task receipt: ${file}`);
+      }
+      if (expectedScope && receipt.attempt_scope_digest !== undefined
+        && receipt.attempt_scope_digest !== expectedScope.attempt_scope_digest) {
+        throw new Error(`automatic build task receipt scope mismatch: ${file}`);
       }
       if (Date.parse(terminalAt) >= Date.parse(persisted.created_at)) {
         return compactTaskReceipt(receipt);
@@ -975,20 +1007,45 @@ export function advanceAutomaticBuildDispatch(
   const now = input.now ?? new Date().toISOString();
   const progress = refreshProgress(target, persisted, now);
   const lastProgress = progress.at(-1);
+  const descriptorStart = lastProgress?.task_receipt.state === "retryable_failure"
+    ? Math.max(0, progress.length - 1)
+    : progress.length;
+  const descriptors = validateDescriptors(
+    persisted,
+    input.descriptors,
+    input.task_bindings,
+    descriptorStart,
+  );
   if (lastProgress?.task_receipt.state === "retryable_failure") {
+    const failedDescriptor = descriptors.get(lastProgress.work_unit_id);
+    const failedBinding = input.task_bindings[lastProgress.work_unit_id];
+    if (!failedDescriptor || !failedBinding) {
+      throw new Error(`dispatch failed task is missing its scoped identity: ${stage}/${lastProgress.work_unit_id}`);
+    }
     const failedInspection = inspectAutomaticBuildTaskClaim(
       target,
       stage,
       lastProgress.work_unit_id,
       {
         now,
+        descriptor: failedDescriptor,
+        binding: failedBinding,
+        ...(isWorkUnitDescriptorV3(failedDescriptor) ? { policy_generation: "v3_only" as const } : {}),
         max_semantic_attempts: input.max_semantic_attempts,
         max_lease_epochs: input.max_lease_epochs,
       },
     );
-    if (failedInspection.status === "retry_exhausted") {
+    if ([
+      "retry_exhausted",
+      "executor_instability",
+      "policy_generation_conflict",
+      "policy_generation_migration_required",
+    ].includes(failedInspection.status)) {
       return {
-        status: "retry_exhausted",
+        status: failedInspection.status as Exclude<
+          AutomaticBuildDispatchAdvanceResult["status"],
+          "leased" | "waiting" | "ready_to_finish" | "finished"
+        >,
         persisted,
         work_unit_id: lastProgress.work_unit_id,
       };
@@ -997,13 +1054,15 @@ export function advanceAutomaticBuildDispatch(
   if (progress.length === persisted.manifest.ordered_work_unit_ids.length) {
     return { status: "ready_to_finish", persisted, task_receipts: progress.map((item) => item.task_receipt) };
   }
-  const descriptors = validateDescriptors(persisted, input.descriptors, input.task_bindings, progress.length);
   const workUnitId = persisted.manifest.ordered_work_unit_ids[progress.length];
   const descriptor = descriptors.get(workUnitId)!;
   const binding = input.task_bindings[workUnitId];
   if (!binding) throw new Error(`dispatch task is missing policy binding: ${stage}/${workUnitId}`);
   const inspection = inspectAutomaticBuildTaskClaim(target, stage, workUnitId, {
     now,
+    descriptor,
+    binding,
+    ...(isWorkUnitDescriptorV3(descriptor) ? { policy_generation: "v3_only" as const } : {}),
     max_semantic_attempts: input.max_semantic_attempts,
     max_lease_epochs: input.max_lease_epochs,
   });
@@ -1015,7 +1074,7 @@ export function advanceAutomaticBuildDispatch(
       retry_after_ms: Math.min(persisted.reserve_ttl_ms, 30_000),
     };
   }
-  if (inspection.status === "retry_exhausted" || inspection.status === "executor_instability") {
+  if (inspection.status !== "ready") {
     return { status: inspection.status, persisted, work_unit_id: workUnitId };
   }
   const claim = claimAutomaticBuildTask(target, stage, workUnitId, {
@@ -1356,7 +1415,19 @@ export function finishAutomaticBuildDispatch(
         throw new Error(`dispatch task_failure requires the current failed work unit to be terminal: ${dispatchId}`);
       }
       const activeWorkUnitIds = persisted.manifest.ordered_work_unit_ids.filter((workUnitId) => (
-        inspectAutomaticBuildTaskClaim(target, stage, workUnitId, { now }).status === "already_leased"
+        [
+          "already_leased",
+          "policy_generation_conflict",
+          "policy_generation_migration_required",
+        ].includes(inspectAutomaticBuildTaskClaim(target, stage, workUnitId, {
+          now,
+          ...(persisted.manifest.task_bindings?.[workUnitId]
+            ? {
+                binding: persisted.manifest.task_bindings[workUnitId],
+                policy_generation: "v3_only" as const,
+              }
+            : {}),
+        }).status)
       ));
       if (activeWorkUnitIds.length) {
         throw new Error(`dispatch task_failure cannot finish with an active lease: ${activeWorkUnitIds.join(",")}`);

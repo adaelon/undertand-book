@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -5,9 +6,12 @@ import { describe, expect, it } from "vitest";
 import {
   AUTOMATIC_BUILD_EXECUTOR_DISPATCH_PROTOCOL_V1,
   AUTOMATIC_BUILD_RELEASE_V3,
+  PROFILE_SIDECAR_POLICY_V2,
 } from "../src/automatic-build-protocol";
 import { parseAutomaticBuildStageCloseResult } from "../src/automatic-build-close";
 import { automaticBuildProtocolDoctor } from "../../../skills/build/automatic-build";
+
+const REPO_ROOT = path.resolve(process.cwd(), "..", "..");
 
 function fixture() {
   const root = mkdtempSync(path.join(tmpdir(), "understand-book-br10-release-"));
@@ -57,6 +61,22 @@ describe("BR10 automatic build release contract", () => {
         "profile_sidecar_formula",
       ]),
     );
+    const profilePrompt = readFileSync(
+      path.join(REPO_ROOT, "agents", "profile-sidecar-extractor.md"),
+      "utf8",
+    );
+    const profilePromptSha256 = createHash("sha256").update(profilePrompt).digest("hex");
+    const profileMembers = AUTOMATIC_BUILD_RELEASE_V3.release_policy_members
+      .filter((member) => member.prompt_name === "profile-sidecar-extractor.md");
+    expect(profileMembers).toHaveLength(2);
+    expect(profileMembers.every((member) => (
+      member.stage_policy_version === PROFILE_SIDECAR_POLICY_V2.stage_policy_version
+      && member.prompt_sha256 === profilePromptSha256
+      && member.schema_version === PROFILE_SIDECAR_POLICY_V2.schema_version
+    ))).toBe(true);
+    const sidecarEntry = readFileSync(path.join(REPO_ROOT, "skills", "build", "sidecar-entry.ts"), "utf8");
+    expect(sidecarEntry).toContain("profile-sidecar-extractor.md");
+    expect(sidecarEntry).toContain("releaseValidatedPrompt");
   });
 
   it("audits every release policy member and reader without mutating the target", () => {

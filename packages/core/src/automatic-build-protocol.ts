@@ -23,6 +23,12 @@ export const AUTOMATIC_BUILD_MODEL_INPUT_BUDGET_V1 = {
   safety_margin_tokens: 256,
 } as const;
 
+export const PROFILE_SIDECAR_POLICY_V2 = {
+  stage_policy_version: "profile_sidecar_policy.v2",
+  prompt_sha256: "4d920312fe6d5f08b409b1854e2b91e92f5de4917eeeafe2dab489b91f3d7d6d",
+  schema_version: "profile_sidecar_output.v2",
+} as const;
+
 export const AUTOMATIC_BUILD_RELEASE_POLICY_MEMBERS_V1 = [
   {
     stage: "pass1",
@@ -59,10 +65,10 @@ export const AUTOMATIC_BUILD_RELEASE_POLICY_MEMBERS_V1 = [
     kind: "profile_sidecar_discourse",
     extractor: "profile-sidecar-extractor",
     prompt_name: "profile-sidecar-extractor.md",
-    stage_policy_version: "profile_sidecar_policy.v1",
+    stage_policy_version: PROFILE_SIDECAR_POLICY_V2.stage_policy_version,
     router_version: "profile_sidecar_semantic_units.v2",
-    prompt_sha256: "0a56b04e68fc4fc86ae292eb0a57f59d2c85bd9b27e61e7da2d3b5c503da297a",
-    schema_version: "profile_sidecar_output.v2",
+    prompt_sha256: PROFILE_SIDECAR_POLICY_V2.prompt_sha256,
+    schema_version: PROFILE_SIDECAR_POLICY_V2.schema_version,
   },
   {
     stage: "profile_sidecar",
@@ -89,10 +95,10 @@ export const AUTOMATIC_BUILD_RELEASE_POLICY_MEMBERS_V1 = [
     kind: "profile_sidecar_formula",
     extractor: "profile-sidecar-extractor",
     prompt_name: "profile-sidecar-extractor.md",
-    stage_policy_version: "profile_sidecar_policy.v1",
+    stage_policy_version: PROFILE_SIDECAR_POLICY_V2.stage_policy_version,
     router_version: "profile_sidecar_semantic_units.v2",
-    prompt_sha256: "0a56b04e68fc4fc86ae292eb0a57f59d2c85bd9b27e61e7da2d3b5c503da297a",
-    schema_version: "profile_sidecar_output.v2",
+    prompt_sha256: PROFILE_SIDECAR_POLICY_V2.prompt_sha256,
+    schema_version: PROFILE_SIDECAR_POLICY_V2.schema_version,
   },
 ] as const;
 

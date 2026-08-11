@@ -148,7 +148,17 @@ describe("automatic build attempt policy", () => {
     const target = resolveAutomaticBuildTarget(source, root);
 
     for (let attempt = 1; attempt <= 3; attempt += 1) {
-      recordAutomaticBuildAttempt(target, "pass1", "0", "failure", `gate failure ${attempt}`);
+      const claimed = acceptedNext(source, root, 1, { owner: `cli-scope-owner-${attempt}` });
+      if (claimed.action.kind !== "extract" || !claimed.action.tasks?.length) {
+        throw new Error(`expected scoped CLI claim ${attempt}`);
+      }
+      const task = claimed.action.tasks[0];
+      if (!("lease" in task) || !task.lease) throw new Error(`expected scoped CLI lease ${attempt}`);
+      recordAutomaticBuildAttempt(target, "pass1", task.task_id, "failure", `gate failure ${attempt}`, {
+        attempt: task.lease.attempt,
+        lease_ref: task.lease_ref,
+        lease_token: task.lease.token,
+      });
     }
 
     expect(automaticBuildNext(source, root, 5, {
@@ -158,16 +168,22 @@ describe("automatic build attempt policy", () => {
         kind: "needs_user",
         reason: "retry_exhausted",
         stage: "pass1",
-        tasks: [{ task_id: "0", failures: 3, last_error: "gate failure 3" }],
+        tasks: [{
+          task_id: "0",
+          status: "retry_exhausted",
+          semantic_attempt: 3,
+          attempt_scope_digest: expect.stringMatching(/^[a-f0-9]{64}$/u),
+        }],
       },
     });
 
-    recordAutomaticBuildAttempt(target, "pass1", "0", "reset");
+    expect(() => recordAutomaticBuildAttempt(target, "pass1", "0", "reset"))
+      .toThrow("scoped automatic build tasks require a guarded recovery receipt");
     expect(acceptedNext(source, root)).toMatchObject({
       action: {
-        kind: "extract",
+        kind: "needs_user",
+        reason: "retry_exhausted",
         stage: "pass1",
-        tasks: [{ task_id: "0", attempt_number: 4 }],
       },
     });
   });
@@ -202,7 +218,7 @@ describe("automatic build attempt policy", () => {
     }
   });
 
-  it("keeps the paper workspace target across generated task and reset commands", () => {
+  it("keeps the paper workspace target across generated task commands without exposing scoped reset", () => {
     const root = mkdtempSync(path.join(tmpdir(), "understand-book-paper-target-"));
     const workspace = writeTrustedPaperWorkspace(root);
     const source = path.join(workspace, "source.txt");
@@ -232,21 +248,33 @@ describe("automatic build attempt policy", () => {
       expect(task).not.toHaveProperty("record_success_command");
 
       const target = resolveAutomaticBuildTarget(source, root);
+      let currentTask = task;
       for (let attempt = 1; attempt <= 3; attempt += 1) {
-        recordAutomaticBuildAttempt(target, "pass1", "0", "failure", `gate failure ${attempt}`);
+        if (!("lease" in currentTask) || !currentTask.lease) {
+          throw new Error(`expected paper scoped lease ${attempt}`);
+        }
+        recordAutomaticBuildAttempt(target, "pass1", currentTask.task_id, "failure", `gate failure ${attempt}`, {
+          attempt: currentTask.lease.attempt,
+          lease_ref: currentTask.lease_ref,
+          lease_token: currentTask.lease.token,
+        });
+        if (attempt < 3) {
+          const retry = acceptedNext(source, root, 1, { owner: `paper-cli-scope-owner-${attempt + 1}` });
+          if (retry.action.kind !== "extract" || !retry.action.tasks?.length) {
+            throw new Error(`expected paper scoped retry ${attempt + 1}`);
+          }
+          const retryTask = retry.action.tasks[0];
+          if (!("input_command" in retryTask)) {
+            throw new Error(`expected paper scoped retry commands ${attempt + 1}`);
+          }
+          currentTask = retryTask;
+        }
       }
       const exhausted = automaticBuildNext(source, root, 1, {
         build_plan: confirmedStandardBuildPlan(source, root),
       });
       expect(exhausted.action.kind).toBe("needs_user");
-      if (!("reset_commands" in exhausted.action)) throw new Error("expected reset commands");
-      const resetCommands = exhausted.action.reset_commands;
-      if (!resetCommands) throw new Error("expected reset commands");
-      expect(resetCommands[0].slice(0, 3)).toEqual([
-        process.env.UNDERSTAND_BOOK_SIDECAR_SELF,
-        "record-attempt",
-        path.resolve(workspace),
-      ]);
+      expect(exhausted.action).not.toHaveProperty("reset_commands");
     } finally {
       if (previous === undefined) delete process.env.UNDERSTAND_BOOK_SIDECAR_SELF;
       else process.env.UNDERSTAND_BOOK_SIDECAR_SELF = previous;

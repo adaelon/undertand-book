@@ -18,10 +18,15 @@ import {
 } from "./automatic-build-lease";
 import {
   listAutomaticBuildStoredAttempts,
-  type AutomaticBuildExecutionIdentityV1,
+  type AutomaticBuildExecutionIdentity,
   type AutomaticBuildStoredAttemptV1,
 } from "./automatic-build-task-store";
 import type { WorkUnitDescriptor, WorkUnitKind } from "./stage-work-unit";
+import {
+  legacyAutomaticBuildFailureDiagnostic,
+  validateAutomaticBuildFailureDiagnostic,
+  type AutomaticBuildFailureDiagnosticV2,
+} from "./extractor-contract";
 
 export interface AutomaticBuildUsageReceiptV1 {
   version: "automatic_build_usage_receipt.v1";
@@ -114,7 +119,7 @@ export interface AutomaticBuildLifecycleEventV1 {
   stage: AutomaticBuildStage;
   work_unit_id: string;
   physical_attempt: number;
-  execution_identity?: AutomaticBuildExecutionIdentityV1;
+  execution_identity?: AutomaticBuildExecutionIdentity;
   observed_at: string;
   diagnostic_code?: string;
   submit_revision?: number;
@@ -524,17 +529,45 @@ interface AutomaticBuildSubmissionV1 {
 }
 
 interface AutomaticBuildTerminalRecord {
+  version?: "automatic_build_task_receipt.v1" | "automatic_build_task_receipt.v2";
   state?: "committed" | "retryable_failure";
   diagnostic_code?: string;
+  failure_diagnostic?: AutomaticBuildFailureDiagnosticV2;
   committed_at?: string;
   failed_at?: string;
 }
 
 interface AutomaticBuildAttemptResult {
-  version: "automatic_build_attempt_event.v2";
+  version: "automatic_build_attempt_event.v2" | "automatic_build_attempt_event.v3";
   outcome: "failure" | "success" | "reset";
   diagnostic?: string;
+  failure_diagnostic?: AutomaticBuildFailureDiagnosticV2;
   created_at: string;
+}
+
+function terminalDiagnosticCode(record: AutomaticBuildTerminalRecord | undefined): string | undefined {
+  if (!record || record.state !== "retryable_failure") return undefined;
+  if (record.version === "automatic_build_task_receipt.v2") {
+    return record.failure_diagnostic
+      ? validateAutomaticBuildFailureDiagnostic(record.failure_diagnostic).code
+      : undefined;
+  }
+  if (record.version === "automatic_build_task_receipt.v1") {
+    return legacyAutomaticBuildFailureDiagnostic().code;
+  }
+  return record.failure_diagnostic
+    ? validateAutomaticBuildFailureDiagnostic(record.failure_diagnostic).code
+    : record.diagnostic_code;
+}
+
+function attemptResultDiagnosticCode(result: AutomaticBuildAttemptResult | undefined): string | undefined {
+  if (!result || result.outcome !== "failure") return undefined;
+  if (result.version === "automatic_build_attempt_event.v3") {
+    return result.failure_diagnostic
+      ? validateAutomaticBuildFailureDiagnostic(result.failure_diagnostic).code
+      : undefined;
+  }
+  return legacyAutomaticBuildFailureDiagnostic().code;
 }
 
 interface AutomaticBuildSubmitRevisionRecord {
@@ -716,12 +749,14 @@ export function readAutomaticBuildLifecycleEvents(
       add("candidate_submitted", facts.submission.started_at);
     }
     if (facts.failure) {
-      add(facts.failure.diagnostic_code === "writer_failed" ? "writer_failed" : "task_failed",
+      const diagnosticCode = terminalDiagnosticCode(facts.failure);
+      add(diagnosticCode === "writer_failed" ? "writer_failed" : "task_failed",
         facts.failure.failed_at ?? terminalAt(facts)!,
-        facts.failure.diagnostic_code ? { diagnostic_code: facts.failure.diagnostic_code } : {});
+        diagnosticCode ? { diagnostic_code: diagnosticCode } : {});
     } else if (facts.result?.outcome === "failure") {
+      const diagnosticCode = attemptResultDiagnosticCode(facts.result);
       add("task_failed", facts.result.created_at,
-        facts.result.diagnostic ? { diagnostic_code: facts.result.diagnostic } : {});
+        diagnosticCode ? { diagnostic_code: diagnosticCode } : {});
     }
     if (facts.receipt?.committed_at) add("task_committed", facts.receipt.committed_at);
     else if (facts.result?.outcome === "success") add("task_committed", facts.result.created_at);
@@ -833,9 +868,9 @@ export function buildAutomaticBuildStageMetricsSummary(
     if (failed) statusCounts.retryable_failure += 1;
     if (attempt.metrics?.status === "skipped") statusCounts.skipped += 1;
     if (attempt.metrics?.status === "needs_user") statusCounts.needs_user += 1;
-    const diagnostic = attempt.failure?.diagnostic_code
+    const diagnostic = terminalDiagnosticCode(attempt.failure)
       ?? attempt.metrics?.diagnostic_code
-      ?? (attempt.result?.outcome === "failure" ? attempt.result.diagnostic : undefined);
+      ?? attemptResultDiagnosticCode(attempt.result);
     if (diagnostic) diagnosticCounts[diagnostic] = (diagnosticCounts[diagnostic] ?? 0) + 1;
     const hasInput = attempt.usage.input_tokens !== undefined;
     const hasOutput = attempt.usage.output_tokens !== undefined;

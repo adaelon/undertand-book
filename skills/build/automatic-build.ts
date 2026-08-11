@@ -55,7 +55,7 @@ import {
   listAutomaticBuildStoredAttempts,
   recordAutomaticBuildAttemptEvent,
   type AutomaticBuildAttemptRecord,
-  type AutomaticBuildExecutionIdentityV1,
+  type AutomaticBuildExecutionIdentity,
 } from "../../packages/core/src/automatic-build-task-store";
 import {
   assertActiveAutomaticBuildLease,
@@ -78,6 +78,7 @@ import {
   verifyModelInputBudgetProof,
 } from "../../packages/core/src/model-input-budget";
 import type { WorkUnitDescriptor, WorkUnitKind } from "../../packages/core/src/stage-work-unit";
+import { parseExtractorContractErrorFromStderr } from "../../packages/core/src/extractor-contract";
 import {
   failAutomaticBuildTask,
   inspectAutomaticBuildTask,
@@ -526,6 +527,8 @@ function forwardStageScript(
     : spawnSync(command, commandArgs, { cwd: target.root_dir, stdio: "inherit", encoding: "utf8" });
   if (result.error) throw result.error;
   if (result.status !== 0) {
+    const extractorFailure = parseExtractorContractErrorFromStderr(result.stderr);
+    if (extractorFailure) throw extractorFailure;
     throw new Error(`stage script ${script} failed (${result.status ?? 1}): ${result.stderr ?? ""}`);
   }
   return { stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
@@ -1212,7 +1215,7 @@ function expandAction(
           snapshot,
           legacy_audit: legacyAudit,
           action: {
-            kind: "needs_user",
+            kind: "needs_user" as const,
             reason: "legacy_migration_required",
             stage: action.stage,
             policy_status: legacyAudit.policy_status,
@@ -1233,7 +1236,7 @@ function expandAction(
           legacy_audit: legacyAudit,
           migration,
           action: {
-            kind: "needs_user",
+            kind: "needs_user" as const,
             reason: "legacy_resume_selected",
             stage: action.stage,
             policy_status: "legacy_policy_unknown",
@@ -1243,63 +1246,77 @@ function expandAction(
       }
     }
     const attempts = readAutomaticBuildAttemptSnapshot(target).stages[action.stage] ?? {};
-    const exhausted = action.task_ids
-      .map((taskId) => ({ task_id: taskId, ...attempts[taskId] }))
-      .filter((item) => (item.failures ?? 0) >= MAX_ATTEMPTS);
-    if (exhausted.length) {
+    const descriptors = new Map((productionStageState.work_units ?? [])
+      .map((descriptor) => [descriptor.work_unit_id, descriptor]));
+    const claimInspections = action.task_ids.map((taskId) => {
+      const descriptor = descriptors.get(taskId);
+      const binding = productionStageState.task_bindings?.[taskId];
+      if (!descriptor) throw new Error(`automatic semantic task is missing its descriptor: ${action.stage}/${taskId}`);
+      if (!binding) throw new Error(`automatic semantic task is missing policy binding: ${action.stage}/${taskId}`);
       return {
-        snapshot,
-        action: {
-          kind: "needs_user",
-          reason: "retry_exhausted",
-          stage: action.stage,
-          tasks: exhausted,
-          message: `semantic extraction failed ${MAX_ATTEMPTS} times; inspect diagnostics before resetting`,
-          reset_commands: exhausted.map((item) => scriptCommand("automatic-build.ts", [
-            "record-attempt", targetInput, action.stage, item.task_id, "reset",
-            ...targetResolutionCommandArgs(target),
-            "--attempt", String(item.last_attempt),
-            "--event-id", `${action.stage}:${item.task_id}:${item.last_attempt}:reset`,
-          ])),
-        },
-      };
-    }
-    const executionBlockers = action.task_ids
-      .map((taskId) => ({
         task_id: taskId,
         last_attempt: attempts[taskId]?.last_attempt ?? 0,
         inspection: inspectAutomaticBuildTaskClaim(target, action.stage, taskId, {
           now: leaseOptions.now,
+          descriptor,
+          binding,
+          ...(descriptor.version === "automatic_build_work_unit.v3"
+            ? { policy_generation: "v3_only" as const }
+            : {}),
           max_semantic_attempts: MAX_ATTEMPTS,
           max_lease_epochs: MAX_LEASE_EPOCHS,
         }),
-      }))
+      };
+    });
+    const policyBlockers = claimInspections.filter((item) => (
+      item.inspection.status === "policy_generation_conflict"
+      || item.inspection.status === "policy_generation_migration_required"
+    ));
+    if (policyBlockers.length) {
+      const reason = policyBlockers.some((item) => item.inspection.status === "policy_generation_conflict")
+        ? "policy_generation_conflict"
+        : "policy_generation_migration_required";
+      return {
+        snapshot,
+        action: {
+          kind: "needs_user" as const,
+          reason,
+          stage: action.stage,
+          tasks: policyBlockers.map(({ task_id, inspection }) => ({ task_id, ...inspection })),
+          message: reason === "policy_generation_conflict"
+            ? "an active task lease belongs to a different complete policy scope"
+            : "an active legacy lease has no unambiguous complete policy scope",
+        },
+      };
+    }
+    const executionBlockers = claimInspections
       .filter((item) => item.inspection.status === "retry_exhausted"
         || item.inspection.status === "executor_instability");
     if (executionBlockers.length) {
       const reason = executionBlockers.some((item) => item.inspection.status === "retry_exhausted")
         ? "retry_exhausted"
         : "executor_instability";
-      const resetCommands = executionBlockers.map(({ task_id, last_attempt }) => {
+      const resetCommands = executionBlockers.flatMap(({ task_id, last_attempt, inspection }) => {
+        if ("attempt_scope_digest" in inspection && inspection.attempt_scope_digest) return [];
         if (last_attempt < 1) throw new Error(`execution blocker is missing attempt state: ${action.stage}/${task_id}`);
-        return scriptCommand("automatic-build.ts", [
+        return [scriptCommand("automatic-build.ts", [
           "record-attempt", targetInput, action.stage, task_id, "reset",
           ...targetResolutionCommandArgs(target),
           "--attempt", String(last_attempt),
           "--event-id", `${action.stage}:${task_id}:${last_attempt}:reset`,
-        ]);
+        ])];
       });
       return {
         snapshot,
         action: {
-          kind: "needs_user",
+          kind: "needs_user" as const,
           reason,
           stage: action.stage,
           tasks: executionBlockers.map(({ task_id, inspection }) => ({ task_id, ...inspection })),
-          reset_commands: resetCommands,
+          ...(resetCommands.length ? { reset_commands: resetCommands } : {}),
           message: reason === "retry_exhausted"
-            ? `semantic extraction failed ${MAX_ATTEMPTS} times; inspect diagnostics before resetting`
-            : `task lease recovery exceeded ${MAX_LEASE_EPOCHS} epochs; inspect executor stability before resetting`,
+            ? `semantic extraction failed ${MAX_ATTEMPTS} times; validate the required guarded recovery before retrying`
+            : `task lease recovery exceeded ${MAX_LEASE_EPOCHS} epochs; use executor-specific recovery without a semantic reset`,
         },
       };
     }
@@ -1337,7 +1354,7 @@ function expandAction(
         snapshot,
         preflight,
         action: {
-          kind: "needs_user",
+          kind: "needs_user" as const,
           reason: "budget_exceeded",
           stage: action.stage,
           plan_digest: preflight.plan_digest,
@@ -1352,7 +1369,7 @@ function expandAction(
         snapshot,
         preflight,
         action: {
-          kind: "needs_user",
+          kind: "needs_user" as const,
           reason: lowConfidence ? "low_confidence_wall_budget" : "wall_budget_exceeded",
           stage: action.stage,
           plan_digest: preflight.plan_digest,
@@ -1370,7 +1387,7 @@ function expandAction(
         snapshot,
         preflight,
         action: {
-          kind: "needs_user",
+          kind: "needs_user" as const,
           reason: "executor_unavailable",
           stage: action.stage,
           plan_digest: preflight.plan_digest,
@@ -1383,7 +1400,7 @@ function expandAction(
         snapshot,
         preflight,
         action: {
-          kind: "needs_user",
+          kind: "needs_user" as const,
           reason: "preflight_required",
           stage: action.stage,
           plan_digest: preflight.plan_digest,
@@ -1396,7 +1413,7 @@ function expandAction(
         snapshot,
         preflight,
         action: {
-          kind: "needs_user",
+          kind: "needs_user" as const,
           reason: "plan_changed",
           stage: action.stage,
           accepted_plan_digest: acceptedPlanDigest,
@@ -1410,7 +1427,7 @@ function expandAction(
         snapshot,
         preflight,
         action: {
-          kind: "needs_user",
+          kind: "needs_user" as const,
           reason: "evaluation_required",
           stage: action.stage,
           plan_digest: preflight.plan_digest,
@@ -1424,7 +1441,7 @@ function expandAction(
         snapshot,
         preflight,
         action: {
-          kind: "needs_user",
+          kind: "needs_user" as const,
           reason: "evaluation_changed",
           stage: action.stage,
           plan_digest: preflight.plan_digest,
@@ -1450,7 +1467,7 @@ function expandAction(
         snapshot,
         preflight,
         action: {
-          kind: "needs_user",
+          kind: "needs_user" as const,
           reason: "budget_exceeded",
           stage: action.stage,
           plan_digest: preflight.plan_digest,
@@ -1513,7 +1530,7 @@ function expandAction(
           snapshot,
           preflight,
           action: {
-            kind: "needs_user",
+            kind: "needs_user" as const,
             reason: "executor_unavailable",
             stage: action.stage,
             plan_digest: preflight.plan_digest,
@@ -1691,7 +1708,7 @@ function expandAction(
       status: "leased";
       lease_ref: string;
       lease: AutomaticBuildTaskLease;
-      execution_identity: AutomaticBuildExecutionIdentityV1;
+      execution_identity: AutomaticBuildExecutionIdentity;
     }> = [];
     let claimedScore = 0;
     for (const descriptor of scheduled.units) {
@@ -1720,7 +1737,7 @@ function expandAction(
         snapshot,
         preflight,
         action: {
-          kind: "waiting",
+          kind: "waiting" as const,
           reason: "active_leases",
           stage: action.stage,
           retry_after_ms: Math.min(leaseOptions.reserve_ttl_ms, 30_000),
@@ -1815,7 +1832,7 @@ function expandAction(
           plan_budget: settledPlanBudget,
           quality_report: qualityReport,
           action: {
-            kind: "needs_user",
+            kind: "needs_user" as const,
             reason: "quality_gate_failed",
             stage: action.stage,
             gate_status: qualityReport.gate_status,
@@ -2484,6 +2501,18 @@ export function automaticBuildDispatchNext(
         kind: "waiting" as const,
         work_unit_id: advanced.work_unit_id,
         retry_after_ms: advanced.retry_after_ms,
+      },
+    };
+  }
+  if (advanced.status === "policy_generation_conflict"
+    || advanced.status === "policy_generation_migration_required") {
+    return {
+      ...base,
+      action: {
+        kind: "waiting" as const,
+        reason: advanced.status,
+        work_unit_id: advanced.work_unit_id,
+        retry_after_ms: Math.min(advanced.persisted.reserve_ttl_ms, 30_000),
       },
     };
   }
