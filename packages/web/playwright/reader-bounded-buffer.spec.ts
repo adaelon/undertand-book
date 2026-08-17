@@ -130,7 +130,11 @@ function profileMemory() {
   };
 }
 
-async function installFixture(page: Page, fixture: Fixture) {
+async function installFixture(
+  page: Page,
+  fixture: Fixture,
+  initialTopIndex = 0,
+) {
   const profile = {
     profile_id: "technical_learning",
     profile_version: "reader-bounded-v1",
@@ -140,7 +144,7 @@ async function installFixture(page: Page, fixture: Fixture) {
     agent_tools: [],
   };
   const maximumTop = Math.max(0, fixture.leafLids.length - VIEWPORT_WIDTH);
-  let readerTopIndex = 0;
+  let readerTopIndex = Math.max(0, Math.min(initialTopIndex, maximumTop));
   let memories: Array<Record<string, unknown>> = fixture.noteLid
     ? [noteRecord(fixture.noteLid)]
     : [];
@@ -600,6 +604,26 @@ async function gotoAndAssertPaneTop(page: Page, fixture: Fixture, targetIndex: n
     { message: `${fixture.scenario} goto pane top`, timeout: 10_000 },
   ).toBeLessThanOrEqual(2);
 }
+
+test("PHR4 restores a deep cold-start viewport after the reader pane mounts", async ({ browser }) => {
+  const fixture = buildFixture("fixed");
+  const initialTopIndex = 1_499;
+  const target = fixture.leafLids[initialTopIndex];
+  const context = await browser.newContext({ viewport: { width: 1_440, height: 900 } });
+  const page = await context.newPage();
+  await installFixture(page, fixture, initialTopIndex);
+
+  await page.goto("/?readerPerf=1");
+  await expect(page.locator(".reader-pane")).toBeVisible({ timeout: 60_000 });
+  await expect(page.locator(`[data-lid="${target}"]`)).toBeAttached({ timeout: 60_000 });
+  await settle(page, fixture.scenario);
+  await expect.poll(
+    async () => Math.abs(await lidTop(page, target)),
+    { message: "deep cold-start target reaches the pane top", timeout: 10_000 },
+  ).toBeLessThanOrEqual(2);
+
+  await context.close();
+});
 
 for (const scenario of ["fixed", "note", "image", "formula"] as const) {
   test(`PHR4 keeps the 2,623-leaf ${scenario} fixture bounded and anchored`, async ({ browser }) => {

@@ -2330,6 +2330,10 @@ async function init() {
     await refreshAgentHistory();
     await refreshProfileSurface();
     appSurface.value = "reader";
+    if (boundedReaderBufferV1 && (readerBufferRange.value?.[0] ?? 0) > 0) {
+      await nextTick();
+      await readerPaneRef.value?.scrollLidIntoView(st.viewport.top_lid);
+    }
     recordIntentUsage("reader_ready");
     void refreshIntentArtifacts();
   } catch (e) {
