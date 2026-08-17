@@ -3058,6 +3058,27 @@ fn route_book(
                 }),
             }
         }
+        "formula_semantics_range" => {
+            if let Some(key) = q
+                .keys()
+                .find(|key| key.as_str() != "start" && key.as_str() != "end")
+            {
+                return validation(
+                    "INVALID_LEAF_RANGE",
+                    &format!("book.formula_semantics_range 未知查询参数: {key}"),
+                );
+            }
+            let (Some(start_lid), Some(end_lid)) = (q.get("start"), q.get("end")) else {
+                return validation(
+                    "INVALID_LEAF_RANGE",
+                    "book.formula_semantics_range 需 start 与 end 查询参数",
+                );
+            };
+            match book.formula_semantics_range(start_lid, end_lid) {
+                Ok(reply) => ok_json(&reply),
+                Err(error) => err_reply(&error),
+            }
+        }
         "route_from" => {
             let Some(at) = q.get("at") else {
                 return validation("INVALID_RANGE", "book.route_from 需 at 查询参数");
@@ -16119,6 +16140,91 @@ unchanged after training concludes";
         assert_eq!(get(&mut s, "/book/formula_semantics?lid=9.9").status, 404);
         assert_eq!(get(&mut s, "/book/formula_semantics").status, 400);
     }
+
+    #[test]
+    fn formula_semantics_range_get_is_ordered_bounded_and_backward_compatible() {
+        fn semantics(lid: &str) -> FormulaSemantics {
+            FormulaSemantics {
+                formula_lid: lid.into(),
+                parameters: vec![FormulaParameter {
+                    symbol: lid.into(),
+                    label: None,
+                    meaning: format!("formula {lid}"),
+                    unit: None,
+                    domain: None,
+                    evidence_lids: vec![lid.into()],
+                }],
+                composition: FormulaComposition {
+                    source_lid: lid.into(),
+                    meaning: format!("composition {lid}"),
+                    terms: vec![],
+                    evidence_lids: vec![lid.into()],
+                },
+                context_links: vec![],
+            }
+        }
+
+        let mut base = multi_leaf_base("formula-semantics-range-book", 5);
+        for lid in ["1.2", "1.3", "1.4"] {
+            base.lid_nodes
+                .iter_mut()
+                .find(|node| node.lid == lid)
+                .unwrap()
+                .kind = NodeKind::Formula;
+        }
+        let book = Book::new(base, &"X".repeat(50))
+            .with_formula_semantics(vec![semantics("1.4"), semantics("1.2")]);
+        let mut state = state_named("formula-semantics-range-get");
+        state.book = book;
+        state.reader = Reader::new(&state.book, DEFAULT_RADIUS);
+
+        let response = get(
+            &mut state,
+            "/book/formula_semantics_range?start=1.1&end=1.5",
+        );
+        assert_eq!(response.status, 200, "{}", response.body);
+        let body: serde_json::Value = serde_json::from_str(&response.body).unwrap();
+        assert_eq!(body["start_lid"], "1.1");
+        assert_eq!(body["end_lid"], "1.5");
+        assert_eq!(
+            body["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|item| item["formula_lid"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["1.2", "1.4"]
+        );
+
+        let narrowed = get(
+            &mut state,
+            "/book/formula_semantics_range?start=1.3&end=1.5",
+        );
+        let narrowed: serde_json::Value = serde_json::from_str(&narrowed.body).unwrap();
+        assert_eq!(narrowed["items"].as_array().unwrap().len(), 1);
+        assert_eq!(narrowed["items"][0]["formula_lid"], "1.4");
+
+        // The singular API remains unchanged: a hit succeeds and an absent sidecar is 404.
+        let singular_hit = get(&mut state, "/book/formula_semantics?lid=1.2");
+        assert_eq!(singular_hit.status, 200);
+        let singular_hit: serde_json::Value = serde_json::from_str(&singular_hit.body).unwrap();
+        assert_eq!(body["items"][0], singular_hit);
+        assert_eq!(
+            get(&mut state, "/book/formula_semantics?lid=1.3").status,
+            404
+        );
+
+        for path in [
+            "/book/formula_semantics_range?start=1.5&end=1.1",
+            "/book/formula_semantics_range?start=1&end=1.5",
+            "/book/formula_semantics_range?start=1.1",
+            "/book/formula_semantics_range?start=1.1&end=1.5&extra=true",
+        ] {
+            let invalid = get(&mut state, path);
+            assert_eq!(invalid.status, 400, "{path}: {}", invalid.body);
+            assert!(invalid.body.contains("INVALID_LEAF_RANGE"), "{path}");
+        }
+    }
     #[test]
     fn route_from_and_route_to_get() {
         let mut s = state_named("route_nav");
@@ -18850,6 +18956,15 @@ unchanged after training concludes";
         }
 
         let mut state = state_named("book-tool-contract-parity");
+        let rest_manifest = get(&mut state, "/book/manifest");
+        let mcp_manifest = mcp::dispatch_mcp_tool(&mut state, "book_manifest", json!({}), "999");
+        assert_eq!(rest_manifest.status, 200);
+        assert_eq!(mcp_manifest.status, 200);
+        let manifest: Value = serde_json::from_str(&rest_manifest.body).unwrap();
+        let mcp_manifest: Value = serde_json::from_str(&mcp_manifest.body).unwrap();
+        assert_eq!(manifest, mcp_manifest);
+        assert_eq!(manifest["tree"][0]["display_title"], "X".repeat(80));
+
         let rest = get(&mut state, "/book/text?lid=1.1&end=1.1");
         let mcp = mcp::dispatch_mcp_tool(
             &mut state,

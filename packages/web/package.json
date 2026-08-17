@@ -9,6 +9,11 @@
     "preview": "vite preview",
     "test": "vitest run",
     "test:e2e": "playwright test",
+    "test:perf-bundle": "pnpm build && node scripts/assert-reader-performance-bundle.mjs",
+    "test:perf-release-gate": "node --test scripts/reader-performance-release-gate.test.mjs scripts/reader-performance-correctness.test.mjs",
+    "test:perf-chromium-real": "node scripts/record-reader-performance-webview2.mjs --runtime chromium",
+    "test:perf-compose-release": "node scripts/compose-reader-performance-release.mjs",
+    "test:perf-webview2": "node scripts/record-reader-performance-webview2.mjs",
     "typecheck": "vue-tsc --noEmit"
   },
   "dependencies": {

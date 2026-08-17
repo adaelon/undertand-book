@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from "vue";
 import { FolderOpen, Highlighter, Languages, MessageSquareText, RotateCcw, Save, Sparkles, X } from "@lucide/vue";
 import { api, ApiError } from "./api";
 import { generateBookIdFromTitle } from "./book-id";
@@ -88,6 +88,24 @@ import {
   resolveReaderNavigationTarget,
   resolveReaderStateNavigationTarget,
 } from "./reader-navigation";
+import {
+  abortBufferTransition,
+  commitBufferTransition,
+  planBufferTransition,
+  replaceReaderBuffer,
+  setReaderBufferPin,
+  type ReaderBufferPin,
+  type ReaderBufferRange,
+  type ReaderBufferState,
+  type ReaderBufferTransition,
+} from "./reader-buffer";
+import {
+  boundedBufferV1Enabled,
+  projectSegmentsToMountedLids,
+  readerScrollProjection,
+} from "./reader-buffer-projection";
+import { alignReaderViewportForEdge, ReaderEdgeLoadGate } from "./reader-edge-load";
+import { ReaderCommandQueue } from "./reader-command-queue";
 import { recallBookAnnotations } from "./reader-annotations";
 import { selectionContextForAgentNote } from "./agent-note-selection";
 import {
@@ -110,6 +128,31 @@ import {
 } from "./source-review-batch";
 import { buildUndoProfileAction } from "./profile-memory";
 import {
+  readerPerformanceEnabled,
+  recordReaderEdgeLoadFinished,
+  recordReaderEdgeLoadStarted,
+  recordReaderRender,
+  setReaderPerformanceCacheSnapshotProvider,
+} from "./reader-performance";
+import {
+  buildReaderAnnotationIndex,
+  readerHighlightGroupMembers,
+} from "./reader-annotation-index";
+import {
+  runReaderRenderWorkInBatches,
+  ReaderSegmentHtmlCache,
+} from "./reader-render-cache";
+import {
+  batchedHydrationV1Enabled,
+  isReaderHydrationCancellation,
+  ReaderHydrator,
+} from "./reader-hydration";
+import {
+  manifestChapterTitle,
+  projectReaderManifestTitles,
+  type ReaderOutlineItem,
+} from "./reader-manifest-title";
+import {
   chooseAppSurface,
   workbenchAvailable,
   type AppSurface,
@@ -123,19 +166,31 @@ import PdfReaderPane from "./components/PdfReaderPane.vue";
 import ReaderPane from "./components/ReaderPane.vue";
 import RightRail from "./components/RightRail.vue";
 
+const readerPerformanceCompiled = import.meta.env.DEV || import.meta.env.VITE_READER_PERF === "1";
+const boundedReaderBufferV1 = boundedBufferV1Enabled(
+  window.location.search,
+  import.meta.env.VITE_BOUNDED_BUFFER_V1,
+);
+const batchedReaderHydrationV1 = batchedHydrationV1Enabled(
+  window.location.search,
+  import.meta.env.VITE_BATCHED_HYDRATION_V1,
+);
+const READER_RENDERER_VERSION = "reader-markdown-v1";
+const readerSegmentHtmlCache = new ReaderSegmentHtmlCache();
+const readerHydrator = new ReaderHydrator({
+  textRange: (startLid, endLid, signal) => api.text(startLid, endLid, signal),
+  formulaRange: (startLid, endLid, signal) => (
+    api.formulaSemanticsRange(startLid, endLid, signal)
+  ),
+});
+
 type NodeKind = import("./api").Manifest["tree"][number]["kind"];
-type ManifestNode = import("./api").Manifest["tree"][number];
 interface ScrollAnchor {
   lid: string;
   top: number;
 }
 
-export interface OutlineItem {
-  lid: string;
-  kind: NodeKind;
-  depth: number;
-  title: string;
-}
+export type OutlineItem = ReaderOutlineItem;
 // ── 阅读区会话态 ──
 const leafOrder = ref<string[]>([]); // 全书叶 LID 序(读位感分母 + 进度)
 const kindByLid = ref<Map<string, NodeKind>>(new Map());
@@ -200,8 +255,47 @@ const pdfRuntimeError = ref<string | null>(null);
 const outlineItems = ref<OutlineItem[]>([]);
 const titleByLid = ref<Map<string, string>>(new Map());
 const viewport = ref<Viewport | null>(null);
-const edgeLoading = ref(false);
+if (readerPerformanceCompiled) {
+  setReaderPerformanceCacheSnapshotProvider(() => {
+    const html = readerSegmentHtmlCache.snapshot();
+    const hydration = readerHydrator.debugSnapshot();
+    return {
+      available: true,
+      viewport_width: viewport.value?.width ?? readerBufferState.value?.viewportWidth ?? null,
+      html_entries: html.entries,
+      html_capacity: html.maxEntries,
+      text_entries: hydration.textSettledLids.length,
+      formula_entries: hydration.formulaSettledLids.length,
+      hydration_capacity: hydration.capacity,
+    };
+  });
+}
+const edgeLoadGate = new ReaderEdgeLoadGate();
+const readerCommandQueue = new ReaderCommandQueue();
+let activeReaderEdgeDirection: "up" | "down" | null = null;
+let readerEdgeInteractionLocked = false;
+let readerViewportInteractionVersion = 0;
+let readerViewportInteractionDirection: "up" | "down" | null = null;
+let pendingReaderEdge: {
+  direction: "up" | "down";
+  interactionVersion: number;
+} | null = null;
+
+function takePendingReaderEdge() {
+  const pending = pendingReaderEdge;
+  pendingReaderEdge = null;
+  return pending;
+}
+const readerBufferState = shallowRef<ReaderBufferState | null>(null);
+const readerBufferRange = computed<ReaderBufferRange | null>(() => {
+  const state = readerBufferState.value;
+  return state ? [state.startLeafIndex, state.endLeafIndex] : null;
+});
 const readerPaneRef = ref<{
+  beginSegmentStage: (segments: readonly Segment[], direction: "up" | "down") => boolean;
+  stageSegment: (segment: Segment) => boolean;
+  finishSegmentStage: (bufferRange: ReaderBufferRange | null) => void;
+  cancelSegmentStage: () => void;
   captureScrollAnchor: (candidateLids: string[]) => ScrollAnchor | null;
   restoreScrollAnchor: (anchor: ScrollAnchor | null) => Promise<void>;
   scrollLidIntoView: (lid: string) => Promise<boolean>;
@@ -213,7 +307,7 @@ interface Segment {
   formula: FormulaSemantics | null;
   imageAsset: ImageAssetManifestEntry | null;
 }
-const segments = ref<Segment[]>([]); // 视口内连续正文(LID 隐形)
+const segments = shallowRef<Segment[]>([]); // 视口内连续正文(LID 隐形)
 const annotations = ref<MemoryRecord[]>([]); // 当前书全部标注(客户端按 lid 过滤)
 const pdfAnnotationProjection = ref<PdfUserAnnotationProjection>(EMPTY_PDF_ANNOTATION_PROJECTION);
 const pdfAnnotationProjectionError = ref<string | null>(null);
@@ -236,6 +330,7 @@ interface SourcePreview {
 }
 const sourceFocus = ref<SourceFocus | null>(null);
 const sourcePreview = ref<SourcePreview | null>(null);
+let sourcePreviewRequestSeq = 0;
 const sourcePreviewBodyRef = ref<HTMLElement | null>(null);
 const profileSummary = ref<ProfileSummary | null>(null);
 const profileManifest = ref<ProfileManifest | null>(null);
@@ -421,7 +516,9 @@ function pdfEntryHasRegion(entry: PdfSourceMapEntry | null | undefined): boolean
 }
 const selectedSegment = computed(() => segments.value.find((seg) => seg.lid === selectedLid.value) ?? null);
 const selectedFormula = computed(() => selectedSegment.value?.formula ?? null);
-const segmentByLid = computed(() => new Map(segments.value.map((seg) => [seg.lid, seg])));
+function segmentForLid(lid: string): Segment | null {
+  return segments.value.find((segment) => segment.lid === lid) ?? null;
+}
 function lidOrderIndex(lid: string | null | undefined): number {
   if (!lid) return Number.MAX_SAFE_INTEGER;
   const idx = leafOrder.value.indexOf(lid);
@@ -435,21 +532,34 @@ function sortMemoryByBookOrder(a: MemoryRecord, b: MemoryRecord): number {
     || a.mem_id.localeCompare(b.mem_id);
 }
 const allNotes = computed(() => annotations.value.filter((r) => r.type === "note").sort(sortMemoryByBookOrder));
+const readerAnnotationIndex = computed(() => buildReaderAnnotationIndex({
+  annotations: annotations.value,
+  mountedLids: leafOrder.value,
+  isInlineNote: (record) => isMarkdownInlineNote(record, noteSourceFingerprint.value),
+  highlightGroupId,
+}));
 const allHighlights = computed(() =>
   annotations.value
     .filter((r) => r.type === "highlight" && isHighlightCardRepresentative(r))
     .sort(sortMemoryByBookOrder),
 );
-const visibleNotes = computed(() => {
-  const visible = segments.value.map((seg) => seg.lid);
-  const order = new Map(visible.map((lid, idx) => [lid, idx]));
-  return annotations.value
-    .filter((r) =>
-      !!r.anchor.lid
-      && order.has(r.anchor.lid)
-      && isMarkdownInlineNote(r, noteSourceFingerprint.value)
-    )
-    .sort((a, b) => (order.get(a.anchor.lid ?? "") ?? 0) - (order.get(b.anchor.lid ?? "") ?? 0));
+const visibleNotes = computed(() => allNotes.value.filter((record) => (
+  isMarkdownInlineNote(record, noteSourceFingerprint.value)
+)));
+const readerSourceFocusRanges = computed(() => sourceFocusRangesIn(segments.value, sourceFocus.value));
+const sourcePreviewFocusRanges = computed(() => sourceFocusRangesIn(
+  sourcePreview.value?.segments ?? [],
+  sourcePreview.value?.focus ?? null,
+));
+const readerRenderRevisions = computed(() => {
+  const revisions = new Map(readerAnnotationIndex.value.renderRevisions);
+  const focusRevision = sourceFocus.value ? JSON.stringify(sourceFocus.value) : "";
+  if (focusRevision) {
+    for (const lid of readerSourceFocusRanges.value.keys()) {
+      revisions.set(lid, `${revisions.get(lid) ?? ""}|focus:${focusRevision}`);
+    }
+  }
+  return revisions;
 });
 function layoutRevNumber(value: number | bigint): number {
   return Number(value);
@@ -730,10 +840,10 @@ watch(
 // ── 标注:高亮(整段 / 段内 range)+ 笔记 ──
 // 整段高亮(range 缺省)→ <p> 背景;段内 range 高亮 → <mark>(见 renderSeg)`[ADR-0031]`。
 function isHighlighted(lid: string): boolean {
-  return annotations.value.some((r) => r.anchor.lid === lid && r.type === "highlight" && !r.range);
+  return (readerAnnotationIndex.value.highlightsByLid.get(lid) ?? []).some((record) => !record.range);
 }
 function highlightsOf(lid: string): MemoryRecord[] {
-  return annotations.value.filter((r) => r.anchor.lid === lid && r.type === "highlight");
+  return [...(readerAnnotationIndex.value.highlightsByLid.get(lid) ?? [])];
 }
 
 function newHighlightGroupId(): string {
@@ -747,11 +857,7 @@ function highlightGroupId(rec: MemoryRecord): string | null {
 }
 
 function highlightGroupMembers(rec: MemoryRecord): MemoryRecord[] {
-  const groupId = highlightGroupId(rec);
-  if (!groupId) return [rec];
-  return annotations.value
-    .filter((r) => r.type === "highlight" && highlightGroupId(r) === groupId)
-    .sort(sortMemoryByBookOrder);
+  return [...readerHighlightGroupMembers(readerAnnotationIndex.value, rec)].sort(sortMemoryByBookOrder);
 }
 
 function highlightGroupRepresentative(rec: MemoryRecord): MemoryRecord {
@@ -799,8 +905,65 @@ function isRawAssetSegment(seg: { kind?: NodeKind }): boolean {
   return seg.kind === "code" || seg.kind === "table" || seg.kind === "image";
 }
 
-function renderSegmentText(seg: { kind?: NodeKind }, text: string): string {
-  return isRawAssetSegment(seg) ? escapeHtml(text) : renderInlineText(text);
+function renderSegmentTextUncached(seg: { lid?: string; kind?: NodeKind }, text: string): string {
+  const rawAsset = isRawAssetSegment(seg);
+  if (readerPerformanceCompiled && readerPerformanceEnabled()) {
+    recordReaderRender(seg.lid, seg.kind, text, !rawAsset);
+  }
+  return rawAsset ? escapeHtml(text) : renderInlineText(text);
+}
+
+function renderBaseSegmentText(seg: { lid?: string; kind?: NodeKind }, text: string): string {
+  const lid = seg.lid?.trim();
+  if (!lid) return renderSegmentTextUncached(seg, text);
+  const viewportWidth = readerBufferState.value?.viewportWidth ?? viewport.value?.width ?? 20;
+  readerSegmentHtmlCache.configure({
+    bookId: buildWorkbenchSnapshot.value?.book_id ?? "reader-book-unresolved",
+    sourceFingerprint: readerBufferSourceFingerprint(),
+    rendererVersion: READER_RENDERER_VERSION,
+    maxEntries: Math.max(1, 5 * viewportWidth),
+  });
+  return readerSegmentHtmlCache.render(
+    { lid, text, kind: seg.kind ?? "paragraph" },
+    () => renderSegmentTextUncached(seg, text),
+  );
+}
+
+function stageIncomingReaderSegments(
+  current: readonly Segment[],
+  incoming: readonly Segment[],
+  direction: "up" | "down",
+  shouldContinue: () => boolean,
+): Promise<boolean> {
+  const pane = readerPaneRef.value;
+  if (!pane?.beginSegmentStage(current, direction)) return Promise.resolve(false);
+  const seen = new Set(current.map((segment) => segment.lid));
+  const unique = incoming.filter((segment) => {
+    if (seen.has(segment.lid)) return false;
+    seen.add(segment.lid);
+    return true;
+  });
+  const staged: Segment[] = [];
+  let stageCurrent = true;
+  return runReaderRenderWorkInBatches(
+    unique,
+    (segment) => {
+      const display = isRawAssetSegment(segment)
+        ? { text: segment.text }
+        : displayText(segment);
+      renderBaseSegmentText(segment, display.text);
+      if (!pane.stageSegment(segment)) {
+        stageCurrent = false;
+        return;
+      }
+      staged.push(segment);
+    },
+    {
+      batchSize: 1,
+      shouldContinue: () => stageCurrent && shouldContinue(),
+      yieldAfterLast: true,
+    },
+  );
 }
 
 interface MarkdownHeadingDisplay {
@@ -997,11 +1160,18 @@ function sourceFocusRange(text: string, focus: SourceFocus | null, lid: string):
 
 // 段正文渲染:把段内 range 高亮包成 <mark>(合并重叠区间),其余文本转义防 XSS `[ADR-0031]`。
 // chapter/section 的 Markdown 标题符号只在显示层剥掉,不改 book.text 原文与 LID 锚点。
-function renderSegWithFocus(seg: Segment, focus: SourceFocus | null, sourceSegments: Segment[], includeStoredHighlights: boolean): string {
+function renderSegWithFocus(
+  seg: Segment,
+  focus: SourceFocus | null,
+  sourceSegments: Segment[],
+  includeStoredHighlights: boolean,
+  focusRanges?: ReadonlyMap<string, [number, number]>,
+): string {
   const display = isRawAssetSegment(seg) ? { text: seg.text, offset: 0 } : displayText(seg);
   const hls = includeStoredHighlights ? highlightsOf(seg.lid).filter((h) => h.range) : [];
-  const focusRange = sourceFocusRangesIn(sourceSegments, focus).get(seg.lid) ?? sourceFocusRange(display.text, focus, seg.lid);
-  if (hls.length === 0 && !focusRange) return renderSegmentText(seg, display.text);
+  const focusRange = (focusRanges ?? sourceFocusRangesIn(sourceSegments, focus)).get(seg.lid)
+    ?? sourceFocusRange(display.text, focus, seg.lid);
+  if (hls.length === 0 && !focusRange) return renderBaseSegmentText(seg, display.text);
   const ranges = hls
     .map((h) => {
       const start = clampRange(h.range!.start - display.offset, display.text.length);
@@ -1022,16 +1192,22 @@ function renderSegWithFocus(seg: Segment, focus: SourceFocus | null, sourceSegme
   let cur = 0;
   for (const [s, e] of merged) {
     const cls = focusRange && s === focusRange[0] && e === focusRange[1] ? "hl-mark source-focus-mark" : "hl-mark";
-    html += renderSegmentText(seg, t.slice(cur, s)) + `<mark class="${cls}">${renderSegmentText(seg, t.slice(s, e))}</mark>`;
+    html += renderSegmentTextUncached(seg, t.slice(cur, s)) + `<mark class="${cls}">${renderSegmentTextUncached(seg, t.slice(s, e))}</mark>`;
     cur = e;
   }
-  return html + renderSegmentText(seg, t.slice(cur));
+  return html + renderSegmentTextUncached(seg, t.slice(cur));
 }
 function renderSeg(seg: Segment): string {
-  return renderSegWithFocus(seg, sourceFocus.value, segments.value, true);
+  return renderSegWithFocus(seg, sourceFocus.value, segments.value, true, readerSourceFocusRanges.value);
 }
 function renderSourcePreviewSeg(seg: Segment): string {
-  return renderSegWithFocus(seg, sourcePreview.value?.focus ?? null, sourcePreview.value?.segments ?? [], false);
+  return renderSegWithFocus(
+    seg,
+    sourcePreview.value?.focus ?? null,
+    sourcePreview.value?.segments ?? [],
+    false,
+    sourcePreviewFocusRanges.value,
+  );
 }
 function isSourcePreviewFlowSegment(seg: Segment): boolean {
   if (seg.kind === "paragraph" && markdownHeadingLevel(seg) !== null) return false;
@@ -1180,44 +1356,6 @@ async function deleteNote(rec: MemoryRecord) {
 function kindOf(lid: string): NodeKind {
   return kindByLid.value.get(lid) ?? "paragraph";
 }
-function lidDepth(lid: string): number {
-  return lid.split(".").length - 1;
-}
-function fallbackTitle(lid: string): string {
-  return titleByLid.value.get(lid) ?? lid;
-}
-function firstTitleLine(text: string, lid: string): string {
-  const line = text
-    .split("\n")
-    .map((s) => s.trim())
-    .find(Boolean);
-  return (line ? stripMarkdownHeadingLine(line) : lid).slice(0, 80);
-}
-function buildOutline(tree: ManifestNode[]): OutlineItem[] {
-  return tree
-    .filter((n) => n.children.length > 0 || n.kind === "chapter" || n.kind === "section")
-    .map((n) => ({
-      lid: n.lid,
-      kind: n.kind,
-      depth: Math.min(lidDepth(n.lid), 4),
-      title: fallbackTitle(n.lid),
-    }));
-}
-async function loadOutlineTitles(tree: ManifestNode[]) {
-  const outline = buildOutline(tree);
-  outlineItems.value = outline;
-  await Promise.all(
-    outline.map(async (item) => {
-      try {
-        const t = await api.text(item.lid);
-        titleByLid.value.set(item.lid, firstTitleLine(t.text, item.lid));
-      } catch {
-        titleByLid.value.set(item.lid, item.lid);
-      }
-    }),
-  );
-  outlineItems.value = buildOutline(tree);
-}
 function isAsset(seg: Segment): boolean {
   return seg.kind === "code" || seg.kind === "table" || seg.kind === "image" || seg.kind === "formula";
 }
@@ -1293,7 +1431,7 @@ async function refreshAnnotations(): Promise<MemoryRecord[]> {
 
 type SegmentLoadMode = "replace" | "append" | "prepend";
 
-async function hydrateSegments(lids: string[]): Promise<Segment[]> {
+async function hydrateSegmentsSingular(lids: string[]): Promise<Segment[]> {
   const texts = await Promise.all(lids.map((lid) => api.text(lid)));
   return Promise.all(
     texts.map(async (t) => {
@@ -1309,31 +1447,126 @@ async function hydrateSegments(lids: string[]): Promise<Segment[]> {
   );
 }
 
-function mergeSegments(current: Segment[], incoming: Segment[], mode: SegmentLoadMode): Segment[] {
-  if (mode === "replace") return incoming;
+async function hydrateSegments(lids: string[]): Promise<Segment[]> {
+  if (!batchedReaderHydrationV1) return hydrateSegmentsSingular(lids);
+  const hydrated = await readerHydrator.hydrate(lids, viewport.value?.width);
+  return hydrated.map((item) => {
+    const kind = kindOf(item.lid);
+    return {
+      lid: item.lid,
+      text: item.text,
+      kind,
+      formula: item.formula,
+      imageAsset: kind === "image" ? imageAssetFor(item.lid) : null,
+    };
+  });
+}
+
+function mergeSegments(
+  current: readonly Segment[],
+  incoming: readonly Segment[],
+  mode: SegmentLoadMode,
+): Segment[] {
+  if (mode === "replace") return [...incoming];
   const seen = new Set(current.map((seg) => seg.lid));
   const unique = incoming.filter((seg) => !seen.has(seg.lid));
   return mode === "append" ? [...current, ...unique] : [...unique, ...current];
 }
 
-// 视口加载:逐 visible_lid 取真原文。replace 用于 goto/sync;append/prepend 用于正文连续滚动缓冲。
+function readerBufferSourceFingerprint(): string {
+  return noteSourceFingerprint.value
+    ?? sourceManifest.value?.canonical_source.sha256
+    ?? buildWorkbenchSnapshot.value?.book_id
+    ?? "reader-source-unresolved";
+}
+
+function readerHydrationSourceIdentity(): string {
+  return `${buildWorkbenchSnapshot.value?.book_id ?? "reader-book-unresolved"}:${readerBufferSourceFingerprint()}`;
+}
+
+function beginReaderReplacement(): number {
+  if (batchedReaderHydrationV1) readerHydrator.invalidatePending();
+  return edgeLoadGate.beginReplacement();
+}
+
+function invalidateReaderReadWork(): void {
+  edgeLoadGate.invalidate();
+  if (batchedReaderHydrationV1) readerHydrator.invalidatePending();
+}
+
+async function onReaderInteractionPin(pin: ReaderBufferPin, active: boolean) {
+  if (!boundedReaderBufferV1 || !readerBufferState.value) return;
+  const current = readerBufferState.value;
+  const trimAnchor = !active && current.phase === "trim_pending"
+    ? readerPaneRef.value?.captureScrollAnchor([
+        current.pendingTrim?.preserveAnchorLid ?? current.mountedLids[0] ?? "",
+      ]) ?? null
+    : null;
+  try {
+    const receipt = setReaderBufferPin(current, {
+      leafOrder: leafOrder.value,
+      pin,
+      active,
+    });
+    readerBufferState.value = receipt.state;
+    if (!receipt.trimmed) return;
+    segments.value = projectSegmentsToMountedLids(
+      segments.value,
+      [],
+      receipt.state.mountedLids,
+    );
+    await readerPaneRef.value?.restoreScrollAnchor(trimAnchor);
+  } catch (error) {
+    fail(error);
+  }
+}
+
+// 视口加载:PHR7 按连续缺口批取;rollback 开关保留逐 LID 路径。
 async function loadWindow(
   vp: Viewport,
   mode: SegmentLoadMode = "replace",
   navigationTargetLid = vp.top_lid,
+  replacementEpochOverride: number | null = null,
 ) {
-  viewport.value = vp;
-  if (mode === "replace") {
-    selectedLid.value = navigationTargetLid;
-    currentReadingLid.value = navigationTargetLid;
+  const ownsReplacementEpoch = mode === "replace" && replacementEpochOverride === null;
+  const replacementEpoch = mode === "replace"
+    ? replacementEpochOverride ?? beginReaderReplacement()
+    : null;
+  try {
+    if (mode === "replace") {
+      readerEdgeInteractionLocked = false;
+      readerViewportInteractionDirection = null;
+      pendingReaderEdge = null;
+    }
+    viewport.value = vp;
+    if (mode === "replace") {
+      selectedLid.value = navigationTargetLid;
+      currentReadingLid.value = navigationTargetLid;
+    }
+    const next = await hydrateSegments(vp.visible_lids);
+    if (replacementEpoch !== null && !edgeLoadGate.isReplacementCurrent(replacementEpoch)) return;
+    if (mode === "replace") {
+      readerBufferState.value = replaceReaderBuffer(readerBufferState.value, {
+        sourceFingerprint: readerBufferSourceFingerprint(),
+        leafOrder: leafOrder.value,
+        mountedLids: next.map((segment) => segment.lid),
+        viewportWidth: vp.width,
+      });
+    }
+    segments.value = mergeSegments(segments.value, next, mode);
+  } catch (error) {
+    if (isReaderHydrationCancellation(error)) return;
+    throw error;
+  } finally {
+    if (replacementEpoch !== null && ownsReplacementEpoch) {
+      edgeLoadGate.finishReplacement(replacementEpoch);
+    }
   }
-  const next = await hydrateSegments(vp.visible_lids);
-  segments.value = mergeSegments(segments.value, next, mode);
   if (mode === "replace") {
     await readerPaneRef.value?.scrollLidIntoView(navigationTargetLid);
   }
   await refreshAnnotations();
-  await loadChapter(vp.top_lid);
+  loadChapter(vp.top_lid);
 }
 
 // 阅读区与服务端 reader 同步(agent 可能改了视口 → 重新拉 state 渲染)。
@@ -1534,25 +1767,38 @@ async function undoProfileUpdate(
   profileMemoryNotice.value = response.kind === "applied" ? "画像更新已撤销" : "敏感画像等待确认";
 }
 
-async function syncViewport(forcePaperProjection = false, preferReaderSelection = false) {
-  const st = await api.state();
+async function syncViewportWithinReplacement(
+  replacementEpoch: number,
+  forcePaperProjection = false,
+  preferReaderSelection = false,
+) {
+  const st = await readerCommandQueue.run(() => api.state());
+  if (!edgeLoadGate.isReplacementCurrent(replacementEpoch)) return;
   await applyReaderState(st);
   const navigationTargetLid = preferReaderSelection
     ? resolveReaderStateNavigationTarget(st.viewport.top_lid, st.selection, leafOrder.value)
     : st.viewport.top_lid;
-  await loadWindow(st.viewport, "replace", navigationTargetLid);
+  await loadWindow(st.viewport, "replace", navigationTargetLid, replacementEpoch);
+  if (!edgeLoadGate.isReplacementCurrent(replacementEpoch)) return;
   await loadPaperProjectionData(forcePaperProjection);
 }
 
-// 章节标题:取 anchor 顶层段(LID 首段)原文首行作标签(读位感「第N章…」)。
-async function loadChapter(anchorLid: string) {
-  const top = anchorLid.split(".")[0];
+async function syncViewport(forcePaperProjection = false, preferReaderSelection = false) {
+  const replacementEpoch = beginReaderReplacement();
   try {
-    const t = await api.text(top);
-    chapterTitle.value = t.text.split("\n")[0].slice(0, 40);
-  } catch {
-    chapterTitle.value = top;
+    await syncViewportWithinReplacement(
+      replacementEpoch,
+      forcePaperProjection,
+      preferReaderSelection,
+    );
+  } finally {
+    edgeLoadGate.finishReplacement(replacementEpoch);
   }
+}
+
+// 章节标题与目录共用 Manifest 的确定性 display_title 投影。
+function loadChapter(anchorLid: string) {
+  chapterTitle.value = manifestChapterTitle(titleByLid.value, anchorLid);
 }
 
 async function loadPdfRuntimeArtifacts() {
@@ -2067,9 +2313,18 @@ async function init() {
     kindByLid.value = new Map(m.tree.map((n) => [n.lid, n.kind]));
     imageAssetByLid.value = new Map(assets.images.map((img) => [img.lid, img]));
     leafOrder.value = m.tree.filter((n) => n.children.length === 0).map((n) => n.lid);
-    await loadOutlineTitles(m.tree);
+    const manifestTitles = projectReaderManifestTitles(m.tree);
+    titleByLid.value = manifestTitles.titleByLid;
+    outlineItems.value = manifestTitles.outline;
     const st = await api.state();
     await applyReaderState(st);
+    if (batchedReaderHydrationV1) {
+      readerHydrator.setSource({
+        identity: readerHydrationSourceIdentity(),
+        leaves: m.tree.filter((node) => node.children.length === 0),
+        windowSize: st.viewport.width,
+      });
+    }
     await loadWindow(st.viewport);
     await loadPaperProjectionData();
     await refreshAgentHistory();
@@ -2210,35 +2465,183 @@ onBeforeUnmount(() => {
   if (profileBackfillPollTimer !== null) window.clearTimeout(profileBackfillPollTimer);
   notePlacementController.cancel();
   pdfSelectionTranslation.invalidate("unmount");
+  if (batchedReaderHydrationV1) readerHydrator.clearSource();
+  if (readerPerformanceCompiled) setReaderPerformanceCacheSnapshotProvider(null);
 });
 
 // ── 四动作 ──
+function onReaderViewportInteraction(direction?: "up" | "down") {
+  if (direction) {
+    readerViewportInteractionVersion += 1;
+    readerViewportInteractionDirection = direction;
+    readerEdgeInteractionLocked = false;
+    pendingReaderEdge = null;
+  }
+  clearOutlineNavigation();
+}
+
 async function onScrollEdge(direction: "up" | "down") {
-  if (edgeLoading.value || !viewport.value) return;
-  const loaded = segments.value;
-  if (!loaded.length || !leafOrder.value.length) return;
-  const firstIdx = leafOrder.value.indexOf(loaded[0].lid);
-  const lastIdx = leafOrder.value.indexOf(loaded[loaded.length - 1].lid);
-  if (firstIdx < 0 || lastIdx < 0) return;
-  const count = Math.max(1, viewport.value.width);
-  const nextLids = direction === "down"
-    ? leafOrder.value.slice(lastIdx + 1, Math.min(lastIdx + 1 + count, leafOrder.value.length))
-    : leafOrder.value.slice(Math.max(0, firstIdx - count), firstIdx);
-  if (!nextLids.length) return;
-  const anchor = direction === "up"
-    ? readerPaneRef.value?.captureScrollAnchor(loaded.map((seg) => seg.lid)) ?? null
+  if (!viewport.value) return;
+  if (
+    readerViewportInteractionDirection !== null
+    && readerViewportInteractionDirection !== direction
+  ) return;
+  if (activeReaderEdgeDirection !== null) {
+    if (!readerEdgeInteractionLocked) {
+      pendingReaderEdge = {
+        direction,
+        interactionVersion: readerViewportInteractionVersion,
+      };
+    }
+    return;
+  }
+  if (readerEdgeInteractionLocked) return;
+  pendingReaderEdge = null;
+  const token = edgeLoadGate.begin(direction);
+  if (!token) return;
+  const loaded = [...segments.value];
+  const bufferState = readerBufferState.value;
+  if (!loaded.length || !leafOrder.value.length || !bufferState) {
+    edgeLoadGate.finish(token);
+    return;
+  }
+  const bufferPlan = planBufferTransition(bufferState, {
+    leafOrder: leafOrder.value,
+    direction,
+  });
+  const bufferTransition: ReaderBufferTransition | null = bufferPlan.transition;
+  if (!bufferTransition) {
+    edgeLoadGate.finish(token);
+    return;
+  }
+  readerBufferState.value = bufferPlan.state;
+  const nextLids = leafOrder.value.slice(...bufferTransition.insertRange);
+  const performanceToken = readerPerformanceCompiled && readerPerformanceEnabled()
+    ? recordReaderEdgeLoadStarted(direction, nextLids.length)
     : null;
-  edgeLoading.value = true;
+  let performanceOutcome: "completed" | "failed" = "completed";
+  const anchor = readerPaneRef.value?.captureScrollAnchor([
+    bufferTransition.preserveAnchorLid,
+  ]) ?? null;
+  let bufferApplied = false;
+  const interactionVersion = readerViewportInteractionVersion;
+  activeReaderEdgeDirection = direction;
   try {
     banner.value = "";
     sourceFocus.value = null;
+    const aligned = await readerCommandQueue.run(() => {
+      if (!edgeLoadGate.isCurrent(token)) return Promise.resolve(null);
+      const currentViewport = viewport.value;
+      if (!currentViewport) throw new Error("reader viewport disappeared before edge alignment");
+      return alignReaderViewportForEdge({
+        currentTopLid: currentViewport.top_lid,
+        project: (currentTopLid) => readerScrollProjection({
+          leafOrder: leafOrder.value,
+          currentTopLid,
+          insertRange: bufferTransition.insertRange,
+          viewportWidth: currentViewport.width,
+        }),
+        scroll: async (delta) => {
+          const effect = await api.scroll(delta);
+          viewport.value = effect.viewport;
+          return effect;
+        },
+      });
+    });
+    if (!aligned) return;
+    if (!edgeLoadGate.isCurrent(token)) return;
+    const scrollEffect = aligned.effect;
     const next = await hydrateSegments(nextLids);
-    segments.value = mergeSegments(segments.value, next, direction === "down" ? "append" : "prepend");
-    if (direction === "up") await readerPaneRef.value?.restoreScrollAnchor(anchor);
+    const staged = await stageIncomingReaderSegments(
+      loaded,
+      next,
+      direction,
+      () => edgeLoadGate.isCurrent(token),
+    );
+    if (!staged || !edgeLoadGate.isCurrent(token)) return;
+    let committedRange: ReaderBufferRange | null = null;
+    const committed = edgeLoadGate.commit(token, () => {
+      const merged = mergeSegments(
+        segments.value,
+        next,
+        direction === "down" ? "append" : "prepend",
+      );
+      if (!readerBufferState.value) return;
+      const bufferCommit = commitBufferTransition(
+        readerBufferState.value,
+        bufferTransition,
+        { leafOrder: leafOrder.value },
+      );
+      if (!bufferCommit.committed) return;
+      Object.assign(readerBufferState.value, bufferCommit.state);
+      const committedSegments = boundedReaderBufferV1
+        ? projectSegmentsToMountedLids(merged, [], bufferCommit.state.mountedLids)
+        : merged;
+      segments.value.splice(0, segments.value.length, ...committedSegments);
+      committedRange = [bufferCommit.state.startLeafIndex, bufferCommit.state.endLeafIndex];
+      if (selectedLid.value && !bufferCommit.state.mountedLids.includes(selectedLid.value)) {
+        selectedLid.value = null;
+      }
+      bufferApplied = true;
+    });
+    if (!committed || !bufferApplied) return;
+    readerPaneRef.value?.finishSegmentStage(committedRange);
+    await nextTick();
+    if (boundedReaderBufferV1 || direction === "up") {
+      await readerPaneRef.value?.restoreScrollAnchor(anchor);
+    }
   } catch (e) {
+    performanceOutcome = "failed";
+    if (!edgeLoadGate.isCurrent(token)) return;
     fail(e);
   } finally {
-    edgeLoading.value = false;
+    readerPaneRef.value?.cancelSegmentStage();
+    if (!bufferApplied && edgeLoadGate.isCurrent(token)) {
+      segments.value.splice(0, segments.value.length, ...loaded);
+    }
+    if (bufferTransition && readerBufferState.value) {
+      const bufferAbort = abortBufferTransition(readerBufferState.value, bufferTransition);
+      if (bufferAbort.aborted) Object.assign(readerBufferState.value, bufferAbort.state);
+    }
+    if (readerPerformanceCompiled && readerPerformanceEnabled()) {
+      recordReaderEdgeLoadFinished(performanceToken, performanceOutcome);
+    }
+    if (
+      bufferApplied
+      && performanceOutcome === "completed"
+      && readerViewportInteractionVersion === interactionVersion
+    ) {
+      readerEdgeInteractionLocked = true;
+    }
+    activeReaderEdgeDirection = null;
+    edgeLoadGate.finish(token);
+    const pending = takePendingReaderEdge();
+    if (
+      pending
+      && !readerEdgeInteractionLocked
+      && pending.interactionVersion === readerViewportInteractionVersion
+    ) {
+      void onScrollEdge(pending.direction);
+    }
+  }
+}
+async function loadGotoViewport(lid: string) {
+  const replacementEpoch = beginReaderReplacement();
+  try {
+    const gotoEffect = await readerCommandQueue.run(() => api.goto(lid));
+    if (!edgeLoadGate.isReplacementCurrent(replacementEpoch)) return null;
+    const navigationTargetLid = resolveReaderNavigationTarget(lid, leafOrder.value)
+      ?? gotoEffect.viewport.top_lid;
+    await loadWindow(
+      gotoEffect.viewport,
+      "replace",
+      navigationTargetLid,
+      replacementEpoch,
+    );
+    if (!edgeLoadGate.isReplacementCurrent(replacementEpoch)) return null;
+    return { gotoEffect, navigationTargetLid };
+  } finally {
+    edgeLoadGate.finishReplacement(replacementEpoch);
   }
 }
 async function doGoto(lid: string, focusQuote?: string | null) {
@@ -2246,11 +2649,10 @@ async function doGoto(lid: string, focusQuote?: string | null) {
   try {
     banner.value = "";
     sourceFocus.value = focusQuote === undefined ? null : { lid, quote: focusQuote };
-    const gotoEffect = await api.goto(lid);
+    const result = await loadGotoViewport(lid);
+    if (!result) return;
+    const { gotoEffect, navigationTargetLid } = result;
     outlineNavigationLid.value = lid;
-    const navigationTargetLid = resolveReaderNavigationTarget(lid, leafOrder.value)
-      ?? gotoEffect.viewport.top_lid;
-    await loadWindow(gotoEffect.viewport, "replace", navigationTargetLid);
     queuePaperSelection(lid);
     if (pdfReaderAvailable.value && !hasMappedPdfNavigationTarget(
       lid,
@@ -2295,19 +2697,23 @@ async function centerSourcePreview() {
   target?.scrollIntoView({ block: "center" });
 }
 async function openSourcePreview(source: SourceFocus) {
+  const request = ++sourcePreviewRequestSeq;
   const centerLid = sourcePreviewCenterLid(source.lid);
   const focus: SourceFocus = { lid: centerLid, quote: source.quote };
   sourcePreview.value = { focus, segments: [], loading: true, error: null };
   try {
     banner.value = "";
     const previewSegments = await hydrateSegments(sourcePreviewLids(centerLid));
+    if (request !== sourcePreviewRequestSeq) return;
     sourcePreview.value = { focus, segments: previewSegments, loading: false, error: null };
     await centerSourcePreview();
   } catch (e) {
+    if (request !== sourcePreviewRequestSeq || isReaderHydrationCancellation(e)) return;
     sourcePreview.value = { focus, segments: [], loading: false, error: errorMessage(e) };
   }
 }
 function closeSourcePreview() {
+  sourcePreviewRequestSeq += 1;
   sourcePreview.value = null;
 }
 async function openSourceInReader() {
@@ -2473,7 +2879,7 @@ function domTextOffset(el: HTMLElement, container: Node, offset: number): number
 
 function selectedRangeForElement(el: HTMLElement, range: Range, startEl: HTMLElement, endEl: HTMLElement): MarkdownSelectedRange | null {
   const lid = el.getAttribute("data-lid") ?? "";
-  const seg = lid ? segmentByLid.value.get(lid) : null;
+  const seg = lid ? segmentForLid(lid) : null;
   if (!lid || !seg) return null;
 
   if (seg.kind === "formula") {
@@ -3097,8 +3503,8 @@ async function undoEffect(ti: number, ei: number, e: AgentEffect) {
   try {
     banner.value = "";
     if (e.kind === "Goto") {
-      await api.goto(e.before_anchor);
-      await syncViewport();
+      const result = await loadGotoViewport(e.before_anchor);
+      if (result) await loadPaperProjectionData();
     } else if (e.kind === "Highlight" || e.kind === "Note") {
       await api.delete(e.mem_id);
       await refreshAnnotations();
@@ -3267,7 +3673,7 @@ async function saveAgentSelection(turn: ChatTurn, text: string) {
     if (viewport.value?.visible_lids.includes(anchor)) {
       await refreshAnnotations();
     } else {
-      await loadWindow((await api.goto(anchor)).viewport);
+      await loadGotoViewport(anchor);
     }
   } catch (e) {
     fail(e);
@@ -3390,6 +3796,7 @@ async function submitCreateBook() {
     openingBook.value = true;
     banner.value = "";
     bookPickerError.value = null;
+    invalidateReaderReadWork();
     const snapshot = await api.createBook({
       book_id: generatedNewBookId.value,
       display_title: title,
@@ -3418,6 +3825,9 @@ function closeBookPicker() {
 }
 
 function resetBookSessionUi() {
+  invalidateReaderReadWork();
+  if (batchedReaderHydrationV1) readerHydrator.clearSource();
+  readerBufferState.value = null;
   buildWorkbenchActionOwner += 1;
   sourceReviewLlmBatchRunToken += 1;
   sourceReviewLlmRequestToken += 1;
@@ -3451,6 +3861,8 @@ function resetBookSessionUi() {
   viewport.value = null;
   segments.value = [];
   annotations.value = [];
+  sourcePreviewRequestSeq += 1;
+  sourcePreview.value = null;
   resetPdfAnnotationProjection();
   cancelPdfSelectionDraftFor("book-switch");
   notePlacementController.cancel();
@@ -3501,6 +3913,7 @@ async function submitOpenBook(dir = bookPickerDir.value) {
     openingBook.value = true;
     banner.value = "";
     bookPickerError.value = null;
+    invalidateReaderReadWork();
     await api.openBook(target);
     desktopNeedsBook.value = false;
     resetBookSessionUi();
@@ -3901,10 +4314,17 @@ async function submitOpenBook(dir = bookPickerDir.value) {
         :hl-excerpt="hlExcerpt"
         :image-meta="imageMeta"
         :image-asset="imageAssetFor"
+        :bounded-buffer-enabled="boundedReaderBufferV1"
+        :source-fingerprint="readerBufferSourceFingerprint()"
+        :leaf-order="leafOrder"
+        :buffer-range="readerBufferRange"
+        :renderer-version="READER_RENDERER_VERSION"
+        :render-revisions="readerRenderRevisions"
         @select="onSelectSeg"
         @prose-mouse-up="onProseMouseUp"
         @current-lid="onCurrentLid"
-        @viewport-interaction="clearOutlineNavigation"
+        @viewport-interaction="onReaderViewportInteraction"
+        @interaction-pin="onReaderInteractionPin"
         @note-placement-target="onMarkdownNotePlacementTarget"
         @note-placement-invalid="onMarkdownNotePlacementInvalid"
         @scroll-edge="onScrollEdge"

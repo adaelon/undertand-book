@@ -48,11 +48,11 @@ flowchart LR
   Recovery -. "programmer or infrastructure failure" .-> Failure[Stable diagnostic failure]
 ```
 
-- **Web reader** owns ephemeral interaction state and calls localhost Reader APIs. `usePdfSelectionDraft` owns native selection resolution; the independent `usePdfSelectionTranslation` controller owns only translation request state.
+- **Web reader** owns ephemeral interaction state and calls localhost Reader APIs. `ReaderPane` owns a mounted LID registry, IntersectionObserver-maintained visible candidates and edge sentinels, one rAF scroll-state coalescer, and the ResizeObserver-fed `reader-height-ledger` projection for render-item height, top/bottom spacer and next-frame anchor correction; Note open state is keyed by `mem_id` outside recyclable DOM. `StableReaderSegment` owns body HTML identity so anchor/selection/Note-only parent updates do not re-run Markdown/KaTeX; App builds one annotation index and one source-focus range projection per input revision, then sends only affected LID render revisions. `ReaderSegmentHtmlCache` owns source/book/renderer-scoped base HTML with a `5w` LRU; final Highlight/focus `<mark>` and Note DOM remain outside the cache. App's `ReaderEdgeLoadGate` and serialized Reader command queue own epoch/direction request identity so replacement windows reject stale edge receipts and edge scroll cannot race navigation. The pure `reader-buffer` reducer owns contiguous `insert/keep/evict` identity ranges, `3w/4w` budgets, one incoming transition, epoch/transition receipt identity and interaction-pin trim debt; App projects each current receipt into the authoritative mounted segment slice, while selection/Note pins may temporarily retain the `4w` transient slice until release. `ReaderHydrator` owns source-scoped range hydration: it partitions text misses into canonical consecutive ranges, shares per-LID in-flight promises, derives FormulaSemantics positive/negative entries from one hit-only range, and bounds text plus formula settled LRUs independently to `5w`. Replacement navigation and book switches abort active range transports and advance the hydration epoch before any late reply can mutate caches; `batched_hydration_v1=0` retains the singular path only as an explicit rollback. App independently projects Manifest `display_title` into one title map shared by outline and chapter read position; title construction issues no `book.text` request and never joins the first-segment dependency chain. `usePdfSelectionDraft` owns native selection resolution; the independent `usePdfSelectionTranslation` controller owns only translation request state.
 - **server::host** owns sockets, worker threads, the global `AppState` mutex, Provider configuration snapshots, and lock boundaries.
 - **AppState** owns the active immutable `Book` plus mutable Reader, memory, and Agent session state.
 - **runtime::ProviderRegistry** constructs Native/ReAct model adapters; timeout-bound adapters apply the supplied duration to the actual HTTP request.
-- **read-tools source resolver** validates internal evidence ranges against canonical UTF-16 text and derives deterministic labels, previews, digests, and bounded local context. It does not alter any public `book.*` result.
+- **read-tools** projects every Manifest node's `display_title` from the first non-empty line inside its canonical span, strips an ATX heading marker, truncates at a valid 80-unit UTF-16 boundary and falls back to LID. It also validates `book.text(start,end)` as an ordered consecutive leaf interval before slicing canonical UTF-16 text. Its formula-range projection reuses that interval identity, returns only sidecar hits in canonical leaf order, and rejects duplicate or mismatched Formula identities. The independent source resolver validates internal evidence ranges and derives deterministic labels, previews, digests, and bounded local context.
 - **Pass1 production v3 router** preserves source/LID identity while selecting a byte-identical whole/group path or exact-cover model-input fragments. Every model unit and stitch dependency is proof/policy/hash bound; only a root final may emit a task-private `Pass1Artifact` candidate. Quality-v2 must prove the complete public-contributor closure before the existing transaction publishes `base.json`.
 - **Profile-sidecar production v3 router** selects a whole-unit semantic fast path or exact-cover discourse fragments with bounded deterministic reduction. Its task-private final is route- and receipt-bound; quality-v2 excludes intermediates from the public denominator and gates transactional publication of discourse/formula sidecars.
 - **Automatic build recovery boundary** owns the allowlisted `automatic_build_recovery.v1` protocol, projects only target identity and bounded work-unit/LID references, and canonicalizes the result without source text, prompts, paths, stderr, or stacks. BR7 callers consume only `ready(value)` or `blocked(recovery)`; unexpected failures remain outside the envelope.
@@ -61,6 +61,72 @@ flowchart LR
 - **Automatic build release v3 boundary** binds production routing, model-input budgets, seven Pass1/Profile policy members, recovery, quality-v2, batch publication, and strict close reading under one active identity. The read-only doctor proves those members and readers while the packaged Sidecar supplies all ten extractor prompts plus the dispatch wrapper; Node and Bun must return byte-identical task/dispatch prompts. The public plugin stays thin (`agents/` absent), so it never borrows prompt assets or Core source from the repository root.
 
 ## Major Data Flows
+
+Markdown reader scroll-state work is independent from hydration and buffer eviction:
+
+```text
+template LID refs + visibility/edge IntersectionObservers
+  -> one requestAnimationFrame coalescer
+  -> 28% probe over ordered visible candidates -> emit current LID only on change
+  -> edge direction -> ReaderEdgeLoadGate(epoch, direction, requestId)
+  -> reader-buffer plan(insert, keep, evict, anchor, epoch) with one incoming transition
+  -> serialize authoritative reader.scroll with navigation, then hydrate existing per-LID path
+  -> commit reducer receipt + project App segments to settled range only while token is current
+  -> interaction pin may retain transient range; final pin release projects pending trim
+  -X-> replace/goto/book switch invalidates stale success and failure receipts
+  -> ReaderPane projects mounted range through the source/layout/renderer-scoped height ledger
+  -> top/bottom spacer preserve virtual extent; next-frame correction restores preserved anchor
+```
+
+Markdown body rendering is revision-scoped and keeps overlays outside the base cache:
+
+```text
+annotations + mounted LIDs -> one ReaderAnnotationIndex
+source focus + mounted segments -> one focus-range projection
+  -> per-LID render revision only for ranged Highlight/focus changes
+  -> StableReaderSegment watches source/renderer/segment/revision identity
+  -> ReaderSegmentHtmlCache(book, source, renderer, lid, kind, text; max 5w)
+  -> base Markdown/KaTeX HTML
+  -> ranged Highlight/focus marks + parent-owned classes/cards/Note DOM
+```
+
+PHR6 range primitives feed PHR7's source-scoped hydration path:
+
+```text
+GET book.text(first, last)
+  -> validate consecutive leaf identities, UTF-16 spans, order and whitespace-only gaps
+  -> one canonical UTF-16 response
+  + requested Manifest leaves -> splitUtf16Range -> exact per-LID text map
+
+GET book.formula_semantics_range(first, last)
+  -> the same validated leaf interval
+  -> ordered, unique, interval-bounded FormulaSemantics hits
+  -> requested formula LIDs - returned hits = same-source negative-cache set
+
+requested mounted/preview LIDs + Manifest leaf order + source fingerprint + epoch
+  -> settled text/formula cache hits + shared in-flight LID promises
+  -> group consecutive text misses -> one book.text(first, last) per gap
+  -> splitUtf16Range -> exact per-LID text
+  -> coalesce missing Formula leaves -> zero or one FormulaSemantics range per cold window
+  -> validate response identities/order -> positive and negative formula entries
+  -> epoch/current-source check -> Segment[] in requested order
+  -> text LRU <= 5w and formula positive/negative LRU <= 5w
+  -X-> goto/replace/book switch aborts transports and rejects late success/failure
+
+batched_hydration_v1=0 -> explicit singular text/formula rollback path
+```
+
+Manifest title projection is local to the topology response and independent from body hydration:
+
+```text
+Book::manifest + canonical UTF-16 source
+  -> each ManifestNode span -> first non-empty line -> strip heading marker
+  -> truncate at <= 80 UTF-16 units without splitting a surrogate; blank/invalid -> LID
+  -> one display_title field shared by REST, Book MCP and generated TS contract
+  -> App.projectReaderManifestTitles -> outline + titleByLid
+  -> active outline / chapter read position consume the same title
+  -> first Segment render has zero outline/chapter book.text requests
+```
 
 Pass1 budget routing keeps fitting windows eligible for exact v2 artifact adoption into the frozen v3 generation. An over-limit paragraph is split only at the model-input layer; each fragment returns nodes and local edges anchored to the original parent LID. Core gates and merges verified child graphs deterministically, while bounded `pass1_lid_stitch` calls may propose only local cross-fragment edges. Missing ranges, duplicate children, stale hashes, invalid proofs, or a root artifact whose route differs from its frozen task stop before a final candidate is produced.
 
@@ -213,4 +279,5 @@ Legacy Agent answers are adapted only in the read path. A conservative Markdown-
 - **PDF selection translation boundary**: [ADR-0078](adr/0078-pdf-selection-translation-ephemeral-lock-free-bilingual-projection.md).
 - **PDF selection and canonical ranges**: [ADR-0074](adr/0074-pdf-selection-actions-and-exact-user-annotation-projection.md).
 - **Reader localhost server boundary**: [ADR-0028](adr/0028-前端切片架构-vue-localhost-server-crate-tinyhttp同步-rest命令面1对1投影-不引epub框架-连续正文lid隐形-无页码寻址.md).
+- **Bounded reader buffer and scroll hot path**: [ADR-0105](adr/0105-bounded-reader-buffer-stable-rendering-and-batched-source-loading.md).
 - **Provider adapter boundary**: [ADR-0016](adr/0016-自建运行时第一叉-最小agentloop-双层混合驱动-档位同轴-合一轮确定性验停-薄adapter-双重停机.md) and [ADR-0025](adr/0025-book-query内层运行时落地-runtime-crate-modeladapter-scope两档确定性检索-合一轮交叉验停.md).

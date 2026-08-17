@@ -45,6 +45,8 @@ import type { PaperMinimapApplyOutcome } from "./generated/PaperMinimapApplyOutc
 import type { PaperMinimapCommand } from "./generated/PaperMinimapCommand";
 import type { PaperViewportPosition } from "./generated/PaperViewportPosition";
 import type { PaperMinimapEffect } from "./generated/PaperMinimapEffect";
+import type { FormulaSemanticsRangeReply } from "./generated/FormulaSemanticsRangeReply";
+import type { FormulaSemantics } from "../../core/src/generated/FormulaSemantics";
 
 export type {
   Manifest,
@@ -91,6 +93,8 @@ export type {
   PaperMinimapCommand,
   PaperViewportPosition,
   PaperMinimapEffect,
+  FormulaSemantics,
+  FormulaSemanticsRangeReply,
 };
 
 const BASE = "/api";
@@ -1063,32 +1067,6 @@ export interface BuildWorkbenchSnapshot {
     build_spec: unknown | null;
   };
 }
-export interface FormulaParameter {
-  symbol: string;
-  label: string | null;
-  meaning: string;
-  unit: string | null;
-  domain: string | null;
-  evidence_lids: string[];
-}
-export interface FormulaComposition {
-  source_lid: string;
-  meaning: string;
-  terms: string[];
-  evidence_lids: string[];
-}
-export interface FormulaContextLink {
-  target_lid: string;
-  relation: string;
-  description: string;
-  evidence_lids: string[];
-}
-export interface FormulaSemantics {
-  formula_lid: string;
-  parameters: FormulaParameter[];
-  composition: FormulaComposition;
-  context_links: FormulaContextLink[];
-}
 export interface AskQuote {
   lid: string;
   quote: string;
@@ -1172,8 +1150,13 @@ export class ApiError extends Error {
   }
 }
 
-async function http<T>(method: "GET" | "POST", path: string, body?: unknown): Promise<T> {
-  const init: RequestInit = { method };
+async function http<T>(
+  method: "GET" | "POST",
+  path: string,
+  body?: unknown,
+  signal?: AbortSignal,
+): Promise<T> {
+  const init: RequestInit = signal ? { method, signal } : { method };
   if (body !== undefined) {
     init.headers = { "Content-Type": "application/json" };
     init.body = JSON.stringify(body);
@@ -1260,15 +1243,22 @@ export const api = {
     kind: IntentBuildReaderUsageKind;
     artifact_id?: string;
   }) => http<IntentBuildUsageAppendResultV1>("POST", "/build_intent/usage.event", payload),
-  text: (lid: string, end?: string) =>
-    http<BookText>("GET", `/book/text${qs({ lid, end })}`),
+  text: (lid: string, end?: string, signal?: AbortSignal) =>
+    http<BookText>("GET", `/book/text${qs({ lid, end })}`, undefined, signal),
   structure: (at?: string) => http<StructureProjection>("GET", `/book/structure${qs({ at })}`),
   paperReadingGuide: (mode?: PaperReadingMode, stage?: PaperReadingStage) =>
     http<PaperReadingGuide>("GET", `/book/paper_reading_guide${qs({ mode, stage })}`),
   paperMetadata: () => http<PaperMetadataProjection>("GET", "/book/paper_metadata"),
   paperLexicon: () => http<PaperLexiconProjection>("GET", "/book/paper_lexicon"),
-  formulaSemantics: (lid: string) =>
-    http<FormulaSemantics>("GET", `/book/formula_semantics${qs({ lid })}`),
+  formulaSemantics: (lid: string, signal?: AbortSignal) =>
+    http<FormulaSemantics>("GET", `/book/formula_semantics${qs({ lid })}`, undefined, signal),
+  formulaSemanticsRange: (start_lid: string, end_lid: string, signal?: AbortSignal) =>
+    http<FormulaSemanticsRangeReply>(
+      "GET",
+      `/book/formula_semantics_range${qs({ start: start_lid, end: end_lid })}`,
+      undefined,
+      signal,
+    ),
   openBook: (dir: string) => http<{ ok: boolean; book_id: string }>("POST", "/book/open", { dir }),
   createBook: (payload: {
     book_id: string;

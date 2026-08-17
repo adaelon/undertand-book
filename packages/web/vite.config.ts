@@ -10,7 +10,11 @@ const backend = process.env.UNDERSTAND_BOOK_ADDR
 export default defineConfig({
   plugins: [vue()],
   test: {
-    exclude: [...configDefaults.exclude, "playwright/**"],
+    exclude: [
+      ...configDefaults.exclude,
+      "playwright/**",
+      "scripts/**/*.test.mjs",
+    ],
   },
   server: {
     proxy: {

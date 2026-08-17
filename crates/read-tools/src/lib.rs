@@ -1410,6 +1410,17 @@ pub struct ToolError {
     pub message: String,
 }
 
+/// Inclusive leaf-range projection for the optional FormulaSemantics sidecar.
+/// Only sidecar hits are returned; callers derive negative-cache entries from
+/// the requested formula LIDs that are absent from `items`.
+#[derive(Debug, Clone, Serialize, PartialEq, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
+pub struct FormulaSemanticsRangeReply {
+    pub start_lid: String,
+    pub end_lid: String,
+    pub items: Vec<FormulaSemantics>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SourceTextRange {
     pub start: u32,
@@ -1646,6 +1657,7 @@ pub fn disambiguate_source_labels(sources: &mut [ResolvedSource]) {
 #[ts(export, export_to = "../../../packages/web/src/generated/")]
 pub struct ManifestNode {
     pub lid: String,
+    pub display_title: String,
     pub children: Vec<String>,
     pub span: Span,
     pub kind: NodeKind,
@@ -3317,6 +3329,60 @@ impl Book {
         self.formula_semantics
             .iter()
             .find(|s| s.formula_lid == formula_lid)
+    }
+
+    /// Returns all FormulaSemantics hits in one inclusive, consecutive leaf range.
+    /// Output follows canonical leaf order regardless of sidecar serialization order.
+    pub fn formula_semantics_range(
+        &self,
+        start_lid: &str,
+        end_lid: &str,
+    ) -> Result<FormulaSemanticsRangeReply, ToolError> {
+        let leaves = self.validated_leaf_range(start_lid, end_lid)?;
+        let requested: HashSet<&str> = leaves.iter().map(|node| node.lid.as_str()).collect();
+        let mut semantics_by_lid: HashMap<&str, &FormulaSemantics> = HashMap::new();
+
+        for semantics in &self.formula_semantics {
+            if !requested.contains(semantics.formula_lid.as_str()) {
+                continue;
+            }
+            let node = leaves
+                .iter()
+                .find(|node| node.lid == semantics.formula_lid)
+                .expect("requested identities came from the same leaf slice");
+            if node.kind != NodeKind::Formula {
+                return Err(invalid_formula_semantics(
+                    &semantics.formula_lid,
+                    "sidecar item does not identify a Formula leaf",
+                ));
+            }
+            if semantics.composition.source_lid != semantics.formula_lid {
+                return Err(invalid_formula_semantics(
+                    &semantics.formula_lid,
+                    "composition.source_lid does not match formula_lid",
+                ));
+            }
+            if semantics_by_lid
+                .insert(semantics.formula_lid.as_str(), semantics)
+                .is_some()
+            {
+                return Err(invalid_formula_semantics(
+                    &semantics.formula_lid,
+                    "duplicate sidecar identity",
+                ));
+            }
+        }
+
+        let items = leaves
+            .iter()
+            .filter_map(|node| semantics_by_lid.get(node.lid.as_str()).copied())
+            .cloned()
+            .collect();
+        Ok(FormulaSemanticsRangeReply {
+            start_lid: start_lid.to_string(),
+            end_lid: end_lid.to_string(),
+            items,
+        })
     }
 
     pub fn with_discourse_items(
@@ -5627,12 +5693,125 @@ impl Book {
     /// span 是 UTF-16 code unit 下标 `[ADR-0024]` ⇒ 按 UTF-16 切,绝不按 UTF-8 字节直切。
     /// `end_lid = Some(e)` 取 [lid.span.start, e.span.end);None 取单 LID。
     pub fn text(&self, lid: &str, end_lid: Option<&str>) -> Result<String, ToolError> {
-        let start = self.node(lid)?.span.start;
-        let end = match end_lid {
-            Some(e) => self.node(e)?.span.end,
-            None => self.node(lid)?.span.end,
+        let (start, end) = match end_lid {
+            Some(end_lid) => {
+                let leaves = self.validated_leaf_range(lid, end_lid)?;
+                (
+                    leaves
+                        .first()
+                        .expect("validated range is non-empty")
+                        .span
+                        .start,
+                    leaves
+                        .last()
+                        .expect("validated range is non-empty")
+                        .span
+                        .end,
+                )
+            }
+            None => {
+                let node = self.node(lid)?;
+                self.validate_utf16_span(node, false)?;
+                (node.span.start, node.span.end)
+            }
         };
-        Ok(String::from_utf16_lossy(&self.source_u16[start..end]))
+        let source = self
+            .source_u16
+            .get(start..end)
+            .ok_or_else(|| invalid_leaf_range("source span is outside canonical text"))?;
+        Ok(String::from_utf16_lossy(source))
+    }
+
+    fn validated_leaf_range(
+        &self,
+        start_lid: &str,
+        end_lid: &str,
+    ) -> Result<Vec<&LidNode>, ToolError> {
+        let start = self.node(start_lid)?;
+        let end = self.node(end_lid)?;
+        if !start.children.is_empty() || !end.children.is_empty() {
+            return Err(invalid_leaf_range(
+                "range endpoints must identify leaf LIDs",
+            ));
+        }
+
+        // Manifest order is the public leaf-order contract. Validate spans against
+        // that order instead of sorting malformed input into an apparently valid range.
+        let leaves: Vec<_> = self
+            .base
+            .lid_nodes
+            .iter()
+            .filter(|node| node.children.is_empty())
+            .collect();
+        let start_positions: Vec<_> = leaves
+            .iter()
+            .enumerate()
+            .filter_map(|(index, node)| (node.lid == start_lid).then_some(index))
+            .collect();
+        let end_positions: Vec<_> = leaves
+            .iter()
+            .enumerate()
+            .filter_map(|(index, node)| (node.lid == end_lid).then_some(index))
+            .collect();
+        if start_positions.len() != 1 || end_positions.len() != 1 {
+            return Err(invalid_leaf_range(
+                "range endpoint identity must occur exactly once in leaf order",
+            ));
+        }
+        let start_index = start_positions[0];
+        let end_index = end_positions[0];
+        if start_index > end_index {
+            return Err(invalid_leaf_range(
+                "start_lid must not follow end_lid in leaf order",
+            ));
+        }
+
+        let selected = &leaves[start_index..=end_index];
+        let mut seen = HashSet::new();
+        let mut previous: Option<&LidNode> = None;
+        for node in selected {
+            if !seen.insert(node.lid.as_str()) {
+                return Err(invalid_leaf_range("leaf identities must be unique"));
+            }
+            self.validate_utf16_span(node, true)?;
+            if let Some(previous) = previous {
+                if previous.path >= node.path {
+                    return Err(invalid_leaf_range(
+                        "leaf paths must increase in manifest order",
+                    ));
+                }
+                if previous.span.end > node.span.start {
+                    return Err(invalid_leaf_range("leaf spans overlap or run backwards"));
+                }
+                if !utf16_is_whitespace(&self.source_u16[previous.span.end..node.span.start]) {
+                    return Err(invalid_leaf_range(
+                        "non-whitespace canonical text gap is not owned by a leaf",
+                    ));
+                }
+            }
+            previous = Some(node);
+        }
+        Ok(selected.to_vec())
+    }
+
+    fn validate_utf16_span(
+        &self,
+        node: &LidNode,
+        require_non_empty: bool,
+    ) -> Result<(), ToolError> {
+        let span = &node.span;
+        if span.start > span.end
+            || (require_non_empty && span.start == span.end)
+            || span.end > self.source_u16.len()
+            || !is_utf16_boundary(&self.source_u16, span.start)
+            || !is_utf16_boundary(&self.source_u16, span.end)
+        {
+            return Err(invalid_leaf_range(&format!(
+                "invalid UTF-16 source span for {}",
+                node.lid
+            )));
+        }
+        Ok(())
     }
 
     pub fn resolve_source(
@@ -6481,6 +6660,7 @@ impl Book {
             .iter()
             .map(|n| ManifestNode {
                 lid: n.lid.clone(),
+                display_title: manifest_display_title(&self.source_u16, n),
                 children: n.children.clone(),
                 span: n.span.clone(),
                 kind: n.kind.clone(),
@@ -7020,6 +7200,22 @@ fn invalid_source_range(message: impl Into<String>) -> ToolError {
     }
 }
 
+fn invalid_leaf_range(message: impl Into<String>) -> ToolError {
+    ToolError {
+        error_code: "INVALID_LEAF_RANGE".into(),
+        category: "validation".into(),
+        message: message.into(),
+    }
+}
+
+fn invalid_formula_semantics(lid: &str, message: &str) -> ToolError {
+    ToolError {
+        error_code: "FORMULA_SEMANTICS_INVALID".into(),
+        category: "internal".into(),
+        message: format!("invalid FormulaSemantics for {lid}: {message}"),
+    }
+}
+
 fn search_error(code: &str, message: impl Into<String>) -> ToolError {
     ToolError {
         error_code: code.into(),
@@ -7426,6 +7622,76 @@ fn utf16_is_whitespace(text: &[u16]) -> bool {
         .all(char::is_whitespace)
 }
 
+const MANIFEST_DISPLAY_TITLE_MAX_UTF16: usize = 80;
+
+fn manifest_display_title(source: &[u16], node: &LidNode) -> String {
+    let span = &node.span;
+    if span.start >= span.end
+        || span.end > source.len()
+        || !is_utf16_boundary(source, span.start)
+        || !is_utf16_boundary(source, span.end)
+    {
+        return node.lid.clone();
+    }
+    for line_u16 in source[span.start..span.end].split(|unit| *unit == b'\n' as u16) {
+        let Ok(line) = String::from_utf16(line_u16) else {
+            return node.lid.clone();
+        };
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let title = strip_manifest_heading_marker(line).unwrap_or(line).trim();
+        let title = truncate_utf16_prefix(title, MANIFEST_DISPLAY_TITLE_MAX_UTF16);
+        return if title.is_empty() {
+            node.lid.clone()
+        } else {
+            title
+        };
+    }
+    node.lid.clone()
+}
+
+fn strip_manifest_heading_marker(line: &str) -> Option<&str> {
+    let marker_len = line.bytes().take_while(|byte| *byte == b'#').count();
+    if !(1..=6).contains(&marker_len) {
+        return None;
+    }
+    let rest = &line[marker_len..];
+    if !rest.starts_with([' ', '\t']) {
+        return None;
+    }
+    let title = rest
+        .trim_start_matches([' ', '\t'])
+        .trim_end_matches([' ', '\t']);
+    let trailing_markers = title.bytes().rev().take_while(|byte| *byte == b'#').count();
+    if trailing_markers == 0 {
+        return Some(title);
+    }
+    let before_markers = &title[..title.len() - trailing_markers];
+    if before_markers.ends_with([' ', '\t']) {
+        Some(before_markers.trim_end_matches([' ', '\t']))
+    } else {
+        Some(title)
+    }
+}
+
+fn truncate_utf16_prefix(value: &str, max_units: usize) -> String {
+    let mut units = 0;
+    value
+        .chars()
+        .take_while(|character| {
+            let next = units + character.len_utf16();
+            if next > max_units {
+                false
+            } else {
+                units = next;
+                true
+            }
+        })
+        .collect()
+}
+
 fn markdown_heading(text: &str) -> Option<String> {
     let trimmed = text.lines().find(|line| !line.trim().is_empty())?.trim();
     let marker_len = trimmed.bytes().take_while(|byte| *byte == b'#').count();
@@ -7685,6 +7951,17 @@ mod tests {
         Book::new(sample_base(), &src)
     }
 
+    fn projected_manifest_title(source: &str, span: Span, lid: &str) -> String {
+        let node = LidNode {
+            lid: lid.into(),
+            path: vec![1],
+            kind: NodeKind::Chapter,
+            span,
+            children: vec![],
+        };
+        manifest_display_title(&source.encode_utf16().collect::<Vec<_>>(), &node)
+    }
+
     fn book_with_discourse_projection() -> Book {
         let source = "AAAABBBBCCCCDDDDEEEE";
         let base = ReadOnlyBase {
@@ -7898,6 +8175,80 @@ mod tests {
             },
             context_links: vec![],
         }
+    }
+
+    fn formula_semantics_at(lid: &str) -> FormulaSemantics {
+        let mut semantics = formula_semantics();
+        semantics.formula_lid = lid.into();
+        semantics.composition.source_lid = lid.into();
+        semantics.parameters[0].evidence_lids = vec![lid.into()];
+        semantics.composition.evidence_lids = vec![lid.into()];
+        semantics
+    }
+
+    fn utf16_range_book() -> Book {
+        let source = "ASCII\r\n  中文😀 \n$E=mc^2$\r\n尾\n$z$\n$q$";
+        let base = ReadOnlyBase {
+            book_id: "utf16-range-book".into(),
+            lid_nodes: vec![
+                LidNode {
+                    lid: "1".into(),
+                    path: vec![1],
+                    kind: NodeKind::Chapter,
+                    span: Span { start: 0, end: 34 },
+                    children: (1..=6).map(|index| format!("1.{index}")).collect(),
+                },
+                LidNode {
+                    lid: "1.1".into(),
+                    path: vec![1, 1],
+                    kind: NodeKind::Paragraph,
+                    span: Span { start: 0, end: 5 },
+                    children: vec![],
+                },
+                LidNode {
+                    lid: "1.2".into(),
+                    path: vec![1, 2],
+                    kind: NodeKind::Paragraph,
+                    span: Span { start: 9, end: 13 },
+                    children: vec![],
+                },
+                LidNode {
+                    lid: "1.3".into(),
+                    path: vec![1, 3],
+                    kind: NodeKind::Formula,
+                    span: Span { start: 15, end: 23 },
+                    children: vec![],
+                },
+                LidNode {
+                    lid: "1.4".into(),
+                    path: vec![1, 4],
+                    kind: NodeKind::Paragraph,
+                    span: Span { start: 25, end: 26 },
+                    children: vec![],
+                },
+                LidNode {
+                    lid: "1.5".into(),
+                    path: vec![1, 5],
+                    kind: NodeKind::Formula,
+                    span: Span { start: 27, end: 30 },
+                    children: vec![],
+                },
+                LidNode {
+                    lid: "1.6".into(),
+                    path: vec![1, 6],
+                    kind: NodeKind::Formula,
+                    span: Span { start: 31, end: 34 },
+                    children: vec![],
+                },
+            ],
+            graph_nodes: vec![],
+            graph_edges: vec![],
+        };
+        // Deliberately serialize semantics out of order; the range projection owns order.
+        Book::new(base, source).with_formula_semantics(vec![
+            formula_semantics_at("1.5"),
+            formula_semantics_at("1.3"),
+        ])
     }
 
     fn structure_base() -> ReadOnlyBase {
@@ -8579,6 +8930,150 @@ mod tests {
     }
 
     #[test]
+    fn utf16_text_range_matches_every_singular_leaf() {
+        let book = utf16_range_book();
+        let ranged = book.text("1.1", Some("1.6")).unwrap();
+        assert_eq!(ranged, "ASCII\r\n  中文😀 \n$E=mc^2$\r\n尾\n$z$\n$q$");
+        let ranged_utf16: Vec<u16> = ranged.encode_utf16().collect();
+        let range_start = book.node("1.1").unwrap().span.start;
+
+        for lid in ["1.1", "1.2", "1.3", "1.4", "1.5", "1.6"] {
+            let node = book.node(lid).unwrap();
+            let from_range = String::from_utf16_lossy(
+                &ranged_utf16[node.span.start - range_start..node.span.end - range_start],
+            );
+            let singular = book.text(lid, None).unwrap();
+            assert_eq!(from_range, singular, "text mismatch for {lid}");
+            assert_eq!(
+                from_range.encode_utf16().count(),
+                node.span.end - node.span.start,
+                "UTF-16 length mismatch for {lid}"
+            );
+            assert_eq!(
+                search_sha256_hex(from_range.as_bytes()),
+                search_sha256_hex(singular.as_bytes()),
+                "digest mismatch for {lid}"
+            );
+        }
+    }
+
+    #[test]
+    fn utf16_text_range_rejects_reverse_container_and_invalid_spans() {
+        let book = utf16_range_book();
+        for error in [
+            book.text("1.6", Some("1.1")).unwrap_err(),
+            book.text("1", Some("1.6")).unwrap_err(),
+        ] {
+            assert_eq!(error.error_code, "INVALID_LEAF_RANGE");
+            assert_eq!(error.category, "validation");
+        }
+
+        let mut base = book.base.clone();
+        base.lid_nodes
+            .iter_mut()
+            .find(|node| node.lid == "1.2")
+            .unwrap()
+            .span = Span { start: 11, end: 12 };
+        let invalid = Book::new(base, "ASCII\r\n  中文😀 \n$E=mc^2$\r\n尾\n$z$\n$q$");
+        assert_eq!(
+            invalid.text("1.1", Some("1.2")).unwrap_err().error_code,
+            "INVALID_LEAF_RANGE"
+        );
+    }
+
+    #[test]
+    fn formula_semantics_range_is_ordered_unique_bounded_and_supports_negative_cache() {
+        let book = utf16_range_book();
+        let reply = book.formula_semantics_range("1.1", "1.6").unwrap();
+        assert_eq!(reply.start_lid, "1.1");
+        assert_eq!(reply.end_lid, "1.6");
+        assert_eq!(
+            reply
+                .items
+                .iter()
+                .map(|item| item.formula_lid.as_str())
+                .collect::<Vec<_>>(),
+            vec!["1.3", "1.5"]
+        );
+        let returned: HashSet<_> = reply
+            .items
+            .iter()
+            .map(|item| item.formula_lid.as_str())
+            .collect();
+        assert_eq!(returned.len(), reply.items.len());
+        assert!(returned
+            .iter()
+            .all(|lid| ["1.3", "1.5", "1.6"].contains(lid)));
+        for item in &reply.items {
+            assert_eq!(
+                item,
+                book.formula_semantics(&item.formula_lid).unwrap(),
+                "range item must remain deeply equal to the singular projection"
+            );
+        }
+        let negative: Vec<_> = ["1.3", "1.5", "1.6"]
+            .into_iter()
+            .filter(|lid| !returned.contains(lid))
+            .collect();
+        assert_eq!(negative, vec!["1.6"]);
+    }
+
+    #[test]
+    fn formula_semantics_range_rejects_invalid_order_and_duplicate_identity() {
+        let book = utf16_range_book();
+        assert_eq!(
+            book.formula_semantics_range("1.6", "1.1")
+                .unwrap_err()
+                .error_code,
+            "INVALID_LEAF_RANGE"
+        );
+
+        let duplicate = Book::new(
+            book.base.clone(),
+            "ASCII\r\n  中文😀 \n$E=mc^2$\r\n尾\n$z$\n$q$",
+        )
+        .with_formula_semantics(vec![
+            formula_semantics_at("1.3"),
+            formula_semantics_at("1.3"),
+        ]);
+        assert_eq!(
+            duplicate
+                .formula_semantics_range("1.1", "1.6")
+                .unwrap_err()
+                .error_code,
+            "FORMULA_SEMANTICS_INVALID"
+        );
+
+        let paragraph_identity = Book::new(
+            book.base.clone(),
+            "ASCII\r\n  中文😀 \n$E=mc^2$\r\n尾\n$z$\n$q$",
+        )
+        .with_formula_semantics(vec![formula_semantics_at("1.2")]);
+        assert_eq!(
+            paragraph_identity
+                .formula_semantics_range("1.1", "1.6")
+                .unwrap_err()
+                .error_code,
+            "FORMULA_SEMANTICS_INVALID"
+        );
+
+        let mut composition_mismatch = formula_semantics_at("1.3");
+        composition_mismatch.composition.source_lid = "1.5".into();
+        let composition_identity = Book::new(
+            book.base.clone(),
+            "ASCII\r\n  中文😀 \n$E=mc^2$\r\n尾\n$z$\n$q$",
+        )
+        .with_formula_semantics(vec![composition_mismatch]);
+        assert_eq!(
+            composition_identity
+                .formula_semantics_range("1.1", "1.6")
+                .unwrap_err()
+                .error_code,
+            "FORMULA_SEMANTICS_INVALID"
+        );
+    }
+
+    #[test]
     fn text_missing_lid_errors_not_silent() {
         let b = book();
         let e = b.text("9.9", None).unwrap_err();
@@ -8595,12 +9090,101 @@ mod tests {
             .tree
             .iter()
             .any(|n| n.lid == "1.1" && n.kind == NodeKind::Paragraph));
+        assert!(m.tree.iter().all(|n| n.display_title == "X".repeat(80)));
         let s1 = &m.stats_by_lid["1"];
         assert_eq!(s1.child_count, 1);
         assert_eq!(s1.leaf_count, 1); // 仅 1.1 是叶
         assert_eq!(s1.anchored_nodes, 0); // 锚定都落在 1.1,不在容器 1
         let s11 = &m.stats_by_lid["1.1"];
         assert_eq!(s11.anchored_nodes, 2); // entity:command(occ 含 1.1)+ claim(source 1.1)
+    }
+
+    #[test]
+    fn manifest_display_title_projects_first_line_and_markdown_heading() {
+        let heading = "\r\n  ## 确定性标题 ###  \n正文";
+        assert_eq!(
+            projected_manifest_title(
+                heading,
+                Span {
+                    start: 0,
+                    end: heading.encode_utf16().count(),
+                },
+                "1",
+            ),
+            "确定性标题"
+        );
+
+        let ordinary = "  \n\tOrdinary first line  \r\nsecond";
+        assert_eq!(
+            projected_manifest_title(
+                ordinary,
+                Span {
+                    start: 0,
+                    end: ordinary.encode_utf16().count(),
+                },
+                "2",
+            ),
+            "Ordinary first line"
+        );
+    }
+
+    #[test]
+    fn manifest_display_title_truncates_utf16_without_splitting_emoji() {
+        let cjk = "界".repeat(81);
+        let cjk_title = projected_manifest_title(
+            &cjk,
+            Span {
+                start: 0,
+                end: cjk.encode_utf16().count(),
+            },
+            "1",
+        );
+        assert_eq!(cjk_title, "界".repeat(80));
+        assert_eq!(cjk_title.encode_utf16().count(), 80);
+
+        let exact_emoji = format!("{}😀tail", "a".repeat(78));
+        let exact_title = projected_manifest_title(
+            &exact_emoji,
+            Span {
+                start: 0,
+                end: exact_emoji.encode_utf16().count(),
+            },
+            "2",
+        );
+        assert_eq!(exact_title, format!("{}😀", "a".repeat(78)));
+        assert_eq!(exact_title.encode_utf16().count(), 80);
+
+        let split_emoji = format!("{}😀tail", "b".repeat(79));
+        let split_title = projected_manifest_title(
+            &split_emoji,
+            Span {
+                start: 0,
+                end: split_emoji.encode_utf16().count(),
+            },
+            "3",
+        );
+        assert_eq!(split_title, "b".repeat(79));
+        assert!(!split_title.contains('\u{fffd}'));
+    }
+
+    #[test]
+    fn manifest_display_title_falls_back_to_lid_for_blank_or_empty_span() {
+        let blank = " \r\n\t\n";
+        assert_eq!(
+            projected_manifest_title(
+                blank,
+                Span {
+                    start: 0,
+                    end: blank.encode_utf16().count(),
+                },
+                "blank-lid",
+            ),
+            "blank-lid"
+        );
+        assert_eq!(
+            projected_manifest_title("ignored", Span { start: 0, end: 0 }, "empty-lid"),
+            "empty-lid"
+        );
     }
 
     #[test]
@@ -10928,7 +11512,24 @@ mod search_text_exact_tests {
         let query = r"\sqrt{2\ln N}";
         let exact = book.search_text_exact(query, None).unwrap();
         assert_eq!(exact.total_occurrences, 32);
-        assert_eq!(exact.occurrences[0].start_lid, "1.10.3.10");
+        let query_utf16: Vec<_> = query.encode_utf16().collect();
+        for occurrence in &exact.occurrences {
+            let range = &occurrence.source_range_utf16;
+            assert_eq!(
+                &book.source_u16[range.start..range.end],
+                query_utf16.as_slice(),
+                "real-book search occurrence must reproduce the exact source query"
+            );
+            let start_leaf = book.node(&occurrence.start_lid).unwrap();
+            let end_leaf = book.node(&occurrence.end_lid).unwrap();
+            assert!(start_leaf.children.is_empty() && end_leaf.children.is_empty());
+            assert!(start_leaf.span.start <= range.start && range.start < start_leaf.span.end);
+            assert!(end_leaf.span.start < range.end && range.end <= end_leaf.span.end);
+        }
+        assert!(exact
+            .occurrences
+            .windows(2)
+            .all(|pair| pair[0].source_range_utf16.start < pair[1].source_range_utf16.start));
 
         let mut input = request(query, SearchMatchMode::Exact, 7);
         let mut page_ranges = Vec::new();

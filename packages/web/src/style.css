@@ -563,6 +563,7 @@ body {
   position: relative;
   overflow-y: auto;
   overscroll-behavior-y: contain;
+  overflow-anchor: none;
   background: var(--reader-canvas);
 }
 .reader-pane:focus {
@@ -630,6 +631,15 @@ body {
 }
 .prose .empty {
   color: var(--steel);
+}
+.reader-edge-sentinel {
+  height: 1px;
+  pointer-events: none;
+}
+.reader-spacer {
+  width: 100%;
+  min-height: 0;
+  pointer-events: none;
 }
 
 .asset-block {
@@ -1073,6 +1083,7 @@ input:focus {
 
 
 .prose .seg {
+  display: flow-root;
   position: relative;
 }
 .block-actions {

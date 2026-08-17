@@ -28,6 +28,11 @@ function pdfFixture(): Buffer {
 }
 
 const sourceFingerprint = "a".repeat(64);
+const markdownTexts = new Map([
+  ["1.1", "First placement target for an Agent note."],
+  ["1.2", "Second placement target for moving the note."],
+]);
+const markdownSource = [...markdownTexts.values()].join("");
 const sourceMap = {
   version: "pdf_source_map.v1" as const,
   book_id: "paper-a",
@@ -41,14 +46,14 @@ const sourceMap = {
   entries: [
     {
       lid: "1.1",
-      source_span: { start: 0, end: 42 },
+      source_span: { start: 0, end: 41 },
       status: "word_mapped",
       regions: [{ region_id: "first", pageIndex: 0, bbox: [70, 690, 390, 722] }],
       alignment: { confidence: 1 },
     },
     {
       lid: "1.2",
-      source_span: { start: 42, end: 88 },
+      source_span: { start: 41, end: 85 },
       status: "word_mapped",
       regions: [{ region_id: "second", pageIndex: 0, bbox: [70, 610, 410, 642] }],
       alignment: { confidence: 1 },
@@ -223,8 +228,8 @@ async function installFixture(page: Page, surface: FixtureSurface = "pdf") {
     if (path === "/api/book/manifest") {
       return json(route, {
         tree: [
-          { lid: "1.1", children: [], span: { start: 0, end: 42 }, kind: "paragraph" },
-          { lid: "1.2", children: [], span: { start: 42, end: 88 }, kind: "paragraph" },
+          { lid: "1.1", display_title: "Alpha source line", children: [], span: { start: 0, end: 41 }, kind: "paragraph" },
+          { lid: "1.2", display_title: "Second source line", children: [], span: { start: 41, end: 85 }, kind: "paragraph" },
         ],
         stats_by_lid: {},
       });
@@ -269,10 +274,18 @@ async function installFixture(page: Page, surface: FixtureSurface = "pdf") {
     if (path === "/api/profile/memory") return json(route, profileMemory());
     if (path === "/api/profile/backfill") return json(route, { sessions: [], jobs: [] });
     if (path === "/api/book/text") {
-      const lid = new URL(request.url()).searchParams.get("lid") ?? "1.1";
+      const query = new URL(request.url()).searchParams;
+      const lid = query.get("lid") ?? "1.1";
+      const end = query.get("end");
+      const lids = [...markdownTexts.keys()];
+      const startIndex = lids.indexOf(lid);
+      const endIndex = end ? lids.indexOf(end) : startIndex;
       return json(route, {
         lid,
-        text: lid === "1.2" ? "Second placement target for moving the note." : "First placement target for an Agent note.",
+        ...(end ? { end_lid: end } : {}),
+        text: end && startIndex >= 0 && endIndex >= startIndex
+          ? lids.slice(startIndex, endIndex + 1).map((item) => markdownTexts.get(item) ?? "").join("")
+          : markdownTexts.get(lid) ?? markdownSource,
       });
     }
     if (path === "/api/reader/state") return json(route, readerState);
