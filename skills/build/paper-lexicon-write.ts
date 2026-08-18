@@ -2,6 +2,7 @@
 //   tsx skills/build/paper-lexicon-write.ts <book.md|epub> <workUnitId> <extractor-output.json> [--book-id <id>] --content-profile paper
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { deriveBookId } from "../../packages/core/src/book-id";
+import { readPaperLexiconCommittedArtifacts } from "../../packages/core/src/paper-lexicon-artifact-store";
 import { analyzePaperLexiconCandidates, buildPaperLexiconCandidateArtifact } from "../../packages/core/src/paper-lexicon-router";
 import { parseExtractorCandidate } from "../../packages/core/src/extractor-contract";
 import { contentProfileUsage, parsePaperContentProfileArgsOrExit } from "./content-profile-options";
@@ -19,7 +20,10 @@ if (!book || workUnitId === undefined || !outputPath) {
 }
 
 const { source, lidNodes, byLid, windows } = loadBookWindows(book);
-const routing = analyzePaperLexiconCandidates({ windows, byLid, source });
+const bookId = deriveBookId(book, override);
+const dir = `.understand-book/${bookId}/.build/paper-lexicon`;
+const existingArtifacts = readPaperLexiconCommittedArtifacts(dir);
+const routing = analyzePaperLexiconCandidates({ windows, byLid, source, existing_artifacts: existingArtifacts });
 const packet = routing.packets[workUnitId];
 if (!packet) throw new Error(`paper lexicon work unit is not model-eligible: ${workUnitId}`);
 const outputText = readFileSync(outputPath, "utf8").replace(/^\uFEFF/, "");
@@ -28,8 +32,6 @@ const output = parseExtractorCandidate("paper_lexicon", JSON.parse(outputText), 
 });
 const artifact = buildPaperLexiconCandidateArtifact(packet, lidNodes, output);
 
-const bookId = deriveBookId(book, override);
-const dir = `.understand-book/${bookId}/.build/paper-lexicon`;
 mkdirSync(dir, { recursive: true });
 const finalPath = `${dir}/${workUnitId}.json`;
 const tmpPath = `${finalPath}.tmp`;

@@ -23,7 +23,14 @@ import { buildPass1Input } from "./pass1-input";
 import { buildProfiledPass1Input } from "./pass1-profile-input";
 import { mergeAndGate } from "./merge";
 import { computePaperMetadataRoutingStatus, routePaperMetadataWorkUnits } from "./paper-metadata-router";
-import { computePaperLexiconRoutingStatus, routePaperLexiconWorkUnits } from "./paper-lexicon-router";
+import {
+  computePaperLexiconRoutingStatus,
+  inspectPaperLexiconCommittedArtifact,
+  routePaperLexiconWorkUnitsWithRecovery,
+  type PaperLexiconCommittedArtifactV1,
+  type PaperLexiconRoutingPlan,
+} from "./paper-lexicon-router";
+import type { PaperLexiconArtifact } from "./paper-lexicon";
 import {
   PROFILE_SIDECAR_ROUTER_VERSION,
   analyzeProfileSidecarSemanticUnits,
@@ -703,6 +710,28 @@ function artifactMetaByWorkUnit(
     if (!binding) continue;
     const artifact = freshSemanticPayload<Pass1ArtifactMeta>(file, semanticExpectation(target, stage, id, binding));
     if (artifact && typeof artifact.content_hash === "string") result.set(id, { content_hash: artifact.content_hash });
+  }
+  return result;
+}
+
+function paperLexiconCommittedArtifactsByWorkUnit(
+  dir: string,
+  plan: PaperLexiconRoutingPlan,
+  target: AutomaticBuildTarget,
+): Map<string, PaperLexiconCommittedArtifactV1> {
+  const result = new Map<string, PaperLexiconCommittedArtifactV1>();
+  const bindings = bindingsFromDescriptors(plan.work_units);
+  for (const packet of Object.values(plan.packets)) {
+    if (packet.route.role !== "fragment") continue;
+    const file = path.join(dir, `${packet.work_unit_id}.json`);
+    const binding = bindings[packet.work_unit_id];
+    if (!existsSync(file) || !binding) continue;
+    const artifact = freshSemanticPayload<PaperLexiconArtifact>(
+      file,
+      semanticExpectation(target, "paper_lexicon", packet.work_unit_id, binding),
+    );
+    const committed = artifact ? inspectPaperLexiconCommittedArtifact(artifact) : undefined;
+    if (committed) result.set(packet.work_unit_id, committed);
   }
   return result;
 }
@@ -1954,20 +1983,41 @@ function buildAutomaticBuildSnapshotInternal(
     stages.push(stageState("paper_metadata", metadata.pending_ids, metadataClosed, metadataWorkUnits));
     if (metadata.pending || !metadataClosed) return { target, stages };
 
-    const lexiconPlan = routePaperLexiconWorkUnits({
+    const lexiconPolicy = automaticBuildExtractionPolicy("paper_lexicon", profile, qualityProfile);
+    const lexiconRouteInput = {
       target: target.target_ref,
       windows: loaded.windows,
       byLid: loaded.byLid,
       source: loaded.source,
-      policy_fingerprint: automaticBuildExtractionPolicy("paper_lexicon", profile, qualityProfile),
-    });
+      policy_fingerprint: lexiconPolicy,
+    };
+    let lexiconRoute = routePaperLexiconWorkUnitsWithRecovery(lexiconRouteInput);
+    if (lexiconRoute.status === "blocked") {
+      throw new AutomaticBuildSnapshotRecoverySignal(lexiconRoute.recovery);
+    }
+    const lexiconArtifactDir = path.join(buildRoot, "paper-lexicon");
+    const committedFragments = paperLexiconCommittedArtifactsByWorkUnit(
+      lexiconArtifactDir,
+      lexiconRoute.value,
+      target,
+    );
+    if (committedFragments.size) {
+      lexiconRoute = routePaperLexiconWorkUnitsWithRecovery({
+        ...lexiconRouteInput,
+        existing_artifacts: committedFragments,
+      });
+      if (lexiconRoute.status === "blocked") {
+        throw new AutomaticBuildSnapshotRecoverySignal(lexiconRoute.recovery);
+      }
+    }
+    const lexiconPlan = lexiconRoute.value;
     const lexiconWorkUnits = lexiconPlan.work_units;
     const lexiconBindings = bindingsFromDescriptors(lexiconWorkUnits);
     const eligibleLexiconIds = lexiconWorkUnits
       .filter((unit) => !unit.deterministic_skip)
       .map((unit) => unit.work_unit_id);
     const lexiconMeta = artifactMetaByWorkUnit(
-      path.join(buildRoot, "paper-lexicon"),
+      lexiconArtifactDir,
       eligibleLexiconIds,
       target,
       "paper_lexicon",

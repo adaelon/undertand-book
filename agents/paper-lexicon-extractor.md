@@ -10,12 +10,20 @@ You extract a paper-specific lexicon for the `paper` content profile.
 
 The harness provides one `PAPER_LEXICON_CANDIDATE_BATCH` packet:
 - `work_unit_id`
+- `route`, whose role is `direct`, `fragment`, or `reduce`
 - `visible_lids`
 - `requested_term_types`
 - `candidate_clusters` with normalized keys, surface forms, occurrence/definition LIDs, routing signals, and suggested term types
-- `TEXT` with each source span prefixed by `[LID]`
+- `source_slices`, binding source-backed inputs to exact LID spans and hashes
+- `reduction_children`, binding reducer inputs to child work-unit and artifact hashes
+- `TEXT` with each source span prefixed by `[LID]` (empty for reducers)
 
 Only emit entries represented by `candidate_clusters`. Choose the semantic term type and optional gloss from the evidence; do not invent terms outside the routed set or repeat the same cluster under multiple surface forms.
+
+Route behavior:
+- `direct`: extract zero or one entry per candidate cluster from `TEXT`.
+- `fragment`: emit zero or one provisional entry for the single routed cluster, using only the source fragment in `TEXT`.
+- `reduce`: reconcile the bound `reduction_children` for the single routed cluster and emit exactly zero or one final entry. Resolve semantic field conflicts from the child evidence; do not use first-arrival ordering as a tie-break.
 
 <!-- BEGIN GENERATED EXTRACTOR CONTRACT -->
 ## Machine Contract: paper_lexicon_output.v2
@@ -56,6 +64,7 @@ Cross-field invariants:
 
 - Include only terms needed to understand this paper: paper-defined terms, methods, acronyms, domain terms, datasets, metrics, models, and recurring academic phrases that affect the argument.
 - Treat candidate clusters as a high-recall shortlist, not as accepted lexicon entries. Omit ordinary or incidental candidates after reading their contexts.
+- Never emit more than one entry for the same candidate cluster; fragment and reduce routes may emit at most one entry total.
 - Do not include ordinary English vocabulary just because it may be difficult.
 - Every entry must have non-empty `occurrences_lids` from the provided text.
 - Set `defined_at_lid` only when the paper explicitly defines the term in that LID; first occurrence is not enough.

@@ -3,7 +3,7 @@ import type { BookStructureStitchPacket, BookStructureUnitSource } from "./book-
 import type { GraphEdge } from "./generated/GraphEdge";
 import type { GraphNode } from "./generated/GraphNode";
 import type { PaperMetadataCandidatePacket } from "./paper-metadata-router";
-import type { PaperLexiconCandidatePacketV2 } from "./paper-lexicon-router";
+import type { PaperLexiconCandidatePacketV3 } from "./paper-lexicon-router";
 import type { Pass1Input } from "./pass1-input";
 import type { Pass2WorkPacket } from "./pass2-build";
 import type { ProfileSidecarSemanticPacketV2 } from "./profile-sidecar-router";
@@ -101,8 +101,15 @@ export type ModelInputRenderRequest =
   | {
       kind: "lexicon_candidate_batch";
       input: Pick<
-        PaperLexiconCandidatePacketV2,
-        "work_unit_id" | "visible_lids" | "requested_term_types" | "candidate_clusters" | "text"
+        PaperLexiconCandidatePacketV3,
+        | "work_unit_id"
+        | "route"
+        | "visible_lids"
+        | "requested_term_types"
+        | "candidate_clusters"
+        | "source_slices"
+        | "reduction_children"
+        | "text"
       >;
     }
   | { kind: "pass2_candidate_batch"; input: Pass2WorkPacket }
@@ -233,16 +240,26 @@ export function renderPaperMetadataModelInput(
 
 export function renderPaperLexiconModelInput(
   input: Pick<
-    PaperLexiconCandidatePacketV2,
-    "work_unit_id" | "visible_lids" | "requested_term_types" | "candidate_clusters" | "text"
+    PaperLexiconCandidatePacketV3,
+    | "work_unit_id"
+    | "route"
+    | "visible_lids"
+    | "requested_term_types"
+    | "candidate_clusters"
+    | "source_slices"
+    | "reduction_children"
+    | "text"
   >,
 ): string {
   return lineDocument([
     "PAPER_LEXICON_CANDIDATE_BATCH",
     `work_unit_id: ${input.work_unit_id}`,
+    `route: ${JSON.stringify(input.route)}`,
     `visible_lids: ${JSON.stringify(input.visible_lids)}`,
     `requested_term_types: ${JSON.stringify(input.requested_term_types)}`,
     `candidate_clusters: ${JSON.stringify(input.candidate_clusters)}`,
+    `source_slices: ${JSON.stringify(input.source_slices)}`,
+    `reduction_children: ${JSON.stringify(input.reduction_children)}`,
     "",
     "TEXT",
     input.text,

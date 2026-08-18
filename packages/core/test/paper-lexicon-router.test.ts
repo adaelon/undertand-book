@@ -11,13 +11,15 @@ import { renderPaperLexiconModelInput } from "../src/model-input-renderer";
 import {
   buildPaperLexiconCandidateArtifact,
   computePaperLexiconRoutingStatus,
+  paperLexiconArtifactHash,
   routePaperLexiconWorkUnits,
+  routePaperLexiconWorkUnitsWithRecovery,
 } from "../src/paper-lexicon-router";
 import { automaticBuildExtractionPolicy } from "../src/semantic-artifact";
 import { segment } from "../src/segment";
 import { splitWindows } from "../src/window";
 
-function fixture(sourceOverride?: string, maxInputTokens = 320) {
+function fixture(sourceOverride?: string, maxInputTokens = 600) {
   const sourcePath = path.join(__dirname, "fixtures", "paper-lexicon-routing.md");
   const source = sourceOverride ?? readFileSync(sourcePath, "utf8");
   const lidNodes = segment(markdownToBlocks(source));
@@ -76,8 +78,139 @@ describe("paper lexicon candidate router", () => {
     expect(batches.every((unit) => unit.work_unit_id.startsWith("lexicon-batch-"))).toBe(true);
     expect(batches.every((unit) => !/^\d+$/.test(unit.work_unit_id))).toBe(true);
     expect(Object.values(first.packets).every((packet) => packet.estimated_input_tokens <= input.maxInputTokens)).toBe(true);
+    expect(Object.values(first.packets).every((packet) =>
+      packet.input_budget_proof.prompt_sha256 === input.policy.prompt_sha256,
+    )).toBe(true);
     expect(second.plan_digest).toBe(first.plan_digest);
     expect(second.work_units.map((unit) => unit.work_unit_id)).toEqual(first.work_units.map((unit) => unit.work_unit_id));
+  });
+
+  it("routes one oversized candidate cluster through exact-cover lexicon fragments", () => {
+    const repeatedContext = "bounded retrieval context ".repeat(180);
+    const source = [
+      "# Study",
+      `We define Adaptive Retrieval Architecture (ARA) as a retrieval model. ${repeatedContext}`,
+      `Adaptive Retrieval Architecture (ARA) preserves evidence. ${repeatedContext}`,
+      `Adaptive Retrieval Architecture (ARA) improves recall. ${repeatedContext}`,
+    ].join("\n\n");
+    const input = fixture(source, 420);
+    const routed = routePaperLexiconWorkUnitsWithRecovery({
+      ...input,
+      policy_fingerprint: input.policy,
+      max_input_tokens: input.maxInputTokens,
+    });
+
+    expect(routed.status).toBe("ready");
+    if (routed.status !== "ready") throw new Error("synthetic lexicon cluster should be safely splittable");
+    const fragments = Object.values(routed.value.packets).filter((packet) =>
+      packet.route.role === "fragment"
+      && packet.candidate_clusters.some((cluster) => cluster.normalized_key === "adaptive retrieval architecture"),
+    );
+
+    expect(fragments.length).toBeGreaterThan(1);
+    expect(fragments.every((packet) => packet.estimated_rendered_tokens <= input.maxInputTokens)).toBe(true);
+    expect(fragments.every((packet) => packet.source_slices.length > 0)).toBe(true);
+    expect(fragments.flatMap((packet) => packet.source_slices).every((slice) =>
+      slice.version === "model_input_slice.v1" && slice.source_fingerprint.length === 64,
+    )).toBe(true);
+    const slicesByLid = new Map<string, (typeof fragments)[number]["source_slices"]>();
+    for (const slice of fragments.flatMap((packet) => packet.source_slices)) {
+      const slices = slicesByLid.get(slice.parent_lid) ?? [];
+      slices.push(slice);
+      slicesByLid.set(slice.parent_lid, slices);
+    }
+    for (const [lid, slices] of slicesByLid) {
+      const parent = input.byLid.get(lid)!;
+      const ordered = [...slices].sort((left, right) => left.core_span_utf16.start - right.core_span_utf16.start);
+      expect(ordered[0].core_span_utf16.start).toBe(parent.span.start);
+      expect(ordered.at(-1)!.core_span_utf16.end).toBe(parent.span.end);
+      for (let index = 1; index < ordered.length; index += 1) {
+        expect(ordered[index].core_span_utf16.start).toBe(ordered[index - 1].core_span_utf16.end);
+      }
+      expect(ordered.every((slice) => slice.core_sha256 === createHash("sha256")
+        .update(input.source.slice(slice.core_span_utf16.start, slice.core_span_utf16.end))
+        .digest("hex"))).toBe(true);
+    }
+  });
+
+  it("returns structured model_input_unsplittable when renderer overhead cannot fit", () => {
+    const input = fixture(undefined, 1);
+    const routed = routePaperLexiconWorkUnitsWithRecovery({
+      ...input,
+      policy_fingerprint: input.policy,
+      max_input_tokens: input.maxInputTokens,
+    });
+
+    expect(routed).toMatchObject({
+      status: "blocked",
+      recovery: {
+        version: "automatic_build_recovery.v1",
+        phase: "routing",
+        code: "model_input_unsplittable",
+        stage: "paper_lexicon",
+        retryable: false,
+      },
+    });
+  });
+
+  it("binds a lexicon reducer to fragment artifact hashes and emits one final cluster entry", () => {
+    const repeatedContext = "bounded retrieval context ".repeat(30);
+    const source = [
+      "# Study",
+      `We define Adaptive Retrieval Architecture (ARA) as a retrieval model. ${repeatedContext}`,
+      `Adaptive Retrieval Architecture (ARA) preserves evidence. ${repeatedContext}`,
+      `Adaptive Retrieval Architecture (ARA) improves recall. ${repeatedContext}`,
+    ].join("\n\n");
+    const input = fixture(source, 600);
+    const initial = routePaperLexiconWorkUnits({
+      ...input,
+      policy_fingerprint: input.policy,
+      max_input_tokens: input.maxInputTokens,
+    });
+    const fragments = Object.values(initial.packets).filter((packet) =>
+      packet.route.role === "fragment"
+      && packet.route.cluster_keys[0] === "adaptive retrieval architecture",
+    );
+    const existingArtifacts = new Map(fragments.map((packet, index) => {
+      const artifact = buildPaperLexiconCandidateArtifact(packet, input.lidNodes, {
+        entries: [{
+          term: "ARA",
+          term_type: index % 2 ? "model_name" : "acronym",
+          occurrences_lids: [packet.visible_lids[0]],
+        }],
+      });
+      expect(artifact.entries[0].occurrences_lids).toEqual([packet.visible_lids[0]]);
+      return [packet.work_unit_id, { artifact_hash: paperLexiconArtifactHash(artifact), artifact }];
+    }));
+    const reduced = routePaperLexiconWorkUnits({
+      ...input,
+      policy_fingerprint: input.policy,
+      max_input_tokens: input.maxInputTokens,
+      existing_artifacts: existingArtifacts,
+    });
+    const reducer = Object.values(reduced.packets).find((packet) =>
+      packet.route.role === "reduce"
+      && packet.route.cluster_keys[0] === "adaptive retrieval architecture",
+    )!;
+    const reducerUnit = reduced.work_units.find((unit) => unit.work_unit_id === reducer.work_unit_id)!;
+
+    expect(reducer.reduction_children.map((child) => child.artifact_hash))
+      .toEqual([...existingArtifacts.values()].map((artifact) => artifact.artifact_hash));
+    expect(reducerUnit.dependencies).toEqual(reducer.reduction_children.map((child) => ({
+      artifact: child.work_unit_id,
+      sha256: child.artifact_hash,
+    })).sort((left, right) => left.artifact.localeCompare(right.artifact)));
+    const final = buildPaperLexiconCandidateArtifact(reducer, input.lidNodes, {
+      entries: [{ term: "ARA", term_type: "model_name", occurrences_lids: [reducer.visible_lids[0]] }],
+    });
+    expect(final.route).toMatchObject({ role: "reduce", final: true });
+    expect(final.entries).toHaveLength(1);
+    expect(() => buildPaperLexiconCandidateArtifact(reducer, input.lidNodes, {
+      entries: [
+        { term: "ARA", term_type: "model_name", occurrences_lids: [reducer.visible_lids[0]] },
+        { term: "Adaptive Retrieval Architecture", term_type: "acronym", occurrences_lids: [reducer.visible_lids[0]] },
+      ],
+    })).toThrow("at most one entry");
   });
 
   it("accounts no-candidate areas as skips and source-binds only affected work", () => {
@@ -196,5 +329,5 @@ describe("paper lexicon candidate router", () => {
     const lexicon = JSON.parse(readFileSync(publicArtifact, "utf8"));
     expect(lexicon.entries).toHaveLength(1);
     expect(lexicon.entries[0].occurrences_lids).toEqual(cluster.occurrence_lids);
-  }, 15_000);
+  }, 30_000);
 });

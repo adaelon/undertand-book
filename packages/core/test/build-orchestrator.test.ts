@@ -18,6 +18,10 @@ import { splitWindows } from "../src/window";
 import { buildPass1Artifact } from "../src/build-resume";
 import { resolveContentProfile } from "../src/content-profile";
 import { automaticBuildExtractionPolicy, buildSemanticArtifactEnvelope } from "../src/semantic-artifact";
+import {
+  buildPaperLexiconCandidateArtifact,
+  routePaperLexiconWorkUnits,
+} from "../src/paper-lexicon-router";
 import { freezeAutomaticBuildStagePolicySet } from "../src/automatic-build-policy-generation";
 import {
   collectAutomaticBuildStageQuality,
@@ -148,10 +152,12 @@ function closeV3ProfileSidecar(target: AutomaticBuildTarget): void {
   expect(result.status, result.stderr).toBe(0);
 }
 
-function writeTrustedPaperWorkspace(root: string, bookId = "paper-a"): string {
+function writeTrustedPaperWorkspace(root: string, bookId = "paper-a", sourceOverride?: string): string {
   const dir = path.join(root, ".understand-book", bookId);
-  const source = "# Abstract\n\nThis paper studies Softmax Attention retrieval.\n\n# Discussion\n\nThe Softmax Attention comparison continues here.\n";
-  const draftSource = "# Abstract\n\nThis paper studies Softmax Attention retrieval with OCR noise.\n\n# Discussion\n\nThe Softmax Attention comparison continues here.\n";
+  const source = sourceOverride
+    ?? "# Abstract\n\nThis paper studies Softmax Attention retrieval.\n\n# Discussion\n\nThe Softmax Attention comparison continues here.\n";
+  const draftSource = sourceOverride
+    ?? "# Abstract\n\nThis paper studies Softmax Attention retrieval with OCR noise.\n\n# Discussion\n\nThe Softmax Attention comparison continues here.\n";
   mkdirSync(dir, { recursive: true });
   writeFileSync(path.join(dir, "source.txt"), source, "utf8");
   writeFileSync(path.join(dir, "paper.md"), draftSource, "utf8");
@@ -600,4 +606,92 @@ describe("automatic build orchestrator", () => {
       task_ids: sidecarStage.pending_tasks,
     });
   });
+
+  it("routes fresh paper lexicon fragments into an artifact-bound reducer without mutating build state", () => {
+    const root = tempDir();
+    const repeated = "bounded retrieval context ".repeat(300);
+    const source = [
+      "# Abstract",
+      "This paper defines a retrieval architecture.",
+      "# Evidence A",
+      `We define Adaptive Retrieval Architecture (ARA) as a retrieval model. ${repeated}`,
+      "# Evidence B",
+      `Adaptive Retrieval Architecture (ARA) preserves evidence. ${repeated}`,
+      "# Evidence C",
+      `Adaptive Retrieval Architecture (ARA) improves recall. ${repeated}`,
+      "# Evidence D",
+      `Adaptive Retrieval Architecture (ARA) improves precision. ${repeated}`,
+    ].join("\n\n");
+    const workspace = writeTrustedPaperWorkspace(root, "paper-lexicon-reduce", source);
+    const target = resolveAutomaticBuildTarget(workspace, root);
+    closeV3Pass1(target);
+
+    const metadataSnapshot = buildAutomaticBuildSnapshot(target);
+    const metadataStage = metadataSnapshot.stages.find((stage) => stage.stage === "paper_metadata")!;
+    for (const unit of metadataStage.pending_work_units ?? []) {
+      writeJson(path.join(workspace, ".build", "paper-metadata", `${unit.work_unit_id}.json`), buildSemanticArtifactEnvelope({
+        target: target.target_ref,
+        stage: "paper_metadata",
+        work_unit_id: unit.work_unit_id,
+        input_hash: unit.input_hash,
+        policy_fingerprint: unit.policy_fingerprint,
+        provenance: { executor: "test", model: "codex-test", attempt: 1, generated_at: "2026-08-18T00:00:00.000Z" },
+        payload: { content_hash: unit.input_hash, metadata: {} },
+      }));
+    }
+    writeJson(path.join(workspace, "paper_metadata.json"), {
+      header: { book_id: target.book_id, profile_id: "paper" },
+    });
+
+    const lidNodes = segment(markdownToBlocks(source));
+    const byLid = new Map(lidNodes.map((node) => [node.lid, node]));
+    const windows = splitWindows(lidNodes, source);
+    const policy = automaticBuildExtractionPolicy("paper_lexicon", resolveContentProfile("paper"), "full");
+    const initialPlan = routePaperLexiconWorkUnits({
+      target: target.target_ref,
+      windows,
+      byLid,
+      source,
+      policy_fingerprint: policy,
+    });
+    const fragments = Object.values(initialPlan.packets).filter((packet) =>
+      packet.route.role === "fragment"
+      && packet.route.cluster_keys[0] === "adaptive retrieval architecture");
+    expect(fragments.length).toBeGreaterThan(1);
+
+    const lexiconSnapshot = buildAutomaticBuildSnapshot(target);
+    const lexiconStage = lexiconSnapshot.stages.find((stage) => stage.stage === "paper_lexicon")!;
+    const fragmentArtifactHashes = new Map<string, string>();
+    for (const unit of lexiconStage.pending_work_units ?? []) {
+      const packet = initialPlan.packets[unit.work_unit_id];
+      if (!packet) throw new Error(`missing paper lexicon packet: ${unit.work_unit_id}`);
+      const artifact = buildPaperLexiconCandidateArtifact(packet, lidNodes, { entries: [] });
+      const envelope = buildSemanticArtifactEnvelope({
+        target: target.target_ref,
+        stage: "paper_lexicon",
+        work_unit_id: unit.work_unit_id,
+        input_hash: unit.input_hash,
+        policy_fingerprint: unit.policy_fingerprint,
+        provenance: { executor: "test", model: "codex-test", attempt: 1, generated_at: "2026-08-18T00:01:00.000Z" },
+        payload: artifact,
+      });
+      writeJson(path.join(workspace, ".build", "paper-lexicon", `${unit.work_unit_id}.json`), envelope);
+      if (packet.route.role === "fragment") {
+        fragmentArtifactHashes.set(unit.work_unit_id, envelope.artifact_hash);
+      }
+    }
+
+    const reducedSnapshot = buildAutomaticBuildSnapshot(target);
+    const reducedStage = reducedSnapshot.stages.find((stage) => stage.stage === "paper_lexicon")!;
+    const fragmentIds = new Set(fragments.map((fragment) => fragment.work_unit_id));
+    const reducer = reducedStage.pending_work_units?.find((unit) =>
+      unit.work_unit_id.startsWith("lexicon-reduce-")
+      && unit.dependencies.length === fragmentIds.size
+      && unit.dependencies.every((dependency) => fragmentIds.has(dependency.artifact)));
+    expect(reducer?.dependencies).toEqual(fragments.map((fragment) => ({
+      artifact: fragment.work_unit_id,
+      sha256: fragmentArtifactHashes.get(fragment.work_unit_id),
+    })).sort((left, right) => left.artifact.localeCompare(right.artifact)));
+    expect(existsSync(path.join(workspace, ".build", "paper-lexicon", `${reducer!.work_unit_id}.json`))).toBe(false);
+  }, 60_000);
 });

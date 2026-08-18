@@ -53,6 +53,11 @@ describe("model input renderer", () => {
 
     const lexicon = {
       work_unit_id: "lexicon-batch-test",
+      route: {
+        version: "paper_lexicon_packet_route.v1" as const,
+        role: "direct" as const,
+        cluster_keys: ["retrieval augmented generation"],
+      },
       visible_lids: ["1.2"],
       requested_term_types: ["method_name" as const],
       candidate_clusters: [{
@@ -64,9 +69,22 @@ describe("model input renderer", () => {
         signals: ["explicit_term" as const],
         suggested_term_types: ["acronym" as const],
       }],
+      source_slices: [{
+        version: "model_input_slice.v1" as const,
+        source_fingerprint: "a".repeat(64),
+        parent_lid: "1.2",
+        ordinal: 0,
+        core_span_utf16: { start: 0, end: 3 },
+        context_span_utf16: { start: 0, end: 3 },
+        boundary_kind: "whole_lid" as const,
+        core_sha256: "b".repeat(64),
+        context_sha256: "b".repeat(64),
+      }],
+      reduction_children: [],
       text: "[1.2] RAG",
     };
     expect(renderPaperLexiconModelInput(lexicon)).toContain("candidate_clusters: [{");
+    expect(renderPaperLexiconModelInput(lexicon)).toContain("source_slices: [{");
     expect(renderPaperLexiconModelInput(lexicon).endsWith("[1.2] RAG\n")).toBe(true);
   });
 

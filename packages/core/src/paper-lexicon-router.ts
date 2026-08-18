@@ -1,8 +1,22 @@
 import { createHash } from "node:crypto";
+import { AUTOMATIC_BUILD_MODEL_INPUT_BUDGET_V1 } from "./automatic-build-protocol";
+import {
+  blockedAutomaticBuildRoute,
+  createAutomaticBuildRecoveryEnvelope,
+  readyAutomaticBuildRoute,
+  type AutomaticBuildRouteResult,
+} from "./automatic-build-recovery";
 import type { BuildTargetRefV2 } from "./build-orchestrator";
 import { pass1ContentHash, type Pass1ArtifactMeta } from "./build-resume";
 import type { LidNode } from "./generated/LidNode";
-import { inspectRenderedModelInput } from "./model-input-renderer";
+import { evaluateModelInputBudget, type ModelInputBudgetProofV1 } from "./model-input-budget";
+import { renderPaperLexiconModelInput } from "./model-input-renderer";
+import {
+  routeModelInputSlices,
+  type ModelInputSliceRenderContextV1,
+  type ModelInputSliceV1,
+  type ModelInputUnsplittableDraftV1,
+} from "./model-input-slice";
 import {
   buildPaperLexiconSidecar,
   normalizePaperLexiconKey,
@@ -14,18 +28,19 @@ import {
   type PaperTermType,
 } from "./paper-lexicon";
 import { buildPass1Input } from "./pass1-input";
-import type { ExtractionPolicyFingerprintV1 } from "./semantic-artifact";
+import { extractionPolicyDigest, type ExtractionPolicyFingerprintV1 } from "./semantic-artifact";
 import {
   buildWorkUnitCost,
   createWorkUnitDescriptor,
   workUnitPlanDigest,
   type WorkUnitDescriptorV2,
 } from "./stage-work-unit";
-import { estimateTokens, type Window } from "./window";
+import type { Window } from "./window";
 
-export const PAPER_LEXICON_ROUTER_VERSION = "paper_lexicon_cluster.v2" as const;
+export const PAPER_LEXICON_ROUTER_VERSION = "paper_lexicon_cluster.v3" as const;
 export const DEFAULT_LEXICON_BATCH_INPUT_TOKENS = 6_000;
 export const DEFAULT_LEXICON_BATCH_CANDIDATES = 32;
+export const PAPER_LEXICON_PROMPT_SHA256 = "c563d13e6fb3874f24689eb29a4dc0a9c117f4f6411ccc37cf2a47aebee2fe41" as const;
 
 export const PAPER_LEXICON_CANDIDATE_SIGNALS = [
   "acronym_expansion",
@@ -48,30 +63,74 @@ export interface PaperLexiconCandidateClusterV1 {
   suggested_term_types: PaperTermType[];
 }
 
-export interface PaperLexiconCandidatePacketV2 {
-  version: "paper_lexicon_candidate_packet.v2";
+export type PaperLexiconPacketRouteV1 =
+  | {
+      version: "paper_lexicon_packet_route.v1";
+      role: "direct";
+      cluster_keys: string[];
+    }
+  | {
+      version: "paper_lexicon_packet_route.v1";
+      role: "fragment";
+      cluster_keys: [string];
+      fragment_ordinal: number;
+    }
+  | {
+      version: "paper_lexicon_packet_route.v1";
+      role: "reduce";
+      cluster_keys: [string];
+      reducer_level: number;
+      child_work_unit_ids: string[];
+    };
+
+export interface PaperLexiconReductionChildV1 {
+  work_unit_id: string;
+  artifact_hash: string;
+  entries: PaperLexiconEntry[];
+}
+
+export interface PaperLexiconCandidatePacketV3 {
+  version: "paper_lexicon_candidate_packet.v3";
   router_version: typeof PAPER_LEXICON_ROUTER_VERSION;
   work_unit_id: string;
+  route: PaperLexiconPacketRouteV1;
   candidate_clusters: PaperLexiconCandidateClusterV1[];
   visible_lids: string[];
   requested_term_types: PaperTermType[];
+  source_slices: ModelInputSliceV1[];
+  reduction_children: PaperLexiconReductionChildV1[];
   text: string;
   estimated_input_tokens: number;
   estimated_rendered_tokens: number;
   input_hash: string;
   rendered_input_sha256: string;
+  input_budget_proof: ModelInputBudgetProofV1;
+}
+
+export interface PaperLexiconClusterRouteV1 {
+  version: "paper_lexicon_cluster_route.v1";
+  normalized_key: string;
+  role: "direct" | "fragment_reduce";
+  source_work_unit_ids: string[];
+  final_work_unit_id?: string;
+}
+
+export interface PaperLexiconCommittedArtifactV1 {
+  artifact_hash: string;
+  artifact: PaperLexiconArtifact;
 }
 
 export interface PaperLexiconRoutingAnalysis {
-  version: "paper_lexicon_routing_analysis.v2";
+  version: "paper_lexicon_routing_analysis.v3";
   router_version: typeof PAPER_LEXICON_ROUTER_VERSION;
   clusters: PaperLexiconCandidateClusterV1[];
-  packets: Record<string, PaperLexiconCandidatePacketV2>;
+  packets: Record<string, PaperLexiconCandidatePacketV3>;
+  cluster_routes: Record<string, PaperLexiconClusterRouteV1>;
   skip_windows: Record<string, { code: "no_lexicon_candidate"; evidence: string[]; input_hash: string }>;
 }
 
 export interface PaperLexiconRoutingPlan extends Omit<PaperLexiconRoutingAnalysis, "version"> {
-  version: "paper_lexicon_routing_plan.v2";
+  version: "paper_lexicon_routing_plan.v3";
   work_units: WorkUnitDescriptorV2[];
   plan_digest: string;
 }
@@ -128,6 +187,33 @@ function stableJson(value: unknown): string {
 
 function sha256(value: string): string {
   return createHash("sha256").update(value).digest("hex");
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+export function paperLexiconArtifactHash(artifact: PaperLexiconArtifact): string {
+  return sha256(stableJson(artifact));
+}
+
+export function inspectPaperLexiconCommittedArtifact(
+  value: unknown,
+): PaperLexiconCommittedArtifactV1 | undefined {
+  const envelope = isRecord(value)
+    && (value.version === "semantic_task_artifact.v2" || value.version === "semantic_task_artifact.v3")
+    ? value
+    : undefined;
+  const artifactValue = envelope?.payload ?? value;
+  if (!isRecord(artifactValue)
+    || typeof artifactValue.content_hash !== "string"
+    || !Array.isArray(artifactValue.entries)) {
+    return undefined;
+  }
+  const artifact = artifactValue as unknown as PaperLexiconArtifact;
+  const artifactHash = paperLexiconArtifactHash(artifact);
+  if (envelope && envelope.artifact_hash !== artifactHash) return undefined;
+  return { artifact_hash: artifactHash, artifact };
 }
 
 function normalizedText(value: string): string {
@@ -382,85 +468,450 @@ function scanCandidates(leaves: LeafText[]): PaperLexiconCandidateClusterV1[] {
     .sort((left, right) => left.normalized_key.localeCompare(right.normalized_key));
 }
 
-function representativeLids(cluster: PaperLexiconCandidateClusterV1): string[] {
-  const occurrences = cluster.occurrence_lids;
+type PaperLexiconPacketIdentityV3 = Omit<
+  PaperLexiconCandidatePacketV3,
+  | "estimated_input_tokens"
+  | "estimated_rendered_tokens"
+  | "input_hash"
+  | "rendered_input_sha256"
+  | "input_budget_proof"
+>;
+
+type PaperLexiconPacketBuildResult =
+  | { status: "within_limit"; packet: PaperLexiconCandidatePacketV3; rendered_input: string }
+  | {
+      status: "over_limit";
+      estimated_rendered_tokens: number;
+      effective_body_limit_tokens: number;
+    };
+
+class PaperLexiconRoutingBudgetBlock extends Error {
+  readonly name = "PaperLexiconRoutingBudgetBlock";
+
+  constructor(
+    readonly work_unit_id: string,
+    readonly recovery: ModelInputUnsplittableDraftV1,
+  ) {
+    super(`paper lexicon input is not safely routable: ${work_unit_id}`);
+  }
+}
+
+function sourceFingerprint(source: string): string {
+  return sha256(source);
+}
+
+function orderedLids(lids: Iterable<string>, byLid: Map<string, LidNode>): string[] {
+  return [...new Set(lids)].sort((left, right) => {
+    const leftNode = byLid.get(left);
+    const rightNode = byLid.get(right);
+    if (!leftNode || !rightNode) throw new Error(`paper lexicon candidate references an unknown LID: ${!leftNode ? left : right}`);
+    return leftNode.span.start - rightNode.span.start || left.localeCompare(right);
+  });
+}
+
+function representativeLids(
+  cluster: PaperLexiconCandidateClusterV1,
+  byLid: Map<string, LidNode>,
+): string[] {
+  const definitions = orderedLids(cluster.definition_lids, byLid);
+  const definitionSet = new Set(definitions);
+  const occurrences = orderedLids(cluster.occurrence_lids, byLid)
+    .filter((lid) => !definitionSet.has(lid));
   const sampled = occurrences.length <= 4
     ? occurrences
     : [occurrences[0], occurrences[Math.floor(occurrences.length / 2)], occurrences.at(-1)!];
-  return [...new Set([...cluster.definition_lids, ...sampled])];
+  return [...definitions, ...sampled];
 }
 
-function packetText(clusters: PaperLexiconCandidateClusterV1[], byLid: Map<string, LidNode>, source: string): { lids: string[]; text: string } {
-  const allowedLids = new Set(clusters.flatMap((cluster) => [...cluster.occurrence_lids, ...cluster.definition_lids]));
-  const contextLids = [...new Set(clusters.flatMap(representativeLids))]
-    .sort((left, right) => byLid.get(left)!.span.start - byLid.get(right)!.span.start);
-  const text = contextLids.map((lid) => {
-    const node = byLid.get(lid)!;
-    return `[${lid}] ${source.slice(node.span.start, node.span.end)}`;
-  }).join("\n\n");
+function wholeLidSlice(
+  source: string,
+  fingerprint: string,
+  node: LidNode,
+): ModelInputSliceV1 {
+  const core = source.slice(node.span.start, node.span.end);
   return {
-    lids: [...allowedLids].sort((left, right) => byLid.get(left)!.span.start - byLid.get(right)!.span.start),
-    text,
+    version: "model_input_slice.v1",
+    source_fingerprint: fingerprint,
+    parent_lid: node.lid,
+    ordinal: 0,
+    core_span_utf16: { ...node.span },
+    context_span_utf16: { ...node.span },
+    boundary_kind: "whole_lid",
+    core_sha256: sha256(core),
+    context_sha256: sha256(core),
   };
 }
 
-function packetTokenEstimate(clusters: PaperLexiconCandidateClusterV1[], byLid: Map<string, LidNode>, source: string): number {
-  return buildPacket(clusters, byLid, source).estimated_rendered_tokens;
+function sliceFromRenderContext(
+  fingerprint: string,
+  context: ModelInputSliceRenderContextV1,
+): ModelInputSliceV1 {
+  return {
+    version: "model_input_slice.v1",
+    source_fingerprint: fingerprint,
+    parent_lid: context.parent_lid,
+    ordinal: context.ordinal,
+    core_span_utf16: { ...context.core_span_utf16 },
+    context_span_utf16: { ...context.context_span_utf16 },
+    boundary_kind: context.boundary_kind,
+    core_sha256: sha256(context.core),
+    context_sha256: sha256(`${context.context_before}${context.core}${context.context_after}`),
+  };
 }
 
-function buildPacket(
-  clusters: PaperLexiconCandidateClusterV1[],
-  byLid: Map<string, LidNode>,
-  source: string,
-): PaperLexiconCandidatePacketV2 {
-  const context = packetText(clusters, byLid, source);
-  const identityDigest = sha256(clusters.map((cluster) => cluster.normalized_key).join("\n")).slice(0, 16);
-  const workUnitId = `lexicon-batch-${identityDigest}`;
-  const identity = {
-    version: "paper_lexicon_candidate_packet.v2" as const,
+function textForSlices(source: string, slices: ModelInputSliceV1[]): string {
+  return slices.map((slice) => {
+    const core = source.slice(slice.core_span_utf16.start, slice.core_span_utf16.end);
+    if (slice.boundary_kind === "whole_lid") return `[${slice.parent_lid}] ${core}`;
+    const before = source.slice(slice.context_span_utf16.start, slice.core_span_utf16.start);
+    const after = source.slice(slice.core_span_utf16.end, slice.context_span_utf16.end);
+    return [
+      `[${slice.parent_lid} fragment=${slice.ordinal} core=${slice.core_span_utf16.start}:${slice.core_span_utf16.end}]`,
+      before,
+      "<LEXICON_CORE>",
+      core,
+      "</LEXICON_CORE>",
+      after,
+    ].join("\n");
+  }).join("\n\n");
+}
+
+function lexiconBudget(maxInputTokens: number) {
+  const reserves = AUTOMATIC_BUILD_MODEL_INPUT_BUDGET_V1.prompt_reserve_tokens
+    + AUTOMATIC_BUILD_MODEL_INPUT_BUDGET_V1.protocol_reserve_tokens
+    + AUTOMATIC_BUILD_MODEL_INPUT_BUDGET_V1.output_reserve_tokens
+    + AUTOMATIC_BUILD_MODEL_INPUT_BUDGET_V1.safety_margin_tokens;
+  return {
+    ...AUTOMATIC_BUILD_MODEL_INPUT_BUDGET_V1,
+    stage_body_limit_tokens: maxInputTokens,
+    executor_context_floor_tokens: Math.max(
+      AUTOMATIC_BUILD_MODEL_INPUT_BUDGET_V1.executor_context_floor_tokens,
+      maxInputTokens + reserves,
+    ),
+    router_version: PAPER_LEXICON_ROUTER_VERSION,
+    prompt_sha256: PAPER_LEXICON_PROMPT_SHA256,
+  };
+}
+
+function finishPacket(
+  identity: PaperLexiconPacketIdentityV3,
+  maxInputTokens: number,
+): PaperLexiconPacketBuildResult {
+  const renderedInput = renderPaperLexiconModelInput(identity);
+  const evaluated = evaluateModelInputBudget({
+    ...lexiconBudget(maxInputTokens),
+    rendered_input: renderedInput,
+  });
+  if (evaluated.status === "over_limit") {
+    return {
+      status: "over_limit",
+      estimated_rendered_tokens: evaluated.estimated_rendered_tokens,
+      effective_body_limit_tokens: evaluated.effective_body_limit_tokens,
+    };
+  }
+  return {
+    status: "within_limit",
+    rendered_input: renderedInput,
+    packet: {
+      ...identity,
+      estimated_input_tokens: evaluated.proof.estimated_rendered_tokens,
+      estimated_rendered_tokens: evaluated.proof.estimated_rendered_tokens,
+      input_hash: sha256(stableJson(identity)),
+      rendered_input_sha256: evaluated.proof.rendered_input_sha256,
+      input_budget_proof: evaluated.proof,
+    },
+  };
+}
+
+function directWorkUnitId(clusters: PaperLexiconCandidateClusterV1[]): string {
+  return `lexicon-batch-${sha256(clusters.map((cluster) => cluster.normalized_key).join("\n")).slice(0, 16)}`;
+}
+
+function sourcePacketIdentity(input: {
+  clusters: PaperLexiconCandidateClusterV1[];
+  route: Exclude<PaperLexiconPacketRouteV1, { role: "reduce" }>;
+  source: string;
+  source_slices: ModelInputSliceV1[];
+  visible_lids: string[];
+}): PaperLexiconPacketIdentityV3 {
+  const workUnitId = input.route.role === "direct"
+    ? directWorkUnitId(input.clusters)
+    : `lexicon-fragment-${sha256(stableJson({
+        version: "paper_lexicon_fragment_identity.v1",
+        router_version: PAPER_LEXICON_ROUTER_VERSION,
+        cluster_key: input.route.cluster_keys[0],
+        fragment_ordinal: input.route.fragment_ordinal,
+        source_slices: input.source_slices,
+      })).slice(0, 24)}`;
+  return {
+    version: "paper_lexicon_candidate_packet.v3",
     router_version: PAPER_LEXICON_ROUTER_VERSION,
     work_unit_id: workUnitId,
-    candidate_clusters: clusters,
-    visible_lids: context.lids,
+    route: input.route,
+    candidate_clusters: input.clusters,
+    visible_lids: [...new Set(input.visible_lids)],
     requested_term_types: [...PAPER_TERM_TYPES],
-    text: context.text,
-  };
-  const estimatedInputTokens = estimateTokens(stableJson(identity));
-  const rendered = inspectRenderedModelInput({ kind: "lexicon_candidate_batch", input: identity });
-  return {
-    ...identity,
-    estimated_input_tokens: estimatedInputTokens,
-    estimated_rendered_tokens: rendered.estimated_tokens,
-    input_hash: sha256(stableJson(identity)),
-    rendered_input_sha256: rendered.sha256,
+    source_slices: input.source_slices.map((slice) => ({
+      ...slice,
+      core_span_utf16: { ...slice.core_span_utf16 },
+      context_span_utf16: { ...slice.context_span_utf16 },
+    })),
+    reduction_children: [],
+    text: textForSlices(input.source, input.source_slices),
   };
 }
 
-function batchClusters(input: {
+function directPacket(input: {
+  clusters: PaperLexiconCandidateClusterV1[];
+  byLid: Map<string, LidNode>;
+  source: string;
+  maxInputTokens: number;
+}): PaperLexiconPacketBuildResult {
+  const fingerprint = sourceFingerprint(input.source);
+  const contextLids = orderedLids(
+    input.clusters.flatMap((cluster) => representativeLids(cluster, input.byLid)),
+    input.byLid,
+  );
+  const sourceSlices = contextLids.map((lid) => wholeLidSlice(input.source, fingerprint, input.byLid.get(lid)!));
+  const visibleLids = orderedLids(
+    input.clusters.flatMap((cluster) => [...cluster.occurrence_lids, ...cluster.definition_lids]),
+    input.byLid,
+  );
+  return finishPacket(sourcePacketIdentity({
+    clusters: input.clusters,
+    route: {
+      version: "paper_lexicon_packet_route.v1",
+      role: "direct",
+      cluster_keys: input.clusters.map((cluster) => cluster.normalized_key),
+    },
+    source: input.source,
+    source_slices: sourceSlices,
+    visible_lids: visibleLids,
+  }), input.maxInputTokens);
+}
+
+function fragmentPacket(input: {
+  cluster: PaperLexiconCandidateClusterV1;
+  source: string;
+  source_slices: ModelInputSliceV1[];
+  fragment_ordinal: number;
+  maxInputTokens: number;
+}): PaperLexiconPacketBuildResult {
+  return finishPacket(sourcePacketIdentity({
+    clusters: [input.cluster],
+    route: {
+      version: "paper_lexicon_packet_route.v1",
+      role: "fragment",
+      cluster_keys: [input.cluster.normalized_key],
+      fragment_ordinal: input.fragment_ordinal,
+    },
+    source: input.source,
+    source_slices: input.source_slices,
+    visible_lids: input.source_slices.map((slice) => slice.parent_lid),
+  }), input.maxInputTokens);
+}
+
+function routeClusterFragments(input: {
+  cluster: PaperLexiconCandidateClusterV1;
+  byLid: Map<string, LidNode>;
+  source: string;
+  maxInputTokens: number;
+}): PaperLexiconCandidatePacketV3[] {
+  const fingerprint = sourceFingerprint(input.source);
+  const contextLids = representativeLids(input.cluster, input.byLid);
+  const fragments: PaperLexiconCandidatePacketV3[] = [];
+  let pendingLids: string[] = [];
+
+  const packetForLids = (lids: string[], ordinal: number) => fragmentPacket({
+    cluster: input.cluster,
+    source: input.source,
+    source_slices: lids.map((lid) => wholeLidSlice(input.source, fingerprint, input.byLid.get(lid)!)),
+    fragment_ordinal: ordinal,
+    maxInputTokens: input.maxInputTokens,
+  });
+  const flushPending = (): void => {
+    if (!pendingLids.length) return;
+    const built = packetForLids(pendingLids, fragments.length);
+    if (built.status !== "within_limit") throw new Error("paper lexicon whole-LID regroup drifted over budget");
+    fragments.push(built.packet);
+    pendingLids = [];
+  };
+
+  for (const lid of contextLids) {
+    const proposed = packetForLids([...pendingLids, lid], fragments.length);
+    if (proposed.status === "within_limit") {
+      pendingLids.push(lid);
+      continue;
+    }
+    flushPending();
+    const whole = packetForLids([lid], fragments.length);
+    if (whole.status === "within_limit") {
+      pendingLids = [lid];
+      continue;
+    }
+    const parent = input.byLid.get(lid);
+    if (!parent) throw new Error(`paper lexicon representative LID does not exist: ${lid}`);
+    const baseOrdinal = fragments.length;
+    const sliced = routeModelInputSlices({
+      source: input.source,
+      source_fingerprint: fingerprint,
+      parent,
+      context_overlap_utf16: 64,
+      budget: lexiconBudget(input.maxInputTokens),
+      render: (context) => renderPaperLexiconModelInput(sourcePacketIdentity({
+        clusters: [input.cluster],
+        route: {
+          version: "paper_lexicon_packet_route.v1",
+          role: "fragment",
+          cluster_keys: [input.cluster.normalized_key],
+          fragment_ordinal: baseOrdinal + context.ordinal,
+        },
+        source: input.source,
+        source_slices: [sliceFromRenderContext(fingerprint, context)],
+        visible_lids: [context.parent_lid],
+      })),
+    });
+    if (sliced.status === "blocked") {
+      throw new PaperLexiconRoutingBudgetBlock(
+        `lexicon-fragment-${sha256(`${input.cluster.normalized_key}\n${lid}`).slice(0, 24)}`,
+        sliced.recovery,
+      );
+    }
+    for (const routed of sliced.slices) {
+      const built = fragmentPacket({
+        cluster: input.cluster,
+        source: input.source,
+        source_slices: [routed.slice],
+        fragment_ordinal: fragments.length,
+        maxInputTokens: input.maxInputTokens,
+      });
+      if (built.status !== "within_limit" || built.rendered_input !== routed.rendered_input) {
+        throw new Error("paper lexicon source-slice renderer drifted after routing");
+      }
+      fragments.push(built.packet);
+    }
+  }
+  flushPending();
+
+  if (fragments.length === 1) {
+    const only = fragments[0];
+    const direct = finishPacket(sourcePacketIdentity({
+      clusters: [input.cluster],
+      route: {
+        version: "paper_lexicon_packet_route.v1",
+        role: "direct",
+        cluster_keys: [input.cluster.normalized_key],
+      },
+      source: input.source,
+      source_slices: only.source_slices,
+      visible_lids: only.visible_lids,
+    }), input.maxInputTokens);
+    if (direct.status === "within_limit") return [direct.packet];
+  }
+  return fragments;
+}
+
+function batchDirectClusters(input: {
   clusters: PaperLexiconCandidateClusterV1[];
   byLid: Map<string, LidNode>;
   source: string;
   maxInputTokens: number;
   maxCandidates: number;
-}): PaperLexiconCandidatePacketV2[] {
-  const batches: PaperLexiconCandidateClusterV1[][] = [];
+}): PaperLexiconCandidatePacketV3[] {
+  const packets: PaperLexiconCandidatePacketV3[] = [];
   let current: PaperLexiconCandidateClusterV1[] = [];
+  const flush = (): void => {
+    if (!current.length) return;
+    const built = directPacket({ ...input, clusters: current });
+    if (built.status !== "within_limit") throw new Error("paper lexicon direct batch drifted over budget");
+    packets.push(built.packet);
+    current = [];
+  };
   for (const cluster of input.clusters) {
     const proposed = [...current, cluster];
-    const exceeds = proposed.length > input.maxCandidates
-      || packetTokenEstimate(proposed, input.byLid, input.source) > input.maxInputTokens;
-    if (exceeds && current.length) {
-      batches.push(current);
+    const built = proposed.length <= input.maxCandidates
+      ? directPacket({ ...input, clusters: proposed })
+      : undefined;
+    if (built?.status === "within_limit") current = proposed;
+    else {
+      flush();
       current = [cluster];
-    } else {
-      current = proposed;
-    }
-    if (packetTokenEstimate(current, input.byLid, input.source) > input.maxInputTokens) {
-      throw new Error(`lexicon candidate cluster exceeds input budget: ${cluster.normalized_key}`);
     }
   }
-  if (current.length) batches.push(current);
-  return batches.map((batch) => buildPacket(batch, input.byLid, input.source));
+  flush();
+  return packets;
+}
+
+function freshFragmentArtifact(
+  packet: PaperLexiconCandidatePacketV3,
+  existing: ReadonlyMap<string, PaperLexiconCommittedArtifactV1>,
+): PaperLexiconCommittedArtifactV1 | undefined {
+  const committed = existing.get(packet.work_unit_id);
+  if (!committed
+    || committed.artifact_hash !== sha256(stableJson(committed.artifact))
+    || committed.artifact.content_hash !== packet.input_hash
+    || committed.artifact.route?.version !== "paper_lexicon_artifact_route.v1"
+    || committed.artifact.route.role !== "fragment"
+    || committed.artifact.route.final
+    || stableJson(committed.artifact.route.cluster_keys) !== stableJson(packet.route.cluster_keys)) {
+    return undefined;
+  }
+  return committed;
+}
+
+function reducerPacket(input: {
+  cluster: PaperLexiconCandidateClusterV1;
+  fragments: PaperLexiconCandidatePacketV3[];
+  committed: PaperLexiconCommittedArtifactV1[];
+  byLid: Map<string, LidNode>;
+  maxInputTokens: number;
+}): PaperLexiconCandidatePacketV3 {
+  const children = input.fragments.map((fragment, index): PaperLexiconReductionChildV1 => ({
+    work_unit_id: fragment.work_unit_id,
+    artifact_hash: input.committed[index].artifact_hash,
+    entries: input.committed[index].artifact.entries,
+  }));
+  const workUnitId = `lexicon-reduce-${sha256(stableJson({
+    version: "paper_lexicon_reduce_identity.v1",
+    cluster_key: input.cluster.normalized_key,
+    children: children.map((child) => ({
+      work_unit_id: child.work_unit_id,
+      artifact_hash: child.artifact_hash,
+    })),
+  })).slice(0, 24)}`;
+  const identity: PaperLexiconPacketIdentityV3 = {
+    version: "paper_lexicon_candidate_packet.v3",
+    router_version: PAPER_LEXICON_ROUTER_VERSION,
+    work_unit_id: workUnitId,
+    route: {
+      version: "paper_lexicon_packet_route.v1",
+      role: "reduce",
+      cluster_keys: [input.cluster.normalized_key],
+      reducer_level: 0,
+      child_work_unit_ids: children.map((child) => child.work_unit_id),
+    },
+    candidate_clusters: [input.cluster],
+    visible_lids: orderedLids(input.cluster.occurrence_lids, input.byLid),
+    requested_term_types: [...PAPER_TERM_TYPES],
+    source_slices: [],
+    reduction_children: children,
+    text: "",
+  };
+  const built = finishPacket(identity, input.maxInputTokens);
+  if (built.status === "within_limit") return built.packet;
+  const parentLid = representativeLids(input.cluster, input.byLid)[0];
+  const parent = input.byLid.get(parentLid)!;
+  throw new PaperLexiconRoutingBudgetBlock(workUnitId, {
+    version: "automatic_build_recovery_draft.v1",
+    phase: "routing",
+    code: "model_input_unsplittable",
+    parent_lid: parentLid,
+    lid_kind: parent.kind,
+    reason: "renderer_fixed_overhead",
+    estimated_tokens: built.estimated_rendered_tokens,
+    limit_tokens: built.effective_body_limit_tokens,
+    retryable: false,
+  });
 }
 
 function leafTexts(input: { windows: Window[]; byLid: Map<string, LidNode>; source: string }): LeafText[] {
@@ -482,6 +933,7 @@ export function analyzePaperLexiconCandidates(input: {
   windows: Window[];
   byLid: Map<string, LidNode>;
   source: string;
+  existing_artifacts?: ReadonlyMap<string, PaperLexiconCommittedArtifactV1>;
   max_input_tokens?: number;
   max_candidates_per_batch?: number;
 }): PaperLexiconRoutingAnalysis {
@@ -491,13 +943,81 @@ export function analyzePaperLexiconCandidates(input: {
   if (!Number.isSafeInteger(maxCandidates) || maxCandidates < 1) throw new Error("max_candidates_per_batch must be a positive safe integer");
   const leaves = leafTexts(input);
   const clusters = scanCandidates(leaves);
-  const packets = Object.fromEntries(batchClusters({
-    clusters,
+  const packetList: PaperLexiconCandidatePacketV3[] = [];
+  const directClusters: PaperLexiconCandidateClusterV1[] = [];
+  const cluster_routes: PaperLexiconRoutingAnalysis["cluster_routes"] = {};
+  const existingArtifacts = input.existing_artifacts ?? new Map<string, PaperLexiconCommittedArtifactV1>();
+
+  for (const cluster of clusters) {
+    const direct = directPacket({
+      clusters: [cluster],
+      byLid: input.byLid,
+      source: input.source,
+      maxInputTokens,
+    });
+    if (direct.status === "within_limit") {
+      directClusters.push(cluster);
+      continue;
+    }
+    const routed = routeClusterFragments({
+      cluster,
+      byLid: input.byLid,
+      source: input.source,
+      maxInputTokens,
+    });
+    packetList.push(...routed);
+    if (routed.length === 1 && routed[0].route.role === "direct") {
+      cluster_routes[cluster.normalized_key] = {
+        version: "paper_lexicon_cluster_route.v1",
+        normalized_key: cluster.normalized_key,
+        role: "direct",
+        source_work_unit_ids: [routed[0].work_unit_id],
+        final_work_unit_id: routed[0].work_unit_id,
+      };
+      continue;
+    }
+    const committed = routed.map((packet) => freshFragmentArtifact(packet, existingArtifacts));
+    let finalWorkUnitId: string | undefined;
+    if (committed.every((artifact): artifact is PaperLexiconCommittedArtifactV1 => artifact !== undefined)) {
+      const reducer = reducerPacket({
+        cluster,
+        fragments: routed,
+        committed,
+        byLid: input.byLid,
+        maxInputTokens,
+      });
+      packetList.push(reducer);
+      finalWorkUnitId = reducer.work_unit_id;
+    }
+    cluster_routes[cluster.normalized_key] = {
+      version: "paper_lexicon_cluster_route.v1",
+      normalized_key: cluster.normalized_key,
+      role: "fragment_reduce",
+      source_work_unit_ids: routed.map((packet) => packet.work_unit_id),
+      ...(finalWorkUnitId ? { final_work_unit_id: finalWorkUnitId } : {}),
+    };
+  }
+
+  const directPackets = batchDirectClusters({
+    clusters: directClusters,
     byLid: input.byLid,
     source: input.source,
     maxInputTokens,
     maxCandidates,
-  }).map((packet) => [packet.work_unit_id, packet]));
+  });
+  packetList.unshift(...directPackets);
+  for (const packet of directPackets) {
+    for (const cluster of packet.candidate_clusters) {
+      cluster_routes[cluster.normalized_key] = {
+        version: "paper_lexicon_cluster_route.v1",
+        normalized_key: cluster.normalized_key,
+        role: "direct",
+        source_work_unit_ids: [packet.work_unit_id],
+        final_work_unit_id: packet.work_unit_id,
+      };
+    }
+  }
+  const packets = Object.fromEntries(packetList.map((packet) => [packet.work_unit_id, packet]));
   const candidateLids = new Set(clusters.flatMap((cluster) => cluster.occurrence_lids));
   const skip_windows: PaperLexiconRoutingAnalysis["skip_windows"] = {};
   for (const window of input.windows) {
@@ -509,10 +1029,11 @@ export function analyzePaperLexiconCandidates(input: {
     };
   }
   return {
-    version: "paper_lexicon_routing_analysis.v2",
+    version: "paper_lexicon_routing_analysis.v3",
     router_version: PAPER_LEXICON_ROUTER_VERSION,
     clusters,
     packets,
+    cluster_routes,
     skip_windows,
   };
 }
@@ -523,6 +1044,7 @@ export function routePaperLexiconWorkUnits(input: {
   byLid: Map<string, LidNode>;
   source: string;
   policy_fingerprint: ExtractionPolicyFingerprintV1;
+  existing_artifacts?: ReadonlyMap<string, PaperLexiconCommittedArtifactV1>;
   max_input_tokens?: number;
   max_candidates_per_batch?: number;
 }): PaperLexiconRoutingPlan {
@@ -535,11 +1057,15 @@ export function routePaperLexiconWorkUnits(input: {
     input_hash: packet.input_hash,
     policy_fingerprint: input.policy_fingerprint,
     evidence_lids: packet.visible_lids,
+    dependencies: packet.reduction_children.map((child) => ({
+      artifact: child.work_unit_id,
+      sha256: child.artifact_hash,
+    })),
     cost: buildWorkUnitCost({
-      estimated_input_tokens: packet.estimated_input_tokens,
+      estimated_input_tokens: packet.estimated_rendered_tokens,
       visible_lids: packet.visible_lids.length,
       candidate_count: packet.candidate_clusters.length,
-      expected_output_items: packet.candidate_clusters.length,
+      expected_output_items: packet.route.role === "direct" ? packet.candidate_clusters.length : 1,
     }),
     legacy_artifact_ref: `.build/paper-lexicon/${packet.work_unit_id}.json`,
   }));
@@ -557,10 +1083,36 @@ export function routePaperLexiconWorkUnits(input: {
   const work_units = [...batchUnits, ...skipUnits];
   return {
     ...analysis,
-    version: "paper_lexicon_routing_plan.v2",
+    version: "paper_lexicon_routing_plan.v3",
     work_units,
     plan_digest: workUnitPlanDigest(work_units),
   };
+}
+
+export function routePaperLexiconWorkUnitsWithRecovery(
+  input: Parameters<typeof routePaperLexiconWorkUnits>[0],
+): AutomaticBuildRouteResult<PaperLexiconRoutingPlan> {
+  try {
+    return readyAutomaticBuildRoute(routePaperLexiconWorkUnits(input));
+  } catch (error) {
+    if (!(error instanceof PaperLexiconRoutingBudgetBlock)) throw error;
+    return blockedAutomaticBuildRoute(createAutomaticBuildRecoveryEnvelope({
+      phase: "routing",
+      code: "model_input_unsplittable",
+      stage: "paper_lexicon",
+      target_ref: input.target,
+      router_version: PAPER_LEXICON_ROUTER_VERSION,
+      policy_digest: extractionPolicyDigest(input.policy_fingerprint),
+      affected_work_units: [{
+        work_unit_id: error.work_unit_id,
+        evidence_lids: [error.recovery.parent_lid],
+        estimated_tokens: error.recovery.estimated_tokens,
+        limit_tokens: error.recovery.limit_tokens,
+      }],
+      retryable: false,
+      recovery_actions: ["upgrade_executor"],
+    }));
+  }
 }
 
 function lexiconStatus(
@@ -599,6 +1151,7 @@ export function computePaperLexiconCandidateStatus(input: {
   byLid: Map<string, LidNode>;
   source: string;
   existing: ReadonlyMap<string, Pass1ArtifactMeta>;
+  existing_artifacts?: ReadonlyMap<string, PaperLexiconCommittedArtifactV1>;
   max_input_tokens?: number;
   max_candidates_per_batch?: number;
 }): PaperLexiconCandidateStatus {
@@ -614,7 +1167,7 @@ export function computePaperLexiconCandidateStatus(input: {
   return { analysis, ...lexiconStatus(workUnits, input.existing) };
 }
 
-function clusterForTerm(packet: PaperLexiconCandidatePacketV2, term: string): PaperLexiconCandidateClusterV1 | undefined {
+function clusterForTerm(packet: PaperLexiconCandidatePacketV3, term: string): PaperLexiconCandidateClusterV1 | undefined {
   const key = normalizedText(term);
   return packet.candidate_clusters.find((cluster) =>
     cluster.normalized_key === key || cluster.surface_forms.some((surface) => normalizedText(surface) === key),
@@ -622,17 +1175,28 @@ function clusterForTerm(packet: PaperLexiconCandidatePacketV2, term: string): Pa
 }
 
 export function buildPaperLexiconCandidateArtifact(
-  packet: PaperLexiconCandidatePacketV2,
+  packet: PaperLexiconCandidatePacketV3,
   lidNodes: LidNode[],
   output: PaperLexiconExtractionOutput,
 ): PaperLexiconArtifact {
-  const enriched: PaperLexiconEntry[] = paperLexiconEntriesFromOutput(output).map((entry) => {
+  const entries = paperLexiconEntriesFromOutput(output);
+  if (packet.route.role !== "direct" && entries.length > 1) {
+    throw new Error(`lexicon ${packet.route.role} output must contain at most one entry`);
+  }
+  const seenClusters = new Set<string>();
+  const enriched: PaperLexiconEntry[] = entries.map((entry) => {
     const cluster = clusterForTerm(packet, entry.term);
     if (!cluster) throw new Error(`lexicon candidate out of scope: ${entry.term}`);
+    if (seenClusters.has(cluster.normalized_key)) {
+      throw new Error(`lexicon output contains duplicate entries for cluster: ${cluster.normalized_key}`);
+    }
+    seenClusters.add(cluster.normalized_key);
     return {
       ...entry,
-      occurrences_lids: [...cluster.occurrence_lids],
-      ...(entry.defined_at_lid && !cluster.occurrence_lids.includes(entry.defined_at_lid)
+      occurrences_lids: packet.route.role === "fragment"
+        ? [...entry.occurrences_lids]
+        : [...cluster.occurrence_lids],
+      ...(entry.defined_at_lid && !cluster.definition_lids.includes(entry.defined_at_lid)
         ? { defined_at_lid: undefined }
         : {}),
     };
@@ -645,5 +1209,14 @@ export function buildPaperLexiconCandidateArtifact(
     core_schema_version: "core_v0",
     generated_at: "1970-01-01T00:00:00.000Z",
   }, enriched, lidNodes);
-  return { content_hash: packet.input_hash, entries: sidecar.entries };
+  return {
+    content_hash: packet.input_hash,
+    route: {
+      version: "paper_lexicon_artifact_route.v1",
+      role: packet.route.role,
+      cluster_keys: [...packet.route.cluster_keys],
+      final: packet.route.role !== "fragment",
+    },
+    entries: sidecar.entries,
+  };
 }

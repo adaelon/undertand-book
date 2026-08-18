@@ -121,7 +121,7 @@ const STAGE_POLICIES: Record<SemanticBuildStage, {
   paper_lexicon: {
     stage_policy_version: "paper_lexicon_policy.v1",
     router_version: routerVersionForStage("paper_lexicon"),
-    prompt_sha256: "4ea919e3de78e7be73df41c4cf96a3a3fb832f061e126abfdee3addee21de675",
+    prompt_sha256: "c563d13e6fb3874f24689eb29a4dc0a9c117f4f6411ccc37cf2a47aebee2fe41",
     schema_version: EXTRACTOR_CONTRACT_SCHEMA_VERSIONS.paper_lexicon,
   },
   profile_sidecar: {

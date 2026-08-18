@@ -38,8 +38,16 @@ export interface PaperLexiconExtractionOutput {
   };
 }
 
+export interface PaperLexiconArtifactRouteV1 {
+  version: "paper_lexicon_artifact_route.v1";
+  role: "direct" | "fragment" | "reduce";
+  cluster_keys: string[];
+  final: boolean;
+}
+
 export interface PaperLexiconArtifact extends Pass1ArtifactMeta {
   entries: PaperLexiconEntry[];
+  route?: PaperLexiconArtifactRouteV1;
 }
 
 export interface PaperLexiconWindowInput {
