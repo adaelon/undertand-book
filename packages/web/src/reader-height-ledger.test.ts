@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   createReaderHeightLedger,
   projectReaderSpacerDelta,
+  readerLeafIndexAtOffset,
   readerRangeHeight,
   readerRenderItemKey,
   readerSpacerTotals,
@@ -28,6 +29,26 @@ function ledger(leafOrder = lids(10)) {
 }
 
 describe("reader height ledger", () => {
+  it("maps virtual pixel offsets to leaf indices using estimates and measured groups", () => {
+    const leafOrder = lids(10);
+    const estimated = ledger(leafOrder);
+    expect(readerLeafIndexAtOffset(estimated, 0)).toBe(0);
+    expect(readerLeafIndexAtOffset(estimated, 39.99)).toBe(0);
+    expect(readerLeafIndexAtOffset(estimated, 40)).toBe(1);
+    expect(readerLeafIndexAtOffset(estimated, 400)).toBe(9);
+
+    const measured = recordReaderItemHeight(estimated, {
+      key: readerRenderItemKey([leafOrder[2], leafOrder[3]]),
+      lids: [leafOrder[2], leafOrder[3]],
+      blockHeightPx: 100,
+    }).ledger;
+    expect(readerLeafIndexAtOffset(measured, 79.99)).toBe(1);
+    expect(readerLeafIndexAtOffset(measured, 80)).toBe(2);
+    expect(readerLeafIndexAtOffset(measured, 129.99)).toBe(2);
+    expect(readerLeafIndexAtOffset(measured, 130)).toBe(3);
+    expect(readerLeafIndexAtOffset(measured, 180)).toBe(4);
+  });
+
   it("sums fixed measured items with deterministic estimates for unknown leaves", () => {
     const leafOrder = lids(10);
     let state = ledger(leafOrder);

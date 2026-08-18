@@ -13,9 +13,13 @@ import {
 import type { FormulaSemantics, ImageAssetManifestEntry, MemoryRecord } from "../api";
 import type { Manifest } from "../api";
 import type { ReaderSegment } from "../reader-segment";
-import type { ReaderBufferRange } from "../reader-buffer";
+import {
+  readerTargetIsBeyondAdjacentWindow,
+  type ReaderBufferRange,
+} from "../reader-buffer";
 import {
   createReaderHeightLedger,
+  readerLeafIndexAtOffset,
   readerRenderItemKey,
   readerSpacerTotals,
   recordReaderItemHeight,
@@ -58,9 +62,11 @@ const props = defineProps<{
   sourceFingerprint?: string;
   leafOrder?: string[];
   bufferRange?: ReaderBufferRange | null;
+  bufferViewportWidth?: number | null;
   rendererVersion?: string;
   renderRevisions?: ReadonlyMap<string, string>;
   estimatedLeafHeightPx?: number;
+  fastScrollLoadingLid?: string | null;
 }>();
 
 type ReaderItem =
@@ -86,6 +92,8 @@ const emit = defineEmits<{
   (e: "scroll-edge", direction: "up" | "down"): void;
   (e: "current-lid", lid: string): void;
   (e: "viewport-interaction", direction?: "up" | "down"): void;
+  (e: "fast-scroll-into-spacer", lid: string, direction: "up" | "down", leafIndex: number): void;
+  (e: "fast-scroll-returned-to-mounted", lid: string): void;
   (e: "note-placement-pointer", event: PointerEvent): void;
   (e: "note-placement-target", target: { lid: string }): void;
   (e: "note-placement-invalid"): void;
@@ -125,7 +133,7 @@ function stageSegment(segment: Segment): boolean {
   const stage = segmentStage.value;
   if (!stage || stage.segments.some((current) => current.lid === segment.lid)) return false;
   if (stage.direction === "down") stage.segments.push(segment);
-  else stage.segments.splice(stage.stagedCount, 0, segment);
+  else stage.segments.unshift(segment);
   stage.stagedCount += 1;
   return true;
 }
@@ -213,6 +221,7 @@ let edgeObserver: IntersectionObserver | null = null;
 let heightObserver: ResizeObserver | null = null;
 let edgeObservationEnabled = false;
 let pendingScrollStateFrame: number | null = null;
+let pendingViewportCoverageFrame: number | null = null;
 let pendingHeightMeasurementFrame: number | null = null;
 let notePinReleaseTimer: number | null = null;
 let currentReadingLid: string | null = null;
@@ -220,6 +229,9 @@ let currentLayoutToken = "unmounted";
 let selectionPinActive = false;
 let notePinActive = false;
 let navigationScrollAnchor: ScrollAnchor | null = null;
+let scrollAnchorRestoreEpoch = 0;
+let lastFastScrollRequestKey: string | null = null;
+let fastScrollInteractionSinceRequest = false;
 
 interface MountedRenderItem {
   element: HTMLElement;
@@ -303,7 +315,12 @@ function recordRenderItemHeight(item: MountedRenderItem, blockHeightPx: number) 
   });
   if (!receipt.changed) return;
   heightLedger.value = receipt.ledger;
-  if (receipt.previousHeightPx !== null && receipt.deltaPx !== 0 && itemComesBeforeCurrent(item.lids)) {
+  if (
+    receipt.previousHeightPx !== null
+    && receipt.deltaPx !== 0
+    && itemComesBeforeCurrent(item.lids)
+    && !props.fastScrollLoadingLid
+  ) {
     const el = pane.value;
     if (el) el.scrollTop += receipt.deltaPx;
   }
@@ -419,6 +436,119 @@ function nearMountedBottom(el: HTMLElement): boolean {
   return el.scrollTop + el.clientHeight >= mountedBottomPx - preloadPx(el);
 }
 
+function viewportCoverageIntrusion(direction: "up" | "down"): number {
+  if (!props.boundedBufferEnabled) return 0;
+  const el = pane.value;
+  const range = effectiveBufferRange.value;
+  const topSentinel = topEdgeSentinel.value;
+  const bottomSentinel = bottomEdgeSentinel.value;
+  if (!el || !range || !topSentinel || !bottomSentinel) return 0;
+  const paneRect = el.getBoundingClientRect();
+  if (direction === "up") {
+    return range[0] > 0
+      ? Math.max(0, topSentinel.getBoundingClientRect().bottom - paneRect.top)
+      : 0;
+  }
+  return range[1] < (props.leafOrder?.length ?? 0)
+    ? Math.max(0, paneRect.bottom - bottomSentinel.getBoundingClientRect().top)
+    : 0;
+}
+
+function viewportHasCoverageGap(direction: "up" | "down"): boolean {
+  return viewportCoverageIntrusion(direction) > 1;
+}
+
+function clampAdjacentViewportGap(el: HTMLElement): boolean {
+  if (!props.boundedBufferEnabled) return false;
+  const topIntrusion = viewportCoverageIntrusion("up");
+  if (topIntrusion > 0) {
+    el.scrollTop += topIntrusion;
+    return true;
+  }
+  const bottomIntrusion = viewportCoverageIntrusion("down");
+  if (bottomIntrusion > 0) {
+    el.scrollTop = Math.max(0, el.scrollTop - bottomIntrusion);
+    return true;
+  }
+  return false;
+}
+
+function viewportContainsMountedLid(el: HTMLElement): boolean {
+  const paneRect = el.getBoundingClientRect();
+  for (const node of mountedLidElements.values()) {
+    const rect = node.getBoundingClientRect();
+    if (rect.bottom > paneRect.top && rect.top < paneRect.bottom) return true;
+  }
+  return false;
+}
+
+function requestFastScrollIntoSpacer(): boolean {
+  const el = pane.value;
+  const range = effectiveBufferRange.value;
+  const leafCount = props.leafOrder?.length ?? 0;
+  const viewportWidth = props.bufferViewportWidth ?? 0;
+  const topSentinel = topEdgeSentinel.value;
+  const bottomSentinel = bottomEdgeSentinel.value;
+  if (
+    !props.boundedBufferEnabled
+    || !el
+    || !range
+    || !topSentinel
+    || !bottomSentinel
+    || leafCount === 0
+    || viewportWidth <= 0
+  ) return false;
+
+  const paneRect = el.getBoundingClientRect();
+  const topIntrusion = range[0] > 0
+    ? topSentinel.getBoundingClientRect().bottom - paneRect.top
+    : 0;
+  const bottomIntrusion = range[1] < leafCount
+    ? paneRect.bottom - bottomSentinel.getBoundingClientRect().top
+    : 0;
+  const maximumPreloadIntrusionPx = Math.max(edgePx, el.clientHeight * 0.25);
+  if (
+    topIntrusion > maximumPreloadIntrusionPx
+    && bottomIntrusion > maximumPreloadIntrusionPx
+  ) return false;
+  let direction: "up" | "down" | null = null;
+  if (
+    topIntrusion > maximumPreloadIntrusionPx
+    || bottomIntrusion > maximumPreloadIntrusionPx
+  ) {
+    direction = topIntrusion >= bottomIntrusion ? "up" : "down";
+  }
+  if (!direction) return false;
+  const topSpacer = topSentinel.previousElementSibling;
+  if (!(topSpacer instanceof HTMLElement)) return true;
+  const virtualOffsetPx = Math.max(
+    0,
+    paneRect.top - topSpacer.getBoundingClientRect().top,
+  );
+  const targetLeafIndex = readerLeafIndexAtOffset(heightLedger.value, virtualOffsetPx);
+  if (targetLeafIndex === null) return true;
+  if (!readerTargetIsBeyondAdjacentWindow(
+    range,
+    targetLeafIndex,
+    viewportWidth,
+    leafCount,
+  )) return false;
+  const targetLid = heightLedger.value.leafOrder[targetLeafIndex] ?? null;
+  if (!targetLid) return true;
+
+  const requestKey = `${direction}:${targetLid}`;
+  if (requestKey === lastFastScrollRequestKey) {
+    fastScrollInteractionSinceRequest = false;
+    return true;
+  }
+  lastFastScrollRequestKey = requestKey;
+  fastScrollInteractionSinceRequest = false;
+  scrollAnchorRestoreEpoch += 1;
+  navigationScrollAnchor = null;
+  emit("fast-scroll-into-spacer", targetLid, direction, targetLeafIndex);
+  return true;
+}
+
 function requestBuffer(direction: "up" | "down") {
   emit("scroll-edge", direction);
 }
@@ -500,7 +630,23 @@ function updateCurrentLid() {
 
 function checkScrollState() {
   if (readerPerformanceCompiled && readerPerformanceEnabled()) recordReaderScrollCheck();
+  if (requestFastScrollIntoSpacer()) return;
+  const el = pane.value;
+  if (
+    el
+    && fastScrollInteractionSinceRequest
+    && !viewportContainsMountedLid(el)
+  ) clampAdjacentViewportGap(el);
   updateCurrentLid();
+  if (
+    lastFastScrollRequestKey !== null
+    && fastScrollInteractionSinceRequest
+    && currentReadingLid
+  ) {
+    emit("fast-scroll-returned-to-mounted", currentReadingLid);
+  }
+  lastFastScrollRequestKey = null;
+  fastScrollInteractionSinceRequest = false;
   checkBufferNeed();
 }
 
@@ -519,6 +665,8 @@ function onScroll() {
 
 function onWheel(event: WheelEvent) {
   if (event.deltaY !== 0) {
+    fastScrollInteractionSinceRequest = true;
+    scrollAnchorRestoreEpoch += 1;
     navigationScrollAnchor = null;
     emit("viewport-interaction", event.deltaY > 0 ? "down" : "up");
   }
@@ -553,6 +701,8 @@ function onSelectionChange() {
 }
 
 function onPointerDown(event: PointerEvent) {
+  fastScrollInteractionSinceRequest = true;
+  scrollAnchorRestoreEpoch += 1;
   navigationScrollAnchor = null;
   emit("viewport-interaction");
   const target = event.target;
@@ -587,6 +737,8 @@ function onKeydown(event: KeyboardEvent) {
   else if (event.key === "PageDown") delta = page;
   else if (event.key === "PageUp") delta = -page;
   else return;
+  fastScrollInteractionSinceRequest = true;
+  scrollAnchorRestoreEpoch += 1;
   navigationScrollAnchor = null;
   emit("viewport-interaction", delta > 0 ? "down" : "up");
   if (delta > 0 && atBottomEdge(el)) {
@@ -650,11 +802,13 @@ function captureScrollAnchor(candidateLids: string[]): ScrollAnchor | null {
   return best ? { lid: best.lid, top: best.top } : null;
 }
 
-async function restoreScrollAnchor(anchor: ScrollAnchor | null) {
+async function restoreScrollAnchor(anchor: ScrollAnchor | null, persist = true) {
   if (!anchor) return;
+  const restoreEpoch = ++scrollAnchorRestoreEpoch;
   await nextTick();
   for (let pass = 0; pass < 2; pass += 1) {
     await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    if (restoreEpoch !== scrollAnchorRestoreEpoch) return;
     const el = pane.value;
     const node = lidElement(anchor.lid);
     if (!el || !node) return;
@@ -662,6 +816,7 @@ async function restoreScrollAnchor(anchor: ScrollAnchor | null) {
     const currentTop = node.getBoundingClientRect().top - paneRect.top;
     el.scrollTop += currentTop - anchor.top;
   }
+  if (persist) navigationScrollAnchor = anchor;
   scheduleScrollStateCheck();
 }
 
@@ -680,6 +835,15 @@ async function scrollLidIntoView(lid: string): Promise<boolean> {
   return true;
 }
 
+function recheckViewportCoverage() {
+  if (pendingViewportCoverageFrame !== null) return;
+  pendingViewportCoverageFrame = requestAnimationFrame(() => {
+    pendingViewportCoverageFrame = null;
+    updateCurrentLid();
+    checkBufferNeed();
+  });
+}
+
 defineExpose({
   beginSegmentStage,
   stageSegment,
@@ -688,6 +852,8 @@ defineExpose({
   captureScrollAnchor,
   restoreScrollAnchor,
   scrollLidIntoView,
+  recheckViewportCoverage,
+  viewportHasCoverageGap,
 });
 
 function setupIntersectionObservers() {
@@ -747,7 +913,7 @@ function setupHeightObserver() {
     }
     if (layoutChanged) {
       scheduleHeightMeasurement();
-      void restoreScrollAnchor(layoutAnchor);
+      void restoreScrollAnchor(layoutAnchor, false);
     }
     if (navigationScrollAnchor) {
       void restoreScrollAnchor(navigationScrollAnchor);
@@ -776,9 +942,11 @@ onMounted(async () => {
 });
 onBeforeUnmount(() => {
   if (pendingScrollStateFrame !== null) cancelAnimationFrame(pendingScrollStateFrame);
+  if (pendingViewportCoverageFrame !== null) cancelAnimationFrame(pendingViewportCoverageFrame);
   if (pendingHeightMeasurementFrame !== null) cancelAnimationFrame(pendingHeightMeasurementFrame);
   if (notePinReleaseTimer !== null) window.clearTimeout(notePinReleaseTimer);
   pendingScrollStateFrame = null;
+  pendingViewportCoverageFrame = null;
   pendingHeightMeasurementFrame = null;
   notePinReleaseTimer = null;
   lidVisibilityObserver?.disconnect();
@@ -859,6 +1027,15 @@ watch(
     @pointercancel="releaseNotePinAfterPointerHandlers"
     @keydown="onKeydown"
   >
+    <div
+      v-if="props.fastScrollLoadingLid"
+      class="reader-fast-scroll-loading"
+      :data-target-lid="props.fastScrollLoadingLid"
+      role="status"
+      aria-live="polite"
+    >
+      <span>正在加载目标位置…</span>
+    </div>
     <article ref="prose" class="prose" @mouseup="emit('prose-mouse-up')">
       <div
         v-if="props.boundedBufferEnabled"

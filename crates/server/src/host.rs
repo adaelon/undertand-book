@@ -33,6 +33,57 @@ const REVIEW_RETRY_BASE_MS: u64 = 1_000;
 const REVIEW_RETRY_MAX_MS: u64 = 60_000;
 const REVIEW_SCHEDULER_POLL_MS: u64 = 250;
 const REVIEW_BOUNDARY_TIMEOUT_MS: u64 = 10_000;
+const READ_LEDGER_IDLE_FLUSH_MS: u64 = 250;
+const READ_LEDGER_POLL_MS: u64 = 25;
+
+fn flush_read_ledger_if_ready(
+    state: &Arc<Mutex<AppState>>,
+    idle_for: Duration,
+) -> Result<usize, read_tools::ToolError> {
+    let mut guard = state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if !guard.store.pending_reads_ready(idle_for) {
+        return Ok(0);
+    }
+    guard.store.flush_pending_reads()
+}
+
+fn force_flush_read_ledger(state: &Arc<Mutex<AppState>>) {
+    let result = state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .store
+        .flush_pending_reads();
+    if let Err(error) = result {
+        eprintln!(
+            "read ledger shutdown flush failed [{}]: {}",
+            error.error_code, error.message
+        );
+    }
+}
+
+fn spawn_read_ledger_worker(
+    state: Arc<Mutex<AppState>>,
+    stop: Arc<AtomicBool>,
+    idle_for: Duration,
+    poll_interval: Duration,
+) -> JoinHandle<()> {
+    thread::spawn(move || {
+        while !stop.load(Ordering::Acquire) {
+            thread::sleep(poll_interval);
+            if stop.load(Ordering::Acquire) {
+                break;
+            }
+            if let Err(error) = flush_read_ledger_if_ready(&state, idle_for) {
+                eprintln!(
+                    "read ledger background flush failed [{}]: {}",
+                    error.error_code, error.message
+                );
+            }
+        }
+    })
+}
 
 trait SelectionTranslationExecutor: Send + Sync {
     fn execute(
@@ -1006,6 +1057,7 @@ impl RunningServer {
         for handle in self.handles.drain(..) {
             let _ = handle.join();
         }
+        force_flush_read_ledger(&self.state);
     }
 
     pub fn shutdown(mut self) {
@@ -1014,6 +1066,7 @@ impl RunningServer {
         for handle in self.handles.drain(..) {
             let _ = handle.join();
         }
+        force_flush_read_ledger(&self.state);
     }
 }
 
@@ -1168,6 +1221,12 @@ fn start_server_with_memory_path(
             }
         }));
     }
+    handles.push(spawn_read_ledger_worker(
+        state.clone(),
+        stop.clone(),
+        Duration::from_millis(READ_LEDGER_IDLE_FLUSH_MS),
+        Duration::from_millis(READ_LEDGER_POLL_MS),
+    ));
     let boundary_timeout = review_boundary_timeout();
     let selection_translation_executor: Arc<dyn SelectionTranslationExecutor> =
         Arc::new(ProviderSelectionTranslationExecutor);
@@ -1658,6 +1717,56 @@ mod tests {
         );
         assert!(!memory_path.exists());
         std::fs::remove_file(blocker).unwrap();
+    }
+
+    #[test]
+    fn read_ledger_worker_flushes_deferred_touches_through_owned_store() {
+        let state = review_test_state("read-ledger-worker");
+        let book_id = {
+            let mut guard = state.lock().unwrap();
+            let book_id = guard.book.base.book_id.clone();
+            guard.store.enqueue_read(&book_id, "1.1", "t0").unwrap();
+            assert_eq!(guard.store.pending_read_count(), 1);
+            assert!(guard.store.read_lids(&book_id).is_empty());
+            book_id
+        };
+        let stop = Arc::new(AtomicBool::new(false));
+        let handle = spawn_read_ledger_worker(
+            state.clone(),
+            stop.clone(),
+            Duration::ZERO,
+            Duration::from_millis(1),
+        );
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            if state.lock().unwrap().store.pending_read_count() == 0 {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "worker did not flush");
+            thread::sleep(Duration::from_millis(1));
+        }
+        stop.store(true, Ordering::Release);
+        handle.join().unwrap();
+
+        let guard = state.lock().unwrap();
+        assert_eq!(guard.store.read_lids(&book_id), vec!["1.1"]);
+    }
+
+    #[test]
+    fn read_ledger_force_flush_ignores_idle_delay_for_orderly_shutdown() {
+        let state = review_test_state("read-ledger-shutdown");
+        let book_id = {
+            let mut guard = state.lock().unwrap();
+            let book_id = guard.book.base.book_id.clone();
+            guard.store.enqueue_read(&book_id, "1.1", "t0").unwrap();
+            book_id
+        };
+
+        force_flush_read_ledger(&state);
+
+        let guard = state.lock().unwrap();
+        assert_eq!(guard.store.pending_read_count(), 0);
+        assert_eq!(guard.store.read_lids(&book_id), vec!["1.1"]);
     }
 
     #[test]

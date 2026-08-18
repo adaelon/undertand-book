@@ -49,7 +49,7 @@ flowchart LR
 ```
 
 - **Web reader** owns ephemeral interaction state and calls localhost Reader APIs. `ReaderPane` owns a mounted LID registry, IntersectionObserver-maintained visible candidates and edge sentinels, one rAF scroll-state coalescer, and the ResizeObserver-fed `reader-height-ledger` projection for render-item height, top/bottom spacer and next-frame anchor correction; Note open state is keyed by `mem_id` outside recyclable DOM. `StableReaderSegment` owns body HTML identity so anchor/selection/Note-only parent updates do not re-run Markdown/KaTeX; App builds one annotation index and one source-focus range projection per input revision, then sends only affected LID render revisions. `ReaderSegmentHtmlCache` owns source/book/renderer-scoped base HTML with a `5w` LRU; final Highlight/focus `<mark>` and Note DOM remain outside the cache. App's `ReaderEdgeLoadGate` and serialized Reader command queue own epoch/direction request identity so replacement windows reject stale edge receipts and edge scroll cannot race navigation. The pure `reader-buffer` reducer owns contiguous `insert/keep/evict` identity ranges, `3w/4w` budgets, one incoming transition, epoch/transition receipt identity and interaction-pin trim debt; App projects each current receipt into the authoritative mounted segment slice, while selection/Note pins may temporarily retain the `4w` transient slice until release. `ReaderHydrator` owns source-scoped range hydration: it partitions text misses into canonical consecutive ranges, shares per-LID in-flight promises, derives FormulaSemantics positive/negative entries from one hit-only range, and bounds text plus formula settled LRUs independently to `5w`. Replacement navigation and book switches abort active range transports and advance the hydration epoch before any late reply can mutate caches; `batched_hydration_v1=0` retains the singular path only as an explicit rollback. App independently projects Manifest `display_title` into one title map shared by outline and chapter read position; title construction issues no `book.text` request and never joins the first-segment dependency chain. `usePdfSelectionDraft` owns native selection resolution; the independent `usePdfSelectionTranslation` controller owns only translation request state.
-- **server::host** owns sockets, worker threads, the global `AppState` mutex, Provider configuration snapshots, and lock boundaries.
+- **server::host** owns sockets, worker threads, the global `AppState` mutex, Provider configuration snapshots, and lock boundaries. Its read-ledger worker waits for a 250 ms navigation idle period, then locks the same `AppState`/`MemoryStore` to coalesce all pending LID touches into one atomic commit; book switch and orderly shutdown force a final attempt. ([ADR-0106](adr/0106-asynchronous-coalesced-read-ledger-persistence.md))
 - **AppState** owns the active immutable `Book` plus mutable Reader, memory, and Agent session state.
 - **runtime::ProviderRegistry** constructs Native/ReAct model adapters; timeout-bound adapters apply the supplied duration to the actual HTTP request.
 - **read-tools** projects every Manifest node's `display_title` from the first non-empty line inside its canonical span, strips an ATX heading marker, truncates at a valid 80-unit UTF-16 boundary and falls back to LID. It also validates `book.text(start,end)` as an ordered consecutive leaf interval before slicing canonical UTF-16 text. Its formula-range projection reuses that interval identity, returns only sidecar hits in canonical leaf order, and rejects duplicate or mismatched Formula identities. The independent source resolver validates internal evidence ranges and derives deterministic labels, previews, digests, and bounded local context.
@@ -76,6 +76,20 @@ template LID refs + visibility/edge IntersectionObservers
   -X-> replace/goto/book switch invalidates stale success and failure receipts
   -> ReaderPane projects mounted range through the source/layout/renderer-scoped height ledger
   -> top/bottom spacer preserve virtual extent; next-frame correction restores preserved anchor
+```
+
+Read-ledger durability is also outside the navigation response:
+
+```text
+POST reader.goto | reader.scroll
+  -> lock AppState -> update viewport
+  -> enqueue visible {book_id, lid, touch_count, last_seen} in MemoryStore
+  -> return viewport without disk I/O
+  -> 250 ms navigation idle
+  -> Host worker locks the same AppState/MemoryStore
+  -> merge all pending LIDs into one MemoryDocument candidate + atomic commit
+  -X-> commit failure keeps the batch and restarts the idle retry window
+  -> book switch or orderly shutdown forces a flush attempt
 ```
 
 Markdown body rendering is revision-scoped and keeps overlays outside the base cache:

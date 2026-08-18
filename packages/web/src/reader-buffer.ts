@@ -116,6 +116,29 @@ function assertRange(value: ReaderBufferRange, leafCount: number, label: string)
   }
 }
 
+export function readerTargetIsBeyondAdjacentWindow(
+  mountedRange: ReaderBufferRange,
+  targetLeafIndex: number,
+  viewportWidth: number,
+  leafCount: number,
+): boolean {
+  if (!Number.isInteger(leafCount) || leafCount <= 0) {
+    throw new Error("leafCount must be a positive integer");
+  }
+  assertRange(mountedRange, leafCount, "mountedRange");
+  assertPositiveInteger(viewportWidth, "viewportWidth");
+  if (
+    !Number.isInteger(targetLeafIndex)
+    || targetLeafIndex < 0
+    || targetLeafIndex >= leafCount
+  ) {
+    throw new Error("targetLeafIndex must identify an existing leaf");
+  }
+  const adjacentStart = Math.max(0, mountedRange[0] - viewportWidth);
+  const adjacentEnd = Math.min(leafCount, mountedRange[1] + viewportWidth);
+  return targetLeafIndex < adjacentStart || targetLeafIndex >= adjacentEnd;
+}
+
 function assertUniqueLeafOrder(leafOrder: readonly string[]): void {
   const seen = new Set<string>();
   for (const lid of leafOrder) {

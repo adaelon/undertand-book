@@ -5,6 +5,7 @@ import {
   assertReaderBufferInvariants,
   commitBufferTransition,
   planBufferTransition,
+  readerTargetIsBeyondAdjacentWindow,
   replaceReaderBuffer,
   setReaderBufferPin,
   type ReaderBufferDirection,
@@ -58,6 +59,18 @@ function expectSliceInvariant(state: ReaderBufferState, leafOrder: string[]) {
 }
 
 describe("reader bounded buffer reducer", () => {
+  it("reserves the immediately adjacent windows for edge prefetch", () => {
+    const mountedRange = [100, 120] as const;
+    for (const targetLeafIndex of [80, 99, 100, 119, 120, 139]) {
+      expect(
+        readerTargetIsBeyondAdjacentWindow(mountedRange, targetLeafIndex, 20, 200),
+        `target ${targetLeafIndex}`,
+      ).toBe(false);
+    }
+    expect(readerTargetIsBeyondAdjacentWindow(mountedRange, 79, 20, 200)).toBe(true);
+    expect(readerTargetIsBeyondAdjacentWindow(mountedRange, 140, 20, 200)).toBe(true);
+  });
+
   it.each([
     { leafCount: 0, width: 20 },
     { leafCount: 1, width: 20 },

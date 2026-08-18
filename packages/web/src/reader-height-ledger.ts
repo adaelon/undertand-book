@@ -228,6 +228,48 @@ export function readerRangeHeight(
   return total;
 }
 
+export function readerLeafIndexAtOffset(
+  ledger: ReaderHeightLedger,
+  offsetPx: number,
+): number | null {
+  assertFiniteNonNegative(offsetPx, "offsetPx");
+  const leafCount = ledger.leafOrder.length;
+  if (leafCount === 0) return null;
+  if (readerRangeHeight(ledger, [0, leafCount]) <= 0) return 0;
+
+  let remainingPx = offsetPx;
+  let nextLeafIndex = 0;
+  const measuredEntries = [...ledger.entries.values()]
+    .sort((left, right) => left.startLeafIndex - right.startLeafIndex);
+
+  for (const entry of measuredEntries) {
+    const estimatedLeafCount = entry.startLeafIndex - nextLeafIndex;
+    const estimatedHeightPx = estimatedLeafCount * ledger.estimatedLeafHeightPx;
+    if (estimatedLeafCount > 0 && remainingPx < estimatedHeightPx) {
+      return nextLeafIndex + Math.floor(remainingPx / ledger.estimatedLeafHeightPx);
+    }
+    remainingPx -= estimatedHeightPx;
+
+    const measuredLeafCount = entry.endLeafIndex - entry.startLeafIndex;
+    if (remainingPx < entry.blockHeightPx) {
+      const measuredLeafHeightPx = entry.blockHeightPx / measuredLeafCount;
+      return entry.startLeafIndex + Math.min(
+        measuredLeafCount - 1,
+        Math.floor(remainingPx / measuredLeafHeightPx),
+      );
+    }
+    remainingPx -= entry.blockHeightPx;
+    nextLeafIndex = entry.endLeafIndex;
+  }
+
+  const remainingLeafCount = leafCount - nextLeafIndex;
+  const remainingHeightPx = remainingLeafCount * ledger.estimatedLeafHeightPx;
+  if (remainingLeafCount > 0 && remainingPx < remainingHeightPx) {
+    return nextLeafIndex + Math.floor(remainingPx / ledger.estimatedLeafHeightPx);
+  }
+  return leafCount - 1;
+}
+
 export function readerSpacerTotals(
   ledger: ReaderHeightLedger,
   mountedRange: ReaderBufferRange,

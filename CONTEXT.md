@@ -209,6 +209,9 @@ paper profile 预构建产物与读时用户任务之间的产品入口层。第
 E 的记忆所在。**独立于只读基座、用户私有、可变、跨书**。两层:会话工作记忆(临时:当前对话+阅读位置)+ 长期记忆(持久:旅程/问答/兴趣/卡点/笔记)。book agent 读写但不拥有。详见 [docs/adr/0006]。
 **记录模型** `[ADR-0015]`(参考 Codex `codex-rs/memories`):结构信封 + 散文 content + **记忆引用锚定**(见下)。命令面 `memory.save/recall/delete`(议题6 定);Codex 式两阶段后台 consolidation(Phase1 抽取阅读会话 / Phase2 合并+遗忘+usage 剪枝)+ 分层渐进披露产物留议题7。
 
+## 异步已读账本 (asynchronous read ledger)
+`reader.scroll/goto` 产生的确定性已读事实先进入进程内待持久集合，导航成功只确认 viewport 已改变，不确认该批事实已具备崩溃耐久性。待持久集合合并同一 LID 的触达次数与最近时间，失败时保留待重试，切书或有序退出前冲刷；Note、Highlight、QA 等用户显式记忆仍保持同步原子提交。状态:BOUNDARY_CHANGE(见 [ADR-0106](docs/adr/0106-asynchronous-coalesced-read-ledger-persistence.md))。
+
 ## Memory selection context
 选区创建的 Note 可选携带的结构化来源上下文:保存 `resolved/partial` 状态、用户实际选择的 `raw_quote`、可验证的 `resolved_quote` 与按阅读顺序排列的完整 LID ranges。用户内容可保留 raw quote,但 citations 与精确投影只能使用 resolved quote/ranges。Note 的 `anchor.lid` 仍取首个 resolved LID用于语义定位和排序,PDF 行内标记取末 range 作为显示锚,citations 由 ranges 中的 LID 去重派生;普通旧 Note 无此字段且保持兼容。状态:BOUNDARY_CHANGE。
 

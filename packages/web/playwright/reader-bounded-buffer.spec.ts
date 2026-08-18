@@ -6,7 +6,7 @@ const SETTLED_LIMIT = 3 * VIEWPORT_WIDTH;
 const TRANSIENT_LIMIT = 4 * VIEWPORT_WIDTH;
 const SOURCE_FINGERPRINT = "b".repeat(64);
 
-type Scenario = "fixed" | "note" | "image" | "formula";
+type Scenario = "fixed" | "note" | "image" | "formula" | "compact";
 type NodeKind = "chapter" | "paragraph" | "image" | "formula";
 
 interface FixtureNode {
@@ -35,6 +35,13 @@ interface MountedRange {
   lastIndex: number;
 }
 
+interface FixtureControl {
+  setTextRangeDelay: (delayMs: number) => void;
+  setAnnotationDelay: (delayMs: number) => void;
+  gotoTargets: () => string[];
+  readerTopIndex: () => number;
+}
+
 function buildFixture(scenario: Scenario): Fixture {
   const leafLids: string[] = [];
   const textByLid = new Map<string, string>();
@@ -52,7 +59,9 @@ function buildFixture(scenario: Scenario): Fixture {
       ? `$x_{${index + 1}} = \\frac{${index + 1}}{1 + y^2} + \\sqrt{${index + 3}}$`
       : kind === "image"
         ? `![Delayed image ${index + 1}](/reader-fixture-assets/${index + 1}.svg)`
-        : `Leaf ${index + 1}. ${"Stable reader content fixes enough block height for deterministic bidirectional scrolling. ".repeat(3)}`;
+        : scenario === "compact"
+          ? `Compact leaf ${index + 1} keeps one replacement window shorter than a tall viewport. `
+          : `Leaf ${index + 1}. ${"Stable reader content fixes enough block height for deterministic bidirectional scrolling. ".repeat(3)}`;
     leafLids.push(lid);
     textByLid.set(lid, text);
     if (kind === "formula") formulaLids.add(lid);
@@ -134,7 +143,7 @@ async function installFixture(
   page: Page,
   fixture: Fixture,
   initialTopIndex = 0,
-) {
+): Promise<FixtureControl> {
   const profile = {
     profile_id: "technical_learning",
     profile_version: "reader-bounded-v1",
@@ -149,6 +158,9 @@ async function installFixture(
     ? [noteRecord(fixture.noteLid)]
     : [];
   let nextMemoryId = 1;
+  let textRangeDelayMs = 0;
+  let annotationDelayMs = 0;
+  const gotoTargets: string[] = [];
   const viewportAt = (rawTop: number) => {
     const top = Math.max(0, Math.min(rawTop, maximumTop));
     const visible = fixture.leafLids.slice(top, top + VIEWPORT_WIDTH);
@@ -291,6 +303,7 @@ async function installFixture(
     }
     if (path === "/api/reader/goto") {
       const lid = String(body.lid ?? "");
+      gotoTargets.push(lid);
       const index = fixture.leafLids.indexOf(lid);
       if (index < 0) {
         return fulfill(route, {
@@ -320,7 +333,12 @@ async function installFixture(
     }
     if (path === "/api/build_intent/artifacts") return fulfill(route, { overlay: null });
     if (path === "/api/build_intent/usage.event") return fulfill(route, { accepted: true });
-    if (path === "/api/memory/recall") return fulfill(route, memories);
+    if (path === "/api/memory/recall") {
+      if (annotationDelayMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, annotationDelayMs));
+      }
+      return fulfill(route, memories);
+    }
     if (path === "/api/memory/delete") {
       const memId = String(body.mem_id ?? "");
       memories = memories.filter((record) => record.mem_id !== memId);
@@ -351,6 +369,9 @@ async function installFixture(
       const lid = url.searchParams.get("lid") ?? "";
       const end = url.searchParams.get("end");
       if (end) {
+        if (textRangeDelayMs > 0) {
+          await new Promise((resolve) => setTimeout(resolve, textRangeDelayMs));
+        }
         const first = fixture.tree.find((node) => node.lid === lid);
         const last = fixture.tree.find((node) => node.lid === end);
         if (!first || !last || first.children.length || last.children.length || first.span.start > last.span.end) {
@@ -406,6 +427,17 @@ async function installFixture(
       message: `Unmocked bounded-reader route: ${path}`,
     }, 404);
   });
+
+  return {
+    setTextRangeDelay(delayMs: number) {
+      textRangeDelayMs = delayMs;
+    },
+    setAnnotationDelay(delayMs: number) {
+      annotationDelayMs = delayMs;
+    },
+    gotoTargets: () => [...gotoTargets],
+    readerTopIndex: () => readerTopIndex,
+  };
 }
 
 async function mountedRange(page: Page, fixture: Fixture): Promise<MountedRange> {
@@ -445,6 +477,52 @@ async function lidTop(page: Page, lid: string): Promise<number> {
     if (!node) throw new Error(`mounted LID ${targetLid} missing`);
     return node.getBoundingClientRect().top - pane.getBoundingClientRect().top;
   }, lid);
+}
+
+async function jumpToProgress(
+  page: Page,
+  progress: number,
+  direction: "up" | "down",
+): Promise<{ targetTop: number; expectedIndex: number }> {
+  return page.locator(".reader-pane").evaluate((pane, input) => {
+    const element = pane as HTMLElement;
+    const maximumTop = Math.max(0, element.scrollHeight - element.clientHeight);
+    const targetTop = Math.round(maximumTop * input.progress);
+    element.dispatchEvent(new WheelEvent("wheel", {
+      bubbles: true,
+      deltaY: input.direction === "down" ? 10_000 : -10_000,
+    }));
+    element.scrollTop = targetTop;
+    element.dispatchEvent(new Event("scroll", { bubbles: true }));
+    return {
+      targetTop,
+      expectedIndex: Math.round((input.leafCount - input.viewportWidth) * input.progress),
+    };
+  }, {
+    progress,
+    direction,
+    leafCount: LEAF_COUNT,
+    viewportWidth: VIEWPORT_WIDTH,
+  });
+}
+
+async function sampleScrollTop(page: Page, durationMs: number): Promise<number[]> {
+  return page.locator(".reader-pane").evaluate((pane, duration) => {
+    const element = pane as HTMLElement;
+    const samples: number[] = [];
+    const startedAt = performance.now();
+    return new Promise<number[]>((resolve) => {
+      const sample = () => {
+        samples.push(element.scrollTop);
+        if (performance.now() - startedAt >= duration) {
+          resolve(samples);
+          return;
+        }
+        requestAnimationFrame(sample);
+      };
+      sample();
+    });
+  }, durationMs);
 }
 
 async function currentLidIndex(page: Page, fixture: Fixture): Promise<number> {
@@ -621,6 +699,258 @@ test("PHR4 restores a deep cold-start viewport after the reader pane mounts", as
     async () => Math.abs(await lidTop(page, target)),
     { message: "deep cold-start target reaches the pane top", timeout: 10_000 },
   ).toBeLessThanOrEqual(2);
+
+  await context.close();
+});
+
+test("PHR4 refills a tall viewport after a deep replacement navigation", async ({ browser }) => {
+  const fixture = buildFixture("compact");
+  const context = await browser.newContext({ viewport: { width: 1_440, height: 1_000 } });
+  const page = await context.newPage();
+  const control = await installFixture(page, fixture);
+
+  await page.goto("/?readerPerf=1");
+  await expect(page.locator(".reader-pane")).toBeVisible({ timeout: 60_000 });
+  await page.getByRole("button", { name: "调试" }).click();
+  control.setAnnotationDelay(250);
+  await gotoAndAssertPaneTop(page, fixture, 1_499);
+
+  await expect.poll(
+    async () => (await mountedRange(page, fixture)).count,
+    {
+      message: "replacement completion must recheck and fill a visible bottom spacer",
+      timeout: 10_000,
+    },
+  ).toBeGreaterThan(VIEWPORT_WIDTH);
+  await expect.poll(() => page.locator(".reader-pane").evaluate((pane) => {
+    const paneRect = pane.getBoundingClientRect();
+    const bottomSpacer = pane.querySelector<HTMLElement>(".reader-spacer-bottom");
+    if (!bottomSpacer) return 0;
+    return Math.max(0, paneRect.bottom - bottomSpacer.getBoundingClientRect().top);
+  }), {
+    message: "replacement viewport must not settle with bottom spacer exposed",
+    timeout: 10_000,
+  }).toBeLessThanOrEqual(2);
+
+  await context.close();
+});
+
+test("PHR4 keeps a small adjacent scroll on the edge-prefetch path", async ({ browser }) => {
+  const fixture = buildFixture("fixed");
+  const initialTopIndex = 1_499;
+  const target = fixture.leafLids[initialTopIndex];
+  const context = await browser.newContext({ viewport: { width: 1_440, height: 900 } });
+  const page = await context.newPage();
+  const control = await installFixture(page, fixture, initialTopIndex);
+  control.setTextRangeDelay(900);
+
+  await page.goto("/?readerPerf=1");
+  await expect(page.locator(".reader-pane")).toBeVisible({ timeout: 60_000 });
+  await expect(page.locator(`[data-lid="${target}"]`)).toBeAttached({ timeout: 60_000 });
+  await page.getByRole("button", { name: "调试" }).click();
+  await expect.poll(
+    async () => Math.abs(await lidTop(page, target)),
+    { message: "deep target reaches the pane top before adjacent scrolling", timeout: 10_000 },
+  ).toBeLessThanOrEqual(2);
+
+  await page.locator(".reader-pane").evaluate((pane) => {
+    const element = pane as HTMLElement;
+    element.dispatchEvent(new WheelEvent("wheel", { bubbles: true, deltaY: -320 }));
+    element.scrollTop -= 320;
+    element.dispatchEvent(new Event("scroll", { bubbles: true }));
+  });
+
+  await page.waitForTimeout(120);
+  await expect(page.locator(".reader-fast-scroll-loading")).toBeHidden();
+  expect(control.gotoTargets(), "adjacent scrolling must not use replacement goto").toEqual([]);
+  await expect.poll(
+    async () => (await mountedRange(page, fixture)).firstIndex,
+    { message: "adjacent upward scrolling is fulfilled by edge prefetch", timeout: 10_000 },
+  ).toBeLessThan(initialTopIndex);
+
+  await context.close();
+});
+
+test("PHR4 keeps render-item slices contiguous while a deep goto prefetches upward", async ({ browser }) => {
+  const fixture = buildFixture("formula");
+  const context = await browser.newContext({ viewport: { width: 1_440, height: 900 } });
+  const page = await context.newPage();
+  const pageErrors: string[] = [];
+  page.on("pageerror", (error) => pageErrors.push(error.message));
+  await installFixture(page, fixture);
+
+  await page.goto("/?readerPerf=1");
+  await expect(page.locator(".reader-pane")).toBeVisible({ timeout: 60_000 });
+  await page.getByRole("button", { name: "调试" }).click();
+  await page.locator(".reader-pane").evaluate((pane, leafLids) => {
+    const leafIndex = new Map(leafLids.map((lid, index) => [lid, index]));
+    const violations: string[][] = [];
+    const inspect = () => {
+      for (const item of pane.querySelectorAll<HTMLElement>("[data-reader-item-key]")) {
+        const lids = JSON.parse(item.dataset.readerItemKey ?? "[]") as string[];
+        const start = leafIndex.get(lids[0] ?? "") ?? -1;
+        if (
+          start < 0
+          || lids.some((lid, offset) => leafLids[start + offset] !== lid)
+        ) violations.push(lids);
+      }
+    };
+    const observer = new MutationObserver(inspect);
+    observer.observe(pane, { childList: true, subtree: true });
+    (window as typeof window & {
+      __READER_NON_CONTIGUOUS_ITEMS__?: string[][];
+      __READER_ITEM_OBSERVER__?: MutationObserver;
+    }).__READER_NON_CONTIGUOUS_ITEMS__ = violations;
+    (window as typeof window & {
+      __READER_ITEM_OBSERVER__?: MutationObserver;
+    }).__READER_ITEM_OBSERVER__ = observer;
+  }, fixture.leafLids);
+  await gotoAndAssertPaneTop(page, fixture, 1_501);
+  await triggerTransition(page, fixture, "up");
+  await page.waitForTimeout(100);
+  expect(
+    pageErrors.filter((message) => message.includes("render-item LIDs")),
+    "incremental upward staging must never expose a non-contiguous render item",
+  ).toEqual([]);
+  expect(await page.evaluate(() => (
+    window as typeof window & { __READER_NON_CONTIGUOUS_ITEMS__?: string[][] }
+  ).__READER_NON_CONTIGUOUS_ITEMS__ ?? [])).toEqual([]);
+
+  await context.close();
+});
+
+test("PHR4 keeps a fast native scroll target stable while its distant window hydrates", async ({ browser }) => {
+  const fixture = buildFixture("fixed");
+  const initialTopIndex = 1_499;
+  const context = await browser.newContext({ viewport: { width: 1_440, height: 900 } });
+  const page = await context.newPage();
+  const control = await installFixture(page, fixture, initialTopIndex);
+
+  await page.goto("/?readerPerf=1");
+  await expect(page.locator(".reader-pane")).toBeVisible({ timeout: 60_000 });
+  await settle(page, fixture.scenario);
+  await page.getByRole("button", { name: "调试" }).click();
+  control.setTextRangeDelay(900);
+
+  const jump = await jumpToProgress(page, 0.86, "down");
+  const loading = page.locator(".reader-fast-scroll-loading");
+  const loadingSamples = await sampleScrollTop(page, 300);
+  expect(
+    Math.min(...loadingSamples),
+    "downward fast scroll must not rebound toward the old mounted range while loading",
+  ).toBeGreaterThanOrEqual(jump.targetTop - 2);
+  await expect(loading).toBeVisible({ timeout: 2_000 });
+  await page.locator(".reader-pane").evaluate((pane) => {
+    pane.dispatchEvent(new WheelEvent("wheel", { bubbles: true, deltaY: 1 }));
+    pane.dispatchEvent(new Event("scroll", { bubbles: true }));
+  });
+  await page.waitForTimeout(80);
+  await expect(loading).toBeVisible();
+
+  await expect(loading).toBeHidden({ timeout: 10_000 });
+  await expect.poll(
+    async () => Math.abs(await currentLidIndex(page, fixture) - jump.expectedIndex),
+    { message: "fast scroll current LID converges near the requested virtual progress", timeout: 10_000 },
+  ).toBeLessThanOrEqual(2 * VIEWPORT_WIDTH);
+  await expect(page.locator(".reader-pane [data-lid]").first()).toBeVisible();
+
+  await context.close();
+});
+
+test("PHR4 lets the latest reverse fast-scroll target supersede stale hydration", async ({ browser }) => {
+  const fixture = buildFixture("fixed");
+  const initialTopIndex = 1_499;
+  const context = await browser.newContext({ viewport: { width: 1_440, height: 900 } });
+  const page = await context.newPage();
+  const control = await installFixture(page, fixture, initialTopIndex);
+
+  await page.goto("/?readerPerf=1");
+  await expect(page.locator(".reader-pane")).toBeVisible({ timeout: 60_000 });
+  await settle(page, fixture.scenario);
+  await page.getByRole("button", { name: "调试" }).click();
+  control.setTextRangeDelay(900);
+
+  const first = await jumpToProgress(page, 0.88, "down");
+  await expect(page.locator(".reader-fast-scroll-loading")).toBeVisible({ timeout: 2_000 });
+  await expect.poll(() => control.gotoTargets().length, { timeout: 2_000 }).toBeGreaterThan(0);
+
+  await jumpToProgress(page, 0.34, "up");
+  await page.waitForTimeout(8);
+  await jumpToProgress(page, 0.24, "up");
+  await page.waitForTimeout(8);
+  const latest = await jumpToProgress(page, 0.16, "up");
+  const reverseSamples = await sampleScrollTop(page, 300);
+  expect(
+    Math.max(...reverseSamples),
+    "stale downward hydration must not pull a newer upward target back down",
+  ).toBeLessThanOrEqual(latest.targetTop + 2);
+
+  await expect(page.locator(".reader-fast-scroll-loading")).toBeHidden({ timeout: 10_000 });
+  await expect.poll(
+    async () => Math.abs(await currentLidIndex(page, fixture) - latest.expectedIndex),
+    { message: "the latest reverse target owns the final current LID", timeout: 10_000 },
+  ).toBeLessThanOrEqual(2 * VIEWPORT_WIDTH);
+  expect(
+    Math.abs(await currentLidIndex(page, fixture) - first.expectedIndex),
+    "the stale first target must not win after reverse interaction",
+  ).toBeGreaterThan(8 * VIEWPORT_WIDTH);
+  expect(control.gotoTargets().length, "rapid intermediate targets are coalesced").toBeLessThanOrEqual(2);
+
+  await context.close();
+});
+
+test("PHR4 cancels stale fast-scroll hydration when the latest interaction returns to mounted text", async ({ browser }) => {
+  const fixture = buildFixture("fixed");
+  const initialTopIndex = 1_499;
+  const context = await browser.newContext({ viewport: { width: 1_440, height: 900 } });
+  const page = await context.newPage();
+  const control = await installFixture(page, fixture, initialTopIndex);
+
+  await page.goto("/?readerPerf=1");
+  await expect(page.locator(".reader-pane")).toBeVisible({ timeout: 60_000 });
+  await settle(page, fixture.scenario);
+  await page.getByRole("button", { name: "调试" }).click();
+  while ((await mountedRange(page, fixture)).count < SETTLED_LIMIT) {
+    await triggerTransition(page, fixture, "down");
+  }
+  const mountedTop = await page.locator(".reader-pane").evaluate((pane) => {
+    const element = pane as HTMLElement;
+    const paneRect = element.getBoundingClientRect();
+    const topSentinel = element.querySelector<HTMLElement>(".reader-edge-sentinel-top");
+    const bottomSentinel = element.querySelector<HTMLElement>(".reader-edge-sentinel-bottom");
+    if (!topSentinel || !bottomSentinel) throw new Error("reader edge sentinels missing");
+    const mountedTopPx = element.scrollTop + topSentinel.getBoundingClientRect().bottom - paneRect.top;
+    const mountedBottomPx = element.scrollTop + bottomSentinel.getBoundingClientRect().top - paneRect.top;
+    element.scrollTop = Math.max(0, (mountedTopPx + mountedBottomPx - element.clientHeight) / 2);
+    element.dispatchEvent(new Event("scroll", { bubbles: true }));
+    return element.scrollTop;
+  });
+  await settle(page, fixture.scenario);
+  const mountedCurrentIndex = await currentLidIndex(page, fixture);
+  control.setTextRangeDelay(900);
+
+  await jumpToProgress(page, 0.88, "down");
+  const loading = page.locator(".reader-fast-scroll-loading");
+  await expect(loading).toBeVisible({ timeout: 2_000 });
+  await expect.poll(() => control.gotoTargets().length, { timeout: 2_000 }).toBeGreaterThan(0);
+
+  await page.locator(".reader-pane").evaluate((pane, targetTop) => {
+    const element = pane as HTMLElement;
+    element.dispatchEvent(new WheelEvent("wheel", { bubbles: true, deltaY: -10_000 }));
+    element.scrollTop = targetTop;
+    element.dispatchEvent(new Event("scroll", { bubbles: true }));
+  }, mountedTop);
+  await expect(loading).toBeHidden({ timeout: 500 });
+
+  await page.waitForTimeout(1_100);
+  await expect.poll(
+    async () => Math.abs(await currentLidIndex(page, fixture) - mountedCurrentIndex),
+    { message: "returning to mounted text prevents the stale distant target from landing", timeout: 5_000 },
+  ).toBeLessThanOrEqual(3 * VIEWPORT_WIDTH);
+  expect(
+    Math.abs(control.readerTopIndex() - mountedCurrentIndex),
+    "the authoritative reader viewport returns to the mounted window",
+  ).toBeLessThanOrEqual(3 * VIEWPORT_WIDTH);
 
   await context.close();
 });

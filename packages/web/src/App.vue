@@ -176,6 +176,7 @@ const batchedReaderHydrationV1 = batchedHydrationV1Enabled(
   import.meta.env.VITE_BATCHED_HYDRATION_V1,
 );
 const READER_RENDERER_VERSION = "reader-markdown-v1";
+const FAST_SCROLL_COALESCE_MS = 64;
 const readerSegmentHtmlCache = new ReaderSegmentHtmlCache();
 const readerHydrator = new ReaderHydrator({
   textRange: (startLid, endLid, signal) => api.text(startLid, endLid, signal),
@@ -276,15 +277,84 @@ let activeReaderEdgeDirection: "up" | "down" | null = null;
 let readerEdgeInteractionLocked = false;
 let readerViewportInteractionVersion = 0;
 let readerViewportInteractionDirection: "up" | "down" | null = null;
+let readerIdleViewportResyncSuppressedVersion: number | null = null;
 let pendingReaderEdge: {
   direction: "up" | "down";
   interactionVersion: number;
 } | null = null;
+interface ReaderFastScrollRequest {
+  lid: string;
+  replacementEpoch: number;
+}
+interface ReaderMountedViewportResync {
+  lid: string;
+  replacementEpoch: number;
+}
+let pendingReaderFastScroll: ReaderFastScrollRequest | null = null;
+let readerFastScrollFlushTimer: number | null = null;
+let readerFastScrollActive = false;
+let readerFastScrollLoadingEpoch: number | null = null;
+const readerFastScrollLoadingLid = ref<string | null>(null);
+let pendingReaderMountedViewportResync: ReaderMountedViewportResync | null = null;
+let readerMountedViewportResyncTimer: number | null = null;
+let pendingReaderIdleViewportLid: string | null = null;
+let readerIdleViewportResyncTimer: number | null = null;
+const READER_IDLE_VIEWPORT_RESYNC_MS = 400;
 
 function takePendingReaderEdge() {
   const pending = pendingReaderEdge;
   pendingReaderEdge = null;
   return pending;
+}
+
+function cancelPendingReaderMountedViewportResync() {
+  pendingReaderMountedViewportResync = null;
+  if (readerMountedViewportResyncTimer !== null) {
+    window.clearTimeout(readerMountedViewportResyncTimer);
+    readerMountedViewportResyncTimer = null;
+  }
+}
+
+function cancelPendingReaderIdleViewportResync() {
+  pendingReaderIdleViewportLid = null;
+  if (readerIdleViewportResyncTimer !== null) {
+    window.clearTimeout(readerIdleViewportResyncTimer);
+    readerIdleViewportResyncTimer = null;
+  }
+}
+
+function scheduleReaderIdleViewportResync(lid: string) {
+  pendingReaderIdleViewportLid = lid;
+  if (readerIdleViewportResyncTimer !== null) {
+    window.clearTimeout(readerIdleViewportResyncTimer);
+  }
+  readerIdleViewportResyncTimer = window.setTimeout(() => {
+    readerIdleViewportResyncTimer = null;
+    const targetLid = pendingReaderIdleViewportLid;
+    pendingReaderIdleViewportLid = null;
+    if (!targetLid || viewport.value?.top_lid === targetLid) return;
+    if (
+      activeReaderEdgeDirection !== null
+      || readerFastScrollActive
+      || pendingReaderFastScroll !== null
+      || readerFastScrollLoadingLid.value !== null
+      || pendingReaderMountedViewportResync !== null
+    ) {
+      scheduleReaderIdleViewportResync(targetLid);
+      return;
+    }
+    onFastScrollReturnedToMounted(targetLid);
+  }, READER_IDLE_VIEWPORT_RESYNC_MS);
+}
+
+function cancelPendingReaderFastScroll() {
+  pendingReaderFastScroll = null;
+  if (readerFastScrollFlushTimer !== null) {
+    window.clearTimeout(readerFastScrollFlushTimer);
+    readerFastScrollFlushTimer = null;
+  }
+  readerFastScrollLoadingEpoch = null;
+  readerFastScrollLoadingLid.value = null;
 }
 const readerBufferState = shallowRef<ReaderBufferState | null>(null);
 const readerBufferRange = computed<ReaderBufferRange | null>(() => {
@@ -299,6 +369,8 @@ const readerPaneRef = ref<{
   captureScrollAnchor: (candidateLids: string[]) => ScrollAnchor | null;
   restoreScrollAnchor: (anchor: ScrollAnchor | null) => Promise<void>;
   scrollLidIntoView: (lid: string) => Promise<boolean>;
+  recheckViewportCoverage: () => void;
+  viewportHasCoverageGap: (direction: "up" | "down") => boolean;
 } | null>(null);
 interface Segment {
   lid: string;
@@ -943,10 +1015,11 @@ function stageIncomingReaderSegments(
     seen.add(segment.lid);
     return true;
   });
+  const stageOrder = direction === "up" ? [...unique].reverse() : unique;
   const staged: Segment[] = [];
   let stageCurrent = true;
   return runReaderRenderWorkInBatches(
-    unique,
+    stageOrder,
     (segment) => {
       const display = isRawAssetSegment(segment)
         ? { text: segment.text }
@@ -1484,12 +1557,26 @@ function readerHydrationSourceIdentity(): string {
   return `${buildWorkbenchSnapshot.value?.book_id ?? "reader-book-unresolved"}:${readerBufferSourceFingerprint()}`;
 }
 
-function beginReaderReplacement(): number {
+function beginReaderReplacement(
+  owner: "general" | "fast-scroll" | "mounted-resync" = "general",
+): number {
+  cancelPendingReaderMountedViewportResync();
+  cancelPendingReaderIdleViewportResync();
+  if (owner !== "fast-scroll") cancelPendingReaderFastScroll();
   if (batchedReaderHydrationV1) readerHydrator.invalidatePending();
   return edgeLoadGate.beginReplacement();
 }
 
+function finishReaderReplacement(replacementEpoch: number): boolean {
+  const finished = edgeLoadGate.finishReplacement(replacementEpoch);
+  if (finished) readerPaneRef.value?.recheckViewportCoverage();
+  return finished;
+}
+
 function invalidateReaderReadWork(): void {
+  cancelPendingReaderMountedViewportResync();
+  cancelPendingReaderIdleViewportResync();
+  cancelPendingReaderFastScroll();
   edgeLoadGate.invalidate();
   if (batchedReaderHydrationV1) readerHydrator.invalidatePending();
 }
@@ -1559,7 +1646,7 @@ async function loadWindow(
     throw error;
   } finally {
     if (replacementEpoch !== null && ownsReplacementEpoch) {
-      edgeLoadGate.finishReplacement(replacementEpoch);
+      finishReaderReplacement(replacementEpoch);
     }
   }
   if (mode === "replace") {
@@ -1792,7 +1879,7 @@ async function syncViewport(forcePaperProjection = false, preferReaderSelection 
       preferReaderSelection,
     );
   } finally {
-    edgeLoadGate.finishReplacement(replacementEpoch);
+    finishReaderReplacement(replacementEpoch);
   }
 }
 
@@ -2469,6 +2556,9 @@ onBeforeUnmount(() => {
   if (profileBackfillPollTimer !== null) window.clearTimeout(profileBackfillPollTimer);
   notePlacementController.cancel();
   pdfSelectionTranslation.invalidate("unmount");
+  cancelPendingReaderMountedViewportResync();
+  cancelPendingReaderIdleViewportResync();
+  cancelPendingReaderFastScroll();
   if (batchedReaderHydrationV1) readerHydrator.clearSource();
   if (readerPerformanceCompiled) setReaderPerformanceCacheSnapshotProvider(null);
 });
@@ -2478,6 +2568,7 @@ function onReaderViewportInteraction(direction?: "up" | "down") {
   if (direction) {
     readerViewportInteractionVersion += 1;
     readerViewportInteractionDirection = direction;
+    readerIdleViewportResyncSuppressedVersion = null;
     readerEdgeInteractionLocked = false;
     pendingReaderEdge = null;
   }
@@ -2486,12 +2577,15 @@ function onReaderViewportInteraction(direction?: "up" | "down") {
 
 async function onScrollEdge(direction: "up" | "down") {
   if (!viewport.value) return;
+  const coverageRecovery = readerPaneRef.value?.viewportHasCoverageGap(direction) ?? false;
   if (
+    !coverageRecovery
+    &&
     readerViewportInteractionDirection !== null
     && readerViewportInteractionDirection !== direction
   ) return;
   if (activeReaderEdgeDirection !== null) {
-    if (!readerEdgeInteractionLocked) {
+    if (!readerEdgeInteractionLocked || coverageRecovery) {
       pendingReaderEdge = {
         direction,
         interactionVersion: readerViewportInteractionVersion,
@@ -2499,7 +2593,8 @@ async function onScrollEdge(direction: "up" | "down") {
     }
     return;
   }
-  if (readerEdgeInteractionLocked) return;
+  if (readerEdgeInteractionLocked && !coverageRecovery) return;
+  if (coverageRecovery) readerEdgeInteractionLocked = false;
   pendingReaderEdge = null;
   const token = edgeLoadGate.begin(direction);
   if (!token) return;
@@ -2622,17 +2717,34 @@ async function onScrollEdge(direction: "up" | "down") {
     const pending = takePendingReaderEdge();
     if (
       pending
-      && !readerEdgeInteractionLocked
       && pending.interactionVersion === readerViewportInteractionVersion
     ) {
       void onScrollEdge(pending.direction);
     }
+    if (
+      bufferApplied
+      && coverageRecovery
+      && currentReadingLid.value
+      && !readerPaneRef.value?.viewportHasCoverageGap("up")
+      && !readerPaneRef.value?.viewportHasCoverageGap("down")
+    ) {
+      onFastScrollReturnedToMounted(currentReadingLid.value);
+    }
   }
 }
-async function loadGotoViewport(lid: string) {
-  const replacementEpoch = beginReaderReplacement();
+async function loadGotoViewport(
+  lid: string,
+  replacementEpochOverride: number | null = null,
+) {
+  const ownsReplacementEpoch = replacementEpochOverride === null;
+  const replacementEpoch = replacementEpochOverride ?? beginReaderReplacement();
   try {
-    const gotoEffect = await readerCommandQueue.run(() => api.goto(lid));
+    const gotoEffect = await readerCommandQueue.run(() => (
+      edgeLoadGate.isReplacementCurrent(replacementEpoch)
+        ? api.goto(lid)
+        : Promise.resolve(null)
+    ));
+    if (!gotoEffect) return null;
     if (!edgeLoadGate.isReplacementCurrent(replacementEpoch)) return null;
     const navigationTargetLid = resolveReaderNavigationTarget(lid, leafOrder.value)
       ?? gotoEffect.viewport.top_lid;
@@ -2645,8 +2757,84 @@ async function loadGotoViewport(lid: string) {
     if (!edgeLoadGate.isReplacementCurrent(replacementEpoch)) return null;
     return { gotoEffect, navigationTargetLid };
   } finally {
-    edgeLoadGate.finishReplacement(replacementEpoch);
+    if (ownsReplacementEpoch) finishReaderReplacement(replacementEpoch);
   }
+}
+
+async function flushReaderFastScroll() {
+  if (readerFastScrollActive) return;
+  const request = pendingReaderFastScroll;
+  if (!request) return;
+  pendingReaderFastScroll = null;
+  readerFastScrollActive = true;
+  try {
+    if (!edgeLoadGate.isReplacementCurrent(request.replacementEpoch)) return;
+    await loadGotoViewport(request.lid, request.replacementEpoch);
+  } catch (error) {
+    if (edgeLoadGate.isReplacementCurrent(request.replacementEpoch)) fail(error);
+  } finally {
+    finishReaderReplacement(request.replacementEpoch);
+    if (
+      readerFastScrollLoadingEpoch === request.replacementEpoch
+      && pendingReaderFastScroll === null
+    ) {
+      readerFastScrollLoadingEpoch = null;
+      readerFastScrollLoadingLid.value = null;
+    }
+    readerFastScrollActive = false;
+    if (pendingReaderFastScroll && readerFastScrollFlushTimer === null) {
+      void flushReaderFastScroll();
+    }
+  }
+}
+
+async function flushReaderMountedViewportResync() {
+  const request = pendingReaderMountedViewportResync;
+  if (!request) return;
+  pendingReaderMountedViewportResync = null;
+  try {
+    const gotoEffect = await readerCommandQueue.run(() => (
+      edgeLoadGate.isReplacementCurrent(request.replacementEpoch)
+        ? api.goto(request.lid)
+        : Promise.resolve(null)
+    ));
+    if (gotoEffect && edgeLoadGate.isReplacementCurrent(request.replacementEpoch)) {
+      viewport.value = gotoEffect.viewport;
+    }
+  } catch (error) {
+    if (edgeLoadGate.isReplacementCurrent(request.replacementEpoch)) fail(error);
+  } finally {
+    finishReaderReplacement(request.replacementEpoch);
+  }
+}
+
+function onFastScrollReturnedToMounted(lid: string) {
+  const replacementEpoch = beginReaderReplacement("mounted-resync");
+  pendingReaderMountedViewportResync = { lid, replacementEpoch };
+  readerMountedViewportResyncTimer = window.setTimeout(() => {
+    readerMountedViewportResyncTimer = null;
+    void flushReaderMountedViewportResync();
+  }, FAST_SCROLL_COALESCE_MS);
+}
+
+function onFastScrollIntoSpacer(
+  lid: string,
+  direction: "up" | "down",
+  _leafIndex: number,
+) {
+  onReaderViewportInteraction(direction);
+  readerIdleViewportResyncSuppressedVersion = readerViewportInteractionVersion;
+  const replacementEpoch = beginReaderReplacement("fast-scroll");
+  pendingReaderFastScroll = { lid, replacementEpoch };
+  readerFastScrollLoadingEpoch = replacementEpoch;
+  readerFastScrollLoadingLid.value = lid;
+  if (readerFastScrollFlushTimer !== null) {
+    window.clearTimeout(readerFastScrollFlushTimer);
+  }
+  readerFastScrollFlushTimer = window.setTimeout(() => {
+    readerFastScrollFlushTimer = null;
+    void flushReaderFastScroll();
+  }, FAST_SCROLL_COALESCE_MS);
 }
 async function doGoto(lid: string, focusQuote?: string | null) {
   if (!lid) return;
@@ -3142,6 +3330,17 @@ async function onPdfNotePlacementTarget(target: { entry: PdfSourceMapEntry; regi
 
 function onCurrentLid(lid: string) {
   currentReadingLid.value = lid;
+  if (pendingReaderMountedViewportResync) {
+    pendingReaderMountedViewportResync.lid = lid;
+    return;
+  }
+  if (!boundedReaderBufferV1 || readerViewportInteractionDirection === null) return;
+  if (readerIdleViewportResyncSuppressedVersion === readerViewportInteractionVersion) return;
+  if (viewport.value?.top_lid === lid) {
+    cancelPendingReaderIdleViewportResync();
+    return;
+  }
+  scheduleReaderIdleViewportResync(lid);
 }
 
 function clearOutlineNavigation() {
@@ -4322,12 +4521,16 @@ async function submitOpenBook(dir = bookPickerDir.value) {
         :source-fingerprint="readerBufferSourceFingerprint()"
         :leaf-order="leafOrder"
         :buffer-range="readerBufferRange"
+        :buffer-viewport-width="readerBufferState?.viewportWidth ?? viewport?.width ?? null"
         :renderer-version="READER_RENDERER_VERSION"
         :render-revisions="readerRenderRevisions"
+        :fast-scroll-loading-lid="readerFastScrollLoadingLid"
         @select="onSelectSeg"
         @prose-mouse-up="onProseMouseUp"
         @current-lid="onCurrentLid"
         @viewport-interaction="onReaderViewportInteraction"
+        @fast-scroll-into-spacer="onFastScrollIntoSpacer"
+        @fast-scroll-returned-to-mounted="onFastScrollReturnedToMounted"
         @interaction-pin="onReaderInteractionPin"
         @note-placement-target="onMarkdownNotePlacementTarget"
         @note-placement-invalid="onMarkdownNotePlacementInvalid"

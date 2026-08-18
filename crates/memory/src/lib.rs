@@ -52,9 +52,10 @@ pub use review::{
     ReviewSessionCursor, ReviewState,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 /// 记忆记录(符 V3 §4.3 / `[ADR-0015]`)。`type` 是 Rust 保留词 ⇒ serde rename。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -507,10 +508,20 @@ fn persist_document_atomically(
 }
 
 /// 用户私有 memory 库:与只读基座物理隔离的独立 JSON 文件 `[ADR-0006/0026]`。
+#[derive(Debug, Clone)]
+struct PendingReadTouch {
+    book_id: String,
+    lid: String,
+    touch_count: u32,
+    last_seen: String,
+}
+
 pub struct MemoryStore {
     path: PathBuf,
     document: MemoryDocument,
     storage: MemoryStorage,
+    pending_reads: BTreeMap<(String, String), PendingReadTouch>,
+    pending_reads_last_activity: Option<Instant>,
 }
 
 enum MemoryStorage {
@@ -568,6 +579,8 @@ impl MemoryStore {
             path,
             document,
             storage: MemoryStorage::Available { private: false },
+            pending_reads: BTreeMap::new(),
+            pending_reads_last_activity: None,
         })
     }
 
@@ -597,6 +610,8 @@ impl MemoryStore {
                 message: error.message,
                 occurred_at: occurred_at.into(),
             }),
+            pending_reads: BTreeMap::new(),
+            pending_reads_last_activity: None,
         }
     }
 
@@ -1108,6 +1123,117 @@ impl MemoryStore {
             },
             now,
         )
+    }
+
+    /// ADR-0106:登记导航产生的已读触达，不在导航请求内执行磁盘 I/O。
+    /// 同一 `(book_id,lid)` 在静默批次内合并计数并保留最近触达时间。
+    pub fn enqueue_read(&mut self, book_id: &str, lid: &str, now: &str) -> Result<(), ToolError> {
+        self.ensure_storage_available()?;
+        let key = (book_id.to_string(), lid.to_string());
+        match self.pending_reads.get_mut(&key) {
+            Some(touch) => {
+                touch.touch_count = touch
+                    .touch_count
+                    .checked_add(1)
+                    .ok_or_else(|| internal("read usage count 溢出".into()))?;
+                touch.last_seen = now.to_string();
+            }
+            None => {
+                self.pending_reads.insert(
+                    key,
+                    PendingReadTouch {
+                        book_id: book_id.to_string(),
+                        lid: lid.to_string(),
+                        touch_count: 1,
+                        last_seen: now.to_string(),
+                    },
+                );
+            }
+        }
+        self.pending_reads_last_activity = Some(Instant::now());
+        Ok(())
+    }
+
+    pub fn pending_read_count(&self) -> usize {
+        self.pending_reads.len()
+    }
+
+    /// Host 只在最后一次导航触达静默一段时间后抢占 AppState 锁执行批量冲刷。
+    pub fn pending_reads_ready(&self, idle_for: Duration) -> bool {
+        !self.pending_reads.is_empty()
+            && self
+                .pending_reads_last_activity
+                .is_some_and(|last_activity| last_activity.elapsed() >= idle_for)
+    }
+
+    /// 把当前待持久集合合并进一个 MemoryDocument candidate，仅执行一次原子提交与投影刷新。
+    /// 失败时集合保持不变，并重置重试退避起点。
+    pub fn flush_pending_reads(&mut self) -> Result<usize, ToolError> {
+        if self.pending_reads.is_empty() {
+            return Ok(0);
+        }
+        self.ensure_storage_available()?;
+        let touches = self.pending_reads.values().cloned().collect::<Vec<_>>();
+        let result = (|| {
+            let mut candidate = self.projection_mutation_candidate()?;
+            for touch in &touches {
+                let anchor = Anchor {
+                    lid: Some(touch.lid.clone()),
+                    concept: None,
+                };
+                let mem_id = content_mem_id(&touch.book_id, "read", &anchor, "", None, None, None);
+                let previous_count = candidate
+                    .records
+                    .iter()
+                    .find(|record| record.mem_id == mem_id)
+                    .map(|record| record.usage.count)
+                    .unwrap_or(0);
+                let count = previous_count
+                    .checked_add(touch.touch_count)
+                    .ok_or_else(|| internal("read usage count 溢出".into()))?;
+                let record = Record {
+                    mem_id: mem_id.clone(),
+                    mem_type: "read".into(),
+                    layer: "long_term".into(),
+                    book_id: touch.book_id.clone(),
+                    anchor,
+                    content: String::new(),
+                    range: None,
+                    selection_context: None,
+                    note_placement: None,
+                    citations: Vec::new(),
+                    usage: Usage {
+                        count,
+                        last_used: Some(touch.last_seen.clone()),
+                    },
+                    generated_at: touch.last_seen.clone(),
+                    source_session_id: None,
+                };
+                match candidate
+                    .records
+                    .iter_mut()
+                    .find(|current| current.mem_id == mem_id)
+                {
+                    Some(slot) => *slot = record,
+                    None => candidate.records.push(record),
+                }
+            }
+            self.commit_document(candidate)?;
+            let _ = self.write_profile_files();
+            Ok(touches.len())
+        })();
+
+        match result {
+            Ok(flushed) => {
+                self.pending_reads.clear();
+                self.pending_reads_last_activity = None;
+                Ok(flushed)
+            }
+            Err(error) => {
+                self.pending_reads_last_activity = Some(Instant::now());
+                Err(error)
+            }
+        }
     }
 
     /// 已读集 / reading journey `[ADR-0038]`:某书真读过的 LID 历史,按 `generated_at` 触达序
@@ -2559,6 +2685,62 @@ mod tests {
         }
         let s2 = MemoryStore::open(&path).unwrap();
         assert_eq!(s2.read_lids("bookA"), vec!["1.1", "1.2"]);
+    }
+
+    // ADR-0106:导航只登记已读触达；同一静默批次合并为一次 document revision/原子提交。
+    #[test]
+    fn deferred_read_ledger_coalesces_touches_and_flushes_once() {
+        let path = tmp("read-deferred");
+        let mut s = MemoryStore::open(&path).unwrap();
+
+        s.enqueue_read("bookA", "1.1", "t0").unwrap();
+        s.enqueue_read("bookA", "1.2", "t1").unwrap();
+        s.enqueue_read("bookA", "1.1", "t2").unwrap();
+
+        assert_eq!(s.pending_read_count(), 2);
+        assert!(s.read_lids("bookA").is_empty());
+        assert!(
+            !path.exists(),
+            "enqueue must not synchronously persist memory"
+        );
+
+        assert_eq!(s.flush_pending_reads().unwrap(), 2);
+        assert_eq!(s.pending_read_count(), 0);
+        assert_eq!(s.document_revision(), 1);
+        assert_eq!(s.read_lids("bookA"), vec!["1.2", "1.1"]);
+        assert_eq!(
+            s.derive_book_reading_state("bookA").engagement_by_lid["1.1"].read_count,
+            2
+        );
+
+        let reopened = MemoryStore::open(&path).unwrap();
+        assert_eq!(reopened.read_lids("bookA"), vec!["1.2", "1.1"]);
+        assert_eq!(
+            reopened
+                .derive_book_reading_state("bookA")
+                .engagement_by_lid["1.1"]
+                .read_count,
+            2
+        );
+    }
+
+    // 后台写失败不得丢待持久触达；解除故障后同一批可以重试成功。
+    #[test]
+    fn deferred_read_ledger_retains_batch_after_flush_failure() {
+        let path = tmp("read-deferred-retry");
+        let temporary = atomic_temporary_path(&path);
+        let mut s = MemoryStore::open(&path).unwrap();
+        s.enqueue_read("bookA", "1.1", "t0").unwrap();
+        std::fs::create_dir_all(&temporary).unwrap();
+
+        assert!(s.flush_pending_reads().is_err());
+        assert_eq!(s.pending_read_count(), 1);
+        assert!(s.read_lids("bookA").is_empty());
+
+        std::fs::remove_dir_all(&temporary).unwrap();
+        assert_eq!(s.flush_pending_reads().unwrap(), 1);
+        assert_eq!(s.pending_read_count(), 0);
+        assert_eq!(s.read_lids("bookA"), vec!["1.1"]);
     }
 
     // BookReadingState 派生 `[ADR-0075]`:已读集(触达序)+ note/highlight 原始活动;跨书隔离。

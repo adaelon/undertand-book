@@ -107,7 +107,7 @@ describe("ReaderEdgeLoadGate", () => {
     expect(gate.finishReplacement(first)).toBe(false);
   });
 
-  it("guards App edge commits and invalidates them on replacement windows", () => {
+  it("guards App edge commits and rechecks coverage after replacement windows", () => {
     const source = readFileSync("src/App.vue", "utf8");
     const loadWindow = source.slice(
       source.indexOf("async function loadWindow"),
@@ -125,8 +125,11 @@ describe("ReaderEdgeLoadGate", () => {
     expect(loadWindow).toContain("beginReaderReplacement()");
     expect(beginReplacement).toContain("readerHydrator.invalidatePending()");
     expect(beginReplacement).toContain("edgeLoadGate.beginReplacement()");
+    expect(beginReplacement).toContain("function finishReaderReplacement");
+    expect(beginReplacement).toContain("edgeLoadGate.finishReplacement(replacementEpoch)");
+    expect(beginReplacement).toContain("readerPaneRef.value?.recheckViewportCoverage()");
     expect(loadWindow).toContain("edgeLoadGate.isReplacementCurrent(replacementEpoch)");
-    expect(loadWindow).toContain("edgeLoadGate.finishReplacement(replacementEpoch)");
+    expect(loadWindow).toContain("finishReaderReplacement(replacementEpoch)");
     expect(edge).toContain("const token = edgeLoadGate.begin(direction)");
     expect(edge.indexOf("edgeLoadGate.commit(token"))
       .toBeLessThan(edge.indexOf("const merged = mergeSegments"));

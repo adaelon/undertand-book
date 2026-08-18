@@ -570,6 +570,28 @@ body {
   outline: 2px solid rgba(204, 120, 92, 0.26);
   outline-offset: -2px;
 }
+.reader-fast-scroll-loading {
+  position: sticky;
+  top: calc(50% - 22px);
+  z-index: 8;
+  display: flex;
+  justify-content: center;
+  height: 44px;
+  margin-bottom: -44px;
+  pointer-events: none;
+}
+.reader-fast-scroll-loading span {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 0.55rem 0.9rem;
+  color: var(--reader-ink);
+  background: color-mix(in srgb, var(--reader-card) 94%, transparent);
+  border: 1px solid var(--hairline);
+  border-radius: 999px;
+  box-shadow: 0 10px 28px rgba(48, 45, 39, 0.14);
+  font-size: 0.86rem;
+}
 .prose {
   width: min(720px, calc(100% - 4.5rem));
   margin: 0 auto;

@@ -1692,7 +1692,7 @@ impl Reader {
         self.leaf_lids.len().saturating_sub(self.width)
     }
 
-    fn mark_visible_read(
+    fn enqueue_visible_read(
         &self,
         book: &Book,
         store: &mut MemoryStore,
@@ -1702,7 +1702,7 @@ impl Reader {
             return Ok(());
         }
         for lid in &self.viewport().visible_lids {
-            store.mark_read(&book.base.book_id, lid, now)?;
+            store.enqueue_read(&book.base.book_id, lid, now)?;
         }
         Ok(())
     }
@@ -1738,7 +1738,7 @@ impl Reader {
             Some(i) => {
                 self.top_idx = i.min(self.max_top_idx());
                 self.selection = Some(lid.to_string());
-                self.mark_visible_read(book, store, now)?;
+                self.enqueue_visible_read(book, store, now)?;
                 Ok(ViewportEffect {
                     ok: true,
                     viewport: self.viewport(),
@@ -1754,7 +1754,7 @@ impl Reader {
     }
 
     /// `reader.scroll(delta)`:沿叶序移动锚点(clamp 到 [0, len-1]),返变更后视口。
-    /// 落点 anchor 记入已读账本 `[ADR-0038]`;记账=持久写 ⇒ 返 `Result`(失败诚实传播,不静默降级)。
+    /// 可见叶只登记到异步已读队列 `[ADR-0038/0106]`;导航响应不等待磁盘耐久化。
     pub fn scroll(
         &mut self,
         book: &Book,
@@ -1767,7 +1767,7 @@ impl Reader {
             let next = (self.top_idx as i64 + delta).clamp(0, last);
             self.top_idx = next as usize;
             self.selection = Some(self.leaf_lids[self.top_idx].clone());
-            self.mark_visible_read(book, store, now)?;
+            self.enqueue_visible_read(book, store, now)?;
         }
         Ok(ViewportEffect {
             ok: true,
@@ -2966,16 +2966,19 @@ mod tests {
         assert_eq!(err.error_code, "LID_NOT_FOUND");
     }
 
-    // 已读账本接线 `[ADR-0038]`:goto/scroll 落点 anchor 真叶记入已读账本;
-    // goto 容器记子树首叶(非传入容器 lid);未翻到的 LID 不在已读集。
+    // 异步已读账本接线 `[ADR-0038/0106]`:goto/scroll 只登记可见真叶，冲刷前不落盘;
+    // goto 容器登记子树首叶(非传入容器 lid);未翻到的 LID 不在已读集。
     #[test]
-    fn goto_scroll_record_read_ledger() {
+    fn goto_scroll_enqueue_read_ledger_until_flush() {
         let b = book_n_leaves(10);
         let mut store = MemoryStore::open(tmp("ledger")).unwrap();
         let mut r = Reader::new(&b, 3);
         r.goto_lid(&b, &mut store, "1.5", "t0").unwrap(); // 读 1.5
         r.scroll(&b, &mut store, 2, "t1").unwrap(); // 落点 1.7
         r.goto_lid(&b, &mut store, "1", "t2").unwrap(); // 容器 → 记真叶 1.1
+        assert!(store.read_lids("bookR").is_empty());
+        assert_eq!(store.pending_read_count(), 8);
+        assert_eq!(store.flush_pending_reads().unwrap(), 8);
         let read = store.read_lids("bookR");
         assert_eq!(
             read,

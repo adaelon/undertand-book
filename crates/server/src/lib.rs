@@ -2578,6 +2578,14 @@ fn route_open_book(state: &mut AppState, body: &str, now: &str) -> Reply {
     if let Err(error) = reconcile_agent_history_review_jobs(state, now) {
         return err_reply(&error);
     }
+    // ADR-0106:切书是已读账本的有序边界。失败批次仍留在同一个 Store 中，
+    // 不阻断切书，Host 后台 worker 会继续重试。
+    if let Err(error) = state.store.flush_pending_reads() {
+        eprintln!(
+            "read ledger book-switch flush failed [{}]: {}",
+            error.error_code, error.message
+        );
+    }
     let book = match Book::load(dir) {
         Ok(book) => book,
         Err(e) => {
@@ -7283,7 +7291,7 @@ fn route_mut(state: &mut AppState, path: &str, body: &str, now: &str) -> Reply {
             let Some(delta) = v.get("delta").and_then(|x| x.as_i64()) else {
                 return validation("INVALID_RANGE", "reader.scroll 需 delta(整数)");
             };
-            // scroll 落点记入已读账本 `[ADR-0038]` ⇒ 返 Result(持久写失败诚实透传)。
+            // scroll 只登记异步已读队列 `[ADR-0038/0106]`;响应不等待账本落盘。
             match state
                 .reader
                 .scroll(&state.book, &mut state.store, delta, now)
@@ -19322,8 +19330,11 @@ unchanged after training concludes";
             200
         );
         assert_eq!(s.reader.viewport().top_lid, "1.11");
+        assert!(s.store.pending_read_count() > 0);
 
         assert_eq!(post(&mut s, "/book/open", &body_b).status, 200);
+        assert_eq!(s.store.pending_read_count(), 0);
+        assert!(!s.store.read_lids("book-a").is_empty());
         assert_eq!(post(&mut s, "/reader/goto", r#"{"lid":"1.6"}"#).status, 200);
         assert_eq!(s.reader.viewport().top_lid, "1.6");
 
