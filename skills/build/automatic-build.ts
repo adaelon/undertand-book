@@ -85,7 +85,9 @@ import {
   stageAutomaticBuildCandidate,
   submitAutomaticBuildCandidate,
   type AutomaticBuildWriterResult,
+  type AutomaticBuildWriterWarnings,
 } from "../../packages/core/src/automatic-build-mailbox";
+import { inspectPaperLexiconCommittedArtifact } from "../../packages/core/src/paper-lexicon-router";
 import {
   automaticBuildStageMetricsSummaryPath,
   automaticBuildUsageReceiptPath,
@@ -553,6 +555,22 @@ function stageArtifactPath(
   }
 }
 
+function paperLexiconWriterWarnings(artifactPath: string): AutomaticBuildWriterWarnings | undefined {
+  const committed = inspectPaperLexiconCommittedArtifact(
+    JSON.parse(readFileSync(artifactPath, "utf8").replace(/^\uFEFF/, "")) as unknown,
+  );
+  if (!committed) throw new Error("paper lexicon writer produced an invalid committed artifact");
+  const warnings: AutomaticBuildWriterWarnings = {};
+  for (const warning of committed.artifact.warnings ?? []) {
+    if (warning.code === "candidate_reconciled") {
+      warnings.paper_lexicon_candidate_reconciled = warning.count;
+    } else if (warning.code === "candidate_rejected") {
+      warnings.paper_lexicon_candidate_rejected = warning.count;
+    }
+  }
+  return Object.keys(warnings).length ? warnings : undefined;
+}
+
 function shadowCandidatePath(directory: string, attempt: number, candidateBytes: Buffer): string {
   if (!Number.isSafeInteger(attempt) || attempt < 1) {
     throw new Error("shadow candidate attempt must be a positive safe integer");
@@ -641,7 +659,12 @@ export function runAutomaticBuildStageWriter(
     [target.source_path, taskId, candidatePath, ...stageScriptArgs(target).slice(1)],
     true,
   );
-  return { artifact_path: stageArtifactPath(target, stage, taskId) };
+  const artifactPath = stageArtifactPath(target, stage, taskId);
+  const writerWarnings = stage === "paper_lexicon" ? paperLexiconWriterWarnings(artifactPath) : undefined;
+  return {
+    artifact_path: artifactPath,
+    ...(writerWarnings ? { writer_warnings: writerWarnings } : {}),
+  };
 }
 
 export function runAutomaticBuildTaskInput(

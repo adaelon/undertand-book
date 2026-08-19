@@ -108,7 +108,7 @@ export interface StageWorkUnitRouterRegistration {
 export const STAGE_WORK_UNIT_ROUTERS: Record<WorkUnitStage, StageWorkUnitRouterRegistration> = {
   pass1: { stage: "pass1", router_version: "pass1_window.v1", kind: "pass1_window", compatibility_mode: true },
   paper_metadata: { stage: "paper_metadata", router_version: "paper_metadata_candidate.v2", kind: "metadata_region", compatibility_mode: false },
-  paper_lexicon: { stage: "paper_lexicon", router_version: "paper_lexicon_cluster.v3", kind: "lexicon_candidate_batch", compatibility_mode: false },
+  paper_lexicon: { stage: "paper_lexicon", router_version: "paper_lexicon_cluster.v4", kind: "lexicon_candidate_batch", compatibility_mode: false },
   profile_sidecar: { stage: "profile_sidecar", router_version: "profile_sidecar_semantic_units.v2", kind: "profile_sidecar_discourse", compatibility_mode: false },
   pass2: { stage: "pass2", router_version: "pass2_candidate_window.v1", kind: "pass2_candidate_batch", compatibility_mode: true },
   book_structure: { stage: "book_structure", router_version: "book_structure_unit.v1", kind: "structure_unit", compatibility_mode: true },

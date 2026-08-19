@@ -18,7 +18,7 @@ The harness provides one `PAPER_LEXICON_CANDIDATE_BATCH` packet:
 - `reduction_children`, binding reducer inputs to child work-unit and artifact hashes
 - `TEXT` with each source span prefixed by `[LID]` (empty for reducers)
 
-Only emit entries represented by `candidate_clusters`. Choose the semantic term type and optional gloss from the evidence; do not invent terms outside the routed set or repeat the same cluster under multiple surface forms.
+Only emit entries represented by `candidate_clusters`. Set each emitted `term` by copying one value from that cluster's `surface_forms` exactly; do not shorten, expand, paraphrase, or normalize it yourself. Choose the semantic term type and optional gloss from the evidence; do not invent terms outside the routed set or repeat the same cluster under multiple surface forms.
 
 Route behavior:
 - `direct`: extract zero or one entry per candidate cluster from `TEXT`.

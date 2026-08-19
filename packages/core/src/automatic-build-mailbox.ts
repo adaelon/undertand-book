@@ -46,6 +46,13 @@ const MAX_RECEIPT_BYTES = 4_096;
 const UTF8_BOM = Buffer.from([0xef, 0xbb, 0xbf]);
 const UTF8_DECODER = new TextDecoder("utf-8", { fatal: true });
 
+export const AUTOMATIC_BUILD_WRITER_WARNING_CODES = [
+  "paper_lexicon_candidate_reconciled",
+  "paper_lexicon_candidate_rejected",
+] as const;
+export type AutomaticBuildWriterWarningCode = (typeof AUTOMATIC_BUILD_WRITER_WARNING_CODES)[number];
+export type AutomaticBuildWriterWarnings = Partial<Record<AutomaticBuildWriterWarningCode, number>>;
+
 export interface AutomaticBuildCandidateRecordV1 {
   version: "automatic_build_candidate_record.v1";
   candidate_path: string;
@@ -56,6 +63,7 @@ export interface AutomaticBuildCandidateRecordV1 {
 export interface AutomaticBuildWriterResult {
   artifact_path: string;
   output_counts?: Record<string, number>;
+  writer_warnings?: AutomaticBuildWriterWarnings;
 }
 
 export interface AutomaticBuildTaskReceiptV1 {
@@ -71,6 +79,7 @@ export interface AutomaticBuildTaskReceiptV1 {
   artifact_path?: string;
   artifact_sha256?: string;
   output_counts?: Record<string, number>;
+  writer_warnings?: AutomaticBuildWriterWarnings;
   diagnostic_code?: string;
   message?: string;
   committed_at?: string;
@@ -99,6 +108,30 @@ export interface AutomaticBuildTaskInspectionV1 {
 
 function sha256(data: Uint8Array): string {
   return createHash("sha256").update(data).digest("hex");
+}
+
+function normalizeAutomaticBuildWriterWarnings(
+  value: AutomaticBuildWriterWarnings | undefined,
+): AutomaticBuildWriterWarnings | undefined {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("writer warnings must be a bounded object");
+  }
+  const entries = Object.entries(value).sort(([left], [right]) => left.localeCompare(right));
+  if (!entries.length || entries.length > AUTOMATIC_BUILD_WRITER_WARNING_CODES.length) {
+    throw new Error("writer warnings must contain one or more allowlisted codes");
+  }
+  const normalized: AutomaticBuildWriterWarnings = {};
+  for (const [code, count] of entries) {
+    if (!(AUTOMATIC_BUILD_WRITER_WARNING_CODES as readonly string[]).includes(code)) {
+      throw new Error(`writer warning code is not allowlisted: ${code}`);
+    }
+    if (!Number.isSafeInteger(count) || count <= 0) {
+      throw new Error(`writer warning count must be a positive safe integer: ${code}`);
+    }
+    normalized[code as AutomaticBuildWriterWarningCode] = count;
+  }
+  return normalized;
 }
 
 function readJson<T>(file: string): T {
@@ -194,6 +227,10 @@ function ensureReceiptBounded(receipt: AutomaticBuildTaskReceiptV2): void {
 export function normalizeAutomaticBuildTaskReceipt(
   receipt: AutomaticBuildTaskReceipt,
 ): AutomaticBuildTaskReceiptV2 {
+  const writerWarnings = normalizeAutomaticBuildWriterWarnings(receipt.writer_warnings);
+  if (receipt.state === "retryable_failure" && writerWarnings) {
+    throw new Error("failed task receipt contains committed writer warnings");
+  }
   if (receipt.version === "automatic_build_task_receipt.v2") {
     if (receipt.state === "retryable_failure") {
       if (!receipt.failure_diagnostic) throw new Error("v2 failure receipt is missing its typed diagnostic");
@@ -205,7 +242,7 @@ export function normalizeAutomaticBuildTaskReceipt(
     if (receipt.failure_diagnostic !== undefined) {
       throw new Error("committed task receipt contains a failure diagnostic");
     }
-    return receipt;
+    return { ...receipt, ...(writerWarnings ? { writer_warnings: writerWarnings } : {}) };
   }
   if (receipt.version !== "automatic_build_task_receipt.v1") {
     throw new Error("automatic build task receipt version is unsupported");
@@ -214,6 +251,7 @@ export function normalizeAutomaticBuildTaskReceipt(
   return {
     ...safe,
     version: "automatic_build_task_receipt.v2",
+    ...(writerWarnings ? { writer_warnings: writerWarnings } : {}),
     ...(receipt.state === "retryable_failure"
       ? { failure_diagnostic: legacyAutomaticBuildFailureDiagnostic() }
       : {}),
@@ -358,6 +396,7 @@ export function submitAutomaticBuildCandidate(
 
   try {
     const result = writer(candidate.candidate_path);
+    const writerWarnings = normalizeAutomaticBuildWriterWarnings(result.writer_warnings);
     const artifactPath = path.resolve(result.artifact_path);
     if (!existsSync(artifactPath) || !statSync(artifactPath).isFile()) {
       throw new Error(`writer did not produce an artifact: ${artifactPath}`);
@@ -427,6 +466,7 @@ export function submitAutomaticBuildCandidate(
       artifact_path: artifactPath,
       artifact_sha256: sha256(readFileSync(artifactPath)),
       ...(result.output_counts ? { output_counts: result.output_counts } : {}),
+      ...(writerWarnings ? { writer_warnings: writerWarnings } : {}),
       committed_at: committedAt,
       metrics,
     };

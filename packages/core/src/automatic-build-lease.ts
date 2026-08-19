@@ -25,6 +25,7 @@ import {
 } from "./automatic-build-task-store";
 import {
   freezeAutomaticBuildStagePolicy,
+  freezeAutomaticBuildStagePolicyGeneration,
   isAutomaticBuildTaskPolicyBindingV2,
   type AutomaticBuildTaskPolicyBinding,
   type ExtractionPolicyFingerprintV1,
@@ -607,7 +608,11 @@ export function claimAutomaticBuildTask(
   if (options.binding) {
     if (stage === "paper_reading_guide") throw new Error("paper_reading_guide does not accept semantic task bindings");
     if (!isAutomaticBuildTaskPolicyBindingV2(options.binding)) {
-      freezeAutomaticBuildStagePolicy(target, stage, options.binding.policy_fingerprint, times.now);
+      if (stage === "paper_lexicon") {
+        freezeAutomaticBuildStagePolicyGeneration(target, stage, options.binding.policy_fingerprint, times.now);
+      } else {
+        freezeAutomaticBuildStagePolicy(target, stage, options.binding.policy_fingerprint, times.now);
+      }
     }
   }
   for (let retry = 0; retry < 8; retry += 1) {

@@ -119,9 +119,9 @@ const STAGE_POLICIES: Record<SemanticBuildStage, {
     schema_version: EXTRACTOR_CONTRACT_SCHEMA_VERSIONS.paper_metadata,
   },
   paper_lexicon: {
-    stage_policy_version: "paper_lexicon_policy.v1",
+    stage_policy_version: "paper_lexicon_policy.v2",
     router_version: routerVersionForStage("paper_lexicon"),
-    prompt_sha256: "c563d13e6fb3874f24689eb29a4dc0a9c117f4f6411ccc37cf2a47aebee2fe41",
+    prompt_sha256: "b79dd841bb69f11b74e54d96552081fecef369504ad6313a1b7dab329e1e3bc8",
     schema_version: EXTRACTOR_CONTRACT_SCHEMA_VERSIONS.paper_lexicon,
   },
   profile_sidecar: {
@@ -325,6 +325,25 @@ export function automaticBuildStagePolicyLockPath(
   return path.join(target.workspace_dir, ".build", "automatic-build", "v2", "policies", `${stage}.json`);
 }
 
+export function automaticBuildStagePolicyGenerationLockPath(
+  target: AutomaticBuildTarget,
+  stage: SemanticBuildStage,
+  policyDigest: string,
+): string {
+  if (!/^[a-f0-9]{64}$/.test(policyDigest)) {
+    throw new Error("stage policy generation digest must be a lowercase SHA-256 digest");
+  }
+  return path.join(
+    target.workspace_dir,
+    ".build",
+    "automatic-build",
+    "v2",
+    "policies",
+    stage,
+    `${policyDigest}.json`,
+  );
+}
+
 export function readAutomaticBuildStagePolicyLock(
   target: AutomaticBuildTarget,
   stage: SemanticBuildStage,
@@ -370,6 +389,42 @@ export function freezeAutomaticBuildStagePolicy(
       || !extractionPolicyEqual(existing.policy_fingerprint, policy)
       || existing.policy_digest !== lock.policy_digest) {
       throw new Error(`policy_mismatch: ${stage} policy is already frozen at ${file}`);
+    }
+    return existing;
+  }
+}
+
+export function freezeAutomaticBuildStagePolicyGeneration(
+  target: AutomaticBuildTarget,
+  stage: SemanticBuildStage,
+  policy: ExtractionPolicyFingerprintV1,
+  frozenAt = new Date().toISOString(),
+): AutomaticBuildStagePolicyLockV1 {
+  const policyDigest = extractionPolicyDigest(policy);
+  const file = automaticBuildStagePolicyGenerationLockPath(target, stage, policyDigest);
+  const lock: AutomaticBuildStagePolicyLockV1 = {
+    version: "automatic_build_stage_policy_lock.v1",
+    target_ref: target.target_ref,
+    stage,
+    policy_fingerprint: policy,
+    policy_digest: policyDigest,
+    frozen_at: frozenAt,
+  };
+  mkdirSync(path.dirname(file), { recursive: true });
+  try {
+    writeFileSync(file, `${JSON.stringify(lock, null, 2)}\n`, { encoding: "utf8", flag: "wx" });
+    return lock;
+  } catch (error) {
+    const code = error && typeof error === "object" && "code" in error ? String(error.code) : "";
+    if (code !== "EEXIST") throw error;
+    const existing = JSON.parse(readFileSync(file, "utf8")) as AutomaticBuildStagePolicyLockV1;
+    if (existing.version !== lock.version
+      || existing.stage !== stage
+      || !sameTarget(existing.target_ref, target.target_ref)
+      || !extractionPolicyEqual(existing.policy_fingerprint, policy)
+      || existing.policy_digest !== policyDigest
+      || !Number.isFinite(Date.parse(existing.frozen_at))) {
+      throw new Error(`policy_generation_conflict: ${stage} policy generation is frozen at ${file}`);
     }
     return existing;
   }

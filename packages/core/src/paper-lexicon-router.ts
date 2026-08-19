@@ -21,8 +21,10 @@ import {
   buildPaperLexiconSidecar,
   normalizePaperLexiconKey,
   paperLexiconEntriesFromOutput,
+  PAPER_LEXICON_ARTIFACT_WARNING_CODES,
   PAPER_TERM_TYPES,
   type PaperLexiconArtifact,
+  type PaperLexiconArtifactWarningV1,
   type PaperLexiconEntry,
   type PaperLexiconExtractionOutput,
   type PaperTermType,
@@ -37,10 +39,17 @@ import {
 } from "./stage-work-unit";
 import type { Window } from "./window";
 
-export const PAPER_LEXICON_ROUTER_VERSION = "paper_lexicon_cluster.v3" as const;
+export const PAPER_LEXICON_ROUTER_VERSION = "paper_lexicon_cluster.v4" as const;
 export const DEFAULT_LEXICON_BATCH_INPUT_TOKENS = 6_000;
 export const DEFAULT_LEXICON_BATCH_CANDIDATES = 32;
-export const PAPER_LEXICON_PROMPT_SHA256 = "c563d13e6fb3874f24689eb29a4dc0a9c117f4f6411ccc37cf2a47aebee2fe41" as const;
+export const PAPER_LEXICON_STAGE_POLICY_VERSION = "paper_lexicon_policy.v2" as const;
+export const PAPER_LEXICON_PROMPT_SHA256 = "b79dd841bb69f11b74e54d96552081fecef369504ad6313a1b7dab329e1e3bc8" as const;
+export const PAPER_LEXICON_WORK_UNIT_SCOPE_DIGEST = sha256(stableJson({
+  version: "paper_lexicon_work_unit_scope.v1",
+  stage_policy_version: PAPER_LEXICON_STAGE_POLICY_VERSION,
+  router_version: PAPER_LEXICON_ROUTER_VERSION,
+  prompt_sha256: PAPER_LEXICON_PROMPT_SHA256,
+}));
 
 export const PAPER_LEXICON_CANDIDATE_SIGNALS = [
   "acronym_expansion",
@@ -171,6 +180,10 @@ const EDGE_STOPWORDS = new Set([
   ...CONNECTORS,
   "be", "been", "being", "between", "can", "called", "class", "consists", "could", "define", "defined", "denote", "does", "each", "has", "have", "here", "higher", "indicates", "introduce", "introduced", "is", "it", "its", "measures", "our", "present", "propose", "records", "same", "than", "that", "this", "those", "use", "used", "using", "we", "while", "will",
 ]);
+const CLAUSE_BOUNDARY_TOKENS = new Set([
+  "achieve", "achieves", "complement", "complements", "improve", "improves", "outperform", "outperforms",
+  "predict", "predicts", "reduce", "reduces", "report", "reports", "require", "requires", "show", "shows",
+]);
 const TECHNICAL_SUFFIXES = new Set([
   "ability", "accuracy", "algorithm", "architecture", "attention", "benchmark", "capability", "capacity", "circuit", "complexity", "context", "dataset", "decay", "depth", "distribution", "embedding", "encoding", "equation", "evolution", "execution", "factor", "feature", "function", "gate", "gradient", "head", "hierarchy", "implementation", "imbalance", "inference", "inversion", "kernel", "layer", "learning", "lemma", "loss", "map", "mapping", "mask", "matrix", "memories", "memory", "method", "metric", "model", "network", "noise", "norm", "normalization", "objective", "optimization", "phrase", "programmer", "ratio", "reachability", "recall", "regression", "representation", "retrieval", "rule", "score", "sequence", "signal", "speed", "sphere", "state", "step", "term", "theorem", "token", "tracking", "tradeoff", "training", "transformer", "update", "validation", "value", "vector",
 ]);
@@ -210,6 +223,19 @@ export function inspectPaperLexiconCommittedArtifact(
     || !Array.isArray(artifactValue.entries)) {
     return undefined;
   }
+  if (artifactValue.warnings !== undefined) {
+    if (!Array.isArray(artifactValue.warnings)
+      || artifactValue.warnings.length > PAPER_LEXICON_ARTIFACT_WARNING_CODES.length
+      || artifactValue.warnings.some((warning) => !isRecord(warning)
+        || warning.version !== "paper_lexicon_artifact_warning.v1"
+        || !(PAPER_LEXICON_ARTIFACT_WARNING_CODES as readonly unknown[]).includes(warning.code)
+        || !Number.isSafeInteger(warning.count)
+        || (warning.count as number) <= 0)) {
+      return undefined;
+    }
+    const warningCodes = artifactValue.warnings.map((warning) => (warning as Record<string, unknown>).code);
+    if (new Set(warningCodes).size !== warningCodes.length) return undefined;
+  }
   const artifact = artifactValue as unknown as PaperLexiconArtifact;
   const artifactHash = paperLexiconArtifactHash(artifact);
   if (envelope && envelope.artifact_hash !== artifactHash) return undefined;
@@ -233,12 +259,16 @@ function technicalSuffix(token: string): string | undefined {
   return TECHNICAL_SUFFIXES.has(normalized) ? normalized : TECHNICAL_PLURALS.get(normalized);
 }
 
+function parameterizedMetricSymbol(token: string): boolean {
+  return /^(?:Distinct|BLEU|ROUGE|Recall|Precision|Hit|Pass|Success|Accuracy|F)[-_.][A-Za-z0-9]+$/u.test(token);
+}
+
 function suggestedTypes(surface: string, signal: PaperLexiconCandidateSignal): PaperTermType[] {
   if (signal === "acronym_expansion" || signal === "recurring_acronym") return ["acronym"];
   if (signal === "dataset_symbol" || /dataset|benchmark/i.test(surface)) return ["dataset_name"];
   const last = wordTokens(surface).at(-1) ?? "";
   const suffix = technicalSuffix(last);
-  if (suffix === "accuracy" || suffix === "metric" || suffix === "ratio" || suffix === "score" || /\bSNR\b/.test(surface)) return ["metric_name"];
+  if (suffix === "accuracy" || suffix === "metric" || suffix === "ratio" || suffix === "score" || /\bSNR\b/.test(surface) || parameterizedMetricSymbol(surface)) return ["metric_name"];
   if (["algorithm", "attention", "implementation", "inversion", "method", "optimization", "rule", "update"].includes(suffix ?? "")) return ["method_name"];
   if (["architecture", "model", "network", "transformer"].includes(suffix ?? "")) return ["model_name"];
   if (signal === "explicit_term") return ["paper_defined_term"];
@@ -349,7 +379,8 @@ function scanCandidates(leaves: LeafText[]): PaperLexiconCandidateClusterV1[] {
       const mixedCase = /[a-z]/.test(letters) && (letters.match(/[A-Z]/g)?.length ?? 0) >= 2;
       const alphaNumeric = /[A-Za-z]/.test(symbol) && /\d/.test(symbol);
       const namedSuffix = /^.+(?:Attention|Former|GPT|Net|Norm|RNN|Transformer)$/i.test(symbol) && /[A-Z]/.test(symbol);
-      if (symbol.length >= 3 && (mixedCase || alphaNumeric || namedSuffix)) {
+      const parameterizedMetric = parameterizedMetricSymbol(symbol);
+      if (symbol.length >= 3 && (mixedCase || alphaNumeric || namedSuffix || parameterizedMetric)) {
         addCandidate(clusters, symbol, leaf.lid, "named_symbol", { definition });
       }
     }
@@ -372,6 +403,7 @@ function scanCandidates(leaves: LeafText[]): PaperLexiconCandidateClusterV1[] {
           start > 0
           && end - start < 4
           && !EDGE_STOPWORDS.has(normalizedText(tokens[start - 1]))
+          && !CLAUSE_BOUNDARY_TOKENS.has(normalizedText(tokens[start - 1]))
           && !technicalSuffix(tokens[start - 1])
           && !/(?:Dataset|DataSet|Benchmark)$/i.test(tokens[start - 1])
         ) start -= 1;
@@ -385,7 +417,9 @@ function scanCandidates(leaves: LeafText[]): PaperLexiconCandidateClusterV1[] {
           const phraseTokens = tokens.slice(start, start + length);
           const first = normalizedText(phraseTokens[0]);
           const last = normalizedText(phraseTokens.at(-1)!);
-          if (EDGE_STOPWORDS.has(first) || EDGE_STOPWORDS.has(last) || !technicalSuffix(last)) continue;
+          const crossesClauseBoundary = phraseTokens.slice(0, -1)
+            .some((token) => CLAUSE_BOUNDARY_TOKENS.has(normalizedText(token)));
+          if (EDGE_STOPWORDS.has(first) || EDGE_STOPWORDS.has(last) || crossesClauseBoundary || !technicalSuffix(last)) continue;
           const surface = phraseTokens.join(" ");
           const key = normalizedText(surface);
           if (key.length < 3) continue;
@@ -624,7 +658,9 @@ function finishPacket(
 }
 
 function directWorkUnitId(clusters: PaperLexiconCandidateClusterV1[]): string {
-  return `lexicon-batch-${sha256(clusters.map((cluster) => cluster.normalized_key).join("\n")).slice(0, 16)}`;
+  return `lexicon-batch-${PAPER_LEXICON_WORK_UNIT_SCOPE_DIGEST}-${sha256(
+    clusters.map((cluster) => cluster.normalized_key).join("\n"),
+  ).slice(0, 16)}`;
 }
 
 function sourcePacketIdentity(input: {
@@ -636,7 +672,7 @@ function sourcePacketIdentity(input: {
 }): PaperLexiconPacketIdentityV3 {
   const workUnitId = input.route.role === "direct"
     ? directWorkUnitId(input.clusters)
-    : `lexicon-fragment-${sha256(stableJson({
+    : `lexicon-fragment-${PAPER_LEXICON_WORK_UNIT_SCOPE_DIGEST}-${sha256(stableJson({
         version: "paper_lexicon_fragment_identity.v1",
         router_version: PAPER_LEXICON_ROUTER_VERSION,
         cluster_key: input.route.cluster_keys[0],
@@ -773,7 +809,9 @@ function routeClusterFragments(input: {
     });
     if (sliced.status === "blocked") {
       throw new PaperLexiconRoutingBudgetBlock(
-        `lexicon-fragment-${sha256(`${input.cluster.normalized_key}\n${lid}`).slice(0, 24)}`,
+        `lexicon-fragment-${PAPER_LEXICON_WORK_UNIT_SCOPE_DIGEST}-${sha256(
+          `${input.cluster.normalized_key}\n${lid}`,
+        ).slice(0, 24)}`,
         sliced.recovery,
       );
     }
@@ -871,7 +909,7 @@ function reducerPacket(input: {
     artifact_hash: input.committed[index].artifact_hash,
     entries: input.committed[index].artifact.entries,
   }));
-  const workUnitId = `lexicon-reduce-${sha256(stableJson({
+  const workUnitId = `lexicon-reduce-${PAPER_LEXICON_WORK_UNIT_SCOPE_DIGEST}-${sha256(stableJson({
     version: "paper_lexicon_reduce_identity.v1",
     cluster_key: input.cluster.normalized_key,
     children: children.map((child) => ({
@@ -1022,7 +1060,7 @@ export function analyzePaperLexiconCandidates(input: {
   const skip_windows: PaperLexiconRoutingAnalysis["skip_windows"] = {};
   for (const window of input.windows) {
     if (window.leafLids.some((lid) => candidateLids.has(lid))) continue;
-    skip_windows[`lexicon-skip-window-${window.id}`] = {
+    skip_windows[`lexicon-skip-window-${PAPER_LEXICON_WORK_UNIT_SCOPE_DIGEST}-${window.id}`] = {
       code: "no_lexicon_candidate",
       evidence: [...window.leafLids],
       input_hash: pass1ContentHash(buildPass1Input(window, input.byLid, input.source)),
@@ -1167,11 +1205,47 @@ export function computePaperLexiconCandidateStatus(input: {
   return { analysis, ...lexiconStatus(workUnits, input.existing) };
 }
 
-function clusterForTerm(packet: PaperLexiconCandidatePacketV3, term: string): PaperLexiconCandidateClusterV1 | undefined {
+interface PaperLexiconClusterResolution {
+  cluster: PaperLexiconCandidateClusterV1;
+  reconciled: boolean;
+}
+
+function sourceBackedClausePrefix(cluster: PaperLexiconCandidateClusterV1, key: string): boolean {
+  return cluster.surface_forms.some((surface) => {
+    const surfaceKey = normalizedText(surface);
+    if (!surfaceKey.startsWith(`${key} `)) return false;
+    const nextToken = surfaceKey.slice(key.length + 1).split(" ")[0];
+    return CLAUSE_BOUNDARY_TOKENS.has(nextToken);
+  });
+}
+
+function clusterForTerm(packet: PaperLexiconCandidatePacketV3, term: string): PaperLexiconClusterResolution | undefined {
   const key = normalizedText(term);
-  return packet.candidate_clusters.find((cluster) =>
+  const exact = packet.candidate_clusters.filter((cluster) =>
     cluster.normalized_key === key || cluster.surface_forms.some((surface) => normalizedText(surface) === key),
   );
+  if (exact.length === 1) return { cluster: exact[0], reconciled: false };
+  if (exact.length > 1) return undefined;
+  const reconciled = packet.candidate_clusters.filter((cluster) => sourceBackedClausePrefix(cluster, key));
+  return reconciled.length === 1 ? { cluster: reconciled[0], reconciled: true } : undefined;
+}
+
+function artifactWarnings(input: {
+  reconciled: number;
+  rejected: number;
+}): PaperLexiconArtifactWarningV1[] {
+  return [
+    ...(input.reconciled > 0 ? [{
+      version: "paper_lexicon_artifact_warning.v1" as const,
+      code: "candidate_reconciled" as const,
+      count: input.reconciled,
+    }] : []),
+    ...(input.rejected > 0 ? [{
+      version: "paper_lexicon_artifact_warning.v1" as const,
+      code: "candidate_rejected" as const,
+      count: input.rejected,
+    }] : []),
+  ];
 }
 
 export function buildPaperLexiconCandidateArtifact(
@@ -1180,18 +1254,26 @@ export function buildPaperLexiconCandidateArtifact(
   output: PaperLexiconExtractionOutput,
 ): PaperLexiconArtifact {
   const entries = paperLexiconEntriesFromOutput(output);
-  if (packet.route.role !== "direct" && entries.length > 1) {
-    throw new Error(`lexicon ${packet.route.role} output must contain at most one entry`);
-  }
   const seenClusters = new Set<string>();
-  const enriched: PaperLexiconEntry[] = entries.map((entry) => {
-    const cluster = clusterForTerm(packet, entry.term);
-    if (!cluster) throw new Error(`lexicon candidate out of scope: ${entry.term}`);
+  const enriched: PaperLexiconEntry[] = [];
+  let reconciled = 0;
+  let rejected = 0;
+  const eligibleEntries = packet.route.role !== "direct" && entries.length > 1 ? [] : entries;
+  if (eligibleEntries.length !== entries.length) rejected += entries.length;
+  for (const entry of eligibleEntries) {
+    const resolution = clusterForTerm(packet, entry.term);
+    if (!resolution) {
+      rejected += 1;
+      continue;
+    }
+    const { cluster } = resolution;
     if (seenClusters.has(cluster.normalized_key)) {
-      throw new Error(`lexicon output contains duplicate entries for cluster: ${cluster.normalized_key}`);
+      rejected += 1;
+      continue;
     }
     seenClusters.add(cluster.normalized_key);
-    return {
+    if (resolution.reconciled) reconciled += 1;
+    enriched.push({
       ...entry,
       occurrences_lids: packet.route.role === "fragment"
         ? [...entry.occurrences_lids]
@@ -1199,8 +1281,8 @@ export function buildPaperLexiconCandidateArtifact(
       ...(entry.defined_at_lid && !cluster.definition_lids.includes(entry.defined_at_lid)
         ? { defined_at_lid: undefined }
         : {}),
-    };
-  });
+    });
+  }
   const sidecar = buildPaperLexiconSidecar({
     book_id: "artifact-validation",
     book_version: "v1",
@@ -1209,6 +1291,7 @@ export function buildPaperLexiconCandidateArtifact(
     core_schema_version: "core_v0",
     generated_at: "1970-01-01T00:00:00.000Z",
   }, enriched, lidNodes);
+  const warnings = artifactWarnings({ reconciled, rejected });
   return {
     content_hash: packet.input_hash,
     route: {
@@ -1218,5 +1301,6 @@ export function buildPaperLexiconCandidateArtifact(
       final: packet.route.role !== "fragment",
     },
     entries: sidecar.entries,
+    ...(warnings.length ? { warnings } : {}),
   };
 }

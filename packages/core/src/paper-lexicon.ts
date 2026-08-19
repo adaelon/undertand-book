@@ -45,9 +45,22 @@ export interface PaperLexiconArtifactRouteV1 {
   final: boolean;
 }
 
+export const PAPER_LEXICON_ARTIFACT_WARNING_CODES = [
+  "candidate_reconciled",
+  "candidate_rejected",
+] as const;
+export type PaperLexiconArtifactWarningCode = (typeof PAPER_LEXICON_ARTIFACT_WARNING_CODES)[number];
+
+export interface PaperLexiconArtifactWarningV1 {
+  version: "paper_lexicon_artifact_warning.v1";
+  code: PaperLexiconArtifactWarningCode;
+  count: number;
+}
+
 export interface PaperLexiconArtifact extends Pass1ArtifactMeta {
   entries: PaperLexiconEntry[];
   route?: PaperLexiconArtifactRouteV1;
+  warnings?: PaperLexiconArtifactWarningV1[];
 }
 
 export interface PaperLexiconWindowInput {

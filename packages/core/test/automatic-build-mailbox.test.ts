@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import {
   failAutomaticBuildTask,
   inspectAutomaticBuildTask,
+  normalizeAutomaticBuildTaskReceipt,
   stageAutomaticBuildCandidate,
   submitAutomaticBuildCandidate,
 } from "../src/automatic-build-mailbox";
@@ -162,7 +163,11 @@ describe("automatic build task mailbox", () => {
     const writer = () => {
       writes += 1;
       writeFileSync(artifact, JSON.stringify({ content_hash: "hash-a", nodes: [], edges: [] }), "utf8");
-      return { artifact_path: artifact, output_counts: { nodes: 0, edges: 0 } };
+      return {
+        artifact_path: artifact,
+        output_counts: { nodes: 0, edges: 0 },
+        writer_warnings: { paper_lexicon_candidate_rejected: 1 },
+      };
     };
 
     const first = submitAutomaticBuildCandidate(
@@ -195,10 +200,22 @@ describe("automatic build task mailbox", () => {
       claim.lease.token,
       path.join(root, "candidate-source.json"),
     ).candidate_sha256).toBe(staged.candidate_sha256);
-    expect(first).toMatchObject({ state: "committed", candidate_sha256: staged.candidate_sha256 });
+    expect(first).toMatchObject({
+      state: "committed",
+      candidate_sha256: staged.candidate_sha256,
+      writer_warnings: { paper_lexicon_candidate_rejected: 1 },
+    });
     expect(Buffer.byteLength(JSON.stringify(first))).toBeLessThanOrEqual(4_096);
     expect(first).not.toHaveProperty("payload");
     expect(Object.values(first).some(Array.isArray)).toBe(false);
+    expect(() => normalizeAutomaticBuildTaskReceipt({
+      ...first,
+      writer_warnings: { unbounded_private_warning: 1 },
+    } as never)).toThrow("not allowlisted");
+    expect(() => normalizeAutomaticBuildTaskReceipt({
+      ...first,
+      writer_warnings: { paper_lexicon_candidate_rejected: 0 },
+    })).toThrow("positive safe integer");
 
     writeFileSync(staged.candidate_path, JSON.stringify({ nodes: [{ id: "changed" }], edges: [] }), "utf8");
     expect(() => submitAutomaticBuildCandidate(
