@@ -659,9 +659,6 @@ fn save_desktop_provider_settings(
 
 fn web_dist(app: &tauri::App) -> Result<PathBuf, String> {
     if cfg!(debug_assertions) {
-        if let Some(path) = std::env::var_os("UNDERSTAND_BOOK_DESKTOP_WEB_DIST") {
-            return Ok(PathBuf::from(path));
-        }
         return Ok(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../packages/web/dist"));
     }
     app.path()

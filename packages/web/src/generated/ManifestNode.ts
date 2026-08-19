@@ -5,4 +5,4 @@ import type { Span } from "../../../core/src/generated/Span";
 /**
  * book.manifest 树节点(确定性拓扑)`[ADR-0014]`。
  */
-export type ManifestNode = { lid: string, display_title: string, children: Array<string>, span: Span, kind: NodeKind, };
+export type ManifestNode = { lid: string, children: Array<string>, span: Span, kind: NodeKind, };

@@ -4,14 +4,12 @@ import type { MemoryRecord } from "../api";
 const props = defineProps<{
   note: MemoryRecord;
   renderMarkdown: (source: string) => string;
-  open?: boolean;
 }>();
 
 const emit = defineEmits<{
   (event: "focus-source", source: { lid: string; quote: string | null }): void;
   (event: "edit", note: MemoryRecord): void;
   (event: "delete", note: MemoryRecord): void;
-  (event: "toggle", open: boolean): void;
 }>();
 
 function leadingQuote(content: string): string | null {
@@ -47,19 +45,10 @@ function focusSource() {
   if (!lid) return;
   emit("focus-source", { lid, quote: leadingQuote(props.note.content) });
 }
-
-function onToggle(event: Event) {
-  const details = event.currentTarget;
-  if (details instanceof HTMLDetailsElement) emit("toggle", details.open);
-}
 </script>
 
 <template>
-  <details
-    class="note-card"
-    :open="props.open ?? !isLongNote(props.note)"
-    @toggle="onToggle"
-  >
+  <details class="note-card" :open="!isLongNote(props.note)">
     <summary class="note-summary">
       <span class="note-kind">笔记</span>
       <button

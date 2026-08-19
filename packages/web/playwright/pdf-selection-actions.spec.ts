@@ -45,7 +45,6 @@ const profile = {
   allowed_layout_actions: [],
   agent_tools: [],
 };
-const readerText = "Selectable PDF fixture text for explicit actions.";
 
 const readerState = {
   viewport: {
@@ -168,9 +167,8 @@ async function installApiFixture(
       return json(route, {
         tree: [{
           lid: "1.1",
-          display_title: readerText.slice(0, 80),
           children: [],
-          span: { start: 0, end: readerText.length },
+          span: { start: 0, end: 52 },
           kind: "paragraph",
         }],
         stats_by_lid: {},
@@ -220,10 +218,7 @@ async function installApiFixture(
       });
     }
     if (path === "/api/book/text") {
-      const query = new URL(request.url()).searchParams;
-      const lid = query.get("lid") ?? "1.1";
-      const end = query.get("end");
-      return json(route, { lid, ...(end ? { end_lid: end } : {}), text: readerText });
+      return json(route, { lid: new URL(request.url()).searchParams.get("lid") ?? "1.1", text: "Selectable PDF fixture text for explicit actions." });
     }
     if (path === "/api/reader/state") return json(route, readerState);
     if (path === "/api/memory/recall") return json(route, records);

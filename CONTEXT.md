@@ -210,7 +210,7 @@ E 的记忆所在。**独立于只读基座、用户私有、可变、跨书**�
 **记录模型** `[ADR-0015]`(参考 Codex `codex-rs/memories`):结构信封 + 散文 content + **记忆引用锚定**(见下)。命令面 `memory.save/recall/delete`(议题6 定);Codex 式两阶段后台 consolidation(Phase1 抽取阅读会话 / Phase2 合并+遗忘+usage 剪枝)+ 分层渐进披露产物留议题7。
 
 ## 异步已读账本 (asynchronous read ledger)
-`reader.scroll/goto` 产生的确定性已读事实先进入进程内待持久集合，导航成功只确认 viewport 已改变，不确认该批事实已具备崩溃耐久性。待持久集合合并同一 LID 的触达次数与最近时间，失败时保留待重试，切书或有序退出前冲刷；Note、Highlight、QA 等用户显式记忆仍保持同步原子提交。状态:BOUNDARY_CHANGE(见 [ADR-0106](docs/adr/0106-asynchronous-coalesced-read-ledger-persistence.md))。
+`reader.scroll/goto` 与 GUI `reader.position.observe` 产生的确定性已读事实先进入进程内待持久集合，命令成功不确认该批事实已具备崩溃耐久性。Agent/headless 导航可登记命令窗口，GUI 原生滚动只登记防抖后实际观察到的当前 LID；待持久集合合并同一 LID 的触达次数与最近时间，失败保留待重试，切书或有序退出前冲刷。Note、Highlight、QA 等用户显式记忆仍保持同步原子提交。状态:BOUNDARY_CHANGE(见 [ADR-0106](docs/adr/0106-asynchronous-coalesced-read-ledger-persistence.md)、[ADR-0109](docs/adr/0109-browser-owned-native-prose-flow.md))。
 
 ## Memory selection context
 选区创建的 Note 可选携带的结构化来源上下文:保存 `resolved/partial` 状态、用户实际选择的 `raw_quote`、可验证的 `resolved_quote` 与按阅读顺序排列的完整 LID ranges。用户内容可保留 raw quote,但 citations 与精确投影只能使用 resolved quote/ranges。Note 的 `anchor.lid` 仍取首个 resolved LID用于语义定位和排序,PDF 行内标记取末 range 作为显示锚,citations 由 ranges 中的 LID 去重派生;普通旧 Note 无此字段且保持兼容。状态:BOUNDARY_CHANGE。
@@ -335,16 +335,16 @@ LID 的字符串编码 = 各级序号点分串(如 `3.2.5.2`)。比较用**逐�
 读时 localhost 服务把**冻结命令面**(V3 §4)投影成 HTTP 的形式 `[ADR-0028]`:`book.*` 只读 → `GET`、`reader.*`/`memory.*` 可变 → `POST`,**端点名 = 命令名**,错误**原样透传** §4.4 分类信封。是命令面的网络面、非另立的第二套 API;前端 / agent / 人看同一张面([docs/adr/0007] 人机同命令面无特供)。状态:NEW(详见 [docs/adr/0028])。
 
 ## 连续正文渲染 / LID 隐形 (continuous prose rendering)
-前端把视口 `visible_lids`(叶序滑动窗口,[docs/adr/0027])渲染成**一整列连续流动的正文** `[ADR-0028]`:不画每段框/分隔/LID 标号,阅读单位是连续文章而非 LID 片段。**LID 是隐形接缝**,只在被用到时(citation / 跳转 / 高亮锚)才显形——LID 之于阅读体验 ≈ HTML 之于网页(结构底座,非阅读单位)。状态:NEW(详见 [docs/adr/0028])。
+前端把视口 `visible_lids`(叶序滑动窗口)渲染成**一整列连续流动的正文**:不画每段框/分隔/LID 标号,阅读单位是连续文章而非 LID 片段。**LID 是隐形接缝**,只在 citation、跳转或高亮锚等需要时显形。状态:BOUNDARY_CHANGE(基础见 [ADR-0028](docs/adr/0028-前端切片架构-vue-localhost-server-crate-tinyhttp同步-rest命令面1对1投影-不引epub框架-连续正文lid隐形-无页码寻址.md),实现基线恢复见 [ADR-0112](docs/adr/0112-pre-phr-reader-body-path-rollback.md))。
 
 ## 区间视口 (interval viewport)
-阅读器连续滚动模型中的后端视口 `[ADR-0043]`: `top_lid` 是当前阅读区间起点,`bottom_lid` 是当前阅读区间终点,`visible_lids` 是 `[top..top+width)` 叶序区间,`width` 是区间宽度。`anchor_lid` 仍由后端派生,表示区间中段叶,用于 agent/state 共享;它不再表示视觉中心或进度起点。`scroll(delta)` 移动 `top_lid`, `goto(lid)` 让目标叶成为 `top_lid`。状态:NEW(详见 [docs/adr/0043])。
+阅读器连续滚动模型中的后端视口:`top_lid` 是当前阅读区间起点,`bottom_lid` 是区间终点,`visible_lids` 是 `[top..top+width)` 叶序区间,`width` 是区间宽度。`anchor_lid` 表示区间中段叶,用于 agent/state 共享；`scroll(delta)` 移动 `top_lid`,`goto(lid)` 让目标叶成为 `top_lid`。状态:EXISTING(见 [ADR-0043](docs/adr/0043-reader连续滚动视口-后端区间窗口-前端虚拟流-note-overlay.md))。
 ## 虚拟阅读流 (virtual reader buffer)
-前端连续阅读的渲染形态 `[ADR-0043]`:浏览器原生滚动驱动一条按叶序排列的长流,到缓冲边缘时调用 reader 区间视口命令补入新叶并回收旧叶。它是 `visible_lids` 的展示策略,不引入页码,不改变 LID 作为唯一引用锚。状态:NEW(详见 [docs/adr/0043])。
+前端连续阅读的渲染形态:浏览器原生滚动驱动一条按叶序排列的长流,到缓冲边缘时调用 Reader 区间视口命令补入新叶。它是 `visible_lids` 的展示策略,不引入页码,不改变 LID 作为唯一引用锚；当前实现恢复为 `e64d5f0` 的追加路径,不沿用 PHR 有界回收或未提交原生正文流。状态:BOUNDARY_CHANGE(基础见 [ADR-0043](docs/adr/0043-reader连续滚动视口-后端区间窗口-前端虚拟流-note-overlay.md),回退见 [ADR-0112](docs/adr/0112-pre-phr-reader-body-path-rollback.md))。
 ## note overlay
 note 卡片的展示层 `[ADR-0043]`:note 内容仍来自 memory,overlay 只负责按当前可见 LID 过滤、定位和展示,避免 note 卡嵌入正文段落循环后污染虚拟列表的段高估算。highlight 仍是段内 `<mark>`。状态:NEW(详见 [docs/adr/0043])。
 ## 读位感 (reading position sense)
-替代"页码"的位置参照 `[ADR-0028]`:**章节定位**(从当前 anchor 上溯容器 LID,显示"第N章 …")+ **进度%**(`anchor_idx` / 叶总数,确定性)。只做导航 / 显示,**不做引用锚**。本项目**无一等页码**——页在 reflowable / 连续滚动模型里物理不存在,造页号不可复现(违锚定红线);印刷版 page-list 仅当源 EPUB 携带时作 LID 展示标签(切片1+),citation 恒为 LID。状态:NEW(详见 [docs/adr/0028])。
+替代"页码"的位置参照:**章节定位**(从当前 anchor 上溯容器 LID)+ **进度%**(`anchor_idx` / 叶总数)。它只做导航与显示,**不做引用锚**。本项目无一等页码；印刷版 page-list 仅在源携带时作 LID 展示标签,citation 恒为 LID。状态:EXISTING(见 [ADR-0028](docs/adr/0028-前端切片架构-vue-localhost-server-crate-tinyhttp同步-rest命令面1对1投影-不引epub框架-连续正文lid隐形-无页码寻址.md))。
 
 ## MemoryDocument
 本地单用户、跨书的读者私人记忆真相源;统一容纳内容记录、画像事实及其审核状态,与只读书基座物理隔离。旧的裸记录数组是其待迁移前身,不是并列真相源。状态:BOUNDARY_CHANGE(详见 [docs/adr/0075])。

@@ -29,8 +29,7 @@ describe("reader navigation", () => {
     expect(app).toContain("const outlineNavigationLid = ref<string | null>(null)");
     expect(app).toContain("outlineNavigationLid.value = lid");
     expect(app).toContain(":anchor-lid=\"outlineAnchorLid\"");
-    expect(app).toContain("@viewport-interaction=\"onReaderViewportInteraction\"");
-    expect(app).toMatch(/function onReaderViewportInteraction[\s\S]*?clearOutlineNavigation\(\);\s*}/);
+    expect(app).toContain("@viewport-interaction=\"clearOutlineNavigation\"");
   });
 
   it("uses the reader selection after a successful agent goto in a clamped viewport", () => {
