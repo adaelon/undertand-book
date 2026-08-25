@@ -18,7 +18,7 @@ pub const GUIDED_READ_ROUTE_REPLAY_VERSION: &str = "guided_read_route_replay.v1"
 pub const GUIDED_READ_REPLAY_MAX_BYTES: usize = 64 * 1024;
 
 const NAVIGATION_ASSET_ID: &str = "resident-agent.policy.navigation";
-const NAVIGATION_REVISION: &str = "v3";
+const NAVIGATION_REVISION: &str = "v4";
 const MAX_TRACE_STEPS: usize = 64;
 const MAX_ROUTE_LIDS: usize = 512;
 const MAX_TOOL_NAMES: usize = 128;
@@ -587,7 +587,7 @@ fn verify_instruction_assets(
         .collect::<Vec<_>>();
     if navigation.len() != 1 || navigation[0].revision != NAVIGATION_REVISION {
         return Err(GuidedReadReplayVerificationError::invalid(
-            "first request must contain exactly one resident navigation@v3 asset",
+            "first request must contain exactly one resident navigation@v4 asset",
         ));
     }
     Ok(())
@@ -1114,6 +1114,7 @@ mod tests {
 
     fn trace(tool: &str, args: &str) -> TraceStep {
         TraceStep {
+            model_tool_loop: None,
             tool: tool.into(),
             args: args.into(),
             result_digest: "PRIVATE TOOL BODY".into(),

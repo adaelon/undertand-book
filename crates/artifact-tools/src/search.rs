@@ -162,6 +162,25 @@ impl SearchQuery {
     }
 }
 
+/// One model-independent text field consumed by deterministic lexical ranking.
+///
+/// Weights intentionally share the artifact-search 1..=10 convention. Callers own
+/// field selection; this type only supplies the versioned Unicode/CJK analyzer and
+/// stable score composition already used by artifact search.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WeightedTextField<'a> {
+    pub name: &'a str,
+    pub weight: u8,
+    pub value: &'a str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WeightedTextScore {
+    pub score: u64,
+    pub matched_fields: Vec<String>,
+    pub matched_terms: Vec<String>,
+}
+
 #[derive(Debug, Clone, Default)]
 struct MatchAggregate {
     tier: u64,
@@ -196,6 +215,46 @@ impl MatchAggregate {
     fn is_match(&self) -> bool {
         !self.matched_fields.is_empty()
     }
+}
+
+/// Score bounded weighted text fields with artifact search's versioned analyzer.
+///
+/// This helper is deliberately pure: it performs no artifact lookup, pagination,
+/// typo fallback, or side effect. A zero-weight field is ignored so a caller cannot
+/// report a textual match that contributed no ranking signal.
+pub fn score_weighted_text_fields(
+    query: &str,
+    fields: &[WeightedTextField<'_>],
+) -> Option<WeightedTextScore> {
+    let query = SearchQuery::new(query);
+    if query.terms.is_empty() {
+        return None;
+    }
+
+    let mut aggregate = MatchAggregate::default();
+    for field in fields.iter().filter(|field| field.weight > 0) {
+        if let Some(result) = match_text(field.value, &query, ArtifactSearchAnalyzer::Text, false) {
+            aggregate.add(field.name, field.weight.min(10), result);
+        }
+    }
+    if !aggregate.is_match() {
+        return None;
+    }
+
+    let coverage = ((aggregate.covered_terms.len() * 1_000) / query.terms.len()) as u64;
+    Some(WeightedTextScore {
+        score: aggregate
+            .tier
+            .saturating_mul(SCORE_TIER_SCALE)
+            .saturating_add(
+                aggregate
+                    .weighted_quality
+                    .saturating_mul(SCORE_WEIGHT_SCALE),
+            )
+            .saturating_add(coverage.saturating_mul(SCORE_COVERAGE_SCALE)),
+        matched_fields: aggregate.matched_fields.into_iter().collect(),
+        matched_terms: aggregate.matched_terms.into_iter().collect(),
+    })
 }
 
 struct FieldMatch {
@@ -895,6 +954,36 @@ mod tests {
             ["心脏", "脏诊", "诊断", "心脏诊", "脏诊断"]
         );
         assert!(ARTIFACT_SEARCH_NORMALIZATION_VERSION.contains("nfkc"));
+    }
+
+    #[test]
+    fn shared_weighted_text_search_reuses_unicode_cjk_and_field_weights() {
+        let fields = [
+            WeightedTextField {
+                name: "name",
+                weight: 10,
+                value: "book.structure",
+            },
+            WeightedTextField {
+                name: "use_when",
+                weight: 7,
+                value: "查看这本书的结构、主要内容与关键停靠点",
+            },
+            WeightedTextField {
+                name: "avoid_when",
+                weight: 1,
+                value: "不要用它读取正文",
+            },
+        ];
+
+        let first = score_weighted_text_fields("这本书主要讲什么", &fields).unwrap();
+        let second = score_weighted_text_fields("这本书主要讲什么", &fields).unwrap();
+
+        assert_eq!(first, second);
+        assert_eq!(first.matched_fields, vec!["use_when"]);
+        assert!(first.matched_terms.iter().any(|term| term == "这本"));
+        assert!(first.matched_terms.iter().any(|term| term == "主要"));
+        assert!(first.score > 0);
     }
 
     #[test]

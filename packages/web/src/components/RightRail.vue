@@ -221,7 +221,7 @@ function incompleteNotice(outcome: OuterOutcome): string | null {
     case "ACTIVE_CONTEXT_EXHAUSTED":
       return "当前内容超过模型可处理范围";
     case "TURN_LIMIT_EXCEEDED":
-      return "本轮工具调用次数已达上限";
+      return "本轮模型—工具循环次数已达上限";
     default:
       return outcome.warning;
   }
@@ -245,6 +245,21 @@ function closeAgentSourcePopup() {
   agentSourcePopup.value = null;
   agentSourceAnchor = null;
 }
+
+function modelToolLoopCount(trace: readonly TraceStep[]): number | null {
+  const loops = trace
+    .map((step) => step.model_tool_loop ?? 0)
+    .filter((loop) => loop > 0);
+  return loops.length ? Math.max(...loops) : null;
+}
+
+function traceLoopLabel(step: TraceStep): string | null {
+  return step.model_tool_loop && step.model_tool_loop > 0
+    ? `循环 ${step.model_tool_loop}`
+    : null;
+}
+
+const latestModelToolLoopCount = computed(() => modelToolLoopCount(props.latestTrace));
 
 function clampToRange(value: number, minimum: number, maximum: number): number {
   return Math.min(Math.max(value, minimum), Math.max(minimum, maximum));
@@ -658,10 +673,14 @@ function influenceLabel(influence: ProfileUsageTrace["influences"][number]): str
 
             <div v-if="turn.outcome.trace.length" class="trace">
               <button class="trace-toggle" @click="emit('toggle-trace', ti)">
-                轨迹 ({{ turn.outcome.trace.length }}) {{ props.showTrace[ti] ? "▲" : "▼" }}
+                <template v-if="modelToolLoopCount(turn.outcome.trace)">
+                  {{ modelToolLoopCount(turn.outcome.trace) }} 个模型—工具循环 ·
+                </template>
+                {{ turn.outcome.trace.length }} 次工具调用 {{ props.showTrace[ti] ? "▲" : "▼" }}
               </button>
               <ol v-if="props.showTrace[ti]">
                 <li v-for="(t, i) in turn.outcome.trace" :key="i">
+                  <span v-if="traceLoopLabel(t)" class="trace-loop">{{ traceLoopLabel(t) }}</span>
                   <code>{{ t.tool }}</code>
                   <span class="t-args">{{ t.args }}</span>
                   <span class="t-res">→ {{ t.result_digest }}</span>
@@ -735,10 +754,14 @@ function influenceLabel(influence: ProfileUsageTrace["influences"][number]): str
     <section v-show="activeTab === 'trace'" class="tab-panel context-panel">
       <div class="panel-head">
         <p class="rail-kicker">最近工具轨迹</p>
-        <h3>{{ props.latestTrace.length }} 步</h3>
+        <h3 v-if="latestModelToolLoopCount">
+          {{ latestModelToolLoopCount }} 个模型—工具循环 · {{ props.latestTrace.length }} 次工具调用
+        </h3>
+        <h3 v-else>{{ props.latestTrace.length }} 次工具调用</h3>
       </div>
       <ol v-if="props.latestTrace.length" class="trace-list">
         <li v-for="(t, i) in props.latestTrace" :key="i" class="trace-card">
+          <span v-if="traceLoopLabel(t)" class="trace-loop">{{ traceLoopLabel(t) }}</span>
           <code>{{ t.tool }}</code>
           <p class="trace-args">{{ t.args }}</p>
           <p class="trace-result">{{ t.result_digest }}</p>
@@ -1435,6 +1458,11 @@ function influenceLabel(influence: ProfileUsageTrace["influences"][number]): str
 .trace-args,
 .trace-result {
   color: var(--stone);
+}
+.trace-loop {
+  color: var(--steel);
+  font-size: 0.72rem;
+  font-weight: 650;
 }
 .trace-card code,
 .memory-meta code {

@@ -184,7 +184,7 @@ describe("RightRail agent sources", () => {
     const warnings = [
       ["COMPACTION_FAILED", "上下文整理失败，请重试"],
       ["ACTIVE_CONTEXT_EXHAUSTED", "当前内容超过模型可处理范围"],
-      ["TURN_LIMIT_EXCEEDED", "本轮工具调用次数已达上限"],
+      ["TURN_LIMIT_EXCEEDED", "本轮模型—工具循环次数已达上限"],
     ] as const;
     const wrapper = mount(RightRail, {
       attachTo: document.body,
@@ -690,12 +690,15 @@ describe("RightRail AskQuote", () => {
           tool: "book.query",
           args: "typed request",
           result_digest: "complete response only",
+          model_tool_loop: 2,
           query_audit: audit,
         }],
       },
     });
     const traceTab = wrapper.findAll(".tab").find((tab) => tab.text().includes("轨迹"));
     await traceTab!.trigger("click");
+    expect(wrapper.get(".panel-head h3").text()).toBe("2 个模型—工具循环 · 1 次工具调用");
+    expect(wrapper.get(".trace-loop").text()).toBe("循环 2");
     expect(wrapper.get(".trace-result").text()).toBe("complete response only");
     const panel = wrapper.get(".query-audit");
     expect(panel.text()).toContain("QueryAudit");

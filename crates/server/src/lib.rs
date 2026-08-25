@@ -19290,14 +19290,14 @@ unchanged after training concludes";
     #[test]
     fn agent_chat_drives_shared_reader_and_returns_effects() {
         let mut s = state_named("agent");
-        // 脚本:先发现 deferred reader tool,下一采样调用 highlight,再终答。
+        // 脚本:显式 Reader 写意图下先发现 deferred reader tool,下一采样调用 highlight,再终答。
         s.adapter = Box::new(ChatStubAdapter::scripted(vec![
             AssistantTurn {
                 text: None,
                 tool_calls: vec![ToolCall {
                     id: "discover-highlight".into(),
                     name: "tool.search".into(),
-                    arguments: r#"{"query":"reader.highlight","max_results":1}"#.into(),
+                    arguments: r#"{"task":"Highlight the first paragraph","required_capabilities":["reader_write"],"scope":"passage","operation":"mutate_reader","effect_mode":"reader_mutation_explicitly_requested","max_results":1}"#.into(),
                 }],
                 usage_total_tokens: Some(5),
             },
@@ -19316,7 +19316,7 @@ unchanged after training concludes";
                 usage_total_tokens: Some(5),
             },
         ]));
-        let r = post(&mut s, "/agent/chat", r#"{"message":"高亮第一段"}"#);
+        let r = post(&mut s, "/agent/chat", r#"{"message":"带我读；高亮第一段"}"#);
         assert_eq!(r.status, 200);
         assert!(r.body.contains("\"incomplete\":false"));
         assert!(r.body.contains("已高亮第一段"));
@@ -20486,6 +20486,35 @@ unchanged after training concludes";
     }
 
     #[test]
+    fn agent_loop_diagnostics_keep_loop_capacity_protocol_and_evidence_distinct() {
+        let cases = [
+            ("AGENT_NO_PROGRESS", "loop", 500),
+            ("ACTIVE_CONTEXT_EXHAUSTED", "capacity", 500),
+            ("FINALIZATION_TOOL_PROTOCOL_VIOLATION", "protocol", 500),
+            ("EVIDENCE_PLAN_REQUIRED", "validation", 400),
+        ];
+        let mut diagnostics = BTreeSet::new();
+
+        for (error_code, category, expected_status) in cases {
+            let reply = err_reply(&ToolError {
+                error_code: error_code.into(),
+                category: category.into(),
+                message: "bounded diagnostic".into(),
+            });
+            let body: serde_json::Value = serde_json::from_str(&reply.body).unwrap();
+            assert_eq!(reply.status, expected_status, "{error_code}");
+            assert_eq!(body["error_code"], error_code, "{error_code}");
+            assert_eq!(body["category"], category, "{error_code}");
+            diagnostics.insert((
+                body["error_code"].as_str().unwrap().to_string(),
+                body["category"].as_str().unwrap().to_string(),
+            ));
+        }
+
+        assert_eq!(diagnostics.len(), cases.len());
+    }
+
+    #[test]
     fn agent_warning_projection_persists_typed_stops_and_reads_legacy_context_budget() {
         let mut state = state_named("agent-warning-projection");
         let history_path = tmp("agent-warning-projection-history");
@@ -20724,7 +20753,7 @@ unchanged after training concludes";
         assert_eq!(reply.status, 200);
         for hidden in [
             "request_audit",
-            "agent_request_audit.v1",
+            "agent_request_audit.v2",
             "audit-only-secret-tool-body",
             "audit-only-secret-description",
         ] {
@@ -20735,13 +20764,13 @@ unchanged after training concludes";
             .unwrap();
         let persisted = std::fs::read_to_string(&history_path).unwrap();
         assert!(!persisted.contains("request_audit"));
-        assert!(!persisted.contains("agent_request_audit.v1"));
+        assert!(!persisted.contains("agent_request_audit.v2"));
         assert!(!persisted.contains("audit-only-secret"));
 
         let public = get(&mut state, "/agent/history");
         assert_eq!(public.status, 200, "{}", public.body);
         assert!(!public.body.contains("request_audit"));
-        assert!(!public.body.contains("agent_request_audit.v1"));
+        assert!(!public.body.contains("agent_request_audit.v2"));
 
         let generated = include_str!("../../../packages/web/src/generated/OuterOutcome.ts");
         assert!(!generated.contains("request_audit"));
@@ -21578,6 +21607,7 @@ Version 1.2 and bare 1.1 stay unchanged.
             tokens_spent: 1,
             effects: Vec::new(),
             trace: vec![runtime::orchestrator::TraceStep {
+                model_tool_loop: Some(1),
                 tool: "book.query".into(),
                 args: serde_json::to_string(&request).unwrap(),
                 result_digest: "complete".into(),

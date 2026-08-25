@@ -692,3 +692,20 @@ Build controller 为一次 server-side executor run 写出的未信任执行契�
 
 ## BuildDecisionRequest
 Build Workbench 中影响构建方向或阶段 readiness 的用户选择请求,区别于 Codex/opencode/Claude 等 executor 的工具权限请求。其答案必须写入 job event,若影响构建结果还要写入 stage decision artifact。状态:NEW(见 [docs/adr/0063])。
+## TaskNeed（任务需求）
+开放自然语言在 Resident 工具发现边界中的有界结构化需求。模型只提出语义维度（scope、operation 与所需 capability）；Runtime 以本轮真实证据状态、content profile、权限和经确认的副作用意图补全并校验状态维度。它是单回合路由输入，不是持久用户意图、证据或权限授予。状态:NEW(见 [ADR-0113](docs/adr/0113-open-natural-language-capability-routing-and-runtime-evidence-topology.md))。
+
+## Resident Tool Routing Card（住户工具能力卡）
+ToolRegistry 为每个 Resident 工具拥有的结构化发现合同，声明 provides、scopes、operations、use_when、avoid_when、effects、preconditions、content_profiles 与 relative_cost。它用于能力解析和发现排序，不是书内证据、工具执行结果或权限来源。状态:NEW(见 [ADR-0113](docs/adr/0113-open-natural-language-capability-routing-and-runtime-evidence-topology.md))。
+
+## StructuralIndex（结构索引能力）
+只读地提供章节或文档结构角色、主线、关键停靠点及证据规划入口的 Resident 工具能力。它可以被概述和导航流程共同消费，但本身不改变 Reader 状态，也不等同于 `NavigationPlan` 或 `ReaderWrite`。状态:NEW(见 [ADR-0113](docs/adr/0113-open-natural-language-capability-routing-and-runtime-evidence-topology.md))。
+
+## TurnLocatorLedger（本轮定位来源账本）
+Runtime 在一个用户回合内维护的 LID 来源集合，记录某个定位是否来自用户明确输入、已验证选区、当前 Reader anchor、结构/搜索/查询/context 工具结果或先前已验证证据。它只决定某个 LID 能否作为后续读取参数，不证明该位置正文已经被模型观察；后者仍由“本轮证据账本”负责。状态:NEW(见 [ADR-0113](docs/adr/0113-open-natural-language-capability-routing-and-runtime-evidence-topology.md))。
+
+## ProgressPhase（进展阶段）
+Runtime 对当前 Resident 用户回合所处任务阶段的瞬时权威分类，按 `UNLOCATED -> LOCATED -> EVIDENCE_READY -> SYNTHESIZED -> FINAL` 单向推进。只有新的合法 locator、正文 evidence、capability、Reader/memory effect 或最终综合结果能证明进展；仅更换工具参数不构成阶段推进。它不是 Provider 自报状态、工具调用计数或持久任务进度。状态:NEW(见 [ADR-0113](docs/adr/0113-open-natural-language-capability-routing-and-runtime-evidence-topology.md))。
+
+## 最终收敛采样 (finalization sampling)
+Resident 模型—工具循环用尽最后一个合法工具批次后，由 Runtime 保留的一次 tools-disabled 终答机会。它只能利用本轮已取得的证据形成最终回答；任何工具调用输出都是协议错误，不得重新进入工具循环。状态:NEW(见 [ADR-0113](docs/adr/0113-open-natural-language-capability-routing-and-runtime-evidence-topology.md))。

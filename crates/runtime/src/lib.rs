@@ -26,6 +26,7 @@ pub mod model_runtime;
 pub mod orchestrator;
 pub mod profile_api;
 pub mod profile_context;
+pub mod semantic_release;
 pub mod tool_exposure;
 pub mod tool_registry;
 pub mod tool_result;
@@ -1797,14 +1798,24 @@ impl SynthesizeMode {
 
     fn instruction(self) -> &'static str {
         match self {
-            SynthesizeMode::Compare => "组织为相同点/差异点/适用边界,不要引入输入 LID 之外的证据。",
-            SynthesizeMode::Explain => "优先给定义、机制、例子和限制,证据必须来自输入 LID。",
-            SynthesizeMode::Summarize => "按章节/LID 顺序压缩主旨,保留关键限定条件。",
-            SynthesizeMode::Derive => {
-                "按原文证据给出逐步推导链,缺失步骤必须标为 model_supplement。"
+            SynthesizeMode::Compare => {
+                "Organize the answer by similarities, differences, and applicability boundaries. Do not introduce evidence outside the input LIDs."
             }
-            SynthesizeMode::Teach => "用教学顺序组织解释,可补前置知识但不得把补充当 citation。",
-            SynthesizeMode::AnswerQuestion => "直接回答问题,再列支撑证据和必要补充。",
+            SynthesizeMode::Explain => {
+                "Prioritize definitions, mechanisms, examples, and limitations. Evidence must come from the input LIDs."
+            }
+            SynthesizeMode::Summarize => {
+                "Condense the main ideas in chapter and LID order while preserving important qualifications."
+            }
+            SynthesizeMode::Derive => {
+                "Give a step-by-step derivation from source evidence. Mark every missing step as model_supplement."
+            }
+            SynthesizeMode::Teach => {
+                "Organize the explanation in teaching order. You may add prerequisites, but never present supplements as citations."
+            }
+            SynthesizeMode::AnswerQuestion => {
+                "Answer the question directly, then provide supporting evidence and any necessary supplements."
+            }
         }
     }
 }
@@ -1925,8 +1936,8 @@ fn build_synthesize_prompt(
     discourse_hints: &[String],
     partials: &[String],
 ) -> CompletionRequest {
-    let mut user = String::from("任务:\n");
-    user.push_str(task.unwrap_or("综合这些 LID 的内容"));
+    let mut user = String::from("Task:\n");
+    user.push_str(task.unwrap_or("Synthesize the content of these LIDs."));
     user.push_str("\n\nSynthesizePolicy:\n");
     user.push_str("- book_profile=technical_learning\n");
     user.push_str(&format!("- mode={}\n", mode.as_str()));
@@ -1935,37 +1946,40 @@ fn build_synthesize_prompt(
     user.push_str("- discourse_policy=use_discourse_relations_as_structure_hints\n");
     user.push_str("- reader_profile=not_attached\n");
     user.push_str(&format!("- mode_instruction={}\n", mode.instruction()));
-    user.push_str("\n\n输入 LID 范围(只允许引用这些 LID):\n");
+    user.push_str("\n\nInput LID scope (citations may reference only these LIDs):\n");
     for lid in ev.keys() {
         user.push_str(&format!("- {lid}\n"));
     }
     if !formula_hints.is_empty() {
-        user.push_str("\n公式语义上下文(仅作结构提示,不新增 citation):\n");
+        user.push_str("\nFormula semantics context (structural hints only; adds no citations):\n");
         for h in formula_hints {
             user.push_str(h);
             user.push('\n');
         }
     }
     if !discourse_hints.is_empty() {
-        user.push_str("\n语篇结构提示(仅限输入 LID 范围,不新增 citation):\n");
+        user.push_str(
+            "\nDiscourse structure hints (limited to the input LID scope; adds no citations):\n",
+        );
         for h in discourse_hints {
             user.push_str(h);
             user.push('\n');
         }
     }
     if !partials.is_empty() {
-        user.push_str("\n分批局部综合结果(归并时仍只能引用输入 LID):\n");
+        user.push_str("\nPartial batch syntheses (the merge may still cite only input LIDs):\n");
         for (i, p) in partials.iter().enumerate() {
             user.push_str(&format!("[batch:{}] {p}\n", i + 1));
         }
     }
-    user.push_str("\n证据(每条前缀 [LID],citations 只能引用这里出现的 LID):\n");
+    user.push_str(
+        "\nEvidence (each item is prefixed by [LID]; citations may use only LIDs shown here):\n",
+    );
     for (lid, text) in ev {
         user.push_str(&format!("[{lid}] {text}\n"));
     }
     CompletionRequest {
-        system: "你是书内综合器。只依据调用方给定的 LID 范围综合;不得外扩检索。\
-                 citations 只能引用输入 LID;原文未覆盖的世界知识补充放 model_supplement(无 LID)。"
+        system: "You are an in-book synthesizer. Synthesize only from the LID scope supplied by the caller and never expand retrieval. Citations may reference only input LIDs. Put outside knowledge not covered by source text in model_supplement without a LID."
             .into(),
         user,
     }
@@ -2349,27 +2363,29 @@ fn build_book_guide_prompt(
     ev: &EvidenceSet,
     transcript_tail: &[String],
 ) -> CompletionRequest {
-    let mut user = String::from("访客意图:\n");
+    let mut user = String::from("Visitor intent:\n");
     user.push_str(intent);
-    user.push_str("\n\n入口 LID:\n");
+    user.push_str("\n\nEntry LID:\n");
     user.push_str(entry_lid);
-    user.push_str("\n\n本轮状态:\n");
+    user.push_str("\n\nTurn state:\n");
     user.push_str(if refined {
-        "访客否定了上一条路线,请中立换到另一条结构分支。\n"
+        "The visitor rejected the previous route. Neutrally switch to a different structural branch.\n"
     } else {
-        "首次或继续引导,请给出可验证路线。\n"
+        "This is an initial or continuing guide request. Provide a verifiable route.\n"
     });
     if !transcript_tail.is_empty() {
-        user.push_str("\n访客会话摘要(仅临时③,不可当书中事实):\n");
+        user.push_str(
+            "\nVisitor session summary (ephemeral context only; never an in-book fact):\n",
+        );
         for item in transcript_tail {
             user.push_str("- ");
             user.push_str(item);
             user.push('\n');
         }
     }
-    user.push_str("\n路线步骤(每步都是真 LID/真边):\n");
+    user.push_str("\nRoute steps (every step contains a real LID and real edge):\n");
     if route.is_empty() {
-        user.push_str("- 当前入口暂无可继续展开的 route 前沿,请围绕入口说明下一步如何核查。\n");
+        user.push_str("- The current entry has no route frontier to expand. Explain how to verify the next step around the entry.\n");
     } else {
         for (idx, step) in route.iter().enumerate() {
             user.push_str(&format!(
@@ -2382,13 +2398,14 @@ fn build_book_guide_prompt(
             ));
         }
     }
-    user.push_str("\n证据(每条前缀 [LID],citations 只能引用这里出现的 LID):\n");
+    user.push_str(
+        "\nEvidence (each item is prefixed by [LID]; citations may use only LIDs shown here):\n",
+    );
     for (lid, text) in ev {
         user.push_str(&format!("[{lid}] {text}\n"));
     }
     CompletionRequest {
-        system: "你是书内路线向导。只给访客可独立验证的阅读路线,不使用读者私人记忆、reader viewport 或 memory。\
-                 answer 用中立语气说明入口和下一步;citations 只能引用证据 LID。"
+        system: "You are an in-book route guide. Give the visitor only independently verifiable reading routes, without using private reader memory, the Reader viewport, or memory tools. In a neutral voice, explain the entry and next step. Citations may reference only evidence LIDs."
             .into(),
         user,
     }
@@ -2491,15 +2508,15 @@ pub fn book_guide(
 // 结构红线不在此守:lid 真实性由 loop 的确定性交叉验停过滤,后端乱吐也滤净 `[ADR-0004]`。
 
 /// LLM 合一轮的 JSON 输出契约(拼到 system,约束 glm-5.1 等 OpenAI-兼容后端的 json 形状)。
-const OUTPUT_CONTRACT: &str = "只输出一个 JSON 对象,不要 markdown 代码块,形如:\n\
-{\"sufficient\": true 或 false, \"answer\": \"答案文本或 null\", \
-\"citations\": [{\"lid\": \"证据中的LID\", \"text\": \"引用的原文片段\", \"role\": \"support 或 contrast\"}], \
-\"model_supplement\": [{\"text\": \"原文未覆盖的世界知识补充\"}]}\n\
-规则:\n\
-- 只要证据中有任何片段能支撑你的回答,就把综合答案写进 answer 字段、令 sufficient=true。\n\
-- citations 的 lid 必须来自上面 [LID] 标注过的证据,引用支撑答案的原文片段。\n\
-- model_supplement 只放证据完全无法支撑、纯靠世界知识的延伸;不要把主答案放这里。\n\
-- 只有当证据完全无法支撑任何回答时,才令 sufficient=false、answer=null。";
+const OUTPUT_CONTRACT: &str = "Return exactly one JSON object and no Markdown code fence, in this shape:\n\
+{\"sufficient\": true or false, \"answer\": \"answer text or null\", \
+\"citations\": [{\"lid\": \"LID from evidence\", \"text\": \"quoted source passage\", \"role\": \"support or contrast\"}], \
+\"model_supplement\": [{\"text\": \"outside knowledge not covered by source text\"}]}\n\
+Rules:\n\
+- If any evidence passage supports an answer, put the synthesized answer in answer and set sufficient=true.\n\
+- Every citation lid must come from evidence marked [LID] above, and citation text must quote source that supports the answer.\n\
+- Use model_supplement only for extensions that the evidence cannot support and that rely entirely on outside knowledge; never put the main answer there.\n\
+- Set sufficient=false and answer=null only when the evidence cannot support any answer.";
 
 /// NativeAdapter:对接 `.env` 配置的 OpenAI-兼容后端 `[ADR-0003/0025]`。
 pub struct NativeAdapter {
@@ -2929,7 +2946,7 @@ fn react_message_to_json(m: &Message) -> serde_json::Value {
                 if !content.is_empty() {
                     content.push_str("\n\n");
                 }
-                content.push_str("已请求工具:");
+                content.push_str("Requested tools:");
                 content.push_str(&serde_json::to_string(&calls).unwrap_or_else(|_| "[]".into()));
             }
             serde_json::json!({ "role": "assistant", "content": content })
@@ -2937,7 +2954,7 @@ fn react_message_to_json(m: &Message) -> serde_json::Value {
         Role::Tool => serde_json::json!({
             "role": "user",
             "content": format!(
-                "工具结果 tool_call_id={}:\n{}",
+                "Tool result for tool_call_id={}:\n{}",
                 m.tool_call_id.as_deref().unwrap_or(""),
                 m.content.as_deref().unwrap_or("")
             )
@@ -2961,7 +2978,8 @@ fn build_react_system(
         })
         .collect();
     let tool_call_instruction = if tool_choice == ToolChoice::None || tools.is_empty() {
-        "本轮工具调用已禁用;不得输出 tool_calls,必须输出 final。".to_string()
+        "Tool calls are disabled for this turn. Do not output tool_calls; you must output final."
+            .to_string()
     } else {
         let example_tool = tools
             .iter()
@@ -2974,15 +2992,15 @@ fn build_react_system(
             }]
         });
         format!(
-            "若要调用工具,只输出本轮列表中的精确 name,形状示例(值须按当前任务替换): {}",
+            "To call a tool, output only an exact name from this turn's list. Shape example; replace values for the current task: {}",
             example
         )
     };
     format!(
-        "你所在的 provider 没有原生 tool-calling。tool_choice={};parallel_tool_calls={}。你必须每回合只输出一个 JSON 对象,不要 markdown。\n\
+        "Your provider has no native tool calling. tool_choice={};parallel_tool_calls={}. You must output exactly one JSON object per turn and no Markdown.\n\
          {}\n\
-         若要最终回答,输出: {{\"final\":\"回答文本\"}}\n\
-         工具只能从以下列表选择,arguments 必须符合对应 JSON Schema:\n{}",
+         For a final answer, output: {{\"final\":\"answer text\"}}\n\
+         Select tools only from the following list. arguments must satisfy the corresponding JSON Schema:\n{}",
         tool_choice.as_provider_value(),
         parallel_tool_calls,
         tool_call_instruction,
@@ -4055,6 +4073,64 @@ mod tests {
         }
     }
 
+    fn contains_han(value: &str) -> bool {
+        value.chars().any(|character| {
+            matches!(
+                character as u32,
+                0x3400..=0x4dbf | 0x4e00..=0x9fff | 0xf900..=0xfaff
+            )
+        })
+    }
+
+    #[test]
+    fn runtime_authored_prompt_scaffolds_are_english_and_preserve_dynamic_payloads() {
+        let ascii_evidence = EvidenceSet::from([("1.1".into(), "ASCII source".into())]);
+        let synthesize = build_synthesize_prompt(
+            None,
+            SynthesizeMode::Summarize,
+            &ascii_evidence,
+            &[],
+            &[],
+            &[],
+        );
+        assert!(!contains_han(&synthesize.system));
+        assert!(!contains_han(&synthesize.user));
+
+        let guide =
+            build_book_guide_prompt("Explain the route", "1.1", false, &[], &ascii_evidence, &[]);
+        assert!(!contains_han(&guide.system));
+        assert!(!contains_han(&guide.user));
+        assert!(!contains_han(OUTPUT_CONTRACT));
+
+        let react = build_react_system(
+            &[ToolSpec {
+                name: "book.text".into(),
+                description: "Read canonical source text".into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {"lid": {"type": "string", "description": "Target LID"}},
+                    "required": ["lid"]
+                }),
+            }],
+            ToolChoice::Auto,
+            false,
+        );
+        assert!(!contains_han(&react));
+
+        let localized_evidence = EvidenceSet::from([("1.1".into(), "中文原文保持不变".into())]);
+        let localized = build_synthesize_prompt(
+            Some("解释这个概念"),
+            SynthesizeMode::Explain,
+            &localized_evidence,
+            &[],
+            &[],
+            &[],
+        );
+        assert!(!contains_han(&localized.system));
+        assert!(localized.user.contains("解释这个概念"));
+        assert!(localized.user.contains("[1.1] 中文原文保持不变"));
+    }
+
     #[test]
     fn synthesize_includes_only_input_scoped_discourse_hints() {
         let b = book_with_discourse_index();
@@ -4818,7 +4894,7 @@ mod tests {
         assert_eq!(react_messages.len(), 3);
         let protocol = react_messages[0]["content"].as_str().unwrap();
         assert!(protocol.starts_with(
-            "你所在的 provider 没有原生 tool-calling。tool_choice=auto;parallel_tool_calls=false。"
+            "Your provider has no native tool calling. tool_choice=auto;parallel_tool_calls=false."
         ));
         assert!(protocol.contains("\"name\": \"book.text\""));
         assert!(protocol.contains("\"required\": ["));
@@ -4872,9 +4948,11 @@ mod tests {
                 .iter()
                 .find(|asset| asset.asset_id == "resident-agent.policy.navigation")
                 .map(|asset| asset.revision.as_str()),
-            Some("v3")
+            Some("v4")
         );
-        assert!(plan.instructions.contains("显式带读不是章节摘要"));
+        assert!(plan
+            .instructions
+            .contains("Explicit guided reading is not a section summary"));
 
         let (native, _) = native_chat_request_projection("snapshot-model", &plan);
         assert_eq!(
@@ -4912,7 +4990,7 @@ mod tests {
         assert!(protocol.contains(r#""granularity":"near""#));
 
         let no_tools = build_react_system(&[], ToolChoice::None, false);
-        assert!(no_tools.contains("不得输出 tool_calls"));
+        assert!(no_tools.contains("Do not output tool_calls"));
         assert!(!no_tools.contains("book.text"));
     }
 

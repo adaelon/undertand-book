@@ -1054,7 +1054,7 @@ mod tests {
             .find(|tool| tool["name"] == "book_concept")
             .and_then(|tool| tool["description"].as_str())
             .expect("book_concept description");
-        assert!(concept_description.contains("候选"));
+        assert!(concept_description.contains("candidates"));
         assert!(concept_description.contains("book.text"));
 
         for name in tool_names() {

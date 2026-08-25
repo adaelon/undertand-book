@@ -152,7 +152,7 @@ impl ModelRuntimeProfile {
             matched_model: model,
             model_match: ModelSelector::Default,
             resolution: ModelProfileResolution::DefaultFallback,
-            base_instructions: InstructionAsset::inherited("resident-agent.base.v1"),
+            base_instructions: InstructionAsset::inherited("resident-agent.base.v2"),
             context_window_tokens: 128_000,
             output_reserve_tokens: 8_000,
             safety_margin_tokens: 4_000,
@@ -203,13 +203,13 @@ impl Default for ModelRuntimeCatalog {
         let mut glm = ModelRuntimeProfile::fallback("glm-5.1", ProviderToolProtocol::Native);
         glm.profile_id = "resident-agent-glm-5.1-v1".into();
         glm.model_match = ModelSelector::Exact("glm-5.1".into());
-        glm.base_instructions = InstructionAsset::inherited("resident-agent.glm-5.1.v1");
+        glm.base_instructions = InstructionAsset::inherited("resident-agent.glm-5.1.v2");
         glm.supports_parallel_tools = true;
 
         let mut gpt = ModelRuntimeProfile::fallback("gpt-5", ProviderToolProtocol::Native);
         gpt.profile_id = "resident-agent-gpt-5-v1".into();
         gpt.model_match = ModelSelector::Prefix("gpt-5".into());
-        gpt.base_instructions = InstructionAsset::inherited("resident-agent.gpt-5.v1");
+        gpt.base_instructions = InstructionAsset::inherited("resident-agent.gpt-5.v2");
         gpt.supports_parallel_tools = true;
 
         Self {
@@ -541,6 +541,21 @@ mod tests {
             react.compaction.output_schema_id,
             COMPACTION_DRAFT_SCHEMA_ID
         );
+    }
+
+    #[test]
+    fn default_catalog_versions_every_inherited_resident_base_asset() {
+        let catalog = ModelRuntimeCatalog::default();
+        let fallback = catalog.resolve("unknown-future-model", ProviderToolProtocol::Native, None);
+        let glm = catalog.resolve("glm-5.1", ProviderToolProtocol::Native, None);
+        let gpt = catalog.resolve("gpt-5.6", ProviderToolProtocol::Native, None);
+
+        assert_eq!(
+            fallback.base_instructions.asset_id,
+            "resident-agent.base.v2"
+        );
+        assert_eq!(glm.base_instructions.asset_id, "resident-agent.glm-5.1.v2");
+        assert_eq!(gpt.base_instructions.asset_id, "resident-agent.gpt-5.v2");
     }
 
     #[test]

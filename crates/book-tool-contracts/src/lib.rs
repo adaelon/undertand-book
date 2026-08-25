@@ -57,7 +57,7 @@ const CONTRACTS: &[BookToolContract] = &[
         Some("book.text"),
         Some("book_text"),
         Some("text"),
-        "按 LID 或 LID 区间取真原文。",
+        "Read canonical source text by one LID or an inclusive LID range.",
         "Read source text after a LID has been located.",
         "Do not use for lexical discovery when no LID is known.",
         "book_text.v1",
@@ -67,7 +67,7 @@ const CONTRACTS: &[BookToolContract] = &[
         Some("book.search_text"),
         Some("book_search_text"),
         Some("search_text"),
-        "在规范全文中枚举字面文本的完整 occurrence 集,返回稳定原文 UTF-16 ranges、总数与分页游标。",
+        "Enumerate the complete set of literal-text occurrences in canonical source, returning stable source UTF-16 ranges, the total count, and a pagination cursor.",
         "Locate the first, previous, or every lexical occurrence before interpreting it.",
         "Do not use lexical exhaustiveness as proof of semantic exhaustiveness.",
         "search_text.v1",
@@ -77,7 +77,7 @@ const CONTRACTS: &[BookToolContract] = &[
         Some("book.context"),
         Some("book_context"),
         Some("context"),
-        "取某 LID 的上下文指针:near=树邻接+local 边,mid=near+概念/实体其他 occurrences,far=mid+long_range 边;不带原文,用 book.text 取内容。",
+        "Return context pointers for a LID: near adds tree adjacency and local edges, mid adds other concept or entity occurrences, and far adds long-range edges. Pointers contain no source text; use book.text to read it.",
         "Expand around a verified LID through deterministic context links.",
         "Do not treat pointers as source text.",
         "book_context.v1",
@@ -87,7 +87,7 @@ const CONTRACTS: &[BookToolContract] = &[
         Some("book.concept"),
         Some("book_concept"),
         Some("concept"),
-        "确定性召回全书 concept/entity 候选,返回匹配原因、有限 preview 与完整 occurrences;调用方选择候选后必须用 book.text 读取完整证据。",
+        "Deterministically recall whole-book concept and entity candidates with match reasons, bounded previews, and complete occurrence LIDs. After choosing candidates, read their full evidence with book.text.",
         "Discover concept or entity candidates when the user may not know the graph display label.",
         "Do not treat previews as final evidence or silently select a candidate; read chosen occurrence LIDs with book.text.",
         "book_concept.v2",
@@ -97,7 +97,7 @@ const CONTRACTS: &[BookToolContract] = &[
         Some("book.structure"),
         Some("book_structure"),
         Some("structure"),
-        "BookStructure 结构投影:说明某 LID 在全书 spine/throughline/key_stop 中的结构意义。缺 at 时返回全书结构概览;缺 sidecar 时显式 unavailable。",
+        "Project BookStructure to explain a LID's role in the whole-book spine, throughline, and key stops. Without at, return the whole-book overview; when the sidecar is absent, return explicit unavailable status.",
         "Inspect the structural role of a LID or the whole-book overview.",
         "Do not use as a source-text search surface.",
         "book_structure.v1",
@@ -107,7 +107,7 @@ const CONTRACTS: &[BookToolContract] = &[
         Some("book.guide_path"),
         Some("book_guide_path"),
         Some("guide_path"),
-        "BookStructure 宏观带读路线:按 spine 分段展开 key_stops,不理解自然语言、不读取 reader/memory。缺 sidecar 时显式 unavailable。",
+        "Return a macro guided-reading route from BookStructure by expanding key stops along spine segments. It does not interpret natural language or read Reader or memory state; when the sidecar is absent, it returns explicit unavailable status.",
         "Choose macro reading stops from BookStructure.",
         "Do not use for semantic question answering.",
         "book_guide_path.v1",
@@ -117,7 +117,7 @@ const CONTRACTS: &[BookToolContract] = &[
         Some("book.paper_metadata"),
         Some("book_paper_metadata"),
         Some("paper_metadata"),
-        "返回当前单篇 paper 的 metadata projection,保留 value/source/evidence_lids/confidence;缺 sidecar 时 explicit unavailable,不生成跨论文关系。",
+        "Return the current paper's metadata projection while preserving value, source, evidence_lids, and confidence. It returns explicit unavailable status without a sidecar and never creates cross-paper relationships.",
         "Read the current paper metadata projection.",
         "Do not infer cross-paper relations.",
         "paper_metadata_projection.v1",
@@ -127,7 +127,7 @@ const CONTRACTS: &[BookToolContract] = &[
         Some("book.paper_lexicon"),
         Some("book_paper_lexicon"),
         Some("paper_lexicon"),
-        "返回当前单篇 paper 的 lexicon projection,用于术语/缩写/数据集候选对齐;缺 sidecar 时 explicit unavailable。",
+        "Return the current paper's lexicon projection for aligning term, abbreviation, and dataset candidates. It returns explicit unavailable status when the sidecar is absent.",
         "Align paper terms, abbreviations, and dataset candidates.",
         "Do not treat candidates as verified definitions without source text.",
         "paper_lexicon_projection.v1",
@@ -137,7 +137,7 @@ const CONTRACTS: &[BookToolContract] = &[
         Some("book.paper_reading_guide"),
         Some("book_paper_reading_guide"),
         Some("paper_reading_guide"),
-        "PaperReadingGuide 只读投影:组合 paper metadata/lexicon、BookStructure、graph、discourse 与原文,返回论文十问、Codebook、摘要阅读辅助。不会新增或修改持久 truth。",
+        "Return the read-only PaperReadingGuide projection, combining paper metadata and lexicon, BookStructure, graph, discourse, and source text into ten paper questions, a codebook, and abstract-reading aids. It never creates or changes persistent truth.",
         "Read a deterministic paper-reading projection.",
         "Do not use it to mutate persistent truth.",
         "paper_reading_guide.v1",
@@ -147,7 +147,7 @@ const CONTRACTS: &[BookToolContract] = &[
         Some("book.query"),
         Some("book_query"),
         Some("query"),
-        "对显式 referent 做自含语义问答:先解析 targets,再围绕冻结指代读取来源证据。",
+        "Answer a self-contained semantic question about explicit referents by resolving targets first and then reading source evidence around the frozen bindings.",
         "Answer definition, explanation, relation, or comparison obligations for explicit referents.",
         "Do not use for literal occurrence location.",
         "book_query.v1",
@@ -157,7 +157,7 @@ const CONTRACTS: &[BookToolContract] = &[
         Some("book.synthesize"),
         Some("book_synthesize"),
         Some("synthesize"),
-        "对调用方给定的离散 LID 集做综合;不外扩检索,返回 citations ⊆ 输入 lids 的综合回答。",
+        "Synthesize a caller-supplied discrete LID set without expanding retrieval, returning an answer whose citations are a subset of the input LIDs.",
         "Synthesize a caller-supplied, frozen set of LIDs.",
         "Do not expand evidence beyond the supplied LIDs.",
         "book_synthesize.v1",
@@ -910,6 +910,24 @@ mod tests {
     }
 
     #[test]
+    fn model_visible_contract_metadata_is_authored_in_english() {
+        fn contains_han(value: &str) -> bool {
+            value.chars().any(|character| {
+                matches!(
+                    character as u32,
+                    0x3400..=0x4dbf | 0x4e00..=0x9fff | 0xf900..=0xfaff
+                )
+            })
+        }
+
+        for contract in contracts() {
+            assert!(!contains_han(contract.description), "{:?}", contract.id);
+            assert!(!contains_han(contract.use_when), "{:?}", contract.id);
+            assert!(!contains_han(contract.do_not_use_when), "{:?}", contract.id);
+        }
+    }
+
+    #[test]
     fn resident_contract_schema_is_closed_and_typed() {
         for contract in contracts()
             .iter()
@@ -975,7 +993,7 @@ mod tests {
         assert_eq!(contract.aliases.mcp, Some("book_concept"));
         assert_eq!(contract.aliases.rest, Some("concept"));
         assert_eq!(contract.result_contract, "book_concept.v2");
-        assert!(contract.description.contains("候选"));
+        assert!(contract.description.contains("candidates"));
         assert!(contract.description.contains("book.text"));
         assert!(contract.use_when.contains("candidates"));
         assert!(contract.do_not_use_when.contains("previews"));

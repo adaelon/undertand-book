@@ -9,9 +9,10 @@ use std::fmt;
 mod search;
 
 pub use search::{
-    artifact_search_input_schema, validate_artifact_search_input, ArtifactSearchHitV1,
-    ArtifactSearchInput, ArtifactSearchResultV1, ARTIFACT_SEARCH_NORMALIZATION_VERSION,
-    DEFAULT_SEARCH_LIMIT, MAX_SEARCH_ANCHOR_LIDS, MAX_SEARCH_ARTIFACT_REFS, MAX_SEARCH_QUERY_CHARS,
+    artifact_search_input_schema, score_weighted_text_fields, validate_artifact_search_input,
+    ArtifactSearchHitV1, ArtifactSearchInput, ArtifactSearchResultV1, WeightedTextField,
+    WeightedTextScore, ARTIFACT_SEARCH_NORMALIZATION_VERSION, DEFAULT_SEARCH_LIMIT,
+    MAX_SEARCH_ANCHOR_LIDS, MAX_SEARCH_ARTIFACT_REFS, MAX_SEARCH_QUERY_CHARS,
     MAX_SEARCH_RESULT_BYTES, MAX_SEARCH_RESULT_LIMIT,
 };
 

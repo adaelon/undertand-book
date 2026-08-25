@@ -1,7 +1,7 @@
-use crate::{Message, Role, ToolSpec};
+use crate::{tool_exposure::CapabilityRequestAudit, Message, Role, ToolSpec};
 use serde_json::json;
 
-pub const AGENT_REQUEST_AUDIT_VERSION: &str = "agent_request_audit.v1";
+pub const AGENT_REQUEST_AUDIT_VERSION: &str = "agent_request_audit.v2";
 
 /// Server-side observability for the provider-neutral request assembled by the runtime.
 /// It intentionally stores only sizes and digests, never message or tool-result bodies.
@@ -9,6 +9,7 @@ pub const AGENT_REQUEST_AUDIT_VERSION: &str = "agent_request_audit.v1";
 pub struct AgentRequestAudit {
     pub version: String,
     pub requests: Vec<AgentRequestTurnAudit>,
+    pub capability_requests: Vec<CapabilityRequestAudit>,
     pub cumulative_billed_tokens: u32,
 }
 
@@ -17,6 +18,7 @@ impl Default for AgentRequestAudit {
         Self {
             version: AGENT_REQUEST_AUDIT_VERSION.into(),
             requests: Vec::new(),
+            capability_requests: Vec::new(),
             cumulative_billed_tokens: 0,
         }
     }
@@ -58,6 +60,10 @@ pub struct AgentRequestToolSchemaAudit {
 }
 
 impl AgentRequestAudit {
+    pub fn record_capability_request(&mut self, audit: CapabilityRequestAudit) {
+        self.capability_requests.push(audit);
+    }
+
     pub fn begin_request(
         &mut self,
         messages: &[Message],
