@@ -1,17 +1,42 @@
 // PB7 BookStructure input: emit one unit-card packet or the full-book stitch packet.
 //   tsx skills/build/book-structure-input.ts <book.md|epub> <unit:<lid>|stitch> [--book-id <id>] [--content-profile technical_learning|paper] [--paper-subtype research_article|survey]
 import { renderBookStructureModelInput } from "../../packages/core/src/model-input-renderer";
+import { resolveAutomaticBuildTarget } from "../../packages/core/src/build-orchestrator";
+import {
+  readBookStructureGenerationTask,
+  renderBookStructureGenerationTaskInput,
+} from "../../packages/core/src/book-structure-generation";
 import { computeCurrentBookStructureStatus, findUnitSource, loadBookStructureBuildContext, parseBookStructureArgs } from "./book-structure-common";
 
-const parsed = parseBookStructureArgs(process.argv.slice(2));
+const argv = process.argv.slice(2);
+const generationIndex = argv.indexOf("--shadow-generation");
+const generationDigest = generationIndex >= 0 ? argv[generationIndex + 1] : undefined;
+if (generationIndex >= 0 && (!generationDigest || generationDigest.startsWith("--"))) {
+  console.error("--shadow-generation requires a policy-set SHA-256 digest");
+  process.exit(2);
+}
+const parsed = parseBookStructureArgs(argv);
 const [book, jobId] = parsed.positional;
 if (!book || !jobId) {
-  console.error("usage: tsx book-structure-input.ts <book.md|epub> <unit:<lid>|stitch> [--book-id <id>] [--content-profile technical_learning|paper] [--paper-subtype research_article|survey]");
+  console.error("usage: tsx book-structure-input.ts <book.md|epub> <workUnitId> [--book-id <id>] [--shadow-generation <policy-set-sha256>] [--content-profile technical_learning|paper] [--paper-subtype research_article|survey]");
   process.exit(2);
 }
 
-const ctx = loadBookStructureBuildContext(book, parsed.override, parsed.contentProfile);
-if (jobId === "stitch") {
+if (generationDigest) {
+  const target = resolveAutomaticBuildTarget(book, process.cwd(), {
+    ...(parsed.override ? { book_id: parsed.override } : {}),
+  });
+  const task = readBookStructureGenerationTask(target, generationDigest, jobId);
+  if (!task) {
+    throw new Error(`frozen BookStructure generation task is unavailable: ${jobId}`);
+  }
+  process.stdout.write(renderBookStructureGenerationTaskInput(task));
+  process.stderr.write(
+    `[book-structure-input] ${jobId}: shadow_generation=${generationDigest.slice(0, 12)} kind=${task.descriptor.kind} role=${task.output_role}\n`,
+  );
+} else {
+  const ctx = loadBookStructureBuildContext(book, parsed.override, parsed.contentProfile);
+  if (jobId === "stitch") {
   const { status, stitchPacket } = computeCurrentBookStructureStatus(ctx);
   if (!stitchPacket || status.stitch_blocked) {
     console.error(`[book-structure-input] stitch blocked: ${status.unit_pending.length} unit jobs pending`);
@@ -20,10 +45,11 @@ if (jobId === "stitch") {
   }
   process.stdout.write(renderBookStructureModelInput(stitchPacket));
   process.stderr.write(`[book-structure-input] stitch: content_profile=${parsed.contentProfile.id} unit_cards=${stitchPacket.unit_cards.length} long_range_edges=${stitchPacket.long_range_edges.length}\n`);
-} else {
-  const source = findUnitSource(ctx, jobId);
-  process.stdout.write(renderBookStructureModelInput(source));
-  process.stderr.write(
-    `[book-structure-input] ${source.job_id}: content_profile=${parsed.contentProfile.id} leaves=${source.leaf_lids.length} discourse=${source.discourse_items.length} formula=${source.formula_semantics.length} pass2=${source.pass2_edges.length}\n`,
-  );
+  } else {
+    const source = findUnitSource(ctx, jobId);
+    process.stdout.write(renderBookStructureModelInput(source));
+    process.stderr.write(
+      `[book-structure-input] ${source.job_id}: content_profile=${parsed.contentProfile.id} leaves=${source.leaf_lids.length} discourse=${source.discourse_items.length} formula=${source.formula_semantics.length} pass2=${source.pass2_edges.length}\n`,
+    );
+  }
 }

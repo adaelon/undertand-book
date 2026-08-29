@@ -1,16 +1,24 @@
 import { describe, expect, it } from "vitest";
 import {
+  AUTOMATIC_BUILD_DISPATCH_LIMITS,
   planAutomaticBuildExecutorDispatches,
   type AutomaticBuildExecutorDispatchPlanV1,
 } from "../src/automatic-build-dispatch";
 import { buildAutomaticBuildPreflight, type AutomaticBuildBudgetLimitsV1 } from "../src/automatic-build-budget";
+import {
+  createBookStructureExecutionContractsV2,
+  routeBookStructureUnitWorkUnitsV2,
+} from "../src/book-structure";
 import { resolveContentProfile } from "../src/content-profile";
+import { CODEX_EXECUTOR_TRANSPORT_PROFILE_V1 } from "../src/executor-transport";
 import { automaticBuildExtractionPolicy } from "../src/semantic-artifact";
 import {
   buildWorkUnitCost,
   createWorkUnitDescriptor,
+  taskPolicyBindingForWorkUnit,
   workUnitPlanDigest,
   type WorkUnitDescriptorV2,
+  type WorkUnitDescriptorV4,
   type WorkUnitKind,
 } from "../src/stage-work-unit";
 
@@ -66,6 +74,55 @@ function quantificationPending(): WorkUnitDescriptorV2[] {
       181,
     )),
   ];
+}
+
+function proofBoundBookStructureUnit(input: {
+  unit_lid?: string;
+  whole_prompt?: string;
+} = {}): WorkUnitDescriptorV4 {
+  const unitLid = input.unit_lid ?? "1";
+  const leafLid = `${unitLid}.1`;
+  const source = {
+    job_id: `unit:${unitLid}`,
+    unit_lid: unitLid,
+    unit_kind: "chapter" as const,
+    title_path: [],
+    leaf_lids: [leafLid],
+    excerpts: [{ lid: leafLid, text: `A bounded BookStructure unit ${unitLid}.` }],
+    graph_nodes: [],
+    graph_edges: [],
+    discourse_items: [],
+    formula_semantics: [],
+    pass2_edges: [],
+  };
+  const routed = routeBookStructureUnitWorkUnitsV2({
+    target,
+    source,
+    lid_nodes: [{
+      lid: leafLid,
+      path: unitLid.split(".").map(Number).concat(1),
+      kind: "paragraph",
+      span: { start: 0, end: source.excerpts[0].text.length },
+      children: [],
+    }],
+    source_fingerprint: target.input_fingerprint,
+    contracts: createBookStructureExecutionContractsV2({
+      profile: resolveContentProfile("technical_learning"),
+      prompts: {
+        whole: input.whole_prompt ?? "BOOK_STRUCTURE_WHOLE_V2",
+        fragment: "BOOK_STRUCTURE_FRAGMENT_V1",
+        reduce: "BOOK_STRUCTURE_REDUCE_V1",
+        stitch: "BOOK_STRUCTURE_STITCH_V2",
+        stitch_fragment: "BOOK_STRUCTURE_STITCH_FRAGMENT_V1",
+        stitch_reduce: "BOOK_STRUCTURE_STITCH_REDUCE_V1",
+      },
+    }),
+    transport_profile: CODEX_EXECUTOR_TRANSPORT_PROFILE_V1,
+  });
+  if (routed.status !== "ready" || routed.mode !== "whole") {
+    throw new Error("expected a proof-bound whole BookStructure fixture");
+  }
+  return routed.work_units[0].descriptor;
 }
 
 function expectDispatchLimits(plan: AutomaticBuildExecutorDispatchPlanV1): void {
@@ -187,5 +244,74 @@ describe("automatic build executor dispatch planner", () => {
       work_units: [oversized],
       pending_ids: [oversized.work_unit_id],
     })).toThrow("dispatch limits");
+  });
+
+  it("carries V4 execution-proof bindings into BookStructure dispatch identity", () => {
+    const descriptor = proofBoundBookStructureUnit();
+    const policySetDigest = "c".repeat(64);
+    const binding = taskPolicyBindingForWorkUnit(descriptor, policySetDigest);
+    for (const kind of [
+      "structure_unit",
+      "structure_fragment",
+      "structure_reduce",
+      "structure_stitch_fragment",
+      "structure_stitch_reduce",
+      "structure_stitch",
+    ] as const) {
+      expect(AUTOMATIC_BUILD_DISPATCH_LIMITS[kind].max_input_tokens).toBe(6_000);
+    }
+
+    expect(() => planAutomaticBuildExecutorDispatches({
+      target_ref: target,
+      stage: "book_structure",
+      work_units: [descriptor],
+      pending_ids: [descriptor.work_unit_id],
+    })).toThrow(/proof-bound.*binding|missing.*binding/i);
+
+    const plan = planAutomaticBuildExecutorDispatches({
+      target_ref: target,
+      stage: "book_structure",
+      work_units: [descriptor],
+      pending_ids: [descriptor.work_unit_id],
+      task_bindings: { [descriptor.work_unit_id]: binding },
+    });
+
+    expect(plan.dispatches).toHaveLength(1);
+    expect(plan.dispatches[0]).toMatchObject({
+      kind: "structure_unit",
+      ordered_work_unit_ids: [descriptor.work_unit_id],
+      task_bindings: { [descriptor.work_unit_id]: binding },
+      limits: { max_input_tokens: 6_000 },
+    });
+  });
+
+  it("aggregates mixed V4 policy fingerprints through one proof-bound policy set", () => {
+    const first = proofBoundBookStructureUnit();
+    const second = proofBoundBookStructureUnit({
+      unit_lid: "2",
+      whole_prompt: "BOOK_STRUCTURE_WHOLE_V3",
+    });
+    const policySetDigest = "d".repeat(64);
+    const taskBindings = {
+      [first.work_unit_id]: taskPolicyBindingForWorkUnit(first, policySetDigest),
+      [second.work_unit_id]: taskPolicyBindingForWorkUnit(second, policySetDigest),
+    };
+    expect(first.policy_fingerprint).not.toEqual(second.policy_fingerprint);
+
+    const preflight = buildAutomaticBuildPreflight({
+      target_ref: target,
+      stage: "book_structure",
+      work_units: [first, second],
+      task_bindings: taskBindings,
+      pending_ids: [first.work_unit_id, second.work_unit_id],
+      quality_profile: "full",
+      requested_workers: 2,
+      available_agent_slots: 2,
+      budget,
+    });
+
+    expect(preflight.policy_set_digest).toBe(policySetDigest);
+    expect(preflight.policy_digest).toBe(policySetDigest);
+    expect(preflight).not.toHaveProperty("policy_fingerprint");
   });
 });

@@ -32,6 +32,11 @@ const extractorPromptNames = [
   "profile-sidecar-discourse-reducer.md",
   "pass2-longrange-linker.md",
   "book-structure-extractor.md",
+  "book-structure-v2-extractor.md",
+  "book-structure-fragment-extractor.md",
+  "book-structure-reducer.md",
+  "book-structure-stitch-fragment-extractor.md",
+  "book-structure-stitch-reducer.md",
 ];
 const nodeEnvironment = {
   ...process.env,
@@ -191,23 +196,58 @@ try {
       }
       if (mode === "dispatch") {
         for (const marker of [
-          "automatic_build_executor_session.v1",
-          "automatic_build_executor.v1",
+          "automatic_build_executor_session.v2",
           "executor.open",
+          "executor.input.next",
+          "executor.generation.start",
+          "executor.submit_candidate",
+          "action.kind=DELIVER_INPUT",
+          "action.kind=INPUT_CHUNK",
+          "action.kind=GENERATION_GRANT",
           "action.kind=GENERATE",
           "action.kind=WAIT",
           "action.kind=DONE",
-          "executor.session",
         ]) {
           if (!nodePrompt.includes(marker)) {
             throw new Error(`complete executor prompt is missing marker ${marker}: ${promptName}`);
           }
         }
-        if (nodePrompt.includes("automatic_build_dispatch_executor.v1")) {
-          throw new Error(`complete executor prompt retains obsolete dispatch marker: ${promptName}`);
+        for (const obsolete of [
+          "automatic_build_dispatch_executor.v1",
+          "automatic_build_executor_session.v1",
+          "automatic_build_executor.v1",
+          "candidate_path",
+          "input_command",
+          "submit_command",
+          "fail_command",
+          "heartbeat_command",
+          "executor.session",
+        ]) {
+          if (nodePrompt.includes(obsolete)) {
+            throw new Error(`complete executor prompt retains obsolete marker ${obsolete}: ${promptName}`);
+          }
         }
       }
     }
+  }
+  const sourceExecutorAgentTemplateBytes = readFileSync(path.join(
+    pluginSnapshotRoot,
+    "assets",
+    "codex-agents",
+    "understand-book-executor.toml",
+  ));
+  const sidecarExecutorAgentTemplateBytes = runBytes(
+    sidecar,
+    ["executor.agent-template"],
+    "sidecar raw executor agent template",
+    blackBoxCwd,
+  );
+  if (!sourceExecutorAgentTemplateBytes.equals(sidecarExecutorAgentTemplateBytes)) {
+    throw new Error(
+      `Node/sidecar executor agent template bytes diverged: `
+      + `node=${createHash("sha256").update(sourceExecutorAgentTemplateBytes).digest("hex")} `
+      + `sidecar=${createHash("sha256").update(sidecarExecutorAgentTemplateBytes).digest("hex")}`,
+    );
   }
 
   writeFileSync(source, "# Parity\n\nA deterministic semantic paragraph.\n", "utf8");
@@ -275,9 +315,15 @@ try {
   if (sidecarDefaultRootDoctor.value.status !== "compatible"
     || sidecarDefaultRootDoctor.value.checks?.prompt_provider?.source !== "packaged_sidecar"
     || sidecarDefaultRootDoctor.value.checks.prompt_provider.checked_extractors?.length !== extractorPromptNames.length
-    || sidecarDefaultRootDoctor.value.checks?.handoff_preparation?.status !== "compatible") {
+    || sidecarDefaultRootDoctor.value.checks?.handoff_preparation?.status !== "compatible"
+    || sidecarDefaultRootDoctor.value.checks?.plugin_shape?.status !== "compatible"
+    || sidecarDefaultRootDoctor.value.checks?.plugin_shape?.thin_plugin !== true
+    || sidecarDefaultRootDoctor.value.checks?.plugin_shape?.agent_template_required !== true
+    || sidecarDefaultRootDoctor.value.checks?.plugin_shape?.agent_template_present !== true
+    || sidecarDefaultRootDoctor.value.checks?.executor_bootstrap?.status !== "compatible") {
     throw new Error(
-      `packaged sidecar required an external plugin root for prompt preparation: ${sidecarDefaultRootDoctor.stdout}`,
+      `packaged sidecar did not validate its embedded executor bootstrap without a plugin-root override: `
+      + `${sidecarDefaultRootDoctor.stdout}`,
     );
   }
   const thinNodeDoctor = run(
@@ -329,9 +375,13 @@ try {
   const handoff = JSON.parse(handoffBytes.toString("utf8"));
   if (handoff.version !== "automatic_build_dispatch_executor_handoff.v1"
     || handoff.envelope?.dispatch_run_id !== envelope.dispatch_run_id
-    || !handoff.prompt?.includes("automatic_build_executor_session.v1")
-    || handoff.prompt?.includes("automatic_build_dispatch_executor.v1")
-    || !handoff.prompt?.includes("automatic_build_executor.v1")) {
+    || !handoff.prompt?.includes("automatic_build_executor_session.v2")
+    || !handoff.prompt?.includes("executor.open")
+    || !handoff.prompt?.includes("executor.input.next")
+    || !handoff.prompt?.includes("executor.generation.start")
+    || !handoff.prompt?.includes("executor.submit_candidate")
+    || /automatic_build_dispatch_executor\.v1|automatic_build_executor_session\.v1|automatic_build_executor\.v1|candidate_path|executor\.session/u
+      .test(handoff.prompt ?? "")) {
     throw new Error(`dispatch executor handoff content is incomplete: ${executorHandoff.path}`);
   }
   const dispatchArgs = [

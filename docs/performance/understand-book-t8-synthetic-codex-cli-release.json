@@ -1,0 +1,87 @@
+{
+  "version": "understand_book_t7_codex_cli_release_evidence.v1",
+  "status": "passed",
+  "codex_cli": "codex-cli 0.147.0",
+  "plugin": {
+    "name": "understand-book",
+    "version": "0.1.0+codex.20260828030148",
+    "manifest_sha256": "fb52377c2e559b940c9572d1aaaa27a6885fe4461dcc5fe98f8ac12100f6b1ca"
+  },
+  "registration": {
+    "scope": "personal",
+    "activation": "new_task_required",
+    "digest": "19e5d95417771e80f6f1b5bcbf42a9d5a284b7f1f6f8872a919ecc59665bf9b2"
+  },
+  "root_inventory": {
+    "server_names": [
+      "book"
+    ],
+    "executor_server_present": false,
+    "executor_tool_intersection": []
+  },
+  "semantic_smoke": {
+    "durable": {
+      "semantic_attempts": 1,
+      "committed_tasks": 1
+    },
+    "root_final_sha256": "4ff7f899eb42452cd82705d16408977e290bf658764bb12ff0027527ef9ecf53",
+    "root_event_count": 6,
+    "persisted_jsonl_files": 2
+  },
+  "trace_allowlist": {
+    "semantic_marker_records": [
+      {
+        "source": "persisted_jsonl",
+        "top_type": "event_msg",
+        "item_type": null,
+        "payload_type": "mcp_tool_call_end",
+        "contains_input_next": true,
+        "contains_submit_candidate": false
+      },
+      {
+        "source": "persisted_jsonl",
+        "top_type": "response_item",
+        "item_type": null,
+        "payload_type": "custom_tool_call_output",
+        "contains_input_next": true,
+        "contains_submit_candidate": false
+      },
+      {
+        "source": "persisted_jsonl",
+        "top_type": "response_item",
+        "item_type": null,
+        "payload_type": "custom_tool_call",
+        "contains_input_next": false,
+        "contains_submit_candidate": true
+      },
+      {
+        "source": "persisted_jsonl",
+        "top_type": "event_msg",
+        "item_type": null,
+        "payload_type": "mcp_tool_call_end",
+        "contains_input_next": false,
+        "contains_submit_candidate": true
+      }
+    ],
+    "candidate_submit_records": [
+      {
+        "source": "persisted_jsonl",
+        "top_type": "response_item",
+        "item_type": null,
+        "payload_type": "custom_tool_call",
+        "contains_input_next": false,
+        "contains_submit_candidate": true
+      },
+      {
+        "source": "persisted_jsonl",
+        "top_type": "event_msg",
+        "item_type": null,
+        "payload_type": "mcp_tool_call_end",
+        "contains_input_next": false,
+        "contains_submit_candidate": true
+      }
+    ],
+    "root_final_sensitive_hits": 0,
+    "stderr_sensitive_hits": 0
+  }
+}

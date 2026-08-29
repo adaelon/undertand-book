@@ -13,7 +13,8 @@ installation.
 
 Obtain exactly one registration scope from the user:
 
-- `personal`: install into the current user's personal Codex agent directory.
+- `personal`: install into the current user's personal Codex agent directory. When `CODEX_HOME` is
+  set, the target is `<CODEX_HOME>/agents`; otherwise it is the user-profile `.codex/agents` directory.
 - `project`: install into one explicitly named absolute workspace root. Do not infer the workspace
   from the current directory.
 

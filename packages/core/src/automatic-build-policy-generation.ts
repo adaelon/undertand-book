@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { CODEX_EXECUTOR_TRANSPORT_PROFILE_V1 } from "./executor-transport";
 import { inspectAutomaticBuildTaskClaim } from "./automatic-build-lease";
 import { automaticBuildLegacyStageArtifactPath } from "./automatic-build-legacy";
 import {
@@ -24,9 +25,12 @@ import {
   type SemanticBuildStage,
 } from "./semantic-artifact";
 import {
+  isWorkUnitDescriptorV4,
   validateWorkUnitDescriptorV3,
+  validateWorkUnitDescriptorV4,
   type WorkUnitDescriptorV2,
   type WorkUnitDescriptorV3,
+  type WorkUnitDescriptorV4,
   type WorkUnitKind,
 } from "./stage-work-unit";
 
@@ -48,7 +52,7 @@ export interface AutomaticBuildStagePolicySetV2 {
 export type AutomaticBuildPolicyMigrationCurrent =
   | {
       route: "model";
-      descriptor: WorkUnitDescriptorV3;
+      descriptor: WorkUnitDescriptorV3 | WorkUnitDescriptorV4;
       rendered_input: string;
     }
   | {
@@ -373,9 +377,14 @@ function currentIdentity(
   policySet: AutomaticBuildStagePolicySetV2,
 ): AutomaticBuildPolicyMigrationIdentityV1 {
   if (current.route === "model") {
-    let descriptor: WorkUnitDescriptorV3;
+    let descriptor: WorkUnitDescriptorV3 | WorkUnitDescriptorV4;
     try {
-      descriptor = validateWorkUnitDescriptorV3(current.descriptor);
+      descriptor = isWorkUnitDescriptorV4(current.descriptor)
+        ? validateWorkUnitDescriptorV4(
+            current.descriptor,
+            CODEX_EXECUTOR_TRANSPORT_PROFILE_V1,
+          )
+        : validateWorkUnitDescriptorV3(current.descriptor);
     } catch {
       throw new BudgetProofInvalidError("current migration descriptor has an invalid budget proof");
     }
@@ -386,7 +395,16 @@ function currentIdentity(
       && extractionPolicyEqual(candidate.policy_fingerprint, descriptor.policy_fingerprint));
     if (!member) throw new Error("current migration descriptor is outside the frozen policy set");
     try {
-      verifyModelInputBudgetProof(current.rendered_input, descriptor.input_budget_proof);
+      if (isWorkUnitDescriptorV4(descriptor)) {
+        const renderedHash = createHash("sha256")
+          .update(current.rendered_input, "utf8")
+          .digest("hex");
+        if (renderedHash !== descriptor.input_hash) {
+          throw new Error("rendered input hash mismatch");
+        }
+      } else {
+        verifyModelInputBudgetProof(current.rendered_input, descriptor.input_budget_proof);
+      }
     } catch {
       throw new BudgetProofInvalidError("current migration rendered input does not match its budget proof");
     }
@@ -400,7 +418,9 @@ function currentIdentity(
       current_route_digest: digest(descriptor),
       current_policy_digest: extractionPolicyDigest(descriptor.policy_fingerprint),
       current_input_hash: descriptor.input_hash,
-      current_proof_digest: descriptor.input_budget_proof.proof_digest,
+      current_proof_digest: isWorkUnitDescriptorV4(descriptor)
+        ? descriptor.execution_budget_proof.proof_digest
+        : descriptor.input_budget_proof.proof_digest,
     };
   }
   assertBounded(current.work_unit_id, `${current.route} work_unit_id`);
@@ -593,7 +613,9 @@ export function recordAutomaticBuildPolicyMigration(input: {
       current_route_digest: digest(descriptor),
       current_policy_digest: extractionPolicyDigest(descriptor.policy_fingerprint),
       current_input_hash: descriptor.input_hash,
-      current_proof_digest: descriptor.input_budget_proof.proof_digest,
+      current_proof_digest: isWorkUnitDescriptorV4(descriptor)
+        ? descriptor.execution_budget_proof.proof_digest
+        : descriptor.input_budget_proof.proof_digest,
     };
     return migrationBlock(identity, "budget_proof_invalid", false);
   }
@@ -816,7 +838,9 @@ export function materializeAdoptedAutomaticBuildGenerationArtifact(input: {
     stage: input.stage,
     work_unit_id: descriptor.work_unit_id,
     input_hash: descriptor.input_hash,
-    proof_digest: descriptor.input_budget_proof.proof_digest,
+    proof_digest: isWorkUnitDescriptorV4(descriptor)
+      ? descriptor.execution_budget_proof.proof_digest
+      : descriptor.input_budget_proof.proof_digest,
     policy_set_digest: policySet.policy_set_digest,
     policy_fingerprint: descriptor.policy_fingerprint,
     provenance: legacy.provenance,
@@ -846,7 +870,9 @@ function rebuiltArtifactFresh(
       stage,
       work_unit_id: descriptor.work_unit_id,
       input_hash: descriptor.input_hash,
-      proof_digest: descriptor.input_budget_proof.proof_digest,
+      proof_digest: isWorkUnitDescriptorV4(descriptor)
+        ? descriptor.execution_budget_proof.proof_digest
+        : descriptor.input_budget_proof.proof_digest,
       policy_set_digest: policySet.policy_set_digest,
       policy_fingerprint: descriptor.policy_fingerprint,
     });

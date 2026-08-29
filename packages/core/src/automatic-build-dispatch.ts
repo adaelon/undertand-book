@@ -1,13 +1,17 @@
 import { createHash } from "node:crypto";
 import type { AutomaticBuildStage, BuildTargetRefV2 } from "./build-orchestrator";
+import { CODEX_EXECUTOR_TRANSPORT_PROFILE_V1 } from "./executor-transport";
 import type {
   AutomaticBuildTaskPolicyBinding,
   AutomaticBuildTaskPolicyBindingV2,
   ExtractionPolicyFingerprintV1,
 } from "./semantic-artifact";
 import {
+  isProofBoundWorkUnitDescriptor,
   isWorkUnitDescriptorV3,
+  isWorkUnitDescriptorV4,
   validateWorkUnitDescriptorV3,
+  validateWorkUnitDescriptorV4,
   validateWorkUnitTaskPolicyBinding,
   workUnitPlanDigest,
   type WorkUnitDescriptor,
@@ -17,6 +21,7 @@ import {
 const DEFAULT_PREDICTED_SERVICE_MS = 300_000;
 const MAX_DISPATCH_SERVICE_MS = 2_400_000;
 const OTHER_KIND_MAX_INPUT_TOKENS = 10_000_000;
+const BOOK_STRUCTURE_MAX_INPUT_TOKENS = 6_000;
 
 export interface AutomaticBuildDispatchLimitsV1 {
   max_units: number;
@@ -38,8 +43,12 @@ export const AUTOMATIC_BUILD_DISPATCH_LIMITS: Record<WorkUnitKind, AutomaticBuil
   discourse_paragraph_group: { max_units: 1, max_input_tokens: OTHER_KIND_MAX_INPUT_TOKENS, max_predicted_service_ms: MAX_DISPATCH_SERVICE_MS },
   formula_context_group: { max_units: 1, max_input_tokens: OTHER_KIND_MAX_INPUT_TOKENS, max_predicted_service_ms: MAX_DISPATCH_SERVICE_MS },
   pass2_candidate_batch: { max_units: 1, max_input_tokens: OTHER_KIND_MAX_INPUT_TOKENS, max_predicted_service_ms: MAX_DISPATCH_SERVICE_MS },
-  structure_unit: { max_units: 1, max_input_tokens: OTHER_KIND_MAX_INPUT_TOKENS, max_predicted_service_ms: MAX_DISPATCH_SERVICE_MS },
-  structure_stitch: { max_units: 1, max_input_tokens: OTHER_KIND_MAX_INPUT_TOKENS, max_predicted_service_ms: MAX_DISPATCH_SERVICE_MS },
+  structure_unit: { max_units: 1, max_input_tokens: BOOK_STRUCTURE_MAX_INPUT_TOKENS, max_predicted_service_ms: MAX_DISPATCH_SERVICE_MS },
+  structure_fragment: { max_units: 1, max_input_tokens: BOOK_STRUCTURE_MAX_INPUT_TOKENS, max_predicted_service_ms: MAX_DISPATCH_SERVICE_MS },
+  structure_reduce: { max_units: 1, max_input_tokens: BOOK_STRUCTURE_MAX_INPUT_TOKENS, max_predicted_service_ms: MAX_DISPATCH_SERVICE_MS },
+  structure_stitch_fragment: { max_units: 1, max_input_tokens: BOOK_STRUCTURE_MAX_INPUT_TOKENS, max_predicted_service_ms: MAX_DISPATCH_SERVICE_MS },
+  structure_stitch_reduce: { max_units: 1, max_input_tokens: BOOK_STRUCTURE_MAX_INPUT_TOKENS, max_predicted_service_ms: MAX_DISPATCH_SERVICE_MS },
+  structure_stitch: { max_units: 1, max_input_tokens: BOOK_STRUCTURE_MAX_INPUT_TOKENS, max_predicted_service_ms: MAX_DISPATCH_SERVICE_MS },
 };
 
 export interface AutomaticBuildExecutorDispatchManifestV1 {
@@ -126,11 +135,11 @@ function dispatchFor(
     kind,
     policy_fingerprint: policy,
     ordered_work_unit_ids: units.map((unit) => unit.work_unit_id),
-    ...(isWorkUnitDescriptorV3(units[0]) ? {
+    ...(isProofBoundWorkUnitDescriptor(units[0]) ? {
       task_bindings: Object.fromEntries(units.map((unit) => {
         const binding = taskBindings?.[unit.work_unit_id];
         if (!binding || !("proof_digest" in binding) || !("policy_set_digest" in binding)) {
-          throw new Error(`v3 dispatch is missing a proof-bound task binding: ${unit.work_unit_id}`);
+          throw new Error(`proof-bound dispatch is missing a task binding: ${unit.work_unit_id}`);
         }
         return [unit.work_unit_id, binding];
       })),
@@ -165,8 +174,14 @@ export function planAutomaticBuildExecutorDispatches(input: {
     if (!sameIdentity(unit.target, input.target_ref)) throw new Error(`dispatch work unit target mismatch: ${unit.work_unit_id}`);
     if (isWorkUnitDescriptorV3(unit)) {
       validateWorkUnitDescriptorV3(unit);
+    } else if (isWorkUnitDescriptorV4(unit)) {
+      validateWorkUnitDescriptorV4(unit, CODEX_EXECUTOR_TRANSPORT_PROFILE_V1);
+    }
+    if (isProofBoundWorkUnitDescriptor(unit)) {
       const binding = input.task_bindings?.[unit.work_unit_id];
-      if (!binding) throw new Error(`v3 dispatch work unit is missing its task binding: ${unit.work_unit_id}`);
+      if (!binding) {
+        throw new Error(`proof-bound dispatch work unit is missing its task binding: ${unit.work_unit_id}`);
+      }
       validateWorkUnitTaskPolicyBinding(unit, binding);
     } else if (input.task_bindings?.[unit.work_unit_id]) {
       validateWorkUnitTaskPolicyBinding(unit, input.task_bindings[unit.work_unit_id]);
@@ -188,7 +203,9 @@ export function planAutomaticBuildExecutorDispatches(input: {
   const byKey = new Map<string, (typeof groups)[number]>();
   for (const unit of pending) {
     const binding = input.task_bindings?.[unit.work_unit_id];
-    const aggregationRole = isWorkUnitDescriptorV3(unit) ? unit.aggregation?.role ?? "none" : "v2";
+    const aggregationRole = isProofBoundWorkUnitDescriptor(unit)
+      ? unit.aggregation?.role ?? "none"
+      : "v2";
     const policySetDigest = binding && "policy_set_digest" in binding ? binding.policy_set_digest : "v1";
     const key = `${unit.version}:${unit.kind}:${aggregationRole}:${policySetDigest}:${sha256(unit.policy_fingerprint)}`;
     let group = byKey.get(key);

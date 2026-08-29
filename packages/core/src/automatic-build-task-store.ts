@@ -16,6 +16,7 @@ import type {
   BuildTargetRefV2,
 } from "./build-orchestrator";
 import {
+  isAutomaticBuildFailureDiagnosticV3,
   legacyAutomaticBuildFailureDiagnostic,
   validateAutomaticBuildFailureDiagnostic,
   type AutomaticBuildFailureDiagnosticV2,
@@ -375,8 +376,25 @@ function readScopedTerminalFailureReceipt(input: {
     || receipt.failure_diagnostic === undefined) {
     throw new Error(`invalid automatic build terminal failure receipt: ${input.file}`);
   }
+  const metrics = receipt.metrics;
+  const phaseFacts = metrics && typeof metrics === "object" && metrics !== null
+    ? {
+        writer_started: (metrics as Record<string, unknown>).writer_started === true,
+        output_bytes: (metrics as Record<string, unknown>).output_bytes,
+      }
+    : undefined;
   return {
-    failure_diagnostic: validateAutomaticBuildFailureDiagnostic(receipt.failure_diagnostic),
+    failure_diagnostic: validateAutomaticBuildFailureDiagnostic(
+      receipt.failure_diagnostic,
+      phaseFacts === undefined
+        ? undefined
+        : {
+            writer_started: phaseFacts.writer_started,
+            ...(typeof phaseFacts.output_bytes === "number"
+              ? { output_bytes: phaseFacts.output_bytes }
+              : {}),
+          },
+    ),
     sha256: sha256(readFileSync(input.file)),
   };
 }
@@ -1256,6 +1274,46 @@ export function readAutomaticBuildAttemptSnapshot(target: AutomaticBuildTarget):
   return snapshot;
 }
 
+function validateTerminalFailurePhaseFacts(
+  target: AutomaticBuildTarget,
+  input: Pick<AutomaticBuildAttemptEventInput, "stage" | "work_unit_id" | "attempt">,
+  diagnostic: AutomaticBuildFailureDiagnosticV2,
+): void {
+  if (!isAutomaticBuildFailureDiagnosticV3(diagnostic)) return;
+  if (diagnostic.phase === "input_delivery" || diagnostic.phase === "candidate_sink") {
+    throw new Error(`${diagnostic.phase} is a non-semantic terminal failure phase`);
+  }
+  const attemptDir = automaticBuildTaskAttemptDirectory(
+    target,
+    input.stage,
+    input.work_unit_id,
+    input.attempt,
+  );
+  const submissionFile = path.join(attemptDir, "submission.json");
+  if (diagnostic.phase === "generation") {
+    if (existsSync(submissionFile)) {
+      throw new Error("generation failure conflicts with a persisted writer-start fact");
+    }
+    validateAutomaticBuildFailureDiagnostic(diagnostic, {
+      writer_started: false,
+      output_bytes: 0,
+    });
+    return;
+  }
+  const metricsFile = path.join(attemptDir, "metrics.json");
+  if (!existsSync(submissionFile) || !existsSync(metricsFile)) {
+    throw new Error("artifact_writer failure requires persisted writer-start phase facts");
+  }
+  const metrics = readJson<Record<string, unknown>>(metricsFile);
+  validateAutomaticBuildFailureDiagnostic(diagnostic, {
+    writer_started: metrics.writer_started === true,
+    ...(typeof metrics.output_bytes === "number" ? { output_bytes: metrics.output_bytes } : {}),
+  });
+  if (metrics.failure_phase !== diagnostic.phase) {
+    throw new Error("artifact_writer failure metrics disagree with the diagnostic phase");
+  }
+}
+
 export function recordAutomaticBuildAttemptEvent(
   target: AutomaticBuildTarget,
   input: AutomaticBuildAttemptEventInput,
@@ -1283,6 +1341,9 @@ export function recordAutomaticBuildAttemptEvent(
       ? validateAutomaticBuildFailureDiagnostic(input.failure_diagnostic)
       : legacyAutomaticBuildFailureDiagnostic()
     : undefined;
+  if (failureDiagnostic) {
+    validateTerminalFailurePhaseFacts(target, input, failureDiagnostic);
+  }
   const event: AutomaticBuildAttemptEventV3 = {
     version: "automatic_build_attempt_event.v3",
     target_ref: target.target_ref,

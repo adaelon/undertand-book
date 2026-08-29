@@ -165,9 +165,10 @@ receipt body, command, path inspection result, or reconstructed stage status.
 Consume only `automatic_build_step.v1`. Handle its action exactly and call `build.step` again after
 the external boundary is resolved:
 
-- `SPAWN_EXECUTORS`: launch exactly one dedicated subagent for every returned
-  `opaque_handoff_ref`, subject only to the refs already bounded by the driver. Choose its bootstrap
-  provider in this strict order:
+- `SPAWN_EXECUTORS`: merge returned `opaque_handoff_ref` values into a local pending set after
+  excluding every ref already present in `live_by_ref` or `completed_refs`. Launch at most one
+  dedicated subagent per pending ref, filling only the currently available live slots. Choose each
+  ref's bootstrap provider in this strict order:
   1. If the spawn tool advertises `agent_type=understand_book_executor`, select that custom agent
      explicitly and give it only this payload, with the returned ref substituted exactly:
      ```text
@@ -186,16 +187,21 @@ the external boundary is resolved:
      the executor in root. Treat the boundary as `interrupted/bootstrap_unavailable`, then call
      `build.step` again and trust its durable result.
   The ref is the only dynamic spawn data in either provider path. Do not add a target path, prompt,
-  task input, hash, command list, receipt, or candidate. An executor final is only a harness
-  lifecycle observation; after it ends, call `build.step` and trust durable state.
-- `WAIT`: wait only `retry_after_ms`, then recompute live slots and call `build.step` again. Do not
-  duplicate an active executor or lease.
+  task input, hash, command list, receipt, or candidate. While `live_by_ref` is non-empty, wait only
+  until the first owned child becomes terminal; record only that child's bounded lifecycle state,
+  move only its ref to `completed_refs`, and immediately call `build.step`. Every other live ref
+  remains owned and must not be duplicated, orphaned, or forgotten. Never wait for all children
+  before rereading durable state, and never treat the first child final as global completion.
+- `WAIT`: if an owned child is live, wait for its first terminal event as above. Otherwise wait only
+  `retry_after_ms`, then recompute live slots and call `build.step` again. Do not duplicate an active
+  executor or lease.
 - `NEEDS_USER`: show the returned `reason`, `message`, optional `projection`, and choices exactly.
   Never invent or broaden choices. If choices are present, wait for the user and return the selected
   `request_id + choice_id` in the next step. If choices are empty, report the external blocker and
   do not manufacture a decision.
-- `DONE`: report only the returned completion summary and end. This covers both public stages and
-  any declared reader-private artifacts; the root has no separate private-artifact loop.
+- `DONE`: require `live_by_ref` to be empty, report only the returned completion summary, and end.
+  This covers both public stages and any declared reader-private artifacts; the root has no separate
+  private-artifact loop.
 
 Continue across ordinary executor completions, stage boundaries, retries, and internal recovery.
 Stop only at `NEEDS_USER`, `DONE`, explicit user interruption, or a packaged-engine failure for
@@ -204,11 +210,14 @@ which no structured action exists. Never emulate a dedicated executor in the roo
 ## Dedicated executor contract
 
 Each subagent receives one `opaque_handoff_ref` and follows the
-`automatic_build_executor_session.v1` protocol in the dedicated executor instructions:
+`automatic_build_executor_session.v2` protocol in the dedicated executor instructions:
 
 ```text
 executor.open(ref)
-  -> GENERATE: produce one strict candidate privately; send it through executor.session; continue
+  -> DELIVER_INPUT: follow next_request through executor.input.next
+  -> INPUT_CHUNK: retain the ordered chunk only in the dedicated child; acknowledge by receipt
+  -> GENERATION_GRANT: accept exactly once through executor.generation.start
+  -> GENERATE: produce one strict JSON value; send it through executor.submit_candidate; continue
   -> WAIT: wait retry_after_ms; reopen the same ref
   -> DONE: return only committed | retryable_failure | interrupted
 ```
@@ -216,8 +225,10 @@ executor.open(ref)
 The ref is not a filesystem path and must not be decoded or inspected. The session code performs
 all path, length, hash, schema, identity, mailbox, lease, receipt, writer, quality, and retry gates.
 The semantic extractor prompts remain byte-stable and use their ordinary strict-JSON output branch;
-the session does not supply the old command envelope. Candidate bytes stay in the executor-private
-temporary source and code-owned mailbox. Never return candidate JSON to the caller.
+the session does not supply the old command envelope. Semantic chunks may appear only in the
+dedicated child tool-result context, and candidate JSON may appear only in that child's structured
+`executor.submit_candidate` request and the code-owned mailbox. No candidate source file, path
+submit, shell fallback, child final, or root projection is allowed.
 
 ## Hard boundaries
 

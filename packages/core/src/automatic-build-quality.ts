@@ -16,10 +16,15 @@ import {
   type SemanticBuildStage,
 } from "./semantic-artifact";
 import {
+  isProofBoundWorkUnitDescriptor,
+  isWorkUnitDescriptorV4,
   validateWorkUnitDescriptorV3,
+  validateWorkUnitDescriptorV4,
   type WorkUnitDescriptor,
   type WorkUnitDescriptorV3,
+  type WorkUnitDescriptorV4,
 } from "./stage-work-unit";
+import { CODEX_EXECUTOR_TRANSPORT_PROFILE_V1 } from "./executor-transport";
 import {
   validateAutomaticBuildStagePolicySet,
   type AutomaticBuildStagePolicySetV2,
@@ -417,7 +422,7 @@ export function evaluateAutomaticBuildStageQualityV2(input: {
   target_ref: BuildTargetRefV2;
   stage: QualityStage;
   quality_profile: ExtractionQualityProfile;
-  work_units: WorkUnitDescriptorV3[];
+  work_units: Array<WorkUnitDescriptorV3 | WorkUnitDescriptorV4>;
   artifacts: Record<string, SemanticArtifactEnvelopeV3<unknown> | unknown>;
   routing: AutomaticBuildStageQualityRoutingEvidenceV2;
 }): AutomaticBuildStageQualityReportV2 {
@@ -436,7 +441,7 @@ export function evaluateAutomaticBuildStageQualityV2(input: {
     pushViolation(integrityViolations, "policy_set_identity_invalid");
   }
 
-  const descriptorsById = new Map<string, WorkUnitDescriptorV3>();
+  const descriptorsById = new Map<string, WorkUnitDescriptorV3 | WorkUnitDescriptorV4>();
   let provenModelUnits = 0;
   let invalidOrMissingProofs = 0;
   let invalidProof = false;
@@ -449,7 +454,11 @@ export function evaluateAutomaticBuildStageQualityV2(input: {
     }
     descriptorsById.set(descriptor.work_unit_id, descriptor);
     try {
-      validateWorkUnitDescriptorV3(descriptor);
+      if (isWorkUnitDescriptorV4(descriptor)) {
+        validateWorkUnitDescriptorV4(descriptor, CODEX_EXECUTOR_TRANSPORT_PROFILE_V1);
+      } else {
+        validateWorkUnitDescriptorV3(descriptor);
+      }
       if (!sameTargetRef(descriptor.target, input.target_ref)
         || descriptor.stage !== input.stage) {
         throw new Error("quality descriptor identity does not match target or stage");
@@ -501,7 +510,9 @@ export function evaluateAutomaticBuildStageQualityV2(input: {
         stage: input.stage as SemanticBuildStage,
         work_unit_id: descriptor.work_unit_id,
         input_hash: descriptor.input_hash,
-        proof_digest: descriptor.input_budget_proof.proof_digest,
+        proof_digest: isWorkUnitDescriptorV4(descriptor)
+          ? descriptor.execution_budget_proof.proof_digest
+          : descriptor.input_budget_proof.proof_digest,
         policy_set_digest: policySetDigest,
         policy_fingerprint: descriptor.policy_fingerprint,
       });
@@ -823,8 +834,8 @@ export function collectAutomaticBuildStageQuality(
       throw new Error(`v3 quality routing is incomplete for stage ${stageState.stage}`);
     }
     const workUnits = stageState.work_units ?? [];
-    if (workUnits.some((descriptor) => descriptor.version !== "automatic_build_work_unit.v3")) {
-      throw new Error(`v3 quality routing contains a non-v3 descriptor for stage ${stageState.stage}`);
+    if (workUnits.some((descriptor) => !isProofBoundWorkUnitDescriptor(descriptor))) {
+      throw new Error(`proof-bound quality routing contains an unproved descriptor for stage ${stageState.stage}`);
     }
     const artifacts: Record<string, unknown> = {};
     for (const descriptor of workUnits) {
@@ -840,7 +851,7 @@ export function collectAutomaticBuildStageQuality(
       target_ref: target.target_ref,
       stage: stageState.stage,
       quality_profile: qualityProfile,
-      work_units: workUnits as WorkUnitDescriptorV3[],
+      work_units: workUnits as Array<WorkUnitDescriptorV3 | WorkUnitDescriptorV4>,
       artifacts,
       routing: stageState.quality_routing,
     });

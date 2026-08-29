@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -23,6 +23,9 @@ import { claimAutomaticBuildTask, startAutomaticBuildLease } from "../src/automa
 import {
   failAutomaticBuildExecutorSession,
   openAutomaticBuildExecutorSession,
+  openAutomaticBuildExecutorSessionV2,
+  nextAutomaticBuildExecutorInput,
+  startAutomaticBuildExecutorGeneration,
   submitAutomaticBuildExecutorCandidate,
   type AutomaticBuildExecutorSessionResponseV1,
 } from "../src/automatic-build-executor-session";
@@ -32,7 +35,10 @@ import {
 } from "../src/automatic-build-task-store";
 import { resolveAutomaticBuildTarget } from "../src/build-orchestrator";
 import { resolveContentProfile } from "../src/content-profile";
-import { createAutomaticBuildFailureDiagnostic } from "../src/extractor-contract";
+import {
+  createAutomaticBuildFailureDiagnostic,
+  createAutomaticBuildFailureDiagnosticV3,
+} from "../src/extractor-contract";
 import {
   transitionBuildIntent,
   transitionBuildPlan,
@@ -414,6 +420,34 @@ function firstDecision(response: AutomaticBuildStepResponseV1) {
   return { request_id: response.action.request_id, choice_id: choice.choice_id };
 }
 
+function startV2GenerationForHandoff(opaqueHandoffRef: string, now: string) {
+  const opened = openAutomaticBuildExecutorSessionV2(opaqueHandoffRef, { now });
+  if (opened.action.kind !== "DELIVER_INPUT") {
+    throw new Error("expected V2 input delivery before generation");
+  }
+  let request = opened.action.next_request;
+  for (let ordinal = 0; ordinal < 256; ordinal += 1) {
+    const response = nextAutomaticBuildExecutorInput(request, { now });
+    if (response.action.kind === "GENERATION_GRANT") {
+      return startAutomaticBuildExecutorGeneration({
+        version: "automatic_build_executor_generation_start_request.v1",
+        opaque_session_ref: response.action.grant.opaque_session_ref,
+        generation_grant_ref: response.action.grant.generation_grant_ref,
+      }, { now });
+    }
+    if (response.action.kind !== "INPUT_CHUNK") {
+      throw new Error("expected V2 input chunk or generation grant");
+    }
+    request = {
+      version: "automatic_build_executor_input_next_request.v2",
+      opaque_session_ref: opened.action.input_manifest.opaque_session_ref,
+      generation_input_ref: opened.action.input_manifest.generation_input_ref,
+      previous_chunk_receipt: response.action.chunk.chunk_receipt,
+    };
+  }
+  throw new Error("V2 input delivery did not reach a generation grant");
+}
+
 function writeMatchedPerformanceHistory(
   value: ReturnType<typeof fixture>,
   executor: AutomaticBuildExecutorProvenanceV1,
@@ -517,9 +551,11 @@ function taskTreeDigest(target: ReturnType<typeof resolveAutomaticBuildTarget>):
 
 function exhaustFirstPublicTask(
   value: ReturnType<typeof fixture>,
-  failureDiagnostic = createAutomaticBuildFailureDiagnostic({
+  failureDiagnostic: ReturnType<typeof createAutomaticBuildFailureDiagnostic>
+    | ReturnType<typeof createAutomaticBuildFailureDiagnosticV3> = createAutomaticBuildFailureDiagnosticV3({
     category: "schema",
     code: "schema_invalid",
+    phase: "generation",
     json_pointer: "/discourse_items/0/local_summary",
     expected: "string length <= 200",
   }),
@@ -559,7 +595,8 @@ async function exhaustedRetryBoundary(
   value: ReturnType<typeof fixture>,
   createdAt: string,
   options: {
-    failure_diagnostic?: ReturnType<typeof createAutomaticBuildFailureDiagnostic>;
+    failure_diagnostic?: ReturnType<typeof createAutomaticBuildFailureDiagnostic>
+      | ReturnType<typeof createAutomaticBuildFailureDiagnosticV3>;
     expected_projection?: Record<string, unknown>;
   } = {},
 ) {
@@ -577,6 +614,7 @@ async function exhaustedRetryBoundary(
     projection: options.expected_projection ?? {
       category: "schema",
       code: "schema_invalid",
+      phase: "generation",
       stage: "pass1",
       work_unit_count: 1,
       required_recovery: "publish_new_policy_scope",
@@ -614,6 +652,39 @@ describe("S0 deterministic automatic-build driver protocol", () => {
       available_agent_slots: 1,
     });
     expect(replayed).toEqual(response);
+  });
+
+  it("fails closed before task mutation when the installed executor protocol is unavailable", async () => {
+    const driver = expectedDriver();
+    const value = fixture("executor-installation-incompatible");
+    const invocation = await createInvocation(driver, value);
+    const target = resolveAutomaticBuildTarget(value.source, value.root);
+    const before = taskTreeDigest(target);
+    const previousSidecar = process.env.UNDERSTAND_BOOK_SIDECAR_SELF;
+    process.env.UNDERSTAND_BOOK_SIDECAR_SELF = path.join(value.root, "missing-understand-book-build.exe");
+    try {
+      const response = await driver.automaticBuildStep({
+        version: "automatic_build_step_request.v1",
+        invocation_ref: invocation.invocation_ref,
+        available_agent_slots: 1,
+      });
+      expect(response.action).toMatchObject({
+        kind: "NEEDS_USER",
+        reason: "installation_incompatible",
+        projection: { category: "installation_incompatible" },
+      });
+      expect(taskTreeDigest(target)).toBe(before);
+      expectRootSafeStep(response, [
+        value.root,
+        value.source,
+        value.buildPlanPath,
+        "missing-understand-book-build.exe",
+        "PRIVATE_DRIVER_INPUT",
+      ]);
+    } finally {
+      if (previousSidecar === undefined) delete process.env.UNDERSTAND_BOOK_SIDECAR_SELF;
+      else process.env.UNDERSTAND_BOOK_SIDECAR_SELF = previousSidecar;
+    }
   });
 
   it("lets a fresh invocation reuse an expired dispatch opaque handoff", async () => {
@@ -655,6 +726,76 @@ describe("S0 deterministic automatic-build driver protocol", () => {
       vi.useRealTimers();
     }
   });
+
+  it("reissues a durable active dispatch after volatile registry loss without another semantic attempt", async () => {
+    vi.useFakeTimers();
+    const previousRegistryRoot = process.env.UNDERSTAND_BOOK_AUTOMATIC_BUILD_DRIVER_ROOT;
+    const value = fixture("durable-active-dispatch-registry-loss", {
+      body: `# Guide\n\n${"bounded durable recovery input ".repeat(400)}\n`,
+    });
+    const registryRoot = path.join(value.root, "driver-registry");
+    process.env.UNDERSTAND_BOOK_AUTOMATIC_BUILD_DRIVER_ROOT = registryRoot;
+    try {
+      vi.setSystemTime(new Date("2026-08-08T05:00:00.000Z"));
+      const driver = expectedDriver();
+      const firstInvocation = await createInvocation(driver, value, {
+        created_at: "2026-08-08T05:00:00.000Z",
+      });
+      const first = await driver.automaticBuildStep({
+        version: "automatic_build_step_request.v1",
+        invocation_ref: firstInvocation.invocation_ref,
+        available_agent_slots: 1,
+      });
+      if (first.action.kind !== "SPAWN_EXECUTORS") {
+        throw new Error("expected the first invocation to publish an executor handoff");
+      }
+      const firstRef = first.action.executors[0]?.opaque_handoff_ref;
+      if (!firstRef) throw new Error("expected the first executor handoff ref");
+      const firstGeneration = startV2GenerationForHandoff(
+        firstRef,
+        "2026-08-08T05:00:01.000Z",
+      );
+      expect(firstGeneration.action).toMatchObject({ kind: "GENERATE", semantic_attempt: 1 });
+
+      const target = resolveAutomaticBuildTarget(value.source, value.root);
+      const beforeLoss = Object.values(readAutomaticBuildAttemptSnapshot(target).stages.pass1 ?? {});
+      expect(beforeLoss).toHaveLength(1);
+      expect(beforeLoss[0]).toMatchObject({ semantic_attempt: 1, failures: 0 });
+
+      rmSync(registryRoot, { recursive: true, force: true });
+      vi.setSystemTime(new Date("2026-08-08T05:00:02.000Z"));
+      const freshInvocation = await createInvocation(driver, value, {
+        created_at: "2026-08-08T05:00:02.000Z",
+      });
+      const resumed = await driver.automaticBuildStep({
+        version: "automatic_build_step_request.v1",
+        invocation_ref: freshInvocation.invocation_ref,
+        available_agent_slots: 1,
+      });
+      expect(resumed.action.kind).toBe("SPAWN_EXECUTORS");
+      if (resumed.action.kind !== "SPAWN_EXECUTORS") {
+        throw new Error("expected durable active dispatch reissue after registry loss");
+      }
+      expect(resumed.action.executors).toEqual(first.action.executors);
+
+      const resumedGeneration = startV2GenerationForHandoff(
+        resumed.action.executors[0]!.opaque_handoff_ref,
+        "2026-08-08T05:00:03.000Z",
+      );
+      expect(resumedGeneration.action).toMatchObject({ kind: "GENERATE", semantic_attempt: 1 });
+      const afterRecovery = Object.values(readAutomaticBuildAttemptSnapshot(target).stages.pass1 ?? {});
+      expect(afterRecovery).toHaveLength(1);
+      expect(afterRecovery[0]).toMatchObject({ semantic_attempt: 1, failures: 0 });
+      expectRootSafeStep(resumed, [value.root, value.source, value.buildPlanPath]);
+    } finally {
+      if (previousRegistryRoot === undefined) {
+        delete process.env.UNDERSTAND_BOOK_AUTOMATIC_BUILD_DRIVER_ROOT;
+      } else {
+        process.env.UNDERSTAND_BOOK_AUTOMATIC_BUILD_DRIVER_ROOT = previousRegistryRoot;
+      }
+      vi.useRealTimers();
+    }
+  }, 30_000);
 
   it("resumes an expired running dispatch without republishing its manifest", () => {
     const value = fixture("expired-public-dispatch");
@@ -869,6 +1010,7 @@ describe("S0 deterministic automatic-build driver protocol", () => {
         projection: {
           category: "schema",
           code: "schema_invalid",
+          phase: "generation",
           required_recovery: "publish_new_policy_scope",
         },
       });
@@ -895,9 +1037,10 @@ describe("S0 deterministic automatic-build driver protocol", () => {
     process.env.UNDERSTAND_BOOK_AUTOMATIC_BUILD_DRIVER_ROOT = path.join(value.root, "driver-registry");
     try {
       const driver = expectedDriver();
-      const providerDiagnostic = createAutomaticBuildFailureDiagnostic({
+      const providerDiagnostic = createAutomaticBuildFailureDiagnosticV3({
         category: "provider",
         code: "provider_timeout",
+        phase: "generation",
       });
       const { invocation, retryDecision, target } = await exhaustedRetryBoundary(
         driver,
@@ -908,6 +1051,7 @@ describe("S0 deterministic automatic-build driver protocol", () => {
           expected_projection: {
             category: "provider",
             code: "provider_timeout",
+            phase: "generation",
             stage: "pass1",
             work_unit_count: 1,
             required_recovery: "confirm_transient_retry",
@@ -1314,7 +1458,7 @@ describe("S0 deterministic automatic-build driver protocol", () => {
     });
     const sidecarEntry = readFileSync(path.join(REPO_ROOT, "skills", "build", "sidecar-entry.ts"), "utf8");
     expect(sidecarEntry).toContain("command === \"build.step\"");
-    expect(sidecarEntry).toContain("command === \"executor.open\"");
+    expect(sidecarEntry).toContain("\"executor.open\",");
   }, 30_000);
 
   it("makes executor.open reject digest drift and escaping refs before any task claim", async () => {

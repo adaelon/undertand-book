@@ -17,7 +17,11 @@ import { segment } from "../src/segment";
 import { splitWindows } from "../src/window";
 import { buildPass1Artifact } from "../src/build-resume";
 import { resolveContentProfile } from "../src/content-profile";
-import { automaticBuildExtractionPolicy, buildSemanticArtifactEnvelope } from "../src/semantic-artifact";
+import {
+  automaticBuildExtractionPolicy,
+  automaticBuildGenerationArtifactPath,
+  buildSemanticArtifactEnvelope,
+} from "../src/semantic-artifact";
 import {
   buildPaperLexiconCandidateArtifact,
   routePaperLexiconWorkUnits,
@@ -32,6 +36,20 @@ import {
   freezeProfileSidecarSemanticFastPathTask,
   writeProfileSidecarSemanticFastPathCandidate,
 } from "../src/profile-sidecar-reduction";
+import {
+  bookStructureGenerationTaskPath,
+  renderBookStructureGenerationTaskInput,
+} from "../src/book-structure-generation";
+import { stageAutomaticBuildCandidate } from "../src/automatic-build-mailbox";
+import { AUTOMATIC_BUILD_PROTOCOL_V2 } from "../src/automatic-build-protocol";
+import {
+  automaticBuildNext,
+  automaticBuildPlan,
+  prepareExplicitLegacyBuildPlan,
+  runAutomaticBuildCloseStage,
+  runAutomaticBuildTaskInput,
+  submitAutomaticBuildTaskCandidate,
+} from "../../../skills/build/automatic-build";
 import { writePass1ProductionTaskArtifact } from "./helpers/model-input-routability-fixture";
 
 function tempDir(): string {
@@ -384,59 +402,217 @@ describe("automatic build orchestrator", () => {
     const bookStructure = snapshot.stages.find((stage) => stage.stage === "book_structure");
     expect(bookStructure?.pending_work_units?.length).toBeGreaterThan(0);
     expect(bookStructure?.pending_work_units?.every((unit) => unit.cost.candidate_count === 0)).toBe(true);
+    expect(bookStructure?.policy_set?.stage).toBe("book_structure");
+    expect(bookStructure?.policy_set?.members.map((member) => member.kind)).toEqual([
+      "structure_fragment",
+      "structure_reduce",
+      "structure_stitch",
+      "structure_stitch_fragment",
+      "structure_stitch_reduce",
+      "structure_unit",
+    ]);
+    expect(bookStructure?.pending_work_units?.every((unit) => (
+      unit.version === "automatic_build_work_unit.v4"
+      && unit.kind === "structure_unit"
+      && "execution_budget_proof" in unit
+    ))).toBe(true);
+    expect(bookStructure?.pending_work_units?.every((unit) => (
+      bookStructure.generation_tasks?.[unit.work_unit_id]?.kind === "book_structure"
+    ))).toBe(true);
+    expect(bookStructure?.pending_work_units?.every((unit) => {
+      if (unit.version !== "automatic_build_work_unit.v4") return false;
+      const binding = bookStructure.task_bindings?.[unit.work_unit_id];
+      return Boolean(binding && "proof_digest" in binding
+        && binding.proof_digest === unit.execution_budget_proof.proof_digest
+        && binding.policy_set_digest === bookStructure.policy_set?.policy_set_digest);
+    })).toBe(true);
     expect(target.source_path).toBe(path.resolve(sourceFile));
 
     const unitWork = bookStructure?.pending_work_units ?? [];
-    for (const unit of unitWork) {
-      const unitLid = unit.work_unit_id.slice("unit:".length);
-      writeJson(
-        path.join(workspace, ".build", "book-structure", "units", `${unitLid}.json`),
-        buildSemanticArtifactEnvelope({
-          target: target.target_ref,
-          stage: "book_structure",
-          work_unit_id: unit.work_unit_id,
-          input_hash: unit.input_hash,
-          policy_fingerprint: unit.policy_fingerprint,
-          provenance: { executor: "test", model: "codex-test", attempt: 1, generated_at: "2026-07-31T00:00:00.000Z" },
-          payload: {
-            content_hash: unit.input_hash,
-            output: {
-              unit_card: {
-                unit_lid: unitLid,
-                role: "setup",
-                summary: { text: "Structure before Pass2.", evidence_lids: [unit.evidence_lids[0]] },
-                candidate_key_stops: [],
-                depends_on: [],
-                evidence_lids: unit.evidence_lids,
-              },
-            },
-          },
-        }),
+    if (!bookStructure?.policy_set) throw new Error("missing BookStructure production policy set");
+    const buildPlan = prepareExplicitLegacyBuildPlan(target.source_path, root, {
+      book_id: target.book_id,
+      pass2: "disabled",
+      now: "2026-07-31T00:00:00.000Z",
+    }).plan;
+    const unitPlan = automaticBuildPlan(target.source_path, root, {
+      book_id: target.book_id,
+      requested_workers: Math.max(1, unitWork.length),
+      available_agent_slots: Math.max(1, unitWork.length),
+      build_plan: buildPlan,
+    });
+    if (!unitPlan.preflight) throw new Error("expected BookStructure unit preflight");
+    const unitNext = automaticBuildNext(
+      target.source_path,
+      root,
+      Math.max(1, unitWork.length),
+      {
+        book_id: target.book_id,
+        protocol: AUTOMATIC_BUILD_PROTOCOL_V2,
+        owner: "book-structure-units",
+        now: "2026-07-31T00:00:00.000Z",
+        available_agent_slots: Math.max(1, unitWork.length),
+        accepted_plan_digest: unitPlan.preflight.plan_digest,
+        build_plan: buildPlan,
+      },
+    );
+    if (unitNext.action.kind !== "extract" || unitNext.action.stage !== "book_structure") {
+      throw new Error("expected active BookStructure unit extraction action");
+    }
+    const scheduledUnits = new Map(unitNext.action.tasks.map((task) => [task.task_id, task]));
+    for (const [unitIndex, unit] of unitWork.entries()) {
+      const generation = bookStructure.generation_tasks?.[unit.work_unit_id];
+      if (generation?.kind !== "book_structure") {
+        throw new Error(`missing BookStructure production task: ${unit.work_unit_id}`);
+      }
+      const scheduled = scheduledUnits.get(unit.work_unit_id);
+      if (!scheduled) throw new Error(`BookStructure scheduler omitted ${unit.work_unit_id}`);
+      expect(scheduled.lease).toMatchObject({
+        proof_digest: unit.version === "automatic_build_work_unit.v4"
+          ? unit.execution_budget_proof.proof_digest
+          : undefined,
+        policy_set_digest: bookStructure.policy_set.policy_set_digest,
+      });
+      expect(existsSync(bookStructureGenerationTaskPath(
+        target,
+        bookStructure.policy_set.policy_set_digest,
+        unit.work_unit_id,
+      ))).toBe(true);
+      const rendered = runAutomaticBuildTaskInput(
+        target,
+        "book_structure",
+        unit.work_unit_id,
+        scheduled.lease_ref,
+        scheduled.lease.token,
+        { now: "2026-07-31T00:00:01.000Z", run_ttl_ms: 60_000 },
       );
+      expect(rendered.stdout).toBe(renderBookStructureGenerationTaskInput(generation.task));
+      const unitLid = generation.task.parent_unit_lid;
+      const candidatePath = path.join(root, `book-structure-unit-${unitIndex}.json`);
+      writeJson(candidatePath, {
+        unit_card: {
+          unit_lid: unitLid,
+          role: "setup",
+          summary: { text: "Structure before Pass2.", evidence_lids: [unitLid] },
+          candidate_key_stops: [],
+          depends_on: [],
+          evidence_lids: [unitLid],
+        },
+      });
+      stageAutomaticBuildCandidate(
+        target,
+        scheduled.lease_ref,
+        scheduled.lease.token,
+        candidatePath,
+        { now: "2026-07-31T00:00:02.000Z" },
+      );
+      const receipt = submitAutomaticBuildTaskCandidate(
+        target,
+        "book_structure",
+        unit.work_unit_id,
+        scheduled.lease_ref,
+        scheduled.lease.token,
+        { now: "2026-07-31T00:00:03.000Z" },
+      );
+      expect(receipt.artifact_path).toBe(automaticBuildGenerationArtifactPath(
+        target,
+        "book_structure",
+        bookStructure.policy_set.policy_set_digest,
+        unit.work_unit_id,
+      ));
     }
 
     const stitchSnapshot = buildAutomaticBuildSnapshot(target);
-    const stitch = stitchSnapshot.stages
-      .find((stage) => stage.stage === "book_structure")
-      ?.pending_work_units?.find((unit) => unit.work_unit_id === "stitch");
+    const stitchStage = stitchSnapshot.stages.find((stage) => stage.stage === "book_structure");
+    const stitch = stitchStage?.pending_work_units?.find((unit) => unit.work_unit_id === "stitch");
     expect(stitch).toBeDefined();
-    writeJson(
-      path.join(workspace, ".build", "book-structure", "stitch.json"),
-      buildSemanticArtifactEnvelope({
-        target: target.target_ref,
-        stage: "book_structure",
-        work_unit_id: "stitch",
-        input_hash: stitch!.input_hash,
-        policy_fingerprint: stitch!.policy_fingerprint,
-        provenance: { executor: "test", model: "codex-test", attempt: 1, generated_at: "2026-07-31T00:00:00.000Z" },
-        payload: {
-          content_hash: stitch!.input_hash,
-          output: { spine: [], throughlines: [], key_stops: [] },
-        },
-      }),
+    const stitchGeneration = stitchStage?.generation_tasks?.stitch;
+    if (stitchGeneration?.kind !== "book_structure") {
+      throw new Error("missing BookStructure stitch production task");
+    }
+    if (!stitchStage?.policy_set || !stitch) {
+      throw new Error("missing proof-bound BookStructure stitch stage");
+    }
+    const stitchPlan = automaticBuildPlan(target.source_path, root, {
+      book_id: target.book_id,
+      requested_workers: 1,
+      available_agent_slots: 1,
+      build_plan: buildPlan,
+    });
+    if (!stitchPlan.preflight) throw new Error("expected BookStructure stitch preflight");
+    const stitchNext = automaticBuildNext(target.source_path, root, 1, {
+      book_id: target.book_id,
+      protocol: AUTOMATIC_BUILD_PROTOCOL_V2,
+      owner: "book-structure-stitch",
+      now: "2026-07-31T00:01:00.000Z",
+      available_agent_slots: 1,
+      accepted_plan_digest: stitchPlan.preflight.plan_digest,
+      build_plan: buildPlan,
+    });
+    if (stitchNext.action.kind !== "extract"
+      || stitchNext.action.stage !== "book_structure"
+      || stitchNext.action.tasks.length !== 1
+      || stitchNext.action.tasks[0].task_id !== "stitch") {
+      throw new Error("expected active BookStructure stitch extraction action");
+    }
+    const stitchTask = stitchNext.action.tasks[0];
+    expect(stitchTask.lease).toMatchObject({
+      proof_digest: stitch.version === "automatic_build_work_unit.v4"
+        ? stitch.execution_budget_proof.proof_digest
+        : undefined,
+      policy_set_digest: stitchStage.policy_set.policy_set_digest,
+    });
+    expect(existsSync(bookStructureGenerationTaskPath(
+      target,
+      stitchStage.policy_set.policy_set_digest,
+      "stitch",
+    ))).toBe(true);
+    const stitchInput = runAutomaticBuildTaskInput(
+      target,
+      "book_structure",
+      "stitch",
+      stitchTask.lease_ref,
+      stitchTask.lease.token,
+      { now: "2026-07-31T00:01:01.000Z", run_ttl_ms: 60_000 },
     );
-    writeJson(path.join(workspace, "book_structure.json"), {
-      header,
+    expect(stitchInput.stdout).toBe(renderBookStructureGenerationTaskInput(stitchGeneration.task));
+    const stitchCandidatePath = path.join(root, "book-structure-stitch.json");
+    writeJson(stitchCandidatePath, { spine: [], throughlines: [], key_stops: [] });
+    stageAutomaticBuildCandidate(
+      target,
+      stitchTask.lease_ref,
+      stitchTask.lease.token,
+      stitchCandidatePath,
+      { now: "2026-07-31T00:01:02.000Z" },
+    );
+    const stitchReceipt = submitAutomaticBuildTaskCandidate(
+      target,
+      "book_structure",
+      "stitch",
+      stitchTask.lease_ref,
+      stitchTask.lease.token,
+      { now: "2026-07-31T00:01:03.000Z" },
+    );
+    expect(stitchReceipt.artifact_path).toBe(automaticBuildGenerationArtifactPath(
+      target,
+      "book_structure",
+      stitchStage!.policy_set!.policy_set_digest,
+      "stitch",
+    ));
+    const closeResult = runAutomaticBuildCloseStage(
+      target.source_path,
+      root,
+      "book_structure",
+      { quality_profile: "full", book_id: target.book_id },
+    );
+    expect(closeResult).toMatchObject({
+      version: "automatic_build_stage_close_result.v1",
+      status: "closed",
+      stage: "book_structure",
+      postcondition: { stage_closed: true },
+    });
+    expect(JSON.parse(readFileSync(path.join(workspace, "book_structure.json"), "utf8"))).toMatchObject({
+      header: { book_id: target.book_id, profile_id: target.profile_id },
       spine: [],
       throughlines: [],
       key_stops: [],
@@ -446,7 +622,14 @@ describe("automatic build orchestrator", () => {
       pending_tasks: [],
     });
 
-    const evidenceLid = unitWork[0].evidence_lids[0];
+    const firstUnitGeneration = bookStructure.generation_tasks?.[unitWork[0].work_unit_id];
+    if (firstUnitGeneration?.kind !== "book_structure") {
+      throw new Error("missing first BookStructure production task");
+    }
+    const evidenceLid = firstUnitGeneration.task.allowed_evidence_lids.find(
+      (lid) => lid !== firstUnitGeneration.task.parent_unit_lid,
+    );
+    if (!evidenceLid) throw new Error("BookStructure production task has no leaf evidence");
     writeJson(path.join(workspace, "pass2_audit.json"), {
       header,
       accepted: [{

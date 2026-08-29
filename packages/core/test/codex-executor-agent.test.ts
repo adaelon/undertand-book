@@ -13,6 +13,11 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import {
+  BUILD_EXECUTOR_BOOTSTRAP_CONTRACT_V2,
+  validateBuildExecutorAgentConfigV2,
+  validateBuildExecutorRootNegativeToolInventory,
+} from "../src/build-executor-connection-capability";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const EXECUTOR_AGENT_DESCRIPTION =
@@ -20,9 +25,8 @@ const EXECUTOR_AGENT_DESCRIPTION =
 const EXECUTOR_SKILL_PROHIBITION =
   "Do not activate `$understand-book-build`, `$understand-book-executor`, or any other skill; "
   + "this role already carries the complete bootstrap contract.";
-const EXECUTOR_CANDIDATE_CLEANUP =
-  "Delete every executor-private candidate source in a finally-equivalent cleanup immediately "
-  + "after its submit or fail call, before continuing or returning.";
+const EXECUTOR_MCP_ONLY =
+  "Use only the four tools on the dedicated `understand_book_build_executor` MCP connection.";
 
 const PROJECT_AGENT = ".codex/agents/understand-book-executor.toml";
 const ROOT_AGENT_TEMPLATE = "assets/codex-agents/understand-book-executor.toml";
@@ -34,6 +38,9 @@ const ROOT_REGISTER_SKILL = "skills/register-executor/SKILL.md";
 const RELEASE_REGISTER_SKILL = "plugins/understand-book/skills/register-executor/SKILL.md";
 const ROOT_EXECUTOR_SKILL = "skills/executor/SKILL.md";
 const RELEASE_EXECUTOR_SKILL = "plugins/understand-book/skills/executor/SKILL.md";
+const ROOT_BUILD_SKILL = "skills/build/SKILL.md";
+const RELEASE_BUILD_SKILL = "plugins/understand-book/skills/build/SKILL.md";
+const RELEASE_ASSERTION = "apps/desktop/scripts/assert-plugin-release.mjs";
 
 function absolute(relativePath: string): string {
   return path.join(REPO_ROOT, ...relativePath.split("/"));
@@ -81,12 +88,45 @@ describe("Codex executor bootstrap publication", () => {
     expect(projectAgent).toMatch(/^name\s*=\s*"understand_book_executor"\s*$/mu);
     expect(projectAgent).toContain(`description = "${EXECUTOR_AGENT_DESCRIPTION}"`);
     expect(projectAgent).not.toMatch(/^model(?:_reasoning_effort)?\s*=/mu);
+    expect(projectAgent).toContain('sandbox_mode = "read-only"');
+    expect(projectAgent).toContain("[mcp_servers.understand_book_build_executor]");
+    expect(projectAgent).toContain(`'${BUILD_EXECUTOR_BOOTSTRAP_CONTRACT_V2.bootstrap_digest}'`);
+    for (const toolName of BUILD_EXECUTOR_BOOTSTRAP_CONTRACT_V2.tools) {
+      expect(projectAgent).toContain(`"${toolName}"`);
+    }
 
     const wrapper = readText("agents/automatic-build-dispatch-executor.md");
     expect(wrapper).toContain(EXECUTOR_SKILL_PROHIBITION);
-    expect(wrapper).toContain(EXECUTOR_CANDIDATE_CLEANUP);
+    expect(wrapper).toContain(EXECUTOR_MCP_ONLY);
     expect(projectAgent).toContain(expectedDeveloperInstructionsAssignment(wrapper));
+    expect(validateBuildExecutorAgentConfigV2(projectAgent)).toMatchObject({
+      status: "compatible",
+      bootstrap_digest: BUILD_EXECUTOR_BOOTSTRAP_CONTRACT_V2.bootstrap_digest,
+      session_protocol: "automatic_build_executor_session.v2",
+      sandbox_mode: "read-only",
+      registration_scope: "agent_only",
+      shell_tool: false,
+      skills_config: "empty",
+      tool_names: [...BUILD_EXECUTOR_BOOTSTRAP_CONTRACT_V2.tools],
+    });
+    expect(() => validateBuildExecutorAgentConfigV2(
+      projectAgent.replace('sandbox_mode = "read-only"', 'sandbox_mode = "workspace-write"'),
+    )).toThrow(/bootstrap|config|incompatible/i);
+    expect(projectAgent).not.toMatch(/automatic_build_executor_session\.v1|candidate_path|executor\.session|private candidate source/u);
     expect(contractSha256(wrapper)).toMatch(/^[a-f0-9]{64}$/u);
+  });
+
+  it("keeps executor tools out of root and project MCP inventories", () => {
+    const rootConfig = `${readText(".codex/config.toml")}\n${readText(".mcp.json")}`;
+    const projectMcp = readText("plugins/understand-book/.mcp.json");
+    expect(validateBuildExecutorRootNegativeToolInventory([rootConfig, projectMcp])).toEqual({
+      status: "compatible",
+      server_registered: false,
+      executor_tool_intersection: [],
+    });
+    expect(() => validateBuildExecutorRootNegativeToolInventory([
+      `${projectMcp}\nexecutor.open`,
+    ])).toThrow(/root|project|executor tool/i);
   });
 
   it("publishes byte-identical explicit registration script and skill projections", () => {
@@ -144,6 +184,37 @@ describe("Codex executor bootstrap publication", () => {
     expect(readFileSync(target, "utf8")).toBe(conflicting);
   }, 20_000);
 
+  windowsIt("registers a personal executor agent inside an isolated CODEX_HOME", () => {
+    const registrationScript = readText(ROOT_REGISTER_SCRIPT);
+    expect(registrationScript).toContain('GetEnvironmentVariable("CODEX_HOME")');
+
+    const container = mkdtempSync(path.join(tmpdir(), "understand-book-personal-executor-agent-"));
+    const codexHome = path.join(container, "codex-home");
+    const target = path.join(codexHome, "agents", "understand-book-executor.toml");
+    const result = spawnSync("powershell.exe", [
+      "-NoProfile",
+      "-NonInteractive",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-File",
+      absolute(ROOT_REGISTER_SCRIPT),
+      "-Scope",
+      "personal",
+    ], {
+      cwd: container,
+      encoding: "utf8",
+      env: { ...process.env, CODEX_HOME: codexHome },
+    });
+
+    expect(result.status, result.stderr || result.stdout).toBe(0);
+    expect(readFileSync(target, "utf8")).toBe(readText(ROOT_AGENT_TEMPLATE));
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      scope: "personal",
+      target,
+      activation: "new_task_required",
+    });
+  }, 20_000);
+
   it("publishes a byte-identical executor-only skill backed by the canonical wrapper", () => {
     expectFiles([ROOT_EXECUTOR_SKILL, RELEASE_EXECUTOR_SKILL]);
     const rootSkill = readText(ROOT_EXECUTOR_SKILL);
@@ -155,8 +226,92 @@ describe("Codex executor bootstrap publication", () => {
     const wrapper = normalizeContract(readText("agents/automatic-build-dispatch-executor.md"));
     expect(body).toBe(wrapper);
     expect(contractSha256(body)).toBe(contractSha256(wrapper));
+    expect(rootSkill).toContain("action.chunk.chunk_receipt");
+    expect(rootSkill).toMatch(/Make exactly one executor MCP\s+call per tool step/u);
     for (const forbidden of ["BuildIntent", "BuildPlan", "build.step", "planning.context", "draft.candidate"]) {
       expect(rootSkill).not.toContain(forbidden);
+    }
+  });
+
+  it("publishes the V2 first-terminal root orchestration contract byte-identically", () => {
+    expectFiles([ROOT_BUILD_SKILL, RELEASE_BUILD_SKILL]);
+    const rootSkill = readText(ROOT_BUILD_SKILL);
+    expect(readText(RELEASE_BUILD_SKILL)).toBe(rootSkill);
+    for (const marker of [
+      "automatic_build_executor_session.v2",
+      "live_by_ref",
+      "completed_refs",
+      "first owned child becomes terminal",
+      "executor.input.next",
+      "executor.generation.start",
+      "executor.submit_candidate",
+    ]) {
+      expect(rootSkill).toContain(marker);
+    }
+    expect(rootSkill).not.toMatch(
+      /automatic_build_executor_session\.v1|executor-private temporary source|executor\.session/u,
+    );
+  });
+
+  it("passes the scoped T6 source release gate without installed or compiled evidence", () => {
+    const env = { ...process.env };
+    delete env.UNDERSTAND_BOOK_INSTALLED_PLUGIN_ROOT;
+    const result = spawnSync(process.execPath, [
+      absolute(RELEASE_ASSERTION),
+      "--source-contract-only",
+    ], {
+      cwd: REPO_ROOT,
+      encoding: "utf8",
+      env,
+    });
+
+    expect(result.status, result.stderr || result.stdout).toBe(0);
+    expect(result.stderr).toBe("");
+    expect(result.stdout).toMatch(/^plugin source contract ok: .+ skill_sha256=[a-f0-9]{64}\s*$/u);
+
+    const releaseAssertion = readText(RELEASE_ASSERTION);
+    expect(releaseAssertion.indexOf('process.argv.includes("--source-contract-only")'))
+      .toBeLessThan(releaseAssertion.indexOf("spawnSync(sidecarBinary"));
+  });
+
+  it("publishes a deterministic T7 compiled executor release gate", () => {
+    const desktopPackage = JSON.parse(readText("apps/desktop/package.json")) as {
+      scripts?: Record<string, string>;
+    };
+    expect(desktopPackage.scripts?.["test:t7-executor-release"])
+      .toContain("smoke-t7-executor-release.ts");
+    expect(desktopPackage.scripts?.["test:t7-codex-cli-release"])
+      .toContain("smoke-t7-codex-cli-release.ts");
+    expect(desktopPackage.scripts?.["package:windows"])
+      .toContain("smoke-t7-executor-release.ts");
+    expect(desktopPackage.scripts?.["package:windows"])
+      .toContain("--t7-executor-release-prechecked");
+
+    const smoke = readText("apps/desktop/scripts/smoke-t7-executor-release.ts");
+    for (const marker of [
+      "T7_SEMANTIC_INPUT_SENTINEL_317247",
+      "executor.mcp",
+      "executor.input.next",
+      "executor.generation.start",
+      "executor.submit_candidate",
+      "tampered_chunk_receipt",
+      "trace_allowlist",
+    ]) {
+      expect(smoke).toContain(marker);
+    }
+    const releaseAssertion = readText(RELEASE_ASSERTION);
+    expect(releaseAssertion).toContain("smoke-t7-executor-release.ts");
+    expect(releaseAssertion).toContain("--t7-executor-release-prechecked");
+
+    const realCliSmoke = readText("apps/desktop/scripts/smoke-t7-codex-cli-release.ts");
+    for (const marker of [
+      "CODEX_HOME: codexHome",
+      '"-Scope",\n        "personal"',
+      "agent_type=understand_book_executor",
+      "real Codex executor child never accepted generation.start",
+      "trace_allowlist",
+    ]) {
+      expect(realCliSmoke).toContain(marker);
     }
   });
 
@@ -170,6 +325,9 @@ describe("Codex executor bootstrap publication", () => {
       "scripts/register-executor-agent.ps1",
       "skills/executor/SKILL.md",
       "agent_type\\s*=\\s*understand_book_executor",
+      ".codex/config.toml",
+      "understand_book_build_executor",
+      "--source-contract-only",
     ]) {
       expect(releaseAssertion).toContain(marker);
     }

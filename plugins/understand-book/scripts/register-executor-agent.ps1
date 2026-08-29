@@ -58,15 +58,28 @@ else {
         Stop-Registration -ExitCode 2 -Message "WorkspaceRoot is valid only for project registration."
     }
 
-    $userProfile = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
-    if ([string]::IsNullOrWhiteSpace($userProfile)) {
-        Stop-Registration -ExitCode 2 -Message "The personal Codex configuration root could not be resolved."
-    }
-    $targetDirectory = Join-Path -Path $userProfile -ChildPath ".codex/agents"
-}
+    $codexHome = [Environment]::GetEnvironmentVariable("CODEX_HOME")
+    if (-not [string]::IsNullOrWhiteSpace($codexHome)) {
+        if (-not [System.IO.Path]::IsPathRooted($codexHome)) {
+            Stop-Registration -ExitCode 2 -Message "CODEX_HOME must be an absolute path."
+        }
 
-$targetPath = Join-Path -Path $targetDirectory -ChildPath $agentFileName
-$templateDigest = (Get-FileHash -LiteralPath $templatePath -Algorithm SHA256).Hash.ToLowerInvariant()
+        try {
+            $personalCodexRoot = [System.IO.Path]::GetFullPath($codexHome)
+        }
+        catch {
+            Stop-Registration -ExitCode 2 -Message "CODEX_HOME must name a valid absolute path."
+        }
+    }
+    else {
+        $userProfile = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+        if ([string]::IsNullOrWhiteSpace($userProfile)) {
+            Stop-Registration -ExitCode 2 -Message "The personal Codex configuration root could not be resolved."
+        }
+        $personalCodexRoot = Join-Path -Path $userProfile -ChildPath ".codex"
+    }
+    $targetDirectory = Join-Path -Path $personalCodexRoot -ChildPath "agents"
+}
 
 function Get-AgentDigest {
     param(
@@ -74,8 +87,25 @@ function Get-AgentDigest {
         [string]$LiteralPath
     )
 
-    return (Get-FileHash -LiteralPath $LiteralPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $stream = [System.IO.File]::OpenRead($LiteralPath)
+    try {
+        $sha256 = [System.Security.Cryptography.SHA256]::Create()
+        try {
+            $hash = $sha256.ComputeHash($stream)
+        }
+        finally {
+            $sha256.Dispose()
+        }
+    }
+    finally {
+        $stream.Dispose()
+    }
+
+    return ([System.BitConverter]::ToString($hash)).Replace("-", "").ToLowerInvariant()
 }
+
+$targetPath = Join-Path -Path $targetDirectory -ChildPath $agentFileName
+$templateDigest = Get-AgentDigest -LiteralPath $templatePath
 
 function Write-SuccessResult {
     [pscustomobject]@{

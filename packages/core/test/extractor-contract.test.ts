@@ -6,10 +6,15 @@ import {
   EXTRACTOR_CONTRACT_SCHEMA_VERSIONS,
   ExtractorContractError,
   PROFILE_SIDECAR_FIELD_CONTRACTS_V1,
+  automaticBuildFailureDiagnosticFromCandidateSinkError,
+  automaticBuildFailureDiagnosticFromExecutorReport,
   automaticBuildFailureDiagnosticFromError,
+  automaticBuildFailureDiagnosticFromWriterError,
+  createAutomaticBuildFailureDiagnosticV3,
   parseExtractorCandidate,
   parseExtractorContractErrorFromStderr,
   renderExtractorContractMarkdown,
+  validateAutomaticBuildFailureDiagnostic,
   type ExtractorFieldContractV1,
 } from "../src/extractor-contract";
 import {
@@ -105,6 +110,84 @@ describe("automatic build extractor contracts", () => {
     );
     expect(transported).toBeInstanceOf(ExtractorContractError);
     expect(automaticBuildFailureDiagnosticFromError(transported)).toEqual(diagnostic);
+  });
+
+  it("keeps executor, candidate-sink, extractor, and writer failures in distinct V3 phases", () => {
+    const incidentCodes = [
+      "semantic_input_tool_result_truncated",
+      "executor_transport_closed",
+      "candidate_source_command_failed",
+    ];
+    const executorFailures = incidentCodes.map((code) => (
+      automaticBuildFailureDiagnosticFromExecutorReport(code, "generation")
+    ));
+    expect(executorFailures).toHaveLength(3);
+    for (const [index, diagnostic] of executorFailures.entries()) {
+      expect(diagnostic).toMatchObject({
+        version: "automatic_build_failure_diagnostic.v3",
+        category: "executor",
+        code: "executor_failed",
+        phase: "generation",
+        reported_code_digest: createHash("sha256").update(incidentCodes[index]).digest("hex"),
+      });
+      expect(diagnostic.code).not.toBe("writer_failed");
+    }
+
+    expect(automaticBuildFailureDiagnosticFromCandidateSinkError(new Error("PRIVATE_SINK_PATH")))
+      .toMatchObject({
+        version: "automatic_build_failure_diagnostic.v3",
+        category: "executor",
+        code: "candidate_sink_unavailable",
+        phase: "candidate_sink",
+      });
+
+    let extractorFailure: unknown;
+    try {
+      parseExtractorCandidate("profile_sidecar", {
+        discourse_items: [{
+          lid: "3.1",
+          mode: "informative",
+          local_summary: "S".repeat(201),
+          relations: [],
+        }],
+      }, { allowed_evidence_lids: ["3.1"], formula_lids: [] });
+    } catch (error) {
+      extractorFailure = error;
+    }
+    expect(automaticBuildFailureDiagnosticFromWriterError(extractorFailure, {
+      writer_started: true,
+    })).toMatchObject({
+      version: "automatic_build_failure_diagnostic.v3",
+      category: "schema",
+      code: "schema_invalid",
+      phase: "artifact_writer",
+    });
+    expect(automaticBuildFailureDiagnosticFromWriterError(new Error("PRIVATE_WRITER_PATH"), {
+      writer_started: true,
+    })).toMatchObject({
+      version: "automatic_build_failure_diagnostic.v3",
+      category: "internal",
+      code: "writer_failed",
+      phase: "artifact_writer",
+    });
+    expect(() => automaticBuildFailureDiagnosticFromWriterError(new Error("not started"), {
+      writer_started: false,
+    })).toThrow(/writer.*start/i);
+
+    const forgedWriter = createAutomaticBuildFailureDiagnosticV3({
+      category: "internal",
+      code: "writer_failed",
+      phase: "artifact_writer",
+    });
+    expect(() => validateAutomaticBuildFailureDiagnostic(forgedWriter, {
+      writer_started: false,
+      output_bytes: 0,
+    })).toThrow(/writer.*start|phase facts/i);
+    expect(() => createAutomaticBuildFailureDiagnosticV3({
+      category: "internal",
+      code: "writer_failed",
+      phase: "generation",
+    })).toThrow(/phase/i);
   });
 
   it("binds every semantic policy hash to the raw extractor prompt bytes", () => {

@@ -1,5 +1,10 @@
 import { createHash } from "node:crypto";
 import bookStructurePrompt from "../../agents/book-structure-extractor.md";
+import bookStructureV2Prompt from "../../agents/book-structure-v2-extractor.md";
+import bookStructureFragmentPrompt from "../../agents/book-structure-fragment-extractor.md";
+import bookStructureReducerPrompt from "../../agents/book-structure-reducer.md";
+import bookStructureStitchFragmentPrompt from "../../agents/book-structure-stitch-fragment-extractor.md";
+import bookStructureStitchReducerPrompt from "../../agents/book-structure-stitch-reducer.md";
 import dispatchExecutorPrompt from "../../agents/automatic-build-dispatch-executor.md";
 import canvasGeometry from "@napi-rs/canvas/geometry.js";
 import paperLexiconPrompt from "../../agents/paper-lexicon-extractor.md";
@@ -12,6 +17,7 @@ import "pdfjs-dist/legacy/build/pdf.worker.mjs";
 import profileSidecarDiscourseFragmentPrompt from "../../agents/profile-sidecar-discourse-fragment-extractor.md";
 import profileSidecarDiscourseReducerPrompt from "../../agents/profile-sidecar-discourse-reducer.md";
 import profileSidecarPrompt from "../../agents/profile-sidecar-extractor.md";
+import executorAgentTemplate from "../../plugins/understand-book/assets/codex-agents/understand-book-executor.toml";
 import { AUTOMATIC_BUILD_RELEASE_POLICY_MEMBERS_V1 } from "../../packages/core/src/automatic-build-protocol";
 import {
   AUTOMATIC_BUILD_EXECUTOR_PROMPT_MODES,
@@ -26,6 +32,11 @@ const command = argv[0];
 
 const PROMPTS: Record<string, string> = {
   "book-structure-extractor.md": bookStructurePrompt,
+  "book-structure-v2-extractor.md": bookStructureV2Prompt,
+  "book-structure-fragment-extractor.md": bookStructureFragmentPrompt,
+  "book-structure-reducer.md": bookStructureReducerPrompt,
+  "book-structure-stitch-fragment-extractor.md": bookStructureStitchFragmentPrompt,
+  "book-structure-stitch-reducer.md": bookStructureStitchReducerPrompt,
   "paper-lexicon-extractor.md": paperLexiconPrompt,
   "paper-metadata-extractor.md": paperMetadataPrompt,
   "pass1-local-extractor.md": pass1Prompt,
@@ -95,7 +106,13 @@ async function runScript(script: string, args: string[]): Promise<void> {
   }
 }
 
-if (command === "prompt") {
+if (command === "executor.agent-template") {
+  if (argv.length !== 1) {
+    console.error("usage: understand-book-build executor.agent-template");
+    process.exit(2);
+  }
+  process.stdout.write(executorAgentTemplate);
+} else if (command === "prompt") {
   const promptName = argv[1] ?? "";
   const registeredPrompt = PROMPTS[promptName];
   if (!registeredPrompt) {
@@ -167,7 +184,16 @@ if (command === "prompt") {
   }
   prepare("automatic-build-driver.ts", []);
   await import("./automatic-build-driver");
-} else if (command === "executor.open" || command === "executor.session") {
+} else if (command === "executor.mcp") {
+  prepare("build-executor-mcp.ts", forwardedArgs(1));
+  await import("./build-executor-mcp");
+} else if ([
+  "executor.open",
+  "executor.session",
+  "executor.input.next",
+  "executor.generation.start",
+  "executor.submit_candidate",
+].includes(command ?? "")) {
   if (argv.length !== 1) {
     console.error(`usage: understand-book-build ${command} < request.json`);
     process.exit(2);
@@ -187,6 +213,6 @@ if (command === "prompt") {
   prepare("intent-blueprint.ts", forwardedArgs(1));
   await import("./intent-blueprint");
 } else {
-  console.error("usage: understand-book-build <legacy-plan|protocol-doctor|plan|next|dispatch.next|dispatch.inspect|dispatch.finish|audit-legacy|migration-mode|quality|metrics|record-attempt|heartbeat|candidate|submit|legacy-submit|fail|inspect|input|write|close|run-script|prompt|workbench-stage|build.step|executor.open|executor.session|intent.plan|intent.artifact|intent.metrics|intent.blueprint> [...args]");
+  console.error("usage: understand-book-build <legacy-plan|protocol-doctor|plan|next|dispatch.next|dispatch.inspect|dispatch.finish|audit-legacy|migration-mode|quality|metrics|record-attempt|heartbeat|candidate|submit|legacy-submit|fail|inspect|input|write|close|run-script|prompt|workbench-stage|build.step|executor.agent-template|executor.mcp|executor.open|executor.session|executor.input.next|executor.generation.start|executor.submit_candidate|intent.plan|intent.artifact|intent.metrics|intent.blueprint> [...args]");
   process.exit(2);
 }

@@ -8,6 +8,14 @@ import { fileURLToPath } from "node:url";
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(scriptDir, "..", "..", "..");
+const sourceContractOnly = process.argv.includes("--source-contract-only");
+const executorServerName = "understand_book_build_executor";
+const executorToolNames = [
+  "executor.open",
+  "executor.input.next",
+  "executor.generation.start",
+  "executor.submit_candidate",
+];
 
 async function readJson(relativePath) {
   return JSON.parse(await readFile(path.join(repoRoot, relativePath), "utf8"));
@@ -72,6 +80,10 @@ assert(
   desktopPackage.scripts?.["package:windows"]?.includes("assert-plugin-release.mjs"),
   "package:windows must gate on the plugin release assertion",
 );
+assert(
+  desktopPackage.scripts?.["test:t7-codex-cli-release"]?.includes("smoke-t7-codex-cli-release.ts"),
+  "desktop scripts must publish the authenticated T7 real Codex CLI release smoke",
+);
 
 const rootManifest = await readJson(".codex-plugin/plugin.json");
 const releaseManifest = await readJson("plugins/understand-book/.codex-plugin/plugin.json");
@@ -99,6 +111,24 @@ assert.deepEqual(
   "Book MCP must launch through the plugin-owned Windows resolver",
 );
 assert.equal(rootMcp.mcpServers?.book?.cwd, ".", "Book MCP cwd must resolve from plugin root");
+
+const rootRuntimeConfigs = [
+  ["project Codex config", await readText(".codex/config.toml")],
+  ["root plugin MCP config", JSON.stringify(rootMcp)],
+  ["published plugin MCP config", JSON.stringify(releaseMcp)],
+];
+for (const [label, configText] of rootRuntimeConfigs) {
+  assert(
+    !configText.includes(executorServerName),
+    `${label} must not register the agent-only Build Executor server`,
+  );
+  for (const toolName of executorToolNames) {
+    assert(
+      !configText.includes(toolName),
+      `${label} must not expose agent-only Build Executor tool: ${toolName}`,
+    );
+  }
+}
 
 const rootMcpLauncher = await readText("scripts/start-book-mcp.cmd");
 const releaseMcpLauncher = await readText("plugins/understand-book/scripts/start-book-mcp.cmd");
@@ -151,6 +181,30 @@ assert(
   !/^model(?:_reasoning_effort)?\s*=/mu.test(projectExecutorAgent),
   "executor custom agent must inherit model and reasoning settings",
 );
+assert.match(
+  projectExecutorAgent,
+  /^sandbox_mode\s*=\s*"read-only"\s*$/mu,
+  "executor custom agent must default to read-only sandbox mode",
+);
+assert.match(
+  projectExecutorAgent,
+  /^\[mcp_servers\.understand_book_build_executor\]\s*$/mu,
+  "executor custom agent must own the dedicated Build Executor MCP registration",
+);
+assert(
+  projectExecutorAgent.includes("executor.mcp"),
+  "executor custom agent must launch the dedicated Build Executor MCP entry",
+);
+assert(
+  /\b[a-f0-9]{64}\b/u.test(projectExecutorAgent),
+  "executor custom agent must carry the V2 bootstrap digest",
+);
+for (const toolName of executorToolNames) {
+  assert(
+    projectExecutorAgent.includes(`"${toolName}"`),
+    `executor custom agent is missing dedicated tool allowlist entry: ${toolName}`,
+  );
+}
 const canonicalExecutorWrapper = await readText("agents/automatic-build-dispatch-executor.md");
 assert(
   canonicalExecutorWrapper.includes(
@@ -158,13 +212,6 @@ assert(
       + "this role already carries the complete bootstrap contract.",
   ),
   "executor bootstrap must prohibit skill activation after role injection",
-);
-assert(
-  canonicalExecutorWrapper.includes(
-    "Delete every executor-private candidate source in a finally-equivalent cleanup immediately "
-      + "after its submit or fail call, before continuing or returning.",
-  ),
-  "executor bootstrap must delete private candidate sources after every terminal engine call",
 );
 assert(
   normalizeLineEndings(projectExecutorAgent)
@@ -188,6 +235,10 @@ assert.equal(
   await readText(releaseRegisterScriptPath),
   await readText(rootRegisterScriptPath),
   "published executor registration script must match the root script byte-for-byte",
+);
+assert(
+  (await readText(rootRegisterScriptPath)).includes('GetEnvironmentVariable("CODEX_HOME")'),
+  "personal executor registration must honor an isolated CODEX_HOME",
 );
 assert.equal(
   await readText(releaseRegisterSkillPath),
@@ -228,6 +279,9 @@ for (const marker of [
   "$understand-book-executor",
   "Do not use $understand-book-build inside this subagent.",
   "bootstrap_unavailable",
+  "live_by_ref",
+  "completed_refs",
+  "first owned child becomes terminal",
 ]) {
   assert(rootSkill.includes(marker), `build skill is missing executor provider marker: ${marker}`);
 }
@@ -253,7 +307,9 @@ const protocolMarkers = [
   "opaque_handoff_ref",
   "retry_after_ms",
   "executor.open",
-  "executor.session",
+  "executor.input.next",
+  "executor.generation.start",
+  "executor.submit_candidate",
   "The root never reads, receives, summarizes, caches, or forwards semantic input or candidate JSON.",
   "codex_build_intent_command.v2",
   "codex_build_intent_result.v2",
@@ -304,7 +360,7 @@ for (const removedMarker of [
 
 const releaseSkillSha256 = canonicalTextSha256(releaseSkill);
 const installedPluginRoot = process.env.UNDERSTAND_BOOK_INSTALLED_PLUGIN_ROOT;
-if (installedPluginRoot) {
+if (installedPluginRoot && !sourceContractOnly) {
   const installedRoot = path.resolve(installedPluginRoot);
   const relativeToRepo = path.relative(repoRoot, installedRoot);
   assert(
@@ -364,8 +420,13 @@ if (installedPluginRoot) {
 const sidecarEntry = await readText("skills/build/sidecar-entry.ts");
 for (const command of [
   "build.step",
+  "executor.agent-template",
+  "executor.mcp",
   "executor.open",
   "executor.session",
+  "executor.input.next",
+  "executor.generation.start",
+  "executor.submit_candidate",
   "intent.plan",
   "intent.artifact",
   "intent.metrics",
@@ -379,13 +440,18 @@ for (const command of [
 
 const dispatchWrapper = await readText("agents/automatic-build-dispatch-executor.md");
 for (const marker of [
-  "automatic_build_executor_session.v1",
+  "automatic_build_executor_session.v2",
   "opaque_handoff_ref",
   "executor.open",
-  "GENERATE",
-  "executor.session",
-  "WAIT",
-  "DONE",
+  "executor.input.next",
+  "executor.generation.start",
+  "executor.submit_candidate",
+  "action.kind=DELIVER_INPUT",
+  "action.kind=INPUT_CHUNK",
+  "action.kind=GENERATION_GRANT",
+  "action.kind=GENERATE",
+  "action.kind=WAIT",
+  "action.kind=DONE",
   "Never return candidate JSON to the caller",
 ]) {
   assert(dispatchWrapper.includes(marker), `dispatch executor wrapper is missing marker: ${marker}`);
@@ -398,6 +464,9 @@ for (const removedMarker of [
   "submit_command",
   "fail_command",
   "interrupt_command",
+  "automatic_build_executor_session.v1",
+  "candidate_path",
+  "executor.session",
 ]) {
   assert(
     !dispatchWrapper.includes(removedMarker),
@@ -408,6 +477,10 @@ assert(
   sidecarEntry.includes("automatic-build-dispatch-executor.md"),
   "packaged build sidecar must import the dispatch executor wrapper asset",
 );
+if (sourceContractOnly) {
+  console.log(`plugin source contract ok: ${releaseManifest.version} skill_sha256=${releaseSkillSha256}`);
+  process.exit(0);
+}
 const sidecarBinary = path.join(
   repoRoot,
   "apps",
@@ -426,12 +499,17 @@ assert.ifError(packagedPrompt.error);
 assert.equal(packagedPrompt.status, 0, `packaged executor prompt failed: ${packagedPrompt.stderr}`);
 assert.equal(packagedPrompt.stderr, "", "packaged executor prompt must reserve stderr for diagnostics");
 for (const marker of [
-  "automatic_build_executor_session.v1",
+  "automatic_build_executor_session.v2",
   "executor.open",
+  "executor.input.next",
+  "executor.generation.start",
+  "executor.submit_candidate",
+  "action.kind=DELIVER_INPUT",
+  "action.kind=INPUT_CHUNK",
+  "action.kind=GENERATION_GRANT",
   "action.kind=GENERATE",
   "action.kind=WAIT",
   "action.kind=DONE",
-  "automatic_build_executor.v1",
 ]) {
   assert(packagedPrompt.stdout.includes(marker), `packaged executor prompt is missing marker: ${marker}`);
 }
@@ -439,12 +517,25 @@ for (const marker of [
 if (!process.argv.includes("--automatic-build-parity-prechecked")) {
   const parity = spawnSync(process.execPath, [
     path.join(scriptDir, "smoke-automatic-build-parity.mjs"),
-  ], { cwd: repoRoot, encoding: "utf8", timeout: 90_000 });
+  ], { cwd: repoRoot, encoding: "utf8", timeout: 240_000 });
   assert.ifError(parity.error);
   assert.equal(
     parity.status,
     0,
     `thin-plugin accepted-next parity failed:\n${parity.stdout}\n${parity.stderr}`,
+  );
+}
+
+if (!process.argv.includes("--t7-executor-release-prechecked")) {
+  const t7ExecutorRelease = spawnSync(process.execPath, [
+    path.join(repoRoot, "node_modules", "tsx", "dist", "cli.mjs"),
+    path.join(scriptDir, "smoke-t7-executor-release.ts"),
+  ], { cwd: repoRoot, encoding: "utf8", timeout: 120_000 });
+  assert.ifError(t7ExecutorRelease.error);
+  assert.equal(
+    t7ExecutorRelease.status,
+    0,
+    `T7 compiled executor release smoke failed:\n${t7ExecutorRelease.stdout}\n${t7ExecutorRelease.stderr}`,
   );
 }
 

@@ -30,8 +30,13 @@ import {
 } from "./automatic-build-dispatch";
 import type { AutomaticBuildTaskPolicyBinding } from "./semantic-artifact";
 import {
+  CODEX_EXECUTOR_TRANSPORT_PROFILE_V1,
+} from "./executor-transport";
+import {
+  isProofBoundWorkUnitDescriptor,
   isWorkUnitDescriptorV3,
   validateWorkUnitDescriptorV3,
+  validateWorkUnitDescriptorV4,
   validateWorkUnitTaskPolicyBinding,
   type WorkUnitDescriptor,
 } from "./stage-work-unit";
@@ -960,13 +965,17 @@ function validateDescriptors(
       || stableJson(descriptor.policy_fingerprint) !== stableJson(persisted.manifest.policy_fingerprint)) {
       throw new Error(`dispatch descriptor identity changed: ${persisted.manifest.stage}/${workUnitId}`);
     }
-    if (isWorkUnitDescriptorV3(descriptor)) {
+    if (isProofBoundWorkUnitDescriptor(descriptor)) {
       const binding = taskBindings[workUnitId];
       if (!binding) {
         throw new Error(`dispatch task is missing policy binding: ${persisted.manifest.stage}/${workUnitId}`);
       }
       validateWorkUnitTaskPolicyBinding(descriptor, binding);
-      validateWorkUnitDescriptorV3(descriptor);
+      if (isWorkUnitDescriptorV3(descriptor)) {
+        validateWorkUnitDescriptorV3(descriptor);
+      } else {
+        validateWorkUnitDescriptorV4(descriptor, CODEX_EXECUTOR_TRANSPORT_PROFILE_V1);
+      }
       const persistedBinding = persisted.manifest.task_bindings?.[workUnitId];
       if (!persistedBinding || stableJson(persistedBinding) !== stableJson(binding)) {
         throw new Error(`dispatch v3 task binding changed: ${persisted.manifest.stage}/${workUnitId}`);
@@ -1030,7 +1039,9 @@ export function advanceAutomaticBuildDispatch(
         now,
         descriptor: failedDescriptor,
         binding: failedBinding,
-        ...(isWorkUnitDescriptorV3(failedDescriptor) ? { policy_generation: "v3_only" as const } : {}),
+        ...(isProofBoundWorkUnitDescriptor(failedDescriptor)
+          ? { policy_generation: "v3_only" as const }
+          : {}),
         max_semantic_attempts: input.max_semantic_attempts,
         max_lease_epochs: input.max_lease_epochs,
       },
@@ -1062,7 +1073,7 @@ export function advanceAutomaticBuildDispatch(
     now,
     descriptor,
     binding,
-    ...(isWorkUnitDescriptorV3(descriptor) ? { policy_generation: "v3_only" as const } : {}),
+    ...(isProofBoundWorkUnitDescriptor(descriptor) ? { policy_generation: "v3_only" as const } : {}),
     max_semantic_attempts: input.max_semantic_attempts,
     max_lease_epochs: input.max_lease_epochs,
   });
@@ -1083,7 +1094,7 @@ export function advanceAutomaticBuildDispatch(
     reserve_ttl_ms: persisted.reserve_ttl_ms,
     binding,
     descriptor,
-    ...(isWorkUnitDescriptorV3(descriptor) ? { policy_generation: "v3_only" as const } : {}),
+    ...(isProofBoundWorkUnitDescriptor(descriptor) ? { policy_generation: "v3_only" as const } : {}),
     max_semantic_attempts: input.max_semantic_attempts,
     max_lease_epochs: input.max_lease_epochs,
   });

@@ -6,9 +6,13 @@ import type {
   ExtractionPolicyFingerprintV1,
   ExtractionQualityProfile,
 } from "./semantic-artifact";
+import { CODEX_EXECUTOR_TRANSPORT_PROFILE_V1 } from "./executor-transport";
 import {
+  isProofBoundWorkUnitDescriptor,
   isWorkUnitDescriptorV3,
+  isWorkUnitDescriptorV4,
   validateWorkUnitDescriptorV3,
+  validateWorkUnitDescriptorV4,
   validateWorkUnitTaskPolicyBinding,
   workUnitPlanDigest,
   type WorkUnitDescriptor,
@@ -465,19 +469,25 @@ export function buildAutomaticBuildPreflight(input: {
   const eligible = input.work_units.filter((unit) => !unit.deterministic_skip);
   if (!eligible.length) throw new Error(`preflight requires eligible model work: ${input.stage}`);
   if (eligible.some((unit) => unit.stage !== input.stage)) throw new Error("preflight work unit stage mismatch");
-  const v3Units = eligible.filter(isWorkUnitDescriptorV3);
-  if (v3Units.length && v3Units.length !== eligible.length) {
-    throw new Error(`preflight stage cannot mix v2 and v3 descriptor generations: ${input.stage}`);
+  const proofBoundUnits = eligible.filter(isProofBoundWorkUnitDescriptor);
+  if (proofBoundUnits.length && proofBoundUnits.length !== eligible.length) {
+    throw new Error(`preflight stage cannot mix v2 and proof-bound descriptor generations: ${input.stage}`);
   }
   const policySetDigests = new Set<string>();
   for (const unit of eligible) {
     if (isWorkUnitDescriptorV3(unit)) {
       validateWorkUnitDescriptorV3(unit);
+    } else if (isWorkUnitDescriptorV4(unit)) {
+      validateWorkUnitDescriptorV4(unit, CODEX_EXECUTOR_TRANSPORT_PROFILE_V1);
+    }
+    if (isProofBoundWorkUnitDescriptor(unit)) {
       const binding = input.task_bindings?.[unit.work_unit_id];
-      if (!binding) throw new Error(`preflight v3 work unit is missing its proof-bound task binding: ${unit.work_unit_id}`);
+      if (!binding) {
+        throw new Error(`preflight proof-bound work unit is missing its task binding: ${unit.work_unit_id}`);
+      }
       validateWorkUnitTaskPolicyBinding(unit, binding);
       if (!("policy_set_digest" in binding)) {
-        throw new Error(`preflight v3 work unit is missing its policy-set authority: ${unit.work_unit_id}`);
+        throw new Error(`preflight proof-bound work unit is missing its policy-set authority: ${unit.work_unit_id}`);
       }
       policySetDigests.add(binding.policy_set_digest);
     } else if (input.task_bindings?.[unit.work_unit_id]) {
@@ -485,13 +495,13 @@ export function buildAutomaticBuildPreflight(input: {
     }
   }
   const policy = eligible[0].policy_fingerprint;
-  const policySetDigest = v3Units.length
+  const policySetDigest = proofBoundUnits.length
     ? [...policySetDigests][0]
     : undefined;
-  if (v3Units.length && policySetDigests.size !== 1) {
-    throw new Error(`preflight v3 stage must use exactly one policy-set digest: ${input.stage}`);
+  if (proofBoundUnits.length && policySetDigests.size !== 1) {
+    throw new Error(`preflight proof-bound stage must use exactly one policy-set digest: ${input.stage}`);
   }
-  if (!v3Units.length && eligible.some((unit) => !samePolicy(unit.policy_fingerprint, policy))) {
+  if (!proofBoundUnits.length && eligible.some((unit) => !samePolicy(unit.policy_fingerprint, policy))) {
     throw new Error(`preflight stage contains mixed policy fingerprints: ${input.stage}`);
   }
   if (eligible.some((unit) => unit.policy_fingerprint.quality_profile !== input.quality_profile)) {

@@ -41,6 +41,15 @@ export const AUTOMATIC_BUILD_FAILURE_CATEGORIES = [
 
 export type AutomaticBuildFailureCategory = typeof AUTOMATIC_BUILD_FAILURE_CATEGORIES[number];
 
+export const AUTOMATIC_BUILD_FAILURE_PHASES = [
+  "input_delivery",
+  "generation",
+  "candidate_sink",
+  "artifact_writer",
+] as const;
+
+export type AutomaticBuildFailurePhase = typeof AUTOMATIC_BUILD_FAILURE_PHASES[number];
+
 export type AutomaticBuildRequiredRecovery =
   | "publish_new_policy_scope"
   | "change_evidence_or_policy_scope"
@@ -50,7 +59,7 @@ export type AutomaticBuildRequiredRecovery =
   | "forward_fix"
   | "inspect_legacy_failure";
 
-export interface AutomaticBuildFailureDiagnosticV2 {
+export interface AutomaticBuildFailureDiagnosticLegacyV2 {
   version: "automatic_build_failure_diagnostic.v2";
   category: AutomaticBuildFailureCategory;
   code: string;
@@ -59,11 +68,44 @@ export interface AutomaticBuildFailureDiagnosticV2 {
   diagnostic_digest: string;
 }
 
+export interface AutomaticBuildFailureDiagnosticV3 {
+  version: "automatic_build_failure_diagnostic.v3";
+  category: AutomaticBuildFailureCategory;
+  code: string;
+  phase: AutomaticBuildFailurePhase;
+  json_pointer?: string;
+  expected?: string;
+  reported_code_digest?: string;
+  diagnostic_digest: string;
+}
+
+/**
+ * Compatibility name retained for callers compiled against the original V2-only
+ * surface. Readers accept both the immutable V2 record and the phase-aware V3
+ * successor; new source-specific writers explicitly create V3.
+ */
+export type AutomaticBuildFailureDiagnosticV2 =
+  | AutomaticBuildFailureDiagnosticLegacyV2
+  | AutomaticBuildFailureDiagnosticV3;
+
+export type AutomaticBuildFailureDiagnostic = AutomaticBuildFailureDiagnosticV2;
+
 export interface AutomaticBuildFailureDiagnosticInputV2 {
   category: AutomaticBuildFailureCategory;
   code: string;
   json_pointer?: string;
   expected?: string;
+}
+
+export interface AutomaticBuildFailureDiagnosticInputV3
+  extends AutomaticBuildFailureDiagnosticInputV2 {
+  phase: AutomaticBuildFailurePhase;
+  reported_code_digest?: string;
+}
+
+export interface AutomaticBuildFailurePhaseFacts {
+  writer_started?: boolean;
+  output_bytes?: number;
 }
 
 const AUTOMATIC_BUILD_FAILURE_CODES: Record<AutomaticBuildFailureCategory, ReadonlySet<string>> = {
@@ -96,10 +138,14 @@ const AUTOMATIC_BUILD_FAILURE_CODES: Record<AutomaticBuildFailureCategory, Reado
     "harness_cancelled",
     "private_exception",
     "legacy_handoff_missing",
+    "semantic_input_transport_truncated",
+    "semantic_input_delivery_interrupted",
+    "candidate_sink_unavailable",
   ]),
   budget: new Set([
     "budget_proof_invalid",
     "budget_exceeded",
+    "input_transport_budget_exceeded",
     "low_confidence_wall_budget",
     "wall_budget_exceeded",
   ]),
@@ -153,7 +199,7 @@ function failureCategoryForCode(code: string): AutomaticBuildFailureCategory | u
 
 export function createAutomaticBuildFailureDiagnostic(
   input: AutomaticBuildFailureDiagnosticInputV2,
-): AutomaticBuildFailureDiagnosticV2 {
+): AutomaticBuildFailureDiagnosticLegacyV2 {
   if (!AUTOMATIC_BUILD_FAILURE_CATEGORIES.includes(input.category)) {
     throw new Error("automatic build failure category is invalid");
   }
@@ -185,10 +231,109 @@ export function createAutomaticBuildFailureDiagnostic(
   };
 }
 
-export function validateAutomaticBuildFailureDiagnostic(
-  value: unknown,
-): AutomaticBuildFailureDiagnosticV2 {
-  if (!isRecord(value)) throw new Error("automatic build failure diagnostic must be an object");
+function validateFailurePhase(
+  category: AutomaticBuildFailureCategory,
+  code: string,
+  phase: AutomaticBuildFailurePhase,
+): void {
+  if (code === "writer_failed" && phase !== "artifact_writer") {
+    throw new Error("writer_failed requires the artifact_writer failure phase");
+  }
+  if (code === "candidate_sink_unavailable" && phase !== "candidate_sink") {
+    throw new Error("candidate_sink_unavailable requires the candidate_sink failure phase");
+  }
+  if ((code === "semantic_input_transport_truncated"
+    || code === "semantic_input_delivery_interrupted"
+    || code === "input_transport_budget_exceeded")
+    && phase !== "input_delivery") {
+    throw new Error(`${code} requires the input_delivery failure phase`);
+  }
+  if ((category === "schema" || category === "evidence")
+    && phase !== "generation" && phase !== "artifact_writer") {
+    throw new Error(`${category} failures require generation or artifact_writer phase`);
+  }
+  if (category === "provider" && phase !== "generation") {
+    throw new Error("provider failures require the generation failure phase");
+  }
+  if (category === "budget" && phase !== "input_delivery") {
+    throw new Error("budget failure diagnostics require the input_delivery failure phase");
+  }
+  if (category === "executor" && phase === "artifact_writer") {
+    throw new Error("executor failures cannot claim the artifact_writer failure phase");
+  }
+  if (category === "internal" && code === "legacy_unclassified") {
+    throw new Error("legacy_unclassified remains a V2 read-only diagnostic");
+  }
+}
+
+function validateFailurePhaseFacts(
+  diagnostic: AutomaticBuildFailureDiagnosticV3,
+  facts: AutomaticBuildFailurePhaseFacts | undefined,
+): void {
+  if (!facts) return;
+  if (facts.writer_started !== undefined && typeof facts.writer_started !== "boolean") {
+    throw new Error("automatic build writer_started phase fact is invalid");
+  }
+  if (facts.output_bytes !== undefined
+    && (!Number.isSafeInteger(facts.output_bytes) || facts.output_bytes < 0)) {
+    throw new Error("automatic build output_bytes phase fact is invalid");
+  }
+  if (diagnostic.phase === "artifact_writer" && facts.writer_started !== true) {
+    throw new Error("artifact_writer diagnostic requires a persisted writer-start phase fact");
+  }
+  if (diagnostic.phase !== "artifact_writer" && facts.writer_started === true) {
+    throw new Error(`${diagnostic.phase} diagnostic conflicts with the writer-start phase fact`);
+  }
+}
+
+export function createAutomaticBuildFailureDiagnosticV3(
+  input: AutomaticBuildFailureDiagnosticInputV3,
+): AutomaticBuildFailureDiagnosticV3 {
+  if (!AUTOMATIC_BUILD_FAILURE_CATEGORIES.includes(input.category)) {
+    throw new Error("automatic build failure category is invalid");
+  }
+  if (!AUTOMATIC_BUILD_FAILURE_PHASES.includes(input.phase)) {
+    throw new Error("automatic build failure phase is invalid");
+  }
+  const code = boundedFailureString(input.code, "automatic build failure code", MAX_FAILURE_CODE_BYTES);
+  if (!AUTOMATIC_BUILD_FAILURE_CODES[input.category].has(code)) {
+    throw new Error(`automatic build failure code is not allowlisted for ${input.category}`);
+  }
+  validateFailurePhase(input.category, code, input.phase);
+  const jsonPointer = input.json_pointer === undefined
+    ? undefined
+    : boundedFailureString(input.json_pointer, "automatic build failure json_pointer", MAX_FAILURE_POINTER_BYTES);
+  if (jsonPointer !== undefined && !jsonPointer.startsWith("/")) {
+    throw new Error("automatic build failure json_pointer must be an absolute JSON pointer");
+  }
+  const expected = input.expected === undefined
+    ? undefined
+    : boundedFailureString(input.expected, "automatic build failure expected", MAX_FAILURE_EXPECTED_BYTES);
+  const reportedCodeDigest = input.reported_code_digest;
+  if (reportedCodeDigest !== undefined
+    && (!SHA256.test(reportedCodeDigest) || input.category !== "executor" || code !== "executor_failed")) {
+    throw new Error("reported_code_digest is only valid for executor/executor_failed");
+  }
+  const identity = {
+    version: "automatic_build_failure_diagnostic.v3" as const,
+    category: input.category,
+    code,
+    phase: input.phase,
+    ...(jsonPointer === undefined ? {} : { json_pointer: jsonPointer }),
+    ...(expected === undefined ? {} : { expected }),
+    ...(reportedCodeDigest === undefined ? {} : { reported_code_digest: reportedCodeDigest }),
+  };
+  return {
+    ...identity,
+    diagnostic_digest: createHash("sha256")
+      .update(canonicalAutomaticBuildJson(identity))
+      .digest("hex"),
+  };
+}
+
+function validateAutomaticBuildFailureDiagnosticV2(
+  value: Record<string, unknown>,
+): AutomaticBuildFailureDiagnosticLegacyV2 {
   const allowed = new Set([
     "version",
     "category",
@@ -218,6 +363,68 @@ export function validateAutomaticBuildFailureDiagnostic(
   return canonical;
 }
 
+function validateAutomaticBuildFailureDiagnosticV3(
+  value: Record<string, unknown>,
+  facts?: AutomaticBuildFailurePhaseFacts,
+): AutomaticBuildFailureDiagnosticV3 {
+  const allowed = new Set([
+    "version",
+    "category",
+    "code",
+    "phase",
+    "json_pointer",
+    "expected",
+    "reported_code_digest",
+    "diagnostic_digest",
+  ]);
+  if (Object.keys(value).some((key) => !allowed.has(key))
+    || value.version !== "automatic_build_failure_diagnostic.v3"
+    || typeof value.category !== "string"
+    || !AUTOMATIC_BUILD_FAILURE_CATEGORIES.includes(value.category as AutomaticBuildFailureCategory)
+    || typeof value.code !== "string"
+    || typeof value.phase !== "string"
+    || !AUTOMATIC_BUILD_FAILURE_PHASES.includes(value.phase as AutomaticBuildFailurePhase)
+    || typeof value.diagnostic_digest !== "string"
+    || !SHA256.test(value.diagnostic_digest)) {
+    throw new Error("automatic build failure diagnostic V3 identity is invalid");
+  }
+  const canonical = createAutomaticBuildFailureDiagnosticV3({
+    category: value.category as AutomaticBuildFailureCategory,
+    code: value.code,
+    phase: value.phase as AutomaticBuildFailurePhase,
+    ...(value.json_pointer === undefined ? {} : { json_pointer: value.json_pointer as string }),
+    ...(value.expected === undefined ? {} : { expected: value.expected as string }),
+    ...(value.reported_code_digest === undefined
+      ? {}
+      : { reported_code_digest: value.reported_code_digest as string }),
+  });
+  if (canonical.diagnostic_digest !== value.diagnostic_digest) {
+    throw new Error("automatic build failure diagnostic digest mismatch");
+  }
+  validateFailurePhaseFacts(canonical, facts);
+  return canonical;
+}
+
+export function validateAutomaticBuildFailureDiagnostic(
+  value: unknown,
+  facts?: AutomaticBuildFailurePhaseFacts,
+): AutomaticBuildFailureDiagnosticV2 {
+  if (!isRecord(value)) throw new Error("automatic build failure diagnostic must be an object");
+  if (value.version === "automatic_build_failure_diagnostic.v2") {
+    return validateAutomaticBuildFailureDiagnosticV2(value);
+  }
+  if (value.version === "automatic_build_failure_diagnostic.v3") {
+    return validateAutomaticBuildFailureDiagnosticV3(value, facts);
+  }
+  throw new Error("automatic build failure diagnostic version is unsupported");
+}
+
+export function isAutomaticBuildFailureDiagnosticV3(
+  diagnostic: AutomaticBuildFailureDiagnosticV2,
+): diagnostic is AutomaticBuildFailureDiagnosticV3 {
+  return diagnostic.version === "automatic_build_failure_diagnostic.v3";
+}
+
 export function automaticBuildFailureDiagnosticFromCode(
   code: unknown,
 ): AutomaticBuildFailureDiagnosticV2 {
@@ -226,6 +433,45 @@ export function automaticBuildFailureDiagnosticFromCode(
     if (category) return createAutomaticBuildFailureDiagnostic({ category, code });
   }
   return createAutomaticBuildFailureDiagnostic({ category: "internal", code: "writer_failed" });
+}
+
+export function automaticBuildFailureDiagnosticFromExecutorReport(
+  reportedCode: unknown,
+  phase: Exclude<AutomaticBuildFailurePhase, "artifact_writer"> = "generation",
+): AutomaticBuildFailureDiagnosticV3 {
+  if (typeof reportedCode === "string") {
+    const category = failureCategoryForCode(reportedCode);
+    if (category && category !== "internal") {
+      try {
+        return createAutomaticBuildFailureDiagnosticV3({
+          category,
+          code: reportedCode,
+          phase,
+        });
+      } catch {
+        // A known code reported from an impossible source/phase remains an
+        // executor report. It must never borrow another source's semantics.
+      }
+    }
+  }
+  return createAutomaticBuildFailureDiagnosticV3({
+    category: "executor",
+    code: "executor_failed",
+    phase,
+    ...(typeof reportedCode === "string"
+      ? { reported_code_digest: createHash("sha256").update(reportedCode).digest("hex") }
+      : {}),
+  });
+}
+
+export function automaticBuildFailureDiagnosticFromCandidateSinkError(
+  _error: unknown,
+): AutomaticBuildFailureDiagnosticV3 {
+  return createAutomaticBuildFailureDiagnosticV3({
+    category: "executor",
+    code: "candidate_sink_unavailable",
+    phase: "candidate_sink",
+  });
 }
 
 export function legacyAutomaticBuildFailureDiagnostic(): AutomaticBuildFailureDiagnosticV2 {
@@ -310,6 +556,60 @@ export function automaticBuildFailureDiagnosticFromError(
     }
   }
   return createAutomaticBuildFailureDiagnostic({ category: "internal", code: "writer_failed" });
+}
+
+function automaticBuildFailureDiagnosticV3FromExtractorDiagnostic(
+  diagnostic: ExtractorContractDiagnosticV1,
+): AutomaticBuildFailureDiagnosticV3 | undefined {
+  const category = failureCategoryForCode(diagnostic.code);
+  if (category !== "schema" && category !== "evidence") return undefined;
+  return createAutomaticBuildFailureDiagnosticV3({
+    category,
+    code: diagnostic.code,
+    phase: "artifact_writer",
+    json_pointer: summarizeFailureString(diagnostic.json_pointer, MAX_FAILURE_POINTER_BYTES),
+    expected: summarizeFailureString(diagnostic.expected, MAX_FAILURE_EXPECTED_BYTES),
+  });
+}
+
+export function automaticBuildFailureDiagnosticFromWriterError(
+  error: unknown,
+  facts: { writer_started: boolean },
+): AutomaticBuildFailureDiagnosticV3 {
+  if (facts.writer_started !== true) {
+    throw new Error("writer failure mapping requires a persisted writer-start fact");
+  }
+  if (error instanceof ExtractorContractError) {
+    const extractor = automaticBuildFailureDiagnosticV3FromExtractorDiagnostic(error.diagnostic);
+    if (extractor) return extractor;
+  }
+  if (isRecord(error) && "failure_diagnostic" in error) {
+    try {
+      const existing = validateAutomaticBuildFailureDiagnostic(error.failure_diagnostic);
+      if (existing.version === "automatic_build_failure_diagnostic.v3"
+        && existing.phase === "artifact_writer") {
+        validateFailurePhaseFacts(existing, facts);
+        return existing;
+      }
+      if (existing.category === "schema" || existing.category === "evidence") {
+        return createAutomaticBuildFailureDiagnosticV3({
+          category: existing.category,
+          code: existing.code,
+          phase: "artifact_writer",
+          ...(existing.json_pointer === undefined ? {} : { json_pointer: existing.json_pointer }),
+          ...(existing.expected === undefined ? {} : { expected: existing.expected }),
+        });
+      }
+    } catch {
+      // Forged or source-incompatible diagnostics cannot choose the writer's
+      // durable classification.
+    }
+  }
+  return createAutomaticBuildFailureDiagnosticV3({
+    category: "internal",
+    code: "writer_failed",
+    phase: "artifact_writer",
+  });
 }
 
 export function parseExtractorContractErrorFromStderr(stderr: unknown): ExtractorContractError | undefined {

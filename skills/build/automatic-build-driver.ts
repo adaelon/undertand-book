@@ -24,6 +24,7 @@ import {
   issueAutomaticBuildOpaqueHandoff,
   resolveAutomaticBuildTargetLids,
 } from "../../packages/core/src/automatic-build-executor-session";
+import { readAutomaticBuildDispatch } from "../../packages/core/src/automatic-build-dispatch-runtime";
 import { validateBuildIntentAny } from "../../packages/core/src/build-intent-v2";
 import {
   resolveAutomaticBuildTarget,
@@ -43,11 +44,14 @@ import {
 } from "../../packages/core/src/automatic-build-attempt-recovery";
 import {
   createAutomaticBuildFailureDiagnostic,
+  createAutomaticBuildFailureDiagnosticV3,
+  isAutomaticBuildFailureDiagnosticV3,
   legacyAutomaticBuildFailureDiagnostic,
   requiredRecoveryForAutomaticBuildFailure,
   validateAutomaticBuildFailureDiagnostic,
   type AutomaticBuildFailureCategory,
   type AutomaticBuildFailureDiagnosticV2,
+  type AutomaticBuildFailurePhase,
   type AutomaticBuildRequiredRecovery,
 } from "../../packages/core/src/extractor-contract";
 import {
@@ -141,6 +145,7 @@ export type AutomaticBuildUserDecisionReasonV1 =
 export interface AutomaticBuildUserDecisionProjectionV1 {
   category: AutomaticBuildUserDecisionReasonV1 | AutomaticBuildFailureCategory;
   code?: string;
+  phase?: AutomaticBuildFailurePhase;
   stage?: AutomaticBuildStage;
   work_unit_count?: number;
   required_recovery?: AutomaticBuildRequiredRecovery;
@@ -874,9 +879,10 @@ function failureProjectionFor(
   const workUnitCount = tasks.length;
   let diagnostic: AutomaticBuildFailureDiagnosticV2;
   if (reason === "executor_instability") {
-    diagnostic = createAutomaticBuildFailureDiagnostic({
+    diagnostic = createAutomaticBuildFailureDiagnosticV3({
       category: "executor",
       code: "executor_instability",
+      phase: "generation",
     });
   } else {
     const diagnostics = tasks.flatMap((task) => {
@@ -890,14 +896,29 @@ function failureProjectionFor(
     if (!diagnostics.length) {
       diagnostic = legacyAutomaticBuildFailureDiagnostic();
     } else if (diagnostics.every((item) => (
-      item.category === diagnostics[0].category && item.code === diagnostics[0].code
+      item.version === diagnostics[0].version
+      && item.category === diagnostics[0].category
+      && item.code === diagnostics[0].code
+      && (!isAutomaticBuildFailureDiagnosticV3(item)
+        || (isAutomaticBuildFailureDiagnosticV3(diagnostics[0])
+          && item.phase === diagnostics[0].phase))
     ))) {
       diagnostic = diagnostics[0];
     } else {
-      diagnostic = createAutomaticBuildFailureDiagnostic({
-        category: "internal",
-        code: "multiple_failure_causes",
-      });
+      const phases = diagnostics.flatMap((item) => (
+        isAutomaticBuildFailureDiagnosticV3(item) ? [item.phase] : []
+      ));
+      diagnostic = phases.length === diagnostics.length
+        && phases.every((phase) => phase === phases[0])
+        ? createAutomaticBuildFailureDiagnosticV3({
+            category: "internal",
+            code: "multiple_failure_causes",
+            phase: phases[0],
+          })
+        : createAutomaticBuildFailureDiagnostic({
+            category: "internal",
+            code: "multiple_failure_causes",
+          });
     }
   }
   return {
@@ -930,6 +951,9 @@ function projectionFor(
   return {
     category: failure?.diagnostic.category ?? reason,
     ...(failure ? { code: failure.diagnostic.code } : {}),
+    ...(failure && isAutomaticBuildFailureDiagnosticV3(failure.diagnostic)
+      ? { phase: failure.diagnostic.phase }
+      : {}),
     ...(stage ? { stage } : {}),
     ...(failure ? {
       work_unit_count: failure.work_unit_count,
@@ -1341,7 +1365,8 @@ function currentAttemptScopeDigest(
   const descriptor = stageState?.work_units?.find((unit) => unit.work_unit_id === workUnitId);
   const binding = stageState?.task_bindings?.[workUnitId];
   if (!descriptor
-    || descriptor.version !== "automatic_build_work_unit.v3"
+    || (descriptor.version !== "automatic_build_work_unit.v3"
+      && descriptor.version !== "automatic_build_work_unit.v4")
     || !binding
     || !("proof_digest" in binding)
     || !("policy_set_digest" in binding)) return undefined;
@@ -1623,6 +1648,56 @@ function replayDispatchHandoffRefs(
   }));
 }
 
+function reissueActiveDispatchHandoffRefs(
+  invocation: AutomaticBuildInvocationRecordV1,
+  stageValue: unknown,
+  activeDispatchIdsValue: unknown,
+  dispatchRunIdValue: unknown,
+  issuedAt: string,
+): Array<{ opaque_handoff_ref: string }> {
+  const stage = safeStage(stageValue);
+  if (!stage || !Array.isArray(activeDispatchIdsValue) || !activeDispatchIdsValue.length) {
+    throw new Error("automatic build active dispatch reissue input is invalid");
+  }
+  const dispatchRunId = boundedString(dispatchRunIdValue, "dispatch_run_id", 512);
+  const activeDispatchIds = activeDispatchIdsValue.map((value) => boundedString(
+    value,
+    "active_dispatch_id",
+    512,
+  ));
+  const target = resolveAutomaticBuildTarget(
+    invocation.input.target_input,
+    invocation.input.root_dir,
+  );
+  const dispatches = activeDispatchIds.map((dispatchId) => {
+    const persisted = readAutomaticBuildDispatch(target, stage, dispatchId, dispatchRunId);
+    if (persisted.manifest.stage !== stage
+      || persisted.manifest.dispatch_id !== dispatchId
+      || persisted.dispatch_run_id !== dispatchRunId) {
+      throw new Error("automatic build durable dispatch identity changed during reissue");
+    }
+    const issued = issueAutomaticBuildOpaqueHandoff({
+      target,
+      kind: "public_dispatch",
+      owner_identity: {
+        version: "automatic_build_dispatch_owner_identity.v1",
+        stage,
+        dispatch_id: dispatchId,
+        dispatch_run_id: dispatchRunId,
+      },
+      executor_handoff: persisted.executor_handoff,
+      issued_at: issuedAt,
+    });
+    return {
+      manifest: persisted.manifest,
+      dispatch_run_id: persisted.dispatch_run_id,
+      executor_handoff: persisted.executor_handoff,
+      opaque_handoff_ref: issued.opaque_handoff_ref,
+    };
+  });
+  return dispatchHandoffRefs(invocation, dispatches);
+}
+
 function readBoundedJsonWithin(rootInput: string, fileInput: string, label: string): unknown {
   const root = path.resolve(rootInput);
   const rootStat = lstatSync(root);
@@ -1851,12 +1926,17 @@ export function automaticBuildStep(inputValue: AutomaticBuildStepRequestV1): Aut
     if (action.kind === "waiting") {
       if (action.reason === "active_dispatches") {
         const replayed = replayDispatchHandoffRefs(invocation, action.active_dispatch_ids);
-        if (replayed) {
-          return finalizeResponse({
-            version: "automatic_build_step.v1",
-            action: { kind: "SPAWN_EXECUTORS", executors: replayed },
-          });
-        }
+        const executors = replayed ?? reissueActiveDispatchHandoffRefs(
+          invocation,
+          action.stage,
+          action.active_dispatch_ids,
+          action.dispatch_run_id,
+          transitionNow(current, input.available_agent_slots, effect),
+        );
+        return finalizeResponse({
+          version: "automatic_build_step.v1",
+          action: { kind: "SPAWN_EXECUTORS", executors },
+        });
       }
       const waitReason = action.reason === "active_leases" ? "active_lease" : "active_executors";
       const retryAfter = typeof action.retry_after_ms === "number" && Number.isSafeInteger(action.retry_after_ms)

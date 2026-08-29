@@ -1,0 +1,37 @@
+{
+  "version": "understand_book_t7_executor_release_evidence.v1",
+  "status": "passed",
+  "protocol": "automatic_build_executor_session.v2",
+  "transport_profile_digest": "7db2980824bda15cdf4e9a0a3844da466ca4275dea8ad7eaba714ffe605fdf7b",
+  "compiled_sidecar_sha256": "63a2220ca0f148b20a4e913442d66a603a568d1d10b049a6f61114956dfda1e6",
+  "tool_inventory": [
+    "executor.open",
+    "executor.input.next",
+    "executor.generation.start",
+    "executor.submit_candidate"
+  ],
+  "synthetic_input": {
+    "legacy_fixture_bytes": 317247,
+    "compiled_chunk_count": 4,
+    "compiled_delivered_bytes": 24308,
+    "max_tool_result_bytes": 8192,
+    "chunk_zero_request_replays": 4
+  },
+  "attempt_contract": {
+    "before_generation_start": 0,
+    "accepted_generation_count": 1,
+    "final_semantic_attempt_count": 1,
+    "untouched_cross_handoff_attempt_count": 0
+  },
+  "negative_gates": {
+    "unknown_request_field": "protocol_incompatible",
+    "cross_handoff_connection": "protocol_incompatible",
+    "premature_generation_start": "protocol_incompatible",
+    "tampered_chunk_receipt": "protocol_incompatible"
+  },
+  "trace_allowlist": {
+    "semantic_chunk_hits": 1,
+    "candidate_request_hits": 2
+  },
+  "final_status": "committed"
+}

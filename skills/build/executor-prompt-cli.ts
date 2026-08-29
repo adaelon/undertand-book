@@ -18,6 +18,11 @@ export const AUTOMATIC_BUILD_EXTRACTOR_PROMPT_NAMES = [
   "profile-sidecar-discourse-reducer.md",
   "pass2-longrange-linker.md",
   "book-structure-extractor.md",
+  "book-structure-v2-extractor.md",
+  "book-structure-fragment-extractor.md",
+  "book-structure-reducer.md",
+  "book-structure-stitch-fragment-extractor.md",
+  "book-structure-stitch-reducer.md",
 ] as const;
 
 export const AUTOMATIC_BUILD_SHADOW_EXTRACTOR_PROMPT_NAMES = [] as const;

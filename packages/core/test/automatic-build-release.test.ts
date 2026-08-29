@@ -142,7 +142,7 @@ describe("automatic build BP8 production release", () => {
       build_plan: buildPlan,
     });
     expect(doctor).toMatchObject({
-      version: "automatic_build_protocol_doctor.v2",
+      version: "automatic_build_protocol_doctor.v3",
       status: "compatible",
       checks: {
         prompt_provider: {
@@ -159,6 +159,11 @@ describe("automatic build BP8 production release", () => {
             "profile-sidecar-discourse-reducer.md",
             "pass2-longrange-linker.md",
             "book-structure-extractor.md",
+            "book-structure-v2-extractor.md",
+            "book-structure-fragment-extractor.md",
+            "book-structure-reducer.md",
+            "book-structure-stitch-fragment-extractor.md",
+            "book-structure-stitch-reducer.md",
           ],
         },
         handoff_preparation: {
@@ -169,6 +174,23 @@ describe("automatic build BP8 production release", () => {
           status: "compatible",
           thin_plugin: false,
           agents_required: false,
+        },
+        executor_bootstrap: {
+          status: "compatible",
+          session_protocol: "automatic_build_executor_session.v2",
+          registration_scope: "agent_only",
+          sandbox_mode: "read-only",
+        },
+        root_tool_inventory: {
+          status: "compatible",
+          server_registered: false,
+          executor_tool_intersection: [],
+        },
+        connection_capability: {
+          status: "compatible",
+          model_parameter: false,
+          cross_handoff_rejected: true,
+          session_private_root_bound: true,
         },
       },
       production_default: AUTOMATIC_BUILD_EXECUTOR_DISPATCH_PROTOCOL_V1,
@@ -195,7 +217,7 @@ describe("automatic build BP8 production release", () => {
         build_plan: buildPlan,
       });
       expect(doctor).toMatchObject({
-        version: "automatic_build_protocol_doctor.v2",
+        version: "automatic_build_protocol_doctor.v3",
         status: "incompatible",
         checks: {
           prompt_provider: {
@@ -208,8 +230,14 @@ describe("automatic build BP8 production release", () => {
             diagnostic_code: "prompt_provider_unavailable",
           },
           plugin_shape: {
-            status: "compatible",
+            status: "incompatible",
             agents_required: false,
+            agent_template_present: false,
+            diagnostic_code: "plugin_shape_incompatible",
+          },
+          executor_bootstrap: {
+            status: "incompatible",
+            diagnostic_code: "executor_bootstrap_incompatible",
           },
         },
         target_state: { dry_run_mutates_state: false },

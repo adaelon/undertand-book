@@ -13,13 +13,22 @@ import { planAutomaticBuildExecutorDispatches } from "../src/automatic-build-dis
 import { claimAutomaticBuildTask, startAutomaticBuildLease } from "../src/automatic-build-lease";
 import { failAutomaticBuildTask, submitAutomaticBuildCandidate } from "../src/automatic-build-mailbox";
 import {
+  createBookStructureExecutionContractsV2,
+  routeBookStructureUnitWorkUnitsV2,
+} from "../src/book-structure";
+import {
   listAutomaticBuildStoredAttempts,
   readAutomaticBuildAttemptSnapshot,
 } from "../src/automatic-build-task-store";
 import { resolveAutomaticBuildTarget } from "../src/build-orchestrator";
 import { resolveContentProfile } from "../src/content-profile";
+import { CODEX_EXECUTOR_TRANSPORT_PROFILE_V1 } from "../src/executor-transport";
 import { automaticBuildExtractionPolicy } from "../src/semantic-artifact";
-import { buildWorkUnitCost, createWorkUnitDescriptor } from "../src/stage-work-unit";
+import {
+  buildWorkUnitCost,
+  createWorkUnitDescriptor,
+  taskPolicyBindingForWorkUnit,
+} from "../src/stage-work-unit";
 
 function fixture() {
   const root = mkdtempSync(path.join(tmpdir(), "understand-book-dispatch-runtime-"));
@@ -140,6 +149,83 @@ function seedSemanticFailure(
 }
 
 describe("automatic build executor dispatch runtime", () => {
+  it("advances a proof-bound V4 BookStructure dispatch through the scoped binding path", () => {
+    const root = mkdtempSync(path.join(tmpdir(), "understand-book-dispatch-runtime-v4-"));
+    const sourcePath = path.join(root, "guide.md");
+    writeFileSync(sourcePath, "# Guide\n\nA bounded BookStructure unit.\n", "utf8");
+    const target = resolveAutomaticBuildTarget(sourcePath, root);
+    const profile = resolveContentProfile("technical_learning");
+    const routed = routeBookStructureUnitWorkUnitsV2({
+      target: target.target_ref,
+      source: {
+        job_id: "unit:1",
+        unit_lid: "1",
+        unit_kind: "chapter",
+        title_path: [],
+        leaf_lids: ["1.1"],
+        excerpts: [{ lid: "1.1", text: "A bounded BookStructure unit." }],
+        graph_nodes: [],
+        graph_edges: [],
+        discourse_items: [],
+        formula_semantics: [],
+        pass2_edges: [],
+      },
+      lid_nodes: [{
+        lid: "1.1",
+        path: [1, 1],
+        kind: "paragraph",
+        span: { start: 0, end: 29 },
+        children: [],
+      }],
+      source_fingerprint: target.target_ref.input_fingerprint,
+      contracts: createBookStructureExecutionContractsV2({
+        profile,
+        quality_profile: "full",
+        prompts: {
+          whole: "BOOK_STRUCTURE_WHOLE_V2\nReturn one strict JSON unit card.\n",
+          fragment: "BOOK_STRUCTURE_FRAGMENT_V1\nReturn one grounded local observation.\n",
+          reduce: "BOOK_STRUCTURE_REDUCE_V1\nReduce proof-bound child observations.\n",
+          stitch: "BOOK_STRUCTURE_STITCH_V2\nReturn the public BookStructure candidate.\n",
+          stitch_fragment: "BOOK_STRUCTURE_STITCH_FRAGMENT_V1\nReturn one local stitch observation.\n",
+          stitch_reduce: "BOOK_STRUCTURE_STITCH_REDUCE_V1\nReduce proof-bound stitch observations.\n",
+        },
+      }),
+      transport_profile: CODEX_EXECUTOR_TRANSPORT_PROFILE_V1,
+    });
+    expect(routed.status).toBe("ready");
+    if (routed.status !== "ready") throw new Error("expected one routable V4 BookStructure unit");
+    expect(routed.work_units).toHaveLength(1);
+    const descriptor = routed.work_units[0].descriptor;
+    expect(descriptor.version).toBe("automatic_build_work_unit.v4");
+    const binding = taskPolicyBindingForWorkUnit(descriptor, "a".repeat(64));
+    const plan = planAutomaticBuildExecutorDispatches({
+      target_ref: target.target_ref,
+      stage: "book_structure",
+      work_units: [descriptor],
+      task_bindings: { [descriptor.work_unit_id]: binding },
+      pending_ids: [descriptor.work_unit_id],
+      available_agent_slots: 1,
+    });
+    expect(plan.dispatches).toHaveLength(1);
+    const manifest = plan.dispatches[0];
+    persistAutomaticBuildDispatch(target, manifest, {
+      owner: `dispatch-v4:${manifest.dispatch_id}`,
+      created_at: "2026-08-27T02:00:00.000Z",
+      reserve_ttl_ms: 60_000,
+      run_ttl_ms: 1_800_000,
+    });
+    expect(listAutomaticBuildStoredAttempts(target, "book_structure")).toEqual([]);
+
+    const advanced = advanceAutomaticBuildDispatch(target, "book_structure", manifest.dispatch_id, {
+      descriptors: [descriptor],
+      task_bindings: { [descriptor.work_unit_id]: binding },
+      now: "2026-08-27T02:00:01.000Z",
+    });
+
+    expect(advanced.status).toBe("leased");
+    expect(listAutomaticBuildStoredAttempts(target, "book_structure")).toHaveLength(1);
+  });
+
   it("runs an eight-task formula dispatch with one lease at a time and eight canonical receipts", () => {
     const { target, descriptors, manifest, bindings } = fixture();
     persistAutomaticBuildDispatch(target, manifest, {

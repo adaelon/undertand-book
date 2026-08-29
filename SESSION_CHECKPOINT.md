@@ -1,45 +1,53 @@
-# SESSION_CHECKPOINT — 2026-08-25 14:50 +08:00
+# SESSION_CHECKPOINT — 2026-08-29 12:59 +08:00
 
 ## 新鲜度自检
 
-- 写入时父提交：`d1b1a72 docs: refresh reader rollback checkpoint`；分支 `main`。本 checkpoint 与 CR0–CR10 实现同属其后的单一 CR 提交，读入时以实际 `git log` 为准。
-- 读入时先对比 `git log --oneline -3` 与 `git status --short`；若变化，以 Git 和工作树为准。
-- CR0–CR10 均已完成并纳入与本 checkpoint 相同的提交；不存在未提交的 CR 实现。
+- 写入时父 commit：`19586a7 feat(runtime): complete capability routing and evidence topology`；分支 `main`。
+- 本 checkpoint 与 T1-T8 源码、测试、agent/plugin、cachebuster、文档和脱敏证据同属其后的单一提交；读入时以实际 `git log --oneline -3` 为准。
+- 提交范围只包含 T 系列；Memory/Profile、Reader、预构建评审、Debug Desktop smoke、private/tmp/handoff 与真实书工作区均未混入。
 
 ## 当前在做什么
 
-“开放自然语言能力发现与 Runtime 证据拓扑”CR0–CR10 已完成并合并为一个提交：能力路由、Runtime 证据拓扑、隐私有界 semantic release receipt/bundle、双语九场景真实模型发布门、v4 evidence/source policy 和完整邻接复验均已通过；当前没有 CR 实现缺口。
+T1-T8 工程改动已收口：有界 executor 传输、BookStructure V4 路由、结构化 candidate sink、阶段化失败账本、agent-only MCP、compiled/installed 发布门和 T8 replacement-child rehydration 均已落盘；真实书恢复仍在首个稳定 `bootstrap/protocol_incompatible` blocker 处停止，尚未到 durable `DONE`。
+
+- 三项真实书 delivery 仍为 8/8、6/6、6/6；grant/start 各 3，semantic attempt 均为 1，attempt 2/candidate/failure/receipt 均为 0。
+- 前后 12-file attempt digest 均为 `8df05d0397a32767776f126ac2f8950dd7e192602cef32084ba8d2629de6e7d5`；真实书 append-only 未破坏。
+- source/installed Sidecar SHA-256 均为 `20ca697f9416d8a87d86babed02a108ac1f66b146d4cdaafaf4bf1a15601f51d`。
+- 当前 published plugin version 为 `0.1.0+codex.20260828030148`；source contract 通过。
+- installed doctor 的 release/prompt/handoff/root-negative/connection-capability 为绿；当前任务仍在 `executor_bootstrap` 与 `plugin_shape` 上 fail-closed。
 
 ## 下一步（可直接接手）
 
-1. 运行 `git log --oneline -3`，确认当前 HEAD 包含 CR0–CR10 单一提交；再用 `git status --short` 区分用户原有脏文件与该已提交边界。
-2. 若远端或 CI 报告 CR 回归，先按 `docs/代码链路.md` 的 CR1–CR10 入口定位，不把剩余 Reader、Memory/Profile、Desktop 或构建产物混入修复。
-3. 只有 prompt/tool schema/model/profile/冻结书或 receipt verifier 发生变化时，才重跑 `cargo test -p runtime semantic_release_real_provider_replay --lib -- --ignored --nocapture` 并更新脱敏 hash。
+1. 取得用户明确的 executor 注册 scope：`personal`，或 `project` + 精确绝对 workspace root；按 published register-executor skill 原子安装，冲突时不覆盖。
+2. 新建 Codex 任务，先在 synthetic/非真实书环境验证 installed doctor 全 compatible，且 custom agent 实际看到四个 agent-only MCP tools 并能 open/commit。
+3. synthetic 门全绿后，从默认 driver registry 取回同一三个真实 ref；先恢复一个，terminal 后立即 durable reread；若仍 bootstrap/stream blocker，停止且不得 `retry_current`。
+4. 同 attempt 的三项均 committed 后才运行正常 driver step 到 durable `DONE` 或首个新 typed blocker。
+5. 刷新 `docs/performance/understand-book-t8-resume-codex-cli-release.json`、`docs/代码链路.md` 与本 checkpoint；继续重算 12-file attempt digest 和 Sidecar hash 守卫。
 
 ## 未提交 / 未完成
 
-- CR0–CR10：无未提交或未完成项。
-- Reader、Memory/Profile、Desktop、预构建文档等既有修改仍未提交；书稿、构建产物、日志、handoff、测试临时目录和其他 untracked 文件均未清理或覆盖。
-- `docs/代码链路.md` 中 2026-08-25 Debug Desktop 条目及对应 Desktop smoke 修改不属于 CR，仍留在工作树。
+- T1-T8 工程实现：无未提交项；T8 真实书 durable recovery 仍未完成。
+- 注册修复必须等待用户选择 scope，并且只在新的 Codex 任务激活；当前任务禁止假装 hot reload。
+- 工作树仍保留不属于 T 系列的用户修改、书稿、构建产物、日志、handoff、测试临时目录与 private 状态；不得清理、覆盖或误提交。
 
 ## 验证状态
 
-- 真实模型门：`deepseek-v4-flash` Native 9/9 + bundle offline verifier 全绿；五条 overview 与 negated-summary 均结构首开、blind-read=0、Reader effect=0，selection 零工具，literal 首调用 `book.search_text`，guided 唯一 Goto。
-- 脱敏 bundle：106,881 bytes；SHA-256 `5a91b989849b8ef0b8667694c63690d97cb7e092b32f028e2cf88d2a07020e89`；禁用 payload marker 0 命中。
-- 单一 CR staged snapshot：Runtime 298/298 + integration 6/6（3 个真模用例 ignored，1 个本地真书用例在原工作区单独 1/1）；Artifact Tools 17/17；Book Contracts 10/10；Server CR 定向 4/4 + Book MCP 5/5；原工作区 Server 231/231；Web 38 files / 215 tests + typecheck；CR Rust 文件 rustfmt 与 `git diff --cached --check` 全绿。
-- scoped Runtime Clippy：`--all-targets --no-deps -D warnings`，仅 allow 既有 `too_many_arguments/result_large_err/large_enum_variant/collapsible_match/cloned_ref_to_slice_refs/useless_vec`，全绿。
-- 不带 `--no-deps` 的 `-D warnings` 会命中 `book-tool-contracts` 五个既有 `derivable_impls`；这是无关基线债务，未在 CR10 中修改。
+- `pnpm --filter @understand-book/core typecheck`：通过。
+- T 定向 Core：其余 18 suites 172/172；修正 V2 prompt 迁移残留断言后 `automatic-build-handoff.test.ts` 16/16。
+- `node apps/desktop/scripts/assert-plugin-release.mjs --source-contract-only`：通过，版本 `0.1.0+codex.20260828030148`。
+- T7/T8 compiled、installed、真实 CLI 与真实书守卫证据见 `docs/performance/understand-book-t7-codex-cli-release.json`、`understand-book-t8-compiled-executor-release.json`、`understand-book-t8-synthetic-codex-cli-release.json`、`understand-book-t8-resume-codex-cli-release.json`。
 
 ## 冷启动读序
 
-1. `docs/切片方案-开放自然语言能力发现与Runtime证据拓扑.md` 的 §0、§14–§17 — 冻结边界与 CR9/CR10 完成回执。
-2. `docs/adr/0113-open-natural-language-capability-routing-and-runtime-evidence-topology.md` 的 §1、§6–§8 — 开放语义、收敛、Prompt policy 与既有边界。
-3. `CONTEXT.md` 尾部六个 ADR-0113 术语 — Runtime 权威术语表。
-4. `crates/runtime/src/semantic_release.rs:SemanticReleaseReceipt/SemanticReleaseBundle/build_*/verify_*` — CR10 closed receipt 与离线 release verdict。
-5. `crates/runtime/src/orchestrator.rs:CR10_DOCUMENT_OVERVIEW_CASES/run_cr10_semantic_release_case/semantic_release_real_provider_replay` 与 `agent_prompt.rs` 的 evidence/source v4 policy — 真模夹具和产品策略边界。
-6. `docs/代码链路.md` 尾部 CR10a–CR10d 与 `docs/架构.md` 的 Runtime Agent request governance — 改动账本与权威数据流。
+1. `docs/performance/understand-book-t8-resume-codex-cli-release.json` 全文 — 当前 release、真实书守卫、历史模型流与 bootstrap blocker。
+2. `docs/切片方案-executor有界语义传输与候选提交闭环.md` 仅读 §3.8、T8、§7、§9 — 权限、可见性、恢复门和 DoD。
+3. `docs/代码链路.md` 仅读 T8.2、T8.3、T8.4 — rehydration、安装态门与当前 blocker 账本。
+4. `packages/core/src/automatic-build-executor-session.ts` 仅读 `deliveryProgressResponse`/`nextAutomaticBuildExecutorInput`；对应测试仅读 replacement-child regression。
+5. `.codex/agents/understand-book-executor.toml`、`plugins/understand-book/assets/codex-agents/understand-book-executor.toml` 与 published register-executor `SKILL.md` 全文。
 
 ## 本会话决策摘要
 
-- CR10：开放语义改写只存在 eval 夹具，不进入产品 classifier/同义词表；发布结论同时依赖真实模型结构化回执和确定性不变量测试（ADR-0113 §1/§8、切片方案 §15）。
-- CR10：当前真模 receipt 未因仅文档收口而重跑；任何影响 prompt/schema/model/profile/冻结书/verifier 的变更都必须使现有回执失效并重跑（切片方案 §15）。
+- 提交边界：只提交 T1-T8；所有非 T 用户改动与运行产物保持 unstaged。
+- Bootstrap 停止规则：当前 child `protocol_incompatible` 后停止，不启动其余 ref、不 reset、不 `retry_current`。
+- 恢复准入：必须先在新任务的 synthetic 环境证明四工具 MCP 与 installed doctor 全绿，再触碰同一真实 ref。
+- 注册激活边界：scope 必须由用户明确指定；安装成功也仅对新 Codex 任务生效。

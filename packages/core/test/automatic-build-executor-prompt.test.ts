@@ -26,16 +26,27 @@ describe("automatic build executor prompt", () => {
       "utf8",
     ));
     for (const marker of [
-      "automatic_build_executor_session.v1",
-      "Your first engine call is `<build-exe> executor.open`",
+      "automatic_build_executor_session.v2",
+      "understand_book_build_executor",
+      "executor.open",
+      "executor.input.next",
+      "executor.generation.start",
+      "executor.submit_candidate",
+      "action.kind=DELIVER_INPUT",
+      "action.kind=INPUT_CHUNK",
+      "action.chunk.chunk_receipt",
+      "never batch, prefetch, or loop multiple executor calls",
+      "action.kind=GENERATION_GRANT",
       "action.kind=GENERATE",
       "action.kind=WAIT",
       "action.kind=DONE",
       "Never return candidate JSON to the caller",
-      "do not fabricate an",
+      "user actively inspects this dedicated child thread",
     ]) {
       expect(wrapper).toContain(marker);
     }
+    expect(wrapper).toMatch(/Make exactly one executor MCP\s+call per tool step/u);
+    expect(wrapper).not.toMatch(/automatic_build_executor_session\.v1|candidate_path|executor\.session|PowerShell|private candidate source/u);
     expect(wrapper.split("# Automatic Build Executor Session Protocol")).toHaveLength(2);
     expect(wrapper.split("## Semantic extractor instructions")).toHaveLength(2);
     expect(createHash("sha256").update(wrapper).digest("hex")).toMatch(/^[a-f0-9]{64}$/u);
@@ -85,8 +96,17 @@ describe("automatic build executor prompt", () => {
       );
       expect(status, stderr).toBe(0);
       expect(stderr).toBe("");
-      expect(stdout.split(rawPrompt.replace(/(?:\r\n|\n|\r)+$/u, ""))).toHaveLength(2);
+      expect(rawPrompt).toContain("## Automatic Build Executor Envelope");
+      expect(stdout).toBe(composeAutomaticBuildExecutorPrompt({
+        mode: "dispatch",
+        extractor_name: extractorName,
+        extractor_prompt: rawPrompt,
+        protocol_wrapper: wrapper,
+      }));
       expect(stdout).toContain(wrapper.replace(/(?:\r\n|\n|\r)+$/u, ""));
+      expect(stdout).not.toMatch(
+        /automatic_build_executor\.v1|candidate_path|input_command|submit_command|fail_command|heartbeat_command/u,
+      );
       expect(stdout).not.toContain(REPO_ROOT);
       expect(stdout.endsWith("\n")).toBe(true);
     }

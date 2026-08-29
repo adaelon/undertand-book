@@ -47,6 +47,12 @@ import {
   profileSidecarDiscourseShadowTaskPath,
   profileSidecarDiscourseShadowTaskPrivateDirectory,
 } from "../../packages/core/src/profile-sidecar-reduction";
+import {
+  bookStructureGenerationTaskPath,
+  freezeBookStructureGenerationTask,
+  readBookStructureGenerationTask,
+  writeBookStructureGenerationCandidate,
+} from "../../packages/core/src/book-structure-generation";
 import type { BuildPlanV1 } from "../../packages/core/src/build-intent";
 import type { Pass2PlanChoice } from "../../packages/core/src/build-capability";
 import { mapLegacyBuildInvocation } from "../../packages/core/src/build-intent-controller";
@@ -152,6 +158,12 @@ import {
 } from "../../packages/core/src/automatic-build-dispatch-runtime";
 import { issueAutomaticBuildOpaqueHandoff } from "../../packages/core/src/automatic-build-executor-session";
 import {
+  BUILD_EXECUTOR_BOOTSTRAP_CONTRACT_V2,
+  createBuildExecutorChildConnectionCapability,
+  validateBuildExecutorAgentConfigV2,
+  validateBuildExecutorRootNegativeToolInventory,
+} from "../../packages/core/src/build-executor-connection-capability";
+import {
   composeAutomaticBuildExecutorPrompt,
   type AutomaticBuildExecutorPromptMode,
 } from "./executor-prompt";
@@ -171,6 +183,7 @@ const MAX_LEASE_EPOCHS = 3;
 const DEFAULT_RESERVE_TTL_MS = 600_000;
 const DEFAULT_RUN_TTL_MS = 1_800_000;
 const MAX_AUTOMATIC_BUILD_EXECUTOR_PROMPT_BYTES = 65_536;
+const MAX_AUTOMATIC_BUILD_EXECUTOR_AGENT_TEMPLATE_BYTES = 65_536;
 const MAX_DISPATCH_EXECUTOR_HANDOFF_BYTES = 262_144;
 const AUTOMATIC_BUILD_STAGES: AutomaticBuildStage[] = [
   "pass1",
@@ -330,14 +343,18 @@ export function resolveAutomaticBuildExecutorPrompt(
   }
   const requiredMarkers = mode === "dispatch"
     ? [
-      "automatic_build_executor_session.v1",
-      "automatic_build_executor.v1",
+      "automatic_build_executor_session.v2",
       "opaque_handoff_ref",
       "executor.open",
+      "executor.input.next",
+      "executor.generation.start",
+      "executor.submit_candidate",
+      "action.kind=DELIVER_INPUT",
+      "action.kind=INPUT_CHUNK",
+      "action.kind=GENERATION_GRANT",
       "action.kind=GENERATE",
       "action.kind=WAIT",
       "action.kind=DONE",
-      "executor.session",
       "Never return candidate JSON to the caller",
     ]
     : ["automatic_build_executor.v1", "candidate_path", "submit_command", "fail_command"];
@@ -399,6 +416,35 @@ export function resolveAutomaticBuildPromptAsset(
     sha256: createHash("sha256").update(bytes).digest("hex"),
     byte_length: bytes.byteLength,
   };
+}
+
+function resolveBuildExecutorAgentTemplate(): string {
+  let bytes: Buffer;
+  const sidecar = process.env.UNDERSTAND_BOOK_SIDECAR_SELF;
+  if (sidecar) {
+    const output = captureBuildProcessOutput(
+      sidecar,
+      ["executor.agent-template"],
+      path.dirname(path.resolve(sidecar)),
+    );
+    if (output.error || output.status !== 0 || output.stderr !== "") {
+      throw new Error("packaged executor agent template is unavailable");
+    }
+    bytes = Buffer.from(output.stdout, "utf8");
+  } else {
+    bytes = readFileSync(path.join(
+      PLUGIN_ROOT,
+      "assets",
+      "codex-agents",
+      "understand-book-executor.toml",
+    ));
+  }
+  if (bytes.byteLength === 0
+    || bytes.byteLength > MAX_AUTOMATIC_BUILD_EXECUTOR_AGENT_TEMPLATE_BYTES
+    || bytes.includes(0)) {
+    throw new Error("executor agent template bytes are invalid");
+  }
+  return bytes.toString("utf8");
 }
 
 function buildDispatchExecutorHandoffBytes(
@@ -600,13 +646,42 @@ export function runAutomaticBuildStageWriter(
   const script = STAGE_COMMANDS[stage].write;
   if (!script) throw new Error(`stage ${stage} does not support write`);
   const generationStage = stage === "pass1" || stage === "profile_sidecar" ? stage : undefined;
-  const generationTaskPath = generation && generationStage
-    ? generationStage === "pass1"
+  const generationTaskPath = generation
+    ? stage === "pass1"
       ? pass1ShadowTaskPath(target, generation.policy_set_digest, taskId)
-      : profileSidecarDiscourseShadowTaskPath(target, generation.policy_set_digest, taskId)
+      : stage === "profile_sidecar"
+        ? profileSidecarDiscourseShadowTaskPath(target, generation.policy_set_digest, taskId)
+        : stage === "book_structure"
+          ? bookStructureGenerationTaskPath(target, generation.policy_set_digest, taskId)
+          : undefined
     : undefined;
-  if (generation && (!generationStage || !generationTaskPath || !existsSync(generationTaskPath))) {
-    throw new Error(`policy_generation_conflict: frozen v3 generation task is unavailable: ${stage}/${taskId}`);
+  if (generation && (!generationTaskPath || !existsSync(generationTaskPath))) {
+    throw new Error(`policy_generation_conflict: frozen production generation task is unavailable: ${stage}/${taskId}`);
+  }
+  if (generation && stage === "book_structure") {
+    const task = readBookStructureGenerationTask(target, generation.policy_set_digest, taskId);
+    if (!task) {
+      throw new Error(`policy_generation_conflict: frozen BookStructure generation task is unavailable: ${taskId}`);
+    }
+    const candidate = JSON.parse(readFileSync(candidatePath, "utf8").replace(/^\uFEFF/, "")) as unknown;
+    writeBookStructureGenerationCandidate({
+      target,
+      task,
+      candidate,
+      provenance: {
+        executor: generation.executor,
+        attempt: generation.attempt,
+        generated_at: generation.generated_at,
+      },
+    });
+    return {
+      artifact_path: automaticBuildGenerationArtifactPath(
+        target,
+        "book_structure",
+        generation.policy_set_digest,
+        taskId,
+      ),
+    };
   }
   if (generation && generationStage && generationTaskPath && existsSync(generationTaskPath)) {
     const directory = generationStage === "pass1"
@@ -667,6 +742,35 @@ export function runAutomaticBuildStageWriter(
   };
 }
 
+export function renderAutomaticBuildTaskInput(
+  target: AutomaticBuildTarget,
+  stage: AutomaticBuildStage,
+  taskId: string,
+  options: { policy_set_digest?: string } = {},
+): { stdout: string; stderr: string } {
+  const productionGenerationDigest = options.policy_set_digest;
+  if (productionGenerationDigest) {
+    const generationTaskPath = stage === "pass1"
+      ? pass1ShadowTaskPath(target, productionGenerationDigest, taskId)
+      : stage === "profile_sidecar"
+        ? profileSidecarDiscourseShadowTaskPath(target, productionGenerationDigest, taskId)
+        : stage === "book_structure"
+          ? bookStructureGenerationTaskPath(target, productionGenerationDigest, taskId)
+          : undefined;
+    if (!generationTaskPath || !existsSync(generationTaskPath)) {
+      throw new Error(`policy_generation_conflict: frozen production generation task is unavailable: ${stage}/${taskId}`);
+    }
+  }
+
+  const script = STAGE_COMMANDS[stage].input;
+  if (!script) throw new Error(`stage ${stage} does not support input`);
+  const args = [target.source_path, taskId, ...stageScriptArgs(target).slice(1)];
+  if (productionGenerationDigest) {
+    args.push("--shadow-generation", productionGenerationDigest);
+  }
+  return forwardStageScript(target, script, args, true);
+}
+
 export function runAutomaticBuildTaskInput(
   target: AutomaticBuildTarget,
   stage: AutomaticBuildStage,
@@ -684,27 +788,12 @@ export function runAutomaticBuildTaskInput(
     throw new Error(`stage command does not match lease identity: ${stage}/${taskId}`);
   }
 
-  let productionGenerationDigest: string | undefined;
-  if ("policy_set_digest" in lease && lease.policy_set_digest) {
-    const generationTaskPath = stage === "pass1"
-      ? pass1ShadowTaskPath(target, lease.policy_set_digest, taskId)
-      : stage === "profile_sidecar"
-        ? profileSidecarDiscourseShadowTaskPath(target, lease.policy_set_digest, taskId)
-        : undefined;
-    if (!generationTaskPath || !existsSync(generationTaskPath)) {
-      throw new Error(`policy_generation_conflict: frozen v3 generation task is unavailable: ${stage}/${taskId}`);
-    }
-    productionGenerationDigest = lease.policy_set_digest;
-  }
-
-  const script = STAGE_COMMANDS[stage].input;
-  if (!script) throw new Error(`stage ${stage} does not support input`);
-  const args = [target.source_path, taskId, ...stageScriptArgs(target).slice(1)];
-  if (productionGenerationDigest) {
-    args.push("--shadow-generation", productionGenerationDigest);
-  }
   const startedAt = options.now ?? new Date().toISOString();
-  const result = forwardStageScript(target, script, args, true);
+  const result = renderAutomaticBuildTaskInput(target, stage, taskId, {
+    ...("policy_set_digest" in lease && lease.policy_set_digest
+      ? { policy_set_digest: lease.policy_set_digest }
+      : {}),
+  });
   const finishedAt = options.now ?? new Date().toISOString();
   const binding = automaticBuildTaskPolicyBindingFromLease(lease);
   const inputSha256 = createHash("sha256").update(result.stdout, "utf8").digest("hex");
@@ -1178,7 +1267,11 @@ function freezeAutomaticBuildGenerationTask(
     freezeProfileSidecarSemanticFastPathTask(target, generationTask.task);
     return;
   }
-  throw new Error(`unsupported v3 production generation task: ${stageState.stage}/${workUnitId}`);
+  if (generationTask.kind === "book_structure") {
+    freezeBookStructureGenerationTask(target, generationTask.task);
+    return;
+  }
+  throw new Error(`unsupported proof-bound production generation task: ${stageState.stage}/${workUnitId}`);
 }
 
 function expandAction(
@@ -1545,6 +1638,7 @@ function expandAction(
               reason: "active_dispatches",
               stage: action.stage,
               active_dispatch_ids: handoff.active_dispatch_ids,
+              dispatch_run_id: dispatchRunId,
               retry_after_ms: Math.min(leaseOptions.reserve_ttl_ms, 30_000),
             },
           };
@@ -1968,8 +2062,8 @@ export function runAutomaticBuildCloseStage(
 
   let productionGenerationDigest: string | undefined;
   if (stageState.policy_set) {
-    if (stage !== "pass1" && stage !== "profile_sidecar") {
-      throw new Error(`v3 production close is not supported for stage ${stage}`);
+    if (stage !== "pass1" && stage !== "profile_sidecar" && stage !== "book_structure") {
+      throw new Error(`proof-bound production close is not supported for stage ${stage}`);
     }
     productionGenerationDigest = stageState.policy_set.policy_set_digest;
   }
@@ -2404,8 +2498,103 @@ export function automaticBuildProtocolDoctor(
       handoffDiagnostic = "handoff_preparation_failed";
     }
   }
+  let executorBootstrap:
+    | ReturnType<typeof validateBuildExecutorAgentConfigV2>
+    | { status: "incompatible"; diagnostic_code: "executor_bootstrap_incompatible" };
+  let executorAgentTemplatePresent = false;
+  try {
+    const executorAgentTemplate = resolveBuildExecutorAgentTemplate();
+    executorAgentTemplatePresent = true;
+    executorBootstrap = validateBuildExecutorAgentConfigV2(executorAgentTemplate);
+  } catch {
+    executorBootstrap = {
+      status: "incompatible",
+      diagnostic_code: "executor_bootstrap_incompatible",
+    };
+  }
+
+  const rootInventoryPaths = [
+    path.join(PLUGIN_ROOT, ".codex", "config.toml"),
+    path.join(PLUGIN_ROOT, ".mcp.json"),
+    path.join(PLUGIN_ROOT, "plugins", "understand-book", ".mcp.json"),
+  ];
+  let rootToolInventory:
+    | ReturnType<typeof validateBuildExecutorRootNegativeToolInventory>
+    | { status: "incompatible"; diagnostic_code: "root_tool_inventory_incompatible" };
+  try {
+    rootToolInventory = validateBuildExecutorRootNegativeToolInventory(
+      rootInventoryPaths.filter((candidate) => existsSync(candidate)).map((candidate) => (
+        readFileSync(candidate, "utf8")
+      )),
+    );
+  } catch {
+    rootToolInventory = {
+      status: "incompatible",
+      diagnostic_code: "root_tool_inventory_incompatible",
+    };
+  }
+
+  let connectionCapability:
+    | {
+      status: "compatible";
+      model_parameter: false;
+      cross_handoff_rejected: true;
+      session_private_root_bound: true;
+    }
+    | { status: "incompatible"; diagnostic_code: "connection_capability_incompatible" };
+  try {
+    const connection = createBuildExecutorChildConnectionCapability({
+      bootstrap_digest: BUILD_EXECUTOR_BOOTSTRAP_CONTRACT_V2.bootstrap_digest,
+      protocol_generation: BUILD_EXECUTOR_BOOTSTRAP_CONTRACT_V2.session_protocol,
+      session_private_root: path.resolve(PLUGIN_ROOT, ".automatic-build-executor-private"),
+    });
+    const firstOpen = {
+      tool_name: "executor.open" as const,
+      request: {
+        version: "automatic_build_executor_open_request.v2",
+        opaque_handoff_ref: `abhandoff1_${"a".repeat(64)}`,
+      },
+    };
+    const crossHandoffOpen = {
+      tool_name: "executor.open" as const,
+      request: {
+        version: "automatic_build_executor_open_request.v2",
+        opaque_handoff_ref: `abhandoff1_${"b".repeat(64)}`,
+      },
+    };
+    let relativeRootRejected = false;
+    try {
+      createBuildExecutorChildConnectionCapability({
+        bootstrap_digest: BUILD_EXECUTOR_BOOTSTRAP_CONTRACT_V2.bootstrap_digest,
+        protocol_generation: BUILD_EXECUTOR_BOOTSTRAP_CONTRACT_V2.session_protocol,
+        session_private_root: "relative-root-is-not-authorized",
+      });
+    } catch {
+      relativeRootRejected = true;
+    }
+    if (connection.authorize_connection(Symbol("root"), firstOpen)
+      || !connection.authorize_connection(connection.connection_capability, firstOpen)
+      || connection.authorize_connection(connection.connection_capability, crossHandoffOpen)
+      || JSON.stringify(connection.connection_capability) !== undefined
+      || !relativeRootRejected) {
+      throw new Error("Build Executor connection capability proof failed");
+    }
+    connectionCapability = {
+      status: "compatible",
+      model_parameter: false,
+      cross_handoff_rejected: true,
+      session_private_root_bound: true,
+    };
+  } catch {
+    connectionCapability = {
+      status: "incompatible",
+      diagnostic_code: "connection_capability_incompatible",
+    };
+  }
+
   const thinPlugin = !existsSync(path.join(PLUGIN_ROOT, "agents"));
-  const pluginShapeCompatible = promptSource === "packaged_sidecar" || !thinPlugin;
+  const pluginShapeCompatible = (promptSource === "packaged_sidecar" || !thinPlugin)
+    && executorAgentTemplatePresent;
   const checks = {
     release_contract: releaseContract,
     prompt_provider: {
@@ -2423,17 +2612,25 @@ export function automaticBuildProtocolDoctor(
       status: pluginShapeCompatible ? "compatible" as const : "incompatible" as const,
       thin_plugin: thinPlugin,
       agents_required: false as const,
+      agent_template_required: true as const,
+      agent_template_present: executorAgentTemplatePresent,
       ...(!pluginShapeCompatible ? { diagnostic_code: "plugin_shape_incompatible" as const } : {}),
     },
+    executor_bootstrap: executorBootstrap,
+    root_tool_inventory: rootToolInventory,
+    connection_capability: connectionCapability,
   };
   const doctorStatus = checks.release_contract.status === "compatible"
     && checks.prompt_provider.status === "compatible"
     && checks.handoff_preparation.status === "compatible"
     && checks.plugin_shape.status === "compatible"
+    && checks.executor_bootstrap.status === "compatible"
+    && checks.root_tool_inventory.status === "compatible"
+    && checks.connection_capability.status === "compatible"
     ? "compatible" as const
     : "incompatible" as const;
   return {
-    version: "automatic_build_protocol_doctor.v2" as const,
+    version: "automatic_build_protocol_doctor.v3" as const,
     status: doctorStatus,
     checks,
     production_default: AUTOMATIC_BUILD_PRODUCTION_DEFAULT,
@@ -3034,9 +3231,11 @@ if (argv[0] === "legacy-plan") {
         ? pass1ShadowTaskPath(target, leaseState.policy_set_digest, taskId!)
         : stageValue === "profile_sidecar"
           ? profileSidecarDiscourseShadowTaskPath(target, leaseState.policy_set_digest, taskId!)
-          : undefined;
+          : stageValue === "book_structure"
+            ? bookStructureGenerationTaskPath(target, leaseState.policy_set_digest, taskId!)
+            : undefined;
       if (!generationTaskPath || !existsSync(generationTaskPath)) {
-        throw new Error(`policy_generation_conflict: frozen v3 generation task is unavailable: ${stageValue}/${taskId}`);
+        throw new Error(`policy_generation_conflict: frozen production generation task is unavailable: ${stageValue}/${taskId}`);
       }
       productionGenerationDigest = leaseState.policy_set_digest;
     }
@@ -3064,8 +3263,10 @@ if (argv[0] === "legacy-plan") {
       const stageState = snapshot.stages.find((stage) => stage.stage === stageValue);
       if (!stageState) throw new Error(`quality stage is not reachable in the current snapshot: ${stageValue}`);
       if (stageState.policy_set) {
-        if (stageValue !== "pass1" && stageValue !== "profile_sidecar") {
-          throw new Error(`v3 production close is not supported for stage ${stageValue}`);
+        if (stageValue !== "pass1"
+          && stageValue !== "profile_sidecar"
+          && stageValue !== "book_structure") {
+          throw new Error(`proof-bound production close is not supported for stage ${stageValue}`);
         }
         closeProductionGenerationDigest = stageState.policy_set.policy_set_digest;
       }

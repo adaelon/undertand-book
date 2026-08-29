@@ -3,16 +3,22 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  AUTOMATIC_BUILD_CANDIDATE_JSON_LIMITS_V1,
   failAutomaticBuildTask,
   inspectAutomaticBuildTask,
   normalizeAutomaticBuildTaskReceipt,
+  serializeAutomaticBuildCandidateValue,
   stageAutomaticBuildCandidate,
+  stageAutomaticBuildCandidateValue,
   submitAutomaticBuildCandidate,
 } from "../src/automatic-build-mailbox";
 import { claimAutomaticBuildTask } from "../src/automatic-build-lease";
 import { readAutomaticBuildAttemptRecord } from "../src/automatic-build-task-store";
 import { resolveAutomaticBuildTarget } from "../src/build-orchestrator";
-import { parseExtractorCandidate } from "../src/extractor-contract";
+import {
+  createAutomaticBuildFailureDiagnosticV3,
+  parseExtractorCandidate,
+} from "../src/extractor-contract";
 
 function fixture() {
   const root = mkdtempSync(path.join(tmpdir(), "understand-book-mailbox-"));
@@ -35,6 +41,41 @@ function candidateFile(root: string, value: unknown, name = "candidate-source.js
 }
 
 describe("automatic build task mailbox", () => {
+  it("serializes a JsonValue once into the create-only canonical candidate mailbox", () => {
+    const { target, claim } = fixture();
+    const first = stageAutomaticBuildCandidateValue(
+      target,
+      claim.lease_ref,
+      claim.lease.token,
+      { zeta: [true, null, 3], alpha: { second: "b", first: "a" } },
+      { now: "2026-07-19T00:00:01.000Z" },
+    );
+
+    expect(readFileSync(first.candidate_path, "utf8"))
+      .toBe("{\"alpha\":{\"first\":\"a\",\"second\":\"b\"},\"zeta\":[true,null,3]}\n");
+    expect(stageAutomaticBuildCandidateValue(
+      target,
+      claim.lease_ref,
+      claim.lease.token,
+      { alpha: { first: "a", second: "b" }, zeta: [true, null, 3] },
+      { now: "2026-07-19T00:00:02.000Z" },
+    )).toEqual(first);
+    expect(() => stageAutomaticBuildCandidateValue(
+      target,
+      claim.lease_ref,
+      claim.lease.token,
+      { alpha: { first: "changed", second: "b" }, zeta: [true, null, 3] },
+      { now: "2026-07-19T00:00:03.000Z" },
+    )).toThrow(/candidate.*different|conflict/i);
+  });
+
+  it("rejects candidate object graphs beyond the closed JsonValue node budget", () => {
+    expect(() => serializeAutomaticBuildCandidateValue(Array.from(
+      { length: AUTOMATIC_BUILD_CANDIDATE_JSON_LIMITS_V1.max_nodes },
+      () => null,
+    ))).toThrow(/node limit/i);
+  });
+
   it("normalizes no-BOM and single-BOM UTF-8 candidates to the same payload", () => {
     const noBom = fixture();
     const withBom = fixture();
@@ -257,10 +298,15 @@ describe("automatic build task mailbox", () => {
       state: "retryable_failure",
       candidate_sha256: staged.candidate_sha256,
       failure_diagnostic: {
-        version: "automatic_build_failure_diagnostic.v2",
+        version: "automatic_build_failure_diagnostic.v3",
         category: "schema",
         code: "schema_invalid",
+        phase: "artifact_writer",
         json_pointer: "/discourse_items/0/local_summary",
+      },
+      metrics: {
+        writer_started: true,
+        failure_phase: "artifact_writer",
       },
     });
     expect(writerFailure).not.toHaveProperty("message");
@@ -274,7 +320,12 @@ describe("automatic build task mailbox", () => {
     expect(JSON.parse(readFileSync(path.join(path.dirname(claim.lease_ref), "result.json"), "utf8"))).toMatchObject({
       version: "automatic_build_attempt_event.v3",
       outcome: "failure",
-      failure_diagnostic: { category: "schema", code: "schema_invalid" },
+      failure_diagnostic: {
+        version: "automatic_build_failure_diagnostic.v3",
+        category: "schema",
+        code: "schema_invalid",
+        phase: "artifact_writer",
+      },
     });
     expect(readAutomaticBuildAttemptRecord(target, "pass1", "0")).toMatchObject({
       failures: 1,
@@ -326,6 +377,21 @@ describe("automatic build task mailbox", () => {
     });
     expect(JSON.stringify(enumReceipt)).not.toMatch(/problem_framing|PRIVATE_ENUM_CANDIDATE/u);
 
+    expect(() => normalizeAutomaticBuildTaskReceipt({
+      ...writerFailure,
+      failure_diagnostic: createAutomaticBuildFailureDiagnosticV3({
+        category: "internal",
+        code: "writer_failed",
+        phase: "artifact_writer",
+      }),
+      metrics: {
+        ...writerFailure.metrics!,
+        output_bytes: 0,
+        writer_started: false,
+        failure_phase: "artifact_writer",
+      },
+    })).toThrow(/writer.*start|phase facts/i);
+
     const other = fixture();
     const failed = failAutomaticBuildTask(
       other.target,
@@ -340,7 +406,13 @@ describe("automatic build task mailbox", () => {
     expect(failed).toMatchObject({
       version: "automatic_build_task_receipt.v2",
       state: "retryable_failure",
-      failure_diagnostic: { category: "provider", code: "provider_unavailable" },
+      failure_diagnostic: {
+        version: "automatic_build_failure_diagnostic.v3",
+        category: "provider",
+        code: "provider_unavailable",
+        phase: "generation",
+      },
+      metrics: { writer_started: false, failure_phase: "generation" },
     });
     expect(JSON.stringify(failed)).not.toContain("PRIVATE_PROVIDER_MESSAGE");
     expect(JSON.parse(readFileSync(path.join(path.dirname(other.claim.lease_ref), "failure.json"), "utf8"))).toMatchObject({
@@ -359,7 +431,12 @@ describe("automatic build task mailbox", () => {
       },
     );
     expect(executorFailure).toMatchObject({
-      failure_diagnostic: { category: "executor", code: "executor_failed" },
+      failure_diagnostic: {
+        version: "automatic_build_failure_diagnostic.v3",
+        category: "executor",
+        code: "executor_failed",
+        phase: "generation",
+      },
     });
     expect(JSON.stringify(executorFailure)).not.toContain("PRIVATE_EXECUTOR_MESSAGE");
 
@@ -380,7 +457,13 @@ describe("automatic build task mailbox", () => {
       { now: "2026-07-19T00:00:02.000Z" },
     );
     expect(unknownFailure).toMatchObject({
-      failure_diagnostic: { category: "internal", code: "writer_failed" },
+      failure_diagnostic: {
+        version: "automatic_build_failure_diagnostic.v3",
+        category: "internal",
+        code: "writer_failed",
+        phase: "artifact_writer",
+      },
+      metrics: { writer_started: true, failure_phase: "artifact_writer" },
     });
     expect(JSON.stringify(unknownFailure)).not.toContain("PRIVATE_UNKNOWN_WRITER_FAILURE");
     expect(JSON.stringify(unknownFailure)).not.toContain(unknown.root);

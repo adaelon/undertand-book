@@ -15,7 +15,10 @@ import {
   recordAutomaticBuildAttemptEvent,
 } from "../src/automatic-build-task-store";
 import { resolveAutomaticBuildTarget } from "../src/build-orchestrator";
-import { createAutomaticBuildFailureDiagnostic } from "../src/extractor-contract";
+import {
+  createAutomaticBuildFailureDiagnostic,
+  createAutomaticBuildFailureDiagnosticV3,
+} from "../src/extractor-contract";
 import {
   profileSidecarPolicyScopeFixture,
   type SyntheticAutomaticBuildAttemptScopeV1,
@@ -97,6 +100,43 @@ describe("automatic build per-task attempt store", () => {
       outcome: "success",
       failure_diagnostic: undefined,
     })).toThrow("conflicting terminal attempt event");
+  });
+
+  it("rejects transport and candidate-sink observations as terminal semantic failures", () => {
+    const { target } = targetFixture();
+    const claim = claimAutomaticBuildTask(target, "pass1", "phase-accounting", {
+      owner: "phase-accounting-owner",
+      now: "2026-08-26T00:00:00.000Z",
+      ttl_ms: 60_000,
+    });
+    if (claim.status !== "leased") throw new Error("expected phase-accounting lease");
+    const sinkFailure = createAutomaticBuildFailureDiagnosticV3({
+      category: "executor",
+      code: "candidate_sink_unavailable",
+      phase: "candidate_sink",
+    });
+
+    expect(() => failAutomaticBuildTask(target, claim.lease_ref, claim.lease.token, {
+      failure_diagnostic: sinkFailure,
+      now: "2026-08-26T00:00:01.000Z",
+    })).toThrow(/candidate_sink|semantic.*terminal|non-semantic/i);
+    expect(() => recordAutomaticBuildAttemptEvent(target, {
+      stage: "pass1",
+      work_unit_id: "phase-accounting",
+      attempt: claim.lease.attempt,
+      event_id: "forged-candidate-sink-terminal",
+      outcome: "failure",
+      failure_diagnostic: sinkFailure,
+      created_at: "2026-08-26T00:00:02.000Z",
+    })).toThrow(/candidate_sink|semantic.*terminal|non-semantic/i);
+    expect(existsSync(path.join(path.dirname(claim.lease_ref), "failure.json"))).toBe(false);
+    expect(existsSync(path.join(path.dirname(claim.lease_ref), "result.json"))).toBe(false);
+    expect(readAutomaticBuildAttemptRecord(target, "pass1", "phase-accounting")).toMatchObject({
+      failures: 0,
+      semantic_attempt: 1,
+      lease_epoch: 1,
+      submit_revision: 0,
+    });
   });
 
   it("reads the v1 ledger without modifying it and continues with a monotonic attempt", () => {

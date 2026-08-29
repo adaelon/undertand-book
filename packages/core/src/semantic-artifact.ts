@@ -254,12 +254,21 @@ export function buildSemanticArtifactEnvelopeV3<T>(input: {
   if (!/^[a-f0-9]{64}$/.test(input.policy_set_digest)) {
     throw new Error("semantic artifact policy_set_digest must be a lowercase SHA-256 digest");
   }
-  const legacyShape = buildSemanticArtifactEnvelope(input);
+  if (!input.work_unit_id) throw new Error("semantic artifact work_unit_id must not be empty");
+  if (!input.input_hash) throw new Error("semantic artifact input_hash must not be empty");
+  assertProvenance(input.provenance);
   return {
-    ...legacyShape,
     version: "semantic_task_artifact.v3",
+    target: input.target,
+    stage: input.stage,
+    work_unit_id: input.work_unit_id,
+    input_hash: input.input_hash,
     proof_digest: input.proof_digest,
     policy_set_digest: input.policy_set_digest,
+    policy_fingerprint: input.policy_fingerprint,
+    artifact_hash: sha256(input.payload),
+    provenance: input.provenance,
+    payload: input.payload,
   };
 }
 

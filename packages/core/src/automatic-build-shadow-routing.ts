@@ -123,7 +123,11 @@ export function migrateAutomaticBuildPolicyAndReplan<T>(
 ): AutomaticBuildRouteResult<T> {
   const current = input.current;
   const workUnit = current.route === "model" ? current.descriptor : current;
-  const proof = current.route === "model" ? current.descriptor.input_budget_proof : undefined;
+  const proof = current.route === "model"
+    ? "execution_budget_proof" in current.descriptor
+      ? current.descriptor.execution_budget_proof
+      : current.descriptor.input_budget_proof
+    : undefined;
   const policy = current.route === "model"
     ? current.descriptor.policy_fingerprint
     : current.policy_fingerprint;

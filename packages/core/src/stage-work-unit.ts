@@ -2,10 +2,13 @@ import { createHash } from "node:crypto";
 import type { BuildTargetRefV2 } from "./build-orchestrator";
 import { TECHNICAL_LEARNING_PROFILE, type ContentProfileDefinition } from "./content-profile";
 import type { LidNode } from "./generated/LidNode";
+import type { ExecutorTransportProfileV1 } from "./executor-transport";
 import {
   MODEL_INPUT_ESTIMATOR_VERSION,
+  validateModelExecutionBudgetProof,
   validateModelInputBudgetProof,
   verifyModelInputBudgetProof,
+  type ModelExecutionBudgetProofV2,
   type ModelInputBudgetProofV1,
 } from "./model-input-budget";
 import { MODEL_INPUT_RENDER_CONTRACT_VERSION } from "./model-input-renderer";
@@ -43,6 +46,10 @@ export type WorkUnitKind =
   | "formula_context_group"
   | "pass2_candidate_batch"
   | "structure_unit"
+  | "structure_fragment"
+  | "structure_reduce"
+  | "structure_stitch_fragment"
+  | "structure_stitch_reduce"
   | "structure_stitch";
 
 export interface WorkUnitCostV1 {
@@ -73,6 +80,14 @@ export interface WorkUnitDescriptorV2 {
 export type ModelInputBasisV1 =
   | { kind: "source_slices"; slices: ModelInputSliceV1[] }
   | {
+      kind: "semantic_projection";
+      projection_kind: "book_structure";
+      source_fingerprint: string;
+      projection_sha256: string;
+      parent_lids: string[];
+      core_range?: { start_ordinal: number; end_ordinal_exclusive: number };
+    }
+  | {
       kind: "artifact_reduction";
       dependency_artifacts: Array<{ work_unit_id: string; artifact_hash: string }>;
       parent_lids: string[];
@@ -96,7 +111,26 @@ export interface WorkUnitDescriptorV3 {
   legacy_artifact_ref?: never;
 }
 
-export type WorkUnitDescriptor = WorkUnitDescriptorV2 | WorkUnitDescriptorV3;
+/** Transport-proof-bound descriptor used by forward V4 routers. */
+export interface WorkUnitDescriptorV4 {
+  version: "automatic_build_work_unit.v4";
+  target: BuildTargetRefV2;
+  stage: WorkUnitStage;
+  work_unit_id: string;
+  kind: WorkUnitKind;
+  input_basis: ModelInputBasisV1;
+  input_hash: string;
+  execution_budget_proof: ModelExecutionBudgetProofV2;
+  policy_fingerprint: ExtractionPolicyFingerprintV1;
+  evidence_lids: string[];
+  dependencies: Array<{ artifact: string; sha256: string }>;
+  cost: WorkUnitCostV1;
+  aggregation?: { parent_lid: string; role: "fragment" | "reduce" | "final" };
+  deterministic_skip?: never;
+  legacy_artifact_ref?: never;
+}
+
+export type WorkUnitDescriptor = WorkUnitDescriptorV2 | WorkUnitDescriptorV3 | WorkUnitDescriptorV4;
 
 export interface StageWorkUnitRouterRegistration {
   stage: WorkUnitStage;
@@ -196,6 +230,35 @@ function normalizeInputBasis(inputBasis: ModelInputBasisV1): ModelInputBasisV1 {
     }
     return { kind: "source_slices", slices };
   }
+  if (inputBasis.kind === "semantic_projection") {
+    if (inputBasis.projection_kind !== "book_structure") {
+      throw new Error("unsupported semantic projection input basis");
+    }
+    const sourceFingerprint = boundedIdentity(
+      inputBasis.source_fingerprint,
+      "semantic_projection.source_fingerprint",
+    );
+    const projectionSha256 = sha256Identity(
+      inputBasis.projection_sha256,
+      "semantic_projection.projection_sha256",
+    );
+    const parentLids = normalizedEvidenceLids(inputBasis.parent_lids);
+    const coreRange = inputBasis.core_range;
+    if (coreRange && (!Number.isSafeInteger(coreRange.start_ordinal)
+      || !Number.isSafeInteger(coreRange.end_ordinal_exclusive)
+      || coreRange.start_ordinal < 0
+      || coreRange.end_ordinal_exclusive <= coreRange.start_ordinal)) {
+      throw new Error("semantic projection core range is invalid");
+    }
+    return {
+      kind: "semantic_projection",
+      projection_kind: inputBasis.projection_kind,
+      source_fingerprint: sourceFingerprint,
+      projection_sha256: projectionSha256,
+      parent_lids: parentLids,
+      ...(coreRange ? { core_range: { ...coreRange } } : {}),
+    };
+  }
   if (inputBasis.kind !== "artifact_reduction") throw new Error("unsupported model input basis");
   if (!inputBasis.dependency_artifacts.length) {
     throw new Error("artifact_reduction input basis must contain dependency artifacts");
@@ -264,6 +327,34 @@ export function buildWorkUnitCostFromBudgetProof(input: {
   });
 }
 
+export function buildWorkUnitCostFromExecutionProof(input: {
+  rendered_input: string;
+  proof: ModelExecutionBudgetProofV2;
+  transport_profile: ExecutorTransportProfileV1;
+  visible_lids?: number;
+  formula_lids?: number;
+  table_fragments?: number;
+  candidate_count?: number;
+  expected_output_items?: number;
+}): WorkUnitCostV1 {
+  if ("estimated_input_tokens" in input) {
+    throw new Error("estimated_input_tokens must be derived from the verified execution proof");
+  }
+  const proof = validateModelExecutionBudgetProof(input.proof, input.transport_profile);
+  const renderedHash = createHash("sha256").update(input.rendered_input, "utf8").digest("hex");
+  if (renderedHash !== proof.rendered_input_sha256) {
+    throw new Error("execution proof does not match rendered input");
+  }
+  return buildWorkUnitCost({
+    estimated_input_tokens: proof.estimated_rendered_tokens,
+    visible_lids: input.visible_lids,
+    formula_lids: input.formula_lids,
+    table_fragments: input.table_fragments,
+    candidate_count: input.candidate_count,
+    expected_output_items: input.expected_output_items,
+  });
+}
+
 export function createWorkUnitDescriptor(
   input: Omit<WorkUnitDescriptorV2, "version" | "dependencies"> & {
     dependencies?: WorkUnitDescriptorV2["dependencies"];
@@ -308,6 +399,18 @@ export function isWorkUnitDescriptorV3(
   descriptor: WorkUnitDescriptor,
 ): descriptor is WorkUnitDescriptorV3 {
   return descriptor.version === "automatic_build_work_unit.v3";
+}
+
+export function isWorkUnitDescriptorV4(
+  descriptor: WorkUnitDescriptor,
+): descriptor is WorkUnitDescriptorV4 {
+  return descriptor.version === "automatic_build_work_unit.v4";
+}
+
+export function isProofBoundWorkUnitDescriptor(
+  descriptor: WorkUnitDescriptor,
+): descriptor is WorkUnitDescriptorV3 | WorkUnitDescriptorV4 {
+  return isWorkUnitDescriptorV3(descriptor) || isWorkUnitDescriptorV4(descriptor);
 }
 
 export function validateWorkUnitDescriptorV3(
@@ -373,8 +476,10 @@ export function validateWorkUnitDescriptorV3(
     if (!evidenceLids.includes(descriptor.aggregation.parent_lid)) {
       throw new Error("aggregation parent_lid must be present in evidence_lids");
     }
-    if (descriptor.aggregation.role === "fragment" && inputBasis.kind !== "source_slices") {
-      throw new Error("fragment aggregation requires a source_slices input basis");
+    if (descriptor.aggregation.role === "fragment"
+      && inputBasis.kind !== "source_slices"
+      && inputBasis.kind !== "semantic_projection") {
+      throw new Error("fragment aggregation requires a source or semantic projection input basis");
     }
     if (descriptor.aggregation.role === "reduce" && inputBasis.kind !== "artifact_reduction") {
       throw new Error("reduce aggregation requires an artifact_reduction input basis");
@@ -406,6 +511,109 @@ export function createWorkUnitDescriptorV3(
   return validateWorkUnitDescriptorV3(descriptor);
 }
 
+export function validateWorkUnitDescriptorV4(
+  descriptor: WorkUnitDescriptorV4,
+  transportProfile: ExecutorTransportProfileV1,
+): WorkUnitDescriptorV4 {
+  if (descriptor.version !== "automatic_build_work_unit.v4") {
+    throw new Error("unsupported v4 work-unit descriptor version");
+  }
+  boundedIdentity(descriptor.work_unit_id, "work_unit_id");
+  sha256Identity(descriptor.input_hash, "input_hash");
+  if (descriptor.target.profile_id !== descriptor.policy_fingerprint.profile_id) {
+    throw new Error("work unit target profile does not match policy profile");
+  }
+  const proof = validateModelExecutionBudgetProof(
+    descriptor.execution_budget_proof,
+    transportProfile,
+  );
+  if (descriptor.input_hash !== proof.rendered_input_sha256) {
+    throw new Error("v4 work unit input_hash does not match its execution budget proof");
+  }
+  if (proof.router_version !== descriptor.policy_fingerprint.router_version) {
+    throw new Error("v4 work unit proof router does not match its policy");
+  }
+  if (proof.prompt_sha256 !== descriptor.policy_fingerprint.prompt_sha256) {
+    throw new Error("v4 work unit proof prompt does not match its policy");
+  }
+  if (proof.estimator_version !== MODEL_INPUT_ESTIMATOR_VERSION) {
+    throw new Error("v4 work unit budget estimator is not supported by this release");
+  }
+  if (proof.render_contract_version !== MODEL_INPUT_RENDER_CONTRACT_VERSION) {
+    throw new Error("v4 work unit render contract is not supported by this release");
+  }
+  if (descriptor.cost.estimated_input_tokens !== proof.estimated_rendered_tokens) {
+    throw new Error("v4 work unit cost is not derived from its execution budget proof");
+  }
+  const expectedCost = buildWorkUnitCost({
+    estimated_input_tokens: descriptor.cost.estimated_input_tokens,
+    visible_lids: descriptor.cost.visible_lids,
+    formula_lids: descriptor.cost.formula_lids,
+    table_fragments: descriptor.cost.table_fragments,
+    candidate_count: descriptor.cost.candidate_count,
+    expected_output_items: descriptor.cost.expected_output_items,
+  });
+  if (stableJson(expectedCost) !== stableJson(descriptor.cost)) {
+    throw new Error("v4 work unit cost score is inconsistent with its dimensions");
+  }
+  const evidenceLids = normalizedEvidenceLids(descriptor.evidence_lids);
+  const dependencies = normalizedDependencies(descriptor.dependencies);
+  const inputBasis = normalizeInputBasis(descriptor.input_basis);
+  const basisParentLids = inputBasis.kind === "source_slices"
+    ? inputBasis.slices.map((slice) => slice.parent_lid)
+    : inputBasis.parent_lids;
+  if (basisParentLids.some((lid) => !evidenceLids.includes(lid))) {
+    throw new Error("v4 work unit input basis contains a parent outside evidence_lids");
+  }
+  if (inputBasis.kind === "artifact_reduction") {
+    for (const dependency of inputBasis.dependency_artifacts) {
+      if (!dependencies.some((candidate) => candidate.artifact === dependency.work_unit_id
+        && candidate.sha256 === dependency.artifact_hash)) {
+        throw new Error("v4 artifact_reduction dependency is not bound by descriptor dependencies");
+      }
+    }
+  }
+  if (descriptor.aggregation) {
+    boundedIdentity(descriptor.aggregation.parent_lid, "aggregation.parent_lid");
+    if (!evidenceLids.includes(descriptor.aggregation.parent_lid)) {
+      throw new Error("v4 aggregation parent_lid must be present in evidence_lids");
+    }
+    if (descriptor.aggregation.role === "fragment"
+      && inputBasis.kind !== "source_slices"
+      && inputBasis.kind !== "semantic_projection") {
+      throw new Error("v4 fragment aggregation requires a source or semantic projection input basis");
+    }
+    if (descriptor.aggregation.role === "reduce" && inputBasis.kind !== "artifact_reduction") {
+      throw new Error("v4 reduce aggregation requires an artifact_reduction input basis");
+    }
+  }
+  return descriptor;
+}
+
+export function createWorkUnitDescriptorV4(
+  input: Omit<WorkUnitDescriptorV4, "version" | "dependencies"> & {
+    dependencies?: WorkUnitDescriptorV4["dependencies"];
+  },
+  transportProfile: ExecutorTransportProfileV1,
+): WorkUnitDescriptorV4 {
+  const descriptor: WorkUnitDescriptorV4 = {
+    version: "automatic_build_work_unit.v4",
+    target: input.target,
+    stage: input.stage,
+    work_unit_id: input.work_unit_id,
+    kind: input.kind,
+    input_basis: normalizeInputBasis(input.input_basis),
+    input_hash: input.input_hash,
+    execution_budget_proof: input.execution_budget_proof,
+    policy_fingerprint: input.policy_fingerprint,
+    evidence_lids: normalizedEvidenceLids(input.evidence_lids),
+    dependencies: normalizedDependencies(input.dependencies ?? []),
+    cost: input.cost,
+    ...(input.aggregation ? { aggregation: { ...input.aggregation } } : {}),
+  };
+  return validateWorkUnitDescriptorV4(descriptor, transportProfile);
+}
+
 export function taskPolicyBindingForWorkUnit(
   descriptor: WorkUnitDescriptorV2,
 ): AutomaticBuildTaskPolicyBindingV1;
@@ -414,19 +622,29 @@ export function taskPolicyBindingForWorkUnit(
   policySetDigest: string,
 ): AutomaticBuildTaskPolicyBindingV2;
 export function taskPolicyBindingForWorkUnit(
+  descriptor: WorkUnitDescriptorV4,
+  policySetDigest: string,
+): AutomaticBuildTaskPolicyBindingV2;
+export function taskPolicyBindingForWorkUnit(
+  descriptor: WorkUnitDescriptorV3 | WorkUnitDescriptorV4,
+  policySetDigest: string,
+): AutomaticBuildTaskPolicyBindingV2;
+export function taskPolicyBindingForWorkUnit(
   descriptor: WorkUnitDescriptor,
   policySetDigest?: string,
 ): AutomaticBuildTaskPolicyBinding {
-  if (!isWorkUnitDescriptorV3(descriptor)) {
+  if (!isProofBoundWorkUnitDescriptor(descriptor)) {
     return {
       input_hash: descriptor.input_hash,
       policy_fingerprint: descriptor.policy_fingerprint,
     };
   }
-  validateWorkUnitDescriptorV3(descriptor);
+  const proofDigest = isWorkUnitDescriptorV4(descriptor)
+    ? descriptor.execution_budget_proof.proof_digest
+    : descriptor.input_budget_proof.proof_digest;
   return {
     input_hash: descriptor.input_hash,
-    proof_digest: descriptor.input_budget_proof.proof_digest,
+    proof_digest: proofDigest,
     policy_set_digest: sha256Identity(policySetDigest ?? "", "policy_set_digest"),
     policy_fingerprint: descriptor.policy_fingerprint,
   };
@@ -436,17 +654,19 @@ export function validateWorkUnitTaskPolicyBinding(
   descriptor: WorkUnitDescriptor,
   binding: AutomaticBuildTaskPolicyBinding,
 ): AutomaticBuildTaskPolicyBinding {
-  if (isWorkUnitDescriptorV3(descriptor)) {
-    validateWorkUnitDescriptorV3(descriptor);
+  if (isProofBoundWorkUnitDescriptor(descriptor)) {
     if (!("proof_digest" in binding) || !("policy_set_digest" in binding)) {
-      throw new Error("v3 work unit requires an automatic build task policy binding v2");
+      throw new Error("proof-bound work unit requires an automatic build task policy binding v2");
     }
     sha256Identity(binding.proof_digest, "binding.proof_digest");
     sha256Identity(binding.policy_set_digest, "binding.policy_set_digest");
+    const proofDigest = isWorkUnitDescriptorV4(descriptor)
+      ? descriptor.execution_budget_proof.proof_digest
+      : descriptor.input_budget_proof.proof_digest;
     if (binding.input_hash !== descriptor.input_hash
-      || binding.proof_digest !== descriptor.input_budget_proof.proof_digest
+      || binding.proof_digest !== proofDigest
       || !samePolicy(binding.policy_fingerprint, descriptor.policy_fingerprint)) {
-      throw new Error("v3 work unit policy binding drifted from its descriptor");
+      throw new Error("proof-bound work unit policy binding drifted from its descriptor");
     }
     return binding;
   }

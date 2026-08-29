@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { AutomaticBuildStage, BuildTargetRefV2 } from "./build-orchestrator";
 import {
+  isAutomaticBuildFailureDiagnosticV3,
   isAutomaticBuildTransientProviderFailure,
   validateAutomaticBuildFailureDiagnostic,
   type AutomaticBuildFailureDiagnosticV2,
@@ -82,6 +83,10 @@ export function automaticBuildRetryBoundaryRequiredRecovery(
   diagnostic: AutomaticBuildFailureDiagnosticV2,
 ): AutomaticBuildRetryBoundaryRequiredRecovery {
   const value = validateAutomaticBuildFailureDiagnostic(diagnostic);
+  if (isAutomaticBuildFailureDiagnosticV3(value)
+    && (value.phase === "input_delivery" || value.phase === "candidate_sink")) {
+    throw new Error(`${value.phase} cannot create a semantic retry boundary`);
+  }
   if (isAutomaticBuildTransientProviderFailure(value)) return "authorize_transient_retry";
   if (value.category === "schema" || value.category === "evidence") return "publish_new_policy";
   return "operator_fix";

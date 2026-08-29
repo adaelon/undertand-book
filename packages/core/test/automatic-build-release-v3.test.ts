@@ -88,7 +88,7 @@ describe("BR10 automatic build release contract", () => {
     });
 
     expect(doctor).toMatchObject({
-      version: "automatic_build_protocol_doctor.v2",
+      version: "automatic_build_protocol_doctor.v3",
       status: "compatible",
       release: { version: "automatic_build_release.v3" },
       checks: {
@@ -117,6 +117,16 @@ describe("BR10 automatic build release contract", () => {
             close: { version: "automatic_build_stage_close_result.v1", status: "compatible" },
           },
         },
+        executor_bootstrap: {
+          status: "compatible",
+          session_protocol: "automatic_build_executor_session.v2",
+          registration_scope: "agent_only",
+        },
+        root_tool_inventory: {
+          status: "compatible",
+          executor_tool_intersection: [],
+        },
+        connection_capability: { status: "compatible" },
       },
       target_state: { dry_run_mutates_state: false },
     });

@@ -352,9 +352,9 @@ describe("automatic build Codex executor handoff", () => {
         "--interruption-command-role",
         "{last_command_role}",
       ]));
-      expect(handoff.prompt).toContain("automatic_build_executor_session.v1");
+      expect(handoff.prompt).toContain("automatic_build_executor_session.v2");
       expect(handoff.prompt).not.toContain("automatic_build_dispatch_executor.v1");
-      expect(handoff.prompt).toContain("automatic_build_executor.v1");
+      expect(handoff.prompt).not.toContain("automatic_build_executor.v1");
       expect(JSON.stringify(handoff)).not.toContain("PRIVATE_CANDIDATE_MARKER");
       if (!("extractor_prompt_command" in next.action) || !next.action.extractor_prompt_command) {
         throw new Error("dispatch handoff must expose extractor_prompt_command");
@@ -367,17 +367,23 @@ describe("automatic build Codex executor handoff", () => {
       expect(run.status, run.stderr).toBe(0);
       expect(run.stderr).toBe("");
       for (const marker of [
-        "automatic_build_executor_session.v1",
-        "automatic_build_executor.v1",
+        "automatic_build_executor_session.v2",
         "executor.open",
+        "executor.input.next",
+        "executor.generation.start",
+        "executor.submit_candidate",
+        "action.kind=DELIVER_INPUT",
+        "action.kind=INPUT_CHUNK",
+        "action.kind=GENERATION_GRANT",
         "action.kind=GENERATE",
         "action.kind=WAIT",
         "action.kind=DONE",
-        "executor.session",
         "Never return candidate JSON to the caller",
       ]) {
         expect(run.stdout).toContain(marker);
       }
+      expect(run.stdout).not.toContain("automatic_build_executor_session.v1");
+      expect(run.stdout).not.toContain("automatic_build_executor.v1");
       const rawPrompt = readFileSync(path.join(REPO_ROOT, "agents", "pass1-local-extractor.md"), "utf8");
       expect(createHash("sha256").update(run.stdout).digest("hex"))
         .not.toBe(createHash("sha256").update(rawPrompt).digest("hex"));
@@ -480,10 +486,23 @@ describe("automatic build Codex executor handoff", () => {
     });
     const legacy = seedLegacyManifestOnly(source, root, plan, "2026-08-02T04:00:00.000Z");
     const firstWorkUnitId = legacy.manifest.ordered_work_unit_ids[0];
+    const legacyStage = plan.snapshot.stages.find((candidate) => candidate.stage === legacy.manifest.stage);
+    const legacyDescriptor = legacyStage?.work_units?.find(
+      (candidate) => candidate.work_unit_id === firstWorkUnitId,
+    );
+    const legacyBinding = legacyDescriptor
+      ? legacyStage?.task_bindings?.[legacyDescriptor.work_unit_id]
+      : undefined;
+    if (!legacyDescriptor || legacyDescriptor.version !== "automatic_build_work_unit.v3" || !legacyBinding) {
+      throw new Error("expected a proof-bound legacy Pass1 work unit");
+    }
     const claim = claimAutomaticBuildTask(legacy.target, legacy.manifest.stage, firstWorkUnitId, {
       owner: legacy.publication.prepared.owner,
       now: "2026-08-02T04:00:01.000Z",
       reserve_ttl_ms: 60_000,
+      descriptor: legacyDescriptor,
+      binding: legacyBinding,
+      policy_generation: "v3_only",
     });
     if (claim.status !== "leased") throw new Error("expected legacy owner claim");
     const next = automaticBuildNext(source, root, 1, {
@@ -634,11 +653,20 @@ describe("automatic build Codex executor handoff", () => {
     if (!plan.preflight) throw new Error("expected dispatch preflight");
     const firstTaskId = plan.preflight.dispatch_plan.dispatches[0].ordered_work_unit_ids[0];
     const target = resolveAutomaticBuildTarget(source, root);
+    const pass1Stage = plan.snapshot.stages.find((candidate) => candidate.stage === "pass1");
+    const descriptor = pass1Stage?.work_units?.find((candidate) => candidate.work_unit_id === firstTaskId);
+    const binding = descriptor ? pass1Stage?.task_bindings?.[descriptor.work_unit_id] : undefined;
+    if (!descriptor || descriptor.version !== "automatic_build_work_unit.v3" || !binding) {
+      throw new Error("expected a proof-bound synthetic Pass1 work unit");
+    }
     for (let attempt = 1; attempt <= 2; attempt += 1) {
       const claim = claimAutomaticBuildTask(target, "pass1", firstTaskId, {
         owner: `seed-semantic-failure-${attempt}`,
         now: `2026-07-25T01:0${attempt}:00.000Z`,
         reserve_ttl_ms: 60_000,
+        descriptor,
+        binding,
+        policy_generation: "v3_only",
         max_semantic_attempts: 3,
       });
       if (claim.status !== "leased") throw new Error(`expected seed lease ${attempt}`);
@@ -843,7 +871,9 @@ describe("automatic build Codex executor handoff", () => {
       "opaque_handoff_ref",
       "retry_after_ms",
       "executor.open",
-      "executor.session",
+      "executor.input.next",
+      "executor.generation.start",
+      "executor.submit_candidate",
       "planning.context",
       "draft.candidate",
       "plan_confirmation_required",
@@ -867,6 +897,9 @@ describe("automatic build Codex executor handoff", () => {
       "automatic_build_recovery.v1",
       "artifact.prepare",
       "intent_artifact_mailbox_receipt.v1",
+      "automatic_build_executor_session.v1",
+      "executor.session",
+      "candidate_path",
     ]) {
       expect(skill).not.toContain(removedMarker);
     }
@@ -876,13 +909,18 @@ describe("automatic build Codex executor handoff", () => {
       "utf8",
     );
     for (const marker of [
-      "automatic_build_executor_session.v1",
+      "automatic_build_executor_session.v2",
       "opaque_handoff_ref",
       "executor.open",
-      "GENERATE",
-      "executor.session",
-      "WAIT",
-      "DONE",
+      "executor.input.next",
+      "executor.generation.start",
+      "executor.submit_candidate",
+      "action.kind=DELIVER_INPUT",
+      "action.kind=INPUT_CHUNK",
+      "action.kind=GENERATION_GRANT",
+      "action.kind=GENERATE",
+      "action.kind=WAIT",
+      "action.kind=DONE",
       "Never return candidate JSON to the caller",
     ]) {
       expect(executor).toContain(marker);
@@ -895,6 +933,9 @@ describe("automatic build Codex executor handoff", () => {
       "submit_command",
       "fail_command",
       "interrupt_command",
+      "automatic_build_executor_session.v1",
+      "candidate_path",
+      "executor.session",
     ]) {
       expect(executor).not.toContain(removedMarker);
     }

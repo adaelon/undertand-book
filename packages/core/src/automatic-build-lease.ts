@@ -10,6 +10,7 @@ import {
 } from "node:fs";
 import path from "node:path";
 import type { AutomaticBuildStage, AutomaticBuildTarget, BuildTargetRefV2 } from "./build-orchestrator";
+import { CODEX_EXECUTOR_TRANSPORT_PROFILE_V1 } from "./executor-transport";
 import type { AutomaticBuildFailureDiagnosticV2 } from "./extractor-contract";
 import {
   automaticBuildTaskAttemptDirectory,
@@ -31,7 +32,10 @@ import {
   type ExtractionPolicyFingerprintV1,
 } from "./semantic-artifact";
 import {
+  isProofBoundWorkUnitDescriptor,
   isWorkUnitDescriptorV3,
+  validateWorkUnitDescriptorV3,
+  validateWorkUnitDescriptorV4,
   validateWorkUnitTaskPolicyBinding,
   type WorkUnitDescriptor,
 } from "./stage-work-unit";
@@ -263,11 +267,18 @@ function resolveRequestedAttemptScope(
       || !sameTargetRef(options.descriptor.target, target.target_ref)) {
       throw new Error("automatic build claim descriptor identity mismatch");
     }
+    if (isProofBoundWorkUnitDescriptor(options.descriptor)) {
+      if (isWorkUnitDescriptorV3(options.descriptor)) {
+        validateWorkUnitDescriptorV3(options.descriptor);
+      } else {
+        validateWorkUnitDescriptorV4(options.descriptor, CODEX_EXECUTOR_TRANSPORT_PROFILE_V1);
+      }
+    }
     validateWorkUnitTaskPolicyBinding(options.descriptor, options.binding);
   }
   const descriptorScope = options.descriptor
     && options.binding
-    && isWorkUnitDescriptorV3(options.descriptor)
+    && isProofBoundWorkUnitDescriptor(options.descriptor)
     && isAutomaticBuildTaskPolicyBindingV2(options.binding)
     ? createAutomaticBuildAttemptScope({
         target_ref: target.target_ref,
@@ -303,7 +314,7 @@ function resolveRequestedAttemptScope(
     && (!scope
       || (requireDescriptorBinding
         && (!options.descriptor || !options.binding
-          || !isWorkUnitDescriptorV3(options.descriptor)
+          || !isProofBoundWorkUnitDescriptor(options.descriptor)
           || !isAutomaticBuildTaskPolicyBindingV2(options.binding))))) {
     throw new Error("policy_generation_migration_required: v3 release forbids unscoped claims");
   }

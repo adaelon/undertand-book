@@ -26,9 +26,12 @@ import {
   recordAutomaticBuildAttemptEvent,
   recordAutomaticBuildSubmitRevision,
 } from "./automatic-build-task-store";
+import { canonicalAutomaticBuildJson } from "./automatic-build-protocol";
 import {
-  automaticBuildFailureDiagnosticFromCode,
-  automaticBuildFailureDiagnosticFromError,
+  automaticBuildFailureDiagnosticFromCandidateSinkError,
+  automaticBuildFailureDiagnosticFromExecutorReport,
+  automaticBuildFailureDiagnosticFromWriterError,
+  isAutomaticBuildFailureDiagnosticV3,
   legacyAutomaticBuildFailureDiagnostic,
   validateAutomaticBuildFailureDiagnostic,
   type AutomaticBuildFailureDiagnosticV2,
@@ -40,11 +43,37 @@ import {
   writeSemanticArtifactEnvelopeFile,
   type SemanticBuildStage,
 } from "./semantic-artifact";
+import { estimateTokens } from "./window";
 
 const DEFAULT_MAX_CANDIDATE_BYTES = 4 * 1024 * 1024;
 const MAX_RECEIPT_BYTES = 4_096;
 const UTF8_BOM = Buffer.from([0xef, 0xbb, 0xbf]);
 const UTF8_DECODER = new TextDecoder("utf-8", { fatal: true });
+
+export type AutomaticBuildJsonValue =
+  | null
+  | boolean
+  | number
+  | string
+  | AutomaticBuildJsonValue[]
+  | { [key: string]: AutomaticBuildJsonValue };
+
+export const AUTOMATIC_BUILD_CANDIDATE_JSON_LIMITS_V1 = Object.freeze({
+  max_depth: 64,
+  max_nodes: 8_192,
+});
+
+export interface AutomaticBuildCandidateValueSerializationV1 {
+  version: "automatic_build_candidate_value_serialization.v1";
+  value: AutomaticBuildJsonValue;
+  canonical_json: string;
+  canonical_bytes: Buffer;
+  candidate_sha256: string;
+  size_bytes: number;
+  estimated_tokens: number;
+  node_count: number;
+  max_depth: number;
+}
 
 export const AUTOMATIC_BUILD_WRITER_WARNING_CODES = [
   "paper_lexicon_candidate_reconciled",
@@ -64,6 +93,21 @@ export interface AutomaticBuildWriterResult {
   artifact_path: string;
   output_counts?: Record<string, number>;
   writer_warnings?: AutomaticBuildWriterWarnings;
+}
+
+export class AutomaticBuildCandidateSinkUnavailableError extends Error {
+  readonly failure_diagnostic: AutomaticBuildFailureDiagnosticV2;
+
+  constructor(error: unknown) {
+    super("automatic build candidate sink is temporarily unavailable");
+    this.name = "AutomaticBuildCandidateSinkUnavailableError";
+    this.failure_diagnostic = automaticBuildFailureDiagnosticFromCandidateSinkError(error);
+  }
+}
+
+function throwCandidateSinkUnavailable(error: unknown): never {
+  if (error instanceof AutomaticBuildCandidateSinkUnavailableError) throw error;
+  throw new AutomaticBuildCandidateSinkUnavailableError(error);
 }
 
 export interface AutomaticBuildTaskReceiptV1 {
@@ -108,6 +152,86 @@ export interface AutomaticBuildTaskInspectionV1 {
 
 function sha256(data: Uint8Array): string {
   return createHash("sha256").update(data).digest("hex");
+}
+
+export function serializeAutomaticBuildCandidateValue(
+  input: unknown,
+): AutomaticBuildCandidateValueSerializationV1 {
+  const seen = new WeakSet<object>();
+  let nodeCount = 0;
+  let maxDepth = 0;
+  const visit = (value: unknown, depth: number): AutomaticBuildJsonValue => {
+    nodeCount += 1;
+    maxDepth = Math.max(maxDepth, depth);
+    if (nodeCount > AUTOMATIC_BUILD_CANDIDATE_JSON_LIMITS_V1.max_nodes) {
+      throw new Error("executor candidate JSON value exceeds its node limit");
+    }
+    if (depth > AUTOMATIC_BUILD_CANDIDATE_JSON_LIMITS_V1.max_depth) {
+      throw new Error("executor candidate JSON value exceeds its depth limit");
+    }
+    if (value === null || typeof value === "boolean" || typeof value === "string") return value;
+    if (typeof value === "number") {
+      if (!Number.isFinite(value)) throw new Error("executor candidate JSON numbers must be finite");
+      return Object.is(value, -0) ? 0 : value;
+    }
+    if (typeof value !== "object") {
+      throw new Error("executor candidate must be a JSON value without host types");
+    }
+    if (seen.has(value)) throw new Error("executor candidate JSON value must not contain cycles or aliases");
+    seen.add(value);
+    if (Array.isArray(value)) {
+      const ownKeys = Reflect.ownKeys(value);
+      if (ownKeys.some((key) => typeof key === "symbol"
+        || (key !== "length" && !/^(?:0|[1-9][0-9]*)$/u.test(key)))) {
+        throw new Error("executor candidate arrays must not contain host properties");
+      }
+      const result: AutomaticBuildJsonValue[] = [];
+      for (let index = 0; index < value.length; index += 1) {
+        const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+        if (!descriptor || !descriptor.enumerable || !("value" in descriptor)) {
+          throw new Error("executor candidate arrays must be dense JSON values");
+        }
+        result.push(visit(descriptor.value, depth + 1));
+      }
+      return result;
+    }
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) {
+      throw new Error("executor candidate must be a JSON value without host objects");
+    }
+    const result = Object.create(null) as Record<string, AutomaticBuildJsonValue>;
+    for (const key of Reflect.ownKeys(value)) {
+      if (typeof key !== "string") {
+        throw new Error("executor candidate JSON objects must use string keys");
+      }
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (!descriptor || !descriptor.enumerable || !("value" in descriptor)) {
+        throw new Error("executor candidate JSON objects must contain plain data properties");
+      }
+      Object.defineProperty(result, key, {
+        value: visit(descriptor.value, depth + 1),
+        enumerable: true,
+        configurable: true,
+        writable: true,
+      });
+    }
+    return result;
+  };
+
+  const value = visit(input, 0);
+  const canonicalJson = canonicalAutomaticBuildJson(value);
+  const canonicalBytes = Buffer.from(canonicalJson, "utf8");
+  return {
+    version: "automatic_build_candidate_value_serialization.v1",
+    value,
+    canonical_json: canonicalJson,
+    canonical_bytes: canonicalBytes,
+    candidate_sha256: sha256(canonicalBytes),
+    size_bytes: canonicalBytes.byteLength,
+    estimated_tokens: estimateTokens(canonicalJson),
+    node_count: nodeCount,
+    max_depth: maxDepth,
+  };
 }
 
 function normalizeAutomaticBuildWriterWarnings(
@@ -234,9 +358,23 @@ export function normalizeAutomaticBuildTaskReceipt(
   if (receipt.version === "automatic_build_task_receipt.v2") {
     if (receipt.state === "retryable_failure") {
       if (!receipt.failure_diagnostic) throw new Error("v2 failure receipt is missing its typed diagnostic");
+      const failureDiagnostic = validateAutomaticBuildFailureDiagnostic(
+        receipt.failure_diagnostic,
+        receipt.metrics
+          ? {
+              writer_started: receipt.metrics.writer_started ?? false,
+              output_bytes: receipt.metrics.output_bytes,
+            }
+          : undefined,
+      );
+      if (receipt.metrics?.failure_phase !== undefined
+        && (!isAutomaticBuildFailureDiagnosticV3(failureDiagnostic)
+          || receipt.metrics.failure_phase !== failureDiagnostic.phase)) {
+        throw new Error("failure receipt metrics disagree with the diagnostic phase facts");
+      }
       return {
         ...receipt,
-        failure_diagnostic: validateAutomaticBuildFailureDiagnostic(receipt.failure_diagnostic),
+        failure_diagnostic: failureDiagnostic,
       };
     }
     if (receipt.failure_diagnostic !== undefined) {
@@ -323,6 +461,79 @@ export function stageAutomaticBuildCandidate(
     candidate_sha256: staged.candidate_sha256,
     size_bytes: staged.size_bytes,
   });
+  return staged;
+}
+
+export function stageAutomaticBuildCandidateValue(
+  target: AutomaticBuildTarget,
+  leaseRef: string,
+  token: string,
+  candidateValue: unknown,
+  options: { max_bytes?: number; max_tokens?: number; now?: string } = {},
+): AutomaticBuildCandidateRecordV1 {
+  readAutomaticBuildLease(target, leaseRef, token);
+  const candidate = serializeAutomaticBuildCandidateValue(candidateValue);
+  const maxBytes = options.max_bytes ?? DEFAULT_MAX_CANDIDATE_BYTES;
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) {
+    throw new Error("candidate max_bytes must be a positive safe integer");
+  }
+  if (candidate.size_bytes > maxBytes) {
+    throw new Error(`candidate exceeds ${maxBytes} bytes: ${candidate.size_bytes}`);
+  }
+  if (options.max_tokens !== undefined) {
+    if (!Number.isSafeInteger(options.max_tokens) || options.max_tokens < 1) {
+      throw new Error("candidate max_tokens must be a positive safe integer");
+    }
+    if (candidate.estimated_tokens > options.max_tokens) {
+      throw new Error(`candidate exceeds ${options.max_tokens} estimated tokens: ${candidate.estimated_tokens}`);
+    }
+  }
+  const destination = expectedCandidatePath(leaseRef);
+  if (existsSync(destination)) {
+    const existing = readCandidatePayload(destination, maxBytes);
+    if (existing.record.candidate_sha256 === candidate.candidate_sha256) {
+      normalizeCandidatePayload(existing);
+      return existing.record;
+    }
+    throw new Error(`candidate already exists with a different hash: ${destination}`);
+  }
+  assertActiveAutomaticBuildLease(target, leaseRef, token, options.now);
+  try {
+    writeFileSync(destination, candidate.canonical_bytes, { flag: "wx" });
+  } catch (error) {
+    const code = error && typeof error === "object" && "code" in error ? String(error.code) : "";
+    if (code !== "EEXIST") throwCandidateSinkUnavailable(error);
+    let existing: AutomaticBuildCandidatePayload;
+    try {
+      existing = readCandidatePayload(destination, maxBytes);
+    } catch (readError) {
+      throwCandidateSinkUnavailable(readError);
+    }
+    if (existing.record.candidate_sha256 !== candidate.candidate_sha256) {
+      throw new Error(`candidate already exists with a different hash: ${destination}`);
+    }
+    normalizeCandidatePayload(existing);
+  }
+  let staged: AutomaticBuildCandidateRecordV1;
+  try {
+    staged = candidateInfo(destination, maxBytes);
+  } catch (error) {
+    throwCandidateSinkUnavailable(error);
+  }
+  if (staged.candidate_sha256 !== candidate.candidate_sha256
+    || staged.size_bytes !== candidate.size_bytes) {
+    throw new Error("canonical candidate mailbox bytes changed during staging");
+  }
+  try {
+    writeJsonAtomic(path.join(path.dirname(destination), "validation.json"), {
+      version: "automatic_build_candidate_validation.v1",
+      valid_json: true,
+      candidate_sha256: staged.candidate_sha256,
+      size_bytes: staged.size_bytes,
+    });
+  } catch (error) {
+    throwCandidateSinkUnavailable(error);
+  }
   return staged;
 }
 
@@ -475,14 +686,16 @@ export function submitAutomaticBuildCandidate(
     recordTerminalSuccess(target, lease, committedAt);
     return receipt;
   } catch (error) {
-    const failureDiagnostic = automaticBuildFailureDiagnosticFromError(error);
+    const failureDiagnostic = automaticBuildFailureDiagnosticFromWriterError(error, {
+      writer_started: true,
+    });
     const failedAt = options.completed_at ?? (options.now ? options.now : new Date().toISOString());
     const metrics = persistAutomaticBuildTaskMetrics(target, leaseRef, token, {
       status: "retryable_failure",
       terminal_at: failedAt,
       writer_started_at: submission.started_at,
       output_bytes: candidate.size_bytes,
-      diagnostic_code: failureDiagnostic.code,
+      failure_diagnostic: failureDiagnostic,
       usage,
     });
     const failureReceipt = {
@@ -530,7 +743,11 @@ export function failAutomaticBuildTask(
   const lease = assertActiveAutomaticBuildLease(target, leaseRef, token, now);
   const failureDiagnostic = input.failure_diagnostic
     ? validateAutomaticBuildFailureDiagnostic(input.failure_diagnostic)
-    : automaticBuildFailureDiagnosticFromCode(input.diagnostic_code);
+    : automaticBuildFailureDiagnosticFromExecutorReport(input.diagnostic_code, "generation");
+  if (isAutomaticBuildFailureDiagnosticV3(failureDiagnostic)
+    && failureDiagnostic.phase !== "generation") {
+    throw new Error(`${failureDiagnostic.phase} is a non-semantic terminal failure phase`);
+  }
   const usage = readAutomaticBuildUsageReceipt(leaseRef);
   const candidatePath = expectedCandidatePath(leaseRef);
   const candidate = existsSync(candidatePath) ? candidateInfo(candidatePath) : undefined;
@@ -538,7 +755,7 @@ export function failAutomaticBuildTask(
     status: "retryable_failure",
     terminal_at: now,
     output_bytes: candidate?.size_bytes ?? 0,
-    diagnostic_code: failureDiagnostic.code,
+    failure_diagnostic: failureDiagnostic,
     usage,
   });
   const receipt: AutomaticBuildTaskReceiptV2 = {

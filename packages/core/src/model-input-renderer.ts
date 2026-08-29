@@ -1,5 +1,12 @@
 import { createHash } from "node:crypto";
-import type { BookStructureStitchPacket, BookStructureUnitSource } from "./book-structure";
+import type {
+  BookStructureFragmentInputV1,
+  BookStructureReductionInputV1,
+  BookStructureStitchFragmentInputV1,
+  BookStructureStitchPacket,
+  BookStructureStitchReductionInputV1,
+  BookStructureUnitSource,
+} from "./book-structure";
 import type { GraphEdge } from "./generated/GraphEdge";
 import type { GraphNode } from "./generated/GraphNode";
 import type { PaperMetadataCandidatePacket } from "./paper-metadata-router";
@@ -114,6 +121,10 @@ export type ModelInputRenderRequest =
     }
   | { kind: "pass2_candidate_batch"; input: Pass2WorkPacket }
   | { kind: "structure_unit"; input: BookStructureUnitSource }
+  | { kind: "structure_fragment"; input: BookStructureFragmentInputV1 }
+  | { kind: "structure_reduce"; input: BookStructureReductionInputV1 }
+  | { kind: "structure_stitch_fragment"; input: BookStructureStitchFragmentInputV1 }
+  | { kind: "structure_stitch_reduce"; input: BookStructureStitchReductionInputV1 }
   | { kind: "structure_stitch"; input: BookStructureStitchPacket };
 
 export interface RenderedModelInputV1 {
@@ -124,6 +135,17 @@ export interface RenderedModelInputV1 {
   byte_length: number;
   sha256: string;
   estimated_tokens: number;
+}
+
+export interface InspectedModelExecutionInputV2 {
+  version: "inspected_model_execution_input.v2";
+  render_contract_version: string;
+  prompt_sha256: string;
+  rendered_input_sha256: string;
+  prompt_byte_length: number;
+  rendered_input_byte_length: number;
+  estimated_prompt_tokens: number;
+  estimated_rendered_tokens: number;
 }
 
 function lineDocument(lines: string[]): string {
@@ -276,6 +298,30 @@ export function renderBookStructureModelInput(
   return prettyJson(input);
 }
 
+export function renderBookStructureFragmentModelInput(
+  input: BookStructureFragmentInputV1,
+): string {
+  return prettyJson(input);
+}
+
+export function renderBookStructureReductionModelInput(
+  input: BookStructureReductionInputV1,
+): string {
+  return prettyJson(input);
+}
+
+export function renderBookStructureStitchFragmentModelInput(
+  input: BookStructureStitchFragmentInputV1,
+): string {
+  return prettyJson(input);
+}
+
+export function renderBookStructureStitchReductionModelInput(
+  input: BookStructureStitchReductionInputV1,
+): string {
+  return prettyJson(input);
+}
+
 export function renderModelInput(request: ModelInputRenderRequest): string {
   switch (request.kind) {
     case "pass1_window":
@@ -300,6 +346,14 @@ export function renderModelInput(request: ModelInputRenderRequest): string {
     case "structure_unit":
     case "structure_stitch":
       return renderBookStructureModelInput(request.input);
+    case "structure_fragment":
+      return renderBookStructureFragmentModelInput(request.input);
+    case "structure_reduce":
+      return renderBookStructureReductionModelInput(request.input);
+    case "structure_stitch_fragment":
+      return renderBookStructureStitchFragmentModelInput(request.input);
+    case "structure_stitch_reduce":
+      return renderBookStructureStitchReductionModelInput(request.input);
   }
 }
 
@@ -313,5 +367,26 @@ export function inspectRenderedModelInput(request: ModelInputRenderRequest): Ren
     byte_length: Buffer.byteLength(text, "utf8"),
     sha256: createHash("sha256").update(text, "utf8").digest("hex"),
     estimated_tokens: estimateTokens(text),
+  };
+}
+
+export function inspectModelExecutionInput(input: {
+  semantic_prompt: string;
+  rendered_input: string;
+  render_contract_version?: string;
+}): InspectedModelExecutionInputV2 {
+  const renderContractVersion = input.render_contract_version ?? MODEL_INPUT_RENDER_CONTRACT_VERSION;
+  if (!renderContractVersion || Buffer.byteLength(renderContractVersion, "utf8") > 256) {
+    throw new Error("render_contract_version must be a non-empty bounded string");
+  }
+  return {
+    version: "inspected_model_execution_input.v2",
+    render_contract_version: renderContractVersion,
+    prompt_sha256: createHash("sha256").update(input.semantic_prompt, "utf8").digest("hex"),
+    rendered_input_sha256: createHash("sha256").update(input.rendered_input, "utf8").digest("hex"),
+    prompt_byte_length: Buffer.byteLength(input.semantic_prompt, "utf8"),
+    rendered_input_byte_length: Buffer.byteLength(input.rendered_input, "utf8"),
+    estimated_prompt_tokens: estimateTokens(input.semantic_prompt),
+    estimated_rendered_tokens: estimateTokens(input.rendered_input),
   };
 }

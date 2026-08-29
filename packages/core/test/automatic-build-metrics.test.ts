@@ -243,6 +243,13 @@ describe("automatic build task metrics", () => {
       },
       empty_output: { known_attempts: 2, empty_attempts: 1, rate: 0.5 },
       diagnostic_counts: { executor_failed: 1 },
+      failure_phase_counts: {
+        input_delivery: 0,
+        generation: 1,
+        candidate_sink: 0,
+        artifact_writer: 0,
+        legacy_unclassified: 0,
+      },
     });
     expect(first.latency.writer_ms).toEqual({ p50: 250, p95: 250 });
     expect(first.phase_latency).toMatchObject({
@@ -314,6 +321,64 @@ describe("automatic build task metrics", () => {
     expect(events.find((event) => event.kind === "lease_expired")).toMatchObject({
       work_unit_id: expired.lease.work_unit_id,
       execution_identity: { semantic_attempt: 1, lease_epoch: 1, submit_revision: 0 },
+    });
+  });
+
+  it("projects generation and writer failures into distinct lifecycle and stage phase metrics", () => {
+    const { root, target } = fixture();
+    const generation = claim(target, "generation-phase");
+    observeInput(target, generation, 20);
+    const generationReceipt = failAutomaticBuildTask(
+      target,
+      generation.lease_ref,
+      generation.lease.token,
+      {
+        diagnostic_code: "provider_timeout",
+        now: "2026-07-19T00:00:02.000Z",
+      },
+    );
+    expect(generationReceipt.metrics).toMatchObject({
+      writer_started: false,
+      failure_phase: "generation",
+    });
+
+    const writer = claim(target, "writer-phase");
+    observeInput(target, writer, 30);
+    const writerReceipt = submitAutomaticBuildCandidate(
+      target,
+      writer.lease_ref,
+      writer.lease.token,
+      candidate(writer, { nodes: [] }),
+      () => { throw new Error(`PRIVATE_WRITER_FAILURE at ${root}`); },
+      {
+        now: "2026-07-19T00:00:03.000Z",
+        completed_at: "2026-07-19T00:00:03.250Z",
+      },
+    );
+    expect(writerReceipt.metrics).toMatchObject({
+      writer_started: true,
+      failure_phase: "artifact_writer",
+    });
+
+    const events = readAutomaticBuildLifecycleEvents(target, "pass1");
+    expect(events.filter((event) => event.kind === "task_failed")).toContainEqual(expect.objectContaining({
+      work_unit_id: "generation-phase",
+      diagnostic_code: "provider_timeout",
+      failure_phase: "generation",
+    }));
+    expect(events.filter((event) => event.kind === "writer_failed")).toContainEqual(expect.objectContaining({
+      work_unit_id: "writer-phase",
+      diagnostic_code: "writer_failed",
+      failure_phase: "artifact_writer",
+    }));
+    expect(buildAutomaticBuildStageMetricsSummary(target, "pass1")).toMatchObject({
+      failure_phase_counts: {
+        input_delivery: 0,
+        generation: 1,
+        candidate_sink: 0,
+        artifact_writer: 1,
+        legacy_unclassified: 0,
+      },
     });
   });
 

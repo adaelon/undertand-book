@@ -1,0 +1,154 @@
+{
+  "version": "understand_book_t8_resume_evidence.v1",
+  "status": "blocked",
+  "captured_at": "2026-08-28T01:42:02.5831097Z",
+  "release_gate": {
+    "plugin_version": "0.1.0+codex.20260827012058",
+    "plugin_manifest_sha256": "0bcbad6c3d0e0d123b47f125108083591177360ee9c39ab89a21ffa877793bbb",
+    "source_sidecar_sha256": "20ca697f9416d8a87d86babed02a108ac1f66b146d4cdaafaf4bf1a15601f51d",
+    "installed_sidecar_sha256": "20ca697f9416d8a87d86babed02a108ac1f66b146d4cdaafaf4bf1a15601f51d",
+    "replaced_sidecar_backup_sha256": "6e024eb10298affc4e0cc34459ce83f36ce64dec4a47be9ec88cb3f399a9ec76",
+    "transport_profile_digest": "7db2980824bda15cdf4e9a0a3844da466ca4275dea8ad7eaba714ffe605fdf7b",
+    "t7_release_evidence_sha256": "c10be81e14a3cae5dadfb113e26f438cfc154bd22c3ab42611baa646767fc3df",
+    "compiled_executor_release_smoke": "passed",
+    "installed_executor_release_smoke": "passed",
+    "source_contract": "passed",
+    "outside_repo_installed_parity": "passed",
+    "installed_release_assertion": "passed",
+    "current_installed_protocol_doctor": {
+      "status": "incompatible",
+      "compatible_checks": [
+        "release_contract",
+        "prompt_provider",
+        "handoff_preparation",
+        "root_tool_inventory",
+        "connection_capability"
+      ],
+      "incompatible_checks": {
+        "executor_bootstrap": "executor_bootstrap_incompatible",
+        "plugin_shape": "plugin_shape_incompatible"
+      }
+    }
+  },
+  "real_book_guard": {
+    "target_identity_redacted": true,
+    "stage": "book_structure",
+    "dispatch_count": 3,
+    "work_unit_count": 3,
+    "opaque_handoff_refs_redacted": true,
+    "semantic_and_candidate_bodies_read_by_root": false,
+    "delivery": {
+      "total_chunk_counts": [
+        8,
+        6,
+        6
+      ],
+      "confirmed_chunk_counts": [
+        8,
+        6,
+        6
+      ],
+      "generation_grants": 3,
+      "generation_starts": 3
+    },
+    "attempts": {
+      "semantic_attempts": [
+        1,
+        1,
+        1
+      ],
+      "attempt_2_count": 0,
+      "candidate_file_count": 0,
+      "failure_file_count": 0,
+      "receipt_file_count": 0,
+      "retry_current_calls_this_session": 0,
+      "retry_current_treated_as_already_consumed": true
+    },
+    "append_only": {
+      "attempt_file_count_before": 12,
+      "attempt_file_count_after": 12,
+      "attempt_digest_before": "8df05d0397a32767776f126ac2f8950dd7e192602cef32084ba8d2629de6e7d5",
+      "attempt_digest_after": "8df05d0397a32767776f126ac2f8950dd7e192602cef32084ba8d2629de6e7d5",
+      "guard_file_count": 3,
+      "guard_digest": "5e90d917c5a6c05f2ba486d626d624e248750389c2877e5a1267de7b4aaaf986",
+      "existing_public_unit_count": 9,
+      "existing_public_unit_digest": "c33e48aaa2c48a3246c6cd722663a65700d57e674a9c275fdd7b940724c593bc",
+      "unchanged": true
+    }
+  },
+  "executor_observations": {
+    "desktop_custom_agent": {
+      "attempted_children": 4,
+      "terminal_status": "interrupted",
+      "category": "bootstrap",
+      "diagnostic_code": "protocol_incompatible",
+      "durable_mutation": false
+    },
+    "current_codex_custom_agent": {
+      "attempted_children": 1,
+      "agent_type": "understand_book_executor",
+      "fork_turns": "none",
+      "protocol": "automatic_build_executor_session.v2",
+      "terminal_status": "interrupted",
+      "category": "bootstrap",
+      "diagnostic_code": "protocol_incompatible",
+      "executor_open_delta": 0,
+      "durable_mutation": false
+    },
+    "isolated_codex_cli": {
+      "codex_cli": "codex-cli 0.147.0",
+      "registered_agent_protocol": "automatic_build_executor_session.v2",
+      "replacement_child_started": true,
+      "bounded_wait_ms": 600000,
+      "model_stream_disconnect_observations": 4,
+      "candidate_submitted": false,
+      "durable_mutation": false,
+      "root_sensitive_body_hits": 0
+    }
+  },
+  "blocker": {
+    "version": "understand_book_t8_blocker.v1",
+    "category": "bootstrap",
+    "code": "protocol_incompatible",
+    "phase": "executor_bootstrap",
+    "source": "dedicated_executor_lifecycle",
+    "engine_failure_written": false,
+    "prior_observation": {
+      "category": "executor",
+      "code": "model_stream_disconnected",
+      "phase": "semantic_generation",
+      "source": "harness_observation"
+    },
+    "recovery": "repair the installed/plugin executor bootstrap until the current-task V2 agent exposes its required MCP, then resume the same opaque handoffs; do not call retry_current and do not create attempt 2"
+  },
+  "verification": {
+    "focused_rehydration_regression": {
+      "passed": 1,
+      "total": 1
+    },
+    "executor_session_suite": {
+      "passed": 24,
+      "total": 24
+    },
+    "mcp_and_adapter_suite": {
+      "passed": 9,
+      "total": 9
+    },
+    "core_typecheck": "passed",
+    "scoped_diff_check": "passed",
+    "post_resume_guard": {
+      "attempt_file_count": 12,
+      "attempt_digest": "8df05d0397a32767776f126ac2f8950dd7e192602cef32084ba8d2629de6e7d5",
+      "attempt_2_count": 0,
+      "candidate_file_count": 0,
+      "failure_file_count": 0,
+      "receipt_file_count": 0,
+      "generation_grant_count": 3,
+      "generation_start_count": 3,
+      "executor_open_count": 28,
+      "source_sidecar_sha256": "20ca697f9416d8a87d86babed02a108ac1f66b146d4cdaafaf4bf1a15601f51d",
+      "installed_sidecar_sha256": "20ca697f9416d8a87d86babed02a108ac1f66b146d4cdaafaf4bf1a15601f51d",
+      "passed": true
+    }
+  }
+}

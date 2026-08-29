@@ -9,10 +9,12 @@
     "test:workbench-sidecar": "node scripts/smoke-workbench-sidecar.mjs",
     "test:book-mcp-plugin": "node scripts/smoke-book-mcp-plugin.mjs",
     "test:automatic-build-parity": "node scripts/smoke-automatic-build-parity.mjs",
+    "test:t7-executor-release": "node ../../node_modules/tsx/dist/cli.mjs scripts/smoke-t7-executor-release.ts",
+    "test:t7-codex-cli-release": "node ../../node_modules/tsx/dist/cli.mjs scripts/smoke-t7-codex-cli-release.ts",
     "test:intent-metrics-parity": "node scripts/smoke-intent-build-metrics.mjs",
     "test:codex-build-intent": "node scripts/smoke-codex-build-intent.mjs",
     "test:plugin-release": "node scripts/assert-plugin-release.mjs",
-    "package:windows": "node scripts/smoke-automatic-build-parity.mjs && node scripts/assert-plugin-release.mjs --automatic-build-parity-prechecked && node scripts/assert-release-config.mjs && tauri build --bundles nsis && node scripts/export-installer.mjs"
+    "package:windows": "node scripts/smoke-automatic-build-parity.mjs && node ../../node_modules/tsx/dist/cli.mjs scripts/smoke-t7-executor-release.ts && node scripts/assert-plugin-release.mjs --automatic-build-parity-prechecked --t7-executor-release-prechecked && node scripts/assert-release-config.mjs && tauri build --bundles nsis && node scripts/export-installer.mjs"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.0.0"

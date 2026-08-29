@@ -23,8 +23,10 @@ import {
 } from "./automatic-build-task-store";
 import type { WorkUnitDescriptor, WorkUnitKind } from "./stage-work-unit";
 import {
+  isAutomaticBuildFailureDiagnosticV3,
   legacyAutomaticBuildFailureDiagnostic,
   validateAutomaticBuildFailureDiagnostic,
+  type AutomaticBuildFailurePhase,
   type AutomaticBuildFailureDiagnosticV2,
 } from "./extractor-contract";
 
@@ -80,6 +82,8 @@ export interface AutomaticBuildTaskMetricsV1 {
   output_items?: number;
   status: "committed" | "skipped" | "retryable_failure" | "needs_user";
   diagnostic_code?: string;
+  writer_started?: boolean;
+  failure_phase?: AutomaticBuildFailurePhase;
   usage: Omit<AutomaticBuildUsageReceiptV1, "version" | "estimate">;
   estimate?: AutomaticBuildUsageReceiptV1["estimate"];
 }
@@ -122,6 +126,7 @@ export interface AutomaticBuildLifecycleEventV1 {
   execution_identity?: AutomaticBuildExecutionIdentity;
   observed_at: string;
   diagnostic_code?: string;
+  failure_phase?: AutomaticBuildFailurePhase;
   submit_revision?: number;
   provenance: {
     model: string;
@@ -188,6 +193,7 @@ export interface AutomaticBuildStageMetricsSummaryV1 {
     rate: number | null;
   };
   diagnostic_counts: Record<string, number>;
+  failure_phase_counts: Record<AutomaticBuildFailurePhase | "legacy_unclassified", number>;
   lifecycle_counts: {
     lease_issued: number;
     lease_expired: number;
@@ -228,6 +234,7 @@ export interface AutomaticBuildTerminalMetricsInput {
   output_bytes?: number;
   output_items?: number;
   diagnostic_code?: string;
+  failure_diagnostic?: AutomaticBuildFailureDiagnosticV2;
   usage?: AutomaticBuildUsageReceiptV1;
 }
 
@@ -477,6 +484,24 @@ export function persistAutomaticBuildTaskMetrics(
   const input = readAutomaticBuildInputObservation(leaseRef);
   const usageReceipt = terminal.usage ?? readAutomaticBuildUsageReceipt(leaseRef);
   const executorEnd = terminal.writer_started_at ?? terminal.terminal_at;
+  const writerStarted = terminal.writer_started_at !== undefined;
+  const failureDiagnostic = terminal.failure_diagnostic === undefined
+    ? undefined
+    : validateAutomaticBuildFailureDiagnostic(terminal.failure_diagnostic, {
+        writer_started: writerStarted,
+        output_bytes: terminal.output_bytes ?? 0,
+      });
+  if (failureDiagnostic && terminal.status !== "retryable_failure") {
+    throw new Error("only retryable failure metrics may contain a failure diagnostic");
+  }
+  if (failureDiagnostic && terminal.diagnostic_code !== undefined
+    && terminal.diagnostic_code !== failureDiagnostic.code) {
+    throw new Error("terminal metric diagnostic code disagrees with its typed diagnostic");
+  }
+  if (failureDiagnostic && isAutomaticBuildFailureDiagnosticV3(failureDiagnostic)
+    && (failureDiagnostic.phase === "input_delivery" || failureDiagnostic.phase === "candidate_sink")) {
+    throw new Error(`${failureDiagnostic.phase} is a non-terminal semantic failure phase`);
+  }
   const metrics: AutomaticBuildTaskMetricsV1 = {
     version: "automatic_build_task_metrics.v1",
     task_ref: taskRef(lease),
@@ -496,7 +521,13 @@ export function persistAutomaticBuildTaskMetrics(
       ? { output_items: nonNegativeInteger(terminal.output_items, "output_items") }
       : {}),
     status: terminal.status,
-    ...(terminal.diagnostic_code ? { diagnostic_code: terminal.diagnostic_code } : {}),
+    ...(failureDiagnostic
+      ? { diagnostic_code: failureDiagnostic.code }
+      : terminal.diagnostic_code ? { diagnostic_code: terminal.diagnostic_code } : {}),
+    writer_started: writerStarted,
+    ...(failureDiagnostic && isAutomaticBuildFailureDiagnosticV3(failureDiagnostic)
+      ? { failure_phase: failureDiagnostic.phase }
+      : {}),
     usage: {
       source: usageReceipt.source,
       model: usageReceipt.model ?? "unavailable",
@@ -545,29 +576,43 @@ interface AutomaticBuildAttemptResult {
   created_at: string;
 }
 
-function terminalDiagnosticCode(record: AutomaticBuildTerminalRecord | undefined): string | undefined {
+function terminalFailureDiagnostic(
+  record: AutomaticBuildTerminalRecord | undefined,
+): AutomaticBuildFailureDiagnosticV2 | undefined {
   if (!record || record.state !== "retryable_failure") return undefined;
   if (record.version === "automatic_build_task_receipt.v2") {
     return record.failure_diagnostic
-      ? validateAutomaticBuildFailureDiagnostic(record.failure_diagnostic).code
+      ? validateAutomaticBuildFailureDiagnostic(record.failure_diagnostic)
       : undefined;
   }
   if (record.version === "automatic_build_task_receipt.v1") {
-    return legacyAutomaticBuildFailureDiagnostic().code;
+    return legacyAutomaticBuildFailureDiagnostic();
   }
   return record.failure_diagnostic
-    ? validateAutomaticBuildFailureDiagnostic(record.failure_diagnostic).code
-    : record.diagnostic_code;
+    ? validateAutomaticBuildFailureDiagnostic(record.failure_diagnostic)
+    : record.diagnostic_code
+      ? legacyAutomaticBuildFailureDiagnostic()
+      : undefined;
 }
 
-function attemptResultDiagnosticCode(result: AutomaticBuildAttemptResult | undefined): string | undefined {
+function terminalDiagnosticCode(record: AutomaticBuildTerminalRecord | undefined): string | undefined {
+  return terminalFailureDiagnostic(record)?.code;
+}
+
+function attemptResultFailureDiagnostic(
+  result: AutomaticBuildAttemptResult | undefined,
+): AutomaticBuildFailureDiagnosticV2 | undefined {
   if (!result || result.outcome !== "failure") return undefined;
   if (result.version === "automatic_build_attempt_event.v3") {
     return result.failure_diagnostic
-      ? validateAutomaticBuildFailureDiagnostic(result.failure_diagnostic).code
+      ? validateAutomaticBuildFailureDiagnostic(result.failure_diagnostic)
       : undefined;
   }
-  return legacyAutomaticBuildFailureDiagnostic().code;
+  return legacyAutomaticBuildFailureDiagnostic();
+}
+
+function attemptResultDiagnosticCode(result: AutomaticBuildAttemptResult | undefined): string | undefined {
+  return attemptResultFailureDiagnostic(result)?.code;
 }
 
 interface AutomaticBuildSubmitRevisionRecord {
@@ -749,14 +794,26 @@ export function readAutomaticBuildLifecycleEvents(
       add("candidate_submitted", facts.submission.started_at);
     }
     if (facts.failure) {
-      const diagnosticCode = terminalDiagnosticCode(facts.failure);
+      const diagnostic = terminalFailureDiagnostic(facts.failure);
+      const diagnosticCode = diagnostic?.code;
       add(diagnosticCode === "writer_failed" ? "writer_failed" : "task_failed",
         facts.failure.failed_at ?? terminalAt(facts)!,
-        diagnosticCode ? { diagnostic_code: diagnosticCode } : {});
+        diagnosticCode ? {
+          diagnostic_code: diagnosticCode,
+          ...(diagnostic && isAutomaticBuildFailureDiagnosticV3(diagnostic)
+            ? { failure_phase: diagnostic.phase }
+            : {}),
+        } : {});
     } else if (facts.result?.outcome === "failure") {
-      const diagnosticCode = attemptResultDiagnosticCode(facts.result);
+      const diagnostic = attemptResultFailureDiagnostic(facts.result);
+      const diagnosticCode = diagnostic?.code;
       add("task_failed", facts.result.created_at,
-        diagnosticCode ? { diagnostic_code: diagnosticCode } : {});
+        diagnosticCode ? {
+          diagnostic_code: diagnosticCode,
+          ...(diagnostic && isAutomaticBuildFailureDiagnosticV3(diagnostic)
+            ? { failure_phase: diagnostic.phase }
+            : {}),
+        } : {});
     }
     if (facts.receipt?.committed_at) add("task_committed", facts.receipt.committed_at);
     else if (facts.result?.outcome === "success") add("task_committed", facts.result.created_at);
@@ -857,6 +914,13 @@ export function buildAutomaticBuildStageMetricsSummary(
   const estimateMethods = new Set<string>();
   let emptyKnown = 0;
   let emptyAttempts = 0;
+  const failurePhaseCounts: AutomaticBuildStageMetricsSummaryV1["failure_phase_counts"] = {
+    input_delivery: 0,
+    generation: 0,
+    candidate_sink: 0,
+    artifact_writer: 0,
+    legacy_unclassified: 0,
+  };
   for (const attempt of attempts) {
     const committed = attempt.receipt?.state === "committed"
       || attempt.result?.outcome === "success"
@@ -872,6 +936,17 @@ export function buildAutomaticBuildStageMetricsSummary(
       ?? attempt.metrics?.diagnostic_code
       ?? attemptResultDiagnosticCode(attempt.result);
     if (diagnostic) diagnosticCounts[diagnostic] = (diagnosticCounts[diagnostic] ?? 0) + 1;
+    if (failed) {
+      const failureDiagnostic = terminalFailureDiagnostic(attempt.failure)
+        ?? attemptResultFailureDiagnostic(attempt.result);
+      if (failureDiagnostic && isAutomaticBuildFailureDiagnosticV3(failureDiagnostic)) {
+        failurePhaseCounts[failureDiagnostic.phase] += 1;
+      } else if (attempt.metrics?.failure_phase) {
+        failurePhaseCounts[attempt.metrics.failure_phase] += 1;
+      } else {
+        failurePhaseCounts.legacy_unclassified += 1;
+      }
+    }
     const hasInput = attempt.usage.input_tokens !== undefined;
     const hasOutput = attempt.usage.output_tokens !== undefined;
     const hasAny = hasInput || hasOutput || attempt.usage.cached_input_tokens !== undefined;
@@ -967,6 +1042,7 @@ export function buildAutomaticBuildStageMetricsSummary(
       rate: emptyKnown ? emptyAttempts / emptyKnown : null,
     },
     diagnostic_counts: Object.fromEntries(Object.entries(diagnosticCounts).sort(([left], [right]) => left.localeCompare(right))),
+    failure_phase_counts: failurePhaseCounts,
     lifecycle_counts: {
       lease_issued: eventCount("lease_reserved"),
       lease_expired: eventCount("lease_expired"),
