@@ -9,7 +9,7 @@ import {
 import type { BuildTargetRefV2 } from "./build-orchestrator";
 import { pass1ContentHash, type Pass1ArtifactMeta } from "./build-resume";
 import type { LidNode } from "./generated/LidNode";
-import { evaluateModelInputBudget, type ModelInputBudgetProofV1 } from "./model-input-budget";
+import { evaluateModelInputBudget, type ModelInputBudgetEvidenceV2 } from "./model-input-budget";
 import { renderPaperLexiconModelInput } from "./model-input-renderer";
 import {
   routeModelInputSlices,
@@ -30,7 +30,7 @@ import {
   type PaperTermType,
 } from "./paper-lexicon";
 import { buildPass1Input } from "./pass1-input";
-import { extractionPolicyDigest, type ExtractionPolicyFingerprintV1 } from "./semantic-artifact";
+import type { ExtractionPolicyFingerprintV1 } from "./semantic-artifact";
 import {
   buildWorkUnitCost,
   createWorkUnitDescriptor,
@@ -113,7 +113,7 @@ export interface PaperLexiconCandidatePacketV3 {
   estimated_rendered_tokens: number;
   input_hash: string;
   rendered_input_sha256: string;
-  input_budget_proof: ModelInputBudgetProofV1;
+  input_budget_proof: ModelInputBudgetEvidenceV2;
 }
 
 export interface PaperLexiconClusterRouteV1 {
@@ -1140,7 +1140,6 @@ export function routePaperLexiconWorkUnitsWithRecovery(
       stage: "paper_lexicon",
       target_ref: input.target,
       router_version: PAPER_LEXICON_ROUTER_VERSION,
-      policy_digest: extractionPolicyDigest(input.policy_fingerprint),
       affected_work_units: [{
         work_unit_id: error.work_unit_id,
         evidence_lids: [error.recovery.parent_lid],

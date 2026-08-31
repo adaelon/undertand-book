@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import {
   advanceAutomaticBuildDispatch,
   finishAutomaticBuildDispatch,
+  inspectAutomaticBuildDispatch,
   persistAutomaticBuildDispatch as persistAutomaticBuildDispatchRuntime,
   prepareAutomaticBuildDispatch,
 } from "../src/automatic-build-dispatch-runtime";
@@ -22,7 +23,7 @@ import {
 } from "../src/automatic-build-task-store";
 import { resolveAutomaticBuildTarget } from "../src/build-orchestrator";
 import { resolveContentProfile } from "../src/content-profile";
-import { CODEX_EXECUTOR_TRANSPORT_PROFILE_V1 } from "../src/executor-transport";
+import { CODEX_EXECUTOR_TRANSPORT_PROFILE_V2 } from "../src/executor-transport";
 import { automaticBuildExtractionPolicy } from "../src/semantic-artifact";
 import {
   buildWorkUnitCost,
@@ -149,6 +150,29 @@ function seedSemanticFailure(
 }
 
 describe("automatic build executor dispatch runtime", () => {
+  it("reads a legacy dispatch manifest binding without inventing a V3 attempt scope", () => {
+    const { target, manifest, bindings } = fixture();
+    const legacyManifest = { ...manifest, task_bindings: bindings } as unknown as typeof manifest;
+    persistAutomaticBuildDispatch(target, legacyManifest, {
+      owner: `legacy-dispatch-runtime:${legacyManifest.dispatch_id}`,
+      created_at: "2026-08-27T01:00:00.000Z",
+      reserve_ttl_ms: 60_000,
+      run_ttl_ms: 1_800_000,
+    });
+
+    expect(inspectAutomaticBuildDispatch(
+      target,
+      "profile_sidecar",
+      legacyManifest.dispatch_id,
+      "2026-08-27T01:00:01.000Z",
+    )).toMatchObject({
+      state: "active",
+      next_work_unit_id: legacyManifest.ordered_work_unit_ids[0],
+      task_receipts: [],
+    });
+    expect(listAutomaticBuildStoredAttempts(target, "profile_sidecar")).toEqual([]);
+  });
+
   it("advances a proof-bound V4 BookStructure dispatch through the scoped binding path", () => {
     const root = mkdtempSync(path.join(tmpdir(), "understand-book-dispatch-runtime-v4-"));
     const sourcePath = path.join(root, "guide.md");
@@ -190,7 +214,7 @@ describe("automatic build executor dispatch runtime", () => {
           stitch_reduce: "BOOK_STRUCTURE_STITCH_REDUCE_V1\nReduce proof-bound stitch observations.\n",
         },
       }),
-      transport_profile: CODEX_EXECUTOR_TRANSPORT_PROFILE_V1,
+      transport_profile: CODEX_EXECUTOR_TRANSPORT_PROFILE_V2,
     });
     expect(routed.status).toBe("ready");
     if (routed.status !== "ready") throw new Error("expected one routable V4 BookStructure unit");

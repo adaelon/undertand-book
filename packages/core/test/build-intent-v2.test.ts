@@ -1,7 +1,11 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { computeArtifactBlueprintDigest, getSystemArtifactBlueprintV1 } from "../src/artifact-blueprint";
-import { compileBuildModeV2 } from "../src/build-capability";
+import {
+  assertSameArtifactBlueprintVersionV2,
+  computeArtifactBlueprintDigest,
+  getSystemArtifactBlueprintV1,
+} from "../src/artifact-blueprint";
+import { compileBuildModeV2, compileBuildModeV3 } from "../src/build-capability";
 import {
   canonicalBuildJson,
   validateBuildPlanV1,
@@ -11,11 +15,20 @@ import {
   attachBuildPlanDigestV2,
   computeBuildIntentDigestV2,
   computeBuildPlanDigestV2,
+  migrateBuildIntentV2ToV3,
+  migratePlanningControlV2ToV3,
+  reconcileBuildIntentV3,
+  reconcileBuildPlanV3,
   validateBuildIntentV2,
   validateBuildPlanV2,
   type BuildIntentV2,
   type BuildPlanV2,
 } from "../src/build-intent-v2";
+import {
+  buildPlanningContextV1,
+  issueBuildPlanningContextV2,
+  reconcileBuildPlanningContextV2,
+} from "../src/build-planning-context";
 import legacyGolden from "./fixtures/build-intent.v1.golden.json";
 import v2Golden from "./fixtures/build-intent.v2.golden.json";
 
@@ -70,6 +83,155 @@ function planInput(privateArtifacts: BuildPlanV2["private_artifacts"]): Omit<Bui
 }
 
 describe("AA3 BuildIntentV2 and BuildPlanV2", () => {
+  it("H0 uses explicit context, intent, plan, and Blueprint generations instead of control-object digests", () => {
+    const context = issueBuildPlanningContextV2({
+      context_id: "context-book-v2",
+      planning: {
+        target: {
+          book_id: "book-v2",
+          source_fingerprint: "a".repeat(64),
+          content_profile: "technical_learning",
+        },
+        available_lids: ["1.1"],
+        available_sections: ["Introduction"],
+        blueprint_registry: [],
+      },
+    });
+    const currentIntent = migrateBuildIntentV2ToV3(intent());
+    const preset = getSystemArtifactBlueprintV1("comparison_table");
+    const currentPlan = compileBuildModeV3({
+      mode: "goal_directed",
+      book_id: currentIntent.book_id,
+      source_fingerprint: currentIntent.source_fingerprint,
+      content_profile: currentIntent.content_profile,
+      plan_id: "plan-v3",
+      plan_revision: 1,
+      created_at: NOW,
+      budget: { max_total_tokens: 50_000, on_exceed: "needs_user" },
+      public_freshness: [],
+      intent: currentIntent,
+      selected_blueprints: [{
+        version: "artifact_blueprint_resolution.v2",
+        source: "system",
+        blueprint: preset.blueprint,
+        blueprint_id: preset.blueprint.blueprint_id,
+        blueprint_version: preset.blueprint.blueprint_version,
+      }],
+    }).plan!;
+
+    expect(context).toMatchObject({ context_id: "context-book-v2", context_revision: 1 });
+    expect(currentIntent).toMatchObject({ intent_id: "intent-v2", intent_revision: 1 });
+    expect(currentPlan).toMatchObject({ plan_id: "plan-v3", plan_revision: 1 });
+    expect(currentPlan.private_artifacts[0].blueprint).toMatchObject({
+      blueprint_id: preset.blueprint.blueprint_id,
+      blueprint_version: preset.blueprint.blueprint_version,
+    });
+    expect(context.target).toMatchObject({ book_id: "book-v2" });
+
+    const present = [
+      Object.hasOwn(context, "context_digest") ? "context_digest" : undefined,
+      Object.hasOwn(currentIntent, "intent_digest") ? "intent_digest" : undefined,
+      Object.hasOwn(currentPlan, "intent_digest") ? "intent_digest" : undefined,
+      Object.hasOwn(currentPlan, "plan_digest") ? "plan_digest" : undefined,
+      Object.hasOwn(currentPlan.private_artifacts[0], "blueprint_digest") ? "blueprint_digest" : undefined,
+    ].filter((field): field is string => field !== undefined);
+    // H0_RED action: H1 replaces these fields with context_id/context_revision,
+    // intent_id/revision, plan_id/plan_revision, and blueprint_id/blueprint_version.
+    expect(present).toEqual([]);
+  });
+
+  it("rejects divergent control bodies at the same owner revision or Blueprint version", () => {
+    const currentIntent = migrateBuildIntentV2ToV3(intent());
+    expect(() => reconcileBuildIntentV3(currentIntent, {
+      ...currentIntent,
+      user_goal: "Different body at the same intent revision",
+    })).toThrow(/same revision/i);
+
+    const currentPlan = compileBuildModeV3({
+      mode: "goal_directed",
+      book_id: currentIntent.book_id,
+      source_fingerprint: currentIntent.source_fingerprint,
+      content_profile: currentIntent.content_profile,
+      plan_id: "plan-revision-contract",
+      plan_revision: 1,
+      created_at: NOW,
+      budget: { on_exceed: "needs_user" },
+      public_freshness: [],
+      intent: currentIntent,
+      selected_blueprints: [],
+    }).plan!;
+    expect(() => reconcileBuildPlanV3(currentPlan, {
+      ...currentPlan,
+      budget: { max_total_tokens: 1, on_exceed: "needs_user" },
+    })).toThrow(/same revision/i);
+
+    const context = issueBuildPlanningContextV2({
+      context_id: "context-revision-contract",
+      planning: {
+        target: {
+          book_id: "book-v2",
+          source_fingerprint: "a".repeat(64),
+          content_profile: "technical_learning",
+        },
+        available_lids: ["1.1"],
+        available_sections: [],
+        blueprint_registry: [],
+      },
+    });
+    expect(() => reconcileBuildPlanningContextV2(context, {
+      ...context,
+      target: { ...context.target, source_fingerprint: "b".repeat(64) },
+    })).toThrow(/same revision/i);
+
+    const blueprint = getSystemArtifactBlueprintV1("timeline").blueprint;
+    expect(() => assertSameArtifactBlueprintVersionV2(blueprint, {
+      ...blueprint,
+      title: "Different schema body at the same version",
+    })).toThrow(/same id and version|different schema/i);
+  });
+
+  it("migrates a fully validated V2 fixture to V3 with business fields and authorization unchanged", () => {
+    const migrated = migratePlanningControlV2ToV3({
+      intent: v2Golden.intent,
+      plan: v2Golden.plan,
+    });
+    expect(migrated).toMatchObject({
+      version: "planning_control_migration.v2_to_v3",
+      intent: {
+        version: "build_intent.v3",
+        intent_id: v2Golden.intent.intent_id,
+        intent_revision: v2Golden.intent.revision,
+        user_goal: v2Golden.intent.user_goal,
+        status: v2Golden.intent.status,
+        confirmed_at: v2Golden.intent.confirmed_at,
+      },
+      plan: {
+        version: "build_plan.v3",
+        plan_id: v2Golden.plan.plan_id,
+        plan_revision: v2Golden.plan.revision,
+        intent_id: v2Golden.plan.intent_id,
+        intent_revision: v2Golden.intent.revision,
+        public_stage_closure: v2Golden.plan.public_stage_closure,
+        reuse: v2Golden.plan.reuse,
+        create: v2Golden.plan.create,
+        excluded: v2Golden.plan.excluded,
+        estimate: v2Golden.plan.estimate,
+        budget: v2Golden.plan.budget,
+        status: v2Golden.plan.status,
+        confirmation_source: v2Golden.plan.confirmation_source,
+        confirmed_at: v2Golden.plan.confirmed_at,
+      },
+    });
+    expect(migrated.plan.private_artifacts[0]).toMatchObject({
+      artifact_id: v2Golden.plan.private_artifacts[0].artifact_id,
+      blueprint_id: v2Golden.plan.private_artifacts[0].blueprint.blueprint_id,
+      blueprint_version: v2Golden.plan.private_artifacts[0].blueprint.blueprint_version,
+      blueprint: v2Golden.plan.private_artifacts[0].blueprint,
+      required_public_capabilities: v2Golden.plan.private_artifacts[0].required_public_capabilities,
+    });
+    expect(JSON.stringify(migrated)).not.toMatch(/intent_digest|plan_digest|blueprint_digest/u);
+  });
+
   it("keeps the V2 intent, plan, Blueprint, and payload canonical digests frozen", () => {
     const currentIntent = validateBuildIntentV2(v2Golden.intent);
     const currentPlan = validateBuildPlanV2(v2Golden.plan);

@@ -76,7 +76,6 @@ function recordProofBoundFakeInput(
     finished_at: task.lease.issued_at,
     input_bytes: 0,
     input_sha256: task.descriptor.input_hash,
-    proof_digest: task.descriptor.input_budget_proof.proof_digest,
     render_contract_version: MODEL_INPUT_RENDER_CONTRACT_VERSION,
   });
 }
@@ -115,7 +114,7 @@ async function fakeExecutorRun(workerSlots: 1 | 2 | 3, reduceAfterFirst = false)
       expect(plan.next_action).toMatchObject({ kind: "close_stage", stage: "pass1" });
       break;
     }
-    planDigests.add(plan.preflight.plan_digest);
+    planDigests.add(plan.preflight.descriptor_plan_digest);
     const next = automaticBuildNext(source, root, 3, {
       protocol: "automatic_build_protocol.v2",
       owner: `fake-dispatcher-${workerSlots}`,
@@ -124,7 +123,7 @@ async function fakeExecutorRun(workerSlots: 1 | 2 | 3, reduceAfterFirst = false)
       quality_profile: "full",
       budget,
       available_agent_slots: liveSlots,
-      accepted_plan_digest: plan.preflight.plan_digest,
+      accepted_plan_digest: plan.preflight.descriptor_plan_digest,
       build_plan: buildPlan,
     });
     expect(next.action.kind).toBe("extract");
@@ -157,10 +156,10 @@ async function fakeExecutorRun(workerSlots: 1 | 2 | 3, reduceAfterFirst = false)
             task.lease.token,
             task.candidate_path,
             () => {
-              if (!task.lease.policy_set_digest) throw new Error("expected a v3 policy-set lease");
+              if (!task.lease.policy_generation_id) throw new Error("expected a v3 policy-set lease");
               return writePass1ProductionTaskArtifact({
                 target,
-                policy_set_digest: task.lease.policy_set_digest,
+                policy_generation_id: task.lease.policy_generation_id,
                 work_unit_id: task.task_id,
                 generated_at: task.lease.issued_at,
               });
@@ -244,7 +243,7 @@ describe("automatic build safe concurrent execution", () => {
       now: "2026-07-25T03:00:00.000Z",
       budget: refillBudget,
       available_agent_slots: 3,
-      accepted_plan_digest: initialPlan.preflight.plan_digest,
+      accepted_plan_digest: initialPlan.preflight.descriptor_plan_digest,
       executor_dispatches: true,
       build_plan: buildPlan,
     });
@@ -277,10 +276,10 @@ describe("automatic build safe concurrent execution", () => {
         task.lease.token,
         task.candidate_path,
         () => {
-          if (!task.lease.policy_set_digest) throw new Error("expected a v3 policy-set lease");
+          if (!task.lease.policy_generation_id) throw new Error("expected a v3 policy-set lease");
           return writePass1ProductionTaskArtifact({
             target,
-            policy_set_digest: task.lease.policy_set_digest,
+            policy_generation_id: task.lease.policy_generation_id,
             work_unit_id: task.task_id,
             generated_at: task.lease.issued_at,
           });
@@ -309,7 +308,7 @@ describe("automatic build safe concurrent execution", () => {
       now: "2026-07-25T03:00:31.000Z",
       budget: refillBudget,
       available_agent_slots: 1,
-      accepted_plan_digest: refillPlan.preflight.plan_digest,
+      accepted_plan_digest: refillPlan.preflight.descriptor_plan_digest,
       executor_dispatches: true,
       build_plan: buildPlan,
     });
@@ -342,8 +341,8 @@ describe("automatic build safe concurrent execution", () => {
       budget: { ...budget, max_parallel_cost: units[0].cost.score + units[1].cost.score },
     });
 
-    expect(three.plan_digest).toBe(one.plan_digest);
-    expect(one.plan_digest).toBe(zero.plan_digest);
+    expect(three.descriptor_plan_digest).toBe(one.descriptor_plan_digest);
+    expect(one.descriptor_plan_digest).toBe(zero.descriptor_plan_digest);
     expect(three.worker_plan).toMatchObject({ max_workers: 3, hard_worker_limit: 3, concurrency_release: "ap14_safe_concurrency.v1" });
     expect(one.worker_plan.max_workers).toBe(1);
     expect(zero.worker_plan).toMatchObject({ available_agent_slots: 0, max_workers: 0 });
@@ -366,7 +365,7 @@ describe("automatic build safe concurrent execution", () => {
     const next = automaticBuildNext(source, root, 3, {
       available_agent_slots: 0,
       budget,
-      accepted_plan_digest: plan.preflight.plan_digest,
+      accepted_plan_digest: plan.preflight.descriptor_plan_digest,
       build_plan: buildPlan,
     });
     expect(next.action).toMatchObject({ kind: "needs_user", reason: "executor_unavailable", stage: "pass1" });

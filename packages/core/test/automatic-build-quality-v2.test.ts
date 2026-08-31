@@ -6,7 +6,8 @@ import {
 } from "../src/automatic-build-quality";
 import {
   createAutomaticBuildStagePolicySet,
-  type AutomaticBuildStagePolicySetV2,
+  resolveAutomaticBuildStagePolicyMember,
+  type AutomaticBuildStagePolicySetV3,
 } from "../src/automatic-build-policy-generation";
 import { resolveContentProfile } from "../src/content-profile";
 import { evaluateModelInputBudget } from "../src/model-input-budget";
@@ -44,7 +45,7 @@ function sha256(value: string): string {
 
 function policySet(
   members = pass1ModelSlicePolicyMembers(profile),
-): AutomaticBuildStagePolicySetV2 {
+): AutomaticBuildStagePolicySetV3 {
   return createAutomaticBuildStagePolicySet({
     target_ref: targetRef,
     stage: "pass1",
@@ -70,7 +71,7 @@ function proof(renderedInput: string, policy: typeof fragmentPolicy) {
 }
 
 interface ClosureFixture {
-  policy_set: AutomaticBuildStagePolicySetV2;
+  policy_set: AutomaticBuildStagePolicySetV3;
   work_units: WorkUnitDescriptorV3[];
   artifacts: Record<string, SemanticArtifactEnvelopeV3<unknown>>;
   routing: AutomaticBuildStageQualityRoutingEvidenceV2;
@@ -124,9 +125,16 @@ function closure(fragmentCount: number): ClosureFixture {
       stage: "pass1",
       work_unit_id: descriptor.work_unit_id,
       input_hash: descriptor.input_hash,
-      proof_digest: descriptor.input_budget_proof.proof_digest,
-      policy_set_digest: currentPolicySet.policy_set_digest,
-      policy_fingerprint: descriptor.policy_fingerprint,
+      policy_generation_id: resolveAutomaticBuildStagePolicyMember(
+        currentPolicySet,
+        descriptor.kind,
+        descriptor.policy_fingerprint,
+      ).policy_generation_id,
+      semantic_contract: resolveAutomaticBuildStagePolicyMember(
+        currentPolicySet,
+        descriptor.kind,
+        descriptor.policy_fingerprint,
+      ).semantic_contract,
       provenance: {
         executor: "br8-test",
         model: "codex-test",
@@ -174,9 +182,16 @@ function closure(fragmentCount: number): ClosureFixture {
     stage: "pass1",
     work_unit_id: finalUnit.work_unit_id,
     input_hash: finalUnit.input_hash,
-    proof_digest: finalUnit.input_budget_proof.proof_digest,
-    policy_set_digest: currentPolicySet.policy_set_digest,
-    policy_fingerprint: finalUnit.policy_fingerprint,
+    policy_generation_id: resolveAutomaticBuildStagePolicyMember(
+      currentPolicySet,
+      finalUnit.kind,
+      finalUnit.policy_fingerprint,
+    ).policy_generation_id,
+    semantic_contract: resolveAutomaticBuildStagePolicyMember(
+      currentPolicySet,
+      finalUnit.kind,
+      finalUnit.policy_fingerprint,
+    ).semantic_contract,
     provenance: {
       executor: "br8-test",
       model: "codex-test",
@@ -261,7 +276,11 @@ describe("BR8 automatic build quality report v2", () => {
     expect(report).toMatchObject({
       gate_status: "passed",
       routing: {
-        policy_set_digest: input.policy_set.policy_set_digest,
+        policy_generations: input.policy_set.members.map((member) => ({
+          kind: member.kind,
+          policy_generation_id: member.policy_generation_id,
+          semantic_contract: member.semantic_contract,
+        })),
         eligible_model_units: 3,
         proven_model_units: 3,
         invalid_or_missing_proofs: 0,

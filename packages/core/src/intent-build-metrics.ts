@@ -13,10 +13,10 @@ import {
 import path from "node:path";
 import { z } from "zod";
 import { canonicalBuildJson, type BuildPlanV1 } from "./build-intent";
+import type { BuildPlanV3 } from "./build-intent-v2";
 
 const NonBlankZ = z.string().trim().min(1);
 const PathSafeIdZ = z.string().regex(/^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,126}[A-Za-z0-9])?$/u);
-const Sha256Z = z.string().regex(/^[a-f0-9]{64}$/u);
 const IsoTimestampZ = z.string().datetime({ offset: true });
 const NonNegativeIntegerZ = z.number().int().safe().nonnegative();
 const NonNegativeNumberZ = z.number().finite().nonnegative();
@@ -27,11 +27,12 @@ const MAX_USAGE_EVENTS = 100_000;
 
 const PlanRefZ = z.object({
   plan_id: PathSafeIdZ,
-  revision: z.number().int().safe().positive(),
-  plan_digest: Sha256Z,
+  plan_revision: z.number().int().safe().positive(),
   confirmation_source: z.enum(["reader_ui", "codex_conversation", "explicit_legacy_command"]),
   intent_id: PathSafeIdZ.optional(),
 }).strict();
+
+type BuildPlanForUsage = BuildPlanV1 | BuildPlanV3;
 
 const ArtifactRefZ = z.object({
   artifact_id: PathSafeIdZ,
@@ -225,12 +226,11 @@ export function validateIntentBuildUsageEventV1(input: unknown): IntentBuildUsag
   return IntentBuildUsageEventV1Z.parse(input);
 }
 
-export function buildPlanUsageRef(plan: BuildPlanV1): z.infer<typeof PlanRefZ> {
+export function buildPlanUsageRef(plan: BuildPlanForUsage): z.infer<typeof PlanRefZ> {
   if (!plan.confirmation_source) throw new Error("selected plan requires confirmation_source");
   return PlanRefZ.parse({
     plan_id: plan.plan_id,
-    revision: plan.revision,
-    plan_digest: plan.plan_digest,
+    plan_revision: plan.version === "build_plan.v3" ? plan.plan_revision : plan.revision,
     confirmation_source: plan.confirmation_source,
     ...(plan.intent_id ? { intent_id: plan.intent_id } : {}),
   });
@@ -241,7 +241,7 @@ export function planSelectedUsageEvent(input: {
   book_id: string;
   occurred_at: string;
   mode: IntentBuildMode;
-  plan: BuildPlanV1 | null;
+  plan: BuildPlanForUsage | null;
 }): IntentBuildUsageEventV1 {
   const plan = input.plan;
   return validateIntentBuildUsageEventV1({
@@ -303,7 +303,7 @@ function modeReport(
   const planMap = new Map<string, z.infer<typeof PlanRefZ>>();
   for (const event of selections) {
     if (event.kind === "plan_selected" && event.plan) {
-      planMap.set(`${event.plan.plan_id}:${event.plan.revision}:${event.plan.plan_digest}`, event.plan);
+      planMap.set(`${event.plan.plan_id}:${event.plan.plan_revision}`, event.plan);
     }
   }
   const actual = emptyActual();
@@ -386,7 +386,7 @@ function modeReport(
   return {
     mode,
     selection_count: selections.length,
-    plan_revisions: [...planMap.values()].sort((left, right) => left.revision - right.revision
+    plan_revisions: [...planMap.values()].sort((left, right) => left.plan_revision - right.plan_revision
       || left.plan_id.localeCompare(right.plan_id)),
     estimate: selections.reduce((sum, event) => {
       if (event.kind !== "plan_selected" || !event.estimate) return sum;

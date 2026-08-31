@@ -1,10 +1,11 @@
 import { createHash } from "node:crypto";
 import type { AutomaticBuildStage, BuildTargetRefV2 } from "./build-orchestrator";
-import { CODEX_EXECUTOR_TRANSPORT_PROFILE_V1 } from "./executor-transport";
-import type {
-  AutomaticBuildTaskPolicyBinding,
-  AutomaticBuildTaskPolicyBindingV2,
-  ExtractionPolicyFingerprintV1,
+import { CODEX_EXECUTOR_TRANSPORT_PROFILE_V2 } from "./executor-transport";
+import {
+  isAutomaticBuildTaskPolicyBindingV2,
+  type AutomaticBuildTaskPolicyBinding,
+  type AutomaticBuildTaskPolicyBindingV2,
+  type ExtractionPolicyFingerprintV1,
 } from "./semantic-artifact";
 import {
   isProofBoundWorkUnitDescriptor,
@@ -138,8 +139,8 @@ function dispatchFor(
     ...(isProofBoundWorkUnitDescriptor(units[0]) ? {
       task_bindings: Object.fromEntries(units.map((unit) => {
         const binding = taskBindings?.[unit.work_unit_id];
-        if (!binding || !("proof_digest" in binding) || !("policy_set_digest" in binding)) {
-          throw new Error(`proof-bound dispatch is missing a task binding: ${unit.work_unit_id}`);
+        if (!binding || !isAutomaticBuildTaskPolicyBindingV2(binding)) {
+          throw new Error(`budget-evidence dispatch is missing a task binding: ${unit.work_unit_id}`);
         }
         return [unit.work_unit_id, binding];
       })),
@@ -175,7 +176,7 @@ export function planAutomaticBuildExecutorDispatches(input: {
     if (isWorkUnitDescriptorV3(unit)) {
       validateWorkUnitDescriptorV3(unit);
     } else if (isWorkUnitDescriptorV4(unit)) {
-      validateWorkUnitDescriptorV4(unit, CODEX_EXECUTOR_TRANSPORT_PROFILE_V1);
+      validateWorkUnitDescriptorV4(unit, CODEX_EXECUTOR_TRANSPORT_PROFILE_V2);
     }
     if (isProofBoundWorkUnitDescriptor(unit)) {
       const binding = input.task_bindings?.[unit.work_unit_id];
@@ -206,8 +207,10 @@ export function planAutomaticBuildExecutorDispatches(input: {
     const aggregationRole = isProofBoundWorkUnitDescriptor(unit)
       ? unit.aggregation?.role ?? "none"
       : "v2";
-    const policySetDigest = binding && "policy_set_digest" in binding ? binding.policy_set_digest : "v1";
-    const key = `${unit.version}:${unit.kind}:${aggregationRole}:${policySetDigest}:${sha256(unit.policy_fingerprint)}`;
+    const policyIdentity = binding && isAutomaticBuildTaskPolicyBindingV2(binding)
+      ? [binding.stage, binding.policy_generation_id, binding.semantic_contract]
+      : ["v1", unit.policy_fingerprint];
+    const key = stableJson([unit.version, unit.kind, aggregationRole, policyIdentity]);
     let group = byKey.get(key);
     if (!group) {
       group = { key, kind: unit.kind, policy: unit.policy_fingerprint, units: [] };

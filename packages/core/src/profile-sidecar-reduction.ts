@@ -35,8 +35,12 @@ import {
 import {
   automaticBuildGenerationArtifactPath,
   automaticBuildExtractionPolicy,
+  assertPolicyGenerationId,
   buildSemanticArtifactEnvelopeV3,
   semanticArtifactMatches,
+  semanticContractEqual,
+  semanticContractFromExtractionPolicy,
+  extractionPolicyFromSemanticContract,
   writeAutomaticBuildGenerationArtifact,
   type ExtractionQualityProfile,
   type ExtractionPolicyFingerprintV1,
@@ -44,8 +48,8 @@ import {
   type SemanticArtifactEnvelopeV3,
 } from "./semantic-artifact";
 import {
-  readAutomaticBuildStagePolicySet,
-  type AutomaticBuildStagePolicySetMemberV2,
+  readAutomaticBuildPolicyGeneration,
+  type AutomaticBuildStagePolicySetMemberInputV1,
 } from "./automatic-build-policy-generation";
 import type { ProfileSidecarArtifact } from "./profile-sidecar-build";
 import {
@@ -148,6 +152,10 @@ export type ProfileSidecarDiscourseRouteV1 =
       reducer_level: number;
       group_ordinal: number;
       source_slice_range: ProfileSidecarDiscourseSourceSliceRangeV1;
+      dependency_policy_generations: Array<{
+        work_unit_id: string;
+        policy_generation_id: string;
+      }>;
     };
 
 export interface ProfileSidecarDiscourseShadowWorkUnitV1 {
@@ -166,7 +174,7 @@ export interface ProfileSidecarDiscourseShadowTaskV1 {
   version: "profile_sidecar_discourse_shadow_task.v1";
   target_ref: BuildTargetRefV2;
   source_fingerprint: string;
-  policy_set_digest: string;
+  policy_generation_id: string;
   fragment_count: number;
   descriptor: WorkUnitDescriptorV3;
   route: ProfileSidecarDiscourseRouteV1;
@@ -176,7 +184,7 @@ export interface ProfileSidecarSemanticFastPathTaskV1 {
   version: "profile_sidecar_semantic_fast_path_task.v1";
   target_ref: BuildTargetRefV2;
   source_fingerprint: string;
-  policy_set_digest: string;
+  policy_generation_id: string;
   descriptor: WorkUnitDescriptorV3;
   packet: ProfileSidecarSemanticPacketV2;
 }
@@ -257,27 +265,31 @@ export function profileSidecarDiscourseReducePolicy(
 export function profileSidecarMapReducePolicyMembers(
   profile: ContentProfileDefinition,
   qualityProfile: ExtractionQualityProfile = "full",
-): AutomaticBuildStagePolicySetMemberV2[] {
+): AutomaticBuildStagePolicySetMemberInputV1[] {
   const existing = automaticBuildExtractionPolicy("profile_sidecar", profile, qualityProfile);
   return [
     {
       kind: "profile_sidecar_discourse",
       extractor: "profile-sidecar-extractor",
+      policy_generation_id: `profile-sidecar-discourse.${qualityProfile}.v2`,
       policy_fingerprint: existing,
     },
     {
       kind: "profile_sidecar_discourse_fragment",
       extractor: PROFILE_SIDECAR_DISCOURSE_FRAGMENT_EXTRACTOR,
+      policy_generation_id: `profile-sidecar-discourse-fragment.${qualityProfile}.v1`,
       policy_fingerprint: profileSidecarDiscourseFragmentPolicy(profile, qualityProfile),
     },
     {
       kind: "profile_sidecar_discourse_reduce",
       extractor: PROFILE_SIDECAR_DISCOURSE_REDUCER,
+      policy_generation_id: `profile-sidecar-discourse-reduce.${qualityProfile}.v1`,
       policy_fingerprint: profileSidecarDiscourseReducePolicy(profile, qualityProfile),
     },
     {
       kind: "profile_sidecar_formula",
       extractor: "profile-sidecar-extractor",
+      policy_generation_id: `profile-sidecar-formula.${qualityProfile}.v2`,
       policy_fingerprint: existing,
     },
   ];
@@ -321,7 +333,7 @@ export function validateProfileSidecarDiscourseShadowTask(
     "version",
     "target_ref",
     "source_fingerprint",
-    "policy_set_digest",
+    "policy_generation_id",
     "fragment_count",
     "descriptor",
     "route",
@@ -330,7 +342,7 @@ export function validateProfileSidecarDiscourseShadowTask(
     throw new Error("unsupported profile sidecar shadow task version");
   }
   assertSourceFingerprint(task.source_fingerprint);
-  assertSha256(task.policy_set_digest, "policy_set_digest");
+  assertPolicyGenerationId(task.policy_generation_id);
   assertPositiveSafeInteger(task.fragment_count, "fragment_count");
   const descriptor = validateWorkUnitDescriptorV3(task.descriptor);
   if (!sameTarget(descriptor.target, task.target_ref)) {
@@ -370,7 +382,7 @@ export function validateProfileSidecarSemanticFastPathTask(
     "version",
     "target_ref",
     "source_fingerprint",
-    "policy_set_digest",
+    "policy_generation_id",
     "descriptor",
     "packet",
   ], "profile sidecar fast-path task");
@@ -378,7 +390,7 @@ export function validateProfileSidecarSemanticFastPathTask(
     throw new Error("unsupported profile sidecar fast-path task version");
   }
   assertSourceFingerprint(task.source_fingerprint);
-  assertSha256(task.policy_set_digest, "policy_set_digest");
+  assertPolicyGenerationId(task.policy_generation_id);
   const descriptor = validateWorkUnitDescriptorV3(task.descriptor);
   if (!sameTarget(descriptor.target, task.target_ref)
     || descriptor.stage !== "profile_sidecar"
@@ -418,13 +430,13 @@ export function createProfileSidecarSemanticFastPathTask(input: {
   descriptor: WorkUnitDescriptorV3;
   packet: ProfileSidecarSemanticPacketV2;
   source_fingerprint: string;
-  policy_set_digest: string;
+  policy_generation_id: string;
 }): ProfileSidecarSemanticFastPathTaskV1 {
   return validateProfileSidecarSemanticFastPathTask({
     version: "profile_sidecar_semantic_fast_path_task.v1",
     target_ref: input.descriptor.target,
     source_fingerprint: input.source_fingerprint,
-    policy_set_digest: input.policy_set_digest,
+    policy_generation_id: input.policy_generation_id,
     descriptor: input.descriptor,
     packet: input.packet,
   });
@@ -433,14 +445,14 @@ export function createProfileSidecarSemanticFastPathTask(input: {
 export function createProfileSidecarDiscourseShadowTask(input: {
   work_unit: ProfileSidecarDiscourseShadowWorkUnitV1;
   source_fingerprint: string;
-  policy_set_digest: string;
+  policy_generation_id: string;
   fragment_count: number;
 }): ProfileSidecarDiscourseShadowTaskV1 {
   const task: ProfileSidecarDiscourseShadowTaskV1 = {
     version: "profile_sidecar_discourse_shadow_task.v1",
     target_ref: input.work_unit.descriptor.target,
     source_fingerprint: input.source_fingerprint,
-    policy_set_digest: input.policy_set_digest,
+    policy_generation_id: input.policy_generation_id,
     fragment_count: input.fragment_count,
     descriptor: input.work_unit.descriptor,
     route: input.work_unit.route,
@@ -458,10 +470,10 @@ export function createProfileSidecarDiscourseShadowTask(input: {
 
 export function profileSidecarDiscourseShadowTaskPath(
   target: AutomaticBuildTarget,
-  policySetDigest: string,
+  policyGenerationId: string,
   workUnitId: string,
 ): string {
-  assertSha256(policySetDigest, "policy_set_digest");
+  assertPolicyGenerationId(policyGenerationId);
   return path.join(
     target.workspace_dir,
     ".build",
@@ -469,7 +481,7 @@ export function profileSidecarDiscourseShadowTaskPath(
     "v3",
     "shadow",
     "profile_sidecar",
-    policySetDigest,
+    policyGenerationId,
     "tasks",
     shadowWorkUnitFileName(workUnitId),
   );
@@ -477,10 +489,10 @@ export function profileSidecarDiscourseShadowTaskPath(
 
 export function profileSidecarDiscourseShadowTaskPrivateDirectory(
   target: AutomaticBuildTarget,
-  policySetDigest: string,
+  policyGenerationId: string,
   workUnitId: string,
 ): string {
-  assertSha256(policySetDigest, "policy_set_digest");
+  assertPolicyGenerationId(policyGenerationId);
   return path.join(
     target.workspace_dir,
     ".build",
@@ -488,7 +500,7 @@ export function profileSidecarDiscourseShadowTaskPrivateDirectory(
     "v3",
     "shadow",
     "profile_sidecar",
-    policySetDigest,
+    policyGenerationId,
     "mailboxes",
     shadowWorkUnitFileName(workUnitId).replace(/\.json$/u, ""),
   );
@@ -501,7 +513,7 @@ export function freezeProfileSidecarDiscourseShadowTask(
   const task = validateProfileSidecarDiscourseShadowTask(taskInput, target);
   const file = profileSidecarDiscourseShadowTaskPath(
     target,
-    task.policy_set_digest,
+    task.policy_generation_id,
     task.descriptor.work_unit_id,
   );
   const bytes = `${JSON.stringify(task, null, 2)}\n`;
@@ -526,7 +538,7 @@ export function freezeProfileSidecarSemanticFastPathTask(
   const task = validateProfileSidecarSemanticFastPathTask(taskInput, target);
   const file = profileSidecarDiscourseShadowTaskPath(
     target,
-    task.policy_set_digest,
+    task.policy_generation_id,
     task.descriptor.work_unit_id,
   );
   const bytes = `${JSON.stringify(task, null, 2)}\n`;
@@ -546,10 +558,10 @@ export function freezeProfileSidecarSemanticFastPathTask(
 
 export function readProfileSidecarDiscourseShadowTask(
   target: AutomaticBuildTarget,
-  policySetDigest: string,
+  policyGenerationId: string,
   workUnitId: string,
 ): ProfileSidecarDiscourseShadowTaskV1 {
-  const file = profileSidecarDiscourseShadowTaskPath(target, policySetDigest, workUnitId);
+  const file = profileSidecarDiscourseShadowTaskPath(target, policyGenerationId, workUnitId);
   if (!existsSync(file)) throw new Error(`profile sidecar shadow task does not exist: ${workUnitId}`);
   return validateProfileSidecarDiscourseShadowTask(
     JSON.parse(readFileSync(file, "utf8")) as ProfileSidecarDiscourseShadowTaskV1,
@@ -559,10 +571,10 @@ export function readProfileSidecarDiscourseShadowTask(
 
 export function readProfileSidecarProductionTask(
   target: AutomaticBuildTarget,
-  policySetDigest: string,
+  policyGenerationId: string,
   workUnitId: string,
 ): ProfileSidecarProductionTaskV1 {
-  const file = profileSidecarDiscourseShadowTaskPath(target, policySetDigest, workUnitId);
+  const file = profileSidecarDiscourseShadowTaskPath(target, policyGenerationId, workUnitId);
   if (!existsSync(file)) throw new Error(`profile sidecar production task does not exist: ${workUnitId}`);
   const value = JSON.parse(readFileSync(file, "utf8")) as ProfileSidecarProductionTaskV1;
   return value.version === "profile_sidecar_semantic_fast_path_task.v1"
@@ -972,9 +984,21 @@ function assertRouteMatchesDescriptor(
       || workUnit.route.source_slice_range.end_ordinal_exclusive !== ordinal + 1) {
       throw new Error("profile sidecar fragment shadow range does not match its source slice");
     }
-  } else if (descriptor.kind !== "profile_sidecar_discourse_reduce"
-    || descriptor.input_basis.kind !== "artifact_reduction") {
-    throw new Error("profile sidecar reducer shadow route has an invalid descriptor basis");
+  } else {
+    if (descriptor.kind !== "profile_sidecar_discourse_reduce"
+      || descriptor.input_basis.kind !== "artifact_reduction"
+      || !("dependency_policy_generations" in workUnit.route)) {
+      throw new Error("profile sidecar reducer shadow route has an invalid descriptor basis");
+    }
+    const generations = workUnit.route.dependency_policy_generations.map((dependency) => ({
+      work_unit_id: dependency.work_unit_id,
+      policy_generation_id: assertPolicyGenerationId(dependency.policy_generation_id),
+    })).sort((left, right) => left.work_unit_id.localeCompare(right.work_unit_id));
+    if (new Set(generations.map((dependency) => dependency.work_unit_id)).size !== generations.length
+      || stableJson(generations.map((dependency) => dependency.work_unit_id))
+        !== stableJson(descriptor.input_basis.dependency_artifacts.map((dependency) => dependency.work_unit_id))) {
+      throw new Error("profile sidecar reducer dependency generations do not match its descriptor");
+    }
   }
   if (options.verify_rendered_input !== false) {
     verifyModelInputBudgetProof(workUnit.rendered_input, descriptor.input_budget_proof);
@@ -984,24 +1008,23 @@ function assertRouteMatchesDescriptor(
 export function verifyProfileSidecarDiscourseShadowArtifact(input: {
   work_unit: ProfileSidecarDiscourseShadowWorkUnitV1;
   artifact: SemanticArtifactEnvelopeV3<unknown>;
-  policy_set_digest: string;
+  policy_generation_id: string;
 }): ProfileSidecarDiscourseVerifiedChildV1 {
-  assertSha256(input.policy_set_digest, "policy_set_digest");
+  assertPolicyGenerationId(input.policy_generation_id);
   assertRouteMatchesDescriptor(input.work_unit);
   if (input.work_unit.route.role === "final") {
     throw new Error("a final profile sidecar artifact cannot become a reducer child");
   }
   const descriptor = input.work_unit.descriptor;
   if (input.artifact.version !== "semantic_task_artifact.v3"
-    || input.artifact.policy_set_digest !== input.policy_set_digest
+    || input.artifact.policy_generation_id !== input.policy_generation_id
     || !semanticArtifactMatches(input.artifact, {
       target: descriptor.target,
       stage: "profile_sidecar",
       work_unit_id: descriptor.work_unit_id,
       input_hash: descriptor.input_hash,
-      proof_digest: descriptor.input_budget_proof.proof_digest,
-      policy_set_digest: input.policy_set_digest,
-      policy_fingerprint: descriptor.policy_fingerprint,
+      policy_generation_id: input.policy_generation_id,
+      semantic_contract: semanticContractFromExtractionPolicy(descriptor.policy_fingerprint),
     })) {
     throw new Error("profile sidecar child artifact is stale or invalid");
   }
@@ -1034,7 +1057,6 @@ function orderedVerifiedChildren(input: {
   target: BuildTargetRefV2;
   parent_lid: string;
   fragment_count: number;
-  policy_set_digest: string;
 }): ProfileSidecarDiscourseVerifiedChildV1[] {
   assertPositiveSafeInteger(input.fragment_count, "fragment_count");
   if (input.fragment_count < 2) throw new Error("profile sidecar reduction requires at least two fragments");
@@ -1042,7 +1064,7 @@ function orderedVerifiedChildren(input: {
   const verified = input.children.map((child) => verifyProfileSidecarDiscourseShadowArtifact({
     work_unit: child.work_unit,
     artifact: child.artifact,
-    policy_set_digest: input.policy_set_digest,
+    policy_generation_id: child.artifact.policy_generation_id,
   }));
   const ids = verified.map((child) => child.work_unit.descriptor.work_unit_id);
   if (new Set(ids).size !== ids.length) throw new Error("profile sidecar reduction child work units must be unique");
@@ -1115,12 +1137,10 @@ export function routeProfileSidecarDiscourseReductionLevel(input: {
   parent_lid: string;
   fragment_count: number;
   children: ProfileSidecarDiscourseVerifiedChildV1[];
-  policy_set_digest: string;
   policy: ExtractionPolicyFingerprintV1;
   budget: ProfileSidecarDiscourseBudgetV1;
 }): ProfileSidecarDiscourseReductionRouteResultV1 {
   assertPolicy({ target: input.target, policy: input.policy, role: "reduce" });
-  assertSha256(input.policy_set_digest, "policy_set_digest");
   const children = orderedVerifiedChildren(input);
   const nextReducerLevel = reducerLevel(children);
   const role = children.length <= PROFILE_SIDECAR_DISCOURSE_REDUCE_MAX_CHILDREN ? "final" : "reduce";
@@ -1186,6 +1206,10 @@ export function routeProfileSidecarDiscourseReductionLevel(input: {
       reducer_level: nextReducerLevel,
       group_ordinal: groupOrdinal,
       source_slice_range: sourceSliceRange,
+      dependency_policy_generations: group.map((child) => ({
+        work_unit_id: child.work_unit.descriptor.work_unit_id,
+        policy_generation_id: child.artifact.policy_generation_id,
+      })),
     };
     const dependencies = childIdentity.map((child) => ({
       artifact: child.work_unit_id,
@@ -1225,17 +1249,18 @@ export function routeProfileSidecarDiscourseReductionLevel(input: {
 
 function assertShadowPolicyMember(
   target: AutomaticBuildTarget,
-  task: Pick<ProfileSidecarProductionTaskV1, "policy_set_digest" | "descriptor">,
+  task: Pick<ProfileSidecarProductionTaskV1, "policy_generation_id" | "descriptor">,
 ): void {
-  const policySet = readAutomaticBuildStagePolicySet(
+  const generation = readAutomaticBuildPolicyGeneration(
     target,
     "profile_sidecar",
-    task.policy_set_digest,
+    task.policy_generation_id,
   );
-  if (!policySet) throw new Error("profile sidecar shadow policy set is not frozen");
-  const member = policySet.members.find((candidate) => candidate.kind === task.descriptor.kind);
-  if (!member
-    || stableJson(member.policy_fingerprint) !== stableJson(task.descriptor.policy_fingerprint)) {
+  if (!generation
+    || !semanticContractEqual(
+      generation.semantic_contract,
+      semanticContractFromExtractionPolicy(task.descriptor.policy_fingerprint),
+    )) {
     throw new Error("profile sidecar shadow task is outside the frozen policy set");
   }
 }
@@ -1303,11 +1328,12 @@ function readShadowReductionDependency(input: {
   task: ProfileSidecarDiscourseShadowTaskV1;
   work_unit_id: string;
   artifact_hash: string;
+  policy_generation_id: string;
 }): ShadowReductionDependency {
   const file = automaticBuildGenerationArtifactPath(
     input.target,
     "profile_sidecar",
-    input.task.policy_set_digest,
+    input.policy_generation_id,
     input.work_unit_id,
   );
   if (!existsSync(file)) throw new Error(`profile sidecar reducer child artifact is missing: ${input.work_unit_id}`);
@@ -1315,7 +1341,7 @@ function readShadowReductionDependency(input: {
   if (artifact.version !== "semantic_task_artifact.v3"
     || artifact.stage !== "profile_sidecar"
     || artifact.work_unit_id !== input.work_unit_id
-    || artifact.policy_set_digest !== input.task.policy_set_digest
+    || artifact.policy_generation_id !== input.policy_generation_id
     || artifact.artifact_hash !== input.artifact_hash
     || !sameResolvedTarget(artifact.target, input.task.target_ref)
     || !semanticArtifactMatches(artifact, {
@@ -1323,9 +1349,8 @@ function readShadowReductionDependency(input: {
       stage: "profile_sidecar",
       work_unit_id: artifact.work_unit_id,
       input_hash: artifact.input_hash,
-      proof_digest: artifact.proof_digest,
-      policy_set_digest: artifact.policy_set_digest,
-      policy_fingerprint: artifact.policy_fingerprint,
+      policy_generation_id: artifact.policy_generation_id,
+      semantic_contract: artifact.semantic_contract,
     })) {
     throw new Error(`profile sidecar reducer child artifact is stale or invalid: ${input.work_unit_id}`);
   }
@@ -1333,7 +1358,11 @@ function readShadowReductionDependency(input: {
   if (typeof payload === "object" && payload !== null
     && (payload as { version?: unknown }).version === PROFILE_SIDECAR_DISCOURSE_FRAGMENT_SCHEMA_VERSION) {
     const raw = payload as ProfileSidecarDiscourseObservationV1;
-    assertPolicy({ target: input.task.target_ref, policy: artifact.policy_fingerprint, role: "fragment" });
+    assertPolicy({
+      target: input.task.target_ref,
+      policy: extractionPolicyFromSemanticContract(input.task.target_ref.profile_id, artifact.semantic_contract),
+      role: "fragment",
+    });
     const parsed = parseProfileSidecarDiscourseFragmentObservation(raw, {
       parent_lid: input.task.route.parent_lid,
       source_slice_ordinal: raw.source_slice_ordinal,
@@ -1356,7 +1385,11 @@ function readShadowReductionDependency(input: {
   if (typeof payload === "object" && payload !== null && "reduction" in payload) {
     const raw = (payload as { reduction?: ProfileSidecarDiscourseReductionV1 }).reduction;
     if (!raw) throw new Error("profile sidecar reducer child reduction is missing");
-    assertPolicy({ target: input.task.target_ref, policy: artifact.policy_fingerprint, role: "reduce" });
+    assertPolicy({
+      target: input.task.target_ref,
+      policy: extractionPolicyFromSemanticContract(input.task.target_ref.profile_id, artifact.semantic_contract),
+      role: "reduce",
+    });
     const parsed = parseProfileSidecarDiscourseReduceOutput(payload, {
       role: "reduce",
       parent_lid: input.task.route.parent_lid,
@@ -1383,28 +1416,39 @@ function renderShadowReductionInput(
   target: AutomaticBuildTarget,
   task: ProfileSidecarDiscourseShadowTaskV1,
 ): string {
-  if (task.route.role === "fragment" || task.descriptor.input_basis.kind !== "artifact_reduction") {
+  const route = task.route;
+  if (route.role === "fragment"
+    || !("dependency_policy_generations" in route)
+    || task.descriptor.input_basis.kind !== "artifact_reduction") {
     throw new Error("profile sidecar shadow reducer task has an invalid artifact basis");
   }
-  const dependencies = task.descriptor.input_basis.dependency_artifacts.map((dependency) =>
-    readShadowReductionDependency({
+  const dependencies = task.descriptor.input_basis.dependency_artifacts.map((dependency) => {
+    const policyGenerationId = route.dependency_policy_generations.find(
+      (candidate) => candidate.work_unit_id === dependency.work_unit_id,
+    )?.policy_generation_id;
+    if (!policyGenerationId) {
+      throw new Error(`profile sidecar reducer child generation is missing: ${dependency.work_unit_id}`);
+    }
+    return readShadowReductionDependency({
       target,
       task,
       work_unit_id: dependency.work_unit_id,
       artifact_hash: dependency.artifact_hash,
-    }));
+      policy_generation_id: policyGenerationId,
+    });
+  });
   if (!dependencies.length || dependencies.length > PROFILE_SIDECAR_DISCOURSE_REDUCE_MAX_CHILDREN) {
     throw new Error("profile sidecar shadow reducer child count is outside the bounded fan-in");
   }
   const roles = new Set(dependencies.map((dependency) => dependency.child_role));
   if (roles.size !== 1) throw new Error("profile sidecar shadow reducer children mix fragment and reduction roles");
   if (roles.has("fragment")) {
-    if (task.route.reducer_level !== 0) {
+    if (route.reducer_level !== 0) {
       throw new Error("profile sidecar fragment children must feed reducer level zero");
     }
   } else {
     const levels = new Set(dependencies.map((dependency) => dependency.reducer_level));
-    if (levels.size !== 1 || !levels.has(task.route.reducer_level - 1)) {
+    if (levels.size !== 1 || !levels.has(route.reducer_level - 1)) {
       throw new Error("profile sidecar reduction child level is stale");
     }
   }
@@ -1413,7 +1457,7 @@ function renderShadowReductionInput(
     || left.source_slice_range.end_ordinal_exclusive - right.source_slice_range.end_ordinal_exclusive
     || left.artifact_hash.localeCompare(right.artifact_hash)
     || left.work_unit_id.localeCompare(right.work_unit_id));
-  let cursor = task.route.source_slice_range.start_ordinal;
+  let cursor = route.source_slice_range.start_ordinal;
   for (const child of ordered) {
     const range = assertRange(child.source_slice_range, "shadow reducer child source_slice_range");
     if (range.start_ordinal !== cursor) {
@@ -1421,17 +1465,17 @@ function renderShadowReductionInput(
     }
     cursor = range.end_ordinal_exclusive;
   }
-  if (cursor !== task.route.source_slice_range.end_ordinal_exclusive) {
+  if (cursor !== route.source_slice_range.end_ordinal_exclusive) {
     throw new Error("profile sidecar shadow reducer children do not cover the task source range");
   }
   return renderProfileSidecarDiscourseReductionModelInput({
     version: "profile_sidecar_discourse_reduction_input.v1",
     work_unit_id: task.descriptor.work_unit_id,
-    parent_lid: task.route.parent_lid,
-    reducer_level: task.route.reducer_level,
-    group_ordinal: task.route.group_ordinal,
-    role: task.route.role,
-    source_slice_range: { ...task.route.source_slice_range },
+    parent_lid: route.parent_lid,
+    reducer_level: route.reducer_level,
+    group_ordinal: route.group_ordinal,
+    role: route.role,
+    source_slice_range: { ...route.source_slice_range },
     children: ordered,
   });
 }
@@ -1513,9 +1557,8 @@ export function writeProfileSidecarSemanticFastPathCandidate(input: {
     stage: "profile_sidecar",
     work_unit_id: replayed.descriptor.work_unit_id,
     input_hash: replayed.descriptor.input_hash,
-    proof_digest: replayed.descriptor.input_budget_proof.proof_digest,
-    policy_set_digest: input.task.policy_set_digest,
-    policy_fingerprint: replayed.descriptor.policy_fingerprint,
+    policy_generation_id: input.task.policy_generation_id,
+    semantic_contract: semanticContractFromExtractionPolicy(replayed.descriptor.policy_fingerprint),
     provenance: input.provenance,
     payload,
   });
@@ -1576,9 +1619,8 @@ export function writeProfileSidecarDiscourseShadowCandidate(input: {
     stage: "profile_sidecar",
     work_unit_id: task.descriptor.work_unit_id,
     input_hash: replayed.descriptor.input_hash,
-    proof_digest: replayed.descriptor.input_budget_proof.proof_digest,
-    policy_set_digest: task.policy_set_digest,
-    policy_fingerprint: replayed.descriptor.policy_fingerprint,
+    policy_generation_id: task.policy_generation_id,
+    semantic_contract: semanticContractFromExtractionPolicy(replayed.descriptor.policy_fingerprint),
     provenance: input.provenance,
     payload,
   });
@@ -1605,7 +1647,7 @@ function readProductionTaskArtifact(
   const file = automaticBuildGenerationArtifactPath(
     target,
     "profile_sidecar",
-    task.policy_set_digest,
+    task.policy_generation_id,
     task.descriptor.work_unit_id,
   );
   if (!existsSync(file)) throw new Error("profile sidecar shadow artifact does not exist");
@@ -1615,9 +1657,8 @@ function readProductionTaskArtifact(
     stage: "profile_sidecar",
     work_unit_id: task.descriptor.work_unit_id,
     input_hash: task.descriptor.input_hash,
-    proof_digest: task.descriptor.input_budget_proof.proof_digest,
-    policy_set_digest: task.policy_set_digest,
-    policy_fingerprint: task.descriptor.policy_fingerprint,
+    policy_generation_id: task.policy_generation_id,
+    semantic_contract: semanticContractFromExtractionPolicy(task.descriptor.policy_fingerprint),
   })) {
     throw new Error("profile sidecar shadow artifact is stale or invalid");
   }
@@ -1664,7 +1705,7 @@ export function writeProfileSidecarDiscourseFinalCandidate(input: {
   const candidate = buildProfileSidecarDiscourseFinalCandidate(input);
   const directory = profileSidecarDiscourseShadowTaskPrivateDirectory(
     input.target,
-    task.policy_set_digest,
+    task.policy_generation_id,
     task.descriptor.work_unit_id,
   );
   const candidatePath = path.join(directory, "public-candidate.json");
@@ -1744,7 +1785,7 @@ export function writeProfileSidecarProductionCandidate(input: {
   });
   const directory = profileSidecarDiscourseShadowTaskPrivateDirectory(
     input.target,
-    task.policy_set_digest,
+    task.policy_generation_id,
     task.descriptor.work_unit_id,
   );
   const candidatePath = path.join(directory, "public-candidate.json");
@@ -1776,7 +1817,7 @@ export function assertProfileSidecarDiscourseShadowCandidatePath(input: {
   const task = validateProfileSidecarDiscourseShadowTask(input.task, input.target);
   const directory = path.resolve(profileSidecarDiscourseShadowTaskPrivateDirectory(
     input.target,
-    task.policy_set_digest,
+    task.policy_generation_id,
     task.descriptor.work_unit_id,
   ));
   const candidatePath = path.resolve(input.candidate_path);
@@ -1797,7 +1838,7 @@ export function assertProfileSidecarProductionCandidatePath(input: {
     : validateProfileSidecarDiscourseShadowTask(input.task, input.target);
   const directory = path.resolve(profileSidecarDiscourseShadowTaskPrivateDirectory(
     input.target,
-    task.policy_set_digest,
+    task.policy_generation_id,
     task.descriptor.work_unit_id,
   ));
   const candidatePath = path.resolve(input.candidate_path);

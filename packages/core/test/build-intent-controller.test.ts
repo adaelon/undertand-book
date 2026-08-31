@@ -8,7 +8,7 @@ import {
   redactBuildIntentSelection,
   rejectBuildIntentSelection,
 } from "../src/build-intent-controller";
-import { computeArtifactBlueprintDigest, getSystemArtifactBlueprintV1 } from "../src/artifact-blueprint";
+import { getSystemArtifactBlueprintV1 } from "../src/artifact-blueprint";
 import { BuildDecisionRequestV2Z } from "../src/build-intent";
 import { projectLegacyBuildDecisionRequestV2 } from "../src/build-workbench";
 
@@ -38,31 +38,50 @@ function resolutions(artifacts: Array<"timeline" | "concept_map" | "comparison_t
   return artifacts.map((artifact) => {
     const preset = getSystemArtifactBlueprintV1(artifact);
     return {
-      version: "artifact_blueprint_resolution.v1" as const,
+      version: "artifact_blueprint_resolution.v2" as const,
       source: "system" as const,
       blueprint: preset.blueprint,
-      digest: preset.digest,
+      blueprint_id: preset.blueprint.blueprint_id,
+      blueprint_version: preset.blueprint.blueprint_version,
     };
   });
+}
+
+function ownerIdentity(suffix: string) {
+  return {
+    intent_id: `intent-${suffix}`,
+    intent_revision: 1,
+    plan_id: `plan-${suffix}`,
+    plan_revision: 1,
+  } as const;
 }
 
 describe("IP5 resident build-intent controller", () => {
   it("keeps read-now and standard-deep deterministic without a private intent", () => {
     expect(draftBuildIntentSelection({ mode: "read_now", target, now })).toEqual({
-      version: "build_intent_selection.v2",
+      version: "build_intent_selection.v3",
       mode: "read_now",
       intent: null,
-      intent_digest: null,
       plan: null,
       estimate_input: null,
       decision_request: null,
     });
-    const standard = draftBuildIntentSelection({ mode: "standard_deep", target, now });
+    const standard = draftBuildIntentSelection({
+      mode: "standard_deep",
+      target,
+      now,
+      plan_id: "plan-standard",
+      plan_revision: 1,
+    });
     expect(standard.intent).toBeNull();
     expect(standard.plan).toMatchObject({ recipe_id: "standard_deep", status: "draft" });
     expect(standard.decision_request).toMatchObject({
-      version: "build_decision_request.v2",
-      scope: { kind: "build_plan", plan_id: standard.plan?.plan_id, plan_digest: standard.plan?.plan_digest },
+      version: "build_decision_request.v3",
+      scope: {
+        kind: "build_plan",
+        plan_id: standard.plan?.plan_id,
+        plan_revision: standard.plan?.plan_revision,
+      },
       kind: "build_intent_plan",
       status: "pending",
     });
@@ -75,17 +94,26 @@ describe("IP5 resident build-intent controller", () => {
       target,
       now,
       user_goal: "Compare the two approaches for my private report",
+      ...ownerIdentity("selected"),
       candidate: candidate([...selected]),
       resolved_blueprints: resolutions([...selected]),
     });
-    expect(selection.intent).toMatchObject({ version: "build_intent.v2", privacy: "reader_private" });
+    expect(selection.intent).toMatchObject({ version: "build_intent.v3", privacy: "reader_private" });
     expect(selection.intent).not.toHaveProperty("desired_artifacts");
     expect(selection.plan).toMatchObject({
-      version: "build_plan.v2",
+      version: "build_plan.v3",
       recipe_id: "goal_directed",
       private_artifacts: [
-        { blueprint: { blueprint_id: "system.comparison_table" } },
-        { blueprint: { blueprint_id: "system.argument_map" } },
+        {
+          blueprint_id: "system.comparison_table",
+          blueprint_version: "1.0.0",
+          blueprint: { blueprint_id: "system.comparison_table" },
+        },
+        {
+          blueprint_id: "system.argument_map",
+          blueprint_version: "1.0.0",
+          blueprint: { blueprint_id: "system.argument_map" },
+        },
       ],
     });
     expect(draftBuildIntentSelection({
@@ -93,6 +121,7 @@ describe("IP5 resident build-intent controller", () => {
       target,
       now,
       user_goal: "No additional artifact is useful",
+      ...ownerIdentity("zero"),
       candidate: candidate([]),
       resolved_blueprints: [],
     }).plan?.private_artifacts).toEqual([]);
@@ -101,30 +130,32 @@ describe("IP5 resident build-intent controller", () => {
       target,
       now,
       user_goal: "private raw goal",
+      ...ownerIdentity("drift"),
       candidate: candidate(["timeline"]),
       resolved_blueprints: resolutions(["concept_map"]),
     })).toThrow(/Blueprint|resolution|identity/i);
   });
 
-  it("binds confirmation to the exact current digest and redacts raw goal from status metadata", () => {
+  it("binds confirmation to the exact current plan revision and redacts raw goal from status metadata", () => {
     const rawGoal = "PRIVATE_RAW_GOAL_DO_NOT_LOG";
     const draft = draftBuildIntentSelection({
       mode: "goal_directed",
       target,
       now,
       user_goal: rawGoal,
+      ...ownerIdentity("confirmation"),
       candidate: { ...candidate(["concept_map"]), goal_kind: "analyze", usage_horizon: "long_term" },
       resolved_blueprints: resolutions(["concept_map"]),
     });
     expect(() => confirmBuildIntentSelection(draft, {
       plan_id: draft.plan!.plan_id,
-      plan_digest: "f".repeat(64),
+      plan_revision: draft.plan!.plan_revision + 1,
       at: now,
       confirmation_source: "reader_ui",
-    })).toThrow(/digest/i);
+    })).toThrow(/revision/i);
     const confirmed = confirmBuildIntentSelection(draft, {
       plan_id: draft.plan!.plan_id,
-      plan_digest: draft.plan!.plan_digest,
+      plan_revision: draft.plan!.plan_revision,
       at: now,
       confirmation_source: "reader_ui",
     });
@@ -148,6 +179,7 @@ describe("IP5 resident build-intent controller", () => {
       target,
       now,
       user_goal: "Turn the book into an implementation sequence",
+      ...ownerIdentity("one-off"),
       candidate: {
         version: "build_intent_planner_candidate.v2",
         goal_kind: "write",
@@ -161,10 +193,11 @@ describe("IP5 resident build-intent controller", () => {
         usage_horizon: "one_off",
       },
       resolved_blueprints: [{
-        version: "artifact_blueprint_resolution.v1",
+        version: "artifact_blueprint_resolution.v2",
         source: "one_off",
         blueprint: oneOff,
-        digest: computeArtifactBlueprintDigest(oneOff),
+        blueprint_id: oneOff.blueprint_id,
+        blueprint_version: oneOff.blueprint_version,
       }],
     });
     expect(draft.plan?.private_artifacts[0]).toMatchObject({
@@ -179,6 +212,7 @@ describe("IP5 resident build-intent controller", () => {
       target,
       now,
       user_goal: rawGoal,
+      ...ownerIdentity("projection"),
       candidate: {
         ...candidate(["comparison_table"]),
         source_scope: { whole_book: false, lids: ["2.1"], sections: [] },
@@ -187,17 +221,17 @@ describe("IP5 resident build-intent controller", () => {
     });
     const projection = projectCodexBuildIntentSelection(draft);
     expect(projection).toMatchObject({
-      version: "codex_build_intent_plan.v2",
+      version: "codex_build_intent_plan.v3",
       mode: "goal_directed",
       intent: {
         intent_id: draft.intent?.intent_id,
-        intent_digest: draft.intent_digest,
+        intent_revision: draft.intent?.intent_revision,
         goal_kind: "compare",
         source_scope: { whole_book: false, lids: ["2.1"], sections: [] },
       },
       plan: {
         plan_id: draft.plan?.plan_id,
-        plan_digest: draft.plan?.plan_digest,
+        plan_revision: draft.plan?.plan_revision,
         create: draft.plan?.create,
         reuse: draft.plan?.reuse,
         estimate: draft.plan?.estimate,
@@ -217,7 +251,7 @@ describe("IP5 resident build-intent controller", () => {
 
     const confirmed = confirmBuildIntentSelection(draft, {
       plan_id: draft.plan!.plan_id,
-      plan_digest: draft.plan!.plan_digest,
+      plan_revision: draft.plan!.plan_revision,
       at: now,
       confirmation_source: "codex_conversation",
     });

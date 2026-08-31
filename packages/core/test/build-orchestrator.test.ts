@@ -21,6 +21,7 @@ import {
   automaticBuildExtractionPolicy,
   automaticBuildGenerationArtifactPath,
   buildSemanticArtifactEnvelope,
+  semanticContractFromExtractionPolicy,
 } from "../src/semantic-artifact";
 import {
   buildPaperLexiconCandidateArtifact,
@@ -56,6 +57,17 @@ function tempDir(): string {
   return mkdtempSync(path.join(tmpdir(), "understand-book-orchestrator-"));
 }
 
+function productionPolicyContracts(
+  stage: NonNullable<ReturnType<typeof buildAutomaticBuildSnapshot>["stages"][number]>,
+): string {
+  if (!stage.policy_set) throw new Error(`missing ${stage.stage} production policy set`);
+  return JSON.stringify(stage.policy_set.members.map((member) => ({
+    kind: member.kind,
+    policy_generation_id: member.policy_generation_id,
+    semantic_contract: member.semantic_contract,
+  })));
+}
+
 function writeJson(file: string, value: unknown): void {
   mkdirSync(path.dirname(file), { recursive: true });
   writeFileSync(file, JSON.stringify(value, null, 2), "utf8");
@@ -88,7 +100,7 @@ function closeV3Pass1(target: AutomaticBuildTarget): void {
       freezePass1ShadowTask(target, generation.task);
       writePass1ProductionTaskArtifact({
         target,
-        policy_set_digest: stage.policy_set.policy_set_digest,
+        policy_generation_id: generation.task.policy_generation_id,
         work_unit_id: unit.work_unit_id,
         marker: "Orchestrator v3 close fixture",
         generated_at: `2026-08-04T02:0${round}:00.000Z`,
@@ -109,7 +121,7 @@ function closeV3Pass1(target: AutomaticBuildTarget): void {
     target.source_path,
     "--book-id", target.book_id,
     "--content-profile", target.profile_id,
-    "--production-generation", stage.policy_set.policy_set_digest,
+    "--production-policy-contracts", productionPolicyContracts(stage),
   ];
   if (target.profile_id === "paper") {
     args.push(
@@ -165,7 +177,7 @@ function closeV3ProfileSidecar(target: AutomaticBuildTarget): void {
     target.source_path,
     "--book-id", target.book_id,
     "--content-profile", target.profile_id,
-    "--production-generation", stage.policy_set.policy_set_digest,
+    "--production-policy-contracts", productionPolicyContracts(stage),
   ], { cwd: target.root_dir, encoding: "utf8" });
   expect(result.status, result.stderr).toBe(0);
 }
@@ -422,9 +434,13 @@ describe("automatic build orchestrator", () => {
     expect(bookStructure?.pending_work_units?.every((unit) => {
       if (unit.version !== "automatic_build_work_unit.v4") return false;
       const binding = bookStructure.task_bindings?.[unit.work_unit_id];
-      return Boolean(binding && "proof_digest" in binding
-        && binding.proof_digest === unit.execution_budget_proof.proof_digest
-        && binding.policy_set_digest === bookStructure.policy_set?.policy_set_digest);
+      const generation = bookStructure.generation_tasks?.[unit.work_unit_id];
+      return Boolean(binding && "policy_generation_id" in binding
+        && generation?.kind === "book_structure"
+        && binding.policy_generation_id === generation.task.policy_generation_id
+        && JSON.stringify(binding.semantic_contract) === JSON.stringify(
+          semanticContractFromExtractionPolicy(generation.task.descriptor.policy_fingerprint),
+        ));
     })).toBe(true);
     expect(target.source_path).toBe(path.resolve(sourceFile));
 
@@ -452,7 +468,7 @@ describe("automatic build orchestrator", () => {
         owner: "book-structure-units",
         now: "2026-07-31T00:00:00.000Z",
         available_agent_slots: Math.max(1, unitWork.length),
-        accepted_plan_digest: unitPlan.preflight.plan_digest,
+        accepted_plan_digest: unitPlan.preflight.descriptor_plan_digest,
         build_plan: buildPlan,
       },
     );
@@ -468,14 +484,12 @@ describe("automatic build orchestrator", () => {
       const scheduled = scheduledUnits.get(unit.work_unit_id);
       if (!scheduled) throw new Error(`BookStructure scheduler omitted ${unit.work_unit_id}`);
       expect(scheduled.lease).toMatchObject({
-        proof_digest: unit.version === "automatic_build_work_unit.v4"
-          ? unit.execution_budget_proof.proof_digest
-          : undefined,
-        policy_set_digest: bookStructure.policy_set.policy_set_digest,
+        policy_generation_id: generation.task.policy_generation_id,
+        semantic_contract: semanticContractFromExtractionPolicy(generation.task.descriptor.policy_fingerprint),
       });
       expect(existsSync(bookStructureGenerationTaskPath(
         target,
-        bookStructure.policy_set.policy_set_digest,
+        generation.task.policy_generation_id,
         unit.work_unit_id,
       ))).toBe(true);
       const rendered = runAutomaticBuildTaskInput(
@@ -517,7 +531,7 @@ describe("automatic build orchestrator", () => {
       expect(receipt.artifact_path).toBe(automaticBuildGenerationArtifactPath(
         target,
         "book_structure",
-        bookStructure.policy_set.policy_set_digest,
+        generation.task.policy_generation_id,
         unit.work_unit_id,
       ));
     }
@@ -546,7 +560,7 @@ describe("automatic build orchestrator", () => {
       owner: "book-structure-stitch",
       now: "2026-07-31T00:01:00.000Z",
       available_agent_slots: 1,
-      accepted_plan_digest: stitchPlan.preflight.plan_digest,
+      accepted_plan_digest: stitchPlan.preflight.descriptor_plan_digest,
       build_plan: buildPlan,
     });
     if (stitchNext.action.kind !== "extract"
@@ -557,14 +571,12 @@ describe("automatic build orchestrator", () => {
     }
     const stitchTask = stitchNext.action.tasks[0];
     expect(stitchTask.lease).toMatchObject({
-      proof_digest: stitch.version === "automatic_build_work_unit.v4"
-        ? stitch.execution_budget_proof.proof_digest
-        : undefined,
-      policy_set_digest: stitchStage.policy_set.policy_set_digest,
+      policy_generation_id: stitchGeneration.task.policy_generation_id,
+      semantic_contract: semanticContractFromExtractionPolicy(stitchGeneration.task.descriptor.policy_fingerprint),
     });
     expect(existsSync(bookStructureGenerationTaskPath(
       target,
-      stitchStage.policy_set.policy_set_digest,
+      stitchGeneration.task.policy_generation_id,
       "stitch",
     ))).toBe(true);
     const stitchInput = runAutomaticBuildTaskInput(
@@ -596,7 +608,7 @@ describe("automatic build orchestrator", () => {
     expect(stitchReceipt.artifact_path).toBe(automaticBuildGenerationArtifactPath(
       target,
       "book_structure",
-      stitchStage!.policy_set!.policy_set_digest,
+      stitchGeneration.task.policy_generation_id,
       "stitch",
     ));
     const closeResult = runAutomaticBuildCloseStage(
@@ -606,7 +618,7 @@ describe("automatic build orchestrator", () => {
       { quality_profile: "full", book_id: target.book_id },
     );
     expect(closeResult).toMatchObject({
-      version: "automatic_build_stage_close_result.v1",
+      version: "automatic_build_stage_close_result.v2",
       status: "closed",
       stage: "book_structure",
       postcondition: { stage_closed: true },

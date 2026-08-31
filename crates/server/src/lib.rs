@@ -16214,11 +16214,11 @@ unchanged after training concludes";
         let response: Value = serde_json::from_str(&drafted.body).unwrap();
         assert_eq!(
             response["selection"]["version"],
-            "build_intent_selection.v2"
+            "build_intent_selection.v3"
         );
         assert_eq!(response["planning_source"], "deterministic");
         assert!(response["selection"]["intent"].is_null());
-        assert_eq!(response["selection"]["plan"]["version"], "build_plan.v2");
+        assert_eq!(response["selection"]["plan"]["version"], "build_plan.v3");
         assert!(response["selection"]["plan"]["private_artifacts"]
             .as_array()
             .is_some_and(Vec::is_empty));
@@ -16226,23 +16226,32 @@ unchanged after training concludes";
             .as_str()
             .unwrap()
             .to_string();
-        let plan_digest = response["selection"]["plan"]["plan_digest"]
-            .as_str()
-            .unwrap()
-            .to_string();
+        let plan_revision = response["selection"]["plan"]["plan_revision"]
+            .as_u64()
+            .unwrap();
+
+        let stale_estimate = post(
+            &mut s,
+            "/build_intent/estimate",
+            &json!({ "plan_id": plan_id, "plan_revision": plan_revision + 1 }).to_string(),
+        );
+        assert_eq!(stale_estimate.status, 409, "{}", stale_estimate.body);
 
         let estimate = post(
             &mut s,
             "/build_intent/estimate",
-            &json!({ "plan_id": plan_id }).to_string(),
+            &json!({ "plan_id": plan_id, "plan_revision": plan_revision }).to_string(),
         );
         assert_eq!(estimate.status, 200, "{}", estimate.body);
-        assert!(estimate.body.contains("build_plan_estimate_response.v1"));
+        let estimate: Value = serde_json::from_str(&estimate.body).unwrap();
+        assert_eq!(estimate["version"], "build_plan_estimate_response.v2");
+        assert_eq!(estimate["plan_id"], plan_id);
+        assert_eq!(estimate["plan_revision"], plan_revision);
 
         let mismatched = post_at(
             &mut s,
             "/build_intent/confirm",
-            &json!({ "plan_id": plan_id, "plan_digest": "0".repeat(64) }).to_string(),
+            &json!({ "plan_id": plan_id, "plan_revision": plan_revision + 1 }).to_string(),
             "2026-07-25T10:01:00.000Z",
         );
         assert_eq!(mismatched.status, 409, "{}", mismatched.body);
@@ -16250,7 +16259,7 @@ unchanged after training concludes";
         let confirmed = post_at(
             &mut s,
             "/build_intent/confirm",
-            &json!({ "plan_id": plan_id, "plan_digest": plan_digest }).to_string(),
+            &json!({ "plan_id": plan_id, "plan_revision": plan_revision }).to_string(),
             "2026-07-25T10:01:00.000Z",
         );
         assert_eq!(confirmed.status, 200, "{}", confirmed.body);
@@ -16306,6 +16315,14 @@ unchanged after training concludes";
         assert_eq!(usage["modes"][1]["actual"]["attempt_count"], 2);
         assert_eq!(usage["modes"][1]["actual"]["input_tokens"], 80);
         assert_eq!(usage["modes"][1]["actual"]["output_tokens"], 30);
+        assert_eq!(usage["modes"][1]["plan_revisions"][0]["plan_id"], plan_id);
+        assert_eq!(
+            usage["modes"][1]["plan_revisions"][0]["plan_revision"],
+            plan_revision
+        );
+        assert!(usage["modes"][1]["plan_revisions"][0]
+            .get("plan_digest")
+            .is_none());
         assert_eq!(
             usage["modes"][1]["actual"]["outcome_counts"]["retryable_failure"],
             1
@@ -16349,26 +16366,32 @@ unchanged after training concludes";
         let response: Value = serde_json::from_str(&drafted.body).unwrap();
         assert_eq!(
             response["selection"]["version"],
-            "build_intent_selection.v2"
+            "build_intent_selection.v3"
         );
         assert_eq!(response["planning_source"], "reader_provider");
         assert_eq!(
             response["selection"]["intent"]["version"],
-            "build_intent.v2"
+            "build_intent.v3"
         );
         assert!(response["selection"]["intent"]
             .get("desired_artifacts")
             .is_none());
-        assert_eq!(response["selection"]["plan"]["version"], "build_plan.v2");
+        assert_eq!(response["selection"]["plan"]["version"], "build_plan.v3");
         assert_eq!(
             response["selection"]["plan"]["private_artifacts"][0]["blueprint"]["blueprint_id"],
             "system.comparison_table"
         );
-        assert!(
-            response["selection"]["plan"]["private_artifacts"][0]["blueprint_digest"]
-                .as_str()
-                .is_some_and(|value| value.len() == 64)
+        assert_eq!(
+            response["selection"]["plan"]["private_artifacts"][0]["blueprint_id"],
+            "system.comparison_table"
         );
+        assert_eq!(
+            response["selection"]["plan"]["private_artifacts"][0]["blueprint_version"],
+            "1.0.0"
+        );
+        assert!(response["selection"]["plan"]["private_artifacts"][0]
+            .get("blueprint_digest")
+            .is_none());
         let intent_id = response["selection"]["intent"]["intent_id"]
             .as_str()
             .unwrap()
@@ -16407,7 +16430,7 @@ unchanged after training concludes";
             intent_build_store::IntentArtifactStore::open(s.intent_store_root.as_ref().unwrap())
                 .unwrap()
                 .read_intent(&s.book.base.book_id, &intent_id)
-                .unwrap()["revision"],
+                .unwrap()["intent_revision"],
             1
         );
 
@@ -16438,7 +16461,7 @@ unchanged after training concludes";
         assert_eq!(*structured_calls.lock().unwrap(), 2);
         let edited: Value = serde_json::from_str(&edited.body).unwrap();
         assert_eq!(edited["planning_source"], "reader_provider");
-        assert_eq!(edited["selection"]["intent"]["revision"], 2);
+        assert_eq!(edited["selection"]["intent"]["intent_revision"], 2);
 
         let rejected = post(
             &mut s,
@@ -16459,7 +16482,7 @@ unchanged after training concludes";
     }
 
     #[test]
-    fn build_intent_v2_allows_zero_blueprints_and_confirms_the_same_budgeted_digest() {
+    fn build_intent_v3_allows_zero_blueprints_and_confirms_the_same_budgeted_revision() {
         let mut state = state_named("build-intent-zero-blueprints");
         state.adapter = Box::new(MemoryFlowAdapter {
             structured_outputs: RefCell::new(VecDeque::from([json!({
@@ -16486,7 +16509,7 @@ unchanged after training concludes";
         );
         assert_eq!(drafted.status, 200, "{}", drafted.body);
         let drafted: Value = serde_json::from_str(&drafted.body).unwrap();
-        assert_eq!(drafted["selection"]["plan"]["version"], "build_plan.v2");
+        assert_eq!(drafted["selection"]["plan"]["version"], "build_plan.v3");
         assert!(drafted["selection"]["plan"]["private_artifacts"]
             .as_array()
             .is_some_and(Vec::is_empty));
@@ -16499,7 +16522,7 @@ unchanged after training concludes";
             "/build_intent/confirm",
             &json!({
                 "plan_id": drafted["selection"]["plan"]["plan_id"],
-                "plan_digest": drafted["selection"]["plan"]["plan_digest"],
+                "plan_revision": drafted["selection"]["plan"]["plan_revision"],
             })
             .to_string(),
             "2026-07-29T12:01:00.000Z",
@@ -16513,7 +16536,7 @@ unchanged after training concludes";
     }
 
     #[test]
-    fn build_intent_v2_rejects_blueprint_snapshot_drift_before_confirmation() {
+    fn build_intent_v3_rejects_same_version_blueprint_drift_before_confirmation() {
         let mut state = state_named("build-intent-blueprint-drift");
         state.adapter = Box::new(MemoryFlowAdapter {
             structured_outputs: RefCell::new(VecDeque::from([json!({
@@ -16542,10 +16565,9 @@ unchanged after training concludes";
             .as_str()
             .unwrap()
             .to_string();
-        let plan_digest = drafted["projection"]["plan"]["plan_digest"]
-            .as_str()
-            .unwrap()
-            .to_string();
+        let plan_revision = drafted["projection"]["plan"]["plan_revision"]
+            .as_u64()
+            .unwrap();
         let path = PathBuf::from(drafted["build_plan_path"].as_str().unwrap());
         let mut stored: Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
@@ -16555,7 +16577,7 @@ unchanged after training concludes";
         let rejected = build_intent_api::run_codex_command(
             &mut state,
             "confirm",
-            json!({ "plan_id": plan_id, "plan_digest": plan_digest }),
+            json!({ "plan_id": plan_id, "plan_revision": plan_revision }),
             "2026-07-29T12:11:00.000Z",
         )
         .unwrap_err();
@@ -16591,7 +16613,7 @@ unchanged after training concludes";
         assert!(!body.contains("user_goal"));
         assert_eq!(
             drafted["projection"]["version"],
-            "codex_build_intent_plan.v2"
+            "codex_build_intent_plan.v3"
         );
         assert_eq!(
             drafted["projection"]["plan"]["artifact_summaries"][0]["title"],
@@ -16604,16 +16626,15 @@ unchanged after training concludes";
             .as_str()
             .unwrap()
             .to_string();
-        let plan_digest = drafted["projection"]["plan"]["plan_digest"]
-            .as_str()
-            .unwrap()
-            .to_string();
+        let plan_revision = drafted["projection"]["plan"]["plan_revision"]
+            .as_u64()
+            .unwrap();
         assert!(Path::new(drafted["build_plan_path"].as_str().unwrap()).is_file());
 
         let mismatched = build_intent_api::run_codex_command(
             &mut state,
             "confirm",
-            json!({ "plan_id": plan_id, "plan_digest": "f".repeat(64) }),
+            json!({ "plan_id": plan_id, "plan_revision": plan_revision + 1 }),
             "2026-07-26T08:01:00.000Z",
         )
         .unwrap_err();
@@ -16625,7 +16646,7 @@ unchanged after training concludes";
         let confirmed = build_intent_api::run_codex_command(
             &mut state,
             "confirm",
-            json!({ "plan_id": plan_id, "plan_digest": plan_digest }),
+            json!({ "plan_id": plan_id, "plan_revision": plan_revision }),
             "2026-07-26T08:02:00.000Z",
         )
         .unwrap();
@@ -16649,7 +16670,7 @@ unchanged after training concludes";
         .unwrap();
         assert_eq!(
             prepared["handoff"]["version"],
-            "intent_artifact_task_batch_handoff.v1"
+            "intent_artifact_task_batch_handoff.v2"
         );
         assert_eq!(prepared["handoff"]["tasks"].as_array().unwrap().len(), 1);
         let prepared_body = serde_json::to_string(&prepared).unwrap();
@@ -16708,6 +16729,7 @@ unchanged after training concludes";
             "2026-07-30T09:00:00.000Z",
         )
         .unwrap();
+        let files_after_first = tree_snapshot(&private_root);
         let second = build_intent_api::run_codex_command(
             &mut state,
             "planning.context",
@@ -16716,7 +16738,15 @@ unchanged after training concludes";
         )
         .unwrap();
         assert_eq!(first, second);
-        assert_eq!(first["version"], "build_planning_context.v1");
+        assert_eq!(first["version"], "build_planning_context.v2");
+        assert_eq!(first["context_revision"], 1);
+        assert!(first["context_id"].as_str().is_some());
+        assert!(first.get("context_digest").is_none());
+        assert!(first["blueprint_registry"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|entry| entry.get("digest").is_none()));
         assert_eq!(first["target"]["book_id"], state.book.base.book_id);
         assert_eq!(first["candidate_contract"]["max_artifacts"], 16);
         assert!(first["blueprint_registry"].as_array().unwrap().len() >= 4);
@@ -16730,7 +16760,11 @@ unchanged after training concludes";
         let serialized = serde_json::to_string(&first).unwrap();
         assert!(!serialized.contains("user_goal"));
         assert!(!serialized.contains(&private_root.to_string_lossy().to_string()));
-        assert_eq!(tree_snapshot(&private_root), files_before);
+        assert_ne!(files_after_first, files_before);
+        assert!(files_after_first
+            .keys()
+            .any(|path| path.ends_with("planning-context.v2.json")));
+        assert_eq!(tree_snapshot(&private_root), files_after_first);
         assert_eq!(
             store
                 .inspect_redacted(&state.book.base.book_id)
@@ -16738,6 +16772,16 @@ unchanged after training concludes";
                 .store_revision,
             revision_before
         );
+        assert!(store
+            .inspect_redacted(&state.book.base.book_id)
+            .unwrap()
+            .intents
+            .is_empty());
+        assert!(store
+            .inspect_redacted(&state.book.base.book_id)
+            .unwrap()
+            .plans
+            .is_empty());
 
         let original_source = std::fs::read(state.book_dir.join("source.txt")).unwrap();
         std::fs::write(
@@ -16752,7 +16796,9 @@ unchanged after training concludes";
             "2026-07-30T09:02:00.000Z",
         )
         .unwrap();
-        assert_ne!(first["context_digest"], drifted["context_digest"]);
+        assert_eq!(first["context_id"], drifted["context_id"]);
+        assert_eq!(drifted["context_revision"], 2);
+        assert_ne!(first["target"], drifted["target"]);
         std::fs::write(state.book_dir.join("source.txt"), original_source).unwrap();
 
         let base = multi_leaf_base("planning-context-large-book", 1_981);
@@ -16939,7 +16985,8 @@ unchanged after training concludes";
             "draft.candidate",
             json!({
                 "user_goal": goal,
-                "planning_context_digest": context["context_digest"],
+                "context_id": context["context_id"],
+                "context_revision": context["context_revision"],
                 "candidate": invalid_candidate
             }),
             now,
@@ -16952,7 +16999,8 @@ unchanged after training concludes";
             "draft.candidate",
             json!({
                 "user_goal": goal,
-                "planning_context_digest": context["context_digest"],
+                "context_id": context["context_id"],
+                "context_revision": context["context_revision"],
                 "candidate": candidate,
                 "budget": { "max_total_tokens": 24_000, "on_exceed": "needs_user" }
             }),
@@ -17025,13 +17073,14 @@ unchanged after training concludes";
             "draft.candidate",
             json!({
                 "user_goal": goal,
-                "planning_context_digest": parity_context["context_digest"],
+                "context_id": parity_context["context_id"],
+                "context_revision": parity_context["context_revision"],
                 "candidate": parity_candidate
             }),
             now,
         )
         .unwrap();
-        for field in ["plan_id", "plan_digest"] {
+        for field in ["plan_id", "plan_revision"] {
             assert_eq!(
                 reader_draft["selection"]["plan"][field],
                 codex_draft["projection"]["plan"][field]
@@ -17042,8 +17091,8 @@ unchanged after training concludes";
             codex_draft["projection"]["intent"]["intent_id"]
         );
         assert_eq!(
-            reader_draft["selection"]["intent_digest"],
-            codex_draft["projection"]["intent"]["intent_digest"]
+            reader_draft["selection"]["intent"]["intent_revision"],
+            codex_draft["projection"]["intent"]["intent_revision"]
         );
     }
 
@@ -17064,7 +17113,8 @@ unchanged after training concludes";
             "draft.candidate",
             json!({
                 "user_goal": "Analyze the current book",
-                "planning_context_digest": context["context_digest"],
+                "context_id": context["context_id"],
+                "context_revision": context["context_revision"],
                 "candidate": {
                     "version": "build_intent_planner_candidate.v2",
                     "goal_kind": "analyze",
@@ -17231,7 +17281,7 @@ unchanged after training concludes";
             "/build_intent/confirm",
             &json!({
                 "plan_id": first_plan_id,
-                "plan_digest": first["selection"]["plan"]["plan_digest"],
+                "plan_revision": first["selection"]["plan"]["plan_revision"],
             })
             .to_string(),
             "2026-07-26T04:31:00.000Z",
@@ -17254,8 +17304,8 @@ unchanged after training concludes";
             .as_str()
             .unwrap()
             .to_string();
-        assert_eq!(second["selection"]["intent"]["revision"], 2);
-        assert_eq!(second["selection"]["plan"]["revision"], 2);
+        assert_eq!(second["selection"]["intent"]["intent_revision"], 2);
+        assert_eq!(second["selection"]["plan"]["plan_revision"], 2);
         assert_eq!(
             second["selection"]["intent"]["supersedes_intent_id"],
             first_intent_id
@@ -17267,7 +17317,7 @@ unchanged after training concludes";
             .unwrap()
             .iter()
             .any(|intent| intent["intent_id"] == first_intent_id
-                && intent["revision"] == 1
+                && intent["intent_revision"] == 1
                 && intent["status"] == "confirmed"));
 
         let second_confirmed = post_at(
@@ -17275,7 +17325,7 @@ unchanged after training concludes";
             "/build_intent/confirm",
             &json!({
                 "plan_id": second_plan_id,
-                "plan_digest": second["selection"]["plan"]["plan_digest"],
+                "plan_revision": second["selection"]["plan"]["plan_revision"],
             })
             .to_string(),
             "2026-07-26T04:33:00.000Z",
@@ -17402,7 +17452,7 @@ unchanged after training concludes";
             "/build_intent/confirm",
             &json!({
                 "plan_id": draft["selection"]["plan"]["plan_id"],
-                "plan_digest": draft["selection"]["plan"]["plan_digest"],
+                "plan_revision": draft["selection"]["plan"]["plan_revision"],
             })
             .to_string(),
             "2026-07-26T05:01:00.000Z",
@@ -17435,7 +17485,7 @@ unchanged after training concludes";
         );
         assert_eq!(replanned.status, 200, "{}", replanned.body);
         let replanned: Value = serde_json::from_str(&replanned.body).unwrap();
-        assert_eq!(replanned["selection"]["intent"]["revision"], 2);
+        assert_eq!(replanned["selection"]["intent"]["intent_revision"], 2);
         assert_eq!(
             replanned["selection"]["intent"]["supersedes_intent_id"],
             intent_id
@@ -17449,7 +17499,7 @@ unchanged after training concludes";
             "/build_intent/confirm",
             &json!({
                 "plan_id": replanned["selection"]["plan"]["plan_id"],
-                "plan_digest": replanned["selection"]["plan"]["plan_digest"],
+                "plan_revision": replanned["selection"]["plan"]["plan_revision"],
             })
             .to_string(),
             "2026-07-26T05:03:00.000Z",
@@ -17486,7 +17536,7 @@ unchanged after training concludes";
             "/build_intent/confirm",
             &json!({
                 "plan_id": drafted["selection"]["plan"]["plan_id"],
-                "plan_digest": drafted["selection"]["plan"]["plan_digest"],
+                "plan_revision": drafted["selection"]["plan"]["plan_revision"],
             })
             .to_string(),
             "2026-07-26T05:06:00.000Z",
@@ -17529,7 +17579,7 @@ unchanged after training concludes";
             "/build_intent/confirm",
             &json!({
                 "plan_id": goal["selection"]["plan"]["plan_id"],
-                "plan_digest": goal["selection"]["plan"]["plan_digest"],
+                "plan_revision": goal["selection"]["plan"]["plan_revision"],
             })
             .to_string(),
             "2026-07-26T05:11:00.000Z",
@@ -17549,7 +17599,7 @@ unchanged after training concludes";
             "/build_intent/confirm",
             &json!({
                 "plan_id": standard["selection"]["plan"]["plan_id"],
-                "plan_digest": standard["selection"]["plan"]["plan_digest"],
+                "plan_revision": standard["selection"]["plan"]["plan_revision"],
             })
             .to_string(),
             "2026-07-26T05:13:00.000Z",
@@ -17602,14 +17652,13 @@ unchanged after training concludes";
             .as_str()
             .unwrap()
             .to_string();
-        let plan_digest = drafted["selection"]["plan"]["plan_digest"]
-            .as_str()
-            .unwrap()
-            .to_string();
+        let plan_revision = drafted["selection"]["plan"]["plan_revision"]
+            .as_u64()
+            .unwrap();
         let confirmed = post_at(
             &mut s,
             "/build_intent/confirm",
-            &json!({ "plan_id": plan_id, "plan_digest": plan_digest }).to_string(),
+            &json!({ "plan_id": plan_id, "plan_revision": plan_revision }).to_string(),
             "2026-07-26T04:01:00.000Z",
         );
         assert_eq!(confirmed.status, 200, "{}", confirmed.body);
@@ -17644,19 +17693,21 @@ unchanged after training concludes";
             serde_json::from_str(&std::fs::read_to_string(&task_path).unwrap()).unwrap();
         let private_body = "PRIVATE_SERVER_ARTIFACT_SENTINEL";
         let candidate = json!({
-            "version": "intent_artifact_candidate.v2",
+            "version": "intent_artifact_candidate.v3",
             "task_id": task["task_id"],
             "book_id": task["book_id"],
             "source_fingerprint": task["source_fingerprint"],
             "intent_id": task["intent_id"],
-            "intent_digest": task["intent_digest"],
+            "intent_revision": task["intent_revision"],
             "plan_id": task["plan_id"],
-            "plan_digest": task["plan_digest"],
+            "plan_revision": task["plan_revision"],
             "artifact_id": task["artifact"]["artifact_id"],
-            "blueprint_digest": task["artifact"]["blueprint_digest"],
+            "blueprint_id": task["artifact"]["blueprint_id"],
+            "blueprint_version": task["artifact"]["blueprint_version"],
             "payload": {
-                "version": "artifact_instance.v2",
-                "blueprint_digest": task["artifact"]["blueprint_digest"],
+                "version": "artifact_instance.v3",
+                "blueprint_id": task["artifact"]["blueprint_id"],
+                "blueprint_version": task["artifact"]["blueprint_version"],
                 "records": [{
                     "record_id": "row-1",
                     "data": {

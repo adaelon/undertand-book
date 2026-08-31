@@ -4,8 +4,12 @@ import { describe, expect, it } from "vitest";
 import {
   buildPlanningContextV1,
   createCodexBuildIntentErrorResultV2,
+  issueBuildPlanningContextV2,
+  reconcileBuildPlanningContextV2,
   validateBuildPlanningContextV1,
+  validateBuildPlanningContextV2,
   validateCodexBuildIntentCommandV2,
+  validateCodexBuildIntentCommandV3,
   validateCodexBuildIntentResultV2,
 } from "../src/build-planning-context";
 
@@ -47,6 +51,66 @@ describe("CB1 BuildPlanningContext and Codex v2 controller contract", () => {
       ...fixture.commands.planning_context,
       input: { user_goal: "must not enter inspect" },
     })).toThrow();
+  });
+
+  it("issues owner-controlled context revisions and validates digest-free Codex v3 commands", () => {
+    const planning = {
+      ...fixture.input,
+      blueprint_registry: fixture.input.blueprint_registry.map(
+        ({ digest: _digest, ...entry }: { digest: string } & Record<string, unknown>) => entry,
+      ),
+    };
+    const first = issueBuildPlanningContextV2({
+      context_id: "context-paper-a",
+      planning,
+    });
+    expect(validateBuildPlanningContextV2(first)).toEqual(first);
+    expect(first).toMatchObject({
+      version: "build_planning_context.v2",
+      context_id: "context-paper-a",
+      context_revision: 1,
+    });
+    expect(first).not.toHaveProperty("context_digest");
+    expect(issueBuildPlanningContextV2({
+      context_id: "context-paper-a",
+      planning,
+      previous: first,
+    })).toEqual(first);
+
+    const second = issueBuildPlanningContextV2({
+      context_id: "context-paper-a",
+      planning: { ...planning, available_lids: [...planning.available_lids, "9.9"] },
+      previous: first,
+    });
+    expect(second.context_revision).toBe(2);
+    expect(reconcileBuildPlanningContextV2(first, second)).toEqual(second);
+
+    expect(validateCodexBuildIntentCommandV3({
+      version: "codex_build_intent_command.v3",
+      operation: "draft.candidate",
+      target: { workspace_dir: "C:\\books\\paper-a" },
+      input: {
+        user_goal: "Compare the two methods",
+        context_id: first.context_id,
+        context_revision: first.context_revision,
+        candidate: {
+          version: "build_intent_planner_candidate.v2",
+          goal_kind: "compare",
+          source_scope: { whole_book: true, lids: [], sections: [] },
+          artifacts: [],
+          usage_horizon: "project",
+        },
+      },
+    })).toMatchObject({
+      version: "codex_build_intent_command.v3",
+      input: { context_id: "context-paper-a", context_revision: 1 },
+    });
+    expect(validateCodexBuildIntentCommandV3({
+      version: "codex_build_intent_command.v3",
+      operation: "confirm",
+      target: { workspace_dir: "C:\\books\\paper-a" },
+      input: { plan_id: "plan-paper-a", plan_revision: 3 },
+    })).toMatchObject({ input: { plan_id: "plan-paper-a", plan_revision: 3 } });
   });
 
   it("returns one bounded redacted error envelope", () => {

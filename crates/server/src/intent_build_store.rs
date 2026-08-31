@@ -17,51 +17,63 @@ pub const INTENT_BUILD_INVALID: &str = "INTENT_BUILD_INVALID";
 pub const INTENT_BUILD_CONFLICT: &str = "INTENT_BUILD_CONFLICT";
 pub const INTENT_BUILD_NOT_FOUND: &str = "INTENT_BUILD_NOT_FOUND";
 
-const INDEX_VERSION: &str = "intent_artifact_store_index.v1";
+const INDEX_VERSION: &str = "intent_artifact_store_index.v2";
+const ACTIVE_POINTER_VERSION: &str = "intent_artifact_active_pointer.v2";
+const LEGACY_INDEX_VERSION: &str = "intent_artifact_store_index.v1";
+const V3_INDEX_FILE: &str = "index.v2.json";
+const V3_ACTIVE_FILE: &str = "active.v2.json";
+const V2_PLANNING_CONTEXT_FILE: &str = "planning-context.v2.json";
+const V3_INTENT_FILE: &str = "intent.v3.json";
+const V3_PLAN_SUFFIX: &str = ".v3.json";
+const V3_ACCEPTED_FILE: &str = "accepted.v3.json";
+const LEGACY_INDEX_FILE: &str = "index.json";
+const LEGACY_INTENT_FILE: &str = "intent.json";
+const LEGACY_ACCEPTED_FILE: &str = "accepted.json";
 static WRITE_NONCE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct IntentIndexEntryV1 {
+pub struct IntentIndexEntryV2 {
     pub intent_id: String,
-    pub revision: u64,
+    pub intent_revision: u64,
     pub status: String,
     pub source_fingerprint: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct PlanIndexEntryV1 {
+pub struct PlanIndexEntryV2 {
     pub plan_id: String,
-    pub revision: u64,
+    pub plan_revision: u64,
     pub status: String,
-    pub plan_digest: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub intent_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub intent_revision: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct ActiveIntentOverlayV1 {
+pub struct ActiveIntentOverlayV2 {
     pub intent_id: String,
+    pub intent_revision: u64,
     pub plan_id: String,
+    pub plan_revision: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-struct IntentArtifactStoreIndexV1 {
+struct IntentArtifactStoreIndexV2 {
     version: String,
     book_id: String,
     store_revision: u64,
     #[serde(default)]
-    intents: BTreeMap<String, IntentIndexEntryV1>,
+    intents: BTreeMap<String, IntentIndexEntryV2>,
     #[serde(default)]
-    plans: BTreeMap<String, PlanIndexEntryV1>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    active_overlay: Option<ActiveIntentOverlayV1>,
+    plans: BTreeMap<String, PlanIndexEntryV2>,
 }
 
-impl IntentArtifactStoreIndexV1 {
+impl IntentArtifactStoreIndexV2 {
     fn empty(book_id: &str) -> Self {
         Self {
             version: INDEX_VERSION.into(),
@@ -69,7 +81,6 @@ impl IntentArtifactStoreIndexV1 {
             store_revision: 0,
             intents: BTreeMap::new(),
             plans: BTreeMap::new(),
-            active_overlay: None,
         }
     }
 
@@ -83,23 +94,109 @@ impl IntentArtifactStoreIndexV1 {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RedactedIntentBuildInspectionV1 {
+#[serde(deny_unknown_fields)]
+struct ActiveIntentPointerFileV2 {
+    version: String,
+    book_id: String,
+    intent_id: String,
+    intent_revision: u64,
+    plan_id: String,
+    plan_revision: u64,
+}
+
+impl ActiveIntentPointerFileV2 {
+    fn from_overlay(book_id: &str, active: &ActiveIntentOverlayV2) -> Self {
+        Self {
+            version: ACTIVE_POINTER_VERSION.into(),
+            book_id: book_id.into(),
+            intent_id: active.intent_id.clone(),
+            intent_revision: active.intent_revision,
+            plan_id: active.plan_id.clone(),
+            plan_revision: active.plan_revision,
+        }
+    }
+
+    fn overlay(&self) -> ActiveIntentOverlayV2 {
+        ActiveIntentOverlayV2 {
+            intent_id: self.intent_id.clone(),
+            intent_revision: self.intent_revision,
+            plan_id: self.plan_id.clone(),
+            plan_revision: self.plan_revision,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct LegacyIntentIndexEntryV1 {
+    intent_id: String,
+    revision: u64,
+    status: String,
+    source_fingerprint: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct LegacyPlanIndexEntryV1 {
+    plan_id: String,
+    revision: u64,
+    status: String,
+    plan_digest: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    intent_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct LegacyActiveIntentOverlayV1 {
+    intent_id: String,
+    plan_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct LegacyIntentArtifactStoreIndexV1 {
+    version: String,
+    book_id: String,
+    store_revision: u64,
+    #[serde(default)]
+    intents: BTreeMap<String, LegacyIntentIndexEntryV1>,
+    #[serde(default)]
+    plans: BTreeMap<String, LegacyPlanIndexEntryV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    active_overlay: Option<LegacyActiveIntentOverlayV1>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PlanningControlMigrationReceiptV2ToV3 {
+    pub version: String,
+    pub book_id: String,
+    pub intent_count: usize,
+    pub plan_count: usize,
+    pub accepted_artifact_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_overlay: Option<ActiveIntentOverlayV2>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RedactedIntentBuildInspectionV2 {
     pub version: String,
     pub book_id: String,
     pub store_revision: u64,
-    pub intents: Vec<IntentIndexEntryV1>,
-    pub plans: Vec<PlanIndexEntryV1>,
+    pub intents: Vec<IntentIndexEntryV2>,
+    pub plans: Vec<PlanIndexEntryV2>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub active_overlay: Option<ActiveIntentOverlayV1>,
+    pub active_overlay: Option<ActiveIntentOverlayV2>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
-pub struct IntentArtifactOverlayV1 {
+pub struct IntentArtifactOverlayV2 {
     pub version: String,
     pub book_id: String,
     pub intent_id: String,
+    pub intent_revision: u64,
     pub plan_id: String,
-    pub plan_digest: String,
+    pub plan_revision: u64,
     pub artifacts: Vec<IntentArtifactProjectionV1>,
 }
 
@@ -127,25 +224,7 @@ pub struct IntentArtifactDisplayBlueprintV1 {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct AcceptedIntentArtifactV1 {
-    version: String,
-    task_id: String,
-    book_id: String,
-    source_fingerprint: String,
-    intent_id: String,
-    intent_digest: String,
-    plan_id: String,
-    plan_digest: String,
-    artifact_id: String,
-    artifact_type: String,
-    payload: Value,
-    payload_digest: String,
-    accepted_at: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct AcceptedIntentArtifactV2 {
+struct LegacyAcceptedIntentArtifactV2 {
     version: String,
     task_id: String,
     book_id: String,
@@ -156,6 +235,25 @@ struct AcceptedIntentArtifactV2 {
     plan_digest: String,
     artifact_id: String,
     blueprint_digest: String,
+    payload: Value,
+    payload_digest: String,
+    accepted_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AcceptedIntentArtifactV3 {
+    version: String,
+    task_id: String,
+    book_id: String,
+    source_fingerprint: String,
+    intent_id: String,
+    intent_revision: u64,
+    plan_id: String,
+    plan_revision: u64,
+    artifact_id: String,
+    blueprint_id: String,
+    blueprint_version: String,
     payload: Value,
     payload_digest: String,
     accepted_at: String,
@@ -165,17 +263,18 @@ struct AcceptedIntentArtifactV2 {
 struct ExpectedIntentArtifact {
     artifact_id: String,
     artifact_type: String,
-    blueprint_digest: String,
+    blueprint_id: String,
+    blueprint_version: String,
     access_blueprint: ArtifactSnapshotBlueprint,
     reader_blueprint: IntentArtifactDisplayBlueprintV1,
-    accepts_legacy_v1: bool,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ArtifactInstanceForAccessV2 {
+struct ArtifactInstanceForAccessV3 {
     version: String,
-    blueprint_digest: String,
+    blueprint_id: String,
+    blueprint_version: String,
     records: Vec<ArtifactInstanceRecordForAccessV2>,
     #[serde(default)]
     relations: Vec<ArtifactInstanceRelationForAccessV2>,
@@ -234,76 +333,6 @@ struct ArtifactBlueprintSearchFieldForAccessV1 {
     path: String,
     weight: u64,
     analyzer: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct LegacyTimelinePayload {
-    items: Vec<LegacyTimelineItem>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct LegacyTimelineItem {
-    id: String,
-    label: String,
-    #[serde(default)]
-    order_hint: Option<String>,
-    evidence_lids: Vec<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct LegacyConceptMapPayload {
-    nodes: Vec<LegacyConceptNode>,
-    links: Vec<LegacyRelation>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct LegacyConceptNode {
-    id: String,
-    label: String,
-    evidence_lids: Vec<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct LegacyComparisonTablePayload {
-    rows: Vec<LegacyComparisonRow>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct LegacyComparisonRow {
-    subject: String,
-    dimensions: serde_json::Map<String, Value>,
-    evidence_lids: Vec<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct LegacyArgumentMapPayload {
-    claims: Vec<LegacyArgumentClaim>,
-    relations: Vec<LegacyRelation>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct LegacyArgumentClaim {
-    id: String,
-    claim: String,
-    role: String,
-    evidence_lids: Vec<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct LegacyRelation {
-    source: String,
-    target: String,
-    relation: String,
-    evidence_lids: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -367,16 +396,247 @@ impl IntentArtifactStore {
         &self.root
     }
 
-    pub fn write_intent(&self, intent: &Value) -> Result<IntentIndexEntryV1, ToolError> {
+    pub fn issue_planning_context_v2(
+        &self,
+        book_id: &str,
+        body: &Value,
+    ) -> Result<Value, ToolError> {
+        self.ensure_private()?;
+        validate_path_safe_id(book_id, "book_id")?;
+        let mut candidate = body
+            .as_object()
+            .cloned()
+            .ok_or_else(|| store_corrupt("BuildPlanningContext body must be an object"))?;
+        if candidate.contains_key("context_id")
+            || candidate.contains_key("context_revision")
+            || candidate.contains_key("context_digest")
+        {
+            return Err(store_corrupt(
+                "BuildPlanningContext body must not issue its own identity",
+            ));
+        }
+        let context_id = format!("context-{book_id}");
+        validate_path_safe_id(&context_id, "context_id")?;
+        candidate.insert("context_id".into(), Value::String(context_id.clone()));
+        candidate.insert("context_revision".into(), Value::from(1));
+
+        let path = self.planning_context_path(book_id)?;
+        if path.exists() {
+            let previous: Value = read_json(&path)?;
+            let previous_revision =
+                validate_owned_planning_context_v2(&previous, book_id, &context_id)?;
+            candidate.insert("context_revision".into(), Value::from(previous_revision));
+            let candidate = Value::Object(candidate.clone());
+            if candidate == previous {
+                return Ok(previous);
+            }
+            let next_revision = previous_revision
+                .checked_add(1)
+                .ok_or_else(|| store_corrupt("BuildPlanningContext revision overflow"))?;
+            let mut changed = candidate
+                .as_object()
+                .expect("candidate remains an object")
+                .clone();
+            changed.insert("context_revision".into(), Value::from(next_revision));
+            let changed = Value::Object(changed);
+            validate_owned_planning_context_v2(&changed, book_id, &context_id)?;
+            write_json_atomically(&path, &changed)?;
+            return Ok(changed);
+        }
+
+        let first = Value::Object(candidate);
+        validate_owned_planning_context_v2(&first, book_id, &context_id)?;
+        write_json_atomically(&path, &first)?;
+        Ok(first)
+    }
+
+    pub fn migrate_planning_control_v2_to_v3(
+        &self,
+        book_id: &str,
+    ) -> Result<PlanningControlMigrationReceiptV2ToV3, ToolError> {
+        self.ensure_private()?;
+        validate_path_safe_id(book_id, "book_id")?;
+        let legacy_index_path = self.legacy_index_path(book_id)?;
+        if !legacy_index_path.exists() {
+            return Err(not_found("legacy V2 planning index does not exist"));
+        }
+        let legacy_index: LegacyIntentArtifactStoreIndexV1 = read_json(&legacy_index_path)?;
+        validate_legacy_index(&legacy_index, book_id)?;
+
+        let mut migrated_index = IntentArtifactStoreIndexV2 {
+            version: INDEX_VERSION.into(),
+            book_id: book_id.into(),
+            store_revision: legacy_index.store_revision,
+            intents: BTreeMap::new(),
+            plans: BTreeMap::new(),
+        };
+        let mut intent_digests = BTreeMap::new();
+        let mut migrated_intents = Vec::with_capacity(legacy_index.intents.len());
+        for (intent_id, legacy_entry) in &legacy_index.intents {
+            let legacy_path = self.legacy_intent_path(book_id, intent_id)?;
+            let legacy: Value = read_required_json(&legacy_path, "legacy V2 intent")?;
+            let digest = validate_legacy_intent_v2(&legacy, book_id, legacy_entry)?;
+            let migrated = migrate_legacy_intent_v2(&legacy)?;
+            let entry = parse_intent_entry(&migrated)?;
+            intent_digests.insert(intent_id.clone(), digest);
+            migrated_index.intents.insert(intent_id.clone(), entry);
+            migrated_intents.push((self.intent_path(book_id, intent_id)?, migrated));
+        }
+
+        let mut migrated_plans = Vec::with_capacity(legacy_index.plans.len());
+        let mut legacy_plans = BTreeMap::new();
+        let mut migrated_plan_values = BTreeMap::new();
+        for (plan_id, legacy_entry) in &legacy_index.plans {
+            let legacy_path = self.legacy_plan_path(book_id, plan_id)?;
+            let legacy: Value = read_required_json(&legacy_path, "legacy V2 plan")?;
+            validate_legacy_plan_v2(
+                &legacy,
+                book_id,
+                legacy_entry,
+                &legacy_index,
+                &intent_digests,
+            )?;
+            let migrated = migrate_legacy_plan_v2(&legacy, &legacy_index)?;
+            let entry = parse_plan_entry(&migrated)?;
+            migrated_index.plans.insert(plan_id.clone(), entry);
+            legacy_plans.insert(plan_id.clone(), legacy);
+            migrated_plan_values.insert(plan_id.clone(), migrated.clone());
+            migrated_plans.push((self.plan_path(book_id, plan_id)?, migrated));
+        }
+        validate_index(&migrated_index, book_id)?;
+
+        let active_overlay = legacy_index
+            .active_overlay
+            .as_ref()
+            .map(|active| migrate_legacy_active_overlay(active, &migrated_index))
+            .transpose()?;
+        let mut migrated_accepted = Vec::new();
+        if let (Some(legacy_active), Some(active)) = (
+            legacy_index.active_overlay.as_ref(),
+            active_overlay.as_ref(),
+        ) {
+            let legacy_plan = legacy_plans
+                .get(&legacy_active.plan_id)
+                .ok_or_else(|| store_corrupt("legacy active plan body is missing"))?;
+            let migrated_plan = migrated_plan_values
+                .get(&legacy_active.plan_id)
+                .ok_or_else(|| store_corrupt("migrated active plan body is missing"))?;
+            let expected = expected_private_artifacts(migrated_plan)?;
+            let legacy_plan_digest = required_string(legacy_plan, "plan_digest")?;
+            let intent_digest = intent_digests
+                .get(&legacy_active.intent_id)
+                .ok_or_else(|| store_corrupt("legacy active intent digest is missing"))?;
+            for artifact in &expected {
+                let legacy_path = self
+                    .artifact_directory(book_id, &legacy_active.intent_id, &artifact.artifact_id)?
+                    .join(LEGACY_ACCEPTED_FILE);
+                if !legacy_path.exists() {
+                    continue;
+                }
+                let legacy: LegacyAcceptedIntentArtifactV2 = read_json(&legacy_path)?;
+                let legacy_blueprint_digest = legacy_plan
+                    .get("private_artifacts")
+                    .and_then(Value::as_array)
+                    .and_then(|artifacts| {
+                        artifacts.iter().find(|candidate| {
+                            candidate.get("artifact_id").and_then(Value::as_str)
+                                == Some(artifact.artifact_id.as_str())
+                        })
+                    })
+                    .and_then(|artifact| artifact.get("blueprint_digest"))
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        store_corrupt("legacy active artifact Blueprint digest is missing")
+                    })?;
+                validate_legacy_accepted_artifact_v2(
+                    &legacy,
+                    book_id,
+                    required_string(legacy_plan, "source_fingerprint")?,
+                    legacy_active,
+                    intent_digest,
+                    legacy_plan_digest,
+                    &artifact.artifact_id,
+                    legacy_blueprint_digest,
+                )?;
+                let migrated = migrate_legacy_accepted_artifact_v2(&legacy, active, artifact)?;
+                let parsed: AcceptedIntentArtifactV3 = serde_json::from_value(migrated.clone())
+                    .map_err(|_| store_corrupt("migrated accepted artifact schema is invalid"))?;
+                validate_accepted_artifact_v3(
+                    &parsed,
+                    book_id,
+                    required_string(legacy_plan, "source_fingerprint")?,
+                    active,
+                    artifact,
+                )?;
+                migrated_accepted.push((
+                    self.artifact_directory(book_id, &active.intent_id, &artifact.artifact_id)?
+                        .join(V3_ACCEPTED_FILE),
+                    migrated,
+                ));
+            }
+        }
+
+        let mut targets = migrated_intents
+            .iter()
+            .chain(migrated_plans.iter())
+            .chain(migrated_accepted.iter())
+            .map(|(path, _)| path)
+            .collect::<Vec<_>>();
+        let index_path = self.index_path(book_id)?;
+        let active_path = self.active_pointer_path(book_id)?;
+        targets.push(&index_path);
+        if active_overlay.is_some() {
+            targets.push(&active_path);
+        }
+        if targets.iter().any(|path| path.exists()) {
+            return Err(conflict(
+                "V3 planning/control migration target already exists; migration is create-only",
+            ));
+        }
+
+        for (path, value) in &migrated_intents {
+            write_json_create_only(path, value)?;
+        }
+        for (path, value) in &migrated_plans {
+            write_json_create_only(path, value)?;
+        }
+        for (path, value) in &migrated_accepted {
+            write_json_create_only(path, value)?;
+        }
+        write_json_create_only(&index_path, &migrated_index)?;
+        if let Some(active) = active_overlay.as_ref() {
+            write_json_create_only(
+                &active_path,
+                &ActiveIntentPointerFileV2::from_overlay(book_id, active),
+            )?;
+        }
+
+        Ok(PlanningControlMigrationReceiptV2ToV3 {
+            version: "planning_control_migration.v2_to_v3".into(),
+            book_id: book_id.into(),
+            intent_count: migrated_index.intents.len(),
+            plan_count: migrated_index.plans.len(),
+            accepted_artifact_count: migrated_accepted.len(),
+            active_overlay,
+        })
+    }
+
+    pub fn write_intent(&self, intent: &Value) -> Result<IntentIndexEntryV2, ToolError> {
         self.ensure_private()?;
         let entry = parse_intent_entry(intent)?;
         let book_id = required_string(intent, "book_id")?;
         let path = self.intent_path(book_id, &entry.intent_id)?;
         let mut index = self.load_index(book_id)?;
         if let Some(current) = index.intents.get(&entry.intent_id) {
-            reject_older_revision("intent", entry.revision, current.revision)?;
+            reject_invalid_revision_step("intent", entry.intent_revision, current.intent_revision)?;
         }
-        let body_changed = reconcile_existing_revision(&path, "intent", entry.revision, intent)?;
+        let body_changed = reconcile_existing_revision(
+            &path,
+            "intent",
+            "intent_revision",
+            entry.intent_revision,
+            intent,
+        )?;
         let index_changed = index.intents.get(&entry.intent_id) != Some(&entry);
         if body_changed {
             write_json_atomically(&path, intent)?;
@@ -389,7 +649,7 @@ impl IntentArtifactStore {
         Ok(entry)
     }
 
-    pub fn write_plan(&self, plan: &Value) -> Result<PlanIndexEntryV1, ToolError> {
+    pub fn write_plan(&self, plan: &Value) -> Result<PlanIndexEntryV2, ToolError> {
         self.ensure_private()?;
         let entry = parse_plan_entry(plan)?;
         let book_id = required_string(plan, "book_id")?;
@@ -405,11 +665,18 @@ impl IntentArtifactStore {
                     "plan source_fingerprint must match the referenced intent",
                 ));
             }
+            if entry.intent_revision != Some(intent.intent_revision) {
+                return Err(invalid(
+                    "plan intent_revision must match the referenced intent owner revision",
+                ));
+            }
         }
+        validate_plan_blueprint_versions(&index, self, book_id, plan)?;
         if let Some(current) = index.plans.get(&entry.plan_id) {
-            reject_older_revision("plan", entry.revision, current.revision)?;
+            reject_invalid_revision_step("plan", entry.plan_revision, current.plan_revision)?;
         }
-        let body_changed = reconcile_existing_revision(&path, "plan", entry.revision, plan)?;
+        let body_changed =
+            reconcile_existing_revision(&path, "plan", "plan_revision", entry.plan_revision, plan)?;
         let index_changed = index.plans.get(&entry.plan_id) != Some(&entry);
         if body_changed {
             write_json_atomically(&path, plan)?;
@@ -444,51 +711,64 @@ impl IntentArtifactStore {
     pub fn inspect_redacted(
         &self,
         book_id: &str,
-    ) -> Result<RedactedIntentBuildInspectionV1, ToolError> {
+    ) -> Result<RedactedIntentBuildInspectionV2, ToolError> {
         self.ensure_private()?;
         validate_path_safe_id(book_id, "book_id")?;
         let index = self.load_index(book_id)?;
-        Ok(RedactedIntentBuildInspectionV1 {
-            version: "intent_build_inspection.v1".into(),
+        let active_overlay = self.load_active_pointer(book_id, &index)?;
+        Ok(RedactedIntentBuildInspectionV2 {
+            version: "intent_build_inspection.v2".into(),
             book_id: book_id.into(),
             store_revision: index.store_revision,
             intents: index.intents.into_values().collect(),
             plans: index.plans.into_values().collect(),
-            active_overlay: index.active_overlay,
+            active_overlay,
         })
     }
 
     pub fn set_active_overlay(
         &self,
         book_id: &str,
-        active: Option<ActiveIntentOverlayV1>,
+        active: Option<ActiveIntentOverlayV2>,
     ) -> Result<(), ToolError> {
         self.ensure_private()?;
         validate_path_safe_id(book_id, "book_id")?;
-        let mut index = self.load_index(book_id)?;
+        let index = self.load_index(book_id)?;
         if let Some(reference) = &active {
             validate_path_safe_id(&reference.intent_id, "active intent_id")?;
             validate_path_safe_id(&reference.plan_id, "active plan_id")?;
-            if !index.intents.contains_key(&reference.intent_id) {
-                return Err(not_found("active intent does not exist"));
-            }
+            let intent = index
+                .intents
+                .get(&reference.intent_id)
+                .ok_or_else(|| not_found("active intent does not exist"))?;
             let plan = index
                 .plans
                 .get(&reference.plan_id)
                 .ok_or_else(|| not_found("active plan does not exist"))?;
-            if plan.intent_id.as_deref() != Some(reference.intent_id.as_str()) {
+            if intent.intent_revision != reference.intent_revision
+                || plan.plan_revision != reference.plan_revision
+                || plan.intent_id.as_deref() != Some(reference.intent_id.as_str())
+                || plan.intent_revision != Some(reference.intent_revision)
+            {
                 return Err(invalid(
-                    "active plan does not belong to the selected intent",
+                    "active pointer does not match the selected intent and plan revisions",
                 ));
             }
             if plan.status != "confirmed" && plan.status != "completed" {
                 return Err(invalid("active plan must be confirmed or completed"));
             }
         }
-        if index.active_overlay != active {
-            index.active_overlay = active;
-            index.bump()?;
-            self.write_index(&index)?;
+        let path = self.active_pointer_path(book_id)?;
+        let current = self.load_active_pointer_unchecked(book_id)?;
+        if current != active {
+            if let Some(active) = active.as_ref() {
+                write_json_atomically(
+                    &path,
+                    &ActiveIntentPointerFileV2::from_overlay(book_id, active),
+                )?;
+            } else {
+                remove_private_path(&path)?;
+            }
         }
         Ok(())
     }
@@ -509,7 +789,7 @@ impl IntentArtifactStore {
         &self,
         book_id: &str,
         current_source_fingerprint: &str,
-    ) -> Result<IntentArtifactOverlayV1, ToolError> {
+    ) -> Result<IntentArtifactOverlayV2, ToolError> {
         self.read_active_overlay_state(book_id, current_source_fingerprint)
             .map(|(projection, _)| projection)
     }
@@ -537,7 +817,7 @@ impl IntentArtifactStore {
             ArtifactSnapshotScope {
                 book_id: projection.book_id,
                 source_fingerprint: current_source_fingerprint.into(),
-                overlay_identity: projection.plan_digest,
+                overlay_identity: format!("{}@{}", projection.plan_id, projection.plan_revision),
             },
             artifacts,
         )
@@ -548,12 +828,12 @@ impl IntentArtifactStore {
         &self,
         book_id: &str,
         current_source_fingerprint: &str,
-    ) -> Result<(IntentArtifactOverlayV1, Vec<ArtifactSnapshotItem>), ToolError> {
+    ) -> Result<(IntentArtifactOverlayV2, Vec<ArtifactSnapshotItem>), ToolError> {
         self.ensure_private()?;
         validate_path_safe_id(book_id, "book_id")?;
         let index = self.load_index(book_id)?;
-        let active = index
-            .active_overlay
+        let active = self
+            .load_active_pointer(book_id, &index)?
             .ok_or_else(|| not_found("active intent artifact overlay does not exist"))?;
         let plan_entry = index
             .plans
@@ -579,14 +859,12 @@ impl IntentArtifactStore {
             &intent,
         )?;
         let expected = expected_private_artifacts(&plan)?;
-        let intent_digest = required_string(&plan, "intent_digest")?;
-        let plan_digest = required_string(&plan, "plan_digest")?;
         let mut artifacts = Vec::with_capacity(expected.len());
         let mut access_artifacts = Vec::with_capacity(expected.len());
         for artifact in expected {
             let accepted_path = self
                 .artifact_directory(book_id, &active.intent_id, &artifact.artifact_id)?
-                .join("accepted.json");
+                .join(V3_ACCEPTED_FILE);
             if !accepted_path.exists() {
                 artifacts.push(IntentArtifactProjectionV1 {
                     artifact_id: artifact.artifact_id,
@@ -600,69 +878,23 @@ impl IntentArtifactStore {
                 continue;
             }
             let accepted_value: Value = read_json(&accepted_path)?;
-            let (payload_digest, accepted_at, payload, access_records, access_relations) =
-                match required_string(&accepted_value, "version")? {
-                    "intent_artifact_accepted.v1" => {
-                        if !artifact.accepts_legacy_v1 {
-                            return Err(store_corrupt(
-                                "accepted v1 intent artifact cannot satisfy a V2 BuildPlan",
-                            ));
-                        }
-                        let accepted: AcceptedIntentArtifactV1 =
-                            serde_json::from_value(accepted_value).map_err(|_| {
-                                store_corrupt("accepted v1 intent artifact schema is invalid")
-                            })?;
-                        validate_accepted_artifact_v1(
-                            &accepted,
-                            book_id,
-                            current_source_fingerprint,
-                            &active,
-                            intent_digest,
-                            plan_digest,
-                            &artifact,
-                        )?;
-                        let (records, relations) =
-                            legacy_payload_to_access(&artifact.artifact_type, &accepted.payload)?;
-                        (
-                            accepted.payload_digest,
-                            accepted.accepted_at,
-                            accepted.payload,
-                            records,
-                            relations,
-                        )
-                    }
-                    "intent_artifact_accepted.v2" => {
-                        let accepted: AcceptedIntentArtifactV2 =
-                            serde_json::from_value(accepted_value).map_err(|_| {
-                                store_corrupt("accepted v2 intent artifact schema is invalid")
-                            })?;
-                        validate_accepted_artifact_v2(
-                            &accepted,
-                            book_id,
-                            current_source_fingerprint,
-                            &active,
-                            intent_digest,
-                            plan_digest,
-                            &artifact,
-                        )?;
-                        let (records, relations) = artifact_instance_to_access(
-                            &accepted.payload,
-                            &artifact.blueprint_digest,
-                        )?;
-                        (
-                            accepted.payload_digest,
-                            accepted.accepted_at,
-                            accepted.payload,
-                            records,
-                            relations,
-                        )
-                    }
-                    _ => {
-                        return Err(store_corrupt(
-                            "unsupported accepted intent artifact version",
-                        ))
-                    }
-                };
+            let accepted: AcceptedIntentArtifactV3 = serde_json::from_value(accepted_value)
+                .map_err(|_| store_corrupt("accepted v3 intent artifact schema is invalid"))?;
+            validate_accepted_artifact_v3(
+                &accepted,
+                book_id,
+                current_source_fingerprint,
+                &active,
+                &artifact,
+            )?;
+            let (access_records, access_relations) = artifact_instance_to_access(
+                &accepted.payload,
+                &artifact.blueprint_id,
+                &artifact.blueprint_version,
+            )?;
+            let payload_digest = accepted.payload_digest;
+            let accepted_at = accepted.accepted_at;
+            let payload = accepted.payload;
             access_artifacts.push(ArtifactSnapshotItem {
                 artifact_id: artifact.artifact_id.clone(),
                 payload_digest: payload_digest.clone(),
@@ -681,12 +913,13 @@ impl IntentArtifactStore {
             });
         }
         Ok((
-            IntentArtifactOverlayV1 {
-                version: "intent_artifact_overlay.v1".into(),
+            IntentArtifactOverlayV2 {
+                version: "intent_artifact_overlay.v2".into(),
                 book_id: book_id.into(),
                 intent_id: active.intent_id,
+                intent_revision: active.intent_revision,
                 plan_id: active.plan_id,
-                plan_digest: plan_digest.into(),
+                plan_revision: active.plan_revision,
                 artifacts,
             },
             access_artifacts,
@@ -718,17 +951,18 @@ impl IntentArtifactStore {
         remove_private_path(&artifact_dir)?;
         for plan_id in &plan_ids {
             remove_private_path(&self.plan_path(book_id, plan_id)?)?;
+            remove_private_path(&self.legacy_plan_path(book_id, plan_id)?)?;
         }
         index.intents.remove(intent_id);
         for plan_id in plan_ids {
             index.plans.remove(&plan_id);
         }
-        if index
-            .active_overlay
+        if self
+            .load_active_pointer_unchecked(book_id)?
             .as_ref()
             .is_some_and(|active| active.intent_id == intent_id)
         {
-            index.active_overlay = None;
+            remove_private_path(&self.active_pointer_path(book_id)?)?;
         }
         index.bump()?;
         self.write_index(&index)?;
@@ -745,7 +979,19 @@ impl IntentArtifactStore {
     }
 
     fn index_path(&self, book_id: &str) -> Result<PathBuf, ToolError> {
-        Ok(self.book_directory(book_id)?.join("index.json"))
+        Ok(self.book_directory(book_id)?.join(V3_INDEX_FILE))
+    }
+
+    fn legacy_index_path(&self, book_id: &str) -> Result<PathBuf, ToolError> {
+        Ok(self.book_directory(book_id)?.join(LEGACY_INDEX_FILE))
+    }
+
+    fn active_pointer_path(&self, book_id: &str) -> Result<PathBuf, ToolError> {
+        Ok(self.book_directory(book_id)?.join(V3_ACTIVE_FILE))
+    }
+
+    fn planning_context_path(&self, book_id: &str) -> Result<PathBuf, ToolError> {
+        Ok(self.book_directory(book_id)?.join(V2_PLANNING_CONTEXT_FILE))
     }
 
     fn intent_directory(&self, book_id: &str, intent_id: &str) -> Result<PathBuf, ToolError> {
@@ -759,10 +1005,24 @@ impl IntentArtifactStore {
     fn intent_path(&self, book_id: &str, intent_id: &str) -> Result<PathBuf, ToolError> {
         Ok(self
             .intent_directory(book_id, intent_id)?
-            .join("intent.json"))
+            .join(V3_INTENT_FILE))
+    }
+
+    fn legacy_intent_path(&self, book_id: &str, intent_id: &str) -> Result<PathBuf, ToolError> {
+        Ok(self
+            .intent_directory(book_id, intent_id)?
+            .join(LEGACY_INTENT_FILE))
     }
 
     fn plan_path(&self, book_id: &str, plan_id: &str) -> Result<PathBuf, ToolError> {
+        validate_path_safe_id(plan_id, "plan_id")?;
+        Ok(self
+            .book_directory(book_id)?
+            .join("plans")
+            .join(format!("{plan_id}{V3_PLAN_SUFFIX}")))
+    }
+
+    fn legacy_plan_path(&self, book_id: &str, plan_id: &str) -> Result<PathBuf, ToolError> {
         validate_path_safe_id(plan_id, "plan_id")?;
         Ok(self
             .book_directory(book_id)?
@@ -782,35 +1042,359 @@ impl IntentArtifactStore {
             .join(intent_id))
     }
 
-    fn load_index(&self, book_id: &str) -> Result<IntentArtifactStoreIndexV1, ToolError> {
+    fn load_index(&self, book_id: &str) -> Result<IntentArtifactStoreIndexV2, ToolError> {
         validate_path_safe_id(book_id, "book_id")?;
         let path = self.index_path(book_id)?;
         if !path.exists() {
-            return Ok(IntentArtifactStoreIndexV1::empty(book_id));
+            return Ok(IntentArtifactStoreIndexV2::empty(book_id));
         }
-        let index: IntentArtifactStoreIndexV1 = read_json(&path)?;
+        let index: IntentArtifactStoreIndexV2 = read_json(&path)?;
         validate_index(&index, book_id)?;
         Ok(index)
     }
 
-    fn write_index(&self, index: &IntentArtifactStoreIndexV1) -> Result<(), ToolError> {
+    fn write_index(&self, index: &IntentArtifactStoreIndexV2) -> Result<(), ToolError> {
         validate_index(index, &index.book_id)?;
         write_json_atomically(&self.index_path(&index.book_id)?, index)
     }
+
+    fn load_active_pointer_unchecked(
+        &self,
+        book_id: &str,
+    ) -> Result<Option<ActiveIntentOverlayV2>, ToolError> {
+        let path = self.active_pointer_path(book_id)?;
+        if !path.exists() {
+            return Ok(None);
+        }
+        let pointer: ActiveIntentPointerFileV2 = read_json(&path)?;
+        if pointer.version != ACTIVE_POINTER_VERSION || pointer.book_id != book_id {
+            return Err(store_corrupt("active intent pointer identity mismatch"));
+        }
+        validate_path_safe_id(&pointer.intent_id, "active intent_id")?;
+        validate_path_safe_id(&pointer.plan_id, "active plan_id")?;
+        if pointer.intent_revision == 0 || pointer.plan_revision == 0 {
+            return Err(store_corrupt(
+                "active intent pointer revisions must be positive",
+            ));
+        }
+        Ok(Some(pointer.overlay()))
+    }
+
+    fn load_active_pointer(
+        &self,
+        book_id: &str,
+        index: &IntentArtifactStoreIndexV2,
+    ) -> Result<Option<ActiveIntentOverlayV2>, ToolError> {
+        let Some(active) = self.load_active_pointer_unchecked(book_id)? else {
+            return Ok(None);
+        };
+        let intent = index
+            .intents
+            .get(&active.intent_id)
+            .ok_or_else(|| store_corrupt("active intent pointer has no index intent"))?;
+        let plan = index
+            .plans
+            .get(&active.plan_id)
+            .ok_or_else(|| store_corrupt("active intent pointer has no index plan"))?;
+        if intent.intent_revision != active.intent_revision
+            || plan.plan_revision != active.plan_revision
+            || plan.intent_id.as_deref() != Some(active.intent_id.as_str())
+            || plan.intent_revision != Some(active.intent_revision)
+        {
+            return Err(store_corrupt(
+                "active intent pointer does not match indexed owner revisions",
+            ));
+        }
+        Ok(Some(active))
+    }
 }
 
-fn parse_intent_entry(intent: &Value) -> Result<IntentIndexEntryV1, ToolError> {
-    if !matches!(
-        required_string(intent, "version")?,
-        "build_intent.v1" | "build_intent.v2"
-    ) {
-        return Err(invalid("unsupported BuildIntent version"));
+fn validate_legacy_index(
+    index: &LegacyIntentArtifactStoreIndexV1,
+    book_id: &str,
+) -> Result<(), ToolError> {
+    if index.version != LEGACY_INDEX_VERSION || index.book_id != book_id {
+        return Err(store_corrupt("legacy planning index identity mismatch"));
+    }
+    validate_path_safe_id(&index.book_id, "legacy index book_id")?;
+    for (key, entry) in &index.intents {
+        if key != &entry.intent_id || entry.revision == 0 || entry.status.trim().is_empty() {
+            return Err(store_corrupt(
+                "legacy planning index has an invalid intent entry",
+            ));
+        }
+        validate_path_safe_id(key, "legacy index intent_id")?;
+    }
+    for (key, entry) in &index.plans {
+        if key != &entry.plan_id
+            || entry.revision == 0
+            || entry.status.trim().is_empty()
+            || !is_sha256(&entry.plan_digest)
+        {
+            return Err(store_corrupt(
+                "legacy planning index has an invalid plan entry",
+            ));
+        }
+        validate_path_safe_id(key, "legacy index plan_id")?;
+        if entry
+            .intent_id
+            .as_ref()
+            .is_some_and(|intent_id| !index.intents.contains_key(intent_id))
+        {
+            return Err(store_corrupt(
+                "legacy planning index plan has a dangling intent",
+            ));
+        }
+    }
+    if let Some(active) = &index.active_overlay {
+        let intent = index
+            .intents
+            .get(&active.intent_id)
+            .ok_or_else(|| store_corrupt("legacy active overlay intent is missing"))?;
+        let plan = index
+            .plans
+            .get(&active.plan_id)
+            .ok_or_else(|| store_corrupt("legacy active overlay plan is missing"))?;
+        if plan.intent_id.as_deref() != Some(intent.intent_id.as_str()) {
+            return Err(store_corrupt(
+                "legacy active overlay plan does not reference its intent",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_legacy_intent_v2(
+    intent: &Value,
+    book_id: &str,
+    entry: &LegacyIntentIndexEntryV1,
+) -> Result<String, ToolError> {
+    if required_string(intent, "version")? != "build_intent.v2"
+        || required_string(intent, "intent_id")? != entry.intent_id
+        || required_positive_u64(intent, "revision")? != entry.revision
+        || required_string(intent, "book_id")? != book_id
+        || required_string(intent, "status")? != entry.status
+        || required_string(intent, "source_fingerprint")? != entry.source_fingerprint
+    {
+        return Err(store_corrupt(
+            "legacy V2 intent does not match its index entry",
+        ));
+    }
+    canonical_identity_digest(intent, &["created_at", "confirmed_at", "status"])
+}
+
+fn validate_legacy_plan_v2(
+    plan: &Value,
+    book_id: &str,
+    entry: &LegacyPlanIndexEntryV1,
+    index: &LegacyIntentArtifactStoreIndexV1,
+    intent_digests: &BTreeMap<String, String>,
+) -> Result<(), ToolError> {
+    if required_string(plan, "version")? != "build_plan.v2"
+        || required_string(plan, "plan_id")? != entry.plan_id
+        || required_positive_u64(plan, "revision")? != entry.revision
+        || required_string(plan, "book_id")? != book_id
+        || required_string(plan, "status")? != entry.status
+        || required_string(plan, "plan_digest")? != entry.plan_digest
+        || build_plan_identity_digest(plan)? != entry.plan_digest
+    {
+        return Err(store_corrupt(
+            "legacy V2 plan does not match its index entry or identity",
+        ));
+    }
+    let plan_intent_id = optional_string(plan, "intent_id")?;
+    if plan_intent_id != entry.intent_id.as_deref() {
+        return Err(store_corrupt(
+            "legacy V2 plan intent does not match its index entry",
+        ));
+    }
+    if let Some(intent_id) = plan_intent_id {
+        let indexed_intent = index
+            .intents
+            .get(intent_id)
+            .ok_or_else(|| store_corrupt("legacy V2 plan intent is missing"))?;
+        if required_string(plan, "source_fingerprint")? != indexed_intent.source_fingerprint
+            || required_string(plan, "intent_digest")?
+                != intent_digests
+                    .get(intent_id)
+                    .ok_or_else(|| store_corrupt("legacy V2 plan intent digest is missing"))?
+        {
+            return Err(store_corrupt(
+                "legacy V2 plan does not match its fully read intent",
+            ));
+        }
+    } else if plan.get("intent_digest").is_some() {
+        return Err(store_corrupt(
+            "legacy standard plan must not contain an intent digest",
+        ));
+    }
+    let artifacts = plan
+        .get("private_artifacts")
+        .and_then(Value::as_array)
+        .ok_or_else(|| store_corrupt("legacy V2 plan private_artifacts are missing"))?;
+    for artifact in artifacts {
+        let blueprint = artifact
+            .get("blueprint")
+            .filter(|value| value.is_object())
+            .ok_or_else(|| store_corrupt("legacy V2 plan Blueprint snapshot is missing"))?;
+        let expected = canonical_identity_digest(blueprint, &[])?;
+        if required_string(artifact, "blueprint_digest")? != expected {
+            return Err(store_corrupt(
+                "legacy V2 plan Blueprint digest does not match its schema",
+            ));
+        }
+        validate_path_safe_id(required_string(blueprint, "blueprint_id")?, "blueprint_id")?;
+        validate_path_safe_id(
+            required_string(blueprint, "blueprint_version")?,
+            "blueprint_version",
+        )?;
+    }
+    Ok(())
+}
+
+fn migrate_legacy_intent_v2(intent: &Value) -> Result<Value, ToolError> {
+    let mut migrated = intent
+        .as_object()
+        .cloned()
+        .ok_or_else(|| store_corrupt("legacy V2 intent must be an object"))?;
+    let revision = migrated
+        .remove("revision")
+        .and_then(|value| value.as_u64())
+        .filter(|revision| *revision > 0)
+        .ok_or_else(|| store_corrupt("legacy V2 intent revision is invalid"))?;
+    migrated.insert("version".into(), Value::String("build_intent.v3".into()));
+    migrated.insert("intent_revision".into(), Value::from(revision));
+    Ok(Value::Object(migrated))
+}
+
+fn migrate_legacy_plan_v2(
+    plan: &Value,
+    index: &LegacyIntentArtifactStoreIndexV1,
+) -> Result<Value, ToolError> {
+    let mut migrated = plan
+        .as_object()
+        .cloned()
+        .ok_or_else(|| store_corrupt("legacy V2 plan must be an object"))?;
+    let revision = migrated
+        .remove("revision")
+        .and_then(|value| value.as_u64())
+        .filter(|revision| *revision > 0)
+        .ok_or_else(|| store_corrupt("legacy V2 plan revision is invalid"))?;
+    migrated.remove("plan_digest");
+    migrated.remove("intent_digest");
+    migrated.insert("version".into(), Value::String("build_plan.v3".into()));
+    migrated.insert("plan_revision".into(), Value::from(revision));
+    if let Some(intent_id) = migrated.get("intent_id").and_then(Value::as_str) {
+        let intent_revision = index
+            .intents
+            .get(intent_id)
+            .ok_or_else(|| store_corrupt("legacy V2 plan intent is missing"))?
+            .revision;
+        migrated.insert("intent_revision".into(), Value::from(intent_revision));
+    }
+    let artifacts = migrated
+        .get_mut("private_artifacts")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| store_corrupt("legacy V2 plan private_artifacts are missing"))?;
+    for artifact in artifacts {
+        let artifact = artifact
+            .as_object_mut()
+            .ok_or_else(|| store_corrupt("legacy V2 plan artifact must be an object"))?;
+        let blueprint = artifact
+            .get("blueprint")
+            .ok_or_else(|| store_corrupt("legacy V2 plan Blueprint snapshot is missing"))?;
+        let blueprint_id = required_string(blueprint, "blueprint_id")?.to_string();
+        let blueprint_version = required_string(blueprint, "blueprint_version")?.to_string();
+        artifact.remove("blueprint_digest");
+        artifact.insert("blueprint_id".into(), Value::String(blueprint_id));
+        artifact.insert("blueprint_version".into(), Value::String(blueprint_version));
+    }
+    Ok(Value::Object(migrated))
+}
+
+fn migrate_legacy_active_overlay(
+    active: &LegacyActiveIntentOverlayV1,
+    index: &IntentArtifactStoreIndexV2,
+) -> Result<ActiveIntentOverlayV2, ToolError> {
+    let intent = index
+        .intents
+        .get(&active.intent_id)
+        .ok_or_else(|| store_corrupt("migrated active intent is missing"))?;
+    let plan = index
+        .plans
+        .get(&active.plan_id)
+        .ok_or_else(|| store_corrupt("migrated active plan is missing"))?;
+    if plan.intent_id.as_deref() != Some(active.intent_id.as_str())
+        || plan.intent_revision != Some(intent.intent_revision)
+        || !matches!(plan.status.as_str(), "confirmed" | "completed")
+        || intent.status != "confirmed"
+    {
+        return Err(store_corrupt(
+            "legacy active overlay does not identify a confirmed selection",
+        ));
+    }
+    Ok(ActiveIntentOverlayV2 {
+        intent_id: active.intent_id.clone(),
+        intent_revision: intent.intent_revision,
+        plan_id: active.plan_id.clone(),
+        plan_revision: plan.plan_revision,
+    })
+}
+
+fn migrate_legacy_accepted_artifact_v2(
+    accepted: &LegacyAcceptedIntentArtifactV2,
+    active: &ActiveIntentOverlayV2,
+    artifact: &ExpectedIntentArtifact,
+) -> Result<Value, ToolError> {
+    let mut payload = accepted
+        .payload
+        .as_object()
+        .cloned()
+        .ok_or_else(|| store_corrupt("legacy V2 accepted payload must be an object"))?;
+    payload.remove("blueprint_digest");
+    payload.insert(
+        "version".into(),
+        Value::String("artifact_instance.v3".into()),
+    );
+    payload.insert(
+        "blueprint_id".into(),
+        Value::String(artifact.blueprint_id.clone()),
+    );
+    payload.insert(
+        "blueprint_version".into(),
+        Value::String(artifact.blueprint_version.clone()),
+    );
+    let payload = Value::Object(payload);
+    let payload_digest = crate::sha256_hex(canonical_json(&payload)?.as_bytes());
+    Ok(serde_json::json!({
+        "version": "intent_artifact_accepted.v3",
+        "task_id": accepted.task_id,
+        "book_id": accepted.book_id,
+        "source_fingerprint": accepted.source_fingerprint,
+        "intent_id": active.intent_id,
+        "intent_revision": active.intent_revision,
+        "plan_id": active.plan_id,
+        "plan_revision": active.plan_revision,
+        "artifact_id": artifact.artifact_id,
+        "blueprint_id": artifact.blueprint_id,
+        "blueprint_version": artifact.blueprint_version,
+        "payload": payload,
+        "payload_digest": payload_digest,
+        "accepted_at": accepted.accepted_at,
+    }))
+}
+
+fn parse_intent_entry(intent: &Value) -> Result<IntentIndexEntryV2, ToolError> {
+    if required_string(intent, "version")? != "build_intent.v3" {
+        return Err(invalid(
+            "production intent storage requires build_intent.v3",
+        ));
     }
     let intent_id = required_string(intent, "intent_id")?;
     validate_path_safe_id(intent_id, "intent_id")?;
     let book_id = required_string(intent, "book_id")?;
     validate_path_safe_id(book_id, "book_id")?;
-    let revision = required_revision(intent)?;
+    let intent_revision = required_positive_u64(intent, "intent_revision")?;
     let status = required_string(intent, "status")?;
     if ![
         "draft",
@@ -824,25 +1408,22 @@ fn parse_intent_entry(intent: &Value) -> Result<IntentIndexEntryV1, ToolError> {
         return Err(invalid("unsupported BuildIntent status"));
     }
     let source_fingerprint = required_string(intent, "source_fingerprint")?;
-    Ok(IntentIndexEntryV1 {
+    Ok(IntentIndexEntryV2 {
         intent_id: intent_id.into(),
-        revision,
+        intent_revision,
         status: status.into(),
         source_fingerprint: source_fingerprint.into(),
     })
 }
 
-fn parse_plan_entry(plan: &Value) -> Result<PlanIndexEntryV1, ToolError> {
-    if !matches!(
-        required_string(plan, "version")?,
-        "build_plan.v1" | "build_plan.v2"
-    ) {
-        return Err(invalid("unsupported BuildPlan version"));
+fn parse_plan_entry(plan: &Value) -> Result<PlanIndexEntryV2, ToolError> {
+    if required_string(plan, "version")? != "build_plan.v3" {
+        return Err(invalid("production plan storage requires build_plan.v3"));
     }
     let plan_id = required_string(plan, "plan_id")?;
     validate_path_safe_id(plan_id, "plan_id")?;
     validate_path_safe_id(required_string(plan, "book_id")?, "book_id")?;
-    let revision = required_revision(plan)?;
+    let plan_revision = required_positive_u64(plan, "plan_revision")?;
     let status = required_string(plan, "status")?;
     if ![
         "draft",
@@ -855,37 +1436,103 @@ fn parse_plan_entry(plan: &Value) -> Result<PlanIndexEntryV1, ToolError> {
     {
         return Err(invalid("unsupported BuildPlan status"));
     }
-    let plan_digest = required_string(plan, "plan_digest")?;
-    if !is_sha256(plan_digest) {
-        return Err(invalid("plan_digest must be a lowercase SHA-256 digest"));
-    }
     let intent_id = optional_string(plan, "intent_id")?;
     if let Some(intent_id) = intent_id {
         validate_path_safe_id(intent_id, "intent_id")?;
     }
-    Ok(PlanIndexEntryV1 {
+    let intent_revision = optional_positive_u64(plan, "intent_revision")?;
+    if intent_id.is_some() != intent_revision.is_some() {
+        return Err(invalid(
+            "plan intent_id and intent_revision must be present together",
+        ));
+    }
+    validate_private_artifact_identities(plan)?;
+    Ok(PlanIndexEntryV2 {
         plan_id: plan_id.into(),
-        revision,
+        plan_revision,
         status: status.into(),
-        plan_digest: plan_digest.into(),
         intent_id: intent_id.map(str::to_string),
+        intent_revision,
     })
+}
+
+fn plan_blueprints(plan: &Value) -> Result<BTreeMap<(String, String), Value>, ToolError> {
+    let artifacts = plan
+        .get("private_artifacts")
+        .and_then(Value::as_array)
+        .ok_or_else(|| invalid("BuildPlan private_artifacts must be an array"))?;
+    let mut blueprints = BTreeMap::new();
+    for artifact in artifacts {
+        let blueprint = artifact
+            .get("blueprint")
+            .filter(|value| value.is_object())
+            .ok_or_else(|| invalid("BuildPlan artifact requires a Blueprint snapshot"))?;
+        let blueprint_id = required_string(artifact, "blueprint_id")?;
+        let blueprint_version = required_string(artifact, "blueprint_version")?;
+        validate_path_safe_id(blueprint_id, "blueprint_id")?;
+        validate_path_safe_id(blueprint_version, "blueprint_version")?;
+        if required_string(blueprint, "blueprint_id")? != blueprint_id
+            || required_string(blueprint, "blueprint_version")? != blueprint_version
+        {
+            return Err(invalid(
+                "BuildPlan Blueprint id/version does not match its frozen schema",
+            ));
+        }
+        let key = (blueprint_id.to_string(), blueprint_version.to_string());
+        if let Some(existing) = blueprints.get(&key) {
+            if existing != blueprint {
+                return Err(conflict(
+                    "same Blueprint id/version has different schema in one BuildPlan",
+                ));
+            }
+        } else {
+            blueprints.insert(key, blueprint.clone());
+        }
+    }
+    Ok(blueprints)
+}
+
+fn validate_private_artifact_identities(plan: &Value) -> Result<(), ToolError> {
+    plan_blueprints(plan).map(|_| ())
+}
+
+fn validate_plan_blueprint_versions(
+    index: &IntentArtifactStoreIndexV2,
+    store: &IntentArtifactStore,
+    book_id: &str,
+    candidate: &Value,
+) -> Result<(), ToolError> {
+    let candidate_blueprints = plan_blueprints(candidate)?;
+    if candidate_blueprints.is_empty() {
+        return Ok(());
+    }
+    for entry in index.plans.values() {
+        let existing = store.read_plan(book_id, &entry.plan_id)?;
+        for (identity, schema) in plan_blueprints(&existing)? {
+            if candidate_blueprints
+                .get(&identity)
+                .is_some_and(|candidate_schema| candidate_schema != &schema)
+            {
+                return Err(conflict(
+                    "same Blueprint id/version already exists with different schema",
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn validate_active_selection(
     book_id: &str,
     current_source_fingerprint: &str,
-    active: &ActiveIntentOverlayV1,
-    plan_entry: &PlanIndexEntryV1,
+    active: &ActiveIntentOverlayV2,
+    plan_entry: &PlanIndexEntryV2,
     plan: &Value,
     intent: &Value,
 ) -> Result<(), ToolError> {
     let intent_version = required_string(intent, "version")?;
     let plan_version = required_string(plan, "version")?;
-    if !matches!(
-        (intent_version, plan_version),
-        ("build_intent.v1", "build_plan.v1") | ("build_intent.v2", "build_plan.v2")
-    ) {
+    if intent_version != "build_intent.v3" || plan_version != "build_plan.v3" {
         return Err(store_corrupt(
             "active intent artifact overlay contract versions do not match",
         ));
@@ -902,7 +1549,11 @@ fn validate_active_selection(
         || required_string(plan, "intent_id")? != active.intent_id
         || required_string(intent, "intent_id")? != active.intent_id
         || required_string(plan, "plan_id")? != active.plan_id
-        || required_string(plan, "plan_digest")? != plan_entry.plan_digest
+        || required_positive_u64(intent, "intent_revision")? != active.intent_revision
+        || required_positive_u64(plan, "intent_revision")? != active.intent_revision
+        || required_positive_u64(plan, "plan_revision")? != active.plan_revision
+        || plan_entry.plan_revision != active.plan_revision
+        || plan_entry.intent_revision != Some(active.intent_revision)
     {
         return Err(store_corrupt(
             "active intent artifact overlay identity does not match stored selection",
@@ -915,82 +1566,40 @@ fn validate_active_selection(
             "active intent artifact overlay does not match the current source",
         ));
     }
-    let intent_digest =
-        canonical_identity_digest(intent, &["created_at", "confirmed_at", "status"])?;
-    if required_string(plan, "intent_digest")? != intent_digest {
-        return Err(store_corrupt(
-            "active BuildPlan intent_digest does not match the stored BuildIntent",
-        ));
-    }
-    let plan_digest = build_plan_identity_digest(plan)?;
-    if required_string(plan, "plan_digest")? != plan_digest || plan_entry.plan_digest != plan_digest
-    {
-        return Err(store_corrupt(
-            "active BuildPlan plan_digest does not match its stored identity",
-        ));
-    }
     Ok(())
 }
 
 fn expected_private_artifacts(plan: &Value) -> Result<Vec<ExpectedIntentArtifact>, ToolError> {
+    if required_string(plan, "version")? != "build_plan.v3" {
+        return Err(store_corrupt(
+            "active planning state must use build_plan.v3",
+        ));
+    }
     let values = plan
         .get("private_artifacts")
         .and_then(Value::as_array)
         .ok_or_else(|| store_corrupt("active goal plan private_artifacts are missing"))?;
-    if values.is_empty() && plan.get("version").and_then(Value::as_str) != Some("build_plan.v2") {
-        return Err(store_corrupt(
-            "active goal plan must declare at least one private artifact",
-        ));
-    }
     let mut seen = std::collections::BTreeSet::new();
     values
         .iter()
         .map(|value| {
             let artifact_id = required_string(value, "artifact_id")?;
-            let is_v2_plan = plan.get("version").and_then(Value::as_str) == Some("build_plan.v2");
-            let (
-                artifact_type,
-                blueprint_digest,
-                access_blueprint,
-                reader_blueprint,
-                accepts_legacy_v1,
-            ) = if is_v2_plan {
-                let blueprint = value.get("blueprint").ok_or_else(|| {
-                    store_corrupt("active V2 goal plan contains no Blueprint snapshot")
-                })?;
-                let artifact_type =
-                    compatibility_artifact_type(required_string(blueprint, "blueprint_id")?);
-                let blueprint_digest = required_string(value, "blueprint_digest")?;
-                if !is_sha256(blueprint_digest) {
-                    return Err(store_corrupt(
-                        "active V2 goal plan contains an invalid blueprint_digest",
-                    ));
-                }
-                if canonical_identity_digest(blueprint, &[])? != blueprint_digest {
-                    return Err(store_corrupt(
-                        "active V2 goal plan blueprint_digest does not match its snapshot",
-                    ));
-                }
-                (
-                    artifact_type,
-                    blueprint_digest.to_string(),
-                    artifact_blueprint_to_access(blueprint, blueprint_digest)?,
-                    artifact_blueprint_to_display(blueprint)?,
-                    false,
-                )
-            } else {
-                let artifact_type = required_string(value, "artifact_type")?;
-                let blueprint_digest = legacy_blueprint_digest(artifact_type).ok_or_else(|| {
-                    store_corrupt("active goal plan contains an unsupported private artifact type")
-                })?;
-                (
-                    artifact_type,
-                    blueprint_digest.to_string(),
-                    legacy_artifact_blueprint(artifact_type)?,
-                    legacy_artifact_display_blueprint(artifact_type)?,
-                    true,
-                )
-            };
+            let blueprint = value.get("blueprint").ok_or_else(|| {
+                store_corrupt("active V3 goal plan contains no Blueprint snapshot")
+            })?;
+            let blueprint_id = required_string(value, "blueprint_id")?;
+            let blueprint_version = required_string(value, "blueprint_version")?;
+            if required_string(blueprint, "blueprint_id")? != blueprint_id
+                || required_string(blueprint, "blueprint_version")? != blueprint_version
+            {
+                return Err(store_corrupt(
+                    "active V3 plan Blueprint identity does not match its frozen schema",
+                ));
+            }
+            let artifact_type = compatibility_artifact_type(blueprint_id);
+            // ArtifactAccessSnapshot still consumes one compact schema content identity. It is
+            // derived only for that downstream snapshot and is not persisted as planning identity.
+            let access_blueprint_digest = canonical_identity_digest(blueprint, &[])?;
             validate_path_safe_id(artifact_id, "artifact_id")?;
             if !seen.insert(artifact_id.to_string()) {
                 return Err(store_corrupt(
@@ -1000,10 +1609,13 @@ fn expected_private_artifacts(plan: &Value) -> Result<Vec<ExpectedIntentArtifact
             Ok(ExpectedIntentArtifact {
                 artifact_id: artifact_id.into(),
                 artifact_type: artifact_type.into(),
-                blueprint_digest,
-                access_blueprint,
-                reader_blueprint,
-                accepts_legacy_v1,
+                blueprint_id: blueprint_id.into(),
+                blueprint_version: blueprint_version.into(),
+                access_blueprint: artifact_blueprint_to_access(
+                    blueprint,
+                    &access_blueprint_digest,
+                )?,
+                reader_blueprint: artifact_blueprint_to_display(blueprint)?,
             })
         })
         .collect()
@@ -1058,18 +1670,6 @@ fn compatibility_artifact_type(blueprint_id: &str) -> &str {
         "system.comparison_table" => "comparison_table",
         "system.argument_map" => "argument_map",
         _ => "custom",
-    }
-}
-
-fn legacy_blueprint_digest(artifact_type: &str) -> Option<&'static str> {
-    match artifact_type {
-        "timeline" => Some("a24d6ff58721c5e64519b1637111f761a037eabf52320e3088504b18857ee37a"),
-        "concept_map" => Some("4910a7dc1c0aceaa6ee85fd207f987d5ca8f545ab9db3cfd57a57dd4276c9b13"),
-        "comparison_table" => {
-            Some("4a331d3b090d20a4a60f354f0637501d88502539a0dbc8cfad6238900c282ff8")
-        }
-        "argument_map" => Some("0120579090f458afa1cf9236630fb5e2b4ecee887ff21659fa2b65faf5d1dfa9"),
-        _ => None,
     }
 }
 
@@ -1152,146 +1752,19 @@ fn artifact_blueprint_to_display(
     })
 }
 
-fn legacy_artifact_blueprint(artifact_type: &str) -> Result<ArtifactSnapshotBlueprint, ToolError> {
-    let digest = legacy_blueprint_digest(artifact_type)
-        .ok_or_else(|| store_corrupt("legacy artifact type has no fixed Blueprint"))?;
-    let blueprint = match artifact_type {
-        "timeline" => access_blueprint(
-            digest,
-            "Timeline",
-            "Order evidence-backed events or stages from the selected source scope.",
-            &["The question depends on chronology, stages, or ordered change."],
-            &["The question asks only for a static definition."],
-            &["chronology", "stages", "ordered change"],
-            &[
-                ("/label", 10, ArtifactSearchAnalyzer::Text),
-                ("/order_hint", 4, ArtifactSearchAnalyzer::Keyword),
-            ],
-            &["/label", "/order_hint"],
-        ),
-        "concept_map" => access_blueprint(
-            digest,
-            "Concept map",
-            "Represent evidence-backed concepts and explicit semantic links between them.",
-            &["The question depends on concept relationships or structural dependencies."],
-            &["The question asks only for chronological ordering."],
-            &["concepts", "relationships", "dependencies"],
-            &[
-                ("/label", 10, ArtifactSearchAnalyzer::Text),
-                ("/relation", 6, ArtifactSearchAnalyzer::Text),
-            ],
-            &["/label", "/relation"],
-        ),
-        "comparison_table" => access_blueprint(
-            digest,
-            "Comparison table",
-            "Compare evidence-backed subjects across named dimensions without fixing dimension names in advance.",
-            &["The question compares multiple subjects using shared dimensions."],
-            &["The question asks for causal or argumentative graph structure."],
-            &["comparison", "trade-offs", "dimensions"],
-            &[("/subject", 10, ArtifactSearchAnalyzer::Text)],
-            &["/subject", "/dimensions"],
-        ),
-        "argument_map" => access_blueprint(
-            digest,
-            "Argument map",
-            "Represent evidence-backed claims, their discourse roles, and explicit argumentative relations.",
-            &["The question depends on claims, support, objections, or qualifications."],
-            &["The question asks only for a flat list of concepts."],
-            &["claims", "support", "objections", "qualifications"],
-            &[
-                ("/claim", 10, ArtifactSearchAnalyzer::Text),
-                ("/role", 5, ArtifactSearchAnalyzer::Keyword),
-                ("/relation", 6, ArtifactSearchAnalyzer::Text),
-            ],
-            &["/claim", "/role", "/relation"],
-        ),
-        _ => return Err(store_corrupt("unsupported legacy artifact type")),
-    };
-    Ok(blueprint)
-}
-
-fn legacy_artifact_display_blueprint(
-    artifact_type: &str,
-) -> Result<IntentArtifactDisplayBlueprintV1, ToolError> {
-    let (title, purpose, shape, summary_fields) = match artifact_type {
-        "timeline" => (
-            "Timeline",
-            "Order evidence-backed events or stages from the selected source scope.",
-            "sequence",
-            &["/label", "/order_hint"][..],
-        ),
-        "concept_map" => (
-            "Concept map",
-            "Represent evidence-backed concepts and explicit semantic links between them.",
-            "graph",
-            &["/label", "/relation"][..],
-        ),
-        "comparison_table" => (
-            "Comparison table",
-            "Compare evidence-backed subjects across named dimensions without fixing dimension names in advance.",
-            "table",
-            &["/subject", "/dimensions"][..],
-        ),
-        "argument_map" => (
-            "Argument map",
-            "Represent evidence-backed claims, their discourse roles, and explicit argumentative relations.",
-            "graph",
-            &["/claim", "/role", "/relation"][..],
-        ),
-        _ => return Err(store_corrupt("unsupported legacy artifact type")),
-    };
-    Ok(IntentArtifactDisplayBlueprintV1 {
-        title: title.into(),
-        purpose: purpose.into(),
-        shape: shape.into(),
-        summary_fields: summary_fields
-            .iter()
-            .map(|value| (*value).to_string())
-            .collect(),
-    })
-}
-
-#[allow(clippy::too_many_arguments)]
-fn access_blueprint(
-    blueprint_digest: &str,
-    title: &str,
-    purpose: &str,
-    use_when: &[&str],
-    avoid_when: &[&str],
-    covered_topics: &[&str],
-    search_fields: &[(&str, u8, ArtifactSearchAnalyzer)],
-    summary_fields: &[&str],
-) -> ArtifactSnapshotBlueprint {
-    ArtifactSnapshotBlueprint {
-        blueprint_digest: blueprint_digest.into(),
-        title: title.into(),
-        purpose: purpose.into(),
-        use_when: use_when.iter().map(|value| (*value).into()).collect(),
-        avoid_when: avoid_when.iter().map(|value| (*value).into()).collect(),
-        covered_topics: covered_topics.iter().map(|value| (*value).into()).collect(),
-        scope_label: "confirmed build source scope".into(),
-        search_fields: search_fields
-            .iter()
-            .map(|(path, weight, analyzer)| ArtifactSnapshotSearchField {
-                path: (*path).into(),
-                weight: *weight,
-                analyzer: *analyzer,
-            })
-            .collect(),
-        summary_fields: summary_fields.iter().map(|value| (*value).into()).collect(),
-    }
-}
-
 fn artifact_instance_to_access(
     payload: &Value,
-    blueprint_digest: &str,
+    blueprint_id: &str,
+    blueprint_version: &str,
 ) -> Result<(Vec<ArtifactSnapshotRecord>, Vec<ArtifactSnapshotRelation>), ToolError> {
-    let instance: ArtifactInstanceForAccessV2 = serde_json::from_value(payload.clone())
-        .map_err(|_| store_corrupt("accepted v2 ArtifactInstance schema is invalid"))?;
-    if instance.version != "artifact_instance.v2" || instance.blueprint_digest != blueprint_digest {
+    let instance: ArtifactInstanceForAccessV3 = serde_json::from_value(payload.clone())
+        .map_err(|_| store_corrupt("accepted v3 ArtifactInstance schema is invalid"))?;
+    if instance.version != "artifact_instance.v3"
+        || instance.blueprint_id != blueprint_id
+        || instance.blueprint_version != blueprint_version
+    {
         return Err(store_corrupt(
-            "accepted v2 ArtifactInstance identity is invalid",
+            "accepted v3 ArtifactInstance identity is invalid",
         ));
     }
     Ok((
@@ -1318,192 +1791,15 @@ fn artifact_instance_to_access(
     ))
 }
 
-fn legacy_payload_to_access(
-    artifact_type: &str,
-    payload: &Value,
-) -> Result<(Vec<ArtifactSnapshotRecord>, Vec<ArtifactSnapshotRelation>), ToolError> {
-    match artifact_type {
-        "timeline" => {
-            let payload: LegacyTimelinePayload = serde_json::from_value(payload.clone())
-                .map_err(|_| store_corrupt("legacy timeline payload schema is invalid"))?;
-            Ok((
-                payload
-                    .items
-                    .into_iter()
-                    .map(|item| {
-                        let mut data = serde_json::Map::new();
-                        data.insert("label".into(), Value::String(item.label));
-                        if let Some(order_hint) = item.order_hint {
-                            data.insert("order_hint".into(), Value::String(order_hint));
-                        }
-                        ArtifactSnapshotRecord {
-                            record_id: item.id,
-                            data,
-                            evidence_lids: item.evidence_lids,
-                        }
-                    })
-                    .collect(),
-                Vec::new(),
-            ))
-        }
-        "concept_map" => {
-            let payload: LegacyConceptMapPayload = serde_json::from_value(payload.clone())
-                .map_err(|_| store_corrupt("legacy concept map payload schema is invalid"))?;
-            let records = payload
-                .nodes
-                .into_iter()
-                .map(|node| ArtifactSnapshotRecord {
-                    record_id: node.id,
-                    data: string_data("label", node.label),
-                    evidence_lids: node.evidence_lids,
-                })
-                .collect();
-            Ok((records, legacy_relations(payload.links)))
-        }
-        "comparison_table" => {
-            let payload: LegacyComparisonTablePayload = serde_json::from_value(payload.clone())
-                .map_err(|_| store_corrupt("legacy comparison table payload schema is invalid"))?;
-            let records = payload
-                .rows
-                .into_iter()
-                .enumerate()
-                .map(|(index, row)| {
-                    let mut dimensions = row.dimensions.into_iter().collect::<Vec<_>>();
-                    dimensions.sort_by(|(left, _), (right, _)| {
-                        left.encode_utf16().cmp(right.encode_utf16())
-                    });
-                    let dimensions = dimensions
-                        .into_iter()
-                        .map(|(name, value)| {
-                            Ok(Value::Object(serde_json::Map::from_iter([
-                                ("name".into(), Value::String(name)),
-                                ("value_json".into(), Value::String(canonical_json(&value)?)),
-                            ])))
-                        })
-                        .collect::<Result<Vec<_>, ToolError>>()?;
-                    Ok(ArtifactSnapshotRecord {
-                        record_id: format!("row-{}", index + 1),
-                        data: serde_json::Map::from_iter([
-                            ("subject".into(), Value::String(row.subject)),
-                            ("dimensions".into(), Value::Array(dimensions)),
-                        ]),
-                        evidence_lids: row.evidence_lids,
-                    })
-                })
-                .collect::<Result<Vec<_>, ToolError>>()?;
-            Ok((records, Vec::new()))
-        }
-        "argument_map" => {
-            let payload: LegacyArgumentMapPayload = serde_json::from_value(payload.clone())
-                .map_err(|_| store_corrupt("legacy argument map payload schema is invalid"))?;
-            let records = payload
-                .claims
-                .into_iter()
-                .map(|claim| ArtifactSnapshotRecord {
-                    record_id: claim.id,
-                    data: serde_json::Map::from_iter([
-                        ("claim".into(), Value::String(claim.claim)),
-                        ("role".into(), Value::String(claim.role)),
-                    ]),
-                    evidence_lids: claim.evidence_lids,
-                })
-                .collect();
-            Ok((records, legacy_relations(payload.relations)))
-        }
-        _ => Err(store_corrupt(
-            "legacy payload has an unsupported artifact type",
-        )),
-    }
-}
-
-fn string_data(field: &str, value: String) -> serde_json::Map<String, Value> {
-    serde_json::Map::from_iter([(field.into(), Value::String(value))])
-}
-
-fn legacy_relations(relations: Vec<LegacyRelation>) -> Vec<ArtifactSnapshotRelation> {
-    let mut seen = std::collections::BTreeSet::new();
-    relations
-        .into_iter()
-        .map(|relation| {
-            let base = format!(
-                "{}:{}:{}",
-                relation.source, relation.relation, relation.target
-            );
-            ArtifactSnapshotRelation {
-                relation_id: unique_legacy_relation_id(&base, &mut seen),
-                source_record_id: relation.source,
-                target_record_id: relation.target,
-                data: string_data("relation", relation.relation),
-                evidence_lids: relation.evidence_lids,
-            }
-        })
-        .collect()
-}
-
-fn unique_legacy_relation_id(base: &str, seen: &mut std::collections::BTreeSet<String>) -> String {
-    const MAX_CHARS: usize = 256;
-    let mut candidate = truncate_chars(base, MAX_CHARS);
-    let mut suffix = 1;
-    while seen.contains(&candidate) {
-        suffix += 1;
-        let marker = format!("#{suffix}");
-        candidate = format!(
-            "{}{}",
-            truncate_chars(base, MAX_CHARS.saturating_sub(marker.chars().count())),
-            marker
-        );
-    }
-    seen.insert(candidate.clone());
-    candidate
-}
-
-fn truncate_chars(value: &str, maximum: usize) -> String {
-    value.chars().take(maximum).collect()
-}
-
-fn validate_accepted_artifact_v1(
-    accepted: &AcceptedIntentArtifactV1,
+fn validate_legacy_accepted_artifact_v2(
+    accepted: &LegacyAcceptedIntentArtifactV2,
     book_id: &str,
     current_source_fingerprint: &str,
-    active: &ActiveIntentOverlayV1,
+    active: &LegacyActiveIntentOverlayV1,
     intent_digest: &str,
     plan_digest: &str,
-    artifact: &ExpectedIntentArtifact,
-) -> Result<(), ToolError> {
-    if accepted.version != "intent_artifact_accepted.v1"
-        || accepted.book_id != book_id
-        || accepted.source_fingerprint != current_source_fingerprint
-        || accepted.intent_id != active.intent_id
-        || accepted.intent_digest != intent_digest
-        || accepted.plan_id != active.plan_id
-        || accepted.plan_digest != plan_digest
-        || accepted.artifact_id != artifact.artifact_id
-        || accepted.artifact_type != artifact.artifact_type
-        || accepted.task_id.trim().is_empty()
-        || accepted.accepted_at.trim().is_empty()
-        || !is_sha256(&accepted.payload_digest)
-    {
-        return Err(store_corrupt(
-            "accepted intent artifact identity does not match the active overlay",
-        ));
-    }
-    let canonical = canonical_json(&accepted.payload)?;
-    if crate::sha256_hex(canonical.as_bytes()) != accepted.payload_digest {
-        return Err(store_corrupt(
-            "accepted intent artifact payload_digest does not match payload",
-        ));
-    }
-    Ok(())
-}
-
-fn validate_accepted_artifact_v2(
-    accepted: &AcceptedIntentArtifactV2,
-    book_id: &str,
-    current_source_fingerprint: &str,
-    active: &ActiveIntentOverlayV1,
-    intent_digest: &str,
-    plan_digest: &str,
-    artifact: &ExpectedIntentArtifact,
+    artifact_id: &str,
+    blueprint_digest: &str,
 ) -> Result<(), ToolError> {
     if accepted.version != "intent_artifact_accepted.v2"
         || accepted.book_id != book_id
@@ -1512,8 +1808,8 @@ fn validate_accepted_artifact_v2(
         || accepted.intent_digest != intent_digest
         || accepted.plan_id != active.plan_id
         || accepted.plan_digest != plan_digest
-        || accepted.artifact_id != artifact.artifact_id
-        || accepted.blueprint_digest != artifact.blueprint_digest
+        || accepted.artifact_id != artifact_id
+        || accepted.blueprint_digest != blueprint_digest
         || accepted.task_id.trim().is_empty()
         || accepted.accepted_at.trim().is_empty()
         || !is_sha256(&accepted.payload_digest)
@@ -1526,8 +1822,7 @@ fn validate_accepted_artifact_v2(
         store_corrupt("accepted v2 intent artifact payload must be an ArtifactInstance object")
     })?;
     if payload.get("version").and_then(Value::as_str) != Some("artifact_instance.v2")
-        || payload.get("blueprint_digest").and_then(Value::as_str)
-            != Some(artifact.blueprint_digest.as_str())
+        || payload.get("blueprint_digest").and_then(Value::as_str) != Some(blueprint_digest)
         || !payload.get("records").is_some_and(Value::is_array)
         || payload
             .get("relations")
@@ -1541,6 +1836,57 @@ fn validate_accepted_artifact_v2(
     if crate::sha256_hex(canonical.as_bytes()) != accepted.payload_digest {
         return Err(store_corrupt(
             "accepted v2 intent artifact payload_digest does not match payload",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_accepted_artifact_v3(
+    accepted: &AcceptedIntentArtifactV3,
+    book_id: &str,
+    current_source_fingerprint: &str,
+    active: &ActiveIntentOverlayV2,
+    artifact: &ExpectedIntentArtifact,
+) -> Result<(), ToolError> {
+    if accepted.version != "intent_artifact_accepted.v3"
+        || accepted.book_id != book_id
+        || accepted.source_fingerprint != current_source_fingerprint
+        || accepted.intent_id != active.intent_id
+        || accepted.intent_revision != active.intent_revision
+        || accepted.plan_id != active.plan_id
+        || accepted.plan_revision != active.plan_revision
+        || accepted.artifact_id != artifact.artifact_id
+        || accepted.blueprint_id != artifact.blueprint_id
+        || accepted.blueprint_version != artifact.blueprint_version
+        || accepted.task_id.trim().is_empty()
+        || accepted.accepted_at.trim().is_empty()
+        || !is_sha256(&accepted.payload_digest)
+    {
+        return Err(store_corrupt(
+            "accepted v3 intent artifact identity does not match the active pointer",
+        ));
+    }
+    let payload = accepted.payload.as_object().ok_or_else(|| {
+        store_corrupt("accepted v3 intent artifact payload must be an ArtifactInstance object")
+    })?;
+    if payload.get("version").and_then(Value::as_str) != Some("artifact_instance.v3")
+        || payload.get("blueprint_id").and_then(Value::as_str)
+            != Some(artifact.blueprint_id.as_str())
+        || payload.get("blueprint_version").and_then(Value::as_str)
+            != Some(artifact.blueprint_version.as_str())
+        || !payload.get("records").is_some_and(Value::is_array)
+        || payload
+            .get("relations")
+            .is_some_and(|relations| !relations.is_array())
+    {
+        return Err(store_corrupt(
+            "accepted v3 intent artifact payload identity is invalid",
+        ));
+    }
+    let canonical = canonical_json(&accepted.payload)?;
+    if crate::sha256_hex(canonical.as_bytes()) != accepted.payload_digest {
+        return Err(store_corrupt(
+            "accepted v3 intent artifact payload_digest does not match payload",
         ));
     }
     Ok(())
@@ -1576,13 +1922,38 @@ fn canonical_json(value: &Value) -> Result<String, ToolError> {
     }
 }
 
-fn validate_index(index: &IntentArtifactStoreIndexV1, book_id: &str) -> Result<(), ToolError> {
+fn validate_owned_planning_context_v2(
+    context: &Value,
+    book_id: &str,
+    context_id: &str,
+) -> Result<u64, ToolError> {
+    if required_string(context, "version")? != "build_planning_context.v2"
+        || required_string(context, "context_id")? != context_id
+        || context
+            .get("target")
+            .and_then(|target| target.get("book_id"))
+            .and_then(Value::as_str)
+            != Some(book_id)
+        || context.get("context_digest").is_some()
+        || context
+            .get("blueprint_registry")
+            .and_then(Value::as_array)
+            .is_none_or(|entries| entries.iter().any(|entry| entry.get("digest").is_some()))
+    {
+        return Err(store_corrupt(
+            "owned BuildPlanningContext identity or body is invalid",
+        ));
+    }
+    required_positive_u64(context, "context_revision")
+}
+
+fn validate_index(index: &IntentArtifactStoreIndexV2, book_id: &str) -> Result<(), ToolError> {
     if index.version != INDEX_VERSION || index.book_id != book_id {
         return Err(store_corrupt("intent artifact index identity mismatch"));
     }
     validate_path_safe_id(&index.book_id, "index book_id")?;
     for (key, entry) in &index.intents {
-        if key != &entry.intent_id || entry.revision == 0 {
+        if key != &entry.intent_id || entry.intent_revision == 0 {
             return Err(store_corrupt(
                 "intent artifact index contains an invalid intent entry",
             ));
@@ -1590,20 +1961,26 @@ fn validate_index(index: &IntentArtifactStoreIndexV1, book_id: &str) -> Result<(
         validate_path_safe_id(key, "index intent_id")?;
     }
     for (key, entry) in &index.plans {
-        if key != &entry.plan_id || entry.revision == 0 || !is_sha256(&entry.plan_digest) {
+        if key != &entry.plan_id
+            || entry.plan_revision == 0
+            || entry.intent_id.is_some() != entry.intent_revision.is_some()
+        {
             return Err(store_corrupt(
                 "intent artifact index contains an invalid plan entry",
             ));
         }
         validate_path_safe_id(key, "index plan_id")?;
-    }
-    if let Some(active) = &index.active_overlay {
-        if !index.intents.contains_key(&active.intent_id)
-            || !index.plans.contains_key(&active.plan_id)
+        if let (Some(intent_id), Some(intent_revision)) = (&entry.intent_id, entry.intent_revision)
         {
-            return Err(store_corrupt(
-                "intent artifact index has a dangling active overlay",
-            ));
+            let intent = index
+                .intents
+                .get(intent_id)
+                .ok_or_else(|| store_corrupt("intent artifact index plan has a dangling intent"))?;
+            if intent.intent_revision < intent_revision {
+                return Err(store_corrupt(
+                    "intent artifact index plan references a future intent revision",
+                ));
+            }
         }
     }
     Ok(())
@@ -1629,13 +2006,24 @@ fn optional_string<'a>(value: &'a Value, field: &str) -> Result<Option<&'a str>,
     Ok(Some(string))
 }
 
-fn required_revision(value: &Value) -> Result<u64, ToolError> {
+fn required_positive_u64(value: &Value, field: &str) -> Result<u64, ToolError> {
     value
         .as_object()
-        .and_then(|object| object.get("revision"))
+        .and_then(|object| object.get(field))
         .and_then(Value::as_u64)
         .filter(|revision| *revision > 0)
-        .ok_or_else(|| invalid("revision must be a positive integer"))
+        .ok_or_else(|| invalid(format!("{field} must be a positive integer")))
+}
+
+fn optional_positive_u64(value: &Value, field: &str) -> Result<Option<u64>, ToolError> {
+    let Some(field_value) = value.as_object().and_then(|object| object.get(field)) else {
+        return Ok(None);
+    };
+    field_value
+        .as_u64()
+        .filter(|revision| *revision > 0)
+        .map(Some)
+        .ok_or_else(|| invalid(format!("{field} must be a positive integer when present")))
 }
 
 fn is_sha256(value: &str) -> bool {
@@ -1669,9 +2057,14 @@ fn validate_path_safe_id(value: &str, field: &str) -> Result<(), ToolError> {
     Ok(())
 }
 
-fn reject_older_revision(kind: &str, candidate: u64, current: u64) -> Result<(), ToolError> {
+fn reject_invalid_revision_step(kind: &str, candidate: u64, current: u64) -> Result<(), ToolError> {
     if candidate < current {
         return Err(conflict(format!("{kind} revision cannot move backward")));
+    }
+    if candidate > current.saturating_add(1) {
+        return Err(conflict(format!(
+            "{kind} revision must be issued monotonically"
+        )));
     }
     Ok(())
 }
@@ -1679,6 +2072,7 @@ fn reject_older_revision(kind: &str, candidate: u64, current: u64) -> Result<(),
 fn reconcile_existing_revision(
     path: &Path,
     kind: &str,
+    revision_field: &str,
     candidate_revision: u64,
     candidate: &Value,
 ) -> Result<bool, ToolError> {
@@ -1686,8 +2080,8 @@ fn reconcile_existing_revision(
         return Ok(true);
     }
     let existing: Value = read_json(path)?;
-    let existing_revision = required_revision(&existing)?;
-    reject_older_revision(kind, candidate_revision, existing_revision)?;
+    let existing_revision = required_positive_u64(&existing, revision_field)?;
+    reject_invalid_revision_step(kind, candidate_revision, existing_revision)?;
     if candidate_revision == existing_revision {
         if &existing == candidate {
             return Ok(false);
@@ -1763,6 +2157,15 @@ fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T, ToolError> 
     })?;
     serde_json::from_slice(&body)
         .map_err(|_| store_corrupt("reader-private intent JSON is invalid"))
+}
+
+fn write_json_create_only<T: Serialize>(path: &Path, value: &T) -> Result<(), ToolError> {
+    if path.exists() {
+        return Err(conflict(
+            "V3 planning/control migration target already exists; migration is create-only",
+        ));
+    }
+    write_json_atomically(path, value)
 }
 
 fn write_json_atomically<T: Serialize>(path: &Path, value: &T) -> Result<(), ToolError> {
@@ -1938,10 +2341,6 @@ mod tests {
         include_str!("../../../packages/core/test/fixtures/build-intent.v1.golden.json");
     const BUILD_INTENT_V2_GOLDEN: &str =
         include_str!("../../../packages/core/test/fixtures/build-intent.v2.golden.json");
-    const ARTIFACT_BLUEPRINT_PRESETS_V1_GOLDEN: &str = include_str!(
-        "../../../packages/core/test/fixtures/artifact-blueprint-presets.v1.golden.json"
-    );
-
     fn test_dir(name: &str) -> std::path::PathBuf {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1954,82 +2353,89 @@ mod tests {
     }
 
     fn intent(book_id: &str, intent_id: &str, revision: u64, goal: &str) -> serde_json::Value {
-        json!({
-            "version": "build_intent.v1",
-            "intent_id": intent_id,
-            "revision": revision,
-            "book_id": book_id,
-            "source_fingerprint": "source-a",
-            "status": "confirmed",
-            "user_goal": goal
-        })
+        let golden: Value = serde_json::from_str(BUILD_INTENT_V2_GOLDEN).unwrap();
+        let mut intent = golden["intent"].clone();
+        intent["version"] = json!("build_intent.v3");
+        intent["intent_id"] = json!(intent_id);
+        intent["intent_revision"] = json!(revision);
+        intent["book_id"] = json!(book_id);
+        intent["user_goal"] = json!(goal);
+        intent.as_object_mut().unwrap().remove("revision");
+        intent
     }
 
     fn plan(book_id: &str, plan_id: &str, intent_id: &str, revision: u64) -> serde_json::Value {
-        json!({
-            "version": "build_plan.v1",
-            "plan_id": plan_id,
-            "revision": revision,
-            "book_id": book_id,
-            "source_fingerprint": "source-a",
-            "intent_id": intent_id,
-            "intent_digest": "b".repeat(64),
-            "private_artifacts": [{
-                "artifact_id": "artifact-001",
-                "artifact_type": "timeline",
-                "source_scope": { "whole_book": false, "lids": ["1.1"], "sections": [] },
-                "required_public_capabilities": [],
-                "evidence_policy": "lid_required"
-            }],
-            "status": "confirmed",
-            "plan_digest": "c".repeat(64)
-        })
+        let golden: Value = serde_json::from_str(BUILD_INTENT_V2_GOLDEN).unwrap();
+        let mut plan = golden["plan"].clone();
+        plan["version"] = json!("build_plan.v3");
+        plan["plan_id"] = json!(plan_id);
+        plan["plan_revision"] = json!(revision);
+        plan["book_id"] = json!(book_id);
+        plan["intent_id"] = json!(intent_id);
+        plan["intent_revision"] = json!(revision);
+        plan.as_object_mut().unwrap().remove("revision");
+        plan.as_object_mut().unwrap().remove("intent_digest");
+        plan.as_object_mut().unwrap().remove("plan_digest");
+        let artifact = plan["private_artifacts"][0].as_object_mut().unwrap();
+        artifact.remove("blueprint_digest");
+        let blueprint = artifact["blueprint"].clone();
+        artifact.insert("blueprint_id".into(), blueprint["blueprint_id"].clone());
+        artifact.insert(
+            "blueprint_version".into(),
+            blueprint["blueprint_version"].clone(),
+        );
+        plan
     }
 
-    fn accepted_artifact_v1(plan: &Value, payload: Value) -> Value {
+    fn v3_selection() -> (Value, Value) {
+        (
+            intent("paper-a", "intent-001", 1, "private v2 goal"),
+            plan("paper-a", "plan-001", "intent-001", 1),
+        )
+    }
+
+    fn legacy_v2_selection() -> (Value, Value) {
+        let golden: Value = serde_json::from_str(BUILD_INTENT_V2_GOLDEN).unwrap();
+        (golden["intent"].clone(), golden["plan"].clone())
+    }
+
+    fn v3_payload(plan: &Value, legacy_payload: Value) -> Value {
+        let artifact = &plan["private_artifacts"][0];
+        let mut payload = legacy_payload.as_object().cloned().unwrap();
+        payload.remove("blueprint_digest");
+        payload.insert("version".into(), json!("artifact_instance.v3"));
+        payload.insert("blueprint_id".into(), artifact["blueprint_id"].clone());
+        payload.insert(
+            "blueprint_version".into(),
+            artifact["blueprint_version"].clone(),
+        );
+        Value::Object(payload)
+    }
+
+    fn accepted_artifact_v3(plan: &Value, payload: Value) -> Value {
         let artifact = &plan["private_artifacts"][0];
         let payload_digest = crate::sha256_hex(canonical_json(&payload).unwrap().as_bytes());
         json!({
-            "version": "intent_artifact_accepted.v1",
+            "version": "intent_artifact_accepted.v3",
             "task_id": "intent-artifact-task-001",
             "book_id": plan["book_id"],
             "source_fingerprint": plan["source_fingerprint"],
             "intent_id": plan["intent_id"],
-            "intent_digest": plan["intent_digest"],
+            "intent_revision": plan["intent_revision"],
             "plan_id": plan["plan_id"],
-            "plan_digest": plan["plan_digest"],
+            "plan_revision": plan["plan_revision"],
             "artifact_id": artifact["artifact_id"],
-            "artifact_type": artifact["artifact_type"],
+            "blueprint_id": artifact["blueprint_id"],
+            "blueprint_version": artifact["blueprint_version"],
             "payload": payload,
             "payload_digest": payload_digest,
-            "accepted_at": "2026-07-26T03:00:00.000Z"
+            "accepted_at": "2026-07-29T12:00:00.000Z"
         })
     }
 
-    fn golden_selection(body: &str) -> (Value, Value) {
-        let golden: Value = serde_json::from_str(body).unwrap();
-        let mut intent = golden["intent"].clone();
-        let mut plan = golden["plan"].clone();
-        intent["status"] = json!("confirmed");
-        intent["confirmed_at"] = json!("2026-07-29T12:01:00.000Z");
-        plan["status"] = json!("confirmed");
-        plan["confirmation_source"] = json!("reader_ui");
-        plan["confirmed_at"] = json!("2026-07-29T12:01:00.000Z");
-        (intent, plan)
-    }
-
-    fn accepted_artifact_v2(plan: &Value, payload: Value) -> Value {
+    fn legacy_accepted_artifact_v2(plan: &Value, payload: Value) -> Value {
         let artifact = &plan["private_artifacts"][0];
-        let blueprint_digest = artifact["blueprint_digest"]
-            .as_str()
-            .map(str::to_string)
-            .or_else(|| {
-                artifact["artifact_type"]
-                    .as_str()
-                    .and_then(legacy_blueprint_digest)
-                    .map(str::to_string)
-            })
-            .unwrap();
+        let blueprint_digest = artifact["blueprint_digest"].as_str().unwrap();
         let payload_digest = crate::sha256_hex(canonical_json(&payload).unwrap().as_bytes());
         json!({
             "version": "intent_artifact_accepted.v2",
@@ -2046,6 +2452,64 @@ mod tests {
             "payload_digest": payload_digest,
             "accepted_at": "2026-07-29T12:00:00.000Z"
         })
+    }
+
+    #[test]
+    fn issues_planning_context_revision_only_when_the_bounded_body_changes() {
+        let root = test_dir("planning-context-revision");
+        let store = IntentArtifactStore::open(&root).unwrap();
+        let body = json!({
+            "version": "build_planning_context.v2",
+            "target": {
+                "book_id": "paper-a",
+                "source_fingerprint": "a".repeat(64),
+                "content_profile": "paper",
+                "candidate_contract_version": "build_intent_planner_candidate.v2"
+            },
+            "scope_catalog": {
+                "available_lids": ["1.1"],
+                "available_lid_count": 1,
+                "available_sections": [],
+                "available_section_count": 0,
+                "truncated": false,
+                "whole_book_allowed": true
+            },
+            "blueprint_registry": [],
+            "blueprint_registry_count": 0,
+            "blueprint_registry_truncated": false,
+            "candidate_contract": {
+                "version": "build_intent_planner_candidate.v2",
+                "max_artifacts": 16,
+                "allowed_shapes": ["collection", "table", "graph", "sequence", "document"],
+                "one_off_blueprint_version": "artifact_blueprint.v1"
+            }
+        });
+
+        let first = store.issue_planning_context_v2("paper-a", &body).unwrap();
+        assert_eq!(first["context_id"], "context-paper-a");
+        assert_eq!(first["context_revision"], 1);
+        assert!(first.get("context_digest").is_none());
+        assert_eq!(
+            store.issue_planning_context_v2("paper-a", &body).unwrap(),
+            first
+        );
+
+        let mut changed = body;
+        changed["scope_catalog"]["available_lids"] = json!(["1.1", "1.2"]);
+        changed["scope_catalog"]["available_lid_count"] = json!(2);
+        let second = store
+            .issue_planning_context_v2("paper-a", &changed)
+            .unwrap();
+        assert_eq!(second["context_revision"], 2);
+
+        let reopened = IntentArtifactStore::open(&root).unwrap();
+        assert_eq!(
+            reopened
+                .issue_planning_context_v2("paper-a", &changed)
+                .unwrap(),
+            second
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -2080,46 +2544,6 @@ mod tests {
             canonical_json(&v2["canonical_number_cases"]["values"]).unwrap(),
             v2["canonical_number_cases"]["json"].as_str().unwrap()
         );
-    }
-
-    #[test]
-    fn legacy_access_adapter_matches_all_core_preset_goldens() {
-        let golden: Value = serde_json::from_str(ARTIFACT_BLUEPRINT_PRESETS_V1_GOLDEN).unwrap();
-        for case in golden["cases"].as_array().unwrap() {
-            let artifact_type = case["artifact_type"].as_str().unwrap();
-            let (records, relations) =
-                legacy_payload_to_access(artifact_type, &case["legacy_payload"]).unwrap();
-            let record_values = records
-                .into_iter()
-                .map(|record| {
-                    json!({
-                        "record_id": record.record_id,
-                        "data": record.data,
-                        "evidence_lids": record.evidence_lids,
-                    })
-                })
-                .collect::<Vec<_>>();
-            let relation_values = relations
-                .into_iter()
-                .map(|relation| {
-                    json!({
-                        "relation_id": relation.relation_id,
-                        "source": relation.source_record_id,
-                        "target": relation.target_record_id,
-                        "data": relation.data,
-                        "evidence_lids": relation.evidence_lids,
-                    })
-                })
-                .collect::<Vec<_>>();
-            assert_eq!(Value::Array(record_values), case["mapped_records"]);
-            assert_eq!(Value::Array(relation_values), case["mapped_relations"]);
-            assert_eq!(
-                legacy_artifact_blueprint(artifact_type)
-                    .unwrap()
-                    .blueprint_digest,
-                case["blueprint_digest"].as_str().unwrap()
-            );
-        }
     }
 
     #[test]
@@ -2163,10 +2587,10 @@ mod tests {
             .write_intent(&intent("paper-a", "intent-001", 1, "private goal"))
             .unwrap();
         store
-            .write_intent(&intent("paper-a", "intent-001", 2, "revised private goal"))
+            .write_plan(&plan("paper-a", "plan-001", "intent-001", 1))
             .unwrap();
         store
-            .write_plan(&plan("paper-a", "plan-001", "intent-001", 1))
+            .write_intent(&intent("paper-a", "intent-001", 2, "revised private goal"))
             .unwrap();
         store
             .write_plan(&plan("paper-a", "plan-001", "intent-001", 2))
@@ -2174,20 +2598,22 @@ mod tests {
 
         assert!(!book_dir.join("intents").exists());
         assert!(!book_dir.join("plans").exists());
-        assert!(root.join("paper-a/intents/intent-001/intent.json").exists());
+        assert!(root
+            .join("paper-a/intents/intent-001/intent.v3.json")
+            .exists());
         let reopened = IntentArtifactStore::open(&root).unwrap();
         assert_eq!(
-            reopened.read_intent("paper-a", "intent-001").unwrap()["revision"],
+            reopened.read_intent("paper-a", "intent-001").unwrap()["intent_revision"],
             2
         );
         assert_eq!(
-            reopened.read_plan("paper-a", "plan-001").unwrap()["revision"],
+            reopened.read_plan("paper-a", "plan-001").unwrap()["plan_revision"],
             2
         );
         let inspection = reopened.inspect_redacted("paper-a").unwrap();
         let public_json = serde_json::to_string(&inspection).unwrap();
-        assert_eq!(inspection.intents[0].revision, 2);
-        assert_eq!(inspection.plans[0].revision, 2);
+        assert_eq!(inspection.intents[0].intent_revision, 2);
+        assert_eq!(inspection.plans[0].plan_revision, 2);
         assert!(!public_json.contains("private goal"));
         assert!(!public_json.contains("revised private goal"));
 
@@ -2313,14 +2739,16 @@ mod tests {
         store
             .set_active_overlay(
                 "paper-a",
-                Some(ActiveIntentOverlayV1 {
+                Some(ActiveIntentOverlayV2 {
                     intent_id: "intent-001".into(),
+                    intent_revision: 1,
                     plan_id: "plan-001".into(),
+                    plan_revision: 1,
                 }),
             )
             .unwrap();
 
-        let accepted = root.join("paper-a/artifacts/intent-001/artifact-001/accepted.json");
+        let accepted = root.join("paper-a/artifacts/intent-001/artifact-001/accepted.v3.json");
         ReaderPrivateStorageGate::enforce(&accepted).unwrap();
         std::fs::write(&accepted, r#"{"body":"private artifact"}"#).unwrap();
         ReaderPrivateStorageGate::secure_file(&accepted).unwrap();
@@ -2342,7 +2770,7 @@ mod tests {
         assert!(inspection.plans.is_empty());
         assert!(inspection.active_overlay.is_none());
         assert!(!root.join("paper-a/intents/intent-001").exists());
-        assert!(!root.join("paper-a/plans/plan-001.json").exists());
+        assert!(!root.join("paper-a/plans/plan-001.v3.json").exists());
         assert!(!root.join("paper-a/artifacts/intent-001").exists());
         assert!(!store.hard_delete_intent("paper-a", "intent-001").unwrap());
 
@@ -2350,20 +2778,23 @@ mod tests {
     }
 
     #[test]
-    fn projects_only_digest_valid_artifacts_from_the_active_overlay_and_reopens() {
+    fn projects_only_identity_valid_v3_artifacts_from_the_active_overlay_and_reopens() {
         use artifact_tools::{ArtifactListInput, ArtifactReadInput};
 
         let root = test_dir("active-artifacts");
         let store = IntentArtifactStore::open(&root).unwrap();
-        let (intent, plan) = golden_selection(BUILD_INTENT_V1_GOLDEN);
+        let golden: Value = serde_json::from_str(BUILD_INTENT_V2_GOLDEN).unwrap();
+        let (intent, plan) = v3_selection();
         store.write_intent(&intent).unwrap();
         store.write_plan(&plan).unwrap();
         store
             .set_active_overlay(
                 "paper-a",
-                Some(ActiveIntentOverlayV1 {
+                Some(ActiveIntentOverlayV2 {
                     intent_id: "intent-001".into(),
+                    intent_revision: 1,
                     plan_id: "plan-001".into(),
+                    plan_revision: 1,
                 }),
             )
             .unwrap();
@@ -2371,39 +2802,40 @@ mod tests {
         let pending = store
             .read_active_overlay_artifacts("paper-a", "source-a")
             .unwrap();
-        assert_eq!(pending.version, "intent_artifact_overlay.v1");
-        assert_eq!(pending.plan_digest, plan["plan_digest"].as_str().unwrap());
+        assert_eq!(pending.version, "intent_artifact_overlay.v2");
+        assert_eq!(pending.intent_revision, 1);
+        assert_eq!(pending.plan_revision, 1);
         assert_eq!(pending.artifacts.len(), 1);
         assert_eq!(pending.artifacts[0].state, "pending");
         assert!(pending.artifacts[0].payload.is_none());
         let pending_projection = serde_json::to_value(&pending).unwrap();
         assert_eq!(
             pending_projection["artifacts"][0]["blueprint"]["title"],
-            "Comparison table"
+            "Timeline"
         );
         assert_eq!(
             pending_projection["artifacts"][0]["blueprint"]["shape"],
-            "table"
+            "sequence"
         );
         assert_eq!(
             pending_projection["artifacts"][0]["blueprint"]["summary_fields"],
-            json!(["/subject", "/dimensions"])
+            json!(["/label", "/order_hint"])
         );
 
         let accepted_path = store
-            .artifact_directory("paper-a", "intent-001", "artifact-001")
+            .artifact_directory(
+                "paper-a",
+                "intent-001",
+                plan["private_artifacts"][0]["artifact_id"]
+                    .as_str()
+                    .unwrap(),
+            )
             .unwrap()
-            .join("accepted.json");
-        let private_payload = json!({
-            "rows": [{
-                "subject": "PRIVATE_STORE_ARTIFACT_SENTINEL",
-                "dimensions": { "result": "same canonical identity" },
-                "evidence_lids": ["1.1"]
-            }]
-        });
+            .join("accepted.v3.json");
+        let private_payload = v3_payload(&plan, golden["payload"].clone());
         write_json_atomically(
             &accepted_path,
-            &accepted_artifact_v1(&plan, private_payload.clone()),
+            &accepted_artifact_v3(&plan, private_payload.clone()),
         )
         .unwrap();
 
@@ -2412,13 +2844,16 @@ mod tests {
             .read_active_overlay_artifacts("paper-a", "source-a")
             .unwrap();
         assert_eq!(projection.artifacts[0].state, "accepted");
-        assert_eq!(projection.artifacts[0].payload, Some(private_payload));
+        assert_eq!(
+            projection.artifacts[0].payload,
+            Some(private_payload.clone())
+        );
         assert!(projection.artifacts[0].payload_digest.is_some());
         let snapshot = reopened
             .read_active_artifact_access_snapshot("paper-a", "source-a")
             .unwrap();
         let list = snapshot.list(ArtifactListInput::default()).unwrap();
-        assert_eq!(list.artifacts[0].title, "Comparison table");
+        assert_eq!(list.artifacts[0].title, "Timeline");
         let read = snapshot
             .read(ArtifactReadInput {
                 artifact_ref: list.artifacts[0].artifact_ref.clone(),
@@ -2430,17 +2865,16 @@ mod tests {
             })
             .unwrap();
         assert_eq!(
-            read.records[0].data["subject"],
-            "PRIVATE_STORE_ARTIFACT_SENTINEL"
+            read.records[0].data["label"],
+            "PRIVATE_V2_ARTIFACT_SENTINEL"
         );
-        assert!(read.records[0].data["dimensions"].is_array());
         let redacted =
             serde_json::to_string(&reopened.inspect_redacted("paper-a").unwrap()).unwrap();
-        assert!(!redacted.contains("Compare the datasets and methods"));
-        assert!(!redacted.contains("PRIVATE_STORE_ARTIFACT_SENTINEL"));
+        assert!(!redacted.contains("private v2 goal"));
+        assert!(!redacted.contains("PRIVATE_V2_ARTIFACT_SENTINEL"));
 
-        let mut stale = accepted_artifact_v1(&plan, json!({ "rows": [] }));
-        stale["plan_digest"] = json!("d".repeat(64));
+        let mut stale = accepted_artifact_v3(&plan, private_payload);
+        stale["plan_revision"] = json!(2);
         write_json_atomically(&accepted_path, &stale).unwrap();
         assert_eq!(
             reopened
@@ -2461,19 +2895,21 @@ mod tests {
     }
 
     #[test]
-    fn projects_v2_instances_and_rejects_blueprint_or_payload_digest_drift() {
-        let root = test_dir("active-artifacts-v2");
+    fn projects_v3_instances_and_rejects_blueprint_identity_or_payload_drift() {
+        let root = test_dir("active-artifacts-v3");
         let store = IntentArtifactStore::open(&root).unwrap();
         let golden: Value = serde_json::from_str(BUILD_INTENT_V2_GOLDEN).unwrap();
-        let (intent, plan) = golden_selection(BUILD_INTENT_V2_GOLDEN);
+        let (intent, plan) = v3_selection();
         store.write_intent(&intent).unwrap();
         store.write_plan(&plan).unwrap();
         store
             .set_active_overlay(
                 "paper-a",
-                Some(ActiveIntentOverlayV1 {
+                Some(ActiveIntentOverlayV2 {
                     intent_id: "intent-001".into(),
+                    intent_revision: 1,
                     plan_id: "plan-001".into(),
+                    plan_revision: 1,
                 }),
             )
             .unwrap();
@@ -2483,18 +2919,18 @@ mod tests {
         let accepted_path = store
             .artifact_directory("paper-a", "intent-001", artifact_id)
             .unwrap()
-            .join("accepted.json");
-        let instance = golden["payload"].clone();
+            .join("accepted.v3.json");
+        let instance = v3_payload(&plan, golden["payload"].clone());
         write_json_atomically(
             &accepted_path,
-            &accepted_artifact_v2(&plan, instance.clone()),
+            &accepted_artifact_v3(&plan, instance.clone()),
         )
         .unwrap();
         let projection = store
             .read_active_overlay_artifacts("paper-a", "source-a")
             .unwrap();
         assert_eq!(projection.artifacts[0].artifact_type, "timeline");
-        assert_eq!(projection.artifacts[0].payload, Some(instance));
+        assert_eq!(projection.artifacts[0].payload, Some(instance.clone()));
         let reader_projection = serde_json::to_value(&projection).unwrap();
         assert_eq!(
             reader_projection["artifacts"][0]["blueprint"]["title"],
@@ -2508,8 +2944,8 @@ mod tests {
             .get("blueprint_digest")
             .is_none());
 
-        let mut drifted = accepted_artifact_v2(&plan, golden["payload"].clone());
-        drifted["blueprint_digest"] = json!("e".repeat(64));
+        let mut drifted = accepted_artifact_v3(&plan, instance.clone());
+        drifted["blueprint_version"] = json!("2.0.0");
         write_json_atomically(&accepted_path, &drifted).unwrap();
         assert_eq!(
             store
@@ -2519,10 +2955,8 @@ mod tests {
             "INTENT_BUILD_STORE_CORRUPT"
         );
 
-        let mut legacy = accepted_artifact_v2(&plan, golden["payload"].clone());
-        legacy["version"] = json!("intent_artifact_accepted.v1");
-        legacy.as_object_mut().unwrap().remove("blueprint_digest");
-        legacy["artifact_type"] = json!("timeline");
+        let (_, legacy_plan) = legacy_v2_selection();
+        let legacy = legacy_accepted_artifact_v2(&legacy_plan, golden["payload"].clone());
         write_json_atomically(&accepted_path, &legacy).unwrap();
         assert_eq!(
             store
@@ -2535,21 +2969,23 @@ mod tests {
     }
 
     #[test]
-    fn builds_a_frozen_bounded_snapshot_only_from_current_accepted_v2_artifacts() {
+    fn builds_a_frozen_bounded_snapshot_only_from_current_accepted_v3_artifacts() {
         use artifact_tools::{ArtifactListInput, ArtifactReadInput};
 
-        let root = test_dir("artifact-access-snapshot-v2");
+        let root = test_dir("artifact-access-snapshot-v3");
         let store = IntentArtifactStore::open(&root).unwrap();
         let golden: Value = serde_json::from_str(BUILD_INTENT_V2_GOLDEN).unwrap();
-        let (intent, plan) = golden_selection(BUILD_INTENT_V2_GOLDEN);
+        let (intent, plan) = v3_selection();
         store.write_intent(&intent).unwrap();
         store.write_plan(&plan).unwrap();
         store
             .set_active_overlay(
                 "paper-a",
-                Some(ActiveIntentOverlayV1 {
+                Some(ActiveIntentOverlayV2 {
                     intent_id: "intent-001".into(),
+                    intent_revision: 1,
                     plan_id: "plan-001".into(),
+                    plan_revision: 1,
                 }),
             )
             .unwrap();
@@ -2568,12 +3004,9 @@ mod tests {
         let accepted_path = store
             .artifact_directory("paper-a", "intent-001", artifact_id)
             .unwrap()
-            .join("accepted.json");
-        write_json_atomically(
-            &accepted_path,
-            &accepted_artifact_v2(&plan, golden["payload"].clone()),
-        )
-        .unwrap();
+            .join("accepted.v3.json");
+        let payload = v3_payload(&plan, golden["payload"].clone());
+        write_json_atomically(&accepted_path, &accepted_artifact_v3(&plan, payload)).unwrap();
 
         let snapshot = store
             .read_active_artifact_access_snapshot("paper-a", "source-a")
@@ -2585,7 +3018,7 @@ mod tests {
         let list_body = serde_json::to_string(&list).unwrap();
         assert!(!list_body.contains(artifact_id));
         assert!(!list_body.contains("private v2 goal"));
-        assert!(!list_body.contains(plan["plan_digest"].as_str().unwrap()));
+        assert!(!list_body.contains(plan["plan_id"].as_str().unwrap()));
 
         let read = snapshot
             .read(ArtifactReadInput {
@@ -2628,19 +3061,21 @@ mod tests {
     }
 
     #[test]
-    fn reread_recomputes_intent_plan_blueprint_and_payload_digests_from_disk() {
-        let root = test_dir("active-artifacts-v2-canonical-reread");
+    fn rejects_same_version_blueprint_body_and_recomputes_payload_identity() {
+        let root = test_dir("active-artifacts-v3-direct-identity");
         let store = IntentArtifactStore::open(&root).unwrap();
         let golden: Value = serde_json::from_str(BUILD_INTENT_V2_GOLDEN).unwrap();
-        let (intent, plan) = golden_selection(BUILD_INTENT_V2_GOLDEN);
+        let (intent, plan) = v3_selection();
         store.write_intent(&intent).unwrap();
         store.write_plan(&plan).unwrap();
         store
             .set_active_overlay(
                 "paper-a",
-                Some(ActiveIntentOverlayV1 {
+                Some(ActiveIntentOverlayV2 {
                     intent_id: "intent-001".into(),
+                    intent_revision: 1,
                     plan_id: "plan-001".into(),
+                    plan_revision: 1,
                 }),
             )
             .unwrap();
@@ -2650,34 +3085,12 @@ mod tests {
         let accepted_path = store
             .artifact_directory("paper-a", "intent-001", artifact_id)
             .unwrap()
-            .join("accepted.json");
-        let accepted = accepted_artifact_v2(&plan, golden["payload"].clone());
+            .join("accepted.v3.json");
+        let accepted = accepted_artifact_v3(&plan, v3_payload(&plan, golden["payload"].clone()));
         write_json_atomically(&accepted_path, &accepted).unwrap();
         store
             .read_active_overlay_artifacts("paper-a", "source-a")
             .unwrap();
-
-        let intent_path = store.intent_path("paper-a", "intent-001").unwrap();
-        let mut drifted_intent = intent.clone();
-        drifted_intent["user_goal"] = json!("tampered intent body");
-        write_json_atomically(&intent_path, &drifted_intent).unwrap();
-        let error = store
-            .read_active_overlay_artifacts("paper-a", "source-a")
-            .unwrap_err();
-        assert_eq!(error.error_code, "INTENT_BUILD_STORE_CORRUPT");
-        assert!(error.message.contains("intent_digest"));
-        write_json_atomically(&intent_path, &intent).unwrap();
-
-        let plan_path = store.plan_path("paper-a", "plan-001").unwrap();
-        let mut drifted_plan = plan.clone();
-        drifted_plan["budget"]["max_total_tokens"] = json!(20_001);
-        write_json_atomically(&plan_path, &drifted_plan).unwrap();
-        let error = store
-            .read_active_overlay_artifacts("paper-a", "source-a")
-            .unwrap_err();
-        assert_eq!(error.error_code, "INTENT_BUILD_STORE_CORRUPT");
-        assert!(error.message.contains("plan_digest"));
-        write_json_atomically(&plan_path, &plan).unwrap();
 
         let mut drifted_accepted = accepted.clone();
         drifted_accepted["payload"]["records"][0]["data"]["label"] = json!("tampered payload body");
@@ -2689,55 +3102,195 @@ mod tests {
         assert!(error.message.contains("payload_digest"));
         write_json_atomically(&accepted_path, &accepted).unwrap();
 
-        let mut drifted_blueprint_plan = plan;
-        drifted_blueprint_plan["revision"] = json!(2);
+        let mut drifted_blueprint_plan = plan.clone();
+        drifted_blueprint_plan["plan_id"] = json!("plan-002");
         drifted_blueprint_plan["private_artifacts"][0]["blueprint"]["title"] =
             json!("tampered Blueprint snapshot");
-        drifted_blueprint_plan["plan_digest"] =
-            json!(build_plan_identity_digest(&drifted_blueprint_plan).unwrap());
-        store.write_plan(&drifted_blueprint_plan).unwrap();
+        let error = store.write_plan(&drifted_blueprint_plan).unwrap_err();
+        assert_eq!(error.error_code, INTENT_BUILD_CONFLICT);
+        assert!(error.message.contains("same Blueprint id/version"));
+
         let error = store
-            .read_active_overlay_artifacts("paper-a", "source-a")
+            .set_active_overlay(
+                "paper-a",
+                Some(ActiveIntentOverlayV2 {
+                    intent_id: "intent-001".into(),
+                    intent_revision: 1,
+                    plan_id: "plan-001".into(),
+                    plan_revision: 2,
+                }),
+            )
             .unwrap_err();
-        assert_eq!(error.error_code, "INTENT_BUILD_STORE_CORRUPT");
-        assert!(error.message.contains("blueprint_digest"));
+        assert_eq!(error.error_code, INTENT_BUILD_INVALID);
 
         std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn a_v1_plan_can_finish_with_new_v2_generation_using_the_fixed_preset_digest() {
-        let root = test_dir("v1-plan-v2-accepted");
+    fn migrates_one_locked_v2_fixture_to_create_only_v3_state_with_parity() {
+        let root = test_dir("v2-to-v3-migration");
         let store = IntentArtifactStore::open(&root).unwrap();
-        let (intent, plan) = golden_selection(BUILD_INTENT_V1_GOLDEN);
-        store.write_intent(&intent).unwrap();
-        store.write_plan(&plan).unwrap();
-        store
-            .set_active_overlay(
-                "paper-a",
-                Some(ActiveIntentOverlayV1 {
+        let golden: Value = serde_json::from_str(BUILD_INTENT_V2_GOLDEN).unwrap();
+        let (intent, plan) = legacy_v2_selection();
+        let legacy_index = LegacyIntentArtifactStoreIndexV1 {
+            version: LEGACY_INDEX_VERSION.into(),
+            book_id: "paper-a".into(),
+            store_revision: 2,
+            intents: BTreeMap::from([(
+                "intent-001".into(),
+                LegacyIntentIndexEntryV1 {
                     intent_id: "intent-001".into(),
+                    revision: 1,
+                    status: "confirmed".into(),
+                    source_fingerprint: "source-a".into(),
+                },
+            )]),
+            plans: BTreeMap::from([(
+                "plan-001".into(),
+                LegacyPlanIndexEntryV1 {
                     plan_id: "plan-001".into(),
-                }),
+                    revision: 1,
+                    status: "confirmed".into(),
+                    plan_digest: plan["plan_digest"].as_str().unwrap().into(),
+                    intent_id: Some("intent-001".into()),
+                },
+            )]),
+            active_overlay: Some(LegacyActiveIntentOverlayV1 {
+                intent_id: "intent-001".into(),
+                plan_id: "plan-001".into(),
+            }),
+        };
+        write_json_atomically(&store.legacy_index_path("paper-a").unwrap(), &legacy_index).unwrap();
+        write_json_atomically(
+            &store.legacy_intent_path("paper-a", "intent-001").unwrap(),
+            &intent,
+        )
+        .unwrap();
+        write_json_atomically(
+            &store.legacy_plan_path("paper-a", "plan-001").unwrap(),
+            &plan,
+        )
+        .unwrap();
+        let legacy_accepted_path = store
+            .artifact_directory(
+                "paper-a",
+                "intent-001",
+                plan["private_artifacts"][0]["artifact_id"]
+                    .as_str()
+                    .unwrap(),
             )
-            .unwrap();
-        let accepted_path = store
-            .artifact_directory("paper-a", "intent-001", "artifact-001")
             .unwrap()
-            .join("accepted.json");
-        let preset_digest = legacy_blueprint_digest("comparison_table").unwrap();
-        let payload = json!({
-            "version": "artifact_instance.v2",
-            "blueprint_digest": preset_digest,
-            "records": []
-        });
-        let accepted = accepted_artifact_v2(&plan, payload.clone());
-        write_json_atomically(&accepted_path, &accepted).unwrap();
+            .join(LEGACY_ACCEPTED_FILE);
+        let legacy_accepted = legacy_accepted_artifact_v2(&plan, golden["payload"].clone());
+        write_json_atomically(&legacy_accepted_path, &legacy_accepted).unwrap();
+
+        let receipt = store.migrate_planning_control_v2_to_v3("paper-a").unwrap();
+        assert_eq!(receipt.version, "planning_control_migration.v2_to_v3");
+        assert_eq!(receipt.intent_count, 1);
+        assert_eq!(receipt.plan_count, 1);
+        assert_eq!(receipt.accepted_artifact_count, 1);
+        assert_eq!(
+            receipt.active_overlay,
+            Some(ActiveIntentOverlayV2 {
+                intent_id: "intent-001".into(),
+                intent_revision: 1,
+                plan_id: "plan-001".into(),
+                plan_revision: 1,
+            })
+        );
+
+        let migrated_intent = store.read_intent("paper-a", "intent-001").unwrap();
+        let migrated_plan = store.read_plan("paper-a", "plan-001").unwrap();
+        let migrated_accepted_path = store
+            .artifact_directory(
+                "paper-a",
+                "intent-001",
+                plan["private_artifacts"][0]["artifact_id"]
+                    .as_str()
+                    .unwrap(),
+            )
+            .unwrap()
+            .join(V3_ACCEPTED_FILE);
+        let migrated_accepted: Value = read_json(&migrated_accepted_path).unwrap();
+        assert_eq!(migrated_intent["version"], "build_intent.v3");
+        assert_eq!(migrated_intent["intent_revision"], intent["revision"]);
+        for field in [
+            "book_id",
+            "source_fingerprint",
+            "content_profile",
+            "user_goal",
+            "goal_kind",
+            "source_scope",
+            "usage_horizon",
+            "privacy",
+            "status",
+            "created_at",
+            "confirmed_at",
+        ] {
+            assert_eq!(migrated_intent[field], intent[field]);
+        }
+        assert_eq!(migrated_plan["version"], "build_plan.v3");
+        assert_eq!(migrated_plan["plan_revision"], plan["revision"]);
+        assert_eq!(migrated_plan["intent_revision"], intent["revision"]);
+        for field in [
+            "book_id",
+            "source_fingerprint",
+            "content_profile",
+            "recipe_id",
+            "intent_id",
+            "public_stage_closure",
+            "reuse",
+            "create",
+            "excluded",
+            "estimate",
+            "budget",
+            "status",
+            "confirmation_source",
+            "created_at",
+            "confirmed_at",
+        ] {
+            assert_eq!(migrated_plan[field], plan[field]);
+        }
+        assert_eq!(
+            migrated_plan["private_artifacts"][0]["blueprint"],
+            plan["private_artifacts"][0]["blueprint"]
+        );
+        assert_eq!(
+            migrated_accepted["payload"]["records"],
+            legacy_accepted["payload"]["records"]
+        );
+        assert_eq!(migrated_accepted["intent_revision"], 1);
+        assert_eq!(migrated_accepted["plan_revision"], 1);
+        let migrated_body = serde_json::to_string(&json!({
+            "intent": migrated_intent,
+            "plan": migrated_plan,
+            "accepted": migrated_accepted,
+        }))
+        .unwrap();
+        assert!(!migrated_body.contains("intent_digest"));
+        assert!(!migrated_body.contains("plan_digest"));
+        assert!(!migrated_body.contains("blueprint_digest"));
+        assert!(legacy_accepted_path.exists());
+        assert_eq!(
+            read_json::<Value>(&legacy_accepted_path).unwrap(),
+            legacy_accepted
+        );
+
         let projection = store
             .read_active_overlay_artifacts("paper-a", "source-a")
             .unwrap();
-        assert_eq!(projection.artifacts[0].artifact_type, "comparison_table");
-        assert_eq!(projection.artifacts[0].payload, Some(payload));
+        assert_eq!(projection.artifacts[0].artifact_type, "timeline");
+        assert_eq!(
+            projection.artifacts[0].payload.as_ref().unwrap()["records"],
+            golden["payload"]["records"]
+        );
+        assert_eq!(
+            store
+                .migrate_planning_control_v2_to_v3("paper-a")
+                .unwrap_err()
+                .error_code,
+            INTENT_BUILD_CONFLICT
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 

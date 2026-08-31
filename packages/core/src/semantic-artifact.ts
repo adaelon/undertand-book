@@ -24,6 +24,15 @@ export interface ExtractionPolicyFingerprintV1 {
   quality_profile: ExtractionQualityProfile;
 }
 
+export interface SemanticContractV1 {
+  profile_version: string;
+  stage_policy_version: string;
+  router_version: string;
+  prompt_sha256: string;
+  schema_version: string;
+  quality_profile: ExtractionQualityProfile;
+}
+
 export interface SemanticArtifactProvenanceV2 {
   executor: string;
   model?: string;
@@ -49,9 +58,8 @@ export interface SemanticArtifactEnvelopeV3<T> {
   stage: SemanticBuildStage;
   work_unit_id: string;
   input_hash: string;
-  proof_digest: string;
-  policy_set_digest: string;
-  policy_fingerprint: ExtractionPolicyFingerprintV1;
+  policy_generation_id: string;
+  semantic_contract: SemanticContractV1;
   artifact_hash: string;
   provenance: SemanticArtifactProvenanceV2;
   payload: T;
@@ -64,9 +72,8 @@ export interface SemanticArtifactExpectation {
   stage: SemanticBuildStage;
   work_unit_id: string;
   input_hash: string;
-  proof_digest?: string;
-  policy_set_digest?: string;
-  policy_fingerprint: ExtractionPolicyFingerprintV1;
+  policy_generation_id?: string;
+  semantic_contract: SemanticContractV1;
 }
 
 export interface AutomaticBuildTaskPolicyBindingV1 {
@@ -76,9 +83,9 @@ export interface AutomaticBuildTaskPolicyBindingV1 {
 
 export interface AutomaticBuildTaskPolicyBindingV2 {
   input_hash: string;
-  proof_digest: string;
-  policy_set_digest: string;
-  policy_fingerprint: ExtractionPolicyFingerprintV1;
+  stage: SemanticBuildStage;
+  policy_generation_id: string;
+  semantic_contract: SemanticContractV1;
 }
 
 export type AutomaticBuildTaskPolicyBinding =
@@ -88,57 +95,50 @@ export type AutomaticBuildTaskPolicyBinding =
 export function isAutomaticBuildTaskPolicyBindingV2(
   binding: AutomaticBuildTaskPolicyBinding,
 ): binding is AutomaticBuildTaskPolicyBindingV2 {
-  return "proof_digest" in binding || "policy_set_digest" in binding;
+  return "policy_generation_id" in binding;
 }
 
-export interface AutomaticBuildStagePolicyLockV1 {
-  version: "automatic_build_stage_policy_lock.v1";
+export interface AutomaticBuildStagePolicyLockV2 {
+  version: "automatic_build_stage_policy_lock.v2";
   target_ref: BuildTargetRefV2;
   stage: SemanticBuildStage;
-  policy_fingerprint: ExtractionPolicyFingerprintV1;
-  policy_digest: string;
+  policy_generation_id: string;
+  semantic_contract: SemanticContractV1;
   frozen_at: string;
 }
 
 const STAGE_POLICIES: Record<SemanticBuildStage, {
   stage_policy_version: string;
-  router_version: string;
   prompt_sha256: string;
   schema_version: string;
 }> = {
   pass1: {
     stage_policy_version: "pass1_policy.v1",
-    router_version: routerVersionForStage("pass1"),
     prompt_sha256: "7f95eb6352042a9d37866488d71418f2a730e78eeedfdbdebe646cc912cb1330",
     schema_version: "pass1_output.v1",
   },
   paper_metadata: {
     stage_policy_version: "paper_metadata_policy.v1",
-    router_version: routerVersionForStage("paper_metadata"),
     prompt_sha256: "a414cf53970cf4e9e537de09bd84b318f61fd210b07c25d48c6534c181057d85",
     schema_version: EXTRACTOR_CONTRACT_SCHEMA_VERSIONS.paper_metadata,
   },
   paper_lexicon: {
     stage_policy_version: "paper_lexicon_policy.v2",
-    router_version: routerVersionForStage("paper_lexicon"),
     prompt_sha256: "b79dd841bb69f11b74e54d96552081fecef369504ad6313a1b7dab329e1e3bc8",
     schema_version: EXTRACTOR_CONTRACT_SCHEMA_VERSIONS.paper_lexicon,
   },
   profile_sidecar: {
     stage_policy_version: PROFILE_SIDECAR_POLICY_V2.stage_policy_version,
-    router_version: routerVersionForStage("profile_sidecar"),
     prompt_sha256: PROFILE_SIDECAR_POLICY_V2.prompt_sha256,
     schema_version: EXTRACTOR_CONTRACT_SCHEMA_VERSIONS.profile_sidecar,
   },
   pass2: {
     stage_policy_version: "pass2_policy.v1",
-    router_version: routerVersionForStage("pass2"),
     prompt_sha256: "f27c511920fd33dad8304540bebc6864fb149f933414c7905107ecf52d83b222",
     schema_version: "pass2_output.v1",
   },
   book_structure: {
     stage_policy_version: "book_structure_policy.v1",
-    router_version: routerVersionForStage("book_structure"),
     prompt_sha256: "706bab293891b3b97aed23d4b09120cb7179f9248ac3a0263005047cf76dda46",
     schema_version: "book_structure_output.v1",
   },
@@ -176,6 +176,45 @@ export function extractionPolicyEqual(
     && left.quality_profile === right.quality_profile;
 }
 
+export function semanticContractFromExtractionPolicy(
+  policy: ExtractionPolicyFingerprintV1,
+): SemanticContractV1 {
+  return {
+    profile_version: policy.profile_version,
+    stage_policy_version: policy.stage_policy_version,
+    router_version: policy.router_version,
+    prompt_sha256: policy.prompt_sha256,
+    schema_version: policy.schema_version,
+    quality_profile: policy.quality_profile,
+  };
+}
+
+export function extractionPolicyFromSemanticContract(
+  profileId: string,
+  contract: SemanticContractV1,
+): ExtractionPolicyFingerprintV1 {
+  return { profile_id: profileId, ...contract };
+}
+
+export function semanticContractEqual(
+  left: SemanticContractV1,
+  right: SemanticContractV1,
+): boolean {
+  return left.profile_version === right.profile_version
+    && left.stage_policy_version === right.stage_policy_version
+    && left.router_version === right.router_version
+    && left.prompt_sha256 === right.prompt_sha256
+    && left.schema_version === right.schema_version
+    && left.quality_profile === right.quality_profile;
+}
+
+export function assertPolicyGenerationId(value: string, field = "policy_generation_id"): string {
+  if (!/^[a-z0-9][a-z0-9._-]{0,127}$/u.test(value)) {
+    throw new Error(`${field} must be a bounded lowercase policy-owner identifier`);
+  }
+  return value;
+}
+
 export function extractionPolicyDigest(policy: ExtractionPolicyFingerprintV1): string {
   return sha256(policy);
 }
@@ -190,6 +229,7 @@ export function automaticBuildExtractionPolicy(
     profile_id: profile.id,
     profile_version: profile.profile_version,
     ...stagePolicy,
+    router_version: routerVersionForStage(stage),
     quality_profile: qualityProfile,
   };
 }
@@ -242,18 +282,12 @@ export function buildSemanticArtifactEnvelopeV3<T>(input: {
   stage: SemanticBuildStage;
   work_unit_id: string;
   input_hash: string;
-  proof_digest: string;
-  policy_set_digest: string;
-  policy_fingerprint: ExtractionPolicyFingerprintV1;
+  policy_generation_id: string;
+  semantic_contract: SemanticContractV1;
   provenance: SemanticArtifactProvenanceV2;
   payload: T;
 }): SemanticArtifactEnvelopeV3<T> {
-  if (!/^[a-f0-9]{64}$/.test(input.proof_digest)) {
-    throw new Error("semantic artifact proof_digest must be a lowercase SHA-256 digest");
-  }
-  if (!/^[a-f0-9]{64}$/.test(input.policy_set_digest)) {
-    throw new Error("semantic artifact policy_set_digest must be a lowercase SHA-256 digest");
-  }
+  assertPolicyGenerationId(input.policy_generation_id, "semantic artifact policy_generation_id");
   if (!input.work_unit_id) throw new Error("semantic artifact work_unit_id must not be empty");
   if (!input.input_hash) throw new Error("semantic artifact input_hash must not be empty");
   assertProvenance(input.provenance);
@@ -263,9 +297,8 @@ export function buildSemanticArtifactEnvelopeV3<T>(input: {
     stage: input.stage,
     work_unit_id: input.work_unit_id,
     input_hash: input.input_hash,
-    proof_digest: input.proof_digest,
-    policy_set_digest: input.policy_set_digest,
-    policy_fingerprint: input.policy_fingerprint,
+    policy_generation_id: input.policy_generation_id,
+    semantic_contract: input.semantic_contract,
     artifact_hash: sha256(input.payload),
     provenance: input.provenance,
     payload: input.payload,
@@ -287,16 +320,20 @@ export function semanticArtifactMatches(
     && value.stage === expected.stage
     && value.work_unit_id === expected.work_unit_id
     && value.input_hash === expected.input_hash
-    && extractionPolicyEqual(value.policy_fingerprint, expected.policy_fingerprint)
     && value.artifact_hash === sha256(value.payload);
   if (!commonMatches) return false;
-  const expectsV3 = expected.proof_digest !== undefined || expected.policy_set_digest !== undefined;
-  if (!expectsV3) return value.version === "semantic_task_artifact.v2";
+  const expectsV3 = expected.policy_generation_id !== undefined;
+  if (!expectsV3) {
+    return value.version === "semantic_task_artifact.v2"
+      && semanticContractEqual(
+        semanticContractFromExtractionPolicy(value.policy_fingerprint),
+        expected.semantic_contract,
+      );
+  }
   return value.version === "semantic_task_artifact.v3"
-    && expected.proof_digest !== undefined
-    && expected.policy_set_digest !== undefined
-    && value.proof_digest === expected.proof_digest
-    && value.policy_set_digest === expected.policy_set_digest;
+    && expected.policy_generation_id !== undefined
+    && value.policy_generation_id === expected.policy_generation_id
+    && semanticContractEqual(value.semantic_contract, expected.semantic_contract);
 }
 
 export function inspectSemanticArtifact<T>(
@@ -337,11 +374,9 @@ export function automaticBuildStagePolicyLockPath(
 export function automaticBuildStagePolicyGenerationLockPath(
   target: AutomaticBuildTarget,
   stage: SemanticBuildStage,
-  policyDigest: string,
+  policyGenerationId: string,
 ): string {
-  if (!/^[a-f0-9]{64}$/.test(policyDigest)) {
-    throw new Error("stage policy generation digest must be a lowercase SHA-256 digest");
-  }
+  assertPolicyGenerationId(policyGenerationId, "stage policy_generation_id");
   return path.join(
     target.workspace_dir,
     ".build",
@@ -349,21 +384,21 @@ export function automaticBuildStagePolicyGenerationLockPath(
     "v2",
     "policies",
     stage,
-    `${policyDigest}.json`,
+    `${policyGenerationId}.json`,
   );
 }
 
 export function readAutomaticBuildStagePolicyLock(
   target: AutomaticBuildTarget,
   stage: SemanticBuildStage,
-): AutomaticBuildStagePolicyLockV1 | undefined {
+): AutomaticBuildStagePolicyLockV2 | undefined {
   const file = automaticBuildStagePolicyLockPath(target, stage);
   if (!existsSync(file)) return undefined;
-  const lock = JSON.parse(readFileSync(file, "utf8")) as AutomaticBuildStagePolicyLockV1;
-  if (lock.version !== "automatic_build_stage_policy_lock.v1"
+  const lock = JSON.parse(readFileSync(file, "utf8")) as AutomaticBuildStagePolicyLockV2;
+  if (lock.version !== "automatic_build_stage_policy_lock.v2"
     || lock.stage !== stage
     || !sameTarget(lock.target_ref, target.target_ref)
-    || lock.policy_digest !== extractionPolicyDigest(lock.policy_fingerprint)
+    || !assertPolicyGenerationId(lock.policy_generation_id)
     || !Number.isFinite(Date.parse(lock.frozen_at))) {
     throw new Error(`invalid automatic build stage policy lock: ${file}`);
   }
@@ -373,16 +408,17 @@ export function readAutomaticBuildStagePolicyLock(
 export function freezeAutomaticBuildStagePolicy(
   target: AutomaticBuildTarget,
   stage: SemanticBuildStage,
+  policyGenerationId: string,
   policy: ExtractionPolicyFingerprintV1,
   frozenAt = new Date().toISOString(),
-): AutomaticBuildStagePolicyLockV1 {
+): AutomaticBuildStagePolicyLockV2 {
   const file = automaticBuildStagePolicyLockPath(target, stage);
-  const lock: AutomaticBuildStagePolicyLockV1 = {
-    version: "automatic_build_stage_policy_lock.v1",
+  const lock: AutomaticBuildStagePolicyLockV2 = {
+    version: "automatic_build_stage_policy_lock.v2",
     target_ref: target.target_ref,
     stage,
-    policy_fingerprint: policy,
-    policy_digest: extractionPolicyDigest(policy),
+    policy_generation_id: assertPolicyGenerationId(policyGenerationId),
+    semantic_contract: semanticContractFromExtractionPolicy(policy),
     frozen_at: frozenAt,
   };
   mkdirSync(path.dirname(file), { recursive: true });
@@ -395,8 +431,8 @@ export function freezeAutomaticBuildStagePolicy(
     const existing = readAutomaticBuildStagePolicyLock(target, stage);
     if (!existing
       || existing.version !== lock.version
-      || !extractionPolicyEqual(existing.policy_fingerprint, policy)
-      || existing.policy_digest !== lock.policy_digest) {
+      || existing.policy_generation_id !== lock.policy_generation_id
+      || !semanticContractEqual(existing.semantic_contract, lock.semantic_contract)) {
       throw new Error(`policy_mismatch: ${stage} policy is already frozen at ${file}`);
     }
     return existing;
@@ -406,17 +442,18 @@ export function freezeAutomaticBuildStagePolicy(
 export function freezeAutomaticBuildStagePolicyGeneration(
   target: AutomaticBuildTarget,
   stage: SemanticBuildStage,
+  policyGenerationId: string,
   policy: ExtractionPolicyFingerprintV1,
   frozenAt = new Date().toISOString(),
-): AutomaticBuildStagePolicyLockV1 {
-  const policyDigest = extractionPolicyDigest(policy);
-  const file = automaticBuildStagePolicyGenerationLockPath(target, stage, policyDigest);
-  const lock: AutomaticBuildStagePolicyLockV1 = {
-    version: "automatic_build_stage_policy_lock.v1",
+): AutomaticBuildStagePolicyLockV2 {
+  const generationId = assertPolicyGenerationId(policyGenerationId);
+  const file = automaticBuildStagePolicyGenerationLockPath(target, stage, generationId);
+  const lock: AutomaticBuildStagePolicyLockV2 = {
+    version: "automatic_build_stage_policy_lock.v2",
     target_ref: target.target_ref,
     stage,
-    policy_fingerprint: policy,
-    policy_digest: policyDigest,
+    policy_generation_id: generationId,
+    semantic_contract: semanticContractFromExtractionPolicy(policy),
     frozen_at: frozenAt,
   };
   mkdirSync(path.dirname(file), { recursive: true });
@@ -426,12 +463,12 @@ export function freezeAutomaticBuildStagePolicyGeneration(
   } catch (error) {
     const code = error && typeof error === "object" && "code" in error ? String(error.code) : "";
     if (code !== "EEXIST") throw error;
-    const existing = JSON.parse(readFileSync(file, "utf8")) as AutomaticBuildStagePolicyLockV1;
+    const existing = JSON.parse(readFileSync(file, "utf8")) as AutomaticBuildStagePolicyLockV2;
     if (existing.version !== lock.version
       || existing.stage !== stage
       || !sameTarget(existing.target_ref, target.target_ref)
-      || !extractionPolicyEqual(existing.policy_fingerprint, policy)
-      || existing.policy_digest !== policyDigest
+      || existing.policy_generation_id !== generationId
+      || !semanticContractEqual(existing.semantic_contract, lock.semantic_contract)
       || !Number.isFinite(Date.parse(existing.frozen_at))) {
       throw new Error(`policy_generation_conflict: ${stage} policy generation is frozen at ${file}`);
     }
@@ -451,12 +488,10 @@ function generationWorkUnitFileName(workUnitId: string): string {
 export function automaticBuildGenerationArtifactPath(
   target: AutomaticBuildTarget,
   stage: SemanticBuildStage,
-  policySetDigest: string,
+  policyGenerationId: string,
   workUnitId: string,
 ): string {
-  if (!/^[a-f0-9]{64}$/.test(policySetDigest)) {
-    throw new Error("generation policy_set_digest must be a lowercase SHA-256 digest");
-  }
+  assertPolicyGenerationId(policyGenerationId, "generation policy_generation_id");
   return path.join(
     target.workspace_dir,
     ".build",
@@ -464,7 +499,7 @@ export function automaticBuildGenerationArtifactPath(
     "v3",
     "artifacts",
     stage,
-    policySetDigest,
+    policyGenerationId,
     generationWorkUnitFileName(workUnitId),
   );
 }
@@ -482,16 +517,15 @@ export function writeAutomaticBuildGenerationArtifact<T>(
       stage: envelope.stage,
       work_unit_id: envelope.work_unit_id,
       input_hash: envelope.input_hash,
-      proof_digest: envelope.proof_digest,
-      policy_set_digest: envelope.policy_set_digest,
-      policy_fingerprint: envelope.policy_fingerprint,
+      policy_generation_id: envelope.policy_generation_id,
+      semantic_contract: envelope.semantic_contract,
     })) {
     throw new Error("generation artifact envelope is invalid");
   }
   const file = automaticBuildGenerationArtifactPath(
     target,
     envelope.stage,
-    envelope.policy_set_digest,
+    envelope.policy_generation_id,
     envelope.work_unit_id,
   );
   const bytes = `${JSON.stringify(envelope, null, 2)}\n`;

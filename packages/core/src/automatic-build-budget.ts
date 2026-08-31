@@ -5,8 +5,9 @@ import type {
   AutomaticBuildTaskPolicyBinding,
   ExtractionPolicyFingerprintV1,
   ExtractionQualityProfile,
+  SemanticContractV1,
 } from "./semantic-artifact";
-import { CODEX_EXECUTOR_TRANSPORT_PROFILE_V1 } from "./executor-transport";
+import { CODEX_EXECUTOR_TRANSPORT_PROFILE_V2 } from "./executor-transport";
 import {
   isProofBoundWorkUnitDescriptor,
   isWorkUnitDescriptorV3,
@@ -96,18 +97,21 @@ export interface AutomaticBuildBudgetViolationV1 {
   limit: number;
 }
 
-export interface AutomaticBuildPreflightV1 {
-  version: "automatic_build_preflight.v1";
+export interface AutomaticBuildPolicyGenerationEvidenceV1 {
+  kind: WorkUnitKind;
+  policy_generation_id: string;
+  semantic_contract: SemanticContractV1;
+}
+
+export interface AutomaticBuildPreflightV2 {
+  version: "automatic_build_preflight.v2";
   target_ref: BuildTargetRefV2;
   stage: AutomaticBuildStage;
   descriptor_plan_digest: string;
-  build_plan?: { plan_id: string; revision: number; plan_digest: string };
-  plan_digest: string;
-  preflight_evaluation_digest: string;
+  build_plan?: { plan_id: string; plan_revision: number };
   quality_profile: ExtractionQualityProfile;
   policy_fingerprint?: ExtractionPolicyFingerprintV1;
-  policy_set_digest?: string;
-  policy_digest: string;
+  policy_generations?: AutomaticBuildPolicyGenerationEvidenceV1[];
   work_units: {
     total: number;
     eligible: number;
@@ -173,6 +177,63 @@ export interface AutomaticBuildPreflightV1 {
   };
 }
 
+export interface AutomaticBuildPreflightPlanEvidenceV2 {
+  version: "automatic_build_preflight_plan_evidence.v2";
+  target_ref: BuildTargetRefV2;
+  stage: AutomaticBuildStage;
+  descriptor_plan_digest: string;
+  build_plan?: { plan_id: string; plan_revision: number };
+  quality_profile: ExtractionQualityProfile;
+  policy_fingerprint?: ExtractionPolicyFingerprintV1;
+  policy_generations?: AutomaticBuildPolicyGenerationEvidenceV1[];
+  budget: AutomaticBuildBudgetLimitsV1;
+  requested_workers: number;
+}
+
+export interface AutomaticBuildPreflightEvaluationEvidenceV2 {
+  version: "automatic_build_preflight_evaluation_evidence.v2";
+  descriptor_plan_digest: string;
+  build_plan?: { plan_id: string; plan_revision: number };
+  dispatch_plan_digest: string;
+  cost_scope: AutomaticBuildPreflightV2["cost_scope"];
+  wall_clock: AutomaticBuildPreflightV2["wall_clock"];
+}
+
+export function automaticBuildPreflightPlanEvidence(
+  preflight: AutomaticBuildPreflightV2,
+): AutomaticBuildPreflightPlanEvidenceV2 {
+  return {
+    version: "automatic_build_preflight_plan_evidence.v2",
+    target_ref: preflight.target_ref,
+    stage: preflight.stage,
+    descriptor_plan_digest: preflight.descriptor_plan_digest,
+    ...(preflight.build_plan ? { build_plan: preflight.build_plan } : {}),
+    quality_profile: preflight.quality_profile,
+    ...(preflight.policy_generations
+      ? { policy_generations: preflight.policy_generations }
+      : { policy_fingerprint: preflight.policy_fingerprint }),
+    budget: preflight.budget.limits,
+    requested_workers: preflight.worker_plan.requested_workers,
+  };
+}
+
+export function automaticBuildPreflightEvaluationEvidence(
+  preflight: AutomaticBuildPreflightV2,
+): AutomaticBuildPreflightEvaluationEvidenceV2 {
+  return {
+    version: "automatic_build_preflight_evaluation_evidence.v2",
+    descriptor_plan_digest: preflight.descriptor_plan_digest,
+    ...(preflight.build_plan ? { build_plan: preflight.build_plan } : {}),
+    dispatch_plan_digest: preflight.dispatch_plan.dispatch_plan_digest,
+    cost_scope: preflight.cost_scope,
+    wall_clock: preflight.wall_clock,
+  };
+}
+
+export function sameAutomaticBuildBudgetEvidence(left: unknown, right: unknown): boolean {
+  return stableJson(left) === stableJson(right);
+}
+
 export interface AutomaticBuildCostBatchV1 {
   units: WorkUnitDescriptor[];
   total_score: number;
@@ -188,7 +249,6 @@ export interface AutomaticBuildPlanActualUsageV1 {
 export interface AutomaticBuildPlanCurrentForecastV1 {
   estimated_total_tokens_upper: number;
   wall_clock_p95_minutes: number;
-  preflight_evaluation_digest?: string;
 }
 
 export interface AutomaticBuildPlanBudgetViolationV1 {
@@ -197,10 +257,10 @@ export interface AutomaticBuildPlanBudgetViolationV1 {
   limit: number;
 }
 
-export interface AutomaticBuildPlanBudgetEvaluationV1 {
-  version: "automatic_build_plan_budget_evaluation.v1";
+export interface AutomaticBuildPlanBudgetEvaluationV2 {
+  version: "automatic_build_plan_budget_evaluation.v2";
   plan_id: string;
-  plan_digest: string;
+  plan_revision: number;
   status: "within_budget" | "exceeded";
   known_usage_coverage: number;
   actual_input_tokens: number;
@@ -210,8 +270,6 @@ export interface AutomaticBuildPlanBudgetEvaluationV1 {
   projected_total_tokens_upper: number;
   projected_wall_clock_p95_minutes: number;
   violations: AutomaticBuildPlanBudgetViolationV1[];
-  preflight_evaluation_digest?: string;
-  receipt_digest: string;
 }
 
 function stableJson(value: unknown): string {
@@ -357,7 +415,7 @@ export function evaluateAutomaticBuildPlanBudget(input: {
   plan: BuildPlanV1;
   actual_usage: AutomaticBuildPlanActualUsageV1;
   current_forecast?: AutomaticBuildPlanCurrentForecastV1;
-}): AutomaticBuildPlanBudgetEvaluationV1 {
+}): AutomaticBuildPlanBudgetEvaluationV2 {
   const plan = validateBuildPlanV1(input.plan);
   const usage = input.actual_usage;
   if (!Number.isFinite(usage.known_usage_coverage)
@@ -396,10 +454,10 @@ export function evaluateAutomaticBuildPlanBudget(input: {
       limit: plan.budget.max_wall_clock_minutes,
     });
   }
-  const identity = {
-    version: "automatic_build_plan_budget_evaluation.v1" as const,
+  return validateAutomaticBuildPlanBudgetEvaluation({
+    version: "automatic_build_plan_budget_evaluation.v2" as const,
     plan_id: plan.plan_id,
-    plan_digest: plan.plan_digest,
+    plan_revision: plan.revision,
     status: violations.length ? "exceeded" as const : "within_budget" as const,
     known_usage_coverage: usage.known_usage_coverage,
     actual_input_tokens: actualInput,
@@ -409,11 +467,119 @@ export function evaluateAutomaticBuildPlanBudget(input: {
     projected_total_tokens_upper: projectedTotal,
     projected_wall_clock_p95_minutes: projectedWall,
     violations,
-    ...(input.current_forecast?.preflight_evaluation_digest
-      ? { preflight_evaluation_digest: input.current_forecast.preflight_evaluation_digest }
-      : {}),
-  };
-  return { ...identity, receipt_digest: sha256(stableJson(identity)) };
+  });
+}
+
+export function validateAutomaticBuildPlanBudgetEvaluation(
+  value: AutomaticBuildPlanBudgetEvaluationV2,
+): AutomaticBuildPlanBudgetEvaluationV2 {
+  const expectedKeys = [
+    "actual_input_tokens",
+    "actual_output_tokens",
+    "actual_total_tokens",
+    "known_usage_coverage",
+    "plan_id",
+    "plan_revision",
+    "projected_total_tokens_upper",
+    "projected_wall_clock_p95_minutes",
+    "remaining_forecast_tokens_upper",
+    "status",
+    "version",
+    "violations",
+  ];
+  const actualKeys = value && typeof value === "object" && !Array.isArray(value)
+    ? Object.keys(value).sort()
+    : [];
+  if (!value || typeof value !== "object" || Array.isArray(value)
+    || actualKeys.length !== expectedKeys.length
+    || actualKeys.some((key, index) => key !== expectedKeys[index])
+    || value.version !== "automatic_build_plan_budget_evaluation.v2"
+    || !value.plan_id || Buffer.byteLength(value.plan_id, "utf8") > 256
+    || !Number.isSafeInteger(value.plan_revision) || value.plan_revision < 1) {
+    throw new Error("automatic build plan budget evidence identity is invalid");
+  }
+  if (!Number.isFinite(value.known_usage_coverage)
+    || value.known_usage_coverage < 0 || value.known_usage_coverage > 1) {
+    throw new Error("automatic build plan budget evidence coverage is invalid");
+  }
+  const actualInput = nonNegativeSafeInteger(value.actual_input_tokens, "plan.actual_input_tokens");
+  const actualOutput = nonNegativeSafeInteger(value.actual_output_tokens, "plan.actual_output_tokens");
+  const actualTotal = nonNegativeSafeInteger(value.actual_total_tokens, "plan.actual_total_tokens");
+  const remaining = nonNegativeSafeInteger(
+    value.remaining_forecast_tokens_upper,
+    "plan.remaining_forecast_tokens_upper",
+  );
+  const projected = nonNegativeSafeInteger(
+    value.projected_total_tokens_upper,
+    "plan.projected_total_tokens_upper",
+  );
+  if (actualInput + actualOutput !== actualTotal || actualTotal + remaining !== projected) {
+    throw new Error("automatic build plan budget evidence token totals are inconsistent");
+  }
+  if (!Number.isFinite(value.projected_wall_clock_p95_minutes)
+    || value.projected_wall_clock_p95_minutes < 0) {
+    throw new Error("automatic build plan budget evidence wall clock is invalid");
+  }
+  if (!Array.isArray(value.violations)) {
+    throw new Error("automatic build plan budget evidence violations are invalid");
+  }
+  for (const violation of value.violations) {
+    if (!violation || !(["max_total_tokens", "max_wall_clock_minutes"] as string[]).includes(violation.code)
+      || !Number.isFinite(violation.actual) || violation.actual < 0
+      || !Number.isFinite(violation.limit) || violation.limit < 0) {
+      throw new Error("automatic build plan budget evidence violation is invalid");
+    }
+  }
+  if ((value.violations.length ? "exceeded" : "within_budget") !== value.status) {
+    throw new Error("automatic build plan budget evidence status is inconsistent");
+  }
+  return value;
+}
+
+/** One-shot forward migration used by synthetic fixtures and the guarded R8 migration. */
+export function migrateAutomaticBuildPlanBudgetEvaluationV1(
+  value: unknown,
+): AutomaticBuildPlanBudgetEvaluationV2 {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("legacy automatic build plan budget evaluation must be an object");
+  }
+  const legacy = value as Record<string, unknown>;
+  const required = [
+    "version",
+    "plan_id",
+    "plan_revision",
+    "status",
+    "known_usage_coverage",
+    "actual_input_tokens",
+    "actual_output_tokens",
+    "actual_total_tokens",
+    "remaining_forecast_tokens_upper",
+    "projected_total_tokens_upper",
+    "projected_wall_clock_p95_minutes",
+    "violations",
+    "receipt_digest",
+  ];
+  const allowed = new Set([...required, "preflight_evaluation_digest"]);
+  if (required.some((key) => !(key in legacy))
+    || Object.keys(legacy).some((key) => !allowed.has(key))
+    || legacy.version !== "automatic_build_plan_budget_evaluation.v1"
+    || typeof legacy.receipt_digest !== "string"
+    || !/^[a-f0-9]{64}$/.test(legacy.receipt_digest)
+    || (legacy.preflight_evaluation_digest !== undefined
+      && (typeof legacy.preflight_evaluation_digest !== "string"
+        || !/^[a-f0-9]{64}$/.test(legacy.preflight_evaluation_digest)))) {
+    throw new Error("legacy automatic build plan budget evaluation is invalid");
+  }
+  const {
+    version: _legacyVersion,
+    receipt_digest: _legacyReceiptDigest,
+    preflight_evaluation_digest: _legacyPreflightEvaluationDigest,
+    ...fields
+  } = legacy;
+  return validateAutomaticBuildPlanBudgetEvaluation({
+    version: "automatic_build_plan_budget_evaluation.v2",
+    ...fields,
+  } as unknown as AutomaticBuildPlanBudgetEvaluationV2);
 }
 
 function upperTokenEstimate(units: WorkUnitDescriptor[]): number {
@@ -451,13 +617,12 @@ export function buildAutomaticBuildPreflight(input: {
   executor_provenance?: AutomaticBuildExecutorProvenanceV1;
   historical_performance?: AutomaticBuildPerformanceHistoryV1;
   build_plan?: BuildPlanV1;
-}): AutomaticBuildPreflightV1 {
+}): AutomaticBuildPreflightV2 {
   const budget = validateBudget(input.budget);
   const buildPlan = input.build_plan ? validateBuildPlanV1(input.build_plan) : undefined;
   const buildPlanBinding = buildPlan ? {
     plan_id: buildPlan.plan_id,
-    revision: buildPlan.revision,
-    plan_digest: buildPlan.plan_digest,
+    plan_revision: buildPlan.revision,
   } : undefined;
   if (!Number.isSafeInteger(input.requested_workers) || input.requested_workers < 1) {
     throw new Error("requested_workers must be a positive safe integer");
@@ -473,12 +638,12 @@ export function buildAutomaticBuildPreflight(input: {
   if (proofBoundUnits.length && proofBoundUnits.length !== eligible.length) {
     throw new Error(`preflight stage cannot mix v2 and proof-bound descriptor generations: ${input.stage}`);
   }
-  const policySetDigests = new Set<string>();
+  const policyGenerations = new Map<WorkUnitKind, AutomaticBuildPolicyGenerationEvidenceV1>();
   for (const unit of eligible) {
     if (isWorkUnitDescriptorV3(unit)) {
       validateWorkUnitDescriptorV3(unit);
     } else if (isWorkUnitDescriptorV4(unit)) {
-      validateWorkUnitDescriptorV4(unit, CODEX_EXECUTOR_TRANSPORT_PROFILE_V1);
+      validateWorkUnitDescriptorV4(unit, CODEX_EXECUTOR_TRANSPORT_PROFILE_V2);
     }
     if (isProofBoundWorkUnitDescriptor(unit)) {
       const binding = input.task_bindings?.[unit.work_unit_id];
@@ -486,21 +651,24 @@ export function buildAutomaticBuildPreflight(input: {
         throw new Error(`preflight proof-bound work unit is missing its task binding: ${unit.work_unit_id}`);
       }
       validateWorkUnitTaskPolicyBinding(unit, binding);
-      if (!("policy_set_digest" in binding)) {
-        throw new Error(`preflight proof-bound work unit is missing its policy-set authority: ${unit.work_unit_id}`);
+      if (!("policy_generation_id" in binding)) {
+        throw new Error(`preflight proof-bound work unit is missing its policy generation authority: ${unit.work_unit_id}`);
       }
-      policySetDigests.add(binding.policy_set_digest);
+      const existing = policyGenerations.get(unit.kind);
+      const generation = {
+        kind: unit.kind,
+        policy_generation_id: binding.policy_generation_id,
+        semantic_contract: binding.semantic_contract,
+      };
+      if (existing && stableJson(existing) !== stableJson(generation)) {
+        throw new Error(`preflight work-unit kind has conflicting policy generations: ${unit.kind}`);
+      }
+      policyGenerations.set(unit.kind, generation);
     } else if (input.task_bindings?.[unit.work_unit_id]) {
       validateWorkUnitTaskPolicyBinding(unit, input.task_bindings[unit.work_unit_id]);
     }
   }
   const policy = eligible[0].policy_fingerprint;
-  const policySetDigest = proofBoundUnits.length
-    ? [...policySetDigests][0]
-    : undefined;
-  if (proofBoundUnits.length && policySetDigests.size !== 1) {
-    throw new Error(`preflight proof-bound stage must use exactly one policy-set digest: ${input.stage}`);
-  }
   if (!proofBoundUnits.length && eligible.some((unit) => !samePolicy(unit.policy_fingerprint, policy))) {
     throw new Error(`preflight stage contains mixed policy fingerprints: ${input.stage}`);
   }
@@ -519,7 +687,6 @@ export function buildAutomaticBuildPreflight(input: {
   const totalLower = inputDistribution.total + outputTokensLower;
   const totalUpper = inputDistribution.total + outputTokensUpper;
   const descriptorPlanDigest = workUnitPlanDigest(input.work_units);
-  const policyDigest = policySetDigest ?? sha256(stableJson(policy));
   const executorProvenance = validateExecutorProvenance(input.executor_provenance);
   const historicalPerformance = validatePerformanceHistory(input.historical_performance);
   const matchingSamples = (kind: WorkUnitKind): AutomaticBuildPerformanceSampleV1[] => {
@@ -655,50 +822,22 @@ export function buildAutomaticBuildPreflight(input: {
   const wallStatus = wallViolations.length
     ? confidence.level === "low" ? "low_confidence" as const : "exceeded" as const
     : "within_budget" as const;
-  const digestIdentity = {
-    version: "automatic_build_preflight.v1",
-    target_ref: input.target_ref,
-    stage: input.stage,
-    descriptor_plan_digest: descriptorPlanDigest,
-    quality_profile: input.quality_profile,
-    policy_digest: policyDigest,
-    build_plan: buildPlanBinding ?? null,
-    budget,
-    requested_workers: input.requested_workers,
-  };
   const historicalUsage = validateHistoricalUsage(input.historical_metrics);
   const workerLimit = Math.min(input.requested_workers, availableAgentSlots, 3);
   const parallelBatch = selectAutomaticBuildCostBatch(pendingEligible, {
     max_tasks: workerLimit,
     max_total_score: Math.min(budget.max_batch_score, budget.max_parallel_cost),
   });
-  const evaluationIdentity = {
-    version: "automatic_build_preflight_evaluation.v1",
-    descriptor_plan_digest: descriptorPlanDigest,
-    build_plan: buildPlanBinding ?? null,
-    dispatch_plan_digest: dispatchPlan.dispatch_plan_digest,
-    executor_provenance: executorProvenance ?? "unavailable",
-    wall_budget: wallBudget ?? null,
-    cost_scope: { lifetime: lifetimeScope, remaining: remainingScope, scheduled: scheduledScope },
-    predicted,
-    confidence,
-    adaptive_run_ttl_ms_by_kind: adaptiveRunTtl,
-    duplicate_lease_ratio: duplicateLeaseRatio,
-    wall_violations: wallViolations,
-  };
   return {
-    version: "automatic_build_preflight.v1",
+    version: "automatic_build_preflight.v2",
     target_ref: input.target_ref,
     stage: input.stage,
     descriptor_plan_digest: descriptorPlanDigest,
     ...(buildPlanBinding ? { build_plan: buildPlanBinding } : {}),
-    plan_digest: sha256(stableJson(digestIdentity)),
-    preflight_evaluation_digest: sha256(stableJson(evaluationIdentity)),
     quality_profile: input.quality_profile,
-    ...(policySetDigest
-      ? { policy_set_digest: policySetDigest }
+    ...(proofBoundUnits.length
+      ? { policy_generations: [...policyGenerations.values()].sort((left, right) => left.kind.localeCompare(right.kind)) }
       : { policy_fingerprint: policy }),
-    policy_digest: policyDigest,
     work_units: {
       total: input.work_units.length,
       eligible: eligible.length,

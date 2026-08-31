@@ -1,17 +1,17 @@
-import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { compileBuildMode } from "../src/build-capability";
+import { compileBuildModeV3 } from "../src/build-capability";
 import {
-  transitionBuildIntent,
-  transitionBuildPlan,
-  validateBuildIntentV1,
-  type BuildIntentV1,
-  type BuildPlanV1,
-} from "../src/build-intent";
+  transitionBuildIntentV3,
+  transitionBuildPlanV3,
+  validateBuildIntentV3,
+  type BuildIntentV3,
+  type BuildPlanV3,
+} from "../src/build-intent-v2";
+import { getSystemArtifactBlueprintV1 } from "../src/artifact-blueprint";
 import {
   failIntentArtifactTaskAttempt,
   inspectIntentArtifactTaskAttempt,
@@ -22,11 +22,10 @@ import * as intentArtifactMailboxModule from "../src/intent-artifact-mailbox";
 import {
   adaptIntentArtifactPayloadV1,
   compileIntentArtifactTasks,
-  type IntentArtifactCandidateV2,
-  type IntentArtifactTaskEnvelopeV2,
+  type IntentArtifactCandidateV3,
+  type IntentArtifactTaskEnvelopeV3,
 } from "../src/intent-artifact";
 import { runIntentArtifactMailboxCommand } from "../../../skills/build/intent-artifact";
-import { canonicalBuildJson } from "../src/build-intent";
 
 const availableLids = ["1.1", "1.2", "2.1"];
 const resolvedScopeLids = ["1.1", "1.2"];
@@ -55,38 +54,48 @@ function expectedPrivateCandidateSink() {
   return sink;
 }
 
-function confirmedSelection(): { intent: BuildIntentV1; plan: BuildPlanV1 } {
-  const draftIntent = validateBuildIntentV1({
-    version: "build_intent.v1",
+function confirmedSelection(): { intent: BuildIntentV3; plan: BuildPlanV3 } {
+  const draftIntent = validateBuildIntentV3({
+    version: "build_intent.v3",
     intent_id: "intent-private-mailbox",
-    revision: 1,
+    intent_revision: 1,
     book_id: "book-a",
     source_fingerprint: "source-a",
     content_profile: { id: "technical_learning", version: "technical_learning_v0" },
     user_goal: "PRIVATE_MAILBOX_SENTINEL compare the sequence and concepts.",
     goal_kind: "compare",
     source_scope: { whole_book: false, lids: ["1.1", "1.2"], sections: [] },
-    desired_artifacts: ["timeline", "concept_map"],
     usage_horizon: "project",
     privacy: "reader_private",
     status: "draft",
     created_at: "2026-07-26T01:00:00.000Z",
   });
-  const draftPlan = compileBuildMode({
+  const selected_blueprints = ["timeline", "concept_map"].map((artifactType) => {
+    const preset = getSystemArtifactBlueprintV1(artifactType as "timeline" | "concept_map");
+    return {
+      version: "artifact_blueprint_resolution.v2" as const,
+      source: "system" as const,
+      blueprint: preset.blueprint,
+      blueprint_id: preset.blueprint.blueprint_id,
+      blueprint_version: preset.blueprint.blueprint_version,
+    };
+  });
+  const draftPlan = compileBuildModeV3({
     mode: "goal_directed",
     book_id: draftIntent.book_id,
     source_fingerprint: draftIntent.source_fingerprint,
     content_profile: draftIntent.content_profile,
     plan_id: "plan-private-mailbox",
-    revision: 1,
+    plan_revision: 1,
     created_at: draftIntent.created_at,
     budget: { max_total_tokens: 20_000, on_exceed: "needs_user" },
     public_freshness: [],
     intent: draftIntent,
+    selected_blueprints,
   }).plan!;
   return {
-    intent: transitionBuildIntent(draftIntent, "confirmed", { at: "2026-07-26T01:01:00.000Z" }),
-    plan: transitionBuildPlan(draftPlan, "confirmed", {
+    intent: transitionBuildIntentV3(draftIntent, "confirmed", { at: "2026-07-26T01:01:00.000Z" }),
+    plan: transitionBuildPlanV3(draftPlan, "confirmed", {
       at: "2026-07-26T01:01:00.000Z",
       confirmation_source: "reader_ui",
     }),
@@ -101,7 +110,7 @@ function fixture() {
     available_lids: availableLids,
     resolved_scope_lids: resolvedScopeLids,
   });
-  const directory = (task: IntentArtifactTaskEnvelopeV2) => path.join(
+  const directory = (task: IntentArtifactTaskEnvelopeV3) => path.join(
     privateRoot,
     task.book_id,
     "artifacts",
@@ -111,20 +120,28 @@ function fixture() {
   return { privateRoot, ...selection, tasks, directory };
 }
 
-function candidate(task: IntentArtifactTaskEnvelopeV2, payload: unknown): IntentArtifactCandidateV2 {
+function candidate(task: IntentArtifactTaskEnvelopeV3, payload: unknown): IntentArtifactCandidateV3 {
   if (task.artifact.artifact_type === "custom") throw new Error("expected a legacy system Blueprint");
+  const adapted = adaptIntentArtifactPayloadV1(task.artifact.artifact_type, payload);
   return {
-    version: "intent_artifact_candidate.v2",
+    version: "intent_artifact_candidate.v3",
     task_id: task.task_id,
     book_id: task.book_id,
     source_fingerprint: task.source_fingerprint,
     intent_id: task.intent_id,
-    intent_digest: task.intent_digest,
+    intent_revision: task.intent_revision,
     plan_id: task.plan_id,
-    plan_digest: task.plan_digest,
+    plan_revision: task.plan_revision,
     artifact_id: task.artifact.artifact_id,
-    blueprint_digest: task.artifact.blueprint_digest,
-    payload: adaptIntentArtifactPayloadV1(task.artifact.artifact_type, payload),
+    blueprint_id: task.artifact.blueprint_id,
+    blueprint_version: task.artifact.blueprint_version,
+    payload: {
+      version: "artifact_instance.v3",
+      blueprint_id: task.artifact.blueprint_id,
+      blueprint_version: task.artifact.blueprint_version,
+      records: adapted.records,
+      ...(adapted.relations === undefined ? {} : { relations: adapted.relations }),
+    },
   };
 }
 
@@ -182,7 +199,7 @@ describe("IP7 reader-private task-owned artifact mailbox", () => {
     const second = submitIntentArtifactTaskAttempt(submitInput(f, handoff.task_path));
     expect(second).toEqual(first);
     expect(first).toMatchObject({
-      version: "intent_artifact_mailbox_receipt.v1",
+      version: "intent_artifact_mailbox_receipt.v2",
       state: "committed",
       task_id: task.task_id,
       attempt: 1,
@@ -193,7 +210,7 @@ describe("IP7 reader-private task-owned artifact mailbox", () => {
     expect(serialized).not.toContain("evidence_lids");
     expect(serialized).not.toContain(f.privateRoot);
     expect(Buffer.byteLength(serialized)).toBeLessThanOrEqual(4_096);
-    expect(readFileSync(path.join(artifactDirectory, "accepted.json"), "utf8")).toContain("Private result body");
+    expect(readFileSync(path.join(artifactDirectory, "accepted.v3.json"), "utf8")).toContain("Private result body");
     expect(inspectIntentArtifactTaskAttempt({
       private_root: f.privateRoot,
       task_path: handoff.task_path,
@@ -203,6 +220,42 @@ describe("IP7 reader-private task-owned artifact mailbox", () => {
       items: [{ id: "event-2", label: "Conflicting body", evidence_lids: ["1.2"] }],
     })), "utf8");
     expect(() => submitIntentArtifactTaskAttempt(submitInput(f, handoff.task_path))).toThrow(/candidate hash/i);
+  });
+
+  it("H0 removes small control and accepted-receipt digests while retaining candidate and payload replay identities", () => {
+    const f = fixture();
+    const task = f.tasks[0];
+    const artifactDirectory = f.directory(task);
+    const handoff = openIntentArtifactTaskAttempt({
+      private_root: f.privateRoot,
+      artifact_directory: artifactDirectory,
+      task,
+      created_at: "2026-07-26T01:02:00.000Z",
+    });
+    writeFileSync(path.join(path.dirname(handoff.task_path), "candidate.json"), JSON.stringify(candidate(task, {
+      items: [{ id: "event-h0", label: "Retained payload body", evidence_lids: ["1.1"] }],
+    })), "utf8");
+
+    const receipt = submitIntentArtifactTaskAttempt(submitInput(f, handoff.task_path));
+    const owner = JSON.parse(readFileSync(path.join(artifactDirectory, "owner.v2.json"), "utf8"));
+    const accepted = JSON.parse(readFileSync(path.join(artifactDirectory, "accepted.v3.json"), "utf8"));
+
+    expect(receipt).toMatchObject({
+      candidate_sha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
+      payload_digest: expect.stringMatching(/^[a-f0-9]{64}$/u),
+    });
+    expect(accepted.payload).toBeDefined();
+
+    const present = [
+      Object.hasOwn(owner, "task_digest") ? "task_digest" : undefined,
+      Object.hasOwn(task, "intent_digest") ? "intent_digest" : undefined,
+      Object.hasOwn(task, "plan_digest") ? "plan_digest" : undefined,
+      Object.hasOwn(task.artifact, "blueprint_digest") ? "blueprint_digest" : undefined,
+      Object.hasOwn(receipt, "accepted_sha256") ? "accepted_sha256" : undefined,
+    ].filter((field): field is string => field !== undefined);
+    // H0_RED action: H1 removes the five wrappers above and compares the task/accepted
+    // id+revision/version fields directly; candidate_sha256 and payload_digest stay for replay.
+    expect(present).toEqual([]);
   });
 
   it("stages executor candidate bytes into the task-owned mailbox with idempotent replay and conflict rejection", () => {
@@ -281,7 +334,7 @@ describe("IP7 reader-private task-owned artifact mailbox", () => {
       private_root: f.privateRoot,
       task_path: conceptFirst.task_path,
     })).toMatchObject({ state: "pending", attempt: 1, task_id: concept.task_id });
-    expect(existsSync(path.join(f.directory(concept), "accepted.json"))).toBe(false);
+    expect(existsSync(path.join(f.directory(concept), "accepted.v3.json"))).toBe(false);
   });
 
   it("rejects public/out-of-root paths, a second owner, and cross-task candidates", () => {
@@ -316,7 +369,7 @@ describe("IP7 reader-private task-owned artifact mailbox", () => {
     );
     expect(() => submitIntentArtifactTaskAttempt(submitInput(f, handoff.task_path))).toThrow(/task_id/i);
     expect(existsSync(path.join(path.dirname(handoff.task_path), "failure.json"))).toBe(true);
-    expect(existsSync(path.join(f.directory(timeline), "accepted.json"))).toBe(false);
+    expect(existsSync(path.join(f.directory(timeline), "accepted.v3.json"))).toBe(false);
   });
 
   it("runs prepare, submit, and inspect through one stdin-safe Sidecar command surface", () => {
@@ -335,10 +388,12 @@ describe("IP7 reader-private task-owned artifact mailbox", () => {
       },
     });
     expect(prepared).toMatchObject({
-      version: "intent_artifact_task_batch_handoff.v1",
+      version: "intent_artifact_task_batch_handoff.v2",
       book_id: task.book_id,
       intent_id: task.intent_id,
+      intent_revision: task.intent_revision,
       plan_id: task.plan_id,
+      plan_revision: task.plan_revision,
       tasks: [
         { task_id: task.task_id, attempt: 1 },
         { task_id: f.tasks[1].task_id, attempt: 1 },
@@ -392,15 +447,12 @@ describe("IP7 reader-private task-owned artifact mailbox", () => {
     })).toThrow(/unrecognized keys/i);
   });
 
-  it("omits a digest-valid accepted v1 body through the read-only preset adapter", () => {
+  it("does not treat a legacy accepted body as a committed V3 artifact", () => {
     const f = fixture();
-    const [timeline, concept] = f.tasks;
+    const [timeline] = f.tasks;
     const legacyPayload = {
       items: [{ id: "legacy-event", label: "PRIVATE_LEGACY_BODY", evidence_lids: ["1.1"] }],
     };
-    const legacyPayloadDigest = createHash("sha256")
-      .update(canonicalBuildJson(legacyPayload), "utf8")
-      .digest("hex");
     mkdirSync(f.directory(timeline), { recursive: true });
     writeFileSync(path.join(f.directory(timeline), "accepted.json"), JSON.stringify({
       version: "intent_artifact_accepted.v1",
@@ -408,13 +460,11 @@ describe("IP7 reader-private task-owned artifact mailbox", () => {
       book_id: timeline.book_id,
       source_fingerprint: timeline.source_fingerprint,
       intent_id: timeline.intent_id,
-      intent_digest: timeline.intent_digest,
       plan_id: timeline.plan_id,
-      plan_digest: timeline.plan_digest,
       artifact_id: timeline.artifact.artifact_id,
       artifact_type: "timeline",
       payload: legacyPayload,
-      payload_digest: legacyPayloadDigest,
+      payload_digest: "a".repeat(64),
       accepted_at: "2026-07-26T01:02:00.000Z",
     }), "utf8");
 
@@ -431,7 +481,8 @@ describe("IP7 reader-private task-owned artifact mailbox", () => {
       },
     }) as { tasks: Array<{ artifact_id: string }> };
     expect(prepared.tasks).toEqual([
-      expect.objectContaining({ artifact_id: concept.artifact.artifact_id }),
+      expect.objectContaining({ artifact_id: timeline.artifact.artifact_id }),
+      expect.objectContaining({ artifact_id: f.tasks[1].artifact.artifact_id }),
     ]);
   });
 
@@ -445,14 +496,18 @@ describe("IP7 reader-private task-owned artifact mailbox", () => {
       created_at: "2026-07-26T01:02:00.000Z",
     });
     writeFileSync(path.join(path.dirname(handoff.task_path), "receipt.json"), JSON.stringify({
-      version: "intent_artifact_mailbox_receipt.v1",
+      version: "intent_artifact_mailbox_receipt.v2",
       state: "committed",
       task_id: task.task_id,
+      intent_id: task.intent_id,
+      intent_revision: task.intent_revision,
+      plan_id: task.plan_id,
+      plan_revision: task.plan_revision,
       artifact_id: task.artifact.artifact_id,
       artifact_type: task.artifact.artifact_type,
+      blueprint_id: task.artifact.blueprint_id,
+      blueprint_version: task.artifact.blueprint_version,
       attempt: 1,
-      intent_digest: task.intent_digest,
-      plan_digest: task.plan_digest,
       terminal_at: "2026-07-26T01:03:00.000Z",
       payload: "PRIVATE_FORGED_RECEIPT_BODY",
     }), "utf8");

@@ -14,9 +14,9 @@ import { canonicalBuildJson } from "./build-intent";
 import {
   acceptIntentArtifactCandidate,
   type AcceptIntentArtifactCandidateInput,
-  type AcceptedIntentArtifactV2,
+  type AcceptedIntentArtifactV3,
   type IntentArtifactCompatibilityType,
-  type IntentArtifactTaskEnvelopeV2,
+  type IntentArtifactTaskEnvelopeV3,
 } from "./intent-artifact";
 
 const DEFAULT_MAX_CANDIDATE_BYTES = 4 * 1024 * 1024;
@@ -25,19 +25,22 @@ const UTF8_BOM = Buffer.from([0xef, 0xbb, 0xbf]);
 const UTF8_DECODER = new TextDecoder("utf-8", { fatal: true });
 const DIAGNOSTIC_CODE = /^[a-z][a-z0-9_.-]{0,63}$/u;
 const SHA256 = /^[a-f0-9]{64}$/u;
+const V3_ATTEMPTS_DIRECTORY = "attempts-v3";
+const V3_OWNER_FILE = "owner.v2.json";
+const V3_ACCEPTED_FILE = "accepted.v3.json";
 
-interface IntentArtifactMailboxOwnerV1 {
-  version: "intent_artifact_mailbox_owner.v1";
+interface IntentArtifactMailboxOwnerV2 {
+  version: "intent_artifact_mailbox_owner.v2";
   task_id: string;
-  task_digest: string;
   book_id: string;
   intent_id: string;
-  intent_digest: string;
+  intent_revision: number;
   plan_id: string;
-  plan_digest: string;
+  plan_revision: number;
   artifact_id: string;
   artifact_type: IntentArtifactCompatibilityType;
-  blueprint_digest: string;
+  blueprint_id: string;
+  blueprint_version: string;
 }
 
 interface IntentArtifactTaskAttemptV1 {
@@ -50,27 +53,35 @@ interface IntentArtifactTaskAttemptV1 {
   created_at: string;
 }
 
-export interface IntentArtifactTaskAttemptHandoffV1 {
-  version: "intent_artifact_task_attempt_handoff.v1";
+export interface IntentArtifactTaskAttemptHandoffV2 {
+  version: "intent_artifact_task_attempt_handoff.v2";
   task_id: string;
+  intent_id: string;
+  intent_revision: number;
+  plan_id: string;
+  plan_revision: number;
   artifact_id: string;
   artifact_type: IntentArtifactCompatibilityType;
+  blueprint_id: string;
+  blueprint_version: string;
   attempt: number;
   task_path: string;
 }
 
-export interface IntentArtifactMailboxReceiptV1 {
-  version: "intent_artifact_mailbox_receipt.v1";
+export interface IntentArtifactMailboxReceiptV2 {
+  version: "intent_artifact_mailbox_receipt.v2";
   state: "committed" | "retryable_failure";
   task_id: string;
+  intent_id: string;
+  intent_revision: number;
+  plan_id: string;
+  plan_revision: number;
   artifact_id: string;
   artifact_type: IntentArtifactCompatibilityType;
+  blueprint_id: string;
+  blueprint_version: string;
   attempt: number;
-  intent_digest: string;
-  plan_digest: string;
-  blueprint_digest: string;
   candidate_sha256?: string;
-  accepted_sha256?: string;
   payload_digest?: string;
   record_count?: number;
   relation_count?: number;
@@ -96,14 +107,14 @@ export interface IntentArtifactTaskAttemptExecutionContextV1 {
   attempt_directory: string;
   task_path: string;
   candidate_path: string;
-  task: IntentArtifactTaskEnvelopeV2;
+  task: IntentArtifactTaskEnvelopeV3;
   attempt: number;
 }
 
 export interface OpenIntentArtifactTaskAttemptInput {
   private_root: string;
   artifact_directory: string;
-  task: IntentArtifactTaskEnvelopeV2;
+  task: IntentArtifactTaskEnvelopeV3;
   created_at: string;
   max_attempts?: number;
 }
@@ -171,7 +182,7 @@ function readJson<T>(file: string): T {
   }
 }
 
-function ensureBounded(value: IntentArtifactMailboxReceiptV1): void {
+function ensureBounded(value: IntentArtifactMailboxReceiptV2): void {
   const bytes = Buffer.byteLength(JSON.stringify(value), "utf8");
   if (bytes > MAX_RECEIPT_BYTES) throw new Error(`intent artifact mailbox receipt exceeds ${MAX_RECEIPT_BYTES} bytes`);
 }
@@ -237,53 +248,60 @@ function assertPrivateDescendant(privateRootInput: string, targetInput: string, 
   return { privateRoot, target };
 }
 
-function artifactOwner(task: IntentArtifactTaskEnvelopeV2): IntentArtifactMailboxOwnerV1 {
+function artifactOwner(task: IntentArtifactTaskEnvelopeV3): IntentArtifactMailboxOwnerV2 {
   return {
-    version: "intent_artifact_mailbox_owner.v1",
+    version: "intent_artifact_mailbox_owner.v2",
     task_id: task.task_id,
-    task_digest: digestJson(task),
     book_id: task.book_id,
     intent_id: task.intent_id,
-    intent_digest: task.intent_digest,
+    intent_revision: task.intent_revision,
     plan_id: task.plan_id,
-    plan_digest: task.plan_digest,
+    plan_revision: task.plan_revision,
     artifact_id: task.artifact.artifact_id,
     artifact_type: task.artifact.artifact_type,
-    blueprint_digest: task.artifact.blueprint_digest,
+    blueprint_id: task.artifact.blueprint_id,
+    blueprint_version: task.artifact.blueprint_version,
   };
 }
 
-function assertTaskEnvelope(task: IntentArtifactTaskEnvelopeV2): void {
+function assertTaskEnvelope(task: IntentArtifactTaskEnvelopeV3): void {
   canonicalBuildJson(task);
-  if (task.version !== "intent_artifact_task_envelope.v2"
+  if (task.version !== "intent_artifact_task_envelope.v3"
     || task.privacy !== "reader_private"
     || !task.task_id
     || !task.book_id
     || !task.intent_id
     || !task.plan_id
-    || !SHA256.test(task.intent_digest)
-    || !SHA256.test(task.plan_digest)
+    || !Number.isSafeInteger(task.intent_revision) || task.intent_revision < 1
+    || !Number.isSafeInteger(task.plan_revision) || task.plan_revision < 1
     || !task.artifact
     || !task.artifact.artifact_id
     || !task.artifact.artifact_type
-    || !SHA256.test(task.artifact.blueprint_digest)) {
+    || !task.artifact.blueprint_id
+    || !task.artifact.blueprint_version) {
     throw new Error("invalid intent artifact task envelope");
   }
 }
 
-function handoff(task: IntentArtifactTaskEnvelopeV2, attempt: number, taskPath: string): IntentArtifactTaskAttemptHandoffV1 {
+function handoff(task: IntentArtifactTaskEnvelopeV3, attempt: number, taskPath: string): IntentArtifactTaskAttemptHandoffV2 {
   return {
-    version: "intent_artifact_task_attempt_handoff.v1",
+    version: "intent_artifact_task_attempt_handoff.v2",
     task_id: task.task_id,
+    intent_id: task.intent_id,
+    intent_revision: task.intent_revision,
+    plan_id: task.plan_id,
+    plan_revision: task.plan_revision,
     artifact_id: task.artifact.artifact_id,
     artifact_type: task.artifact.artifact_type,
+    blueprint_id: task.artifact.blueprint_id,
+    blueprint_version: task.artifact.blueprint_version,
     attempt,
     task_path: taskPath,
   };
 }
 
 function attemptDirectories(artifactDirectory: string): Array<{ attempt: number; directory: string }> {
-  const root = path.join(artifactDirectory, "attempts");
+  const root = path.join(artifactDirectory, V3_ATTEMPTS_DIRECTORY);
   if (!existsSync(root)) return [];
   return readdirSync(root, { withFileTypes: true })
     .filter((entry) => entry.isDirectory() && /^\d{6}$/u.test(entry.name))
@@ -299,7 +317,7 @@ function resolveAttemptPaths(privateRootInput: string, taskPathInput: string): A
   if (path.basename(checked.target) !== "task.json") throw new Error("task_path must end with task.json");
   const attemptDirectory = path.dirname(checked.target);
   const attemptsDirectory = path.dirname(attemptDirectory);
-  if (path.basename(attemptsDirectory) !== "attempts" || !/^\d{6}$/u.test(path.basename(attemptDirectory))) {
+  if (path.basename(attemptsDirectory) !== V3_ATTEMPTS_DIRECTORY || !/^\d{6}$/u.test(path.basename(attemptDirectory))) {
     throw new Error("task_path is not inside an intent artifact attempt directory");
   }
   const artifactDirectory = path.dirname(attemptsDirectory);
@@ -312,15 +330,15 @@ function resolveAttemptPaths(privateRootInput: string, taskPathInput: string): A
     receiptPath: path.join(attemptDirectory, "receipt.json"),
     failurePath: path.join(attemptDirectory, "failure.json"),
     failureDetailPath: path.join(attemptDirectory, "failure-detail.json"),
-    acceptedPath: path.join(artifactDirectory, "accepted.json"),
+    acceptedPath: path.join(artifactDirectory, V3_ACCEPTED_FILE),
   };
 }
 
-function readTask(paths: AttemptPaths): { task: IntentArtifactTaskEnvelopeV2; attempt: IntentArtifactTaskAttemptV1 } {
-  const task = readJson<IntentArtifactTaskEnvelopeV2>(paths.taskPath);
+function readTask(paths: AttemptPaths): { task: IntentArtifactTaskEnvelopeV3; attempt: IntentArtifactTaskAttemptV1 } {
+  const task = readJson<IntentArtifactTaskEnvelopeV3>(paths.taskPath);
   const attempt = readJson<IntentArtifactTaskAttemptV1>(path.join(paths.attemptDirectory, "attempt.json"));
   assertTaskEnvelope(task);
-  if (task.version !== "intent_artifact_task_envelope.v2" || attempt.version !== "intent_artifact_task_attempt.v1") {
+  if (task.version !== "intent_artifact_task_envelope.v3" || attempt.version !== "intent_artifact_task_attempt.v1") {
     throw new Error("unsupported intent artifact task attempt version");
   }
   if (attempt.task_id !== task.task_id
@@ -329,7 +347,7 @@ function readTask(paths: AttemptPaths): { task: IntentArtifactTaskEnvelopeV2; at
     || attempt.attempt !== Number(path.basename(paths.attemptDirectory))) {
     throw new Error("intent artifact attempt identity does not match task_path");
   }
-  const owner = readJson<IntentArtifactMailboxOwnerV1>(path.join(paths.artifactDirectory, "owner.json"));
+  const owner = readJson<IntentArtifactMailboxOwnerV2>(path.join(paths.artifactDirectory, V3_OWNER_FILE));
   if (canonicalBuildJson(owner) !== canonicalBuildJson(artifactOwner(task))) {
     throw new Error("intent artifact mailbox owner does not match task envelope");
   }
@@ -408,7 +426,7 @@ export function stageIntentArtifactTaskCandidate(input: {
 
 export function openIntentArtifactTaskAttempt(
   input: OpenIntentArtifactTaskAttemptInput,
-): IntentArtifactTaskAttemptHandoffV1 {
+): IntentArtifactTaskAttemptHandoffV2 {
   assertTaskEnvelope(input.task);
   assertIsoDateTime(input.created_at, "created_at");
   const maxAttempts = input.max_attempts ?? 3;
@@ -423,12 +441,12 @@ export function openIntentArtifactTaskAttempt(
     "artifact_directory",
   ).target;
   const owner = artifactOwner(input.task);
-  const ownerPath = path.join(artifactDirectory, "owner.json");
+  const ownerPath = path.join(artifactDirectory, V3_OWNER_FILE);
   if (existsSync(ownerPath) && canonicalBuildJson(readJson(ownerPath)) !== canonicalBuildJson(owner)) {
     throw new Error("intent artifact mailbox already has a different owner");
   }
   writeJsonOnce(ownerPath, owner, "intent artifact mailbox owner");
-  if (existsSync(path.join(artifactDirectory, "accepted.json"))) {
+  if (existsSync(path.join(artifactDirectory, V3_ACCEPTED_FILE))) {
     throw new Error("intent artifact mailbox is already committed");
   }
 
@@ -441,7 +459,7 @@ export function openIntentArtifactTaskAttempt(
       if (existsSync(path.join(latest.directory, "receipt.json"))) {
         throw new Error("intent artifact mailbox is already committed");
       }
-      const existingTask = readJson<IntentArtifactTaskEnvelopeV2>(latestTaskPath);
+      const existingTask = readJson<IntentArtifactTaskEnvelopeV3>(latestTaskPath);
       if (canonicalBuildJson(existingTask) !== canonicalBuildJson(input.task)) {
         throw new Error("pending intent artifact attempt has a conflicting task body");
       }
@@ -450,7 +468,11 @@ export function openIntentArtifactTaskAttempt(
   }
   const nextAttempt = (latest?.attempt ?? 0) + 1;
   if (nextAttempt > maxAttempts) throw new Error(`intent artifact retry limit reached: ${maxAttempts}`);
-  const attemptDirectory = path.join(artifactDirectory, "attempts", String(nextAttempt).padStart(6, "0"));
+  const attemptDirectory = path.join(
+    artifactDirectory,
+    V3_ATTEMPTS_DIRECTORY,
+    String(nextAttempt).padStart(6, "0"),
+  );
   if (existsSync(attemptDirectory)) throw new Error(`intent artifact attempt already exists: ${nextAttempt}`);
   mkdirSync(attemptDirectory, { recursive: true });
   const taskPath = path.join(attemptDirectory, "task.json");
@@ -469,25 +491,28 @@ export function openIntentArtifactTaskAttempt(
 
 function writeFailure(
   paths: AttemptPaths,
-  task: IntentArtifactTaskEnvelopeV2,
+  task: IntentArtifactTaskEnvelopeV3,
   attempt: IntentArtifactTaskAttemptV1,
   input: { diagnostic_code: string; message?: string; failed_at: string },
-): IntentArtifactMailboxReceiptV1 {
+): IntentArtifactMailboxReceiptV2 {
   if (!DIAGNOSTIC_CODE.test(input.diagnostic_code)) {
     throw new Error("diagnostic_code must be a path-safe lowercase code");
   }
   assertIsoDateTime(input.failed_at, "failed_at");
   if (existsSync(paths.receiptPath)) throw new Error("cannot fail a committed intent artifact attempt");
-  const receipt: IntentArtifactMailboxReceiptV1 = {
-    version: "intent_artifact_mailbox_receipt.v1",
+  const receipt: IntentArtifactMailboxReceiptV2 = {
+    version: "intent_artifact_mailbox_receipt.v2",
     state: "retryable_failure",
     task_id: task.task_id,
+    intent_id: task.intent_id,
+    intent_revision: task.intent_revision,
+    plan_id: task.plan_id,
+    plan_revision: task.plan_revision,
     artifact_id: task.artifact.artifact_id,
     artifact_type: task.artifact.artifact_type,
+    blueprint_id: task.artifact.blueprint_id,
+    blueprint_version: task.artifact.blueprint_version,
     attempt: attempt.attempt,
-    intent_digest: task.intent_digest,
-    plan_digest: task.plan_digest,
-    blueprint_digest: task.artifact.blueprint_digest,
     diagnostic_code: input.diagnostic_code,
     terminal_at: input.failed_at,
   };
@@ -508,7 +533,7 @@ function writeFailure(
 
 export function failIntentArtifactTaskAttempt(
   input: FailIntentArtifactTaskAttemptInput,
-): IntentArtifactMailboxReceiptV1 {
+): IntentArtifactMailboxReceiptV2 {
   const paths = resolveAttemptPaths(input.private_root, input.task_path);
   const { task, attempt } = readTask(paths);
   if (existsSync(paths.failurePath)) {
@@ -524,7 +549,7 @@ export function failIntentArtifactTaskAttempt(
 export function inspectIntentArtifactTaskAttempt(input: {
   private_root: string;
   task_path: string;
-}): IntentArtifactMailboxReceiptV1 | IntentArtifactTaskAttemptInspectionV1 {
+}): IntentArtifactMailboxReceiptV2 | IntentArtifactTaskAttemptInspectionV1 {
   const paths = resolveAttemptPaths(input.private_root, input.task_path);
   const { task, attempt } = readTask(paths);
   if (existsSync(paths.receiptPath)) return readStoredReceipt(paths, task, attempt, "committed");
@@ -566,10 +591,10 @@ function assertExactKeys(record: Record<string, unknown>, allowed: readonly stri
 
 function readStoredReceipt(
   paths: AttemptPaths,
-  task: IntentArtifactTaskEnvelopeV2,
+  task: IntentArtifactTaskEnvelopeV3,
   attempt: IntentArtifactTaskAttemptV1,
-  expectedState: IntentArtifactMailboxReceiptV1["state"],
-): IntentArtifactMailboxReceiptV1 {
+  expectedState: IntentArtifactMailboxReceiptV2["state"],
+): IntentArtifactMailboxReceiptV2 {
   const file = expectedState === "committed" ? paths.receiptPath : paths.failurePath;
   const value = readJson<unknown>(file);
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -580,14 +605,16 @@ function readStoredReceipt(
     "version",
     "state",
     "task_id",
+    "intent_id",
+    "intent_revision",
+    "plan_id",
+    "plan_revision",
     "artifact_id",
     "artifact_type",
+    "blueprint_id",
+    "blueprint_version",
     "attempt",
-    "intent_digest",
-    "plan_digest",
-    "blueprint_digest",
     "candidate_sha256",
-    "accepted_sha256",
     "payload_digest",
     "record_count",
     "relation_count",
@@ -595,17 +622,21 @@ function readStoredReceipt(
     "diagnostic_code",
     "terminal_at",
   ], "intent artifact mailbox receipt");
-  const receipt = record as unknown as IntentArtifactMailboxReceiptV1;
+  const receipt = record as unknown as IntentArtifactMailboxReceiptV2;
   ensureBounded(receipt);
-  if (receipt.version !== "intent_artifact_mailbox_receipt.v1"
+  if (receipt.version !== "intent_artifact_mailbox_receipt.v2"
     || receipt.state !== expectedState
     || receipt.task_id !== task.task_id
+    || receipt.intent_id !== task.intent_id
+    || receipt.intent_revision !== task.intent_revision
+    || receipt.plan_id !== task.plan_id
+    || receipt.plan_revision !== task.plan_revision
     || receipt.artifact_id !== task.artifact.artifact_id
     || receipt.artifact_type !== task.artifact.artifact_type
+    || receipt.blueprint_id !== task.artifact.blueprint_id
+    || receipt.blueprint_version !== task.artifact.blueprint_version
     || receipt.attempt !== attempt.attempt
-    || receipt.intent_digest !== task.intent_digest
-    || receipt.plan_digest !== task.plan_digest
-    || receipt.blueprint_digest !== task.artifact.blueprint_digest) {
+  ) {
     throw new Error("intent artifact mailbox receipt identity mismatch");
   }
   assertIsoDateTime(receipt.terminal_at, "receipt terminal_at");
@@ -616,7 +647,6 @@ function readStoredReceipt(
     return receipt;
   }
   if (!receipt.candidate_sha256 || !SHA256.test(receipt.candidate_sha256)
-    || !receipt.accepted_sha256 || !SHA256.test(receipt.accepted_sha256)
     || !receipt.payload_digest || !SHA256.test(receipt.payload_digest)
     || !Number.isSafeInteger(receipt.record_count) || receipt.record_count! < 0
     || !Number.isSafeInteger(receipt.relation_count) || receipt.relation_count! < 0
@@ -628,37 +658,49 @@ function readStoredReceipt(
   if (candidate.sha256 !== receipt.candidate_sha256) {
     throw new Error("candidate hash does not match committed intent artifact receipt");
   }
-  const accepted = readJson<AcceptedIntentArtifactV2>(paths.acceptedPath);
-  if (digestJson(accepted) !== receipt.accepted_sha256
+  const accepted = readJson<AcceptedIntentArtifactV3>(paths.acceptedPath);
+  if (accepted.version !== "intent_artifact_accepted.v3"
     || accepted.payload_digest !== receipt.payload_digest
+    || digestJson(accepted.payload) !== receipt.payload_digest
     || accepted.task_id !== task.task_id
+    || accepted.book_id !== task.book_id
+    || accepted.source_fingerprint !== task.source_fingerprint
+    || accepted.intent_id !== task.intent_id
+    || accepted.intent_revision !== task.intent_revision
+    || accepted.plan_id !== task.plan_id
+    || accepted.plan_revision !== task.plan_revision
     || accepted.artifact_id !== task.artifact.artifact_id
-    || accepted.blueprint_digest !== task.artifact.blueprint_digest
-    || accepted.payload.blueprint_digest !== task.artifact.blueprint_digest) {
+    || accepted.blueprint_id !== task.artifact.blueprint_id
+    || accepted.blueprint_version !== task.artifact.blueprint_version
+    || accepted.payload.blueprint_id !== task.artifact.blueprint_id
+    || accepted.payload.blueprint_version !== task.artifact.blueprint_version) {
     throw new Error("accepted artifact does not match committed intent artifact receipt");
   }
   return receipt;
 }
 
 function committedReceipt(
-  task: IntentArtifactTaskEnvelopeV2,
+  task: IntentArtifactTaskEnvelopeV3,
   attempt: IntentArtifactTaskAttemptV1,
   candidateSha256: string,
-  accepted: AcceptedIntentArtifactV2,
+  accepted: AcceptedIntentArtifactV3,
   gateReceipt: ReturnType<typeof acceptIntentArtifactCandidate>["receipt"],
-): IntentArtifactMailboxReceiptV1 {
+): IntentArtifactMailboxReceiptV2 {
+  void accepted;
   return {
-    version: "intent_artifact_mailbox_receipt.v1",
+    version: "intent_artifact_mailbox_receipt.v2",
     state: "committed",
     task_id: task.task_id,
+    intent_id: task.intent_id,
+    intent_revision: task.intent_revision,
+    plan_id: task.plan_id,
+    plan_revision: task.plan_revision,
     artifact_id: task.artifact.artifact_id,
     artifact_type: task.artifact.artifact_type,
+    blueprint_id: task.artifact.blueprint_id,
+    blueprint_version: task.artifact.blueprint_version,
     attempt: attempt.attempt,
-    intent_digest: task.intent_digest,
-    plan_digest: task.plan_digest,
-    blueprint_digest: task.artifact.blueprint_digest,
     candidate_sha256: candidateSha256,
-    accepted_sha256: digestJson(accepted),
     payload_digest: gateReceipt.payload_digest,
     record_count: gateReceipt.record_count,
     relation_count: gateReceipt.relation_count,
@@ -669,7 +711,7 @@ function committedReceipt(
 
 export function submitIntentArtifactTaskAttempt(
   input: SubmitIntentArtifactTaskAttemptInput,
-): IntentArtifactMailboxReceiptV1 {
+): IntentArtifactMailboxReceiptV2 {
   const paths = resolveAttemptPaths(input.private_root, input.task_path);
   const { task, attempt } = readTask(paths);
   const candidate = readCandidate(paths.candidatePath, input.max_candidate_bytes ?? DEFAULT_MAX_CANDIDATE_BYTES);

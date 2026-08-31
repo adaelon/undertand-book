@@ -1,21 +1,21 @@
 import {
-  BUILD_EXECUTOR_MCP_CONTRACT_V1,
+  BUILD_EXECUTOR_MCP_CONTRACT_V3,
   BUILD_EXECUTOR_TOOL_NAMES_V1,
   createBuildExecutorToolAdapter,
   type BuildExecutorToolNameV1,
 } from "../../packages/core/src/build-executor-tool-adapter";
 import {
-  BUILD_EXECUTOR_BOOTSTRAP_CONTRACT_V2,
-  createBuildExecutorChildConnectionCapability,
+  BUILD_EXECUTOR_BOOTSTRAP_CONTRACT_V3,
+  createBuildExecutorStdioConnectionCapability,
 } from "../../packages/core/src/build-executor-connection-capability";
 import {
   resolveAutomaticBuildExecutorRegistryRoot,
   runAutomaticBuildExecutorSessionCommand,
-  type AutomaticBuildExecutorSessionResponseV2,
+  type AutomaticBuildExecutorSessionResponseV3,
 } from "../../packages/core/src/automatic-build-executor-session";
 import { canonicalAutomaticBuildJson } from "../../packages/core/src/automatic-build-protocol";
 import {
-  CODEX_EXECUTOR_TRANSPORT_PROFILE_V1,
+  CODEX_EXECUTOR_TRANSPORT_PROFILE_V2,
   measureExecutorTransportResponse,
 } from "../../packages/core/src/executor-transport";
 
@@ -30,10 +30,10 @@ interface JsonRpcRequest {
 }
 
 interface BuildExecutorMcpSessionOptions {
-  bootstrap_digest: string;
+  bootstrap_version: string;
   protocol_generation: string;
   session_private_root: string;
-  execute_request?: (request: unknown) => AutomaticBuildExecutorSessionResponseV2;
+  execute_request?: (request: unknown) => AutomaticBuildExecutorSessionResponseV3;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -66,8 +66,8 @@ function boundedToolError(id: JsonRpcRequest["id"]) {
 export function createBuildExecutorMcpSession(options: BuildExecutorMcpSessionOptions): {
   handle_message: (value: unknown) => unknown | undefined;
 } {
-  const connection = createBuildExecutorChildConnectionCapability({
-    bootstrap_digest: options.bootstrap_digest,
+  const connection = createBuildExecutorStdioConnectionCapability({
+    bootstrap_version: options.bootstrap_version,
     protocol_generation: options.protocol_generation,
     session_private_root: options.session_private_root,
   });
@@ -75,7 +75,7 @@ export function createBuildExecutorMcpSession(options: BuildExecutorMcpSessionOp
     authorize_connection: connection.authorize_connection,
     execute_request: options.execute_request ?? ((request) => {
       const response = runAutomaticBuildExecutorSessionCommand(request);
-      if (response.version !== "automatic_build_executor_session.v2") {
+      if (response.version !== "automatic_build_executor_session.v3") {
         throw new Error("Build Executor MCP received a legacy session response");
       }
       return response;
@@ -96,8 +96,8 @@ export function createBuildExecutorMcpSession(options: BuildExecutorMcpSessionOp
         protocolVersion: requestedVersion,
         capabilities: { tools: { listChanged: false } },
         serverInfo: {
-          name: BUILD_EXECUTOR_MCP_CONTRACT_V1.server_name,
-          version: BUILD_EXECUTOR_MCP_CONTRACT_V1.version,
+          name: BUILD_EXECUTOR_MCP_CONTRACT_V3.server_name,
+          version: BUILD_EXECUTOR_MCP_CONTRACT_V3.version,
         },
       });
     }
@@ -139,7 +139,7 @@ export function createBuildExecutorMcpSession(options: BuildExecutorMcpSessionOp
       if (measureExecutorTransportResponse(
         response,
         payload,
-        CODEX_EXECUTOR_TRANSPORT_PROFILE_V1,
+        CODEX_EXECUTOR_TRANSPORT_PROFILE_V2,
       ).status !== "within_limit") {
         throw new Error("Build Executor MCP tool result exceeds its transport profile");
       }
@@ -163,13 +163,13 @@ function argumentValue(argv: string[], name: string): string | undefined {
 }
 
 export function runBuildExecutorMcpServer(argv: string[]): void {
-  const bootstrapDigest = argumentValue(argv, "--agent-bootstrap-digest");
+  const bootstrapVersion = argumentValue(argv, "--bootstrap-version");
   const protocolGeneration = argumentValue(argv, "--protocol-generation");
-  if (argv.length !== 4 || !bootstrapDigest || !protocolGeneration) {
+  if (argv.length !== 4 || !bootstrapVersion || !protocolGeneration) {
     throw new Error("Build Executor MCP bootstrap arguments are invalid");
   }
   const session = createBuildExecutorMcpSession({
-    bootstrap_digest: bootstrapDigest,
+    bootstrap_version: bootstrapVersion,
     protocol_generation: protocolGeneration,
     session_private_root: resolveAutomaticBuildExecutorRegistryRoot(),
   });
@@ -209,4 +209,4 @@ if (process.argv[1]?.endsWith("build-executor-mcp.ts")) {
   }
 }
 
-export { BUILD_EXECUTOR_BOOTSTRAP_CONTRACT_V2 };
+export { BUILD_EXECUTOR_BOOTSTRAP_CONTRACT_V3 };

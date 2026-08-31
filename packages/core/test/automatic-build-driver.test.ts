@@ -22,12 +22,13 @@ import { failAutomaticBuildTask, submitAutomaticBuildCandidate } from "../src/au
 import { claimAutomaticBuildTask, startAutomaticBuildLease } from "../src/automatic-build-lease";
 import {
   failAutomaticBuildExecutorSession,
-  openAutomaticBuildExecutorSession,
-  openAutomaticBuildExecutorSessionV2,
+  openAutomaticBuildExecutorSessionV3,
   nextAutomaticBuildExecutorInput,
   startAutomaticBuildExecutorGeneration,
-  submitAutomaticBuildExecutorCandidate,
+  submitAutomaticBuildExecutorCandidateV3,
   type AutomaticBuildExecutorSessionResponseV1,
+  type AutomaticBuildExecutorSessionResponseV3,
+  type JsonValue,
 } from "../src/automatic-build-executor-session";
 import {
   automaticBuildTaskStoreRoot,
@@ -50,7 +51,8 @@ import { automaticBuildExtractionPolicy } from "../src/semantic-artifact";
 import type { BuildPlanV1 } from "../src/build-intent";
 import {
   adaptIntentArtifactPayloadV1,
-  type IntentArtifactTaskEnvelopeV2,
+  type IntentArtifactCandidateV3,
+  type IntentArtifactTaskEnvelopeV3,
 } from "../src/intent-artifact";
 import { confirmedStandardBuildPlan } from "./helpers/confirmed-build-plan";
 import {
@@ -186,7 +188,7 @@ const FORBIDDEN_ROOT_FIELDS = new Set([
   "expected",
   "plan_digest",
   "plan_id",
-  "policy_set_digest",
+  "policy_generation_id",
   "proof_digest",
   "private_root",
   "task_path",
@@ -302,12 +304,10 @@ function privateGoalFixture(label: string) {
 }
 
 function privateCandidateFor(
-  root: string,
-  action: Extract<AutomaticBuildExecutorSessionResponseV1["action"], { kind: "GENERATE" }>,
+  task: IntentArtifactTaskEnvelopeV3,
   label: string,
-): string {
-  const task = action.semantic_input as IntentArtifactTaskEnvelopeV2;
-  expect(task.version).toBe("intent_artifact_task_envelope.v2");
+): JsonValue {
+  expect(task.version).toBe("intent_artifact_task_envelope.v3");
   expect(task.user_goal).toContain("PRIVATE_S4_RAW_GOAL");
   const evidenceLid = task.allowed_evidence_lids[0];
   if (!evidenceLid) throw new Error("expected a private artifact evidence LID");
@@ -324,21 +324,28 @@ function privateCandidateFor(
   } else {
     throw new Error(`unexpected private artifact type: ${task.artifact.artifact_type}`);
   }
-  const candidatePath = path.join(root, `private-candidate-${label}.json`);
-  writeFileSync(candidatePath, `${JSON.stringify({
-    version: "intent_artifact_candidate.v2",
+  const adapted = adaptIntentArtifactPayloadV1(task.artifact.artifact_type, legacyPayload);
+  const candidate: IntentArtifactCandidateV3 = {
+    version: "intent_artifact_candidate.v3",
     task_id: task.task_id,
     book_id: task.book_id,
     source_fingerprint: task.source_fingerprint,
     intent_id: task.intent_id,
-    intent_digest: task.intent_digest,
+    intent_revision: task.intent_revision,
     plan_id: task.plan_id,
-    plan_digest: task.plan_digest,
+    plan_revision: task.plan_revision,
     artifact_id: task.artifact.artifact_id,
-    blueprint_digest: task.artifact.blueprint_digest,
-    payload: adaptIntentArtifactPayloadV1(task.artifact.artifact_type, legacyPayload),
-  })}\n`, "utf8");
-  return candidatePath;
+    blueprint_id: task.artifact.blueprint_id,
+    blueprint_version: task.artifact.blueprint_version,
+    payload: {
+      version: "artifact_instance.v3",
+      blueprint_id: task.artifact.blueprint_id,
+      blueprint_version: task.artifact.blueprint_version,
+      records: adapted.records,
+      ...(adapted.relations === undefined ? {} : { relations: adapted.relations }),
+    },
+  };
+  return candidate as unknown as JsonValue;
 }
 
 async function createInvocation(
@@ -420,32 +427,81 @@ function firstDecision(response: AutomaticBuildStepResponseV1) {
   return { request_id: response.action.request_id, choice_id: choice.choice_id };
 }
 
-function startV2GenerationForHandoff(opaqueHandoffRef: string, now: string) {
-  const opened = openAutomaticBuildExecutorSessionV2(opaqueHandoffRef, { now });
+function startV3GenerationForHandoff(opaqueHandoffRef: string, now: string) {
+  const opened = openAutomaticBuildExecutorSessionV3(opaqueHandoffRef, { now });
   if (opened.action.kind !== "DELIVER_INPUT") {
-    throw new Error("expected V2 input delivery before generation");
+    throw new Error("expected V3 input delivery before generation");
   }
   let request = opened.action.next_request;
   for (let ordinal = 0; ordinal < 256; ordinal += 1) {
     const response = nextAutomaticBuildExecutorInput(request, { now });
     if (response.action.kind === "GENERATION_GRANT") {
       return startAutomaticBuildExecutorGeneration({
-        version: "automatic_build_executor_generation_start_request.v1",
+        version: "automatic_build_executor_generation_start_request.v2",
         opaque_session_ref: response.action.grant.opaque_session_ref,
         generation_grant_ref: response.action.grant.generation_grant_ref,
       }, { now });
     }
     if (response.action.kind !== "INPUT_CHUNK") {
-      throw new Error("expected V2 input chunk or generation grant");
+      throw new Error("expected V3 input chunk or generation grant");
     }
     request = {
-      version: "automatic_build_executor_input_next_request.v2",
+      version: "automatic_build_executor_input_next_request.v3",
       opaque_session_ref: opened.action.input_manifest.opaque_session_ref,
       generation_input_ref: opened.action.input_manifest.generation_input_ref,
-      previous_chunk_receipt: response.action.chunk.chunk_receipt,
+      previous_chunk_ordinal: response.action.chunk.ordinal,
     };
   }
-  throw new Error("V2 input delivery did not reach a generation grant");
+  throw new Error("V3 input delivery did not reach a generation grant");
+}
+
+function startPrivateV3GenerationForHandoff(
+  opaqueHandoffRef: string,
+  now: string,
+): {
+  generation: AutomaticBuildExecutorSessionResponseV3 & {
+    action: Extract<AutomaticBuildExecutorSessionResponseV3["action"], { kind: "GENERATE" }>;
+  };
+  task: IntentArtifactTaskEnvelopeV3;
+} {
+  const opened = openAutomaticBuildExecutorSessionV3(opaqueHandoffRef, { now });
+  if (opened.action.kind !== "DELIVER_INPUT") {
+    throw new Error("expected private V3 input delivery before generation");
+  }
+  const semanticInput: string[] = [];
+  let request = opened.action.next_request;
+  for (let ordinal = 0; ordinal < 256; ordinal += 1) {
+    const response = nextAutomaticBuildExecutorInput(request, { now });
+    if (response.action.kind === "GENERATION_GRANT") {
+      const generation = startAutomaticBuildExecutorGeneration({
+        version: "automatic_build_executor_generation_start_request.v2",
+        opaque_session_ref: response.action.grant.opaque_session_ref,
+        generation_grant_ref: response.action.grant.generation_grant_ref,
+      }, { now });
+      if (generation.action.kind !== "GENERATE") {
+        throw new Error("expected private V3 GENERATE action");
+      }
+      return {
+        generation: generation as typeof generation & {
+          action: Extract<AutomaticBuildExecutorSessionResponseV3["action"], { kind: "GENERATE" }>;
+        },
+        task: JSON.parse(semanticInput.join("")) as IntentArtifactTaskEnvelopeV3,
+      };
+    }
+    if (response.action.kind !== "INPUT_CHUNK") {
+      throw new Error("expected private V3 input chunk or generation grant");
+    }
+    if (response.action.chunk.segment === "semantic_input") {
+      semanticInput.push(response.action.chunk.payload_utf8);
+    }
+    request = {
+      version: "automatic_build_executor_input_next_request.v3",
+      opaque_session_ref: opened.action.input_manifest.opaque_session_ref,
+      generation_input_ref: opened.action.input_manifest.generation_input_ref,
+      previous_chunk_ordinal: response.action.chunk.ordinal,
+    };
+  }
+  throw new Error("private V3 input delivery did not reach a generation grant");
 }
 
 function writeMatchedPerformanceHistory(
@@ -496,7 +552,6 @@ function commitDispatchTask(
       finished_at: task.lease.issued_at,
       input_bytes: 0,
       input_sha256: task.descriptor.input_hash,
-      proof_digest: task.descriptor.input_budget_proof.proof_digest,
       render_contract_version: MODEL_INPUT_RENDER_CONTRACT_VERSION,
     });
   }
@@ -513,10 +568,10 @@ function commitDispatchTask(
     task.lease.token,
     task.candidate_path,
     () => {
-      if (!task.lease.policy_set_digest) throw new Error("expected a proof-bound dispatch lease");
+      if (!task.lease.policy_generation_id) throw new Error("expected a proof-bound dispatch lease");
       return writePass1ProductionTaskArtifact({
         target,
-        policy_set_digest: task.lease.policy_set_digest,
+        policy_generation_id: task.lease.policy_generation_id,
         work_unit_id: task.task_id,
         marker,
         generated_at: task.lease.issued_at,
@@ -751,7 +806,7 @@ describe("S0 deterministic automatic-build driver protocol", () => {
       }
       const firstRef = first.action.executors[0]?.opaque_handoff_ref;
       if (!firstRef) throw new Error("expected the first executor handoff ref");
-      const firstGeneration = startV2GenerationForHandoff(
+      const firstGeneration = startV3GenerationForHandoff(
         firstRef,
         "2026-08-08T05:00:01.000Z",
       );
@@ -778,7 +833,7 @@ describe("S0 deterministic automatic-build driver protocol", () => {
       }
       expect(resumed.action.executors).toEqual(first.action.executors);
 
-      const resumedGeneration = startV2GenerationForHandoff(
+      const resumedGeneration = startV3GenerationForHandoff(
         resumed.action.executors[0]!.opaque_handoff_ref,
         "2026-08-08T05:00:03.000Z",
       );
@@ -809,7 +864,7 @@ describe("S0 deterministic automatic-build driver protocol", () => {
       now: "2026-08-08T05:01:00.000Z",
       lease_ttl_ms: 1_000,
       run_ttl_ms: 1_000,
-      accepted_plan_digest: plan.preflight.plan_digest,
+      accepted_plan_digest: plan.preflight.descriptor_plan_digest,
       available_agent_slots: 1,
       executor_dispatches: true,
       build_plan: value.buildPlan,
@@ -837,7 +892,7 @@ describe("S0 deterministic automatic-build driver protocol", () => {
       now: "2026-08-08T05:01:03.000Z",
       lease_ttl_ms: 1_000,
       run_ttl_ms: 2_000,
-      accepted_plan_digest: plan.preflight.plan_digest,
+      accepted_plan_digest: plan.preflight.descriptor_plan_digest,
       available_agent_slots: 1,
       executor_dispatches: true,
       build_plan: value.buildPlan,
@@ -871,7 +926,7 @@ describe("S0 deterministic automatic-build driver protocol", () => {
       build_plan: value.buildPlan,
     });
     if (!plan.preflight) throw new Error("expected owner-conflict preflight");
-    const acceptedPlanDigest = plan.preflight.plan_digest;
+    const acceptedPlanDigest = plan.preflight.descriptor_plan_digest;
     const first = automaticBuildNext(value.source, value.root, 1, {
       now: "2026-08-08T05:11:00.000Z",
       lease_ttl_ms: 1_000,
@@ -1168,24 +1223,18 @@ describe("S0 deterministic automatic-build driver protocol", () => {
         "2026-08-10T02:10:10.000Z",
       );
 
-      const originalSemanticArtifact = await vi.importActual<typeof import("../src/semantic-artifact")>(
-        "../src/semantic-artifact",
+      const originalPass1Reduction = await vi.importActual<typeof import("../src/pass1-reduction")>(
+        "../src/pass1-reduction",
       );
-      vi.doMock("../src/semantic-artifact", () => ({
-        ...originalSemanticArtifact,
-        automaticBuildExtractionPolicy: (
-          ...args: Parameters<typeof originalSemanticArtifact.automaticBuildExtractionPolicy>
-        ) => {
-          const policy = originalSemanticArtifact.automaticBuildExtractionPolicy(...args);
-          if (args[0] !== "pass1") return policy;
-          return {
-            ...policy,
-            stage_policy_version: "pass1_policy.synthetic_scope_b",
-            prompt_sha256: createHash("sha256")
-              .update(`${policy.prompt_sha256}:synthetic-scope-b`)
-              .digest("hex"),
-          };
-        },
+      vi.doMock("../src/pass1-reduction", () => ({
+        ...originalPass1Reduction,
+        pass1ModelSlicePolicyMembers: (
+          ...args: Parameters<typeof originalPass1Reduction.pass1ModelSlicePolicyMembers>
+        ) => originalPass1Reduction.pass1ModelSlicePolicyMembers(...args).map((member) => (
+          member.kind === "pass1_window"
+            ? { ...member, policy_generation_id: "pass1-window.full.v2" }
+            : member
+        )),
       }));
       vi.doMock("../../../skills/build/automatic-build", async () => {
         const actual = await vi.importActual<typeof import("../../../skills/build/automatic-build")>(
@@ -1193,8 +1242,8 @@ describe("S0 deterministic automatic-build driver protocol", () => {
         );
         return {
           ...actual,
-          // SR2 isolates attempt-scope replanning from the SR5 forward-release
-          // parity gate; the synthetic prompt digest is intentionally unpublished.
+          // SR2 isolates attempt-scope replanning from the forward-release parity
+          // gate; the synthetic explicit policy generation is intentionally unpublished.
           automaticBuildProtocolDoctor: () => ({ status: "compatible" as const }),
         };
       });
@@ -1228,7 +1277,7 @@ describe("S0 deterministic automatic-build driver protocol", () => {
       expect(decisionReceipt.state).not.toEqual(requestRecord.state);
       expect(taskTreeDigest(target)).toBe(exhaustedTreeDigest);
     } finally {
-      vi.doUnmock("../src/semantic-artifact");
+      vi.doUnmock("../src/pass1-reduction");
       vi.doUnmock("../../../skills/build/automatic-build");
       vi.resetModules();
       if (previousRegistryRoot === undefined) {
@@ -1339,7 +1388,7 @@ describe("S0 deterministic automatic-build driver protocol", () => {
     if (!plan.preflight) throw new Error("expected dispatch preflight");
     const dispatched = automaticBuildNext(value.source, value.root, 1, {
       now: "2026-08-08T05:20:00.000Z",
-      accepted_plan_digest: plan.preflight.plan_digest,
+      accepted_plan_digest: plan.preflight.descriptor_plan_digest,
       available_agent_slots: 1,
       executor_dispatches: true,
       build_plan: value.buildPlan,
@@ -1472,7 +1521,7 @@ describe("S0 deterministic automatic-build driver protocol", () => {
     if (!plan.preflight) throw new Error("expected executor-open preflight");
     const dispatched = automaticBuildNext(value.source, value.root, 1, {
       now: "2026-08-08T05:30:00.000Z",
-      accepted_plan_digest: plan.preflight.plan_digest,
+      accepted_plan_digest: plan.preflight.descriptor_plan_digest,
       available_agent_slots: 1,
       executor_dispatches: true,
       build_plan: value.buildPlan,
@@ -1537,20 +1586,22 @@ describe("S4 private artifact driver and executor session", () => {
     ]);
 
     for (const [index, executor] of spawned.action.executors.entries()) {
-      const opened = openAutomaticBuildExecutorSession(executor.opaque_handoff_ref, {
-        now: `2026-08-08T07:00:0${index + 2}.000Z`,
-      });
-      if (opened.action.kind !== "GENERATE") {
-        throw new Error("S4_RED_PRIVATE_EXECUTOR_SESSION_UNAVAILABLE: expected private GENERATE action");
-      }
-      expect(JSON.stringify(opened.action.semantic_input)).toContain("PRIVATE_S4_RAW_GOAL");
-      const submitted = submitAutomaticBuildExecutorCandidate(
-        opened.action.opaque_session_ref,
-        privateCandidateFor(value.root, opened.action, String(index)),
-        { now: `2026-08-08T07:00:1${index}.000Z` },
+      const started = startPrivateV3GenerationForHandoff(
+        executor.opaque_handoff_ref,
+        `2026-08-08T07:00:0${index + 2}.000Z`,
       );
+      expect(JSON.stringify(started.task)).toContain("PRIVATE_S4_RAW_GOAL");
+      expect(started.task).not.toHaveProperty("intent_digest");
+      expect(started.task).not.toHaveProperty("plan_digest");
+      expect(started.task.artifact).not.toHaveProperty("blueprint_digest");
+      const submitted = submitAutomaticBuildExecutorCandidateV3({
+        version: "automatic_build_executor_candidate_submit.v3",
+        opaque_session_ref: started.generation.action.opaque_session_ref,
+        candidate_sink_ref: started.generation.action.candidate_sink_ref,
+        candidate: privateCandidateFor(started.task, String(index)),
+      }, { now: `2026-08-08T07:00:1${index}.000Z` });
       expect(submitted).toEqual({
-        version: "automatic_build_executor_session.v1",
+        version: "automatic_build_executor_session.v3",
         action: { kind: "DONE", status: "committed" },
       });
     }
@@ -1587,28 +1638,28 @@ describe("S4 private artifact driver and executor session", () => {
     expect(firstWave.action.executors).toHaveLength(2);
     const failedRef = firstWave.action.executors[0].opaque_handoff_ref;
     const siblingRef = firstWave.action.executors[1].opaque_handoff_ref;
-    const failedOpen = openAutomaticBuildExecutorSession(failedRef, {
-      now: "2026-08-08T07:10:01.000Z",
-    });
-    const siblingOpen = openAutomaticBuildExecutorSession(siblingRef, {
-      now: "2026-08-08T07:10:02.000Z",
-    });
-    if (failedOpen.action.kind !== "GENERATE" || siblingOpen.action.kind !== "GENERATE") {
-      throw new Error("S4_RED_PRIVATE_EXECUTOR_SESSION_UNAVAILABLE: expected both private tasks to generate");
-    }
-    expect(failAutomaticBuildExecutorSession(failedOpen.action.opaque_session_ref, {
+    const failed = startPrivateV3GenerationForHandoff(
+      failedRef,
+      "2026-08-08T07:10:01.000Z",
+    );
+    const sibling = startPrivateV3GenerationForHandoff(
+      siblingRef,
+      "2026-08-08T07:10:02.000Z",
+    );
+    expect(failAutomaticBuildExecutorSession(failed.generation.action.opaque_session_ref, {
       diagnostic_code: "provider_unavailable",
       now: "2026-08-08T07:10:03.000Z",
     })).toEqual({
-      version: "automatic_build_executor_session.v1",
+      version: "automatic_build_executor_session.v3",
       action: { kind: "DONE", status: "retryable_failure" },
     });
-    expect(submitAutomaticBuildExecutorCandidate(
-      siblingOpen.action.opaque_session_ref,
-      privateCandidateFor(value.root, siblingOpen.action, "sibling"),
-      { now: "2026-08-08T07:10:04.000Z" },
-    )).toEqual({
-      version: "automatic_build_executor_session.v1",
+    expect(submitAutomaticBuildExecutorCandidateV3({
+      version: "automatic_build_executor_candidate_submit.v3",
+      opaque_session_ref: sibling.generation.action.opaque_session_ref,
+      candidate_sink_ref: sibling.generation.action.candidate_sink_ref,
+      candidate: privateCandidateFor(sibling.task, "sibling"),
+    }, { now: "2026-08-08T07:10:04.000Z" })).toEqual({
+      version: "automatic_build_executor_session.v3",
       action: { kind: "DONE", status: "committed" },
     });
 
@@ -1623,22 +1674,22 @@ describe("S4 private artifact driver and executor session", () => {
     expect(retryWave.action.executors).toHaveLength(1);
     expect(retryWave.action.executors[0].opaque_handoff_ref).not.toBe(failedRef);
     expect(retryWave.action.executors[0].opaque_handoff_ref).not.toBe(siblingRef);
-    const retryFirst = openAutomaticBuildExecutorSession(retryWave.action.executors[0].opaque_handoff_ref, {
-      now: "2026-08-08T07:10:05.000Z",
-    });
-    const retryResume = openAutomaticBuildExecutorSession(retryWave.action.executors[0].opaque_handoff_ref, {
-      now: "2026-08-08T07:10:06.000Z",
-    });
+    const retryFirst = startPrivateV3GenerationForHandoff(
+      retryWave.action.executors[0].opaque_handoff_ref,
+      "2026-08-08T07:10:05.000Z",
+    );
+    const retryResume = startPrivateV3GenerationForHandoff(
+      retryWave.action.executors[0].opaque_handoff_ref,
+      "2026-08-08T07:10:06.000Z",
+    );
     expect(retryResume).toEqual(retryFirst);
-    if (retryFirst.action.kind !== "GENERATE") {
-      throw new Error("S4_RED_PRIVATE_RETRY_UNAVAILABLE: expected retry GENERATE action");
-    }
-    expect(submitAutomaticBuildExecutorCandidate(
-      retryFirst.action.opaque_session_ref,
-      privateCandidateFor(value.root, retryFirst.action, "retry"),
-      { now: "2026-08-08T07:10:07.000Z" },
-    )).toEqual({
-      version: "automatic_build_executor_session.v1",
+    expect(submitAutomaticBuildExecutorCandidateV3({
+      version: "automatic_build_executor_candidate_submit.v3",
+      opaque_session_ref: retryFirst.generation.action.opaque_session_ref,
+      candidate_sink_ref: retryFirst.generation.action.candidate_sink_ref,
+      candidate: privateCandidateFor(retryFirst.task, "retry"),
+    }, { now: "2026-08-08T07:10:07.000Z" })).toEqual({
+      version: "automatic_build_executor_session.v3",
       action: { kind: "DONE", status: "committed" },
     });
     const done = await driver.automaticBuildStep({

@@ -1,7 +1,12 @@
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { canonicalBuildJson } from "../../packages/core/src/build-intent";
-import type { BuildIntentAny, BuildPlanAny } from "../../packages/core/src/build-intent-v2";
+import {
+  validateBuildIntentV3,
+  validateBuildPlanV3,
+  type BuildIntentAny,
+  type BuildPlanAny,
+} from "../../packages/core/src/build-intent-v2";
 import {
   failIntentArtifactTaskAttempt,
   inspectIntentArtifactTaskAttempt,
@@ -13,9 +18,7 @@ import {
 } from "../../packages/core/src/intent-artifact-mailbox";
 import {
   compileIntentArtifactTasks,
-  projectAcceptedIntentArtifactV1AsV2,
-  type AcceptedIntentArtifactV1,
-  type IntentArtifactTaskEnvelopeV2,
+  type IntentArtifactTaskEnvelopeV3,
 } from "../../packages/core/src/intent-artifact";
 
 const MAX_STDIN_BYTES = 16 * 1024 * 1024;
@@ -30,12 +33,13 @@ export interface PrepareIntentArtifactMailboxInput {
   max_attempts?: number;
 }
 
-export interface IntentArtifactTaskBatchHandoffV1 {
-  version: "intent_artifact_task_batch_handoff.v1";
+export interface IntentArtifactTaskBatchHandoffV2 {
+  version: "intent_artifact_task_batch_handoff.v2";
   book_id: string;
   intent_id: string;
+  intent_revision: number;
   plan_id: string;
-  plan_digest: string;
+  plan_revision: number;
   tasks: ReturnType<typeof openIntentArtifactTaskAttempt>[];
 }
 
@@ -153,7 +157,7 @@ export function runIntentArtifactMailboxCommand(input: unknown): unknown {
   }
 }
 
-function artifactDirectory(privateRoot: string, task: IntentArtifactTaskEnvelopeV2): string {
+function artifactDirectory(privateRoot: string, task: IntentArtifactTaskEnvelopeV3): string {
   return path.join(
     privateRoot,
     task.book_id,
@@ -165,28 +169,15 @@ function artifactDirectory(privateRoot: string, task: IntentArtifactTaskEnvelope
 
 function artifactAlreadyCommitted(
   privateRoot: string,
-  task: IntentArtifactTaskEnvelopeV2,
+  task: IntentArtifactTaskEnvelopeV3,
 ): boolean {
   const directory = artifactDirectory(privateRoot, task);
-  const acceptedPath = path.join(directory, "accepted.json");
+  const acceptedPath = path.join(directory, "accepted.v3.json");
   if (!existsSync(acceptedPath)) return false;
-  const accepted = JSON.parse(readFileSync(acceptedPath, "utf8")) as Record<string, unknown>;
-  if (accepted.version === "intent_artifact_accepted.v1") {
-    const projected = projectAcceptedIntentArtifactV1AsV2(accepted as unknown as AcceptedIntentArtifactV1);
-    if (projected.task_id !== task.task_id
-      || projected.book_id !== task.book_id
-      || projected.source_fingerprint !== task.source_fingerprint
-      || projected.intent_id !== task.intent_id
-      || projected.intent_digest !== task.intent_digest
-      || projected.plan_id !== task.plan_id
-      || projected.plan_digest !== task.plan_digest
-      || projected.artifact_id !== task.artifact.artifact_id
-      || projected.blueprint_digest !== task.artifact.blueprint_digest) {
-      throw new Error("accepted v1 intent artifact does not match the current adapted task");
-    }
-    return true;
+  const attemptsDirectory = path.join(directory, "attempts-v3");
+  if (!existsSync(attemptsDirectory)) {
+    throw new Error("legacy accepted intent artifact requires migration before V3 production read");
   }
-  const attemptsDirectory = path.join(directory, "attempts");
   const latest = readdirSync(attemptsDirectory, { withFileTypes: true })
     .filter((entry) => entry.isDirectory() && /^\d{6}$/u.test(entry.name))
     .map((entry) => entry.name)
@@ -197,7 +188,15 @@ function artifactAlreadyCommitted(
     private_root: privateRoot,
     task_path: path.join(attemptsDirectory, latest, "task.json"),
   });
-  if (inspection.state !== "committed" || inspection.task_id !== task.task_id) {
+  if (inspection.state !== "committed"
+    || inspection.task_id !== task.task_id
+    || inspection.intent_id !== task.intent_id
+    || inspection.intent_revision !== task.intent_revision
+    || inspection.plan_id !== task.plan_id
+    || inspection.plan_revision !== task.plan_revision
+    || inspection.artifact_id !== task.artifact.artifact_id
+    || inspection.blueprint_id !== task.artifact.blueprint_id
+    || inspection.blueprint_version !== task.artifact.blueprint_version) {
     throw new Error("accepted intent artifact does not match the current task");
   }
   return true;
@@ -205,19 +204,22 @@ function artifactAlreadyCommitted(
 
 export function prepareIntentArtifactMailboxes(
   input: PrepareIntentArtifactMailboxInput,
-): IntentArtifactTaskBatchHandoffV1 {
+): IntentArtifactTaskBatchHandoffV2 {
+  const intent = validateBuildIntentV3(input.intent);
+  const plan = validateBuildPlanV3(input.plan);
   const tasks = compileIntentArtifactTasks({
-    intent: input.intent,
-    plan: input.plan,
+    intent,
+    plan,
     available_lids: input.available_lids,
     resolved_scope_lids: input.resolved_scope_lids,
   });
   return {
-    version: "intent_artifact_task_batch_handoff.v1",
-    book_id: input.plan.book_id,
-    intent_id: input.intent.intent_id,
-    plan_id: input.plan.plan_id,
-    plan_digest: input.plan.plan_digest,
+    version: "intent_artifact_task_batch_handoff.v2",
+    book_id: plan.book_id,
+    intent_id: intent.intent_id,
+    intent_revision: intent.intent_revision,
+    plan_id: plan.plan_id,
+    plan_revision: plan.plan_revision,
     tasks: tasks
       .filter((task) => !artifactAlreadyCommitted(input.private_root, task))
       .map((task) => openIntentArtifactTaskAttempt({

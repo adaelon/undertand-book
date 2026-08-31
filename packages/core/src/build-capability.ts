@@ -3,7 +3,10 @@ import {
   computeArtifactBlueprintDigest,
   validateArtifactBlueprintV1,
 } from "./artifact-blueprint";
-import type { ArtifactBlueprintResolutionV1 } from "./artifact-blueprint-registry";
+import type {
+  ArtifactBlueprintResolutionV1,
+  ArtifactBlueprintResolutionV2,
+} from "./artifact-blueprint-registry";
 import {
   attachBuildPlanDigest,
   canonicalBuildJson,
@@ -23,8 +26,12 @@ import {
   attachBuildPlanDigestV2,
   computeBuildIntentDigestV2,
   validateBuildIntentV2,
+  validateBuildIntentV3,
+  validateBuildPlanV3,
   type BuildIntentV2,
+  type BuildIntentV3,
   type BuildPlanV2,
+  type BuildPlanV3,
 } from "./build-intent-v2";
 import type { AutomaticBuildStageFreshnessInspectionV1, AutomaticBuildStage } from "./build-orchestrator";
 import { BUILD_STAGE_DAG, type BuildStageId } from "./build-workbench";
@@ -280,6 +287,47 @@ export interface BuildModeCompilationV2 {
   mode: BuildMode;
   plan?: BuildPlanV2;
   estimate_input?: BuildPlanEstimateInputV2;
+}
+
+export interface BuildPlanEstimateInputV3 {
+  version: "build_plan_estimate_input.v3";
+  source_fingerprint: string;
+  content_profile: BuildContentProfile;
+  public_stages_to_create: AutomaticBuildStage[];
+  private_blueprints_to_create: Array<{
+    artifact_id: string;
+    blueprint_id: string;
+    blueprint_version: string;
+    shape: string;
+    max_records: number;
+    max_relations: number;
+    max_text_chars: number;
+  }>;
+  reused_artifacts: string[];
+  source_scope?: BuildSourceScope;
+}
+
+export interface CompileBuildModeV3Input {
+  mode: BuildMode;
+  book_id: string;
+  source_fingerprint: string;
+  content_profile: BuildContentProfile;
+  plan_id: string;
+  plan_revision: number;
+  created_at: string;
+  budget: BuildPlanBudgetV1;
+  public_freshness: AutomaticBuildStageFreshnessInspectionV1[];
+  estimate?: BuildPlanEstimateV1;
+  intent?: unknown;
+  selected_blueprints?: ArtifactBlueprintResolutionV2[];
+  pass2?: Pass2PlanChoice;
+}
+
+export interface BuildModeCompilationV3 {
+  version: "build_mode_compilation.v3";
+  mode: BuildMode;
+  plan?: BuildPlanV3;
+  estimate_input?: BuildPlanEstimateInputV3;
 }
 
 function sha256(value: unknown): string {
@@ -671,6 +719,187 @@ export function compileBuildModeV2(input: CompileBuildModeV2Input): BuildModeCom
   });
   return {
     version: "build_mode_compilation.v2",
+    mode: input.mode,
+    plan,
+    estimate_input: estimateInput,
+  };
+}
+
+function validateSelectedBlueprintsV2(
+  inputs: readonly ArtifactBlueprintResolutionV2[],
+): ArtifactBlueprintResolutionV2[] {
+  const selected: ArtifactBlueprintResolutionV2[] = [];
+  const identities = new Set<string>();
+  for (const input of inputs) {
+    if (input.version !== "artifact_blueprint_resolution.v2") {
+      throw new Error("unsupported ArtifactBlueprint resolution version");
+    }
+    const blueprint = validateArtifactBlueprintV1(input.blueprint);
+    if (input.source !== blueprint.origin
+      || input.blueprint_id !== blueprint.blueprint_id
+      || input.blueprint_version !== blueprint.blueprint_version) {
+      throw new Error("ArtifactBlueprint resolution identity does not match its snapshot");
+    }
+    const identity = `${blueprint.blueprint_id}\u0000${blueprint.blueprint_version}`;
+    if (identities.has(identity)) throw new Error("duplicate selected ArtifactBlueprint identity and version");
+    identities.add(identity);
+    selected.push({
+      version: "artifact_blueprint_resolution.v2",
+      source: input.source,
+      blueprint,
+      blueprint_id: blueprint.blueprint_id,
+      blueprint_version: blueprint.blueprint_version,
+    });
+  }
+  return selected;
+}
+
+function unknownEstimateV3(input: BuildPlanEstimateInputV3): BuildPlanEstimateV1 {
+  return {
+    input_tokens: { lower: 0, upper: 0, coverage: 0 },
+    output_tokens: { lower: 0, upper: 0, coverage: 0 },
+    wall_clock_minutes: { confidence: "none" },
+    unknown_stages: [
+      ...input.public_stages_to_create,
+      ...input.private_blueprints_to_create.map((artifact) => `private.${artifact.artifact_id}`),
+    ],
+    historical_match: { stage: false, policy: false, model: false, harness: false, sample_count: 0 },
+  };
+}
+
+export function compileBuildModeV3(input: CompileBuildModeV3Input): BuildModeCompilationV3 {
+  validateBuildCapabilityRegistry(BUILD_CAPABILITY_REGISTRY);
+  const contentProfile = validateBuildContentProfile(input.content_profile);
+  validatePathSafeBuildId(input.book_id, "book_id");
+  validatePathSafeBuildId(input.plan_id, "plan_id");
+  if (!Number.isSafeInteger(input.plan_revision) || input.plan_revision < 1) {
+    throw new Error("plan_revision must be a positive safe integer issued by the plan owner");
+  }
+  if (typeof input.source_fingerprint !== "string" || !input.source_fingerprint.trim()) {
+    throw new Error("source_fingerprint must be a non-empty string");
+  }
+  if (!( ["read_now", "standard_deep", "goal_directed"] as string[]).includes(input.mode)) {
+    throw new Error(`unsupported build mode: ${String(input.mode)}`);
+  }
+  if (input.mode === "read_now") {
+    if (input.intent !== undefined || input.selected_blueprints?.length || input.pass2 !== undefined) {
+      throw new Error("read_now cannot carry an intent, ArtifactBlueprint, or Pass2 selection");
+    }
+    return { version: "build_mode_compilation.v3", mode: "read_now" };
+  }
+
+  const freshness = validateFreshness(input.public_freshness);
+  let intent: BuildIntentV3 | undefined;
+  let selectedBlueprints: ArtifactBlueprintResolutionV2[] = [];
+  let publicStages: AutomaticBuildStage[] = [];
+  const pass2Choice = input.pass2 ?? "enabled";
+  if (input.mode === "standard_deep") {
+    if (input.intent !== undefined || input.selected_blueprints?.length) {
+      throw new Error("standard_deep cannot carry a private intent or ArtifactBlueprint selection");
+    }
+    publicStages = standardDeepStageClosure(contentProfile, { pass2: pass2Choice });
+  } else {
+    if (input.pass2 !== undefined) throw new Error("goal_directed cannot carry a Pass2 selection");
+    intent = validateBuildIntentV3(input.intent);
+    if (intent.book_id !== input.book_id
+      || intent.source_fingerprint !== input.source_fingerprint
+      || !sameProfile(intent.content_profile, contentProfile)) {
+      throw new Error("BuildIntent identity does not match the BuildPlan target");
+    }
+    selectedBlueprints = validateSelectedBlueprintsV2(input.selected_blueprints ?? []);
+  }
+
+  const pass2WillChange = input.mode === "standard_deep"
+    && pass2Choice === "enabled"
+    && !freshness.get("public.pass2")?.fresh;
+  const invalidatedByPass2 = new Set<AutomaticBuildStage>(
+    pass2WillChange ? ["book_structure", "paper_reading_guide"] : [],
+  );
+  const reusedPublic = publicStages.flatMap((stage) => {
+    const artifact = `public.${stage}`;
+    const inspection = freshness.get(artifact);
+    return inspection?.fresh && inspection.freshness_digest && !invalidatedByPass2.has(stage)
+      ? [{ artifact, freshness_digest: inspection.freshness_digest }]
+      : [];
+  });
+  const publicCreate = publicStages
+    .map((stage) => `public.${stage}`)
+    .filter((artifact) => {
+      const stage = artifact.slice("public.".length) as AutomaticBuildStage;
+      return !freshness.get(artifact)?.fresh || invalidatedByPass2.has(stage);
+    });
+  const privateArtifacts = intent
+    ? selectedBlueprints.map((resolution, index) => ({
+        artifact_id: `artifact-r${intent!.intent_revision}-${index + 1}`,
+        source_scope: intent!.source_scope,
+        blueprint: resolution.blueprint,
+        blueprint_id: resolution.blueprint_id,
+        blueprint_version: resolution.blueprint_version,
+        required_public_capabilities: ["foundation.lid"],
+      }))
+    : [];
+  const foundationReuse = input.mode === "goal_directed" && privateArtifacts.length
+    ? [{
+        artifact: "public.foundation",
+        freshness_digest: sha256({
+          version: "foundation_lid_freshness.v1",
+          source_fingerprint: input.source_fingerprint,
+          content_profile: contentProfile,
+        }),
+      }]
+    : [];
+  const reuse = [...foundationReuse, ...reusedPublic];
+  const privateCreate = privateArtifacts.map((artifact) => `private.${artifact.artifact_id}`);
+  const create = [...publicCreate, ...privateCreate];
+  const excluded = input.mode === "standard_deep"
+    ? [
+        ...(pass2Choice === "disabled"
+          ? [{ artifact: "public.pass2", reason: "disabled by the confirmed standard_deep plan" }]
+          : []),
+        ...PRIVATE_ARTIFACT_TYPES.map((artifact) => ({
+          artifact: `private.${artifact}`,
+          reason: "not selected by standard_deep",
+        })),
+      ]
+    : [{ artifact: "public.standard_deep", reason: "not required by selected blueprints" }];
+  const estimateInput: BuildPlanEstimateInputV3 = {
+    version: "build_plan_estimate_input.v3",
+    source_fingerprint: input.source_fingerprint,
+    content_profile: contentProfile,
+    public_stages_to_create: publicStages.filter((stage) => publicCreate.includes(`public.${stage}`)),
+    private_blueprints_to_create: privateArtifacts.map((artifact) => ({
+      artifact_id: artifact.artifact_id,
+      blueprint_id: artifact.blueprint_id,
+      blueprint_version: artifact.blueprint_version,
+      shape: artifact.blueprint.shape,
+      max_records: artifact.blueprint.limits.max_records,
+      max_relations: artifact.blueprint.limits.max_relations,
+      max_text_chars: artifact.blueprint.limits.max_text_chars,
+    })),
+    reused_artifacts: reuse.map((artifact) => artifact.artifact),
+    ...(intent ? { source_scope: intent.source_scope } : {}),
+  };
+  const plan = validateBuildPlanV3({
+    version: "build_plan.v3",
+    plan_id: input.plan_id,
+    plan_revision: input.plan_revision,
+    book_id: input.book_id,
+    source_fingerprint: input.source_fingerprint,
+    content_profile: contentProfile,
+    recipe_id: input.mode,
+    ...(intent ? { intent_id: intent.intent_id, intent_revision: intent.intent_revision } : {}),
+    public_stage_closure: publicStages,
+    private_artifacts: privateArtifacts,
+    reuse,
+    create,
+    excluded,
+    estimate: input.estimate ?? unknownEstimateV3(estimateInput),
+    budget: input.budget,
+    status: "draft",
+    created_at: input.created_at,
+  });
+  return {
+    version: "build_mode_compilation.v3",
     mode: input.mode,
     plan,
     estimate_input: estimateInput,

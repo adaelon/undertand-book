@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import {
   createAutomaticBuildStagePolicySet,
   freezeAutomaticBuildStagePolicySet,
+  resolveAutomaticBuildStagePolicyMember,
 } from "../src/automatic-build-policy-generation";
 import { resolveContentProfile } from "../src/content-profile";
 import type { GraphEdge } from "../src/generated/GraphEdge";
@@ -165,12 +166,23 @@ function freezeTask(input: {
   target: ReturnType<typeof createSyntheticRoutabilityFixture>["target"];
   work_unit: Pass1ShadowWorkUnitV1;
   source_fingerprint: string;
-  policy_set_digest: string;
+  policy_generation_id: string;
   source_unit_count: number;
 }): Pass1ShadowTaskV1 {
   const task = createPass1ShadowTask(input);
   freezePass1ShadowTask(input.target, task);
   return task;
+}
+
+function policyGenerationIdFor(
+  policySet: ReturnType<typeof createAutomaticBuildStagePolicySet>,
+  unit: Pass1ShadowWorkUnitV1,
+): string {
+  return resolveAutomaticBuildStagePolicyMember(
+    policySet,
+    unit.descriptor.kind,
+    unit.descriptor.policy_fingerprint,
+  ).policy_generation_id;
 }
 
 function readEnvelope(file: string): SemanticArtifactEnvelopeV3<unknown> {
@@ -232,7 +244,7 @@ describe("Pass1 shadow CLI", () => {
         target: fixture.target,
         work_unit: unit,
         source_fingerprint: fixture.identity.source_sha256,
-        policy_set_digest: policySet.policy_set_digest,
+        policy_generation_id: policyGenerationIdFor(policySet, unit),
         source_unit_count: routed.units.length,
       });
       const candidate = initialCandidate(unit);
@@ -246,7 +258,7 @@ describe("Pass1 shadow CLI", () => {
           args: [
             unit.descriptor.work_unit_id,
             "--book-id", fixture.target.book_id,
-            "--shadow-generation", policySet.policy_set_digest,
+            "--shadow-generation", task.policy_generation_id,
           ],
         });
         expect(inputResult.status, inputResult.stderr).toBe(0);
@@ -262,7 +274,7 @@ describe("Pass1 shadow CLI", () => {
             unit.descriptor.work_unit_id,
             outsideCandidate,
             "--book-id", fixture.target.book_id,
-            "--shadow-generation", policySet.policy_set_digest,
+            "--shadow-generation", task.policy_generation_id,
           ],
         });
         expect(outsideWrite.status).toBe(1);
@@ -270,7 +282,7 @@ describe("Pass1 shadow CLI", () => {
 
         const candidateDirectory = pass1ShadowTaskPrivateDirectory(
           fixture.target,
-          policySet.policy_set_digest,
+          task.policy_generation_id,
           unit.descriptor.work_unit_id,
         );
         mkdirSync(candidateDirectory, { recursive: true });
@@ -284,7 +296,7 @@ describe("Pass1 shadow CLI", () => {
             unit.descriptor.work_unit_id,
             candidatePath,
             "--book-id", fixture.target.book_id,
-            "--shadow-generation", policySet.policy_set_digest,
+            "--shadow-generation", task.policy_generation_id,
             "--attempt", "1",
             "--generated-at", PROVENANCE.generated_at,
             "--executor", PROVENANCE.executor,
@@ -306,7 +318,7 @@ describe("Pass1 shadow CLI", () => {
             unit.descriptor.work_unit_id,
             candidatePath,
             "--book-id", fixture.target.book_id,
-            "--shadow-generation", policySet.policy_set_digest,
+            "--shadow-generation", task.policy_generation_id,
             "--generated-at", PROVENANCE.generated_at,
           ],
         });
@@ -324,7 +336,7 @@ describe("Pass1 shadow CLI", () => {
       initialChildren.push(verifyPass1ShadowArtifact({
         work_unit: unit,
         artifact: readEnvelope(artifactPath),
-        policy_set_digest: policySet.policy_set_digest,
+        policy_generation_id: task.policy_generation_id,
       }));
     }
     expect(exercisedCliWrite).toBe(true);
@@ -339,7 +351,6 @@ describe("Pass1 shadow CLI", () => {
         window_id: window.id,
         source_unit_count: routed.units.length,
         children,
-        policy_set_digest: policySet.policy_set_digest,
         policy: stitchPolicy,
         budget: BUDGET,
       });
@@ -351,7 +362,7 @@ describe("Pass1 shadow CLI", () => {
           target: fixture.target,
           work_unit: unit,
           source_fingerprint: fixture.identity.source_sha256,
-          policy_set_digest: policySet.policy_set_digest,
+          policy_generation_id: policyGenerationIdFor(policySet, unit),
           source_unit_count: routed.units.length,
         });
         const candidate = stitchCandidate(unit);
@@ -370,7 +381,7 @@ describe("Pass1 shadow CLI", () => {
           const dependencyPath = automaticBuildGenerationArtifactPath(
             fixture.target,
             "pass1",
-            policySet.policy_set_digest,
+            dependencyArtifact.artifact.policy_generation_id,
             dependency.work_unit_id,
           );
           const dependencyBytes = readFileSync(dependencyPath, "utf8");
@@ -384,7 +395,7 @@ describe("Pass1 shadow CLI", () => {
             args: [
               unit.descriptor.work_unit_id,
               "--book-id", fixture.target.book_id,
-              "--shadow-generation", policySet.policy_set_digest,
+              "--shadow-generation", task.policy_generation_id,
             ],
           });
           expect(staleInput.status).toBe(1);
@@ -399,7 +410,7 @@ describe("Pass1 shadow CLI", () => {
             args: [
               unit.descriptor.work_unit_id,
               "--book-id", fixture.target.book_id,
-              "--shadow-generation", policySet.policy_set_digest,
+              "--shadow-generation", task.policy_generation_id,
             ],
           });
           expect(finalInput.status, finalInput.stderr).toBe(0);
@@ -407,7 +418,7 @@ describe("Pass1 shadow CLI", () => {
 
           const candidateDirectory = pass1ShadowTaskPrivateDirectory(
             fixture.target,
-            policySet.policy_set_digest,
+            task.policy_generation_id,
             unit.descriptor.work_unit_id,
           );
           mkdirSync(candidateDirectory, { recursive: true });
@@ -424,7 +435,7 @@ describe("Pass1 shadow CLI", () => {
                 unit.descriptor.work_unit_id,
                 finalCandidatePath,
                 "--book-id", fixture.target.book_id,
-                "--shadow-generation", policySet.policy_set_digest,
+                "--shadow-generation", task.policy_generation_id,
                 "--generated-at", PROVENANCE.generated_at,
               ],
             });
@@ -440,7 +451,7 @@ describe("Pass1 shadow CLI", () => {
               unit.descriptor.work_unit_id,
               finalCandidatePath,
               "--book-id", fixture.target.book_id,
-              "--shadow-generation", policySet.policy_set_digest,
+              "--shadow-generation", task.policy_generation_id,
               "--generated-at", PROVENANCE.generated_at,
             ],
           });
@@ -456,7 +467,7 @@ describe("Pass1 shadow CLI", () => {
           nextChildren.push(verifyPass1ShadowArtifact({
             work_unit: unit,
             artifact: readEnvelope(artifactPath),
-            policy_set_digest: policySet.policy_set_digest,
+            policy_generation_id: task.policy_generation_id,
           }));
         }
       }
@@ -470,7 +481,7 @@ describe("Pass1 shadow CLI", () => {
       script: "pass1-batch.ts",
       args: [
         "--book-id", fixture.target.book_id,
-        "--shadow-generation", policySet.policy_set_digest,
+        "--shadow-generation", policyGenerationIdFor(policySet, routed.units[0]),
         "--shadow-final", routed.units[0].descriptor.work_unit_id,
       ],
     });
@@ -483,7 +494,7 @@ describe("Pass1 shadow CLI", () => {
       script: "pass1-batch.ts",
       args: [
         "--book-id", fixture.target.book_id,
-        "--shadow-generation", policySet.policy_set_digest,
+        "--shadow-generation", finalTask.policy_generation_id,
         "--shadow-final", finalUnit.descriptor.work_unit_id,
       ],
     });
@@ -522,7 +533,7 @@ describe("Pass1 shadow CLI", () => {
       script: "pass1-batch.ts",
       args: [
         "--book-id", fixture.target.book_id,
-        "--shadow-generation", policySet.policy_set_digest,
+        "--shadow-generation", finalTask.policy_generation_id,
         "--shadow-final", finalUnit.descriptor.work_unit_id,
       ],
     });

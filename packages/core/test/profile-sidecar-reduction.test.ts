@@ -28,6 +28,7 @@ import {
 } from "../src/profile-sidecar-reduction";
 import {
   buildSemanticArtifactEnvelopeV3,
+  semanticContractFromExtractionPolicy,
   type ExtractionPolicyFingerprintV1,
   type SemanticArtifactEnvelopeV3,
 } from "../src/semantic-artifact";
@@ -38,7 +39,6 @@ function sha256(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
 }
 
-const POLICY_SET_DIGEST = sha256("profile-sidecar-map-reduce-policy-set.v1");
 const BUDGET: Omit<ModelInputBudgetRequestV1, "rendered_input" | "router_version" | "prompt_sha256"> = {
   stage_body_limit_tokens: 5_000,
   executor_context_floor_tokens: 8_192,
@@ -84,6 +84,10 @@ function observationFor(unit: ProfileSidecarDiscourseShadowWorkUnitV1): ProfileS
   };
 }
 
+function policyGenerationIdFor(unit: ProfileSidecarDiscourseShadowWorkUnitV1): string {
+  return `profile-sidecar-${unit.descriptor.kind}-test-generation.v1`;
+}
+
 function envelopeFor(
   unit: ProfileSidecarDiscourseShadowWorkUnitV1,
 ): SemanticArtifactEnvelopeV3<unknown> {
@@ -118,9 +122,8 @@ function envelopeFor(
     stage: "profile_sidecar",
     work_unit_id: unit.descriptor.work_unit_id,
     input_hash: unit.descriptor.input_hash,
-    proof_digest: unit.descriptor.input_budget_proof.proof_digest,
-    policy_set_digest: POLICY_SET_DIGEST,
-    policy_fingerprint: unit.descriptor.policy_fingerprint,
+    policy_generation_id: policyGenerationIdFor(unit),
+    semantic_contract: semanticContractFromExtractionPolicy(unit.descriptor.policy_fingerprint),
     provenance: {
       executor: "test",
       model: "codex-test",
@@ -137,7 +140,7 @@ function verifiedChild(
   return verifyProfileSidecarDiscourseShadowArtifact({
     work_unit: unit,
     artifact: envelopeFor(unit),
-    policy_set_digest: POLICY_SET_DIGEST,
+    policy_generation_id: policyGenerationIdFor(unit),
   });
 }
 
@@ -224,7 +227,6 @@ function replayTree(
       parent_lid: parent.lid,
       fragment_count: count,
       children,
-      policy_set_digest: POLICY_SET_DIGEST,
       policy: policy("reduce"),
       budget: BUDGET,
     });
@@ -390,7 +392,6 @@ describe("profile sidecar dormant fragment/reduce routing", () => {
       parent_lid: parent.lid,
       fragment_count: 2,
       children,
-      policy_set_digest: POLICY_SET_DIGEST,
       policy: policy("reduce"),
       budget: BUDGET,
     });
@@ -405,37 +406,35 @@ describe("profile sidecar dormant fragment/reduce routing", () => {
       stage: "profile_sidecar",
       work_unit_id: units[0].descriptor.work_unit_id,
       input_hash: units[0].descriptor.input_hash,
-      proof_digest: units[0].descriptor.input_budget_proof.proof_digest,
-      policy_set_digest: POLICY_SET_DIGEST,
-      policy_fingerprint: units[0].descriptor.policy_fingerprint,
+      policy_generation_id: policyGenerationIdFor(units[0]),
+      semantic_contract: semanticContractFromExtractionPolicy(units[0].descriptor.policy_fingerprint),
       provenance: envelopeFor(units[0]).provenance,
       payload: changedPayload,
     });
     const changedChild = verifyProfileSidecarDiscourseShadowArtifact({
       work_unit: units[0],
       artifact: changedArtifact,
-      policy_set_digest: POLICY_SET_DIGEST,
+      policy_generation_id: policyGenerationIdFor(units[0]),
     });
     const second = routeProfileSidecarDiscourseReductionLevel({
       target: units[0].descriptor.target,
       parent_lid: parent.lid,
       fragment_count: 2,
       children: [changedChild, children[1]],
-      policy_set_digest: POLICY_SET_DIGEST,
       policy: policy("reduce"),
       budget: BUDGET,
     });
     if (second.status !== "routed") throw new Error("changed reducer route should fit");
     expect(second.units[0].descriptor.work_unit_id).not.toBe(first.units[0].descriptor.work_unit_id);
     expect(second.units[0].descriptor.input_hash).not.toBe(first.units[0].descriptor.input_hash);
-    expect(second.units[0].descriptor.input_budget_proof.proof_digest)
-      .not.toBe(first.units[0].descriptor.input_budget_proof.proof_digest);
+    expect(second.units[0].descriptor.input_budget_proof.rendered_input_sha256)
+      .not.toBe(first.units[0].descriptor.input_budget_proof.rendered_input_sha256);
 
     const tampered = { ...envelopeFor(units[0]), payload: changedPayload };
     expect(() => verifyProfileSidecarDiscourseShadowArtifact({
       work_unit: units[0],
       artifact: tampered,
-      policy_set_digest: POLICY_SET_DIGEST,
+      policy_generation_id: policyGenerationIdFor(units[0]),
     })).toThrow(/artifact/i);
   });
 });

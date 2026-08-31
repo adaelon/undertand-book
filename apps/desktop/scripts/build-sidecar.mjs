@@ -28,6 +28,7 @@ const result = spawnSync(
     "--target=bun-windows-x64",
     "--loader=.md:text",
     "--loader=.toml:text",
+    "--loader=.cmd:text",
     `--outfile=${output}`,
   ],
   { cwd: repoRoot, stdio: "inherit" },

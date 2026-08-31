@@ -19,6 +19,10 @@ lifecycle only. It does not interpret the internal build state machine.
 - A dedicated executor owns one opaque semantic session. It sees semantic input and writes a
   candidate through the code-owned session sink.
 - The root never reads, receives, summarizes, caches, or forwards semantic input or candidate JSON.
+- The root must not call, probe, enumerate, or use `executor.open` to diagnose a handoff.
+- The root must not call, probe, enumerate, or use `executor.input.next` to diagnose a handoff.
+- The root must not call, probe, enumerate, or use `executor.generation.start` to diagnose a handoff.
+- The root must not call, probe, enumerate, or use `executor.submit_candidate` to diagnose a handoff.
 - Conversation memory is not build state. Re-enter through the same confirmed plan and invocation;
   code rereads durable state on every step.
 
@@ -210,12 +214,12 @@ which no structured action exists. Never emulate a dedicated executor in the roo
 ## Dedicated executor contract
 
 Each subagent receives one `opaque_handoff_ref` and follows the
-`automatic_build_executor_session.v2` protocol in the dedicated executor instructions:
+`automatic_build_executor_session.v3` protocol in the dedicated executor instructions:
 
 ```text
 executor.open(ref)
   -> DELIVER_INPUT: follow next_request through executor.input.next
-  -> INPUT_CHUNK: retain the ordered chunk only in the dedicated child; acknowledge by receipt
+  -> INPUT_CHUNK: retain the ordered chunk only in the dedicated child; continue by exact `previous_chunk_ordinal`
   -> GENERATION_GRANT: accept exactly once through executor.generation.start
   -> GENERATE: produce one strict JSON value; send it through executor.submit_candidate; continue
   -> WAIT: wait retry_after_ms; reopen the same ref
@@ -232,6 +236,10 @@ submit, shell fallback, child final, or root projection is allowed.
 
 ## Hard boundaries
 
+- The root must not call, probe, enumerate, or use `executor.open` to diagnose a handoff.
+- The root must not call, probe, enumerate, or use `executor.input.next` to diagnose a handoff.
+- The root must not call, probe, enumerate, or use `executor.generation.start` to diagnose a handoff.
+- The root must not call, probe, enumerate, or use `executor.submit_candidate` to diagnose a handoff.
 - Dedicated subagents are mandatory for semantic generation; missing capacity is represented by a
   structured driver action, never permission to synthesize empty or generic artifacts in root.
 - Paper foundation remains owned by Build Workbench and Reader. This skill cannot bypass source

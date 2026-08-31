@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import {
+  assertSameArtifactBlueprintVersionV2,
   computeArtifactBlueprintDigest,
   getSystemArtifactBlueprintV1,
   validateArtifactBlueprintV1,
@@ -14,13 +15,12 @@ import {
   type BuildSourceScope,
 } from "./build-intent";
 import {
-  adaptBuildPlanV1PrivateArtifacts,
-  computeBuildIntentDigestAny,
-  validateBuildIntentAny,
-  validateBuildPlanAny,
-  type BuildIntentAny,
-  type BuildPlanAny,
+  validateBuildIntentV3,
+  validateBuildPlanV3,
+  type BuildIntentV3,
   type BuildPlanPrivateArtifactV2,
+  type BuildPlanPrivateArtifactV3,
+  type BuildPlanV3,
 } from "./build-intent-v2";
 
 const PRIVATE_ARTIFACT_TYPES = ["timeline", "concept_map", "comparison_table", "argument_map"] as const;
@@ -57,6 +57,14 @@ export interface ArtifactInstanceV2 {
   relations?: ArtifactInstanceRelationV2[];
 }
 
+export interface ArtifactInstanceV3 {
+  version: "artifact_instance.v3";
+  blueprint_id: string;
+  blueprint_version: string;
+  records: ArtifactInstanceRecordV2[];
+  relations?: ArtifactInstanceRelationV2[];
+}
+
 export interface IntentArtifactTaskArtifactV2 extends BuildPlanPrivateArtifactV2 {
   /** A bounded compatibility label only; validation is always Blueprint-driven. */
   artifact_type: IntentArtifactCompatibilityType;
@@ -84,6 +92,34 @@ export interface IntentArtifactTaskEnvelopeV2 {
   allowed_evidence_lids: string[];
 }
 
+export interface IntentArtifactTaskArtifactV3 extends BuildPlanPrivateArtifactV3 {
+  /** A bounded compatibility label only; validation is always Blueprint-driven. */
+  artifact_type: IntentArtifactCompatibilityType;
+}
+
+export interface IntentArtifactTaskEnvelopeV3 {
+  version: "intent_artifact_task_envelope.v3";
+  task_id: string;
+  privacy: "reader_private";
+  book_id: string;
+  source_fingerprint: string;
+  content_profile: BuildContentProfile;
+  intent_id: string;
+  intent_revision: number;
+  plan_id: string;
+  plan_revision: number;
+  user_goal: string;
+  artifact: IntentArtifactTaskArtifactV3;
+  output_contract: {
+    version: "artifact_instance_output_contract.v3";
+    payload_version: "artifact_instance.v3";
+    blueprint_id: string;
+    blueprint_version: string;
+  };
+  validation_rules: string[];
+  allowed_evidence_lids: string[];
+}
+
 export interface IntentArtifactCandidateV2 {
   version: "intent_artifact_candidate.v2";
   task_id: string;
@@ -100,6 +136,27 @@ export interface IntentArtifactCandidateV2 {
 
 export interface AcceptedIntentArtifactV2 extends Omit<IntentArtifactCandidateV2, "version"> {
   version: "intent_artifact_accepted.v2";
+  payload_digest: string;
+  accepted_at: string;
+}
+
+export interface IntentArtifactCandidateV3 {
+  version: "intent_artifact_candidate.v3";
+  task_id: string;
+  book_id: string;
+  source_fingerprint: string;
+  intent_id: string;
+  intent_revision: number;
+  plan_id: string;
+  plan_revision: number;
+  artifact_id: string;
+  blueprint_id: string;
+  blueprint_version: string;
+  payload: ArtifactInstanceV3;
+}
+
+export interface AcceptedIntentArtifactV3 extends Omit<IntentArtifactCandidateV3, "version"> {
+  version: "intent_artifact_accepted.v3";
   payload_digest: string;
   accepted_at: string;
 }
@@ -140,6 +197,25 @@ export interface IntentArtifactTaskReceiptV1 {
   accepted_at: string;
 }
 
+export interface IntentArtifactTaskReceiptV2 {
+  version: "intent_artifact_task_receipt.v2";
+  state: "committed";
+  task_id: string;
+  artifact_id: string;
+  artifact_type: IntentArtifactCompatibilityType;
+  intent_id: string;
+  intent_revision: number;
+  plan_id: string;
+  plan_revision: number;
+  blueprint_id: string;
+  blueprint_version: string;
+  payload_digest: string;
+  record_count: number;
+  relation_count: number;
+  evidence_reference_count: number;
+  accepted_at: string;
+}
+
 export interface IntentArtifactTaskHandoffV1 {
   version: "intent_artifact_task_handoff.v1";
   task_id: string;
@@ -148,18 +224,32 @@ export interface IntentArtifactTaskHandoffV1 {
   task_path: string;
 }
 
+export interface IntentArtifactTaskHandoffV2 {
+  version: "intent_artifact_task_handoff.v2";
+  task_id: string;
+  intent_id: string;
+  intent_revision: number;
+  plan_id: string;
+  plan_revision: number;
+  artifact_id: string;
+  artifact_type: IntentArtifactCompatibilityType;
+  blueprint_id: string;
+  blueprint_version: string;
+  task_path: string;
+}
+
 export interface CompileIntentArtifactTasksInput {
-  intent: BuildIntentAny;
-  plan: BuildPlanAny;
+  intent: BuildIntentV3;
+  plan: BuildPlanV3;
   available_lids: readonly string[];
   resolved_scope_lids: readonly string[];
 }
 
 export interface AcceptIntentArtifactCandidateInput {
-  task: IntentArtifactTaskEnvelopeV2;
+  task: IntentArtifactTaskEnvelopeV3;
   candidate: unknown;
-  current_intent: BuildIntentAny;
-  current_plan: BuildPlanAny;
+  current_intent: BuildIntentV3;
+  current_plan: BuildPlanV3;
   current_source_fingerprint: string;
   available_lids: readonly string[];
   resolved_scope_lids: readonly string[];
@@ -187,18 +277,27 @@ const ArtifactInstanceV2Z = z.object({
   relations: z.array(ArtifactInstanceRelationV2Z).optional(),
 }).strict();
 
-const CandidateV2Z = z.object({
-  version: z.literal("intent_artifact_candidate.v2"),
+const ArtifactInstanceV3Z = z.object({
+  version: z.literal("artifact_instance.v3"),
+  blueprint_id: NonBlankStringZ,
+  blueprint_version: NonBlankStringZ,
+  records: z.array(ArtifactInstanceRecordV2Z),
+  relations: z.array(ArtifactInstanceRelationV2Z).optional(),
+}).strict();
+
+const CandidateV3Z = z.object({
+  version: z.literal("intent_artifact_candidate.v3"),
   task_id: NonBlankStringZ,
   book_id: NonBlankStringZ,
   source_fingerprint: NonBlankStringZ,
   intent_id: NonBlankStringZ,
-  intent_digest: z.string().regex(SHA256, "intent_digest must be a lowercase SHA-256 digest"),
+  intent_revision: z.number().int().positive().safe(),
   plan_id: NonBlankStringZ,
-  plan_digest: z.string().regex(SHA256, "plan_digest must be a lowercase SHA-256 digest"),
+  plan_revision: z.number().int().positive().safe(),
   artifact_id: NonBlankStringZ,
-  blueprint_digest: z.string().regex(SHA256, "blueprint_digest must be a lowercase SHA-256 digest"),
-  payload: ArtifactInstanceV2Z,
+  blueprint_id: NonBlankStringZ,
+  blueprint_version: NonBlankStringZ,
+  payload: ArtifactInstanceV3Z,
 }).strict();
 
 const TimelinePayloadZ = z.object({
@@ -288,17 +387,13 @@ function compatibilityType(blueprint: ArtifactBlueprintV1): IntentArtifactCompat
   return match ?? "custom";
 }
 
-function validateConfirmedSelection(intentInput: BuildIntentAny, planInput: BuildPlanAny): {
-  intent: BuildIntentAny;
-  plan: BuildPlanAny;
-  intentDigest: string;
-  privateArtifacts: BuildPlanPrivateArtifactV2[];
+function validateConfirmedSelection(intentInput: BuildIntentV3, planInput: BuildPlanV3): {
+  intent: BuildIntentV3;
+  plan: BuildPlanV3;
+  privateArtifacts: BuildPlanPrivateArtifactV3[];
 } {
-  const intent = validateBuildIntentAny(intentInput);
-  const plan = validateBuildPlanAny(planInput);
-  if (intent.version.replace("build_intent", "") !== plan.version.replace("build_plan", "")) {
-    throw new Error("BuildIntent and BuildPlan contract versions do not match");
-  }
+  const intent = validateBuildIntentV3(intentInput);
+  const plan = validateBuildPlanV3(planInput);
   if (intent.status !== "confirmed") throw new Error("intent artifact tasks require a confirmed BuildIntent");
   if (plan.status !== "confirmed") throw new Error("intent artifact tasks require a confirmed BuildPlan");
   if (plan.recipe_id !== "goal_directed") throw new Error("intent artifact tasks require a goal_directed BuildPlan");
@@ -308,18 +403,16 @@ function validateConfirmedSelection(intentInput: BuildIntentAny, planInput: Buil
     throw new Error("BuildPlan source_fingerprint does not match BuildIntent source_fingerprint");
   }
   assertSameJson(plan.content_profile, intent.content_profile, "BuildPlan content_profile does not match BuildIntent content_profile");
-  const intentDigest = computeBuildIntentDigestAny(intent);
   if (plan.intent_id !== intent.intent_id) throw new Error("BuildPlan intent_id does not match BuildIntent intent_id");
-  if (plan.intent_digest !== intentDigest) throw new Error("BuildPlan intent_digest does not match the current BuildIntent");
-  const privateArtifacts = plan.version === "build_plan.v2"
-    ? plan.private_artifacts
-    : adaptBuildPlanV1PrivateArtifacts(plan);
-  return { intent, plan, intentDigest, privateArtifacts };
+  if (plan.intent_revision !== intent.intent_revision) {
+    throw new Error("BuildPlan intent_revision does not match the current BuildIntent");
+  }
+  return { intent, plan, privateArtifacts: plan.private_artifacts };
 }
 
 function validateScope(
-  intent: BuildIntentAny,
-  privateArtifacts: readonly BuildPlanPrivateArtifactV2[],
+  intent: BuildIntentV3,
+  privateArtifacts: readonly BuildPlanPrivateArtifactV3[],
   availableInput: readonly string[],
   resolvedInput: readonly string[],
 ): { available: string[]; resolved: string[] } {
@@ -344,54 +437,52 @@ function validateScope(
   return { available, resolved };
 }
 
-function taskId(planDigest: string, artifactId: string): string {
-  return `intent_artifact_${digest({ plan_digest: planDigest, artifact_id: artifactId }).slice(0, 24)}`;
+function taskId(planRevision: number, artifactId: string): string {
+  return `intent_artifact_r${planRevision}_${artifactId}`;
 }
 
-const V2_VALIDATION_RULES = [
+const V3_VALIDATION_RULES = [
   "candidate_identity_matches_current_task",
-  "blueprint_snapshot_and_digest_match_confirmed_plan",
+  "blueprint_snapshot_and_version_match_confirmed_plan",
   "record_and_relation_data_match_restricted_schema",
   "record_and_relation_ids_are_unique_and_relation_endpoints_exist",
   "every_record_and_relation_has_current_in_scope_lid_evidence",
   "record_relation_and_text_limits_are_enforced",
 ] as const;
 
-export function compileIntentArtifactTasks(input: CompileIntentArtifactTasksInput): IntentArtifactTaskEnvelopeV2[] {
-  const { intent, plan, intentDigest, privateArtifacts } = validateConfirmedSelection(input.intent, input.plan);
+export function compileIntentArtifactTasks(input: CompileIntentArtifactTasksInput): IntentArtifactTaskEnvelopeV3[] {
+  const { intent, plan, privateArtifacts } = validateConfirmedSelection(input.intent, input.plan);
   const { resolved } = validateScope(intent, privateArtifacts, input.available_lids, input.resolved_scope_lids);
   return privateArtifacts.map((artifact) => {
-    const blueprint = validateArtifactBlueprintV1(artifact.blueprint);
-    const blueprintDigest = computeArtifactBlueprintDigest(blueprint);
-    if (blueprintDigest !== artifact.blueprint_digest) {
-      throw new Error(`artifact ${artifact.artifact_id} blueprint_digest does not match its snapshot`);
-    }
+    const blueprint = assertSameArtifactBlueprintVersionV2(artifact.blueprint, artifact.blueprint);
     return {
-      version: "intent_artifact_task_envelope.v2",
-      task_id: taskId(plan.plan_digest, artifact.artifact_id),
+      version: "intent_artifact_task_envelope.v3",
+      task_id: taskId(plan.plan_revision, artifact.artifact_id),
       privacy: "reader_private",
       book_id: plan.book_id,
       source_fingerprint: plan.source_fingerprint,
       content_profile: structuredClone(plan.content_profile),
       intent_id: intent.intent_id,
-      intent_digest: intentDigest,
+      intent_revision: intent.intent_revision,
       plan_id: plan.plan_id,
-      plan_digest: plan.plan_digest,
+      plan_revision: plan.plan_revision,
       user_goal: intent.user_goal,
       artifact: {
         artifact_id: artifact.artifact_id,
         artifact_type: compatibilityType(blueprint),
         source_scope: structuredClone(artifact.source_scope),
         blueprint: structuredClone(blueprint),
-        blueprint_digest: blueprintDigest,
+        blueprint_id: artifact.blueprint_id,
+        blueprint_version: artifact.blueprint_version,
         required_public_capabilities: [...artifact.required_public_capabilities],
       },
       output_contract: {
-        version: "artifact_instance_output_contract.v2",
-        payload_version: "artifact_instance.v2",
-        blueprint_digest: blueprintDigest,
+        version: "artifact_instance_output_contract.v3",
+        payload_version: "artifact_instance.v3",
+        blueprint_id: artifact.blueprint_id,
+        blueprint_version: artifact.blueprint_version,
       },
-      validation_rules: [...V2_VALIDATION_RULES],
+      validation_rules: [...V3_VALIDATION_RULES],
       allowed_evidence_lids: [...resolved],
     };
   });
@@ -434,14 +525,34 @@ function validateEvidence(
 
 function validateArtifactInstance(
   blueprintInput: unknown,
+  input: ArtifactInstanceV2,
+  evidence?: { available_lids: readonly string[]; allowed_evidence_lids: readonly string[] },
+): { payload: ArtifactInstanceV2; metrics: PayloadMetrics };
+function validateArtifactInstance(
+  blueprintInput: unknown,
+  input: ArtifactInstanceV3,
+  evidence?: { available_lids: readonly string[]; allowed_evidence_lids: readonly string[] },
+): { payload: ArtifactInstanceV3; metrics: PayloadMetrics };
+function validateArtifactInstance(
+  blueprintInput: unknown,
   input: unknown,
   evidence?: { available_lids: readonly string[]; allowed_evidence_lids: readonly string[] },
-): { payload: ArtifactInstanceV2; metrics: PayloadMetrics } {
+): { payload: ArtifactInstanceV2 | ArtifactInstanceV3; metrics: PayloadMetrics } {
   const blueprint = validateArtifactBlueprintV1(blueprintInput);
-  const expectedBlueprintDigest = computeArtifactBlueprintDigest(blueprint);
-  const parsed = ArtifactInstanceV2Z.parse(input);
-  if (parsed.blueprint_digest !== expectedBlueprintDigest) {
-    throw new Error("ArtifactInstance blueprint_digest does not match the confirmed Blueprint snapshot");
+  const version = input && typeof input === "object" && !Array.isArray(input)
+    ? (input as Record<string, unknown>).version
+    : undefined;
+  const parsed = version === "artifact_instance.v2"
+    ? ArtifactInstanceV2Z.parse(input)
+    : ArtifactInstanceV3Z.parse(input);
+  if (parsed.version === "artifact_instance.v2") {
+    const expectedBlueprintDigest = computeArtifactBlueprintDigest(blueprint);
+    if (parsed.blueprint_digest !== expectedBlueprintDigest) {
+      throw new Error("ArtifactInstance blueprint_digest does not match the confirmed Blueprint snapshot");
+    }
+  } else if (parsed.blueprint_id !== blueprint.blueprint_id
+    || parsed.blueprint_version !== blueprint.blueprint_version) {
+    throw new Error("ArtifactInstance Blueprint id/version does not match the confirmed snapshot");
   }
   if (parsed.records.length > blueprint.limits.max_records) {
     throw new Error(`ArtifactInstance exceeds Blueprint max_records: ${blueprint.limits.max_records}`);
@@ -476,12 +587,20 @@ function validateArtifactInstance(
   }
   const evidenceArrays = [...records, ...validatedRelations].map((item) => item.evidence_lids);
   validateEvidence(evidenceArrays, evidence?.available_lids, evidence?.allowed_evidence_lids);
-  const payload: ArtifactInstanceV2 = {
-    version: "artifact_instance.v2",
-    blueprint_digest: expectedBlueprintDigest,
-    records,
-    ...(parsed.relations === undefined ? {} : { relations: validatedRelations }),
-  };
+  const payload: ArtifactInstanceV2 | ArtifactInstanceV3 = parsed.version === "artifact_instance.v2"
+    ? {
+        version: "artifact_instance.v2",
+        blueprint_digest: parsed.blueprint_digest,
+        records,
+        ...(parsed.relations === undefined ? {} : { relations: validatedRelations }),
+      }
+    : {
+        version: "artifact_instance.v3",
+        blueprint_id: blueprint.blueprint_id,
+        blueprint_version: blueprint.blueprint_version,
+        records,
+        ...(parsed.relations === undefined ? {} : { relations: validatedRelations }),
+      };
   canonicalBuildJson(payload);
   return {
     payload,
@@ -493,37 +612,39 @@ function validateArtifactInstance(
   };
 }
 
-function parseCandidate(input: unknown): IntentArtifactCandidateV2 {
+function parseCandidate(input: unknown): IntentArtifactCandidateV3 {
   if (!input || typeof input !== "object" || Array.isArray(input)
-    || (input as Record<string, unknown>).version !== "intent_artifact_candidate.v2") {
-    throw new Error("new intent artifact generation requires intent_artifact_candidate.v2");
+    || (input as Record<string, unknown>).version !== "intent_artifact_candidate.v3") {
+    throw new Error("new intent artifact generation requires intent_artifact_candidate.v3");
   }
-  return CandidateV2Z.parse(input) as IntentArtifactCandidateV2;
+  return CandidateV3Z.parse(input) as IntentArtifactCandidateV3;
 }
 
-function assertCandidateIdentity(candidate: IntentArtifactCandidateV2, task: IntentArtifactTaskEnvelopeV2): void {
-  const expected: Array<[keyof IntentArtifactCandidateV2, unknown]> = [
+function assertCandidateIdentity(candidate: IntentArtifactCandidateV3, task: IntentArtifactTaskEnvelopeV3): void {
+  const expected: Array<[keyof IntentArtifactCandidateV3, unknown]> = [
     ["task_id", task.task_id],
     ["book_id", task.book_id],
     ["source_fingerprint", task.source_fingerprint],
     ["intent_id", task.intent_id],
-    ["intent_digest", task.intent_digest],
+    ["intent_revision", task.intent_revision],
     ["plan_id", task.plan_id],
-    ["plan_digest", task.plan_digest],
+    ["plan_revision", task.plan_revision],
     ["artifact_id", task.artifact.artifact_id],
-    ["blueprint_digest", task.artifact.blueprint_digest],
+    ["blueprint_id", task.artifact.blueprint_id],
+    ["blueprint_version", task.artifact.blueprint_version],
   ];
   for (const [field, value] of expected) {
     if (candidate[field] !== value) throw new Error(`candidate ${field} does not match its current task`);
   }
-  if (candidate.payload.blueprint_digest !== task.artifact.blueprint_digest) {
-    throw new Error("candidate payload blueprint_digest does not match its current task");
+  if (candidate.payload.blueprint_id !== task.artifact.blueprint_id
+    || candidate.payload.blueprint_version !== task.artifact.blueprint_version) {
+    throw new Error("candidate payload Blueprint id/version does not match its current task");
   }
 }
 
 export function acceptIntentArtifactCandidate(input: AcceptIntentArtifactCandidateInput): {
-  accepted: AcceptedIntentArtifactV2;
-  receipt: IntentArtifactTaskReceiptV1;
+  accepted: AcceptedIntentArtifactV3;
+  receipt: IntentArtifactTaskReceiptV2;
 } {
   if (input.current_source_fingerprint !== input.current_intent.source_fingerprint) {
     throw new Error("current source_fingerprint does not match the confirmed intent");
@@ -546,22 +667,25 @@ export function acceptIntentArtifactCandidate(input: AcceptIntentArtifactCandida
     allowed_evidence_lids: expectedTask.allowed_evidence_lids,
   });
   const payloadDigest = digest(payload);
-  const accepted: AcceptedIntentArtifactV2 = {
+  const accepted: AcceptedIntentArtifactV3 = {
     ...candidate,
-    version: "intent_artifact_accepted.v2",
+    version: "intent_artifact_accepted.v3",
     payload,
     payload_digest: payloadDigest,
     accepted_at: input.accepted_at,
   };
-  const receipt: IntentArtifactTaskReceiptV1 = {
-    version: "intent_artifact_task_receipt.v1",
+  const receipt: IntentArtifactTaskReceiptV2 = {
+    version: "intent_artifact_task_receipt.v2",
     state: "committed",
     task_id: expectedTask.task_id,
     artifact_id: expectedTask.artifact.artifact_id,
     artifact_type: expectedTask.artifact.artifact_type,
-    intent_digest: expectedTask.intent_digest,
-    plan_digest: expectedTask.plan_digest,
-    blueprint_digest: expectedTask.artifact.blueprint_digest,
+    intent_id: expectedTask.intent_id,
+    intent_revision: expectedTask.intent_revision,
+    plan_id: expectedTask.plan_id,
+    plan_revision: expectedTask.plan_revision,
+    blueprint_id: expectedTask.artifact.blueprint_id,
+    blueprint_version: expectedTask.artifact.blueprint_version,
     payload_digest: payloadDigest,
     ...metrics,
     accepted_at: input.accepted_at,
@@ -708,15 +832,21 @@ export function projectAcceptedIntentArtifactV1AsV2(
 }
 
 export function projectIntentArtifactTaskHandoff(
-  task: IntentArtifactTaskEnvelopeV2,
+  task: IntentArtifactTaskEnvelopeV3,
   taskPath: string,
-): IntentArtifactTaskHandoffV1 {
+): IntentArtifactTaskHandoffV2 {
   if (!taskPath.trim()) throw new Error("intent artifact task handoff requires an opaque task path");
   return {
-    version: "intent_artifact_task_handoff.v1",
+    version: "intent_artifact_task_handoff.v2",
     task_id: task.task_id,
+    intent_id: task.intent_id,
+    intent_revision: task.intent_revision,
+    plan_id: task.plan_id,
+    plan_revision: task.plan_revision,
     artifact_id: task.artifact.artifact_id,
     artifact_type: task.artifact.artifact_type,
+    blueprint_id: task.artifact.blueprint_id,
+    blueprint_version: task.artifact.blueprint_version,
     task_path: taskPath,
   };
 }

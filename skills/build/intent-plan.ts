@@ -14,8 +14,8 @@ import {
 } from "../../packages/core/src/build-intent-controller";
 import { canonicalBuildJson } from "../../packages/core/src/build-intent";
 import {
-  buildAutomaticBuildSnapshot,
   inspectAutomaticBuildStageFreshness,
+  routeAutomaticBuildSnapshot,
   type AutomaticBuildTarget,
 } from "../../packages/core/src/build-orchestrator";
 
@@ -91,12 +91,12 @@ function inspectFreshness(input: IntentPlanFreshnessTargetV1) {
       input_fingerprint: input.source_fingerprint,
     },
   };
+  const snapshotRoute = routeAutomaticBuildSnapshot(target, { quality_profile: "full" });
   return {
     version: "intent_build_public_freshness.v1",
-    public_freshness: inspectAutomaticBuildStageFreshness(
-      buildAutomaticBuildSnapshot(target, { quality_profile: "full" }),
-      { quality_profile: "full" },
-    ),
+    public_freshness: snapshotRoute.status === "ready"
+      ? inspectAutomaticBuildStageFreshness(snapshotRoute.value, { quality_profile: "full" })
+      : [],
   };
 }
 

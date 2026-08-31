@@ -28,9 +28,12 @@ import {
   type AutomaticBuildExecutorDispatchManifestV1,
   type AutomaticBuildExecutorDispatchPlanV1,
 } from "./automatic-build-dispatch";
-import type { AutomaticBuildTaskPolicyBinding } from "./semantic-artifact";
 import {
-  CODEX_EXECUTOR_TRANSPORT_PROFILE_V1,
+  isAutomaticBuildTaskPolicyBindingV2,
+  type AutomaticBuildTaskPolicyBinding,
+} from "./semantic-artifact";
+import {
+  CODEX_EXECUTOR_TRANSPORT_PROFILE_V2,
 } from "./executor-transport";
 import {
   isProofBoundWorkUnitDescriptor,
@@ -843,12 +846,14 @@ function terminalReceiptAfterDispatch(
   workUnitId: string,
 ): AutomaticBuildDispatchTaskReceiptV1 | undefined {
   const binding = persisted.manifest.task_bindings?.[workUnitId];
-  const expectedScope = binding ? createAutomaticBuildAttemptScope({
+  const expectedScope = binding && isAutomaticBuildTaskPolicyBindingV2(binding)
+    ? createAutomaticBuildAttemptScope({
     target_ref: target.target_ref,
     stage: persisted.manifest.stage,
     work_unit_id: workUnitId,
     task_binding: binding,
-  }) : undefined;
+      })
+    : undefined;
   const attempts = listAutomaticBuildStoredAttempts(target, persisted.manifest.stage)
     .filter((attempt) => attempt.work_unit_id === workUnitId)
     .filter((attempt) => !expectedScope
@@ -974,7 +979,7 @@ function validateDescriptors(
       if (isWorkUnitDescriptorV3(descriptor)) {
         validateWorkUnitDescriptorV3(descriptor);
       } else {
-        validateWorkUnitDescriptorV4(descriptor, CODEX_EXECUTOR_TRANSPORT_PROFILE_V1);
+        validateWorkUnitDescriptorV4(descriptor, CODEX_EXECUTOR_TRANSPORT_PROFILE_V2);
       }
       const persistedBinding = persisted.manifest.task_bindings?.[workUnitId];
       if (!persistedBinding || stableJson(persistedBinding) !== stableJson(binding)) {

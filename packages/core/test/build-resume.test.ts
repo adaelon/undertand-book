@@ -59,6 +59,20 @@ describe("PB5-2 computeBuildStatus 续建视图 [ADR-0042]", () => {
     expect(done).not.toContain(stale);
   });
 
+  it("H0 keeps the content hash because a hit reuses and a miss regenerates the same expensive window", () => {
+    const reused = windows[0].id;
+    const regenerated = windows[windows.length - 1].id;
+    const existing = allDoneMap();
+    existing.set(regenerated, { content_hash: "stale-window-content" });
+
+    const status = computeBuildStatus(windows, byLid, md, existing);
+
+    expect(status.done).toContain(reused);
+    expect(status.pending).not.toContain(reused);
+    expect(status.pending).toContain(regenerated);
+    expect(status.done).not.toContain(regenerated);
+  });
+
   it("pass1ContentHash 确定性、对正文变化敏感", () => {
     const inp = buildPass1Input(windows[0], byLid, md);
     expect(pass1ContentHash(inp)).toBe(pass1ContentHash(inp)); // 同输入同 hash

@@ -9,7 +9,7 @@ import {
 import {
   automaticBuildStageCloseResultPath,
   closeAutomaticBuildStage,
-  type AutomaticBuildStageCloseResultV1,
+  type AutomaticBuildStageCloseResultV2,
 } from "../src/automatic-build-close";
 import {
   automaticBuildPublicationReceiptPath,
@@ -80,7 +80,7 @@ describe("BR9 publication-aware stage close", () => {
     const outcome = closePass1(value);
 
     expect(outcome).toMatchObject({
-      version: "automatic_build_stage_close_result.v1",
+      version: "automatic_build_stage_close_result.v2",
       status: "closed",
       stage: "pass1",
       target: {
@@ -92,10 +92,16 @@ describe("BR9 publication-aware stage close", () => {
       postcondition: { stage_closed: true },
       next: "replan",
     });
-    if (outcome.version !== "automatic_build_stage_close_result.v1") {
+    if (outcome.version !== "automatic_build_stage_close_result.v2") {
       throw new Error(`expected close result, received ${outcome.code}`);
     }
-    expect(outcome.postcondition.policy_set_digest).toMatch(/^[a-f0-9]{64}$/u);
+    expect(outcome.postcondition.policy_contracts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: expect.any(String),
+        policy_generation_id: expect.any(String),
+        semantic_contract: expect.any(Object),
+      }),
+    ]));
     expect(outcome.postcondition.coverage_digest).toMatch(/^[a-f0-9]{64}$/u);
     expect(outcome.postcondition.freshness_digest).toMatch(/^[a-f0-9]{64}$/u);
     expect(outcome.postcondition.public_artifact_set_digest).toMatch(/^[a-f0-9]{64}$/u);
@@ -173,18 +179,15 @@ describe("BR9 publication-aware stage close", () => {
     const value = fixture();
     const outcome = closePass1(value, () => {
       const result = publishPass1(value);
-      const quality = JSON.parse(readFileSync(
-        path.join(value.target.workspace_dir, ".build", "automatic-build", "v2", "quality", "pass1.json"),
-        "utf8",
-      )) as { routing: { policy_set_digest: string } };
       const stage = buildAutomaticBuildSnapshot(value.target, { quality_profile: "full" })
         .stages.find((candidate) => candidate.stage === "pass1");
-      const workUnitId = stage?.work_units?.[0]?.work_unit_id;
-      if (!workUnitId) throw new Error("expected a frozen Pass1 work unit");
+      const generationEntry = Object.entries(stage?.generation_tasks ?? {})[0];
+      if (!generationEntry) throw new Error("expected a frozen Pass1 policy generation");
+      const [workUnitId, generationTask] = generationEntry;
       const artifactPath = automaticBuildGenerationArtifactPath(
         value.target,
         "pass1",
-        quality.routing.policy_set_digest,
+        generationTask.task.policy_generation_id,
         workUnitId,
       );
       const artifact = JSON.parse(readFileSync(artifactPath, "utf8")) as Record<string, unknown>;
@@ -207,10 +210,10 @@ describe("BR9 publication-aware stage close", () => {
     expect(first).toEqual(second);
   });
 
-  it("fails closed without overwriting a conflicting result for the same publication identity", () => {
+  it("leaves a V1 predecessor read-only and returns bounded recovery", () => {
     const value = fixture();
     const first = closePass1(value);
-    if (first.version !== "automatic_build_stage_close_result.v1") {
+    if (first.version !== "automatic_build_stage_close_result.v2") {
       throw new Error(`expected close result, received ${first.code}`);
     }
     const resultPath = automaticBuildStageCloseResultPath(
@@ -218,7 +221,39 @@ describe("BR9 publication-aware stage close", () => {
       "pass1",
       first.publication.transaction_id,
     );
-    const conflicting: AutomaticBuildStageCloseResultV1 = {
+    const { policy_contracts: _policyContracts, ...commonPostcondition } = first.postcondition;
+    const predecessor = {
+      ...first,
+      version: "automatic_build_stage_close_result.v1",
+      postcondition: {
+        ...commonPostcondition,
+        policy_set_digest: "a".repeat(64),
+      },
+    };
+    const predecessorBytes = `${JSON.stringify(predecessor, null, 2)}\n`;
+    writeFileSync(resultPath, predecessorBytes, "utf8");
+
+    expect(closePass1(value)).toMatchObject({
+      version: "automatic_build_recovery.v1",
+      phase: "post_close",
+      code: "stage_close_postcondition_failed",
+      stage: "pass1",
+    });
+    expect(readFileSync(resultPath, "utf8")).toBe(predecessorBytes);
+  });
+
+  it("fails closed without overwriting a conflicting result for the same publication identity", () => {
+    const value = fixture();
+    const first = closePass1(value);
+    if (first.version !== "automatic_build_stage_close_result.v2") {
+      throw new Error(`expected close result, received ${first.code}`);
+    }
+    const resultPath = automaticBuildStageCloseResultPath(
+      value.target,
+      "pass1",
+      first.publication.transaction_id,
+    );
+    const conflicting: AutomaticBuildStageCloseResultV2 = {
       ...first,
       postcondition: {
         ...first.postcondition,

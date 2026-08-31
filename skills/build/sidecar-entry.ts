@@ -18,6 +18,8 @@ import profileSidecarDiscourseFragmentPrompt from "../../agents/profile-sidecar-
 import profileSidecarDiscourseReducerPrompt from "../../agents/profile-sidecar-discourse-reducer.md";
 import profileSidecarPrompt from "../../agents/profile-sidecar-extractor.md";
 import executorAgentTemplate from "../../plugins/understand-book/assets/codex-agents/understand-book-executor.toml";
+import executorMcpConfig from "../../plugins/understand-book/.mcp.json";
+import executorMcpLauncher from "../../plugins/understand-book/scripts/start-build-executor-mcp.cmd";
 import { AUTOMATIC_BUILD_RELEASE_POLICY_MEMBERS_V1 } from "../../packages/core/src/automatic-build-protocol";
 import {
   AUTOMATIC_BUILD_EXECUTOR_PROMPT_MODES,
@@ -112,6 +114,18 @@ if (command === "executor.agent-template") {
     process.exit(2);
   }
   process.stdout.write(executorAgentTemplate);
+} else if (command === "executor.mcp-config") {
+  if (argv.length !== 1) {
+    console.error("usage: understand-book-build executor.mcp-config");
+    process.exit(2);
+  }
+  process.stdout.write(JSON.stringify(executorMcpConfig));
+} else if (command === "executor.mcp-launcher") {
+  if (argv.length !== 1) {
+    console.error("usage: understand-book-build executor.mcp-launcher");
+    process.exit(2);
+  }
+  process.stdout.write(executorMcpLauncher);
 } else if (command === "prompt") {
   const promptName = argv[1] ?? "";
   const registeredPrompt = PROMPTS[promptName];
@@ -213,6 +227,6 @@ if (command === "executor.agent-template") {
   prepare("intent-blueprint.ts", forwardedArgs(1));
   await import("./intent-blueprint");
 } else {
-  console.error("usage: understand-book-build <legacy-plan|protocol-doctor|plan|next|dispatch.next|dispatch.inspect|dispatch.finish|audit-legacy|migration-mode|quality|metrics|record-attempt|heartbeat|candidate|submit|legacy-submit|fail|inspect|input|write|close|run-script|prompt|workbench-stage|build.step|executor.agent-template|executor.mcp|executor.open|executor.session|executor.input.next|executor.generation.start|executor.submit_candidate|intent.plan|intent.artifact|intent.metrics|intent.blueprint> [...args]");
+  console.error("usage: understand-book-build <legacy-plan|protocol-doctor|plan|next|dispatch.next|dispatch.inspect|dispatch.finish|audit-legacy|migration-mode|quality|metrics|record-attempt|heartbeat|candidate|submit|legacy-submit|fail|inspect|input|write|close|run-script|prompt|workbench-stage|build.step|executor.agent-template|executor.mcp-config|executor.mcp-launcher|executor.mcp|executor.open|executor.session|executor.input.next|executor.generation.start|executor.submit_candidate|intent.plan|intent.artifact|intent.metrics|intent.blueprint> [...args]");
   process.exit(2);
 }

@@ -18,7 +18,7 @@ import {
 } from "../src/book-structure-generation";
 import type { AutomaticBuildTarget } from "../src/build-orchestrator";
 import { resolveContentProfile } from "../src/content-profile";
-import { CODEX_EXECUTOR_TRANSPORT_PROFILE_V1 } from "../src/executor-transport";
+import { CODEX_EXECUTOR_TRANSPORT_PROFILE_V2 } from "../src/executor-transport";
 import { automaticBuildFailureDiagnosticFromWriterError } from "../src/extractor-contract";
 import type { LidNode } from "../src/generated/LidNode";
 import { validateModelExecutionBudgetProof } from "../src/model-input-budget";
@@ -105,7 +105,7 @@ function route(source: BookStructureUnitSource, lidNodes: LidNode[]) {
     lid_nodes: lidNodes,
     source_fingerprint: target.input_fingerprint,
     contracts,
-    transport_profile: CODEX_EXECUTOR_TRANSPORT_PROFILE_V1,
+    transport_profile: CODEX_EXECUTOR_TRANSPORT_PROFILE_V2,
   });
 }
 
@@ -154,7 +154,7 @@ describe("T4 BookStructure transport-proof routability", () => {
     expect(renderBookStructureModelInput(fixture.source)).toBe(renderedBefore);
     expect(() => validateModelExecutionBudgetProof(
       result.work_units[0].descriptor.execution_budget_proof,
-      CODEX_EXECUTOR_TRANSPORT_PROFILE_V1,
+      CODEX_EXECUTOR_TRANSPORT_PROFILE_V2,
     )).not.toThrow();
   });
 
@@ -187,7 +187,7 @@ describe("T4 BookStructure transport-proof routability", () => {
       expect(workUnit.descriptor.kind).toBe("structure_fragment");
       expect(() => validateModelExecutionBudgetProof(
         workUnit.descriptor.execution_budget_proof,
-        CODEX_EXECUTOR_TRANSPORT_PROFILE_V1,
+        CODEX_EXECUTOR_TRANSPORT_PROFILE_V2,
       )).not.toThrow();
       expect(workUnit.descriptor.cost.estimated_input_tokens)
         .toBeLessThanOrEqual(workUnit.descriptor.execution_budget_proof.effective_body_limit_tokens);
@@ -214,7 +214,7 @@ describe("T4 BookStructure transport-proof routability", () => {
     };
     const task = createBookStructureGenerationTask({
       target_ref: target,
-      policy_set_digest: "a".repeat(64),
+      policy_generation_id: "book-structure-fragment.full.v1",
       descriptor: routed.descriptor,
       generation_input: routed.input,
       parent_unit_lid: routed.route.parent_unit_lid,
@@ -291,7 +291,7 @@ describe("T4 BookStructure transport-proof routability", () => {
       source_leaf_count: children.length,
       children,
       contracts,
-      transport_profile: CODEX_EXECUTOR_TRANSPORT_PROFILE_V1,
+      transport_profile: CODEX_EXECUTOR_TRANSPORT_PROFILE_V2,
     });
     const repeated = routeBookStructureReductionLevelV2({
       target,
@@ -299,7 +299,7 @@ describe("T4 BookStructure transport-proof routability", () => {
       source_leaf_count: children.length,
       children,
       contracts,
-      transport_profile: CODEX_EXECUTOR_TRANSPORT_PROFILE_V1,
+      transport_profile: CODEX_EXECUTOR_TRANSPORT_PROFILE_V2,
     });
 
     expect(first.status).toBe("ready");
@@ -319,7 +319,7 @@ describe("T4 BookStructure transport-proof routability", () => {
       expect(workUnit.descriptor.aggregation?.role).toBe("reduce");
       expect(() => validateModelExecutionBudgetProof(
         workUnit.descriptor.execution_budget_proof,
-        CODEX_EXECUTOR_TRANSPORT_PROFILE_V1,
+        CODEX_EXECUTOR_TRANSPORT_PROFILE_V2,
       )).not.toThrow();
     }
   });
@@ -358,7 +358,7 @@ describe("T4 BookStructure transport-proof routability", () => {
       packet,
       source_fingerprint: target.input_fingerprint,
       contracts,
-      transport_profile: CODEX_EXECUTOR_TRANSPORT_PROFILE_V1,
+      transport_profile: CODEX_EXECUTOR_TRANSPORT_PROFILE_V2,
     });
 
     expect(result.status).toBe("ready");
@@ -380,7 +380,7 @@ describe("T4 BookStructure transport-proof routability", () => {
       expect(workUnit.descriptor.aggregation).toEqual({ parent_lid: "stitch", role: "fragment" });
       expect(() => validateModelExecutionBudgetProof(
         workUnit.descriptor.execution_budget_proof,
-        CODEX_EXECUTOR_TRANSPORT_PROFILE_V1,
+        CODEX_EXECUTOR_TRANSPORT_PROFILE_V2,
       )).not.toThrow();
       if (index > 0) {
         const previous = result.work_units[index - 1];
@@ -423,7 +423,7 @@ describe("T4 BookStructure transport-proof routability", () => {
       unit_card_count: children.length,
       children,
       contracts,
-      transport_profile: CODEX_EXECUTOR_TRANSPORT_PROFILE_V1,
+      transport_profile: CODEX_EXECUTOR_TRANSPORT_PROFILE_V2,
     });
     expect(level.status).toBe("ready");
     if (level.status !== "ready") throw new Error("stitch reducer level must be routable");
@@ -441,7 +441,7 @@ describe("T4 BookStructure transport-proof routability", () => {
       unit_card_count: children.length,
       children: nextChildren,
       contracts,
-      transport_profile: CODEX_EXECUTOR_TRANSPORT_PROFILE_V1,
+      transport_profile: CODEX_EXECUTOR_TRANSPORT_PROFILE_V2,
       reducer_level: 2,
     });
     expect(final.status).toBe("ready");
@@ -459,7 +459,7 @@ describe("T4 BookStructure transport-proof routability", () => {
       packet,
       source_fingerprint: target.input_fingerprint,
       contracts,
-      transport_profile: CODEX_EXECUTOR_TRANSPORT_PROFILE_V1,
+      transport_profile: CODEX_EXECUTOR_TRANSPORT_PROFILE_V2,
     });
 
     expect(result).toMatchObject({

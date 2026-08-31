@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import {
   createAutomaticBuildStagePolicySet,
   freezeAutomaticBuildStagePolicySet,
+  resolveAutomaticBuildStagePolicyMember,
 } from "../src/automatic-build-policy-generation";
 import { resolveContentProfile } from "../src/content-profile";
 import {
@@ -97,12 +98,23 @@ function freezeTask(input: {
   target: ReturnType<typeof createSyntheticRoutabilityFixture>["target"];
   work_unit: ProfileSidecarDiscourseShadowWorkUnitV1;
   source_fingerprint: string;
-  policy_set_digest: string;
+  policy_generation_id: string;
   fragment_count: number;
 }): ProfileSidecarDiscourseShadowTaskV1 {
   const task = createProfileSidecarDiscourseShadowTask(input);
   freezeProfileSidecarDiscourseShadowTask(input.target, task);
   return task;
+}
+
+function policyGenerationIdFor(
+  policySet: ReturnType<typeof createAutomaticBuildStagePolicySet>,
+  unit: ProfileSidecarDiscourseShadowWorkUnitV1,
+): string {
+  return resolveAutomaticBuildStagePolicyMember(
+    policySet,
+    unit.descriptor.kind,
+    unit.descriptor.policy_fingerprint,
+  ).policy_generation_id;
 }
 
 function readEnvelope(file: string): SemanticArtifactEnvelopeV3<unknown> {
@@ -161,7 +173,7 @@ describe("profile sidecar shadow CLI", () => {
         target: fixture.target,
         work_unit: unit,
         source_fingerprint: fixture.identity.source_sha256,
-        policy_set_digest: policySet.policy_set_digest,
+        policy_generation_id: policyGenerationIdFor(policySet, unit),
         fragment_count: routed.units.length,
       });
       const candidate = observationFor(unit);
@@ -174,7 +186,7 @@ describe("profile sidecar shadow CLI", () => {
           args: [
             unit.descriptor.work_unit_id,
             "--book-id", fixture.target.book_id,
-            "--shadow-generation", policySet.policy_set_digest,
+            "--shadow-generation", task.policy_generation_id,
           ],
         });
         expect(inputResult.status, inputResult.stderr).toBe(0);
@@ -190,7 +202,7 @@ describe("profile sidecar shadow CLI", () => {
             unit.descriptor.work_unit_id,
             outsideCandidate,
             "--book-id", fixture.target.book_id,
-            "--shadow-generation", policySet.policy_set_digest,
+            "--shadow-generation", task.policy_generation_id,
           ],
         });
         expect(outsideWrite.status).toBe(1);
@@ -198,7 +210,7 @@ describe("profile sidecar shadow CLI", () => {
 
         const candidateDirectory = profileSidecarDiscourseShadowTaskPrivateDirectory(
           fixture.target,
-          policySet.policy_set_digest,
+          task.policy_generation_id,
           unit.descriptor.work_unit_id,
         );
         mkdirSync(candidateDirectory, { recursive: true });
@@ -212,7 +224,7 @@ describe("profile sidecar shadow CLI", () => {
             unit.descriptor.work_unit_id,
             candidatePath,
             "--book-id", fixture.target.book_id,
-            "--shadow-generation", policySet.policy_set_digest,
+            "--shadow-generation", task.policy_generation_id,
             "--attempt", "1",
             "--generated-at", PROVENANCE.generated_at,
             "--executor", PROVENANCE.executor,
@@ -234,7 +246,7 @@ describe("profile sidecar shadow CLI", () => {
             unit.descriptor.work_unit_id,
             candidatePath,
             "--book-id", fixture.target.book_id,
-            "--shadow-generation", policySet.policy_set_digest,
+            "--shadow-generation", task.policy_generation_id,
             "--generated-at", PROVENANCE.generated_at,
           ],
         });
@@ -253,7 +265,7 @@ describe("profile sidecar shadow CLI", () => {
       children.push(verifyProfileSidecarDiscourseShadowArtifact({
         work_unit: unit,
         artifact: readEnvelope(artifactFile),
-        policy_set_digest: policySet.policy_set_digest,
+        policy_generation_id: task.policy_generation_id,
       }));
     }
 
@@ -262,7 +274,6 @@ describe("profile sidecar shadow CLI", () => {
       parent_lid: fixture.paragraph_lid,
       fragment_count: routed.units.length,
       children,
-      policy_set_digest: policySet.policy_set_digest,
       policy: reducePolicy,
       budget: BUDGET,
     });
@@ -275,7 +286,7 @@ describe("profile sidecar shadow CLI", () => {
       target: fixture.target,
       work_unit: finalUnit,
       source_fingerprint: fixture.identity.source_sha256,
-      policy_set_digest: policySet.policy_set_digest,
+      policy_generation_id: policyGenerationIdFor(policySet, finalUnit),
       fragment_count: routed.units.length,
     });
 
@@ -290,7 +301,7 @@ describe("profile sidecar shadow CLI", () => {
       args: [
         finalUnit.descriptor.work_unit_id,
         "--book-id", fixture.target.book_id,
-        "--shadow-generation", policySet.policy_set_digest,
+        "--shadow-generation", finalTask.policy_generation_id,
       ],
     });
     expect(staleInput.status).toBe(1);
@@ -305,7 +316,7 @@ describe("profile sidecar shadow CLI", () => {
       args: [
         finalUnit.descriptor.work_unit_id,
         "--book-id", fixture.target.book_id,
-        "--shadow-generation", policySet.policy_set_digest,
+        "--shadow-generation", finalTask.policy_generation_id,
       ],
     });
     expect(finalInput.status, finalInput.stderr).toBe(0);
@@ -313,7 +324,7 @@ describe("profile sidecar shadow CLI", () => {
 
     const finalCandidateDirectory = profileSidecarDiscourseShadowTaskPrivateDirectory(
       fixture.target,
-      policySet.policy_set_digest,
+      finalTask.policy_generation_id,
       finalUnit.descriptor.work_unit_id,
     );
     mkdirSync(finalCandidateDirectory, { recursive: true });
@@ -336,7 +347,7 @@ describe("profile sidecar shadow CLI", () => {
         finalUnit.descriptor.work_unit_id,
         finalCandidatePath,
         "--book-id", fixture.target.book_id,
-        "--shadow-generation", policySet.policy_set_digest,
+        "--shadow-generation", finalTask.policy_generation_id,
         "--generated-at", PROVENANCE.generated_at,
       ],
     });
@@ -348,7 +359,7 @@ describe("profile sidecar shadow CLI", () => {
       script: "profile-sidecar-batch.ts",
       args: [
         "--book-id", fixture.target.book_id,
-        "--shadow-generation", policySet.policy_set_digest,
+        "--shadow-generation", finalTask.policy_generation_id,
         "--shadow-final", finalUnit.descriptor.work_unit_id,
       ],
     });

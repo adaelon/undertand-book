@@ -10,7 +10,7 @@ import {
 } from "node:fs";
 import path from "node:path";
 import type { AutomaticBuildStage, AutomaticBuildTarget, BuildTargetRefV2 } from "./build-orchestrator";
-import { CODEX_EXECUTOR_TRANSPORT_PROFILE_V1 } from "./executor-transport";
+import { CODEX_EXECUTOR_TRANSPORT_PROFILE_V2 } from "./executor-transport";
 import type { AutomaticBuildFailureDiagnosticV2 } from "./extractor-contract";
 import {
   automaticBuildTaskAttemptDirectory,
@@ -30,6 +30,7 @@ import {
   isAutomaticBuildTaskPolicyBindingV2,
   type AutomaticBuildTaskPolicyBinding,
   type ExtractionPolicyFingerprintV1,
+  type SemanticContractV1,
 } from "./semantic-artifact";
 import {
   isProofBoundWorkUnitDescriptor,
@@ -57,8 +58,8 @@ export interface AutomaticBuildTaskLeaseV1 {
   issued_at: string;
   expires_at: string;
   input_hash?: string;
-  proof_digest?: string;
-  policy_set_digest?: string;
+  policy_generation_id?: string;
+  semantic_contract?: SemanticContractV1;
   policy_fingerprint?: ExtractionPolicyFingerprintV1;
   attempt_scope_digest?: string;
 }
@@ -77,8 +78,8 @@ export interface AutomaticBuildTaskLeaseV2 {
   issued_at: string;
   expires_at: string;
   input_hash?: string;
-  proof_digest?: string;
-  policy_set_digest?: string;
+  policy_generation_id?: string;
+  semantic_contract?: SemanticContractV1;
   policy_fingerprint?: ExtractionPolicyFingerprintV1;
   attempt_scope_digest?: string;
 }
@@ -201,19 +202,21 @@ export function automaticBuildTaskPolicyBindingFromLease(
   lease: AutomaticBuildTaskLease,
 ): AutomaticBuildTaskPolicyBinding | undefined {
   const hasInputHash = lease.input_hash !== undefined;
-  const hasPolicy = lease.policy_fingerprint !== undefined;
-  const hasProof = lease.proof_digest !== undefined;
-  const hasPolicySet = lease.policy_set_digest !== undefined;
-  if (!hasInputHash && !hasPolicy && !hasProof && !hasPolicySet) return undefined;
-  if (!hasInputHash || !hasPolicy || hasProof !== hasPolicySet) {
+  const hasLegacyPolicy = lease.policy_fingerprint !== undefined;
+  const hasPolicyGeneration = lease.policy_generation_id !== undefined;
+  const hasSemanticContract = lease.semantic_contract !== undefined;
+  if (!hasInputHash && !hasLegacyPolicy && !hasPolicyGeneration && !hasSemanticContract) return undefined;
+  if (!hasInputHash
+    || (hasPolicyGeneration !== hasSemanticContract)
+    || (hasLegacyPolicy === hasPolicyGeneration)) {
     throw new Error("automatic build lease contains a partial task policy binding");
   }
-  return hasProof
+  return hasPolicyGeneration
     ? {
         input_hash: lease.input_hash!,
-        proof_digest: lease.proof_digest!,
-        policy_set_digest: lease.policy_set_digest!,
-        policy_fingerprint: lease.policy_fingerprint!,
+        stage: lease.stage as Exclude<AutomaticBuildStage, "paper_reading_guide">,
+        policy_generation_id: lease.policy_generation_id!,
+        semantic_contract: lease.semantic_contract!,
       }
     : {
         input_hash: lease.input_hash!,
@@ -221,16 +224,24 @@ export function automaticBuildTaskPolicyBindingFromLease(
       };
 }
 
+function legacyPolicyGenerationId(
+  stage: AutomaticBuildStage,
+  policy: ExtractionPolicyFingerprintV1,
+): string {
+  return `${stage}.${policy.stage_policy_version}.${policy.quality_profile}`;
+}
+
 export function automaticBuildAttemptScopeFromLease(
   lease: AutomaticBuildTaskLease,
 ): AutomaticBuildAttemptScopeV1 | undefined {
   const binding = automaticBuildTaskPolicyBindingFromLease(lease);
-  if (!binding || !isAutomaticBuildTaskPolicyBindingV2(binding)) {
+  if (!binding) {
     if (lease.attempt_scope_digest !== undefined) {
       throw new Error("automatic build lease attempt scope requires a complete v3 task binding");
     }
     return undefined;
   }
+  if (!isAutomaticBuildTaskPolicyBindingV2(binding)) return undefined;
   const scope = createAutomaticBuildAttemptScope({
     target_ref: lease.target_ref,
     stage: lease.stage,
@@ -271,7 +282,7 @@ function resolveRequestedAttemptScope(
       if (isWorkUnitDescriptorV3(options.descriptor)) {
         validateWorkUnitDescriptorV3(options.descriptor);
       } else {
-        validateWorkUnitDescriptorV4(options.descriptor, CODEX_EXECUTOR_TRANSPORT_PROFILE_V1);
+        validateWorkUnitDescriptorV4(options.descriptor, CODEX_EXECUTOR_TRANSPORT_PROFILE_V2);
       }
     }
     validateWorkUnitTaskPolicyBinding(options.descriptor, options.binding);
@@ -620,9 +631,21 @@ export function claimAutomaticBuildTask(
     if (stage === "paper_reading_guide") throw new Error("paper_reading_guide does not accept semantic task bindings");
     if (!isAutomaticBuildTaskPolicyBindingV2(options.binding)) {
       if (stage === "paper_lexicon") {
-        freezeAutomaticBuildStagePolicyGeneration(target, stage, options.binding.policy_fingerprint, times.now);
+        freezeAutomaticBuildStagePolicyGeneration(
+          target,
+          stage,
+          legacyPolicyGenerationId(stage, options.binding.policy_fingerprint),
+          options.binding.policy_fingerprint,
+          times.now,
+        );
       } else {
-        freezeAutomaticBuildStagePolicy(target, stage, options.binding.policy_fingerprint, times.now);
+        freezeAutomaticBuildStagePolicy(
+          target,
+          stage,
+          legacyPolicyGenerationId(stage, options.binding.policy_fingerprint),
+          options.binding.policy_fingerprint,
+          times.now,
+        );
       }
     }
   }
@@ -660,10 +683,11 @@ export function claimAutomaticBuildTask(
       ...(options.binding ? {
         input_hash: options.binding.input_hash,
         ...(isAutomaticBuildTaskPolicyBindingV2(options.binding) ? {
-          proof_digest: options.binding.proof_digest,
-          policy_set_digest: options.binding.policy_set_digest,
-        } : {}),
-        policy_fingerprint: options.binding.policy_fingerprint,
+          policy_generation_id: options.binding.policy_generation_id,
+          semantic_contract: options.binding.semantic_contract,
+        } : {
+          policy_fingerprint: options.binding.policy_fingerprint,
+        }),
       } : {}),
       ...(attemptScope ? { attempt_scope_digest: attemptScope.attempt_scope_digest } : {}),
     };

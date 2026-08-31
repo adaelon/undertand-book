@@ -158,7 +158,6 @@ describe("SR6 profile-sidecar policy replay", () => {
       finished_at: "2026-08-11T04:00:04.075Z",
       input_bytes: 0,
       input_sha256: scopeB.descriptor.input_hash,
-      proof_digest: scopeB.descriptor.input_budget_proof.proof_digest,
       render_contract_version: MODEL_INPUT_RENDER_CONTRACT_VERSION,
     });
 
@@ -197,9 +196,8 @@ describe("SR6 profile-sidecar policy replay", () => {
           stage: "profile_sidecar",
           work_unit_id: scopeB.descriptor.work_unit_id,
           input_hash: scopeB.descriptor.input_hash,
-          proof_digest: scopeB.descriptor.input_budget_proof.proof_digest,
-          policy_set_digest: scopeB.policy_set.policy_set_digest,
-          policy_fingerprint: scopeB.descriptor.policy_fingerprint,
+          policy_generation_id: scopeB.policy_set.members[0].policy_generation_id,
+          semantic_contract: scopeB.policy_set.members[0].semantic_contract,
           provenance: {
             executor: "sr6-synthetic-replay",
             model: "codex-test",

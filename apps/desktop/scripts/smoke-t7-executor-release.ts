@@ -1,11 +1,9 @@
 import assert from "node:assert/strict";
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { createHash } from "node:crypto";
+import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
   mkdtempSync,
-  readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -14,17 +12,20 @@ import path from "node:path";
 import { createInterface, type Interface as ReadlineInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import {
-  BUILD_EXECUTOR_BOOTSTRAP_CONTRACT_V2,
+  BUILD_EXECUTOR_BOOTSTRAP_CONTRACT_V3,
 } from "../../../packages/core/src/build-executor-connection-capability";
+import { BUILD_EXECUTOR_MCP_CONTRACT_V3 } from "../../../packages/core/src/build-executor-tool-adapter";
 import {
-  CODEX_EXECUTOR_TRANSPORT_PROFILE_V1,
+  CODEX_EXECUTOR_TRANSPORT_PROFILE_V2,
   measureExecutorTransportResponse,
 } from "../../../packages/core/src/executor-transport";
 import {
   readAutomaticBuildAttemptSnapshot,
 } from "../../../packages/core/src/automatic-build-task-store";
 import { resolveAutomaticBuildTarget } from "../../../packages/core/src/build-orchestrator";
-import type { AutomaticBuildExecutorSessionResponseV2 } from "../../../packages/core/src/automatic-build-executor-session";
+import type {
+  AutomaticBuildExecutorSessionResponseV3,
+} from "../../../packages/core/src/automatic-build-executor-session";
 import {
   automaticBuildNext,
   automaticBuildPlan,
@@ -80,12 +81,34 @@ function argumentValue(name: string): string | undefined {
   return process.argv[index + 1];
 }
 
-function sha256File(file: string): string {
-  return createHash("sha256").update(readFileSync(file)).digest("hex");
-}
-
 function occurrenceCount(value: string, marker: string): number {
   return value.split(marker).length - 1;
+}
+
+function assertRejectedBootstrap(sidecar: string, registryRoot: string, cwd: string): void {
+  const rejected = spawnSync(sidecar, [
+    "executor.mcp",
+    "--bootstrap-version",
+    "automatic_build_executor_bootstrap.v2",
+    "--protocol-generation",
+    BUILD_EXECUTOR_BOOTSTRAP_CONTRACT_V3.session_protocol,
+  ], {
+    cwd,
+    encoding: "utf8",
+    timeout: 30_000,
+    env: {
+      ...process.env,
+      UNDERSTAND_BOOK_AUTOMATIC_BUILD_DRIVER_ROOT: registryRoot,
+    },
+  });
+  assert.ifError(rejected.error);
+  assert.equal(rejected.status, 2, "compiled executor MCP must reject Bootstrap V2");
+  assert.equal(rejected.stdout, "", "rejected compiled bootstrap must not emit MCP output");
+  assert.equal(
+    rejected.stderr,
+    "Build Executor MCP bootstrap is incompatible\n",
+    "rejected compiled bootstrap must emit the bounded incompatibility diagnostic",
+  );
 }
 
 class JsonLineMcpClient {
@@ -99,10 +122,10 @@ class JsonLineMcpClient {
   constructor(sidecar: string, registryRoot: string, cwd: string) {
     this.child = spawn(sidecar, [
       "executor.mcp",
-      "--agent-bootstrap-digest",
-      BUILD_EXECUTOR_BOOTSTRAP_CONTRACT_V2.bootstrap_digest,
+      "--bootstrap-version",
+      BUILD_EXECUTOR_BOOTSTRAP_CONTRACT_V3.version,
       "--protocol-generation",
-      BUILD_EXECUTOR_BOOTSTRAP_CONTRACT_V2.session_protocol,
+      BUILD_EXECUTOR_BOOTSTRAP_CONTRACT_V3.session_protocol,
     ], {
       cwd,
       env: {
@@ -197,7 +220,7 @@ function createFixture(container: string, registryRoot: string, label: string, s
   });
   assert(plan.preflight, "T7 fixture must produce a preflight");
   const next = automaticBuildNext(source, root, 1, {
-    accepted_plan_digest: plan.preflight.plan_digest,
+    accepted_plan_digest: plan.preflight.descriptor_plan_digest,
     available_agent_slots: 1,
     executor_dispatches: true,
     build_plan: buildPlan,
@@ -226,7 +249,7 @@ async function callTool(
   toolName: typeof expectedTools[number],
   args: JsonObject,
 ): Promise<{
-  response: AutomaticBuildExecutorSessionResponseV2 | JsonObject;
+  response: AutomaticBuildExecutorSessionResponseV3 | JsonObject;
   text: string;
   isError: boolean;
 }> {
@@ -244,10 +267,10 @@ async function callTool(
   const text = result.content?.[0]?.text;
   assert.equal(typeof text, "string", `${toolName} must return canonical JSON text`);
   assert(
-    Buffer.byteLength(text as string, "utf8") <= CODEX_EXECUTOR_TRANSPORT_PROFILE_V1.max_tool_result_bytes,
+    Buffer.byteLength(text as string, "utf8") <= CODEX_EXECUTOR_TRANSPORT_PROFILE_V2.max_tool_result_bytes,
     `${toolName} exceeded the tool-result byte cap`,
   );
-  const response = JSON.parse(text as string) as AutomaticBuildExecutorSessionResponseV2 | JsonObject;
+  const response = JSON.parse(text as string) as AutomaticBuildExecutorSessionResponseV3 | JsonObject;
   const actionKind = "action" in response
     && response.action
     && typeof response.action === "object"
@@ -262,8 +285,8 @@ async function callTool(
     ...(actionKind === undefined ? {} : { action_kind: actionKind }),
     payload: JSON.stringify(rpc),
   });
-  if ("version" in response && response.version === "automatic_build_executor_session.v2") {
-    const sessionResponse = response as AutomaticBuildExecutorSessionResponseV2;
+  if ("version" in response && response.version === "automatic_build_executor_session.v3") {
+    const sessionResponse = response as AutomaticBuildExecutorSessionResponseV3;
     const body = sessionResponse.action.kind === "INPUT_CHUNK"
       ? sessionResponse.action.chunk.payload_utf8
       : "";
@@ -271,7 +294,7 @@ async function callTool(
       measureExecutorTransportResponse(
         sessionResponse,
         body,
-        CODEX_EXECUTOR_TRANSPORT_PROFILE_V1,
+        CODEX_EXECUTOR_TRANSPORT_PROFILE_V2,
       ).status,
       "within_limit",
       `${toolName} produced an out-of-profile session response`,
@@ -345,6 +368,7 @@ async function main(): Promise<void> {
     assert.equal(attemptCount(primary), 0);
     assert.equal(attemptCount(secondary), 0);
 
+    assertRejectedBootstrap(sidecar, registryRoot, blackBoxCwd);
     client = new JsonLineMcpClient(sidecar, registryRoot, blackBoxCwd);
     const initialized = await client.request("initialize", {
       protocolVersion: "2025-06-18",
@@ -359,21 +383,21 @@ async function main(): Promise<void> {
 
     const trace: TraceEvent[] = [];
     assertMcpError(await callTool(client, trace, "executor.open", {
-      version: "automatic_build_executor_open_request.v2",
+      version: "automatic_build_executor_open_request.v3",
       opaque_handoff_ref: primary.envelope.opaque_handoff_ref,
       path: primary.envelope.executor_handoff.path,
     }));
     assert.equal(attemptCount(primary), 0);
 
     let current = await callTool(client, trace, "executor.open", {
-      version: "automatic_build_executor_open_request.v2",
+      version: "automatic_build_executor_open_request.v3",
       opaque_handoff_ref: primary.envelope.opaque_handoff_ref,
     });
-    assert.equal(current.isError, false);
-    assert.equal((current.response as AutomaticBuildExecutorSessionResponseV2).action.kind, "DELIVER_INPUT");
+    assert.equal(current.isError, false, current.text);
+    assert.equal((current.response as AutomaticBuildExecutorSessionResponseV3).action.kind, "DELIVER_INPUT");
 
     assertMcpError(await callTool(client, trace, "executor.open", {
-      version: "automatic_build_executor_open_request.v2",
+      version: "automatic_build_executor_open_request.v3",
       opaque_handoff_ref: secondary.envelope.opaque_handoff_ref,
     }));
     assert.equal(attemptCount(secondary), 0);
@@ -383,10 +407,10 @@ async function main(): Promise<void> {
     let maxToolResultBytes = 0;
     let generationCount = 0;
     let chunkZeroReplayCount = 0;
-    let testedReceiptFailure = false;
+    let testedOrdinalFailure = false;
     let testedPrematureStart = false;
     for (let workUnit = 0; workUnit < 16; workUnit += 1) {
-      const sessionResponse = current.response as AutomaticBuildExecutorSessionResponseV2;
+      const sessionResponse = current.response as AutomaticBuildExecutorSessionResponseV3;
       if (sessionResponse.action.kind === "DONE") {
         assert.equal(sessionResponse.action.status, "committed");
         break;
@@ -396,11 +420,11 @@ async function main(): Promise<void> {
       assert(delivery.input_manifest.total_chunk_count > 2, "compiled smoke must exercise a multi-chunk input");
       assert.equal(attemptCount(primary), generationCount);
       let request = delivery.next_request;
-      let grant: Extract<AutomaticBuildExecutorSessionResponseV2["action"], { kind: "GENERATION_GRANT" }> | undefined;
-      for (let ordinal = 0; ordinal < CODEX_EXECUTOR_TRANSPORT_PROFILE_V1.max_input_chunks + 1; ordinal += 1) {
+      let grant: Extract<AutomaticBuildExecutorSessionResponseV3["action"], { kind: "GENERATION_GRANT" }> | undefined;
+      for (let ordinal = 0; ordinal < CODEX_EXECUTOR_TRANSPORT_PROFILE_V2.max_input_chunks + 1; ordinal += 1) {
         const chunkResult = await callTool(client, trace, "executor.input.next", request as unknown as JsonObject);
         maxToolResultBytes = Math.max(maxToolResultBytes, Buffer.byteLength(chunkResult.text, "utf8"));
-        const chunkResponse = chunkResult.response as AutomaticBuildExecutorSessionResponseV2;
+        const chunkResponse = chunkResult.response as AutomaticBuildExecutorSessionResponseV3;
         if (chunkResponse.action.kind === "GENERATION_GRANT") {
           grant = chunkResponse.action;
           const replay = await callTool(client, trace, "executor.input.next", request as unknown as JsonObject);
@@ -433,40 +457,40 @@ async function main(): Promise<void> {
 
         if (!testedPrematureStart) {
           assertMcpError(await callTool(client, trace, "executor.generation.start", {
-            version: "automatic_build_executor_generation_start_request.v1",
+            version: "automatic_build_executor_generation_start_request.v2",
             opaque_session_ref: delivery.input_manifest.opaque_session_ref,
             generation_grant_ref: `abgrant1_${"0".repeat(64)}`,
           }));
           assert.equal(attemptCount(primary), generationCount);
           testedPrematureStart = true;
         }
-        if (!testedReceiptFailure) {
+        if (!testedOrdinalFailure) {
           assertMcpError(await callTool(client, trace, "executor.input.next", {
-            version: "automatic_build_executor_input_next_request.v2",
+            version: "automatic_build_executor_input_next_request.v3",
             opaque_session_ref: delivery.input_manifest.opaque_session_ref,
             generation_input_ref: delivery.input_manifest.generation_input_ref,
-            previous_chunk_receipt: `abchunk1_${"0".repeat(64)}`,
+            previous_chunk_ordinal: chunk.ordinal + 1,
           }));
           assert.equal(attemptCount(primary), generationCount);
-          testedReceiptFailure = true;
+          testedOrdinalFailure = true;
         }
         request = {
-          version: "automatic_build_executor_input_next_request.v2",
+          version: "automatic_build_executor_input_next_request.v3",
           opaque_session_ref: delivery.input_manifest.opaque_session_ref,
           generation_input_ref: delivery.input_manifest.generation_input_ref,
-          previous_chunk_receipt: chunk.chunk_receipt,
+          previous_chunk_ordinal: chunk.ordinal,
         };
       }
       assert(grant, "compiled executor input delivery did not issue a generation grant");
       assert.equal(attemptCount(primary), generationCount);
       const startRequest = {
-        version: "automatic_build_executor_generation_start_request.v1",
+        version: "automatic_build_executor_generation_start_request.v2",
         opaque_session_ref: grant.grant.opaque_session_ref,
         generation_grant_ref: grant.grant.generation_grant_ref,
       };
       const generated = await callTool(client, trace, "executor.generation.start", startRequest);
       assert.equal(generated.isError, false, "compiled MCP rejected a valid generation.start request");
-      const generatedResponse = generated.response as AutomaticBuildExecutorSessionResponseV2;
+      const generatedResponse = generated.response as AutomaticBuildExecutorSessionResponseV3;
       assert.equal(generatedResponse.action.kind, "GENERATE");
       if (generatedResponse.action.kind !== "GENERATE") throw new Error("expected GENERATE");
       generationCount += 1;
@@ -475,7 +499,7 @@ async function main(): Promise<void> {
       const startReplay = await callTool(client, trace, "executor.generation.start", startRequest);
       assert.equal(startReplay.text, generated.text, "generation.start replay must be byte-identical");
       const candidateRequest = {
-        version: "automatic_build_executor_candidate_submit.v2",
+        version: "automatic_build_executor_candidate_submit.v3",
         opaque_session_ref: generatedResponse.action.opaque_session_ref,
         candidate_sink_ref: generatedResponse.action.candidate_sink_ref,
         candidate: {
@@ -507,7 +531,7 @@ async function main(): Promise<void> {
       };
       assert(
         Buffer.byteLength(JSON.stringify(candidateRequest), "utf8")
-          <= CODEX_EXECUTOR_TRANSPORT_PROFILE_V1.max_candidate_request_bytes,
+          <= CODEX_EXECUTOR_TRANSPORT_PROFILE_V2.max_candidate_request_bytes,
         "structured candidate request exceeded its byte cap",
       );
       const submitted = await callTool(client, trace, "executor.submit_candidate", candidateRequest);
@@ -516,23 +540,32 @@ async function main(): Promise<void> {
       assert.equal(submitReplay.text, submitted.text, "candidate submit replay must be byte-identical");
       current = submitted;
     }
-    const finalResponse = current.response as AutomaticBuildExecutorSessionResponseV2;
+    const finalResponse = current.response as AutomaticBuildExecutorSessionResponseV3;
     assert.equal(finalResponse.action.kind, "DONE", "compiled executor dispatch did not terminate");
     assert.equal(generationCount, attemptCount(primary));
     assert.equal(attemptCount(secondary), 0);
-    assert(testedPrematureStart && testedReceiptFailure);
+    assert(testedPrematureStart && testedOrdinalFailure);
     assert.equal(chunkZeroReplayCount, 4);
 
     const visibility = assertTraceAllowlist(trace);
     const evidence = {
-      version: "understand_book_t7_executor_release_evidence.v1",
+      version: "understand_book_t7_executor_release_evidence.v2",
       status: "passed",
-      protocol: BUILD_EXECUTOR_BOOTSTRAP_CONTRACT_V2.session_protocol,
-      transport_profile_digest: CODEX_EXECUTOR_TRANSPORT_PROFILE_V1.profile_digest,
-      compiled_sidecar_sha256: sha256File(sidecar),
+      executor_role: BUILD_EXECUTOR_BOOTSTRAP_CONTRACT_V3.agent_name,
+      shared_executor_mcp: {
+        registration_scope: BUILD_EXECUTOR_MCP_CONTRACT_V3.registration_scope,
+        bootstrap_version: BUILD_EXECUTOR_BOOTSTRAP_CONTRACT_V3.version,
+        session_protocol: BUILD_EXECUTOR_BOOTSTRAP_CONTRACT_V3.session_protocol,
+        executor_tool_count: expectedTools.length,
+        exact_four: true,
+        capability_isolation: false,
+        caller_role_authenticated: BUILD_EXECUTOR_MCP_CONTRACT_V3.caller_role_authenticated,
+        compiled_sidecar_executed: true,
+      },
+      transport_profile: CODEX_EXECUTOR_TRANSPORT_PROFILE_V2,
       tool_inventory: [...expectedTools],
+      forbidden_digest_field_count: 0,
       synthetic_input: {
-        legacy_fixture_bytes: 317_247,
         compiled_chunk_count: chunkCount,
         compiled_delivered_bytes: deliveredBytes,
         max_tool_result_bytes: maxToolResultBytes,
@@ -545,10 +578,11 @@ async function main(): Promise<void> {
         untouched_cross_handoff_attempt_count: attemptCount(secondary),
       },
       negative_gates: {
+        bootstrap_v2: "protocol_incompatible",
         unknown_request_field: "protocol_incompatible",
         cross_handoff_connection: "protocol_incompatible",
         premature_generation_start: "protocol_incompatible",
-        tampered_chunk_receipt: "protocol_incompatible",
+        previous_chunk_ordinal_mismatch: "protocol_incompatible",
       },
       trace_allowlist: visibility,
       final_status: finalResponse.action.kind === "DONE" ? finalResponse.action.status : "invalid",
@@ -558,6 +592,8 @@ async function main(): Promise<void> {
     assert(!serializedEvidence.includes(candidateMarker));
     assert(!serializedEvidence.includes(primary.envelope.opaque_handoff_ref));
     assert(!serializedEvidence.includes(container));
+    assert(!/(transport_profile_digest|compiled_sidecar_sha256|skill_sha256|manifest_sha256|root_final_sha256)/u
+      .test(serializedEvidence));
     if (evidenceOut) {
       mkdirSync(path.dirname(evidenceOut), { recursive: true });
       writeFileSync(evidenceOut, serializedEvidence, "utf8");

@@ -172,11 +172,7 @@ try {
       blackBoxCwd,
     );
     if (!sourcePromptBytes.equals(sidecarPromptBytes)) {
-      throw new Error(
-        `Node/sidecar raw prompt bytes diverged: ${promptName} `
-        + `node=${createHash("sha256").update(sourcePromptBytes).digest("hex")} `
-        + `sidecar=${createHash("sha256").update(sidecarPromptBytes).digest("hex")}`,
-      );
+      throw new Error(`Node/sidecar raw prompt bytes diverged: ${promptName}`);
     }
     for (const mode of ["task", "dispatch"]) {
       const promptArgs = [promptName, "--executor-protocol", mode];
@@ -196,7 +192,7 @@ try {
       }
       if (mode === "dispatch") {
         for (const marker of [
-          "automatic_build_executor_session.v2",
+          "automatic_build_executor_session.v3",
           "executor.open",
           "executor.input.next",
           "executor.generation.start",
@@ -230,6 +226,33 @@ try {
       }
     }
   }
+  const sourceExecutorMcpConfig = JSON.parse(readFileSync(
+    path.join(pluginSnapshotRoot, ".mcp.json"),
+    "utf8",
+  ));
+  const sidecarExecutorMcpConfig = JSON.parse(runText(
+    sidecar,
+    ["executor.mcp-config"],
+    "sidecar shared executor MCP config",
+    blackBoxCwd,
+  ));
+  if (stableJson(sourceExecutorMcpConfig) !== stableJson(sidecarExecutorMcpConfig)) {
+    throw new Error("source/sidecar shared executor MCP config fields diverged");
+  }
+  const sourceExecutorMcpLauncherBytes = readFileSync(path.join(
+    pluginSnapshotRoot,
+    "scripts",
+    "start-build-executor-mcp.cmd",
+  ));
+  const sidecarExecutorMcpLauncherBytes = runBytes(
+    sidecar,
+    ["executor.mcp-launcher"],
+    "sidecar raw executor MCP launcher",
+    blackBoxCwd,
+  );
+  if (!sourceExecutorMcpLauncherBytes.equals(sidecarExecutorMcpLauncherBytes)) {
+    throw new Error("source/sidecar executor MCP launcher bytes diverged");
+  }
   const sourceExecutorAgentTemplateBytes = readFileSync(path.join(
     pluginSnapshotRoot,
     "assets",
@@ -243,11 +266,7 @@ try {
     blackBoxCwd,
   );
   if (!sourceExecutorAgentTemplateBytes.equals(sidecarExecutorAgentTemplateBytes)) {
-    throw new Error(
-      `Node/sidecar executor agent template bytes diverged: `
-      + `node=${createHash("sha256").update(sourceExecutorAgentTemplateBytes).digest("hex")} `
-      + `sidecar=${createHash("sha256").update(sidecarExecutorAgentTemplateBytes).digest("hex")}`,
-    );
+    throw new Error("Node/sidecar executor agent template bytes diverged");
   }
 
   writeFileSync(source, "# Parity\n\nA deterministic semantic paragraph.\n", "utf8");
@@ -320,7 +339,28 @@ try {
     || sidecarDefaultRootDoctor.value.checks?.plugin_shape?.thin_plugin !== true
     || sidecarDefaultRootDoctor.value.checks?.plugin_shape?.agent_template_required !== true
     || sidecarDefaultRootDoctor.value.checks?.plugin_shape?.agent_template_present !== true
-    || sidecarDefaultRootDoctor.value.checks?.executor_bootstrap?.status !== "compatible") {
+    || sidecarDefaultRootDoctor.value.checks?.executor_role?.status !== "compatible"
+    || sidecarDefaultRootDoctor.value.checks?.executor_role?.agent_name !== "understand_book_executor"
+    || sidecarDefaultRootDoctor.value.checks?.executor_role?.mcp_servers_in_role !== 0
+    || sidecarDefaultRootDoctor.value.checks?.shared_executor_mcp?.status !== "compatible"
+    || sidecarDefaultRootDoctor.value.checks?.shared_executor_mcp?.registration_scope !== "root_shared"
+    || sidecarDefaultRootDoctor.value.checks?.shared_executor_mcp?.bootstrap_version
+      !== "automatic_build_executor_bootstrap.v3"
+    || sidecarDefaultRootDoctor.value.checks?.shared_executor_mcp?.session_protocol
+      !== "automatic_build_executor_session.v3"
+    || sidecarDefaultRootDoctor.value.checks?.shared_executor_mcp?.required !== false
+    || sidecarDefaultRootDoctor.value.checks?.shared_executor_mcp?.default_tools_approval_mode !== "approve"
+    || sidecarDefaultRootDoctor.value.checks?.shared_executor_mcp?.executor_tool_count !== 4
+    || sidecarDefaultRootDoctor.value.checks?.connection_integrity?.status !== "compatible"
+    || sidecarDefaultRootDoctor.value.checks?.connection_integrity?.model_parameter !== false
+    || sidecarDefaultRootDoctor.value.checks?.connection_integrity?.caller_role_authenticated !== false
+    || sidecarDefaultRootDoctor.value.checks?.connection_integrity?.cross_handoff_rejected !== true
+    || sidecarDefaultRootDoctor.value.checks?.connection_integrity?.session_private_root_bound !== true
+    || sidecarDefaultRootDoctor.value.checks?.connection_integrity?.forbidden_digest_field_count !== 0
+    || sidecarDefaultRootDoctor.value.checks?.semantic_reuse_identity?.status !== "compatible"
+    || sidecarDefaultRootDoctor.value.checks?.semantic_reuse_identity?.budget_proof_is_freshness_identity !== false
+    || sidecarDefaultRootDoctor.value.checks?.semantic_reuse_identity?.policy_generation_is_explicit !== true
+    || sidecarDefaultRootDoctor.value.checks?.semantic_reuse_identity?.large_content_hash_consumers_present !== true) {
     throw new Error(
       `packaged sidecar did not validate its embedded executor bootstrap without a plugin-root override: `
       + `${sidecarDefaultRootDoctor.stdout}`,
@@ -352,7 +392,7 @@ try {
 
   const acceptedArgs = [
     ...common,
-    "--accepted-plan", sidecarPlan.value.preflight.plan_digest,
+    "--accepted-plan", sidecarPlan.value.preflight.descriptor_plan_digest,
     "--now", "2026-07-25T07:00:00.000Z",
   ];
   const nodeDispatch = runNode("next", acceptedArgs, "Node dispatch handoff");
@@ -375,7 +415,7 @@ try {
   const handoff = JSON.parse(handoffBytes.toString("utf8"));
   if (handoff.version !== "automatic_build_dispatch_executor_handoff.v1"
     || handoff.envelope?.dispatch_run_id !== envelope.dispatch_run_id
-    || !handoff.prompt?.includes("automatic_build_executor_session.v2")
+    || !handoff.prompt?.includes("automatic_build_executor_session.v3")
     || !handoff.prompt?.includes("executor.open")
     || !handoff.prompt?.includes("executor.input.next")
     || !handoff.prompt?.includes("executor.generation.start")
@@ -465,7 +505,7 @@ try {
   const rollback = runSidecar("next", [
     ...common,
     "--protocol", "automatic_build_protocol.v2",
-    "--accepted-plan", rollbackPlan.value.preflight.plan_digest,
+    "--accepted-plan", rollbackPlan.value.preflight.descriptor_plan_digest,
     "--now", "2026-07-25T07:01:00.000Z",
   ], "sidecar explicit v2 rollback");
   if (rollback.value.protocol !== "automatic_build_protocol.v2" || rollback.value.action?.kind !== "extract") {

@@ -1,57 +1,71 @@
 import { describe, expect, it } from "vitest";
-import { compileBuildMode } from "../src/build-capability";
+import { compileBuildModeV3 } from "../src/build-capability";
 import {
-  computeBuildIntentDigest,
-  transitionBuildIntent,
-  transitionBuildPlan,
-  validateBuildIntentV1,
-  type BuildIntentV1,
-  type BuildPlanV1,
-} from "../src/build-intent";
+  transitionBuildIntentV3,
+  transitionBuildPlanV3,
+  validateBuildIntentV3,
+  type BuildIntentV3,
+  type BuildPlanV3,
+} from "../src/build-intent-v2";
+import { getSystemArtifactBlueprintV1 } from "../src/artifact-blueprint";
 import {
   acceptIntentArtifactCandidate,
   adaptIntentArtifactPayloadV1,
   compileIntentArtifactTasks,
   projectIntentArtifactTaskHandoff,
-  type IntentArtifactCandidateV2,
-  type IntentArtifactTaskEnvelopeV2,
+  type IntentArtifactCandidateV3,
+  type IntentArtifactTaskEnvelopeV3,
 } from "../src/intent-artifact";
 
 const availableLids = ["1.1", "1.2", "2.1"];
 const resolvedScopeLids = ["1.1", "1.2"];
 
-function confirmedSelection(): { intent: BuildIntentV1; plan: BuildPlanV1 } {
-  const draftIntent = validateBuildIntentV1({
-    version: "build_intent.v1",
+function confirmedSelection(): { intent: BuildIntentV3; plan: BuildPlanV3 } {
+  const draftIntent = validateBuildIntentV3({
+    version: "build_intent.v3",
     intent_id: "intent-private-artifacts",
-    revision: 1,
+    intent_revision: 1,
     book_id: "book-a",
     source_fingerprint: "source-a",
     content_profile: { id: "technical_learning", version: "technical_learning_v0" },
     user_goal: "PRIVATE_GOAL_SENTINEL compare the sequence, concepts, methods, and claims.",
     goal_kind: "compare",
     source_scope: { whole_book: false, lids: ["1.1", "1.2"], sections: [] },
-    desired_artifacts: ["timeline", "concept_map", "comparison_table", "argument_map"],
     usage_horizon: "project",
     privacy: "reader_private",
     status: "draft",
     created_at: "2026-07-26T00:00:00.000Z",
   });
-  const draftPlan = compileBuildMode({
+  const selected_blueprints = ["timeline", "concept_map", "comparison_table", "argument_map"].map(
+    (artifactType) => {
+      const preset = getSystemArtifactBlueprintV1(
+        artifactType as "timeline" | "concept_map" | "comparison_table" | "argument_map",
+      );
+      return {
+        version: "artifact_blueprint_resolution.v2" as const,
+        source: "system" as const,
+        blueprint: preset.blueprint,
+        blueprint_id: preset.blueprint.blueprint_id,
+        blueprint_version: preset.blueprint.blueprint_version,
+      };
+    },
+  );
+  const draftPlan = compileBuildModeV3({
     mode: "goal_directed",
     book_id: draftIntent.book_id,
     source_fingerprint: draftIntent.source_fingerprint,
     content_profile: draftIntent.content_profile,
     plan_id: "plan-private-artifacts",
-    revision: 1,
+    plan_revision: 1,
     created_at: draftIntent.created_at,
     budget: { max_total_tokens: 40_000, on_exceed: "needs_user" },
     public_freshness: [],
     intent: draftIntent,
+    selected_blueprints,
   }).plan!;
   return {
-    intent: transitionBuildIntent(draftIntent, "confirmed", { at: "2026-07-26T00:01:00.000Z" }),
-    plan: transitionBuildPlan(draftPlan, "confirmed", {
+    intent: transitionBuildIntentV3(draftIntent, "confirmed", { at: "2026-07-26T00:01:00.000Z" }),
+    plan: transitionBuildPlanV3(draftPlan, "confirmed", {
       at: "2026-07-26T00:01:00.000Z",
       confirmation_source: "reader_ui",
     }),
@@ -93,31 +107,39 @@ const payloadByType = {
   },
 } as const;
 
-function legacyType(task: IntentArtifactTaskEnvelopeV2) {
+function legacyType(task: IntentArtifactTaskEnvelopeV3) {
   if (task.artifact.artifact_type === "custom") throw new Error("expected a legacy system Blueprint");
   return task.artifact.artifact_type;
 }
 
-function candidate(task: IntentArtifactTaskEnvelopeV2, payload: unknown): IntentArtifactCandidateV2 {
+function candidate(task: IntentArtifactTaskEnvelopeV3, payload: unknown): IntentArtifactCandidateV3 {
+  const adapted = adaptIntentArtifactPayloadV1(legacyType(task), payload);
   return {
-    version: "intent_artifact_candidate.v2",
+    version: "intent_artifact_candidate.v3",
     task_id: task.task_id,
     book_id: task.book_id,
     source_fingerprint: task.source_fingerprint,
     intent_id: task.intent_id,
-    intent_digest: task.intent_digest,
+    intent_revision: task.intent_revision,
     plan_id: task.plan_id,
-    plan_digest: task.plan_digest,
+    plan_revision: task.plan_revision,
     artifact_id: task.artifact.artifact_id,
-    blueprint_digest: task.artifact.blueprint_digest,
-    payload: adaptIntentArtifactPayloadV1(legacyType(task), payload),
+    blueprint_id: task.artifact.blueprint_id,
+    blueprint_version: task.artifact.blueprint_version,
+    payload: {
+      version: "artifact_instance.v3",
+      blueprint_id: task.artifact.blueprint_id,
+      blueprint_version: task.artifact.blueprint_version,
+      records: adapted.records,
+      ...(adapted.relations === undefined ? {} : { relations: adapted.relations }),
+    },
   };
 }
 
 function accept(
-  task: IntentArtifactTaskEnvelopeV2,
+  task: IntentArtifactTaskEnvelopeV3,
   payload: unknown,
-  overrides: Partial<IntentArtifactCandidateV2> = {},
+  overrides: Partial<IntentArtifactCandidateV3> = {},
 ) {
   const { intent, plan } = confirmedSelection();
   return acceptIntentArtifactCandidate({
@@ -143,15 +165,18 @@ describe("IP7 reader-private intent artifact gate", () => {
     ]);
     expect(new Set(compiled.map((task) => task.task_id)).size).toBe(4);
     expect(compiled.every((task) => task.privacy === "reader_private")).toBe(true);
-    expect(compiled.every((task) => task.intent_digest === computeBuildIntentDigest(intent))).toBe(true);
-    expect(compiled.every((task) => task.plan_digest === plan.plan_digest)).toBe(true);
+    expect(compiled.every((task) => task.intent_id === intent.intent_id
+      && task.intent_revision === intent.intent_revision)).toBe(true);
+    expect(compiled.every((task) => task.plan_id === plan.plan_id
+      && task.plan_revision === plan.plan_revision)).toBe(true);
     expect(compiled.every((task) => task.allowed_evidence_lids.join(",") === resolvedScopeLids.join(","))).toBe(true);
     for (const task of compiled) {
-      expect(task.version).toBe("intent_artifact_task_envelope.v2");
+      expect(task.version).toBe("intent_artifact_task_envelope.v3");
       expect(task.output_contract).toEqual({
-        version: "artifact_instance_output_contract.v2",
-        payload_version: "artifact_instance.v2",
-        blueprint_digest: task.artifact.blueprint_digest,
+        version: "artifact_instance_output_contract.v3",
+        payload_version: "artifact_instance.v3",
+        blueprint_id: task.artifact.blueprint_id,
+        blueprint_version: task.artifact.blueprint_version,
       });
       expect(task.validation_rules).toContain("record_and_relation_data_match_restricted_schema");
       expect(task.user_goal).toBe(intent.user_goal);
@@ -163,14 +188,19 @@ describe("IP7 reader-private intent artifact gate", () => {
       const artifactType = legacyType(task);
       const result = accept(task, payloadByType[artifactType]);
       expect(result.accepted).toMatchObject({
-        version: "intent_artifact_accepted.v2",
+        version: "intent_artifact_accepted.v3",
         task_id: task.task_id,
         artifact_id: task.artifact.artifact_id,
-        blueprint_digest: task.artifact.blueprint_digest,
-        payload: { version: "artifact_instance.v2", blueprint_digest: task.artifact.blueprint_digest },
+        blueprint_id: task.artifact.blueprint_id,
+        blueprint_version: task.artifact.blueprint_version,
+        payload: {
+          version: "artifact_instance.v3",
+          blueprint_id: task.artifact.blueprint_id,
+          blueprint_version: task.artifact.blueprint_version,
+        },
       });
       expect(result.receipt).toMatchObject({
-        version: "intent_artifact_task_receipt.v1",
+        version: "intent_artifact_task_receipt.v2",
         state: "committed",
         task_id: task.task_id,
         artifact_id: task.artifact.artifact_id,
@@ -203,9 +233,9 @@ describe("IP7 reader-private intent artifact gate", () => {
     const task = tasks().tasks[0];
     const payload = payloadByType.timeline;
     expect(() => accept(task, payload, { source_fingerprint: "source-old" })).toThrow(/source_fingerprint/i);
-    expect(() => accept(task, payload, { intent_digest: "a".repeat(64) })).toThrow(/intent_digest/i);
-    expect(() => accept(task, payload, { plan_digest: "b".repeat(64) })).toThrow(/plan_digest/i);
-    expect(() => accept(task, payload, { blueprint_digest: "c".repeat(64) })).toThrow(/blueprint_digest/i);
+    expect(() => accept(task, payload, { intent_revision: task.intent_revision + 1 })).toThrow(/intent_revision/i);
+    expect(() => accept(task, payload, { plan_revision: task.plan_revision + 1 })).toThrow(/plan_revision/i);
+    expect(() => accept(task, payload, { blueprint_version: "2.0.0" })).toThrow(/blueprint_version/i);
     expect(() => acceptIntentArtifactCandidate({
       task,
       candidate: { ...candidate(task, payload), candidate_path: "C:/public/candidate.json" },
@@ -226,8 +256,12 @@ describe("IP7 reader-private intent artifact gate", () => {
     );
     const serialized = JSON.stringify(handoff);
     expect(handoff).toMatchObject({
-      version: "intent_artifact_task_handoff.v1",
+      version: "intent_artifact_task_handoff.v2",
       task_id: task.task_id,
+      intent_id: task.intent_id,
+      intent_revision: task.intent_revision,
+      plan_id: task.plan_id,
+      plan_revision: task.plan_revision,
       artifact_type: "timeline",
     });
     expect(serialized).toContain("task.json");

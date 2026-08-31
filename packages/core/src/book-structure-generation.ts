@@ -19,11 +19,13 @@ import {
   type BookStructureUnitExtractionOutput,
   type BookStructureUnitSource,
 } from "./book-structure";
-import { CODEX_EXECUTOR_TRANSPORT_PROFILE_V1 } from "./executor-transport";
+import { CODEX_EXECUTOR_TRANSPORT_PROFILE_V2 } from "./executor-transport";
 import { ExtractorContractError } from "./extractor-contract";
 import {
   automaticBuildGenerationArtifactPath,
+  assertPolicyGenerationId,
   buildSemanticArtifactEnvelopeV3,
+  semanticContractFromExtractionPolicy,
   inspectSemanticArtifact,
   writeAutomaticBuildGenerationArtifact,
   type SemanticArtifactEnvelopeV3,
@@ -58,7 +60,7 @@ export type BookStructureGenerationOutputRoleV1 =
 export interface BookStructureGenerationTaskV1 {
   version: "book_structure_generation_task.v1";
   target_ref: BuildTargetRefV2;
-  policy_set_digest: string;
+  policy_generation_id: string;
   descriptor: WorkUnitDescriptorV4;
   input: BookStructureGenerationInputV1;
   parent_unit_lid: string;
@@ -66,7 +68,6 @@ export interface BookStructureGenerationTaskV1 {
   source_range: BookStructureLeafRangeV1;
   allowed_evidence_lids: string[];
   output_role: BookStructureGenerationOutputRoleV1;
-  task_digest: string;
 }
 
 export type BookStructureGenerationPayloadV1 =
@@ -166,7 +167,7 @@ export function renderBookStructureGenerationTaskInput(
 
 export function createBookStructureGenerationTask(input: {
   target_ref: BuildTargetRefV2;
-  policy_set_digest: string;
+  policy_generation_id: string;
   descriptor: WorkUnitDescriptorV4;
   generation_input: BookStructureGenerationInputV1;
   parent_unit_lid: string;
@@ -175,15 +176,13 @@ export function createBookStructureGenerationTask(input: {
   allowed_evidence_lids: string[];
   output_role: BookStructureGenerationOutputRoleV1;
 }): BookStructureGenerationTaskV1 {
-  if (!SHA256.test(input.policy_set_digest)) {
-    throw new Error("BookStructure task policy_set_digest must be a SHA-256 digest");
-  }
+  assertPolicyGenerationId(input.policy_generation_id, "BookStructure task policy_generation_id");
   if (!SHA256.test(input.parent_content_hash)) {
     throw new Error("BookStructure task parent_content_hash must be a SHA-256 digest");
   }
   const descriptor = validateWorkUnitDescriptorV4(
     input.descriptor,
-    CODEX_EXECUTOR_TRANSPORT_PROFILE_V1,
+    CODEX_EXECUTOR_TRANSPORT_PROFILE_V2,
   );
   if (!sameTarget(descriptor.target, input.target_ref)
     || descriptor.stage !== "book_structure") {
@@ -199,7 +198,7 @@ export function createBookStructureGenerationTask(input: {
   const unsigned = {
     version: "book_structure_generation_task.v1" as const,
     target_ref: input.target_ref,
-    policy_set_digest: input.policy_set_digest,
+    policy_generation_id: input.policy_generation_id,
     descriptor,
     input: input.generation_input,
     parent_unit_lid: parentUnitLid,
@@ -212,7 +211,7 @@ export function createBookStructureGenerationTask(input: {
   if (sha256(rendered) !== descriptor.input_hash) {
     throw new Error("BookStructure generation task input does not match its descriptor proof");
   }
-  return { ...unsigned, task_digest: sha256(stableJson(unsigned)) };
+  return unsigned;
 }
 
 function generationTaskFileName(workUnitId: string): string {
@@ -225,12 +224,10 @@ function generationTaskFileName(workUnitId: string): string {
 
 export function bookStructureGenerationTaskPath(
   target: AutomaticBuildTarget,
-  policySetDigest: string,
+  policyGenerationId: string,
   workUnitId: string,
 ): string {
-  if (!SHA256.test(policySetDigest)) {
-    throw new Error("BookStructure task policy_set_digest must be a SHA-256 digest");
-  }
+  assertPolicyGenerationId(policyGenerationId, "BookStructure task policy_generation_id");
   return path.join(
     target.workspace_dir,
     ".build",
@@ -238,7 +235,7 @@ export function bookStructureGenerationTaskPath(
     "v4",
     "tasks",
     "book_structure",
-    policySetDigest,
+    policyGenerationId,
     generationTaskFileName(workUnitId),
   );
 }
@@ -249,7 +246,7 @@ function validateBookStructureGenerationTask(
 ): BookStructureGenerationTaskV1 {
   const canonical = createBookStructureGenerationTask({
     target_ref: value.target_ref,
-    policy_set_digest: value.policy_set_digest,
+    policy_generation_id: value.policy_generation_id,
     descriptor: value.descriptor,
     generation_input: value.input,
     parent_unit_lid: value.parent_unit_lid,
@@ -259,7 +256,6 @@ function validateBookStructureGenerationTask(
     output_role: value.output_role,
   });
   if (!sameTarget(canonical.target_ref, target.target_ref)
-    || canonical.task_digest !== value.task_digest
     || stableJson(canonical) !== stableJson(value)) {
     throw new Error("BookStructure generation task identity is invalid");
   }
@@ -273,7 +269,7 @@ export function freezeBookStructureGenerationTask(
   const task = validateBookStructureGenerationTask(target, taskValue);
   const file = bookStructureGenerationTaskPath(
     target,
-    task.policy_set_digest,
+    task.policy_generation_id,
     task.descriptor.work_unit_id,
   );
   const bytes = JSON.stringify(task, null, 2) + "\n";
@@ -291,10 +287,10 @@ export function freezeBookStructureGenerationTask(
 
 export function readBookStructureGenerationTask(
   target: AutomaticBuildTarget,
-  policySetDigest: string,
+  policyGenerationId: string,
   workUnitId: string,
 ): BookStructureGenerationTaskV1 | undefined {
-  const file = bookStructureGenerationTaskPath(target, policySetDigest, workUnitId);
+  const file = bookStructureGenerationTaskPath(target, policyGenerationId, workUnitId);
   if (!existsSync(file)) return undefined;
   return validateBookStructureGenerationTask(
     target,
@@ -744,9 +740,8 @@ export function writeBookStructureGenerationCandidate(input: {
     stage: "book_structure",
     work_unit_id: task.descriptor.work_unit_id,
     input_hash: task.descriptor.input_hash,
-    proof_digest: task.descriptor.execution_budget_proof.proof_digest,
-    policy_set_digest: task.policy_set_digest,
-    policy_fingerprint: task.descriptor.policy_fingerprint,
+    policy_generation_id: task.policy_generation_id,
+    semantic_contract: semanticContractFromExtractionPolicy(task.descriptor.policy_fingerprint),
     provenance: input.provenance,
     payload,
   });
@@ -762,7 +757,7 @@ export function readBookStructureGenerationArtifact(
   const file = automaticBuildGenerationArtifactPath(
     target,
     "book_structure",
-    task.policy_set_digest,
+    task.policy_generation_id,
     task.descriptor.work_unit_id,
   );
   if (!existsSync(file)) return undefined;
@@ -774,9 +769,8 @@ export function readBookStructureGenerationArtifact(
     stage: "book_structure",
     work_unit_id: task.descriptor.work_unit_id,
     input_hash: task.descriptor.input_hash,
-    proof_digest: task.descriptor.execution_budget_proof.proof_digest,
-    policy_set_digest: task.policy_set_digest,
-    policy_fingerprint: task.descriptor.policy_fingerprint,
+    policy_generation_id: task.policy_generation_id,
+    semantic_contract: semanticContractFromExtractionPolicy(task.descriptor.policy_fingerprint),
     },
   );
   if (inspected.format !== "v3" || !inspected.policy_fresh) {

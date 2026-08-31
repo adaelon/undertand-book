@@ -101,7 +101,6 @@ const AutomaticBuildRecoveryEnvelopeV1Z = z.object({
     input_fingerprint: InputFingerprintZ,
   }).strict(),
   router_version: BoundedStringZ.optional(),
-  policy_digest: Sha256Z.optional(),
   affected_work_units: z.array(AffectedWorkUnitZ)
     .max(AUTOMATIC_BUILD_RECOVERY_LIMITS.max_affected_work_units),
   omitted_affected_work_units: OmittedValuesZ.optional(),
@@ -147,7 +146,6 @@ export interface AutomaticBuildRecoveryEnvelopeInputV1 {
   stage?: AutomaticBuildStage;
   target_ref: BuildTargetRefV2;
   router_version?: string;
-  policy_digest?: string;
   affected_work_units: AutomaticBuildRecoveryAffectedWorkUnitInputV1[];
   retryable: boolean;
   recovery_actions: AutomaticBuildRecoveryAction[];
@@ -201,7 +199,6 @@ export function createAutomaticBuildRecoveryEnvelope(
       input_fingerprint: input.target_ref.input_fingerprint,
     },
     ...(input.router_version ? { router_version: input.router_version } : {}),
-    ...(input.policy_digest ? { policy_digest: input.policy_digest } : {}),
     affected_work_units: includedUnits,
     ...(omittedUnits.length ? { omitted_affected_work_units: omissionSummary(omittedUnits) } : {}),
     retryable: input.retryable,

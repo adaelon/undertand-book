@@ -6,6 +6,7 @@ import {
   createAutomaticBuildStagePolicySet,
   freezeAutomaticBuildStagePolicySet,
   recordAutomaticBuildPolicyMigration,
+  resolveAutomaticBuildStagePolicyMember,
 } from "../src/automatic-build-policy-generation";
 import { buildPass1Artifact } from "../src/build-resume";
 import type { AutomaticBuildTarget } from "../src/build-orchestrator";
@@ -51,6 +52,7 @@ import {
   buildSemanticArtifactEnvelope,
   buildSemanticArtifactEnvelopeV3,
   freezeAutomaticBuildStagePolicy,
+  semanticContractFromExtractionPolicy,
   writeAutomaticBuildGenerationArtifact,
   type SemanticArtifactEnvelopeV3,
   type SemanticArtifactProvenanceV2,
@@ -88,7 +90,6 @@ const TINY_BUDGET = {
   output_reserve_tokens: 0,
   safety_margin_tokens: 0,
 };
-const POLICY_SET_DIGEST = sha256("pass1-fragment-stitch-policy-set.v1");
 const PROVENANCE: SemanticArtifactProvenanceV2 = {
   executor: "pass1-reduction-test",
   model: "codex-test",
@@ -117,6 +118,21 @@ function localEdge(source: string, target: string, weight = 0.8): GraphEdge {
   };
 }
 
+function policyGenerationIdFor(unit: Pass1ShadowWorkUnitV1): string {
+  return `pass1-${unit.descriptor.kind}-test-generation.v1`;
+}
+
+function frozenPolicyGenerationIdFor(
+  policySet: ReturnType<typeof createAutomaticBuildStagePolicySet>,
+  unit: Pass1ShadowWorkUnitV1,
+): string {
+  return resolveAutomaticBuildStagePolicyMember(
+    policySet,
+    unit.descriptor.kind,
+    unit.descriptor.policy_fingerprint,
+  ).policy_generation_id;
+}
+
 function graphEnvelopeFor(unit: Pass1ShadowWorkUnitV1): SemanticArtifactEnvelopeV3<unknown> {
   const lid = unit.route.evidence_lids[0];
   const payload: Pass1ShadowGraphArtifactV1 = {
@@ -136,9 +152,8 @@ function graphEnvelopeFor(unit: Pass1ShadowWorkUnitV1): SemanticArtifactEnvelope
     stage: "pass1",
     work_unit_id: unit.descriptor.work_unit_id,
     input_hash: unit.descriptor.input_hash,
-    proof_digest: unit.descriptor.input_budget_proof.proof_digest,
-    policy_set_digest: POLICY_SET_DIGEST,
-    policy_fingerprint: unit.descriptor.policy_fingerprint,
+    policy_generation_id: policyGenerationIdFor(unit),
+    semantic_contract: semanticContractFromExtractionPolicy(unit.descriptor.policy_fingerprint),
     provenance: PROVENANCE,
     payload,
   });
@@ -148,7 +163,7 @@ function verifiedChild(unit: Pass1ShadowWorkUnitV1): Pass1ShadowVerifiedChildV1 
   return verifyPass1ShadowArtifact({
     work_unit: unit,
     artifact: graphEnvelopeFor(unit),
-    policy_set_digest: POLICY_SET_DIGEST,
+    policy_generation_id: policyGenerationIdFor(unit),
   });
 }
 
@@ -157,7 +172,7 @@ function realisticGraphChild(
   childOrdinal: number,
   nodeCount: number,
   edgeCount: number,
-  policySetDigest = POLICY_SET_DIGEST,
+  policyGenerationId = policyGenerationIdFor(unit),
   nodeNameLength = 10,
 ): Pass1ShadowVerifiedChildV1 {
   const lid = unit.route.evidence_lids[0];
@@ -190,16 +205,15 @@ function realisticGraphChild(
     stage: "pass1",
     work_unit_id: unit.descriptor.work_unit_id,
     input_hash: unit.descriptor.input_hash,
-    proof_digest: unit.descriptor.input_budget_proof.proof_digest,
-    policy_set_digest: policySetDigest,
-    policy_fingerprint: unit.descriptor.policy_fingerprint,
+    policy_generation_id: policyGenerationId,
+    semantic_contract: semanticContractFromExtractionPolicy(unit.descriptor.policy_fingerprint),
     provenance: PROVENANCE,
     payload,
   });
   return verifyPass1ShadowArtifact({
     work_unit: unit,
     artifact,
-    policy_set_digest: policySetDigest,
+    policy_generation_id: policyGenerationId,
   });
 }
 
@@ -307,7 +321,6 @@ function replayTree(
       window_id: 0,
       source_unit_count: count,
       children,
-      policy_set_digest: POLICY_SET_DIGEST,
       policy,
       budget: BUDGET,
     });
@@ -388,6 +401,7 @@ describe("Pass1 dormant fragment/stitch routing", () => {
     const oldLock = freezeAutomaticBuildStagePolicy(
       fixture.target,
       "pass1",
+      "pass1-window-legacy-generation.v1",
       wholePolicy,
       "2026-08-03T12:00:00.000Z",
     );
@@ -400,7 +414,7 @@ describe("Pass1 dormant fragment/stitch routing", () => {
     const receipt = recordAutomaticBuildPolicyMigration({
       target: fixture.target,
       stage: "pass1",
-      from_policy_digest: oldLock.policy_digest,
+      from_policy_generation_id: oldLock.policy_generation_id,
       policy_set: policySet,
       current: { route: "model", descriptor: current.descriptor, rendered_input: current.rendered_input },
       previous: { descriptor: previous, rendered_input: expectedInput, artifact_path: legacyPath },
@@ -553,7 +567,7 @@ describe("Pass1 dormant fragment/stitch routing", () => {
       index,
       1,
       0,
-      POLICY_SET_DIGEST,
+      policyGenerationIdFor(unit),
       1_024,
     ));
     const routed = routePass1StitchLevel({
@@ -561,7 +575,6 @@ describe("Pass1 dormant fragment/stitch routing", () => {
       window_id: 0,
       source_unit_count: prepared.units.length,
       children,
-      policy_set_digest: POLICY_SET_DIGEST,
       policy: pass1LidStitchPolicy(resolveContentProfile("technical_learning")),
       budget: PRODUCTION_STITCH_BUDGET,
     });
@@ -593,7 +606,6 @@ describe("Pass1 dormant fragment/stitch routing", () => {
       window_id: 0,
       source_unit_count: prepared.units.length,
       children,
-      policy_set_digest: POLICY_SET_DIGEST,
       policy: pass1LidStitchPolicy(resolveContentProfile("technical_learning")),
       budget: PRODUCTION_STITCH_BUDGET,
     });
@@ -662,7 +674,7 @@ describe("Pass1 dormant fragment/stitch routing", () => {
       const task = createPass1ShadowTask({
         work_unit: unit,
         source_fingerprint: sha256(prepared.source),
-        policy_set_digest: policySet.policy_set_digest,
+        policy_generation_id: frozenPolicyGenerationIdFor(policySet, unit),
         source_unit_count: prepared.units.length,
       });
       freezePass1ShadowTask(target, task);
@@ -671,7 +683,7 @@ describe("Pass1 dormant fragment/stitch routing", () => {
         index,
         graphSizes[index][0],
         graphSizes[index][1],
-        policySet.policy_set_digest,
+        frozenPolicyGenerationIdFor(policySet, unit),
       );
       writeAutomaticBuildGenerationArtifact(target, child.artifact);
       return child;
@@ -681,7 +693,6 @@ describe("Pass1 dormant fragment/stitch routing", () => {
       window_id: 0,
       source_unit_count: prepared.units.length,
       children,
-      policy_set_digest: policySet.policy_set_digest,
       policy: pass1LidStitchPolicy(profile),
       budget: PRODUCTION_STITCH_BUDGET,
     });
@@ -691,7 +702,7 @@ describe("Pass1 dormant fragment/stitch routing", () => {
     const finalTask = createPass1ShadowTask({
       work_unit: routed.units[0],
       source_fingerprint: sha256(prepared.source),
-      policy_set_digest: policySet.policy_set_digest,
+      policy_generation_id: frozenPolicyGenerationIdFor(policySet, routed.units[0]),
       source_unit_count: prepared.units.length,
     });
     freezePass1ShadowTask(target, finalTask);
@@ -719,7 +730,6 @@ describe("Pass1 dormant fragment/stitch routing", () => {
       target: prepared.units[0].descriptor.target,
       window_id: 0,
       source_unit_count: 2,
-      policy_set_digest: POLICY_SET_DIGEST,
       policy,
       budget: BUDGET,
     };
@@ -732,7 +742,7 @@ describe("Pass1 dormant fragment/stitch routing", () => {
     expect(() => verifyPass1ShadowArtifact({
       work_unit: prepared.units[0],
       artifact: stale,
-      policy_set_digest: POLICY_SET_DIGEST,
+      policy_generation_id: policyGenerationIdFor(prepared.units[0]),
     })).toThrow(/stale|invalid/i);
 
     const invalidProofUnit: Pass1ShadowWorkUnitV1 = {
@@ -748,7 +758,7 @@ describe("Pass1 dormant fragment/stitch routing", () => {
     expect(() => verifyPass1ShadowArtifact({
       work_unit: invalidProofUnit,
       artifact: graphEnvelopeFor(prepared.units[0]),
-      policy_set_digest: POLICY_SET_DIGEST,
+      policy_generation_id: policyGenerationIdFor(prepared.units[0]),
     })).toThrow(/proof|input_hash|digest/i);
 
     const fixture = createSyntheticRoutabilityFixture();
@@ -788,14 +798,14 @@ describe("Pass1 dormant fragment/stitch routing", () => {
     const task = createPass1ShadowTask({
       work_unit: fragmentUnit,
       source_fingerprint: fixture.identity.source_sha256,
-      policy_set_digest: policySet.policy_set_digest,
+      policy_generation_id: frozenPolicyGenerationIdFor(policySet, fragmentUnit),
       source_unit_count: routed.units.length,
     });
     freezePass1ShadowTask(fixture.target, task);
     const artifactPath = automaticBuildGenerationArtifactPath(
       fixture.target,
       "pass1",
-      policySet.policy_set_digest,
+      frozenPolicyGenerationIdFor(policySet, fragmentUnit),
       fragmentUnit.descriptor.work_unit_id,
     );
     const slice = fragmentBasis.slices[0];
@@ -816,7 +826,7 @@ describe("Pass1 dormant fragment/stitch routing", () => {
     expect(existsSync(artifactPath)).toBe(false);
     expect(pass1ShadowTaskPrivateDirectory(
       fixture.target,
-      policySet.policy_set_digest,
+      frozenPolicyGenerationIdFor(policySet, fragmentUnit),
       fragmentUnit.descriptor.work_unit_id,
     )).toContain(path.join("v3", "shadow", "pass1"));
   });
@@ -847,7 +857,7 @@ describe("Pass1 dormant fragment/stitch routing", () => {
       const task = createPass1ShadowTask({
         work_unit: unit,
         source_fingerprint: sha256(prepared.source),
-        policy_set_digest: policySet.policy_set_digest,
+        policy_generation_id: frozenPolicyGenerationIdFor(policySet, unit),
         source_unit_count: prepared.units.length,
       });
       freezePass1ShadowTask(target, task);
@@ -872,7 +882,7 @@ describe("Pass1 dormant fragment/stitch routing", () => {
       return verifyPass1ShadowArtifact({
         work_unit: unit,
         artifact: JSON.parse(readFileSync(artifactPath, "utf8")) as SemanticArtifactEnvelopeV3<unknown>,
-        policy_set_digest: policySet.policy_set_digest,
+        policy_generation_id: frozenPolicyGenerationIdFor(policySet, unit),
       });
     });
     const routed = routePass1StitchLevel({
@@ -880,7 +890,6 @@ describe("Pass1 dormant fragment/stitch routing", () => {
       window_id: 0,
       source_unit_count: prepared.units.length,
       children,
-      policy_set_digest: policySet.policy_set_digest,
       policy: pass1LidStitchPolicy(profile),
       budget: BUDGET,
     });
@@ -891,7 +900,7 @@ describe("Pass1 dormant fragment/stitch routing", () => {
     const finalTask = createPass1ShadowTask({
       work_unit: finalUnit,
       source_fingerprint: sha256(prepared.source),
-      policy_set_digest: policySet.policy_set_digest,
+      policy_generation_id: frozenPolicyGenerationIdFor(policySet, finalUnit),
       source_unit_count: prepared.units.length,
     });
     freezePass1ShadowTask(target, finalTask);
@@ -910,9 +919,8 @@ describe("Pass1 dormant fragment/stitch routing", () => {
       stage: "pass1",
       work_unit_id: finalTask.descriptor.work_unit_id,
       input_hash: finalTask.descriptor.input_hash,
-      proof_digest: finalTask.descriptor.input_budget_proof.proof_digest,
-      policy_set_digest: finalTask.policy_set_digest,
-      policy_fingerprint: finalTask.descriptor.policy_fingerprint,
+      policy_generation_id: finalTask.policy_generation_id,
+      semantic_contract: semanticContractFromExtractionPolicy(finalTask.descriptor.policy_fingerprint),
       provenance: original.provenance,
       payload: { ...original.payload, window_id: original.payload.window_id + 1 },
     });

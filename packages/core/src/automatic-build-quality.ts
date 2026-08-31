@@ -9,9 +9,10 @@ import type {
 } from "./build-orchestrator";
 import {
   automaticBuildGenerationArtifactPath,
-  extractionPolicyEqual,
   inspectSemanticArtifact,
+  semanticContractFromExtractionPolicy,
   type ExtractionQualityProfile,
+  type SemanticContractV1,
   type SemanticArtifactEnvelopeV3,
   type SemanticBuildStage,
 } from "./semantic-artifact";
@@ -24,10 +25,11 @@ import {
   type WorkUnitDescriptorV3,
   type WorkUnitDescriptorV4,
 } from "./stage-work-unit";
-import { CODEX_EXECUTOR_TRANSPORT_PROFILE_V1 } from "./executor-transport";
+import { CODEX_EXECUTOR_TRANSPORT_PROFILE_V2 } from "./executor-transport";
 import {
+  resolveAutomaticBuildStagePolicyMember,
   validateAutomaticBuildStagePolicySet,
-  type AutomaticBuildStagePolicySetV2,
+  type AutomaticBuildStagePolicySetV3,
 } from "./automatic-build-policy-generation";
 import type { ModelInputSliceCoverageV1 } from "./model-input-slice";
 
@@ -135,7 +137,7 @@ export interface AutomaticBuildStageQualityReductionParentV2 {
 }
 
 export interface AutomaticBuildStageQualityRoutingEvidenceV2 {
-  policy_set: AutomaticBuildStagePolicySetV2;
+  policy_set: AutomaticBuildStagePolicySetV3;
   coverage: ModelInputSliceCoverageV1[];
   public_contributors: AutomaticBuildStageQualityPublicContributorV2[];
   reduction_parents: AutomaticBuildStageQualityReductionParentV2[];
@@ -154,7 +156,11 @@ export interface AutomaticBuildStageQualityReportV2 {
     committed_units: number;
   };
   routing: {
-    policy_set_digest: string;
+    policy_generations: Array<{
+      kind: WorkUnitDescriptorV3["kind"];
+      policy_generation_id: string;
+      semantic_contract: SemanticContractV1;
+    }>;
     eligible_model_units: number;
     proven_model_units: number;
     invalid_or_missing_proofs: number;
@@ -179,7 +185,7 @@ export interface AutomaticBuildStageQualityReportV2 {
     legacy_artifacts: number;
     policy_generations: number;
     artifact_set_digest: string;
-    policy_status: "v3_policy_set_bound" | "legacy_policy_unknown" | "mixed_policy";
+    policy_status: "v3_policy_generation_bound" | "legacy_policy_unknown" | "mixed_policy";
     violations: string[];
   };
   quality: AutomaticBuildQualityFloorDecisionV1 & {
@@ -322,7 +328,7 @@ export function evaluateAutomaticBuildStageQuality(input: {
       stage: input.stage as SemanticBuildStage,
       work_unit_id: descriptor.work_unit_id,
       input_hash: descriptor.input_hash,
-      policy_fingerprint: descriptor.policy_fingerprint,
+      semantic_contract: semanticContractFromExtractionPolicy(descriptor.policy_fingerprint),
     });
     if (inspected.format === "legacy_v1") {
       legacy += 1;
@@ -428,7 +434,6 @@ export function evaluateAutomaticBuildStageQualityV2(input: {
 }): AutomaticBuildStageQualityReportV2 {
   const integrityViolations: string[] = [];
   const eligibleModelUnits = input.work_units.length;
-  const policySetDigest = input.routing.policy_set.policy_set_digest;
   let policySetValid = true;
   try {
     const policySet = validateAutomaticBuildStagePolicySet(input.routing.policy_set);
@@ -446,6 +451,7 @@ export function evaluateAutomaticBuildStageQualityV2(input: {
   let invalidOrMissingProofs = 0;
   let invalidProof = false;
   let invalidPolicyMember = false;
+  const expectedPolicyGenerations = new Set<string>();
   for (const descriptor of input.work_units) {
     if (descriptorsById.has(descriptor.work_unit_id)) {
       invalidOrMissingProofs += 1;
@@ -455,7 +461,7 @@ export function evaluateAutomaticBuildStageQualityV2(input: {
     descriptorsById.set(descriptor.work_unit_id, descriptor);
     try {
       if (isWorkUnitDescriptorV4(descriptor)) {
-        validateWorkUnitDescriptorV4(descriptor, CODEX_EXECUTOR_TRANSPORT_PROFILE_V1);
+        validateWorkUnitDescriptorV4(descriptor, CODEX_EXECUTOR_TRANSPORT_PROFILE_V2);
       } else {
         validateWorkUnitDescriptorV3(descriptor);
       }
@@ -468,16 +474,24 @@ export function evaluateAutomaticBuildStageQualityV2(input: {
       invalidProof = true;
       continue;
     }
-    const member = policySetValid
-      ? input.routing.policy_set.members.find((candidate) => candidate.kind === descriptor.kind)
-      : undefined;
-    if (!member
-      || !extractionPolicyEqual(member.policy_fingerprint, descriptor.policy_fingerprint)
-      || descriptor.policy_fingerprint.quality_profile !== input.quality_profile) {
+    let member;
+    try {
+      member = policySetValid
+        ? resolveAutomaticBuildStagePolicyMember(
+            input.routing.policy_set,
+            descriptor.kind,
+            descriptor.policy_fingerprint,
+          )
+        : undefined;
+    } catch {
+      member = undefined;
+    }
+    if (!member || descriptor.policy_fingerprint.quality_profile !== input.quality_profile) {
       invalidOrMissingProofs += 1;
       invalidPolicyMember = true;
       continue;
     }
+    expectedPolicyGenerations.add(member.policy_generation_id);
     provenModelUnits += 1;
   }
   if (invalidProof) pushViolation(integrityViolations, "budget_proof_invalid");
@@ -501,20 +515,22 @@ export function evaluateAutomaticBuildStageQualityV2(input: {
     });
     if (artifact && typeof artifact === "object"
       && (artifact as { version?: unknown }).version === "semantic_task_artifact.v3"
-      && typeof (artifact as { policy_set_digest?: unknown }).policy_set_digest === "string") {
-      policyGenerations.add((artifact as { policy_set_digest: string }).policy_set_digest);
+      && typeof (artifact as { policy_generation_id?: unknown }).policy_generation_id === "string") {
+      policyGenerations.add((artifact as { policy_generation_id: string }).policy_generation_id);
     }
     try {
+      const member = resolveAutomaticBuildStagePolicyMember(
+        input.routing.policy_set,
+        descriptor.kind,
+        descriptor.policy_fingerprint,
+      );
       const inspected = inspectSemanticArtifact(artifact, {
         target: input.target_ref,
         stage: input.stage as SemanticBuildStage,
         work_unit_id: descriptor.work_unit_id,
         input_hash: descriptor.input_hash,
-        proof_digest: isWorkUnitDescriptorV4(descriptor)
-          ? descriptor.execution_budget_proof.proof_digest
-          : descriptor.input_budget_proof.proof_digest,
-        policy_set_digest: policySetDigest,
-        policy_fingerprint: descriptor.policy_fingerprint,
+        policy_generation_id: member.policy_generation_id,
+        semantic_contract: semanticContractFromExtractionPolicy(descriptor.policy_fingerprint),
       });
       if (inspected.format === "legacy_v1") {
         legacy += 1;
@@ -535,6 +551,10 @@ export function evaluateAutomaticBuildStageQualityV2(input: {
   if (missing) pushViolation(integrityViolations, "missing_artifacts");
   if (stale) pushViolation(integrityViolations, "stale_artifacts");
   if (legacy) pushViolation(integrityViolations, "legacy_policy_unknown");
+  if ([...expectedPolicyGenerations].some((generation) => !policyGenerations.has(generation))
+    || [...policyGenerations].some((generation) => !expectedPolicyGenerations.has(generation))) {
+    pushViolation(integrityViolations, "policy_generation_set_invalid");
+  }
   if (freshArtifacts.size !== eligibleModelUnits) {
     pushViolation(integrityViolations, "incomplete_eligible_units");
   }
@@ -771,7 +791,7 @@ export function evaluateAutomaticBuildStageQualityV2(input: {
     ? "mixed_policy" as const
     : legacy
       ? "legacy_policy_unknown" as const
-      : "v3_policy_set_bound" as const;
+      : "v3_policy_generation_bound" as const;
   const core = {
     version: "automatic_build_stage_quality_report.v2" as const,
     target_ref: input.target_ref,
@@ -785,7 +805,11 @@ export function evaluateAutomaticBuildStageQualityV2(input: {
       committed_units: committedContributors,
     },
     routing: {
-      policy_set_digest: policySetDigest,
+      policy_generations: input.routing.policy_set.members.map((member) => ({
+        kind: member.kind,
+        policy_generation_id: member.policy_generation_id,
+        semantic_contract: member.semantic_contract,
+      })),
       eligible_model_units: eligibleModelUnits,
       proven_model_units: provenModelUnits,
       invalid_or_missing_proofs: invalidOrMissingProofs,
@@ -839,10 +863,15 @@ export function collectAutomaticBuildStageQuality(
     }
     const artifacts: Record<string, unknown> = {};
     for (const descriptor of workUnits) {
+      const member = resolveAutomaticBuildStagePolicyMember(
+        stageState.policy_set,
+        descriptor.kind,
+        descriptor.policy_fingerprint,
+      );
       const file = automaticBuildGenerationArtifactPath(
         target,
         stageState.stage,
-        stageState.policy_set.policy_set_digest,
+        member.policy_generation_id,
         descriptor.work_unit_id,
       );
       if (existsSync(file)) artifacts[descriptor.work_unit_id] = JSON.parse(readFileSync(file, "utf8"));

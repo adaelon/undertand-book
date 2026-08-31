@@ -21,19 +21,19 @@ import {
   interruptAutomaticBuildExecutorSession,
   nextAutomaticBuildExecutorInput,
   openAutomaticBuildExecutorSession,
-  openAutomaticBuildExecutorSessionV2,
+  openAutomaticBuildExecutorSessionV3,
   runAutomaticBuildExecutorSessionCommand,
   startAutomaticBuildExecutorGeneration,
   submitAutomaticBuildExecutorCandidate,
-  submitAutomaticBuildExecutorCandidateV2,
+  submitAutomaticBuildExecutorCandidateV3,
   type AutomaticBuildExecutorSessionResponseV1,
-  type AutomaticBuildExecutorSessionResponseV2,
+  type AutomaticBuildExecutorSessionResponseV3,
 } from "../src/automatic-build-executor-session";
 import { canonicalAutomaticBuildJson } from "../src/automatic-build-protocol";
-import { BUILD_EXECUTOR_BOOTSTRAP_CONTRACT_V2 } from "../src/build-executor-connection-capability";
+import { BUILD_EXECUTOR_BOOTSTRAP_CONTRACT_V3 } from "../src/build-executor-connection-capability";
 import { createBuildExecutorToolAdapter } from "../src/build-executor-tool-adapter";
 import {
-  CODEX_EXECUTOR_TRANSPORT_PROFILE_V1,
+  CODEX_EXECUTOR_TRANSPORT_PROFILE_V2,
   measureExecutorTransportResponse,
 } from "../src/executor-transport";
 import {
@@ -67,6 +67,7 @@ function fixture(
   label: string,
   sourceBody = "A deterministic executor-open fixture.",
   heading = "Guide",
+  handoffContract: "legacy_v1" | "current_v3" = "legacy_v1",
 ) {
   const root = mkdtempSync(path.join(tmpdir(), `understand-book-executor-open-${label}-`));
   const registryRoot = path.join(root, "driver-registry");
@@ -82,7 +83,7 @@ function fixture(
   if (!plan.preflight) throw new Error("expected executor-open preflight");
   const next = automaticBuildNext(source, root, 1, {
     now: "2026-08-08T06:00:00.000Z",
-    accepted_plan_digest: plan.preflight.plan_digest,
+    accepted_plan_digest: plan.preflight.descriptor_plan_digest,
     available_agent_slots: 1,
     executor_dispatches: true,
     build_plan: buildPlan,
@@ -90,9 +91,61 @@ function fixture(
   if (!("dispatches" in next.action) || !next.action.dispatches) {
     throw new Error("expected executor-open dispatch");
   }
-  const envelope = next.action.dispatches[0];
+  const currentEnvelope = next.action.dispatches[0];
   const target = resolveAutomaticBuildTarget(source, root);
-  return { root, registryRoot, source, target, envelope };
+  if (handoffContract === "current_v3") {
+    return { root, registryRoot, source, target, envelope: currentEnvelope };
+  }
+  const currentRecordPath = path.join(
+    registryRoot,
+    "opaque-handoffs",
+    `${currentEnvelope.opaque_handoff_ref}.json`,
+  );
+  const currentRecord = JSON.parse(readFileSync(currentRecordPath, "utf8"));
+  const legacyIdentity = {
+    version: "automatic_build_opaque_handoff_identity.v1",
+    kind: currentRecord.kind,
+    target_ref: currentRecord.target_ref,
+    target_locator: currentRecord.target_locator,
+    owner_identity: currentRecord.owner_identity,
+    handoff_path: currentRecord.handoff_path,
+    handoff_sha256: currentRecord.handoff_sha256,
+    handoff_byte_length: currentRecord.handoff_byte_length,
+  };
+  const legacyOpaqueHandoffRef = `abhandoff1_${createHash("sha256")
+    .update(canonicalAutomaticBuildJson(legacyIdentity), "utf8")
+    .digest("hex")}`;
+  writeFileSync(path.join(
+    registryRoot,
+    "opaque-handoffs",
+    `${legacyOpaqueHandoffRef}.json`,
+  ), `${JSON.stringify({
+    version: "automatic_build_opaque_handoff_record.v1",
+    opaque_handoff_ref: legacyOpaqueHandoffRef,
+    kind: currentRecord.kind,
+    target_ref: currentRecord.target_ref,
+    target_locator: currentRecord.target_locator,
+    owner_identity: currentRecord.owner_identity,
+    handoff_path: currentRecord.handoff_path,
+    handoff_sha256: currentRecord.handoff_sha256,
+    handoff_byte_length: currentRecord.handoff_byte_length,
+    issued_at: currentRecord.issued_at,
+  }, null, 2)}\n`, "utf8");
+  return {
+    root,
+    registryRoot,
+    source,
+    target,
+    envelope: { ...currentEnvelope, opaque_handoff_ref: legacyOpaqueHandoffRef },
+  };
+}
+
+function v3Fixture(
+  label: string,
+  sourceBody = "A deterministic executor-open fixture.",
+  heading = "Guide",
+) {
+  return fixture(label, sourceBody, heading, "current_v3");
 }
 
 function expectNoAttempts(value: ReturnType<typeof fixture>): void {
@@ -109,27 +162,27 @@ function expectGenerate(
 }
 
 function expectDeliverInput(
-  response: AutomaticBuildExecutorSessionResponseV2,
-): Extract<AutomaticBuildExecutorSessionResponseV2["action"], { kind: "DELIVER_INPUT" }> {
-  expect(response.version).toBe("automatic_build_executor_session.v2");
+  response: AutomaticBuildExecutorSessionResponseV3,
+): Extract<AutomaticBuildExecutorSessionResponseV3["action"], { kind: "DELIVER_INPUT" }> {
+  expect(response.version).toBe("automatic_build_executor_session.v3");
   expect(response.action.kind).toBe("DELIVER_INPUT");
   if (response.action.kind !== "DELIVER_INPUT") throw new Error("expected DELIVER_INPUT executor action");
   return response.action;
 }
 
 function expectInputChunk(
-  response: AutomaticBuildExecutorSessionResponseV2,
-): Extract<AutomaticBuildExecutorSessionResponseV2["action"], { kind: "INPUT_CHUNK" }> {
-  expect(response.version).toBe("automatic_build_executor_session.v2");
+  response: AutomaticBuildExecutorSessionResponseV3,
+): Extract<AutomaticBuildExecutorSessionResponseV3["action"], { kind: "INPUT_CHUNK" }> {
+  expect(response.version).toBe("automatic_build_executor_session.v3");
   expect(response.action.kind).toBe("INPUT_CHUNK");
   if (response.action.kind !== "INPUT_CHUNK") throw new Error("expected INPUT_CHUNK executor action");
   return response.action;
 }
 
 function expectGenerationGrant(
-  response: AutomaticBuildExecutorSessionResponseV2,
-): Extract<AutomaticBuildExecutorSessionResponseV2["action"], { kind: "GENERATION_GRANT" }> {
-  expect(response.version).toBe("automatic_build_executor_session.v2");
+  response: AutomaticBuildExecutorSessionResponseV3,
+): Extract<AutomaticBuildExecutorSessionResponseV3["action"], { kind: "GENERATION_GRANT" }> {
+  expect(response.version).toBe("automatic_build_executor_session.v3");
   expect(response.action.kind).toBe("GENERATION_GRANT");
   if (response.action.kind !== "GENERATION_GRANT") {
     throw new Error("expected GENERATION_GRANT executor action");
@@ -137,20 +190,20 @@ function expectGenerationGrant(
   return response.action;
 }
 
-function expectGenerateV2(
-  response: AutomaticBuildExecutorSessionResponseV2,
-): Extract<AutomaticBuildExecutorSessionResponseV2["action"], { kind: "GENERATE" }> {
-  expect(response.version).toBe("automatic_build_executor_session.v2");
+function expectGenerateV3(
+  response: AutomaticBuildExecutorSessionResponseV3,
+): Extract<AutomaticBuildExecutorSessionResponseV3["action"], { kind: "GENERATE" }> {
+  expect(response.version).toBe("automatic_build_executor_session.v3");
   expect(response.action.kind).toBe("GENERATE");
-  if (response.action.kind !== "GENERATE") throw new Error("expected V2 GENERATE executor action");
+  if (response.action.kind !== "GENERATE") throw new Error("expected V3 GENERATE executor action");
   return response.action;
 }
 
-function startV2Generation(
-  value: ReturnType<typeof fixture>,
+function startV3Generation(
+  value: ReturnType<typeof v3Fixture>,
   now: string,
-): Extract<AutomaticBuildExecutorSessionResponseV2["action"], { kind: "GENERATE" }> {
-  const delivery = expectDeliverInput(openAutomaticBuildExecutorSessionV2(
+): Extract<AutomaticBuildExecutorSessionResponseV3["action"], { kind: "GENERATE" }> {
+  const delivery = expectDeliverInput(openAutomaticBuildExecutorSessionV3(
     value.envelope.opaque_handoff_ref,
     { now },
   ));
@@ -158,21 +211,21 @@ function startV2Generation(
   for (let ordinal = 0; ordinal < 128; ordinal += 1) {
     const response = nextAutomaticBuildExecutorInput(request, { now });
     if (response.action.kind === "GENERATION_GRANT") {
-      return expectGenerateV2(startAutomaticBuildExecutorGeneration({
-        version: "automatic_build_executor_generation_start_request.v1",
+      return expectGenerateV3(startAutomaticBuildExecutorGeneration({
+        version: "automatic_build_executor_generation_start_request.v2",
         opaque_session_ref: response.action.grant.opaque_session_ref,
         generation_grant_ref: response.action.grant.generation_grant_ref,
       }, { now }));
     }
     const chunk = expectInputChunk(response).chunk;
     request = {
-      version: "automatic_build_executor_input_next_request.v2",
+      version: "automatic_build_executor_input_next_request.v3",
       opaque_session_ref: delivery.input_manifest.opaque_session_ref,
       generation_input_ref: delivery.input_manifest.generation_input_ref,
-      previous_chunk_receipt: chunk.chunk_receipt,
+      previous_chunk_ordinal: chunk.ordinal,
     };
   }
-  throw new Error("expected V2 generation action");
+  throw new Error("expected V3 generation action");
 }
 
 function deterministicUtf8Text(seed: string, targetBytes: number): string {
@@ -264,7 +317,7 @@ describe("automatic build executor.open", () => {
     const measured = measureExecutorTransportResponse(
       syntheticFullSizeResponse,
       semanticInput,
-      CODEX_EXECUTOR_TRANSPORT_PROFILE_V1,
+      CODEX_EXECUTOR_TRANSPORT_PROFILE_V2,
     );
 
     expect(Object.hasOwn(action, "semantic_input")).toBe(true);
@@ -303,7 +356,12 @@ describe("automatic build executor.open", () => {
   }, 15_000);
 
   it("reissues the same opaque ref without rewriting its first issued timestamp", () => {
-    const value = fixture("reissue");
+    const value = fixture(
+      "reissue",
+      "A deterministic executor-open fixture.",
+      "Guide",
+      "current_v3",
+    );
     const reissued = issueAutomaticBuildOpaqueHandoff({
       target: value.target,
       kind: "public_dispatch",
@@ -582,10 +640,32 @@ describe("automatic build public executor session S3", () => {
   }, 15_000);
 });
 
-describe("automatic build bounded executor session V2", () => {
-  it("delivers prompt and input through bounded receipts, then creates attempt 1 only at generation.start", () => {
-    const value = fixture("v2-two-phase");
-    const opened = openAutomaticBuildExecutorSessionV2(value.envelope.opaque_handoff_ref, {
+describe("automatic build bounded executor session V3", () => {
+  it("issues a current public handoff directly as V3 without supersession state", () => {
+    const value = v3Fixture("v3-direct-issue");
+    const record = JSON.parse(readFileSync(path.join(
+      value.registryRoot,
+      "opaque-handoffs",
+      `${value.envelope.opaque_handoff_ref}.json`,
+    ), "utf8"));
+
+    expect(record).toMatchObject({
+      version: "automatic_build_opaque_handoff_record.v3",
+      session_protocol: "automatic_build_executor_session.v3",
+      opaque_handoff_ref: value.envelope.opaque_handoff_ref,
+      kind: "public_dispatch",
+    });
+    expect(record).not.toHaveProperty("supersedes_opaque_handoff_ref");
+    expect(existsSync(path.join(value.registryRoot, "executor-handoff-supersessions"))).toBe(false);
+    expectDeliverInput(openAutomaticBuildExecutorSessionV3(value.envelope.opaque_handoff_ref, {
+      now: "2026-08-31T07:00:01.000Z",
+    }));
+    expectNoAttempts(value);
+  }, 30_000);
+
+  it("delivers prompt and input through bounded ordinals, then creates attempt 1 only at generation.start", () => {
+    const value = v3Fixture("v3-two-phase");
+    const opened = openAutomaticBuildExecutorSessionV3(value.envelope.opaque_handoff_ref, {
       now: "2026-08-08T07:00:01.000Z",
     });
     const delivery = expectDeliverInput(opened);
@@ -593,13 +673,12 @@ describe("automatic build bounded executor session V2", () => {
     expect(measureExecutorTransportResponse(
       opened,
       "",
-      CODEX_EXECUTOR_TRANSPORT_PROFILE_V1,
+      CODEX_EXECUTOR_TRANSPORT_PROFILE_V2,
     ).status).toBe("within_limit");
     expect(delivery.input_manifest).toMatchObject({
-      version: "automatic_build_executor_input_manifest.v2",
+      version: "automatic_build_executor_input_manifest.v3",
       opaque_session_ref: delivery.next_request.opaque_session_ref,
       generation_input_ref: delivery.next_request.generation_input_ref,
-      transport_profile_digest: CODEX_EXECUTOR_TRANSPORT_PROFILE_V1.profile_digest,
       segments: [
         { kind: "semantic_prompt" },
         { kind: "semantic_input" },
@@ -607,7 +686,7 @@ describe("automatic build bounded executor session V2", () => {
     });
     const deliveryLedger = readFileSync(path.join(
       value.registryRoot,
-      "executor-v2-delivery-sessions",
+      "executor-v3-delivery-sessions",
       `${delivery.input_manifest.opaque_session_ref}.json`,
     ), "utf8");
     expect(deliveryLedger).not.toMatch(/"semantic_prompt":|"semantic_input":|payload_utf8|deterministic executor-open fixture/u);
@@ -635,15 +714,15 @@ describe("automatic build bounded executor session V2", () => {
       expect(measureExecutorTransportResponse(
         response,
         chunk.payload_utf8,
-        CODEX_EXECUTOR_TRANSPORT_PROFILE_V1,
+        CODEX_EXECUTOR_TRANSPORT_PROFILE_V2,
       ).status).toBe("within_limit");
       bodies.set(chunk.segment, `${bodies.get(chunk.segment) ?? ""}${chunk.payload_utf8}`);
       expectNoAttempts(value);
       request = {
-        version: "automatic_build_executor_input_next_request.v2",
+        version: "automatic_build_executor_input_next_request.v3",
         opaque_session_ref: delivery.input_manifest.opaque_session_ref,
         generation_input_ref: delivery.input_manifest.generation_input_ref,
-        previous_chunk_receipt: chunk.chunk_receipt,
+        previous_chunk_ordinal: chunk.ordinal,
       };
       response = nextAutomaticBuildExecutorInput(request, {
         now: `2026-08-08T07:00:${String(ordinal + 3).padStart(2, "0")}.000Z`,
@@ -658,35 +737,35 @@ describe("automatic build bounded executor session V2", () => {
       expect(createHash("sha256").update(body, "utf8").digest("hex")).toBe(segment.sha256);
     }
     expect(grantAction.grant).toMatchObject({
-      version: "automatic_build_executor_generation_grant.v1",
+      version: "automatic_build_executor_generation_grant.v2",
       opaque_session_ref: delivery.input_manifest.opaque_session_ref,
       generation_input_ref: delivery.input_manifest.generation_input_ref,
     });
     expect(nextAutomaticBuildExecutorInput(request, {
       now: "2026-08-08T07:01:30.000Z",
     })).toEqual(response);
-    const reopenedBeforeStart = expectDeliverInput(openAutomaticBuildExecutorSessionV2(
+    const reopenedBeforeStart = expectDeliverInput(openAutomaticBuildExecutorSessionV3(
       value.envelope.opaque_handoff_ref,
       {
       now: "2026-08-08T07:01:31.000Z",
       },
     ));
     expect(reopenedBeforeStart.input_manifest).toEqual(delivery.input_manifest);
-    expect(reopenedBeforeStart.next_request).not.toHaveProperty("previous_chunk_receipt");
+    expect(reopenedBeforeStart.next_request).not.toHaveProperty("previous_chunk_ordinal");
     expectNoAttempts(value);
 
     const startRequest = {
-      version: "automatic_build_executor_generation_start_request.v1" as const,
+      version: "automatic_build_executor_generation_start_request.v2" as const,
       opaque_session_ref: grantAction.grant.opaque_session_ref,
       generation_grant_ref: grantAction.grant.generation_grant_ref,
     };
     const generatedResponse = startAutomaticBuildExecutorGeneration(startRequest, {
       now: "2026-08-08T07:01:32.000Z",
     });
-    const generated = expectGenerateV2(generatedResponse);
+    const generated = expectGenerateV3(generatedResponse);
     expect(generated.semantic_attempt).toBe(1);
     expect(generated.output_contract.max_bytes)
-      .toBe(CODEX_EXECUTOR_TRANSPORT_PROFILE_V1.max_candidate_request_bytes);
+      .toBe(CODEX_EXECUTOR_TRANSPORT_PROFILE_V2.max_candidate_request_bytes);
     expect(JSON.stringify(generatedResponse)).not.toMatch(/"semantic_prompt":|"semantic_input":|deterministic executor-open fixture/u);
     expect(readAutomaticBuildAttemptSnapshot(value.target)
       .stages[value.envelope.manifest.stage]?.[value.envelope.manifest.ordered_work_unit_ids[0]])
@@ -694,14 +773,14 @@ describe("automatic build bounded executor session V2", () => {
     expect(startAutomaticBuildExecutorGeneration(startRequest, {
       now: "2026-08-08T07:01:33.000Z",
     })).toEqual(generatedResponse);
-    const reopenedAfterStart = expectDeliverInput(openAutomaticBuildExecutorSessionV2(
+    const reopenedAfterStart = expectDeliverInput(openAutomaticBuildExecutorSessionV3(
       value.envelope.opaque_handoff_ref,
       {
       now: "2026-08-08T07:01:34.000Z",
       },
     ));
     expect(reopenedAfterStart.input_manifest).toEqual(delivery.input_manifest);
-    expect(reopenedAfterStart.next_request).not.toHaveProperty("previous_chunk_receipt");
+    expect(reopenedAfterStart.next_request).not.toHaveProperty("previous_chunk_ordinal");
     expect(runAutomaticBuildExecutorSessionCommand({
       ...startRequest,
       now: "2026-08-08T07:01:35.000Z",
@@ -711,9 +790,92 @@ describe("automatic build bounded executor session V2", () => {
       .toMatchObject({ semantic_attempt: 1, lease_epoch: 1, failures: 0 });
   }, 30_000);
 
+  it("H0 uses ordinal/range/body/schema checks without transport, chunk, output-contract, or ledger digests", () => {
+    const value = v3Fixture("v3-h0-forbidden-fields", "x".repeat(20_000));
+    const delivery = expectDeliverInput(openAutomaticBuildExecutorSessionV3(
+      value.envelope.opaque_handoff_ref,
+      { now: "2026-08-30T02:00:00.000Z" },
+    ));
+    const bodies = new Map<string, string>();
+    let request = delivery.next_request;
+    let firstChunk: ReturnType<typeof expectInputChunk>["chunk"] | undefined;
+    let grantAction: ReturnType<typeof expectGenerationGrant> | undefined;
+    for (let ordinal = 0; ordinal < 128; ordinal += 1) {
+      const response = nextAutomaticBuildExecutorInput(request, {
+        now: "2026-08-30T02:00:01.000Z",
+      });
+      if (response.action.kind === "GENERATION_GRANT") {
+        grantAction = expectGenerationGrant(response);
+        break;
+      }
+      const chunk = expectInputChunk(response).chunk;
+      firstChunk ??= chunk;
+      expect(chunk.ordinal).toBe(ordinal);
+      expect(chunk.byte_range.end - chunk.byte_range.start)
+        .toBe(Buffer.byteLength(chunk.payload_utf8, "utf8"));
+      bodies.set(chunk.segment, `${bodies.get(chunk.segment) ?? ""}${chunk.payload_utf8}`);
+      request = {
+        version: "automatic_build_executor_input_next_request.v3",
+        opaque_session_ref: delivery.input_manifest.opaque_session_ref,
+        generation_input_ref: delivery.input_manifest.generation_input_ref,
+        previous_chunk_ordinal: chunk.ordinal,
+      };
+    }
+    if (!firstChunk || !grantAction) throw new Error("expected H0 chunks and generation grant");
+    for (const segment of delivery.input_manifest.segments) {
+      const body = bodies.get(segment.kind) ?? "";
+      expect(Buffer.byteLength(body, "utf8")).toBe(segment.byte_length);
+      // Segment-level prompt/input content identity remains: it avoids storing another large body.
+      expect(createHash("sha256").update(body, "utf8").digest("hex")).toBe(segment.sha256);
+    }
+
+    const deliveryRecord = JSON.parse(readFileSync(path.join(
+      value.registryRoot,
+      "executor-v3-delivery-sessions",
+      `${delivery.input_manifest.opaque_session_ref}.json`,
+    ), "utf8"));
+    const grantRecord = JSON.parse(readFileSync(path.join(
+      value.registryRoot,
+      "executor-v3-generation-grants",
+      `${delivery.input_manifest.opaque_session_ref}.json`,
+    ), "utf8"));
+    const receiptDirectory = path.join(value.registryRoot, "executor-v3-delivery-receipts");
+    const receiptRecord = JSON.parse(readFileSync(path.join(
+      receiptDirectory,
+      readdirSync(receiptDirectory)[0]!,
+    ), "utf8"));
+    expect(Object.keys(receiptRecord).sort()).toEqual([
+      "confirmed_at",
+      "generation_input_ref",
+      "opaque_session_ref",
+      "ordinal",
+      "version",
+    ]);
+    expect(receiptRecord).toMatchObject({
+      opaque_session_ref: delivery.input_manifest.opaque_session_ref,
+      generation_input_ref: delivery.input_manifest.generation_input_ref,
+      ordinal: 0,
+    });
+    expect(grantRecord).toMatchObject({
+      final_delivered_ordinal: grantAction.grant.final_delivered_ordinal,
+      output_schema_version: grantAction.grant.output_schema_version,
+    });
+    const present = [
+      Object.hasOwn(delivery.input_manifest, "transport_profile_digest") ? "transport_profile_digest" : undefined,
+      Object.hasOwn(firstChunk, "payload_sha256") ? "payload_sha256" : undefined,
+      Object.hasOwn(grantAction.grant, "output_contract_digest") ? "output_contract_digest" : undefined,
+      Object.hasOwn(deliveryRecord, "transport_profile_digest") ? "record.transport_profile_digest" : undefined,
+      Object.hasOwn(deliveryRecord, "output_contract_digest") ? "record.output_contract_digest" : undefined,
+      Object.hasOwn(grantRecord, "delivery_ledger_digest") ? "delivery_ledger_digest" : undefined,
+    ].filter((field): field is string => field !== undefined);
+    // H0_RED action: H4 Session V3 removes these wrappers and directly validates version,
+    // ordinal/range/UTF-8 length, concatenated prompt/input bodies, and output schema version.
+    expect(present).toEqual([]);
+  }, 30_000);
+
   it("rehydrates completed input for a replacement child after generation.start without another attempt", () => {
-    const value = fixture("v2-post-start-rehydrate", "x".repeat(20_000));
-    const delivery = expectDeliverInput(openAutomaticBuildExecutorSessionV2(
+    const value = v3Fixture("v3-post-start-rehydrate", "x".repeat(20_000));
+    const delivery = expectDeliverInput(openAutomaticBuildExecutorSessionV3(
       value.envelope.opaque_handoff_ref,
       { now: "2026-08-08T07:05:01.000Z" },
     ));
@@ -731,30 +893,30 @@ describe("automatic build bounded executor session V2", () => {
       }
       const chunk = expectInputChunk(response).chunk;
       request = {
-        version: "automatic_build_executor_input_next_request.v2",
+        version: "automatic_build_executor_input_next_request.v3",
         opaque_session_ref: delivery.input_manifest.opaque_session_ref,
         generation_input_ref: delivery.input_manifest.generation_input_ref,
-        previous_chunk_receipt: chunk.chunk_receipt,
+        previous_chunk_ordinal: chunk.ordinal,
       };
     }
     if (!grantAction) throw new Error("expected generation grant before replacement-child replay");
 
     const startRequest = {
-      version: "automatic_build_executor_generation_start_request.v1" as const,
+      version: "automatic_build_executor_generation_start_request.v2" as const,
       opaque_session_ref: grantAction.grant.opaque_session_ref,
       generation_grant_ref: grantAction.grant.generation_grant_ref,
     };
     const generatedResponse = startAutomaticBuildExecutorGeneration(startRequest, {
       now: "2026-08-08T07:05:03.000Z",
     });
-    expect(expectGenerateV2(generatedResponse).semantic_attempt).toBe(1);
+    expect(expectGenerateV3(generatedResponse).semantic_attempt).toBe(1);
 
-    const replacementDelivery = expectDeliverInput(openAutomaticBuildExecutorSessionV2(
+    const replacementDelivery = expectDeliverInput(openAutomaticBuildExecutorSessionV3(
       value.envelope.opaque_handoff_ref,
       { now: "2026-08-08T07:05:04.000Z" },
     ));
     expect(replacementDelivery.input_manifest).toEqual(delivery.input_manifest);
-    expect(replacementDelivery.next_request).not.toHaveProperty("previous_chunk_receipt");
+    expect(replacementDelivery.next_request).not.toHaveProperty("previous_chunk_ordinal");
 
     const replayedBodies = new Map<string, string>();
     let replayResponse = nextAutomaticBuildExecutorInput(replacementDelivery.next_request, {
@@ -773,10 +935,10 @@ describe("automatic build bounded executor session V2", () => {
         `${replayedBodies.get(chunk.segment) ?? ""}${chunk.payload_utf8}`,
       );
       replayResponse = nextAutomaticBuildExecutorInput({
-        version: "automatic_build_executor_input_next_request.v2",
+        version: "automatic_build_executor_input_next_request.v3",
         opaque_session_ref: delivery.input_manifest.opaque_session_ref,
         generation_input_ref: delivery.input_manifest.generation_input_ref,
-        previous_chunk_receipt: chunk.chunk_receipt,
+        previous_chunk_ordinal: chunk.ordinal,
       }, { now: "2026-08-08T07:05:06.000Z" });
     }
     if (!replayedGrant) throw new Error("expected generation grant after replacement-child replay");
@@ -794,9 +956,9 @@ describe("automatic build bounded executor session V2", () => {
       .toMatchObject({ semantic_attempt: 1, lease_epoch: 1, failures: 0 });
   }, 30_000);
 
-  it("replays the same next request byte-identically and rejects unknown, tampered, or cross-session receipts", () => {
-    const left = fixture("v2-receipt-left");
-    const leftDelivery = expectDeliverInput(openAutomaticBuildExecutorSessionV2(
+  it("replays the same next request byte-identically and rejects unknown ordinals or cross-session refs", () => {
+    const left = v3Fixture("v3-ordinal-left");
+    const leftDelivery = expectDeliverInput(openAutomaticBuildExecutorSessionV3(
       left.envelope.opaque_handoff_ref,
       { now: "2026-08-08T07:10:01.000Z" },
     ));
@@ -811,40 +973,29 @@ describe("automatic build bounded executor session V2", () => {
     }
     expect(nextAutomaticBuildExecutorInput({
       ...leftDelivery.next_request,
-      previous_chunk_receipt: firstChunk.chunk_receipt,
+      previous_chunk_ordinal: firstChunk.ordinal,
     }, { now: "2026-08-08T07:10:03.500Z" }).action.kind)
       .toMatch(/INPUT_CHUNK|GENERATION_GRANT/u);
 
     expect(() => nextAutomaticBuildExecutorInput({
       ...leftDelivery.next_request,
-      previous_chunk_receipt: `abchunk1_${"0".repeat(64)}`,
-    }, { now: "2026-08-08T07:10:04.000Z" })).toThrow(/receipt/i);
+      previous_chunk_ordinal: leftDelivery.input_manifest.total_chunk_count,
+    }, { now: "2026-08-08T07:10:04.000Z" })).toThrow(/ordinal/i);
     expect(() => nextAutomaticBuildExecutorInput({
       ...leftDelivery.next_request,
-      previous_chunk_receipt: `${firstChunk.chunk_receipt.slice(0, -1)}${
-        firstChunk.chunk_receipt.endsWith("0") ? "1" : "0"
-      }`,
-    }, { now: "2026-08-08T07:10:05.000Z" })).toThrow(/receipt/i);
-
-    const right = fixture("v2-receipt-right");
-    const rightDelivery = expectDeliverInput(openAutomaticBuildExecutorSessionV2(
-      right.envelope.opaque_handoff_ref,
-      { now: "2026-08-08T07:10:06.000Z" },
-    ));
-    const rightChunk = expectInputChunk(nextAutomaticBuildExecutorInput(rightDelivery.next_request, {
-      now: "2026-08-08T07:10:07.000Z",
-    })).chunk;
+      previous_chunk_ordinal: -1,
+    }, { now: "2026-08-08T07:10:05.000Z" })).toThrow(/previous_chunk_ordinal/i);
     expect(() => nextAutomaticBuildExecutorInput({
       ...leftDelivery.next_request,
-      previous_chunk_receipt: rightChunk.chunk_receipt,
-    }, { now: "2026-08-08T07:10:08.000Z" })).toThrow(/receipt|session/i);
+      generation_input_ref: `abinput1_${"0".repeat(64)}`,
+      previous_chunk_ordinal: firstChunk.ordinal,
+    }, { now: "2026-08-08T07:10:06.000Z" })).toThrow(/generation input ref|session/i);
     expectNoAttempts(left);
-    expectNoAttempts(right);
   }, 30_000);
 
   it("reopens at the first unconfirmed chunk and keeps a multi-chunk interruption at attempt zero", () => {
-    const value = fixture("v2-resume", "x".repeat(20_000));
-    const delivery = expectDeliverInput(openAutomaticBuildExecutorSessionV2(
+    const value = v3Fixture("v3-resume", "x".repeat(20_000));
+    const delivery = expectDeliverInput(openAutomaticBuildExecutorSessionV3(
       value.envelope.opaque_handoff_ref,
       { now: "2026-08-08T07:20:01.000Z" },
     ));
@@ -853,27 +1004,27 @@ describe("automatic build bounded executor session V2", () => {
       now: "2026-08-08T07:20:02.000Z",
     });
     const first = expectInputChunk(firstResponse).chunk;
-    expect(openAutomaticBuildExecutorSessionV2(value.envelope.opaque_handoff_ref, {
+    expect(openAutomaticBuildExecutorSessionV3(value.envelope.opaque_handoff_ref, {
       now: "2026-08-08T07:20:03.000Z",
     })).toEqual({
-      ...openAutomaticBuildExecutorSessionV2(value.envelope.opaque_handoff_ref, {
+      ...openAutomaticBuildExecutorSessionV3(value.envelope.opaque_handoff_ref, {
         now: "2026-08-08T07:20:04.000Z",
       }),
     });
     expectNoAttempts(value);
 
     const secondResponse = nextAutomaticBuildExecutorInput({
-      version: "automatic_build_executor_input_next_request.v2",
+      version: "automatic_build_executor_input_next_request.v3",
       opaque_session_ref: delivery.input_manifest.opaque_session_ref,
       generation_input_ref: delivery.input_manifest.generation_input_ref,
-      previous_chunk_receipt: first.chunk_receipt,
+      previous_chunk_ordinal: first.ordinal,
     }, { now: "2026-08-08T07:20:05.000Z" });
     const second = expectInputChunk(secondResponse).chunk;
-    const reopened = expectDeliverInput(openAutomaticBuildExecutorSessionV2(
+    const reopened = expectDeliverInput(openAutomaticBuildExecutorSessionV3(
       value.envelope.opaque_handoff_ref,
       { now: "2026-08-08T07:20:06.000Z" },
     ));
-    expect(reopened.next_request.previous_chunk_receipt).toBe(first.chunk_receipt);
+    expect(reopened.next_request.previous_chunk_ordinal).toBe(first.ordinal);
     expect(nextAutomaticBuildExecutorInput(reopened.next_request, {
       now: "2026-08-08T07:20:07.000Z",
     })).toEqual(secondResponse);
@@ -882,19 +1033,19 @@ describe("automatic build bounded executor session V2", () => {
   }, 30_000);
 
   it("rejects generation.start before complete delivery and leaves terminal dispatches body-free", () => {
-    const pending = fixture("v2-start-before-delivery");
-    const delivery = expectDeliverInput(openAutomaticBuildExecutorSessionV2(
+    const pending = v3Fixture("v3-start-before-delivery");
+    const delivery = expectDeliverInput(openAutomaticBuildExecutorSessionV3(
       pending.envelope.opaque_handoff_ref,
       { now: "2026-08-08T07:30:01.000Z" },
     ));
     expect(() => startAutomaticBuildExecutorGeneration({
-      version: "automatic_build_executor_generation_start_request.v1",
+      version: "automatic_build_executor_generation_start_request.v2",
       opaque_session_ref: delivery.input_manifest.opaque_session_ref,
       generation_grant_ref: `abgrant1_${"0".repeat(64)}`,
     }, { now: "2026-08-08T07:30:02.000Z" })).toThrow(/complete input delivery/i);
     expectNoAttempts(pending);
 
-    const terminal = fixture("v2-terminal");
+    const terminal = v3Fixture("v3-terminal");
     automaticBuildDispatchFinish(
       terminal.source,
       terminal.root,
@@ -911,11 +1062,11 @@ describe("automatic build bounded executor session V2", () => {
         now: "2026-08-08T07:30:03.000Z",
       },
     );
-    const done = openAutomaticBuildExecutorSessionV2(terminal.envelope.opaque_handoff_ref, {
+    const done = openAutomaticBuildExecutorSessionV3(terminal.envelope.opaque_handoff_ref, {
       now: "2026-08-08T07:30:04.000Z",
     });
     expect(done).toEqual({
-      version: "automatic_build_executor_session.v2",
+      version: "automatic_build_executor_session.v3",
       action: { kind: "DONE", status: "interrupted" },
     });
     expect(JSON.stringify(done)).not.toMatch(/input_manifest|generation_grant|payload_utf8/u);
@@ -923,18 +1074,18 @@ describe("automatic build bounded executor session V2", () => {
   }, 30_000);
 
   it("submits one structured JsonValue through the bound sink with canonical replay and no path", () => {
-    const value = fixture("v2-structured-submit");
-    const generated = startV2Generation(value, "2026-08-08T07:40:01.000Z");
+    const value = v3Fixture("v3-structured-submit");
+    const generated = startV3Generation(value, "2026-08-08T07:40:01.000Z");
     expect(generated.candidate_sink_ref).toMatch(/^absink1_[a-f0-9]{64}$/u);
     expect(generated).not.toHaveProperty("candidate_path");
     const request = {
-      version: "automatic_build_executor_candidate_submit.v2" as const,
+      version: "automatic_build_executor_candidate_submit.v3" as const,
       opaque_session_ref: generated.opaque_session_ref,
       candidate_sink_ref: generated.candidate_sink_ref,
       candidate: { nodes: [], edges: [] },
     };
 
-    const first = submitAutomaticBuildExecutorCandidateV2(request, {
+    const first = submitAutomaticBuildExecutorCandidateV3(request, {
       now: "2026-08-08T07:40:02.000Z",
     });
     const taskSession = JSON.parse(readFileSync(path.join(
@@ -953,15 +1104,15 @@ describe("automatic build bounded executor session V2", () => {
     expect(readAutomaticBuildAttemptSnapshot(value.target)
       .stages[value.envelope.manifest.stage]?.[value.envelope.manifest.ordered_work_unit_ids[0]])
       .toMatchObject({ semantic_attempt: 1, lease_epoch: 1, failures: 0, submit_revision: 2 });
-    expect(() => submitAutomaticBuildExecutorCandidateV2({
+    expect(() => submitAutomaticBuildExecutorCandidateV3({
       ...request,
       candidate: { nodes: [], edges: [], changed: true },
     }, { now: "2026-08-08T07:40:04.000Z" })).toThrow(/candidate.*different|conflict/i);
   }, 30_000);
 
   it("keeps a temporarily unavailable candidate sink on the same attempt and replays the same value", () => {
-    const value = fixture("v2-candidate-sink-replay");
-    const generated = startV2Generation(value, "2026-08-08T07:42:01.000Z");
+    const value = v3Fixture("v3-candidate-sink-replay");
+    const generated = startV3Generation(value, "2026-08-08T07:42:01.000Z");
     const taskSession = JSON.parse(readFileSync(path.join(
       value.registryRoot,
       "executor-task-sessions",
@@ -970,7 +1121,7 @@ describe("automatic build bounded executor session V2", () => {
     const validationPath = path.join(path.dirname(taskSession.lease_ref), "validation.json");
     mkdirSync(validationPath);
     const request = {
-      version: "automatic_build_executor_candidate_submit.v2" as const,
+      version: "automatic_build_executor_candidate_submit.v3" as const,
       opaque_session_ref: generated.opaque_session_ref,
       candidate_sink_ref: generated.candidate_sink_ref,
       candidate: { nodes: [], edges: [] },
@@ -978,7 +1129,7 @@ describe("automatic build bounded executor session V2", () => {
 
     let unavailable: unknown;
     try {
-      submitAutomaticBuildExecutorCandidateV2(request, {
+      submitAutomaticBuildExecutorCandidateV3(request, {
         now: "2026-08-08T07:42:02.000Z",
       });
     } catch (error) {
@@ -997,7 +1148,7 @@ describe("automatic build bounded executor session V2", () => {
       .toMatchObject({ failures: 0, semantic_attempt: 1, lease_epoch: 1, submit_revision: 0 });
 
     rmSync(validationPath, { recursive: true });
-    submitAutomaticBuildExecutorCandidateV2(request, {
+    submitAutomaticBuildExecutorCandidateV3(request, {
       now: "2026-08-08T07:42:03.000Z",
     });
     expect(readAutomaticBuildAttemptSnapshot(value.target)
@@ -1006,10 +1157,10 @@ describe("automatic build bounded executor session V2", () => {
   }, 30_000);
 
   it("keeps an untyped downstream candidate rejection as a redacted internal writer failure", () => {
-    const value = fixture("v2-structured-schema-failure");
-    const generated = startV2Generation(value, "2026-08-08T07:45:01.000Z");
-    const response = submitAutomaticBuildExecutorCandidateV2({
-      version: "automatic_build_executor_candidate_submit.v2",
+    const value = v3Fixture("v3-structured-schema-failure");
+    const generated = startV3Generation(value, "2026-08-08T07:45:01.000Z");
+    const response = submitAutomaticBuildExecutorCandidateV3({
+      version: "automatic_build_executor_candidate_submit.v3",
       opaque_session_ref: generated.opaque_session_ref,
       candidate_sink_ref: generated.candidate_sink_ref,
       candidate: { invalid_shape: true },
@@ -1033,14 +1184,14 @@ describe("automatic build bounded executor session V2", () => {
   }, 30_000);
 
   it("accepts realistic null source_lid candidates through the real MCP wrapper", () => {
-    const value = fixture(
-      "v2-structured-null-source-lid",
+    const value = v3Fixture(
+      "v3-structured-null-source-lid",
       `T7_CLI_SEMANTIC_INPUT_SENTINEL\n${"bounded synthetic context ".repeat(900)}`,
       "T7 synthetic CLI fixture",
     );
     const mcp = createBuildExecutorMcpSession({
-      bootstrap_digest: BUILD_EXECUTOR_BOOTSTRAP_CONTRACT_V2.bootstrap_digest,
-      protocol_generation: BUILD_EXECUTOR_BOOTSTRAP_CONTRACT_V2.session_protocol,
+      bootstrap_version: BUILD_EXECUTOR_BOOTSTRAP_CONTRACT_V3.version,
+      protocol_generation: BUILD_EXECUTOR_BOOTSTRAP_CONTRACT_V3.session_protocol,
       session_private_root: value.registryRoot,
     });
     let id = 1;
@@ -1060,11 +1211,11 @@ describe("automatic build bounded executor session V2", () => {
         isError: rpc.result?.isError ?? true,
         response: JSON.parse(
           rpc.result?.content[0]?.text ?? "null",
-        ) as AutomaticBuildExecutorSessionResponseV2,
+        ) as AutomaticBuildExecutorSessionResponseV3,
       };
     };
     let current = call("executor.open", {
-      version: "automatic_build_executor_open_request.v2",
+      version: "automatic_build_executor_open_request.v3",
       opaque_handoff_ref: value.envelope.opaque_handoff_ref,
     });
     for (let ordinal = 0; ordinal < 128; ordinal += 1) {
@@ -1074,20 +1225,20 @@ describe("automatic build bounded executor session V2", () => {
         current = call("executor.input.next", action.next_request);
       } else if (action.kind === "INPUT_CHUNK") {
         current = call("executor.input.next", {
-          version: "automatic_build_executor_input_next_request.v2",
+          version: "automatic_build_executor_input_next_request.v3",
           opaque_session_ref: action.chunk.opaque_session_ref,
           generation_input_ref: action.chunk.generation_input_ref,
-          previous_chunk_receipt: action.chunk.chunk_receipt,
+          previous_chunk_ordinal: action.chunk.ordinal,
         });
       } else if (action.kind === "GENERATION_GRANT") {
         current = call("executor.generation.start", {
-          version: "automatic_build_executor_generation_start_request.v1",
+          version: "automatic_build_executor_generation_start_request.v2",
           opaque_session_ref: action.grant.opaque_session_ref,
           generation_grant_ref: action.grant.generation_grant_ref,
         });
       } else if (action.kind === "GENERATE") {
         current = call("executor.submit_candidate", {
-          version: "automatic_build_executor_candidate_submit.v2",
+          version: "automatic_build_executor_candidate_submit.v3",
           opaque_session_ref: action.opaque_session_ref,
           candidate_sink_ref: action.candidate_sink_ref,
           candidate: {
@@ -1124,7 +1275,7 @@ describe("automatic build bounded executor session V2", () => {
     }
 
     expect(current.isError).toBe(false);
-    expect(current.response.version).toBe("automatic_build_executor_session.v2");
+    expect(current.response.version).toBe("automatic_build_executor_session.v3");
     expect(["DELIVER_INPUT", "DONE"]).toContain(current.response.action.kind);
     if (current.response.action.kind === "DONE") expect(current.response.action.status).toBe("committed");
     expect(readAutomaticBuildAttemptSnapshot(value.target)
@@ -1138,8 +1289,8 @@ describe("automatic build bounded executor session V2", () => {
   }, 30_000);
 
   it("rejects V2 path submit and malformed, host, non-finite, deep, oversized, or unbound values before mailbox mutation", () => {
-    const value = fixture("v2-structured-rejections");
-    const generated = startV2Generation(value, "2026-08-08T07:50:01.000Z");
+    const value = v3Fixture("v3-structured-rejections");
+    const generated = startV3Generation(value, "2026-08-08T07:50:01.000Z");
     const taskSession = JSON.parse(readFileSync(path.join(
       value.registryRoot,
       "executor-task-sessions",
@@ -1152,10 +1303,10 @@ describe("automatic build bounded executor session V2", () => {
       generated.opaque_session_ref,
       source,
       { now: "2026-08-08T07:50:02.000Z" },
-    )).toThrow(/V2.*candidate_path|candidate_path.*V2/i);
+    )).toThrow(/V3.*candidate_path|candidate_path.*V3/i);
 
     const validRequest = {
-      version: "automatic_build_executor_candidate_submit.v2" as const,
+      version: "automatic_build_executor_candidate_submit.v3" as const,
       opaque_session_ref: generated.opaque_session_ref,
       candidate_sink_ref: generated.candidate_sink_ref,
       candidate: { nodes: [], edges: [] },
@@ -1176,29 +1327,29 @@ describe("automatic build bounded executor session V2", () => {
       ...validRequest,
       candidate_path: source,
     })).toThrow(/unsupported|missing|invalid fields/i);
-    expect(() => submitAutomaticBuildExecutorCandidateV2({
+    expect(() => submitAutomaticBuildExecutorCandidateV3({
       ...validRequest,
       candidate: new Date("2026-08-08T00:00:00.000Z") as never,
     })).toThrow(/JSON value|host object/i);
-    expect(() => submitAutomaticBuildExecutorCandidateV2({
+    expect(() => submitAutomaticBuildExecutorCandidateV3({
       ...validRequest,
       candidate: { value: Number.NaN },
     })).toThrow(/finite|JSON value/i);
-    expect(() => submitAutomaticBuildExecutorCandidateV2({
+    expect(() => submitAutomaticBuildExecutorCandidateV3({
       ...validRequest,
       candidate: { value: Number.POSITIVE_INFINITY },
     })).toThrow(/finite|JSON value/i);
     let deep: Record<string, unknown> = {};
     for (let depth = 0; depth < 80; depth += 1) deep = { child: deep };
-    expect(() => submitAutomaticBuildExecutorCandidateV2({
+    expect(() => submitAutomaticBuildExecutorCandidateV3({
       ...validRequest,
       candidate: deep as never,
     })).toThrow(/depth|JSON value/i);
-    expect(() => submitAutomaticBuildExecutorCandidateV2({
+    expect(() => submitAutomaticBuildExecutorCandidateV3({
       ...validRequest,
-      candidate: { value: "x".repeat(CODEX_EXECUTOR_TRANSPORT_PROFILE_V1.max_candidate_request_bytes) },
+      candidate: { value: "x".repeat(CODEX_EXECUTOR_TRANSPORT_PROFILE_V2.max_candidate_request_bytes) },
     })).toThrow(/byte|token|exceeds/i);
-    expect(() => submitAutomaticBuildExecutorCandidateV2({
+    expect(() => submitAutomaticBuildExecutorCandidateV3({
       ...validRequest,
       candidate_sink_ref: `absink1_${"0".repeat(64)}`,
     })).toThrow(/sink/i);

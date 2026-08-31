@@ -19,14 +19,12 @@ const GOLDEN = JSON.parse(readFileSync(
 
 const PLAN_STANDARD = {
   plan_id: "plan-standard",
-  revision: 1,
-  plan_digest: "a".repeat(64),
+  plan_revision: 1,
   confirmation_source: "explicit_legacy_command" as const,
 };
 const PLAN_GOAL = {
   plan_id: "plan-goal",
-  revision: 2,
-  plan_digest: "b".repeat(64),
+  plan_revision: 2,
   confirmation_source: "reader_ui" as const,
   intent_id: "intent-goal",
 };
@@ -141,6 +139,8 @@ describe("IP9 intent build usage ledger and ablation", () => {
       window_days: 7,
     });
     expect(report.event_count).toBe(15);
+    expect(JSON.stringify(report.modes.flatMap((mode) => mode.plan_revisions)))
+      .not.toMatch(/plan_digest|"revision"/u);
     expect(report.modes.map((mode) => mode.mode)).toEqual(["read_now", "standard_deep", "goal_directed"]);
     expect(report.modes[0]).toMatchObject({ timing: { first_readable_ms: 1_000 }, actual: { input_tokens: 10, output_tokens: 5 } });
     expect(report.modes[1]).toMatchObject({

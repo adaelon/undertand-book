@@ -21,7 +21,11 @@ import {
   validateAutomaticBuildFailureDiagnostic,
   type AutomaticBuildFailureDiagnosticV2,
 } from "./extractor-contract";
-import type { AutomaticBuildTaskPolicyBindingV2 } from "./semantic-artifact";
+import {
+  assertPolicyGenerationId,
+  type AutomaticBuildTaskPolicyBindingV2,
+  type SemanticContractV1,
+} from "./semantic-artifact";
 
 export type AutomaticBuildAttemptOutcome = "failure" | "success" | "reset";
 
@@ -54,8 +58,10 @@ export function createAutomaticBuildAttemptScope(
 ): AutomaticBuildAttemptScopeV1 {
   if (!input.work_unit_id) throw new Error("attempt scope work_unit_id must not be empty");
   assertSha256(input.task_binding.input_hash, "attempt scope input_hash");
-  assertSha256(input.task_binding.proof_digest, "attempt scope proof_digest");
-  assertSha256(input.task_binding.policy_set_digest, "attempt scope policy_set_digest");
+  assertPolicyGenerationId(input.task_binding.policy_generation_id, "attempt scope policy_generation_id");
+  if (input.task_binding.stage !== input.stage) {
+    throw new Error("attempt scope policy stage does not match the attempt stage");
+  }
   const identity = {
     target_ref: input.target_ref,
     stage: input.stage,
@@ -411,9 +417,9 @@ interface PersistedAutomaticBuildLeaseScopeProjection {
   attempt?: number;
   issued_at?: string;
   input_hash?: string;
-  proof_digest?: string;
-  policy_set_digest?: string;
-  policy_fingerprint?: AutomaticBuildTaskPolicyBindingV2["policy_fingerprint"];
+  policy_fingerprint?: unknown;
+  policy_generation_id?: string;
+  semantic_contract?: SemanticContractV1;
   attempt_scope_digest?: string;
 }
 
@@ -422,16 +428,19 @@ function attemptScopeFromLease(
   expected: Pick<AutomaticBuildAttemptScopeInputV1, "target_ref" | "stage" | "work_unit_id">,
 ): AutomaticBuildAttemptScopeV1 | undefined {
   if (!lease) return undefined;
-  const hasProof = lease.proof_digest !== undefined;
-  const hasPolicySet = lease.policy_set_digest !== undefined;
-  const declaresScope = lease.attempt_scope_digest !== undefined;
-  if (!hasProof && !hasPolicySet && !declaresScope) return undefined;
+  const hasLegacyPolicy = lease.policy_fingerprint !== undefined;
+  const hasPolicyGeneration = lease.policy_generation_id !== undefined;
+  const hasSemanticContract = lease.semantic_contract !== undefined;
+  if (hasLegacyPolicy && !hasPolicyGeneration && !hasSemanticContract) return undefined;
+  const declaresScope = hasPolicyGeneration
+    || hasSemanticContract
+    || lease.attempt_scope_digest !== undefined;
+  if (!declaresScope) return undefined;
   if (!lease.target_ref || lease.stage !== expected.stage || lease.work_unit_id !== expected.work_unit_id
     || !sameTargetRef(lease.target_ref, expected.target_ref)
     || typeof lease.input_hash !== "string"
-    || typeof lease.proof_digest !== "string"
-    || typeof lease.policy_set_digest !== "string"
-    || !lease.policy_fingerprint) {
+    || typeof lease.policy_generation_id !== "string"
+    || !lease.semantic_contract) {
     throw new Error("automatic build lease contains an incomplete attempt scope binding");
   }
   const scope = createAutomaticBuildAttemptScope({
@@ -440,9 +449,9 @@ function attemptScopeFromLease(
     work_unit_id: lease.work_unit_id,
     task_binding: {
       input_hash: lease.input_hash,
-      proof_digest: lease.proof_digest,
-      policy_set_digest: lease.policy_set_digest,
-      policy_fingerprint: lease.policy_fingerprint,
+      stage: lease.stage as AutomaticBuildTaskPolicyBindingV2["stage"],
+      policy_generation_id: lease.policy_generation_id,
+      semantic_contract: lease.semantic_contract,
     },
   });
   if (lease.attempt_scope_digest !== undefined && lease.attempt_scope_digest !== scope.attempt_scope_digest) {

@@ -152,7 +152,7 @@ function spawnAcceptedNext(target, args, label) {
     : [...args, ...confirmedBuildPlanArgs(target, rootDir)];
   const { value: plan } = spawnSidecarJson(["plan", target, ...plannedArgs], `${label} plan`);
   const nextArgs = plan.preflight
-    ? ["next", target, ...plannedArgs, "--accepted-plan", plan.preflight.plan_digest]
+    ? ["next", target, ...plannedArgs, "--accepted-plan", plan.preflight.descriptor_plan_digest]
     : ["next", target, ...plannedArgs];
   return spawnSidecarJson(nextArgs, label);
 }
@@ -263,7 +263,7 @@ try {
   if (unacceptedPlan.action?.reason !== "preflight_required" || existsSync(taskStoreRoot)) {
     throw new Error(`unaccepted preflight created task state: ${JSON.stringify(unacceptedPlan)}`);
   }
-  const acceptedPlanDigest = preflightPlan.preflight.plan_digest;
+  const acceptedPlanDigest = preflightPlan.preflight.descriptor_plan_digest;
   const competingResults = await Promise.all(["sidecar-a", "sidecar-b", "sidecar-c"].map((owner) => spawnCaptured(sidecar, [
     "next",
     automaticTarget,
@@ -513,7 +513,14 @@ try {
   }
   const lexiconRouterFixture = path.join(smokeRoot, "lexicon-router.md");
   writeFileSync(lexiconRouterFixture, "# Lexicon\n\nSoftmax Attention appears.\n\n# Discussion\n\nSoftmax Attention recurs.\n\n# Empty\n\nOrdinary body text.\n", "utf8");
-  const lexiconBatchId = "lexicon-batch-05ca60e0288eb41a";
+  const lexiconStatus = spawnSync(process.execPath, [
+    tsx, path.join(repoRoot, "skills", "build", "paper-lexicon-status.ts"), lexiconRouterFixture,
+    "--book-id", "lexicon-router", "--content-profile", "paper", "--paper-subtype", "research_article",
+  ], { cwd: smokeRoot, encoding: "utf8", timeout: 30_000 });
+  const lexiconBatchId = lexiconStatus.stdout.match(/pending ids:\s*(lexicon-batch-[a-f0-9]+-[a-f0-9]+)/u)?.[1];
+  if (lexiconStatus.status !== 0 || !lexiconBatchId) {
+    throw new Error(`source AP11 lexicon router did not expose an eligible batch: ${lexiconStatus.stdout}\n${lexiconStatus.stderr}`);
+  }
   const eligibleLexiconInput = spawnSync(sidecar, [
     "run-script", "paper-lexicon-input.ts", lexiconRouterFixture, lexiconBatchId,
     "--book-id", "lexicon-router", "--content-profile", "paper", "--paper-subtype", "research_article",
@@ -598,7 +605,7 @@ try {
   }
   const { value: concurrencyNext } = spawnSidecarJson([
     "next", concurrencySource, ...concurrencyArgs,
-    "--accepted-plan", concurrencyPlan.preflight.plan_digest,
+    "--accepted-plan", concurrencyPlan.preflight.descriptor_plan_digest,
   ], "automatic build AP14 concurrency claim smoke");
   const concurrencyTasks = concurrencyNext.action?.tasks ?? [];
   if (
@@ -619,7 +626,7 @@ try {
     "--max-parallel-cost", "2000000",
     ...legacyClaimProtocolArgs,
     ...confirmedBuildPlanArgs(concurrencySource, smokeRoot),
-    "--accepted-plan", concurrencyPlan.preflight.plan_digest,
+    "--accepted-plan", concurrencyPlan.preflight.descriptor_plan_digest,
   ], "automatic build AP14 no-slot smoke");
   if (noSlotNext.action?.reason !== "executor_unavailable") {
     throw new Error(`compiled AP14 zero-slot gate claimed more work: ${JSON.stringify(noSlotNext)}`);
@@ -650,7 +657,7 @@ try {
     }
     const { value: nextBatch } = spawnSidecarJson([
       "next", concurrencySource, ...concurrencyArgs,
-      "--accepted-plan", plan.preflight.plan_digest,
+      "--accepted-plan", plan.preflight.descriptor_plan_digest,
     ], "automatic build AP15 empty batch smoke");
     submitEmptyTasks(nextBatch.action?.tasks ?? []);
   }

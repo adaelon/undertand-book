@@ -9,6 +9,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { isAutomaticBuildTaskPolicyBindingV2 } from "./semantic-artifact";
 import {
   renderAutomaticBuildTaskInput,
   runAutomaticBuildTaskInput,
@@ -52,18 +53,30 @@ import {
 import { readAutomaticBuildExecutionIdentity } from "./automatic-build-task-store";
 import { canonicalAutomaticBuildJson } from "./automatic-build-protocol";
 import {
-  CODEX_EXECUTOR_TRANSPORT_PROFILE_V1,
+  CODEX_EXECUTOR_TRANSPORT_PROFILE_V2,
   measureExecutorTransportResponse,
   packExecutorTransportPayload,
-  type ExecutorTransportChunkFrameV1,
-  type ExecutorTransportPackWithinLimitV1,
+  validateExecutorTransportPack,
+  validateExecutorTransportProfile,
+  type ExecutorTransportChunkFrameV2,
+  type ExecutorTransportPackWithinLimitV2,
+  type ExecutorTransportProfileV2,
 } from "./executor-transport";
 import {
+  validateBuildIntentV3,
+  validateBuildPlanV3,
+  adaptBuildPlanV1PrivateArtifacts,
+  migratePlanningControlV2ToV3,
   validateBuildIntentAny,
   validateBuildPlanAny,
-  type BuildIntentAny,
-  type BuildPlanAny,
+  type BuildIntentV3,
+  type BuildPlanV3,
 } from "./build-intent-v2";
+import {
+  computeBuildIntentDigest,
+  type BuildIntentV1,
+  type BuildPlanV1,
+} from "./build-intent";
 import { epubToSource } from "./epub-adapter";
 import {
   buildAutomaticBuildSnapshot,
@@ -75,6 +88,7 @@ import {
 import {
   compileIntentArtifactTasks,
   type IntentArtifactCompatibilityType,
+  type IntentArtifactTaskEnvelopeV3,
 } from "./intent-artifact";
 import { markdownToBlocks } from "./md-adapter";
 import { segment } from "./segment";
@@ -84,7 +98,7 @@ import { ReadOnlyBaseZ } from "./zod";
 
 const MAX_RECORD_BYTES = 1_048_576;
 const MAX_CONTROL_STDIN_BYTES = 8_192;
-const MAX_STDIN_BYTES = CODEX_EXECUTOR_TRANSPORT_PROFILE_V1.max_candidate_request_bytes;
+const MAX_STDIN_BYTES = CODEX_EXECUTOR_TRANSPORT_PROFILE_V2.max_candidate_request_bytes;
 const MAX_REF_BYTES = 1_024;
 const MAX_CANDIDATE_BYTES = 4 * 1_048_576;
 const MAX_SEMANTIC_ATTEMPTS = 3;
@@ -93,7 +107,6 @@ const SEMANTIC_PROMPT_SEPARATOR = "<!-- AUTOMATIC_BUILD_EXECUTOR_SEMANTIC_PROMPT
 const OPAQUE_HANDOFF_REF = /^abhandoff1_[a-f0-9]{64}$/u;
 const OPAQUE_SESSION_REF = /^absession1_[a-f0-9]{64}$/u;
 const GENERATION_INPUT_REF = /^abinput1_[a-f0-9]{64}$/u;
-const CHUNK_RECEIPT = /^abchunk1_[a-f0-9]{64}$/u;
 const GENERATION_GRANT_REF = /^abgrant1_[a-f0-9]{64}$/u;
 const CANDIDATE_SINK_REF = /^absink1_[a-f0-9]{64}$/u;
 const SHA256 = /^[a-f0-9]{64}$/u;
@@ -135,24 +148,86 @@ export interface AutomaticBuildDispatchOwnerIdentityV1 {
   dispatch_run_id: string;
 }
 
-export interface AutomaticBuildPrivateArtifactOwnerIdentityV1 {
-  version: "automatic_build_private_artifact_owner_identity.v1";
+export interface AutomaticBuildPrivateArtifactOwnerIdentityV2 {
+  version: "automatic_build_private_artifact_owner_identity.v2";
   task_id: string;
   book_id: string;
   source_fingerprint: string;
   intent_id: string;
-  intent_digest: string;
+  intent_revision: number;
   plan_id: string;
-  plan_digest: string;
+  plan_revision: number;
   artifact_id: string;
   artifact_type: IntentArtifactCompatibilityType;
-  blueprint_digest: string;
+  blueprint_id: string;
+  blueprint_version: string;
   attempt: number;
 }
 
 type AutomaticBuildExecutorOwnerIdentityV1 =
   | AutomaticBuildDispatchOwnerIdentityV1
-  | AutomaticBuildPrivateArtifactOwnerIdentityV1;
+  | AutomaticBuildPrivateArtifactOwnerIdentityV2;
+
+export function adaptAutomaticBuildPrivateArtifactSelectionV3(
+  intentInput: unknown,
+  planInput: unknown,
+): { intent: BuildIntentV3; plan: BuildPlanV3 } {
+  const intent = validateBuildIntentAny(intentInput);
+  const plan = validateBuildPlanAny(planInput);
+  if (intent.version === "build_intent.v3" && plan.version === "build_plan.v3") {
+    return {
+      intent: validateBuildIntentV3(intent),
+      plan: validateBuildPlanV3(plan),
+    };
+  }
+  if (intent.version === "build_intent.v2" && plan.version === "build_plan.v2") {
+    const migrated = migratePlanningControlV2ToV3({ intent, plan });
+    if (!migrated.intent) throw new Error("goal-directed private selection lost its BuildIntent");
+    return { intent: migrated.intent, plan: migrated.plan };
+  }
+  if (intent.version !== "build_intent.v1" || plan.version !== "build_plan.v1") {
+    throw new Error("private BuildIntent and BuildPlan generations do not match");
+  }
+  const legacyIntent = intent as BuildIntentV1;
+  const legacyPlan = plan as BuildPlanV1;
+  if (legacyPlan.recipe_id !== "goal_directed"
+    || legacyPlan.intent_id !== legacyIntent.intent_id
+    || legacyPlan.intent_digest !== computeBuildIntentDigest(legacyIntent)) {
+    throw new Error("legacy private BuildPlan does not match its fully validated BuildIntent");
+  }
+  const {
+    revision: intentRevision,
+    desired_artifacts: _desiredArtifacts,
+    ...intentBody
+  } = legacyIntent;
+  const migratedIntent = validateBuildIntentV3({
+    ...intentBody,
+    version: "build_intent.v3",
+    intent_revision: intentRevision,
+  });
+  const {
+    revision: planRevision,
+    intent_digest: _intentDigest,
+    plan_digest: _planDigest,
+    private_artifacts: _privateArtifacts,
+    ...planBody
+  } = legacyPlan;
+  const migratedPlan = validateBuildPlanV3({
+    ...planBody,
+    version: "build_plan.v3",
+    plan_revision: planRevision,
+    intent_revision: migratedIntent.intent_revision,
+    private_artifacts: adaptBuildPlanV1PrivateArtifacts(legacyPlan).map((artifact) => {
+      const { blueprint_digest: _blueprintDigest, ...artifactBody } = artifact;
+      return {
+        ...artifactBody,
+        blueprint_id: artifact.blueprint.blueprint_id,
+        blueprint_version: artifact.blueprint.blueprint_version,
+      };
+    }),
+  });
+  return { intent: migratedIntent, plan: migratedPlan };
+}
 
 export interface AutomaticBuildTargetLocatorV1 {
   version: "automatic_build_target_locator.v1";
@@ -177,6 +252,24 @@ export interface AutomaticBuildOpaqueHandoffRecordV1 {
   issued_at: string;
 }
 
+export interface AutomaticBuildOpaqueHandoffRecordV3 {
+  version: "automatic_build_opaque_handoff_record.v3";
+  session_protocol: "automatic_build_executor_session.v3";
+  opaque_handoff_ref: string;
+  kind: "public_dispatch";
+  target_ref: BuildTargetRefV2;
+  target_locator: AutomaticBuildTargetLocatorV1;
+  owner_identity: AutomaticBuildDispatchOwnerIdentityV1;
+  handoff_path: string;
+  handoff_sha256: string;
+  handoff_byte_length: number;
+  issued_at: string;
+}
+
+type AutomaticBuildOpaqueHandoffRecord =
+  | AutomaticBuildOpaqueHandoffRecordV1
+  | AutomaticBuildOpaqueHandoffRecordV3;
+
 interface AutomaticBuildExecutorOpenRecordV1 {
   version: "automatic_build_executor_open_record.v1";
   opaque_handoff_ref: string;
@@ -190,7 +283,7 @@ interface AutomaticBuildExecutorPrivateSessionRecordV1 {
   opaque_session_ref: string;
   opaque_handoff_ref: string;
   open_session_ref: string;
-  owner_identity: AutomaticBuildPrivateArtifactOwnerIdentityV1;
+  owner_identity: AutomaticBuildPrivateArtifactOwnerIdentityV2;
   created_at: string;
 }
 
@@ -210,8 +303,8 @@ interface AutomaticBuildExecutorTaskSessionRecordV1 {
   created_at: string;
 }
 
-interface AutomaticBuildExecutorDeliverySessionRecordV2 {
-  version: "automatic_build_executor_delivery_session_record.v2";
+interface AutomaticBuildExecutorDeliverySessionRecordV3 {
+  version: "automatic_build_executor_delivery_session_record.v3";
   opaque_session_ref: string;
   opaque_handoff_ref: string;
   open_session_ref: string;
@@ -219,7 +312,7 @@ interface AutomaticBuildExecutorDeliverySessionRecordV2 {
   stage: AutomaticBuildStage;
   work_unit_id: string;
   generation_input_ref: string;
-  transport_profile_digest: string;
+  transport_profile: typeof CODEX_EXECUTOR_TRANSPORT_PROFILE_V2;
   semantic_prompt_sha256: string;
   semantic_prompt_byte_length: number;
   semantic_input_sha256: string;
@@ -227,9 +320,33 @@ interface AutomaticBuildExecutorDeliverySessionRecordV2 {
   semantic_prompt_chunk_count: number;
   semantic_input_chunk_count: number;
   total_chunk_count: number;
-  output_contract_digest: string;
+  output_schema_version: string;
   created_at: string;
 }
+
+interface AutomaticBuildExecutorPrivateDeliverySessionRecordV3 {
+  version: "automatic_build_executor_private_delivery_session_record.v3";
+  opaque_session_ref: string;
+  opaque_handoff_ref: string;
+  open_session_ref: string;
+  owner_identity: AutomaticBuildPrivateArtifactOwnerIdentityV2;
+  task_id: string;
+  generation_input_ref: string;
+  transport_profile: typeof CODEX_EXECUTOR_TRANSPORT_PROFILE_V2;
+  semantic_prompt_sha256: string;
+  semantic_prompt_byte_length: number;
+  semantic_input_sha256: string;
+  semantic_input_byte_length: number;
+  semantic_prompt_chunk_count: number;
+  semantic_input_chunk_count: number;
+  total_chunk_count: number;
+  output_schema_version: string;
+  created_at: string;
+}
+
+type AutomaticBuildExecutorAnyDeliverySessionRecordV3 =
+  | AutomaticBuildExecutorDeliverySessionRecordV3
+  | AutomaticBuildExecutorPrivateDeliverySessionRecordV3;
 
 interface AutomaticBuildExecutorGenerationInputRecordV1 {
   version: "automatic_build_executor_generation_input_record.v1";
@@ -242,24 +359,21 @@ interface AutomaticBuildExecutorGenerationInputRecordV1 {
   created_at: string;
 }
 
-interface AutomaticBuildExecutorDeliveryReceiptRecordV1 {
-  version: "automatic_build_executor_delivery_receipt_record.v1";
+interface AutomaticBuildExecutorDeliveryReceiptRecordV2 {
+  version: "automatic_build_executor_delivery_receipt_record.v2";
   opaque_session_ref: string;
   generation_input_ref: string;
   ordinal: number;
-  chunk_receipt: string;
-  payload_sha256: string;
   confirmed_at: string;
 }
 
-interface AutomaticBuildExecutorGenerationGrantRecordV1 {
-  version: "automatic_build_executor_generation_grant_record.v1";
+interface AutomaticBuildExecutorGenerationGrantRecordV2 {
+  version: "automatic_build_executor_generation_grant_record.v2";
   opaque_session_ref: string;
   generation_input_ref: string;
   generation_grant_ref: string;
-  output_contract_digest: string;
-  delivery_ledger_digest: string;
-  final_chunk_receipt: string;
+  final_delivered_ordinal: number;
+  output_schema_version: string;
   issued_at: string;
 }
 
@@ -271,19 +385,19 @@ interface AutomaticBuildExecutorGenerationStartAcceptanceV1 {
   accepted_at: string;
 }
 
-interface AutomaticBuildExecutorGenerationStartRecordV1 {
-  version: "automatic_build_executor_generation_start_record.v1";
+interface AutomaticBuildExecutorGenerationStartRecordV2 {
+  version: "automatic_build_executor_generation_start_record.v2";
   opaque_session_ref: string;
   generation_input_ref: string;
   generation_grant_ref: string;
   task_session_ref: string;
   semantic_attempt: number;
-  response: AutomaticBuildExecutorSessionResponseV2;
+  response: AutomaticBuildExecutorSessionResponseV3;
   started_at: string;
 }
 
-interface AutomaticBuildExecutorCandidateSinkRecordV1 {
-  version: "automatic_build_executor_candidate_sink_record.v1";
+interface AutomaticBuildExecutorCandidateSinkRecordV2 {
+  version: "automatic_build_executor_candidate_sink_record.v2";
   candidate_sink_ref: string;
   opaque_session_ref: string;
   opaque_handoff_ref: string;
@@ -296,10 +410,28 @@ interface AutomaticBuildExecutorCandidateSinkRecordV1 {
   physical_attempt: number;
   semantic_attempt: number;
   lease_epoch: number;
-  output_contract_digest: string;
-  transport_profile_digest: string;
+  output_schema_version: string;
   created_at: string;
 }
+
+interface AutomaticBuildExecutorPrivateCandidateSinkRecordV3 {
+  version: "automatic_build_executor_private_candidate_sink_record.v3";
+  candidate_sink_ref: string;
+  opaque_session_ref: string;
+  opaque_handoff_ref: string;
+  delivery_session_ref: string;
+  generation_input_ref: string;
+  generation_grant_ref: string;
+  owner_identity: AutomaticBuildPrivateArtifactOwnerIdentityV2;
+  task_id: string;
+  attempt: number;
+  output_schema_version: string;
+  created_at: string;
+}
+
+type AutomaticBuildExecutorAnyCandidateSinkRecord =
+  | AutomaticBuildExecutorCandidateSinkRecordV2
+  | AutomaticBuildExecutorPrivateCandidateSinkRecordV3;
 
 export type JsonValue = AutomaticBuildJsonValue;
 
@@ -326,11 +458,28 @@ export interface AutomaticBuildSemanticCandidateContractV2 {
   input_hash: string;
 }
 
-export interface AutomaticBuildExecutorInputManifestV2 {
-  version: "automatic_build_executor_input_manifest.v2";
+export interface AutomaticBuildPrivateArtifactCandidateContractV2 {
+  version: "automatic_build_private_artifact_candidate_contract.v2";
+  format: "strict_json";
+  encoding: "utf-8";
+  max_bytes: number;
+  candidate_version: "intent_artifact_candidate.v3";
+  task_id: string;
+  artifact_id: string;
+  blueprint_id: string;
+  blueprint_version: string;
+  artifact_instance: IntentArtifactTaskEnvelopeV3["output_contract"];
+}
+
+type AutomaticBuildExecutorOutputContractV3 =
+  | AutomaticBuildSemanticCandidateContractV2
+  | AutomaticBuildPrivateArtifactCandidateContractV2;
+
+export interface AutomaticBuildExecutorInputManifestV3 {
+  version: "automatic_build_executor_input_manifest.v3";
   opaque_session_ref: string;
   generation_input_ref: string;
-  transport_profile_digest: string;
+  transport_profile: typeof CODEX_EXECUTOR_TRANSPORT_PROFILE_V2;
   segments: Array<{
     kind: "semantic_prompt" | "semantic_input";
     byte_length: number;
@@ -340,64 +489,63 @@ export interface AutomaticBuildExecutorInputManifestV2 {
   total_chunk_count: number;
 }
 
-export interface AutomaticBuildExecutorInputNextRequestV2 {
-  version: "automatic_build_executor_input_next_request.v2";
+export interface AutomaticBuildExecutorInputNextRequestV3 {
+  version: "automatic_build_executor_input_next_request.v3";
   opaque_session_ref: string;
   generation_input_ref: string;
-  previous_chunk_receipt?: string;
+  previous_chunk_ordinal?: number;
   now?: string;
 }
 
-export interface AutomaticBuildExecutorInputChunkV2 {
-  version: "automatic_build_executor_input_chunk.v2";
+export interface AutomaticBuildExecutorInputChunkV3 {
+  version: "automatic_build_executor_input_chunk.v3";
   opaque_session_ref: string;
   generation_input_ref: string;
   segment: "semantic_prompt" | "semantic_input";
   ordinal: number;
   byte_range: { start: number; end: number };
   payload_utf8: string;
-  payload_sha256: string;
   final_for_segment: boolean;
   final_for_generation: boolean;
-  chunk_receipt: string;
 }
 
-export interface AutomaticBuildExecutorGenerationGrantV1 {
-  version: "automatic_build_executor_generation_grant.v1";
+export interface AutomaticBuildExecutorGenerationGrantV2 {
+  version: "automatic_build_executor_generation_grant.v2";
   opaque_session_ref: string;
   generation_input_ref: string;
   generation_grant_ref: string;
-  output_contract_digest: string;
+  final_delivered_ordinal: number;
+  output_schema_version: string;
 }
 
-export interface AutomaticBuildExecutorGenerationStartRequestV1 {
-  version: "automatic_build_executor_generation_start_request.v1";
+export interface AutomaticBuildExecutorGenerationStartRequestV2 {
+  version: "automatic_build_executor_generation_start_request.v2";
   opaque_session_ref: string;
   generation_grant_ref: string;
   now?: string;
 }
 
-export type AutomaticBuildExecutorSessionActionV2 =
+export type AutomaticBuildExecutorSessionActionV3 =
   | {
       kind: "DELIVER_INPUT";
-      input_manifest: AutomaticBuildExecutorInputManifestV2;
-      next_request: AutomaticBuildExecutorInputNextRequestV2;
+      input_manifest: AutomaticBuildExecutorInputManifestV3;
+      next_request: AutomaticBuildExecutorInputNextRequestV3;
     }
-  | { kind: "INPUT_CHUNK"; chunk: AutomaticBuildExecutorInputChunkV2 }
-  | { kind: "GENERATION_GRANT"; grant: AutomaticBuildExecutorGenerationGrantV1 }
+  | { kind: "INPUT_CHUNK"; chunk: AutomaticBuildExecutorInputChunkV3 }
+  | { kind: "GENERATION_GRANT"; grant: AutomaticBuildExecutorGenerationGrantV2 }
   | {
       kind: "GENERATE";
       opaque_session_ref: string;
       candidate_sink_ref: string;
       semantic_attempt: number;
-      output_contract: AutomaticBuildSemanticCandidateContractV2;
+      output_contract: AutomaticBuildExecutorOutputContractV3;
     }
   | { kind: "WAIT"; retry_after_ms: number }
   | { kind: "DONE"; status: "committed" | "retryable_failure" | "interrupted" };
 
-export interface AutomaticBuildExecutorSessionResponseV2 {
-  version: "automatic_build_executor_session.v2";
-  action: AutomaticBuildExecutorSessionActionV2;
+export interface AutomaticBuildExecutorSessionResponseV3 {
+  version: "automatic_build_executor_session.v3";
+  action: AutomaticBuildExecutorSessionActionV3;
 }
 
 export type AutomaticBuildExecutorSessionActionV1 =
@@ -442,8 +590,8 @@ export interface AutomaticBuildExecutorOpenRequestV1 {
   now?: string;
 }
 
-export interface AutomaticBuildExecutorOpenRequestV2 {
-  version: "automatic_build_executor_open_request.v2";
+export interface AutomaticBuildExecutorOpenRequestV3 {
+  version: "automatic_build_executor_open_request.v3";
   opaque_handoff_ref: string;
   now?: string;
 }
@@ -455,8 +603,8 @@ export interface AutomaticBuildExecutorSubmitRequestV1 {
   now?: string;
 }
 
-export interface AutomaticBuildExecutorCandidateSubmitV2 {
-  version: "automatic_build_executor_candidate_submit.v2";
+export interface AutomaticBuildExecutorCandidateSubmitV3 {
+  version: "automatic_build_executor_candidate_submit.v3";
   opaque_session_ref: string;
   candidate_sink_ref: string;
   candidate: JsonValue;
@@ -694,7 +842,7 @@ function validateOwnerIdentity(value: unknown): AutomaticBuildDispatchOwnerIdent
   };
 }
 
-function validatePrivateOwnerIdentity(value: unknown): AutomaticBuildPrivateArtifactOwnerIdentityV1 {
+function validatePrivateOwnerIdentity(value: unknown): AutomaticBuildPrivateArtifactOwnerIdentityV2 {
   if (!isRecord(value)) throw new Error("private artifact owner identity is invalid");
   exactKeys(value, [
     "version",
@@ -702,18 +850,16 @@ function validatePrivateOwnerIdentity(value: unknown): AutomaticBuildPrivateArti
     "book_id",
     "source_fingerprint",
     "intent_id",
-    "intent_digest",
+    "intent_revision",
     "plan_id",
-    "plan_digest",
+    "plan_revision",
     "artifact_id",
     "artifact_type",
-    "blueprint_digest",
+    "blueprint_id",
+    "blueprint_version",
     "attempt",
   ]);
-  if (value.version !== "automatic_build_private_artifact_owner_identity.v1"
-    || typeof value.intent_digest !== "string" || !SHA256.test(value.intent_digest)
-    || typeof value.plan_digest !== "string" || !SHA256.test(value.plan_digest)
-    || typeof value.blueprint_digest !== "string" || !SHA256.test(value.blueprint_digest)
+  if (value.version !== "automatic_build_private_artifact_owner_identity.v2"
     || typeof value.artifact_type !== "string"
     || !PRIVATE_ARTIFACT_TYPES.has(value.artifact_type as IntentArtifactCompatibilityType)) {
     throw new Error("private artifact owner identity fields are invalid");
@@ -728,18 +874,19 @@ function validatePrivateOwnerIdentity(value: unknown): AutomaticBuildPrivateArti
       512,
     ),
     intent_id: boundedString(value.intent_id, "owner_identity.intent_id", 512),
-    intent_digest: value.intent_digest,
+    intent_revision: positiveSafeInteger(value.intent_revision, "owner_identity.intent_revision"),
     plan_id: boundedString(value.plan_id, "owner_identity.plan_id", 512),
-    plan_digest: value.plan_digest,
+    plan_revision: positiveSafeInteger(value.plan_revision, "owner_identity.plan_revision"),
     artifact_id: boundedString(value.artifact_id, "owner_identity.artifact_id", 512),
     artifact_type: value.artifact_type as IntentArtifactCompatibilityType,
-    blueprint_digest: value.blueprint_digest,
+    blueprint_id: boundedString(value.blueprint_id, "owner_identity.blueprint_id", 512),
+    blueprint_version: boundedString(value.blueprint_version, "owner_identity.blueprint_version", 128),
     attempt: positiveSafeInteger(value.attempt, "owner_identity.attempt"),
   };
 }
 
 function validateExecutorOwnerIdentity(value: unknown): AutomaticBuildExecutorOwnerIdentityV1 {
-  if (isRecord(value) && value.version === "automatic_build_private_artifact_owner_identity.v1") {
+  if (isRecord(value) && value.version === "automatic_build_private_artifact_owner_identity.v2") {
     return validatePrivateOwnerIdentity(value);
   }
   return validateOwnerIdentity(value);
@@ -804,6 +951,26 @@ function opaqueHandoffRefFor(input: Parameters<typeof opaqueHandoffIdentity>[0])
   return `abhandoff1_${sha256(opaqueHandoffIdentity(input))}`;
 }
 
+function opaqueHandoffIdentityV3(input: {
+  kind: "public_dispatch";
+  target_ref: BuildTargetRefV2;
+  target_locator: AutomaticBuildTargetLocatorV1;
+  owner_identity: AutomaticBuildDispatchOwnerIdentityV1;
+  handoff_path: string;
+  handoff_sha256: string;
+  handoff_byte_length: number;
+}): unknown {
+  return {
+    version: "automatic_build_opaque_handoff_identity.v3",
+    session_protocol: "automatic_build_executor_session.v3",
+    ...input,
+  };
+}
+
+function opaqueHandoffRefForV3(input: Parameters<typeof opaqueHandoffIdentityV3>[0]): string {
+  return `abhandoff1_${sha256(opaqueHandoffIdentityV3(input))}`;
+}
+
 function validateOpaqueHandoffRef(value: unknown): string {
   if (typeof value !== "string" || Buffer.byteLength(value, "utf8") > MAX_REF_BYTES
     || !OPAQUE_HANDOFF_REF.test(value)) {
@@ -812,7 +979,10 @@ function validateOpaqueHandoffRef(value: unknown): string {
   return value;
 }
 
-function validateOpaqueHandoffRecord(value: unknown, expectedRef: string): AutomaticBuildOpaqueHandoffRecordV1 {
+function validateLegacyOpaqueHandoffRecord(
+  value: unknown,
+  expectedRef: string,
+): AutomaticBuildOpaqueHandoffRecordV1 {
   if (!isRecord(value)) throw new Error("opaque handoff record is invalid");
   exactKeys(value, [
     "version",
@@ -864,7 +1034,75 @@ function validateOpaqueHandoffRecord(value: unknown, expectedRef: string): Autom
   return record;
 }
 
-function readOpaqueHandoffRecord(opaqueHandoffRef: string): AutomaticBuildOpaqueHandoffRecordV1 {
+function validateV3OpaqueHandoffRecord(
+  value: unknown,
+  expectedRef: string,
+): AutomaticBuildOpaqueHandoffRecordV3 {
+  if (!isRecord(value)) throw new Error("opaque handoff record is invalid");
+  exactKeys(value, [
+    "version",
+    "session_protocol",
+    "opaque_handoff_ref",
+    "kind",
+    "target_ref",
+    "target_locator",
+    "owner_identity",
+    "handoff_path",
+    "handoff_sha256",
+    "handoff_byte_length",
+    "issued_at",
+  ]);
+  if (value.version !== "automatic_build_opaque_handoff_record.v3"
+    || value.session_protocol !== "automatic_build_executor_session.v3"
+    || value.opaque_handoff_ref !== expectedRef
+    || value.kind !== "public_dispatch"
+    || typeof value.handoff_sha256 !== "string" || !SHA256.test(value.handoff_sha256)
+    || !Number.isSafeInteger(value.handoff_byte_length) || (value.handoff_byte_length as number) < 1) {
+    throw new Error("V3 opaque handoff record identity is invalid");
+  }
+  const targetRef = validateTargetRef(value.target_ref);
+  const locator = validateTargetLocator(value.target_locator);
+  const owner = validateOwnerIdentity(value.owner_identity);
+  const handoffPath = boundedString(value.handoff_path, "handoff_path");
+  if (!path.isAbsolute(handoffPath)) throw new Error("opaque handoff record path must be absolute");
+  const record: AutomaticBuildOpaqueHandoffRecordV3 = {
+    version: value.version,
+    session_protocol: value.session_protocol,
+    opaque_handoff_ref: expectedRef,
+    kind: value.kind,
+    target_ref: targetRef,
+    target_locator: locator,
+    owner_identity: owner,
+    handoff_path: path.resolve(handoffPath),
+    handoff_sha256: value.handoff_sha256,
+    handoff_byte_length: value.handoff_byte_length as number,
+    issued_at: isoTimestamp(value.issued_at, "issued_at"),
+  };
+  const identity = {
+    kind: record.kind,
+    target_ref: record.target_ref,
+    target_locator: record.target_locator,
+    owner_identity: record.owner_identity,
+    handoff_path: record.handoff_path,
+    handoff_sha256: record.handoff_sha256,
+    handoff_byte_length: record.handoff_byte_length,
+  };
+  if (opaqueHandoffRefForV3(identity) !== expectedRef) {
+    throw new Error("V3 opaque handoff record locator is invalid");
+  }
+  return record;
+}
+
+function validateOpaqueHandoffRecord(
+  value: unknown,
+  expectedRef: string,
+): AutomaticBuildOpaqueHandoffRecord {
+  return isRecord(value) && value.version === "automatic_build_opaque_handoff_record.v3"
+    ? validateV3OpaqueHandoffRecord(value, expectedRef)
+    : validateLegacyOpaqueHandoffRecord(value, expectedRef);
+}
+
+function readOpaqueHandoffRecord(opaqueHandoffRef: string): AutomaticBuildOpaqueHandoffRecord {
   const file = registryFile("opaque-handoffs", opaqueHandoffRef);
   if (!existsSync(file)) throw new Error("opaque handoff ref does not exist");
   return validateOpaqueHandoffRecord(decodeJsonRecord(file), opaqueHandoffRef);
@@ -898,7 +1136,7 @@ function semanticPromptFromPublishedHandoff(
 }
 
 function validatePublishedPublicDispatch(
-  record: AutomaticBuildOpaqueHandoffRecordV1,
+  record: AutomaticBuildOpaqueHandoffRecord,
 ): {
   target: AutomaticBuildTarget;
   owner: AutomaticBuildDispatchOwnerIdentityV1;
@@ -940,20 +1178,21 @@ function validatePublishedPublicDispatch(
 
 function privateOwnerFromContext(
   context: IntentArtifactTaskAttemptExecutionContextV1,
-): AutomaticBuildPrivateArtifactOwnerIdentityV1 {
+): AutomaticBuildPrivateArtifactOwnerIdentityV2 {
   const task = context.task;
   return {
-    version: "automatic_build_private_artifact_owner_identity.v1",
+    version: "automatic_build_private_artifact_owner_identity.v2",
     task_id: task.task_id,
     book_id: task.book_id,
     source_fingerprint: task.source_fingerprint,
     intent_id: task.intent_id,
-    intent_digest: task.intent_digest,
+    intent_revision: task.intent_revision,
     plan_id: task.plan_id,
-    plan_digest: task.plan_digest,
+    plan_revision: task.plan_revision,
     artifact_id: task.artifact.artifact_id,
     artifact_type: task.artifact.artifact_type,
-    blueprint_digest: task.artifact.blueprint_digest,
+    blueprint_id: task.artifact.blueprint_id,
+    blueprint_version: task.artifact.blueprint_version,
     attempt: context.attempt,
   };
 }
@@ -997,11 +1236,9 @@ export function issueAutomaticBuildOpaqueHandoff(input: AutomaticBuildOpaqueHand
   const locator = targetLocator(input.target);
   const resolvedTarget = resolveRecordTarget(locator, targetRef);
   const issuedAt = isoTimestamp(input.issued_at, "issued_at");
-  let owner: AutomaticBuildExecutorOwnerIdentityV1;
-  let handoff: AutomaticBuildDispatchExecutorHandoffRefV1;
   if (input.kind === "public_dispatch") {
-    owner = validateOwnerIdentity(input.owner_identity);
-    handoff = validateExecutorHandoffRef(input.executor_handoff);
+    const owner = validateOwnerIdentity(input.owner_identity);
+    const handoff = validateExecutorHandoffRef(input.executor_handoff);
     const persisted = validateAutomaticBuildDispatchHandoff(resolvedTarget, {
       stage: owner.stage,
       dispatch_id: owner.dispatch_id,
@@ -1011,17 +1248,59 @@ export function issueAutomaticBuildOpaqueHandoff(input: AutomaticBuildOpaqueHand
     if (!sameTargetRef(persisted.manifest.target_ref, targetRef)) {
       throw new Error("opaque handoff target does not match the published dispatch");
     }
-  } else {
-    const context = readIntentArtifactTaskAttemptExecutionContext({
-      private_root: input.private_root,
-      task_path: input.task_path,
-    });
-    assertPrivateTaskTarget(resolvedTarget, context);
-    owner = privateOwnerFromContext(context);
-    handoff = privateTaskHandoffRef(context);
+    const identity = {
+      kind: "public_dispatch" as const,
+      target_ref: targetRef,
+      target_locator: locator,
+      owner_identity: owner,
+      handoff_path: handoff.path,
+      handoff_sha256: handoff.sha256,
+      handoff_byte_length: handoff.byte_length,
+    };
+    const opaqueHandoffRef = opaqueHandoffRefForV3(identity);
+    const record: AutomaticBuildOpaqueHandoffRecordV3 = {
+      version: "automatic_build_opaque_handoff_record.v3",
+      session_protocol: "automatic_build_executor_session.v3",
+      opaque_handoff_ref: opaqueHandoffRef,
+      ...identity,
+      issued_at: issuedAt,
+    };
+    const file = registryFile("opaque-handoffs", opaqueHandoffRef);
+    if (!writeCreateOnly(file, record)) {
+      const existing = readOpaqueHandoffRecord(opaqueHandoffRef);
+      if (existing.version !== "automatic_build_opaque_handoff_record.v3") {
+        throw new Error("opaque handoff ref conflicts with its current session protocol");
+      }
+      const existingIdentity = opaqueHandoffIdentityV3({
+        kind: existing.kind,
+        target_ref: existing.target_ref,
+        target_locator: existing.target_locator,
+        owner_identity: existing.owner_identity,
+        handoff_path: existing.handoff_path,
+        handoff_sha256: existing.handoff_sha256,
+        handoff_byte_length: existing.handoff_byte_length,
+      });
+      if (canonicalAutomaticBuildJson(existingIdentity) !== canonicalAutomaticBuildJson(
+        opaqueHandoffIdentityV3(identity),
+      )) {
+        throw new Error("opaque handoff ref conflicts with its create-only record");
+      }
+    }
+    return {
+      version: "automatic_build_opaque_handoff_ref.v1",
+      opaque_handoff_ref: opaqueHandoffRef,
+    };
   }
+
+  const context = readIntentArtifactTaskAttemptExecutionContext({
+    private_root: input.private_root,
+    task_path: input.task_path,
+  });
+  assertPrivateTaskTarget(resolvedTarget, context);
+  const owner = privateOwnerFromContext(context);
+  const handoff = privateTaskHandoffRef(context);
   const identity = {
-    kind: input.kind,
+    kind: "private_artifact" as const,
     target_ref: targetRef,
     target_locator: locator,
     owner_identity: owner,
@@ -1096,6 +1375,11 @@ function positiveSafeInteger(value: unknown, field: string): number {
   return Number(value);
 }
 
+function nonNegativeSafeInteger(value: unknown, field: string): number {
+  if (!Number.isSafeInteger(value) || Number(value) < 0) throw new Error(`${field} is invalid`);
+  return Number(value);
+}
+
 function validateOpaqueSessionRef(value: unknown): string {
   if (typeof value !== "string" || Buffer.byteLength(value, "utf8") > MAX_REF_BYTES
     || !OPAQUE_SESSION_REF.test(value)) {
@@ -1108,14 +1392,6 @@ function validateGenerationInputRef(value: unknown): string {
   if (typeof value !== "string" || Buffer.byteLength(value, "utf8") > MAX_REF_BYTES
     || !GENERATION_INPUT_REF.test(value)) {
     throw new Error("generation input ref is invalid");
-  }
-  return value;
-}
-
-function validateChunkReceipt(value: unknown): string {
-  if (typeof value !== "string" || Buffer.byteLength(value, "utf8") > MAX_REF_BYTES
-    || !CHUNK_RECEIPT.test(value)) {
-    throw new Error("chunk receipt is invalid");
   }
   return value;
 }
@@ -1138,7 +1414,7 @@ function validateCandidateSinkRef(value: unknown): string {
 
 function privateRootFromTaskPath(
   taskPathInput: string,
-  owner: AutomaticBuildPrivateArtifactOwnerIdentityV1,
+  owner: AutomaticBuildPrivateArtifactOwnerIdentityV2,
 ): string {
   const taskPath = path.resolve(taskPathInput);
   const attemptDirectory = path.dirname(taskPath);
@@ -1150,7 +1426,7 @@ function privateRootFromTaskPath(
   const privateRoot = path.dirname(bookDirectory);
   if (path.basename(taskPath) !== "task.json"
     || path.basename(attemptDirectory) !== String(owner.attempt).padStart(6, "0")
-    || path.basename(attemptsDirectory) !== "attempts"
+    || path.basename(attemptsDirectory) !== "attempts-v3"
     || path.basename(artifactDirectory) !== owner.artifact_id
     || path.basename(intentDirectory) !== owner.intent_id
     || path.basename(artifactsDirectory) !== "artifacts"
@@ -1186,10 +1462,10 @@ function readPrivateSelectionJson(privateRoot: string, fileInput: string, label:
 
 interface AutomaticBuildPrivateArtifactContextV1 {
   target: AutomaticBuildTarget;
-  owner: AutomaticBuildPrivateArtifactOwnerIdentityV1;
+  owner: AutomaticBuildPrivateArtifactOwnerIdentityV2;
   attempt: IntentArtifactTaskAttemptExecutionContextV1;
-  intent: BuildIntentAny;
-  plan: BuildPlanAny;
+  intent: BuildIntentV3;
+  plan: BuildPlanV3;
   available_lids: string[];
   resolved_scope_lids: string[];
   inspection: ReturnType<typeof inspectIntentArtifactTaskAttempt>;
@@ -1221,9 +1497,10 @@ export function resolveAutomaticBuildTargetLids(target: AutomaticBuildTarget): s
 }
 
 function resolvePrivateArtifactContext(
-  record: AutomaticBuildOpaqueHandoffRecordV1,
+  record: AutomaticBuildOpaqueHandoffRecord,
 ): AutomaticBuildPrivateArtifactContextV1 {
-  if (record.kind !== "private_artifact") {
+  if (record.version !== "automatic_build_opaque_handoff_record.v1"
+    || record.kind !== "private_artifact") {
     throw new Error("opaque handoff is not a private artifact");
   }
   const owner = validatePrivateOwnerIdentity(record.owner_identity);
@@ -1261,24 +1538,29 @@ function resolvePrivateArtifactContext(
     owner.intent_id,
     "intent.json",
   );
-  const plan = validateBuildPlanAny(readPrivateSelectionJson(
+  const storedPlan = readPrivateSelectionJson(
     attempt.private_root,
     planPath,
     "private BuildPlan",
-  ));
-  const intent = validateBuildIntentAny(readPrivateSelectionJson(
+  );
+  const storedIntent = readPrivateSelectionJson(
     attempt.private_root,
     intentPath,
     "private BuildIntent",
-  ));
+  );
+  const { intent, plan } = adaptAutomaticBuildPrivateArtifactSelectionV3(
+    storedIntent,
+    storedPlan,
+  );
   if (plan.plan_id !== owner.plan_id
-    || plan.plan_digest !== owner.plan_digest
+    || plan.plan_revision !== owner.plan_revision
     || plan.intent_id !== owner.intent_id
-    || plan.intent_digest !== owner.intent_digest
+    || plan.intent_revision !== owner.intent_revision
     || plan.book_id !== owner.book_id
     || plan.source_fingerprint !== owner.source_fingerprint
     || (plan.status !== "confirmed" && plan.status !== "completed")
     || intent.intent_id !== owner.intent_id
+    || intent.intent_revision !== owner.intent_revision
     || intent.book_id !== owner.book_id
     || intent.source_fingerprint !== owner.source_fingerprint
     || intent.status !== "confirmed") {
@@ -1361,7 +1643,7 @@ function validatePrivateSessionRecord(
 function persistPrivateSessionRecord(input: {
   opaque_handoff_ref: string;
   open_record: AutomaticBuildExecutorOpenRecordV1;
-  owner: AutomaticBuildPrivateArtifactOwnerIdentityV1;
+  owner: AutomaticBuildPrivateArtifactOwnerIdentityV2;
   created_at: string;
 }): AutomaticBuildExecutorPrivateSessionRecordV1 {
   const identity = {
@@ -1585,12 +1867,12 @@ function taskDescriptor(
   };
 }
 
-interface AutomaticBuildExecutorDeliveryMaterialV2 {
+interface AutomaticBuildExecutorDeliveryMaterialV3 {
   semantic_prompt: string;
   semantic_input: string;
-  output_contract: AutomaticBuildSemanticCandidateContractV2;
-  manifest: AutomaticBuildExecutorInputManifestV2;
-  chunks: AutomaticBuildExecutorInputChunkV2[];
+  output_contract: AutomaticBuildExecutorOutputContractV3;
+  manifest: AutomaticBuildExecutorInputManifestV3;
+  chunks: AutomaticBuildExecutorInputChunkV3[];
 }
 
 function semanticCandidateContractV2(
@@ -1602,7 +1884,7 @@ function semanticCandidateContractV2(
     encoding: "utf-8",
     max_bytes: Math.min(
       MAX_CANDIDATE_BYTES,
-      CODEX_EXECUTOR_TRANSPORT_PROFILE_V1.max_candidate_request_bytes,
+      CODEX_EXECUTOR_TRANSPORT_PROFILE_V2.max_candidate_request_bytes,
     ),
     stage: descriptor.stage,
     work_unit_id: descriptor.work_unit_id,
@@ -1612,11 +1894,11 @@ function semanticCandidateContractV2(
 }
 
 function deliverySessionFile(opaqueSessionRef: string): string {
-  return registryFile("executor-v2-delivery-sessions", validateOpaqueSessionRef(opaqueSessionRef));
+  return registryFile("executor-v3-delivery-sessions", validateOpaqueSessionRef(opaqueSessionRef));
 }
 
 function generationInputFile(generationInputRef: string): string {
-  return registryFile("executor-v2-generation-inputs", validateGenerationInputRef(generationInputRef));
+  return registryFile("executor-v3-generation-inputs", validateGenerationInputRef(generationInputRef));
 }
 
 function deliveryReceiptFile(opaqueSessionRef: string, ordinal: number): string {
@@ -1624,32 +1906,32 @@ function deliveryReceiptFile(opaqueSessionRef: string, ordinal: number): string 
     throw new Error("delivery receipt ordinal is invalid");
   }
   return registryFile(
-    "executor-v2-delivery-receipts",
+    "executor-v3-delivery-receipts",
     `${validateOpaqueSessionRef(opaqueSessionRef)}-${String(ordinal).padStart(4, "0")}`,
   );
 }
 
 function generationGrantFile(opaqueSessionRef: string): string {
-  return registryFile("executor-v2-generation-grants", validateOpaqueSessionRef(opaqueSessionRef));
+  return registryFile("executor-v3-generation-grants", validateOpaqueSessionRef(opaqueSessionRef));
 }
 
 function generationStartAcceptanceFile(generationGrantRef: string): string {
   return registryFile(
-    "executor-v2-generation-start-acceptances",
+    "executor-v3-generation-start-acceptances",
     validateGenerationGrantRef(generationGrantRef),
   );
 }
 
 function generationStartRecordFile(generationGrantRef: string): string {
   return registryFile(
-    "executor-v2-generation-starts",
+    "executor-v3-generation-starts",
     validateGenerationGrantRef(generationGrantRef),
   );
 }
 
 function candidateSinkRecordFile(opaqueSessionRef: string): string {
   return registryFile(
-    "executor-v2-candidate-sinks",
+    "executor-v3-candidate-sinks",
     validateOpaqueSessionRef(opaqueSessionRef),
   );
 }
@@ -1663,11 +1945,27 @@ function generationInputRefFor(input: {
   descriptor_input_hash: string;
   semantic_prompt_sha256: string;
   semantic_input_sha256: string;
-  transport_profile_digest: string;
-  output_contract_digest: string;
+  transport_profile: ExecutorTransportProfileV2;
+  output_schema_version: string;
 }): string {
   return `abinput1_${sha256({
-    version: "automatic_build_executor_generation_input_identity.v1",
+    version: "automatic_build_executor_generation_input_identity.v2",
+    ...input,
+  })}`;
+}
+
+function privateGenerationInputRefFor(input: {
+  opaque_session_ref: string;
+  opaque_handoff_ref: string;
+  owner_identity: AutomaticBuildPrivateArtifactOwnerIdentityV2;
+  task_id: string;
+  semantic_prompt_sha256: string;
+  semantic_input_sha256: string;
+  transport_profile: ExecutorTransportProfileV2;
+  output_schema_version: string;
+}): string {
+  return `abinput1_${sha256({
+    version: "automatic_build_executor_private_generation_input_identity.v3",
     ...input,
   })}`;
 }
@@ -1679,26 +1977,23 @@ function deliverySessionRefFor(input: {
   stage: AutomaticBuildStage;
   work_unit_id: string;
   descriptor_input_hash: string;
-  transport_profile_digest: string;
+  transport_profile: ExecutorTransportProfileV2;
 }): string {
   return `absession1_${sha256({
-    version: "automatic_build_executor_delivery_session_identity.v1",
+    version: "automatic_build_executor_delivery_session_identity.v2",
     ...input,
   })}`;
 }
 
-function chunkReceiptFor(input: {
-  opaque_session_ref: string;
-  generation_input_ref: string;
-  segment: "semantic_prompt" | "semantic_input";
-  ordinal: number;
-  byte_range: { start: number; end: number };
-  payload_sha256: string;
-  final_for_segment: boolean;
-  final_for_generation: boolean;
+function privateDeliverySessionRefFor(input: {
+  open_session_ref: string;
+  opaque_handoff_ref: string;
+  owner_identity: AutomaticBuildPrivateArtifactOwnerIdentityV2;
+  task_id: string;
+  transport_profile: ExecutorTransportProfileV2;
 }): string {
-  return `abchunk1_${sha256({
-    version: "automatic_build_executor_chunk_receipt_identity.v1",
+  return `absession1_${sha256({
+    version: "automatic_build_executor_private_delivery_session_identity.v3",
     ...input,
   })}`;
 }
@@ -1709,31 +2004,26 @@ function packDeliverySegment(input: {
   segment: "semantic_prompt" | "semantic_input";
   payload_utf8: string;
   ordinal_offset: number;
-}): ExecutorTransportPackWithinLimitV1 {
+}): ExecutorTransportPackWithinLimitV2 {
   const packed = packExecutorTransportPayload({
-    profile: CODEX_EXECUTOR_TRANSPORT_PROFILE_V1,
+    profile: CODEX_EXECUTOR_TRANSPORT_PROFILE_V2,
     payload_utf8: input.payload_utf8,
-    envelope_for_chunk: (frame: ExecutorTransportChunkFrameV1): AutomaticBuildExecutorSessionResponseV2 => {
+    envelope_for_chunk: (frame: ExecutorTransportChunkFrameV2): AutomaticBuildExecutorSessionResponseV3 => {
       const ordinal = input.ordinal_offset + frame.ordinal;
       const finalForGeneration = input.segment === "semantic_input" && frame.final;
-      const identity = {
+      const chunk: AutomaticBuildExecutorInputChunkV3 = {
+        version: "automatic_build_executor_input_chunk.v3",
         opaque_session_ref: input.opaque_session_ref,
         generation_input_ref: input.generation_input_ref,
         segment: input.segment,
         ordinal,
         byte_range: frame.byte_range,
-        payload_sha256: frame.payload_sha256,
+        payload_utf8: frame.payload_utf8,
         final_for_segment: frame.final,
         final_for_generation: finalForGeneration,
       };
-      const chunk: AutomaticBuildExecutorInputChunkV2 = {
-        version: "automatic_build_executor_input_chunk.v2",
-        ...identity,
-        payload_utf8: frame.payload_utf8,
-        chunk_receipt: chunkReceiptFor(identity),
-      };
       return {
-        version: "automatic_build_executor_session.v2",
+        version: "automatic_build_executor_session.v3",
         action: { kind: "INPUT_CHUNK", chunk },
       };
     },
@@ -1741,7 +2031,83 @@ function packDeliverySegment(input: {
   if (packed.status !== "within_limit") {
     throw new AutomaticBuildExecutorTransportError();
   }
-  return packed;
+  return validateExecutorTransportPack(
+    packed,
+    CODEX_EXECUTOR_TRANSPORT_PROFILE_V2,
+    input.payload_utf8,
+  );
+}
+
+function packedDeliveryMaterial(input: {
+  opaque_session_ref: string;
+  generation_input_ref: string;
+  semantic_prompt: string;
+  semantic_input: string;
+  output_contract: AutomaticBuildExecutorOutputContractV3;
+}): AutomaticBuildExecutorDeliveryMaterialV3 {
+  const semanticPromptSha256 = sha256(input.semantic_prompt);
+  const semanticInputSha256 = sha256(input.semantic_input);
+  const promptPack = packDeliverySegment({
+    opaque_session_ref: input.opaque_session_ref,
+    generation_input_ref: input.generation_input_ref,
+    segment: "semantic_prompt",
+    payload_utf8: input.semantic_prompt,
+    ordinal_offset: 0,
+  });
+  const inputPack = packDeliverySegment({
+    opaque_session_ref: input.opaque_session_ref,
+    generation_input_ref: input.generation_input_ref,
+    segment: "semantic_input",
+    payload_utf8: input.semantic_input,
+    ordinal_offset: promptPack.chunk_count,
+  });
+  const totalChunkCount = promptPack.chunk_count + inputPack.chunk_count;
+  if (totalChunkCount > CODEX_EXECUTOR_TRANSPORT_PROFILE_V2.max_input_chunks) {
+    throw new AutomaticBuildExecutorTransportError();
+  }
+  const chunks = [...promptPack.chunks, ...inputPack.chunks].map((chunk) => {
+    const response = chunk.response;
+    if (!isRecord(response)
+      || response.version !== "automatic_build_executor_session.v3"
+      || !isRecord(response.action)
+      || response.action.kind !== "INPUT_CHUNK"
+      || !isRecord(response.action.chunk)
+      || response.action.chunk.version !== "automatic_build_executor_input_chunk.v3") {
+      throw new Error("executor input transport produced an invalid chunk envelope");
+    }
+    return response.action.chunk as unknown as AutomaticBuildExecutorInputChunkV3;
+  });
+  if (chunks.some((chunk, ordinal) => chunk.ordinal !== ordinal
+    || chunk.final_for_generation !== (ordinal === chunks.length - 1))) {
+    throw new Error("executor input transport chunk ordering is invalid");
+  }
+  return {
+    semantic_prompt: input.semantic_prompt,
+    semantic_input: input.semantic_input,
+    output_contract: input.output_contract,
+    manifest: {
+      version: "automatic_build_executor_input_manifest.v3",
+      opaque_session_ref: input.opaque_session_ref,
+      generation_input_ref: input.generation_input_ref,
+      transport_profile: CODEX_EXECUTOR_TRANSPORT_PROFILE_V2,
+      segments: [
+        {
+          kind: "semantic_prompt",
+          byte_length: Buffer.byteLength(input.semantic_prompt, "utf8"),
+          sha256: semanticPromptSha256,
+          chunk_count: promptPack.chunk_count,
+        },
+        {
+          kind: "semantic_input",
+          byte_length: Buffer.byteLength(input.semantic_input, "utf8"),
+          sha256: semanticInputSha256,
+          chunk_count: inputPack.chunk_count,
+        },
+      ],
+      total_chunk_count: totalChunkCount,
+    },
+    chunks,
+  };
 }
 
 function renderDeliveryMaterial(input: {
@@ -1753,7 +2119,7 @@ function renderDeliveryMaterial(input: {
   owner: AutomaticBuildDispatchOwnerIdentityV1;
   work_unit_id: string;
   semantic_input?: string;
-}): AutomaticBuildExecutorDeliveryMaterialV2 {
+}): AutomaticBuildExecutorDeliveryMaterialV3 {
   const stage = taskDescriptor(input.target, input.persisted, input.work_unit_id);
   const descriptor = stage.descriptor;
   const binding = stage.task_bindings[input.work_unit_id];
@@ -1764,16 +2130,13 @@ function renderDeliveryMaterial(input: {
     input.target,
     descriptor.stage,
     descriptor.work_unit_id,
-    {
-      ...("policy_set_digest" in binding
-        ? { policy_set_digest: binding.policy_set_digest }
-        : {}),
-    },
+    isAutomaticBuildTaskPolicyBindingV2(binding)
+      ? { policy_generation_id: binding.policy_generation_id }
+      : {},
   ).stdout;
   const outputContract = semanticCandidateContractV2(descriptor);
   const semanticPromptSha256 = sha256(input.semantic_prompt);
   const semanticInputSha256 = sha256(semanticInput);
-  const outputContractDigest = sha256(outputContract);
   const generationInputRef = generationInputRefFor({
     opaque_session_ref: input.opaque_session_ref,
     opaque_handoff_ref: input.opaque_handoff_ref,
@@ -1783,70 +2146,16 @@ function renderDeliveryMaterial(input: {
     descriptor_input_hash: descriptor.input_hash,
     semantic_prompt_sha256: semanticPromptSha256,
     semantic_input_sha256: semanticInputSha256,
-    transport_profile_digest: CODEX_EXECUTOR_TRANSPORT_PROFILE_V1.profile_digest,
-    output_contract_digest: outputContractDigest,
+    transport_profile: CODEX_EXECUTOR_TRANSPORT_PROFILE_V2,
+    output_schema_version: outputContract.version,
   });
-  const promptPack = packDeliverySegment({
+  return packedDeliveryMaterial({
     opaque_session_ref: input.opaque_session_ref,
     generation_input_ref: generationInputRef,
-    segment: "semantic_prompt",
-    payload_utf8: input.semantic_prompt,
-    ordinal_offset: 0,
-  });
-  const inputPack = packDeliverySegment({
-    opaque_session_ref: input.opaque_session_ref,
-    generation_input_ref: generationInputRef,
-    segment: "semantic_input",
-    payload_utf8: semanticInput,
-    ordinal_offset: promptPack.chunk_count,
-  });
-  const totalChunkCount = promptPack.chunk_count + inputPack.chunk_count;
-  if (totalChunkCount > CODEX_EXECUTOR_TRANSPORT_PROFILE_V1.max_input_chunks) {
-    throw new AutomaticBuildExecutorTransportError();
-  }
-  const chunks = [...promptPack.chunks, ...inputPack.chunks].map((chunk) => {
-    const response = chunk.response;
-    if (!isRecord(response)
-      || response.version !== "automatic_build_executor_session.v2"
-      || !isRecord(response.action)
-      || response.action.kind !== "INPUT_CHUNK"
-      || !isRecord(response.action.chunk)
-      || response.action.chunk.version !== "automatic_build_executor_input_chunk.v2") {
-      throw new Error("executor input transport produced an invalid chunk envelope");
-    }
-    return response.action.chunk as unknown as AutomaticBuildExecutorInputChunkV2;
-  });
-  if (chunks.some((chunk, ordinal) => chunk.ordinal !== ordinal
-    || chunk.final_for_generation !== (ordinal === chunks.length - 1))) {
-    throw new Error("executor input transport chunk ordering is invalid");
-  }
-  return {
     semantic_prompt: input.semantic_prompt,
     semantic_input: semanticInput,
     output_contract: outputContract,
-    manifest: {
-      version: "automatic_build_executor_input_manifest.v2",
-      opaque_session_ref: input.opaque_session_ref,
-      generation_input_ref: generationInputRef,
-      transport_profile_digest: CODEX_EXECUTOR_TRANSPORT_PROFILE_V1.profile_digest,
-      segments: [
-        {
-          kind: "semantic_prompt",
-          byte_length: Buffer.byteLength(input.semantic_prompt, "utf8"),
-          sha256: semanticPromptSha256,
-          chunk_count: promptPack.chunk_count,
-        },
-        {
-          kind: "semantic_input",
-          byte_length: Buffer.byteLength(semanticInput, "utf8"),
-          sha256: semanticInputSha256,
-          chunk_count: inputPack.chunk_count,
-        },
-      ],
-      total_chunk_count: totalChunkCount,
-    },
-    chunks,
-  };
+  });
 }
 
 function deliveryRecordFromMaterial(input: {
@@ -1856,12 +2165,12 @@ function deliveryRecordFromMaterial(input: {
   owner: AutomaticBuildDispatchOwnerIdentityV1;
   stage: AutomaticBuildStage;
   work_unit_id: string;
-  material: AutomaticBuildExecutorDeliveryMaterialV2;
+  material: AutomaticBuildExecutorDeliveryMaterialV3;
   created_at: string;
-}): AutomaticBuildExecutorDeliverySessionRecordV2 {
+}): AutomaticBuildExecutorDeliverySessionRecordV3 {
   const [prompt, semanticInput] = input.material.manifest.segments;
   return {
-    version: "automatic_build_executor_delivery_session_record.v2",
+    version: "automatic_build_executor_delivery_session_record.v3",
     opaque_session_ref: input.delivery_session_ref,
     opaque_handoff_ref: input.opaque_handoff_ref,
     open_session_ref: input.open_record.opaque_session_ref,
@@ -1869,7 +2178,7 @@ function deliveryRecordFromMaterial(input: {
     stage: input.stage,
     work_unit_id: input.work_unit_id,
     generation_input_ref: input.material.manifest.generation_input_ref,
-    transport_profile_digest: input.material.manifest.transport_profile_digest,
+    transport_profile: input.material.manifest.transport_profile,
     semantic_prompt_sha256: prompt.sha256,
     semantic_prompt_byte_length: prompt.byte_length,
     semantic_input_sha256: semanticInput.sha256,
@@ -1877,26 +2186,107 @@ function deliveryRecordFromMaterial(input: {
     semantic_prompt_chunk_count: prompt.chunk_count,
     semantic_input_chunk_count: semanticInput.chunk_count,
     total_chunk_count: input.material.manifest.total_chunk_count,
-    output_contract_digest: sha256(input.material.output_contract),
+    output_schema_version: input.material.output_contract.version,
     created_at: input.created_at,
   };
 }
 
-function validateDeliverySessionRecord(
-  value: unknown,
+function privateArtifactCandidateContractV2(
+  task: IntentArtifactTaskEnvelopeV3,
+): AutomaticBuildPrivateArtifactCandidateContractV2 {
+  return {
+    version: "automatic_build_private_artifact_candidate_contract.v2",
+    format: "strict_json",
+    encoding: "utf-8",
+    max_bytes: Math.min(
+      MAX_CANDIDATE_BYTES,
+      CODEX_EXECUTOR_TRANSPORT_PROFILE_V2.max_candidate_request_bytes,
+    ),
+    candidate_version: "intent_artifact_candidate.v3",
+    task_id: task.task_id,
+    artifact_id: task.artifact.artifact_id,
+    blueprint_id: task.artifact.blueprint_id,
+    blueprint_version: task.artifact.blueprint_version,
+    artifact_instance: task.output_contract,
+  };
+}
+
+function renderPrivateDeliveryMaterial(input: {
+  context: AutomaticBuildPrivateArtifactContextV1;
+  opaque_session_ref: string;
+  opaque_handoff_ref: string;
+  semantic_input?: string;
+}): AutomaticBuildExecutorDeliveryMaterialV3 {
+  const semanticPrompt = [
+    "Generate exactly one reader-private intent_artifact_candidate.v3.",
+    "Use the task goal, frozen Blueprint, validation rules, and allowed evidence LIDs.",
+    "Return strict JSON only; do not include the candidate in the executor final message.",
+  ].join("\n");
+  const semanticInput = input.semantic_input
+    ?? canonicalAutomaticBuildJson(input.context.attempt.task);
+  const outputContract = privateArtifactCandidateContractV2(input.context.attempt.task);
+  const generationInputRef = privateGenerationInputRefFor({
+    opaque_session_ref: input.opaque_session_ref,
+    opaque_handoff_ref: input.opaque_handoff_ref,
+    owner_identity: input.context.owner,
+    task_id: input.context.attempt.task.task_id,
+    semantic_prompt_sha256: sha256(semanticPrompt),
+    semantic_input_sha256: sha256(semanticInput),
+    transport_profile: CODEX_EXECUTOR_TRANSPORT_PROFILE_V2,
+    output_schema_version: outputContract.version,
+  });
+  return packedDeliveryMaterial({
+    opaque_session_ref: input.opaque_session_ref,
+    generation_input_ref: generationInputRef,
+    semantic_prompt: semanticPrompt,
+    semantic_input: semanticInput,
+    output_contract: outputContract,
+  });
+}
+
+function privateDeliveryRecordFromMaterial(input: {
+  opaque_handoff_ref: string;
+  open_record: AutomaticBuildExecutorOpenRecordV1;
+  delivery_session_ref: string;
+  context: AutomaticBuildPrivateArtifactContextV1;
+  material: AutomaticBuildExecutorDeliveryMaterialV3;
+  created_at: string;
+}): AutomaticBuildExecutorPrivateDeliverySessionRecordV3 {
+  const [prompt, semanticInput] = input.material.manifest.segments;
+  return {
+    version: "automatic_build_executor_private_delivery_session_record.v3",
+    opaque_session_ref: input.delivery_session_ref,
+    opaque_handoff_ref: input.opaque_handoff_ref,
+    open_session_ref: input.open_record.opaque_session_ref,
+    owner_identity: input.context.owner,
+    task_id: input.context.attempt.task.task_id,
+    generation_input_ref: input.material.manifest.generation_input_ref,
+    transport_profile: input.material.manifest.transport_profile,
+    semantic_prompt_sha256: prompt.sha256,
+    semantic_prompt_byte_length: prompt.byte_length,
+    semantic_input_sha256: semanticInput.sha256,
+    semantic_input_byte_length: semanticInput.byte_length,
+    semantic_prompt_chunk_count: prompt.chunk_count,
+    semantic_input_chunk_count: semanticInput.chunk_count,
+    total_chunk_count: input.material.manifest.total_chunk_count,
+    output_schema_version: input.material.output_contract.version,
+    created_at: input.created_at,
+  };
+}
+
+function validatePrivateDeliverySessionRecord(
+  value: Record<string, unknown>,
   expectedSessionRef: string,
-): AutomaticBuildExecutorDeliverySessionRecordV2 {
-  if (!isRecord(value)) throw new Error("executor delivery session record is invalid");
+): AutomaticBuildExecutorPrivateDeliverySessionRecordV3 {
   exactKeys(value, [
     "version",
     "opaque_session_ref",
     "opaque_handoff_ref",
     "open_session_ref",
     "owner_identity",
-    "stage",
-    "work_unit_id",
+    "task_id",
     "generation_input_ref",
-    "transport_profile_digest",
+    "transport_profile",
     "semantic_prompt_sha256",
     "semantic_prompt_byte_length",
     "semantic_input_sha256",
@@ -1904,29 +2294,33 @@ function validateDeliverySessionRecord(
     "semantic_prompt_chunk_count",
     "semantic_input_chunk_count",
     "total_chunk_count",
-    "output_contract_digest",
+    "output_schema_version",
     "created_at",
   ]);
-  if (value.version !== "automatic_build_executor_delivery_session_record.v2"
+  if (value.version !== "automatic_build_executor_private_delivery_session_record.v3"
     || value.opaque_session_ref !== expectedSessionRef
-    || typeof value.stage !== "string" || !STAGES.has(value.stage as AutomaticBuildStage)
-    || typeof value.transport_profile_digest !== "string"
-    || value.transport_profile_digest !== CODEX_EXECUTOR_TRANSPORT_PROFILE_V1.profile_digest
     || typeof value.semantic_prompt_sha256 !== "string" || !SHA256.test(value.semantic_prompt_sha256)
     || typeof value.semantic_input_sha256 !== "string" || !SHA256.test(value.semantic_input_sha256)
-    || typeof value.output_contract_digest !== "string" || !SHA256.test(value.output_contract_digest)) {
-    throw new Error("executor delivery session record identity is invalid");
+    || typeof value.output_schema_version !== "string") {
+    throw new Error("executor private delivery session record identity is invalid");
   }
-  const record: AutomaticBuildExecutorDeliverySessionRecordV2 = {
+  const transportProfile = validateExecutorTransportProfile(
+    value.transport_profile as ExecutorTransportProfileV2,
+  );
+  if (canonicalAutomaticBuildJson(transportProfile)
+    !== canonicalAutomaticBuildJson(CODEX_EXECUTOR_TRANSPORT_PROFILE_V2)) {
+    throw new Error("executor private delivery session transport profile changed");
+  }
+  const owner = validatePrivateOwnerIdentity(value.owner_identity);
+  const record: AutomaticBuildExecutorPrivateDeliverySessionRecordV3 = {
     version: value.version,
     opaque_session_ref: expectedSessionRef,
     opaque_handoff_ref: validateOpaqueHandoffRef(value.opaque_handoff_ref),
     open_session_ref: validateOpaqueSessionRef(value.open_session_ref),
-    owner_identity: validateOwnerIdentity(value.owner_identity),
-    stage: value.stage as AutomaticBuildStage,
-    work_unit_id: boundedString(value.work_unit_id, "work_unit_id", 512),
+    owner_identity: owner,
+    task_id: boundedString(value.task_id, "task_id", 512),
     generation_input_ref: validateGenerationInputRef(value.generation_input_ref),
-    transport_profile_digest: value.transport_profile_digest,
+    transport_profile: transportProfile,
     semantic_prompt_sha256: value.semantic_prompt_sha256,
     semantic_prompt_byte_length: positiveSafeInteger(
       value.semantic_prompt_byte_length,
@@ -1946,13 +2340,105 @@ function validateDeliverySessionRecord(
       "semantic_input_chunk_count",
     ),
     total_chunk_count: positiveSafeInteger(value.total_chunk_count, "total_chunk_count"),
-    output_contract_digest: value.output_contract_digest,
+    output_schema_version: boundedString(
+      value.output_schema_version,
+      "output_schema_version",
+      256,
+    ),
+    created_at: isoTimestamp(value.created_at, "created_at"),
+  };
+  if (record.owner_identity.task_id !== record.task_id
+    || record.semantic_prompt_chunk_count + record.semantic_input_chunk_count
+      !== record.total_chunk_count
+    || record.total_chunk_count > CODEX_EXECUTOR_TRANSPORT_PROFILE_V2.max_input_chunks) {
+    throw new Error("executor private delivery session record counts are invalid");
+  }
+  return record;
+}
+
+function validateDeliverySessionRecord(
+  value: unknown,
+  expectedSessionRef: string,
+): AutomaticBuildExecutorAnyDeliverySessionRecordV3 {
+  if (!isRecord(value)) throw new Error("executor delivery session record is invalid");
+  if (value.version === "automatic_build_executor_private_delivery_session_record.v3") {
+    return validatePrivateDeliverySessionRecord(value, expectedSessionRef);
+  }
+  exactKeys(value, [
+    "version",
+    "opaque_session_ref",
+    "opaque_handoff_ref",
+    "open_session_ref",
+    "owner_identity",
+    "stage",
+    "work_unit_id",
+    "generation_input_ref",
+    "transport_profile",
+    "semantic_prompt_sha256",
+    "semantic_prompt_byte_length",
+    "semantic_input_sha256",
+    "semantic_input_byte_length",
+    "semantic_prompt_chunk_count",
+    "semantic_input_chunk_count",
+    "total_chunk_count",
+    "output_schema_version",
+    "created_at",
+  ]);
+  if (value.version !== "automatic_build_executor_delivery_session_record.v3"
+    || value.opaque_session_ref !== expectedSessionRef
+    || typeof value.stage !== "string" || !STAGES.has(value.stage as AutomaticBuildStage)
+    || typeof value.semantic_prompt_sha256 !== "string" || !SHA256.test(value.semantic_prompt_sha256)
+    || typeof value.semantic_input_sha256 !== "string" || !SHA256.test(value.semantic_input_sha256)
+    || typeof value.output_schema_version !== "string") {
+    throw new Error("executor delivery session record identity is invalid");
+  }
+  const transportProfile = validateExecutorTransportProfile(
+    value.transport_profile as ExecutorTransportProfileV2,
+  );
+  if (canonicalAutomaticBuildJson(transportProfile)
+    !== canonicalAutomaticBuildJson(CODEX_EXECUTOR_TRANSPORT_PROFILE_V2)) {
+    throw new Error("executor delivery session transport profile changed");
+  }
+  const record: AutomaticBuildExecutorDeliverySessionRecordV3 = {
+    version: value.version,
+    opaque_session_ref: expectedSessionRef,
+    opaque_handoff_ref: validateOpaqueHandoffRef(value.opaque_handoff_ref),
+    open_session_ref: validateOpaqueSessionRef(value.open_session_ref),
+    owner_identity: validateOwnerIdentity(value.owner_identity),
+    stage: value.stage as AutomaticBuildStage,
+    work_unit_id: boundedString(value.work_unit_id, "work_unit_id", 512),
+    generation_input_ref: validateGenerationInputRef(value.generation_input_ref),
+    transport_profile: transportProfile,
+    semantic_prompt_sha256: value.semantic_prompt_sha256,
+    semantic_prompt_byte_length: positiveSafeInteger(
+      value.semantic_prompt_byte_length,
+      "semantic_prompt_byte_length",
+    ),
+    semantic_input_sha256: value.semantic_input_sha256,
+    semantic_input_byte_length: positiveSafeInteger(
+      value.semantic_input_byte_length,
+      "semantic_input_byte_length",
+    ),
+    semantic_prompt_chunk_count: positiveSafeInteger(
+      value.semantic_prompt_chunk_count,
+      "semantic_prompt_chunk_count",
+    ),
+    semantic_input_chunk_count: positiveSafeInteger(
+      value.semantic_input_chunk_count,
+      "semantic_input_chunk_count",
+    ),
+    total_chunk_count: positiveSafeInteger(value.total_chunk_count, "total_chunk_count"),
+    output_schema_version: boundedString(
+      value.output_schema_version,
+      "output_schema_version",
+      256,
+    ),
     created_at: isoTimestamp(value.created_at, "created_at"),
   };
   if (record.owner_identity.stage !== record.stage
     || record.semantic_prompt_chunk_count + record.semantic_input_chunk_count
       !== record.total_chunk_count
-    || record.total_chunk_count > CODEX_EXECUTOR_TRANSPORT_PROFILE_V1.max_input_chunks) {
+    || record.total_chunk_count > CODEX_EXECUTOR_TRANSPORT_PROFILE_V2.max_input_chunks) {
     throw new Error("executor delivery session record counts are invalid");
   }
   return record;
@@ -1960,20 +2446,21 @@ function validateDeliverySessionRecord(
 
 function readDeliverySessionRecord(
   opaqueSessionRef: string,
-): AutomaticBuildExecutorDeliverySessionRecordV2 {
+): AutomaticBuildExecutorAnyDeliverySessionRecordV3 {
   const file = deliverySessionFile(opaqueSessionRef);
   if (!existsSync(file)) throw new Error("executor delivery session does not exist");
   return validateDeliverySessionRecord(decodeJsonRecord(file), opaqueSessionRef);
 }
 
 function assertDeliveryMaterialMatches(
-  record: AutomaticBuildExecutorDeliverySessionRecordV2,
-  material: AutomaticBuildExecutorDeliveryMaterialV2,
+  record: AutomaticBuildExecutorAnyDeliverySessionRecordV3,
+  material: AutomaticBuildExecutorDeliveryMaterialV3,
 ): void {
   const [prompt, semanticInput] = material.manifest.segments;
   if (material.manifest.opaque_session_ref !== record.opaque_session_ref
     || material.manifest.generation_input_ref !== record.generation_input_ref
-    || material.manifest.transport_profile_digest !== record.transport_profile_digest
+    || canonicalAutomaticBuildJson(material.manifest.transport_profile)
+      !== canonicalAutomaticBuildJson(record.transport_profile)
     || prompt.sha256 !== record.semantic_prompt_sha256
     || prompt.byte_length !== record.semantic_prompt_byte_length
     || prompt.chunk_count !== record.semantic_prompt_chunk_count
@@ -1981,14 +2468,14 @@ function assertDeliveryMaterialMatches(
     || semanticInput.byte_length !== record.semantic_input_byte_length
     || semanticInput.chunk_count !== record.semantic_input_chunk_count
     || material.manifest.total_chunk_count !== record.total_chunk_count
-    || sha256(material.output_contract) !== record.output_contract_digest) {
+    || material.output_contract.version !== record.output_schema_version) {
     throw new Error("executor delivery input identity drifted");
   }
 }
 
 function persistDeliverySessionRecord(
-  record: AutomaticBuildExecutorDeliverySessionRecordV2,
-): AutomaticBuildExecutorDeliverySessionRecordV2 {
+  record: AutomaticBuildExecutorAnyDeliverySessionRecordV3,
+): AutomaticBuildExecutorAnyDeliverySessionRecordV3 {
   const file = deliverySessionFile(record.opaque_session_ref);
   if (writeCreateOnly(file, record)) return record;
   const existing = validateDeliverySessionRecord(decodeJsonRecord(file), record.opaque_session_ref);
@@ -2039,7 +2526,7 @@ function validateGenerationInputRecord(
 }
 
 function persistGenerationInputRecord(
-  material: AutomaticBuildExecutorDeliveryMaterialV2,
+  material: AutomaticBuildExecutorDeliveryMaterialV3,
   createdAt: string,
 ): AutomaticBuildExecutorGenerationInputRecordV1 {
   const record: AutomaticBuildExecutorGenerationInputRecordV1 = {
@@ -2067,7 +2554,7 @@ function persistGenerationInputRecord(
 }
 
 function readGenerationInputRecord(
-  delivery: AutomaticBuildExecutorDeliverySessionRecordV2,
+  delivery: AutomaticBuildExecutorAnyDeliverySessionRecordV3,
 ): AutomaticBuildExecutorGenerationInputRecordV1 {
   const file = generationInputFile(delivery.generation_input_ref);
   if (!existsSync(file)) throw new Error("executor generation input record is missing");
@@ -2087,25 +2574,21 @@ function readGenerationInputRecord(
 
 function validateDeliveryReceiptRecord(
   value: unknown,
-  delivery: AutomaticBuildExecutorDeliverySessionRecordV2,
-  chunk: AutomaticBuildExecutorInputChunkV2,
-): AutomaticBuildExecutorDeliveryReceiptRecordV1 {
+  delivery: AutomaticBuildExecutorAnyDeliverySessionRecordV3,
+  chunk: AutomaticBuildExecutorInputChunkV3,
+): AutomaticBuildExecutorDeliveryReceiptRecordV2 {
   if (!isRecord(value)) throw new Error("executor delivery receipt record is invalid");
   exactKeys(value, [
     "version",
     "opaque_session_ref",
     "generation_input_ref",
     "ordinal",
-    "chunk_receipt",
-    "payload_sha256",
     "confirmed_at",
   ]);
-  if (value.version !== "automatic_build_executor_delivery_receipt_record.v1"
+  if (value.version !== "automatic_build_executor_delivery_receipt_record.v2"
     || value.opaque_session_ref !== delivery.opaque_session_ref
     || value.generation_input_ref !== delivery.generation_input_ref
-    || value.ordinal !== chunk.ordinal
-    || value.chunk_receipt !== chunk.chunk_receipt
-    || value.payload_sha256 !== chunk.payload_sha256) {
+    || value.ordinal !== chunk.ordinal) {
     throw new Error("executor delivery receipt record identity is invalid");
   }
   return {
@@ -2113,17 +2596,15 @@ function validateDeliveryReceiptRecord(
     opaque_session_ref: delivery.opaque_session_ref,
     generation_input_ref: delivery.generation_input_ref,
     ordinal: chunk.ordinal,
-    chunk_receipt: validateChunkReceipt(value.chunk_receipt),
-    payload_sha256: boundedString(value.payload_sha256, "payload_sha256", 64),
     confirmed_at: isoTimestamp(value.confirmed_at, "confirmed_at"),
   };
 }
 
 function confirmedDeliveryReceipts(
-  delivery: AutomaticBuildExecutorDeliverySessionRecordV2,
-  material: AutomaticBuildExecutorDeliveryMaterialV2,
-): AutomaticBuildExecutorDeliveryReceiptRecordV1[] {
-  const receipts: AutomaticBuildExecutorDeliveryReceiptRecordV1[] = [];
+  delivery: AutomaticBuildExecutorAnyDeliverySessionRecordV3,
+  material: AutomaticBuildExecutorDeliveryMaterialV3,
+): AutomaticBuildExecutorDeliveryReceiptRecordV2[] {
+  const receipts: AutomaticBuildExecutorDeliveryReceiptRecordV2[] = [];
   let missingSeen = false;
   for (const chunk of material.chunks) {
     const file = deliveryReceiptFile(delivery.opaque_session_ref, chunk.ordinal);
@@ -2138,17 +2619,15 @@ function confirmedDeliveryReceipts(
 }
 
 function confirmDeliveryChunk(
-  delivery: AutomaticBuildExecutorDeliverySessionRecordV2,
-  chunk: AutomaticBuildExecutorInputChunkV2,
+  delivery: AutomaticBuildExecutorAnyDeliverySessionRecordV3,
+  chunk: AutomaticBuildExecutorInputChunkV3,
   confirmedAt: string,
-): AutomaticBuildExecutorDeliveryReceiptRecordV1 {
-  const record: AutomaticBuildExecutorDeliveryReceiptRecordV1 = {
-    version: "automatic_build_executor_delivery_receipt_record.v1",
+): AutomaticBuildExecutorDeliveryReceiptRecordV2 {
+  const record: AutomaticBuildExecutorDeliveryReceiptRecordV2 = {
+    version: "automatic_build_executor_delivery_receipt_record.v2",
     opaque_session_ref: delivery.opaque_session_ref,
     generation_input_ref: delivery.generation_input_ref,
     ordinal: chunk.ordinal,
-    chunk_receipt: chunk.chunk_receipt,
-    payload_sha256: chunk.payload_sha256,
     confirmed_at: confirmedAt,
   };
   const file = deliveryReceiptFile(delivery.opaque_session_ref, chunk.ordinal);
@@ -2158,103 +2637,85 @@ function confirmDeliveryChunk(
 
 function validateGenerationGrantRecord(
   value: unknown,
-  delivery: AutomaticBuildExecutorDeliverySessionRecordV2,
-  material: AutomaticBuildExecutorDeliveryMaterialV2,
-): AutomaticBuildExecutorGenerationGrantRecordV1 {
+  delivery: AutomaticBuildExecutorAnyDeliverySessionRecordV3,
+  material: AutomaticBuildExecutorDeliveryMaterialV3,
+): AutomaticBuildExecutorGenerationGrantRecordV2 {
   const finalChunk = material.chunks.at(-1);
   if (!finalChunk) throw new Error("executor generation grant is missing its final chunk");
-  const expectedLedgerDigest = sha256({
-    version: "automatic_build_executor_delivery_ledger_identity.v1",
-    chunks: material.chunks.map((chunk) => ({
-      ordinal: chunk.ordinal,
-      segment: chunk.segment,
-      byte_range: chunk.byte_range,
-      payload_sha256: chunk.payload_sha256,
-      chunk_receipt: chunk.chunk_receipt,
-    })),
-  });
   if (!isRecord(value)) throw new Error("executor generation grant record is invalid");
   exactKeys(value, [
     "version",
     "opaque_session_ref",
     "generation_input_ref",
     "generation_grant_ref",
-    "output_contract_digest",
-    "delivery_ledger_digest",
-    "final_chunk_receipt",
+    "final_delivered_ordinal",
+    "output_schema_version",
     "issued_at",
   ]);
-  if (value.version !== "automatic_build_executor_generation_grant_record.v1"
+  if (value.version !== "automatic_build_executor_generation_grant_record.v2"
     || value.opaque_session_ref !== delivery.opaque_session_ref
     || value.generation_input_ref !== delivery.generation_input_ref
-    || value.output_contract_digest !== delivery.output_contract_digest
-    || value.delivery_ledger_digest !== expectedLedgerDigest
-    || value.final_chunk_receipt !== finalChunk.chunk_receipt) {
+    || value.final_delivered_ordinal !== finalChunk.ordinal
+    || value.output_schema_version !== delivery.output_schema_version) {
     throw new Error("executor generation grant record identity is invalid");
   }
-  const record: AutomaticBuildExecutorGenerationGrantRecordV1 = {
+  const record: AutomaticBuildExecutorGenerationGrantRecordV2 = {
     version: value.version,
     opaque_session_ref: delivery.opaque_session_ref,
     generation_input_ref: delivery.generation_input_ref,
     generation_grant_ref: validateGenerationGrantRef(value.generation_grant_ref),
-    output_contract_digest: delivery.output_contract_digest,
-    delivery_ledger_digest: boundedString(
-      value.delivery_ledger_digest,
-      "delivery_ledger_digest",
-      64,
+    final_delivered_ordinal: nonNegativeSafeInteger(
+      value.final_delivered_ordinal,
+      "final_delivered_ordinal",
     ),
-    final_chunk_receipt: validateChunkReceipt(value.final_chunk_receipt),
+    output_schema_version: boundedString(
+      value.output_schema_version,
+      "output_schema_version",
+      256,
+    ),
     issued_at: isoTimestamp(value.issued_at, "issued_at"),
   };
   const expectedRef = `abgrant1_${sha256({
-    version: "automatic_build_executor_generation_grant_identity.v1",
+    version: "automatic_build_executor_generation_grant_identity.v2",
     opaque_session_ref: record.opaque_session_ref,
     generation_input_ref: record.generation_input_ref,
-    output_contract_digest: record.output_contract_digest,
-    delivery_ledger_digest: record.delivery_ledger_digest,
-    final_chunk_receipt: record.final_chunk_receipt,
+    final_delivered_ordinal: record.final_delivered_ordinal,
+    output_schema_version: record.output_schema_version,
   })}`;
   if (record.generation_grant_ref !== expectedRef) {
-    throw new Error("executor generation grant digest is invalid");
+    throw new Error("executor generation grant ref does not match its direct identity");
   }
   return record;
 }
 
 function issueGenerationGrant(
-  delivery: AutomaticBuildExecutorDeliverySessionRecordV2,
-  material: AutomaticBuildExecutorDeliveryMaterialV2,
+  delivery: AutomaticBuildExecutorAnyDeliverySessionRecordV3,
+  material: AutomaticBuildExecutorDeliveryMaterialV3,
   issuedAt: string,
-): AutomaticBuildExecutorGenerationGrantRecordV1 {
+): AutomaticBuildExecutorGenerationGrantRecordV2 {
   const finalChunk = material.chunks.at(-1);
   if (!finalChunk || !finalChunk.final_for_generation) {
     throw new Error("executor delivery is missing its final generation chunk");
   }
-  const deliveryLedgerDigest = sha256({
-    version: "automatic_build_executor_delivery_ledger_identity.v1",
-    chunks: material.chunks.map((chunk) => ({
-      ordinal: chunk.ordinal,
-      segment: chunk.segment,
-      byte_range: chunk.byte_range,
-      payload_sha256: chunk.payload_sha256,
-      chunk_receipt: chunk.chunk_receipt,
-    })),
-  });
+  const receipts = confirmedDeliveryReceipts(delivery, material);
+  if (receipts.length !== material.chunks.length
+    || receipts.at(-1)?.ordinal !== finalChunk.ordinal) {
+    throw new Error("executor generation grant requires complete ordinal delivery");
+  }
   const generationGrantRef = `abgrant1_${sha256({
-    version: "automatic_build_executor_generation_grant_identity.v1",
+    version: "automatic_build_executor_generation_grant_identity.v2",
     opaque_session_ref: delivery.opaque_session_ref,
     generation_input_ref: delivery.generation_input_ref,
-    output_contract_digest: delivery.output_contract_digest,
-    delivery_ledger_digest: deliveryLedgerDigest,
-    final_chunk_receipt: finalChunk.chunk_receipt,
+    final_delivered_ordinal: finalChunk.ordinal,
+    output_schema_version: delivery.output_schema_version,
   })}`;
-  const record: AutomaticBuildExecutorGenerationGrantRecordV1 = {
-    version: "automatic_build_executor_generation_grant_record.v1",
+  const record: AutomaticBuildExecutorGenerationGrantRecordV2 = {
+    version: "automatic_build_executor_generation_grant_record.v2",
     opaque_session_ref: delivery.opaque_session_ref,
     generation_input_ref: delivery.generation_input_ref,
     generation_grant_ref: generationGrantRef,
-    output_contract_digest: delivery.output_contract_digest,
-    delivery_ledger_digest: deliveryLedgerDigest,
-    final_chunk_receipt: finalChunk.chunk_receipt,
+    final_delivered_ordinal: finalChunk.ordinal,
+    output_schema_version: delivery.output_schema_version,
     issued_at: issuedAt,
   };
   const file = generationGrantFile(delivery.opaque_session_ref);
@@ -2263,53 +2724,54 @@ function issueGenerationGrant(
 }
 
 function grantResponse(
-  record: AutomaticBuildExecutorGenerationGrantRecordV1,
-): AutomaticBuildExecutorSessionResponseV2 {
-  return boundedV2Response({
-    version: "automatic_build_executor_session.v2",
+  record: AutomaticBuildExecutorGenerationGrantRecordV2,
+): AutomaticBuildExecutorSessionResponseV3 {
+  return boundedV3Response({
+    version: "automatic_build_executor_session.v3",
     action: {
       kind: "GENERATION_GRANT",
       grant: {
-        version: "automatic_build_executor_generation_grant.v1",
+        version: "automatic_build_executor_generation_grant.v2",
         opaque_session_ref: record.opaque_session_ref,
         generation_input_ref: record.generation_input_ref,
         generation_grant_ref: record.generation_grant_ref,
-        output_contract_digest: record.output_contract_digest,
+        final_delivered_ordinal: record.final_delivered_ordinal,
+        output_schema_version: record.output_schema_version,
       },
     },
   });
 }
 
-function boundedV2Response(
-  response: AutomaticBuildExecutorSessionResponseV2,
+function boundedV3Response(
+  response: AutomaticBuildExecutorSessionResponseV3,
   payloadUtf8 = "",
-): AutomaticBuildExecutorSessionResponseV2 {
+): AutomaticBuildExecutorSessionResponseV3 {
   const measured = measureExecutorTransportResponse(
     response,
     payloadUtf8,
-    CODEX_EXECUTOR_TRANSPORT_PROFILE_V1,
+    CODEX_EXECUTOR_TRANSPORT_PROFILE_V2,
   );
   if (measured.status !== "within_limit") {
-    throw new Error(`executor V2 response exceeds its transport profile: ${measured.blocking_reasons.join(",")}`);
+    throw new Error(`executor V3 response exceeds its transport profile: ${measured.blocking_reasons.join(",")}`);
   }
   return response;
 }
 
-function v2DoneResponse(
-  status: Extract<AutomaticBuildExecutorSessionActionV2, { kind: "DONE" }>["status"],
-): AutomaticBuildExecutorSessionResponseV2 {
-  return boundedV2Response({
-    version: "automatic_build_executor_session.v2",
+function v3DoneResponse(
+  status: Extract<AutomaticBuildExecutorSessionActionV3, { kind: "DONE" }>["status"],
+): AutomaticBuildExecutorSessionResponseV3 {
+  return boundedV3Response({
+    version: "automatic_build_executor_session.v3",
     action: { kind: "DONE", status },
   });
 }
 
 function candidateSinkRefFor(input: Omit<
-  AutomaticBuildExecutorCandidateSinkRecordV1,
+  AutomaticBuildExecutorCandidateSinkRecordV2,
   "version" | "candidate_sink_ref" | "created_at"
 >): string {
   return `absink1_${sha256({
-    version: "automatic_build_executor_candidate_sink_identity.v1",
+    version: "automatic_build_executor_candidate_sink_identity.v2",
     ...input,
   })}`;
 }
@@ -2318,11 +2780,11 @@ function validateCandidateSinkRecord(
   value: unknown,
   expected?: {
     task_session: AutomaticBuildExecutorTaskSessionRecordV1;
-    delivery: AutomaticBuildExecutorDeliverySessionRecordV2;
-    grant: AutomaticBuildExecutorGenerationGrantRecordV1;
+    delivery: AutomaticBuildExecutorDeliverySessionRecordV3;
+    grant: AutomaticBuildExecutorGenerationGrantRecordV2;
     output_contract: AutomaticBuildSemanticCandidateContractV2;
   },
-): AutomaticBuildExecutorCandidateSinkRecordV1 {
+): AutomaticBuildExecutorCandidateSinkRecordV2 {
   if (!isRecord(value)) throw new Error("executor candidate sink record is invalid");
   exactKeys(value, [
     "version",
@@ -2338,12 +2800,11 @@ function validateCandidateSinkRecord(
     "physical_attempt",
     "semantic_attempt",
     "lease_epoch",
-    "output_contract_digest",
-    "transport_profile_digest",
+    "output_schema_version",
     "created_at",
   ]);
   const owner = validateOwnerIdentity(value.owner_identity);
-  if (value.version !== "automatic_build_executor_candidate_sink_record.v1"
+  if (value.version !== "automatic_build_executor_candidate_sink_record.v2"
     || owner.version !== "automatic_build_dispatch_owner_identity.v1"
     || typeof value.stage !== "string" || !STAGES.has(value.stage as AutomaticBuildStage)
     || typeof value.work_unit_id !== "string" || !value.work_unit_id) {
@@ -2361,18 +2822,13 @@ function validateCandidateSinkRecord(
     physical_attempt: positiveSafeInteger(value.physical_attempt, "physical_attempt"),
     semantic_attempt: positiveSafeInteger(value.semantic_attempt, "semantic_attempt"),
     lease_epoch: positiveSafeInteger(value.lease_epoch, "lease_epoch"),
-    output_contract_digest: boundedString(value.output_contract_digest, "output_contract_digest", 64),
-    transport_profile_digest: boundedString(
-      value.transport_profile_digest,
-      "transport_profile_digest",
-      64,
+    output_schema_version: boundedString(
+      value.output_schema_version,
+      "output_schema_version",
+      256,
     ),
   };
-  if (!SHA256.test(unsigned.output_contract_digest)
-    || !SHA256.test(unsigned.transport_profile_digest)) {
-    throw new Error("executor candidate sink digest is invalid");
-  }
-  const record: AutomaticBuildExecutorCandidateSinkRecordV1 = {
+  const record: AutomaticBuildExecutorCandidateSinkRecordV2 = {
     version: value.version,
     candidate_sink_ref: validateCandidateSinkRef(value.candidate_sink_ref),
     ...unsigned,
@@ -2397,9 +2853,9 @@ function validateCandidateSinkRecord(
       || record.physical_attempt !== task.physical_attempt
       || record.semantic_attempt !== task.semantic_attempt
       || record.lease_epoch !== task.lease_epoch
-      || record.output_contract_digest !== sha256(expected.output_contract)
-      || record.output_contract_digest !== grant.output_contract_digest
-      || record.transport_profile_digest !== delivery.transport_profile_digest) {
+      || record.output_schema_version !== expected.output_contract.version
+      || record.output_schema_version !== grant.output_schema_version
+      || record.output_schema_version !== delivery.output_schema_version) {
       throw new Error("executor candidate sink binding changed");
     }
   }
@@ -2408,11 +2864,11 @@ function validateCandidateSinkRecord(
 
 function issueCandidateSink(input: {
   task_session: AutomaticBuildExecutorTaskSessionRecordV1;
-  delivery: AutomaticBuildExecutorDeliverySessionRecordV2;
-  grant: AutomaticBuildExecutorGenerationGrantRecordV1;
+  delivery: AutomaticBuildExecutorDeliverySessionRecordV3;
+  grant: AutomaticBuildExecutorGenerationGrantRecordV2;
   output_contract: AutomaticBuildSemanticCandidateContractV2;
   created_at: string;
-}): AutomaticBuildExecutorCandidateSinkRecordV1 {
+}): AutomaticBuildExecutorCandidateSinkRecordV2 {
   const task = input.task_session;
   const unsigned = {
     opaque_session_ref: task.opaque_session_ref,
@@ -2426,11 +2882,10 @@ function issueCandidateSink(input: {
     physical_attempt: task.physical_attempt,
     semantic_attempt: task.semantic_attempt,
     lease_epoch: task.lease_epoch,
-    output_contract_digest: sha256(input.output_contract),
-    transport_profile_digest: input.delivery.transport_profile_digest,
+    output_schema_version: input.output_contract.version,
   };
-  const proposed: AutomaticBuildExecutorCandidateSinkRecordV1 = {
-    version: "automatic_build_executor_candidate_sink_record.v1",
+  const proposed: AutomaticBuildExecutorCandidateSinkRecordV2 = {
+    version: "automatic_build_executor_candidate_sink_record.v2",
     candidate_sink_ref: candidateSinkRefFor(unsigned),
     ...unsigned,
     created_at: input.created_at,
@@ -2440,18 +2895,132 @@ function issueCandidateSink(input: {
   return validateCandidateSinkRecord(decodeJsonRecord(file), input);
 }
 
+function privateCandidateSinkRefFor(input: Omit<
+  AutomaticBuildExecutorPrivateCandidateSinkRecordV3,
+  "version" | "candidate_sink_ref" | "created_at"
+>): string {
+  return `absink1_${sha256({
+    version: "automatic_build_executor_private_candidate_sink_identity.v3",
+    ...input,
+  })}`;
+}
+
+function validatePrivateCandidateSinkRecord(
+  value: unknown,
+  expected?: {
+    private_session: AutomaticBuildExecutorPrivateSessionRecordV1;
+    delivery: AutomaticBuildExecutorPrivateDeliverySessionRecordV3;
+    grant: AutomaticBuildExecutorGenerationGrantRecordV2;
+    output_contract: AutomaticBuildPrivateArtifactCandidateContractV2;
+  },
+): AutomaticBuildExecutorPrivateCandidateSinkRecordV3 {
+  if (!isRecord(value)) throw new Error("executor private candidate sink record is invalid");
+  exactKeys(value, [
+    "version",
+    "candidate_sink_ref",
+    "opaque_session_ref",
+    "opaque_handoff_ref",
+    "delivery_session_ref",
+    "generation_input_ref",
+    "generation_grant_ref",
+    "owner_identity",
+    "task_id",
+    "attempt",
+    "output_schema_version",
+    "created_at",
+  ]);
+  if (value.version !== "automatic_build_executor_private_candidate_sink_record.v3") {
+    throw new Error("executor private candidate sink record identity is invalid");
+  }
+  const unsigned = {
+    opaque_session_ref: validateOpaqueSessionRef(value.opaque_session_ref),
+    opaque_handoff_ref: validateOpaqueHandoffRef(value.opaque_handoff_ref),
+    delivery_session_ref: validateOpaqueSessionRef(value.delivery_session_ref),
+    generation_input_ref: validateGenerationInputRef(value.generation_input_ref),
+    generation_grant_ref: validateGenerationGrantRef(value.generation_grant_ref),
+    owner_identity: validatePrivateOwnerIdentity(value.owner_identity),
+    task_id: boundedString(value.task_id, "task_id", 512),
+    attempt: positiveSafeInteger(value.attempt, "attempt"),
+    output_schema_version: boundedString(
+      value.output_schema_version,
+      "output_schema_version",
+      256,
+    ),
+  };
+  const record: AutomaticBuildExecutorPrivateCandidateSinkRecordV3 = {
+    version: value.version,
+    candidate_sink_ref: validateCandidateSinkRef(value.candidate_sink_ref),
+    ...unsigned,
+    created_at: isoTimestamp(value.created_at, "created_at"),
+  };
+  if (record.candidate_sink_ref !== privateCandidateSinkRefFor(unsigned)
+    || record.owner_identity.task_id !== record.task_id
+    || record.owner_identity.attempt !== record.attempt) {
+    throw new Error("executor private candidate sink ref does not match its identity");
+  }
+  if (expected) {
+    if (record.opaque_session_ref !== expected.private_session.opaque_session_ref
+      || record.opaque_handoff_ref !== expected.private_session.opaque_handoff_ref
+      || record.delivery_session_ref !== expected.delivery.opaque_session_ref
+      || record.generation_input_ref !== expected.delivery.generation_input_ref
+      || record.generation_grant_ref !== expected.grant.generation_grant_ref
+      || canonicalAutomaticBuildJson(record.owner_identity)
+        !== canonicalAutomaticBuildJson(expected.private_session.owner_identity)
+      || record.task_id !== expected.private_session.owner_identity.task_id
+      || record.attempt !== expected.private_session.owner_identity.attempt
+      || record.output_schema_version !== expected.output_contract.version
+      || record.output_schema_version !== expected.grant.output_schema_version
+      || record.output_schema_version !== expected.delivery.output_schema_version) {
+      throw new Error("executor private candidate sink binding changed");
+    }
+  }
+  return record;
+}
+
+function issuePrivateCandidateSink(input: {
+  private_session: AutomaticBuildExecutorPrivateSessionRecordV1;
+  delivery: AutomaticBuildExecutorPrivateDeliverySessionRecordV3;
+  grant: AutomaticBuildExecutorGenerationGrantRecordV2;
+  output_contract: AutomaticBuildPrivateArtifactCandidateContractV2;
+  created_at: string;
+}): AutomaticBuildExecutorPrivateCandidateSinkRecordV3 {
+  const unsigned = {
+    opaque_session_ref: input.private_session.opaque_session_ref,
+    opaque_handoff_ref: input.private_session.opaque_handoff_ref,
+    delivery_session_ref: input.delivery.opaque_session_ref,
+    generation_input_ref: input.delivery.generation_input_ref,
+    generation_grant_ref: input.grant.generation_grant_ref,
+    owner_identity: input.private_session.owner_identity,
+    task_id: input.private_session.owner_identity.task_id,
+    attempt: input.private_session.owner_identity.attempt,
+    output_schema_version: input.output_contract.version,
+  };
+  const proposed: AutomaticBuildExecutorPrivateCandidateSinkRecordV3 = {
+    version: "automatic_build_executor_private_candidate_sink_record.v3",
+    candidate_sink_ref: privateCandidateSinkRefFor(unsigned),
+    ...unsigned,
+    created_at: input.created_at,
+  };
+  const file = candidateSinkRecordFile(input.private_session.opaque_session_ref);
+  if (writeCreateOnly(file, proposed)) return proposed;
+  return validatePrivateCandidateSinkRecord(decodeJsonRecord(file), input);
+}
+
 function readCandidateSinkRecord(
   opaqueSessionRef: string,
-): AutomaticBuildExecutorCandidateSinkRecordV1 | undefined {
+): AutomaticBuildExecutorAnyCandidateSinkRecord | undefined {
   const file = candidateSinkRecordFile(opaqueSessionRef);
   if (!existsSync(file)) return undefined;
-  return validateCandidateSinkRecord(decodeJsonRecord(file));
+  const value = decodeJsonRecord(file);
+  return isRecord(value) && value.version === "automatic_build_executor_private_candidate_sink_record.v3"
+    ? validatePrivateCandidateSinkRecord(value)
+    : validateCandidateSinkRecord(value);
 }
 
 function validateGenerationStartRecord(
   value: unknown,
-  grant: AutomaticBuildExecutorGenerationGrantRecordV1,
-): AutomaticBuildExecutorGenerationStartRecordV1 {
+  grant: AutomaticBuildExecutorGenerationGrantRecordV2,
+): AutomaticBuildExecutorGenerationStartRecordV2 {
   if (!isRecord(value)) throw new Error("executor generation start record is invalid");
   exactKeys(value, [
     "version",
@@ -2463,15 +3032,15 @@ function validateGenerationStartRecord(
     "response",
     "started_at",
   ]);
-  if (value.version !== "automatic_build_executor_generation_start_record.v1"
+  if (value.version !== "automatic_build_executor_generation_start_record.v2"
     || value.opaque_session_ref !== grant.opaque_session_ref
     || value.generation_input_ref !== grant.generation_input_ref
     || value.generation_grant_ref !== grant.generation_grant_ref
     || !isRecord(value.response)
-    || value.response.version !== "automatic_build_executor_session.v2") {
+    || value.response.version !== "automatic_build_executor_session.v3") {
     throw new Error("executor generation start record identity is invalid");
   }
-  const response = value.response as unknown as AutomaticBuildExecutorSessionResponseV2;
+  const response = value.response as unknown as AutomaticBuildExecutorSessionResponseV3;
   if (response.action.kind !== "GENERATE"
     || response.action.opaque_session_ref !== value.task_session_ref
     || response.action.semantic_attempt !== value.semantic_attempt
@@ -2482,7 +3051,7 @@ function validateGenerationStartRecord(
   if (!sink || sink.candidate_sink_ref !== response.action.candidate_sink_ref) {
     throw new Error("executor generation start candidate sink is missing or changed");
   }
-  const record: AutomaticBuildExecutorGenerationStartRecordV1 = {
+  const record: AutomaticBuildExecutorGenerationStartRecordV2 = {
     version: value.version,
     opaque_session_ref: grant.opaque_session_ref,
     generation_input_ref: grant.generation_input_ref,
@@ -2492,36 +3061,38 @@ function validateGenerationStartRecord(
     response,
     started_at: isoTimestamp(value.started_at, "started_at"),
   };
-  boundedV2Response(record.response);
+  boundedV3Response(record.response);
   return record;
 }
 
 function readGenerationStartRecord(
-  grant: AutomaticBuildExecutorGenerationGrantRecordV1,
-): AutomaticBuildExecutorGenerationStartRecordV1 | undefined {
+  grant: AutomaticBuildExecutorGenerationGrantRecordV2,
+): AutomaticBuildExecutorGenerationStartRecordV2 | undefined {
   const file = generationStartRecordFile(grant.generation_grant_ref);
   if (!existsSync(file)) return undefined;
   return validateGenerationStartRecord(decodeJsonRecord(file), grant);
 }
 
 function deliveryProgressResponse(input: {
-  delivery: AutomaticBuildExecutorDeliverySessionRecordV2;
-  material: AutomaticBuildExecutorDeliveryMaterialV2;
-}): AutomaticBuildExecutorSessionResponseV2 {
+  delivery: AutomaticBuildExecutorAnyDeliverySessionRecordV3;
+  material: AutomaticBuildExecutorDeliveryMaterialV3;
+}): AutomaticBuildExecutorSessionResponseV3 {
   const receipts = confirmedDeliveryReceipts(input.delivery, input.material);
-  const previousReceipt = receipts.length === input.material.chunks.length
+  const previousChunkOrdinal = receipts.length === input.material.chunks.length
     ? undefined
-    : receipts.at(-1)?.chunk_receipt;
-  return boundedV2Response({
-    version: "automatic_build_executor_session.v2",
+    : receipts.at(-1)?.ordinal;
+  return boundedV3Response({
+    version: "automatic_build_executor_session.v3",
     action: {
       kind: "DELIVER_INPUT",
       input_manifest: input.material.manifest,
       next_request: {
-        version: "automatic_build_executor_input_next_request.v2",
+        version: "automatic_build_executor_input_next_request.v3",
         opaque_session_ref: input.delivery.opaque_session_ref,
         generation_input_ref: input.delivery.generation_input_ref,
-        ...(previousReceipt ? { previous_chunk_receipt: previousReceipt } : {}),
+        ...(previousChunkOrdinal === undefined
+          ? {}
+          : { previous_chunk_ordinal: previousChunkOrdinal }),
       },
     },
   });
@@ -2877,6 +3448,9 @@ export function openAutomaticBuildExecutorSession(
   const opaqueHandoffRef = validateOpaqueHandoffRef(opaqueHandoffRefValue);
   const now = options.now === undefined ? new Date().toISOString() : isoTimestamp(options.now, "now");
   const record = readOpaqueHandoffRecord(opaqueHandoffRef);
+  if (record.version !== "automatic_build_opaque_handoff_record.v1") {
+    throw new Error("legacy Executor session requires a V2 handoff ref");
+  }
   if (record.kind === "private_artifact") {
     const context = resolvePrivateArtifactContext(record);
     if (context.inspection.state === "committed") return doneResponse("committed");
@@ -2945,17 +3519,63 @@ export function openAutomaticBuildExecutorSession(
   });
 }
 
-function resolveDeliverySessionContext(opaqueSessionRefValue: string): {
-  delivery: AutomaticBuildExecutorDeliverySessionRecordV2;
-  target: AutomaticBuildTarget;
-  owner: AutomaticBuildDispatchOwnerIdentityV1;
-  persisted: AutomaticBuildPersistedDispatchV1;
-  semantic_prompt: string;
-  open_record: AutomaticBuildExecutorOpenRecordV1;
-  material: AutomaticBuildExecutorDeliveryMaterialV2;
-} {
+type AutomaticBuildExecutorDeliveryContextV3 =
+  | {
+      kind: "public_dispatch";
+      delivery: AutomaticBuildExecutorDeliverySessionRecordV3;
+      target: AutomaticBuildTarget;
+      owner: AutomaticBuildDispatchOwnerIdentityV1;
+      persisted: AutomaticBuildPersistedDispatchV1;
+      semantic_prompt: string;
+      open_record: AutomaticBuildExecutorOpenRecordV1;
+      material: AutomaticBuildExecutorDeliveryMaterialV3;
+    }
+  | {
+      kind: "private_artifact";
+      delivery: AutomaticBuildExecutorPrivateDeliverySessionRecordV3;
+      context: AutomaticBuildPrivateArtifactContextV1;
+      open_record: AutomaticBuildExecutorOpenRecordV1;
+      material: AutomaticBuildExecutorDeliveryMaterialV3;
+    };
+
+function resolveDeliverySessionContext(
+  opaqueSessionRefValue: string,
+): AutomaticBuildExecutorDeliveryContextV3 {
   const delivery = readDeliverySessionRecord(validateOpaqueSessionRef(opaqueSessionRefValue));
   const handoffRecord = readOpaqueHandoffRecord(delivery.opaque_handoff_ref);
+  if (delivery.version === "automatic_build_executor_private_delivery_session_record.v3") {
+    const context = resolvePrivateArtifactContext(handoffRecord);
+    if (canonicalAutomaticBuildJson(context.owner)
+      !== canonicalAutomaticBuildJson(delivery.owner_identity)
+      || context.attempt.task.task_id !== delivery.task_id) {
+      throw new Error("executor private delivery owner identity changed");
+    }
+    const openFile = registryFile("executor-opens", delivery.opaque_handoff_ref);
+    if (!existsSync(openFile)) throw new Error("executor private delivery open record is missing");
+    const openRecord = validateOpenRecord(
+      decodeJsonRecord(openFile),
+      delivery.opaque_handoff_ref,
+      context.owner,
+    );
+    if (openRecord.opaque_session_ref !== delivery.open_session_ref) {
+      throw new Error("executor private delivery open identity changed");
+    }
+    const generationInput = readGenerationInputRecord(delivery);
+    const material = renderPrivateDeliveryMaterial({
+      context,
+      opaque_session_ref: delivery.opaque_session_ref,
+      opaque_handoff_ref: delivery.opaque_handoff_ref,
+      semantic_input: generationInput.semantic_input,
+    });
+    assertDeliveryMaterialMatches(delivery, material);
+    return {
+      kind: "private_artifact",
+      delivery,
+      context,
+      open_record: openRecord,
+      material,
+    };
+  }
   const published = validatePublishedPublicDispatch(handoffRecord);
   if (canonicalAutomaticBuildJson(published.owner)
     !== canonicalAutomaticBuildJson(delivery.owner_identity)
@@ -2992,6 +3612,7 @@ function resolveDeliverySessionContext(opaqueSessionRefValue: string): {
   });
   assertDeliveryMaterialMatches(delivery, material);
   return {
+    kind: "public_dispatch",
     delivery,
     target: published.target,
     owner: published.owner,
@@ -3002,15 +3623,63 @@ function resolveDeliverySessionContext(opaqueSessionRefValue: string): {
   };
 }
 
-export function openAutomaticBuildExecutorSessionV2(
+export function openAutomaticBuildExecutorSessionV3(
   opaqueHandoffRefValue: string,
   options: { now?: string } = {},
-): AutomaticBuildExecutorSessionResponseV2 {
+): AutomaticBuildExecutorSessionResponseV3 {
   const opaqueHandoffRef = validateOpaqueHandoffRef(opaqueHandoffRefValue);
   const now = options.now === undefined ? new Date().toISOString() : isoTimestamp(options.now, "now");
   const record = readOpaqueHandoffRecord(opaqueHandoffRef);
-  if (record.kind !== "public_dispatch") {
-    throw new Error("automatic build executor session V2 currently requires a public dispatch");
+  if (record.version === "automatic_build_opaque_handoff_record.v1"
+    && record.kind === "private_artifact") {
+    const context = resolvePrivateArtifactContext(record);
+    if (context.inspection.state === "committed") return v3DoneResponse("committed");
+    if (context.inspection.state === "retryable_failure") {
+      return v3DoneResponse("retryable_failure");
+    }
+    const openFile = registryFile("executor-opens", opaqueHandoffRef);
+    const proposedOpen: AutomaticBuildExecutorOpenRecordV1 = {
+      version: "automatic_build_executor_open_record.v1",
+      opaque_handoff_ref: opaqueHandoffRef,
+      opaque_session_ref: `absession1_${sha256({
+        version: "automatic_build_executor_session_identity.v1",
+        opaque_handoff_ref: opaqueHandoffRef,
+        nonce: randomUUID(),
+      })}`,
+      owner_identity: context.owner,
+      opened_at: now,
+    };
+    let openRecord = proposedOpen;
+    if (!writeCreateOnly(openFile, proposedOpen)) {
+      openRecord = validateOpenRecord(decodeJsonRecord(openFile), opaqueHandoffRef, context.owner);
+    }
+    const deliverySessionRef = privateDeliverySessionRefFor({
+      open_session_ref: openRecord.opaque_session_ref,
+      opaque_handoff_ref: opaqueHandoffRef,
+      owner_identity: context.owner,
+      task_id: context.attempt.task.task_id,
+      transport_profile: CODEX_EXECUTOR_TRANSPORT_PROFILE_V2,
+    });
+    const material = renderPrivateDeliveryMaterial({
+      context,
+      opaque_session_ref: deliverySessionRef,
+      opaque_handoff_ref: opaqueHandoffRef,
+    });
+    persistGenerationInputRecord(material, now);
+    const delivery = persistDeliverySessionRecord(privateDeliveryRecordFromMaterial({
+      opaque_handoff_ref: opaqueHandoffRef,
+      open_record: openRecord,
+      delivery_session_ref: deliverySessionRef,
+      context,
+      material,
+      created_at: now,
+    }));
+    return deliveryProgressResponse({ delivery, material });
+  }
+  if (record.version !== "automatic_build_opaque_handoff_record.v3"
+    || record.session_protocol !== "automatic_build_executor_session.v3"
+    || record.kind !== "public_dispatch") {
+    throw new Error("automatic build executor session V3 currently requires a public dispatch");
   }
   const published = validatePublishedPublicDispatch(record);
   const inspection = inspectAutomaticBuildDispatch(
@@ -3021,7 +3690,7 @@ export function openAutomaticBuildExecutorSessionV2(
     published.owner.dispatch_run_id,
   );
   if (inspection.state === "finished") {
-    return v2DoneResponse(terminalStatus(inspection.receipt.terminal_reason));
+    return v3DoneResponse(terminalStatus(inspection.receipt.terminal_reason));
   }
   const workUnitId = inspection.next_work_unit_id;
   if (!workUnitId) {
@@ -3031,7 +3700,7 @@ export function openAutomaticBuildExecutorSessionV2(
       published.owner.dispatch_id,
       { now, dispatch_run_id: published.owner.dispatch_run_id },
     );
-    return v2DoneResponse(terminalStatus(receipt.terminal_reason));
+    return v3DoneResponse(terminalStatus(receipt.terminal_reason));
   }
   const openFile = registryFile("executor-opens", opaqueHandoffRef);
   const proposedOpen: AutomaticBuildExecutorOpenRecordV1 = {
@@ -3057,7 +3726,7 @@ export function openAutomaticBuildExecutorSessionV2(
     stage: stage.descriptor.stage,
     work_unit_id: stage.descriptor.work_unit_id,
     descriptor_input_hash: stage.descriptor.input_hash,
-    transport_profile_digest: CODEX_EXECUTOR_TRANSPORT_PROFILE_V1.profile_digest,
+    transport_profile: CODEX_EXECUTOR_TRANSPORT_PROFILE_V2,
   });
   const material = renderDeliveryMaterial({
     target: published.target,
@@ -3085,31 +3754,36 @@ export function openAutomaticBuildExecutorSessionV2(
 
 function validateInputNextRequest(
   value: unknown,
-): AutomaticBuildExecutorInputNextRequestV2 {
+): AutomaticBuildExecutorInputNextRequestV3 {
   if (!isRecord(value)) throw new Error("executor input.next request must be an object");
   exactKeys(
     value,
     ["version", "opaque_session_ref", "generation_input_ref"],
-    ["previous_chunk_receipt", "now"],
+    ["previous_chunk_ordinal", "now"],
   );
-  if (value.version !== "automatic_build_executor_input_next_request.v2") {
+  if (value.version !== "automatic_build_executor_input_next_request.v3") {
     throw new Error("executor input.next request version is unsupported");
   }
   return {
     version: value.version,
     opaque_session_ref: validateOpaqueSessionRef(value.opaque_session_ref),
     generation_input_ref: validateGenerationInputRef(value.generation_input_ref),
-    ...(value.previous_chunk_receipt === undefined
+    ...(value.previous_chunk_ordinal === undefined
       ? {}
-      : { previous_chunk_receipt: validateChunkReceipt(value.previous_chunk_receipt) }),
+      : {
+          previous_chunk_ordinal: nonNegativeSafeInteger(
+            value.previous_chunk_ordinal,
+            "previous_chunk_ordinal",
+          ),
+        }),
     ...(value.now === undefined ? {} : { now: isoTimestamp(value.now, "now") }),
   };
 }
 
 export function nextAutomaticBuildExecutorInput(
-  requestValue: AutomaticBuildExecutorInputNextRequestV2,
+  requestValue: AutomaticBuildExecutorInputNextRequestV3,
   options: { now?: string } = {},
-): AutomaticBuildExecutorSessionResponseV2 {
+): AutomaticBuildExecutorSessionResponseV3 {
   const request = validateInputNextRequest(requestValue);
   const nowValue = options.now ?? request.now;
   const now = nowValue === undefined ? new Date().toISOString() : isoTimestamp(nowValue, "now");
@@ -3119,62 +3793,62 @@ export function nextAutomaticBuildExecutorInput(
   }
   let receipts = confirmedDeliveryReceipts(context.delivery, context.material);
   if (receipts.length === context.material.chunks.length) {
-    if (request.previous_chunk_receipt === undefined) {
+    if (request.previous_chunk_ordinal === undefined) {
       const chunk = context.material.chunks[0];
-      return boundedV2Response({
-        version: "automatic_build_executor_session.v2",
+      return boundedV3Response({
+        version: "automatic_build_executor_session.v3",
         action: { kind: "INPUT_CHUNK", chunk },
       }, chunk.payload_utf8);
     }
-    const replayOrdinal = context.material.chunks.findIndex(
-      (chunk) => chunk.chunk_receipt === request.previous_chunk_receipt,
-    );
-    if (replayOrdinal < 0) throw new Error("executor input.next receipt is unknown or cross-session");
+    const replayOrdinal = request.previous_chunk_ordinal;
+    if (replayOrdinal >= context.material.chunks.length) {
+      throw new Error("executor input.next ordinal is unknown for its session");
+    }
     if (replayOrdinal === context.material.chunks.length - 1) {
       return grantResponse(issueGenerationGrant(context.delivery, context.material, now));
     }
     const chunk = context.material.chunks[replayOrdinal + 1];
-    return boundedV2Response({
-      version: "automatic_build_executor_session.v2",
+    return boundedV3Response({
+      version: "automatic_build_executor_session.v3",
       action: { kind: "INPUT_CHUNK", chunk },
     }, chunk.payload_utf8);
   }
-  if (request.previous_chunk_receipt === undefined) {
+  if (request.previous_chunk_ordinal === undefined) {
     if (receipts.length !== 0) {
-      throw new Error("executor input.next is missing the latest delivery receipt");
+      throw new Error("executor input.next is missing the latest delivered ordinal");
     }
   } else {
-    const receiptOrdinal = context.material.chunks.findIndex(
-      (chunk) => chunk.chunk_receipt === request.previous_chunk_receipt,
-    );
-    if (receiptOrdinal < 0) throw new Error("executor input.next receipt is unknown or cross-session");
+    const receiptOrdinal = request.previous_chunk_ordinal;
+    if (receiptOrdinal >= context.material.chunks.length) {
+      throw new Error("executor input.next ordinal is unknown for its session");
+    }
     if (receiptOrdinal === receipts.length) {
       confirmDeliveryChunk(context.delivery, context.material.chunks[receiptOrdinal], now);
       receipts = confirmedDeliveryReceipts(context.delivery, context.material);
     } else if (receiptOrdinal !== receipts.length - 1) {
-      throw new Error("executor input.next receipt is out of order");
+      throw new Error("executor input.next ordinal is out of order");
     }
   }
   if (receipts.length === context.material.chunks.length) {
     return grantResponse(issueGenerationGrant(context.delivery, context.material, now));
   }
   const chunk = context.material.chunks[receipts.length];
-  return boundedV2Response({
-    version: "automatic_build_executor_session.v2",
+  return boundedV3Response({
+    version: "automatic_build_executor_session.v3",
     action: { kind: "INPUT_CHUNK", chunk },
   }, chunk.payload_utf8);
 }
 
 function validateGenerationStartRequest(
   value: unknown,
-): AutomaticBuildExecutorGenerationStartRequestV1 {
+): AutomaticBuildExecutorGenerationStartRequestV2 {
   if (!isRecord(value)) throw new Error("executor generation.start request must be an object");
   exactKeys(
     value,
     ["version", "opaque_session_ref", "generation_grant_ref"],
     ["now"],
   );
-  if (value.version !== "automatic_build_executor_generation_start_request.v1") {
+  if (value.version !== "automatic_build_executor_generation_start_request.v2") {
     throw new Error("executor generation.start request version is unsupported");
   }
   return {
@@ -3186,9 +3860,9 @@ function validateGenerationStartRequest(
 }
 
 function generationStartAcceptance(
-  request: AutomaticBuildExecutorGenerationStartRequestV1,
-  delivery: AutomaticBuildExecutorDeliverySessionRecordV2,
-  grant: AutomaticBuildExecutorGenerationGrantRecordV1,
+  request: AutomaticBuildExecutorGenerationStartRequestV2,
+  delivery: AutomaticBuildExecutorAnyDeliverySessionRecordV3,
+  grant: AutomaticBuildExecutorGenerationGrantRecordV2,
   acceptedAt: string,
 ): AutomaticBuildExecutorGenerationStartAcceptanceV1 {
   const proposed: AutomaticBuildExecutorGenerationStartAcceptanceV1 = {
@@ -3222,9 +3896,9 @@ function generationStartAcceptance(
 }
 
 export function startAutomaticBuildExecutorGeneration(
-  requestValue: AutomaticBuildExecutorGenerationStartRequestV1,
+  requestValue: AutomaticBuildExecutorGenerationStartRequestV2,
   options: { now?: string } = {},
-): AutomaticBuildExecutorSessionResponseV2 {
+): AutomaticBuildExecutorSessionResponseV3 {
   const request = validateGenerationStartRequest(requestValue);
   const nowValue = options.now ?? request.now;
   const now = nowValue === undefined ? new Date().toISOString() : isoTimestamp(nowValue, "now");
@@ -3240,6 +3914,59 @@ export function startAutomaticBuildExecutorGeneration(
   const existingStart = readGenerationStartRecord(grant);
   if (existingStart) return existingStart.response;
   const acceptance = generationStartAcceptance(request, context.delivery, grant, now);
+  if (context.kind === "private_artifact") {
+    if (context.context.inspection.state !== "pending") {
+      throw new Error("executor private generation.start task is already terminal");
+    }
+    const currentMaterial = renderPrivateDeliveryMaterial({
+      context: context.context,
+      opaque_session_ref: context.delivery.opaque_session_ref,
+      opaque_handoff_ref: context.delivery.opaque_handoff_ref,
+    });
+    assertDeliveryMaterialMatches(context.delivery, currentMaterial);
+    const privateSession = persistPrivateSessionRecord({
+      opaque_handoff_ref: context.delivery.opaque_handoff_ref,
+      open_record: context.open_record,
+      owner: context.context.owner,
+      created_at: acceptance.accepted_at,
+    });
+    const outputContract = privateArtifactCandidateContractV2(
+      context.context.attempt.task,
+    );
+    if (outputContract.version !== grant.output_schema_version) {
+      throw new Error("executor private generation.start output contract changed after grant");
+    }
+    const candidateSink = issuePrivateCandidateSink({
+      private_session: privateSession,
+      delivery: context.delivery,
+      grant,
+      output_contract: outputContract,
+      created_at: acceptance.accepted_at,
+    });
+    const response = boundedV3Response({
+      version: "automatic_build_executor_session.v3",
+      action: {
+        kind: "GENERATE",
+        opaque_session_ref: privateSession.opaque_session_ref,
+        candidate_sink_ref: candidateSink.candidate_sink_ref,
+        semantic_attempt: context.context.owner.attempt,
+        output_contract: outputContract,
+      },
+    });
+    const record: AutomaticBuildExecutorGenerationStartRecordV2 = {
+      version: "automatic_build_executor_generation_start_record.v2",
+      opaque_session_ref: context.delivery.opaque_session_ref,
+      generation_input_ref: context.delivery.generation_input_ref,
+      generation_grant_ref: grant.generation_grant_ref,
+      task_session_ref: privateSession.opaque_session_ref,
+      semantic_attempt: context.context.owner.attempt,
+      response,
+      started_at: acceptance.accepted_at,
+    };
+    const file = generationStartRecordFile(grant.generation_grant_ref);
+    if (writeCreateOnly(file, record)) return response;
+    return validateGenerationStartRecord(decodeJsonRecord(file), grant).response;
+  }
   const inspection = inspectAutomaticBuildDispatch(
     context.target,
     context.owner.stage,
@@ -3309,7 +4036,7 @@ export function startAutomaticBuildExecutorGeneration(
     throw new Error("executor generation.start rendered input changed after delivery");
   }
   const outputContract = semanticCandidateContractV2(stage.descriptor);
-  if (sha256(outputContract) !== grant.output_contract_digest) {
+  if (outputContract.version !== grant.output_schema_version) {
     throw new Error("executor generation.start output contract changed after grant");
   }
   const candidateSink = issueCandidateSink({
@@ -3319,8 +4046,8 @@ export function startAutomaticBuildExecutorGeneration(
     output_contract: outputContract,
     created_at: acceptance.accepted_at,
   });
-  const response = boundedV2Response({
-    version: "automatic_build_executor_session.v2",
+  const response = boundedV3Response({
+    version: "automatic_build_executor_session.v3",
     action: {
       kind: "GENERATE",
       opaque_session_ref: taskSession.opaque_session_ref,
@@ -3329,8 +4056,8 @@ export function startAutomaticBuildExecutorGeneration(
       output_contract: outputContract,
     },
   });
-  const record: AutomaticBuildExecutorGenerationStartRecordV1 = {
-    version: "automatic_build_executor_generation_start_record.v1",
+  const record: AutomaticBuildExecutorGenerationStartRecordV2 = {
+    version: "automatic_build_executor_generation_start_record.v2",
     opaque_session_ref: context.delivery.opaque_session_ref,
     generation_input_ref: context.delivery.generation_input_ref,
     generation_grant_ref: grant.generation_grant_ref,
@@ -3344,19 +4071,102 @@ export function startAutomaticBuildExecutorGeneration(
   return validateGenerationStartRecord(decodeJsonRecord(file), grant).response;
 }
 
-export function submitAutomaticBuildExecutorCandidateV2(
-  requestValue: AutomaticBuildExecutorCandidateSubmitV2,
+function stagePrivateArtifactCandidateValue(
+  context: AutomaticBuildPrivateArtifactContextV1,
+  candidate: JsonValue,
+  maxBytes: number,
+): void {
+  const candidatePath = context.attempt.candidate_path;
+  const bytes = Buffer.from(`${canonicalAutomaticBuildJson(candidate)}\n`, "utf8");
+  if (bytes.byteLength > maxBytes) {
+    throw new Error(`candidate exceeds ${maxBytes} bytes`);
+  }
+  const assertExisting = (): void => {
+    const stat = lstatSync(candidatePath);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size < 2 || stat.size > maxBytes) {
+      throw new Error("private artifact candidate mailbox is invalid");
+    }
+    const existing = JSON.parse(
+      new TextDecoder("utf-8", { fatal: true }).decode(readFileSync(candidatePath)),
+    ) as unknown;
+    if (canonicalAutomaticBuildJson(existing) !== canonicalAutomaticBuildJson(candidate)) {
+      throw new Error("private artifact candidate already exists with different fields");
+    }
+  };
+  if (existsSync(candidatePath)) {
+    assertExisting();
+    return;
+  }
+  try {
+    writeFileSync(candidatePath, bytes, { flag: "wx", mode: 0o600 });
+  } catch (error) {
+    const code = error && typeof error === "object" && "code" in error ? String(error.code) : "";
+    if (code !== "EEXIST") throw error;
+    assertExisting();
+  }
+}
+
+export function submitAutomaticBuildExecutorCandidateV3(
+  requestValue: AutomaticBuildExecutorCandidateSubmitV3,
   options: { now?: string } = {},
-): AutomaticBuildExecutorSessionResponseV2 {
-  const request = validateCandidateSubmitRequestV2(requestValue);
+): AutomaticBuildExecutorSessionResponseV3 {
+  const request = validateCandidateSubmitRequestV3(requestValue);
   const nowValue = options.now ?? request.now;
   const now = nowValue === undefined ? new Date().toISOString() : isoTimestamp(nowValue, "now");
+  const directSink = readCandidateSinkRecord(request.opaque_session_ref);
+  if (directSink?.version === "automatic_build_executor_private_candidate_sink_record.v3") {
+    if (directSink.candidate_sink_ref !== request.candidate_sink_ref) {
+      throw new Error("executor private candidate sink does not match its V3 session");
+    }
+    const privateResolved = resolvePrivateExecutorSession(request.opaque_session_ref);
+    if (!privateResolved) throw new Error("executor private V3 session does not exist");
+    const deliveryContext = resolveDeliverySessionContext(directSink.delivery_session_ref);
+    if (deliveryContext.kind !== "private_artifact") {
+      throw new Error("executor private candidate sink points to a public delivery");
+    }
+    const grant = issueGenerationGrant(
+      deliveryContext.delivery,
+      deliveryContext.material,
+      directSink.created_at,
+    );
+    const outputContract = privateArtifactCandidateContractV2(
+      privateResolved.context.attempt.task,
+    );
+    const sink = validatePrivateCandidateSinkRecord(
+      decodeJsonRecord(candidateSinkRecordFile(request.opaque_session_ref)),
+      {
+        private_session: privateResolved.session,
+        delivery: deliveryContext.delivery,
+        grant,
+        output_contract: outputContract,
+      },
+    );
+    if (sink.candidate_sink_ref !== request.candidate_sink_ref) {
+      throw new Error("executor private candidate sink ref changed before submit");
+    }
+    stagePrivateArtifactCandidateValue(
+      privateResolved.context,
+      request.candidate,
+      Math.min(
+        outputContract.max_bytes,
+        CODEX_EXECUTOR_TRANSPORT_PROFILE_V2.max_candidate_request_bytes,
+      ),
+    );
+    submitPrivateArtifactContext(privateResolved.context, now);
+    return openAutomaticBuildExecutorSessionV3(sink.opaque_handoff_ref, { now });
+  }
   const taskSession = resolveTaskSession(request.opaque_session_ref);
-  const storedSink = readCandidateSinkRecord(taskSession.task_session.opaque_session_ref);
-  if (!storedSink || storedSink.candidate_sink_ref !== request.candidate_sink_ref) {
-    throw new Error("executor candidate sink does not match its V2 session");
+  const storedSink = directSink
+    ?? readCandidateSinkRecord(taskSession.task_session.opaque_session_ref);
+  if (!storedSink
+    || storedSink.version !== "automatic_build_executor_candidate_sink_record.v2"
+    || storedSink.candidate_sink_ref !== request.candidate_sink_ref) {
+    throw new Error("executor candidate sink does not match its V3 session");
   }
   const deliveryContext = resolveDeliverySessionContext(storedSink.delivery_session_ref);
+  if (deliveryContext.kind !== "public_dispatch") {
+    throw new Error("executor public candidate sink points to a private delivery");
+  }
   const grant = issueGenerationGrant(
     deliveryContext.delivery,
     deliveryContext.material,
@@ -3388,9 +4198,9 @@ export function submitAutomaticBuildExecutorCandidateV2(
     {
       max_bytes: Math.min(
         outputContract.max_bytes,
-        CODEX_EXECUTOR_TRANSPORT_PROFILE_V1.max_candidate_request_bytes,
+        CODEX_EXECUTOR_TRANSPORT_PROFILE_V2.max_candidate_request_bytes,
       ),
-      max_tokens: CODEX_EXECUTOR_TRANSPORT_PROFILE_V1.max_candidate_request_tokens,
+      max_tokens: CODEX_EXECUTOR_TRANSPORT_PROFILE_V2.max_candidate_request_tokens,
       now,
     },
   );
@@ -3402,7 +4212,7 @@ export function submitAutomaticBuildExecutorCandidateV2(
     taskSession.task_session.lease_token,
     { now },
   );
-  return openAutomaticBuildExecutorSessionV2(sink.opaque_handoff_ref, { now });
+  return openAutomaticBuildExecutorSessionV3(sink.opaque_handoff_ref, { now });
 }
 
 export function submitAutomaticBuildExecutorCandidate(
@@ -3413,7 +4223,7 @@ export function submitAutomaticBuildExecutorCandidate(
   const now = options.now === undefined ? new Date().toISOString() : isoTimestamp(options.now, "now");
   const opaqueSessionRef = validateOpaqueSessionRef(opaqueSessionRefValue);
   if (readCandidateSinkRecord(opaqueSessionRef)) {
-    throw new Error("V2 executor sessions reject candidate_path submit");
+    throw new Error("V3 executor sessions reject candidate_path submit");
   }
   const candidatePath = path.resolve(boundedString(candidatePathValue, "candidate_path"));
   const privateResolved = resolvePrivateExecutorSession(opaqueSessionRef);
@@ -3466,7 +4276,7 @@ export function submitAutomaticBuildExecutorCandidate(
 export function failAutomaticBuildExecutorSession(
   opaqueSessionRefValue: string,
   input: { diagnostic_code: string; message?: string; now?: string },
-): AutomaticBuildExecutorSessionResponseV1 {
+): AutomaticBuildExecutorSessionResponseV1 | AutomaticBuildExecutorSessionResponseV3 {
   const now = input.now === undefined ? new Date().toISOString() : isoTimestamp(input.now, "now");
   const diagnosticCode = boundedString(input.diagnostic_code, "diagnostic_code", 256);
   const failureDiagnostic = automaticBuildFailureDiagnosticFromExecutorReport(
@@ -3478,7 +4288,11 @@ export function failAutomaticBuildExecutorSession(
     : boundedString(input.message, "message", 2_048);
   const privateResolved = resolvePrivateExecutorSession(opaqueSessionRefValue);
   if (privateResolved) {
-    if (privateResolved.context.inspection.state === "committed") return doneResponse("committed");
+    const privateV3 = readCandidateSinkRecord(opaqueSessionRefValue)?.version
+      === "automatic_build_executor_private_candidate_sink_record.v3";
+    if (privateResolved.context.inspection.state === "committed") {
+      return privateV3 ? v3DoneResponse("committed") : doneResponse("committed");
+    }
     failIntentArtifactTaskAttempt({
       private_root: privateResolved.context.attempt.private_root,
       task_path: privateResolved.context.attempt.task_path,
@@ -3486,7 +4300,7 @@ export function failAutomaticBuildExecutorSession(
       ...(message ? { message } : {}),
       failed_at: now,
     });
-    return doneResponse("retryable_failure");
+    return privateV3 ? v3DoneResponse("retryable_failure") : doneResponse("retryable_failure");
   }
   const resolved = resolveTaskSession(opaqueSessionRefValue);
   const taskState = inspectAutomaticBuildTask(
@@ -3587,11 +4401,11 @@ function validateOpenRequest(value: unknown): AutomaticBuildExecutorOpenRequestV
   };
 }
 
-function validateOpenRequestV2(value: unknown): AutomaticBuildExecutorOpenRequestV2 {
-  if (!isRecord(value)) throw new Error("executor.open V2 request must be an object");
+function validateOpenRequestV3(value: unknown): AutomaticBuildExecutorOpenRequestV3 {
+  if (!isRecord(value)) throw new Error("executor.open V3 request must be an object");
   exactKeys(value, ["version", "opaque_handoff_ref"], ["now"]);
-  if (value.version !== "automatic_build_executor_open_request.v2") {
-    throw new Error("executor.open V2 request version is unsupported");
+  if (value.version !== "automatic_build_executor_open_request.v3") {
+    throw new Error("executor.open V3 request version is unsupported");
   }
   return {
     version: value.version,
@@ -3614,29 +4428,29 @@ function validateSubmitRequest(value: unknown): AutomaticBuildExecutorSubmitRequ
   };
 }
 
-function validateCandidateSubmitRequestV2(
+function validateCandidateSubmitRequestV3(
   value: unknown,
-): AutomaticBuildExecutorCandidateSubmitV2 {
-  if (!isRecord(value)) throw new Error("executor candidate submit V2 request must be an object");
+): AutomaticBuildExecutorCandidateSubmitV3 {
+  if (!isRecord(value)) throw new Error("executor candidate submit V3 request must be an object");
   exactKeys(
     value,
     ["version", "opaque_session_ref", "candidate_sink_ref", "candidate"],
     ["now"],
   );
-  if (value.version !== "automatic_build_executor_candidate_submit.v2") {
-    throw new Error("executor candidate submit V2 request version is unsupported");
+  if (value.version !== "automatic_build_executor_candidate_submit.v3") {
+    throw new Error("executor candidate submit V3 request version is unsupported");
   }
   const serialized = canonicalAutomaticBuildJson(value);
   const serializedBytes = Buffer.byteLength(serialized, "utf8");
   const serializedTokens = estimateTokens(serialized);
-  if (serializedBytes > CODEX_EXECUTOR_TRANSPORT_PROFILE_V1.max_candidate_request_bytes) {
+  if (serializedBytes > CODEX_EXECUTOR_TRANSPORT_PROFILE_V2.max_candidate_request_bytes) {
     throw new Error(
-      `executor candidate request exceeds ${CODEX_EXECUTOR_TRANSPORT_PROFILE_V1.max_candidate_request_bytes} bytes`,
+      `executor candidate request exceeds ${CODEX_EXECUTOR_TRANSPORT_PROFILE_V2.max_candidate_request_bytes} bytes`,
     );
   }
-  if (serializedTokens > CODEX_EXECUTOR_TRANSPORT_PROFILE_V1.max_candidate_request_tokens) {
+  if (serializedTokens > CODEX_EXECUTOR_TRANSPORT_PROFILE_V2.max_candidate_request_tokens) {
     throw new Error(
-      `executor candidate request exceeds ${CODEX_EXECUTOR_TRANSPORT_PROFILE_V1.max_candidate_request_tokens} estimated tokens`,
+      `executor candidate request exceeds ${CODEX_EXECUTOR_TRANSPORT_PROFILE_V2.max_candidate_request_tokens} estimated tokens`,
     );
   }
   return {
@@ -3705,7 +4519,7 @@ function validateInterruptRequest(value: unknown): AutomaticBuildExecutorInterru
 
 export function runAutomaticBuildExecutorSessionCommand(
   value: unknown,
-): AutomaticBuildExecutorSessionResponseV1 | AutomaticBuildExecutorSessionResponseV2 {
+): AutomaticBuildExecutorSessionResponseV1 | AutomaticBuildExecutorSessionResponseV3 {
   if (!isRecord(value) || typeof value.version !== "string") {
     throw new Error("executor session request must be a versioned object");
   }
@@ -3713,21 +4527,21 @@ export function runAutomaticBuildExecutorSessionCommand(
     const request = validateOpenRequest(value);
     return openAutomaticBuildExecutorSession(request.opaque_handoff_ref, { now: request.now });
   }
-  if (value.version === "automatic_build_executor_open_request.v2") {
-    const request = validateOpenRequestV2(value);
-    return openAutomaticBuildExecutorSessionV2(request.opaque_handoff_ref, { now: request.now });
+  if (value.version === "automatic_build_executor_open_request.v3") {
+    const request = validateOpenRequestV3(value);
+    return openAutomaticBuildExecutorSessionV3(request.opaque_handoff_ref, { now: request.now });
   }
-  if (value.version === "automatic_build_executor_input_next_request.v2") {
+  if (value.version === "automatic_build_executor_input_next_request.v3") {
     const request = validateInputNextRequest(value);
     return nextAutomaticBuildExecutorInput(request, { now: request.now });
   }
-  if (value.version === "automatic_build_executor_generation_start_request.v1") {
+  if (value.version === "automatic_build_executor_generation_start_request.v2") {
     const request = validateGenerationStartRequest(value);
     return startAutomaticBuildExecutorGeneration(request, { now: request.now });
   }
-  if (value.version === "automatic_build_executor_candidate_submit.v2") {
-    const request = validateCandidateSubmitRequestV2(value);
-    return submitAutomaticBuildExecutorCandidateV2(request, { now: request.now });
+  if (value.version === "automatic_build_executor_candidate_submit.v3") {
+    const request = validateCandidateSubmitRequestV3(value);
+    return submitAutomaticBuildExecutorCandidateV3(request, { now: request.now });
   }
   if (value.version === "automatic_build_executor_submit_request.v1") {
     const request = validateSubmitRequest(value);
@@ -3773,7 +4587,7 @@ function readStdinRequest(): unknown {
   // Additional BOMs remain U+FEFF and are rejected by JSON.parse below.
   const value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) as unknown;
   if (bytes.byteLength > MAX_CONTROL_STDIN_BYTES
-    && (!isRecord(value) || value.version !== "automatic_build_executor_candidate_submit.v2")) {
+    && (!isRecord(value) || value.version !== "automatic_build_executor_candidate_submit.v3")) {
     throw new Error("executor control stdin exceeds its byte limit");
   }
   return value;

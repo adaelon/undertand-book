@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
@@ -16,6 +15,9 @@ const executorToolNames = [
   "executor.generation.start",
   "executor.submit_candidate",
 ];
+const rootToolProhibition = (toolName) => (
+  `The root must not call, probe, enumerate, or use \`${toolName}\` to diagnose a handoff.`
+);
 
 async function readJson(relativePath) {
   return JSON.parse(await readFile(path.join(repoRoot, relativePath), "utf8"));
@@ -33,10 +35,6 @@ function normalizeContract(text) {
   return normalizeLineEndings(text).replace(/\n+$/u, "");
 }
 
-function canonicalTextSha256(text) {
-  return createHash("sha256").update(normalizeLineEndings(text)).digest("hex");
-}
-
 function expectedDeveloperInstructionsAssignment(wrapper) {
   const escaped = normalizeContract(wrapper).replace(/\\/gu, "\\\\");
   return `developer_instructions = """\n${escaped}\n"""`;
@@ -52,6 +50,37 @@ function skillBody(skill) {
 
 function assertPublishedFile(relativePath, message) {
   assert(existsSync(path.join(repoRoot, ...relativePath.split("/"))), message);
+}
+
+function assertSharedExecutorMcp(config, label) {
+  const server = config.mcpServers?.[executorServerName];
+  assert(server, `${label} must register the root-shared Build Executor server`);
+  assert.equal(server.type, "stdio", `${label} shared Executor server must use stdio`);
+  assert.equal(server.command, "cmd.exe", `${label} shared Executor server must use the plugin launcher`);
+  assert.deepEqual(
+    server.args,
+    ["/d", "/s", "/c", "scripts\\start-build-executor-mcp.cmd"],
+    `${label} shared Executor server must use the plugin-owned Windows resolver`,
+  );
+  assert.equal(server.cwd, ".", `${label} shared Executor cwd must resolve from plugin root`);
+  assert.equal(server.required, false, `${label} shared Executor server must remain optional`);
+  assert.deepEqual(
+    server.enabled_tools,
+    executorToolNames,
+    `${label} shared Executor allowlist must contain exactly four tools`,
+  );
+  assert.equal(
+    server.default_tools_approval_mode,
+    "approve",
+    `${label} shared Executor approval mode must be approve`,
+  );
+  assert.equal(server.startup_timeout_sec, 10, `${label} shared Executor startup timeout drifted`);
+  assert.equal(server.tool_timeout_sec, 120, `${label} shared Executor tool timeout drifted`);
+  assert.deepEqual(
+    server.env_vars,
+    ["UNDERSTAND_BOOK_BUILD_EXE", "UNDERSTAND_BOOK_AUTOMATIC_BUILD_DRIVER_ROOT", "USERPROFILE"],
+    `${label} shared Executor environment surface drifted`,
+  );
 }
 
 const marketplace = await readJson(".agents/plugins/marketplace.json");
@@ -82,7 +111,7 @@ assert(
 );
 assert(
   desktopPackage.scripts?.["test:t7-codex-cli-release"]?.includes("smoke-t7-codex-cli-release.ts"),
-  "desktop scripts must publish the authenticated T7 real Codex CLI release smoke",
+  "desktop scripts must publish the thread-attributed T7 real Codex CLI release smoke",
 );
 
 const rootManifest = await readJson(".codex-plugin/plugin.json");
@@ -98,8 +127,15 @@ assert.equal(
   "plugin manifest must declare the companion MCP config",
 );
 
-const rootMcp = await readJson(".mcp.json");
-const releaseMcp = await readJson("plugins/understand-book/.mcp.json");
+const rootMcpText = await readText(".mcp.json");
+const releaseMcpText = await readText("plugins/understand-book/.mcp.json");
+assert.equal(
+  releaseMcpText,
+  rootMcpText,
+  "published plugin MCP config must match the root plugin MCP config byte-for-byte",
+);
+const rootMcp = JSON.parse(rootMcpText);
+const releaseMcp = JSON.parse(releaseMcpText);
 assert.deepEqual(
   releaseMcp,
   rootMcp,
@@ -112,23 +148,19 @@ assert.deepEqual(
 );
 assert.equal(rootMcp.mcpServers?.book?.cwd, ".", "Book MCP cwd must resolve from plugin root");
 
-const rootRuntimeConfigs = [
-  ["project Codex config", await readText(".codex/config.toml")],
-  ["root plugin MCP config", JSON.stringify(rootMcp)],
-  ["published plugin MCP config", JSON.stringify(releaseMcp)],
-];
-for (const [label, configText] of rootRuntimeConfigs) {
+const projectCodexConfig = await readText(".codex/config.toml");
+assert(
+  !projectCodexConfig.includes(executorServerName),
+  "project Codex config must not duplicate the plugin-owned shared Executor transport",
+);
+for (const toolName of executorToolNames) {
   assert(
-    !configText.includes(executorServerName),
-    `${label} must not register the agent-only Build Executor server`,
+    !projectCodexConfig.includes(toolName),
+    `project Codex config must not duplicate shared Executor tool: ${toolName}`,
   );
-  for (const toolName of executorToolNames) {
-    assert(
-      !configText.includes(toolName),
-      `${label} must not expose agent-only Build Executor tool: ${toolName}`,
-    );
-  }
 }
+assertSharedExecutorMcp(rootMcp, "root plugin MCP config");
+assertSharedExecutorMcp(releaseMcp, "published plugin MCP config");
 
 const rootMcpLauncher = await readText("scripts/start-book-mcp.cmd");
 const releaseMcpLauncher = await readText("plugins/understand-book/scripts/start-book-mcp.cmd");
@@ -140,6 +172,33 @@ assert.equal(
 for (const marker of ["UNDERSTAND_BOOK_MCP_BIN", "HKCU\\Software\\UnderstandBook", "book-mcp.exe"]) {
   assert(rootMcpLauncher.includes(marker), `Book MCP launcher is missing resolver marker: ${marker}`);
 }
+
+const rootExecutorMcpLauncher = await readText("scripts/start-build-executor-mcp.cmd");
+const releaseExecutorMcpLauncher = await readText(
+  "plugins/understand-book/scripts/start-build-executor-mcp.cmd",
+);
+assert.equal(
+  releaseExecutorMcpLauncher,
+  rootExecutorMcpLauncher,
+  "published Executor MCP launcher must match the root plugin launcher",
+);
+for (const marker of [
+  "UNDERSTAND_BOOK_BUILD_EXE",
+  "HKCU\\Software\\UnderstandBook",
+  "understand-book-build.exe",
+  "executor.mcp --bootstrap-version automatic_build_executor_bootstrap.v3 "
+    + "--protocol-generation automatic_build_executor_session.v3",
+]) {
+  assert(
+    rootExecutorMcpLauncher.includes(marker),
+    `Executor MCP launcher is missing resolver marker: ${marker}`,
+  );
+}
+assert(
+  !rootExecutorMcpLauncher.includes("--agent-bootstrap-digest")
+    && !rootExecutorMcpLauncher.includes("%*"),
+  "Executor MCP launcher must pass only the fixed digest-free V3 bootstrap arguments",
+);
 
 const rootSkill = await readText("skills/build/SKILL.md");
 const releaseSkill = await readText("plugins/understand-book/skills/build/SKILL.md");
@@ -154,8 +213,15 @@ const executorAgentPaths = [
   "assets/codex-agents/understand-book-executor.toml",
   "plugins/understand-book/assets/codex-agents/understand-book-executor.toml",
 ];
+const executorKnownPredecessorPaths = [
+  "assets/codex-agents/understand-book-executor.known-predecessor.toml",
+  "plugins/understand-book/assets/codex-agents/understand-book-executor.known-predecessor.toml",
+];
 for (const relativePath of executorAgentPaths) {
   assertPublishedFile(relativePath, `executor custom-agent publication is missing: ${relativePath}`);
+}
+for (const relativePath of executorKnownPredecessorPaths) {
+  assertPublishedFile(relativePath, `executor predecessor publication is missing: ${relativePath}`);
 }
 const projectExecutorAgent = await readText(executorAgentPaths[0]);
 const rootExecutorAgentTemplate = await readText(executorAgentPaths[1]);
@@ -169,6 +235,11 @@ assert.equal(
   releaseExecutorAgentTemplate,
   projectExecutorAgent,
   "published executor agent template must match the project custom agent byte-for-byte",
+);
+assert.equal(
+  await readText(executorKnownPredecessorPaths[1]),
+  await readText(executorKnownPredecessorPaths[0]),
+  "published executor predecessor must match the root predecessor byte-for-byte",
 );
 assert.match(projectExecutorAgent, /^name\s*=\s*"understand_book_executor"\s*$/mu);
 assert(
@@ -186,23 +257,15 @@ assert.match(
   /^sandbox_mode\s*=\s*"read-only"\s*$/mu,
   "executor custom agent must default to read-only sandbox mode",
 );
-assert.match(
-  projectExecutorAgent,
-  /^\[mcp_servers\.understand_book_build_executor\]\s*$/mu,
-  "executor custom agent must own the dedicated Build Executor MCP registration",
-);
-assert(
-  projectExecutorAgent.includes("executor.mcp"),
-  "executor custom agent must launch the dedicated Build Executor MCP entry",
-);
-assert(
-  /\b[a-f0-9]{64}\b/u.test(projectExecutorAgent),
-  "executor custom agent must carry the V2 bootstrap digest",
-);
-for (const toolName of executorToolNames) {
-  assert(
-    projectExecutorAgent.includes(`"${toolName}"`),
-    `executor custom agent is missing dedicated tool allowlist entry: ${toolName}`,
+for (const [label, agentText] of [
+  ["project executor role", projectExecutorAgent],
+  ["root executor role template", rootExecutorAgentTemplate],
+  ["published executor role template", releaseExecutorAgentTemplate],
+]) {
+  assert.doesNotMatch(
+    agentText,
+    /^\[mcp_servers\.[^\]]+\]\s*$/mu,
+    `${label} must inherit the plugin-owned shared MCP and contain zero local mcp_servers`,
   );
 }
 const canonicalExecutorWrapper = await readText("agents/automatic-build-dispatch-executor.md");
@@ -295,6 +358,30 @@ assert(
     < rootSkill.indexOf("$understand-book-executor"),
   "build skill must place the custom-agent provider before the executor skill fallback",
 );
+const rootActionLoopIndex = rootSkill.indexOf("## Four-action loop");
+assert(rootActionLoopIndex > 0, "build skill must retain the bounded four-action loop");
+const rootSkillBeforeActionLoop = rootSkill.slice(0, rootActionLoopIndex);
+for (const toolName of executorToolNames) {
+  assert(
+    rootSkillBeforeActionLoop.includes(rootToolProhibition(toolName)),
+    `root build skill must explicitly prohibit ${toolName} before the action loop`,
+  );
+}
+const rootHardBoundaries = rootSkill.slice(rootSkill.indexOf("## Hard boundaries"));
+for (const toolName of executorToolNames) {
+  assert(
+    rootHardBoundaries.includes(rootToolProhibition(toolName)),
+    `root build skill must explicitly prohibit ${toolName} at hard boundaries`,
+  );
+}
+
+const realCliReleaseSmoke = await readText("apps/desktop/scripts/smoke-t7-codex-cli-release.ts");
+for (const marker of ["capability_isolation: false", "caller_role_authenticated: false"]) {
+  assert(
+    realCliReleaseSmoke.includes(marker),
+    `thread-attributed release evidence must explicitly serialize ${marker}`,
+  );
+}
 
 const protocolMarkers = [
   "automatic_build_invocation_create.v1",
@@ -358,7 +445,6 @@ for (const removedMarker of [
   );
 }
 
-const releaseSkillSha256 = canonicalTextSha256(releaseSkill);
 const installedPluginRoot = process.env.UNDERSTAND_BOOK_INSTALLED_PLUGIN_ROOT;
 if (installedPluginRoot && !sourceContractOnly) {
   const installedRoot = path.resolve(installedPluginRoot);
@@ -369,9 +455,19 @@ if (installedPluginRoot && !sourceContractOnly) {
   );
   const installedSkill = await readFile(path.join(installedPluginRoot, "skills", "build", "SKILL.md"), "utf8");
   assert.equal(
-    canonicalTextSha256(installedSkill),
-    releaseSkillSha256,
-    "installed build skill must match the published source snapshot hash",
+    installedSkill,
+    releaseSkill,
+    "installed build skill must match the published build skill byte-for-byte",
+  );
+  assert.equal(
+    await readFile(path.join(installedPluginRoot, ".mcp.json"), "utf8"),
+    releaseMcpText,
+    "installed plugin MCP config must match the published MCP config byte-for-byte",
+  );
+  assert.equal(
+    await readFile(path.join(installedPluginRoot, "scripts", "start-build-executor-mcp.cmd"), "utf8"),
+    releaseExecutorMcpLauncher,
+    "installed Executor MCP launcher must match the published launcher byte-for-byte",
   );
   assert(
     !existsSync(path.join(installedPluginRoot, "agents")),
@@ -389,6 +485,7 @@ if (installedPluginRoot && !sourceContractOnly) {
   }
   for (const relativePath of [
     "assets/codex-agents/understand-book-executor.toml",
+    "assets/codex-agents/understand-book-executor.known-predecessor.toml",
     "scripts/register-executor-agent.ps1",
     "skills/register-executor/SKILL.md",
     "skills/executor/SKILL.md",
@@ -404,7 +501,7 @@ if (installedPluginRoot && !sourceContractOnly) {
       "utf8",
     )),
     normalizeLineEndings(releaseExecutorAgentTemplate),
-    "installed executor agent template must match the published release snapshot",
+    "installed executor agent template must match the published release file",
   );
   const installedManifest = JSON.parse(await readFile(
     path.join(installedPluginRoot, ".codex-plugin", "plugin.json"),
@@ -413,7 +510,7 @@ if (installedPluginRoot && !sourceContractOnly) {
   assert.equal(
     installedManifest.version,
     releaseManifest.version,
-    "installed plugin cachebuster must match the published release snapshot",
+    "installed plugin cachebuster must match the published manifest version",
   );
 }
 
@@ -421,6 +518,8 @@ const sidecarEntry = await readText("skills/build/sidecar-entry.ts");
 for (const command of [
   "build.step",
   "executor.agent-template",
+  "executor.mcp-config",
+  "executor.mcp-launcher",
   "executor.mcp",
   "executor.open",
   "executor.session",
@@ -440,7 +539,8 @@ for (const command of [
 
 const dispatchWrapper = await readText("agents/automatic-build-dispatch-executor.md");
 for (const marker of [
-  "automatic_build_executor_session.v2",
+  "automatic_build_executor_session.v3",
+  "automatic_build_executor_open_request.v3",
   "opaque_handoff_ref",
   "executor.open",
   "executor.input.next",
@@ -452,6 +552,8 @@ for (const marker of [
   "action.kind=GENERATE",
   "action.kind=WAIT",
   "action.kind=DONE",
+  "previous_chunk_ordinal",
+  "does not authenticate the caller role",
   "Never return candidate JSON to the caller",
 ]) {
   assert(dispatchWrapper.includes(marker), `dispatch executor wrapper is missing marker: ${marker}`);
@@ -465,6 +567,10 @@ for (const removedMarker of [
   "fail_command",
   "interrupt_command",
   "automatic_build_executor_session.v1",
+  "automatic_build_executor_session.v2",
+  "chunk_receipt",
+  "previous_chunk_receipt",
+  "agent-only stdio",
   "candidate_path",
   "executor.session",
 ]) {
@@ -478,7 +584,7 @@ assert(
   "packaged build sidecar must import the dispatch executor wrapper asset",
 );
 if (sourceContractOnly) {
-  console.log(`plugin source contract ok: ${releaseManifest.version} skill_sha256=${releaseSkillSha256}`);
+  console.log(`plugin source contract ok: ${releaseManifest.version}`);
   process.exit(0);
 }
 const sidecarBinary = path.join(
@@ -499,7 +605,7 @@ assert.ifError(packagedPrompt.error);
 assert.equal(packagedPrompt.status, 0, `packaged executor prompt failed: ${packagedPrompt.stderr}`);
 assert.equal(packagedPrompt.stderr, "", "packaged executor prompt must reserve stderr for diagnostics");
 for (const marker of [
-  "automatic_build_executor_session.v2",
+  "automatic_build_executor_session.v3",
   "executor.open",
   "executor.input.next",
   "executor.generation.start",
@@ -539,4 +645,4 @@ if (!process.argv.includes("--t7-executor-release-prechecked")) {
   );
 }
 
-console.log(`plugin release parity ok: ${releaseManifest.version} skill_sha256=${releaseSkillSha256}`);
+console.log(`plugin release parity ok: ${releaseManifest.version}`);

@@ -53,19 +53,18 @@ export interface AutomaticBuildInputObservationV1 {
   input_bytes: number;
 }
 
-export interface AutomaticBuildInputObservationV2 {
-  version: "automatic_build_input_observation.v2";
+export interface AutomaticBuildInputObservationV3 {
+  version: "automatic_build_input_observation.v3";
   started_at: string;
   finished_at: string;
   input_bytes: number;
   input_sha256: string;
-  proof_digest: string;
   render_contract_version: string;
 }
 
 export type AutomaticBuildInputObservation =
   | AutomaticBuildInputObservationV1
-  | AutomaticBuildInputObservationV2;
+  | AutomaticBuildInputObservationV3;
 
 export interface AutomaticBuildTaskMetricsV1 {
   version: "automatic_build_task_metrics.v1";
@@ -246,7 +245,8 @@ export function automaticBuildTaskMetricsUsageEvent(input: {
   if (input.metrics.status === "skipped") return null;
   const plan = validateBuildPlanV1(input.plan);
   const identity = createHash("sha256").update(canonicalBuildJson({
-    plan_digest: plan.plan_digest,
+    plan_id: plan.plan_id,
+    plan_revision: plan.revision,
     task_ref: input.metrics.task_ref,
     stage: input.metrics.stage,
     work_unit_id: input.metrics.work_unit_id,
@@ -390,37 +390,33 @@ export function recordAutomaticBuildInputObservation(
   token: string,
   input: Omit<AutomaticBuildInputObservationV1, "version"> & {
     input_sha256?: string;
-    proof_digest?: string;
     render_contract_version?: string;
   },
 ): AutomaticBuildInputObservation {
   const lease = assertActiveAutomaticBuildLease(target, leaseRef, token, input.finished_at);
   durationMs(input.started_at, input.finished_at, "input_observation");
   const binding = automaticBuildTaskPolicyBindingFromLease(lease);
-  const isV3 = binding !== undefined && "proof_digest" in binding;
+  const isV3 = binding !== undefined && "policy_generation_id" in binding;
   if (isV3) {
-    if (!input.input_sha256 || !input.proof_digest || !input.render_contract_version) {
-      throw new Error("v3 input observation requires input hash, proof digest, and render contract version");
+    if (!input.input_sha256 || !input.render_contract_version) {
+      throw new Error("v3 input observation requires input hash and render contract version");
     }
-    if (!/^[a-f0-9]{64}$/.test(input.input_sha256)
-      || !/^[a-f0-9]{64}$/.test(input.proof_digest)) {
-      throw new Error("v3 input observation hashes must be lowercase SHA-256 digests");
+    if (!/^[a-f0-9]{64}$/.test(input.input_sha256)) {
+      throw new Error("v3 input observation input hash must be a lowercase SHA-256 digest");
     }
-    if (input.input_sha256 !== binding.input_hash || input.proof_digest !== binding.proof_digest) {
+    if (input.input_sha256 !== binding.input_hash) {
       throw new Error("v3 input observation drifted from the leased task binding");
     }
-  } else if (input.input_sha256 !== undefined || input.proof_digest !== undefined
-    || input.render_contract_version !== undefined) {
-    throw new Error("v2 input observation cannot add v3 proof fields");
+  } else if (input.input_sha256 !== undefined || input.render_contract_version !== undefined) {
+    throw new Error("v2 input observation cannot add v3 evidence fields");
   }
   const observation: AutomaticBuildInputObservation = isV3
     ? {
-        version: "automatic_build_input_observation.v2",
+        version: "automatic_build_input_observation.v3",
         started_at: input.started_at,
         finished_at: input.finished_at,
         input_bytes: nonNegativeInteger(input.input_bytes, "input_bytes"),
         input_sha256: input.input_sha256!,
-        proof_digest: input.proof_digest!,
         render_contract_version: input.render_contract_version!,
       }
     : {
@@ -440,9 +436,8 @@ export function recordAutomaticBuildInputObservation(
     const sameInputIdentity = existing.version === observation.version
       && existing.input_bytes === observation.input_bytes
       && (existing.version === "automatic_build_input_observation.v1"
-        || (observation.version === "automatic_build_input_observation.v2"
+        || (observation.version === "automatic_build_input_observation.v3"
           && existing.input_sha256 === observation.input_sha256
-          && existing.proof_digest === observation.proof_digest
           && existing.render_contract_version === observation.render_contract_version));
     if (!sameInputIdentity) {
       throw new Error(`input observation conflicts with the current attempt: ${taskRef(lease)}`);
@@ -458,17 +453,16 @@ export function readAutomaticBuildInputObservation(
   if (!existsSync(file)) return undefined;
   const input = readJson<AutomaticBuildInputObservation>(file);
   if (!(input.version === "automatic_build_input_observation.v1"
-    || input.version === "automatic_build_input_observation.v2")) {
+    || input.version === "automatic_build_input_observation.v3")) {
     throw new Error(`invalid automatic build input observation: ${file}`);
   }
   durationMs(input.started_at, input.finished_at, "input_observation");
   nonNegativeInteger(input.input_bytes, "input_bytes");
-  if (input.version === "automatic_build_input_observation.v2") {
+  if (input.version === "automatic_build_input_observation.v3") {
     if (!/^[a-f0-9]{64}$/.test(input.input_sha256)
-      || !/^[a-f0-9]{64}$/.test(input.proof_digest)
       || !input.render_contract_version
       || Buffer.byteLength(input.render_contract_version, "utf8") > 256) {
-      throw new Error(`invalid automatic build v2 input observation: ${file}`);
+      throw new Error(`invalid automatic build v3 input observation: ${file}`);
     }
   }
   return input;

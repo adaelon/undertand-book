@@ -182,7 +182,7 @@ function reductionDescriptor(
 }
 
 function bindingFor(descriptor: WorkUnitDescriptorV3): AutomaticBuildTaskPolicyBindingV2 {
-  return taskPolicyBindingForWorkUnit(descriptor, sha256("profile-sidecar-policy-set.v2"));
+  return taskPolicyBindingForWorkUnit(descriptor, "profile-sidecar-discourse.full.v2");
 }
 
 function pass1Descriptor(
@@ -264,17 +264,18 @@ function freezePass1CliTask(
     members: [{
       kind: input.descriptor.kind,
       extractor: "pass1-local-extractor",
+      policy_generation_id: "pass1-window.full.v2",
       policy_fingerprint: input.descriptor.policy_fingerprint,
     }],
     frozen_at: "2026-08-03T04:00:00.000Z",
   }));
-  const binding = taskPolicyBindingForWorkUnit(input.descriptor, policySet.policy_set_digest);
+  const binding = taskPolicyBindingForWorkUnit(input.descriptor, policySet.members[0].policy_generation_id);
   const sourceUnitCount = input.descriptor.evidence_lids.length;
   freezePass1ShadowTask(target, {
     version: "pass1_shadow_task.v1",
     target_ref: target.target_ref,
     source_fingerprint: target.target_ref.input_fingerprint,
-    policy_set_digest: binding.policy_set_digest,
+    policy_generation_id: binding.policy_generation_id,
     source_unit_count: sourceUnitCount,
     descriptor: input.descriptor,
     route: {
@@ -386,23 +387,12 @@ describe("automatic-build v3 proof-bound compatibility", () => {
     expect(workUnitPlanDigest([reductionA])).not.toBe(workUnitPlanDigest([reductionB]));
   });
 
-  it("fails proof, hash, reserve, and policy drift before claim with zero task state", () => {
+  it("fails input hash and policy drift before claim with zero task state", () => {
     const { target, policy } = fixture("fail-closed");
     const descriptor = v3Descriptor(target, policy);
     const binding = bindingFor(descriptor);
     const mutations: WorkUnitDescriptorV3[] = [
       { ...descriptor, input_hash: "f".repeat(64) },
-      {
-        ...descriptor,
-        input_budget_proof: { ...descriptor.input_budget_proof, proof_digest: "e".repeat(64) },
-      },
-      {
-        ...descriptor,
-        input_budget_proof: {
-          ...descriptor.input_budget_proof,
-          prompt_reserve_tokens: descriptor.input_budget_proof.prompt_reserve_tokens + 1,
-        },
-      },
       {
         ...descriptor,
         policy_fingerprint: { ...descriptor.policy_fingerprint, prompt_sha256: "d".repeat(64) },
@@ -451,8 +441,8 @@ describe("automatic-build v3 proof-bound compatibility", () => {
     expect(automaticBuildTaskPolicyBindingFromLease(claim.lease)).toEqual(binding);
     expect(claim.lease).toMatchObject({
       input_hash: descriptor.input_hash,
-      proof_digest: descriptor.input_budget_proof.proof_digest,
-      policy_set_digest: binding.policy_set_digest,
+      policy_generation_id: binding.policy_generation_id,
+      semantic_contract: binding.semantic_contract,
     });
 
     startAutomaticBuildLease(target, claim.lease_ref, claim.lease.token, {
@@ -464,7 +454,6 @@ describe("automatic-build v3 proof-bound compatibility", () => {
       finished_at: "2026-08-03T04:00:02.000Z",
       input_bytes: Buffer.byteLength(rendered),
       input_sha256: "b".repeat(64),
-      proof_digest: binding.proof_digest,
       render_contract_version: MODEL_INPUT_RENDER_CONTRACT_VERSION,
     })).toThrow(/drifted/);
     expect(existsSync(automaticBuildInputObservationPath(claim.lease_ref))).toBe(false);
@@ -489,7 +478,7 @@ describe("automatic-build v3 proof-bound compatibility", () => {
         return { artifact_path: path.join(root, "must-not-exist.json") };
       },
       { now: "2026-08-03T04:00:02.000Z" },
-    )).toThrow(/proof-bound input observation/);
+    )).toThrow(/budget-evidence input observation/);
     expect(writerCalled).toBe(false);
 
     const observation = recordAutomaticBuildInputObservation(target, claim.lease_ref, claim.lease.token, {
@@ -497,10 +486,9 @@ describe("automatic-build v3 proof-bound compatibility", () => {
       finished_at: "2026-08-03T04:00:02.000Z",
       input_bytes: Buffer.byteLength(rendered),
       input_sha256: sha256(rendered),
-      proof_digest: binding.proof_digest,
       render_contract_version: MODEL_INPUT_RENDER_CONTRACT_VERSION,
     });
-    expect(observation.version).toBe("automatic_build_input_observation.v2");
+    expect(observation.version).toBe("automatic_build_input_observation.v3");
     expect(JSON.stringify(observation)).not.toContain(rendered);
     const artifactPath = path.join(target.workspace_dir, ".build", "profile-sidecar", "v3-artifact.json");
     submitAutomaticBuildCandidate(
@@ -519,17 +507,16 @@ describe("automatic-build v3 proof-bound compatibility", () => {
     expect(envelope).toMatchObject({
       version: "semantic_task_artifact.v3",
       input_hash: descriptor.input_hash,
-      proof_digest: binding.proof_digest,
-      policy_set_digest: binding.policy_set_digest,
+      policy_generation_id: binding.policy_generation_id,
+      semantic_contract: binding.semantic_contract,
     });
     expect(inspectSemanticArtifact(envelope, {
       target: target.target_ref,
       stage: "profile_sidecar",
       work_unit_id: descriptor.work_unit_id,
       input_hash: descriptor.input_hash,
-      proof_digest: binding.proof_digest,
-      policy_set_digest: binding.policy_set_digest,
-      policy_fingerprint: policy,
+      policy_generation_id: binding.policy_generation_id,
+      semantic_contract: binding.semantic_contract,
     })).toMatchObject({ format: "v3", policy_fresh: true });
   });
 
@@ -559,9 +546,8 @@ describe("automatic-build v3 proof-bound compatibility", () => {
     expect(validRun.stdout).toBe(validInput.rendered);
     expect(sha256(validRun.stdout)).toBe(validInput.descriptor.input_hash);
     expect(readAutomaticBuildInputObservation(validClaim.lease_ref)).toMatchObject({
-      version: "automatic_build_input_observation.v2",
+      version: "automatic_build_input_observation.v3",
       input_sha256: validInput.descriptor.input_hash,
-      proof_digest: validBinding.proof_digest,
       render_contract_version: MODEL_INPUT_RENDER_CONTRACT_VERSION,
     });
 
@@ -587,7 +573,7 @@ describe("automatic-build v3 proof-bound compatibility", () => {
     });
     expect(driftedRun.status).not.toBe(0);
     expect(driftedRun.stdout).toBe("");
-    expect(driftedRun.stderr).toContain("budget proof does not match rendered input or policy");
+    expect(driftedRun.stderr).toContain("budget evidence does not match rendered input or policy");
     expect(existsSync(automaticBuildInputObservationPath(driftedClaim.lease_ref))).toBe(false);
     const driftedInspection = inspectAutomaticBuildTask(
       drifted.target,
@@ -612,7 +598,7 @@ describe("automatic-build v3 proof-bound compatibility", () => {
     });
     const manifest = plan.dispatches[0];
     publishDispatch(target, manifest);
-    const driftedBinding = { ...binding, proof_digest: "c".repeat(64) };
+    const driftedBinding = { ...binding, input_hash: "c".repeat(64) };
     expect(() => advanceAutomaticBuildDispatch(target, "profile_sidecar", manifest.dispatch_id, {
       descriptors: [descriptor],
       task_bindings: { [descriptor.work_unit_id]: driftedBinding },

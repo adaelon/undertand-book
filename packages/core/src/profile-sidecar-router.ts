@@ -16,10 +16,7 @@ import {
   type ProfileSidecarArtifact,
   type ProfileSidecarExtractionOutput,
 } from "./profile-sidecar-build";
-import {
-  extractionPolicyDigest,
-  type ExtractionPolicyFingerprintV1,
-} from "./semantic-artifact";
+import type { ExtractionPolicyFingerprintV1 } from "./semantic-artifact";
 import {
   buildWorkUnitCost,
   createWorkUnitDescriptor,
@@ -431,7 +428,6 @@ export function routeProfileSidecarWorkUnitsWithRecovery(input: Parameters<
       stage: "profile_sidecar",
       target_ref: input.target,
       router_version: PROFILE_SIDECAR_ROUTER_VERSION,
-      policy_digest: extractionPolicyDigest(input.policy_fingerprint),
       affected_work_units: [{
         work_unit_id: error.work_unit_id,
         evidence_lids: error.evidence_lids,

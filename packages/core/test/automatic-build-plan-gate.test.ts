@@ -227,18 +227,17 @@ describe("IP4 confirmed BuildPlan execution gate", () => {
       current_forecast: {
         estimated_total_tokens_upper: 60,
         wall_clock_p95_minutes: 5,
-        preflight_evaluation_digest: "a".repeat(64),
       },
     });
     expect(evaluation).toMatchObject({
-      version: "automatic_build_plan_budget_evaluation.v1",
+      version: "automatic_build_plan_budget_evaluation.v2",
       status: "exceeded",
       actual_total_tokens: 50,
       remaining_forecast_tokens_upper: 60,
       projected_total_tokens_upper: 110,
       violations: [{ code: "max_total_tokens", actual: 110, limit: 100 }],
     });
-    expect(evaluation.receipt_digest).toMatch(/^[a-f0-9]{64}$/u);
+    expect(evaluation).not.toHaveProperty("receipt_digest");
   });
 
   it("returns build_plan_required before creating a task lease on disk", () => {
@@ -263,6 +262,8 @@ describe("IP4 confirmed BuildPlan execution gate", () => {
       kind: "needs_user",
       reason: "build_plan_budget_changed",
       stage: "pass1",
+      plan_id: buildPlan.plan_id,
+      plan_revision: buildPlan.revision,
       recovery: {
         version: "automatic_build_recovery.v1",
         phase: "preflight",
@@ -271,6 +272,7 @@ describe("IP4 confirmed BuildPlan execution gate", () => {
         recovery_actions: ["reconfirm_build_plan"],
       },
     });
+    expect(result.action).not.toHaveProperty("plan_digest");
     expect(existsSync(path.join(
       root,
       ".understand-book",

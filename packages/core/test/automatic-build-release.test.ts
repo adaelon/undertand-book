@@ -82,7 +82,7 @@ describe("automatic build BP8 production release", () => {
     if (!currentPlan.preflight) throw new Error("expected current preflight");
     expect(currentPlan.protocol).toBe(AUTOMATIC_BUILD_EXECUTOR_DISPATCH_PROTOCOL_V1);
     const currentNext = automaticBuildNext(current.source, current.root, 1, {
-      accepted_plan_digest: currentPlan.preflight.plan_digest,
+      accepted_plan_digest: currentPlan.preflight.descriptor_plan_digest,
       available_agent_slots: 1,
       now: "2026-07-25T09:00:00.000Z",
       build_plan: currentBuildPlan,
@@ -110,7 +110,7 @@ describe("automatic build BP8 production release", () => {
     if (!rollbackPlan.preflight) throw new Error("expected rollback preflight");
     const rollbackNext = automaticBuildNext(rollback.source, rollback.root, 1, {
       protocol: AUTOMATIC_BUILD_PROTOCOL_V2,
-      accepted_plan_digest: rollbackPlan.preflight.plan_digest,
+      accepted_plan_digest: rollbackPlan.preflight.descriptor_plan_digest,
       available_agent_slots: 1,
       owner: "bp8-rollback-owner",
       now: "2026-07-25T09:00:00.000Z",
@@ -122,14 +122,14 @@ describe("automatic build BP8 production release", () => {
     });
   });
 
-  it("audits existing v2 task state without mutating it", () => {
+  it("R1 audits existing v2 state with a positive shared Executor inventory without mutation", () => {
     const { root, source } = fixture();
     const buildPlan = confirmedStandardBuildPlan(source, root);
     const plan = automaticBuildPlan(source, root, { requested_workers: 1, build_plan: buildPlan });
     if (!plan.preflight) throw new Error("expected doctor preflight");
     automaticBuildNext(source, root, 1, {
       protocol: AUTOMATIC_BUILD_PROTOCOL_V2,
-      accepted_plan_digest: plan.preflight.plan_digest,
+      accepted_plan_digest: plan.preflight.descriptor_plan_digest,
       owner: "bp8-existing-v2-owner",
       now: "2026-07-25T09:00:00.000Z",
       build_plan: buildPlan,
@@ -175,22 +175,33 @@ describe("automatic build BP8 production release", () => {
           thin_plugin: false,
           agents_required: false,
         },
-        executor_bootstrap: {
+        executor_role: {
           status: "compatible",
-          session_protocol: "automatic_build_executor_session.v2",
-          registration_scope: "agent_only",
-          sandbox_mode: "read-only",
+          agent_name: "understand_book_executor",
+          mcp_servers_in_role: 0,
         },
-        root_tool_inventory: {
+        shared_executor_mcp: {
           status: "compatible",
-          server_registered: false,
-          executor_tool_intersection: [],
+          registration_scope: "root_shared",
+          bootstrap_version: "automatic_build_executor_bootstrap.v3",
+          session_protocol: "automatic_build_executor_session.v3",
+          required: false,
+          default_tools_approval_mode: "approve",
+          executor_tool_count: 4,
         },
-        connection_capability: {
+        connection_integrity: {
           status: "compatible",
           model_parameter: false,
+          caller_role_authenticated: false,
           cross_handoff_rejected: true,
           session_private_root_bound: true,
+          forbidden_digest_field_count: 0,
+        },
+        semantic_reuse_identity: {
+          status: "compatible",
+          budget_proof_is_freshness_identity: false,
+          policy_generation_is_explicit: true,
+          large_content_hash_consumers_present: true,
         },
       },
       production_default: AUTOMATIC_BUILD_EXECUTOR_DISPATCH_PROTOCOL_V1,
@@ -200,6 +211,7 @@ describe("automatic build BP8 production release", () => {
         dry_run_mutates_state: false,
       },
     });
+    // R1_RED action: R5 replaces the old root-negative PASS with this positive shared inventory.
     expect(fileSnapshot(workspace)).toEqual(before);
   }, 20_000);
 
@@ -235,9 +247,9 @@ describe("automatic build BP8 production release", () => {
             agent_template_present: false,
             diagnostic_code: "plugin_shape_incompatible",
           },
-          executor_bootstrap: {
+          executor_role: {
             status: "incompatible",
-            diagnostic_code: "executor_bootstrap_incompatible",
+            diagnostic_code: "executor_role_incompatible",
           },
         },
         target_state: { dry_run_mutates_state: false },

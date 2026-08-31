@@ -2,24 +2,27 @@ import { createHash } from "node:crypto";
 import type { BuildTargetRefV2 } from "./build-orchestrator";
 import { TECHNICAL_LEARNING_PROFILE, type ContentProfileDefinition } from "./content-profile";
 import type { LidNode } from "./generated/LidNode";
-import type { ExecutorTransportProfileV1 } from "./executor-transport";
+import type { ExecutorTransportProfileV2 } from "./executor-transport";
 import {
   MODEL_INPUT_ESTIMATOR_VERSION,
   validateModelExecutionBudgetProof,
   validateModelInputBudgetProof,
   verifyModelInputBudgetProof,
-  type ModelExecutionBudgetProofV2,
-  type ModelInputBudgetProofV1,
+  type ModelExecutionBudgetEvidenceV3,
+  type ModelInputBudgetEvidenceV2,
 } from "./model-input-budget";
 import { MODEL_INPUT_RENDER_CONTRACT_VERSION } from "./model-input-renderer";
 import type { ModelInputSliceV1 } from "./model-input-slice";
 import { pass1ContentHash } from "./build-resume";
 import { buildProfiledPass1Input } from "./pass1-profile-input";
-import type {
-  AutomaticBuildTaskPolicyBinding,
-  AutomaticBuildTaskPolicyBindingV1,
-  AutomaticBuildTaskPolicyBindingV2,
-  ExtractionPolicyFingerprintV1,
+import {
+  assertPolicyGenerationId,
+  semanticContractEqual,
+  semanticContractFromExtractionPolicy,
+  type AutomaticBuildTaskPolicyBinding,
+  type AutomaticBuildTaskPolicyBindingV1,
+  type AutomaticBuildTaskPolicyBindingV2,
+  type ExtractionPolicyFingerprintV1,
 } from "./semantic-artifact";
 import { estimateTokens, type Window } from "./window";
 
@@ -101,7 +104,7 @@ export interface WorkUnitDescriptorV3 {
   kind: WorkUnitKind;
   input_basis: ModelInputBasisV1;
   input_hash: string;
-  input_budget_proof: ModelInputBudgetProofV1;
+  input_budget_proof: ModelInputBudgetEvidenceV2;
   policy_fingerprint: ExtractionPolicyFingerprintV1;
   evidence_lids: string[];
   dependencies: Array<{ artifact: string; sha256: string }>;
@@ -120,7 +123,7 @@ export interface WorkUnitDescriptorV4 {
   kind: WorkUnitKind;
   input_basis: ModelInputBasisV1;
   input_hash: string;
-  execution_budget_proof: ModelExecutionBudgetProofV2;
+  execution_budget_proof: ModelExecutionBudgetEvidenceV3;
   policy_fingerprint: ExtractionPolicyFingerprintV1;
   evidence_lids: string[];
   dependencies: Array<{ artifact: string; sha256: string }>;
@@ -306,7 +309,7 @@ export function buildWorkUnitCost(input: {
 
 export function buildWorkUnitCostFromBudgetProof(input: {
   rendered_input: string;
-  proof: ModelInputBudgetProofV1;
+  proof: ModelInputBudgetEvidenceV2;
   visible_lids?: number;
   formula_lids?: number;
   table_fragments?: number;
@@ -329,8 +332,8 @@ export function buildWorkUnitCostFromBudgetProof(input: {
 
 export function buildWorkUnitCostFromExecutionProof(input: {
   rendered_input: string;
-  proof: ModelExecutionBudgetProofV2;
-  transport_profile: ExecutorTransportProfileV1;
+  proof: ModelExecutionBudgetEvidenceV3;
+  transport_profile: ExecutorTransportProfileV2;
   visible_lids?: number;
   formula_lids?: number;
   table_fragments?: number;
@@ -513,7 +516,7 @@ export function createWorkUnitDescriptorV3(
 
 export function validateWorkUnitDescriptorV4(
   descriptor: WorkUnitDescriptorV4,
-  transportProfile: ExecutorTransportProfileV1,
+  transportProfile: ExecutorTransportProfileV2,
 ): WorkUnitDescriptorV4 {
   if (descriptor.version !== "automatic_build_work_unit.v4") {
     throw new Error("unsupported v4 work-unit descriptor version");
@@ -594,7 +597,7 @@ export function createWorkUnitDescriptorV4(
   input: Omit<WorkUnitDescriptorV4, "version" | "dependencies"> & {
     dependencies?: WorkUnitDescriptorV4["dependencies"];
   },
-  transportProfile: ExecutorTransportProfileV1,
+  transportProfile: ExecutorTransportProfileV2,
 ): WorkUnitDescriptorV4 {
   const descriptor: WorkUnitDescriptorV4 = {
     version: "automatic_build_work_unit.v4",
@@ -619,19 +622,19 @@ export function taskPolicyBindingForWorkUnit(
 ): AutomaticBuildTaskPolicyBindingV1;
 export function taskPolicyBindingForWorkUnit(
   descriptor: WorkUnitDescriptorV3,
-  policySetDigest: string,
+  policyGenerationId: string,
 ): AutomaticBuildTaskPolicyBindingV2;
 export function taskPolicyBindingForWorkUnit(
   descriptor: WorkUnitDescriptorV4,
-  policySetDigest: string,
+  policyGenerationId: string,
 ): AutomaticBuildTaskPolicyBindingV2;
 export function taskPolicyBindingForWorkUnit(
   descriptor: WorkUnitDescriptorV3 | WorkUnitDescriptorV4,
-  policySetDigest: string,
+  policyGenerationId: string,
 ): AutomaticBuildTaskPolicyBindingV2;
 export function taskPolicyBindingForWorkUnit(
   descriptor: WorkUnitDescriptor,
-  policySetDigest?: string,
+  policyGenerationId?: string,
 ): AutomaticBuildTaskPolicyBinding {
   if (!isProofBoundWorkUnitDescriptor(descriptor)) {
     return {
@@ -639,14 +642,11 @@ export function taskPolicyBindingForWorkUnit(
       policy_fingerprint: descriptor.policy_fingerprint,
     };
   }
-  const proofDigest = isWorkUnitDescriptorV4(descriptor)
-    ? descriptor.execution_budget_proof.proof_digest
-    : descriptor.input_budget_proof.proof_digest;
   return {
     input_hash: descriptor.input_hash,
-    proof_digest: proofDigest,
-    policy_set_digest: sha256Identity(policySetDigest ?? "", "policy_set_digest"),
-    policy_fingerprint: descriptor.policy_fingerprint,
+    stage: descriptor.stage,
+    policy_generation_id: assertPolicyGenerationId(policyGenerationId ?? ""),
+    semantic_contract: semanticContractFromExtractionPolicy(descriptor.policy_fingerprint),
   };
 }
 
@@ -655,22 +655,21 @@ export function validateWorkUnitTaskPolicyBinding(
   binding: AutomaticBuildTaskPolicyBinding,
 ): AutomaticBuildTaskPolicyBinding {
   if (isProofBoundWorkUnitDescriptor(descriptor)) {
-    if (!("proof_digest" in binding) || !("policy_set_digest" in binding)) {
-      throw new Error("proof-bound work unit requires an automatic build task policy binding v2");
+    if (!("policy_generation_id" in binding)) {
+      throw new Error("budget-evidence work unit requires an automatic build task policy binding v2");
     }
-    sha256Identity(binding.proof_digest, "binding.proof_digest");
-    sha256Identity(binding.policy_set_digest, "binding.policy_set_digest");
-    const proofDigest = isWorkUnitDescriptorV4(descriptor)
-      ? descriptor.execution_budget_proof.proof_digest
-      : descriptor.input_budget_proof.proof_digest;
-    if (binding.input_hash !== descriptor.input_hash
-      || binding.proof_digest !== proofDigest
-      || !samePolicy(binding.policy_fingerprint, descriptor.policy_fingerprint)) {
-      throw new Error("proof-bound work unit policy binding drifted from its descriptor");
+    assertPolicyGenerationId(binding.policy_generation_id, "binding.policy_generation_id");
+    if (binding.stage !== descriptor.stage
+      || binding.input_hash !== descriptor.input_hash
+      || !semanticContractEqual(
+        binding.semantic_contract,
+        semanticContractFromExtractionPolicy(descriptor.policy_fingerprint),
+      )) {
+      throw new Error("budget-evidence work unit policy binding drifted from its descriptor");
     }
     return binding;
   }
-  if ("proof_digest" in binding || "policy_set_digest" in binding) {
+  if ("policy_generation_id" in binding) {
     throw new Error("v2 work unit cannot use a v3 task policy binding");
   }
   if (binding.input_hash !== descriptor.input_hash

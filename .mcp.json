@@ -18,6 +18,27 @@
       ],
       "startup_timeout_sec": 10,
       "tool_timeout_sec": 60
+    },
+    "understand_book_build_executor": {
+      "type": "stdio",
+      "command": "cmd.exe",
+      "args": ["/d", "/s", "/c", "scripts\\start-build-executor-mcp.cmd"],
+      "cwd": ".",
+      "required": false,
+      "enabled_tools": [
+        "executor.open",
+        "executor.input.next",
+        "executor.generation.start",
+        "executor.submit_candidate"
+      ],
+      "default_tools_approval_mode": "approve",
+      "startup_timeout_sec": 10,
+      "tool_timeout_sec": 120,
+      "env_vars": [
+        "UNDERSTAND_BOOK_BUILD_EXE",
+        "UNDERSTAND_BOOK_AUTOMATIC_BUILD_DRIVER_ROOT",
+        "USERPROFILE"
+      ]
     }
   }
 }

@@ -4,8 +4,11 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   adaptiveAutomaticBuildRunTtlMs,
+  automaticBuildPreflightEvaluationEvidence,
   buildAutomaticBuildPreflight,
+  evaluateAutomaticBuildPlanBudget,
   listScheduleAutomaticBuildWallClock,
+  migrateAutomaticBuildPlanBudgetEvaluationV1,
   selectAutomaticBuildCostBatch,
   type AutomaticBuildBudgetLimitsV1,
   type AutomaticBuildExecutorProvenanceV1,
@@ -82,7 +85,7 @@ describe("automatic build preflight budget and cost scheduler", () => {
     expect(result.cost_scope.lifetime.score).toBeGreaterThan(result.cost_scope.remaining.score);
   });
 
-  it("predicts wall clock with matched history and binds history changes only to evaluation identity", () => {
+  it("predicts wall clock from direct history fields without plan or evaluation digest wrappers", () => {
     const units = Array.from({ length: 8 }, (_, index) => unit(`history-${index}`, 100, 1, 0));
     const executor: AutomaticBuildExecutorProvenanceV1 = {
       model: "codex-luna-high",
@@ -150,9 +153,64 @@ describe("automatic build preflight budget and cost scheduler", () => {
     expect(first.wall_clock.predicted.remaining.p95_ms)
       .toBeGreaterThanOrEqual(first.wall_clock.predicted.remaining.p50_ms);
     expect(first.wall_clock.adaptive_run_ttl_ms_by_kind.pass1_window).toBe(1_800_000);
-    expect(first.descriptor_plan_digest).toBe(changed.descriptor_plan_digest);
-    expect(first.plan_digest).toBe(changed.plan_digest);
-    expect(first.preflight_evaluation_digest).not.toBe(changed.preflight_evaluation_digest);
+    expect(first.work_units).toEqual(changed.work_units);
+    expect(first.target_ref).toEqual(changed.target_ref);
+    expect(first.stage).toBe(changed.stage);
+    expect(first.quality_profile).toBe(changed.quality_profile);
+    expect(first.wall_clock.predicted).not.toEqual(changed.wall_clock.predicted);
+
+    const present = [
+      Object.hasOwn(first, "plan_digest") ? "plan_digest" : undefined,
+      Object.hasOwn(first, "preflight_evaluation_digest") ? "preflight_evaluation_digest" : undefined,
+    ].filter((field): field is string => field !== undefined);
+    // H0_RED action: H1 binds authorization to plan_id+plan_revision; H2 persists and compares
+    // the concrete forecast/history fields above instead of a preflight evaluation digest.
+    expect(present).toEqual([]);
+  });
+
+  it("keeps plan-budget usage fields direct and rejects its plan/evaluation/receipt digest wrappers", () => {
+    const root = mkdtempSync(path.join(tmpdir(), "understand-book-plan-budget-h0-"));
+    const source = path.join(root, "guide.md");
+    writeFileSync(source, "# Guide\n\nA direct budget evidence fixture.\n", "utf8");
+    const buildPlan = confirmedStandardBuildPlan(source, root);
+    const evaluation = evaluateAutomaticBuildPlanBudget({
+      plan: buildPlan,
+      actual_usage: {
+        known_usage_coverage: 0.5,
+        exact_input_tokens: 120,
+        exact_output_tokens: 30,
+      },
+      current_forecast: {
+        estimated_total_tokens_upper: 1_000,
+        wall_clock_p95_minutes: 2,
+      },
+    });
+
+    expect(buildPlan).toMatchObject({ plan_id: expect.any(String), revision: expect.any(Number) });
+    expect(evaluation).toMatchObject({
+      plan_id: buildPlan.plan_id,
+      plan_revision: buildPlan.revision,
+      known_usage_coverage: 0.5,
+      actual_input_tokens: 120,
+      actual_output_tokens: 30,
+      remaining_forecast_tokens_upper: expect.any(Number),
+    });
+    const present = [
+      Object.hasOwn(evaluation, "plan_digest") ? "plan_digest" : undefined,
+      Object.hasOwn(evaluation, "preflight_evaluation_digest") ? "preflight_evaluation_digest" : undefined,
+      Object.hasOwn(evaluation, "receipt_digest") ? "receipt_digest" : undefined,
+    ].filter((field): field is string => field !== undefined);
+    // H0_RED action: H1 uses plan_id+revision, and H2 directly compares the finite usage/forecast
+    // fields above when claim/execution is retried; no plan-budget receipt wrapper remains.
+    expect(present).toEqual([]);
+
+    const migrated = migrateAutomaticBuildPlanBudgetEvaluationV1({
+      ...evaluation,
+      version: "automatic_build_plan_budget_evaluation.v1",
+      preflight_evaluation_digest: "e".repeat(64),
+      receipt_digest: "f".repeat(64),
+    });
+    expect(migrated).toEqual(evaluation);
   });
 
   it("fails closed on an unmatched agent-start budget and exposes deterministic scheduling goldsets", () => {
@@ -208,7 +266,8 @@ describe("automatic build preflight budget and cost scheduler", () => {
       },
     });
 
-    expect(noHistory.plan_digest).toBe(partialHistory.plan_digest);
+    expect(noHistory.work_units).toEqual(partialHistory.work_units);
+    expect(noHistory.cost_scope).toEqual(partialHistory.cost_scope);
     expect(noHistory.cost.score).toMatchObject({ min: units[0].cost.score, max: units[1].cost.score });
     if (noHistory.cost.score.min === null) throw new Error("expected non-empty score distribution");
     expect(noHistory.cost.score.max).toBeGreaterThan(noHistory.cost.score.min * 100);
@@ -267,6 +326,42 @@ describe("automatic build preflight budget and cost scheduler", () => {
     expect(selected.deferred_ids).toContain("outlier");
   });
 
+  it("binds plan-budget recovery to the BuildPlan id and revision", () => {
+    const root = mkdtempSync(path.join(tmpdir(), "understand-book-plan-budget-recovery-"));
+    const source = path.join(root, "guide.md");
+    writeFileSync(source, "# Guide\n\nA synthetic BuildPlan authority fixture.\n", "utf8");
+    const buildPlan = confirmedStandardBuildPlan(source, root, {
+      budget: { max_total_tokens: 0, on_exceed: "needs_user" },
+    });
+
+    const blocked = automaticBuildNext(source, root, 1, { build_plan: buildPlan });
+
+    expect(blocked.action).toMatchObject({
+      kind: "needs_user",
+      reason: "build_plan_budget_changed",
+      stage: "pass1",
+      plan_id: buildPlan.plan_id,
+      plan_revision: buildPlan.revision,
+      plan_budget_evidence: {
+        version: "automatic_build_plan_budget_evaluation.v2",
+        plan_id: buildPlan.plan_id,
+        plan_revision: buildPlan.revision,
+        status: "exceeded",
+      },
+      recovery: { code: "build_plan_budget_changed" },
+    });
+    expect(blocked.action).not.toHaveProperty("plan_digest");
+    expect(blocked).toMatchObject({
+      plan_budget: {
+        plan_id: buildPlan.plan_id,
+        plan_revision: buildPlan.revision,
+        status: "exceeded",
+      },
+    });
+    expect(blocked.plan_budget).not.toHaveProperty("preflight_evaluation_digest");
+    expect(blocked.plan_budget).not.toHaveProperty("receipt_digest");
+  });
+
   it("does not claim before plan acceptance or after budget rejection", () => {
     const root = mkdtempSync(path.join(tmpdir(), "understand-book-budget-gate-"));
     const source = path.join(root, "guide.md");
@@ -282,6 +377,11 @@ describe("automatic build preflight budget and cost scheduler", () => {
     if (!plan.preflight) throw new Error("expected model-work preflight");
     const taskRoot = path.join(root, ".understand-book", "guide", ".build", "automatic-build", "v2", "tasks");
     expect(plan.preflight.budget.status).toBe("within_budget");
+    expect(plan.preflight.build_plan).toEqual({
+      plan_id: buildPlan.plan_id,
+      plan_revision: buildPlan.revision,
+    });
+    expect(plan.preflight.build_plan).not.toHaveProperty("plan_digest");
     expect(plan.preflight.worker_plan.max_workers).toBe(1);
     expect(existsSync(taskRoot)).toBe(false);
 
@@ -301,7 +401,7 @@ describe("automatic build preflight budget and cost scheduler", () => {
     if (!rejectedPlan.preflight) throw new Error("expected rejected model-work preflight");
     const rejected = automaticBuildNext(source, root, 3, {
       budget: { ...generousBudget, max_total_score: 0 },
-      accepted_plan_digest: rejectedPlan.preflight.plan_digest,
+      accepted_plan_digest: rejectedPlan.preflight.descriptor_plan_digest,
       quality_profile: "full",
       build_plan: buildPlan,
     });
@@ -311,7 +411,7 @@ describe("automatic build preflight budget and cost scheduler", () => {
     const accepted = automaticBuildNext(source, root, 3, {
       protocol: "automatic_build_protocol.v2",
       budget: generousBudget,
-      accepted_plan_digest: plan.preflight.plan_digest,
+      accepted_plan_digest: plan.preflight.descriptor_plan_digest,
       owner: "budget-test",
       now: "2026-07-19T00:00:00.000Z",
       quality_profile: "full",
@@ -320,8 +420,16 @@ describe("automatic build preflight budget and cost scheduler", () => {
     expect(accepted.action).toMatchObject({ kind: "extract", tasks: [{ lease: { owner: "budget-test" } }] });
     expect("tasks" in accepted.action && accepted.action.tasks).toHaveLength(1);
     expect(existsSync(taskRoot)).toBe(true);
-    const acceptance = path.join(root, ".understand-book", "guide", ".build", "automatic-build", "v2", "preflight", "pass1", `${plan.preflight.plan_digest}.json`);
-    expect(JSON.parse(readFileSync(acceptance, "utf8"))).toMatchObject({ plan_digest: plan.preflight.plan_digest, quality_profile: "full" });
+    if (accepted.action.kind !== "extract" || !("plan_acceptance_path" in accepted.action)) {
+      throw new Error("expected direct preflight acceptance evidence");
+    }
+    expect(JSON.parse(readFileSync(accepted.action.plan_acceptance_path, "utf8"))).toMatchObject({
+      version: "automatic_build_plan_acceptance.v2",
+      plan_evidence: {
+        descriptor_plan_digest: plan.preflight.descriptor_plan_digest,
+        quality_profile: "full",
+      },
+    });
   });
 
   it("returns low_confidence_wall_budget before claim when unmatched agent starts exceed the limit", () => {
@@ -348,22 +456,22 @@ describe("automatic build preflight budget and cost scheduler", () => {
     const next = automaticBuildNext(source, root, 3, {
       budget: generousBudget,
       wall_budget: wallBudget,
-      accepted_plan_digest: plan.preflight.plan_digest,
-      accepted_evaluation_digest: plan.preflight.preflight_evaluation_digest,
+      accepted_plan_digest: plan.preflight.descriptor_plan_digest,
+      accepted_evaluation_evidence: automaticBuildPreflightEvaluationEvidence(plan.preflight),
       available_agent_slots: 3,
       build_plan: buildPlan,
     });
     expect(next.action).toMatchObject({
       kind: "needs_user",
       reason: "low_confidence_wall_budget",
-      plan_digest: plan.preflight.plan_digest,
-      preflight_evaluation_digest: plan.preflight.preflight_evaluation_digest,
+      descriptor_plan_digest: plan.preflight.descriptor_plan_digest,
+      evaluation_evidence: automaticBuildPreflightEvaluationEvidence(plan.preflight),
     });
     const taskRoot = path.join(root, ".understand-book", "guide", ".build", "automatic-build", "v2", "tasks");
     expect(existsSync(taskRoot)).toBe(false);
   });
 
-  it("requires the current evaluation digest and forwards a matched adaptive run TTL", () => {
+  it("requires current direct evaluation evidence and forwards a matched adaptive run TTL", () => {
     const root = mkdtempSync(path.join(tmpdir(), "understand-book-adaptive-ttl-"));
     const source = path.join(root, "guide.md");
     writeFileSync(source, "# Guide\n\nA semantic paragraph for adaptive lease history.\n", "utf8");
@@ -409,12 +517,23 @@ describe("automatic build preflight budget and cost scheduler", () => {
     });
     if (!plan.preflight) throw new Error("expected adaptive preflight");
     expect(plan.preflight.wall_clock.adaptive_run_ttl_ms_by_kind.pass1_window).toBe(900_000);
+    const staleEvaluation = automaticBuildPreflightEvaluationEvidence(plan.preflight);
+    staleEvaluation.wall_clock = {
+      ...staleEvaluation.wall_clock,
+      predicted: {
+        ...staleEvaluation.wall_clock.predicted,
+        remaining: {
+          ...staleEvaluation.wall_clock.predicted.remaining,
+          p95_ms: staleEvaluation.wall_clock.predicted.remaining.p95_ms + 1,
+        },
+      },
+    };
     const changed = automaticBuildNext(source, root, 1, {
       budget: generousBudget,
       wall_budget: wallBudget,
       executor_provenance: executor,
-      accepted_plan_digest: plan.preflight.plan_digest,
-      accepted_evaluation_digest: "stale-evaluation",
+      accepted_plan_digest: plan.preflight.descriptor_plan_digest,
+      accepted_evaluation_evidence: staleEvaluation,
       available_agent_slots: 1,
       build_plan: buildPlan,
     });
@@ -427,8 +546,8 @@ describe("automatic build preflight budget and cost scheduler", () => {
       budget: generousBudget,
       wall_budget: wallBudget,
       executor_provenance: executor,
-      accepted_plan_digest: plan.preflight.plan_digest,
-      accepted_evaluation_digest: plan.preflight.preflight_evaluation_digest,
+      accepted_plan_digest: plan.preflight.descriptor_plan_digest,
+      accepted_evaluation_evidence: automaticBuildPreflightEvaluationEvidence(plan.preflight),
       available_agent_slots: 1,
       build_plan: buildPlan,
     });

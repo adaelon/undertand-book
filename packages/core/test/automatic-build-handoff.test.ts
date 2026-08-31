@@ -64,7 +64,6 @@ function commitDispatchTask(
       finished_at: task.lease.issued_at,
       input_bytes: 0,
       input_sha256: task.descriptor.input_hash,
-      proof_digest: task.descriptor.input_budget_proof.proof_digest,
       render_contract_version: MODEL_INPUT_RENDER_CONTRACT_VERSION,
     });
   }
@@ -80,10 +79,10 @@ function commitDispatchTask(
     task.lease.token,
     task.candidate_path,
     () => {
-      if (!task.lease.policy_set_digest) throw new Error("expected a v3 policy-set lease");
+      if (!task.lease.policy_generation_id) throw new Error("expected a v3 policy-set lease");
       return writePass1ProductionTaskArtifact({
         target,
-        policy_set_digest: task.lease.policy_set_digest,
+        policy_generation_id: task.lease.policy_generation_id,
         work_unit_id: task.task_id,
         marker,
         generated_at: task.lease.issued_at,
@@ -103,7 +102,7 @@ function seedLegacyManifestOnly(
   const target = resolveAutomaticBuildTarget(source, root);
   persistAutomaticBuildDispatchPlan(
     target,
-    plan.preflight.plan_digest,
+    plan.preflight.descriptor_plan_digest,
     plan.preflight.dispatch_plan,
     createdAt,
   );
@@ -135,7 +134,7 @@ describe("automatic build Codex executor handoff", () => {
         owner: "handoff-test",
         now: "2026-07-19T00:00:00.000Z",
         lease_ttl_ms: 60_000,
-        accepted_plan_digest: plan.preflight.plan_digest,
+        accepted_plan_digest: plan.preflight.descriptor_plan_digest,
         build_plan: buildPlan,
       });
       expect(result.action.kind).toBe("extract");
@@ -166,8 +165,7 @@ describe("automatic build Codex executor handoff", () => {
           phase: "reserved",
           reserved_at: "2026-07-19T00:00:00.000Z",
           reserve_expires_at: "2026-07-19T00:01:00.000Z",
-          proof_digest: expect.stringMatching(/^[a-f0-9]{64}$/u),
-          policy_set_digest: expect.stringMatching(/^[a-f0-9]{64}$/u),
+          policy_generation_id: "pass1-window.full.v1",
         },
       });
       const executable = process.env.UNDERSTAND_BOOK_SIDECAR_SELF;
@@ -203,7 +201,7 @@ describe("automatic build Codex executor handoff", () => {
         protocol: "automatic_build_protocol.v2",
         owner: "handoff-test",
         now: "2026-07-19T00:00:00.000Z",
-        accepted_plan_digest: plan.preflight.plan_digest,
+        accepted_plan_digest: plan.preflight.descriptor_plan_digest,
         build_plan: buildPlan,
       });
       if (result.action.kind !== "extract" || !result.action.tasks) throw new Error("expected executor task");
@@ -244,7 +242,7 @@ describe("automatic build Codex executor handoff", () => {
     const next = automaticBuildNext(source, root, 2, {
       owner: "dispatch-handoff",
       now: "2026-07-25T00:00:00.000Z",
-      accepted_plan_digest: plan.preflight.plan_digest,
+      accepted_plan_digest: plan.preflight.descriptor_plan_digest,
       available_agent_slots: 2,
       executor_dispatches: true,
       build_plan: buildPlan,
@@ -260,7 +258,7 @@ describe("automatic build Codex executor handoff", () => {
     const replayed = automaticBuildNext(source, root, 2, {
       owner: "dispatch-handoff-restart",
       now: "2026-07-25T00:00:00.000Z",
-      accepted_plan_digest: plan.preflight.plan_digest,
+      accepted_plan_digest: plan.preflight.descriptor_plan_digest,
       available_agent_slots: 2,
       executor_dispatches: true,
       build_plan: buildPlan,
@@ -306,7 +304,7 @@ describe("automatic build Codex executor handoff", () => {
       if (!plan.preflight) throw new Error("expected dispatch preflight");
       const next = automaticBuildNext(source, root, 1, {
         now: "2026-07-25T00:30:00.000Z",
-        accepted_plan_digest: plan.preflight.plan_digest,
+        accepted_plan_digest: plan.preflight.descriptor_plan_digest,
         available_agent_slots: 1,
         executor_dispatches: true,
         build_plan: buildPlan,
@@ -352,7 +350,7 @@ describe("automatic build Codex executor handoff", () => {
         "--interruption-command-role",
         "{last_command_role}",
       ]));
-      expect(handoff.prompt).toContain("automatic_build_executor_session.v2");
+      expect(handoff.prompt).toContain("automatic_build_executor_session.v3");
       expect(handoff.prompt).not.toContain("automatic_build_dispatch_executor.v1");
       expect(handoff.prompt).not.toContain("automatic_build_executor.v1");
       expect(JSON.stringify(handoff)).not.toContain("PRIVATE_CANDIDATE_MARKER");
@@ -367,7 +365,7 @@ describe("automatic build Codex executor handoff", () => {
       expect(run.status, run.stderr).toBe(0);
       expect(run.stderr).toBe("");
       for (const marker of [
-        "automatic_build_executor_session.v2",
+        "automatic_build_executor_session.v3",
         "executor.open",
         "executor.input.next",
         "executor.generation.start",
@@ -418,7 +416,7 @@ describe("automatic build Codex executor handoff", () => {
 
     expect(() => automaticBuildNext(source, root, 1, {
       now,
-      accepted_plan_digest: plan.preflight?.plan_digest,
+      accepted_plan_digest: plan.preflight?.descriptor_plan_digest,
       available_agent_slots: 1,
       build_plan: buildPlan,
     })).toThrow("dispatch executor handoff conflicts");
@@ -445,7 +443,7 @@ describe("automatic build Codex executor handoff", () => {
     const legacy = seedLegacyManifestOnly(source, root, plan, "2026-08-02T03:00:00.000Z");
     const next = automaticBuildNext(source, root, 1, {
       now: "2026-08-02T03:01:00.000Z",
-      accepted_plan_digest: plan.preflight?.plan_digest,
+      accepted_plan_digest: plan.preflight?.descriptor_plan_digest,
       available_agent_slots: 1,
       build_plan: buildPlan,
     });
@@ -507,7 +505,7 @@ describe("automatic build Codex executor handoff", () => {
     if (claim.status !== "leased") throw new Error("expected legacy owner claim");
     const next = automaticBuildNext(source, root, 1, {
       now: "2026-08-02T04:01:00.000Z",
-      accepted_plan_digest: plan.preflight?.plan_digest,
+      accepted_plan_digest: plan.preflight?.descriptor_plan_digest,
       available_agent_slots: 1,
       build_plan: buildPlan,
     });
@@ -534,7 +532,7 @@ describe("automatic build Codex executor handoff", () => {
     });
     const next = automaticBuildNext(source, root, 1, {
       now: "2026-08-02T05:00:00.000Z",
-      accepted_plan_digest: plan.preflight?.plan_digest,
+      accepted_plan_digest: plan.preflight?.descriptor_plan_digest,
       available_agent_slots: 1,
       build_plan: buildPlan,
     });
@@ -562,7 +560,7 @@ describe("automatic build Codex executor handoff", () => {
     });
     const next = automaticBuildNext(source, root, 1, {
       now: "2026-08-02T05:30:00.000Z",
-      accepted_plan_digest: plan.preflight?.plan_digest,
+      accepted_plan_digest: plan.preflight?.descriptor_plan_digest,
       available_agent_slots: 1,
       build_plan: buildPlan,
     });
@@ -597,7 +595,7 @@ describe("automatic build Codex executor handoff", () => {
     const next = automaticBuildNext(source, root, 1, {
       owner: "dispatch-receipt",
       now: "2026-07-25T01:00:00.000Z",
-      accepted_plan_digest: plan.preflight.plan_digest,
+      accepted_plan_digest: plan.preflight.descriptor_plan_digest,
       available_agent_slots: 1,
       executor_dispatches: true,
       build_plan: buildPlan,
@@ -677,7 +675,7 @@ describe("automatic build Codex executor handoff", () => {
     }
     const next = automaticBuildNext(source, root, 1, {
       now: "2026-07-25T02:00:00.000Z",
-      accepted_plan_digest: plan.preflight.plan_digest,
+      accepted_plan_digest: plan.preflight.descriptor_plan_digest,
       available_agent_slots: 1,
       executor_dispatches: true,
       build_plan: buildPlan,
@@ -709,7 +707,7 @@ describe("automatic build Codex executor handoff", () => {
     expect(receipt.unclaimed_work_unit_ids).toEqual(envelope.manifest.ordered_work_unit_ids.slice(1));
     const replanned = automaticBuildNext(source, root, 1, {
       now: "2026-07-25T02:00:05.000Z",
-      accepted_plan_digest: plan.preflight.plan_digest,
+      accepted_plan_digest: plan.preflight.descriptor_plan_digest,
       available_agent_slots: 1,
       executor_dispatches: true,
       build_plan: buildPlan,
@@ -731,7 +729,7 @@ describe("automatic build Codex executor handoff", () => {
     const next = automaticBuildNext(source, root, 1, {
       now: "2026-07-25T03:00:00.000Z",
       lease_ttl_ms: 1_000,
-      accepted_plan_digest: plan.preflight.plan_digest,
+      accepted_plan_digest: plan.preflight.descriptor_plan_digest,
       available_agent_slots: 1,
       executor_dispatches: true,
       build_plan: buildPlan,
@@ -780,7 +778,7 @@ describe("automatic build Codex executor handoff", () => {
     const next = automaticBuildNext(source, root, 1, {
       owner: "dispatch-interrupt",
       now: "2026-07-25T02:00:00.000Z",
-      accepted_plan_digest: plan.preflight.plan_digest,
+      accepted_plan_digest: plan.preflight.descriptor_plan_digest,
       available_agent_slots: 1,
       executor_dispatches: true,
       build_plan: buildPlan,
@@ -830,7 +828,7 @@ describe("automatic build Codex executor handoff", () => {
       if (!plan.preflight) throw new Error("expected dispatch preflight");
       const next = automaticBuildNext(source, root, 1, {
         now: "2026-07-25T02:30:00.000Z",
-        accepted_plan_digest: plan.preflight.plan_digest,
+        accepted_plan_digest: plan.preflight.descriptor_plan_digest,
         available_agent_slots: 1,
         executor_dispatches: true,
         build_plan: buildPlan,
@@ -909,7 +907,7 @@ describe("automatic build Codex executor handoff", () => {
       "utf8",
     );
     for (const marker of [
-      "automatic_build_executor_session.v2",
+      "automatic_build_executor_session.v3",
       "opaque_handoff_ref",
       "executor.open",
       "executor.input.next",

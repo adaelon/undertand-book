@@ -2,16 +2,18 @@ import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { AUTOMATIC_BUILD_MODEL_INPUT_BUDGET_V1 } from "../src/automatic-build-protocol";
 import {
-  CODEX_EXECUTOR_TRANSPORT_PROFILE_V1,
+  CODEX_EXECUTOR_TRANSPORT_PROFILE_V2,
   createExecutorTransportProfile,
   packExecutorTransportPayload,
-  type ExecutorTransportChunkFrameV1,
-  type ExecutorTransportPackResultV1,
-  type ExecutorTransportProfileV1,
+  type ExecutorTransportChunkFrameV2,
+  type ExecutorTransportPackResultV2,
+  type ExecutorTransportProfileV2,
 } from "../src/executor-transport";
 import {
   evaluateModelExecutionBudget,
   evaluateModelInputBudget,
+  migrateModelExecutionBudgetProofV2,
+  migrateModelInputBudgetProofV1,
   validateModelExecutionBudgetProof,
   verifyModelExecutionBudgetProof,
   verifyModelInputBudgetProof,
@@ -44,23 +46,21 @@ function request(overrides: Partial<ModelInputBudgetRequestV1> = {}): ModelInput
 }
 
 function executionEnvelope(segment: "semantic_prompt" | "semantic_input") {
-  return (frame: ExecutorTransportChunkFrameV1): unknown => ({
-    version: "synthetic_model_execution_input_chunk.v1",
+  return (frame: ExecutorTransportChunkFrameV2): unknown => ({
+    version: "synthetic_model_execution_input_chunk.v2",
     segment,
     ordinal: frame.ordinal,
     byte_range: frame.byte_range,
     payload_utf8: frame.payload_utf8,
-    payload_sha256: frame.payload_sha256,
     final_for_segment: frame.final,
-    chunk_receipt: `receipt-${segment}-${frame.ordinal}-${frame.payload_sha256}`,
   });
 }
 
 function packExecutionSegment(
   payload: string,
   segment: "semantic_prompt" | "semantic_input",
-  transportProfile: ExecutorTransportProfileV1,
-): ExecutorTransportPackResultV1 {
+  transportProfile: ExecutorTransportProfileV2,
+): ExecutorTransportPackResultV2 {
   return packExecutorTransportPayload({
     profile: transportProfile,
     payload_utf8: payload,
@@ -73,7 +73,7 @@ function executionRequest(
 ): ModelExecutionBudgetRequestV2 {
   const semanticPrompt = overrides.semantic_prompt ?? "Generate one strict JSON candidate.";
   const renderedInput = overrides.rendered_input ?? "abcdefghijklmnop";
-  const transportProfile = overrides.transport_profile ?? CODEX_EXECUTOR_TRANSPORT_PROFILE_V1;
+  const transportProfile = overrides.transport_profile ?? CODEX_EXECUTOR_TRANSPORT_PROFILE_V2;
   return {
     semantic_prompt: semanticPrompt,
     rendered_input: renderedInput,
@@ -92,7 +92,7 @@ function executionRequest(
   };
 }
 
-describe("model input budget proof", () => {
+describe("model input budget evidence v2", () => {
   it("routes a 5,025-token production body and blocks one estimated token above 6,000", () => {
     expect(AUTOMATIC_BUILD_MODEL_INPUT_BUDGET_V1.stage_body_limit_tokens).toBe(6_000);
     expect(DEFAULT_DISCOURSE_INPUT_TOKENS)
@@ -135,27 +135,40 @@ describe("model input budget proof", () => {
     expect(over).toMatchObject({ status: "over_limit", estimated_rendered_tokens: 5, effective_body_limit_tokens: 4 });
   });
 
-  it("binds input, versions, prompt, and every reserve into the proof digest", () => {
+  it("compares input, versions, prompt identity, and every reserve directly without a proof wrapper", () => {
     const base = evaluateModelInputBudget(request({ stage_body_limit_tokens: 12 }));
     if (base.status !== "within_limit") throw new Error("expected base proof");
-    const variants: Array<Partial<ModelInputBudgetRequestV1>> = [
-      { rendered_input: "abcdefghijklmnoq" },
-      { estimator_version: "weighted_codepoint_estimator.v2" },
-      { render_contract_version: "model_input_render.v2" },
-      { router_version: "test_router.v2" },
-      { prompt_sha256: createHash("sha256").update("other prompt").digest("hex") },
-      { stage_body_limit_tokens: 11 },
-      { executor_context_floor_tokens: 17 },
-      { prompt_reserve_tokens: 3 },
-      { protocol_reserve_tokens: 1 },
-      { output_reserve_tokens: 3 },
-      { safety_margin_tokens: 1 },
+    const variants: Array<{
+      change: Partial<ModelInputBudgetRequestV1>;
+      proof_field: string;
+    }> = [
+      { change: { rendered_input: "abcdefghijklmnoq" }, proof_field: "rendered_input_sha256" },
+      { change: { estimator_version: "weighted_codepoint_estimator.v2" }, proof_field: "estimator_version" },
+      { change: { render_contract_version: "model_input_render.v2" }, proof_field: "render_contract_version" },
+      { change: { router_version: "test_router.v2" }, proof_field: "router_version" },
+      {
+        change: { prompt_sha256: createHash("sha256").update("other prompt").digest("hex") },
+        proof_field: "prompt_sha256",
+      },
+      { change: { stage_body_limit_tokens: 11 }, proof_field: "stage_body_limit_tokens" },
+      { change: { executor_context_floor_tokens: 17 }, proof_field: "executor_context_floor_tokens" },
+      { change: { prompt_reserve_tokens: 3 }, proof_field: "prompt_reserve_tokens" },
+      { change: { protocol_reserve_tokens: 1 }, proof_field: "protocol_reserve_tokens" },
+      { change: { output_reserve_tokens: 3 }, proof_field: "output_reserve_tokens" },
+      { change: { safety_margin_tokens: 1 }, proof_field: "safety_margin_tokens" },
     ];
     for (const variant of variants) {
-      const changed = evaluateModelInputBudget(request({ stage_body_limit_tokens: 12, ...variant }));
+      const changed = evaluateModelInputBudget(request({ stage_body_limit_tokens: 12, ...variant.change }));
       expect(changed.status).toBe("within_limit");
-      if (changed.status === "within_limit") expect(changed.proof.proof_digest).not.toBe(base.proof.proof_digest);
+      if (changed.status === "within_limit") {
+        expect((changed.proof as unknown as Record<string, unknown>)[variant.proof_field])
+          .not.toBe((base.proof as unknown as Record<string, unknown>)[variant.proof_field]);
+      }
     }
+
+    // H0_RED action: H2 removes proof_digest; validators and claim/execution re-read the
+    // concrete fields exercised above, while rendered_input_sha256/prompt_sha256 stay semantic inputs.
+    expect(Object.hasOwn(base.proof, "proof_digest") ? ["proof_digest"] : []).toEqual([]);
   });
 
   it("revalidates exact rendered bytes and rejects a tampered proof", () => {
@@ -197,7 +210,7 @@ describe("model input budget proof", () => {
   });
 });
 
-describe("model execution budget proof v2", () => {
+describe("model execution budget evidence v3", () => {
   it("does not treat an arbitrarily large dispatch cap as transport proof", () => {
     const syntheticDispatchLimit = 10_000_000;
     const renderedInput = "x".repeat(40_004);
@@ -212,29 +225,24 @@ describe("model execution budget proof v2", () => {
     expect(evaluated.estimated_rendered_tokens).toBeLessThan(syntheticDispatchLimit);
   });
 
-  it("binds transport profile, chunk count, renderer, prompt, and reserves into one V2 proof", () => {
+  it("validates transport fields, chunk count, renderer, prompt, and reserves without digest wrappers", () => {
     const input = executionRequest();
     const evaluated = evaluateModelExecutionBudget(input);
     expect(evaluated.status).toBe("within_limit");
     if (evaluated.status !== "within_limit") throw new Error("expected execution budget proof");
     expect(evaluated.proof).toMatchObject({
-      version: "model_execution_budget_proof.v2",
-      transport_profile_digest: CODEX_EXECUTOR_TRANSPORT_PROFILE_V1.profile_digest,
+      version: "model_execution_budget_evidence.v3",
       input_chunk_count: 2,
       output_reserve_tokens: 1_024,
       max_candidate_tokens: 1_024,
     });
     expect(validateModelExecutionBudgetProof(
       evaluated.proof,
-      CODEX_EXECUTOR_TRANSPORT_PROFILE_V1,
+      CODEX_EXECUTOR_TRANSPORT_PROFILE_V2,
     )).toBe(evaluated.proof);
     expect(verifyModelExecutionBudgetProof(input, evaluated.proof)).toBe(evaluated.proof);
 
     const tampered = [
-      {
-        ...evaluated.proof,
-        transport_profile_digest: "0".repeat(64),
-      },
       {
         ...evaluated.proof,
         input_chunk_count: evaluated.proof.input_chunk_count + 1,
@@ -253,29 +261,34 @@ describe("model execution budget proof v2", () => {
       },
     ];
     for (const proof of tampered) {
-      expect(() => validateModelExecutionBudgetProof(
-        proof,
-        CODEX_EXECUTOR_TRANSPORT_PROFILE_V1,
-      )).toThrow();
+      expect(() => verifyModelExecutionBudgetProof(input, proof)).toThrow();
     }
 
     const changedProfile = createExecutorTransportProfile({
-      carrier: CODEX_EXECUTOR_TRANSPORT_PROFILE_V1.carrier,
-      session_protocol: CODEX_EXECUTOR_TRANSPORT_PROFILE_V1.session_protocol,
-      max_tool_result_tokens: CODEX_EXECUTOR_TRANSPORT_PROFILE_V1.max_tool_result_tokens,
-      max_tool_result_bytes: CODEX_EXECUTOR_TRANSPORT_PROFILE_V1.max_tool_result_bytes,
+      carrier: CODEX_EXECUTOR_TRANSPORT_PROFILE_V2.carrier,
+      session_protocol: CODEX_EXECUTOR_TRANSPORT_PROFILE_V2.session_protocol,
+      max_tool_result_tokens: CODEX_EXECUTOR_TRANSPORT_PROFILE_V2.max_tool_result_tokens,
+      max_tool_result_bytes: CODEX_EXECUTOR_TRANSPORT_PROFILE_V2.max_tool_result_bytes,
       result_envelope_reserve_tokens:
-        CODEX_EXECUTOR_TRANSPORT_PROFILE_V1.result_envelope_reserve_tokens,
-      max_input_chunks: CODEX_EXECUTOR_TRANSPORT_PROFILE_V1.max_input_chunks - 1,
+        CODEX_EXECUTOR_TRANSPORT_PROFILE_V2.result_envelope_reserve_tokens,
+      max_input_chunks: 1,
       max_candidate_request_tokens:
-        CODEX_EXECUTOR_TRANSPORT_PROFILE_V1.max_candidate_request_tokens,
+        CODEX_EXECUTOR_TRANSPORT_PROFILE_V2.max_candidate_request_tokens,
       max_candidate_request_bytes:
-        CODEX_EXECUTOR_TRANSPORT_PROFILE_V1.max_candidate_request_bytes,
+        CODEX_EXECUTOR_TRANSPORT_PROFILE_V2.max_candidate_request_bytes,
     });
     expect(() => verifyModelExecutionBudgetProof(
       executionRequest({ transport_profile: changedProfile }),
       evaluated.proof,
-    )).toThrow(/match|profile|proof/i);
+    )).toThrow(/transport chunk limit/i);
+
+    const present = [
+      Object.hasOwn(evaluated.proof, "proof_digest") ? "proof_digest" : undefined,
+      Object.hasOwn(evaluated.proof, "transport_profile_digest") ? "transport_profile_digest" : undefined,
+    ].filter((field): field is string => field !== undefined);
+    // H0_RED action: H2 removes proof_digest and H4 compares the explicit transport version/caps
+    // directly; the changed-profile rejection above remains the replacement failure branch.
+    expect(present).toEqual([]);
   });
 
   it("requires both a bounded short carrier result and a candidate request that fits token and byte caps", () => {
@@ -283,8 +296,8 @@ describe("model execution budget proof v2", () => {
     expect(short.status).toBe("within_limit");
 
     const candidateBlocked = evaluateModelExecutionBudget(executionRequest({
-      max_candidate_tokens: CODEX_EXECUTOR_TRANSPORT_PROFILE_V1.max_candidate_request_tokens + 1,
-      output_reserve_tokens: CODEX_EXECUTOR_TRANSPORT_PROFILE_V1.max_candidate_request_tokens + 1,
+      max_candidate_tokens: CODEX_EXECUTOR_TRANSPORT_PROFILE_V2.max_candidate_request_tokens + 1,
+      output_reserve_tokens: CODEX_EXECUTOR_TRANSPORT_PROFILE_V2.max_candidate_request_tokens + 1,
     }));
     expect(candidateBlocked.status).toBe("blocked");
     if (candidateBlocked.status !== "blocked") throw new Error("expected candidate transport block");
@@ -292,7 +305,7 @@ describe("model execution budget proof v2", () => {
 
     const byteBoundProfile = createExecutorTransportProfile({
       carrier: "codex_executor_mcp",
-      session_protocol: "automatic_build_executor_session.v2",
+      session_protocol: "automatic_build_executor_session.v3",
       max_tool_result_tokens: 2_048,
       max_tool_result_bytes: 8_192,
       result_envelope_reserve_tokens: 256,
@@ -318,7 +331,7 @@ describe("model execution budget proof v2", () => {
     expect(long.reasons).toContain("context_limit");
   });
 
-  it("keeps V2 proof and blocked diagnostics free of prompt, body, chunks, and paths", () => {
+  it("keeps V3 evidence and blocked diagnostics free of prompt, body, chunks, and paths", () => {
     const semanticPrompt = "PRIVATE_PROMPT_SENTINEL";
     const renderedInput = "PRIVATE_BODY_SENTINEL";
     const evaluated = evaluateModelExecutionBudget(executionRequest({
@@ -370,16 +383,57 @@ describe("model execution budget proof v2", () => {
         visible_lids: 1,
         expected_output_items: 1,
       }),
-    }, CODEX_EXECUTOR_TRANSPORT_PROFILE_V1);
+    }, CODEX_EXECUTOR_TRANSPORT_PROFILE_V2);
 
     expect(descriptor.version).toBe("automatic_build_work_unit.v4");
     expect(validateWorkUnitDescriptorV4(
       descriptor,
-      CODEX_EXECUTOR_TRANSPORT_PROFILE_V1,
+      CODEX_EXECUTOR_TRANSPORT_PROFILE_V2,
     )).toBe(descriptor);
     expect(() => validateWorkUnitDescriptorV4({
       ...descriptor,
       input_hash: "e".repeat(64),
-    }, CODEX_EXECUTOR_TRANSPORT_PROFILE_V1)).toThrow(/input_hash/i);
+    }, CODEX_EXECUTOR_TRANSPORT_PROFILE_V2)).toThrow(/input_hash/i);
+  });
+});
+
+describe("H2 synthetic budget evidence migration", () => {
+  it("migrates locked V1/V2 proof shapes to direct evidence with field parity", () => {
+    const inputEvaluation = evaluateModelInputBudget(request());
+    if (inputEvaluation.status !== "within_limit") throw new Error("expected input budget evidence");
+    const legacyInput = {
+      ...inputEvaluation.proof,
+      version: "model_input_budget_proof.v1" as const,
+      proof_digest: "a".repeat(64),
+    };
+    const migratedInput = migrateModelInputBudgetProofV1(
+      JSON.parse(JSON.stringify(legacyInput)) as unknown,
+    );
+    expect(migratedInput).toEqual(inputEvaluation.proof);
+    expect(migratedInput).not.toHaveProperty("proof_digest");
+
+    const executionInput = executionRequest();
+    const executionEvaluation = evaluateModelExecutionBudget(executionInput);
+    if (executionEvaluation.status !== "within_limit") {
+      throw new Error("expected execution budget evidence");
+    }
+    const legacyExecution = {
+      ...executionEvaluation.proof,
+      version: "model_execution_budget_proof.v2" as const,
+      transport_profile_digest: "c".repeat(64),
+      proof_digest: "b".repeat(64),
+    };
+    const migratedExecution = migrateModelExecutionBudgetProofV2(
+      JSON.parse(JSON.stringify(legacyExecution)) as unknown,
+      CODEX_EXECUTOR_TRANSPORT_PROFILE_V2,
+    );
+    expect(migratedExecution).toEqual(executionEvaluation.proof);
+    expect(migratedExecution).not.toHaveProperty("proof_digest");
+    expect(migratedExecution).not.toHaveProperty("transport_profile_digest");
+
+    expect(() => migrateModelInputBudgetProofV1({
+      ...legacyInput,
+      output_reserve_tokens: legacyInput.output_reserve_tokens + 1,
+    })).toThrow(/effective body limit/i);
   });
 });

@@ -1,5 +1,5 @@
 use crate::intent_build_store::{
-    ActiveIntentOverlayV1, IntentArtifactStore, INTENT_BUILD_CONFLICT, INTENT_BUILD_INVALID,
+    ActiveIntentOverlayV2, IntentArtifactStore, INTENT_BUILD_CONFLICT, INTENT_BUILD_INVALID,
     INTENT_BUILD_NOT_FOUND,
 };
 use crate::{
@@ -12,7 +12,6 @@ use runtime::build_intent::{
     build_planning_context_v1, plan_build_intent_candidate,
     validate_build_intent_planner_candidate, ArtifactBlueprintPlannerSummaryV1,
     BuildIntentPlannerCandidateV2, BuildIntentPlannerRequest, BuildPlanningContextInputV1,
-    BuildPlanningContextV1,
 };
 use serde_json::{json, Value};
 use std::ffi::OsString;
@@ -29,6 +28,7 @@ struct CoreIntentCommand {
     current_dir: PathBuf,
 }
 
+#[derive(Debug, Clone)]
 struct DraftRevisionIdentity {
     intent_id: String,
     plan_id: String,
@@ -263,6 +263,11 @@ fn draft(state: &mut AppState, body: &str, now: &str) -> Result<Value, ToolError
         );
     }
     let mut core_input = build_core_draft_input(state, mode, now)?;
+    if mode != "read_now" {
+        let identity = issue_new_draft_identity(state)?;
+        core_input["plan_id"] = json!(identity.plan_id);
+        core_input["plan_revision"] = json!(identity.plan_revision);
+    }
     copy_optional(&input, &mut core_input, "budget");
     let selection = run_core(&json!({ "operation": "draft", "input": core_input }))?;
     persist_selection(state, &selection)?;
@@ -332,12 +337,21 @@ fn edit(state: &mut AppState, body: &str, now: &str) -> Result<Value, ToolError>
 
 fn estimate(state: &AppState, body: &str) -> Result<Value, ToolError> {
     let input = parse_body(body)?;
+    reject_unknown_fields(&input, &["plan_id", "plan_revision"])?;
     let plan_id = required_string(&input, "plan_id")?;
+    let plan_revision = required_positive_u64(&input, "plan_revision")?;
     let plan = private_store(state)?.read_plan(&state.book.base.book_id, plan_id)?;
+    if required_revision(&plan)? != plan_revision {
+        return Err(error(
+            INTENT_BUILD_CONFLICT,
+            "conflict",
+            "estimate plan id or revision does not match the current plan",
+        ));
+    }
     Ok(json!({
-        "version": "build_plan_estimate_response.v1",
-        "plan_id": plan.get("plan_id").cloned().unwrap_or(Value::Null),
-        "plan_digest": plan.get("plan_digest").cloned().unwrap_or(Value::Null),
+        "version": "build_plan_estimate_response.v2",
+        "plan_id": plan_id,
+        "plan_revision": plan_revision,
         "estimate": plan.get("estimate").cloned().unwrap_or(Value::Null),
     }))
 }
@@ -353,17 +367,18 @@ fn confirm_with_source(
     confirmation_source: &str,
 ) -> Result<Value, ToolError> {
     let input = parse_body(body)?;
+    reject_unknown_fields(&input, &["plan_id", "plan_revision"])?;
     let plan_id = required_string(&input, "plan_id")?;
-    let plan_digest = required_string(&input, "plan_digest")?;
+    let plan_revision = required_positive_u64(&input, "plan_revision")?;
     let store = private_store(state)?;
     let plan = store.read_plan(&state.book.base.book_id, plan_id)?;
     if plan.get("status").and_then(Value::as_str) != Some("draft")
-        || plan.get("plan_digest").and_then(Value::as_str) != Some(plan_digest)
+        || required_revision(&plan)? != plan_revision
     {
         return Err(error(
             INTENT_BUILD_CONFLICT,
             "conflict",
-            "confirmation plan id or digest does not match the current draft",
+            "confirmation plan id or revision does not match the current draft",
         ));
     }
     validate_plan_blueprints_current(state, &plan)?;
@@ -374,7 +389,7 @@ fn confirm_with_source(
         "selection": selection,
         "confirmation": {
             "plan_id": plan_id,
-            "plan_digest": plan_digest,
+            "plan_revision": plan_revision,
             "at": now,
             "confirmation_source": confirmation_source,
         }
@@ -436,8 +451,7 @@ fn usage_plan_ref(plan: &Value) -> Result<Value, ToolError> {
     let confirmation_source = required_string(plan, "confirmation_source")?;
     let mut reference = json!({
         "plan_id": required_string(plan, "plan_id")?,
-        "revision": required_revision(plan)?,
-        "plan_digest": required_string(plan, "plan_digest")?,
+        "plan_revision": required_revision(plan)?,
         "confirmation_source": confirmation_source,
     });
     copy_optional(plan, &mut reference, "intent_id");
@@ -465,7 +479,10 @@ fn usage_artifact_ref(plan: &Value, artifact_id: &str) -> Result<Value, ToolErro
                 "artifact does not belong to the selected plan",
             )
         })?;
-    let artifact_type = if plan.get("version").and_then(Value::as_str) == Some("build_plan.v2") {
+    let artifact_type = if matches!(
+        plan.get("version").and_then(Value::as_str),
+        Some("build_plan.v2" | "build_plan.v3")
+    ) {
         match artifact
             .get("blueprint")
             .and_then(|blueprint| blueprint.get("blueprint_id"))
@@ -480,7 +497,7 @@ fn usage_artifact_ref(plan: &Value, artifact_id: &str) -> Result<Value, ToolErro
                 return Err(error(
                     INTENT_BUILD_INVALID,
                     "validation",
-                    "stored V2 plan artifact has no Blueprint identity",
+                    "stored plan artifact has no Blueprint identity",
                 ))
             }
         }
@@ -504,11 +521,10 @@ fn append_plan_selected_usage(
         format!("{}:{mode}:{occurred_at}", state.book.base.book_id)
     } else {
         format!(
-            "{}:{}:{}:{}",
+            "{}:{}:{}",
             state.book.base.book_id,
             required_string(&plan, "plan_id")?,
             required_revision(&plan)?,
-            required_string(&plan, "plan_digest")?,
         )
     };
     let store = private_store(state)?;
@@ -576,7 +592,7 @@ fn current_usage_plan(state: &AppState) -> Result<Option<Value>, ToolError> {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_owned();
-        candidates.push((selected_at, entry.revision, entry.plan_id, plan));
+        candidates.push((selected_at, entry.plan_revision, entry.plan_id, plan));
     }
     candidates.sort_by(|left, right| {
         left.0
@@ -775,6 +791,41 @@ fn build_core_draft_input(state: &AppState, mode: &str, now: &str) -> Result<Val
     }))
 }
 
+fn issue_new_draft_identity(state: &AppState) -> Result<DraftRevisionIdentity, ToolError> {
+    let inspection = private_store(state)?.inspect_redacted(&state.book.base.book_id)?;
+    let mut ordinal = inspection.store_revision.checked_add(1).ok_or_else(|| {
+        error(
+            INTENT_BUILD_CONFLICT,
+            "conflict",
+            "planning id generation overflow",
+        )
+    })?;
+    loop {
+        let intent_id = format!("intent-{ordinal}");
+        let plan_id = format!("plan-{ordinal}");
+        let intent_exists = inspection
+            .intents
+            .iter()
+            .any(|intent| intent.intent_id == intent_id);
+        let plan_exists = inspection.plans.iter().any(|plan| plan.plan_id == plan_id);
+        if !intent_exists && !plan_exists {
+            return Ok(DraftRevisionIdentity {
+                intent_id,
+                plan_id,
+                intent_revision: 1,
+                plan_revision: 1,
+            });
+        }
+        ordinal = ordinal.checked_add(1).ok_or_else(|| {
+            error(
+                INTENT_BUILD_CONFLICT,
+                "conflict",
+                "planning id generation overflow",
+            )
+        })?;
+    }
+}
+
 fn apply_active_replan_identity(state: &AppState, core_input: &mut Value) -> Result<(), ToolError> {
     let store = private_store(state)?;
     let inspection = store.inspect_redacted(&state.book.base.book_id)?;
@@ -785,13 +836,13 @@ fn apply_active_replan_identity(state: &AppState, core_input: &mut Value) -> Res
             .intents
             .iter()
             .filter(|intent| intent.status == "stale_source")
-            .max_by_key(|intent| intent.revision)
+            .max_by_key(|intent| intent.intent_revision)
             .and_then(|intent| {
                 inspection
                     .plans
                     .iter()
                     .filter(|plan| plan.intent_id.as_deref() == Some(intent.intent_id.as_str()))
-                    .max_by_key(|plan| plan.revision)
+                    .max_by_key(|plan| plan.plan_revision)
                     .map(|plan| (intent.intent_id.clone(), plan.plan_id.clone()))
             })
     };
@@ -863,13 +914,16 @@ fn activate_confirmed_selection(state: &AppState, confirmed: &Value) -> Result<(
             persist_selection(state, &superseded)?;
         }
     }
-    let next_active = next_plan
-        .get("intent_id")
-        .and_then(Value::as_str)
-        .map(|intent_id| ActiveIntentOverlayV1 {
+    let next_active = if let Some(intent_id) = next_plan.get("intent_id").and_then(Value::as_str) {
+        Some(ActiveIntentOverlayV2 {
             intent_id: intent_id.into(),
+            intent_revision: required_positive_u64(next_plan, "intent_revision")?,
             plan_id: next_plan_id.into(),
-        });
+            plan_revision: required_positive_u64(next_plan, "plan_revision")?,
+        })
+    } else {
+        None
+    };
     store.set_active_overlay(&state.book.base.book_id, next_active)
 }
 
@@ -1039,7 +1093,7 @@ fn current_content_profile_id(state: &AppState) -> Result<ContentProfileId, Tool
     }
 }
 
-fn current_planning_context(state: &AppState) -> Result<BuildPlanningContextV1, ToolError> {
+fn current_planning_context(state: &AppState) -> Result<Value, ToolError> {
     let source_fingerprint = current_source_fingerprint(state)?;
     let profile = match current_content_profile_id(state)? {
         ContentProfileId::TechnicalLearning => "technical_learning",
@@ -1061,14 +1115,50 @@ fn current_planning_context(state: &AppState) -> Result<BuildPlanningContextV1, 
         .map(|node| node.lid.as_str())
         .collect::<Vec<_>>();
     let blueprints = blueprint_registry_summaries(state)?;
-    build_planning_context_v1(&BuildPlanningContextInputV1 {
+    let legacy = build_planning_context_v1(&BuildPlanningContextInputV1 {
         book_id: &state.book.base.book_id,
         source_fingerprint: &source_fingerprint,
         content_profile: profile,
         available_lids: &available_lids,
         available_sections: &available_sections,
         available_blueprints: &blueprints,
-    })
+    })?;
+    let mut body = serde_json::to_value(legacy).map_err(internal_json)?;
+    let object = body.as_object_mut().ok_or_else(|| {
+        error(
+            INTENT_BUILD_INVALID,
+            "validation",
+            "BuildPlanningContext body is invalid",
+        )
+    })?;
+    object.insert(
+        "version".into(),
+        Value::String("build_planning_context.v2".into()),
+    );
+    object.remove("context_digest");
+    for entry in object
+        .get_mut("blueprint_registry")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| {
+            error(
+                INTENT_BUILD_INVALID,
+                "validation",
+                "BuildPlanningContext Registry is invalid",
+            )
+        })?
+    {
+        entry
+            .as_object_mut()
+            .ok_or_else(|| {
+                error(
+                    INTENT_BUILD_INVALID,
+                    "validation",
+                    "BuildPlanningContext Registry entry is invalid",
+                )
+            })?
+            .remove("digest");
+    }
+    private_store(state)?.issue_planning_context_v2(&state.book.base.book_id, &body)
 }
 
 fn validate_candidate_against_current_state(
@@ -1105,28 +1195,38 @@ fn compile_candidate_draft(
     user_goal: &str,
     candidate: BuildIntentPlannerCandidateV2,
     budget: Option<&Value>,
-    expected_context_digest: Option<&str>,
+    expected_context_identity: Option<(&str, u64)>,
     revision_identity: Option<&DraftRevisionIdentity>,
     planning_source: &str,
     now: &str,
 ) -> Result<Value, ToolError> {
     let initial_context = current_planning_context(state)?;
-    if expected_context_digest.is_some_and(|expected| expected != initial_context.context_digest) {
-        return Err(error(
-            "BUILD_PLANNING_CONTEXT_DRIFT",
-            "needs_user",
-            "the BuildPlanningContext changed; inspect the current context and plan again",
-        ));
+    if let Some((expected_id, expected_revision)) = expected_context_identity {
+        if required_string(&initial_context, "context_id")? != expected_id
+            || required_positive_u64(&initial_context, "context_revision")? != expected_revision
+        {
+            return Err(error(
+                "BUILD_PLANNING_CONTEXT_DRIFT",
+                "needs_user",
+                "the BuildPlanningContext changed; inspect the current context and plan again",
+            ));
+        }
     }
     validate_candidate_against_current_state(state, user_goal, &candidate)?;
     let resolved_blueprints = resolve_candidate_blueprints(state, &candidate, true)?;
     let mut core_input = build_core_draft_input(state, "goal_directed", now)?;
-    if let Some(identity) = revision_identity {
-        core_input["intent_id"] = json!(identity.intent_id.clone());
-        core_input["plan_id"] = json!(identity.plan_id.clone());
-        core_input["intent_revision"] = json!(identity.intent_revision);
-        core_input["plan_revision"] = json!(identity.plan_revision);
+    let owned_identity;
+    let identity = if let Some(identity) = revision_identity {
+        identity
     } else {
+        owned_identity = issue_new_draft_identity(state)?;
+        &owned_identity
+    };
+    core_input["intent_id"] = json!(identity.intent_id.clone());
+    core_input["plan_id"] = json!(identity.plan_id.clone());
+    core_input["intent_revision"] = json!(identity.intent_revision);
+    core_input["plan_revision"] = json!(identity.plan_revision);
+    if revision_identity.is_none() {
         apply_active_replan_identity(state, &mut core_input)?;
     }
     core_input["user_goal"] = json!(user_goal);
@@ -1137,7 +1237,11 @@ fn compile_candidate_draft(
     }
     let selection = run_core(&json!({ "operation": "draft", "input": core_input }))?;
     let final_context = current_planning_context(state)?;
-    if final_context.context_digest != initial_context.context_digest {
+    if required_string(&final_context, "context_id")?
+        != required_string(&initial_context, "context_id")?
+        || required_positive_u64(&final_context, "context_revision")?
+            != required_positive_u64(&initial_context, "context_revision")?
+    {
         return Err(error(
             "BUILD_PLANNING_CONTEXT_DRIFT",
             "needs_user",
@@ -1231,21 +1335,44 @@ fn resolve_candidate_blueprints(
                 "operation": "resolve",
                 "input": input,
             }))?;
-            if resolution.get("source").and_then(Value::as_str) != Some(artifact.source.as_str()) {
+            let source = required_string(&resolution, "source")?;
+            let blueprint = resolution.get("blueprint").ok_or_else(|| {
+                error(
+                    INTENT_BUILD_INVALID,
+                    "validation",
+                    "ArtifactBlueprint resolution has no Blueprint snapshot",
+                )
+            })?;
+            let blueprint_id = required_string(blueprint, "blueprint_id")?;
+            let blueprint_version = required_string(blueprint, "blueprint_version")?;
+            if source != artifact.source
+                || blueprint_id != artifact.blueprint_id
+                || blueprint_version != artifact.blueprint_version
+            {
                 return Err(error(
                     INTENT_BUILD_INVALID,
                     "validation",
-                    "ArtifactBlueprint resolution source does not match the planner selection",
+                    "ArtifactBlueprint resolution identity does not match the planner selection",
                 ));
             }
-            Ok(resolution)
+            Ok(json!({
+                "version": "artifact_blueprint_resolution.v2",
+                "source": source,
+                "blueprint": blueprint,
+                "blueprint_id": blueprint_id,
+                "blueprint_version": blueprint_version,
+            }))
         })
         .collect()
 }
 
 fn validate_plan_blueprints_current(state: &AppState, plan: &Value) -> Result<(), ToolError> {
-    if plan.get("version").and_then(Value::as_str) != Some("build_plan.v2") {
-        return Ok(());
+    if plan.get("version").and_then(Value::as_str) != Some("build_plan.v3") {
+        return Err(error(
+            INTENT_BUILD_INVALID,
+            "validation",
+            "production confirmation requires build_plan.v3",
+        ));
     }
     let artifacts = plan
         .get("private_artifacts")
@@ -1254,7 +1381,7 @@ fn validate_plan_blueprints_current(state: &AppState, plan: &Value) -> Result<()
             error(
                 INTENT_BUILD_INVALID,
                 "validation",
-                "stored V2 plan artifacts are invalid",
+                "stored V3 plan artifacts are invalid",
             )
         })?;
     for artifact in artifacts {
@@ -1262,7 +1389,7 @@ fn validate_plan_blueprints_current(state: &AppState, plan: &Value) -> Result<()
             error(
                 INTENT_BUILD_INVALID,
                 "validation",
-                "stored V2 plan has no Blueprint snapshot",
+                "stored V3 plan has no Blueprint snapshot",
             )
         })?;
         let source = required_string(blueprint, "origin")?;
@@ -1295,13 +1422,15 @@ fn validate_plan_blueprints_current(state: &AppState, plan: &Value) -> Result<()
             .pop()
             .expect("one Blueprint resolution");
         candidate.artifacts.clear();
-        if resolution.get("digest") != artifact.get("blueprint_digest")
+        if resolution.get("source").and_then(Value::as_str) != Some(source)
+            || resolution.get("blueprint_id") != artifact.get("blueprint_id")
+            || resolution.get("blueprint_version") != artifact.get("blueprint_version")
             || resolution.get("blueprint") != Some(blueprint)
         {
             return Err(error(
                 "BUILD_PLAN_BLUEPRINT_DRIFT",
                 "needs_user",
-                "the current ArtifactBlueprint snapshot or digest changed; replan before confirmation",
+                "the current ArtifactBlueprint identity or schema changed; replan before confirmation",
             ));
         }
     }
@@ -1309,35 +1438,30 @@ fn validate_plan_blueprints_current(state: &AppState, plan: &Value) -> Result<()
 }
 
 fn selection_from_artifacts(plan: Value, intent: Option<Value>) -> Result<Value, ToolError> {
-    let selection_version = match plan.get("version").and_then(Value::as_str) {
-        Some("build_plan.v2") => "build_intent_selection.v2",
-        Some("build_plan.v1") => "build_intent_selection.v1",
-        _ => {
-            return Err(error(
-                INTENT_BUILD_INVALID,
-                "validation",
-                "stored BuildPlan version is unsupported",
-            ))
-        }
-    };
+    if plan.get("version").and_then(Value::as_str) != Some("build_plan.v3") {
+        return Err(error(
+            INTENT_BUILD_INVALID,
+            "validation",
+            "production selection requires build_plan.v3",
+        ));
+    }
     let recipe = required_string(&plan, "recipe_id")?;
     let plan_id = required_string(&plan, "plan_id")?;
-    let plan_digest = required_string(&plan, "plan_digest")?;
+    let plan_revision = required_revision(&plan)?;
     let status = plan
         .get("status")
         .and_then(Value::as_str)
         .unwrap_or("draft");
     Ok(json!({
-        "version": selection_version,
+        "version": "build_intent_selection.v3",
         "mode": recipe,
         "intent": intent,
-        "intent_digest": plan.get("intent_digest").cloned().unwrap_or(Value::Null),
         "plan": plan,
         "estimate_input": null,
         "decision_request": {
-            "version": "build_decision_request.v2",
-            "decision_id": format!("decision-{}", &plan_digest[..16]),
-            "scope": { "kind": "build_plan", "plan_id": plan_id, "plan_digest": plan_digest },
+            "version": "build_decision_request.v3",
+            "decision_id": format!("decision-{plan_id}-r{plan_revision}"),
+            "scope": { "kind": "build_plan", "plan_id": plan_id, "plan_revision": plan_revision },
             "kind": "build_intent_plan",
             "options": [
                 { "id": "confirm", "label": "Confirm plan" },
@@ -1424,7 +1548,7 @@ fn codex_selection(state: &AppState, input: &Value) -> Result<Option<Value>, Too
                     .plans
                     .iter()
                     .filter(|plan| matches!(plan.status.as_str(), "confirmed" | "completed"))
-                    .max_by_key(|plan| plan.revision)
+                    .max_by_key(|plan| plan.plan_revision)
                     .map(|plan| plan.plan_id.clone())
             })
     };
@@ -1478,20 +1602,22 @@ pub(super) fn run_codex_command(
     match operation {
         "planning.context" => {
             reject_unknown_fields(&input, &[])?;
-            serde_json::to_value(current_planning_context(state)?).map_err(internal_json)
+            current_planning_context(state)
         }
         "draft.candidate" => {
             reject_unknown_fields(
                 &input,
                 &[
                     "user_goal",
-                    "planning_context_digest",
+                    "context_id",
+                    "context_revision",
                     "candidate",
                     "budget",
                 ],
             )?;
             let user_goal = required_string(&input, "user_goal")?;
-            let context_digest = required_string(&input, "planning_context_digest")?;
+            let context_id = required_string(&input, "context_id")?;
+            let context_revision = required_positive_u64(&input, "context_revision")?;
             let candidate: BuildIntentPlannerCandidateV2 =
                 serde_json::from_value(input.get("candidate").cloned().ok_or_else(|| {
                     error(
@@ -1512,7 +1638,7 @@ pub(super) fn run_codex_command(
                 user_goal,
                 candidate,
                 input.get("budget"),
-                Some(context_digest),
+                Some((context_id, context_revision)),
                 None,
                 "codex",
                 now,
@@ -1528,7 +1654,7 @@ pub(super) fn run_codex_command(
         }
         "status" => codex_response(state, codex_selection(state, &input)?),
         "confirm" => {
-            reject_unknown_fields(&input, &["plan_id", "plan_digest"])?;
+            reject_unknown_fields(&input, &["plan_id", "plan_revision"])?;
             let confirmed =
                 confirm_with_source(state, &input.to_string(), now, "codex_conversation")?;
             codex_response(state, confirmed.get("selection").cloned())
@@ -1757,14 +1883,24 @@ fn required_string<'a>(value: &'a Value, field: &str) -> Result<&'a str, ToolErr
 }
 
 fn required_revision(value: &Value) -> Result<u64, ToolError> {
+    let field = match value.get("version").and_then(Value::as_str) {
+        Some("build_intent.v3") => "intent_revision",
+        Some("build_plan.v3") => "plan_revision",
+        _ => "revision",
+    };
+    required_positive_u64(value, field)
+}
+
+fn required_positive_u64(value: &Value, field: &str) -> Result<u64, ToolError> {
     value
-        .get("revision")
+        .get(field)
         .and_then(Value::as_u64)
+        .filter(|revision| *revision > 0)
         .ok_or_else(|| {
             error(
                 INTENT_BUILD_INVALID,
                 "validation",
-                "stored revision is invalid",
+                format!("stored {field} is invalid"),
             )
         })
 }

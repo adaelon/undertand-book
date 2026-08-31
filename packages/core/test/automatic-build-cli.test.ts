@@ -43,7 +43,7 @@ function acceptedNext(
     protocol: "automatic_build_protocol.v2",
     ...options,
     build_plan: buildPlan,
-    accepted_plan_digest: plan.preflight.plan_digest,
+    accepted_plan_digest: plan.preflight.descriptor_plan_digest,
   });
 }
 
@@ -336,7 +336,7 @@ describe("automatic build attempt policy", () => {
       owner: "dispatch-book-id-test",
       now: "2026-07-30T14:00:00.000Z",
       available_agent_slots: 1,
-      accepted_plan_digest: plan.preflight.plan_digest,
+      accepted_plan_digest: plan.preflight.descriptor_plan_digest,
       executor_dispatches: true,
       build_plan: buildPlan,
     });

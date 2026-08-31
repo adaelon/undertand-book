@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -26,7 +25,8 @@ describe("automatic build executor prompt", () => {
       "utf8",
     ));
     for (const marker of [
-      "automatic_build_executor_session.v2",
+      "automatic_build_executor_session.v3",
+      "automatic_build_executor_open_request.v3",
       "understand_book_build_executor",
       "executor.open",
       "executor.input.next",
@@ -34,8 +34,7 @@ describe("automatic build executor prompt", () => {
       "executor.submit_candidate",
       "action.kind=DELIVER_INPUT",
       "action.kind=INPUT_CHUNK",
-      "action.chunk.chunk_receipt",
-      "never batch, prefetch, or loop multiple executor calls",
+      "previous_chunk_ordinal",
       "action.kind=GENERATION_GRANT",
       "action.kind=GENERATE",
       "action.kind=WAIT",
@@ -46,10 +45,16 @@ describe("automatic build executor prompt", () => {
       expect(wrapper).toContain(marker);
     }
     expect(wrapper).toMatch(/Make exactly one executor MCP\s+call per tool step/u);
-    expect(wrapper).not.toMatch(/automatic_build_executor_session\.v1|candidate_path|executor\.session|PowerShell|private candidate source/u);
+    expect(wrapper).toMatch(/never batch, prefetch, or loop multiple executor\s+calls/u);
+    expect(wrapper).toContain(
+      "The stdio state machine enforces direct phase, ref, ordinal, and schema checks, "
+        + "but it does not authenticate the caller role.",
+    );
+    expect(wrapper).not.toMatch(
+      /automatic_build_executor_session\.v[12]|chunk_receipt|previous_chunk_receipt|agent-only stdio|candidate_path|executor\.session|PowerShell|private candidate source/u,
+    );
     expect(wrapper.split("# Automatic Build Executor Session Protocol")).toHaveLength(2);
     expect(wrapper.split("## Semantic extractor instructions")).toHaveLength(2);
-    expect(createHash("sha256").update(wrapper).digest("hex")).toMatch(/^[a-f0-9]{64}$/u);
   });
 
   it("composes one deterministic dispatch wrapper and one semantic prompt", () => {

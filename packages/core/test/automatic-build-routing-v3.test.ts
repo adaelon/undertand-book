@@ -65,7 +65,7 @@ describe("BR8 production v3 routing release", () => {
     expect(AUTOMATIC_BUILD_ROUTING_RELEASE).toEqual({
       version: "automatic_build_routing_release.v1",
       descriptor_generation: "automatic_build_work_unit.v3",
-      policy_set: "automatic_build_stage_policy_set.v2",
+      policy_set: "automatic_build_stage_policy_set.v3",
       quality_report: "automatic_build_stage_quality_report.v2",
       pass1_router: "pass1_model_slice.v1",
       profile_sidecar_router: "profile_sidecar_discourse_map_reduce.v1",
@@ -73,7 +73,7 @@ describe("BR8 production v3 routing release", () => {
       activated_at: "2026-08-04T00:00:00.000Z",
     });
     expect(result.routing_release).toBe(AUTOMATIC_BUILD_ROUTING_RELEASE);
-    expect(pass1?.policy_set?.version).toBe("automatic_build_stage_policy_set.v2");
+    expect(pass1?.policy_set?.version).toBe("automatic_build_stage_policy_set.v3");
     expect(pass1?.work_units?.length).toBeGreaterThan(1);
     expect(pass1?.work_units?.every((unit) => unit.version === "automatic_build_work_unit.v3"))
       .toBe(true);
@@ -85,7 +85,14 @@ describe("BR8 production v3 routing release", () => {
       extractor: "pass1-local-extractor",
     });
     expect(result.preflight).toMatchObject({
-      policy_set_digest: pass1?.policy_set?.policy_set_digest,
+      policy_generations: expect.arrayContaining([
+        expect.objectContaining({
+          kind: "pass1_source_slice",
+          policy_generation_id: pass1?.policy_set?.members.find(
+            (member) => member.kind === "pass1_source_slice",
+          )?.policy_generation_id,
+        }),
+      ]),
     });
     expect(existsSync(path.join(
       fixture.target.workspace_dir,
@@ -109,7 +116,7 @@ describe("BR8 production v3 routing release", () => {
       protocol: AUTOMATIC_BUILD_PROTOCOL_V2,
       owner: "br8-v3-claim",
       now: "2026-08-04T00:10:00.000Z",
-      accepted_plan_digest: plan.preflight.plan_digest,
+      accepted_plan_digest: plan.preflight.descriptor_plan_digest,
       available_agent_slots: 1,
       build_plan: buildPlan,
     });
@@ -121,8 +128,8 @@ describe("BR8 production v3 routing release", () => {
       tasks: [{
         descriptor: { version: "automatic_build_work_unit.v3" },
         lease: {
-          proof_digest: expect.stringMatching(/^[a-f0-9]{64}$/u),
-          policy_set_digest: expect.stringMatching(/^[a-f0-9]{64}$/u),
+          policy_generation_id: expect.stringMatching(/^[a-z0-9][a-z0-9._-]{0,127}$/u),
+          semantic_contract: expect.any(Object),
         },
       }],
     });
@@ -183,7 +190,7 @@ describe("BR8 production v3 routing release", () => {
     const next = automaticBuildNext(fixture.source_file, fixture.root, 2, {
       owner: "br8-dynamic-prompts",
       now: "2026-08-04T00:15:00.000Z",
-      accepted_plan_digest: plan.preflight.plan_digest,
+      accepted_plan_digest: plan.preflight.descriptor_plan_digest,
       available_agent_slots: 2,
       executor_dispatches: true,
       build_plan: buildPlan,
@@ -221,7 +228,7 @@ describe("BR8 production v3 routing release", () => {
       protocol: AUTOMATIC_BUILD_PROTOCOL_V2,
       owner: "br8-v3-executor",
       now: "2026-08-04T00:20:00.000Z",
-      accepted_plan_digest: plan.preflight.plan_digest,
+      accepted_plan_digest: plan.preflight.descriptor_plan_digest,
       available_agent_slots: 1,
       build_plan: buildPlan,
     });
@@ -247,7 +254,7 @@ describe("BR8 production v3 routing release", () => {
     });
     expect(input.status, input.stderr).toBe(0);
     expect(input.stdout).not.toBe("");
-    expect(task.lease.policy_set_digest).toMatch(/^[a-f0-9]{64}$/u);
+    expect(task.lease.policy_generation_id).toMatch(/^[a-z0-9][a-z0-9._-]{0,127}$/u);
 
     const candidateSource = path.join(fixture.root, "pass1-candidate.json");
     writeFileSync(candidateSource, JSON.stringify({ nodes: [], edges: [] }), "utf8");
@@ -269,7 +276,7 @@ describe("BR8 production v3 routing release", () => {
         task.task_id,
         candidatePath,
         {
-          policy_set_digest: task.lease.policy_set_digest!,
+          policy_generation_id: task.lease.policy_generation_id!,
           attempt: task.lease.attempt,
           executor: task.lease.owner,
           generated_at: "2026-08-04T00:20:03.000Z",
@@ -279,7 +286,8 @@ describe("BR8 production v3 routing release", () => {
     );
     expect(JSON.parse(readFileSync(receipt.artifact_path!, "utf8"))).toMatchObject({
       version: "semantic_task_artifact.v3",
-      policy_set_digest: task.lease.policy_set_digest,
+      policy_generation_id: task.lease.policy_generation_id,
+      semantic_contract: task.lease.semantic_contract,
     });
 
     const resumed = automaticBuildPlan(fixture.source_file, fixture.root, {
@@ -306,7 +314,7 @@ describe("BR8 production v3 routing release", () => {
       protocol: AUTOMATIC_BUILD_PROTOCOL_V2,
       owner: "br8-shadow-retry-isolation",
       now: "2026-08-04T00:25:00.000Z",
-      accepted_plan_digest: plan.preflight.plan_digest,
+      accepted_plan_digest: plan.preflight.descriptor_plan_digest,
       available_agent_slots: 1,
       build_plan: buildPlan,
     });
@@ -316,7 +324,7 @@ describe("BR8 production v3 routing release", () => {
       throw new Error("expected a leased BR8 retry-isolation task");
     }
     const task = next.action.tasks[0];
-    if (!("lease" in task) || !task.lease.policy_set_digest) {
+    if (!("lease" in task) || !task.lease.policy_generation_id) {
       throw new Error("expected a proof-bound retry-isolation lease");
     }
     const invalidCandidate = path.join(fixture.root, "pass1-invalid-retry-candidate.json");
@@ -324,7 +332,7 @@ describe("BR8 production v3 routing release", () => {
     writeFileSync(invalidCandidate, JSON.stringify({ nodes: "invalid", edges: [] }), "utf8");
     writeFileSync(validCandidate, JSON.stringify({ nodes: [], edges: [] }), "utf8");
     const generation = {
-      policy_set_digest: task.lease.policy_set_digest,
+      policy_generation_id: task.lease.policy_generation_id,
       executor: task.lease.owner,
       generated_at: "2026-08-04T00:25:01.000Z",
     };
@@ -346,7 +354,7 @@ describe("BR8 production v3 routing release", () => {
 
     const mailbox = pass1ShadowTaskPrivateDirectory(
       fixture.target,
-      task.lease.policy_set_digest,
+      task.lease.policy_generation_id,
       task.task_id,
     );
     const stagedCandidates = readdirSync(mailbox, { recursive: true })
@@ -411,6 +419,7 @@ describe("BR8 production v3 routing release", () => {
     const legacyLock = freezeAutomaticBuildStagePolicy(
       fixture.target,
       "pass1",
+      `pass1.${legacyPolicy.stage_policy_version}.${legacyPolicy.quality_profile}`,
       legacyPolicy,
       "2026-08-03T23:55:00.000Z",
     );
@@ -420,8 +429,10 @@ describe("BR8 production v3 routing release", () => {
       available_agent_slots: 1,
     });
     const pass1 = adopted.snapshot.stages.find((stage) => stage.stage === "pass1");
-    const policySetDigest = pass1?.policy_set?.policy_set_digest;
-    if (!pass1?.policy_set || !policySetDigest) {
+    const policyGenerationId = pass1?.policy_set?.members.find(
+      (member) => member.kind === "pass1_window",
+    )?.policy_generation_id;
+    if (!pass1?.policy_set || !policyGenerationId) {
       throw new Error("expected a Pass1 v3 policy set after exact adoption");
     }
     expect(adopted.next_action).toEqual({ kind: "close_stage", stage: "pass1" });
@@ -438,8 +449,8 @@ describe("BR8 production v3 routing release", () => {
     const migrationReceipt = JSON.parse(readFileSync(automaticBuildPolicyMigrationReceiptPath(
       fixture.target,
       "pass1",
-      legacyLock.policy_digest,
-      policySetDigest,
+      legacyLock.policy_generation_id,
+      policyGenerationId,
       legacyDescriptor.work_unit_id,
     ), "utf8"));
     expect(migrationReceipt).toMatchObject({
@@ -452,7 +463,7 @@ describe("BR8 production v3 routing release", () => {
     const generationArtifact = JSON.parse(readFileSync(automaticBuildGenerationArtifactPath(
       fixture.target,
       "pass1",
-      policySetDigest,
+      policyGenerationId,
       legacyDescriptor.work_unit_id,
     ), "utf8"));
     expect(generationArtifact).toMatchObject({
@@ -468,7 +479,7 @@ describe("BR8 production v3 routing release", () => {
 
     const task = readPass1ShadowTask(
       fixture.target,
-      policySetDigest,
+      policyGenerationId,
       legacyDescriptor.work_unit_id,
     );
     const candidate = writePass1ShadowFinalCandidate({
@@ -513,7 +524,7 @@ describe("BR8 production v3 routing release", () => {
     });
     expect(close.status, close.stderr).toBe(0);
     expect(JSON.parse(close.stdout)).toMatchObject({
-      version: "automatic_build_stage_close_result.v1",
+      version: "automatic_build_stage_close_result.v2",
       status: "closed",
       stage: "pass1",
       next: "replan",
@@ -547,7 +558,7 @@ describe("BR8 production v3 routing release", () => {
     }
     const task = readPass1ShadowTask(
       fixture.target,
-      pass1.policy_set.policy_set_digest,
+      pass1.generation_tasks?.[contributor.work_unit_id]?.task.policy_generation_id ?? "",
       contributor.work_unit_id,
     );
     expect(task.route.role).toBe("final");
@@ -582,7 +593,7 @@ describe("BR8 production v3 routing release", () => {
     });
     expect(close.status, close.stderr).toBe(0);
     expect(JSON.parse(close.stdout)).toMatchObject({
-      version: "automatic_build_stage_close_result.v1",
+      version: "automatic_build_stage_close_result.v2",
       status: "closed",
       stage: "pass1",
       next: "replan",
@@ -600,7 +611,7 @@ describe("BR8 production v3 routing release", () => {
     const profile = result.snapshot.stages.find((stage) => stage.stage === "profile_sidecar");
 
     expect(profile?.policy_set).toMatchObject({
-      version: "automatic_build_stage_policy_set.v2",
+      version: "automatic_build_stage_policy_set.v3",
       stage: "profile_sidecar",
     });
     expect(profile?.work_units?.length).toBeGreaterThan(1);
@@ -616,7 +627,14 @@ describe("BR8 production v3 routing release", () => {
       extractor: "profile-sidecar-discourse-fragment-extractor",
     });
     expect(result.preflight).toMatchObject({
-      policy_set_digest: profile?.policy_set?.policy_set_digest,
+      policy_generations: expect.arrayContaining([
+        expect.objectContaining({
+          kind: "profile_sidecar_discourse_fragment",
+          policy_generation_id: profile?.policy_set?.members.find(
+            (member) => member.kind === "profile_sidecar_discourse_fragment",
+          )?.policy_generation_id,
+        }),
+      ]),
     });
 
     const buildPlan = confirmedStandardBuildPlan(fixture.source_file, fixture.root);
@@ -630,7 +648,7 @@ describe("BR8 production v3 routing release", () => {
       protocol: AUTOMATIC_BUILD_PROTOCOL_V2,
       owner: "br8-profile-fragment",
       now: "2026-08-04T00:40:00.000Z",
-      accepted_plan_digest: executable.preflight.plan_digest,
+      accepted_plan_digest: executable.preflight.descriptor_plan_digest,
       available_agent_slots: 1,
       build_plan: buildPlan,
     });
@@ -650,7 +668,7 @@ describe("BR8 production v3 routing release", () => {
     });
     expect(existsSync(profileSidecarDiscourseShadowTaskPath(
       fixture.target,
-      task.lease.policy_set_digest!,
+      task.lease.policy_generation_id!,
       task.task_id,
     ))).toBe(true);
     const [inputCommand, ...inputArgs] = task.input_command;
@@ -681,7 +699,7 @@ describe("BR8 production v3 routing release", () => {
       protocol: AUTOMATIC_BUILD_PROTOCOL_V2,
       owner: "br8-profile-fast-path",
       now: "2026-08-04T00:50:00.000Z",
-      accepted_plan_digest: plan.preflight.plan_digest,
+      accepted_plan_digest: plan.preflight.descriptor_plan_digest,
       available_agent_slots: 1,
       build_plan: buildPlan,
     });
@@ -746,7 +764,7 @@ describe("BR8 production v3 routing release", () => {
         task.task_id,
         candidatePath,
         {
-          policy_set_digest: task.lease.policy_set_digest!,
+          policy_generation_id: task.lease.policy_generation_id!,
           attempt: task.lease.attempt,
           executor: task.lease.owner,
           generated_at: "2026-08-04T00:50:03.000Z",
@@ -757,7 +775,8 @@ describe("BR8 production v3 routing release", () => {
     expect(JSON.parse(readFileSync(receipt.artifact_path!, "utf8"))).toMatchObject({
       version: "semantic_task_artifact.v3",
       stage: "profile_sidecar",
-      policy_set_digest: task.lease.policy_set_digest,
+      policy_generation_id: task.lease.policy_generation_id,
+      semantic_contract: task.lease.semantic_contract,
     });
     const closing = automaticBuildNext(fixture.source_file, fixture.root, 1, {
       owner: "br8-profile-fast-path-close",
@@ -778,7 +797,7 @@ describe("BR8 production v3 routing release", () => {
     });
     expect(close.status, close.stderr).toBe(0);
     expect(JSON.parse(close.stdout)).toMatchObject({
-      version: "automatic_build_stage_close_result.v1",
+      version: "automatic_build_stage_close_result.v2",
       status: "closed",
       stage: "profile_sidecar",
       next: "replan",

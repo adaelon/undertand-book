@@ -11,10 +11,12 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  automaticBuildPolicyGenerationPath,
   automaticBuildPolicyMigrationReceiptPath,
-  automaticBuildStagePolicySetPath,
   createAutomaticBuildStagePolicySet,
   freezeAutomaticBuildStagePolicySet,
+  materializeAdoptedAutomaticBuildGenerationArtifact,
+  recordAutomaticBuildPriorGenerationAdoption,
   recordAutomaticBuildPolicyMigration,
   resolveAutomaticBuildPolicyGeneration,
   type AutomaticBuildPolicyMigrationCurrent,
@@ -30,11 +32,12 @@ import { resolveAutomaticBuildTarget } from "../src/build-orchestrator";
 import { resolveContentProfile } from "../src/content-profile";
 import { evaluateModelInputBudget } from "../src/model-input-budget";
 import {
+  automaticBuildGenerationArtifactPath,
   automaticBuildExtractionPolicy,
   buildSemanticArtifactEnvelope,
   buildSemanticArtifactEnvelopeV3,
-  extractionPolicyDigest,
   freezeAutomaticBuildStagePolicy,
+  semanticContractFromExtractionPolicy,
   writeAutomaticBuildGenerationArtifact,
   type ExtractionPolicyFingerprintV1,
 } from "../src/semantic-artifact";
@@ -86,30 +89,43 @@ function fixture(label: string, policies?: {
     ...defaultPolicy,
     router_version: "profile_sidecar_semantic_units.v3",
   };
+  const policyMembers = [
+    {
+      kind: "profile_sidecar_discourse" as const,
+      extractor: "profile-sidecar-extractor" as const,
+      policy_generation_id: "profile-sidecar-discourse.test.v2",
+      policy_fingerprint: currentPolicy,
+    },
+    {
+      kind: "profile_sidecar_formula" as const,
+      extractor: "profile-sidecar-extractor" as const,
+      policy_generation_id: "profile-sidecar-formula.test.v2",
+      policy_fingerprint: currentPolicy,
+    },
+  ];
   const policySet = createAutomaticBuildStagePolicySet({
     target_ref: target.target_ref,
     stage: "profile_sidecar",
-    members: [
-      {
-        kind: "profile_sidecar_discourse",
-        extractor: "profile-sidecar-extractor",
-        policy_fingerprint: currentPolicy,
-      },
-      {
-        kind: "profile_sidecar_formula",
-        extractor: "profile-sidecar-extractor",
-        policy_fingerprint: currentPolicy,
-      },
-    ],
+    members: policyMembers,
     frozen_at: "2026-08-03T08:00:00.000Z",
   });
   const oldLock = freezeAutomaticBuildStagePolicy(
     target,
     "profile_sidecar",
+    `profile_sidecar.${oldPolicy.stage_policy_version}.${oldPolicy.quality_profile}`,
     oldPolicy,
     "2026-08-03T07:00:00.000Z",
   );
-  return { root, target, oldPolicy, currentPolicy, policySet, oldLock };
+  return { root, target, oldPolicy, currentPolicy, policyMembers, policySet, oldLock };
+}
+
+function policyMember(
+  input: ReturnType<typeof fixture>,
+  kind: "profile_sidecar_discourse" | "profile_sidecar_formula",
+) {
+  const member = input.policySet.members.find((candidate) => candidate.kind === kind);
+  if (!member) throw new Error(`missing fixture policy member: ${kind}`);
+  return member;
 }
 
 function oldDescriptor(
@@ -157,6 +173,55 @@ function writeOldArtifact(
       formula_semantics: [],
     },
   }), null, 2)}\n`, "utf8");
+  return artifactPath;
+}
+
+function writeDigestBoundGenerationArtifact(
+  input: ReturnType<typeof fixture>,
+  descriptor: WorkUnitDescriptorV3,
+  sourceGenerationId: string,
+): string {
+  const payload = {
+    content_hash: descriptor.input_hash,
+    discourse_items: [{ lid: "1.1", local_function: "explanation", relations: [] }],
+    formula_semantics: [],
+  };
+  const currentEnvelope = buildSemanticArtifactEnvelopeV3({
+    target: input.target.target_ref,
+    stage: "profile_sidecar",
+    work_unit_id: descriptor.work_unit_id,
+    input_hash: descriptor.input_hash,
+    policy_generation_id: sourceGenerationId,
+    semantic_contract: semanticContractFromExtractionPolicy(input.currentPolicy),
+    provenance: {
+      executor: "codex-harness",
+      model: "gpt-5.4-codex",
+      attempt: 1,
+      generated_at: "2026-08-03T07:30:00.000Z",
+    },
+    payload,
+  });
+  const predecessor = {
+    version: "semantic_task_artifact.v3",
+    target: currentEnvelope.target,
+    stage: currentEnvelope.stage,
+    work_unit_id: currentEnvelope.work_unit_id,
+    input_hash: currentEnvelope.input_hash,
+    proof_digest: sha256("legacy execution proof"),
+    policy_set_digest: sourceGenerationId,
+    policy_fingerprint: input.currentPolicy,
+    artifact_hash: currentEnvelope.artifact_hash,
+    provenance: currentEnvelope.provenance,
+    payload: currentEnvelope.payload,
+  };
+  const artifactPath = automaticBuildGenerationArtifactPath(
+    input.target,
+    "profile_sidecar",
+    sourceGenerationId,
+    descriptor.work_unit_id,
+  );
+  mkdirSync(path.dirname(artifactPath), { recursive: true });
+  writeFileSync(artifactPath, `${JSON.stringify(predecessor, null, 2)}\n`, "utf8");
   return artifactPath;
 }
 
@@ -210,12 +275,15 @@ function currentDescriptor(
   });
 }
 
-function modelCurrent(descriptor: WorkUnitDescriptorV3, renderedInput: string): AutomaticBuildPolicyMigrationCurrent {
+function modelCurrent(
+  descriptor: WorkUnitDescriptorV3,
+  renderedInput: string,
+): Extract<AutomaticBuildPolicyMigrationCurrent, { route: "model" }> {
   return { route: "model", descriptor, rendered_input: renderedInput };
 }
 
 describe("automatic build policy generation and selective migration", () => {
-  it("keeps policy v1 history immutable and requires rebuild for profile_sidecar_policy.v2", () => {
+  it("keeps policy v1 history immutable and requires rebuild for direct profile_sidecar policy v2 changes", () => {
     const currentPolicy = automaticBuildExtractionPolicy(
       "profile_sidecar",
       resolveContentProfile("technical_learning"),
@@ -230,15 +298,18 @@ describe("automatic build policy generation and selective migration", () => {
     const oldPolicySet = createAutomaticBuildStagePolicySet({
       target_ref: input.target.target_ref,
       stage: "profile_sidecar",
-      members: input.policySet.members.map((member) => ({
+      members: input.policyMembers.map((member) => ({
         ...member,
+        policy_generation_id: `${member.policy_generation_id}.legacy`,
         policy_fingerprint: oldPolicy,
       })),
       frozen_at: input.policySet.frozen_at,
     });
     expect(currentPolicy.stage_policy_version).toBe("profile_sidecar_policy.v2");
-    expect(extractionPolicyDigest(oldPolicy)).not.toBe(extractionPolicyDigest(currentPolicy));
-    expect(oldPolicySet.policy_set_digest).not.toBe(input.policySet.policy_set_digest);
+    expect(oldPolicy.stage_policy_version).not.toBe(currentPolicy.stage_policy_version);
+    expect(oldPolicy.prompt_sha256).not.toBe(currentPolicy.prompt_sha256);
+    expect(oldPolicySet.members[0].semantic_contract)
+      .not.toEqual(input.policySet.members[0].semantic_contract);
 
     const rendered = "PROFILE_SIDECAR_INPUT\n[LID 1.1]\nA canonical paragraph.\n";
     const previousDescriptor = oldDescriptor(input, "policy-v1-discourse", rendered);
@@ -249,7 +320,7 @@ describe("automatic build policy generation and selective migration", () => {
     const migration = recordAutomaticBuildPolicyMigration({
       target: input.target,
       stage: "profile_sidecar",
-      from_policy_digest: input.oldLock.policy_digest,
+      from_policy_generation_id: input.oldLock.policy_generation_id,
       policy_set: frozen,
       current: modelCurrent(descriptor, rendered),
       previous: {
@@ -262,17 +333,111 @@ describe("automatic build policy generation and selective migration", () => {
     expect(migration).toMatchObject({
       decision: "rebuild",
       reason: "semantic_policy_changed",
-      from_policy_digest: extractionPolicyDigest(oldPolicy),
-      to_policy_set_digest: frozen.policy_set_digest,
     });
     expect(readFileSync(previousArtifactPath)).toEqual(previousArtifactBytes);
     expect(resolveAutomaticBuildPolicyGeneration({
       target: input.target,
       stage: "profile_sidecar",
-      from_policy_digest: input.oldLock.policy_digest,
-      policy_set_digest: frozen.policy_set_digest,
+      from_policy_generation_id: input.oldLock.policy_generation_id,
+      policy_set: frozen,
       current_units: [modelCurrent(descriptor, rendered)],
     })).toMatchObject({ status: "pending", pending_rebuild_units: [descriptor.work_unit_id] });
+  });
+
+  it("H0 removes policy-generation wrappers after direct stage, member, input, artifact, and skip fields decide", () => {
+    const input = fixture("h0-forbidden-fields");
+    const rendered = "PROFILE_SIDECAR_INPUT\n[LID 1.1]\nA canonical paragraph.\n";
+    const previousDescriptor = oldDescriptor(input, "h0-old-discourse", rendered);
+    const previousArtifactPath = writeOldArtifact(input, previousDescriptor);
+    const descriptor = currentDescriptor(input, "h0-current-discourse", rendered);
+    const current = modelCurrent(descriptor, rendered);
+    const frozen = freezeAutomaticBuildStagePolicySet(input.target, input.policySet);
+    const adopted = recordAutomaticBuildPolicyMigration({
+      target: input.target,
+      stage: "profile_sidecar",
+      from_policy_generation_id: input.oldLock.policy_generation_id,
+      policy_set: frozen,
+      current,
+      previous: {
+        descriptor: previousDescriptor,
+        rendered_input: rendered,
+        artifact_path: previousArtifactPath,
+      },
+      now: "2026-08-30T01:00:00.000Z",
+    });
+    if (adopted.decision === "blocked") throw new Error("expected an H0 adoption receipt");
+    const skip: AutomaticBuildPolicyMigrationCurrent = {
+      route: "deterministic_skip",
+      work_unit_id: "h0-formula-skip",
+      work_unit_kind: "profile_sidecar_formula",
+      policy_fingerprint: input.currentPolicy,
+      evidence_lids: ["1.1"],
+      skip_code: "formula_without_grounding",
+    };
+    const skipped = recordAutomaticBuildPolicyMigration({
+      target: input.target,
+      stage: "profile_sidecar",
+      from_policy_generation_id: input.oldLock.policy_generation_id,
+      policy_set: frozen,
+      current: skip,
+      now: "2026-08-30T01:00:01.000Z",
+    });
+    if (skipped.decision === "blocked") throw new Error("expected an H0 deterministic-skip receipt");
+    const resolution = resolveAutomaticBuildPolicyGeneration({
+      target: input.target,
+      stage: "profile_sidecar",
+      from_policy_generation_id: input.oldLock.policy_generation_id,
+      policy_set: frozen,
+      current_units: [current, skip],
+    });
+
+    expect(input.policySet).toMatchObject({
+      stage: "profile_sidecar",
+      members: expect.arrayContaining([
+        expect.objectContaining({ kind: "profile_sidecar_discourse" }),
+        expect.objectContaining({ kind: "profile_sidecar_formula" }),
+      ]),
+    });
+    expect(adopted).toMatchObject({
+      decision: "adopt_exact",
+      work_unit_id: descriptor.work_unit_id,
+      current_input_hash: descriptor.input_hash,
+    });
+    expect(skipped).toMatchObject({
+      decision: "deterministic_skip",
+      from_policy_generation_id: input.oldLock.policy_generation_id,
+      to_policy_generation_id: policyMember(input, "profile_sidecar_formula").policy_generation_id,
+      semantic_contract: policyMember(input, "profile_sidecar_formula").semantic_contract,
+      deterministic_skip: { code: "formula_without_grounding", evidence_lids: ["1.1"] },
+    });
+    expect(resolution).toMatchObject({
+      stage: "profile_sidecar",
+      status: "ready",
+      policy_generations: frozen.members.map((member) => ({
+        kind: member.kind,
+        policy_generation_id: member.policy_generation_id,
+        semantic_contract: member.semantic_contract,
+      })),
+      adopted_units: [descriptor.work_unit_id],
+      deterministic_skip_units: [skip.work_unit_id],
+    });
+
+    const present = [
+      Object.hasOwn(input.oldLock, "policy_digest") ? "policy_digest" : undefined,
+      Object.hasOwn(frozen, "policy_set_digest") ? "policy_set_digest" : undefined,
+      Object.hasOwn(adopted, "from_policy_digest") ? "from_policy_digest" : undefined,
+      Object.hasOwn(adopted, "to_policy_set_digest") ? "to_policy_set_digest" : undefined,
+      Object.hasOwn(adopted, "current_route_digest") ? "current_route_digest" : undefined,
+      Object.hasOwn(adopted, "current_policy_digest") ? "current_policy_digest" : undefined,
+      Object.hasOwn(adopted, "current_proof_digest") ? "current_proof_digest" : undefined,
+      Object.hasOwn(adopted, "receipt_digest") ? "receipt_digest" : undefined,
+      Object.hasOwn(adopted.adopted_artifact ?? {}, "file_sha256") ? "file_sha256" : undefined,
+      Object.hasOwn(skipped.deterministic_skip ?? {}, "evidence_digest") ? "evidence_digest" : undefined,
+      Object.hasOwn(resolution, "resolution_digest") ? "resolution_digest" : undefined,
+    ].filter((field): field is string => field !== undefined);
+    // H0_RED action: H3 replaces these wrappers with stage+policy_generation_id and direct
+    // member/input/receipt fields; H2 rechecks budget fields, and artifact_hash remains the body identity.
+    expect(present).toEqual([]);
   });
 
   it("freezes canonical policy sets and adopts exact v2 artifacts without mutating v2 history", () => {
@@ -283,12 +448,13 @@ describe("automatic build policy generation and selective migration", () => {
     const descriptor = currentDescriptor(input, "current-discourse", rendered);
     const current = modelCurrent(descriptor, rendered);
     const frozen = freezeAutomaticBuildStagePolicySet(input.target, input.policySet);
-    expect(freezeAutomaticBuildStagePolicySet(input.target, createAutomaticBuildStagePolicySet({
+    const replayedPolicySet = freezeAutomaticBuildStagePolicySet(input.target, createAutomaticBuildStagePolicySet({
       target_ref: input.target.target_ref,
       stage: "profile_sidecar",
-      members: [...input.policySet.members].reverse(),
+      members: [...input.policyMembers].reverse(),
       frozen_at: "2026-08-03T08:05:00.000Z",
-    }))).toEqual(frozen);
+    }));
+    expect(replayedPolicySet.members).toEqual(frozen.members);
     const v2Tree = path.join(input.target.workspace_dir, ".build", "automatic-build", "v2");
     const legacyTree = path.join(input.target.workspace_dir, ".build", "profile-sidecar");
     const before = { v2: treeDigest(v2Tree), legacy: treeDigest(legacyTree) };
@@ -296,7 +462,7 @@ describe("automatic build policy generation and selective migration", () => {
     const first = recordAutomaticBuildPolicyMigration({
       target: input.target,
       stage: "profile_sidecar",
-      from_policy_digest: input.oldLock.policy_digest,
+      from_policy_generation_id: input.oldLock.policy_generation_id,
       policy_set: frozen,
       current,
       previous: {
@@ -309,7 +475,7 @@ describe("automatic build policy generation and selective migration", () => {
     const replay = recordAutomaticBuildPolicyMigration({
       target: input.target,
       stage: "profile_sidecar",
-      from_policy_digest: input.oldLock.policy_digest,
+      from_policy_generation_id: input.oldLock.policy_generation_id,
       policy_set: frozen,
       current,
       previous: {
@@ -321,35 +487,51 @@ describe("automatic build policy generation and selective migration", () => {
     });
 
     expect(first).toMatchObject({
-      version: "automatic_build_policy_migration_receipt.v1",
+      version: "automatic_build_policy_migration_receipt.v2",
       decision: "adopt_exact",
       work_unit_id: descriptor.work_unit_id,
+      from_policy_generation_id: input.oldLock.policy_generation_id,
+      to_policy_generation_id: policyMember(input, "profile_sidecar_discourse").policy_generation_id,
+      semantic_contract: policyMember(input, "profile_sidecar_discourse").semantic_contract,
       adopted_artifact: {
         work_unit_id: previousDescriptor.work_unit_id,
+        envelope_version: "semantic_task_artifact.v2",
         artifact_hash: expect.stringMatching(/^[a-f0-9]{64}$/),
-        file_sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
       },
     });
     expect(replay).toEqual(first);
     expect(resolveAutomaticBuildPolicyGeneration({
       target: input.target,
       stage: "profile_sidecar",
-      from_policy_digest: input.oldLock.policy_digest,
-      policy_set_digest: frozen.policy_set_digest,
+      from_policy_generation_id: input.oldLock.policy_generation_id,
+      policy_set: frozen,
       current_units: [current],
     })).toMatchObject({ status: "ready", adopted_units: [descriptor.work_unit_id] });
     expect({ v2: treeDigest(v2Tree), legacy: treeDigest(legacyTree) }).toEqual(before);
-    expect(existsSync(automaticBuildStagePolicySetPath(
+    expect(existsSync(automaticBuildPolicyGenerationPath(
       input.target,
       "profile_sidecar",
-      frozen.policy_set_digest,
+      policyMember(input, "profile_sidecar_discourse").policy_generation_id,
     ))).toBe(true);
+    expect(policyMember(input, "profile_sidecar_discourse").semantic_contract)
+      .toEqual(semanticContractFromExtractionPolicy(input.currentPolicy));
+    expect(() => freezeAutomaticBuildStagePolicySet(input.target, createAutomaticBuildStagePolicySet({
+      target_ref: input.target.target_ref,
+      stage: "profile_sidecar",
+      members: input.policyMembers.map((member) => ({
+        ...member,
+        policy_fingerprint: member.kind === "profile_sidecar_discourse"
+          ? { ...input.currentPolicy, router_version: "profile_sidecar_semantic_units.contract-drift" }
+          : member.policy_fingerprint,
+      })),
+      frozen_at: "2026-08-03T08:06:00.000Z",
+    }))).toThrow(/policy_set_frozen/);
 
     let replans = 0;
     expect(migrateAutomaticBuildPolicyAndReplan({
       target: input.target,
       stage: "profile_sidecar",
-      from_policy_digest: input.oldLock.policy_digest,
+      from_policy_generation_id: input.oldLock.policy_generation_id,
       policy_set: frozen,
       current,
       previous: {
@@ -363,6 +545,112 @@ describe("automatic build policy generation and selective migration", () => {
       return readyAutomaticBuildRoute({ next: "continued" as const });
     })).toEqual({ status: "ready", value: { next: "continued" } });
     expect(replans).toBe(1);
+  });
+
+  it("adopts one exact digest-bound v3 predecessor into the explicit generation without rewriting history", () => {
+    const input = fixture("digest-bound-v3-adoption");
+    const rendered = "PROFILE_SIDECAR_INPUT\n[LID 1.1]\nA canonical paragraph.\n";
+    const descriptor = currentDescriptor(input, "digest-bound-discourse", rendered);
+    const current = modelCurrent(descriptor, rendered);
+    const sourceGenerationId = "a".repeat(64);
+    const predecessorPath = writeDigestBoundGenerationArtifact(
+      input,
+      descriptor,
+      sourceGenerationId,
+    );
+    const predecessorBytes = readFileSync(predecessorPath);
+    const frozen = freezeAutomaticBuildStagePolicySet(input.target, input.policySet);
+
+    const first = recordAutomaticBuildPriorGenerationAdoption({
+      target: input.target,
+      stage: "profile_sidecar",
+      policy_set: frozen,
+      current,
+      now: "2026-08-31T05:00:00.000Z",
+    });
+    if (!first || first.decision !== "adopt_exact") {
+      throw new Error("expected exact prior-generation adoption");
+    }
+    const projected = materializeAdoptedAutomaticBuildGenerationArtifact({
+      target: input.target,
+      stage: "profile_sidecar",
+      policy_set: frozen,
+      current,
+      receipt: first,
+      project_payload: () => {
+        throw new Error("digest-bound v3 adoption must not invoke the v2 payload projector");
+      },
+    });
+    const replay = recordAutomaticBuildPriorGenerationAdoption({
+      target: input.target,
+      stage: "profile_sidecar",
+      policy_set: frozen,
+      current,
+      now: "2026-08-31T05:01:00.000Z",
+    });
+
+    expect(first).toMatchObject({
+      version: "automatic_build_policy_migration_receipt.v2",
+      decision: "adopt_exact",
+      reason: "exact_input_and_policy",
+      from_policy_generation_id: sourceGenerationId,
+      to_policy_generation_id: policyMember(input, "profile_sidecar_discourse").policy_generation_id,
+      adopted_artifact: {
+        work_unit_id: descriptor.work_unit_id,
+        envelope_version: "semantic_task_artifact.v3",
+      },
+    });
+    expect(replay).toEqual(first);
+    expect(projected).toMatchObject({
+      version: "semantic_task_artifact.v3",
+      work_unit_id: descriptor.work_unit_id,
+      input_hash: descriptor.input_hash,
+      policy_generation_id: policyMember(input, "profile_sidecar_discourse").policy_generation_id,
+      semantic_contract: semanticContractFromExtractionPolicy(input.currentPolicy),
+    });
+    expect(projected).not.toHaveProperty("proof_digest");
+    expect(projected).not.toHaveProperty("policy_set_digest");
+    expect(projected).not.toHaveProperty("policy_fingerprint");
+    expect(readFileSync(predecessorPath)).toEqual(predecessorBytes);
+    expect(resolveAutomaticBuildPolicyGeneration({
+      target: input.target,
+      stage: "profile_sidecar",
+      from_policy_generation_id: sourceGenerationId,
+      policy_set: frozen,
+      current_units: [current],
+    })).toMatchObject({ status: "ready", adopted_units: [descriptor.work_unit_id] });
+  });
+
+  it("stops prior-generation adoption when the semantic input drifted", () => {
+    const input = fixture("digest-bound-v3-drift");
+    const sourceGenerationId = "b".repeat(64);
+    const predecessor = currentDescriptor(
+      input,
+      "digest-bound-drift",
+      "PROFILE_SIDECAR_INPUT\n[LID 1.1]\nOriginal paragraph.\n",
+    );
+    writeDigestBoundGenerationArtifact(input, predecessor, sourceGenerationId);
+    const changedRendered = "PROFILE_SIDECAR_INPUT\n[LID 1.1]\nChanged paragraph.\n";
+    const changed = currentDescriptor(input, predecessor.work_unit_id, changedRendered);
+    const frozen = freezeAutomaticBuildStagePolicySet(input.target, input.policySet);
+
+    expect(recordAutomaticBuildPriorGenerationAdoption({
+      target: input.target,
+      stage: "profile_sidecar",
+      policy_set: frozen,
+      current: modelCurrent(changed, changedRendered),
+      now: "2026-08-31T05:10:00.000Z",
+    })).toMatchObject({
+      decision: "blocked",
+      reason: "previous_generation_semantic_drift",
+      retryable: false,
+    });
+    expect(existsSync(automaticBuildGenerationArtifactPath(
+      input.target,
+      "profile_sidecar",
+      policyMember(input, "profile_sidecar_discourse").policy_generation_id,
+      changed.work_unit_id,
+    ))).toBe(false);
   });
 
   it("persists rebuild and deterministic-skip decisions, then resolves only after the v3 artifact is fresh", () => {
@@ -382,7 +670,7 @@ describe("automatic build policy generation and selective migration", () => {
     const rebuild = recordAutomaticBuildPolicyMigration({
       target: input.target,
       stage: "profile_sidecar",
-      from_policy_digest: input.oldLock.policy_digest,
+      from_policy_generation_id: input.oldLock.policy_generation_id,
       policy_set: frozen,
       current,
       now: "2026-08-03T09:00:00.000Z",
@@ -390,7 +678,7 @@ describe("automatic build policy generation and selective migration", () => {
     const deterministicSkip = recordAutomaticBuildPolicyMigration({
       target: input.target,
       stage: "profile_sidecar",
-      from_policy_digest: input.oldLock.policy_digest,
+      from_policy_generation_id: input.oldLock.policy_generation_id,
       policy_set: frozen,
       current: skip,
       now: "2026-08-03T09:00:01.000Z",
@@ -398,7 +686,7 @@ describe("automatic build policy generation and selective migration", () => {
     expect(recordAutomaticBuildPolicyMigration({
       target: input.target,
       stage: "profile_sidecar",
-      from_policy_digest: input.oldLock.policy_digest,
+      from_policy_generation_id: input.oldLock.policy_generation_id,
       policy_set: frozen,
       current,
       now: "2026-08-03T09:01:00.000Z",
@@ -406,7 +694,7 @@ describe("automatic build policy generation and selective migration", () => {
     expect(recordAutomaticBuildPolicyMigration({
       target: input.target,
       stage: "profile_sidecar",
-      from_policy_digest: input.oldLock.policy_digest,
+      from_policy_generation_id: input.oldLock.policy_generation_id,
       policy_set: frozen,
       current: skip,
       now: "2026-08-03T09:01:01.000Z",
@@ -417,8 +705,8 @@ describe("automatic build policy generation and selective migration", () => {
     expect(resolveAutomaticBuildPolicyGeneration({
       target: input.target,
       stage: "profile_sidecar",
-      from_policy_digest: input.oldLock.policy_digest,
-      policy_set_digest: frozen.policy_set_digest,
+      from_policy_generation_id: input.oldLock.policy_generation_id,
+      policy_set: frozen,
       current_units: [current, skip],
     })).toMatchObject({ status: "pending", pending_rebuild_units: [descriptor.work_unit_id] });
 
@@ -427,9 +715,8 @@ describe("automatic build policy generation and selective migration", () => {
       stage: "profile_sidecar",
       work_unit_id: descriptor.work_unit_id,
       input_hash: descriptor.input_hash,
-      proof_digest: descriptor.input_budget_proof.proof_digest,
-      policy_set_digest: frozen.policy_set_digest,
-      policy_fingerprint: descriptor.policy_fingerprint,
+      policy_generation_id: policyMember(input, "profile_sidecar_discourse").policy_generation_id,
+      semantic_contract: policyMember(input, "profile_sidecar_discourse").semantic_contract,
       provenance: {
         executor: "codex-harness",
         model: "gpt-5.4-codex",
@@ -451,8 +738,8 @@ describe("automatic build policy generation and selective migration", () => {
     expect(resolveAutomaticBuildPolicyGeneration({
       target: input.target,
       stage: "profile_sidecar",
-      from_policy_digest: input.oldLock.policy_digest,
-      policy_set_digest: frozen.policy_set_digest,
+      from_policy_generation_id: input.oldLock.policy_generation_id,
+      policy_set: frozen,
       current_units: [current, skip],
     })).toMatchObject({
       status: "ready",
@@ -482,7 +769,7 @@ describe("automatic build policy generation and selective migration", () => {
     const blocked = recordAutomaticBuildPolicyMigration({
       target: input.target,
       stage: "profile_sidecar",
-      from_policy_digest: input.oldLock.policy_digest,
+      from_policy_generation_id: input.oldLock.policy_generation_id,
       policy_set: frozen,
       current,
       previous: {
@@ -493,15 +780,15 @@ describe("automatic build policy generation and selective migration", () => {
       now: "2026-08-03T10:00:30.000Z",
     });
     expect(blocked).toMatchObject({
-      version: "automatic_build_policy_migration_block.v1",
+      version: "automatic_build_policy_migration_block.v2",
       decision: "blocked",
       reason: "active_lease",
     });
     expect(existsSync(automaticBuildPolicyMigrationReceiptPath(
       input.target,
       "profile_sidecar",
-      input.oldLock.policy_digest,
-      frozen.policy_set_digest,
+      input.oldLock.policy_generation_id,
+      policyMember(input, "profile_sidecar_discourse").policy_generation_id,
       descriptor.work_unit_id,
     ))).toBe(false);
     expect(assertActiveAutomaticBuildLease(
@@ -514,7 +801,7 @@ describe("automatic build policy generation and selective migration", () => {
     expect(recordAutomaticBuildPolicyMigration({
       target: input.target,
       stage: "profile_sidecar",
-      from_policy_digest: input.oldLock.policy_digest,
+      from_policy_generation_id: input.oldLock.policy_generation_id,
       policy_set: frozen,
       current,
       previous: {
@@ -547,7 +834,7 @@ describe("automatic build policy generation and selective migration", () => {
     expect(recordAutomaticBuildPolicyMigration({
       target: input.target,
       stage: "profile_sidecar",
-      from_policy_digest: input.oldLock.policy_digest,
+      from_policy_generation_id: input.oldLock.policy_generation_id,
       policy_set: frozen,
       current: {
         route: "blocked",
@@ -560,22 +847,22 @@ describe("automatic build policy generation and selective migration", () => {
       },
       now: "2026-08-03T10:59:59.000Z",
     })).toMatchObject({
-      version: "automatic_build_policy_migration_block.v1",
+      version: "automatic_build_policy_migration_block.v2",
       decision: "blocked",
       reason: "model_input_unsplittable",
     });
     expect(existsSync(automaticBuildPolicyMigrationReceiptPath(
       input.target,
       "profile_sidecar",
-      input.oldLock.policy_digest,
-      frozen.policy_set_digest,
+      input.oldLock.policy_generation_id,
+      policyMember(input, "profile_sidecar_formula").policy_generation_id,
       "atomic-formula",
     ))).toBe(false);
 
     expect(recordAutomaticBuildPolicyMigration({
       target: input.target,
       stage: "profile_sidecar",
-      from_policy_digest: input.oldLock.policy_digest,
+      from_policy_generation_id: input.oldLock.policy_generation_id,
       policy_set: frozen,
       current,
       previous: { descriptor: previousDescriptor, artifact_path: previousArtifactPath },
@@ -585,7 +872,7 @@ describe("automatic build policy generation and selective migration", () => {
     const adopted = recordAutomaticBuildPolicyMigration({
       target: input.target,
       stage: "profile_sidecar",
-      from_policy_digest: input.oldLock.policy_digest,
+      from_policy_generation_id: input.oldLock.policy_generation_id,
       policy_set: frozen,
       current,
       previous: {
@@ -600,7 +887,7 @@ describe("automatic build policy generation and selective migration", () => {
     expect(() => recordAutomaticBuildPolicyMigration({
       target: input.target,
       stage: "profile_sidecar",
-      from_policy_digest: input.oldLock.policy_digest,
+      from_policy_generation_id: input.oldLock.policy_generation_id,
       policy_set: frozen,
       current: changedCurrent,
       previous: {
@@ -614,7 +901,7 @@ describe("automatic build policy generation and selective migration", () => {
     expect(migrateAutomaticBuildPolicyAndReplan({
       target: input.target,
       stage: "profile_sidecar",
-      from_policy_digest: input.oldLock.policy_digest,
+      from_policy_generation_id: input.oldLock.policy_generation_id,
       policy_set: frozen,
       current: changedCurrent,
       previous: {
@@ -639,8 +926,8 @@ describe("automatic build policy generation and selective migration", () => {
     const receiptPath = automaticBuildPolicyMigrationReceiptPath(
       input.target,
       "profile_sidecar",
-      input.oldLock.policy_digest,
-      frozen.policy_set_digest,
+      input.oldLock.policy_generation_id,
+      policyMember(input, "profile_sidecar_discourse").policy_generation_id,
       descriptor.work_unit_id,
     );
     expect(JSON.parse(readFileSync(receiptPath, "utf8"))).toEqual(adopted);

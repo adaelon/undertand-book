@@ -1,103 +1,91 @@
-import { createHash } from "node:crypto";
 import { canonicalAutomaticBuildJson } from "./automatic-build-protocol";
 import { estimateTokens } from "./window";
 
-export interface ExecutorTransportProfileV1 {
-  version: "executor_transport_profile.v1";
+export interface ExecutorTransportProfileV2 {
+  version: "executor_transport_profile.v2";
   carrier: "codex_executor_mcp";
-  session_protocol: "automatic_build_executor_session.v2";
+  session_protocol: "automatic_build_executor_session.v3";
   max_tool_result_tokens: number;
   max_tool_result_bytes: number;
   result_envelope_reserve_tokens: number;
   max_input_chunks: number;
   max_candidate_request_tokens: number;
   max_candidate_request_bytes: number;
-  profile_digest: string;
 }
 
-export type ExecutorTransportProfileInputV1 = Omit<
-  ExecutorTransportProfileV1,
-  "version" | "profile_digest"
+export type ExecutorTransportProfileInputV2 = Omit<
+  ExecutorTransportProfileV2,
+  "version"
 >;
 
-export type ExecutorTransportBlockReasonV1 =
+export type ExecutorTransportBlockReasonV2 =
   | "token_cap_exceeded"
   | "byte_cap_exceeded"
   | "envelope_reserve_exceeded";
 
-interface ExecutorTransportResponseMeasurementCommonV1 {
-  version: "executor_transport_response_measurement.v1";
-  transport_profile_digest: string;
-  payload_sha256: string;
+interface ExecutorTransportResponseMeasurementCommonV2 {
+  version: "executor_transport_response_measurement.v2";
   payload_byte_length: number;
   payload_estimated_tokens: number;
   serialized_response: string;
-  serialized_response_sha256: string;
   serialized_response_bytes: number;
   serialized_response_tokens: number;
   envelope_overhead_tokens: number;
 }
 
-export type ExecutorTransportResponseMeasurementV1 =
-  | (ExecutorTransportResponseMeasurementCommonV1 & {
+export type ExecutorTransportResponseMeasurementV2 =
+  | (ExecutorTransportResponseMeasurementCommonV2 & {
       status: "within_limit";
       blocking_reasons: [];
     })
-  | (ExecutorTransportResponseMeasurementCommonV1 & {
+  | (ExecutorTransportResponseMeasurementCommonV2 & {
       status: "blocked";
-      blocking_reasons: ExecutorTransportBlockReasonV1[];
+      blocking_reasons: ExecutorTransportBlockReasonV2[];
     });
 
-export interface ExecutorTransportChunkFrameV1 {
+export interface ExecutorTransportChunkFrameV2 {
   ordinal: number;
   byte_range: { start: number; end: number };
   payload_utf8: string;
-  payload_sha256: string;
   final: boolean;
 }
 
-export interface PackedExecutorTransportChunkV1 extends ExecutorTransportChunkFrameV1 {
+export interface PackedExecutorTransportChunkV2 extends ExecutorTransportChunkFrameV2 {
   response: unknown;
   serialized_response: string;
-  serialized_response_sha256: string;
   serialized_response_bytes: number;
   serialized_response_tokens: number;
   payload_estimated_tokens: number;
   envelope_overhead_tokens: number;
 }
 
-export interface ExecutorTransportPackWithinLimitV1 {
-  version: "executor_transport_pack.v1";
+export interface ExecutorTransportPackWithinLimitV2 {
+  version: "executor_transport_pack.v2";
   status: "within_limit";
-  transport_profile_digest: string;
-  payload_sha256: string;
   payload_byte_length: number;
   payload_estimated_tokens: number;
   chunk_count: number;
   input_delivery_overhead_tokens: number;
-  chunks: PackedExecutorTransportChunkV1[];
-  pack_digest: string;
+  chunks: PackedExecutorTransportChunkV2[];
 }
 
-export interface ExecutorTransportPackBlockedV1 {
-  version: "executor_transport_pack.v1";
+export interface ExecutorTransportPackBlockedV2 {
+  version: "executor_transport_pack.v2";
   status: "blocked";
-  code: ExecutorTransportBlockReasonV1 | "max_chunk_count_exceeded";
-  transport_profile_digest: string;
-  payload_sha256: string;
+  code: ExecutorTransportBlockReasonV2 | "max_chunk_count_exceeded";
   payload_byte_length: number;
   required_chunk_count: number;
-  blocking_reasons: ExecutorTransportBlockReasonV1[];
+  blocking_reasons: ExecutorTransportBlockReasonV2[];
 }
 
-export type ExecutorTransportPackResultV1 =
-  | ExecutorTransportPackWithinLimitV1
-  | ExecutorTransportPackBlockedV1;
+export type ExecutorTransportPackResultV2 =
+  | ExecutorTransportPackWithinLimitV2
+  | ExecutorTransportPackBlockedV2;
 
-export interface PackExecutorTransportPayloadRequestV1 {
-  profile: ExecutorTransportProfileV1;
+export interface PackExecutorTransportPayloadRequestV2 {
+  profile: ExecutorTransportProfileV2;
   payload_utf8: string;
-  envelope_for_chunk: (frame: ExecutorTransportChunkFrameV1) => unknown;
+  envelope_for_chunk: (frame: ExecutorTransportChunkFrameV2) => unknown;
 }
 
 const PROFILE_KEYS = [
@@ -107,20 +95,10 @@ const PROFILE_KEYS = [
   "max_input_chunks",
   "max_tool_result_bytes",
   "max_tool_result_tokens",
-  "profile_digest",
   "result_envelope_reserve_tokens",
   "session_protocol",
   "version",
 ] as const;
-
-function sha256(value: string): string {
-  return createHash("sha256").update(value, "utf8").digest("hex");
-}
-
-function sha256Identity(value: string, field: string): string {
-  if (!/^[a-f0-9]{64}$/u.test(value)) throw new Error(`${field} must be a lowercase SHA-256 digest`);
-  return value;
-}
 
 function positiveSafeInteger(value: number, field: string): number {
   if (!Number.isSafeInteger(value) || value < 1) {
@@ -136,17 +114,11 @@ function nonNegativeSafeInteger(value: number, field: string): number {
   return value;
 }
 
-function profileDigest(value: ExecutorTransportProfileInputV1 & {
-  version: "executor_transport_profile.v1";
-}): string {
-  return sha256(canonicalAutomaticBuildJson(value));
-}
-
 export function createExecutorTransportProfile(
-  input: ExecutorTransportProfileInputV1,
-): ExecutorTransportProfileV1 {
-  const unsigned = {
-    version: "executor_transport_profile.v1" as const,
+  input: ExecutorTransportProfileInputV2,
+): ExecutorTransportProfileV2 {
+  return validateExecutorTransportProfile({
+    version: "executor_transport_profile.v2" as const,
     carrier: input.carrier,
     session_protocol: input.session_protocol,
     max_tool_result_tokens: input.max_tool_result_tokens,
@@ -155,16 +127,12 @@ export function createExecutorTransportProfile(
     max_input_chunks: input.max_input_chunks,
     max_candidate_request_tokens: input.max_candidate_request_tokens,
     max_candidate_request_bytes: input.max_candidate_request_bytes,
-  };
-  return validateExecutorTransportProfile({
-    ...unsigned,
-    profile_digest: profileDigest(unsigned),
   });
 }
 
 export function validateExecutorTransportProfile(
-  profile: ExecutorTransportProfileV1,
-): ExecutorTransportProfileV1 {
+  profile: ExecutorTransportProfileV2,
+): ExecutorTransportProfileV2 {
   if (!profile || typeof profile !== "object" || Array.isArray(profile)) {
     throw new Error("executor transport profile must be an object");
   }
@@ -173,9 +141,9 @@ export function validateExecutorTransportProfile(
     || keys.some((key, index) => key !== PROFILE_KEYS[index])) {
     throw new Error("executor transport profile contains unsupported or missing fields");
   }
-  if (profile.version !== "executor_transport_profile.v1"
+  if (profile.version !== "executor_transport_profile.v2"
     || profile.carrier !== "codex_executor_mcp"
-    || profile.session_protocol !== "automatic_build_executor_session.v2") {
+    || profile.session_protocol !== "automatic_build_executor_session.v3") {
     throw new Error("executor transport profile identity is unsupported");
   }
   const maxToolResultTokens = positiveSafeInteger(
@@ -193,17 +161,12 @@ export function validateExecutorTransportProfile(
   positiveSafeInteger(profile.max_input_chunks, "max_input_chunks");
   positiveSafeInteger(profile.max_candidate_request_tokens, "max_candidate_request_tokens");
   positiveSafeInteger(profile.max_candidate_request_bytes, "max_candidate_request_bytes");
-  sha256Identity(profile.profile_digest, "profile_digest");
-  const { profile_digest: _profileDigest, ...unsigned } = profile;
-  if (profile.profile_digest !== profileDigest(unsigned)) {
-    throw new Error("executor transport profile digest is invalid");
-  }
   return profile;
 }
 
-export const CODEX_EXECUTOR_TRANSPORT_PROFILE_V1 = createExecutorTransportProfile({
+export const CODEX_EXECUTOR_TRANSPORT_PROFILE_V2 = createExecutorTransportProfile({
   carrier: "codex_executor_mcp",
-  session_protocol: "automatic_build_executor_session.v2",
+  session_protocol: "automatic_build_executor_session.v3",
   max_tool_result_tokens: 2_048,
   max_tool_result_bytes: 8_192,
   result_envelope_reserve_tokens: 256,
@@ -215,8 +178,8 @@ export const CODEX_EXECUTOR_TRANSPORT_PROFILE_V1 = createExecutorTransportProfil
 export function measureExecutorTransportResponse(
   response: unknown,
   payloadUtf8: string,
-  profile: ExecutorTransportProfileV1,
-): ExecutorTransportResponseMeasurementV1 {
+  profile: ExecutorTransportProfileV2,
+): ExecutorTransportResponseMeasurementV2 {
   validateExecutorTransportProfile(profile);
   if (typeof payloadUtf8 !== "string") throw new Error("executor transport payload must be a string");
   const serializedResponse = canonicalAutomaticBuildJson(response);
@@ -224,7 +187,7 @@ export function measureExecutorTransportResponse(
   const serializedResponseTokens = estimateTokens(serializedResponse);
   const envelopeOverheadTokens = Math.max(0, serializedResponseTokens - payloadEstimatedTokens);
   const serializedResponseBytes = Buffer.byteLength(serializedResponse, "utf8");
-  const blockingReasons: ExecutorTransportBlockReasonV1[] = [];
+  const blockingReasons: ExecutorTransportBlockReasonV2[] = [];
   if (serializedResponseTokens > profile.max_tool_result_tokens) {
     blockingReasons.push("token_cap_exceeded");
   }
@@ -238,14 +201,11 @@ export function measureExecutorTransportResponse(
     && envelopeOverheadTokens > profile.result_envelope_reserve_tokens) {
     blockingReasons.push("envelope_reserve_exceeded");
   }
-  const common: ExecutorTransportResponseMeasurementCommonV1 = {
-    version: "executor_transport_response_measurement.v1",
-    transport_profile_digest: profile.profile_digest,
-    payload_sha256: sha256(payloadUtf8),
+  const common: ExecutorTransportResponseMeasurementCommonV2 = {
+    version: "executor_transport_response_measurement.v2",
     payload_byte_length: Buffer.byteLength(payloadUtf8, "utf8"),
     payload_estimated_tokens: payloadEstimatedTokens,
     serialized_response: serializedResponse,
-    serialized_response_sha256: sha256(serializedResponse),
     serialized_response_bytes: serializedResponseBytes,
     serialized_response_tokens: serializedResponseTokens,
     envelope_overhead_tokens: envelopeOverheadTokens,
@@ -256,10 +216,10 @@ export function measureExecutorTransportResponse(
 }
 
 function packedChunk(
-  frame: ExecutorTransportChunkFrameV1,
+  frame: ExecutorTransportChunkFrameV2,
   response: unknown,
-  measurement: ExecutorTransportResponseMeasurementV1,
-): PackedExecutorTransportChunkV1 {
+  measurement: ExecutorTransportResponseMeasurementV2,
+): PackedExecutorTransportChunkV2 {
   if (measurement.status !== "within_limit") {
     throw new Error("cannot create a packed chunk from a blocked response");
   }
@@ -267,7 +227,6 @@ function packedChunk(
     ...frame,
     response,
     serialized_response: measurement.serialized_response,
-    serialized_response_sha256: measurement.serialized_response_sha256,
     serialized_response_bytes: measurement.serialized_response_bytes,
     serialized_response_tokens: measurement.serialized_response_tokens,
     payload_estimated_tokens: measurement.payload_estimated_tokens,
@@ -275,45 +234,16 @@ function packedChunk(
   };
 }
 
-function packDigest(input: Omit<ExecutorTransportPackWithinLimitV1, "chunks" | "pack_digest"> & {
-  chunks: PackedExecutorTransportChunkV1[];
-}): string {
-  return sha256(canonicalAutomaticBuildJson({
-    version: input.version,
-    status: input.status,
-    transport_profile_digest: input.transport_profile_digest,
-    payload_sha256: input.payload_sha256,
-    payload_byte_length: input.payload_byte_length,
-    payload_estimated_tokens: input.payload_estimated_tokens,
-    chunk_count: input.chunk_count,
-    input_delivery_overhead_tokens: input.input_delivery_overhead_tokens,
-    chunks: input.chunks.map((chunk) => ({
-      ordinal: chunk.ordinal,
-      byte_range: chunk.byte_range,
-      payload_sha256: chunk.payload_sha256,
-      serialized_response_sha256: chunk.serialized_response_sha256,
-      serialized_response_bytes: chunk.serialized_response_bytes,
-      serialized_response_tokens: chunk.serialized_response_tokens,
-      payload_estimated_tokens: chunk.payload_estimated_tokens,
-      envelope_overhead_tokens: chunk.envelope_overhead_tokens,
-      final: chunk.final,
-    })),
-  }));
-}
-
 function blockedPack(
-  profile: ExecutorTransportProfileV1,
   payloadUtf8: string,
-  code: ExecutorTransportPackBlockedV1["code"],
+  code: ExecutorTransportPackBlockedV2["code"],
   requiredChunkCount: number,
-  blockingReasons: ExecutorTransportBlockReasonV1[] = [],
-): ExecutorTransportPackBlockedV1 {
+  blockingReasons: ExecutorTransportBlockReasonV2[] = [],
+): ExecutorTransportPackBlockedV2 {
   return {
-    version: "executor_transport_pack.v1",
+    version: "executor_transport_pack.v2",
     status: "blocked",
     code,
-    transport_profile_digest: profile.profile_digest,
-    payload_sha256: sha256(payloadUtf8),
     payload_byte_length: Buffer.byteLength(payloadUtf8, "utf8"),
     required_chunk_count: requiredChunkCount,
     blocking_reasons: [...blockingReasons],
@@ -321,8 +251,8 @@ function blockedPack(
 }
 
 export function packExecutorTransportPayload(
-  input: PackExecutorTransportPayloadRequestV1,
-): ExecutorTransportPackResultV1 {
+  input: PackExecutorTransportPayloadRequestV2,
+): ExecutorTransportPackResultV2 {
   const profile = validateExecutorTransportProfile(input.profile);
   if (typeof input.payload_utf8 !== "string") {
     throw new Error("executor transport payload must be a string");
@@ -336,20 +266,19 @@ export function packExecutorTransportPayload(
   for (let index = 0; index < codePoints.length; index += 1) {
     byteOffsets[index + 1] = byteOffsets[index] + Buffer.byteLength(codePoints[index], "utf8");
   }
-  const chunks: PackedExecutorTransportChunkV1[] = [];
+  const chunks: PackedExecutorTransportChunkV2[] = [];
 
   const evaluateRange = (start: number, end: number): {
     end: number;
-    frame: ExecutorTransportChunkFrameV1;
+    frame: ExecutorTransportChunkFrameV2;
     response: unknown;
-    measurement: ExecutorTransportResponseMeasurementV1;
+    measurement: ExecutorTransportResponseMeasurementV2;
   } => {
     const payload = codePoints.slice(start, end).join("");
-    const frame: ExecutorTransportChunkFrameV1 = {
+    const frame: ExecutorTransportChunkFrameV2 = {
       ordinal: chunks.length,
       byte_range: { start: byteOffsets[start], end: byteOffsets[end] },
       payload_utf8: payload,
-      payload_sha256: sha256(payload),
       final: end === codePoints.length,
     };
     const response = input.envelope_for_chunk(frame);
@@ -365,7 +294,6 @@ export function packExecutorTransportPayload(
     const empty = evaluateRange(0, 0);
     if (empty.measurement.status === "blocked") {
       return blockedPack(
-        profile,
         input.payload_utf8,
         empty.measurement.blocking_reasons[0] ?? "token_cap_exceeded",
         1,
@@ -379,7 +307,6 @@ export function packExecutorTransportPayload(
   while (start < codePoints.length) {
     if (chunks.length >= profile.max_input_chunks) {
       return blockedPack(
-        profile,
         input.payload_utf8,
         "max_chunk_count_exceeded",
         chunks.length + 1,
@@ -388,7 +315,7 @@ export function packExecutorTransportPayload(
     let low = start + 1;
     let high = codePoints.length;
     let best: ReturnType<typeof evaluateRange> | undefined;
-    let firstBlocked: ExecutorTransportResponseMeasurementV1 | undefined;
+    let firstBlocked: ExecutorTransportResponseMeasurementV2 | undefined;
     while (low <= high) {
       const end = Math.floor((low + high) / 2);
       const candidate = evaluateRange(start, end);
@@ -408,7 +335,6 @@ export function packExecutorTransportPayload(
           ? firstBlocked.blocking_reasons
           : [];
       return blockedPack(
-        profile,
         input.payload_utf8,
         reasons[0] ?? "token_cap_exceeded",
         chunks.length + 1,
@@ -420,10 +346,8 @@ export function packExecutorTransportPayload(
   }
 
   const unsigned = {
-    version: "executor_transport_pack.v1" as const,
+    version: "executor_transport_pack.v2" as const,
     status: "within_limit" as const,
-    transport_profile_digest: profile.profile_digest,
-    payload_sha256: sha256(input.payload_utf8),
     payload_byte_length: Buffer.byteLength(input.payload_utf8, "utf8"),
     payload_estimated_tokens: estimateTokens(input.payload_utf8),
     chunk_count: chunks.length,
@@ -433,23 +357,36 @@ export function packExecutorTransportPayload(
     ),
     chunks,
   };
-  return { ...unsigned, pack_digest: packDigest(unsigned) };
+  return unsigned;
 }
 
 export function validateExecutorTransportPack(
-  pack: ExecutorTransportPackWithinLimitV1,
-  profile: ExecutorTransportProfileV1,
-): ExecutorTransportPackWithinLimitV1 {
+  pack: ExecutorTransportPackWithinLimitV2,
+  profile: ExecutorTransportProfileV2,
+  expectedPayloadUtf8: string,
+): ExecutorTransportPackWithinLimitV2 {
   validateExecutorTransportProfile(profile);
+  if (typeof expectedPayloadUtf8 !== "string") {
+    throw new Error("executor transport expected payload must be a string");
+  }
   if (!pack || typeof pack !== "object" || Array.isArray(pack)
-    || pack.version !== "executor_transport_pack.v1" || pack.status !== "within_limit") {
+    || pack.version !== "executor_transport_pack.v2" || pack.status !== "within_limit") {
     throw new Error("executor transport pack is invalid");
   }
-  if (pack.transport_profile_digest !== profile.profile_digest) {
-    throw new Error("executor transport pack profile does not match");
+  const packKeys = [
+    "chunk_count",
+    "chunks",
+    "input_delivery_overhead_tokens",
+    "payload_byte_length",
+    "payload_estimated_tokens",
+    "status",
+    "version",
+  ];
+  if (Object.keys(pack).sort().some((key, index) => key !== packKeys[index])
+    || Object.keys(pack).length !== packKeys.length
+    || !Array.isArray(pack.chunks)) {
+    throw new Error("executor transport pack contains unsupported or missing fields");
   }
-  sha256Identity(pack.payload_sha256, "payload_sha256");
-  sha256Identity(pack.pack_digest, "pack_digest");
   nonNegativeSafeInteger(pack.payload_byte_length, "payload_byte_length");
   nonNegativeSafeInteger(pack.payload_estimated_tokens, "payload_estimated_tokens");
   positiveSafeInteger(pack.chunk_count, "chunk_count");
@@ -465,21 +402,40 @@ export function validateExecutorTransportPack(
   const payloadParts: string[] = [];
   for (let ordinal = 0; ordinal < pack.chunks.length; ordinal += 1) {
     const chunk = pack.chunks[ordinal];
-    if (chunk.ordinal !== ordinal
+    const chunkKeys = [
+      "byte_range",
+      "envelope_overhead_tokens",
+      "final",
+      "ordinal",
+      "payload_estimated_tokens",
+      "payload_utf8",
+      "response",
+      "serialized_response",
+      "serialized_response_bytes",
+      "serialized_response_tokens",
+    ];
+    if (!chunk || typeof chunk !== "object" || Array.isArray(chunk)
+      || Object.keys(chunk).sort().some((key, index) => key !== chunkKeys[index])
+      || Object.keys(chunk).length !== chunkKeys.length
+      || !chunk.byte_range || typeof chunk.byte_range !== "object"
+      || Array.isArray(chunk.byte_range)
+      || Object.keys(chunk.byte_range).sort().join(",") !== "end,start"
+      || typeof chunk.payload_utf8 !== "string"
+      || typeof chunk.serialized_response !== "string"
+      || chunk.ordinal !== ordinal
       || chunk.byte_range.start !== expectedByteStart
-      || chunk.byte_range.end <= chunk.byte_range.start
+      || chunk.byte_range.end < chunk.byte_range.start
       || chunk.final !== (ordinal === pack.chunks.length - 1)) {
       throw new Error("executor transport chunk ordering or range is invalid");
     }
     const chunkBytes = Buffer.byteLength(chunk.payload_utf8, "utf8");
     if (chunk.byte_range.end - chunk.byte_range.start !== chunkBytes
-      || chunk.payload_sha256 !== sha256(chunk.payload_utf8)) {
+      || (chunkBytes === 0 && (pack.chunks.length !== 1 || expectedPayloadUtf8.length !== 0))) {
       throw new Error("executor transport chunk payload identity is invalid");
     }
     const measured = measureExecutorTransportResponse(chunk.response, chunk.payload_utf8, profile);
     if (measured.status !== "within_limit"
       || measured.serialized_response !== chunk.serialized_response
-      || measured.serialized_response_sha256 !== chunk.serialized_response_sha256
       || measured.serialized_response_bytes !== chunk.serialized_response_bytes
       || measured.serialized_response_tokens !== chunk.serialized_response_tokens
       || measured.payload_estimated_tokens !== chunk.payload_estimated_tokens
@@ -493,14 +449,10 @@ export function validateExecutorTransportPack(
   const payload = payloadParts.join("");
   if (expectedByteStart !== pack.payload_byte_length
     || Buffer.byteLength(payload, "utf8") !== pack.payload_byte_length
-    || sha256(payload) !== pack.payload_sha256
+    || payload !== expectedPayloadUtf8
     || estimateTokens(payload) !== pack.payload_estimated_tokens
     || overheadTokens !== pack.input_delivery_overhead_tokens) {
     throw new Error("executor transport pack aggregate identity is invalid");
-  }
-  const { pack_digest: _packDigest, ...unsigned } = pack;
-  if (pack.pack_digest !== packDigest(unsigned)) {
-    throw new Error("executor transport pack digest is invalid");
   }
   return pack;
 }

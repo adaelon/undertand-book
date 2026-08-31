@@ -25,7 +25,11 @@ import {
   type AutomaticBuildPublicationReceiptV1,
   type AutomaticBuildPublicationStage,
 } from "./automatic-build-publication";
-import type { ExtractionQualityProfile } from "./semantic-artifact";
+import {
+  semanticContractFromExtractionPolicy,
+  type ExtractionQualityProfile,
+  type SemanticContractV1,
+} from "./semantic-artifact";
 
 const SHA256 = /^[a-f0-9]{64}$/u;
 const CLOSE_STAGES: AutomaticBuildPublicationStage[] = [
@@ -68,8 +72,14 @@ const PUBLICATION_PATH_ALLOWLIST: Record<AutomaticBuildPublicationStage, Readonl
   book_structure: new Set(["book_structure.json"]),
 };
 
-export interface AutomaticBuildStageCloseResultV1 {
-  version: "automatic_build_stage_close_result.v1";
+export interface AutomaticBuildClosePolicyContractV1 {
+  kind: string;
+  policy_generation_id?: string;
+  semantic_contract: SemanticContractV1;
+}
+
+export interface AutomaticBuildStageCloseResultV2 {
+  version: "automatic_build_stage_close_result.v2";
   status: "closed";
   stage: AutomaticBuildPublicationStage;
   target: {
@@ -87,7 +97,7 @@ export interface AutomaticBuildStageCloseResultV1 {
   };
   postcondition: {
     stage_closed: true;
-    policy_set_digest: string;
+    policy_contracts: AutomaticBuildClosePolicyContractV1[];
     coverage_digest: string;
     freshness_digest: string;
     public_artifact_set_digest: string;
@@ -96,7 +106,7 @@ export interface AutomaticBuildStageCloseResultV1 {
 }
 
 export type AutomaticBuildStageCloseOutcomeV1 =
-  | AutomaticBuildStageCloseResultV1
+  | AutomaticBuildStageCloseResultV2
   | AutomaticBuildRecoveryEnvelopeV1;
 
 export interface AutomaticBuildStageVerificationResultV1 {
@@ -122,7 +132,7 @@ export interface AutomaticBuildStageBatchExecutionV1 {
 
 export function parseAutomaticBuildStageCloseResult(
   value: unknown,
-): AutomaticBuildStageCloseResultV1 {
+): AutomaticBuildStageCloseResultV2 {
   if (!isRecord(value)
     || !exactKeys(value, [
       "version",
@@ -134,7 +144,7 @@ export function parseAutomaticBuildStageCloseResult(
       "postcondition",
       "next",
     ])
-    || value.version !== "automatic_build_stage_close_result.v1"
+    || value.version !== "automatic_build_stage_close_result.v2"
     || value.status !== "closed"
     || !(CLOSE_STAGES as string[]).includes(String(value.stage))
     || value.next !== "replan"
@@ -158,24 +168,66 @@ export function parseAutomaticBuildStageCloseResult(
     || !isRecord(value.postcondition)
     || !exactKeys(value.postcondition, [
       "stage_closed",
-      "policy_set_digest",
+      "policy_contracts",
       "coverage_digest",
       "freshness_digest",
       "public_artifact_set_digest",
     ])
     || value.postcondition.stage_closed !== true
+    || !Array.isArray(value.postcondition.policy_contracts)
+    || value.postcondition.policy_contracts.some((item) => !isRecord(item)
+      || !exactKeys(item, item.policy_generation_id === undefined
+        ? ["kind", "semantic_contract"]
+        : ["kind", "policy_generation_id", "semantic_contract"])
+      || !boundedString(item.kind, 128)
+      || (item.policy_generation_id !== undefined
+        && (typeof item.policy_generation_id !== "string"
+          || !/^[a-z0-9][a-z0-9._-]{0,127}$/u.test(item.policy_generation_id)))
+      || !isRecord(item.semantic_contract)
+      || !exactKeys(item.semantic_contract, [
+        "profile_version",
+        "stage_policy_version",
+        "router_version",
+        "prompt_sha256",
+        "schema_version",
+        "quality_profile",
+      ])
+      || !boundedString(item.semantic_contract.profile_version, 128)
+      || !boundedString(item.semantic_contract.stage_policy_version, 128)
+      || !boundedString(item.semantic_contract.router_version, 128)
+      || typeof item.semantic_contract.prompt_sha256 !== "string"
+      || !SHA256.test(item.semantic_contract.prompt_sha256)
+      || !boundedString(item.semantic_contract.schema_version, 128)
+      || !["full", "balanced", "sparse"].includes(String(item.semantic_contract.quality_profile)))
     || [
-      value.postcondition.policy_set_digest,
       value.postcondition.coverage_digest,
       value.postcondition.freshness_digest,
       value.postcondition.public_artifact_set_digest,
     ].some((digest) => typeof digest !== "string" || !SHA256.test(digest))) {
     throw new Error("automatic build stage close result is invalid");
   }
-  return value as unknown as AutomaticBuildStageCloseResultV1;
+  return value as unknown as AutomaticBuildStageCloseResultV2;
 }
 
 class AutomaticBuildCloseResultConflictError extends Error {}
+
+function reconcileAutomaticBuildStageCloseResult(
+  file: string,
+  current: AutomaticBuildStageCloseResultV2,
+): AutomaticBuildStageCloseResultV2 {
+  let existing: AutomaticBuildStageCloseResultV2;
+  try {
+    existing = parseAutomaticBuildStageCloseResult(JSON.parse(readFileSync(file, "utf8")));
+  } catch {
+    throw new AutomaticBuildCloseResultConflictError(
+      "automatic build close result uses an incompatible read-only contract",
+    );
+  }
+  if (canonicalBuildJson(existing) === canonicalBuildJson(current)) return existing;
+  throw new AutomaticBuildCloseResultConflictError(
+    "automatic build close result conflicts with create-only identity",
+  );
+}
 
 function sha256(value: unknown): string {
   return createHash("sha256").update(
@@ -188,14 +240,12 @@ function closeRecovery(
   stage: AutomaticBuildPublicationStage,
   phase: "close" | "post_close",
   code: "publication_receipt_invalid" | "stage_close_postcondition_failed",
-  policyDigest?: string,
 ): AutomaticBuildRecoveryEnvelopeV1 {
   return createAutomaticBuildRecoveryEnvelope({
     phase,
     code,
     stage,
     target_ref: target.target_ref,
-    ...(policyDigest ? { policy_digest: policyDigest } : {}),
     affected_work_units: [],
     retryable: false,
     recovery_actions: ["inspect_publication"],
@@ -214,22 +264,21 @@ function stageState(
 function reportCloseEvidence(
   report: AutomaticBuildStageQualityReportV1 | AutomaticBuildStageQualityReportV2,
   state: AutomaticBuildStageState,
-): { policy_set_digest: string; coverage_digest: string } {
+): { policy_contracts: AutomaticBuildClosePolicyContractV1[]; coverage_digest: string } {
   if (report.version === "automatic_build_stage_quality_report.v2") {
     return {
-      policy_set_digest: report.routing.policy_set_digest,
+      policy_contracts: report.routing.policy_generations.map((generation) => ({ ...generation })),
       coverage_digest: report.coverage.coverage_digest,
     };
   }
-  const policies = (state.work_units ?? [])
-    .map((unit) => unit.policy_fingerprint)
+  const policies = (state.work_units ?? []).map((unit): AutomaticBuildClosePolicyContractV1 => ({
+    kind: unit.kind,
+    semantic_contract: semanticContractFromExtractionPolicy(unit.policy_fingerprint),
+  }));
+  const policyContracts = [...new Map(policies.map((policy) => [canonicalBuildJson(policy), policy])).values()]
     .sort((left, right) => canonicalBuildJson(left).localeCompare(canonicalBuildJson(right)));
   return {
-    policy_set_digest: sha256({
-      version: "automatic_build_stage_policy_set_compatibility.v1",
-      stage: report.stage,
-      policies,
-    }),
+    policy_contracts: policyContracts,
     coverage_digest: sha256({
       version: "automatic_build_stage_coverage_compatibility.v1",
       stage: report.stage,
@@ -284,8 +333,8 @@ export function automaticBuildStageCloseResultPath(
 
 export function writeAutomaticBuildStageCloseResult(
   target: AutomaticBuildTarget,
-  result: AutomaticBuildStageCloseResultV1,
-): AutomaticBuildStageCloseResultV1 {
+  result: AutomaticBuildStageCloseResultV2,
+): AutomaticBuildStageCloseResultV2 {
   const validated = parseAutomaticBuildStageCloseResult(result);
   if (validated.target.book_id !== target.book_id
     || validated.target.profile_id !== target.profile_id
@@ -299,9 +348,7 @@ export function writeAutomaticBuildStageCloseResult(
   );
   mkdirSync(path.dirname(file), { recursive: true });
   if (existsSync(file)) {
-    const existing = parseAutomaticBuildStageCloseResult(JSON.parse(readFileSync(file, "utf8")));
-    if (canonicalBuildJson(existing) === canonicalBuildJson(validated)) return existing;
-    throw new AutomaticBuildCloseResultConflictError("automatic build close result conflicts with create-only identity");
+    return reconcileAutomaticBuildStageCloseResult(file, validated);
   }
   try {
     writeFileSync(file, `${JSON.stringify(validated, null, 2)}\n`, { encoding: "utf8", flag: "wx" });
@@ -309,9 +356,7 @@ export function writeAutomaticBuildStageCloseResult(
   } catch (error) {
     const code = error && typeof error === "object" && "code" in error ? String(error.code) : "";
     if (code !== "EEXIST") throw error;
-    const existing = parseAutomaticBuildStageCloseResult(JSON.parse(readFileSync(file, "utf8")));
-    if (canonicalBuildJson(existing) === canonicalBuildJson(validated)) return existing;
-    throw new AutomaticBuildCloseResultConflictError("automatic build close result conflicts with create-only identity");
+    return reconcileAutomaticBuildStageCloseResult(file, validated);
   }
 }
 
@@ -346,7 +391,6 @@ export function closeAutomaticBuildStage(input: {
       input.stage,
       "close",
       "publication_receipt_invalid",
-      preEvidence.policy_set_digest,
     );
   }
   if (!publicArtifactsMatchReceipt(input.target, receipt)) {
@@ -355,7 +399,6 @@ export function closeAutomaticBuildStage(input: {
       input.stage,
       "post_close",
       "stage_close_postcondition_failed",
-      preEvidence.policy_set_digest,
     );
   }
 
@@ -366,7 +409,6 @@ export function closeAutomaticBuildStage(input: {
       input.stage,
       "post_close",
       "stage_close_postcondition_failed",
-      preEvidence.policy_set_digest,
     );
   }
   const postSnapshot = postRoute.value;
@@ -379,7 +421,7 @@ export function closeAutomaticBuildStage(input: {
   if (!postStage.closed
     || postQuality.gate_status !== "passed"
     || postQuality.digest !== preQuality.digest
-    || postEvidence.policy_set_digest !== preEvidence.policy_set_digest
+    || canonicalBuildJson(postEvidence.policy_contracts) !== canonicalBuildJson(preEvidence.policy_contracts)
     || postEvidence.coverage_digest !== preEvidence.coverage_digest
     || !freshness?.fresh
     || !freshness.freshness_digest) {
@@ -388,11 +430,10 @@ export function closeAutomaticBuildStage(input: {
       input.stage,
       "post_close",
       "stage_close_postcondition_failed",
-      preEvidence.policy_set_digest,
     );
   }
-  const result: AutomaticBuildStageCloseResultV1 = {
-    version: "automatic_build_stage_close_result.v1",
+  const result: AutomaticBuildStageCloseResultV2 = {
+    version: "automatic_build_stage_close_result.v2",
     status: "closed",
     stage: input.stage,
     target: {
@@ -410,7 +451,7 @@ export function closeAutomaticBuildStage(input: {
     },
     postcondition: {
       stage_closed: true,
-      policy_set_digest: postEvidence.policy_set_digest,
+      policy_contracts: postEvidence.policy_contracts,
       coverage_digest: postEvidence.coverage_digest,
       freshness_digest: freshness.freshness_digest,
       public_artifact_set_digest: sha256(receipt.artifacts),
@@ -426,7 +467,6 @@ export function closeAutomaticBuildStage(input: {
       input.stage,
       "post_close",
       "stage_close_postcondition_failed",
-      preEvidence.policy_set_digest,
     );
   }
 }

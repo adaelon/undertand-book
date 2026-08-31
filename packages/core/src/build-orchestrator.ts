@@ -77,9 +77,11 @@ import {
 import {
   automaticBuildExtractionPolicy,
   automaticBuildGenerationArtifactPath,
-  extractionPolicyDigest,
+  extractionPolicyFromSemanticContract,
   inspectSemanticArtifact,
+  isAutomaticBuildTaskPolicyBindingV2,
   readAutomaticBuildStagePolicyLock,
+  semanticContractFromExtractionPolicy,
   semanticArtifactMatches,
   type AutomaticBuildTaskPolicyBinding,
   type AutomaticBuildTaskPolicyBindingV1,
@@ -129,10 +131,12 @@ import {
   AutomaticBuildPolicyGenerationConflictError,
   createAutomaticBuildStagePolicySet,
   materializeAdoptedAutomaticBuildGenerationArtifact,
+  recordAutomaticBuildPriorGenerationAdoption,
   recordAutomaticBuildPolicyMigration,
+  resolveAutomaticBuildStagePolicyMember,
   type AutomaticBuildPolicyMigrationCurrent,
   type AutomaticBuildPolicyMigrationPreviousV2,
-  type AutomaticBuildStagePolicySetV2,
+  type AutomaticBuildStagePolicySetV3,
 } from "./automatic-build-policy-generation";
 import {
   createPass1ShadowTask,
@@ -234,7 +238,7 @@ export interface AutomaticBuildStageState {
   task_bindings?: Record<string, AutomaticBuildTaskPolicyBinding>;
   work_units?: WorkUnitDescriptor[];
   pending_work_units?: WorkUnitDescriptor[];
-  policy_set?: AutomaticBuildStagePolicySetV2;
+  policy_set?: AutomaticBuildStagePolicySetV3;
   quality_routing?: AutomaticBuildStageQualityRoutingEvidenceV2;
   generation_tasks?: Record<string, AutomaticBuildGenerationTaskV1>;
 }
@@ -259,17 +263,28 @@ export function inspectAutomaticBuildStageFreshness(
   const profile = resolveContentProfile(snapshot.target.profile_id);
   const qualityProfile = options.quality_profile ?? "full";
   return snapshot.stages.map((state) => {
-    const policyDigest = state.policy_set?.policy_set_digest ?? (state.stage === "paper_reading_guide"
-      ? createHash("sha256").update("paper_reading_guide_verification.v1", "utf8").digest("hex")
-      : extractionPolicyDigest(automaticBuildExtractionPolicy(state.stage, profile, qualityProfile)));
+    const policyContracts = state.policy_set
+      ? state.policy_set.members.map((member) => ({
+          kind: member.kind,
+          policy_generation_id: member.policy_generation_id,
+          semantic_contract: member.semantic_contract,
+        }))
+      : state.stage === "paper_reading_guide"
+        ? [{ kind: "paper_reading_guide", verification_version: "paper_reading_guide_verification.v1" }]
+        : [{
+            kind: state.stage,
+            semantic_contract: semanticContractFromExtractionPolicy(
+              automaticBuildExtractionPolicy(state.stage, profile, qualityProfile),
+            ),
+          }];
     const freshnessDigest = state.closed
       ? createHash("sha256").update(canonicalBuildJson({
           version: state.policy_set
-            ? "automatic_build_stage_freshness_identity.v2"
+            ? "automatic_build_stage_freshness_identity.v3"
             : "automatic_build_stage_freshness_identity.v1",
           target: snapshot.target.target_ref,
           stage: state.stage,
-          policy_digest: policyDigest,
+          policy_contracts: policyContracts,
         }), "utf8").digest("hex")
       : undefined;
     return {
@@ -309,7 +324,7 @@ function assertNoActiveLegacyGenerationLease(
     const inspection = inspectAutomaticBuildTaskClaim(target, stage, workUnitId);
     if (inspection.status !== "already_leased") continue;
     const binding = automaticBuildTaskPolicyBindingFromLease(inspection.lease);
-    if (binding && "proof_digest" in binding) continue;
+    if (binding && isAutomaticBuildTaskPolicyBindingV2(binding)) continue;
     affectedWorkUnits.push({ work_unit_id: workUnitId, evidence_lids: [] });
   }
   if (!affectedWorkUnits.length) return;
@@ -335,7 +350,7 @@ function canonicalSourceFingerprint(source: string): string {
 function currentV3QualityReportPassed(
   target: AutomaticBuildTarget,
   stage: SemanticBuildStage,
-  policySetDigest: string,
+  policySet: AutomaticBuildStagePolicySetV3,
   qualityProfile: ExtractionQualityProfile,
 ): boolean {
   const file = path.join(
@@ -375,7 +390,13 @@ function currentV3QualityReportPassed(
       && report.stage === stage
       && report.quality_profile === qualityProfile
       && report.gate_status === "passed"
-      && report.routing.policy_set_digest === policySetDigest
+      && canonicalBuildJson(report.routing.policy_generations) === canonicalBuildJson(
+        policySet.members.map((member) => ({
+          kind: member.kind,
+          policy_generation_id: member.policy_generation_id,
+          semantic_contract: member.semantic_contract,
+        })),
+      )
       && count(report.routing.eligible_model_units)
       && report.routing.proven_model_units === report.routing.eligible_model_units
       && report.routing.invalid_or_missing_proofs === 0
@@ -387,8 +408,8 @@ function currentV3QualityReportPassed(
       && report.integrity.missing_artifacts === 0
       && report.integrity.stale_artifacts === 0
       && report.integrity.legacy_artifacts === 0
-      && report.integrity.policy_generations === 1
-      && report.integrity.policy_status === "v3_policy_set_bound"
+      && report.integrity.policy_generations >= 1
+      && report.integrity.policy_status === "v3_policy_generation_bound"
       && report.integrity.violations.length === 0
       && report.quality.status === "passed"
       && report.quality.violations.length === 0
@@ -425,8 +446,8 @@ function productionMigrationRecoveryActions(
 function applyAutomaticBuildProductionMigration(input: {
   target: AutomaticBuildTarget;
   stage: SemanticBuildStage;
-  from_policy_digest: string;
-  policy_set: AutomaticBuildStagePolicySetV2;
+  from_policy_generation_id: string;
+  policy_set: AutomaticBuildStagePolicySetV3;
   current: AutomaticBuildPolicyMigrationCurrent;
   previous?: AutomaticBuildPolicyMigrationPreviousV2;
   project_adopted_payload?: (payload: unknown) => unknown;
@@ -450,10 +471,19 @@ function applyAutomaticBuildProductionMigration(input: {
   };
   let migration: ReturnType<typeof recordAutomaticBuildPolicyMigration>;
   try {
-    migration = recordAutomaticBuildPolicyMigration({
+    const priorGeneration = current.route === "model" && !input.previous
+      ? recordAutomaticBuildPriorGenerationAdoption({
+          target: input.target,
+          stage: input.stage,
+          policy_set: input.policy_set,
+          current,
+          now: AUTOMATIC_BUILD_ROUTING_RELEASE.activated_at,
+        })
+      : undefined;
+    migration = priorGeneration ?? recordAutomaticBuildPolicyMigration({
       target: input.target,
       stage: input.stage,
-      from_policy_digest: input.from_policy_digest,
+      from_policy_generation_id: input.from_policy_generation_id,
       policy_set: input.policy_set,
       current,
       ...(input.previous ? { previous: input.previous } : {}),
@@ -467,7 +497,6 @@ function applyAutomaticBuildProductionMigration(input: {
       stage: input.stage,
       target_ref: input.target.target_ref,
       router_version: policy.router_version,
-      policy_digest: input.policy_set.policy_set_digest,
       affected_work_units: [affected],
       retryable: false,
       recovery_actions: ["migrate_policy"],
@@ -480,7 +509,6 @@ function applyAutomaticBuildProductionMigration(input: {
       stage: input.stage,
       target_ref: input.target.target_ref,
       router_version: policy.router_version,
-      policy_digest: input.policy_set.policy_set_digest,
       affected_work_units: [affected],
       retryable: migration.retryable,
       recovery_actions: productionMigrationRecoveryActions(migration.reason),
@@ -508,7 +536,6 @@ function pass1RoutingRecovery(input: {
   target: AutomaticBuildTarget;
   work_unit_id: string;
   evidence_lids: string[];
-  policy_set_digest: string;
   router_version: string;
   estimated_tokens: number;
   limit_tokens: number;
@@ -519,7 +546,6 @@ function pass1RoutingRecovery(input: {
     stage: "pass1",
     target_ref: input.target.target_ref,
     router_version: input.router_version,
-    policy_digest: input.policy_set_digest,
     affected_work_units: [{
       work_unit_id: input.work_unit_id,
       evidence_lids: input.evidence_lids,
@@ -551,7 +577,6 @@ function assertAutomaticBuildShadowInputRoutable(input: {
     stage: input.stage,
     target_ref: input.target.target_ref,
     router_version: input.policy_fingerprint.router_version,
-    policy_digest: extractionPolicyDigest(input.policy_fingerprint),
     affected_work_units: [{
       work_unit_id: input.work_unit_id,
       evidence_lids: input.evidence_lids,
@@ -715,11 +740,14 @@ function semanticExpectation(
     stage,
     work_unit_id: workUnitId,
     input_hash: binding.input_hash,
-    ...("proof_digest" in binding ? {
-      proof_digest: binding.proof_digest,
-      policy_set_digest: binding.policy_set_digest,
-    } : {}),
-    policy_fingerprint: binding.policy_fingerprint,
+    ...(isAutomaticBuildTaskPolicyBindingV2(binding)
+      ? {
+          policy_generation_id: binding.policy_generation_id,
+          semantic_contract: binding.semantic_contract,
+        }
+      : {
+          semantic_contract: semanticContractFromExtractionPolicy(binding.policy_fingerprint),
+        }),
   };
 }
 
@@ -887,7 +915,7 @@ function stageStateV3(input: {
   closed: boolean;
   work_units: Array<WorkUnitDescriptorV3 | WorkUnitDescriptorV4>;
   pending_ids: string[];
-  policy_set: AutomaticBuildStagePolicySetV2;
+  policy_set: AutomaticBuildStagePolicySetV3;
   quality_routing: AutomaticBuildStageQualityRoutingEvidenceV2;
   generation_tasks: Record<string, AutomaticBuildGenerationTaskV1>;
 }): AutomaticBuildStageState {
@@ -899,7 +927,14 @@ function stageStateV3(input: {
     closed: input.closed,
     task_bindings: Object.fromEntries(input.work_units.map((unit) => [
       unit.work_unit_id,
-      taskPolicyBindingForWorkUnit(unit, input.policy_set.policy_set_digest),
+      taskPolicyBindingForWorkUnit(
+        unit,
+        resolveAutomaticBuildStagePolicyMember(
+          input.policy_set,
+          unit.kind,
+          unit.policy_fingerprint,
+        ).policy_generation_id,
+      ),
     ])),
     work_units: input.work_units,
     pending_work_units: pendingWorkUnits,
@@ -912,7 +947,6 @@ function stageStateV3(input: {
 function pass1GenerationConflictRecovery(input: {
   target: AutomaticBuildTarget;
   descriptor: WorkUnitDescriptorV3;
-  policy_set_digest: string;
 }): AutomaticBuildRecoveryEnvelopeV1 {
   return createAutomaticBuildRecoveryEnvelope({
     phase: "migration",
@@ -920,7 +954,6 @@ function pass1GenerationConflictRecovery(input: {
     stage: "pass1",
     target_ref: input.target.target_ref,
     router_version: input.descriptor.policy_fingerprint.router_version,
-    policy_digest: input.policy_set_digest,
     affected_work_units: [{
       work_unit_id: input.descriptor.work_unit_id,
       evidence_lids: input.descriptor.evidence_lids,
@@ -935,12 +968,12 @@ function pass1GenerationConflictRecovery(input: {
 function readPass1GenerationArtifact(
   target: AutomaticBuildTarget,
   workUnit: Pass1ShadowWorkUnitV1,
-  policySetDigest: string,
+  policyGenerationId: string,
 ): SemanticArtifactEnvelopeV3<unknown> | undefined {
   const file = automaticBuildGenerationArtifactPath(
     target,
     "pass1",
-    policySetDigest,
+    policyGenerationId,
     workUnit.descriptor.work_unit_id,
   );
   if (!existsSync(file)) return undefined;
@@ -951,9 +984,8 @@ function readPass1GenerationArtifact(
       stage: "pass1",
       work_unit_id: workUnit.descriptor.work_unit_id,
       input_hash: workUnit.descriptor.input_hash,
-      proof_digest: workUnit.descriptor.input_budget_proof.proof_digest,
-      policy_set_digest: policySetDigest,
-      policy_fingerprint: workUnit.descriptor.policy_fingerprint,
+      policy_generation_id: policyGenerationId,
+      semantic_contract: semanticContractFromExtractionPolicy(workUnit.descriptor.policy_fingerprint),
     })) {
       throw new Error("pass1 generation artifact identity is stale");
     }
@@ -962,7 +994,6 @@ function readPass1GenerationArtifact(
     throw new AutomaticBuildSnapshotRecoverySignal(pass1GenerationConflictRecovery({
       target,
       descriptor: workUnit.descriptor,
-      policy_set_digest: policySetDigest,
     }));
   }
 }
@@ -985,9 +1016,10 @@ function routePass1ProductionStage(input: {
     frozen_at: AUTOMATIC_BUILD_ROUTING_RELEASE.activated_at,
   });
   const previousPolicyLock = readAutomaticBuildStagePolicyLock(input.target, "pass1");
-  const previousPolicy = previousPolicyLock?.policy_fingerprint ?? wholePolicy;
-  const fromPolicyDigest = previousPolicyLock?.policy_digest
-    ?? extractionPolicyDigest(previousPolicy);
+  const previousPolicy = previousPolicyLock
+    ? extractionPolicyFromSemanticContract(input.target.target_ref.profile_id, previousPolicyLock.semantic_contract)
+    : wholePolicy;
+  const fromPolicyGenerationId = previousPolicyLock?.policy_generation_id ?? "pass1-legacy.v2";
   const previousDescriptors = new Map(routePass1WindowWorkUnits({
     target: input.target.target_ref,
     windows: input.loaded.windows,
@@ -1020,10 +1052,15 @@ function routePass1ProductionStage(input: {
     if (seenWorkUnits.has(id)) throw new Error(`duplicate Pass1 v3 work-unit identity: ${id}`);
     seenWorkUnits.add(id);
     workUnits.push(workUnit.descriptor);
+    const member = resolveAutomaticBuildStagePolicyMember(
+      policySet,
+      workUnit.descriptor.kind,
+      workUnit.descriptor.policy_fingerprint,
+    );
     const generationTask = createPass1ShadowTask({
       work_unit: workUnit,
       source_fingerprint: sourceFingerprint,
-      policy_set_digest: policySet.policy_set_digest,
+      policy_generation_id: member.policy_generation_id,
       source_unit_count: sourceUnitCount,
     });
     generationTasks[id] = {
@@ -1035,7 +1072,7 @@ function routePass1ProductionStage(input: {
     const migration = applyAutomaticBuildProductionMigration({
       target: input.target,
       stage: "pass1",
-      from_policy_digest: fromPolicyDigest,
+      from_policy_generation_id: fromPolicyGenerationId,
       policy_set: policySet,
       current: { route: "model", descriptor: workUnit.descriptor, rendered_input: workUnit.rendered_input },
       ...(previousDescriptor && previousRenderedInputs.has(id) && existsSync(previousArtifactPath) ? {
@@ -1074,7 +1111,6 @@ function routePass1ProductionStage(input: {
         target: input.target,
         work_unit_id: `pass1-window-${window.id}`,
         evidence_lids: [initial.recovery.parent_lid],
-        policy_set_digest: policySet.policy_set_digest,
         router_version: fragmentPolicy.router_version,
         estimated_tokens: initial.recovery.estimated_tokens,
         limit_tokens: initial.recovery.limit_tokens,
@@ -1092,7 +1128,12 @@ function routePass1ProductionStage(input: {
         current.push(workUnit.descriptor.work_unit_id);
         fragmentIdsByParent.set(workUnit.route.parent_lid, current);
       }
-      const artifact = readPass1GenerationArtifact(input.target, workUnit, policySet.policy_set_digest);
+      const member = resolveAutomaticBuildStagePolicyMember(
+        policySet,
+        workUnit.descriptor.kind,
+        workUnit.descriptor.policy_fingerprint,
+      );
+      const artifact = readPass1GenerationArtifact(input.target, workUnit, member.policy_generation_id);
       if (!artifact) {
         pendingIds.push(workUnit.descriptor.work_unit_id);
         initialReady = false;
@@ -1101,7 +1142,7 @@ function routePass1ProductionStage(input: {
       children.push(verifyPass1ShadowArtifact({
         work_unit: workUnit,
         artifact,
-        policy_set_digest: policySet.policy_set_digest,
+        policy_generation_id: member.policy_generation_id,
       }));
     }
     if (initial.mode === "whole") {
@@ -1126,7 +1167,6 @@ function routePass1ProductionStage(input: {
         window_id: window.id,
         source_unit_count: sourceUnitCount,
         children,
-        policy_set_digest: policySet.policy_set_digest,
         policy: stitchPolicy,
         budget: AUTOMATIC_BUILD_V3_MODEL_BUDGET,
       });
@@ -1135,7 +1175,6 @@ function routePass1ProductionStage(input: {
           target: input.target,
           work_unit_id: `pass1-window-${window.id}-stitch`,
           evidence_lids: [reduction.recovery.parent_lid],
-          policy_set_digest: policySet.policy_set_digest,
           router_version: stitchPolicy.router_version,
           estimated_tokens: reduction.recovery.estimated_tokens,
           limit_tokens: reduction.recovery.limit_tokens,
@@ -1145,7 +1184,12 @@ function routePass1ProductionStage(input: {
       let levelReady = true;
       for (const workUnit of reduction.units) {
         addWorkUnit(workUnit, sourceUnitCount);
-        const artifact = readPass1GenerationArtifact(input.target, workUnit, policySet.policy_set_digest);
+        const member = resolveAutomaticBuildStagePolicyMember(
+          policySet,
+          workUnit.descriptor.kind,
+          workUnit.descriptor.policy_fingerprint,
+        );
+        const artifact = readPass1GenerationArtifact(input.target, workUnit, member.policy_generation_id);
         if (!artifact) {
           pendingIds.push(workUnit.descriptor.work_unit_id);
           levelReady = false;
@@ -1155,7 +1199,7 @@ function routePass1ProductionStage(input: {
           nextChildren.push(verifyPass1ShadowArtifact({
             work_unit: workUnit,
             artifact,
-            policy_set_digest: policySet.policy_set_digest,
+            policy_generation_id: member.policy_generation_id,
           }));
         }
       }
@@ -1193,7 +1237,7 @@ function routePass1ProductionStage(input: {
     && currentV3QualityReportPassed(
       input.target,
       "pass1",
-      policySet.policy_set_digest,
+      policySet,
       input.quality_profile,
     )
     && profileArtifactMatches(path.join(input.target.workspace_dir, "profile_metadata.json"), input.target)
@@ -1213,7 +1257,6 @@ function profileSidecarRoutingRecovery(input: {
   target: AutomaticBuildTarget;
   work_unit_id: string;
   evidence_lids: string[];
-  policy_set_digest: string;
   router_version: string;
   estimated_tokens: number;
   limit_tokens: number;
@@ -1224,7 +1267,6 @@ function profileSidecarRoutingRecovery(input: {
     stage: "profile_sidecar",
     target_ref: input.target.target_ref,
     router_version: input.router_version,
-    policy_digest: input.policy_set_digest,
     affected_work_units: [{
       work_unit_id: input.work_unit_id,
       evidence_lids: input.evidence_lids,
@@ -1242,7 +1284,7 @@ function profileSidecarFastPathWorkUnit(input: {
   packet: ProfileSidecarSemanticPacketV2;
   source_fingerprint: string;
   policy: ReturnType<typeof automaticBuildExtractionPolicy>;
-  policy_set_digest: string;
+  policy_generation_id: string;
 }): {
   descriptor: WorkUnitDescriptorV3;
   task: ProfileSidecarSemanticFastPathTaskV1;
@@ -1303,7 +1345,7 @@ function profileSidecarFastPathWorkUnit(input: {
       descriptor,
       packet: input.packet,
       source_fingerprint: input.source_fingerprint,
-      policy_set_digest: input.policy_set_digest,
+      policy_generation_id: input.policy_generation_id,
     }),
   };
 }
@@ -1311,12 +1353,12 @@ function profileSidecarFastPathWorkUnit(input: {
 function readProfileSidecarGenerationArtifact(
   target: AutomaticBuildTarget,
   descriptor: WorkUnitDescriptorV3,
-  policySetDigest: string,
+  policyGenerationId: string,
 ): SemanticArtifactEnvelopeV3<unknown> | undefined {
   const file = automaticBuildGenerationArtifactPath(
     target,
     "profile_sidecar",
-    policySetDigest,
+    policyGenerationId,
     descriptor.work_unit_id,
   );
   if (!existsSync(file)) return undefined;
@@ -1327,9 +1369,8 @@ function readProfileSidecarGenerationArtifact(
       stage: "profile_sidecar",
       work_unit_id: descriptor.work_unit_id,
       input_hash: descriptor.input_hash,
-      proof_digest: descriptor.input_budget_proof.proof_digest,
-      policy_set_digest: policySetDigest,
-      policy_fingerprint: descriptor.policy_fingerprint,
+      policy_generation_id: policyGenerationId,
+      semantic_contract: semanticContractFromExtractionPolicy(descriptor.policy_fingerprint),
     })) {
       throw new Error("profile sidecar generation artifact identity is stale");
     }
@@ -1341,7 +1382,6 @@ function readProfileSidecarGenerationArtifact(
       stage: "profile_sidecar",
       target_ref: target.target_ref,
       router_version: descriptor.policy_fingerprint.router_version,
-      policy_digest: policySetDigest,
       affected_work_units: [{
         work_unit_id: descriptor.work_unit_id,
         evidence_lids: descriptor.evidence_lids,
@@ -1380,9 +1420,10 @@ function routeProfileSidecarProductionStage(input: {
     allow_over_limit_packets: true,
   });
   const previousPolicyLock = readAutomaticBuildStagePolicyLock(input.target, "profile_sidecar");
-  const previousPolicy = previousPolicyLock?.policy_fingerprint ?? fastPolicy;
-  const fromPolicyDigest = previousPolicyLock?.policy_digest
-    ?? extractionPolicyDigest(previousPolicy);
+  const previousPolicy = previousPolicyLock
+    ? extractionPolicyFromSemanticContract(input.target.target_ref.profile_id, previousPolicyLock.semantic_contract)
+    : fastPolicy;
+  const fromPolicyGenerationId = previousPolicyLock?.policy_generation_id ?? "profile-sidecar-legacy.v2";
   const previousDescriptors = new Map<string, WorkUnitDescriptorV2>([
     ...Object.values(analysis.packets).map((packet) => createWorkUnitDescriptor({
       target: input.target.target_ref,
@@ -1448,7 +1489,7 @@ function routeProfileSidecarProductionStage(input: {
     const migration = applyAutomaticBuildProductionMigration({
       target: input.target,
       stage: "profile_sidecar",
-      from_policy_digest: fromPolicyDigest,
+      from_policy_generation_id: fromPolicyGenerationId,
       policy_set: policySet,
       current: { route: "model", descriptor, rendered_input: renderedInput },
       ...(previousDescriptor && previousRenderedInputs.has(descriptor.work_unit_id)
@@ -1475,7 +1516,7 @@ function routeProfileSidecarProductionStage(input: {
     applyAutomaticBuildProductionMigration({
       target: input.target,
       stage: "profile_sidecar",
-      from_policy_digest: fromPolicyDigest,
+      from_policy_generation_id: fromPolicyGenerationId,
       policy_set: policySet,
       current: {
         route: "deterministic_skip",
@@ -1491,13 +1532,18 @@ function routeProfileSidecarProductionStage(input: {
   }
 
   for (const packet of Object.values(analysis.packets)) {
+    const fastMember = resolveAutomaticBuildStagePolicyMember(
+      policySet,
+      packet.unit_kind,
+      fastPolicy,
+    );
     const fastPath = profileSidecarFastPathWorkUnit({
       target: input.target,
       loaded: input.loaded,
       packet,
       source_fingerprint: sourceFingerprint,
       policy: fastPolicy,
-      policy_set_digest: policySet.policy_set_digest,
+      policy_generation_id: fastMember.policy_generation_id,
     });
     if (fastPath) {
       addWorkUnit(
@@ -1508,7 +1554,7 @@ function routeProfileSidecarProductionStage(input: {
       const artifact = readProfileSidecarGenerationArtifact(
         input.target,
         fastPath.descriptor,
-        policySet.policy_set_digest,
+        fastMember.policy_generation_id,
       );
       if (!artifact) pendingIds.push(fastPath.descriptor.work_unit_id);
       publicContributors.push({
@@ -1524,7 +1570,6 @@ function routeProfileSidecarProductionStage(input: {
         target: input.target,
         work_unit_id: packet.work_unit_id,
         evidence_lids: packet.visible_lids,
-        policy_set_digest: policySet.policy_set_digest,
         router_version: PROFILE_SIDECAR_ROUTER_VERSION,
         estimated_tokens: packet.estimated_rendered_tokens,
         limit_tokens: AUTOMATIC_BUILD_V3_MODEL_BUDGET.stage_body_limit_tokens,
@@ -1537,7 +1582,6 @@ function routeProfileSidecarProductionStage(input: {
         target: input.target,
         work_unit_id: packet.work_unit_id,
         evidence_lids: packet.visible_lids,
-        policy_set_digest: policySet.policy_set_digest,
         router_version: PROFILE_SIDECAR_ROUTER_VERSION,
         estimated_tokens: packet.estimated_rendered_tokens,
         limit_tokens: AUTOMATIC_BUILD_V3_MODEL_BUDGET.stage_body_limit_tokens,
@@ -1557,7 +1601,6 @@ function routeProfileSidecarProductionStage(input: {
         target: input.target,
         work_unit_id: packet.work_unit_id,
         evidence_lids: packet.visible_lids,
-        policy_set_digest: policySet.policy_set_digest,
         router_version: fragmentPolicy.router_version,
         estimated_tokens: fragments.recovery.estimated_tokens,
         limit_tokens: fragments.recovery.limit_tokens,
@@ -1565,6 +1608,16 @@ function routeProfileSidecarProductionStage(input: {
     }
     coverages.push(fragments.coverage);
     const fragmentCount = fragments.units.length;
+    const fragmentMember = resolveAutomaticBuildStagePolicyMember(
+      policySet,
+      "profile_sidecar_discourse_fragment",
+      fragmentPolicy,
+    );
+    const reduceMember = resolveAutomaticBuildStagePolicyMember(
+      policySet,
+      "profile_sidecar_discourse_reduce",
+      reducePolicy,
+    );
     const fragmentIds = fragments.units.map((unit) => unit.descriptor.work_unit_id);
     let children: ProfileSidecarDiscourseVerifiedChildV1[] = [];
     let fragmentsReady = true;
@@ -1572,7 +1625,7 @@ function routeProfileSidecarProductionStage(input: {
       const task = createProfileSidecarDiscourseShadowTask({
         work_unit: workUnit,
         source_fingerprint: sourceFingerprint,
-        policy_set_digest: policySet.policy_set_digest,
+        policy_generation_id: fragmentMember.policy_generation_id,
         fragment_count: fragmentCount,
       });
       addWorkUnit(
@@ -1583,7 +1636,7 @@ function routeProfileSidecarProductionStage(input: {
       const artifact = readProfileSidecarGenerationArtifact(
         input.target,
         workUnit.descriptor,
-        policySet.policy_set_digest,
+        fragmentMember.policy_generation_id,
       );
       if (!artifact) {
         pendingIds.push(workUnit.descriptor.work_unit_id);
@@ -1593,7 +1646,7 @@ function routeProfileSidecarProductionStage(input: {
       children.push(verifyProfileSidecarDiscourseShadowArtifact({
         work_unit: workUnit,
         artifact,
-        policy_set_digest: policySet.policy_set_digest,
+        policy_generation_id: fragmentMember.policy_generation_id,
       }));
     }
     if (!fragmentsReady) continue;
@@ -1604,7 +1657,6 @@ function routeProfileSidecarProductionStage(input: {
         parent_lid: parentLid,
         fragment_count: fragmentCount,
         children,
-        policy_set_digest: policySet.policy_set_digest,
         policy: reducePolicy,
         budget: AUTOMATIC_BUILD_V3_MODEL_BUDGET,
       });
@@ -1613,7 +1665,6 @@ function routeProfileSidecarProductionStage(input: {
           target: input.target,
           work_unit_id: `${packet.work_unit_id}:reduce`,
           evidence_lids: packet.visible_lids,
-          policy_set_digest: policySet.policy_set_digest,
           router_version: reducePolicy.router_version,
           estimated_tokens: reduction.recovery.estimated_tokens,
           limit_tokens: reduction.recovery.limit_tokens,
@@ -1625,7 +1676,7 @@ function routeProfileSidecarProductionStage(input: {
         const task = createProfileSidecarDiscourseShadowTask({
           work_unit: workUnit,
           source_fingerprint: sourceFingerprint,
-          policy_set_digest: policySet.policy_set_digest,
+          policy_generation_id: reduceMember.policy_generation_id,
           fragment_count: fragmentCount,
         });
         addWorkUnit(
@@ -1636,7 +1687,7 @@ function routeProfileSidecarProductionStage(input: {
         const artifact = readProfileSidecarGenerationArtifact(
           input.target,
           workUnit.descriptor,
-          policySet.policy_set_digest,
+          reduceMember.policy_generation_id,
         );
         if (!artifact) {
           pendingIds.push(workUnit.descriptor.work_unit_id);
@@ -1647,7 +1698,7 @@ function routeProfileSidecarProductionStage(input: {
           nextChildren.push(verifyProfileSidecarDiscourseShadowArtifact({
             work_unit: workUnit,
             artifact,
-            policy_set_digest: policySet.policy_set_digest,
+            policy_generation_id: reduceMember.policy_generation_id,
           }));
         }
       }
@@ -1683,7 +1734,7 @@ function routeProfileSidecarProductionStage(input: {
     && currentV3QualityReportPassed(
       input.target,
       "profile_sidecar",
-      policySet.policy_set_digest,
+      policySet,
       input.quality_profile,
     )
     && profileArtifactMatches(path.join(input.target.workspace_dir, "discourse_index.json"), input.target)
@@ -1707,7 +1758,6 @@ type BookStructureProductionRoutedWorkUnit =
 
 function bookStructureProductionRecovery(input: {
   target: AutomaticBuildTarget;
-  policy_set_digest: string;
   recovery: BookStructureRoutingRecoveryV1;
 }): AutomaticBuildRecoveryEnvelopeV1 {
   const recovery = input.recovery;
@@ -1722,7 +1772,6 @@ function bookStructureProductionRecovery(input: {
     stage: "book_structure",
     target_ref: input.target.target_ref,
     router_version: BOOK_STRUCTURE_ROUTER_VERSION_V2,
-    policy_digest: input.policy_set_digest,
     affected_work_units: [{
       work_unit_id: workUnitId,
       evidence_lids: [recovery.parent_unit_lid],
@@ -1756,15 +1805,16 @@ function routeBookStructureProductionStage(input: {
     prompts: BOOK_STRUCTURE_EXECUTION_PROMPTS_V2,
   });
   const policyMembers = ([
-    ["structure_unit", contracts.whole],
-    ["structure_fragment", contracts.fragment],
-    ["structure_reduce", contracts.reduce],
-    ["structure_stitch", contracts.stitch],
-    ["structure_stitch_fragment", contracts.stitch_fragment],
-    ["structure_stitch_reduce", contracts.stitch_reduce],
-  ] as const).map(([kind, contract]) => ({
+    ["structure_unit", contracts.whole, `book-structure-unit.${input.quality_profile}.v2`],
+    ["structure_fragment", contracts.fragment, `book-structure-fragment.${input.quality_profile}.v2`],
+    ["structure_reduce", contracts.reduce, `book-structure-reduce.${input.quality_profile}.v2`],
+    ["structure_stitch", contracts.stitch, `book-structure-stitch.${input.quality_profile}.v2`],
+    ["structure_stitch_fragment", contracts.stitch_fragment, `book-structure-stitch-fragment.${input.quality_profile}.v2`],
+    ["structure_stitch_reduce", contracts.stitch_reduce, `book-structure-stitch-reduce.${input.quality_profile}.v2`],
+  ] as const).map(([kind, contract, policyGenerationId]) => ({
     kind,
     extractor: automaticBuildExtractorForWorkUnitKind("book_structure", kind),
+    policy_generation_id: policyGenerationId,
     policy_fingerprint: contract.policy_fingerprint,
   }));
   const policySet = createAutomaticBuildStagePolicySet({
@@ -1774,10 +1824,10 @@ function routeBookStructureProductionStage(input: {
     frozen_at: AUTOMATIC_BUILD_ROUTING_RELEASE.activated_at,
   });
   const previousPolicyLock = readAutomaticBuildStagePolicyLock(input.target, "book_structure");
-  const previousPolicy = previousPolicyLock?.policy_fingerprint
-    ?? automaticBuildExtractionPolicy("book_structure", input.profile, input.quality_profile);
-  const fromPolicyDigest = previousPolicyLock?.policy_digest
-    ?? extractionPolicyDigest(previousPolicy);
+  const previousPolicy = previousPolicyLock
+    ? extractionPolicyFromSemanticContract(input.target.target_ref.profile_id, previousPolicyLock.semantic_contract)
+    : automaticBuildExtractionPolicy("book_structure", input.profile, input.quality_profile);
+  const fromPolicyGenerationId = previousPolicyLock?.policy_generation_id ?? "book-structure-legacy.v2";
   const workUnits: WorkUnitDescriptorV4[] = [];
   const pendingIds: string[] = [];
   const generationTasks: Record<string, AutomaticBuildGenerationTaskV1> = {};
@@ -1807,9 +1857,14 @@ function routeBookStructureProductionStage(input: {
       throw new Error(`duplicate BookStructure v4 work-unit identity: ${id}`);
     }
     seenWorkUnits.add(id);
+    const member = resolveAutomaticBuildStagePolicyMember(
+      policySet,
+      descriptor.kind,
+      descriptor.policy_fingerprint,
+    );
     const task = createBookStructureGenerationTask({
       target_ref: input.target.target_ref,
-      policy_set_digest: policySet.policy_set_digest,
+      policy_generation_id: member.policy_generation_id,
       descriptor,
       generation_input: taskInput.work_unit.input,
       parent_unit_lid: taskInput.parent_unit_lid,
@@ -1824,7 +1879,7 @@ function routeBookStructureProductionStage(input: {
     const generationArtifactPath = automaticBuildGenerationArtifactPath(
       input.target,
       "book_structure",
-      policySet.policy_set_digest,
+      member.policy_generation_id,
       id,
     );
     let artifact = readFreshArtifact(task);
@@ -1832,7 +1887,7 @@ function routeBookStructureProductionStage(input: {
       const migration = applyAutomaticBuildProductionMigration({
         target: input.target,
         stage: "book_structure",
-        from_policy_digest: fromPolicyDigest,
+        from_policy_generation_id: fromPolicyGenerationId,
         policy_set: policySet,
         current: {
           route: "model",
@@ -1897,7 +1952,6 @@ function routeBookStructureProductionStage(input: {
     if (initial.status === "blocked") {
       throw new AutomaticBuildSnapshotRecoverySignal(bookStructureProductionRecovery({
         target: input.target,
-        policy_set_digest: policySet.policy_set_digest,
         recovery: initial.recovery,
       }));
     }
@@ -1967,7 +2021,6 @@ function routeBookStructureProductionStage(input: {
       if (reduction.status === "blocked") {
         throw new AutomaticBuildSnapshotRecoverySignal(bookStructureProductionRecovery({
           target: input.target,
-          policy_set_digest: policySet.policy_set_digest,
           recovery: reduction.recovery,
         }));
       }
@@ -2043,7 +2096,6 @@ function routeBookStructureProductionStage(input: {
     if (initial.status === "blocked") {
       throw new AutomaticBuildSnapshotRecoverySignal(bookStructureProductionRecovery({
         target: input.target,
-        policy_set_digest: policySet.policy_set_digest,
         recovery: initial.recovery,
       }));
     }
@@ -2137,7 +2189,6 @@ function routeBookStructureProductionStage(input: {
         if (reduction.status === "blocked") {
           throw new AutomaticBuildSnapshotRecoverySignal(bookStructureProductionRecovery({
             target: input.target,
-            policy_set_digest: policySet.policy_set_digest,
             recovery: reduction.recovery,
           }));
         }
@@ -2871,13 +2922,20 @@ export function nextAutomaticBuildAction(snapshot: AutomaticBuildSnapshot, maxPa
           ? automaticBuildExtractorForWorkUnitKind(stage.stage, firstWorkUnit.kind)
           : automaticBuildExtractorForStage(stage.stage);
       if (!extractor) throw new Error(`stage ${stage.stage} has pending semantic tasks but no extractor`);
-      const selectedPolicyDigest = firstWorkUnit
-        ? extractionPolicyDigest(firstWorkUnit.policy_fingerprint)
-        : undefined;
+      const policyIdentity = (unit: WorkUnitDescriptor) => {
+        const binding = stage.task_bindings?.[unit.work_unit_id];
+        return binding && isAutomaticBuildTaskPolicyBindingV2(binding)
+          ? {
+              policy_generation_id: binding.policy_generation_id,
+              semantic_contract: binding.semantic_contract,
+            }
+          : { semantic_contract: semanticContractFromExtractionPolicy(unit.policy_fingerprint) };
+      };
+      const selectedPolicyIdentity = firstWorkUnit ? policyIdentity(firstWorkUnit) : undefined;
       const selectedWorkUnits = (stage.pending_work_units ?? [])
         .filter((unit) => !firstWorkUnit || (
           unit.kind === firstWorkUnit.kind
-          && extractionPolicyDigest(unit.policy_fingerprint) === selectedPolicyDigest
+          && canonicalBuildJson(policyIdentity(unit)) === canonicalBuildJson(selectedPolicyIdentity)
         ))
         .slice(0, maxParallel);
       const selectedTaskIds = selectedWorkUnits.length

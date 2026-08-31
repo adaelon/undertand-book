@@ -393,7 +393,7 @@ function runReplay(iteration: number) {
       lease_ttl_ms: 3_600_000,
       available_agent_slots: 3,
       quality_profile: "full",
-      ...(plan.preflight ? { accepted_plan_digest: plan.preflight.plan_digest } : {}),
+      ...(plan.preflight ? { accepted_plan_digest: plan.preflight.descriptor_plan_digest } : {}),
     });
     const action = next.action as any;
     trace.push({ kind: "action", action: action.kind, stage: action.stage ?? null, reason: action.reason ?? null });

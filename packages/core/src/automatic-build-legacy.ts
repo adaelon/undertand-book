@@ -11,7 +11,11 @@ import {
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
-import { canonicalAutomaticBuildJson } from "./automatic-build-protocol";
+import {
+  validateAutomaticBuildPolicyMigrationReceipt,
+  type AutomaticBuildPolicyMigrationReceiptV2,
+} from "./automatic-build-policy-generation";
+import type { SemanticBuildStage } from "./semantic-artifact";
 import {
   buildAutomaticBuildSnapshot,
   type AutomaticBuildStage,
@@ -118,12 +122,11 @@ function descriptorInputHashesFromMigrationReceipts(
   target: AutomaticBuildTarget,
 ): Map<string, Set<string>> {
   const hashes = new Map<string, Set<string>>();
-  const migrationRoot = path.join(target.workspace_dir, ".build", "automatic-build", "v3", "migrations");
+  const migrationRoot = path.join(target.workspace_dir, ".build", "automatic-build", "v4", "migrations");
   for (const file of filesRecursive(migrationRoot)) {
     try {
       const value = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
-      if (value.version !== "automatic_build_policy_migration_receipt.v1"
-        || typeof value.receipt_digest !== "string"
+      if (value.version !== "automatic_build_policy_migration_receipt.v2"
         || typeof value.stage !== "string"
         || typeof value.work_unit_id !== "string"
         || typeof value.current_input_hash !== "string") {
@@ -144,12 +147,15 @@ function descriptorInputHashesFromMigrationReceipts(
         || !/^[a-f0-9]{64}$/u.test(value.current_input_hash)) {
         continue;
       }
-      const { receipt_digest: receiptDigest, ...core } = value;
-      const actualDigest = sha256(canonicalAutomaticBuildJson(core).slice(0, -1));
-      if (receiptDigest !== actualDigest) continue;
-      const key = `${value.stage}:${value.work_unit_id}`;
+      const receipt = validateAutomaticBuildPolicyMigrationReceipt(
+        target,
+        value.stage as SemanticBuildStage,
+        value as unknown as AutomaticBuildPolicyMigrationReceiptV2,
+      );
+      if (receipt.current_route !== "model" || !receipt.current_input_hash) continue;
+      const key = `${receipt.stage}:${receipt.work_unit_id}`;
       const candidates = hashes.get(key) ?? new Set<string>();
-      candidates.add(value.current_input_hash);
+      candidates.add(receipt.current_input_hash);
       hashes.set(key, candidates);
     } catch {
       // Invalid or unrelated private receipts cannot establish descriptor identity.

@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  automaticBuildAttemptScopeFromLease,
   assertActiveAutomaticBuildLease,
   claimAutomaticBuildTask,
   heartbeatAutomaticBuildLease,
@@ -38,11 +39,40 @@ function acceptedNext(source: string, root: string, options: AutomaticBuildNextO
     protocol: "automatic_build_protocol.v2",
     ...options,
     build_plan: buildPlan,
-    accepted_plan_digest: plan.preflight.plan_digest,
+    accepted_plan_digest: plan.preflight.descriptor_plan_digest,
   });
 }
 
 describe("automatic build task lease", () => {
+  it("keeps legacy policy-fingerprint scope digests readable but rejects partial V3 bindings", () => {
+    const { target } = targetFixture();
+    const fixture = profileSidecarPolicyScopeFixture(target);
+    const legacyLease = {
+      version: "automatic_build_task_lease.v2" as const,
+      target_ref: target.target_ref,
+      stage: fixture.descriptor.stage,
+      work_unit_id: fixture.descriptor.work_unit_id,
+      attempt: 1,
+      phase: "reserved" as const,
+      owner: "legacy-policy-owner",
+      token: "legacy-policy-token",
+      reserved_at: T0,
+      reserve_expires_at: "2026-07-19T00:10:00.000Z",
+      issued_at: T0,
+      expires_at: "2026-07-19T00:10:00.000Z",
+      input_hash: fixture.descriptor.input_hash,
+      policy_fingerprint: fixture.descriptor.policy_fingerprint,
+      attempt_scope_digest: "a".repeat(64),
+    };
+
+    expect(automaticBuildAttemptScopeFromLease(legacyLease)).toBeUndefined();
+    expect(() => automaticBuildAttemptScopeFromLease({
+      ...legacyLease,
+      policy_fingerprint: undefined,
+      policy_generation_id: fixture.scope_a.task_binding.policy_generation_id,
+    })).toThrow("partial task policy binding");
+  });
+
   it("uses independent ten minute reservation and thirty minute run defaults", () => {
     const { target } = targetFixture();
     const claim = claimAutomaticBuildTask(target, "pass1", "0", { owner: "owner-a", now: T0 });

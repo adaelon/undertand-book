@@ -2,15 +2,20 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 import {
   compileBuildMode,
-  compileBuildModeV2,
+  compileBuildModeV3,
   type BuildMode,
   type Pass2PlanChoice,
   type BuildPlanEstimateInputV1,
   type BuildPlanEstimateInputV2,
+  type BuildPlanEstimateInputV3,
 } from "./build-capability";
-import type { ArtifactBlueprintResolutionV1 } from "./artifact-blueprint-registry";
+import type {
+  ArtifactBlueprintResolutionV1,
+  ArtifactBlueprintResolutionV2,
+} from "./artifact-blueprint-registry";
 import {
   BuildDecisionRequestV2Z,
+  BuildDecisionRequestV3Z,
   canonicalBuildJson,
   computeBuildIntentDigest,
   transitionBuildIntent,
@@ -20,6 +25,7 @@ import {
   validateBuildPlanV1,
   type BuildContentProfile,
   type BuildDecisionRequestV2,
+  type BuildDecisionRequestV3,
   type BuildIntentV1,
   type BuildPlanBudgetV1,
   type BuildPlanV1,
@@ -27,18 +33,26 @@ import {
 import {
   computeBuildIntentDigestAny,
   computeBuildIntentDigestV2,
+  summarizeBuildPlanPrivateArtifactV3,
   summarizeBuildPlanPrivateArtifactV2,
   transitionBuildIntentV2,
+  transitionBuildIntentV3,
   transitionBuildPlanV2,
+  transitionBuildPlanV3,
   validateBuildIntentAny,
   validateBuildIntentV2,
+  validateBuildIntentV3,
   validateBuildPlanAny,
   validateBuildPlanV2,
+  validateBuildPlanV3,
   type ArtifactBlueprintPlanSummaryV1,
+  type ArtifactBlueprintPlanSummaryV2,
   type BuildIntentAny,
   type BuildIntentV2,
+  type BuildIntentV3,
   type BuildPlanAny,
   type BuildPlanV2,
+  type BuildPlanV3,
 } from "./build-intent-v2";
 import type { AutomaticBuildStageFreshnessInspectionV1 } from "./build-orchestrator";
 
@@ -89,7 +103,7 @@ export interface DraftBuildIntentSelectionInput {
   plan_id?: string;
   plan_revision?: number;
   supersedes_intent_id?: string;
-  resolved_blueprints?: ArtifactBlueprintResolutionV1[];
+  resolved_blueprints?: ArtifactBlueprintResolutionV2[];
 }
 
 export interface BuildIntentSelectionV1 {
@@ -112,7 +126,16 @@ export interface BuildIntentSelectionV2 {
   decision_request: BuildDecisionRequestV2 | null;
 }
 
-export type BuildIntentSelection = BuildIntentSelectionV1 | BuildIntentSelectionV2;
+export interface BuildIntentSelectionV3 {
+  version: "build_intent_selection.v3";
+  mode: BuildMode;
+  intent: BuildIntentV3 | null;
+  plan: BuildPlanV3 | null;
+  estimate_input: BuildPlanEstimateInputV3 | null;
+  decision_request: BuildDecisionRequestV3 | null;
+}
+
+export type BuildIntentSelection = BuildIntentSelectionV1 | BuildIntentSelectionV2 | BuildIntentSelectionV3;
 
 export interface RedactedBuildIntentSelectionV1 {
   version: "build_intent_status.v1";
@@ -169,10 +192,45 @@ export interface CodexBuildIntentPlanV2 {
   decision_request: BuildDecisionRequestV2 | null;
 }
 
+export interface RedactedBuildIntentSelectionV2 {
+  version: "build_intent_status.v2";
+  mode: BuildMode;
+  intent: null | {
+    intent_id: string;
+    intent_revision: number;
+    status: BuildIntentV3["status"];
+  };
+  plan: null | {
+    plan_id: string;
+    plan_revision: number;
+    status: BuildPlanV3["status"];
+    recipe_id: BuildPlanV3["recipe_id"];
+  };
+  decision_request: BuildDecisionRequestV3 | null;
+}
+
+export interface CodexBuildIntentPlanV3 {
+  version: "codex_build_intent_plan.v3";
+  mode: BuildMode;
+  intent: null | {
+    intent_id: string;
+    intent_revision: number;
+    status: BuildIntentV3["status"];
+    goal_kind: BuildIntentV3["goal_kind"];
+    source_scope: BuildIntentV3["source_scope"];
+    usage_horizon: BuildIntentV3["usage_horizon"];
+  };
+  plan: null | Omit<BuildPlanV3, "private_artifacts"> & {
+    private_artifacts: never[];
+    artifact_summaries: ArtifactBlueprintPlanSummaryV2[];
+  };
+  decision_request: BuildDecisionRequestV3 | null;
+}
+
 export interface ReplannedBuildIntentSelectionV2 {
-  version: "replanned_build_intent_selection.v2";
+  version: "replanned_build_intent_selection.v3";
   previous: BuildIntentSelection;
-  current: BuildIntentSelectionV2;
+  current: BuildIntentSelectionV3;
 }
 
 export type LegacyBuildInvocation =
@@ -185,7 +243,7 @@ function digest(value: unknown): string {
   return createHash("sha256").update(canonicalBuildJson(value), "utf8").digest("hex");
 }
 
-function stableIds(input: DraftBuildIntentSelectionInput, candidate?: BuildIntentPlannerCandidateV2) {
+function legacyStableIds(input: DraftBuildIntentSelectionInput, candidate?: BuildIntentPlannerCandidateV2) {
   const suffix = digest({
     mode: input.mode,
     target: input.target,
@@ -200,11 +258,29 @@ function stableIds(input: DraftBuildIntentSelectionInput, candidate?: BuildInten
   };
 }
 
-function decisionFor(plan: BuildPlanAny): BuildDecisionRequestV2 {
+function decisionForLegacy(plan: BuildPlanV1 | BuildPlanV2): BuildDecisionRequestV2 {
   return BuildDecisionRequestV2Z.parse({
     version: "build_decision_request.v2",
     decision_id: `decision-${plan.plan_digest.slice(0, 16)}`,
     scope: { kind: "build_plan", plan_id: plan.plan_id, plan_digest: plan.plan_digest },
+    kind: "build_intent_plan",
+    options: [
+      { id: "confirm", label: "Confirm plan" },
+      { id: "reject", label: "Keep reading" },
+    ],
+    status: "pending",
+  });
+}
+
+function decisionForV3(plan: BuildPlanV3): BuildDecisionRequestV3 {
+  return BuildDecisionRequestV3Z.parse({
+    version: "build_decision_request.v3",
+    decision_id: `decision-${plan.plan_id}-r${plan.plan_revision}`,
+    scope: {
+      kind: "build_plan",
+      plan_id: plan.plan_id,
+      plan_revision: plan.plan_revision,
+    },
     kind: "build_intent_plan",
     options: [
       { id: "confirm", label: "Confirm plan" },
@@ -225,16 +301,18 @@ export function validateBuildIntentPlannerCandidate(input: unknown): BuildIntent
 
 function validateResolvedBlueprints(
   candidate: BuildIntentPlannerCandidateV2,
-  resolutions: readonly ArtifactBlueprintResolutionV1[],
-): ArtifactBlueprintResolutionV1[] {
+  resolutions: readonly ArtifactBlueprintResolutionV2[],
+): ArtifactBlueprintResolutionV2[] {
   if (resolutions.length !== candidate.artifacts.length) {
     throw new Error("ArtifactBlueprint resolution count does not match the planner candidate");
   }
   return resolutions.map((resolution, index) => {
     const selected = candidate.artifacts[index];
     if (resolution.source !== selected.source
-      || resolution.blueprint.blueprint_id !== selected.blueprint_id
-      || resolution.blueprint.blueprint_version !== selected.blueprint_version) {
+      || resolution.blueprint_id !== selected.blueprint_id
+      || resolution.blueprint_version !== selected.blueprint_version
+      || resolution.blueprint.blueprint_id !== resolution.blueprint_id
+      || resolution.blueprint.blueprint_version !== resolution.blueprint_version) {
       throw new Error("ArtifactBlueprint resolution identity does not match the planner candidate");
     }
     if (selected.source === "one_off"
@@ -245,28 +323,27 @@ function validateResolvedBlueprints(
   });
 }
 
-export function draftBuildIntentSelection(input: DraftBuildIntentSelectionInput): BuildIntentSelectionV2 {
+export function draftBuildIntentSelection(input: DraftBuildIntentSelectionInput): BuildIntentSelectionV3 {
   const profile = validateBuildContentProfile(input.target.content_profile);
   if (!input.target.book_id.trim() || !input.target.source_fingerprint.trim()) {
     throw new Error("build intent target identity must not be blank");
   }
   if (input.mode === "read_now") {
-    compileBuildModeV2({
+    compileBuildModeV3({
       mode: "read_now",
       book_id: input.target.book_id,
       source_fingerprint: input.target.source_fingerprint,
       content_profile: profile,
       plan_id: input.plan_id ?? "read-now",
-      revision: input.plan_revision ?? 1,
+      plan_revision: input.plan_revision ?? 1,
       created_at: input.now,
       budget: input.budget ?? { on_exceed: "needs_user" },
       public_freshness: input.target.public_freshness,
     });
     return {
-      version: "build_intent_selection.v2",
+      version: "build_intent_selection.v3",
       mode: "read_now",
       intent: null,
-      intent_digest: null,
       plan: null,
       estimate_input: null,
       decision_request: null,
@@ -276,15 +353,20 @@ export function draftBuildIntentSelection(input: DraftBuildIntentSelectionInput)
   const candidate = input.mode === "goal_directed"
     ? validateBuildIntentPlannerCandidate(input.candidate)
     : undefined;
-  const ids = stableIds(input, candidate);
-  let intent: BuildIntentV2 | undefined;
+  if (!input.plan_id || !input.plan_revision) {
+    throw new Error("BuildPlan id and revision must be issued by the owning store");
+  }
+  if (input.mode === "goal_directed" && (!input.intent_id || !input.intent_revision)) {
+    throw new Error("BuildIntent id and revision must be issued by the owning store");
+  }
+  let intent: BuildIntentV3 | undefined;
   if (input.mode === "goal_directed") {
     const goal = input.user_goal?.trim();
     if (!goal) throw new Error("goal_directed mode requires a non-blank user goal");
-    intent = validateBuildIntentV2({
-      version: "build_intent.v2",
-      intent_id: ids.intent_id,
-      revision: input.intent_revision ?? 1,
+    intent = validateBuildIntentV3({
+      version: "build_intent.v3",
+      intent_id: input.intent_id,
+      intent_revision: input.intent_revision,
       book_id: input.target.book_id,
       source_fingerprint: input.target.source_fingerprint,
       content_profile: profile,
@@ -301,74 +383,67 @@ export function draftBuildIntentSelection(input: DraftBuildIntentSelectionInput)
   const resolvedBlueprints = candidate
     ? validateResolvedBlueprints(candidate, input.resolved_blueprints ?? [])
     : [];
-  const compilation = compileBuildModeV2({
+  const compilation = compileBuildModeV3({
     mode: input.mode,
     book_id: input.target.book_id,
     source_fingerprint: input.target.source_fingerprint,
     content_profile: profile,
-    plan_id: ids.plan_id,
-    revision: input.plan_revision ?? 1,
+    plan_id: input.plan_id,
+    plan_revision: input.plan_revision,
     created_at: input.now,
     budget: input.budget ?? { on_exceed: "needs_user" },
     public_freshness: input.target.public_freshness,
     ...(intent ? { intent } : {}),
     ...(candidate ? { selected_blueprints: resolvedBlueprints } : {}),
   });
-  const plan = validateBuildPlanV2(compilation.plan);
+  const plan = validateBuildPlanV3(compilation.plan);
   return {
-    version: "build_intent_selection.v2",
+    version: "build_intent_selection.v3",
     mode: input.mode,
     intent: intent ?? null,
-    intent_digest: intent ? computeBuildIntentDigestV2(intent) : null,
     plan,
     estimate_input: compilation.estimate_input ?? null,
-    decision_request: decisionFor(plan),
+    decision_request: decisionForV3(plan),
   };
 }
 
 export function confirmBuildIntentSelection(
-  input: BuildIntentSelection,
+  input: BuildIntentSelectionV3,
   confirmation: {
     plan_id: string;
-    plan_digest: string;
+    plan_revision: number;
     at: string;
-    confirmation_source: BuildPlanAny["confirmation_source"];
+    confirmation_source: BuildPlanV3["confirmation_source"];
   },
-): BuildIntentSelection {
+): BuildIntentSelectionV3 {
   if (!input.plan) throw new Error("read_now has no BuildPlan to confirm");
-  const plan = validateBuildPlanAny(input.plan);
-  if (confirmation.plan_id !== plan.plan_id || confirmation.plan_digest !== plan.plan_digest) {
-    throw new Error("confirmation plan id or digest does not match the current draft");
+  const plan = validateBuildPlanV3(input.plan);
+  if (confirmation.plan_id !== plan.plan_id || confirmation.plan_revision !== plan.plan_revision) {
+    throw new Error("confirmation plan id or revision does not match the current draft");
   }
   if (!confirmation.confirmation_source) throw new Error("confirmation source is required");
   const intent = input.intent
-    ? input.intent.version === "build_intent.v2"
-      ? transitionBuildIntentV2(input.intent, "confirmed", { at: confirmation.at })
-      : transitionBuildIntent(input.intent, "confirmed", { at: confirmation.at })
+    ? transitionBuildIntentV3(input.intent, "confirmed", { at: confirmation.at })
     : null;
-  const confirmedPlan = plan.version === "build_plan.v2"
-    ? transitionBuildPlanV2(plan, "confirmed", {
-        at: confirmation.at,
-        confirmation_source: confirmation.confirmation_source,
-      })
-    : transitionBuildPlan(plan, "confirmed", {
-        at: confirmation.at,
-        confirmation_source: confirmation.confirmation_source,
-      });
+  const confirmedPlan = transitionBuildPlanV3(plan, "confirmed", {
+    at: confirmation.at,
+    confirmation_source: confirmation.confirmation_source,
+  });
   return {
     ...input,
     intent,
     plan: confirmedPlan,
     decision_request: input.decision_request
-      ? BuildDecisionRequestV2Z.parse({ ...input.decision_request, status: "answered" })
+      ? BuildDecisionRequestV3Z.parse({ ...input.decision_request, status: "answered" })
       : null,
-  } as BuildIntentSelection;
+  };
 }
 
 function transitionIntent(
   input: BuildIntentAny,
   status: "superseded" | "stale_source",
 ): BuildIntentAny {
+  if (input.version === "build_intent.v3") return transitionBuildIntentV3(input, status);
   return input.version === "build_intent.v2"
     ? transitionBuildIntentV2(input, status)
     : transitionBuildIntent(input, status);
@@ -378,6 +453,7 @@ function transitionPlan(
   input: BuildPlanAny,
   status: "superseded" | "stale_source",
 ): BuildPlanAny {
+  if (input.version === "build_plan.v3") return transitionBuildPlanV3(input, status);
   return input.version === "build_plan.v2"
     ? transitionBuildPlanV2(input, status)
     : transitionBuildPlan(input, status);
@@ -389,7 +465,9 @@ export function rejectBuildIntentSelection(input: BuildIntentSelection): BuildIn
     intent: input.intent ? transitionIntent(input.intent, "superseded") : null,
     plan: input.plan ? transitionPlan(input.plan, "superseded") : null,
     decision_request: input.decision_request
-      ? BuildDecisionRequestV2Z.parse({ ...input.decision_request, status: "answered" })
+      ? input.decision_request.version === "build_decision_request.v3"
+        ? BuildDecisionRequestV3Z.parse({ ...input.decision_request, status: "answered" })
+        : BuildDecisionRequestV2Z.parse({ ...input.decision_request, status: "answered" })
       : null,
   } as BuildIntentSelection;
 }
@@ -404,7 +482,9 @@ function transitionSelectionLifecycle(
     intent: input.intent ? transitionIntent(input.intent, status) : null,
     plan: transitionPlan(input.plan, status),
     decision_request: input.decision_request
-      ? BuildDecisionRequestV2Z.parse({ ...input.decision_request, status: "answered" })
+      ? input.decision_request.version === "build_decision_request.v3"
+        ? BuildDecisionRequestV3Z.parse({ ...input.decision_request, status: "answered" })
+        : BuildDecisionRequestV2Z.parse({ ...input.decision_request, status: "answered" })
       : null,
   } as BuildIntentSelection;
 }
@@ -435,13 +515,21 @@ export function replanBuildIntentSelection(
     : supersedeBuildIntentSelection(previousInput);
   const current = draftBuildIntentSelection({
     ...nextInput,
-    intent_revision: nextInput.intent_revision ?? ((previousInput.intent?.revision ?? 0) + 1),
-    plan_revision: nextInput.plan_revision ?? (previousPlan.revision + 1),
+    intent_revision: nextInput.intent_revision ?? (
+      previousInput.intent?.version === "build_intent.v3"
+        ? previousInput.intent.intent_revision + 1
+        : (previousInput.intent?.revision ?? 0) + 1
+    ),
+    plan_revision: nextInput.plan_revision ?? (
+      previousPlan.version === "build_plan.v3"
+        ? previousPlan.plan_revision + 1
+        : previousPlan.revision + 1
+    ),
     ...(nextInput.mode === "goal_directed" && previousInput.intent
       ? { supersedes_intent_id: previousInput.intent.intent_id }
       : {}),
   });
-  return { version: "replanned_build_intent_selection.v2", previous, current };
+  return { version: "replanned_build_intent_selection.v3", previous, current };
 }
 
 export function mapLegacyBuildInvocation(input: {
@@ -458,7 +546,7 @@ export function mapLegacyBuildInvocation(input: {
     now: input.now,
     ...(input.budget ? { budget: input.budget } : {}),
   };
-  const ids = stableIds(draftInput);
+  const ids = legacyStableIds(draftInput);
   const compilation = compileBuildMode({
     mode: "standard_deep",
     book_id: input.target.book_id,
@@ -479,34 +567,62 @@ export function mapLegacyBuildInvocation(input: {
     intent_digest: null,
     plan,
     estimate_input: compilation.estimate_input ?? null,
-    decision_request: decisionFor(plan),
+    decision_request: decisionForLegacy(plan),
   };
-  return confirmBuildIntentSelection(draft, {
-    plan_id: draft.plan!.plan_id,
-    plan_digest: draft.plan!.plan_digest,
-    at: input.now,
-    confirmation_source: "explicit_legacy_command",
-  }) as BuildIntentSelectionV1;
+  return {
+    ...draft,
+    plan: transitionBuildPlan(plan, "confirmed", {
+      at: input.now,
+      confirmation_source: "explicit_legacy_command",
+    }),
+    decision_request: draft.decision_request
+      ? BuildDecisionRequestV2Z.parse({ ...draft.decision_request, status: "answered" })
+      : null,
+  };
 }
 
-export function redactBuildIntentSelection(input: BuildIntentSelection): RedactedBuildIntentSelectionV1 {
+export function redactBuildIntentSelection(
+  input: BuildIntentSelection,
+): RedactedBuildIntentSelectionV1 | RedactedBuildIntentSelectionV2 {
   const intent = input.intent ? validateBuildIntentAny(input.intent) : null;
   const plan = input.plan ? validateBuildPlanAny(input.plan) : null;
+  if (input.version === "build_intent_selection.v3") {
+    const v3Intent = intent?.version === "build_intent.v3" ? intent : null;
+    const v3Plan = plan?.version === "build_plan.v3" ? plan : null;
+    return {
+      version: "build_intent_status.v2",
+      mode: input.mode,
+      intent: v3Intent ? {
+        intent_id: v3Intent.intent_id,
+        intent_revision: v3Intent.intent_revision,
+        status: v3Intent.status,
+      } : null,
+      plan: v3Plan ? {
+        plan_id: v3Plan.plan_id,
+        plan_revision: v3Plan.plan_revision,
+        status: v3Plan.status,
+        recipe_id: v3Plan.recipe_id,
+      } : null,
+      decision_request: input.decision_request,
+    };
+  }
+  const legacyIntent = intent?.version === "build_intent.v3" ? null : intent;
+  const legacyPlan = plan?.version === "build_plan.v3" ? null : plan;
   return {
     version: "build_intent_status.v1",
     mode: input.mode,
-    intent: intent ? {
-      intent_id: intent.intent_id,
-      revision: intent.revision,
-      status: intent.status,
-      intent_digest: computeBuildIntentDigestAny(intent),
+    intent: legacyIntent ? {
+      intent_id: legacyIntent.intent_id,
+      revision: legacyIntent.revision,
+      status: legacyIntent.status,
+      intent_digest: computeBuildIntentDigestAny(legacyIntent),
     } : null,
-    plan: plan ? {
-      plan_id: plan.plan_id,
-      revision: plan.revision,
-      status: plan.status,
-      recipe_id: plan.recipe_id,
-      plan_digest: plan.plan_digest,
+    plan: legacyPlan ? {
+      plan_id: legacyPlan.plan_id,
+      revision: legacyPlan.revision,
+      status: legacyPlan.status,
+      recipe_id: legacyPlan.recipe_id,
+      plan_digest: legacyPlan.plan_digest,
     } : null,
     decision_request: input.decision_request,
   };
@@ -514,9 +630,34 @@ export function redactBuildIntentSelection(input: BuildIntentSelection): Redacte
 
 export function projectCodexBuildIntentSelection(
   input: BuildIntentSelection,
-): CodexBuildIntentPlanV1 | CodexBuildIntentPlanV2 {
+): CodexBuildIntentPlanV1 | CodexBuildIntentPlanV2 | CodexBuildIntentPlanV3 {
   const intent = input.intent ? validateBuildIntentAny(input.intent) : null;
   const plan = input.plan ? validateBuildPlanAny(input.plan) : null;
+  if (plan?.version === "build_plan.v3" || intent?.version === "build_intent.v3") {
+    const v3Intent = intent?.version === "build_intent.v3" ? intent : null;
+    const v3Plan = plan?.version === "build_plan.v3" ? plan : null;
+    const projectedPlan = v3Plan
+      ? {
+          ...v3Plan,
+          private_artifacts: [] as never[],
+          artifact_summaries: v3Plan.private_artifacts.map(summarizeBuildPlanPrivateArtifactV3),
+        }
+      : null;
+    return {
+      version: "codex_build_intent_plan.v3",
+      mode: input.mode,
+      intent: v3Intent ? {
+        intent_id: v3Intent.intent_id,
+        intent_revision: v3Intent.intent_revision,
+        status: v3Intent.status,
+        goal_kind: v3Intent.goal_kind,
+        source_scope: v3Intent.source_scope,
+        usage_horizon: v3Intent.usage_horizon,
+      } : null,
+      plan: projectedPlan,
+      decision_request: input.version === "build_intent_selection.v3" ? input.decision_request : null,
+    };
+  }
   if (plan?.version === "build_plan.v2" || intent?.version === "build_intent.v2") {
     const v2Intent = intent?.version === "build_intent.v2" ? intent : null;
     const v2Plan = plan?.version === "build_plan.v2" ? plan : null;
@@ -540,7 +681,9 @@ export function projectCodexBuildIntentSelection(
         usage_horizon: v2Intent.usage_horizon,
       } : null,
       plan: projectedPlan,
-      decision_request: input.decision_request,
+      decision_request: input.version === "build_intent_selection.v2"
+        ? input.decision_request
+        : null,
     };
   }
   const v1Intent = intent?.version === "build_intent.v1" ? intent : null;
@@ -559,6 +702,8 @@ export function projectCodexBuildIntentSelection(
       usage_horizon: v1Intent.usage_horizon,
     } : null,
     plan: v1Plan,
-    decision_request: input.decision_request,
+    decision_request: input.version === "build_intent_selection.v1"
+      ? input.decision_request
+      : null,
   };
 }

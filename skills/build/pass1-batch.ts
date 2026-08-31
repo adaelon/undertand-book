@@ -32,6 +32,7 @@ import {
   resolveAutomaticBuildTarget,
 } from "../../packages/core/src/build-orchestrator";
 import { collectAutomaticBuildStageQuality } from "../../packages/core/src/automatic-build-quality";
+import { canonicalAutomaticBuildJson } from "../../packages/core/src/automatic-build-protocol";
 import {
   assertPass1ShadowCandidatePath,
   readPass1ShadowTask,
@@ -50,7 +51,7 @@ const VALUE_FLAGS = new Set([
   "--preserve-foundation",
   "--shadow-generation",
   "--shadow-final",
-  "--production-generation",
+  "--production-policy-contracts",
   "--quality-profile",
 ]);
 const opts: Record<string, string | undefined> = {};
@@ -76,7 +77,7 @@ const pdfSourceMapPath = opts["--pdf-source-map"];
 const preserveFoundationPath = opts["--preserve-foundation"];
 const shadowGeneration = opts["--shadow-generation"];
 const shadowFinal = opts["--shadow-final"];
-const productionGeneration = opts["--production-generation"];
+const productionPolicyContractsJson = opts["--production-policy-contracts"];
 const productionQualityProfile = opts["--quality-profile"] ?? "full";
 if (!( ["full", "balanced", "sparse"] as string[]).includes(productionQualityProfile)) {
   throw new Error(`unsupported --quality-profile ${productionQualityProfile}`);
@@ -85,8 +86,8 @@ if (Boolean(shadowGeneration) !== Boolean(shadowFinal)) {
   console.error("--shadow-generation and --shadow-final must be provided together");
   process.exit(2);
 }
-if (productionGeneration && (shadowGeneration || shadowFinal)) {
-  throw new Error("--production-generation cannot be combined with --shadow-generation/--shadow-final");
+if (productionPolicyContractsJson && (shadowGeneration || shadowFinal)) {
+  throw new Error("--production-policy-contracts cannot be combined with --shadow-generation/--shadow-final");
 }
 
 const { source, blocks, lidNodes, byLid, windows } = loadBookWindows(book);
@@ -124,7 +125,7 @@ const pass1Dir = `.understand-book/${bookId}/.build/pass1`;
 const artifacts = new Map<number, Pass1Artifact>();
 let done: number[];
 let pending: number[];
-if (productionGeneration) {
+if (productionPolicyContractsJson) {
   if (allowPartial) throw new Error("--allow-partial is not valid for a production v3 generation");
   const target = resolveAutomaticBuildTarget(book, process.cwd(), { book_id: bookId });
   if (path.resolve(target.workspace_dir) !== outputDir) {
@@ -134,7 +135,15 @@ if (productionGeneration) {
     quality_profile: productionQualityProfile as ExtractionQualityProfile,
   });
   const stage = snapshot.stages.find((candidate) => candidate.stage === "pass1");
-  if (!stage?.policy_set || stage.policy_set.policy_set_digest !== productionGeneration) {
+  const expectedPolicyContracts = JSON.parse(productionPolicyContractsJson) as unknown;
+  const currentPolicyContracts = stage?.policy_set?.members.map((member) => ({
+    kind: member.kind,
+    policy_generation_id: member.policy_generation_id,
+    semantic_contract: member.semantic_contract,
+  }));
+  if (!stage?.policy_set
+    || canonicalAutomaticBuildJson(currentPolicyContracts)
+      !== canonicalAutomaticBuildJson(expectedPolicyContracts)) {
     throw new Error("production Pass1 generation does not match the current policy set");
   }
   if (stage.pending_tasks.length) {
@@ -147,7 +156,11 @@ if (productionGeneration) {
     if (generation?.kind !== "pass1") {
       throw new Error(`production Pass1 contributor has no frozen task: ${contributor.work_unit_id}`);
     }
-    const task = readPass1ShadowTask(target, productionGeneration, contributor.work_unit_id);
+    const task = readPass1ShadowTask(
+      target,
+      generation.task.policy_generation_id,
+      contributor.work_unit_id,
+    );
     const result = writePass1ShadowFinalCandidate({ target, source, task });
     const candidatePath = assertPass1ShadowCandidatePath({
       target,

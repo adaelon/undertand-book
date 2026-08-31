@@ -14,6 +14,7 @@ import {
   extractionPolicyDigest,
   freezeAutomaticBuildStagePolicy,
   inspectSemanticArtifact,
+  semanticContractFromExtractionPolicy,
   semanticArtifactMatches,
   semanticArtifactPayload,
 } from "../src/semantic-artifact";
@@ -34,6 +35,7 @@ describe("automatic build policy-bound semantic artifacts", () => {
   it("makes every policy field part of freshness while keeping legacy payloads readable", () => {
     const { target } = fixture();
     const policy = automaticBuildExtractionPolicy("pass1", resolveContentProfile("technical_learning"), "full");
+    const semanticContract = semanticContractFromExtractionPolicy(policy);
     const payload = { content_hash: "input-a", nodes: [], edges: [] };
     const envelope = buildSemanticArtifactEnvelope({
       target: target.target_ref,
@@ -54,13 +56,12 @@ describe("automatic build policy-bound semantic artifacts", () => {
       stage: "pass1" as const,
       work_unit_id: "0",
       input_hash: "input-a",
-      policy_fingerprint: policy,
+      semantic_contract: semanticContract,
     };
 
     expect(SemanticArtifactEnvelopeV2Z.parse(envelope)).toEqual(envelope);
     expect(semanticArtifactMatches(envelope, expected)).toBe(true);
     const mutations = [
-      { profile_id: "paper" },
       { profile_version: "technical_learning_v999" },
       { stage_policy_version: "pass1_policy.v999" },
       { router_version: "pass1_window.v999" },
@@ -71,9 +72,13 @@ describe("automatic build policy-bound semantic artifacts", () => {
     for (const mutation of mutations) {
       expect(semanticArtifactMatches(envelope, {
         ...expected,
-        policy_fingerprint: { ...policy, ...mutation },
+        semantic_contract: { ...semanticContract, ...mutation },
       }), JSON.stringify(mutation)).toBe(false);
     }
+    expect(semanticArtifactMatches(envelope, {
+      ...expected,
+      target: { ...target.target_ref, profile_id: "paper" },
+    })).toBe(false);
 
     expect(inspectSemanticArtifact(payload, expected)).toEqual({
       format: "legacy_v1",
@@ -166,7 +171,13 @@ describe("automatic build policy-bound semantic artifacts", () => {
       router_version: "paper_lexicon_cluster.v3",
       prompt_sha256: "c563d13e6fb3874f24689eb29a4dc0a9c117f4f6411ccc37cf2a47aebee2fe41",
     };
-    freezeAutomaticBuildStagePolicy(target, "paper_lexicon", previous, "2026-08-18T00:00:00.000Z");
+    freezeAutomaticBuildStagePolicy(
+      target,
+      "paper_lexicon",
+      `paper_lexicon.${previous.stage_policy_version}.${previous.quality_profile}`,
+      previous,
+      "2026-08-18T00:00:00.000Z",
+    );
     const legacyWorkUnitId = `lexicon-batch-${"1".repeat(16)}`;
     const legacyLockPath = automaticBuildStagePolicyLockPath(target, "paper_lexicon");
     const legacyLockBefore = readFileSync(legacyLockPath, "utf8");
@@ -238,7 +249,7 @@ describe("automatic build policy-bound semantic artifacts", () => {
     const generationLockPath = automaticBuildStagePolicyGenerationLockPath(
       target,
       "paper_lexicon",
-      extractionPolicyDigest(current),
+      `paper_lexicon.${current.stage_policy_version}.${current.quality_profile}`,
     );
     expect(existsSync(generationLockPath)).toBe(true);
     const generationLockBefore = readFileSync(generationLockPath, "utf8");
@@ -301,7 +312,7 @@ describe("automatic build policy-bound semantic artifacts", () => {
       stage: "pass1",
       work_unit_id: "0",
       input_hash: "input-a",
-      policy_fingerprint: policy,
+      semantic_contract: semanticContractFromExtractionPolicy(policy),
     })).toBe(true);
     expect(receipt.artifact_sha256).toMatch(/^[a-f0-9]{64}$/);
   });

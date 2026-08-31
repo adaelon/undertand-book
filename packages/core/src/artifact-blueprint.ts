@@ -115,10 +115,22 @@ export interface ArtifactBlueprintV1 {
   };
 }
 
+export interface ArtifactBlueprintIdentityV2 {
+  blueprint_id: string;
+  blueprint_version: string;
+}
+
 export interface SystemArtifactBlueprintEntryV1 {
   legacy_artifact_type: LegacyIntentArtifactTypeV1;
   blueprint: ArtifactBlueprintV1;
   digest: string;
+}
+
+export interface SystemArtifactBlueprintEntryV2 {
+  legacy_artifact_type: LegacyIntentArtifactTypeV1;
+  blueprint: ArtifactBlueprintV1;
+  blueprint_id: string;
+  blueprint_version: string;
 }
 
 type JsonObject = Record<string, unknown>;
@@ -631,6 +643,30 @@ export function computeArtifactBlueprintDigest(input: unknown): string {
   return createHash("sha256").update(canonicalBuildJson(blueprint), "utf8").digest("hex");
 }
 
+export function artifactBlueprintIdentityV2(input: unknown): ArtifactBlueprintIdentityV2 {
+  const blueprint = validateArtifactBlueprintV1(input);
+  return {
+    blueprint_id: blueprint.blueprint_id,
+    blueprint_version: blueprint.blueprint_version,
+  };
+}
+
+export function assertSameArtifactBlueprintVersionV2(
+  expectedInput: unknown,
+  actualInput: unknown,
+): ArtifactBlueprintV1 {
+  const expected = validateArtifactBlueprintV1(expectedInput);
+  const actual = validateArtifactBlueprintV1(actualInput);
+  if (actual.blueprint_id !== expected.blueprint_id
+    || actual.blueprint_version !== expected.blueprint_version) {
+    throw new Error("ArtifactBlueprint id or version does not match the expected identity");
+  }
+  if (canonicalBuildJson(actual) !== canonicalBuildJson(expected)) {
+    throw new Error("ArtifactBlueprint with the same id and version has different schema content");
+  }
+  return actual;
+}
+
 function valueMatchesEnum(value: string | number | boolean, enumeration: readonly unknown[] | undefined): boolean {
   return enumeration === undefined || enumeration.some((item) => Object.is(item, value));
 }
@@ -842,10 +878,30 @@ function buildSystemRegistry(): Readonly<Record<LegacyIntentArtifactTypeV1, Syst
 
 export const SYSTEM_ARTIFACT_BLUEPRINT_REGISTRY_V1 = buildSystemRegistry();
 
+export const SYSTEM_ARTIFACT_BLUEPRINT_REGISTRY_V2 = deepFreeze(
+  Object.fromEntries(Object.entries(SYSTEM_ARTIFACT_BLUEPRINT_REGISTRY_V1).map(([legacyType, entry]) => [
+    legacyType,
+    {
+      legacy_artifact_type: entry.legacy_artifact_type,
+      blueprint: entry.blueprint,
+      blueprint_id: entry.blueprint.blueprint_id,
+      blueprint_version: entry.blueprint.blueprint_version,
+    } satisfies SystemArtifactBlueprintEntryV2,
+  ])) as Record<LegacyIntentArtifactTypeV1, SystemArtifactBlueprintEntryV2>,
+);
+
 export function getSystemArtifactBlueprintV1(
   artifactType: LegacyIntentArtifactTypeV1,
 ): SystemArtifactBlueprintEntryV1 {
   const entry = SYSTEM_ARTIFACT_BLUEPRINT_REGISTRY_V1[artifactType];
+  if (!entry) throw new Error(`unknown system ArtifactBlueprint preset: ${artifactType}`);
+  return entry;
+}
+
+export function getSystemArtifactBlueprintV2(
+  artifactType: LegacyIntentArtifactTypeV1,
+): SystemArtifactBlueprintEntryV2 {
+  const entry = SYSTEM_ARTIFACT_BLUEPRINT_REGISTRY_V2[artifactType];
   if (!entry) throw new Error(`unknown system ArtifactBlueprint preset: ${artifactType}`);
   return entry;
 }

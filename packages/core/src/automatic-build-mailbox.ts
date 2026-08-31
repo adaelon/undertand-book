@@ -547,12 +547,11 @@ export function submitAutomaticBuildCandidate(
 ): AutomaticBuildTaskReceiptV2 {
   const lease = readAutomaticBuildLease(target, leaseRef, token);
   const taskBinding = automaticBuildTaskPolicyBindingFromLease(lease);
-  if (taskBinding && "proof_digest" in taskBinding) {
+  if (taskBinding && "policy_generation_id" in taskBinding) {
     const observation = readAutomaticBuildInputObservation(leaseRef);
-    if (!observation || observation.version !== "automatic_build_input_observation.v2"
-      || observation.input_sha256 !== taskBinding.input_hash
-      || observation.proof_digest !== taskBinding.proof_digest) {
-      throw new Error("v3 candidate submission requires a matching proof-bound input observation");
+    if (!observation || observation.version !== "automatic_build_input_observation.v3"
+      || observation.input_sha256 !== taskBinding.input_hash) {
+      throw new Error("v3 candidate submission requires a matching budget-evidence input observation");
     }
   }
   const candidatePayload = readCandidatePayload(assertCandidatePath(leaseRef, candidatePath));
@@ -616,12 +615,11 @@ export function submitAutomaticBuildCandidate(
     if (taskBinding) {
       if (lease.stage === "paper_reading_guide") throw new Error("paper_reading_guide cannot emit a semantic task artifact");
       const payload = JSON.parse(readFileSync(artifactPath, "utf8").replace(/^\uFEFF/, "")) as unknown;
-      const envelopeInput = {
+      const envelopeCommon = {
         target: lease.target_ref,
         stage: lease.stage as SemanticBuildStage,
         work_unit_id: lease.work_unit_id,
         input_hash: taskBinding.input_hash,
-        policy_fingerprint: taskBinding.policy_fingerprint,
         provenance: {
           executor: lease.owner,
           ...(usage.model ? { model: usage.model } : {}),
@@ -630,7 +628,7 @@ export function submitAutomaticBuildCandidate(
         },
         payload,
       };
-      const writerAlreadyProducedV3 = "proof_digest" in taskBinding
+      const writerAlreadyProducedV3 = "policy_generation_id" in taskBinding
         && payload
         && typeof payload === "object"
         && (payload as { version?: unknown }).version === "semantic_task_artifact.v3";
@@ -640,20 +638,22 @@ export function submitAutomaticBuildCandidate(
           stage: lease.stage as SemanticBuildStage,
           work_unit_id: lease.work_unit_id,
           input_hash: taskBinding.input_hash,
-          proof_digest: taskBinding.proof_digest,
-          policy_set_digest: taskBinding.policy_set_digest,
-          policy_fingerprint: taskBinding.policy_fingerprint,
+          policy_generation_id: taskBinding.policy_generation_id,
+          semantic_contract: taskBinding.semantic_contract,
         })) {
-          throw new Error("v3 writer artifact does not match its proof-bound lease");
+          throw new Error("v3 writer artifact does not match its budget-evidence lease");
         }
       } else {
-        writeSemanticArtifactEnvelopeFile(artifactPath, "proof_digest" in taskBinding
+        writeSemanticArtifactEnvelopeFile(artifactPath, "policy_generation_id" in taskBinding
           ? buildSemanticArtifactEnvelopeV3({
-              ...envelopeInput,
-              proof_digest: taskBinding.proof_digest,
-              policy_set_digest: taskBinding.policy_set_digest,
+              ...envelopeCommon,
+              policy_generation_id: taskBinding.policy_generation_id,
+              semantic_contract: taskBinding.semantic_contract,
             })
-          : buildSemanticArtifactEnvelope(envelopeInput));
+          : buildSemanticArtifactEnvelope({
+              ...envelopeCommon,
+              policy_fingerprint: taskBinding.policy_fingerprint,
+            }));
       }
     }
     const metrics = persistAutomaticBuildTaskMetrics(target, leaseRef, token, {

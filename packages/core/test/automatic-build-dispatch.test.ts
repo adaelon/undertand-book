@@ -10,7 +10,7 @@ import {
   routeBookStructureUnitWorkUnitsV2,
 } from "../src/book-structure";
 import { resolveContentProfile } from "../src/content-profile";
-import { CODEX_EXECUTOR_TRANSPORT_PROFILE_V1 } from "../src/executor-transport";
+import { CODEX_EXECUTOR_TRANSPORT_PROFILE_V2 } from "../src/executor-transport";
 import { automaticBuildExtractionPolicy } from "../src/semantic-artifact";
 import {
   buildWorkUnitCost,
@@ -117,7 +117,7 @@ function proofBoundBookStructureUnit(input: {
         stitch_reduce: "BOOK_STRUCTURE_STITCH_REDUCE_V1",
       },
     }),
-    transport_profile: CODEX_EXECUTOR_TRANSPORT_PROFILE_V1,
+    transport_profile: CODEX_EXECUTOR_TRANSPORT_PROFILE_V2,
   });
   if (routed.status !== "ready" || routed.mode !== "whole") {
     throw new Error("expected a proof-bound whole BookStructure fixture");
@@ -206,7 +206,7 @@ describe("automatic build executor dispatch planner", () => {
       available_agent_slots: 3,
       budget,
     });
-    expect(preflightOne.plan_digest).toBe(preflightThree.plan_digest);
+    expect(preflightOne.descriptor_plan_digest).toBe(preflightThree.descriptor_plan_digest);
     expect(preflightOne.dispatch_plan.dispatch_plan_digest).toBe(preflightThree.dispatch_plan.dispatch_plan_digest);
     expect(preflightOne.dispatch_plan.selected_dispatch_ids).toHaveLength(1);
     expect(preflightThree.dispatch_plan.selected_dispatch_ids).toHaveLength(3);
@@ -219,7 +219,7 @@ describe("automatic build executor dispatch planner", () => {
       available_agent_slots: 3,
       budget,
     });
-    expect(afterOneCommitted.plan_digest).toBe(preflightThree.plan_digest);
+    expect(afterOneCommitted.descriptor_plan_digest).toBe(preflightThree.descriptor_plan_digest);
     expect(afterOneCommitted.dispatch_plan.dispatch_plan_digest)
       .not.toBe(preflightThree.dispatch_plan.dispatch_plan_digest);
   });
@@ -285,20 +285,20 @@ describe("automatic build executor dispatch planner", () => {
     });
   });
 
-  it("aggregates mixed V4 policy fingerprints through one proof-bound policy set", () => {
+  it("rejects mixed semantic contracts for one work-unit kind and generation", () => {
     const first = proofBoundBookStructureUnit();
     const second = proofBoundBookStructureUnit({
       unit_lid: "2",
       whole_prompt: "BOOK_STRUCTURE_WHOLE_V3",
     });
-    const policySetDigest = "d".repeat(64);
+    const policyGenerationId = "book-structure-unit.full.v2";
     const taskBindings = {
-      [first.work_unit_id]: taskPolicyBindingForWorkUnit(first, policySetDigest),
-      [second.work_unit_id]: taskPolicyBindingForWorkUnit(second, policySetDigest),
+      [first.work_unit_id]: taskPolicyBindingForWorkUnit(first, policyGenerationId),
+      [second.work_unit_id]: taskPolicyBindingForWorkUnit(second, policyGenerationId),
     };
     expect(first.policy_fingerprint).not.toEqual(second.policy_fingerprint);
 
-    const preflight = buildAutomaticBuildPreflight({
+    expect(() => buildAutomaticBuildPreflight({
       target_ref: target,
       stage: "book_structure",
       work_units: [first, second],
@@ -308,10 +308,6 @@ describe("automatic build executor dispatch planner", () => {
       requested_workers: 2,
       available_agent_slots: 2,
       budget,
-    });
-
-    expect(preflight.policy_set_digest).toBe(policySetDigest);
-    expect(preflight.policy_digest).toBe(policySetDigest);
-    expect(preflight).not.toHaveProperty("policy_fingerprint");
+    })).toThrow(/conflicting policy generations/);
   });
 });

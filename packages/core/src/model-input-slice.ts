@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import type { LidNode } from "./generated/LidNode";
 import {
   evaluateModelInputBudget,
-  type ModelInputBudgetProofV1,
+  type ModelInputBudgetEvidenceV2,
   type ModelInputBudgetRequestV1,
 } from "./model-input-budget";
 
@@ -35,7 +35,7 @@ export interface ModelInputSliceRenderContextV1 {
 export interface RoutedModelInputSliceV1 {
   slice: ModelInputSliceV1;
   rendered_input: string;
-  proof: ModelInputBudgetProofV1;
+  proof: ModelInputBudgetEvidenceV2;
 }
 
 export interface ModelInputUnsplittableDraftV1 {

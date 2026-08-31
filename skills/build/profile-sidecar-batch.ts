@@ -24,6 +24,7 @@ import {
   buildAutomaticBuildStageBatchResult,
   publishAutomaticBuildArtifactSet,
 } from "../../packages/core/src/automatic-build-publication";
+import { canonicalAutomaticBuildJson } from "../../packages/core/src/automatic-build-protocol";
 import {
   assertProfileSidecarProductionCandidatePath,
   readProfileSidecarProductionTask,
@@ -42,15 +43,18 @@ const shadowGenerationIdx = argv.indexOf("--shadow-generation");
 const shadowGeneration = shadowGenerationIdx >= 0 ? argv[shadowGenerationIdx + 1] : undefined;
 const shadowFinalIdx = argv.indexOf("--shadow-final");
 const shadowFinal = shadowFinalIdx >= 0 ? argv[shadowFinalIdx + 1] : undefined;
-const productionGenerationIdx = argv.indexOf("--production-generation");
-const productionGeneration = productionGenerationIdx >= 0 ? argv[productionGenerationIdx + 1] : undefined;
+const productionPolicyContractsIdx = argv.indexOf("--production-policy-contracts");
+const productionPolicyContractsJson = productionPolicyContractsIdx >= 0
+  ? argv[productionPolicyContractsIdx + 1]
+  : undefined;
 const qualityProfileIdx = argv.indexOf("--quality-profile");
 const productionQualityProfile = qualityProfileIdx >= 0 ? argv[qualityProfileIdx + 1] : "full";
 if ((shadowGenerationIdx >= 0 && (!shadowGeneration || shadowGeneration.startsWith("--")))
   || (shadowFinalIdx >= 0 && (!shadowFinal || shadowFinal.startsWith("--")))
-  || (productionGenerationIdx >= 0 && (!productionGeneration || productionGeneration.startsWith("--")))
+  || (productionPolicyContractsIdx >= 0
+    && (!productionPolicyContractsJson || productionPolicyContractsJson.startsWith("--")))
   || (qualityProfileIdx >= 0 && (!productionQualityProfile || productionQualityProfile.startsWith("--")))) {
-  console.error("--shadow-generation, --shadow-final, --production-generation, and --quality-profile each require a value");
+  console.error("--shadow-generation, --shadow-final, --production-policy-contracts, and --quality-profile each require a value");
   process.exit(2);
 }
 if (!( ["full", "balanced", "sparse"] as string[]).includes(productionQualityProfile)) {
@@ -60,11 +64,11 @@ if (Boolean(shadowGeneration) !== Boolean(shadowFinal)) {
   console.error("--shadow-generation and --shadow-final must be provided together");
   process.exit(2);
 }
-if (productionGeneration && (shadowGeneration || shadowFinal)) {
-  throw new Error("--production-generation cannot be combined with --shadow-generation/--shadow-final");
+if (productionPolicyContractsJson && (shadowGeneration || shadowFinal)) {
+  throw new Error("--production-policy-contracts cannot be combined with --shadow-generation/--shadow-final");
 }
 if (!book) {
-  console.error(`usage: tsx profile-sidecar-batch.ts <book.md|epub> [--book-id <id>] [--allow-partial] [--shadow-generation <policy-set-sha256> --shadow-final <workUnitId>] ${contentProfileUsage()}`);
+  console.error(`usage: tsx profile-sidecar-batch.ts <book.md|epub> [--book-id <id>] [--allow-partial] [--shadow-generation <policy-generation-id> --shadow-final <workUnitId>] ${contentProfileUsage()}`);
   process.exit(2);
 }
 
@@ -90,7 +94,7 @@ if (shadowGeneration && shadowFinal) {
     source,
     content_profile: parsedProfile.contentProfile,
     existing: new Map(),
-    allow_over_limit_packets: Boolean(productionGeneration),
+    allow_over_limit_packets: Boolean(productionPolicyContractsJson),
   });
   const discourseItems: TechnicalLearningDiscourseItem[] = [];
   const formulaCandidates: FormulaSemanticsBuildCandidate[] = [];
@@ -98,7 +102,7 @@ if (shadowGeneration && shadowFinal) {
   let pending: number;
   let eligible: number;
   let skipped: number;
-  if (productionGeneration) {
+  if (productionPolicyContractsJson) {
     if (allowPartial) throw new Error("--allow-partial is not valid for a production v3 generation");
     const target = resolveAutomaticBuildTarget(book, process.cwd(), { ...(override ? { book_id: override } : {}) });
     const outDir = path.resolve(`.understand-book/${bookId}`);
@@ -109,7 +113,15 @@ if (shadowGeneration && shadowFinal) {
       quality_profile: productionQualityProfile as ExtractionQualityProfile,
     });
     const stage = snapshot.stages.find((candidate) => candidate.stage === "profile_sidecar");
-    if (!stage?.policy_set || stage.policy_set.policy_set_digest !== productionGeneration) {
+    const expectedPolicyContracts = JSON.parse(productionPolicyContractsJson) as unknown;
+    const currentPolicyContracts = stage?.policy_set?.members.map((member) => ({
+      kind: member.kind,
+      policy_generation_id: member.policy_generation_id,
+      semantic_contract: member.semantic_contract,
+    }));
+    if (!stage?.policy_set
+      || canonicalAutomaticBuildJson(currentPolicyContracts)
+        !== canonicalAutomaticBuildJson(expectedPolicyContracts)) {
       throw new Error("production profile-sidecar generation does not match the current policy set");
     }
     if (stage.pending_tasks.length) {
@@ -125,9 +137,14 @@ if (shadowGeneration && shadowFinal) {
         throw new Error(`duplicate production profile-sidecar contributor: ${contributor.work_unit_id}`);
       }
       seen.add(contributor.work_unit_id);
+      const generation = stage.generation_tasks?.[contributor.work_unit_id];
+      if (generation?.kind !== "profile_sidecar_discourse"
+        && generation?.kind !== "profile_sidecar_fast_path") {
+        throw new Error(`production profile-sidecar contributor has no frozen task: ${contributor.work_unit_id}`);
+      }
       const task = readProfileSidecarProductionTask(
         target,
-        productionGeneration,
+        generation.task.policy_generation_id,
         contributor.work_unit_id,
       );
       const result = writeProfileSidecarProductionCandidate({ target, source, task });

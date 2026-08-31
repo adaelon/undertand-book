@@ -120,7 +120,7 @@ describe("BR7 model-input routability", () => {
           ...unit.descriptor,
           input_budget_proof: {
             ...unit.descriptor.input_budget_proof,
-            proof_digest: "0".repeat(64),
+            estimated_rendered_tokens: unit.descriptor.input_budget_proof.estimated_rendered_tokens + 1,
           },
         },
       })),
@@ -175,7 +175,14 @@ describe("BR7 model-input routability", () => {
       next_action: { kind: "extract", stage: "pass1" },
       preflight: {
         stage: "pass1",
-        policy_set_digest: pass1?.policy_set?.policy_set_digest,
+        policy_generations: expect.arrayContaining([
+          expect.objectContaining({
+            kind: "pass1_source_slice",
+            policy_generation_id: pass1?.policy_set?.members.find(
+              (member) => member.kind === "pass1_source_slice",
+            )?.policy_generation_id,
+          }),
+        ]),
       },
     });
     expect(pass1?.pending_work_units?.some((unit) => (
@@ -211,7 +218,14 @@ describe("BR7 model-input routability", () => {
       },
       preflight: {
         stage: "profile_sidecar",
-        policy_set_digest: profile?.policy_set?.policy_set_digest,
+        policy_generations: expect.arrayContaining([
+          expect.objectContaining({
+            kind: "profile_sidecar_discourse_fragment",
+            policy_generation_id: profile?.policy_set?.members.find(
+              (member) => member.kind === "profile_sidecar_discourse_fragment",
+            )?.policy_generation_id,
+          }),
+        ]),
       },
     });
     expect(profile?.pending_work_units?.some((unit) => (
@@ -233,7 +247,7 @@ describe("BR7 model-input routability", () => {
     }
 
     expect(automaticBuildProtocolDoctor(fixture.source_file, fixture.root)).toMatchObject({
-      version: "automatic_build_protocol_doctor.v2",
+      version: "automatic_build_protocol_doctor.v3",
       status: "compatible",
       release: { version: "automatic_build_release.v3" },
       checks: {
@@ -256,7 +270,11 @@ describe("BR7 model-input routability", () => {
       fixture.source_file,
       "--book-id", fixture.target.book_id,
       "--content-profile", fixture.target.profile_id,
-      "--production-generation", profile!.policy_set!.policy_set_digest,
+      "--production-policy-contracts", JSON.stringify(profile!.policy_set!.members.map((member) => ({
+        kind: member.kind,
+        policy_generation_id: member.policy_generation_id,
+        semantic_contract: member.semantic_contract,
+      }))),
     ], { cwd: fixture.root, encoding: "utf8" });
     expect(productionBatch.status).toBe(1);
     expect(productionBatch.stderr).toContain("production profile-sidecar generation still has pending work units");

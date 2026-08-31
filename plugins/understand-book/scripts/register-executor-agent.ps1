@@ -5,7 +5,10 @@ param(
     [string]$Scope,
 
     [Parameter()]
-    [string]$WorkspaceRoot
+    [string]$WorkspaceRoot,
+
+    [Parameter()]
+    [switch]$MigrateKnownPredecessor
 )
 
 Set-StrictMode -Version Latest
@@ -24,12 +27,68 @@ function Stop-Registration {
     exit $ExitCode
 }
 
+function Get-AgentBytes {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$LiteralPath
+    )
+
+    return [System.IO.File]::ReadAllBytes($LiteralPath)
+}
+
+function Test-AgentBytesEqual {
+    param(
+        [Parameter(Mandatory = $true)]
+        [byte[]]$Left,
+
+        [Parameter(Mandatory = $true)]
+        [byte[]]$Right
+    )
+
+    if ($Left.Length -ne $Right.Length) {
+        return $false
+    }
+    for ($byteIndex = 0; $byteIndex -lt $Left.Length; $byteIndex += 1) {
+        if ($Left[$byteIndex] -ne $Right[$byteIndex]) {
+            return $false
+        }
+    }
+    return $true
+}
+
+function Get-NormalizedAgentText {
+    param(
+        [Parameter(Mandatory = $true)]
+        [byte[]]$Bytes
+    )
+
+    return [System.Text.Encoding]::UTF8.GetString($Bytes).Replace("`r`n", "`n").Replace("`r", "`n")
+}
+
+function Test-AgentTextEqual {
+    param(
+        [Parameter(Mandatory = $true)]
+        [byte[]]$Left,
+
+        [Parameter(Mandatory = $true)]
+        [byte[]]$Right
+    )
+
+    return (Get-NormalizedAgentText -Bytes $Left) -ceq (Get-NormalizedAgentText -Bytes $Right)
+}
+
 $agentFileName = "understand-book-executor.toml"
+$knownPredecessorFileName = "understand-book-executor.known-predecessor.toml"
+$targetVersion = "automatic_build_executor_session.v3"
 $pluginRoot = [System.IO.Path]::GetFullPath((Join-Path -Path $PSScriptRoot -ChildPath ".."))
 $templatePath = Join-Path -Path $pluginRoot -ChildPath "assets/codex-agents/$agentFileName"
+$knownPredecessorPath = Join-Path -Path $pluginRoot -ChildPath "assets/codex-agents/$knownPredecessorFileName"
 
 if (-not (Test-Path -LiteralPath $templatePath -PathType Leaf)) {
     Stop-Registration -ExitCode 2 -Message "The installed executor agent template is unavailable."
+}
+if (-not (Test-Path -LiteralPath $knownPredecessorPath -PathType Leaf)) {
+    Stop-Registration -ExitCode 2 -Message "The installed executor agent predecessor template is unavailable."
 }
 
 if ($Scope -eq "project") {
@@ -50,8 +109,7 @@ if ($Scope -eq "project") {
         Stop-Registration -ExitCode 2 -Message "WorkspaceRoot must name an existing directory."
     }
 
-    $resolvedWorkspaceRoot = $workspaceItem.FullName
-    $targetDirectory = Join-Path -Path $resolvedWorkspaceRoot -ChildPath ".codex/agents"
+    $targetDirectory = Join-Path -Path $workspaceItem.FullName -ChildPath ".codex/agents"
 }
 else {
     if (-not [string]::IsNullOrWhiteSpace($WorkspaceRoot)) {
@@ -81,79 +139,144 @@ else {
     $targetDirectory = Join-Path -Path $personalCodexRoot -ChildPath "agents"
 }
 
-function Get-AgentDigest {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$LiteralPath
-    )
-
-    $stream = [System.IO.File]::OpenRead($LiteralPath)
-    try {
-        $sha256 = [System.Security.Cryptography.SHA256]::Create()
-        try {
-            $hash = $sha256.ComputeHash($stream)
-        }
-        finally {
-            $sha256.Dispose()
-        }
-    }
-    finally {
-        $stream.Dispose()
-    }
-
-    return ([System.BitConverter]::ToString($hash)).Replace("-", "").ToLowerInvariant()
-}
-
 $targetPath = Join-Path -Path $targetDirectory -ChildPath $agentFileName
-$templateDigest = Get-AgentDigest -LiteralPath $templatePath
+$templateBytes = Get-AgentBytes -LiteralPath $templatePath
+$knownPredecessorBytes = Get-AgentBytes -LiteralPath $knownPredecessorPath
 
 function Write-SuccessResult {
-    [pscustomobject]@{
-        digest = $templateDigest
-        scope = $Scope
-        target = $targetPath
-        activation = "new_task_required"
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet("absent", "same", "known_predecessor")]
+        [string]$SourceState,
+
+        [Parameter()]
+        [AllowNull()]
+        [object]$Backup
+    )
+
+    [ordered]@{
+        source_state = $SourceState
+        target_version = $targetVersion
+        backup = $Backup
+        new_task_required = $true
     } | ConvertTo-Json -Compress
 }
 
-if (Test-Path -LiteralPath $targetPath) {
-    if (-not (Test-Path -LiteralPath $targetPath -PathType Leaf)) {
-        Stop-Registration -ExitCode 3 -Message "The executor agent target exists but is not a file; nothing was changed."
+if (-not (Test-Path -LiteralPath $targetPath)) {
+    New-Item -ItemType Directory -Path $targetDirectory -Force | Out-Null
+    $temporaryPath = Join-Path -Path $targetDirectory -ChildPath (".{0}.{1}.tmp" -f $agentFileName, [Guid]::NewGuid().ToString("N"))
+    try {
+        [System.IO.File]::Copy($templatePath, $temporaryPath, $false)
+        if (-not (Test-AgentBytesEqual -Left (Get-AgentBytes -LiteralPath $temporaryPath) -Right $templateBytes)) {
+            Stop-Registration -ExitCode 2 -Message "The staged executor agent template differs from the published bytes."
+        }
+
+        try {
+            [System.IO.File]::Move($temporaryPath, $targetPath)
+        }
+        catch [System.IO.IOException] {
+            if ((Test-Path -LiteralPath $targetPath -PathType Leaf) -and
+                (Test-AgentTextEqual -Left (Get-AgentBytes -LiteralPath $targetPath) -Right $templateBytes)) {
+                Write-SuccessResult -SourceState "same" -Backup $null
+                exit 0
+            }
+            Stop-Registration -ExitCode 3 -Message "A different executor agent won the registration race; nothing was overwritten."
+        }
+
+        if (-not (Test-AgentBytesEqual -Left (Get-AgentBytes -LiteralPath $targetPath) -Right $templateBytes)) {
+            Stop-Registration -ExitCode 2 -Message "The installed executor agent differs from the published bytes."
+        }
     }
-    if ((Get-AgentDigest -LiteralPath $targetPath) -eq $templateDigest) {
-        Write-SuccessResult
-        exit 0
+    finally {
+        if (Test-Path -LiteralPath $temporaryPath -PathType Leaf) {
+            Remove-Item -LiteralPath $temporaryPath -Force
+        }
     }
 
-    Stop-Registration -ExitCode 3 -Message "A different executor agent already exists at the target; nothing was changed."
+    Write-SuccessResult -SourceState "absent" -Backup $null
+    exit 0
 }
 
-New-Item -ItemType Directory -Path $targetDirectory -Force | Out-Null
-$temporaryPath = Join-Path -Path $targetDirectory -ChildPath (".{0}.{1}.tmp" -f $agentFileName, [Guid]::NewGuid().ToString("N"))
+if (-not (Test-Path -LiteralPath $targetPath -PathType Leaf)) {
+    Stop-Registration -ExitCode 3 -Message "The executor agent target exists but is not a file; nothing was changed."
+}
 
+$targetBytes = Get-AgentBytes -LiteralPath $targetPath
+if (Test-AgentTextEqual -Left $targetBytes -Right $templateBytes) {
+    Write-SuccessResult -SourceState "same" -Backup $null
+    exit 0
+}
+
+if (-not (Test-AgentTextEqual -Left $targetBytes -Right $knownPredecessorBytes)) {
+    Stop-Registration -ExitCode 3 -Message "An unknown executor agent already exists at the target; nothing was changed."
+}
+if (-not $MigrateKnownPredecessor.IsPresent) {
+    Stop-Registration -ExitCode 3 -Message "The installed executor agent is the known predecessor; explicit -MigrateKnownPredecessor consent is required."
+}
+
+$backupPath = "$targetPath.automatic_build_executor_session.v2.bak"
+if (Test-Path -LiteralPath $backupPath) {
+    if (-not (Test-Path -LiteralPath $backupPath -PathType Leaf) -or
+        -not (Test-AgentBytesEqual -Left (Get-AgentBytes -LiteralPath $backupPath) -Right $targetBytes)) {
+        Stop-Registration -ExitCode 3 -Message "The fixed executor agent backup path conflicts; the target was not changed."
+    }
+}
+else {
+    try {
+        $backupStream = [System.IO.File]::Open(
+            $backupPath,
+            [System.IO.FileMode]::CreateNew,
+            [System.IO.FileAccess]::Write,
+            [System.IO.FileShare]::None
+        )
+        try {
+            $backupStream.Write($targetBytes, 0, $targetBytes.Length)
+        }
+        finally {
+            $backupStream.Dispose()
+        }
+    }
+    catch [System.IO.IOException] {
+        if (-not (Test-Path -LiteralPath $backupPath -PathType Leaf) -or
+            -not (Test-AgentBytesEqual -Left (Get-AgentBytes -LiteralPath $backupPath) -Right $targetBytes)) {
+            Stop-Registration -ExitCode 3 -Message "The fixed executor agent backup path conflicts; the target was not changed."
+        }
+    }
+}
+
+if (-not (Test-AgentBytesEqual -Left (Get-AgentBytes -LiteralPath $backupPath) -Right $targetBytes)) {
+    Stop-Registration -ExitCode 3 -Message "The executor agent backup differs from the original target; the target was not changed."
+}
+
+$migrationTemporaryPath = Join-Path -Path $targetDirectory -ChildPath (".{0}.{1}.tmp" -f $agentFileName, [Guid]::NewGuid().ToString("N"))
+$replacementBackupPath = Join-Path -Path $targetDirectory -ChildPath (".{0}.{1}.replace-backup.tmp" -f $agentFileName, [Guid]::NewGuid().ToString("N"))
 try {
-    [System.IO.File]::Copy($templatePath, $temporaryPath, $false)
-    if ((Get-AgentDigest -LiteralPath $temporaryPath) -ne $templateDigest) {
-        Stop-Registration -ExitCode 2 -Message "The staged executor agent template failed its digest check."
+    [System.IO.File]::Copy($templatePath, $migrationTemporaryPath, $false)
+    if (-not (Test-AgentBytesEqual -Left (Get-AgentBytes -LiteralPath $migrationTemporaryPath) -Right $templateBytes)) {
+        Stop-Registration -ExitCode 2 -Message "The staged executor agent template differs from the published bytes; the target was not changed."
+    }
+    if (-not (Test-AgentBytesEqual -Left (Get-AgentBytes -LiteralPath $targetPath) -Right $targetBytes)) {
+        Stop-Registration -ExitCode 3 -Message "The executor agent target changed during migration; it was not overwritten."
     }
 
     try {
-        [System.IO.File]::Move($temporaryPath, $targetPath)
+        [System.IO.File]::Replace($migrationTemporaryPath, $targetPath, $replacementBackupPath, $true)
     }
-    catch [System.IO.IOException] {
-        if ((Test-Path -LiteralPath $targetPath -PathType Leaf) -and
-            ((Get-AgentDigest -LiteralPath $targetPath) -eq $templateDigest)) {
-            Write-SuccessResult
-            exit 0
-        }
-
-        Stop-Registration -ExitCode 3 -Message "A different executor agent won the registration race; nothing was overwritten."
+    catch {
+        Stop-Registration -ExitCode 3 -Message "The known predecessor could not be replaced; its backup and target were preserved."
     }
 }
 finally {
-    if (Test-Path -LiteralPath $temporaryPath -PathType Leaf) {
-        Remove-Item -LiteralPath $temporaryPath -Force
+    if (Test-Path -LiteralPath $migrationTemporaryPath -PathType Leaf) {
+        Remove-Item -LiteralPath $migrationTemporaryPath -Force
+    }
+    if (Test-Path -LiteralPath $replacementBackupPath -PathType Leaf) {
+        Remove-Item -LiteralPath $replacementBackupPath -Force
     }
 }
 
-Write-SuccessResult
+if (-not (Test-AgentBytesEqual -Left (Get-AgentBytes -LiteralPath $targetPath) -Right $templateBytes)) {
+    Stop-Registration -ExitCode 2 -Message "The migrated executor agent differs from the published bytes."
+}
+
+Write-SuccessResult -SourceState "known_predecessor" -Backup $backupPath

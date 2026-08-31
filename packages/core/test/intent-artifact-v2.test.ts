@@ -10,16 +10,19 @@ import { canonicalBuildJson } from "../src/build-intent";
 import {
   transitionBuildIntentV2,
   transitionBuildPlanV2,
+  migratePlanningControlV2ToV3,
   validateBuildIntentV2,
   type BuildIntentV2,
   type BuildPlanV2,
+  type BuildIntentV3,
+  type BuildPlanV3,
 } from "../src/build-intent-v2";
 import {
   acceptIntentArtifactCandidate,
   compileIntentArtifactTasks,
   projectAcceptedIntentArtifactV1AsV2,
-  type IntentArtifactCandidateV2,
-  type IntentArtifactTaskEnvelopeV2,
+  type IntentArtifactCandidateV3,
+  type IntentArtifactTaskEnvelopeV3,
 } from "../src/intent-artifact";
 
 const availableLids = ["1.1", "1.2", "2.1"];
@@ -68,7 +71,7 @@ const blueprint: ArtifactBlueprintV1 = {
 };
 const blueprintDigest = computeArtifactBlueprintDigest(blueprint);
 
-function confirmedSelection(): { intent: BuildIntentV2; plan: BuildPlanV2 } {
+function legacyConfirmedSelection(): { intent: BuildIntentV2; plan: BuildPlanV2 } {
   const draftIntent = validateBuildIntentV2({
     version: "build_intent.v2",
     intent_id: "intent-artifact-v2",
@@ -111,7 +114,14 @@ function confirmedSelection(): { intent: BuildIntentV2; plan: BuildPlanV2 } {
   };
 }
 
-function task(): IntentArtifactTaskEnvelopeV2 {
+function confirmedSelection(): { intent: BuildIntentV3; plan: BuildPlanV3 } {
+  const legacy = legacyConfirmedSelection();
+  const migrated = migratePlanningControlV2ToV3(legacy);
+  if (!migrated.intent) throw new Error("expected migrated goal-directed BuildIntent");
+  return { intent: migrated.intent, plan: migrated.plan };
+}
+
+function task(): IntentArtifactTaskEnvelopeV3 {
   const selection = confirmedSelection();
   return compileIntentArtifactTasks({
     ...selection,
@@ -120,10 +130,11 @@ function task(): IntentArtifactTaskEnvelopeV2 {
   })[0];
 }
 
-function payload(overrides: Partial<IntentArtifactCandidateV2["payload"]> = {}): IntentArtifactCandidateV2["payload"] {
+function payload(overrides: Partial<IntentArtifactCandidateV3["payload"]> = {}): IntentArtifactCandidateV3["payload"] {
   return {
-    version: "artifact_instance.v2",
-    blueprint_digest: blueprintDigest,
+    version: "artifact_instance.v3",
+    blueprint_id: blueprint.blueprint_id,
+    blueprint_version: blueprint.blueprint_version,
     records: [
       { record_id: "method-a", data: { label: "Method A", score: 8 }, evidence_lids: ["1.1"] },
       { record_id: "method-b", data: { label: "Method B", score: 6 }, evidence_lids: ["1.2"] },
@@ -139,18 +150,19 @@ function payload(overrides: Partial<IntentArtifactCandidateV2["payload"]> = {}):
   };
 }
 
-function candidate(currentTask: IntentArtifactTaskEnvelopeV2, instance = payload()): IntentArtifactCandidateV2 {
+function candidate(currentTask: IntentArtifactTaskEnvelopeV3, instance = payload()): IntentArtifactCandidateV3 {
   return {
-    version: "intent_artifact_candidate.v2",
+    version: "intent_artifact_candidate.v3",
     task_id: currentTask.task_id,
     book_id: currentTask.book_id,
     source_fingerprint: currentTask.source_fingerprint,
     intent_id: currentTask.intent_id,
-    intent_digest: currentTask.intent_digest,
+    intent_revision: currentTask.intent_revision,
     plan_id: currentTask.plan_id,
-    plan_digest: currentTask.plan_digest,
+    plan_revision: currentTask.plan_revision,
     artifact_id: currentTask.artifact.artifact_id,
-    blueprint_digest: currentTask.artifact.blueprint_digest,
+    blueprint_id: currentTask.artifact.blueprint_id,
+    blueprint_version: currentTask.artifact.blueprint_version,
     payload: instance,
   };
 }
@@ -169,23 +181,32 @@ function accept(candidateInput: unknown) {
   });
 }
 
-describe("AA4 generic ArtifactInstance v2 gate", () => {
-  it("compiles a Blueprint-frozen v2 task and accepts a schema-valid instance", () => {
+describe("AA4 generic ArtifactInstance V3 gate after V2 migration", () => {
+  it("compiles a Blueprint-frozen V3 task and accepts a schema-valid instance", () => {
     const currentTask = task();
     expect(currentTask).toMatchObject({
-      version: "intent_artifact_task_envelope.v2",
-      artifact: { blueprint, blueprint_digest: blueprintDigest },
-      output_contract: { version: "artifact_instance_output_contract.v2" },
+      version: "intent_artifact_task_envelope.v3",
+      artifact: {
+        blueprint,
+        blueprint_id: blueprint.blueprint_id,
+        blueprint_version: blueprint.blueprint_version,
+      },
+      output_contract: { version: "artifact_instance_output_contract.v3" },
     });
     const result = accept(candidate(currentTask));
     expect(result.accepted).toMatchObject({
-      version: "intent_artifact_accepted.v2",
+      version: "intent_artifact_accepted.v3",
       artifact_id: currentTask.artifact.artifact_id,
-      blueprint_digest: blueprintDigest,
-      payload: { version: "artifact_instance.v2", blueprint_digest: blueprintDigest },
+      blueprint_id: blueprint.blueprint_id,
+      blueprint_version: blueprint.blueprint_version,
+      payload: {
+        version: "artifact_instance.v3",
+        blueprint_id: blueprint.blueprint_id,
+        blueprint_version: blueprint.blueprint_version,
+      },
     });
     expect(result.receipt).toMatchObject({
-      version: "intent_artifact_task_receipt.v1",
+      version: "intent_artifact_task_receipt.v2",
       record_count: 2,
       relation_count: 1,
       evidence_reference_count: 3,
@@ -196,8 +217,8 @@ describe("AA4 generic ArtifactInstance v2 gate", () => {
   it("rejects stale Blueprint identity, invalid schema, duplicate/dangling IDs, and old candidates", () => {
     const currentTask = task();
     const valid = candidate(currentTask);
-    expect(() => accept({ ...valid, blueprint_digest: "a".repeat(64) })).toThrow(/blueprint_digest/i);
-    expect(() => accept(candidate(currentTask, payload({ blueprint_digest: "b".repeat(64) })))).toThrow(/blueprint_digest/i);
+    expect(() => accept({ ...valid, blueprint_version: "2.0.0" })).toThrow(/blueprint_version|version/i);
+    expect(() => accept(candidate(currentTask, payload({ blueprint_id: "one-off.other" })))).toThrow(/Blueprint id|blueprint_id/i);
     expect(() => accept(candidate(currentTask, payload({
       records: [{ record_id: "method-a", data: { label: "Method A", score: 99 }, evidence_lids: ["1.1"] }],
       relations: [],
@@ -218,7 +239,7 @@ describe("AA4 generic ArtifactInstance v2 gate", () => {
         evidence_lids: ["1.1"],
       }],
     })))).toThrow(/existing record/i);
-    expect(() => accept({ ...valid, version: "intent_artifact_candidate.v1", artifact_type: "timeline" })).toThrow(/candidate\.v2/i);
+    expect(() => accept({ ...valid, version: "intent_artifact_candidate.v2", artifact_type: "timeline" })).toThrow(/candidate\.v3/i);
   });
 
   it("rejects fabricated/cross-scope evidence and every Blueprint size limit", () => {

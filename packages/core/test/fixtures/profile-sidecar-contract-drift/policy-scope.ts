@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import {
   createAutomaticBuildStagePolicySet,
-  type AutomaticBuildStagePolicySetV2,
+  type AutomaticBuildStagePolicySetV3,
 } from "../../../src/automatic-build-policy-generation";
 import { canonicalAutomaticBuildJson } from "../../../src/automatic-build-protocol";
 import type { AutomaticBuildTarget } from "../../../src/build-orchestrator";
@@ -40,7 +40,7 @@ export interface ProfileSidecarPolicyScopeFixture {
 
 export interface ProfileSidecarPolicyReplayGeneration {
   descriptor: WorkUnitDescriptorV3;
-  policy_set: AutomaticBuildStagePolicySetV2;
+  policy_set: AutomaticBuildStagePolicySetV3;
   scope: SyntheticAutomaticBuildAttemptScopeV1;
 }
 
@@ -137,11 +137,12 @@ function replayGeneration(
     members: [{
       kind: "profile_sidecar_discourse",
       extractor: "profile-sidecar-extractor",
+      policy_generation_id: `profile-sidecar-discourse.${descriptor.policy_fingerprint.stage_policy_version}.${descriptor.policy_fingerprint.quality_profile}`,
       policy_fingerprint: descriptor.policy_fingerprint,
     }],
     frozen_at: frozenAt,
   });
-  const binding = taskPolicyBindingForWorkUnit(descriptor, policySet.policy_set_digest);
+  const binding = taskPolicyBindingForWorkUnit(descriptor, policySet.members[0].policy_generation_id);
   return {
     descriptor,
     policy_set: policySet,

@@ -22,21 +22,22 @@ import {
   buildAutomaticBuildStageBatchResult,
   publishAutomaticBuildArtifactSet,
 } from "../../packages/core/src/automatic-build-publication";
+import { canonicalAutomaticBuildJson } from "../../packages/core/src/automatic-build-protocol";
 
 const argv = process.argv.slice(2);
-const productionGenerationIndex = argv.indexOf("--production-generation");
-const productionGeneration = productionGenerationIndex >= 0
-  ? argv[productionGenerationIndex + 1]
+const productionPolicyContractsIndex = argv.indexOf("--production-policy-contracts");
+const productionPolicyContractsJson = productionPolicyContractsIndex >= 0
+  ? argv[productionPolicyContractsIndex + 1]
   : undefined;
 const qualityProfileIndex = argv.indexOf("--quality-profile");
 const productionQualityProfile = qualityProfileIndex >= 0
   ? argv[qualityProfileIndex + 1]
   : "full";
-if ((productionGenerationIndex >= 0
-    && (!productionGeneration || productionGeneration.startsWith("--")))
+if ((productionPolicyContractsIndex >= 0
+    && (!productionPolicyContractsJson || productionPolicyContractsJson.startsWith("--")))
   || (qualityProfileIndex >= 0
     && (!productionQualityProfile || productionQualityProfile.startsWith("--")))) {
-  console.error("--production-generation and --quality-profile each require a value");
+  console.error("--production-policy-contracts and --quality-profile each require a value");
   process.exit(2);
 }
 if (!( ["full", "balanced", "sparse"] as string[]).includes(productionQualityProfile)) {
@@ -45,13 +46,13 @@ if (!( ["full", "balanced", "sparse"] as string[]).includes(productionQualityPro
 
 const { book, override, contentProfile } = parseBookStructureArgs(argv);
 if (!book) {
-  console.error("usage: tsx book-structure-batch.ts <book.md|epub> [--book-id <id>] [--production-generation <policy-set-sha256>] [--quality-profile full|balanced|sparse] [--content-profile technical_learning|paper] [--paper-subtype research_article|survey]");
+  console.error("usage: tsx book-structure-batch.ts <book.md|epub> [--book-id <id>] [--production-policy-contracts <json>] [--quality-profile full|balanced|sparse] [--content-profile technical_learning|paper] [--paper-subtype research_article|survey]");
   process.exit(2);
 }
 
 const ctx = loadBookStructureBuildContext(book, override, contentProfile);
 let stitchArtifact: BookStructureStitchArtifact;
-if (productionGeneration) {
+if (productionPolicyContractsJson) {
   const target = resolveAutomaticBuildTarget(book, process.cwd(), {
     ...(override ? { book_id: override } : {}),
   });
@@ -62,7 +63,15 @@ if (productionGeneration) {
     quality_profile: productionQualityProfile as ExtractionQualityProfile,
   });
   const stage = snapshot.stages.find((candidate) => candidate.stage === "book_structure");
-  if (!stage?.policy_set || stage.policy_set.policy_set_digest !== productionGeneration) {
+  const expectedPolicyContracts = JSON.parse(productionPolicyContractsJson) as unknown;
+  const currentPolicyContracts = stage?.policy_set?.members.map((member) => ({
+    kind: member.kind,
+    policy_generation_id: member.policy_generation_id,
+    semantic_contract: member.semantic_contract,
+  }));
+  if (!stage?.policy_set
+    || canonicalAutomaticBuildJson(currentPolicyContracts)
+      !== canonicalAutomaticBuildJson(expectedPolicyContracts)) {
     throw new Error("production BookStructure generation does not match the current policy set");
   }
   if (stage.pending_tasks.length) {
@@ -88,7 +97,7 @@ if (productionGeneration) {
   }
   const task = readBookStructureGenerationTask(
     target,
-    productionGeneration,
+    generation.task.policy_generation_id,
     stitchWorkUnitId,
   );
   if (!task || task.output_role !== "stitch_artifact") {

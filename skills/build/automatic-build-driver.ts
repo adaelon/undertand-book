@@ -11,9 +11,14 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
+  automaticBuildPreflightEvaluationEvidence,
   DEFAULT_AUTOMATIC_BUILD_BUDGET,
+  sameAutomaticBuildBudgetEvidence,
+  validateAutomaticBuildPlanBudgetEvaluation,
   type AutomaticBuildBudgetLimitsV1,
   type AutomaticBuildExecutorProvenanceV1,
+  type AutomaticBuildPlanBudgetEvaluationV2,
+  type AutomaticBuildPreflightEvaluationEvidenceV2,
   type AutomaticBuildWallBudgetV1,
 } from "../../packages/core/src/automatic-build-budget";
 import {
@@ -21,6 +26,7 @@ import {
   type BuildPlanV1,
 } from "../../packages/core/src/build-intent";
 import {
+  adaptAutomaticBuildPrivateArtifactSelectionV3,
   issueAutomaticBuildOpaqueHandoff,
   resolveAutomaticBuildTargetLids,
 } from "../../packages/core/src/automatic-build-executor-session";
@@ -31,6 +37,7 @@ import {
   type AutomaticBuildStage,
   type BuildTargetRefV2,
 } from "../../packages/core/src/build-orchestrator";
+import { isAutomaticBuildTaskPolicyBindingV2 } from "../../packages/core/src/semantic-artifact";
 import { canonicalAutomaticBuildJson } from "../../packages/core/src/automatic-build-protocol";
 import {
   createAutomaticBuildAttemptScope,
@@ -217,8 +224,8 @@ interface AutomaticBuildInvocationRecordV1 {
 
 interface DriverStateIdentityV1 {
   build_plan_digest: string;
-  preflight_plan_digest?: string;
-  preflight_evaluation_digest?: string;
+  descriptor_plan_digest?: string;
+  preflight_evaluation?: AutomaticBuildPreflightEvaluationEvidenceV2;
 }
 
 interface DecisionBoundaryV1 {
@@ -227,7 +234,7 @@ interface DecisionBoundaryV1 {
   state: DriverStateIdentityV1;
   stage?: AutomaticBuildStage;
   projection?: AutomaticBuildUserDecisionProjectionV1;
-  plan_budget_receipt_digest?: string;
+  plan_budget_evidence?: AutomaticBuildPlanBudgetEvaluationV2;
   attempt_scopes?: Array<{ work_unit_id: string; attempt_scope_digest: string }>;
   retry_boundaries?: Array<AutomaticBuildRetryBoundaryV1 & { work_unit_id: string }>;
 }
@@ -282,7 +289,7 @@ type AutomaticBuildPrivateArtifactWaveV1 =
 interface DecisionEffect {
   bypass_budget?: true;
   bypass_wall_budget?: true;
-  accepted_plan_budget_receipt_digest?: string;
+  accepted_plan_budget_evidence?: AutomaticBuildPlanBudgetEvaluationV2;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -574,6 +581,33 @@ function validateTargetRef(value: unknown): BuildTargetRefV2 {
   };
 }
 
+function validatePreflightEvaluationEvidence(
+  value: unknown,
+): AutomaticBuildPreflightEvaluationEvidenceV2 {
+  if (!isRecord(value)) throw new Error("automatic build preflight evaluation evidence is invalid");
+  exactKeys(
+    value,
+    ["version", "descriptor_plan_digest", "dispatch_plan_digest", "cost_scope", "wall_clock"],
+    ["build_plan"],
+  );
+  if (value.version !== "automatic_build_preflight_evaluation_evidence.v2"
+    || typeof value.descriptor_plan_digest !== "string" || !SHA256.test(value.descriptor_plan_digest)
+    || typeof value.dispatch_plan_digest !== "string" || !SHA256.test(value.dispatch_plan_digest)
+    || !isRecord(value.cost_scope) || !isRecord(value.wall_clock)) {
+    throw new Error("automatic build preflight evaluation evidence fields are invalid");
+  }
+  if (value.build_plan !== undefined) {
+    if (!isRecord(value.build_plan)) throw new Error("automatic build preflight BuildPlan evidence is invalid");
+    exactKeys(value.build_plan, ["plan_id", "plan_revision"]);
+    if (typeof value.build_plan.plan_id !== "string" || !value.build_plan.plan_id
+      || !Number.isSafeInteger(value.build_plan.plan_revision)
+      || (value.build_plan.plan_revision as number) < 1) {
+      throw new Error("automatic build preflight BuildPlan evidence fields are invalid");
+    }
+  }
+  return value as unknown as AutomaticBuildPreflightEvaluationEvidenceV2;
+}
+
 function readInvocation(invocationRef: string): AutomaticBuildInvocationRecordV1 {
   const value = readJsonRecord(invocationRecordPath(invocationRef));
   if (!isRecord(value)) throw new Error("automatic build invocation record is invalid");
@@ -628,8 +662,10 @@ function stateIdentity(state: DriverState): DriverStateIdentityV1 {
   const preflight = state.plan_result.preflight;
   return {
     build_plan_digest: state.plan.plan_digest,
-    ...(preflight ? { preflight_plan_digest: preflight.plan_digest } : {}),
-    ...(preflight ? { preflight_evaluation_digest: preflight.preflight_evaluation_digest } : {}),
+    ...(preflight ? { descriptor_plan_digest: preflight.descriptor_plan_digest } : {}),
+    ...(preflight ? {
+      preflight_evaluation: automaticBuildPreflightEvaluationEvidence(preflight),
+    } : {}),
   };
 }
 
@@ -1022,10 +1058,11 @@ function boundaryFromAction(
   const internalReason = typeof action.reason === "string" ? action.reason : "automatic_build_routing_blocked";
   const reason = externalReason(internalReason);
   const stage = safeStage(action.stage);
-  const planBudgetReceiptDigest = typeof action.receipt_digest === "string"
-    && SHA256.test(action.receipt_digest)
-    ? action.receipt_digest
-    : undefined;
+  const planBudgetEvidence = action.plan_budget_evidence === undefined
+    ? undefined
+    : validateAutomaticBuildPlanBudgetEvaluation(
+        action.plan_budget_evidence as AutomaticBuildPlanBudgetEvaluationV2,
+      );
   const attemptScopes = attemptScopesForAction(action);
   const retryBoundaries = retryBoundariesForAction(action);
   return {
@@ -1034,7 +1071,7 @@ function boundaryFromAction(
     state,
     ...(stage ? { stage } : {}),
     projection: projectionFor(reason, action),
-    ...(planBudgetReceiptDigest ? { plan_budget_receipt_digest: planBudgetReceiptDigest } : {}),
+    ...(planBudgetEvidence ? { plan_budget_evidence: planBudgetEvidence } : {}),
     ...(attemptScopes ? { attempt_scopes: attemptScopes } : {}),
     ...(retryBoundaries ? { retry_boundaries: retryBoundaries } : {}),
   };
@@ -1076,7 +1113,7 @@ function requestIdFor(
     state: boundary.state,
     stage: boundary.stage ?? null,
     projection: boundary.projection ?? null,
-    plan_budget_receipt_digest: boundary.plan_budget_receipt_digest ?? null,
+    plan_budget_evidence: boundary.plan_budget_evidence ?? null,
     attempt_scopes: boundary.attempt_scopes ?? null,
     retry_boundaries: boundary.retry_boundaries ?? null,
     choices,
@@ -1098,8 +1135,8 @@ function issueBoundary(
     state: boundary.state,
     ...(boundary.stage ? { stage: boundary.stage } : {}),
     ...(boundary.projection ? { projection: boundary.projection } : {}),
-    ...(boundary.plan_budget_receipt_digest ? {
-      plan_budget_receipt_digest: boundary.plan_budget_receipt_digest,
+    ...(boundary.plan_budget_evidence ? {
+      plan_budget_evidence: boundary.plan_budget_evidence,
     } : {}),
     ...(boundary.attempt_scopes ? { attempt_scopes: boundary.attempt_scopes } : {}),
     ...(boundary.retry_boundaries ? { retry_boundaries: boundary.retry_boundaries } : {}),
@@ -1133,7 +1170,7 @@ function readDecisionRequest(requestId: string): AutomaticBuildDecisionRequestRe
       "state",
       "choices",
     ],
-    ["stage", "projection", "plan_budget_receipt_digest", "attempt_scopes", "retry_boundaries"],
+    ["stage", "projection", "plan_budget_evidence", "attempt_scopes", "retry_boundaries"],
   );
   if (value.version !== "automatic_build_decision_request_record.v1"
     || value.request_id !== requestId
@@ -1149,17 +1186,23 @@ function readDecisionRequest(requestId: string): AutomaticBuildDecisionRequestRe
   exactKeys(
     value.state,
     ["build_plan_digest"],
-    ["preflight_plan_digest", "preflight_evaluation_digest"],
+    ["descriptor_plan_digest", "preflight_evaluation"],
   );
-  for (const digest of [
-    value.state.build_plan_digest,
-    value.state.preflight_plan_digest,
-    value.state.preflight_evaluation_digest,
-  ]) {
-    if (digest !== undefined && (typeof digest !== "string" || !SHA256.test(digest))) {
-      throw new Error("automatic build decision request state identity is invalid");
-    }
+  if (typeof value.state.build_plan_digest !== "string" || !SHA256.test(value.state.build_plan_digest)
+    || (value.state.descriptor_plan_digest !== undefined
+      && (typeof value.state.descriptor_plan_digest !== "string"
+        || !SHA256.test(value.state.descriptor_plan_digest)))) {
+    throw new Error("automatic build decision request state identity is invalid");
   }
+  const state: DriverStateIdentityV1 = {
+    build_plan_digest: value.state.build_plan_digest,
+    ...(typeof value.state.descriptor_plan_digest === "string"
+      ? { descriptor_plan_digest: value.state.descriptor_plan_digest }
+      : {}),
+    ...(value.state.preflight_evaluation !== undefined
+      ? { preflight_evaluation: validatePreflightEvaluationEvidence(value.state.preflight_evaluation) }
+      : {}),
+  };
   const choices = value.choices.map((choice) => {
     if (!isRecord(choice)) throw new Error("automatic build decision request choice is invalid");
     exactKeys(choice, ["choice_id", "label", "consequence"]);
@@ -1171,11 +1214,11 @@ function readDecisionRequest(requestId: string): AutomaticBuildDecisionRequestRe
   });
   const stage = value.stage === undefined ? undefined : safeStage(value.stage);
   if (value.stage !== undefined && !stage) throw new Error("automatic build decision request stage is invalid");
-  const planBudgetReceiptDigest = value.plan_budget_receipt_digest;
-  if (planBudgetReceiptDigest !== undefined
-    && (typeof planBudgetReceiptDigest !== "string" || !SHA256.test(planBudgetReceiptDigest))) {
-    throw new Error("automatic build decision request budget receipt is invalid");
-  }
+  const planBudgetEvidence = value.plan_budget_evidence === undefined
+    ? undefined
+    : validateAutomaticBuildPlanBudgetEvaluation(
+        value.plan_budget_evidence as AutomaticBuildPlanBudgetEvaluationV2,
+      );
   const attemptScopes = value.attempt_scopes === undefined
     ? undefined
     : (() => {
@@ -1240,13 +1283,13 @@ function readDecisionRequest(requestId: string): AutomaticBuildDecisionRequestRe
     request_id: requestId,
     reason: value.reason as AutomaticBuildUserDecisionReasonV1,
     internal_reason: value.internal_reason,
-    state: value.state as unknown as DriverStateIdentityV1,
+    state,
     ...(stage ? { stage } : {}),
     ...(value.projection ? {
       projection: value.projection as unknown as AutomaticBuildUserDecisionProjectionV1,
     } : {}),
-    ...(typeof planBudgetReceiptDigest === "string" ? {
-      plan_budget_receipt_digest: planBudgetReceiptDigest,
+    ...(planBudgetEvidence ? {
+      plan_budget_evidence: planBudgetEvidence,
     } : {}),
     ...(attemptScopes ? { attempt_scopes: attemptScopes } : {}),
     ...(retryBoundaries ? { retry_boundaries: retryBoundaries } : {}),
@@ -1260,7 +1303,7 @@ function readDecisionRequest(requestId: string): AutomaticBuildDecisionRequestRe
     state: record.state,
     stage: record.stage ?? null,
     projection: record.projection ?? null,
-    plan_budget_receipt_digest: record.plan_budget_receipt_digest ?? null,
+    plan_budget_evidence: record.plan_budget_evidence ?? null,
     attempt_scopes: record.attempt_scopes ?? null,
     retry_boundaries: record.retry_boundaries ?? null,
     choices: record.choices,
@@ -1311,18 +1354,29 @@ function readDecisionReceipt(
   exactKeys(
     value.state,
     ["build_plan_digest"],
-    ["preflight_plan_digest", "preflight_evaluation_digest"],
+    ["descriptor_plan_digest", "preflight_evaluation"],
   );
-  for (const digest of [
-    value.state.build_plan_digest,
-    value.state.preflight_plan_digest,
-    value.state.preflight_evaluation_digest,
-  ]) {
-    if (digest !== undefined && (typeof digest !== "string" || !SHA256.test(digest))) {
-      throw new Error("automatic build decision receipt state identity is invalid");
-    }
+  if (typeof value.state.build_plan_digest !== "string" || !SHA256.test(value.state.build_plan_digest)
+    || (value.state.descriptor_plan_digest !== undefined
+      && (typeof value.state.descriptor_plan_digest !== "string"
+        || !SHA256.test(value.state.descriptor_plan_digest)))) {
+    throw new Error("automatic build decision receipt state identity is invalid");
   }
-  return value as unknown as AutomaticBuildDecisionReceiptV1;
+  return {
+    version: value.version,
+    invocation_ref: value.invocation_ref,
+    request_id: value.request_id,
+    choice_id: value.choice_id,
+    state: {
+      build_plan_digest: value.state.build_plan_digest,
+      ...(typeof value.state.descriptor_plan_digest === "string"
+        ? { descriptor_plan_digest: value.state.descriptor_plan_digest }
+        : {}),
+      ...(value.state.preflight_evaluation !== undefined
+        ? { preflight_evaluation: validatePreflightEvaluationEvidence(value.state.preflight_evaluation) }
+        : {}),
+    },
+  };
 }
 
 function effectForAcceptedBoundary(
@@ -1343,17 +1397,13 @@ function effectForAcceptedBoundary(
   }
   return {
     ...(boundary.reason === "budget_exceeded" ? { bypass_budget: true as const } : {}),
-    ...(boundary.plan_budget_receipt_digest ? {
-      accepted_plan_budget_receipt_digest: boundary.plan_budget_receipt_digest,
+    ...(boundary.plan_budget_evidence ? {
+      accepted_plan_budget_evidence: boundary.plan_budget_evidence,
     } : {}),
     ...(boundary.reason === "low_confidence_wall_budget" || boundary.reason === "wall_budget_exceeded"
       ? { bypass_wall_budget: true as const }
       : {}),
   };
-}
-
-function sameOptional(left: string | undefined, right: string | undefined): boolean {
-  return left === right;
 }
 
 function currentAttemptScopeDigest(
@@ -1368,8 +1418,7 @@ function currentAttemptScopeDigest(
     || (descriptor.version !== "automatic_build_work_unit.v3"
       && descriptor.version !== "automatic_build_work_unit.v4")
     || !binding
-    || !("proof_digest" in binding)
-    || !("policy_set_digest" in binding)) return undefined;
+    || !isAutomaticBuildTaskPolicyBindingV2(binding)) return undefined;
   return createAutomaticBuildAttemptScope({
     target_ref: descriptor.target,
     stage: descriptor.stage,
@@ -1484,14 +1533,17 @@ function applyDecision(
   }
   const scopeChanged = decision.choice_id === "retry_current"
     && retryAttemptScopeChanged(request, current);
-  if (request.state.build_plan_digest !== identity.build_plan_digest
-    || (!scopeChanged
-      && !sameOptional(request.state.preflight_plan_digest, identity.preflight_plan_digest))) {
+  if (!scopeChanged
+    && (request.state.build_plan_digest !== identity.build_plan_digest
+      || request.state.descriptor_plan_digest !== identity.descriptor_plan_digest)) {
     if (decision.choice_id === "retry_current") return unresolvedRetryResponse(request, "plan_changed");
     return issueBoundary(invocation, syntheticBoundary("plan_changed", "plan_changed", current));
   }
   if (!scopeChanged
-    && !sameOptional(request.state.preflight_evaluation_digest, identity.preflight_evaluation_digest)) {
+    && !sameAutomaticBuildBudgetEvidence(
+      request.state.preflight_evaluation,
+      identity.preflight_evaluation,
+    )) {
     const wallStatus = current.plan_result.preflight?.wall_clock.budget.status;
     const reason = wallStatus === "low_confidence" ? "low_confidence_wall_budget" : "wall_budget_exceeded";
     if (decision.choice_id === "retry_current") return unresolvedRetryResponse(request, "plan_changed");
@@ -1517,8 +1569,8 @@ function applyDecision(
   }
   return {
     ...(request.reason === "budget_exceeded" ? { bypass_budget: true as const } : {}),
-    ...(request.plan_budget_receipt_digest ? {
-      accepted_plan_budget_receipt_digest: request.plan_budget_receipt_digest,
+    ...(request.plan_budget_evidence ? {
+      accepted_plan_budget_evidence: request.plan_budget_evidence,
     } : {}),
     ...(request.reason === "low_confidence_wall_budget" || request.reason === "wall_budget_exceeded"
       ? { bypass_wall_budget: true as const }
@@ -1775,16 +1827,17 @@ function privateArtifactWave(
     || intent.status !== "confirmed") {
     throw new Error("private BuildIntent does not match the current BuildPlan and target");
   }
+  const explicitSelection = adaptAutomaticBuildPrivateArtifactSelectionV3(intent, storedPlan);
   const availableLids = resolveAutomaticBuildTargetLids(target);
-  const resolvedScopeLids = intent.source_scope.whole_book
+  const resolvedScopeLids = explicitSelection.intent.source_scope.whole_book
     ? [...availableLids]
-    : [...intent.source_scope.lids];
+    : [...explicitSelection.intent.source_scope.lids];
   let prepared: ReturnType<typeof prepareIntentArtifactMailboxes>;
   try {
     prepared = prepareIntentArtifactMailboxes({
       private_root: privateRoot,
-      intent,
-      plan,
+      intent: explicitSelection.intent,
+      plan: explicitSelection.plan,
       available_lids: availableLids,
       resolved_scope_lids: resolvedScopeLids,
       created_at: issuedAt,
@@ -1897,9 +1950,11 @@ export function automaticBuildStep(inputValue: AutomaticBuildStepRequestV1): Aut
         wall_budget: effect.bypass_wall_budget ? undefined : invocation.input.wall_budget,
         executor_provenance: invocation.input.executor_provenance,
         available_agent_slots: input.available_agent_slots,
-        accepted_plan_digest: preflight?.plan_digest,
-        accepted_evaluation_digest: preflight?.preflight_evaluation_digest,
-        accepted_plan_budget_receipt_digest: effect.accepted_plan_budget_receipt_digest,
+        accepted_plan_digest: preflight?.descriptor_plan_digest,
+        accepted_evaluation_evidence: preflight
+          ? automaticBuildPreflightEvaluationEvidence(preflight)
+          : undefined,
+        accepted_plan_budget_evidence: effect.accepted_plan_budget_evidence,
         executor_dispatches: true,
         build_plan: current.plan,
       },

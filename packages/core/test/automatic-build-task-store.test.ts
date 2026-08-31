@@ -232,6 +232,53 @@ describe("automatic build per-task attempt store", () => {
     expect(existsSync(path.join(attemptDir, "execution.json"))).toBe(false);
   });
 
+  it("classifies legacy policy-fingerprint attempt digests as unscoped migration state", () => {
+    const { target } = targetFixture();
+    const fixture = profileSidecarPolicyScopeFixture(target);
+    const attemptDir = automaticBuildTaskAttemptDirectory(
+      target,
+      fixture.descriptor.stage,
+      fixture.descriptor.work_unit_id,
+      1,
+    );
+    const leasePath = path.join(attemptDir, "lease.json");
+    const legacyLease = `${JSON.stringify({
+      version: "automatic_build_task_lease.v2",
+      target_ref: target.target_ref,
+      stage: fixture.descriptor.stage,
+      work_unit_id: fixture.descriptor.work_unit_id,
+      attempt: 1,
+      phase: "reserved",
+      owner: "legacy-policy-owner",
+      token: "legacy-policy-token",
+      reserved_at: "2026-08-02T00:00:00.000Z",
+      reserve_expires_at: "2026-08-02T00:10:00.000Z",
+      issued_at: "2026-08-02T00:00:00.000Z",
+      expires_at: "2026-08-02T00:10:00.000Z",
+      input_hash: fixture.descriptor.input_hash,
+      policy_fingerprint: fixture.descriptor.policy_fingerprint,
+      attempt_scope_digest: "a".repeat(64),
+    }, null, 2)}\n`;
+    mkdirSync(attemptDir, { recursive: true });
+    writeFileSync(leasePath, legacyLease, "utf8");
+
+    expect(nextAutomaticBuildExecutionIdentity(
+      target,
+      fixture.descriptor.stage,
+      fixture.descriptor.work_unit_id,
+      {
+        max_semantic_attempts: 3,
+        max_lease_epochs: 3,
+        attempt_scope: fixture.scope_a,
+      },
+    )).toMatchObject({
+      status: "policy_generation_migration_required",
+      requested_attempt_scope_digest: fixture.scope_a.attempt_scope_digest,
+      reason: "legacy_attempt_scope_ambiguous",
+    });
+    expect(readFileSync(leasePath, "utf8")).toBe(legacyLease);
+  });
+
   it("counts semantic failures only inside the complete policy-bound attempt scope", () => {
     const { target } = targetFixture();
     const fixture = profileSidecarPolicyScopeFixture(target);

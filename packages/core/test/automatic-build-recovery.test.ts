@@ -23,7 +23,6 @@ function recoveryInput() {
     stage: "profile_sidecar" as const,
     target_ref: target,
     router_version: "profile_sidecar_semantic_units.v3",
-    policy_digest: "b".repeat(64),
     affected_work_units: [{
       work_unit_id: "profile-discourse:1.7.2",
       evidence_lids: ["1.7.2"],
@@ -51,7 +50,6 @@ describe("BR7 automatic build recovery envelope", () => {
         input_fingerprint: "a".repeat(64),
       },
       router_version: "profile_sidecar_semantic_units.v3",
-      policy_digest: "b".repeat(64),
       affected_work_units: [{
         work_unit_id: "profile-discourse:1.7.2",
         evidence_lids: ["1.7.2"],

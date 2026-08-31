@@ -10,7 +10,8 @@ import {
 } from "./automatic-build-recovery";
 import { verifyModelInputBudgetProof } from "./model-input-budget";
 import {
-  extractionPolicyDigest,
+  semanticContractFromExtractionPolicy,
+  type SemanticContractV1,
   type SemanticBuildStage,
 } from "./semantic-artifact";
 import {
@@ -53,7 +54,7 @@ export interface AutomaticBuildShadowStageAuditV1 {
   deterministic_skips: number;
   descriptor_plan_digest: string;
   router_versions: string[];
-  policy_digests: string[];
+  semantic_contracts: SemanticContractV1[];
 }
 
 export interface AutomaticBuildShadowRoutingAuditV1 {
@@ -142,7 +143,6 @@ export function migrateAutomaticBuildPolicyAndReplan<T>(
       stage: input.stage,
       target_ref: input.target.target_ref,
       router_version: policy.router_version,
-      policy_digest: extractionPolicyDigest(policy),
       affected_work_units: [{
         work_unit_id: workUnit.work_unit_id,
         evidence_lids: current.route === "model"
@@ -164,7 +164,6 @@ export function migrateAutomaticBuildPolicyAndReplan<T>(
     stage: input.stage,
     target_ref: input.target.target_ref,
     router_version: policy.router_version,
-    policy_digest: migration.current_policy_digest,
     affected_work_units: [{
       work_unit_id: workUnit.work_unit_id,
       evidence_lids: current.route === "model"
@@ -202,7 +201,7 @@ export function auditAutomaticBuildShadowRouting(input: {
       return blockedAutomaticBuildRoute(recovery);
     }
     const routerVersions = new Set<string>();
-    const policyDigests = new Set<string>();
+    const semanticContracts = new Map<string, SemanticContractV1>();
     let valid = 0;
     for (const unit of stage.work_units) {
       try {
@@ -233,7 +232,6 @@ export function auditAutomaticBuildShadowRouting(input: {
             stage: stage.stage,
             target_ref: input.target_ref,
             router_version: proof.router_version,
-            policy_digest: extractionPolicyDigest(descriptor.policy_fingerprint),
             affected_work_units: [{
               work_unit_id: descriptor.work_unit_id,
               evidence_lids: descriptor.evidence_lids,
@@ -245,7 +243,8 @@ export function auditAutomaticBuildShadowRouting(input: {
           }));
         }
         routerVersions.add(proof.router_version);
-        policyDigests.add(extractionPolicyDigest(descriptor.policy_fingerprint));
+        const semanticContract = semanticContractFromExtractionPolicy(descriptor.policy_fingerprint);
+        semanticContracts.set(canonicalBuildJson(semanticContract), semanticContract);
         valid += 1;
       } catch {
         const descriptor = unit.descriptor;
@@ -256,9 +255,6 @@ export function auditAutomaticBuildShadowRouting(input: {
           target_ref: input.target_ref,
           ...(descriptor?.policy_fingerprint?.router_version
             ? { router_version: descriptor.policy_fingerprint.router_version }
-            : {}),
-          ...(descriptor?.policy_fingerprint
-            ? { policy_digest: extractionPolicyDigest(descriptor.policy_fingerprint) }
             : {}),
           affected_work_units: descriptor ? [{
             work_unit_id: descriptor.work_unit_id,
@@ -279,7 +275,8 @@ export function auditAutomaticBuildShadowRouting(input: {
       deterministic_skips: stage.deterministic_skips,
       descriptor_plan_digest: workUnitPlanDigest(descriptors),
       router_versions: [...routerVersions].sort(),
-      policy_digests: [...policyDigests].sort(),
+      semantic_contracts: [...semanticContracts.values()]
+        .sort((left, right) => canonicalBuildJson(left).localeCompare(canonicalBuildJson(right))),
     });
   }
   const identity = {

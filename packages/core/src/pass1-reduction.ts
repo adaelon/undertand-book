@@ -14,9 +14,9 @@ import type { LidNode } from "./generated/LidNode";
 import {
   evaluateModelInputBudget,
   verifyModelInputBudgetProof,
-  type ModelInputBudgetProofV1,
+  type ModelInputBudgetEvidenceV2,
   type ModelInputBudgetRequestV1,
-  type ModelInputOverLimitV1,
+  type ModelInputOverLimitV2,
 } from "./model-input-budget";
 import {
   renderPass1LidStitchModelInput,
@@ -39,8 +39,11 @@ import { buildProfiledPass1Input } from "./pass1-profile-input";
 import {
   automaticBuildGenerationArtifactPath,
   automaticBuildExtractionPolicy,
+  assertPolicyGenerationId,
   buildSemanticArtifactEnvelopeV3,
   semanticArtifactMatches,
+  semanticContractEqual,
+  semanticContractFromExtractionPolicy,
   writeAutomaticBuildGenerationArtifact,
   type ExtractionPolicyFingerprintV1,
   type ExtractionQualityProfile,
@@ -48,8 +51,8 @@ import {
   type SemanticArtifactProvenanceV2,
 } from "./semantic-artifact";
 import {
-  readAutomaticBuildStagePolicySet,
-  type AutomaticBuildStagePolicySetMemberV2,
+  readAutomaticBuildPolicyGeneration,
+  type AutomaticBuildStagePolicySetMemberInputV1,
 } from "./automatic-build-policy-generation";
 import type { Pass1Artifact } from "./build-resume";
 import {
@@ -113,6 +116,10 @@ export type Pass1ShadowRouteV1 =
       group_ordinal: number;
       source_unit_range: Pass1SourceUnitRangeV1;
       evidence_lids: string[];
+      dependency_policy_generations: Array<{
+        work_unit_id: string;
+        policy_generation_id: string;
+      }>;
     };
 
 export interface Pass1ShadowWorkUnitV1 {
@@ -152,7 +159,7 @@ export interface Pass1ShadowTaskV1 {
   version: "pass1_shadow_task.v1";
   target_ref: BuildTargetRefV2;
   source_fingerprint: string;
-  policy_set_digest: string;
+  policy_generation_id: string;
   source_unit_count: number;
   descriptor: WorkUnitDescriptorV3;
   route: Pass1ShadowRouteV1;
@@ -305,21 +312,24 @@ export function pass1LidStitchPolicy(
 export function pass1ModelSlicePolicyMembers(
   profile: ContentProfileDefinition,
   qualityProfile: ExtractionQualityProfile = "full",
-): AutomaticBuildStagePolicySetMemberV2[] {
+): AutomaticBuildStagePolicySetMemberInputV1[] {
   return [
     {
       kind: "pass1_window",
       extractor: "pass1-local-extractor",
+      policy_generation_id: `pass1-window.${qualityProfile}.v1`,
       policy_fingerprint: automaticBuildExtractionPolicy("pass1", profile, qualityProfile),
     },
     {
       kind: "pass1_source_slice",
       extractor: PASS1_SOURCE_FRAGMENT_EXTRACTOR,
+      policy_generation_id: `pass1-source-slice.${qualityProfile}.v1`,
       policy_fingerprint: pass1SourceFragmentPolicy(profile, qualityProfile),
     },
     {
       kind: "pass1_lid_stitch",
       extractor: PASS1_LID_STITCHER,
+      policy_generation_id: `pass1-lid-stitch.${qualityProfile}.v1`,
       policy_fingerprint: pass1LidStitchPolicy(profile, qualityProfile),
     },
   ];
@@ -903,10 +913,10 @@ function shadowFileName(workUnitId: string): string {
 
 export function pass1ShadowTaskPath(
   target: AutomaticBuildTarget,
-  policySetDigest: string,
+  policyGenerationId: string,
   workUnitId: string,
 ): string {
-  assertSha256(policySetDigest, "policy_set_digest");
+  assertPolicyGenerationId(policyGenerationId);
   return path.join(
     target.workspace_dir,
     ".build",
@@ -914,7 +924,7 @@ export function pass1ShadowTaskPath(
     "v3",
     "shadow",
     "pass1",
-    policySetDigest,
+    policyGenerationId,
     "tasks",
     shadowFileName(workUnitId),
   );
@@ -922,10 +932,10 @@ export function pass1ShadowTaskPath(
 
 export function pass1ShadowTaskPrivateDirectory(
   target: AutomaticBuildTarget,
-  policySetDigest: string,
+  policyGenerationId: string,
   workUnitId: string,
 ): string {
-  assertSha256(policySetDigest, "policy_set_digest");
+  assertPolicyGenerationId(policyGenerationId);
   return path.join(
     target.workspace_dir,
     ".build",
@@ -933,7 +943,7 @@ export function pass1ShadowTaskPrivateDirectory(
     "v3",
     "shadow",
     "pass1",
-    policySetDigest,
+    policyGenerationId,
     "mailboxes",
     shadowFileName(workUnitId).replace(/\.json$/u, ""),
   );
@@ -963,9 +973,21 @@ function assertRouteMatchesDescriptor(
       || descriptor.aggregation.role !== "fragment") {
       throw new Error("pass1 fragment route does not match its source slice");
     }
-  } else if (descriptor.kind !== "pass1_lid_stitch"
-    || descriptor.input_basis.kind !== "artifact_reduction") {
-    throw new Error("pass1 stitch/final route has an invalid descriptor basis");
+  } else {
+    if (descriptor.kind !== "pass1_lid_stitch"
+      || descriptor.input_basis.kind !== "artifact_reduction"
+      || !("dependency_policy_generations" in workUnit.route)) {
+      throw new Error("pass1 stitch/final route has an invalid descriptor basis");
+    }
+    const generations = workUnit.route.dependency_policy_generations.map((dependency) => ({
+      work_unit_id: dependency.work_unit_id,
+      policy_generation_id: assertPolicyGenerationId(dependency.policy_generation_id),
+    })).sort((left, right) => left.work_unit_id.localeCompare(right.work_unit_id));
+    if (new Set(generations.map((dependency) => dependency.work_unit_id)).size !== generations.length
+      || stableJson(generations.map((dependency) => dependency.work_unit_id))
+        !== stableJson(descriptor.input_basis.dependency_artifacts.map((dependency) => dependency.work_unit_id))) {
+      throw new Error("pass1 stitch/final dependency generations do not match its descriptor");
+    }
   }
   if (range.end_ordinal_exclusive - range.start_ordinal < 1) {
     throw new Error("pass1 shadow route source range is empty");
@@ -988,14 +1010,14 @@ export function validatePass1ShadowTask(
     "version",
     "target_ref",
     "source_fingerprint",
-    "policy_set_digest",
+    "policy_generation_id",
     "source_unit_count",
     "descriptor",
     "route",
   ], "pass1 shadow task");
   if (task.version !== "pass1_shadow_task.v1") throw new Error("unsupported pass1 shadow task version");
   assertSha256(task.source_fingerprint, "source_fingerprint");
-  assertSha256(task.policy_set_digest, "policy_set_digest");
+  assertPolicyGenerationId(task.policy_generation_id);
   assertPositiveInteger(task.source_unit_count, "source_unit_count");
   const descriptor = validateWorkUnitDescriptorV3(task.descriptor);
   if (!sameTarget(descriptor.target, task.target_ref)) {
@@ -1020,14 +1042,14 @@ export function validatePass1ShadowTask(
 export function createPass1ShadowTask(input: {
   work_unit: Pass1ShadowWorkUnitV1;
   source_fingerprint: string;
-  policy_set_digest: string;
+  policy_generation_id: string;
   source_unit_count: number;
 }): Pass1ShadowTaskV1 {
   const task = validatePass1ShadowTask({
     version: "pass1_shadow_task.v1",
     target_ref: input.work_unit.descriptor.target,
     source_fingerprint: input.source_fingerprint,
-    policy_set_digest: input.policy_set_digest,
+    policy_generation_id: input.policy_generation_id,
     source_unit_count: input.source_unit_count,
     descriptor: input.work_unit.descriptor,
     route: input.work_unit.route,
@@ -1044,7 +1066,7 @@ export function createPass1ShadowTask(input: {
 
 export function freezePass1ShadowTask(target: AutomaticBuildTarget, input: Pass1ShadowTaskV1): string {
   const task = validatePass1ShadowTask(input, target);
-  const file = pass1ShadowTaskPath(target, task.policy_set_digest, task.descriptor.work_unit_id);
+  const file = pass1ShadowTaskPath(target, task.policy_generation_id, task.descriptor.work_unit_id);
   const bytes = `${JSON.stringify(task, null, 2)}\n`;
   mkdirSync(path.dirname(file), { recursive: true });
   try {
@@ -1062,10 +1084,10 @@ export function freezePass1ShadowTask(target: AutomaticBuildTarget, input: Pass1
 
 export function readPass1ShadowTask(
   target: AutomaticBuildTarget,
-  policySetDigest: string,
+  policyGenerationId: string,
   workUnitId: string,
 ): Pass1ShadowTaskV1 {
-  const file = pass1ShadowTaskPath(target, policySetDigest, workUnitId);
+  const file = pass1ShadowTaskPath(target, policyGenerationId, workUnitId);
   if (!existsSync(file)) throw new Error(`pass1 shadow task does not exist: ${workUnitId}`);
   return validatePass1ShadowTask(
     JSON.parse(readFileSync(file, "utf8")) as Pass1ShadowTaskV1,
@@ -1074,11 +1096,12 @@ export function readPass1ShadowTask(
 }
 
 function assertPolicyMember(target: AutomaticBuildTarget, task: Pass1ShadowTaskV1): void {
-  const policySet = readAutomaticBuildStagePolicySet(target, "pass1", task.policy_set_digest);
-  if (!policySet) throw new Error("pass1 shadow policy set is not frozen");
-  const member = policySet.members.find((candidate) => candidate.kind === task.descriptor.kind);
-  if (!member
-    || stableJson(member.policy_fingerprint) !== stableJson(task.descriptor.policy_fingerprint)) {
+  const generation = readAutomaticBuildPolicyGeneration(target, "pass1", task.policy_generation_id);
+  if (!generation
+    || !semanticContractEqual(
+      generation.semantic_contract,
+      semanticContractFromExtractionPolicy(task.descriptor.policy_fingerprint),
+    )) {
     throw new Error("pass1 shadow task is outside the frozen policy set");
   }
 }
@@ -1176,16 +1199,24 @@ function readStitchDependencies(
   target: AutomaticBuildTarget,
   task: Pass1ShadowTaskV1,
 ): Pass1ShadowDependencyV1[] {
-  if ((task.route.role !== "stitch" && task.route.role !== "final")
+  const route = task.route;
+  if ((route.role !== "stitch" && route.role !== "final")
+    || !("dependency_policy_generations" in route)
     || task.descriptor.input_basis.kind !== "artifact_reduction") {
     throw new Error("pass1 stitch/final task has an invalid artifact basis");
   }
   const dependencies = task.descriptor.input_basis.dependency_artifacts.map((dependency) => {
-    const childTask = readPass1ShadowTask(target, task.policy_set_digest, dependency.work_unit_id);
+    const childPolicyGenerationId = route.dependency_policy_generations.find(
+      (candidate) => candidate.work_unit_id === dependency.work_unit_id,
+    )?.policy_generation_id;
+    if (!childPolicyGenerationId) {
+      throw new Error(`pass1 stitch child generation is missing: ${dependency.work_unit_id}`);
+    }
+    const childTask = readPass1ShadowTask(target, childPolicyGenerationId, dependency.work_unit_id);
     const file = automaticBuildGenerationArtifactPath(
       target,
       "pass1",
-      task.policy_set_digest,
+      childPolicyGenerationId,
       dependency.work_unit_id,
     );
     if (!existsSync(file)) throw new Error(`pass1 stitch child artifact is missing: ${dependency.work_unit_id}`);
@@ -1196,9 +1227,8 @@ function readStitchDependencies(
         stage: "pass1",
         work_unit_id: childTask.descriptor.work_unit_id,
         input_hash: childTask.descriptor.input_hash,
-        proof_digest: childTask.descriptor.input_budget_proof.proof_digest,
-        policy_set_digest: task.policy_set_digest,
-        policy_fingerprint: childTask.descriptor.policy_fingerprint,
+        policy_generation_id: childPolicyGenerationId,
+        semantic_contract: semanticContractFromExtractionPolicy(childTask.descriptor.policy_fingerprint),
       })) {
       throw new Error(`pass1 stitch child artifact is stale or invalid: ${dependency.work_unit_id}`);
     }
@@ -1217,14 +1247,14 @@ function readStitchDependencies(
   if (!dependencies.length || dependencies.length > PASS1_STITCH_MAX_CHILDREN) {
     throw new Error("pass1 stitch child count is outside the bounded fan-in");
   }
-  let cursor = task.route.source_unit_range.start_ordinal;
+  let cursor = route.source_unit_range.start_ordinal;
   for (const dependency of dependencies) {
     if (dependency.payload.source_unit_range.start_ordinal !== cursor) {
       throw new Error("pass1 stitch children contain a source-unit gap or overlap");
     }
     cursor = dependency.payload.source_unit_range.end_ordinal_exclusive;
   }
-  if (cursor !== task.route.source_unit_range.end_ordinal_exclusive) {
+  if (cursor !== route.source_unit_range.end_ordinal_exclusive) {
     throw new Error("pass1 stitch children do not cover the task source range");
   }
   const childStitchLevels = dependencies
@@ -1233,10 +1263,10 @@ function readStitchDependencies(
   if (childStitchLevels.length) {
     if (childStitchLevels.length !== dependencies.length
       || new Set(childStitchLevels).size !== 1
-      || childStitchLevels[0] !== task.route.reducer_level - 1) {
+      || childStitchLevels[0] !== route.reducer_level - 1) {
       throw new Error("pass1 stitch child reducer level is stale");
     }
-  } else if (task.route.reducer_level !== 0) {
+  } else if (route.reducer_level !== 0) {
     throw new Error("pass1 initial graph children must feed stitch level zero");
   }
   return dependencies;
@@ -1255,11 +1285,11 @@ type Pass1StitchProjectedRenderV1 =
       status: "within_limit";
       input: Pass1LidStitchRenderInputV1;
       rendered_input: string;
-      proof: ModelInputBudgetProofV1;
+      proof: ModelInputBudgetEvidenceV2;
     }
   | {
       status: "over_limit";
-      evaluation: ModelInputOverLimitV1;
+      evaluation: ModelInputOverLimitV2;
       reason: ModelInputUnsplittableDraftV1["reason"];
     };
 
@@ -1285,7 +1315,7 @@ function boundaryProjectionNodes(source: Pass1StitchProjectionSourceV1): Pass1Li
     || compareStableText(left.name, right.name));
 }
 
-function pass1BudgetFromProof(proof: ModelInputBudgetProofV1): Pass1BudgetV1 {
+function pass1BudgetFromProof(proof: ModelInputBudgetEvidenceV2): Pass1BudgetV1 {
   return {
     stage_body_limit_tokens: proof.stage_body_limit_tokens,
     executor_context_floor_tokens: proof.executor_context_floor_tokens,
@@ -1543,9 +1573,8 @@ export function writePass1ShadowCandidate(input: {
     stage: "pass1",
     work_unit_id: task.descriptor.work_unit_id,
     input_hash: replayed.descriptor.input_hash,
-    proof_digest: replayed.descriptor.input_budget_proof.proof_digest,
-    policy_set_digest: task.policy_set_digest,
-    policy_fingerprint: replayed.descriptor.policy_fingerprint,
+    policy_generation_id: task.policy_generation_id,
+    semantic_contract: semanticContractFromExtractionPolicy(replayed.descriptor.policy_fingerprint),
     provenance: input.provenance,
     payload,
   });
@@ -1563,22 +1592,21 @@ export function writePass1ShadowCandidate(input: {
 export function verifyPass1ShadowArtifact(input: {
   work_unit: Pass1ShadowWorkUnitV1;
   artifact: SemanticArtifactEnvelopeV3<unknown>;
-  policy_set_digest: string;
+  policy_generation_id: string;
 }): Pass1ShadowVerifiedChildV1 {
-  assertSha256(input.policy_set_digest, "policy_set_digest");
+  assertPolicyGenerationId(input.policy_generation_id);
   assertRouteMatchesDescriptor(input.work_unit);
   if (input.work_unit.route.role === "final") throw new Error("a final pass1 artifact cannot become a stitch child");
   const descriptor = input.work_unit.descriptor;
   if (input.artifact.version !== "semantic_task_artifact.v3"
-    || input.artifact.policy_set_digest !== input.policy_set_digest
+    || input.artifact.policy_generation_id !== input.policy_generation_id
     || !semanticArtifactMatches(input.artifact, {
       target: descriptor.target,
       stage: "pass1",
       work_unit_id: descriptor.work_unit_id,
       input_hash: descriptor.input_hash,
-      proof_digest: descriptor.input_budget_proof.proof_digest,
-      policy_set_digest: input.policy_set_digest,
-      policy_fingerprint: descriptor.policy_fingerprint,
+      policy_generation_id: input.policy_generation_id,
+      semantic_contract: semanticContractFromExtractionPolicy(descriptor.policy_fingerprint),
     })) {
     throw new Error("pass1 child artifact is stale or invalid");
   }
@@ -1597,14 +1625,13 @@ function orderedChildren(input: {
   target: BuildTargetRefV2;
   window_id: number;
   source_unit_count: number;
-  policy_set_digest: string;
 }): Pass1ShadowVerifiedChildV1[] {
   assertPositiveInteger(input.source_unit_count, "source_unit_count");
   if (!input.children.length) throw new Error("pass1 stitch children must not be empty");
   const verified = input.children.map((child) => verifyPass1ShadowArtifact({
     work_unit: child.work_unit,
     artifact: child.artifact,
-    policy_set_digest: input.policy_set_digest,
+    policy_generation_id: child.artifact.policy_generation_id,
   }));
   const ids = verified.map((child) => child.work_unit.descriptor.work_unit_id);
   if (new Set(ids).size !== ids.length) throw new Error("pass1 stitch child work units must be unique");
@@ -1721,12 +1748,10 @@ export function routePass1StitchLevel(input: {
   window_id: number;
   source_unit_count: number;
   children: Pass1ShadowVerifiedChildV1[];
-  policy_set_digest: string;
   policy: ExtractionPolicyFingerprintV1;
   budget: Pass1BudgetV1;
 }): Pass1StitchRouteResultV1 {
   assertPolicy({ target: input.target, policy: input.policy, role: "stitch" });
-  assertSha256(input.policy_set_digest, "policy_set_digest");
   const children = orderedChildren(input);
   const reducerLevel = nextReducerLevel(children);
   const groups: Pass1ShadowVerifiedChildV1[][] = [];
@@ -1809,6 +1834,10 @@ export function routePass1StitchLevel(input: {
       group_ordinal: groupOrdinal,
       source_unit_range: sourceUnitRange,
       evidence_lids: evidenceLids,
+      dependency_policy_generations: group.map((child) => ({
+        work_unit_id: child.work_unit.descriptor.work_unit_id,
+        policy_generation_id: child.artifact.policy_generation_id,
+      })),
     };
     const dependencies = childIdentity.map((child) => ({
       artifact: child.work_unit_id,
@@ -1852,7 +1881,7 @@ function readTaskArtifact(
   const file = automaticBuildGenerationArtifactPath(
     target,
     "pass1",
-    task.policy_set_digest,
+    task.policy_generation_id,
     task.descriptor.work_unit_id,
   );
   if (!existsSync(file)) throw new Error("pass1 shadow artifact does not exist");
@@ -1862,9 +1891,8 @@ function readTaskArtifact(
     stage: "pass1",
     work_unit_id: task.descriptor.work_unit_id,
     input_hash: task.descriptor.input_hash,
-    proof_digest: task.descriptor.input_budget_proof.proof_digest,
-    policy_set_digest: task.policy_set_digest,
-    policy_fingerprint: task.descriptor.policy_fingerprint,
+    policy_generation_id: task.policy_generation_id,
+    semantic_contract: semanticContractFromExtractionPolicy(task.descriptor.policy_fingerprint),
   })) {
     throw new Error("pass1 shadow artifact is stale or invalid");
   }
@@ -1917,7 +1945,7 @@ export function writePass1ShadowFinalCandidate(input: {
   const candidate = buildPass1ShadowFinalCandidate(input);
   const directory = pass1ShadowTaskPrivateDirectory(
     input.target,
-    task.policy_set_digest,
+    task.policy_generation_id,
     task.descriptor.work_unit_id,
   );
   const candidatePath = path.join(directory, "public-candidate.json");
@@ -1950,7 +1978,7 @@ export function assertPass1ShadowCandidatePath(input: {
   const task = validatePass1ShadowTask(input.task, input.target);
   const directory = path.resolve(pass1ShadowTaskPrivateDirectory(
     input.target,
-    task.policy_set_digest,
+    task.policy_generation_id,
     task.descriptor.work_unit_id,
   ));
   const candidatePath = path.resolve(input.candidate_path);

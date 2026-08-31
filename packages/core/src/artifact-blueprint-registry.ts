@@ -11,6 +11,7 @@ import {
 import path from "node:path";
 import {
   SYSTEM_ARTIFACT_BLUEPRINT_REGISTRY_V1,
+  assertSameArtifactBlueprintVersionV2,
   computeArtifactBlueprintDigest,
   validateArtifactBlueprintV1,
   validatePlannerOneOffArtifactBlueprintV1,
@@ -75,6 +76,40 @@ export interface ArtifactBlueprintResolutionV1 {
   source: "system" | "user_private" | "one_off";
   blueprint: ArtifactBlueprintV1;
   digest: string;
+}
+
+export interface ArtifactBlueprintRegistryEntryV2 {
+  version: "artifact_blueprint_registry_entry.v2";
+  source: "system" | "user_private";
+  blueprint: ArtifactBlueprintV1;
+  blueprint_id: string;
+  blueprint_version: string;
+  status: "active" | "retired";
+  usage_count: number;
+  created_at?: string;
+  retired_at?: string;
+  last_used_at?: string;
+}
+
+export interface ArtifactBlueprintRegistryListV2 {
+  version: "artifact_blueprint_registry_list.v2";
+  system_presets: ArtifactBlueprintRegistryEntryV2[];
+  user_candidates: ArtifactBlueprintRegistryEntryV2[];
+}
+
+export interface ArtifactBlueprintResolutionV2 {
+  version: "artifact_blueprint_resolution.v2";
+  source: "system" | "user_private" | "one_off";
+  blueprint: ArtifactBlueprintV1;
+  blueprint_id: string;
+  blueprint_version: string;
+}
+
+export interface ArtifactBlueprintCandidateUpsertResultV2 {
+  version: "artifact_blueprint_candidate_upsert_result.v2";
+  blueprint_id: string;
+  blueprint_version: string;
+  disposition: "created" | "existing";
 }
 
 interface StoredCandidateV1 {
@@ -472,7 +507,7 @@ export function upsertArtifactBlueprintCandidateV1(input: {
     const stored = readStoredCandidate(file);
     if (stored.blueprint.blueprint_id !== blueprint.blueprint_id
       || stored.blueprint.blueprint_version !== blueprint.blueprint_version
-      || stored.digest !== digest) {
+      || canonicalBuildJson(stored.blueprint) !== canonicalBuildJson(blueprint)) {
       throw new Error("ArtifactBlueprint with the same identity and version conflicts with existing content");
     }
     disposition = "existing";
@@ -619,5 +654,70 @@ export function resolveArtifactBlueprintV1(input: {
     source: "one_off",
     blueprint: oneOff,
     digest: computeArtifactBlueprintDigest(oneOff),
+  };
+}
+
+function registryEntryV2(entry: ArtifactBlueprintRegistryEntryV1): ArtifactBlueprintRegistryEntryV2 {
+  return {
+    version: "artifact_blueprint_registry_entry.v2",
+    source: entry.source,
+    blueprint: entry.blueprint,
+    blueprint_id: entry.blueprint.blueprint_id,
+    blueprint_version: entry.blueprint.blueprint_version,
+    status: entry.status,
+    usage_count: entry.usage_count,
+    ...(entry.created_at === undefined ? {} : { created_at: entry.created_at }),
+    ...(entry.retired_at === undefined ? {} : { retired_at: entry.retired_at }),
+    ...(entry.last_used_at === undefined ? {} : { last_used_at: entry.last_used_at }),
+  };
+}
+
+export function listArtifactBlueprintRegistryV2(privateRootInput: string): ArtifactBlueprintRegistryListV2 {
+  const legacy = listArtifactBlueprintRegistryV1(privateRootInput);
+  return {
+    version: "artifact_blueprint_registry_list.v2",
+    system_presets: legacy.system_presets.map(registryEntryV2),
+    user_candidates: legacy.user_candidates.map(registryEntryV2),
+  };
+}
+
+export function upsertArtifactBlueprintCandidateV2(input: {
+  private_root: string;
+  blueprint: unknown;
+  created_at: string;
+}): ArtifactBlueprintCandidateUpsertResultV2 {
+  const blueprint = validateArtifactBlueprintV1(input.blueprint);
+  const result = upsertArtifactBlueprintCandidateV1({ ...input, blueprint });
+  if (result.disposition === "existing") {
+    const stored = getArtifactBlueprintRegistryEntryV1(
+      input.private_root,
+      blueprint.blueprint_id,
+      blueprint.blueprint_version,
+    );
+    assertSameArtifactBlueprintVersionV2(stored.blueprint, blueprint);
+  }
+  return {
+    version: "artifact_blueprint_candidate_upsert_result.v2",
+    blueprint_id: blueprint.blueprint_id,
+    blueprint_version: blueprint.blueprint_version,
+    disposition: result.disposition,
+  };
+}
+
+export function resolveArtifactBlueprintV2(input: {
+  private_root: string;
+  blueprint_id: string;
+  blueprint_version: string;
+  one_off?: unknown;
+  planning_candidate?: true;
+}): ArtifactBlueprintResolutionV2 {
+  const resolution = resolveArtifactBlueprintV1(input);
+  const blueprint = assertSameArtifactBlueprintVersionV2(resolution.blueprint, resolution.blueprint);
+  return {
+    version: "artifact_blueprint_resolution.v2",
+    source: resolution.source,
+    blueprint,
+    blueprint_id: blueprint.blueprint_id,
+    blueprint_version: blueprint.blueprint_version,
   };
 }

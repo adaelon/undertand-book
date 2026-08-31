@@ -467,3 +467,38 @@ export const BuildDecisionRequestV2Z = z.object({
 });
 
 export type BuildDecisionRequestV2 = z.infer<typeof BuildDecisionRequestV2Z>;
+
+export const BuildDecisionScopeV3Z = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("stage"), stage: z.enum(BUILD_STAGE_IDS) }).strict(),
+  z.object({
+    kind: z.literal("build_plan"),
+    plan_id: PathSafeBuildIdZ,
+    plan_revision: SafeRevisionZ,
+  }).strict(),
+]);
+
+export type BuildDecisionScopeV3 = z.infer<typeof BuildDecisionScopeV3Z>;
+
+export const BuildDecisionRequestV3Z = z.object({
+  version: z.literal("build_decision_request.v3"),
+  decision_id: PathSafeBuildIdZ,
+  job_id: PathSafeBuildIdZ.optional(),
+  scope: BuildDecisionScopeV3Z,
+  kind: z.union([z.literal("build_intent_plan"), z.enum(EXISTING_BUILD_DECISION_KINDS)]),
+  options: z.array(z.object({
+    id: NonBlankStringZ,
+    label: NonBlankStringZ,
+    description: NonBlankStringZ.optional(),
+  }).strict()).min(1),
+  status: z.enum(["pending", "answered"]),
+}).strict().superRefine((request, context) => {
+  addDuplicateIssues(request.options.map((option) => option.id), context, ["options"], "decision option id");
+  if (request.kind === "build_intent_plan" && request.scope.kind !== "build_plan") {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["scope"], message: "build_intent_plan requires build_plan scope" });
+  }
+  if (request.kind !== "build_intent_plan" && request.scope.kind !== "stage") {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["scope"], message: "existing build decision kinds require stage scope" });
+  }
+});
+
+export type BuildDecisionRequestV3 = z.infer<typeof BuildDecisionRequestV3Z>;

@@ -137,6 +137,11 @@ describe("automatic build task metrics", () => {
     expect(event).toMatchObject({
       mode: "standard_deep",
       kind: "cost_observed",
+      plan: {
+        plan_id: "plan-standard",
+        plan_revision: 1,
+        confirmation_source: "reader_ui",
+      },
       outcome: "retryable_failure",
       wall_clock_ms: 39,
       usage: {
@@ -148,7 +153,9 @@ describe("automatic build task metrics", () => {
         estimated_output_tokens: 10,
       },
     });
-    expect(JSON.stringify(event)).not.toMatch(/private-model-detail|harness-private-detail|task_ref|work_unit_id/u);
+    expect(JSON.stringify(event)).not.toMatch(
+      /private-model-detail|harness-private-detail|task_ref|work_unit_id|plan_digest/u,
+    );
     expect(automaticBuildTaskMetricsUsageEvent({
       plan,
       metrics: { ...metrics, status: "skipped" },

@@ -168,7 +168,7 @@ export function writeSyntheticPass1ProductionGeneration(
 
 export function writePass1ProductionTaskArtifact(input: {
   target: AutomaticBuildTarget;
-  policy_set_digest: string;
+  policy_generation_id: string;
   work_unit_id: string;
   marker?: string;
   executor?: string;
@@ -177,7 +177,7 @@ export function writePass1ProductionTaskArtifact(input: {
 }) {
   const task = readPass1ShadowTask(
     input.target,
-    input.policy_set_digest,
+    input.policy_generation_id,
     input.work_unit_id,
   );
   const evidenceLid = task.route.evidence_lids[0];
