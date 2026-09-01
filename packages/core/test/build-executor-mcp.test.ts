@@ -47,22 +47,24 @@ describe("Build Executor root-shared MCP boundary", () => {
 
     expect(samples).toEqual([
       {
-        version: "executor_mcp_server_timing.v1",
+        version: "executor_mcp_server_timing.v2",
         connection_call_ordinal: 1,
         operation: "executor.open",
         server_elapsed_ms: 25,
         response_bytes: Buffer.byteLength(`${JSON.stringify(ok)}\n`, "utf8"),
         response_action_kind: "WAIT",
         outcome: "ok",
+        server_phase_elapsed_ms: null,
       },
       {
-        version: "executor_mcp_server_timing.v1",
+        version: "executor_mcp_server_timing.v2",
         connection_call_ordinal: 2,
         operation: "executor.open",
         server_elapsed_ms: 31,
         response_bytes: Buffer.byteLength(`${JSON.stringify(boundedError)}\n`, "utf8"),
         response_action_kind: null,
         outcome: "bounded_error",
+        server_phase_elapsed_ms: null,
       },
     ]);
     expect(JSON.stringify(samples)).not.toMatch(
@@ -158,17 +160,24 @@ describe("Build Executor root-shared MCP boundary", () => {
 
   it("keeps capability out of model parameters and candidate bodies out of tool results", () => {
     const executed: unknown[] = [];
+    const timingSamples: Array<{
+      operation: string;
+      server_elapsed_ms: number;
+      server_phase_elapsed_ms: Record<string, number> | null;
+    }> = [];
+    let tick = 0;
     const handoffRef = `abhandoff1_${"1".repeat(64)}`;
     const sessionRef = `absession1_${"2".repeat(64)}`;
     const taskSessionRef = `absession1_${"a".repeat(64)}`;
     const inputRef = `abinput1_${"3".repeat(64)}`;
-    const grantRef = `abgrant1_${"5".repeat(64)}`;
     const sinkRef = `absink1_${"6".repeat(64)}`;
     const session = createBuildExecutorMcpSession({
       bootstrap_version: BUILD_EXECUTOR_BOOTSTRAP_CONTRACT_V3.version,
       protocol_generation: BUILD_EXECUTOR_BOOTSTRAP_CONTRACT_V3.session_protocol,
       session_private_root: path.join(REPO_ROOT, ".t6-private-root"),
-      execute_request: (request) => {
+      now_ms: () => tick++,
+      timing_sample_sink: (sample) => timingSamples.push(sample),
+      execute_request: (request, timing) => {
         executed.push(request);
         const version = (request as { version: string }).version;
         if (version === "automatic_build_executor_open_request.v3") {
@@ -185,20 +194,26 @@ describe("Build Executor root-shared MCP boundary", () => {
                 total_chunk_count: 1,
               },
               next_request: {
-                version: "automatic_build_executor_input_next_request.v3",
+                version: "automatic_build_executor_input_next_request.v4",
                 opaque_session_ref: sessionRef,
                 generation_input_ref: inputRef,
               },
             },
           };
         }
-        if (version === "automatic_build_executor_input_next_request.v3"
-          && (request as { previous_chunk_ordinal?: number }).previous_chunk_ordinal === undefined) {
+        if (version === "automatic_build_executor_input_next_request.v4") {
           return {
             version: "automatic_build_executor_session.v3",
             action: {
-              kind: "INPUT_CHUNK",
-              chunk: {
+              kind: "INPUT_BATCH",
+              batch: {
+                version: "automatic_build_executor_input_batch.v1",
+                opaque_session_ref: sessionRef,
+                generation_input_ref: inputRef,
+                first_ordinal: 0,
+                last_ordinal: 0,
+                final_for_generation: true,
+                chunks: [{
                 version: "automatic_build_executor_input_chunk.v3",
                 opaque_session_ref: sessionRef,
                 generation_input_ref: inputRef,
@@ -208,27 +223,14 @@ describe("Build Executor root-shared MCP boundary", () => {
                 payload_utf8: "{}",
                 final_for_segment: true,
                 final_for_generation: true,
+                }],
               },
             },
           };
         }
-        if (version === "automatic_build_executor_input_next_request.v3") {
-          return {
-            version: "automatic_build_executor_session.v3",
-            action: {
-              kind: "GENERATION_GRANT",
-              grant: {
-                version: "automatic_build_executor_generation_grant.v2",
-                opaque_session_ref: sessionRef,
-                generation_input_ref: inputRef,
-                generation_grant_ref: grantRef,
-                final_delivered_ordinal: 0,
-                output_schema_version: "automatic_build_semantic_candidate_contract.v2",
-              },
-            },
-          };
-        }
-        if (version === "automatic_build_executor_generation_start_request.v2") {
+        if (version === "automatic_build_executor_generation_start_request.v3") {
+          timing.complete_phase("current-state/claim");
+          timing.complete_phase("input-render-or-reuse");
           return {
             version: "automatic_build_executor_session.v3",
             action: {
@@ -249,6 +251,8 @@ describe("Build Executor root-shared MCP boundary", () => {
             },
           };
         }
+        timing.complete_phase("candidate-gate");
+        timing.complete_phase("writer/commit");
         return {
           version: "automatic_build_executor_session.v3",
           action: { kind: "DONE", status: "committed" },
@@ -260,7 +264,7 @@ describe("Build Executor root-shared MCP boundary", () => {
       jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args },
     });
     const firstChunkRequest = {
-      version: "automatic_build_executor_input_next_request.v3",
+      version: "automatic_build_executor_input_next_request.v4",
       opaque_session_ref: sessionRef,
       generation_input_ref: inputRef,
     };
@@ -272,16 +276,11 @@ describe("Build Executor root-shared MCP boundary", () => {
       ...Array.from({ length: 5 }, (_, index) => (
         call(4 + index, "executor.input.next", firstChunkRequest)
       )),
-      call(9, "executor.input.next", {
-        version: "automatic_build_executor_input_next_request.v3",
+      call(10, "executor.generation.start", {
+        version: "automatic_build_executor_generation_start_request.v3",
         opaque_session_ref: sessionRef,
         generation_input_ref: inputRef,
-        previous_chunk_ordinal: 0,
-      }),
-      call(10, "executor.generation.start", {
-        version: "automatic_build_executor_generation_start_request.v2",
-        opaque_session_ref: sessionRef,
-        generation_grant_ref: grantRef,
+        confirmed_through_ordinal: 0,
       }),
       call(11, "executor.submit_candidate", {
         version: "automatic_build_executor_candidate_submit.v3",
@@ -290,15 +289,39 @@ describe("Build Executor root-shared MCP boundary", () => {
         candidate: { private_value: sentinel },
       }),
     ];
-    expect(executed).toHaveLength(9);
+    expect(executed).toHaveLength(8);
     const replayKinds = responses.slice(1, 6).map((response) => {
       const text = (response as { result: { content: Array<{ text: string }> } })
         .result.content[0]?.text ?? "";
       return (JSON.parse(text) as { action: { kind: string } }).action.kind;
     });
-    expect(replayKinds).toEqual(Array.from({ length: 5 }, () => "INPUT_CHUNK"));
+    expect(replayKinds).toEqual(Array.from({ length: 5 }, () => "INPUT_BATCH"));
+    const longSamples = timingSamples.filter((sample) => sample.server_phase_elapsed_ms !== null);
+    expect(longSamples.map((sample) => sample.operation)).toEqual([
+      "executor.generation.start",
+      "executor.submit_candidate",
+    ]);
+    for (const sample of longSamples) {
+      expect(Object.values(sample.server_phase_elapsed_ms ?? {}).reduce((sum, value) => sum + value, 0))
+        .toBe(sample.server_elapsed_ms);
+    }
+    expect(longSamples.map((sample) => sample.server_phase_elapsed_ms)).toEqual([
+      {
+        "current-state/claim": 1,
+        "input-render-or-reuse": 1,
+        "persist/response": 1,
+      },
+      {
+        "candidate-gate": 1,
+        "writer/commit": 1,
+        "next-work-prepare": 1,
+      },
+    ]);
     expect(JSON.stringify(responses.at(-1))).not.toContain(sentinel);
     expect(JSON.stringify(responses)).not.toMatch(/capability|session_private_root/u);
+    expect(JSON.stringify(timingSamples)).not.toMatch(
+      /T6_PRIVATE_CANDIDATE_SENTINEL|abhandoff1_|absession1_|abinput1_|abgrant1_|absink1_|[A-Z]:\\/u,
+    );
   });
 
   it("fails closed with a bounded bootstrap diagnostic", () => {

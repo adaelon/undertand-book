@@ -27,6 +27,11 @@ async function readText(relativePath) {
   return readFile(path.join(repoRoot, relativePath), "utf8");
 }
 
+async function readOptionalText(relativePath) {
+  const absolutePath = path.join(repoRoot, relativePath);
+  return existsSync(absolutePath) ? readFile(absolutePath, "utf8") : "";
+}
+
 function normalizeLineEndings(text) {
   return text.replace(/\r\n?|\n/gu, "\n");
 }
@@ -148,7 +153,7 @@ assert.deepEqual(
 );
 assert.equal(rootMcp.mcpServers?.book?.cwd, ".", "Book MCP cwd must resolve from plugin root");
 
-const projectCodexConfig = await readText(".codex/config.toml");
+const projectCodexConfig = await readOptionalText(".codex/config.toml");
 assert(
   !projectCodexConfig.includes(executorServerName),
   "project Codex config must not duplicate the plugin-owned shared Executor transport",
@@ -547,12 +552,12 @@ for (const marker of [
   "executor.generation.start",
   "executor.submit_candidate",
   "action.kind=DELIVER_INPUT",
-  "action.kind=INPUT_CHUNK",
-  "action.kind=GENERATION_GRANT",
+  "action.kind=INPUT_BATCH",
   "action.kind=GENERATE",
   "action.kind=WAIT",
   "action.kind=DONE",
-  "previous_chunk_ordinal",
+  "ack_through_ordinal",
+  "confirmed_through_ordinal",
   "does not authenticate the caller role",
   "Never return candidate JSON to the caller",
 ]) {
@@ -611,8 +616,7 @@ for (const marker of [
   "executor.generation.start",
   "executor.submit_candidate",
   "action.kind=DELIVER_INPUT",
-  "action.kind=INPUT_CHUNK",
-  "action.kind=GENERATION_GRANT",
+  "action.kind=INPUT_BATCH",
   "action.kind=GENERATE",
   "action.kind=WAIT",
   "action.kind=DONE",

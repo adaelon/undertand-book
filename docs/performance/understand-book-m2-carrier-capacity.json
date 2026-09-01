@@ -1,0 +1,191 @@
+{
+  "version": "executor_carrier_capacity_evidence.v1",
+  "status": "passed",
+  "host_release": "codex-cli 0.149.0",
+  "direct_result": {
+    "max_tested_passing_bytes": 65536,
+    "first_failed_bytes": null
+  },
+  "program_output": {
+    "max_tested_passing_bytes": 65536,
+    "first_failed_bytes": null
+  },
+  "cases": [
+    {
+      "mode": "direct_result",
+      "shape": "ascii",
+      "tier_bytes": 8192,
+      "status": "passed",
+      "exact_result_bytes": 8192,
+      "raw_tail_complete": true,
+      "structure_closed": true,
+      "model_ack_complete": true,
+      "failure_kind": null
+    },
+    {
+      "mode": "direct_result",
+      "shape": "ascii",
+      "tier_bytes": 16384,
+      "status": "passed",
+      "exact_result_bytes": 16384,
+      "raw_tail_complete": true,
+      "structure_closed": true,
+      "model_ack_complete": true,
+      "failure_kind": null
+    },
+    {
+      "mode": "direct_result",
+      "shape": "ascii",
+      "tier_bytes": 32768,
+      "status": "passed",
+      "exact_result_bytes": 32768,
+      "raw_tail_complete": true,
+      "structure_closed": true,
+      "model_ack_complete": true,
+      "failure_kind": null
+    },
+    {
+      "mode": "direct_result",
+      "shape": "ascii",
+      "tier_bytes": 65536,
+      "status": "passed",
+      "exact_result_bytes": 65536,
+      "raw_tail_complete": true,
+      "structure_closed": true,
+      "model_ack_complete": true,
+      "failure_kind": null
+    },
+    {
+      "mode": "direct_result",
+      "shape": "cjk",
+      "tier_bytes": 8192,
+      "status": "passed",
+      "exact_result_bytes": 8192,
+      "raw_tail_complete": true,
+      "structure_closed": true,
+      "model_ack_complete": true,
+      "failure_kind": null
+    },
+    {
+      "mode": "direct_result",
+      "shape": "cjk",
+      "tier_bytes": 16384,
+      "status": "passed",
+      "exact_result_bytes": 16384,
+      "raw_tail_complete": true,
+      "structure_closed": true,
+      "model_ack_complete": true,
+      "failure_kind": null
+    },
+    {
+      "mode": "direct_result",
+      "shape": "cjk",
+      "tier_bytes": 32768,
+      "status": "passed",
+      "exact_result_bytes": 32768,
+      "raw_tail_complete": true,
+      "structure_closed": true,
+      "model_ack_complete": true,
+      "failure_kind": null
+    },
+    {
+      "mode": "direct_result",
+      "shape": "cjk",
+      "tier_bytes": 65536,
+      "status": "passed",
+      "exact_result_bytes": 65536,
+      "raw_tail_complete": true,
+      "structure_closed": true,
+      "model_ack_complete": true,
+      "failure_kind": null
+    },
+    {
+      "mode": "program_output",
+      "shape": "ascii",
+      "tier_bytes": 8192,
+      "status": "passed",
+      "exact_result_bytes": 8192,
+      "raw_tail_complete": true,
+      "structure_closed": true,
+      "model_ack_complete": true,
+      "failure_kind": null
+    },
+    {
+      "mode": "program_output",
+      "shape": "ascii",
+      "tier_bytes": 16384,
+      "status": "passed",
+      "exact_result_bytes": 16384,
+      "raw_tail_complete": true,
+      "structure_closed": true,
+      "model_ack_complete": true,
+      "failure_kind": null
+    },
+    {
+      "mode": "program_output",
+      "shape": "ascii",
+      "tier_bytes": 32768,
+      "status": "passed",
+      "exact_result_bytes": 32768,
+      "raw_tail_complete": true,
+      "structure_closed": true,
+      "model_ack_complete": true,
+      "failure_kind": null
+    },
+    {
+      "mode": "program_output",
+      "shape": "ascii",
+      "tier_bytes": 65536,
+      "status": "passed",
+      "exact_result_bytes": 65536,
+      "raw_tail_complete": true,
+      "structure_closed": true,
+      "model_ack_complete": true,
+      "failure_kind": null
+    },
+    {
+      "mode": "program_output",
+      "shape": "cjk",
+      "tier_bytes": 8192,
+      "status": "passed",
+      "exact_result_bytes": 8192,
+      "raw_tail_complete": true,
+      "structure_closed": true,
+      "model_ack_complete": true,
+      "failure_kind": null
+    },
+    {
+      "mode": "program_output",
+      "shape": "cjk",
+      "tier_bytes": 16384,
+      "status": "passed",
+      "exact_result_bytes": 16384,
+      "raw_tail_complete": true,
+      "structure_closed": true,
+      "model_ack_complete": true,
+      "failure_kind": null
+    },
+    {
+      "mode": "program_output",
+      "shape": "cjk",
+      "tier_bytes": 32768,
+      "status": "passed",
+      "exact_result_bytes": 32768,
+      "raw_tail_complete": true,
+      "structure_closed": true,
+      "model_ack_complete": true,
+      "failure_kind": null
+    },
+    {
+      "mode": "program_output",
+      "shape": "cjk",
+      "tier_bytes": 65536,
+      "status": "passed",
+      "exact_result_bytes": 65536,
+      "raw_tail_complete": true,
+      "structure_closed": true,
+      "model_ack_complete": true,
+      "failure_kind": null
+    }
+  ]
+}

@@ -1,0 +1,50 @@
+{
+  "version": "executor_scheduling_observation_evidence.v1",
+  "status": "passed",
+  "fixture": "deterministic_durable_work_units_and_reduced_lifecycle_trace",
+  "remaining_work": [
+    {
+      "stage": "pass1",
+      "kind": "pass1_window",
+      "pending": 8,
+      "reserved": 8,
+      "running": 8,
+      "terminal": 8
+    }
+  ],
+  "work_unit_total": 32,
+  "executor_session_count_used_for_work_unit_total": false,
+  "slot_intervals": [
+    {
+      "live_slots": 2,
+      "idle_slots": 1,
+      "idle_reason": "root_refill_gap",
+      "observed_ms": 10
+    },
+    {
+      "live_slots": 1,
+      "idle_slots": 2,
+      "idle_reason": "tail_imbalance",
+      "observed_ms": 35
+    }
+  ],
+  "correctness": {
+    "counts_sum_to_durable_work_unit_truth": true,
+    "reserved_and_running_come_from_lease_start_records": true,
+    "slot_intervals_recompute_from_lifecycle_wall_time": true,
+    "semantic_body_fields_present": false,
+    "eta_present": false,
+    "compiled_build_engine_modules": 384,
+    "node_compiled_thin_plugin_parity": true
+  },
+  "decision": {
+    "s1_complete": true,
+    "enter_s2": false,
+    "reason": "the injected clock proves the observation join and idle-cause classifier but does not identify the largest real same-host idle source"
+  },
+  "limitations": [
+    "the 10 ms and 35 ms intervals are deterministic injected values, not Codex host performance samples",
+    "no scheduler, bundle, barrier, concurrency, or child-lifecycle behavior changed in S1",
+    "S2 requires a same-host synthetic topology run with real lifecycle wall times before one idle-cause branch can be selected"
+  ]
+}

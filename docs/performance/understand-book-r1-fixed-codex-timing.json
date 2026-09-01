@@ -1,0 +1,50 @@
+{
+  "version": "executor_public_frozen_input_reuse_evidence.v1",
+  "status": "passed",
+  "codex_cli": "codex-cli 0.149.0",
+  "fixture": "isolated_single_synthetic_work_unit_5_chunks",
+  "baseline": {
+    "sources": [
+      "understand-book-a2-fixed-codex-timing.json",
+      "understand-book-a2-fixed-codex-timing-run-d.json",
+      "understand-book-a2-fixed-codex-timing-run-e.json"
+    ],
+    "sample_count": 3,
+    "generation_start_server_median_ms": 1463.0925000000007,
+    "input_render_or_reuse_median_ms": 1162.3720999999987,
+    "overall_server_median_ms": 4708.936700000001
+  },
+  "r1": {
+    "sample_count": 1,
+    "executor_mcp_calls": 4,
+    "generation_start_server_ms": 326.9529999999995,
+    "input_render_or_reuse_ms": 15.069400000000314,
+    "overall_server_ms": 3281.0224999999973,
+    "generation_start_change_percent": -77.65329259769977,
+    "input_render_or_reuse_change_percent": -98.7035648911394,
+    "overall_server_change_percent": -30.323495323264876
+  },
+  "server_phase_totals_ms": {
+    "current-state/claim": 302.90389999999934,
+    "input-render-or-reuse": 15.069400000000314,
+    "persist/response": 8.979699999999866,
+    "candidate-gate": 298.58539999999994,
+    "writer/commit": 1150.9679999999971,
+    "next-work-prepare": 57.248100000000704
+  },
+  "durable": {
+    "semantic_attempts": 1,
+    "committed_tasks": 1,
+    "thread_attribution_complete": true
+  },
+  "decision": {
+    "keep_r1": true,
+    "reason": "public generation.start reused the delivered frozen input, removed the second renderer process, and reduced the measured start and overall server time without durable regression",
+    "next_slice": "R2"
+  },
+  "limitations": [
+    "R1 real timing is one Codex 0.149 sample compared with the declared three-run A2 median on the same frozen five-chunk fixture",
+    "the remaining input-render-or-reuse phase contains frozen binding validation and input observation; 15.0694 ms is not a renderer subprocess",
+    "the retained timing projection does not expose a comparable end-to-end model token total"
+  ]
+}

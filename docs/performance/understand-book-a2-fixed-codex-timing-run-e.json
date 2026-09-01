@@ -1,0 +1,67 @@
+{
+  "version": "executor_mcp_fixed_timing_evidence.v2",
+  "status": "passed",
+  "codex_cli": "codex-cli 0.149.0",
+  "fixture": "isolated_single_synthetic_work_unit",
+  "connection_count": 1,
+  "sample_count": 4,
+  "totals": {
+    "executor.open": {
+      "call_count": 1,
+      "server_total_ms": 1657.979,
+      "outer_total_ms": 1686,
+      "residual_total_ms": 28.020999999999958,
+      "response_total_bytes": 1466
+    },
+    "executor.input.next": {
+      "call_count": 1,
+      "server_total_ms": 145.41589999999997,
+      "outer_total_ms": 177,
+      "residual_total_ms": 31.584100000000035,
+      "response_total_bytes": 30820
+    },
+    "executor.generation.start": {
+      "call_count": 1,
+      "server_total_ms": 1446.9400000000005,
+      "outer_total_ms": 1472,
+      "residual_total_ms": 25.05999999999949,
+      "response_total_bytes": 724
+    },
+    "executor.submit_candidate": {
+      "call_count": 1,
+      "server_total_ms": 1458.6018000000004,
+      "outer_total_ms": 1484,
+      "residual_total_ms": 25.398199999999633,
+      "response_total_bytes": 201
+    }
+  },
+  "overall": {
+    "call_count": 4,
+    "server_total_ms": 4708.936700000001,
+    "outer_total_ms": 4819,
+    "residual_total_ms": 110.06329999999912,
+    "response_total_bytes": 33211
+  },
+  "server_phase_totals_ms": {
+    "current-state/claim": 296.7371999999996,
+    "input-render-or-reuse": 1141.048200000001,
+    "persist/response": 9.154599999999846,
+    "candidate-gate": 254.2465000000011,
+    "writer/commit": 1152.125799999998,
+    "next-work-prepare": 52.22950000000128
+  },
+  "observed_dominant_server_phase": "writer/commit",
+  "observed_dominant_component": "server",
+  "measured_followup_branch": "writer/commit",
+  "next_slice": "M2",
+  "durable": {
+    "semantic_attempts": 1,
+    "committed_tasks": 1
+  },
+  "thread_attribution_complete": true,
+  "semantic_trace_projection": {
+    "executor_input_or_submit": 5,
+    "dedicated_child_inference": 2,
+    "bounded_response_only": 2
+  }
+}

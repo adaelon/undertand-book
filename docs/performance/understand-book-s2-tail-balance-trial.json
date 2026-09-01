@@ -1,0 +1,31 @@
+{
+  "version": "executor_tail_balance_trial_evidence.v1",
+  "status": "rejected_unverifiable",
+  "codex_cli": "codex-cli 0.151.0-alpha.7.1",
+  "fixture": "isolated_nine_work_unit_three_slot_pass1_tail",
+  "baseline": {
+    "bundle_units": [4, 4, 1],
+    "semantic_attempts": 9,
+    "committed_tasks": 9,
+    "root_terminal_observed": true,
+    "tail_observed_ms": 48640,
+    "idle_slot_ms_lower_bound": 51963
+  },
+  "balanced": {
+    "bundle_units": [3, 3, 3],
+    "semantic_attempts": 9,
+    "committed_tasks": 9,
+    "root_terminal_observed": false,
+    "timeouts_ms": [900000, 1500000]
+  },
+  "decision": {
+    "keep_s2_tail_balance": false,
+    "production_scheduler_changed": false,
+    "reason": "balanced runs reached durable 9/9 but never produced a complete root lifecycle tail, so the declared same-topology latency comparison is unverifiable"
+  },
+  "limitations": [
+    "the baseline and both balanced attempts were sequential same-host samples",
+    "balanced durable completion cannot substitute for a missing terminal lifecycle observation",
+    "the experimental planner and dedicated long-run harness changes were reverted"
+  ]
+}

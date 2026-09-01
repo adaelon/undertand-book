@@ -1,0 +1,50 @@
+{
+  "version": "executor_pass1_in_process_writer_evidence.v1",
+  "status": "passed",
+  "codex_cli": "codex-cli 0.151.0-alpha.7.1",
+  "fixture": "isolated_single_synthetic_work_unit",
+  "sample_count_per_variant": 1,
+  "baseline": {
+    "implementation": "current M1-R2 tree with the proof-bound Pass1 subprocess writer",
+    "executor_mcp_calls": 4,
+    "submit_candidate_server_ms": 1612.4157000000014,
+    "submit_candidate_outer_ms": 1641,
+    "writer_commit_ms": 1195.9601999999977,
+    "overall_server_ms": 3466.673500000001,
+    "overall_outer_ms": 3581
+  },
+  "w1": {
+    "implementation": "proof-bound Pass1 generation writer executed in the current deterministic build process",
+    "executor_mcp_calls": 4,
+    "submit_candidate_server_ms": 510.61629999999786,
+    "submit_candidate_outer_ms": 536,
+    "writer_commit_ms": 71.31330000000162,
+    "overall_server_ms": 2734.2250999999965,
+    "overall_outer_ms": 2849,
+    "writer_commit_change_percent": -94.03715106907389,
+    "submit_candidate_server_change_percent": -68.33221730599637,
+    "submit_candidate_outer_change_percent": -67.33698964046313,
+    "overall_server_change_percent": -21.12827758368373,
+    "overall_outer_change_percent": -20.44121753700083
+  },
+  "durable": {
+    "baseline_semantic_attempts": 1,
+    "baseline_committed_tasks": 1,
+    "w1_semantic_attempts": 1,
+    "w1_committed_tasks": 1,
+    "thread_attribution_complete": true,
+    "response_bytes_unchanged": true,
+    "semantic_trace_projection_unchanged": true
+  },
+  "decision": {
+    "keep_w1": true,
+    "reason": "the same-host fixed fixture removed the Pass1 writer subprocess and reduced writer/commit and submit time without changing attempt, commit, response, or trace contracts",
+    "next_slice": "S1"
+  },
+  "limitations": [
+    "the baseline and W1 each contain one sequential Codex sample, so unrelated open, input, and generation phase noise remains visible",
+    "the same-version A/B uses the currently installed desktop Codex 0.151.0-alpha.7.1 because the earlier 0.149 host is no longer installed; it is not compared directly with the older 0.149 timing",
+    "the fixture exercises the proof-bound Pass1 whole-window writer only; other stage writers remain subprocess-backed and were not changed",
+    "the timing covers MCP server and outer tool-call intervals, not end-to-end model inference or total token cost"
+  ]
+}

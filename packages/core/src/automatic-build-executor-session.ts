@@ -12,6 +12,7 @@ import path from "node:path";
 import { isAutomaticBuildTaskPolicyBindingV2 } from "./semantic-artifact";
 import {
   renderAutomaticBuildTaskInput,
+  runAutomaticBuildFrozenTaskInput,
   runAutomaticBuildTaskInput,
   submitAutomaticBuildTaskCandidate,
 } from "../../../skills/build/automatic-build";
@@ -53,12 +54,16 @@ import {
 import { readAutomaticBuildExecutionIdentity } from "./automatic-build-task-store";
 import { canonicalAutomaticBuildJson } from "./automatic-build-protocol";
 import {
+  CODEX_EXECUTOR_DELIVERY_BATCH_LIMIT_V1,
   CODEX_EXECUTOR_TRANSPORT_PROFILE_V2,
   measureExecutorTransportResponse,
+  packExecutorTransportBatches,
   packExecutorTransportPayload,
+  serializeExecutorMcpToolResult,
   validateExecutorTransportPack,
   validateExecutorTransportProfile,
   type ExecutorTransportChunkFrameV2,
+  type PackedExecutorTransportBatchV1,
   type ExecutorTransportPackWithinLimitV2,
   type ExecutorTransportProfileV2,
 } from "./executor-transport";
@@ -77,6 +82,16 @@ import {
   type BuildIntentV1,
   type BuildPlanV1,
 } from "./build-intent";
+
+export type AutomaticBuildExecutorServerPhaseBoundaryV1 =
+  | "current-state/claim"
+  | "input-render-or-reuse"
+  | "candidate-gate"
+  | "writer/commit";
+
+export interface AutomaticBuildExecutorServerTimingObserverV1 {
+  complete_phase: (phase: AutomaticBuildExecutorServerPhaseBoundaryV1) => void;
+}
 import { epubToSource } from "./epub-adapter";
 import {
   buildAutomaticBuildSnapshot,
@@ -367,6 +382,15 @@ interface AutomaticBuildExecutorDeliveryReceiptRecordV2 {
   confirmed_at: string;
 }
 
+interface AutomaticBuildExecutorBatchOfferRecordV1 {
+  version: "automatic_build_executor_batch_offer_record.v1";
+  opaque_session_ref: string;
+  generation_input_ref: string;
+  first_ordinal: number;
+  last_ordinal: number;
+  offered_at: string;
+}
+
 interface AutomaticBuildExecutorGenerationGrantRecordV2 {
   version: "automatic_build_executor_generation_grant_record.v2";
   opaque_session_ref: string;
@@ -489,11 +513,11 @@ export interface AutomaticBuildExecutorInputManifestV3 {
   total_chunk_count: number;
 }
 
-export interface AutomaticBuildExecutorInputNextRequestV3 {
-  version: "automatic_build_executor_input_next_request.v3";
+export interface AutomaticBuildExecutorInputNextRequestV4 {
+  version: "automatic_build_executor_input_next_request.v4";
   opaque_session_ref: string;
   generation_input_ref: string;
-  previous_chunk_ordinal?: number;
+  ack_through_ordinal?: number;
   now?: string;
 }
 
@@ -509,6 +533,16 @@ export interface AutomaticBuildExecutorInputChunkV3 {
   final_for_generation: boolean;
 }
 
+export interface AutomaticBuildExecutorInputBatchV1 {
+  version: "automatic_build_executor_input_batch.v1";
+  opaque_session_ref: string;
+  generation_input_ref: string;
+  first_ordinal: number;
+  last_ordinal: number;
+  final_for_generation: boolean;
+  chunks: AutomaticBuildExecutorInputChunkV3[];
+}
+
 export interface AutomaticBuildExecutorGenerationGrantV2 {
   version: "automatic_build_executor_generation_grant.v2";
   opaque_session_ref: string;
@@ -518,10 +552,11 @@ export interface AutomaticBuildExecutorGenerationGrantV2 {
   output_schema_version: string;
 }
 
-export interface AutomaticBuildExecutorGenerationStartRequestV2 {
-  version: "automatic_build_executor_generation_start_request.v2";
+export interface AutomaticBuildExecutorGenerationStartRequestV3 {
+  version: "automatic_build_executor_generation_start_request.v3";
   opaque_session_ref: string;
-  generation_grant_ref: string;
+  generation_input_ref: string;
+  confirmed_through_ordinal: number;
   now?: string;
 }
 
@@ -529,10 +564,9 @@ export type AutomaticBuildExecutorSessionActionV3 =
   | {
       kind: "DELIVER_INPUT";
       input_manifest: AutomaticBuildExecutorInputManifestV3;
-      next_request: AutomaticBuildExecutorInputNextRequestV3;
+      next_request: AutomaticBuildExecutorInputNextRequestV4;
     }
-  | { kind: "INPUT_CHUNK"; chunk: AutomaticBuildExecutorInputChunkV3 }
-  | { kind: "GENERATION_GRANT"; grant: AutomaticBuildExecutorGenerationGrantV2 }
+  | { kind: "INPUT_BATCH"; batch: AutomaticBuildExecutorInputBatchV1 }
   | {
       kind: "GENERATE";
       opaque_session_ref: string;
@@ -1873,6 +1907,7 @@ interface AutomaticBuildExecutorDeliveryMaterialV3 {
   output_contract: AutomaticBuildExecutorOutputContractV3;
   manifest: AutomaticBuildExecutorInputManifestV3;
   chunks: AutomaticBuildExecutorInputChunkV3[];
+  batches: PackedExecutorTransportBatchV1<AutomaticBuildExecutorInputChunkV3>[];
 }
 
 function semanticCandidateContractV2(
@@ -1908,6 +1943,21 @@ function deliveryReceiptFile(opaqueSessionRef: string, ordinal: number): string 
   return registryFile(
     "executor-v3-delivery-receipts",
     `${validateOpaqueSessionRef(opaqueSessionRef)}-${String(ordinal).padStart(4, "0")}`,
+  );
+}
+
+function batchOfferFile(
+  opaqueSessionRef: string,
+  firstOrdinal: number,
+  lastOrdinal: number,
+): string {
+  if (!Number.isSafeInteger(firstOrdinal) || firstOrdinal < 0
+    || !Number.isSafeInteger(lastOrdinal) || lastOrdinal < firstOrdinal) {
+    throw new Error("delivery batch offer ordinals are invalid");
+  }
+  return registryFile(
+    "executor-v3-delivery-batch-offers",
+    `${validateOpaqueSessionRef(opaqueSessionRef)}-${String(firstOrdinal).padStart(4, "0")}-${String(lastOrdinal).padStart(4, "0")}`,
   );
 }
 
@@ -2008,7 +2058,7 @@ function packDeliverySegment(input: {
   const packed = packExecutorTransportPayload({
     profile: CODEX_EXECUTOR_TRANSPORT_PROFILE_V2,
     payload_utf8: input.payload_utf8,
-    envelope_for_chunk: (frame: ExecutorTransportChunkFrameV2): AutomaticBuildExecutorSessionResponseV3 => {
+    envelope_for_chunk: (frame: ExecutorTransportChunkFrameV2): AutomaticBuildExecutorInputChunkV3 => {
       const ordinal = input.ordinal_offset + frame.ordinal;
       const finalForGeneration = input.segment === "semantic_input" && frame.final;
       const chunk: AutomaticBuildExecutorInputChunkV3 = {
@@ -2022,10 +2072,7 @@ function packDeliverySegment(input: {
         final_for_segment: frame.final,
         final_for_generation: finalForGeneration,
       };
-      return {
-        version: "automatic_build_executor_session.v3",
-        action: { kind: "INPUT_CHUNK", chunk },
-      };
+      return chunk;
     },
   });
   if (packed.status !== "within_limit") {
@@ -2068,18 +2115,36 @@ function packedDeliveryMaterial(input: {
   const chunks = [...promptPack.chunks, ...inputPack.chunks].map((chunk) => {
     const response = chunk.response;
     if (!isRecord(response)
-      || response.version !== "automatic_build_executor_session.v3"
-      || !isRecord(response.action)
-      || response.action.kind !== "INPUT_CHUNK"
-      || !isRecord(response.action.chunk)
-      || response.action.chunk.version !== "automatic_build_executor_input_chunk.v3") {
+      || response.version !== "automatic_build_executor_input_chunk.v3") {
       throw new Error("executor input transport produced an invalid chunk envelope");
     }
-    return response.action.chunk as unknown as AutomaticBuildExecutorInputChunkV3;
+    return response as unknown as AutomaticBuildExecutorInputChunkV3;
   });
   if (chunks.some((chunk, ordinal) => chunk.ordinal !== ordinal
     || chunk.final_for_generation !== (ordinal === chunks.length - 1))) {
     throw new Error("executor input transport chunk ordering is invalid");
+  }
+  const batchPack = packExecutorTransportBatches({
+    chunks,
+    limit: CODEX_EXECUTOR_DELIVERY_BATCH_LIMIT_V1,
+    envelope_for_chunks: (batchChunks): AutomaticBuildExecutorSessionResponseV3 => ({
+      version: "automatic_build_executor_session.v3",
+      action: {
+        kind: "INPUT_BATCH",
+        batch: {
+          version: "automatic_build_executor_input_batch.v1",
+          opaque_session_ref: input.opaque_session_ref,
+          generation_input_ref: input.generation_input_ref,
+          first_ordinal: batchChunks[0].ordinal,
+          last_ordinal: batchChunks.at(-1)!.ordinal,
+          final_for_generation: batchChunks.at(-1)!.final_for_generation,
+          chunks: batchChunks,
+        },
+      },
+    }),
+  });
+  if (batchPack.status !== "within_limit") {
+    throw new AutomaticBuildExecutorTransportError();
   }
   return {
     semantic_prompt: input.semantic_prompt,
@@ -2107,6 +2172,7 @@ function packedDeliveryMaterial(input: {
       total_chunk_count: totalChunkCount,
     },
     chunks,
+    batches: batchPack.batches,
   };
 }
 
@@ -2572,6 +2638,28 @@ function readGenerationInputRecord(
   return record;
 }
 
+function materialFromFrozenGenerationInput(input: {
+  delivery: AutomaticBuildExecutorAnyDeliverySessionRecordV3;
+  expected_semantic_prompt?: string;
+  expected_semantic_input?: string;
+  build_material: (
+    generationInput: AutomaticBuildExecutorGenerationInputRecordV1,
+  ) => AutomaticBuildExecutorDeliveryMaterialV3;
+}): AutomaticBuildExecutorDeliveryMaterialV3 {
+  const generationInput = readGenerationInputRecord(input.delivery);
+  if (input.expected_semantic_prompt !== undefined
+    && generationInput.semantic_prompt !== input.expected_semantic_prompt) {
+    throw new Error("executor delivery semantic prompt changed after input freeze");
+  }
+  if (input.expected_semantic_input !== undefined
+    && generationInput.semantic_input !== input.expected_semantic_input) {
+    throw new Error("executor private frozen task, Blueprint, or output contract changed after input freeze");
+  }
+  const material = input.build_material(generationInput);
+  assertDeliveryMaterialMatches(input.delivery, material);
+  return material;
+}
+
 function validateDeliveryReceiptRecord(
   value: unknown,
   delivery: AutomaticBuildExecutorAnyDeliverySessionRecordV3,
@@ -2633,6 +2721,103 @@ function confirmDeliveryChunk(
   const file = deliveryReceiptFile(delivery.opaque_session_ref, chunk.ordinal);
   if (writeCreateOnly(file, record)) return record;
   return validateDeliveryReceiptRecord(decodeJsonRecord(file), delivery, chunk);
+}
+
+function inputBatchFromPacked(
+  batch: PackedExecutorTransportBatchV1<AutomaticBuildExecutorInputChunkV3>,
+): AutomaticBuildExecutorInputBatchV1 {
+  const first = batch.chunks[0];
+  const last = batch.chunks.at(-1);
+  if (!first || !last
+    || first.ordinal !== batch.first_ordinal
+    || last.ordinal !== batch.last_ordinal) {
+    throw new Error("executor input batch ordering is invalid");
+  }
+  return {
+    version: "automatic_build_executor_input_batch.v1",
+    opaque_session_ref: first.opaque_session_ref,
+    generation_input_ref: first.generation_input_ref,
+    first_ordinal: first.ordinal,
+    last_ordinal: last.ordinal,
+    final_for_generation: last.final_for_generation,
+    chunks: batch.chunks,
+  };
+}
+
+function offerDeliveryBatch(
+  delivery: AutomaticBuildExecutorAnyDeliverySessionRecordV3,
+  batch: PackedExecutorTransportBatchV1<AutomaticBuildExecutorInputChunkV3>,
+  offeredAt: string,
+): AutomaticBuildExecutorBatchOfferRecordV1 {
+  const inputBatch = inputBatchFromPacked(batch);
+  if (inputBatch.opaque_session_ref !== delivery.opaque_session_ref
+    || inputBatch.generation_input_ref !== delivery.generation_input_ref) {
+    throw new Error("executor input batch does not match its delivery session");
+  }
+  const proposed: AutomaticBuildExecutorBatchOfferRecordV1 = {
+    version: "automatic_build_executor_batch_offer_record.v1",
+    opaque_session_ref: delivery.opaque_session_ref,
+    generation_input_ref: delivery.generation_input_ref,
+    first_ordinal: inputBatch.first_ordinal,
+    last_ordinal: inputBatch.last_ordinal,
+    offered_at: offeredAt,
+  };
+  const file = batchOfferFile(
+    delivery.opaque_session_ref,
+    inputBatch.first_ordinal,
+    inputBatch.last_ordinal,
+  );
+  if (writeCreateOnly(file, proposed)) return proposed;
+  const existing = decodeJsonRecord(file);
+  if (!isRecord(existing)) throw new Error("executor input batch offer is invalid");
+  exactKeys(existing, [
+    "version",
+    "opaque_session_ref",
+    "generation_input_ref",
+    "first_ordinal",
+    "last_ordinal",
+    "offered_at",
+  ]);
+  if (existing.version !== proposed.version
+    || existing.opaque_session_ref !== proposed.opaque_session_ref
+    || existing.generation_input_ref !== proposed.generation_input_ref
+    || existing.first_ordinal !== proposed.first_ordinal
+    || existing.last_ordinal !== proposed.last_ordinal) {
+    throw new Error("executor input batch offer conflicts with its delivery session");
+  }
+  return {
+    ...proposed,
+    offered_at: isoTimestamp(existing.offered_at, "offered_at"),
+  };
+}
+
+function requireDeliveryBatchOffer(
+  delivery: AutomaticBuildExecutorAnyDeliverySessionRecordV3,
+  batch: PackedExecutorTransportBatchV1<AutomaticBuildExecutorInputChunkV3>,
+): void {
+  const file = batchOfferFile(delivery.opaque_session_ref, batch.first_ordinal, batch.last_ordinal);
+  if (!existsSync(file)) throw new Error("executor generation.start requires the final batch delivery");
+  offerDeliveryBatch(delivery, batch, new Date(0).toISOString());
+}
+
+function confirmDeliveryBatch(
+  delivery: AutomaticBuildExecutorAnyDeliverySessionRecordV3,
+  batch: PackedExecutorTransportBatchV1<AutomaticBuildExecutorInputChunkV3>,
+  confirmedAt: string,
+): void {
+  for (const chunk of batch.chunks) confirmDeliveryChunk(delivery, chunk, confirmedAt);
+}
+
+function inputBatchResponse(
+  delivery: AutomaticBuildExecutorAnyDeliverySessionRecordV3,
+  batch: PackedExecutorTransportBatchV1<AutomaticBuildExecutorInputChunkV3>,
+  offeredAt: string,
+): AutomaticBuildExecutorSessionResponseV3 {
+  offerDeliveryBatch(delivery, batch, offeredAt);
+  return boundedV3Response({
+    version: "automatic_build_executor_session.v3",
+    action: { kind: "INPUT_BATCH", batch: inputBatchFromPacked(batch) },
+  });
 }
 
 function validateGenerationGrantRecord(
@@ -2723,29 +2908,17 @@ function issueGenerationGrant(
   return validateGenerationGrantRecord(decodeJsonRecord(file), delivery, material);
 }
 
-function grantResponse(
-  record: AutomaticBuildExecutorGenerationGrantRecordV2,
-): AutomaticBuildExecutorSessionResponseV3 {
-  return boundedV3Response({
-    version: "automatic_build_executor_session.v3",
-    action: {
-      kind: "GENERATION_GRANT",
-      grant: {
-        version: "automatic_build_executor_generation_grant.v2",
-        opaque_session_ref: record.opaque_session_ref,
-        generation_input_ref: record.generation_input_ref,
-        generation_grant_ref: record.generation_grant_ref,
-        final_delivered_ordinal: record.final_delivered_ordinal,
-        output_schema_version: record.output_schema_version,
-      },
-    },
-  });
-}
-
 function boundedV3Response(
   response: AutomaticBuildExecutorSessionResponseV3,
   payloadUtf8 = "",
 ): AutomaticBuildExecutorSessionResponseV3 {
+  if (response.action.kind === "INPUT_BATCH") {
+    const serializedBytes = Buffer.byteLength(serializeExecutorMcpToolResult(response), "utf8");
+    if (serializedBytes > CODEX_EXECUTOR_DELIVERY_BATCH_LIMIT_V1.max_serialized_batch_bytes) {
+      throw new Error("executor V3 input batch exceeds its delivery batch limit");
+    }
+    return response;
+  }
   const measured = measureExecutorTransportResponse(
     response,
     payloadUtf8,
@@ -3078,7 +3251,7 @@ function deliveryProgressResponse(input: {
   material: AutomaticBuildExecutorDeliveryMaterialV3;
 }): AutomaticBuildExecutorSessionResponseV3 {
   const receipts = confirmedDeliveryReceipts(input.delivery, input.material);
-  const previousChunkOrdinal = receipts.length === input.material.chunks.length
+  const acknowledgedThroughOrdinal = receipts.length === input.material.chunks.length
     ? undefined
     : receipts.at(-1)?.ordinal;
   return boundedV3Response({
@@ -3087,12 +3260,12 @@ function deliveryProgressResponse(input: {
       kind: "DELIVER_INPUT",
       input_manifest: input.material.manifest,
       next_request: {
-        version: "automatic_build_executor_input_next_request.v3",
+        version: "automatic_build_executor_input_next_request.v4",
         opaque_session_ref: input.delivery.opaque_session_ref,
         generation_input_ref: input.delivery.generation_input_ref,
-        ...(previousChunkOrdinal === undefined
+        ...(acknowledgedThroughOrdinal === undefined
           ? {}
-          : { previous_chunk_ordinal: previousChunkOrdinal }),
+          : { ack_through_ordinal: acknowledgedThroughOrdinal }),
       },
     },
   });
@@ -3560,14 +3733,16 @@ function resolveDeliverySessionContext(
     if (openRecord.opaque_session_ref !== delivery.open_session_ref) {
       throw new Error("executor private delivery open identity changed");
     }
-    const generationInput = readGenerationInputRecord(delivery);
-    const material = renderPrivateDeliveryMaterial({
-      context,
-      opaque_session_ref: delivery.opaque_session_ref,
-      opaque_handoff_ref: delivery.opaque_handoff_ref,
-      semantic_input: generationInput.semantic_input,
+    const material = materialFromFrozenGenerationInput({
+      delivery,
+      expected_semantic_input: canonicalAutomaticBuildJson(context.attempt.task),
+      build_material: (generationInput) => renderPrivateDeliveryMaterial({
+        context,
+        opaque_session_ref: delivery.opaque_session_ref,
+        opaque_handoff_ref: delivery.opaque_handoff_ref,
+        semantic_input: generationInput.semantic_input,
+      }),
     });
-    assertDeliveryMaterialMatches(delivery, material);
     return {
       kind: "private_artifact",
       delivery,
@@ -3596,21 +3771,20 @@ function resolveDeliverySessionContext(
   if (stage.descriptor.stage !== delivery.stage) {
     throw new Error("executor delivery work unit stage changed");
   }
-  const generationInput = readGenerationInputRecord(delivery);
-  if (generationInput.semantic_prompt !== published.semantic_prompt) {
-    throw new Error("executor delivery semantic prompt changed after input freeze");
-  }
-  const material = renderDeliveryMaterial({
-    target: published.target,
-    persisted: published.persisted,
-    semantic_prompt: generationInput.semantic_prompt,
-    opaque_session_ref: delivery.opaque_session_ref,
-    opaque_handoff_ref: delivery.opaque_handoff_ref,
-    owner: published.owner,
-    work_unit_id: delivery.work_unit_id,
-    semantic_input: generationInput.semantic_input,
+  const material = materialFromFrozenGenerationInput({
+    delivery,
+    expected_semantic_prompt: published.semantic_prompt,
+    build_material: (generationInput) => renderDeliveryMaterial({
+      target: published.target,
+      persisted: published.persisted,
+      semantic_prompt: generationInput.semantic_prompt,
+      opaque_session_ref: delivery.opaque_session_ref,
+      opaque_handoff_ref: delivery.opaque_handoff_ref,
+      owner: published.owner,
+      work_unit_id: delivery.work_unit_id,
+      semantic_input: generationInput.semantic_input,
+    }),
   });
-  assertDeliveryMaterialMatches(delivery, material);
   return {
     kind: "public_dispatch",
     delivery,
@@ -3754,26 +3928,26 @@ export function openAutomaticBuildExecutorSessionV3(
 
 function validateInputNextRequest(
   value: unknown,
-): AutomaticBuildExecutorInputNextRequestV3 {
+): AutomaticBuildExecutorInputNextRequestV4 {
   if (!isRecord(value)) throw new Error("executor input.next request must be an object");
   exactKeys(
     value,
     ["version", "opaque_session_ref", "generation_input_ref"],
-    ["previous_chunk_ordinal", "now"],
+    ["ack_through_ordinal", "now"],
   );
-  if (value.version !== "automatic_build_executor_input_next_request.v3") {
+  if (value.version !== "automatic_build_executor_input_next_request.v4") {
     throw new Error("executor input.next request version is unsupported");
   }
   return {
     version: value.version,
     opaque_session_ref: validateOpaqueSessionRef(value.opaque_session_ref),
     generation_input_ref: validateGenerationInputRef(value.generation_input_ref),
-    ...(value.previous_chunk_ordinal === undefined
+    ...(value.ack_through_ordinal === undefined
       ? {}
       : {
-          previous_chunk_ordinal: nonNegativeSafeInteger(
-            value.previous_chunk_ordinal,
-            "previous_chunk_ordinal",
+          ack_through_ordinal: nonNegativeSafeInteger(
+            value.ack_through_ordinal,
+            "ack_through_ordinal",
           ),
         }),
     ...(value.now === undefined ? {} : { now: isoTimestamp(value.now, "now") }),
@@ -3781,7 +3955,7 @@ function validateInputNextRequest(
 }
 
 export function nextAutomaticBuildExecutorInput(
-  requestValue: AutomaticBuildExecutorInputNextRequestV3,
+  requestValue: AutomaticBuildExecutorInputNextRequestV4,
   options: { now?: string } = {},
 ): AutomaticBuildExecutorSessionResponseV3 {
   const request = validateInputNextRequest(requestValue);
@@ -3791,76 +3965,73 @@ export function nextAutomaticBuildExecutorInput(
   if (request.generation_input_ref !== context.delivery.generation_input_ref) {
     throw new Error("executor input.next generation input ref does not match its session");
   }
+  const batches = context.material.batches;
   let receipts = confirmedDeliveryReceipts(context.delivery, context.material);
-  if (receipts.length === context.material.chunks.length) {
-    if (request.previous_chunk_ordinal === undefined) {
-      const chunk = context.material.chunks[0];
-      return boundedV3Response({
-        version: "automatic_build_executor_session.v3",
-        action: { kind: "INPUT_CHUNK", chunk },
-      }, chunk.payload_utf8);
+  const allConfirmed = receipts.length === context.material.chunks.length;
+  if (request.ack_through_ordinal === undefined) {
+    if (!allConfirmed && receipts.length !== 0) {
+      throw new Error("executor input.next is missing the latest batch acknowledgement");
     }
-    const replayOrdinal = request.previous_chunk_ordinal;
-    if (replayOrdinal >= context.material.chunks.length) {
-      throw new Error("executor input.next ordinal is unknown for its session");
-    }
-    if (replayOrdinal === context.material.chunks.length - 1) {
-      return grantResponse(issueGenerationGrant(context.delivery, context.material, now));
-    }
-    const chunk = context.material.chunks[replayOrdinal + 1];
-    return boundedV3Response({
-      version: "automatic_build_executor_session.v3",
-      action: { kind: "INPUT_CHUNK", chunk },
-    }, chunk.payload_utf8);
+    return inputBatchResponse(context.delivery, batches[0], now);
   }
-  if (request.previous_chunk_ordinal === undefined) {
-    if (receipts.length !== 0) {
-      throw new Error("executor input.next is missing the latest delivered ordinal");
+
+  const ackOrdinal = request.ack_through_ordinal;
+  const acknowledgedBatchIndex = batches.findIndex((batch) => batch.last_ordinal === ackOrdinal);
+  if (acknowledgedBatchIndex < 0) {
+    throw new Error("executor input.next ack ordinal is not a batch boundary");
+  }
+  if (acknowledgedBatchIndex === batches.length - 1) {
+    throw new Error("executor input.next cannot acknowledge the final batch; use generation.start");
+  }
+  if (!allConfirmed) {
+    const confirmedThrough = receipts.at(-1)?.ordinal;
+    if (confirmedThrough !== undefined && ackOrdinal < confirmedThrough) {
+      throw new Error("executor input.next ack ordinal moved backwards");
     }
-  } else {
-    const receiptOrdinal = request.previous_chunk_ordinal;
-    if (receiptOrdinal >= context.material.chunks.length) {
-      throw new Error("executor input.next ordinal is unknown for its session");
-    }
-    if (receiptOrdinal === receipts.length) {
-      confirmDeliveryChunk(context.delivery, context.material.chunks[receiptOrdinal], now);
+    if (ackOrdinal !== confirmedThrough) {
+      const nextUnconfirmedBatch = batches.find(
+        (batch) => batch.first_ordinal === receipts.length,
+      );
+      if (!nextUnconfirmedBatch || ackOrdinal !== nextUnconfirmedBatch.last_ordinal) {
+        throw new Error("executor input.next ack ordinal is out of order");
+      }
+      requireDeliveryBatchOffer(context.delivery, nextUnconfirmedBatch);
+      confirmDeliveryBatch(context.delivery, nextUnconfirmedBatch, now);
       receipts = confirmedDeliveryReceipts(context.delivery, context.material);
-    } else if (receiptOrdinal !== receipts.length - 1) {
-      throw new Error("executor input.next ordinal is out of order");
+      if (receipts.at(-1)?.ordinal !== ackOrdinal) {
+        throw new Error("executor input.next batch acknowledgement did not remain contiguous");
+      }
     }
   }
-  if (receipts.length === context.material.chunks.length) {
-    return grantResponse(issueGenerationGrant(context.delivery, context.material, now));
-  }
-  const chunk = context.material.chunks[receipts.length];
-  return boundedV3Response({
-    version: "automatic_build_executor_session.v3",
-    action: { kind: "INPUT_CHUNK", chunk },
-  }, chunk.payload_utf8);
+  return inputBatchResponse(context.delivery, batches[acknowledgedBatchIndex + 1], now);
 }
 
 function validateGenerationStartRequest(
   value: unknown,
-): AutomaticBuildExecutorGenerationStartRequestV2 {
+): AutomaticBuildExecutorGenerationStartRequestV3 {
   if (!isRecord(value)) throw new Error("executor generation.start request must be an object");
   exactKeys(
     value,
-    ["version", "opaque_session_ref", "generation_grant_ref"],
+    ["version", "opaque_session_ref", "generation_input_ref", "confirmed_through_ordinal"],
     ["now"],
   );
-  if (value.version !== "automatic_build_executor_generation_start_request.v2") {
+  if (value.version !== "automatic_build_executor_generation_start_request.v3") {
     throw new Error("executor generation.start request version is unsupported");
   }
   return {
     version: value.version,
     opaque_session_ref: validateOpaqueSessionRef(value.opaque_session_ref),
-    generation_grant_ref: validateGenerationGrantRef(value.generation_grant_ref),
+    generation_input_ref: validateGenerationInputRef(value.generation_input_ref),
+    confirmed_through_ordinal: nonNegativeSafeInteger(
+      value.confirmed_through_ordinal,
+      "confirmed_through_ordinal",
+    ),
     ...(value.now === undefined ? {} : { now: isoTimestamp(value.now, "now") }),
   };
 }
 
 function generationStartAcceptance(
-  request: AutomaticBuildExecutorGenerationStartRequestV2,
+  request: AutomaticBuildExecutorGenerationStartRequestV3,
   delivery: AutomaticBuildExecutorAnyDeliverySessionRecordV3,
   grant: AutomaticBuildExecutorGenerationGrantRecordV2,
   acceptedAt: string,
@@ -3872,7 +4043,7 @@ function generationStartAcceptance(
     generation_grant_ref: grant.generation_grant_ref,
     accepted_at: acceptedAt,
   };
-  const file = generationStartAcceptanceFile(request.generation_grant_ref);
+  const file = generationStartAcceptanceFile(grant.generation_grant_ref);
   if (writeCreateOnly(file, proposed)) return proposed;
   const existing = decodeJsonRecord(file);
   if (!isRecord(existing)) throw new Error("executor generation start acceptance is invalid");
@@ -3896,34 +4067,51 @@ function generationStartAcceptance(
 }
 
 export function startAutomaticBuildExecutorGeneration(
-  requestValue: AutomaticBuildExecutorGenerationStartRequestV2,
-  options: { now?: string } = {},
+  requestValue: AutomaticBuildExecutorGenerationStartRequestV3,
+  options: {
+    now?: string;
+    timing?: AutomaticBuildExecutorServerTimingObserverV1;
+  } = {},
 ): AutomaticBuildExecutorSessionResponseV3 {
   const request = validateGenerationStartRequest(requestValue);
   const nowValue = options.now ?? request.now;
   const now = nowValue === undefined ? new Date().toISOString() : isoTimestamp(nowValue, "now");
   const context = resolveDeliverySessionContext(request.opaque_session_ref);
-  const receipts = confirmedDeliveryReceipts(context.delivery, context.material);
+  if (request.generation_input_ref !== context.delivery.generation_input_ref) {
+    throw new Error("executor generation.start generation input ref does not match its session");
+  }
+  const finalBatch = context.material.batches.at(-1);
+  const finalChunk = context.material.chunks.at(-1);
+  if (!finalBatch || !finalChunk
+    || request.confirmed_through_ordinal !== finalChunk.ordinal
+    || finalBatch.last_ordinal !== finalChunk.ordinal) {
+    throw new Error("executor generation.start must confirm the final batch ordinal");
+  }
+  requireDeliveryBatchOffer(context.delivery, finalBatch);
+  let receipts = confirmedDeliveryReceipts(context.delivery, context.material);
+  if (receipts.length !== context.material.chunks.length) {
+    if (receipts.length !== finalBatch.first_ordinal) {
+      throw new Error("executor generation.start requires every non-final batch acknowledgement");
+    }
+    confirmDeliveryBatch(context.delivery, finalBatch, now);
+    receipts = confirmedDeliveryReceipts(context.delivery, context.material);
+  }
   if (receipts.length !== context.material.chunks.length) {
     throw new Error("executor generation.start requires complete input delivery");
   }
   const grant = issueGenerationGrant(context.delivery, context.material, now);
-  if (grant.generation_grant_ref !== request.generation_grant_ref) {
-    throw new Error("executor generation.start grant does not match its session");
-  }
   const existingStart = readGenerationStartRecord(grant);
-  if (existingStart) return existingStart.response;
+  if (existingStart) {
+    options.timing?.complete_phase("current-state/claim");
+    options.timing?.complete_phase("input-render-or-reuse");
+    return existingStart.response;
+  }
   const acceptance = generationStartAcceptance(request, context.delivery, grant, now);
   if (context.kind === "private_artifact") {
     if (context.context.inspection.state !== "pending") {
       throw new Error("executor private generation.start task is already terminal");
     }
-    const currentMaterial = renderPrivateDeliveryMaterial({
-      context: context.context,
-      opaque_session_ref: context.delivery.opaque_session_ref,
-      opaque_handoff_ref: context.delivery.opaque_handoff_ref,
-    });
-    assertDeliveryMaterialMatches(context.delivery, currentMaterial);
+    options.timing?.complete_phase("current-state/claim");
     const privateSession = persistPrivateSessionRecord({
       opaque_handoff_ref: context.delivery.opaque_handoff_ref,
       open_record: context.open_record,
@@ -3933,9 +4121,12 @@ export function startAutomaticBuildExecutorGeneration(
     const outputContract = privateArtifactCandidateContractV2(
       context.context.attempt.task,
     );
-    if (outputContract.version !== grant.output_schema_version) {
+    if (outputContract.version !== grant.output_schema_version
+      || canonicalAutomaticBuildJson(outputContract)
+        !== canonicalAutomaticBuildJson(context.material.output_contract)) {
       throw new Error("executor private generation.start output contract changed after grant");
     }
+    options.timing?.complete_phase("input-render-or-reuse");
     const candidateSink = issuePrivateCandidateSink({
       private_session: privateSession,
       delivery: context.delivery,
@@ -3978,6 +4169,14 @@ export function startAutomaticBuildExecutorGeneration(
     throw new Error("executor generation.start delivery is no longer the current dispatch task");
   }
   const stage = taskDescriptor(context.target, context.persisted, context.delivery.work_unit_id);
+  const currentBinding = stage.task_bindings[context.delivery.work_unit_id];
+  if (!currentBinding) {
+    throw new Error("executor generation.start current task policy binding is unavailable");
+  }
+  if (isAutomaticBuildTaskPolicyBindingV2(currentBinding)
+    && currentBinding.input_hash !== context.delivery.semantic_input_sha256) {
+    throw new Error("executor generation.start frozen input no longer matches the current task binding");
+  }
   const advanced = advanceAutomaticBuildDispatch(
     context.target,
     context.owner.stage,
@@ -4023,22 +4222,21 @@ export function startAutomaticBuildExecutorGeneration(
     claim,
     created_at: acceptance.accepted_at,
   });
-  const rendered = runAutomaticBuildTaskInput(
+  options.timing?.complete_phase("current-state/claim");
+  runAutomaticBuildFrozenTaskInput(
     context.target,
     taskSession.stage,
     taskSession.work_unit_id,
     taskSession.lease_ref,
     taskSession.lease_token,
+    context.material.semantic_input,
     { now: acceptance.accepted_at, run_ttl_ms: context.persisted.run_ttl_ms },
-  ).stdout;
-  if (sha256(rendered) !== context.delivery.semantic_input_sha256
-    || Buffer.byteLength(rendered, "utf8") !== context.delivery.semantic_input_byte_length) {
-    throw new Error("executor generation.start rendered input changed after delivery");
-  }
+  );
   const outputContract = semanticCandidateContractV2(stage.descriptor);
   if (outputContract.version !== grant.output_schema_version) {
     throw new Error("executor generation.start output contract changed after grant");
   }
+  options.timing?.complete_phase("input-render-or-reuse");
   const candidateSink = issueCandidateSink({
     task_session: taskSession,
     delivery: context.delivery,
@@ -4108,7 +4306,10 @@ function stagePrivateArtifactCandidateValue(
 
 export function submitAutomaticBuildExecutorCandidateV3(
   requestValue: AutomaticBuildExecutorCandidateSubmitV3,
-  options: { now?: string } = {},
+  options: {
+    now?: string;
+    timing?: AutomaticBuildExecutorServerTimingObserverV1;
+  } = {},
 ): AutomaticBuildExecutorSessionResponseV3 {
   const request = validateCandidateSubmitRequestV3(requestValue);
   const nowValue = options.now ?? request.now;
@@ -4152,7 +4353,9 @@ export function submitAutomaticBuildExecutorCandidateV3(
         CODEX_EXECUTOR_TRANSPORT_PROFILE_V2.max_candidate_request_bytes,
       ),
     );
+    options.timing?.complete_phase("candidate-gate");
     submitPrivateArtifactContext(privateResolved.context, now);
+    options.timing?.complete_phase("writer/commit");
     return openAutomaticBuildExecutorSessionV3(sink.opaque_handoff_ref, { now });
   }
   const taskSession = resolveTaskSession(request.opaque_session_ref);
@@ -4204,6 +4407,7 @@ export function submitAutomaticBuildExecutorCandidateV3(
       now,
     },
   );
+  options.timing?.complete_phase("candidate-gate");
   submitAutomaticBuildTaskCandidate(
     taskSession.target,
     taskSession.task_session.stage,
@@ -4212,6 +4416,7 @@ export function submitAutomaticBuildExecutorCandidateV3(
     taskSession.task_session.lease_token,
     { now },
   );
+  options.timing?.complete_phase("writer/commit");
   return openAutomaticBuildExecutorSessionV3(sink.opaque_handoff_ref, { now });
 }
 
@@ -4519,6 +4724,7 @@ function validateInterruptRequest(value: unknown): AutomaticBuildExecutorInterru
 
 export function runAutomaticBuildExecutorSessionCommand(
   value: unknown,
+  options: { timing?: AutomaticBuildExecutorServerTimingObserverV1 } = {},
 ): AutomaticBuildExecutorSessionResponseV1 | AutomaticBuildExecutorSessionResponseV3 {
   if (!isRecord(value) || typeof value.version !== "string") {
     throw new Error("executor session request must be a versioned object");
@@ -4531,17 +4737,23 @@ export function runAutomaticBuildExecutorSessionCommand(
     const request = validateOpenRequestV3(value);
     return openAutomaticBuildExecutorSessionV3(request.opaque_handoff_ref, { now: request.now });
   }
-  if (value.version === "automatic_build_executor_input_next_request.v3") {
+  if (value.version === "automatic_build_executor_input_next_request.v4") {
     const request = validateInputNextRequest(value);
     return nextAutomaticBuildExecutorInput(request, { now: request.now });
   }
-  if (value.version === "automatic_build_executor_generation_start_request.v2") {
+  if (value.version === "automatic_build_executor_generation_start_request.v3") {
     const request = validateGenerationStartRequest(value);
-    return startAutomaticBuildExecutorGeneration(request, { now: request.now });
+    return startAutomaticBuildExecutorGeneration(request, {
+      now: request.now,
+      timing: options.timing,
+    });
   }
   if (value.version === "automatic_build_executor_candidate_submit.v3") {
     const request = validateCandidateSubmitRequestV3(value);
-    return submitAutomaticBuildExecutorCandidateV3(request, { now: request.now });
+    return submitAutomaticBuildExecutorCandidateV3(request, {
+      now: request.now,
+      timing: options.timing,
+    });
   }
   if (value.version === "automatic_build_executor_submit_request.v1") {
     const request = validateSubmitRequest(value);

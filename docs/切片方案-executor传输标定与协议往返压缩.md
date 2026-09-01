@@ -204,6 +204,8 @@ interface ExecutorOuterTimingV1 {
 
 进入条件:M1 显示 server time 是主要部分，或 `generation.start`/`submit_candidate` 内部占时仍无法指导下一刀。
 
+状态:本切片已实施；真实最大阶段为 `writer/commit`，按冻结顺序下一刀仍为 M2。
+
 **做**:只给两个长 operation 增加互斥阶段计时：
 
 ```text
@@ -217,9 +219,13 @@ submit_candidate = candidate-gate + writer/commit + next-work-prepare
 
 **停止条件**:阶段和无法与 operation total 对齐时，修计时边界，不依据残缺样本改代码。
 
+**完成回执（2026-09-01）**:`executor_mcp_server_timing.v2` 只给两个长 operation 增加固定键的 `server_phase_elapsed_ms`；Core 在真实业务边界完成前两段，MCP 用同一单调时钟补齐 response 尾段，strict JSONL/reducer 拒绝缺段、错键、负值与阶段和不覆盖 server interval。Codex CLI `0.149.0` compiled single fixture 的 `generation.start=1,327.898 ms`，其中 `current-state/claim=250.603 ms`、`input-render-or-reuse=1,068.332 ms`、`persist/response=8.963 ms`；`submit_candidate=1,388.941 ms`，其中 `candidate-gate=239.218 ms`、`writer/commit=1,100.827 ms`、`next-work-prepare=48.896 ms`。最大真实阶段选择 writer 专项；完整 body-free 证据落到 `docs/performance/understand-book-m1b-fixed-codex-timing.json`，M2 完成前不改 writer 或 batch 行为。
+
 ### M2 宿主容量标定
 
 映射:P0.5，必须先于任何 batch response 设计。
+
+状态:本切片已实施；direct result 与 program output 的最大已测试通过档均为 64 KiB，下一刀为 A1。
 
 **做**:在隔离 `CODEX_HOME`、仓外 cwd 和 test-only synthetic MCP server 上，沿与 Executor 相同的 stdio MCP + Codex 路径测试完整 serialized result。探针只运行离散档位 `8/16/32/64 KiB`，在第一次失败后停止更大档位；64 KiB 全部通过也停止，不继续寻找理论最大值。
 
@@ -260,9 +266,13 @@ submit_candidate = candidate-gate + writer/commit + next-work-prepare
 
 **不做**:不在生产 Executor 增加 probe 工具，不调用真实 handoff，不自动改用户配置，不运行无限二分搜索。
 
+**完成回执（2026-09-01）**:`smoke-executor-carrier-capacity.ts` 在仓外 cwd、隔离 `CODEX_HOME` 与 test-only exact-two MCP 上，按 8→16→32→64 KiB 顺序分别执行 direct result 与 `functions.exec` program output；server 只有上一档收到精确 ack 后才允许下一档。ASCII-heavy/CJK-heavy 共 16 档全部满足整条 JSON-RPC response 精确字节、raw direct 或 compact program 尾部完整、JSON 结构闭合与 test-only ack，Codex CLI 为 `0.149.0`；direct/program 的 `max_tested_passing_bytes` 均为 `65,536`，`first_failed_bytes=null`。证据落到 `docs/performance/understand-book-m2-carrier-capacity.json`；64 KiB 只称最大已测试通过档，不称绝对上限，生产 `2,048 tokens / 8,192 bytes` 不在本刀自动改动，A2 日后只可选择不超过 64 KiB 的 batch 边界。
+
 ### A1 程序化领取 A/B
 
 映射:P1 低风险实验。
+
+状态:已停止并拒绝（2026-09-01）；生产 Executor 指令保持 direct model loop，下一刀为 A2。
 
 **做**:不改 Session V3 或四个 MCP 工具；只为实验 Executor 指令允许一个有界 `functions.exec` 程序循环调用现有 `executor.input.next`，直到拿到 `GENERATION_GRANT`，再向 child 模型返回按序拼接的完整 prompt/input 与 grant 控制字段。
 
@@ -294,9 +304,13 @@ direct calls remain= executor.open, generation.start, submit_candidate
 
 **去留**:只有总墙钟或模型步进成本实际下降且正确性不变才保留；“turn 数更少”本身不算成功。
 
+**停止回执（2026-09-01）**:同一 Codex CLI `0.149.0`、同一 compiled Sidecar 与同一 5-chunk synthetic fixture 下，旧 direct 模式完成 9 次 Executor MCP、1 次 semantic attempt 与 1 次 durable commit，其中 `input.next=6`、server `4,861.718 ms`、outer `5,086 ms`；只改专用 Executor 指令的 programmatic 模式在任何 `executor.open` 或 `functions.exec` 调用前返回 bounded lifecycle `interrupted/bootstrap/protocol_incompatible`，durable truth 保持 attempt 0、commit 0。当前角色的有效能力缩减仍含 ADR-0115 冻结的 `shell_tool=false`；为取得 programmatic caller 而放宽该能力会越过 A1“只改实验指令”的范围，因此未继续 2/3/4-chunk 样本，撤回全部 A1 指令与发布投影改动。Body-free A/B 证据见 `docs/performance/understand-book-a1-programmatic-delivery.json`。M2 已证明 64 KiB batch carrier，M1 又证明 `input.next` 有实测 per-call 成本，故下一刀按原判定树进入 A2，不把 A1 的宿主不可用误判为 Session 或 writer 失败。
+
 ### A2 有界 batch 与 final-ack start
 
 映射:P1 真正减少 MCP 次数；只有 M2 支持 batch 且 M1/A1 表明 per-call 成本仍显著时进入。
+
+状态:本切片已实施并保留（2026-09-01）；下一刀为 R1。
 
 **做**:保持 exact-four 工具表面，前向演进 `executor.input.next` 和 `executor.generation.start`：
 
@@ -343,9 +357,15 @@ executor.generation.start.v3(
 
 **不做**:不把 input 与 candidate 合并，不让 start 接收正文，不删除 frozen record、ordinal、receipt 或 attempt 两阶段语义。
 
+**完成回执（2026-09-01）**:`input.next.v4` 以 `ack_through_ordinal` 推进不超过 64 KiB 的连续 `INPUT_BATCH`，`generation.start.v3` 用 `confirmed_through_ordinal` 确认 final batch 并 create-only 建立 grant/start/sink；exact-four、candidate、writer、frozen input 与 attempt 语义不变。Session 28/28、Transport 6/6、Driver 20/20 全覆盖通过；383-module Sidecar 与 compiled exact-four smoke 通过，4 chunks 被 1 batch 完整交付。固定 5-chunk Codex CLI 0.149 A/B 中，baseline 为 9 MCP、server `4,861.718 ms`、outer `5,086 ms`；三次 A2 均为 4 MCP/1 input.next/1 attempt/1 commit，中位数 server `4,708.937 ms`、outer `4,819 ms`、residual `110.063 ms`，相对 baseline 分别下降 `3.14%`、`5.25%`、`50.93%`，故保留。证据见 `docs/performance/understand-book-a2-bounded-batch.json`。
+
+**Limitations**:真实 Codex 计时只覆盖冻结 5-chunk fixture；2/3/4/5-chunk 的 packing、边界 +1、replay、ack 与 attempt 正确性由确定性回归覆盖。首个 A2 样本慢于 baseline，因此按预先声明的三次中位数判定；当前 timing 投影未提供可与 baseline 直接比较的端到端模型墙钟或 token 总量。
+
 ### R1 Public frozen input 复用
 
 映射:P2 第一刀；只改 public dispatch。
+
+状态:本切片已实施并保留（2026-09-01）；下一刀为 R2。
 
 **做**:把 `runAutomaticBuildTaskInput()` 中“启动 lease、再次 render、记录 observation”拆开。open/next-work prepare 仍通过 stage input script 渲染一次并持久化 frozen input；generation.start claim lease 后，直接读取该记录、重验 current control identity 与现有 input binding，并按冻结字节登记 observation。
 
@@ -385,9 +405,15 @@ generation.start:
 
 **停止条件**:发现受支持状态变化只能依赖第二次 renderer 才能检测，且不能由 current task/binding 直接表达；先补真实所有者校验，不用重复子进程兜底。
 
+**完成回执（2026-09-01）**:`runAutomaticBuildTaskInput()` 已拆出共用的 lease start、lease binding 校验与 input observation；public `generation.start` 读取 open 时持久化且已交付的 frozen bytes，先重验 current dispatch/work unit/task binding，再用同一共用段启动 lease 和登记 observation，不再调用 stage renderer。renderer 不可执行红例由失败转绿，work unit 在 delivery 后失效仍于 attempt 0 拒绝；Session public/V1 15/15、Session V3 15/15、Driver 20/20 与 Core typecheck 全绿。Codex CLI 0.149 固定 5-chunk fixture 中，start server 从 A2 三次中位数 `1,463.093 ms` 降至 `326.953 ms`（`-77.65%`），input-render-or-reuse 从 `1,162.372 ms` 降至 `15.069 ms`（`-98.70%`），overall server 从 `4,708.937 ms` 降至 `3,281.022 ms`（`-30.32%`），1 attempt/1 commit 与 thread attribution 不变；证据见 `docs/performance/understand-book-r1-fixed-codex-timing.json`。
+
+**Limitations**:R1 真实计时为一次 Codex 0.149 样本，对照同 fixture 的 A2 三次中位数；剩余 `15.069 ms` 属于 frozen binding 校验与 observation，不是 renderer 子进程；当前 timing 仍无可比端到端模型 token 总量。private frozen input 未在本刀修改，留给 R2。
+
 ### R2 Private frozen input 复用
 
 映射:P2 第二刀；R1 全绿后才进入。
+
+状态:本切片已实施并保留（2026-09-01）；下一刀为 W1。
 
 **做**:把同一单渲染合同扩到 intent artifact/private delivery；不与 public 刀混改，避免一个失败无法归因。
 
@@ -395,9 +421,15 @@ generation.start:
 
 **不做**:不统一 public/private 领域模型，不抽象新兼容层；只复用已由两条路径共同需要的最小 frozen-input helper。
 
+**完成回执（2026-09-01）**:`materialFromFrozenGenerationInput()` 统一 public/private 对 create-only generation input record 的读取、当前冻结字段直比和 delivery material 校验；private start 删除第二次 `renderPrivateDeliveryMaterial()`，并在创建 acceptance/private session/candidate sink/start record 前锁定当前 task、Blueprint 与完整 output contract。红例将 start 的 segment packing 从 4 次锁到 2 次；Driver 22/22、Session 分组 15/15 + 15/15 与 Core typecheck 全绿，private sink/replay/artifact commit 不变。三次 direct Core synthetic 对照中，input-render-or-reuse 中位数 `8.504 → 5.058 ms`（`-40.52%`），两阶段总中位数 `119.609 → 118.514 ms`（`-0.91%`），故保留；证据见 `docs/performance/understand-book-r2-private-frozen-input-timing.json`。
+
+**Limitations**:计时不是 Codex outer/model 墙钟；current-state/claim 仍包含 current intent/plan/task/base 的完整复核并主导总量。完整 Session 单进程的 30 条断言全通过，但 Vitest 命中既有 `onTaskUpdate` RPC timeout；按既有互斥分组重跑后均 clean exit。
+
 ### W1 Submit 主导段专项
 
 映射:P2 后的条件切片，不预设修法。
+
+状态:本切片已实施并保留（2026-09-01）；下一刀为 S1。
 
 进入条件:M1b 显示 `submit_candidate` 在 P1/P2 后仍是最大 server operation。
 
@@ -409,9 +441,15 @@ generation.start:
 
 每个分支必须重新声明 A1 切片；本方案不提前授权后台 writer、额外 MCP turn 或整阶段预渲染。
 
+**完成回执（2026-09-01）**:R1 后 fixed fixture 仍为 `writer/commit=1,150.968 ms` 主导；W1 只把 proof-bound Pass1 generation writer 从额外 Sidecar/TSX 子进程改为当前 deterministic build 进程内调用既有 Core writer，candidate 私有副本、Schema/evidence/quality、同步 durable commit、receipt 与 DONE 边界不变，其他 stage writer 不动。红例在缺失 writer Sidecar 时先得到无 artifact 的失败回执，改后同步提交；路由 11/11、Session V3 15/15、Driver 22/22、Core typecheck、compiled exact-four 与 parity 全绿。同一 Codex 0.151 fixed fixture 的 `writer/commit 1,195.960 → 71.313 ms`（`-94.04%`）、submit server `1,612.416 → 510.616 ms`（`-68.33%`）、overall server `3,466.674 → 2,734.225 ms`（`-21.13%`），均为 4 MCP/1 attempt/1 commit，故保留；证据见 `docs/performance/understand-book-w1-pass1-in-process-writer-timing.json`。
+
+**Limitations**:baseline/W1 各一次顺序样本；因旧 0.149 已不在本机，A/B 同用当前桌面 Codex `0.151.0-alpha.7.1`，不直接与旧版本墙钟相除。fixture 只覆盖 Pass1 whole-window，其他 stage writer 与端到端模型 token/推理墙钟未测。
+
 ### S1 剩余工作与槽位事实
 
 映射:P3 第一刀。
+
+状态:本切片已实施（2026-09-01）；同宿主真实证据已选出 S2 tail 分支。
 
 **做**:从 durable task/dispatch 状态公开无语义聚合：
 
@@ -439,9 +477,17 @@ interface ExecutorSlotObservationV1 {
 
 **不做**:不改并发数、bundle size、agent 生命周期或阶段 barrier。
 
+**完成回执（2026-09-01）**:`automatic-build-observation.ts` 以 snapshot 的完整 descriptors 决定总 work units 与 terminal，以 active lease + create-only `start.json` 区分 reserved/running，其余未完成项为 pending；`automatic-build.ts remaining-work` 返回 `automatic_build_remaining_work_observation.v1`，不含正文、路径或 session 推断。R7 reduced trace 直接从 `list_agents` tool-call wall time 输出 `observed_at_ms + live_slots`，`observeExecutorSlotInterval()` 用相邻生命周期时刻形成 `observed_ms`，再按 ready work、barrier、tail、无 ready work 的顺序归因。32-unit durable fixture 精确得到四态各 8；注入 trace fixture 可复算 10 ms `root_refill_gap` 与 35 ms `tail_imbalance`。Observation/lease/Driver/trace 共 49 条回归、Core typecheck、384-module Build Engine 与 Node/compiled/thin-plugin parity 全绿。
+
+**真实调度证据（2026-09-01）**:Codex `0.151.0-alpha.7.1` 四任务/三槽 synthetic topology 完成 4 attempts/4 commits。首次终态观察到补位 spawn 的 `root_refill_gap=18,076 ms`，idle-slot 下/上界为 `18,076/54,228 ms`；补位后的保守 `tail_imbalance=38,203 ms`，idle-slot 下/上界为 `76,406/114,609 ms`。tail 下界仍大于 refill 上界，因此 S2 只允许进入 tail 分支。无正文证据见 `docs/performance/understand-book-s1-real-scheduling-observation.json`。
+
+**Limitations**:10/35 ms 仍只作注入时钟正确性证据；真实证据各区间来自单次同宿主采样。补位 spawn 后到首次 post-refill `list_agents` 的 2,589 ms 不计入两类总量，但它发生在 pending work 已派发之后，不会增加 `root_refill_gap`。S1 没有保存正文、hash 或 ETA。
+
 ### S2 调度利用率实验
 
 映射:P3 第二刀；S1 后只选择一个最大已观测来源。
+
+状态:已进入 tail 分支并按停止条件撤回；生产 scheduler 未改。
 
 **分支**:
 
@@ -451,6 +497,8 @@ interface ExecutorSlotObservationV1 {
 - `no_ready_work`:不创建长期 worker；空闲是正确状态。
 
 只有在 P1/P2 后 agent startup/refill 成为最大的可避免成本，才另立“长期 worker”ADR；当前 1.9% 启动/收尾证据不足以支持扩大 child 生命周期。
+
+**停止回执（2026-09-01）**:按真实 S1 证据只试 `[4,4,1] → [3,3,3]` work-unit 均分。baseline 在同宿主完成 9 attempts/9 commits，根观测 terminal tail `48,640 ms`；balanced 两次也都 durable 9/9，但分别在 15 分钟与 25 分钟停止点前未形成完整 root terminal lifecycle，故没有合法的对应 tail 时间，不能声称下降。planner 与专用长跑脚手架均撤回；refill、barrier、长期 worker 和生产 dispatch identity 全部未改。无正文试验事实见 `docs/performance/understand-book-s2-tail-balance-trial.json`。
 
 **完成判据**:同一 synthetic stage topology 的 idle cause 对应时间下降，semantic attempt、work-unit 数、candidate 质量和 stage barrier 不变。
 

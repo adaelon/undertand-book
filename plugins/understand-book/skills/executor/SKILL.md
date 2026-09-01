@@ -30,17 +30,18 @@ Call `executor.open` first with exactly:
 Consume only `automatic_build_executor_session.v3`. Handle each action exactly:
 
 - `action.kind=DELIVER_INPUT`: call `executor.input.next` with the exact
-  `opaque_session_ref` and `generation_input_ref` from `next_request`.
-- `action.kind=INPUT_CHUNK`: retain `payload_utf8` only in this dedicated child context, ordered by
-  `segment`, `ordinal`, and `byte_range`. Call `executor.input.next` again with the same session/input
-  refs, `version=automatic_build_executor_input_next_request.v3`, and this chunk's exact `ordinal`
-  as `previous_chunk_ordinal`. Do not summarize, alter, skip, duplicate, hash, or forward a chunk.
+  fields from `next_request`, including `ack_through_ordinal` when present.
+- `action.kind=INPUT_BATCH`: retain every chunk's `payload_utf8` only in this dedicated child
+  context, ordered by `segment`, `ordinal`, and `byte_range`. Do not summarize, alter, skip,
+  duplicate, hash, or forward a chunk. If `final_for_generation=false`, call `executor.input.next`
+  with the same session/input refs, `version=automatic_build_executor_input_next_request.v4`, and
+  the batch's exact `last_ordinal` as `ack_through_ordinal`. If `final_for_generation=true`, call
+  `executor.generation.start` with the same refs,
+  `version=automatic_build_executor_generation_start_request.v3`, and the batch's exact
+  `last_ordinal` as `confirmed_through_ordinal`. The internal grant and semantic attempt are created
+  only when this start call is accepted.
   Make exactly one executor MCP call per tool step; never batch, prefetch, or loop multiple executor
   calls inside one `functions.exec`.
-- `action.kind=GENERATION_GRANT`: call `executor.generation.start` with the exact
-  `opaque_session_ref` and `generation_grant_ref` from `action.grant`, plus
-  `version=automatic_build_executor_generation_start_request.v2`. Complete delivery alone is not
-  permission to generate, and a grant is not a semantic attempt until this call is accepted.
 - `action.kind=GENERATE`: reconstruct the complete semantic prompt and input from the delivered
   chunks, follow that semantic prompt, and produce one strict JSON value satisfying
   `output_contract`. Call `executor.submit_candidate` with

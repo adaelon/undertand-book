@@ -1,0 +1,57 @@
+{
+  "version": "executor_scheduling_real_observation_evidence.v1",
+  "status": "passed",
+  "codex_cli": "codex-cli 0.151.0-alpha.7.1",
+  "fixture": "isolated_four_work_unit_three_slot_first_terminal_refill",
+  "semantic_work_units": 4,
+  "slot_capacity": 3,
+  "durable": {
+    "semantic_attempts": 4,
+    "committed_tasks": 4,
+    "thread_attribution_complete": true
+  },
+  "lifecycle_relative_ms": [
+    {
+      "observed_at_ms": 0,
+      "live_slots": 2
+    },
+    {
+      "event": "refill_spawn_started",
+      "observed_at_ms": 18076
+    },
+    {
+      "observed_at_ms": 20665,
+      "live_slots": 1
+    },
+    {
+      "observed_at_ms": 58868,
+      "live_slots": 0
+    }
+  ],
+  "cause_totals": [
+    {
+      "idle_reason": "root_refill_gap",
+      "interval_count": 1,
+      "observed_ms": 18076,
+      "idle_slot_ms_lower_bound": 18076,
+      "idle_slot_ms_upper_bound": 54228
+    },
+    {
+      "idle_reason": "tail_imbalance",
+      "interval_count": 1,
+      "observed_ms": 38203,
+      "idle_slot_ms_lower_bound": 76406,
+      "idle_slot_ms_upper_bound": 114609
+    }
+  ],
+  "decision": {
+    "dominant_avoidable_idle_reason": "tail_imbalance",
+    "enter_s2_branch": "tail_imbalance",
+    "reason": "tail idle-slot lower bound exceeds the root-refill upper bound"
+  },
+  "limitations": [
+    "this is one same-host synthetic topology sample",
+    "the 2589 ms between refill spawn start and the first post-refill list_agents observation is excluded from both cause totals; it occurs after pending work was dispatched and therefore cannot increase root_refill_gap",
+    "the evidence measures sampled agent lifecycle wall time, not model inference time or token cost"
+  ]
+}

@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -229,7 +229,6 @@ describe("dormant Build Executor tool adapter", () => {
     const otherHandoff = `abhandoff1_${"2".repeat(64)}`;
     const session = `absession1_${"3".repeat(64)}`;
     const inputRef = `abinput1_${"4".repeat(64)}`;
-    const grantRef = `abgrant1_${"5".repeat(64)}`;
     const sinkRef = `absink1_${"6".repeat(64)}`;
     const openCall = {
       tool_name: "executor.open" as const,
@@ -254,7 +253,7 @@ describe("dormant Build Executor tool adapter", () => {
           total_chunk_count: 1,
         },
         next_request: {
-          version: "automatic_build_executor_input_next_request.v3",
+          version: "automatic_build_executor_input_next_request.v4",
           opaque_session_ref: session,
           generation_input_ref: inputRef,
         },
@@ -268,7 +267,7 @@ describe("dormant Build Executor tool adapter", () => {
     const nextCall = {
       tool_name: "executor.input.next" as const,
       request: {
-        version: "automatic_build_executor_input_next_request.v3",
+        version: "automatic_build_executor_input_next_request.v4",
         opaque_session_ref: session,
         generation_input_ref: inputRef,
       },
@@ -278,11 +277,18 @@ describe("dormant Build Executor tool adapter", () => {
       ...nextCall,
       request: { ...nextCall.request, previous_chunk_receipt: `abchunk1_${"7".repeat(64)}` },
     })).toBe(false);
-    const firstChunkResponse = {
+    const firstBatchResponse = {
       version: "automatic_build_executor_session.v3",
       action: {
-        kind: "INPUT_CHUNK",
-        chunk: {
+        kind: "INPUT_BATCH",
+        batch: {
+          version: "automatic_build_executor_input_batch.v1",
+          opaque_session_ref: session,
+          generation_input_ref: inputRef,
+          first_ordinal: 0,
+          last_ordinal: 0,
+          final_for_generation: true,
+          chunks: [{
           version: "automatic_build_executor_input_chunk.v3",
           opaque_session_ref: session,
           generation_input_ref: inputRef,
@@ -292,39 +298,24 @@ describe("dormant Build Executor tool adapter", () => {
           payload_utf8: "{}",
           final_for_segment: true,
           final_for_generation: true,
+          }],
         },
       },
     } as const;
-    connection.observe_response(nextCall, firstChunkResponse);
+    connection.observe_response(nextCall, firstBatchResponse);
     expect(connection.authorize_connection(connection.connection_capability, nextCall)).toBe(true);
-    connection.observe_response(nextCall, firstChunkResponse);
+    connection.observe_response(nextCall, firstBatchResponse);
     expect(connection.authorize_connection(connection.connection_capability, {
       ...nextCall,
-      request: { ...nextCall.request, previous_chunk_ordinal: 1 },
+      request: { ...nextCall.request, ack_through_ordinal: 1 },
     })).toBe(false);
-    const finalNextCall = {
-      ...nextCall,
-      request: { ...nextCall.request, previous_chunk_ordinal: 0 },
-    };
-    expect(connection.authorize_connection(connection.connection_capability, finalNextCall)).toBe(true);
-    connection.observe_response(finalNextCall, {
-      version: "automatic_build_executor_session.v3",
-      action: {
-        kind: "GENERATION_GRANT",
-        grant: {
-          version: "automatic_build_executor_generation_grant.v2",
-          opaque_session_ref: session,
-          generation_input_ref: inputRef,
-          generation_grant_ref: grantRef,
-        },
-      },
-    });
     const startCall = {
       tool_name: "executor.generation.start" as const,
       request: {
-        version: "automatic_build_executor_generation_start_request.v2",
+        version: "automatic_build_executor_generation_start_request.v3",
         opaque_session_ref: session,
-        generation_grant_ref: grantRef,
+        generation_input_ref: inputRef,
+        confirmed_through_ordinal: 0,
       },
     };
     expect(connection.authorize_connection(connection.connection_capability, startCall)).toBe(true);
@@ -378,7 +369,6 @@ describe("dormant Build Executor tool adapter", () => {
     const deliverySession = `absession1_${"2".repeat(64)}`;
     const taskSession = `absession1_${"3".repeat(64)}`;
     const inputRef = `abinput1_${"4".repeat(64)}`;
-    const grantRef = `abgrant1_${"6".repeat(64)}`;
     const sinkRef = `absink1_${"7".repeat(64)}`;
     const openCall = {
       tool_name: "executor.open" as const,
@@ -405,20 +395,20 @@ describe("dormant Build Executor tool adapter", () => {
           total_chunk_count: 2,
         },
         next_request: {
-          version: "automatic_build_executor_input_next_request.v3",
+          version: "automatic_build_executor_input_next_request.v4",
           opaque_session_ref: deliverySession,
           generation_input_ref: inputRef,
-          previous_chunk_ordinal: 0,
+          ack_through_ordinal: 0,
         },
       },
     });
     expect(partialDelivery.authorize_connection(partialDelivery.connection_capability, {
       tool_name: "executor.input.next",
       request: {
-        version: "automatic_build_executor_input_next_request.v3",
+        version: "automatic_build_executor_input_next_request.v4",
         opaque_session_ref: deliverySession,
         generation_input_ref: inputRef,
-        previous_chunk_ordinal: 0,
+        ack_through_ordinal: 0,
       },
     })).toBe(true);
 
@@ -427,21 +417,62 @@ describe("dormant Build Executor tool adapter", () => {
     granted.observe_response(openCall, {
       version: "automatic_build_executor_session.v3",
       action: {
-        kind: "GENERATION_GRANT",
-        grant: {
-          version: "automatic_build_executor_generation_grant.v2",
+        kind: "DELIVER_INPUT",
+        input_manifest: {
+          version: "automatic_build_executor_input_manifest.v3",
           opaque_session_ref: deliverySession,
           generation_input_ref: inputRef,
-          generation_grant_ref: grantRef,
+          segments: [],
+          total_chunk_count: 1,
+        },
+        next_request: {
+          version: "automatic_build_executor_input_next_request.v4",
+          opaque_session_ref: deliverySession,
+          generation_input_ref: inputRef,
+        },
+      },
+    });
+    const finalBatchCall = {
+      tool_name: "executor.input.next" as const,
+      request: {
+        version: "automatic_build_executor_input_next_request.v4",
+        opaque_session_ref: deliverySession,
+        generation_input_ref: inputRef,
+      },
+    };
+    expect(granted.authorize_connection(granted.connection_capability, finalBatchCall)).toBe(true);
+    granted.observe_response(finalBatchCall, {
+      version: "automatic_build_executor_session.v3",
+      action: {
+        kind: "INPUT_BATCH",
+        batch: {
+          version: "automatic_build_executor_input_batch.v1",
+          opaque_session_ref: deliverySession,
+          generation_input_ref: inputRef,
+          first_ordinal: 0,
+          last_ordinal: 0,
+          final_for_generation: true,
+          chunks: [{
+            version: "automatic_build_executor_input_chunk.v3",
+            opaque_session_ref: deliverySession,
+            generation_input_ref: inputRef,
+            segment: "semantic_input",
+            ordinal: 0,
+            byte_range: { start: 0, end: 2 },
+            payload_utf8: "{}",
+            final_for_segment: true,
+            final_for_generation: true,
+          }],
         },
       },
     });
     expect(granted.authorize_connection(granted.connection_capability, {
       tool_name: "executor.generation.start",
       request: {
-        version: "automatic_build_executor_generation_start_request.v2",
+        version: "automatic_build_executor_generation_start_request.v3",
         opaque_session_ref: deliverySession,
-        generation_grant_ref: grantRef,
+        generation_input_ref: inputRef,
+        confirmed_through_ordinal: 0,
       },
     })).toBe(true);
 
@@ -478,7 +509,8 @@ describe("dormant Build Executor tool adapter", () => {
   });
 
   it("R1 keeps transport out of project config while both plugin configs expose exact-four tools", () => {
-    const rootConfig = readFileSync(path.join(REPO_ROOT, ".codex", "config.toml"), "utf8");
+    const rootConfigPath = path.join(REPO_ROOT, ".codex", "config.toml");
+    const rootConfig = existsSync(rootConfigPath) ? readFileSync(rootConfigPath, "utf8") : "";
     const rootPluginMcp = readFileSync(path.join(REPO_ROOT, ".mcp.json"), "utf8");
     const releasePluginMcp = readFileSync(
       path.join(REPO_ROOT, "plugins", "understand-book", ".mcp.json"),

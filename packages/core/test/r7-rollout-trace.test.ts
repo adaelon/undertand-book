@@ -7,8 +7,10 @@ import {
   readExecutorMcpServerTimingJsonl,
   reduceExecutorMcpTiming,
   ROOT_EXECUTOR_BOUNDARY_UNVERIFIABLE,
+  summarizeThreeSlotFirstTerminalScheduling,
   type ExecutorTraceOperation,
 } from "../../../apps/desktop/scripts/r7-rollout-trace";
+import { observeExecutorSlotInterval } from "../src/automatic-build-observation";
 
 const executorServer = "understand_book_build_executor";
 const executorRole = "understand_book_executor";
@@ -225,6 +227,21 @@ function traceFixture(options: FixtureOptions = {}) {
       raw_result_payload_id: resultId,
       mcp_call_id: null,
     };
+    traceEvents.push({
+      schema_version: 1,
+      seq: ++traceSequence,
+      wall_time_unix_ms: 5_000 + observation.start,
+      rollout_id: "rollout-r7-fixture",
+      codex_turn_id: "turn-root",
+      payload: { type: "tool_call_started", tool_call_id: `list-agents-${index}` },
+    }, {
+      schema_version: 1,
+      seq: ++traceSequence,
+      wall_time_unix_ms: 5_005 + observation.start,
+      rollout_id: "rollout-r7-fixture",
+      codex_turn_id: "turn-root",
+      payload: { type: "tool_call_ended", tool_call_id: `list-agents-${index}` },
+    });
   }
 
   const state = {
@@ -266,22 +283,24 @@ describe("R7 reduced rollout trace analyzer", () => {
   it("M1 reads only the body-free Executor timing projection from one connection JSONL", () => {
     const samples = [
       {
-        version: "executor_mcp_server_timing.v1",
+        version: "executor_mcp_server_timing.v2",
         connection_call_ordinal: 1,
         operation: "executor.open",
         server_elapsed_ms: 10.5,
         response_bytes: 123,
         response_action_kind: "DELIVER_INPUT",
         outcome: "ok",
+        server_phase_elapsed_ms: null,
       },
       {
-        version: "executor_mcp_server_timing.v1",
+        version: "executor_mcp_server_timing.v2",
         connection_call_ordinal: 2,
         operation: "executor.input.next",
         server_elapsed_ms: 2,
         response_bytes: 456,
         response_action_kind: null,
         outcome: "bounded_error",
+        server_phase_elapsed_ms: null,
       },
     ];
     const stderr = samples.map((sample) => JSON.stringify(sample)).join("\n");
@@ -289,15 +308,43 @@ describe("R7 reduced rollout trace analyzer", () => {
     expect(readExecutorMcpServerTimingJsonl(stderr, "fixed connection")).toEqual(samples);
   });
 
+  it("M1b accepts exact long-operation phases and rejects an uncovered server interval", () => {
+    const sample = {
+      version: "executor_mcp_server_timing.v2",
+      connection_call_ordinal: 1,
+      operation: "executor.generation.start",
+      server_elapsed_ms: 12,
+      response_bytes: 123,
+      response_action_kind: "GENERATE",
+      outcome: "ok",
+      server_phase_elapsed_ms: {
+        "current-state/claim": 3,
+        "input-render-or-reuse": 7,
+        "persist/response": 2,
+      },
+    };
+
+    expect(readExecutorMcpServerTimingJsonl(JSON.stringify(sample), "fixed connection"))
+      .toEqual([sample]);
+    expect(() => readExecutorMcpServerTimingJsonl(JSON.stringify({
+      ...sample,
+      server_phase_elapsed_ms: {
+        ...sample.server_phase_elapsed_ms,
+        "persist/response": 1,
+      },
+    }), "fixed connection")).toThrow("do not cover the server interval");
+  });
+
   it("M1 rejects a connection timing line that carries an extra semantic field", () => {
     const stderr = JSON.stringify({
-      version: "executor_mcp_server_timing.v1",
+      version: "executor_mcp_server_timing.v2",
       connection_call_ordinal: 1,
       operation: "executor.open",
       server_elapsed_ms: 1,
       response_bytes: 10,
       response_action_kind: "WAIT",
       outcome: "ok",
+      server_phase_elapsed_ms: null,
       payload: "M1_PRIVATE_SEMANTIC_SENTINEL",
     });
 
@@ -311,23 +358,25 @@ describe("R7 reduced rollout trace analyzer", () => {
       thread_id: `child-${child}`,
       samples: [
         {
-          version: "executor_mcp_server_timing.v1" as const,
+          version: "executor_mcp_server_timing.v2" as const,
           connection_call_ordinal: 1,
           operation: "executor.open" as const,
           server_elapsed_ms: 10 + child,
           response_bytes: 100 + child,
           response_action_kind: "WAIT",
           outcome: "ok" as const,
+          server_phase_elapsed_ms: null,
           private_debug: `${sensitive}:${child}`,
         },
         {
-          version: "executor_mcp_server_timing.v1" as const,
+          version: "executor_mcp_server_timing.v2" as const,
           connection_call_ordinal: 2,
           operation: "executor.input.next" as const,
           server_elapsed_ms: 20 + child,
           response_bytes: 200 + child,
           response_action_kind: "INPUT_CHUNK",
           outcome: "ok" as const,
+          server_phase_elapsed_ms: null,
         },
       ],
     }));
@@ -375,13 +424,14 @@ describe("R7 reduced rollout trace analyzer", () => {
       connections: [{
         thread_id: "child-1",
         samples: [{
-          version: "executor_mcp_server_timing.v1",
+          version: "executor_mcp_server_timing.v2",
           connection_call_ordinal: 1,
           operation: "executor.open",
           server_elapsed_ms: 11,
           response_bytes: 100,
           response_action_kind: "WAIT",
           outcome: "ok",
+          server_phase_elapsed_ms: null,
         }],
       }],
       outer_samples: [{
@@ -505,12 +555,104 @@ describe("R7 reduced rollout trace analyzer", () => {
       driverCallSeqs: [5, 60, 160],
       listAgentObservations: [
         { start: 55, completedChildIndexes: [1], runningChildIndexes: [2, 3] },
+        { start: 65, completedChildIndexes: [1], runningChildIndexes: [2, 3, 4] },
+        { start: 120, completedChildIndexes: [1, 2, 3], runningChildIndexes: [4] },
         { start: 155, completedChildIndexes: [3, 4], runningChildIndexes: [] },
       ],
     });
     const result = analyze(fixture.root, fixture.sentinels, 4, true);
 
     expect(result.max_live_dedicated_children).toBe(3);
+    expect(result.executor_slot_lifecycle_observations).toEqual([
+      { observed_at_ms: 5_060, live_slots: 2 },
+      { observed_at_ms: 5_070, live_slots: 3 },
+      { observed_at_ms: 5_125, live_slots: 1 },
+      { observed_at_ms: 5_160, live_slots: 0 },
+    ]);
+    expect(summarizeThreeSlotFirstTerminalScheduling(
+      result.executor_slot_lifecycle_observations,
+      3,
+    )).toEqual({
+      version: "executor_synthetic_scheduling_evidence.v1",
+      slot_capacity: 3,
+      lifecycle_observations: result.executor_slot_lifecycle_observations,
+      cause_totals: [
+        {
+          idle_reason: "root_refill_gap",
+          interval_count: 1,
+          observed_ms: 10,
+          idle_slot_ms_lower_bound: 10,
+          idle_slot_ms_upper_bound: 30,
+        },
+        {
+          idle_reason: "tail_imbalance",
+          interval_count: 1,
+          observed_ms: 35,
+          idle_slot_ms_lower_bound: 70,
+          idle_slot_ms_upper_bound: 105,
+        },
+      ],
+      dominant_avoidable_idle_reason: "tail_imbalance",
+    });
+    expect(summarizeThreeSlotFirstTerminalScheduling([
+      { observed_at_ms: 5_060, live_slots: 2 },
+      { observed_at_ms: 5_070, live_slots: 1 },
+      { observed_at_ms: 5_160, live_slots: 0 },
+    ], 3, 5_065)).toMatchObject({
+      cause_totals: [
+        {
+          idle_reason: "root_refill_gap",
+          observed_ms: 5,
+          idle_slot_ms_lower_bound: 5,
+          idle_slot_ms_upper_bound: 15,
+        },
+        {
+          idle_reason: "tail_imbalance",
+          observed_ms: 90,
+          idle_slot_ms_lower_bound: 180,
+          idle_slot_ms_upper_bound: 270,
+        },
+      ],
+      dominant_avoidable_idle_reason: "tail_imbalance",
+    });
+    expect(observeExecutorSlotInterval({
+      slot_capacity: 3,
+      start: result.executor_slot_lifecycle_observations[0],
+      end_observed_at_ms: result.executor_slot_lifecycle_observations[1].observed_at_ms,
+      remaining_work: [{
+        stage: "pass1",
+        kind: "pass1_window",
+        pending: 1,
+        reserved: 0,
+        running: 2,
+        terminal: 1,
+      }],
+      stage_barrier: false,
+    })).toMatchObject({
+      live_slots: 2,
+      idle_slots: 1,
+      idle_reason: "root_refill_gap",
+      observed_ms: 10,
+    });
+    expect(observeExecutorSlotInterval({
+      slot_capacity: 3,
+      start: result.executor_slot_lifecycle_observations[2],
+      end_observed_at_ms: result.executor_slot_lifecycle_observations[3].observed_at_ms,
+      remaining_work: [{
+        stage: "pass1",
+        kind: "pass1_window",
+        pending: 0,
+        reserved: 0,
+        running: 1,
+        terminal: 3,
+      }],
+      stage_barrier: false,
+    })).toMatchObject({
+      live_slots: 1,
+      idle_slots: 2,
+      idle_reason: "tail_imbalance",
+      observed_ms: 35,
+    });
     expect(result.fourth_child_started_after_first_terminal).toBe(true);
     expect(result.fourth_child_started_before_last_initial_terminal).toBe(true);
     expect(result.synthetic_build_step_call_count).toBe(3);

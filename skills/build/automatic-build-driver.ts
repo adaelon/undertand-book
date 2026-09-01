@@ -643,9 +643,13 @@ export function createAutomaticBuildInvocation(inputValue: AutomaticBuildInvocat
   invocation_ref: string;
 } {
   const requested = validateCreateInput(inputValue);
-  const target = resolveAutomaticBuildTarget(requested.target_input, path.resolve(requested.root_dir));
+  const buildPlan = readBuildPlan(requested.build_plan_path);
+  const target = resolveAutomaticBuildTarget(
+    requested.target_input,
+    path.resolve(requested.root_dir),
+    { book_id: buildPlan.book_id },
+  );
   const input = normalizedCreateInput(requested, target);
-  const buildPlan = readBuildPlan(input.build_plan_path);
   const invocationRef = invocationRefFor(input, target.target_ref);
   const record: AutomaticBuildInvocationRecordV1 = {
     version: "automatic_build_invocation_record.v1",
@@ -656,6 +660,14 @@ export function createAutomaticBuildInvocation(inputValue: AutomaticBuildInvocat
   };
   writeCreateOnly(invocationRecordPath(invocationRef), record);
   return { version: "automatic_build_invocation_ref.v1", invocation_ref: invocationRef };
+}
+
+function resolveInvocationTarget(invocation: AutomaticBuildInvocationRecordV1) {
+  return resolveAutomaticBuildTarget(
+    invocation.input.target_input,
+    invocation.input.root_dir,
+    { book_id: invocation.initial_target_ref.book_id },
+  );
 }
 
 function stateIdentity(state: DriverState): DriverStateIdentityV1 {
@@ -731,7 +743,7 @@ function loadDriverState(
   effect: DecisionEffect = {},
 ): DriverState {
   const input = invocation.input;
-  const target = resolveAutomaticBuildTarget(input.target_input, input.root_dir);
+  const target = resolveInvocationTarget(invocation);
   if (target.book_id !== invocation.initial_target_ref.book_id
     || target.profile_id !== invocation.initial_target_ref.profile_id
     || path.resolve(target.workspace_dir) !== path.resolve(invocation.initial_target_ref.workspace_dir)) {
@@ -739,6 +751,7 @@ function loadDriverState(
   }
   const plan = readBuildPlan(input.build_plan_path);
   const planResult = automaticBuildPlan(input.target_input, input.root_dir, {
+    book_id: invocation.initial_target_ref.book_id,
     requested_workers: input.max_parallel,
     available_agent_slots: availableAgentSlots,
     quality_profile: input.quality_profile,
@@ -1486,7 +1499,7 @@ function prepareRetryRecoveries(
   if (request.reason !== "retry_exhausted" || !request.stage || !request.retry_boundaries?.length) {
     return { status: "not_satisfied" };
   }
-  const target = resolveAutomaticBuildTarget(invocation.input.target_input, invocation.input.root_dir);
+  const target = resolveInvocationTarget(invocation);
   const recoveries: PreparedRetryRecovery[] = [];
   for (const previous of request.retry_boundaries) {
     const currentScopeDigest = currentAttemptScopeDigest(current, request.stage, previous.work_unit_id);
@@ -1717,10 +1730,7 @@ function reissueActiveDispatchHandoffRefs(
     "active_dispatch_id",
     512,
   ));
-  const target = resolveAutomaticBuildTarget(
-    invocation.input.target_input,
-    invocation.input.root_dir,
-  );
+  const target = resolveInvocationTarget(invocation);
   const dispatches = activeDispatchIds.map((dispatchId) => {
     const persisted = readAutomaticBuildDispatch(target, stage, dispatchId, dispatchRunId);
     if (persisted.manifest.stage !== stage
@@ -1804,7 +1814,7 @@ function privateArtifactWave(
   if (plan.recipe_id !== "goal_directed" || !plan.intent_id || !plan.intent_digest) {
     throw new Error("private artifact BuildPlan identity is invalid");
   }
-  const target = resolveAutomaticBuildTarget(invocation.input.target_input, invocation.input.root_dir);
+  const target = resolveInvocationTarget(invocation);
   const privateRoot = privateArtifactRootFromPlan(invocation, plan);
   const storedPlan = validateBuildPlanV1(readBoundedJsonWithin(
     privateRoot,
@@ -1911,6 +1921,7 @@ export function automaticBuildStep(inputValue: AutomaticBuildStepRequestV1): Aut
     invocation.input.target_input,
     invocation.input.root_dir,
     {
+      book_id: invocation.initial_target_ref.book_id,
       requested_workers: invocation.input.max_parallel,
       available_agent_slots: input.available_agent_slots,
       quality_profile: invocation.input.quality_profile,
@@ -1943,6 +1954,7 @@ export function automaticBuildStep(inputValue: AutomaticBuildStepRequestV1): Aut
       invocation.input.root_dir,
       invocation.input.max_parallel,
       {
+        book_id: invocation.initial_target_ref.book_id,
         owner: `automatic-build-driver:${invocation.invocation_ref}`,
         now: transitionNow(current, input.available_agent_slots, effect),
         quality_profile: invocation.input.quality_profile,
@@ -2009,7 +2021,10 @@ export function automaticBuildStep(inputValue: AutomaticBuildStepRequestV1): Aut
         invocation.input.target_input,
         invocation.input.root_dir,
         stage,
-        { quality_profile: invocation.input.quality_profile },
+        {
+          book_id: invocation.initial_target_ref.book_id,
+          quality_profile: invocation.input.quality_profile,
+        },
       ) as unknown as Record<string, unknown>;
       if (outcome.next === "replan") continue;
       const internalReason = typeof outcome.code === "string" ? outcome.code : "stage_close_postcondition_failed";

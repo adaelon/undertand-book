@@ -1,0 +1,38 @@
+{
+  "version": "executor_programmatic_delivery_ab_evidence.v1",
+  "status": "rejected",
+  "host_release": "codex-cli 0.149.0",
+  "fixture": "isolated_single_synthetic_work_unit_5_chunks",
+  "baseline": {
+    "delivery_mode": "direct_model_loop",
+    "executor_mcp_calls": 9,
+    "executor_input_next_calls": 6,
+    "model_visible_delivery_turns": 6,
+    "semantic_attempts": 1,
+    "committed_tasks": 1,
+    "server_total_ms": 4861.71799999999,
+    "outer_total_ms": 5086,
+    "residual_total_ms": 224.2820000000097
+  },
+  "programmatic": {
+    "delivery_mode": "functions_exec_loop",
+    "executor_mcp_calls": 0,
+    "functions_exec_calls": 0,
+    "semantic_attempts": 0,
+    "committed_tasks": 0,
+    "terminal_lifecycle": {
+      "status": "interrupted",
+      "category": "bootstrap",
+      "diagnostic_code": "protocol_incompatible"
+    },
+    "failure_stage": "required_programmatic_caller_preflight"
+  },
+  "decision": {
+    "keep_a1": false,
+    "reason": "functions.exec was unavailable inside the current shell_tool=false dedicated Executor role",
+    "production_executor_instruction_changed": false,
+    "session_v3_changed": false,
+    "transport_profile_changed": false,
+    "next_slice": "A2"
+  }
+}

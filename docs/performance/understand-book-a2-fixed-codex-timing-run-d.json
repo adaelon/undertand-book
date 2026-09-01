@@ -1,0 +1,67 @@
+{
+  "version": "executor_mcp_fixed_timing_evidence.v2",
+  "status": "passed",
+  "codex_cli": "codex-cli 0.149.0",
+  "fixture": "isolated_single_synthetic_work_unit",
+  "connection_count": 1,
+  "sample_count": 4,
+  "totals": {
+    "executor.open": {
+      "call_count": 1,
+      "server_total_ms": 1296.3535,
+      "outer_total_ms": 1321,
+      "residual_total_ms": 24.64650000000006,
+      "response_total_bytes": 1466
+    },
+    "executor.input.next": {
+      "call_count": 1,
+      "server_total_ms": 142.70520000000033,
+      "outer_total_ms": 172,
+      "residual_total_ms": 29.294799999999668,
+      "response_total_bytes": 30820
+    },
+    "executor.generation.start": {
+      "call_count": 1,
+      "server_total_ms": 1463.0925000000007,
+      "outer_total_ms": 1486,
+      "residual_total_ms": 22.907499999999345,
+      "response_total_bytes": 724
+    },
+    "executor.submit_candidate": {
+      "call_count": 1,
+      "server_total_ms": 1541.1193999999996,
+      "outer_total_ms": 1573,
+      "residual_total_ms": 31.880600000000413,
+      "response_total_bytes": 201
+    }
+  },
+  "overall": {
+    "call_count": 4,
+    "server_total_ms": 4443.270600000001,
+    "outer_total_ms": 4552,
+    "residual_total_ms": 108.72939999999949,
+    "response_total_bytes": 33211
+  },
+  "server_phase_totals_ms": {
+    "current-state/claim": 290.8248000000003,
+    "input-render-or-reuse": 1162.3720999999987,
+    "persist/response": 9.89560000000165,
+    "candidate-gate": 251.58150000000023,
+    "writer/commit": 1224.6500000000015,
+    "next-work-prepare": 64.8878999999979
+  },
+  "observed_dominant_server_phase": "writer/commit",
+  "observed_dominant_component": "server",
+  "measured_followup_branch": "writer/commit",
+  "next_slice": "M2",
+  "durable": {
+    "semantic_attempts": 1,
+    "committed_tasks": 1
+  },
+  "thread_attribution_complete": true,
+  "semantic_trace_projection": {
+    "executor_input_or_submit": 5,
+    "dedicated_child_inference": 2,
+    "bounded_response_only": 2
+  }
+}

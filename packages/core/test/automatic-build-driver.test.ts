@@ -24,9 +24,9 @@ import {
   failAutomaticBuildExecutorSession,
   openAutomaticBuildExecutorSessionV3,
   nextAutomaticBuildExecutorInput,
+  resolveAutomaticBuildExecutorRegistryRoot,
   startAutomaticBuildExecutorGeneration,
   submitAutomaticBuildExecutorCandidateV3,
-  type AutomaticBuildExecutorSessionResponseV1,
   type AutomaticBuildExecutorSessionResponseV3,
   type JsonValue,
 } from "../src/automatic-build-executor-session";
@@ -34,6 +34,7 @@ import {
   automaticBuildTaskStoreRoot,
   readAutomaticBuildAttemptSnapshot,
 } from "../src/automatic-build-task-store";
+import * as executorTransport from "../src/executor-transport";
 import { resolveAutomaticBuildTarget } from "../src/build-orchestrator";
 import { resolveContentProfile } from "../src/content-profile";
 import {
@@ -41,6 +42,7 @@ import {
   createAutomaticBuildFailureDiagnosticV3,
 } from "../src/extractor-contract";
 import {
+  computeBuildPlanDigest,
   transitionBuildIntent,
   transitionBuildPlan,
   validateBuildIntentV1,
@@ -433,26 +435,27 @@ function startV3GenerationForHandoff(opaqueHandoffRef: string, now: string) {
     throw new Error("expected V3 input delivery before generation");
   }
   let request = opened.action.next_request;
-  for (let ordinal = 0; ordinal < 256; ordinal += 1) {
+  for (let batchOrdinal = 0; batchOrdinal < 256; batchOrdinal += 1) {
     const response = nextAutomaticBuildExecutorInput(request, { now });
-    if (response.action.kind === "GENERATION_GRANT") {
+    if (response.action.kind !== "INPUT_BATCH") {
+      throw new Error("expected V3 input batch");
+    }
+    if (response.action.batch.final_for_generation) {
       return startAutomaticBuildExecutorGeneration({
-        version: "automatic_build_executor_generation_start_request.v2",
-        opaque_session_ref: response.action.grant.opaque_session_ref,
-        generation_grant_ref: response.action.grant.generation_grant_ref,
+        version: "automatic_build_executor_generation_start_request.v3",
+        opaque_session_ref: response.action.batch.opaque_session_ref,
+        generation_input_ref: response.action.batch.generation_input_ref,
+        confirmed_through_ordinal: response.action.batch.last_ordinal,
       }, { now });
     }
-    if (response.action.kind !== "INPUT_CHUNK") {
-      throw new Error("expected V3 input chunk or generation grant");
-    }
     request = {
-      version: "automatic_build_executor_input_next_request.v3",
+      version: "automatic_build_executor_input_next_request.v4",
       opaque_session_ref: opened.action.input_manifest.opaque_session_ref,
       generation_input_ref: opened.action.input_manifest.generation_input_ref,
-      previous_chunk_ordinal: response.action.chunk.ordinal,
+      ack_through_ordinal: response.action.batch.last_ordinal,
     };
   }
-  throw new Error("V3 input delivery did not reach a generation grant");
+  throw new Error("V3 input delivery did not reach a final batch");
 }
 
 function startPrivateV3GenerationForHandoff(
@@ -470,13 +473,20 @@ function startPrivateV3GenerationForHandoff(
   }
   const semanticInput: string[] = [];
   let request = opened.action.next_request;
-  for (let ordinal = 0; ordinal < 256; ordinal += 1) {
+  for (let batchOrdinal = 0; batchOrdinal < 256; batchOrdinal += 1) {
     const response = nextAutomaticBuildExecutorInput(request, { now });
-    if (response.action.kind === "GENERATION_GRANT") {
+    if (response.action.kind !== "INPUT_BATCH") {
+      throw new Error("expected private V3 input batch");
+    }
+    for (const chunk of response.action.batch.chunks) {
+      if (chunk.segment === "semantic_input") semanticInput.push(chunk.payload_utf8);
+    }
+    if (response.action.batch.final_for_generation) {
       const generation = startAutomaticBuildExecutorGeneration({
-        version: "automatic_build_executor_generation_start_request.v2",
-        opaque_session_ref: response.action.grant.opaque_session_ref,
-        generation_grant_ref: response.action.grant.generation_grant_ref,
+        version: "automatic_build_executor_generation_start_request.v3",
+        opaque_session_ref: response.action.batch.opaque_session_ref,
+        generation_input_ref: response.action.batch.generation_input_ref,
+        confirmed_through_ordinal: response.action.batch.last_ordinal,
       }, { now });
       if (generation.action.kind !== "GENERATE") {
         throw new Error("expected private V3 GENERATE action");
@@ -488,20 +498,14 @@ function startPrivateV3GenerationForHandoff(
         task: JSON.parse(semanticInput.join("")) as IntentArtifactTaskEnvelopeV3,
       };
     }
-    if (response.action.kind !== "INPUT_CHUNK") {
-      throw new Error("expected private V3 input chunk or generation grant");
-    }
-    if (response.action.chunk.segment === "semantic_input") {
-      semanticInput.push(response.action.chunk.payload_utf8);
-    }
     request = {
-      version: "automatic_build_executor_input_next_request.v3",
+      version: "automatic_build_executor_input_next_request.v4",
       opaque_session_ref: opened.action.input_manifest.opaque_session_ref,
       generation_input_ref: opened.action.input_manifest.generation_input_ref,
-      previous_chunk_ordinal: response.action.chunk.ordinal,
+      ack_through_ordinal: response.action.batch.last_ordinal,
     };
   }
-  throw new Error("private V3 input delivery did not reach a generation grant");
+  throw new Error("private V3 input delivery did not reach a final batch");
 }
 
 function writeMatchedPerformanceHistory(
@@ -689,6 +693,23 @@ async function exhaustedRetryBoundary(
 }
 
 describe("S0 deterministic automatic-build driver protocol", () => {
+  it("uses the confirmed BuildPlan book id for a non-ASCII source throughout the driver", async () => {
+    const driver = expectedDriver();
+    const value = fixture("confirmed-book-id");
+    const nonAsciiSource = path.join(value.root, "深入理解深度学习.md");
+    writeFileSync(nonAsciiSource, readFileSync(value.source));
+    const invocation = await createInvocation(driver, { ...value, source: nonAsciiSource });
+
+    const response = await driver.automaticBuildStep({
+      version: "automatic_build_step_request.v1",
+      invocation_ref: invocation.invocation_ref,
+      available_agent_slots: 1,
+    });
+
+    expect(response.action.kind).toBe("SPAWN_EXECUTORS");
+    expectRootSafeStep(response, [value.root, nonAsciiSource, value.buildPlanPath]);
+  });
+
   it("returns only the four root actions and never exposes internal or semantic fields", async () => {
     const driver = expectedDriver();
     const value = fixture("root-surface");
@@ -1480,7 +1501,7 @@ describe("S0 deterministic automatic-build driver protocol", () => {
     expectRootSafeStep(response, [value.root, value.source, value.buildPlanPath]);
     if (response.action.kind !== "SPAWN_EXECUTORS") throw new Error("expected an executor ref");
     const executorOpenRequest = Buffer.from(`${JSON.stringify({
-      version: "automatic_build_executor_open_request.v1",
+      version: "automatic_build_executor_open_request.v3",
       opaque_handoff_ref: response.action.executors[0].opaque_handoff_ref,
       now: "2026-08-08T05:25:01.000Z",
     })}\n`, "utf8");
@@ -1494,16 +1515,21 @@ describe("S0 deterministic automatic-build driver protocol", () => {
     });
     expect(opened.status, opened.stderr).toBe(0);
     expect(opened.stderr).toBe("");
-    const openedResponse = JSON.parse(opened.stdout) as AutomaticBuildExecutorSessionResponseV1;
-    expect(openedResponse.version).toBe("automatic_build_executor_session.v1");
-    expect(openedResponse.action.kind).toBe("GENERATE");
-    if (openedResponse.action.kind !== "GENERATE") throw new Error("expected GENERATE executor action");
-    expect(openedResponse.action.opaque_session_ref).toMatch(/^absession1_[a-f0-9]{64}$/u);
-    expect(openedResponse.action.semantic_input).toContain("PRIVATE_DRIVER_INPUT");
-    expect(openedResponse.action.output_contract).toMatchObject({
-      version: "automatic_build_semantic_candidate_contract.v1",
-      stage: "pass1",
-      work_unit_id: "0",
+    const openedResponse = JSON.parse(opened.stdout) as AutomaticBuildExecutorSessionResponseV3;
+    expect(openedResponse.version).toBe("automatic_build_executor_session.v3");
+    expect(openedResponse.action.kind).toBe("DELIVER_INPUT");
+    if (openedResponse.action.kind !== "DELIVER_INPUT") {
+      throw new Error("expected DELIVER_INPUT executor action");
+    }
+    expect(openedResponse.action.input_manifest).toMatchObject({
+      version: "automatic_build_executor_input_manifest.v3",
+      opaque_session_ref: expect.stringMatching(/^absession1_[a-f0-9]{64}$/u),
+      generation_input_ref: expect.stringMatching(/^abinput1_[a-f0-9]{64}$/u),
+    });
+    expect(openedResponse.action.next_request).toMatchObject({
+      version: "automatic_build_executor_input_next_request.v4",
+      opaque_session_ref: openedResponse.action.input_manifest.opaque_session_ref,
+      generation_input_ref: openedResponse.action.input_manifest.generation_input_ref,
     });
     const sidecarEntry = readFileSync(path.join(REPO_ROOT, "skills", "build", "sidecar-entry.ts"), "utf8");
     expect(sidecarEntry).toContain("command === \"build.step\"");
@@ -1559,6 +1585,164 @@ describe("S0 deterministic automatic-build driver protocol", () => {
 });
 
 describe("S4 private artifact driver and executor session", () => {
+  it("R2 resolves private frozen delivery material once at generation.start", async () => {
+    const driver = expectedDriver();
+    const value = privateGoalFixture("private-r2-frozen-input");
+    const invocation = await createInvocation(driver, value, {
+      created_at: "2026-09-01T09:00:00.000Z",
+    });
+    const spawned = await driver.automaticBuildStep({
+      version: "automatic_build_step_request.v1",
+      invocation_ref: invocation.invocation_ref,
+      available_agent_slots: 1,
+    });
+    if (spawned.action.kind !== "SPAWN_EXECUTORS") {
+      throw new Error("expected one private executor for the R2 fixture");
+    }
+    const executor = spawned.action.executors[0];
+    if (!executor) throw new Error("expected an R2 private executor ref");
+
+    const opened = openAutomaticBuildExecutorSessionV3(
+      executor.opaque_handoff_ref,
+      { now: "2026-09-01T09:00:01.000Z" },
+    );
+    if (opened.action.kind !== "DELIVER_INPUT") {
+      throw new Error("expected R2 private input delivery");
+    }
+    let request = opened.action.next_request;
+    let startRequest: Parameters<typeof startAutomaticBuildExecutorGeneration>[0] | undefined;
+    for (let batchOrdinal = 0; batchOrdinal < 256; batchOrdinal += 1) {
+      const response = nextAutomaticBuildExecutorInput(request, {
+        now: "2026-09-01T09:00:02.000Z",
+      });
+      if (response.action.kind !== "INPUT_BATCH") {
+        throw new Error("expected R2 private input batch");
+      }
+      if (response.action.batch.final_for_generation) {
+        startRequest = {
+          version: "automatic_build_executor_generation_start_request.v3",
+          opaque_session_ref: response.action.batch.opaque_session_ref,
+          generation_input_ref: response.action.batch.generation_input_ref,
+          confirmed_through_ordinal: response.action.batch.last_ordinal,
+        };
+        break;
+      }
+      request = {
+        version: "automatic_build_executor_input_next_request.v4",
+        opaque_session_ref: response.action.batch.opaque_session_ref,
+        generation_input_ref: response.action.batch.generation_input_ref,
+        ack_through_ordinal: response.action.batch.last_ordinal,
+      };
+    }
+    if (!startRequest) throw new Error("expected the R2 private final batch");
+
+    const pack = vi.spyOn(executorTransport, "packExecutorTransportPayload");
+    pack.mockClear();
+    try {
+      const generated = startAutomaticBuildExecutorGeneration(startRequest, {
+        now: "2026-09-01T09:00:03.000Z",
+      });
+      expect(generated.action.kind).toBe("GENERATE");
+      expect(pack).toHaveBeenCalledTimes(2);
+    } finally {
+      pack.mockRestore();
+    }
+  });
+
+  it("R2 rejects private task, Blueprint, and output-contract drift before creating generation state", async () => {
+    const driver = expectedDriver();
+    const value = privateGoalFixture("private-r2-contract-drift");
+    const invocation = await createInvocation(driver, value, {
+      created_at: "2026-09-01T09:10:00.000Z",
+    });
+    const spawned = await driver.automaticBuildStep({
+      version: "automatic_build_step_request.v1",
+      invocation_ref: invocation.invocation_ref,
+      available_agent_slots: 1,
+    });
+    if (spawned.action.kind !== "SPAWN_EXECUTORS") {
+      throw new Error("expected one private executor for the R2 drift fixture");
+    }
+    const executor = spawned.action.executors[0];
+    if (!executor) throw new Error("expected an R2 drift private executor ref");
+    const opened = openAutomaticBuildExecutorSessionV3(
+      executor.opaque_handoff_ref,
+      { now: "2026-09-01T09:10:01.000Z" },
+    );
+    if (opened.action.kind !== "DELIVER_INPUT") {
+      throw new Error("expected R2 drift private input delivery");
+    }
+    let request = opened.action.next_request;
+    let startRequest: Parameters<typeof startAutomaticBuildExecutorGeneration>[0] | undefined;
+    for (let batchOrdinal = 0; batchOrdinal < 256; batchOrdinal += 1) {
+      const response = nextAutomaticBuildExecutorInput(request, {
+        now: "2026-09-01T09:10:02.000Z",
+      });
+      if (response.action.kind !== "INPUT_BATCH") {
+        throw new Error("expected R2 drift private input batch");
+      }
+      if (response.action.batch.final_for_generation) {
+        startRequest = {
+          version: "automatic_build_executor_generation_start_request.v3",
+          opaque_session_ref: response.action.batch.opaque_session_ref,
+          generation_input_ref: response.action.batch.generation_input_ref,
+          confirmed_through_ordinal: response.action.batch.last_ordinal,
+        };
+        break;
+      }
+      request = {
+        version: "automatic_build_executor_input_next_request.v4",
+        opaque_session_ref: response.action.batch.opaque_session_ref,
+        generation_input_ref: response.action.batch.generation_input_ref,
+        ack_through_ordinal: response.action.batch.last_ordinal,
+      };
+    }
+    if (!startRequest) throw new Error("expected the R2 drift final batch");
+
+    const registryRoot = resolveAutomaticBuildExecutorRegistryRoot();
+    const handoffRecord = JSON.parse(readFileSync(path.join(
+      registryRoot,
+      "opaque-handoffs",
+      `${executor.opaque_handoff_ref}.json`,
+    ), "utf8")) as { handoff_path: string };
+    const task = JSON.parse(readFileSync(handoffRecord.handoff_path, "utf8")) as {
+      artifact: { artifact_id: string; artifact_type: string };
+    };
+    const generationStateDirectories = [
+      "executor-private-sessions",
+      "executor-v3-candidate-sinks",
+      "executor-v3-generation-start-acceptances",
+      "executor-v3-generation-starts",
+    ];
+    const generationStateBefore = new Map(generationStateDirectories.map((directory) => {
+      const registryDirectory = path.join(registryRoot, directory);
+      return [directory, existsSync(registryDirectory) ? readdirSync(registryDirectory).sort() : []];
+    }));
+    const changedPlan = JSON.parse(readFileSync(value.buildPlanPath, "utf8")) as BuildPlanV1;
+    const changedArtifact = changedPlan.private_artifacts.find(
+      (artifact) => artifact.artifact_id === task.artifact.artifact_id,
+    );
+    if (!changedArtifact) throw new Error("expected the R2 drift plan artifact");
+    changedArtifact.artifact_type = changedArtifact.artifact_type === "timeline"
+      ? "concept_map"
+      : "timeline";
+    const { plan_digest: _oldDigest, ...changedPlanWithoutDigest } = changedPlan;
+    changedPlan.plan_digest = computeBuildPlanDigest(changedPlanWithoutDigest);
+    writeFileSync(value.buildPlanPath, `${JSON.stringify(changedPlan, null, 2)}\n`, "utf8");
+
+    expect(() => startAutomaticBuildExecutorGeneration(startRequest, {
+      now: "2026-09-01T09:10:03.000Z",
+    })).toThrow(/task no longer matches|intent or plan identity drifted/i);
+    for (const directory of generationStateDirectories) {
+      const registryDirectory = path.join(
+        registryRoot,
+        directory,
+      );
+      expect(existsSync(registryDirectory) ? readdirSync(registryDirectory).sort() : [])
+        .toEqual(generationStateBefore.get(directory));
+    }
+  });
+
   it("drives public completion through private preparation and accepts every artifact without root leakage", async () => {
     const driver = expectedDriver();
     const value = privateGoalFixture("private-complete");

@@ -77,6 +77,11 @@ function readText(relativePath: string): string {
   return readFileSync(absolute(relativePath), "utf8");
 }
 
+function readOptionalText(relativePath: string): string {
+  const file = absolute(relativePath);
+  return existsSync(file) ? readFileSync(file, "utf8") : "";
+}
+
 function normalizeContract(text: string): string {
   return text.replace(/\r\n?|\n/gu, "\n").replace(/\n+$/u, "");
 }
@@ -107,7 +112,7 @@ Protocol version: \`automatic_build_executor_session.v3\`.
 Process exactly one code-issued \`opaque_handoff_ref\`.
 Call \`executor.open\`, \`executor.input.next\`, \`executor.generation.start\`, and
 \`executor.submit_candidate\` in the canonical loop.
-Handle action.kind=DELIVER_INPUT, action.kind=INPUT_CHUNK, action.kind=GENERATION_GRANT,
+Handle action.kind=DELIVER_INPUT, action.kind=INPUT_BATCH,
 action.kind=GENERATE, action.kind=WAIT, and action.kind=DONE.
 Never return candidate JSON to the caller.
 """
@@ -201,7 +206,7 @@ describe("Codex executor bootstrap publication", () => {
   });
 
   it("keeps plugin-owned Executor transport out of the project Codex config", () => {
-    const projectConfig = readText(".codex/config.toml");
+    const projectConfig = readOptionalText(".codex/config.toml");
     expect(projectConfig).not.toContain(EXECUTOR_SERVER_NAME);
     for (const toolName of EXECUTOR_TOOL_NAMES) expect(projectConfig).not.toContain(toolName);
   });
@@ -426,7 +431,8 @@ describe("Codex executor bootstrap publication", () => {
     const body = skillBody(rootSkill);
     const wrapper = normalizeContract(readText("agents/automatic-build-dispatch-executor.md"));
     expect(body).toBe(wrapper);
-    expect(rootSkill).toContain("previous_chunk_ordinal");
+    expect(rootSkill).toContain("ack_through_ordinal");
+    expect(rootSkill).toContain("confirmed_through_ordinal");
     expect(rootSkill).toMatch(/Make exactly one executor MCP\s+call per tool step/u);
     expect(rootSkill).toContain(
       "The stdio state machine enforces direct phase, ref, ordinal, and schema checks, "
@@ -450,7 +456,8 @@ describe("Codex executor bootstrap publication", () => {
       "executor.input.next",
       "executor.generation.start",
       "executor.submit_candidate",
-      "previous_chunk_ordinal",
+      "ack_through_ordinal",
+      "confirmed_through_ordinal",
     ]) {
       expect(rootSkill).toContain(marker);
     }
@@ -571,7 +578,7 @@ describe("Codex executor bootstrap publication", () => {
       "automatic_build_executor_bootstrap.v2",
       "automatic_build_executor_session.v3",
       "unknown_request_field",
-      "previous_chunk_ordinal_mismatch",
+      "ack_through_ordinal_mismatch",
       "trace_allowlist",
     ]) {
       expect(smoke).toContain(marker);

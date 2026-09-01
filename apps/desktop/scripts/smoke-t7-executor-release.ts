@@ -16,8 +16,10 @@ import {
 } from "../../../packages/core/src/build-executor-connection-capability";
 import { BUILD_EXECUTOR_MCP_CONTRACT_V3 } from "../../../packages/core/src/build-executor-tool-adapter";
 import {
+  CODEX_EXECUTOR_DELIVERY_BATCH_LIMIT_V1,
   CODEX_EXECUTOR_TRANSPORT_PROFILE_V2,
   measureExecutorTransportResponse,
+  serializeExecutorMcpToolResult,
 } from "../../../packages/core/src/executor-transport";
 import {
   readAutomaticBuildAttemptSnapshot,
@@ -33,7 +35,7 @@ import {
 import { confirmedStandardBuildPlan } from "../../../packages/core/test/helpers/confirmed-build-plan";
 import {
   readExecutorMcpServerTimingJsonl,
-  type ExecutorMcpServerTimingV1,
+  type ExecutorMcpServerTimingV2,
 } from "./r7-rollout-trace";
 
 type JsonObject = Record<string, unknown>;
@@ -188,7 +190,7 @@ class JsonLineMcpClient {
     });
   }
 
-  async close(): Promise<ExecutorMcpServerTimingV1[]> {
+  async close(): Promise<ExecutorMcpServerTimingV2[]> {
     this.child.stdin.end();
     const timeout = new Promise<never>((_, reject) => {
       setTimeout(() => {
@@ -273,10 +275,6 @@ async function callTool(
   assert.equal(result.content?.length, 1, `${toolName} must return one content block`);
   const text = result.content?.[0]?.text;
   assert.equal(typeof text, "string", `${toolName} must return canonical JSON text`);
-  assert(
-    Buffer.byteLength(text as string, "utf8") <= CODEX_EXECUTOR_TRANSPORT_PROFILE_V2.max_tool_result_bytes,
-    `${toolName} exceeded the tool-result byte cap`,
-  );
   const response = JSON.parse(text as string) as AutomaticBuildExecutorSessionResponseV3 | JsonObject;
   const actionKind = "action" in response
     && response.action
@@ -294,18 +292,23 @@ async function callTool(
   });
   if ("version" in response && response.version === "automatic_build_executor_session.v3") {
     const sessionResponse = response as AutomaticBuildExecutorSessionResponseV3;
-    const body = sessionResponse.action.kind === "INPUT_CHUNK"
-      ? sessionResponse.action.chunk.payload_utf8
-      : "";
-    assert.equal(
-      measureExecutorTransportResponse(
-        sessionResponse,
-        body,
-        CODEX_EXECUTOR_TRANSPORT_PROFILE_V2,
-      ).status,
-      "within_limit",
-      `${toolName} produced an out-of-profile session response`,
-    );
+    if (sessionResponse.action.kind === "INPUT_BATCH") {
+      assert(
+        Buffer.byteLength(serializeExecutorMcpToolResult(sessionResponse), "utf8")
+          <= CODEX_EXECUTOR_DELIVERY_BATCH_LIMIT_V1.max_serialized_batch_bytes,
+        `${toolName} exceeded the tested batch carrier tier`,
+      );
+    } else {
+      assert.equal(
+        measureExecutorTransportResponse(
+          sessionResponse,
+          "",
+          CODEX_EXECUTOR_TRANSPORT_PROFILE_V2,
+        ).status,
+        "within_limit",
+        `${toolName} produced an out-of-profile session response`,
+      );
+    }
   }
   return { response, text: text as string, isError: result.isError === true };
 }
@@ -332,7 +335,7 @@ function assertTraceAllowlist(trace: TraceEvent[]): {
       assert.equal(event.scope, "dedicated_child");
       assert.equal(event.direction, "tool_result");
       assert.equal(event.tool_name, "executor.input.next");
-      assert.equal(event.action_kind, "INPUT_CHUNK");
+      assert.equal(event.action_kind, "INPUT_BATCH");
       semanticChunkHits += semanticHits;
     }
     const candidateHits = occurrenceCount(event.payload, candidateMarker);
@@ -410,10 +413,11 @@ async function main(): Promise<void> {
     assert.equal(attemptCount(secondary), 0);
 
     let chunkCount = 0;
+    let batchCount = 0;
     let deliveredBytes = 0;
     let maxToolResultBytes = 0;
     let generationCount = 0;
-    let chunkZeroReplayCount = 0;
+    let batchZeroReplayCount = 0;
     let testedOrdinalFailure = false;
     let testedPrematureStart = false;
     for (let workUnit = 0; workUnit < 16; workUnit += 1) {
@@ -427,73 +431,82 @@ async function main(): Promise<void> {
       assert(delivery.input_manifest.total_chunk_count > 2, "compiled smoke must exercise a multi-chunk input");
       assert.equal(attemptCount(primary), generationCount);
       let request = delivery.next_request;
-      let grant: Extract<AutomaticBuildExecutorSessionResponseV3["action"], { kind: "GENERATION_GRANT" }> | undefined;
-      for (let ordinal = 0; ordinal < CODEX_EXECUTOR_TRANSPORT_PROFILE_V2.max_input_chunks + 1; ordinal += 1) {
-        const chunkResult = await callTool(client, trace, "executor.input.next", request as unknown as JsonObject);
-        maxToolResultBytes = Math.max(maxToolResultBytes, Buffer.byteLength(chunkResult.text, "utf8"));
-        const chunkResponse = chunkResult.response as AutomaticBuildExecutorSessionResponseV3;
-        if (chunkResponse.action.kind === "GENERATION_GRANT") {
-          grant = chunkResponse.action;
-          const replay = await callTool(client, trace, "executor.input.next", request as unknown as JsonObject);
-          assert.equal(replay.text, chunkResult.text, "generation grant replay must be byte-identical");
-          break;
+      let finalBatch: Extract<AutomaticBuildExecutorSessionResponseV3["action"], { kind: "INPUT_BATCH" }>["batch"] | undefined;
+      let expectedChunkOrdinal = 0;
+      if (!testedPrematureStart) {
+        assertMcpError(await callTool(client, trace, "executor.generation.start", {
+          version: "automatic_build_executor_generation_start_request.v3",
+          opaque_session_ref: delivery.input_manifest.opaque_session_ref,
+          generation_input_ref: delivery.input_manifest.generation_input_ref,
+          confirmed_through_ordinal: delivery.input_manifest.total_chunk_count - 1,
+        }));
+        assert.equal(attemptCount(primary), generationCount);
+        testedPrematureStart = true;
+      }
+      for (let batchOrdinal = 0; batchOrdinal < CODEX_EXECUTOR_TRANSPORT_PROFILE_V2.max_input_chunks + 1; batchOrdinal += 1) {
+        const batchResult = await callTool(client, trace, "executor.input.next", request as unknown as JsonObject);
+        maxToolResultBytes = Math.max(maxToolResultBytes, Buffer.byteLength(batchResult.text, "utf8"));
+        const batchResponse = batchResult.response as AutomaticBuildExecutorSessionResponseV3;
+        assert.equal(batchResponse.action.kind, "INPUT_BATCH");
+        if (batchResponse.action.kind !== "INPUT_BATCH") throw new Error("expected INPUT_BATCH");
+        const batch = batchResponse.action.batch;
+        batchCount += 1;
+        assert.equal(batch.first_ordinal, expectedChunkOrdinal);
+        for (const chunk of batch.chunks) {
+          assert.equal(chunk.ordinal, expectedChunkOrdinal);
+          expectedChunkOrdinal += 1;
+          chunkCount += 1;
+          deliveredBytes += Buffer.byteLength(chunk.payload_utf8, "utf8");
         }
-        assert.equal(chunkResponse.action.kind, "INPUT_CHUNK");
-        const chunk = chunkResponse.action.chunk;
-        assert.equal(chunk.ordinal, ordinal);
-        chunkCount += 1;
-        deliveredBytes += Buffer.byteLength(chunk.payload_utf8, "utf8");
 
-        if (generationCount === 0 && ordinal === 0 && chunkZeroReplayCount === 0) {
+        if (generationCount === 0 && batchOrdinal === 0 && batchZeroReplayCount === 0) {
           for (let replay = 0; replay < 4; replay += 1) {
-            const replayedChunk = await callTool(
+            const replayedBatch = await callTool(
               client,
               trace,
               "executor.input.next",
               request as unknown as JsonObject,
             );
             assert.equal(
-              replayedChunk.text,
-              chunkResult.text,
-              "chunk-zero request replay must be byte-identical",
+              replayedBatch.text,
+              batchResult.text,
+              "batch-zero request replay must be byte-identical",
             );
             assert.equal(attemptCount(primary), generationCount);
-            chunkZeroReplayCount += 1;
+            batchZeroReplayCount += 1;
           }
         }
 
-        if (!testedPrematureStart) {
-          assertMcpError(await callTool(client, trace, "executor.generation.start", {
-            version: "automatic_build_executor_generation_start_request.v2",
-            opaque_session_ref: delivery.input_manifest.opaque_session_ref,
-            generation_grant_ref: `abgrant1_${"0".repeat(64)}`,
-          }));
-          assert.equal(attemptCount(primary), generationCount);
-          testedPrematureStart = true;
-        }
         if (!testedOrdinalFailure) {
           assertMcpError(await callTool(client, trace, "executor.input.next", {
-            version: "automatic_build_executor_input_next_request.v3",
+            version: "automatic_build_executor_input_next_request.v4",
             opaque_session_ref: delivery.input_manifest.opaque_session_ref,
             generation_input_ref: delivery.input_manifest.generation_input_ref,
-            previous_chunk_ordinal: chunk.ordinal + 1,
+            ack_through_ordinal: batch.last_ordinal + 1,
           }));
           assert.equal(attemptCount(primary), generationCount);
           testedOrdinalFailure = true;
         }
+        if (batch.final_for_generation) {
+          finalBatch = batch;
+          const replay = await callTool(client, trace, "executor.input.next", request as unknown as JsonObject);
+          assert.equal(replay.text, batchResult.text, "final batch replay must be byte-identical");
+          break;
+        }
         request = {
-          version: "automatic_build_executor_input_next_request.v3",
+          version: "automatic_build_executor_input_next_request.v4",
           opaque_session_ref: delivery.input_manifest.opaque_session_ref,
           generation_input_ref: delivery.input_manifest.generation_input_ref,
-          previous_chunk_ordinal: chunk.ordinal,
+          ack_through_ordinal: batch.last_ordinal,
         };
       }
-      assert(grant, "compiled executor input delivery did not issue a generation grant");
+      assert(finalBatch, "compiled executor input delivery did not issue a final batch");
       assert.equal(attemptCount(primary), generationCount);
       const startRequest = {
-        version: "automatic_build_executor_generation_start_request.v2",
-        opaque_session_ref: grant.grant.opaque_session_ref,
-        generation_grant_ref: grant.grant.generation_grant_ref,
+        version: "automatic_build_executor_generation_start_request.v3",
+        opaque_session_ref: finalBatch.opaque_session_ref,
+        generation_input_ref: finalBatch.generation_input_ref,
+        confirmed_through_ordinal: finalBatch.last_ordinal,
       };
       const generated = await callTool(client, trace, "executor.generation.start", startRequest);
       assert.equal(generated.isError, false, "compiled MCP rejected a valid generation.start request");
@@ -552,7 +565,7 @@ async function main(): Promise<void> {
     assert.equal(generationCount, attemptCount(primary));
     assert.equal(attemptCount(secondary), 0);
     assert(testedPrematureStart && testedOrdinalFailure);
-    assert.equal(chunkZeroReplayCount, 4);
+    assert.equal(batchZeroReplayCount, 4);
 
     const visibility = assertTraceAllowlist(trace);
     const serverTimingSamples = await client.close();
@@ -576,9 +589,10 @@ async function main(): Promise<void> {
       forbidden_digest_field_count: 0,
       synthetic_input: {
         compiled_chunk_count: chunkCount,
+        compiled_batch_count: batchCount,
         compiled_delivered_bytes: deliveredBytes,
         max_tool_result_bytes: maxToolResultBytes,
-        chunk_zero_request_replays: chunkZeroReplayCount,
+        batch_zero_request_replays: batchZeroReplayCount,
       },
       attempt_contract: {
         before_generation_start: 0,
@@ -591,11 +605,11 @@ async function main(): Promise<void> {
         unknown_request_field: "protocol_incompatible",
         cross_handoff_connection: "protocol_incompatible",
         premature_generation_start: "protocol_incompatible",
-        previous_chunk_ordinal_mismatch: "protocol_incompatible",
+        ack_through_ordinal_mismatch: "protocol_incompatible",
       },
       trace_allowlist: visibility,
       mcp_server_timing: {
-        version: "executor_mcp_server_timing.v1",
+        version: "executor_mcp_server_timing.v2",
         sample_count: serverTimingSamples.length,
         first_connection_call_ordinal: serverTimingSamples[0]?.connection_call_ordinal,
         last_connection_call_ordinal: serverTimingSamples.at(-1)?.connection_call_ordinal,

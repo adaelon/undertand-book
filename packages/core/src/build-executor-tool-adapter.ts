@@ -53,14 +53,9 @@ const INPUT_REF_SCHEMA = Object.freeze({
   pattern: "^abinput1_[a-f0-9]{64}$",
   maxLength: 73,
 });
-const CHUNK_ORDINAL_SCHEMA = Object.freeze({
+const ORDINAL_SCHEMA = Object.freeze({
   type: "integer",
   minimum: 0,
-});
-const GRANT_REF_SCHEMA = Object.freeze({
-  type: "string",
-  pattern: "^abgrant1_[a-f0-9]{64}$",
-  maxLength: 73,
 });
 const SINK_REF_SCHEMA = Object.freeze({
   type: "string",
@@ -108,12 +103,12 @@ const BUILD_EXECUTOR_TOOL_CONTRACTS_V3 = Object.freeze([
       name: "executor.input.next" as const,
       description: `${DEDICATED_EXECUTOR_ONLY} Read the next ordered semantic input chunk.`,
       input_schema: closedSchema(
-        "automatic_build_executor_input_next_request.v3",
+        "automatic_build_executor_input_next_request.v4",
         ["opaque_session_ref", "generation_input_ref"],
         {
           opaque_session_ref: SESSION_REF_SCHEMA,
           generation_input_ref: INPUT_REF_SCHEMA,
-          previous_chunk_ordinal: CHUNK_ORDINAL_SCHEMA,
+          ack_through_ordinal: ORDINAL_SCHEMA,
         },
       ),
     },
@@ -121,11 +116,12 @@ const BUILD_EXECUTOR_TOOL_CONTRACTS_V3 = Object.freeze([
       name: "executor.generation.start" as const,
       description: `${DEDICATED_EXECUTOR_ONLY} Accept one generation grant and create or replay its semantic attempt.`,
       input_schema: closedSchema(
-        "automatic_build_executor_generation_start_request.v2",
-        ["opaque_session_ref", "generation_grant_ref"],
+        "automatic_build_executor_generation_start_request.v3",
+        ["opaque_session_ref", "generation_input_ref", "confirmed_through_ordinal"],
         {
           opaque_session_ref: SESSION_REF_SCHEMA,
-          generation_grant_ref: GRANT_REF_SCHEMA,
+          generation_input_ref: INPUT_REF_SCHEMA,
+          confirmed_through_ordinal: ORDINAL_SCHEMA,
         },
       ),
     },
@@ -292,8 +288,8 @@ export function validateBuildExecutorRegistrationScope(input: {
 
 const REQUEST_VERSION_BY_TOOL = Object.freeze({
   "executor.open": "automatic_build_executor_open_request.v3",
-  "executor.input.next": "automatic_build_executor_input_next_request.v3",
-  "executor.generation.start": "automatic_build_executor_generation_start_request.v2",
+  "executor.input.next": "automatic_build_executor_input_next_request.v4",
+  "executor.generation.start": "automatic_build_executor_generation_start_request.v3",
   "executor.submit_candidate": "automatic_build_executor_candidate_submit.v3",
 } satisfies Record<BuildExecutorToolNameV1, string>);
 
@@ -306,10 +302,15 @@ const REQUEST_KEYS_BY_TOOL = Object.freeze({
   },
   "executor.input.next": {
     required: ["version", "opaque_session_ref", "generation_input_ref"],
-    optional: ["previous_chunk_ordinal"],
+    optional: ["ack_through_ordinal"],
   },
   "executor.generation.start": {
-    required: ["version", "opaque_session_ref", "generation_grant_ref"],
+    required: [
+      "version",
+      "opaque_session_ref",
+      "generation_input_ref",
+      "confirmed_through_ordinal",
+    ],
     optional: [],
   },
   "executor.submit_candidate": {

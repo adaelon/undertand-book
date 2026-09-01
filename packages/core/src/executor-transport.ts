@@ -88,6 +88,43 @@ export interface PackExecutorTransportPayloadRequestV2 {
   envelope_for_chunk: (frame: ExecutorTransportChunkFrameV2) => unknown;
 }
 
+export interface ExecutorTransportDeliveryBatchLimitV1 {
+  version: "executor_transport_delivery_batch_limit.v1";
+  max_chunks_per_batch: number;
+  max_serialized_batch_bytes: number;
+  max_batches_per_work_unit: number;
+}
+
+export interface PackedExecutorTransportBatchV1<TChunk extends { ordinal: number }> {
+  first_ordinal: number;
+  last_ordinal: number;
+  chunks: TChunk[];
+  response: unknown;
+  serialized_mcp_result: string;
+  serialized_mcp_result_bytes: number;
+}
+
+export type ExecutorTransportBatchPackResultV1<TChunk extends { ordinal: number }> =
+  | {
+      version: "executor_transport_batch_pack.v1";
+      status: "within_limit";
+      batch_count: number;
+      batches: PackedExecutorTransportBatchV1<TChunk>[];
+    }
+  | {
+      version: "executor_transport_batch_pack.v1";
+      status: "blocked";
+      code: "single_chunk_exceeds_batch_limit" | "max_batch_count_exceeded";
+      required_batch_count: number;
+    };
+
+export const CODEX_EXECUTOR_DELIVERY_BATCH_LIMIT_V1 = Object.freeze({
+  version: "executor_transport_delivery_batch_limit.v1" as const,
+  max_chunks_per_batch: 8,
+  max_serialized_batch_bytes: 65_536,
+  max_batches_per_work_unit: 64,
+});
+
 const PROFILE_KEYS = [
   "carrier",
   "max_candidate_request_bytes",
@@ -174,6 +211,86 @@ export const CODEX_EXECUTOR_TRANSPORT_PROFILE_V2 = createExecutorTransportProfil
   max_candidate_request_tokens: 2_048,
   max_candidate_request_bytes: 32_768,
 });
+
+export function serializeExecutorMcpToolResult(response: unknown): string {
+  return canonicalAutomaticBuildJson({
+    content: [{ type: "text", text: canonicalAutomaticBuildJson(response) }],
+    isError: false,
+  });
+}
+
+export function packExecutorTransportBatches<
+  TChunk extends { ordinal: number },
+>(input: {
+  chunks: TChunk[];
+  limit: ExecutorTransportDeliveryBatchLimitV1;
+  envelope_for_chunks: (chunks: TChunk[]) => unknown;
+}): ExecutorTransportBatchPackResultV1<TChunk> {
+  const limit = input.limit;
+  if (limit.version !== "executor_transport_delivery_batch_limit.v1") {
+    throw new Error("executor delivery batch limit version is unsupported");
+  }
+  positiveSafeInteger(limit.max_chunks_per_batch, "max_chunks_per_batch");
+  positiveSafeInteger(limit.max_serialized_batch_bytes, "max_serialized_batch_bytes");
+  positiveSafeInteger(limit.max_batches_per_work_unit, "max_batches_per_work_unit");
+  if (!Array.isArray(input.chunks) || input.chunks.length === 0) {
+    throw new Error("executor delivery batch requires at least one chunk");
+  }
+  if (typeof input.envelope_for_chunks !== "function") {
+    throw new Error("executor delivery batch envelope factory must be a function");
+  }
+  for (let index = 0; index < input.chunks.length; index += 1) {
+    if (input.chunks[index]?.ordinal !== index) {
+      throw new Error("executor delivery batch chunks must use contiguous ordinals");
+    }
+  }
+
+  const batches: PackedExecutorTransportBatchV1<TChunk>[] = [];
+  let start = 0;
+  while (start < input.chunks.length) {
+    if (batches.length >= limit.max_batches_per_work_unit) {
+      return {
+        version: "executor_transport_batch_pack.v1",
+        status: "blocked",
+        code: "max_batch_count_exceeded",
+        required_batch_count: batches.length + 1,
+      };
+    }
+    let best: PackedExecutorTransportBatchV1<TChunk> | undefined;
+    const maxEnd = Math.min(input.chunks.length, start + limit.max_chunks_per_batch);
+    for (let end = start + 1; end <= maxEnd; end += 1) {
+      const chunks = input.chunks.slice(start, end);
+      const response = input.envelope_for_chunks(chunks);
+      const serializedMcpResult = serializeExecutorMcpToolResult(response);
+      const serializedMcpResultBytes = Buffer.byteLength(serializedMcpResult, "utf8");
+      if (serializedMcpResultBytes > limit.max_serialized_batch_bytes) break;
+      best = {
+        first_ordinal: chunks[0].ordinal,
+        last_ordinal: chunks.at(-1)!.ordinal,
+        chunks,
+        response,
+        serialized_mcp_result: serializedMcpResult,
+        serialized_mcp_result_bytes: serializedMcpResultBytes,
+      };
+    }
+    if (!best) {
+      return {
+        version: "executor_transport_batch_pack.v1",
+        status: "blocked",
+        code: "single_chunk_exceeds_batch_limit",
+        required_batch_count: batches.length + 1,
+      };
+    }
+    batches.push(best);
+    start = best.last_ordinal + 1;
+  }
+  return {
+    version: "executor_transport_batch_pack.v1",
+    status: "within_limit",
+    batch_count: batches.length,
+    batches,
+  };
+}
 
 export function measureExecutorTransportResponse(
   response: unknown,

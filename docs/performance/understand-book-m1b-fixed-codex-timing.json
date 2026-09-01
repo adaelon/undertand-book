@@ -1,0 +1,67 @@
+{
+  "version": "executor_mcp_fixed_timing_evidence.v2",
+  "status": "passed",
+  "codex_cli": "codex-cli 0.149.0",
+  "fixture": "isolated_single_synthetic_work_unit",
+  "connection_count": 1,
+  "sample_count": 9,
+  "totals": {
+    "executor.open": {
+      "call_count": 1,
+      "server_total_ms": 1234.1665,
+      "outer_total_ms": 1259,
+      "residual_total_ms": 24.833499999999958,
+      "response_total_bytes": 1466
+    },
+    "executor.input.next": {
+      "call_count": 6,
+      "server_total_ms": 931.3854000000028,
+      "outer_total_ms": 1074,
+      "residual_total_ms": 142.61459999999715,
+      "response_total_bytes": 31923
+    },
+    "executor.generation.start": {
+      "call_count": 1,
+      "server_total_ms": 1327.8977999999988,
+      "outer_total_ms": 1351,
+      "residual_total_ms": 23.102200000001176,
+      "response_total_bytes": 724
+    },
+    "executor.submit_candidate": {
+      "call_count": 1,
+      "server_total_ms": 1388.9412999999986,
+      "outer_total_ms": 1413,
+      "residual_total_ms": 24.05870000000141,
+      "response_total_bytes": 202
+    }
+  },
+  "overall": {
+    "call_count": 9,
+    "server_total_ms": 4882.3910000000005,
+    "outer_total_ms": 5097,
+    "residual_total_ms": 214.6089999999997,
+    "response_total_bytes": 34315
+  },
+  "server_phase_totals_ms": {
+    "current-state/claim": 250.60319999999774,
+    "input-render-or-reuse": 1068.3319000000047,
+    "persist/response": 8.962699999996403,
+    "candidate-gate": 239.21800000000076,
+    "writer/commit": 1100.8272999999972,
+    "next-work-prepare": 48.89600000000064
+  },
+  "observed_dominant_server_phase": "writer/commit",
+  "observed_dominant_component": "server",
+  "measured_followup_branch": "writer/commit",
+  "next_slice": "M2",
+  "durable": {
+    "semantic_attempts": 1,
+    "committed_tasks": 1
+  },
+  "thread_attribution_complete": true,
+  "semantic_trace_projection": {
+    "executor_input_or_submit": 5,
+    "dedicated_child_inference": 2,
+    "bounded_response_only": 2
+  }
+}

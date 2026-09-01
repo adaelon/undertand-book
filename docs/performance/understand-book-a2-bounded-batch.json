@@ -1,0 +1,67 @@
+{
+  "version": "executor_bounded_batch_ab_evidence.v1",
+  "status": "passed",
+  "codex_cli": "codex-cli 0.149.0",
+  "fixture": "isolated_single_synthetic_work_unit_5_chunks",
+  "baseline": {
+    "source": "understand-book-a1-programmatic-delivery.json",
+    "executor_mcp_calls": 9,
+    "executor_input_next_calls": 6,
+    "server_total_ms": 4861.71799999999,
+    "outer_total_ms": 5086,
+    "residual_total_ms": 224.2820000000097,
+    "semantic_attempts": 1,
+    "committed_tasks": 1
+  },
+  "a2_runs": [
+    {
+      "source": "understand-book-a2-fixed-codex-timing.json",
+      "executor_mcp_calls": 4,
+      "executor_input_next_calls": 1,
+      "server_total_ms": 5003.774099999998,
+      "outer_total_ms": 5125,
+      "residual_total_ms": 121.22590000000218
+    },
+    {
+      "source": "understand-book-a2-fixed-codex-timing-run-d.json",
+      "executor_mcp_calls": 4,
+      "executor_input_next_calls": 1,
+      "server_total_ms": 4443.270600000001,
+      "outer_total_ms": 4552,
+      "residual_total_ms": 108.72939999999949
+    },
+    {
+      "source": "understand-book-a2-fixed-codex-timing-run-e.json",
+      "executor_mcp_calls": 4,
+      "executor_input_next_calls": 1,
+      "server_total_ms": 4708.936700000001,
+      "outer_total_ms": 4819,
+      "residual_total_ms": 110.06329999999912
+    }
+  ],
+  "median": {
+    "executor_mcp_calls": 4,
+    "executor_input_next_calls": 1,
+    "server_total_ms": 4708.936700000001,
+    "outer_total_ms": 4819,
+    "residual_total_ms": 110.06329999999912,
+    "server_change_percent": -3.142558628750521,
+    "outer_change_percent": -5.249705073731813,
+    "residual_change_percent": -50.92649932034814
+  },
+  "durable": {
+    "all_runs_semantic_attempts": 1,
+    "all_runs_committed_tasks": 1,
+    "thread_attribution_complete": true
+  },
+  "decision": {
+    "keep_a2": true,
+    "reason": "three-run median reduced MCP calls, server time, outer time, and residual time without correctness regression",
+    "next_slice": "R1"
+  },
+  "limitations": [
+    "real Codex timing used the frozen 5-chunk fixture; deterministic regression covered 2/3/4/5-chunk packing and replay correctness",
+    "the first A2 timing sample was slower than baseline, so the decision uses the declared three-run median rather than a best sample",
+    "the retained timing projection does not expose a comparable end-to-end model wall-clock or token total"
+  ]
+}

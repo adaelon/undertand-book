@@ -515,6 +515,21 @@ export function inspectAutomaticBuildTaskClaim(
   });
 }
 
+export type AutomaticBuildTaskActivityState = "pending" | "reserved" | "running";
+
+export function inspectAutomaticBuildTaskActivity(
+  target: AutomaticBuildTarget,
+  stage: AutomaticBuildStage,
+  workUnitId: string,
+  options: AutomaticBuildClaimInspectionOptions = {},
+): AutomaticBuildTaskActivityState {
+  const inspection = inspectAutomaticBuildTaskClaim(target, stage, workUnitId, options);
+  if (!("lease" in inspection)) return "pending";
+  return readAutomaticBuildStart(target, inspection.lease_ref, inspection.lease)
+    ? "running"
+    : "reserved";
+}
+
 export function assertActiveAutomaticBuildLease(
   target: AutomaticBuildTarget,
   leaseRef: string,

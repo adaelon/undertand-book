@@ -1,0 +1,40 @@
+{
+  "version": "executor_private_frozen_input_reuse_evidence.v1",
+  "status": "passed",
+  "fixture": "direct_core_private_intent_artifact_generation_start",
+  "sample_count_per_variant": 3,
+  "baseline": {
+    "material_segment_pack_calls": 4,
+    "current_state_claim_ms": [113.154, 111.3246, 110.7313],
+    "input_render_or_reuse_ms": [9.3055, 8.2839, 8.5036],
+    "current_state_claim_median_ms": 111.3246,
+    "input_render_or_reuse_median_ms": 8.5036,
+    "measured_phase_total_median_ms": 119.6085
+  },
+  "r2": {
+    "material_segment_pack_calls": 2,
+    "current_state_claim_ms": [117.8625, 108.3757, 113.456],
+    "input_render_or_reuse_ms": [5.2748, 4.8106, 5.0583],
+    "current_state_claim_median_ms": 113.456,
+    "input_render_or_reuse_median_ms": 5.0583,
+    "measured_phase_total_median_ms": 118.5143,
+    "input_render_or_reuse_change_percent": -40.516,
+    "measured_phase_total_change_percent": -0.915
+  },
+  "durable": {
+    "private_driver_tests_passed": 22,
+    "material_count_regression_passed": true,
+    "task_blueprint_output_contract_drift_rejected_before_generation_state": true,
+    "candidate_sink_replay_and_artifact_commit_unchanged": true
+  },
+  "decision": {
+    "keep_r2": true,
+    "reason": "private generation.start removed the second frozen-material construction, reduced the measured input phase, and preserved the existing private task, sink, replay, and artifact commit contracts",
+    "next_slice": "W1"
+  },
+  "limitations": [
+    "timing is three direct Core synthetic private generation.start samples per variant, not a Codex outer-tool or model-wall-clock measurement",
+    "the total phase change is small because current private intent, plan, task, and base revalidation remains the dominant supported work",
+    "each sample ran in a fresh Vitest process, so process and filesystem noise remain visible in current-state/claim"
+  ]
+}

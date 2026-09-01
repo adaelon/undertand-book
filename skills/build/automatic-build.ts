@@ -28,6 +28,9 @@ import {
   parseAutomaticBuildStageCloseResult,
   verifyAutomaticBuildStageClose,
 } from "../../packages/core/src/automatic-build-close";
+import {
+  observeAutomaticBuildRemainingWork,
+} from "../../packages/core/src/automatic-build-observation";
 import type { AutomaticBuildPublicationStage } from "../../packages/core/src/automatic-build-publication";
 import {
   createAutomaticBuildStagePolicySet,
@@ -36,10 +39,13 @@ import {
   type AutomaticBuildStagePolicySetV3,
 } from "../../packages/core/src/automatic-build-policy-generation";
 import {
+  assertPass1ShadowCandidatePath,
   freezePass1ShadowTask,
   pass1ModelSlicePolicyMembers,
   pass1ShadowTaskPath,
   pass1ShadowTaskPrivateDirectory,
+  readPass1ShadowTask,
+  writePass1ShadowCandidate,
 } from "../../packages/core/src/pass1-reduction";
 import {
   freezeProfileSidecarDiscourseShadowTask,
@@ -180,6 +186,7 @@ import {
   type AutomaticBuildExecutorPromptMode,
 } from "./executor-prompt";
 import { resolveContentProfile } from "../../packages/core/src/content-profile";
+import { epubToSource } from "../../packages/core/src/epub-adapter";
 import {
   AUTOMATIC_BUILD_EXTRACTOR_PROMPT_NAMES,
   isAutomaticBuildExtractorPromptName,
@@ -363,8 +370,7 @@ export function resolveAutomaticBuildExecutorPrompt(
       "executor.generation.start",
       "executor.submit_candidate",
       "action.kind=DELIVER_INPUT",
-      "action.kind=INPUT_CHUNK",
-      "action.kind=GENERATION_GRANT",
+      "action.kind=INPUT_BATCH",
       "action.kind=GENERATE",
       "action.kind=WAIT",
       "action.kind=DONE",
@@ -764,6 +770,30 @@ export function runAutomaticBuildStageWriter(
       const code = error && typeof error === "object" && "code" in error ? String(error.code) : "";
       if (code !== "EEXIST" || !readFileSync(candidatePathForExecution).equals(candidateBytes)) throw error;
     }
+    if (generationStage === "pass1") {
+      const task = readPass1ShadowTask(target, generation.policy_generation_id, taskId);
+      const candidatePath = assertPass1ShadowCandidatePath({
+        target,
+        task,
+        candidate_path: candidatePathForExecution,
+      });
+      const sourceBytes = readFileSync(target.source_path);
+      const source = /\.epub$/iu.test(target.source_path)
+        ? epubToSource(new Uint8Array(sourceBytes)).source
+        : sourceBytes.toString("utf8");
+      const candidate = JSON.parse(readFileSync(candidatePath, "utf8").replace(/^\uFEFF/, "")) as unknown;
+      return writePass1ShadowCandidate({
+        target,
+        source,
+        task,
+        candidate,
+        provenance: {
+          executor: generation.executor,
+          attempt: generation.attempt,
+          generated_at: generation.generated_at,
+        },
+      });
+    }
     forwardStageScript(
       target,
       script,
@@ -835,12 +865,16 @@ export function renderAutomaticBuildTaskInput(
   return forwardStageScript(target, script, args, true);
 }
 
-export function runAutomaticBuildTaskInput(
+function runAutomaticBuildTaskInputWithSource(
   target: AutomaticBuildTarget,
   stage: AutomaticBuildStage,
   taskId: string,
   leaseRef: string,
   leaseToken: string,
+  inputSource: (lease: ReturnType<typeof readAutomaticBuildLease>) => {
+    stdout: string;
+    stderr: string;
+  },
   options: { now?: string; run_ttl_ms?: number } = {},
 ): { stdout: string; stderr: string } {
   startAutomaticBuildLease(target, leaseRef, leaseToken, {
@@ -853,11 +887,7 @@ export function runAutomaticBuildTaskInput(
   }
 
   const startedAt = options.now ?? new Date().toISOString();
-  const result = renderAutomaticBuildTaskInput(target, stage, taskId, {
-    ...(lease.policy_generation_id
-      ? { policy_generation_id: lease.policy_generation_id }
-      : {}),
-  });
+  const result = inputSource(lease);
   const finishedAt = options.now ?? new Date().toISOString();
   const binding = automaticBuildTaskPolicyBindingFromLease(lease);
   const inputSha256 = createHash("sha256").update(result.stdout, "utf8").digest("hex");
@@ -878,6 +908,52 @@ export function runAutomaticBuildTaskInput(
     } : {}),
   });
   return result;
+}
+
+export function runAutomaticBuildTaskInput(
+  target: AutomaticBuildTarget,
+  stage: AutomaticBuildStage,
+  taskId: string,
+  leaseRef: string,
+  leaseToken: string,
+  options: { now?: string; run_ttl_ms?: number } = {},
+): { stdout: string; stderr: string } {
+  return runAutomaticBuildTaskInputWithSource(
+    target,
+    stage,
+    taskId,
+    leaseRef,
+    leaseToken,
+    (lease) => renderAutomaticBuildTaskInput(target, stage, taskId, {
+      ...(lease.policy_generation_id
+        ? { policy_generation_id: lease.policy_generation_id }
+        : {}),
+    }),
+    options,
+  );
+}
+
+export function runAutomaticBuildFrozenTaskInput(
+  target: AutomaticBuildTarget,
+  stage: AutomaticBuildStage,
+  taskId: string,
+  leaseRef: string,
+  leaseToken: string,
+  frozenInput: string,
+  options: { now?: string; run_ttl_ms?: number } = {},
+): { stdout: string; stderr: string } {
+  if (typeof frozenInput !== "string") {
+    throw new Error("frozen automatic build task input must be a string");
+  }
+  return runAutomaticBuildTaskInputWithSource(
+    target,
+    stage,
+    taskId,
+    leaseRef,
+    leaseToken,
+    () => ({ stdout: frozenInput, stderr: "" }),
+    options,
+  );
 }
 
 export function submitAutomaticBuildTaskCandidate(
@@ -1287,6 +1363,27 @@ export function prepareExplicitLegacyBuildPlan(
     target_ref: target.target_ref,
     build_plan_path: buildPlanPath,
     plan: selection.plan,
+  };
+}
+
+export function automaticBuildRemainingWork(
+  targetInput: string,
+  rootDir: string,
+  options: {
+    book_id?: string;
+    quality_profile?: ExtractionQualityProfile;
+    now?: string;
+  } = {},
+) {
+  const target = resolveAutomaticBuildTarget(targetInput, rootDir, { book_id: options.book_id });
+  const snapshot = buildAutomaticBuildSnapshot(target, {
+    quality_profile: options.quality_profile ?? "full",
+  });
+  return {
+    version: "automatic_build_remaining_work_observation.v1" as const,
+    remaining_work: observeAutomaticBuildRemainingWork(snapshot, {
+      ...(options.now ? { now: options.now } : {}),
+    }),
   };
 }
 
@@ -3392,6 +3489,18 @@ if (argv[0] === "legacy-plan") {
   const stageState = snapshot.stages.find((stage) => stage.stage === stageValue);
   if (!stageState) throw new Error(`quality stage is not reachable in the current snapshot: ${stageValue}`);
   printAutomaticBuildJson(collectAutomaticBuildStageQuality(target, stageState, qualityProfileFromArgs(argv)));
+} else if (argv[0] === "remaining-work") {
+  const targetInput = argv[1];
+  if (!targetInput) {
+    console.error("usage: tsx skills/build/automatic-build.ts remaining-work <target> [--root <dir>] [--quality-profile <profile>] [--now <iso>]");
+    process.exit(2);
+  }
+  const rootDir = path.resolve(valueArg(argv, "--root") ?? process.cwd());
+  printAutomaticBuildJson(automaticBuildRemainingWork(targetInput, rootDir, {
+    ...(valueArg(argv, "--book-id") ? { book_id: valueArg(argv, "--book-id") } : {}),
+    quality_profile: qualityProfileFromArgs(argv),
+    ...(valueArg(argv, "--now") ? { now: valueArg(argv, "--now") } : {}),
+  }));
 } else if (argv[0] === "metrics") {
   const [targetInput, stageValue] = argv.slice(1, 3);
   if (!targetInput || !AUTOMATIC_BUILD_STAGES.includes(stageValue as AutomaticBuildStage)) {

@@ -129,7 +129,7 @@ export interface BuildExecutorRoleConfigValidationV3 {
   tool_names: BuildExecutorToolNameV1[];
 }
 
-type ConnectionPhase = "open" | "input" | "grant" | "generate" | "wait" | "terminal";
+type ConnectionPhase = "open" | "input" | "grant" | "final_batch" | "generate" | "wait" | "terminal";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
@@ -223,8 +223,7 @@ export function validateBuildExecutorRoleConfigV3(
     "opaque_handoff_ref",
     ...BUILD_EXECUTOR_TOOL_NAMES_V1,
     "action.kind=DELIVER_INPUT",
-    "action.kind=INPUT_CHUNK",
-    "action.kind=GENERATION_GRANT",
+    "action.kind=INPUT_BATCH",
     "action.kind=GENERATE",
     "action.kind=WAIT",
     "action.kind=DONE",
@@ -447,9 +446,9 @@ export function createBuildExecutorStdioConnectionCapability(input: {
   let handoffRef: string | undefined;
   let sessionRef: string | undefined;
   let generationInputRef: string | undefined;
-  let generationGrantRef: string | undefined;
   let candidateSinkRef: string | undefined;
-  let expectedPreviousChunkOrdinal: number | undefined;
+  let expectedAckThroughOrdinal: number | undefined;
+  let finalBatchOrdinal: number | undefined;
   let lastObservedCallKey: string | undefined;
 
   const optionalOrdinal = (record: Record<string, unknown>, field: string): number | undefined => {
@@ -477,25 +476,27 @@ export function createBuildExecutorStdioConnectionCapability(input: {
       if (Object.hasOwn(call.request, "previous_chunk_receipt")) return false;
       const requestedSessionRef = stringField(call.request, "opaque_session_ref");
       const requestedInputRef = stringField(call.request, "generation_input_ref");
-      const ordinalValue = call.request.previous_chunk_ordinal;
-      const requestedOrdinal = optionalOrdinal(call.request, "previous_chunk_ordinal");
+      const ordinalValue = call.request.ack_through_ordinal;
+      const requestedOrdinal = optionalOrdinal(call.request, "ack_through_ordinal");
       if (ordinalValue !== undefined && requestedOrdinal === undefined) return false;
       return phase === "input"
         && !!requestedSessionRef && OPAQUE_SESSION_REF.test(requestedSessionRef)
         && requestedSessionRef === sessionRef
         && !!requestedInputRef && GENERATION_INPUT_REF.test(requestedInputRef)
         && requestedInputRef === generationInputRef
-        && requestedOrdinal === expectedPreviousChunkOrdinal;
+        && requestedOrdinal === expectedAckThroughOrdinal;
     }
 
     if (call.tool_name === "executor.generation.start") {
       const requestedSessionRef = stringField(call.request, "opaque_session_ref");
-      const requestedGrantRef = stringField(call.request, "generation_grant_ref");
-      return phase === "grant"
+      const requestedInputRef = stringField(call.request, "generation_input_ref");
+      const requestedOrdinal = optionalOrdinal(call.request, "confirmed_through_ordinal");
+      return phase === "final_batch"
         && !!requestedSessionRef && requestedSessionRef === sessionRef
         && OPAQUE_SESSION_REF.test(requestedSessionRef)
-        && !!requestedGrantRef && requestedGrantRef === generationGrantRef
-        && GENERATION_GRANT_REF.test(requestedGrantRef);
+        && !!requestedInputRef && requestedInputRef === generationInputRef
+        && GENERATION_INPUT_REF.test(requestedInputRef)
+        && requestedOrdinal === finalBatchOrdinal;
     }
 
     if (call.tool_name === "executor.submit_candidate") {
@@ -529,8 +530,8 @@ export function createBuildExecutorStdioConnectionCapability(input: {
       const manifestInputRef = stringField(manifest, "generation_input_ref");
       const nextSessionRef = stringField(next, "opaque_session_ref");
       const nextInputRef = stringField(next, "generation_input_ref");
-      const nextOrdinalValue = next.previous_chunk_ordinal;
-      const nextOrdinal = optionalOrdinal(next, "previous_chunk_ordinal");
+      const nextOrdinalValue = next.ack_through_ordinal;
+      const nextOrdinal = optionalOrdinal(next, "ack_through_ordinal");
       if (!manifestSessionRef || !OPAQUE_SESSION_REF.test(manifestSessionRef)
         || !manifestInputRef || !GENERATION_INPUT_REF.test(manifestInputRef)
         || nextSessionRef !== manifestSessionRef
@@ -542,58 +543,53 @@ export function createBuildExecutorStdioConnectionCapability(input: {
       }
       sessionRef = manifestSessionRef;
       generationInputRef = manifestInputRef;
-      generationGrantRef = undefined;
       candidateSinkRef = undefined;
-      expectedPreviousChunkOrdinal = nextOrdinal;
+      expectedAckThroughOrdinal = nextOrdinal;
+      finalBatchOrdinal = undefined;
       phase = "input";
-    } else if (action.kind === "INPUT_CHUNK") {
-      if (call.tool_name !== "executor.input.next" || !isRecord(call.request) || !isRecord(action.chunk)) {
-        throw new Error("Build Executor input chunk binding is invalid");
+    } else if (action.kind === "INPUT_BATCH") {
+      if (call.tool_name !== "executor.input.next" || !isRecord(call.request) || !isRecord(action.batch)) {
+        throw new Error("Build Executor input batch binding is invalid");
       }
-      const chunk = action.chunk;
-      const chunkSessionRef = stringField(chunk, "opaque_session_ref");
-      const chunkInputRef = stringField(chunk, "generation_input_ref");
-      const ordinal = optionalOrdinal(chunk, "ordinal");
-      const previousOrdinal = optionalOrdinal(call.request, "previous_chunk_ordinal");
-      const expectedOrdinal = previousOrdinal === undefined ? 0 : previousOrdinal + 1;
-      const payload = stringField(chunk, "payload_utf8");
-      const range = chunk.byte_range;
-      if (!chunkSessionRef || chunkSessionRef !== sessionRef
-        || !chunkInputRef || chunkInputRef !== generationInputRef
-        || ordinal !== expectedOrdinal
-        || payload === undefined
-        || !isRecord(range)
-        || !Number.isSafeInteger(range.start) || (range.start as number) < 0
-        || !Number.isSafeInteger(range.end) || (range.end as number) < (range.start as number)
-        || (range.end as number) - (range.start as number) !== Buffer.byteLength(payload, "utf8")
-        || Object.hasOwn(chunk, "chunk_receipt")
-        || Object.hasOwn(chunk, "payload_sha256")) {
-        throw new Error("Build Executor input chunk binding is invalid");
+      const batch = action.batch;
+      const batchSessionRef = stringField(batch, "opaque_session_ref");
+      const batchInputRef = stringField(batch, "generation_input_ref");
+      const firstOrdinal = optionalOrdinal(batch, "first_ordinal");
+      const lastOrdinal = optionalOrdinal(batch, "last_ordinal");
+      const requestedAck = optionalOrdinal(call.request, "ack_through_ordinal");
+      const expectedFirstOrdinal = requestedAck === undefined ? 0 : requestedAck + 1;
+      if (!batchSessionRef || batchSessionRef !== sessionRef
+        || !batchInputRef || batchInputRef !== generationInputRef
+        || firstOrdinal !== expectedFirstOrdinal
+        || lastOrdinal === undefined || lastOrdinal < firstOrdinal
+        || !Array.isArray(batch.chunks)
+        || batch.chunks.length !== lastOrdinal - firstOrdinal + 1
+        || typeof batch.final_for_generation !== "boolean") {
+        throw new Error("Build Executor input batch binding is invalid");
       }
-      expectedPreviousChunkOrdinal = ordinal;
-      phase = "input";
-    } else if (action.kind === "GENERATION_GRANT") {
-      if (!isRecord(action.grant)) {
-        throw new Error("Build Executor generation grant binding is invalid");
+      for (let index = 0; index < batch.chunks.length; index += 1) {
+        const chunk = batch.chunks[index];
+        if (!isRecord(chunk)
+          || stringField(chunk, "opaque_session_ref") !== sessionRef
+          || stringField(chunk, "generation_input_ref") !== generationInputRef
+          || optionalOrdinal(chunk, "ordinal") !== firstOrdinal + index
+          || typeof chunk.payload_utf8 !== "string"
+          || !isRecord(chunk.byte_range)
+          || !Number.isSafeInteger(chunk.byte_range.start)
+          || !Number.isSafeInteger(chunk.byte_range.end)
+          || (chunk.byte_range.end as number) - (chunk.byte_range.start as number)
+            !== Buffer.byteLength(chunk.payload_utf8, "utf8")
+          || Object.hasOwn(chunk, "payload_sha256")) {
+          throw new Error("Build Executor input batch chunk binding is invalid");
+        }
       }
-      const grant = action.grant;
-      const grantSessionRef = stringField(grant, "opaque_session_ref");
-      const grantInputRef = stringField(grant, "generation_input_ref");
-      const grantRef = stringField(grant, "generation_grant_ref");
-      const rebindFromOpen = call.tool_name === "executor.open";
-      if (!grantSessionRef || !OPAQUE_SESSION_REF.test(grantSessionRef)
-        || !grantInputRef || !GENERATION_INPUT_REF.test(grantInputRef)
-        || !grantRef || !GENERATION_GRANT_REF.test(grantRef)
-        || Object.hasOwn(grant, "output_contract_digest")) {
-        throw new Error("Build Executor generation grant binding is invalid");
+      expectedAckThroughOrdinal = lastOrdinal;
+      if (batch.final_for_generation) {
+        finalBatchOrdinal = lastOrdinal;
+        phase = "final_batch";
+      } else {
+        phase = "input";
       }
-      if (!rebindFromOpen && (grantSessionRef !== sessionRef || grantInputRef !== generationInputRef)) {
-        throw new Error("Build Executor generation grant changed its delivery binding");
-      }
-      sessionRef = grantSessionRef;
-      generationInputRef = grantInputRef;
-      generationGrantRef = grantRef;
-      phase = "grant";
     } else if (action.kind === "GENERATE") {
       const generateSessionRef = stringField(action, "opaque_session_ref");
       const sinkRef = stringField(action, "candidate_sink_ref");

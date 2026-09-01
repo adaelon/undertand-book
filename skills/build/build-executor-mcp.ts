@@ -11,12 +11,16 @@ import {
 import {
   resolveAutomaticBuildExecutorRegistryRoot,
   runAutomaticBuildExecutorSessionCommand,
+  type AutomaticBuildExecutorServerPhaseBoundaryV1,
+  type AutomaticBuildExecutorServerTimingObserverV1,
   type AutomaticBuildExecutorSessionResponseV3,
 } from "../../packages/core/src/automatic-build-executor-session";
 import { canonicalAutomaticBuildJson } from "../../packages/core/src/automatic-build-protocol";
 import {
+  CODEX_EXECUTOR_DELIVERY_BATCH_LIMIT_V1,
   CODEX_EXECUTOR_TRANSPORT_PROFILE_V2,
   measureExecutorTransportResponse,
+  serializeExecutorMcpToolResult,
 } from "../../packages/core/src/executor-transport";
 
 const MCP_PROTOCOL_VERSION = "2025-06-18";
@@ -29,23 +33,57 @@ interface JsonRpcRequest {
   params?: unknown;
 }
 
-export interface ExecutorMcpServerTimingV1 {
-  version: "executor_mcp_server_timing.v1";
+export interface ExecutorMcpServerTimingV2 {
+  version: "executor_mcp_server_timing.v2";
   connection_call_ordinal: number;
   operation: BuildExecutorToolNameV1;
   server_elapsed_ms: number;
   response_bytes: number;
   response_action_kind: string | null;
   outcome: "ok" | "bounded_error";
+  server_phase_elapsed_ms: ExecutorMcpServerPhaseElapsedV2 | null;
+}
+
+export type ExecutorMcpServerPhaseElapsedV2 =
+  | {
+      "current-state/claim": number;
+      "input-render-or-reuse": number;
+      "persist/response": number;
+    }
+  | {
+      "candidate-gate": number;
+      "writer/commit": number;
+      "next-work-prepare": number;
+    };
+
+interface ExecutorMcpPhasePlanV2 {
+  boundaries: readonly AutomaticBuildExecutorServerPhaseBoundaryV1[];
+}
+
+function phasePlan(operation: BuildExecutorToolNameV1): ExecutorMcpPhasePlanV2 | undefined {
+  if (operation === "executor.generation.start") {
+    return {
+      boundaries: ["current-state/claim", "input-render-or-reuse"],
+    };
+  }
+  if (operation === "executor.submit_candidate") {
+    return {
+      boundaries: ["candidate-gate", "writer/commit"],
+    };
+  }
+  return undefined;
 }
 
 interface BuildExecutorMcpSessionOptions {
   bootstrap_version: string;
   protocol_generation: string;
   session_private_root: string;
-  execute_request?: (request: unknown) => AutomaticBuildExecutorSessionResponseV3;
+  execute_request?: (
+    request: unknown,
+    timing: AutomaticBuildExecutorServerTimingObserverV1,
+  ) => AutomaticBuildExecutorSessionResponseV3;
   now_ms?: () => number;
-  timing_sample_sink?: (sample: ExecutorMcpServerTimingV1) => void;
+  timing_sample_sink?: (sample: ExecutorMcpServerTimingV2) => void;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -83,17 +121,21 @@ export function createBuildExecutorMcpSession(options: BuildExecutorMcpSessionOp
     protocol_generation: options.protocol_generation,
     session_private_root: options.session_private_root,
   });
+  const nowMs = options.now_ms ?? (() => performance.now());
+  let activeTiming: AutomaticBuildExecutorServerTimingObserverV1 | undefined;
   const adapter = createBuildExecutorToolAdapter({
     authorize_connection: connection.authorize_connection,
-    execute_request: options.execute_request ?? ((request) => {
-      const response = runAutomaticBuildExecutorSessionCommand(request);
+    execute_request: (request) => {
+      if (!activeTiming) throw new Error("Build Executor MCP timing boundary is unavailable");
+      const response = options.execute_request
+        ? options.execute_request(request, activeTiming)
+        : runAutomaticBuildExecutorSessionCommand(request, { timing: activeTiming });
       if (response.version !== "automatic_build_executor_session.v3") {
         throw new Error("Build Executor MCP received a legacy session response");
       }
       return response;
-    }),
+    },
   });
-  const nowMs = options.now_ms ?? (() => performance.now());
   let connectionCallOrdinal = 0;
 
   const handleMessage = (value: unknown): unknown | undefined => {
@@ -143,10 +185,26 @@ export function createBuildExecutorMcpSession(options: BuildExecutorMcpSessionOp
     connectionCallOrdinal += 1;
     const callOrdinal = connectionCallOrdinal;
     const startedAtMs = nowMs();
+    const plan = phasePlan(toolName);
+    const completedPhases = new Map<AutomaticBuildExecutorServerPhaseBoundaryV1, number>();
+    let nextBoundary = 0;
+    let phaseStartedAtMs = startedAtMs;
+    const timing: AutomaticBuildExecutorServerTimingObserverV1 = {
+      complete_phase: (phase) => {
+        if (!plan || plan.boundaries[nextBoundary] !== phase) {
+          throw new Error("Build Executor MCP server phase order is invalid");
+        }
+        const finishedPhaseAtMs = nowMs();
+        completedPhases.set(phase, finishedPhaseAtMs - phaseStartedAtMs);
+        phaseStartedAtMs = finishedPhaseAtMs;
+        nextBoundary += 1;
+      },
+    };
     let rpcResponse: ReturnType<typeof rpcResult>;
     let responseActionKind: string | null = null;
-    let outcome: ExecutorMcpServerTimingV1["outcome"] = "bounded_error";
+    let outcome: ExecutorMcpServerTimingV2["outcome"] = "bounded_error";
     try {
+      activeTiming = timing;
       if (!isRecord(request.params) || !isRecord(request.params.arguments)) {
         throw new Error("Build Executor MCP tool arguments are invalid");
       }
@@ -156,12 +214,14 @@ export function createBuildExecutorMcpSession(options: BuildExecutorMcpSessionOp
         request.params.arguments,
         connection.connection_capability,
       );
-      const payload = response.action.kind === "INPUT_CHUNK"
-        ? response.action.chunk.payload_utf8
-        : "";
-      if (measureExecutorTransportResponse(
+      if (response.action.kind === "INPUT_BATCH") {
+        if (Buffer.byteLength(serializeExecutorMcpToolResult(response), "utf8")
+          > CODEX_EXECUTOR_DELIVERY_BATCH_LIMIT_V1.max_serialized_batch_bytes) {
+          throw new Error("Build Executor MCP input batch exceeds its tested carrier tier");
+        }
+      } else if (measureExecutorTransportResponse(
         response,
-        payload,
+        "",
         CODEX_EXECUTOR_TRANSPORT_PROFILE_V2,
       ).status !== "within_limit") {
         throw new Error("Build Executor MCP tool result exceeds its transport profile");
@@ -175,17 +235,36 @@ export function createBuildExecutorMcpSession(options: BuildExecutorMcpSessionOp
       });
     } catch {
       rpcResponse = boundedToolError(request.id);
+    } finally {
+      activeTiming = undefined;
     }
     const serializedResponse = `${JSON.stringify(rpcResponse)}\n`;
     const finishedAtMs = nowMs();
+    let serverPhaseElapsedMs: ExecutorMcpServerPhaseElapsedV2 | null = null;
+    if (outcome === "ok" && plan && nextBoundary === plan.boundaries.length) {
+      if (toolName === "executor.generation.start") {
+        serverPhaseElapsedMs = {
+          "current-state/claim": completedPhases.get("current-state/claim") ?? 0,
+          "input-render-or-reuse": completedPhases.get("input-render-or-reuse") ?? 0,
+          "persist/response": finishedAtMs - phaseStartedAtMs,
+        };
+      } else if (toolName === "executor.submit_candidate") {
+        serverPhaseElapsedMs = {
+          "candidate-gate": completedPhases.get("candidate-gate") ?? 0,
+          "writer/commit": completedPhases.get("writer/commit") ?? 0,
+          "next-work-prepare": finishedAtMs - phaseStartedAtMs,
+        };
+      }
+    }
     options.timing_sample_sink?.({
-      version: "executor_mcp_server_timing.v1",
+      version: "executor_mcp_server_timing.v2",
       connection_call_ordinal: callOrdinal,
       operation: toolName,
       server_elapsed_ms: finishedAtMs - startedAtMs,
       response_bytes: Buffer.byteLength(serializedResponse, "utf8"),
       response_action_kind: responseActionKind,
       outcome,
+      server_phase_elapsed_ms: serverPhaseElapsedMs,
     });
     return rpcResponse;
   };

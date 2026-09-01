@@ -215,7 +215,7 @@ describe("BR8 production v3 routing release", () => {
     }
   }, 30_000);
 
-  it("replays and commits a whole-window production task without claiming an extra stitch", () => {
+  it("commits a whole-window production task in-process without claiming an extra stitch", () => {
     const fixture = createSyntheticRoutabilityFixture(200);
     const buildPlan = confirmedStandardBuildPlan(fixture.source_file, fixture.root);
     const plan = automaticBuildPlan(fixture.source_file, fixture.root, {
@@ -265,25 +265,33 @@ describe("BR8 production v3 routing release", () => {
       candidateSource,
       { now: "2026-08-04T00:20:02.000Z" },
     );
-    const receipt = submitAutomaticBuildCandidate(
-      fixture.target,
-      task.lease_ref,
-      task.lease.token,
-      candidate.candidate_path,
-      (candidatePath) => runAutomaticBuildStageWriter(
+    const previousSidecar = process.env.UNDERSTAND_BOOK_SIDECAR_SELF;
+    process.env.UNDERSTAND_BOOK_SIDECAR_SELF = path.join(fixture.root, "missing-writer-sidecar.exe");
+    let receipt: ReturnType<typeof submitAutomaticBuildCandidate>;
+    try {
+      receipt = submitAutomaticBuildCandidate(
         fixture.target,
-        "pass1",
-        task.task_id,
-        candidatePath,
-        {
-          policy_generation_id: task.lease.policy_generation_id!,
-          attempt: task.lease.attempt,
-          executor: task.lease.owner,
-          generated_at: "2026-08-04T00:20:03.000Z",
-        },
-      ),
-      { now: "2026-08-04T00:20:03.000Z" },
-    );
+        task.lease_ref,
+        task.lease.token,
+        candidate.candidate_path,
+        (candidatePath) => runAutomaticBuildStageWriter(
+          fixture.target,
+          "pass1",
+          task.task_id,
+          candidatePath,
+          {
+            policy_generation_id: task.lease.policy_generation_id!,
+            attempt: task.lease.attempt,
+            executor: task.lease.owner,
+            generated_at: "2026-08-04T00:20:03.000Z",
+          },
+        ),
+        { now: "2026-08-04T00:20:03.000Z" },
+      );
+    } finally {
+      if (previousSidecar === undefined) delete process.env.UNDERSTAND_BOOK_SIDECAR_SELF;
+      else process.env.UNDERSTAND_BOOK_SIDECAR_SELF = previousSidecar;
+    }
     expect(JSON.parse(readFileSync(receipt.artifact_path!, "utf8"))).toMatchObject({
       version: "semantic_task_artifact.v3",
       policy_generation_id: task.lease.policy_generation_id,

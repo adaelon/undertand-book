@@ -19,19 +19,32 @@ const EXECUTOR_TRACE_OPERATIONS = [
   "executor.submit_candidate",
 ] as const satisfies readonly ExecutorTraceOperation[];
 
-export interface ExecutorMcpServerTimingV1 {
-  version: "executor_mcp_server_timing.v1";
+export interface ExecutorMcpServerTimingV2 {
+  version: "executor_mcp_server_timing.v2";
   connection_call_ordinal: number;
   operation: ExecutorTraceOperation;
   server_elapsed_ms: number;
   response_bytes: number;
   response_action_kind: string | null;
   outcome: "ok" | "bounded_error";
+  server_phase_elapsed_ms: ExecutorMcpServerPhaseElapsedV2 | null;
 }
 
-export interface ExecutorMcpTimingConnectionV1 {
+export type ExecutorMcpServerPhaseElapsedV2 =
+  | {
+      "current-state/claim": number;
+      "input-render-or-reuse": number;
+      "persist/response": number;
+    }
+  | {
+      "candidate-gate": number;
+      "writer/commit": number;
+      "next-work-prepare": number;
+    };
+
+export interface ExecutorMcpTimingConnectionV2 {
   thread_id: string;
-  samples: readonly ExecutorMcpServerTimingV1[];
+  samples: readonly ExecutorMcpServerTimingV2[];
 }
 
 export interface ExecutorOuterTimingV1 {
@@ -41,7 +54,7 @@ export interface ExecutorOuterTimingV1 {
   outer_tool_call_elapsed_ms: number;
 }
 
-export interface ExecutorMcpTimingJoinSampleV1 {
+export interface ExecutorMcpTimingJoinSampleV2 {
   thread_id: string;
   connection_call_ordinal: number;
   operation: ExecutorTraceOperation;
@@ -51,9 +64,10 @@ export interface ExecutorMcpTimingJoinSampleV1 {
   response_bytes: number;
   response_action_kind: string | null;
   outcome: "ok" | "bounded_error";
+  server_phase_elapsed_ms: ExecutorMcpServerPhaseElapsedV2 | null;
 }
 
-export interface ExecutorMcpTimingOperationTotalV1 {
+export interface ExecutorMcpTimingOperationTotalV2 {
   call_count: number;
   server_total_ms: number;
   outer_total_ms: number;
@@ -61,10 +75,43 @@ export interface ExecutorMcpTimingOperationTotalV1 {
   response_total_bytes: number;
 }
 
-export interface ExecutorMcpTimingJoinV1 {
-  version: "executor_mcp_timing_join.v1";
-  samples: ExecutorMcpTimingJoinSampleV1[];
-  totals: Record<ExecutorTraceOperation, ExecutorMcpTimingOperationTotalV1>;
+export interface ExecutorMcpTimingJoinV2 {
+  version: "executor_mcp_timing_join.v2";
+  samples: ExecutorMcpTimingJoinSampleV2[];
+  totals: Record<ExecutorTraceOperation, ExecutorMcpTimingOperationTotalV2>;
+}
+
+function serverPhaseElapsed(
+  sample: ExecutorMcpServerTimingV2,
+): ExecutorMcpServerPhaseElapsedV2 | null {
+  const phases = sample.server_phase_elapsed_ms;
+  if (phases === null) {
+    if (sample.outcome === "ok"
+      && (sample.operation === "executor.generation.start"
+        || sample.operation === "executor.submit_candidate")) {
+      timingFailure("successful long operation is missing server phases");
+    }
+    return null;
+  }
+  if (!isRecord(phases)) timingFailure("server phases are not an object");
+  const expected = sample.operation === "executor.generation.start"
+    ? ["current-state/claim", "input-render-or-reuse", "persist/response"]
+    : sample.operation === "executor.submit_candidate"
+      ? ["candidate-gate", "writer/commit", "next-work-prepare"]
+      : undefined;
+  if (!expected || !hasExactKeys(phases, expected)) {
+    timingFailure("server phases do not match the operation");
+  }
+  const phaseRecord = phases as Record<string, unknown>;
+  const elapsed = Object.fromEntries(expected.map((phase) => [
+    phase,
+    nonNegativeFinite(phaseRecord[phase] as number, `server phase ${phase}`),
+  ])) as ExecutorMcpServerPhaseElapsedV2;
+  const phaseTotal = Object.values(elapsed).reduce((sum, value) => sum + value, 0);
+  if (Math.abs(phaseTotal - sample.server_elapsed_ms) > 0.000_001) {
+    timingFailure("server phases do not cover the server interval");
+  }
+  return elapsed;
 }
 
 function timingFailure(message: string): never {
@@ -84,9 +131,9 @@ function timingOperation(value: string, label: string): ExecutorTraceOperation {
 }
 
 export function reduceExecutorMcpTiming(options: {
-  connections: readonly ExecutorMcpTimingConnectionV1[];
+  connections: readonly ExecutorMcpTimingConnectionV2[];
   outer_samples: readonly ExecutorOuterTimingV1[];
-}): ExecutorMcpTimingJoinV1 {
+}): ExecutorMcpTimingJoinV2 {
   const outerByCall = new Map<string, ExecutorOuterTimingV1>();
   for (const sample of options.outer_samples) {
     if (!sample.thread_id) timingFailure("outer sample thread_id is missing");
@@ -106,8 +153,8 @@ export function reduceExecutorMcpTiming(options: {
     outer_total_ms: 0,
     residual_total_ms: 0,
     response_total_bytes: 0,
-  }])) as Record<ExecutorTraceOperation, ExecutorMcpTimingOperationTotalV1>;
-  const samples: ExecutorMcpTimingJoinSampleV1[] = [];
+  }])) as Record<ExecutorTraceOperation, ExecutorMcpTimingOperationTotalV2>;
+  const samples: ExecutorMcpTimingJoinSampleV2[] = [];
   const connectionThreads = new Set<string>();
   for (const connection of options.connections) {
     if (!connection.thread_id) timingFailure("connection thread_id is missing");
@@ -117,7 +164,7 @@ export function reduceExecutorMcpTiming(options: {
     connectionThreads.add(connection.thread_id);
     for (const [index, server] of connection.samples.entries()) {
       const expectedOrdinal = index + 1;
-      if (server.version !== "executor_mcp_server_timing.v1") {
+      if (server.version !== "executor_mcp_server_timing.v2") {
         timingFailure(`server sample ${connection.thread_id}:${expectedOrdinal} has an incompatible version`);
       }
       if (server.connection_call_ordinal !== expectedOrdinal) {
@@ -125,6 +172,7 @@ export function reduceExecutorMcpTiming(options: {
       }
       const operation = timingOperation(server.operation, "server sample operation");
       const serverElapsed = nonNegativeFinite(server.server_elapsed_ms, "server elapsed");
+      const phaseElapsed = serverPhaseElapsed(server);
       if (!Number.isSafeInteger(server.response_bytes) || server.response_bytes < 0) {
         timingFailure("server response_bytes is invalid");
       }
@@ -147,6 +195,7 @@ export function reduceExecutorMcpTiming(options: {
         response_bytes: server.response_bytes,
         response_action_kind: server.response_action_kind,
         outcome: server.outcome,
+        server_phase_elapsed_ms: phaseElapsed,
       });
       const total = totals[operation];
       total.call_count += 1;
@@ -157,7 +206,7 @@ export function reduceExecutorMcpTiming(options: {
     }
   }
   if (outerByCall.size > 0) timingFailure("outer samples contain calls without a server sample");
-  return { version: "executor_mcp_timing_join.v1", samples, totals };
+  return { version: "executor_mcp_timing_join.v2", samples, totals };
 }
 
 export interface R7TraceThread {
@@ -203,12 +252,144 @@ export interface R7RolloutTraceAnalysis {
     bounded_response_only: number;
   };
   max_live_dedicated_children: number;
+  executor_slot_lifecycle_observations: Array<{
+    observed_at_ms: number;
+    live_slots: number;
+  }>;
+  executor_refill_started_at_ms: number | null;
   fourth_child_started_after_first_terminal: boolean | null;
   fourth_child_started_before_last_initial_terminal: boolean | null;
   synthetic_build_step_call_count: number;
   synthetic_build_step_started_seqs: number[];
   first_partial_completion_observed_seq: number | null;
   all_dedicated_terminal_observed_seq: number | null;
+}
+
+export interface ExecutorSyntheticSchedulingEvidenceV1 {
+  version: "executor_synthetic_scheduling_evidence.v1";
+  slot_capacity: number;
+  lifecycle_observations: ExecutorSlotLifecycleObservationV1[];
+  cause_totals: Array<{
+    idle_reason: "root_refill_gap" | "tail_imbalance";
+    interval_count: number;
+    observed_ms: number;
+    idle_slot_ms_lower_bound: number;
+    idle_slot_ms_upper_bound: number;
+  }>;
+  dominant_avoidable_idle_reason: "root_refill_gap" | "tail_imbalance" | null;
+}
+
+export interface ExecutorSlotLifecycleObservationV1 {
+  observed_at_ms: number;
+  live_slots: number;
+}
+
+export function summarizeThreeSlotFirstTerminalScheduling(
+  lifecycleObservations: readonly ExecutorSlotLifecycleObservationV1[],
+  slotCapacity = 3,
+  refillStartedAtMs?: number,
+): ExecutorSyntheticSchedulingEvidenceV1 {
+  if (!Number.isSafeInteger(slotCapacity) || slotCapacity < 1) {
+    throw new Error("executor scheduling slot capacity is invalid");
+  }
+  if (lifecycleObservations.length < 3) {
+    throw new Error("executor scheduling lifecycle evidence is incomplete");
+  }
+  const observations = lifecycleObservations.map((observation, index) => {
+    if (!Number.isFinite(observation.observed_at_ms) || observation.observed_at_ms < 0
+      || !Number.isSafeInteger(observation.live_slots) || observation.live_slots < 0
+      || observation.live_slots > slotCapacity) {
+      throw new Error("executor scheduling lifecycle observation is invalid");
+    }
+    if (index > 0 && observation.observed_at_ms <= lifecycleObservations[index - 1].observed_at_ms) {
+      throw new Error("executor scheduling lifecycle observations are not strictly ordered");
+    }
+    return { ...observation };
+  });
+  const refillStartIndex = observations.findIndex((observation, index) => (
+    index < observations.length - 1
+    && observation.live_slots > 0
+    && observation.live_slots < slotCapacity
+  ));
+  if (refillStartIndex < 0) {
+    throw new Error("executor scheduling trace has no first-terminal refill observation");
+  }
+  const refillFullIndex = observations.findIndex((observation, index) => (
+    index > refillStartIndex && observation.live_slots === slotCapacity
+  ));
+  const refillStartedAt = refillStartedAtMs ?? (refillFullIndex >= 0
+    ? observations[refillFullIndex].observed_at_ms
+    : undefined);
+  if (refillStartedAt === undefined || !Number.isFinite(refillStartedAt)
+    || refillStartedAt <= observations[refillStartIndex].observed_at_ms
+    || refillStartedAt >= observations.at(-1)!.observed_at_ms) {
+    throw new Error("executor scheduling trace has no valid refill start boundary");
+  }
+  if (observations.at(-1)?.live_slots !== 0) {
+    throw new Error("executor scheduling trace has no terminal zero-live observation");
+  }
+
+  const totals = new Map<"root_refill_gap" | "tail_imbalance", {
+    interval_count: number;
+    observed_ms: number;
+    idle_slot_ms_lower_bound: number;
+    idle_slot_ms_upper_bound: number;
+  }>([
+    ["root_refill_gap", {
+      interval_count: 0,
+      observed_ms: 0,
+      idle_slot_ms_lower_bound: 0,
+      idle_slot_ms_upper_bound: 0,
+    }],
+    ["tail_imbalance", {
+      interval_count: 0,
+      observed_ms: 0,
+      idle_slot_ms_lower_bound: 0,
+      idle_slot_ms_upper_bound: 0,
+    }],
+  ]);
+  const refillStart = observations[refillStartIndex];
+  const refillGapMs = refillStartedAt - refillStart.observed_at_ms;
+  const refillTotal = totals.get("root_refill_gap")!;
+  refillTotal.interval_count = 1;
+  refillTotal.observed_ms = refillGapMs;
+  refillTotal.idle_slot_ms_lower_bound = (slotCapacity - refillStart.live_slots) * refillGapMs;
+  refillTotal.idle_slot_ms_upper_bound = slotCapacity * refillGapMs;
+
+  const tailStartIndex = observations.findIndex((observation) => (
+    observation.observed_at_ms >= refillStartedAt
+  ));
+  if (tailStartIndex < 0) {
+    throw new Error("executor scheduling trace has no post-refill lifecycle observation");
+  }
+  for (let index = tailStartIndex; index < observations.length - 1; index += 1) {
+    const start = observations[index];
+    if (start.live_slots === slotCapacity || start.live_slots === 0) continue;
+    const observedMs = observations[index + 1].observed_at_ms - start.observed_at_ms;
+    const total = totals.get("tail_imbalance")!;
+    total.interval_count += 1;
+    total.observed_ms += observedMs;
+    total.idle_slot_ms_lower_bound += (slotCapacity - start.live_slots) * observedMs;
+    total.idle_slot_ms_upper_bound += slotCapacity * observedMs;
+  }
+  const causeTotals = (["root_refill_gap", "tail_imbalance"] as const).map((idleReason) => ({
+    idle_reason: idleReason,
+    ...totals.get(idleReason)!,
+  }));
+  const rootRefill = causeTotals.find((total) => total.idle_reason === "root_refill_gap")!;
+  const tail = causeTotals.find((total) => total.idle_reason === "tail_imbalance")!;
+  const dominant = rootRefill.idle_slot_ms_lower_bound > tail.idle_slot_ms_upper_bound
+    ? "root_refill_gap"
+    : tail.idle_slot_ms_lower_bound > rootRefill.idle_slot_ms_upper_bound
+      ? "tail_imbalance"
+      : null;
+  return {
+    version: "executor_synthetic_scheduling_evidence.v1",
+    slot_capacity: slotCapacity,
+    lifecycle_observations: observations,
+    cause_totals: causeTotals,
+    dominant_avoidable_idle_reason: dominant,
+  };
 }
 
 export interface AnalyzeR7RolloutTraceOptions {
@@ -240,6 +421,7 @@ interface ToolCallRecord {
 
 interface AgentStatusObservation {
   ended_seq: number;
+  observed_at_ms: number;
   completed_task_names: string[];
   running_task_names: string[];
 }
@@ -297,7 +479,7 @@ function hasExactKeys(value: JsonObject, expected: readonly string[]): boolean {
     && actual.every((key, index) => key === sortedExpected[index]);
 }
 
-export function readExecutorMcpServerTimingJsonl(value: string, label: string): ExecutorMcpServerTimingV1[] {
+export function readExecutorMcpServerTimingJsonl(value: string, label: string): ExecutorMcpServerTimingV2[] {
   const keys = [
     "version",
     "connection_call_ordinal",
@@ -306,8 +488,9 @@ export function readExecutorMcpServerTimingJsonl(value: string, label: string): 
     "response_bytes",
     "response_action_kind",
     "outcome",
+    "server_phase_elapsed_ms",
   ] as const;
-  const samples: ExecutorMcpServerTimingV1[] = [];
+  const samples: ExecutorMcpServerTimingV2[] = [];
   for (const [index, line] of value.split(/\r?\n/u).filter(Boolean).entries()) {
     let raw: unknown;
     try {
@@ -318,7 +501,7 @@ export function readExecutorMcpServerTimingJsonl(value: string, label: string): 
     if (!isRecord(raw) || !hasExactKeys(raw, keys)) {
       timingFailure(`${label} line ${index + 1} is outside the Executor timing contract`);
     }
-    if (raw.version !== "executor_mcp_server_timing.v1") {
+    if (raw.version !== "executor_mcp_server_timing.v2") {
       timingFailure(`${label} line ${index + 1} has an incompatible timing version`);
     }
     if (!Number.isSafeInteger(raw.connection_call_ordinal) || (raw.connection_call_ordinal as number) < 1) {
@@ -338,15 +521,18 @@ export function readExecutorMcpServerTimingJsonl(value: string, label: string): 
     if (raw.outcome !== "ok" && raw.outcome !== "bounded_error") {
       timingFailure(`${label} line ${index + 1} has an invalid outcome`);
     }
-    samples.push({
-      version: "executor_mcp_server_timing.v1",
+    const sample: ExecutorMcpServerTimingV2 = {
+      version: "executor_mcp_server_timing.v2",
       connection_call_ordinal: raw.connection_call_ordinal as number,
       operation,
       server_elapsed_ms: serverElapsed,
       response_bytes: raw.response_bytes as number,
       response_action_kind: raw.response_action_kind as string | null,
       outcome: raw.outcome,
-    });
+      server_phase_elapsed_ms: raw.server_phase_elapsed_ms as ExecutorMcpServerPhaseElapsedV2 | null,
+    };
+    serverPhaseElapsed(sample);
+    samples.push(sample);
   }
   if (samples.length === 0) timingFailure(`${label} contains no Executor server timing samples`);
   return samples;
@@ -528,10 +714,15 @@ function parseToolCall(value: unknown, label: string): ToolCallRecord {
   };
 }
 
-function readOuterToolCallElapsed(
+interface ToolCallWallTimeV1 {
+  started_ms: number;
+  ended_ms: number;
+}
+
+function readToolCallWallTimes(
   bundleRoot: string,
   rolloutId: string,
-): Map<string, number> {
+): Map<string, ToolCallWallTimeV1> {
   const tracePath = path.join(bundleRoot, "trace.jsonl");
   let lines: string[];
   try {
@@ -561,14 +752,14 @@ function readOuterToolCallElapsed(
     if (target.has(callId)) unverifiable(`tool call ${callId} has duplicate ${payload.type} timing`);
     target.set(callId, wallTime);
   }
-  const elapsed = new Map<string, number>();
+  const timings = new Map<string, ToolCallWallTimeV1>();
   for (const [callId, startedAt] of starts) {
     const endedAt = ends.get(callId);
     if (endedAt === undefined) continue;
     if (endedAt < startedAt) unverifiable(`tool call ${callId} has negative outer elapsed`);
-    elapsed.set(callId, endedAt - startedAt);
+    timings.set(callId, { started_ms: startedAt, ended_ms: endedAt });
   }
-  return elapsed;
+  return timings;
 }
 
 function maxConcurrent(threads: R7TraceThread[]): number {
@@ -613,6 +804,7 @@ export function analyzeR7RolloutTrace(options: AnalyzeR7RolloutTraceOptions): R7
   const dedicatedIds = new Set(dedicated.map((thread) => thread.thread_id));
 
   const readRaw = rawPayloadReader(bundleRoot, state);
+  const toolCallWallTimes = readToolCallWallTimes(bundleRoot, stateRolloutId);
   const executorNamespace = `mcp__${options.executor_server_name}`;
   const modelToolToOperation = new Map(options.executor_tool_names.map((tool) => [tool.replaceAll(".", "_"), tool]));
   const toolCalls = mapRecord(state.tool_calls, "state.tool_calls");
@@ -621,6 +813,7 @@ export function analyzeR7RolloutTrace(options: AnalyzeR7RolloutTraceOptions): R7
   const allowedSemanticToolResponses: unknown[] = [];
   const syntheticBuildStepStartedSeqs: number[] = [];
   const agentStatusObservations: AgentStatusObservation[] = [];
+  let executorRefillStartedAtMs: number | null = null;
 
   for (const [key, rawCall] of Object.entries(toolCalls)) {
     const call = parseToolCall(rawCall, `tool call ${key}`);
@@ -646,11 +839,36 @@ export function analyzeR7RolloutTrace(options: AnalyzeR7RolloutTraceOptions): R7
 
     if (call.thread_id === stateRootThreadId
       && toolNamespace === "collaboration"
+      && toolName === "spawn_agent"
+      && dedicated.length >= 4) {
+      const payload = requiredRecord(invocation.value.payload, `spawn_agent call ${key} payload`);
+      const argumentsText = requiredString(payload.arguments, `spawn_agent call ${key} arguments`);
+      let argumentsValue: unknown;
+      try {
+        argumentsValue = JSON.parse(argumentsText) as unknown;
+      } catch (error) {
+        unverifiable(`spawn_agent call ${key} arguments are not JSON: ${String(error)}`);
+      }
+      const argumentsRecord = requiredRecord(argumentsValue, `spawn_agent call ${key} arguments`);
+      if (argumentsRecord.task_name === dedicated[3].task_name) {
+        const wallTime = toolCallWallTimes.get(call.tool_call_id);
+        if (!wallTime) unverifiable(`spawn_agent call ${key} has no outer wall timing`);
+        if (executorRefillStartedAtMs !== null) {
+          unverifiable("fourth dedicated child has duplicate spawn timing");
+        }
+        executorRefillStartedAtMs = wallTime.started_ms;
+      }
+    }
+
+    if (call.thread_id === stateRootThreadId
+      && toolNamespace === "collaboration"
       && toolName === "list_agents") {
       if (call.execution.status !== "completed" || !call.raw_result_payload_id) {
         unverifiable(`list_agents call ${key} has no completed result`);
       }
       const observed = parseListAgentsResult(readRaw(call.raw_result_payload_id), `list_agents call ${key}`);
+      const wallTime = toolCallWallTimes.get(call.tool_call_id);
+      if (!wallTime) unverifiable(`list_agents call ${key} has no outer wall timing`);
       const completedTaskNames: string[] = [];
       const runningTaskNames: string[] = [];
       for (const thread of dedicated) {
@@ -662,6 +880,7 @@ export function analyzeR7RolloutTrace(options: AnalyzeR7RolloutTraceOptions): R7
       }
       agentStatusObservations.push({
         ended_seq: call.execution.ended_seq,
+        observed_at_ms: wallTime.ended_ms,
         completed_task_names: completedTaskNames,
         running_task_names: runningTaskNames,
       });
@@ -756,20 +975,19 @@ export function analyzeR7RolloutTrace(options: AnalyzeR7RolloutTraceOptions): R7
     }
   }
 
-  const outerElapsedByCall = readOuterToolCallElapsed(bundleRoot, stateRolloutId);
   const executorOuterTimingSamples: ExecutorOuterTimingV1[] = [];
   for (const thread of dedicated) {
     const calls = executorCalls.filter((call) => call.thread_id === thread.thread_id);
     for (const [index, call] of calls.entries()) {
-      const outerElapsed = outerElapsedByCall.get(call.tool_call_id);
-      if (outerElapsed === undefined) {
+      const wallTime = toolCallWallTimes.get(call.tool_call_id);
+      if (!wallTime) {
         unverifiable(`Executor call ${call.tool_call_id} has no outer wall timing`);
       }
       executorOuterTimingSamples.push({
         thread_id: thread.thread_id,
         connection_call_ordinal: index + 1,
         operation: call.operation,
-        outer_tool_call_elapsed_ms: outerElapsed,
+        outer_tool_call_elapsed_ms: wallTime.ended_ms - wallTime.started_ms,
       });
     }
   }
@@ -897,6 +1115,13 @@ export function analyzeR7RolloutTrace(options: AnalyzeR7RolloutTraceOptions): R7
       bounded_response_only: boundedResponseOnlyHits,
     },
     max_live_dedicated_children: maxConcurrent(dedicated),
+    executor_slot_lifecycle_observations: agentStatusObservations
+      .sort((left, right) => left.ended_seq - right.ended_seq)
+      .map((observation) => ({
+        observed_at_ms: observation.observed_at_ms,
+        live_slots: observation.running_task_names.length,
+      })),
+    executor_refill_started_at_ms: executorRefillStartedAtMs,
     fourth_child_started_after_first_terminal: fourthAfterFirst,
     fourth_child_started_before_last_initial_terminal: fourthBeforeLast,
     synthetic_build_step_call_count: syntheticBuildStepStartedSeqs.length,

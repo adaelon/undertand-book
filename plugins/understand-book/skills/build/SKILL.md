@@ -219,8 +219,7 @@ Each subagent receives one `opaque_handoff_ref` and follows the
 ```text
 executor.open(ref)
   -> DELIVER_INPUT: follow next_request through executor.input.next
-  -> INPUT_CHUNK: retain the ordered chunk only in the dedicated child; continue by exact `previous_chunk_ordinal`
-  -> GENERATION_GRANT: accept exactly once through executor.generation.start
+  -> INPUT_BATCH: retain ordered chunks only in the dedicated child; send non-final `last_ordinal` as `ack_through_ordinal` to input.next, or send the final `last_ordinal` as `confirmed_through_ordinal` to generation.start
   -> GENERATE: produce one strict JSON value; send it through executor.submit_candidate; continue
   -> WAIT: wait retry_after_ms; reopen the same ref
   -> DONE: return only committed | retryable_failure | interrupted

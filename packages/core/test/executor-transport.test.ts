@@ -1,13 +1,16 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
+  CODEX_EXECUTOR_DELIVERY_BATCH_LIMIT_V1,
   CODEX_EXECUTOR_TRANSPORT_PROFILE_V2,
   createExecutorTransportProfile,
   measureExecutorTransportResponse,
+  packExecutorTransportBatches,
   packExecutorTransportPayload,
   validateExecutorTransportPack,
   validateExecutorTransportProfile,
   type ExecutorTransportChunkFrameV2,
+  type ExecutorTransportDeliveryBatchLimitV1,
   type ExecutorTransportProfileV2,
 } from "../src/executor-transport";
 
@@ -53,6 +56,74 @@ function syntheticEnvelope(frame: ExecutorTransportChunkFrameV2): unknown {
 }
 
 describe("executor transport profile and response packer", () => {
+  it("packs contiguous chunks to the exact MCP result byte boundary and splits at boundary plus one", () => {
+    const packed = packExecutorTransportPayload({
+      profile: profile({
+        max_tool_result_tokens: 512,
+        max_tool_result_bytes: 2_048,
+        result_envelope_reserve_tokens: 256,
+      }),
+      payload_utf8: deterministicUtf8Text("executor-batch-boundary", 4_096),
+      envelope_for_chunk: syntheticEnvelope,
+    });
+    if (packed.status !== "within_limit" || packed.chunks.length < 3) {
+      throw new Error("expected at least three transport chunks for batch fixture");
+    }
+    const envelopeForChunks = (chunks: typeof packed.chunks) => ({
+      version: "automatic_build_executor_session.v3",
+      action: {
+        kind: "INPUT_BATCH",
+        batch: {
+          version: "automatic_build_executor_input_batch.v1",
+          chunks: chunks.map((chunk) => chunk.response),
+          first_ordinal: chunks[0]?.ordinal,
+          last_ordinal: chunks.at(-1)?.ordinal,
+          final_for_generation: chunks.at(-1)?.final ?? false,
+        },
+      },
+    });
+    const twoChunkProbe = packExecutorTransportBatches({
+      chunks: packed.chunks.slice(0, 2),
+      limit: {
+        ...CODEX_EXECUTOR_DELIVERY_BATCH_LIMIT_V1,
+        max_chunks_per_batch: 2,
+        max_batches_per_work_unit: 2,
+        max_serialized_batch_bytes: Number.MAX_SAFE_INTEGER,
+      },
+      envelope_for_chunks: envelopeForChunks,
+    });
+    expect(twoChunkProbe.status).toBe("within_limit");
+    if (twoChunkProbe.status !== "within_limit") throw new Error("expected two-chunk probe");
+    const exactBytes = twoChunkProbe.batches[0].serialized_mcp_result_bytes;
+
+    const limit = (maxSerializedBatchBytes: number): ExecutorTransportDeliveryBatchLimitV1 => ({
+      ...CODEX_EXECUTOR_DELIVERY_BATCH_LIMIT_V1,
+      max_chunks_per_batch: 2,
+      max_batches_per_work_unit: packed.chunks.length,
+      max_serialized_batch_bytes: maxSerializedBatchBytes,
+    });
+    const exact = packExecutorTransportBatches({
+      chunks: packed.chunks,
+      limit: limit(exactBytes),
+      envelope_for_chunks: envelopeForChunks,
+    });
+    expect(exact.status).toBe("within_limit");
+    if (exact.status !== "within_limit") throw new Error("expected exact-boundary batches");
+    expect(exact.batches[0].chunks).toHaveLength(2);
+    expect(exact.batches[0].serialized_mcp_result_bytes).toBe(exactBytes);
+
+    const plusOne = packExecutorTransportBatches({
+      chunks: packed.chunks,
+      limit: limit(exactBytes - 1),
+      envelope_for_chunks: envelopeForChunks,
+    });
+    expect(plusOne.status).toBe("within_limit");
+    if (plusOne.status !== "within_limit") throw new Error("expected split batches");
+    expect(plusOne.batches[0].chunks).toHaveLength(1);
+    expect(plusOne.batches.flatMap((batch) => batch.chunks).map((chunk) => chunk.ordinal))
+      .toEqual(packed.chunks.map((chunk) => chunk.ordinal));
+  });
+
   it("freezes the V2 Codex executor carrier profile and rejects invalid direct fields", () => {
     expect(CODEX_EXECUTOR_TRANSPORT_PROFILE_V2).toMatchObject({
       version: "executor_transport_profile.v2",

@@ -249,7 +249,7 @@ try {
   );
   if (
     preflightPlan.version !== "automatic_build_plan.v1"
-    || preflightPlan.preflight?.version !== "automatic_build_preflight.v1"
+    || preflightPlan.preflight?.version !== "automatic_build_preflight.v2"
     || preflightPlan.preflight?.budget?.status !== "within_budget"
     || preflightPlan.preflight?.worker_plan?.max_workers !== 1
     || existsSync(taskStoreRoot)
@@ -308,9 +308,11 @@ try {
     || task.descriptor.work_unit_id !== task.task_id
     || task.descriptor.kind !== "pass1_window"
     || task.descriptor.input_hash !== task.lease.input_hash
-    || task.descriptor.input_budget_proof?.proof_digest !== task.lease.proof_digest
-    || task.lease.policy_set_digest !== next.action.task_bindings?.[task.task_id]?.policy_set_digest
-    || JSON.stringify(task.descriptor.policy_fingerprint) !== JSON.stringify(task.lease.policy_fingerprint)
+    || task.lease.policy_generation_id !== next.action.task_bindings?.[task.task_id]?.policy_generation_id
+    || JSON.stringify(task.lease.semantic_contract) !== JSON.stringify(next.action.task_bindings?.[task.task_id]?.semantic_contract)
+    || !task.lease.semantic_contract
+    || Object.entries(task.lease.semantic_contract)
+      .some(([key, value]) => task.descriptor.policy_fingerprint?.[key] !== value)
     || task.descriptor.target?.input_fingerprint !== next.snapshot.target.target_ref.input_fingerprint
     || !(task.descriptor.cost?.score > 0)
     || Object.hasOwn(task, "write_command")
@@ -426,31 +428,30 @@ try {
     throw new Error("automatic build attempt events were not isolated in the canonical paper workspace");
   }
   const semanticArtifact = JSON.parse(readFileSync(semanticArtifactPath, "utf8"));
-  const policySet = JSON.parse(readFileSync(path.join(
+  const policyGeneration = JSON.parse(readFileSync(path.join(
     workspace,
     ".build",
     "automatic-build",
-    "v3",
+    "v4",
     "policies",
     "pass1",
-    retryTask.lease.policy_set_digest,
+    retryTask.lease.policy_generation_id,
     "policy.json",
   ), "utf8"));
-  const policySetMember = policySet.members?.find((member) => member.kind === retryTask.descriptor.kind);
   if (
     semanticArtifact.version !== "semantic_task_artifact.v3"
     || semanticArtifact.stage !== "pass1"
     || semanticArtifact.work_unit_id !== task.task_id
     || semanticArtifact.input_hash !== retryTask.descriptor.input_hash
-    || semanticArtifact.proof_digest !== retryTask.lease.proof_digest
-    || semanticArtifact.policy_set_digest !== retryTask.lease.policy_set_digest
-    || semanticArtifact.policy_fingerprint?.quality_profile !== "full"
+    || semanticArtifact.policy_generation_id !== retryTask.lease.policy_generation_id
+    || !isDeepStrictEqual(semanticArtifact.semantic_contract, retryTask.lease.semantic_contract)
+    || semanticArtifact.semantic_contract?.quality_profile !== "full"
     || semanticArtifact.provenance?.attempt !== 2
     || semanticArtifact.provenance?.executor !== retryTask.lease.owner
     || sha256(readFileSync(semanticArtifactPath)) !== receipt.artifact_sha256
-    || policySet.version !== "automatic_build_stage_policy_set.v2"
-    || policySet.policy_set_digest !== retryTask.lease.policy_set_digest
-    || !isDeepStrictEqual(policySetMember?.policy_fingerprint, retryTask.lease.policy_fingerprint)
+    || policyGeneration.version !== "automatic_build_policy_generation.v1"
+    || policyGeneration.policy_generation_id !== retryTask.lease.policy_generation_id
+    || !isDeepStrictEqual(policyGeneration.semantic_contract, retryTask.lease.semantic_contract)
   ) {
     throw new Error(`automatic build semantic artifact was not policy-bound: ${JSON.stringify(semanticArtifact)}`);
   }
@@ -563,7 +564,7 @@ try {
   if (skippedSemanticInput.status === 0 || !skippedSemanticInput.stderr.includes("not model-eligible")) {
     throw new Error(`compiled AP12 semantic-unit router exposed a skipped formula: ${skippedSemanticInput.stdout}\n${skippedSemanticInput.stderr}`);
   }
-  semanticArtifact.policy_fingerprint = { ...semanticArtifact.policy_fingerprint, schema_version: "pass1_output.v999" };
+  semanticArtifact.semantic_contract = { ...semanticArtifact.semantic_contract, schema_version: "pass1_output.v999" };
   writeFileSync(semanticArtifactPath, JSON.stringify(semanticArtifact, null, 2), "utf8");
   const { result: staleResult, value: stalePlan } = spawnSidecarJson(
     ["plan", automaticTarget, ...automaticArgs],

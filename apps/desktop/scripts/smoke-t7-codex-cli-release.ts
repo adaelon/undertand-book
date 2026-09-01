@@ -38,7 +38,8 @@ import {
   readExecutorMcpServerTimingJsonl,
   reduceExecutorMcpTiming,
   ROOT_EXECUTOR_BOUNDARY_UNVERIFIABLE,
-  type ExecutorMcpTimingJoinV1,
+  summarizeThreeSlotFirstTerminalScheduling,
+  type ExecutorMcpTimingJoinV2,
   type ExecutorTraceOperation,
   type R7RolloutTraceAnalysis,
 } from "./r7-rollout-trace";
@@ -79,7 +80,7 @@ interface CodexScenarioOptions {
 
 interface CodexScenarioResult {
   analysis: R7RolloutTraceAnalysis;
-  executor_mcp_timing: ExecutorMcpTimingJoinV1 | null;
+  executor_mcp_timing: ExecutorMcpTimingJoinV2 | null;
   executor_mcp_connection_count: number;
   durable: {
     semantic_attempts: number;
@@ -676,6 +677,11 @@ async function main(): Promise<void> {
   const evidenceOut = evidenceOutValue ? path.resolve(evidenceOutValue) : undefined;
   const m1EvidenceOutValue = argumentValue("--m1-evidence-out");
   const m1EvidenceOut = m1EvidenceOutValue ? path.resolve(m1EvidenceOutValue) : undefined;
+  const schedulingEvidenceOutValue = argumentValue("--scheduling-evidence-out");
+  const schedulingEvidenceOut = schedulingEvidenceOutValue
+    ? path.resolve(schedulingEvidenceOutValue)
+    : undefined;
+  const expectedCodexVersion = argumentValue("--expected-codex-version");
   const m1Only = hasArgument("--m1-only");
   const codex = resolveCodexInvocation(argumentValue("--codex-command"));
 
@@ -724,7 +730,11 @@ async function main(): Promise<void> {
       isolatedEnvironment,
       stagingWorkspace,
     ).stdout.trim();
-    assert.match(preflightVersion, /^codex-cli 0\.149\./u, "R7 must execute the Codex 0.149 version family");
+    if (expectedCodexVersion) {
+      assert.equal(preflightVersion, expectedCodexVersion, "R7 did not execute the explicitly selected Codex release");
+    } else {
+      assert.match(preflightVersion, /^codex-cli 0\.149\./u, "R7 must execute the Codex 0.149 version family");
+    }
 
     const installation = installThinPlugin(
       codex,
@@ -900,13 +910,21 @@ async function main(): Promise<void> {
       residual_total_ms: 0,
       response_total_bytes: 0,
     });
+    const serverPhaseTotalsMs: Record<string, number> = {};
+    for (const sample of single.executor_mcp_timing.samples) {
+      for (const [phase, elapsed] of Object.entries(sample.server_phase_elapsed_ms ?? {})) {
+        serverPhaseTotalsMs[phase] = (serverPhaseTotalsMs[phase] ?? 0) + elapsed;
+      }
+    }
+    const observedDominantServerPhase = Object.entries(serverPhaseTotalsMs)
+      .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))[0]?.[0] ?? null;
     const dominantComponent = overallTiming.server_total_ms > overallTiming.residual_total_ms
       ? "server"
       : overallTiming.residual_total_ms > overallTiming.server_total_ms
         ? "residual"
         : "equal";
     const m1Evidence = {
-      version: "executor_mcp_fixed_timing_evidence.v1",
+      version: "executor_mcp_fixed_timing_evidence.v2",
       status: "passed",
       codex_cli: preflightVersion,
       fixture: "isolated_single_synthetic_work_unit",
@@ -914,12 +932,11 @@ async function main(): Promise<void> {
       sample_count: single.executor_mcp_timing.samples.length,
       totals: single.executor_mcp_timing.totals,
       overall: overallTiming,
+      server_phase_totals_ms: serverPhaseTotalsMs,
+      observed_dominant_server_phase: observedDominantServerPhase,
       observed_dominant_component: dominantComponent,
-      next_branch: dominantComponent === "server"
-        ? "M1b"
-        : dominantComponent === "residual"
-          ? "A1"
-          : "M1b_and_A1_independent",
+      measured_followup_branch: observedDominantServerPhase,
+      next_slice: "M2",
       durable: single.durable,
       thread_attribution_complete: single.analysis.thread_attribution_complete,
       semantic_trace_projection: single.analysis.semantic_hit_shapes,
@@ -962,6 +979,7 @@ async function main(): Promise<void> {
       "Proceed as soon as list_agents reports at least one completed initial child; do not wait for the whole wave.",
       `Immediately call node ${syntheticBuildStepMarker} refill exactly once, then spawn its one returned child `
         + "with the same role and fork contract.",
+      "Immediately call list_agents once to record post-refill occupancy; do not wait before this observation.",
       "For the final gate, maintain a cumulative terminal set while repeating wait_agent then list_agents.",
       "A completed status is terminal; a task previously reported running that disappears from a later complete",
       "list_agents live inventory is also terminal. Continue until all four owned task names are terminal.",
@@ -1001,6 +1019,25 @@ async function main(): Promise<void> {
     assert(parallel.analysis.all_dedicated_terminal_observed_seq !== null);
     assert(parallel.analysis.all_dedicated_terminal_observed_seq < doneStep);
 
+    const schedulingEvidence = {
+      ...summarizeThreeSlotFirstTerminalScheduling(
+        parallel.analysis.executor_slot_lifecycle_observations,
+        3,
+        parallel.analysis.executor_refill_started_at_ms ?? undefined,
+      ),
+      status: "passed" as const,
+      codex_cli: preflightVersion,
+      fixture: "isolated_four_work_unit_three_slot_first_terminal_refill",
+      durable: parallel.durable,
+      semantic_work_unit_count: parallelFixtures.length,
+      executor_session_count_used_for_work_unit_total: false,
+    };
+    const serializedSchedulingEvidence = `${JSON.stringify(schedulingEvidence, null, 2)}\n`;
+    if (schedulingEvidenceOut) {
+      mkdirSync(path.dirname(schedulingEvidenceOut), { recursive: true });
+      writeFileSync(schedulingEvidenceOut, serializedSchedulingEvidence, "utf8");
+    }
+
     const codexVersion = runSync(
       codex.command,
       [...codex.argsPrefix, "--version"],
@@ -1008,7 +1045,8 @@ async function main(): Promise<void> {
       isolatedEnvironment,
       stagingWorkspace,
     ).stdout.trim();
-    assert.match(codexVersion, /^codex-cli 0\.149\./u);
+    if (expectedCodexVersion) assert.equal(codexVersion, expectedCodexVersion);
+    else assert.match(codexVersion, /^codex-cli 0\.149\./u);
 
     const evidence = {
       version: "understand_book_root_shared_executor_evidence.v1",
@@ -1069,6 +1107,8 @@ async function main(): Promise<void> {
         executor_mcp_connection_count: parallel.executor_mcp_connection_count,
         dedicated_child_count: parallel.analysis.dedicated_child_threads.length,
         max_live_dedicated_children: parallel.analysis.max_live_dedicated_children,
+        executor_slot_lifecycle_observations:
+          parallel.analysis.executor_slot_lifecycle_observations,
         fourth_child_started_after_first_terminal: parallel.analysis.fourth_child_started_after_first_terminal,
         fourth_child_started_before_last_initial_terminal:
           parallel.analysis.fourth_child_started_before_last_initial_terminal,
@@ -1084,6 +1124,7 @@ async function main(): Promise<void> {
         semantic_hit_shapes: parallel.analysis.semantic_hit_shapes,
         root_event_count: parallel.root_event_count,
         root_final_marker_matched: parallel.root_final_marker_matched,
+        scheduling_observation: schedulingEvidence,
       },
       session_protocol: "automatic_build_executor_session.v3",
       capability_isolation: false,
