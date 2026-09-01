@@ -4,6 +4,8 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   analyzeR7RolloutTrace,
+  readExecutorMcpServerTimingJsonl,
+  reduceExecutorMcpTiming,
   ROOT_EXECUTOR_BOUNDARY_UNVERIFIABLE,
   type ExecutorTraceOperation,
 } from "../../../apps/desktop/scripts/r7-rollout-trace";
@@ -32,7 +34,9 @@ function traceFixture(options: FixtureOptions = {}) {
   const payloadRoot = path.join(root, "payloads");
   mkdirSync(payloadRoot, { recursive: true });
   const rawPayloads: Record<string, unknown> = {};
+  const traceEvents: unknown[] = [];
   let payloadOrdinal = 0;
+  let traceSequence = 0;
   const writePayload = (kind: string, value: unknown): string => {
     payloadOrdinal += 1;
     const id = `raw_payload:${payloadOrdinal}`;
@@ -118,6 +122,23 @@ function traceFixture(options: FixtureOptions = {}) {
         }
       }
       const startedSeq = interval.start + 1 + operationIndex * 2;
+      const startedAtMs = 1_000 + childIndex * 1_000 + operationIndex * 100;
+      const outerElapsedMs = 50 + operationIndex;
+      traceEvents.push({
+        schema_version: 1,
+        seq: ++traceSequence,
+        wall_time_unix_ms: startedAtMs,
+        rollout_id: "rollout-r7-fixture",
+        codex_turn_id: `turn-${threadId}`,
+        payload: { type: "tool_call_started", tool_call_id: callId },
+      }, {
+        schema_version: 1,
+        seq: ++traceSequence,
+        wall_time_unix_ms: startedAtMs + outerElapsedMs,
+        rollout_id: "rollout-r7-fixture",
+        codex_turn_id: `turn-${threadId}`,
+        payload: { type: "tool_call_ended", tool_call_id: callId },
+      });
       toolCalls[callId] = {
         tool_call_id: callId,
         thread_id: threadId,
@@ -220,6 +241,11 @@ function traceFixture(options: FixtureOptions = {}) {
     rollout_id: state.rollout_id,
     root_thread_id: state.root_thread_id,
   })}\n`, "utf8");
+  writeFileSync(
+    path.join(root, "trace.jsonl"),
+    `${traceEvents.map((event) => JSON.stringify(event)).join("\n")}\n`,
+    "utf8",
+  );
   writeFileSync(path.join(root, "state.json"), `${JSON.stringify(state)}\n`, "utf8");
   return { root, sentinels };
 }
@@ -237,6 +263,136 @@ function analyze(root: string, sentinels: string[], childCount: number, driver =
 }
 
 describe("R7 reduced rollout trace analyzer", () => {
+  it("M1 reads only the body-free Executor timing projection from one connection JSONL", () => {
+    const samples = [
+      {
+        version: "executor_mcp_server_timing.v1",
+        connection_call_ordinal: 1,
+        operation: "executor.open",
+        server_elapsed_ms: 10.5,
+        response_bytes: 123,
+        response_action_kind: "DELIVER_INPUT",
+        outcome: "ok",
+      },
+      {
+        version: "executor_mcp_server_timing.v1",
+        connection_call_ordinal: 2,
+        operation: "executor.input.next",
+        server_elapsed_ms: 2,
+        response_bytes: 456,
+        response_action_kind: null,
+        outcome: "bounded_error",
+      },
+    ];
+    const stderr = samples.map((sample) => JSON.stringify(sample)).join("\n");
+
+    expect(readExecutorMcpServerTimingJsonl(stderr, "fixed connection")).toEqual(samples);
+  });
+
+  it("M1 rejects a connection timing line that carries an extra semantic field", () => {
+    const stderr = JSON.stringify({
+      version: "executor_mcp_server_timing.v1",
+      connection_call_ordinal: 1,
+      operation: "executor.open",
+      server_elapsed_ms: 1,
+      response_bytes: 10,
+      response_action_kind: "WAIT",
+      outcome: "ok",
+      payload: "M1_PRIVATE_SEMANTIC_SENTINEL",
+    });
+
+    expect(() => readExecutorMcpServerTimingJsonl(stderr, "fixed connection"))
+      .toThrow("outside the Executor timing contract");
+  });
+
+  it("M1 joins per-connection server ordinals to outer child calls without cross-thread leakage", () => {
+    const sensitive = "M1_SEMANTIC_CANDIDATE_REF_PATH_SENTINEL";
+    const connections = [1, 2, 3].map((child) => ({
+      thread_id: `child-${child}`,
+      samples: [
+        {
+          version: "executor_mcp_server_timing.v1" as const,
+          connection_call_ordinal: 1,
+          operation: "executor.open" as const,
+          server_elapsed_ms: 10 + child,
+          response_bytes: 100 + child,
+          response_action_kind: "WAIT",
+          outcome: "ok" as const,
+          private_debug: `${sensitive}:${child}`,
+        },
+        {
+          version: "executor_mcp_server_timing.v1" as const,
+          connection_call_ordinal: 2,
+          operation: "executor.input.next" as const,
+          server_elapsed_ms: 20 + child,
+          response_bytes: 200 + child,
+          response_action_kind: "INPUT_CHUNK",
+          outcome: "ok" as const,
+        },
+      ],
+    }));
+    const outer_samples = connections.flatMap((connection, index) => connection.samples.map((sample) => ({
+      thread_id: connection.thread_id,
+      connection_call_ordinal: sample.connection_call_ordinal,
+      operation: sample.operation,
+      outer_tool_call_elapsed_ms: sample.server_elapsed_ms + 30 + index,
+      private_debug: sensitive,
+    })));
+
+    const reduced = reduceExecutorMcpTiming({ connections, outer_samples });
+
+    expect(reduced.samples).toHaveLength(6);
+    expect(reduced.samples.map((sample) => (
+      `${sample.thread_id}:${sample.connection_call_ordinal}:${sample.operation}`
+    ))).toEqual([
+      "child-1:1:executor.open",
+      "child-1:2:executor.input.next",
+      "child-2:1:executor.open",
+      "child-2:2:executor.input.next",
+      "child-3:1:executor.open",
+      "child-3:2:executor.input.next",
+    ]);
+    expect(reduced.totals["executor.open"]).toEqual({
+      call_count: 3,
+      server_total_ms: 36,
+      outer_total_ms: 129,
+      residual_total_ms: 93,
+      response_total_bytes: 306,
+    });
+    expect(reduced.totals["executor.input.next"]).toEqual({
+      call_count: 3,
+      server_total_ms: 66,
+      outer_total_ms: 159,
+      residual_total_ms: 93,
+      response_total_bytes: 606,
+    });
+    expect(reduced.samples.every((sample) => sample.residual_ms >= 0)).toBe(true);
+    expect(JSON.stringify(reduced)).not.toContain(sensitive);
+  });
+
+  it("M1 rejects a join whose outer elapsed is shorter than its server interval", () => {
+    expect(() => reduceExecutorMcpTiming({
+      connections: [{
+        thread_id: "child-1",
+        samples: [{
+          version: "executor_mcp_server_timing.v1",
+          connection_call_ordinal: 1,
+          operation: "executor.open",
+          server_elapsed_ms: 11,
+          response_bytes: 100,
+          response_action_kind: "WAIT",
+          outcome: "ok",
+        }],
+      }],
+      outer_samples: [{
+        thread_id: "child-1",
+        connection_call_ordinal: 1,
+        operation: "executor.open",
+        outer_tool_call_elapsed_ms: 10,
+      }],
+    })).toThrow("negative residual");
+  });
+
   it("joins dedicated-child exact-four dispatch and backend calls without root leakage", () => {
     const fixture = traceFixture();
     const result = analyze(fixture.root, fixture.sentinels, 1);
@@ -252,6 +408,12 @@ describe("R7 reduced rollout trace analyzer", () => {
       max_live_dedicated_children: 1,
     });
     expect(result.child_executor_tools).toEqual([...executorTools].sort());
+    expect(result.executor_outer_timing_samples).toEqual(executorTools.map((operation, index) => ({
+      thread_id: "child-1",
+      connection_call_ordinal: index + 1,
+      operation,
+      outer_tool_call_elapsed_ms: 50 + index,
+    })));
     expect(result.semantic_hit_shapes.executor_input_or_submit).toBeGreaterThan(0);
     expect(result.semantic_hit_shapes.dedicated_child_inference).toBeGreaterThan(0);
     expect(result.semantic_hit_shapes.bounded_response_only).toBeGreaterThan(0);

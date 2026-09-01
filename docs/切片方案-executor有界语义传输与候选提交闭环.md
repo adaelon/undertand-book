@@ -166,7 +166,7 @@ interface ExecutorTransportProfileV1 {
 }
 ```
 
-首个 profile 的保守设计目标为“单个完整工具结果不超过 2,048 estimated tokens 且不超过 8,192 UTF-8 bytes”；payload 大小必须在序列化最终 envelope 后反算，不能把 8 KiB 全给正文。精确发布值由 T1 的 synthetic carrier probe 和常量测试冻结；若当前安装态无法证明这些值，doctor 返回 incompatible，不通过提高上限猜测。
+首个 profile 的保守设计目标为“单个完整工具结果不超过 2,048 estimated tokens 且不超过 8,192 UTF-8 bytes”；payload 大小必须在序列化最终 envelope 后反算，不能把 8 KiB 全给正文。T1 与 compiled evidence 证明实现遵守该值且 8 KiB 路径可达，但没有阶梯探测宿主最大容量；因此它是本地基线，不是 Codex/MCP 硬上限。精确容量与后续 batch 预算由 [ADR-0116](adr/0116-calibrated-executor-transport-budget-and-round-trip-reduction.md) 的 M2 标定，标定前不猜测提高生产值。
 
 V1 模型预算保留兼容读，新增 V2 执行预算证明：
 

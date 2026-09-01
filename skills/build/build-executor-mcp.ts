@@ -29,11 +29,23 @@ interface JsonRpcRequest {
   params?: unknown;
 }
 
+export interface ExecutorMcpServerTimingV1 {
+  version: "executor_mcp_server_timing.v1";
+  connection_call_ordinal: number;
+  operation: BuildExecutorToolNameV1;
+  server_elapsed_ms: number;
+  response_bytes: number;
+  response_action_kind: string | null;
+  outcome: "ok" | "bounded_error";
+}
+
 interface BuildExecutorMcpSessionOptions {
   bootstrap_version: string;
   protocol_generation: string;
   session_private_root: string;
   execute_request?: (request: unknown) => AutomaticBuildExecutorSessionResponseV3;
+  now_ms?: () => number;
+  timing_sample_sink?: (sample: ExecutorMcpServerTimingV1) => void;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -81,6 +93,8 @@ export function createBuildExecutorMcpSession(options: BuildExecutorMcpSessionOp
       return response;
     }),
   });
+  const nowMs = options.now_ms ?? (() => performance.now());
+  let connectionCallOrdinal = 0;
 
   const handleMessage = (value: unknown): unknown | undefined => {
     if (!isRecord(value) || value.jsonrpc !== "2.0" || typeof value.method !== "string") {
@@ -119,14 +133,23 @@ export function createBuildExecutorMcpSession(options: BuildExecutorMcpSessionOp
     }
     if (request.method !== "tools/call") return rpcError(request.id, -32601, "Method not found");
 
+    const toolName = isRecord(request.params)
+      && typeof request.params.name === "string"
+      && (BUILD_EXECUTOR_TOOL_NAMES_V1 as readonly string[]).includes(request.params.name)
+      ? request.params.name as BuildExecutorToolNameV1
+      : undefined;
+    if (!toolName) return boundedToolError(request.id);
+
+    connectionCallOrdinal += 1;
+    const callOrdinal = connectionCallOrdinal;
+    const startedAtMs = nowMs();
+    let rpcResponse: ReturnType<typeof rpcResult>;
+    let responseActionKind: string | null = null;
+    let outcome: ExecutorMcpServerTimingV1["outcome"] = "bounded_error";
     try {
-      if (!isRecord(request.params)
-        || typeof request.params.name !== "string"
-        || !(BUILD_EXECUTOR_TOOL_NAMES_V1 as readonly string[]).includes(request.params.name)
-        || !isRecord(request.params.arguments)) {
-        return boundedToolError(request.id);
+      if (!isRecord(request.params) || !isRecord(request.params.arguments)) {
+        throw new Error("Build Executor MCP tool arguments are invalid");
       }
-      const toolName = request.params.name as BuildExecutorToolNameV1;
       const call = { tool_name: toolName, request: request.params.arguments };
       const response = adapter.call_tool(
         toolName,
@@ -144,13 +167,27 @@ export function createBuildExecutorMcpSession(options: BuildExecutorMcpSessionOp
         throw new Error("Build Executor MCP tool result exceeds its transport profile");
       }
       connection.observe_response(call, response);
-      return rpcResult(request.id, {
+      responseActionKind = response.action.kind;
+      outcome = "ok";
+      rpcResponse = rpcResult(request.id, {
         content: [{ type: "text" as const, text: canonicalAutomaticBuildJson(response) }],
         isError: false,
       });
     } catch {
-      return boundedToolError(request.id);
+      rpcResponse = boundedToolError(request.id);
     }
+    const serializedResponse = `${JSON.stringify(rpcResponse)}\n`;
+    const finishedAtMs = nowMs();
+    options.timing_sample_sink?.({
+      version: "executor_mcp_server_timing.v1",
+      connection_call_ordinal: callOrdinal,
+      operation: toolName,
+      server_elapsed_ms: finishedAtMs - startedAtMs,
+      response_bytes: Buffer.byteLength(serializedResponse, "utf8"),
+      response_action_kind: responseActionKind,
+      outcome,
+    });
+    return rpcResponse;
   };
 
   return Object.freeze({ handle_message: handleMessage });
@@ -172,6 +209,9 @@ export function runBuildExecutorMcpServer(argv: string[]): void {
     bootstrap_version: bootstrapVersion,
     protocol_generation: protocolGeneration,
     session_private_root: resolveAutomaticBuildExecutorRegistryRoot(),
+    timing_sample_sink: (sample) => {
+      process.stderr.write(`${JSON.stringify(sample)}\n`);
+    },
   });
   process.stdin.setEncoding("utf8");
   let pending = "";

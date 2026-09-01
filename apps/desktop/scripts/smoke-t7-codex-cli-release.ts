@@ -35,7 +35,10 @@ import {
 import { confirmedStandardBuildPlan } from "../../../packages/core/test/helpers/confirmed-build-plan";
 import {
   analyzeR7RolloutTrace,
+  readExecutorMcpServerTimingJsonl,
+  reduceExecutorMcpTiming,
   ROOT_EXECUTOR_BOUNDARY_UNVERIFIABLE,
+  type ExecutorMcpTimingJoinV1,
   type ExecutorTraceOperation,
   type R7RolloutTraceAnalysis,
 } from "./r7-rollout-trace";
@@ -70,11 +73,14 @@ interface CodexScenarioOptions {
   finalMarker: string;
   fixtures: readonly SyntheticFixture[];
   expectedDedicatedChildCount: number;
+  timingRoot: string;
   syntheticBuildStepMarker?: string;
 }
 
 interface CodexScenarioResult {
   analysis: R7RolloutTraceAnalysis;
+  executor_mcp_timing: ExecutorMcpTimingJoinV1 | null;
+  executor_mcp_connection_count: number;
   durable: {
     semantic_attempts: number;
     committed_tasks: number;
@@ -114,6 +120,13 @@ function argumentValue(name: string, required = false): string | undefined {
   assert(index + 1 < process.argv.length, `${name} requires a value`);
   assert.equal(process.argv.indexOf(name, index + 1), -1, `${name} may appear only once`);
   return process.argv[index + 1];
+}
+
+function hasArgument(name: string): boolean {
+  const first = process.argv.indexOf(name);
+  if (first < 0) return false;
+  assert.equal(process.argv.indexOf(name, first + 1), -1, `${name} may appear only once`);
+  return true;
 }
 
 function runSync(
@@ -421,6 +434,41 @@ function writeParallelBuildStepDriver(
   writeFileSync(path.join(stagingWorkspace, syntheticBuildStepMarker), source, "utf8");
 }
 
+function writeTimingCaptureBuildWrapper(options: {
+  stagingWorkspace: string;
+  name: string;
+  sidecar: string;
+  timingRoot: string;
+}): string {
+  const wrapper = path.join(options.stagingWorkspace, `m1-build-executor-timing-${options.name}.cmd`);
+  writeFileSync(wrapper, [
+    "@echo off",
+    "setlocal",
+    "for /f \"delims=\" %%I in ('powershell.exe -NoProfile -NonInteractive -Command \"[guid]::NewGuid().ToString()\"') do set \"M1_CONNECTION_ID=%%I\"",
+    "if not defined M1_CONNECTION_ID exit /b 2",
+    `\"${options.sidecar}\" %* 2>\"${options.timingRoot}\\%M1_CONNECTION_ID%.jsonl\"`,
+    "exit /b %ERRORLEVEL%",
+    "",
+  ].join("\r\n"), "utf8");
+  return wrapper;
+}
+
+function readServerTimingConnections(timingRoot: string) {
+  const connections = readdirSync(timingRoot, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && entry.name.endsWith(".jsonl"))
+    .sort((left, right) => left.name.localeCompare(right.name))
+    .flatMap((entry) => {
+      const value = readFileSync(path.join(timingRoot, entry.name), "utf8");
+      if (value.trim().length === 0) return [];
+      return [readExecutorMcpServerTimingJsonl(value, `M1 connection ${entry.name}`)];
+    });
+  assert(connections.length > 0, "fixed Codex fixture captured no non-empty Executor timing connection");
+  for (const samples of connections) {
+    assert(samples.every((sample, index) => sample.connection_call_ordinal === index + 1));
+  }
+  return connections;
+}
+
 function installParallelBuildStepExecPolicy(
   codexHome: string,
   codex: CodexInvocation,
@@ -494,7 +542,9 @@ function oneTraceBundle(traceRoot: string): string {
 
 async function runCodexScenario(options: CodexScenarioOptions): Promise<CodexScenarioResult> {
   mkdirSync(options.traceRoot, { recursive: true });
+  mkdirSync(options.timingRoot, { recursive: true });
   assert.deepEqual(readdirSync(options.traceRoot), [], `${options.name} trace root must start empty`);
+  assert.deepEqual(readdirSync(options.timingRoot), [], `${options.name} timing root must start empty`);
   for (const fixture of options.fixtures) {
     assert.deepEqual(attemptSummary(fixture.target), { semantic_attempts: 0, committed_tasks: 0 });
   }
@@ -574,9 +624,26 @@ async function runCodexScenario(options: CodexScenarioOptions): Promise<CodexSce
       ? { synthetic_build_step_marker: options.syntheticBuildStepMarker }
       : {}),
   });
+  const serverTimingConnections = readServerTimingConnections(options.timingRoot);
+  assert.equal(
+    serverTimingConnections.length,
+    options.expectedDedicatedChildCount,
+    `${options.name} did not capture one timing connection per dedicated child`,
+  );
+  const executorMcpTiming = options.expectedDedicatedChildCount === 1
+    ? reduceExecutorMcpTiming({
+      connections: [{
+        thread_id: analysis.dedicated_child_threads[0].thread_id,
+        samples: serverTimingConnections[0],
+      }],
+      outer_samples: analysis.executor_outer_timing_samples,
+    })
+    : null;
 
   return {
     analysis,
+    executor_mcp_timing: executorMcpTiming,
+    executor_mcp_connection_count: serverTimingConnections.length,
     durable: {
       semantic_attempts: summaries.reduce((sum, summary) => sum + summary.semantic_attempts, 0),
       committed_tasks: summaries.reduce((sum, summary) => sum + summary.committed_tasks, 0),
@@ -607,6 +674,9 @@ async function main(): Promise<void> {
   const sidecar = path.resolve(argumentValue("--sidecar") ?? defaultSidecar);
   const evidenceOutValue = argumentValue("--evidence-out");
   const evidenceOut = evidenceOutValue ? path.resolve(evidenceOutValue) : undefined;
+  const m1EvidenceOutValue = argumentValue("--m1-evidence-out");
+  const m1EvidenceOut = m1EvidenceOutValue ? path.resolve(m1EvidenceOutValue) : undefined;
+  const m1Only = hasArgument("--m1-only");
   const codex = resolveCodexInvocation(argumentValue("--codex-command"));
 
   assert(pathIsOutside(repoRoot, codexHome), "isolated CODEX_HOME must be outside the source repository");
@@ -623,6 +693,20 @@ async function main(): Promise<void> {
   const stagingWorkspace = path.join(container, "staging-workspace");
   const registryRoot = path.join(container, "driver-registry");
   mkdirSync(stagingWorkspace, { recursive: true });
+  const singleTimingRoot = path.join(container, "timing-single");
+  const parallelTimingRoot = path.join(container, "timing-parallel");
+  const singleTimingCaptureBuildWrapper = writeTimingCaptureBuildWrapper({
+    stagingWorkspace,
+    name: "single",
+    sidecar,
+    timingRoot: singleTimingRoot,
+  });
+  const parallelTimingCaptureBuildWrapper = writeTimingCaptureBuildWrapper({
+    stagingWorkspace,
+    name: "parallel",
+    sidecar,
+    timingRoot: parallelTimingRoot,
+  });
   const isolatedEnvironment = {
     ...process.env,
     CODEX_HOME: codexHome,
@@ -786,17 +870,84 @@ async function main(): Promise<void> {
     const single = await runCodexScenario({
       name: "R7 scenario B",
       codex,
-      env: isolatedEnvironment,
+      env: {
+        ...isolatedEnvironment,
+        UNDERSTAND_BOOK_BUILD_EXE: singleTimingCaptureBuildWrapper,
+      },
       cwd: stagingWorkspace,
       traceRoot: path.join(container, "trace-single"),
       prompt: singlePrompt,
       finalMarker: singleRootFinalMarker,
       fixtures: [singleFixture],
       expectedDedicatedChildCount: 1,
+      timingRoot: singleTimingRoot,
     });
     assertCommonTraceBoundary(single);
+    assert(single.executor_mcp_timing, "single fixed fixture did not produce a server/outer timing join");
     assert.equal(single.analysis.max_live_dedicated_children, 1);
     assert.deepEqual(single.durable, { semantic_attempts: 1, committed_tasks: 1 });
+
+    const overallTiming = Object.values(single.executor_mcp_timing.totals).reduce((total, operation) => ({
+      call_count: total.call_count + operation.call_count,
+      server_total_ms: total.server_total_ms + operation.server_total_ms,
+      outer_total_ms: total.outer_total_ms + operation.outer_total_ms,
+      residual_total_ms: total.residual_total_ms + operation.residual_total_ms,
+      response_total_bytes: total.response_total_bytes + operation.response_total_bytes,
+    }), {
+      call_count: 0,
+      server_total_ms: 0,
+      outer_total_ms: 0,
+      residual_total_ms: 0,
+      response_total_bytes: 0,
+    });
+    const dominantComponent = overallTiming.server_total_ms > overallTiming.residual_total_ms
+      ? "server"
+      : overallTiming.residual_total_ms > overallTiming.server_total_ms
+        ? "residual"
+        : "equal";
+    const m1Evidence = {
+      version: "executor_mcp_fixed_timing_evidence.v1",
+      status: "passed",
+      codex_cli: preflightVersion,
+      fixture: "isolated_single_synthetic_work_unit",
+      connection_count: single.executor_mcp_connection_count,
+      sample_count: single.executor_mcp_timing.samples.length,
+      totals: single.executor_mcp_timing.totals,
+      overall: overallTiming,
+      observed_dominant_component: dominantComponent,
+      next_branch: dominantComponent === "server"
+        ? "M1b"
+        : dominantComponent === "residual"
+          ? "A1"
+          : "M1b_and_A1_independent",
+      durable: single.durable,
+      thread_attribution_complete: single.analysis.thread_attribution_complete,
+      semantic_trace_projection: single.analysis.semantic_hit_shapes,
+    };
+    const serializedM1Evidence = `${JSON.stringify(m1Evidence, null, 2)}\n`;
+    for (const sensitive of [
+      singleFixture.sentinel,
+      singleFixture.opaqueHandoffRef,
+      container,
+      registryRoot,
+      stagingWorkspace,
+      codexHome,
+      installation.installedPluginRoot,
+      marketplaceRoot,
+      repoRoot,
+      sidecar,
+    ]) {
+      assert(!serializedM1Evidence.includes(sensitive), "M1 evidence serialized a private path, ref, or sentinel");
+    }
+    if (m1EvidenceOut) {
+      mkdirSync(path.dirname(m1EvidenceOut), { recursive: true });
+      writeFileSync(m1EvidenceOut, serializedM1Evidence, "utf8");
+    }
+    if (m1Only) {
+      process.stdout.write(serializedM1Evidence);
+      completed = true;
+      return;
+    }
 
     installParallelBuildStepExecPolicy(codexHome, codex, isolatedEnvironment, stagingWorkspace);
     const parallelPrompt = [
@@ -821,13 +972,17 @@ async function main(): Promise<void> {
     const parallel = await runCodexScenario({
       name: "R7 scenario C",
       codex,
-      env: isolatedEnvironment,
+      env: {
+        ...isolatedEnvironment,
+        UNDERSTAND_BOOK_BUILD_EXE: parallelTimingCaptureBuildWrapper,
+      },
       cwd: stagingWorkspace,
       traceRoot: path.join(container, "trace-parallel"),
       prompt: parallelPrompt,
       finalMarker: parallelRootFinalMarker,
       fixtures: parallelFixtures,
       expectedDedicatedChildCount: 4,
+      timingRoot: parallelTimingRoot,
       syntheticBuildStepMarker,
     });
     assertCommonTraceBoundary(parallel);
@@ -903,8 +1058,15 @@ async function main(): Promise<void> {
         root_event_count: single.root_event_count,
         root_final_marker_matched: single.root_final_marker_matched,
       },
+      m1_fixed_fixture_timing: {
+        version: single.executor_mcp_timing.version,
+        connection_count: single.executor_mcp_connection_count,
+        sample_count: single.executor_mcp_timing.samples.length,
+        totals: single.executor_mcp_timing.totals,
+      },
       three_slot_first_terminal: {
         durable: parallel.durable,
+        executor_mcp_connection_count: parallel.executor_mcp_connection_count,
         dedicated_child_count: parallel.analysis.dedicated_child_threads.length,
         max_live_dedicated_children: parallel.analysis.max_live_dedicated_children,
         fourth_child_started_after_first_terminal: parallel.analysis.fourth_child_started_after_first_terminal,

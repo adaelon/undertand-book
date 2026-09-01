@@ -12,6 +12,154 @@ export type ExecutorTraceOperation =
   | "executor.generation.start"
   | "executor.submit_candidate";
 
+const EXECUTOR_TRACE_OPERATIONS = [
+  "executor.open",
+  "executor.input.next",
+  "executor.generation.start",
+  "executor.submit_candidate",
+] as const satisfies readonly ExecutorTraceOperation[];
+
+export interface ExecutorMcpServerTimingV1 {
+  version: "executor_mcp_server_timing.v1";
+  connection_call_ordinal: number;
+  operation: ExecutorTraceOperation;
+  server_elapsed_ms: number;
+  response_bytes: number;
+  response_action_kind: string | null;
+  outcome: "ok" | "bounded_error";
+}
+
+export interface ExecutorMcpTimingConnectionV1 {
+  thread_id: string;
+  samples: readonly ExecutorMcpServerTimingV1[];
+}
+
+export interface ExecutorOuterTimingV1 {
+  thread_id: string;
+  connection_call_ordinal: number;
+  operation: ExecutorTraceOperation;
+  outer_tool_call_elapsed_ms: number;
+}
+
+export interface ExecutorMcpTimingJoinSampleV1 {
+  thread_id: string;
+  connection_call_ordinal: number;
+  operation: ExecutorTraceOperation;
+  server_elapsed_ms: number;
+  outer_tool_call_elapsed_ms: number;
+  residual_ms: number;
+  response_bytes: number;
+  response_action_kind: string | null;
+  outcome: "ok" | "bounded_error";
+}
+
+export interface ExecutorMcpTimingOperationTotalV1 {
+  call_count: number;
+  server_total_ms: number;
+  outer_total_ms: number;
+  residual_total_ms: number;
+  response_total_bytes: number;
+}
+
+export interface ExecutorMcpTimingJoinV1 {
+  version: "executor_mcp_timing_join.v1";
+  samples: ExecutorMcpTimingJoinSampleV1[];
+  totals: Record<ExecutorTraceOperation, ExecutorMcpTimingOperationTotalV1>;
+}
+
+function timingFailure(message: string): never {
+  throw new Error(`executor_mcp_timing_unverifiable: ${message}`);
+}
+
+function nonNegativeFinite(value: number, label: string): number {
+  if (!Number.isFinite(value) || value < 0) timingFailure(`${label} is not non-negative`);
+  return value;
+}
+
+function timingOperation(value: string, label: string): ExecutorTraceOperation {
+  if (!(EXECUTOR_TRACE_OPERATIONS as readonly string[]).includes(value)) {
+    timingFailure(`${label} is not an Executor operation`);
+  }
+  return value as ExecutorTraceOperation;
+}
+
+export function reduceExecutorMcpTiming(options: {
+  connections: readonly ExecutorMcpTimingConnectionV1[];
+  outer_samples: readonly ExecutorOuterTimingV1[];
+}): ExecutorMcpTimingJoinV1 {
+  const outerByCall = new Map<string, ExecutorOuterTimingV1>();
+  for (const sample of options.outer_samples) {
+    if (!sample.thread_id) timingFailure("outer sample thread_id is missing");
+    if (!Number.isSafeInteger(sample.connection_call_ordinal) || sample.connection_call_ordinal < 1) {
+      timingFailure("outer sample ordinal is invalid");
+    }
+    timingOperation(sample.operation, "outer sample operation");
+    nonNegativeFinite(sample.outer_tool_call_elapsed_ms, "outer elapsed");
+    const key = `${sample.thread_id}\u0000${sample.connection_call_ordinal}`;
+    if (outerByCall.has(key)) timingFailure(`duplicate outer sample for ${sample.thread_id} ordinal ${sample.connection_call_ordinal}`);
+    outerByCall.set(key, sample);
+  }
+
+  const totals = Object.fromEntries(EXECUTOR_TRACE_OPERATIONS.map((operation) => [operation, {
+    call_count: 0,
+    server_total_ms: 0,
+    outer_total_ms: 0,
+    residual_total_ms: 0,
+    response_total_bytes: 0,
+  }])) as Record<ExecutorTraceOperation, ExecutorMcpTimingOperationTotalV1>;
+  const samples: ExecutorMcpTimingJoinSampleV1[] = [];
+  const connectionThreads = new Set<string>();
+  for (const connection of options.connections) {
+    if (!connection.thread_id) timingFailure("connection thread_id is missing");
+    if (connectionThreads.has(connection.thread_id)) {
+      timingFailure(`duplicate connection for thread ${connection.thread_id}`);
+    }
+    connectionThreads.add(connection.thread_id);
+    for (const [index, server] of connection.samples.entries()) {
+      const expectedOrdinal = index + 1;
+      if (server.version !== "executor_mcp_server_timing.v1") {
+        timingFailure(`server sample ${connection.thread_id}:${expectedOrdinal} has an incompatible version`);
+      }
+      if (server.connection_call_ordinal !== expectedOrdinal) {
+        timingFailure(`server ordinals are not contiguous for thread ${connection.thread_id}`);
+      }
+      const operation = timingOperation(server.operation, "server sample operation");
+      const serverElapsed = nonNegativeFinite(server.server_elapsed_ms, "server elapsed");
+      if (!Number.isSafeInteger(server.response_bytes) || server.response_bytes < 0) {
+        timingFailure("server response_bytes is invalid");
+      }
+      const key = `${connection.thread_id}\u0000${expectedOrdinal}`;
+      const outer = outerByCall.get(key);
+      if (!outer) timingFailure(`missing outer sample for ${connection.thread_id} ordinal ${expectedOrdinal}`);
+      if (outer.operation !== operation) {
+        timingFailure(`operation mismatch for ${connection.thread_id} ordinal ${expectedOrdinal}`);
+      }
+      const residual = outer.outer_tool_call_elapsed_ms - serverElapsed;
+      if (residual < 0) timingFailure(`negative residual for ${connection.thread_id} ordinal ${expectedOrdinal}`);
+      outerByCall.delete(key);
+      samples.push({
+        thread_id: connection.thread_id,
+        connection_call_ordinal: expectedOrdinal,
+        operation,
+        server_elapsed_ms: serverElapsed,
+        outer_tool_call_elapsed_ms: outer.outer_tool_call_elapsed_ms,
+        residual_ms: residual,
+        response_bytes: server.response_bytes,
+        response_action_kind: server.response_action_kind,
+        outcome: server.outcome,
+      });
+      const total = totals[operation];
+      total.call_count += 1;
+      total.server_total_ms += serverElapsed;
+      total.outer_total_ms += outer.outer_tool_call_elapsed_ms;
+      total.residual_total_ms += residual;
+      total.response_total_bytes += server.response_bytes;
+    }
+  }
+  if (outerByCall.size > 0) timingFailure("outer samples contain calls without a server sample");
+  return { version: "executor_mcp_timing_join.v1", samples, totals };
+}
+
 export interface R7TraceThread {
   thread_id: string;
   origin_type: "root" | "spawned";
@@ -24,6 +172,7 @@ export interface R7TraceThread {
 }
 
 export interface R7ExecutorTraceCall {
+  tool_call_id: string;
   thread_id: string;
   operation: ExecutorTraceOperation;
   dispatch_attempt: true;
@@ -38,6 +187,7 @@ export interface R7RolloutTraceAnalysis {
   thread_attribution_complete: true;
   dedicated_child_threads: R7TraceThread[];
   executor_calls: R7ExecutorTraceCall[];
+  executor_outer_timing_samples: ExecutorOuterTimingV1[];
   root_executor_dispatch_attempt_count: number;
   root_executor_backend_call_count: number;
   other_child_executor_dispatch_attempt_count: number;
@@ -79,6 +229,7 @@ interface RawPayload {
 }
 
 interface ToolCallRecord {
+  tool_call_id: string;
   thread_id: string;
   execution: { started_seq: number; ended_seq: number; status: string };
   raw_invocation_payload_id: string;
@@ -144,6 +295,61 @@ function hasExactKeys(value: JsonObject, expected: readonly string[]): boolean {
   const sortedExpected = [...expected].sort();
   return actual.length === sortedExpected.length
     && actual.every((key, index) => key === sortedExpected[index]);
+}
+
+export function readExecutorMcpServerTimingJsonl(value: string, label: string): ExecutorMcpServerTimingV1[] {
+  const keys = [
+    "version",
+    "connection_call_ordinal",
+    "operation",
+    "server_elapsed_ms",
+    "response_bytes",
+    "response_action_kind",
+    "outcome",
+  ] as const;
+  const samples: ExecutorMcpServerTimingV1[] = [];
+  for (const [index, line] of value.split(/\r?\n/u).filter(Boolean).entries()) {
+    let raw: unknown;
+    try {
+      raw = JSON.parse(line) as unknown;
+    } catch (error) {
+      timingFailure(`${label} line ${index + 1} is not Executor timing JSON: ${String(error)}`);
+    }
+    if (!isRecord(raw) || !hasExactKeys(raw, keys)) {
+      timingFailure(`${label} line ${index + 1} is outside the Executor timing contract`);
+    }
+    if (raw.version !== "executor_mcp_server_timing.v1") {
+      timingFailure(`${label} line ${index + 1} has an incompatible timing version`);
+    }
+    if (!Number.isSafeInteger(raw.connection_call_ordinal) || (raw.connection_call_ordinal as number) < 1) {
+      timingFailure(`${label} line ${index + 1} has an invalid connection ordinal`);
+    }
+    const operation = timingOperation(String(raw.operation), `${label} line ${index + 1} operation`);
+    const serverElapsed = nonNegativeFinite(
+      raw.server_elapsed_ms as number,
+      `${label} line ${index + 1} server elapsed`,
+    );
+    if (!Number.isSafeInteger(raw.response_bytes) || (raw.response_bytes as number) < 0) {
+      timingFailure(`${label} line ${index + 1} has invalid response_bytes`);
+    }
+    if (raw.response_action_kind !== null && typeof raw.response_action_kind !== "string") {
+      timingFailure(`${label} line ${index + 1} has an invalid action kind`);
+    }
+    if (raw.outcome !== "ok" && raw.outcome !== "bounded_error") {
+      timingFailure(`${label} line ${index + 1} has an invalid outcome`);
+    }
+    samples.push({
+      version: "executor_mcp_server_timing.v1",
+      connection_call_ordinal: raw.connection_call_ordinal as number,
+      operation,
+      server_elapsed_ms: serverElapsed,
+      response_bytes: raw.response_bytes as number,
+      response_action_kind: raw.response_action_kind as string | null,
+      outcome: raw.outcome,
+    });
+  }
+  if (samples.length === 0) timingFailure(`${label} contains no Executor server timing samples`);
+  return samples;
 }
 
 function boundedResponseOnlyValue(payload: RawPayload): unknown | undefined {
@@ -305,6 +511,7 @@ function parseToolCall(value: unknown, label: string): ToolCallRecord {
     unverifiable(`${label}.mcp_call_id is invalid`);
   }
   return {
+    tool_call_id: requiredString(call.tool_call_id, `${label}.tool_call_id`),
     thread_id: requiredString(call.thread_id, `${label}.thread_id`),
     execution: {
       started_seq: requiredSequence(execution.started_seq, `${label}.execution.started_seq`),
@@ -319,6 +526,49 @@ function parseToolCall(value: unknown, label: string): ToolCallRecord {
     raw_result_payload_id: typeof resultId === "string" ? resultId : null,
     mcp_call_id: typeof mcpCallId === "string" && mcpCallId.length > 0 ? mcpCallId : null,
   };
+}
+
+function readOuterToolCallElapsed(
+  bundleRoot: string,
+  rolloutId: string,
+): Map<string, number> {
+  const tracePath = path.join(bundleRoot, "trace.jsonl");
+  let lines: string[];
+  try {
+    lines = readFileSync(tracePath, "utf8").split(/\r?\n/u).filter(Boolean);
+  } catch (error) {
+    unverifiable(`trace event log is unreadable: ${String(error)}`);
+  }
+  const starts = new Map<string, number>();
+  const ends = new Map<string, number>();
+  for (const [index, line] of lines.entries()) {
+    let raw: unknown;
+    try {
+      raw = JSON.parse(line) as unknown;
+    } catch (error) {
+      unverifiable(`trace event ${index + 1} is not JSON: ${String(error)}`);
+    }
+    const event = requiredRecord(raw, `trace event ${index + 1}`);
+    if (event.rollout_id !== rolloutId) unverifiable(`trace event ${index + 1} changed rollout identity`);
+    const payload = requiredRecord(event.payload, `trace event ${index + 1}.payload`);
+    if (payload.type !== "tool_call_started" && payload.type !== "tool_call_ended") continue;
+    const callId = requiredString(payload.tool_call_id, `trace event ${index + 1}.payload.tool_call_id`);
+    const wallTime = event.wall_time_unix_ms;
+    if (typeof wallTime !== "number" || !Number.isFinite(wallTime) || wallTime < 0) {
+      unverifiable(`trace event ${index + 1}.wall_time_unix_ms is invalid`);
+    }
+    const target = payload.type === "tool_call_started" ? starts : ends;
+    if (target.has(callId)) unverifiable(`tool call ${callId} has duplicate ${payload.type} timing`);
+    target.set(callId, wallTime);
+  }
+  const elapsed = new Map<string, number>();
+  for (const [callId, startedAt] of starts) {
+    const endedAt = ends.get(callId);
+    if (endedAt === undefined) continue;
+    if (endedAt < startedAt) unverifiable(`tool call ${callId} has negative outer elapsed`);
+    elapsed.set(callId, endedAt - startedAt);
+  }
+  return elapsed;
 }
 
 function maxConcurrent(threads: R7TraceThread[]): number {
@@ -345,7 +595,9 @@ export function analyzeR7RolloutTrace(options: AnalyzeR7RolloutTraceOptions): R7
   const manifestRootThreadId = requiredString(manifest.root_thread_id, "manifest.root_thread_id");
   const stateRootThreadId = requiredString(state.root_thread_id, "state.root_thread_id");
   if (manifestRootThreadId !== stateRootThreadId) unverifiable("root thread identity drifted during reduction");
-  if (manifest.rollout_id !== state.rollout_id) unverifiable("rollout identity drifted during reduction");
+  const manifestRolloutId = requiredString(manifest.rollout_id, "manifest.rollout_id");
+  const stateRolloutId = requiredString(state.rollout_id, "state.rollout_id");
+  if (manifestRolloutId !== stateRolloutId) unverifiable("rollout identity drifted during reduction");
 
   const threads = parseThreads(state, stateRootThreadId);
   const threadById = new Map(threads.map((thread) => [thread.thread_id, thread]));
@@ -372,6 +624,7 @@ export function analyzeR7RolloutTrace(options: AnalyzeR7RolloutTraceOptions): R7
 
   for (const [key, rawCall] of Object.entries(toolCalls)) {
     const call = parseToolCall(rawCall, `tool call ${key}`);
+    if (call.tool_call_id !== key) unverifiable(`tool call ${key} changed identity`);
     if (!threadById.has(call.thread_id)) unverifiable(`tool call ${key} has no thread provenance`);
     const invocation = readRaw(call.raw_invocation_payload_id);
     const rawToolNamespace = invocation.value.tool_namespace;
@@ -466,6 +719,7 @@ export function analyzeR7RolloutTrace(options: AnalyzeR7RolloutTraceOptions): R7
       backendCall = true;
     }
     executorCalls.push({
+      tool_call_id: call.tool_call_id,
       thread_id: call.thread_id,
       operation,
       dispatch_attempt: true,
@@ -499,6 +753,24 @@ export function analyzeR7RolloutTrace(options: AnalyzeR7RolloutTraceOptions): R7
     const successfulTools = [...new Set(calls.map((call) => call.operation))].sort();
     if (JSON.stringify(successfulTools) !== JSON.stringify(expectedToolSet)) {
       throw new Error(`dedicated child ${thread.task_name} did not successfully call exact-four`);
+    }
+  }
+
+  const outerElapsedByCall = readOuterToolCallElapsed(bundleRoot, stateRolloutId);
+  const executorOuterTimingSamples: ExecutorOuterTimingV1[] = [];
+  for (const thread of dedicated) {
+    const calls = executorCalls.filter((call) => call.thread_id === thread.thread_id);
+    for (const [index, call] of calls.entries()) {
+      const outerElapsed = outerElapsedByCall.get(call.tool_call_id);
+      if (outerElapsed === undefined) {
+        unverifiable(`Executor call ${call.tool_call_id} has no outer wall timing`);
+      }
+      executorOuterTimingSamples.push({
+        thread_id: thread.thread_id,
+        connection_call_ordinal: index + 1,
+        operation: call.operation,
+        outer_tool_call_elapsed_ms: outerElapsed,
+      });
     }
   }
 
@@ -609,6 +881,7 @@ export function analyzeR7RolloutTrace(options: AnalyzeR7RolloutTraceOptions): R7
     thread_attribution_complete: true,
     dedicated_child_threads: dedicated,
     executor_calls: executorCalls,
+    executor_outer_timing_samples: executorOuterTimingSamples,
     root_executor_dispatch_attempt_count: rootCalls.length,
     root_executor_backend_call_count: rootCalls.filter((call) => call.backend_call).length,
     other_child_executor_dispatch_attempt_count: otherCalls.length,

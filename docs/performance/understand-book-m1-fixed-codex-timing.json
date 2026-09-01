@@ -1,0 +1,57 @@
+{
+  "version": "executor_mcp_fixed_timing_evidence.v1",
+  "status": "passed",
+  "codex_cli": "codex-cli 0.149.0",
+  "fixture": "isolated_single_synthetic_work_unit",
+  "connection_count": 1,
+  "sample_count": 9,
+  "totals": {
+    "executor.open": {
+      "call_count": 1,
+      "server_total_ms": 627.1631,
+      "outer_total_ms": 654,
+      "residual_total_ms": 26.836900000000014,
+      "response_total_bytes": 1466
+    },
+    "executor.input.next": {
+      "call_count": 6,
+      "server_total_ms": 1060.8106000000007,
+      "outer_total_ms": 1220,
+      "residual_total_ms": 159.1893999999993,
+      "response_total_bytes": 31923
+    },
+    "executor.generation.start": {
+      "call_count": 1,
+      "server_total_ms": 1394.1959999999963,
+      "outer_total_ms": 1418,
+      "residual_total_ms": 23.804000000003725,
+      "response_total_bytes": 724
+    },
+    "executor.submit_candidate": {
+      "call_count": 1,
+      "server_total_ms": 1671.4720000000016,
+      "outer_total_ms": 1704,
+      "residual_total_ms": 32.52799999999843,
+      "response_total_bytes": 202
+    }
+  },
+  "overall": {
+    "call_count": 9,
+    "server_total_ms": 4753.641699999998,
+    "outer_total_ms": 4996,
+    "residual_total_ms": 242.35830000000146,
+    "response_total_bytes": 34315
+  },
+  "observed_dominant_component": "server",
+  "next_branch": "M1b",
+  "durable": {
+    "semantic_attempts": 1,
+    "committed_tasks": 1
+  },
+  "thread_attribution_complete": true,
+  "semantic_trace_projection": {
+    "executor_input_or_submit": 5,
+    "dedicated_child_inference": 2,
+    "bounded_response_only": 2
+  }
+}

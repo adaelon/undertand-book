@@ -10,6 +10,98 @@ const DEDICATED_EXECUTOR_ONLY =
   "Only the dedicated `understand_book_executor` Executor may call this tool.";
 
 describe("Build Executor root-shared MCP boundary", () => {
+  it("M1 records one bounded server timing sample per valid tool call", () => {
+    const samples: unknown[] = [];
+    const ticks = [100, 125, 200, 231];
+    let callCount = 0;
+    const session = createBuildExecutorMcpSession({
+      bootstrap_version: BUILD_EXECUTOR_BOOTSTRAP_CONTRACT_V3.version,
+      protocol_generation: BUILD_EXECUTOR_BOOTSTRAP_CONTRACT_V3.session_protocol,
+      session_private_root: path.join(REPO_ROOT, ".m1-timing-private-root"),
+      now_ms: () => ticks.shift() ?? 0,
+      timing_sample_sink: (sample) => samples.push(sample),
+      execute_request: () => {
+        callCount += 1;
+        if (callCount === 2) throw new Error("M1_PRIVATE_ERROR_SENTINEL");
+        return {
+          version: "automatic_build_executor_session.v3",
+          action: { kind: "WAIT", retry_after_ms: 1_000 },
+        };
+      },
+    });
+    const invoke = (id: number) => session.handle_message({
+      jsonrpc: "2.0",
+      id,
+      method: "tools/call",
+      params: {
+        name: "executor.open",
+        arguments: {
+          version: "automatic_build_executor_open_request.v3",
+          opaque_handoff_ref: `abhandoff1_${String(id).repeat(64)}`,
+        },
+      },
+    });
+
+    const ok = invoke(1);
+    const boundedError = invoke(2);
+
+    expect(samples).toEqual([
+      {
+        version: "executor_mcp_server_timing.v1",
+        connection_call_ordinal: 1,
+        operation: "executor.open",
+        server_elapsed_ms: 25,
+        response_bytes: Buffer.byteLength(`${JSON.stringify(ok)}\n`, "utf8"),
+        response_action_kind: "WAIT",
+        outcome: "ok",
+      },
+      {
+        version: "executor_mcp_server_timing.v1",
+        connection_call_ordinal: 2,
+        operation: "executor.open",
+        server_elapsed_ms: 31,
+        response_bytes: Buffer.byteLength(`${JSON.stringify(boundedError)}\n`, "utf8"),
+        response_action_kind: null,
+        outcome: "bounded_error",
+      },
+    ]);
+    expect(JSON.stringify(samples)).not.toMatch(
+      /M1_PRIVATE_ERROR_SENTINEL|abhandoff1_|session_private_root|candidate|payload|[A-Z]:\\/u,
+    );
+  });
+
+  it("M1 keeps call ordinals local to each stdio connection", () => {
+    const firstOrdinals = Array.from({ length: 3 }, (_, index) => {
+      const samples: Array<{ connection_call_ordinal: number }> = [];
+      const session = createBuildExecutorMcpSession({
+        bootstrap_version: BUILD_EXECUTOR_BOOTSTRAP_CONTRACT_V3.version,
+        protocol_generation: BUILD_EXECUTOR_BOOTSTRAP_CONTRACT_V3.session_protocol,
+        session_private_root: path.join(REPO_ROOT, `.m1-connection-${index + 1}`),
+        now_ms: () => 0,
+        timing_sample_sink: (sample) => samples.push(sample),
+        execute_request: () => ({
+          version: "automatic_build_executor_session.v3",
+          action: { kind: "WAIT", retry_after_ms: 1_000 },
+        }),
+      });
+      session.handle_message({
+        jsonrpc: "2.0",
+        id: index + 1,
+        method: "tools/call",
+        params: {
+          name: "executor.open",
+          arguments: {
+            version: "automatic_build_executor_open_request.v3",
+            opaque_handoff_ref: `abhandoff1_${String(index + 1).repeat(64)}`,
+          },
+        },
+      });
+      return samples[0]?.connection_call_ordinal;
+    });
+
+    expect(firstOrdinals).toEqual([1, 1, 1]);
+  });
+
   it("negotiates MCP and exposes exactly the four closed executor tools", () => {
     const session = createBuildExecutorMcpSession({
       bootstrap_version: BUILD_EXECUTOR_BOOTSTRAP_CONTRACT_V3.version,

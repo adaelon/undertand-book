@@ -31,6 +31,10 @@ import {
   automaticBuildPlan,
 } from "../../../skills/build/automatic-build";
 import { confirmedStandardBuildPlan } from "../../../packages/core/test/helpers/confirmed-build-plan";
+import {
+  readExecutorMcpServerTimingJsonl,
+  type ExecutorMcpServerTimingV1,
+} from "./r7-rollout-trace";
 
 type JsonObject = Record<string, unknown>;
 
@@ -184,7 +188,7 @@ class JsonLineMcpClient {
     });
   }
 
-  async close(): Promise<void> {
+  async close(): Promise<ExecutorMcpServerTimingV1[]> {
     this.child.stdin.end();
     const timeout = new Promise<never>((_, reject) => {
       setTimeout(() => {
@@ -195,7 +199,10 @@ class JsonLineMcpClient {
     const code = await Promise.race([this.exitPromise, timeout]);
     this.lines.close();
     assert.equal(code, 0, `compiled executor MCP exited ${String(code)}: ${this.stderrText}`);
-    assert.equal(this.stderrText, "", "compiled executor MCP must reserve stderr for diagnostics");
+    const samples = readExecutorMcpServerTimingJsonl(this.stderrText, "compiled executor MCP stderr");
+    assert(samples.every((sample, index) => sample.connection_call_ordinal === index + 1));
+    assert(samples.length > 0, "compiled executor MCP emitted no server timing samples");
+    return samples;
   }
 
   private rejectAll(error: Error): void {
@@ -548,6 +555,8 @@ async function main(): Promise<void> {
     assert.equal(chunkZeroReplayCount, 4);
 
     const visibility = assertTraceAllowlist(trace);
+    const serverTimingSamples = await client.close();
+    client = undefined;
     const evidence = {
       version: "understand_book_t7_executor_release_evidence.v2",
       status: "passed",
@@ -585,6 +594,14 @@ async function main(): Promise<void> {
         previous_chunk_ordinal_mismatch: "protocol_incompatible",
       },
       trace_allowlist: visibility,
+      mcp_server_timing: {
+        version: "executor_mcp_server_timing.v1",
+        sample_count: serverTimingSamples.length,
+        first_connection_call_ordinal: serverTimingSamples[0]?.connection_call_ordinal,
+        last_connection_call_ordinal: serverTimingSamples.at(-1)?.connection_call_ordinal,
+        operations: [...new Set(serverTimingSamples.map((sample) => sample.operation))].sort(),
+        bounded_error_count: serverTimingSamples.filter((sample) => sample.outcome === "bounded_error").length,
+      },
       final_status: finalResponse.action.kind === "DONE" ? finalResponse.action.status : "invalid",
     };
     const serializedEvidence = `${JSON.stringify(evidence, null, 2)}\n`;
@@ -599,8 +616,6 @@ async function main(): Promise<void> {
       writeFileSync(evidenceOut, serializedEvidence, "utf8");
     }
     process.stdout.write(serializedEvidence);
-    await client.close();
-    client = undefined;
   } finally {
     if (client) {
       try {

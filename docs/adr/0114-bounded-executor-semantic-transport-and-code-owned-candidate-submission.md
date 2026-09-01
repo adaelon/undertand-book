@@ -3,6 +3,7 @@
 Status: Accepted design, 2026-08-25; T1-T7 implemented and verified, T8 pending; Codex subagent release gate passed with compiled Sidecar, thin-plugin installed parity, root-negative inventory, real CLI child trace and durable commit evidence.
 Extends: ADR-0084, ADR-0092, ADR-0099, ADR-0100, ADR-0101 and ADR-0103.
 Revises: ADR-0101 §3 中 `executor.open` 内嵌完整语义输入的实现，以及 ADR-0092 §2 中输入交付故障的计数边界。
+Revised by: ADR-0116；`2,048 estimated tokens / 8,192 bytes` 是当前本地保守 profile，不是已证明的 Codex/MCP 宿主硬上限。
 Change type: [边界重构]。
 
 Review gate: problem coverage `PASS`; implementation `PARTIAL (T1-T7)`; Codex subagent compliance `PASS`; guarded real-book recovery `BLOCKED (T8)`。T7 已用 compiled Sidecar、仓外 thin-plugin、安装态 root-negative、真实 `agent_type=understand_book_executor` child 四工具 trace 与 durable success event 复验证明 T6 源码边界；在用户再次授权 T8 前不得对真实书执行 `retry_current`。
