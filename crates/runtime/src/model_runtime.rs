@@ -291,6 +291,7 @@ pub struct ActiveContextStatus {
 
 #[derive(Debug, Clone)]
 pub struct AgentRequestPlan {
+    pub output_token_limit: Option<u32>,
     pub version: String,
     pub runtime_profile: ModelRuntimeProfile,
     pub instructions: String,
@@ -403,6 +404,7 @@ impl AgentRequestPlan {
             tools,
             tool_choice,
             parallel_tool_calls: false,
+            output_token_limit: None,
         }
     }
 

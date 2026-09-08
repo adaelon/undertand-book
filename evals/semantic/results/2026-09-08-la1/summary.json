@@ -1,0 +1,355 @@
+{
+  "version": "quantification-essence-agent-v1",
+  "started_at": "2026-09-08T05:35:35.228Z",
+  "finished_at": "2026-09-08T05:37:09.770Z",
+  "status": "completed",
+  "model": "deepseek-v4-flash",
+  "git_head": "9e365075c99c9627959f2d9a03f987912c8c7a95",
+  "scope": "24 common natural-language QA tasks; 4 Agent navigation tasks; 4 Agent restart tasks. Product comparison, not graph causal attribution.",
+  "config": {
+    "agent": "production POST /agent/chat, OuterConfig::default(), isolated per-task memory/private artifacts",
+    "chunk": {
+      "chars": 1000,
+      "overlap": 150,
+      "budget": 6000,
+      "max_output_tokens": 4096
+    },
+    "temperature": 0,
+    "repeats": 1,
+    "task_timeout_ms": 300000,
+    "grading": "separate model annotation + deterministic facts/quote/source/action checks"
+  },
+  "corpus": {
+    "book_id": "quantification-essence",
+    "source_utf16": 154448,
+    "lids": 2757,
+    "graph_nodes": 1640,
+    "graph_edges": 1745
+  },
+  "scoring_version": "natural-facts-v2-bold-normalization",
+  "selected_ids": [
+    "source-01",
+    "source-02",
+    "source-03",
+    "source-04"
+  ],
+  "summary": {
+    "Chunk RAG (BM25, single-shot)": {
+      "count": 0,
+      "succeeded": 0,
+      "success_rate": null,
+      "semantic_accuracy": null,
+      "evidence_recall": null,
+      "citation_support": null,
+      "p95_seconds": null,
+      "mean_tokens": null,
+      "total_requests": 0,
+      "missing_usage": 0,
+      "errors": 0,
+      "incomplete": 0
+    },
+    "Resident Agent (LID + Graph, full loop)": {
+      "count": 0,
+      "succeeded": 0,
+      "success_rate": null,
+      "semantic_accuracy": null,
+      "evidence_recall": null,
+      "citation_support": null,
+      "p95_seconds": null,
+      "mean_tokens": null,
+      "total_requests": 0,
+      "missing_usage": 0,
+      "errors": 0,
+      "incomplete": 0
+    }
+  },
+  "qa": [],
+  "navigation": [
+    {
+      "id": "source-01",
+      "category": "source",
+      "system": "Resident Agent (LID + Graph, full loop)",
+      "score": {
+        "evidence_groups": 1,
+        "recalled_groups": 1,
+        "evidence_recall": 1,
+        "facts": 1,
+        "supported_facts": 1,
+        "semantic_correct": true,
+        "success": true,
+        "details": [
+          {
+            "key": "remove",
+            "correct": true,
+            "supported": true
+          }
+        ]
+      },
+      "elapsed_ms": 15026.5444,
+      "usage": {
+        "requests": 7,
+        "total_tokens": 41176,
+        "missing_usage": 0
+      },
+      "incomplete": false,
+      "tool_counts": {
+        "reader.state": 1,
+        "book.search_text": 1,
+        "book.text": 1,
+        "reader.gotoLid": 1,
+        "source.present": 2
+      },
+      "tool_sequence": [
+        {
+          "loop": 1,
+          "tool": "reader.state"
+        },
+        {
+          "loop": 1,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 2,
+          "tool": "book.text"
+        },
+        {
+          "loop": 3,
+          "tool": "reader.gotoLid"
+        },
+        {
+          "loop": 4,
+          "tool": "source.present"
+        },
+        {
+          "loop": 5,
+          "tool": "source.present"
+        }
+      ],
+      "valid_sources": 1,
+      "navigation_ok": true
+    },
+    {
+      "id": "source-02",
+      "category": "source",
+      "system": "Resident Agent (LID + Graph, full loop)",
+      "score": {
+        "evidence_groups": 1,
+        "recalled_groups": 1,
+        "evidence_recall": 1,
+        "facts": 1,
+        "supported_facts": 1,
+        "semantic_correct": true,
+        "success": true,
+        "details": [
+          {
+            "key": "alias",
+            "correct": true,
+            "supported": true
+          }
+        ]
+      },
+      "elapsed_ms": 17557.158199999998,
+      "usage": {
+        "requests": 5,
+        "total_tokens": 35708,
+        "missing_usage": 0
+      },
+      "incomplete": false,
+      "tool_counts": {
+        "reader.state": 1,
+        "book.search_text": 1,
+        "book.text": 1,
+        "reader.gotoLid": 1,
+        "source.present": 1
+      },
+      "tool_sequence": [
+        {
+          "loop": 1,
+          "tool": "reader.state"
+        },
+        {
+          "loop": 1,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 2,
+          "tool": "book.text"
+        },
+        {
+          "loop": 3,
+          "tool": "reader.gotoLid"
+        },
+        {
+          "loop": 3,
+          "tool": "source.present"
+        }
+      ],
+      "valid_sources": 1,
+      "navigation_ok": true
+    },
+    {
+      "id": "source-03",
+      "category": "source",
+      "system": "Resident Agent (LID + Graph, full loop)",
+      "score": {
+        "evidence_groups": 1,
+        "recalled_groups": 1,
+        "evidence_recall": 1,
+        "facts": 1,
+        "supported_facts": 1,
+        "semantic_correct": true,
+        "success": true,
+        "details": [
+          {
+            "key": "information",
+            "correct": true,
+            "supported": true
+          }
+        ]
+      },
+      "elapsed_ms": 15302.460400000004,
+      "usage": {
+        "requests": 7,
+        "total_tokens": 43956,
+        "missing_usage": 0
+      },
+      "incomplete": false,
+      "tool_counts": {
+        "book.search_text": 1,
+        "book.concept": 1,
+        "book.text": 1,
+        "reader.gotoLid": 1,
+        "source.present": 2
+      },
+      "tool_sequence": [
+        {
+          "loop": 1,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 1,
+          "tool": "book.concept"
+        },
+        {
+          "loop": 2,
+          "tool": "book.text"
+        },
+        {
+          "loop": 3,
+          "tool": "reader.gotoLid"
+        },
+        {
+          "loop": 4,
+          "tool": "source.present"
+        },
+        {
+          "loop": 5,
+          "tool": "source.present"
+        }
+      ],
+      "valid_sources": 1,
+      "navigation_ok": true
+    },
+    {
+      "id": "source-04",
+      "category": "source",
+      "system": "Resident Agent (LID + Graph, full loop)",
+      "score": {
+        "evidence_groups": 1,
+        "recalled_groups": 1,
+        "evidence_recall": 1,
+        "facts": 1,
+        "supported_facts": 1,
+        "semantic_correct": true,
+        "success": true,
+        "details": [
+          {
+            "key": "differentiable",
+            "correct": true,
+            "supported": true
+          }
+        ]
+      },
+      "elapsed_ms": 35519.112400000005,
+      "usage": {
+        "requests": 7,
+        "total_tokens": 66525,
+        "missing_usage": 0
+      },
+      "incomplete": false,
+      "tool_counts": {
+        "reader.state": 1,
+        "book.search_text": 3,
+        "book.text": 3,
+        "reader.gotoLid": 1,
+        "source.present": 2
+      },
+      "tool_sequence": [
+        {
+          "loop": 1,
+          "tool": "reader.state"
+        },
+        {
+          "loop": 1,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 1,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 1,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 2,
+          "tool": "book.text"
+        },
+        {
+          "loop": 2,
+          "tool": "book.text"
+        },
+        {
+          "loop": 2,
+          "tool": "book.text"
+        },
+        {
+          "loop": 3,
+          "tool": "reader.gotoLid"
+        },
+        {
+          "loop": 4,
+          "tool": "source.present"
+        },
+        {
+          "loop": 5,
+          "tool": "source.present"
+        }
+      ],
+      "valid_sources": 1,
+      "navigation_ok": true
+    }
+  ],
+  "restart": [],
+  "tool_counts": {
+    "reader.state": 3,
+    "book.search_text": 6,
+    "book.text": 6,
+    "reader.gotoLid": 4,
+    "source.present": 7,
+    "book.concept": 1
+  },
+  "tool_error_counts": {
+    "SOURCE_AMBIGUOUS": 3
+  },
+  "grading_usage": {
+    "requests": 4,
+    "total_tokens": 3087,
+    "missing_usage": 0
+  },
+  "background_usage": {
+    "requests": 0,
+    "total_tokens": null,
+    "missing_usage": 0
+  }
+}

@@ -1,0 +1,37 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
+import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
+import { startServer } from './server.mjs';
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
+const requireWeb = createRequire(path.join(root, 'packages/web/package.json'));
+const { chromium } = requireWeb('@playwright/test');
+const book = path.join(root, '.understand-book/quickstart-demo');
+const memory = fs.mkdtempSync(path.join(os.tmpdir(), 'understand-book-demo-'));
+const server = await startServer(book, memory, root);
+let browser;
+try {
+  browser = await chromium.launch({ headless: true });
+  const source = fs.readFileSync(path.join(book, 'source.txt'), 'utf8');
+  const base = JSON.parse(fs.readFileSync(path.join(book, 'base.json'), 'utf8'));
+  const quote = '关系边本身不是事实证据';
+  const at = source.indexOf(quote);
+  const leaf = base.lid_nodes.find(n => !n.children.length && n.span.start <= at && n.span.end > at);
+  const note = '图谱负责定位，原文负责证实。回答要能回到具体段落；重启后还应保留阅读记录。';
+  await server.api('reader/highlight', { lid: leaf.lid, range: { start: at - leaf.span.start, end: at - leaf.span.start + quote.length } }, 'POST');
+  await server.api('reader/note', { lid: leaf.lid, text: note }, 'POST');
+  const page = await browser.newPage({ viewport: { width: 1440, height: 760 }, deviceScaleFactor: 1 });
+  const errors = [];
+  page.on('pageerror', error => errors.push(error.message));
+  await page.goto(server.url, { waitUntil: 'networkidle' });
+  await page.getByText('让每一次理解都有出处', { exact: false }).first().waitFor();
+  const rail = page.locator('.right-rail');
+  await rail.locator('.context-tabs').getByRole('button', { name: '笔记', exact: true }).click();
+  await rail.getByRole('button', { name: '展开', exact: true }).click();
+  await rail.locator('.note-memory-card > .md').getByText(note, { exact: true }).waitFor();
+  fs.mkdirSync(path.join(root, 'docs/screenshots'), { recursive: true });
+  await page.screenshot({ path: path.join(root, 'docs/screenshots/quickstart-reader.png'), fullPage: false });
+  if (errors.length) throw new Error(`Reader page errors: ${errors.join('; ')}`);
+  console.log(JSON.stringify({ screenshot: 'docs/screenshots/quickstart-reader.png', page_errors: errors, url: server.url }));
+} finally { if (browser) await browser.close(); await server.stop(); }

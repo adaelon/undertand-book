@@ -1,0 +1,45 @@
+{
+  "version": "la10-v1",
+  "status": "passed",
+  "started_at": "2026-09-08T06:57:21.242Z",
+  "finished_at": "2026-09-08T07:02:02.435Z",
+  "steps": [
+    {
+      "stage": "selection_explanation",
+      "status": "passed"
+    },
+    {
+      "stage": "source_popup",
+      "status": "passed"
+    },
+    {
+      "stage": "explicit_navigation",
+      "status": "passed"
+    },
+    {
+      "stage": "save_note",
+      "status": "passed"
+    },
+    {
+      "stage": "restart",
+      "status": "passed"
+    },
+    {
+      "stage": "new_chat_recovery",
+      "status": "passed"
+    },
+    {
+      "stage": "cross_chapter_sources",
+      "status": "passed",
+      "chapters": [
+        "正文 · 因子是什么？",
+        "正文 · 防过拟合"
+      ]
+    }
+  ],
+  "resumed_from_saved_conversation": true,
+  "limitations": [
+    "The last source-button check resumed the same persisted answer after fixing a UI wait; no answer was regenerated.",
+    "Earlier failed attempts are retained locally. No claim of a failure-free first run."
+  ]
+}

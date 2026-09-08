@@ -634,6 +634,7 @@ enum LocatorOrigin {
     LexicalSearchResult,
     SemanticQueryResult,
     ContextResult,
+    NavigationPlanResult,
     VerifiedEvidence,
 }
 
@@ -645,6 +646,7 @@ impl LocatorOrigin {
                 | Self::LexicalSearchResult
                 | Self::SemanticQueryResult
                 | Self::ContextResult
+                | Self::NavigationPlanResult
                 | Self::VerifiedEvidence
         )
     }
@@ -858,6 +860,12 @@ impl TurnLocatorLedger {
                     return;
                 };
                 self.observe_value_scalar(&value, "at", LocatorOrigin::StructuralIndexResult, book);
+                if let Some(nodes) = value.get("nodes").and_then(serde_json::Value::as_array) {
+                    for node in nodes {
+                        self.observe_value_scalar(node, "lid", LocatorOrigin::StructuralIndexResult, book);
+                        self.observe_value_array(node, "children", LocatorOrigin::StructuralIndexResult, book);
+                    }
+                }
                 if let Some(unit) = value.get("spine_unit") {
                     self.observe_value_scalar(
                         unit,
@@ -914,6 +922,37 @@ impl TurnLocatorLedger {
                     }
                 }
             }
+            "book.guide_path" => {
+                let Ok(value) = serde_json::from_str::<serde_json::Value>(result) else { return; };
+                if let Some(segments) = value.get("segments").and_then(serde_json::Value::as_array) {
+                    for segment in segments {
+                        // Guide-path segments carry the same spine/key-stop projection as structure.
+                        self.observe_tool_result("book.structure", &segment.to_string(), book);
+                    }
+                }
+            }
+            "book.route_from" | "book.guided_route_from" | "book.unvisited_back" | "book.route_to" => {
+                let Ok(value) = serde_json::from_str::<serde_json::Value>(result) else { return; };
+                let mut step_lists = Vec::new();
+                for field in ["back", "forward", "concretize", "cross", "continue", "unvisited_back", "path"] {
+                    if let Some(steps) = value.get(field).and_then(serde_json::Value::as_array) {
+                        step_lists.push(steps);
+                    }
+                }
+                if let Some(groups) = value.get("groups").and_then(serde_json::Value::as_array) {
+                    for group in groups {
+                        if let Some(steps) = group.get("steps").and_then(serde_json::Value::as_array) {
+                            step_lists.push(steps);
+                        }
+                    }
+                }
+                for steps in step_lists {
+                    for step in steps {
+                        self.observe_value_scalar(step, "lid", LocatorOrigin::NavigationPlanResult, book);
+                        self.observe_value_array(step, "evidence_lids", LocatorOrigin::NavigationPlanResult, book);
+                    }
+                }
+            }
             "book.search_text" => {
                 let Ok(result) = serde_json::from_str::<SearchTextResult>(result) else {
                     return;
@@ -935,6 +974,14 @@ impl TurnLocatorLedger {
                         LocatorOrigin::LexicalSearchResult,
                         book,
                     );
+                }
+            }
+            "book.concept" => {
+                let Ok(result) = serde_json::from_str::<read_tools::ConceptCandidateSet>(result) else { return; };
+                for candidate in result.candidates {
+                    for lid in candidate.occurrences {
+                        self.observe_lid(&lid, LocatorOrigin::SemanticQueryResult, book);
+                    }
                 }
             }
             "book.query" => {
@@ -1321,13 +1368,18 @@ impl TurnEvidenceLedger {
                     coarse
                 };
                 let resolved = book.resolve_source(&candidate, SOURCE_PRESENTATION_LOCALE, None)?;
-                if quote.as_ref().is_some_and(|quote| {
-                    normalize_presented_quote(&resolved.highlighted_quote) != *quote
-                }) || !self.covers(book, &candidate)
-                {
+                if !self.covers(book, &candidate) {
                     return Err(source_presentation_error(
                         "SOURCE_NOT_OBSERVED",
-                        "source.present may only use evidence observed in this turn",
+                        "source.present may only use evidence observed in this turn. A requested book.text range may have been shortened in its result; use the returned observed range, not the original larger request.",
+                    ));
+                }
+                if quote.as_ref().is_some_and(|quote| {
+                    normalize_presented_quote(&resolved.highlighted_quote) != *quote
+                }) {
+                    return Err(source_presentation_error(
+                        "SOURCE_QUOTE_MISMATCH",
+                        "This range was observed, but quote does not exactly match its source. Copy the original wording without rewriting punctuation or formulas, or omit quote to present this observed range. No reread is needed.",
                     ));
                 }
                 (candidate, resolved)
@@ -2214,6 +2266,7 @@ impl AnswerProvenanceLedger {
                     .next_back()
                     .is_none_or(is_lid_start_boundary)
                     || !is_lid_end_boundary(&answer[end..])
+                    || is_ordered_list_marker(answer, start, end)
                     || violations
                         .iter()
                         .any(|violation| start < violation.end && end > violation.start)
@@ -2285,6 +2338,24 @@ fn contains_locator_literal(text: &str, locator: &str) -> bool {
             .is_none_or(is_lid_start_boundary)
             && is_lid_end_boundary(&text[start + locator.len()..])
     })
+}
+
+fn is_ordered_list_marker(answer: &str, start: usize, end: usize) -> bool {
+    // A root LID such as "1" can collide with answer formatting, not provenance.
+    // Only a line-leading integer plus list delimiter is exempt; "LID 1", "[1]"
+    // and multi-component locators keep the existing validation path.
+    if !answer[start..end].bytes().all(|byte| byte.is_ascii_digit()) {
+        return false;
+    }
+    let line_start = answer[..start].rfind('\n').map_or(0, |at| at + 1);
+    if !answer[line_start..start]
+        .bytes()
+        .all(|byte| matches!(byte, b' ' | b'\t'))
+    {
+        return false;
+    }
+    let tail = answer[end..].as_bytes();
+    matches!(tail.first(), Some(b'.' | b')')) && matches!(tail.get(1), Some(b' ' | b'\t'))
 }
 
 fn explicit_answer_locator_violations(answer: &str) -> Vec<AnswerProvenanceViolation> {
@@ -2402,11 +2473,56 @@ struct AnswerDelivery {
 const SOURCE_MARKER_PREFIX: &str = "[[source:";
 const SOURCE_PRESENTATION_FAILURE_MESSAGE: &str = "这次回答生成失败，请重试。";
 
+fn normalize_bound_source_suffixes(raw: &str, bindings: &[SourceBinding]) -> String {
+    let mut result = String::new();
+    let mut fence: Option<char> = None;
+    for line in raw.split_inclusive('\n') {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            let marker = trimmed.chars().next().unwrap();
+            fence = if fence == Some(marker) { None } else { Some(marker) };
+            result.push_str(line);
+            continue;
+        }
+        // Restrict to ordinary prose suffixes; code, quotations and indented blocks
+        // are left intact. Ambiguous placements remain the Agent's responsibility.
+        if fence.is_some() || trimmed.starts_with('>') || line.starts_with("    ")
+            || line.contains(['`', '“', '”', '‘', '’', '"']) {
+            result.push_str(line);
+            continue;
+        }
+        let mut normalized = line.to_string();
+        for binding in bindings {
+            for (open, close) in [("[[", "]]"), ("[", "]"), ("（", "）"), ("(", ")")] {
+                let marker = format!("{open}{}{close}", binding.source_ref_id);
+                let mut from = 0;
+                while let Some(index) = normalized[from..].find(&marker).map(|offset| from + offset) {
+                    let end = index + marker.len();
+                    let prefix = &normalized[..index];
+                    let suffix = normalized[end..].trim_start();
+                    let has_claim = !prefix.trim().is_empty() || !result.trim().is_empty();
+                    let is_suffix = suffix.is_empty() || suffix.starts_with(['。', '，', '；', '：', '.', ',', ';', ':', '!', '！', '?', '？'])
+                        || suffix.starts_with("[[source") || suffix.starts_with("[source_ref_");
+                    if has_claim && is_suffix && !prefix.ends_with(['[', ']', '\\']) {
+                        let standard = format!("[[source:{}]]", binding.source_ref_id);
+                        normalized.replace_range(index..end, &standard);
+                        from = index + standard.len();
+                    } else { from = end; }
+                }
+            }
+        }
+        result.push_str(&normalized);
+    }
+    result
+}
+
 fn compile_agent_answer(
     raw: &str,
     bindings: &[SourceBinding],
     provenance: &AnswerProvenanceLedger,
 ) -> Result<CompiledAgentAnswer, AnswerCompileError> {
+    let normalized = normalize_bound_source_suffixes(raw, bindings);
+    let raw = normalized.as_str();
     if raw.trim().is_empty() {
         return Err(answer_compile_error(
             "INVALID_AGENT_ANSWER",
@@ -2624,6 +2740,7 @@ fn deliver_agent_answer(
     provenance: &AnswerProvenanceLedger,
     adapter: &dyn ModelAdapter,
     runtime_profile: &ModelRuntimeProfile,
+    output_token_limit: Option<u32>,
 ) -> AnswerDelivery {
     match compile_agent_answer(raw, bindings, provenance) {
         Ok(compiled) => AnswerDelivery {
@@ -2653,12 +2770,13 @@ fn deliver_agent_answer(
             });
             let repair_messages = vec![
                 Message::system(
-                    "source_answer_repair.v3\nReturn one revised final answer and no tool calls. Rewrite the candidate freely as needed. The final answer must avoid every listed violation, may use only source_ref_id values from allowed_sources, and must not mention validation or create sources.",
+                    "source_answer_repair.v3\nReturn one revised final answer and no tool calls. Rewrite the candidate freely as needed. The final answer must avoid every listed violation, may use only source_ref_id values from allowed_sources, and must not mention validation or create sources. When selecting a source for a claim, place [[source:<source_ref_id>]] after that claim, replacing <source_ref_id> with the exact allowed ID. A bare ID or a source list is not a clickable citation. Preserve the candidate's supported source choices; do not attach unchosen sources.",
                 ),
                 Message::user(payload.to_string()),
             ];
-            let repair_plan =
+            let mut repair_plan =
                 AgentRequestPlan::for_ad_hoc(runtime_profile.clone(), &repair_messages, &[]);
+            repair_plan.output_token_limit = output_token_limit;
             let repaired = adapter.chat(&repair_plan);
             let extra_tokens = repaired
                 .as_ref()
@@ -2942,10 +3060,10 @@ fn declared_tool_specs() -> Vec<ToolSpec> {
         ),
         s(
             "reader.highlight",
-            "Highlight a LID through a thin entry point whose persistence is delegated to memory. Returns highlight_id, which is the memory-layer ID.",
+            "Highlight source text at a LID. When the user specifies a sentence or quote, provide that exact quote; only its unique original occurrence is saved. Omit quote only when the user requests the whole passage. Persistence is delegated to memory; returns highlight_id.",
             json!({
                 "type": "object",
-                "properties": {"lid": {"type": "string"}},
+                "properties": {"lid": {"type": "string"}, "quote": {"type": "string", "description": "Exact requested original text within this LID; must match once"}},
                 "required": ["lid"]
             }),
         ),
@@ -3309,10 +3427,15 @@ fn dispatch_resident_book_tool(
             }
         }
         (BookToolId::Structure, BookToolInput::At(input)) => {
-            match book.structure(input.at.as_deref()) {
+            if book.experimental_read_access().is_some() {
+                match book.canonical_tree(input.at.as_deref()) {
+                    Ok(projection) => to_json(&projection),
+                    Err(error) => to_json(&error),
+                }
+            } else { match book.structure(input.at.as_deref()) {
                 Ok(projection) => to_json(&projection),
                 Err(error) => to_json(&error),
-            }
+            } }
         }
         (BookToolId::GuidePath, BookToolInput::At(input)) => {
             match book.guide_path(input.at.as_deref()) {
@@ -3346,6 +3469,16 @@ fn dispatch_resident_book_tool(
 /// agent 的 highlight/note 落 `session` 层(提议态,用户「保留」才升 long_term `[ADR-0030]`)。
 /// 视口变更(goto/scroll)不在此产 effect:由 `run` 按回合首尾 anchor 合并成单条 `Goto`(事务性 undo)。
 #[allow(clippy::too_many_arguments)]
+fn exact_highlight_range(text: &str, quote: &str) -> Option<(u32, u32)> {
+    if quote.is_empty() { return None; }
+    let text: Vec<u16> = text.encode_utf16().collect();
+    let quote: Vec<u16> = quote.encode_utf16().collect();
+    let mut matches = text.windows(quote.len()).enumerate().filter(|(_, window)| *window == quote.as_slice());
+    let (start, _) = matches.next()?;
+    if matches.next().is_some() { return None; }
+    Some((start as u32, (start + quote.len()) as u32))
+}
+
 fn dispatch_registered(
     handler: ToolHandlerId,
     arguments: &str,
@@ -3560,8 +3693,17 @@ fn dispatch_registered(
                     None,
                 );
             };
-            // agent 标注 = 提议态,落 session 层 `[ADR-0030 决策4]`;agent 高亮整段(range=None `[ADR-0031]`)。
-            match reader.highlight(book, store, lid, None, None, "session", now) {
+            let range = if let Some(quote) = sget("quote") {
+                let text = match book.text(lid, None) {
+                    Ok(text) => text,
+                    Err(error) => return (to_json(&error), None),
+                };
+                let Some(range) = exact_highlight_range(&text, quote) else {
+                    return (err_json("INVALID_RANGE", "validation", "highlight quote must match exactly once in the selected LID; locate a unique original quote"), None);
+                };
+                Some(range)
+            } else { None };
+            match reader.highlight(book, store, lid, range, None, "session", now) {
                 Ok(e) => {
                     let eff = AgentEffect::Highlight {
                         mem_id: e.highlight_id.clone(),
@@ -3924,10 +4066,10 @@ fn tool_progress_signature(
     let state = serde_json::json!({
         "phase": progress.phase,
         "evidence": evidence.evidence_ranges(),
+        "source_bindings": evidence.bindings().iter().map(|binding| binding.source_ref_id.as_str()).collect::<Vec<_>>(),
         "evidence_plan_origins": evidence_plan.origins,
         "broad_synthesis_requested": evidence_plan.broad_synthesis_requested,
         "locators": locators.entries.keys().collect::<Vec<_>>(),
-        "blind_lid_reads_blocked": locators.blind_reads_blocked,
         "activated_tools": exposure.activated_names().collect::<Vec<_>>(),
         "completed_capabilities": completed_capabilities,
         "artifact_tools": artifact_tools.progress_revision(),
@@ -3944,9 +4086,20 @@ const CONSECUTIVE_NO_PROGRESS_BATCH_LIMIT: usize = 2;
 struct ProgressPhaseGuard {
     stalled_signature: Option<String>,
     consecutive_stalled_batches: usize,
+    recovery_pending: bool,
+    recovery_used: bool,
 }
 
 impl ProgressPhaseGuard {
+    fn recovery_available(&self) -> bool {
+        self.recovery_pending && !self.recovery_used
+    }
+
+    fn observe_error(&mut self, result: &str) {
+        if matches!(tool_result_error_code(result).as_deref(), Some("LID_NOT_FOUND" | "LID_PROVENANCE_REQUIRED" | "LID_RECOVERY_REQUIRED")) {
+            self.recovery_pending = true;
+        }
+    }
     fn blocks(&self, progress_signature: &str) -> bool {
         self.consecutive_stalled_batches >= CONSECUTIVE_NO_PROGRESS_BATCH_LIMIT
             && self.stalled_signature.as_deref() == Some(progress_signature)
@@ -3956,6 +4109,8 @@ impl ProgressPhaseGuard {
         if before_signature != after_signature {
             self.stalled_signature = None;
             self.consecutive_stalled_batches = 0;
+            self.recovery_pending = false;
+            self.recovery_used = false;
             return;
         }
         if self.stalled_signature.as_deref() == Some(after_signature) {
@@ -4285,13 +4440,16 @@ fn build_sample_request(
         .filter(|tool| !excluded_tools.contains(&tool.name.as_str()))
         .cloned()
         .collect::<Vec<_>>();
-    let instruction_modules = policy_modules_for_tools(&visible_tools);
-    let request_plan = AgentRequestPlan::for_agent_turn_with_modules(
+    let instruction_modules = if book.experimental_read_access().is_some() {
+        crate::experiment::policy_modules(&visible_tools)
+    } else { policy_modules_for_tools(&visible_tools) };
+    let mut request_plan = AgentRequestPlan::for_agent_turn_with_modules(
         runtime_profile.clone(),
         &request_messages,
         &visible_tools,
         &instruction_modules,
     );
+    if book.experimental_read_access().is_some() { request_plan.output_token_limit = Some(8_000); }
     Ok((tool_exposure_plan, request_plan))
 }
 
@@ -4894,7 +5052,7 @@ pub fn run_with_turn_resources_and_checkpoint_sink(
     now: &str,
     cfg: OuterConfig,
 ) -> Result<OuterOutcome, ToolError> {
-    let tool_registry = resident_tool_registry();
+    let tool_registry = crate::experiment::registry(book, resident_tool_registry());
     let runtime_profile = adapter.model_runtime_profile();
     let mut active_checkpoint = active_checkpoint.cloned();
     let consumption_wrapper = runtime_profile
@@ -4903,18 +5061,19 @@ pub fn run_with_turn_resources_and_checkpoint_sink(
         .resolve(COMPACTION_CONSUMPTION_WRAPPER);
     let tool_permissions = ToolPermissions::default();
     let mut tool_exposure_state = ToolExposureState::default();
-    let mut artifact_tools = ArtifactToolSession::new(resources.artifact_snapshot(), question);
+    let experimental = book.experimental_read_access().is_some();
+    let mut artifact_tools = ArtifactToolSession::new(if experimental { None } else { resources.artifact_snapshot() }, question);
     let mut context_fragments = ContextFragmentLedger::default();
     context_fragments
         .upsert(ContextFragment::new(
             READER_PROFILE_FRAGMENT_KEY,
             FragmentScope::TurnFrozen,
             Role::System,
-            profile_snapshot.to_prompt_data(),
+            if experimental { "{}".into() } else { profile_snapshot.to_prompt_data() },
             FragmentSensitivity::Sensitive,
         ))
         .map_err(context_fragment_error)?;
-    for fragment in resources.context_fragments() {
+    for fragment in resources.context_fragments().iter().filter(|_| !experimental) {
         context_fragments
             .upsert(fragment.clone())
             .map_err(context_fragment_error)?;
@@ -4924,7 +5083,7 @@ pub fn run_with_turn_resources_and_checkpoint_sink(
             .upsert(fragment)
             .map_err(context_fragment_error)?;
     }
-    if let Some(fragment) = paper_minimap_context_fragment(book, reader, question) {
+    if let Some(fragment) = if experimental { None } else { paper_minimap_context_fragment(book, reader, question) } {
         context_fragments
             .upsert(fragment)
             .map_err(context_fragment_error)?;
@@ -4964,6 +5123,7 @@ pub fn run_with_turn_resources_and_checkpoint_sink(
     let mut active_tool_results = ActiveToolResultLedger::default();
     let verified_selection_turn = question.starts_with("selection_provenance.v1 ");
     let mut evidence_acquisition_calls = 0_usize;
+    let mut experimental_body_budget = crate::experiment::BodyBudget::default();
     let mut selection_protocol_retries = 0_u8;
 
     // Pre-turn pressure includes the new user message, but the compactable source
@@ -5283,6 +5443,7 @@ pub fn run_with_turn_resources_and_checkpoint_sink(
                     &answer_provenance,
                     adapter,
                     &runtime_profile,
+                    experimental.then_some(8_000),
                 )
             });
             if let Some(delivery) = &delivery {
@@ -5359,6 +5520,8 @@ pub fn run_with_turn_resources_and_checkpoint_sink(
             effects.len(),
         );
         let phase_stalled = phase_progress_guard.blocks(&batch_progress_before);
+        let recovery_batch = phase_stalled && phase_progress_guard.recovery_available();
+        if recovery_batch { phase_progress_guard.recovery_used = true; }
         let mut batch_synthesis_observed = false;
         let mut batch_progress_calls = Vec::new();
         for (call_index, tc) in turn.tool_calls.iter().enumerate() {
@@ -5387,7 +5550,14 @@ pub fn run_with_turn_resources_and_checkpoint_sink(
             );
             let repeated_without_progress = handler.is_some()
                 && tool_call_progress.is_repeat(&tc.name, &tc.arguments, &progress_before);
-            let blocked_without_progress = phase_stalled || repeated_without_progress;
+            let recovery_call = recovery_batch && match handler {
+                Some(ToolHandlerId::Book(BookToolId::SearchText | BookToolId::Structure | BookToolId::Context)) => true,
+                Some(ToolHandlerId::Book(BookToolId::Text)) => authorize_book_text(&tc.arguments, &locator_batch_snapshot).is_ok(),
+                Some(ToolHandlerId::ToolSearch) => true,
+                _ => false,
+            };
+            let phase_blocked = phase_stalled && !recovery_call;
+            let blocked_without_progress = phase_blocked || repeated_without_progress;
             let (result, effect, query_audit) = match handler {
                 None if registered.is_some() => (
                     err_json(
@@ -5407,7 +5577,11 @@ pub fn run_with_turn_resources_and_checkpoint_sink(
                     None,
                     None,
                 ),
-                Some(_) if phase_stalled => (
+                Some(action) if registered.is_some_and(|registration| registration.routing_card.effects == crate::tool_registry::ToolEffect::ReaderWrite)
+                    && !tool_exposure_state.authorizes_reader_action(action) => (
+                    err_json("READER_ACTION_NOT_REQUESTED", "permission", "this Reader action was not explicitly requested in the current user turn"), None, None,
+                ),
+                Some(_) if phase_blocked => (
                     err_json(
                         "AGENT_NO_PROGRESS",
                         "loop",
@@ -5570,6 +5744,7 @@ pub fn run_with_turn_resources_and_checkpoint_sink(
                 batch_synthesis_observed = true;
             }
             let result = attach_lid_recovery_requirement(result);
+            phase_progress_guard.observe_error(&result);
             let output_policy = registered
                 .map(|registration| registration.output_policy)
                 .unwrap_or_else(crate::tool_registry::ToolOutputPolicy::bounded_error);
@@ -5577,7 +5752,7 @@ pub fn run_with_turn_resources_and_checkpoint_sink(
             let calls_remaining = turn.tool_calls.len().saturating_sub(call_index).max(1);
             let fair_turn_budget =
                 active_tool_results.remaining_model_body_bytes() / calls_remaining;
-            let projection = project_tool_result(
+            let mut projection = project_tool_result(
                 &tc.name,
                 &tc.arguments,
                 &result,
@@ -5585,6 +5760,14 @@ pub fn run_with_turn_resources_and_checkpoint_sink(
                 fair_turn_budget,
                 book,
             );
+            if experimental {
+                let body = experimental_body_budget.admit(&tc.name, &projection.evidence_arguments, projection.model_body_json(), book);
+                projection.model_body = serde_json::from_str(&body).unwrap_or(serde_json::Value::Null);
+                if tool_result_error_code(&body).is_some() {
+                    projection.status = crate::tool_result::ToolResultStatus::Error;
+                    projection.continuation = None;
+                }
+            }
             let model_body = projection.model_body_json();
             let evidence_before = evidence_ledger.evidence_ranges();
             let locator_observations_before = locator_batch_observations.clone();
@@ -5713,7 +5896,10 @@ pub fn run_with_turn_resources_and_checkpoint_sink(
 
         // Tool-loop count is a separate stop reason. Cumulative provider usage
         // remains telemetry and cannot masquerade as active-context pressure.
-        if turns >= cfg.max_turns {
+        let stalled = phase_progress_guard.blocks(&batch_progress_after)
+            && !phase_progress_guard.recovery_available();
+        let experimental_budget_stop = experimental && spent >= 100_000;
+        if turns >= cfg.max_turns || stalled || experimental_budget_stop {
             let mut finalization_context_fragments = context_fragments.clone();
             finalization_context_fragments
                 .upsert(ContextFragment::new(
@@ -5833,6 +6019,7 @@ pub fn run_with_turn_resources_and_checkpoint_sink(
                 &answer_provenance,
                 adapter,
                 &runtime_profile,
+                experimental.then_some(8_000),
             );
             spent += delivery.extra_tokens;
             let answer = delivery.compiled.answer.clone();
@@ -5848,7 +6035,7 @@ pub fn run_with_turn_resources_and_checkpoint_sink(
                 answer: Some(answer),
                 answer_view: Some(answer_view),
                 incomplete: true,
-                warning: Some(TURN_LIMIT_EXCEEDED.into()),
+                warning: Some(if experimental_budget_stop { "EXPERIMENT_TOKEN_BUDGET" } else if turns >= cfg.max_turns { TURN_LIMIT_EXCEEDED } else { "AGENT_NO_PROGRESS" }.into()),
                 turns,
                 tokens_spent: spent,
                 effects: with_goto(reader, &before_anchor, effects),
@@ -7424,6 +7611,152 @@ user_question=\"explain normalization\"";
     }
 
     #[test]
+    fn agent_progress_phase_allows_one_legal_locator_recovery_after_stall() {
+        let b = book_leaves(4);
+        let adapter = FakeAdapter::new(vec![
+            turn_calls(vec![call("blind-1", "book.text", r#"{"lid":"9.1"}"#)]),
+            turn_calls(vec![call("blind-2", "book.text", r#"{"lid":"9.2"}"#)]),
+            turn_calls(vec![call("locate", "book.search_text", r#"{"query":"XX","page_size":50}"#)]),
+            turn_calls(vec![call("read", "book.text", r#"{"lid":"1.3"}"#)]),
+            turn_final("recovered"),
+        ], vec![]);
+        let mut store = MemoryStore::open(tmp("phase-legal-recovery")).unwrap();
+        let mut messages = new_session();
+        let out = run(&b, &mut store, &mut Reader::new(&b, 1), &adapter, &mut messages, "找到原文并解释", "t0", OuterConfig::default()).unwrap();
+        assert!(!tool_result(&messages, "locate").contains("AGENT_NO_PROGRESS"));
+        let text: ObservedBookText = serde_json::from_str(tool_result(&messages, "read")).unwrap();
+        assert_eq!(text.lid, "1.3");
+        assert!(!out.incomplete);
+    }
+
+    #[test]
+    fn experiment_real_requests_isolate_semantics_and_keep_source_evidence() {
+        use read_tools::ExperimentalReadAccess::{Text, Tree, Graph};
+        let marker = "SEMANTIC_ONLY_SENTINEL";
+        let mut base = sample_base();
+        for node in &mut base.graph_nodes { node.name = marker.into(); }
+        let length = base.lid_nodes.iter().map(|n| n.span.end).max().unwrap();
+        let original = Book::new(base, &"X".repeat(length));
+        for access in [Text, Tree, Graph] {
+            let b = original.experimental_view(access);
+            let adapter = RequestPlanRecordingAdapter {
+                chats: RefCell::new(vec![
+                    turn_calls(vec![call("blocked-query", "book.query", r#"{"query":"question"}"#)]),
+                    turn_calls(vec![call("locate", "book.search_text", r#"{"query":"X","page_size":1}"#)]),
+                    turn_calls(vec![call("read", "book.text", r#"{"lid":"1.1"}"#)]),
+                    turn_final("The observed passage contains X."),
+                ].into()),
+                completes: RefCell::new(VecDeque::new()),
+                seen_plans: RefCell::new(Vec::new()),
+            };
+            let mut store = MemoryStore::open(tmp(&format!("experiment-{access:?}"))).unwrap();
+            let mut reader = Reader::new(&b, DEFAULT_RADIUS);
+            let mut messages = new_session();
+            let snapshot = default_profile_snapshot(&b, &store, "t0");
+            let resources = ResidentTurnResources::new(vec![ContextFragment::new("private-test", FragmentScope::TurnFrozen, Role::System, marker, FragmentSensitivity::Private)], vec![], vec![])
+                .with_artifact_snapshot(resident_artifact_snapshot(marker));
+            super::run_with_turn_resources(&b, &mut store, &mut reader, &adapter, &mut messages, &snapshot, &resources, "Explain LID 1.1", "t0", OuterConfig::default()).unwrap();
+            let plans = adapter.seen_plans.borrow();
+            let wire = serde_json::to_string(&plans.iter().map(|p| p.ordered_messages()).collect::<Vec<_>>()).unwrap();
+            assert!(!wire.contains(marker), "private or default semantic channel leaked in {access:?}");
+            assert!(wire.contains("XXXX"), "all arms must read the same canonical body");
+            let searched = messages.iter().find(|m| m.tool_call_id.as_deref() == Some("locate")).unwrap().content.as_ref().unwrap();
+            let mut ledger = TurnLocatorLedger::default();
+            let sanitized = crate::experiment::BodyBudget::default().admit("book.search_text", "{}", searched.clone(), &b);
+            ledger.observe_tool_result("book.search_text", &sanitized, &b);
+            assert!(!ledger.entries.is_empty(), "locator-only search must remain readable");
+            for plan in plans.iter() {
+                for tool in &plan.tools {
+                    assert!(!matches!(tool.name.as_str(), "book.query" | "book.synthesize" | "artifact.read" | "profile.manifest" | "memory.recall"));
+                    if access == Text { assert!(!matches!(tool.name.as_str(), "book.structure" | "book.context" | "book.concept")); }
+                    if access == Tree { assert_ne!(tool.name, "book.concept"); }
+                }
+            }
+            let registry = crate::experiment::registry(&b, resident_tool_registry());
+            assert!(registry.registration("book.query").is_none());
+            assert_eq!(registry.registration("book.concept").is_some(), access == Graph);
+            if access != Graph { assert!(b.base.graph_nodes.is_empty()); }
+        }
+        assert!(original.base.graph_nodes.iter().any(|n| n.name == marker));
+    }
+
+    #[test]
+    fn experiment_graph_increment_reaches_model_only_in_graph_arm() {
+        use read_tools::ExperimentalReadAccess::{Text, Tree, Graph};
+        let marker = "ONLY_GRAPH_RELATION_LABEL";
+        let mut base = sample_base();
+        for node in &mut base.graph_nodes { node.name = marker.into(); }
+        base.graph_edges[0].edge_type = marker.into();
+        let mut extra = base.lid_nodes[1].clone();
+        extra.lid = "1.2".into();
+        extra.path = vec![1,2];
+        extra.span = Span { start:100, end:200 };
+        base.lid_nodes.push(extra);
+        base.lid_nodes[0].span.end = 200;
+        base.lid_nodes[0].children.push("1.2".into());
+        base.graph_nodes[0].occurrences = vec!["1.2".into()];
+        let original = Book::new(base, &"X".repeat(200));
+        for access in [Text, Tree, Graph] {
+            let b = original.experimental_view(access);
+            let adapter = RequestPlanRecordingAdapter::new(vec![
+                turn_calls(vec![call("context", "book.context", r#"{"lid":"1.1","granularity":"far","k":20}"#)]),
+                turn_final("No source conclusion yet."),
+            ], vec![]);
+            let mut store = MemoryStore::open(tmp(&format!("experiment-graph-increment-{access:?}"))).unwrap();
+            let mut reader = Reader::new(&b, DEFAULT_RADIUS);
+            let mut messages = new_session();
+            run(&b, &mut store, &mut reader, &adapter, &mut messages, "Inspect LID 1.1", "t0", OuterConfig::default()).unwrap();
+            let wire = serde_json::to_string(&adapter.seen_plans.borrow().iter().map(|p| p.ordered_messages()).collect::<Vec<_>>()).unwrap();
+            assert_eq!(wire.contains(marker), access == Graph);
+            assert!(!b.canonical_tree(None).unwrap().to_string().contains(marker));
+        }
+    }
+
+    #[test]
+    fn locator_ledger_concept_results_authorize_only_returned_locations() {
+        let b = book();
+        let mut ledger = TurnLocatorLedger::default();
+        let query = b.base.graph_nodes.iter().find(|node| !node.name.is_empty()).unwrap().name.clone();
+        let result = b.concept_candidates(&query, None, Some(10)).unwrap();
+        assert!(!result.candidates.is_empty());
+        ledger.observe_tool_result("book.concept", &serde_json::to_string(&result).unwrap(), &b);
+        let lid = &result.candidates[0].occurrences[0];
+        assert!(ledger.may_read_lid(lid));
+        assert!(!ledger.may_read_lid("9.9"));
+    }
+
+    #[test]
+    fn finalization_sampling_stall_stops_ordinary_requests() {
+        let b = book_leaves(4);
+        let adapter = RequestPlanRecordingAdapter::new(vec![
+            turn_calls(vec![call("bad1", "book.text", r#"{"unexpected":1}"#)]),
+            turn_calls(vec![call("bad2", "book.text", r#"{"unexpected":2}"#)]),
+            turn_final("I could not complete the requested reading."),
+        ], vec![]);
+        let mut store = MemoryStore::open(tmp("stall-finalization")).unwrap();
+        let out = run(&b, &mut store, &mut Reader::new(&b, 1), &adapter, &mut new_session(), "explain the text", "t0", OuterConfig::default()).unwrap();
+        assert!(out.incomplete);
+        assert_eq!(out.warning.as_deref(), Some("AGENT_NO_PROGRESS"));
+        assert_eq!(out.request_audit.requests.len(), 3);
+        assert!(out.request_audit.requests[2].tool_schemas.is_empty());
+    }
+
+    #[test]
+    fn agent_progress_phase_new_source_bindings_are_delivery_progress() {
+        let b = book_leaves(4);
+        let adapter = FakeAdapter::new(vec![
+            turn_calls((1..=3).map(|i| call(&format!("read{i}"), "book.text", &format!(r#"{{"lid":"1.{i}"}}"#))).collect()),
+            turn_calls(vec![call("source1", "source.present", r#"{"start_lid":"1.1"}"#)]),
+            turn_calls(vec![call("source2", "source.present", r#"{"start_lid":"1.2"}"#)]),
+            turn_calls(vec![call("source3", "source.present", r#"{"start_lid":"1.3"}"#)]),
+            turn_final("sources prepared"),
+        ], vec![]);
+        let mut store = MemoryStore::open(tmp("source-binding-progress")).unwrap();
+        let out = run(&b, &mut store, &mut Reader::new(&b, 1), &adapter, &mut new_session(), "read 1.1, 1.2, 1.3", "t0", OuterConfig::default()).unwrap();
+        assert!(!out.incomplete, "new source bindings must allow delivery to continue");
+    }
+
+    #[test]
     fn tool_result_projection_keeps_raw_trace_but_does_not_admit_omitted_text_as_evidence() {
         let source = format!("HEAD{}TAIL_SECRET", "X".repeat(20_000));
         let end = source.len();
@@ -8477,6 +8810,38 @@ user_question=\"explain normalization\"";
     }
 
     #[test]
+    fn navigation_plan_targets_authorize_reads_without_becoming_evidence() {
+        let b = guided_read_book();
+        let store = MemoryStore::open(tmp("navigation-locator")).unwrap();
+        let groups = crate::guided_route_from(&b, "1.1", None,
+            &store.derive_book_reading_state(&b.base.book_id)).unwrap();
+        let target = groups.iter().flat_map(|group| &group.steps)
+            .find(|step| step.lid != "1.1").unwrap().lid.clone();
+        let mut ledger = TurnLocatorLedger::default();
+        ledger.observe_tool_result("book.guided_route_from",
+            &serde_json::json!({"at":"1.1", "groups":groups}).to_string(), &b);
+        authorize_book_text(&serde_json::json!({"lid":target}).to_string(), &ledger).unwrap();
+        assert!(!ledger.origins(&target).unwrap().contains(&LocatorOrigin::VerifiedEvidence));
+        let mut macro_route = TurnLocatorLedger::default();
+        macro_route.observe_tool_result("book.guide_path", &to_json(&b.guide_path(None).unwrap()), &b);
+        assert!(macro_route.may_read_lid("1.2"));
+        for (tool, body) in [
+            ("book.route_from", to_json(&b.route_from("1.1", None).unwrap())),
+            ("book.route_to", serde_json::json!({"path":b.route_to("1.1", &target, None).unwrap()}).to_string()),
+            ("book.unvisited_back", serde_json::json!({"unvisited_back": [{"lid":target,"evidence_lids":["1.1"]}]}).to_string()),
+        ] {
+            let mut route = TurnLocatorLedger::default();
+            route.observe_tool_result(tool, &body, &b);
+            assert!(route.may_read_lid(&target), "{tool}");
+        }
+        let mut ignored = TurnLocatorLedger::default();
+        ignored.observe_tool_result("book.guided_route_from",
+            r#"{"debug":{"lid":"1.2"},"groups":[],"at":"1.3"}"#, &b);
+        assert!(!ignored.may_read_lid("1.2"));
+        assert!(!ignored.may_read_lid("1.3"));
+    }
+
+    #[test]
     fn locator_ledger_records_eight_origins_and_ignores_uncontracted_fields() {
         let b = guided_read_book();
         let selection = EvidenceRange {
@@ -9498,6 +9863,19 @@ user_question=\"explain normalization\"";
     }
 
     #[test]
+    fn source_presentation_quote_mismatch_can_recover_without_rereading() {
+        let b = book();
+        let evidence = EvidenceRange { start_lid: "1.1".into(), end_lid: "1.1".into(), ranges: vec![] };
+        let mut ledger = TurnEvidenceLedger::from_seed(&b, vec![evidence.clone()]).unwrap();
+        let wrong = r#"{"start_lid":"1.1","quote":"rewritten source"}"#;
+        assert_eq!(ledger.present(&b, wrong).unwrap_err().error_code, "SOURCE_QUOTE_MISMATCH");
+        assert!(ledger.bindings().is_empty());
+        ledger.present(&b, r#"{"start_lid":"1.1"}"#).unwrap();
+        assert_eq!(ledger.bindings()[0].evidence_range, evidence);
+        assert_eq!(TurnEvidenceLedger::default().present(&b, wrong).unwrap_err().error_code, "SOURCE_NOT_OBSERVED");
+    }
+
+    #[test]
     fn source_presentation_rejects_context_route_state_error_and_unobserved_lid() {
         let b = book();
         let mut empty_ledger = TurnEvidenceLedger::default();
@@ -9696,6 +10074,36 @@ user_question=\"explain normalization\"";
             evidence_text_digest: format!("digest-{source_ref_id}"),
             label_snapshot: format!("正文 · {source_ref_id}"),
             preview_snapshot: format!("preview {source_ref_id}"),
+        }
+    }
+
+    #[test]
+    fn answer_provenance_ordered_list_markers_are_not_internal_locators() {
+        let mut provenance = AnswerProvenanceLedger::default();
+        for lid in ["1", "2", "1.2"] {
+            provenance.observe_internal_locator(
+                lid,
+                AnswerProvenanceChannel::ToolResult {
+                    tool: "book.search_text".into(),
+                    field: "occurrences.heading_path.lid".into(),
+                },
+            );
+        }
+        for answer in [
+            "书中要求：\n\n1. **保留范围**：全部保留。\n2. **附带元数据**：保留日期。",
+            "1) 保留范围。\n  2) 附带日期。",
+        ] {
+            assert!(provenance.violations(answer).is_empty(), "{answer}");
+            assert!(compile_agent_answer(answer, &[], &provenance).is_ok());
+        }
+        for answer in [
+            "参见 LID 1。",
+            "请看第1节。",
+            "内部位置 [1]。",
+            "1.2 讨论边界。",
+            "位置为 1. 请跳转。",
+        ] {
+            assert!(!provenance.violations(answer).is_empty(), "{answer}");
         }
     }
 
@@ -10558,6 +10966,21 @@ user_question=\"这段怎么理解？\"",
         );
         assert!(compiled.view.sources.is_empty());
         assert!(compiled.bindings.is_empty());
+    }
+
+    #[test]
+    fn source_presentation_bound_suffix_formats_compile_without_repair() {
+        let bindings = vec![source_binding_fixture("source_ref_one", "1.1")];
+        for answer in ["A claim [[source_ref_one]]", "A claim [source_ref_one]", "A claim（source_ref_one）。", "A claim\n[source_ref_one]", "依据书中的近似式 [source_ref_one]：\n\n> IR ≈ IC·√breadth", "The formula [source_ref_one]:\n\n> IR ≈ IC·√breadth"] {
+            let adapter = FakeAdapter::new(vec![], vec![]);
+            let delivery = deliver_agent_answer(answer, &bindings, &AnswerProvenanceLedger::default(), &adapter, &ModelRuntimeProfile::fallback("test", ProviderToolProtocol::Native), None);
+            assert_eq!(delivery.compiled.bindings.len(), 1, "{answer}");
+            assert_eq!(delivery.extra_turns, 0);
+        }
+        for answer in ["No citation chosen", "Example `[source_ref_one]`", "```text\n[source_ref_one]\n```", "> quoted [source_ref_one]", "标记 [source_ref_one] 的语法", "A claim [unknown]", "A claim [source_ref_one](https://example.com)"] {
+            let compiled = compile_agent_answer(answer, &bindings, &AnswerProvenanceLedger::default()).unwrap();
+            assert!(compiled.bindings.is_empty(), "{answer}");
+        }
     }
 
     #[test]
@@ -12148,6 +12571,73 @@ user_question={}",
     }
 
     #[test]
+    fn explicit_navigation_runs_only_the_requested_effect() {
+        for (index, question, allowed) in [
+            (0, "请跳转到 1.3", true),
+            (1, "不要跳转到 1.3，只解释", false),
+        ] {
+            let b = book_leaves(4);
+            let mut store = MemoryStore::open(tmp(&format!("explicit-navigation-{index}"))).unwrap();
+            let mut reader = Reader::new(&b, 1);
+            let before = reader.state().viewport.anchor_lid;
+            let fake = FakeAdapter::new(vec![turn_calls(vec![
+                call("go", "reader.gotoLid", r#"{"lid":"1.3"}"#),
+                call("note", "reader.note", r#"{"lid":"1.3","text":"unexpected"}"#),
+            ]), turn_final("done")], vec![]);
+            let out = run(&b, &mut store, &mut reader, &fake, &mut new_session(), question, "t0", OuterConfig::default()).unwrap();
+            assert_eq!(reader.state().viewport.anchor_lid, if allowed { "1.3".into() } else { before });
+            assert!(!out.effects.iter().any(|effect| matches!(effect, AgentEffect::Note { .. } | AgentEffect::Highlight { .. })));
+            assert_eq!(out.trace[0].result_digest.contains("TOOL_NOT_EXPOSED"), !allowed);
+        }
+    }
+
+    #[test]
+    fn explicit_reader_writes_persist_type_anchor_and_content() {
+        for (index, question, requested, expected_type, expected_content) in [
+            (0, "不要跳转，只保存这条笔记到 1.3", "reader.note", "note", "remember this"),
+            (1, "请高亮 1.3", "reader.highlight", "highlight", "XXXXXXXXXX"),
+        ] {
+            let b = book_leaves(4);
+            let path = tmp(&format!("explicit-reader-write-{index}"));
+            let mut store = MemoryStore::open(&path).unwrap();
+            let mut reader = Reader::new(&b, 1);
+            let before = reader.state().viewport.anchor_lid;
+            let fake = FakeAdapter::new(vec![turn_calls(vec![
+                call("write", requested, r#"{"lid":"1.3","text":"remember this"}"#),
+                call("go", "reader.gotoLid", r#"{"lid":"1.3"}"#),
+            ]), turn_final("saved")], vec![]);
+            let out = run(&b, &mut store, &mut reader, &fake, &mut new_session(), question, "t0", OuterConfig::default()).unwrap();
+            assert_eq!(reader.state().viewport.anchor_lid, before);
+            assert_eq!(out.effects.len(), 1);
+            drop(store);
+            let reopened = MemoryStore::open(&path).unwrap();
+            let records = reopened.recall(&RecallQuery { book_id: Some(b.base.book_id.clone()), lid: Some("1.3".into()), mem_type: Some(expected_type.into()), ..Default::default() });
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].content, expected_content);
+            assert_eq!(records[0].anchor.lid.as_deref(), Some("1.3"));
+        }
+    }
+
+    #[test]
+    fn explicit_highlight_quote_saves_only_exact_unique_text() {
+        assert_eq!(exact_highlight_range("a😀bc", "😀b"), Some((1, 4)));
+        for (text, quote) in [("aaaa", "aa"), ("abc", ""), ("abc", "z"), ("abc", "abcd")] {
+            assert_eq!(exact_highlight_range(text, quote), None);
+        }
+        let b = Book::new(book_leaves(4).base, "0123456789abcdefghijKLMNOPQRSTuvwxyz0123");
+        let path = tmp("highlight-exact-quote");
+        let mut store = MemoryStore::open(&path).unwrap();
+        let fake = FakeAdapter::new(vec![turn_calls(vec![call("highlight", "reader.highlight", r#"{"lid":"1.3","quote":"NOP"}"#)]), turn_final("saved")], vec![]);
+        run(&b, &mut store, &mut Reader::new(&b, 1), &fake, &mut new_session(), "请高亮 1.3 中的‘NOP’", "t0", OuterConfig::default()).unwrap();
+        drop(store);
+        let reopened = MemoryStore::open(&path).unwrap();
+        let records = reopened.recall(&RecallQuery { mem_type: Some("highlight".into()), ..Default::default() });
+        assert_eq!(records[0].content, "NOP");
+        assert_eq!(records[0].range.as_ref().unwrap().start, 3);
+        assert_eq!(records[0].range.as_ref().unwrap().end, 6);
+    }
+
+    #[test]
     fn turn_intent_active_context_budget_includes_seeded_tool_exposure() {
         let b = book();
         let mut store = MemoryStore::open(tmp("turn-intent-seeded-active-context")).unwrap();
@@ -12245,12 +12735,12 @@ user_question={}",
         let fake = FakeAdapter::new(
             vec![
                 turn_calls(vec![
-                    discovery_call("discover-highlight", "reader.highlight", 1),
-                    call("too-early", "reader.highlight", r#"{"lid":"1.1"}"#),
+                    call("discover-memory", "tool.search", r#"{"task":"recall saved notes","required_capabilities":["memory_read"],"scope":"document","operation":"explain","effect_mode":"read_only","max_results":1}"#),
+                    call("too-early", "memory.recall", r#"{"lid":"1.1"}"#),
                 ]),
                 turn_calls(vec![call(
                     "after-discovery",
-                    "reader.highlight",
+                    "memory.recall",
                     r#"{"lid":"1.1"}"#,
                 )]),
                 turn_final("highlighted"),
@@ -12265,7 +12755,7 @@ user_question={}",
             &mut reader,
             &fake,
             &mut messages,
-            "guide me through and highlight the current passage",
+            "recall my saved reading notes",
             "t0",
             OuterConfig::default(),
         )
@@ -12275,13 +12765,13 @@ user_question={}",
         assert_eq!(out.trace.len(), 3);
         assert_eq!(out.trace[0].tool, "tool.search");
         assert!(out.trace[1].result_digest.contains("TOOL_NOT_EXPOSED"));
-        assert_eq!(out.trace[2].tool, "reader.highlight");
+        assert_eq!(out.trace[2].tool, "memory.recall");
         assert_eq!(
             out.effects
                 .iter()
                 .filter(|effect| matches!(effect, AgentEffect::Highlight { .. }))
                 .count(),
-            1
+            0
         );
     }
 

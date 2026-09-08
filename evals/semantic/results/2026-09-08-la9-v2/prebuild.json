@@ -1,0 +1,117 @@
+{
+  "version": "la9-existing-prebuild-v1",
+  "book_id": "quantification-essence",
+  "measured_at": "2026-09-08T06:58:17.542Z",
+  "stored_files": 7861,
+  "stored_bytes": 34814058,
+  "root_artifacts": [
+    {
+      "name": "asset_manifest.json",
+      "bytes": 1848
+    },
+    {
+      "name": "base.json",
+      "bytes": 1482111
+    },
+    {
+      "name": "book_structure.json",
+      "bytes": 32851
+    },
+    {
+      "name": "discourse_index.json",
+      "bytes": 598352
+    },
+    {
+      "name": "formula_semantics.json",
+      "bytes": 549222
+    },
+    {
+      "name": "long_range_candidates.json",
+      "bytes": 6817743
+    },
+    {
+      "name": "pass2_audit.json",
+      "bytes": 1682173
+    },
+    {
+      "name": "profile_metadata.json",
+      "bytes": 261
+    },
+    {
+      "name": "quantification-essence.md",
+      "bytes": 335861
+    },
+    {
+      "name": "source.txt",
+      "bytes": 335861
+    },
+    {
+      "name": "source_manifest.json",
+      "bytes": 313
+    }
+  ],
+  "metric_records": 530,
+  "stages": {
+    "book_structure": {
+      "attempts": 25,
+      "statuses": {
+        "committed": 25
+      },
+      "executor_ms": 2561519,
+      "queue_ms": 0,
+      "lease_wait_ms": 306316,
+      "writer_ms": 22342,
+      "usage_sources": {
+        "unavailable": 25
+      }
+    },
+    "pass1": {
+      "attempts": 46,
+      "statuses": {
+        "committed": 46
+      },
+      "executor_ms": 6004439,
+      "queue_ms": 0,
+      "lease_wait_ms": 552843,
+      "writer_ms": 33144,
+      "usage_sources": {
+        "unavailable": 46
+      }
+    },
+    "pass2": {
+      "attempts": 37,
+      "statuses": {
+        "retryable_failure": 1,
+        "committed": 36
+      },
+      "executor_ms": 1744224,
+      "queue_ms": 0,
+      "lease_wait_ms": 4906768,
+      "writer_ms": 33387,
+      "usage_sources": {
+        "unavailable": 37
+      }
+    },
+    "profile_sidecar": {
+      "attempts": 422,
+      "statuses": {
+        "committed": 401,
+        "retryable_failure": 21
+      },
+      "executor_ms": 27043871,
+      "queue_ms": 0,
+      "lease_wait_ms": 6194527,
+      "writer_ms": 424564,
+      "usage_sources": {
+        "unavailable": 422
+      }
+    }
+  },
+  "actual_provider_tokens": null,
+  "elapsed_wall_ms": null,
+  "limitations": [
+    "Existing attempt metrics only; summed executor/queue durations overlap across parallel tasks and are not wall-clock build time.",
+    "Historical usage provenance is retained by stage; these records do not establish complete actual Provider usage for the book.",
+    "No rebuild and no estimated tokens were used to fill missing historical costs. Unknown extra build cost prevents a numeric amortization point."
+  ]
+}

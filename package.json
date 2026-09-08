@@ -7,7 +7,11 @@
   "scripts": {
     "test": "pnpm -r --workspace-concurrency=1 test",
     "build": "pnpm --filter @understand-book/web build",
-    "gen-schema": "cargo test -p base-schema export_bindings"
+    "gen-schema": "cargo test -p base-schema export_bindings",
+    "demo:prepare": "node --import tsx examples/quickstart/create.ts",
+    "eval:semantic:test": "node --test evals/semantic/core.test.mjs evals/semantic/report.test.mjs evals/semantic/provider-recorder.test.mjs evals/semantic/agent-core.test.mjs evals/semantic/agent-report.test.mjs evals/semantic/ablation-report.test.mjs",
+    "eval:semantic": "node evals/semantic/run.mjs",
+    "eval:agent": "node evals/semantic/agent-run.mjs"
   },
   "devDependencies": {
     "@napi-rs/canvas": "1.0.2",

@@ -1,1 +1,2 @@
 *.pdf binary
+scripts/linux/*.sh text eol=lf

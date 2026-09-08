@@ -1,0 +1,121 @@
+{
+  "slices": [
+    "LX2",
+    "LX3",
+    "LX4",
+    "LX5",
+    "LX6"
+  ],
+  "status": "passed",
+  "source_head": "9e365075c99c9627959f2d9a03f987912c8c7a95",
+  "source_state": "current working tree including earlier uncommitted work and this slice; no commit created",
+  "windows": {
+    "server_library_passed": 238,
+    "cli_passed": 1,
+    "tauri_check": "passed",
+    "web_build": "passed",
+    "web_tests_passed": 7,
+    "relocation_tests_passed": 3,
+    "source_node_metrics": "passed",
+    "packaged_sidecar_metrics": "passed"
+  },
+  "linux": {
+    "native_release_build": "passed",
+    "web_build": "passed",
+    "server_library_initial": {
+      "passed": 239,
+      "failed": 1,
+      "failure": "required quantification-essence fixture absent from source snapshot"
+    },
+    "missing_fixture_retry": {
+      "passed": 1,
+      "failed": 0,
+      "resolution": "copy the complete existing fixture; no search code change"
+    },
+    "cli_passed": 1,
+    "relocation_tests_passed": 3,
+    "smoke": {
+      "status": "passed",
+      "checks": [
+        "legacy-identity",
+        "clean-stop-3413971",
+        "environment-identity",
+        "clean-stop-3413983",
+        "reader-environment-identity",
+        "clean-stop-3413995",
+        "reader-identity",
+        "technical-ready",
+        "technical-ready",
+        "technical-readiness-no-build-write",
+        "technical-fixed-library",
+        "paper-ready",
+        "paper-ready",
+        "paper-readiness-no-build-write",
+        "paper-fixed-library",
+        "missing-material-waits",
+        "missing-material-no-build-write",
+        "reject-/build_workbench/job.start",
+        "reject-/build_workbench/job.resume",
+        "reject-/build_workbench/input.import",
+        "reject-/build_intent/confirm",
+        "reject-/book/create",
+        "node-usage-report",
+        "node-event-on-disk",
+        "empty-artifacts",
+        "profile-readable",
+        "inflight-sigterm-clean",
+        "inflight-chat-finished",
+        "chat-persisted",
+        "relocation-idempotent",
+        "relocation-private-bytes-preserved",
+        "restore-last-book",
+        "restore-paper-top",
+        "history-api-restored",
+        "restore-technical-top",
+        "note-anchor-restored",
+        "profile-after-migration",
+        "read-touch-still-pending-before-signal",
+        "clean-stop-3414067",
+        "shutdown-flushed-pending-touch",
+        "read-ledger-persisted",
+        "restart-scroll-top",
+        "clean-stop-3414081"
+      ],
+      "run_dir": "/opt/understand-book/acceptance/lx2-lx6/run-1788841095",
+      "technical": "/opt/understand-book/acceptance/lx2-lx6/run-1788841095/books/中文 技术书",
+      "paper": "/opt/understand-book/acceptance/lx2-lx6/run-1788841095/books/paper",
+      "migrated_data": "/opt/understand-book/acceptance/lx2-lx6/run-1788841095/migrated",
+      "library": "/opt/understand-book/acceptance/lx2-lx6/run-1788841095/migrated-library"
+    },
+    "sigint": {
+      "status": "passed",
+      "signal": "SIGINT",
+      "exit": 0
+    },
+    "systemd": {
+      "status": "passed",
+      "user": "understand-book",
+      "stop_seconds": 0.10069043934345245,
+      "prior_pid": "3414194",
+      "restart_top_lid": "1.1",
+      "desktop_host": false,
+      "reader_only": true,
+      "active": "active",
+      "unit": "/etc/systemd/system/understand-book.service",
+      "data": "/opt/understand-book/data/lx6",
+      "provider": "unconfigured; controlled Provider used only in lifecycle test"
+    }
+  },
+  "browser": {
+    "status": "passed",
+    "checks": [
+      "reader and host menus",
+      "browser book library without native creation",
+      "missing material waits across refresh",
+      "no automatic build request or JavaScript error"
+    ]
+  },
+  "remaining": "LX7 real Provider and complete reading interaction acceptance",
+  "remote_evidence": "/opt/understand-book/acceptance/lx2-lx6",
+  "local_evidence": "E:\\allwork\\download\\agent\\understand-book\\tmp\\lx2-lx6\\evidence"
+}

@@ -1,0 +1,305 @@
+{
+  "version": "la9-paired-v1",
+  "status": "invalid_configuration",
+  "model": "deepseek-v4-flash",
+  "git_head": "9e365075c99c9627959f2d9a03f987912c8c7a95",
+  "experiment": {
+    "version": "la8-v1",
+    "arms": [
+      "text",
+      "tree",
+      "graph"
+    ],
+    "order": "task order; cyclic rotation text/tree/graph by task index",
+    "max_turns": 12,
+    "token_limit": 120000,
+    "finalization_reserve": 20000,
+    "unique_body_utf16": 12000,
+    "samples_per_arm": 1
+  },
+  "summary": {
+    "text": {
+      "count": 1,
+      "succeeded": 1,
+      "success_rate": 1,
+      "semantic_accuracy": 1,
+      "evidence_recall": 1,
+      "citation_support": 1,
+      "p95_seconds": 18.634347,
+      "mean_tokens": 20302,
+      "total_requests": 6,
+      "missing_usage": 0,
+      "errors": 0,
+      "incomplete": 0
+    },
+    "tree": {
+      "count": 1,
+      "succeeded": 1,
+      "success_rate": 1,
+      "semantic_accuracy": 1,
+      "evidence_recall": 1,
+      "citation_support": 1,
+      "p95_seconds": 35.116710700000006,
+      "mean_tokens": 104837,
+      "total_requests": 8,
+      "missing_usage": 0,
+      "errors": 0,
+      "incomplete": 0
+    },
+    "graph": {
+      "count": 0,
+      "succeeded": 0,
+      "success_rate": null,
+      "semantic_accuracy": null,
+      "evidence_recall": null,
+      "citation_support": null,
+      "p95_seconds": null,
+      "mean_tokens": null,
+      "total_requests": 0,
+      "missing_usage": 0,
+      "errors": 0,
+      "incomplete": 0
+    }
+  },
+  "rows": [
+    {
+      "id": "exact-01",
+      "arm": "text",
+      "score": {
+        "evidence_groups": 1,
+        "recalled_groups": 1,
+        "evidence_recall": 1,
+        "facts": 1,
+        "supported_facts": 1,
+        "semantic_correct": true,
+        "success": true,
+        "details": [
+          {
+            "key": "purpose",
+            "correct": true,
+            "supported": true
+          }
+        ]
+      },
+      "elapsed_ms": 18634.347,
+      "usage": {
+        "requests": 6,
+        "total_tokens": 20302,
+        "missing_usage": 0
+      },
+      "error": null,
+      "incomplete": false,
+      "valid_sources": 1,
+      "tool_sequence": [
+        "book.search_text",
+        "book.search_text",
+        "book.text",
+        "book.text",
+        "book.text",
+        "book.text",
+        "source.present"
+      ],
+      "cost_by_purpose": {
+        "business_loop": {
+          "requests": 5,
+          "total_tokens": 19381,
+          "missing_usage": 0
+        },
+        "inner_query": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "inner_synthesis": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "source_repair": {
+          "requests": 1,
+          "total_tokens": 921,
+          "missing_usage": 0
+        },
+        "finalization": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "compaction": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "background_profile_review": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "grading": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "unclassified": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        }
+      },
+      "budget_rejections": 0,
+      "token_limit_verified": true,
+      "token_overshoot": 0,
+      "request_settings": [
+        {
+          "model": "deepseek-v4-flash",
+          "temperature": 0
+        }
+      ]
+    },
+    {
+      "id": "exact-01",
+      "arm": "tree",
+      "score": {
+        "evidence_groups": 1,
+        "recalled_groups": 1,
+        "evidence_recall": 1,
+        "facts": 1,
+        "supported_facts": 1,
+        "semantic_correct": true,
+        "success": true,
+        "details": [
+          {
+            "key": "purpose",
+            "correct": true,
+            "supported": true
+          }
+        ]
+      },
+      "elapsed_ms": 35116.7107,
+      "usage": {
+        "requests": 8,
+        "total_tokens": 104837,
+        "missing_usage": 0
+      },
+      "error": null,
+      "incomplete": false,
+      "valid_sources": 1,
+      "tool_sequence": [
+        "book.structure",
+        "book.search_text",
+        "book.search_text",
+        "book.search_text",
+        "book.search_text",
+        "book.search_text",
+        "book.text",
+        "book.text",
+        "book.text",
+        "book.text",
+        "book.text",
+        "book.text",
+        "source.present"
+      ],
+      "cost_by_purpose": {
+        "business_loop": {
+          "requests": 8,
+          "total_tokens": 104837,
+          "missing_usage": 0
+        },
+        "inner_query": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "inner_synthesis": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "source_repair": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "finalization": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "compaction": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "background_profile_review": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "grading": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "unclassified": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        }
+      },
+      "budget_rejections": 0,
+      "token_limit_verified": true,
+      "token_overshoot": 0,
+      "request_settings": [
+        {
+          "model": "deepseek-v4-flash",
+          "temperature": 0
+        }
+      ]
+    }
+  ],
+  "comparisons": [
+    {
+      "from": "text",
+      "to": "tree",
+      "pairs": [
+        {
+          "id": "exact-01",
+          "left_success": true,
+          "right_success": true,
+          "token_delta": 84535,
+          "added_paths": [
+            "book.structure"
+          ]
+        }
+      ],
+      "gained": [],
+      "lost": []
+    },
+    {
+      "from": "tree",
+      "to": "graph",
+      "pairs": [
+        {
+          "id": "exact-01",
+          "left_success": true,
+          "right_success": null,
+          "token_delta": null,
+          "added_paths": []
+        }
+      ],
+      "gained": [],
+      "lost": []
+    }
+  ],
+  "grading_usage": {
+    "requests": 2,
+    "total_tokens": 2516,
+    "missing_usage": 0
+  },
+  "limitations": [
+    "Single book development set, one sample per arm/task; no statistical significance claim.",
+    "Added tool paths and changed success are paired observations, not proof of a specific edge causing the outcome.",
+    "Any missing Provider usage makes cumulative token compliance unknown. In-flight overshoots are retained.",
+    "Prebuild history is reported separately; no book rebuild is performed to fill missing measurements."
+  ]
+}

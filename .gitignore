@@ -32,6 +32,9 @@ tmp-smoke-*.json
 # 预构建产物基座(生成物,按需重建)
 .understand-book/
 
+# Semantic eval raw evidence contains excerpts from the user's local book.
+evals/semantic/results/**/run.json
+
 # OS / editor cruft
 .DS_Store
 Thumbs.db

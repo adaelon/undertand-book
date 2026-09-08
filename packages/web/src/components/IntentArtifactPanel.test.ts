@@ -124,7 +124,7 @@ describe("IntentArtifactPanel", () => {
     expect(wrapper.find(".artifact-error").exists()).toBe(true);
   });
 
-  it("renders Blueprint-driven collection, table, graph, sequence, and document shapes", async () => {
+  it.each(["artifact_instance.v2", "artifact_instance.v3"])("renders Blueprint-driven collection, table, graph, sequence, and document shapes (%s)", async (version) => {
     const longToken = `LONG_FIELD_${"x".repeat(320)}`;
     const genericOverlay = {
       ...overlay,
@@ -142,7 +142,9 @@ describe("IntentArtifactPanel", () => {
           payload_digest: "1".repeat(64),
           accepted_at: "2026-07-30T01:00:00.000Z",
           payload: {
-            version: "artifact_instance.v2",
+            version,
+            blueprint_id: "system.acceptance",
+            blueprint_version: "1.0.0",
             blueprint_digest: "c".repeat(64),
             records: [{
               record_id: "term-1",
@@ -164,7 +166,9 @@ describe("IntentArtifactPanel", () => {
           payload_digest: "2".repeat(64),
           accepted_at: "2026-07-30T01:01:00.000Z",
           payload: {
-            version: "artifact_instance.v2",
+            version,
+            blueprint_id: "system.acceptance",
+            blueprint_version: "1.0.0",
             records: [{
               record_id: "task-1",
               data: { task: "Reader projection", owner: "Web", status: "ready" },
@@ -185,7 +189,9 @@ describe("IntentArtifactPanel", () => {
           payload_digest: "3".repeat(64),
           accepted_at: "2026-07-30T01:02:00.000Z",
           payload: {
-            version: "artifact_instance.v2",
+            version,
+            blueprint_id: "system.acceptance",
+            blueprint_version: "1.0.0",
             records: [
               { record_id: "node-a", data: { label: "Blueprint" }, evidence_lids: ["5.3"] },
               { record_id: "node-b", data: { label: "Reader" }, evidence_lids: ["5.4"] },
@@ -212,7 +218,9 @@ describe("IntentArtifactPanel", () => {
           payload_digest: "4".repeat(64),
           accepted_at: "2026-07-30T01:03:00.000Z",
           payload: {
-            version: "artifact_instance.v2",
+            version,
+            blueprint_id: "system.acceptance",
+            blueprint_version: "1.0.0",
             records: [{
               record_id: "step-1",
               data: { step: "验证", detail: "运行确定性测试" },
@@ -233,7 +241,9 @@ describe("IntentArtifactPanel", () => {
           payload_digest: "5".repeat(64),
           accepted_at: "2026-07-30T01:04:00.000Z",
           payload: {
-            version: "artifact_instance.v2",
+            version,
+            blueprint_id: "system.acceptance",
+            blueprint_version: "1.0.0",
             records: [{
               record_id: "section-1",
               data: { heading: "结论", body: "五种形态共享同一 accepted 实例合同。" },
@@ -268,7 +278,7 @@ describe("IntentArtifactPanel", () => {
     expect(wrapper.emitted("cite")?.[0]).toEqual(["collection-1"]);
   });
 
-  it("keeps the four established views when system presets arrive as v2 instances", async () => {
+  it.each(["artifact_instance.v2", "artifact_instance.v3"])("keeps the four established views when system presets arrive as %s instances", async (version) => {
     const v2Overlay = {
       ...overlay,
       artifacts: [
@@ -280,7 +290,9 @@ describe("IntentArtifactPanel", () => {
           payload_digest: "7".repeat(64),
           accepted_at: "2026-07-30T02:00:00.000Z",
           payload: {
-            version: "artifact_instance.v2",
+            version,
+            blueprint_id: "system.acceptance",
+            blueprint_version: "1.0.0",
             records: [{
               record_id: "event-v2",
               data: { label: "V2 timeline event", order_hint: "Stage V2" },
@@ -296,7 +308,9 @@ describe("IntentArtifactPanel", () => {
           payload_digest: "8".repeat(64),
           accepted_at: "2026-07-30T02:01:00.000Z",
           payload: {
-            version: "artifact_instance.v2",
+            version,
+            blueprint_id: "system.acceptance",
+            blueprint_version: "1.0.0",
             records: [
               { record_id: "concept-v2-a", data: { label: "V2 concept A" }, evidence_lids: ["7.2"] },
               { record_id: "concept-v2-b", data: { label: "V2 concept B" }, evidence_lids: ["7.3"] },
@@ -318,7 +332,9 @@ describe("IntentArtifactPanel", () => {
           payload_digest: "9".repeat(64),
           accepted_at: "2026-07-30T02:02:00.000Z",
           payload: {
-            version: "artifact_instance.v2",
+            version,
+            blueprint_id: "system.acceptance",
+            blueprint_version: "1.0.0",
             records: [{
               record_id: "row-v2",
               data: {
@@ -337,7 +353,9 @@ describe("IntentArtifactPanel", () => {
           payload_digest: "a".repeat(64),
           accepted_at: "2026-07-30T02:03:00.000Z",
           payload: {
-            version: "artifact_instance.v2",
+            version,
+            blueprint_id: "system.acceptance",
+            blueprint_version: "1.0.0",
             records: [{
               record_id: "claim-v2",
               data: { claim: "V2 evidence remains visible.", role: "evidence" },

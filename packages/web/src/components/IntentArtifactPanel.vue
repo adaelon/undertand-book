@@ -8,6 +8,7 @@ import type {
   IntentArtifactInstanceRecordV2,
   IntentArtifactInstanceRelationV2,
   IntentArtifactInstanceV2,
+  IntentArtifactInstanceV3,
   IntentArtifactOverlayV1,
   IntentArtifactProjectionV1,
   IntentArtifactType,
@@ -104,9 +105,9 @@ function isObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-function isArtifactInstance(payload: unknown): payload is IntentArtifactInstanceV2 {
+function isArtifactInstance(payload: unknown): payload is IntentArtifactInstanceV2 | IntentArtifactInstanceV3 {
   return isObject(payload)
-    && payload.version === "artifact_instance.v2"
+    && (payload.version === "artifact_instance.v2" || payload.version === "artifact_instance.v3")
     && Array.isArray(payload.records);
 }
 

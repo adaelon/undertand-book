@@ -45,6 +45,8 @@ fn main() {
             .ok()
             .map(|port| Box::new(port) as Box<dyn ArtifactSnapshotReadPort>);
     let mut state = AppState {
+        desktop_host: false,
+        reader_only: false,
         book_dir: dir,
         library_root: None,
         book,

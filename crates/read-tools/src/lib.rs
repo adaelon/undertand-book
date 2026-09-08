@@ -35,7 +35,12 @@ pub struct Book {
     paper_metadata: Option<PaperMetadataSidecar>,
     paper_lexicon: Option<PaperLexiconSidecar>,
     paper_minimap_artifacts: PaperMinimapArtifacts,
+    experimental_read_access: Option<ExperimentalReadAccess>,
 }
+
+/// Explicit, in-memory evaluation view. Never changes the stored book.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExperimentalReadAccess { Text, Tree, Graph }
 
 #[derive(Debug, Clone, Default)]
 struct PaperMinimapArtifacts {
@@ -3300,7 +3305,34 @@ impl Book {
             paper_metadata: None,
             paper_lexicon: None,
             paper_minimap_artifacts: PaperMinimapArtifacts::default(),
+            experimental_read_access: None,
         }
+    }
+
+    pub fn experimental_read_access(&self) -> Option<ExperimentalReadAccess> {
+        self.experimental_read_access
+    }
+
+    pub fn experimental_view(&self, access: ExperimentalReadAccess) -> Book {
+        let mut base = self.base.clone();
+        if access != ExperimentalReadAccess::Graph {
+            base.graph_nodes.clear();
+            base.graph_edges.clear();
+        }
+        let mut view = Book::new(base, &String::from_utf16_lossy(&self.source_u16));
+        view.experimental_read_access = Some(access);
+        view
+    }
+
+    /// Only canonical LID topology; no model-authored spine or key stops.
+    pub fn canonical_tree(&self, at: Option<&str>) -> Result<serde_json::Value, ToolError> {
+        let nodes = if let Some(lid) = at {
+            let node = self.node(lid)?;
+            self.base.lid_nodes.iter().filter(|n| n.lid == lid || node.children.contains(&n.lid)).collect::<Vec<_>>()
+        } else {
+            self.base.lid_nodes.iter().filter(|n| n.path.len() <= 2).collect::<Vec<_>>()
+        };
+        Ok(serde_json::json!({"available": true, "at": at, "nodes": nodes}))
     }
 
     /// SHA-256 of the canonical `source.txt` bytes loaded into this Book.

@@ -1,0 +1,1007 @@
+{
+  "version": "quantification-essence-agent-v1",
+  "started_at": "2026-09-08T05:59:09.588Z",
+  "finished_at": "2026-09-08T06:12:50.607Z",
+  "status": "completed",
+  "model": "deepseek-v4-flash",
+  "git_head": "9e365075c99c9627959f2d9a03f987912c8c7a95",
+  "scope": "24 common natural-language QA tasks; 4 Agent navigation tasks; 4 Agent restart tasks. Product comparison, not graph causal attribution.",
+  "config": {
+    "agent": "production POST /agent/chat, OuterConfig::default(), isolated per-task memory/private artifacts",
+    "chunk": {
+      "chars": 1000,
+      "overlap": 150,
+      "budget": 6000,
+      "max_output_tokens": 4096
+    },
+    "temperature": 0,
+    "repeats": 1,
+    "task_timeout_ms": 300000,
+    "grading": "separate model annotation + deterministic facts/quote/source/action checks"
+  },
+  "corpus": {
+    "book_id": "quantification-essence",
+    "source_utf16": 154448,
+    "lids": 2757,
+    "graph_nodes": 1640,
+    "graph_edges": 1745
+  },
+  "scoring_version": "natural-facts-v2-bold-normalization",
+  "selected_ids": [
+    "exact-04",
+    "concept-02",
+    "concept-03",
+    "cross-01",
+    "cross-02",
+    "cross-04",
+    "formula-01",
+    "formula-03",
+    "restart-01",
+    "restart-02",
+    "restart-03",
+    "restart-04"
+  ],
+  "summary": {
+    "Chunk RAG (BM25, single-shot)": {
+      "count": 8,
+      "succeeded": 5,
+      "success_rate": 0.625,
+      "semantic_accuracy": 0.75,
+      "evidence_recall": 0.9090909090909091,
+      "citation_support": 0.7272727272727273,
+      "p95_seconds": 14.3038799,
+      "mean_tokens": 4518.625,
+      "total_requests": 8,
+      "missing_usage": 0,
+      "errors": 1,
+      "incomplete": 0
+    },
+    "Resident Agent (LID + Graph, full loop)": {
+      "count": 8,
+      "succeeded": 5,
+      "success_rate": 0.625,
+      "semantic_accuracy": 0.875,
+      "evidence_recall": 1,
+      "citation_support": 0.5454545454545454,
+      "p95_seconds": 179.24946119999996,
+      "mean_tokens": 88705.25,
+      "total_requests": 57,
+      "missing_usage": 0,
+      "errors": 1,
+      "incomplete": 0
+    }
+  },
+  "qa": [
+    {
+      "id": "exact-04",
+      "category": "exact",
+      "system": "Chunk RAG (BM25, single-shot)",
+      "score": {
+        "evidence_groups": 1,
+        "recalled_groups": 1,
+        "evidence_recall": 1,
+        "facts": 1,
+        "supported_facts": 1,
+        "semantic_correct": true,
+        "success": true,
+        "details": [
+          {
+            "key": "pretrain",
+            "correct": true,
+            "supported": true
+          }
+        ]
+      },
+      "elapsed_ms": 2856.6411,
+      "usage": {
+        "requests": 1,
+        "total_tokens": 4062,
+        "missing_usage": 0
+      },
+      "incomplete": false,
+      "tool_counts": {},
+      "tool_sequence": [],
+      "valid_sources": 2
+    },
+    {
+      "id": "exact-04",
+      "category": "exact",
+      "system": "Resident Agent (LID + Graph, full loop)",
+      "score": {
+        "evidence_groups": 1,
+        "recalled_groups": 1,
+        "evidence_recall": 1,
+        "facts": 1,
+        "supported_facts": 1,
+        "semantic_correct": true,
+        "success": true,
+        "details": [
+          {
+            "key": "pretrain",
+            "correct": true,
+            "supported": true
+          }
+        ]
+      },
+      "elapsed_ms": 20641.588799999998,
+      "usage": {
+        "requests": 5,
+        "total_tokens": 34738,
+        "missing_usage": 0
+      },
+      "incomplete": false,
+      "tool_counts": {
+        "book.search_text": 2,
+        "book.text": 2,
+        "source.present": 2
+      },
+      "tool_sequence": [
+        {
+          "loop": 1,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 1,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 2,
+          "tool": "book.text"
+        },
+        {
+          "loop": 2,
+          "tool": "book.text"
+        },
+        {
+          "loop": 3,
+          "tool": "source.present"
+        },
+        {
+          "loop": 3,
+          "tool": "source.present"
+        }
+      ],
+      "valid_sources": 2
+    },
+    {
+      "id": "concept-02",
+      "category": "concept",
+      "system": "Resident Agent (LID + Graph, full loop)",
+      "score": {
+        "evidence_groups": 1,
+        "recalled_groups": 1,
+        "evidence_recall": 1,
+        "facts": 1,
+        "supported_facts": 1,
+        "semantic_correct": true,
+        "success": true,
+        "details": [
+          {
+            "key": "nonprice_allowed",
+            "correct": true,
+            "supported": true
+          }
+        ]
+      },
+      "elapsed_ms": 32091.637799999997,
+      "usage": {
+        "requests": 4,
+        "total_tokens": 28861,
+        "missing_usage": 0
+      },
+      "incomplete": false,
+      "tool_counts": {
+        "book.search_text": 2,
+        "book.concept": 1,
+        "book.text": 1,
+        "source.present": 1
+      },
+      "tool_sequence": [
+        {
+          "loop": 1,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 1,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 1,
+          "tool": "book.concept"
+        },
+        {
+          "loop": 2,
+          "tool": "book.text"
+        },
+        {
+          "loop": 3,
+          "tool": "source.present"
+        }
+      ],
+      "valid_sources": 1
+    },
+    {
+      "id": "concept-02",
+      "category": "concept",
+      "system": "Chunk RAG (BM25, single-shot)",
+      "score": {
+        "evidence_groups": 1,
+        "recalled_groups": 1,
+        "evidence_recall": 1,
+        "facts": 1,
+        "supported_facts": 0,
+        "semantic_correct": true,
+        "success": false,
+        "details": [
+          {
+            "key": "nonprice_allowed",
+            "correct": true,
+            "supported": false
+          }
+        ]
+      },
+      "elapsed_ms": 4571.6033000000025,
+      "usage": {
+        "requests": 1,
+        "total_tokens": 4075,
+        "missing_usage": 0
+      },
+      "incomplete": false,
+      "tool_counts": {},
+      "tool_sequence": [],
+      "valid_sources": 0
+    },
+    {
+      "id": "concept-03",
+      "category": "concept",
+      "system": "Chunk RAG (BM25, single-shot)",
+      "score": {
+        "evidence_groups": 1,
+        "recalled_groups": 1,
+        "evidence_recall": 1,
+        "facts": 1,
+        "supported_facts": 1,
+        "semantic_correct": true,
+        "success": true,
+        "details": [
+          {
+            "key": "correction",
+            "correct": true,
+            "supported": true
+          }
+        ]
+      },
+      "elapsed_ms": 5460.828000000009,
+      "usage": {
+        "requests": 1,
+        "total_tokens": 4568,
+        "missing_usage": 0
+      },
+      "incomplete": false,
+      "tool_counts": {},
+      "tool_sequence": [],
+      "valid_sources": 1
+    },
+    {
+      "id": "concept-03",
+      "category": "concept",
+      "system": "Resident Agent (LID + Graph, full loop)",
+      "score": {
+        "evidence_groups": 1,
+        "recalled_groups": 1,
+        "evidence_recall": 1,
+        "facts": 1,
+        "supported_facts": 1,
+        "semantic_correct": true,
+        "success": true,
+        "details": [
+          {
+            "key": "correction",
+            "correct": true,
+            "supported": true
+          }
+        ]
+      },
+      "elapsed_ms": 35086.0818,
+      "usage": {
+        "requests": 7,
+        "total_tokens": 43546,
+        "missing_usage": 0
+      },
+      "incomplete": false,
+      "tool_counts": {
+        "book.search_text": 4,
+        "book.text": 2,
+        "source.present": 2
+      },
+      "tool_sequence": [
+        {
+          "loop": 1,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 1,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 2,
+          "tool": "book.text"
+        },
+        {
+          "loop": 3,
+          "tool": "book.text"
+        },
+        {
+          "loop": 4,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 4,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 5,
+          "tool": "source.present"
+        },
+        {
+          "loop": 5,
+          "tool": "source.present"
+        }
+      ],
+      "valid_sources": 2
+    },
+    {
+      "id": "cross-01",
+      "category": "cross",
+      "system": "Resident Agent (LID + Graph, full loop)",
+      "score": {
+        "evidence_groups": 2,
+        "recalled_groups": 2,
+        "evidence_recall": 1,
+        "facts": 2,
+        "supported_facts": 0,
+        "semantic_correct": false,
+        "success": false,
+        "details": [
+          {
+            "key": "reward",
+            "correct": false,
+            "supported": false
+          },
+          {
+            "key": "reset_N",
+            "correct": false,
+            "supported": false
+          }
+        ]
+      },
+      "elapsed_ms": 54751.8713,
+      "usage": {
+        "requests": 13,
+        "total_tokens": 192309,
+        "missing_usage": 0
+      },
+      "incomplete": false,
+      "tool_counts": {},
+      "tool_sequence": [],
+      "valid_sources": 0,
+      "error": "task_error"
+    },
+    {
+      "id": "cross-01",
+      "category": "cross",
+      "system": "Chunk RAG (BM25, single-shot)",
+      "score": {
+        "evidence_groups": 2,
+        "recalled_groups": 1,
+        "evidence_recall": 0.5,
+        "facts": 2,
+        "supported_facts": 1,
+        "semantic_correct": false,
+        "success": false,
+        "details": [
+          {
+            "key": "reward",
+            "correct": true,
+            "supported": true
+          },
+          {
+            "key": "reset_N",
+            "correct": false,
+            "supported": false
+          }
+        ]
+      },
+      "elapsed_ms": 12856.544900000008,
+      "usage": {
+        "requests": 1,
+        "total_tokens": 5159,
+        "missing_usage": 0
+      },
+      "incomplete": false,
+      "tool_counts": {},
+      "tool_sequence": [],
+      "valid_sources": 4
+    },
+    {
+      "id": "cross-02",
+      "category": "cross",
+      "system": "Chunk RAG (BM25, single-shot)",
+      "score": {
+        "evidence_groups": 2,
+        "recalled_groups": 2,
+        "evidence_recall": 1,
+        "facts": 2,
+        "supported_facts": 2,
+        "semantic_correct": true,
+        "success": true,
+        "details": [
+          {
+            "key": "entropy",
+            "correct": true,
+            "supported": true
+          },
+          {
+            "key": "objective",
+            "correct": true,
+            "supported": true
+          }
+        ]
+      },
+      "elapsed_ms": 14303.8799,
+      "usage": {
+        "requests": 1,
+        "total_tokens": 5493,
+        "missing_usage": 0
+      },
+      "incomplete": false,
+      "tool_counts": {},
+      "tool_sequence": [],
+      "valid_sources": 4
+    },
+    {
+      "id": "cross-02",
+      "category": "cross",
+      "system": "Resident Agent (LID + Graph, full loop)",
+      "score": {
+        "evidence_groups": 2,
+        "recalled_groups": 2,
+        "evidence_recall": 1,
+        "facts": 2,
+        "supported_facts": 2,
+        "semantic_correct": true,
+        "success": true,
+        "details": [
+          {
+            "key": "entropy",
+            "correct": true,
+            "supported": true
+          },
+          {
+            "key": "objective",
+            "correct": true,
+            "supported": true
+          }
+        ]
+      },
+      "elapsed_ms": 179249.46119999996,
+      "usage": {
+        "requests": 11,
+        "total_tokens": 216545,
+        "missing_usage": 0
+      },
+      "incomplete": false,
+      "tool_counts": {
+        "book.structure": 1,
+        "book.concept": 4,
+        "book.search_text": 2,
+        "book.text": 5,
+        "source.present": 9
+      },
+      "tool_sequence": [
+        {
+          "loop": 1,
+          "tool": "book.structure"
+        },
+        {
+          "loop": 1,
+          "tool": "book.concept"
+        },
+        {
+          "loop": 1,
+          "tool": "book.concept"
+        },
+        {
+          "loop": 2,
+          "tool": "book.concept"
+        },
+        {
+          "loop": 2,
+          "tool": "book.concept"
+        },
+        {
+          "loop": 2,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 2,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 3,
+          "tool": "book.text"
+        },
+        {
+          "loop": 3,
+          "tool": "book.text"
+        },
+        {
+          "loop": 4,
+          "tool": "book.text"
+        },
+        {
+          "loop": 4,
+          "tool": "book.text"
+        },
+        {
+          "loop": 5,
+          "tool": "source.present"
+        },
+        {
+          "loop": 5,
+          "tool": "source.present"
+        },
+        {
+          "loop": 5,
+          "tool": "source.present"
+        },
+        {
+          "loop": 5,
+          "tool": "source.present"
+        },
+        {
+          "loop": 6,
+          "tool": "book.text"
+        },
+        {
+          "loop": 7,
+          "tool": "source.present"
+        },
+        {
+          "loop": 7,
+          "tool": "source.present"
+        },
+        {
+          "loop": 7,
+          "tool": "source.present"
+        },
+        {
+          "loop": 8,
+          "tool": "source.present"
+        },
+        {
+          "loop": 9,
+          "tool": "source.present"
+        }
+      ],
+      "valid_sources": 4
+    },
+    {
+      "id": "cross-04",
+      "category": "cross",
+      "system": "Resident Agent (LID + Graph, full loop)",
+      "score": {
+        "evidence_groups": 2,
+        "recalled_groups": 2,
+        "evidence_recall": 1,
+        "facts": 2,
+        "supported_facts": 0,
+        "semantic_correct": true,
+        "success": false,
+        "details": [
+          {
+            "key": "high_capacity_stacking",
+            "correct": true,
+            "supported": false
+          },
+          {
+            "key": "constrain_transformer",
+            "correct": true,
+            "supported": false
+          }
+        ]
+      },
+      "elapsed_ms": 65778.01160000003,
+      "usage": {
+        "requests": 4,
+        "total_tokens": 55796,
+        "missing_usage": 0
+      },
+      "incomplete": false,
+      "tool_counts": {
+        "book.structure": 1,
+        "book.concept": 2,
+        "book.text": 2,
+        "source.present": 2
+      },
+      "tool_sequence": [
+        {
+          "loop": 1,
+          "tool": "book.structure"
+        },
+        {
+          "loop": 1,
+          "tool": "book.concept"
+        },
+        {
+          "loop": 1,
+          "tool": "book.concept"
+        },
+        {
+          "loop": 2,
+          "tool": "book.text"
+        },
+        {
+          "loop": 2,
+          "tool": "book.text"
+        },
+        {
+          "loop": 3,
+          "tool": "source.present"
+        },
+        {
+          "loop": 3,
+          "tool": "source.present"
+        }
+      ],
+      "valid_sources": 0
+    },
+    {
+      "id": "cross-04",
+      "category": "cross",
+      "system": "Chunk RAG (BM25, single-shot)",
+      "score": {
+        "evidence_groups": 2,
+        "recalled_groups": 2,
+        "evidence_recall": 1,
+        "facts": 2,
+        "supported_facts": 2,
+        "semantic_correct": true,
+        "success": true,
+        "details": [
+          {
+            "key": "high_capacity_stacking",
+            "correct": true,
+            "supported": true
+          },
+          {
+            "key": "constrain_transformer",
+            "correct": true,
+            "supported": true
+          }
+        ]
+      },
+      "elapsed_ms": 4498.278300000005,
+      "usage": {
+        "requests": 1,
+        "total_tokens": 4386,
+        "missing_usage": 0
+      },
+      "incomplete": false,
+      "tool_counts": {},
+      "tool_sequence": [],
+      "valid_sources": 3
+    },
+    {
+      "id": "formula-01",
+      "category": "formula",
+      "system": "Chunk RAG (BM25, single-shot)",
+      "score": {
+        "evidence_groups": 1,
+        "recalled_groups": 1,
+        "evidence_recall": 1,
+        "facts": 1,
+        "supported_facts": 1,
+        "semantic_correct": true,
+        "success": true,
+        "details": [
+          {
+            "key": "multiplier",
+            "correct": true,
+            "supported": true
+          }
+        ]
+      },
+      "elapsed_ms": 2534.9375,
+      "usage": {
+        "requests": 1,
+        "total_tokens": 4100,
+        "missing_usage": 0
+      },
+      "incomplete": false,
+      "tool_counts": {},
+      "tool_sequence": [],
+      "valid_sources": 3
+    },
+    {
+      "id": "formula-01",
+      "category": "formula",
+      "system": "Resident Agent (LID + Graph, full loop)",
+      "score": {
+        "evidence_groups": 1,
+        "recalled_groups": 1,
+        "evidence_recall": 1,
+        "facts": 1,
+        "supported_facts": 0,
+        "semantic_correct": true,
+        "success": false,
+        "details": [
+          {
+            "key": "multiplier",
+            "correct": true,
+            "supported": false
+          }
+        ]
+      },
+      "elapsed_ms": 20006.778399999952,
+      "usage": {
+        "requests": 5,
+        "total_tokens": 37009,
+        "missing_usage": 0
+      },
+      "incomplete": false,
+      "tool_counts": {
+        "book.search_text": 2,
+        "book.text": 3,
+        "source.present": 2
+      },
+      "tool_sequence": [
+        {
+          "loop": 1,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 1,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 2,
+          "tool": "book.text"
+        },
+        {
+          "loop": 3,
+          "tool": "book.text"
+        },
+        {
+          "loop": 3,
+          "tool": "book.text"
+        },
+        {
+          "loop": 4,
+          "tool": "source.present"
+        },
+        {
+          "loop": 4,
+          "tool": "source.present"
+        }
+      ],
+      "valid_sources": 1
+    },
+    {
+      "id": "formula-03",
+      "category": "formula",
+      "system": "Resident Agent (LID + Graph, full loop)",
+      "score": {
+        "evidence_groups": 1,
+        "recalled_groups": 1,
+        "evidence_recall": 1,
+        "facts": 1,
+        "supported_facts": 1,
+        "semantic_correct": true,
+        "success": true,
+        "details": [
+          {
+            "key": "multiplier",
+            "correct": true,
+            "supported": true
+          }
+        ]
+      },
+      "elapsed_ms": 36778.69869999995,
+      "usage": {
+        "requests": 8,
+        "total_tokens": 100838,
+        "missing_usage": 0
+      },
+      "incomplete": false,
+      "tool_counts": {
+        "book.search_text": 2,
+        "book.text": 3,
+        "source.present": 2
+      },
+      "tool_sequence": [
+        {
+          "loop": 1,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 1,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 2,
+          "tool": "book.text"
+        },
+        {
+          "loop": 3,
+          "tool": "book.text"
+        },
+        {
+          "loop": 4,
+          "tool": "book.text"
+        },
+        {
+          "loop": 5,
+          "tool": "source.present"
+        },
+        {
+          "loop": 6,
+          "tool": "source.present"
+        }
+      ],
+      "valid_sources": 1
+    },
+    {
+      "id": "formula-03",
+      "category": "formula",
+      "system": "Chunk RAG (BM25, single-shot)",
+      "score": {
+        "evidence_groups": 1,
+        "recalled_groups": 1,
+        "evidence_recall": 1,
+        "facts": 1,
+        "supported_facts": 0,
+        "semantic_correct": false,
+        "success": false,
+        "details": [
+          {
+            "key": "multiplier",
+            "correct": false,
+            "supported": false
+          }
+        ]
+      },
+      "elapsed_ms": 3639.7754000000423,
+      "usage": {
+        "requests": 1,
+        "total_tokens": 4306,
+        "missing_usage": 0
+      },
+      "incomplete": false,
+      "tool_counts": {},
+      "tool_sequence": [],
+      "valid_sources": 1,
+      "grade_error": "grading_error"
+    }
+  ],
+  "navigation": [],
+  "restart": [
+    {
+      "id": "restart-01",
+      "kind": "note",
+      "success": true,
+      "setup_ok": true,
+      "persistence_ok": true,
+      "process_changed": true,
+      "new_chat_empty": true,
+      "memory_observed_by_agent": true,
+      "elapsed_ms": 22535.632400000002,
+      "usage": {
+        "requests": 10,
+        "total_tokens": 37352,
+        "missing_usage": 0
+      },
+      "tool_counts": {
+        "book.search_text": 1,
+        "reader.note": 1,
+        "tool.search": 1,
+        "memory.recall": 1
+      }
+    },
+    {
+      "id": "restart-02",
+      "kind": "highlight",
+      "success": true,
+      "setup_ok": true,
+      "persistence_ok": true,
+      "process_changed": true,
+      "new_chat_empty": true,
+      "memory_observed_by_agent": true,
+      "elapsed_ms": 19966.32779999997,
+      "usage": {
+        "requests": 11,
+        "total_tokens": null,
+        "missing_usage": 1
+      },
+      "tool_counts": {
+        "book.search_text": 1,
+        "book.text": 1,
+        "reader.highlight": 1,
+        "tool.search": 1,
+        "memory.recall": 1
+      }
+    },
+    {
+      "id": "restart-03",
+      "kind": "position",
+      "success": false,
+      "setup_ok": true,
+      "persistence_ok": true,
+      "process_changed": true,
+      "new_chat_empty": true,
+      "memory_observed_by_agent": false,
+      "elapsed_ms": 29146.32890000008,
+      "usage": {
+        "requests": 9,
+        "total_tokens": 43762,
+        "missing_usage": 0
+      },
+      "tool_counts": {
+        "book.search_text": 1,
+        "book.text": 1,
+        "reader.gotoLid": 1,
+        "tool.search": 4
+      }
+    },
+    {
+      "id": "restart-04",
+      "kind": "note",
+      "success": true,
+      "setup_ok": true,
+      "persistence_ok": true,
+      "process_changed": true,
+      "new_chat_empty": true,
+      "memory_observed_by_agent": true,
+      "elapsed_ms": 21392.834499999997,
+      "usage": {
+        "requests": 9,
+        "total_tokens": 33178,
+        "missing_usage": 0
+      },
+      "tool_counts": {
+        "book.search_text": 1,
+        "reader.note": 1,
+        "tool.search": 1,
+        "memory.recall": 1
+      }
+    }
+  ],
+  "tool_counts": {
+    "book.search_text": 18,
+    "book.text": 20,
+    "source.present": 20,
+    "book.concept": 7,
+    "book.structure": 2,
+    "reader.note": 2,
+    "tool.search": 7,
+    "memory.recall": 3,
+    "reader.highlight": 1,
+    "reader.gotoLid": 1
+  },
+  "tool_error_counts": {
+    "LID_PROVENANCE_REQUIRED": 6,
+    "SOURCE_AMBIGUOUS": 3,
+    "SOURCE_NOT_OBSERVED": 9,
+    "BOOK_TOOL_INPUT_INVALID": 2
+  },
+  "grading_usage": {
+    "requests": 15,
+    "total_tokens": 36001,
+    "missing_usage": 0
+  },
+  "background_usage": {
+    "requests": 6,
+    "total_tokens": null,
+    "missing_usage": 1
+  }
+}

@@ -197,13 +197,13 @@ paper profile 预构建产物与读时用户任务之间的产品入口层。第
 外部 MCP 客户端(如 Claude / Codex)同时连接多个单篇论文 MCP,在运行时按用户任务询问、比较、挑战和综合多篇论文,从而建立临时跨论文关系。跨论文关系默认是会话级综合;只有用户显式保存时才进入 memory/note。状态:NEW(详见 [docs/adr/0047])。
 
 ## 阅读器 (reader)
-第三层(消费)的产品形态。一个独立的阅读应用,集成确定性导航(②)+ LLM 问答(③)。由 plugin 启动的本地临时查询服务(localhost)支撑;读时与 agent harness 无关。
+第三层(消费)的独立阅读产品,集成确定性导航(②)+ LLM 问答(③),消费已就绪材料并维护当前读者的阅读状态。“阅读器本体”包含读时 Agent 与读者私有数据;读时与预构建宿主脱钩,支持用户自有设备或自有服务器上的使用。状态:BOUNDARY_CHANGE(见 [ADR-0122](docs/adr/0122-linux-reader-host-and-source-deployment.md))。
 
 ## LLM 后端 (LLM backend)
-读时 ③ 用的大模型提供方,**用户自选**(Anthropic / OpenAI / 本地 Ollama 等),藏在本地查询服务的 provider 抽象层后。区别于预构建期由 harness 提供的 LLM。
+读时 ③ 用的大模型提供方,**用户自选**(Anthropic / OpenAI / 本地 Ollama 等),由阅读器后端的 provider 抽象接入。区别于预构建期由 harness 提供的 LLM。
 
 ## 书 agent / 模块 E (book agent)
-读时"这本书的 agent"。承接用户对本书任何问题的**单一入口**,带 **memory** + **skills**,架在确定性导航(②)+ LLM 问答(③)之上,跑用户自选后端。运行时由我们在本地查询服务里**自建**(最小工具调用 loop + 记忆;弱后端走 ReAct 兜底)。详见 [docs/adr/0005]。
+读时"这本书的 agent"。承接用户对本书任何问题的**单一入口**,带 **memory** + **skills**,架在确定性导航(②)+ LLM 问答(③)之上,跑用户自选后端。运行时由我们在阅读器后端**自建**(最小工具调用 loop + 记忆;弱后端走 ReAct 兜底)。详见 [docs/adr/0005]。
 
 ## 记忆层 (memory layer)
 E 的记忆所在。**独立于只读基座、用户私有、可变、跨书**。两层:会话工作记忆(临时:当前对话+阅读位置)+ 长期记忆(持久:旅程/问答/兴趣/卡点/笔记)。book agent 读写但不拥有。详见 [docs/adr/0006]。

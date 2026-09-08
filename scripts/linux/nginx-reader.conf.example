@@ -1,0 +1,24 @@
+# Independent port; the existing port 80 site keeps its configuration.
+# Install as /etc/nginx/conf.d/understand-book-reader.conf after creating
+# /etc/nginx/understand-book-reader.htpasswd (root:nginx, 0640).
+server {
+    listen 8080;
+    server_name _;
+
+    auth_basic "Understand Book";
+    auth_basic_user_file /etc/nginx/understand-book-reader.htpasswd;
+
+    access_log /var/log/nginx/understand-book-reader.access.log;
+    error_log /var/log/nginx/understand-book-reader.error.log;
+
+    location / {
+        proxy_pass http://127.0.0.1:8787;
+        proxy_http_version 1.1;
+        proxy_set_header Host $http_host;
+        proxy_set_header Connection "";
+        proxy_set_header Authorization "";
+        # A complete Agent turn may exceed nginx's default 60 seconds.
+        proxy_read_timeout 600s;
+        proxy_buffering off;
+    }
+}

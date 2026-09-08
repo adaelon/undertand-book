@@ -1,0 +1,567 @@
+{
+  "version": "quantification-essence-agent-v1",
+  "started_at": "2026-09-08T05:50:53.576Z",
+  "finished_at": "2026-09-08T05:55:51.801Z",
+  "status": "completed",
+  "model": "deepseek-v4-flash",
+  "git_head": "9e365075c99c9627959f2d9a03f987912c8c7a95",
+  "scope": "24 common natural-language QA tasks; 4 Agent navigation tasks; 4 Agent restart tasks. Product comparison, not graph causal attribution.",
+  "config": {
+    "agent": "production POST /agent/chat, OuterConfig::default(), isolated per-task memory/private artifacts",
+    "chunk": {
+      "chars": 1000,
+      "overlap": 150,
+      "budget": 6000,
+      "max_output_tokens": 4096
+    },
+    "temperature": 0,
+    "repeats": 1,
+    "task_timeout_ms": 300000,
+    "grading": "separate model annotation + deterministic facts/quote/source/action checks"
+  },
+  "corpus": {
+    "book_id": "quantification-essence",
+    "source_utf16": 154448,
+    "lids": 2757,
+    "graph_nodes": 1640,
+    "graph_edges": 1745
+  },
+  "scoring_version": "natural-facts-v2-bold-normalization",
+  "selected_ids": [
+    "refusal-01",
+    "refusal-02",
+    "refusal-03",
+    "refusal-04",
+    "restart-02",
+    "restart-03"
+  ],
+  "summary": {
+    "Chunk RAG (BM25, single-shot)": {
+      "count": 4,
+      "succeeded": 3,
+      "success_rate": 0.75,
+      "semantic_accuracy": 0.75,
+      "evidence_recall": null,
+      "citation_support": null,
+      "p95_seconds": 3.813916299999997,
+      "mean_tokens": 3905.75,
+      "total_requests": 4,
+      "missing_usage": 0,
+      "errors": 0,
+      "incomplete": 0
+    },
+    "Resident Agent (LID + Graph, full loop)": {
+      "count": 4,
+      "succeeded": 3,
+      "success_rate": 0.75,
+      "semantic_accuracy": 0.75,
+      "evidence_recall": null,
+      "citation_support": null,
+      "p95_seconds": 53.6138602,
+      "mean_tokens": 59113.5,
+      "total_requests": 28,
+      "missing_usage": 0,
+      "errors": 0,
+      "incomplete": 1
+    }
+  },
+  "qa": [
+    {
+      "id": "refusal-01",
+      "category": "refusal",
+      "system": "Chunk RAG (BM25, single-shot)",
+      "score": {
+        "evidence_groups": 0,
+        "recalled_groups": 0,
+        "evidence_recall": null,
+        "facts": 0,
+        "supported_facts": 0,
+        "semantic_correct": true,
+        "success": true,
+        "details": []
+      },
+      "elapsed_ms": 1541.0347,
+      "usage": {
+        "requests": 1,
+        "total_tokens": 3857,
+        "missing_usage": 0
+      },
+      "incomplete": false,
+      "tool_counts": {},
+      "tool_sequence": [],
+      "valid_sources": 0
+    },
+    {
+      "id": "refusal-01",
+      "category": "refusal",
+      "system": "Resident Agent (LID + Graph, full loop)",
+      "score": {
+        "evidence_groups": 0,
+        "recalled_groups": 0,
+        "evidence_recall": null,
+        "facts": 0,
+        "supported_facts": 0,
+        "semantic_correct": false,
+        "success": false,
+        "details": []
+      },
+      "elapsed_ms": 31397.223599999998,
+      "usage": {
+        "requests": 7,
+        "total_tokens": 55577,
+        "missing_usage": 0
+      },
+      "incomplete": true,
+      "tool_counts": {
+        "book.search_text": 10,
+        "book.text": 1,
+        "source.present": 1
+      },
+      "tool_sequence": [
+        {
+          "loop": 1,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 1,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 2,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 2,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 2,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 3,
+          "tool": "book.text"
+        },
+        {
+          "loop": 3,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 3,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 4,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 4,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 4,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 5,
+          "tool": "source.present"
+        }
+      ],
+      "valid_sources": 0
+    },
+    {
+      "id": "refusal-02",
+      "category": "refusal",
+      "system": "Resident Agent (LID + Graph, full loop)",
+      "score": {
+        "evidence_groups": 0,
+        "recalled_groups": 0,
+        "evidence_recall": null,
+        "facts": 0,
+        "supported_facts": 0,
+        "semantic_correct": true,
+        "success": true,
+        "details": []
+      },
+      "elapsed_ms": 22330.587799999994,
+      "usage": {
+        "requests": 5,
+        "total_tokens": 26880,
+        "missing_usage": 0
+      },
+      "incomplete": false,
+      "tool_counts": {
+        "book.search_text": 7,
+        "book.concept": 1
+      },
+      "tool_sequence": [
+        {
+          "loop": 1,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 1,
+          "tool": "book.concept"
+        },
+        {
+          "loop": 2,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 2,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 2,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 3,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 3,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 3,
+          "tool": "book.search_text"
+        }
+      ],
+      "valid_sources": 0
+    },
+    {
+      "id": "refusal-02",
+      "category": "refusal",
+      "system": "Chunk RAG (BM25, single-shot)",
+      "score": {
+        "evidence_groups": 0,
+        "recalled_groups": 0,
+        "evidence_recall": null,
+        "facts": 0,
+        "supported_facts": 0,
+        "semantic_correct": false,
+        "success": false,
+        "details": []
+      },
+      "elapsed_ms": 3813.916299999997,
+      "usage": {
+        "requests": 1,
+        "total_tokens": 4231,
+        "missing_usage": 0
+      },
+      "incomplete": false,
+      "tool_counts": {},
+      "tool_sequence": [],
+      "valid_sources": 0
+    },
+    {
+      "id": "refusal-03",
+      "category": "refusal",
+      "system": "Chunk RAG (BM25, single-shot)",
+      "score": {
+        "evidence_groups": 0,
+        "recalled_groups": 0,
+        "evidence_recall": null,
+        "facts": 0,
+        "supported_facts": 0,
+        "semantic_correct": true,
+        "success": true,
+        "details": []
+      },
+      "elapsed_ms": 1735.4504000000015,
+      "usage": {
+        "requests": 1,
+        "total_tokens": 3810,
+        "missing_usage": 0
+      },
+      "incomplete": false,
+      "tool_counts": {},
+      "tool_sequence": [],
+      "valid_sources": 1
+    },
+    {
+      "id": "refusal-03",
+      "category": "refusal",
+      "system": "Resident Agent (LID + Graph, full loop)",
+      "score": {
+        "evidence_groups": 0,
+        "recalled_groups": 0,
+        "evidence_recall": null,
+        "facts": 0,
+        "supported_facts": 0,
+        "semantic_correct": true,
+        "success": true,
+        "details": []
+      },
+      "elapsed_ms": 53613.860199999996,
+      "usage": {
+        "requests": 8,
+        "total_tokens": 80312,
+        "missing_usage": 0
+      },
+      "incomplete": false,
+      "tool_counts": {
+        "book.search_text": 10,
+        "book.text": 3,
+        "source.present": 2
+      },
+      "tool_sequence": [
+        {
+          "loop": 1,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 1,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 1,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 2,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 2,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 2,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 2,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 3,
+          "tool": "book.text"
+        },
+        {
+          "loop": 3,
+          "tool": "book.text"
+        },
+        {
+          "loop": 4,
+          "tool": "book.text"
+        },
+        {
+          "loop": 5,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 5,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 5,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 6,
+          "tool": "source.present"
+        },
+        {
+          "loop": 6,
+          "tool": "source.present"
+        }
+      ],
+      "valid_sources": 0
+    },
+    {
+      "id": "refusal-04",
+      "category": "refusal",
+      "system": "Resident Agent (LID + Graph, full loop)",
+      "score": {
+        "evidence_groups": 0,
+        "recalled_groups": 0,
+        "evidence_recall": null,
+        "facts": 0,
+        "supported_facts": 0,
+        "semantic_correct": true,
+        "success": true,
+        "details": []
+      },
+      "elapsed_ms": 28796.990299999976,
+      "usage": {
+        "requests": 8,
+        "total_tokens": 73685,
+        "missing_usage": 0
+      },
+      "incomplete": false,
+      "tool_counts": {
+        "book.search_text": 15,
+        "book.concept": 1
+      },
+      "tool_sequence": [
+        {
+          "loop": 1,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 1,
+          "tool": "book.concept"
+        },
+        {
+          "loop": 2,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 2,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 3,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 3,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 3,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 4,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 4,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 4,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 5,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 5,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 5,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 6,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 6,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 6,
+          "tool": "book.search_text"
+        }
+      ],
+      "valid_sources": 0
+    },
+    {
+      "id": "refusal-04",
+      "category": "refusal",
+      "system": "Chunk RAG (BM25, single-shot)",
+      "score": {
+        "evidence_groups": 0,
+        "recalled_groups": 0,
+        "evidence_recall": null,
+        "facts": 0,
+        "supported_facts": 0,
+        "semantic_correct": true,
+        "success": true,
+        "details": []
+      },
+      "elapsed_ms": 1004.3678999999829,
+      "usage": {
+        "requests": 1,
+        "total_tokens": 3725,
+        "missing_usage": 0
+      },
+      "incomplete": false,
+      "tool_counts": {},
+      "tool_sequence": [],
+      "valid_sources": 0
+    }
+  ],
+  "navigation": [],
+  "restart": [
+    {
+      "id": "restart-02",
+      "kind": "highlight",
+      "success": false,
+      "setup_ok": true,
+      "process_changed": true,
+      "new_chat_empty": true,
+      "usage": {
+        "requests": 11,
+        "total_tokens": 52187,
+        "missing_usage": 0
+      },
+      "error": "task_error",
+      "tool_counts": {
+        "book.search_text": 1,
+        "book.text": 1,
+        "reader.highlight": 1
+      }
+    },
+    {
+      "id": "restart-03",
+      "kind": "position",
+      "success": false,
+      "setup_ok": true,
+      "persistence_ok": true,
+      "process_changed": true,
+      "new_chat_empty": true,
+      "memory_observed_by_agent": true,
+      "elapsed_ms": 88740.6815,
+      "usage": {
+        "requests": 20,
+        "total_tokens": 167233,
+        "missing_usage": 0
+      },
+      "tool_counts": {
+        "book.search_text": 3,
+        "book.text": 8,
+        "reader.gotoLid": 1,
+        "tool.search": 3,
+        "reader.state": 1,
+        "book.context": 1,
+        "book.structure": 1,
+        "source.present": 4
+      }
+    }
+  ],
+  "tool_counts": {
+    "book.search_text": 46,
+    "book.text": 13,
+    "source.present": 7,
+    "book.concept": 2,
+    "reader.highlight": 1,
+    "reader.gotoLid": 1,
+    "tool.search": 3,
+    "reader.state": 1,
+    "book.context": 1,
+    "book.structure": 1
+  },
+  "tool_error_counts": {
+    "LID_PROVENANCE_REQUIRED": 3,
+    "SOURCE_NOT_OBSERVED": 4,
+    "SOURCE_AMBIGUOUS": 1
+  },
+  "grading_usage": {
+    "requests": 8,
+    "total_tokens": 7106,
+    "missing_usage": 0
+  },
+  "background_usage": {
+    "requests": 3,
+    "total_tokens": 7692,
+    "missing_usage": 0
+  }
+}

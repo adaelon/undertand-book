@@ -1,0 +1,20 @@
+[Unit]
+Description=Understand Book single-reader service
+After=network.target
+
+[Service]
+Type=simple
+User=understand-book
+Group=understand-book
+WorkingDirectory=/opt/understand-book/source
+EnvironmentFile=/opt/understand-book/reader.env
+ExecStart=/bin/bash /opt/understand-book/source/scripts/linux/start-reader.sh
+KillSignal=SIGTERM
+KillMode=mixed
+TimeoutStopSec=180
+Restart=on-failure
+RestartSec=3
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

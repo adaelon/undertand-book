@@ -73,12 +73,15 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 pub mod host;
+mod host_lifecycle;
 pub mod mcp;
 
 /// 服务的单会话共享状态(切片0 单用户单书)`[ADR-0028 决策2]`。
 /// S10b:持只读 `Book` + 会话态 `Reader` + 用户私有 `MemoryStore`(物理隔离 `[ADR-0006]`)。
 /// S10c:持 LLM `adapter`(`book.query` 经它触模型;`+ Send` 供 `Arc<Mutex<_>>` 跨 worker 线程)。
 pub struct AppState {
+    pub desktop_host: bool,
+    pub reader_only: bool,
     pub book_dir: PathBuf,
     /// Stable desktop library root. `None` preserves the legacy current-book-derived behavior.
     pub library_root: Option<PathBuf>,
@@ -180,6 +183,8 @@ pub fn run_codex_build_intent_command(
         None => Some(intent_build_store::IntentArtifactStore::default_root()?),
     };
     let mut state = AppState {
+        desktop_host: false,
+        reader_only: false,
         book_dir,
         library_root: Some(config.library_root),
         book,
@@ -619,6 +624,12 @@ fn paper_minimap_localization_request(base: &PaperMinimapBase) -> CompletionRequ
 
 fn route_paper_minimap_localize(state: &mut AppState) -> Reply {
     let base = state.book.paper_minimap();
+    localize_paper_minimap(base, paper_minimap_localization_cache_path(&state.session_path), state.adapter.as_ref())
+}
+
+static PAPER_LOCALIZATION_CACHE_WRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn localize_paper_minimap(base: PaperMinimapBase, cache_path: Option<PathBuf>, adapter: &dyn ModelAdapter) -> Reply {
     if base.regions.is_empty() {
         return ok_json(&fallback_paper_minimap_localization(
             &base,
@@ -626,8 +637,9 @@ fn route_paper_minimap_localize(state: &mut AppState) -> Reply {
         ));
     }
 
-    let cache_path = paper_minimap_localization_cache_path(&state.session_path);
-    let (mut cache, cache_warning) = match cache_path.as_deref() {
+    let (cache, mut cache_warning) = {
+    let _guard = PAPER_LOCALIZATION_CACHE_WRITE.lock().unwrap_or_else(|p| p.into_inner());
+    match cache_path.as_deref() {
         Some(path) => match load_paper_minimap_localization_cache(path) {
             Ok(cache) => (cache, None),
             Err(error) => (
@@ -636,7 +648,7 @@ fn route_paper_minimap_localize(state: &mut AppState) -> Reply {
             ),
         },
         None => (PaperMinimapLocalizationCache::default(), None),
-    };
+    }};
     if let Some(entry) = cache.entries.iter().find(|entry| {
         entry.book_id == base.book_id
             && entry.book_version == base.book_version
@@ -655,9 +667,7 @@ fn route_paper_minimap_localize(state: &mut AppState) -> Reply {
         });
     }
 
-    let output = match state
-        .adapter
-        .complete_structured(paper_minimap_localization_request(&base))
+    let output = match adapter.complete_structured(paper_minimap_localization_request(&base))
     {
         Ok(output) => output,
         Err(error) => {
@@ -689,6 +699,14 @@ fn route_paper_minimap_localize(state: &mut AppState) -> Reply {
         locale: PAPER_MINIMAP_LOCALIZATION_LOCALE.into(),
         region_labels: region_labels.clone(),
         landmark_labels: landmark_labels.clone(),
+    };
+    // Another book's translation may finish while this Provider request is running.
+    // Reload and merge under a short cache-only lock; never hold Reader state here.
+    let _guard = PAPER_LOCALIZATION_CACHE_WRITE.lock().unwrap_or_else(|p| p.into_inner());
+    let mut cache = match cache_path.as_deref().map(load_paper_minimap_localization_cache) {
+        Some(Ok(latest)) => latest,
+        Some(Err(error)) => { cache_warning = Some(error.message); cache },
+        None => cache,
     };
     cache.entries.retain(|cached| {
         cached.book_id != entry.book_id
@@ -2350,8 +2368,29 @@ struct PdfRangesProjectResponse {
 
 /// 纯函数路由 `[ADR-0028 决策3]`:按命名空间前缀定方法(`book.*`→GET 只读、
 /// `reader.*`/`memory.*`→POST 可变),端点名 = 命令名,错误原样透传 §4.4 信封。
+pub(crate) fn reader_only_disallows(path: &str, method: &str) -> bool {
+    if path == "/book/create" || path.starts_with("/build_workbench/") {
+        return true;
+    }
+    if let Some(action) = path.strip_prefix("/build_intent/") {
+        return !matches!((action, method),
+            ("status" | "artifacts" | "usage", "GET") | ("usage.event", "POST"));
+    }
+    false
+}
+
 pub fn route(state: &mut AppState, req: Req) -> Reply {
     let (path, q) = parse_query(req.url);
+    if state.reader_only && reader_only_disallows(&path, req.method) {
+        return Reply {
+            status: 403,
+            body: json!({
+                "error_code": "READER_ONLY_UNSUPPORTED",
+                "category": "validation",
+                "message": "纯阅读模式不支持预构建；请同步已就绪的完整书籍目录。",
+            }).to_string(),
+        };
+    }
     if let Some(action) = path.strip_prefix("/build_intent/") {
         return build_intent_api::route_build_intent(state, action, req.method, req.body, req.now);
     }
@@ -2362,7 +2401,8 @@ pub fn route(state: &mut AppState, req: Req) -> Reply {
         let active_book = state.book_dir.file_name().and_then(|name| name.to_str())
             != Some("__desktop_bootstrap__");
         return ok_json(&json!({
-            "desktop_host": true,
+            "desktop_host": state.desktop_host,
+            "reader_only": state.reader_only,
             "active_book": active_book,
             "book_dir": active_book.then(|| path_string(&state.book_dir)),
             "library_root": path_string(&state_library_root(state)),
@@ -5670,6 +5710,10 @@ fn route_workbench_permission_resolve(state: &mut AppState, body: &str, now: &st
 }
 
 fn route_build_workbench(book: &Book, book_dir: &Path) -> Reply {
+    build_workbench_snapshot(book, book_dir, true)
+}
+
+fn build_workbench_snapshot(book: &Book, book_dir: &Path, maintain_jobs: bool) -> Reply {
     if is_current_existing_technical_book(book, book_dir) {
         return route_existing_technical_book_workbench(book, book_dir);
     }
@@ -6022,7 +6066,7 @@ fn route_build_workbench(book: &Book, book_dir: &Path) -> Reply {
     }
 
     let jobs = match read_build_jobs(book_dir)
-        .and_then(|jobs| enforce_build_job_retention(book_dir, jobs))
+        .and_then(|jobs| if maintain_jobs { enforce_build_job_retention(book_dir, jobs) } else { Ok(jobs) })
     {
         Ok(jobs) => jobs,
         Err(e) => return err_reply(&e),
@@ -6101,6 +6145,9 @@ fn route_build_workbench(book: &Book, book_dir: &Path) -> Reply {
 }
 
 fn route_build_workbench_state(state: &mut AppState, now: &str) -> Reply {
+    if state.reader_only {
+        return build_workbench_snapshot(&state.book, &state.book_dir, false);
+    }
     if let Err(e) = recover_orphaned_active_runs(&state.book_dir, now) {
         return err_reply(&e);
     }
@@ -11209,6 +11256,7 @@ fn route_agent_source_open(state: &mut AppState, body: &str, now: &str) -> Reply
     ) {
         return err_reply(&error);
     }
+    save_session(state, None);
     ok_json(&SourceOpenView {
         source_ref_id: binding.source_ref_id,
         opened: true,
@@ -11293,6 +11341,7 @@ fn route_agent_chat(state: &mut AppState, body: &str, now: &str) -> Reply {
         Ok(turn_ref) => turn_ref,
         Err(error) => return err_reply(&error),
     };
+    let viewport_before = state.reader.viewport().top_lid;
     let result = run_precommitted_agent_chat(
         state,
         msg,
@@ -11302,6 +11351,9 @@ fn route_agent_chat(state: &mut AppState, body: &str, now: &str) -> Reply {
         initial_evidence,
         now,
     );
+    if state.reader.viewport().top_lid != viewport_before {
+        save_session(state, None);
+    }
     match result {
         Ok(outcome) => {
             if let Err(error) = finalize_agent_turn_completed(state, &turn_ref, &outcome, now) {
@@ -11531,8 +11583,15 @@ fn run_precommitted_agent_chat(
     if let Some(snapshot) = artifact_snapshot {
         turn_resources = turn_resources.with_artifact_snapshot(snapshot);
     }
+    let experimental_book = match std::env::var("UNDERSTAND_BOOK_EVAL_ACCESS").ok().as_deref() {
+        None => None,
+        Some("text") => Some(state.book.experimental_view(read_tools::ExperimentalReadAccess::Text)),
+        Some("tree") => Some(state.book.experimental_view(read_tools::ExperimentalReadAccess::Tree)),
+        Some("graph") => Some(state.book.experimental_view(read_tools::ExperimentalReadAccess::Graph)),
+        Some(_) => return Err(ToolError { error_code: "INVALID_EVAL_ACCESS".into(), category: "validation".into(), message: "eval access must be text, tree or graph".into() }),
+    };
     run_with_turn_resources_and_checkpoint_sink(
-        &state.book,
+        experimental_book.as_ref().unwrap_or(&state.book),
         &mut state.store,
         &mut state.reader,
         state.adapter.as_ref(),
@@ -12608,6 +12667,8 @@ mod tests {
         // 桩固定引用首叶 "1.1"；typed query 的 anchor 由请求显式提供。
         let adapter = Box::new(StubAdapter { lid: "1.1".into() });
         AppState {
+            desktop_host: false,
+            reader_only: false,
             intent_store_root: Some(book_dir.join("private-build-intents")),
             mcp_artifact_read_port: None,
             book_dir,
@@ -13073,6 +13134,50 @@ mod tests {
     }
 
     #[test]
+    fn reader_only_real_metrics_persist_and_report_without_a_plan() {
+        let mut s = state_named("lx4-reader-metrics");
+        write_current_book_files(&s);
+        s.reader_only = true;
+        let event = post_at(&mut s, "/build_intent/usage.event",
+            r#"{"event_id":"lx4-ready","kind":"reader_ready","occurred_at":"2026-09-08T04:00:00.000Z"}"#,
+            "2026-09-08T04:00:00.000Z");
+        assert_eq!(event.status, 200, "{}", event.body);
+        let report = get_at(&mut s, "/build_intent/usage", "2026-09-08T05:00:00.000Z");
+        assert_eq!(report.status, 200, "{}", report.body);
+        let report: Value = serde_json::from_str(&report.body).unwrap();
+        assert_eq!(report["event_count"], 1);
+        let empty = get(&mut s, "/build_intent/artifacts");
+        assert_eq!(empty.status, 404, "{}", empty.body);
+        assert!(!s.book_dir.join(".build").exists());
+    }
+
+    #[test]
+    fn host_modes_and_reader_only_build_boundary() {
+        let mut state = state_named("lx2-host-modes");
+        for (desktop, reader_only) in [(true, false), (false, false), (false, true)] {
+            state.desktop_host = desktop;
+            state.reader_only = reader_only;
+            let status: Value = serde_json::from_str(&get(&mut state, "/desktop/status").body).unwrap();
+            assert_eq!(status["desktop_host"], desktop);
+            assert_eq!(status["reader_only"], reader_only);
+        }
+        for path in ["/book/create", "/build_workbench/job.create", "/build_workbench/job.start",
+            "/build_workbench/job.resume", "/build_workbench/input.import", "/build_intent/draft",
+            "/build_intent/confirm", "/build_intent/artifact.prepare"] {
+            let reply = post(&mut state, path, "{}");
+            assert_eq!(reply.status, 403, "{path}: {}", reply.body);
+            assert!(reply.body.contains("READER_ONLY_UNSUPPORTED"));
+        }
+        assert!(!state.book_dir.join(".build").exists());
+        for (path, method) in [("/build_intent/artifacts", "GET"), ("/build_intent/usage", "GET"),
+            ("/build_intent/usage.event", "POST"), ("/book/open", "POST"), ("/agent/chat", "POST")] {
+            assert!(!reader_only_disallows(path, method));
+        }
+        state.reader_only = false;
+        assert_ne!(post(&mut state, "/build_workbench/job.start", "{}").status, 403);
+    }
+
+    #[test]
     fn desktop_status_reports_an_unavailable_configured_library_root() {
         let mut state = state_named("desktop-library-unavailable");
         let missing = tmp_dir("desktop-library-missing").join("removed");
@@ -13263,6 +13368,49 @@ mod tests {
         );
         assert_eq!(body["jobs"].as_array().unwrap().len(), 0);
         assert!(body["sidecar_plan"]["plan"].is_null());
+    }
+
+    #[test]
+    fn reader_only_snapshot_never_recovers_or_prunes_build_files() {
+        fn files(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+            let mut result = BTreeMap::new();
+            for entry in std::fs::read_dir(root).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() { result.extend(files(&path)); }
+                else { result.insert(path.clone(), std::fs::read(path).unwrap()); }
+            }
+            result
+        }
+        let mut s = state_named("lx3-read-only");
+        write_workbench_review_artifacts(&mut s);
+        for index in 0..(MAX_BUILD_JOBS + 2) {
+            let mut job = create_build_job_value("paper", &json!({}), &index.to_string());
+            job["job_id"] = json!(format!("lx3-{index}"));
+            job["status"] = json!("running");
+            write_build_job_atomic(&s.book_dir, &job).unwrap();
+        }
+        s.reader_only = true;
+        let before = files(&s.book_dir);
+        for _ in 0..2 {
+            let response = get(&mut s, "/book/build_workbench");
+            assert_eq!(response.status, 200, "{}", response.body);
+            let snapshot: Value = serde_json::from_str(&response.body).unwrap();
+            assert_eq!(snapshot["readiness"]["route"], "workbench");
+            assert!(snapshot["jobs"].as_array().unwrap().len() > MAX_BUILD_JOBS);
+        }
+        assert_eq!(files(&s.book_dir), before);
+        std::fs::remove_file(s.book_dir.join(".build/source-reconciliation/report.json")).unwrap();
+        let response: Value = serde_json::from_str(&get(&mut s, "/book/build_workbench").body).unwrap();
+        assert_eq!(response["readiness"]["route"], "workbench");
+        assert_eq!(response["readiness"]["stages"]["source_reconciliation"]["status"], "missing");
+
+        let mut technical = state_named("lx3-technical");
+        write_current_book_files(&technical);
+        technical.reader_only = true;
+        let before = files(&technical.book_dir);
+        let response: Value = serde_json::from_str(&get(&mut technical, "/book/build_workbench").body).unwrap();
+        assert_eq!(response["readiness"]["route"], "reader");
+        assert_eq!(files(&technical.book_dir), before);
     }
 
     #[test]
@@ -16103,6 +16251,8 @@ unchanged after training concludes";
         let store = MemoryStore::open(tmp("formula-semantics-get")).unwrap();
         let adapter = Box::new(StubAdapter { lid: "1.1".into() });
         let mut s = AppState {
+            desktop_host: false,
+            reader_only: false,
             book_dir: tmp_dir("formula-semantics-book-dir"),
             library_root: None,
             book,
@@ -17818,9 +17968,28 @@ unchanged after training concludes";
             .body
             .contains("PRIVATE_HTTP_CANDIDATE_SENTINEL"));
 
+        s.reader_only = true;
         let projected = get(&mut s, "/build_intent/artifacts");
         assert_eq!(projected.status, 200, "{}", projected.body);
         let projected_body: Value = serde_json::from_str(&projected.body).unwrap();
+        fn copy_private_dir(source: &Path, target: &Path) {
+            std::fs::create_dir_all(target).unwrap();
+            for entry in std::fs::read_dir(source).unwrap() {
+                let entry = entry.unwrap();
+                let next = target.join(entry.file_name());
+                if entry.path().is_dir() { copy_private_dir(&entry.path(), &next); }
+                else { std::fs::copy(entry.path(), next).unwrap(); }
+            }
+        }
+        let original_private = s.intent_store_root.clone().unwrap();
+        let migrated_private = tmp_dir("lx5-migrated-private 中文");
+        copy_private_dir(&original_private, &migrated_private);
+        s.intent_store_root = Some(migrated_private);
+        let migrated = get(&mut s, "/build_intent/artifacts");
+        assert_eq!(migrated.status, 200, "{}", migrated.body);
+        assert_eq!(serde_json::from_str::<Value>(&migrated.body).unwrap(), projected_body);
+        s.intent_store_root = Some(original_private);
+
         assert_eq!(
             projected_body["overlay"]["artifacts"][0]["payload"]["records"][0]["data"]
                 ["dimensions"][0]["value_json"],
@@ -17857,6 +18026,7 @@ unchanged after training concludes";
             );
             assert_eq!(usage_event.status, 200, "{}", usage_event.body);
         }
+        s.reader_only = false;
         let artifact_cost = post_at(
             &mut s,
             "/build_intent/usage.cost",
@@ -19150,6 +19320,8 @@ unchanged after training concludes";
             users: Arc::clone(&users),
         });
         let mut s = AppState {
+            desktop_host: false,
+            reader_only: false,
             book_dir: dir.clone(),
             library_root: None,
             book,
@@ -20571,6 +20743,7 @@ unchanged after training concludes";
         let history_path = tmp("agent-warning-projection-history");
         state.history_path = Some(history_path.clone());
         let warning_codes = [
+            "AGENT_NO_PROGRESS",
             "COMPACTION_FAILED",
             "ACTIVE_CONTEXT_EXHAUSTED",
             "TURN_LIMIT_EXCEEDED",
@@ -21086,6 +21259,8 @@ Version 1.2 and bare 1.1 stay unchanged.
     #[test]
     fn agent_source_resolve_open_stale_and_wrong_owner_fail_closed() {
         let mut state = state_named("agent-source-endpoints");
+        let session_path = tmp("source-open-session");
+        state.session_path = Some(session_path.clone());
         let history_path = tmp("agent-source-endpoints-file");
         let (turn_id, source_ref_id) = install_source_bound_turn(&mut state, history_path);
         let request = serde_json::json!({
@@ -21101,10 +21276,13 @@ Version 1.2 and bare 1.1 stay unchanged.
         assert_eq!(resolved_json["stale"], false);
         assert_eq!(resolved_json["can_open_in_reader"], true);
         assert!(!resolved.body.contains("1.1"));
+        assert!(!session_path.exists(), "popup resolution must not save a navigation");
 
         let opened = post(&mut state, "/agent/source.open", &request);
         assert_eq!(opened.status, 200, "{}", opened.body);
         assert!(!opened.body.contains("lid"));
+        let saved = load_session(&Some(session_path)).expect("source opening must persist position");
+        assert_eq!(saved.current_top_lid(), Some(state.reader.viewport().top_lid.as_str()));
 
         let current_book_id = state.book.base.book_id.clone();
         let second = precommit_agent_turn(
@@ -21387,6 +21565,47 @@ Version 1.2 and bare 1.1 stay unchanged.
         }
         .evidence_id();
         assert_eq!(restarted_evidence_id, first_evidence_id);
+    }
+
+    #[test]
+    fn agent_navigation_persists_reading_position_before_reply() {
+        let mut state = state_named("agent-navigation-session");
+        let book_dir = write_multi_leaf_book("agent-navigation-book", "agent-navigation", 30);
+        state.book = Book::load(&path_string(&book_dir)).unwrap();
+        state.book_dir = book_dir;
+        state.reader = Reader::new(&state.book, DEFAULT_RADIUS);
+        let session_path = tmp("agent-navigation-session-file");
+        state.session_path = Some(session_path.clone());
+        let target = state.book.base.lid_nodes.iter().filter(|node| node.children.is_empty()).last().unwrap().lid.clone();
+        state.adapter = Box::new(ChatStubAdapter::scripted(vec![
+            AssistantTurn { text: None, tool_calls: vec![runtime::ToolCall { id: "go".into(), name: "reader.gotoLid".into(), arguments: json!({"lid":target}).to_string() }], usage_total_tokens: Some(1) },
+            AssistantTurn { text: Some("done".into()), tool_calls: vec![], usage_total_tokens: Some(1) },
+        ]));
+        let reply = post_at(&mut state, "/agent/chat", &json!({"message":format!("请跳转到 {target}")}).to_string(), "2026-09-08T00:00:00Z");
+        assert_eq!(reply.status, 200, "{}", reply.body);
+        let saved = load_session(&Some(session_path)).expect("Agent navigation must persist the current viewport");
+        assert_eq!(saved.current_top_lid(), Some(state.reader.viewport().top_lid.as_str()));
+    }
+
+    #[test]
+    fn finalization_protocol_violation_persists_failed_turn_without_effects() {
+        let mut state = state_named("finalization-protocol-failure");
+        let history_path = tmp("finalization-protocol-history");
+        state.history_path = Some(history_path.clone());
+        let before = serde_json::to_value(state.reader.state()).unwrap();
+        state.adapter = Box::new(ChatStubAdapter::scripted((0..3).map(|i| AssistantTurn {
+            text: None,
+            tool_calls: vec![runtime::ToolCall { id: format!("call{i}"), name: if i == 2 { "reader.highlight" } else { "book.text" }.into(), arguments: if i == 2 { r#"{"lid":"1.1"}"#.into() } else { format!(r#"{{"invalid":{i}}}"#) } }],
+            usage_total_tokens: Some(1),
+        }).collect()));
+        let reply = post_at(&mut state, "/agent/chat", r#"{"message":"只解释原文"}"#, "2026-09-08T00:00:00Z");
+        assert_eq!(reply.status, 500, "{}", reply.body);
+        assert!(reply.body.contains("FINALIZATION_TOOL_PROTOCOL_VIOLATION"));
+        assert_eq!(serde_json::to_value(state.reader.state()).unwrap(), before);
+        assert!(state.store.recall(&memory::RecallQuery { mem_type: Some("highlight".into()), ..Default::default() }).is_empty());
+        let history = serde_json::to_value(load_agent_history(&Some(history_path)).unwrap()).unwrap();
+        assert_eq!(history["sessions"][0]["turns"][0]["status"], "failed");
+        assert_eq!(history["sessions"][0]["turns"][0]["error"]["error_code"], "FINALIZATION_TOOL_PROTOCOL_VIOLATION");
     }
 
     #[test]

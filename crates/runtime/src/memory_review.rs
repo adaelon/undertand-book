@@ -132,6 +132,12 @@ pub trait ReviewExecutorFactory: Send + Sync {
 #[derive(Default)]
 pub struct ProviderReviewExecutorFactory;
 
+impl ProviderReviewExecutorFactory {
+    pub fn with_adapter(adapter: Box<dyn ModelAdapter + Send>) -> Box<dyn ReviewExecutor> {
+        Box::new(ProviderReviewExecutor { adapter })
+    }
+}
+
 impl ReviewExecutorFactory for ProviderReviewExecutorFactory {
     fn create(&self, config: &ProviderConfig) -> Box<dyn ReviewExecutor> {
         Box::new(ProviderReviewExecutor {

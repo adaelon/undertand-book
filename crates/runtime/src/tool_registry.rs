@@ -480,6 +480,17 @@ pub struct ToolRegistry {
 }
 
 impl ToolRegistry {
+    pub(crate) fn experimental_subset(mut self, keep: impl Fn(&ToolSpec) -> bool) -> Self {
+        self.registrations.retain(|r| keep(&r.spec));
+        for r in &mut self.registrations {
+            if r.spec.name == "book.structure" {
+                r.spec.description = "Return canonical LID chapter topology only. With at, return that node and its immediate children; otherwise return the top two levels. Read source separately with book.text.".into();
+            }
+        }
+        self.by_name = self.registrations.iter().enumerate().map(|(i, r)| (r.spec.name.clone(), i)).collect();
+        self
+    }
+
     pub fn try_new(specs: Vec<ToolSpec>) -> Result<Self, ToolRegistryError> {
         let mut registrations = Vec::with_capacity(specs.len());
         let mut by_name = HashMap::with_capacity(specs.len());

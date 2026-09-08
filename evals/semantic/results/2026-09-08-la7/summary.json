@@ -1,0 +1,6353 @@
+{
+  "version": "quantification-essence-agent-v1",
+  "started_at": "2026-09-08T06:30:27.599Z",
+  "finished_at": "2026-09-08T07:08:37.765Z",
+  "status": "completed",
+  "model": "deepseek-v4-flash",
+  "git_head": "9e365075c99c9627959f2d9a03f987912c8c7a95",
+  "scope": "24 common natural-language QA tasks; 4 Agent navigation tasks; 4 Agent restart tasks. Product comparison, not graph causal attribution.",
+  "config": {
+    "agent": "production POST /agent/chat, OuterConfig::default(), isolated per-task memory/private artifacts",
+    "chunk": {
+      "chars": 1000,
+      "overlap": 150,
+      "budget": 6000,
+      "max_output_tokens": 4096
+    },
+    "temperature": 0,
+    "repeats": 1,
+    "task_timeout_ms": 300000,
+    "grading": "separate model annotation + deterministic facts/quote/source/action checks"
+  },
+  "corpus": {
+    "book_id": "quantification-essence",
+    "source_utf16": 154448,
+    "lids": 2757,
+    "graph_nodes": 1640,
+    "graph_edges": 1745
+  },
+  "scoring_version": "natural-facts-v2-bold-normalization",
+  "selected_ids": [
+    "exact-01",
+    "exact-02",
+    "exact-03",
+    "exact-04",
+    "concept-01",
+    "concept-02",
+    "concept-03",
+    "concept-04",
+    "cross-01",
+    "cross-02",
+    "cross-03",
+    "cross-04",
+    "contrast-01",
+    "contrast-02",
+    "contrast-03",
+    "contrast-04",
+    "formula-01",
+    "formula-02",
+    "formula-03",
+    "formula-04",
+    "refusal-01",
+    "refusal-02",
+    "refusal-03",
+    "refusal-04",
+    "source-01",
+    "source-02",
+    "source-03",
+    "source-04",
+    "restart-01",
+    "restart-02",
+    "restart-03",
+    "restart-04"
+  ],
+  "summary": {
+    "Chunk RAG (BM25, single-shot)": {
+      "count": 24,
+      "succeeded": 20,
+      "success_rate": 0.8333333333333334,
+      "semantic_accuracy": 0.8333333333333334,
+      "evidence_recall": 0.8461538461538461,
+      "citation_support": 0.7692307692307693,
+      "p95_seconds": 7.574450199999847,
+      "mean_tokens": null,
+      "total_requests": 24,
+      "missing_usage": 1,
+      "errors": 3,
+      "incomplete": 0
+    },
+    "Resident Agent (LID + Graph, full loop)": {
+      "count": 24,
+      "succeeded": 15,
+      "success_rate": 0.625,
+      "semantic_accuracy": 0.6666666666666666,
+      "evidence_recall": 1,
+      "citation_support": 0.6538461538461539,
+      "p95_seconds": 114.85455209999998,
+      "mean_tokens": 97359.25,
+      "total_requests": 200,
+      "missing_usage": 0,
+      "errors": 2,
+      "incomplete": 5
+    }
+  },
+  "qa": [
+    {
+      "id": "exact-01",
+      "category": "exact",
+      "system": "Chunk RAG (BM25, single-shot)",
+      "score": {
+        "evidence_groups": 1,
+        "recalled_groups": 1,
+        "evidence_recall": 1,
+        "facts": 1,
+        "supported_facts": 1,
+        "semantic_correct": true,
+        "success": true,
+        "details": [
+          {
+            "key": "purpose",
+            "correct": true,
+            "supported": true
+          }
+        ]
+      },
+      "elapsed_ms": 2555.9861,
+      "usage": {
+        "requests": 1,
+        "total_tokens": 3701,
+        "missing_usage": 0
+      },
+      "cost_by_purpose": {
+        "business_loop": {
+          "requests": 1,
+          "total_tokens": 3701,
+          "missing_usage": 0
+        },
+        "inner_query": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "inner_synthesis": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "source_repair": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "finalization": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "compaction": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "background_profile_review": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "grading": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "unclassified": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        }
+      },
+      "incomplete": false,
+      "tool_counts": {},
+      "tool_sequence": [],
+      "valid_sources": 1
+    },
+    {
+      "id": "exact-01",
+      "category": "exact",
+      "system": "Resident Agent (LID + Graph, full loop)",
+      "score": {
+        "evidence_groups": 1,
+        "recalled_groups": 1,
+        "evidence_recall": 1,
+        "facts": 1,
+        "supported_facts": 1,
+        "semantic_correct": true,
+        "success": true,
+        "details": [
+          {
+            "key": "purpose",
+            "correct": true,
+            "supported": true
+          }
+        ]
+      },
+      "elapsed_ms": 26014.5505,
+      "usage": {
+        "requests": 6,
+        "total_tokens": 33621,
+        "missing_usage": 0
+      },
+      "cost_by_purpose": {
+        "business_loop": {
+          "requests": 5,
+          "total_tokens": 31423,
+          "missing_usage": 0
+        },
+        "inner_query": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "inner_synthesis": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "source_repair": {
+          "requests": 1,
+          "total_tokens": 2198,
+          "missing_usage": 0
+        },
+        "finalization": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "compaction": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "background_profile_review": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "grading": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "unclassified": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        }
+      },
+      "incomplete": false,
+      "tool_counts": {
+        "book.search_text": 1,
+        "book.structure": 1,
+        "book.text": 1,
+        "source.present": 2
+      },
+      "tool_sequence": [
+        {
+          "loop": 1,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 1,
+          "tool": "book.structure"
+        },
+        {
+          "loop": 2,
+          "tool": "book.text"
+        },
+        {
+          "loop": 3,
+          "tool": "source.present"
+        },
+        {
+          "loop": 4,
+          "tool": "source.present"
+        }
+      ],
+      "valid_sources": 1
+    },
+    {
+      "id": "exact-02",
+      "category": "exact",
+      "system": "Resident Agent (LID + Graph, full loop)",
+      "score": {
+        "evidence_groups": 1,
+        "recalled_groups": 1,
+        "evidence_recall": 1,
+        "facts": 1,
+        "supported_facts": 1,
+        "semantic_correct": true,
+        "success": true,
+        "details": [
+          {
+            "key": "data_relation",
+            "correct": true,
+            "supported": true
+          }
+        ]
+      },
+      "elapsed_ms": 18986.9655,
+      "usage": {
+        "requests": 6,
+        "total_tokens": 31054,
+        "missing_usage": 0
+      },
+      "cost_by_purpose": {
+        "business_loop": {
+          "requests": 5,
+          "total_tokens": 29729,
+          "missing_usage": 0
+        },
+        "inner_query": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "inner_synthesis": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "source_repair": {
+          "requests": 1,
+          "total_tokens": 1325,
+          "missing_usage": 0
+        },
+        "finalization": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "compaction": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "background_profile_review": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "grading": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "unclassified": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        }
+      },
+      "incomplete": false,
+      "tool_counts": {
+        "book.search_text": 2,
+        "book.text": 3,
+        "source.present": 1
+      },
+      "tool_sequence": [
+        {
+          "loop": 1,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 1,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 2,
+          "tool": "book.text"
+        },
+        {
+          "loop": 3,
+          "tool": "book.text"
+        },
+        {
+          "loop": 3,
+          "tool": "book.text"
+        },
+        {
+          "loop": 4,
+          "tool": "source.present"
+        }
+      ],
+      "valid_sources": 1
+    },
+    {
+      "id": "exact-02",
+      "category": "exact",
+      "system": "Chunk RAG (BM25, single-shot)",
+      "score": {
+        "evidence_groups": 1,
+        "recalled_groups": 1,
+        "evidence_recall": 1,
+        "facts": 1,
+        "supported_facts": 0,
+        "semantic_correct": false,
+        "success": false,
+        "details": [
+          {
+            "key": "data_relation",
+            "correct": false,
+            "supported": false
+          }
+        ]
+      },
+      "elapsed_ms": 7364.531499999997,
+      "usage": {
+        "requests": 1,
+        "total_tokens": 4131,
+        "missing_usage": 0
+      },
+      "cost_by_purpose": {
+        "business_loop": {
+          "requests": 1,
+          "total_tokens": 4131,
+          "missing_usage": 0
+        },
+        "inner_query": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "inner_synthesis": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "source_repair": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "finalization": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "compaction": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "background_profile_review": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "grading": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "unclassified": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        }
+      },
+      "incomplete": false,
+      "tool_counts": {},
+      "tool_sequence": [],
+      "valid_sources": 2,
+      "grade_error": "grading_error"
+    },
+    {
+      "id": "exact-03",
+      "category": "exact",
+      "system": "Chunk RAG (BM25, single-shot)",
+      "score": {
+        "evidence_groups": 1,
+        "recalled_groups": 1,
+        "evidence_recall": 1,
+        "facts": 1,
+        "supported_facts": 1,
+        "semantic_correct": true,
+        "success": true,
+        "details": [
+          {
+            "key": "keep_delisted",
+            "correct": true,
+            "supported": true
+          }
+        ]
+      },
+      "elapsed_ms": 1957.949299999993,
+      "usage": {
+        "requests": 1,
+        "total_tokens": 3944,
+        "missing_usage": 0
+      },
+      "cost_by_purpose": {
+        "business_loop": {
+          "requests": 1,
+          "total_tokens": 3944,
+          "missing_usage": 0
+        },
+        "inner_query": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "inner_synthesis": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "source_repair": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "finalization": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "compaction": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "background_profile_review": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "grading": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "unclassified": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        }
+      },
+      "incomplete": false,
+      "tool_counts": {},
+      "tool_sequence": [],
+      "valid_sources": 2
+    },
+    {
+      "id": "exact-03",
+      "category": "exact",
+      "system": "Resident Agent (LID + Graph, full loop)",
+      "score": {
+        "evidence_groups": 1,
+        "recalled_groups": 1,
+        "evidence_recall": 1,
+        "facts": 1,
+        "supported_facts": 1,
+        "semantic_correct": true,
+        "success": true,
+        "details": [
+          {
+            "key": "keep_delisted",
+            "correct": true,
+            "supported": true
+          }
+        ]
+      },
+      "elapsed_ms": 33481.7288,
+      "usage": {
+        "requests": 6,
+        "total_tokens": 38082,
+        "missing_usage": 0
+      },
+      "cost_by_purpose": {
+        "business_loop": {
+          "requests": 5,
+          "total_tokens": 36209,
+          "missing_usage": 0
+        },
+        "inner_query": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "inner_synthesis": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "source_repair": {
+          "requests": 1,
+          "total_tokens": 1873,
+          "missing_usage": 0
+        },
+        "finalization": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "compaction": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "background_profile_review": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "grading": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "unclassified": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        }
+      },
+      "incomplete": false,
+      "tool_counts": {
+        "book.concept": 1,
+        "book.search_text": 3,
+        "book.text": 3,
+        "tool.search": 1,
+        "source.present": 1
+      },
+      "tool_sequence": [
+        {
+          "loop": 1,
+          "tool": "book.concept"
+        },
+        {
+          "loop": 1,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 1,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 1,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 2,
+          "tool": "book.text"
+        },
+        {
+          "loop": 3,
+          "tool": "book.text"
+        },
+        {
+          "loop": 3,
+          "tool": "book.text"
+        },
+        {
+          "loop": 3,
+          "tool": "tool.search"
+        },
+        {
+          "loop": 4,
+          "tool": "source.present"
+        }
+      ],
+      "valid_sources": 1
+    },
+    {
+      "id": "exact-04",
+      "category": "exact",
+      "system": "Resident Agent (LID + Graph, full loop)",
+      "score": {
+        "evidence_groups": 1,
+        "recalled_groups": 1,
+        "evidence_recall": 1,
+        "facts": 1,
+        "supported_facts": 1,
+        "semantic_correct": true,
+        "success": true,
+        "details": [
+          {
+            "key": "pretrain",
+            "correct": true,
+            "supported": true
+          }
+        ]
+      },
+      "elapsed_ms": 26122.799800000008,
+      "usage": {
+        "requests": 5,
+        "total_tokens": 39034,
+        "missing_usage": 0
+      },
+      "cost_by_purpose": {
+        "business_loop": {
+          "requests": 4,
+          "total_tokens": 36397,
+          "missing_usage": 0
+        },
+        "inner_query": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "inner_synthesis": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "source_repair": {
+          "requests": 1,
+          "total_tokens": 2637,
+          "missing_usage": 0
+        },
+        "finalization": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "compaction": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "background_profile_review": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "grading": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "unclassified": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        }
+      },
+      "incomplete": false,
+      "tool_counts": {
+        "book.search_text": 1,
+        "book.concept": 1,
+        "book.text": 2,
+        "source.present": 1
+      },
+      "tool_sequence": [
+        {
+          "loop": 1,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 1,
+          "tool": "book.concept"
+        },
+        {
+          "loop": 2,
+          "tool": "book.text"
+        },
+        {
+          "loop": 2,
+          "tool": "book.text"
+        },
+        {
+          "loop": 3,
+          "tool": "source.present"
+        }
+      ],
+      "valid_sources": 1
+    },
+    {
+      "id": "exact-04",
+      "category": "exact",
+      "system": "Chunk RAG (BM25, single-shot)",
+      "score": {
+        "evidence_groups": 1,
+        "recalled_groups": 1,
+        "evidence_recall": 1,
+        "facts": 1,
+        "supported_facts": 1,
+        "semantic_correct": true,
+        "success": true,
+        "details": [
+          {
+            "key": "pretrain",
+            "correct": true,
+            "supported": true
+          }
+        ]
+      },
+      "elapsed_ms": 3324.990600000019,
+      "usage": {
+        "requests": 1,
+        "total_tokens": 3984,
+        "missing_usage": 0
+      },
+      "cost_by_purpose": {
+        "business_loop": {
+          "requests": 1,
+          "total_tokens": 3984,
+          "missing_usage": 0
+        },
+        "inner_query": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "inner_synthesis": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "source_repair": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "finalization": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "compaction": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "background_profile_review": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "grading": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "unclassified": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        }
+      },
+      "incomplete": false,
+      "tool_counts": {},
+      "tool_sequence": [],
+      "valid_sources": 2
+    },
+    {
+      "id": "concept-01",
+      "category": "concept",
+      "system": "Chunk RAG (BM25, single-shot)",
+      "score": {
+        "evidence_groups": 1,
+        "recalled_groups": 1,
+        "evidence_recall": 1,
+        "facts": 1,
+        "supported_facts": 1,
+        "semantic_correct": true,
+        "success": true,
+        "details": [
+          {
+            "key": "family",
+            "correct": true,
+            "supported": true
+          }
+        ]
+      },
+      "elapsed_ms": 3267.687900000019,
+      "usage": {
+        "requests": 1,
+        "total_tokens": 4007,
+        "missing_usage": 0
+      },
+      "cost_by_purpose": {
+        "business_loop": {
+          "requests": 1,
+          "total_tokens": 4007,
+          "missing_usage": 0
+        },
+        "inner_query": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "inner_synthesis": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "source_repair": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "finalization": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "compaction": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "background_profile_review": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "grading": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "unclassified": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        }
+      },
+      "incomplete": false,
+      "tool_counts": {},
+      "tool_sequence": [],
+      "valid_sources": 1
+    },
+    {
+      "id": "concept-01",
+      "category": "concept",
+      "system": "Resident Agent (LID + Graph, full loop)",
+      "score": {
+        "evidence_groups": 1,
+        "recalled_groups": 1,
+        "evidence_recall": 1,
+        "facts": 1,
+        "supported_facts": 1,
+        "semantic_correct": true,
+        "success": true,
+        "details": [
+          {
+            "key": "family",
+            "correct": true,
+            "supported": true
+          }
+        ]
+      },
+      "elapsed_ms": 39409.98309999998,
+      "usage": {
+        "requests": 7,
+        "total_tokens": 54688,
+        "missing_usage": 0
+      },
+      "cost_by_purpose": {
+        "business_loop": {
+          "requests": 6,
+          "total_tokens": 51650,
+          "missing_usage": 0
+        },
+        "inner_query": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "inner_synthesis": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "source_repair": {
+          "requests": 1,
+          "total_tokens": 3038,
+          "missing_usage": 0
+        },
+        "finalization": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "compaction": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "background_profile_review": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "grading": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "unclassified": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        }
+      },
+      "incomplete": false,
+      "tool_counts": {
+        "book.search_text": 1,
+        "book.concept": 1,
+        "book.text": 4,
+        "source.present": 3
+      },
+      "tool_sequence": [
+        {
+          "loop": 1,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 1,
+          "tool": "book.concept"
+        },
+        {
+          "loop": 2,
+          "tool": "book.text"
+        },
+        {
+          "loop": 2,
+          "tool": "book.text"
+        },
+        {
+          "loop": 3,
+          "tool": "book.text"
+        },
+        {
+          "loop": 3,
+          "tool": "book.text"
+        },
+        {
+          "loop": 4,
+          "tool": "source.present"
+        },
+        {
+          "loop": 4,
+          "tool": "source.present"
+        },
+        {
+          "loop": 5,
+          "tool": "source.present"
+        }
+      ],
+      "valid_sources": 2
+    },
+    {
+      "id": "concept-02",
+      "category": "concept",
+      "system": "Resident Agent (LID + Graph, full loop)",
+      "score": {
+        "evidence_groups": 1,
+        "recalled_groups": 1,
+        "evidence_recall": 1,
+        "facts": 1,
+        "supported_facts": 0,
+        "semantic_correct": false,
+        "success": false,
+        "details": [
+          {
+            "key": "nonprice_allowed",
+            "correct": false,
+            "supported": false
+          }
+        ]
+      },
+      "elapsed_ms": 102182.55550000002,
+      "usage": {
+        "requests": 11,
+        "total_tokens": 131920,
+        "missing_usage": 0
+      },
+      "cost_by_purpose": {
+        "business_loop": {
+          "requests": 10,
+          "total_tokens": 129121,
+          "missing_usage": 0
+        },
+        "inner_query": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "inner_synthesis": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "source_repair": {
+          "requests": 1,
+          "total_tokens": 2799,
+          "missing_usage": 0
+        },
+        "finalization": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "compaction": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "background_profile_review": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "grading": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "unclassified": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        }
+      },
+      "incomplete": true,
+      "tool_counts": {
+        "book.search_text": 4,
+        "book.text": 12,
+        "book.context": 4,
+        "source.present": 6
+      },
+      "tool_sequence": [
+        {
+          "loop": 1,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 1,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 2,
+          "tool": "book.text"
+        },
+        {
+          "loop": 2,
+          "tool": "book.context"
+        },
+        {
+          "loop": 3,
+          "tool": "book.text"
+        },
+        {
+          "loop": 3,
+          "tool": "book.text"
+        },
+        {
+          "loop": 3,
+          "tool": "book.text"
+        },
+        {
+          "loop": 3,
+          "tool": "book.text"
+        },
+        {
+          "loop": 3,
+          "tool": "book.text"
+        },
+        {
+          "loop": 3,
+          "tool": "book.text"
+        },
+        {
+          "loop": 3,
+          "tool": "book.text"
+        },
+        {
+          "loop": 4,
+          "tool": "book.context"
+        },
+        {
+          "loop": 4,
+          "tool": "book.context"
+        },
+        {
+          "loop": 4,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 5,
+          "tool": "book.text"
+        },
+        {
+          "loop": 5,
+          "tool": "book.text"
+        },
+        {
+          "loop": 6,
+          "tool": "book.context"
+        },
+        {
+          "loop": 6,
+          "tool": "book.text"
+        },
+        {
+          "loop": 7,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 7,
+          "tool": "book.text"
+        },
+        {
+          "loop": 8,
+          "tool": "source.present"
+        },
+        {
+          "loop": 8,
+          "tool": "source.present"
+        },
+        {
+          "loop": 8,
+          "tool": "source.present"
+        },
+        {
+          "loop": 8,
+          "tool": "source.present"
+        },
+        {
+          "loop": 9,
+          "tool": "source.present"
+        },
+        {
+          "loop": 9,
+          "tool": "source.present"
+        }
+      ],
+      "valid_sources": 0
+    },
+    {
+      "id": "concept-02",
+      "category": "concept",
+      "system": "Chunk RAG (BM25, single-shot)",
+      "score": {
+        "evidence_groups": 1,
+        "recalled_groups": 1,
+        "evidence_recall": 1,
+        "facts": 1,
+        "supported_facts": 1,
+        "semantic_correct": true,
+        "success": true,
+        "details": [
+          {
+            "key": "nonprice_allowed",
+            "correct": true,
+            "supported": true
+          }
+        ]
+      },
+      "elapsed_ms": 3157.1650000000373,
+      "usage": {
+        "requests": 1,
+        "total_tokens": 3876,
+        "missing_usage": 0
+      },
+      "cost_by_purpose": {
+        "business_loop": {
+          "requests": 1,
+          "total_tokens": 3876,
+          "missing_usage": 0
+        },
+        "inner_query": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "inner_synthesis": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "source_repair": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "finalization": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "compaction": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "background_profile_review": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "grading": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "unclassified": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        }
+      },
+      "incomplete": false,
+      "tool_counts": {},
+      "tool_sequence": [],
+      "valid_sources": 2
+    },
+    {
+      "id": "concept-03",
+      "category": "concept",
+      "system": "Chunk RAG (BM25, single-shot)",
+      "score": {
+        "evidence_groups": 1,
+        "recalled_groups": 1,
+        "evidence_recall": 1,
+        "facts": 1,
+        "supported_facts": 1,
+        "semantic_correct": true,
+        "success": true,
+        "details": [
+          {
+            "key": "correction",
+            "correct": true,
+            "supported": true
+          }
+        ]
+      },
+      "elapsed_ms": 5260.642400000012,
+      "usage": {
+        "requests": 1,
+        "total_tokens": 4392,
+        "missing_usage": 0
+      },
+      "cost_by_purpose": {
+        "business_loop": {
+          "requests": 1,
+          "total_tokens": 4392,
+          "missing_usage": 0
+        },
+        "inner_query": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "inner_synthesis": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "source_repair": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "finalization": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "compaction": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "background_profile_review": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "grading": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "unclassified": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        }
+      },
+      "incomplete": false,
+      "tool_counts": {},
+      "tool_sequence": [],
+      "valid_sources": 2
+    },
+    {
+      "id": "concept-03",
+      "category": "concept",
+      "system": "Resident Agent (LID + Graph, full loop)",
+      "score": {
+        "evidence_groups": 1,
+        "recalled_groups": 1,
+        "evidence_recall": 1,
+        "facts": 1,
+        "supported_facts": 0,
+        "semantic_correct": false,
+        "success": false,
+        "details": [
+          {
+            "key": "correction",
+            "correct": true,
+            "supported": false
+          }
+        ]
+      },
+      "elapsed_ms": 70295.02289999998,
+      "usage": {
+        "requests": 7,
+        "total_tokens": 51320,
+        "missing_usage": 0
+      },
+      "cost_by_purpose": {
+        "business_loop": {
+          "requests": 5,
+          "total_tokens": 38524,
+          "missing_usage": 0
+        },
+        "inner_query": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "inner_synthesis": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "source_repair": {
+          "requests": 1,
+          "total_tokens": 5126,
+          "missing_usage": 0
+        },
+        "finalization": {
+          "requests": 1,
+          "total_tokens": 7670,
+          "missing_usage": 0
+        },
+        "compaction": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "background_profile_review": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "grading": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "unclassified": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        }
+      },
+      "incomplete": true,
+      "tool_counts": {
+        "book.search_text": 4,
+        "book.text": 1,
+        "source.present": 2
+      },
+      "tool_sequence": [
+        {
+          "loop": 1,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 1,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 2,
+          "tool": "book.text"
+        },
+        {
+          "loop": 3,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 3,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 4,
+          "tool": "source.present"
+        },
+        {
+          "loop": 5,
+          "tool": "source.present"
+        }
+      ],
+      "valid_sources": 0
+    },
+    {
+      "id": "concept-04",
+      "category": "concept",
+      "system": "Resident Agent (LID + Graph, full loop)",
+      "score": {
+        "evidence_groups": 2,
+        "recalled_groups": 2,
+        "evidence_recall": 1,
+        "facts": 2,
+        "supported_facts": 2,
+        "semantic_correct": true,
+        "success": true,
+        "details": [
+          {
+            "key": "when",
+            "correct": true,
+            "supported": true
+          },
+          {
+            "key": "reason",
+            "correct": true,
+            "supported": true
+          }
+        ]
+      },
+      "elapsed_ms": 52630.23869999999,
+      "usage": {
+        "requests": 8,
+        "total_tokens": 54716,
+        "missing_usage": 0
+      },
+      "cost_by_purpose": {
+        "business_loop": {
+          "requests": 7,
+          "total_tokens": 51982,
+          "missing_usage": 0
+        },
+        "inner_query": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "inner_synthesis": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "source_repair": {
+          "requests": 1,
+          "total_tokens": 2734,
+          "missing_usage": 0
+        },
+        "finalization": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "compaction": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "background_profile_review": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "grading": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "unclassified": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        }
+      },
+      "incomplete": false,
+      "tool_counts": {
+        "book.search_text": 2,
+        "book.text": 4,
+        "book.context": 3,
+        "source.present": 2
+      },
+      "tool_sequence": [
+        {
+          "loop": 1,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 2,
+          "tool": "book.text"
+        },
+        {
+          "loop": 2,
+          "tool": "book.text"
+        },
+        {
+          "loop": 3,
+          "tool": "book.context"
+        },
+        {
+          "loop": 3,
+          "tool": "book.context"
+        },
+        {
+          "loop": 4,
+          "tool": "book.text"
+        },
+        {
+          "loop": 4,
+          "tool": "book.text"
+        },
+        {
+          "loop": 5,
+          "tool": "book.context"
+        },
+        {
+          "loop": 5,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 6,
+          "tool": "source.present"
+        },
+        {
+          "loop": 6,
+          "tool": "source.present"
+        }
+      ],
+      "valid_sources": 2
+    },
+    {
+      "id": "concept-04",
+      "category": "concept",
+      "system": "Chunk RAG (BM25, single-shot)",
+      "score": {
+        "evidence_groups": 2,
+        "recalled_groups": 0,
+        "evidence_recall": 0,
+        "facts": 2,
+        "supported_facts": 0,
+        "semantic_correct": false,
+        "success": false,
+        "details": [
+          {
+            "key": "when",
+            "correct": false,
+            "supported": false
+          },
+          {
+            "key": "reason",
+            "correct": false,
+            "supported": false
+          }
+        ]
+      },
+      "elapsed_ms": 2296.572199999995,
+      "usage": {
+        "requests": 1,
+        "total_tokens": 3802,
+        "missing_usage": 0
+      },
+      "cost_by_purpose": {
+        "business_loop": {
+          "requests": 1,
+          "total_tokens": 3802,
+          "missing_usage": 0
+        },
+        "inner_query": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "inner_synthesis": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "source_repair": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "finalization": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "compaction": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "background_profile_review": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "grading": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "unclassified": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        }
+      },
+      "incomplete": false,
+      "tool_counts": {},
+      "tool_sequence": [],
+      "valid_sources": 0
+    },
+    {
+      "id": "cross-01",
+      "category": "cross",
+      "system": "Chunk RAG (BM25, single-shot)",
+      "score": {
+        "evidence_groups": 2,
+        "recalled_groups": 1,
+        "evidence_recall": 0.5,
+        "facts": 2,
+        "supported_facts": 0,
+        "semantic_correct": false,
+        "success": false,
+        "details": [
+          {
+            "key": "reward",
+            "correct": false,
+            "supported": false
+          },
+          {
+            "key": "reset_N",
+            "correct": false,
+            "supported": false
+          }
+        ]
+      },
+      "elapsed_ms": 4645.587300000014,
+      "usage": {
+        "requests": 1,
+        "total_tokens": 4230,
+        "missing_usage": 0
+      },
+      "cost_by_purpose": {
+        "business_loop": {
+          "requests": 1,
+          "total_tokens": 4230,
+          "missing_usage": 0
+        },
+        "inner_query": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "inner_synthesis": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "source_repair": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "finalization": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "compaction": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "background_profile_review": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "grading": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "unclassified": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        }
+      },
+      "incomplete": false,
+      "tool_counts": {},
+      "tool_sequence": [],
+      "valid_sources": 2,
+      "grade_error": "grading_error"
+    },
+    {
+      "id": "cross-01",
+      "category": "cross",
+      "system": "Resident Agent (LID + Graph, full loop)",
+      "score": {
+        "evidence_groups": 2,
+        "recalled_groups": 2,
+        "evidence_recall": 1,
+        "facts": 2,
+        "supported_facts": 0,
+        "semantic_correct": false,
+        "success": false,
+        "details": [
+          {
+            "key": "reward",
+            "correct": false,
+            "supported": false
+          },
+          {
+            "key": "reset_N",
+            "correct": false,
+            "supported": false
+          }
+        ]
+      },
+      "elapsed_ms": 90682.2087999999,
+      "usage": {
+        "requests": 11,
+        "total_tokens": 175056,
+        "missing_usage": 0
+      },
+      "cost_by_purpose": {
+        "business_loop": {
+          "requests": 10,
+          "total_tokens": 170931,
+          "missing_usage": 0
+        },
+        "inner_query": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "inner_synthesis": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "source_repair": {
+          "requests": 1,
+          "total_tokens": 4125,
+          "missing_usage": 0
+        },
+        "finalization": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "compaction": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "background_profile_review": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "grading": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "unclassified": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        }
+      },
+      "incomplete": true,
+      "tool_counts": {
+        "book.search_text": 4,
+        "book.concept": 1,
+        "book.text": 10,
+        "book.context": 1,
+        "source.present": 7
+      },
+      "tool_sequence": [
+        {
+          "loop": 1,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 1,
+          "tool": "book.concept"
+        },
+        {
+          "loop": 2,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 2,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 3,
+          "tool": "book.text"
+        },
+        {
+          "loop": 3,
+          "tool": "book.text"
+        },
+        {
+          "loop": 3,
+          "tool": "book.text"
+        },
+        {
+          "loop": 3,
+          "tool": "book.text"
+        },
+        {
+          "loop": 3,
+          "tool": "book.text"
+        },
+        {
+          "loop": 4,
+          "tool": "book.text"
+        },
+        {
+          "loop": 4,
+          "tool": "book.context"
+        },
+        {
+          "loop": 5,
+          "tool": "book.text"
+        },
+        {
+          "loop": 5,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 6,
+          "tool": "book.text"
+        },
+        {
+          "loop": 6,
+          "tool": "book.text"
+        },
+        {
+          "loop": 6,
+          "tool": "book.text"
+        },
+        {
+          "loop": 7,
+          "tool": "source.present"
+        },
+        {
+          "loop": 7,
+          "tool": "source.present"
+        },
+        {
+          "loop": 7,
+          "tool": "source.present"
+        },
+        {
+          "loop": 8,
+          "tool": "source.present"
+        },
+        {
+          "loop": 8,
+          "tool": "source.present"
+        },
+        {
+          "loop": 9,
+          "tool": "source.present"
+        },
+        {
+          "loop": 9,
+          "tool": "source.present"
+        }
+      ],
+      "valid_sources": 0
+    },
+    {
+      "id": "cross-02",
+      "category": "cross",
+      "system": "Resident Agent (LID + Graph, full loop)",
+      "score": {
+        "evidence_groups": 2,
+        "recalled_groups": 2,
+        "evidence_recall": 1,
+        "facts": 2,
+        "supported_facts": 0,
+        "semantic_correct": false,
+        "success": false,
+        "details": [
+          {
+            "key": "entropy",
+            "correct": false,
+            "supported": false
+          },
+          {
+            "key": "objective",
+            "correct": false,
+            "supported": false
+          }
+        ]
+      },
+      "elapsed_ms": 95089.98109999998,
+      "usage": {
+        "requests": 11,
+        "total_tokens": 204445,
+        "missing_usage": 0
+      },
+      "cost_by_purpose": {
+        "business_loop": {
+          "requests": 11,
+          "total_tokens": 204445,
+          "missing_usage": 0
+        },
+        "inner_query": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "inner_synthesis": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "source_repair": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "finalization": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "compaction": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "background_profile_review": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "grading": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "unclassified": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        }
+      },
+      "incomplete": false,
+      "tool_counts": {
+        "book.concept": 2,
+        "book.text": 10,
+        "book.search_text": 2,
+        "book.context": 1,
+        "source.present": 13
+      },
+      "tool_sequence": [
+        {
+          "loop": 1,
+          "tool": "book.concept"
+        },
+        {
+          "loop": 1,
+          "tool": "book.concept"
+        },
+        {
+          "loop": 2,
+          "tool": "book.text"
+        },
+        {
+          "loop": 2,
+          "tool": "book.text"
+        },
+        {
+          "loop": 3,
+          "tool": "book.text"
+        },
+        {
+          "loop": 3,
+          "tool": "book.text"
+        },
+        {
+          "loop": 3,
+          "tool": "book.text"
+        },
+        {
+          "loop": 3,
+          "tool": "book.text"
+        },
+        {
+          "loop": 4,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 4,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 5,
+          "tool": "book.text"
+        },
+        {
+          "loop": 5,
+          "tool": "book.text"
+        },
+        {
+          "loop": 6,
+          "tool": "book.text"
+        },
+        {
+          "loop": 6,
+          "tool": "book.context"
+        },
+        {
+          "loop": 7,
+          "tool": "book.text"
+        },
+        {
+          "loop": 8,
+          "tool": "source.present"
+        },
+        {
+          "loop": 8,
+          "tool": "source.present"
+        },
+        {
+          "loop": 8,
+          "tool": "source.present"
+        },
+        {
+          "loop": 8,
+          "tool": "source.present"
+        },
+        {
+          "loop": 9,
+          "tool": "source.present"
+        },
+        {
+          "loop": 9,
+          "tool": "source.present"
+        },
+        {
+          "loop": 9,
+          "tool": "source.present"
+        },
+        {
+          "loop": 9,
+          "tool": "source.present"
+        },
+        {
+          "loop": 9,
+          "tool": "source.present"
+        },
+        {
+          "loop": 9,
+          "tool": "source.present"
+        },
+        {
+          "loop": 10,
+          "tool": "source.present"
+        },
+        {
+          "loop": 10,
+          "tool": "source.present"
+        },
+        {
+          "loop": 10,
+          "tool": "source.present"
+        }
+      ],
+      "valid_sources": 7,
+      "grade_error": "grading_error"
+    },
+    {
+      "id": "cross-02",
+      "category": "cross",
+      "system": "Chunk RAG (BM25, single-shot)",
+      "score": {
+        "evidence_groups": 2,
+        "recalled_groups": 2,
+        "evidence_recall": 1,
+        "facts": 2,
+        "supported_facts": 2,
+        "semantic_correct": true,
+        "success": true,
+        "details": [
+          {
+            "key": "entropy",
+            "correct": true,
+            "supported": true
+          },
+          {
+            "key": "objective",
+            "correct": true,
+            "supported": true
+          }
+        ]
+      },
+      "elapsed_ms": 4263.808200000087,
+      "usage": {
+        "requests": 1,
+        "total_tokens": 4220,
+        "missing_usage": 0
+      },
+      "cost_by_purpose": {
+        "business_loop": {
+          "requests": 1,
+          "total_tokens": 4220,
+          "missing_usage": 0
+        },
+        "inner_query": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "inner_synthesis": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "source_repair": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "finalization": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "compaction": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "background_profile_review": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "grading": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "unclassified": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        }
+      },
+      "incomplete": false,
+      "tool_counts": {},
+      "tool_sequence": [],
+      "valid_sources": 4
+    },
+    {
+      "id": "cross-03",
+      "category": "cross",
+      "system": "Chunk RAG (BM25, single-shot)",
+      "score": {
+        "evidence_groups": 2,
+        "recalled_groups": 1,
+        "evidence_recall": 0.5,
+        "facts": 2,
+        "supported_facts": 2,
+        "semantic_correct": true,
+        "success": true,
+        "details": [
+          {
+            "key": "noise_extreme",
+            "correct": true,
+            "supported": true
+          },
+          {
+            "key": "bias",
+            "correct": true,
+            "supported": true
+          }
+        ]
+      },
+      "elapsed_ms": 5096.990800000029,
+      "usage": {
+        "requests": 1,
+        "total_tokens": 4287,
+        "missing_usage": 0
+      },
+      "cost_by_purpose": {
+        "business_loop": {
+          "requests": 1,
+          "total_tokens": 4287,
+          "missing_usage": 0
+        },
+        "inner_query": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "inner_synthesis": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "source_repair": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "finalization": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "compaction": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "background_profile_review": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "grading": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "unclassified": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        }
+      },
+      "incomplete": false,
+      "tool_counts": {},
+      "tool_sequence": [],
+      "valid_sources": 4
+    },
+    {
+      "id": "cross-03",
+      "category": "cross",
+      "system": "Resident Agent (LID + Graph, full loop)",
+      "score": {
+        "evidence_groups": 2,
+        "recalled_groups": 2,
+        "evidence_recall": 1,
+        "facts": 2,
+        "supported_facts": 2,
+        "semantic_correct": true,
+        "success": true,
+        "details": [
+          {
+            "key": "noise_extreme",
+            "correct": true,
+            "supported": true
+          },
+          {
+            "key": "bias",
+            "correct": true,
+            "supported": true
+          }
+        ]
+      },
+      "elapsed_ms": 114854.55209999997,
+      "usage": {
+        "requests": 9,
+        "total_tokens": 175806,
+        "missing_usage": 0
+      },
+      "cost_by_purpose": {
+        "business_loop": {
+          "requests": 8,
+          "total_tokens": 172006,
+          "missing_usage": 0
+        },
+        "inner_query": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "inner_synthesis": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "source_repair": {
+          "requests": 1,
+          "total_tokens": 3800,
+          "missing_usage": 0
+        },
+        "finalization": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "compaction": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "background_profile_review": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "grading": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "unclassified": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        }
+      },
+      "incomplete": false,
+      "tool_counts": {
+        "book.structure": 1,
+        "book.concept": 3,
+        "book.text": 16,
+        "book.search_text": 4,
+        "source.present": 14
+      },
+      "tool_sequence": [
+        {
+          "loop": 1,
+          "tool": "book.structure"
+        },
+        {
+          "loop": 1,
+          "tool": "book.concept"
+        },
+        {
+          "loop": 1,
+          "tool": "book.concept"
+        },
+        {
+          "loop": 1,
+          "tool": "book.concept"
+        },
+        {
+          "loop": 2,
+          "tool": "book.text"
+        },
+        {
+          "loop": 2,
+          "tool": "book.text"
+        },
+        {
+          "loop": 2,
+          "tool": "book.text"
+        },
+        {
+          "loop": 2,
+          "tool": "book.text"
+        },
+        {
+          "loop": 2,
+          "tool": "book.text"
+        },
+        {
+          "loop": 2,
+          "tool": "book.text"
+        },
+        {
+          "loop": 2,
+          "tool": "book.text"
+        },
+        {
+          "loop": 2,
+          "tool": "book.text"
+        },
+        {
+          "loop": 2,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 2,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 3,
+          "tool": "book.text"
+        },
+        {
+          "loop": 3,
+          "tool": "book.text"
+        },
+        {
+          "loop": 3,
+          "tool": "book.text"
+        },
+        {
+          "loop": 3,
+          "tool": "book.text"
+        },
+        {
+          "loop": 3,
+          "tool": "book.text"
+        },
+        {
+          "loop": 3,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 3,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 4,
+          "tool": "book.text"
+        },
+        {
+          "loop": 4,
+          "tool": "book.text"
+        },
+        {
+          "loop": 4,
+          "tool": "book.text"
+        },
+        {
+          "loop": 5,
+          "tool": "source.present"
+        },
+        {
+          "loop": 5,
+          "tool": "source.present"
+        },
+        {
+          "loop": 5,
+          "tool": "source.present"
+        },
+        {
+          "loop": 5,
+          "tool": "source.present"
+        },
+        {
+          "loop": 5,
+          "tool": "source.present"
+        },
+        {
+          "loop": 5,
+          "tool": "source.present"
+        },
+        {
+          "loop": 5,
+          "tool": "source.present"
+        },
+        {
+          "loop": 6,
+          "tool": "source.present"
+        },
+        {
+          "loop": 6,
+          "tool": "source.present"
+        },
+        {
+          "loop": 6,
+          "tool": "source.present"
+        },
+        {
+          "loop": 6,
+          "tool": "source.present"
+        },
+        {
+          "loop": 7,
+          "tool": "source.present"
+        },
+        {
+          "loop": 7,
+          "tool": "source.present"
+        },
+        {
+          "loop": 7,
+          "tool": "source.present"
+        }
+      ],
+      "valid_sources": 7
+    },
+    {
+      "id": "cross-04",
+      "category": "cross",
+      "system": "Resident Agent (LID + Graph, full loop)",
+      "score": {
+        "evidence_groups": 2,
+        "recalled_groups": 2,
+        "evidence_recall": 1,
+        "facts": 2,
+        "supported_facts": 2,
+        "semantic_correct": true,
+        "success": true,
+        "details": [
+          {
+            "key": "high_capacity_stacking",
+            "correct": true,
+            "supported": true
+          },
+          {
+            "key": "constrain_transformer",
+            "correct": true,
+            "supported": true
+          }
+        ]
+      },
+      "elapsed_ms": 139425.29599999997,
+      "usage": {
+        "requests": 10,
+        "total_tokens": 179249,
+        "missing_usage": 0
+      },
+      "cost_by_purpose": {
+        "business_loop": {
+          "requests": 9,
+          "total_tokens": 169985,
+          "missing_usage": 0
+        },
+        "inner_query": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "inner_synthesis": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "source_repair": {
+          "requests": 1,
+          "total_tokens": 9264,
+          "missing_usage": 0
+        },
+        "finalization": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "compaction": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "background_profile_review": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "grading": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "unclassified": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        }
+      },
+      "incomplete": false,
+      "tool_counts": {
+        "book.search_text": 6,
+        "book.context": 5,
+        "book.text": 3,
+        "source.present": 4
+      },
+      "tool_sequence": [
+        {
+          "loop": 1,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 1,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 1,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 2,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 2,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 2,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 3,
+          "tool": "book.context"
+        },
+        {
+          "loop": 3,
+          "tool": "book.context"
+        },
+        {
+          "loop": 3,
+          "tool": "book.context"
+        },
+        {
+          "loop": 4,
+          "tool": "book.context"
+        },
+        {
+          "loop": 4,
+          "tool": "book.context"
+        },
+        {
+          "loop": 5,
+          "tool": "book.text"
+        },
+        {
+          "loop": 5,
+          "tool": "book.text"
+        },
+        {
+          "loop": 6,
+          "tool": "book.text"
+        },
+        {
+          "loop": 7,
+          "tool": "source.present"
+        },
+        {
+          "loop": 7,
+          "tool": "source.present"
+        },
+        {
+          "loop": 7,
+          "tool": "source.present"
+        },
+        {
+          "loop": 8,
+          "tool": "source.present"
+        }
+      ],
+      "valid_sources": 3
+    },
+    {
+      "id": "cross-04",
+      "category": "cross",
+      "system": "Chunk RAG (BM25, single-shot)",
+      "score": {
+        "evidence_groups": 2,
+        "recalled_groups": 2,
+        "evidence_recall": 1,
+        "facts": 2,
+        "supported_facts": 2,
+        "semantic_correct": true,
+        "success": true,
+        "details": [
+          {
+            "key": "high_capacity_stacking",
+            "correct": true,
+            "supported": true
+          },
+          {
+            "key": "constrain_transformer",
+            "correct": true,
+            "supported": true
+          }
+        ]
+      },
+      "elapsed_ms": 5692.832900000038,
+      "usage": {
+        "requests": 1,
+        "total_tokens": 4570,
+        "missing_usage": 0
+      },
+      "cost_by_purpose": {
+        "business_loop": {
+          "requests": 1,
+          "total_tokens": 4570,
+          "missing_usage": 0
+        },
+        "inner_query": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "inner_synthesis": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "source_repair": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "finalization": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "compaction": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "background_profile_review": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "grading": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "unclassified": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        }
+      },
+      "incomplete": false,
+      "tool_counts": {},
+      "tool_sequence": [],
+      "valid_sources": 4
+    },
+    {
+      "id": "contrast-01",
+      "category": "contrast",
+      "system": "Chunk RAG (BM25, single-shot)",
+      "score": {
+        "evidence_groups": 2,
+        "recalled_groups": 2,
+        "evidence_recall": 1,
+        "facts": 2,
+        "supported_facts": 2,
+        "semantic_correct": true,
+        "success": true,
+        "details": [
+          {
+            "key": "trend_focus",
+            "correct": true,
+            "supported": true
+          },
+          {
+            "key": "arb_focus",
+            "correct": true,
+            "supported": true
+          }
+        ]
+      },
+      "elapsed_ms": 1498.312600000063,
+      "usage": {
+        "requests": 1,
+        "total_tokens": 3830,
+        "missing_usage": 0
+      },
+      "cost_by_purpose": {
+        "business_loop": {
+          "requests": 1,
+          "total_tokens": 3830,
+          "missing_usage": 0
+        },
+        "inner_query": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "inner_synthesis": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "source_repair": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "finalization": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "compaction": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "background_profile_review": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "grading": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "unclassified": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        }
+      },
+      "incomplete": false,
+      "tool_counts": {},
+      "tool_sequence": [],
+      "valid_sources": 2
+    },
+    {
+      "id": "contrast-01",
+      "category": "contrast",
+      "system": "Resident Agent (LID + Graph, full loop)",
+      "score": {
+        "evidence_groups": 2,
+        "recalled_groups": 2,
+        "evidence_recall": 1,
+        "facts": 2,
+        "supported_facts": 2,
+        "semantic_correct": true,
+        "success": true,
+        "details": [
+          {
+            "key": "trend_focus",
+            "correct": true,
+            "supported": true
+          },
+          {
+            "key": "arb_focus",
+            "correct": true,
+            "supported": true
+          }
+        ]
+      },
+      "elapsed_ms": 20858.977399999974,
+      "usage": {
+        "requests": 5,
+        "total_tokens": 41714,
+        "missing_usage": 0
+      },
+      "cost_by_purpose": {
+        "business_loop": {
+          "requests": 4,
+          "total_tokens": 40212,
+          "missing_usage": 0
+        },
+        "inner_query": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "inner_synthesis": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "source_repair": {
+          "requests": 1,
+          "total_tokens": 1502,
+          "missing_usage": 0
+        },
+        "finalization": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "compaction": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "background_profile_review": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "grading": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "unclassified": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        }
+      },
+      "incomplete": false,
+      "tool_counts": {
+        "book.structure": 1,
+        "book.search_text": 2,
+        "book.text": 2,
+        "source.present": 2
+      },
+      "tool_sequence": [
+        {
+          "loop": 1,
+          "tool": "book.structure"
+        },
+        {
+          "loop": 1,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 1,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 2,
+          "tool": "book.text"
+        },
+        {
+          "loop": 2,
+          "tool": "book.text"
+        },
+        {
+          "loop": 3,
+          "tool": "source.present"
+        },
+        {
+          "loop": 3,
+          "tool": "source.present"
+        }
+      ],
+      "valid_sources": 2
+    },
+    {
+      "id": "contrast-02",
+      "category": "contrast",
+      "system": "Resident Agent (LID + Graph, full loop)",
+      "score": {
+        "evidence_groups": 1,
+        "recalled_groups": 1,
+        "evidence_recall": 1,
+        "facts": 1,
+        "supported_facts": 1,
+        "semantic_correct": true,
+        "success": true,
+        "details": [
+          {
+            "key": "valid_holdout",
+            "correct": true,
+            "supported": true
+          }
+        ]
+      },
+      "elapsed_ms": 56793.7818,
+      "usage": {
+        "requests": 11,
+        "total_tokens": 130671,
+        "missing_usage": 0
+      },
+      "cost_by_purpose": {
+        "business_loop": {
+          "requests": 10,
+          "total_tokens": 127423,
+          "missing_usage": 0
+        },
+        "inner_query": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "inner_synthesis": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "source_repair": {
+          "requests": 1,
+          "total_tokens": 3248,
+          "missing_usage": 0
+        },
+        "finalization": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "compaction": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "background_profile_review": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "grading": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "unclassified": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        }
+      },
+      "incomplete": false,
+      "tool_counts": {
+        "book.concept": 2,
+        "book.text": 7,
+        "book.structure": 1,
+        "book.context": 1,
+        "source.present": 4
+      },
+      "tool_sequence": [
+        {
+          "loop": 1,
+          "tool": "book.concept"
+        },
+        {
+          "loop": 1,
+          "tool": "book.concept"
+        },
+        {
+          "loop": 2,
+          "tool": "book.text"
+        },
+        {
+          "loop": 2,
+          "tool": "book.structure"
+        },
+        {
+          "loop": 3,
+          "tool": "book.text"
+        },
+        {
+          "loop": 4,
+          "tool": "book.text"
+        },
+        {
+          "loop": 4,
+          "tool": "book.text"
+        },
+        {
+          "loop": 4,
+          "tool": "book.text"
+        },
+        {
+          "loop": 5,
+          "tool": "book.context"
+        },
+        {
+          "loop": 6,
+          "tool": "book.text"
+        },
+        {
+          "loop": 6,
+          "tool": "book.text"
+        },
+        {
+          "loop": 7,
+          "tool": "source.present"
+        },
+        {
+          "loop": 7,
+          "tool": "source.present"
+        },
+        {
+          "loop": 8,
+          "tool": "source.present"
+        },
+        {
+          "loop": 9,
+          "tool": "source.present"
+        }
+      ],
+      "valid_sources": 2
+    },
+    {
+      "id": "contrast-02",
+      "category": "contrast",
+      "system": "Chunk RAG (BM25, single-shot)",
+      "score": {
+        "evidence_groups": 1,
+        "recalled_groups": 1,
+        "evidence_recall": 1,
+        "facts": 1,
+        "supported_facts": 1,
+        "semantic_correct": true,
+        "success": true,
+        "details": [
+          {
+            "key": "valid_holdout",
+            "correct": true,
+            "supported": true
+          }
+        ]
+      },
+      "elapsed_ms": 2057.7024999998976,
+      "usage": {
+        "requests": 1,
+        "total_tokens": 4071,
+        "missing_usage": 0
+      },
+      "cost_by_purpose": {
+        "business_loop": {
+          "requests": 1,
+          "total_tokens": 4071,
+          "missing_usage": 0
+        },
+        "inner_query": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "inner_synthesis": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "source_repair": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "finalization": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "compaction": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "background_profile_review": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "grading": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "unclassified": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        }
+      },
+      "incomplete": false,
+      "tool_counts": {},
+      "tool_sequence": [],
+      "valid_sources": 1
+    },
+    {
+      "id": "contrast-03",
+      "category": "contrast",
+      "system": "Chunk RAG (BM25, single-shot)",
+      "score": {
+        "evidence_groups": 1,
+        "recalled_groups": 1,
+        "evidence_recall": 1,
+        "facts": 1,
+        "supported_facts": 0,
+        "semantic_correct": false,
+        "success": false,
+        "details": [
+          {
+            "key": "allocation",
+            "correct": false,
+            "supported": false
+          }
+        ]
+      },
+      "elapsed_ms": 51.55019999993965,
+      "usage": {
+        "requests": 1,
+        "total_tokens": null,
+        "missing_usage": 1
+      },
+      "cost_by_purpose": {
+        "business_loop": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "inner_query": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "inner_synthesis": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "source_repair": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "finalization": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "compaction": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "background_profile_review": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "grading": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "unclassified": {
+          "requests": 1,
+          "total_tokens": null,
+          "missing_usage": 1
+        }
+      },
+      "incomplete": false,
+      "tool_counts": {},
+      "tool_sequence": [],
+      "valid_sources": 0,
+      "error": "task_error"
+    },
+    {
+      "id": "contrast-03",
+      "category": "contrast",
+      "system": "Resident Agent (LID + Graph, full loop)",
+      "score": {
+        "evidence_groups": 1,
+        "recalled_groups": 1,
+        "evidence_recall": 1,
+        "facts": 1,
+        "supported_facts": 0,
+        "semantic_correct": false,
+        "success": false,
+        "details": [
+          {
+            "key": "allocation",
+            "correct": false,
+            "supported": false
+          }
+        ]
+      },
+      "elapsed_ms": 57260.24919999996,
+      "usage": {
+        "requests": 7,
+        "total_tokens": 80899,
+        "missing_usage": 0
+      },
+      "cost_by_purpose": {
+        "business_loop": {
+          "requests": 7,
+          "total_tokens": 80899,
+          "missing_usage": 0
+        },
+        "inner_query": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "inner_synthesis": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "source_repair": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "finalization": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "compaction": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "background_profile_review": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "grading": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "unclassified": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        }
+      },
+      "incomplete": false,
+      "tool_counts": {
+        "book.search_text": 2,
+        "book.text": 5,
+        "source.present": 7
+      },
+      "tool_sequence": [
+        {
+          "loop": 1,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 1,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 2,
+          "tool": "book.text"
+        },
+        {
+          "loop": 2,
+          "tool": "book.text"
+        },
+        {
+          "loop": 3,
+          "tool": "book.text"
+        },
+        {
+          "loop": 3,
+          "tool": "book.text"
+        },
+        {
+          "loop": 3,
+          "tool": "book.text"
+        },
+        {
+          "loop": 4,
+          "tool": "source.present"
+        },
+        {
+          "loop": 4,
+          "tool": "source.present"
+        },
+        {
+          "loop": 4,
+          "tool": "source.present"
+        },
+        {
+          "loop": 5,
+          "tool": "source.present"
+        },
+        {
+          "loop": 5,
+          "tool": "source.present"
+        },
+        {
+          "loop": 6,
+          "tool": "source.present"
+        },
+        {
+          "loop": 6,
+          "tool": "source.present"
+        }
+      ],
+      "valid_sources": 3
+    },
+    {
+      "id": "contrast-04",
+      "category": "contrast",
+      "system": "Resident Agent (LID + Graph, full loop)",
+      "score": {
+        "evidence_groups": 1,
+        "recalled_groups": 1,
+        "evidence_recall": 1,
+        "facts": 1,
+        "supported_facts": 0,
+        "semantic_correct": true,
+        "success": false,
+        "details": [
+          {
+            "key": "more_efficient",
+            "correct": true,
+            "supported": false
+          }
+        ]
+      },
+      "elapsed_ms": 62852.46270000003,
+      "usage": {
+        "requests": 5,
+        "total_tokens": 52279,
+        "missing_usage": 0
+      },
+      "cost_by_purpose": {
+        "business_loop": {
+          "requests": 5,
+          "total_tokens": 52279,
+          "missing_usage": 0
+        },
+        "inner_query": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "inner_synthesis": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "source_repair": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "finalization": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "compaction": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "background_profile_review": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "grading": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "unclassified": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        }
+      },
+      "incomplete": false,
+      "tool_counts": {
+        "book.concept": 2,
+        "book.text": 3,
+        "source.present": 2
+      },
+      "tool_sequence": [
+        {
+          "loop": 1,
+          "tool": "book.concept"
+        },
+        {
+          "loop": 1,
+          "tool": "book.concept"
+        },
+        {
+          "loop": 2,
+          "tool": "book.text"
+        },
+        {
+          "loop": 2,
+          "tool": "book.text"
+        },
+        {
+          "loop": 3,
+          "tool": "book.text"
+        },
+        {
+          "loop": 4,
+          "tool": "source.present"
+        },
+        {
+          "loop": 4,
+          "tool": "source.present"
+        }
+      ],
+      "valid_sources": 0
+    },
+    {
+      "id": "contrast-04",
+      "category": "contrast",
+      "system": "Chunk RAG (BM25, single-shot)",
+      "score": {
+        "evidence_groups": 1,
+        "recalled_groups": 1,
+        "evidence_recall": 1,
+        "facts": 1,
+        "supported_facts": 1,
+        "semantic_correct": true,
+        "success": true,
+        "details": [
+          {
+            "key": "more_efficient",
+            "correct": true,
+            "supported": true
+          }
+        ]
+      },
+      "elapsed_ms": 10095.749599999981,
+      "usage": {
+        "requests": 1,
+        "total_tokens": 4981,
+        "missing_usage": 0
+      },
+      "cost_by_purpose": {
+        "business_loop": {
+          "requests": 1,
+          "total_tokens": 4981,
+          "missing_usage": 0
+        },
+        "inner_query": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "inner_synthesis": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "source_repair": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "finalization": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "compaction": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "background_profile_review": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "grading": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "unclassified": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        }
+      },
+      "incomplete": false,
+      "tool_counts": {},
+      "tool_sequence": [],
+      "valid_sources": 1
+    },
+    {
+      "id": "formula-01",
+      "category": "formula",
+      "system": "Chunk RAG (BM25, single-shot)",
+      "score": {
+        "evidence_groups": 1,
+        "recalled_groups": 1,
+        "evidence_recall": 1,
+        "facts": 1,
+        "supported_facts": 1,
+        "semantic_correct": true,
+        "success": true,
+        "details": [
+          {
+            "key": "multiplier",
+            "correct": true,
+            "supported": true
+          }
+        ]
+      },
+      "elapsed_ms": 6560.128499999875,
+      "usage": {
+        "requests": 1,
+        "total_tokens": 4762,
+        "missing_usage": 0
+      },
+      "cost_by_purpose": {
+        "business_loop": {
+          "requests": 1,
+          "total_tokens": 4762,
+          "missing_usage": 0
+        },
+        "inner_query": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "inner_synthesis": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "source_repair": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "finalization": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "compaction": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "background_profile_review": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "grading": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "unclassified": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        }
+      },
+      "incomplete": false,
+      "tool_counts": {},
+      "tool_sequence": [],
+      "valid_sources": 2
+    },
+    {
+      "id": "formula-01",
+      "category": "formula",
+      "system": "Resident Agent (LID + Graph, full loop)",
+      "score": {
+        "evidence_groups": 1,
+        "recalled_groups": 1,
+        "evidence_recall": 1,
+        "facts": 1,
+        "supported_facts": 1,
+        "semantic_correct": true,
+        "success": true,
+        "details": [
+          {
+            "key": "multiplier",
+            "correct": true,
+            "supported": true
+          }
+        ]
+      },
+      "elapsed_ms": 60694.15369999991,
+      "usage": {
+        "requests": 10,
+        "total_tokens": 139904,
+        "missing_usage": 0
+      },
+      "cost_by_purpose": {
+        "business_loop": {
+          "requests": 10,
+          "total_tokens": 139904,
+          "missing_usage": 0
+        },
+        "inner_query": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "inner_synthesis": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "source_repair": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "finalization": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "compaction": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "background_profile_review": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "grading": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "unclassified": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        }
+      },
+      "incomplete": false,
+      "tool_counts": {
+        "book.search_text": 8,
+        "book.text": 5,
+        "book.context": 1,
+        "source.present": 5
+      },
+      "tool_sequence": [
+        {
+          "loop": 1,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 1,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 2,
+          "tool": "book.text"
+        },
+        {
+          "loop": 2,
+          "tool": "book.context"
+        },
+        {
+          "loop": 3,
+          "tool": "book.text"
+        },
+        {
+          "loop": 3,
+          "tool": "book.text"
+        },
+        {
+          "loop": 4,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 4,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 4,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 5,
+          "tool": "book.text"
+        },
+        {
+          "loop": 5,
+          "tool": "book.text"
+        },
+        {
+          "loop": 6,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 6,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 6,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 7,
+          "tool": "source.present"
+        },
+        {
+          "loop": 7,
+          "tool": "source.present"
+        },
+        {
+          "loop": 8,
+          "tool": "source.present"
+        },
+        {
+          "loop": 8,
+          "tool": "source.present"
+        },
+        {
+          "loop": 9,
+          "tool": "source.present"
+        }
+      ],
+      "valid_sources": 3
+    },
+    {
+      "id": "formula-02",
+      "category": "formula",
+      "system": "Resident Agent (LID + Graph, full loop)",
+      "score": {
+        "evidence_groups": 1,
+        "recalled_groups": 1,
+        "evidence_recall": 1,
+        "facts": 1,
+        "supported_facts": 1,
+        "semantic_correct": true,
+        "success": true,
+        "details": [
+          {
+            "key": "direction",
+            "correct": true,
+            "supported": true
+          }
+        ]
+      },
+      "elapsed_ms": 78709.66570000001,
+      "usage": {
+        "requests": 11,
+        "total_tokens": 173830,
+        "missing_usage": 0
+      },
+      "cost_by_purpose": {
+        "business_loop": {
+          "requests": 10,
+          "total_tokens": 170410,
+          "missing_usage": 0
+        },
+        "inner_query": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "inner_synthesis": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "source_repair": {
+          "requests": 1,
+          "total_tokens": 3420,
+          "missing_usage": 0
+        },
+        "finalization": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "compaction": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "background_profile_review": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "grading": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "unclassified": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        }
+      },
+      "incomplete": false,
+      "tool_counts": {
+        "book.search_text": 4,
+        "book.concept": 1,
+        "book.text": 15,
+        "book.context": 3,
+        "source.present": 9
+      },
+      "tool_sequence": [
+        {
+          "loop": 1,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 1,
+          "tool": "book.concept"
+        },
+        {
+          "loop": 2,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 2,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 2,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 3,
+          "tool": "book.text"
+        },
+        {
+          "loop": 3,
+          "tool": "book.text"
+        },
+        {
+          "loop": 3,
+          "tool": "book.text"
+        },
+        {
+          "loop": 3,
+          "tool": "book.text"
+        },
+        {
+          "loop": 3,
+          "tool": "book.context"
+        },
+        {
+          "loop": 4,
+          "tool": "book.text"
+        },
+        {
+          "loop": 4,
+          "tool": "book.text"
+        },
+        {
+          "loop": 4,
+          "tool": "book.text"
+        },
+        {
+          "loop": 4,
+          "tool": "book.text"
+        },
+        {
+          "loop": 4,
+          "tool": "book.text"
+        },
+        {
+          "loop": 4,
+          "tool": "book.text"
+        },
+        {
+          "loop": 5,
+          "tool": "book.context"
+        },
+        {
+          "loop": 5,
+          "tool": "book.context"
+        },
+        {
+          "loop": 6,
+          "tool": "book.text"
+        },
+        {
+          "loop": 6,
+          "tool": "book.text"
+        },
+        {
+          "loop": 7,
+          "tool": "book.text"
+        },
+        {
+          "loop": 7,
+          "tool": "book.text"
+        },
+        {
+          "loop": 7,
+          "tool": "book.text"
+        },
+        {
+          "loop": 8,
+          "tool": "source.present"
+        },
+        {
+          "loop": 8,
+          "tool": "source.present"
+        },
+        {
+          "loop": 8,
+          "tool": "source.present"
+        },
+        {
+          "loop": 8,
+          "tool": "source.present"
+        },
+        {
+          "loop": 8,
+          "tool": "source.present"
+        },
+        {
+          "loop": 8,
+          "tool": "source.present"
+        },
+        {
+          "loop": 9,
+          "tool": "source.present"
+        },
+        {
+          "loop": 9,
+          "tool": "source.present"
+        },
+        {
+          "loop": 9,
+          "tool": "source.present"
+        }
+      ],
+      "valid_sources": 6
+    },
+    {
+      "id": "formula-02",
+      "category": "formula",
+      "system": "Chunk RAG (BM25, single-shot)",
+      "score": {
+        "evidence_groups": 1,
+        "recalled_groups": 1,
+        "evidence_recall": 1,
+        "facts": 1,
+        "supported_facts": 1,
+        "semantic_correct": true,
+        "success": true,
+        "details": [
+          {
+            "key": "direction",
+            "correct": true,
+            "supported": true
+          }
+        ]
+      },
+      "elapsed_ms": 7574.4501999998465,
+      "usage": {
+        "requests": 1,
+        "total_tokens": 4719,
+        "missing_usage": 0
+      },
+      "cost_by_purpose": {
+        "business_loop": {
+          "requests": 1,
+          "total_tokens": 4719,
+          "missing_usage": 0
+        },
+        "inner_query": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "inner_synthesis": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "source_repair": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "finalization": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "compaction": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "background_profile_review": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "grading": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "unclassified": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        }
+      },
+      "incomplete": false,
+      "tool_counts": {},
+      "tool_sequence": [],
+      "valid_sources": 3
+    },
+    {
+      "id": "formula-03",
+      "category": "formula",
+      "system": "Chunk RAG (BM25, single-shot)",
+      "score": {
+        "evidence_groups": 1,
+        "recalled_groups": 1,
+        "evidence_recall": 1,
+        "facts": 1,
+        "supported_facts": 1,
+        "semantic_correct": true,
+        "success": true,
+        "details": [
+          {
+            "key": "multiplier",
+            "correct": true,
+            "supported": true
+          }
+        ]
+      },
+      "elapsed_ms": 3134.7306999999564,
+      "usage": {
+        "requests": 1,
+        "total_tokens": 4165,
+        "missing_usage": 0
+      },
+      "cost_by_purpose": {
+        "business_loop": {
+          "requests": 1,
+          "total_tokens": 4165,
+          "missing_usage": 0
+        },
+        "inner_query": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "inner_synthesis": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "source_repair": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "finalization": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "compaction": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "background_profile_review": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "grading": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "unclassified": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        }
+      },
+      "incomplete": false,
+      "tool_counts": {},
+      "tool_sequence": [],
+      "valid_sources": 1
+    },
+    {
+      "id": "formula-03",
+      "category": "formula",
+      "system": "Resident Agent (LID + Graph, full loop)",
+      "score": {
+        "evidence_groups": 1,
+        "recalled_groups": 1,
+        "evidence_recall": 1,
+        "facts": 1,
+        "supported_facts": 1,
+        "semantic_correct": true,
+        "success": true,
+        "details": [
+          {
+            "key": "multiplier",
+            "correct": true,
+            "supported": true
+          }
+        ]
+      },
+      "elapsed_ms": 26383.330599999987,
+      "usage": {
+        "requests": 9,
+        "total_tokens": 76444,
+        "missing_usage": 0
+      },
+      "cost_by_purpose": {
+        "business_loop": {
+          "requests": 8,
+          "total_tokens": 75047,
+          "missing_usage": 0
+        },
+        "inner_query": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "inner_synthesis": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "source_repair": {
+          "requests": 1,
+          "total_tokens": 1397,
+          "missing_usage": 0
+        },
+        "finalization": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "compaction": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "background_profile_review": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "grading": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "unclassified": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        }
+      },
+      "incomplete": false,
+      "tool_counts": {
+        "book.search_text": 3,
+        "book.query": 1,
+        "book.text": 4,
+        "book.context": 1,
+        "source.present": 2
+      },
+      "tool_sequence": [
+        {
+          "loop": 1,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 1,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 2,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 2,
+          "tool": "book.query"
+        },
+        {
+          "loop": 3,
+          "tool": "book.text"
+        },
+        {
+          "loop": 3,
+          "tool": "book.text"
+        },
+        {
+          "loop": 4,
+          "tool": "book.context"
+        },
+        {
+          "loop": 5,
+          "tool": "book.text"
+        },
+        {
+          "loop": 5,
+          "tool": "book.text"
+        },
+        {
+          "loop": 6,
+          "tool": "source.present"
+        },
+        {
+          "loop": 7,
+          "tool": "source.present"
+        }
+      ],
+      "valid_sources": 1
+    },
+    {
+      "id": "formula-04",
+      "category": "formula",
+      "system": "Resident Agent (LID + Graph, full loop)",
+      "score": {
+        "evidence_groups": 1,
+        "recalled_groups": 1,
+        "evidence_recall": 1,
+        "facts": 1,
+        "supported_facts": 0,
+        "semantic_correct": false,
+        "success": false,
+        "details": [
+          {
+            "key": "weight",
+            "correct": true,
+            "supported": false
+          }
+        ]
+      },
+      "elapsed_ms": 58291.337300000014,
+      "usage": {
+        "requests": 7,
+        "total_tokens": 63142,
+        "missing_usage": 0
+      },
+      "cost_by_purpose": {
+        "business_loop": {
+          "requests": 5,
+          "total_tokens": 48943,
+          "missing_usage": 0
+        },
+        "inner_query": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "inner_synthesis": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "source_repair": {
+          "requests": 1,
+          "total_tokens": 4822,
+          "missing_usage": 0
+        },
+        "finalization": {
+          "requests": 1,
+          "total_tokens": 9377,
+          "missing_usage": 0
+        },
+        "compaction": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "background_profile_review": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "grading": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "unclassified": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        }
+      },
+      "incomplete": true,
+      "tool_counts": {
+        "book.search_text": 1,
+        "book.concept": 1,
+        "book.text": 2,
+        "source.present": 2
+      },
+      "tool_sequence": [
+        {
+          "loop": 1,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 1,
+          "tool": "book.concept"
+        },
+        {
+          "loop": 2,
+          "tool": "book.text"
+        },
+        {
+          "loop": 3,
+          "tool": "book.text"
+        },
+        {
+          "loop": 4,
+          "tool": "source.present"
+        },
+        {
+          "loop": 5,
+          "tool": "source.present"
+        }
+      ],
+      "valid_sources": 0
+    },
+    {
+      "id": "formula-04",
+      "category": "formula",
+      "system": "Chunk RAG (BM25, single-shot)",
+      "score": {
+        "evidence_groups": 1,
+        "recalled_groups": 1,
+        "evidence_recall": 1,
+        "facts": 1,
+        "supported_facts": 1,
+        "semantic_correct": true,
+        "success": true,
+        "details": [
+          {
+            "key": "weight",
+            "correct": true,
+            "supported": true
+          }
+        ]
+      },
+      "elapsed_ms": 5622.01099999994,
+      "usage": {
+        "requests": 1,
+        "total_tokens": 4408,
+        "missing_usage": 0
+      },
+      "cost_by_purpose": {
+        "business_loop": {
+          "requests": 1,
+          "total_tokens": 4408,
+          "missing_usage": 0
+        },
+        "inner_query": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "inner_synthesis": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "source_repair": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "finalization": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "compaction": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "background_profile_review": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "grading": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "unclassified": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        }
+      },
+      "incomplete": false,
+      "tool_counts": {},
+      "tool_sequence": [],
+      "valid_sources": 2
+    },
+    {
+      "id": "refusal-01",
+      "category": "refusal",
+      "system": "Chunk RAG (BM25, single-shot)",
+      "score": {
+        "evidence_groups": 0,
+        "recalled_groups": 0,
+        "evidence_recall": null,
+        "facts": 0,
+        "supported_facts": 0,
+        "semantic_correct": true,
+        "success": true,
+        "details": []
+      },
+      "elapsed_ms": 1822.6385999999475,
+      "usage": {
+        "requests": 1,
+        "total_tokens": 3945,
+        "missing_usage": 0
+      },
+      "cost_by_purpose": {
+        "business_loop": {
+          "requests": 1,
+          "total_tokens": 3945,
+          "missing_usage": 0
+        },
+        "inner_query": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "inner_synthesis": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "source_repair": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "finalization": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "compaction": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "background_profile_review": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "grading": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "unclassified": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        }
+      },
+      "incomplete": false,
+      "tool_counts": {},
+      "tool_sequence": [],
+      "valid_sources": 0
+    },
+    {
+      "id": "refusal-01",
+      "category": "refusal",
+      "system": "Resident Agent (LID + Graph, full loop)",
+      "score": {
+        "evidence_groups": 0,
+        "recalled_groups": 0,
+        "evidence_recall": null,
+        "facts": 0,
+        "supported_facts": 0,
+        "semantic_correct": false,
+        "success": false,
+        "details": []
+      },
+      "elapsed_ms": 64434.151700000046,
+      "usage": {
+        "requests": 13,
+        "total_tokens": 194067,
+        "missing_usage": 0
+      },
+      "cost_by_purpose": {
+        "business_loop": {
+          "requests": 12,
+          "total_tokens": 180691,
+          "missing_usage": 0
+        },
+        "inner_query": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "inner_synthesis": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "source_repair": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "finalization": {
+          "requests": 1,
+          "total_tokens": 13376,
+          "missing_usage": 0
+        },
+        "compaction": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "background_profile_review": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "grading": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "unclassified": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        }
+      },
+      "incomplete": true,
+      "tool_counts": {
+        "book.search_text": 19,
+        "book.text": 4,
+        "source.present": 1
+      },
+      "tool_sequence": [
+        {
+          "loop": 1,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 1,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 2,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 2,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 3,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 3,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 3,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 4,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 4,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 4,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 5,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 5,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 5,
+          "tool": "book.text"
+        },
+        {
+          "loop": 6,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 7,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 7,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 7,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 8,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 9,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 10,
+          "tool": "book.text"
+        },
+        {
+          "loop": 10,
+          "tool": "book.text"
+        },
+        {
+          "loop": 10,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 11,
+          "tool": "book.text"
+        },
+        {
+          "loop": 12,
+          "tool": "source.present"
+        }
+      ],
+      "valid_sources": 0
+    },
+    {
+      "id": "refusal-02",
+      "category": "refusal",
+      "system": "Resident Agent (LID + Graph, full loop)",
+      "score": {
+        "evidence_groups": 0,
+        "recalled_groups": 0,
+        "evidence_recall": null,
+        "facts": 0,
+        "supported_facts": 0,
+        "semantic_correct": true,
+        "success": true,
+        "details": []
+      },
+      "elapsed_ms": 43619.936400000006,
+      "usage": {
+        "requests": 6,
+        "total_tokens": 46170,
+        "missing_usage": 0
+      },
+      "cost_by_purpose": {
+        "business_loop": {
+          "requests": 5,
+          "total_tokens": 43838,
+          "missing_usage": 0
+        },
+        "inner_query": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "inner_synthesis": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "source_repair": {
+          "requests": 1,
+          "total_tokens": 2332,
+          "missing_usage": 0
+        },
+        "finalization": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "compaction": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "background_profile_review": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "grading": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "unclassified": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        }
+      },
+      "incomplete": false,
+      "tool_counts": {
+        "book.search_text": 10
+      },
+      "tool_sequence": [
+        {
+          "loop": 1,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 1,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 2,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 2,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 3,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 3,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 4,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 4,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 4,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 4,
+          "tool": "book.search_text"
+        }
+      ],
+      "valid_sources": 0
+    },
+    {
+      "id": "refusal-02",
+      "category": "refusal",
+      "system": "Chunk RAG (BM25, single-shot)",
+      "score": {
+        "evidence_groups": 0,
+        "recalled_groups": 0,
+        "evidence_recall": null,
+        "facts": 0,
+        "supported_facts": 0,
+        "semantic_correct": true,
+        "success": true,
+        "details": []
+      },
+      "elapsed_ms": 1852.812699999893,
+      "usage": {
+        "requests": 1,
+        "total_tokens": 3986,
+        "missing_usage": 0
+      },
+      "cost_by_purpose": {
+        "business_loop": {
+          "requests": 1,
+          "total_tokens": 3986,
+          "missing_usage": 0
+        },
+        "inner_query": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "inner_synthesis": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "source_repair": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "finalization": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "compaction": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "background_profile_review": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "grading": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "unclassified": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        }
+      },
+      "incomplete": false,
+      "tool_counts": {},
+      "tool_sequence": [],
+      "valid_sources": 0
+    },
+    {
+      "id": "refusal-03",
+      "category": "refusal",
+      "system": "Chunk RAG (BM25, single-shot)",
+      "score": {
+        "evidence_groups": 0,
+        "recalled_groups": 0,
+        "evidence_recall": null,
+        "facts": 0,
+        "supported_facts": 0,
+        "semantic_correct": true,
+        "success": true,
+        "details": []
+      },
+      "elapsed_ms": 1687.2057000000495,
+      "usage": {
+        "requests": 1,
+        "total_tokens": 3782,
+        "missing_usage": 0
+      },
+      "cost_by_purpose": {
+        "business_loop": {
+          "requests": 1,
+          "total_tokens": 3782,
+          "missing_usage": 0
+        },
+        "inner_query": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "inner_synthesis": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "source_repair": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "finalization": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "compaction": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "background_profile_review": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "grading": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "unclassified": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        }
+      },
+      "incomplete": false,
+      "tool_counts": {},
+      "tool_sequence": [],
+      "valid_sources": 1
+    },
+    {
+      "id": "refusal-03",
+      "category": "refusal",
+      "system": "Resident Agent (LID + Graph, full loop)",
+      "score": {
+        "evidence_groups": 0,
+        "recalled_groups": 0,
+        "evidence_recall": null,
+        "facts": 0,
+        "supported_facts": 0,
+        "semantic_correct": false,
+        "success": false,
+        "details": []
+      },
+      "elapsed_ms": 32761.68619999988,
+      "usage": {
+        "requests": 13,
+        "total_tokens": 125505,
+        "missing_usage": 0
+      },
+      "cost_by_purpose": {
+        "business_loop": {
+          "requests": 12,
+          "total_tokens": 114679,
+          "missing_usage": 0
+        },
+        "inner_query": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "inner_synthesis": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "source_repair": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "finalization": {
+          "requests": 1,
+          "total_tokens": 10826,
+          "missing_usage": 0
+        },
+        "compaction": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "background_profile_review": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "grading": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "unclassified": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        }
+      },
+      "incomplete": false,
+      "tool_counts": {
+        "book.search_text": 9,
+        "book.query": 1,
+        "book.text": 5,
+        "book.context": 4
+      },
+      "tool_sequence": [
+        {
+          "request_ordinal": 1,
+          "tool": "book.search_text"
+        },
+        {
+          "request_ordinal": 1,
+          "tool": "book.query"
+        },
+        {
+          "request_ordinal": 2,
+          "tool": "book.search_text"
+        },
+        {
+          "request_ordinal": 2,
+          "tool": "book.search_text"
+        },
+        {
+          "request_ordinal": 2,
+          "tool": "book.search_text"
+        },
+        {
+          "request_ordinal": 3,
+          "tool": "book.text"
+        },
+        {
+          "request_ordinal": 4,
+          "tool": "book.text"
+        },
+        {
+          "request_ordinal": 5,
+          "tool": "book.context"
+        },
+        {
+          "request_ordinal": 6,
+          "tool": "book.text"
+        },
+        {
+          "request_ordinal": 7,
+          "tool": "book.search_text"
+        },
+        {
+          "request_ordinal": 7,
+          "tool": "book.search_text"
+        },
+        {
+          "request_ordinal": 8,
+          "tool": "book.context"
+        },
+        {
+          "request_ordinal": 9,
+          "tool": "book.text"
+        },
+        {
+          "request_ordinal": 10,
+          "tool": "book.context"
+        },
+        {
+          "request_ordinal": 11,
+          "tool": "book.search_text"
+        },
+        {
+          "request_ordinal": 11,
+          "tool": "book.search_text"
+        },
+        {
+          "request_ordinal": 11,
+          "tool": "book.search_text"
+        },
+        {
+          "request_ordinal": 12,
+          "tool": "book.text"
+        },
+        {
+          "request_ordinal": 12,
+          "tool": "book.context"
+        }
+      ],
+      "valid_sources": 0,
+      "error": "FINALIZATION_TOOL_PROTOCOL_VIOLATION"
+    },
+    {
+      "id": "refusal-04",
+      "category": "refusal",
+      "system": "Resident Agent (LID + Graph, full loop)",
+      "score": {
+        "evidence_groups": 0,
+        "recalled_groups": 0,
+        "evidence_recall": null,
+        "facts": 0,
+        "supported_facts": 0,
+        "semantic_correct": true,
+        "success": true,
+        "details": []
+      },
+      "elapsed_ms": 25109.772600000026,
+      "usage": {
+        "requests": 6,
+        "total_tokens": 43006,
+        "missing_usage": 0
+      },
+      "cost_by_purpose": {
+        "business_loop": {
+          "requests": 5,
+          "total_tokens": 41281,
+          "missing_usage": 0
+        },
+        "inner_query": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "inner_synthesis": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "source_repair": {
+          "requests": 1,
+          "total_tokens": 1725,
+          "missing_usage": 0
+        },
+        "finalization": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "compaction": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "background_profile_review": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "grading": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "unclassified": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        }
+      },
+      "incomplete": false,
+      "tool_counts": {
+        "book.search_text": 12
+      },
+      "tool_sequence": [
+        {
+          "loop": 1,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 1,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 2,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 2,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 2,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 3,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 3,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 3,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 4,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 4,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 4,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 4,
+          "tool": "book.search_text"
+        }
+      ],
+      "valid_sources": 0
+    },
+    {
+      "id": "refusal-04",
+      "category": "refusal",
+      "system": "Chunk RAG (BM25, single-shot)",
+      "score": {
+        "evidence_groups": 0,
+        "recalled_groups": 0,
+        "evidence_recall": null,
+        "facts": 0,
+        "supported_facts": 0,
+        "semantic_correct": true,
+        "success": true,
+        "details": []
+      },
+      "elapsed_ms": 2579.9473999999464,
+      "usage": {
+        "requests": 1,
+        "total_tokens": 3732,
+        "missing_usage": 0
+      },
+      "cost_by_purpose": {
+        "business_loop": {
+          "requests": 1,
+          "total_tokens": 3732,
+          "missing_usage": 0
+        },
+        "inner_query": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "inner_synthesis": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "source_repair": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "finalization": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "compaction": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "background_profile_review": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "grading": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "unclassified": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        }
+      },
+      "incomplete": false,
+      "tool_counts": {},
+      "tool_sequence": [],
+      "valid_sources": 0
+    }
+  ],
+  "navigation": [
+    {
+      "id": "source-01",
+      "category": "source",
+      "system": "Resident Agent (LID + Graph, full loop)",
+      "score": {
+        "evidence_groups": 1,
+        "recalled_groups": 1,
+        "evidence_recall": 1,
+        "facts": 1,
+        "supported_facts": 1,
+        "semantic_correct": true,
+        "success": true,
+        "details": [
+          {
+            "key": "remove",
+            "correct": true,
+            "supported": true
+          }
+        ]
+      },
+      "elapsed_ms": 26127.54119999986,
+      "usage": {
+        "requests": 6,
+        "total_tokens": 33804,
+        "missing_usage": 0
+      },
+      "cost_by_purpose": {
+        "business_loop": {
+          "requests": 5,
+          "total_tokens": 31726,
+          "missing_usage": 0
+        },
+        "inner_query": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "inner_synthesis": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "source_repair": {
+          "requests": 1,
+          "total_tokens": 2078,
+          "missing_usage": 0
+        },
+        "finalization": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "compaction": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "background_profile_review": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "grading": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "unclassified": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        }
+      },
+      "incomplete": false,
+      "tool_counts": {
+        "book.search_text": 2,
+        "book.text": 1,
+        "reader.gotoLid": 1,
+        "source.present": 1
+      },
+      "tool_sequence": [
+        {
+          "loop": 1,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 1,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 2,
+          "tool": "book.text"
+        },
+        {
+          "loop": 3,
+          "tool": "reader.gotoLid"
+        },
+        {
+          "loop": 4,
+          "tool": "source.present"
+        }
+      ],
+      "valid_sources": 1,
+      "navigation_ok": true
+    },
+    {
+      "id": "source-02",
+      "category": "source",
+      "system": "Resident Agent (LID + Graph, full loop)",
+      "score": {
+        "evidence_groups": 1,
+        "recalled_groups": 1,
+        "evidence_recall": 1,
+        "facts": 1,
+        "supported_facts": 0,
+        "semantic_correct": true,
+        "success": false,
+        "details": [
+          {
+            "key": "alias",
+            "correct": true,
+            "supported": false
+          }
+        ]
+      },
+      "elapsed_ms": 20634.36910000001,
+      "usage": {
+        "requests": 6,
+        "total_tokens": 46145,
+        "missing_usage": 0
+      },
+      "cost_by_purpose": {
+        "business_loop": {
+          "requests": 5,
+          "total_tokens": 44493,
+          "missing_usage": 0
+        },
+        "inner_query": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "inner_synthesis": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "source_repair": {
+          "requests": 1,
+          "total_tokens": 1652,
+          "missing_usage": 0
+        },
+        "finalization": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "compaction": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "background_profile_review": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "grading": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "unclassified": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        }
+      },
+      "incomplete": false,
+      "tool_counts": {
+        "reader.state": 1,
+        "book.search_text": 2,
+        "book.text": 1,
+        "reader.gotoLid": 1
+      },
+      "tool_sequence": [
+        {
+          "loop": 1,
+          "tool": "reader.state"
+        },
+        {
+          "loop": 2,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 2,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 3,
+          "tool": "book.text"
+        },
+        {
+          "loop": 4,
+          "tool": "reader.gotoLid"
+        }
+      ],
+      "valid_sources": 0,
+      "navigation_ok": true
+    },
+    {
+      "id": "source-03",
+      "category": "source",
+      "system": "Resident Agent (LID + Graph, full loop)",
+      "score": {
+        "evidence_groups": 1,
+        "recalled_groups": 1,
+        "evidence_recall": 1,
+        "facts": 1,
+        "supported_facts": 0,
+        "semantic_correct": true,
+        "success": false,
+        "details": [
+          {
+            "key": "information",
+            "correct": true,
+            "supported": false
+          }
+        ]
+      },
+      "elapsed_ms": 22891.786800000118,
+      "usage": {
+        "requests": 6,
+        "total_tokens": 33763,
+        "missing_usage": 0
+      },
+      "cost_by_purpose": {
+        "business_loop": {
+          "requests": 5,
+          "total_tokens": 32424,
+          "missing_usage": 0
+        },
+        "inner_query": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "inner_synthesis": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "source_repair": {
+          "requests": 1,
+          "total_tokens": 1339,
+          "missing_usage": 0
+        },
+        "finalization": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "compaction": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "background_profile_review": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "grading": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "unclassified": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        }
+      },
+      "incomplete": false,
+      "tool_counts": {
+        "book.search_text": 2,
+        "book.text": 1,
+        "reader.gotoLid": 1,
+        "source.present": 2
+      },
+      "tool_sequence": [
+        {
+          "loop": 1,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 1,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 2,
+          "tool": "book.text"
+        },
+        {
+          "loop": 2,
+          "tool": "reader.gotoLid"
+        },
+        {
+          "loop": 3,
+          "tool": "source.present"
+        },
+        {
+          "loop": 4,
+          "tool": "source.present"
+        }
+      ],
+      "valid_sources": 1,
+      "navigation_ok": true
+    },
+    {
+      "id": "source-04",
+      "category": "source",
+      "system": "Resident Agent (LID + Graph, full loop)",
+      "score": {
+        "evidence_groups": 1,
+        "recalled_groups": 1,
+        "evidence_recall": 1,
+        "facts": 1,
+        "supported_facts": 0,
+        "semantic_correct": false,
+        "success": false,
+        "details": [
+          {
+            "key": "differentiable",
+            "correct": false,
+            "supported": false
+          }
+        ]
+      },
+      "elapsed_ms": 68063.47980000009,
+      "usage": {
+        "requests": 6,
+        "total_tokens": 66162,
+        "missing_usage": 0
+      },
+      "cost_by_purpose": {
+        "business_loop": {
+          "requests": 5,
+          "total_tokens": 61279,
+          "missing_usage": 0
+        },
+        "inner_query": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "inner_synthesis": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "source_repair": {
+          "requests": 1,
+          "total_tokens": 4883,
+          "missing_usage": 0
+        },
+        "finalization": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "compaction": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "background_profile_review": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "grading": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "unclassified": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        }
+      },
+      "incomplete": false,
+      "tool_counts": {
+        "book.search_text": 6,
+        "book.text": 2,
+        "reader.gotoLid": 1,
+        "source.present": 2
+      },
+      "tool_sequence": [
+        {
+          "loop": 1,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 1,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 1,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 2,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 2,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 2,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 3,
+          "tool": "book.text"
+        },
+        {
+          "loop": 3,
+          "tool": "book.text"
+        },
+        {
+          "loop": 4,
+          "tool": "reader.gotoLid"
+        },
+        {
+          "loop": 4,
+          "tool": "source.present"
+        },
+        {
+          "loop": 4,
+          "tool": "source.present"
+        }
+      ],
+      "valid_sources": 2,
+      "navigation_ok": true
+    }
+  ],
+  "restart": [
+    {
+      "id": "restart-01",
+      "kind": "note",
+      "success": true,
+      "setup_ok": true,
+      "persistence_ok": true,
+      "process_changed": true,
+      "new_chat_empty": true,
+      "memory_observed_by_agent": true,
+      "elapsed_ms": 16215.512199999765,
+      "usage": {
+        "requests": 10,
+        "total_tokens": 43520,
+        "missing_usage": 0
+      },
+      "cost_by_purpose": {
+        "business_loop": {
+          "requests": 7,
+          "total_tokens": 33816,
+          "missing_usage": 0
+        },
+        "inner_query": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "inner_synthesis": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "source_repair": {
+          "requests": 2,
+          "total_tokens": 1340,
+          "missing_usage": 0
+        },
+        "finalization": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "compaction": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "background_profile_review": {
+          "requests": 1,
+          "total_tokens": 8364,
+          "missing_usage": 0
+        },
+        "grading": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "unclassified": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        }
+      },
+      "tool_counts": {
+        "book.search_text": 1,
+        "reader.note": 1,
+        "tool.search": 1,
+        "memory.recall": 2
+      }
+    },
+    {
+      "id": "restart-02",
+      "kind": "highlight",
+      "success": true,
+      "setup_ok": true,
+      "persistence_ok": true,
+      "process_changed": true,
+      "new_chat_empty": true,
+      "memory_observed_by_agent": true,
+      "elapsed_ms": 30278.688199999975,
+      "usage": {
+        "requests": 10,
+        "total_tokens": 41531,
+        "missing_usage": 0
+      },
+      "cost_by_purpose": {
+        "business_loop": {
+          "requests": 7,
+          "total_tokens": 35210,
+          "missing_usage": 0
+        },
+        "inner_query": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "inner_synthesis": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "source_repair": {
+          "requests": 2,
+          "total_tokens": 2145,
+          "missing_usage": 0
+        },
+        "finalization": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "compaction": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "background_profile_review": {
+          "requests": 1,
+          "total_tokens": 4176,
+          "missing_usage": 0
+        },
+        "grading": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "unclassified": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        }
+      },
+      "tool_counts": {
+        "book.search_text": 1,
+        "reader.highlight": 1,
+        "tool.search": 1,
+        "memory.recall": 1,
+        "book.text": 1
+      }
+    },
+    {
+      "id": "restart-03",
+      "kind": "position",
+      "success": true,
+      "setup_ok": true,
+      "persistence_ok": true,
+      "process_changed": true,
+      "new_chat_empty": true,
+      "memory_observed_by_agent": true,
+      "elapsed_ms": 63227.58389999997,
+      "usage": {
+        "requests": 19,
+        "total_tokens": 143285,
+        "missing_usage": 0
+      },
+      "cost_by_purpose": {
+        "business_loop": {
+          "requests": 15,
+          "total_tokens": 137584,
+          "missing_usage": 0
+        },
+        "inner_query": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "inner_synthesis": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "source_repair": {
+          "requests": 2,
+          "total_tokens": 2432,
+          "missing_usage": 0
+        },
+        "finalization": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "compaction": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "background_profile_review": {
+          "requests": 2,
+          "total_tokens": 3269,
+          "missing_usage": 0
+        },
+        "grading": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "unclassified": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        }
+      },
+      "tool_counts": {
+        "book.search_text": 4,
+        "book.text": 6,
+        "reader.gotoLid": 1,
+        "tool.search": 3,
+        "reader.state": 1,
+        "book.context": 1,
+        "source.present": 2
+      }
+    },
+    {
+      "id": "restart-04",
+      "kind": "note",
+      "success": true,
+      "setup_ok": true,
+      "persistence_ok": true,
+      "process_changed": true,
+      "new_chat_empty": true,
+      "memory_observed_by_agent": true,
+      "elapsed_ms": 22367.197399999946,
+      "usage": {
+        "requests": 10,
+        "total_tokens": null,
+        "missing_usage": 1
+      },
+      "cost_by_purpose": {
+        "business_loop": {
+          "requests": 6,
+          "total_tokens": 29080,
+          "missing_usage": 0
+        },
+        "inner_query": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "inner_synthesis": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "source_repair": {
+          "requests": 2,
+          "total_tokens": 1917,
+          "missing_usage": 0
+        },
+        "finalization": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "compaction": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "background_profile_review": {
+          "requests": 2,
+          "total_tokens": null,
+          "missing_usage": 1
+        },
+        "grading": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        },
+        "unclassified": {
+          "requests": 0,
+          "total_tokens": null,
+          "missing_usage": 0
+        }
+      },
+      "tool_counts": {
+        "book.search_text": 1,
+        "reader.note": 1,
+        "tool.search": 1,
+        "memory.recall": 1
+      }
+    }
+  ],
+  "tool_counts": {
+    "book.search_text": 123,
+    "book.structure": 4,
+    "book.text": 133,
+    "source.present": 97,
+    "book.concept": 15,
+    "tool.search": 7,
+    "book.context": 25,
+    "book.query": 2,
+    "reader.gotoLid": 5,
+    "reader.state": 2,
+    "reader.note": 2,
+    "memory.recall": 4,
+    "reader.highlight": 1
+  },
+  "tool_error_counts": {
+    "SOURCE_NOT_OBSERVED": 28,
+    "LID_PROVENANCE_REQUIRED": 11,
+    "SOURCE_AMBIGUOUS": 14,
+    "BOOK_TOOL_INPUT_INVALID": 1,
+    "LID_NOT_FOUND": 1
+  },
+  "cost_by_purpose": {
+    "business_loop": {
+      "requests": 256,
+      "total_tokens": 2739145,
+      "missing_usage": 0
+    },
+    "inner_query": {
+      "requests": 0,
+      "total_tokens": null,
+      "missing_usage": 0
+    },
+    "inner_synthesis": {
+      "requests": 0,
+      "total_tokens": null,
+      "missing_usage": 0
+    },
+    "source_repair": {
+      "requests": 30,
+      "total_tokens": 75151,
+      "missing_usage": 0
+    },
+    "finalization": {
+      "requests": 4,
+      "total_tokens": 41249,
+      "missing_usage": 0
+    },
+    "compaction": {
+      "requests": 0,
+      "total_tokens": null,
+      "missing_usage": 0
+    },
+    "background_profile_review": {
+      "requests": 6,
+      "total_tokens": null,
+      "missing_usage": 1
+    },
+    "grading": {
+      "requests": 0,
+      "total_tokens": null,
+      "missing_usage": 0
+    },
+    "unclassified": {
+      "requests": 1,
+      "total_tokens": null,
+      "missing_usage": 1
+    }
+  },
+  "cost_by_system": {
+    "Chunk RAG (BM25, single-shot)": {
+      "business_loop": {
+        "requests": 23,
+        "total_tokens": 95525,
+        "missing_usage": 0
+      },
+      "inner_query": {
+        "requests": 0,
+        "total_tokens": null,
+        "missing_usage": 0
+      },
+      "inner_synthesis": {
+        "requests": 0,
+        "total_tokens": null,
+        "missing_usage": 0
+      },
+      "source_repair": {
+        "requests": 0,
+        "total_tokens": null,
+        "missing_usage": 0
+      },
+      "finalization": {
+        "requests": 0,
+        "total_tokens": null,
+        "missing_usage": 0
+      },
+      "compaction": {
+        "requests": 0,
+        "total_tokens": null,
+        "missing_usage": 0
+      },
+      "background_profile_review": {
+        "requests": 0,
+        "total_tokens": null,
+        "missing_usage": 0
+      },
+      "grading": {
+        "requests": 0,
+        "total_tokens": null,
+        "missing_usage": 0
+      },
+      "unclassified": {
+        "requests": 1,
+        "total_tokens": null,
+        "missing_usage": 1
+      }
+    },
+    "Resident Agent (LID + Graph, full loop)": {
+      "business_loop": {
+        "requests": 233,
+        "total_tokens": 2643620,
+        "missing_usage": 0
+      },
+      "inner_query": {
+        "requests": 0,
+        "total_tokens": null,
+        "missing_usage": 0
+      },
+      "inner_synthesis": {
+        "requests": 0,
+        "total_tokens": null,
+        "missing_usage": 0
+      },
+      "source_repair": {
+        "requests": 30,
+        "total_tokens": 75151,
+        "missing_usage": 0
+      },
+      "finalization": {
+        "requests": 4,
+        "total_tokens": 41249,
+        "missing_usage": 0
+      },
+      "compaction": {
+        "requests": 0,
+        "total_tokens": null,
+        "missing_usage": 0
+      },
+      "background_profile_review": {
+        "requests": 6,
+        "total_tokens": null,
+        "missing_usage": 1
+      },
+      "grading": {
+        "requests": 0,
+        "total_tokens": null,
+        "missing_usage": 0
+      },
+      "unclassified": {
+        "requests": 0,
+        "total_tokens": null,
+        "missing_usage": 0
+      }
+    }
+  },
+  "failed_task_usage": {
+    "requests": 107,
+    "total_tokens": null,
+    "missing_usage": 1
+  },
+  "grading_usage": {
+    "requests": 50,
+    "total_tokens": 102195,
+    "missing_usage": 0
+  },
+  "background_usage": {
+    "requests": 6,
+    "total_tokens": null,
+    "missing_usage": 1
+  }
+}

@@ -696,6 +696,8 @@ fn main() {
             let initial_book = std::env::args().nth(1).map(PathBuf::from);
             let server = match initial_book {
                 Some(book_dir) => start_server(ServerHostConfig {
+                    desktop_host: true,
+                    reader_only: false,
                     book_dir: Some(book_dir),
                     library_root: Some(library_root),
                     addr: "127.0.0.1:0".into(),

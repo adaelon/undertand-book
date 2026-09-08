@@ -1,0 +1,134 @@
+{
+  "slice": "LX1",
+  "status": "passed",
+  "environment": {
+    "captured_at": "2026-09-08T11:30:46.938413+08:00",
+    "hostname": "iv-yeea1nvzeo4c5qvuqdp9",
+    "kernel": "5.15.120-5.ve2.x86_64",
+    "machine": "x86_64",
+    "glibc": "glibc 2.34",
+    "versions": {
+      "node": "v24.20.0",
+      "pnpm": "10.34.2",
+      "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+      "cargo": "cargo 1.98.1 (797e8a9bc 2026-08-05)",
+      "gcc": "gcc (GCC) 11.5.0 20240719 (Red Hat 11.5.0-5)",
+      "make": "GNU Make 4.3",
+      "pkg-config": "1.7.3",
+      "git": "git version 2.47.1",
+      "python3": "Python 3.9.21",
+      "systemctl": "systemd 252 (252-51.el9)"
+    },
+    "source_head": "9e365075c99c9627959f2d9a03f987912c8c7a95 feat(build): complete executor transport compression",
+    "source_captured_at": "2026-09-08T10:55:40.773642+08:00",
+    "source_file_count": 803,
+    "source_bytes": 13595123,
+    "build_command": "cargo build --offline --locked --release -p server --bin server -j 1",
+    "exits": {
+      "rust_install": 0,
+      "web": 0,
+      "server_native": 0,
+      "http": 0
+    },
+    "binary_bytes": 18295128
+  },
+  "http_cases": [
+    {
+      "book_id": "quickstart-demo",
+      "checks": [
+        {
+          "check": "spa",
+          "http_status": 200,
+          "bytes": 407,
+          "matches_dist": true
+        },
+        {
+          "check": "web_asset",
+          "path": "/assets/index-D56ABJ7-.js",
+          "http_status": 200,
+          "bytes": 1482454,
+          "matches_file": true
+        },
+        {
+          "check": "web_asset",
+          "path": "/assets/index-DwZ7ms7_.css",
+          "http_status": 200,
+          "bytes": 158958,
+          "matches_file": true
+        },
+        {
+          "check": "manifest",
+          "http_status": 200,
+          "lid_count": 23,
+          "matches_base_lids": true
+        },
+        {
+          "check": "lid_text",
+          "lid": "1.2",
+          "http_status": 200,
+          "characters": 80,
+          "matches_source_span": true
+        }
+      ],
+      "status": "passed",
+      "process_cleanup": "terminated"
+    },
+    {
+      "book_id": "understanding-transformer-from-the-perspective-of-associative-memory",
+      "checks": [
+        {
+          "check": "spa",
+          "http_status": 200,
+          "bytes": 407,
+          "matches_dist": true
+        },
+        {
+          "check": "web_asset",
+          "path": "/assets/index-D56ABJ7-.js",
+          "http_status": 200,
+          "bytes": 1482454,
+          "matches_file": true
+        },
+        {
+          "check": "web_asset",
+          "path": "/assets/index-DwZ7ms7_.css",
+          "http_status": 200,
+          "bytes": 158958,
+          "matches_file": true
+        },
+        {
+          "check": "manifest",
+          "http_status": 200,
+          "lid_count": 2017,
+          "matches_base_lids": true
+        },
+        {
+          "check": "lid_text",
+          "lid": "1.1",
+          "http_status": 200,
+          "characters": 70,
+          "matches_source_span": true
+        },
+        {
+          "check": "original_pdf",
+          "http_status": 200,
+          "bytes": 2646721,
+          "matches_file": true
+        }
+      ],
+      "status": "passed",
+      "process_cleanup": "terminated"
+    }
+  ],
+  "windows_bridge": {
+    "entry_url": "http://127.0.0.1:18787",
+    "http_status": 200,
+    "html_bytes": 407,
+    "book_dir": "/opt/understand-book/books/understanding-transformer-from-the-perspective-of-associative-memory",
+    "reported_desktop_host": true,
+    "manifest_lids": 2017,
+    "passed": true
+  },
+  "remote_evidence_dir": "/opt/understand-book/acceptance/lx1",
+  "local_raw_evidence_dir": "C:\\Users\\Lenovo\\AppData\\Local\\Temp\\understand-book-lx1-20260908-105540\\evidence"
+}

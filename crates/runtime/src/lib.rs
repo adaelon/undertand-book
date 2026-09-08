@@ -12,6 +12,7 @@ use std::collections::{BTreeMap, HashSet};
 use ts_rs::TS;
 
 pub mod agent_prompt;
+pub mod experiment;
 pub mod agent_request_audit;
 pub mod auto_compaction;
 pub mod build_intent;
@@ -3203,7 +3204,7 @@ fn native_chat_request_projection(
         .iter()
         .map(|m| native_message_to_json(m, &internal_to_provider))
         .collect();
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "model": model,
         "messages": msgs,
         "tools": tool_specs,
@@ -3211,6 +3212,7 @@ fn native_chat_request_projection(
         "parallel_tool_calls": request.parallel_tool_calls,
         "temperature": 0,
     });
+    if let Some(limit) = request.output_token_limit { body["max_tokens"] = serde_json::json!(limit); }
     (body, provider_to_internal)
 }
 
@@ -3259,11 +3261,13 @@ fn react_chat_request_projection(model: &str, request: &AgentRequestPlan) -> ser
         ),
     }));
     msgs.extend(messages.iter().map(react_message_to_json));
-    serde_json::json!({
+    let mut body = serde_json::json!({
         "model": model,
         "messages": msgs,
         "temperature": 0,
-    })
+    });
+    if let Some(limit) = request.output_token_limit { body["max_tokens"] = serde_json::json!(limit); }
+    body
 }
 
 /// technical_learning 教学整形后的有序前沿分组 `[ADR-0037]`。
@@ -4832,6 +4836,17 @@ mod tests {
     }
 
     #[test]
+    fn experiment_output_limit_is_explicit_for_both_adapters_and_absent_by_default() {
+        let profile = ModelRuntimeCatalog::default().resolve("test", ProviderToolProtocol::Native, None);
+        let mut plan = AgentRequestPlan::for_ad_hoc(profile, &[Message::user("answer")], &[]);
+        assert!(native_chat_request_projection("test", &plan).0.get("max_tokens").is_none());
+        assert!(react_chat_request_projection("test", &plan).get("max_tokens").is_none());
+        plan.output_token_limit = Some(8_000);
+        assert_eq!(native_chat_request_projection("test", &plan).0["max_tokens"], 8_000);
+        assert_eq!(react_chat_request_projection("test", &plan)["max_tokens"], 8_000);
+    }
+
+    #[test]
     fn agent_request_plan_native_and_react_request_snapshots_are_provider_equivalent() {
         let profile = ModelRuntimeCatalog::default().resolve(
             "snapshot-model",
@@ -4992,6 +5007,24 @@ mod tests {
         let no_tools = build_react_system(&[], ToolChoice::None, false);
         assert!(no_tools.contains("Do not output tool_calls"));
         assert!(!no_tools.contains("book.text"));
+    }
+
+    #[test]
+    fn finalization_adapters_serialize_no_tools_and_no_tool_choice() {
+        for protocol in [ProviderToolProtocol::Native, ProviderToolProtocol::ReAct] {
+            let profile = ModelRuntimeProfile::fallback("test", protocol);
+            let plan = AgentRequestPlan::for_ad_hoc(profile, &[Message::user("finish using existing evidence")], &[]);
+            assert_eq!(plan.tool_choice, ToolChoice::None);
+            assert!(plan.tools.is_empty());
+            let (native, _) = native_chat_request_projection("test", &plan);
+            assert_eq!(native["tool_choice"], "none");
+            assert_eq!(native["tools"], serde_json::json!([]));
+            let react = react_chat_request_projection("test", &plan);
+            assert!(react.get("tools").is_none());
+            let instructions = react["messages"][0]["content"].as_str().unwrap();
+            assert!(instructions.contains("tool_choice=none"));
+            assert!(instructions.contains("Do not output tool_calls"));
+        }
     }
 
     #[test]

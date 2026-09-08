@@ -1,0 +1,569 @@
+{
+  "version": "quantification-essence-agent-v1",
+  "started_at": "2026-09-08T05:43:51.551Z",
+  "finished_at": "2026-09-08T05:49:55.319Z",
+  "status": "completed",
+  "model": "deepseek-v4-flash",
+  "git_head": "9e365075c99c9627959f2d9a03f987912c8c7a95",
+  "scope": "24 common natural-language QA tasks; 4 Agent navigation tasks; 4 Agent restart tasks. Product comparison, not graph causal attribution.",
+  "config": {
+    "agent": "production POST /agent/chat, OuterConfig::default(), isolated per-task memory/private artifacts",
+    "chunk": {
+      "chars": 1000,
+      "overlap": 150,
+      "budget": 6000,
+      "max_output_tokens": 4096
+    },
+    "temperature": 0,
+    "repeats": 1,
+    "task_timeout_ms": 300000,
+    "grading": "separate model annotation + deterministic facts/quote/source/action checks"
+  },
+  "corpus": {
+    "book_id": "quantification-essence",
+    "source_utf16": 154448,
+    "lids": 2757,
+    "graph_nodes": 1640,
+    "graph_edges": 1745
+  },
+  "scoring_version": "natural-facts-v2-bold-normalization",
+  "selected_ids": [
+    "concept-02",
+    "cross-01",
+    "cross-02"
+  ],
+  "summary": {
+    "Chunk RAG (BM25, single-shot)": {
+      "count": 3,
+      "succeeded": 2,
+      "success_rate": 0.6666666666666666,
+      "semantic_accuracy": 0.6666666666666666,
+      "evidence_recall": 0.8,
+      "citation_support": 0.8,
+      "p95_seconds": 4.880810399999959,
+      "mean_tokens": 4216,
+      "total_requests": 3,
+      "missing_usage": 0,
+      "errors": 0,
+      "incomplete": 0
+    },
+    "Resident Agent (LID + Graph, full loop)": {
+      "count": 3,
+      "succeeded": 1,
+      "success_rate": 0.3333333333333333,
+      "semantic_accuracy": 0.6666666666666666,
+      "evidence_recall": 1,
+      "citation_support": 0.4,
+      "p95_seconds": 177.0131417,
+      "mean_tokens": 143234.66666666666,
+      "total_requests": 31,
+      "missing_usage": 0,
+      "errors": 0,
+      "incomplete": 1
+    }
+  },
+  "qa": [
+    {
+      "id": "concept-02",
+      "category": "concept",
+      "system": "Chunk RAG (BM25, single-shot)",
+      "score": {
+        "evidence_groups": 1,
+        "recalled_groups": 1,
+        "evidence_recall": 1,
+        "facts": 1,
+        "supported_facts": 1,
+        "semantic_correct": true,
+        "success": true,
+        "details": [
+          {
+            "key": "nonprice_allowed",
+            "correct": true,
+            "supported": true
+          }
+        ]
+      },
+      "elapsed_ms": 3216.1372,
+      "usage": {
+        "requests": 1,
+        "total_tokens": 3946,
+        "missing_usage": 0
+      },
+      "incomplete": false,
+      "tool_counts": {},
+      "tool_sequence": [],
+      "valid_sources": 2
+    },
+    {
+      "id": "concept-02",
+      "category": "concept",
+      "system": "Resident Agent (LID + Graph, full loop)",
+      "score": {
+        "evidence_groups": 1,
+        "recalled_groups": 1,
+        "evidence_recall": 1,
+        "facts": 1,
+        "supported_facts": 0,
+        "semantic_correct": false,
+        "success": false,
+        "details": [
+          {
+            "key": "nonprice_allowed",
+            "correct": false,
+            "supported": false
+          }
+        ]
+      },
+      "elapsed_ms": 56918.0666,
+      "usage": {
+        "requests": 13,
+        "total_tokens": 146538,
+        "missing_usage": 0
+      },
+      "incomplete": true,
+      "tool_counts": {
+        "book.concept": 2,
+        "book.search_text": 5,
+        "book.text": 11,
+        "book.context": 1,
+        "source.present": 6
+      },
+      "tool_sequence": [
+        {
+          "loop": 1,
+          "tool": "book.concept"
+        },
+        {
+          "loop": 1,
+          "tool": "book.concept"
+        },
+        {
+          "loop": 2,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 2,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 2,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 3,
+          "tool": "book.text"
+        },
+        {
+          "loop": 4,
+          "tool": "book.text"
+        },
+        {
+          "loop": 5,
+          "tool": "book.text"
+        },
+        {
+          "loop": 6,
+          "tool": "book.text"
+        },
+        {
+          "loop": 6,
+          "tool": "book.text"
+        },
+        {
+          "loop": 6,
+          "tool": "book.context"
+        },
+        {
+          "loop": 7,
+          "tool": "book.text"
+        },
+        {
+          "loop": 7,
+          "tool": "book.text"
+        },
+        {
+          "loop": 7,
+          "tool": "book.text"
+        },
+        {
+          "loop": 8,
+          "tool": "book.text"
+        },
+        {
+          "loop": 8,
+          "tool": "book.text"
+        },
+        {
+          "loop": 8,
+          "tool": "book.text"
+        },
+        {
+          "loop": 9,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 9,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 10,
+          "tool": "source.present"
+        },
+        {
+          "loop": 10,
+          "tool": "source.present"
+        },
+        {
+          "loop": 10,
+          "tool": "source.present"
+        },
+        {
+          "loop": 10,
+          "tool": "source.present"
+        },
+        {
+          "loop": 10,
+          "tool": "source.present"
+        },
+        {
+          "loop": 11,
+          "tool": "source.present"
+        }
+      ],
+      "valid_sources": 0
+    },
+    {
+      "id": "cross-01",
+      "category": "cross",
+      "system": "Resident Agent (LID + Graph, full loop)",
+      "score": {
+        "evidence_groups": 2,
+        "recalled_groups": 2,
+        "evidence_recall": 1,
+        "facts": 2,
+        "supported_facts": 0,
+        "semantic_correct": true,
+        "success": false,
+        "details": [
+          {
+            "key": "reward",
+            "correct": true,
+            "supported": false
+          },
+          {
+            "key": "reset_N",
+            "correct": true,
+            "supported": false
+          }
+        ]
+      },
+      "elapsed_ms": 177013.1417,
+      "usage": {
+        "requests": 10,
+        "total_tokens": 183582,
+        "missing_usage": 0
+      },
+      "incomplete": false,
+      "tool_counts": {
+        "book.search_text": 4,
+        "book.text": 10,
+        "book.context": 1,
+        "source.present": 9
+      },
+      "tool_sequence": [
+        {
+          "loop": 1,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 1,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 1,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 1,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 2,
+          "tool": "book.text"
+        },
+        {
+          "loop": 2,
+          "tool": "book.text"
+        },
+        {
+          "loop": 2,
+          "tool": "book.text"
+        },
+        {
+          "loop": 3,
+          "tool": "book.text"
+        },
+        {
+          "loop": 3,
+          "tool": "book.text"
+        },
+        {
+          "loop": 3,
+          "tool": "book.text"
+        },
+        {
+          "loop": 4,
+          "tool": "book.context"
+        },
+        {
+          "loop": 4,
+          "tool": "book.text"
+        },
+        {
+          "loop": 4,
+          "tool": "book.text"
+        },
+        {
+          "loop": 5,
+          "tool": "book.text"
+        },
+        {
+          "loop": 5,
+          "tool": "book.text"
+        },
+        {
+          "loop": 6,
+          "tool": "source.present"
+        },
+        {
+          "loop": 6,
+          "tool": "source.present"
+        },
+        {
+          "loop": 6,
+          "tool": "source.present"
+        },
+        {
+          "loop": 7,
+          "tool": "source.present"
+        },
+        {
+          "loop": 7,
+          "tool": "source.present"
+        },
+        {
+          "loop": 7,
+          "tool": "source.present"
+        },
+        {
+          "loop": 8,
+          "tool": "source.present"
+        },
+        {
+          "loop": 8,
+          "tool": "source.present"
+        },
+        {
+          "loop": 8,
+          "tool": "source.present"
+        }
+      ],
+      "valid_sources": 0
+    },
+    {
+      "id": "cross-01",
+      "category": "cross",
+      "system": "Chunk RAG (BM25, single-shot)",
+      "score": {
+        "evidence_groups": 2,
+        "recalled_groups": 1,
+        "evidence_recall": 0.5,
+        "facts": 2,
+        "supported_facts": 1,
+        "semantic_correct": false,
+        "success": false,
+        "details": [
+          {
+            "key": "reward",
+            "correct": true,
+            "supported": true
+          },
+          {
+            "key": "reset_N",
+            "correct": false,
+            "supported": false
+          }
+        ]
+      },
+      "elapsed_ms": 4300.841800000024,
+      "usage": {
+        "requests": 1,
+        "total_tokens": 4327,
+        "missing_usage": 0
+      },
+      "incomplete": false,
+      "tool_counts": {},
+      "tool_sequence": [],
+      "valid_sources": 4
+    },
+    {
+      "id": "cross-02",
+      "category": "cross",
+      "system": "Chunk RAG (BM25, single-shot)",
+      "score": {
+        "evidence_groups": 2,
+        "recalled_groups": 2,
+        "evidence_recall": 1,
+        "facts": 2,
+        "supported_facts": 2,
+        "semantic_correct": true,
+        "success": true,
+        "details": [
+          {
+            "key": "entropy",
+            "correct": true,
+            "supported": true
+          },
+          {
+            "key": "objective",
+            "correct": true,
+            "supported": true
+          }
+        ]
+      },
+      "elapsed_ms": 4880.8103999999585,
+      "usage": {
+        "requests": 1,
+        "total_tokens": 4375,
+        "missing_usage": 0
+      },
+      "incomplete": false,
+      "tool_counts": {},
+      "tool_sequence": [],
+      "valid_sources": 3
+    },
+    {
+      "id": "cross-02",
+      "category": "cross",
+      "system": "Resident Agent (LID + Graph, full loop)",
+      "score": {
+        "evidence_groups": 2,
+        "recalled_groups": 2,
+        "evidence_recall": 1,
+        "facts": 2,
+        "supported_facts": 2,
+        "semantic_correct": true,
+        "success": true,
+        "details": [
+          {
+            "key": "entropy",
+            "correct": true,
+            "supported": true
+          },
+          {
+            "key": "objective",
+            "correct": true,
+            "supported": true
+          }
+        ]
+      },
+      "elapsed_ms": 72369.20989999996,
+      "usage": {
+        "requests": 8,
+        "total_tokens": 99584,
+        "missing_usage": 0
+      },
+      "incomplete": false,
+      "tool_counts": {
+        "book.search_text": 3,
+        "book.text": 5,
+        "source.present": 6
+      },
+      "tool_sequence": [
+        {
+          "loop": 1,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 1,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 2,
+          "tool": "book.text"
+        },
+        {
+          "loop": 2,
+          "tool": "book.text"
+        },
+        {
+          "loop": 3,
+          "tool": "book.text"
+        },
+        {
+          "loop": 3,
+          "tool": "book.search_text"
+        },
+        {
+          "loop": 4,
+          "tool": "book.text"
+        },
+        {
+          "loop": 4,
+          "tool": "book.text"
+        },
+        {
+          "loop": 5,
+          "tool": "source.present"
+        },
+        {
+          "loop": 5,
+          "tool": "source.present"
+        },
+        {
+          "loop": 5,
+          "tool": "source.present"
+        },
+        {
+          "loop": 6,
+          "tool": "source.present"
+        },
+        {
+          "loop": 6,
+          "tool": "source.present"
+        },
+        {
+          "loop": 6,
+          "tool": "source.present"
+        }
+      ],
+      "valid_sources": 3
+    }
+  ],
+  "navigation": [],
+  "restart": [],
+  "tool_counts": {
+    "book.concept": 2,
+    "book.search_text": 12,
+    "book.text": 26,
+    "book.context": 2,
+    "source.present": 21
+  },
+  "tool_error_counts": {
+    "CONCEPT_NOT_FOUND": 1,
+    "LID_PROVENANCE_REQUIRED": 6,
+    "SOURCE_NOT_OBSERVED": 7,
+    "SOURCE_AMBIGUOUS": 3,
+    "AGENT_NO_PROGRESS": 3
+  },
+  "grading_usage": {
+    "requests": 6,
+    "total_tokens": 16395,
+    "missing_usage": 0
+  },
+  "background_usage": {
+    "requests": 0,
+    "total_tokens": null,
+    "missing_usage": 0
+  }
+}

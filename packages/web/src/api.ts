@@ -242,6 +242,7 @@ export interface BookLibraryResponse {
 
 export interface DesktopStatus {
   desktop_host: boolean;
+  reader_only?: boolean;
   active_book: boolean;
   book_dir: string | null;
   library_root: string;
@@ -652,12 +653,20 @@ export interface IntentArtifactInstanceV2 {
   records: IntentArtifactInstanceRecordV2[];
   relations?: IntentArtifactInstanceRelationV2[];
 }
+export interface IntentArtifactInstanceV3 {
+  version: "artifact_instance.v3";
+  blueprint_id: string;
+  blueprint_version: string;
+  records: IntentArtifactInstanceRecordV2[];
+  relations?: IntentArtifactInstanceRelationV2[];
+}
 export type IntentArtifactPayload =
   | IntentTimelinePayloadV1
   | IntentConceptMapPayloadV1
   | IntentComparisonTablePayloadV1
   | IntentArgumentMapPayloadV1
-  | IntentArtifactInstanceV2;
+  | IntentArtifactInstanceV2
+  | IntentArtifactInstanceV3;
 type PendingIntentArtifactProjectionV1 = {
   artifact_id: string;
   artifact_type: IntentArtifactCompatibilityType;

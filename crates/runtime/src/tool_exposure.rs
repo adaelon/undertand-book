@@ -67,24 +67,66 @@ const EXPLICIT_GUIDED_READ_NEGATIONS_V1: [&str; 22] = [
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum TurnIntentHint {
     ExplicitGuidedRead,
+    ExplicitNavigation,
+    ExplicitNote,
+    ExplicitHighlight,
 }
 
 pub fn classify_turn_intent(question: &str) -> BTreeSet<TurnIntentHint> {
-    let normalized = question.trim().to_lowercase();
+    let normalized = action_request_text(question);
+    let mut hints = BTreeSet::new();
+    if explicit_action(&normalized, &["保存", "记下", "添加", "记一条", "写一条", "记成笔记", "记笔记", "save", "add", "take a note"], &["笔记", "note"])
+        && ["笔记", "note"].iter().any(|word| normalized.contains(word)) {
+        hints.insert(TurnIntentHint::ExplicitNote);
+    }
+    if explicit_action(&normalized, &["高亮", "highlight"], &["高亮", "highlight"]) {
+        hints.insert(TurnIntentHint::ExplicitHighlight);
+    }
+    if explicit_action(&normalized, &["跳转到", "跳到", "定位到", "jump to", "navigate to", "go to"], &["跳转", "跳到", "定位", "jump", "navigate", "go to"]) {
+        hints.insert(TurnIntentHint::ExplicitNavigation);
+    }
     if normalized.is_empty()
+        || normalized.split(['，', ',', '。', '；', ';', '\n']).any(|clause|
+            ["跳转", "跳到", "定位", "jump", "navigate"].iter().any(|verb| clause.contains(verb))
+                && ["不要", "不用", "别", "不需要", "don't", "do not"].iter().any(|neg| clause.contains(neg)))
         || EXPLICIT_GUIDED_READ_NEGATIONS_V1
             .iter()
             .any(|phrase| normalized.contains(phrase))
     {
-        return BTreeSet::new();
+        return hints;
     }
 
-    EXPLICIT_GUIDED_READ_PHRASES_V1
+    if EXPLICIT_GUIDED_READ_PHRASES_V1
         .iter()
         .any(|phrase| normalized.contains(phrase))
-        .then_some(TurnIntentHint::ExplicitGuidedRead)
-        .into_iter()
-        .collect()
+    { hints.insert(TurnIntentHint::ExplicitGuidedRead); }
+    hints
+}
+
+// Quoted source and code are task data, never an action request.
+fn action_request_text(question: &str) -> String {
+    let mut closing = None;
+    question.chars().filter(|&ch| {
+        if let Some(end) = closing {
+            if ch == end { closing = None; }
+            return false;
+        }
+        closing = match ch { '“' => Some('”'), '‘' => Some('’'), '"' => Some('"'), '`' => Some('`'), _ => None };
+        closing.is_none()
+    }).collect::<String>().to_lowercase()
+}
+
+fn explicit_action(text: &str, requests: &[&str], verbs: &[&str]) -> bool {
+    let clauses = text.split(['，', ',', '。', '；', ';', '\n']);
+    let mut requested = false;
+    for clause in clauses {
+        if !verbs.iter().any(|verb| clause.contains(verb)) { continue; }
+        if ["不要", "不用", "别", "不需要", "don't", "do not"].iter().any(|neg| clause.contains(neg)) { return false; }
+        let first_action = requests.iter().filter_map(|phrase| clause.find(phrase)).min().unwrap_or(clause.len());
+        if ["如何", "怎么", "怎样", "是否", "解释", "是什么意思", "how to", "how do", "explain"].iter().any(|meta| clause.find(meta).is_some_and(|index| index < first_action)) { continue; }
+        requested |= requests.iter().any(|phrase| clause.contains(phrase));
+    }
+    requested
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -234,9 +276,21 @@ pub struct ToolExposureEntry {
 pub struct ToolExposureState {
     activated: BTreeSet<String>,
     explicit_reader_mutation_intent: bool,
+    action_hints: BTreeSet<TurnIntentHint>,
 }
 
 impl ToolExposureState {
+    pub(crate) fn authorizes_reader_action(&self, handler: ToolHandlerId) -> bool {
+        // Layout and minimap retain their existing guided-read discovery/reducer policy.
+        if matches!(handler, ToolHandlerId::ReaderLayoutApply | ToolHandlerId::ReaderPaperMinimapApply) {
+            return self.action_hints.contains(&TurnIntentHint::ExplicitGuidedRead);
+        }
+        self.action_hints.iter().any(|hint| match hint {
+            TurnIntentHint::ExplicitGuidedRead | TurnIntentHint::ExplicitNavigation => handler == ToolHandlerId::ReaderGotoLid,
+            TurnIntentHint::ExplicitNote => handler == ToolHandlerId::ReaderNote,
+            TurnIntentHint::ExplicitHighlight => handler == ToolHandlerId::ReaderHighlight,
+        })
+    }
     pub fn is_activated(&self, name: &str) -> bool {
         self.activated.contains(name)
     }
@@ -260,14 +314,22 @@ pub fn seed_turn_tool_activations(
     context: &ToolExposureContext,
     state: &mut ToolExposureState,
 ) {
-    if !hints.contains(&TurnIntentHint::ExplicitGuidedRead) {
+    state.action_hints = hints.clone();
+    if hints.is_empty() {
         return;
     }
 
     state.explicit_reader_mutation_intent = true;
 
     for registration in registry.registrations() {
-        if !supports_explicit_guided_read(&registration.routing_card) {
+        let navigate = hints.contains(&TurnIntentHint::ExplicitGuidedRead) || hints.contains(&TurnIntentHint::ExplicitNavigation);
+        let supported = if registration.routing_card.effects == ToolEffect::ReaderWrite {
+            matches!(registration.handler, ToolHandlerId::ReaderGotoLid | ToolHandlerId::ReaderNote | ToolHandlerId::ReaderHighlight)
+                && state.authorizes_reader_action(registration.handler)
+        } else {
+            (navigate && supports_explicit_guided_read(&registration.routing_card)) || registration.handler == ToolHandlerId::ReaderState
+        };
+        if !supported {
             continue;
         }
         if classify(registration.handler, context).0 == ToolExposureDisposition::Deferred {
@@ -446,6 +508,7 @@ pub struct TaskNeed {
     pub authorized_effect_mode: ToolSearchEffectMode,
     pub content_profile: ContentProfileId,
     pub permissions: ToolPermissions,
+    action_hints: BTreeSet<TurnIntentHint>,
 }
 
 impl fmt::Debug for TaskNeed {
@@ -492,6 +555,7 @@ pub fn stamp_task_need(
         authorized_effect_mode,
         content_profile: context.content_profile.clone(),
         permissions: context.permissions,
+        action_hints: state.action_hints.clone(),
     }
 }
 
@@ -736,6 +800,10 @@ pub fn resolve_capabilities(
                 CapabilityBlockReason::ExplicitEffectIntentRequired,
                 Some(ToolPrecondition::ExplicitReaderMutationIntent),
             ))
+        } else if card.effects == ToolEffect::ReaderWrite
+            && !(ToolExposureState { action_hints: need.action_hints.clone(), ..Default::default() }).authorizes_reader_action(registration.handler)
+        {
+            Some((CapabilityBlockReason::EffectNotAuthorized, None))
         } else {
             card.preconditions.iter().find_map(|precondition| {
                 unmet_precondition(*precondition, need).map(|reason| (reason, Some(*precondition)))
@@ -1159,6 +1227,45 @@ fn projected_schema_bytes(current: usize, selected_count: usize, next: usize) ->
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn explicit_navigation_is_scoped_through_discovery() {
+        let registry = resident_tool_registry();
+        let context = context(ContentProfileId::TechnicalLearning);
+        let mut state = ToolExposureState::default();
+        seed_turn_tool_activations(&classify_turn_intent("找到并跳转到解释 purging 的原文"), &registry, &context, &mut state);
+        let plan = ToolExposurePlan::build(&registry, &model(), &context, &state);
+        assert!(plan.is_visible("reader.gotoLid"));
+        let outcome = search_and_activate(
+            r#"{"task":"save a note","required_capabilities":["reader_write"],"scope":"passage","operation":"mutate_reader","effect_mode":"reader_mutation_explicitly_requested","max_results":6}"#,
+            &context, &plan, &registry, &mut state).unwrap();
+        assert!(!outcome.matches.iter().any(|hit| matches!(hit.name.as_str(), "reader.note" | "reader.highlight")));
+        for question in ["不要跳转，只解释这段", "不要跳转，带我读这段", "解释如何跳转到原文", "书中说‘跳转到下一章’，是什么意思"] {
+            let mut state = ToolExposureState::default();
+            seed_turn_tool_activations(&classify_turn_intent(question), &registry, &context, &mut state);
+            assert!(!ToolExposurePlan::build(&registry, &model(), &context, &state).is_visible("reader.gotoLid"), "{question}");
+        }
+    }
+
+    #[test]
+    fn explicit_note_and_highlight_have_separate_authority() {
+        let registry = resident_tool_registry();
+        let context = context(ContentProfileId::TechnicalLearning);
+        for (question, note, highlight, navigation) in [
+            ("不要跳转，只保存这条笔记", true, false, false),
+            ("找到原文，在对应位置保存一条阅读笔记，内容为‘不要高亮’", true, false, false),
+            ("找到并高亮原文中的这句话", false, true, false),
+            ("请跳转到原文，并保存笔记和高亮这段", true, true, true),
+            ("解释如何做笔记和高亮", false, false, false),
+            ("不要保存笔记，只高亮这段", false, true, false),
+        ] {
+            let mut state = ToolExposureState::default();
+            seed_turn_tool_activations(&classify_turn_intent(question), &registry, &context, &mut state);
+            let plan = ToolExposurePlan::build(&registry, &model(), &context, &state);
+            for (name, expected) in [("reader.note", note), ("reader.highlight", highlight), ("reader.gotoLid", navigation)] {
+                assert_eq!(plan.is_visible(name), expected, "{question}: {name}");
+            }
+        }
+    }
     use super::*;
     use crate::orchestrator::resident_tool_registry;
     use crate::{
@@ -1661,12 +1768,14 @@ mod tests {
         assert_eq!(seeded.capability_plan.matched_tools.len(), 1);
         assert_eq!(
             seeded.capability_plan.visible_from,
-            ToolSearchVisibility::NextSampling
+            ToolSearchVisibility::CurrentSampling
         );
-        assert!(!seeded_sample.is_visible(&seeded.activated[0]));
+        assert_eq!(seeded.matches[0].name, "reader.gotoLid");
+        assert!(seeded.activated.is_empty());
         let next =
             ToolExposurePlan::build(&registry, &runtime_profile, &runtime_context, &seeded_state);
-        assert!(next.is_visible(&seeded.activated[0]));
+        assert!(next.is_visible("reader.gotoLid"));
+        assert!(!next.is_visible("reader.highlight"));
 
         let audit = serde_json::to_string(&seeded.request_audit).unwrap();
         assert!(!audit.contains("private phrase"));

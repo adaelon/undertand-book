@@ -94,7 +94,9 @@ trait SelectionTranslationExecutor: Send + Sync {
     ) -> Result<SelectionTranslationResponse, read_tools::ToolError>;
 }
 
-struct ProviderSelectionTranslationExecutor;
+struct ProviderSelectionTranslationExecutor {
+    stop: Arc<AtomicBool>,
+}
 
 impl SelectionTranslationExecutor for ProviderSelectionTranslationExecutor {
     fn execute(
@@ -103,6 +105,9 @@ impl SelectionTranslationExecutor for ProviderSelectionTranslationExecutor {
         work: SelectionTranslationWork,
         timeout: Duration,
     ) -> Result<SelectionTranslationResponse, read_tools::ToolError> {
+        if self.stop.load(Ordering::Acquire) {
+            return Err(read_tools::ToolError { error_code: "SERVICE_STOPPING".into(), category: "internal".into(), message: "Reader service is stopping".into() });
+        }
         crate::execute_selection_translation(provider, work, timeout)
     }
 }
@@ -161,6 +166,8 @@ fn route_selection_translation_request(
 }
 
 pub struct ServerHostConfig {
+    pub desktop_host: bool,
+    pub reader_only: bool,
     pub book_dir: Option<PathBuf>,
     pub library_root: Option<PathBuf>,
     pub addr: String,
@@ -170,8 +177,10 @@ pub struct ServerHostConfig {
 impl ServerHostConfig {
     pub fn from_env(book_dir: impl Into<PathBuf>) -> Self {
         Self {
+            desktop_host: false,
+            reader_only: false,
             book_dir: Some(book_dir.into()),
-            library_root: None,
+            library_root: std::env::var_os("UNDERSTAND_BOOK_LIBRARY_ROOT").map(PathBuf::from),
             addr: std::env::var("UNDERSTAND_BOOK_ADDR").unwrap_or_else(|_| "127.0.0.1:8787".into()),
             web_dist: std::env::var("UNDERSTAND_BOOK_WEB_DIST")
                 .map(PathBuf::from)
@@ -181,6 +190,8 @@ impl ServerHostConfig {
 
     pub fn desktop(library_root: PathBuf, web_dist: PathBuf) -> Self {
         Self {
+            desktop_host: true,
+            reader_only: false,
             book_dir: None,
             library_root: Some(library_root),
             addr: "127.0.0.1:0".into(),
@@ -217,6 +228,7 @@ struct ReviewCoordinator {
     clock: Arc<dyn ReviewClock>,
     schedule: Mutex<ReviewSchedule>,
     wake: Condvar,
+    stopping: AtomicBool,
 }
 
 trait ReviewClock: Send + Sync {
@@ -333,6 +345,7 @@ impl ReviewCoordinator {
             clock,
             schedule: Mutex::new(ReviewSchedule::default()),
             wake: Condvar::new(),
+            stopping: AtomicBool::new(false),
         }
     }
 
@@ -395,6 +408,7 @@ impl ReviewCoordinator {
     }
 
     fn scheduler_tick(&self) -> Result<usize, read_tools::ToolError> {
+        if self.stopping.load(Ordering::Acquire) { return Ok(0); }
         let now_ms = self.clock.now_millis();
         if self.ready_backfill_count() > 0 {
             return self
@@ -433,7 +447,7 @@ impl ReviewCoordinator {
     fn run_due_reviews(&self, moment: ReviewMoment) -> Result<usize, read_tools::ToolError> {
         let mut completed = 0;
         let mut first_error = None;
-        loop {
+        while !self.stopping.load(Ordering::Acquire) {
             let ready_before = self.ready_review_count(moment.millis);
             if ready_before == 0 {
                 break;
@@ -1030,7 +1044,9 @@ impl RunningServer {
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        state.adapter = ProviderRegistry::adapter_from_config(config);
+        state.adapter = if cfg!(target_os = "linux") && state.reader_only {
+            crate::host_lifecycle::ServiceAdapter::from_config(config, self.stop.clone())
+        } else { ProviderRegistry::adapter_from_config(config) };
     }
 
     pub fn run_one_review(
@@ -1062,6 +1078,7 @@ impl RunningServer {
 
     pub fn shutdown(mut self) {
         self.stop.store(true, Ordering::Release);
+        self.review_coordinator.stopping.store(true, Ordering::Release);
         self.review_coordinator.wake.notify_all();
         for handle in self.handles.drain(..) {
             let _ = handle.join();
@@ -1077,6 +1094,32 @@ fn open_resident_memory_store(memory_path: &Path, now: &str) -> MemoryStore {
     }
 }
 
+fn route_paper_localization_request(state: &Arc<Mutex<AppState>>, adapter: &dyn ModelAdapter) -> Reply {
+    let (base, cache_path) = {
+        let guard = state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        (guard.book.paper_minimap(), crate::paper_minimap_localization_cache_path(&guard.session_path))
+    };
+    crate::localize_paper_minimap(base, cache_path, adapter)
+}
+
+fn bind_host_http(addr: &str, desktop_host: bool) -> Result<Server, String> {
+    if desktop_host && addr == "127.0.0.1:0" {
+        // Windows may allocate a low ephemeral port rejected by WebView (e.g. 1719).
+        // Keep the listener bound while handing it to tiny_http; concurrent apps
+        // simply advance to the next available port in the private dynamic range.
+        for port in 49152..=65535 {
+            match std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)) {
+                Ok(listener) => return Server::from_listener(listener, None)
+                    .map_err(|error| format!("failed to start desktop HTTP listener: {error}")),
+                Err(error) if matches!(error.kind(), std::io::ErrorKind::AddrInUse | std::io::ErrorKind::PermissionDenied) => continue,
+                Err(error) => return Err(format!("failed to bind desktop loopback: {error}")),
+            }
+        }
+        return Err("no available desktop loopback port in 49152..65535".into());
+    }
+    Server::http(addr).map_err(|error| format!("failed to bind {addr}: {error}"))
+}
+
 pub fn start_server(config: ServerHostConfig) -> Result<RunningServer, String> {
     let memory_path = MemoryStore::default_path();
     start_server_with_memory_path(config, memory_path)
@@ -1086,6 +1129,8 @@ fn start_server_with_memory_path(
     config: ServerHostConfig,
     memory_path: PathBuf,
 ) -> Result<RunningServer, String> {
+    let stop = Arc::new(AtomicBool::new(false));
+    let service_mode = cfg!(target_os = "linux") && config.reader_only;
     let startup_now = now_ts();
     let mut store = open_resident_memory_store(&memory_path, &startup_now);
     let (session_path, history_path) = if store.private_storage_available() {
@@ -1132,7 +1177,9 @@ fn start_server_with_memory_path(
     let provider_config = ProviderConfig::from_env().ok();
     let adapter: Box<dyn ModelAdapter + Send> = provider_config
         .clone()
-        .map(ProviderRegistry::adapter_from_config)
+        .map(|config| if service_mode {
+            crate::host_lifecycle::ServiceAdapter::from_config(config, stop.clone())
+        } else { ProviderRegistry::adapter_from_config(config) })
         .unwrap_or_else(|| Box::new(UnconfiguredAdapter));
     let mut agent_history = load_agent_history(&history_path)
         .map_err(|error| format!("failed to load agent history: {}", error.message))?;
@@ -1166,6 +1213,8 @@ fn start_server_with_memory_path(
         .iter()
         .any(|job| job.status != ReviewJobStatus::Completed);
     let state = Arc::new(Mutex::new(AppState {
+        desktop_host: config.desktop_host,
+        reader_only: config.reader_only,
         book_dir: PathBuf::from(&dir),
         library_root: config.library_root.clone(),
         book,
@@ -1185,7 +1234,8 @@ fn start_server_with_memory_path(
     let review_coordinator = Arc::new(ReviewCoordinator::new(
         state.clone(),
         provider_config,
-        Arc::new(ProviderReviewExecutorFactory),
+        if service_mode { Arc::new(crate::host_lifecycle::ServiceReviewFactory(stop.clone())) }
+        else { Arc::new(ProviderReviewExecutorFactory) },
     ));
     if startup_review_pending {
         review_coordinator.request_startup_run();
@@ -1199,16 +1249,12 @@ fn start_server_with_memory_path(
         }
     }
 
-    let server = Arc::new(
-        Server::http(&config.addr)
-            .map_err(|error| format!("failed to bind {}: {error}", config.addr))?,
-    );
+    let server = Arc::new(bind_host_http(&config.addr, config.desktop_host)?);
     let address = server
         .server_addr()
         .to_ip()
         .ok_or_else(|| "server did not bind an IP address".to_string())?;
     let url = format!("http://{address}");
-    let stop = Arc::new(AtomicBool::new(false));
     let mut handles = Vec::new();
     {
         let coordinator = review_coordinator.clone();
@@ -1229,13 +1275,14 @@ fn start_server_with_memory_path(
     ));
     let boundary_timeout = review_boundary_timeout();
     let selection_translation_executor: Arc<dyn SelectionTranslationExecutor> =
-        Arc::new(ProviderSelectionTranslationExecutor);
+        Arc::new(ProviderSelectionTranslationExecutor { stop: stop.clone() });
     for _ in 0..4 {
         let server = server.clone();
         let state = state.clone();
         let review_coordinator = review_coordinator.clone();
         let selection_translation_executor = selection_translation_executor.clone();
         let dist = config.web_dist.clone();
+        let reader_only = config.reader_only;
         let stop_signal = stop.clone();
         handles.push(thread::spawn(move || {
             while !stop_signal.load(Ordering::Acquire) {
@@ -1243,6 +1290,7 @@ fn start_server_with_memory_path(
                     break;
                 };
                 let Some(mut request) = request else { continue };
+                if stop_signal.load(Ordering::Acquire) { break; }
                 let method = request.method().to_string();
                 let url = request.url().to_string();
                 let mut body = String::new();
@@ -1252,9 +1300,11 @@ fn start_server_with_memory_path(
                     None => {
                         let api_url = normalize_api_url(&url);
                         let request_now = now_ts();
-                        if is_review_boundary(&method, &api_url) {
+                        if is_review_boundary(&method, &api_url)
+                            && !(reader_only && crate::reader_only_disallows(&api_url, &method)) {
                             let _ = review_coordinator.drain_boundary(boundary_timeout);
                         }
+                        if stop_signal.load(Ordering::Acquire) { break; }
                         if api_url == "/reader/selection.translate" {
                             let reply = if method == "POST" {
                                 route_selection_translation_request(
@@ -1266,6 +1316,16 @@ fn start_server_with_memory_path(
                             } else {
                                 selection_translation_method_not_allowed()
                             };
+                            let _ = request.respond(response_from_json(reply.status, reply.body));
+                            continue;
+                        }
+                        if api_url == "/reader/paper_minimap.localize" && method == "POST" {
+                            let adapter: Box<dyn ModelAdapter + Send> = match review_coordinator.provider_config_snapshot() {
+                                Some(config) if service_mode => crate::host_lifecycle::ServiceAdapter::from_config(config, stop_signal.clone()),
+                                Some(config) => ProviderRegistry::adapter_from_config(config),
+                                None => Box::new(UnconfiguredAdapter),
+                            };
+                            let reply = route_paper_localization_request(&state, adapter.as_ref());
                             let _ = request.respond(response_from_json(reply.status, reply.body));
                             continue;
                         }
@@ -1285,6 +1345,7 @@ fn start_server_with_memory_path(
                             let mut guard = state
                                 .lock()
                                 .unwrap_or_else(|poisoned| poisoned.into_inner());
+                            if stop_signal.load(Ordering::Acquire) { break; }
                             route(
                                 &mut guard,
                                 Req {
@@ -1770,6 +1831,25 @@ mod tests {
     }
 
     #[test]
+    fn running_server_shutdown_flushes_a_still_pending_touch() {
+        let root = std::env::temp_dir().join(format!("ub-lx6-host-{}", system_now_millis()));
+        let memory_path = root.join("memory/memory.json");
+        let running = start_server_with_memory_path(
+            ServerHostConfig::desktop(root.join("library"), root.join("dist")),
+            memory_path.clone(),
+        ).unwrap();
+        let book_id = {
+            let mut state = running.state.lock().unwrap();
+            let book_id = state.book.base.book_id.clone();
+            state.store.enqueue_read(&book_id, "1", "lx6-final-touch").unwrap();
+            assert_eq!(state.store.pending_read_count(), 1);
+            book_id
+        };
+        running.shutdown();
+        assert_eq!(MemoryStore::open(memory_path).unwrap().read_lids(&book_id), vec!["1"]);
+    }
+
+    #[test]
     fn agent_history_load_failure_preserves_source_and_blocks_startup() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1787,6 +1867,8 @@ mod tests {
 
         let result = start_server_with_memory_path(
             ServerHostConfig {
+                desktop_host: true,
+                reader_only: false,
                 book_dir: None,
                 library_root: Some(root.join("library")),
                 addr: "not-a-valid-server-address".into(),
@@ -1860,6 +1942,8 @@ mod tests {
             })
             .collect();
         Arc::new(Mutex::new(AppState {
+            desktop_host: false,
+            reader_only: false,
             book_dir: PathBuf::from(dir),
             library_root: None,
             book,
@@ -1911,6 +1995,8 @@ mod tests {
         let reader = Reader::new(&book, DEFAULT_RADIUS);
         let store = MemoryStore::open(dir.join("memory.json")).unwrap();
         Arc::new(Mutex::new(AppState {
+            desktop_host: false,
+            reader_only: false,
             book_dir: dir,
             library_root: None,
             book,
@@ -2095,14 +2181,48 @@ mod tests {
     }
 
     #[test]
-    fn desktop_host_uses_random_loopback_address() {
+    fn paper_localization_provider_does_not_hold_reader_lock() {
+        struct Probe(Arc<Mutex<AppState>>, Arc<AtomicBool>);
+        impl ModelAdapter for Probe {
+            fn complete(&self, _: runtime::CompletionRequest) -> Result<runtime::ParsedResponse, AdapterError> { unreachable!() }
+            fn chat(&self, _: &runtime::AgentRequestPlan) -> Result<runtime::AssistantTurn, AdapterError> { unreachable!() }
+            fn complete_structured(&self, _: runtime::CompletionRequest) -> Result<serde_json::Value, AdapterError> {
+                assert!(self.0.try_lock().is_ok(), "localization must release Reader state before calling Provider");
+                self.1.store(true, Ordering::SeqCst);
+                Ok(serde_json::json!({}))
+            }
+        }
+        let state = review_test_state("paper-localization-lock");
+        {
+            let mut guard = state.lock().unwrap();
+            guard.book = Book::load(&PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../.understand-book/understanding-transformer-from-the-perspective-of-associative-memory").to_string_lossy()).unwrap();
+            guard.session_path = None;
+        }
+        let called = Arc::new(AtomicBool::new(false));
+        let response = route_paper_localization_request(&state, &Probe(state.clone(), called.clone()));
+        assert_eq!(response.status, 200);
+        assert!(called.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn desktop_host_uses_browser_safe_available_loopback_port() {
         let config = ServerHostConfig {
+            desktop_host: true,
+            reader_only: false,
             book_dir: Some(PathBuf::from("book")),
             library_root: None,
             addr: "127.0.0.1:0".into(),
             web_dist: PathBuf::from("dist"),
         };
-        assert_eq!(config.addr, "127.0.0.1:0");
+        let first = bind_host_http(&config.addr, config.desktop_host).unwrap();
+        let second = bind_host_http(&config.addr, config.desktop_host).unwrap();
+        let first_addr = first.server_addr().to_ip().unwrap();
+        let second_addr = second.server_addr().to_ip().unwrap();
+        assert!(first_addr.ip().is_loopback());
+        assert!(first_addr.port() >= 49152, "browser-safe dynamic range: {first_addr}");
+        assert!(second_addr.port() >= 49152);
+        assert_ne!(first_addr, second_addr);
     }
 
     #[test]

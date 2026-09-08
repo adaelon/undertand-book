@@ -26,6 +26,7 @@ struct CoreIntentCommand {
     program: PathBuf,
     prefix_args: Vec<OsString>,
     current_dir: PathBuf,
+    timeout: Option<std::time::Duration>,
 }
 
 #[derive(Debug, Clone)]
@@ -1708,7 +1709,9 @@ fn resolve_artifact_core_command() -> Result<CoreIntentCommand, ToolError> {
 }
 
 fn resolve_metrics_core_command() -> Result<CoreIntentCommand, ToolError> {
-    resolve_named_core_command("intent.metrics", "intent-metrics.ts")
+    let mut command = resolve_named_core_command("intent.metrics", "intent-metrics.ts")?;
+    command.timeout = Some(std::time::Duration::from_secs(30));
+    Ok(command)
 }
 
 fn resolve_blueprint_core_command() -> Result<CoreIntentCommand, ToolError> {
@@ -1755,8 +1758,9 @@ fn resolve_named_core_command(
         program: PathBuf::from(
             std::env::var_os("UNDERSTAND_BOOK_NODE").unwrap_or_else(|| OsString::from("node")),
         ),
-        prefix_args: vec![tsx.into_os_string(), script.into_os_string()],
+        prefix_args: vec![OsString::from("--import"), OsString::from("tsx"), script.into_os_string()],
         current_dir: root,
+        timeout: None,
     })
 }
 
@@ -1772,6 +1776,7 @@ fn packaged_core_command(
         ));
     }
     Ok(CoreIntentCommand {
+        timeout: None,
         program: sidecar.to_path_buf(),
         prefix_args: vec![OsString::from(packaged_subcommand)],
         current_dir: sidecar
@@ -1835,7 +1840,7 @@ fn run_core_command(command: CoreIntentCommand, request: &Value) -> Result<Value
                 format!("build intent Core request could not be written: {write_error}"),
             )
         })?;
-    let output = child.wait_with_output().map_err(|wait_error| {
+    let output = wait_for_core(child, command.timeout).map_err(|wait_error| {
         error(
             "BUILD_INTENT_CORE_ERROR",
             "internal",
@@ -1856,6 +1861,31 @@ fn run_core_command(command: CoreIntentCommand, request: &Value) -> Result<Value
             format!("build intent Core response is invalid JSON: {parse_error}"),
         )
     })
+}
+
+fn wait_for_core(mut child: std::process::Child, timeout: Option<std::time::Duration>) -> std::io::Result<std::process::Output> {
+    use std::io::Read;
+    let Some(timeout) = timeout else { return child.wait_with_output(); };
+    let stdout = child.stdout.take().expect("piped stdout");
+    let stderr = child.stderr.take().expect("piped stderr");
+    fn collect(mut pipe: impl Read + Send + 'static) -> std::thread::JoinHandle<std::io::Result<Vec<u8>>> {
+        std::thread::spawn(move || { let mut bytes = Vec::new(); pipe.read_to_end(&mut bytes)?; Ok(bytes) })
+    }
+    let stdout = collect(stdout);
+    let stderr = collect(stderr);
+    let started = std::time::Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait()? { break Ok(status); }
+        if started.elapsed() >= timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            break Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "intent.metrics exceeded its 30 second deadline"));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    let stdout = stdout.join().map_err(|_| std::io::Error::other("stdout reader failed"))??;
+    let stderr = stderr.join().map_err(|_| std::io::Error::other("stderr reader failed"))??;
+    Ok(std::process::Output { status: status?, stdout, stderr })
 }
 
 fn parse_body(body: &str) -> Result<Value, ToolError> {
@@ -1946,5 +1976,22 @@ fn error(
         error_code: code.into(),
         category: category.into(),
         message: message.into(),
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+    #[test]
+    fn metrics_timeout_reaps_a_live_node_and_drains_output() {
+        let child = Command::new("node").args(["-e", "setInterval(() => {}, 1000)"])
+            .stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+        let error = wait_for_core(child, Some(std::time::Duration::from_millis(100))).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        let child = Command::new("node").args(["-e", "process.stdout.write('x'.repeat(1000000))"])
+            .stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+        let output = wait_for_core(child, Some(std::time::Duration::from_secs(5))).unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout.len(), 1000000);
     }
 }

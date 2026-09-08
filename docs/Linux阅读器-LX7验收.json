@@ -1,0 +1,217 @@
+{
+  "slice": "LX7",
+  "status": "passed",
+  "recorded_at": "2026-09-08T05:54:46.236403+00:00",
+  "source": {
+    "base_commit": "9e365075c99c9627959f2d9a03f987912c8c7a95",
+    "dirty_worktree": true,
+    "tested_snapshot": "/opt/understand-book/acceptance/lx7/source-final.tar.gz",
+    "file_list": "/opt/understand-book/acceptance/lx7/source-files.json",
+    "scope": "Deployed LX7 source, formal dist and saved Windows test builds; excludes later concurrent local LA edits."
+  },
+  "environment": {
+    "os": "veLinux 2.2 CentOS Compat / CentOS Stream 9 x86_64",
+    "glibc": "2.34",
+    "systemd": "252",
+    "node": "24.20.0",
+    "pnpm": "10.34.2",
+    "rust": "1.98.1",
+    "provider": "native",
+    "model": "deepseek-v4-flash",
+    "base_url": "https://api.deepseek.com",
+    "listen": "127.0.0.1:8787"
+  },
+  "tests": {
+    "windows_runtime": {
+      "passed": 301,
+      "ignored_existing": 3
+    },
+    "windows_server": {
+      "passed": 239
+    },
+    "windows_web_targeted": {
+      "passed": 26,
+      "files": 6
+    },
+    "linux_new_rust_regressions": {
+      "passed": 2
+    },
+    "linux_web": {
+      "passed": 219,
+      "files": 39
+    },
+    "formal_builds": [
+      "Linux release server",
+      "Linux web dist",
+      "Windows web dist",
+      "Windows Tauri debug executable"
+    ]
+  },
+  "phases": {
+    "qa": {
+      "status": "passed",
+      "checks": [
+        "Linux pure-reader host",
+        "technical book rendered with server menus",
+        "outline search and navigation",
+        "real Provider Q&A and source opens actual text",
+        "real Node usage, profile and chat projections",
+        "no prebuild request or page exception"
+      ],
+      "evidence": "tmp/lx7/qa.json",
+      "started_at": "2026-09-08T05:48:53.449Z",
+      "finished_at": "2026-09-08T05:50:38.815Z"
+    },
+    "guided": {
+      "status": "passed",
+      "checks": [
+        "Linux pure-reader host",
+        "technical book rendered with server menus",
+        "outline search and navigation",
+        "real Provider guided-reading navigation effect rendered",
+        "real Node usage, profile and chat projections",
+        "no prebuild request or page exception"
+      ],
+      "evidence": "tmp/lx7/guided.json",
+      "started_at": "2026-09-08T05:14:04.859Z",
+      "finished_at": "2026-09-08T05:15:06.186Z"
+    },
+    "pdf": {
+      "status": "passed",
+      "checks": [
+        "Linux pure-reader host",
+        "book library switches to real paper PDF",
+        "real PDF selection translation via configured Provider",
+        "PDF highlight displayed",
+        "PDF Note displayed and persistent projections readable"
+      ],
+      "evidence": "tmp/lx7/pdf.json",
+      "started_at": "2026-09-08T05:27:05.554Z",
+      "finished_at": "2026-09-08T05:31:36.131Z",
+      "completed_from_saved_record": true
+    },
+    "images": {
+      "status": "passed",
+      "checks": [
+        "Linux pure-reader host",
+        "bundled book image displayed through Linux same-origin asset API",
+        "no prebuild request or page exception"
+      ],
+      "evidence": "tmp/lx7/images.json",
+      "started_at": "2026-09-08T05:32:15.804Z",
+      "finished_at": "2026-09-08T05:33:16.246Z"
+    },
+    "artifacts": {
+      "status": "passed",
+      "checks": [
+        "Linux pure-reader host",
+        "migrated accepted projection equals Windows and renders in pure reader",
+        "no prebuild request or page exception"
+      ],
+      "evidence": "tmp/lx7/artifacts.json",
+      "started_at": "2026-09-08T05:45:15.252Z",
+      "finished_at": "2026-09-08T05:45:23.273Z"
+    },
+    "lifecycle": {
+      "status": "passed",
+      "checks": [
+        "explicit profile fact saved before restart",
+        "systemd stop exits main process",
+        "stopped disk contains PDF note, highlight, profile and real chat",
+        "new process restores paper position and explicit profile fact"
+      ],
+      "evidence": "tmp/lx7/lifecycle.json"
+    },
+    "restore": {
+      "status": "passed",
+      "checks": [
+        "Linux pure-reader host",
+        "systemd restart restores book, viewport, PDF highlight and Note",
+        "technical guided-reading conversation survives restart and book switch",
+        "no prebuild request or page exception"
+      ],
+      "evidence": "tmp/lx7/restore.json",
+      "started_at": "2026-09-08T05:51:46.113Z",
+      "finished_at": "2026-09-08T05:53:55.142Z"
+    },
+    "desktop-initial": {
+      "status": "passed",
+      "checks": [
+        "real Tauri host on browser-safe port",
+        "native settings command reads configured Provider and library",
+        "native prebuild creation entry remains available",
+        "build-intent entry opens",
+        "desktop note saved through UI"
+      ],
+      "evidence": "tmp/lx7/desktop-initial.json"
+    },
+    "desktop-restore": {
+      "status": "passed",
+      "checks": [
+        "real Tauri host on browser-safe port",
+        "no-argument desktop startup restores prior book and note"
+      ],
+      "evidence": "tmp/lx7/desktop-restore.json"
+    },
+    "startbat-initial": {
+      "status": "passed",
+      "checks": [
+        "actual start.bat retains legacy server mode",
+        "legacy browser build-intent entry opens",
+        "existing accepted artifact projection readable in Windows legacy mode"
+      ],
+      "evidence": "tmp/lx7/startbat-initial.json"
+    },
+    "startbat-restore": {
+      "status": "passed",
+      "checks": [
+        "actual start.bat retains legacy server mode",
+        "legacy browser build-intent entry opens",
+        "actual start.bat relaunch restores saved note"
+      ],
+      "evidence": "tmp/lx7/startbat-restore.json"
+    },
+    "windows-artifact": {
+      "status": "passed",
+      "checks": [
+        "original start.bat renders accepted v3 comparison rows after formal web rebuild"
+      ],
+      "evidence": "tmp/lx7/windows-artifact.json"
+    }
+  },
+  "persistence": {
+    "checks": [
+      "explicit profile fact saved before restart",
+      "systemd stop exits main process",
+      "stopped disk contains PDF note, highlight, profile and real chat",
+      "new process restores paper position and explicit profile fact"
+    ],
+    "old_pid": 3423159,
+    "unit_user": "understand-book",
+    "stop_seconds": 0.086,
+    "new_pid": 3425481,
+    "node": "/opt/understand-book/tools/node-v24.20.0-linux-x64/bin/node",
+    "model": "deepseek-v4-flash",
+    "cwd": "/opt/understand-book/source",
+    "status": "passed"
+  },
+  "reading": {
+    "guided_anchor": "1.3.7",
+    "usage_event_count": 8,
+    "pdf_note_id": "mem_b7ae1be67bf5e4ea",
+    "pdf_highlight_id": "mem_10d297cba1748b74",
+    "pdf_anchor": "1.12",
+    "profile_fact_count": 1
+  },
+  "limitations": [
+    "Single reader per instance, accessed over SSH tunnel.",
+    "Explicit guided-reading wording follows the frozen classifier; use 带我读, not 带我阅读.",
+    "External source images retain their original network dependency; bundled SVG tested separately.",
+    "Initial smoke-client workspace load timed out once; retained failure and successful fresh-page rerun, no server restart or product timeout workaround.",
+    "PDF final saved-note verification resumed from its real persisted record after correcting the acceptance selector; translation/highlight/save were performed through real UI."
+  ],
+  "evidence_roots": [
+    "tmp/lx7",
+    "/opt/understand-book/acceptance/lx7"
+  ]
+}

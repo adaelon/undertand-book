@@ -263,6 +263,7 @@ const paperProjectionLoading = ref(false);
 const paperProjectionError = ref<string | null>(null);
 const paperProjectionKey = ref("");
 let paperProjectionSeq = 0;
+let paperLocalizationRequest: { key: string; promise: Promise<PaperMinimapLocalization> } | null = null;
 let paperPositionSyncTimer: number | null = null;
 let paperPositionSyncRunning = false;
 let paperPositionSyncCompletion: Promise<void> | null = null;
@@ -288,6 +289,7 @@ const newBookPdf = ref<File | null>(null);
 const openingBook = ref(false);
 const desktopNeedsBook = ref(false);
 const desktopHost = ref(false);
+const readerOnly = ref(false);
 const desktopSettingsOpen = ref(false);
 const desktopLibraryRoot = ref("");
 const desktopLibraryAvailable = ref(true);
@@ -457,6 +459,7 @@ function layoutRevNumber(value: number | bigint): number {
 const isPaperProfile = computed(() => profileSummary.value?.profile_id === "paper");
 function resetPaperProjectionData() {
   paperProjectionSeq += 1;
+  paperLocalizationRequest = null;
   if (paperPositionSyncTimer !== null) window.clearTimeout(paperPositionSyncTimer);
   paperPositionSyncTimer = null;
   pendingPaperViewport = null;
@@ -684,10 +687,18 @@ async function loadPaperProjectionData(force = false) {
     if (seq !== paperProjectionSeq) return;
     paperMinimapSnapshot.value = minimap;
     if (paperMinimapLocalization.value?.base_map_rev !== minimap.base.fingerprint) {
-      const localization = await api.paperMinimapLocalize();
-      if (seq !== paperProjectionSeq) return;
-      if (localization.base_map_rev === minimap.base.fingerprint) {
-        paperMinimapLocalization.value = localization;
+      const localizationKey = `${minimap.base.book_id}:${minimap.base.fingerprint}`;
+      if (paperLocalizationRequest?.key !== localizationKey) {
+        const request = { key: localizationKey, promise: api.paperMinimapLocalize() };
+        paperLocalizationRequest = request;
+        void request.promise.then((localization) => {
+          if (paperLocalizationRequest !== request) return;
+          if (localization.base_map_rev === minimap.base.fingerprint) {
+            paperMinimapLocalization.value = localization;
+          }
+        }).catch((error) => {
+          if (paperLocalizationRequest === request) paperProjectionError.value = errorMessage(error);
+        });
       }
     }
     paperProjectionKey.value = key;
@@ -1597,6 +1608,7 @@ async function maybeAutoRerunSourceReview(
   snapshot: BuildWorkbenchSnapshot,
   actionOwner?: number,
 ): Promise<BuildWorkbenchSnapshot> {
+  if (readerOnly.value) return snapshot;
   const request = getSourceReviewAutoRerunRequest(snapshot);
   if (!request) return snapshot;
 
@@ -2029,6 +2041,7 @@ async function init() {
       throw error;
     });
     desktopHost.value = Boolean(desktop?.desktop_host);
+    readerOnly.value = Boolean(desktop?.reader_only);
     desktopLibraryRoot.value = desktop?.library_root ?? "";
     desktopLibraryAvailable.value = desktop?.library_root_available ?? true;
     desktopNeedsBook.value = Boolean(desktop && !desktop.active_book);
@@ -2046,13 +2059,13 @@ async function init() {
     desktopNeedsBook.value = false;
     const workbench = await loadBuildWorkbenchSnapshot();
     if (!workbench && buildWorkbenchError.value) {
-      appSurface.value = "workbench";
+      appSurface.value = readerOnly.value ? "waiting-materials" : "workbench";
       return;
     }
     if (workbench) {
-      const surface = chooseAppSurface(workbench);
-      if (surface === "workbench") {
-        appSurface.value = "workbench";
+      const surface = chooseAppSurface(workbench, readerOnly.value);
+      if (surface !== "reader") {
+        appSurface.value = surface;
         return;
       }
     }
@@ -2819,7 +2832,7 @@ function askSelection() {
   if (!p) return;
   const quote = p.text.replace(/\s+/g, " ").trim();
   if (!quote) return;
-  askDraft.value = { lid: p.anchorLid, quote };
+  askDraft.value = { lid: p.anchorLid, quote, ...markdownSelectionContext(p) };
   selectedLid.value = p.anchorLid;
   agentInput.value = "";
   hlPopover.value = null;
@@ -3524,8 +3537,8 @@ async function submitOpenBook(dir = bookPickerDir.value) {
       :debug-open="debugOpen"
       :left-rail-open="leftRailOpen"
       :build-intent-open="buildIntentOpen"
-      :build-intent-available="appSurface === 'reader'"
-      :workbench-available="appSurface === 'reader' && workbenchAvailable(buildWorkbenchSnapshot)"
+      :build-intent-available="!readerOnly && appSurface === 'reader'"
+      :workbench-available="!readerOnly && appSurface === 'reader' && workbenchAvailable(buildWorkbenchSnapshot)"
       :desktop-host="desktopHost"
       @new-chat="newChat"
       @open-workbench="openBuildWorkbench"
@@ -3539,11 +3552,23 @@ async function submitOpenBook(dir = bookPickerDir.value) {
     <AlignmentQualityBar
       v-if="appSurface === 'reader' && sourceManifest?.alignment_quality"
       :quality="sourceManifest.alignment_quality"
-      :workbench-available="workbenchAvailable(buildWorkbenchSnapshot)"
+      :workbench-available="!readerOnly && workbenchAvailable(buildWorkbenchSnapshot)"
       @open-workbench="openBuildWorkbench"
     />
 
     <p v-if="banner" class="banner">{{ banner }}</p>
+
+    <section v-if="appSurface === 'waiting-materials'" class="build-workbench" role="status">
+      <h2>等待完整阅读材料</h2>
+      <p>请在服务停止后同步这本书的完整已就绪目录，再启动服务并刷新。</p>
+      <p v-if="buildWorkbenchError">{{ buildWorkbenchError }}</p>
+      <ul>
+        <li v-for="reason in buildWorkbenchSnapshot?.readiness.reasons ?? []" :key="reason">{{ reason }}</li>
+        <li v-for="stage in Object.values(buildWorkbenchSnapshot?.readiness.stages ?? {}).filter(s => s.reason && s.status !== 'done' && s.status !== 'blocked')" :key="stage.stage">{{ stage.reason }}</li>
+      </ul>
+      <button @click="init">刷新材料状态</button>
+      <button @click="openBook">打开其他书籍</button>
+    </section>
 
     <div v-if="desktopSettingsOpen" class="desktop-settings-modal" @click.self="closeDesktopSettings">
       <section class="desktop-settings-dialog" role="dialog" aria-modal="true" aria-labelledby="desktop-settings-title">
@@ -3680,6 +3705,7 @@ async function submitOpenBook(dir = bookPickerDir.value) {
             打开
           </button>
           <button
+            v-if="desktopHost && !readerOnly"
             role="tab"
             :aria-selected="bookPickerMode === 'create'"
             :class="{ active: bookPickerMode === 'create' }"
@@ -3821,7 +3847,7 @@ async function submitOpenBook(dir = bookPickerDir.value) {
 
     <main v-else-if="appSurface === 'loading'" class="app-loading">正在加载工作区...</main>
 
-    <div v-else class="workspace-grid" :class="{ 'left-collapsed': !leftRailOpen }" :style="workspaceStyle">
+    <div v-else-if="appSurface === 'reader'" class="workspace-grid" :class="{ 'left-collapsed': !leftRailOpen }" :style="workspaceStyle">
       <LeftRail
         v-show="leftRailOpen"
         v-model:goto-input="gotoInput"

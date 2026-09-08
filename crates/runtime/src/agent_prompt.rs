@@ -5,8 +5,8 @@ pub const BASE_INSTRUCTIONS: &str = "You are the resident reading agent for the 
 
 const POLICY_REVISION: &str = "v3";
 const EVIDENCE_ROUTING_REVISION: &str = "v4";
-const SOURCE_DELIVERY_REVISION: &str = "v4";
-const TOOL_DISCOVERY_REVISION: &str = "v4";
+const SOURCE_DELIVERY_REVISION: &str = "v6";
+const TOOL_DISCOVERY_REVISION: &str = "v5";
 
 const EVIDENCE_ROUTING: &str = "Evidence routing:
 - When the user supplies a source quotation and asks about its local meaning, that quotation is the highest-priority evidence. The Server has validated selection_provenance.v1 resolved_quote and admitted it into this turn's evidence. When it is sufficient, explain it directly and do not call tools to verify it again. Only when the answer genuinely depends on information outside the quotation may you add at most book.text, book.context, or book.synthesize; do not begin with open-ended retrieval.
@@ -21,9 +21,11 @@ const EVIDENCE_ROUTING: &str = "Evidence routing:
 const SOURCE_DELIVERY: &str = "Source presentation:
 - source.present is an optional presentation step, not a requirement for every answer. Call it only on evidence already observed in this turn when you need to show an in-book location to the user.
 - If source.present returns SOURCE_NOT_OBSERVED, stop presenting that target. Acquire verified source evidence first and never retry an adjacent LID, widened range, or guessed endpoint.
-- Place the [[source:<source_ref_id>]] returned by source.present after the relevant sentence. Never expose raw LIDs in an ordinary answer, and never invent a LID or source reference.";
+- quote is optional. Omit it to present a complete observed range; if supplied, copy the original text exactly, including punctuation and formulas. SOURCE_QUOTE_MISMATCH means the range is already observed: correct or omit quote for that same range instead of retrieving it again. A keyword-only occurrence cannot support a full explanatory claim; read and select the supporting passage.
+- When the user requests original sources, select the supporting observed passages with source.present before delivering factual claims. Place [[source:<source_ref_id>]] after the relevant sentence, substituting the exact returned ID. Bare IDs and a separate list of IDs do not create source citations. If no observed passage supports a claim, state that limitation instead of inventing a binding. Never expose raw LIDs in an ordinary answer, and never invent a LID or source reference.";
 
 const TOOL_DISCOVERY: &str = "Capability discovery:
+- Saved reading notes and highlights belong to memory, including after restart or a new chat. To retrieve them, request memory_read with operation=explain, scope=document (or passage for a known location), effect_mode=read_only, then call memory.recall. They are not profile facts or build artifacts. Do not repeat discovery with an unsupported operation; use the blocked capability feedback.
 - The current tool list contains only capabilities directly available in this sampling. Call tool.search when a capability required to complete the task is missing.
 - Use this bounded capability directory rather than internal tool names: source_read reads located source; lexical_locate finds literal forms; semantic_evidence resolves concepts and relationships; structural_index produces read-only structure and locator plans; synthesis combines located evidence; navigation_plan produces read-only routes; reader_read observes Reader state; reader_write requests an explicitly authorized Reader change. Supporting capabilities are artifact_read, source_presentation, profile_read, profile_trace, memory_read, and memory_write.
 - Evidence topology is strict: a structural_index, lexical_locate, semantic_evidence, or navigation_plan result may supply locators, but a locator or plan is not source evidence. Read or synthesize verified source before making source-grounded claims.
@@ -265,7 +267,7 @@ mod tests {
                 .iter()
                 .find(|module| module.asset_id == "resident-agent.policy.source-delivery")
                 .map(|module| module.revision.as_str()),
-            Some("v4")
+            Some("v6")
         );
     }
 

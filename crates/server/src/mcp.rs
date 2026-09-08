@@ -929,6 +929,8 @@ mod tests {
         let book = book();
         let reader = Reader::new(&book, DEFAULT_RADIUS);
         AppState {
+            desktop_host: false,
+            reader_only: false,
             book_dir: std::env::temp_dir(),
             library_root: None,
             book,

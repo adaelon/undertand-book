@@ -89,3 +89,12 @@ describe("reader surface selection", () => {
     expect(chooseAppSurface(snapshot)).toBe("reader");
   });
 });
+
+it("pure reader honors readiness even without an input manifest", () => {
+  const snapshot = trustedPaperSnapshot();
+  expect(chooseAppSurface(snapshot, true)).toBe("reader");
+  snapshot.readiness.route = "workbench";
+  snapshot.input.manifest = null;
+  expect(chooseAppSurface(snapshot, true)).toBe("waiting-materials");
+  expect(chooseAppSurface(snapshot)).toBe("reader");
+});
