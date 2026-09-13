@@ -605,6 +605,23 @@ fn current_usage_plan(state: &AppState) -> Result<Option<Value>, ToolError> {
 }
 
 fn append_reader_usage_event(state: &AppState, body: &str) -> Result<Value, ToolError> {
+    run_metrics_core(&reader_usage_request(state, body)?)
+}
+
+/// Freeze the book/plan association before releasing the host's shared state.
+pub(super) fn prepare_reader_usage(state: &AppState, body: &str) -> Result<Value, ToolError> {
+    synchronize_active_source(state)?;
+    reader_usage_request(state, body)
+}
+
+pub(super) fn execute_reader_usage(request: &Value) -> Reply {
+    match run_metrics_core(request) {
+        Ok(value) => ok_json(&value),
+        Err(error) => err_reply(&error),
+    }
+}
+
+fn reader_usage_request(state: &AppState, body: &str) -> Result<Value, ToolError> {
     let input = parse_body(body)?;
     reject_unknown_fields(&input, &["event_id", "occurred_at", "kind", "artifact_id"])?;
     let event_id = required_string(&input, "event_id")?;
@@ -678,7 +695,7 @@ fn append_reader_usage_event(state: &AppState, body: &str) -> Result<Value, Tool
             "reader usage event kind is not allowed",
         ));
     };
-    append_usage_event(state, event)
+    usage_append_request(state, event)
 }
 
 fn append_cost_usage_event(state: &AppState, body: &str) -> Result<Value, ToolError> {
@@ -741,8 +758,12 @@ fn append_cost_usage_event(state: &AppState, body: &str) -> Result<Value, ToolEr
 }
 
 fn append_usage_event(state: &AppState, event: Value) -> Result<Value, ToolError> {
+    run_metrics_core(&usage_append_request(state, event)?)
+}
+
+fn usage_append_request(state: &AppState, event: Value) -> Result<Value, ToolError> {
     let store = private_store(state)?;
-    run_metrics_core(&json!({
+    Ok(json!({
         "version": "intent_build_usage_command.v1",
         "operation": "append",
         "input": {

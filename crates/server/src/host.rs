@@ -1,3 +1,4 @@
+use serde_json::json;
 use crate::intent_build_store::IntentArtifactStore;
 use crate::{
     agent_history_review_cursors, ensure_agent_history_for_book, load_agent_history, load_session,
@@ -206,6 +207,7 @@ pub struct RunningServer {
     handles: Vec<JoinHandle<()>>,
     state: Arc<Mutex<AppState>>,
     review_coordinator: Arc<ReviewCoordinator>,
+    pub run_coordinator: Arc<crate::agent_run::RunCoordinator>,
 }
 
 pub struct ReviewRunOutcome {
@@ -229,6 +231,7 @@ struct ReviewCoordinator {
     schedule: Mutex<ReviewSchedule>,
     wake: Condvar,
     stopping: AtomicBool,
+    resident_running: AtomicBool,
 }
 
 trait ReviewClock: Send + Sync {
@@ -346,6 +349,7 @@ impl ReviewCoordinator {
             schedule: Mutex::new(ReviewSchedule::default()),
             wake: Condvar::new(),
             stopping: AtomicBool::new(false),
+            resident_running: AtomicBool::new(false),
         }
     }
 
@@ -408,7 +412,7 @@ impl ReviewCoordinator {
     }
 
     fn scheduler_tick(&self) -> Result<usize, read_tools::ToolError> {
-        if self.stopping.load(Ordering::Acquire) { return Ok(0); }
+        if self.stopping.load(Ordering::Acquire) || self.resident_running.load(Ordering::Acquire) { return Ok(0); }
         let now_ms = self.clock.now_millis();
         if self.ready_backfill_count() > 0 {
             return self
@@ -931,6 +935,7 @@ fn copy_historical_backfill_input(
                 AgentAssistantStatus::PendingAssistant => ReviewTurnStatus::PendingAssistant,
                 AgentAssistantStatus::Completed => ReviewTurnStatus::Completed,
                 AgentAssistantStatus::Failed => ReviewTurnStatus::Failed,
+                AgentAssistantStatus::Cancelled => ReviewTurnStatus::Cancelled,
             },
             assistant_answer: turn
                 .outcome
@@ -965,6 +970,7 @@ fn copy_review_input(
                 AgentAssistantStatus::PendingAssistant => ReviewTurnStatus::PendingAssistant,
                 AgentAssistantStatus::Completed => ReviewTurnStatus::Completed,
                 AgentAssistantStatus::Failed => ReviewTurnStatus::Failed,
+                AgentAssistantStatus::Cancelled => ReviewTurnStatus::Cancelled,
             },
             assistant_answer: turn
                 .outcome
@@ -1077,6 +1083,7 @@ impl RunningServer {
     }
 
     pub fn shutdown(mut self) {
+        self.run_coordinator.stop_and_wait();
         self.stop.store(true, Ordering::Release);
         self.review_coordinator.stopping.store(true, Ordering::Release);
         self.review_coordinator.wake.notify_all();
@@ -1177,12 +1184,18 @@ fn start_server_with_memory_path(
     let provider_config = ProviderConfig::from_env().ok();
     let adapter: Box<dyn ModelAdapter + Send> = provider_config
         .clone()
-        .map(|config| if service_mode {
-            crate::host_lifecycle::ServiceAdapter::from_config(config, stop.clone())
-        } else { ProviderRegistry::adapter_from_config(config) })
+        .map(|config| {
+            if service_mode {
+                crate::host_lifecycle::ServiceAdapter::from_config(config, stop.clone())
+            } else {
+                ProviderRegistry::adapter_from_config(config)
+            }
+        })
         .unwrap_or_else(|| Box::new(UnconfiguredAdapter));
     let mut agent_history = load_agent_history(&history_path)
         .map_err(|error| format!("failed to load agent history: {}", error.message))?;
+    crate::agent_run::recover_pending(&mut agent_history, &history_path)
+        .map_err(|error| format!("failed to recover pending Agent runs: {}", error.message))?;
     let messages =
         ensure_agent_history_for_book(&mut agent_history, &book.base.book_id, "server-start");
     let review_cursors = agent_history_review_cursors(&agent_history);
@@ -1217,7 +1230,7 @@ fn start_server_with_memory_path(
         reader_only: config.reader_only,
         book_dir: PathBuf::from(&dir),
         library_root: config.library_root.clone(),
-        book,
+        book: book.into(),
         reader,
         store,
         intent_store_root: IntentArtifactStore::default_root().ok(),
@@ -1230,12 +1243,20 @@ fn start_server_with_memory_path(
         profile_context_cache: runtime::profile_context::ProfileContextCache::default(),
         visitor_sessions: VisitorSessions::default(),
         workbench_loaded_revision: None,
+        active_agent_stream: None,
     }));
+    let run_coordinator = Arc::new(crate::agent_run::RunCoordinator::new(
+        state.clone(),
+        stop.clone(),
+    ));
     let review_coordinator = Arc::new(ReviewCoordinator::new(
         state.clone(),
         provider_config,
-        if service_mode { Arc::new(crate::host_lifecycle::ServiceReviewFactory(stop.clone())) }
-        else { Arc::new(ProviderReviewExecutorFactory) },
+        if service_mode {
+            Arc::new(crate::host_lifecycle::ServiceReviewFactory(stop.clone()))
+        } else {
+            Arc::new(ProviderReviewExecutorFactory)
+        },
     ));
     if startup_review_pending {
         review_coordinator.request_startup_run();
@@ -1281,6 +1302,7 @@ fn start_server_with_memory_path(
         let state = state.clone();
         let review_coordinator = review_coordinator.clone();
         let selection_translation_executor = selection_translation_executor.clone();
+        let run_coordinator = run_coordinator.clone();
         let dist = config.web_dist.clone();
         let reader_only = config.reader_only;
         let stop_signal = stop.clone();
@@ -1290,7 +1312,9 @@ fn start_server_with_memory_path(
                     break;
                 };
                 let Some(mut request) = request else { continue };
-                if stop_signal.load(Ordering::Acquire) { break; }
+                if stop_signal.load(Ordering::Acquire) {
+                    break;
+                }
                 let method = request.method().to_string();
                 let url = request.url().to_string();
                 let mut body = String::new();
@@ -1300,11 +1324,85 @@ fn start_server_with_memory_path(
                     None => {
                         let api_url = normalize_api_url(&url);
                         let request_now = now_ts();
-                        if is_review_boundary(&method, &api_url)
-                            && !(reader_only && crate::reader_only_disallows(&api_url, &method)) {
-                            let _ = review_coordinator.drain_boundary(boundary_timeout);
+                        if stop_signal.load(Ordering::Acquire) {
+                            break;
                         }
-                        if stop_signal.load(Ordering::Acquire) { break; }
+                        if method == "POST" && split_url(&api_url).0 == "/build_intent/usage.event" {
+                            let prepared = {
+                                let guard = state.lock().unwrap_or_else(|error| error.into_inner());
+                                crate::build_intent_api::prepare_reader_usage(&guard, &body)
+                            };
+                            // Reader startup metrics must not hold AppState while the Core process runs.
+                            let reply = match prepared {
+                                Ok(input) => crate::build_intent_api::execute_reader_usage(&input),
+                                Err(error) => crate::err_reply(&error),
+                            };
+                            let _ = request.respond(response_from_json(reply.status, reply.body));
+                            continue;
+                        }
+                        if let Some(tail) = split_url(&api_url).0.strip_prefix("/agent/runs/") {
+                            let (id, action) = tail.split_once('/').unwrap_or((tail, ""));
+                            let stream = run_coordinator.stream(id);
+                            let allowed = (method == "GET" && matches!(action, "" | "events")) || (method == "POST" && action == "cancel");
+                            if !allowed {
+                                let _ = request.respond(response_from_json(405, json!({"error_code":"METHOD_NOT_ALLOWED","category":"validation","message":"Unsupported run operation"}).to_string()));
+                            } else if let Some(stream) = stream {
+                                if action == "events" {
+                                    let header = request.headers().iter().find(|h| h.field.equiv("Last-Event-ID")).map(|h| h.value.as_str());
+                                    let query = api_url.split_once('?').and_then(|(_, q)| q.split('&').find_map(|pair| pair.strip_prefix("after=")));
+                                    let cursor = header.or(query);
+                                    let after = cursor.map(str::parse::<u64>).transpose();
+                                    match after {
+                                        Ok(after) => crate::agent_stream::serve(request, stream, after),
+                                        Err(_) => { let _ = request.respond(response_from_json(400, json!({"error_code":"INVALID_CURSOR","category":"validation","message":"Event cursor must be an unsigned integer"}).to_string())); }
+                                    }
+                                } else {
+                                    let snapshot = if action == "cancel" { run_coordinator.cancel_run(id).unwrap_or_else(|| stream.snapshot()) } else { stream.snapshot() };
+                                    let _ = request.respond(response_from_json(200, json!(snapshot).to_string()));
+                                }
+                            } else {
+                                let _ = request.respond(response_from_json(404, json!({"error_code":"AGENT_RUN_NOT_FOUND","category":"not_found","message":"Run does not exist"}).to_string()));
+                            }
+                            continue;
+                        }
+                        if is_resident_turn_request(&method, &api_url) {
+                            let adapter: Box<dyn ModelAdapter + Send> = match review_coordinator
+                                .provider_config_snapshot()
+                            {
+                                Some(config) => ProviderRegistry::adapter_from_config_with_timeout(
+                                    config,
+                                    crate::host_lifecycle::SERVICE_PROVIDER_TIMEOUT,
+                                ),
+                                None => Box::new(UnconfiguredAdapter),
+                            };
+                            if split_url(&api_url).0 == "/agent/runs" {
+                                let on_exit = review_coordinator.clone();
+                                let reply = run_coordinator.start(&body, &request_now, adapter,
+                                    || { review_coordinator.resident_running.store(true, Ordering::Release); review_coordinator.note_resident_activity(); },
+                                    move || { on_exit.resident_running.store(false, Ordering::Release); on_exit.note_resident_activity(); });
+                                let _ = request.respond(response_from_json(reply.status, reply.body));
+                                continue;
+                            }
+                            let reply = run_coordinator.run(
+                                &body,
+                                &request_now,
+                                adapter.as_ref(),
+                                || {
+                                    review_coordinator
+                                        .resident_running
+                                        .store(true, Ordering::Release);
+                                    review_coordinator.note_resident_activity();
+                                },
+                                || {
+                                    review_coordinator
+                                        .resident_running
+                                        .store(false, Ordering::Release);
+                                    review_coordinator.note_resident_activity();
+                                },
+                            );
+                            let _ = request.respond(response_from_json(reply.status, reply.body));
+                            continue;
+                        }
                         if api_url == "/reader/selection.translate" {
                             let reply = if method == "POST" {
                                 route_selection_translation_request(
@@ -1320,11 +1418,17 @@ fn start_server_with_memory_path(
                             continue;
                         }
                         if api_url == "/reader/paper_minimap.localize" && method == "POST" {
-                            let adapter: Box<dyn ModelAdapter + Send> = match review_coordinator.provider_config_snapshot() {
-                                Some(config) if service_mode => crate::host_lifecycle::ServiceAdapter::from_config(config, stop_signal.clone()),
-                                Some(config) => ProviderRegistry::adapter_from_config(config),
-                                None => Box::new(UnconfiguredAdapter),
-                            };
+                            let adapter: Box<dyn ModelAdapter + Send> =
+                                match review_coordinator.provider_config_snapshot() {
+                                    Some(config) if service_mode => {
+                                        crate::host_lifecycle::ServiceAdapter::from_config(
+                                            config,
+                                            stop_signal.clone(),
+                                        )
+                                    }
+                                    Some(config) => ProviderRegistry::adapter_from_config(config),
+                                    None => Box::new(UnconfiguredAdapter),
+                                };
                             let reply = route_paper_localization_request(&state, adapter.as_ref());
                             let _ = request.respond(response_from_json(reply.status, reply.body));
                             continue;
@@ -1341,11 +1445,13 @@ fn start_server_with_memory_path(
                                 continue;
                             }
                         }
-                        let reply = {
+                        let action = || {
+                            if is_review_boundary(&method, &api_url) {
+                                let _ = review_coordinator.drain_boundary(boundary_timeout);
+                            }
                             let mut guard = state
                                 .lock()
                                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-                            if stop_signal.load(Ordering::Acquire) { break; }
                             route(
                                 &mut guard,
                                 Req {
@@ -1356,11 +1462,16 @@ fn start_server_with_memory_path(
                                 },
                             )
                         };
-                        if is_resident_turn_request(&method, &api_url)
-                            && !matches!(reply.status, 400 | 405)
-                        {
-                            review_coordinator.note_resident_activity();
-                        }
+                        let boundary = (is_review_boundary(&method, &api_url)
+                            || (method == "POST"
+                                && split_url(&api_url).0 == "/agent/history/delete"
+                                && run_coordinator.deletes_active_session(&body)))
+                            && !(reader_only && crate::reader_only_disallows(&api_url, &method));
+                        let reply = if boundary {
+                            run_coordinator.with_boundary(action)
+                        } else {
+                            action()
+                        };
                         response_from_json(reply.status, reply.body)
                     }
                 };
@@ -1374,6 +1485,7 @@ fn start_server_with_memory_path(
         handles,
         state,
         review_coordinator,
+        run_coordinator,
     })
 }
 
@@ -1443,7 +1555,7 @@ fn is_review_boundary(method: &str, url: &str) -> bool {
 }
 
 fn is_resident_turn_request(method: &str, url: &str) -> bool {
-    method == "POST" && split_url(url).0 == "/agent/chat"
+    method == "POST" && matches!(split_url(url).0, "/agent/chat" | "/agent/runs")
 }
 
 struct StaticReply {
@@ -1925,6 +2037,7 @@ mod tests {
                         user_turn_ordinal: ordinal,
                         user: format!("I prefer worked examples {ordinal}"),
                         status: AgentAssistantStatus::Failed,
+                        run_summary: None,
                         outcome: None,
                         error: Some(AgentTurnError {
                             error_code: "PROVIDER_ERROR".into(),
@@ -1946,7 +2059,7 @@ mod tests {
             reader_only: false,
             book_dir: PathBuf::from(dir),
             library_root: None,
-            book,
+            book: book.into(),
             reader,
             store,
             intent_store_root: None,
@@ -1967,6 +2080,7 @@ mod tests {
             profile_context_cache: runtime::profile_context::ProfileContextCache::default(),
             visitor_sessions: VisitorSessions::default(),
             workbench_loaded_revision: None,
+        active_agent_stream: None,
         }))
     }
 
@@ -1999,7 +2113,7 @@ mod tests {
             reader_only: false,
             book_dir: dir,
             library_root: None,
-            book,
+            book: book.into(),
             reader,
             store,
             intent_store_root: None,
@@ -2012,6 +2126,7 @@ mod tests {
             profile_context_cache: runtime::profile_context::ProfileContextCache::default(),
             visitor_sessions: VisitorSessions::default(),
             workbench_loaded_revision: None,
+        active_agent_stream: None,
         }))
     }
 
@@ -2195,8 +2310,8 @@ mod tests {
         let state = review_test_state("paper-localization-lock");
         {
             let mut guard = state.lock().unwrap();
-            guard.book = Book::load(&PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("../../.understand-book/understanding-transformer-from-the-perspective-of-associative-memory").to_string_lossy()).unwrap();
+            guard.book = (Book::load(&PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../.understand-book/understanding-transformer-from-the-perspective-of-associative-memory").to_string_lossy()).unwrap()).into();
             guard.session_path = None;
         }
         let called = Arc::new(AtomicBool::new(false));
@@ -2830,3 +2945,7 @@ mod tests {
         assert!(!is_resident_turn_request("POST", "/book/query"));
     }
 }
+
+#[cfg(test)]
+#[path = "agent_run_tests.rs"]
+mod agent_run_tests;

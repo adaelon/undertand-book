@@ -23,6 +23,8 @@ import type {
 } from "../api";
 import type { PdfAnnotationLocation } from "../pdf-annotation-projection";
 import { rangeToMarkdown } from "../selection";
+import AgentActivities from "./AgentActivities.vue";
+import type { RunActivity } from "../agent-run-state";
 import ProfileMemoryPanel from "./ProfileMemoryPanel.vue";
 import QueryAuditPanel from "./QueryAuditPanel.vue";
 import IntentArtifactPanel from "./IntentArtifactPanel.vue";
@@ -40,7 +42,12 @@ interface ChatTurn {
   questionAnchorLid: string | null;
   questionQuote: AgentQuestionQuoteView | null;
   questionSelection: AskDraft | null;
+  liveEffects?: { effect_id: string; effect: AgentEffect }[];
   effectLabels: string[];
+  activities?: RunActivity[];
+  runTrace?: TraceStep[];
+  runStatus?: string;
+  draft?: import("./../agent-run-state").AnswerDraft | null;
 }
 interface ChatSessionSummary {
   id: string;
@@ -62,6 +69,8 @@ const props = defineProps<{
   activeChatSessionId: string;
   agentInput: string;
   sending: boolean;
+  runConnection?: string;
+  canStop?: boolean;
   unquotedNotePlacementAvailable?: boolean;
   notePlacementSurface?: "markdown" | "pdf";
   noteSourceFingerprint?: string | null;
@@ -100,6 +109,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: "update:agentInput", value: string): void;
   (e: "send-agent"): void;
+  (e: "stop-agent"): void;
   (e: "new-chat"): void;
   (e: "select-chat", sessionId: string): void;
   (e: "delete-chat", sessionId: string): void;
@@ -127,6 +137,13 @@ const activeTab = ref<ContextTab>("agent");
 const historyOpen = ref(false);
 const notesExpanded = ref(false);
 const transcriptRef = ref<HTMLElement | null>(null);
+const followTranscript = ref(true);
+function trackTranscriptScroll() {
+  const el = transcriptRef.value;
+  if (el) followTranscript.value = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
+}
+const latestActivities = computed(() => props.chat.at(-1)?.activities ?? []);
+const activityToolCount = computed(() => latestActivities.value.filter(a => a.kind === "tool").length);
 const agentInputRef = ref<HTMLTextAreaElement | null>(null);
 const tabs: { id: ContextTab; label: string }[] = [
   { id: "agent", label: "问答" },
@@ -154,7 +171,7 @@ watch(() => props.askDraft, async (draft) => {
 async function scrollTranscriptToBottom() {
   await nextTick();
   const el = transcriptRef.value;
-  if (!el) return;
+  if (!el || !followTranscript.value) return;
   el.scrollTop = el.scrollHeight;
 }
 watch(
@@ -163,6 +180,7 @@ watch(
     return [
       props.chat.length,
       last?.pending ? 1 : 0,
+      last?.activities?.map(a => `${a.step_id}:${a.status}`).join(",") ?? "",
       last?.outcome?.answer?.length ?? 0,
       props.askDraft ? 1 : 0,
     ].join(":");
@@ -202,6 +220,18 @@ const agentSourcePopupStyle = computed(() => {
   const popup = agentSourcePopup.value;
   return popup ? { left: `${popup.left}px`, top: `${popup.top}px` } : {};
 });
+
+// Keep completed rendered blocks mounted while the active tail grows.
+function draftMarkdownBlocks(text: string): string[] {
+  const template = document.createElement("template");
+  template.innerHTML = props.renderMarkdown(text);
+  return Array.from(template.content.childNodes).flatMap(node => {
+    if (node.nodeType === Node.ELEMENT_NODE) return [(node as Element).outerHTML];
+    if (!node.textContent?.trim()) return [];
+    const span = document.createElement("span"); span.textContent = node.textContent;
+    return [span.outerHTML];
+  });
+}
 
 function answerParts(outcome: OuterOutcome): AgentAnswerPart[] {
   return outcome.answer_view?.parts?.length
@@ -374,6 +404,13 @@ async function openActiveAgentSourceInReader() {
 }
 
 watch(() => props.activeChatSessionId, closeAgentSourcePopup);
+watch(() => props.chat, () => {
+  const popup = agentSourcePopup.value;
+  if (!popup) return;
+  const turn = props.chat.find(turn => turn.turnId === popup.turnId);
+  const view = turn?.pending ? turn.draft?.view : turn?.outcome?.answer_view;
+  if (!popup.sourceRefIds.every(id => view?.sources.some(source => source.source_ref_id === id))) closeAgentSourcePopup();
+}, { deep: true });
 
 function onAnswerMouseUp(turn: ChatTurn) {
   if (!turn.questionSelection && !props.unquotedNotePlacementAvailable) {
@@ -577,7 +614,7 @@ function influenceLabel(influence: ProfileUsageTrace["influences"][number]): str
         </div>
       </div>
 
-      <div ref="transcriptRef" class="transcript">
+      <div ref="transcriptRef" class="transcript" @scroll="trackTranscriptScroll">
         <div v-for="(turn, ti) in props.chat" :key="ti" class="turn">
           <div v-if="turn.questionQuote" class="turn-quote">
             <div class="turn-quote-head">
@@ -586,8 +623,21 @@ function influenceLabel(influence: ProfileUsageTrace["influences"][number]): str
             <blockquote>{{ turn.questionQuote.quote }}</blockquote>
           </div>
           <p class="u-msg">{{ turn.user }}</p>
-          <p v-if="turn.pending" class="pending">正在思考...</p>
-          <p v-else-if="turn.error" class="incomplete">{{ turn.error }}</p>
+          <AgentActivities v-if="turn.activities?.length" :activities="turn.activities" />
+          <p v-if="turn.runStatus" class="run-status" role="status">{{ turn.runStatus }}</p>
+          <p v-if="turn.pending && !turn.runStatus" class="pending">正在接收运行...</p>
+          <div v-if="!turn.outcome && turn.liveEffects?.length" class="live-effects">
+            <p v-for="item in turn.liveEffects" :key="item.effect_id">{{ props.effLabel(item.effect) }}</p>
+          </div>
+          <div v-if="turn.pending && turn.draft?.view" class="answer-draft ans-text md" aria-label="回答草稿">
+            <template v-for="(part, pi) in turn.draft.view.parts" :key="`${turn.draft.message_id}-${turn.draft.revision}-${pi}`">
+              <template v-if="part.kind === 'markdown'">
+                <div v-for="(block, bi) in draftMarkdownBlocks(part.text)" :key="bi" v-memo="[block]" class="answer-markdown" v-html="block"></div>
+              </template>
+              <button v-else type="button" class="agent-source-button draft-source" @click.stop="openAgentSources(turn, part.source_ref_ids, $event)">{{ part.source_ref_ids.map(id => turn.draft?.view?.sources.find(s => s.source_ref_id === id)?.label).filter(Boolean).join(' · ') }}</button>
+            </template>
+          </div>
+          <p v-if="!turn.pending && turn.error" class="incomplete">{{ turn.error }}</p>
 
           <div v-else-if="turn.outcome" class="a-msg">
             <div v-if="answerParts(turn.outcome).length" class="ans-text md" @mouseup="onAnswerMouseUp(turn)">
@@ -696,6 +746,7 @@ function influenceLabel(influence: ProfileUsageTrace["influences"][number]): str
       </div>
 
       <div class="agent-input">
+        <p v-if="props.runConnection === 'reconnecting'" role="status">连接中断，正在重新连接；运行仍可继续。</p>
         <div v-if="props.askDraft" class="ask-draft">
           <div class="ask-draft-head">
             <span>{{ askQuoteLabel(props.askDraft) }}</span>
@@ -713,6 +764,7 @@ function influenceLabel(influence: ProfileUsageTrace["influences"][number]): str
           @input="emit('update:agentInput', ($event.target as HTMLTextAreaElement).value)"
           @keydown.ctrl.enter="emit('send-agent')"
         />
+        <button v-if="props.canStop" class="stop-agent" @click="emit('stop-agent')">停止</button>
         <button :disabled="props.sending || !props.agentInput.trim()" @click="emit('send-agent')">
           {{ props.sending ? "..." : "发送" }}
         </button>
@@ -754,12 +806,16 @@ function influenceLabel(influence: ProfileUsageTrace["influences"][number]): str
     <section v-show="activeTab === 'trace'" class="tab-panel context-panel">
       <div class="panel-head">
         <p class="rail-kicker">最近工具轨迹</p>
-        <h3 v-if="latestModelToolLoopCount">
+        <h3 v-if="latestActivities.length">{{ activityToolCount }} 次工具调用 · {{ latestActivities.length }} 项活动</h3>
+        <h3 v-else-if="latestModelToolLoopCount">
           {{ latestModelToolLoopCount }} 个模型—工具循环 · {{ props.latestTrace.length }} 次工具调用
         </h3>
         <h3 v-else>{{ props.latestTrace.length }} 次工具调用</h3>
       </div>
-      <ol v-if="props.latestTrace.length" class="trace-list">
+      <AgentActivities v-if="latestActivities.length" :activities="latestActivities" diagnostic />
+      <details v-if="props.latestTrace.length" :open="!latestActivities.length">
+        <summary v-if="latestActivities.length">工具诊断</summary>
+      <ol class="trace-list">
         <li v-for="(t, i) in props.latestTrace" :key="i" class="trace-card">
           <span v-if="traceLoopLabel(t)" class="trace-loop">{{ traceLoopLabel(t) }}</span>
           <code>{{ t.tool }}</code>
@@ -768,7 +824,8 @@ function influenceLabel(influence: ProfileUsageTrace["influences"][number]): str
           <QueryAuditPanel v-if="t.query_audit" :audit="t.query_audit" />
         </li>
       </ol>
-      <p v-else class="empty panel-empty">暂无工具轨迹。</p>
+      </details>
+      <p v-else-if="!latestActivities.length" class="empty panel-empty">暂无工具轨迹。</p>
     </section>
 
     <section v-show="activeTab === 'formula'" class="tab-panel context-panel">

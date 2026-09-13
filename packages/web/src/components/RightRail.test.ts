@@ -505,7 +505,7 @@ describe("RightRail AskQuote", () => {
     expect(wrapper.emitted("send-agent")).toHaveLength(1);
 
     const app = readFileSync("src/App.vue", "utf8");
-    expect(app).toContain("await api.agentChat(msg, {");
+    expect(app).toContain("await api.agentRunCreate(msg, {");
     expect(app).not.toContain("const outbound = draft");
     expect(app).toContain("question_quote: draft ? { ...draft } : null");
   });
@@ -745,5 +745,30 @@ describe("RightRail AskQuote", () => {
     expect(wrapper.emitted("artifact-cited")?.at(-1)).toEqual(["timeline-1"]);
     expect(wrapper.get(".artifact-panel").text()).not.toContain("book-private");
     expect(wrapper.get(".artifact-panel").text()).not.toContain("plan-private");
+  });
+});
+
+describe("Resident activities", () => {
+  it("shares live steps with trace, emits stop and preserves upward scrolling", async () => {
+    const activity = { step_id: 1, parent_step_id: null, kind: "model", name: "outer", label: "生成回答", status: "running" as const, started_ms: 0, duration_ms: null, result_count: null, error_code: null, usage_total_tokens: null };
+    const turn = { turnId: "turn", user: "问题", outcome: null, pending: true, questionAnchorLid: null, questionQuote: null, questionSelection: null, effectLabels: [], activities: [activity], runStatus: "正在运行" };
+    const wrapper = mount(RightRail, { props: { ...baseProps, chat: [turn], sending: true, canStop: true } });
+    expect(wrapper.find(".transcript .agent-activity").attributes("data-status")).toBe("running");
+    await wrapper.find(".stop-agent").trigger("click");
+    expect(wrapper.emitted("stop-agent")).toHaveLength(1);
+    await wrapper.findAll("button.tab").find(button => button.text().includes("轨迹"))!.trigger("click");
+    expect(wrapper.findAll('.agent-activity[data-step-id="1"]')).toHaveLength(2);
+    const transcript = wrapper.find(".transcript");
+    const el = transcript.element as HTMLElement;
+    Object.defineProperty(el, "scrollHeight", { value: 1000, configurable: true });
+    Object.defineProperty(el, "clientHeight", { value: 200, configurable: true });
+    el.scrollTop = 50;
+    await transcript.trigger("scroll");
+    await wrapper.setProps({ chat: [{ ...turn, pending: false, runStatus: "已停止", activities: [{ ...activity, status: "cancelled" as const, duration_ms: 100 }] }], sending: false, canStop: false });
+    expect(el.scrollTop).toBe(50);
+    expect(wrapper.find(".pending").exists()).toBe(false);
+    expect(wrapper.find(".run-status").text()).toBe("已停止");
+    expect(wrapper.findAll('.agent-activity[data-status="cancelled"]')).toHaveLength(2);
+    wrapper.unmount();
   });
 });

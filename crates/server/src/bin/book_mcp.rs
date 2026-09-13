@@ -49,7 +49,7 @@ fn main() {
         reader_only: false,
         book_dir: dir,
         library_root: None,
-        book,
+        book: book.into(),
         reader,
         store,
         intent_store_root: None,
@@ -62,6 +62,7 @@ fn main() {
         profile_context_cache: runtime::profile_context::ProfileContextCache::default(),
         visitor_sessions: VisitorSessions::default(),
         workbench_loaded_revision: None,
+        active_agent_stream: None,
     };
 
     let stdin = std::io::stdin();

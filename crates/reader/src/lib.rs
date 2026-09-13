@@ -725,6 +725,7 @@ pub fn project_paper_minimap_lens(
 /// 命令优先阅读器(headless,有状态会话态)。不拥有 Book/MemoryStore(调用方注入),
 /// 标注不归 reader 持有(归记忆层),reader 只持视口/选区会话态。
 pub struct Reader {
+    revision: u64,
     /// 全书叶 LID,按物化路径序(lid_nodes 已是排序数组 `[ADR-0008]`)。
     leaf_lids: Vec<String>,
     /// 当前锚点在 leaf_lids 的下标。
@@ -1650,6 +1651,7 @@ impl Reader {
             .map(|n| n.lid.clone())
             .collect();
         Reader {
+            revision: 0,
             leaf_lids,
             top_idx: 0,
             width: width.max(1),
@@ -1666,6 +1668,8 @@ impl Reader {
     }
 
     /// 当前视口 = 叶序滑动窗口(anchor ± radius,边界 saturating)。
+    pub fn revision(&self) -> u64 { self.revision }
+
     pub fn viewport(&self) -> Viewport {
         if self.leaf_lids.is_empty() {
             return Viewport {
@@ -1737,6 +1741,7 @@ impl Reader {
         match idx {
             Some(i) => {
                 self.top_idx = i.min(self.max_top_idx());
+                self.revision += 1;
                 self.selection = Some(lid.to_string());
                 self.enqueue_visible_read(book, store, now)?;
                 Ok(ViewportEffect {
@@ -1766,6 +1771,7 @@ impl Reader {
             let last = self.max_top_idx() as i64;
             let next = (self.top_idx as i64 + delta).clamp(0, last);
             self.top_idx = next as usize;
+            self.revision += 1;
             self.selection = Some(self.leaf_lids[self.top_idx].clone());
             self.enqueue_visible_read(book, store, now)?;
         }
@@ -1831,6 +1837,7 @@ impl Reader {
             },
             now,
         )?;
+        self.revision += 1;
         self.selection = Some(lid.to_string());
         Ok(HighlightEffect {
             ok: true,
@@ -1882,6 +1889,7 @@ impl Reader {
                 to_layer: "long_term".into(),
             })?;
         }
+        self.revision += 1;
         self.selection = Some(lid.to_string());
         Ok(NoteEffect {
             ok: true,
@@ -1934,6 +1942,7 @@ impl Reader {
             apply_layout_action_to_state(book, &manifest, &mut after, action)?;
         }
         after.rev = before.rev + 1;
+        self.revision += 1;
         self.layout = after.clone();
         Ok(ReaderLayoutEffect {
             before,
@@ -2026,6 +2035,7 @@ impl Reader {
         let before = self.layout.clone();
         let mut restored = effect.before.clone();
         restored.rev = before.rev + 1;
+        self.revision += 1;
         self.layout = restored.clone();
         Ok(ReaderLayoutEffect {
             before,
@@ -2153,6 +2163,7 @@ impl Reader {
                 landmark.created_from_effect = Some(effect_id.clone());
             }
         }
+        self.revision += 1;
         self.paper_minimap = after.clone();
         let effect = PaperMinimapEffect {
             effect_id: effect_id.clone(),
@@ -2378,6 +2389,7 @@ impl Reader {
             before,
             after: after.clone(),
         };
+        self.revision += 1;
         self.paper_minimap = after;
         Ok(undo)
     }

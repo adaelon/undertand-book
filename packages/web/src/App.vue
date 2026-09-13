@@ -84,7 +84,6 @@ import {
   normalizePaperViewportForMinimap,
 } from "./paper-minimap-navigation";
 import {
-  hasSuccessfulReaderNavigation,
   resolveReaderNavigationTarget,
   resolveReaderStateNavigationTarget,
 } from "./reader-navigation";
@@ -122,6 +121,8 @@ import LeftRail from "./components/LeftRail.vue";
 import PdfReaderPane from "./components/PdfReaderPane.vue";
 import ReaderPane from "./components/ReaderPane.vue";
 import RightRail from "./components/RightRail.vue";
+import { useAgentRun } from "./useAgentRun";
+import { runStatusText, type RunActivity, type RunSnapshot } from "./agent-run-state";
 
 type NodeKind = import("./api").Manifest["tree"][number]["kind"];
 type ManifestNode = import("./api").Manifest["tree"][number];
@@ -200,6 +201,9 @@ const pdfRuntimeError = ref<string | null>(null);
 const outlineItems = ref<OutlineItem[]>([]);
 const titleByLid = ref<Map<string, string>>(new Map());
 const viewport = ref<Viewport | null>(null);
+let readerInteractionRevision = 0;
+let manualReaderBoundary: Promise<void> = Promise.resolve();
+let manualReaderState: { book_id: string; revision: number } | null = null;
 const edgeLoading = ref(false);
 const readerPaneRef = ref<{
   captureScrollAnchor: (candidateLids: string[]) => ScrollAnchor | null;
@@ -1332,13 +1336,15 @@ async function loadWindow(
   vp: Viewport,
   mode: SegmentLoadMode = "replace",
   navigationTargetLid = vp.top_lid,
+  stillCurrent: () => boolean = () => true,
 ) {
+  const next = await hydrateSegments(vp.visible_lids);
+  if (!stillCurrent()) return;
   viewport.value = vp;
   if (mode === "replace") {
     selectedLid.value = navigationTargetLid;
     currentReadingLid.value = navigationTargetLid;
   }
-  const next = await hydrateSegments(vp.visible_lids);
   segments.value = mergeSegments(segments.value, next, mode);
   if (mode === "replace") {
     await readerPaneRef.value?.scrollLidIntoView(navigationTargetLid);
@@ -2390,9 +2396,14 @@ function cancelPdfSelectionDraft() {
   cancelPdfSelectionDraftFor("close");
 }
 
+function onReaderViewportInteraction() {
+  clearOutlineNavigation();
+  const interaction = readerInteractionRevision;
+  if (residentRun.active.value) manualReaderBoundary = api.state().then(state => { if (readerInteractionRevision === interaction) manualReaderState = state; }).catch(fail);
+}
 function onPdfViewportInteraction() {
   pdfSelectionTranslation.invalidate("viewport");
-  clearOutlineNavigation();
+  onReaderViewportInteraction();
 }
 
 function translatePdfSelection() {
@@ -2748,6 +2759,7 @@ function onCurrentLid(lid: string) {
 }
 
 function clearOutlineNavigation() {
+  readerInteractionRevision++;
   outlineNavigationLid.value = null;
 }
 
@@ -2852,7 +2864,12 @@ interface ChatTurn {
   questionAnchorLid: string | null;
   questionQuote: AgentQuestionQuoteView | null;
   questionSelection: AskDraft | null;
+  liveEffects?: { effect_id: string; effect: AgentEffect }[];
   effectLabels: string[];
+  activities?: RunActivity[];
+  runTrace?: TraceStep[];
+  runStatus?: string;
+  draft?: import("./agent-run-state").AnswerDraft | null;
 }
 type AskDraft = AskQuote;
 const chat = ref<ChatTurn[]>([]);
@@ -2860,7 +2877,68 @@ const chatSessions = ref<AgentChatSessionSummary[]>([]);
 const activeChatSessionId = ref("");
 const agentInput = ref("");
 const askDraft = ref<AskDraft | null>(null);
-const sending = ref(false);
+const acceptingRun = ref(false);
+const residentRun = useAgentRun((snapshot) => { void finishResidentRun(snapshot).catch(fail); });
+const sending = computed(() => acceptingRun.value || residentRun.active.value);
+const runConnection = computed(() => residentRun.connection.value);
+watch([residentRun.snapshot, residentRun.connection], ([snapshot]) => {
+  if (!snapshot || snapshot.descriptor.session_id !== activeChatSessionId.value) return;
+  const turn = chat.value.find(t => t.turnId === snapshot.descriptor.turn_id);
+  if (!turn) return;
+  turn.activities = snapshot.activities;
+  turn.liveEffects = snapshot.effects;
+  void syncResidentChanges(snapshot).catch(fail);
+  turn.draft = snapshot.draft;
+  turn.pending = snapshot.persistence_state === "pending";
+  turn.runStatus = runStatusText(snapshot, residentRun.connection.value);
+  if (snapshot.final_view) Object.assign(turn, chatTurnFromHistory(snapshot.final_view, turn), { runStatus: turn.runStatus });
+  if (snapshot.persistence_state === "failed") turn.error = "运行已结束，但结果未保存。已发生的阅读操作保留。";
+}, { flush: "sync" });
+const seenResidentEffects = new Set<string>();
+let residentReaderRevision = -1;
+let residentReaderTurn = "";
+async function syncResidentChanges(snapshot: RunSnapshot) {
+  const matches = () => snapshot.descriptor.book_id === buildWorkbenchSnapshot.value?.book_id && snapshot.descriptor.session_id === activeChatSessionId.value;
+  if (!matches()) return;
+  if (residentReaderTurn !== snapshot.descriptor.turn_id) { residentReaderTurn = snapshot.descriptor.turn_id; residentReaderRevision = -1; seenResidentEffects.clear(); }
+  let navigation = false;
+  for (const item of snapshot.effects ?? []) {
+    if (seenResidentEffects.has(item.effect_id)) continue;
+    seenResidentEffects.add(item.effect_id);
+    if (item.effect.kind === "Goto") navigation = true;
+    if (item.effect.kind === "LayoutProposal") pendingLayoutProposal.value = item.effect.proposal;
+    if (item.effect.kind === "PaperMinimap") lastPaperMinimapEffect.value = item.effect.effect;
+  }
+  const changed = snapshot.reader_state;
+  if (!changed || (changed.revision <= residentReaderRevision && !navigation)) return;
+  residentReaderRevision = changed.revision;
+  const interaction = readerInteractionRevision;
+  const stillCurrent = () => matches() && residentReaderTurn === snapshot.descriptor.turn_id && residentReaderRevision === changed.revision && readerInteractionRevision === interaction;
+  await manualReaderBoundary;
+  if (manualReaderState?.book_id === snapshot.descriptor.book_id && changed.revision <= manualReaderState.revision) return;
+  const current = await api.state();
+  if (!stillCurrent() || current.book_id !== snapshot.descriptor.book_id || current.revision !== changed.revision) return;
+  await applyReaderState(current);
+  if (!stillCurrent()) return;
+  if (navigation) await loadWindow(current.viewport, "replace", resolveReaderStateNavigationTarget(current.viewport.top_lid, current.selection, leafOrder.value), stillCurrent);
+  else await refreshAnnotations();
+  if (stillCurrent()) await loadPaperProjectionData(true);
+}
+async function stopResidentRun() {
+  try { await residentRun.cancel(); } catch (error) { fail(error); }
+}
+async function finishResidentRun(snapshot: RunSnapshot) {
+  if (snapshot.descriptor.session_id !== activeChatSessionId.value || snapshot.descriptor.book_id !== buildWorkbenchSnapshot.value?.book_id) return;
+  const outcome = snapshot.final_view?.outcome;
+  const proposalEffect = outcome?.effects.find(effect => effect.kind === "LayoutProposal");
+  if (proposalEffect?.kind === "LayoutProposal") pendingLayoutProposal.value = proposalEffect.proposal;
+  const minimapEffect = [...(outcome?.effects ?? [])].reverse().find(effect => effect.kind === "PaperMinimap");
+  if (minimapEffect?.kind === "PaperMinimap") lastPaperMinimapEffect.value = minimapEffect.effect;
+  await refreshAnnotations();
+  if (snapshot.persistence_state === "saved" && snapshot.descriptor.session_id === activeChatSessionId.value) await refreshAgentHistory();
+  await refreshProfileSurface(true);
+}
+
 
 async function highlightPdfSelection() {
   const ready = pdfSelectionState.value.draft;
@@ -2935,8 +3013,12 @@ function askPdfSelection() {
 }
 const showTrace = ref<Record<string, boolean>>({});
 const latestTrace = computed<TraceStep[]>(() => {
+  const latest = chat.value.at(-1);
+  if (latest?.pending || latest?.activities !== undefined) {
+    return latest.runTrace ?? latest.outcome?.trace ?? [];
+  }
   for (let i = chat.value.length - 1; i >= 0; i -= 1) {
-    const trace = chat.value[i].outcome?.trace;
+    const trace = chat.value[i].runTrace ?? chat.value[i].outcome?.trace;
     if (trace?.length) return trace;
   }
   return [];
@@ -2974,17 +3056,37 @@ function chatTurnFromHistory(turn: StoredAgentChatTurn, previous?: ChatTurn): Ch
     questionAnchorLid: matchingPrevious?.questionAnchorLid ?? null,
     questionQuote: turn.question_quote ? { ...turn.question_quote } : null,
     questionSelection: matchingPrevious?.questionSelection ?? null,
+    liveEffects: turn.run_summary?.effects.map((effect, index) => ({ effect_id: `${turn.turn_id}:${index}`, effect })),
     effectLabels: [...turn.effect_labels],
+    activities: turn.run_summary?.activities ?? undefined,
+    runTrace: turn.run_summary?.trace,
+    runStatus: turn.status === "cancelled" ? "已停止" : undefined,
   };
 }
 
 function applyAgentHistory(history: AgentHistoryResponse) {
+  if (residentRun.snapshot.value && residentRun.snapshot.value.descriptor.session_id !== history.current.id) residentRun.forget();
   const previousChat = activeChatSessionId.value === history.active_session_id ? chat.value : [];
   activeChatSessionId.value = history.active_session_id;
   chatSessions.value = history.sessions;
   chat.value = history.current.turns.map((turn, index) => chatTurnFromHistory(turn, previousChat[index]));
   handled.value = {};
   showTrace.value = {};
+  const pending = history.current.turns.find(turn => turn.status === "pending_assistant");
+  if (pending && !(residentRun.snapshot.value?.descriptor.turn_id === pending.turn_id && residentRun.snapshot.value.persistence_state === "failed")) {
+    residentRun.observe({ book_id: history.current.book_id, session_id: history.current.id, turn_id: pending.turn_id });
+  }
+  const snapshot = residentRun.snapshot.value;
+  if (snapshot?.descriptor.session_id === history.current.id) {
+    const current = chat.value.find(turn => turn.turnId === snapshot.descriptor.turn_id);
+    if (current) {
+      current.activities = snapshot.activities;
+      current.draft = snapshot.draft;
+      current.pending = snapshot.persistence_state === "pending";
+      current.runStatus = runStatusText(snapshot, residentRun.connection.value);
+      if (snapshot.persistence_state === "failed") current.error = "运行已结束，但结果未保存。已发生的阅读操作保留。";
+    }
+  }
 }
 
 async function refreshAgentHistory() {
@@ -3060,30 +3162,30 @@ async function submitAgentMessage(msg: string, displayUser: string, draft: AskDr
     effectLabels: [],
   };
   chat.value.push(turn);
-  sending.value = true;
+  acceptingRun.value = true;
   banner.value = "";
   try {
-    turn.outcome = await api.agentChat(msg, {
-      display_user: displayUser,
-      question_anchor_lid: questionAnchorLid,
+    const result = await api.agentRunCreate(msg, {
+      display_user: displayUser, question_anchor_lid: questionAnchorLid,
       question_quote: draft ? { ...draft } : null,
     });
-    const proposalEffect = turn.outcome.effects.find((effect) => effect.kind === "LayoutProposal");
-    if (proposalEffect?.kind === "LayoutProposal") pendingLayoutProposal.value = proposalEffect.proposal;
-    const minimapEffect = [...turn.outcome.effects]
-      .reverse()
-      .find((effect) => effect.kind === "PaperMinimap");
-    if (minimapEffect?.kind === "PaperMinimap") lastPaperMinimapEffect.value = minimapEffect.effect;
-    // agent 可能驱动了共享 reader 视口 / 落了 session 标注 → 同步阅读区。
-    await syncViewport(true, hasSuccessfulReaderNavigation(turn.outcome.trace));
-    await refreshAgentHistory();
-    await refreshProfileSurface(true);
-  } catch (e) {
-    turn.error = e instanceof ApiError ? `[${e.category}] ${e.errorCode}: ${e.message}` : String(e);
-    await refreshProfileSurface(true);
-  } finally {
+    if ("turn_id" in result) {
+      turn.turnId = result.turn_id;
+      activeChatSessionId.value = result.session_id;
+      residentRun.observe(result);
+    } else {
+      // Existing precommit privacy refusals return an immediate outcome without creating a run.
+      turn.outcome = result;
+      turn.pending = false;
+      await refreshProfileSurface(true);
+    }
+  } catch (error) {
     turn.pending = false;
-    sending.value = false;
+    turn.error = error instanceof ApiError ? `[${error.category}] ${error.errorCode}: ${error.message}` : String(error);
+    // A lost creation response may already have accepted the turn. Discover it, never resubmit it.
+    try { await refreshAgentHistory(); } catch { fail(error); }
+  } finally {
+    acceptingRun.value = false;
   }
 }
 
@@ -3461,6 +3563,9 @@ function resetBookSessionUi() {
   noteSourceFingerprint.value = null;
   outlineItems.value = [];
   titleByLid.value = new Map();
+  readerInteractionRevision++;
+  manualReaderState = null;
+  manualReaderBoundary = Promise.resolve();
   viewport.value = null;
   segments.value = [];
   annotations.value = [];
@@ -3930,7 +4035,7 @@ async function submitOpenBook(dir = bookPickerDir.value) {
         @select="onSelectSeg"
         @prose-mouse-up="onProseMouseUp"
         @current-lid="onCurrentLid"
-        @viewport-interaction="clearOutlineNavigation"
+        @viewport-interaction="onReaderViewportInteraction"
         @note-placement-target="onMarkdownNotePlacementTarget"
         @note-placement-invalid="onMarkdownNotePlacementInvalid"
         @scroll-edge="onScrollEdge"
@@ -3959,6 +4064,9 @@ async function submitOpenBook(dir = bookPickerDir.value) {
         :chat-sessions="chatSessions"
         :active-chat-session-id="activeChatSessionId"
         :sending="sending"
+        :run-connection="runConnection"
+        :can-stop="residentRun.active.value"
+        @stop-agent="stopResidentRun"
         :unquoted-note-placement-available="unquotedNotePlacementAvailable"
         :note-placement-surface="notePlacementSurface"
         :note-source-fingerprint="noteSourceFingerprint"

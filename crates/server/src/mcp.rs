@@ -933,7 +933,7 @@ mod tests {
             reader_only: false,
             book_dir: std::env::temp_dir(),
             library_root: None,
-            book,
+            book: book.into(),
             reader,
             store: MemoryStore::open(tmp("memory")).unwrap(),
             intent_store_root: None,
@@ -948,6 +948,7 @@ mod tests {
                 .map(VisitorSessions::with_timeout_ms)
                 .unwrap_or_default(),
             workbench_loaded_revision: None,
+        active_agent_stream: None,
         }
     }
 

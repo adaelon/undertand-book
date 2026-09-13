@@ -29,7 +29,7 @@ describe("reader navigation", () => {
     expect(app).toContain("const outlineNavigationLid = ref<string | null>(null)");
     expect(app).toContain("outlineNavigationLid.value = lid");
     expect(app).toContain(":anchor-lid=\"outlineAnchorLid\"");
-    expect(app).toContain("@viewport-interaction=\"clearOutlineNavigation\"");
+    expect(app).toContain("@viewport-interaction=\"onReaderViewportInteraction\"");
   });
 
   it("uses the reader selection after a successful agent goto in a clamped viewport", () => {
@@ -51,7 +51,6 @@ describe("reader navigation", () => {
     ])).toBe(false);
 
     const app = readFileSync("src/App.vue", "utf8");
-    expect(app).toContain("hasSuccessfulReaderNavigation(turn.outcome.trace)");
     expect(app).toContain("resolveReaderStateNavigationTarget(");
   });
 });

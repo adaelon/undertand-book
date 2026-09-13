@@ -1,63 +1,45 @@
-# SESSION_CHECKPOINT — 2026-09-08 16:40
+# SESSION_CHECKPOINT — 2026-09-14 05:17（Asia/Hong_Kong）
 
 ## 新鲜度自检
+- 写入时最新 commit：`96215a67b24407c9ebe648718505cead683d5e44 feat(reader): deliver LA reliability and Linux reader deployment`。
+- 接手时对比 `git log -3` 与工作树；AS0–AS9 实现/验收尚未提交，不能只凭 HEAD 判断进度。
 
-- 合并提交基线：`9e36507 feat(build): complete executor transport compression`；本文件随 LA/LX 合并交付，最新提交以 `git log -1` 为准。
-- 读入时比对最新git记录；本次仅合并 LA/LX 及其评测与部署文档；前序 V1、插件及其他未提交工作继续保留。
+## 当前在做什么
+Resident Agent 流式回答与运行活动 **AS0–AS9 全部完成**。AS8 活动来源及即时动作已实现；Windows Chromium、真实 Tauri/WebView2、Linux release/Nginx、真实模型与生命周期验收已完成。
 
-## 本轮完成
+## 下一步（可直接接手）
+1. 阅读 `docs/agent-streaming-validation.md/json`，了解最终验收与单样本测量边界。
+2. 若用户要求提交或发布，先按 `docs/代码链路.md` 的 AS1–AS9 条目筛选本功能改动；工作树还有预构建、插件和画像等其他修改，不要批量提交。
+3. 若用户要求部署，使用已验证源码构建正式发布版本；本轮 Linux 独立验收目录为 `/opt/understand-book/acceptance/as9-20260914`，正式服务尚未切换。
 
-用户目标“阅读checkpoint，实现LA7–LA10，完成后刷新checkpoint”已完成实现、实测及落档。完整产品质量目标未全通过，失败与返回切片明确保留。
+## 未提交 / 未完成
+- 本 goal 无未完成实现或验收；所有改动待 commit，本轮未安装插件或更新正式服务。
+- Runtime：`provider_stream.rs/answer_stream.rs/run_context.rs/run_events.rs` 及 lib/orchestrator；Server：`agent_run.rs/agent_stream.rs/agent_run_tests.rs` 与宿主/来源入口。
+- Reader revision、Web reducer/订阅/App/RightRail、生成类型、单元及浏览器测试待提交。
+- ADR-0127、切片方案、架构、代码链路、验收 Markdown/JSON 与本 checkpoint 已同步。
+- AS9 runner：`scripts/validate-agent-streaming.mjs`；Playwright 配置支持 `AS9_WEBVIEW`、`AS9_RELEASE`、`AS9_BROWSER_WS` 和 `AS9_NGINX_TEMPLATE`。
+- 原有其他工作树修改仍保留；不要回退。凭据未写入项目文件或报告。
 
-- LA7固定32题：Agent15/24、Chunk20/24；实际跳转4/4、回答引用动作完整1/4；重启准备/持久化/恢复均4/4。
-- Agent平均97,359.25 tokens、P95 114.85秒；Chunk一次usage缺失，平均N/A。旧Agent13/24、Chunk22/24基线不改写。
-- LA7请求用途分账完整：业务循环、内层查询/综合、来源修复、终答、压缩、后台、判分和未分类；失败和缺失usage保留。
-- LA8同环Text/Tree/Graph显式实验完成：内存Book视图、同注册表直接/discovery限制、环境/sidecar隔离、真实模型输入标记测试。
-- LA9固定72样本全部完成：Text10/24、Tree11/24、Graph9/24；平均tokens分别85,729.96、101,842.04、95,171.38。
-- Tree对Text增4失3，平均成本+18.79%；Graph对Tree增2失4。保留LID，不扩大默认图谱使用，不从单次开发集作正向推广。
-- LA9实际599请求/6,785,841 tokens，usage完整；27样本在途超额，最大19,351，10次后续上游请求被预算拒绝；正文并集最大11,465/12,000 UTF-16。
-- LA10真实前端七阶段通过：选区解释、弹窗不导航、显式open、保存笔记、进程重启、新聊天恢复、两章来源点击。
-- 修复Markdown askSelection丢失精确provenance；source.open改视口后漏存session；已读范围引文错误单列SOURCE_QUOTE_MISMATCH，允许更正/省略quote，不放宽证据闸。
-- 最终Runtime318 passed/3既有ignored、Server241 passed、评测器28 passed；真实UI及来源持久化红绿证据保留。
-
-## 结果与固定程序
-
-- LA7：`tmp/la-final-colon/server.exe`；`evals/semantic/results/2026-09-08-la7`。
-- LA8接入：`2026-09-08-la8-probe`三题通过；初版LA9因无显式输出上限停为invalid_configuration，2条样本不拼接。
-- LA9：`tmp/la9/server.exe`；`evals/semantic/results/2026-09-08-la9-v2`。此程序早于LA10位置修复及LA7后续来源提示修复，批次内未替换。
-- LA9冻结：deepseek-v4-flash/温度0/12轮/300秒/输出8000/实际累计120000/终答预留20000/唯一正文12000；按题循环轮换三组。
-- LA7后续：`tmp/la7-followup/server.exe`；`2026-09-08-la7-followup`。contrast-04/source-02/source-03通过；formula-04仍终答协议失败，独立结果不替换全量。
-- LA10：`tmp/la10-final/server.exe`及正式Web dist；`tmp/la10-v4/run.json` passed，末步等待修正后接续同一持久回答，原失败run-initial.json保留；匿名结果`2026-09-08-la10/summary.json`。
-- 历史构建：书目录7,861文件/34,814,058字节/530条metrics；实际tokens和墙钟未知，不重建、不计算数值回收点。见LA9 prebuild.json。
-- 公开summary/report不含原文请求；run.json与tmp行为证据仅本地。最终测试和交付核对日志在`tmp/la7-la10-final-*`、`tmp/la7-la10-delivery-check.log`。
-
-## 后续入口与已知问题
-
-1. 先读`docs/LA7-LA10实施与验收.md`，再按问题回到LA3–LA6；LA7–LA10不再是待实施切片。
-2. 来源选择/范围与终答可靠性仍未达全量质量目标；formula-04后续复验仍违规终答。不要靠提高预算、拼接成功样本或接纳违规工具掩盖失败。
-3. 标注器有改写引号/标点与布尔反填，严格分数保留；LA9部分Tree表面增益受标注影响。单书单次、同模型家族标注和开发机并行负载限制结论。
-4. 后续若要在README主张某项能力有普遍收益，先用新冻结题集复核；当前README保持谨慎结论。
-5. 代码与文档未提交；Linux仍为前序部署版本，本轮LA修改未部署。不要重做已完成LX0–LX7。
-6. 前序V1候选已实现未提交；旧/新宿主A/B、真实模型child故障注入和正式发布待后续，见`docs/performance/understand-book-v1-release.md`。
-7. Mastering Rust未续跑：`E:\allwork\download\agent\lifebook\.understand-book\mastering-rust`；保留原plan/invocation/accepted、Pass2 disabled和三槽约束。
-
-## 并行 Linux 完成状态（保留前序成果）
-
-- LX0–LX7完成：真实Provider、阅读问答/来源/带读、PDF高亮/Note/翻译、v3成果、systemd重启与Windows入口联验通过；12阶段证据见LX7验收。
-- veLinux2.2/CentOS Stream9 x86_64；Node24.20.0、pnpm10.34.2、Rust1.98.1。
-- `understand-book.service`专用账户监听127.0.0.1:8787；native/DeepSeek/deepseek-v4-flash，凭据只在远端环境文件。
-- 公网 `http://115.190.121.150:8080/`：机内401、原站点200、PID保持；外部TCP超时，等待云安全组TCP8080及用户网络验收。旧公共域名因备案拦截撤下。
-- 源码 `/opt/understand-book/source`；书库 `/opt/understand-book/books`；私有数据 `/opt/understand-book/data/lx6/{memory,private}`；环境 `/opt/understand-book/reader.env`。
-- 实测停止0.086秒，重启恢复位置/画像/PDF批注/聊天；测试进程和隧道已关闭，Linux常驻保留。该部署不含后来本地LA修改。
+## 验证状态
+- Windows Reader **54**、Runtime **328**（3 原有忽略）、Server **259** 全量通过：`tmp/as9-rust-tests.log`。
+- Web **41 文件/227 项**通过：`tmp/as9-web-all.log`；类型检查/构建：`tmp/as9-web-final-build.log`。
+- Windows Chromium **Native/ReAct 2 场景**：`tmp/as8-browser-final.log`；真实 Tauri/WebView2 **2 场景**：`tmp/as9-webview-final3.log`。
+- Linux release 构建通过；Nginx **Native/ReAct 2 场景**通过：`tmp/as9-linux/browser.log`（ReAct）、`browser-native-final.log`（Native）；生命周期 **15 项**通过：`lifecycle.log`。
+- 旧完整入口评测器 **9 项**通过：`tmp/as9-linux/evaluator-tests.log`；Windows/Linux 三题×两入口共 **12 个真实模型样本 completed**，数据在 `docs/agent-streaming-validation.json`。
+- 两端流式样本首正文均早于 Provider 最后结束；Reader 请求 Windows 约 7ms、Linux 2.3–10.9ms。单样本及模型请求数差异不用于声称稳定总耗时收益。
+- Linux 临时 Nginx/测试宿主、浏览器控制和 SSH 转发均已退出。正式服务仍 active、MainPID 3444218，匿名 8080 返回 401，未切换部署。
+- Linux Native 首次触及整场景 60s 上限，远程总上限改为 180s 后通过，单项断言不变；原始失败保留。详细口径见验收文档。
+- C 盘曾满；本轮临时目录转移至 `tmp/as9-temp`。后续 Windows 验收应使用有空间的 E 盘 TEMP/TMP。
 
 ## 冷启动读序
+1. `docs/adr/0127-resident-agent-streaming-and-runtime-activity.md` — 已接受架构及完成边界。
+2. `docs/切片方案-Resident-Agent流式回答与运行活动.md` — §2–§6、AS8–AS9 及末尾实施记录。
+3. `docs/agent-streaming-validation.md/json` — Windows/Linux 最终证据、测量和环境限制。
+4. `crates/server/src/agent_stream.rs/agent_run.rs`；`lib.rs:agent_source_binding/reader_state_response`；Runtime `answer_stream.rs/run_events.rs` — 来源、revision 和 effects。
+5. Web `App.vue:syncResidentChanges/onReaderViewportInteraction`、`agent-run-state.ts/useAgentRun.ts`、RightRail 来源；`playwright/agent-run-live.spec.ts`、`scripts/validate-agent-streaming.mjs` — 展示与验收入口。
+6. `docs/架构.md` Resident 两节、`docs/代码链路.md` AS8–AS9；`docs/Linux阅读器部署.md` — 当前结构及发布入口。
 
-1. 本checkpoint → `docs/LA7-LA10实施与验收.md` → 各批summary/report；不重跑已完成整批。
-2. ADR0123、LA切片方案、LA1–LA6验收；代码链路/架构的LA7–LA10与来源反馈节。
-3. 按问题触达experiment.rs、orchestrator.rs、read-tools Book视图、报告与continuous-reading脚本。
-4. Linux仅按问题读LX7验收/JSON、部署说明和ADR0122，保留公网待验收状态。
-
-## LA/LX 合并交付
-
-- 用户要求一个 commit 并推送，再同步 Linux；暂存版本独立验证：Runtime 318/3 ignored、Server 241、CLI/MCP 6、评测器 28、迁入 3、Web 219 与正式 Web 构建通过；提交不包含预构建 V1 与插件更新。
-- Linux 更新采用独立固定目录构建，保留原 source 与私有数据；构建通过后仅重启阅读器，原 80 端口程序保持。
+## 本会话决策摘要
+- 延续 ADR-0127：活动引用受已验证绑定与当前发布草稿约束，终局由持久绑定接续；修复撤回旧引用。
+- Reader 写入推进 revision，事件只同步观察；effect 使用运行/步骤身份，终局保留原撤销合同并取消强制定位。
+- Linux 复用正式 Nginx 代理段，在独立 loopback 实例验证；实际部署保持原版本。详见验收记录。

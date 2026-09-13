@@ -443,6 +443,18 @@ pub struct ToolRegistration {
 }
 
 impl ToolRegistration {
+    pub fn activity_label(&self) -> &'static str {
+        match self.spec.name.as_str() {
+            "book.query" => "检索书内证据", "book.synthesize" => "综合原文", "book.text" => "读取原文",
+            "book.search_text" => "搜索原文", "book.structure" => "查看书籍结构", "source.present" => "整理来源",
+            "tool.search" => "查找可用工具", "reader.note" => "保存笔记", "reader.highlight" => "添加高亮",
+            "reader.gotoLid" | "reader.scroll" => "调整阅读位置", "reader.state" => "查看阅读状态",
+            name if name.starts_with("artifact.") => "读取学习成果",
+            name if name.starts_with("memory.") || name.starts_with("profile.") => "处理阅读记忆",
+            name if name.starts_with("reader.") => "更新阅读器", _ => "查阅书籍",
+        }
+    }
+
     pub fn validate_arguments(&self, arguments: &str) -> Result<(), ToolArgumentError> {
         let value: Value = serde_json::from_str(arguments).map_err(|error| ToolArgumentError {
             message: format!("tool arguments are not valid JSON: {error}"),

@@ -1,5 +1,14 @@
 # CONTEXT —— 术语表
 
+## Resident 运行 (Resident Run)
+一条读者消息触发的完整住户 Agent 工作过程，归属于提问时的书籍与会话，可以包含多次模型请求和工具调用。它以回答交付、失败或取消结束；运行结束与问题得到完整回答是两个判断。状态:EXISTING（见 [ADR-0127](docs/adr/0127-resident-agent-streaming-and-runtime-activity.md)）。
+
+## Resident 运行活动 (Resident Activity)
+住户 Agent 一次运行中已经发生的模型请求、工具执行、阅读动作及其结果的可见记录。活动的先后与包含关系来自实际执行，准备调用、正在执行和执行完成具有不同含义。状态:EXISTING（见 [ADR-0127](docs/adr/0127-resident-agent-streaming-and-runtime-activity.md)）。
+
+## Agent 回答草稿 (Agent Answer Draft)
+当前运行中已经通过公开展示规则、仍可能随后续生成或交付修复而变化的回答内容。草稿尚未成为持久的完成回答，其中的来源仍须来自本轮已验证且已绑定的证据。状态:EXISTING（见 [ADR-0127](docs/adr/0127-resident-agent-streaming-and-runtime-activity.md)）。
+
 > 纯术语表。只定义"词是什么意思",不含实现细节、不含决策(决策见 `docs/adr/`)。
 > 凡此处定义与代码/对话冲突,以此处为准,冲突即点破。
 

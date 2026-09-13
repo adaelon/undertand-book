@@ -1,3 +1,4 @@
+import type { RunDescriptor, RunSnapshot, RunActivity } from "./agent-run-state";
 // 类型化命令面 REST 客户端 `[ADR-0028]`:前端经 `/api` dev proxy 打到 tiny_http。
 // 端点名 = 命令名;book.*→GET、reader.*/memory.*/book.query→POST;错误透传 §4.4 信封。
 import type { Manifest } from "./generated/Manifest";
@@ -94,6 +95,7 @@ export type {
 };
 
 const BASE = "/api";
+export const agentRunEventsUrl = (turnId: string) => `${BASE}/agent/runs/${encodeURIComponent(turnId)}/events`;
 
 /** reader.* 会话态(符 V3 §4.2),与 Rust `Viewport`/`ReaderState` 对齐(memory 类型未走 ts-rs,在此手定)。 */
 export interface Viewport {
@@ -108,6 +110,8 @@ export interface ViewportEffect {
   viewport: Viewport;
 }
 export interface ReaderState {
+  book_id: string;
+  revision: number;
   viewport: Viewport;
   open_panels: string[];
   selection: string | null;
@@ -1116,7 +1120,8 @@ export interface AgentChatTurn {
   turn_id: string;
   user_turn_ordinal: number;
   user: string;
-  status: "pending_assistant" | "completed" | "failed";
+  status: "pending_assistant" | "completed" | "failed" | "cancelled";
+  run_summary?: { effects: OuterOutcome["effects"]; trace: OuterOutcome["trace"]; activities?: RunActivity[] | null; last_seq?: number | null } | null;
   outcome?: OuterOutcome | null;
   error?: { error_code: string; category: string; message: string } | null;
   question_source_label: string | null;
@@ -1388,6 +1393,9 @@ export const api = {
   delete: (mem_id: string) => http<{ ok: boolean }>("POST", "/memory/delete", { mem_id }),
 
   // ── agent.*(外层 E agent,POST)`[ADR-0030]` ──
+  agentRunCreate: (message: string, meta: AgentChatMeta = {}) => http<RunDescriptor | OuterOutcome>("POST", "/agent/runs", { message, ...meta }),
+  agentRun: (turn_id: string) => http<RunSnapshot>("GET", `/agent/runs/${encodeURIComponent(turn_id)}`),
+  agentRunCancel: (turn_id: string) => http<RunSnapshot>("POST", `/agent/runs/${encodeURIComponent(turn_id)}/cancel`, {}),
   agentChat: (message: string, meta: AgentChatMeta = {}) =>
     http<OuterOutcome>("POST", "/agent/chat", { message, ...meta }),
   agentNew: () => http<{ ok: boolean; history: AgentHistoryResponse }>("POST", "/agent/new", {}),

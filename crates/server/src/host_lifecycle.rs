@@ -24,6 +24,16 @@ impl ServiceAdapter {
 }
 
 impl ModelAdapter for ServiceAdapter {
+    fn stream_text_is_structured(&self) -> bool { self.inner.stream_text_is_structured() }
+    fn complete_observed(&self, request: runtime::CompletionRequest, observer: &mut dyn runtime::provider_stream::ModelObserver) -> Result<runtime::ParsedResponse, runtime::AdapterError> { self.check_running()?; let result = self.inner.complete_observed(request, observer); result }
+
+    fn complete_structured_observed(&self, request: runtime::CompletionRequest, observer: &mut dyn runtime::provider_stream::ModelObserver) -> Result<serde_json::Value, runtime::AdapterError> { self.check_running()?; let result = self.inner.complete_structured_observed(request, observer); result }
+
+    fn chat_observed(&self, request: &runtime::AgentRequestPlan, observer: &mut dyn runtime::provider_stream::ModelObserver) -> Result<runtime::AssistantTurn, runtime::AdapterError> { self.check_running()?; let result = self.inner.chat_observed(request, observer); result }
+
+    fn set_run_cancellation(&self, cancellation: runtime::run_context::CancellationToken) {
+        self.inner.set_run_cancellation(cancellation);
+    }
     fn complete(&self, request: CompletionRequest) -> Result<ParsedResponse, AdapterError> {
         self.check_running()?;
         self.inner.complete(request)

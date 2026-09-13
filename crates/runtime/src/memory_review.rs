@@ -49,6 +49,7 @@ pub enum ReviewTurnStatus {
     PendingAssistant,
     Completed,
     Failed,
+    Cancelled,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

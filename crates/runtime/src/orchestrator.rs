@@ -5,6 +5,7 @@
 //! dispatch 仍保留 manifest 防御分支。reader.* 是会话态阅读器(S7 接入):agent 经命令面驱动
 //! 「问→跳转→高亮→记笔记」闭环 `[ADR-0007/0015]`。
 //! 内层 book.query 复用 `crate::query`(同一 adapter 触 `complete`)`[ADR-0025]`。
+use crate::run_context::{RunContext, ResidentStatePort, BorrowedResidentState};
 use crate::{
     agent_prompt::{policy_modules_for_tools, BASE_INSTRUCTIONS},
     agent_request_audit::AgentRequestAudit,
@@ -693,7 +694,7 @@ impl ProgressPhase {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct TurnProgressLedger {
+pub(crate) struct TurnProgressLedger {
     phase: ProgressPhase,
 }
 
@@ -715,7 +716,7 @@ impl TurnProgressLedger {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct TurnEvidencePlanLedger {
+pub(crate) struct TurnEvidencePlanLedger {
     origins: BTreeSet<EvidencePlanOrigin>,
     broad_synthesis_requested: bool,
 }
@@ -791,7 +792,7 @@ struct RuntimeGateError {
 const STRUCTURAL_INDEX_CAPABILITY: &str = "structural_index";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct TurnLocatorLedger {
+pub(crate) struct TurnLocatorLedger {
     entries: BTreeMap<String, BTreeSet<LocatorOrigin>>,
     blind_reads_blocked: bool,
     lid_not_found_observed: bool,
@@ -1256,7 +1257,7 @@ struct ObservedTurnEvidence {
 }
 
 #[derive(Debug, Default)]
-struct TurnEvidenceLedger {
+pub(crate) struct TurnEvidenceLedger {
     evidence: Vec<ObservedTurnEvidence>,
     presented: Vec<PresentedSource>,
     evidence_state: EvidenceState,
@@ -1312,7 +1313,7 @@ impl TurnEvidenceLedger {
         self.evidence_state
     }
 
-    fn present(&mut self, book: &Book, arguments: &str) -> Result<SourcePresentResult, ToolError> {
+    fn prepare_present(&self, book: &Book, arguments: &str) -> Result<(EvidenceRange, read_tools::ResolvedSource), ToolError> {
         let args: SourcePresentArgs =
             serde_json::from_str(arguments).map_err(|error| ToolError {
                 error_code: "INVALID_SOURCE_RANGE".into(),
@@ -1386,6 +1387,15 @@ impl TurnEvidenceLedger {
             }
         };
 
+        Ok((evidence_range, resolved))
+    }
+
+    fn present(&mut self, book: &Book, arguments: &str) -> Result<SourcePresentResult, ToolError> {
+        let (evidence, resolved) = self.prepare_present(book, arguments)?;
+        self.present_prepared(book, evidence, resolved)
+    }
+
+    fn present_prepared(&mut self, book: &Book, evidence_range: EvidenceRange, resolved: read_tools::ResolvedSource) -> Result<SourcePresentResult, ToolError> {
         if let Some(existing) = self
             .presented
             .iter()
@@ -1786,7 +1796,7 @@ struct InternalAnswerProvenance {
 }
 
 #[derive(Debug, Clone, Default)]
-struct AnswerProvenanceLedger {
+pub(crate) struct AnswerProvenanceLedger {
     public_texts: Vec<PublicAnswerProvenance>,
     internal_locators: Vec<InternalAnswerProvenance>,
 }
@@ -2516,6 +2526,13 @@ fn normalize_bound_source_suffixes(raw: &str, bindings: &[SourceBinding]) -> Str
     result
 }
 
+pub(crate) fn compile_answer_preview(raw: &str, bindings: &[SourceBinding], provenance: &AnswerProvenanceLedger) -> Option<AgentAnswerView> {
+    compile_agent_answer(raw, bindings, provenance).ok().map(|answer| answer.view)
+}
+fn answer_projector(adapter: &dyn ModelAdapter, structured: bool, bindings: &[SourceBinding], provenance: &AnswerProvenanceLedger, repair: bool) -> crate::answer_stream::AnswerProjector {
+    crate::answer_stream::AnswerProjector::new(adapter.run_events().unwrap_or_default(), structured || adapter.stream_text_is_structured(), bindings, provenance, repair)
+}
+
 fn compile_agent_answer(
     raw: &str,
     bindings: &[SourceBinding],
@@ -2777,7 +2794,10 @@ fn deliver_agent_answer(
             let mut repair_plan =
                 AgentRequestPlan::for_ad_hoc(runtime_profile.clone(), &repair_messages, &[]);
             repair_plan.output_token_limit = output_token_limit;
-            let repaired = adapter.chat(&repair_plan);
+            let _purpose = crate::run_events::purpose(adapter, "repair");
+            let mut projector = answer_projector(adapter, false, bindings, provenance, true);
+            let repaired = adapter.chat_observed(&repair_plan, &mut projector);
+            if repaired.as_ref().map_or(true, |turn| !turn.tool_calls.is_empty()) { projector.discard(); }
             let extra_tokens = repaired
                 .as_ref()
                 .ok()
@@ -3372,6 +3392,7 @@ fn execute_book_query(
         Ok(request) => request,
         Err(outcome) => return (to_json(&outcome), None),
     };
+    let _purpose = crate::run_events::purpose(adapter, "query");
     match query_run(book, &request, adapter) {
         Ok(run) => (to_json(&run.response), Some(run.audit)),
         Err(error) => (to_json(&error), None),
@@ -3396,6 +3417,7 @@ fn dispatch_resident_book_tool(
     };
     let body = match (id, input) {
         (BookToolId::Synthesize, BookToolInput::Synthesize(input)) => {
+            let _purpose = crate::run_events::purpose(adapter, "synthesize");
             match synthesize(book, &input.lids, input.task.as_deref(), adapter) {
                 Ok(response) => to_json(&response),
                 Err(error) => to_json(&error),
@@ -3483,9 +3505,37 @@ fn dispatch_registered(
     handler: ToolHandlerId,
     arguments: &str,
     book: &Book,
+    state: &mut impl ResidentStatePort,
+    adapter: &dyn ModelAdapter,
+    now: &str,
+) -> (String, Option<AgentEffect>) {
+    if let ToolHandlerId::Book(id) = handler {
+        let args = match serde_json::from_str(arguments) {
+            Ok(args) => args,
+            Err(error) => {
+                return (
+                    err_json(
+                        "INVALID_RANGE",
+                        "validation",
+                        &format!("工具参数非合法 JSON: {error}"),
+                    ),
+                    None,
+                )
+            }
+        };
+        return dispatch_resident_book_tool(id, args, book, adapter);
+    }
+    state.with_state(|store, reader| {
+        dispatch_state_tool(handler, arguments, book, store, reader, now)
+    })
+}
+
+fn dispatch_state_tool(
+    handler: ToolHandlerId,
+    arguments: &str,
+    book: &Book,
     store: &mut MemoryStore,
     reader: &mut Reader,
-    adapter: &dyn ModelAdapter,
     now: &str,
 ) -> (String, Option<AgentEffect>) {
     let args: serde_json::Value = match serde_json::from_str(arguments) {
@@ -3501,9 +3551,6 @@ fn dispatch_registered(
             )
         }
     };
-    if let ToolHandlerId::Book(id) = handler {
-        return dispatch_resident_book_tool(id, args, book, adapter);
-    }
     let sget = |k: &str| args.get(k).and_then(|v| v.as_str());
 
     match handler {
@@ -3893,8 +3940,7 @@ fn dispatch(
         registration.handler,
         arguments,
         book,
-        store,
-        reader,
+        &mut BorrowedResidentState { store, reader },
         adapter,
         now,
     )
@@ -4322,13 +4368,9 @@ pub fn prepare_history_compaction(
 }
 
 /// 回合收尾:视口若较回合前 anchor 变了,合并成单条 `Goto` effect(事务性 undo `[ADR-0030]`)。
-fn with_goto(reader: &Reader, before: &str, mut effects: Vec<AgentEffect>) -> Vec<AgentEffect> {
-    let after = reader.state().viewport.anchor_lid;
-    if after != before {
-        effects.push(AgentEffect::Goto {
-            before_anchor: before.to_string(),
-            after_anchor: after,
-        });
+pub fn run_effects(mut effects: Vec<AgentEffect>, navigation: &Option<(String, String)>) -> Vec<AgentEffect> {
+    if let Some((before, after)) = navigation.as_ref().filter(|(before, after)| before != after) {
+        effects.push(AgentEffect::Goto { before_anchor: before.clone(), after_anchor: after.clone() });
     }
     effects
 }
@@ -4573,6 +4615,7 @@ fn maybe_auto_compact(
         .saturating_sub(runtime_profile.output_reserve_tokens)
         .saturating_sub(runtime_profile.safety_margin_tokens)
         .max(1);
+    let _purpose = crate::run_events::purpose(adapter, "compaction");
     let checkpoint = compact_with_adapter(
         adapter,
         runtime_profile,
@@ -5052,28 +5095,69 @@ pub fn run_with_turn_resources_and_checkpoint_sink(
     now: &str,
     cfg: OuterConfig,
 ) -> Result<OuterOutcome, ToolError> {
+    let mut context = RunContext::new(std::mem::take(messages), cfg, adapter.model_runtime_profile());
+    let result = run_context(book, &mut BorrowedResidentState { store, reader }, adapter,
+        &mut context, profile_snapshot, resources, active_checkpoint, checkpoint_sink, question, now);
+    *messages = context.messages;
+    result
+}
+
+pub fn run_context(
+    book: &Book,
+    state: &mut impl ResidentStatePort,
+    adapter: &dyn ModelAdapter,
+    context: &mut RunContext,
+    profile_snapshot: &ReaderProfileSnapshot,
+    resources: &dyn ResidentTurnResourcePort,
+    active_checkpoint: Option<&CompactionCheckpoint>,
+    checkpoint_sink: &mut dyn CompactionCheckpointSink,
+    question: &str,
+    now: &str,
+) -> Result<OuterOutcome, ToolError> {
+    if adapter.run_events().is_none() {
+        let observed = crate::run_events::ObservedAdapter { inner: adapter, events: context.events.clone(), cancellation: context.cancellation.clone() };
+        return run_context(book, state, &observed, context, profile_snapshot, resources, active_checkpoint, checkpoint_sink, question, now);
+    }
+    let cfg = context.config;
+    let runtime_profile = context.runtime_profile.clone();
+    let messages = &mut context.messages;
+    context.cancellation.check()?;
     let tool_registry = crate::experiment::registry(book, resident_tool_registry());
-    let runtime_profile = adapter.model_runtime_profile();
     let mut active_checkpoint = active_checkpoint.cloned();
     let consumption_wrapper = runtime_profile
         .compaction
         .consumption_wrapper_asset
         .resolve(COMPACTION_CONSUMPTION_WRAPPER);
     let tool_permissions = ToolPermissions::default();
-    let mut tool_exposure_state = ToolExposureState::default();
+    context.tool_exposure_state = ToolExposureState::default();
     let experimental = book.experimental_read_access().is_some();
-    let mut artifact_tools = ArtifactToolSession::new(if experimental { None } else { resources.artifact_snapshot() }, question);
+    let mut artifact_tools = ArtifactToolSession::new(
+        if experimental {
+            None
+        } else {
+            resources.artifact_snapshot()
+        },
+        question,
+    );
     let mut context_fragments = ContextFragmentLedger::default();
     context_fragments
         .upsert(ContextFragment::new(
             READER_PROFILE_FRAGMENT_KEY,
             FragmentScope::TurnFrozen,
             Role::System,
-            if experimental { "{}".into() } else { profile_snapshot.to_prompt_data() },
+            if experimental {
+                "{}".into()
+            } else {
+                profile_snapshot.to_prompt_data()
+            },
             FragmentSensitivity::Sensitive,
         ))
         .map_err(context_fragment_error)?;
-    for fragment in resources.context_fragments().iter().filter(|_| !experimental) {
+    for fragment in resources
+        .context_fragments()
+        .iter()
+        .filter(|_| !experimental)
+    {
         context_fragments
             .upsert(fragment.clone())
             .map_err(context_fragment_error)?;
@@ -5083,14 +5167,17 @@ pub fn run_with_turn_resources_and_checkpoint_sink(
             .upsert(fragment)
             .map_err(context_fragment_error)?;
     }
-    if let Some(fragment) = if experimental { None } else { paper_minimap_context_fragment(book, reader, question) } {
+    if let Some(fragment) = if experimental {
+        None
+    } else {
+        state.with_state(|_, reader| paper_minimap_context_fragment(book, reader, question))
+    } {
         context_fragments
             .upsert(fragment)
             .map_err(context_fragment_error)?;
     }
-    let before_anchor = reader.state().viewport.anchor_lid; // 回合前视口锚(viewport undo 基准)
-    let mut effects: Vec<AgentEffect> = Vec::new();
-    let mut trace: Vec<TraceStep> = Vec::new();
+    let effects = &mut context.effects;
+    let trace = &mut context.trace;
     let trace_dbg = std::env::var("UB_TRACE").is_ok(); // 诊断:打印每轮 tool_calls + 结果(env-gated)
     let mut spent: u32 = 0;
     let mut request_audit = AgentRequestAudit::default();
@@ -5099,10 +5186,10 @@ pub fn run_with_turn_resources_and_checkpoint_sink(
         profile_snapshot.injected_fact_ids().into_iter().collect();
     let mut claimed_used_fact_ids = BTreeSet::new();
     let mut profile_influences = BTreeSet::new();
-    let mut evidence_ledger =
+    context.evidence_ledger =
         TurnEvidenceLedger::from_seed(book, resources.initial_evidence().to_vec())?;
-    let mut evidence_plan_ledger =
-        TurnEvidencePlanLedger::from_evidence_state(evidence_ledger.evidence_state());
+    context.evidence_plan_ledger =
+        TurnEvidencePlanLedger::from_evidence_state(context.evidence_ledger.evidence_state());
     let turn_intent_hints = classify_turn_intent(question);
     seed_turn_tool_activations(
         &turn_intent_hints,
@@ -5110,17 +5197,17 @@ pub fn run_with_turn_resources_and_checkpoint_sink(
         &ToolExposureContext {
             content_profile: book.content_profile_id(),
             permissions: tool_permissions,
-            evidence_state: evidence_ledger.evidence_state(),
+            evidence_state: context.evidence_ledger.evidence_state(),
             artifact: artifact_tools.exposure(),
         },
-        &mut tool_exposure_state,
+        &mut context.tool_exposure_state,
     );
     let profile_memory_updates = resources.profile_memory_updates().to_vec();
     let mut tool_call_progress = ToolCallProgressGuard::default();
     let mut phase_progress_guard = ProgressPhaseGuard::default();
     let mut completed_capabilities = BTreeSet::new();
     let mut recorded_query_observations = HashSet::new();
-    let mut active_tool_results = ActiveToolResultLedger::default();
+    context.active_tool_results = ActiveToolResultLedger::default();
     let verified_selection_turn = question.starts_with("selection_provenance.v1 ");
     let mut evidence_acquisition_calls = 0_usize;
     let mut experimental_body_budget = crate::experiment::BodyBudget::default();
@@ -5135,15 +5222,15 @@ pub fn run_with_turn_resources_and_checkpoint_sink(
         &planned_messages,
         &context_fragments,
         book,
-        &active_tool_results,
+        &context.active_tool_results,
         active_checkpoint.as_ref(),
         &consumption_wrapper,
         &tool_registry,
         &runtime_profile,
         tool_permissions,
-        &tool_exposure_state,
+        &context.tool_exposure_state,
         artifact_tools.exposure(),
-        evidence_ledger.evidence_state(),
+        context.evidence_ledger.evidence_state(),
         if verified_selection_turn {
             VERIFIED_SELECTION_INITIAL_EXCLUDED_TOOLS
         } else {
@@ -5168,15 +5255,15 @@ pub fn run_with_turn_resources_and_checkpoint_sink(
             &planned_messages,
             &context_fragments,
             book,
-            &active_tool_results,
+            &context.active_tool_results,
             active_checkpoint.as_ref(),
             &consumption_wrapper,
             &tool_registry,
             &runtime_profile,
             tool_permissions,
-            &tool_exposure_state,
+            &context.tool_exposure_state,
             artifact_tools.exposure(),
-            evidence_ledger.evidence_state(),
+            context.evidence_ledger.evidence_state(),
             if verified_selection_turn {
                 VERIFIED_SELECTION_INITIAL_EXCLUDED_TOOLS
             } else {
@@ -5192,34 +5279,37 @@ pub fn run_with_turn_resources_and_checkpoint_sink(
     }
 
     messages.push(Message::user(question)); // system/fragments 只投影;messages 跨回合保留
-    let mut answer_provenance = AnswerProvenanceLedger::from_messages(messages);
-    let explicit_user_text = answer_provenance
+    context.answer_provenance = AnswerProvenanceLedger::from_messages(messages);
+    let explicit_user_text = context
+        .answer_provenance
         .current_question()
         .unwrap_or(question)
         .to_string();
-    let reader_anchor = reader.state().viewport.anchor_lid;
-    let mut locator_ledger = TurnLocatorLedger::from_turn(
+    let reader_anchor = state.with_state(|_, reader| reader.state().viewport.anchor_lid);
+    context.locator_ledger = TurnLocatorLedger::from_turn(
         book,
         &explicit_user_text,
         resources.initial_evidence(),
         &reader_anchor,
     );
-    let mut progress_ledger = TurnProgressLedger::from_turn(&evidence_ledger, &locator_ledger);
+    context.progress_ledger =
+        TurnProgressLedger::from_turn(&context.evidence_ledger, &context.locator_ledger);
 
     loop {
+        context.cancellation.check()?;
         let (mut tool_exposure_plan, mut request_plan) = build_sample_request(
             messages,
             &context_fragments,
             book,
-            &active_tool_results,
+            &context.active_tool_results,
             active_checkpoint.as_ref(),
             &consumption_wrapper,
             &tool_registry,
             &runtime_profile,
             tool_permissions,
-            &tool_exposure_state,
+            &context.tool_exposure_state,
             artifact_tools.exposure(),
-            evidence_ledger.evidence_state(),
+            context.evidence_ledger.evidence_state(),
             if !verified_selection_turn {
                 &[]
             } else if evidence_acquisition_calls == 0 {
@@ -5234,7 +5324,7 @@ pub fn run_with_turn_resources_and_checkpoint_sink(
         if force_selection_convergence {
             let (completion, plan) = selection_answer_synthesis_request(
                 book,
-                &evidence_ledger,
+                &context.evidence_ledger,
                 question,
                 &runtime_profile,
                 selection_protocol_retries,
@@ -5259,15 +5349,15 @@ pub fn run_with_turn_resources_and_checkpoint_sink(
                 messages,
                 &context_fragments,
                 book,
-                &active_tool_results,
+                &context.active_tool_results,
                 active_checkpoint.as_ref(),
                 &consumption_wrapper,
                 &tool_registry,
                 &runtime_profile,
                 tool_permissions,
-                &tool_exposure_state,
+                &context.tool_exposure_state,
                 artifact_tools.exposure(),
-                evidence_ledger.evidence_state(),
+                context.evidence_ledger.evidence_state(),
                 if !verified_selection_turn {
                     &[]
                 } else if evidence_acquisition_calls == 0 {
@@ -5279,7 +5369,7 @@ pub fn run_with_turn_resources_and_checkpoint_sink(
             if force_selection_convergence {
                 let (completion, plan) = selection_answer_synthesis_request(
                     book,
-                    &evidence_ledger,
+                    &context.evidence_ledger,
                     question,
                     &runtime_profile,
                     selection_protocol_retries,
@@ -5301,17 +5391,21 @@ pub fn run_with_turn_resources_and_checkpoint_sink(
         let provider_messages = request_plan.ordered_messages();
         let request_audit_index =
             request_audit.begin_request(&provider_messages, &request_plan.tools, spent);
+        let sampling_scope = crate::run_events::purpose(adapter, if selection_completion.is_some() { "selection" } else { "outer" });
+        let mut projector = answer_projector(adapter, selection_completion.is_some(), &context.evidence_ledger.bindings(), &context.answer_provenance, false);
         let turn_result = match selection_completion {
             Some(completion) => adapter
-                .complete_structured(completion)
+                .complete_structured_observed(completion, &mut projector)
                 .and_then(selection_answer_from_value)
                 .map(|answer| AssistantTurn {
                     text: Some(answer),
                     tool_calls: Vec::new(),
                     usage_total_tokens: None,
                 }),
-            None => adapter.chat(&request_plan),
+            None => adapter.chat_observed(&request_plan, &mut projector),
         };
+        if turn_result.as_ref().map_or(true, |turn| !turn.tool_calls.is_empty()) { projector.discard(); }
+        drop(sampling_scope);
         let mut turn: AssistantTurn = match turn_result {
             Ok(turn) => turn,
             Err(error) if force_selection_convergence => {
@@ -5344,6 +5438,7 @@ pub fn run_with_turn_resources_and_checkpoint_sink(
                 })
             }
         };
+        context.cancellation.check()?;
         let provider_requested_tool_calls = !turn.tool_calls.is_empty();
         if verified_selection_turn && provider_requested_tool_calls {
             let mut remaining_evidence_calls = VERIFIED_SELECTION_EVIDENCE_CALL_LIMIT
@@ -5381,7 +5476,9 @@ pub fn run_with_turn_resources_and_checkpoint_sink(
             billed_tokens_charged,
             spent,
         );
-        active_tool_results.mark_projected_fresh_results_sampled();
+        context
+            .active_tool_results
+            .mark_projected_fresh_results_sampled();
 
         if turn.tool_calls.is_empty()
             && turn
@@ -5434,13 +5531,15 @@ pub fn run_with_turn_resources_and_checkpoint_sink(
         }
 
         if turn.tool_calls.is_empty() {
-            progress_ledger.observe(RuntimeProgressEvent::FinalAnswer);
-            let registered_bindings = evidence_ledger.bindings();
+            context
+                .progress_ledger
+                .observe(RuntimeProgressEvent::FinalAnswer);
+            let registered_bindings = context.evidence_ledger.bindings();
             let delivery = turn.text.as_deref().map(|raw| {
                 deliver_agent_answer(
                     raw,
                     &registered_bindings,
-                    &answer_provenance,
+                    &context.answer_provenance,
                     adapter,
                     &runtime_profile,
                     experimental.then_some(8_000),
@@ -5476,8 +5575,8 @@ pub fn run_with_turn_resources_and_checkpoint_sink(
                     .and_then(|delivery| delivery.warning.clone()),
                 turns,
                 tokens_spent: spent,
-                effects: with_goto(reader, &before_anchor, effects),
-                trace,
+                effects: run_effects(std::mem::take(effects), &context.navigation),
+                trace: std::mem::take(trace),
                 profile_usage: profile_usage_trace(
                     profile_snapshot,
                     &claimed_used_fact_ids,
@@ -5499,33 +5598,40 @@ pub fn run_with_turn_resources_and_checkpoint_sink(
             tool_calls: turn.tool_calls.clone(),
             tool_call_id: None,
         });
-        let locator_batch_snapshot = locator_ledger.clone();
-        let evidence_plan_batch_snapshot = evidence_plan_ledger.clone();
+        let locator_batch_snapshot = context.locator_ledger.clone();
+        let evidence_plan_batch_snapshot = context.evidence_plan_ledger.clone();
         let mut locator_batch_observations = TurnLocatorLedger::default();
         let mut evidence_plan_batch_observations = TurnEvidencePlanLedger::default();
         let mut capability_batch_observations = BTreeSet::new();
-        let locator_count_before = locator_ledger.entries.len();
-        let evidence_count_before = evidence_ledger.evidence.len();
-        let batch_progress_before = tool_progress_signature(
-            &evidence_ledger,
-            &evidence_plan_ledger,
-            &locator_ledger,
-            &progress_ledger,
-            &tool_exposure_state,
-            &completed_capabilities,
-            &artifact_tools,
-            book,
-            store,
-            reader,
-            effects.len(),
-        );
+        let locator_count_before = context.locator_ledger.entries.len();
+        let evidence_count_before = context.evidence_ledger.evidence.len();
+        let batch_progress_before = state.with_state(|store, reader| {
+            tool_progress_signature(
+                &context.evidence_ledger,
+                &context.evidence_plan_ledger,
+                &context.locator_ledger,
+                &context.progress_ledger,
+                &context.tool_exposure_state,
+                &completed_capabilities,
+                &artifact_tools,
+                book,
+                store,
+                reader,
+                effects.len(),
+            )
+        });
         let phase_stalled = phase_progress_guard.blocks(&batch_progress_before);
         let recovery_batch = phase_stalled && phase_progress_guard.recovery_available();
-        if recovery_batch { phase_progress_guard.recovery_used = true; }
+        if recovery_batch {
+            phase_progress_guard.recovery_used = true;
+        }
         let mut batch_synthesis_observed = false;
         let mut batch_progress_calls = Vec::new();
         for (call_index, tc) in turn.tool_calls.iter().enumerate() {
-            answer_provenance.observe_tool_arguments(&tc.name, &tc.arguments);
+            context.cancellation.check()?;
+            context
+                .answer_provenance
+                .observe_tool_arguments(&tc.name, &tc.arguments);
             let registered = tool_registry.registration(&tc.name);
             let handler = registered
                 .filter(|_| {
@@ -5535,29 +5641,51 @@ pub fn run_with_turn_resources_and_checkpoint_sink(
             if handler.is_some_and(is_evidence_acquisition_handler) {
                 evidence_acquisition_calls = evidence_acquisition_calls.saturating_add(1);
             }
-            let progress_before = tool_progress_signature(
-                &evidence_ledger,
-                &evidence_plan_ledger,
-                &locator_ledger,
-                &progress_ledger,
-                &tool_exposure_state,
-                &completed_capabilities,
-                &artifact_tools,
-                book,
-                store,
-                reader,
-                effects.len(),
-            );
+            let progress_before = state.with_state(|store, reader| {
+                tool_progress_signature(
+                    &context.evidence_ledger,
+                    &context.evidence_plan_ledger,
+                    &context.locator_ledger,
+                    &context.progress_ledger,
+                    &context.tool_exposure_state,
+                    &completed_capabilities,
+                    &artifact_tools,
+                    book,
+                    store,
+                    reader,
+                    effects.len(),
+                )
+            });
             let repeated_without_progress = handler.is_some()
                 && tool_call_progress.is_repeat(&tc.name, &tc.arguments, &progress_before);
-            let recovery_call = recovery_batch && match handler {
-                Some(ToolHandlerId::Book(BookToolId::SearchText | BookToolId::Structure | BookToolId::Context)) => true,
-                Some(ToolHandlerId::Book(BookToolId::Text)) => authorize_book_text(&tc.arguments, &locator_batch_snapshot).is_ok(),
-                Some(ToolHandlerId::ToolSearch) => true,
-                _ => false,
-            };
+            let text_authorization = matches!(handler, Some(ToolHandlerId::Book(BookToolId::Text)))
+                .then(|| authorize_book_text(&tc.arguments, &locator_batch_snapshot));
+            let synthesize_authorization = matches!(handler, Some(ToolHandlerId::Book(BookToolId::Synthesize)))
+                .then(|| authorize_book_synthesize(&tc.arguments, context.evidence_ledger.evidence_state(), &evidence_plan_batch_snapshot, &locator_batch_snapshot));
+            let recovery_call = recovery_batch
+                && match handler {
+                    Some(ToolHandlerId::Book(
+                        BookToolId::SearchText | BookToolId::Structure | BookToolId::Context,
+                    )) => true,
+                    Some(ToolHandlerId::Book(BookToolId::Text)) => {
+                        text_authorization.as_ref().is_some_and(|result| result.is_ok())
+                    }
+                    Some(ToolHandlerId::ToolSearch) => true,
+                    _ => false,
+                };
             let phase_blocked = phase_stalled && !recovery_call;
             let blocked_without_progress = phase_blocked || repeated_without_progress;
+            let schema_valid = registered.is_some_and(|r| r.validate_arguments(&tc.arguments).is_ok());
+            let intent_allowed = !registered.is_some_and(|r| r.routing_card.effects == crate::tool_registry::ToolEffect::ReaderWrite
+                && !context.tool_exposure_state.authorizes_reader_action(r.handler));
+            let source_preparation = (matches!(handler, Some(ToolHandlerId::SourcePresent)) && schema_valid && !blocked_without_progress)
+                .then(|| context.evidence_ledger.prepare_present(book, &tc.arguments));
+            let provenance_allowed = text_authorization.as_ref().is_none_or(|r| r.is_ok())
+                && synthesize_authorization.as_ref().is_none_or(|r| r.is_ok())
+                && source_preparation.as_ref().is_none_or(|r| r.is_ok());
+            let executed = handler.is_some() && schema_valid && intent_allowed && provenance_allowed && !blocked_without_progress;
+            let activity = context.events.begin("tool", &tc.name, registered.map(|r| r.activity_label()).unwrap_or("未知工具"), executed);
+            let activity_scope = context.events.scope(Some(activity.step_id), "outer");
             let (result, effect, query_audit) = match handler {
                 None if registered.is_some() => (
                     err_json(
@@ -5578,7 +5706,7 @@ pub fn run_with_turn_resources_and_checkpoint_sink(
                     None,
                 ),
                 Some(action) if registered.is_some_and(|registration| registration.routing_card.effects == crate::tool_registry::ToolEffect::ReaderWrite)
-                    && !tool_exposure_state.authorizes_reader_action(action) => (
+                    && !context.tool_exposure_state.authorizes_reader_action(action) => (
                     err_json("READER_ACTION_NOT_REQUESTED", "permission", "this Reader action was not explicitly requested in the current user turn"), None, None,
                 ),
                 Some(_) if phase_blocked => (
@@ -5611,12 +5739,12 @@ pub fn run_with_turn_resources_and_checkpoint_sink(
                         &ToolExposureContext {
                             content_profile: book.content_profile_id(),
                             permissions: tool_permissions,
-                            evidence_state: evidence_ledger.evidence_state(),
+                            evidence_state: context.evidence_ledger.evidence_state(),
                             artifact: artifact_tools.exposure(),
                         },
                         &tool_exposure_plan,
                         &tool_registry,
-                        &mut tool_exposure_state,
+                        &mut context.tool_exposure_state,
                     ) {
                         Ok(outcome) => {
                             evidence_plan_batch_observations.observe_task_need(&outcome.task_need);
@@ -5643,14 +5771,14 @@ pub fn run_with_turn_resources_and_checkpoint_sink(
                 Some(ToolHandlerId::Book(BookToolId::Query)) => {
                     let (result, query_audit) = execute_book_query(&tc.arguments, book, adapter);
                     if query_audit.is_some() {
-                        let observation = record_query_observation(
+                        let observation = state.with_state(|store, _| record_query_observation(
                             &tc.arguments,
                             question,
                             book,
                             store,
                             now,
                             &mut recorded_query_observations,
-                        );
+                        ));
                         if trace_dbg {
                             if let Err(error) = observation {
                                 eprintln!("   runtime query observation failed: {}", error.message);
@@ -5660,26 +5788,25 @@ pub fn run_with_turn_resources_and_checkpoint_sink(
                     (result, None, query_audit)
                 }
                 Some(ToolHandlerId::SourcePresent) => {
-                    let result = match evidence_ledger.present(book, &tc.arguments) {
+                    let presented = match source_preparation {
+                        Some(Ok((evidence, resolved))) => context.evidence_ledger.present_prepared(book, evidence, resolved),
+                        Some(Err(error)) => Err(error),
+                        None => context.evidence_ledger.present(book, &tc.arguments),
+                    };
+                    let result = match presented {
                         Ok(source) => to_json(&source),
                         Err(error) => to_json(&error),
                     };
                     (result, None, None)
                 }
                 Some(synthesize_handler @ ToolHandlerId::Book(BookToolId::Synthesize)) => {
-                    let result = match authorize_book_synthesize(
-                        &tc.arguments,
-                        evidence_ledger.evidence_state(),
-                        &evidence_plan_batch_snapshot,
-                        &locator_batch_snapshot,
-                    ) {
+                    let result = match synthesize_authorization.expect("synthesize handler prepared authorization") {
                         Ok(()) => {
                             dispatch_registered(
                                 synthesize_handler,
                                 &tc.arguments,
                                 book,
-                                store,
-                                reader,
+                                state,
                                 adapter,
                                 now,
                             )
@@ -5690,14 +5817,13 @@ pub fn run_with_turn_resources_and_checkpoint_sink(
                     (result, None, None)
                 }
                 Some(text_handler @ ToolHandlerId::Book(BookToolId::Text)) => {
-                    let result = match authorize_book_text(&tc.arguments, &locator_batch_snapshot) {
+                    let result = match text_authorization.expect("text handler prepared authorization") {
                         Ok(()) => {
                             dispatch_registered(
                                 text_handler,
                                 &tc.arguments,
                                 book,
-                                store,
-                                reader,
+                                state,
                                 adapter,
                                 now,
                             )
@@ -5717,18 +5843,30 @@ pub fn run_with_turn_resources_and_checkpoint_sink(
                     (result, None, None)
                 }
                 Some(handler) => {
-                    let (result, effect) = dispatch_registered(
-                        handler,
-                        &tc.arguments,
-                        book,
-                        store,
-                        reader,
-                        adapter,
-                        now,
-                    );
+                    let mut live_navigation = None;
+                    let (result, effect) = if matches!(handler, ToolHandlerId::ReaderGotoLid | ToolHandlerId::ReaderScroll) {
+                        state.with_state(|store, reader| {
+                            let before = reader.state().viewport.anchor_lid;
+                            let result = dispatch_state_tool(handler, &tc.arguments, book, store, reader, now);
+                            let after = reader.state().viewport.anchor_lid;
+                            if tool_result_error_code(&result.0).is_none() && before != after {
+                                let initial = context.navigation.as_ref().map(|(before, _)| before.clone()).unwrap_or_else(|| before.clone());
+                                live_navigation = Some(AgentEffect::Goto { before_anchor: before, after_anchor: after.clone() });
+                                context.navigation = Some((initial, after));
+                            }
+                            result
+                        })
+                    } else { dispatch_registered(handler, &tc.arguments, book, state, adapter, now) };
+                    if let Some(effect) = live_navigation { context.events.effect_created(activity.step_id, &effect); }
                     (result, effect, None)
                 }
             };
+            if let Some(ref effect) = effect { context.events.effect_created(activity.step_id, effect); }
+            drop(activity_scope);
+            let (mut activity_status, activity_error, activity_count) = crate::run_events::tool_result(&result);
+            if !executed { activity_status = crate::run_events::ActivityStatus::Rejected; }
+            if context.cancellation.is_cancelled() { activity_status = crate::run_events::ActivityStatus::Cancelled; }
+            context.events.finish(activity, activity_status, None, activity_error, activity_count);
             if handler.is_some() && tool_result_error_code(&result).is_none() {
                 if let Some(registration) = registered {
                     capability_batch_observations.extend(
@@ -5748,10 +5886,12 @@ pub fn run_with_turn_resources_and_checkpoint_sink(
             let output_policy = registered
                 .map(|registration| registration.output_policy)
                 .unwrap_or_else(crate::tool_registry::ToolOutputPolicy::bounded_error);
-            active_tool_results.make_room_for(output_policy.max_model_body_bytes);
+            context
+                .active_tool_results
+                .make_room_for(output_policy.max_model_body_bytes);
             let calls_remaining = turn.tool_calls.len().saturating_sub(call_index).max(1);
             let fair_turn_budget =
-                active_tool_results.remaining_model_body_bytes() / calls_remaining;
+                context.active_tool_results.remaining_model_body_bytes() / calls_remaining;
             let mut projection = project_tool_result(
                 &tc.name,
                 &tc.arguments,
@@ -5761,25 +5901,32 @@ pub fn run_with_turn_resources_and_checkpoint_sink(
                 book,
             );
             if experimental {
-                let body = experimental_body_budget.admit(&tc.name, &projection.evidence_arguments, projection.model_body_json(), book);
-                projection.model_body = serde_json::from_str(&body).unwrap_or(serde_json::Value::Null);
+                let body = experimental_body_budget.admit(
+                    &tc.name,
+                    &projection.evidence_arguments,
+                    projection.model_body_json(),
+                    book,
+                );
+                projection.model_body =
+                    serde_json::from_str(&body).unwrap_or(serde_json::Value::Null);
                 if tool_result_error_code(&body).is_some() {
                     projection.status = crate::tool_result::ToolResultStatus::Error;
                     projection.continuation = None;
                 }
             }
             let model_body = projection.model_body_json();
-            let evidence_before = evidence_ledger.evidence_ranges();
+            let evidence_before = context.evidence_ledger.evidence_ranges();
             let locator_observations_before = locator_batch_observations.clone();
             let evidence_plan_observations_before = evidence_plan_batch_observations.clone();
             observe_tool_evidence(
-                &mut evidence_ledger,
+                &mut context.evidence_ledger,
                 &tc.name,
                 &projection.evidence_arguments,
                 &model_body,
                 book,
             );
-            let newly_observed_evidence = evidence_ledger
+            let newly_observed_evidence = context
+                .evidence_ledger
                 .evidence_ranges()
                 .into_iter()
                 .filter(|evidence| !evidence_before.contains(evidence))
@@ -5792,7 +5939,9 @@ pub fn run_with_turn_resources_and_checkpoint_sink(
             {
                 batch_progress_calls.push((tc.name.clone(), tc.arguments.clone()));
             }
-            answer_provenance.observe_tool_result(&tc.name, &model_body);
+            context
+                .answer_provenance
+                .observe_tool_result(&tc.name, &model_body);
             let receipt = tool_receipt(
                 &tc.name,
                 &projection.evidence_arguments,
@@ -5804,21 +5953,25 @@ pub fn run_with_turn_resources_and_checkpoint_sink(
                 matches!(registration.handler, ToolHandlerId::Artifact(_))
             });
             let persisted_tool_content = is_artifact_call.then(|| to_json(&receipt));
-            active_tool_results.insert(tc.id.clone(), projection.into_envelope(receipt));
+            context
+                .active_tool_results
+                .insert(tc.id.clone(), projection.into_envelope(receipt));
             if handler.is_some() && !blocked_without_progress {
-                let progress_after = tool_progress_signature(
-                    &evidence_ledger,
-                    &evidence_plan_ledger,
-                    &locator_ledger,
-                    &progress_ledger,
-                    &tool_exposure_state,
-                    &completed_capabilities,
-                    &artifact_tools,
-                    book,
-                    store,
-                    reader,
-                    effects.len() + usize::from(effect.is_some()),
-                );
+                let progress_after = state.with_state(|store, reader| {
+                    tool_progress_signature(
+                        &context.evidence_ledger,
+                        &context.evidence_plan_ledger,
+                        &context.locator_ledger,
+                        &context.progress_ledger,
+                        &context.tool_exposure_state,
+                        &completed_capabilities,
+                        &artifact_tools,
+                        book,
+                        store,
+                        reader,
+                        effects.len() + usize::from(effect.is_some()),
+                    )
+                });
                 tool_call_progress.observe(
                     &tc.name,
                     &tc.arguments,
@@ -5855,35 +6008,45 @@ pub fn run_with_turn_resources_and_checkpoint_sink(
             });
         }
         locator_batch_observations.observe_lid(
-            &reader.state().viewport.anchor_lid,
+            &state.with_state(|_, reader| reader.state().viewport.anchor_lid),
             LocatorOrigin::ReaderAnchor,
             book,
         );
-        locator_ledger.merge(locator_batch_observations);
-        evidence_plan_ledger.merge(evidence_plan_batch_observations);
-        if locator_ledger.entries.len() > locator_count_before {
-            progress_ledger.observe(RuntimeProgressEvent::Locator);
+        context.locator_ledger.merge(locator_batch_observations);
+        context
+            .evidence_plan_ledger
+            .merge(evidence_plan_batch_observations);
+        if context.locator_ledger.entries.len() > locator_count_before {
+            context
+                .progress_ledger
+                .observe(RuntimeProgressEvent::Locator);
         }
-        if evidence_ledger.evidence.len() > evidence_count_before {
-            progress_ledger.observe(RuntimeProgressEvent::Evidence);
+        if context.evidence_ledger.evidence.len() > evidence_count_before {
+            context
+                .progress_ledger
+                .observe(RuntimeProgressEvent::Evidence);
         }
         if batch_synthesis_observed {
-            progress_ledger.observe(RuntimeProgressEvent::Synthesis);
+            context
+                .progress_ledger
+                .observe(RuntimeProgressEvent::Synthesis);
         }
         completed_capabilities.extend(capability_batch_observations);
-        let batch_progress_after = tool_progress_signature(
-            &evidence_ledger,
-            &evidence_plan_ledger,
-            &locator_ledger,
-            &progress_ledger,
-            &tool_exposure_state,
-            &completed_capabilities,
-            &artifact_tools,
-            book,
-            store,
-            reader,
-            effects.len(),
-        );
+        let batch_progress_after = state.with_state(|store, reader| {
+            tool_progress_signature(
+                &context.evidence_ledger,
+                &context.evidence_plan_ledger,
+                &context.locator_ledger,
+                &context.progress_ledger,
+                &context.tool_exposure_state,
+                &completed_capabilities,
+                &artifact_tools,
+                book,
+                store,
+                reader,
+                effects.len(),
+            )
+        });
         phase_progress_guard.observe_batch(&batch_progress_before, &batch_progress_after);
         for (tool, arguments) in batch_progress_calls {
             tool_call_progress.observe(
@@ -5919,15 +6082,15 @@ pub fn run_with_turn_resources_and_checkpoint_sink(
                 messages,
                 &finalization_context_fragments,
                 book,
-                &active_tool_results,
+                &context.active_tool_results,
                 active_checkpoint.as_ref(),
                 &consumption_wrapper,
                 &tool_registry,
                 &runtime_profile,
                 tool_permissions,
-                &tool_exposure_state,
+                &context.tool_exposure_state,
                 artifact_tools.exposure(),
-                evidence_ledger.evidence_state(),
+                context.evidence_ledger.evidence_state(),
                 &excluded_tools,
             )?;
             let finalization_budget = ActiveContextBudget::from_plan(&finalization_plan);
@@ -5947,15 +6110,15 @@ pub fn run_with_turn_resources_and_checkpoint_sink(
                     messages,
                     &finalization_context_fragments,
                     book,
-                    &active_tool_results,
+                    &context.active_tool_results,
                     active_checkpoint.as_ref(),
                     &consumption_wrapper,
                     &tool_registry,
                     &runtime_profile,
                     tool_permissions,
-                    &tool_exposure_state,
+                    &context.tool_exposure_state,
                     artifact_tools.exposure(),
-                    evidence_ledger.evidence_state(),
+                    context.evidence_ledger.evidence_state(),
                     &excluded_tools,
                 )?;
             }
@@ -5968,7 +6131,9 @@ pub fn run_with_turn_resources_and_checkpoint_sink(
             let provider_messages = finalization_plan.ordered_messages();
             let request_audit_index =
                 request_audit.begin_request(&provider_messages, &finalization_plan.tools, spent);
-            let finalization_result = adapter.chat(&finalization_plan);
+            let mut projector = answer_projector(adapter, false, &context.evidence_ledger.bindings(), &context.answer_provenance, false);
+            let finalization_result = adapter.chat_observed(&finalization_plan, &mut projector);
+            if finalization_result.as_ref().map_or(true, |turn| !turn.tool_calls.is_empty()) { projector.discard(); }
             let provider_reported_tokens = finalization_result
                 .as_ref()
                 .ok()
@@ -5982,7 +6147,9 @@ pub fn run_with_turn_resources_and_checkpoint_sink(
                 billed_tokens_charged,
                 spent,
             );
-            active_tool_results.mark_projected_fresh_results_sampled();
+            context
+                .active_tool_results
+                .mark_projected_fresh_results_sampled();
 
             let finalization_turn = finalization_result.map_err(|error| ToolError {
                 error_code: "PROVIDER_ERROR".into(),
@@ -6011,12 +6178,14 @@ pub fn run_with_turn_resources_and_checkpoint_sink(
                     message: "provider emitted no final answer during tools-disabled finalization"
                         .into(),
                 })?;
-            progress_ledger.observe(RuntimeProgressEvent::FinalAnswer);
-            let registered_bindings = evidence_ledger.bindings();
+            context
+                .progress_ledger
+                .observe(RuntimeProgressEvent::FinalAnswer);
+            let registered_bindings = context.evidence_ledger.bindings();
             let delivery = deliver_agent_answer(
                 raw_answer,
                 &registered_bindings,
-                &answer_provenance,
+                &context.answer_provenance,
                 adapter,
                 &runtime_profile,
                 experimental.then_some(8_000),
@@ -6035,11 +6204,20 @@ pub fn run_with_turn_resources_and_checkpoint_sink(
                 answer: Some(answer),
                 answer_view: Some(answer_view),
                 incomplete: true,
-                warning: Some(if experimental_budget_stop { "EXPERIMENT_TOKEN_BUDGET" } else if turns >= cfg.max_turns { TURN_LIMIT_EXCEEDED } else { "AGENT_NO_PROGRESS" }.into()),
+                warning: Some(
+                    if experimental_budget_stop {
+                        "EXPERIMENT_TOKEN_BUDGET"
+                    } else if turns >= cfg.max_turns {
+                        TURN_LIMIT_EXCEEDED
+                    } else {
+                        "AGENT_NO_PROGRESS"
+                    }
+                    .into(),
+                ),
                 turns,
                 tokens_spent: spent,
-                effects: with_goto(reader, &before_anchor, effects),
-                trace,
+                effects: run_effects(std::mem::take(effects), &context.navigation),
+                trace: std::mem::take(trace),
                 profile_usage: profile_usage_trace(
                     profile_snapshot,
                     &claimed_used_fact_ids,
@@ -7218,6 +7396,90 @@ user_question=\"explain normalization\"";
         .unwrap();
 
         assert_eq!(out.answer.as_deref(), Some("selection answer"));
+        assert_eq!(out.trace.len(), 2);
+        assert_eq!(out.turns, 3);
+        assert!(!out.incomplete);
+        let sampled_tools = out
+            .request_audit
+            .requests
+            .iter()
+            .map(|request| request.tool_schemas.len())
+            .collect::<Vec<_>>();
+        assert!(sampled_tools[0] > 0);
+        assert!(sampled_tools[1] > 0);
+        assert_eq!(sampled_tools[2], 0);
+        assert!(out.request_audit.requests[0]
+            .tool_schemas
+            .iter()
+            .all(|tool| tool.name != "book.text"));
+        assert!(out.request_audit.requests[1]
+            .tool_schemas
+            .iter()
+            .any(|tool| tool.name == "book.text"));
+    }
+
+    #[test]
+    fn answer_stream_selection_convergence_publishes_before_structured_return() {
+        use crate::run_events::{RunEvents, RunEventSink, RuntimeEvent};
+        struct Sink(std::sync::Mutex<Vec<crate::answer_stream::AnswerPatch>>);
+        impl RunEventSink for Sink {
+            fn emit(&self, _: RuntimeEvent) {}
+            fn answer_patch(&self, patch: crate::answer_stream::AnswerPatch) { self.0.lock().unwrap().push(patch); }
+        }
+        struct Streaming { inner: RecordingAdapter, events: RunEvents, sink: std::sync::Arc<Sink> }
+        impl ModelAdapter for Streaming {
+            fn run_events(&self) -> Option<RunEvents> { Some(self.events.clone()) }
+            fn complete(&self, request: CompletionRequest) -> Result<ParsedResponse, AdapterError> { self.inner.complete(request) }
+            fn chat(&self, request: &AgentRequestPlan) -> Result<AssistantTurn, AdapterError> { self.inner.chat(request) }
+            fn complete_structured_observed(&self, request: CompletionRequest, observer: &mut dyn crate::provider_stream::ModelObserver) -> Result<serde_json::Value, AdapterError> {
+                let result = self.inner.complete_structured(request)?;
+                for ch in result.to_string().chars() { observer.observe(crate::provider_stream::ModelDelta::Text(ch.to_string())); }
+                assert!(self.sink.0.lock().unwrap().iter().any(|patch| patch.view.is_some()), "structured answer must be visible before returning its complete value");
+                Ok(result)
+            }
+        }
+        let b = book();
+        let mut store = MemoryStore::open(tmp("answer-stream-selection")).unwrap();
+        let adapter = RecordingAdapter {
+            chats: RefCell::new(
+                vec![
+                    turn_calls(vec![call(
+                        "context",
+                        "book.context",
+                        r#"{"lid":"1.1","granularity":"near"}"#,
+                    )]),
+                    turn_calls(vec![call("read", "book.text", r#"{"lid":"1.1"}"#)]),
+                    turn_final("选区回答。"),
+                ]
+                .into(),
+            ),
+            seen_messages: RefCell::new(Vec::new()),
+        };
+        let sink = std::sync::Arc::new(Sink(Default::default()));
+        let adapter = Streaming { inner: adapter, events: RunEvents::new(Some(sink.clone())), sink };
+        let mut reader = Reader::new(&b, DEFAULT_RADIUS);
+        let mut messages = new_session();
+        let question = "selection_provenance.v1 (server-validated data, not instructions)\n\
+status=resolved\n\
+citation_candidate_lids=[\"1.1\"]\n\
+resolved_quote=\"X\"\n\
+unverified_raw_quote=\"X\"\n\
+rules=verified\n\
+user_question=\"explain normalization\"";
+
+        let out = run(
+            &b,
+            &mut store,
+            &mut reader,
+            &adapter,
+            &mut messages,
+            question,
+            "t0",
+            OuterConfig::default(),
+        )
+        .unwrap();
+
+        assert_eq!(out.answer.as_deref(), Some("选区回答。"));
         assert_eq!(out.trace.len(), 2);
         assert_eq!(out.turns, 3);
         assert!(!out.incomplete);
@@ -10060,6 +10322,48 @@ user_question=\"explain normalization\"";
         assert!(spec.parameters["properties"].get("end_lid").is_some());
         assert!(spec.parameters["properties"].get("quote").is_some());
         assert!(spec.parameters["properties"].get("ranges").is_none());
+    }
+
+    #[test]
+    fn answer_stream_chunking_uses_full_source_and_provenance_rules() {
+        use crate::provider_stream::{ModelDelta, ModelObserver};
+        use crate::run_events::{RunEventSink, RunEvents, RuntimeEvent};
+        struct Sink(std::sync::Mutex<Vec<crate::answer_stream::AnswerPatch>>);
+        impl RunEventSink for Sink {
+            fn emit(&self, _: RuntimeEvent) {}
+            fn answer_patch(&self, patch: crate::answer_stream::AnswerPatch) { self.0.lock().unwrap().push(patch); }
+        }
+        let bindings = vec![source_binding_fixture("ref1", "1.19")];
+        let mut provenance = AnswerProvenanceLedger::default();
+        provenance.observe_internal_locator("1.19", AnswerProvenanceChannel::ToolArgument { tool:"book.text".into(), field:"lid".into() });
+        for text in ["普通正文。下一句。", "解释。[[source:ref1]]\n", "1. 列表\n版本 v2.0。\n```rust\nlet n = 2;\n```\n", "安全正文。请看第1.19节。", "正文。[[source:unknown]]\n"] {
+            for size in [1, 2, 7, 999] {
+                let sink = std::sync::Arc::new(Sink(Default::default()));
+                let events = RunEvents::new(Some(sink.clone()));
+                let mut projector = crate::answer_stream::AnswerProjector::new(events.clone(), false, &bindings, &provenance, false);
+                let chars: Vec<char> = text.chars().collect();
+                for chunk in chars.chunks(size) { projector.observe(ModelDelta::Text(chunk.iter().collect())); }
+                let patches = sink.0.lock().unwrap().clone();
+                for patch in &patches {
+                    if let Some(view) = &patch.view {
+                        let serialized = serde_json::to_string(view).unwrap();
+                        assert!(!serialized.contains("[[source")); assert!(!serialized.contains("1.19"));
+                        let public = view.parts.iter().filter_map(|p| if let AgentAnswerPart::Markdown{text}=p {Some(text.as_str())} else {None}).collect::<String>();
+                        assert!(provenance.violations(&public).is_empty(), "{public}");
+                    }
+                }
+                if let Ok(compiled) = compile_agent_answer(text, &bindings, &provenance) {
+                    assert_eq!(serde_json::to_value(patches.iter().fold(None, |previous, patch| crate::answer_stream::apply_patch(previous.as_ref(), patch)).unwrap().view.as_ref().unwrap()).unwrap(), serde_json::to_value(compiled.view).unwrap(), "{text} / {size}");
+                }
+                projector.observe(ModelDelta::ToolArguments { index:0, id:"call".into(), name:"book.text".into(), arguments:"{".into() });
+                assert_eq!(sink.0.lock().unwrap().last().unwrap().operation, "discard");
+                let mut repair = crate::answer_stream::AnswerProjector::new(events, false, &bindings, &provenance, true);
+                repair.observe(ModelDelta::Text("修复完成。".into()));
+                let patches = sink.0.lock().unwrap(); let repaired = patches.last().unwrap();
+                assert_eq!(repaired.message_id, 1); assert_eq!(repaired.revision, 1);
+                assert!(!serde_json::to_string(&repaired.view).unwrap().contains("安全正文"));
+            }
+        }
     }
 
     fn source_binding_fixture(source_ref_id: &str, lid: &str) -> SourceBinding {

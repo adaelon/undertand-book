@@ -1,0 +1,1818 @@
+{
+  "model": "deepseek-v4-flash",
+  "provider": "https://api.deepseek.com",
+  "platform": "Windows tiny_http, real HTTP Provider",
+  "observations": [
+    {
+      "name": "source",
+      "mode": "stream",
+      "accepted_ms": 18.351800000000026,
+      "first_activity_ms": 34.28030000000001,
+      "first_answer_ms": 10249.6685,
+      "total_ms": 10748.1618,
+      "reader_ms": 7.0756999999999834,
+      "requests": [
+        {
+          "request_at_ms": 38.557000000000016,
+          "first_chunk_ms": 282.00879999999995,
+          "total_ms": 1756.9524999999999,
+          "status": 200
+        },
+        {
+          "request_at_ms": 1801.3957,
+          "first_chunk_ms": 169.85260000000017,
+          "total_ms": 1655.6955000000003,
+          "status": 200
+        },
+        {
+          "request_at_ms": 3466.2092000000002,
+          "first_chunk_ms": 85.87609999999995,
+          "total_ms": 1613.0377000000003,
+          "status": 200
+        },
+        {
+          "request_at_ms": 5089.529299999999,
+          "first_chunk_ms": 132.23190000000068,
+          "total_ms": 1258.9516000000003,
+          "status": 200
+        },
+        {
+          "request_at_ms": 6356.8503,
+          "first_chunk_ms": 95.91719999999987,
+          "total_ms": 2689.550299999999,
+          "status": 200
+        },
+        {
+          "request_at_ms": 9055.7835,
+          "first_chunk_ms": 296.1139000000003,
+          "total_ms": 1644.9825999999994,
+          "status": 200
+        }
+      ],
+      "status": "completed",
+      "answer": "流式回答只是在模型尚未完成时让读者提前看到内容，它改变的是呈现时机而非内容是否可信，所以原文强调\"流式回答让读者在模型尚未完成时看到已验证的内容。完整回答仍需要经过来源检查\" 。也正因如此，无论流式与否，引用都必须\"来自本轮实际读取的原文\"，并且\"读者可以打开来源查看上下文，并继续阅读\"，即每段呈现出来的内容仍要能追溯到本轮真实读取的原文 。",
+      "sources": [
+        {
+          "source_ref_id": "source_ref_6e4fed3210d30caa",
+          "label": "正文"
+        }
+      ],
+      "effects": [],
+      "activities": [
+        {
+          "step_id": 1,
+          "parent_step_id": null,
+          "kind": "model",
+          "name": "outer",
+          "label": "生成回答",
+          "status": "succeeded",
+          "started_ms": 15.9555,
+          "duration_ms": 1760.9959,
+          "result_count": null,
+          "error_code": null,
+          "usage_total_tokens": 3724
+        },
+        {
+          "step_id": 2,
+          "parent_step_id": null,
+          "kind": "tool",
+          "name": "book.structure",
+          "label": "查看书籍结构",
+          "status": "succeeded",
+          "started_ms": 1777.7832999999998,
+          "duration_ms": 0.1019000000003416,
+          "result_count": null,
+          "error_code": null,
+          "usage_total_tokens": null
+        },
+        {
+          "step_id": 3,
+          "parent_step_id": null,
+          "kind": "model",
+          "name": "outer",
+          "label": "生成回答",
+          "status": "succeeded",
+          "started_ms": 1782.0407,
+          "duration_ms": 1657.6716000000001,
+          "result_count": null,
+          "error_code": null,
+          "usage_total_tokens": 4105
+        },
+        {
+          "step_id": 4,
+          "parent_step_id": null,
+          "kind": "tool",
+          "name": "book.search_text",
+          "label": "搜索原文",
+          "status": "succeeded",
+          "started_ms": 3440.649,
+          "duration_ms": 0.37520000000040454,
+          "result_count": null,
+          "error_code": null,
+          "usage_total_tokens": null
+        },
+        {
+          "step_id": 5,
+          "parent_step_id": null,
+          "kind": "tool",
+          "name": "book.search_text",
+          "label": "搜索原文",
+          "status": "succeeded",
+          "started_ms": 3441.8568,
+          "duration_ms": 0.3449999999997999,
+          "result_count": null,
+          "error_code": null,
+          "usage_total_tokens": null
+        },
+        {
+          "step_id": 6,
+          "parent_step_id": null,
+          "kind": "model",
+          "name": "outer",
+          "label": "生成回答",
+          "status": "succeeded",
+          "started_ms": 3446.4719999999998,
+          "duration_ms": 1615.3774000000003,
+          "result_count": null,
+          "error_code": null,
+          "usage_total_tokens": 4708
+        },
+        {
+          "step_id": 7,
+          "parent_step_id": null,
+          "kind": "tool",
+          "name": "book.search_text",
+          "label": "搜索原文",
+          "status": "succeeded",
+          "started_ms": 5062.7426,
+          "duration_ms": 0.5626000000011118,
+          "result_count": null,
+          "error_code": null,
+          "usage_total_tokens": null
+        },
+        {
+          "step_id": 8,
+          "parent_step_id": null,
+          "kind": "tool",
+          "name": "book.concept",
+          "label": "查阅书籍",
+          "status": "failed",
+          "started_ms": 5064.9372,
+          "duration_ms": 0.05709999999999127,
+          "result_count": null,
+          "error_code": "CONCEPT_NOT_FOUND",
+          "usage_total_tokens": null
+        },
+        {
+          "step_id": 9,
+          "parent_step_id": null,
+          "kind": "model",
+          "name": "outer",
+          "label": "生成回答",
+          "status": "succeeded",
+          "started_ms": 5069.869500000001,
+          "duration_ms": 1260.7735999999986,
+          "result_count": null,
+          "error_code": null,
+          "usage_total_tokens": 5898
+        },
+        {
+          "step_id": 10,
+          "parent_step_id": null,
+          "kind": "tool",
+          "name": "book.text",
+          "label": "读取原文",
+          "status": "succeeded",
+          "started_ms": 6331.572099999999,
+          "duration_ms": 0.07580000000052678,
+          "result_count": null,
+          "error_code": null,
+          "usage_total_tokens": null
+        },
+        {
+          "step_id": 11,
+          "parent_step_id": null,
+          "kind": "model",
+          "name": "outer",
+          "label": "生成回答",
+          "status": "succeeded",
+          "started_ms": 6337.2128999999995,
+          "duration_ms": 2691.8136999999997,
+          "result_count": null,
+          "error_code": null,
+          "usage_total_tokens": 6582
+        },
+        {
+          "step_id": 12,
+          "parent_step_id": null,
+          "kind": "tool",
+          "name": "source.present",
+          "label": "整理来源",
+          "status": "succeeded",
+          "started_ms": 9030.2285,
+          "duration_ms": 0.09679999999934807,
+          "result_count": null,
+          "error_code": null,
+          "usage_total_tokens": null
+        },
+        {
+          "step_id": 13,
+          "parent_step_id": null,
+          "kind": "model",
+          "name": "outer",
+          "label": "生成回答",
+          "status": "succeeded",
+          "started_ms": 9035.9342,
+          "duration_ms": 1647.8140999999996,
+          "result_count": null,
+          "error_code": null,
+          "usage_total_tokens": 6916
+        }
+      ],
+      "actual_usage_tokens": 31933,
+      "missing_usage_requests": 0,
+      "provider_finished_ms": 10700.766099999999,
+      "answer_before_provider_finish": true
+    },
+    {
+      "name": "source",
+      "mode": "complete",
+      "accepted_ms": null,
+      "first_activity_ms": null,
+      "first_answer_ms": null,
+      "total_ms": 9549.852499999999,
+      "reader_ms": null,
+      "requests": [
+        {
+          "request_at_ms": 36.33640000000014,
+          "first_chunk_ms": 114.41579999999885,
+          "total_ms": 981.6283999999996,
+          "status": 200
+        },
+        {
+          "request_at_ms": 1025.4719999999998,
+          "first_chunk_ms": 90.42059999999947,
+          "total_ms": 1245.1343000000015,
+          "status": 200
+        },
+        {
+          "request_at_ms": 2279.6245,
+          "first_chunk_ms": 107.47609999999986,
+          "total_ms": 1168.7073999999993,
+          "status": 200
+        },
+        {
+          "request_at_ms": 3468.118700000001,
+          "first_chunk_ms": 99.61069999999745,
+          "total_ms": 728.5349999999999,
+          "status": 200
+        },
+        {
+          "request_at_ms": 4208.235599999998,
+          "first_chunk_ms": 105.74200000000201,
+          "total_ms": 1524.3833000000013,
+          "status": 200
+        },
+        {
+          "request_at_ms": 5744.700699999999,
+          "first_chunk_ms": 137.72279999999955,
+          "total_ms": 2513.1731,
+          "status": 200
+        },
+        {
+          "request_at_ms": 8271.3054,
+          "first_chunk_ms": 86.60009999999966,
+          "total_ms": 1245.9166000000005,
+          "status": 200
+        }
+      ],
+      "status": "completed",
+      "answer": "1.2 指出流式的本质只是把呈现时机提前——\"流式回答让读者在模型尚未完成时看到已验证的内容。完整回答仍需要经过来源检查\"，也就是说流式并不改变答案最终必须核验来源这一要求。 1.3 则把这一要求落实为引用规范：\"来源引用必须来自本轮实际读取的原文。读者可以打开来源查看上下文，并继续阅读\"，所以只有逐条核对本轮真实读到的原文，流式过程中滚动出现的内容才能被确认、追溯为完整的回答。",
+      "sources": [
+        {
+          "source_ref_id": "source_ref_0a2402a6e7a7e8bd",
+          "label": "正文"
+        },
+        {
+          "source_ref_id": "source_ref_4613418c50ca2f4a",
+          "label": "正文"
+        }
+      ],
+      "effects": [],
+      "activities": [
+        {
+          "step_id": 1,
+          "parent_step_id": null,
+          "kind": "model",
+          "name": "outer",
+          "label": "生成回答",
+          "status": "succeeded",
+          "started_ms": 17.518900000000002,
+          "duration_ms": 983.3429,
+          "result_count": null,
+          "error_code": null,
+          "usage_total_tokens": 3744
+        },
+        {
+          "step_id": 2,
+          "parent_step_id": null,
+          "kind": "tool",
+          "name": "book.structure",
+          "label": "查看书籍结构",
+          "status": "succeeded",
+          "started_ms": 1001.6596,
+          "duration_ms": 0.06610000000000582,
+          "result_count": null,
+          "error_code": null,
+          "usage_total_tokens": null
+        },
+        {
+          "step_id": 3,
+          "parent_step_id": null,
+          "kind": "model",
+          "name": "outer",
+          "label": "生成回答",
+          "status": "succeeded",
+          "started_ms": 1006.5287999999999,
+          "duration_ms": 1247.5428000000002,
+          "result_count": null,
+          "error_code": null,
+          "usage_total_tokens": 4058
+        },
+        {
+          "step_id": 4,
+          "parent_step_id": null,
+          "kind": "tool",
+          "name": "book.search_text",
+          "label": "搜索原文",
+          "status": "succeeded",
+          "started_ms": 2255.0113,
+          "duration_ms": 0.3809000000001106,
+          "result_count": null,
+          "error_code": null,
+          "usage_total_tokens": null
+        },
+        {
+          "step_id": 5,
+          "parent_step_id": null,
+          "kind": "tool",
+          "name": "book.search_text",
+          "label": "搜索原文",
+          "status": "succeeded",
+          "started_ms": 2256.2133,
+          "duration_ms": 0.31730000000015934,
+          "result_count": null,
+          "error_code": null,
+          "usage_total_tokens": null
+        },
+        {
+          "step_id": 6,
+          "parent_step_id": null,
+          "kind": "model",
+          "name": "outer",
+          "label": "生成回答",
+          "status": "succeeded",
+          "started_ms": 2260.9109,
+          "duration_ms": 1171.0783000000001,
+          "result_count": null,
+          "error_code": null,
+          "usage_total_tokens": 4598
+        },
+        {
+          "step_id": 7,
+          "parent_step_id": null,
+          "kind": "tool",
+          "name": "book.search_text",
+          "label": "搜索原文",
+          "status": "succeeded",
+          "started_ms": 3433.5256,
+          "duration_ms": 1.0877000000000407,
+          "result_count": null,
+          "error_code": null,
+          "usage_total_tokens": null
+        },
+        {
+          "step_id": 8,
+          "parent_step_id": null,
+          "kind": "tool",
+          "name": "book.search_text",
+          "label": "搜索原文",
+          "status": "succeeded",
+          "started_ms": 3438.1620000000003,
+          "duration_ms": 0.8154999999997017,
+          "result_count": null,
+          "error_code": null,
+          "usage_total_tokens": null
+        },
+        {
+          "step_id": 9,
+          "parent_step_id": null,
+          "kind": "model",
+          "name": "outer",
+          "label": "生成回答",
+          "status": "succeeded",
+          "started_ms": 3448.4727,
+          "duration_ms": 731.9351999999994,
+          "result_count": null,
+          "error_code": null,
+          "usage_total_tokens": 5863
+        },
+        {
+          "step_id": 10,
+          "parent_step_id": null,
+          "kind": "tool",
+          "name": "book.text",
+          "label": "读取原文",
+          "status": "succeeded",
+          "started_ms": 4181.5398000000005,
+          "duration_ms": 0.1069999999999709,
+          "result_count": null,
+          "error_code": null,
+          "usage_total_tokens": null
+        },
+        {
+          "step_id": 11,
+          "parent_step_id": null,
+          "kind": "model",
+          "name": "outer",
+          "label": "生成回答",
+          "status": "succeeded",
+          "started_ms": 4188.6088,
+          "duration_ms": 1527.6008000000002,
+          "result_count": null,
+          "error_code": null,
+          "usage_total_tokens": 6279
+        },
+        {
+          "step_id": 12,
+          "parent_step_id": null,
+          "kind": "tool",
+          "name": "book.text",
+          "label": "读取原文",
+          "status": "succeeded",
+          "started_ms": 5717.1002,
+          "duration_ms": 0.06210000000010041,
+          "result_count": null,
+          "error_code": null,
+          "usage_total_tokens": null
+        },
+        {
+          "step_id": 13,
+          "parent_step_id": null,
+          "kind": "tool",
+          "name": "book.text",
+          "label": "读取原文",
+          "status": "succeeded",
+          "started_ms": 5718.8153,
+          "duration_ms": 0.06790000000000873,
+          "result_count": null,
+          "error_code": null,
+          "usage_total_tokens": null
+        },
+        {
+          "step_id": 14,
+          "parent_step_id": null,
+          "kind": "model",
+          "name": "outer",
+          "label": "生成回答",
+          "status": "succeeded",
+          "started_ms": 5725.5249,
+          "duration_ms": 2514.3552,
+          "result_count": null,
+          "error_code": null,
+          "usage_total_tokens": 7103
+        },
+        {
+          "step_id": 15,
+          "parent_step_id": null,
+          "kind": "tool",
+          "name": "source.present",
+          "label": "整理来源",
+          "status": "succeeded",
+          "started_ms": 8242.165500000001,
+          "duration_ms": 0.111799999998766,
+          "result_count": null,
+          "error_code": null,
+          "usage_total_tokens": null
+        },
+        {
+          "step_id": 16,
+          "parent_step_id": null,
+          "kind": "tool",
+          "name": "source.present",
+          "label": "整理来源",
+          "status": "succeeded",
+          "started_ms": 8243.774300000001,
+          "duration_ms": 0.07159999999930733,
+          "result_count": null,
+          "error_code": null,
+          "usage_total_tokens": null
+        },
+        {
+          "step_id": 17,
+          "parent_step_id": null,
+          "kind": "model",
+          "name": "outer",
+          "label": "生成回答",
+          "status": "succeeded",
+          "started_ms": 8251.179199999999,
+          "duration_ms": 1249.5752000000011,
+          "result_count": null,
+          "error_code": null,
+          "usage_total_tokens": 7607
+        }
+      ],
+      "actual_usage_tokens": 39252,
+      "missing_usage_requests": 0,
+      "provider_finished_ms": 9517.222,
+      "answer_before_provider_finish": false
+    },
+    {
+      "name": "selection",
+      "mode": "stream",
+      "accepted_ms": 16.71310000000085,
+      "first_activity_ms": 33.073300000003655,
+      "first_answer_ms": 2983.745999999999,
+      "total_ms": 3197.6898,
+      "reader_ms": 7.026400000002468,
+      "requests": [
+        {
+          "request_at_ms": 34.14549999999872,
+          "first_chunk_ms": 183.19440000000031,
+          "total_ms": 2096.8188999999984,
+          "status": 200
+        },
+        {
+          "request_at_ms": 2137.580900000001,
+          "first_chunk_ms": 128.04099999999744,
+          "total_ms": 1028.8611999999994,
+          "status": 200
+        }
+      ],
+      "status": "completed",
+      "answer": "选区的核心意思是：来源引用必须锚定在本轮实际读取过的原文上，不能凭记忆或外部转述来标注来源。同时，来源对读者是开放的——读者可以打开来源查看上下文，并从那里继续阅读。",
+      "sources": [
+        {
+          "source_ref_id": "source_ref_3b4a3f44a6f40b4a",
+          "label": "正文"
+        }
+      ],
+      "effects": [],
+      "activities": [
+        {
+          "step_id": 1,
+          "parent_step_id": null,
+          "kind": "model",
+          "name": "outer",
+          "label": "生成回答",
+          "status": "succeeded",
+          "started_ms": 16.5574,
+          "duration_ms": 2098.4825,
+          "result_count": null,
+          "error_code": null,
+          "usage_total_tokens": 3710
+        },
+        {
+          "step_id": 2,
+          "parent_step_id": null,
+          "kind": "tool",
+          "name": "source.present",
+          "label": "整理来源",
+          "status": "succeeded",
+          "started_ms": 2116.0979,
+          "duration_ms": 0.07289999999966312,
+          "result_count": null,
+          "error_code": null,
+          "usage_total_tokens": null
+        },
+        {
+          "step_id": 3,
+          "parent_step_id": null,
+          "kind": "model",
+          "name": "outer",
+          "label": "生成回答",
+          "status": "succeeded",
+          "started_ms": 2119.9031,
+          "duration_ms": 1029.6898999999999,
+          "result_count": null,
+          "error_code": null,
+          "usage_total_tokens": 3959
+        }
+      ],
+      "actual_usage_tokens": 7669,
+      "missing_usage_requests": 0,
+      "provider_finished_ms": 3166.4421,
+      "answer_before_provider_finish": true
+    },
+    {
+      "name": "selection",
+      "mode": "complete",
+      "accepted_ms": null,
+      "first_activity_ms": null,
+      "first_answer_ms": null,
+      "total_ms": 3557.214,
+      "reader_ms": null,
+      "requests": [
+        {
+          "request_at_ms": 29.81590000000142,
+          "first_chunk_ms": 85.7184999999954,
+          "total_ms": 2378.073899999996,
+          "status": 200
+        },
+        {
+          "request_at_ms": 2414.437899999997,
+          "first_chunk_ms": 148.2045999999973,
+          "total_ms": 1112.6779999999999,
+          "status": 200
+        }
+      ],
+      "status": "completed",
+      "answer": "选区的核心意思是：文中提出的“来源引用”必须严格限定为本轮对话中真实读取过的原文内容，不能凭空生成或引用未读材料；同时它强调读者有权点开来源查看上下文并顺此继续阅读，即引用要可核验、可延伸。\n\n选区的原话是：“来源引用必须来自本轮实际读取的原文。读者可以打开来源查看上下文，并继续阅读。” ",
+      "sources": [
+        {
+          "source_ref_id": "source_ref_3b4a3f44a6f40b4a",
+          "label": "正文"
+        }
+      ],
+      "effects": [],
+      "activities": [
+        {
+          "step_id": 1,
+          "parent_step_id": null,
+          "kind": "model",
+          "name": "outer",
+          "label": "生成回答",
+          "status": "succeeded",
+          "started_ms": 13.1015,
+          "duration_ms": 2379.8147,
+          "result_count": null,
+          "error_code": null,
+          "usage_total_tokens": 3580
+        },
+        {
+          "step_id": 2,
+          "parent_step_id": null,
+          "kind": "tool",
+          "name": "source.present",
+          "label": "整理来源",
+          "status": "succeeded",
+          "started_ms": 2393.917,
+          "duration_ms": 0.06440000000020518,
+          "result_count": null,
+          "error_code": null,
+          "usage_total_tokens": null
+        },
+        {
+          "step_id": 3,
+          "parent_step_id": null,
+          "kind": "model",
+          "name": "outer",
+          "label": "生成回答",
+          "status": "succeeded",
+          "started_ms": 2397.674,
+          "duration_ms": 1114.4524000000001,
+          "result_count": null,
+          "error_code": null,
+          "usage_total_tokens": 3866
+        }
+      ],
+      "actual_usage_tokens": 7446,
+      "missing_usage_requests": 0,
+      "provider_finished_ms": 3527.115899999997,
+      "answer_before_provider_finish": false
+    },
+    {
+      "name": "action",
+      "mode": "stream",
+      "accepted_ms": 15.454399999995076,
+      "first_activity_ms": 30.396899999999732,
+      "first_answer_ms": 2637.787099999994,
+      "total_ms": 2726.984599999996,
+      "reader_ms": 6.9979999999995925,
+      "requests": [
+        {
+          "request_at_ms": 31.777799999996205,
+          "first_chunk_ms": 76.40359999999782,
+          "total_ms": 1794.6943000000028,
+          "status": 200
+        },
+        {
+          "request_at_ms": 1864.4858999999997,
+          "first_chunk_ms": 98.83629999999539,
+          "total_ms": 832.9854999999952,
+          "status": 200
+        }
+      ],
+      "status": "completed",
+      "answer": "已在 1.4 保存笔记（note_id：`mem_f8b942d9d62ca373`）：\n\n> 取消回答会保留已经保存的阅读动作。",
+      "sources": [],
+      "effects": [
+        {
+          "kind": "Note",
+          "mem_id": "mem_f8b942d9d62ca373",
+          "lid": "1.4",
+          "text": "取消回答会保留已经保存的阅读动作。"
+        }
+      ],
+      "activities": [
+        {
+          "step_id": 1,
+          "parent_step_id": null,
+          "kind": "model",
+          "name": "outer",
+          "label": "生成回答",
+          "status": "succeeded",
+          "started_ms": 15.0205,
+          "duration_ms": 1796.0179999999998,
+          "result_count": null,
+          "error_code": null,
+          "usage_total_tokens": 4052
+        },
+        {
+          "step_id": 2,
+          "parent_step_id": null,
+          "kind": "tool",
+          "name": "reader.note",
+          "label": "保存笔记",
+          "status": "succeeded",
+          "started_ms": 1811.8068,
+          "duration_ms": 31.027499999999918,
+          "result_count": null,
+          "error_code": null,
+          "usage_total_tokens": null
+        },
+        {
+          "step_id": 3,
+          "parent_step_id": null,
+          "kind": "model",
+          "name": "outer",
+          "label": "生成回答",
+          "status": "succeeded",
+          "started_ms": 1847.4114,
+          "duration_ms": 834.4626000000003,
+          "result_count": null,
+          "error_code": null,
+          "usage_total_tokens": 4215
+        }
+      ],
+      "actual_usage_tokens": 8267,
+      "missing_usage_requests": 0,
+      "provider_finished_ms": 2697.471399999995,
+      "answer_before_provider_finish": true
+    },
+    {
+      "name": "action",
+      "mode": "complete",
+      "accepted_ms": null,
+      "first_activity_ms": null,
+      "first_answer_ms": null,
+      "total_ms": 10931.835000000006,
+      "reader_ms": null,
+      "requests": [
+        {
+          "request_at_ms": 31.330400000006193,
+          "first_chunk_ms": 106.67409999999654,
+          "total_ms": 5171.722599999994,
+          "status": 200
+        },
+        {
+          "request_at_ms": 5210.5538000000015,
+          "first_chunk_ms": 143.2216000000044,
+          "total_ms": 3739.431000000004,
+          "status": 200
+        },
+        {
+          "request_at_ms": 8957.792400000006,
+          "first_chunk_ms": 99.83099999999831,
+          "total_ms": 1939.6875999999902,
+          "status": 200
+        }
+      ],
+      "status": "completed",
+      "answer": "已保存。\n\n- 笔记位置：LID `1.4`（当前选中项）\n- 会话核对：书 `as9-real`，当前视口锚点 `1.10`，可见范围 `1.1–1.19`，`1.4` 在其中\n- 笔记内容（按您给的原文）：“取消回答会保留已经保存的阅读动作。”\n- 返回：`note_id = mem_f8b942d9d62ca373`，状态 `EXISTING`\n\n说明一点：这条内容我按您的原话作为阅读批注保存，它属于对阅读器行为的陈述，并非书中正文，我没有在书内找到支持它的证据，因此未在笔记中把它标注为已核实。",
+      "sources": [],
+      "effects": [],
+      "activities": [
+        {
+          "step_id": 1,
+          "parent_step_id": null,
+          "kind": "model",
+          "name": "outer",
+          "label": "生成回答",
+          "status": "succeeded",
+          "started_ms": 13.9998,
+          "duration_ms": 5173.1068000000005,
+          "result_count": null,
+          "error_code": null,
+          "usage_total_tokens": 5129
+        },
+        {
+          "step_id": 2,
+          "parent_step_id": null,
+          "kind": "tool",
+          "name": "reader.state",
+          "label": "查看阅读状态",
+          "status": "succeeded",
+          "started_ms": 5187.8017,
+          "duration_ms": 0.3342000000002372,
+          "result_count": null,
+          "error_code": null,
+          "usage_total_tokens": null
+        },
+        {
+          "step_id": 3,
+          "parent_step_id": null,
+          "kind": "model",
+          "name": "outer",
+          "label": "生成回答",
+          "status": "succeeded",
+          "started_ms": 5193.1526,
+          "duration_ms": 3741.6562999999996,
+          "result_count": null,
+          "error_code": null,
+          "usage_total_tokens": 6408
+        },
+        {
+          "step_id": 4,
+          "parent_step_id": null,
+          "kind": "tool",
+          "name": "reader.note",
+          "label": "保存笔记",
+          "status": "succeeded",
+          "started_ms": 8935.654400000001,
+          "duration_ms": 0.21079999999892607,
+          "result_count": null,
+          "error_code": null,
+          "usage_total_tokens": null
+        },
+        {
+          "step_id": 5,
+          "parent_step_id": null,
+          "kind": "model",
+          "name": "outer",
+          "label": "生成回答",
+          "status": "succeeded",
+          "started_ms": 8940.4044,
+          "duration_ms": 1940.8755,
+          "result_count": null,
+          "error_code": null,
+          "usage_total_tokens": 6818
+        }
+      ],
+      "actual_usage_tokens": 18355,
+      "missing_usage_requests": 0,
+      "provider_finished_ms": 10897.479999999996,
+      "answer_before_provider_finish": false
+    }
+  ],
+  "linux": {
+    "model": "deepseek-v4-flash",
+    "provider": "https://api.deepseek.com",
+    "platform": "veLinux/CentOS Stream 9, native release tiny_http via nginx 1.20.1 loopback acceptance instance",
+    "observations": [
+      {
+        "name": "source",
+        "mode": "stream",
+        "accepted_ms": 4.6221299999999985,
+        "first_activity_ms": 17.228049999999996,
+        "first_answer_ms": 7874.145906,
+        "total_ms": 8410.352503999999,
+        "reader_ms": 10.891261,
+        "requests": [
+          {
+            "request_at_ms": 8.934117999999998,
+            "first_chunk_ms": 143.919715,
+            "total_ms": 1018.0053800000001,
+            "status": 200
+          },
+          {
+            "request_at_ms": 1029.673494,
+            "first_chunk_ms": 92.33355400000005,
+            "total_ms": 908.1876200000002,
+            "status": 200
+          },
+          {
+            "request_at_ms": 1939.8928489999998,
+            "first_chunk_ms": 101.71944600000029,
+            "total_ms": 940.0163580000001,
+            "status": 200
+          },
+          {
+            "request_at_ms": 2882.226412,
+            "first_chunk_ms": 106.13560400000006,
+            "total_ms": 1066.1311600000004,
+            "status": 200
+          },
+          {
+            "request_at_ms": 3949.9534820000003,
+            "first_chunk_ms": 103.02713600000016,
+            "total_ms": 1697.7959459999997,
+            "status": 200
+          },
+          {
+            "request_at_ms": 5648.945143,
+            "first_chunk_ms": 103.00868400000036,
+            "total_ms": 1459.7940750000007,
+            "status": 200
+          },
+          {
+            "request_at_ms": 7110.571702,
+            "first_chunk_ms": 98.45888999999988,
+            "total_ms": 1285.0790820000002,
+            "status": 200
+          }
+        ],
+        "status": "completed",
+        "answer": "1.2 明确写道：「流式回答让读者在模型尚未完成时看到已验证的内容。完整回答仍需要经过来源检查。」 因为流式展示的只是「尚未完成」时的片段，最终完整回答仍必须逐句落实来源，而 1.3 进一步要求「来源引用必须来自本轮实际读取的原文。读者可以打开来源查看上下文，并继续阅读」，即来源检查保证引文可回溯到本轮真正读到的原文、且读者可自行打开核对上下文。",
+        "sources": [
+          {
+            "source_ref_id": "source_ref_0a2401a6e7a7e70a",
+            "label": "正文"
+          },
+          {
+            "source_ref_id": "source_ref_4613428c50ca30fd",
+            "label": "正文"
+          }
+        ],
+        "effects": [],
+        "activities": [
+          {
+            "step_id": 1,
+            "parent_step_id": null,
+            "kind": "model",
+            "name": "outer",
+            "label": "生成回答",
+            "status": "succeeded",
+            "started_ms": 2.449466,
+            "duration_ms": 1020.5778100000001,
+            "result_count": null,
+            "error_code": null,
+            "usage_total_tokens": 3645
+          },
+          {
+            "step_id": 2,
+            "parent_step_id": null,
+            "kind": "tool",
+            "name": "book.structure",
+            "label": "查看书籍结构",
+            "status": "succeeded",
+            "started_ms": 1023.290138,
+            "duration_ms": 0.03014500000017506,
+            "result_count": null,
+            "error_code": null,
+            "usage_total_tokens": null
+          },
+          {
+            "step_id": 3,
+            "parent_step_id": null,
+            "kind": "model",
+            "name": "outer",
+            "label": "生成回答",
+            "status": "succeeded",
+            "started_ms": 1023.962559,
+            "duration_ms": 910.0333409999998,
+            "result_count": null,
+            "error_code": null,
+            "usage_total_tokens": 3939
+          },
+          {
+            "step_id": 4,
+            "parent_step_id": null,
+            "kind": "tool",
+            "name": "book.search_text",
+            "label": "搜索原文",
+            "status": "succeeded",
+            "started_ms": 1934.2665650000001,
+            "duration_ms": 0.10126900000000205,
+            "result_count": null,
+            "error_code": null,
+            "usage_total_tokens": null
+          },
+          {
+            "step_id": 5,
+            "parent_step_id": null,
+            "kind": "tool",
+            "name": "book.search_text",
+            "label": "搜索原文",
+            "status": "succeeded",
+            "started_ms": 1934.554851,
+            "duration_ms": 0.0444199999999455,
+            "result_count": null,
+            "error_code": null,
+            "usage_total_tokens": null
+          },
+          {
+            "step_id": 6,
+            "parent_step_id": null,
+            "kind": "model",
+            "name": "outer",
+            "label": "生成回答",
+            "status": "succeeded",
+            "started_ms": 1935.257357,
+            "duration_ms": 940.7440339999998,
+            "result_count": null,
+            "error_code": null,
+            "usage_total_tokens": 4473
+          },
+          {
+            "step_id": 7,
+            "parent_step_id": null,
+            "kind": "tool",
+            "name": "book.search_text",
+            "label": "搜索原文",
+            "status": "succeeded",
+            "started_ms": 2876.278931,
+            "duration_ms": 0.10490699999991193,
+            "result_count": null,
+            "error_code": null,
+            "usage_total_tokens": null
+          },
+          {
+            "step_id": 8,
+            "parent_step_id": null,
+            "kind": "tool",
+            "name": "book.search_text",
+            "label": "搜索原文",
+            "status": "succeeded",
+            "started_ms": 2876.688041,
+            "duration_ms": 0.059201000000030035,
+            "result_count": null,
+            "error_code": null,
+            "usage_total_tokens": null
+          },
+          {
+            "step_id": 9,
+            "parent_step_id": null,
+            "kind": "model",
+            "name": "outer",
+            "label": "生成回答",
+            "status": "succeeded",
+            "started_ms": 2877.585157,
+            "duration_ms": 1066.2802259999999,
+            "result_count": null,
+            "error_code": null,
+            "usage_total_tokens": 5722
+          },
+          {
+            "step_id": 10,
+            "parent_step_id": null,
+            "kind": "tool",
+            "name": "book.text",
+            "label": "读取原文",
+            "status": "succeeded",
+            "started_ms": 3944.1494430000002,
+            "duration_ms": 0.022260999999616615,
+            "result_count": null,
+            "error_code": null,
+            "usage_total_tokens": null
+          },
+          {
+            "step_id": 11,
+            "parent_step_id": null,
+            "kind": "tool",
+            "name": "book.text",
+            "label": "读取原文",
+            "status": "succeeded",
+            "started_ms": 3944.426265,
+            "duration_ms": 0.011722000000190747,
+            "result_count": null,
+            "error_code": null,
+            "usage_total_tokens": null
+          },
+          {
+            "step_id": 12,
+            "parent_step_id": null,
+            "kind": "model",
+            "name": "outer",
+            "label": "生成回答",
+            "status": "succeeded",
+            "started_ms": 3945.24954,
+            "duration_ms": 1697.7043869999998,
+            "result_count": null,
+            "error_code": null,
+            "usage_total_tokens": 6314
+          },
+          {
+            "step_id": 13,
+            "parent_step_id": null,
+            "kind": "tool",
+            "name": "source.present",
+            "label": "整理来源",
+            "status": "rejected",
+            "started_ms": null,
+            "duration_ms": null,
+            "result_count": null,
+            "error_code": "SOURCE_AMBIGUOUS",
+            "usage_total_tokens": null
+          },
+          {
+            "step_id": 14,
+            "parent_step_id": null,
+            "kind": "tool",
+            "name": "source.present",
+            "label": "整理来源",
+            "status": "succeeded",
+            "started_ms": 5643.532936,
+            "duration_ms": 0.018711000000621425,
+            "result_count": null,
+            "error_code": null,
+            "usage_total_tokens": null
+          },
+          {
+            "step_id": 15,
+            "parent_step_id": null,
+            "kind": "model",
+            "name": "outer",
+            "label": "生成回答",
+            "status": "succeeded",
+            "started_ms": 5644.379625,
+            "duration_ms": 1460.4911470000006,
+            "result_count": null,
+            "error_code": null,
+            "usage_total_tokens": 6835
+          },
+          {
+            "step_id": 16,
+            "parent_step_id": null,
+            "kind": "tool",
+            "name": "source.present",
+            "label": "整理来源",
+            "status": "succeeded",
+            "started_ms": 7105.2410899999995,
+            "duration_ms": 0.022810000000390573,
+            "result_count": null,
+            "error_code": null,
+            "usage_total_tokens": null
+          },
+          {
+            "step_id": 17,
+            "parent_step_id": null,
+            "kind": "model",
+            "name": "outer",
+            "label": "生成回答",
+            "status": "succeeded",
+            "started_ms": 7106.044165,
+            "duration_ms": 1285.3720019999992,
+            "result_count": null,
+            "error_code": null,
+            "usage_total_tokens": 7233
+          }
+        ],
+        "actual_usage_tokens": 38161,
+        "missing_usage_requests": 0,
+        "provider_finished_ms": 8395.650784000001,
+        "answer_before_provider_finish": true
+      },
+      {
+        "name": "source",
+        "mode": "complete",
+        "accepted_ms": null,
+        "first_activity_ms": null,
+        "first_answer_ms": null,
+        "total_ms": 7714.494103000001,
+        "reader_ms": null,
+        "requests": [
+          {
+            "request_at_ms": 5.441472000000431,
+            "first_chunk_ms": 99.7041449999997,
+            "total_ms": 1104.9863430000005,
+            "status": 200
+          },
+          {
+            "request_at_ms": 1112.0477809999993,
+            "first_chunk_ms": 98.90148000000045,
+            "total_ms": 1448.0926760000002,
+            "status": 200
+          },
+          {
+            "request_at_ms": 2562.2765290000007,
+            "first_chunk_ms": 98.09105799999998,
+            "total_ms": 1868.0599619999994,
+            "status": 200
+          },
+          {
+            "request_at_ms": 4432.427877,
+            "first_chunk_ms": 104.35361499999999,
+            "total_ms": 572.2896380000002,
+            "status": 200
+          },
+          {
+            "request_at_ms": 5006.596904,
+            "first_chunk_ms": 93.5215590000007,
+            "total_ms": 1783.6380689999987,
+            "status": 200
+          },
+          {
+            "request_at_ms": 6792.337055,
+            "first_chunk_ms": 121.32758399999875,
+            "total_ms": 916.6602859999985,
+            "status": 200
+          }
+        ],
+        "status": "completed",
+        "answer": "1.2 说明，流式回答只是让读者在模型尚未完成时先看到已验证的内容——“流式回答让读者在模型尚未完成时看到已验证的内容。完整回答仍需要经过来源检查。”\n\n1.3 说明，来源检查的约束并不因流式而放宽，引用只能取本轮真正读到的原文——“来源引用必须来自本轮实际读取的原文。读者可以打开来源查看上下文，并继续阅读。”",
+        "sources": [
+          {
+            "source_ref_id": "source_ref_0a2402a6e7a7e8bd",
+            "label": "正文"
+          },
+          {
+            "source_ref_id": "source_ref_4613418c50ca2f4a",
+            "label": "正文"
+          }
+        ],
+        "effects": [],
+        "activities": [
+          {
+            "step_id": 1,
+            "parent_step_id": null,
+            "kind": "model",
+            "name": "outer",
+            "label": "生成回答",
+            "status": "succeeded",
+            "started_ms": 1.5456949999999998,
+            "duration_ms": 1105.5776700000001,
+            "result_count": null,
+            "error_code": null,
+            "usage_total_tokens": 3614
+          },
+          {
+            "step_id": 2,
+            "parent_step_id": null,
+            "kind": "tool",
+            "name": "book.structure",
+            "label": "查看书籍结构",
+            "status": "succeeded",
+            "started_ms": 1107.330146,
+            "duration_ms": 0.01985899999999674,
+            "result_count": null,
+            "error_code": null,
+            "usage_total_tokens": null
+          },
+          {
+            "step_id": 3,
+            "parent_step_id": null,
+            "kind": "model",
+            "name": "outer",
+            "label": "生成回答",
+            "status": "succeeded",
+            "started_ms": 1108.010262,
+            "duration_ms": 1449.044145,
+            "result_count": null,
+            "error_code": null,
+            "usage_total_tokens": 3978
+          },
+          {
+            "step_id": 4,
+            "parent_step_id": null,
+            "kind": "tool",
+            "name": "book.search_text",
+            "label": "搜索原文",
+            "status": "succeeded",
+            "started_ms": 2557.293803,
+            "duration_ms": 0.07008500000029017,
+            "result_count": null,
+            "error_code": null,
+            "usage_total_tokens": null
+          },
+          {
+            "step_id": 5,
+            "parent_step_id": null,
+            "kind": "tool",
+            "name": "book.search_text",
+            "label": "搜索原文",
+            "status": "succeeded",
+            "started_ms": 2557.530024,
+            "duration_ms": 0.06715099999973972,
+            "result_count": null,
+            "error_code": null,
+            "usage_total_tokens": null
+          },
+          {
+            "step_id": 6,
+            "parent_step_id": null,
+            "kind": "model",
+            "name": "outer",
+            "label": "生成回答",
+            "status": "succeeded",
+            "started_ms": 2558.46967,
+            "duration_ms": 1868.8132250000003,
+            "result_count": null,
+            "error_code": null,
+            "usage_total_tokens": 5201
+          },
+          {
+            "step_id": 7,
+            "parent_step_id": null,
+            "kind": "tool",
+            "name": "book.text",
+            "label": "读取原文",
+            "status": "succeeded",
+            "started_ms": 4427.53338,
+            "duration_ms": 0.024166000000150234,
+            "result_count": null,
+            "error_code": null,
+            "usage_total_tokens": null
+          },
+          {
+            "step_id": 8,
+            "parent_step_id": null,
+            "kind": "tool",
+            "name": "book.context",
+            "label": "查阅书籍",
+            "status": "succeeded",
+            "started_ms": 4427.761098,
+            "duration_ms": 0.0234760000003007,
+            "result_count": 3,
+            "error_code": null,
+            "usage_total_tokens": null
+          },
+          {
+            "step_id": 9,
+            "parent_step_id": null,
+            "kind": "model",
+            "name": "outer",
+            "label": "生成回答",
+            "status": "succeeded",
+            "started_ms": 4428.515837,
+            "duration_ms": 573.0961719999996,
+            "result_count": null,
+            "error_code": null,
+            "usage_total_tokens": 5622
+          },
+          {
+            "step_id": 10,
+            "parent_step_id": null,
+            "kind": "tool",
+            "name": "book.text",
+            "label": "读取原文",
+            "status": "succeeded",
+            "started_ms": 5001.853197,
+            "duration_ms": 0.025725999998940097,
+            "result_count": null,
+            "error_code": null,
+            "usage_total_tokens": null
+          },
+          {
+            "step_id": 11,
+            "parent_step_id": null,
+            "kind": "model",
+            "name": "outer",
+            "label": "生成回答",
+            "status": "succeeded",
+            "started_ms": 5002.7357520000005,
+            "duration_ms": 1784.466957999999,
+            "result_count": null,
+            "error_code": null,
+            "usage_total_tokens": 6080
+          },
+          {
+            "step_id": 12,
+            "parent_step_id": null,
+            "kind": "tool",
+            "name": "source.present",
+            "label": "整理来源",
+            "status": "succeeded",
+            "started_ms": 6787.550822,
+            "duration_ms": 0.01731900000049791,
+            "result_count": null,
+            "error_code": null,
+            "usage_total_tokens": null
+          },
+          {
+            "step_id": 13,
+            "parent_step_id": null,
+            "kind": "tool",
+            "name": "source.present",
+            "label": "整理来源",
+            "status": "succeeded",
+            "started_ms": 6787.75058,
+            "duration_ms": 0.009766999999555992,
+            "result_count": null,
+            "error_code": null,
+            "usage_total_tokens": null
+          },
+          {
+            "step_id": 14,
+            "parent_step_id": null,
+            "kind": "model",
+            "name": "outer",
+            "label": "生成回答",
+            "status": "succeeded",
+            "started_ms": 6788.517529,
+            "duration_ms": 917.3822909999999,
+            "result_count": null,
+            "error_code": null,
+            "usage_total_tokens": 6553
+          }
+        ],
+        "actual_usage_tokens": 31048,
+        "missing_usage_requests": 0,
+        "provider_finished_ms": 7708.997340999998,
+        "answer_before_provider_finish": false
+      },
+      {
+        "name": "selection",
+        "mode": "stream",
+        "accepted_ms": 3.87302500000078,
+        "first_activity_ms": 8.506822999999713,
+        "first_answer_ms": 1777.0291130000005,
+        "total_ms": 1929.932471,
+        "reader_ms": 2.279736000000412,
+        "requests": [
+          {
+            "request_at_ms": 5.5700539999998,
+            "first_chunk_ms": 124.440294,
+            "total_ms": 1251.2725900000005,
+            "status": 200
+          },
+          {
+            "request_at_ms": 1257.842434000002,
+            "first_chunk_ms": 96.3335679999982,
+            "total_ms": 664.5095879999972,
+            "status": 200
+          }
+        ],
+        "status": "completed",
+        "answer": "选区讲的是引用规则的来源与读者的可验证路径：引用只能落在本轮真正读取过的原文上，不能凭印象或转述生成。“来源引用必须来自本轮实际读取的原文。读者可以打开来源查看上下文，并继续阅读。”",
+        "sources": [
+          {
+            "source_ref_id": "source_ref_3b4a3f44a6f40b4a",
+            "label": "正文"
+          }
+        ],
+        "effects": [],
+        "activities": [
+          {
+            "step_id": 1,
+            "parent_step_id": null,
+            "kind": "model",
+            "name": "outer",
+            "label": "生成回答",
+            "status": "succeeded",
+            "started_ms": 1.47176,
+            "duration_ms": 1251.4510440000001,
+            "result_count": null,
+            "error_code": null,
+            "usage_total_tokens": 3631
+          },
+          {
+            "step_id": 2,
+            "parent_step_id": null,
+            "kind": "tool",
+            "name": "source.present",
+            "label": "整理来源",
+            "status": "succeeded",
+            "started_ms": 1253.227012,
+            "duration_ms": 0.02903999999989537,
+            "result_count": null,
+            "error_code": null,
+            "usage_total_tokens": null
+          },
+          {
+            "step_id": 3,
+            "parent_step_id": null,
+            "kind": "model",
+            "name": "outer",
+            "label": "生成回答",
+            "status": "succeeded",
+            "started_ms": 1253.863083,
+            "duration_ms": 665.1203069999999,
+            "result_count": null,
+            "error_code": null,
+            "usage_total_tokens": 3882
+          }
+        ],
+        "actual_usage_tokens": 7513,
+        "missing_usage_requests": 0,
+        "provider_finished_ms": 1922.3520219999991,
+        "answer_before_provider_finish": true
+      },
+      {
+        "name": "selection",
+        "mode": "complete",
+        "accepted_ms": null,
+        "first_activity_ms": null,
+        "first_answer_ms": null,
+        "total_ms": 4094.8591270000034,
+        "reader_ms": null,
+        "requests": [
+          {
+            "request_at_ms": 6.530418000002101,
+            "first_chunk_ms": 93.87591799999791,
+            "total_ms": 2439.444296999998,
+            "status": 200
+          },
+          {
+            "request_at_ms": 2447.35282,
+            "first_chunk_ms": 620.4731720000018,
+            "total_ms": 1642.2723540000006,
+            "status": 200
+          }
+        ],
+        "status": "completed",
+        "answer": "选区的核心意思是给“来源引用”定一条硬性边界：引用所用的文字必须是本轮真正读取到的原文，而不能来自记忆、转述或任何未经本轮读取的内容。 它同时说明了这条约束的可验证性——读者可以打开来源查看上下文，并继续阅读，从而自行核对引用是否与原文一致。",
+        "sources": [
+          {
+            "source_ref_id": "source_ref_3b4a3f44a6f40b4a",
+            "label": "正文"
+          }
+        ],
+        "effects": [],
+        "activities": [
+          {
+            "step_id": 1,
+            "parent_step_id": null,
+            "kind": "model",
+            "name": "outer",
+            "label": "生成回答",
+            "status": "succeeded",
+            "started_ms": 1.391956,
+            "duration_ms": 2440.0044190000003,
+            "result_count": null,
+            "error_code": null,
+            "usage_total_tokens": 3917
+          },
+          {
+            "step_id": 2,
+            "parent_step_id": null,
+            "kind": "tool",
+            "name": "source.present",
+            "label": "整理来源",
+            "status": "succeeded",
+            "started_ms": 2441.6569689999997,
+            "duration_ms": 0.01661900000044625,
+            "result_count": null,
+            "error_code": null,
+            "usage_total_tokens": null
+          },
+          {
+            "step_id": 3,
+            "parent_step_id": null,
+            "kind": "model",
+            "name": "outer",
+            "label": "生成回答",
+            "status": "succeeded",
+            "started_ms": 2442.30511,
+            "duration_ms": 1642.8190319999999,
+            "result_count": null,
+            "error_code": null,
+            "usage_total_tokens": 4214
+          }
+        ],
+        "actual_usage_tokens": 8131,
+        "missing_usage_requests": 0,
+        "provider_finished_ms": 4089.6251740000007,
+        "answer_before_provider_finish": false
+      },
+      {
+        "name": "action",
+        "mode": "stream",
+        "accepted_ms": 5.243632000005164,
+        "first_activity_ms": 10.475470000004862,
+        "first_answer_ms": 1445.2708800000037,
+        "total_ms": 1465.410926000004,
+        "reader_ms": 2.7451530000034836,
+        "requests": [
+          {
+            "request_at_ms": 7.331872000002477,
+            "first_chunk_ms": 121.23047499999666,
+            "total_ms": 1006.8139240000019,
+            "status": 200
+          },
+          {
+            "request_at_ms": 1020.3930160000018,
+            "first_chunk_ms": 89.37495800000033,
+            "total_ms": 437.11911500000133,
+            "status": 200
+          }
+        ],
+        "status": "completed",
+        "answer": "笔记已保存到 1.4，note_id 为 `mem_f8b942d9d62ca373`。",
+        "sources": [],
+        "effects": [
+          {
+            "kind": "Note",
+            "mem_id": "mem_f8b942d9d62ca373",
+            "lid": "1.4",
+            "text": "取消回答会保留已经保存的阅读动作。"
+          }
+        ],
+        "activities": [
+          {
+            "step_id": 1,
+            "parent_step_id": null,
+            "kind": "model",
+            "name": "outer",
+            "label": "生成回答",
+            "status": "succeeded",
+            "started_ms": 1.831728,
+            "duration_ms": 1007.605831,
+            "result_count": null,
+            "error_code": null,
+            "usage_total_tokens": 4249
+          },
+          {
+            "step_id": 2,
+            "parent_step_id": null,
+            "kind": "tool",
+            "name": "reader.note",
+            "label": "保存笔记",
+            "status": "succeeded",
+            "started_ms": 1009.658218,
+            "duration_ms": 4.641367999999829,
+            "result_count": null,
+            "error_code": null,
+            "usage_total_tokens": null
+          },
+          {
+            "step_id": 3,
+            "parent_step_id": null,
+            "kind": "model",
+            "name": "outer",
+            "label": "生成回答",
+            "status": "succeeded",
+            "started_ms": 1015.0760539999999,
+            "duration_ms": 437.9554780000001,
+            "result_count": null,
+            "error_code": null,
+            "usage_total_tokens": 4401
+          }
+        ],
+        "actual_usage_tokens": 8650,
+        "missing_usage_requests": 0,
+        "provider_finished_ms": 1457.5121310000031,
+        "answer_before_provider_finish": true
+      },
+      {
+        "name": "action",
+        "mode": "complete",
+        "accepted_ms": null,
+        "first_activity_ms": null,
+        "first_answer_ms": null,
+        "total_ms": 5240.431672999999,
+        "reader_ms": null,
+        "requests": [
+          {
+            "request_at_ms": 6.825710999997682,
+            "first_chunk_ms": 111.0015310000017,
+            "total_ms": 1707.2844130000012,
+            "status": 200
+          },
+          {
+            "request_at_ms": 1715.816872000003,
+            "first_chunk_ms": 98.88478599999507,
+            "total_ms": 966.5766469999944,
+            "status": 200
+          },
+          {
+            "request_at_ms": 2684.393261999998,
+            "first_chunk_ms": 99.69213600000512,
+            "total_ms": 1305.3815820000018,
+            "status": 200
+          },
+          {
+            "request_at_ms": 3997.1115130000035,
+            "first_chunk_ms": 95.09131199999683,
+            "total_ms": 1237.2131789999985,
+            "status": 200
+          }
+        ],
+        "status": "completed",
+        "answer": "已在 **1.4** 保存笔记：\"取消回答会保留已经保存的阅读动作。\"（note_id：`mem_f8b942d9d62ca373`）",
+        "sources": [],
+        "effects": [
+          {
+            "kind": "Note",
+            "mem_id": "mem_f8b942d9d62ca373",
+            "lid": "1.4",
+            "text": "取消回答会保留已经保存的阅读动作。"
+          }
+        ],
+        "activities": [
+          {
+            "step_id": 1,
+            "parent_step_id": null,
+            "kind": "model",
+            "name": "outer",
+            "label": "生成回答",
+            "status": "succeeded",
+            "started_ms": 1.6031520000000001,
+            "duration_ms": 1708.074613,
+            "result_count": null,
+            "error_code": null,
+            "usage_total_tokens": 4367
+          },
+          {
+            "step_id": 2,
+            "parent_step_id": null,
+            "kind": "tool",
+            "name": "book.structure",
+            "label": "查看书籍结构",
+            "status": "succeeded",
+            "started_ms": 1709.9060339999999,
+            "duration_ms": 0.02241600000024846,
+            "result_count": null,
+            "error_code": null,
+            "usage_total_tokens": null
+          },
+          {
+            "step_id": 3,
+            "parent_step_id": null,
+            "kind": "tool",
+            "name": "book.search_text",
+            "label": "搜索原文",
+            "status": "succeeded",
+            "started_ms": 1710.086334,
+            "duration_ms": 0.06102999999984604,
+            "result_count": null,
+            "error_code": null,
+            "usage_total_tokens": null
+          },
+          {
+            "step_id": 4,
+            "parent_step_id": null,
+            "kind": "model",
+            "name": "outer",
+            "label": "生成回答",
+            "status": "succeeded",
+            "started_ms": 1710.792686,
+            "duration_ms": 967.1823539999998,
+            "result_count": null,
+            "error_code": null,
+            "usage_total_tokens": 4820
+          },
+          {
+            "step_id": 5,
+            "parent_step_id": null,
+            "kind": "tool",
+            "name": "reader.state",
+            "label": "查看阅读状态",
+            "status": "succeeded",
+            "started_ms": 2678.195896,
+            "duration_ms": 0.07525499999974272,
+            "result_count": null,
+            "error_code": null,
+            "usage_total_tokens": null
+          },
+          {
+            "step_id": 6,
+            "parent_step_id": null,
+            "kind": "tool",
+            "name": "book.concept",
+            "label": "查阅书籍",
+            "status": "failed",
+            "started_ms": 2678.571738,
+            "duration_ms": 0.01749999999992724,
+            "result_count": null,
+            "error_code": "CONCEPT_NOT_FOUND",
+            "usage_total_tokens": null
+          },
+          {
+            "step_id": 7,
+            "parent_step_id": null,
+            "kind": "model",
+            "name": "outer",
+            "label": "生成回答",
+            "status": "succeeded",
+            "started_ms": 2679.25404,
+            "duration_ms": 1306.1791820000003,
+            "result_count": null,
+            "error_code": null,
+            "usage_total_tokens": 5886
+          },
+          {
+            "step_id": 8,
+            "parent_step_id": null,
+            "kind": "tool",
+            "name": "reader.note",
+            "label": "保存笔记",
+            "status": "succeeded",
+            "started_ms": 3985.642548,
+            "duration_ms": 5.347729999999956,
+            "result_count": null,
+            "error_code": null,
+            "usage_total_tokens": null
+          },
+          {
+            "step_id": 9,
+            "parent_step_id": null,
+            "kind": "model",
+            "name": "outer",
+            "label": "生成回答",
+            "status": "succeeded",
+            "started_ms": 3991.828419,
+            "duration_ms": 1238.1122979999996,
+            "result_count": null,
+            "error_code": null,
+            "usage_total_tokens": 6049
+          }
+        ],
+        "actual_usage_tokens": 21122,
+        "missing_usage_requests": 0,
+        "provider_finished_ms": 5234.324692000002,
+        "answer_before_provider_finish": false
+      }
+    ]
+  }
+}

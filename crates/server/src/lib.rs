@@ -46,7 +46,7 @@ use runtime::memory_policy::{
     MemoryPolicyRegistry, PaperPolicyContext, PolicyProjectionInput, PAPER_MEMORY_POLICY_ID,
 };
 use runtime::orchestrator::{
-    new_session, run_with_turn_resources_and_checkpoint_sink, AgentAnswerPart, AgentAnswerSource,
+    new_session, AgentAnswerPart, AgentAnswerSource,
     AgentAnswerView, AgentEffect, AnswerDeliveryDiagnostics, OuterConfig, OuterOutcome,
     ProfileMemoryUpdate, ProfileMemoryUpdateKind, ProfileUsageTrace, ResidentTurnResources,
     SourceBinding,
@@ -73,6 +73,8 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 pub mod host;
+pub mod agent_run;
+pub mod agent_stream;
 mod host_lifecycle;
 pub mod mcp;
 
@@ -85,7 +87,7 @@ pub struct AppState {
     pub book_dir: PathBuf,
     /// Stable desktop library root. `None` preserves the legacy current-book-derived behavior.
     pub library_root: Option<PathBuf>,
-    pub book: Book,
+    pub book: std::sync::Arc<Book>,
     pub reader: Reader,
     pub store: MemoryStore,
     /// Resident-only root for private build intents. Visitor/MCP hosts always set `None`.
@@ -108,6 +110,7 @@ pub struct AppState {
     pub visitor_sessions: mcp::VisitorSessions,
     /// Last durable Workbench job revision loaded into `book`/`reader`.
     pub workbench_loaded_revision: Option<String>,
+    pub active_agent_stream: Option<std::sync::Weak<agent_stream::RunStream>>,
 }
 
 pub struct CodexBuildIntentControllerConfig {
@@ -187,7 +190,7 @@ pub fn run_codex_build_intent_command(
         reader_only: false,
         book_dir,
         library_root: Some(config.library_root),
-        book,
+        book: book.into(),
         reader,
         store,
         intent_store_root,
@@ -200,6 +203,7 @@ pub fn run_codex_build_intent_command(
         profile_context_cache: runtime::profile_context::ProfileContextCache::default(),
         visitor_sessions: mcp::VisitorSessions::default(),
         workbench_loaded_revision: None,
+        active_agent_stream: None,
     };
     build_intent_api::run_codex_command(&mut state, operation, input, now)
 }
@@ -928,6 +932,7 @@ pub enum AgentAssistantStatus {
     PendingAssistant,
     Completed,
     Failed,
+    Cancelled,
 }
 
 fn completed_agent_assistant_status() -> AgentAssistantStatus {
@@ -950,6 +955,8 @@ pub struct AgentChatTurn {
     pub user: String,
     #[serde(default = "completed_agent_assistant_status")]
     pub status: AgentAssistantStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_summary: Option<agent_run::AgentRunSummary>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<OuterOutcome>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1021,6 +1028,8 @@ pub struct AgentChatTurnView {
     pub user_turn_ordinal: u64,
     pub user: String,
     pub status: AgentAssistantStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_summary: Option<agent_run::AgentRunSummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub outcome: Option<OuterOutcome>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1115,7 +1124,7 @@ fn validate_agent_turn(turn: &AgentChatTurn) -> Result<(), ToolError> {
         (turn.status, turn.outcome.is_some(), turn.error.is_some()),
         (AgentAssistantStatus::PendingAssistant, false, false)
             | (AgentAssistantStatus::Completed, true, false)
-            | (AgentAssistantStatus::Failed, false, true)
+            | (AgentAssistantStatus::Failed | AgentAssistantStatus::Cancelled, false, true)
     );
     if !valid {
         return Err(agent_history_internal(format!(
@@ -1477,6 +1486,7 @@ fn precommit_agent_turn(
         user_turn_ordinal,
         user,
         status: AgentAssistantStatus::PendingAssistant,
+        run_summary: None,
         outcome: None,
         error: None,
         question_anchor_lid,
@@ -1501,6 +1511,8 @@ fn finalize_agent_turn(
     status: AgentAssistantStatus,
     mut outcome: Option<OuterOutcome>,
     error: Option<AgentTurnError>,
+    run_summary: Option<agent_run::AgentRunSummary>,
+    messages: &[Message],
     now: &str,
 ) -> Result<(), ToolError> {
     let mut candidate = state.agent_history.clone();
@@ -1521,6 +1533,7 @@ fn finalize_agent_turn(
         )));
     }
     turn.status = status;
+    turn.run_summary = run_summary;
     turn.delivery_diagnostics = outcome
         .as_mut()
         .and_then(|outcome| outcome.delivery_diagnostics.take());
@@ -1546,14 +1559,16 @@ fn finalize_agent_turn(
     turn.error = error;
     validate_agent_turn(turn)?;
     session.updated_at = now.into();
-    session.messages = state.messages.clone();
+    session.messages = messages.to_vec();
     commit_agent_history_candidate(state, candidate)
 }
 
+#[cfg(test)]
 fn finalize_agent_turn_completed(
     state: &mut AppState,
     turn_ref: &AgentTurnRef,
     outcome: &OuterOutcome,
+    messages: &[Message],
     now: &str,
 ) -> Result<(), ToolError> {
     finalize_agent_turn(
@@ -1562,26 +1577,8 @@ fn finalize_agent_turn_completed(
         AgentAssistantStatus::Completed,
         Some(outcome.clone()),
         None,
-        now,
-    )
-}
-
-fn finalize_agent_turn_failed(
-    state: &mut AppState,
-    turn_ref: &AgentTurnRef,
-    error: &ToolError,
-    now: &str,
-) -> Result<(), ToolError> {
-    finalize_agent_turn(
-        state,
-        turn_ref,
-        AgentAssistantStatus::Failed,
         None,
-        Some(AgentTurnError {
-            error_code: error.error_code.clone(),
-            category: error.category.clone(),
-            message: error.message.clone(),
-        }),
+        messages,
         now,
     )
 }
@@ -2091,16 +2088,9 @@ fn turn_view(book: &Book, turn: &AgentChatTurn) -> AgentChatTurnView {
         .as_ref()
         .map(|quote| quote.label.clone())
         .or_else(|| question_source_label(book, turn));
-    let effect_labels = turn
-        .outcome
-        .as_ref()
-        .map(|outcome| {
-            outcome
-                .effects
-                .iter()
-                .map(|effect| agent_effect_label(book, effect))
-                .collect()
-        })
+    let effect_labels = turn.run_summary.as_ref().map(|summary| &summary.effects)
+        .or_else(|| turn.outcome.as_ref().map(|outcome| &outcome.effects))
+        .map(|effects| effects.iter().map(|effect| agent_effect_label(book, effect)).collect())
         .unwrap_or_default();
     let mut outcome = turn.outcome.clone();
     if let Some(public_outcome) = outcome.as_mut() {
@@ -2114,6 +2104,7 @@ fn turn_view(book: &Book, turn: &AgentChatTurn) -> AgentChatTurnView {
         user_turn_ordinal: turn.user_turn_ordinal,
         user: turn.user.clone(),
         status: turn.status,
+        run_summary: turn.run_summary.clone(),
         outcome,
         error: turn.error.clone(),
         question_source_label,
@@ -2667,7 +2658,7 @@ fn route_open_book(state: &mut AppState, body: &str, now: &str) -> Reply {
     state.reader = reader;
     state.book_dir = PathBuf::from(dir);
     let _ = register_external_workspace(state, Path::new(dir));
-    state.book = book;
+    state.book = (book).into();
     state.workbench_loaded_revision = None;
     state.messages = messages;
     let _ = save_session(state, Some(dir));
@@ -2893,6 +2884,8 @@ fn path_string(path: &Path) -> String {
 fn reader_state_response(book: &Book, reader: &Reader) -> serde_json::Value {
     let state = reader.state();
     json!({
+        "book_id": book.base.book_id,
+        "revision": reader.revision(),
         "viewport": state.viewport,
         "open_panels": state.open_panels,
         "selection": state.selection,
@@ -6213,7 +6206,7 @@ fn route_build_workbench_state(state: &mut AppState, now: &str) -> Reply {
             return err_reply(&e);
         }
         state.reader = Reader::new(&loaded, DEFAULT_RADIUS);
-        state.book = loaded;
+        state.book = (loaded).into();
         state.workbench_loaded_revision = revision;
         state.messages = messages;
         let _ = save_session(state, Some(&dir));
@@ -11157,6 +11150,9 @@ fn agent_source_binding(
     state: &AppState,
     request: &AgentSourceRequest,
 ) -> Result<SourceBinding, ToolError> {
+    if let Some(stream) = state.active_agent_stream.as_ref().and_then(|s| s.upgrade()) {
+        if let Some(binding) = stream.source_binding(&state.book.base.book_id, &request.turn_id, &request.source_ref_id) { return Ok(binding); }
+    }
     let turn = state
         .agent_history
         .sessions
@@ -11267,13 +11263,20 @@ fn route_agent_source_open(state: &mut AppState, body: &str, now: &str) -> Reply
 /// `book/store/reader/messages/adapter`(与前端共享视口、跨回合 messages)。body `{message}` →
 /// `OuterOutcome{answer, incomplete, effects, trace, ...}`;agent 动作即时驱动共享 reader 视口,
 /// effects 供前端可撤销提议、trace 供查询踪迹展示。provider 错经 run 映射 `PROVIDER_ERROR` 透传不降级。
-fn route_agent_chat(state: &mut AppState, body: &str, now: &str) -> Reply {
+fn prepare_agent_chat(
+    state: &mut AppState,
+    body: &str,
+    now: &str,
+) -> Result<agent_run::PreparedAgentChat, Reply> {
     let v = match body_value(body) {
         Ok(v) => v,
-        Err(reply) => return reply,
+        Err(reply) => return Err(reply),
     };
     let Some(msg) = v.get("message").and_then(|x| x.as_str()) else {
-        return validation("INVALID_RANGE", "agent.chat 需 message(用户消息文本)");
+        return Err(validation(
+            "INVALID_RANGE",
+            "agent.chat 需 message(用户消息文本)",
+        ));
     };
     let display_user = v
         .get("display_user")
@@ -11286,17 +11289,17 @@ fn route_agent_chat(state: &mut AppState, body: &str, now: &str) -> Reply {
         .map(str::to_string);
     let question_quote = match parse_question_quote(&v, &state.book) {
         Ok(q) => q,
-        Err(reply) => return reply,
+        Err(reply) => return Err(reply),
     };
     if question_anchor_lid
         .as_deref()
         .zip(question_quote.as_ref().map(|quote| quote.lid.as_str()))
         .is_some_and(|(anchor, quote_lid)| anchor != quote_lid)
     {
-        return validation(
+        return Err(validation(
             "INVALID_SELECTION_CONTEXT",
             "question_anchor_lid 必须等于 question_quote lid",
-        );
+        ));
     }
     let initial_evidence = verified_question_evidence(&state.book, question_quote.as_ref());
     let memory_intent = scan_memory_intent(msg);
@@ -11313,19 +11316,19 @@ fn route_agent_chat(state: &mut AppState, body: &str, now: &str) -> Reply {
                 .pending_governance_mutations
                 .remove(&session_id);
         }
-        return ok_json(&rejected_memory_outcome(
+        return Err(ok_json(&rejected_memory_outcome(
             state.store.projection_revision(),
             "SECRET_PROFILE_REJECTED",
             "credentials and other secrets are never stored in profile memory",
-        ));
+        )));
     }
     if memory_intent.is_some() {
         if let Err(error) = state.store.ensure_storage_available() {
-            return ok_json(&rejected_memory_outcome(
+            return Err(ok_json(&rejected_memory_outcome(
                 state.store.projection_revision(),
                 &error.error_code,
                 &error.message,
-            ));
+            )));
         }
     }
     let agent_message = agent_question_with_provenance(msg, question_quote.as_ref());
@@ -11339,41 +11342,33 @@ fn route_agent_chat(state: &mut AppState, body: &str, now: &str) -> Reply {
         now,
     ) {
         Ok(turn_ref) => turn_ref,
-        Err(error) => return err_reply(&error),
+        Err(error) => return Err(err_reply(&error)),
     };
-    let viewport_before = state.reader.viewport().top_lid;
-    let result = run_precommitted_agent_chat(
-        state,
-        msg,
-        &agent_message,
-        &current_book_id,
-        &turn_ref,
+    Ok(agent_run::PreparedAgentChat {
+        book: state.book.clone(),
+        turn_ref,
+        message: msg.into(),
+        agent_message,
         initial_evidence,
-        now,
+        messages: state.messages.clone(),
+        now: now.into(),
+    })
+}
+
+fn route_agent_chat(state: &mut AppState, body: &str, now: &str) -> Reply {
+    let prepared = match prepare_agent_chat(state, body, now) {
+        Ok(value) => value,
+        Err(reply) => return reply,
+    };
+    let adapter = std::mem::replace(&mut state.adapter, Box::new(UnconfiguredAdapter));
+    let reply = agent_run::execute_prepared(
+        &agent_run::BorrowedAppPort(std::cell::RefCell::new(state)),
+        adapter.as_ref(),
+        prepared,
+        runtime::run_context::CancellationToken::default(),
     );
-    if state.reader.viewport().top_lid != viewport_before {
-        save_session(state, None);
-    }
-    match result {
-        Ok(outcome) => {
-            if let Err(error) = finalize_agent_turn_completed(state, &turn_ref, &outcome, now) {
-                return err_reply(&error);
-            }
-            if let Err(error) = reconcile_agent_history_review_jobs(state, now) {
-                return err_reply(&error);
-            }
-            ok_json(&outcome)
-        }
-        Err(error) => {
-            if let Err(finalize_error) = finalize_agent_turn_failed(state, &turn_ref, &error, now) {
-                return err_reply(&finalize_error);
-            }
-            if let Err(reconcile_error) = reconcile_agent_history_review_jobs(state, now) {
-                return err_reply(&reconcile_error);
-            }
-            err_reply(&error)
-        }
-    }
+    state.adapter = adapter;
+    reply.reply
 }
 
 fn freeze_resident_artifact_snapshot(
@@ -11399,89 +11394,114 @@ fn freeze_resident_artifact_snapshot(
 }
 
 fn run_precommitted_agent_chat(
-    state: &mut AppState,
-    msg: &str,
-    agent_message: &str,
-    current_book_id: &str,
-    turn_ref: &AgentTurnRef,
-    initial_evidence: Vec<EvidenceRange>,
-    now: &str,
+    port: &impl agent_run::AppStatePort,
+    adapter: &dyn ModelAdapter,
+    prepared: &agent_run::PreparedAgentChat,
+    context: &mut runtime::run_context::RunContext,
 ) -> Result<OuterOutcome, ToolError> {
-    let artifact_snapshot = freeze_resident_artifact_snapshot(state, current_book_id)?;
-    let content_profile = current_content_profile(&state.book);
-    let profile_context = ProfileResolutionContext {
-        book_id: Some(current_book_id.into()),
-        content_profile: Some(content_profile.into()),
-        now: Some(now.into()),
-        ..Default::default()
-    };
-    let mut memory_events = Vec::new();
-    let mut memory_updates = Vec::new();
-    let mut confirmation_applied = false;
-    if let Some(pending) = state
-        .agent_history
-        .pending_governance_mutations
-        .remove(&turn_ref.session_id)
-    {
-        if is_sensitive_memory_confirmation(msg) {
-            let retry = pending.clone();
-            match state.store.apply_profile_governance_mutation(
-                acknowledge_sensitive_governance_mutation(pending),
-                now,
-            ) {
-                Ok(outcome) => {
-                    record_governance_outcome(&outcome, &mut memory_events, &mut memory_updates);
-                    confirmation_applied = true;
-                }
-                Err(error) => {
-                    if error.category == "internal" {
-                        state
-                            .agent_history
-                            .pending_governance_mutations
-                            .insert(turn_ref.session_id.clone(), retry);
+    context.cancellation.check()?;
+    let msg = prepared.message.as_str();
+    let agent_message = prepared.agent_message.as_str();
+    let book = prepared.book.as_ref();
+    let current_book_id = book.base.book_id.as_str();
+    let turn_ref = &prepared.turn_ref;
+    let now = prepared.now.as_str();
+    let content_profile = current_content_profile(book);
+    let (
+        artifact_snapshot,
+        mut memory_events,
+        mut memory_updates,
+        confirmation_applied,
+        active_facts,
+    ) = port.with_app(|state| {
+        let artifact_snapshot = freeze_resident_artifact_snapshot(state, current_book_id)?;
+        let profile_context = ProfileResolutionContext {
+            book_id: Some(current_book_id.into()),
+            content_profile: Some(content_profile.into()),
+            now: Some(now.into()),
+            ..Default::default()
+        };
+        let mut memory_events = Vec::new();
+        let mut memory_updates = Vec::new();
+        let mut confirmation_applied = false;
+        if let Some(pending) = state
+            .agent_history
+            .pending_governance_mutations
+            .remove(&turn_ref.session_id)
+        {
+            if is_sensitive_memory_confirmation(msg) {
+                let retry = pending.clone();
+                match state.store.apply_profile_governance_mutation(
+                    acknowledge_sensitive_governance_mutation(pending),
+                    now,
+                ) {
+                    Ok(outcome) => {
+                        record_governance_outcome(
+                            &outcome,
+                            &mut memory_events,
+                            &mut memory_updates,
+                        );
+                        confirmation_applied = true;
                     }
-                    return Err(error);
-                }
-            }
-        } else {
-            record_sensitive_confirmation_cancelled(&mut memory_events, &mut memory_updates);
-        }
-    } else if let Some(pending) = state
-        .agent_history
-        .pending_memory_ops
-        .remove(&turn_ref.session_id)
-    {
-        if is_sensitive_memory_confirmation(msg) {
-            let retry = pending.clone();
-            match state
-                .store
-                .apply_memory_op(acknowledge_sensitive_memory_op(pending), now)
-            {
-                Ok(outcome) => {
-                    record_memory_outcome(&outcome, &mut memory_events, &mut memory_updates);
-                    confirmation_applied = true;
-                }
-                Err(error) => {
-                    if error.category == "internal" {
-                        state
-                            .agent_history
-                            .pending_memory_ops
-                            .insert(turn_ref.session_id.clone(), retry);
+                    Err(error) => {
+                        if error.category == "internal" {
+                            state
+                                .agent_history
+                                .pending_governance_mutations
+                                .insert(turn_ref.session_id.clone(), retry);
+                        }
+                        return Err(error);
                     }
-                    return Err(error);
                 }
+            } else {
+                record_sensitive_confirmation_cancelled(&mut memory_events, &mut memory_updates);
             }
-        } else {
-            record_sensitive_confirmation_cancelled(&mut memory_events, &mut memory_updates);
+        } else if let Some(pending) = state
+            .agent_history
+            .pending_memory_ops
+            .remove(&turn_ref.session_id)
+        {
+            if is_sensitive_memory_confirmation(msg) {
+                let retry = pending.clone();
+                match state
+                    .store
+                    .apply_memory_op(acknowledge_sensitive_memory_op(pending), now)
+                {
+                    Ok(outcome) => {
+                        record_memory_outcome(&outcome, &mut memory_events, &mut memory_updates);
+                        confirmation_applied = true;
+                    }
+                    Err(error) => {
+                        if error.category == "internal" {
+                            state
+                                .agent_history
+                                .pending_memory_ops
+                                .insert(turn_ref.session_id.clone(), retry);
+                        }
+                        return Err(error);
+                    }
+                }
+            } else {
+                record_sensitive_confirmation_cancelled(&mut memory_events, &mut memory_updates);
+            }
         }
-    }
 
-    if !confirmation_applied {
         let active_facts = state.store.resolve_profile_facts(&profile_context);
+        Ok::<_, ToolError>((
+            artifact_snapshot,
+            memory_events,
+            memory_updates,
+            confirmation_applied,
+            active_facts,
+        ))
+    })?;
+    context.cancellation.check()?;
+    if !confirmation_applied {
         let operation_id =
             stable_memory_operation_id(&turn_ref.session_id, turn_ref.user_turn_ordinal, msg);
+        let purpose = runtime::run_events::purpose(adapter, "profile");
         let decision = evaluate_memory_intent(
-            state.adapter.as_ref(),
+            adapter,
             &MemoryIntentRequest {
                 operation_id: &operation_id,
                 book_id: current_book_id,
@@ -11492,92 +11512,99 @@ fn run_precommitted_agent_chat(
                 active_facts: &active_facts,
             },
         )?;
-        match decision {
-            MemoryIntentDecision::NoIntent => {}
-            MemoryIntentDecision::Apply { operation } => {
-                let outcome = state.store.apply_memory_op(operation, now)?;
-                record_memory_outcome(&outcome, &mut memory_events, &mut memory_updates);
+        context.cancellation.check()?;
+        drop(purpose);
+        let rejected = port.with_app(|state| {
+            match decision {
+                MemoryIntentDecision::NoIntent => {}
+                MemoryIntentDecision::Apply { operation } => {
+                    let outcome = state.store.apply_memory_op(operation, now)?;
+                    record_memory_outcome(&outcome, &mut memory_events, &mut memory_updates);
+                }
+                MemoryIntentDecision::NeedsClarification {
+                    intent,
+                    candidates,
+                    message,
+                } => {
+                    let candidate_ids = candidates
+                        .iter()
+                        .map(|candidate| candidate.fact_id.clone())
+                        .collect();
+                    memory_events.push(json!({
+                        "kind": "needs_clarification",
+                        "intent": intent,
+                        "candidates": candidates,
+                        "message": message
+                    }));
+                    memory_updates.push(ProfileMemoryUpdate {
+                        kind: ProfileMemoryUpdateKind::NeedsClarification,
+                        operation_id: None,
+                        fact_ids: candidate_ids,
+                        message: Some(message),
+                    });
+                }
+                MemoryIntentDecision::NeedsSensitiveConfirmation {
+                    operation,
+                    preview,
+                    warning,
+                } => {
+                    state
+                        .agent_history
+                        .pending_governance_mutations
+                        .remove(&turn_ref.session_id);
+                    state
+                        .agent_history
+                        .pending_memory_ops
+                        .insert(turn_ref.session_id.clone(), operation);
+                    memory_events.push(json!({
+                        "kind": "needs_sensitive_confirmation",
+                        "preview": preview,
+                        "warning": warning
+                    }));
+                    memory_updates.push(ProfileMemoryUpdate {
+                        kind: ProfileMemoryUpdateKind::NeedsSensitiveConfirmation,
+                        operation_id: None,
+                        fact_ids: Vec::new(),
+                        message: Some(warning),
+                    });
+                }
+                MemoryIntentDecision::Rejected {
+                    error_code,
+                    message,
+                } => {
+                    return Ok(Some(rejected_memory_outcome(
+                        state.store.projection_revision(),
+                        &error_code,
+                        &message,
+                    )));
+                }
             }
-            MemoryIntentDecision::NeedsClarification {
-                intent,
-                candidates,
-                message,
-            } => {
-                let candidate_ids = candidates
-                    .iter()
-                    .map(|candidate| candidate.fact_id.clone())
-                    .collect();
-                memory_events.push(json!({
-                    "kind": "needs_clarification",
-                    "intent": intent,
-                    "candidates": candidates,
-                    "message": message
-                }));
-                memory_updates.push(ProfileMemoryUpdate {
-                    kind: ProfileMemoryUpdateKind::NeedsClarification,
-                    operation_id: None,
-                    fact_ids: candidate_ids,
-                    message: Some(message),
-                });
-            }
-            MemoryIntentDecision::NeedsSensitiveConfirmation {
-                operation,
-                preview,
-                warning,
-            } => {
-                state
-                    .agent_history
-                    .pending_governance_mutations
-                    .remove(&turn_ref.session_id);
-                state
-                    .agent_history
-                    .pending_memory_ops
-                    .insert(turn_ref.session_id.clone(), operation);
-                memory_events.push(json!({
-                    "kind": "needs_sensitive_confirmation",
-                    "preview": preview,
-                    "warning": warning
-                }));
-                memory_updates.push(ProfileMemoryUpdate {
-                    kind: ProfileMemoryUpdateKind::NeedsSensitiveConfirmation,
-                    operation_id: None,
-                    fact_ids: Vec::new(),
-                    message: Some(warning),
-                });
-            }
-            MemoryIntentDecision::Rejected {
-                error_code,
-                message,
-            } => {
-                return Ok(rejected_memory_outcome(
-                    state.store.projection_revision(),
-                    &error_code,
-                    &message,
-                ));
-            }
+            Ok::<_, ToolError>(None)
+        })?;
+        if let Some(outcome) = rejected {
+            return Ok(outcome);
         }
     }
-
-    let snapshot_request = profile_snapshot_request(state, current_book_id, content_profile, now);
-    let profile_snapshot = state
-        .profile_context_cache
-        .snapshot(&state.store, &snapshot_request)
-        .clone();
-    let context_fragments = memory_context_fragment(&memory_events)
-        .into_iter()
-        .collect::<Vec<_>>();
-    // 字段级不相交借用:book(shared)+ store/reader/messages(mut)+ adapter(shared)。
-    let active_checkpoint = state
-        .agent_history
-        .sessions
-        .iter()
-        .find(|session| session.id == turn_ref.session_id)
-        .and_then(|session| session.compaction_checkpoint.clone());
-    let mut checkpoint_sink = ServerAgentCompactionCheckpointSink {
-        history_path: &state.history_path,
-        agent_history: &mut state.agent_history,
-        session_id: &turn_ref.session_id,
-    };
+    let (profile_snapshot, context_fragments, active_checkpoint) = port.with_app(|state| {
+        let snapshot_request =
+            profile_snapshot_request(state, current_book_id, content_profile, now);
+        let profile_snapshot = state
+            .profile_context_cache
+            .snapshot(&state.store, &snapshot_request)
+            .clone();
+        let context_fragments = memory_context_fragment(&memory_events)
+            .into_iter()
+            .collect::<Vec<_>>();
+        // 字段级不相交借用:book(shared)+ store/reader/messages(mut)+ adapter(shared)。
+        let active_checkpoint = state
+            .agent_history
+            .sessions
+            .iter()
+            .find(|session| session.id == turn_ref.session_id)
+            .and_then(|session| session.compaction_checkpoint.clone());
+        (profile_snapshot, context_fragments, active_checkpoint)
+    });
+    let initial_evidence = prepared.initial_evidence.clone();
     let mut turn_resources =
         ResidentTurnResources::new(context_fragments, initial_evidence, memory_updates);
     if let Some(snapshot) = artifact_snapshot {
@@ -11585,24 +11612,30 @@ fn run_precommitted_agent_chat(
     }
     let experimental_book = match std::env::var("UNDERSTAND_BOOK_EVAL_ACCESS").ok().as_deref() {
         None => None,
-        Some("text") => Some(state.book.experimental_view(read_tools::ExperimentalReadAccess::Text)),
-        Some("tree") => Some(state.book.experimental_view(read_tools::ExperimentalReadAccess::Tree)),
-        Some("graph") => Some(state.book.experimental_view(read_tools::ExperimentalReadAccess::Graph)),
-        Some(_) => return Err(ToolError { error_code: "INVALID_EVAL_ACCESS".into(), category: "validation".into(), message: "eval access must be text, tree or graph".into() }),
+        Some("text") => Some(book.experimental_view(read_tools::ExperimentalReadAccess::Text)),
+        Some("tree") => Some(book.experimental_view(read_tools::ExperimentalReadAccess::Tree)),
+        Some("graph") => Some(book.experimental_view(read_tools::ExperimentalReadAccess::Graph)),
+        Some(_) => {
+            return Err(ToolError {
+                error_code: "INVALID_EVAL_ACCESS".into(),
+                category: "validation".into(),
+                message: "eval access must be text, tree or graph".into(),
+            })
+        }
     };
-    run_with_turn_resources_and_checkpoint_sink(
-        experimental_book.as_ref().unwrap_or(&state.book),
-        &mut state.store,
-        &mut state.reader,
-        state.adapter.as_ref(),
-        &mut state.messages,
+    let mut state_port = agent_run::RuntimeStatePort(port);
+    let mut checkpoint_sink = agent_run::RunCheckpointSink { port, turn_ref };
+    runtime::orchestrator::run_context(
+        experimental_book.as_ref().unwrap_or(book),
+        &mut state_port,
+        adapter,
+        context,
         &profile_snapshot,
         &turn_resources,
         active_checkpoint.as_ref(),
         &mut checkpoint_sink,
         agent_message,
         now,
-        OuterConfig::default(),
     )
 }
 
@@ -11976,7 +12009,7 @@ fn status_for(category: &str) -> u16 {
         "not_found" => 404,
         "provider" => 502,
         "budget" => 429,
-        "conflict" => 409,
+        "conflict" | "cancelled" => 409,
         "permission" => 403,
         "unavailable" => 503,
         "internal" => 500,
@@ -12193,7 +12226,7 @@ mod tests {
         base
     }
 
-    fn write_multi_leaf_book(name: &str, book_id: &str, leaves: usize) -> PathBuf {
+    pub(crate) fn write_multi_leaf_book(name: &str, book_id: &str, leaves: usize) -> PathBuf {
         let dir = tmp_dir(name);
         let base = multi_leaf_base(book_id, leaves);
         std::fs::write(dir.join("base.json"), serde_json::to_string(&base).unwrap()).unwrap();
@@ -12238,7 +12271,7 @@ mod tests {
             .to_string(),
         )
         .unwrap();
-        s.book = Book::load(s.book_dir.to_str().unwrap()).unwrap();
+        s.book = (Book::load(s.book_dir.to_str().unwrap()).unwrap()).into();
         s.reader = Reader::new(&s.book, DEFAULT_RADIUS);
     }
 
@@ -12352,7 +12385,7 @@ mod tests {
 
     fn use_pdf_runtime_fixture_source(s: &mut AppState) {
         let source = format!("PDF{}", "X".repeat(97));
-        s.book = Book::new(sample_base(), &source);
+        s.book = (Book::new(sample_base(), &source)).into();
         s.reader = Reader::new(&s.book, DEFAULT_RADIUS);
     }
 
@@ -12673,7 +12706,7 @@ mod tests {
             mcp_artifact_read_port: None,
             book_dir,
             library_root: None,
-            book,
+            book: book.into(),
             reader,
             store,
             adapter,
@@ -12684,6 +12717,7 @@ mod tests {
             profile_context_cache: runtime::profile_context::ProfileContextCache::default(),
             visitor_sessions: mcp::VisitorSessions::default(),
             workbench_loaded_revision: None,
+        active_agent_stream: None,
         }
     }
 
@@ -14928,7 +14962,7 @@ mod tests {
     fn write_formula_recovery_runtime_artifacts(s: &mut AppState) -> usize {
         let formula = "$ W_{Ui}, W_{Di} $";
         let source = format!("{formula}{}", "X".repeat(100 - formula.len()));
-        s.book = Book::new(sample_base(), &source);
+        s.book = (Book::new(sample_base(), &source)).into();
         s.reader = Reader::new(&s.book, DEFAULT_RADIUS);
         write_pdf_runtime_artifacts(s);
         rewrite_pdf_runtime_artifacts_v2(s, "partial", formula.len());
@@ -15335,7 +15369,7 @@ unchanged after training concludes";
         assert!(source_prefix.is_ascii());
         assert!(source_prefix.len() < 100);
         let source = format!("{source_prefix}{}", "X".repeat(100 - source_prefix.len()));
-        s.book = Book::new(sample_base(), &source);
+        s.book = (Book::new(sample_base(), &source)).into();
         s.reader = Reader::new(&s.book, DEFAULT_RADIUS);
         write_pdf_runtime_artifacts(s);
         rewrite_pdf_runtime_artifacts_v2(s, "partial", source_prefix.len());
@@ -16033,7 +16067,7 @@ unchanged after training concludes";
     fn pdf_range_projection_preserves_request_page_char_order_and_rotated_geometry() {
         let mut s = state_named("pdf-range-order");
         let base = multi_leaf_base("sample-book", 2);
-        s.book = Book::new(base, &"X".repeat(20));
+        s.book = (Book::new(base, &"X".repeat(20))).into();
         s.reader = Reader::new(&s.book, DEFAULT_RADIUS);
         write_pdf_runtime_artifacts(&mut s);
         write_projection_selection_pages(
@@ -16255,7 +16289,7 @@ unchanged after training concludes";
             reader_only: false,
             book_dir: tmp_dir("formula-semantics-book-dir"),
             library_root: None,
-            book,
+            book: book.into(),
             reader,
             store,
             intent_store_root: None,
@@ -16268,6 +16302,7 @@ unchanged after training concludes";
             profile_context_cache: runtime::profile_context::ProfileContextCache::default(),
             visitor_sessions: mcp::VisitorSessions::default(),
             workbench_loaded_revision: None,
+        active_agent_stream: None,
         };
 
         let ok = get(&mut s, "/book/formula_semantics?lid=1.1");
@@ -16953,7 +16988,7 @@ unchanged after training concludes";
 
         let base = multi_leaf_base("planning-context-large-book", 1_981);
         let source = "X".repeat(19_810);
-        state.book = Book::new(base, &source);
+        state.book = (Book::new(base, &source)).into();
         state.reader = Reader::new(&state.book, DEFAULT_RADIUS);
         std::fs::write(state.book_dir.join("source.txt"), source).unwrap();
         let large = build_intent_api::run_codex_command(
@@ -18254,7 +18289,7 @@ unchanged after training concludes";
         let mut s = state_named("paper-minimap-position-sync");
         attach_paper_profile(&mut s);
         write_pdf_runtime_artifacts(&mut s);
-        s.book = Book::load(s.book_dir.to_str().unwrap()).unwrap();
+        s.book = (Book::load(s.book_dir.to_str().unwrap()).unwrap()).into();
         s.reader = Reader::new(&s.book, DEFAULT_RADIUS);
         let base: serde_json::Value =
             serde_json::from_str(&get(&mut s, "/book/paper_minimap").body).unwrap();
@@ -18311,7 +18346,7 @@ unchanged after training concludes";
         let mut s = state_named("paper-minimap-localization-cache");
         attach_paper_profile(&mut s);
         write_pdf_runtime_artifacts(&mut s);
-        s.book = Book::load(s.book_dir.to_str().unwrap()).unwrap();
+        s.book = (Book::load(s.book_dir.to_str().unwrap()).unwrap()).into();
         s.reader = Reader::new(&s.book, DEFAULT_RADIUS);
         let base = s.book.paper_minimap();
         let answer = serde_json::json!({
@@ -18350,7 +18385,7 @@ unchanged after training concludes";
         let mut s = state_named("paper-minimap-localization-fallback");
         attach_paper_profile(&mut s);
         write_pdf_runtime_artifacts(&mut s);
-        s.book = Book::load(s.book_dir.to_str().unwrap()).unwrap();
+        s.book = (Book::load(s.book_dir.to_str().unwrap()).unwrap()).into();
         s.reader = Reader::new(&s.book, DEFAULT_RADIUS);
         s.adapter = Box::new(UnconfiguredAdapter);
 
@@ -18366,7 +18401,7 @@ unchanged after training concludes";
         let mut s = state_named("paper-minimap-localization-invalid");
         attach_paper_profile(&mut s);
         write_pdf_runtime_artifacts(&mut s);
-        s.book = Book::load(s.book_dir.to_str().unwrap()).unwrap();
+        s.book = (Book::load(s.book_dir.to_str().unwrap()).unwrap()).into();
         s.reader = Reader::new(&s.book, DEFAULT_RADIUS);
         s.adapter = Box::new(StructuredRecordingAdapter {
             users: Arc::new(Mutex::new(Vec::new())),
@@ -18601,10 +18636,10 @@ unchanged after training concludes";
     fn note_body_placement_markdown_routes_fail_closed_and_reanchor_atomically() {
         let mut s = state_named("note-placement-markdown-routes");
         let source = format!("{}{}", "A".repeat(10), "B".repeat(10));
-        s.book = Book::new(
+        s.book = (Book::new(
             multi_leaf_base("note-placement-markdown-routes", 2),
             &source,
-        );
+        )).into();
         s.reader = Reader::new(&s.book, DEFAULT_RADIUS);
         std::fs::write(s.book_dir.join("source.txt"), &source).unwrap();
         let source_fingerprint = current_note_source_fingerprint(&s.book_dir).unwrap();
@@ -19105,7 +19140,7 @@ unchanged after training concludes";
     #[test]
     fn search_text_rest_mcp_and_resident_contracts_have_parity() {
         let mut state = state_named("search-text-parity");
-        state.book = Book::new(sample_base(), &"X".repeat(100));
+        state.book = (Book::new(sample_base(), &"X".repeat(100))).into();
 
         let rest = get(
             &mut state,
@@ -19151,7 +19186,7 @@ unchanged after training concludes";
             .join("../..")
             .join(".understand-book/quantification-essence");
         let mut state = state_named("search-real-mcp");
-        state.book = Book::load(path.to_str().unwrap()).unwrap();
+        state.book = (Book::load(path.to_str().unwrap()).unwrap()).into();
         let query = r"\sqrt{2\ln N}";
         let mut cursor: Option<String> = None;
         let mut ordinals = Vec::new();
@@ -19324,7 +19359,7 @@ unchanged after training concludes";
             reader_only: false,
             book_dir: dir.clone(),
             library_root: None,
-            book,
+            book: book.into(),
             reader,
             store,
             intent_store_root: None,
@@ -19337,6 +19372,7 @@ unchanged after training concludes";
             profile_context_cache: runtime::profile_context::ProfileContextCache::default(),
             visitor_sessions: mcp::VisitorSessions::default(),
             workbench_loaded_revision: None,
+        active_agent_stream: None,
         };
 
         let r = post(
@@ -20032,6 +20068,7 @@ unchanged after training concludes";
                 user_turn_ordinal: ordinal,
                 user: format!("resident turn {ordinal}"),
                 status: AgentAssistantStatus::Failed,
+                run_summary: None,
                 outcome: None,
                 error: Some(AgentTurnError {
                     error_code: "TEST_FAILURE".into(),
@@ -20065,6 +20102,7 @@ unchanged after training concludes";
                 user_turn_ordinal: 1,
                 user: "other".into(),
                 status: AgentAssistantStatus::Failed,
+                run_summary: None,
                 outcome: None,
                 error: Some(AgentTurnError {
                     error_code: "TEST_FAILURE".into(),
@@ -20669,7 +20707,7 @@ unchanged after training concludes";
             delivery_diagnostics: None,
             request_audit: Default::default(),
         };
-        finalize_agent_turn_completed(state, &turn_ref, &outcome, "2026-07-20T00:00:01Z").unwrap();
+        { let messages = state.messages.clone(); finalize_agent_turn_completed(state, &turn_ref, &outcome, &messages, "2026-07-20T00:00:01Z") }.unwrap();
         (turn_ref.turn_id, source_ref_id)
     }
 
@@ -20704,7 +20742,7 @@ unchanged after training concludes";
             delivery_diagnostics: None,
             request_audit: Default::default(),
         };
-        finalize_agent_turn_completed(state, &turn_ref, &outcome, "2026-07-20T00:00:01Z").unwrap();
+        { let messages = state.messages.clone(); finalize_agent_turn_completed(state, &turn_ref, &outcome, &messages, "2026-07-20T00:00:01Z") }.unwrap();
         turn_ref.turn_id
     }
 
@@ -20776,7 +20814,7 @@ unchanged after training concludes";
                 delivery_diagnostics: None,
                 request_audit: Default::default(),
             };
-            finalize_agent_turn_completed(&mut state, &turn_ref, &outcome, "2026-07-24T00:00:01Z")
+            { let messages = state.messages.clone(); finalize_agent_turn_completed(&mut state, &turn_ref, &outcome, &messages, "2026-07-24T00:00:01Z") }
                 .unwrap();
         }
 
@@ -20862,7 +20900,7 @@ unchanged after training concludes";
             request_audit: Default::default(),
         };
 
-        finalize_agent_turn_completed(&mut state, &turn_ref, &outcome, "2026-07-20T00:00:01Z")
+        { let messages = state.messages.clone(); finalize_agent_turn_completed(&mut state, &turn_ref, &outcome, &messages, "2026-07-20T00:00:01Z") }
             .unwrap();
 
         let persisted = std::fs::read_to_string(&history_path).unwrap();
@@ -20984,7 +21022,7 @@ unchanged after training concludes";
             assert!(!reply.body.contains(hidden), "HTTP reply leaked {hidden}");
         }
 
-        finalize_agent_turn_completed(&mut state, &turn_ref, &outcome, "2026-07-20T00:00:01Z")
+        { let messages = state.messages.clone(); finalize_agent_turn_completed(&mut state, &turn_ref, &outcome, &messages, "2026-07-20T00:00:01Z") }
             .unwrap();
         let persisted = std::fs::read_to_string(&history_path).unwrap();
         assert!(!persisted.contains("request_audit"));
@@ -21254,6 +21292,41 @@ Version 1.2 and bare 1.1 stay unchanged.
             .to_string(),
         );
         assert_eq!(after_restart.status, 200, "{}", after_restart.body);
+    }
+
+    #[test]
+    fn agent_source_live_binding_withdrawal_and_durable_handoff() {
+        use runtime::run_events::RunEventSink;
+        use runtime::answer_stream::AnswerPatch;
+        use crate::agent_stream::{RunStream, RunDescriptor};
+        let mut state = state_named("as8-live-source");
+        let (turn_id, source_ref_id) = install_source_bound_turn(&mut state, tmp("as8-source-history"));
+        let saved = state.agent_history.sessions[0].turns[0].clone();
+        let bindings = saved.source_bindings.clone();
+        let view = saved.outcome.as_ref().unwrap().answer_view.clone();
+        let turn = &mut state.agent_history.sessions[0].turns[0];
+        turn.status = AgentAssistantStatus::PendingAssistant;
+        turn.source_bindings.clear(); turn.outcome = None;
+        let stream = RunStream::new(RunDescriptor { book_id: state.book.base.book_id.clone(), session_id: state.agent_history.sessions[0].id.clone(), turn_id: turn_id.clone() });
+        state.active_agent_stream = Some(std::sync::Arc::downgrade(&stream));
+        let request = json!({"turn_id":turn_id,"source_ref_id":source_ref_id}).to_string();
+        stream.source_bindings(&bindings);
+        assert_ne!(post(&mut state, "/agent/source.resolve", &request).status, 200);
+        let patch = |revision, view| AnswerPatch { message_id:1, revision, operation:"replace".into(), view };
+        stream.answer_patch(patch(0, view.clone()));
+        assert_eq!(post(&mut state, "/agent/source.resolve", &request).status, 200);
+        assert_eq!(post(&mut state, "/agent/source.open", &request).status, 200);
+        assert!(state.reader.revision() > 0);
+        assert!(stream.source_binding("another-book", &turn_id, &source_ref_id).is_none());
+        assert!(!serde_json::to_string(&stream.snapshot()).unwrap().contains("evidence_range"));
+        stream.answer_patch(patch(1, None));
+        assert_ne!(post(&mut state, "/agent/source.resolve", &request).status, 200);
+        stream.answer_patch(patch(0, view.clone()));
+        assert_ne!(post(&mut state, "/agent/source.resolve", &request).status, 200);
+        state.agent_history.sessions[0].turns[0] = saved;
+        stream.finish(Some(json!({"status":"completed","outcome":{"answer_view":view}})), None);
+        assert_eq!(post(&mut state, "/agent/source.resolve", &request).status, 200);
+        assert_eq!(post(&mut state, "/agent/source.open", &request).status, 200);
     }
 
     #[test]
@@ -21571,7 +21644,7 @@ Version 1.2 and bare 1.1 stay unchanged.
     fn agent_navigation_persists_reading_position_before_reply() {
         let mut state = state_named("agent-navigation-session");
         let book_dir = write_multi_leaf_book("agent-navigation-book", "agent-navigation", 30);
-        state.book = Book::load(&path_string(&book_dir)).unwrap();
+        state.book = (Book::load(&path_string(&book_dir)).unwrap()).into();
         state.book_dir = book_dir;
         state.reader = Reader::new(&state.book, DEFAULT_RADIUS);
         let session_path = tmp("agent-navigation-session-file");
@@ -21901,6 +21974,7 @@ Version 1.2 and bare 1.1 stay unchanged.
             user_turn_ordinal: 1,
             user: "command 是什么".into(),
             status: AgentAssistantStatus::Completed,
+            run_summary: None,
             outcome: Some(outer),
             error: None,
             question_anchor_lid: Some("1.1".into()),
