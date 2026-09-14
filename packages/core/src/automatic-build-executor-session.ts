@@ -9,7 +9,13 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { isAutomaticBuildTaskPolicyBindingV2 } from "./semantic-artifact";
+import { isAutomaticBuildTaskPolicyBindingV2, semanticContractEqual, semanticContractFromExtractionPolicy,
+  type AutomaticBuildTaskPolicyBinding } from "./semantic-artifact";
+import { readAutomaticBuildPolicyGeneration } from "./automatic-build-policy-generation";
+import { readPass1ShadowTask, replayPass1ShadowInput } from "./pass1-reduction";
+import { readProfileSidecarProductionTask, replayProfileSidecarDiscourseShadowInput } from "./profile-sidecar-reduction";
+import { readBookStructureGenerationTask } from "./book-structure-generation";
+import { taskPolicyBindingForWorkUnit, validateWorkUnitTaskPolicyBinding } from "./stage-work-unit";
 import {
   renderAutomaticBuildTaskInput,
   runAutomaticBuildFrozenTaskInput,
@@ -19,19 +25,25 @@ import {
 import {
   advanceAutomaticBuildDispatch,
   finishAutomaticBuildDispatch,
+  inspectAutomaticBuildDispatchRecoveryGeneration,
+  recordAutomaticBuildDispatchBootstrapFailure,
   inspectAutomaticBuildDispatch,
   validateAutomaticBuildDispatchHandoff,
   type AutomaticBuildDispatchExecutorHandoffRefV1,
   type AutomaticBuildExecutorInterruptionInputV1,
   type AutomaticBuildPersistedDispatchV1,
+  type AutomaticBuildRecoveryGenerationIdentity,
 } from "./automatic-build-dispatch-runtime";
 import {
+  AutomaticBuildLeaseExpiredError,
+  assertActiveAutomaticBuildLease,
   heartbeatAutomaticBuildLease,
   inspectAutomaticBuildTaskClaim,
   readAutomaticBuildLease,
   type AutomaticBuildClaimResult,
 } from "./automatic-build-lease";
 import {
+  AutomaticBuildCandidateSinkUnavailableError,
   failAutomaticBuildTask,
   inspectAutomaticBuildTask,
   stageAutomaticBuildCandidate,
@@ -51,11 +63,17 @@ import {
   submitIntentArtifactTaskAttempt,
   type IntentArtifactTaskAttemptExecutionContextV1,
 } from "./intent-artifact-mailbox";
-import { readAutomaticBuildExecutionIdentity } from "./automatic-build-task-store";
+import {
+  readAutomaticBuildExecutionIdentity,
+  readAutomaticBuildCandidateRetryFeedback,
+  type AutomaticBuildCandidateRetryFeedback,
+} from "./automatic-build-task-store";
 import { canonicalAutomaticBuildJson } from "./automatic-build-protocol";
 import {
   CODEX_EXECUTOR_DELIVERY_BATCH_LIMIT_V1,
   CODEX_EXECUTOR_TRANSPORT_PROFILE_V2,
+  createCandidateTransportContract,
+  measureExecutorCandidateRequest,
   measureExecutorTransportResponse,
   packExecutorTransportBatches,
   packExecutorTransportPayload,
@@ -63,6 +81,7 @@ import {
   validateExecutorTransportPack,
   validateExecutorTransportProfile,
   type ExecutorTransportChunkFrameV2,
+  type CandidateTransportContractV1,
   type PackedExecutorTransportBatchV1,
   type ExecutorTransportPackWithinLimitV2,
   type ExecutorTransportProfileV2,
@@ -94,7 +113,8 @@ export interface AutomaticBuildExecutorServerTimingObserverV1 {
 }
 import { epubToSource } from "./epub-adapter";
 import {
-  buildAutomaticBuildSnapshot,
+  readAutomaticBuildTaskStage,
+  currentAutomaticBuildTaskPolicy,
   resolveAutomaticBuildTarget,
   type AutomaticBuildStage,
   type AutomaticBuildTarget,
@@ -108,7 +128,6 @@ import {
 import { markdownToBlocks } from "./md-adapter";
 import { segment } from "./segment";
 import type { WorkUnitDescriptor } from "./stage-work-unit";
-import { estimateTokens } from "./window";
 import { ReadOnlyBaseZ } from "./zod";
 
 const MAX_RECORD_BYTES = 1_048_576;
@@ -154,6 +173,146 @@ export class AutomaticBuildExecutorTransportError extends Error {
       phase: "input_delivery",
     });
   }
+}
+
+export class AutomaticBuildExecutorStaleGenerationSessionError extends Error {
+  readonly diagnostic_code = "stale_generation_session" as const;
+  readonly phase = "generation_start" as const;
+
+  constructor(detail?: string) {
+    super(`automatic build executor generation session is stale${detail ? `: ${detail}` : ""}`);
+    this.name = "AutomaticBuildExecutorStaleGenerationSessionError";
+  }
+}
+
+export type AutomaticBuildExecutorMcpErrorStatusV2 = "interrupted" | "retryable_failure";
+export type AutomaticBuildExecutorMcpErrorCategoryV2 =
+  | "bootstrap"
+  | "session"
+  | "transport"
+  | "candidate_sink"
+  | "writer"
+  | "internal";
+export type AutomaticBuildExecutorMcpErrorCodeV2 =
+  | "protocol_incompatible"
+  | "connection_terminal"
+  | "handoff_ref_mismatch"
+  | "bootstrap_unavailable"
+  | "stale_generation_session"
+  | "lease_expired"
+  | "candidate_request_too_large"
+  | "candidate_sink_unavailable"
+  | "writer_failed"
+  | "executor_internal";
+export type AutomaticBuildExecutorMcpErrorPhaseV2 =
+  | "open"
+  | "input_delivery"
+  | "generation_start"
+  | "candidate_submit";
+
+export interface AutomaticBuildExecutorMcpErrorV2 {
+  version: "automatic_build_executor_mcp_error.v2";
+  status: AutomaticBuildExecutorMcpErrorStatusV2;
+  category: AutomaticBuildExecutorMcpErrorCategoryV2;
+  diagnostic_code: AutomaticBuildExecutorMcpErrorCodeV2;
+  phase: AutomaticBuildExecutorMcpErrorPhaseV2;
+}
+
+function hasExecutorDiagnosticCode(
+  error: unknown,
+  code: AutomaticBuildExecutorMcpErrorCodeV2,
+): boolean {
+  return !!error
+    && typeof error === "object"
+    && "diagnostic_code" in error
+    && error.diagnostic_code === code;
+}
+
+function hasFailureDiagnosticCode(error: unknown, code: string): boolean {
+  if (!error || typeof error !== "object" || !("failure_diagnostic" in error)) return false;
+  const diagnostic = error.failure_diagnostic;
+  return !!diagnostic
+    && typeof diagnostic === "object"
+    && "code" in diagnostic
+    && diagnostic.code === code;
+}
+
+export function createAutomaticBuildExecutorProtocolMcpErrorV2(
+  phase: AutomaticBuildExecutorMcpErrorPhaseV2,
+): AutomaticBuildExecutorMcpErrorV2 {
+  return {
+    version: "automatic_build_executor_mcp_error.v2",
+    status: "interrupted",
+    category: "bootstrap",
+    diagnostic_code: "protocol_incompatible",
+    phase,
+  };
+}
+
+export function automaticBuildExecutorMcpErrorFromSessionError(
+  error: unknown,
+  phase: AutomaticBuildExecutorMcpErrorPhaseV2,
+): AutomaticBuildExecutorMcpErrorV2 {
+  const base = {
+    version: "automatic_build_executor_mcp_error.v2" as const,
+    phase,
+  };
+  for (const code of ["connection_terminal", "handoff_ref_mismatch"] as const) {
+    if (phase === "open" && hasExecutorDiagnosticCode(error, code)) {
+      return { ...base, status: "interrupted", category: "session", diagnostic_code: code };
+    }
+  }
+  if (error instanceof AutomaticBuildExecutorStaleGenerationSessionError
+    || hasExecutorDiagnosticCode(error, "stale_generation_session")) {
+    return {
+      ...base,
+      status: "interrupted",
+      category: "session",
+      diagnostic_code: "stale_generation_session",
+    };
+  }
+  if (error instanceof AutomaticBuildLeaseExpiredError
+    || hasExecutorDiagnosticCode(error, "lease_expired")) {
+    return {
+      ...base,
+      status: "interrupted",
+      category: "session",
+      diagnostic_code: "lease_expired",
+    };
+  }
+  if (error instanceof AutomaticBuildCandidateSinkUnavailableError
+    || hasFailureDiagnosticCode(error, "candidate_sink_unavailable")
+    || hasExecutorDiagnosticCode(error, "candidate_sink_unavailable")) {
+    return {
+      ...base,
+      status: "interrupted",
+      category: "candidate_sink",
+      diagnostic_code: "candidate_sink_unavailable",
+    };
+  }
+  if (hasFailureDiagnosticCode(error, "writer_failed")
+    || hasExecutorDiagnosticCode(error, "writer_failed")) {
+    return {
+      ...base,
+      status: "retryable_failure",
+      category: "writer",
+      diagnostic_code: "writer_failed",
+    };
+  }
+  if (hasExecutorDiagnosticCode(error, "candidate_request_too_large")) {
+    return {
+      ...base,
+      status: "retryable_failure",
+      category: "transport",
+      diagnostic_code: "candidate_request_too_large",
+    };
+  }
+  return {
+    ...base,
+    status: "interrupted",
+    category: "internal",
+    diagnostic_code: "executor_internal",
+  };
 }
 
 export interface AutomaticBuildDispatchOwnerIdentityV1 {
@@ -281,9 +440,25 @@ export interface AutomaticBuildOpaqueHandoffRecordV3 {
   issued_at: string;
 }
 
+export interface AutomaticBuildOpaqueHandoffRecordV4 {
+  version: "automatic_build_opaque_handoff_record.v4";
+  session_protocol: "automatic_build_executor_session.v3";
+  opaque_handoff_ref: string;
+  kind: "public_dispatch";
+  target_ref: BuildTargetRefV2;
+  target_locator: AutomaticBuildTargetLocatorV1;
+  owner_identity: AutomaticBuildDispatchOwnerIdentityV1;
+  recovery_identity: AutomaticBuildRecoveryGenerationIdentity;
+  handoff_path: string;
+  handoff_sha256: string;
+  handoff_byte_length: number;
+  issued_at: string;
+}
+
 type AutomaticBuildOpaqueHandoffRecord =
   | AutomaticBuildOpaqueHandoffRecordV1
-  | AutomaticBuildOpaqueHandoffRecordV3;
+  | AutomaticBuildOpaqueHandoffRecordV3
+  | AutomaticBuildOpaqueHandoffRecordV4;
 
 interface AutomaticBuildExecutorOpenRecordV1 {
   version: "automatic_build_executor_open_record.v1";
@@ -482,6 +657,18 @@ export interface AutomaticBuildSemanticCandidateContractV2 {
   input_hash: string;
 }
 
+export interface AutomaticBuildSemanticCandidateContractV3 {
+  version: "automatic_build_semantic_candidate_contract.v3";
+  format: "strict_json";
+  encoding: "utf-8";
+  max_bytes: number;
+  transport: CandidateTransportContractV1;
+  stage: AutomaticBuildStage;
+  work_unit_id: string;
+  work_unit_kind: string;
+  input_hash: string;
+}
+
 export interface AutomaticBuildPrivateArtifactCandidateContractV2 {
   version: "automatic_build_private_artifact_candidate_contract.v2";
   format: "strict_json";
@@ -495,9 +682,23 @@ export interface AutomaticBuildPrivateArtifactCandidateContractV2 {
   artifact_instance: IntentArtifactTaskEnvelopeV3["output_contract"];
 }
 
+export interface AutomaticBuildPrivateArtifactCandidateContractV3 {
+  version: "automatic_build_private_artifact_candidate_contract.v3";
+  format: "strict_json";
+  encoding: "utf-8";
+  max_bytes: number;
+  transport: CandidateTransportContractV1;
+  candidate_version: "intent_artifact_candidate.v3";
+  task_id: string;
+  artifact_id: string;
+  blueprint_id: string;
+  blueprint_version: string;
+  artifact_instance: IntentArtifactTaskEnvelopeV3["output_contract"];
+}
+
 type AutomaticBuildExecutorOutputContractV3 =
-  | AutomaticBuildSemanticCandidateContractV2
-  | AutomaticBuildPrivateArtifactCandidateContractV2;
+  | AutomaticBuildSemanticCandidateContractV3
+  | AutomaticBuildPrivateArtifactCandidateContractV3;
 
 export interface AutomaticBuildExecutorInputManifestV3 {
   version: "automatic_build_executor_input_manifest.v3";
@@ -573,6 +774,7 @@ export type AutomaticBuildExecutorSessionActionV3 =
       candidate_sink_ref: string;
       semantic_attempt: number;
       output_contract: AutomaticBuildExecutorOutputContractV3;
+      retry_feedback?: AutomaticBuildCandidateRetryFeedback;
     }
   | { kind: "WAIT"; retry_after_ms: number }
   | { kind: "DONE"; status: "committed" | "retryable_failure" | "interrupted" };
@@ -602,6 +804,7 @@ export interface AutomaticBuildPublicOpaqueHandoffIssueV1 {
   target: AutomaticBuildTarget;
   kind: "public_dispatch";
   owner_identity: unknown;
+  recovery_identity: AutomaticBuildRecoveryGenerationIdentity;
   executor_handoff: AutomaticBuildDispatchExecutorHandoffRefV1;
   issued_at: string;
 }
@@ -1005,6 +1208,61 @@ function opaqueHandoffRefForV3(input: Parameters<typeof opaqueHandoffIdentityV3>
   return `abhandoff1_${sha256(opaqueHandoffIdentityV3(input))}`;
 }
 
+function validateRecoveryGenerationIdentity(
+  value: unknown,
+): AutomaticBuildRecoveryGenerationIdentity {
+  if (!isRecord(value)) throw new Error("recovery identity is invalid");
+  exactKeys(value, [
+    "version",
+    "dispatch_id",
+    "dispatch_run_id",
+    "current_work_unit_id",
+    "semantic_attempt",
+    "lease_epoch",
+  ], value.version === "automatic_build_recovery_generation_identity.v2" ? ["bootstrap_epoch"] : []);
+  if ((value.version !== "automatic_build_recovery_generation_identity.v1"
+      && value.version !== "automatic_build_recovery_generation_identity.v2")
+    || !Number.isSafeInteger(value.semantic_attempt) || (value.semantic_attempt as number) < 1
+    || !Number.isSafeInteger(value.lease_epoch) || (value.lease_epoch as number) < 1) {
+    throw new Error("recovery identity is invalid");
+  }
+  if (value.version === "automatic_build_recovery_generation_identity.v2"
+    && (!Number.isSafeInteger(value.bootstrap_epoch) || (value.bootstrap_epoch as number) < 1)) {
+    throw new Error("bootstrap epoch is invalid");
+  }
+  const base = {
+    dispatch_id: boundedString(value.dispatch_id, "dispatch_id", 512),
+    dispatch_run_id: boundedString(value.dispatch_run_id, "dispatch_run_id", 512),
+    current_work_unit_id: boundedString(value.current_work_unit_id, "current_work_unit_id", 512),
+    semantic_attempt: value.semantic_attempt as number,
+    lease_epoch: value.lease_epoch as number,
+  };
+  return value.version === "automatic_build_recovery_generation_identity.v1"
+    ? { ...base, version: value.version }
+    : { ...base, version: value.version, bootstrap_epoch: value.bootstrap_epoch as number };
+}
+
+function opaqueHandoffIdentityV4(input: {
+  kind: "public_dispatch";
+  target_ref: BuildTargetRefV2;
+  target_locator: AutomaticBuildTargetLocatorV1;
+  owner_identity: AutomaticBuildDispatchOwnerIdentityV1;
+  recovery_identity: AutomaticBuildRecoveryGenerationIdentity;
+  handoff_path: string;
+  handoff_sha256: string;
+  handoff_byte_length: number;
+}): unknown {
+  return {
+    version: "automatic_build_opaque_handoff_identity.v4",
+    session_protocol: "automatic_build_executor_session.v3",
+    ...input,
+  };
+}
+
+function opaqueHandoffRefForV4(input: Parameters<typeof opaqueHandoffIdentityV4>[0]): string {
+  return `abhandoff1_${sha256(opaqueHandoffIdentityV4(input))}`;
+}
+
 function validateOpaqueHandoffRef(value: unknown): string {
   if (typeof value !== "string" || Buffer.byteLength(value, "utf8") > MAX_REF_BYTES
     || !OPAQUE_HANDOFF_REF.test(value)) {
@@ -1127,13 +1385,84 @@ function validateV3OpaqueHandoffRecord(
   return record;
 }
 
+function validateV4OpaqueHandoffRecord(
+  value: unknown,
+  expectedRef: string,
+): AutomaticBuildOpaqueHandoffRecordV4 {
+  if (!isRecord(value)) throw new Error("opaque handoff record is invalid");
+  exactKeys(value, [
+    "version",
+    "session_protocol",
+    "opaque_handoff_ref",
+    "kind",
+    "target_ref",
+    "target_locator",
+    "owner_identity",
+    "recovery_identity",
+    "handoff_path",
+    "handoff_sha256",
+    "handoff_byte_length",
+    "issued_at",
+  ]);
+  if (value.version !== "automatic_build_opaque_handoff_record.v4"
+    || value.session_protocol !== "automatic_build_executor_session.v3"
+    || value.opaque_handoff_ref !== expectedRef
+    || value.kind !== "public_dispatch"
+    || typeof value.handoff_sha256 !== "string" || !SHA256.test(value.handoff_sha256)
+    || !Number.isSafeInteger(value.handoff_byte_length) || (value.handoff_byte_length as number) < 1) {
+    throw new Error("V4 opaque handoff record identity is invalid");
+  }
+  const targetRef = validateTargetRef(value.target_ref);
+  const locator = validateTargetLocator(value.target_locator);
+  const owner = validateOwnerIdentity(value.owner_identity);
+  const recoveryIdentity = validateRecoveryGenerationIdentity(value.recovery_identity);
+  const handoffPath = boundedString(value.handoff_path, "handoff_path");
+  if (!path.isAbsolute(handoffPath)) throw new Error("opaque handoff record path must be absolute");
+  if (recoveryIdentity.dispatch_id !== owner.dispatch_id
+    || recoveryIdentity.dispatch_run_id !== owner.dispatch_run_id) {
+    throw new Error("V4 opaque handoff recovery identity does not match its owner");
+  }
+  const record: AutomaticBuildOpaqueHandoffRecordV4 = {
+    version: value.version,
+    session_protocol: value.session_protocol,
+    opaque_handoff_ref: expectedRef,
+    kind: value.kind,
+    target_ref: targetRef,
+    target_locator: locator,
+    owner_identity: owner,
+    recovery_identity: recoveryIdentity,
+    handoff_path: path.resolve(handoffPath),
+    handoff_sha256: value.handoff_sha256,
+    handoff_byte_length: value.handoff_byte_length as number,
+    issued_at: isoTimestamp(value.issued_at, "issued_at"),
+  };
+  const identity = {
+    kind: record.kind,
+    target_ref: record.target_ref,
+    target_locator: record.target_locator,
+    owner_identity: record.owner_identity,
+    recovery_identity: record.recovery_identity,
+    handoff_path: record.handoff_path,
+    handoff_sha256: record.handoff_sha256,
+    handoff_byte_length: record.handoff_byte_length,
+  };
+  if (opaqueHandoffRefForV4(identity) !== expectedRef) {
+    throw new Error("V4 opaque handoff record locator is invalid");
+  }
+  return record;
+}
+
 function validateOpaqueHandoffRecord(
   value: unknown,
   expectedRef: string,
 ): AutomaticBuildOpaqueHandoffRecord {
-  return isRecord(value) && value.version === "automatic_build_opaque_handoff_record.v3"
-    ? validateV3OpaqueHandoffRecord(value, expectedRef)
-    : validateLegacyOpaqueHandoffRecord(value, expectedRef);
+  if (isRecord(value) && value.version === "automatic_build_opaque_handoff_record.v4") {
+    return validateV4OpaqueHandoffRecord(value, expectedRef);
+  }
+  if (isRecord(value) && value.version === "automatic_build_opaque_handoff_record.v3") {
+    return validateV3OpaqueHandoffRecord(value, expectedRef);
+  }
+  return validateLegacyOpaqueHandoffRecord(value, expectedRef);
 }
 
 function readOpaqueHandoffRecord(opaqueHandoffRef: string): AutomaticBuildOpaqueHandoffRecord {
@@ -1272,6 +1601,7 @@ export function issueAutomaticBuildOpaqueHandoff(input: AutomaticBuildOpaqueHand
   const issuedAt = isoTimestamp(input.issued_at, "issued_at");
   if (input.kind === "public_dispatch") {
     const owner = validateOwnerIdentity(input.owner_identity);
+    const recoveryIdentity = validateRecoveryGenerationIdentity(input.recovery_identity);
     const handoff = validateExecutorHandoffRef(input.executor_handoff);
     const persisted = validateAutomaticBuildDispatchHandoff(resolvedTarget, {
       stage: owner.stage,
@@ -1282,18 +1612,29 @@ export function issueAutomaticBuildOpaqueHandoff(input: AutomaticBuildOpaqueHand
     if (!sameTargetRef(persisted.manifest.target_ref, targetRef)) {
       throw new Error("opaque handoff target does not match the published dispatch");
     }
+    const currentRecoveryIdentity = inspectAutomaticBuildDispatchRecoveryGeneration(
+      resolvedTarget,
+      owner.stage,
+      owner.dispatch_id,
+      { now: issuedAt, dispatch_run_id: owner.dispatch_run_id },
+    ).recovery_identity;
+    if (canonicalAutomaticBuildJson(recoveryIdentity)
+      !== canonicalAutomaticBuildJson(currentRecoveryIdentity)) {
+      throw new Error("opaque handoff recovery identity is not current");
+    }
     const identity = {
       kind: "public_dispatch" as const,
       target_ref: targetRef,
       target_locator: locator,
       owner_identity: owner,
+      recovery_identity: recoveryIdentity,
       handoff_path: handoff.path,
       handoff_sha256: handoff.sha256,
       handoff_byte_length: handoff.byte_length,
     };
-    const opaqueHandoffRef = opaqueHandoffRefForV3(identity);
-    const record: AutomaticBuildOpaqueHandoffRecordV3 = {
-      version: "automatic_build_opaque_handoff_record.v3",
+    const opaqueHandoffRef = opaqueHandoffRefForV4(identity);
+    const record: AutomaticBuildOpaqueHandoffRecordV4 = {
+      version: "automatic_build_opaque_handoff_record.v4",
       session_protocol: "automatic_build_executor_session.v3",
       opaque_handoff_ref: opaqueHandoffRef,
       ...identity,
@@ -1302,20 +1643,21 @@ export function issueAutomaticBuildOpaqueHandoff(input: AutomaticBuildOpaqueHand
     const file = registryFile("opaque-handoffs", opaqueHandoffRef);
     if (!writeCreateOnly(file, record)) {
       const existing = readOpaqueHandoffRecord(opaqueHandoffRef);
-      if (existing.version !== "automatic_build_opaque_handoff_record.v3") {
+      if (existing.version !== "automatic_build_opaque_handoff_record.v4") {
         throw new Error("opaque handoff ref conflicts with its current session protocol");
       }
-      const existingIdentity = opaqueHandoffIdentityV3({
+      const existingIdentity = opaqueHandoffIdentityV4({
         kind: existing.kind,
         target_ref: existing.target_ref,
         target_locator: existing.target_locator,
         owner_identity: existing.owner_identity,
+        recovery_identity: existing.recovery_identity,
         handoff_path: existing.handoff_path,
         handoff_sha256: existing.handoff_sha256,
         handoff_byte_length: existing.handoff_byte_length,
       });
       if (canonicalAutomaticBuildJson(existingIdentity) !== canonicalAutomaticBuildJson(
-        opaqueHandoffIdentityV3(identity),
+        opaqueHandoffIdentityV4(identity),
       )) {
         throw new Error("opaque handoff ref conflicts with its create-only record");
       }
@@ -1880,25 +2222,75 @@ function taskDescriptor(
   target: AutomaticBuildTarget,
   persisted: AutomaticBuildPersistedDispatchV1,
   workUnitId: string,
-): {
-  descriptor: WorkUnitDescriptor;
-  descriptors: WorkUnitDescriptor[];
-  task_bindings: NonNullable<ReturnType<typeof buildAutomaticBuildSnapshot>["stages"][number]["task_bindings"]>;
-} {
-  const snapshot = buildAutomaticBuildSnapshot(target, {
-    quality_profile: persisted.manifest.policy_fingerprint.quality_profile,
-  });
-  const stageState = snapshot.stages.find((candidate) => candidate.stage === persisted.manifest.stage);
-  if (!stageState?.work_units) {
-    throw new Error("executor dispatch stage descriptor plan is unavailable");
+): { descriptor: WorkUnitDescriptor; descriptors: WorkUnitDescriptor[];
+  task_bindings: Record<string, AutomaticBuildTaskPolicyBinding> } {
+  try {
+    const manifest = persisted.manifest;
+    if (!manifest.ordered_work_unit_ids.includes(workUnitId)) throw new Error("executor work unit is outside dispatch");
+    const binding = manifest.task_bindings?.[workUnitId];
+    if (binding && isAutomaticBuildTaskPolicyBindingV2(binding)) {
+      const policy = readAutomaticBuildPolicyGeneration(target, binding.stage, binding.policy_generation_id);
+      if (!policy || !semanticContractEqual(policy.semantic_contract, binding.semantic_contract)) {
+        throw new Error("policy_generation_conflict: executor current policy record changed");
+      }
+    }
+    let descriptor: WorkUnitDescriptor | undefined;
+    let currentBinding: AutomaticBuildTaskPolicyBinding | undefined;
+    if (binding && isAutomaticBuildTaskPolicyBindingV2(binding)
+      && (manifest.stage === "pass1" || manifest.stage === "profile_sidecar")) {
+      const task = manifest.stage === "pass1"
+        ? readPass1ShadowTask(target, binding.policy_generation_id, workUnitId)
+        : readProfileSidecarProductionTask(target, binding.policy_generation_id, workUnitId);
+      descriptor = task.descriptor;
+      const currentPolicy = currentAutomaticBuildTaskPolicy(target, manifest.stage, descriptor.kind,
+        manifest.policy_fingerprint.quality_profile);
+      if (!currentPolicy || currentPolicy.policy_generation_id !== task.policy_generation_id
+        || !semanticContractEqual(binding.semantic_contract, semanticContractFromExtractionPolicy(currentPolicy.policy_fingerprint))
+        || !semanticContractEqual(binding.semantic_contract, semanticContractFromExtractionPolicy(descriptor.policy_fingerprint))) {
+        throw new Error("policy_generation_conflict: executor current task policy changed");
+      }
+      // Source identity is revalidated when resolving the published target. Reducers additionally
+      // replay only their bound accepted children; unrelated receipts never rerender source tasks.
+      if (descriptor.input_basis.kind === "artifact_reduction") {
+        const sourceBytes = readFileSync(target.source_path);
+        const source = /\.epub$/iu.test(target.source_path)
+          ? epubToSource(new Uint8Array(sourceBytes)).source : sourceBytes.toString("utf8");
+        if (task.version === "pass1_shadow_task.v1") replayPass1ShadowInput({ target, source, task });
+        else if (task.version === "profile_sidecar_discourse_shadow_task.v1") {
+          replayProfileSidecarDiscourseShadowInput({ target, source, task });
+        }
+      }
+      currentBinding = taskPolicyBindingForWorkUnit(descriptor, task.policy_generation_id);
+    } else {
+      const task = binding && isAutomaticBuildTaskPolicyBindingV2(binding) && manifest.stage === "book_structure"
+        ? readBookStructureGenerationTask(target, binding.policy_generation_id, workUnitId) : undefined;
+      if (binding && isAutomaticBuildTaskPolicyBindingV2(binding) && manifest.stage === "book_structure" && !task) {
+        throw new Error("policy_generation_conflict: frozen BookStructure task is unavailable");
+      }
+      if (manifest.stage === "paper_reading_guide") throw new Error("executor stage has no semantic descriptor");
+      const stage = readAutomaticBuildTaskStage(target, { stage: manifest.stage, work_unit_id: workUnitId,
+        ...(task && !task.descriptor.kind.startsWith("structure_stitch") ? { parent_lid: task.parent_unit_lid } : {}) },
+        manifest.policy_fingerprint.quality_profile);
+      descriptor = stage?.work_units?.find(candidate => candidate.work_unit_id === workUnitId);
+      currentBinding = stage?.task_bindings?.[workUnitId];
+      if (task && canonicalAutomaticBuildJson(task.descriptor) !== canonicalAutomaticBuildJson(descriptor)) {
+        throw new Error("policy_generation_conflict: executor projection dependencies changed");
+      }
+    }
+    if (!descriptor || !currentBinding) throw new Error("executor dispatch work unit descriptor is unavailable");
+    if (descriptor.work_unit_id !== workUnitId || descriptor.stage !== manifest.stage
+      || !sameTargetRef(descriptor.target, target.target_ref) || descriptor.kind !== manifest.kind
+      || canonicalAutomaticBuildJson(descriptor.policy_fingerprint) !== canonicalAutomaticBuildJson(manifest.policy_fingerprint)
+      || (binding && canonicalAutomaticBuildJson(currentBinding) !== canonicalAutomaticBuildJson(binding))) {
+      throw new Error("policy_generation_conflict: executor dispatch descriptor identity changed");
+    }
+    validateWorkUnitTaskPolicyBinding(descriptor, currentBinding);
+    return { descriptor, descriptors: [descriptor], task_bindings: { [workUnitId]: currentBinding } };
+  } catch (error) {
+    // This operation cannot proceed with an unverified current task or dependency.
+    // Return the existing session recovery boundary; the Driver owns replanning.
+    throw new AutomaticBuildExecutorStaleGenerationSessionError(error instanceof Error ? error.message : undefined);
   }
-  const descriptor = stageState.work_units.find((candidate) => candidate.work_unit_id === workUnitId);
-  if (!descriptor) throw new Error("executor dispatch work unit descriptor is unavailable");
-  return {
-    descriptor,
-    descriptors: stageState.work_units,
-    task_bindings: stageState.task_bindings ?? {},
-  };
 }
 
 interface AutomaticBuildExecutorDeliveryMaterialV3 {
@@ -1910,17 +2302,19 @@ interface AutomaticBuildExecutorDeliveryMaterialV3 {
   batches: PackedExecutorTransportBatchV1<AutomaticBuildExecutorInputChunkV3>[];
 }
 
-function semanticCandidateContractV2(
+function semanticCandidateContractV3(
   descriptor: WorkUnitDescriptor,
-): AutomaticBuildSemanticCandidateContractV2 {
+): AutomaticBuildSemanticCandidateContractV3 {
+  const transport = createCandidateTransportContract(
+    CODEX_EXECUTOR_TRANSPORT_PROFILE_V2,
+    MAX_CANDIDATE_BYTES,
+  );
   return {
-    version: "automatic_build_semantic_candidate_contract.v2",
+    version: "automatic_build_semantic_candidate_contract.v3",
     format: "strict_json",
     encoding: "utf-8",
-    max_bytes: Math.min(
-      MAX_CANDIDATE_BYTES,
-      CODEX_EXECUTOR_TRANSPORT_PROFILE_V2.max_candidate_request_bytes,
-    ),
+    max_bytes: transport.candidate_value_max_bytes,
+    transport,
     stage: descriptor.stage,
     work_unit_id: descriptor.work_unit_id,
     work_unit_kind: descriptor.kind,
@@ -2200,7 +2594,7 @@ function renderDeliveryMaterial(input: {
       ? { policy_generation_id: binding.policy_generation_id }
       : {},
   ).stdout;
-  const outputContract = semanticCandidateContractV2(descriptor);
+  const outputContract = semanticCandidateContractV3(descriptor);
   const semanticPromptSha256 = sha256(input.semantic_prompt);
   const semanticInputSha256 = sha256(semanticInput);
   const generationInputRef = generationInputRefFor({
@@ -2257,17 +2651,19 @@ function deliveryRecordFromMaterial(input: {
   };
 }
 
-function privateArtifactCandidateContractV2(
+function privateArtifactCandidateContractV3(
   task: IntentArtifactTaskEnvelopeV3,
-): AutomaticBuildPrivateArtifactCandidateContractV2 {
+): AutomaticBuildPrivateArtifactCandidateContractV3 {
+  const transport = createCandidateTransportContract(
+    CODEX_EXECUTOR_TRANSPORT_PROFILE_V2,
+    MAX_CANDIDATE_BYTES,
+  );
   return {
-    version: "automatic_build_private_artifact_candidate_contract.v2",
+    version: "automatic_build_private_artifact_candidate_contract.v3",
     format: "strict_json",
     encoding: "utf-8",
-    max_bytes: Math.min(
-      MAX_CANDIDATE_BYTES,
-      CODEX_EXECUTOR_TRANSPORT_PROFILE_V2.max_candidate_request_bytes,
-    ),
+    max_bytes: transport.candidate_value_max_bytes,
+    transport,
     candidate_version: "intent_artifact_candidate.v3",
     task_id: task.task_id,
     artifact_id: task.artifact.artifact_id,
@@ -2290,7 +2686,7 @@ function renderPrivateDeliveryMaterial(input: {
   ].join("\n");
   const semanticInput = input.semantic_input
     ?? canonicalAutomaticBuildJson(input.context.attempt.task);
-  const outputContract = privateArtifactCandidateContractV2(input.context.attempt.task);
+  const outputContract = privateArtifactCandidateContractV3(input.context.attempt.task);
   const generationInputRef = privateGenerationInputRefFor({
     opaque_session_ref: input.opaque_session_ref,
     opaque_handoff_ref: input.opaque_handoff_ref,
@@ -2955,7 +3351,7 @@ function validateCandidateSinkRecord(
     task_session: AutomaticBuildExecutorTaskSessionRecordV1;
     delivery: AutomaticBuildExecutorDeliverySessionRecordV3;
     grant: AutomaticBuildExecutorGenerationGrantRecordV2;
-    output_contract: AutomaticBuildSemanticCandidateContractV2;
+    output_contract: AutomaticBuildSemanticCandidateContractV3;
   },
 ): AutomaticBuildExecutorCandidateSinkRecordV2 {
   if (!isRecord(value)) throw new Error("executor candidate sink record is invalid");
@@ -3039,7 +3435,7 @@ function issueCandidateSink(input: {
   task_session: AutomaticBuildExecutorTaskSessionRecordV1;
   delivery: AutomaticBuildExecutorDeliverySessionRecordV3;
   grant: AutomaticBuildExecutorGenerationGrantRecordV2;
-  output_contract: AutomaticBuildSemanticCandidateContractV2;
+  output_contract: AutomaticBuildSemanticCandidateContractV3;
   created_at: string;
 }): AutomaticBuildExecutorCandidateSinkRecordV2 {
   const task = input.task_session;
@@ -3084,7 +3480,7 @@ function validatePrivateCandidateSinkRecord(
     private_session: AutomaticBuildExecutorPrivateSessionRecordV1;
     delivery: AutomaticBuildExecutorPrivateDeliverySessionRecordV3;
     grant: AutomaticBuildExecutorGenerationGrantRecordV2;
-    output_contract: AutomaticBuildPrivateArtifactCandidateContractV2;
+    output_contract: AutomaticBuildPrivateArtifactCandidateContractV3;
   },
 ): AutomaticBuildExecutorPrivateCandidateSinkRecordV3 {
   if (!isRecord(value)) throw new Error("executor private candidate sink record is invalid");
@@ -3154,7 +3550,7 @@ function issuePrivateCandidateSink(input: {
   private_session: AutomaticBuildExecutorPrivateSessionRecordV1;
   delivery: AutomaticBuildExecutorPrivateDeliverySessionRecordV3;
   grant: AutomaticBuildExecutorGenerationGrantRecordV2;
-  output_contract: AutomaticBuildPrivateArtifactCandidateContractV2;
+  output_contract: AutomaticBuildPrivateArtifactCandidateContractV3;
   created_at: string;
 }): AutomaticBuildExecutorPrivateCandidateSinkRecordV3 {
   const unsigned = {
@@ -3384,6 +3780,10 @@ function drivePublicExecutorSession(input: {
     {
       descriptors: stage.descriptors,
       task_bindings: stage.task_bindings,
+      read_task: workUnitId => {
+        const task = taskDescriptor(input.target, input.persisted, workUnitId);
+        return { descriptor: task.descriptor, task_binding: task.task_bindings[workUnitId] };
+      },
       dispatch_run_id: input.owner.dispatch_run_id,
       now: input.now,
       max_semantic_attempts: MAX_SEMANTIC_ATTEMPTS,
@@ -3614,6 +4014,58 @@ function terminalStatus(
   return "interrupted";
 }
 
+function currentPublicDispatchResponse(
+  inspection: ReturnType<typeof inspectAutomaticBuildDispatch>,
+  workUnitId: string,
+): AutomaticBuildExecutorSessionResponseV3 | undefined {
+  if (inspection.state === "finished") {
+    return v3DoneResponse(terminalStatus(inspection.receipt.terminal_reason));
+  }
+  if (inspection.state === "active" && inspection.next_work_unit_id === workUnitId) {
+    return undefined;
+  }
+  const receipt = inspection.task_receipts.find((candidate) => (
+    candidate.work_unit_id === workUnitId
+  ));
+  if (!receipt) {
+    throw new Error("executor generation task advanced without a terminal task receipt");
+  }
+  return v3DoneResponse(receipt.state);
+}
+
+function inspectCurrentPublicRecovery(input: {
+  target: AutomaticBuildTarget;
+  owner: AutomaticBuildDispatchOwnerIdentityV1;
+  handoff_record: AutomaticBuildOpaqueHandoffRecord;
+  work_unit_id: string;
+  now: string;
+}): {
+  terminal_response?: AutomaticBuildExecutorSessionResponseV3;
+  recovery_identity?: AutomaticBuildRecoveryGenerationIdentity;
+} {
+  const inspection = inspectAutomaticBuildDispatch(
+    input.target,
+    input.owner.stage,
+    input.owner.dispatch_id,
+    input.now,
+    input.owner.dispatch_run_id,
+  );
+  const terminalResponse = currentPublicDispatchResponse(inspection, input.work_unit_id);
+  if (terminalResponse) return { terminal_response: terminalResponse };
+  const recoveryIdentity = inspectAutomaticBuildDispatchRecoveryGeneration(
+    input.target,
+    input.owner.stage,
+    input.owner.dispatch_id,
+    { now: input.now, dispatch_run_id: input.owner.dispatch_run_id },
+  ).recovery_identity;
+  if (input.handoff_record.version === "automatic_build_opaque_handoff_record.v4"
+    && canonicalAutomaticBuildJson(input.handoff_record.recovery_identity)
+      !== canonicalAutomaticBuildJson(recoveryIdentity)) {
+    throw new AutomaticBuildExecutorStaleGenerationSessionError();
+  }
+  return { recovery_identity: recoveryIdentity };
+}
+
 export function openAutomaticBuildExecutorSession(
   opaqueHandoffRefValue: string,
   options: { now?: string } = {},
@@ -3696,6 +4148,7 @@ type AutomaticBuildExecutorDeliveryContextV3 =
   | {
       kind: "public_dispatch";
       delivery: AutomaticBuildExecutorDeliverySessionRecordV3;
+      handoff_record: AutomaticBuildOpaqueHandoffRecord;
       target: AutomaticBuildTarget;
       owner: AutomaticBuildDispatchOwnerIdentityV1;
       persisted: AutomaticBuildPersistedDispatchV1;
@@ -3788,6 +4241,7 @@ function resolveDeliverySessionContext(
   return {
     kind: "public_dispatch",
     delivery,
+    handoff_record: handoffRecord,
     target: published.target,
     owner: published.owner,
     persisted: published.persisted,
@@ -3795,6 +4249,28 @@ function resolveDeliverySessionContext(
     open_record: openRecord,
     material,
   };
+}
+
+/** Root reports an unopened startup terminal (bootstrap or precise connection refusal).
+ * Both observations use the same bounded bootstrap epoch; durable open/task state wins.
+ */
+export function recordAutomaticBuildExecutorBootstrapFailure(
+  opaqueHandoffRefValue: string,
+  expectedTarget: BuildTargetRefV2,
+  now: string,
+): void {
+  const ref = validateOpaqueHandoffRef(opaqueHandoffRefValue);
+  const record = readOpaqueHandoffRecord(ref);
+  if (!sameTargetRef(record.target_ref, expectedTarget)) throw new Error("bootstrap target mismatch");
+  if (record.version !== "automatic_build_opaque_handoff_record.v4") {
+    throw new Error("bootstrap recovery requires a public V4 handoff");
+  }
+  if (existsSync(registryFile("executor-opens", ref))) return;
+  const target = resolveRecordTarget(record.target_locator, record.target_ref);
+  const owner = record.owner_identity;
+  const inspection = inspectAutomaticBuildDispatch(target, owner.stage, owner.dispatch_id, now, owner.dispatch_run_id);
+  if (inspection.state !== "active") return;
+  recordAutomaticBuildDispatchBootstrapFailure(target, owner.stage, record.recovery_identity, ref, now);
 }
 
 export function openAutomaticBuildExecutorSessionV3(
@@ -3850,7 +4326,8 @@ export function openAutomaticBuildExecutorSessionV3(
     }));
     return deliveryProgressResponse({ delivery, material });
   }
-  if (record.version !== "automatic_build_opaque_handoff_record.v3"
+  if ((record.version !== "automatic_build_opaque_handoff_record.v3"
+      && record.version !== "automatic_build_opaque_handoff_record.v4")
     || record.session_protocol !== "automatic_build_executor_session.v3"
     || record.kind !== "public_dispatch") {
     throw new Error("automatic build executor session V3 currently requires a public dispatch");
@@ -3876,6 +4353,14 @@ export function openAutomaticBuildExecutorSessionV3(
     );
     return v3DoneResponse(terminalStatus(receipt.terminal_reason));
   }
+  const currentness = inspectCurrentPublicRecovery({
+    target: published.target,
+    owner: published.owner,
+    handoff_record: record,
+    work_unit_id: workUnitId,
+    now,
+  });
+  if (currentness.terminal_response) return currentness.terminal_response;
   const openFile = registryFile("executor-opens", opaqueHandoffRef);
   const proposedOpen: AutomaticBuildExecutorOpenRecordV1 = {
     version: "automatic_build_executor_open_record.v1",
@@ -4101,13 +4586,13 @@ export function startAutomaticBuildExecutorGeneration(
   }
   const grant = issueGenerationGrant(context.delivery, context.material, now);
   const existingStart = readGenerationStartRecord(grant);
-  if (existingStart) {
-    options.timing?.complete_phase("current-state/claim");
-    options.timing?.complete_phase("input-render-or-reuse");
-    return existingStart.response;
-  }
-  const acceptance = generationStartAcceptance(request, context.delivery, grant, now);
   if (context.kind === "private_artifact") {
+    if (existingStart) {
+      options.timing?.complete_phase("current-state/claim");
+      options.timing?.complete_phase("input-render-or-reuse");
+      return existingStart.response;
+    }
+    const acceptance = generationStartAcceptance(request, context.delivery, grant, now);
     if (context.context.inspection.state !== "pending") {
       throw new Error("executor private generation.start task is already terminal");
     }
@@ -4118,7 +4603,7 @@ export function startAutomaticBuildExecutorGeneration(
       owner: context.context.owner,
       created_at: acceptance.accepted_at,
     });
-    const outputContract = privateArtifactCandidateContractV2(
+    const outputContract = privateArtifactCandidateContractV3(
       context.context.attempt.task,
     );
     if (outputContract.version !== grant.output_schema_version
@@ -4158,15 +4643,21 @@ export function startAutomaticBuildExecutorGeneration(
     if (writeCreateOnly(file, record)) return response;
     return validateGenerationStartRecord(decodeJsonRecord(file), grant).response;
   }
-  const inspection = inspectAutomaticBuildDispatch(
-    context.target,
-    context.owner.stage,
-    context.owner.dispatch_id,
-    acceptance.accepted_at,
-    context.owner.dispatch_run_id,
-  );
-  if (inspection.state === "finished" || inspection.next_work_unit_id !== context.delivery.work_unit_id) {
-    throw new Error("executor generation.start delivery is no longer the current dispatch task");
+  const currentness = inspectCurrentPublicRecovery({
+    target: context.target,
+    owner: context.owner,
+    handoff_record: context.handoff_record,
+    work_unit_id: context.delivery.work_unit_id,
+    now,
+  });
+  if (currentness.terminal_response) {
+    options.timing?.complete_phase("current-state/claim");
+    options.timing?.complete_phase("input-render-or-reuse");
+    return currentness.terminal_response;
+  }
+  const currentRecoveryIdentity = currentness.recovery_identity;
+  if (!currentRecoveryIdentity) {
+    throw new Error("executor generation.start current recovery identity is unavailable");
   }
   const stage = taskDescriptor(context.target, context.persisted, context.delivery.work_unit_id);
   const currentBinding = stage.task_bindings[context.delivery.work_unit_id];
@@ -4177,6 +4668,44 @@ export function startAutomaticBuildExecutorGeneration(
     && currentBinding.input_hash !== context.delivery.semantic_input_sha256) {
     throw new Error("executor generation.start frozen input no longer matches the current task binding");
   }
+  if (existingStart) {
+    const taskSession = readTaskSessionRecord(existingStart.task_session_ref);
+    if (taskSession.opaque_handoff_ref !== context.delivery.opaque_handoff_ref
+      || taskSession.open_session_ref !== context.delivery.open_session_ref
+      || canonicalAutomaticBuildJson(taskSession.owner_identity)
+        !== canonicalAutomaticBuildJson(context.owner)
+      || taskSession.stage !== context.delivery.stage
+      || taskSession.work_unit_id !== context.delivery.work_unit_id
+      || taskSession.semantic_attempt !== existingStart.semantic_attempt) {
+      throw new Error("executor generation start task session binding changed");
+    }
+    if (taskSession.work_unit_id !== currentRecoveryIdentity.current_work_unit_id
+      || taskSession.semantic_attempt !== currentRecoveryIdentity.semantic_attempt
+      || taskSession.lease_epoch !== currentRecoveryIdentity.lease_epoch) {
+      throw new AutomaticBuildExecutorStaleGenerationSessionError();
+    }
+    let activeLease;
+    try {
+      activeLease = assertActiveAutomaticBuildLease(
+        context.target,
+        taskSession.lease_ref,
+        taskSession.lease_token,
+        now,
+      );
+    } catch {
+      throw new AutomaticBuildExecutorStaleGenerationSessionError();
+    }
+    if (activeLease.owner !== context.persisted.owner
+      || activeLease.stage !== taskSession.stage
+      || activeLease.work_unit_id !== taskSession.work_unit_id
+      || activeLease.attempt !== taskSession.physical_attempt) {
+      throw new AutomaticBuildExecutorStaleGenerationSessionError();
+    }
+    options.timing?.complete_phase("current-state/claim");
+    options.timing?.complete_phase("input-render-or-reuse");
+    return existingStart.response;
+  }
+  const acceptance = generationStartAcceptance(request, context.delivery, grant, now);
   const advanced = advanceAutomaticBuildDispatch(
     context.target,
     context.owner.stage,
@@ -4184,6 +4713,10 @@ export function startAutomaticBuildExecutorGeneration(
     {
       descriptors: stage.descriptors,
       task_bindings: stage.task_bindings,
+      read_task: workUnitId => {
+        const task = taskDescriptor(context.target, context.persisted, workUnitId);
+        return { descriptor: task.descriptor, task_binding: task.task_bindings[workUnitId] };
+      },
       dispatch_run_id: context.owner.dispatch_run_id,
       now: acceptance.accepted_at,
       max_semantic_attempts: MAX_SEMANTIC_ATTEMPTS,
@@ -4215,6 +4748,11 @@ export function startAutomaticBuildExecutorGeneration(
   if (claim.lease.work_unit_id !== context.delivery.work_unit_id) {
     throw new Error("executor generation.start claimed a different work unit");
   }
+  if (claim.lease.work_unit_id !== currentRecoveryIdentity.current_work_unit_id
+    || claim.execution_identity.semantic_attempt !== currentRecoveryIdentity.semantic_attempt
+    || claim.execution_identity.lease_epoch !== currentRecoveryIdentity.lease_epoch) {
+    throw new AutomaticBuildExecutorStaleGenerationSessionError();
+  }
   const taskSession = persistTaskSessionRecord({
     opaque_handoff_ref: context.delivery.opaque_handoff_ref,
     open_record: context.open_record,
@@ -4232,7 +4770,7 @@ export function startAutomaticBuildExecutorGeneration(
     context.material.semantic_input,
     { now: acceptance.accepted_at, run_ttl_ms: context.persisted.run_ttl_ms },
   );
-  const outputContract = semanticCandidateContractV2(stage.descriptor);
+  const outputContract = semanticCandidateContractV3(stage.descriptor);
   if (outputContract.version !== grant.output_schema_version) {
     throw new Error("executor generation.start output contract changed after grant");
   }
@@ -4244,6 +4782,9 @@ export function startAutomaticBuildExecutorGeneration(
     output_contract: outputContract,
     created_at: acceptance.accepted_at,
   });
+  const retryFeedback = readAutomaticBuildCandidateRetryFeedback(
+    context.target, taskSession.stage, taskSession.work_unit_id, taskSession.physical_attempt,
+  );
   const response = boundedV3Response({
     version: "automatic_build_executor_session.v3",
     action: {
@@ -4252,6 +4793,7 @@ export function startAutomaticBuildExecutorGeneration(
       candidate_sink_ref: candidateSink.candidate_sink_ref,
       semantic_attempt: taskSession.semantic_attempt,
       output_contract: outputContract,
+      ...(retryFeedback ? { retry_feedback: retryFeedback } : {}),
     },
   });
   const record: AutomaticBuildExecutorGenerationStartRecordV2 = {
@@ -4311,7 +4853,8 @@ export function submitAutomaticBuildExecutorCandidateV3(
     timing?: AutomaticBuildExecutorServerTimingObserverV1;
   } = {},
 ): AutomaticBuildExecutorSessionResponseV3 {
-  const request = validateCandidateSubmitRequestV3(requestValue);
+  const routedRequest = validateCandidateSubmitRoutingV3(requestValue);
+  const request = routedRequest as AutomaticBuildExecutorCandidateSubmitV3;
   const nowValue = options.now ?? request.now;
   const now = nowValue === undefined ? new Date().toISOString() : isoTimestamp(nowValue, "now");
   const directSink = readCandidateSinkRecord(request.opaque_session_ref);
@@ -4330,7 +4873,7 @@ export function submitAutomaticBuildExecutorCandidateV3(
       deliveryContext.material,
       directSink.created_at,
     );
-    const outputContract = privateArtifactCandidateContractV2(
+    const outputContract = privateArtifactCandidateContractV3(
       privateResolved.context.attempt.task,
     );
     const sink = validatePrivateCandidateSinkRecord(
@@ -4345,9 +4888,20 @@ export function submitAutomaticBuildExecutorCandidateV3(
     if (sink.candidate_sink_ref !== request.candidate_sink_ref) {
       throw new Error("executor private candidate sink ref changed before submit");
     }
+    const validation = validateCandidateSubmitRequestV3(requestValue, routedRequest);
+    if (validation.status === "blocked") {
+      failIntentArtifactTaskAttempt({
+        private_root: privateResolved.context.attempt.private_root,
+        task_path: privateResolved.context.attempt.task_path,
+        diagnostic_code: "candidate_request_too_large",
+        failed_at: now,
+      });
+      options.timing?.complete_phase("candidate-gate");
+      return v3DoneResponse("retryable_failure");
+    }
     stagePrivateArtifactCandidateValue(
       privateResolved.context,
-      request.candidate,
+      validation.request.candidate,
       Math.min(
         outputContract.max_bytes,
         CODEX_EXECUTOR_TRANSPORT_PROFILE_V2.max_candidate_request_bytes,
@@ -4380,7 +4934,7 @@ export function submitAutomaticBuildExecutorCandidateV3(
     taskSession.persisted,
     taskSession.task_session.work_unit_id,
   );
-  const outputContract = semanticCandidateContractV2(stage.descriptor);
+  const outputContract = semanticCandidateContractV3(stage.descriptor);
   const sink = validateCandidateSinkRecord(
     decodeJsonRecord(candidateSinkRecordFile(taskSession.task_session.opaque_session_ref)),
     {
@@ -4393,11 +4947,29 @@ export function submitAutomaticBuildExecutorCandidateV3(
   if (sink.candidate_sink_ref !== request.candidate_sink_ref) {
     throw new Error("executor candidate sink ref changed before submit");
   }
+  const validation = validateCandidateSubmitRequestV3(requestValue, routedRequest);
+  if (validation.status === "blocked") {
+    failAutomaticBuildTask(
+      taskSession.target,
+      taskSession.task_session.lease_ref,
+      taskSession.task_session.lease_token,
+      {
+        failure_diagnostic: createAutomaticBuildFailureDiagnosticV3({
+          category: "transport",
+          code: "candidate_request_too_large",
+          phase: "generation",
+        }),
+        now,
+      },
+    );
+    options.timing?.complete_phase("candidate-gate");
+    return openAutomaticBuildExecutorSessionV3(sink.opaque_handoff_ref, { now });
+  }
   stageAutomaticBuildCandidateValue(
     taskSession.target,
     taskSession.task_session.lease_ref,
     taskSession.task_session.lease_token,
-    request.candidate,
+    validation.request.candidate,
     {
       max_bytes: Math.min(
         outputContract.max_bytes,
@@ -4408,7 +4980,7 @@ export function submitAutomaticBuildExecutorCandidateV3(
     },
   );
   options.timing?.complete_phase("candidate-gate");
-  submitAutomaticBuildTaskCandidate(
+  const receipt = submitAutomaticBuildTaskCandidate(
     taskSession.target,
     taskSession.task_session.stage,
     taskSession.task_session.work_unit_id,
@@ -4417,6 +4989,9 @@ export function submitAutomaticBuildExecutorCandidateV3(
     { now },
   );
   options.timing?.complete_phase("writer/commit");
+  if (deliveryContext.handoff_record.version === "automatic_build_opaque_handoff_record.v4") {
+    return v3DoneResponse(receipt.state);
+  }
   return openAutomaticBuildExecutorSessionV3(sink.opaque_handoff_ref, { now });
 }
 
@@ -4633,9 +5208,17 @@ function validateSubmitRequest(value: unknown): AutomaticBuildExecutorSubmitRequ
   };
 }
 
-function validateCandidateSubmitRequestV3(
+interface AutomaticBuildExecutorCandidateSubmitRoutingV3 {
+  version: "automatic_build_executor_candidate_submit.v3";
+  opaque_session_ref: string;
+  candidate_sink_ref: string;
+  candidate: unknown;
+  now?: string;
+}
+
+function validateCandidateSubmitRoutingV3(
   value: unknown,
-): AutomaticBuildExecutorCandidateSubmitV3 {
+): AutomaticBuildExecutorCandidateSubmitRoutingV3 {
   if (!isRecord(value)) throw new Error("executor candidate submit V3 request must be an object");
   exactKeys(
     value,
@@ -4645,25 +5228,29 @@ function validateCandidateSubmitRequestV3(
   if (value.version !== "automatic_build_executor_candidate_submit.v3") {
     throw new Error("executor candidate submit V3 request version is unsupported");
   }
-  const serialized = canonicalAutomaticBuildJson(value);
-  const serializedBytes = Buffer.byteLength(serialized, "utf8");
-  const serializedTokens = estimateTokens(serialized);
-  if (serializedBytes > CODEX_EXECUTOR_TRANSPORT_PROFILE_V2.max_candidate_request_bytes) {
-    throw new Error(
-      `executor candidate request exceeds ${CODEX_EXECUTOR_TRANSPORT_PROFILE_V2.max_candidate_request_bytes} bytes`,
-    );
-  }
-  if (serializedTokens > CODEX_EXECUTOR_TRANSPORT_PROFILE_V2.max_candidate_request_tokens) {
-    throw new Error(
-      `executor candidate request exceeds ${CODEX_EXECUTOR_TRANSPORT_PROFILE_V2.max_candidate_request_tokens} estimated tokens`,
-    );
-  }
   return {
     version: value.version,
     opaque_session_ref: validateOpaqueSessionRef(value.opaque_session_ref),
     candidate_sink_ref: validateCandidateSinkRef(value.candidate_sink_ref),
-    candidate: value.candidate as JsonValue,
+    candidate: value.candidate,
     ...(value.now === undefined ? {} : { now: isoTimestamp(value.now, "now") }),
+  };
+}
+
+function validateCandidateSubmitRequestV3(
+  value: unknown,
+  routed = validateCandidateSubmitRoutingV3(value),
+):
+  | { status: "within_limit"; request: AutomaticBuildExecutorCandidateSubmitV3 }
+  | { status: "blocked" } {
+  const measurement = measureExecutorCandidateRequest(
+    value,
+    CODEX_EXECUTOR_TRANSPORT_PROFILE_V2,
+  );
+  if (measurement.blocking_reasons.length > 0) return { status: "blocked" };
+  return {
+    status: "within_limit",
+    request: routed as AutomaticBuildExecutorCandidateSubmitV3,
   };
 }
 
@@ -4749,11 +5336,14 @@ export function runAutomaticBuildExecutorSessionCommand(
     });
   }
   if (value.version === "automatic_build_executor_candidate_submit.v3") {
-    const request = validateCandidateSubmitRequestV3(value);
-    return submitAutomaticBuildExecutorCandidateV3(request, {
+    const request = validateCandidateSubmitRoutingV3(value);
+    return submitAutomaticBuildExecutorCandidateV3(
+      request as AutomaticBuildExecutorCandidateSubmitV3,
+      {
       now: request.now,
       timing: options.timing,
-    });
+      },
+    );
   }
   if (value.version === "automatic_build_executor_submit_request.v1") {
     const request = validateSubmitRequest(value);

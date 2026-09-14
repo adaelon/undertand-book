@@ -4,11 +4,15 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { claimAutomaticBuildTask } from "../src/automatic-build-lease";
-import { failAutomaticBuildTask } from "../src/automatic-build-mailbox";
+import { failAutomaticBuildTask, submitAutomaticBuildCandidate } from "../src/automatic-build-mailbox";
+import { recordAutomaticBuildInputObservation } from "../src/automatic-build-metrics";
+import { MODEL_INPUT_RENDER_CONTRACT_VERSION } from "../src/model-input-renderer";
+import { ExtractorContractError, type AutomaticBuildFailureDiagnosticV2 } from "../src/extractor-contract";
 import {
   automaticBuildTaskAttemptDirectory,
   nextAutomaticBuildExecutionIdentity,
   readAutomaticBuildRetryBoundary,
+  readAutomaticBuildCandidateRetryFeedback,
   readAutomaticBuildAttemptRecord,
   readAutomaticBuildAttemptSnapshot,
   recordAutomaticBuildRetryRecovery,
@@ -34,7 +38,7 @@ function targetFixture() {
 function exhaustPolicyScope(
   target: ReturnType<typeof resolveAutomaticBuildTarget>,
   fixture: ReturnType<typeof profileSidecarPolicyScopeFixture>,
-  failureDiagnostic: ReturnType<typeof createAutomaticBuildFailureDiagnostic>,
+  failureDiagnostic: AutomaticBuildFailureDiagnosticV2,
   eventPrefix: string,
 ): void {
   for (let semanticAttempt = 1; semanticAttempt <= 3; semanticAttempt += 1) {
@@ -52,6 +56,21 @@ function exhaustPolicyScope(
       },
     );
     if (claim.status !== "leased") throw new Error(`expected scope A attempt ${semanticAttempt}`);
+    if (failureDiagnostic.version === "automatic_build_failure_diagnostic.v3"
+      && failureDiagnostic.phase === "artifact_writer") {
+      recordAutomaticBuildInputObservation(target, claim.lease_ref, claim.lease.token, {
+        started_at: claim.lease.issued_at, finished_at: claim.lease.issued_at, input_bytes: 0,
+        input_sha256: fixture.scope_a.task_binding.input_hash, render_contract_version: MODEL_INPUT_RENDER_CONTRACT_VERSION,
+      });
+      const candidatePath = path.join(path.dirname(claim.lease_ref), "candidate.json");
+      writeFileSync(candidatePath, JSON.stringify({ type: "application" }));
+      submitAutomaticBuildCandidate(target, claim.lease_ref, claim.lease.token, candidatePath, () => {
+        throw new ExtractorContractError({ version: "automatic_build_extractor_diagnostic.v1",
+          code: failureDiagnostic.code, json_pointer: failureDiagnostic.json_pointer!,
+          expected: failureDiagnostic.expected!, actual: "application" });
+      }, { now: `2026-08-10T00:00:0${semanticAttempt}.100Z` });
+      continue;
+    }
     failAutomaticBuildTask(target, claim.lease_ref, claim.lease.token, {
       failure_diagnostic: failureDiagnostic,
       now: `2026-08-10T00:00:0${semanticAttempt}.100Z`,
@@ -320,10 +339,13 @@ describe("automatic build per-task attempt store", () => {
     });
   });
 
-  it("opens exactly one create-only retry window for an exact transient terminal boundary", () => {
+  it.each(["provider", "candidate"])("opens exactly one create-only retry window for an exact %s terminal boundary", (kind) => {
     const { target } = targetFixture();
     const fixture = profileSidecarPolicyScopeFixture(target);
-    exhaustPolicyScope(target, fixture, createAutomaticBuildFailureDiagnostic({
+    exhaustPolicyScope(target, fixture, kind === "candidate" ? createAutomaticBuildFailureDiagnosticV3({
+      category: "schema", code: "schema_invalid", phase: "artifact_writer",
+      json_pointer: "/unit_card/candidate_key_stops/4/type", expected: "definition | example | claim",
+    }) : createAutomaticBuildFailureDiagnostic({
       category: "provider",
       code: "provider_timeout",
     }), "profile-sidecar-provider-timeout");
@@ -338,7 +360,7 @@ describe("automatic build per-task attempt store", () => {
       version: "automatic_build_retry_boundary.v1",
       attempt_scope_digest: fixture.scope_a.attempt_scope_digest,
       exhausted_semantic_attempt: 3,
-      required_recovery: "authorize_transient_retry",
+      required_recovery: kind === "candidate" ? "authorize_candidate_retry" : "authorize_transient_retry",
     });
     if (!boundary) throw new Error("expected transient retry boundary");
     const terminalAttemptDir = automaticBuildTaskAttemptDirectory(
@@ -403,6 +425,12 @@ describe("automatic build per-task attempt store", () => {
     );
     if (reopened.status !== "leased") throw new Error("expected one recovered semantic attempt");
     expect(reopened.execution_identity).toMatchObject({ semantic_attempt: 4, lease_epoch: 1 });
+    if (kind === "candidate") {
+      expect(readAutomaticBuildCandidateRetryFeedback(target, fixture.descriptor.stage,
+        fixture.descriptor.work_unit_id, reopened.lease.attempt)).toMatchObject({
+          json_pointer: "/unit_card/candidate_key_stops/4/type", expected: "definition | example | claim",
+        });
+    }
     failAutomaticBuildTask(target, reopened.lease_ref, reopened.lease.token, {
       failure_diagnostic: createAutomaticBuildFailureDiagnostic({
         category: "provider",
@@ -434,6 +462,22 @@ describe("automatic build per-task attempt store", () => {
       event_id: "forged-scoped-reset",
       outcome: "reset",
     })).toThrow("scoped automatic build tasks require a guarded recovery receipt");
+  });
+
+  it("does not carry a candidate field error into a different input or policy scope", () => {
+    const { target } = targetFixture();
+    const fixture = profileSidecarPolicyScopeFixture(target);
+    exhaustPolicyScope(target, fixture, createAutomaticBuildFailureDiagnosticV3({
+      category: "schema", code: "schema_invalid", phase: "artifact_writer",
+      json_pointer: "/unit_card/candidate_key_stops/4/type", expected: "definition | example | claim",
+    }), "candidate-scope");
+    const changed = claimAutomaticBuildTask(target, fixture.descriptor.stage, fixture.descriptor.work_unit_id, {
+      owner: "scope-b-owner", now: "2026-08-10T00:00:10.000Z", descriptor: fixture.descriptor,
+      binding: fixture.scope_b.task_binding, policy_generation: "v3_only", max_semantic_attempts: 3,
+    });
+    if (changed.status !== "leased") throw new Error("expected new scope claim");
+    expect(readAutomaticBuildCandidateRetryFeedback(target, fixture.descriptor.stage,
+      fixture.descriptor.work_unit_id, changed.lease.attempt)).toBeUndefined();
   });
 
   it("rejects deterministic, stale, and fabricated same-scope recovery without writing", () => {

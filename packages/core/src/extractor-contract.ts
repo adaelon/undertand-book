@@ -35,6 +35,7 @@ export const AUTOMATIC_BUILD_FAILURE_CATEGORIES = [
   "evidence",
   "provider",
   "executor",
+  "transport",
   "budget",
   "internal",
 ] as const;
@@ -55,6 +56,7 @@ export type AutomaticBuildRequiredRecovery =
   | "change_evidence_or_policy_scope"
   | "replan_budget"
   | "confirm_transient_retry"
+  | "confirm_candidate_retry"
   | "recover_executor"
   | "forward_fix"
   | "inspect_legacy_failure";
@@ -141,6 +143,9 @@ const AUTOMATIC_BUILD_FAILURE_CODES: Record<AutomaticBuildFailureCategory, Reado
     "semantic_input_transport_truncated",
     "semantic_input_delivery_interrupted",
     "candidate_sink_unavailable",
+  ]),
+  transport: new Set([
+    "candidate_request_too_large",
   ]),
   budget: new Set([
     "budget_proof_invalid",
@@ -254,6 +259,9 @@ function validateFailurePhase(
   }
   if (category === "provider" && phase !== "generation") {
     throw new Error("provider failures require the generation failure phase");
+  }
+  if (category === "transport" && phase !== "generation") {
+    throw new Error("transport failures require the generation failure phase");
   }
   if (category === "budget" && phase !== "input_delivery") {
     throw new Error("budget failure diagnostics require the input_delivery failure phase");
@@ -482,11 +490,13 @@ export function requiredRecoveryForAutomaticBuildFailure(
   diagnostic: AutomaticBuildFailureDiagnosticV2,
 ): AutomaticBuildRequiredRecovery {
   const value = validateAutomaticBuildFailureDiagnostic(diagnostic);
+  if (isAutomaticBuildCorrectableCandidateFailure(value)) return "confirm_candidate_retry";
   switch (value.category) {
     case "schema": return "publish_new_policy_scope";
     case "evidence": return "change_evidence_or_policy_scope";
     case "budget": return "replan_budget";
     case "executor": return "recover_executor";
+    case "transport": return "recover_executor";
     case "provider": return TRANSIENT_PROVIDER_FAILURE_CODES.has(value.code)
       ? "confirm_transient_retry"
       : "forward_fix";
@@ -494,6 +504,17 @@ export function requiredRecoveryForAutomaticBuildFailure(
       ? "inspect_legacy_failure"
       : "forward_fix";
   }
+}
+
+/** A writer supplied a concrete candidate field correction, not a policy diagnosis. */
+export function isAutomaticBuildCorrectableCandidateFailure(
+  diagnostic: AutomaticBuildFailureDiagnosticV2,
+): boolean {
+  return isAutomaticBuildFailureDiagnosticV3(diagnostic)
+    && diagnostic.phase === "artifact_writer"
+    && diagnostic.category === "schema"
+    && diagnostic.code === "schema_invalid"
+    && Boolean(diagnostic.json_pointer && diagnostic.expected);
 }
 
 export function isAutomaticBuildTransientProviderFailure(

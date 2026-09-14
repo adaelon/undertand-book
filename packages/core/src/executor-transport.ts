@@ -13,6 +13,26 @@ export interface ExecutorTransportProfileV2 {
   max_candidate_request_bytes: number;
 }
 
+export interface CandidateTransportContractV1 {
+  version: "candidate_transport_contract.v1";
+  candidate_value_max_bytes: number;
+  candidate_value_max_estimated_tokens: number;
+  serialized_request_max_bytes: number;
+  serialized_request_max_estimated_tokens: number;
+}
+
+export type ExecutorCandidateRequestBlockReasonV1 =
+  | "token_cap_exceeded"
+  | "byte_cap_exceeded";
+
+export interface ExecutorCandidateRequestMeasurementV1 {
+  version: "executor_candidate_request_measurement.v1";
+  serialized_request: string;
+  serialized_request_bytes: number;
+  serialized_request_tokens: number;
+  blocking_reasons: ExecutorCandidateRequestBlockReasonV1[];
+}
+
 export type ExecutorTransportProfileInputV2 = Omit<
   ExecutorTransportProfileV2,
   "version"
@@ -211,6 +231,75 @@ export const CODEX_EXECUTOR_TRANSPORT_PROFILE_V2 = createExecutorTransportProfil
   max_candidate_request_tokens: 2_048,
   max_candidate_request_bytes: 32_768,
 });
+
+const CANDIDATE_SUBMIT_ENVELOPE_V3 = Object.freeze({
+  version: "automatic_build_executor_candidate_submit.v3" as const,
+  opaque_session_ref: `absession1_${"0".repeat(64)}`,
+  candidate_sink_ref: `absink1_${"0".repeat(64)}`,
+  candidate: null,
+});
+
+function candidateSubmitEnvelopeReserve(): { bytes: number; tokens: number } {
+  const serialized = canonicalAutomaticBuildJson(CANDIDATE_SUBMIT_ENVELOPE_V3);
+  const candidateMarker = "null";
+  const markerIndex = serialized.indexOf(candidateMarker);
+  if (markerIndex < 0) throw new Error("candidate submit envelope marker is missing");
+  const withoutCandidate = `${serialized.slice(0, markerIndex)}${serialized.slice(
+    markerIndex + candidateMarker.length,
+  )}`;
+  return {
+    bytes: Buffer.byteLength(withoutCandidate, "utf8"),
+    tokens: estimateTokens(withoutCandidate),
+  };
+}
+
+export function createCandidateTransportContract(
+  profile: ExecutorTransportProfileV2,
+  candidateValueByteCap = profile.max_candidate_request_bytes,
+): CandidateTransportContractV1 {
+  validateExecutorTransportProfile(profile);
+  positiveSafeInteger(candidateValueByteCap, "candidateValueByteCap");
+  const reserve = candidateSubmitEnvelopeReserve();
+  const candidateValueMaxBytes = Math.min(
+    candidateValueByteCap,
+    profile.max_candidate_request_bytes - reserve.bytes,
+  );
+  const candidateValueMaxTokens = profile.max_candidate_request_tokens - reserve.tokens;
+  if (candidateValueMaxBytes < 1 || candidateValueMaxTokens < 1) {
+    throw new Error("candidate request envelope consumes the transport budget");
+  }
+  return Object.freeze({
+    version: "candidate_transport_contract.v1",
+    candidate_value_max_bytes: candidateValueMaxBytes,
+    candidate_value_max_estimated_tokens: candidateValueMaxTokens,
+    serialized_request_max_bytes: profile.max_candidate_request_bytes,
+    serialized_request_max_estimated_tokens: profile.max_candidate_request_tokens,
+  });
+}
+
+export function measureExecutorCandidateRequest(
+  request: unknown,
+  profile: ExecutorTransportProfileV2,
+): ExecutorCandidateRequestMeasurementV1 {
+  validateExecutorTransportProfile(profile);
+  const serializedRequest = canonicalAutomaticBuildJson(request);
+  const serializedRequestBytes = Buffer.byteLength(serializedRequest, "utf8");
+  const serializedRequestTokens = estimateTokens(serializedRequest);
+  const blockingReasons: ExecutorCandidateRequestBlockReasonV1[] = [];
+  if (serializedRequestTokens > profile.max_candidate_request_tokens) {
+    blockingReasons.push("token_cap_exceeded");
+  }
+  if (serializedRequestBytes > profile.max_candidate_request_bytes) {
+    blockingReasons.push("byte_cap_exceeded");
+  }
+  return {
+    version: "executor_candidate_request_measurement.v1",
+    serialized_request: serializedRequest,
+    serialized_request_bytes: serializedRequestBytes,
+    serialized_request_tokens: serializedRequestTokens,
+    blocking_reasons: blockingReasons,
+  };
+}
 
 export function serializeExecutorMcpToolResult(response: unknown): string {
   return canonicalAutomaticBuildJson({

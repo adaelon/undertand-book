@@ -364,6 +364,7 @@ export function createBuildExecutorToolAdapter(input: {
         throw new Error("Build Executor tool is unsupported");
       }
       validateClosedToolRequest(toolName, request);
+      // Precise connection-open errors pass through to MCP without becoming a protocol error.
       if (!input.authorize_connection(connectionCapability, { tool_name: toolName, request })) {
         throw new Error("Build Executor child connection capability is missing or invalid");
       }

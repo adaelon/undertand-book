@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import {
   existsSync,
   lstatSync,
@@ -28,12 +28,19 @@ import {
 import {
   adaptAutomaticBuildPrivateArtifactSelectionV3,
   issueAutomaticBuildOpaqueHandoff,
+  recordAutomaticBuildExecutorBootstrapFailure,
   resolveAutomaticBuildTargetLids,
 } from "../../packages/core/src/automatic-build-executor-session";
-import { readAutomaticBuildDispatch } from "../../packages/core/src/automatic-build-dispatch-runtime";
+import {
+  inspectAutomaticBuildDispatchRecoveryGeneration,
+  AutomaticBuildDispatchSettledError,
+  readAutomaticBuildDispatch,
+  type AutomaticBuildRecoveryGenerationIdentity,
+} from "../../packages/core/src/automatic-build-dispatch-runtime";
 import { validateBuildIntentAny } from "../../packages/core/src/build-intent-v2";
 import {
   resolveAutomaticBuildTarget,
+  prepareAutomaticBuildSnapshot,
   type AutomaticBuildStage,
   type BuildTargetRefV2,
 } from "../../packages/core/src/build-orchestrator";
@@ -47,6 +54,7 @@ import {
 } from "../../packages/core/src/automatic-build-task-store";
 import {
   validateAutomaticBuildRetryBoundary,
+  allowsAutomaticBuildSameScopeRetry,
   type AutomaticBuildRetryBoundaryV1,
 } from "../../packages/core/src/automatic-build-attempt-recovery";
 import {
@@ -64,7 +72,8 @@ import {
 import {
   automaticBuildNext,
   automaticBuildPlan,
-  automaticBuildProtocolDoctor,
+  automaticBuildRecoveryAction,
+  automaticBuildProtocolContract,
   runAutomaticBuildCloseStage,
 } from "./automatic-build";
 import { prepareIntentArtifactMailboxes } from "./intent-artifact";
@@ -75,6 +84,7 @@ const MAX_TRANSITIONS = 8;
 const INVOCATION_REF = /^abinv1_[a-f0-9]{64}$/u;
 const REQUEST_ID = /^abreq1_[a-f0-9]{64}$/u;
 const HANDOFF_REF = /^abhandoff1_[a-f0-9]{64}$/u;
+const DISPATCH_SLOT_REF = /^abdispatchslot1_[a-f0-9]{64}$/u;
 const SHA256 = /^[a-f0-9]{64}$/u;
 const FORBIDDEN_ROOT_FIELDS = new Set([
   "command",
@@ -131,6 +141,8 @@ const USER_DECISION_REASONS = new Set<AutomaticBuildUserDecisionReasonV1>([
   "recovery_not_satisfied",
   "executor_instability",
   "installation_incompatible",
+  "executor_bootstrap_failed",
+  "build_engine_failed",
 ]);
 
 export type AutomaticBuildUserDecisionReasonV1 =
@@ -147,7 +159,9 @@ export type AutomaticBuildUserDecisionReasonV1 =
   | "retry_exhausted"
   | "recovery_not_satisfied"
   | "executor_instability"
-  | "installation_incompatible";
+  | "installation_incompatible"
+  | "executor_bootstrap_failed"
+  | "build_engine_failed";
 
 export interface AutomaticBuildUserDecisionProjectionV1 {
   category: AutomaticBuildUserDecisionReasonV1 | AutomaticBuildFailureCategory;
@@ -169,7 +183,10 @@ export interface AutomaticBuildCompletionSummaryV1 {
 export type AutomaticBuildStepActionV1 =
   | {
       kind: "SPAWN_EXECUTORS";
-      executors: Array<{ opaque_handoff_ref: string }>;
+      executors: Array<{
+        opaque_handoff_ref: string;
+        dispatch_slot_ref?: string;
+      }>;
     }
   | {
       kind: "WAIT";
@@ -199,6 +216,12 @@ export interface AutomaticBuildStepRequestV1 {
   invocation_ref: string;
   available_agent_slots: 0 | 1 | 2 | 3;
   decision?: { request_id: string; choice_id: string };
+  bootstrap_failure?: { opaque_handoff_ref: string };
+  executor_open_failure?: {
+    opaque_handoff_ref: string;
+    diagnostic_code: "connection_terminal" | "handoff_ref_mismatch";
+    phase: "open";
+  };
 }
 
 export interface AutomaticBuildInvocationCreateV1 {
@@ -272,6 +295,25 @@ interface AutomaticBuildDriverDispatchProjectionV1 {
   dispatch_id: string;
   dispatch_run_id: string;
   opaque_handoff_ref: string;
+}
+
+interface AutomaticBuildDriverHandoffProjectionV2 {
+  version: "automatic_build_driver_handoff_projection.v2";
+  invocation_ref: string;
+  opaque_handoff_ref: string;
+  dispatch_slot_ref: string;
+  recovery_identity: AutomaticBuildRecoveryGenerationIdentity;
+  dispatch_identity: AutomaticBuildDriverHandoffProjectionV1["dispatch_identity"];
+}
+
+interface AutomaticBuildDriverDispatchProjectionV2 {
+  version: "automatic_build_driver_dispatch_projection.v2";
+  invocation_ref: string;
+  dispatch_id: string;
+  dispatch_run_id: string;
+  opaque_handoff_ref: string;
+  dispatch_slot_ref: string;
+  recovery_identity: AutomaticBuildRecoveryGenerationIdentity;
 }
 
 interface DriverState {
@@ -436,7 +478,7 @@ function validateCreateInput(value: unknown): AutomaticBuildInvocationCreateV1 {
 
 function validateStepRequest(value: unknown): AutomaticBuildStepRequestV1 {
   if (!isRecord(value)) throw new Error("automatic build step request is invalid");
-  exactKeys(value, ["version", "invocation_ref", "available_agent_slots"], ["decision"]);
+  exactKeys(value, ["version", "invocation_ref", "available_agent_slots"], ["decision", "bootstrap_failure", "executor_open_failure"]);
   if (value.version !== "automatic_build_step_request.v1"
     || typeof value.invocation_ref !== "string" || !INVOCATION_REF.test(value.invocation_ref)) {
     throw new Error("automatic build step request version or invocation ref is invalid");
@@ -444,6 +486,28 @@ function validateStepRequest(value: unknown): AutomaticBuildStepRequestV1 {
   const availableAgentSlots = nonNegativeSafeInteger(value.available_agent_slots, "available_agent_slots");
   if (availableAgentSlots > 3) throw new Error("available_agent_slots must be between 0 and 3");
   let decision: AutomaticBuildStepRequestV1["decision"];
+  let bootstrapFailure: AutomaticBuildStepRequestV1["bootstrap_failure"];
+  let openFailure: AutomaticBuildStepRequestV1["executor_open_failure"];
+  if (value.executor_open_failure !== undefined) {
+    if (value.bootstrap_failure !== undefined) throw new Error("executor failure observations are mutually exclusive");
+    const failure = value.executor_open_failure;
+    if (!isRecord(failure)) throw new Error("executor open failure is invalid");
+    exactKeys(failure, ["opaque_handoff_ref", "diagnostic_code", "phase"]);
+    if (typeof failure.opaque_handoff_ref !== "string" || !HANDOFF_REF.test(failure.opaque_handoff_ref)
+      || failure.phase !== "open"
+      || (failure.diagnostic_code !== "connection_terminal" && failure.diagnostic_code !== "handoff_ref_mismatch")) {
+      throw new Error("executor open failure is invalid");
+    }
+    openFailure = { opaque_handoff_ref: failure.opaque_handoff_ref,
+      diagnostic_code: failure.diagnostic_code, phase: failure.phase };
+  }
+  if (value.bootstrap_failure !== undefined) {
+    if (!isRecord(value.bootstrap_failure)) throw new Error("bootstrap failure is invalid");
+    exactKeys(value.bootstrap_failure, ["opaque_handoff_ref"]);
+    const ref = value.bootstrap_failure.opaque_handoff_ref;
+    if (typeof ref !== "string" || !HANDOFF_REF.test(ref)) throw new Error("bootstrap handoff ref is invalid");
+    bootstrapFailure = { opaque_handoff_ref: ref };
+  }
   if (value.decision !== undefined) {
     if (!isRecord(value.decision)) throw new Error("automatic build decision is invalid");
     exactKeys(value.decision, ["request_id", "choice_id"]);
@@ -460,6 +524,8 @@ function validateStepRequest(value: unknown): AutomaticBuildStepRequestV1 {
     invocation_ref: value.invocation_ref,
     available_agent_slots: availableAgentSlots as 0 | 1 | 2 | 3,
     ...(decision ? { decision } : {}),
+    ...(bootstrapFailure ? { bootstrap_failure: bootstrapFailure } : {}),
+    ...(openFailure ? { executor_open_failure: openFailure } : {}),
   };
 }
 
@@ -855,18 +921,23 @@ function userMessage(reason: AutomaticBuildUserDecisionReasonV1): string {
     case "low_confidence_wall_budget": return "The wall-clock forecast exceeds its limit with low confidence.";
     case "wall_budget_exceeded": return "The current wall-clock forecast exceeds the confirmed limit.";
     case "executor_unavailable": return "No dedicated executor slot is currently available.";
+    case "executor_bootstrap_failed": return "The executor failed to start three times. Repair its tool availability, then retry the current build.";
     case "foundation_required": return "The deterministic build foundation requires attention before continuing.";
     case "legacy_migration_required": return "Legacy build state requires an explicit migration choice.";
     case "quality_gate_failed": return "The stage quality gate failed and publication remains closed.";
     case "retry_exhausted": return "Semantic retries are exhausted and require explicit recovery.";
     case "recovery_not_satisfied": return "The bound terminal state does not satisfy same-scope retry recovery.";
     case "executor_instability": return "Executor lease recovery is exhausted and requires explicit recovery.";
+    case "build_engine_failed": return "The build engine failed; inspect the bounded local diagnostic before continuing.";
     case "installation_incompatible": return "The installed build runtime is incompatible with this protocol.";
   }
 }
 
 function choicesFor(reason: AutomaticBuildUserDecisionReasonV1) {
   switch (reason) {
+    case "executor_bootstrap_failed":
+      return [{ choice_id: "retry_bootstrap", label: "Retry after repairing executor startup",
+        consequence: "Authorize one new bootstrap generation without rerunning accepted artifacts." }];
     case "plan_confirmation_required":
     case "plan_changed":
       return [{
@@ -1464,8 +1535,8 @@ function retryBoundaryMatches(
     && left.attempt_scope_digest === right.attempt_scope_digest
     && left.exhausted_semantic_attempt === right.exhausted_semantic_attempt
     && left.terminal_receipt_sha256 === right.terminal_receipt_sha256
-    && left.diagnostic_digest === right.diagnostic_digest
-    && left.required_recovery === right.required_recovery;
+    // Recovery advice can change with an engine fix; the bound failure cannot.
+    && left.diagnostic_digest === right.diagnostic_digest;
 }
 
 function unresolvedRetryResponse(
@@ -1515,7 +1586,7 @@ function prepareRetryRecoveries(
     if (!currentBoundary || !retryBoundaryMatches(previous, currentBoundary)) {
       return { status: "stale" };
     }
-    if (currentBoundary.required_recovery !== "authorize_transient_retry") {
+    if (!allowsAutomaticBuildSameScopeRetry(currentBoundary)) {
       return { status: "not_satisfied" };
     }
     const input: Parameters<typeof prepareAutomaticBuildRetryRecovery>[1] = {
@@ -1539,6 +1610,10 @@ function applyDecision(
   const request = readDecisionRequest(decision.request_id);
   if (request.invocation_ref !== invocation.invocation_ref) {
     throw new Error("automatic build decision belongs to a different invocation");
+  }
+  if (request.reason === "retry_exhausted" && decision.choice_id === "retry_current") {
+    const accepted = readDecisionReceipt(invocation, request.request_id);
+    if (accepted?.choice_id === decision.choice_id) return {};
   }
   const identity = stateIdentity(current);
   if (!request.choices.some((choice) => choice.choice_id === decision.choice_id)) {
@@ -1594,7 +1669,7 @@ function applyDecision(
 function dispatchHandoffRefs(
   invocation: AutomaticBuildInvocationRecordV1,
   dispatches: unknown,
-): Array<{ opaque_handoff_ref: string }> {
+): Array<{ opaque_handoff_ref: string; dispatch_slot_ref: string }> {
   if (!Array.isArray(dispatches) || !dispatches.length) {
     throw new Error("automatic build dispatch action has no dispatches");
   }
@@ -1607,16 +1682,28 @@ function dispatchHandoffRefs(
     const dispatchRunId = boundedString(value.dispatch_run_id, "dispatch_run_id", 512);
     const handoffDigest = value.executor_handoff.sha256;
     const opaqueHandoffRef = value.opaque_handoff_ref;
+    const dispatchSlotRef = value.dispatch_slot_ref;
+    const recoveryIdentity = value.recovery_identity;
     if (!stage || typeof handoffDigest !== "string" || !SHA256.test(handoffDigest)) {
       throw new Error("automatic build dispatch identity is invalid");
     }
     if (typeof opaqueHandoffRef !== "string" || !HANDOFF_REF.test(opaqueHandoffRef)) {
       throw new Error("automatic build handoff ref is invalid");
     }
-    const projection: AutomaticBuildDriverHandoffProjectionV1 = {
-      version: "automatic_build_driver_handoff_projection.v1",
+    if (typeof dispatchSlotRef !== "string" || !DISPATCH_SLOT_REF.test(dispatchSlotRef)
+      || !isRecord(recoveryIdentity)
+      || (recoveryIdentity.version !== "automatic_build_recovery_generation_identity.v1"
+        && recoveryIdentity.version !== "automatic_build_recovery_generation_identity.v2")
+      || recoveryIdentity.dispatch_id !== dispatchId
+      || recoveryIdentity.dispatch_run_id !== dispatchRunId) {
+      throw new Error("automatic build recovery launch identity is invalid");
+    }
+    const projection: AutomaticBuildDriverHandoffProjectionV2 = {
+      version: "automatic_build_driver_handoff_projection.v2",
       invocation_ref: invocation.invocation_ref,
       opaque_handoff_ref: opaqueHandoffRef,
+      dispatch_slot_ref: dispatchSlotRef,
+      recovery_identity: recoveryIdentity as unknown as AutomaticBuildRecoveryGenerationIdentity,
       dispatch_identity: {
         stage,
         dispatch_id: dispatchId,
@@ -1628,29 +1715,71 @@ function dispatchHandoffRefs(
       path.join("handoff-projections", invocation.invocation_ref),
       opaqueHandoffRef,
     ), projection);
-    const dispatchProjection: AutomaticBuildDriverDispatchProjectionV1 = {
-      version: "automatic_build_driver_dispatch_projection.v1",
+    const dispatchProjection: AutomaticBuildDriverDispatchProjectionV2 = {
+      version: "automatic_build_driver_dispatch_projection.v2",
       invocation_ref: invocation.invocation_ref,
       dispatch_id: dispatchId,
       dispatch_run_id: dispatchRunId,
       opaque_handoff_ref: opaqueHandoffRef,
+      dispatch_slot_ref: dispatchSlotRef,
+      recovery_identity: recoveryIdentity as unknown as AutomaticBuildRecoveryGenerationIdentity,
     };
     writeCreateOnly(
       recordFile(
         path.join("dispatch-projections", invocation.invocation_ref),
-        sha256({ dispatch_id: dispatchId, dispatch_run_id: dispatchRunId }),
+        sha256({
+          version: "automatic_build_driver_dispatch_projection_locator.v2",
+          recovery_identity: recoveryIdentity,
+        }),
       ),
       dispatchProjection,
     );
-    return { opaque_handoff_ref: opaqueHandoffRef };
+    return { opaque_handoff_ref: opaqueHandoffRef, dispatch_slot_ref: dispatchSlotRef };
   });
+}
+
+function invocationDispatchProjection(
+  invocation: AutomaticBuildInvocationRecordV1,
+  ref: string,
+): AutomaticBuildDriverHandoffProjectionV2 | undefined {
+  const file = recordFile(path.join("handoff-projections", invocation.invocation_ref), ref);
+  if (!existsSync(file)) return undefined;
+  const value = readJsonRecord(file);
+  if (!isRecord(value) || value.version !== "automatic_build_driver_handoff_projection.v2"
+    || value.invocation_ref !== invocation.invocation_ref || value.opaque_handoff_ref !== ref) return undefined;
+  return value as unknown as AutomaticBuildDriverHandoffProjectionV2;
+}
+
+function bootstrapBoundaryForLaunches(
+  invocation: AutomaticBuildInvocationRecordV1,
+  current: DriverState,
+  executors: Array<{ opaque_handoff_ref: string }>,
+): AutomaticBuildStepResponseV1 | undefined {
+  for (const launch of executors) {
+    const identity = invocationDispatchProjection(invocation, launch.opaque_handoff_ref)?.recovery_identity;
+    if (!identity || identity.version !== "automatic_build_recovery_generation_identity.v2"
+      || identity.bootstrap_epoch < 3) continue;
+    const boundary = syntheticBoundary("executor_bootstrap_failed",
+      `bootstrap_unavailable:${launch.opaque_handoff_ref}`, current);
+    boundary.projection = { category: "executor_bootstrap_failed", code: "bootstrap_unavailable" };
+    const receipt = readDecisionReceipt(invocation,
+      requestIdFor(invocation, boundary, choicesFor(boundary.reason)));
+    if (receipt?.choice_id !== "retry_bootstrap") return issueBoundary(invocation, boundary);
+  }
+  return undefined;
 }
 
 function replayDispatchHandoffRefs(
   invocation: AutomaticBuildInvocationRecordV1,
+  stageValue: unknown,
   activeDispatchIdsValue: unknown,
-): Array<{ opaque_handoff_ref: string }> | undefined {
+  dispatchRunIdValue: unknown,
+  now: string,
+): Array<{ opaque_handoff_ref: string; dispatch_slot_ref: string }> | undefined {
   if (!Array.isArray(activeDispatchIdsValue) || !activeDispatchIdsValue.length) return undefined;
+  const stage = safeStage(stageValue);
+  if (!stage) throw new Error("automatic build active dispatch projection stage is invalid");
+  const dispatchRunId = boundedString(dispatchRunIdValue, "dispatch_run_id", 512);
   const activeDispatchIds = activeDispatchIdsValue.map((value) => boundedString(
     value,
     "active_dispatch_id",
@@ -1672,44 +1801,83 @@ function replayDispatchHandoffRefs(
     throw new Error("automatic build dispatch projection directory is invalid");
   }
   const active = new Set(activeDispatchIds);
-  const latest = new Map<string, AutomaticBuildDriverDispatchProjectionV1>();
+  const target = resolveInvocationTarget(invocation);
+  const currentByDispatch = new Map(activeDispatchIds.map((dispatchId) => [
+    dispatchId,
+    inspectAutomaticBuildDispatchRecoveryGeneration(target, stage, dispatchId, {
+      now,
+      dispatch_run_id: dispatchRunId,
+    }),
+  ]));
+  const latest = new Map<string, AutomaticBuildDriverDispatchProjectionV2>();
   for (const entry of entries) {
     if (!/^[a-f0-9]{64}\.json$/u.test(entry.name)) {
       throw new Error("automatic build dispatch projection filename is invalid");
     }
     const value = readJsonRecord(path.join(realDirectory, entry.name));
     if (!isRecord(value)) throw new Error("automatic build dispatch projection is invalid");
+    if (value.version === "automatic_build_driver_dispatch_projection.v1") {
+      exactKeys(value, [
+        "version",
+        "invocation_ref",
+        "dispatch_id",
+        "dispatch_run_id",
+        "opaque_handoff_ref",
+      ]);
+      if (value.invocation_ref !== invocation.invocation_ref
+        || typeof value.dispatch_id !== "string"
+        || typeof value.dispatch_run_id !== "string"
+        || typeof value.opaque_handoff_ref !== "string"
+        || !HANDOFF_REF.test(value.opaque_handoff_ref)
+        || entry.name !== `${sha256({
+          dispatch_id: value.dispatch_id,
+          dispatch_run_id: value.dispatch_run_id,
+        })}.json`) {
+        throw new Error("automatic build V1 dispatch projection identity is invalid");
+      }
+      continue;
+    }
     exactKeys(value, [
       "version",
       "invocation_ref",
       "dispatch_id",
       "dispatch_run_id",
       "opaque_handoff_ref",
+      "dispatch_slot_ref",
+      "recovery_identity",
     ]);
-    if (value.version !== "automatic_build_driver_dispatch_projection.v1"
+    if (value.version !== "automatic_build_driver_dispatch_projection.v2"
       || value.invocation_ref !== invocation.invocation_ref
       || typeof value.dispatch_id !== "string"
       || typeof value.dispatch_run_id !== "string"
       || typeof value.opaque_handoff_ref !== "string"
-      || !HANDOFF_REF.test(value.opaque_handoff_ref)) {
+      || !HANDOFF_REF.test(value.opaque_handoff_ref)
+      || typeof value.dispatch_slot_ref !== "string"
+      || !DISPATCH_SLOT_REF.test(value.dispatch_slot_ref)
+      || !isRecord(value.recovery_identity)) {
       throw new Error("automatic build dispatch projection identity is invalid");
     }
     if (entry.name !== `${sha256({
-      dispatch_id: value.dispatch_id,
-      dispatch_run_id: value.dispatch_run_id,
+      version: "automatic_build_driver_dispatch_projection_locator.v2",
+      recovery_identity: value.recovery_identity,
     })}.json`) {
       throw new Error("automatic build dispatch projection digest is invalid");
     }
     if (!active.has(value.dispatch_id)) continue;
-    const candidate = value as unknown as AutomaticBuildDriverDispatchProjectionV1;
-    const current = latest.get(candidate.dispatch_id);
-    if (!current || candidate.dispatch_run_id.localeCompare(current.dispatch_run_id) > 0) {
-      latest.set(candidate.dispatch_id, candidate);
+    const current = currentByDispatch.get(value.dispatch_id);
+    if (!current
+      || value.dispatch_run_id !== dispatchRunId
+      || canonicalAutomaticBuildJson(value.recovery_identity)
+        !== canonicalAutomaticBuildJson(current.recovery_identity)) continue;
+    if (value.dispatch_slot_ref !== current.dispatch_slot_ref) {
+      throw new Error("automatic build dispatch projection slot identity changed");
     }
+    latest.set(value.dispatch_id, value as unknown as AutomaticBuildDriverDispatchProjectionV2);
   }
   if (activeDispatchIds.some((dispatchId) => !latest.has(dispatchId))) return undefined;
   return activeDispatchIds.map((dispatchId) => ({
     opaque_handoff_ref: latest.get(dispatchId)!.opaque_handoff_ref,
+    dispatch_slot_ref: latest.get(dispatchId)!.dispatch_slot_ref,
   }));
 }
 
@@ -1719,7 +1887,7 @@ function reissueActiveDispatchHandoffRefs(
   activeDispatchIdsValue: unknown,
   dispatchRunIdValue: unknown,
   issuedAt: string,
-): Array<{ opaque_handoff_ref: string }> {
+): Array<{ opaque_handoff_ref: string; dispatch_slot_ref: string }> {
   const stage = safeStage(stageValue);
   if (!stage || !Array.isArray(activeDispatchIdsValue) || !activeDispatchIdsValue.length) {
     throw new Error("automatic build active dispatch reissue input is invalid");
@@ -1738,6 +1906,12 @@ function reissueActiveDispatchHandoffRefs(
       || persisted.dispatch_run_id !== dispatchRunId) {
       throw new Error("automatic build durable dispatch identity changed during reissue");
     }
+    const recoveryGeneration = inspectAutomaticBuildDispatchRecoveryGeneration(
+      target,
+      stage,
+      dispatchId,
+      { now: issuedAt, dispatch_run_id: dispatchRunId },
+    );
     const issued = issueAutomaticBuildOpaqueHandoff({
       target,
       kind: "public_dispatch",
@@ -1747,6 +1921,7 @@ function reissueActiveDispatchHandoffRefs(
         dispatch_id: dispatchId,
         dispatch_run_id: dispatchRunId,
       },
+      recovery_identity: recoveryGeneration.recovery_identity,
       executor_handoff: persisted.executor_handoff,
       issued_at: issuedAt,
     });
@@ -1755,6 +1930,8 @@ function reissueActiveDispatchHandoffRefs(
       dispatch_run_id: persisted.dispatch_run_id,
       executor_handoff: persisted.executor_handoff,
       opaque_handoff_ref: issued.opaque_handoff_ref,
+      dispatch_slot_ref: recoveryGeneration.dispatch_slot_ref,
+      recovery_identity: recoveryGeneration.recovery_identity,
     };
   });
   return dispatchHandoffRefs(invocation, dispatches);
@@ -1917,7 +2094,7 @@ export function automaticBuildStep(inputValue: AutomaticBuildStepRequestV1): Aut
     ));
   }
 
-  const doctor = automaticBuildProtocolDoctor(
+  const doctor = automaticBuildProtocolContract(
     invocation.input.target_input,
     invocation.input.root_dir,
     {
@@ -1939,14 +2116,36 @@ export function automaticBuildStep(inputValue: AutomaticBuildStepRequestV1): Aut
     ));
   }
 
+  const unopenedFailure = input.bootstrap_failure ?? input.executor_open_failure;
+  if (unopenedFailure) {
+    const ref = unopenedFailure.opaque_handoff_ref;
+    if (!invocationDispatchProjection(invocation, ref)) {
+      throw new Error("bootstrap handoff was not issued by this invocation");
+    }
+    recordAutomaticBuildExecutorBootstrapFailure(ref, invocation.initial_target_ref,
+      transitionNow(current, input.available_agent_slots, effect));
+  }
+
   for (let transition = 0; transition < MAX_TRANSITIONS; transition += 1) {
-    current = loadDriverState(invocation, input.available_agent_slots, effect);
+    // A new transition follows a state change; the initial pure decision shares its read.
+    if (transition > 0 || unopenedFailure) current = loadDriverState(invocation, input.available_agent_slots, effect);
     const planAction = current.plan_result.next_action;
     if (planAction.kind === "needs_user") {
       return issueBoundary(
         invocation,
         boundaryFromAction(planAction as unknown as Record<string, unknown>, stateIdentity(current)),
       );
+    }
+    const preparation = current.plan_result.snapshot.stages.find(stage => stage.preparation_required
+      && current.plan.public_stage_closure.includes(stage.stage));
+    if (preparation?.policy_set) {
+      const prepared = prepareAutomaticBuildSnapshot(current.plan_result.snapshot.target, preparation.policy_set.stage,
+        { quality_profile: invocation.input.quality_profile });
+      if (prepared.status === "blocked") {
+        return issueBoundary(invocation, boundaryFromAction(automaticBuildRecoveryAction(prepared.recovery), stateIdentity(current)));
+      }
+      // Preparation can adopt accepted work or expose a reducer. Recompute pending and budget evidence.
+      continue;
     }
     const preflight = current.plan_result.preflight;
     const next = automaticBuildNext(
@@ -1970,6 +2169,7 @@ export function automaticBuildStep(inputValue: AutomaticBuildStepRequestV1): Aut
         executor_dispatches: true,
         build_plan: current.plan,
       },
+      current.plan_result.snapshot,
     );
     const action = next.action as unknown as Record<string, unknown>;
     if (action.kind === "needs_user") {
@@ -1982,24 +2182,46 @@ export function automaticBuildStep(inputValue: AutomaticBuildStepRequestV1): Aut
       return issueBoundary(invocation, boundary);
     }
     if (action.kind === "dispatch") {
+      const executors = dispatchHandoffRefs(invocation, action.dispatches);
+      const selectedIds = new Set((action.dispatches as Array<{ manifest: { dispatch_id: string } }>)
+        .map(dispatch => dispatch.manifest.dispatch_id));
+      const replayIds = Array.isArray(action.replay_dispatch_ids)
+        ? action.replay_dispatch_ids.filter(id => !selectedIds.has(id)) : [];
+      if (replayIds.length) {
+        const issuedAt = transitionNow(current, input.available_agent_slots, effect);
+        executors.push(...(replayDispatchHandoffRefs(invocation, action.stage, replayIds,
+          action.dispatch_run_id, issuedAt) ?? reissueActiveDispatchHandoffRefs(invocation,
+          action.stage, replayIds, action.dispatch_run_id, issuedAt)));
+      }
+      const bootstrapBoundary = bootstrapBoundaryForLaunches(invocation, current, executors);
+      if (bootstrapBoundary) return bootstrapBoundary;
       return finalizeResponse({
         version: "automatic_build_step.v1",
         action: {
           kind: "SPAWN_EXECUTORS",
-          executors: dispatchHandoffRefs(invocation, action.dispatches),
+          executors,
         },
       });
     }
     if (action.kind === "waiting") {
       if (action.reason === "active_dispatches") {
-        const replayed = replayDispatchHandoffRefs(invocation, action.active_dispatch_ids);
+        const issuedAt = transitionNow(current, input.available_agent_slots, effect);
+        const replayed = replayDispatchHandoffRefs(
+          invocation,
+          action.stage,
+          action.active_dispatch_ids,
+          action.dispatch_run_id,
+          issuedAt,
+        );
         const executors = replayed ?? reissueActiveDispatchHandoffRefs(
           invocation,
           action.stage,
           action.active_dispatch_ids,
           action.dispatch_run_id,
-          transitionNow(current, input.available_agent_slots, effect),
+          issuedAt,
         );
+        const bootstrapBoundary = bootstrapBoundaryForLaunches(invocation, current, executors);
+        if (bootstrapBoundary) return bootstrapBoundary;
         return finalizeResponse({
           version: "automatic_build_step.v1",
           action: { kind: "SPAWN_EXECUTORS", executors },
@@ -2094,6 +2316,36 @@ export function runAutomaticBuildDriverCommand(value: unknown): unknown {
   throw new Error("build.step request version is unsupported");
 }
 
+/** Keep raw errors in the local driver registry, outside the root's semantic boundary. */
+export function automaticBuildDriverFailureResponse(error: unknown): AutomaticBuildStepResponseV1 {
+  if (error instanceof AutomaticBuildDispatchSettledError) {
+    // Another executor may finish during publication/replay. The next step reconciles receipts.
+    return finalizeResponse({ version: "automatic_build_step.v1",
+      action: { kind: "WAIT", reason: "backoff", retry_after_ms: 50 } });
+  }
+  const requestId = `abreq1_${randomBytes(32).toString("hex")}`;
+  const diagnostic = {
+    version: "automatic_build_driver_failure.v1",
+    request_id: requestId,
+    created_at: new Date().toISOString(),
+    error: error instanceof Error ? {
+      name: error.name.slice(0, 128), message: error.message.slice(0, 2048), stack: error.stack?.slice(0, 8192),
+    } : { name: "NonErrorThrown", message: String(error).slice(0, 2048) },
+  };
+  let saved = false;
+  try { writeCreateOnly(recordFile("diagnostics", requestId), diagnostic); saved = true; } catch { /* Report the unavailable diagnostic explicitly. */ }
+  return finalizeResponse({
+    version: "automatic_build_step.v1",
+    action: {
+      kind: "NEEDS_USER", request_id: requestId, reason: "build_engine_failed", choices: [],
+      message: saved
+        ? "The build engine failed. A bounded local diagnostic is stored under this request ID; maintenance is required before continuing."
+        : "The build engine failed and its local diagnostic could not be saved. Maintenance is required before continuing.",
+      projection: { category: "internal", code: saved ? "build_step_failed" : "build_step_failed_diagnostic_unavailable" },
+    },
+  });
+}
+
 function readStdinRequest(): unknown {
   const bytes = readFileSync(0);
   if (!bytes.byteLength || bytes.byteLength > MAX_STDIN_BYTES || bytes.includes(0)) {
@@ -2109,8 +2361,7 @@ function isCommandEntrypoint(): boolean {
 if (isCommandEntrypoint()) {
   try {
     process.stdout.write(`${canonicalAutomaticBuildJson(runAutomaticBuildDriverCommand(readStdinRequest()))}\n`);
-  } catch {
-    process.stderr.write("build.step failed; inspect deterministic build state for diagnostics\n");
-    process.exitCode = 2;
+  } catch (error) {
+    process.stdout.write(`${canonicalAutomaticBuildJson(automaticBuildDriverFailureResponse(error))}\n`);
   }
 }

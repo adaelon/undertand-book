@@ -1,0 +1,90 @@
+{
+  "version": "understand_book_t7_executor_release_evidence.v3",
+  "status": "passed",
+  "executor_role": "understand_book_executor",
+  "shared_executor_mcp": {
+    "registration_scope": "root_shared",
+    "bootstrap_version": "automatic_build_executor_bootstrap.v3",
+    "session_protocol": "automatic_build_executor_session.v3",
+    "executor_tool_count": 4,
+    "exact_four": true,
+    "capability_isolation": false,
+    "caller_role_authenticated": false,
+    "compiled_sidecar_executed": true,
+    "installed_launcher_executed": true
+  },
+  "transport_profile": {
+    "version": "executor_transport_profile.v2",
+    "carrier": "codex_executor_mcp",
+    "session_protocol": "automatic_build_executor_session.v3",
+    "max_tool_result_tokens": 2048,
+    "max_tool_result_bytes": 8192,
+    "result_envelope_reserve_tokens": 256,
+    "max_input_chunks": 64,
+    "max_candidate_request_tokens": 2048,
+    "max_candidate_request_bytes": 32768
+  },
+  "tool_inventory": [
+    "executor.open",
+    "executor.input.next",
+    "executor.generation.start",
+    "executor.submit_candidate"
+  ],
+  "forbidden_digest_field_count": 0,
+  "synthetic_input": {
+    "compiled_chunk_count": 4,
+    "compiled_batch_count": 1,
+    "compiled_delivered_bytes": 24308,
+    "max_tool_result_bytes": 26486,
+    "batch_zero_request_replays": 4
+  },
+  "attempt_contract": {
+    "before_generation_start": 0,
+    "accepted_generation_count": 1,
+    "final_semantic_attempt_count": 1,
+    "untouched_cross_handoff_attempt_count": 0
+  },
+  "negative_gates": {
+    "bootstrap_v2": "protocol_incompatible",
+    "unknown_request_field": "protocol_incompatible",
+    "cross_handoff_connection": "protocol_incompatible",
+    "premature_generation_start": "protocol_incompatible",
+    "ack_through_ordinal_mismatch": "protocol_incompatible"
+  },
+  "trace_allowlist": {
+    "semantic_chunk_hits": 6,
+    "candidate_request_hits": 6
+  },
+  "mcp_server_timing": {
+    "version": "executor_mcp_server_timing.v2",
+    "sample_count": 15,
+    "first_connection_call_ordinal": 1,
+    "last_connection_call_ordinal": 15,
+    "operations": [
+      "executor.generation.start",
+      "executor.input.next",
+      "executor.open",
+      "executor.submit_candidate"
+    ],
+    "bounded_error_count": 4
+  },
+  "rg8_recovery_canary": {
+    "committed_reused_units": 2,
+    "recovered_units": 1,
+    "stale_epoch": 1,
+    "recovered_epoch": 2,
+    "semantic_attempt": 1,
+    "recovery_ref_replays": 2,
+    "trace_event_count": 30
+  },
+  "rg8_oversize_canary": {
+    "diagnostic_code": "candidate_request_too_large",
+    "phase": "generation",
+    "semantic_attempt": 1,
+    "lease_epoch": 1,
+    "failure_count": 1,
+    "writer_started": false,
+    "candidate_file_count": 0
+  },
+  "final_status": "committed"
+}

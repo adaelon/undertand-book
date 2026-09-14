@@ -1,0 +1,345 @@
+{
+  "version": "understand_book_l1_l2_regression.v1",
+  "expected_tests": 121,
+  "groups": [
+    {
+      "group": 1,
+      "file": "test/automatic-build-executor-session.test.ts",
+      "test_names": [
+        "automatic build executor.open > documents that the V1 GENERATE envelope would inline and overflow a 317,247-byte input",
+        "automatic build executor.open > opens one create-only session and makes every replay resume the same first GENERATE lease",
+        "automatic build executor.open > reissues the same V4 recovery handoff without rewriting its first issued timestamp",
+        "automatic build executor.open > rejects malformed, overlong, and unknown refs without touching task state",
+        "automatic build executor.open > rejects missing handoff and missing publish marker before task claim"
+      ],
+      "passed": 5,
+      "expected": 5,
+      "exit_code": 0,
+      "status": "passed"
+    },
+    {
+      "group": 2,
+      "file": "test/automatic-build-executor-session.test.ts",
+      "test_names": [
+        "automatic build executor.open > rejects handoff bytes and manifest identity drift before task claim",
+        "automatic build executor.open > revalidates strict JSON and prompt hash even when every outer digest is rewritten",
+        "automatic build executor.open > rejects a symlinked published run before task claim",
+        "automatic build executor.open > returns durable terminal state without creating an open record or task attempt",
+        "automatic build public executor session S3 > runs an ordered public dispatch through the code-owned candidate sink to a canonical terminal receipt"
+      ],
+      "passed": 5,
+      "expected": 5,
+      "exit_code": 0,
+      "status": "passed"
+    },
+    {
+      "group": 3,
+      "file": "test/automatic-build-executor-session.test.ts",
+      "test_names": [
+        "automatic build public executor session S3 > replays an identical submit without another attempt and rejects a conflicting candidate",
+        "automatic build public executor session S3 > records semantic failure as a retryable task outcome",
+        "automatic build public executor session S3 > maps unknown V1 executor reports to generation/executor_failed without inventing writer facts",
+        "automatic build public executor session S3 > resumes the same executor session after a heartbeat",
+        "automatic build public executor session S3 > persists executor interruption across reopen"
+      ],
+      "passed": 5,
+      "expected": 5,
+      "exit_code": 0,
+      "status": "passed"
+    },
+    {
+      "group": 4,
+      "file": "test/automatic-build-executor-session.test.ts",
+      "test_names": [
+        "automatic build bounded executor session V3 > A2 returns contiguous bounded batches and confirms the final ordinal only at generation.start",
+        "automatic build bounded executor session V3 > issues a current public recovery handoff directly as V4 without supersession state",
+        "automatic build bounded executor session V3 > keeps historical V3 record bytes unchanged while issuing the current V4 handoff",
+        "automatic build bounded executor session V3 > binds V4 refs to each recovery identity field and rejects a forged current identity",
+        "automatic build bounded executor session V3 > delivers prompt and input through bounded ordinals, then creates attempt 1 only at generation.start"
+      ],
+      "passed": 5,
+      "expected": 5,
+      "exit_code": 0,
+      "status": "passed"
+    },
+    {
+      "group": 5,
+      "file": "test/automatic-build-executor-session.test.ts",
+      "test_names": [
+        "automatic build bounded executor session V3 > R1 starts from the public frozen input without invoking the stage renderer again",
+        "automatic build bounded executor session V3 > RG4 projects a finished dispatch without creating an attempt or candidate action",
+        "automatic build bounded executor session V3 > H0 uses ordinal/range/body/schema checks without transport, chunk, output-contract, or ledger digests",
+        "automatic build bounded executor session V3 > rehydrates completed input for a replacement child after generation.start without another attempt",
+        "automatic build bounded executor session V3 > RG4 replaces an expired recovery generation with epoch 2 without consuming a semantic attempt"
+      ],
+      "passed": 5,
+      "expected": 5,
+      "exit_code": 0,
+      "status": "passed"
+    },
+    {
+      "group": 6,
+      "file": "test/automatic-build-executor-session.test.ts",
+      "test_names": [
+        "automatic build bounded executor session V3 > RG4 projects a candidate-free terminal action instead of replaying a committed start",
+        "automatic build bounded executor session V3 > replays the same next request byte-identically and rejects unknown ordinals or cross-session refs",
+        "automatic build bounded executor session V3 > reopens at the first unconfirmed batch and keeps an interrupted delivery at attempt zero",
+        "automatic build bounded executor session V3 > rejects generation.start before complete delivery and leaves terminal dispatches body-free",
+        "automatic build bounded executor session V3 > submits one structured JsonValue through the bound sink with canonical replay and no path"
+      ],
+      "passed": 5,
+      "expected": 5,
+      "exit_code": 0,
+      "status": "passed"
+    },
+    {
+      "group": 7,
+      "file": "test/automatic-build-executor-session.test.ts",
+      "test_names": [
+        "automatic build bounded executor session V3 > keeps a temporarily unavailable candidate sink on the same attempt and replays the same value",
+        "automatic build bounded executor session V3 > keeps an untyped downstream candidate rejection as a redacted internal writer failure",
+        "automatic build bounded executor session V3 > returns committed after an intermediate current V4 generation submit",
+        "automatic build bounded executor session V3 > RG7 reuses committed A/B bytes and recovers only C through a new V4 epoch",
+        "automatic build bounded executor session V3 > accepts realistic null source_lid candidates through the real MCP wrapper"
+      ],
+      "passed": 5,
+      "expected": 5,
+      "exit_code": 0,
+      "status": "passed"
+    },
+    {
+      "group": 8,
+      "file": "test/automatic-build-executor-session.test.ts",
+      "test_names": [
+        "automatic build bounded executor session V3 > RG6 records an owned token-oversized request before writer start and leaves forged sessions untouched",
+        "automatic build bounded executor session V3 > rejects V2 path submit and malformed, host, non-finite, deep, or unbound values before mailbox mutation"
+      ],
+      "passed": 2,
+      "expected": 2,
+      "exit_code": 0,
+      "status": "passed"
+    },
+    {
+      "group": 9,
+      "file": "test/codex-executor-agent.test.ts",
+      "test_names": [
+        "executor tool discovery > executes the published mapping against all four normalized MCP names",
+        "Codex executor bootstrap publication > publishes one project custom agent and two byte-identical release templates",
+        "Codex executor bootstrap publication > R2 validates only the effective V3 role projection and rejects role-local MCP transport",
+        "Codex executor bootstrap publication > R1 expects both plugin MCP configs to own one optional exact-four shared Executor server",
+        "Codex executor bootstrap publication > keeps plugin-owned Executor transport out of the project Codex config",
+        "Codex executor bootstrap publication > R1 expects all three Executor role assets to inherit MCP and contain zero local servers",
+        "Codex executor bootstrap publication > R3 publishes byte-identical plugin-owned Executor launchers with fixed V3 arguments",
+        "Codex executor bootstrap publication > publishes byte-identical explicit registration script and skill projections",
+        "Codex executor bootstrap publication > R3 Executor launcher invokes the selected binary and fails closed when it is absent",
+        "Codex executor bootstrap publication > registers absent/same, explicitly migrates the known predecessor, and preserves conflicts",
+        "Codex executor bootstrap publication > registers a personal executor agent inside an isolated CODEX_HOME",
+        "Codex executor bootstrap publication > publishes a byte-identical executor-only skill backed by the canonical wrapper",
+        "Codex executor bootstrap publication > RG5 separates zero-call bootstrap failure from observed MCP V2 session errors",
+        "Codex executor bootstrap publication > publishes the V3 first-terminal root orchestration contract byte-identically",
+        "Codex executor bootstrap publication > L1 requires fresh children, drains delivered terminals, and retains unsent failures",
+        "Codex executor bootstrap publication > L2 publishes the exact open-failure observation and retains legacy manual recovery",
+        "Codex executor bootstrap publication > R4 prohibits every shared Executor tool before the root action loop and at hard boundaries",
+        "Codex executor bootstrap publication > H0/R6 removes source release snapshot digests after direct file assertions",
+        "Codex executor bootstrap publication > R6 keeps thin-plugin parity on the shared V3 doctor and direct byte comparisons",
+        "Codex executor bootstrap publication > R1 runs the shared-boundary source release gate before compiled or installed evidence",
+        "Codex executor bootstrap publication > R1 requires release evidence to state that shared capability is not role-isolated",
+        "Codex executor bootstrap publication > publishes a deterministic T7 compiled executor release gate",
+        "Codex executor bootstrap publication > keeps source agent directories out of the plugin while gating the asset template"
+      ],
+      "passed": 23,
+      "expected": 23,
+      "exit_code": 0,
+      "status": "passed"
+    },
+    {
+      "group": 10,
+      "file": "test/build-executor-mcp.test.ts",
+      "test_names": [
+        "Build Executor root-shared MCP boundary > RG5 maps operation failures to one allowlisted V2 error without private detail",
+        "Build Executor root-shared MCP boundary > L2 reports connection_terminal precisely without opening the second ref",
+        "Build Executor root-shared MCP boundary > L2 reports handoff_ref_mismatch precisely without opening the second ref",
+        "Build Executor root-shared MCP boundary > RG5 keeps a pre-session contract failure as protocol_incompatible with its operation phase",
+        "Build Executor root-shared MCP boundary > RG5 never relabels a post-session response failure as bootstrap",
+        "Build Executor root-shared MCP boundary > M1 records one bounded server timing sample per valid tool call",
+        "Build Executor root-shared MCP boundary > records a returned retryable failure as a bounded timing outcome",
+        "Build Executor root-shared MCP boundary > M1 keeps call ordinals local to each stdio connection",
+        "Build Executor root-shared MCP boundary > negotiates MCP and exposes exactly the four closed executor tools",
+        "Build Executor root-shared MCP boundary > R1/R2 exposes the dedicated-Executor-only warning on every tools/list description",
+        "Build Executor root-shared MCP boundary > keeps capability out of model parameters and candidate bodies out of tool results",
+        "Build Executor root-shared MCP boundary > fails closed with a bounded bootstrap diagnostic"
+      ],
+      "passed": 12,
+      "expected": 12,
+      "exit_code": 0,
+      "status": "passed"
+    },
+    {
+      "group": 11,
+      "file": "test/build-executor-tool-adapter.test.ts",
+      "test_names": [
+        "dormant Build Executor tool adapter > R1/R2 publishes direct V3 bootstrap and MCP identities without a digest",
+        "dormant Build Executor tool adapter > R2 validates shared transport and registration placement as separate direct contracts",
+        "dormant Build Executor tool adapter > R1/R2 marks every listed tool as callable only by the dedicated Executor role",
+        "dormant Build Executor tool adapter > requires an out-of-band connection token before dispatch without treating it as role identity",
+        "dormant Build Executor tool adapter > rejects unclosed request fields before authorization or execution",
+        "dormant Build Executor tool adapter > R2 binds one thread-owned stdio capability to one handoff and direct ordinal state",
+        "dormant Build Executor tool adapter > R2 rebinds a fresh stdio connection from resumable executor.open responses",
+        "dormant Build Executor tool adapter > R1 keeps transport out of project config while both plugin configs expose exact-four tools"
+      ],
+      "passed": 8,
+      "expected": 8,
+      "exit_code": 0,
+      "status": "passed"
+    },
+    {
+      "group": 12,
+      "file": "test/automatic-build-driver.test.ts",
+      "test_names": [
+        "S0 deterministic automatic-build driver protocol > uses the confirmed BuildPlan book id for a non-ASCII source throughout the driver",
+        "S0 deterministic automatic-build driver protocol > returns only the four root actions and never exposes internal or semantic fields",
+        "S0 deterministic automatic-build driver protocol > fails closed before task mutation when the installed executor protocol is unavailable",
+        "S0 deterministic automatic-build driver protocol > L2 rejects non-allowlisted, wrong-phase, extra-field and simultaneous observations",
+        "S0 deterministic automatic-build driver protocol > L2 recovers a real terminal-connection refusal after A commits and commits B on a new connection"
+      ],
+      "passed": 5,
+      "expected": 5,
+      "exit_code": 0,
+      "status": "passed"
+    },
+    {
+      "group": 13,
+      "file": "test/automatic-build-driver.test.ts",
+      "test_names": [
+        "S0 deterministic automatic-build driver protocol > L1 refills the released slot while sibling children have not opened yet"
+      ],
+      "passed": 1,
+      "expected": 1,
+      "exit_code": 0,
+      "status": "passed"
+    },
+    {
+      "group": 14,
+      "file": "test/automatic-build-driver.test.ts",
+      "test_names": [
+        "S0 deterministic automatic-build driver protocol > L1 commits six units through fresh connections while refilling one of three live slots"
+      ],
+      "passed": 1,
+      "expected": 1,
+      "exit_code": 0,
+      "status": "passed"
+    },
+    {
+      "group": 15,
+      "file": "test/automatic-build-driver.test.ts",
+      "test_names": [
+        "S0 deterministic automatic-build driver protocol > L2 bootstrap: recovers a zero-call bootstrap failure once without consuming a semantic attempt",
+        "S0 deterministic automatic-build driver protocol > L2 connection_terminal: recovers a zero-call bootstrap failure once without consuming a semantic attempt",
+        "S0 deterministic automatic-build driver protocol > L2 handoff_ref_mismatch: recovers a zero-call bootstrap failure once without consuming a semantic attempt",
+        "S0 deterministic automatic-build driver protocol > L2 bootstrap: rejects bootstrap reports from another invocation without changing its tasks",
+        "S0 deterministic automatic-build driver protocol > L2 connection_terminal: rejects bootstrap reports from another invocation without changing its tasks"
+      ],
+      "passed": 5,
+      "expected": 5,
+      "exit_code": 0,
+      "status": "passed"
+    },
+    {
+      "group": 16,
+      "file": "test/automatic-build-driver.test.ts",
+      "test_names": [
+        "S0 deterministic automatic-build driver protocol > L2 handoff_ref_mismatch: rejects bootstrap reports from another invocation without changing its tasks",
+        "S0 deterministic automatic-build driver protocol > L2 bootstrap: keeps accepted work when bootstrap recovery resumes a dispatch between units",
+        "S0 deterministic automatic-build driver protocol > L2 connection_terminal: keeps accepted work when bootstrap recovery resumes a dispatch between units",
+        "S0 deterministic automatic-build driver protocol > L2 handoff_ref_mismatch: keeps accepted work when bootstrap recovery resumes a dispatch between units",
+        "S0 deterministic automatic-build driver protocol > L2 bootstrap: bounds repeated bootstrap failures and resumes only after an explicit recovery decision"
+      ],
+      "passed": 5,
+      "expected": 5,
+      "exit_code": 0,
+      "status": "passed"
+    },
+    {
+      "group": 17,
+      "file": "test/automatic-build-driver.test.ts",
+      "test_names": [
+        "S0 deterministic automatic-build driver protocol > L2 connection_terminal: bounds repeated bootstrap failures and resumes only after an explicit recovery decision",
+        "S0 deterministic automatic-build driver protocol > L2 handoff_ref_mismatch: bounds repeated bootstrap failures and resumes only after an explicit recovery decision",
+        "S0 deterministic automatic-build driver protocol > gives an expired recovery generation a new opaque handoff while keeping its dispatch slot",
+        "S0 deterministic automatic-build driver protocol > reissues a durable active dispatch after volatile registry loss without another semantic attempt",
+        "S0 deterministic automatic-build driver protocol > resumes an expired running dispatch without republishing its manifest"
+      ],
+      "passed": 5,
+      "expected": 5,
+      "exit_code": 0,
+      "status": "passed"
+    },
+    {
+      "group": 18,
+      "file": "test/automatic-build-driver.test.ts",
+      "test_names": [
+        "S0 deterministic automatic-build driver protocol > rejects expired dispatch re-entry when the persisted owner identity conflicts",
+        "S0 deterministic automatic-build driver protocol > rejects a stale decision after BuildPlan drift without caller-supplied digests",
+        "S0 deterministic automatic-build driver protocol > binds a fresh budget decision to the current deterministic receipt",
+        "S0 deterministic automatic-build driver protocol > keeps deterministic retry_current side-effect free while the policy scope is unchanged",
+        "S0 deterministic automatic-build driver protocol > writes one terminal-bound recovery receipt for an allowlisted transient retry_current"
+      ],
+      "passed": 5,
+      "expected": 5,
+      "exit_code": 0,
+      "status": "passed"
+    },
+    {
+      "group": 19,
+      "file": "test/automatic-build-driver.test.ts",
+      "test_names": [
+        "S0 deterministic automatic-build driver protocol > rejects terminal receipt drift without persisting a decision or recovery effect",
+        "S0 deterministic automatic-build driver protocol > replans retry_current when the complete policy scope changes",
+        "S0 deterministic automatic-build driver protocol > reissues a bounded user projection when wall-clock evaluation drifts",
+        "S0 deterministic automatic-build driver protocol > closes and replans internally instead of returning a close command",
+        "S0 deterministic automatic-build driver protocol > advances from a terminal dispatch receipt on disk without a receipt body from root"
+      ],
+      "passed": 5,
+      "expected": 5,
+      "exit_code": 0,
+      "status": "passed"
+    },
+    {
+      "group": 20,
+      "file": "test/automatic-build-driver.test.ts",
+      "test_names": [
+        "S0 deterministic automatic-build driver protocol > terminalizes a fully committed V4 dispatch before build.step refills it",
+        "S0 deterministic automatic-build driver protocol > terminalizes a V4 committed-failed-committed dispatch as task_failure and retries the failure",
+        "S0 deterministic automatic-build driver protocol > runs driver commands and accepts a PowerShell-style UTF-8 BOM on executor stdin",
+        "S0 deterministic automatic-build driver protocol > makes executor.open reject digest drift and escaping refs before any task claim",
+        "S4 private artifact driver and executor session > R2 resolves private frozen delivery material once at generation.start"
+      ],
+      "passed": 5,
+      "expected": 5,
+      "exit_code": 0,
+      "status": "passed"
+    },
+    {
+      "group": 21,
+      "file": "test/automatic-build-driver.test.ts",
+      "test_names": [
+        "S4 private artifact driver and executor session > R2 rejects private task, Blueprint, and output-contract drift before creating generation state",
+        "S4 private artifact driver and executor session > RG6 gives private artifacts the four-budget contract and records oversize before staging",
+        "S4 private artifact driver and executor session > drives public completion through private preparation and accepts every artifact without root leakage",
+        "S4 private artifact driver and executor session > lets an untouched sibling commit before retrying one failed artifact and resumes the retry in place"
+      ],
+      "passed": 4,
+      "expected": 4,
+      "exit_code": 0,
+      "status": "passed"
+    }
+  ],
+  "status": "passed",
+  "passed_tests": 121,
+  "additional_handoff_regression": {
+    "file": "test/automatic-build-handoff.test.ts",
+    "passed_tests": 16,
+    "exit_code": 0,
+    "status": "passed"
+  }
+}

@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { AutomaticBuildStage, BuildTargetRefV2 } from "./build-orchestrator";
 import {
   isAutomaticBuildFailureDiagnosticV3,
+  isAutomaticBuildCorrectableCandidateFailure,
   isAutomaticBuildTransientProviderFailure,
   validateAutomaticBuildFailureDiagnostic,
   type AutomaticBuildFailureDiagnosticV2,
@@ -27,6 +28,7 @@ const BoundedIdZ = z.string().min(1).refine(
 export const AUTOMATIC_BUILD_RETRY_BOUNDARY_RECOVERIES = [
   "publish_new_policy",
   "authorize_transient_retry",
+  "authorize_candidate_retry",
   "operator_fix",
 ] as const;
 
@@ -88,6 +90,7 @@ export function automaticBuildRetryBoundaryRequiredRecovery(
     throw new Error(`${value.phase} cannot create a semantic retry boundary`);
   }
   if (isAutomaticBuildTransientProviderFailure(value)) return "authorize_transient_retry";
+  if (isAutomaticBuildCorrectableCandidateFailure(value)) return "authorize_candidate_retry";
   if (value.category === "schema" || value.category === "evidence") return "publish_new_policy";
   return "operator_fix";
 }
@@ -113,6 +116,11 @@ export function validateAutomaticBuildRetryBoundary(input: unknown): AutomaticBu
   return AutomaticBuildRetryBoundaryV1Z.parse(input);
 }
 
+export function allowsAutomaticBuildSameScopeRetry(boundary: AutomaticBuildRetryBoundaryV1): boolean {
+  return boundary.required_recovery === "authorize_transient_retry"
+    || boundary.required_recovery === "authorize_candidate_retry";
+}
+
 export function createAutomaticBuildRetryRecoveryReceipt(input: {
   target_ref: BuildTargetRefV2;
   stage: AutomaticBuildStage;
@@ -122,7 +130,7 @@ export function createAutomaticBuildRetryRecoveryReceipt(input: {
   created_at: string;
 }): AutomaticBuildRetryRecoveryReceiptV1 {
   const boundary = validateAutomaticBuildRetryBoundary(input.boundary);
-  if (boundary.required_recovery !== "authorize_transient_retry") {
+  if (!allowsAutomaticBuildSameScopeRetry(boundary)) {
     throw new Error("automatic build terminal diagnostic does not allow same-scope retry recovery");
   }
   return AutomaticBuildRetryRecoveryReceiptV1Z.parse({

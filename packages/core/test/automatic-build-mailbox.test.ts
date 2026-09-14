@@ -41,6 +41,58 @@ function candidateFile(root: string, value: unknown, name = "candidate-source.js
 }
 
 describe("automatic build task mailbox", () => {
+  it("RG6 records candidate request overflow as a pre-writer generation failure", () => {
+    const { target, claim } = fixture();
+    const receipt = failAutomaticBuildTask(
+      target,
+      claim.lease_ref,
+      claim.lease.token,
+      {
+        failure_diagnostic: createAutomaticBuildFailureDiagnosticV3({
+          category: "transport",
+          code: "candidate_request_too_large",
+          phase: "generation",
+        }),
+        now: "2026-07-19T00:00:01.000Z",
+      },
+    );
+    expect(receipt).toMatchObject({
+      state: "retryable_failure",
+      failure_diagnostic: {
+        category: "transport",
+        code: "candidate_request_too_large",
+        phase: "generation",
+      },
+      metrics: {
+        writer_started: false,
+        failure_phase: "generation",
+        output_bytes: 0,
+      },
+    });
+    const attemptDirectory = path.dirname(claim.lease_ref);
+    expect(readFileSync(path.join(attemptDirectory, "failure.json"), "utf8"))
+      .not.toContain("candidate_sha256");
+    expect(JSON.parse(readFileSync(path.join(attemptDirectory, "result.json"), "utf8")))
+      .toMatchObject({
+        outcome: "failure",
+        failure_diagnostic: {
+          category: "transport",
+          code: "candidate_request_too_large",
+          phase: "generation",
+        },
+      });
+    expect(readAutomaticBuildAttemptRecord(target, "pass1", "0"))
+      .toMatchObject({ failures: 1, semantic_attempt: 1, lease_epoch: 1, submit_revision: 0 });
+    expect(claimAutomaticBuildTask(target, "pass1", "0", {
+      owner: "mailbox-rg6-retry",
+      now: "2026-07-19T00:00:02.000Z",
+      ttl_ms: 60_000,
+    })).toMatchObject({
+      status: "leased",
+      execution_identity: { semantic_attempt: 2, lease_epoch: 1, submit_revision: 0 },
+    });
+  });
+
   it("serializes a JsonValue once into the create-only canonical candidate mailbox", () => {
     const { target, claim } = fixture();
     const first = stageAutomaticBuildCandidateValue(

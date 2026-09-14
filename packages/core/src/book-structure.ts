@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { bookStructureReferenceScope, bookStructureScopeLids, type BookStructureReferenceScope } from "./book-structure-evidence";
 import type { BuildTargetRefV2 } from "./build-orchestrator";
 import type { FormulaSemantics } from "./generated/FormulaSemantics";
 import type { GraphEdge } from "./generated/GraphEdge";
@@ -84,6 +85,9 @@ export interface BookStructureSidecar {
 }
 
 export interface BookStructureCandidate {
+  /** Writer-owned provenance carried into the next reduction, not model output. */
+  reference_scope?: BookStructureReferenceScope;
+  context_units?: BookStructureSpineUnit[];
   spine?: BookStructureSpineUnit[];
   throughlines?: BookStructureThroughline[];
   key_stops?: BookStructureKeyStop[];
@@ -92,6 +96,10 @@ export interface BookStructureCandidate {
 export interface BookStructureTextExcerpt {
   lid: string;
   text: string;
+}
+
+export interface BookStructureEvidenceExcerpt extends BookStructureTextExcerpt {
+  unit_lid: string;
 }
 
 export interface BookStructureProfileRules {
@@ -139,6 +147,49 @@ export const BOOK_STRUCTURE_EXECUTION_BUDGET_V2 = Object.freeze({
   max_candidate_tokens: 1_024,
 });
 
+const BOOK_STRUCTURE_OUTPUT_TYPES = [
+  "Output contract (exact field names; no extra fields):",
+  'AnchoredText = {"text": string, "evidence_lids": string[]}. Use this object for every summary and reason, never a bare string.',
+  "Role = setup | foundation | method | application | case | synthesis. Choose setup for front matter or orientation; do not invent roles.",
+  "KeyStopType = definition | formula | claim | example | turning_point | warning | summary.",
+  'KeyStop = {"id": string, "lid": string, "type": KeyStopType, "reason": AnchoredText, "title"?: string}. Only title is optional.',
+  "reference_scope is the authoritative citation contract, derived from the delivered content. Use evidence_by_unit[unit_lid] for that unit summary and key stops. Unit identities and graph node IDs are not paragraph citations. Never infer LIDs from IDs.",
+  "Graph edges are retrieval hints, not proof of a relationship. Base judgments on delivered excerpts or anchored child summaries. A shared concept alone does not establish a dependency. Anchor each substantive summary/reason in non-empty evidence_lids.",
+  "Keep text concise (at most 600 characters). IDs/LIDs are non-empty strings of at most 256 UTF-8 bytes; optional titles and throughline names at most 1024 bytes.",
+  "Empty arrays are valid when the input supports no key stops, dependencies, or throughlines. Do not fabricate content to fill an array.",
+  "Examples below illustrate the schema using LIDs 1 and 1.1. Replace them with this input's actual LIDs and grounded content; do not copy example facts.",
+].join("\n");
+
+const BOOK_STRUCTURE_UNIT_OUTPUT = [
+  'Unit output = {"unit_card":{"unit_lid":string,"role":Role,"summary":AnchoredText,"candidate_key_stops":KeyStop[],"depends_on":string[],"evidence_lids":string[]}}. All six unit_card fields are required. Use candidate_key_stops, not key_stops.',
+  "unit_lid must equal input.unit_lid (or parent_unit_lid for a final reduction). Chapter tasks produce local content: depends_on must be empty; cross-chapter dependencies are decided during stitching with both chapters available.",
+  "Unit output example:",
+  "```json",
+  '{"unit_card":{"unit_lid":"1","role":"foundation","summary":{"text":"Defines the chapter concept.","evidence_lids":["1.1"]},"candidate_key_stops":[{"id":"stop-1","lid":"1.1","type":"definition","reason":{"text":"Introduces the central definition.","evidence_lids":["1.1"]}}],"depends_on":[],"evidence_lids":["1.1"]}}',
+  "```",
+].join("\n");
+
+const BOOK_STRUCTURE_OBSERVATION_OUTPUT = [
+  'Observation output = {"version":"book_structure_fragment_observation.v1","parent_unit_lid":string,"summary_fragments":AnchoredText[],"candidate_key_stops":KeyStop[],"role_hints":Role[],"dependency_hints":string[],"evidence_lids":string[]}. All fields are required.',
+  "parent_unit_lid must match the input. dependency_hints must be empty for local observations; stitching decides dependencies. Retain only evidence in reference_scope.evidence_by_unit[parent_unit_lid]. Do not summarize other chapters.",
+  "Observation output example:",
+  "```json",
+  '{"version":"book_structure_fragment_observation.v1","parent_unit_lid":"1","summary_fragments":[{"text":"Defines the chapter concept.","evidence_lids":["1.1"]}],"candidate_key_stops":[{"id":"stop-1","lid":"1.1","type":"definition","reason":{"text":"Introduces the central definition.","evidence_lids":["1.1"]}}],"role_hints":["foundation"],"dependency_hints":[],"evidence_lids":["1.1"]}',
+  "```",
+].join("\n");
+
+const BOOK_STRUCTURE_STITCH_OUTPUT = [
+  'Stitch output = {"spine":SpineUnit[],"throughlines":Throughline[],"key_stops":KeyStop[]}. Always return these three arrays.',
+  'SpineUnit = {"lid":string,"role":Role,"summary":AnchoredText,"key_stop_ids":string[],"depends_on":string[]}. All fields are required; lid identifies the supplied unit.',
+  'Throughline = {"id":string,"name":string,"summary":AnchoredText,"lids":string[],"key_stop_ids":string[]}. All fields are required.',
+  "key_stop_ids must reference unique IDs present in this candidate's key_stops. spine.lid is a supplied unit ID. depends_on selects other unit IDs from reference_scope.dependency_target_lids, never paragraph or graph node IDs. Judge dependencies from both units' delivered content. Preserve reading order and deduplicate stable identities.",
+  "Each spine summary cites only reference_scope.evidence_by_unit[spine.lid]. A throughline may span chapters, but its summary must cite evidence for every declared unit or paragraph in lids. context_unit_cards provide counterpart material. Do not copy writer-owned reference_scope or context_units into the output.",
+  "Stitch output example:",
+  "```json",
+  '{"spine":[{"lid":"1","role":"foundation","summary":{"text":"Defines the chapter concept.","evidence_lids":["1.1"]},"key_stop_ids":["stop-1"],"depends_on":[]}],"throughlines":[{"id":"line-1","name":"Core concept","summary":{"text":"Connects the chapter to its definition.","evidence_lids":["1.1"]},"lids":["1"],"key_stop_ids":["stop-1"]}],"key_stops":[{"id":"stop-1","lid":"1.1","type":"definition","reason":{"text":"Introduces the central definition.","evidence_lids":["1.1"]}}]}',
+  "```",
+].join("\n");
+
 const BOOK_STRUCTURE_V2_EXTRACTOR_PROMPT = [
   "---",
   "name: book-structure-v2-extractor",
@@ -150,6 +201,9 @@ const BOOK_STRUCTURE_V2_EXTRACTOR_PROMPT = [
   "Consume exactly the supplied JSON. If job_id is unit:<lid>, emit only {\"unit_card\":...}.",
   "If job_id is stitch, emit only {\"spine\":[],\"throughlines\":[],\"key_stops\":[]}.",
   "Use only input LIDs and the closed role/key-stop enums. Do not emit markdown or explanation.",
+  BOOK_STRUCTURE_OUTPUT_TYPES,
+  BOOK_STRUCTURE_UNIT_OUTPUT,
+  BOOK_STRUCTURE_STITCH_OUTPUT,
 ].join("\n") + "\n";
 
 const BOOK_STRUCTURE_FRAGMENT_EXTRACTOR_PROMPT = [
@@ -164,6 +218,8 @@ const BOOK_STRUCTURE_FRAGMENT_EXTRACTOR_PROMPT = [
   "parent_unit_lid must match the input. Use only supplied evidence LIDs.",
   "Return local summary_fragments, candidate_key_stops, role_hints, dependency_hints, and evidence_lids.",
   "A fragment is not a final unit card. Do not emit markdown or explanation.",
+  BOOK_STRUCTURE_OUTPUT_TYPES,
+  BOOK_STRUCTURE_OBSERVATION_OUTPUT,
 ].join("\n") + "\n";
 
 const BOOK_STRUCTURE_REDUCER_PROMPT = [
@@ -178,6 +234,9 @@ const BOOK_STRUCTURE_REDUCER_PROMPT = [
   "When role is reduce, emit one book_structure_fragment_observation.v1 JSON object.",
   "When role is final, emit only {\"unit_card\":...} for parent_unit_lid.",
   "Deduplicate stable key stops and dependencies; use only child evidence LIDs. No markdown.",
+  BOOK_STRUCTURE_OUTPUT_TYPES,
+  BOOK_STRUCTURE_OBSERVATION_OUTPUT,
+  BOOK_STRUCTURE_UNIT_OUTPUT,
 ].join("\n") + "\n";
 
 const BOOK_STRUCTURE_STITCH_FRAGMENT_EXTRACTOR_PROMPT = [
@@ -191,6 +250,8 @@ const BOOK_STRUCTURE_STITCH_FRAGMENT_EXTRACTOR_PROMPT = [
   "Emit only a partial {\"spine\":[],\"throughlines\":[],\"key_stops\":[]} JSON candidate.",
   "Use only supplied unit cards and long-range edge evidence.",
   "Preserve unit order and stable key-stop identities. Do not emit markdown or explanation.",
+  BOOK_STRUCTURE_OUTPUT_TYPES,
+  BOOK_STRUCTURE_STITCH_OUTPUT,
 ].join("\n") + "\n";
 
 const BOOK_STRUCTURE_STITCH_REDUCER_PROMPT = [
@@ -204,6 +265,8 @@ const BOOK_STRUCTURE_STITCH_REDUCER_PROMPT = [
   "Emit only {\"spine\":[],\"throughlines\":[],\"key_stops\":[]} as strict JSON.",
   "Merge only supplied child candidates, preserve reading order, and deduplicate stable identities.",
   "Use only child evidence LIDs. Do not emit markdown or explanation.",
+  BOOK_STRUCTURE_OUTPUT_TYPES,
+  BOOK_STRUCTURE_STITCH_OUTPUT,
 ].join("\n") + "\n";
 
 export const BOOK_STRUCTURE_EXECUTION_PROMPTS_V2: BookStructureExecutionPromptsV2 =
@@ -307,6 +370,8 @@ export interface BookStructureReductionInputV1 {
 }
 
 export interface BookStructureStitchFragmentInputV1 {
+  context_unit_cards?: BookStructureUnitCard[];
+  evidence_excerpts?: BookStructureEvidenceExcerpt[];
   version: "book_structure_stitch_fragment_input.v1";
   work_unit_id: string;
   fragment_ordinal: number;
@@ -488,6 +553,8 @@ export interface BookStructureUnitArtifact {
 }
 
 export interface BookStructureStitchPacket {
+  context_unit_cards?: BookStructureUnitCard[];
+  evidence_excerpts?: BookStructureEvidenceExcerpt[];
   job_id: "stitch";
   profile_rules?: BookStructureProfileRules;
   unit_cards: BookStructureUnitCard[];
@@ -753,7 +820,7 @@ function proofBoundBookStructureDescriptor(input: {
   rendered_input: string;
   proof: ModelExecutionBudgetEvidenceV3;
   policy_fingerprint: ExtractionPolicyFingerprintV1;
-  input_basis: WorkUnitDescriptorV4["input_basis"];
+  input_basis: Exclude<WorkUnitDescriptorV4["input_basis"], { kind: "source_slices" }>;
   evidence_lids: string[];
   dependencies?: WorkUnitDescriptorV4["dependencies"];
   aggregation?: WorkUnitDescriptorV4["aggregation"];
@@ -762,22 +829,27 @@ function proofBoundBookStructureDescriptor(input: {
   expected_output_items?: number;
   transport_profile: ExecutorTransportProfileV2;
 }): WorkUnitDescriptorV4 {
+  const scope = JSON.parse(input.rendered_input).reference_scope as BookStructureReferenceScope;
+  const deliveredLids = [...new Set([
+    ...bookStructureScopeLids(scope),
+    ...input.evidence_lids.filter(lid => lid === "stitch"),
+  ])];
   return createWorkUnitDescriptorV4({
     target: input.target,
     stage: "book_structure",
     work_unit_id: input.work_unit_id,
     kind: input.kind,
-    input_basis: input.input_basis,
+    input_basis: { ...input.input_basis, parent_lids: deliveredLids },
     input_hash: input.proof.rendered_input_sha256,
     execution_budget_proof: input.proof,
     policy_fingerprint: input.policy_fingerprint,
-    evidence_lids: input.evidence_lids,
+    evidence_lids: deliveredLids,
     dependencies: input.dependencies ?? [],
     cost: buildWorkUnitCostFromExecutionProof({
       rendered_input: input.rendered_input,
       proof: input.proof,
       transport_profile: input.transport_profile,
-      visible_lids: new Set(input.evidence_lids).size,
+      visible_lids: deliveredLids.length,
       formula_lids: input.formula_lids,
       candidate_count: input.candidate_count,
       expected_output_items: input.expected_output_items ?? 1,
@@ -830,7 +902,7 @@ function graphNodeLids(node: GraphNode): string[] {
 }
 
 function edgeTouchesNode(edge: GraphEdge, nodeIds: Set<string>): boolean {
-  return nodeIds.has(edge.source) || nodeIds.has(edge.target);
+  return nodeIds.has(edge.source) && nodeIds.has(edge.target);
 }
 
 function pass2EdgesFor(leafSet: Set<string>, audit?: Pass2BuildAuditSidecar): Pass2AuditEdge[] {
@@ -886,14 +958,16 @@ function bookStructureAuxiliaryItems(
   for (const node of source.graph_nodes) {
     const evidence = graphNodeLids(node);
     graphEvidence.set(node.id, evidence.filter((lid) => ordinalByLid.has(lid)));
-    const recovery = add("graph_node", node.id, evidence, node);
+    const recovery = add("graph_node", node.id, evidence.slice(0, 1), node);
     if (recovery) return { status: "blocked", recovery };
   }
   for (const edge of source.graph_edges) {
-    const evidence = [
-      ...(graphEvidence.get(edge.source) ?? []),
-      ...(graphEvidence.get(edge.target) ?? []),
-    ];
+    const sourceEvidence = graphEvidence.get(edge.source) ?? [];
+    const targetEvidence = graphEvidence.get(edge.target) ?? [];
+    // Prefer a shared occurrence; otherwise carry one actual excerpt per end.
+    // A common concept's book-wide occurrence list is not an atomic evidence packet.
+    const shared = sourceEvidence.find(lid => targetEvidence.includes(lid));
+    const evidence = shared ? [shared] : [...sourceEvidence.slice(0, 1), ...targetEvidence.slice(0, 1)];
     const recovery = add(
       "graph_edge",
       `edge:${sha256Json(edge)}`,
@@ -945,7 +1019,6 @@ function bookStructureFragmentInput(input: {
   const coreLeafLids = range
     ? input.source.leaf_lids.slice(range.start_ordinal, range.end_ordinal_exclusive)
     : [];
-  const coreSet = new Set(coreLeafLids);
   const graphNodes: GraphNode[] = [];
   const graphEdges: GraphEdge[] = [];
   const discourseItems: TechnicalLearningDiscourseItem[] = [];
@@ -960,6 +1033,14 @@ function bookStructureFragmentInput(input: {
       case "pass2_edge": pass2Edges.push(item.value as Pass2AuditEdge); break;
     }
   }
+  // Auxiliary shards are self-contained: an edge is delivered with endpoint
+  // mappings and the actual local excerpts supporting those mappings.
+  const evidenceSet = new Set([...coreLeafLids, ...input.auxiliary_items.flatMap(item => item.evidence_lids)]);
+  const endpointIds = new Set(graphEdges.flatMap(edge => [edge.source, edge.target]));
+  const includedNodeIds = new Set(graphNodes.map(node => node.id));
+  for (const node of input.source.graph_nodes) {
+    if (endpointIds.has(node.id) && !includedNodeIds.has(node.id)) graphNodes.push(node);
+  }
   return {
     version: "book_structure_fragment_input.v1",
     work_unit_id: input.work_unit_id,
@@ -973,10 +1054,8 @@ function bookStructureFragmentInput(input: {
     source_leaf_range: { ...input.source_range },
     ...(range ? { core_leaf_range: { ...range } } : {}),
     core_leaf_lids: coreLeafLids,
-    excerpts: range
-      ? input.source.excerpts.filter((excerpt) => coreSet.has(excerpt.lid))
-      : [],
-    graph_nodes: graphNodes,
+    excerpts: input.source.excerpts.filter((excerpt) => evidenceSet.has(excerpt.lid)),
+    graph_nodes: graphNodes.map(node => ({ ...node, occurrences: node.occurrences.filter(lid => evidenceSet.has(lid)) })),
     graph_edges: graphEdges,
     discourse_items: discourseItems,
     formula_semantics: formulaSemantics,
@@ -1640,7 +1719,17 @@ function bookStructureStitchFragmentPacket(input: {
     input.unit_card_range.start_ordinal,
     input.unit_card_range.end_ordinal_exclusive,
   );
-  const visibleLids = new Set(unitCards.flatMap(bookStructureUnitCardEvidenceLids));
+  const coreIds = new Set(unitCards.map(card => card.unit_lid));
+  const visibleLids = new Set([
+    ...unitCards.flatMap(bookStructureUnitCardEvidenceLids),
+    ...(input.packet.evidence_excerpts ?? []).filter(excerpt => coreIds.has(excerpt.unit_lid)).map(excerpt => excerpt.lid),
+  ]);
+  const edges = input.packet.long_range_edges.filter(edge => edge.evidence_lids.some(lid => visibleLids.has(lid)));
+  const edgeLids = new Set(edges.flatMap(edge => edge.evidence_lids));
+  const excerpts = (input.packet.evidence_excerpts ?? []).filter(excerpt => edgeLids.has(excerpt.lid));
+  const contextIds = new Set(excerpts.map(excerpt => excerpt.unit_lid));
+  const contextCards = input.packet.unit_cards.filter(card => !coreIds.has(card.unit_lid)
+    && (contextIds.has(card.unit_lid) || bookStructureUnitCardEvidenceLids(card).some(lid => edgeLids.has(lid))));
   return {
     version: "book_structure_stitch_fragment_input.v1",
     work_unit_id: input.work_unit_id,
@@ -1648,9 +1737,9 @@ function bookStructureStitchFragmentPacket(input: {
     unit_card_range: { ...input.unit_card_range },
     ...(input.packet.profile_rules ? { profile_rules: input.packet.profile_rules } : {}),
     unit_cards: unitCards,
-    long_range_edges: input.packet.long_range_edges.filter((edge) => (
-      edge.evidence_lids.some((lid) => visibleLids.has(lid))
-    )),
+    context_unit_cards: contextCards,
+    evidence_excerpts: excerpts,
+    long_range_edges: edges,
   };
 }
 
@@ -1767,6 +1856,15 @@ export function routeBookStructureStitchWorkUnitsV2(input: {
   if (new Set(unitLids).size !== unitLids.length) {
     throw new Error("BookStructure stitch unit cards must have unique unit_lid values");
   }
+  const scope = bookStructureReferenceScope(input.packet);
+  const delivered = new Set(Object.values(scope.evidence_by_unit).flat());
+  const incomplete = input.packet.long_range_edges.find(edge =>
+    !edge.source_evidence_lids.length || !edge.target_evidence_lids.length
+    || [...edge.source_evidence_lids, ...edge.target_evidence_lids, ...edge.evidence_lids].some(lid => !delivered.has(lid)));
+  if (incomplete) return { status: "blocked", recovery: {
+    code: "evidence/dangling_input_item", stage: "book_structure", parent_unit_lid: "stitch",
+    item_kind: "pass2_edge", item_key: incomplete.candidate_id,
+  } };
   const transportProfile = input.transport_profile ?? CODEX_EXECUTOR_TRANSPORT_PROFILE_V2;
   const budget = input.budget ?? BOOK_STRUCTURE_EXECUTION_BUDGET_V2;
   const wholeRendered = renderBookStructureModelInput(input.packet);
@@ -2170,6 +2268,7 @@ export function buildBookStructureUnitSources(input: {
     const leafSet = new Set(leafLids);
     const graphNodes = (input.graphNodes ?? [])
       .filter((node) => graphNodeLids(node).some((lid) => leafSet.has(lid)))
+      .map((node) => ({ ...node, occurrences: node.occurrences.filter(lid => leafSet.has(lid)) }))
       .sort((a, b) => a.id.localeCompare(b.id));
     const graphNodeIds = new Set(graphNodes.map((node) => node.id));
     return {
@@ -2194,7 +2293,8 @@ export function buildBookStructureUnitSources(input: {
       formula_semantics: leafLids
         .map((lid) => formulaByLid.get(lid))
         .filter((item): item is FormulaSemantics => item !== undefined),
-      pass2_edges: pass2EdgesFor(leafSet, input.pass2Audit),
+      pass2_edges: pass2EdgesFor(leafSet, input.pass2Audit)
+        .filter(edge => edge.evidence_lids.every(lid => leafSet.has(lid))),
     };
   });
 }
@@ -2216,15 +2316,21 @@ export function buildBookStructureStitchPacket(
   unitArtifacts: BookStructureUnitArtifact[],
   pass2Audit?: Pass2BuildAuditSidecar,
   contentProfile: ContentProfileDefinition = TECHNICAL_LEARNING_PROFILE,
+  unitSources: BookStructureUnitSource[] = [],
 ): BookStructureStitchPacket {
   const profileRules = bookStructureProfileRules(contentProfile);
+  const edges = [...(pass2Audit?.accepted ?? []), ...(pass2Audit?.pending ?? [])]
+    .sort((a, b) => a.candidate_id.localeCompare(b.candidate_id));
+  const neededLids = new Set(edges.flatMap(edge => edge.evidence_lids));
+  const excerpts = unitSources.flatMap(unit => unit.excerpts
+    .filter(excerpt => neededLids.has(excerpt.lid))
+    .map(excerpt => ({ ...excerpt, unit_lid: unit.unit_lid })));
   return {
     job_id: "stitch",
     ...(profileRules ? { profile_rules: profileRules } : {}),
     unit_cards: unitArtifacts.map((artifact) => artifact.output.unit_card),
-    long_range_edges: [...(pass2Audit?.accepted ?? []), ...(pass2Audit?.pending ?? [])].sort((a, b) =>
-      a.candidate_id.localeCompare(b.candidate_id),
-    ),
+    long_range_edges: edges,
+    evidence_excerpts: excerpts,
   };
 }
 

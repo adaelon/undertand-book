@@ -6,6 +6,9 @@ import {
   analyzeR7RolloutTrace,
   readExecutorMcpServerTimingJsonl,
   reduceExecutorMcpTiming,
+  createExecutorOuterTimingRecorder,
+  type ExecutorMcpTimingConnectionV2,
+  type ExecutorOuterTimingV1,
   ROOT_EXECUTOR_BOUNDARY_UNVERIFIABLE,
   summarizeThreeSlotFirstTerminalScheduling,
   type ExecutorTraceOperation,
@@ -22,6 +25,8 @@ const executorTools = [
 ] as const satisfies readonly ExecutorTraceOperation[];
 
 interface FixtureOptions {
+  codeModeHostDuration?: { secs: number; nanos: number };
+  captureSpawns?: boolean;
   childIntervals?: Array<{ start: number; end: number }>;
   driverCallSeqs?: number[];
   listAgentObservations?: Array<{
@@ -82,6 +87,20 @@ function traceFixture(options: FixtureOptions = {}) {
         status: "completed",
       },
     };
+    if (options.captureSpawns) {
+      const callId = `spawn-${childIndex + 1}`;
+      const invocationId = writePayload("tool_invocation", {
+        tool_namespace: "collaboration", tool_name: "spawn_agent",
+        payload: { type: "function", arguments: JSON.stringify({ task_name: `r7_child_${childIndex + 1}` }) },
+      });
+      toolCalls[callId] = { tool_call_id: callId, thread_id: "root",
+        execution: { started_seq: interval.start - 1, ended_seq: interval.start, status: "completed" },
+        raw_invocation_payload_id: invocationId, raw_runtime_payload_ids: [], raw_result_payload_id: null, mcp_call_id: null };
+      for (const [type, offset] of [["tool_call_started", 2], ["tool_call_ended", 3]] as const) {
+        traceEvents.push({ schema_version: 1, seq: ++traceSequence, wall_time_unix_ms: 5_000 + interval.start + offset,
+          rollout_id: "rollout-r7-fixture", codex_turn_id: "turn-root", payload: { type, tool_call_id: callId } });
+      }
+    }
 
     executorTools.forEach((operation, operationIndex) => {
       const callId = `${threadId}-call-${operationIndex}`;
@@ -118,6 +137,7 @@ function traceFixture(options: FixtureOptions = {}) {
                 cell_id: "4",
                 content_items: [{ type: "input_text", text: responseText }],
                 error_text: null,
+                ...(options.codeModeHostDuration ? { code_mode_host_duration: options.codeModeHostDuration } : {}),
               },
             },
           });
@@ -443,6 +463,49 @@ describe("R7 reduced rollout trace analyzer", () => {
     })).toThrow("negative residual");
   });
 
+  it("B1 records independent connection ordinals even when responses finish out of order", () => {
+    const first = createExecutorOuterTimingRecorder("connection-a");
+    const second = createExecutorOuterTimingRecorder("connection-b");
+    const finishOpen = first.begin("executor.open");
+    const finishInput = first.begin("executor.input.next");
+    second.begin("executor.open")();
+    finishInput();
+    finishOpen();
+    expect(first.samples.map((sample) => sample.connection_call_ordinal)).toEqual([2, 1]);
+    expect(second.samples[0]).toMatchObject({ thread_id: "connection-b", connection_call_ordinal: 1 });
+    expect([...first.samples, ...second.samples].every((sample) => sample.outer_tool_call_elapsed_ms >= 0)).toBe(true);
+  });
+
+  it.each([
+    "no-connections", "empty-connection", "missing-outer", "missing-server", "wrong-connection",
+    "wrong-operation", "wrong-ordinal", "duplicate-outer", "missing-phases",
+  ])("B1 fails explicitly on %s timing evidence", (failure) => {
+    const connections: ExecutorMcpTimingConnectionV2[] = [{
+      thread_id: "connection-a", samples: [{
+        version: "executor_mcp_server_timing.v2", connection_call_ordinal: 1,
+        operation: "executor.open", server_elapsed_ms: 1, response_bytes: 100,
+        response_action_kind: "DELIVER_INPUT", outcome: "ok", server_phase_elapsed_ms: null,
+      }],
+    }];
+    const outer: ExecutorOuterTimingV1[] = [{
+      thread_id: "connection-a", connection_call_ordinal: 1,
+      operation: "executor.open", outer_tool_call_elapsed_ms: 2,
+    }];
+    if (failure === "no-connections") connections.length = 0;
+    if (failure === "empty-connection") connections[0].samples = [];
+    if (failure === "missing-outer") outer.length = 0;
+    if (failure === "missing-server") outer.push({ ...outer[0], connection_call_ordinal: 2 });
+    if (failure === "wrong-connection") outer[0].thread_id = "connection-b";
+    if (failure === "wrong-operation") outer[0].operation = "executor.input.next";
+    if (failure === "wrong-ordinal") connections[0].samples[0].connection_call_ordinal = 2;
+    if (failure === "duplicate-outer") outer.push({ ...outer[0] });
+    if (failure === "missing-phases") {
+      connections[0].samples[0].operation = "executor.generation.start";
+      outer[0].operation = "executor.generation.start";
+    }
+    expect(() => reduceExecutorMcpTiming({ connections, outer_samples: outer })).toThrow("executor_mcp_timing_unverifiable");
+  });
+
   it("joins dedicated-child exact-four dispatch and backend calls without root leakage", () => {
     const fixture = traceFixture();
     const result = analyze(fixture.root, fixture.sentinels, 1);
@@ -458,6 +521,7 @@ describe("R7 reduced rollout trace analyzer", () => {
       max_live_dedicated_children: 1,
     });
     expect(result.child_executor_tools).toEqual([...executorTools].sort());
+    expect(result.first_open_to_commit).toEqual([{ thread_id: "child-1", elapsed_ms: 353 }]);
     expect(result.executor_outer_timing_samples).toEqual(executorTools.map((operation, index) => ({
       thread_id: "child-1",
       connection_call_ordinal: index + 1,
@@ -467,6 +531,16 @@ describe("R7 reduced rollout trace analyzer", () => {
     expect(result.semantic_hit_shapes.executor_input_or_submit).toBeGreaterThan(0);
     expect(result.semantic_hit_shapes.dedicated_child_inference).toBeGreaterThan(0);
     expect(result.semantic_hit_shapes.bounded_response_only).toBeGreaterThan(0);
+  });
+
+  it("V1 accepts the current host numeric duration on a matching response-only envelope", () => {
+    const fixture = traceFixture({ codeModeHostDuration: { secs: 0, nanos: 98_840_800 } });
+    expect(analyze(fixture.root, fixture.sentinels, 1).semantic_hit_shapes.bounded_response_only).toBe(2);
+  });
+
+  it("V1 rejects malformed host duration on a response-only envelope", () => {
+    const fixture = traceFixture({ codeModeHostDuration: { secs: -1, nanos: 0 } });
+    expect(() => analyze(fixture.root, fixture.sentinels, 1)).toThrow("semantic sentinel escaped");
   });
 
   it("rejects an unowned response-only envelope unless it directly matches an attributed child result", () => {
@@ -542,6 +616,26 @@ describe("R7 reduced rollout trace analyzer", () => {
 
     expect(() => analyze(fixture.root, fixture.sentinels, 1))
       .toThrow("root dispatched an Executor tool");
+  });
+
+  it("V1 records all three replacements across six children without losing delivered terminals", () => {
+    const fixture = traceFixture({ captureSpawns: true,
+      childIntervals: [{ start: 10, end: 50 }, { start: 11, end: 100 }, { start: 12, end: 110 },
+        { start: 60, end: 150 }, { start: 105, end: 160 }, { start: 125, end: 170 }],
+      listAgentObservations: [
+        { start: 55, completedChildIndexes: [1], runningChildIndexes: [2, 3] },
+        { start: 101, completedChildIndexes: [2], runningChildIndexes: [3, 4] },
+        { start: 120, completedChildIndexes: [3], runningChildIndexes: [4, 5] },
+        { start: 175, completedChildIndexes: [4, 5, 6], runningChildIndexes: [] }],
+    });
+    const result = analyze(fixture.root, fixture.sentinels, 6);
+    expect(result.max_live_dedicated_children).toBe(3);
+    expect(result.executor_refill_starts).toEqual([
+      { thread_id: "child-4", started_at_ms: 5_062 },
+      { thread_id: "child-5", started_at_ms: 5_107 },
+      { thread_id: "child-6", started_at_ms: 5_127 }]);
+    expect(result.root_followup_task_count).toBe(0);
+    expect(result.all_dedicated_terminal_observed_seq).toBe(176);
   });
 
   it("proves a fourth child refills after first terminal while two siblings remain live", () => {

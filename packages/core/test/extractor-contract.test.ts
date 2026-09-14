@@ -11,6 +11,7 @@ import {
   automaticBuildFailureDiagnosticFromError,
   automaticBuildFailureDiagnosticFromWriterError,
   createAutomaticBuildFailureDiagnosticV3,
+  requiredRecoveryForAutomaticBuildFailure,
   parseExtractorCandidate,
   parseExtractorContractErrorFromStderr,
   renderExtractorContractMarkdown,
@@ -46,6 +47,26 @@ function diagnosticOf(run: () => unknown) {
 }
 
 describe("automatic build extractor contracts", () => {
+  it("distinguishes a writer field correction from missing diagnostics, generation and evidence failures", () => {
+    const fieldError = { category: "schema" as const, code: "schema_invalid", phase: "artifact_writer" as const,
+      json_pointer: "/unit_card/candidate_key_stops/4/type", expected: "definition | example | claim" };
+    expect(requiredRecoveryForAutomaticBuildFailure(createAutomaticBuildFailureDiagnosticV3(fieldError)))
+      .toBe("confirm_candidate_retry");
+    for (const diagnostic of [
+      { ...fieldError, expected: undefined },
+      { ...fieldError, json_pointer: undefined },
+      { ...fieldError, phase: "generation" as const },
+    ]) {
+      expect(requiredRecoveryForAutomaticBuildFailure(createAutomaticBuildFailureDiagnosticV3(diagnostic)))
+        .toBe("publish_new_policy_scope");
+    }
+    expect(requiredRecoveryForAutomaticBuildFailure(createAutomaticBuildFailureDiagnosticV3({
+      ...fieldError, category: "evidence", code: "evidence_out_of_scope",
+    }))).toBe("change_evidence_or_policy_scope");
+    expect(requiredRecoveryForAutomaticBuildFailure(createAutomaticBuildFailureDiagnosticV3({
+      category: "internal", code: "writer_failed", phase: "artifact_writer",
+    }))).toBe("forward_fix");
+  });
   it("projects extractor errors into stable bounded failure diagnostics", () => {
     const privateCandidate = `PRIVATE_FAILURE_CANDIDATE_${"S".repeat(201)}`;
     let failure: unknown;

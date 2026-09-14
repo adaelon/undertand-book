@@ -3,7 +3,9 @@ import { describe, expect, it } from "vitest";
 import {
   CODEX_EXECUTOR_DELIVERY_BATCH_LIMIT_V1,
   CODEX_EXECUTOR_TRANSPORT_PROFILE_V2,
+  createCandidateTransportContract,
   createExecutorTransportProfile,
+  measureExecutorCandidateRequest,
   measureExecutorTransportResponse,
   packExecutorTransportBatches,
   packExecutorTransportPayload,
@@ -56,6 +58,62 @@ function syntheticEnvelope(frame: ExecutorTransportChunkFrameV2): unknown {
 }
 
 describe("executor transport profile and response packer", () => {
+  it("RG6 exposes candidate-value and serialized-request token/byte budgets with a fixed envelope reserve", () => {
+    const contract = createCandidateTransportContract(CODEX_EXECUTOR_TRANSPORT_PROFILE_V2);
+    expect(contract).toMatchObject({
+      version: "candidate_transport_contract.v1",
+      serialized_request_max_bytes:
+        CODEX_EXECUTOR_TRANSPORT_PROFILE_V2.max_candidate_request_bytes,
+      serialized_request_max_estimated_tokens:
+        CODEX_EXECUTOR_TRANSPORT_PROFILE_V2.max_candidate_request_tokens,
+    });
+    expect(contract.candidate_value_max_bytes)
+      .toBeLessThan(contract.serialized_request_max_bytes);
+    expect(contract.candidate_value_max_estimated_tokens)
+      .toBeLessThan(contract.serialized_request_max_estimated_tokens);
+
+    const exactBytes = measureExecutorCandidateRequest({
+      version: "automatic_build_executor_candidate_submit.v3",
+      opaque_session_ref: `absession1_${"a".repeat(64)}`,
+      candidate_sink_ref: `absink1_${"b".repeat(64)}`,
+      candidate: "x".repeat(contract.candidate_value_max_bytes - 2),
+    }, CODEX_EXECUTOR_TRANSPORT_PROFILE_V2);
+    expect(exactBytes.serialized_request_bytes)
+      .toBe(contract.serialized_request_max_bytes);
+    expect(exactBytes.blocking_reasons).not.toContain("byte_cap_exceeded");
+
+    const bytePlusOne = measureExecutorCandidateRequest({
+      version: "automatic_build_executor_candidate_submit.v3",
+      opaque_session_ref: `absession1_${"a".repeat(64)}`,
+      candidate_sink_ref: `absink1_${"b".repeat(64)}`,
+      candidate: "x".repeat(contract.candidate_value_max_bytes - 1),
+    }, CODEX_EXECUTOR_TRANSPORT_PROFILE_V2);
+    expect(bytePlusOne.blocking_reasons).toContain("byte_cap_exceeded");
+
+    const tokenBoundary = measureExecutorCandidateRequest({
+      version: "automatic_build_executor_candidate_submit.v3",
+      opaque_session_ref: `absession1_${"a".repeat(64)}`,
+      candidate_sink_ref: `absink1_${"b".repeat(64)}`,
+      candidate: "界".repeat(contract.candidate_value_max_estimated_tokens - 1),
+    }, createExecutorTransportProfile({
+      ...CODEX_EXECUTOR_TRANSPORT_PROFILE_V2,
+      max_candidate_request_bytes: Number.MAX_SAFE_INTEGER,
+    }));
+    expect(tokenBoundary.serialized_request_tokens)
+      .toBe(contract.serialized_request_max_estimated_tokens);
+
+    const tokenPlusOne = measureExecutorCandidateRequest({
+      version: "automatic_build_executor_candidate_submit.v3",
+      opaque_session_ref: `absession1_${"a".repeat(64)}`,
+      candidate_sink_ref: `absink1_${"b".repeat(64)}`,
+      candidate: "界".repeat(contract.candidate_value_max_estimated_tokens),
+    }, createExecutorTransportProfile({
+      ...CODEX_EXECUTOR_TRANSPORT_PROFILE_V2,
+      max_candidate_request_bytes: Number.MAX_SAFE_INTEGER,
+    }));
+    expect(tokenPlusOne.blocking_reasons).toContain("token_cap_exceeded");
+  });
+
   it("packs contiguous chunks to the exact MCP result byte boundary and splits at boundary plus one", () => {
     const packed = packExecutorTransportPayload({
       profile: profile({

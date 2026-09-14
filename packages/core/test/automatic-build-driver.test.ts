@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
+import { canonicalAutomaticBuildJson } from "../src/automatic-build-protocol";
 import {
   automaticBuildDispatchFinish,
   automaticBuildDispatchNext,
@@ -12,12 +13,18 @@ import {
   automaticBuildPlan,
 } from "../../../skills/build/automatic-build";
 import { compileBuildMode } from "../src/build-capability";
+import { createBuildExecutorMcpSession } from "../../../skills/build/build-executor-mcp";
+import { BUILD_EXECUTOR_BOOTSTRAP_CONTRACT_V3 } from "../src/build-executor-connection-capability";
 import type {
   AutomaticBuildBudgetLimitsV1,
   AutomaticBuildExecutorProvenanceV1,
   AutomaticBuildWallBudgetV1,
 } from "../src/automatic-build-budget";
 import { recordAutomaticBuildInputObservation } from "../src/automatic-build-metrics";
+import {
+  inspectAutomaticBuildDispatch,
+  inspectAutomaticBuildDispatchRecoveryGeneration,
+} from "../src/automatic-build-dispatch-runtime";
 import { failAutomaticBuildTask, submitAutomaticBuildCandidate } from "../src/automatic-build-mailbox";
 import { claimAutomaticBuildTask, startAutomaticBuildLease } from "../src/automatic-build-lease";
 import {
@@ -40,6 +47,7 @@ import { resolveContentProfile } from "../src/content-profile";
 import {
   createAutomaticBuildFailureDiagnostic,
   createAutomaticBuildFailureDiagnosticV3,
+  ExtractorContractError,
 } from "../src/extractor-contract";
 import {
   computeBuildPlanDigest,
@@ -63,6 +71,8 @@ import {
   writeSyntheticPass1ProductionGeneration,
 } from "./helpers/model-input-routability-fixture";
 
+import * as buildOrchestrator from "../src/build-orchestrator";
+
 declare global {
   interface ImportMeta {
     glob<T = unknown>(pattern: string, options: { eager: true }): Record<string, T>;
@@ -85,7 +95,7 @@ const EXECUTOR_SESSION_CLI = path.join(
 type AutomaticBuildStepActionV1 =
   | {
       kind: "SPAWN_EXECUTORS";
-      executors: Array<{ opaque_handoff_ref: string }>;
+      executors: Array<{ opaque_handoff_ref: string; dispatch_slot_ref?: string }>;
     }
   | {
       kind: "WAIT";
@@ -115,6 +125,49 @@ interface AutomaticBuildStepRequestV1 {
   invocation_ref: string;
   available_agent_slots: 0 | 1 | 2 | 3;
   decision?: { request_id: string; choice_id: string };
+  bootstrap_failure?: { opaque_handoff_ref: string };
+  executor_open_failure?: { opaque_handoff_ref: string; diagnostic_code: "connection_terminal" | "handoff_ref_mismatch"; phase: "open" };
+}
+
+function failureObservation(kind: "bootstrap" | "connection_terminal" | "handoff_ref_mismatch", ref: string): Pick<AutomaticBuildStepRequestV1, "bootstrap_failure" | "executor_open_failure"> {
+  return kind === "bootstrap" ? { bootstrap_failure: { opaque_handoff_ref: ref } }
+    : { executor_open_failure: { opaque_handoff_ref: ref, diagnostic_code: kind, phase: "open" } };
+}
+
+function executorMcpConnection() {
+  const session = createBuildExecutorMcpSession({
+    bootstrap_version: BUILD_EXECUTOR_BOOTSTRAP_CONTRACT_V3.version,
+    protocol_generation: BUILD_EXECUTOR_BOOTSTRAP_CONTRACT_V3.session_protocol,
+    session_private_root: resolveAutomaticBuildExecutorRegistryRoot(),
+  });
+  let id = 0;
+  const rawCall = (name: string, args: unknown) => session.handle_message({ jsonrpc: "2.0", id: ++id,
+    method: "tools/call", params: { name, arguments: args } }) as {
+      result: { isError: boolean; content: { text: string }[] };
+    };
+  const call = (name: string, args: unknown): AutomaticBuildExecutorSessionResponseV3 => {
+    const rpc = rawCall(name, args);
+    expect(rpc.result.isError).toBe(false);
+    return JSON.parse(rpc.result.content[0]!.text);
+  };
+  const commit = (ref: string) => {
+    const opened = call("executor.open", { version: "automatic_build_executor_open_request.v3", opaque_handoff_ref: ref });
+    if (opened.action.kind !== "DELIVER_INPUT") throw new Error("expected delivery");
+    const batch = call("executor.input.next", opened.action.next_request);
+    if (batch.action.kind !== "INPUT_BATCH" || !batch.action.batch.final_for_generation) throw new Error("expected final batch");
+    const started = call("executor.generation.start", {
+      version: "automatic_build_executor_generation_start_request.v3",
+      opaque_session_ref: batch.action.batch.opaque_session_ref,
+      generation_input_ref: batch.action.batch.generation_input_ref,
+      confirmed_through_ordinal: batch.action.batch.last_ordinal,
+    });
+    if (started.action.kind !== "GENERATE") throw new Error("expected generation");
+    expect(started.action.semantic_attempt).toBe(1);
+    expect(call("executor.submit_candidate", { version: "automatic_build_executor_candidate_submit.v3",
+      opaque_session_ref: started.action.opaque_session_ref, candidate_sink_ref: started.action.candidate_sink_ref,
+      candidate: { nodes: [], edges: [] } })).toMatchObject({ action: { kind: "DONE", status: "committed" } });
+  };
+  return { rawCall, commit };
 }
 
 interface AutomaticBuildInvocationCreateV1 {
@@ -143,6 +196,7 @@ interface AutomaticBuildExecutorSessionModule {
     target: ReturnType<typeof resolveAutomaticBuildTarget>;
     kind: "public_dispatch" | "private_artifact";
     owner_identity: unknown;
+    recovery_identity: unknown;
     executor_handoff: {
       version: string;
       path: string;
@@ -358,6 +412,7 @@ async function createInvocation(
     wall_budget?: AutomaticBuildWallBudgetV1;
     executor_provenance?: AutomaticBuildExecutorProvenanceV1;
     created_at?: string;
+    max_parallel?: 1 | 2 | 3;
   } = {},
 ) {
   return driver.createAutomaticBuildInvocation({
@@ -366,7 +421,7 @@ async function createInvocation(
     root_dir: value.root,
     build_plan_path: value.buildPlanPath,
     quality_profile: "full",
-    max_parallel: 1,
+    max_parallel: options.max_parallel ?? 1,
     created_at: options.created_at ?? "2026-08-08T05:00:00.000Z",
     ...(options.budget ? { budget: options.budget } : {}),
     ...(options.wall_budget ? { wall_budget: options.wall_budget } : {}),
@@ -416,8 +471,14 @@ function expectRootSafeStep(response: AutomaticBuildStepResponseV1, secrets: str
     expect(Object.keys(response.action).sort()).toEqual(["executors", "kind"]);
     expect(response.action.executors.length).toBeGreaterThan(0);
     for (const executor of response.action.executors) {
-      expect(Object.keys(executor)).toEqual(["opaque_handoff_ref"]);
+      expect([
+        ["opaque_handoff_ref"],
+        ["dispatch_slot_ref", "opaque_handoff_ref"],
+      ]).toContainEqual(Object.keys(executor).sort());
       expect(executor.opaque_handoff_ref).toMatch(/^[\x21-\x7e]{1,1024}$/u);
+      if (executor.dispatch_slot_ref) {
+        expect(executor.dispatch_slot_ref).toMatch(/^abdispatchslot1_[a-f0-9]{64}$/u);
+      }
     }
   }
 }
@@ -456,6 +517,66 @@ function startV3GenerationForHandoff(opaqueHandoffRef: string, now: string) {
     };
   }
   throw new Error("V3 input delivery did not reach a final batch");
+}
+
+function publicV4HandoffFacts(opaqueHandoffRef: string): {
+  owner_identity: {
+    stage: Parameters<typeof inspectAutomaticBuildDispatch>[1];
+    dispatch_id: string;
+    dispatch_run_id: string;
+  };
+  recovery_identity: {
+    current_work_unit_id: string;
+  };
+} {
+  const record = JSON.parse(readFileSync(path.join(
+    resolveAutomaticBuildExecutorRegistryRoot(),
+    "opaque-handoffs",
+    `${opaqueHandoffRef}.json`,
+  ), "utf8")) as {
+    version?: string;
+    owner_identity?: {
+      stage?: Parameters<typeof inspectAutomaticBuildDispatch>[1];
+      dispatch_id?: string;
+      dispatch_run_id?: string;
+    };
+    recovery_identity?: { current_work_unit_id?: string };
+  };
+  if (record.version !== "automatic_build_opaque_handoff_record.v4"
+    || !record.owner_identity?.stage
+    || !record.owner_identity.dispatch_id
+    || !record.owner_identity.dispatch_run_id
+    || !record.recovery_identity?.current_work_unit_id) {
+    throw new Error("expected a current public V4 recovery handoff");
+  }
+  return {
+    owner_identity: {
+      stage: record.owner_identity.stage,
+      dispatch_id: record.owner_identity.dispatch_id,
+      dispatch_run_id: record.owner_identity.dispatch_run_id,
+    },
+    recovery_identity: {
+      current_work_unit_id: record.recovery_identity.current_work_unit_id,
+    },
+  };
+}
+
+function submitCommittedPublicV4Handoff(opaqueHandoffRef: string, now: string) {
+  const generated = startV3GenerationForHandoff(opaqueHandoffRef, now);
+  if (generated.action.kind !== "GENERATE") {
+    throw new Error("expected a public V4 generation action");
+  }
+  const submitted = submitAutomaticBuildExecutorCandidateV3({
+    version: "automatic_build_executor_candidate_submit.v3",
+    opaque_session_ref: generated.action.opaque_session_ref,
+    candidate_sink_ref: generated.action.candidate_sink_ref,
+    candidate: { nodes: [], edges: [] },
+  }, { now });
+  expect(submitted).toEqual({
+    version: "automatic_build_executor_session.v3",
+    action: { kind: "DONE", status: "committed" },
+  });
+  return generated.action;
 }
 
 function startPrivateV3GenerationForHandoff(
@@ -585,6 +706,20 @@ function commitDispatchTask(
   );
 }
 
+function taskTreeBytes(target: ReturnType<typeof resolveAutomaticBuildTarget>): Record<string, Buffer | null> {
+  const root = automaticBuildTaskStoreRoot(target);
+  const entries: Record<string, Buffer | null> = {};
+  const visit = (directory: string): void => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const file = path.join(directory, entry.name);
+      entries[path.relative(root, file)] = entry.isDirectory() ? null : readFileSync(file);
+      if (entry.isDirectory()) visit(file);
+    }
+  };
+  if (existsSync(root)) visit(root);
+  return entries;
+}
+
 function taskTreeDigest(target: ReturnType<typeof resolveAutomaticBuildTarget>): string {
   const root = automaticBuildTaskStoreRoot(target);
   const hash = createHash("sha256");
@@ -642,6 +777,23 @@ function exhaustFirstPublicTask(
       max_semantic_attempts: 3,
     });
     if (claim.status !== "leased") throw new Error(`expected synthetic scope A task ${semanticAttempt}`);
+    if (failureDiagnostic.version === "automatic_build_failure_diagnostic.v3"
+      && failureDiagnostic.phase === "artifact_writer") {
+      recordAutomaticBuildInputObservation(target, claim.lease_ref, claim.lease.token, {
+        started_at: claim.lease.issued_at, finished_at: claim.lease.issued_at,
+        input_bytes: 0, input_sha256: descriptor.input_hash,
+        render_contract_version: MODEL_INPUT_RENDER_CONTRACT_VERSION,
+      });
+      const candidatePath = path.join(path.dirname(claim.lease_ref), "candidate.json");
+      writeFileSync(candidatePath, JSON.stringify({ type: "application" }));
+      submitAutomaticBuildCandidate(target, claim.lease_ref, claim.lease.token, candidatePath, () => {
+        throw new ExtractorContractError({
+          version: "automatic_build_extractor_diagnostic.v1", code: failureDiagnostic.code,
+          json_pointer: failureDiagnostic.json_pointer!, expected: failureDiagnostic.expected!, actual: "application",
+        });
+      }, { now: `2026-08-10T02:00:0${semanticAttempt}.100Z` });
+      continue;
+    }
     failAutomaticBuildTask(target, claim.lease_ref, claim.lease.token, {
       failure_diagnostic: failureDiagnostic,
       now: `2026-08-10T02:00:0${semanticAttempt}.100Z`,
@@ -722,13 +874,38 @@ describe("S0 deterministic automatic-build driver protocol", () => {
 
     expect(response.action.kind).toBe("SPAWN_EXECUTORS");
     expectRootSafeStep(response, [value.root, value.source, value.buildPlanPath, "PRIVATE_DRIVER_INPUT"]);
+    const snapshotRead = vi.spyOn(buildOrchestrator, "routeAutomaticBuildSnapshot");
     const replayed = await driver.automaticBuildStep({
       version: "automatic_build_step_request.v1",
       invocation_ref: invocation.invocation_ref,
       available_agent_slots: 1,
     });
     expect(replayed).toEqual(response);
+    expect(snapshotRead).toHaveBeenCalledTimes(1);
+    snapshotRead.mockRestore();
   });
+
+  it("P3 observes a child commit between plan and dispatch without reclaiming it", async () => {
+    const driver = expectedDriver(); const value = fixture("p3-commit-between");
+    const invocation = await createInvocation(driver, value);
+    const request = { version: "automatic_build_step_request.v1" as const,
+      invocation_ref: invocation.invocation_ref, available_agent_slots: 1 as const };
+    const first = await driver.automaticBuildStep(request);
+    if (first.action.kind !== "SPAWN_EXECUTORS") throw new Error("expected dispatch");
+    const ref = first.action.executors[0].opaque_handoff_ref;
+    const readSnapshot = buildOrchestrator.routeAutomaticBuildSnapshot;
+    const snapshotRead = vi.spyOn(buildOrchestrator, "routeAutomaticBuildSnapshot").mockImplementationOnce((...args) => {
+      const result = readSnapshot(...args);
+      executorMcpConnection().commit(ref);
+      return result;
+    });
+    let next;
+    try { next = await driver.automaticBuildStep(request); }
+    finally { snapshotRead.mockRestore(); }
+    if (next.action.kind === "SPAWN_EXECUTORS") {
+      expect(next.action.executors.map(executor => executor.opaque_handoff_ref)).not.toContain(ref);
+    } else expect(["DONE", "NEEDS_USER"]).toContain(next.action.kind);
+  }, 30_000);
 
   it("fails closed before task mutation when the installed executor protocol is unavailable", async () => {
     const driver = expectedDriver();
@@ -763,7 +940,290 @@ describe("S0 deterministic automatic-build driver protocol", () => {
     }
   });
 
-  it("lets a fresh invocation reuse an expired dispatch opaque handoff", async () => {
+  it("L2 rejects non-allowlisted, wrong-phase, extra-field and simultaneous observations", async () => {
+    const driver = expectedDriver();
+    const ref = `abhandoff1_${"a".repeat(64)}`;
+    const base = { version: "automatic_build_step_request.v1", invocation_ref: `abinv1_${"b".repeat(64)}`,
+      available_agent_slots: 1, executor_open_failure: { opaque_handoff_ref: ref, diagnostic_code: "connection_terminal", phase: "open" } };
+    for (const invalid of [
+      { ...base, bootstrap_failure: { opaque_handoff_ref: ref } },
+      ...[{ diagnostic_code: "protocol_incompatible" }, { phase: "generation_start" },
+        { opaque_handoff_ref: "invalid" }, { extra: true }].map(change => ({ ...base,
+        executor_open_failure: { ...base.executor_open_failure, ...change } })),
+    ]) {
+      await expect(async () => driver.automaticBuildStep(invalid as AutomaticBuildStepRequestV1))
+        .rejects.toThrow(/mutually exclusive|executor open failure|invalid fields/u);
+    }
+  });
+
+  it("L2 recovers a real terminal-connection refusal after A commits and commits B on a new connection", async () => {
+    const driver = expectedDriver();
+    const value = fixture("l2-connection-recovery", { body: `# Guide\n\n${Array.from({ length: 160 }, (_, i) =>
+      `Paragraph ${i + 1} contains stable evidence for the current V4 submit fixture.`).join("\n\n")}` });
+    const invocation = await createInvocation(driver, value);
+    const request: AutomaticBuildStepRequestV1 = { version: "automatic_build_step_request.v1",
+      invocation_ref: invocation.invocation_ref, available_agent_slots: 1 as const };
+    const first = await driver.automaticBuildStep(request);
+    if (first.action.kind !== "SPAWN_EXECUTORS") throw new Error("expected A");
+    const old = executorMcpConnection();
+    old.commit(first.action.executors[0]!.opaque_handoff_ref);
+    const second = await driver.automaticBuildStep(request);
+    if (second.action.kind !== "SPAWN_EXECUTORS") throw new Error("expected B");
+    const b = second.action.executors[0]!;
+    const rejected = old.rawCall("executor.open", { version: "automatic_build_executor_open_request.v3",
+      opaque_handoff_ref: b.opaque_handoff_ref });
+    const error = JSON.parse(rejected.result.content[0]!.text);
+    expect(error).toMatchObject({ status: "interrupted", category: "session", diagnostic_code: "connection_terminal", phase: "open" });
+    const target = resolveAutomaticBuildTarget(value.source, value.root);
+    const before = taskTreeBytes(target);
+    const report = { ...request, executor_open_failure: { opaque_handoff_ref: b.opaque_handoff_ref,
+      diagnostic_code: error.diagnostic_code, phase: error.phase } };
+    const recovered = await driver.automaticBuildStep(report);
+    if (recovered.action.kind !== "SPAWN_EXECUTORS") throw new Error("expected replacement B");
+    const replacement = recovered.action.executors[0]!;
+    expect(replacement.dispatch_slot_ref).toBe(b.dispatch_slot_ref);
+    expect(replacement.opaque_handoff_ref).not.toBe(b.opaque_handoff_ref);
+    expect(taskTreeBytes(target)).toEqual(before);
+    expect(await driver.automaticBuildStep(report)).toEqual(recovered);
+    executorMcpConnection().commit(replacement.opaque_handoff_ref);
+    const owner = publicV4HandoffFacts(b.opaque_handoff_ref).owner_identity;
+    const state = inspectAutomaticBuildDispatch(target, owner.stage, owner.dispatch_id,
+      new Date().toISOString(), owner.dispatch_run_id);
+    if (state.state !== "active") throw new Error("expected remaining unit");
+    expect(state.task_receipts.map(receipt => receipt.state)).toEqual(["committed", "committed"]);
+    const after = taskTreeBytes(target);
+    await driver.automaticBuildStep(report);
+    expect(taskTreeBytes(target)).toEqual(after);
+  }, 30_000);
+
+  it("L1 refills the released slot while sibling children have not opened yet", async () => {
+    const driver = expectedDriver();
+    const value = fixture("l1-unopened-siblings", { body: `# Guide\n\n${Array.from({ length: 900 }, (_, i) =>
+      `Paragraph ${i + 1} contains stable evidence for the current V4 submit fixture.`).join("\n\n")}` });
+    const invocation = await createInvocation(driver, value, { max_parallel: 3 });
+    const request: AutomaticBuildStepRequestV1 = { version: "automatic_build_step_request.v1",
+      invocation_ref: invocation.invocation_ref, available_agent_slots: 3 };
+    const first = await driver.automaticBuildStep(request);
+    if (first.action.kind !== "SPAWN_EXECUTORS") throw new Error("expected initial three slots");
+    expect(first.action.executors).toHaveLength(3);
+    const [a, b, c] = first.action.executors;
+    submitCommittedPublicV4Handoff(a!.opaque_handoff_ref, new Date().toISOString());
+    const second = await driver.automaticBuildStep({ ...request, available_agent_slots: 1 });
+    if (second.action.kind !== "SPAWN_EXECUTORS") throw new Error("expected A replacement");
+    const replacementA = second.action.executors.find(x => x.dispatch_slot_ref === a!.dispatch_slot_ref)!;
+    expect(replacementA.opaque_handoff_ref).not.toBe(a!.opaque_handoff_ref);
+    // B and replacement A are live in the harness but still waiting to make their first call.
+    submitCommittedPublicV4Handoff(c!.opaque_handoff_ref, new Date().toISOString());
+    const third = await driver.automaticBuildStep({ ...request, available_agent_slots: 1 });
+    if (third.action.kind !== "SPAWN_EXECUTORS") throw new Error("expected C replacement");
+    const liveSlots = new Set([b!.dispatch_slot_ref, replacementA.dispatch_slot_ref]);
+    const refill = third.action.executors.filter(x => !liveSlots.has(x.dispatch_slot_ref));
+    expect(refill).toHaveLength(1);
+    expect(refill[0]!.dispatch_slot_ref).toBe(c!.dispatch_slot_ref);
+    expect(refill[0]!.opaque_handoff_ref).not.toBe(c!.opaque_handoff_ref);
+  }, 30_000);
+
+  it("L1 commits six units through fresh connections while refilling one of three live slots", async () => {
+    const driver = expectedDriver();
+    const value = fixture("l1-three-slot-six-units", {
+      body: `# Guide\n\n${Array.from({ length: 900 }, (_, i) =>
+        `Paragraph ${i + 1} contains stable evidence for the current V4 submit fixture.`).join("\n\n")}`,
+    });
+    const invocation = await createInvocation(driver, value, { max_parallel: 3 });
+    const target = resolveAutomaticBuildTarget(value.source, value.root);
+    type Generation = Extract<AutomaticBuildExecutorSessionResponseV3["action"], { kind: "GENERATE" }>;
+    const live = new Map<string, { ref: string; generated: Generation;
+      call: (name: string, args: unknown) => AutomaticBuildExecutorSessionResponseV3 }>();
+    const completed = new Set<string>();
+    const children = new Set<ReturnType<typeof createBuildExecutorMcpSession>>();
+    const units = new Set<string>();
+    const refill = async () => {
+      const step = await driver.automaticBuildStep({ version: "automatic_build_step_request.v1",
+        invocation_ref: invocation.invocation_ref, available_agent_slots: (3 - live.size) as 1 | 2 | 3 });
+      if (step.action.kind !== "SPAWN_EXECUTORS") throw new Error(JSON.stringify(step.action));
+      for (const launch of [...step.action.executors, ...step.action.executors]) {
+        const slot = launch.dispatch_slot_ref!;
+        if (live.has(slot) || completed.has(launch.opaque_handoff_ref) || live.size === 3) continue;
+        const child = createBuildExecutorMcpSession({
+          bootstrap_version: BUILD_EXECUTOR_BOOTSTRAP_CONTRACT_V3.version,
+          protocol_generation: BUILD_EXECUTOR_BOOTSTRAP_CONTRACT_V3.session_protocol,
+          session_private_root: resolveAutomaticBuildExecutorRegistryRoot(),
+        });
+        expect(children.has(child)).toBe(false);
+        children.add(child);
+        let id = 0;
+        const call = (name: string, args: unknown): AutomaticBuildExecutorSessionResponseV3 => {
+          const rpc = child.handle_message({ jsonrpc: "2.0", id: ++id, method: "tools/call",
+            params: { name, arguments: args } }) as { result: { isError: boolean; content: { text: string }[] } };
+          expect(rpc.result.isError).toBe(false);
+          return JSON.parse(rpc.result.content[0]!.text);
+        };
+        const opened = call("executor.open", { version: "automatic_build_executor_open_request.v3",
+          opaque_handoff_ref: launch.opaque_handoff_ref });
+        if (opened.action.kind !== "DELIVER_INPUT") throw new Error("expected delivery");
+        const batch = call("executor.input.next", opened.action.next_request);
+        if (batch.action.kind !== "INPUT_BATCH" || !batch.action.batch.final_for_generation) throw new Error("expected final batch");
+        const generated = call("executor.generation.start", {
+          version: "automatic_build_executor_generation_start_request.v3",
+          opaque_session_ref: batch.action.batch.opaque_session_ref,
+          generation_input_ref: batch.action.batch.generation_input_ref,
+          confirmed_through_ordinal: batch.action.batch.last_ordinal,
+        });
+        if (generated.action.kind !== "GENERATE") throw new Error("expected generation");
+        expect(id).toBe(3);
+        live.set(slot, { ref: launch.opaque_handoff_ref, call, generated: generated.action });
+        await new Promise<void>(resolve => setImmediate(resolve));
+      }
+      expect(live.size).toBe(3);
+    };
+    await refill();
+    for (let count = 0; count < 6; count++) {
+      const [slot, { ref, call, generated }] = [...live][count % live.size]!;
+      const others = [...live].filter(([key]) => key !== slot);
+      if (!("work_unit_id" in generated.output_contract)) throw new Error("expected public contract");
+      expect(generated.semantic_attempt).toBe(1);
+      expect(units.has(generated.output_contract.work_unit_id)).toBe(false);
+      units.add(generated.output_contract.work_unit_id);
+      expect(call("executor.submit_candidate", { version: "automatic_build_executor_candidate_submit.v3",
+        opaque_session_ref: generated.opaque_session_ref, candidate_sink_ref: generated.candidate_sink_ref,
+        candidate: { nodes: [], edges: [] } })).toMatchObject({ action: { kind: "DONE", status: "committed" } });
+      const facts = publicV4HandoffFacts(ref);
+      const state = inspectAutomaticBuildDispatch(target, facts.owner_identity.stage,
+        facts.owner_identity.dispatch_id, new Date().toISOString(), facts.owner_identity.dispatch_run_id);
+      if (state.state === "finished") throw new Error("expected active dispatch");
+      expect(state.task_receipts.some(receipt => receipt.state === "committed"
+        && receipt.work_unit_id === facts.recovery_identity.current_work_unit_id)).toBe(true);
+      live.delete(slot);
+      completed.add(ref);
+      await new Promise<void>(resolve => setImmediate(resolve));
+      if (count < 3) {
+        await refill();
+        for (const [key, owned] of others) expect(live.get(key)).toBe(owned);
+      }
+    }
+    expect(units.size).toBe(6);
+    expect(completed.size).toBe(6);
+    expect(children.size).toBe(6);
+    expect(live.size).toBe(0);
+  }, 120_000);
+
+  it.each(["bootstrap", "connection_terminal", "handoff_ref_mismatch"] as const)("L2 %s: recovers a zero-call bootstrap failure once without consuming a semantic attempt", async (failureKind) => {
+    const driver = expectedDriver();
+    const value = fixture("zero-call-bootstrap", {
+      body: `# Guide\n\n${Array.from({ length: 900 }, (_, i) =>
+        `Paragraph ${i + 1} contains stable evidence for the current V4 submit fixture.`).join("\n\n")}`,
+    });
+    const invocation = await createInvocation(driver, value, { max_parallel: 3 });
+    const request: AutomaticBuildStepRequestV1 = {
+      version: "automatic_build_step_request.v1", invocation_ref: invocation.invocation_ref,
+      available_agent_slots: 3,
+    };
+    const first = await driver.automaticBuildStep(request);
+    if (first.action.kind !== "SPAWN_EXECUTORS") throw new Error("expected launch");
+    expect(first.action.executors).toHaveLength(3);
+    const failed = first.action.executors[0]!;
+    const facts = publicV4HandoffFacts(failed.opaque_handoff_ref);
+    const target = resolveAutomaticBuildTarget(value.source, value.root);
+    const before = taskTreeDigest(target);
+    const report = { ...request, ...failureObservation(failureKind, failed.opaque_handoff_ref) };
+    const resumed = await driver.automaticBuildStep(report);
+    if (resumed.action.kind !== "SPAWN_EXECUTORS") throw new Error("expected replacement");
+    const replacement = resumed.action.executors.find(x => x.dispatch_slot_ref === failed.dispatch_slot_ref)!;
+    expect(replacement.opaque_handoff_ref).not.toBe(failed.opaque_handoff_ref);
+    expect(publicV4HandoffFacts(replacement.opaque_handoff_ref)).toEqual(facts);
+    expect(taskTreeDigest(target)).toBe(before);
+    expect(await driver.automaticBuildStep(report)).toEqual(resumed);
+    expect(await driver.automaticBuildStep(request)).toEqual(resumed);
+    for (const other of first.action.executors.slice(1)) {
+      expect(resumed.action.executors).toContainEqual(other);
+    }
+    expect(() => openAutomaticBuildExecutorSessionV3(failed.opaque_handoff_ref)).toThrow();
+    expect(openAutomaticBuildExecutorSessionV3(replacement.opaque_handoff_ref).action.kind)
+      .toBe("DELIVER_INPUT");
+    const afterOpen = await driver.automaticBuildStep({ ...request,
+      ...failureObservation(failureKind, replacement.opaque_handoff_ref) });
+    expect(afterOpen).toEqual(resumed);
+  }, 60_000);
+
+  it.each(["bootstrap", "connection_terminal", "handoff_ref_mismatch"] as const)("L2 %s: rejects bootstrap reports from another invocation without changing its tasks", async (failureKind) => {
+    const driver = expectedDriver();
+    const a = fixture("bootstrap-owner-a");
+    const b = fixture("bootstrap-owner-b");
+    const first = await createInvocation(driver, a);
+    const second = await createInvocation(driver, b);
+    const launch = await driver.automaticBuildStep({ version: "automatic_build_step_request.v1",
+      invocation_ref: first.invocation_ref, available_agent_slots: 1 });
+    if (launch.action.kind !== "SPAWN_EXECUTORS") throw new Error("expected launch");
+    const target = resolveAutomaticBuildTarget(a.source, a.root);
+    const before = taskTreeDigest(target);
+    await expect(async () => driver.automaticBuildStep({ version: "automatic_build_step_request.v1",
+      invocation_ref: second.invocation_ref, available_agent_slots: 1,
+      ...failureObservation(failureKind, launch.action.kind === "SPAWN_EXECUTORS"
+        ? launch.action.executors[0]!.opaque_handoff_ref : ""),
+    })).rejects.toThrow("not issued by this invocation");
+    expect(taskTreeDigest(target)).toBe(before);
+  });
+
+  it.each(["bootstrap", "connection_terminal", "handoff_ref_mismatch"] as const)("L2 %s: keeps accepted work when bootstrap recovery resumes a dispatch between units", async (failureKind) => {
+    const driver = expectedDriver();
+    const value = fixture("bootstrap-committed-prefix", {
+      body: `# Guide\n\n${Array.from({ length: 160 }, (_, i) =>
+        `Paragraph ${i + 1} contains stable evidence for the current V4 submit fixture.`).join("\n\n")}`,
+    });
+    const invocation = await createInvocation(driver, value);
+    const request: AutomaticBuildStepRequestV1 = { version: "automatic_build_step_request.v1",
+      invocation_ref: invocation.invocation_ref, available_agent_slots: 1 as const };
+    const first = await driver.automaticBuildStep(request);
+    if (first.action.kind !== "SPAWN_EXECUTORS") throw new Error("expected launch");
+    submitCommittedPublicV4Handoff(first.action.executors[0]!.opaque_handoff_ref, new Date().toISOString());
+    const second = await driver.automaticBuildStep(request);
+    if (second.action.kind !== "SPAWN_EXECUTORS") throw new Error("expected next unit");
+    const ref = second.action.executors[0]!.opaque_handoff_ref;
+    const target = resolveAutomaticBuildTarget(value.source, value.root);
+    const before = taskTreeDigest(target);
+    const resumed = await driver.automaticBuildStep({ ...request, ...failureObservation(failureKind, ref) });
+    if (resumed.action.kind !== "SPAWN_EXECUTORS") throw new Error("expected replacement");
+    expect(taskTreeDigest(target)).toBe(before);
+    expect(publicV4HandoffFacts(resumed.action.executors[0]!.opaque_handoff_ref))
+      .toEqual(publicV4HandoffFacts(ref));
+    submitCommittedPublicV4Handoff(resumed.action.executors[0]!.opaque_handoff_ref, new Date().toISOString());
+    const owner = publicV4HandoffFacts(ref).owner_identity;
+    const state = inspectAutomaticBuildDispatch(target, owner.stage, owner.dispatch_id,
+      new Date().toISOString(), owner.dispatch_run_id);
+    if (state.state !== "active") throw new Error("expected remaining third unit");
+    expect(state.task_receipts.map(x => x.state)).toEqual(["committed", "committed"]);
+  }, 30_000);
+
+  it.each(["bootstrap", "connection_terminal", "handoff_ref_mismatch"] as const)("L2 %s: bounds repeated bootstrap failures and resumes only after an explicit recovery decision", async (failureKind) => {
+    const driver = expectedDriver();
+    const value = fixture("bootstrap-budget");
+    const invocation = await createInvocation(driver, value);
+    const request: AutomaticBuildStepRequestV1 = {
+      version: "automatic_build_step_request.v1", invocation_ref: invocation.invocation_ref,
+      available_agent_slots: 1,
+    };
+    let step = await driver.automaticBuildStep(request);
+    const launched = new Set<string>();
+    for (let count = 0; count < 3; count++) {
+      if (step.action.kind !== "SPAWN_EXECUTORS") throw new Error("expected launch");
+      const ref = step.action.executors[0]!.opaque_handoff_ref;
+      expect(launched.has(ref)).toBe(false);
+      launched.add(ref);
+      step = await driver.automaticBuildStep({ ...request, ...failureObservation(failureKind, ref) });
+    }
+    expect(step.action.kind).toBe("NEEDS_USER");
+    if (step.action.kind !== "NEEDS_USER") throw new Error("expected bounded failure");
+    expect(step.action.reason).toBe("executor_bootstrap_failed");
+    expect(await driver.automaticBuildStep(request)).toEqual(step);
+    const resumed = await driver.automaticBuildStep({ ...request, decision: {
+      request_id: step.action.request_id, choice_id: "retry_bootstrap",
+    } });
+    if (resumed.action.kind !== "SPAWN_EXECUTORS") throw new Error("expected authorized retry");
+    expect(launched.has(resumed.action.executors[0]!.opaque_handoff_ref)).toBe(false);
+    expect(await driver.automaticBuildStep(request)).toEqual(resumed);
+  });
+
+  it("gives an expired recovery generation a new opaque handoff while keeping its dispatch slot", async () => {
     vi.useFakeTimers();
     try {
       vi.setSystemTime(new Date("2026-08-08T05:00:00.000Z"));
@@ -780,6 +1240,9 @@ describe("S0 deterministic automatic-build driver protocol", () => {
       if (first.action.kind !== "SPAWN_EXECUTORS") {
         throw new Error("expected the first invocation to publish an executor handoff");
       }
+      const firstLaunch = first.action.executors[0];
+      if (!firstLaunch?.dispatch_slot_ref) throw new Error("expected the first dispatch slot ref");
+      startV3GenerationForHandoff(firstLaunch.opaque_handoff_ref, "2026-08-08T05:00:01.000Z");
 
       vi.setSystemTime(new Date("2026-08-09T05:00:00.000Z"));
       const freshInvocation = await createInvocation(driver, value, {
@@ -794,9 +1257,10 @@ describe("S0 deterministic automatic-build driver protocol", () => {
       });
       expect(resumed.action.kind).toBe("SPAWN_EXECUTORS");
       if (resumed.action.kind !== "SPAWN_EXECUTORS") {
-        throw new Error("expected the fresh invocation to reuse the expired dispatch handoff");
+        throw new Error("expected the fresh invocation to issue the current recovery handoff");
       }
-      expect(resumed.action.executors).toEqual(first.action.executors);
+      expect(resumed.action.executors[0]?.opaque_handoff_ref).not.toBe(firstLaunch.opaque_handoff_ref);
+      expect(resumed.action.executors[0]?.dispatch_slot_ref).toBe(firstLaunch.dispatch_slot_ref);
       expectRootSafeStep(resumed, [value.root, value.source, value.buildPlanPath]);
     } finally {
       vi.useRealTimers();
@@ -1107,6 +1571,57 @@ describe("S0 deterministic automatic-build driver protocol", () => {
     }
   }, 30_000);
 
+  it("authorizes candidate correction from an old publish-policy request without rewriting failures", async () => {
+    const value = fixture("candidate-correction");
+    const priorRoot = process.env.UNDERSTAND_BOOK_AUTOMATIC_BUILD_DRIVER_ROOT;
+    process.env.UNDERSTAND_BOOK_AUTOMATIC_BUILD_DRIVER_ROOT = path.join(value.root, "driver-registry");
+    try {
+      const driver = expectedDriver();
+      const { invocation, retryDecision, target } = await exhaustedRetryBoundary(driver, value,
+        "2026-08-10T02:08:10.000Z", {
+          failure_diagnostic: createAutomaticBuildFailureDiagnosticV3({
+            category: "schema", code: "schema_invalid", phase: "artifact_writer",
+            json_pointer: "/unit_card/candidate_key_stops/4/type", expected: "definition | example | claim",
+          }),
+          expected_projection: { category: "schema", code: "schema_invalid", phase: "artifact_writer",
+            required_recovery: "confirm_candidate_retry" },
+        });
+      const requestPath = path.join(value.root, "driver-registry", "requests", `${retryDecision.request_id}.json`);
+      const oldRequest = JSON.parse(readFileSync(requestPath, "utf8"));
+      oldRequest.projection.required_recovery = "publish_new_policy_scope";
+      for (const boundary of oldRequest.retry_boundaries) boundary.required_recovery = "publish_new_policy";
+      oldRequest.request_id = `abreq1_${createHash("sha256").update(canonicalAutomaticBuildJson({
+        version: "automatic_build_decision_request_identity.v1",
+        invocation_ref: oldRequest.invocation_ref, reason: oldRequest.reason,
+        internal_reason: oldRequest.internal_reason, state: oldRequest.state,
+        stage: oldRequest.stage ?? null, projection: oldRequest.projection ?? null,
+        plan_budget_evidence: oldRequest.plan_budget_evidence ?? null,
+        attempt_scopes: oldRequest.attempt_scopes ?? null,
+        retry_boundaries: oldRequest.retry_boundaries ?? null, choices: oldRequest.choices,
+      })).digest("hex")}`;
+      retryDecision.request_id = oldRequest.request_id;
+      writeFileSync(path.join(path.dirname(requestPath), `${oldRequest.request_id}.json`), JSON.stringify(oldRequest));
+      const before = taskTreeBytes(target);
+      const request = { version: "automatic_build_step_request.v1" as const,
+        invocation_ref: invocation.invocation_ref, available_agent_slots: 1 as const, decision: retryDecision };
+      const recovered = await driver.automaticBuildStep(request);
+      expect(recovered.action.kind).toBe("SPAWN_EXECUTORS");
+      expectRootSafeStep(recovered, [value.root, "candidate_key_stops", "application"]);
+      for (const [file, bytes] of Object.entries(before)) {
+        if (bytes && /(?:failure|result)\.json$/.test(file)) {
+          expect(readFileSync(path.join(automaticBuildTaskStoreRoot(target), file))).toEqual(bytes);
+        }
+      }
+      expect(await driver.automaticBuildStep(request)).toEqual(recovered);
+      const recoveries = readdirSync(automaticBuildTaskStoreRoot(target), { recursive: true })
+        .map(String).filter(file => file.endsWith("recovery.json"));
+      expect(recoveries).toHaveLength(1);
+    } finally {
+      if (priorRoot === undefined) delete process.env.UNDERSTAND_BOOK_AUTOMATIC_BUILD_DRIVER_ROOT;
+      else process.env.UNDERSTAND_BOOK_AUTOMATIC_BUILD_DRIVER_ROOT = priorRoot;
+    }
+  }, 30_000);
+
   it("writes one terminal-bound recovery receipt for an allowlisted transient retry_current", async () => {
     const previousRegistryRoot = process.env.UNDERSTAND_BOOK_AUTOMATIC_BUILD_DRIVER_ROOT;
     const value = fixture("transient-retry");
@@ -1265,7 +1780,7 @@ describe("S0 deterministic automatic-build driver protocol", () => {
           ...actual,
           // SR2 isolates attempt-scope replanning from the forward-release parity
           // gate; the synthetic explicit policy generation is intentionally unpublished.
-          automaticBuildProtocolDoctor: () => ({ status: "compatible" as const }),
+          automaticBuildProtocolContract: () => ({ status: "compatible" as const }),
         };
       });
       vi.resetModules();
@@ -1280,7 +1795,7 @@ describe("S0 deterministic automatic-build driver protocol", () => {
       expect({
         kind: replanned.action.kind,
         ...(replanned.action.kind === "NEEDS_USER" ? { reason: replanned.action.reason } : {}),
-      }).toEqual({ kind: "SPAWN_EXECUTORS" });
+      }, JSON.stringify(replanned.action)).toEqual({ kind: "SPAWN_EXECUTORS" });
       const requestRecord = JSON.parse(readFileSync(
         path.join(registryRoot, "requests", `${retryDecision.request_id}.json`),
         "utf8",
@@ -1462,6 +1977,265 @@ describe("S0 deterministic automatic-build driver protocol", () => {
     expectRootSafeStep(response, [value.root, value.buildPlanPath, "driver-receipt-"]);
   }, 30_000);
 
+  it("terminalizes a fully committed V4 dispatch before build.step refills it", async () => {
+    vi.useFakeTimers();
+    const previousRegistryRoot = process.env.UNDERSTAND_BOOK_AUTOMATIC_BUILD_DRIVER_ROOT;
+    const value = fixture("v4-ready-to-finish-success", {
+      body: `# Guide\n\n${Array.from({ length: 320 }, (_, index) => (
+        `Paragraph ${index + 1} contains stable evidence for the current V4 submit fixture.`
+      )).join("\n\n")}`,
+    });
+    process.env.UNDERSTAND_BOOK_AUTOMATIC_BUILD_DRIVER_ROOT = path.join(value.root, "driver-registry");
+    try {
+      const driver = expectedDriver();
+      vi.setSystemTime(new Date("2026-09-02T10:00:00.000Z"));
+      const invocation = await createInvocation(driver, value, {
+        created_at: "2026-09-02T10:00:00.000Z",
+      });
+      let step = await driver.automaticBuildStep({
+        version: "automatic_build_step_request.v1",
+        invocation_ref: invocation.invocation_ref,
+        available_agent_slots: 1,
+      });
+      if (step.action.kind !== "SPAWN_EXECUTORS") {
+        throw new Error("expected the first V4 public executor");
+      }
+      let executor = step.action.executors[0];
+      if (!executor) throw new Error("expected a V4 public executor ref");
+      const firstFacts = publicV4HandoffFacts(executor.opaque_handoff_ref);
+      const target = resolveAutomaticBuildTarget(value.source, value.root);
+      const initial = inspectAutomaticBuildDispatch(
+        target,
+        firstFacts.owner_identity.stage,
+        firstFacts.owner_identity.dispatch_id,
+        "2026-09-02T10:00:00.000Z",
+        firstFacts.owner_identity.dispatch_run_id,
+      );
+      expect(initial.state).toBe("active");
+      expect(initial.manifest.ordered_work_unit_ids).toHaveLength(4);
+
+      let lastSubmitSecond = 0;
+      for (let ordinal = 0; ordinal < initial.manifest.ordered_work_unit_ids.length; ordinal += 1) {
+        const handoffFacts = publicV4HandoffFacts(executor.opaque_handoff_ref);
+        expect(handoffFacts.owner_identity).toEqual(firstFacts.owner_identity);
+        expect(handoffFacts.recovery_identity.current_work_unit_id)
+          .toBe(initial.manifest.ordered_work_unit_ids[ordinal]);
+        const second = ordinal * 3 + 1;
+        lastSubmitSecond = second;
+        submitCommittedPublicV4Handoff(
+          executor.opaque_handoff_ref,
+          `2026-09-02T10:00:${String(second).padStart(2, "0")}.000Z`,
+        );
+        if (ordinal === initial.manifest.ordered_work_unit_ids.length - 1) break;
+        vi.setSystemTime(new Date(
+          `2026-09-02T10:00:${String(second + 1).padStart(2, "0")}.000Z`,
+        ));
+        step = await driver.automaticBuildStep({
+          version: "automatic_build_step_request.v1",
+          invocation_ref: invocation.invocation_ref,
+          available_agent_slots: 1,
+        });
+        if (step.action.kind !== "SPAWN_EXECUTORS") {
+          throw new Error("expected the next V4 recovery generation");
+        }
+        const nextExecutor = step.action.executors[0];
+        if (!nextExecutor) throw new Error("expected the next V4 executor ref");
+        expect(nextExecutor.dispatch_slot_ref).toBe(executor.dispatch_slot_ref);
+        expect(nextExecutor.opaque_handoff_ref).not.toBe(executor.opaque_handoff_ref);
+        executor = nextExecutor;
+      }
+
+      const ready = inspectAutomaticBuildDispatch(
+        target,
+        firstFacts.owner_identity.stage,
+        firstFacts.owner_identity.dispatch_id,
+        `2026-09-02T10:00:${String(lastSubmitSecond).padStart(2, "0")}.000Z`,
+        firstFacts.owner_identity.dispatch_run_id,
+      );
+      expect(ready.state).toBe("ready_to_finish");
+      const continuationSecond = lastSubmitSecond + 1;
+      vi.setSystemTime(new Date(
+        `2026-09-02T10:00:${String(continuationSecond).padStart(2, "0")}.000Z`,
+      ));
+      const continued = await driver.automaticBuildStep({
+        version: "automatic_build_step_request.v1",
+        invocation_ref: invocation.invocation_ref,
+        available_agent_slots: 1,
+      });
+
+      expectRootSafeStep(continued, [value.root, value.source, value.buildPlanPath]);
+      const finished = inspectAutomaticBuildDispatch(
+        target,
+        firstFacts.owner_identity.stage,
+        firstFacts.owner_identity.dispatch_id,
+        `2026-09-02T10:00:${String(continuationSecond).padStart(2, "0")}.000Z`,
+        firstFacts.owner_identity.dispatch_run_id,
+      );
+      expect(finished.state).toBe("finished");
+      if (finished.state !== "finished") throw new Error("expected a durable dispatch receipt");
+      expect(finished.receipt.terminal_reason).toBe("complete");
+      expect(finished.receipt.task_receipts.map((receipt) => receipt.state))
+        .toEqual(initial.manifest.ordered_work_unit_ids.map(() => "committed"));
+    } finally {
+      if (previousRegistryRoot === undefined) {
+        delete process.env.UNDERSTAND_BOOK_AUTOMATIC_BUILD_DRIVER_ROOT;
+      } else {
+        process.env.UNDERSTAND_BOOK_AUTOMATIC_BUILD_DRIVER_ROOT = previousRegistryRoot;
+      }
+      vi.useRealTimers();
+    }
+  }, 60_000);
+
+  it("terminalizes a V4 committed-failed-committed dispatch as task_failure and retries the failure", async () => {
+    vi.useFakeTimers();
+    const previousRegistryRoot = process.env.UNDERSTAND_BOOK_AUTOMATIC_BUILD_DRIVER_ROOT;
+    const value = fixture("v4-ready-to-finish-task-failure", {
+      body: `# Guide\n\n${Array.from({ length: 160 }, (_, index) => (
+        `Paragraph ${index + 1} contains stable evidence for the current V4 submit fixture.`
+      )).join("\n\n")}`,
+    });
+    process.env.UNDERSTAND_BOOK_AUTOMATIC_BUILD_DRIVER_ROOT = path.join(value.root, "driver-registry");
+    try {
+      const driver = expectedDriver();
+      vi.setSystemTime(new Date("2026-09-02T11:00:00.000Z"));
+      const invocation = await createInvocation(driver, value, {
+        created_at: "2026-09-02T11:00:00.000Z",
+      });
+      const first = await driver.automaticBuildStep({
+        version: "automatic_build_step_request.v1",
+        invocation_ref: invocation.invocation_ref,
+        available_agent_slots: 1,
+      });
+      if (first.action.kind !== "SPAWN_EXECUTORS") {
+        throw new Error("expected the first V4 task-failure executor");
+      }
+      const firstExecutor = first.action.executors[0];
+      if (!firstExecutor) throw new Error("expected the first V4 task-failure ref");
+      const firstFacts = publicV4HandoffFacts(firstExecutor.opaque_handoff_ref);
+      const target = resolveAutomaticBuildTarget(value.source, value.root);
+      const initial = inspectAutomaticBuildDispatch(
+        target,
+        firstFacts.owner_identity.stage,
+        firstFacts.owner_identity.dispatch_id,
+        "2026-09-02T11:00:00.000Z",
+        firstFacts.owner_identity.dispatch_run_id,
+      );
+      expect(initial.manifest.ordered_work_unit_ids).toHaveLength(3);
+      const [unitA, unitB, unitC] = initial.manifest.ordered_work_unit_ids;
+      if (!unitA || !unitB || !unitC) throw new Error("expected V4 A/B/C work units");
+      expect(firstFacts.recovery_identity.current_work_unit_id).toBe(unitA);
+
+      submitCommittedPublicV4Handoff(
+        firstExecutor.opaque_handoff_ref,
+        "2026-09-02T11:00:01.000Z",
+      );
+      vi.setSystemTime(new Date("2026-09-02T11:00:02.000Z"));
+      const second = await driver.automaticBuildStep({
+        version: "automatic_build_step_request.v1",
+        invocation_ref: invocation.invocation_ref,
+        available_agent_slots: 1,
+      });
+      if (second.action.kind !== "SPAWN_EXECUTORS") {
+        throw new Error("expected the V4 B recovery generation");
+      }
+      const secondExecutor = second.action.executors[0];
+      if (!secondExecutor) throw new Error("expected the V4 B executor ref");
+      expect(publicV4HandoffFacts(secondExecutor.opaque_handoff_ref)
+        .recovery_identity.current_work_unit_id).toBe(unitB);
+      const failedGeneration = startV3GenerationForHandoff(
+        secondExecutor.opaque_handoff_ref,
+        "2026-09-02T11:00:03.000Z",
+      );
+      if (failedGeneration.action.kind !== "GENERATE") {
+        throw new Error("expected the V4 B generation action");
+      }
+      const failedTaskSession = JSON.parse(readFileSync(path.join(
+        resolveAutomaticBuildExecutorRegistryRoot(),
+        "executor-task-sessions",
+        `${failedGeneration.action.opaque_session_ref}.json`,
+      ), "utf8")) as { lease_ref: string; lease_token: string; work_unit_id: string };
+      expect(failedTaskSession.work_unit_id).toBe(unitB);
+      failAutomaticBuildTask(target, failedTaskSession.lease_ref, failedTaskSession.lease_token, {
+        failure_diagnostic: createAutomaticBuildFailureDiagnosticV3({
+          category: "transport",
+          code: "candidate_request_too_large",
+          phase: "generation",
+        }),
+        now: "2026-09-02T11:00:04.000Z",
+      });
+
+      vi.setSystemTime(new Date("2026-09-02T11:00:05.000Z"));
+      const third = await driver.automaticBuildStep({
+        version: "automatic_build_step_request.v1",
+        invocation_ref: invocation.invocation_ref,
+        available_agent_slots: 1,
+      });
+      if (third.action.kind !== "SPAWN_EXECUTORS") {
+        throw new Error("expected the V4 C recovery generation");
+      }
+      const thirdExecutor = third.action.executors[0];
+      if (!thirdExecutor) throw new Error("expected the V4 C executor ref");
+      expect(publicV4HandoffFacts(thirdExecutor.opaque_handoff_ref)
+        .recovery_identity.current_work_unit_id).toBe(unitC);
+      submitCommittedPublicV4Handoff(
+        thirdExecutor.opaque_handoff_ref,
+        "2026-09-02T11:00:06.000Z",
+      );
+      const ready = inspectAutomaticBuildDispatch(
+        target,
+        firstFacts.owner_identity.stage,
+        firstFacts.owner_identity.dispatch_id,
+        "2026-09-02T11:00:06.000Z",
+        firstFacts.owner_identity.dispatch_run_id,
+      );
+      expect(ready.state).toBe("ready_to_finish");
+      if (ready.state !== "ready_to_finish") throw new Error("expected V4 ready_to_finish state");
+      expect(ready.task_receipts.map((receipt) => receipt.state))
+        .toEqual(["committed", "retryable_failure", "committed"]);
+
+      vi.setSystemTime(new Date("2026-09-02T11:00:07.000Z"));
+      const retry = await driver.automaticBuildStep({
+        version: "automatic_build_step_request.v1",
+        invocation_ref: invocation.invocation_ref,
+        available_agent_slots: 1,
+      });
+      expectRootSafeStep(retry, [value.root, value.source, value.buildPlanPath]);
+      const finished = inspectAutomaticBuildDispatch(
+        target,
+        firstFacts.owner_identity.stage,
+        firstFacts.owner_identity.dispatch_id,
+        "2026-09-02T11:00:07.000Z",
+        firstFacts.owner_identity.dispatch_run_id,
+      );
+      expect(finished.state).toBe("finished");
+      if (finished.state !== "finished") throw new Error("expected a durable task_failure receipt");
+      expect(finished.receipt.terminal_reason).toBe("task_failure");
+      expect(finished.receipt.task_receipts.map((receipt) => receipt.state))
+        .toEqual(["committed", "retryable_failure", "committed"]);
+
+      if (retry.action.kind !== "SPAWN_EXECUTORS") {
+        throw new Error("expected a new dispatch run for the failed B unit");
+      }
+      const retryExecutor = retry.action.executors[0];
+      if (!retryExecutor) throw new Error("expected the V4 retry executor ref");
+      const retryFacts = publicV4HandoffFacts(retryExecutor.opaque_handoff_ref);
+      expect(retryFacts.owner_identity.dispatch_id).not.toBe(firstFacts.owner_identity.dispatch_id);
+      expect(retryFacts.recovery_identity.current_work_unit_id).toBe(unitB);
+      const retriedGeneration = startV3GenerationForHandoff(
+        retryExecutor.opaque_handoff_ref,
+        "2026-09-02T11:00:08.000Z",
+      );
+      expect(retriedGeneration.action).toMatchObject({ kind: "GENERATE", semantic_attempt: 2 });
+    } finally {
+      if (previousRegistryRoot === undefined) {
+        delete process.env.UNDERSTAND_BOOK_AUTOMATIC_BUILD_DRIVER_ROOT;
+      } else {
+        process.env.UNDERSTAND_BOOK_AUTOMATIC_BUILD_DRIVER_ROOT = previousRegistryRoot;
+      }
+      vi.useRealTimers();
+    }
+  }, 60_000);
+
   it("runs driver commands and accepts a PowerShell-style UTF-8 BOM on executor stdin", () => {
     const value = fixture("stdin-command");
     const env = {
@@ -1500,9 +2274,23 @@ describe("S0 deterministic automatic-build driver protocol", () => {
     expect(response.action.kind).toBe("SPAWN_EXECUTORS");
     expectRootSafeStep(response, [value.root, value.source, value.buildPlanPath]);
     if (response.action.kind !== "SPAWN_EXECUTORS") throw new Error("expected an executor ref");
+    const recoveryRequest = { version: "automatic_build_step_request.v1",
+      invocation_ref: invocation.invocation_ref, available_agent_slots: 1,
+      bootstrap_failure: { opaque_handoff_ref: response.action.executors[0]!.opaque_handoff_ref } };
+    const recovered = run(recoveryRequest);
+    expect(recovered.status, recovered.stderr).toBe(0);
+    const recovery = JSON.parse(recovered.stdout) as AutomaticBuildStepResponseV1;
+    if (recovery.action.kind !== "SPAWN_EXECUTORS") throw new Error("expected persisted recovery");
+    expect(recovery.action.executors[0]!.opaque_handoff_ref)
+      .not.toBe(response.action.executors[0]!.opaque_handoff_ref);
+    expect(recovery.action.executors[0]!.dispatch_slot_ref)
+      .toBe(response.action.executors[0]!.dispatch_slot_ref);
+    const replayed = run(recoveryRequest);
+    expect(replayed.status, replayed.stderr).toBe(0);
+    expect(JSON.parse(replayed.stdout)).toEqual(recovery);
     const executorOpenRequest = Buffer.from(`${JSON.stringify({
       version: "automatic_build_executor_open_request.v3",
-      opaque_handoff_ref: response.action.executors[0].opaque_handoff_ref,
+      opaque_handoff_ref: recovery.action.executors[0]!.opaque_handoff_ref,
       now: "2026-08-08T05:25:01.000Z",
     })}\n`, "utf8");
     const opened = spawnSync(process.execPath, [TSX_CLI, EXECUTOR_SESSION_CLI], {
@@ -1534,7 +2322,7 @@ describe("S0 deterministic automatic-build driver protocol", () => {
     const sidecarEntry = readFileSync(path.join(REPO_ROOT, "skills", "build", "sidecar-entry.ts"), "utf8");
     expect(sidecarEntry).toContain("command === \"build.step\"");
     expect(sidecarEntry).toContain("\"executor.open\",");
-  }, 30_000);
+  }, 60_000);
 
   it("makes executor.open reject digest drift and escaping refs before any task claim", async () => {
     const executorSession = expectedExecutorSession();
@@ -1566,6 +2354,15 @@ describe("S0 deterministic automatic-build driver protocol", () => {
         dispatch_id: envelope.manifest.dispatch_id,
         dispatch_run_id: envelope.dispatch_run_id,
       },
+      recovery_identity: inspectAutomaticBuildDispatchRecoveryGeneration(
+        target,
+        envelope.manifest.stage,
+        envelope.manifest.dispatch_id,
+        {
+          now: "2026-08-08T05:30:01.000Z",
+          dispatch_run_id: envelope.dispatch_run_id,
+        },
+      ).recovery_identity,
       executor_handoff: envelope.executor_handoff,
       issued_at: "2026-08-08T05:30:01.000Z",
     });
@@ -1742,6 +2539,71 @@ describe("S4 private artifact driver and executor session", () => {
         .toEqual(generationStateBefore.get(directory));
     }
   });
+
+  it("RG6 gives private artifacts the four-budget contract and records oversize before staging", async () => {
+    const driver = expectedDriver();
+    const value = privateGoalFixture("private-rg6-oversize");
+    const invocation = await createInvocation(driver, value, {
+      created_at: "2026-09-02T03:10:00.000Z",
+    });
+    const spawned = await driver.automaticBuildStep({
+      version: "automatic_build_step_request.v1",
+      invocation_ref: invocation.invocation_ref,
+      available_agent_slots: 1,
+    });
+    if (spawned.action.kind !== "SPAWN_EXECUTORS") {
+      throw new Error("expected one private RG6 executor");
+    }
+    const executor = spawned.action.executors[0];
+    if (!executor) throw new Error("expected one private RG6 handoff");
+    const started = startPrivateV3GenerationForHandoff(
+      executor.opaque_handoff_ref,
+      "2026-09-02T03:10:01.000Z",
+    );
+    expect(started.generation.action.output_contract).toMatchObject({
+      version: "automatic_build_private_artifact_candidate_contract.v3",
+      transport: {
+        version: "candidate_transport_contract.v1",
+        serialized_request_max_bytes:
+          executorTransport.CODEX_EXECUTOR_TRANSPORT_PROFILE_V2.max_candidate_request_bytes,
+        serialized_request_max_estimated_tokens:
+          executorTransport.CODEX_EXECUTOR_TRANSPORT_PROFILE_V2.max_candidate_request_tokens,
+      },
+    });
+    const terminal = submitAutomaticBuildExecutorCandidateV3({
+      version: "automatic_build_executor_candidate_submit.v3",
+      opaque_session_ref: started.generation.action.opaque_session_ref,
+      candidate_sink_ref: started.generation.action.candidate_sink_ref,
+      candidate: {
+        value: "界".repeat(
+          started.generation.action.output_contract.transport
+            .candidate_value_max_estimated_tokens + 1,
+        ),
+      },
+    }, { now: "2026-09-02T03:10:02.000Z" });
+    expect(terminal).toEqual({
+      version: "automatic_build_executor_session.v3",
+      action: { kind: "DONE", status: "retryable_failure" },
+    });
+    expect(JSON.stringify(terminal)).not.toContain("界");
+
+    const privateFiles = readdirSync(value.privateRoot, { recursive: true }).map(String);
+    expect(privateFiles.filter((file) => file.replaceAll("\\", "/").endsWith("/failure.json")))
+      .toHaveLength(1);
+    expect(privateFiles.filter((file) => file.replaceAll("\\", "/").endsWith("/candidate.json")))
+      .toHaveLength(0);
+    expect(privateFiles.filter((file) => file.replaceAll("\\", "/").endsWith("/accepted.v3.json")))
+      .toHaveLength(0);
+    const failureFile = privateFiles.find(
+      (file) => file.replaceAll("\\", "/").endsWith("/failure.json"),
+    );
+    if (!failureFile) throw new Error("expected private RG6 failure receipt");
+    expect(JSON.parse(readFileSync(path.join(value.privateRoot, failureFile), "utf8")))
+      .toMatchObject({
+        state: "retryable_failure",
+        diagnostic_code: "candidate_request_too_large",
+      });
+  }, 30_000);
 
   it("drives public completion through private preparation and accepts every artifact without root leakage", async () => {
     const driver = expectedDriver();

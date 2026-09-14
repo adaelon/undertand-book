@@ -1,0 +1,143 @@
+{
+  "version": "executor_multi_wave_scheduling_evidence.v1",
+  "slot_capacity": 3,
+  "lifecycle_observations": [
+    {
+      "observed_at_ms": 1788823559329,
+      "live_slots": 3
+    },
+    {
+      "observed_at_ms": 1788823576209,
+      "live_slots": 3
+    },
+    {
+      "observed_at_ms": 1788823586869,
+      "live_slots": 2
+    },
+    {
+      "observed_at_ms": 1788823605040,
+      "live_slots": 1
+    },
+    {
+      "observed_at_ms": 1788823631203,
+      "live_slots": 2
+    },
+    {
+      "observed_at_ms": 1788823647131,
+      "live_slots": 3
+    },
+    {
+      "observed_at_ms": 1788823658568,
+      "live_slots": 2
+    },
+    {
+      "observed_at_ms": 1788823672967,
+      "live_slots": 2
+    },
+    {
+      "observed_at_ms": 1788823678478,
+      "live_slots": 1
+    },
+    {
+      "observed_at_ms": 1788823693661,
+      "live_slots": 1
+    },
+    {
+      "observed_at_ms": 1788823708694,
+      "live_slots": 0
+    }
+  ],
+  "refills": [
+    {
+      "thread_id": "01a07e31-f9f0-7a21-8837-ebeddc7dcbc8",
+      "started_at_ms": 1788823599582,
+      "free_slot_observed_at_ms": 1788823586869,
+      "observed_refill_gap_ms": 12713
+    },
+    {
+      "thread_id": "01a07e32-6350-7611-a5da-d4b885abc03f",
+      "started_at_ms": 1788823626562,
+      "free_slot_observed_at_ms": 1788823605040,
+      "observed_refill_gap_ms": 21522
+    },
+    {
+      "thread_id": "01a07e32-a52f-7cd1-ad98-6bc79b71fefc",
+      "started_at_ms": 1788823643423,
+      "free_slot_observed_at_ms": 1788823631203,
+      "observed_refill_gap_ms": 12220
+    }
+  ],
+  "status": "passed",
+  "codex_cli": "codex-cli 0.153.4",
+  "fixture": "isolated_six_work_unit_three_slot_refill",
+  "elapsed_ms": 211812.01720000003,
+  "successful_units_per_minute": 1.69962028009051,
+  "child_lifecycles": [
+    {
+      "thread_id": "01a07e30-eb27-7ca2-a8e1-00855dc86270",
+      "origin_type": "spawned",
+      "parent_thread_id": "01a07e30-a046-7840-b0bb-a15eeabab09d",
+      "task_name": "r7_parallel_executor_1",
+      "agent_role": "understand_book_executor",
+      "started_seq": 17,
+      "ended_seq": 219,
+      "status": "completed"
+    },
+    {
+      "thread_id": "01a07e30-fe6f-7453-b5d3-acd16611ecac",
+      "origin_type": "spawned",
+      "parent_thread_id": "01a07e30-a046-7840-b0bb-a15eeabab09d",
+      "task_name": "r7_parallel_executor_2",
+      "agent_role": "understand_book_executor",
+      "started_seq": 27,
+      "ended_seq": 254,
+      "status": "completed"
+    },
+    {
+      "thread_id": "01a07e31-1eb9-7e61-8f32-3dae32864c4b",
+      "origin_type": "spawned",
+      "parent_thread_id": "01a07e30-a046-7840-b0bb-a15eeabab09d",
+      "task_name": "r7_parallel_executor_3",
+      "agent_role": "understand_book_executor",
+      "started_seq": 39,
+      "ended_seq": 304,
+      "status": "completed"
+    },
+    {
+      "thread_id": "01a07e31-f9f0-7a21-8837-ebeddc7dcbc8",
+      "origin_type": "spawned",
+      "parent_thread_id": "01a07e30-a046-7840-b0bb-a15eeabab09d",
+      "task_name": "r7_parallel_executor_4",
+      "agent_role": "understand_book_executor",
+      "started_seq": 220,
+      "ended_seq": 478,
+      "status": "completed"
+    },
+    {
+      "thread_id": "01a07e32-6350-7611-a5da-d4b885abc03f",
+      "origin_type": "spawned",
+      "parent_thread_id": "01a07e30-a046-7840-b0bb-a15eeabab09d",
+      "task_name": "r7_parallel_executor_5",
+      "agent_role": "understand_book_executor",
+      "started_seq": 255,
+      "ended_seq": 483,
+      "status": "completed"
+    },
+    {
+      "thread_id": "01a07e32-a52f-7cd1-ad98-6bc79b71fefc",
+      "origin_type": "spawned",
+      "parent_thread_id": "01a07e30-a046-7840-b0bb-a15eeabab09d",
+      "task_name": "r7_parallel_executor_6",
+      "agent_role": "understand_book_executor",
+      "started_seq": 305,
+      "ended_seq": 485,
+      "status": "completed"
+    }
+  ],
+  "durable": {
+    "semantic_attempts": 6,
+    "committed_tasks": 6
+  },
+  "semantic_work_unit_count": 6,
+  "executor_session_count_used_for_work_unit_total": false
+}

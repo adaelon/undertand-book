@@ -12,10 +12,18 @@ import {
   BUILD_EXECUTOR_BOOTSTRAP_CONTRACT_V3,
   createBuildExecutorStdioConnectionCapability,
 } from "../src/build-executor-connection-capability";
+import {
+  CODEX_EXECUTOR_TRANSPORT_PROFILE_V2,
+  createCandidateTransportContract,
+} from "../src/executor-transport";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const DEDICATED_EXECUTOR_ONLY =
   "Only the dedicated `understand_book_executor` Executor may call this tool.";
+const TEST_CANDIDATE_TRANSPORT = createCandidateTransportContract(
+  CODEX_EXECUTOR_TRANSPORT_PROFILE_V2,
+  1_024,
+);
 
 function validSharedMcpConfig() {
   return {
@@ -260,10 +268,10 @@ describe("dormant Build Executor tool adapter", () => {
       },
     });
 
-    expect(connection.authorize_connection(connection.connection_capability, {
+    expect(() => connection.authorize_connection(connection.connection_capability, {
       ...openCall,
       request: { ...openCall.request, opaque_handoff_ref: otherHandoff },
-    })).toBe(false);
+    })).toThrow("handoff_ref_mismatch");
     const nextCall = {
       tool_name: "executor.input.next" as const,
       request: {
@@ -327,10 +335,11 @@ describe("dormant Build Executor tool adapter", () => {
         candidate_sink_ref: sinkRef,
         semantic_attempt: 1,
         output_contract: {
-          version: "automatic_build_semantic_candidate_contract.v2",
+          version: "automatic_build_semantic_candidate_contract.v3",
           format: "strict_json",
           encoding: "utf-8",
           max_bytes: 1024,
+          transport: TEST_CANDIDATE_TRANSPORT,
           stage: "book_structure",
           work_unit_id: "unit:1",
           work_unit_kind: "book_structure_unit",
@@ -486,10 +495,11 @@ describe("dormant Build Executor tool adapter", () => {
         candidate_sink_ref: sinkRef,
         semantic_attempt: 1,
         output_contract: {
-          version: "automatic_build_semantic_candidate_contract.v2",
+          version: "automatic_build_semantic_candidate_contract.v3",
           format: "strict_json",
           encoding: "utf-8",
           max_bytes: 1024,
+          transport: TEST_CANDIDATE_TRANSPORT,
           stage: "book_structure",
           work_unit_id: "unit:resume",
           work_unit_kind: "book_structure_unit",

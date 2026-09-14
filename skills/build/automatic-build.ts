@@ -11,6 +11,7 @@ import {
   nextAutomaticBuildAction,
   nextPlannedAutomaticBuildAction,
   routeAutomaticBuildSnapshot,
+  prepareAutomaticBuildSnapshot,
   resolveAutomaticBuildTarget,
   type AutomaticBuildStage,
   type AutomaticBuildStageState,
@@ -161,18 +162,22 @@ import {
   advanceAutomaticBuildDispatch,
   AutomaticBuildLegacyPartialDispatchRunError,
   automaticBuildDispatchRunId,
+  automaticBuildDispatchManifestPath,
   finishAutomaticBuildDispatch,
   inspectAutomaticBuildDispatch,
+  inspectAutomaticBuildDispatchRecoveryGeneration,
   prepareAutomaticBuildDispatch,
   persistAutomaticBuildDispatch,
   readAutomaticBuildDispatch,
   selectAutomaticBuildDispatchHandoff,
+  finishAutomaticBuildDispatchIfTerminal,
   type AutomaticBuildExecutorDispatchReceiptV1,
   type AutomaticBuildExecutorInterruptionInputV1,
 } from "../../packages/core/src/automatic-build-dispatch-runtime";
 import { issueAutomaticBuildOpaqueHandoff } from "../../packages/core/src/automatic-build-executor-session";
 import {
   BUILD_EXECUTOR_BOOTSTRAP_CONTRACT_V3,
+  BuildExecutorConnectionOpenError,
   createBuildExecutorStdioConnectionCapability,
   validateBuildExecutorRoleConfigV3,
 } from "../../packages/core/src/build-executor-connection-capability";
@@ -1145,7 +1150,7 @@ function preflightForAction(
   });
 }
 
-function automaticBuildRecoveryAction(recovery: AutomaticBuildRecoveryEnvelopeV1) {
+export function automaticBuildRecoveryAction(recovery: AutomaticBuildRecoveryEnvelopeV1) {
   return {
     kind: "needs_user" as const,
     reason: "automatic_build_routing_blocked" as const,
@@ -1431,21 +1436,38 @@ function expandAction(
   acceptedPlanBudgetEvidence?: AutomaticBuildPlanBudgetEvaluationV2,
   executorDispatches = false,
   buildPlan?: BuildPlanV1,
+  decisionSnapshot?: ReturnType<typeof buildAutomaticBuildSnapshot>,
 ) {
   if (!Number.isInteger(maxParallel) || maxParallel < 1) throw new Error("maxParallel must be a positive integer");
-  const snapshotRoute = routeAutomaticBuildSnapshot(target, { quality_profile: qualityProfile });
+  const snapshotRoute = decisionSnapshot
+    && canonicalAutomaticBuildJson(decisionSnapshot.target.target_ref) === canonicalAutomaticBuildJson(target.target_ref)
+    ? { status: "ready" as const, value: decisionSnapshot }
+    : routeAutomaticBuildSnapshot(target, { quality_profile: qualityProfile });
   if (snapshotRoute.status === "blocked") {
     return {
       snapshot: { target, stages: [] },
       action: automaticBuildRecoveryAction(snapshotRoute.recovery),
     };
   }
-  const snapshot = snapshotRoute.value;
-  const action = nextPlannedAutomaticBuildAction(snapshot, buildPlan, Number.MAX_SAFE_INTEGER, {
+  let snapshot = snapshotRoute.value;
+  let action = nextPlannedAutomaticBuildAction(snapshot, buildPlan, Number.MAX_SAFE_INTEGER, {
     quality_profile: qualityProfile,
   });
   if (action.kind === "needs_user") return { snapshot, action };
   if (!buildPlan) throw new Error("planned automatic action is missing its BuildPlan");
+  const preparationStages = snapshot.stages.filter(stage => stage.preparation_required
+    && buildPlan.public_stage_closure.includes(stage.stage));
+  for (const stage of preparationStages) {
+    if (!stage.policy_set) throw new Error("preparation stage is missing policy set");
+    const prepared = prepareAutomaticBuildSnapshot(target, stage.policy_set.stage, { quality_profile: qualityProfile });
+    if (prepared.status === "blocked") return { snapshot, action: automaticBuildRecoveryAction(prepared.recovery) };
+    snapshot = prepared.value;
+  }
+  if (preparationStages.length) {
+    action = nextPlannedAutomaticBuildAction(snapshot, buildPlan, Number.MAX_SAFE_INTEGER, { quality_profile: qualityProfile });
+    if (action.kind === "needs_user") return { snapshot, action };
+  }
+
   const settledPlanBudget = action.kind === "extract"
     ? undefined
     : buildPlanBudgetEvaluation(target, buildPlan, snapshot, leaseOptions.now);
@@ -1912,6 +1934,14 @@ function expandAction(
             executor_handoff: preparedHandoff,
           }).persisted.executor_handoff;
         })();
+        if (finishAutomaticBuildDispatchIfTerminal(target, manifest.stage, manifest.dispatch_id,
+          { now: leaseOptions.now, dispatch_run_id: dispatchRunId })) return undefined;
+        const recoveryGeneration = inspectAutomaticBuildDispatchRecoveryGeneration(
+          target,
+          manifest.stage,
+          manifest.dispatch_id,
+          { now: leaseOptions.now, dispatch_run_id: dispatchRunId },
+        );
         const opaqueHandoff = issueAutomaticBuildOpaqueHandoff({
           target,
           kind: "public_dispatch",
@@ -1921,6 +1951,7 @@ function expandAction(
             dispatch_id: manifest.dispatch_id,
             dispatch_run_id: dispatchRunId,
           },
+          recovery_identity: recoveryGeneration.recovery_identity,
           executor_handoff: executorHandoff,
           issued_at: leaseOptions.now,
         });
@@ -1928,8 +1959,14 @@ function expandAction(
           ...envelope,
           executor_handoff: executorHandoff,
           opaque_handoff_ref: opaqueHandoff.opaque_handoff_ref,
+          dispatch_slot_ref: recoveryGeneration.dispatch_slot_ref,
+          recovery_identity: recoveryGeneration.recovery_identity,
         };
       });
+      const liveDispatches = dispatches.filter((dispatch): dispatch is NonNullable<typeof dispatch> => Boolean(dispatch));
+      if (!liveDispatches.length) {
+        return { snapshot, preflight, action: { kind: "waiting" as const, reason: "settled_dispatches", retry_after_ms: 50 } };
+      }
       const dispatchedIds = new Set(selectedDispatches.flatMap((dispatch) => dispatch.ordered_work_unit_ids));
       return {
         snapshot,
@@ -1945,21 +1982,30 @@ function expandAction(
             dispatchPrompts.get(selectedDispatches[0].dispatch_id)?.prompt_name ?? promptName,
             "dispatch",
           ),
-          dispatches,
+          dispatches: liveDispatches,
+          // Prepared but unopened children still occupy harness slots. Return their current
+          // identities too, so the Root can find a free slot even when selection chose a live ref.
+          replay_dispatch_ids: handoff.persisted_plan.dispatch_plan.dispatches
+            .filter(dispatch => !handoff.completed_dispatch_ids.includes(dispatch.dispatch_id)
+              && existsSync(automaticBuildDispatchManifestPath(
+                target, action.stage, dispatch.dispatch_id, dispatchRunId,
+              )))
+            .map(dispatch => dispatch.dispatch_id),
+          dispatch_run_id: dispatchRunId,
           dispatch_plan_digest: handoff.persisted_plan.dispatch_plan.dispatch_plan_digest,
           active_dispatch_ids: handoff.active_dispatch_ids,
           completed_dispatch_ids: handoff.completed_dispatch_ids,
           scheduled_batch: {
-            total_score: dispatches.reduce((sum, dispatch) => sum + dispatch.accounting.total_score, 0),
+            total_score: liveDispatches.reduce((sum, dispatch) => sum + dispatch.accounting.total_score, 0),
             deferred_ids: allPendingUnits
               .filter((unit) => !dispatchedIds.has(unit.work_unit_id))
               .map((unit) => unit.work_unit_id),
           },
           receipt_aggregation: {
             version: "automatic_build_dispatch_receipt_aggregation.v1" as const,
-            expected_receipts: dispatches.length,
+            expected_receipts: liveDispatches.length,
             max_receipt_bytes: 16_384,
-            max_total_bytes: dispatches.length * 16_384,
+            max_total_bytes: liveDispatches.length * 16_384,
             candidate_payload_forbidden: true,
           },
         },
@@ -2152,6 +2198,7 @@ export function automaticBuildNext(
   rootDir: string,
   maxParallel = 5,
   options: AutomaticBuildNextOptions = {},
+  decisionSnapshot?: ReturnType<typeof buildAutomaticBuildSnapshot>,
 ) {
   const target = resolveAutomaticBuildTarget(targetInput, rootDir, { book_id: options.book_id });
   const protocol = resolveAutomaticBuildClaimProtocol(options.protocol, options.executor_dispatches === true);
@@ -2180,6 +2227,7 @@ export function automaticBuildNext(
       options.accepted_plan_budget_evidence,
       protocol === AUTOMATIC_BUILD_EXECUTOR_DISPATCH_PROTOCOL_V1,
       options.build_plan,
+      decisionSnapshot,
     ),
   };
 }
@@ -2820,9 +2868,17 @@ export function validateAutomaticBuildProtocolDoctorBoundaryV3(
       relativeRootRejected = true;
     }
     const serializedToolContract = JSON.stringify(BUILD_EXECUTOR_MCP_CONTRACT_V3);
+    const firstOpenAccepted = connection.authorize_connection(connection.connection_capability, firstOpen);
+    let crossHandoffRejected = false;
+    try {
+      connection.authorize_connection(connection.connection_capability, crossHandoffOpen);
+    } catch (error) {
+      crossHandoffRejected = error instanceof BuildExecutorConnectionOpenError
+        && error.diagnostic_code === "handoff_ref_mismatch";
+    }
     if (connection.authorize_connection(Symbol("root"), firstOpen)
-      || !connection.authorize_connection(connection.connection_capability, firstOpen)
-      || connection.authorize_connection(connection.connection_capability, crossHandoffOpen)
+      || !firstOpenAccepted
+      || !crossHandoffRejected
       || JSON.stringify(connection.connection_capability) !== undefined
       || !relativeRootRejected
       || BUILD_EXECUTOR_MCP_CONTRACT_V3.caller_role_authenticated !== false
@@ -2899,22 +2955,12 @@ export function validateAutomaticBuildProtocolDoctorBoundaryV3(
   };
 }
 
-export function automaticBuildProtocolDoctor(
+export function automaticBuildProtocolContract(
   targetInput: string,
   rootDir: string,
   options: AutomaticBuildPlanOptions = {},
 ) {
   const target = resolveAutomaticBuildTarget(targetInput, rootDir, { book_id: options.book_id });
-  const attempts = AUTOMATIC_BUILD_STAGES.flatMap((stage) => listAutomaticBuildStoredAttempts(target, stage));
-  const currentExecutionIdentities = attempts.filter(
-    (attempt) => attempt.execution_identity?.identity_source === "native",
-  ).length;
-  const legacyInferredExecutionIdentities = attempts.filter(
-    (attempt) => attempt.execution_identity?.identity_source === "legacy_inferred",
-  ).length;
-  const legacyAudit = auditAutomaticBuildLegacy(target, undefined, {
-    inspect_current_descriptors: false,
-  });
   const releaseContract = buildAutomaticBuildReleaseContractCheck(target.profile_id);
   const checkedExtractors: string[] = [];
   const resolvedDispatchPrompts: ResolvedAutomaticBuildExecutorPromptV1[] = [];
@@ -3048,6 +3094,24 @@ export function automaticBuildProtocolDoctor(
       },
     ],
     target_ref: target.target_ref,
+
+  };
+}
+
+export function automaticBuildProtocolDoctor(targetInput: string, rootDir: string, options: AutomaticBuildPlanOptions = {}) {
+  const contract = automaticBuildProtocolContract(targetInput, rootDir, options);
+  const target = resolveAutomaticBuildTarget(targetInput, rootDir, { book_id: options.book_id });
+  const attempts = AUTOMATIC_BUILD_STAGES.flatMap((stage) => listAutomaticBuildStoredAttempts(target, stage));
+  const currentExecutionIdentities = attempts.filter(
+    (attempt) => attempt.execution_identity?.identity_source === "native",
+  ).length;
+  const legacyInferredExecutionIdentities = attempts.filter(
+    (attempt) => attempt.execution_identity?.identity_source === "legacy_inferred",
+  ).length;
+  const legacyAudit = auditAutomaticBuildLegacy(target, undefined, {
+    inspect_current_descriptors: false,
+  });
+  return { ...contract,
     target_state: {
       persisted_task_attempts: attempts.length,
       current_execution_identities: currentExecutionIdentities,

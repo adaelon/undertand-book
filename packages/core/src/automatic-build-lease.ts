@@ -44,6 +44,15 @@ import {
 const DEFAULT_RESERVE_TTL_MS = 600_000;
 const DEFAULT_RUN_TTL_MS = 1_800_000;
 const CLAIM_PUBLICATION_WAIT_MS = 250;
+
+export class AutomaticBuildLeaseExpiredError extends Error {
+  readonly diagnostic_code = "lease_expired" as const;
+
+  constructor() {
+    super("automatic build lease expired");
+    this.name = "AutomaticBuildLeaseExpiredError";
+  }
+}
 const CLAIM_PUBLICATION_POLL_MS = 5;
 const claimPublicationWaiter = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
 
@@ -540,7 +549,7 @@ export function assertActiveAutomaticBuildLease(
   const resolved = assertLeasePath(target, leaseRef);
   if (terminalEventExists(resolved)) throw new Error(`automatic build lease is already terminal: ${resolved}`);
   if (timeMs(now, "now") >= timeMs(effectiveExpiry(target, resolved, lease), "expires_at")) {
-    throw new Error(`automatic build lease expired: ${resolved}`);
+    throw new AutomaticBuildLeaseExpiredError();
   }
   return lease;
 }

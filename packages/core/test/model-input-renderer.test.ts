@@ -88,7 +88,7 @@ describe("model input renderer", () => {
     expect(renderPaperLexiconModelInput(lexicon).endsWith("[1.2] RAG\n")).toBe(true);
   });
 
-  it("uses the same pretty-JSON bytes for Pass2 and both BookStructure input kinds", () => {
+  it("renders Pass2 unchanged and includes the delivered BookStructure reference scope", () => {
     const pass2: Pass2WorkPacket = {
       packet_id: "pass2-window:0",
       source_window: { index: 0, leaf_lids: ["1.1"], title_path: ["1"], text: [{ lid: "1.1", text: "Body" }] },
@@ -114,8 +114,12 @@ describe("model input renderer", () => {
       pass2_edges: [],
     };
     const stitch: BookStructureStitchPacket = { job_id: "stitch", unit_cards: [], long_range_edges: [] };
-    expect(renderBookStructureModelInput(unit)).toBe(`${JSON.stringify(unit, null, 2)}\n`);
-    expect(renderModelInput({ kind: "structure_stitch", input: stitch })).toBe(`${JSON.stringify(stitch, null, 2)}\n`);
+    expect(renderBookStructureModelInput(unit)).toBe(`${JSON.stringify({ ...unit,
+      reference_scope: { unit_lids: ["1.1"], evidence_by_unit: { "1.1": ["1.1"] }, dependency_target_lids: [] },
+    }, null, 2)}\n`);
+    expect(renderModelInput({ kind: "structure_stitch", input: stitch })).toBe(`${JSON.stringify({ ...stitch,
+      reference_scope: { unit_lids: [], evidence_by_unit: {}, dependency_target_lids: [] },
+    }, null, 2)}\n`);
   });
 
   it("reports the exact UTF-8 bytes, hash, estimator value, and render contract", () => {

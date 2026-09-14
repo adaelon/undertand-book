@@ -332,6 +332,17 @@ assert.equal(
   normalizeContract(canonicalExecutorWrapper),
   "executor-only skill body must equal the normalized canonical bootstrap body",
 );
+for (const marker of [
+  "automatic_build_executor_mcp_error.v2",
+  '"diagnostic_code": "bootstrap_unavailable"',
+  '"phase": "<exact error.phase>"',
+]) {
+  assert(rootExecutorSkill.includes(marker), `executor-only skill is missing RG5 marker: ${marker}`);
+}
+assert(
+  !rootExecutorSkill.includes('"diagnostic_code": "protocol_incompatible"'),
+  "executor-only skill must not relabel zero-call bootstrap failure as protocol_incompatible",
+);
 for (const forbidden of ["BuildIntent", "BuildPlan", "build.step", "planning.context", "draft.candidate"]) {
   assert(
     !rootExecutorSkill.includes(forbidden),
@@ -347,9 +358,11 @@ for (const marker of [
   "$understand-book-executor",
   "Do not use $understand-book-build inside this subagent.",
   "bootstrap_unavailable",
-  "live_by_ref",
+  "live_by_slot",
+  "dispatch_slot_ref",
   "completed_refs",
   "first owned child becomes terminal",
+  "A child lifecycle final is never durable task completion authority",
 ]) {
   assert(rootSkill.includes(marker), `build skill is missing executor provider marker: ${marker}`);
 }
@@ -381,10 +394,30 @@ for (const toolName of executorToolNames) {
 }
 
 const realCliReleaseSmoke = await readText("apps/desktop/scripts/smoke-t7-codex-cli-release.ts");
-for (const marker of ["capability_isolation: false", "caller_role_authenticated: false"]) {
+for (const marker of [
+  "capability_isolation: false",
+  "caller_role_authenticated: false",
+  "--installed-plugin-root",
+  "installed_rg8_canary",
+]) {
   assert(
     realCliReleaseSmoke.includes(marker),
     `thread-attributed release evidence must explicitly serialize ${marker}`,
+  );
+}
+const compiledExecutorReleaseSmoke = await readText(
+  "apps/desktop/scripts/smoke-t7-executor-release.ts",
+);
+for (const marker of [
+  "runRg8RecoveryCanary",
+  "runRg8OversizeCanary",
+  "committed_reused_units",
+  "candidate_request_too_large",
+  "installed_launcher_executed",
+]) {
+  assert(
+    compiledExecutorReleaseSmoke.includes(marker),
+    `compiled release canary is missing RG8 marker: ${marker}`,
   );
 }
 

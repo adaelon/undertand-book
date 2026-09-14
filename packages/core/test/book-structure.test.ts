@@ -207,7 +207,8 @@ describe("PB7 BookStructure build helpers", () => {
     expect(sources[0].graph_nodes.map((node) => node.id)).toEqual(["concept:risk"]);
     expect(sources[0].discourse_items.map((item) => item.lid)).toEqual(["1.1"]);
     expect(sources[0].formula_semantics.map((item) => item.formula_lid)).toEqual(["1.2"]);
-    expect(sources[0].pass2_edges.map((edge) => edge.candidate_id)).toEqual(["cand:concept:risk->claim:later"]);
+    // Cross-chapter audit edges are consumed by stitching with both sides available.
+    expect(sources[0].pass2_edges).toEqual([]);
     expect(sources[0]).not.toHaveProperty("profile_rules");
   });
 

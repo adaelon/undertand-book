@@ -164,15 +164,44 @@ fresh user choice is added only as
 `decision={request_id:<returned id>,choice_id:<selected returned id>}`. Never send a digest,
 receipt body, command, path inspection result, or reconstructed stage status.
 
+When an owned public-dispatch child (a launch with `dispatch_slot_ref`) returns the exact zero-call lifecycle
+`interrupted/bootstrap/bootstrap_unavailable`, add
+`bootstrap_failure={"opaque_handoff_ref":"<that child's owned ref>"}` to the next step request.
+Keep pending failures in a ref-keyed queue. Send at most one pending observation per step and
+remove only that sent observation after a structured step response other than NEEDS_USER;
+resending it is idempotent. NEEDS_USER may precede failure processing, so retain the sent item too.
+Successful child finals and NEEDS_USER responses never discard other pending failures. Preserve
+the queue across a user boundary and report the remaining observations when execution resumes.
+The Driver checks that the ref was issued by this invocation, has never opened, and is still
+current before recording a bootstrap failure. This observation cannot mark a task complete.
+It advances only the bootstrap recovery epoch: the replacement ref changes, while its dispatch
+slot, semantic attempt, lease, and accepted artifacts stay intact. Three consecutive bootstrap
+failures produce `NEEDS_USER(reason=executor_bootstrap_failed)`; after startup is repaired,
+the returned `retry_bootstrap` choice authorizes one further attempt.
+
+When an owned public-dispatch child terminates with exact lifecycle
+`interrupted/session/connection_terminal/open` or `interrupted/session/handoff_ref_mismatch/open`,
+queue `executor_open_failure={"opaque_handoff_ref":"<that child's owned ref>",
+"diagnostic_code":"<that exact diagnostic_code>","phase":"open"}` instead of bootstrap_failure.
+These two optional fields are mutually exclusive; send one queued observation per step. The
+Driver checks invocation ownership, current recovery generation, and absence of a durable open
+before advancing the same bounded bootstrap epoch. Already-opened, committed, or superseded work
+takes precedence. Preserve the exact diagnostic; never relabel it bootstrap_unavailable.
+Historical protocol_incompatible is not evidence of either connection error and remains an
+installation/manual recovery boundary, without automatic open-failure reporting.
+
 ## Four-action loop
 
 Consume only `automatic_build_step.v1`. Handle its action exactly and call `build.step` again after
 the external boundary is resolved:
 
-- `SPAWN_EXECUTORS`: merge returned `opaque_handoff_ref` values into a local pending set after
-  excluding every ref already present in `live_by_ref` or `completed_refs`. Launch at most one
-  dedicated subagent per pending ref, filling only the currently available live slots. Choose each
-  ref's bootstrap provider in this strict order:
+- `SPAWN_EXECUTORS`: treat each returned public launch as
+  `opaque_handoff_ref + dispatch_slot_ref`; reader-private launches have no dispatch slot and use
+  their ref as the local slot key. Exclude a launch when its slot key is already present in
+  `live_by_slot` or its ref is in `completed_refs`. Launch at most one dedicated subagent per pending
+  slot, filling only the currently available live slots. Store
+  `live_by_slot[slot_key] = {child, opaque_handoff_ref}`. Choose each ref's bootstrap provider in this
+  strict order:
   1. If the spawn tool advertises `agent_type=understand_book_executor`, select that custom agent
      explicitly and give it only this payload, with the returned ref substituted exactly:
      ```text
@@ -188,22 +217,44 @@ the external boundary is resolved:
      Do not use $understand-book-build inside this subagent.
      ```
   3. If neither provider is advertised, do not launch an unbound generic subagent and never emulate
-     the executor in root. Treat the boundary as `interrupted/bootstrap_unavailable`, then call
-     `build.step` again and trust its durable result.
+     the executor in root. For a public dispatch, report the returned ref through
+     `bootstrap_failure` on the next `build.step`; do not silently reread an unchanged launch.
   The ref is the only dynamic spawn data in either provider path. Do not add a target path, prompt,
-  task input, hash, command list, receipt, or candidate. While `live_by_ref` is non-empty, wait only
-  until the first owned child becomes terminal; record only that child's bounded lifecycle state,
-  move only its ref to `completed_refs`, and immediately call `build.step`. Every other live ref
+  task input, hash, command list, receipt, or candidate. Never pass `dispatch_slot_ref` to the child.
+  Every new ref requires a newly spawned child with a fresh connection. Never use followup_task,
+  send_message, or resume to give a terminal child another ref; a dispatch slot is not a child pool.
+  If no provider is available, retain that ref in completed_refs and queue its bootstrap failure.
+  While `live_by_slot` is non-empty, wait only
+  until the first owned child becomes terminal; consume all other terminal observations already
+  delivered without waiting for unfinished children. For each observed terminal, match the owned
+  child identity, move only its owned ref to `completed_refs`, release only its own slot, and queue
+  any reportable failure. Duplicate or late observations cannot release a replacement child's slot.
+  Recompute current available capacity and immediately call `build.step` with one pending failure.
+  After a step returns, consume terminal observations delivered during that call before launching
+  or waiting; the next step must use the latest capacity, not the count sent before the call.
+  Keep the old ref in `completed_refs`; only the Driver-issued replacement ref can launch.
+  Every other live slot
   remains owned and must not be duplicated, orphaned, or forgotten. Never wait for all children
   before rereading durable state, and never treat the first child final as global completion.
+  A child lifecycle final is never durable task completion authority: even if it says `committed` or
+  `retryable_failure`, only the next `build.step` projection may prove that the task committed,
+  advanced, remains active, or needs a replacement recovery generation.
 - `WAIT`: if an owned child is live, wait for its first terminal event as above. Otherwise wait only
   `retry_after_ms`, then recompute live slots and call `build.step` again. Do not duplicate an active
   executor or lease.
 - `NEEDS_USER`: show the returned `reason`, `message`, optional `projection`, and choices exactly.
+  `projection.work_unit_count` counts the units in this boundary, not all remaining build work.
+  `confirm_candidate_retry` authorizes another bounded correction window under the current schema;
+  it does not require accepting the rejected output or changing policy.
+  `build_engine_failed` is an engine maintenance boundary with no recovery choices. Report its
+  request ID and diagnostic availability; raw local diagnostics belong to a separate debugging task.
+  Do not describe ordinary state reads as stage close unless the engine establishes that phase.
   Never invent or broaden choices. If choices are present, wait for the user and return the selected
   `request_id + choice_id` in the next step. If choices are empty, report the external blocker and
   do not manufacture a decision.
-- `DONE`: require `live_by_ref` to be empty, report only the returned completion summary, and end.
+- `DONE`: require `live_by_slot` to be empty, report only the returned completion summary, and end.
+  Drain pending failure observations through structured steps before ending; durable state decides
+  whether they are obsolete.
   This covers both public stages and any declared reader-private artifacts; the root has no separate
   private-artifact loop.
 

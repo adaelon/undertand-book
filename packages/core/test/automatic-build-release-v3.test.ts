@@ -302,7 +302,11 @@ describe("BR10 automatic build release contract", () => {
     expect(compiledSmoke).toContain("forbidden_digest_field_count: 0");
 
     expect(codexCliSmoke).toContain("executor_server_present: true");
-    expect(codexCliSmoke).toContain("executor_tool_count: installedSharedMcp.tool_names.length");
+    expect(codexCliSmoke).toContain("root_executor_tool_count: 4");
+    expect(codexCliSmoke).toContain("assert.deepEqual(rootMcpGet.enabled_tools, executorToolNames)");
+    expect(codexCliSmoke).toContain("assert.deepEqual(compiledReleaseCanary.tool_inventory, executorToolNames)");
+    expect(codexCliSmoke).toContain("child_executor_tool_count: single.analysis.child_executor_tool_count");
+    expect(codexCliSmoke).toContain("assert.equal(result.analysis.child_executor_tool_count, 4)");
     expect(codexCliSmoke).toContain("capability_isolation: false");
     expect(codexCliSmoke).toContain("caller_role_authenticated: false");
     expect(codexCliSmoke).toContain("forbidden_digest_field_count: 0");

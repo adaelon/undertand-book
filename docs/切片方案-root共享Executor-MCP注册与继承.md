@@ -925,7 +925,7 @@ node apps/desktop/scripts/smoke-automatic-build-parity.mjs
 
 ### R8 守卫恢复与发布收口
 
-状态:按发布接管边界重写，待实施；用户已授权换代后改跑一份新的 `standard_deep` 目标，精确 BuildPlan 仍须按 build skill 单独确认。
+状态:发布资产与仓外安装态 synthetic canary 已完成；正式 cachebuster 安装、新 parent task 与新的 `standard_deep` 目标仍待实施，精确 BuildPlan 仍须按 build skill 单独确认。
 
 **做**:发布新 cachebuster、安装新 plugin/role，启动新 parent task 并通过 synthetic doctor；旧 V1/V2 控制历史保持只读，新的已确认 BuildPlan 与 Session V3 接管后续执行。只按语义复用身份引用仍有效的 accepted artifact，不迁移旧 control envelope。
 
@@ -968,6 +968,8 @@ install new plugin cachebuster
 **不做**:不原地迁移 V1/V2 plan、budget proof、policy、lease、dispatch、close result、handoff 或 opened session；不删除历史 handoff/session/receipt，不覆盖 accepted artifact，不把 generation.start 已发生的 attempt 重编号为未开始，也不把失败统一记 `writer_failed`。
 
 **完成判据**:正式安装的 server/launcher/role 字段与 R7 已验证值直接相等；旧目标控制目录保持字节不变；新目标只有一个经精确确认的当前 plan/invocation；canary 和后续 wave 只通过 child 执行且 live child≤3；semantic attempt 只从被接受的 `generation.start` 增加；文档、代码链路、cachebuster 与 evidence 指向同一发布代际且不保存 snapshot hash。
+
+**发布资产回执**:cachebuster `0.1.0+codex.20260902035609` 的双 manifest、source contract、384-module compiled Sidecar、仓外 thin-plugin launcher、Node/Bun/compiled parity 与 RG8 synthetic canary 已全绿；evidence 落在 `docs/performance/understand-book-rg8-compiled-canary.json`。canary 证明 A/B 两个 committed unit 保持复用、C 从 epoch 1 恢复为 epoch 2 且 semantic attempt 仍为 1，owned oversize 在 writer 前以 `candidate_request_too_large` 终止且无 candidate 文件。正式 Codex 安装、新 parent task、真实 workspace 与新书 BuildPlan 本轮未触碰，因此 R8 尚未整体完成。
 
 ## 5. 依赖与提交边界
 

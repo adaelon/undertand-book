@@ -1,0 +1,72 @@
+{
+  "version": "executor_mcp_fixed_timing_evidence.v2",
+  "status": "passed",
+  "codex_cli": "codex-cli 0.153.4",
+  "fixture": "isolated_single_synthetic_work_unit",
+  "connection_count": 1,
+  "sample_count": 4,
+  "totals": {
+    "executor.open": {
+      "call_count": 1,
+      "server_total_ms": 1124.7567999999999,
+      "outer_total_ms": 1155,
+      "residual_total_ms": 30.243200000000115,
+      "response_total_bytes": 1466
+    },
+    "executor.input.next": {
+      "call_count": 1,
+      "server_total_ms": 67.95989999999983,
+      "outer_total_ms": 97,
+      "residual_total_ms": 29.040100000000166,
+      "response_total_bytes": 30820
+    },
+    "executor.generation.start": {
+      "call_count": 1,
+      "server_total_ms": 214.2474000000002,
+      "outer_total_ms": 236,
+      "residual_total_ms": 21.752599999999802,
+      "response_total_bytes": 958
+    },
+    "executor.submit_candidate": {
+      "call_count": 1,
+      "server_total_ms": 187.2827000000034,
+      "outer_total_ms": 210,
+      "residual_total_ms": 22.717299999996612,
+      "response_total_bytes": 201
+    }
+  },
+  "overall": {
+    "call_count": 4,
+    "server_total_ms": 1594.2468000000033,
+    "outer_total_ms": 1698,
+    "residual_total_ms": 103.7531999999967,
+    "response_total_bytes": 33445
+  },
+  "server_phase_totals_ms": {
+    "current-state/claim": 190.34519999999975,
+    "input-render-or-reuse": 14.897799999998824,
+    "persist/response": 9.004400000001624,
+    "candidate-gate": 126.47370000000228,
+    "writer/commit": 60.661299999999756,
+    "next-work-prepare": 0.14770000000135042
+  },
+  "observed_dominant_server_phase": "current-state/claim",
+  "observed_dominant_component": "server",
+  "measured_followup_branch": "current-state/claim",
+  "first_open_to_commit": [
+    {
+      "thread_id": "01a07e3d-1e33-7b00-b41a-acd179e6ef06",
+      "elapsed_ms": 35824
+    }
+  ],
+  "durable": {
+    "semantic_attempts": 1,
+    "committed_tasks": 1
+  },
+  "thread_attribution_complete": true,
+  "semantic_trace_projection": {
+    "executor_input_or_submit": 2,
+    "dedicated_child_inference": 1,
+    "bounded_response_only": 2
+  }
+}

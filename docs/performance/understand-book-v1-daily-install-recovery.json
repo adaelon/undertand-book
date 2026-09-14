@@ -1,0 +1,317 @@
+{
+  "version": "understand_book_v1_compiled_recovery.v1",
+  "status": "passed",
+  "execution": "compiled stdio and compiled Driver; synthetic candidates",
+  "installed_launcher_executed": true,
+  "slot_capacity": 3,
+  "zero_call_failed_slot": 1,
+  "siblings_completed_during_recovery": 2,
+  "precise_connection_rejection": "connection_terminal",
+  "distinct_recovery_refs": 4,
+  "stable_dispatch_slot": true,
+  "duplicate_observations_idempotent": true,
+  "paused_after_failures": 3,
+  "explicit_retry_choice": "retry_bootstrap",
+  "semantic_attempts": 3,
+  "durable_commits": 3,
+  "prior_success_receipts_unchanged": 2,
+  "elapsed_ms": 106706.06450000001,
+  "driver_call_elapsed_ms": [
+    2240.9428,
+    12744.375199999999,
+    12665.600699999995,
+    12199.8082,
+    12469.807500000003,
+    12284.597099999992,
+    12447.300400000007,
+    11934.157200000001,
+    12115.719599999997
+  ],
+  "connections": [
+    {
+      "version": "executor_mcp_timing_join.v2",
+      "samples": [
+        {
+          "thread_id": "compiled-connection-1",
+          "connection_call_ordinal": 1,
+          "operation": "executor.open",
+          "server_elapsed_ms": 1484.6947,
+          "outer_tool_call_elapsed_ms": 2559.3950000000004,
+          "residual_ms": 1074.7003000000004,
+          "response_bytes": 1465,
+          "response_action_kind": "DELIVER_INPUT",
+          "outcome": "ok",
+          "server_phase_elapsed_ms": null
+        },
+        {
+          "thread_id": "compiled-connection-1",
+          "connection_call_ordinal": 2,
+          "operation": "executor.input.next",
+          "server_elapsed_ms": 48.80250000000001,
+          "outer_tool_call_elapsed_ms": 50.86909999999989,
+          "residual_ms": 2.0665999999998803,
+          "response_bytes": 12187,
+          "response_action_kind": "INPUT_BATCH",
+          "outcome": "ok",
+          "server_phase_elapsed_ms": null
+        },
+        {
+          "thread_id": "compiled-connection-1",
+          "connection_call_ordinal": 3,
+          "operation": "executor.generation.start",
+          "server_elapsed_ms": 166.19669999999996,
+          "outer_tool_call_elapsed_ms": 166.72129999999743,
+          "residual_ms": 0.5245999999974629,
+          "response_bytes": 958,
+          "response_action_kind": "GENERATE",
+          "outcome": "ok",
+          "server_phase_elapsed_ms": {
+            "current-state/claim": 141.30690000000004,
+            "input-render-or-reuse": 15.627899999999954,
+            "persist/response": 9.261899999999969
+          }
+        },
+        {
+          "thread_id": "compiled-connection-1",
+          "connection_call_ordinal": 4,
+          "operation": "executor.submit_candidate",
+          "server_elapsed_ms": 204.49179999999978,
+          "outer_tool_call_elapsed_ms": 207.35089999999764,
+          "residual_ms": 2.859099999997852,
+          "response_bytes": 201,
+          "response_action_kind": "DONE",
+          "outcome": "ok",
+          "server_phase_elapsed_ms": {
+            "candidate-gate": 135.72500000000218,
+            "writer/commit": 68.65290000000095,
+            "next-work-prepare": 0.11389999999664724
+          }
+        },
+        {
+          "thread_id": "compiled-connection-1",
+          "connection_call_ordinal": 5,
+          "operation": "executor.open",
+          "server_elapsed_ms": 0.4974999999976717,
+          "outer_tool_call_elapsed_ms": 2.6682999999975436,
+          "residual_ms": 2.170799999999872,
+          "response_bytes": 261,
+          "response_action_kind": null,
+          "outcome": "bounded_error",
+          "server_phase_elapsed_ms": null
+        }
+      ],
+      "totals": {
+        "executor.open": {
+          "call_count": 2,
+          "server_total_ms": 1485.1921999999977,
+          "outer_total_ms": 2562.063299999998,
+          "residual_total_ms": 1076.8711000000003,
+          "response_total_bytes": 1726
+        },
+        "executor.input.next": {
+          "call_count": 1,
+          "server_total_ms": 48.80250000000001,
+          "outer_total_ms": 50.86909999999989,
+          "residual_total_ms": 2.0665999999998803,
+          "response_total_bytes": 12187
+        },
+        "executor.generation.start": {
+          "call_count": 1,
+          "server_total_ms": 166.19669999999996,
+          "outer_total_ms": 166.72129999999743,
+          "residual_total_ms": 0.5245999999974629,
+          "response_total_bytes": 958
+        },
+        "executor.submit_candidate": {
+          "call_count": 1,
+          "server_total_ms": 204.49179999999978,
+          "outer_total_ms": 207.35089999999764,
+          "residual_total_ms": 2.859099999997852,
+          "response_total_bytes": 201
+        }
+      }
+    },
+    {
+      "version": "executor_mcp_timing_join.v2",
+      "samples": [
+        {
+          "thread_id": "compiled-connection-2",
+          "connection_call_ordinal": 1,
+          "operation": "executor.open",
+          "server_elapsed_ms": 1257.4610999999998,
+          "outer_tool_call_elapsed_ms": 1260.4844000000012,
+          "residual_ms": 3.023300000001427,
+          "response_bytes": 1465,
+          "response_action_kind": "DELIVER_INPUT",
+          "outcome": "ok",
+          "server_phase_elapsed_ms": null
+        },
+        {
+          "thread_id": "compiled-connection-2",
+          "connection_call_ordinal": 2,
+          "operation": "executor.input.next",
+          "server_elapsed_ms": 48.64669999999978,
+          "outer_tool_call_elapsed_ms": 50.37280000000101,
+          "residual_ms": 1.7261000000012245,
+          "response_bytes": 12187,
+          "response_action_kind": "INPUT_BATCH",
+          "outcome": "ok",
+          "server_phase_elapsed_ms": null
+        },
+        {
+          "thread_id": "compiled-connection-2",
+          "connection_call_ordinal": 3,
+          "operation": "executor.generation.start",
+          "server_elapsed_ms": 173.15409999999974,
+          "outer_tool_call_elapsed_ms": 173.64649999999892,
+          "residual_ms": 0.49239999999917927,
+          "response_bytes": 958,
+          "response_action_kind": "GENERATE",
+          "outcome": "ok",
+          "server_phase_elapsed_ms": {
+            "current-state/claim": 148.74919999999975,
+            "input-render-or-reuse": 14.66210000000001,
+            "persist/response": 9.742799999999988
+          }
+        },
+        {
+          "thread_id": "compiled-connection-2",
+          "connection_call_ordinal": 4,
+          "operation": "executor.submit_candidate",
+          "server_elapsed_ms": 182.47039999999834,
+          "outer_tool_call_elapsed_ms": 185.1776000000027,
+          "residual_ms": 2.707200000004377,
+          "response_bytes": 201,
+          "response_action_kind": "DONE",
+          "outcome": "ok",
+          "server_phase_elapsed_ms": {
+            "candidate-gate": 117.05289999999877,
+            "writer/commit": 65.28180000000066,
+            "next-work-prepare": 0.1356999999989057
+          }
+        }
+      ],
+      "totals": {
+        "executor.open": {
+          "call_count": 1,
+          "server_total_ms": 1257.4610999999998,
+          "outer_total_ms": 1260.4844000000012,
+          "residual_total_ms": 3.023300000001427,
+          "response_total_bytes": 1465
+        },
+        "executor.input.next": {
+          "call_count": 1,
+          "server_total_ms": 48.64669999999978,
+          "outer_total_ms": 50.37280000000101,
+          "residual_total_ms": 1.7261000000012245,
+          "response_total_bytes": 12187
+        },
+        "executor.generation.start": {
+          "call_count": 1,
+          "server_total_ms": 173.15409999999974,
+          "outer_total_ms": 173.64649999999892,
+          "residual_total_ms": 0.49239999999917927,
+          "response_total_bytes": 958
+        },
+        "executor.submit_candidate": {
+          "call_count": 1,
+          "server_total_ms": 182.47039999999834,
+          "outer_total_ms": 185.1776000000027,
+          "residual_total_ms": 2.707200000004377,
+          "response_total_bytes": 201
+        }
+      }
+    },
+    {
+      "version": "executor_mcp_timing_join.v2",
+      "samples": [
+        {
+          "thread_id": "compiled-connection-3",
+          "connection_call_ordinal": 1,
+          "operation": "executor.open",
+          "server_elapsed_ms": 1253.7867999999999,
+          "outer_tool_call_elapsed_ms": 2308.8706999999995,
+          "residual_ms": 1055.0838999999996,
+          "response_bytes": 1465,
+          "response_action_kind": "DELIVER_INPUT",
+          "outcome": "ok",
+          "server_phase_elapsed_ms": null
+        },
+        {
+          "thread_id": "compiled-connection-3",
+          "connection_call_ordinal": 2,
+          "operation": "executor.input.next",
+          "server_elapsed_ms": 48.150699999999915,
+          "outer_tool_call_elapsed_ms": 49.7954000000027,
+          "residual_ms": 1.6447000000027856,
+          "response_bytes": 11957,
+          "response_action_kind": "INPUT_BATCH",
+          "outcome": "ok",
+          "server_phase_elapsed_ms": null
+        },
+        {
+          "thread_id": "compiled-connection-3",
+          "connection_call_ordinal": 3,
+          "operation": "executor.generation.start",
+          "server_elapsed_ms": 187.67150000000015,
+          "outer_tool_call_elapsed_ms": 188.2002000000066,
+          "residual_ms": 0.5287000000064381,
+          "response_bytes": 958,
+          "response_action_kind": "GENERATE",
+          "outcome": "ok",
+          "server_phase_elapsed_ms": {
+            "current-state/claim": 164.17070000000012,
+            "input-render-or-reuse": 14.524699999999939,
+            "persist/response": 8.976100000000088
+          }
+        },
+        {
+          "thread_id": "compiled-connection-3",
+          "connection_call_ordinal": 4,
+          "operation": "executor.submit_candidate",
+          "server_elapsed_ms": 163.21769999999992,
+          "outer_tool_call_elapsed_ms": 166.66890000000421,
+          "residual_ms": 3.4512000000042917,
+          "response_bytes": 201,
+          "response_action_kind": "DONE",
+          "outcome": "ok",
+          "server_phase_elapsed_ms": {
+            "candidate-gate": 103.26409999999987,
+            "writer/commit": 59.83259999999996,
+            "next-work-prepare": 0.12100000000009459
+          }
+        }
+      ],
+      "totals": {
+        "executor.open": {
+          "call_count": 1,
+          "server_total_ms": 1253.7867999999999,
+          "outer_total_ms": 2308.8706999999995,
+          "residual_total_ms": 1055.0838999999996,
+          "response_total_bytes": 1465
+        },
+        "executor.input.next": {
+          "call_count": 1,
+          "server_total_ms": 48.150699999999915,
+          "outer_total_ms": 49.7954000000027,
+          "residual_total_ms": 1.6447000000027856,
+          "response_total_bytes": 11957
+        },
+        "executor.generation.start": {
+          "call_count": 1,
+          "server_total_ms": 187.67150000000015,
+          "outer_total_ms": 188.2002000000066,
+          "residual_total_ms": 0.5287000000064381,
+          "response_total_bytes": 958
+        },
+        "executor.submit_candidate": {
+          "call_count": 1,
+          "server_total_ms": 163.21769999999992,
+          "outer_total_ms": 166.66890000000421,
+          "residual_total_ms": 3.4512000000042917,
+          "response_total_bytes": 201
+        }
+      }
+    }
+  ]
+}

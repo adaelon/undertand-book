@@ -1,8 +1,9 @@
 # ADR-0115 Root-shared Executor MCP and subagent inheritance
 
-Status: Accepted design, 2026-08-29; recovery boundary revised to release takeover, 2026-08-31; R0-R7 implemented, minimal R8 pending.
+Status: Accepted design, 2026-08-29; recovery boundary revised to release takeover, 2026-08-31; R0-R7 implemented; R8 release asset gate passed, formal install and fresh target pending.
 Revises: ADR-0093/0094/0096 的小型控制对象摘要身份、ADR-0100 的 budget proof freshness 绑定、ADR-0101 的 root 能力边界、ADR-0102 §2 的 Executor transport 注册位置、ADR-0103 的 policy-set generation 身份，以及 ADR-0114 §6-§8 的 root-negative、agent-only capability、transport 摘要与隐私证明。
 Extends: ADR-0089, ADR-0099, ADR-0102 and ADR-0114.
+Revised by: ADR-0117；旧 V3 控制记录保持只读，新 recovery generation 使用 V4 handoff，Root 以 dispatch slot 与 completed ref 双层去重。
 Change type: [边界重构].
 
 OpenAI 官方 Subagents 文档把 custom-agent TOML 描述为 spawned session 的配置层，允许其中包含 `mcp_servers`，也说明 agent 文件省略的 `mcp_servers` 从 parent 继承。本机 Codex Desktop `0.149.0-alpha.4.3` 的已验证实现只把 Agent TOML 投影到不含 `mcp_servers` 的 `AgentRoleOverrides`，于是 child 能获得角色指令和能力缩减，却不能新增 root 没有的 Executor MCP；三条失败 child 均在第一次 `executor.open` 前终止。公开合同与版本实测必须分别记录。[官方 Subagents 文档](https://learn.chatgpt.com/docs/agent-configuration/subagents)、[0.149 诊断记录](../../mcp%20debug.md)

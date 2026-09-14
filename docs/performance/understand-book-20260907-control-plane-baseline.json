@@ -1,0 +1,90 @@
+{
+  "purpose": "Diagnostic evidence for ADR-0121; not a runtime contract or a speedup promise",
+  "captured_on": "2026-09-07",
+  "timezone": "Asia/Hong_Kong",
+  "book_id": "mastering-rust",
+  "source_revision": {
+    "head": "9e36507",
+    "subject": "feat(build): complete executor transport compression",
+    "dirty_worktree": true,
+    "installed_plugin_version_observed": "0.1.0+codex.20260907110058"
+  },
+  "trace_origins": {
+    "original_build_thread": "01a07a2b-62ed-77f1-96da-426e2f9e221f",
+    "resumed_build_thread": "01a07bca-3030-7ef2-b451-25e4efb84683",
+    "successful_wave_children": [
+      "01a07bd9-46a3-7963-8c9b-402787fd1de6",
+      "01a07bd9-5df6-7590-b055-e27caeb85f26",
+      "01a07bd9-7d2e-7292-afe5-28556d16bad7"
+    ],
+    "extraction": "Persisted rollout event_msg/item_completed: tool identity, duration, started_at_ms and completed_at_ms only; child lifecycle from session_meta and task_complete; no semantic bodies retained"
+  },
+  "successful_wave": {
+    "calls_per_child": 4,
+    "input_next_calls_per_child": 1,
+    "samples_seconds": [
+      {"open":49.1257705,"input_next":34.3996391,"generation_start":51.2113668,"submit":53.0529902,"tools_total":187.7897666,"first_open_to_commit":234.867},
+      {"open":49.2217102,"input_next":34.1283811,"generation_start":50.694224,"submit":54.3623795,"tools_total":188.4066948,"first_open_to_commit":248.315},
+      {"open":48.2737412,"input_next":33.7638105,"generation_start":49.6154745,"submit":54.8762825,"tools_total":186.5293087,"first_open_to_commit":257.384}
+    ],
+    "mean_tools_seconds": 187.5752567,
+    "mean_first_open_to_commit_seconds": 246.85533333333333,
+    "tools_share_percent": 75.98590403826262
+  },
+  "driver_calls": {
+    "interval_local": ["2026-09-07 12:46", "2026-09-07 17:30"],
+    "count": 124,
+    "total_minutes_rounded": 118.74,
+    "by_completion_hour": [
+      {"hour":12,"count":11,"total_minutes":6.59,"mean_seconds":35.97},
+      {"hour":13,"count":45,"total_minutes":29.65,"mean_seconds":39.53},
+      {"hour":14,"count":27,"total_minutes":28.28,"mean_seconds":62.84},
+      {"hour":15,"count":19,"total_minutes":25.56,"mean_seconds":80.72},
+      {"hour":16,"count":14,"total_minutes":18.31,"mean_seconds":78.48},
+      {"hour":17,"count":8,"total_minutes":10.35,"mean_seconds":77.59}
+    ]
+  },
+  "original_child_lifecycles": {
+    "interval_local": ["2026-09-07 12:47:41", "2026-09-07 17:22:14"],
+    "child_count": 118,
+    "minutes_by_live_children_rounded": {"0":65.74,"1":117.88,"2":74.70,"3":16.22},
+    "slot_occupancy_percent_from_rounded_intervals": 38.35992326558364,
+    "full_three_child_time_percent_from_rounded_intervals": 5.908064398630437,
+    "zero_call_failures_local": [
+      {"child":"executor_90","started_at":"2026-09-07 15:19:40"},
+      {"child":"executor_103","started_at":"2026-09-07 16:07:40"},
+      {"child":"executor_118","started_at":"2026-09-07 17:21:54"}
+    ]
+  },
+  "receipt_observations": {
+    "basis": "Committed receipt state and filesystem last-write time; historical observation, not current progress authority",
+    "new_pass1_commits_on_date": 63,
+    "sidecar_commits_by_171951": 49,
+    "no_new_receipt_interval_local": ["2026-09-07 17:19:51", "2026-09-07 20:34:44"]
+  },
+  "snapshot_probe": {
+    "entry": "buildAutomaticBuildSnapshot(target, {quality_profile: full})",
+    "isolation": "Copied workspace and source; original logical paths mapped to copied filesystem paths; state writes restricted to the copy",
+    "runtime": "Local Bun source execution with CPU sampling and synchronous filesystem-call counters",
+    "first_valid_snapshot_ms": 20156.2221,
+    "second_valid_snapshot_ms": 17508.2443,
+    "observed_state": {"pass1_units":205,"pass1_pending":0,"pass1_closed":true,"sidecar_units":315,"sidecar_pending":251,"sidecar_closed":false},
+    "second_run_calls": {"existsSync":13854,"statSync":2,"readFileSync":8646,"readdirSync":2460,"mkdirSync":6315,"writeFileSync":6315},
+    "second_run_existing_write_rejections": 6315,
+    "second_run_unique_write_paths": 936,
+    "second_run_max_write_attempts_to_one_path": 1039,
+    "first_run_sampled_inclusive_ms_rounded": {"routePass1ProductionStage":7116,"routeProfileSidecarProductionStage":12569},
+    "temporary_profile_directory": "C:/Users/Lenovo/AppData/Local/Temp/understand-book-perf-ab17f360c33b49ddb4f715dfaf18bab3",
+    "valid_profiles": ["snapshot-valid.cpuprofile", "snapshot-warm.cpuprofile"]
+  },
+  "limitations": [
+    "The source worktree was dirty; HEAD alone does not reconstruct the measured executable or source snapshot.",
+    "The profiling copy was obtained while other work could continue; it is not a frozen end-to-end A/B starting state.",
+    "The copied filesystem is on the temp drive and includes path-redirection/counter overhead; timings are not exact installed-process attribution.",
+    "Failed preliminary probes are excluded. Only two successful full snapshot runs are reported; they are not a median or p95.",
+    "Tool durations are outer wall times. Per-call server/residual timing for the real book was not joined in this diagnosis.",
+    "Driver time, child tool time and lifecycle intervals overlap and must not be added as disjoint wall time.",
+    "Child occupancy includes waiting on tools; it is not CPU or model-generation utilization.",
+    "Temporary profiles and local rollouts may be removed. B1 must provide a reproducible representative fixture; no book text or candidate is stored here."
+  ]
+}

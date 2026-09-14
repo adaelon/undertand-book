@@ -1,0 +1,79 @@
+{
+  "version": "understand_book_v1_validation.v1",
+  "status": "passed",
+  "head": "9e36507",
+  "source_worktree_dirty": true,
+  "checks": [
+    {
+      "name": "trace duration reproduction",
+      "expected_red": 1,
+      "expected_pass": 1,
+      "exit_code": 1
+    },
+    {
+      "name": "final trace analyzer",
+      "tests": 25,
+      "exit_code": 0
+    },
+    {
+      "name": "Agent and publication contract",
+      "tests": 23,
+      "exit_code": 0
+    },
+    {
+      "name": "original-scale performance",
+      "tests": 2,
+      "samples": 4,
+      "exit_code": 0
+    },
+    {
+      "name": "core typecheck",
+      "exit_code": 0
+    },
+    {
+      "name": "three release scripts strict typecheck",
+      "exit_code": 0
+    },
+    {
+      "name": "compiled stdio and Node/compiled parity",
+      "exit_code": 0
+    },
+    {
+      "name": "installed host six-unit scenarios",
+      "runs": 2,
+      "commits_per_run": 6,
+      "exit_code": 0
+    },
+    {
+      "name": "compiled installed recovery",
+      "commits": 3,
+      "exit_code": 0
+    },
+    {
+      "name": "release assertion",
+      "exit_code": 0
+    },
+    {
+      "name": "evidence counts and private-value exclusion",
+      "files": [
+        "understand-book-v1-compiled.json",
+        "understand-book-v1-control-plane-samples.json",
+        "understand-book-v1-host-release.json",
+        "understand-book-v1-host-scheduling.json",
+        "understand-book-v1-host-single-reanalyzed.json",
+        "understand-book-v1-host-single.json",
+        "understand-book-v1-host-timed-release.json",
+        "understand-book-v1-host-timed-scheduling.json",
+        "understand-book-v1-host-timed-single.json",
+        "understand-book-v1-recovery.json"
+      ],
+      "exit_code": 0
+    }
+  ],
+  "unverified": [
+    "old/current program same-state host A/B",
+    "model-child zero-call failure and Root failure-queue injection",
+    "daily installation update",
+    "real book continuation"
+  ]
+}

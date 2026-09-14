@@ -54,6 +54,27 @@ export interface ExecutorOuterTimingV1 {
   outer_tool_call_elapsed_ms: number;
 }
 
+/** One recorder per actual MCP connection; never infer connection identity from timing order. */
+export function createExecutorOuterTimingRecorder(threadId: string) {
+  const samples: ExecutorOuterTimingV1[] = [];
+  let ordinal = 0;
+  return {
+    samples,
+    begin(operation: ExecutorTraceOperation): () => void {
+      const connectionCallOrdinal = ++ordinal;
+      const started = performance.now();
+      return () => {
+        samples.push({
+          thread_id: threadId,
+          connection_call_ordinal: connectionCallOrdinal,
+          operation,
+          outer_tool_call_elapsed_ms: performance.now() - started,
+        });
+      };
+    },
+  };
+}
+
 export interface ExecutorMcpTimingJoinSampleV2 {
   thread_id: string;
   connection_call_ordinal: number;
@@ -134,6 +155,7 @@ export function reduceExecutorMcpTiming(options: {
   connections: readonly ExecutorMcpTimingConnectionV2[];
   outer_samples: readonly ExecutorOuterTimingV1[];
 }): ExecutorMcpTimingJoinV2 {
+  if (options.connections.length === 0) timingFailure("no server timing connections");
   const outerByCall = new Map<string, ExecutorOuterTimingV1>();
   for (const sample of options.outer_samples) {
     if (!sample.thread_id) timingFailure("outer sample thread_id is missing");
@@ -157,6 +179,7 @@ export function reduceExecutorMcpTiming(options: {
   const samples: ExecutorMcpTimingJoinSampleV2[] = [];
   const connectionThreads = new Set<string>();
   for (const connection of options.connections) {
+    if (connection.samples.length === 0) timingFailure("connection has no server timing samples");
     if (!connection.thread_id) timingFailure("connection thread_id is missing");
     if (connectionThreads.has(connection.thread_id)) {
       timingFailure(`duplicate connection for thread ${connection.thread_id}`);
@@ -237,6 +260,7 @@ export interface R7RolloutTraceAnalysis {
   dedicated_child_threads: R7TraceThread[];
   executor_calls: R7ExecutorTraceCall[];
   executor_outer_timing_samples: ExecutorOuterTimingV1[];
+  first_open_to_commit: Array<{ thread_id: string; elapsed_ms: number }>;
   root_executor_dispatch_attempt_count: number;
   root_executor_backend_call_count: number;
   other_child_executor_dispatch_attempt_count: number;
@@ -257,6 +281,8 @@ export interface R7RolloutTraceAnalysis {
     live_slots: number;
   }>;
   executor_refill_started_at_ms: number | null;
+  executor_refill_starts: Array<{ thread_id: string; started_at_ms: number }>;
+  root_followup_task_count: number;
   fourth_child_started_after_first_terminal: boolean | null;
   fourth_child_started_before_last_initial_terminal: boolean | null;
   synthetic_build_step_call_count: number;
@@ -543,7 +569,17 @@ function boundedResponseOnlyValue(payload: RawPayload): unknown | undefined {
   const response = payload.value.response;
   if (!isRecord(response) || !hasExactKeys(response, ["Result"])) return undefined;
   const result = response.Result;
-  if (!isRecord(result) || !hasExactKeys(result, ["cell_id", "content_items", "error_text"])) {
+  if (!isRecord(result)) return undefined;
+  const duration = result.code_mode_host_duration;
+  const expectedKeys = ["cell_id", "content_items", "error_text"];
+  if (duration !== undefined) {
+    if (!isRecord(duration) || !hasExactKeys(duration, ["secs", "nanos"])
+      || !Number.isSafeInteger(duration.secs) || (duration.secs as number) < 0
+      || !Number.isSafeInteger(duration.nanos) || (duration.nanos as number) < 0
+      || (duration.nanos as number) >= 1_000_000_000) return undefined;
+    expectedKeys.push("code_mode_host_duration");
+  }
+  if (!hasExactKeys(result, expectedKeys)) {
     return undefined;
   }
   if (typeof result.cell_id !== "string" || result.cell_id.length === 0 || result.error_text !== null) {
@@ -814,6 +850,8 @@ export function analyzeR7RolloutTrace(options: AnalyzeR7RolloutTraceOptions): R7
   const syntheticBuildStepStartedSeqs: number[] = [];
   const agentStatusObservations: AgentStatusObservation[] = [];
   let executorRefillStartedAtMs: number | null = null;
+  const executorRefillStarts: Array<{ thread_id: string; started_at_ms: number }> = [];
+  let rootFollowupTaskCount = 0;
 
   for (const [key, rawCall] of Object.entries(toolCalls)) {
     const call = parseToolCall(rawCall, `tool call ${key}`);
@@ -825,6 +863,8 @@ export function analyzeR7RolloutTrace(options: AnalyzeR7RolloutTraceOptions): R7
       ? null
       : requiredString(rawToolNamespace, `tool call ${key} namespace`);
     const toolName = requiredString(invocation.value.tool_name, `tool call ${key} name`);
+    if (call.thread_id === stateRootThreadId && toolNamespace === "collaboration"
+      && toolName === "followup_task") rootFollowupTaskCount++;
     const allPayloadIds = [
       call.raw_invocation_payload_id,
       ...call.raw_runtime_payload_ids,
@@ -850,6 +890,15 @@ export function analyzeR7RolloutTrace(options: AnalyzeR7RolloutTraceOptions): R7
         unverifiable(`spawn_agent call ${key} arguments are not JSON: ${String(error)}`);
       }
       const argumentsRecord = requiredRecord(argumentsValue, `spawn_agent call ${key} arguments`);
+      const replacement = dedicated.slice(3).find(thread => thread.task_name === argumentsRecord.task_name);
+      if (replacement) {
+        const wallTime = toolCallWallTimes.get(call.tool_call_id);
+        if (!wallTime) unverifiable(`spawn_agent call ${key} has no outer wall timing`);
+        if (executorRefillStarts.some(entry => entry.thread_id === replacement.thread_id)) {
+          unverifiable("replacement child has duplicate spawn timing");
+        }
+        executorRefillStarts.push({ thread_id: replacement.thread_id, started_at_ms: wallTime.started_ms });
+      }
       if (argumentsRecord.task_name === dedicated[3].task_name) {
         const wallTime = toolCallWallTimes.get(call.tool_call_id);
         if (!wallTime) unverifiable(`spawn_agent call ${key} has no outer wall timing`);
@@ -976,8 +1025,16 @@ export function analyzeR7RolloutTrace(options: AnalyzeR7RolloutTraceOptions): R7
   }
 
   const executorOuterTimingSamples: ExecutorOuterTimingV1[] = [];
+  const firstOpenToCommit: Array<{ thread_id: string; elapsed_ms: number }> = [];
   for (const thread of dedicated) {
     const calls = executorCalls.filter((call) => call.thread_id === thread.thread_id);
+    const openTime = toolCallWallTimes.get(calls[0].tool_call_id);
+    const submit = [...calls].reverse().find(call => call.operation === "executor.submit_candidate");
+    const commitTime = submit && toolCallWallTimes.get(submit.tool_call_id);
+    if (!openTime || !commitTime || commitTime.ended_ms < openTime.started_ms) {
+      unverifiable(`Executor thread ${thread.thread_id} has no open-to-commit interval`);
+    }
+    firstOpenToCommit.push({ thread_id: thread.thread_id, elapsed_ms: commitTime.ended_ms - openTime.started_ms });
     for (const [index, call] of calls.entries()) {
       const wallTime = toolCallWallTimes.get(call.tool_call_id);
       if (!wallTime) {
@@ -1100,6 +1157,7 @@ export function analyzeR7RolloutTrace(options: AnalyzeR7RolloutTraceOptions): R7
     dedicated_child_threads: dedicated,
     executor_calls: executorCalls,
     executor_outer_timing_samples: executorOuterTimingSamples,
+    first_open_to_commit: firstOpenToCommit,
     root_executor_dispatch_attempt_count: rootCalls.length,
     root_executor_backend_call_count: rootCalls.filter((call) => call.backend_call).length,
     other_child_executor_dispatch_attempt_count: otherCalls.length,
@@ -1122,6 +1180,8 @@ export function analyzeR7RolloutTrace(options: AnalyzeR7RolloutTraceOptions): R7
         live_slots: observation.running_task_names.length,
       })),
     executor_refill_started_at_ms: executorRefillStartedAtMs,
+    executor_refill_starts: executorRefillStarts.sort((left, right) => left.started_at_ms - right.started_at_ms),
+    root_followup_task_count: rootFollowupTaskCount,
     fourth_child_started_after_first_terminal: fourthAfterFirst,
     fourth_child_started_before_last_initial_terminal: fourthBeforeLast,
     synthetic_build_step_call_count: syntheticBuildStepStartedSeqs.length,

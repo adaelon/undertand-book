@@ -38,7 +38,6 @@ import {
   readExecutorMcpServerTimingJsonl,
   reduceExecutorMcpTiming,
   ROOT_EXECUTOR_BOUNDARY_UNVERIFIABLE,
-  summarizeThreeSlotFirstTerminalScheduling,
   type ExecutorMcpTimingJoinV2,
   type ExecutorTraceOperation,
   type R7RolloutTraceAnalysis,
@@ -88,6 +87,7 @@ interface CodexScenarioResult {
   };
   root_event_count: number;
   root_final_marker_matched: true;
+  elapsed_ms: number;
 }
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
@@ -369,6 +369,22 @@ function installThinPlugin(
   const installedPluginRoot = path.resolve(installed.installedPath ?? "");
   assert(pathIsOutside(repoRoot, installedPluginRoot), "installed plugin root must be outside source cwd");
   assert(existsSync(path.join(installedPluginRoot, ".codex-plugin", "plugin.json")));
+  // The cache may preserve an older projection under the same plugin version.
+  const candidateRoot = path.join(marketplaceRoot, "plugins", pluginName);
+  const compareTree = (relative: string): void => {
+    const candidate = path.join(candidateRoot, relative);
+    const installed = path.join(installedPluginRoot, relative);
+    const entries = readdirSync(candidate, { withFileTypes: true });
+    assert.deepEqual(readdirSync(installed).sort(), entries.map(entry => entry.name).sort(),
+      `installed plugin file set differs: ${relative}`);
+    for (const entry of entries) {
+      const child = path.join(relative, entry.name);
+      if (entry.isDirectory()) compareTree(child);
+      else assert.deepEqual(readFileSync(path.join(installedPluginRoot, child)),
+        readFileSync(path.join(candidateRoot, child)), `installed plugin bytes differ: ${child}`);
+    }
+  };
+  compareTree("");
   return {
     installedPluginRoot,
     marketplaceName: marketplace.marketplaceName,
@@ -380,28 +396,55 @@ function compiledExecutorToolInventory(
   sidecar: string,
   env: NodeJS.ProcessEnv,
   cwd: string,
-): string[] {
+  installedPluginRoot: string,
+): {
+  tool_inventory: string[];
+  installed_launcher_executed: true;
+  rg8_recovery_canary: JsonObject;
+  rg8_oversize_canary: JsonObject;
+} {
   const tsxCli = path.join(repoRoot, "node_modules", "tsx", "dist", "cli.mjs");
   const compiledSmoke = path.join(scriptDir, "smoke-t7-executor-release.ts");
   const result = runSync(
     process.execPath,
-    [tsxCli, compiledSmoke, "--sidecar", sidecar],
+    [
+      tsxCli,
+      compiledSmoke,
+      "--sidecar",
+      sidecar,
+      "--installed-plugin-root",
+      installedPluginRoot,
+    ],
     "compiled Executor tools/list gate",
     env,
     cwd,
     180_000,
   );
-  const evidence = JSON.parse(result.stdout) as { status?: string; tool_inventory?: string[] };
+  const evidence = JSON.parse(result.stdout) as {
+    status?: string;
+    tool_inventory?: string[];
+    shared_executor_mcp?: { installed_launcher_executed?: boolean };
+    rg8_recovery_canary?: JsonObject;
+    rg8_oversize_canary?: JsonObject;
+  };
   assert.equal(evidence.status, "passed");
   assert.deepEqual(evidence.tool_inventory, executorToolNames);
-  return [...(evidence.tool_inventory ?? [])];
+  assert.equal(evidence.shared_executor_mcp?.installed_launcher_executed, true);
+  assert(evidence.rg8_recovery_canary, "compiled smoke omitted the RG8 recovery canary");
+  assert(evidence.rg8_oversize_canary, "compiled smoke omitted the RG8 oversize canary");
+  return {
+    tool_inventory: [...(evidence.tool_inventory ?? [])],
+    installed_launcher_executed: true,
+    rg8_recovery_canary: evidence.rg8_recovery_canary,
+    rg8_oversize_canary: evidence.rg8_oversize_canary,
+  };
 }
 
 function writeParallelBuildStepDriver(
   stagingWorkspace: string,
   fixtures: readonly SyntheticFixture[],
 ): void {
-  assert.equal(fixtures.length, 4);
+  assert.equal(fixtures.length, 6);
   const actionFor = (selected: readonly SyntheticFixture[]) => ({
     version: "r7_synthetic_build_step_result.v1",
     action: {
@@ -417,7 +460,9 @@ function writeParallelBuildStepDriver(
   });
   const actions = {
     initial: actionFor(fixtures.slice(0, 3)),
-    refill: actionFor(fixtures.slice(3)),
+    refill: actionFor(fixtures.slice(3, 4)),
+    refill2: actionFor(fixtures.slice(4, 5)),
+    refill3: actionFor(fixtures.slice(5, 6)),
     done: {
       version: "r7_synthetic_build_step_result.v1",
       action: { kind: "DONE" },
@@ -442,12 +487,44 @@ function writeTimingCaptureBuildWrapper(options: {
   timingRoot: string;
 }): string {
   const wrapper = path.join(options.stagingWorkspace, `m1-build-executor-timing-${options.name}.cmd`);
+  const forwarder = path.join(options.stagingWorkspace, `v1-timing-forwarder-${options.name}.mjs`);
+  // Capture only the first opaque open ref for a deterministic connection/thread join.
+  // Model input and candidates pass through the pipes and never enter this metadata file.
+  writeFileSync(forwarder, [
+    'import { spawn } from "node:child_process";',
+    'import { randomUUID } from "node:crypto";',
+    'import { createWriteStream, writeFileSync } from "node:fs";',
+    'import path from "node:path";',
+    `const timingRoot = ${JSON.stringify(options.timingRoot)};`,
+    'const connection = randomUUID();',
+    `const child = spawn(${JSON.stringify(options.sidecar)}, process.argv.slice(2), { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });`,
+    'const timing = createWriteStream(path.join(timingRoot, `${connection}.jsonl`));',
+    'let pending = "", captured = false;',
+    'process.stdin.setEncoding("utf8");',
+    'process.stdin.on("data", chunk => {',
+    '  child.stdin.write(chunk);',
+    '  if (captured) return;',
+    '  pending += chunk;',
+    '  let end;',
+    '  while ((end = pending.indexOf("\\n")) >= 0) {',
+    '    const line = pending.slice(0, end); pending = pending.slice(end + 1);',
+    '    const request = JSON.parse(line);',
+    '    if (request.method === "tools/call" && request.params?.name === "executor.open") {',
+    '      writeFileSync(path.join(timingRoot, `${connection}.owner.json`), JSON.stringify({ opaque_handoff_ref: request.params.arguments.opaque_handoff_ref }));',
+    '      captured = true; pending = ""; break;',
+    '    }',
+    '  }',
+    '});',
+    'process.stdin.on("end", () => child.stdin.end());',
+    'child.stdout.pipe(process.stdout); child.stderr.pipe(timing);',
+    'child.on("error", () => { process.exitCode = 1; });',
+    'child.on("close", code => { process.exitCode = code ?? 1; });',
+    '',
+  ].join("\n"), "utf8");
   writeFileSync(wrapper, [
     "@echo off",
     "setlocal",
-    "for /f \"delims=\" %%I in ('powershell.exe -NoProfile -NonInteractive -Command \"[guid]::NewGuid().ToString()\"') do set \"M1_CONNECTION_ID=%%I\"",
-    "if not defined M1_CONNECTION_ID exit /b 2",
-    `\"${options.sidecar}\" %* 2>\"${options.timingRoot}\\%M1_CONNECTION_ID%.jsonl\"`,
+    `\"${process.execPath}\" \"${forwarder}\" %*`,
     "exit /b %ERRORLEVEL%",
     "",
   ].join("\r\n"), "utf8");
@@ -461,10 +538,13 @@ function readServerTimingConnections(timingRoot: string) {
     .flatMap((entry) => {
       const value = readFileSync(path.join(timingRoot, entry.name), "utf8");
       if (value.trim().length === 0) return [];
-      return [readExecutorMcpServerTimingJsonl(value, `M1 connection ${entry.name}`)];
+      const owner = JSON.parse(readFileSync(path.join(timingRoot, entry.name.replace(/\.jsonl$/u, ".owner.json")), "utf8"));
+      assert.equal(typeof owner.opaque_handoff_ref, "string");
+      return [{ opaqueHandoffRef: owner.opaque_handoff_ref as string,
+        samples: readExecutorMcpServerTimingJsonl(value, `M1 connection ${entry.name}`) }];
     });
   assert(connections.length > 0, "fixed Codex fixture captured no non-empty Executor timing connection");
-  for (const samples of connections) {
+  for (const { samples } of connections) {
     assert(samples.every((sample, index) => sample.connection_call_ordinal === index + 1));
   }
   return connections;
@@ -481,12 +561,14 @@ function installParallelBuildStepExecPolicy(
   mkdirSync(rulesRoot, { recursive: true });
   writeFileSync(rulePath, [
     "prefix_rule(",
-    `    pattern = ["node", ${JSON.stringify(syntheticBuildStepMarker)}, ["initial", "refill", "done"]],`,
+    `    pattern = ["node", ${JSON.stringify(syntheticBuildStepMarker)}, ["initial", "refill", "refill2", "refill3", "done"]],`,
     "    decision = \"allow\",",
     "    justification = \"Run only the bounded read-only R7 synthetic dispatch helper\",",
     "    match = [",
     `        "node ${syntheticBuildStepMarker} initial",`,
-    `        "node ${syntheticBuildStepMarker} refill",`,
+      `        "node ${syntheticBuildStepMarker} refill",`,
+      `        "node ${syntheticBuildStepMarker} refill2",`,
+      `        "node ${syntheticBuildStepMarker} refill3",`,
     `        "node ${syntheticBuildStepMarker} done",`,
     "    ],",
     "    not_match = [",
@@ -497,7 +579,7 @@ function installParallelBuildStepExecPolicy(
     "",
   ].join("\n"), "utf8");
 
-  for (const phase of ["initial", "refill", "done"]) {
+  for (const phase of ["initial", "refill", "refill2", "refill3", "done"]) {
     const check = JSON.parse(runSync(
       codex.command,
       [
@@ -554,6 +636,7 @@ async function runCodexScenario(options: CodexScenarioOptions): Promise<CodexSce
     ...options.env,
     CODEX_ROLLOUT_TRACE_ROOT: options.traceRoot,
   };
+  const startedAt = performance.now();
   const execResult = await runCodexExec(options.codex, [
     "exec",
     "--json",
@@ -564,6 +647,7 @@ async function runCodexScenario(options: CodexScenarioOptions): Promise<CodexSce
     options.cwd,
     options.prompt,
   ], scenarioEnvironment, options.cwd);
+  const elapsedMs = performance.now() - startedAt;
   assert.equal(execResult.code, 0, `${options.name} Codex task failed:\n${execResult.stderr}`);
 
   const stdoutEvents = jsonLines(execResult.stdout, `${options.name} codex exec JSONL`);
@@ -631,15 +715,27 @@ async function runCodexScenario(options: CodexScenarioOptions): Promise<CodexSce
     options.expectedDedicatedChildCount,
     `${options.name} did not capture one timing connection per dedicated child`,
   );
-  const executorMcpTiming = options.expectedDedicatedChildCount === 1
-    ? reduceExecutorMcpTiming({
-      connections: [{
-        thread_id: analysis.dedicated_child_threads[0].thread_id,
-        samples: serverTimingConnections[0],
-      }],
+  const traceState = JSON.parse(readFileSync(path.join(bundleRoot, "state.json"), "utf8"));
+  const openRefs = new Map<string, string>();
+  for (const call of analysis.executor_calls.filter(call => call.operation === "executor.open")) {
+    const stored = traceState.tool_calls[call.tool_call_id];
+    const invocationPath = traceState.raw_payloads[stored.raw_invocation_payload_id].path;
+    const invocation = JSON.parse(readFileSync(path.join(bundleRoot, invocationPath), "utf8"));
+    const ref = JSON.parse(invocation.payload.arguments).opaque_handoff_ref;
+    assert.equal(typeof ref, "string");
+    assert(!openRefs.has(ref), "a handoff was opened by more than one dedicated child");
+    openRefs.set(ref, call.thread_id);
+  }
+  const matchedThreads = new Set<string>();
+  const executorMcpTiming = reduceExecutorMcpTiming({
+      connections: serverTimingConnections.map(connection => {
+        const thread = openRefs.get(connection.opaqueHandoffRef);
+        assert(thread && !matchedThreads.has(thread), "timing connection has no unique child open");
+        matchedThreads.add(thread);
+        return { thread_id: thread, samples: connection.samples };
+      }),
       outer_samples: analysis.executor_outer_timing_samples,
-    })
-    : null;
+    });
 
   return {
     analysis,
@@ -651,6 +747,7 @@ async function runCodexScenario(options: CodexScenarioOptions): Promise<CodexSce
     },
     root_event_count: stdoutEvents.length,
     root_final_marker_matched: true,
+    elapsed_ms: elapsedMs,
   };
 }
 
@@ -845,12 +942,13 @@ async function main(): Promise<void> {
     assert.equal(installedSharedMcp.required, false);
     assert.equal(installedSharedMcp.default_tools_approval_mode, "approve");
     assert.equal(BUILD_EXECUTOR_MCP_CONTRACT_V3.caller_role_authenticated, false);
-    const compiledToolInventory = compiledExecutorToolInventory(
+    const compiledReleaseCanary = compiledExecutorToolInventory(
       sidecar,
       isolatedEnvironment,
       stagingWorkspace,
+      installation.installedPluginRoot,
     );
-    assert.deepEqual(compiledToolInventory, executorToolNames);
+    assert.deepEqual(compiledReleaseCanary.tool_inventory, executorToolNames);
 
     const singleFixture = createFixture(
       container,
@@ -864,6 +962,8 @@ async function main(): Promise<void> {
       createFixture(container, registryRoot, "parallel-2", "R7_PARALLEL_SYNTHETIC_SENTINEL_2", 1_800),
       createFixture(container, registryRoot, "parallel-3", "R7_PARALLEL_SYNTHETIC_SENTINEL_3", 1_800),
       createFixture(container, registryRoot, "parallel-4", "R7_PARALLEL_SYNTHETIC_SENTINEL_4", 900),
+      createFixture(container, registryRoot, "parallel-5", "R7_PARALLEL_SYNTHETIC_SENTINEL_5", 900),
+      createFixture(container, registryRoot, "parallel-6", "R7_PARALLEL_SYNTHETIC_SENTINEL_6", 900),
     ];
     writeParallelBuildStepDriver(stagingWorkspace, parallelFixtures);
 
@@ -936,7 +1036,7 @@ async function main(): Promise<void> {
       observed_dominant_server_phase: observedDominantServerPhase,
       observed_dominant_component: dominantComponent,
       measured_followup_branch: observedDominantServerPhase,
-      next_slice: "M2",
+      first_open_to_commit: single.analysis.first_open_to_commit,
       durable: single.durable,
       thread_attribution_complete: single.analysis.thread_attribution_complete,
       semantic_trace_projection: single.analysis.semantic_hit_shapes,
@@ -968,7 +1068,7 @@ async function main(): Promise<void> {
 
     installParallelBuildStepExecPolicy(codexHome, codex, isolatedEnvironment, stagingWorkspace);
     const parallelPrompt = [
-      "This is isolated R7 scenario C using four synthetic refs and no real book state.",
+      "This is isolated V1 scenario C using six synthetic refs and no real book state.",
       "The root must never call, probe, enumerate, or diagnose any Executor MCP tool.",
       `Call the exact command node ${syntheticBuildStepMarker} initial once and parse only its JSON stdout.`,
       "For its three dispatches, call spawn_agent three times without waiting between spawns.",
@@ -980,9 +1080,14 @@ async function main(): Promise<void> {
       `Immediately call node ${syntheticBuildStepMarker} refill exactly once, then spawn its one returned child `
         + "with the same role and fork contract.",
       "Immediately call list_agents once to record post-refill occupancy; do not wait before this observation.",
+      "Consume every terminal already delivered and keep a cumulative terminal set; a new ref always needs a new child.",
+      "Never send followup_task to a terminal child. Keep at most three live children, counting replacements too.",
+      `As soon as another slot is free, call node ${syntheticBuildStepMarker} refill2 exactly once and spawn its child.`,
+      `Do the same with node ${syntheticBuildStepMarker} refill3 at the next free slot.`,
+      "Before and immediately after each refill, call list_agents to record occupancy. Do not wait for a whole wave.",
       "For the final gate, maintain a cumulative terminal set while repeating wait_agent then list_agents.",
       "A completed status is terminal; a task previously reported running that disappears from a later complete",
-      "list_agents live inventory is also terminal. Continue until all four owned task names are terminal.",
+      "list_agents live inventory is also terminal. Continue until all six owned task names are terminal.",
       "Do not quote or summarize their tools, content, or finals.",
       `Call node ${syntheticBuildStepMarker} done exactly once; require action.kind=DONE.`,
       `Then return exactly ${parallelRootFinalMarker} and nothing else.`,
@@ -999,19 +1104,24 @@ async function main(): Promise<void> {
       prompt: parallelPrompt,
       finalMarker: parallelRootFinalMarker,
       fixtures: parallelFixtures,
-      expectedDedicatedChildCount: 4,
+      expectedDedicatedChildCount: 6,
       timingRoot: parallelTimingRoot,
       syntheticBuildStepMarker,
     });
     assertCommonTraceBoundary(parallel);
-    assert.deepEqual(parallel.durable, { semantic_attempts: 4, committed_tasks: 4 });
+    assert.deepEqual(parallel.durable, { semantic_attempts: 6, committed_tasks: 6 });
+    assert.equal(parallel.analysis.executor_calls.length, 24, "six bounded units must use four calls each");
     assert.equal(parallel.analysis.max_live_dedicated_children, 3);
     assert.equal(parallel.analysis.fourth_child_started_after_first_terminal, true);
     assert.equal(parallel.analysis.fourth_child_started_before_last_initial_terminal, true);
-    assert.equal(parallel.analysis.synthetic_build_step_call_count, 3);
+    assert.equal(parallel.analysis.synthetic_build_step_call_count, 5);
+    assert.equal(parallel.analysis.root_followup_task_count, 0);
+    assert.equal(parallel.analysis.executor_refill_starts.length, 3);
     const initialThreads = parallel.analysis.dedicated_child_threads.slice(0, 3);
     const fourthThread = parallel.analysis.dedicated_child_threads[3];
-    const [initialStep, refillStep, doneStep] = parallel.analysis.synthetic_build_step_started_seqs;
+    const [initialStep, refillStep, refill2Step, refill3Step, doneStep] = parallel.analysis.synthetic_build_step_started_seqs;
+    assert(refill2Step < parallel.analysis.dedicated_child_threads[4].started_seq);
+    assert(refill3Step < parallel.analysis.dedicated_child_threads[5].started_seq);
     assert(initialStep < initialThreads[0].started_seq);
     assert(parallel.analysis.first_partial_completion_observed_seq !== null);
     assert(parallel.analysis.first_partial_completion_observed_seq < refillStep);
@@ -1020,14 +1130,24 @@ async function main(): Promise<void> {
     assert(parallel.analysis.all_dedicated_terminal_observed_seq < doneStep);
 
     const schedulingEvidence = {
-      ...summarizeThreeSlotFirstTerminalScheduling(
-        parallel.analysis.executor_slot_lifecycle_observations,
-        3,
-        parallel.analysis.executor_refill_started_at_ms ?? undefined,
-      ),
+      version: "executor_multi_wave_scheduling_evidence.v1",
+      slot_capacity: 3,
+      lifecycle_observations: parallel.analysis.executor_slot_lifecycle_observations,
+      refills: parallel.analysis.executor_refill_starts.map(refill => {
+        const observation = parallel.analysis.executor_slot_lifecycle_observations.filter(item =>
+          item.observed_at_ms < refill.started_at_ms).at(-1);
+        assert(observation && observation.live_slots < 3, "refill has no observed free slot");
+        return { ...refill, free_slot_observed_at_ms: observation.observed_at_ms,
+          observed_refill_gap_ms: refill.started_at_ms - observation.observed_at_ms };
+      }),
       status: "passed" as const,
       codex_cli: preflightVersion,
-      fixture: "isolated_four_work_unit_three_slot_first_terminal_refill",
+      fixture: "isolated_six_work_unit_three_slot_refill",
+      elapsed_ms: parallel.elapsed_ms,
+      successful_units_per_minute: 6 * 60_000 / parallel.elapsed_ms,
+      child_lifecycles: parallel.analysis.dedicated_child_threads,
+      first_open_to_commit: parallel.analysis.first_open_to_commit,
+      executor_mcp_timing: parallel.executor_mcp_timing,
       durable: parallel.durable,
       semantic_work_unit_count: parallelFixtures.length,
       executor_session_count_used_for_work_unit_total: false,
@@ -1056,6 +1176,7 @@ async function main(): Promise<void> {
         name: installedManifest.name,
         version: installedManifest.version,
         installed_from_isolated_local_marketplace: true,
+        candidate_file_set_and_bytes_match: true,
         enabled: true,
       },
       registration: {
@@ -1074,8 +1195,13 @@ async function main(): Promise<void> {
         cli_get_tool_timeout_sec: rootMcpGet.tool_timeout_sec,
         installed_static_required: installedSharedMcp.required,
         installed_static_default_tools_approval_mode: installedSharedMcp.default_tools_approval_mode,
-        compiled_server_tools_list: compiledToolInventory,
+        compiled_server_tools_list: compiledReleaseCanary.tool_inventory,
         root_executor_tool_count: 4,
+      },
+      installed_rg8_canary: {
+        installed_launcher_executed: compiledReleaseCanary.installed_launcher_executed,
+        recovery: compiledReleaseCanary.rg8_recovery_canary,
+        oversize: compiledReleaseCanary.rg8_oversize_canary,
       },
       child_inventory: {
         inherited_parent_registration: true,

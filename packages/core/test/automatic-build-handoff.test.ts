@@ -866,6 +866,7 @@ describe("automatic build Codex executor handoff", () => {
       "DONE",
       "available_agent_slots",
       "opaque_handoff_ref",
+      "dispatch_slot_ref",
       "retry_after_ms",
       "executor.open",
       "executor.input.next",

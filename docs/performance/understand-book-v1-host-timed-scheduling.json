@@ -1,0 +1,536 @@
+{
+  "version": "executor_multi_wave_scheduling_evidence.v1",
+  "slot_capacity": 3,
+  "lifecycle_observations": [
+    {
+      "observed_at_ms": 1788824441731,
+      "live_slots": 3
+    },
+    {
+      "observed_at_ms": 1788824458616,
+      "live_slots": 3
+    },
+    {
+      "observed_at_ms": 1788824465870,
+      "live_slots": 2
+    },
+    {
+      "observed_at_ms": 1788824482909,
+      "live_slots": 1
+    },
+    {
+      "observed_at_ms": 1788824495603,
+      "live_slots": 2
+    },
+    {
+      "observed_at_ms": 1788824510881,
+      "live_slots": 3
+    },
+    {
+      "observed_at_ms": 1788824526324,
+      "live_slots": 3
+    },
+    {
+      "observed_at_ms": 1788824544080,
+      "live_slots": 1
+    },
+    {
+      "observed_at_ms": 1788824559814,
+      "live_slots": 1
+    },
+    {
+      "observed_at_ms": 1788824568181,
+      "live_slots": 0
+    }
+  ],
+  "refills": [
+    {
+      "thread_id": "01a07e3f-67ef-7332-9201-c864987c7aeb",
+      "started_at_ms": 1788824479711,
+      "free_slot_observed_at_ms": 1788824465870,
+      "observed_refill_gap_ms": 13841
+    },
+    {
+      "thread_id": "01a07e3f-9a91-7cc0-9e28-05bc46e27d99",
+      "started_at_ms": 1788824492672,
+      "free_slot_observed_at_ms": 1788824482909,
+      "observed_refill_gap_ms": 9763
+    },
+    {
+      "thread_id": "01a07e3f-d02c-74d2-84a3-030f94baff03",
+      "started_at_ms": 1788824506395,
+      "free_slot_observed_at_ms": 1788824495603,
+      "observed_refill_gap_ms": 10792
+    }
+  ],
+  "status": "passed",
+  "codex_cli": "codex-cli 0.153.4",
+  "fixture": "isolated_six_work_unit_three_slot_refill",
+  "elapsed_ms": 188061.9377,
+  "successful_units_per_minute": 1.9142629518913012,
+  "child_lifecycles": [
+    {
+      "thread_id": "01a07e3e-5816-7291-a36b-4a8235c789da",
+      "origin_type": "spawned",
+      "parent_thread_id": "01a07e3e-13da-7c80-8a9c-fd2a6513b288",
+      "task_name": "r7_parallel_executor_1",
+      "agent_role": "understand_book_executor",
+      "started_seq": 17,
+      "ended_seq": 219,
+      "status": "completed"
+    },
+    {
+      "thread_id": "01a07e3e-745e-7fa0-8591-3252c304b06d",
+      "origin_type": "spawned",
+      "parent_thread_id": "01a07e3e-13da-7c80-8a9c-fd2a6513b288",
+      "task_name": "r7_parallel_executor_2",
+      "agent_role": "understand_book_executor",
+      "started_seq": 27,
+      "ended_seq": 246,
+      "status": "completed"
+    },
+    {
+      "thread_id": "01a07e3e-8a3c-78f1-bba5-b4f94af745dc",
+      "origin_type": "spawned",
+      "parent_thread_id": "01a07e3e-13da-7c80-8a9c-fd2a6513b288",
+      "task_name": "r7_parallel_executor_3",
+      "agent_role": "understand_book_executor",
+      "started_seq": 39,
+      "ended_seq": 291,
+      "status": "completed"
+    },
+    {
+      "thread_id": "01a07e3f-67ef-7332-9201-c864987c7aeb",
+      "origin_type": "spawned",
+      "parent_thread_id": "01a07e3e-13da-7c80-8a9c-fd2a6513b288",
+      "task_name": "r7_parallel_executor_4",
+      "agent_role": "understand_book_executor",
+      "started_seq": 220,
+      "ended_seq": 470,
+      "status": "completed"
+    },
+    {
+      "thread_id": "01a07e3f-9a91-7cc0-9e28-05bc46e27d99",
+      "origin_type": "spawned",
+      "parent_thread_id": "01a07e3e-13da-7c80-8a9c-fd2a6513b288",
+      "task_name": "r7_parallel_executor_5",
+      "agent_role": "understand_book_executor",
+      "started_seq": 247,
+      "ended_seq": 472,
+      "status": "completed"
+    },
+    {
+      "thread_id": "01a07e3f-d02c-74d2-84a3-030f94baff03",
+      "origin_type": "spawned",
+      "parent_thread_id": "01a07e3e-13da-7c80-8a9c-fd2a6513b288",
+      "task_name": "r7_parallel_executor_6",
+      "agent_role": "understand_book_executor",
+      "started_seq": 292,
+      "ended_seq": 477,
+      "status": "completed"
+    }
+  ],
+  "first_open_to_commit": [
+    {
+      "thread_id": "01a07e3e-5816-7291-a36b-4a8235c789da",
+      "elapsed_ms": 31104
+    },
+    {
+      "thread_id": "01a07e3e-745e-7fa0-8591-3252c304b06d",
+      "elapsed_ms": 37280
+    },
+    {
+      "thread_id": "01a07e3e-8a3c-78f1-bba5-b4f94af745dc",
+      "elapsed_ms": 37949
+    },
+    {
+      "thread_id": "01a07e3f-67ef-7332-9201-c864987c7aeb",
+      "elapsed_ms": 30830
+    },
+    {
+      "thread_id": "01a07e3f-9a91-7cc0-9e28-05bc46e27d99",
+      "elapsed_ms": 31299
+    },
+    {
+      "thread_id": "01a07e3f-d02c-74d2-84a3-030f94baff03",
+      "elapsed_ms": 36013
+    }
+  ],
+  "executor_mcp_timing": {
+    "version": "executor_mcp_timing_join.v2",
+    "samples": [
+      {
+        "thread_id": "01a07e3e-5816-7291-a36b-4a8235c789da",
+        "connection_call_ordinal": 1,
+        "operation": "executor.open",
+        "server_elapsed_ms": 1103.5871000000002,
+        "outer_tool_call_elapsed_ms": 1125,
+        "residual_ms": 21.41289999999981,
+        "response_bytes": 1465,
+        "response_action_kind": "DELIVER_INPUT",
+        "outcome": "ok",
+        "server_phase_elapsed_ms": null
+      },
+      {
+        "thread_id": "01a07e3e-5816-7291-a36b-4a8235c789da",
+        "connection_call_ordinal": 2,
+        "operation": "executor.input.next",
+        "server_elapsed_ms": 51.904099999999744,
+        "outer_tool_call_elapsed_ms": 77,
+        "residual_ms": 25.095900000000256,
+        "response_bytes": 12609,
+        "response_action_kind": "INPUT_BATCH",
+        "outcome": "ok",
+        "server_phase_elapsed_ms": null
+      },
+      {
+        "thread_id": "01a07e3e-5816-7291-a36b-4a8235c789da",
+        "connection_call_ordinal": 3,
+        "operation": "executor.generation.start",
+        "server_elapsed_ms": 161.71659999999974,
+        "outer_tool_call_elapsed_ms": 182,
+        "residual_ms": 20.283400000000256,
+        "response_bytes": 958,
+        "response_action_kind": "GENERATE",
+        "outcome": "ok",
+        "server_phase_elapsed_ms": {
+          "current-state/claim": 137.68860000000132,
+          "input-render-or-reuse": 14.816999999999098,
+          "persist/response": 9.21099999999933
+        }
+      },
+      {
+        "thread_id": "01a07e3e-5816-7291-a36b-4a8235c789da",
+        "connection_call_ordinal": 4,
+        "operation": "executor.submit_candidate",
+        "server_elapsed_ms": 167.08989999999903,
+        "outer_tool_call_elapsed_ms": 190,
+        "residual_ms": 22.910100000000966,
+        "response_bytes": 201,
+        "response_action_kind": "DONE",
+        "outcome": "ok",
+        "server_phase_elapsed_ms": {
+          "candidate-gate": 105.89119999999821,
+          "writer/commit": 61.061799999999494,
+          "next-work-prepare": 0.13690000000133296
+        }
+      },
+      {
+        "thread_id": "01a07e3e-8a3c-78f1-bba5-b4f94af745dc",
+        "connection_call_ordinal": 1,
+        "operation": "executor.open",
+        "server_elapsed_ms": 1155.7457,
+        "outer_tool_call_elapsed_ms": 1177,
+        "residual_ms": 21.254300000000057,
+        "response_bytes": 1463,
+        "response_action_kind": "DELIVER_INPUT",
+        "outcome": "ok",
+        "server_phase_elapsed_ms": null
+      },
+      {
+        "thread_id": "01a07e3e-8a3c-78f1-bba5-b4f94af745dc",
+        "connection_call_ordinal": 2,
+        "operation": "executor.input.next",
+        "server_elapsed_ms": 50.03570000000036,
+        "outer_tool_call_elapsed_ms": 76,
+        "residual_ms": 25.96429999999964,
+        "response_bytes": 6095,
+        "response_action_kind": "INPUT_BATCH",
+        "outcome": "ok",
+        "server_phase_elapsed_ms": null
+      },
+      {
+        "thread_id": "01a07e3e-8a3c-78f1-bba5-b4f94af745dc",
+        "connection_call_ordinal": 3,
+        "operation": "executor.generation.start",
+        "server_elapsed_ms": 167.93570000000182,
+        "outer_tool_call_elapsed_ms": 189,
+        "residual_ms": 21.064299999998184,
+        "response_bytes": 1042,
+        "response_action_kind": "GENERATE",
+        "outcome": "ok",
+        "server_phase_elapsed_ms": {
+          "current-state/claim": 140.24179999999978,
+          "input-render-or-reuse": 18.1150000000016,
+          "persist/response": 9.57890000000043
+        }
+      },
+      {
+        "thread_id": "01a07e3e-8a3c-78f1-bba5-b4f94af745dc",
+        "connection_call_ordinal": 4,
+        "operation": "executor.submit_candidate",
+        "server_elapsed_ms": 165.18700000000536,
+        "outer_tool_call_elapsed_ms": 187,
+        "residual_ms": 21.812999999994645,
+        "response_bytes": 201,
+        "response_action_kind": "DONE",
+        "outcome": "ok",
+        "server_phase_elapsed_ms": {
+          "candidate-gate": 102.75640000000567,
+          "writer/commit": 62.3127999999997,
+          "next-work-prepare": 0.11779999999998836
+        }
+      },
+      {
+        "thread_id": "01a07e3f-67ef-7332-9201-c864987c7aeb",
+        "connection_call_ordinal": 1,
+        "operation": "executor.open",
+        "server_elapsed_ms": 1137.7961,
+        "outer_tool_call_elapsed_ms": 1160,
+        "residual_ms": 22.203899999999976,
+        "response_bytes": 1466,
+        "response_action_kind": "DELIVER_INPUT",
+        "outcome": "ok",
+        "server_phase_elapsed_ms": null
+      },
+      {
+        "thread_id": "01a07e3f-67ef-7332-9201-c864987c7aeb",
+        "connection_call_ordinal": 2,
+        "operation": "executor.input.next",
+        "server_elapsed_ms": 71.72270000000026,
+        "outer_tool_call_elapsed_ms": 100,
+        "residual_ms": 28.27729999999974,
+        "response_bytes": 30819,
+        "response_action_kind": "INPUT_BATCH",
+        "outcome": "ok",
+        "server_phase_elapsed_ms": null
+      },
+      {
+        "thread_id": "01a07e3f-67ef-7332-9201-c864987c7aeb",
+        "connection_call_ordinal": 3,
+        "operation": "executor.generation.start",
+        "server_elapsed_ms": 224.86419999999998,
+        "outer_tool_call_elapsed_ms": 245,
+        "residual_ms": 20.135800000000017,
+        "response_bytes": 958,
+        "response_action_kind": "GENERATE",
+        "outcome": "ok",
+        "server_phase_elapsed_ms": {
+          "current-state/claim": 200.19840000000113,
+          "input-render-or-reuse": 15.391100000000733,
+          "persist/response": 9.27469999999812
+        }
+      },
+      {
+        "thread_id": "01a07e3f-67ef-7332-9201-c864987c7aeb",
+        "connection_call_ordinal": 4,
+        "operation": "executor.submit_candidate",
+        "server_elapsed_ms": 200.9987000000001,
+        "outer_tool_call_elapsed_ms": 224,
+        "residual_ms": 23.0012999999999,
+        "response_bytes": 201,
+        "response_action_kind": "DONE",
+        "outcome": "ok",
+        "server_phase_elapsed_ms": {
+          "candidate-gate": 139.15840000000026,
+          "writer/commit": 61.65200000000186,
+          "next-work-prepare": 0.1882999999979802
+        }
+      },
+      {
+        "thread_id": "01a07e3f-9a91-7cc0-9e28-05bc46e27d99",
+        "connection_call_ordinal": 1,
+        "operation": "executor.open",
+        "server_elapsed_ms": 1163.5582,
+        "outer_tool_call_elapsed_ms": 1185,
+        "residual_ms": 21.441800000000057,
+        "response_bytes": 1466,
+        "response_action_kind": "DELIVER_INPUT",
+        "outcome": "ok",
+        "server_phase_elapsed_ms": null
+      },
+      {
+        "thread_id": "01a07e3f-9a91-7cc0-9e28-05bc46e27d99",
+        "connection_call_ordinal": 2,
+        "operation": "executor.input.next",
+        "server_elapsed_ms": 71.15309999999954,
+        "outer_tool_call_elapsed_ms": 99,
+        "residual_ms": 27.84690000000046,
+        "response_bytes": 30819,
+        "response_action_kind": "INPUT_BATCH",
+        "outcome": "ok",
+        "server_phase_elapsed_ms": null
+      },
+      {
+        "thread_id": "01a07e3f-9a91-7cc0-9e28-05bc46e27d99",
+        "connection_call_ordinal": 3,
+        "operation": "executor.generation.start",
+        "server_elapsed_ms": 218.8110000000015,
+        "outer_tool_call_elapsed_ms": 239,
+        "residual_ms": 20.188999999998487,
+        "response_bytes": 958,
+        "response_action_kind": "GENERATE",
+        "outcome": "ok",
+        "server_phase_elapsed_ms": {
+          "current-state/claim": 193.62880000000223,
+          "input-render-or-reuse": 15.65729999999894,
+          "persist/response": 9.524900000000343
+        }
+      },
+      {
+        "thread_id": "01a07e3f-9a91-7cc0-9e28-05bc46e27d99",
+        "connection_call_ordinal": 4,
+        "operation": "executor.submit_candidate",
+        "server_elapsed_ms": 200.03900000000067,
+        "outer_tool_call_elapsed_ms": 224,
+        "residual_ms": 23.96099999999933,
+        "response_bytes": 201,
+        "response_action_kind": "DONE",
+        "outcome": "ok",
+        "server_phase_elapsed_ms": {
+          "candidate-gate": 137.487000000001,
+          "writer/commit": 62.38869999999952,
+          "next-work-prepare": 0.16330000000016298
+        }
+      },
+      {
+        "thread_id": "01a07e3e-745e-7fa0-8591-3252c304b06d",
+        "connection_call_ordinal": 1,
+        "operation": "executor.open",
+        "server_elapsed_ms": 1146.4545,
+        "outer_tool_call_elapsed_ms": 1167,
+        "residual_ms": 20.545499999999947,
+        "response_bytes": 1463,
+        "response_action_kind": "DELIVER_INPUT",
+        "outcome": "ok",
+        "server_phase_elapsed_ms": null
+      },
+      {
+        "thread_id": "01a07e3e-745e-7fa0-8591-3252c304b06d",
+        "connection_call_ordinal": 2,
+        "operation": "executor.input.next",
+        "server_elapsed_ms": 49.59970000000067,
+        "outer_tool_call_elapsed_ms": 75,
+        "residual_ms": 25.400299999999334,
+        "response_bytes": 6095,
+        "response_action_kind": "INPUT_BATCH",
+        "outcome": "ok",
+        "server_phase_elapsed_ms": null
+      },
+      {
+        "thread_id": "01a07e3e-745e-7fa0-8591-3252c304b06d",
+        "connection_call_ordinal": 3,
+        "operation": "executor.generation.start",
+        "server_elapsed_ms": 169.77730000000156,
+        "outer_tool_call_elapsed_ms": 190,
+        "residual_ms": 20.22269999999844,
+        "response_bytes": 1042,
+        "response_action_kind": "GENERATE",
+        "outcome": "ok",
+        "server_phase_elapsed_ms": {
+          "current-state/claim": 143.33710000000065,
+          "input-render-or-reuse": 17.322100000001228,
+          "persist/response": 9.118099999999686
+        }
+      },
+      {
+        "thread_id": "01a07e3e-745e-7fa0-8591-3252c304b06d",
+        "connection_call_ordinal": 4,
+        "operation": "executor.submit_candidate",
+        "server_elapsed_ms": 176.27590000000055,
+        "outer_tool_call_elapsed_ms": 198,
+        "residual_ms": 21.724099999999453,
+        "response_bytes": 201,
+        "response_action_kind": "DONE",
+        "outcome": "ok",
+        "server_phase_elapsed_ms": {
+          "candidate-gate": 105.57049999999435,
+          "writer/commit": 70.53490000000602,
+          "next-work-prepare": 0.17050000000017462
+        }
+      },
+      {
+        "thread_id": "01a07e3f-d02c-74d2-84a3-030f94baff03",
+        "connection_call_ordinal": 1,
+        "operation": "executor.open",
+        "server_elapsed_ms": 1497.4274,
+        "outer_tool_call_elapsed_ms": 1520,
+        "residual_ms": 22.572599999999966,
+        "response_bytes": 1466,
+        "response_action_kind": "DELIVER_INPUT",
+        "outcome": "ok",
+        "server_phase_elapsed_ms": null
+      },
+      {
+        "thread_id": "01a07e3f-d02c-74d2-84a3-030f94baff03",
+        "connection_call_ordinal": 2,
+        "operation": "executor.input.next",
+        "server_elapsed_ms": 71.37960000000021,
+        "outer_tool_call_elapsed_ms": 98,
+        "residual_ms": 26.62039999999979,
+        "response_bytes": 30819,
+        "response_action_kind": "INPUT_BATCH",
+        "outcome": "ok",
+        "server_phase_elapsed_ms": null
+      },
+      {
+        "thread_id": "01a07e3f-d02c-74d2-84a3-030f94baff03",
+        "connection_call_ordinal": 3,
+        "operation": "executor.generation.start",
+        "server_elapsed_ms": 218.10789999999906,
+        "outer_tool_call_elapsed_ms": 240,
+        "residual_ms": 21.892100000000937,
+        "response_bytes": 958,
+        "response_action_kind": "GENERATE",
+        "outcome": "ok",
+        "server_phase_elapsed_ms": {
+          "current-state/claim": 193.59040000000095,
+          "input-render-or-reuse": 14.939399999999296,
+          "persist/response": 9.578099999998813
+        }
+      },
+      {
+        "thread_id": "01a07e3f-d02c-74d2-84a3-030f94baff03",
+        "connection_call_ordinal": 4,
+        "operation": "executor.submit_candidate",
+        "server_elapsed_ms": 199.07269999999698,
+        "outer_tool_call_elapsed_ms": 221,
+        "residual_ms": 21.927300000003015,
+        "response_bytes": 201,
+        "response_action_kind": "DONE",
+        "outcome": "ok",
+        "server_phase_elapsed_ms": {
+          "candidate-gate": 137.4007999999958,
+          "writer/commit": 61.51380000000063,
+          "next-work-prepare": 0.1581000000005588
+        }
+      }
+    ],
+    "totals": {
+      "executor.open": {
+        "call_count": 6,
+        "server_total_ms": 7204.5689999999995,
+        "outer_total_ms": 7334,
+        "residual_total_ms": 129.4309999999998,
+        "response_total_bytes": 8789
+      },
+      "executor.input.next": {
+        "call_count": 6,
+        "server_total_ms": 365.7949000000008,
+        "outer_total_ms": 525,
+        "residual_total_ms": 159.20509999999922,
+        "response_total_bytes": 117256
+      },
+      "executor.generation.start": {
+        "call_count": 6,
+        "server_total_ms": 1161.2127000000037,
+        "outer_total_ms": 1285,
+        "residual_total_ms": 123.78729999999632,
+        "response_total_bytes": 5916
+      },
+      "executor.submit_candidate": {
+        "call_count": 6,
+        "server_total_ms": 1108.6632000000027,
+        "outer_total_ms": 1244,
+        "residual_total_ms": 135.3367999999973,
+        "response_total_bytes": 1206
+      }
+    }
+  },
+  "durable": {
+    "semantic_attempts": 6,
+    "committed_tasks": 6
+  },
+  "semantic_work_unit_count": 6,
+  "executor_session_count_used_for_work_unit_total": false
+}

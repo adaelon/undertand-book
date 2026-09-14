@@ -1,0 +1,17 @@
+{
+  "version": "understand_book_v1_daily_install_resume.v1",
+  "plugin_version": "0.1.0+codex.20260908031700",
+  "launcher": {
+    "no_build_exe_environment_override": true,
+    "tool_count": 4,
+    "exited_cleanly": true
+  },
+  "driver_elapsed_ms": 32619.8298,
+  "driver_action": "SPAWN_EXECUTORS",
+  "launched_references": 3,
+  "reason": null,
+  "existing_plan_unchanged": true,
+  "existing_invocation_unchanged": true,
+  "existing_success_receipts_unchanged": 327,
+  "semantic_executors_started": 0
+}

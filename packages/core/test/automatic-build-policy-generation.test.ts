@@ -9,7 +9,8 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import * as fs from "node:fs";
+import { describe, expect, it, vi } from "vitest";
 import {
   automaticBuildPolicyGenerationPath,
   automaticBuildPolicyMigrationReceiptPath,
@@ -50,6 +51,48 @@ import {
   type WorkUnitDescriptorV2,
   type WorkUnitDescriptorV3,
 } from "../src/stage-work-unit";
+
+const writes = vi.hoisted(() => ({ active: false, count: 0, beforeMkdir: undefined as (() => void) | undefined }));
+vi.mock("node:fs", async (original) => {
+  const actual = await original<typeof fs>();
+  return { ...actual, writeFileSync: (...args: Parameters<typeof fs.writeFileSync>) => {
+    if (writes.active) writes.count++;
+    return actual.writeFileSync(...args);
+  }, mkdirSync: (...args: Parameters<typeof fs.mkdirSync>) => {
+    if (writes.active) writes.count++;
+    const before = writes.beforeMkdir; writes.beforeMkdir = undefined; before?.();
+    return actual.mkdirSync(...args);
+  } };
+});
+
+it("P1 replays prepared policies and receipts without creation attempts", () => {
+  const f = fixture("p1-replay");
+  const input = { target: f.target, stage: "profile_sidecar" as const,
+    from_policy_generation_id: f.oldLock.policy_generation_id, policy_set: f.policySet,
+    current: { route: "deterministic_skip" as const, work_unit_id: "skip-p1",
+      work_unit_kind: "profile_sidecar_discourse" as const, policy_fingerprint: f.currentPolicy,
+      evidence_lids: ["1.1"], skip_code: "no_content" } };
+  const receipt = recordAutomaticBuildPolicyMigration(input);
+  writes.count = 0; writes.active = true;
+  try {
+    expect(recordAutomaticBuildPolicyMigration(input)).toEqual(receipt);
+    expect(writes.count).toBe(0);
+  } finally { writes.active = false; }
+});
+
+it("P1 rechecks a competing first policy and receipt creation", () => {
+  const f = fixture("p1-competing-create");
+  writes.beforeMkdir = () => freezeAutomaticBuildStagePolicySet(f.target, f.policySet);
+  expect(freezeAutomaticBuildStagePolicySet(f.target, f.policySet)).toEqual(f.policySet);
+  const input = { target: f.target, stage: "profile_sidecar" as const,
+    from_policy_generation_id: f.oldLock.policy_generation_id, policy_set: f.policySet,
+    current: { route: "deterministic_skip" as const, work_unit_id: "skip-race",
+      work_unit_kind: "profile_sidecar_discourse" as const, policy_fingerprint: f.currentPolicy,
+      evidence_lids: ["1.1"], skip_code: "no_content" } };
+  let winner: ReturnType<typeof recordAutomaticBuildPolicyMigration> | undefined;
+  writes.beforeMkdir = () => { winner = recordAutomaticBuildPolicyMigration(input); };
+  expect(recordAutomaticBuildPolicyMigration(input)).toEqual(winner);
+});
 
 function sha256(value: string | Uint8Array): string {
   return createHash("sha256").update(value).digest("hex");

@@ -6,13 +6,17 @@ import {
 } from "../../packages/core/src/build-executor-tool-adapter";
 import {
   BUILD_EXECUTOR_BOOTSTRAP_CONTRACT_V3,
+  BuildExecutorConnectionOpenError,
   createBuildExecutorStdioConnectionCapability,
 } from "../../packages/core/src/build-executor-connection-capability";
 import {
+  automaticBuildExecutorMcpErrorFromSessionError,
+  createAutomaticBuildExecutorProtocolMcpErrorV2,
   resolveAutomaticBuildExecutorRegistryRoot,
   runAutomaticBuildExecutorSessionCommand,
   type AutomaticBuildExecutorServerPhaseBoundaryV1,
   type AutomaticBuildExecutorServerTimingObserverV1,
+  type AutomaticBuildExecutorMcpErrorPhaseV2,
   type AutomaticBuildExecutorSessionResponseV3,
 } from "../../packages/core/src/automatic-build-executor-session";
 import { canonicalAutomaticBuildJson } from "../../packages/core/src/automatic-build-protocol";
@@ -98,19 +102,34 @@ function rpcError(id: JsonRpcRequest["id"], code: number, message: string) {
   return { jsonrpc: "2.0" as const, id: id ?? null, error: { code, message } };
 }
 
-function boundedToolError(id: JsonRpcRequest["id"]) {
+function boundedToolError(
+  id: JsonRpcRequest["id"],
+  error: ReturnType<typeof createAutomaticBuildExecutorProtocolMcpErrorV2>,
+) {
   return rpcResult(id, {
     content: [{
       type: "text" as const,
-      text: canonicalAutomaticBuildJson({
-        version: "automatic_build_executor_mcp_error.v1",
-        status: "interrupted",
-        category: "bootstrap",
-        diagnostic_code: "protocol_incompatible",
-      }),
+      text: canonicalAutomaticBuildJson(error),
     }],
     isError: true,
   });
+}
+
+function operationPhase(operation: BuildExecutorToolNameV1): AutomaticBuildExecutorMcpErrorPhaseV2 {
+  if (operation === "executor.open") return "open";
+  if (operation === "executor.input.next") return "input_delivery";
+  if (operation === "executor.generation.start") return "generation_start";
+  return "candidate_submit";
+}
+
+class BuildExecutorSessionCommandError extends Error {
+  readonly session_error: unknown;
+
+  constructor(error: unknown) {
+    super("Build Executor session command failed");
+    this.name = "BuildExecutorSessionCommandError";
+    this.session_error = error;
+  }
 }
 
 export function createBuildExecutorMcpSession(options: BuildExecutorMcpSessionOptions): {
@@ -127,11 +146,18 @@ export function createBuildExecutorMcpSession(options: BuildExecutorMcpSessionOp
     authorize_connection: connection.authorize_connection,
     execute_request: (request) => {
       if (!activeTiming) throw new Error("Build Executor MCP timing boundary is unavailable");
-      const response = options.execute_request
-        ? options.execute_request(request, activeTiming)
-        : runAutomaticBuildExecutorSessionCommand(request, { timing: activeTiming });
+      let response: AutomaticBuildExecutorSessionResponseV3;
+      try {
+        response = options.execute_request
+          ? options.execute_request(request, activeTiming)
+          : runAutomaticBuildExecutorSessionCommand(request, { timing: activeTiming }) as AutomaticBuildExecutorSessionResponseV3;
+      } catch (error) {
+        throw new BuildExecutorSessionCommandError(error);
+      }
       if (response.version !== "automatic_build_executor_session.v3") {
-        throw new Error("Build Executor MCP received a legacy session response");
+        throw new BuildExecutorSessionCommandError(
+          new Error("Build Executor MCP received a legacy session response"),
+        );
       }
       return response;
     },
@@ -180,7 +206,9 @@ export function createBuildExecutorMcpSession(options: BuildExecutorMcpSessionOp
       && (BUILD_EXECUTOR_TOOL_NAMES_V1 as readonly string[]).includes(request.params.name)
       ? request.params.name as BuildExecutorToolNameV1
       : undefined;
-    if (!toolName) return boundedToolError(request.id);
+    if (!toolName) {
+      return boundedToolError(request.id, createAutomaticBuildExecutorProtocolMcpErrorV2("open"));
+    }
 
     connectionCallOrdinal += 1;
     const callOrdinal = connectionCallOrdinal;
@@ -203,6 +231,7 @@ export function createBuildExecutorMcpSession(options: BuildExecutorMcpSessionOp
     let rpcResponse: ReturnType<typeof rpcResult>;
     let responseActionKind: string | null = null;
     let outcome: ExecutorMcpServerTimingV2["outcome"] = "bounded_error";
+    let sessionCommandCompleted = false;
     try {
       activeTiming = timing;
       if (!isRecord(request.params) || !isRecord(request.params.arguments)) {
@@ -214,6 +243,7 @@ export function createBuildExecutorMcpSession(options: BuildExecutorMcpSessionOp
         request.params.arguments,
         connection.connection_capability,
       );
+      sessionCommandCompleted = true;
       if (response.action.kind === "INPUT_BATCH") {
         if (Buffer.byteLength(serializeExecutorMcpToolResult(response), "utf8")
           > CODEX_EXECUTOR_DELIVERY_BATCH_LIMIT_V1.max_serialized_batch_bytes) {
@@ -228,13 +258,23 @@ export function createBuildExecutorMcpSession(options: BuildExecutorMcpSessionOp
       }
       connection.observe_response(call, response);
       responseActionKind = response.action.kind;
-      outcome = "ok";
+      outcome = response.action.kind === "DONE" && response.action.status !== "committed"
+        ? "bounded_error"
+        : "ok";
       rpcResponse = rpcResult(request.id, {
         content: [{ type: "text" as const, text: canonicalAutomaticBuildJson(response) }],
         isError: false,
       });
-    } catch {
-      rpcResponse = boundedToolError(request.id);
+    } catch (error) {
+      const phase = operationPhase(toolName);
+      rpcResponse = boundedToolError(
+        request.id,
+        error instanceof BuildExecutorSessionCommandError
+          ? automaticBuildExecutorMcpErrorFromSessionError(error.session_error, phase)
+          : sessionCommandCompleted || error instanceof BuildExecutorConnectionOpenError
+            ? automaticBuildExecutorMcpErrorFromSessionError(error, phase)
+            : createAutomaticBuildExecutorProtocolMcpErrorV2(phase),
+      );
     } finally {
       activeTiming = undefined;
     }

@@ -11,6 +11,7 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { runInNewContext } from "node:vm";
 import { describe, expect, it } from "vitest";
 import {
   BUILD_EXECUTOR_BOOTSTRAP_CONTRACT_V3,
@@ -32,6 +33,92 @@ const EXECUTOR_TOOL_NAMES = [
   "executor.generation.start",
   "executor.submit_candidate",
 ] as const;
+
+describe("executor tool discovery", () => {
+  it("carries issued control objects across isolated exec cells and serializes exact lifecycle errors", async () => {
+    const contract = readText("agents/automatic-build-dispatch-executor.md");
+    const snippet = contract.match(/```javascript\n([\s\S]*?)\n```/u)?.[1];
+    const state = new Map<string, unknown>();
+    const calls: unknown[] = [];
+    const responses = [
+      { version: "automatic_build_executor_session.v3", action: { kind: "WAIT", retry_after_ms: 1 } },
+      { version: "automatic_build_executor_session.v3", action: { kind: "DELIVER_INPUT", next_request: {
+        version: "automatic_build_executor_input_next_request.v4", opaque_session_ref: "absession1_835b964",
+        generation_input_ref: "abinput1_exact", ack_through_ordinal: 2,
+      } } },
+      { version: "automatic_build_executor_session.v3", action: { kind: "INPUT_BATCH", batch: {
+        opaque_session_ref: "absession1_835b964", generation_input_ref: "abinput1_exact",
+        last_ordinal: 4, final_for_generation: false, chunks: [{ payload_utf8: "private body" }],
+      } } },
+      { version: "automatic_build_executor_session.v3", action: { kind: "INPUT_BATCH", batch: {
+        opaque_session_ref: "absession1_835b964", generation_input_ref: "abinput1_exact",
+        last_ordinal: 7, final_for_generation: true, chunks: [{ payload_utf8: "private body" }],
+      } } },
+      { version: "automatic_build_executor_session.v3", action: { kind: "GENERATE",
+        opaque_session_ref: "absession1_generation", candidate_sink_ref: "absink1_exact" } },
+      { version: "automatic_build_executor_session.v3", action: { kind: "DONE", status: "committed" } },
+      { version: "automatic_build_executor_mcp_error.v2", status: "interrupted", category: "bootstrap",
+        diagnostic_code: "protocol_incompatible", phase: "input_delivery" },
+    ];
+    const names = EXECUTOR_TOOL_NAMES.map(name => `mcp__${EXECUTOR_SERVER_NAME}__${name.replaceAll(".", "_")}`);
+    const tools = Object.fromEntries(names.map(name => [name, async (request: unknown) => {
+      calls.push(request);
+      return { content: [{ type: "text", text: JSON.stringify(responses.shift()) }] };
+    }]));
+    const step = async (operation: string, request?: unknown) => {
+      // Each cell has a fresh JS global; only functions.store/load survive.
+      const call = runInNewContext(`${snippet}\nexecutorCall`, {
+        ALL_TOOLS: names.map(name => ({ name })), tools, text: () => {},
+        store: (key: string, value: unknown) => state.set(key, JSON.parse(JSON.stringify(value))),
+        load: (key: string) => state.get(key),
+      }) as (operation: string, request: unknown) => Promise<void>;
+      await call(operation, request ?? state.get("understand_book_next_request"));
+    };
+    await step("executor.open", { version: "automatic_build_executor_open_request.v3", opaque_handoff_ref: "abhandoff1_exact" });
+    expect(state.get("understand_book_next_request")).toEqual({
+      version: "automatic_build_executor_open_request.v3", opaque_handoff_ref: "abhandoff1_exact",
+    });
+    await step("executor.open");
+    await step("executor.input.next");
+    expect(calls[2]).toEqual({ version: "automatic_build_executor_input_next_request.v4",
+      opaque_session_ref: "absession1_835b964", generation_input_ref: "abinput1_exact", ack_through_ordinal: 2 });
+    await step("executor.input.next");
+    expect(calls[3]).toMatchObject({ ack_through_ordinal: 4, opaque_session_ref: "absession1_835b964" });
+    await step("executor.generation.start");
+    expect(calls[4]).toEqual({ version: "automatic_build_executor_generation_start_request.v3",
+      opaque_session_ref: "absession1_835b964", generation_input_ref: "abinput1_exact", confirmed_through_ordinal: 7 });
+    await step("executor.submit_candidate", { ...(state.get("understand_book_next_request") as object), candidate: { unit_card: {} } });
+    expect(calls[5]).toMatchObject({ opaque_session_ref: "absession1_generation", candidate_sink_ref: "absink1_exact" });
+    expect(JSON.parse(state.get("understand_book_lifecycle") as string)).toEqual({
+      version: "automatic_build_executor_lifecycle.v2", status: "committed", protocol: "automatic_build_executor_session.v3",
+    });
+    expect(JSON.stringify([...state])).not.toContain("private body");
+    state.clear(); // A new child has a fresh store; the prior child ended at DONE.
+    await step("executor.open", { version: "automatic_build_executor_open_request.v3", opaque_handoff_ref: "abhandoff1_other" });
+    expect(JSON.parse(state.get("understand_book_lifecycle") as string)).toEqual({
+      version: "automatic_build_executor_lifecycle.v2", status: "interrupted", category: "bootstrap",
+      diagnostic_code: "protocol_incompatible", phase: "input_delivery", protocol: "automatic_build_executor_session.v3",
+    });
+    expect(calls).toHaveLength(7);
+  });
+
+  it("executes the published mapping against all four normalized MCP names", () => {
+    const contract = readText("agents/automatic-build-dispatch-executor.md");
+    const snippet = contract.match(/```javascript\n([\s\S]*?)\n```/u)?.[1];
+    expect(snippet, "the role must publish executable tool discovery").toBeDefined();
+    const names = EXECUTOR_TOOL_NAMES.map(name =>
+      `mcp__${EXECUTOR_SERVER_NAME}__${name.replaceAll(".", "_")}`);
+    const tools = Object.fromEntries(names.map(name => [name, () => name]));
+    const resolve = runInNewContext(`${snippet}\nexecutorTool`, {
+      ALL_TOOLS: [...names, "mcp__another_server__executor_open"].map(name => ({ name })), tools,
+    }) as (name: string) => () => string;
+    EXECUTOR_TOOL_NAMES.forEach((name, index) => expect(resolve(name)()).toBe(names[index]));
+    const missing = runInNewContext(`${snippet}\nexecutorTool`, {
+      ALL_TOOLS: [{ name: "mcp__another_server__executor_open" }], tools,
+    }) as (name: string) => unknown;
+    expect(() => missing("executor.open")).toThrow("bootstrap_unavailable");
+  });
+});
 
 const PROJECT_AGENT = ".codex/agents/understand-book-executor.toml";
 const ROOT_AGENT_TEMPLATE = "assets/codex-agents/understand-book-executor.toml";
@@ -444,15 +531,32 @@ describe("Codex executor bootstrap publication", () => {
     }
   });
 
+  it("RG5 separates zero-call bootstrap failure from observed MCP V2 session errors", () => {
+    const wrapper = normalizeContract(readText("agents/automatic-build-dispatch-executor.md"));
+    const skill = skillBody(readText(ROOT_EXECUTOR_SKILL));
+    expect(skill).toBe(wrapper);
+    for (const contract of [wrapper, skill, readText(PROJECT_AGENT)]) {
+      expect(contract).toContain("automatic_build_executor_mcp_error.v2");
+      expect(contract).toContain('"diagnostic_code": "bootstrap_unavailable"');
+      expect(contract).toContain('"phase": "<exact error.phase>"');
+      expect(contract).toContain("preserve its exact `status`, `category`, `diagnostic_code`, and `phase`");
+      expect(contract).not.toContain('"diagnostic_code": "protocol_incompatible"');
+    }
+  });
+
   it("publishes the V3 first-terminal root orchestration contract byte-identically", () => {
     expectFiles([ROOT_BUILD_SKILL, RELEASE_BUILD_SKILL]);
     const rootSkill = readText(ROOT_BUILD_SKILL);
     expect(readText(RELEASE_BUILD_SKILL)).toBe(rootSkill);
     for (const marker of [
       "automatic_build_executor_session.v3",
-      "live_by_ref",
+      "live_by_slot",
       "completed_refs",
+      "bootstrap_failure",
+      "retry_bootstrap",
+      "executor_bootstrap_failed",
       "first owned child becomes terminal",
+      "A child lifecycle final is never durable task completion authority",
       "executor.input.next",
       "executor.generation.start",
       "executor.submit_candidate",
@@ -461,6 +565,7 @@ describe("Codex executor bootstrap publication", () => {
     ]) {
       expect(rootSkill).toContain(marker);
     }
+    expect(rootSkill).not.toContain("live_by_ref");
     expect(rootSkill).not.toMatch(
       /automatic_build_executor_session\.v[12]|previous_chunk_receipt|executor-private temporary source|executor\.session/u,
     );
@@ -474,6 +579,37 @@ describe("Codex executor bootstrap publication", () => {
       /Use \$understand-book-executor for exactly this opaque handoff ref:\s+<opaque_handoff_ref>\s+Return only the bounded lifecycle state defined by that skill\.\s+Do not use \$understand-book-build inside this subagent\./u,
     );
     expect(rootSkill.indexOf(customProvider)).toBeLessThan(rootSkill.indexOf(fallbackProvider));
+  });
+
+  it("L1 requires fresh children, drains delivered terminals, and retains unsent failures", () => {
+    const root = readText(ROOT_BUILD_SKILL);
+    for (const marker of [
+      "Every new ref requires a newly spawned child with a fresh connection",
+      "Never use followup_task",
+      "consume all other terminal observations already",
+      "Duplicate or late observations cannot release a replacement child's slot",
+      "consume terminal observations delivered during that call",
+      "remove only that sent observation after a structured step response",
+      "NEEDS_USER may precede failure processing, so retain the sent item too",
+      "NEEDS_USER responses never discard other pending failures",
+      "Drain pending failure observations through structured steps",
+    ]) expect(root).toContain(marker);
+    for (const file of ["agents/automatic-build-dispatch-executor.md", ROOT_EXECUTOR_SKILL,
+      RELEASE_EXECUTOR_SKILL, ROOT_AGENT_TEMPLATE, RELEASE_AGENT_TEMPLATE, PROJECT_AGENT]) {
+      expect(readText(file)).toContain("Never accept another ref through followup");
+    }
+  });
+
+  it("L2 publishes the exact open-failure observation and retains legacy manual recovery", () => {
+    const root = readText(ROOT_BUILD_SKILL);
+    for (const marker of ["executor_open_failure", "connection_terminal", "handoff_ref_mismatch",
+      "mutually exclusive", "absence of a durable open", "Historical protocol_incompatible"]) {
+      expect(root).toContain(marker);
+    }
+    for (const file of [ROOT_EXECUTOR_SKILL, RELEASE_EXECUTOR_SKILL, ROOT_AGENT_TEMPLATE,
+      RELEASE_AGENT_TEMPLATE, PROJECT_AGENT]) {
+      expect(readText(file)).toContain("preserve session/connection_terminal/open and session/handoff_ref_mismatch/open");
+    }
   });
 
   it("R4 prohibits every shared Executor tool before the root action loop and at hard boundaries", () => {

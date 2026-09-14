@@ -162,6 +162,31 @@ export interface AutomaticBuildDispatchProgressV1 {
   observed_at: string;
 }
 
+export interface AutomaticBuildRecoveryGenerationIdentityV1 {
+  version: "automatic_build_recovery_generation_identity.v1";
+  dispatch_id: string;
+  dispatch_run_id: string;
+  current_work_unit_id: string;
+  semantic_attempt: number;
+  lease_epoch: number;
+}
+
+export interface AutomaticBuildRecoveryGenerationIdentityV2
+  extends Omit<AutomaticBuildRecoveryGenerationIdentityV1, "version"> {
+  version: "automatic_build_recovery_generation_identity.v2";
+  bootstrap_epoch: number;
+}
+
+export type AutomaticBuildRecoveryGenerationIdentity =
+  | AutomaticBuildRecoveryGenerationIdentityV1
+  | AutomaticBuildRecoveryGenerationIdentityV2;
+
+export interface AutomaticBuildDispatchRecoveryGenerationInspectionV1 {
+  version: "automatic_build_dispatch_recovery_generation_inspection.v1";
+  dispatch_slot_ref: string;
+  recovery_identity: AutomaticBuildRecoveryGenerationIdentity;
+}
+
 export interface AutomaticBuildExecutorDispatchReceiptV1 {
   version: "automatic_build_executor_dispatch_receipt.v1";
   dispatch_id: string;
@@ -647,6 +672,7 @@ function dispatchPlanRuntimeState(
   target: AutomaticBuildTarget,
   record: AutomaticBuildPersistedDispatchPlanV1,
   now: string,
+  currentPending: ReadonlySet<string>,
 ): { active_dispatch_ids: string[]; completed_dispatch_ids: string[] } {
   const active: string[] = [];
   const completed: string[] = [];
@@ -658,7 +684,14 @@ function dispatchPlanRuntimeState(
       dispatch.dispatch_id,
       dispatchRunId,
     );
-    if (!existsSync(manifestFile)) continue;
+    if (!existsSync(manifestFile)) {
+      // An accepted plan can outlive work completed through another dispatch run.
+      // Retire the unopened batch; any remaining members stay in the current plan.
+      if (dispatch.ordered_work_unit_ids.some(id => !currentPending.has(id))) {
+        completed.push(dispatch.dispatch_id);
+      }
+      continue;
+    }
     const receiptFile = dispatchReceiptPath(target, dispatch.stage, dispatch.dispatch_id, dispatchRunId);
     if (existsSync(receiptFile)) {
       completed.push(dispatch.dispatch_id);
@@ -676,7 +709,14 @@ function dispatchPlanRuntimeState(
     }
     const progress = refreshProgress(target, persisted, now);
     const nextWorkUnitId = dispatch.ordered_work_unit_ids[progress.length];
-    if (!nextWorkUnitId) continue;
+    if (!nextWorkUnitId) {
+      finishAutomaticBuildDispatch(target, dispatch.stage, dispatch.dispatch_id, {
+        now,
+        dispatch_run_id: dispatchRunId,
+      });
+      completed.push(dispatch.dispatch_id);
+      continue;
+    }
     const binding = dispatch.task_bindings?.[nextWorkUnitId];
     const inspection = inspectAutomaticBuildTaskClaim(target, dispatch.stage, nextWorkUnitId, {
       now,
@@ -696,6 +736,7 @@ function resumableDispatchPlan(
   stage: AutomaticBuildStage,
   acceptedPlanDigest: string,
   now: string,
+  currentPending: ReadonlySet<string>,
 ): AutomaticBuildPersistedDispatchPlanV1 | undefined {
   const directory = dispatchPlanDirectory(target, stage);
   if (!existsSync(directory)) return undefined;
@@ -710,7 +751,7 @@ function resumableDispatchPlan(
     .sort((left, right) => Date.parse(right.created_at) - Date.parse(left.created_at)
       || right.dispatch_plan.dispatch_plan_digest.localeCompare(left.dispatch_plan.dispatch_plan_digest));
   return candidates.find((record) => {
-    const state = dispatchPlanRuntimeState(target, record, now);
+    const state = dispatchPlanRuntimeState(target, record, now, currentPending);
     return state.completed_dispatch_ids.length < record.dispatch_plan.dispatches.length;
   });
 }
@@ -732,18 +773,21 @@ export function selectAutomaticBuildDispatchHandoff(
   if (!Number.isSafeInteger(input.available_new_executor_slots) || input.available_new_executor_slots < 0) {
     throw new Error("available_new_executor_slots must be a non-negative safe integer");
   }
+  const currentPending = new Set(input.current_dispatch_plan.dispatches
+    .flatMap(dispatch => dispatch.ordered_work_unit_ids));
   const persistedPlan = resumableDispatchPlan(
     target,
     input.current_dispatch_plan.stage,
     input.accepted_plan_digest,
     input.created_at,
+    currentPending,
   ) ?? persistAutomaticBuildDispatchPlan(
     target,
     input.accepted_plan_digest,
     input.current_dispatch_plan,
     input.created_at,
   );
-  const state = dispatchPlanRuntimeState(target, persistedPlan, input.created_at);
+  const state = dispatchPlanRuntimeState(target, persistedPlan, input.created_at, currentPending);
   const totalCapacity = Math.min(3, state.active_dispatch_ids.length + input.available_new_executor_slots);
   const selectedIds = new Set(selectAutomaticBuildDispatchRefill(persistedPlan.dispatch_plan, {
     ...state,
@@ -954,14 +998,147 @@ function refreshProgress(
   return progress;
 }
 
+function currentDispatchWorkUnitIdReadOnly(
+  target: AutomaticBuildTarget,
+  persisted: AutomaticBuildPersistedDispatchV1,
+): string | undefined {
+  for (let ordinal = 0; ordinal < persisted.manifest.ordered_work_unit_ids.length; ordinal += 1) {
+    if (readProgress(target, persisted, ordinal)) continue;
+    const workUnitId = persisted.manifest.ordered_work_unit_ids[ordinal];
+    if (terminalReceiptAfterDispatch(target, persisted, workUnitId)) continue;
+    return workUnitId;
+  }
+  return undefined;
+}
+
+function automaticBuildDispatchSlotRef(dispatchId: string, dispatchRunId: string): string {
+  const identity = stableJson({
+    version: "automatic_build_executor_dispatch_slot_identity.v1",
+    dispatch_id: dispatchId,
+    dispatch_run_id: dispatchRunId,
+  });
+  return `abdispatchslot1_${createHash("sha256").update(identity, "utf8").digest("hex")}`;
+}
+
+function bootstrapFailureDirectory(
+  target: AutomaticBuildTarget,
+  stage: AutomaticBuildStage,
+  identity: AutomaticBuildRecoveryGenerationIdentity,
+): string {
+  return path.join(dispatchRunDirectory(target, stage, identity.dispatch_id, identity.dispatch_run_id),
+    "bootstrap-failures", encodeURIComponent(identity.current_work_unit_id),
+    `${identity.semantic_attempt}-${identity.lease_epoch}`);
+}
+
+function bootstrapEpoch(
+  target: AutomaticBuildTarget, stage: AutomaticBuildStage,
+  identity: AutomaticBuildRecoveryGenerationIdentity,
+): number {
+  const directory = bootstrapFailureDirectory(target, stage, identity);
+  let epoch = 0;
+  while (existsSync(path.join(directory, `${epoch}.json`))) epoch++;
+  return epoch;
+}
+
+/** Called only after the executor registry proves this handoff has never opened. */
+export function recordAutomaticBuildDispatchBootstrapFailure(
+  target: AutomaticBuildTarget,
+  stage: AutomaticBuildStage,
+  identity: AutomaticBuildRecoveryGenerationIdentity,
+  opaqueHandoffRef: string,
+  now: string,
+): void {
+  const epoch = identity.version === "automatic_build_recovery_generation_identity.v2"
+    ? identity.bootstrap_epoch : 0;
+  const file = path.join(bootstrapFailureDirectory(target, stage, identity), `${epoch}.json`);
+  const record = { version: "automatic_build_bootstrap_failure.v1", opaque_handoff_ref: opaqueHandoffRef,
+    recovery_identity: identity };
+  if (existsSync(file)) {
+    if (stableJson(readJson(file)) !== stableJson(record)) throw new Error("bootstrap failure conflicts");
+    return;
+  }
+  const current = inspectAutomaticBuildDispatchRecoveryGeneration(target, stage, identity.dispatch_id,
+    { now, dispatch_run_id: identity.dispatch_run_id });
+  if (stableJson(current.recovery_identity) !== stableJson(identity)) return;
+  writeCreateOnly(file, record);
+}
+
+export class AutomaticBuildDispatchSettledError extends Error {
+  readonly name = "AutomaticBuildDispatchSettledError";
+}
+
+/** Reconcile a dispatch that became terminal before its executor was published. */
+export function finishAutomaticBuildDispatchIfTerminal(
+  target: AutomaticBuildTarget,
+  stage: AutomaticBuildStage,
+  dispatchId: string,
+  options: { now: string; dispatch_run_id: string },
+): boolean {
+  const persisted = readAutomaticBuildDispatch(target, stage, dispatchId, options.dispatch_run_id);
+  if (existsSync(dispatchReceiptPath(target, stage, dispatchId, persisted.dispatch_run_id))) return true;
+  if (currentDispatchWorkUnitIdReadOnly(target, persisted)) return false;
+  finishAutomaticBuildDispatch(target, stage, dispatchId, options);
+  return true;
+}
+
+export function inspectAutomaticBuildDispatchRecoveryGeneration(
+  target: AutomaticBuildTarget,
+  stage: AutomaticBuildStage,
+  dispatchId: string,
+  options: {
+    now?: string;
+    dispatch_run_id?: string;
+    max_semantic_attempts?: number;
+    max_lease_epochs?: number;
+  } = {},
+): AutomaticBuildDispatchRecoveryGenerationInspectionV1 {
+  const persisted = readAutomaticBuildDispatch(target, stage, dispatchId, options.dispatch_run_id);
+  if (existsSync(dispatchReceiptPath(target, stage, dispatchId, persisted.dispatch_run_id))) {
+    throw new AutomaticBuildDispatchSettledError(`finished dispatch has no recovery generation: ${dispatchId}`);
+  }
+  const currentWorkUnitId = currentDispatchWorkUnitIdReadOnly(target, persisted);
+  if (!currentWorkUnitId) {
+    throw new AutomaticBuildDispatchSettledError(`dispatch has no current work unit: ${dispatchId}`);
+  }
+  const binding = persisted.manifest.task_bindings?.[currentWorkUnitId];
+  const inspection = inspectAutomaticBuildTaskClaim(target, stage, currentWorkUnitId, {
+    now: options.now,
+    ...(binding ? { binding } : {}),
+    ...(binding && isAutomaticBuildTaskPolicyBindingV2(binding)
+      ? { policy_generation: "v3_only" as const }
+      : {}),
+    max_semantic_attempts: options.max_semantic_attempts,
+    max_lease_epochs: options.max_lease_epochs,
+  });
+  if (inspection.status !== "ready" && inspection.status !== "already_leased") {
+    throw new Error(`dispatch recovery generation is not launchable: ${inspection.status}`);
+  }
+  const identity: AutomaticBuildRecoveryGenerationIdentityV1 = {
+    version: "automatic_build_recovery_generation_identity.v1",
+    dispatch_id: dispatchId,
+    dispatch_run_id: persisted.dispatch_run_id,
+    current_work_unit_id: currentWorkUnitId,
+    semantic_attempt: inspection.execution_identity.semantic_attempt,
+    lease_epoch: inspection.execution_identity.lease_epoch,
+  };
+  const epoch = bootstrapEpoch(target, stage, identity);
+  return {
+    version: "automatic_build_dispatch_recovery_generation_inspection.v1",
+    dispatch_slot_ref: automaticBuildDispatchSlotRef(dispatchId, persisted.dispatch_run_id),
+    recovery_identity: epoch === 0 ? identity : { ...identity,
+      version: "automatic_build_recovery_generation_identity.v2", bootstrap_epoch: epoch },
+  };
+}
+
 function validateDescriptors(
   persisted: AutomaticBuildPersistedDispatchV1,
   descriptors: WorkUnitDescriptor[],
   taskBindings: Record<string, AutomaticBuildTaskPolicyBinding>,
   fromOrdinal: number,
+  throughOrdinal: number,
 ): Map<string, WorkUnitDescriptor> {
   const byId = new Map(descriptors.map((descriptor) => [descriptor.work_unit_id, descriptor]));
-  for (const workUnitId of persisted.manifest.ordered_work_unit_ids.slice(fromOrdinal)) {
+  for (const workUnitId of persisted.manifest.ordered_work_unit_ids.slice(fromOrdinal, throughOrdinal + 1)) {
     const descriptor = byId.get(workUnitId);
     if (!descriptor
       || descriptor.stage !== persisted.manifest.stage
@@ -1003,6 +1180,11 @@ export function advanceAutomaticBuildDispatch(
   input: {
     descriptors: WorkUnitDescriptor[];
     task_bindings: Record<string, AutomaticBuildTaskPolicyBinding>;
+    // Resolve only a prior failed task needed by this advancement, when not already supplied.
+    read_task?: (workUnitId: string) => {
+      descriptor: WorkUnitDescriptor;
+      task_binding: AutomaticBuildTaskPolicyBinding;
+    };
     dispatch_run_id?: string;
     now?: string;
     max_semantic_attempts?: number;
@@ -1024,15 +1206,25 @@ export function advanceAutomaticBuildDispatch(
   const descriptorStart = lastProgress?.task_receipt.state === "retryable_failure"
     ? Math.max(0, progress.length - 1)
     : progress.length;
+  const scopedDescriptors = [...input.descriptors];
+  const taskBindings = { ...input.task_bindings };
+  if (lastProgress?.task_receipt.state === "retryable_failure"
+    && !scopedDescriptors.some(descriptor => descriptor.work_unit_id === lastProgress.work_unit_id)
+    && input.read_task) {
+    const failedTask = input.read_task(lastProgress.work_unit_id);
+    scopedDescriptors.push(failedTask.descriptor);
+    taskBindings[lastProgress.work_unit_id] = failedTask.task_binding;
+  }
   const descriptors = validateDescriptors(
     persisted,
-    input.descriptors,
-    input.task_bindings,
+    scopedDescriptors,
+    taskBindings,
     descriptorStart,
+    progress.length,
   );
   if (lastProgress?.task_receipt.state === "retryable_failure") {
     const failedDescriptor = descriptors.get(lastProgress.work_unit_id);
-    const failedBinding = input.task_bindings[lastProgress.work_unit_id];
+    const failedBinding = taskBindings[lastProgress.work_unit_id];
     if (!failedDescriptor || !failedBinding) {
       throw new Error(`dispatch failed task is missing its scoped identity: ${stage}/${lastProgress.work_unit_id}`);
     }

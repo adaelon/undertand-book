@@ -3,6 +3,8 @@
 Status: Accepted design, 2026-09-01; D0/M1/M1b/M2/A2/R1/R2/W1/S1 implemented, A1 rejected by its bootstrap stop condition, S2 tail-balance trial rejected as unverifiable with scheduler unchanged.
 Revises: ADR-0114 §1-§2 对 `2,048 estimated tokens / 8,192 bytes` 的宿主硬闸表述。
 Extends: ADR-0115 的 Session V3、共享 Executor MCP、直接字段校验与前向接管边界。
+Extended by: ADR-0117；candidate request 上限显式进入 transport output contract，超限形成 durable retryable failure，但不提升当前预算或 Pass1 policy generation。
+Extended by: [ADR-0121](0121-bounded-build-state-reads-and-executor-lifecycle.md)；保留既有传输优化，另行处理全书状态重建、重复准备写入与 V4 单引用 child 的补位成本；新方案运行切片尚未实施。
 Change type: [边界重构].
 
 32 个成功候选的实测中，工具调用与模型可见协议步进约占成功 Executor 活跃时间的 70%，而启动与收尾只占 1.9%。当前 `2,048/8,192` 来自本地 `CODEX_EXECUTOR_TRANSPORT_PROFILE_V2`；仓库只证明 8 KiB 结果可达、317,247-byte 单次结果不可达，没有证明 2,048 tokens 是 Codex/MCP 的最大值。公开 [OpenAI MCP 指南](https://developers.openai.com/api/docs/guides/tools-connectors-mcp)未声明该上限；[Programmatic Tool Calling 指南](https://developers.openai.com/api/docs/guides/latest-model#programmatic-tool-calling)建议把无需逐步模型判断的有界工具密集流程交给程序执行，并以代表性任务比较质量、延迟、tokens 与成本。实施顺序见[切片方案](../切片方案-executor传输标定与协议往返压缩.md)。

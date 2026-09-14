@@ -2,10 +2,13 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, unlinkSync, writeFile
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { describe, expect, it } from "vitest";
+import * as fs from "node:fs";
+import { describe, expect, it, vi } from "vitest";
 import {
   nextAutomaticBuildAction,
   buildAutomaticBuildSnapshot,
+  prepareAutomaticBuildSnapshot,
+  readAutomaticBuildTaskStage,
   resolveAutomaticBuildTarget,
   type AutomaticBuildTarget,
   type AutomaticBuildSnapshot,
@@ -52,6 +55,37 @@ import {
   submitAutomaticBuildTaskCandidate,
 } from "../../../skills/build/automatic-build";
 import { writePass1ProductionTaskArtifact } from "./helpers/model-input-routability-fixture";
+
+const mutationCount = vi.hoisted(() => ({ active: false, count: 0 }));
+vi.mock("node:fs", async (original) => {
+  const actual = await original<typeof fs>();
+  return { ...actual, mkdirSync: (...args: Parameters<typeof fs.mkdirSync>) => {
+    if (mutationCount.active) mutationCount.count++;
+    return actual.mkdirSync(...args);
+  }, writeFileSync: (...args: Parameters<typeof fs.writeFileSync>) => {
+    if (mutationCount.active) mutationCount.count++;
+    return actual.writeFileSync(...args);
+  } };
+});
+
+it("P2 snapshots and plans inspect preparation without mutating an empty or prepared stage", () => {
+  const root = tempDir(); const source = path.join(root, "guide.md");
+  writeFileSync(source, "# Guide\n\nAn independent paragraph.\n");
+  const target = resolveAutomaticBuildTarget(source, root);
+  const inspect = () => {
+    mutationCount.count = 0; mutationCount.active = true;
+    try {
+      const first = buildAutomaticBuildSnapshot(target);
+      expect(buildAutomaticBuildSnapshot(target)).toEqual(first);
+      automaticBuildPlan(source, root);
+      expect(mutationCount.count).toBe(0);
+      return first;
+    } finally { mutationCount.active = false; }
+  };
+  expect(inspect().stages[0].preparation_required).toBe(true);
+  expect(prepareAutomaticBuildSnapshot(target, "pass1").status).toBe("ready");
+  expect(inspect().stages[0].preparation_required).toBe(false);
+});
 
 function tempDir(): string {
   return mkdtempSync(path.join(tmpdir(), "understand-book-orchestrator-"));
@@ -399,6 +433,32 @@ describe("automatic build orchestrator", () => {
     expect(nextAutomaticBuildAction(snapshot)).toEqual({ kind: "close_stage", stage: "pass1" });
   });
 
+  it("prepares the repaired BookStructure prompt alongside a frozen v2 policy", () => {
+    const root = tempDir();
+    const { workspace } = writeTechnicalLearningWorkspace(root, "structure-prompt-upgrade");
+    const target = resolveAutomaticBuildTarget(workspace, root);
+    writeJson(path.join(workspace, "long_range_candidates.json"), { candidates: [] });
+    closeV3Pass1(target);
+    closeV3ProfileSidecar(target);
+    const stage = buildAutomaticBuildSnapshot(target).stages.find(item => item.stage === "book_structure");
+    if (!stage?.policy_set) throw new Error("expected BookStructure production policies");
+    const previous = {
+      ...stage.policy_set,
+      members: stage.policy_set.members.map(member => ({
+        ...member, policy_generation_id: member.policy_generation_id.replace(/\.v\d+$/u, ".v2"),
+        semantic_contract: { ...member.semantic_contract, prompt_sha256: "a".repeat(64) },
+      })),
+    };
+    freezeAutomaticBuildStagePolicySet(target, previous);
+    const before = previous.members.map(member => readFileSync(path.join(workspace, ".build", "automatic-build",
+      "v4", "policies", "book_structure", member.policy_generation_id, "policy.json")));
+    expect(prepareAutomaticBuildSnapshot(target, "book_structure").status).toBe("ready");
+    const current = buildAutomaticBuildSnapshot(target).stages.find(item => item.stage === "book_structure");
+    expect(current?.policy_set?.members.every(member => member.policy_generation_id.endsWith(".v4"))).toBe(true);
+    previous.members.forEach((member, index) => expect(readFileSync(path.join(workspace, ".build", "automatic-build",
+      "v4", "policies", "book_structure", member.policy_generation_id, "policy.json"))).toEqual(before[index]));
+  });
+
   it("exposes BookStructure without Pass2 and invalidates it when a Pass2 audit arrives later", () => {
     const root = tempDir();
     const { workspace, sourceFile, source } = writeTechnicalLearningWorkspace(root, "optional-pass2");
@@ -445,6 +505,13 @@ describe("automatic build orchestrator", () => {
     expect(target.source_path).toBe(path.resolve(sourceFile));
 
     const unitWork = bookStructure?.pending_work_units ?? [];
+    for (const unit of unitWork) {
+      const task = bookStructure?.generation_tasks?.[unit.work_unit_id];
+      if (task?.kind !== "book_structure") throw new Error("missing unit projection");
+      const focused = readAutomaticBuildTaskStage(target, { stage: "book_structure", work_unit_id: unit.work_unit_id,
+        parent_lid: task.task.parent_unit_lid }, "full");
+      expect(focused?.work_units?.find(item => item.work_unit_id === unit.work_unit_id)).toEqual(unit);
+    }
     if (!bookStructure?.policy_set) throw new Error("missing BookStructure production policy set");
     const buildPlan = prepareExplicitLegacyBuildPlan(target.source_path, root, {
       book_id: target.book_id,
@@ -503,14 +570,15 @@ describe("automatic build orchestrator", () => {
       expect(rendered.stdout).toBe(renderBookStructureGenerationTaskInput(generation.task));
       const unitLid = generation.task.parent_unit_lid;
       const candidatePath = path.join(root, `book-structure-unit-${unitIndex}.json`);
+      const evidenceLid = JSON.parse(rendered.stdout).reference_scope.evidence_by_unit[unitLid][0];
       writeJson(candidatePath, {
         unit_card: {
           unit_lid: unitLid,
           role: "setup",
-          summary: { text: "Structure before Pass2.", evidence_lids: [unitLid] },
+          summary: { text: "Structure before Pass2.", evidence_lids: [evidenceLid] },
           candidate_key_stops: [],
           depends_on: [],
-          evidence_lids: [unitLid],
+          evidence_lids: [evidenceLid],
         },
       });
       stageAutomaticBuildCandidate(
@@ -663,6 +731,11 @@ describe("automatic build orchestrator", () => {
     const enrichedSnapshot = buildAutomaticBuildSnapshot(target);
     expect(enrichedSnapshot.stages.find((stage) => stage.stage === "pass2")).toMatchObject({ closed: true });
     const staleStructure = enrichedSnapshot.stages.find((stage) => stage.stage === "book_structure");
+    const focusedAfterPass2 = readAutomaticBuildTaskStage(target, { stage: "book_structure",
+      work_unit_id: firstUnitGeneration.task.descriptor.work_unit_id,
+      parent_lid: firstUnitGeneration.task.parent_unit_lid }, "full");
+    expect(focusedAfterPass2?.work_units?.find(unit => unit.work_unit_id === firstUnitGeneration.task.descriptor.work_unit_id))
+      .not.toEqual(firstUnitGeneration.task.descriptor);
     expect(staleStructure?.closed).toBe(false);
     expect(staleStructure?.pending_work_units?.some((unit) => (
       unit.work_unit_id.startsWith("unit:") && unit.cost.candidate_count === 1
@@ -706,6 +779,7 @@ describe("automatic build orchestrator", () => {
     });
     writeJson(path.join(workspace, "long_range_candidates.json"), { candidates: [] });
 
+    expect(prepareAutomaticBuildSnapshot(target, "pass1").status).toBe("ready");
     const snapshot = buildAutomaticBuildSnapshot(target);
 
     expect(snapshot.stages).toMatchObject([{

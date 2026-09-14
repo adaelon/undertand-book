@@ -107,3 +107,4 @@ cargo run -p server --bin server -- .understand-book/quantification-essence
 - [架构与设计决策](docs/架构.md)
 - [工具接口](docs/book工具.md)
 - [原创演示文本](examples/quickstart/book.md)
+- [构建控制面实测](docs/performance/understand-book-v1-release.md)

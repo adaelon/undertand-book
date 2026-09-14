@@ -1,0 +1,67 @@
+{
+  "version": "executor_mcp_fixed_timing_evidence.v2",
+  "status": "passed",
+  "codex_cli": "codex-cli 0.153.4",
+  "fixture": "isolated_single_synthetic_work_unit",
+  "connection_count": 1,
+  "sample_count": 4,
+  "totals": {
+    "executor.open": {
+      "call_count": 1,
+      "server_total_ms": 1120.2059,
+      "outer_total_ms": 1143,
+      "residual_total_ms": 22.79410000000007,
+      "response_total_bytes": 1466
+    },
+    "executor.input.next": {
+      "call_count": 1,
+      "server_total_ms": 66.84860000000117,
+      "outer_total_ms": 97,
+      "residual_total_ms": 30.15139999999883,
+      "response_total_bytes": 30820
+    },
+    "executor.generation.start": {
+      "call_count": 1,
+      "server_total_ms": 213.72920000000158,
+      "outer_total_ms": 235,
+      "residual_total_ms": 21.270799999998417,
+      "response_total_bytes": 958
+    },
+    "executor.submit_candidate": {
+      "call_count": 1,
+      "server_total_ms": 191.82599999999366,
+      "outer_total_ms": 216,
+      "residual_total_ms": 24.174000000006345,
+      "response_total_bytes": 201
+    }
+  },
+  "overall": {
+    "call_count": 4,
+    "server_total_ms": 1592.6096999999963,
+    "outer_total_ms": 1691,
+    "residual_total_ms": 98.39030000000366,
+    "response_total_bytes": 33445
+  },
+  "server_phase_totals_ms": {
+    "current-state/claim": 189.00930000000153,
+    "input-render-or-reuse": 15.372800000001007,
+    "persist/response": 9.347099999999045,
+    "candidate-gate": 130.13009999999485,
+    "writer/commit": 61.53429999999935,
+    "next-work-prepare": 0.16159999999945285
+  },
+  "observed_dominant_server_phase": "current-state/claim",
+  "observed_dominant_component": "server",
+  "measured_followup_branch": "current-state/claim",
+  "next_slice": "M2",
+  "durable": {
+    "semantic_attempts": 1,
+    "committed_tasks": 1
+  },
+  "thread_attribution_complete": true,
+  "semantic_trace_projection": {
+    "executor_input_or_submit": 2,
+    "dedicated_child_inference": 1,
+    "bounded_response_only": 2
+  }
+}

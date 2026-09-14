@@ -20,6 +20,76 @@ Use only the four tools on the dedicated `understand_book_build_executor` MCP co
 use shell, filesystem writes, another MCP server, a candidate source file, or a path-based submit.
 Never place a capability, path, clock override, or extra field in a tool request.
 
+In code mode, MCP dots become underscores; use this exact discovery helper in `functions.exec`:
+```javascript
+function executorTool(operation) {
+  const names = {
+    "executor.open": "mcp__understand_book_build_executor__executor_open",
+    "executor.input.next": "mcp__understand_book_build_executor__executor_input_next",
+    "executor.generation.start": "mcp__understand_book_build_executor__executor_generation_start",
+    "executor.submit_candidate": "mcp__understand_book_build_executor__executor_submit_candidate"
+  };
+  const name = names[operation];
+  if (!name || !ALL_TOOLS.some(tool => tool.name === name)) {
+    throw new Error("bootstrap_unavailable");
+  }
+  return tools[name];
+}
+
+async function executorCall(operation, request) {
+  if (operation === "executor.open") store("understand_book_open_request", request);
+  const result = await executorTool(operation)(request);
+  const response = JSON.parse(result.content.find(item => item.type === "text").text);
+  const action = response.action;
+  if (action?.kind === "DELIVER_INPUT") {
+    store("understand_book_next_request", action.next_request);
+  } else if (action?.kind === "INPUT_BATCH") {
+    const batch = action.batch;
+    store("understand_book_next_request", {
+      version: batch.final_for_generation
+        ? "automatic_build_executor_generation_start_request.v3"
+        : "automatic_build_executor_input_next_request.v4",
+      opaque_session_ref: batch.opaque_session_ref,
+      generation_input_ref: batch.generation_input_ref,
+      ...(batch.final_for_generation
+        ? { confirmed_through_ordinal: batch.last_ordinal }
+        : { ack_through_ordinal: batch.last_ordinal })
+    });
+  } else if (action?.kind === "GENERATE") {
+    store("understand_book_next_request", {
+      version: "automatic_build_executor_candidate_submit.v3",
+      opaque_session_ref: action.opaque_session_ref,
+      candidate_sink_ref: action.candidate_sink_ref
+    });
+  } else if (action?.kind === "WAIT") {
+    store("understand_book_next_request", load("understand_book_open_request"));
+  }
+  text(response);
+  if (action?.kind === "DONE" || response.version === "automatic_build_executor_mcp_error.v2") {
+    const lifecycle = {
+      version: "automatic_build_executor_lifecycle.v2",
+      status: action?.kind === "DONE" ? action.status : response.status,
+      ...(action?.kind === "DONE" ? {} : {
+        category: response.category, diagnostic_code: response.diagnostic_code, phase: response.phase
+      }),
+      protocol: "automatic_build_executor_session.v3"
+    };
+    store("understand_book_lifecycle", JSON.stringify(lifecycle));
+    text(load("understand_book_lifecycle"));
+  }
+}
+```
+Include both helper functions above in each `functions.exec` cell. Globals do not survive a cell;
+`store/load` do. Call `await executorCall("executor.open", request)` once for open. For later
+delivery/start/wait calls use `await executorCall(operation, load("understand_book_next_request"))`.
+For submit use `await executorCall("executor.submit_candidate", {
+...load("understand_book_next_request"), candidate: YOUR_JSON_VALUE })`.
+Never retype returned refs, ordinals, versions, or diagnostics into a subsequent request. The helper
+copies control fields from the response; it stores no semantic chunks or candidate bodies.
+Do not infer tool absence from suffix searches such as
+`endsWith("__open")`. Use the helper against the complete advertised catalog before reporting
+a missing tool. Each executorCall makes exactly one MCP call and never loops or prefetches.
+
 ## Open and delivery loop
 
 Call `executor.open` first with exactly:
@@ -48,7 +118,11 @@ Consume only `automatic_build_executor_session.v3`. Handle each action exactly:
   calls inside one `functions.exec`.
 - `action.kind=GENERATE`: reconstruct the complete semantic prompt and input from the delivered
   chunks, follow that semantic prompt, and produce one strict JSON value satisfying
-  `output_contract`. Call `executor.submit_candidate` with
+  `output_contract`. When `retry_feedback` is present, use its `json_pointer` and `expected` to
+  correct the previous candidate field error within the current schema. Generate a complete
+  candidate from the delivered input; the feedback is not permission to change the schema or
+  invent evidence. Keep feedback in this child and never forward it in the lifecycle final.
+  Call `executor.submit_candidate` with
   `version=automatic_build_executor_candidate_submit.v3`, the exact returned `opaque_session_ref`
   and `candidate_sink_ref`, and that JSON value as `candidate`.
   Never return candidate JSON to the caller or put it in a file, command, log, or another tool.
@@ -56,14 +130,23 @@ Consume only `automatic_build_executor_session.v3`. Handle each action exactly:
   original `opaque_handoff_ref`. Do not open another ref or claim work by another route.
 - `action.kind=DONE`: stop and return only the bounded lifecycle object defined below.
 
+For DONE or an MCP error, the helper prints the serialized lifecycle object and stores it as
+`understand_book_lifecycle`. Copy that exact JSON string as your final response, without retyping
+field values, adding quotes around the object, or appending punctuation. If needed, a tool-only
+`text(load("understand_book_lifecycle"))` cell can redisplay it without another MCP call.
+
+This child and its connection serve exactly one opaque handoff ref. After DONE or any terminal
+error, this child is finished. A later work unit or recovery ref requires a new child and a fresh
+connection, even when the dispatch slot is unchanged. Never accept another ref through followup.
+
 Every replay uses the exact previous request. Do not self-judge schema, evidence, identity,
 quality, writer, terminal, or retry state; tool responses and the durable Build Engine are
 authoritative.
 
 ## Failure, permission, and privacy boundary
 
-If the dedicated MCP server or any required tool is absent, its bootstrap is incompatible, or a
-required tool call is unavailable in the current interaction mode, do not fall back to shell,
+If no Executor MCP tool call has been accepted because the dedicated server or a required tool is
+absent, startup failed, or the current interaction mode cannot call it, do not fall back to shell,
 skills, paths, or a generic agent. Return only:
 
 ```json
@@ -71,9 +154,28 @@ skills, paths, or a generic agent. Return only:
   "version": "automatic_build_executor_lifecycle.v2",
   "status": "interrupted",
   "category": "bootstrap",
-  "diagnostic_code": "protocol_incompatible"
+  "diagnostic_code": "bootstrap_unavailable"
 }
 ```
+
+If an accepted tool call returns `automatic_build_executor_mcp_error.v2`, stop immediately and
+preserve its exact `status`, `category`, `diagnostic_code`, and `phase` in this lifecycle object:
+
+```json
+{
+  "version": "automatic_build_executor_lifecycle.v2",
+  "status": "<exact error.status>",
+  "category": "<exact error.category>",
+  "diagnostic_code": "<exact error.diagnostic_code>",
+  "phase": "<exact error.phase>",
+  "protocol": "automatic_build_executor_session.v3"
+}
+```
+
+Do not relabel an observed MCP error as bootstrap failure, retry the tool, or infer task completion
+from the lifecycle object. The caller recomputes durable state after every child terminal.
+In particular, preserve session/connection_terminal/open and session/handoff_ref_mismatch/open
+exactly. They describe this connection's refusal to open; they are not protocol_incompatible.
 
 Semantic chunks may appear in this dedicated child tool-result context, and the candidate may
 appear in its `executor.submit_candidate` tool request. They may therefore be visible when the user actively inspects this dedicated child thread. Never copy, summarize, cache, print, or forward

@@ -2,6 +2,7 @@
 
 Status: Accepted, 2026-08-02.
 Extends: ADR-0068 and ADR-0092.
+Revised by: ADR-0117；session/lease/transport/sink/writer 错误不得统一伪装为 bootstrap/protocol_incompatible。
 Change type: 边界重构。
 
 Windows 发布版的 Codex plugin 是不携带 `agents/` 的薄外壳，Build Engine Sidecar 已内嵌 extractor prompts。现有 handoff 实现却从 `--plugin-root/agents` 读 prompt；doctor 不准备 handoff、parity smoke 使用完整仓库根、release assertion 只单测 `sidecar prompt`，因而安装态失败仍被报告为 compatible。manifest 先于 handoff 写入还会暴露半发布 run，而 `executor_interrupted` receipt 无法区分中断阶段与有界原因。实施顺序见[切片方案](../切片方案-安装态executor-handoff可靠性闭环.md)。

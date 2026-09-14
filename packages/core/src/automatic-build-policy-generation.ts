@@ -458,24 +458,65 @@ export function freezeAutomaticBuildStagePolicySet(
       semantic_contract: member.semantic_contract,
       frozen_at: policySet.frozen_at,
     };
-    const bytes = `${JSON.stringify(generation, null, 2)}\n`;
-    mkdirSync(path.dirname(file), { recursive: true });
-    try {
-      writeFileSync(file, bytes, { encoding: "utf8", flag: "wx" });
-    } catch (error) {
-      const code = error && typeof error === "object" && "code" in error ? String(error.code) : "";
-      if (code !== "EEXIST") throw error;
-      const existing = readAutomaticBuildPolicyGeneration(
-        target,
-        policySet.stage,
-        member.policy_generation_id,
-      );
-      if (!existing || !semanticContractEqual(existing.semantic_contract, member.semantic_contract)) {
+    const checkExisting = () => {
+      const existing = readAutomaticBuildPolicyGeneration(target, policySet.stage, member.policy_generation_id);
+      if (!existing) return false;
+      if (!semanticContractEqual(existing.semantic_contract, member.semantic_contract)) {
         throw new AutomaticBuildPolicyGenerationConflictError("policy_set_frozen");
       }
+      return true;
+    };
+    if (checkExisting()) continue;
+    mkdirSync(path.dirname(file), { recursive: true });
+    try {
+      writeFileSync(file, `${JSON.stringify(generation, null, 2)}\n`, { encoding: "utf8", flag: "wx" });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      if (!checkExisting()) throw error;
     }
   }
   return policySet;
+}
+
+/** Read only the stage constants and this unit's existing preparation facts. */
+export function inspectAutomaticBuildStagePolicySet(target: AutomaticBuildTarget, policySet: AutomaticBuildStagePolicySetV3): boolean {
+  let prepared = true;
+  for (const member of policySet.members) {
+    const existing = readAutomaticBuildPolicyGeneration(target, policySet.stage, member.policy_generation_id);
+    if (!existing) prepared = false;
+    else if (!semanticContractEqual(existing.semantic_contract, member.semantic_contract)) {
+      throw new AutomaticBuildPolicyGenerationConflictError("policy_set_frozen");
+    }
+  }
+  return prepared;
+}
+
+export function readAutomaticBuildCurrentMigration(input: Parameters<typeof recordAutomaticBuildPolicyMigration>[0]) {
+  const identity = { ...currentIdentity(input.target, input.stage, input.current, input.policy_set),
+    from_policy_generation_id: input.from_policy_generation_id };
+  const receipt = readMigrationReceipt(input.target, input.stage, input.from_policy_generation_id,
+    identity.to_policy_generation_id, identity.work_unit_id);
+  if (receipt && (receipt.from_policy_generation_id !== identity.from_policy_generation_id
+    || receipt.to_policy_generation_id !== identity.to_policy_generation_id || receipt.work_unit_id !== identity.work_unit_id
+    || receipt.current_input_hash !== identity.current_input_hash
+    || receipt.work_unit_kind !== identity.work_unit_kind || receipt.current_route !== identity.current_route
+    || !semanticContractEqual(receipt.semantic_contract, identity.semantic_contract)
+    || (input.current.route === "deterministic_skip" && (receipt.deterministic_skip?.code !== input.current.skip_code
+      || stableJson(receipt.deterministic_skip.evidence_lids) !== stableJson([...new Set(input.current.evidence_lids)].sort()))))) {
+    throw new AutomaticBuildPolicyGenerationConflictError("migration_receipt_frozen");
+  }
+  return receipt;
+}
+
+/** One routing/preparation invocation owns this context; never retain across requests. */
+export function prepareAutomaticBuildPolicyMigrations(target: AutomaticBuildTarget, policySet: AutomaticBuildStagePolicySetV3) {
+  const prepared = freezeAutomaticBuildStagePolicySet(target, policySet);
+  return {
+    record: (input: Parameters<typeof recordAutomaticBuildPolicyMigration>[0]) =>
+      recordAutomaticBuildPolicyMigrationPrepared({ ...input, target, policy_set: prepared }),
+    adopt: (input: Parameters<typeof recordAutomaticBuildPriorGenerationAdoption>[0]) =>
+      recordAutomaticBuildPriorGenerationAdoptionPrepared({ ...input, target, policy_set: prepared }),
+  };
 }
 
 function migrationWorkUnitFileName(workUnitId: string): string {
@@ -650,23 +691,27 @@ function persistMigrationReceipt(
     receipt.to_policy_generation_id,
     receipt.work_unit_id,
   );
-  const bytes = `${JSON.stringify(receipt, null, 2)}\n`;
-  mkdirSync(path.dirname(file), { recursive: true });
-  try {
-    writeFileSync(file, bytes, { encoding: "utf8", flag: "wx" });
-    return receipt;
-  } catch (error) {
-    const code = error && typeof error === "object" && "code" in error ? String(error.code) : "";
-    if (code !== "EEXIST") throw error;
+  const checkExisting = () => {
+    if (!existsSync(file)) return undefined;
     const existing = validateAutomaticBuildPolicyMigrationReceipt(
-      target,
-      receipt.stage,
-      JSON.parse(readFileSync(file, "utf8")) as AutomaticBuildPolicyMigrationReceiptV2,
+      target, receipt.stage, JSON.parse(readFileSync(file, "utf8")),
     );
     if (stableJson(receiptComparable(existing)) !== stableJson(receiptComparable(receipt))) {
       throw new AutomaticBuildPolicyGenerationConflictError("migration_receipt_frozen");
     }
     return existing;
+  };
+  const existing = checkExisting();
+  if (existing) return existing;
+  mkdirSync(path.dirname(file), { recursive: true });
+  try {
+    writeFileSync(file, `${JSON.stringify(receipt, null, 2)}\n`, { encoding: "utf8", flag: "wx" });
+    return receipt;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    const raced = checkExisting();
+    if (!raced) throw error;
+    return raced;
   }
 }
 
@@ -796,7 +841,17 @@ export function recordAutomaticBuildPriorGenerationAdoption(input: {
   current: Extract<AutomaticBuildPolicyMigrationCurrent, { route: "model" }>;
   now?: string;
 }): AutomaticBuildPolicyMigrationResult | undefined {
-  const policySet = freezeAutomaticBuildStagePolicySet(input.target, input.policy_set);
+  return recordAutomaticBuildPriorGenerationAdoptionPrepared({ ...input, policy_set: freezeAutomaticBuildStagePolicySet(input.target, input.policy_set) });
+}
+
+function recordAutomaticBuildPriorGenerationAdoptionPrepared(input: {
+  target: AutomaticBuildTarget;
+  stage: SemanticBuildStage;
+  policy_set: AutomaticBuildStagePolicySetV3;
+  current: Extract<AutomaticBuildPolicyMigrationCurrent, { route: "model" }>;
+  now?: string;
+}): AutomaticBuildPolicyMigrationResult | undefined {
+  const policySet = input.policy_set;
   if (policySet.stage !== input.stage) throw new Error("prior-generation policy set stage mismatch");
   const current = currentIdentity(input.target, input.stage, input.current, policySet);
   const candidates = digestBoundGenerationArtifactCandidates(
@@ -873,7 +928,20 @@ export function recordAutomaticBuildPolicyMigration(input: {
   now?: string;
 }): AutomaticBuildPolicyMigrationResult {
   assertPolicyGenerationId(input.from_policy_generation_id, "from_policy_generation_id");
-  const policySet = freezeAutomaticBuildStagePolicySet(input.target, input.policy_set);
+  return recordAutomaticBuildPolicyMigrationPrepared({ ...input, policy_set: freezeAutomaticBuildStagePolicySet(input.target, input.policy_set) });
+}
+
+function recordAutomaticBuildPolicyMigrationPrepared(input: {
+  target: AutomaticBuildTarget;
+  stage: SemanticBuildStage;
+  from_policy_generation_id: string;
+  policy_set: AutomaticBuildStagePolicySetV3;
+  current: AutomaticBuildPolicyMigrationCurrent;
+  previous?: AutomaticBuildPolicyMigrationPreviousV2;
+  now?: string;
+}): AutomaticBuildPolicyMigrationResult {
+  assertPolicyGenerationId(input.from_policy_generation_id, "from_policy_generation_id");
+  const policySet = input.policy_set;
   if (policySet.stage !== input.stage) throw new Error("migration policy set stage mismatch");
   const previousLock = readAutomaticBuildStagePolicyLock(input.target, input.stage);
   if (previousLock && previousLock.policy_generation_id !== input.from_policy_generation_id) {

@@ -1,14 +1,18 @@
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   advanceAutomaticBuildDispatch,
   finishAutomaticBuildDispatch,
+  finishAutomaticBuildDispatchIfTerminal,
+  inspectAutomaticBuildDispatchRecoveryGeneration,
   inspectAutomaticBuildDispatch,
   persistAutomaticBuildDispatch as persistAutomaticBuildDispatchRuntime,
   prepareAutomaticBuildDispatch,
+  persistAutomaticBuildDispatchPlan,
+  selectAutomaticBuildDispatchHandoff,
 } from "../src/automatic-build-dispatch-runtime";
 import { planAutomaticBuildExecutorDispatches } from "../src/automatic-build-dispatch";
 import { claimAutomaticBuildTask, startAutomaticBuildLease } from "../src/automatic-build-lease";
@@ -31,7 +35,7 @@ import {
   taskPolicyBindingForWorkUnit,
 } from "../src/stage-work-unit";
 
-function fixture() {
+function fixture(count = 8) {
   const root = mkdtempSync(path.join(tmpdir(), "understand-book-dispatch-runtime-"));
   const source = path.join(root, "guide.md");
   writeFileSync(source, "# Guide\n\nA deterministic source.\n", "utf8");
@@ -41,7 +45,7 @@ function fixture() {
     resolveContentProfile("technical_learning"),
     "full",
   );
-  const descriptors = Array.from({ length: 8 }, (_, index) => createWorkUnitDescriptor({
+  const descriptors = Array.from({ length: count }, (_, index) => createWorkUnitDescriptor({
     target: target.target_ref,
     stage: "profile_sidecar",
     work_unit_id: `formula-${index}`,
@@ -63,12 +67,12 @@ function fixture() {
     pending_ids: descriptors.map((descriptor) => descriptor.work_unit_id),
     available_agent_slots: 1,
   });
-  expect(plan.dispatches).toHaveLength(1);
+  expect(plan.dispatches).toHaveLength(Math.ceil(count / 8));
   const bindings = Object.fromEntries(descriptors.map((descriptor) => [descriptor.work_unit_id, {
     input_hash: descriptor.input_hash,
     policy_fingerprint: descriptor.policy_fingerprint,
   }]));
-  return { root, target, descriptors, manifest: plan.dispatches[0], bindings };
+  return { root, target, descriptors, plan, manifest: plan.dispatches[0], bindings };
 }
 
 function persistAutomaticBuildDispatch(
@@ -149,7 +153,171 @@ function seedSemanticFailure(
   });
 }
 
+function workspaceFileSnapshot(root: string): Record<string, string> {
+  const snapshot: Record<string, string> = {};
+  const visit = (directory: string) => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const file = path.join(directory, entry.name);
+      if (entry.isDirectory()) {
+        visit(file);
+      } else if (entry.isFile()) {
+        snapshot[path.relative(root, file)] = readFileSync(file).toString("base64");
+      }
+    }
+  };
+  visit(root);
+  return snapshot;
+}
+
 describe("automatic build executor dispatch runtime", () => {
+  it.each([false, true])("skips unpublished obsolete batches and retains pending work (partial=%s)", (partial) => {
+    const { target, descriptors, plan } = fixture(16);
+    const accepted = "same-accepted-descriptor-plan";
+    persistAutomaticBuildDispatchPlan(target, accepted, plan, "2026-09-12T13:34:43.325Z");
+    // The current snapshot has already validated the completed work. The old batch was never published.
+    const pending = descriptors.slice(partial ? 1 : 8);
+    const current = planAutomaticBuildExecutorDispatches({
+      target_ref: target.target_ref, stage: "profile_sidecar", work_units: descriptors,
+      pending_ids: pending.map(unit => unit.work_unit_id), available_agent_slots: 1,
+    });
+    const selected = selectAutomaticBuildDispatchHandoff(target, {
+      accepted_plan_digest: accepted, current_dispatch_plan: current,
+      available_new_executor_slots: 1, created_at: "2026-09-12T13:38:08.000Z",
+    });
+    expect(selected.selected_manifests).not.toContainEqual(plan.dispatches[0]);
+    expect(selected.selected_manifests.flatMap(item => item.ordered_work_unit_ids))
+      .not.toContain(descriptors[0].work_unit_id);
+    expect(selected.completed_dispatch_ids).toContain(plan.dispatches[0].dispatch_id);
+    expect(selected.selected_manifests).toContainEqual(plan.dispatches[1]);
+    const remaining = partial ? descriptors.slice(1, 8) : [];
+    const nextPlan = planAutomaticBuildExecutorDispatches({
+      target_ref: target.target_ref, stage: "profile_sidecar", work_units: descriptors,
+      pending_ids: remaining.map(unit => unit.work_unit_id), available_agent_slots: 1,
+    });
+    const next = selectAutomaticBuildDispatchHandoff(target, {
+      accepted_plan_digest: accepted, current_dispatch_plan: nextPlan,
+      available_new_executor_slots: 1, created_at: "2026-09-12T13:39:08.000Z",
+    });
+    expect(next.selected_manifests.flatMap(item => item.ordered_work_unit_ids))
+      .toEqual(remaining.map(unit => unit.work_unit_id));
+  });
+
+  it("projects initial, active, and expired recovery generations without writing workspace state", () => {
+    const { target, descriptors, manifest, bindings } = fixture();
+    const persisted = persistAutomaticBuildDispatch(target, manifest, {
+      owner: `dispatch-recovery-projection:${manifest.dispatch_id}`,
+      created_at: "2026-09-02T01:00:00.000Z",
+      reserve_ttl_ms: 1_000,
+      run_ttl_ms: 1_800_000,
+    }).persisted;
+    const project = (now: string) => {
+      const before = workspaceFileSnapshot(target.workspace_dir);
+      const projection = inspectAutomaticBuildDispatchRecoveryGeneration(
+        target,
+        "profile_sidecar",
+        manifest.dispatch_id,
+        { now, dispatch_run_id: persisted.dispatch_run_id },
+      );
+      expect(workspaceFileSnapshot(target.workspace_dir)).toEqual(before);
+      return projection;
+    };
+
+    const initial = project("2026-09-02T01:00:00.100Z");
+    expect(initial.recovery_identity).toMatchObject({
+      version: "automatic_build_recovery_generation_identity.v1",
+      dispatch_id: manifest.dispatch_id,
+      dispatch_run_id: persisted.dispatch_run_id,
+      current_work_unit_id: manifest.ordered_work_unit_ids[0],
+      semantic_attempt: 1,
+      lease_epoch: 1,
+    });
+
+    const claim = advanceAutomaticBuildDispatch(target, "profile_sidecar", manifest.dispatch_id, {
+      descriptors,
+      task_bindings: bindings,
+      dispatch_run_id: persisted.dispatch_run_id,
+      now: "2026-09-02T01:00:00.200Z",
+    });
+    if (claim.status !== "leased") throw new Error("expected active recovery projection lease");
+    expect(project("2026-09-02T01:00:00.500Z").recovery_identity).toMatchObject({
+      semantic_attempt: 1,
+      lease_epoch: 1,
+    });
+    expect(project("2026-09-02T01:00:01.200Z").recovery_identity).toMatchObject({
+      semantic_attempt: 1,
+      lease_epoch: 2,
+    });
+  });
+
+  it("projects a semantic retry as attempt two and lease epoch one without claiming it", () => {
+    const { target, manifest } = fixture();
+    seedSemanticFailure(
+      target,
+      manifest.ordered_work_unit_ids[0],
+      "semantic-retry-seed",
+      "2026-09-02T01:10:00.000Z",
+      "2026-09-02T01:10:00.100Z",
+    );
+    const persisted = persistAutomaticBuildDispatch(target, manifest, {
+      owner: `dispatch-semantic-retry-projection:${manifest.dispatch_id}`,
+      created_at: "2026-09-02T01:10:01.000Z",
+      reserve_ttl_ms: 60_000,
+      run_ttl_ms: 1_800_000,
+    }).persisted;
+    const before = workspaceFileSnapshot(target.workspace_dir);
+
+    const projection = inspectAutomaticBuildDispatchRecoveryGeneration(
+      target,
+      "profile_sidecar",
+      manifest.dispatch_id,
+      { now: "2026-09-02T01:10:01.100Z", dispatch_run_id: persisted.dispatch_run_id },
+    );
+
+    expect(projection.recovery_identity).toMatchObject({
+      current_work_unit_id: manifest.ordered_work_unit_ids[0],
+      semantic_attempt: 2,
+      lease_epoch: 1,
+    });
+    expect(workspaceFileSnapshot(target.workspace_dir)).toEqual(before);
+  });
+
+  it("changes recovery identity after a committed work unit while keeping the dispatch slot stable", () => {
+    const { target, descriptors, manifest, bindings } = fixture();
+    const persisted = persistAutomaticBuildDispatch(target, manifest, {
+      owner: `dispatch-work-unit-projection:${manifest.dispatch_id}`,
+      created_at: "2026-09-02T01:20:00.000Z",
+      reserve_ttl_ms: 60_000,
+      run_ttl_ms: 1_800_000,
+    }).persisted;
+    const first = inspectAutomaticBuildDispatchRecoveryGeneration(
+      target,
+      "profile_sidecar",
+      manifest.dispatch_id,
+      { now: "2026-09-02T01:20:00.100Z", dispatch_run_id: persisted.dispatch_run_id },
+    );
+    const claimed = advanceAutomaticBuildDispatch(target, "profile_sidecar", manifest.dispatch_id, {
+      descriptors,
+      task_bindings: bindings,
+      dispatch_run_id: persisted.dispatch_run_id,
+      now: "2026-09-02T01:20:00.200Z",
+    });
+    if (claimed.status !== "leased") throw new Error("expected first work-unit projection lease");
+    commit(target, claimed, 0);
+    const before = workspaceFileSnapshot(target.workspace_dir);
+
+    const second = inspectAutomaticBuildDispatchRecoveryGeneration(
+      target,
+      "profile_sidecar",
+      manifest.dispatch_id,
+      { now: "2026-09-02T01:20:00.300Z", dispatch_run_id: persisted.dispatch_run_id },
+    );
+
+    expect(second.dispatch_slot_ref).toBe(first.dispatch_slot_ref);
+    expect(second.recovery_identity.current_work_unit_id).toBe(manifest.ordered_work_unit_ids[1]);
+    expect(second.recovery_identity).not.toEqual(first.recovery_identity);
+    expect(workspaceFileSnapshot(target.workspace_dir)).toEqual(before);
+  });
+
   it("reads a legacy dispatch manifest binding without inventing a V3 attempt scope", () => {
     const { target, manifest, bindings } = fixture();
     const legacyManifest = { ...manifest, task_bindings: bindings } as unknown as typeof manifest;
@@ -277,6 +445,9 @@ describe("automatic build executor dispatch runtime", () => {
       now: "2026-07-25T04:00:20.000Z",
     });
     expect(complete.status).toBe("ready_to_finish");
+    const terminalOptions = { now: "2026-07-25T04:00:21.000Z", dispatch_run_id: "run-20260725T040000000Z" };
+    expect(finishAutomaticBuildDispatchIfTerminal(target, "profile_sidecar", manifest.dispatch_id, terminalOptions)).toBe(true);
+    expect(finishAutomaticBuildDispatchIfTerminal(target, "profile_sidecar", manifest.dispatch_id, terminalOptions)).toBe(true);
     const receipt = finishAutomaticBuildDispatch(target, "profile_sidecar", manifest.dispatch_id, {
       now: "2026-07-25T04:00:21.000Z",
     });
@@ -285,6 +456,15 @@ describe("automatic build executor dispatch runtime", () => {
     expect(new Set(receipt.task_receipts.map((item) => item.work_unit_id)).size).toBe(8);
     expect(Buffer.byteLength(JSON.stringify(receipt))).toBeLessThanOrEqual(16_384);
     expect(JSON.stringify(receipt)).not.toContain("PRIVATE_FORMULA_");
+    // A second plan existed before those commits, but publishes this dispatch only afterwards.
+    const late = persistAutomaticBuildDispatch(target, manifest, {
+      owner: "late-publication", created_at: "2026-07-25T04:00:00.500Z", reserve_ttl_ms: 60_000, run_ttl_ms: 1_800_000,
+    });
+    expect(finishAutomaticBuildDispatchIfTerminal(target, "profile_sidecar", manifest.dispatch_id, {
+      now: "2026-07-25T04:00:22.000Z", dispatch_run_id: late.persisted.dispatch_run_id,
+    })).toBe(true);
+    expect(listAutomaticBuildStoredAttempts(target, "profile_sidecar")).toHaveLength(8);
+
   }, 15_000);
 
   it("preserves three commits, recovers the fourth lease, and never claims the remaining suffix", () => {

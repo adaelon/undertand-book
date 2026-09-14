@@ -1,0 +1,352 @@
+{
+  "version": "understand_book_root_shared_executor_evidence.v1",
+  "status": "passed",
+  "codex_cli": "codex-cli 0.153.4",
+  "plugin": {
+    "name": "understand-book",
+    "version": "0.1.0+codex.20260907110058",
+    "installed_from_isolated_local_marketplace": true,
+    "candidate_file_set_and_bytes_match": true,
+    "enabled": true
+  },
+  "registration": {
+    "source_state": "absent",
+    "target_version": "automatic_build_executor_session.v3",
+    "backup": null,
+    "new_task_required": true,
+    "role_compatible": true,
+    "role_local_mcp_server_count": 0,
+    "projected_role_reductions": [
+      "shell_tool=false",
+      "apps=false"
+    ]
+  },
+  "root_inventory": {
+    "executor_server_present": true,
+    "cli_get_enabled_tools": [
+      "executor.open",
+      "executor.input.next",
+      "executor.generation.start",
+      "executor.submit_candidate"
+    ],
+    "cli_get_startup_timeout_sec": 10,
+    "cli_get_tool_timeout_sec": 120,
+    "installed_static_required": false,
+    "installed_static_default_tools_approval_mode": "approve",
+    "compiled_server_tools_list": [
+      "executor.open",
+      "executor.input.next",
+      "executor.generation.start",
+      "executor.submit_candidate"
+    ],
+    "root_executor_tool_count": 4
+  },
+  "installed_rg8_canary": {
+    "installed_launcher_executed": true,
+    "recovery": {
+      "committed_reused_units": 2,
+      "recovered_units": 1,
+      "stale_epoch": 1,
+      "recovered_epoch": 2,
+      "semantic_attempt": 1,
+      "recovery_ref_replays": 2,
+      "trace_event_count": 30
+    },
+    "oversize": {
+      "diagnostic_code": "candidate_request_too_large",
+      "phase": "generation",
+      "semantic_attempt": 1,
+      "lease_epoch": 1,
+      "failure_count": 1,
+      "writer_started": false,
+      "candidate_file_count": 0
+    }
+  },
+  "child_inventory": {
+    "inherited_parent_registration": true,
+    "role_local_mcp_server_count": 0,
+    "successful_backend_tools": [
+      "executor.generation.start",
+      "executor.input.next",
+      "executor.open",
+      "executor.submit_candidate"
+    ],
+    "child_executor_tool_count": 4
+  },
+  "single_ref_durable_commit": {
+    "durable": {
+      "semantic_attempts": 1,
+      "committed_tasks": 1
+    },
+    "thread_attribution_complete": true,
+    "root_executor_dispatch_attempt_count": 0,
+    "root_executor_backend_call_count": 0,
+    "other_child_executor_dispatch_attempt_count": 0,
+    "other_child_executor_backend_call_count": 0,
+    "first_child_dispatch": "executor.open",
+    "first_child_backend_call": "executor.open",
+    "semantic_hit_shapes": {
+      "executor_input_or_submit": 2,
+      "dedicated_child_inference": 1,
+      "bounded_response_only": 2
+    },
+    "root_event_count": 13,
+    "root_final_marker_matched": true
+  },
+  "m1_fixed_fixture_timing": {
+    "version": "executor_mcp_timing_join.v2",
+    "connection_count": 1,
+    "sample_count": 4,
+    "totals": {
+      "executor.open": {
+        "call_count": 1,
+        "server_total_ms": 1120.2059,
+        "outer_total_ms": 1143,
+        "residual_total_ms": 22.79410000000007,
+        "response_total_bytes": 1466
+      },
+      "executor.input.next": {
+        "call_count": 1,
+        "server_total_ms": 66.84860000000117,
+        "outer_total_ms": 97,
+        "residual_total_ms": 30.15139999999883,
+        "response_total_bytes": 30820
+      },
+      "executor.generation.start": {
+        "call_count": 1,
+        "server_total_ms": 213.72920000000158,
+        "outer_total_ms": 235,
+        "residual_total_ms": 21.270799999998417,
+        "response_total_bytes": 958
+      },
+      "executor.submit_candidate": {
+        "call_count": 1,
+        "server_total_ms": 191.82599999999366,
+        "outer_total_ms": 216,
+        "residual_total_ms": 24.174000000006345,
+        "response_total_bytes": 201
+      }
+    }
+  },
+  "three_slot_first_terminal": {
+    "durable": {
+      "semantic_attempts": 6,
+      "committed_tasks": 6
+    },
+    "executor_mcp_connection_count": 6,
+    "dedicated_child_count": 6,
+    "max_live_dedicated_children": 3,
+    "executor_slot_lifecycle_observations": [
+      {
+        "observed_at_ms": 1788823559329,
+        "live_slots": 3
+      },
+      {
+        "observed_at_ms": 1788823576209,
+        "live_slots": 3
+      },
+      {
+        "observed_at_ms": 1788823586869,
+        "live_slots": 2
+      },
+      {
+        "observed_at_ms": 1788823605040,
+        "live_slots": 1
+      },
+      {
+        "observed_at_ms": 1788823631203,
+        "live_slots": 2
+      },
+      {
+        "observed_at_ms": 1788823647131,
+        "live_slots": 3
+      },
+      {
+        "observed_at_ms": 1788823658568,
+        "live_slots": 2
+      },
+      {
+        "observed_at_ms": 1788823672967,
+        "live_slots": 2
+      },
+      {
+        "observed_at_ms": 1788823678478,
+        "live_slots": 1
+      },
+      {
+        "observed_at_ms": 1788823693661,
+        "live_slots": 1
+      },
+      {
+        "observed_at_ms": 1788823708694,
+        "live_slots": 0
+      }
+    ],
+    "fourth_child_started_after_first_terminal": true,
+    "fourth_child_started_before_last_initial_terminal": true,
+    "first_partial_completion_observed_before_refill": true,
+    "all_dedicated_terminal_observed_before_done": true,
+    "synthetic_build_step_call_count": 5,
+    "root_executor_dispatch_attempt_count": 0,
+    "root_executor_backend_call_count": 0,
+    "other_child_executor_dispatch_attempt_count": 0,
+    "other_child_executor_backend_call_count": 0,
+    "first_child_dispatch": "executor.open",
+    "first_child_backend_call": "executor.open",
+    "semantic_hit_shapes": {
+      "executor_input_or_submit": 15,
+      "dedicated_child_inference": 7,
+      "bounded_response_only": 12
+    },
+    "root_event_count": 32,
+    "root_final_marker_matched": true,
+    "scheduling_observation": {
+      "version": "executor_multi_wave_scheduling_evidence.v1",
+      "slot_capacity": 3,
+      "lifecycle_observations": [
+        {
+          "observed_at_ms": 1788823559329,
+          "live_slots": 3
+        },
+        {
+          "observed_at_ms": 1788823576209,
+          "live_slots": 3
+        },
+        {
+          "observed_at_ms": 1788823586869,
+          "live_slots": 2
+        },
+        {
+          "observed_at_ms": 1788823605040,
+          "live_slots": 1
+        },
+        {
+          "observed_at_ms": 1788823631203,
+          "live_slots": 2
+        },
+        {
+          "observed_at_ms": 1788823647131,
+          "live_slots": 3
+        },
+        {
+          "observed_at_ms": 1788823658568,
+          "live_slots": 2
+        },
+        {
+          "observed_at_ms": 1788823672967,
+          "live_slots": 2
+        },
+        {
+          "observed_at_ms": 1788823678478,
+          "live_slots": 1
+        },
+        {
+          "observed_at_ms": 1788823693661,
+          "live_slots": 1
+        },
+        {
+          "observed_at_ms": 1788823708694,
+          "live_slots": 0
+        }
+      ],
+      "refills": [
+        {
+          "thread_id": "01a07e31-f9f0-7a21-8837-ebeddc7dcbc8",
+          "started_at_ms": 1788823599582,
+          "free_slot_observed_at_ms": 1788823586869,
+          "observed_refill_gap_ms": 12713
+        },
+        {
+          "thread_id": "01a07e32-6350-7611-a5da-d4b885abc03f",
+          "started_at_ms": 1788823626562,
+          "free_slot_observed_at_ms": 1788823605040,
+          "observed_refill_gap_ms": 21522
+        },
+        {
+          "thread_id": "01a07e32-a52f-7cd1-ad98-6bc79b71fefc",
+          "started_at_ms": 1788823643423,
+          "free_slot_observed_at_ms": 1788823631203,
+          "observed_refill_gap_ms": 12220
+        }
+      ],
+      "status": "passed",
+      "codex_cli": "codex-cli 0.153.4",
+      "fixture": "isolated_six_work_unit_three_slot_refill",
+      "elapsed_ms": 211812.01720000003,
+      "successful_units_per_minute": 1.69962028009051,
+      "child_lifecycles": [
+        {
+          "thread_id": "01a07e30-eb27-7ca2-a8e1-00855dc86270",
+          "origin_type": "spawned",
+          "parent_thread_id": "01a07e30-a046-7840-b0bb-a15eeabab09d",
+          "task_name": "r7_parallel_executor_1",
+          "agent_role": "understand_book_executor",
+          "started_seq": 17,
+          "ended_seq": 219,
+          "status": "completed"
+        },
+        {
+          "thread_id": "01a07e30-fe6f-7453-b5d3-acd16611ecac",
+          "origin_type": "spawned",
+          "parent_thread_id": "01a07e30-a046-7840-b0bb-a15eeabab09d",
+          "task_name": "r7_parallel_executor_2",
+          "agent_role": "understand_book_executor",
+          "started_seq": 27,
+          "ended_seq": 254,
+          "status": "completed"
+        },
+        {
+          "thread_id": "01a07e31-1eb9-7e61-8f32-3dae32864c4b",
+          "origin_type": "spawned",
+          "parent_thread_id": "01a07e30-a046-7840-b0bb-a15eeabab09d",
+          "task_name": "r7_parallel_executor_3",
+          "agent_role": "understand_book_executor",
+          "started_seq": 39,
+          "ended_seq": 304,
+          "status": "completed"
+        },
+        {
+          "thread_id": "01a07e31-f9f0-7a21-8837-ebeddc7dcbc8",
+          "origin_type": "spawned",
+          "parent_thread_id": "01a07e30-a046-7840-b0bb-a15eeabab09d",
+          "task_name": "r7_parallel_executor_4",
+          "agent_role": "understand_book_executor",
+          "started_seq": 220,
+          "ended_seq": 478,
+          "status": "completed"
+        },
+        {
+          "thread_id": "01a07e32-6350-7611-a5da-d4b885abc03f",
+          "origin_type": "spawned",
+          "parent_thread_id": "01a07e30-a046-7840-b0bb-a15eeabab09d",
+          "task_name": "r7_parallel_executor_5",
+          "agent_role": "understand_book_executor",
+          "started_seq": 255,
+          "ended_seq": 483,
+          "status": "completed"
+        },
+        {
+          "thread_id": "01a07e32-a52f-7cd1-ad98-6bc79b71fefc",
+          "origin_type": "spawned",
+          "parent_thread_id": "01a07e30-a046-7840-b0bb-a15eeabab09d",
+          "task_name": "r7_parallel_executor_6",
+          "agent_role": "understand_book_executor",
+          "started_seq": 305,
+          "ended_seq": 485,
+          "status": "completed"
+        }
+      ],
+      "durable": {
+        "semantic_attempts": 6,
+        "committed_tasks": 6
+      },
+      "semantic_work_unit_count": 6,
+      "executor_session_count_used_for_work_unit_total": false
+    }
+  },
+  "session_protocol": "automatic_build_executor_session.v3",
+  "capability_isolation": false,
+  "caller_role_authenticated": false,
+  "forbidden_digest_field_count": 0,
+  "budget_proof_is_freshness_identity": false
+}

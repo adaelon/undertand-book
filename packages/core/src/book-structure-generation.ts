@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { bookStructureReferenceScope } from "./book-structure-evidence";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { AutomaticBuildTarget, BuildTargetRefV2 } from "./build-orchestrator";
@@ -386,7 +387,9 @@ function assertEvidence(
     failCandidateValidation(
       "evidence_out_of_scope",
       field,
-      "LIDs from the proof-bound BookStructure input",
+      field.includes("depends_on") || field.includes("dependency_hints")
+        ? "unit IDs from reference_scope.dependency_target_lids (chapter tasks defer dependencies to stitching)"
+        : "paragraph LIDs from reference_scope.evidence_by_unit for this unit; graph node IDs and unit identities are not citations",
       lids,
     );
   }
@@ -400,10 +403,15 @@ function anchoredText(
 ): AnchoredText {
   const record = recordValue(value, field);
   exactKeys(record, ["text", "evidence_lids"], [], field);
+  const evidence = stringArray(record.evidence_lids, field + ".evidence_lids");
+  if (!evidence.length) {
+    failCandidateValidation("evidence_out_of_scope", field + ".evidence_lids",
+      "at least one delivered paragraph supporting this summary or reason", evidence);
+  }
   return {
     text: candidateBoundedString(record.text, field + ".text", 65_536),
     evidence_lids: assertEvidence(
-      stringArray(record.evidence_lids, field + ".evidence_lids"),
+      evidence,
       allowed,
       field + ".evidence_lids",
     ),
@@ -450,7 +458,8 @@ function validateUnitOutput(
   value: unknown,
   task: BookStructureGenerationTaskV1,
 ): BookStructureUnitExtractionOutput {
-  const allowed = new Set(task.allowed_evidence_lids);
+  const scope = bookStructureReferenceScope(task.input);
+  const allowed = new Set(scope.evidence_by_unit[task.parent_unit_lid] ?? []);
   const root = recordValue(value, "BookStructure unit output");
   exactKeys(root, ["unit_card"], [], "/");
   const card = recordValue(root.unit_card, "unit_card");
@@ -498,7 +507,7 @@ function validateUnitOutput(
       )),
       depends_on: assertEvidence(
         stringArray(card.depends_on, "unit_card.depends_on"),
-        allowed,
+        new Set(scope.dependency_target_lids.filter(lid => lid !== task.parent_unit_lid)),
         "unit_card.depends_on",
       ),
       evidence_lids: assertEvidence(
@@ -514,7 +523,8 @@ function validateObservation(
   value: unknown,
   task: BookStructureGenerationTaskV1,
 ): BookStructureFragmentObservationV1 {
-  const allowed = new Set(task.allowed_evidence_lids);
+  const scope = bookStructureReferenceScope(task.input);
+  const allowed = new Set(scope.evidence_by_unit[task.parent_unit_lid] ?? []);
   const record = recordValue(value, "BookStructure fragment observation");
   exactKeys(record, [
     "version",
@@ -568,7 +578,7 @@ function validateObservation(
     role_hints: [...new Set(roleHints)],
     dependency_hints: assertEvidence(
       stringArray(record.dependency_hints, "dependency_hints"),
-      allowed,
+      new Set(scope.dependency_target_lids.filter(lid => lid !== task.parent_unit_lid)),
       "dependency_hints",
     ),
     evidence_lids: assertEvidence(
@@ -582,10 +592,13 @@ function validateObservation(
 function validateCandidate(
   value: unknown,
   task: BookStructureGenerationTaskV1,
+  stored = false,
 ): BookStructureCandidate {
-  const allowed = new Set(task.allowed_evidence_lids);
+  const scope = bookStructureReferenceScope(task.input);
+  const allowed = new Set(Object.values(scope.evidence_by_unit).flat());
+  const unitIds = new Set(scope.unit_lids);
   const record = recordValue(value, "BookStructure stitch candidate");
-  exactKeys(record, [], ["spine", "throughlines", "key_stops"], "/");
+  exactKeys(record, [], ["spine", "throughlines", "key_stops", ...(stored ? ["reference_scope", "context_units"] : [])], "/");
   const spineInput = record.spine ?? [];
   const throughlineInput = record.throughlines ?? [];
   const keyStopInput = record.key_stops ?? [];
@@ -603,7 +616,7 @@ function validateCandidate(
     const unit = recordValue(item, "spine[" + index + "]");
     exactKeys(unit, ["lid", "role", "summary", "key_stop_ids", "depends_on"], [], `spine[${index}]`);
     const lid = candidateBoundedString(unit.lid, `spine[${index}].lid`, 256);
-    if (!allowed.has(lid)) {
+    if (!unitIds.has(lid)) {
       failCandidateValidation(
         "evidence_out_of_scope",
         `spine[${index}].lid`,
@@ -627,11 +640,11 @@ function validateCandidate(
     return {
       lid,
       role,
-      summary: anchoredText(unit.summary, allowed, "spine.summary"),
+      summary: anchoredText(unit.summary, new Set(scope.evidence_by_unit[lid]), `spine[${index}].summary`),
       key_stop_ids: stringArray(unit.key_stop_ids, "spine.key_stop_ids"),
       depends_on: assertEvidence(
         stringArray(unit.depends_on, "spine.depends_on"),
-        allowed,
+        new Set(scope.dependency_target_lids.filter(target => target !== lid)),
         "spine.depends_on",
       ),
     };
@@ -644,15 +657,21 @@ function validateCandidate(
       [],
       `throughlines[${index}]`,
     );
+    const summary = anchoredText(throughline.summary, allowed, `throughlines[${index}].summary`);
+    const lids = assertEvidence(stringArray(throughline.lids, "throughline.lids"),
+      new Set([...allowed, ...unitIds]), `throughlines[${index}].lids`);
+    for (const lid of lids) {
+      const evidence = scope.evidence_by_unit[lid] ?? [lid];
+      if (!evidence.some(anchor => summary.evidence_lids.includes(anchor))) {
+        failCandidateValidation("evidence_out_of_scope", `throughlines[${index}].summary.evidence_lids`,
+          "summary evidence covering every declared throughline unit or paragraph", summary.evidence_lids);
+      }
+    }
     return {
       id: candidateBoundedString(throughline.id, `throughlines[${index}].id`, 256),
       name: candidateBoundedString(throughline.name, `throughlines[${index}].name`, 1_024),
-      summary: anchoredText(throughline.summary, allowed, "throughline.summary"),
-      lids: assertEvidence(
-        stringArray(throughline.lids, "throughline.lids"),
-        allowed,
-        "throughline.lids",
-      ),
+      summary,
+      lids,
       key_stop_ids: stringArray(throughline.key_stop_ids, "throughline.key_stop_ids"),
     };
   });
@@ -671,7 +690,27 @@ function validateCandidate(
       value,
     );
   }
-  return { spine, throughlines, key_stops: keyStops };
+  const spineIds = new Set(spine.map(unit => unit.lid));
+  const neededContext = new Set(spine.flatMap(unit => unit.depends_on).filter(lid => !spineIds.has(lid)));
+  const inputUnits = "unit_cards" in task.input
+    ? [...task.input.unit_cards, ...(task.input.context_unit_cards ?? [])].map(card => ({
+      lid: card.unit_lid, role: card.role, summary: card.summary, key_stop_ids: [] as string[], depends_on: [] as string[],
+    }))
+    : "children" in task.input && !("parent_unit_lid" in task.input)
+      ? task.input.children.flatMap(child => [...(child.payload.spine ?? []), ...(child.payload.context_units ?? [])]) : [];
+  const contextUnits = inputUnits.filter((unit, index, all) => neededContext.has(unit.lid)
+    && all.findIndex(other => other.lid === unit.lid) === index);
+  const cited = new Set([
+    ...spine.flatMap(unit => unit.summary.evidence_lids),
+    ...throughlines.flatMap(line => line.summary.evidence_lids),
+    ...keyStops.flatMap(stop => [stop.lid, ...stop.reason.evidence_lids]),
+    ...contextUnits.flatMap(unit => unit.summary.evidence_lids),
+  ]);
+  return { spine, throughlines, key_stops: keyStops, context_units: contextUnits, reference_scope: {
+    ...scope,
+    evidence_by_unit: Object.fromEntries(Object.entries(scope.evidence_by_unit)
+      .map(([unit, lids]) => [unit, lids.filter(lid => cited.has(lid))])),
+  } };
 }
 
 function payloadForCandidate(
@@ -714,7 +753,7 @@ function validateStoredPayload(
     };
   }
   if (task.output_role === "stitch_candidate") {
-    return validateCandidate(payload, task);
+    return validateCandidate(payload, task, true);
   }
   const artifact = recordValue(payload, "BookStructure stitch artifact");
   exactKeys(artifact, ["content_hash", "output"]);
@@ -723,7 +762,7 @@ function validateStoredPayload(
   }
   return {
     content_hash: task.parent_content_hash,
-    output: validateCandidate(artifact.output, task),
+    output: validateCandidate(artifact.output, task, true),
   };
 }
 

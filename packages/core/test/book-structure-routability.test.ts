@@ -85,12 +85,14 @@ function makeSource(leafCount: number): { source: BookStructureUnitSource; lid_n
 
 function makeExactRenderedSizeFixture(): { source: BookStructureUnitSource; lid_nodes: LidNode[] } {
   const fixture = makeSource(320);
+  // Keep the delivered evidence set fixed while adjusting body size.
+  for (const excerpt of fixture.source.excerpts) excerpt.text = "x";
   const emptyBytes = Buffer.byteLength(renderBookStructureModelInput(fixture.source), "utf8");
   let remaining = TARGET_BYTES - emptyBytes;
   if (remaining < 0) throw new Error("BookStructure fixture metadata already exceeds target bytes");
   for (const excerpt of fixture.source.excerpts) {
-    const length = Math.min(1_000, remaining);
-    excerpt.text = "x".repeat(length);
+    const length = Math.min(999, remaining);
+    excerpt.text += "x".repeat(length);
     remaining -= length;
   }
   if (remaining !== 0) throw new Error(`unable to construct ${TARGET_BYTES}-byte fixture`);

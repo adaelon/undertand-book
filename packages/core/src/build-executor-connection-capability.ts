@@ -106,6 +106,13 @@ export interface BuildExecutorStdioConnectionCapabilityV3 {
   observe_response: (call: BuildExecutorToolCallV1, response: unknown) => void;
 }
 
+export class BuildExecutorConnectionOpenError extends Error {
+  constructor(readonly diagnostic_code: "connection_terminal" | "handoff_ref_mismatch") {
+    super(diagnostic_code);
+    this.name = "BuildExecutorConnectionOpenError";
+  }
+}
+
 export interface BuildExecutorAgentConfigValidationV2 {
   status: "compatible";
   bootstrap_digest: string;
@@ -463,11 +470,12 @@ export function createBuildExecutorStdioConnectionCapability(input: {
 
     if (call.tool_name === "executor.open") {
       const requestedHandoffRef = stringField(call.request, "opaque_handoff_ref");
-      if (!requestedHandoffRef || !OPAQUE_HANDOFF_REF.test(requestedHandoffRef)
-        || (phase !== "open" && phase !== "wait")) {
-        return false;
+      if (!requestedHandoffRef || !OPAQUE_HANDOFF_REF.test(requestedHandoffRef)) return false;
+      if (phase === "terminal") throw new BuildExecutorConnectionOpenError("connection_terminal");
+      if (handoffRef && requestedHandoffRef !== handoffRef) {
+        throw new BuildExecutorConnectionOpenError("handoff_ref_mismatch");
       }
-      if (handoffRef && requestedHandoffRef !== handoffRef) return false;
+      if (phase !== "open" && phase !== "wait") return false;
       handoffRef ??= requestedHandoffRef;
       return true;
     }

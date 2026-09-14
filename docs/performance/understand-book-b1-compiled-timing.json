@@ -1,0 +1,321 @@
+{
+  "version": "understand_book_t7_executor_release_evidence.v3",
+  "status": "passed",
+  "executor_role": "understand_book_executor",
+  "shared_executor_mcp": {
+    "registration_scope": "root_shared",
+    "bootstrap_version": "automatic_build_executor_bootstrap.v3",
+    "session_protocol": "automatic_build_executor_session.v3",
+    "executor_tool_count": 4,
+    "exact_four": true,
+    "capability_isolation": false,
+    "caller_role_authenticated": false,
+    "compiled_sidecar_executed": true,
+    "installed_launcher_executed": false
+  },
+  "transport_profile": {
+    "version": "executor_transport_profile.v2",
+    "carrier": "codex_executor_mcp",
+    "session_protocol": "automatic_build_executor_session.v3",
+    "max_tool_result_tokens": 2048,
+    "max_tool_result_bytes": 8192,
+    "result_envelope_reserve_tokens": 256,
+    "max_input_chunks": 64,
+    "max_candidate_request_tokens": 2048,
+    "max_candidate_request_bytes": 32768
+  },
+  "tool_inventory": [
+    "executor.open",
+    "executor.input.next",
+    "executor.generation.start",
+    "executor.submit_candidate"
+  ],
+  "forbidden_digest_field_count": 0,
+  "synthetic_input": {
+    "compiled_chunk_count": 4,
+    "compiled_batch_count": 1,
+    "compiled_delivered_bytes": 24308,
+    "max_tool_result_bytes": 26486,
+    "batch_zero_request_replays": 4
+  },
+  "attempt_contract": {
+    "before_generation_start": 0,
+    "accepted_generation_count": 1,
+    "final_semantic_attempt_count": 1,
+    "untouched_cross_handoff_attempt_count": 0
+  },
+  "negative_gates": {
+    "bootstrap_v2": "protocol_incompatible",
+    "unknown_request_field": "protocol_incompatible",
+    "cross_handoff_connection": "protocol_incompatible",
+    "premature_generation_start": "protocol_incompatible",
+    "ack_through_ordinal_mismatch": "protocol_incompatible"
+  },
+  "trace_allowlist": {
+    "semantic_chunk_hits": 6,
+    "candidate_request_hits": 6
+  },
+  "mcp_server_timing": {
+    "version": "executor_mcp_server_timing.v2",
+    "sample_count": 15,
+    "first_connection_call_ordinal": 1,
+    "last_connection_call_ordinal": 15,
+    "operations": [
+      "executor.generation.start",
+      "executor.input.next",
+      "executor.open",
+      "executor.submit_candidate"
+    ],
+    "bounded_error_count": 4
+  },
+  "mcp_outer_server_timing": {
+    "version": "executor_mcp_timing_join.v2",
+    "samples": [
+      {
+        "thread_id": "compiled-connection-1",
+        "connection_call_ordinal": 1,
+        "operation": "executor.open",
+        "server_elapsed_ms": 0.40219999999999345,
+        "outer_tool_call_elapsed_ms": 0.8093999999996413,
+        "residual_ms": 0.40719999999964784,
+        "response_bytes": 265,
+        "response_action_kind": null,
+        "outcome": "bounded_error",
+        "server_phase_elapsed_ms": null
+      },
+      {
+        "thread_id": "compiled-connection-1",
+        "connection_call_ordinal": 2,
+        "operation": "executor.open",
+        "server_elapsed_ms": 519.675,
+        "outer_tool_call_elapsed_ms": 520.1884,
+        "residual_ms": 0.5134000000000469,
+        "response_bytes": 1466,
+        "response_action_kind": "DELIVER_INPUT",
+        "outcome": "ok",
+        "server_phase_elapsed_ms": null
+      },
+      {
+        "thread_id": "compiled-connection-1",
+        "connection_call_ordinal": 3,
+        "operation": "executor.open",
+        "server_elapsed_ms": 0.08399999999994634,
+        "outer_tool_call_elapsed_ms": 1.5421999999998661,
+        "residual_ms": 1.4581999999999198,
+        "response_bytes": 265,
+        "response_action_kind": null,
+        "outcome": "bounded_error",
+        "server_phase_elapsed_ms": null
+      },
+      {
+        "thread_id": "compiled-connection-1",
+        "connection_call_ordinal": 4,
+        "operation": "executor.generation.start",
+        "server_elapsed_ms": 0.04739999999992506,
+        "outer_tool_call_elapsed_ms": 0.39400000000023283,
+        "residual_ms": 0.3466000000003078,
+        "response_bytes": 277,
+        "response_action_kind": null,
+        "outcome": "bounded_error",
+        "server_phase_elapsed_ms": null
+      },
+      {
+        "thread_id": "compiled-connection-1",
+        "connection_call_ordinal": 5,
+        "operation": "executor.input.next",
+        "server_elapsed_ms": 104.78719999999998,
+        "outer_tool_call_elapsed_ms": 105.46939999999995,
+        "residual_ms": 0.6821999999999662,
+        "response_bytes": 26982,
+        "response_action_kind": "INPUT_BATCH",
+        "outcome": "ok",
+        "server_phase_elapsed_ms": null
+      },
+      {
+        "thread_id": "compiled-connection-1",
+        "connection_call_ordinal": 6,
+        "operation": "executor.input.next",
+        "server_elapsed_ms": 104.93290000000002,
+        "outer_tool_call_elapsed_ms": 107.12040000000025,
+        "residual_ms": 2.1875000000002274,
+        "response_bytes": 26982,
+        "response_action_kind": "INPUT_BATCH",
+        "outcome": "ok",
+        "server_phase_elapsed_ms": null
+      },
+      {
+        "thread_id": "compiled-connection-1",
+        "connection_call_ordinal": 7,
+        "operation": "executor.input.next",
+        "server_elapsed_ms": 101.62570000000005,
+        "outer_tool_call_elapsed_ms": 103.3751999999995,
+        "residual_ms": 1.7494999999994434,
+        "response_bytes": 26982,
+        "response_action_kind": "INPUT_BATCH",
+        "outcome": "ok",
+        "server_phase_elapsed_ms": null
+      },
+      {
+        "thread_id": "compiled-connection-1",
+        "connection_call_ordinal": 8,
+        "operation": "executor.input.next",
+        "server_elapsed_ms": 104.09010000000012,
+        "outer_tool_call_elapsed_ms": 106.1238999999996,
+        "residual_ms": 2.0337999999994736,
+        "response_bytes": 26983,
+        "response_action_kind": "INPUT_BATCH",
+        "outcome": "ok",
+        "server_phase_elapsed_ms": null
+      },
+      {
+        "thread_id": "compiled-connection-1",
+        "connection_call_ordinal": 9,
+        "operation": "executor.input.next",
+        "server_elapsed_ms": 104.05120000000011,
+        "outer_tool_call_elapsed_ms": 104.68040000000019,
+        "residual_ms": 0.6292000000000826,
+        "response_bytes": 26983,
+        "response_action_kind": "INPUT_BATCH",
+        "outcome": "ok",
+        "server_phase_elapsed_ms": null
+      },
+      {
+        "thread_id": "compiled-connection-1",
+        "connection_call_ordinal": 10,
+        "operation": "executor.input.next",
+        "server_elapsed_ms": 0.09019999999986794,
+        "outer_tool_call_elapsed_ms": 1.5119000000004235,
+        "residual_ms": 1.4217000000005555,
+        "response_bytes": 276,
+        "response_action_kind": null,
+        "outcome": "bounded_error",
+        "server_phase_elapsed_ms": null
+      },
+      {
+        "thread_id": "compiled-connection-1",
+        "connection_call_ordinal": 11,
+        "operation": "executor.input.next",
+        "server_elapsed_ms": 103.72159999999985,
+        "outer_tool_call_elapsed_ms": 104.25579999999991,
+        "residual_ms": 0.5342000000000553,
+        "response_bytes": 26983,
+        "response_action_kind": "INPUT_BATCH",
+        "outcome": "ok",
+        "server_phase_elapsed_ms": null
+      },
+      {
+        "thread_id": "compiled-connection-1",
+        "connection_call_ordinal": 12,
+        "operation": "executor.generation.start",
+        "server_elapsed_ms": 250.6968999999999,
+        "outer_tool_call_elapsed_ms": 252.4333999999999,
+        "residual_ms": 1.7364999999999782,
+        "response_bytes": 959,
+        "response_action_kind": "GENERATE",
+        "outcome": "ok",
+        "server_phase_elapsed_ms": {
+          "current-state/claim": 228.38519999999994,
+          "input-render-or-reuse": 13.577999999999975,
+          "persist/response": 8.733699999999999
+        }
+      },
+      {
+        "thread_id": "compiled-connection-1",
+        "connection_call_ordinal": 13,
+        "operation": "executor.generation.start",
+        "server_elapsed_ms": 239.8351,
+        "outer_tool_call_elapsed_ms": 241.99349999999959,
+        "residual_ms": 2.158399999999574,
+        "response_bytes": 959,
+        "response_action_kind": "GENERATE",
+        "outcome": "ok",
+        "server_phase_elapsed_ms": {
+          "current-state/claim": 239.7487000000001,
+          "input-render-or-reuse": 0.0019999999999527063,
+          "persist/response": 0.08439999999995962
+        }
+      },
+      {
+        "thread_id": "compiled-connection-1",
+        "connection_call_ordinal": 14,
+        "operation": "executor.submit_candidate",
+        "server_elapsed_ms": 274.8756999999998,
+        "outer_tool_call_elapsed_ms": 277.45340000000033,
+        "residual_ms": 2.5777000000005046,
+        "response_bytes": 202,
+        "response_action_kind": "DONE",
+        "outcome": "ok",
+        "server_phase_elapsed_ms": {
+          "candidate-gate": 217.97079999999983,
+          "writer/commit": 56.76459999999997,
+          "next-work-prepare": 0.14030000000002474
+        }
+      },
+      {
+        "thread_id": "compiled-connection-1",
+        "connection_call_ordinal": 15,
+        "operation": "executor.submit_candidate",
+        "server_elapsed_ms": 229.29179999999997,
+        "outer_tool_call_elapsed_ms": 231.46680000000015,
+        "residual_ms": 2.175000000000182,
+        "response_bytes": 202,
+        "response_action_kind": "DONE",
+        "outcome": "ok",
+        "server_phase_elapsed_ms": {
+          "candidate-gate": 205.26980000000003,
+          "writer/commit": 23.94329999999991,
+          "next-work-prepare": 0.0787000000000262
+        }
+      }
+    ],
+    "totals": {
+      "executor.open": {
+        "call_count": 3,
+        "server_total_ms": 520.1611999999999,
+        "outer_total_ms": 522.5399999999995,
+        "residual_total_ms": 2.3787999999996146,
+        "response_total_bytes": 1996
+      },
+      "executor.input.next": {
+        "call_count": 7,
+        "server_total_ms": 623.2989,
+        "outer_total_ms": 632.5369999999998,
+        "residual_total_ms": 9.238099999999804,
+        "response_total_bytes": 162171
+      },
+      "executor.generation.start": {
+        "call_count": 3,
+        "server_total_ms": 490.57939999999985,
+        "outer_total_ms": 494.8208999999997,
+        "residual_total_ms": 4.24149999999986,
+        "response_total_bytes": 2195
+      },
+      "executor.submit_candidate": {
+        "call_count": 2,
+        "server_total_ms": 504.1674999999998,
+        "outer_total_ms": 508.9202000000005,
+        "residual_total_ms": 4.7527000000006865,
+        "response_total_bytes": 404
+      }
+    }
+  },
+  "rg8_recovery_canary": {
+    "committed_reused_units": 2,
+    "recovered_units": 1,
+    "stale_epoch": 1,
+    "recovered_epoch": 2,
+    "semantic_attempt": 1,
+    "recovery_ref_replays": 2,
+    "trace_event_count": 30
+  },
+  "rg8_oversize_canary": {
+    "diagnostic_code": "candidate_request_too_large",
+    "phase": "generation",
+    "semantic_attempt": 1,
+    "lease_epoch": 1,
+    "failure_count": 1,
+    "writer_started": false,
+    "candidate_file_count": 0
+  },
+  "final_status": "committed"
+}

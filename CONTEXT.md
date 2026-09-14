@@ -9,6 +9,12 @@
 ## Agent 回答草稿 (Agent Answer Draft)
 当前运行中已经通过公开展示规则、仍可能随后续生成或交付修复而变化的回答内容。草稿尚未成为持久的完成回答，其中的来源仍须来自本轮已验证且已绑定的证据。状态:EXISTING（见 [ADR-0127](docs/adr/0127-resident-agent-streaming-and-runtime-activity.md)）。
 
+## 当前待办与历史派发计划
+当前待办是经过当前输入、策略与成果有效性判定后仍需执行的工作。历史派发计划保存批次组织和顺序，不代表其中每一项仍未完成。状态:EXISTING（见 [ADR-0126](docs/adr/0126-dispatch-refill-uses-current-pending-work.md)）。
+
+## 候选纠错反馈 (candidate retry feedback)
+同一工作单元、输入和策略范围内，最近一次 writer 字段格式失败的有界诊断。由持久失败记录生成，在专用执行器的下一次 `GENERATE.retry_feedback` 交付字段位置与期望格式；不改变产物 schema、语义输入或策略身份。自动三次尝试耗尽后，用户每次确认只追加一次纠错机会。状态:EXISTING(见 [ADR-0125](docs/adr/0125-candidate-validation-feedback-and-bounded-retry.md))。
+
 > 纯术语表。只定义"词是什么意思",不含实现细节、不含决策(决策见 `docs/adr/`)。
 > 凡此处定义与代码/对话冲突,以此处为准,冲突即点破。
 
@@ -639,17 +645,28 @@ Codex plugin 面向同一 reader-private `BuildIntent/BuildPlan` 权威提供的
 ## 租约世代 (lease epoch)
 同一语义尝试因 owner、进程、heartbeat 或调度中断而重新领取时递增的执行所有权世代。每个世代有独立 token 与阶段时间线;过期世代永久不能 submit,但不消耗语义尝试上限。状态:NEW(见 [ADR-0092](docs/adr/0092-phase-aware-automatic-build-leases-and-executor-dispatch-bundles.md))。
 
+## 恢复代际身份 (recovery generation identity)
+同一 Executor 调度运行中当前可启动一次的控制面恢复身份,由 `dispatch_id + dispatch_run_id + current_work_unit_id + semantic_attempt + lease_epoch` 确定。相同恢复代际必须返回同一 opaque handoff ref 并至多启动一个专用 Executor;当前工作单元、语义尝试或租约世代变化时必须形成新 ref。它不进入 task binding、attempt scope、artifact path 或语义复用身份,不得使仍 fresh 的 accepted artifact 失效。状态:NEW(见 [ADR-0117](docs/adr/0117-recovery-generation-handoff-and-semantic-result-reuse.md))。
+
+零调用启动失败后，恢复身份还区分启动重试代际（bootstrap epoch）。它记录同一工作单元、语义尝试与租约世代内已结束的启动尝试，使重试获得新 handoff，同时保持 dispatch slot 和语义复用身份不变。重复上报同一次失败不推进代际。见 [启动恢复修复](docs/修复-executor-bootstrap-20260907.md)。
+
+## Executor 调度槽身份 (executor dispatch slot identity)
+Root 在同一 `dispatch_id + dispatch_run_id` 内限制 live child 数量的不透明控制键。它跨 work unit、semantic attempt 与 lease epoch 保持稳定,只用于保证一个调度运行同时最多有一个专用 Executor;Root 不把它传给 child,它也不进入 handoff 恢复身份、task binding、attempt scope 或 artifact freshness。状态:NEW(见 [ADR-0117](docs/adr/0117-recovery-generation-handoff-and-semantic-result-reuse.md))。
+
 ## 提交修订 (submit revision)
 同一活动租约内对同一语义候选执行确定性编码修复或幂等重传的序号。它不得改变候选语义、input hash 或 policy identity;一旦需要重新推理,必须进入新的语义尝试。状态:NEW(见 [ADR-0092](docs/adr/0092-phase-aware-automatic-build-leases-and-executor-dispatch-bundles.md))。
 
 ## Executor 调度执行包 (executor dispatch bundle)
-Build Engine Sidecar 把多个既有、同 target/stage/policy/kind 的 work unit 临时排给一个专用 executor session 的调度信封。Executor 逐个激活任务租约,每个 work unit 仍保留独立 input、candidate mailbox、receipt、失败恢复和 artifact identity;执行包不是新的语义 work unit,也不把多个输入合成一次模型判断。状态:NEW(见 [ADR-0092](docs/adr/0092-phase-aware-automatic-build-leases-and-executor-dispatch-bundles.md))。
+Build Engine 把多个既有、同 target/stage/policy/kind 的 work unit 临时编组的调度信封。每个 work unit 保留独立任务租约、input、candidate mailbox、receipt、失败恢复和 artifact identity；执行包不是新的语义 work unit，也不等同于某个专用 child 或连接的生命周期，不把多个输入合成一次模型判断。见 [ADR-0092](docs/adr/0092-phase-aware-automatic-build-leases-and-executor-dispatch-bundles.md)、[ADR-0117](docs/adr/0117-recovery-generation-handoff-and-semantic-result-reuse.md)、[ADR-0121](docs/adr/0121-bounded-build-state-reads-and-executor-lifecycle.md)。
 
 ## Executor 调度运行 (executor dispatch run)
 同一确定性 `dispatch_id` 的一次有界执行周期,由独立 `dispatch_run_id` 标识。Planner identity、work unit 和 artifact freshness 不随运行重试改变;semantic failure、executor interruption 或恢复重排后可为相同 manifest 创建新的 run-scoped mailbox,旧 run 的 progress/receipt 保持 append-only 且不得吞掉新 run。状态:NEW(见 [ADR-0092](docs/adr/0092-phase-aware-automatic-build-leases-and-executor-dispatch-bundles.md))。
 
 ## Opaque handoff ref
 由确定性预构建代码签发、供 root Codex 原样转交给专用 executor 的有界 ASCII locator。它不等同于文件路径,不暴露 workspace、dispatch、attempt、hash 或 mailbox identity；其真实绑定只由代码私下持久化并在消费点重验。状态:NEW(见 [ADR-0101](docs/adr/0101-deterministic-prebuild-protocol-ownership-and-codex-semantic-boundary.md))。
+
+## 候选传输合同 (candidate transport contract)
+生成侧在产生候选前可见的基础设施准入边界,分别公开候选值与完整序列化提交请求的 token/UTF-8 byte 上限。它只决定一次候选能否进入 Executor transport；合同版本和预算不属于 policy generation、semantic contract 或 artifact freshness。状态:BOUNDARY_CHANGE(见 [ADR-0117](docs/adr/0117-recovery-generation-handoff-and-semantic-result-reuse.md))。
 
 ## Executor open
 专用 executor 用 opaque handoff ref 开启语义执行会话的原子消费边界。它在返回任何语义输入或取得任务执行权前,由代码完成 ref、路径、handoff、prompt、manifest、dispatch identity 与当前终态的重验；无效或漂移输入必须失败关闭且不得创建语义尝试。状态:NEW(见 [ADR-0101](docs/adr/0101-deterministic-prebuild-protocol-ownership-and-codex-semantic-boundary.md))。
@@ -730,3 +747,6 @@ Runtime 对当前 Resident 用户回合所处任务阶段的瞬时权威分类�
 
 ## 最终收敛采样 (finalization sampling)
 Resident 模型—工具循环用尽最后一个合法工具批次后，由 Runtime 保留的一次 tools-disabled 终答机会。它只能利用本轮已取得的证据形成最终回答；任何工具调用输出都是协议错误，不得重新进入工具循环。状态:NEW(见 [ADR-0113](docs/adr/0113-open-natural-language-capability-routing-and-runtime-evidence-topology.md))。
+
+## BookStructure 构建引用范围
+由实际交付的章节摘录、带出处的卡片或子级结果派生的构建期引用范围，区分结构单元身份、正文证据和依赖目标。章节任务生成本章内容，汇总任务在两端资料可见时形成跨章依赖与主题线；它不等同于 Resident 回合证据账本。状态：EXISTING（ADR-0124，2026-09-12）。

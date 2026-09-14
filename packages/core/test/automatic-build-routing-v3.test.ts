@@ -1,3 +1,4 @@
+import { prepareAutomaticBuildSnapshot } from "../src/build-orchestrator";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
@@ -432,6 +433,10 @@ describe("BR8 production v3 routing release", () => {
       "2026-08-03T23:55:00.000Z",
     );
 
+    const unprepared = automaticBuildPlan(fixture.source_file, fixture.root);
+    expect(unprepared.snapshot.stages[0].preparation_required).toBe(true);
+    expect(readFileSync(legacyPath, "utf8")).toBe(legacyBytes);
+    expect(prepareAutomaticBuildSnapshot(fixture.target, "pass1").status).toBe("ready");
     const adopted = automaticBuildPlan(fixture.source_file, fixture.root, {
       requested_workers: 1,
       available_agent_slots: 1,

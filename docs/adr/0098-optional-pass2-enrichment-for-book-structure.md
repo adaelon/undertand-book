@@ -15,3 +15,5 @@ Revises: ADR-0093 §5 standard_deep fixed closure.
 **命门**:未启用 Pass2 时 BookStructure 使用空长程边输入;启用时继续消费 accepted/pending 审计边;后生成 audit 必须改变 unit/stitch 输入哈希,使旧结构失效并重建。
 **何时回头**:BookStructure 的确定性质量闸证明长程边是不可缺的完整性条件时。
 **展开**:[ADR-0093 §4](0093-intent-confirmed-progressive-prebuild-and-reader-private-goal-artifacts.md#4-buildplan-与依赖闭包)
+
+2026-09-12 更新（ADR-0124）：跨章节审计边由 stitch 携带两端资料消费；只有完整属于本章的审计边进入 unit。后到跨章 audit 改变 stitch 输入；本章内 audit 同时改变对应 unit 输入。Pass2 的可选性不变。

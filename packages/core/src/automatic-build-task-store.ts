@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 
 import path from "node:path";
 import {
   createAutomaticBuildRetryBoundary,
+  allowsAutomaticBuildSameScopeRetry,
   createAutomaticBuildRetryRecoveryReceipt,
   validateAutomaticBuildRetryBoundary,
   validateAutomaticBuildRetryRecoveryReceipt,
@@ -17,6 +18,7 @@ import type {
 } from "./build-orchestrator";
 import {
   isAutomaticBuildFailureDiagnosticV3,
+  isAutomaticBuildCorrectableCandidateFailure,
   legacyAutomaticBuildFailureDiagnostic,
   validateAutomaticBuildFailureDiagnostic,
   type AutomaticBuildFailureDiagnosticV2,
@@ -670,8 +672,8 @@ function assertRetryRecoveryMatchesState(
   if (!recovery || !boundary) {
     throw new Error("automatic build retry recovery is missing its scoped terminal failure");
   }
-  if (boundary.required_recovery !== "authorize_transient_retry") {
-    throw new Error("automatic build retry recovery targets a non-transient terminal failure");
+  if (!allowsAutomaticBuildSameScopeRetry(boundary)) {
+    throw new Error("automatic build retry recovery targets a terminal failure requiring external recovery");
   }
   if (recovery.attempt_scope_digest !== boundary.attempt_scope_digest
     || recovery.exhausted_semantic_attempt !== boundary.exhausted_semantic_attempt
@@ -690,6 +692,34 @@ export function readAutomaticBuildExecutionIdentity(
 ): AutomaticBuildExecutionIdentity | undefined {
   const states = attemptStates(target, stage, workUnitId);
   return executionIdentityFromStates(states, workUnitId, attempt);
+}
+
+export interface AutomaticBuildCandidateRetryFeedback {
+  code: string;
+  json_pointer: string;
+  expected: string;
+}
+
+export function readAutomaticBuildCandidateRetryFeedback(
+  target: AutomaticBuildTarget,
+  stage: AutomaticBuildStage,
+  workUnitId: string,
+  currentAttempt: number,
+): AutomaticBuildCandidateRetryFeedback | undefined {
+  const states = attemptStates(target, stage, workUnitId);
+  const current = states.find(state => state.attempt === currentAttempt);
+  if (!current?.attempt_scope_digest) return undefined;
+  for (let index = states.length - 1; index >= 0; index -= 1) {
+    const previous = states[index];
+    if (previous.attempt >= currentAttempt) continue;
+    if (previous.attempt_scope_digest !== current.attempt_scope_digest) return undefined;
+    if (!previous.result) continue;
+    if (previous.result.outcome !== "failure") return undefined;
+    const diagnostic = failureDiagnosticFromEvent(previous.result);
+    if (!diagnostic || !isAutomaticBuildCorrectableCandidateFailure(diagnostic)) return undefined;
+    return { code: diagnostic.code, json_pointer: diagnostic.json_pointer!, expected: diagnostic.expected! };
+  }
+  return undefined;
 }
 
 function executionIdentityFromStates(

@@ -16,6 +16,7 @@ import type { Pass2WorkPacket } from "./pass2-build";
 import type { ProfileSidecarSemanticPacketV2 } from "./profile-sidecar-router";
 import type { ModelInputSliceRenderContextV1 } from "./model-input-slice";
 import { estimateTokens } from "./window";
+import { bookStructureReferenceScope } from "./book-structure-evidence";
 
 export const MODEL_INPUT_RENDER_CONTRACT_VERSION = "model_input_render.v1" as const;
 
@@ -295,31 +296,31 @@ export function renderPass2ModelInput(input: Pass2WorkPacket): string {
 export function renderBookStructureModelInput(
   input: BookStructureUnitSource | BookStructureStitchPacket,
 ): string {
-  return prettyJson(input);
+  return prettyJson({ ...input, reference_scope: bookStructureReferenceScope(input) });
 }
 
 export function renderBookStructureFragmentModelInput(
   input: BookStructureFragmentInputV1,
 ): string {
-  return prettyJson(input);
+  return prettyJson({ ...input, reference_scope: bookStructureReferenceScope(input) });
 }
 
 export function renderBookStructureReductionModelInput(
   input: BookStructureReductionInputV1,
 ): string {
-  return prettyJson(input);
+  return prettyJson({ ...input, reference_scope: bookStructureReferenceScope(input) });
 }
 
 export function renderBookStructureStitchFragmentModelInput(
   input: BookStructureStitchFragmentInputV1,
 ): string {
-  return prettyJson(input);
+  return prettyJson({ ...input, reference_scope: bookStructureReferenceScope(input) });
 }
 
 export function renderBookStructureStitchReductionModelInput(
   input: BookStructureStitchReductionInputV1,
 ): string {
-  return prettyJson(input);
+  return prettyJson({ ...input, reference_scope: bookStructureReferenceScope(input) });
 }
 
 export function renderModelInput(request: ModelInputRenderRequest): string {

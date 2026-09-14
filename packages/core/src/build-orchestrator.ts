@@ -131,7 +131,9 @@ import {
   AutomaticBuildPolicyGenerationConflictError,
   createAutomaticBuildStagePolicySet,
   materializeAdoptedAutomaticBuildGenerationArtifact,
-  recordAutomaticBuildPriorGenerationAdoption,
+  prepareAutomaticBuildPolicyMigrations,
+  inspectAutomaticBuildStagePolicySet,
+  readAutomaticBuildCurrentMigration,
   recordAutomaticBuildPolicyMigration,
   resolveAutomaticBuildStagePolicyMember,
   type AutomaticBuildPolicyMigrationCurrent,
@@ -239,6 +241,7 @@ export interface AutomaticBuildStageState {
   work_units?: WorkUnitDescriptor[];
   pending_work_units?: WorkUnitDescriptor[];
   policy_set?: AutomaticBuildStagePolicySetV3;
+  preparation_required?: boolean;
   quality_routing?: AutomaticBuildStageQualityRoutingEvidenceV2;
   generation_tasks?: Record<string, AutomaticBuildGenerationTaskV1>;
 }
@@ -443,6 +446,20 @@ function productionMigrationRecoveryActions(
   return ["migrate_policy"];
 }
 
+function productionMigrationContext(target: AutomaticBuildTarget, policySet: AutomaticBuildStagePolicySetV3, prepare = false) {
+  try {
+    if (prepare) return { required: false, writer: prepareAutomaticBuildPolicyMigrations(target, policySet) };
+    return { required: !inspectAutomaticBuildStagePolicySet(target, policySet), writer: undefined };
+  } catch (error) {
+    if (!(error instanceof AutomaticBuildPolicyGenerationConflictError)) throw error;
+    throw new AutomaticBuildSnapshotRecoverySignal(createAutomaticBuildRecoveryEnvelope({
+      phase: "migration", code: "policy_generation_conflict", stage: policySet.stage,
+      target_ref: target.target_ref, router_version: policySet.members[0].semantic_contract.router_version,
+      affected_work_units: [], retryable: false, recovery_actions: ["migrate_policy"],
+    }));
+  }
+}
+
 function applyAutomaticBuildProductionMigration(input: {
   target: AutomaticBuildTarget;
   stage: SemanticBuildStage;
@@ -450,6 +467,7 @@ function applyAutomaticBuildProductionMigration(input: {
   policy_set: AutomaticBuildStagePolicySetV3;
   current: AutomaticBuildPolicyMigrationCurrent;
   previous?: AutomaticBuildPolicyMigrationPreviousV2;
+  migrations: ReturnType<typeof productionMigrationContext>;
   project_adopted_payload?: (payload: unknown) => unknown;
 }): AutomaticBuildProductionMigrationDecision {
   const current = input.current;
@@ -471,8 +489,16 @@ function applyAutomaticBuildProductionMigration(input: {
   };
   let migration: ReturnType<typeof recordAutomaticBuildPolicyMigration>;
   try {
+    const existing = readAutomaticBuildCurrentMigration(input);
+    const currentArtifact = descriptor && automaticBuildGenerationArtifactPath(input.target, input.stage,
+      resolveAutomaticBuildStagePolicyMember(input.policy_set, descriptor.kind, descriptor.policy_fingerprint).policy_generation_id,
+      descriptor.work_unit_id);
+    if (currentArtifact && existsSync(currentArtifact)) return "rebuild";
+    if (existing && existing.decision !== "adopt_exact") return existing.decision;
+    input.migrations.required = true;
+    if (!input.migrations.writer) return current.route === "deterministic_skip" ? "deterministic_skip" : "rebuild";
     const priorGeneration = current.route === "model" && !input.previous
-      ? recordAutomaticBuildPriorGenerationAdoption({
+      ? input.migrations.writer.adopt({
           target: input.target,
           stage: input.stage,
           policy_set: input.policy_set,
@@ -480,7 +506,7 @@ function applyAutomaticBuildProductionMigration(input: {
           now: AUTOMATIC_BUILD_ROUTING_RELEASE.activated_at,
         })
       : undefined;
-    migration = priorGeneration ?? recordAutomaticBuildPolicyMigration({
+    migration = priorGeneration ?? input.migrations.writer.record({
       target: input.target,
       stage: input.stage,
       from_policy_generation_id: input.from_policy_generation_id,
@@ -1003,6 +1029,7 @@ function routePass1ProductionStage(input: {
   loaded: LoadedAutomaticBook;
   profile: ReturnType<typeof resolveContentProfile>;
   quality_profile: ExtractionQualityProfile;
+  prepare?: boolean;
 }): AutomaticBuildStageState {
   assertNoActiveLegacyGenerationLease(input.target, "pass1");
   const sourceFingerprint = canonicalSourceFingerprint(input.loaded.source);
@@ -1015,6 +1042,7 @@ function routePass1ProductionStage(input: {
     members: pass1ModelSlicePolicyMembers(input.profile, input.quality_profile),
     frozen_at: AUTOMATIC_BUILD_ROUTING_RELEASE.activated_at,
   });
+  const migrations = productionMigrationContext(input.target, policySet, input.prepare);
   const previousPolicyLock = readAutomaticBuildStagePolicyLock(input.target, "pass1");
   const previousPolicy = previousPolicyLock
     ? extractionPolicyFromSemanticContract(input.target.target_ref.profile_id, previousPolicyLock.semantic_contract)
@@ -1070,6 +1098,7 @@ function routePass1ProductionStage(input: {
     const previousDescriptor = previousDescriptors.get(id);
     const previousArtifactPath = automaticBuildLegacyStageArtifactPath(input.target, "pass1", id);
     const migration = applyAutomaticBuildProductionMigration({
+      migrations,
       target: input.target,
       stage: "pass1",
       from_policy_generation_id: fromPolicyGenerationId,
@@ -1242,7 +1271,7 @@ function routePass1ProductionStage(input: {
     )
     && profileArtifactMatches(path.join(input.target.workspace_dir, "profile_metadata.json"), input.target)
     && existsSync(path.join(input.target.workspace_dir, "base.json"));
-  return stageStateV3({
+  return { preparation_required: !input.prepare && migrations.required, ...stageStateV3({
     stage: "pass1",
     closed,
     work_units: workUnits,
@@ -1250,7 +1279,7 @@ function routePass1ProductionStage(input: {
     policy_set: policySet,
     quality_routing: qualityRouting,
     generation_tasks: generationTasks,
-  });
+  }) };
 }
 
 function profileSidecarRoutingRecovery(input: {
@@ -1399,6 +1428,7 @@ function routeProfileSidecarProductionStage(input: {
   loaded: LoadedAutomaticBook;
   profile: ReturnType<typeof resolveContentProfile>;
   quality_profile: ExtractionQualityProfile;
+  prepare?: boolean;
 }): AutomaticBuildStageState {
   assertNoActiveLegacyGenerationLease(input.target, "profile_sidecar");
   const sourceFingerprint = canonicalSourceFingerprint(input.loaded.source);
@@ -1411,6 +1441,7 @@ function routeProfileSidecarProductionStage(input: {
     members: profileSidecarMapReducePolicyMembers(input.profile, input.quality_profile),
     frozen_at: AUTOMATIC_BUILD_ROUTING_RELEASE.activated_at,
   });
+  const migrations = productionMigrationContext(input.target, policySet, input.prepare);
   const analysis = analyzeProfileSidecarSemanticUnits({
     windows: input.loaded.windows,
     byLid: input.loaded.byLid,
@@ -1487,6 +1518,7 @@ function routeProfileSidecarProductionStage(input: {
       descriptor.work_unit_id,
     );
     const migration = applyAutomaticBuildProductionMigration({
+      migrations,
       target: input.target,
       stage: "profile_sidecar",
       from_policy_generation_id: fromPolicyGenerationId,
@@ -1514,6 +1546,7 @@ function routeProfileSidecarProductionStage(input: {
 
   for (const [workUnitId, skip] of Object.entries(analysis.skips)) {
     applyAutomaticBuildProductionMigration({
+      migrations,
       target: input.target,
       stage: "profile_sidecar",
       from_policy_generation_id: fromPolicyGenerationId,
@@ -1739,7 +1772,7 @@ function routeProfileSidecarProductionStage(input: {
     )
     && profileArtifactMatches(path.join(input.target.workspace_dir, "discourse_index.json"), input.target)
     && profileArtifactMatches(path.join(input.target.workspace_dir, "formula_semantics.json"), input.target);
-  return stageStateV3({
+  return { preparation_required: !input.prepare && migrations.required, ...stageStateV3({
     stage: "profile_sidecar",
     closed,
     work_units: workUnits,
@@ -1747,7 +1780,7 @@ function routeProfileSidecarProductionStage(input: {
     policy_set: policySet,
     quality_routing: qualityRouting,
     generation_tasks: generationTasks,
-  });
+  }) };
 }
 
 type BookStructureProductionRoutedWorkUnit =
@@ -1795,7 +1828,9 @@ function routeBookStructureProductionStage(input: {
   profile: ReturnType<typeof resolveContentProfile>;
   quality_profile: ExtractionQualityProfile;
   unit_sources: BookStructureUnitSource[];
+  task_parent_lid?: string;
   pass2_audit?: NonNullable<Parameters<typeof buildBookStructureUnitSources>[0]["pass2Audit"]>;
+  prepare?: boolean;
 }): AutomaticBuildStageState {
   assertNoActiveLegacyGenerationLease(input.target, "book_structure");
   const sourceFingerprint = canonicalSourceFingerprint(input.loaded.source);
@@ -1805,12 +1840,13 @@ function routeBookStructureProductionStage(input: {
     prompts: BOOK_STRUCTURE_EXECUTION_PROMPTS_V2,
   });
   const policyMembers = ([
-    ["structure_unit", contracts.whole, `book-structure-unit.${input.quality_profile}.v2`],
-    ["structure_fragment", contracts.fragment, `book-structure-fragment.${input.quality_profile}.v2`],
-    ["structure_reduce", contracts.reduce, `book-structure-reduce.${input.quality_profile}.v2`],
-    ["structure_stitch", contracts.stitch, `book-structure-stitch.${input.quality_profile}.v2`],
-    ["structure_stitch_fragment", contracts.stitch_fragment, `book-structure-stitch-fragment.${input.quality_profile}.v2`],
-    ["structure_stitch_reduce", contracts.stitch_reduce, `book-structure-stitch-reduce.${input.quality_profile}.v2`],
+    // Evidence packet and field-specific citation contracts supersede frozen v3 policies.
+    ["structure_unit", contracts.whole, `book-structure-unit.${input.quality_profile}.v4`],
+    ["structure_fragment", contracts.fragment, `book-structure-fragment.${input.quality_profile}.v4`],
+    ["structure_reduce", contracts.reduce, `book-structure-reduce.${input.quality_profile}.v4`],
+    ["structure_stitch", contracts.stitch, `book-structure-stitch.${input.quality_profile}.v4`],
+    ["structure_stitch_fragment", contracts.stitch_fragment, `book-structure-stitch-fragment.${input.quality_profile}.v4`],
+    ["structure_stitch_reduce", contracts.stitch_reduce, `book-structure-stitch-reduce.${input.quality_profile}.v4`],
   ] as const).map(([kind, contract, policyGenerationId]) => ({
     kind,
     extractor: automaticBuildExtractorForWorkUnitKind("book_structure", kind),
@@ -1823,6 +1859,7 @@ function routeBookStructureProductionStage(input: {
     members: policyMembers,
     frozen_at: AUTOMATIC_BUILD_ROUTING_RELEASE.activated_at,
   });
+  const migrations = productionMigrationContext(input.target, policySet, input.prepare);
   const previousPolicyLock = readAutomaticBuildStagePolicyLock(input.target, "book_structure");
   const previousPolicy = previousPolicyLock
     ? extractionPolicyFromSemanticContract(input.target.target_ref.profile_id, previousPolicyLock.semantic_contract)
@@ -1885,6 +1922,7 @@ function routeBookStructureProductionStage(input: {
     let artifact = readFreshArtifact(task);
     if (!artifact && !existsSync(generationArtifactPath) && taskInput.previous) {
       const migration = applyAutomaticBuildProductionMigration({
+      migrations,
         target: input.target,
         stage: "book_structure",
         from_policy_generation_id: fromPolicyGenerationId,
@@ -2080,11 +2118,12 @@ function routeBookStructureProductionStage(input: {
   }
 
   let stitchArtifact: BookStructureStitchArtifact | undefined;
-  if (unitArtifacts.size === input.unit_sources.length) {
+  if (!input.task_parent_lid && unitArtifacts.size === input.unit_sources.length) {
     const stitchPacket = buildBookStructureStitchPacket(
       input.unit_sources.map((source) => unitArtifacts.get(source.job_id)!),
       input.pass2_audit,
       input.profile,
+      input.unit_sources,
     );
     const parentContentHash = bookStructureStitchHash(stitchPacket);
     const initial = routeBookStructureStitchWorkUnitsV2({
@@ -2257,7 +2296,7 @@ function routeBookStructureProductionStage(input: {
   const closed = pendingIds.length === 0
     && Boolean(stitchArtifact)
     && profileArtifactMatches(path.join(input.target.workspace_dir, "book_structure.json"), input.target);
-  return stageStateV3({
+  return { preparation_required: !input.prepare && migrations.required, ...stageStateV3({
     stage: "book_structure",
     closed,
     work_units: workUnits,
@@ -2265,7 +2304,7 @@ function routeBookStructureProductionStage(input: {
     policy_set: policySet,
     quality_routing: qualityRouting,
     generation_tasks: generationTasks,
-  });
+  }) };
 }
 
 function taskBindings(
@@ -2565,47 +2604,53 @@ export function resolveAutomaticBuildTarget(
 function buildAutomaticBuildSnapshotInternal(
   target: AutomaticBuildTarget,
   options: { quality_profile?: ExtractionQualityProfile } = {},
-  auditPendingPass1 = false,
+  prepareStage?: SemanticBuildStage,
+  focus?: { stage: SemanticBuildStage; work_unit_id: string; parent_lid?: string },
 ): AutomaticBuildSnapshot {
   const loaded = loadAutomaticBook(target.source_path);
   const stages: AutomaticBuildStageState[] = [];
   const profile = resolveContentProfile(target.profile_id);
   const qualityProfile = options.quality_profile ?? "full";
   const buildRoot = path.join(target.workspace_dir, ".build");
-  void auditPendingPass1;
-  const pass1State = routePass1ProductionStage({
-    target,
-    loaded,
-    profile,
-    quality_profile: qualityProfile,
-  });
-  stages.push(pass1State);
-  if (pass1State.pending_tasks.length || !pass1State.closed) return { target, stages };
 
-  if (target.profile_id === "paper") {
-    const metadataPlan = routePaperMetadataWorkUnits({
-      target: target.target_ref,
-      windows: loaded.windows,
-      byLid: loaded.byLid,
-      source: loaded.source,
-      policy_fingerprint: automaticBuildExtractionPolicy("paper_metadata", profile, qualityProfile),
-    });
-    const metadataWorkUnits = metadataPlan.work_units;
-    const metadataBindings = bindingsFromDescriptors(metadataWorkUnits);
-    const eligibleMetadataIds = metadataWorkUnits
-      .filter((unit) => !unit.deterministic_skip)
-      .map((unit) => Number(unit.work_unit_id));
-    const metadataMeta = artifactMetaByNumericTask(
-      path.join(buildRoot, "paper-metadata"),
-      eligibleMetadataIds,
+  if (!focus || focus.stage === "pass1") {
+    const pass1State = routePass1ProductionStage({
+      prepare: prepareStage === "pass1",
       target,
-      "paper_metadata",
-      metadataBindings,
-    );
-    const metadata = computePaperMetadataRoutingStatus(metadataPlan, metadataMeta);
-    const metadataClosed = profileArtifactMatches(path.join(target.workspace_dir, "paper_metadata.json"), target);
-    stages.push(stageState("paper_metadata", metadata.pending_ids, metadataClosed, metadataWorkUnits));
-    if (metadata.pending || !metadataClosed) return { target, stages };
+      loaded,
+      profile,
+      quality_profile: qualityProfile,
+    });
+    stages.push(pass1State);
+    if (focus || pass1State.pending_tasks.length || !pass1State.closed) return { target, stages };
+  }
+
+  if (target.profile_id === "paper" && (!focus || focus.stage === "paper_metadata" || focus.stage === "paper_lexicon")) {
+    if (!focus || focus.stage === "paper_metadata") {
+      const metadataPlan = routePaperMetadataWorkUnits({
+        target: target.target_ref,
+        windows: loaded.windows,
+        byLid: loaded.byLid,
+        source: loaded.source,
+        policy_fingerprint: automaticBuildExtractionPolicy("paper_metadata", profile, qualityProfile),
+      });
+      const metadataWorkUnits = metadataPlan.work_units;
+      const metadataBindings = bindingsFromDescriptors(metadataWorkUnits);
+      const eligibleMetadataIds = metadataWorkUnits
+        .filter((unit) => !unit.deterministic_skip)
+        .map((unit) => Number(unit.work_unit_id));
+      const metadataMeta = artifactMetaByNumericTask(
+        path.join(buildRoot, "paper-metadata"),
+        eligibleMetadataIds,
+        target,
+        "paper_metadata",
+        metadataBindings,
+      );
+      const metadata = computePaperMetadataRoutingStatus(metadataPlan, metadataMeta);
+      const metadataClosed = profileArtifactMatches(path.join(target.workspace_dir, "paper_metadata.json"), target);
+      stages.push(stageState("paper_metadata", metadata.pending_ids, metadataClosed, metadataWorkUnits));
+      if (focus || metadata.pending || !metadataClosed) return { target, stages };
+    }
 
     const lexiconPolicy = automaticBuildExtractionPolicy("paper_lexicon", profile, qualityProfile);
     const lexiconRouteInput = {
@@ -2650,67 +2695,74 @@ function buildAutomaticBuildSnapshotInternal(
     const lexicon = computePaperLexiconRoutingStatus(lexiconPlan, lexiconMeta);
     const lexiconClosed = profileArtifactMatches(path.join(target.workspace_dir, "paper_lexicon.json"), target);
     stages.push(stageState("paper_lexicon", lexicon.pending_ids, lexiconClosed, lexiconWorkUnits));
-    if (lexicon.pending || !lexiconClosed) return { target, stages };
+    if (focus || lexicon.pending || !lexiconClosed) return { target, stages };
   }
 
-  const sidecarState = routeProfileSidecarProductionStage({
-    target,
-    loaded,
-    profile,
-    quality_profile: qualityProfile,
-  });
-  stages.push(sidecarState);
-  if (sidecarState.pending_tasks.length || !sidecarState.closed) return { target, stages };
+  if (!focus || focus.stage === "profile_sidecar") {
+    const sidecarState = routeProfileSidecarProductionStage({
+      prepare: prepareStage === "profile_sidecar",
+      target,
+      loaded,
+      profile,
+      quality_profile: qualityProfile,
+    });
+    stages.push(sidecarState);
+    if (focus || sidecarState.pending_tasks.length || !sidecarState.closed) return { target, stages };
+  }
 
   const base = readJson<ReadOnlyBase>(path.join(target.workspace_dir, "base.json"));
   const discourseIndex = readJson<TechnicalLearningDiscourseIndex>(path.join(target.workspace_dir, "discourse_index.json"));
   const formulaValue = readJson<{ items?: FormulaSemantics[] } | FormulaSemantics[]>(path.join(target.workspace_dir, "formula_semantics.json"));
   const formulaSemantics = Array.isArray(formulaValue) ? formulaValue : formulaValue.items ?? [];
-  const candidateIndex = buildPass2Candidates({
-    graphNodes: base.graph_nodes,
-    windows: loaded.windows,
-    discourseIndex,
-    formulaSemantics,
-  });
-  const packets = new Map<number, Pass2WorkPacket>();
-  for (const window of loaded.windows) {
-    packets.set(window.id, buildPass2WorkPacket({
-      window,
-      byLid: loaded.byLid,
-      source: loaded.source,
+  const pass2Closed = profileArtifactMatches(path.join(target.workspace_dir, "pass2_audit.json"), target);
+  if (!focus || focus.stage === "pass2") {
+    const candidateIndex = buildPass2Candidates({
       graphNodes: base.graph_nodes,
-      candidates: candidateIndex.candidates,
+      windows: loaded.windows,
       discourseIndex,
       formulaSemantics,
+    });
+    const packets = new Map<number, Pass2WorkPacket>();
+    for (const window of loaded.windows.filter(window => !focus || String(window.id) === focus.work_unit_id)) {
+      packets.set(window.id, buildPass2WorkPacket({
+        window,
+        byLid: loaded.byLid,
+        source: loaded.source,
+        graphNodes: base.graph_nodes,
+        candidates: candidateIndex.candidates,
+        discourseIndex,
+        formulaSemantics,
+      }));
+    }
+    const pass2Bindings = taskBindings("pass2", profile, qualityProfile, [...packets.entries()].map(([id, packet]) => ({
+      task_id: id,
+      input_hash: pass2PacketHash(packet),
+    })));
+    const pass2WorkUnits = [...packets.entries()].map(([id, packet]) => descriptorFromBinding({
+      target,
+      stage: "pass2",
+      task_id: String(id),
+      kind: "pass2_candidate_batch",
+      binding: pass2Bindings[String(id)],
+      evidence_lids: packet.source_window.leaf_lids,
+      estimated_input_tokens: estimateTokens(JSON.stringify(packet)),
+      formula_lids: packet.source_formula_semantics.length,
+      candidate_count: packet.candidate_targets.length,
+      expected_output_items: packet.candidate_targets.length,
+      legacy_artifact_ref: `.build/pass2/${id}.json`,
     }));
+    const pass2Meta = artifactMetaByNumericTask(
+      path.join(buildRoot, "pass2"),
+      loaded.windows.map((window) => window.id),
+      target,
+      "pass2",
+      pass2Bindings,
+    );
+    const pass2 = computePass2Status(packets, pass2Meta);
+
+    stages.push(stageState("pass2", pass2.pending, pass2Closed, pass2WorkUnits));
+    if (focus) return { target, stages };
   }
-  const pass2Bindings = taskBindings("pass2", profile, qualityProfile, [...packets.entries()].map(([id, packet]) => ({
-    task_id: id,
-    input_hash: pass2PacketHash(packet),
-  })));
-  const pass2WorkUnits = [...packets.entries()].map(([id, packet]) => descriptorFromBinding({
-    target,
-    stage: "pass2",
-    task_id: String(id),
-    kind: "pass2_candidate_batch",
-    binding: pass2Bindings[String(id)],
-    evidence_lids: packet.source_window.leaf_lids,
-    estimated_input_tokens: estimateTokens(JSON.stringify(packet)),
-    formula_lids: packet.source_formula_semantics.length,
-    candidate_count: packet.candidate_targets.length,
-    expected_output_items: packet.candidate_targets.length,
-    legacy_artifact_ref: `.build/pass2/${id}.json`,
-  }));
-  const pass2Meta = artifactMetaByNumericTask(
-    path.join(buildRoot, "pass2"),
-    loaded.windows.map((window) => window.id),
-    target,
-    "pass2",
-    pass2Bindings,
-  );
-  const pass2 = computePass2Status(packets, pass2Meta);
-  const pass2Closed = profileArtifactMatches(path.join(target.workspace_dir, "pass2_audit.json"), target);
-  stages.push(stageState("pass2", pass2.pending, pass2Closed, pass2WorkUnits));
   const pass2Audit = pass2Closed
     ? readJson<NonNullable<Parameters<typeof buildBookStructureUnitSources>[0]["pass2Audit"]>>(
         path.join(target.workspace_dir, "pass2_audit.json"),
@@ -2727,11 +2779,13 @@ function buildAutomaticBuildSnapshotInternal(
     contentProfile: profile,
   });
   const structureState = routeBookStructureProductionStage({
+    prepare: prepareStage === "book_structure",
     target,
     loaded,
     profile,
     quality_profile: qualityProfile,
-    unit_sources: unitSources,
+    task_parent_lid: focus?.parent_lid,
+    unit_sources: focus?.parent_lid ? unitSources.filter(source => source.unit_lid === focus.parent_lid) : unitSources,
     ...(pass2Audit ? { pass2_audit: pass2Audit } : {}),
   });
   stages.push(structureState);
@@ -2743,6 +2797,27 @@ function buildAutomaticBuildSnapshotInternal(
   return { target, stages };
 }
 
+/** Legacy stages and BookStructure projections read only their actual dependency stage. */
+export function readAutomaticBuildTaskStage(target: AutomaticBuildTarget,
+  focus: { stage: SemanticBuildStage; work_unit_id: string; parent_lid?: string },
+  quality_profile: ExtractionQualityProfile) {
+  return buildAutomaticBuildSnapshotInternal(target, { quality_profile }, undefined, focus).stages
+    .find(stage => stage.stage === focus.stage);
+}
+
+export function currentAutomaticBuildTaskPolicy(target: AutomaticBuildTarget, stage: SemanticBuildStage,
+  kind: WorkUnitKind, quality: ExtractionQualityProfile) {
+  const profile = resolveContentProfile(target.profile_id);
+  if (stage === "pass1" || stage === "profile_sidecar") {
+    const members = stage === "pass1" ? pass1ModelSlicePolicyMembers(profile, quality)
+      : profileSidecarMapReducePolicyMembers(profile, quality);
+    const member = members.find(member => member.kind === kind);
+    if (!member) throw new Error("policy_generation_conflict: current task policy is unavailable");
+    return member;
+  }
+  return undefined;
+}
+
 export function buildAutomaticBuildSnapshot(
   target: AutomaticBuildTarget,
   options: { quality_profile?: ExtractionQualityProfile } = {},
@@ -2750,12 +2825,22 @@ export function buildAutomaticBuildSnapshot(
   return buildAutomaticBuildSnapshotInternal(target, options);
 }
 
+/** Authorized command boundary: prepare one reachable stage using existing durable formats. */
+export function prepareAutomaticBuildSnapshot(target: AutomaticBuildTarget, stage: SemanticBuildStage,
+  options: { quality_profile?: ExtractionQualityProfile } = {}): AutomaticBuildRouteResult<AutomaticBuildSnapshot> {
+  try { return readyAutomaticBuildRoute(buildAutomaticBuildSnapshotInternal(target, options, stage)); }
+  catch (error) {
+    if (!(error instanceof AutomaticBuildSnapshotRecoverySignal)) throw error;
+    return blockedAutomaticBuildRoute(error.recovery);
+  }
+}
+
 export function routeAutomaticBuildSnapshot(
   target: AutomaticBuildTarget,
   options: { quality_profile?: ExtractionQualityProfile } = {},
 ): AutomaticBuildRouteResult<AutomaticBuildSnapshot> {
   try {
-    return readyAutomaticBuildRoute(buildAutomaticBuildSnapshotInternal(target, options, true));
+    return readyAutomaticBuildRoute(buildAutomaticBuildSnapshotInternal(target, options));
   } catch (error) {
     if (!(error instanceof AutomaticBuildSnapshotRecoverySignal)) throw error;
     return blockedAutomaticBuildRoute(error.recovery);

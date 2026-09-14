@@ -4,6 +4,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -35,6 +36,10 @@ import {
 import { confirmedStandardBuildPlan } from "../../../packages/core/test/helpers/confirmed-build-plan";
 import {
   readExecutorMcpServerTimingJsonl,
+  createExecutorOuterTimingRecorder,
+  reduceExecutorMcpTiming,
+  type ExecutorMcpTimingJoinV2,
+  type ExecutorTraceOperation,
   type ExecutorMcpServerTimingV2,
 } from "./r7-rollout-trace";
 
@@ -61,6 +66,12 @@ interface TraceEvent {
   payload: string;
 }
 
+interface ExecutorMcpInvocation {
+  command: string;
+  args: string[];
+  cwd: string;
+}
+
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const desktopRoot = path.resolve(scriptDir, "..");
 const repoRoot = path.resolve(desktopRoot, "..", "..");
@@ -85,6 +96,39 @@ function argumentValue(name: string): string | undefined {
   assert(index + 1 < process.argv.length, `${name} requires a value`);
   assert.equal(process.argv.indexOf(name, index + 1), -1, `${name} may appear only once`);
   return process.argv[index + 1];
+}
+
+function pathIsOutside(parent: string, candidate: string): boolean {
+  const relative = path.relative(path.resolve(parent), path.resolve(candidate));
+  return relative.startsWith("..") || path.isAbsolute(relative);
+}
+
+export function executorMcpInvocation(
+  sidecar: string,
+  blackBoxCwd: string,
+  installedPluginRoot?: string,
+): ExecutorMcpInvocation {
+  if (!installedPluginRoot) {
+    return {
+      command: sidecar,
+      args: [
+        "executor.mcp",
+        "--bootstrap-version",
+        BUILD_EXECUTOR_BOOTSTRAP_CONTRACT_V3.version,
+        "--protocol-generation",
+        BUILD_EXECUTOR_BOOTSTRAP_CONTRACT_V3.session_protocol,
+      ],
+      cwd: blackBoxCwd,
+    };
+  }
+  assert(pathIsOutside(repoRoot, installedPluginRoot), "installed plugin root must be outside source cwd");
+  const launcher = path.join(installedPluginRoot, "scripts", "start-build-executor-mcp.cmd");
+  assert(existsSync(launcher), `installed Executor MCP launcher is missing: ${launcher}`);
+  return {
+    command: "cmd.exe",
+    args: ["/d", "/s", "/c", launcher],
+    cwd: installedPluginRoot,
+  };
 }
 
 function occurrenceCount(value: string, marker: string): number {
@@ -117,7 +161,11 @@ function assertRejectedBootstrap(sidecar: string, registryRoot: string, cwd: str
   );
 }
 
-class JsonLineMcpClient {
+export class JsonLineMcpClient {
+  private static nextConnection = 1;
+  private readonly connectionId = `compiled-connection-${JsonLineMcpClient.nextConnection++}`;
+  private readonly outerTiming = createExecutorOuterTimingRecorder(this.connectionId);
+  timingJoin: ExecutorMcpTimingJoinV2 | undefined;
   private readonly child: ChildProcessWithoutNullStreams;
   private readonly lines: ReadlineInterface;
   private readonly pending = new Map<number, PendingRequest>();
@@ -125,20 +173,16 @@ class JsonLineMcpClient {
   private nextId = 1;
   private stderrText = "";
 
-  constructor(sidecar: string, registryRoot: string, cwd: string) {
-    this.child = spawn(sidecar, [
-      "executor.mcp",
-      "--bootstrap-version",
-      BUILD_EXECUTOR_BOOTSTRAP_CONTRACT_V3.version,
-      "--protocol-generation",
-      BUILD_EXECUTOR_BOOTSTRAP_CONTRACT_V3.session_protocol,
-    ], {
-      cwd,
+  constructor(invocation: ExecutorMcpInvocation, registryRoot: string, sidecar: string) {
+    this.child = spawn(invocation.command, invocation.args, {
+      cwd: invocation.cwd,
       env: {
         ...process.env,
+        UNDERSTAND_BOOK_BUILD_EXE: sidecar,
         UNDERSTAND_BOOK_AUTOMATIC_BUILD_DRIVER_ROOT: registryRoot,
       },
       stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
     });
     this.child.stderr.setEncoding("utf8");
     this.child.stderr.on("data", (chunk: string) => {
@@ -175,12 +219,16 @@ class JsonLineMcpClient {
     const id = this.nextId;
     this.nextId += 1;
     const payload = JSON.stringify({ jsonrpc: "2.0", id, method, ...(params === undefined ? {} : { params }) });
+    const operation = method === "tools/call" ? (params as { name?: string } | undefined)?.name : undefined;
+    const finishTiming = operation && (BUILD_EXECUTOR_MCP_CONTRACT_V3.tools as readonly { name: string }[]).some((tool) => tool.name === operation)
+      ? this.outerTiming.begin(operation as ExecutorTraceOperation)
+      : undefined;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
         reject(new Error(`compiled executor MCP timed out for ${method}`));
       }, 30_000);
-      this.pending.set(id, { resolve, reject, timer });
+      this.pending.set(id, { resolve: (response) => { finishTiming?.(); resolve(response); }, reject, timer });
       this.child.stdin.write(`${payload}\n`, "utf8", (error) => {
         if (!error) return;
         clearTimeout(timer);
@@ -192,18 +240,24 @@ class JsonLineMcpClient {
 
   async close(): Promise<ExecutorMcpServerTimingV2[]> {
     this.child.stdin.end();
+    let timeoutHandle: NodeJS.Timeout | undefined;
     const timeout = new Promise<never>((_, reject) => {
-      setTimeout(() => {
+      timeoutHandle = setTimeout(() => {
         this.child.kill();
         reject(new Error("compiled executor MCP did not exit after stdin closed"));
       }, 10_000);
     });
     const code = await Promise.race([this.exitPromise, timeout]);
+    if (timeoutHandle) clearTimeout(timeoutHandle);
     this.lines.close();
     assert.equal(code, 0, `compiled executor MCP exited ${String(code)}: ${this.stderrText}`);
     const samples = readExecutorMcpServerTimingJsonl(this.stderrText, "compiled executor MCP stderr");
     assert(samples.every((sample, index) => sample.connection_call_ordinal === index + 1));
     assert(samples.length > 0, "compiled executor MCP emitted no server timing samples");
+    this.timingJoin = reduceExecutorMcpTiming({
+      connections: [{ thread_id: this.connectionId, samples }],
+      outer_samples: this.outerTiming.samples,
+    });
     return samples;
   }
 
@@ -216,7 +270,34 @@ class JsonLineMcpClient {
   }
 }
 
-function createFixture(container: string, registryRoot: string, label: string, sourceBody: string) {
+async function withJsonLineMcpClient<T>(
+  invocation: ExecutorMcpInvocation,
+  registryRoot: string,
+  sidecar: string,
+  action: (client: JsonLineMcpClient) => Promise<T>,
+): Promise<T> {
+  const client = new JsonLineMcpClient(invocation, registryRoot, sidecar);
+  let actionCompleted = false;
+  try {
+    const result = await action(client);
+    actionCompleted = true;
+    return result;
+  } finally {
+    try {
+      await client.close();
+    } catch (error) {
+      if (actionCompleted) throw error;
+    }
+  }
+}
+
+function createFixture(
+  container: string,
+  registryRoot: string,
+  label: string,
+  sourceBody: string,
+  options: { run_ttl_ms?: number } = {},
+) {
   const root = path.join(container, label);
   mkdirSync(root, { recursive: true });
   const source = path.join(root, `${label}.md`);
@@ -233,6 +314,7 @@ function createFixture(container: string, registryRoot: string, label: string, s
     available_agent_slots: 1,
     executor_dispatches: true,
     build_plan: buildPlan,
+    ...(options.run_ttl_ms === undefined ? {} : { run_ttl_ms: options.run_ttl_ms }),
   });
   assert("dispatches" in next.action && next.action.dispatches, "T7 fixture must produce a dispatch");
   const envelope = next.action.dispatches[0];
@@ -243,6 +325,9 @@ function createFixture(container: string, registryRoot: string, label: string, s
     target: resolveAutomaticBuildTarget(source, root),
     envelope,
     registryRoot,
+    buildPlan,
+    acceptedPlanDigest: plan.preflight.descriptor_plan_digest,
+    runTtlMs: options.run_ttl_ms,
   };
 }
 
@@ -313,13 +398,115 @@ async function callTool(
   return { response, text: text as string, isError: result.isError === true };
 }
 
-function assertMcpError(value: Awaited<ReturnType<typeof callTool>>): void {
+async function startCurrentGeneration(
+  client: JsonLineMcpClient,
+  trace: TraceEvent[],
+  opaqueHandoffRef: string,
+): Promise<Extract<AutomaticBuildExecutorSessionResponseV3["action"], { kind: "GENERATE" }>> {
+  const opened = await callTool(client, trace, "executor.open", {
+    version: "automatic_build_executor_open_request.v3",
+    opaque_handoff_ref: opaqueHandoffRef,
+  });
+  assert.equal(opened.isError, false, opened.text);
+  const openResponse = opened.response as AutomaticBuildExecutorSessionResponseV3;
+  assert.equal(openResponse.action.kind, "DELIVER_INPUT");
+  if (openResponse.action.kind !== "DELIVER_INPUT") throw new Error("expected DELIVER_INPUT");
+  let request = openResponse.action.next_request;
+  let finalBatch: Extract<AutomaticBuildExecutorSessionResponseV3["action"], {
+    kind: "INPUT_BATCH";
+  }>["batch"] | undefined;
+  for (let batchOrdinal = 0; batchOrdinal < CODEX_EXECUTOR_TRANSPORT_PROFILE_V2.max_input_chunks + 1; batchOrdinal += 1) {
+    const delivered = await callTool(client, trace, "executor.input.next", request as unknown as JsonObject);
+    assert.equal(delivered.isError, false, delivered.text);
+    const response = delivered.response as AutomaticBuildExecutorSessionResponseV3;
+    assert.equal(response.action.kind, "INPUT_BATCH");
+    if (response.action.kind !== "INPUT_BATCH") throw new Error("expected INPUT_BATCH");
+    finalBatch = response.action.batch;
+    if (finalBatch.final_for_generation) break;
+    request = {
+      version: "automatic_build_executor_input_next_request.v4",
+      opaque_session_ref: finalBatch.opaque_session_ref,
+      generation_input_ref: finalBatch.generation_input_ref,
+      ack_through_ordinal: finalBatch.last_ordinal,
+    };
+  }
+  assert(finalBatch?.final_for_generation, "executor input did not reach its final batch");
+  const generated = await callTool(client, trace, "executor.generation.start", {
+    version: "automatic_build_executor_generation_start_request.v3",
+    opaque_session_ref: finalBatch.opaque_session_ref,
+    generation_input_ref: finalBatch.generation_input_ref,
+    confirmed_through_ordinal: finalBatch.last_ordinal,
+  });
+  assert.equal(generated.isError, false, generated.text);
+  const response = generated.response as AutomaticBuildExecutorSessionResponseV3;
+  assert.equal(response.action.kind, "GENERATE");
+  if (response.action.kind !== "GENERATE") throw new Error("expected GENERATE");
+  return response.action;
+}
+
+function taskSessionFacts(
+  registryRoot: string,
+  opaqueSessionRef: string,
+): {
+  work_unit_id: string;
+  lease_ref: string;
+  semantic_attempt: number;
+  lease_epoch: number;
+} {
+  return JSON.parse(readFileSync(path.join(
+    registryRoot,
+    "executor-task-sessions",
+    `${opaqueSessionRef}.json`,
+  ), "utf8")) as {
+    work_unit_id: string;
+    lease_ref: string;
+    semantic_attempt: number;
+    lease_epoch: number;
+  };
+}
+
+function committedAttemptBytes(leaseRef: string): {
+  receipt_path: string;
+  receipt_bytes: Buffer;
+  artifact_path: string;
+  artifact_bytes: Buffer;
+} {
+  const receiptPath = path.join(path.dirname(leaseRef), "receipt.json");
+  const receiptBytes = readFileSync(receiptPath);
+  const receipt = JSON.parse(receiptBytes.toString("utf8")) as { artifact_path: string };
+  return {
+    receipt_path: receiptPath,
+    receipt_bytes: receiptBytes,
+    artifact_path: receipt.artifact_path,
+    artifact_bytes: readFileSync(receipt.artifact_path),
+  };
+}
+
+async function waitForRunLeaseExpiry(leaseRef: string): Promise<void> {
+  const start = JSON.parse(readFileSync(path.join(path.dirname(leaseRef), "start.json"), "utf8")) as {
+    run_expires_at: string;
+  };
+  const expiresAt = Date.parse(start.run_expires_at);
+  assert(Number.isFinite(expiresAt), "synthetic run lease expiry is invalid");
+  const remaining = expiresAt - Date.now();
+  if (remaining > 0) {
+    await new Promise((resolve) => setTimeout(resolve, remaining + 25));
+  }
+  assert(Date.now() >= expiresAt, "synthetic run lease did not expire");
+}
+
+function assertMcpError(
+  value: Awaited<ReturnType<typeof callTool>>,
+  phase: "open" | "input_delivery" | "generation_start" | "candidate_submit",
+  diagnostic: "protocol_incompatible" | "handoff_ref_mismatch" | "connection_terminal" = "protocol_incompatible",
+): void {
   assert.equal(value.isError, true);
   assert.deepEqual(value.response, {
-    version: "automatic_build_executor_mcp_error.v1",
+    version: "automatic_build_executor_mcp_error.v2",
     status: "interrupted",
-    category: "bootstrap",
-    diagnostic_code: "protocol_incompatible",
+    category: diagnostic === "protocol_incompatible" ? "bootstrap" : "session",
+    diagnostic_code: diagnostic,
+    phase,
   });
 }
 
@@ -354,8 +541,293 @@ function assertTraceAllowlist(trace: TraceEvent[]): {
   };
 }
 
+function nextPublicRecoveryEnvelope(value: ReturnType<typeof createFixture>) {
+  const next = automaticBuildNext(value.source, value.root, 1, {
+    accepted_plan_digest: value.acceptedPlanDigest,
+    available_agent_slots: 1,
+    executor_dispatches: true,
+    build_plan: value.buildPlan,
+    ...(value.runTtlMs === undefined ? {} : { run_ttl_ms: value.runTtlMs }),
+  });
+  assert("dispatches" in next.action && next.action.dispatches, "RG8 recovery must produce a dispatch");
+  const envelope = next.action.dispatches.find((candidate) => (
+    candidate.manifest.dispatch_id === value.envelope.manifest.dispatch_id
+  ));
+  assert(envelope, "RG8 recovery dispatch is missing the current public envelope");
+  return envelope;
+}
+
+async function runRg8RecoveryCanary(input: {
+  container: string;
+  registryRoot: string;
+  invocation: ExecutorMcpInvocation;
+  sidecar: string;
+}): Promise<{
+  committed_reused_units: number;
+  recovered_units: number;
+  stale_epoch: number;
+  recovered_epoch: number;
+  semantic_attempt: number;
+  recovery_ref_replays: number;
+  trace_event_count: number;
+  sensitive_values: string[];
+}> {
+  const sentinel = "RG8_RECOVERY_SEMANTIC_SENTINEL_711931";
+  const fixture = createFixture(
+    input.container,
+    input.registryRoot,
+    "rg8-recovery",
+    `${sentinel}\n${Array.from({ length: 160 }, (_, index) => (
+      `Paragraph ${index + 1} contains stable evidence for the RG8 installed recovery canary.`
+    )).join("\n\n")}`,
+    { run_ttl_ms: 10_000 },
+  );
+  const workUnitIds = fixture.envelope.manifest.ordered_work_unit_ids;
+  assert.equal(workUnitIds.length, 3, "RG8 recovery fixture must produce exactly A/B/C");
+  const [unitA, unitB, unitC] = workUnitIds;
+  assert(unitA && unitB && unitC);
+  const trace: TraceEvent[] = [];
+  const frozen: ReturnType<typeof committedAttemptBytes>[] = [];
+  let currentEnvelope = fixture.envelope;
+
+  for (const expectedUnit of [unitA, unitB]) {
+    const taskSession = await withJsonLineMcpClient(
+      input.invocation,
+      input.registryRoot,
+      input.sidecar,
+      async (client) => {
+        const generated = await startCurrentGeneration(
+          client,
+          trace,
+          currentEnvelope.opaque_handoff_ref,
+        );
+        const session = taskSessionFacts(input.registryRoot, generated.opaque_session_ref);
+        assert.equal(session.work_unit_id, expectedUnit);
+        const submitted = await callTool(client, trace, "executor.submit_candidate", {
+          version: "automatic_build_executor_candidate_submit.v3",
+          opaque_session_ref: generated.opaque_session_ref,
+          candidate_sink_ref: generated.candidate_sink_ref,
+          candidate: { nodes: [], edges: [] },
+        });
+        assert.equal(submitted.isError, false, submitted.text);
+        return session;
+      },
+    );
+    frozen.push(committedAttemptBytes(taskSession.lease_ref));
+    currentEnvelope = nextPublicRecoveryEnvelope(fixture);
+  }
+  const attemptsAfterAB = readAutomaticBuildAttemptSnapshot(fixture.target).stages.pass1;
+  const frozenAttemptA = JSON.parse(JSON.stringify(attemptsAfterAB?.[unitA]));
+  const frozenAttemptB = JSON.parse(JSON.stringify(attemptsAfterAB?.[unitB]));
+
+  const stale = await withJsonLineMcpClient(
+    input.invocation,
+    input.registryRoot,
+    input.sidecar,
+    async (client) => {
+      const generated = await startCurrentGeneration(
+        client,
+        trace,
+        currentEnvelope.opaque_handoff_ref,
+      );
+      const taskSession = taskSessionFacts(input.registryRoot, generated.opaque_session_ref);
+      assert.deepEqual({
+        work_unit_id: taskSession.work_unit_id,
+        semantic_attempt: taskSession.semantic_attempt,
+        lease_epoch: taskSession.lease_epoch,
+      }, {
+        work_unit_id: unitC,
+        semantic_attempt: 1,
+        lease_epoch: 1,
+      });
+      return { generated, taskSession };
+    },
+  );
+  const staleGenerated = stale.generated;
+  const staleTaskSession = stale.taskSession;
+  await waitForRunLeaseExpiry(staleTaskSession.lease_ref);
+
+  const recoveredEnvelope = nextPublicRecoveryEnvelope(fixture);
+  const replayedRecoveryEnvelope = nextPublicRecoveryEnvelope(fixture);
+  assert.notEqual(recoveredEnvelope.opaque_handoff_ref, currentEnvelope.opaque_handoff_ref);
+  assert.equal(recoveredEnvelope.opaque_handoff_ref, replayedRecoveryEnvelope.opaque_handoff_ref);
+  assert.equal(recoveredEnvelope.dispatch_slot_ref, currentEnvelope.dispatch_slot_ref);
+
+  const recovered = await withJsonLineMcpClient(
+    input.invocation,
+    input.registryRoot,
+    input.sidecar,
+    async (client) => {
+      const generated = await startCurrentGeneration(
+        client,
+        trace,
+        recoveredEnvelope.opaque_handoff_ref,
+      );
+      const taskSession = taskSessionFacts(input.registryRoot, generated.opaque_session_ref);
+      assert.deepEqual({
+        work_unit_id: taskSession.work_unit_id,
+        semantic_attempt: taskSession.semantic_attempt,
+        lease_epoch: taskSession.lease_epoch,
+      }, {
+        work_unit_id: unitC,
+        semantic_attempt: 1,
+        lease_epoch: 2,
+      });
+      assert.notEqual(generated.opaque_session_ref, staleGenerated.opaque_session_ref);
+      assert.notEqual(generated.candidate_sink_ref, staleGenerated.candidate_sink_ref);
+      const submitted = await callTool(client, trace, "executor.submit_candidate", {
+        version: "automatic_build_executor_candidate_submit.v3",
+        opaque_session_ref: generated.opaque_session_ref,
+        candidate_sink_ref: generated.candidate_sink_ref,
+        candidate: { nodes: [], edges: [] },
+      });
+      assert.equal(submitted.isError, false, submitted.text);
+      return { generated, taskSession };
+    },
+  );
+  const recoveredGenerated = recovered.generated;
+  const recoveredTaskSession = recovered.taskSession;
+
+  for (const bytes of frozen) {
+    assert.deepEqual(readFileSync(bytes.receipt_path), bytes.receipt_bytes);
+    assert.deepEqual(readFileSync(bytes.artifact_path), bytes.artifact_bytes);
+  }
+  const attempts = readAutomaticBuildAttemptSnapshot(fixture.target).stages.pass1;
+  assert.deepEqual(attempts?.[unitA], frozenAttemptA);
+  assert.deepEqual(attempts?.[unitB], frozenAttemptB);
+  assert.equal(attempts?.[unitA]?.semantic_attempt, 1);
+  assert.equal(attempts?.[unitA]?.lease_epoch, 1);
+  assert.equal(attempts?.[unitA]?.submit_revision, 1);
+  assert.equal(attempts?.[unitB]?.semantic_attempt, 1);
+  assert.equal(attempts?.[unitB]?.lease_epoch, 1);
+  assert.equal(attempts?.[unitB]?.submit_revision, 1);
+  assert.equal(attempts?.[unitC]?.semantic_attempt, 1);
+  assert.equal(attempts?.[unitC]?.lease_epoch, 2);
+  assert.equal(attempts?.[unitC]?.submit_revision, 1);
+
+  return {
+    committed_reused_units: 2,
+    recovered_units: 1,
+    stale_epoch: staleTaskSession.lease_epoch,
+    recovered_epoch: recoveredTaskSession.lease_epoch,
+    semantic_attempt: recoveredTaskSession.semantic_attempt,
+    recovery_ref_replays: 2,
+    trace_event_count: trace.length,
+    sensitive_values: [
+      sentinel,
+      fixture.root,
+      fixture.source,
+      currentEnvelope.opaque_handoff_ref,
+      recoveredEnvelope.opaque_handoff_ref,
+      staleGenerated.opaque_session_ref,
+      staleGenerated.candidate_sink_ref,
+      recoveredGenerated.opaque_session_ref,
+      recoveredGenerated.candidate_sink_ref,
+    ],
+  };
+}
+
+async function runRg8OversizeCanary(input: {
+  container: string;
+  registryRoot: string;
+  invocation: ExecutorMcpInvocation;
+  sidecar: string;
+}): Promise<{
+  diagnostic_code: string;
+  phase: string;
+  semantic_attempt: number;
+  lease_epoch: number;
+  failure_count: number;
+  writer_started: boolean;
+  candidate_file_count: number;
+  sensitive_values: string[];
+}> {
+  const sentinel = "RG8_OVERSIZE_PRIVATE_SENTINEL_284613";
+  const fixture = createFixture(
+    input.container,
+    input.registryRoot,
+    "rg8-oversize",
+    `${sentinel}\n${"bounded oversize context ".repeat(300)}`,
+  );
+  const trace: TraceEvent[] = [];
+  const canary = await withJsonLineMcpClient(
+    input.invocation,
+    input.registryRoot,
+    input.sidecar,
+    async (client) => {
+      const generated = await startCurrentGeneration(
+        client,
+        trace,
+        fixture.envelope.opaque_handoff_ref,
+      );
+      const taskSession = taskSessionFacts(input.registryRoot, generated.opaque_session_ref);
+      const oversizeCandidate = {
+        private_marker: sentinel,
+        value: "界".repeat(generated.output_contract.transport.candidate_value_max_estimated_tokens + 1),
+      };
+      const submitted = await callTool(client, trace, "executor.submit_candidate", {
+        version: "automatic_build_executor_candidate_submit.v3",
+        opaque_session_ref: generated.opaque_session_ref,
+        candidate_sink_ref: generated.candidate_sink_ref,
+        candidate: oversizeCandidate,
+      });
+      assert.equal(submitted.isError, false, submitted.text);
+      assert.deepEqual(submitted.response, {
+        version: "automatic_build_executor_session.v3",
+        action: { kind: "DONE", status: "retryable_failure" },
+      });
+      return { generated, taskSession, oversizeCandidate };
+    },
+  );
+  const { generated, taskSession, oversizeCandidate } = canary;
+
+  const attemptDir = path.dirname(taskSession.lease_ref);
+  assert.equal(existsSync(path.join(attemptDir, "candidate.json")), false);
+  assert.equal(existsSync(path.join(attemptDir, "submission.json")), false);
+  assert.equal(existsSync(path.join(attemptDir, "receipt.json")), false);
+  const failure = JSON.parse(readFileSync(path.join(attemptDir, "failure.json"), "utf8")) as {
+    failure_diagnostic: { version: string; category: string; code: string; phase: string };
+    metrics: { writer_started: boolean };
+  };
+  assert.equal(failure.failure_diagnostic.version, "automatic_build_failure_diagnostic.v3");
+  assert.equal(failure.failure_diagnostic.category, "transport");
+  assert.equal(failure.failure_diagnostic.code, "candidate_request_too_large");
+  assert.equal(failure.failure_diagnostic.phase, "generation");
+  assert.equal(failure.metrics.writer_started, false);
+  const attempt = readAutomaticBuildAttemptSnapshot(fixture.target).stages.pass1?.[
+    fixture.envelope.manifest.ordered_work_unit_ids[0]
+  ];
+  assert.equal(attempt?.semantic_attempt, 1);
+  assert.equal(attempt?.lease_epoch, 1);
+  assert.equal(attempt?.failures, 1);
+  assert.equal(attempt?.submit_revision, 0);
+
+  return {
+    diagnostic_code: failure.failure_diagnostic.code,
+    phase: failure.failure_diagnostic.phase,
+    semantic_attempt: attempt?.semantic_attempt ?? 0,
+    lease_epoch: attempt?.lease_epoch ?? 0,
+    failure_count: attempt?.failures ?? 0,
+    writer_started: failure.metrics.writer_started,
+    candidate_file_count: Number(existsSync(path.join(attemptDir, "candidate.json"))),
+    sensitive_values: [
+      sentinel,
+      fixture.root,
+      fixture.source,
+      fixture.envelope.opaque_handoff_ref,
+      generated.opaque_session_ref,
+      generated.candidate_sink_ref,
+      JSON.stringify(oversizeCandidate),
+    ],
+  };
+}
+
 async function main(): Promise<void> {
   const sidecar = path.resolve(argumentValue("--sidecar") ?? defaultSidecar);
+  const installedPluginRootValue = argumentValue("--installed-plugin-root");
+  const installedPluginRoot = installedPluginRootValue
+    ? path.resolve(installedPluginRootValue)
+    : undefined;
   const evidenceOutValue = argumentValue("--evidence-out");
   const evidenceOut = evidenceOutValue ? path.resolve(evidenceOutValue) : undefined;
   assert(existsSync(sidecar), `compiled Build Engine Sidecar is missing: ${sidecar}`);
@@ -364,6 +836,7 @@ async function main(): Promise<void> {
   const registryRoot = path.join(container, "driver-registry");
   const blackBoxCwd = path.join(container, "black-box-cwd");
   mkdirSync(blackBoxCwd, { recursive: true });
+  const mcpInvocation = executorMcpInvocation(sidecar, blackBoxCwd, installedPluginRoot);
   const previousRegistryRoot = process.env.UNDERSTAND_BOOK_AUTOMATIC_BUILD_DRIVER_ROOT;
   process.env.UNDERSTAND_BOOK_AUTOMATIC_BUILD_DRIVER_ROOT = registryRoot;
   let client: JsonLineMcpClient | undefined;
@@ -379,7 +852,7 @@ async function main(): Promise<void> {
     assert.equal(attemptCount(secondary), 0);
 
     assertRejectedBootstrap(sidecar, registryRoot, blackBoxCwd);
-    client = new JsonLineMcpClient(sidecar, registryRoot, blackBoxCwd);
+    client = new JsonLineMcpClient(mcpInvocation, registryRoot, sidecar);
     const initialized = await client.request("initialize", {
       protocolVersion: "2025-06-18",
       capabilities: {},
@@ -396,7 +869,7 @@ async function main(): Promise<void> {
       version: "automatic_build_executor_open_request.v3",
       opaque_handoff_ref: primary.envelope.opaque_handoff_ref,
       path: primary.envelope.executor_handoff.path,
-    }));
+    }), "open");
     assert.equal(attemptCount(primary), 0);
 
     let current = await callTool(client, trace, "executor.open", {
@@ -409,7 +882,7 @@ async function main(): Promise<void> {
     assertMcpError(await callTool(client, trace, "executor.open", {
       version: "automatic_build_executor_open_request.v3",
       opaque_handoff_ref: secondary.envelope.opaque_handoff_ref,
-    }));
+    }), "open", "handoff_ref_mismatch");
     assert.equal(attemptCount(secondary), 0);
 
     let chunkCount = 0;
@@ -439,7 +912,7 @@ async function main(): Promise<void> {
           opaque_session_ref: delivery.input_manifest.opaque_session_ref,
           generation_input_ref: delivery.input_manifest.generation_input_ref,
           confirmed_through_ordinal: delivery.input_manifest.total_chunk_count - 1,
-        }));
+        }), "generation_start");
         assert.equal(attemptCount(primary), generationCount);
         testedPrematureStart = true;
       }
@@ -483,7 +956,7 @@ async function main(): Promise<void> {
             opaque_session_ref: delivery.input_manifest.opaque_session_ref,
             generation_input_ref: delivery.input_manifest.generation_input_ref,
             ack_through_ordinal: batch.last_ordinal + 1,
-          }));
+          }), "input_delivery");
           assert.equal(attemptCount(primary), generationCount);
           testedOrdinalFailure = true;
         }
@@ -562,6 +1035,10 @@ async function main(): Promise<void> {
     }
     const finalResponse = current.response as AutomaticBuildExecutorSessionResponseV3;
     assert.equal(finalResponse.action.kind, "DONE", "compiled executor dispatch did not terminate");
+    assertMcpError(await callTool(client, trace, "executor.open", {
+      version: "automatic_build_executor_open_request.v3",
+      opaque_handoff_ref: secondary.envelope.opaque_handoff_ref,
+    }), "open", "connection_terminal");
     assert.equal(generationCount, attemptCount(primary));
     assert.equal(attemptCount(secondary), 0);
     assert(testedPrematureStart && testedOrdinalFailure);
@@ -569,9 +1046,22 @@ async function main(): Promise<void> {
 
     const visibility = assertTraceAllowlist(trace);
     const serverTimingSamples = await client.close();
+    const outerServerTiming = client.timingJoin;
     client = undefined;
+    const rg8Recovery = await runRg8RecoveryCanary({
+      container,
+      registryRoot,
+      invocation: mcpInvocation,
+      sidecar,
+    });
+    const rg8Oversize = await runRg8OversizeCanary({
+      container,
+      registryRoot,
+      invocation: mcpInvocation,
+      sidecar,
+    });
     const evidence = {
-      version: "understand_book_t7_executor_release_evidence.v2",
+      version: "understand_book_t7_executor_release_evidence.v3",
       status: "passed",
       executor_role: BUILD_EXECUTOR_BOOTSTRAP_CONTRACT_V3.agent_name,
       shared_executor_mcp: {
@@ -583,6 +1073,7 @@ async function main(): Promise<void> {
         capability_isolation: false,
         caller_role_authenticated: BUILD_EXECUTOR_MCP_CONTRACT_V3.caller_role_authenticated,
         compiled_sidecar_executed: true,
+        installed_launcher_executed: installedPluginRoot !== undefined,
       },
       transport_profile: CODEX_EXECUTOR_TRANSPORT_PROFILE_V2,
       tool_inventory: [...expectedTools],
@@ -603,7 +1094,8 @@ async function main(): Promise<void> {
       negative_gates: {
         bootstrap_v2: "protocol_incompatible",
         unknown_request_field: "protocol_incompatible",
-        cross_handoff_connection: "protocol_incompatible",
+        cross_handoff_connection: "handoff_ref_mismatch",
+        terminal_connection: "connection_terminal",
         premature_generation_start: "protocol_incompatible",
         ack_through_ordinal_mismatch: "protocol_incompatible",
       },
@@ -616,6 +1108,25 @@ async function main(): Promise<void> {
         operations: [...new Set(serverTimingSamples.map((sample) => sample.operation))].sort(),
         bounded_error_count: serverTimingSamples.filter((sample) => sample.outcome === "bounded_error").length,
       },
+      mcp_outer_server_timing: outerServerTiming,
+      rg8_recovery_canary: {
+        committed_reused_units: rg8Recovery.committed_reused_units,
+        recovered_units: rg8Recovery.recovered_units,
+        stale_epoch: rg8Recovery.stale_epoch,
+        recovered_epoch: rg8Recovery.recovered_epoch,
+        semantic_attempt: rg8Recovery.semantic_attempt,
+        recovery_ref_replays: rg8Recovery.recovery_ref_replays,
+        trace_event_count: rg8Recovery.trace_event_count,
+      },
+      rg8_oversize_canary: {
+        diagnostic_code: rg8Oversize.diagnostic_code,
+        phase: rg8Oversize.phase,
+        semantic_attempt: rg8Oversize.semantic_attempt,
+        lease_epoch: rg8Oversize.lease_epoch,
+        failure_count: rg8Oversize.failure_count,
+        writer_started: rg8Oversize.writer_started,
+        candidate_file_count: rg8Oversize.candidate_file_count,
+      },
       final_status: finalResponse.action.kind === "DONE" ? finalResponse.action.status : "invalid",
     };
     const serializedEvidence = `${JSON.stringify(evidence, null, 2)}\n`;
@@ -623,6 +1134,9 @@ async function main(): Promise<void> {
     assert(!serializedEvidence.includes(candidateMarker));
     assert(!serializedEvidence.includes(primary.envelope.opaque_handoff_ref));
     assert(!serializedEvidence.includes(container));
+    for (const sensitive of [...rg8Recovery.sensitive_values, ...rg8Oversize.sensitive_values]) {
+      assert(!serializedEvidence.includes(sensitive), "RG8 evidence serialized a path, ref, sentinel, or candidate");
+    }
     assert(!/(transport_profile_digest|compiled_sidecar_sha256|skill_sha256|manifest_sha256|root_final_sha256)/u
       .test(serializedEvidence));
     if (evidenceOut) {
@@ -643,11 +1157,11 @@ async function main(): Promise<void> {
     } else {
       process.env.UNDERSTAND_BOOK_AUTOMATIC_BUILD_DRIVER_ROOT = previousRegistryRoot;
     }
-    rmSync(container, { recursive: true, force: true });
+    rmSync(container, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 }
 
-main().catch((error: unknown) => {
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main().catch((error: unknown) => {
   process.stderr.write(`${error instanceof Error ? error.stack ?? error.message : String(error)}\n`);
   process.exitCode = 1;
 });

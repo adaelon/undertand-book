@@ -148,7 +148,7 @@ export function buildFreshStitchPacket(ctx: BookStructureBuildContext): BookStru
     if (!artifact || artifact.content_hash !== bookStructureUnitHash(source)) return undefined;
     unitArtifacts.push(artifact);
   }
-  return buildBookStructureStitchPacket(unitArtifacts, ctx.pass2Audit, ctx.contentProfile);
+  return buildBookStructureStitchPacket(unitArtifacts, ctx.pass2Audit, ctx.contentProfile, ctx.unitSources);
 }
 
 export function computeCurrentBookStructureStatus(ctx: BookStructureBuildContext): {

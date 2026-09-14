@@ -4,6 +4,8 @@
 冻结决策:[ADR-0116](adr/0116-calibrated-executor-transport-budget-and-round-trip-reduction.md)。
 承接边界:[ADR-0114](adr/0114-bounded-executor-semantic-transport-and-code-owned-candidate-submission.md)、[ADR-0115](adr/0115-root-shared-executor-mcp-and-subagent-inheritance.md)。
 
+后续方案（2026-09-07）：[控制面有界读取与执行器补位](切片方案-预构建控制面有界读取与执行器补位.md)。本方案已保留的 A2/R1/R2/W1 优化继续有效；S2 生产调度未改。旧 8 child/32 candidates 的基线不用于当前 V4 每工作单元交接的启动占比或整书 ETA。
+
 本方案把 P0→P1→P2→P3 拆成独立实验。D0 只落文档；后续每刀单独实施、验证和决定是否继续。本轮不修改运行代码，不执行真实书，不改变候选格式、Schema/evidence/quality/writer 门禁、reader-private 边界、Session V3 durable state 或当前 transport 常量。
 
 ## 0. 对齐确认单
