@@ -187,8 +187,49 @@ These two optional fields are mutually exclusive; send one queued observation pe
 Driver checks invocation ownership, current recovery generation, and absence of a durable open
 before advancing the same bounded bootstrap epoch. Already-opened, committed, or superseded work
 takes precedence. Preserve the exact diagnostic; never relabel it bootstrap_unavailable.
-Historical protocol_incompatible is not evidence of either connection error and remains an
-installation/manual recovery boundary, without automatic open-failure reporting.
+Historical protocol_incompatible alone is not evidence of a connection error. Diagnose the actual
+owned child's open call before choosing installation recovery, using the bounded reader below.
+
+## Diagnose an owned child's open failure
+
+On an open error, especially protocol_incompatible or an error inconsistent with successful sibling
+children, read the failed child's actual control call before retrying. Successful children do not
+need history reads. Use the resolved Build Engine:
+`build.diagnose-child <this-root-task-id> <owned-child-id> <original-issued-handoff-ref>`.
+This reader checks parent/child ownership and streams the local Codex rollout, returning only the
+last failed open request version/ref, the original structured tool diagnostic, connection state,
+and the last 16 operation names. It excludes conversation, hidden reasoning, semantic input,
+candidate JSON and private paths. Never use an unfiltered read_thread or dump the rollout in Root.
+If local records or completed MCP facts are absent, report `evidence_missing` and its `missing`
+field; do not infer a correction or recommend re-registration without evidence.
+
+Compare `issued_handoff_ref` from the owned launch with `attempted_handoff_ref` character by
+character. Keep the original `reported_diagnostic`; the separate `open_call_correction` observation
+does not rewrite it. Unknown request versions remain an actual protocol boundary.
+
+- If the child is still live and the reader says `connection_state=unbound`, send that same child
+  a bounded correction: “The previous executor.open opaque_handoff_ref differs from the issued
+  ref. Retry only open with this original issued ref: <issued_handoff_ref>. The semantic task is
+  unchanged. Original diagnostic: <reported_diagnostic>.” Keep its live slot; do not spawn a
+  second child. Do not repeat identical correction feedback; after at most three failed corrections
+  end that child and use the bounded Driver recovery path.
+- If the child has terminated or its connection cannot continue, queue the returned versioned
+  `open_call_correction` as the sole failure observation in the next `build.step` request. It is
+  mutually exclusive with bootstrap_failure and executor_open_failure. Driver verifies the issued
+  ref belongs to this invocation, protects opened/leased/committed/superseded work, records the real
+  diagnostic and advances only the existing bounded control generation. Preserve the failed ref
+  in completed_refs; release only that child's owned live_by_slot entry. A fresh child receives
+  only the Driver-issued replacement ref plus the bounded correction feedback below.
+- If no correction is returned, preserve the real diagnostic and follow its existing recovery
+  boundary. Never call executor.open from Root to test either ref.
+
+For a corrected replacement add this control-only feedback to the normal spawn payload:
+“Previous open failed because opaque_handoff_ref differed from the issued value. Use the attached
+Driver-issued ref exactly; it supersedes the failed launch. Original diagnostic:
+<reported_diagnostic>. Only the open call is being corrected; semantic work is unchanged.”
+Keep feedback keyed by dispatch_slot_ref until its replacement launches, including across NEEDS_USER.
+Do not send the obsolete attempted ref as a second actionable handoff. Only the next build.step
+can establish durable completion; sibling slots and accepted artifacts keep their ownership.
 
 ## Four-action loop
 
@@ -219,7 +260,7 @@ the external boundary is resolved:
   3. If neither provider is advertised, do not launch an unbound generic subagent and never emulate
      the executor in root. For a public dispatch, report the returned ref through
      `bootstrap_failure` on the next `build.step`; do not silently reread an unchanged launch.
-  The ref is the only dynamic spawn data in either provider path. Do not add a target path, prompt,
+  The ref and the bounded open-correction feedback above are the only dynamic spawn data. Do not add a target path, prompt,
   task input, hash, command list, receipt, or candidate. Never pass `dispatch_slot_ref` to the child.
   Every new ref requires a newly spawned child with a fresh connection. Never use followup_task,
   send_message, or resume to give a terminal child another ref; a dispatch slot is not a child pool.

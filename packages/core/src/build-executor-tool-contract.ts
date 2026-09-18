@@ -8,3 +8,10 @@ export const BUILD_EXECUTOR_TOOL_NAMES_V1 = [
 ] as const;
 
 export type BuildExecutorToolNameV1 = (typeof BUILD_EXECUTOR_TOOL_NAMES_V1)[number];
+export class BuildExecutorInvalidArgumentsError extends Error {
+  readonly diagnostic_code = "invalid_arguments" as const;
+  constructor(readonly field: "arguments" | "version" | "opaque_handoff_ref") {
+    super(`Build Executor invalid arguments field: ${field}`);
+    this.name = "BuildExecutorInvalidArgumentsError";
+  }
+}

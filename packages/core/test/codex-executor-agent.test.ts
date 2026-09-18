@@ -35,6 +35,20 @@ const EXECUTOR_TOOL_NAMES = [
 ] as const;
 
 describe("executor tool discovery", () => {
+  it("R3 publishes bounded owned-child diagnosis, original errors and both correction branches", () => {
+    for (const file of ["skills/build/SKILL.md", "plugins/understand-book/skills/build/SKILL.md"]) {
+      const text = readText(file);
+      for (const marker of ["build.diagnose-child", "open_call_correction", "reported_diagnostic",
+        "evidence_missing", "connection_state=unbound", "completed_refs", "live_by_slot",
+        "Successful children do not", "Never use an unfiltered read_thread", "at most three"]) {
+        expect(text).toContain(marker);
+      }
+    }
+    const role = readText("agents/automatic-build-dispatch-executor.md");
+    for (const marker of ["Root-guided open correction", "field=opaque_handoff_ref", "same unbound connection",
+      "Driver-issued handoff ref", "reported_diagnostic", "After a lifecycle final"]) expect(role).toContain(marker);
+  });
+
   it("carries issued control objects across isolated exec cells and serializes exact lifecycle errors", async () => {
     const contract = readText("agents/automatic-build-dispatch-executor.md");
     const snippet = contract.match(/```javascript\n([\s\S]*?)\n```/u)?.[1];

@@ -454,7 +454,9 @@ describe("automatic build orchestrator", () => {
       "v4", "policies", "book_structure", member.policy_generation_id, "policy.json")));
     expect(prepareAutomaticBuildSnapshot(target, "book_structure").status).toBe("ready");
     const current = buildAutomaticBuildSnapshot(target).stages.find(item => item.stage === "book_structure");
-    expect(current?.policy_set?.members.every(member => member.policy_generation_id.endsWith(".v4"))).toBe(true);
+    expect(current?.policy_set?.members.every(member => member.policy_generation_id.endsWith(
+      member.kind.startsWith("structure_relation_") ? ".v1" : ".v4",
+    ))).toBe(true);
     previous.members.forEach((member, index) => expect(readFileSync(path.join(workspace, ".build", "automatic-build",
       "v4", "policies", "book_structure", member.policy_generation_id, "policy.json"))).toEqual(before[index]));
   });
@@ -478,9 +480,10 @@ describe("automatic build orchestrator", () => {
     expect(bookStructure?.policy_set?.members.map((member) => member.kind)).toEqual([
       "structure_fragment",
       "structure_reduce",
+      "structure_relation_delta",
+      "structure_relation_select",
       "structure_stitch",
       "structure_stitch_fragment",
-      "structure_stitch_reduce",
       "structure_unit",
     ]);
     expect(bookStructure?.pending_work_units?.every((unit) => (
@@ -657,7 +660,10 @@ describe("automatic build orchestrator", () => {
     );
     expect(stitchInput.stdout).toBe(renderBookStructureGenerationTaskInput(stitchGeneration.task));
     const stitchCandidatePath = path.join(root, "book-structure-stitch.json");
-    writeJson(stitchCandidatePath, { spine: [], throughlines: [], key_stops: [] });
+    const stitchCards = JSON.parse(stitchInput.stdout).unit_cards;
+    writeJson(stitchCandidatePath, { spine: stitchCards.map((card: any) => ({
+      lid: card.unit_lid, role: card.role, summary: card.summary, key_stop_ids: [], depends_on: [],
+    })), throughlines: [], key_stops: [] });
     stageAutomaticBuildCandidate(
       target,
       stitchTask.lease_ref,
@@ -693,7 +699,7 @@ describe("automatic build orchestrator", () => {
     });
     expect(JSON.parse(readFileSync(path.join(workspace, "book_structure.json"), "utf8"))).toMatchObject({
       header: { book_id: target.book_id, profile_id: target.profile_id },
-      spine: [],
+      spine: stitchCards.map((card: any) => expect.objectContaining({ lid: card.unit_lid })),
       throughlines: [],
       key_stops: [],
     });

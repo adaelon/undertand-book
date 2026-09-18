@@ -1,0 +1,20 @@
+{
+  "version": "understand_book_r4_install.v1",
+  "status": "passed",
+  "plugin_version": "0.1.0+codex.20260914042345",
+  "installed_exe": "E:/allwork/Understand Book/understand-book-build.exe",
+  "installed_plugin": "C:/Users/Lenovo/.codex/plugins/cache/understand-book-local/understand-book/0.1.0+codex.20260914042345",
+  "marketplace": "C:/Users/Lenovo/.codex/local-marketplaces/understand-book-local/plugins/understand-book",
+  "matched_plugin_files": 10,
+  "binary_bytes_match": true,
+  "project_agent_source_state": "same",
+  "registry_resolved_launcher_without_exe_override": true,
+  "tool_inventory": [
+    "executor.open",
+    "executor.input.next",
+    "executor.generation.start",
+    "executor.submit_candidate"
+  ],
+  "backup": "E:/allwork/Understand Book/understand-book-build.exe.before-r4-20260914042345",
+  "original_book_resumed": false
+}

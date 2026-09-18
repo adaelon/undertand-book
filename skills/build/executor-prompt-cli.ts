@@ -23,6 +23,8 @@ export const AUTOMATIC_BUILD_EXTRACTOR_PROMPT_NAMES = [
   "book-structure-reducer.md",
   "book-structure-stitch-fragment-extractor.md",
   "book-structure-stitch-reducer.md",
+  "book-structure-relation-selector.md",
+  "book-structure-relation-extractor.md",
 ] as const;
 
 export const AUTOMATIC_BUILD_SHADOW_EXTRACTOR_PROMPT_NAMES = [] as const;

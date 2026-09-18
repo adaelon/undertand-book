@@ -37,6 +37,8 @@ const extractorPromptNames = [
   "book-structure-reducer.md",
   "book-structure-stitch-fragment-extractor.md",
   "book-structure-stitch-reducer.md",
+  "book-structure-relation-selector.md",
+  "book-structure-relation-extractor.md",
 ];
 const nodeEnvironment = {
   ...process.env,

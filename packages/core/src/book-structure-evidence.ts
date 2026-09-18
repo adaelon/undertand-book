@@ -9,6 +9,7 @@ export interface BookStructureReferenceScope {
 }
 
 export function bookStructureReferenceScope(input: BookStructureGenerationInputV1): BookStructureReferenceScope {
+  if ("entries" in input) return input.reference_scope;
   const byUnit: Record<string, string[]> = {};
   const dependencyUnits = new Set<string>();
   const add = (unit: string, lids: string[]) => {

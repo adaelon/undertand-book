@@ -16,6 +16,7 @@
     "test:intent-metrics-parity": "node scripts/smoke-intent-build-metrics.mjs",
     "test:codex-build-intent": "node scripts/smoke-codex-build-intent.mjs",
     "test:plugin-release": "node scripts/assert-plugin-release.mjs",
+    "test:r4-call-correction": "node ../../node_modules/tsx/dist/cli.mjs scripts/smoke-r4-call-correction.ts run",
     "package:windows": "node scripts/smoke-automatic-build-parity.mjs && node ../../node_modules/tsx/dist/cli.mjs scripts/smoke-t7-executor-release.ts && node scripts/assert-plugin-release.mjs --automatic-build-parity-prechecked --t7-executor-release-prechecked && node scripts/assert-release-config.mjs && tauri build --bundles nsis && node scripts/export-installer.mjs"
   },
   "devDependencies": {

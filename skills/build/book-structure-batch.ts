@@ -10,10 +10,6 @@ import {
   buildAutomaticBuildSnapshot,
   resolveAutomaticBuildTarget,
 } from "../../packages/core/src/build-orchestrator";
-import {
-  readBookStructureGenerationArtifact,
-  readBookStructureGenerationTask,
-} from "../../packages/core/src/book-structure-generation";
 import { buildReproducibleProfileArtifactHeader } from "../../packages/core/src/profile-artifact";
 import type { ExtractionQualityProfile } from "../../packages/core/src/semantic-artifact";
 import { BookStructureSidecarZ } from "../../packages/core/src/zod";
@@ -84,34 +80,10 @@ if (productionPolicyContractsJson) {
       throw new Error(`production BookStructure generation is missing unit contributor: ${source.unit_lid}`);
     }
   }
-  const stitchContributors = contributors.filter(
-    (contributor) => contributor.contributor_id === "book-structure:stitch",
-  );
-  if (stitchContributors.length !== 1) {
-    throw new Error("production BookStructure generation must have exactly one stitch contributor");
+  if (!stage.book_structure_materialized) {
+    throw new Error("production BookStructure materialization is not complete");
   }
-  const stitchWorkUnitId = stitchContributors[0].work_unit_id;
-  const generation = stage.generation_tasks?.[stitchWorkUnitId];
-  if (generation?.kind !== "book_structure") {
-    throw new Error("production BookStructure stitch contributor has no frozen task");
-  }
-  const task = readBookStructureGenerationTask(
-    target,
-    generation.task.policy_generation_id,
-    stitchWorkUnitId,
-  );
-  if (!task || task.output_role !== "stitch_artifact") {
-    throw new Error("production BookStructure stitch task is missing or not final");
-  }
-  const artifact = readBookStructureGenerationArtifact(target, task);
-  if (!artifact
-    || !artifact.payload
-    || typeof artifact.payload !== "object"
-    || !("content_hash" in artifact.payload)
-    || !("output" in artifact.payload)) {
-    throw new Error("production BookStructure stitch artifact is missing or invalid");
-  }
-  stitchArtifact = artifact.payload as BookStructureStitchArtifact;
+  stitchArtifact = stage.book_structure_materialized;
 } else {
   const current = computeCurrentBookStructureStatus(ctx);
   if (current.status.unit_pending.length) {
@@ -130,6 +102,9 @@ if (productionPolicyContractsJson) {
 
 const header = buildReproducibleProfileArtifactHeader({ book_id: ctx.bookId, content_profile: contentProfile.id });
 const result = buildBookStructureSidecar(header, stitchArtifact.output, ctx.lidNodes);
+if (productionPolicyContractsJson && result.dropped.length) {
+  throw new Error(`production BookStructure contains invalid public references: ${result.dropped[0].id}`);
+}
 BookStructureSidecarZ.parse(result.sidecar);
 mkdirSync(ctx.baseDir, { recursive: true });
 const outPath = `${ctx.baseDir}/book_structure.json`;

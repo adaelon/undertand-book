@@ -137,6 +137,7 @@ export interface AutomaticBuildStageQualityReductionParentV2 {
 }
 
 export interface AutomaticBuildStageQualityRoutingEvidenceV2 {
+  book_structure_assembly?: { local_work_unit_ids: string[]; selection_work_unit_ids: string[]; relation_work_unit_ids: string[] };
   policy_set: AutomaticBuildStagePolicySetV3;
   coverage: ModelInputSliceCoverageV1[];
   public_contributors: AutomaticBuildStageQualityPublicContributorV2[];
@@ -265,12 +266,18 @@ function artifactItems(stage: QualityStage, descriptor: WorkUnitDescriptor, payl
       .flatMap((key) => Array.isArray(output[key]) ? output[key] as unknown[] : []);
   } else {
     const output = value.output && typeof value.output === "object" ? value.output as Record<string, unknown> : {};
-    items = Object.keys(output).length ? [output] : [];
+    items = descriptor.kind === "structure_relation_delta"
+      ? ["new_throughlines", "extend_throughlines", "merge_throughlines", "add_dependencies"].flatMap(key => Array.isArray(value[key]) ? value[key] as unknown[] : [])
+      : descriptor.kind === "structure_stitch_fragment"
+      ? Array.isArray(value.spine) ? value.spine : []
+      : Object.keys(output).length ? [output] : [];
   }
   const emitted = items.length;
   const expected = descriptor.cost.expected_output_items;
   return {
-    grounded: stage === "pass2" ? emitted >= expected : emitted > 0,
+    grounded: descriptor.kind === "structure_relation_delta"
+      ? ["new_throughlines", "extend_throughlines", "merge_throughlines", "add_dependencies"].every(key => Array.isArray(value[key]))
+      : stage === "pass2" ? emitted >= expected : emitted > 0,
     emitted_items: emitted,
     low_information_items: lowInformationItems(items),
   };
@@ -729,12 +736,15 @@ export function evaluateAutomaticBuildStageQualityV2(input: {
   const reachableWorkUnits = new Set<string>();
   const pendingContributorClosure = input.routing.public_contributors
     .map((contributor) => contributor.work_unit_id);
+  const assembly = input.stage === "book_structure" ? input.routing.book_structure_assembly : undefined;
+  if (assembly) pendingContributorClosure.push(...assembly.selection_work_unit_ids, ...assembly.relation_work_unit_ids);
   let eligibleClosureInvalid = false;
   for (const contributor of input.routing.public_contributors) {
     const descriptor = descriptorsById.get(contributor.work_unit_id);
     if (!descriptor
       || !freshArtifacts.has(contributor.work_unit_id)
-      || (descriptor.aggregation !== undefined && descriptor.aggregation.role !== "final")
+      || (descriptor.aggregation !== undefined && descriptor.aggregation.role !== "final"
+        && !(descriptor.kind === "structure_stitch_fragment" && assembly?.local_work_unit_ids.includes(contributor.work_unit_id)))
       || contributor.parent_lids.some((parentLid) => !descriptor.evidence_lids.includes(parentLid))) {
       eligibleClosureInvalid = true;
     }

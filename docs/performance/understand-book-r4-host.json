@@ -1,0 +1,76 @@
+{
+  "version": "understand_book_r4_host_correction.v1",
+  "status": "passed",
+  "host": "codex-cli 0.153.4",
+  "plugin_version": "0.1.0+codex.20260914042345",
+  "installed_file_count": 10,
+  "installed_bytes_match": true,
+  "execution": "real model Root and four dedicated children; compiled Driver and installed MCP launcher",
+  "fault_injection": "two initial truncated refs; isolated role permits live child to wait for Root feedback",
+  "live": {
+    "child_id": "01a09e2e-451d-7d90-aa36-ede599c3c00f",
+    "issued_ref": "abhandoff1_39d4a96552eb1c64810513c94e108e198f0bdb0e418246e957283c88d709a9ef",
+    "attempted_ref": "abhandoff1_39d4a96552eb1c64810513c94e108e198f0bdb0e418246e957283c88d709a9",
+    "original_diagnostic": {
+      "version": "automatic_build_executor_mcp_error.v2",
+      "status": "interrupted",
+      "category": "session",
+      "diagnostic_code": "invalid_arguments",
+      "phase": "open",
+      "field": "opaque_handoff_ref"
+    },
+    "same_child_corrected": true,
+    "open_count": 2
+  },
+  "terminal": {
+    "child_id": "01a09e2e-5acd-76f1-a02c-a617be9625f1",
+    "replacement_child_id": "01a09e2f-ff22-7910-9f64-d277ce085b28",
+    "observation": {
+      "version": "automatic_build_open_call_correction.v1",
+      "issued_handoff_ref": "abhandoff1_951ae9643c1c8c3f125fd53fd06261eb266465946c40816b7bd301d52c641170",
+      "attempted_handoff_ref": "abhandoff1_951ae9643c1c8c3f125fd53fd06261eb266465946c40816b7bd301d52c6411",
+      "request_version": "automatic_build_executor_open_request.v3",
+      "field": "opaque_handoff_ref",
+      "phase": "open",
+      "cause": "invalid_ref",
+      "reported_diagnostic": {
+        "version": "automatic_build_executor_mcp_error.v2",
+        "status": "interrupted",
+        "category": "session",
+        "diagnostic_code": "invalid_arguments",
+        "phase": "open",
+        "field": "opaque_handoff_ref"
+      }
+    },
+    "replacement_ref": "abhandoff1_dc7c60dac96482513b5aee57ea275d55bc265b5768ef1d162a5f94fc825218fa",
+    "recovery_identity": {
+      "bootstrap_epoch": 1,
+      "current_work_unit_id": "4",
+      "dispatch_id": "dispatch-3ae76727f9581057dd978a4e5906b751e67faed311945c4c041c10466b94a785",
+      "dispatch_run_id": "run-20260914T042950920Z",
+      "lease_epoch": 1,
+      "semantic_attempt": 1,
+      "version": "automatic_build_recovery_generation_identity.v2"
+    },
+    "stable_slot": true,
+    "repeated_observation_idempotent": true
+  },
+  "semantic_attempts": 3,
+  "durable_commits": 3,
+  "successful_submit_calls": 3,
+  "root_executor_calls": 0,
+  "user_operations_required": 0,
+  "next_driver_action": "SPAWN_EXECUTORS",
+  "elapsed_ms": 302796.924,
+  "feedback": {
+    "root_sent_message_to_live_child": true,
+    "feedback_body_storage": "encrypted_by_host",
+    "corrected_open_verified_separately": true,
+    "root_spawn_count": 4,
+    "terminal_followup_count": 0
+  },
+  "state_during_terminal_recovery": {
+    "semantic_attempts": 1,
+    "durable_commits": 0
+  }
+}

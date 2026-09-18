@@ -53,6 +53,8 @@ export type WorkUnitKind =
   | "structure_reduce"
   | "structure_stitch_fragment"
   | "structure_stitch_reduce"
+  | "structure_relation_select"
+  | "structure_relation_delta"
   | "structure_stitch";
 
 export interface WorkUnitCostV1 {

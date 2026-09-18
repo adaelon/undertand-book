@@ -143,6 +143,22 @@ Every replay uses the exact previous request. Do not self-judge schema, evidence
 quality, writer, terminal, or retry state; tool responses and the durable Build Engine are
 authoritative.
 
+## Root-guided open correction
+
+The caller may attach bounded control feedback describing a previous open failure and its original
+reported_diagnostic. For a fresh child, use only the attached Driver-issued handoff ref; never reuse
+the failed child's obsolete ref. This feedback does not change semantic instructions or authorize
+extra tool arguments.
+
+If Root supplies a correction while this child is still live, before its lifecycle final, and no
+open has succeeded, an `invalid_arguments` error at `phase=open`, `field=opaque_handoff_ref` may be
+corrected on this same unbound connection. Replace only the incorrect open ref with the caller's
+original issued ref, store the corrected open request, and call executor.open once. Preserve the
+actual error diagnostic in the control feedback; do not label it bootstrap_unavailable. Do not
+repeat an identical failed request or make more than three Root-guided corrections. Unknown
+request versions, bound connections, connection_terminal and completed child finals cannot use
+this exception. After a lifecycle final, let Driver issue a replacement to a fresh child.
+
 ## Failure, permission, and privacy boundary
 
 If no Executor MCP tool call has been accepted because the dedicated server or a required tool is
@@ -158,7 +174,8 @@ skills, paths, or a generic agent. Return only:
 }
 ```
 
-If an accepted tool call returns `automatic_build_executor_mcp_error.v2`, stop immediately and
+Except for the live unbound Root-guided correction above, if an accepted tool call returns
+`automatic_build_executor_mcp_error.v2`, stop immediately and
 preserve its exact `status`, `category`, `diagnostic_code`, and `phase` in this lifecycle object:
 
 ```json
@@ -172,7 +189,7 @@ preserve its exact `status`, `category`, `diagnostic_code`, and `phase` in this 
 }
 ```
 
-Do not relabel an observed MCP error as bootstrap failure, retry the tool, or infer task completion
+Do not relabel an observed MCP error as bootstrap failure, retry without the correction exception, or infer task completion
 from the lifecycle object. The caller recomputes durable state after every child terminal.
 In particular, preserve session/connection_terminal/open and session/handoff_ref_mismatch/open
 exactly. They describe this connection's refusal to open; they are not protocol_incompatible.

@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { renderBookStructureRelationInput, validateBookStructureRelationSelection, type BookStructureRelationSelectionInput, type BookStructureRelationSelection } from "./book-structure-relation-routing";
+import { validateBookStructureRelationDelta, type BookStructureRelationInput, type BookStructureRelationDelta } from "./book-structure-relations";
 import { bookStructureReferenceScope } from "./book-structure-evidence";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
@@ -45,6 +47,8 @@ import {
 } from "./stage-work-unit";
 
 export type BookStructureGenerationInputV1 =
+  | BookStructureRelationSelectionInput
+  | BookStructureRelationInput
   | BookStructureUnitSource
   | BookStructureFragmentInputV1
   | BookStructureReductionInputV1
@@ -53,6 +57,8 @@ export type BookStructureGenerationInputV1 =
   | BookStructureStitchReductionInputV1;
 
 export type BookStructureGenerationOutputRoleV1 =
+  | "relation_selection"
+  | "relation_delta"
   | "unit_artifact"
   | "unit_observation"
   | "stitch_artifact"
@@ -72,6 +78,8 @@ export interface BookStructureGenerationTaskV1 {
 }
 
 export type BookStructureGenerationPayloadV1 =
+  | BookStructureRelationSelection
+  | BookStructureRelationDelta
   | BookStructureUnitArtifact
   | BookStructureFragmentObservationV1
   | BookStructureStitchArtifact
@@ -145,6 +153,9 @@ export function renderBookStructureGenerationTaskInput(
   task: Pick<BookStructureGenerationTaskV1, "descriptor" | "input">,
 ): string {
   switch (task.descriptor.kind) {
+    case "structure_relation_select":
+    case "structure_relation_delta":
+      return renderBookStructureRelationInput(task.input as BookStructureRelationSelectionInput | BookStructureRelationInput);
     case "structure_unit":
       return renderBookStructureModelInput(task.input as BookStructureUnitSource);
     case "structure_fragment":
@@ -691,6 +702,12 @@ function validateCandidate(
     );
   }
   const spineIds = new Set(spine.map(unit => unit.lid));
+  if ("core_coverage_requirement" in task.input && task.input.core_coverage_requirement) {
+    const core = task.input.unit_cards.map(card => card.unit_lid);
+    if (spine.length !== core.length || core.some(lid => spine.filter(unit => unit.lid === lid).length !== 1)) {
+      failCandidateValidation("schema_invalid", "spine", "exactly one spine entry for each core unit card", spine);
+    }
+  }
   const neededContext = new Set(spine.flatMap(unit => unit.depends_on).filter(lid => !spineIds.has(lid)));
   const inputUnits = "unit_cards" in task.input
     ? [...task.input.unit_cards, ...(task.input.context_unit_cards ?? [])].map(card => ({
@@ -717,6 +734,8 @@ function payloadForCandidate(
   task: BookStructureGenerationTaskV1,
   candidate: unknown,
 ): BookStructureGenerationPayloadV1 {
+  if (task.output_role === "relation_selection") return validateBookStructureRelationSelection(candidate, task.input as BookStructureRelationSelectionInput);
+  if (task.output_role === "relation_delta") return validateBookStructureRelationDelta(candidate, task.input as BookStructureRelationInput);
   if (task.output_role === "unit_observation") {
     return validateObservation(candidate, task);
   }
@@ -738,6 +757,8 @@ function validateStoredPayload(
   task: BookStructureGenerationTaskV1,
   payload: unknown,
 ): BookStructureGenerationPayloadV1 {
+  if (task.output_role === "relation_selection") return validateBookStructureRelationSelection(payload, task.input as BookStructureRelationSelectionInput);
+  if (task.output_role === "relation_delta") return validateBookStructureRelationDelta(payload, task.input as BookStructureRelationInput);
   if (task.output_role === "unit_observation") {
     return validateObservation(payload, task);
   }

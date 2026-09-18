@@ -49,6 +49,8 @@ export const AUTOMATIC_BUILD_DISPATCH_LIMITS: Record<WorkUnitKind, AutomaticBuil
   structure_reduce: { max_units: 1, max_input_tokens: BOOK_STRUCTURE_MAX_INPUT_TOKENS, max_predicted_service_ms: MAX_DISPATCH_SERVICE_MS },
   structure_stitch_fragment: { max_units: 1, max_input_tokens: BOOK_STRUCTURE_MAX_INPUT_TOKENS, max_predicted_service_ms: MAX_DISPATCH_SERVICE_MS },
   structure_stitch_reduce: { max_units: 1, max_input_tokens: BOOK_STRUCTURE_MAX_INPUT_TOKENS, max_predicted_service_ms: MAX_DISPATCH_SERVICE_MS },
+  structure_relation_select: { max_units: 1, max_input_tokens: BOOK_STRUCTURE_MAX_INPUT_TOKENS, max_predicted_service_ms: MAX_DISPATCH_SERVICE_MS },
+  structure_relation_delta: { max_units: 1, max_input_tokens: BOOK_STRUCTURE_MAX_INPUT_TOKENS, max_predicted_service_ms: MAX_DISPATCH_SERVICE_MS },
   structure_stitch: { max_units: 1, max_input_tokens: BOOK_STRUCTURE_MAX_INPUT_TOKENS, max_predicted_service_ms: MAX_DISPATCH_SERVICE_MS },
 };
 

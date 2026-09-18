@@ -126,10 +126,18 @@ interface AutomaticBuildStepRequestV1 {
   available_agent_slots: 0 | 1 | 2 | 3;
   decision?: { request_id: string; choice_id: string };
   bootstrap_failure?: { opaque_handoff_ref: string };
+  open_call_correction?: import("../src/automatic-build-executor-session").AutomaticBuildOpenCallCorrectionV1;
   executor_open_failure?: { opaque_handoff_ref: string; diagnostic_code: "connection_terminal" | "handoff_ref_mismatch"; phase: "open" };
 }
 
-function failureObservation(kind: "bootstrap" | "connection_terminal" | "handoff_ref_mismatch", ref: string): Pick<AutomaticBuildStepRequestV1, "bootstrap_failure" | "executor_open_failure"> {
+function failureObservation(kind: "bootstrap" | "connection_terminal" | "handoff_ref_mismatch" | "correction", ref: string): Pick<AutomaticBuildStepRequestV1, "bootstrap_failure" | "executor_open_failure" | "open_call_correction"> {
+  if (kind === "correction") return { open_call_correction: {
+    version: "automatic_build_open_call_correction.v1", issued_handoff_ref: ref,
+    attempted_handoff_ref: ref.slice(0, -2), request_version: "automatic_build_executor_open_request.v3",
+    field: "opaque_handoff_ref", phase: "open", cause: "invalid_ref",
+    reported_diagnostic: { version: "automatic_build_executor_mcp_error.v2", status: "interrupted",
+      category: "bootstrap", diagnostic_code: "protocol_incompatible", phase: "open" },
+  } };
   return kind === "bootstrap" ? { bootstrap_failure: { opaque_handoff_ref: ref } }
     : { executor_open_failure: { opaque_handoff_ref: ref, diagnostic_code: kind, phase: "open" } };
 }
@@ -885,6 +893,62 @@ describe("S0 deterministic automatic-build driver protocol", () => {
     snapshotRead.mockRestore();
   });
 
+  it("replays an active dispatch after more than 512 valid projection records accumulate", async () => {
+    const previousRegistryRoot = process.env.UNDERSTAND_BOOK_AUTOMATIC_BUILD_DRIVER_ROOT;
+    const value = fixture("large-dispatch-projection-registry");
+    const registryRoot = path.join(value.root, "driver-registry");
+    process.env.UNDERSTAND_BOOK_AUTOMATIC_BUILD_DRIVER_ROOT = registryRoot;
+    try {
+      const driver = expectedDriver();
+      const invocation = await createInvocation(driver, value);
+      const request: AutomaticBuildStepRequestV1 = {
+        version: "automatic_build_step_request.v1",
+        invocation_ref: invocation.invocation_ref,
+        available_agent_slots: 1,
+      };
+      const first = await driver.automaticBuildStep(request);
+      expect(first.action.kind).toBe("SPAWN_EXECUTORS");
+      if (first.action.kind !== "SPAWN_EXECUTORS") throw new Error("expected launch");
+      startV3GenerationForHandoff(first.action.executors[0]!.opaque_handoff_ref, new Date().toISOString());
+
+      const projectionDirectory = path.join(
+        registryRoot,
+        "dispatch-projections",
+        invocation.invocation_ref,
+      );
+      expect(readdirSync(projectionDirectory)).toHaveLength(1);
+      for (let index = 0; index < 512; index++) {
+        const recoveryIdentity = { historical_generation: index };
+        const locator = {
+          version: "automatic_build_driver_dispatch_projection_locator.v2",
+          recovery_identity: recoveryIdentity,
+        };
+        const fileName = `${createHash("sha256")
+          .update(canonicalAutomaticBuildJson(locator), "utf8")
+          .digest("hex")}.json`;
+        const suffix = index.toString(16).padStart(64, "0");
+        writeFileSync(path.join(projectionDirectory, fileName), `${canonicalAutomaticBuildJson({
+          version: "automatic_build_driver_dispatch_projection.v2",
+          invocation_ref: invocation.invocation_ref,
+          dispatch_id: `historical-${index}`,
+          dispatch_run_id: "historical-run",
+          opaque_handoff_ref: `abhandoff1_${suffix}`,
+          dispatch_slot_ref: `abdispatchslot1_${suffix}`,
+          recovery_identity: recoveryIdentity,
+        })}\n`, "utf8");
+      }
+      expect(readdirSync(projectionDirectory)).toHaveLength(513);
+
+      expect(await driver.automaticBuildStep(request)).toEqual(first);
+    } finally {
+      if (previousRegistryRoot === undefined) {
+        delete process.env.UNDERSTAND_BOOK_AUTOMATIC_BUILD_DRIVER_ROOT;
+      } else {
+        process.env.UNDERSTAND_BOOK_AUTOMATIC_BUILD_DRIVER_ROOT = previousRegistryRoot;
+      }
+    }
+  }, 30_000);
+
   it("P3 observes a child commit between plan and dispatch without reclaiming it", async () => {
     const driver = expectedDriver(); const value = fixture("p3-commit-between");
     const invocation = await createInvocation(driver, value);
@@ -956,7 +1020,7 @@ describe("S0 deterministic automatic-build driver protocol", () => {
     }
   });
 
-  it("L2 recovers a real terminal-connection refusal after A commits and commits B on a new connection", async () => {
+  it.each(["terminal", "correction"] as const)("R2 %s recovers an open refusal and commits B once on a new connection", async (kind) => {
     const driver = expectedDriver();
     const value = fixture("l2-connection-recovery", { body: `# Guide\n\n${Array.from({ length: 160 }, (_, i) =>
       `Paragraph ${i + 1} contains stable evidence for the current V4 submit fixture.`).join("\n\n")}` });
@@ -970,14 +1034,18 @@ describe("S0 deterministic automatic-build driver protocol", () => {
     const second = await driver.automaticBuildStep(request);
     if (second.action.kind !== "SPAWN_EXECUTORS") throw new Error("expected B");
     const b = second.action.executors[0]!;
-    const rejected = old.rawCall("executor.open", { version: "automatic_build_executor_open_request.v3",
-      opaque_handoff_ref: b.opaque_handoff_ref });
+    const attempted = kind === "correction" ? b.opaque_handoff_ref.slice(0, -2) : b.opaque_handoff_ref;
+    const rejected = (kind === "correction" ? executorMcpConnection() : old).rawCall("executor.open", { version: "automatic_build_executor_open_request.v3",
+      opaque_handoff_ref: attempted });
     const error = JSON.parse(rejected.result.content[0]!.text);
-    expect(error).toMatchObject({ status: "interrupted", category: "session", diagnostic_code: "connection_terminal", phase: "open" });
+    expect(error).toMatchObject({ status: "interrupted", category: "session",
+      diagnostic_code: kind === "correction" ? "invalid_arguments" : "connection_terminal", phase: "open" });
     const target = resolveAutomaticBuildTarget(value.source, value.root);
     const before = taskTreeBytes(target);
-    const report = { ...request, executor_open_failure: { opaque_handoff_ref: b.opaque_handoff_ref,
-      diagnostic_code: error.diagnostic_code, phase: error.phase } };
+    const report = kind === "correction"
+      ? { ...request, open_call_correction: { ...failureObservation("correction", b.opaque_handoff_ref).open_call_correction!, reported_diagnostic: error } }
+      : { ...request, executor_open_failure: { opaque_handoff_ref: b.opaque_handoff_ref,
+        diagnostic_code: error.diagnostic_code, phase: error.phase } };
     const recovered = await driver.automaticBuildStep(report);
     if (recovered.action.kind !== "SPAWN_EXECUTORS") throw new Error("expected replacement B");
     const replacement = recovered.action.executors[0]!;
@@ -994,6 +1062,37 @@ describe("S0 deterministic automatic-build driver protocol", () => {
     const after = taskTreeBytes(target);
     await driver.automaticBuildStep(report);
     expect(taskTreeBytes(target)).toEqual(after);
+  }, 30_000);
+
+  it("R2 refuses a different ref that already opened another child and accepts an unopened typo", async () => {
+    const driver = expectedDriver();
+    const value = fixture("r2-different-ref", { body: `# Guide\n\n${Array.from({ length: 900 }, (_, i) =>
+      `Paragraph ${i + 1} contains stable evidence for the current V4 submit fixture.`).join("\n\n")}` });
+    const invocation = await createInvocation(driver, value, { max_parallel: 3 });
+    const request: AutomaticBuildStepRequestV1 = { version: "automatic_build_step_request.v1",
+      invocation_ref: invocation.invocation_ref, available_agent_slots: 3 };
+    const first = await driver.automaticBuildStep(request);
+    if (first.action.kind !== "SPAWN_EXECUTORS") throw new Error("expected launch");
+    const [a, b] = first.action.executors;
+    openAutomaticBuildExecutorSessionV3(b!.opaque_handoff_ref);
+    const correction = { ...failureObservation("correction", a!.opaque_handoff_ref).open_call_correction!,
+      cause: "different_ref" as const, attempted_handoff_ref: b!.opaque_handoff_ref };
+    await expect(async () => driver.automaticBuildStep({ ...request, open_call_correction: correction }))
+      .rejects.toThrow(/already opened another/);
+    expect(await driver.automaticBuildStep(request)).toEqual(first);
+    const typo = `abhandoff1_${"0".repeat(64)}`;
+    const rejected = executorMcpConnection().rawCall("executor.open", {
+      version: "automatic_build_executor_open_request.v3", opaque_handoff_ref: typo,
+    });
+    expect(rejected.result.isError).toBe(true);
+    const recovered = await driver.automaticBuildStep({ ...request, open_call_correction: {
+      ...correction, attempted_handoff_ref: typo,
+      reported_diagnostic: JSON.parse(rejected.result.content[0]!.text),
+    } });
+    if (recovered.action.kind !== "SPAWN_EXECUTORS") throw new Error("expected replacement");
+    expect(recovered.action.executors.find(x => x.dispatch_slot_ref === a!.dispatch_slot_ref)!.opaque_handoff_ref)
+      .not.toBe(a!.opaque_handoff_ref);
+    expect(recovered.action.executors).toContainEqual(b);
   }, 30_000);
 
   it("L1 refills the released slot while sibling children have not opened yet", async () => {
@@ -1107,7 +1206,7 @@ describe("S0 deterministic automatic-build driver protocol", () => {
     expect(live.size).toBe(0);
   }, 120_000);
 
-  it.each(["bootstrap", "connection_terminal", "handoff_ref_mismatch"] as const)("L2 %s: recovers a zero-call bootstrap failure once without consuming a semantic attempt", async (failureKind) => {
+  it.each(["bootstrap", "connection_terminal", "handoff_ref_mismatch", "correction"] as const)("L2 %s: recovers a zero-call bootstrap failure once without consuming a semantic attempt", async (failureKind) => {
     const driver = expectedDriver();
     const value = fixture("zero-call-bootstrap", {
       body: `# Guide\n\n${Array.from({ length: 900 }, (_, i) =>
@@ -1145,7 +1244,7 @@ describe("S0 deterministic automatic-build driver protocol", () => {
     expect(afterOpen).toEqual(resumed);
   }, 60_000);
 
-  it.each(["bootstrap", "connection_terminal", "handoff_ref_mismatch"] as const)("L2 %s: rejects bootstrap reports from another invocation without changing its tasks", async (failureKind) => {
+  it.each(["bootstrap", "connection_terminal", "handoff_ref_mismatch", "correction"] as const)("L2 %s: rejects bootstrap reports from another invocation without changing its tasks", async (failureKind) => {
     const driver = expectedDriver();
     const a = fixture("bootstrap-owner-a");
     const b = fixture("bootstrap-owner-b");
@@ -1164,7 +1263,7 @@ describe("S0 deterministic automatic-build driver protocol", () => {
     expect(taskTreeDigest(target)).toBe(before);
   });
 
-  it.each(["bootstrap", "connection_terminal", "handoff_ref_mismatch"] as const)("L2 %s: keeps accepted work when bootstrap recovery resumes a dispatch between units", async (failureKind) => {
+  it.each(["bootstrap", "connection_terminal", "handoff_ref_mismatch", "correction"] as const)("L2 %s: keeps accepted work when bootstrap recovery resumes a dispatch between units", async (failureKind) => {
     const driver = expectedDriver();
     const value = fixture("bootstrap-committed-prefix", {
       body: `# Guide\n\n${Array.from({ length: 160 }, (_, i) =>
@@ -1194,7 +1293,7 @@ describe("S0 deterministic automatic-build driver protocol", () => {
     expect(state.task_receipts.map(x => x.state)).toEqual(["committed", "committed"]);
   }, 30_000);
 
-  it.each(["bootstrap", "connection_terminal", "handoff_ref_mismatch"] as const)("L2 %s: bounds repeated bootstrap failures and resumes only after an explicit recovery decision", async (failureKind) => {
+  it.each(["bootstrap", "connection_terminal", "handoff_ref_mismatch", "correction"] as const)("L2 %s: bounds repeated bootstrap failures and resumes only after an explicit recovery decision", async (failureKind) => {
     const driver = expectedDriver();
     const value = fixture("bootstrap-budget");
     const invocation = await createInvocation(driver, value);
@@ -1496,6 +1595,14 @@ describe("S0 deterministic automatic-build driver protocol", () => {
     }
     expect(changed.action.request_id).not.toBe(first.action.request_id);
     expectRootSafeStep(changed, [value.root, value.buildPlanPath]);
+    const planBytes = readFileSync(value.buildPlanPath);
+    const continued = await driver.automaticBuildStep({
+      version: "automatic_build_step_request.v1", invocation_ref: invocation.invocation_ref,
+      available_agent_slots: 1, decision: firstDecision(changed),
+    });
+    expect(continued.action.kind).toBe("SPAWN_EXECUTORS");
+    expect(readFileSync(value.buildPlanPath)).toEqual(planBytes);
+    expectRootSafeStep(continued, [value.root, value.buildPlanPath]);
   });
 
   it("binds a fresh budget decision to the current deterministic receipt", async () => {

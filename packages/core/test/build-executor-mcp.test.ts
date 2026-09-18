@@ -283,6 +283,30 @@ describe("Build Executor root-shared MCP boundary", () => {
       expect(backendCalls).toBe(1);
     });
 
+  it("R1 diagnoses a shortened handoff before binding and accepts the corrected ref", () => {
+    let backendCalls = 0;
+    const session = createBuildExecutorMcpSession({
+      bootstrap_version: BUILD_EXECUTOR_BOOTSTRAP_CONTRACT_V3.version,
+      protocol_generation: BUILD_EXECUTOR_BOOTSTRAP_CONTRACT_V3.session_protocol,
+      session_private_root: path.join(REPO_ROOT, ".r1-invalid-open"),
+      execute_request: () => {
+        backendCalls++;
+        return { version: "automatic_build_executor_session.v3", action: { kind: "WAIT", retry_after_ms: 1 } };
+      },
+    });
+    const call = (ref: string) => session.handle_message({ jsonrpc: "2.0", id: 1,
+      method: "tools/call", params: { name: "executor.open", arguments: {
+        version: "automatic_build_executor_open_request.v3", opaque_handoff_ref: ref,
+      } } }) as { result: { isError: boolean; content: { text: string }[] } };
+    const rejected = call(`abhandoff1_${"1".repeat(62)}`);
+    expect(JSON.parse(rejected.result.content[0]!.text)).toMatchObject({
+      diagnostic_code: "invalid_arguments", phase: "open", field: "opaque_handoff_ref",
+    });
+    expect(backendCalls).toBe(0);
+    expect(call(`abhandoff1_${"1".repeat(64)}`).result.isError).toBe(false);
+    expect(backendCalls).toBe(1);
+  });
+
   it("RG5 keeps a pre-session contract failure as protocol_incompatible with its operation phase", () => {
     let backendCalls = 0;
     const session = createBuildExecutorMcpSession({

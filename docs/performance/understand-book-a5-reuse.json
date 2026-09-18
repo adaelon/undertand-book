@@ -1,0 +1,334 @@
+{
+  "date": "2026-09-14",
+  "source_workspace": "E:\\allwork\\download\\agent\\lifebook\\.understand-book\\mastering-rust",
+  "storage_overlay": "E:\\allwork\\download\\agent\\understand-book\\tmp\\a5-real-20260914\\workspace",
+  "original_workspace_modified": false,
+  "original_invocation_executed": false,
+  "semantic_model_calls": 0,
+  "admissions": [
+    {
+      "work_unit_id": "stitch:fragment:0000",
+      "identity_fresh": true,
+      "core_units": 8,
+      "accepted_for_append": true,
+      "missing_or_duplicate_core_lids": []
+    },
+    {
+      "work_unit_id": "stitch:fragment:0001",
+      "identity_fresh": true,
+      "core_units": 6,
+      "accepted_for_append": true,
+      "missing_or_duplicate_core_lids": []
+    },
+    {
+      "work_unit_id": "stitch:fragment:0002",
+      "identity_fresh": true,
+      "core_units": 7,
+      "accepted_for_append": true,
+      "missing_or_duplicate_core_lids": []
+    },
+    {
+      "work_unit_id": "stitch:fragment:0003",
+      "identity_fresh": true,
+      "core_units": 9,
+      "accepted_for_append": false,
+      "missing_or_duplicate_core_lids": [
+        "23",
+        "24",
+        "25",
+        "26",
+        "27",
+        "28",
+        "29"
+      ]
+    },
+    {
+      "work_unit_id": "stitch:fragment:0004",
+      "identity_fresh": true,
+      "core_units": 8,
+      "accepted_for_append": true,
+      "missing_or_duplicate_core_lids": []
+    },
+    {
+      "work_unit_id": "stitch:fragment:0005",
+      "identity_fresh": true,
+      "core_units": 6,
+      "accepted_for_append": true,
+      "missing_or_duplicate_core_lids": []
+    },
+    {
+      "work_unit_id": "stitch:fragment:0006",
+      "identity_fresh": true,
+      "core_units": 9,
+      "accepted_for_append": true,
+      "missing_or_duplicate_core_lids": []
+    },
+    {
+      "work_unit_id": "stitch:fragment:0007",
+      "identity_fresh": true,
+      "core_units": 7,
+      "accepted_for_append": true,
+      "missing_or_duplicate_core_lids": []
+    },
+    {
+      "work_unit_id": "stitch:fragment:0008",
+      "identity_fresh": true,
+      "core_units": 9,
+      "accepted_for_append": true,
+      "missing_or_duplicate_core_lids": []
+    },
+    {
+      "work_unit_id": "stitch:fragment:0009",
+      "identity_fresh": true,
+      "core_units": 8,
+      "accepted_for_append": true,
+      "missing_or_duplicate_core_lids": []
+    },
+    {
+      "work_unit_id": "stitch:fragment:0010",
+      "identity_fresh": true,
+      "core_units": 4,
+      "accepted_for_append": true,
+      "missing_or_duplicate_core_lids": []
+    },
+    {
+      "work_unit_id": "stitch:fragment:0011",
+      "identity_fresh": true,
+      "core_units": 7,
+      "accepted_for_append": true,
+      "missing_or_duplicate_core_lids": []
+    },
+    {
+      "work_unit_id": "stitch:fragment:0012",
+      "identity_fresh": true,
+      "core_units": 8,
+      "accepted_for_append": true,
+      "missing_or_duplicate_core_lids": []
+    },
+    {
+      "work_unit_id": "stitch:fragment:0013",
+      "identity_fresh": true,
+      "core_units": 8,
+      "accepted_for_append": true,
+      "missing_or_duplicate_core_lids": []
+    },
+    {
+      "work_unit_id": "stitch:fragment:0014",
+      "identity_fresh": true,
+      "core_units": 6,
+      "accepted_for_append": true,
+      "missing_or_duplicate_core_lids": []
+    },
+    {
+      "work_unit_id": "stitch:fragment:0015",
+      "identity_fresh": true,
+      "core_units": 5,
+      "accepted_for_append": true,
+      "missing_or_duplicate_core_lids": []
+    },
+    {
+      "work_unit_id": "stitch:fragment:0016",
+      "identity_fresh": true,
+      "core_units": 6,
+      "accepted_for_append": true,
+      "missing_or_duplicate_core_lids": []
+    },
+    {
+      "work_unit_id": "stitch:fragment:0017",
+      "identity_fresh": true,
+      "core_units": 6,
+      "accepted_for_append": true,
+      "missing_or_duplicate_core_lids": []
+    },
+    {
+      "work_unit_id": "stitch:fragment:0018",
+      "identity_fresh": true,
+      "core_units": 6,
+      "accepted_for_append": true,
+      "missing_or_duplicate_core_lids": []
+    },
+    {
+      "work_unit_id": "stitch:fragment:0019",
+      "identity_fresh": true,
+      "core_units": 9,
+      "accepted_for_append": true,
+      "missing_or_duplicate_core_lids": []
+    },
+    {
+      "work_unit_id": "stitch:fragment:0020",
+      "identity_fresh": true,
+      "core_units": 6,
+      "accepted_for_append": true,
+      "missing_or_duplicate_core_lids": []
+    },
+    {
+      "work_unit_id": "stitch:fragment:0021",
+      "identity_fresh": true,
+      "core_units": 7,
+      "accepted_for_append": true,
+      "missing_or_duplicate_core_lids": []
+    },
+    {
+      "work_unit_id": "stitch:fragment:0022",
+      "identity_fresh": true,
+      "core_units": 6,
+      "accepted_for_append": true,
+      "missing_or_duplicate_core_lids": []
+    },
+    {
+      "work_unit_id": "stitch:fragment:0023",
+      "identity_fresh": true,
+      "core_units": 6,
+      "accepted_for_append": true,
+      "missing_or_duplicate_core_lids": []
+    },
+    {
+      "work_unit_id": "stitch:fragment:0024",
+      "identity_fresh": true,
+      "core_units": 2,
+      "accepted_for_append": true,
+      "missing_or_duplicate_core_lids": []
+    },
+    {
+      "work_unit_id": "stitch:fragment:0025",
+      "identity_fresh": true,
+      "core_units": 2,
+      "accepted_for_append": true,
+      "missing_or_duplicate_core_lids": []
+    },
+    {
+      "work_unit_id": "stitch:fragment:0026",
+      "identity_fresh": true,
+      "core_units": 3,
+      "accepted_for_append": true,
+      "missing_or_duplicate_core_lids": []
+    },
+    {
+      "work_unit_id": "stitch:fragment:0027",
+      "identity_fresh": true,
+      "core_units": 2,
+      "accepted_for_append": true,
+      "missing_or_duplicate_core_lids": []
+    },
+    {
+      "work_unit_id": "stitch:fragment:0028",
+      "identity_fresh": true,
+      "core_units": 2,
+      "accepted_for_append": true,
+      "missing_or_duplicate_core_lids": []
+    }
+  ],
+  "production_recovery": {
+    "version": "automatic_build_recovery.v1",
+    "phase": "routing",
+    "code": "source_slice_coverage_invalid",
+    "stage": "book_structure",
+    "target": {
+      "book_id": "mastering-rust",
+      "profile_id": "technical_learning",
+      "input_fingerprint": "9de7c6bd0a1d3b3f404841a7a3f1d4ced10893dc4c3fd3ca744ca90a35a44fc0"
+    },
+    "router_version": "book_structure_unit.v2",
+    "affected_work_units": [
+      {
+        "work_unit_id": "stitch:fragment:0003",
+        "evidence_lids": [
+          "23",
+          "24",
+          "25",
+          "26",
+          "27",
+          "28",
+          "29"
+        ]
+      }
+    ],
+    "retryable": false,
+    "recovery_actions": [
+      "retry_plan"
+    ]
+  },
+  "historical_files_unchanged": 7534,
+  "old_reduce_artifacts": 51,
+  "prior_public_file_present": false,
+  "invocations": [
+    {
+      "invocation_ref": "abinv1_0adb3820eaa247f483e7b17ed95ac9a3e6c2625564432b9e913bd797af20e86d",
+      "created_at": "2026-09-12T21:15:17.3453629+00:00",
+      "plan_version": "build_plan.v1",
+      "plan_digest_unchanged": true,
+      "binds_internal_descriptor_plan": false
+    },
+    {
+      "invocation_ref": "abinv1_0b0e3f189c92a825c9c375f16a3348fb1d3567505bb7593ff42504fed1b743b2",
+      "created_at": "2026-09-07T04:46:05.1688076+00:00",
+      "plan_version": "build_plan.v1",
+      "plan_digest_unchanged": true,
+      "binds_internal_descriptor_plan": false
+    },
+    {
+      "invocation_ref": "abinv1_1113f529eb03d3a98a7f26a1c55b79dc7551d2eb88d04648b877ca06a6784574",
+      "created_at": "2026-09-12T01:55:07.6641721+00:00",
+      "plan_version": "build_plan.v1",
+      "plan_digest_unchanged": true,
+      "binds_internal_descriptor_plan": false
+    },
+    {
+      "invocation_ref": "abinv1_1c5171bafe142fad73f7ef968940ee2ddb7b87ac9e849b0ddc1710e5a6942236",
+      "created_at": "2026-09-08T01:15:57.6193104+00:00",
+      "plan_version": "build_plan.v1",
+      "plan_digest_unchanged": true,
+      "binds_internal_descriptor_plan": false
+    },
+    {
+      "invocation_ref": "abinv1_26fc89b98216385372e30c60e0e5016d9b98d84b82b20b7fe65de593e710cd57",
+      "created_at": "2026-09-08T03:50:39.6032658Z",
+      "plan_version": "build_plan.v1",
+      "plan_digest_unchanged": true,
+      "binds_internal_descriptor_plan": false
+    },
+    {
+      "invocation_ref": "abinv1_359ac19ba328f01fe05907c7ff47966010d06a435d993c5d1355c7f4805adf1a",
+      "created_at": "2026-09-12T20:43:38.7306629+08:00",
+      "plan_version": "build_plan.v1",
+      "plan_digest_unchanged": true,
+      "binds_internal_descriptor_plan": false
+    },
+    {
+      "invocation_ref": "abinv1_4b330b066280e88cc1de0e851bd9e8c24d653eaf55292249bfa331c473e592db",
+      "created_at": "2026-09-08T18:25:54.1878987+08:00",
+      "plan_version": "build_plan.v1",
+      "plan_digest_unchanged": true,
+      "binds_internal_descriptor_plan": false
+    },
+    {
+      "invocation_ref": "abinv1_959b258326d8fdc73bdcd8b02378b7ba10aa722295c6f45d1053f7190e6d509e",
+      "created_at": "2026-09-03T01:05:49.3229797Z",
+      "plan_version": "build_plan.v1",
+      "plan_digest_unchanged": true,
+      "binds_internal_descriptor_plan": false
+    },
+    {
+      "invocation_ref": "abinv1_a38528a5cace3c1fb58107d8c4c51d8c276b4fb6d004cb782d40f0c2cb573615",
+      "created_at": "2026-09-08T09:56:06.2382480+00:00",
+      "plan_version": "build_plan.v1",
+      "plan_digest_unchanged": true,
+      "binds_internal_descriptor_plan": false
+    },
+    {
+      "invocation_ref": "abinv1_b18731de81634f95f39611bdd8993da56a9faa91ec8c155ba6466a07ade79ec6",
+      "created_at": "2026-09-13T07:08:18.0471690Z",
+      "plan_version": "build_plan.v1",
+      "plan_digest_unchanged": true,
+      "binds_internal_descriptor_plan": false
+    },
+    {
+      "invocation_ref": "abinv1_bacaa07819df12165e549b4663155776e1ec3107b3d74ebd873eaad74331d5e9",
+      "created_at": "2026-09-07T12:16:40.6969840Z",
+      "plan_version": "build_plan.v1",
+      "plan_digest_unchanged": true,
+      "binds_internal_descriptor_plan": false
+    }
+  ],
+  "production_prepare_elapsed_ms": 43922
+}

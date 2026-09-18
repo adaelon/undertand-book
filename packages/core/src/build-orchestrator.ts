@@ -1,4 +1,11 @@
 import { createHash } from "node:crypto";
+import { CODEX_EXECUTOR_TRANSPORT_PROFILE_V2 } from "./executor-transport";
+import { BookStructureContributionCoverageError, materializeBookStructureContributions } from "./book-structure-materialization";
+import { buildReproducibleProfileArtifactHeader } from "./profile-artifact";
+import { hasCommittedAutomaticBuildPublication } from "./automatic-build-publication";
+import { applyBookStructureRelationDeltas, type AcceptedBookStructureRelationDelta, type BookStructureRelationDelta } from "./book-structure-relations";
+import { bookStructureRelationContracts, routeBookStructureRelationSelections, bookStructureSelectedPairs, routeBookStructureRelationDelta,
+  type BookStructureRelationRoutedWorkUnit, type BookStructureRelationSelection } from "./book-structure-relation-routing";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import { deriveBookId } from "./book-id";
@@ -49,10 +56,12 @@ import {
   bookStructureStitchHash,
   bookStructureUnitHash,
   buildBookStructureStitchPacket,
+  buildBookStructureSidecar,
   buildBookStructureUnitSources,
   createBookStructureExecutionContractsV2,
+  createBookStructureStitchFragmentWorkUnit,
+  BOOK_STRUCTURE_EXECUTION_BUDGET_V2,
   routeBookStructureReductionLevelV2,
-  routeBookStructureStitchReductionLevelV2,
   routeBookStructureStitchWorkUnitsV2,
   routeBookStructureUnitWorkUnitsV2,
   type BookStructureCandidate,
@@ -62,7 +71,6 @@ import {
   type BookStructureReductionRoutedWorkUnitV2,
   type BookStructureRoutedWorkUnitV2,
   type BookStructureStitchReductionChildV1,
-  type BookStructureStitchReductionRoutedWorkUnitV2,
   type BookStructureStitchRoutedWorkUnitV2,
   type BookStructureStitchArtifact,
   type BookStructureUnitArtifact,
@@ -203,7 +211,9 @@ export type SemanticExtractor =
   | "book-structure-fragment-extractor"
   | "book-structure-reducer"
   | "book-structure-stitch-fragment-extractor"
-  | "book-structure-stitch-reducer";
+  | "book-structure-stitch-reducer"
+  | "book-structure-relation-selector"
+  | "book-structure-relation-extractor";
 
 export interface AutomaticBuildTarget {
   kind: "paper_workspace" | "source_file";
@@ -234,6 +244,8 @@ export type AutomaticBuildGenerationTaskV1 =
   | { kind: "book_structure"; task: BookStructureGenerationTaskV1 };
 
 export interface AutomaticBuildStageState {
+  book_structure_materialized?: BookStructureStitchArtifact;
+  book_structure_progress?: { local: { done: number; total: number }; selection: { done: number; total: number }; relation: { done: number; total: number }; publication: "pending" | "ready" | "published" };
   stage: AutomaticBuildStage;
   pending_tasks: string[];
   closed: boolean;
@@ -704,6 +716,10 @@ export function automaticBuildExtractorForWorkUnitKind(
   if (kind === "structure_stitch_reduce") {
     if (stage !== "book_structure") throw new Error(`${kind} does not belong to stage ${stage}`);
     return "book-structure-stitch-reducer";
+  }
+  if (kind === "structure_relation_select" || kind === "structure_relation_delta") {
+    if (stage !== "book_structure") throw new Error(`${kind} does not belong to stage ${stage}`);
+    return kind === "structure_relation_select" ? "book-structure-relation-selector" : "book-structure-relation-extractor";
   }
   return automaticBuildExtractorForStage(stage);
 }
@@ -1784,10 +1800,10 @@ function routeProfileSidecarProductionStage(input: {
 }
 
 type BookStructureProductionRoutedWorkUnit =
+  | BookStructureRelationRoutedWorkUnit
   | BookStructureRoutedWorkUnitV2
   | BookStructureReductionRoutedWorkUnitV2
-  | BookStructureStitchRoutedWorkUnitV2
-  | BookStructureStitchReductionRoutedWorkUnitV2;
+  | BookStructureStitchRoutedWorkUnitV2;
 
 function bookStructureProductionRecovery(input: {
   target: AutomaticBuildTarget;
@@ -1839,6 +1855,7 @@ function routeBookStructureProductionStage(input: {
     quality_profile: input.quality_profile,
     prompts: BOOK_STRUCTURE_EXECUTION_PROMPTS_V2,
   });
+  const relationContracts = bookStructureRelationContracts(contracts.stitch_fragment);
   const policyMembers = ([
     // Evidence packet and field-specific citation contracts supersede frozen v3 policies.
     ["structure_unit", contracts.whole, `book-structure-unit.${input.quality_profile}.v4`],
@@ -1846,7 +1863,8 @@ function routeBookStructureProductionStage(input: {
     ["structure_reduce", contracts.reduce, `book-structure-reduce.${input.quality_profile}.v4`],
     ["structure_stitch", contracts.stitch, `book-structure-stitch.${input.quality_profile}.v4`],
     ["structure_stitch_fragment", contracts.stitch_fragment, `book-structure-stitch-fragment.${input.quality_profile}.v4`],
-    ["structure_stitch_reduce", contracts.stitch_reduce, `book-structure-stitch-reduce.${input.quality_profile}.v4`],
+    ["structure_relation_select", relationContracts.select, `book-structure-relation-select.${input.quality_profile}.v1`],
+    ["structure_relation_delta", relationContracts.delta, `book-structure-relation-delta.${input.quality_profile}.v1`],
   ] as const).map(([kind, contract, policyGenerationId]) => ({
     kind,
     extractor: automaticBuildExtractorForWorkUnitKind("book_structure", kind),
@@ -2117,6 +2135,8 @@ function routeBookStructureProductionStage(input: {
     }
   }
 
+  const assembly = { local_work_unit_ids: [] as string[], selection_work_unit_ids: [] as string[], relation_work_unit_ids: [] as string[] };
+  const progress = { local: { done: 0, total: 0 }, selection: { done: 0, total: 0 }, relation: { done: 0, total: 0 }, publication: "pending" as "pending" | "ready" | "published" };
   let stitchArtifact: BookStructureStitchArtifact | undefined;
   if (!input.task_parent_lid && unitArtifacts.size === input.unit_sources.length) {
     const stitchPacket = buildBookStructureStitchPacket(
@@ -2168,15 +2188,13 @@ function routeBookStructureProductionStage(input: {
         artifact_path: artifactPath,
       };
     };
-    const fragmentIds = initial.mode === "fragmented"
-      ? initial.work_units.map((workUnit) => workUnit.descriptor.work_unit_id)
-      : [];
     let children: BookStructureStitchReductionChildV1[] = [];
+    progress.local.total = initial.work_units.length;
     let initialReady = true;
     let wholeArtifact: BookStructureStitchArtifact | undefined;
-    for (const workUnit of initial.work_units) {
+    for (let workUnit of initial.work_units) {
       const previous = workUnit.route.role === "whole" ? legacyStitchPrevious() : undefined;
-      const artifact = addWorkUnit({
+      let artifact = addWorkUnit({
         work_unit: workUnit,
         parent_unit_lid: "stitch",
         parent_content_hash: parentContentHash,
@@ -2186,11 +2204,55 @@ function routeBookStructureProductionStage(input: {
         output_role: workUnit.route.role === "whole" ? "stitch_artifact" : "stitch_candidate",
         ...(previous ? { previous } : {}),
       });
+      if (artifact && workUnit.route.role === "fragment") {
+        const packet = workUnit.input as import("./book-structure").BookStructureStitchFragmentInputV1;
+        const payload = artifact.payload as BookStructureCandidate;
+        const missing = packet.unit_cards.filter(card => (payload.spine ?? []).filter(unit => unit.lid === card.unit_lid).length !== 1);
+        if (missing.length) {
+          // The accepted selective spine remains immutable. A distinct normal work
+          // unit replaces only this contribution after exact-core validation.
+          const repairs = packet.unit_cards.map((card, ordinal) => createBookStructureStitchFragmentWorkUnit({
+            target: input.target.target_ref, source_fingerprint: sourceFingerprint,
+            packet: { ...packet, work_unit_id: packet.work_unit_id + ":core-repair:" + String(ordinal).padStart(4, "0"),
+              unit_cards: [card], unit_card_range: { start_ordinal: packet.unit_card_range.start_ordinal + ordinal,
+                end_ordinal_exclusive: packet.unit_card_range.start_ordinal + ordinal + 1 },
+              core_coverage_requirement: "Include exactly one spine entry for every unit_cards unit_lid; context_unit_cards are context only." },
+            contract: contracts.stitch_fragment, transport_profile: CODEX_EXECUTOR_TRANSPORT_PROFILE_V2,
+            budget: BOOK_STRUCTURE_EXECUTION_BUDGET_V2,
+          }));
+          if (repairs.some(repair => repair.status === "blocked")) throw new AutomaticBuildSnapshotRecoverySignal(createAutomaticBuildRecoveryEnvelope({
+            phase: "routing", code: "source_slice_coverage_invalid", stage: "book_structure",
+            target_ref: input.target.target_ref, router_version: BOOK_STRUCTURE_ROUTER_VERSION_V2,
+            affected_work_units: [{ work_unit_id: packet.work_unit_id, evidence_lids: missing.map(card => card.unit_lid) }],
+            retryable: false, recovery_actions: ["retry_plan"],
+          }));
+          // Historical success is retained on disk, but is not a current eligible
+          // contributor. Only the replacement belongs to this production plan.
+          workUnits.splice(workUnits.findIndex(item => item.work_unit_id === packet.work_unit_id), 1);
+          delete generationTasks[packet.work_unit_id];
+          progress.local.total += repairs.length - 1;
+          for (const repair of repairs) {
+            if (repair.status !== "ready" || repair.work_unit.route.role !== "fragment") throw new Error("core repair must fit its execution budget");
+            const work = repair.work_unit;
+            const range = repair.work_unit.route.unit_card_range;
+            const repaired = addWorkUnit({ work_unit: work, parent_unit_lid: "stitch", parent_content_hash: parentContentHash,
+              source_range: range, output_role: "stitch_candidate" });
+            if (!repaired) { pendingIds.push(work.descriptor.work_unit_id); initialReady = false; continue; }
+            progress.local.done++;
+            assembly.local_work_unit_ids.push(work.descriptor.work_unit_id);
+            children.push({ work_unit_id: work.descriptor.work_unit_id, artifact_hash: repaired.artifact_hash,
+              unit_card_range: range, payload: repaired.payload as BookStructureCandidate });
+          }
+          continue;
+        }
+      }
       if (!artifact) {
         pendingIds.push(workUnit.descriptor.work_unit_id);
         initialReady = false;
         continue;
       }
+      progress.local.done += 1;
+      assembly.local_work_unit_ids.push(workUnit.descriptor.work_unit_id);
       if (workUnit.route.role === "whole") {
         wholeArtifact = artifact.payload as BookStructureStitchArtifact;
       } else {
@@ -2216,73 +2278,55 @@ function routeBookStructureProductionStage(input: {
         });
       }
     } else if (initialReady) {
-      let reducerLevel = 1;
-      for (;;) {
-        const reduction = routeBookStructureStitchReductionLevelV2({
-          target: input.target.target_ref,
-          unit_card_count: stitchPacket.unit_cards.length,
-          children,
-          contracts,
-          reducer_level: reducerLevel,
-        });
-        if (reduction.status === "blocked") {
-          throw new AutomaticBuildSnapshotRecoverySignal(bookStructureProductionRecovery({
-            target: input.target,
-            recovery: reduction.recovery,
-          }));
+      let local: ReturnType<typeof materializeBookStructureContributions>;
+      try {
+        local = materializeBookStructureContributions(children, stitchPacket.unit_cards.map(card => card.unit_lid));
+      } catch (error) {
+        if (!(error instanceof BookStructureContributionCoverageError)) throw error;
+        throw new AutomaticBuildSnapshotRecoverySignal(createAutomaticBuildRecoveryEnvelope({
+          phase: "routing", code: "source_slice_coverage_invalid", stage: "book_structure",
+          target_ref: input.target.target_ref, router_version: BOOK_STRUCTURE_ROUTER_VERSION_V2,
+          affected_work_units: error.affected_work_units, retryable: false, recovery_actions: ["retry_plan"],
+        }));
+      }
+      for (const child of children) publicContributors.push({
+        contributor_id: 'book-structure-local:' + child.work_unit_id, work_unit_id: child.work_unit_id,
+        parent_lids: stitchPacket.unit_cards.slice(child.unit_card_range.start_ordinal, child.unit_card_range.end_ordinal_exclusive).map(card => card.unit_lid),
+      });
+      const dependencies = children.map(child => ({ artifact: child.work_unit_id, sha256: child.artifact_hash }));
+      const selections = routeBookStructureRelationSelections({ target: input.target.target_ref, candidate: local.candidate, contract: relationContracts.select, dependencies });
+      progress.selection.total = selections.length;
+      const selected: BookStructureRelationSelection[] = [];
+      const relationDependencies = [...dependencies];
+      for (const work of selections) {
+        assembly.selection_work_unit_ids.push(work.descriptor.work_unit_id);
+        const artifact = addWorkUnit({ work_unit: work, parent_unit_lid: "stitch", parent_content_hash: parentContentHash,
+          source_range: { start_ordinal: 0, end_ordinal_exclusive: stitchPacket.unit_cards.length }, output_role: "relation_selection" });
+        if (!artifact) { pendingIds.push(work.descriptor.work_unit_id); continue; }
+        progress.selection.done++;
+        selected.push(artifact.payload as BookStructureRelationSelection);
+        relationDependencies.push({ artifact: work.descriptor.work_unit_id, sha256: artifact.artifact_hash });
+      }
+      if (progress.selection.done === progress.selection.total) {
+        const pairs = bookStructureSelectedPairs(selected);
+        progress.relation.total = pairs.length;
+        const accepted: AcceptedBookStructureRelationDelta[] = [];
+        let materialized = applyBookStructureRelationDeltas(local.candidate, accepted);
+        for (const [ordinal, pair] of pairs.entries()) {
+          const work = routeBookStructureRelationDelta({ target: input.target.target_ref, candidate: materialized.candidate,
+            member_ids: pair, members: materialized.members, ordinal, contract: relationContracts.delta, dependencies: relationDependencies });
+          assembly.relation_work_unit_ids.push(work.descriptor.work_unit_id);
+          const artifact = addWorkUnit({ work_unit: work, parent_unit_lid: "stitch", parent_content_hash: parentContentHash,
+            source_range: { start_ordinal: 0, end_ordinal_exclusive: stitchPacket.unit_cards.length }, output_role: "relation_delta" });
+          if (!artifact) { pendingIds.push(work.descriptor.work_unit_id); break; }
+          accepted.push({ work_unit_id: work.descriptor.work_unit_id, delta: artifact.payload as BookStructureRelationDelta });
+          publicContributors.push({ contributor_id: `book-structure-relation:${work.descriptor.work_unit_id}`,
+            work_unit_id: work.descriptor.work_unit_id, parent_lids: work.input.reference_scope.unit_lids });
+          relationDependencies.push({ artifact: work.descriptor.work_unit_id, sha256: artifact.artifact_hash });
+          materialized = applyBookStructureRelationDeltas(local.candidate, accepted);
+          progress.relation.done++;
         }
-        const nextChildren: BookStructureStitchReductionChildV1[] = [];
-        let levelReady = true;
-        let finalArtifact: BookStructureStitchArtifact | undefined;
-        for (const workUnit of reduction.work_units) {
-          const artifact = addWorkUnit({
-            work_unit: workUnit,
-            parent_unit_lid: "stitch",
-            parent_content_hash: parentContentHash,
-            source_range: workUnit.route.unit_card_range,
-            output_role: workUnit.route.role === "final"
-              ? "stitch_artifact"
-              : "stitch_candidate",
-          });
-          if (!artifact) {
-            pendingIds.push(workUnit.descriptor.work_unit_id);
-            levelReady = false;
-            continue;
-          }
-          if (workUnit.route.role === "final") {
-            finalArtifact = artifact.payload as BookStructureStitchArtifact;
-          } else {
-            nextChildren.push({
-              work_unit_id: workUnit.descriptor.work_unit_id,
-              artifact_hash: artifact.artifact_hash,
-              unit_card_range: workUnit.route.unit_card_range,
-              payload: artifact.payload as BookStructureCandidate,
-            });
-          }
-        }
-        if (reduction.role === "final") {
-          const finalUnit = reduction.work_units[0];
-          if (reduction.work_units.length !== 1 || !finalUnit) {
-            throw new Error("BookStructure stitch final reduction level must contain exactly one root");
-          }
-          if (levelReady && finalArtifact) {
-            stitchArtifact = finalArtifact;
-            publicContributors.push({
-              contributor_id: "book-structure:stitch",
-              work_unit_id: finalUnit.descriptor.work_unit_id,
-              parent_lids: input.unit_sources.map((source) => source.unit_lid),
-            });
-            reductionParents.push({
-              parent_lid: "stitch",
-              fragment_work_unit_ids: fragmentIds,
-              final_work_unit_ids: [finalUnit.descriptor.work_unit_id],
-            });
-          }
-          break;
-        }
-        if (!levelReady) break;
-        children = nextChildren;
-        reducerLevel += 1;
+        if (progress.relation.done === progress.relation.total) stitchArtifact = { content_hash: parentContentHash, output: materialized.candidate };
       }
     }
   }
@@ -2292,11 +2336,30 @@ function routeBookStructureProductionStage(input: {
     coverage: [],
     public_contributors: publicContributors,
     reduction_parents: reductionParents,
+    book_structure_assembly: assembly,
   };
-  const closed = pendingIds.length === 0
-    && Boolean(stitchArtifact)
-    && profileArtifactMatches(path.join(input.target.workspace_dir, "book_structure.json"), input.target);
-  return { preparation_required: !input.prepare && migrations.required, ...stageStateV3({
+  const publicFile = path.join(input.target.workspace_dir, "book_structure.json");
+  let closed = false;
+  if (pendingIds.length === 0 && stitchArtifact) {
+    const spine = stitchArtifact.output.spine ?? [];
+    if (spine.length !== input.unit_sources.length
+      || input.unit_sources.some(source => spine.filter(unit => unit.lid === source.unit_lid).length !== 1)) {
+      throw new Error("BookStructure materialization does not cover the expected units exactly");
+    }
+    const result = buildBookStructureSidecar(buildReproducibleProfileArtifactHeader({
+      book_id: input.target.book_id, content_profile: input.profile.id,
+    }), stitchArtifact.output, input.loaded.lidNodes);
+    if (result.dropped.length) throw new Error(`BookStructure materialization contains invalid public references: ${result.dropped[0].id}`);
+    // An older public file with a matching profile header is not this materialization.
+    if (existsSync(publicFile)) {
+      const expected = JSON.stringify(result.sidecar, null, 2);
+      try { closed = readFileSync(publicFile, "utf8") === expected
+        && hasCommittedAutomaticBuildPublication({ workspace_dir: input.target.workspace_dir, stage: "book_structure", artifacts: { "book_structure.json": expected } }); }
+      catch { closed = false; }
+    }
+  }
+  progress.publication = closed ? "published" : stitchArtifact ? "ready" : "pending";
+  return { book_structure_materialized: stitchArtifact, book_structure_progress: progress, preparation_required: !input.prepare && migrations.required, ...stageStateV3({
     stage: "book_structure",
     closed,
     work_units: workUnits,

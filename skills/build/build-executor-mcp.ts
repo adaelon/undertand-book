@@ -4,6 +4,7 @@ import {
   createBuildExecutorToolAdapter,
   type BuildExecutorToolNameV1,
 } from "../../packages/core/src/build-executor-tool-adapter";
+import { BuildExecutorInvalidArgumentsError } from "../../packages/core/src/build-executor-tool-contract";
 import {
   BUILD_EXECUTOR_BOOTSTRAP_CONTRACT_V3,
   BuildExecutorConnectionOpenError,
@@ -235,7 +236,7 @@ export function createBuildExecutorMcpSession(options: BuildExecutorMcpSessionOp
     try {
       activeTiming = timing;
       if (!isRecord(request.params) || !isRecord(request.params.arguments)) {
-        throw new Error("Build Executor MCP tool arguments are invalid");
+        throw new BuildExecutorInvalidArgumentsError("arguments");
       }
       const call = { tool_name: toolName, request: request.params.arguments };
       const response = adapter.call_tool(
@@ -272,6 +273,7 @@ export function createBuildExecutorMcpSession(options: BuildExecutorMcpSessionOp
         error instanceof BuildExecutorSessionCommandError
           ? automaticBuildExecutorMcpErrorFromSessionError(error.session_error, phase)
           : sessionCommandCompleted || error instanceof BuildExecutorConnectionOpenError
+            || error instanceof BuildExecutorInvalidArgumentsError
             ? automaticBuildExecutorMcpErrorFromSessionError(error, phase)
             : createAutomaticBuildExecutorProtocolMcpErrorV2(phase),
       );

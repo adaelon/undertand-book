@@ -498,7 +498,8 @@ async function waitForRunLeaseExpiry(leaseRef: string): Promise<void> {
 function assertMcpError(
   value: Awaited<ReturnType<typeof callTool>>,
   phase: "open" | "input_delivery" | "generation_start" | "candidate_submit",
-  diagnostic: "protocol_incompatible" | "handoff_ref_mismatch" | "connection_terminal" = "protocol_incompatible",
+  diagnostic: "protocol_incompatible" | "handoff_ref_mismatch" | "connection_terminal" | "invalid_arguments" = "protocol_incompatible",
+  field?: "arguments" | "opaque_handoff_ref",
 ): void {
   assert.equal(value.isError, true);
   assert.deepEqual(value.response, {
@@ -507,6 +508,7 @@ function assertMcpError(
     category: diagnostic === "protocol_incompatible" ? "bootstrap" : "session",
     diagnostic_code: diagnostic,
     phase,
+    ...(field ? { field } : {}),
   });
 }
 
@@ -852,6 +854,14 @@ async function main(): Promise<void> {
     assert.equal(attemptCount(secondary), 0);
 
     assertRejectedBootstrap(sidecar, registryRoot, blackBoxCwd);
+    const absentChild = spawnSync(sidecar, ["build.diagnose-child",
+      "00000000-0000-0000-0000-000000000001", "00000000-0000-0000-0000-000000000002",
+      primary.envelope.opaque_handoff_ref], { cwd: blackBoxCwd, windowsHide: true, encoding: "utf8",
+      env: { ...process.env, CODEX_HOME: blackBoxCwd }, timeout: 30_000 });
+    assert.ifError(absentChild.error);
+    assert.equal(absentChild.status, 0, absentChild.stderr);
+    assert.equal(absentChild.stderr, "");
+    assert.equal(JSON.parse(absentChild.stdout).status, "evidence_missing");
     client = new JsonLineMcpClient(mcpInvocation, registryRoot, sidecar);
     const initialized = await client.request("initialize", {
       protocolVersion: "2025-06-18",
@@ -866,10 +876,21 @@ async function main(): Promise<void> {
 
     const trace: TraceEvent[] = [];
     assertMcpError(await callTool(client, trace, "executor.open", {
+      version: "automatic_build_executor_open_request.v99",
+      opaque_handoff_ref: primary.envelope.opaque_handoff_ref,
+    }), "open");
+    assert.equal(attemptCount(primary), 0);
+    assertMcpError(await callTool(client, trace, "executor.open", {
       version: "automatic_build_executor_open_request.v3",
       opaque_handoff_ref: primary.envelope.opaque_handoff_ref,
       path: primary.envelope.executor_handoff.path,
-    }), "open");
+    }), "open", "invalid_arguments", "arguments");
+    assert.equal(attemptCount(primary), 0);
+
+    assertMcpError(await callTool(client, trace, "executor.open", {
+      version: "automatic_build_executor_open_request.v3",
+      opaque_handoff_ref: primary.envelope.opaque_handoff_ref.slice(0, -2),
+    }), "open", "invalid_arguments", "opaque_handoff_ref");
     assert.equal(attemptCount(primary), 0);
 
     let current = await callTool(client, trace, "executor.open", {
@@ -1093,7 +1114,10 @@ async function main(): Promise<void> {
       },
       negative_gates: {
         bootstrap_v2: "protocol_incompatible",
-        unknown_request_field: "protocol_incompatible",
+        unknown_open_version: "protocol_incompatible",
+        unknown_request_field: "invalid_arguments",
+        truncated_handoff_ref: "invalid_arguments",
+        unbound_connection_correction: "same_connection_opened",
         cross_handoff_connection: "handoff_ref_mismatch",
         terminal_connection: "connection_terminal",
         premature_generation_start: "protocol_incompatible",

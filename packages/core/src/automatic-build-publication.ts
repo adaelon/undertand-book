@@ -164,6 +164,17 @@ export function buildAutomaticBuildStageBatchResult(
   };
 }
 
+/** Locate the existing atomic-publication receipt for these exact expected bytes. */
+export function hasCommittedAutomaticBuildPublication(input: {
+  workspace_dir: string; stage: AutomaticBuildPublicationStage; artifacts: Record<string, string>;
+}): boolean {
+  const artifacts = Object.entries(input.artifacts).sort(([a], [b]) => a.localeCompare(b))
+    .map(([relative, bytes]) => ({ path: safeRelative(relative), sha256: sha256(bytes), size_bytes: Buffer.byteLength(bytes) }));
+  const transactionId = sha256(JSON.stringify({ version: AUTOMATIC_BUILD_PUBLICATION_VERSION, stage: input.stage, artifacts }));
+  try { readAutomaticBuildPublicationReceipt(input.workspace_dir, input.stage, transactionId); return true; }
+  catch { return false; }
+}
+
 export function parseAutomaticBuildStageBatchResult(
   value: unknown,
   expectedStage?: AutomaticBuildPublicationStage,

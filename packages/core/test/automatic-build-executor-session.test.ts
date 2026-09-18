@@ -520,6 +520,16 @@ describe("automatic build executor.open", () => {
     expectNoAttempts(value);
   });
 
+  it("R1 rejects a 73-character V3 open without durable open or semantic attempt", () => {
+    const value = v3Fixture("r1-short-open");
+    expect(() => openAutomaticBuildExecutorSessionV3(value.envelope.opaque_handoff_ref.slice(0, -2)))
+      .toThrow(/opaque_handoff_ref/);
+    expect(existsSync(path.join(value.registryRoot, "executor-opens"))).toBe(false);
+    expectNoAttempts(value);
+    expectDeliverInput(openAutomaticBuildExecutorSessionV3(value.envelope.opaque_handoff_ref));
+    expectNoAttempts(value);
+  });
+
   it("rejects missing handoff and missing publish marker before task claim", () => {
     const missingHandoff = fixture("missing-handoff");
     unlinkSync(missingHandoff.envelope.executor_handoff.path);

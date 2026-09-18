@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { renderBookStructureRelationInput, type BookStructureRelationSelectionInput } from "./book-structure-relation-routing";
+import type { BookStructureRelationInput } from "./book-structure-relations";
 import type {
   BookStructureFragmentInputV1,
   BookStructureReductionInputV1,
@@ -126,6 +128,8 @@ export type ModelInputRenderRequest =
   | { kind: "structure_reduce"; input: BookStructureReductionInputV1 }
   | { kind: "structure_stitch_fragment"; input: BookStructureStitchFragmentInputV1 }
   | { kind: "structure_stitch_reduce"; input: BookStructureStitchReductionInputV1 }
+  | { kind: "structure_relation_select"; input: BookStructureRelationSelectionInput }
+  | { kind: "structure_relation_delta"; input: BookStructureRelationInput }
   | { kind: "structure_stitch"; input: BookStructureStitchPacket };
 
 export interface RenderedModelInputV1 {
@@ -355,6 +359,9 @@ export function renderModelInput(request: ModelInputRenderRequest): string {
       return renderBookStructureStitchFragmentModelInput(request.input);
     case "structure_stitch_reduce":
       return renderBookStructureStitchReductionModelInput(request.input);
+    case "structure_relation_select":
+    case "structure_relation_delta":
+      return renderBookStructureRelationInput(request.input);
   }
 }
 

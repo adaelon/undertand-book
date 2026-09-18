@@ -3,6 +3,7 @@ import {
   type AutomaticBuildExecutorSessionResponseV3,
 } from "./automatic-build-executor-session";
 import {
+  BuildExecutorInvalidArgumentsError,
   BUILD_EXECUTOR_SERVER_NAME_V1,
   BUILD_EXECUTOR_TOOL_NAMES_V1,
   type BuildExecutorToolNameV1,
@@ -321,17 +322,22 @@ const REQUEST_KEYS_BY_TOOL = Object.freeze({
 
 function validateClosedToolRequest(toolName: BuildExecutorToolNameV1, request: unknown): void {
   if (!request || typeof request !== "object" || Array.isArray(request)) {
-    throw new Error("Build Executor tool request must be a closed object");
+    throw new BuildExecutorInvalidArgumentsError("arguments");
   }
   const record = request as Record<string, unknown>;
   const shape = REQUEST_KEYS_BY_TOOL[toolName];
   const allowed = new Set([...shape.required, ...shape.optional]);
   if (shape.required.some((key) => !(key in record))
     || Object.keys(record).some((key) => !allowed.has(key))) {
-    throw new Error("Build Executor tool request contains unsupported or missing fields");
+    throw new BuildExecutorInvalidArgumentsError("arguments");
   }
   if (record.version !== REQUEST_VERSION_BY_TOOL[toolName]) {
     throw new Error("Build Executor tool request version does not match the selected tool");
+  }
+  if (toolName === "executor.open"
+    && (typeof record.opaque_handoff_ref !== "string"
+      || !/^abhandoff1_[a-f0-9]{64}$/u.test(record.opaque_handoff_ref))) {
+    throw new BuildExecutorInvalidArgumentsError("opaque_handoff_ref");
   }
 }
 

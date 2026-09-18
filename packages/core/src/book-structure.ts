@@ -370,6 +370,7 @@ export interface BookStructureReductionInputV1 {
 }
 
 export interface BookStructureStitchFragmentInputV1 {
+  core_coverage_requirement?: "Include exactly one spine entry for every unit_cards unit_lid; context_unit_cards are context only.";
   context_unit_cards?: BookStructureUnitCard[];
   evidence_excerpts?: BookStructureEvidenceExcerpt[];
   version: "book_structure_stitch_fragment_input.v1";
@@ -751,8 +752,8 @@ function packBookStructureExecutionSegment(
   });
 }
 
-function evaluateBookStructureExecution(input: {
-  contract: BookStructureExecutionContractV2;
+export function evaluateBookStructureExecution(input: {
+  contract: Pick<BookStructureExecutionContractV2, "semantic_prompt" | "policy_fingerprint">;
   rendered_input: string;
   transport_profile: ExecutorTransportProfileV2;
   budget: typeof BOOK_STRUCTURE_EXECUTION_BUDGET_V2;
@@ -813,7 +814,7 @@ function evaluateBookStructureExecution(input: {
   });
 }
 
-function proofBoundBookStructureDescriptor(input: {
+export function proofBoundBookStructureDescriptor(input: {
   target: BuildTargetRefV2;
   work_unit_id: string;
   kind: WorkUnitDescriptorV4["kind"];
@@ -1743,7 +1744,7 @@ function bookStructureStitchFragmentPacket(input: {
   };
 }
 
-function createBookStructureStitchFragmentWorkUnit(input: {
+export function createBookStructureStitchFragmentWorkUnit(input: {
   target: BuildTargetRefV2;
   source_fingerprint: string;
   packet: BookStructureStitchFragmentInputV1;

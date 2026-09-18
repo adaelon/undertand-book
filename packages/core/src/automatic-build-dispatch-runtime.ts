@@ -1060,6 +1060,12 @@ export function recordAutomaticBuildDispatchBootstrapFailure(
   const current = inspectAutomaticBuildDispatchRecoveryGeneration(target, stage, identity.dispatch_id,
     { now, dispatch_run_id: identity.dispatch_run_id });
   if (stableJson(current.recovery_identity) !== stableJson(identity)) return;
+  const persisted = readAutomaticBuildDispatch(target, stage, identity.dispatch_id, identity.dispatch_run_id);
+  const binding = persisted.manifest.task_bindings?.[identity.current_work_unit_id];
+  if (inspectAutomaticBuildTaskClaim(target, stage, identity.current_work_unit_id, {
+    now, ...(binding ? { binding } : {}),
+    ...(binding && isAutomaticBuildTaskPolicyBindingV2(binding) ? { policy_generation: "v3_only" as const } : {}),
+  }).status === "already_leased") return;
   writeCreateOnly(file, record);
 }
 

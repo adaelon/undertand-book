@@ -29,6 +29,9 @@ import {
   adaptAutomaticBuildPrivateArtifactSelectionV3,
   issueAutomaticBuildOpaqueHandoff,
   recordAutomaticBuildExecutorBootstrapFailure,
+  recordAutomaticBuildExecutorOpenCallCorrection,
+  validateAutomaticBuildOpenCallCorrection,
+  type AutomaticBuildOpenCallCorrectionV1,
   resolveAutomaticBuildTargetLids,
 } from "../../packages/core/src/automatic-build-executor-session";
 import {
@@ -209,6 +212,12 @@ export type AutomaticBuildStepActionV1 =
 export interface AutomaticBuildStepResponseV1 {
   version: "automatic_build_step.v1";
   action: AutomaticBuildStepActionV1;
+  book_structure_progress?: {
+    local: { done: number; total: number };
+    selection: { done: number; total: number };
+    relation: { done: number; total: number };
+    publication: "pending" | "ready" | "published";
+  };
 }
 
 export interface AutomaticBuildStepRequestV1 {
@@ -217,6 +226,7 @@ export interface AutomaticBuildStepRequestV1 {
   available_agent_slots: 0 | 1 | 2 | 3;
   decision?: { request_id: string; choice_id: string };
   bootstrap_failure?: { opaque_handoff_ref: string };
+  open_call_correction?: AutomaticBuildOpenCallCorrectionV1;
   executor_open_failure?: {
     opaque_handoff_ref: string;
     diagnostic_code: "connection_terminal" | "handoff_ref_mismatch";
@@ -478,7 +488,12 @@ function validateCreateInput(value: unknown): AutomaticBuildInvocationCreateV1 {
 
 function validateStepRequest(value: unknown): AutomaticBuildStepRequestV1 {
   if (!isRecord(value)) throw new Error("automatic build step request is invalid");
-  exactKeys(value, ["version", "invocation_ref", "available_agent_slots"], ["decision", "bootstrap_failure", "executor_open_failure"]);
+  exactKeys(value, ["version", "invocation_ref", "available_agent_slots"], ["decision", "bootstrap_failure", "executor_open_failure", "open_call_correction"]);
+  const correction = value.open_call_correction === undefined ? undefined
+    : validateAutomaticBuildOpenCallCorrection(value.open_call_correction);
+  if (correction && (value.bootstrap_failure !== undefined || value.executor_open_failure !== undefined)) {
+    throw new Error("executor failure observations are mutually exclusive");
+  }
   if (value.version !== "automatic_build_step_request.v1"
     || typeof value.invocation_ref !== "string" || !INVOCATION_REF.test(value.invocation_ref)) {
     throw new Error("automatic build step request version or invocation ref is invalid");
@@ -526,6 +541,7 @@ function validateStepRequest(value: unknown): AutomaticBuildStepRequestV1 {
     ...(decision ? { decision } : {}),
     ...(bootstrapFailure ? { bootstrap_failure: bootstrapFailure } : {}),
     ...(openFailure ? { executor_open_failure: openFailure } : {}),
+    ...(correction ? { open_call_correction: correction } : {}),
   };
 }
 
@@ -1797,7 +1813,7 @@ function replayDispatchHandoffRefs(
     throw new Error("automatic build dispatch projection directory escapes registry root");
   }
   const entries = readdirSync(realDirectory, { withFileTypes: true });
-  if (entries.length > 512 || entries.some((entry) => !entry.isFile() || entry.isSymbolicLink())) {
+  if (entries.some((entry) => !entry.isFile() || entry.isSymbolicLink())) {
     throw new Error("automatic build dispatch projection directory is invalid");
   }
   const active = new Set(activeDispatchIds);
@@ -2078,6 +2094,10 @@ export function automaticBuildStep(inputValue: AutomaticBuildStepRequestV1): Aut
   const input = validateStepRequest(inputValue);
   const invocation = readInvocation(input.invocation_ref);
   let current = loadDriverState(invocation, input.available_agent_slots);
+  const finish = (response: AutomaticBuildStepResponseV1) => {
+    const progress = current.plan_result.snapshot.stages.find(stage => stage.stage === "book_structure")?.book_structure_progress;
+    return finalizeResponse({ ...response, ...(progress ? { book_structure_progress: progress } : {}) });
+  };
   let effect: DecisionEffect = {};
   if (input.decision) {
     const applied = applyDecision(invocation, input.decision, current);
@@ -2116,14 +2136,19 @@ export function automaticBuildStep(inputValue: AutomaticBuildStepRequestV1): Aut
     ));
   }
 
-  const unopenedFailure = input.bootstrap_failure ?? input.executor_open_failure;
+  const unopenedFailure = input.bootstrap_failure ?? input.executor_open_failure
+    ?? (input.open_call_correction ? { opaque_handoff_ref: input.open_call_correction.issued_handoff_ref } : undefined);
   if (unopenedFailure) {
     const ref = unopenedFailure.opaque_handoff_ref;
     if (!invocationDispatchProjection(invocation, ref)) {
       throw new Error("bootstrap handoff was not issued by this invocation");
     }
-    recordAutomaticBuildExecutorBootstrapFailure(ref, invocation.initial_target_ref,
-      transitionNow(current, input.available_agent_slots, effect));
+    const now = transitionNow(current, input.available_agent_slots, effect);
+    if (input.open_call_correction) {
+      recordAutomaticBuildExecutorOpenCallCorrection(input.open_call_correction, invocation.initial_target_ref, now);
+    } else {
+      recordAutomaticBuildExecutorBootstrapFailure(ref, invocation.initial_target_ref, now);
+    }
   }
 
   for (let transition = 0; transition < MAX_TRANSITIONS; transition += 1) {
@@ -2195,7 +2220,7 @@ export function automaticBuildStep(inputValue: AutomaticBuildStepRequestV1): Aut
       }
       const bootstrapBoundary = bootstrapBoundaryForLaunches(invocation, current, executors);
       if (bootstrapBoundary) return bootstrapBoundary;
-      return finalizeResponse({
+      return finish({
         version: "automatic_build_step.v1",
         action: {
           kind: "SPAWN_EXECUTORS",
@@ -2222,7 +2247,7 @@ export function automaticBuildStep(inputValue: AutomaticBuildStepRequestV1): Aut
         );
         const bootstrapBoundary = bootstrapBoundaryForLaunches(invocation, current, executors);
         if (bootstrapBoundary) return bootstrapBoundary;
-        return finalizeResponse({
+        return finish({
           version: "automatic_build_step.v1",
           action: { kind: "SPAWN_EXECUTORS", executors },
         });
@@ -2231,7 +2256,7 @@ export function automaticBuildStep(inputValue: AutomaticBuildStepRequestV1): Aut
       const retryAfter = typeof action.retry_after_ms === "number" && Number.isSafeInteger(action.retry_after_ms)
         ? Math.max(1, Math.min(action.retry_after_ms, 300_000))
         : 1_000;
-      return finalizeResponse({
+      return finish({
         version: "automatic_build_step.v1",
         action: { kind: "WAIT", reason: waitReason, retry_after_ms: retryAfter },
       });
@@ -2266,13 +2291,13 @@ export function automaticBuildStep(inputValue: AutomaticBuildStepRequestV1): Aut
         transitionNow(current, input.available_agent_slots, effect),
       );
       if (privateWave?.state === "spawn") {
-        return finalizeResponse({
+        return finish({
           version: "automatic_build_step.v1",
           action: { kind: "SPAWN_EXECUTORS", executors: privateWave.executors },
         });
       }
       if (privateWave?.state === "waiting") {
-        return finalizeResponse({
+        return finish({
           version: "automatic_build_step.v1",
           action: { kind: "WAIT", reason: "backoff", retry_after_ms: 1_000 },
         });
@@ -2284,7 +2309,7 @@ export function automaticBuildStep(inputValue: AutomaticBuildStepRequestV1): Aut
           current,
         ));
       }
-      return finalizeResponse({
+      return finish({
         version: "automatic_build_step.v1",
         action: {
           kind: "DONE",
@@ -2297,7 +2322,7 @@ export function automaticBuildStep(inputValue: AutomaticBuildStepRequestV1): Aut
     }
     throw new Error("automatic build reducer received an unsupported internal action");
   }
-  return finalizeResponse({
+  return finish({
     version: "automatic_build_step.v1",
     action: { kind: "WAIT", reason: "backoff", retry_after_ms: 50 },
   });

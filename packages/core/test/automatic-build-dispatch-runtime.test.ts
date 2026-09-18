@@ -8,6 +8,7 @@ import {
   finishAutomaticBuildDispatch,
   finishAutomaticBuildDispatchIfTerminal,
   inspectAutomaticBuildDispatchRecoveryGeneration,
+  recordAutomaticBuildDispatchBootstrapFailure,
   inspectAutomaticBuildDispatch,
   persistAutomaticBuildDispatch as persistAutomaticBuildDispatchRuntime,
   prepareAutomaticBuildDispatch,
@@ -170,6 +171,25 @@ function workspaceFileSnapshot(root: string): Record<string, string> {
 }
 
 describe("automatic build executor dispatch runtime", () => {
+  it("R2 preserves an active lease when a stale unopened correction is reported", () => {
+    const { target, descriptors, manifest, bindings } = fixture();
+    const persisted = persistAutomaticBuildDispatch(target, manifest, {
+      owner: `r2-lease:${manifest.dispatch_id}`, created_at: "2026-09-02T01:00:00.000Z",
+      reserve_ttl_ms: 60_000, run_ttl_ms: 1_800_000,
+    }).persisted;
+    const options = { now: "2026-09-02T01:00:00.200Z", dispatch_run_id: persisted.dispatch_run_id };
+    const initial = inspectAutomaticBuildDispatchRecoveryGeneration(target, "profile_sidecar", manifest.dispatch_id, options);
+    expect(advanceAutomaticBuildDispatch(target, "profile_sidecar", manifest.dispatch_id, {
+      ...options, descriptors, task_bindings: bindings,
+    }).status).toBe("leased");
+    const before = workspaceFileSnapshot(target.workspace_dir);
+    recordAutomaticBuildDispatchBootstrapFailure(target, "profile_sidecar", initial.recovery_identity,
+      `abhandoff1_${"a".repeat(64)}`, options.now);
+    expect(workspaceFileSnapshot(target.workspace_dir)).toEqual(before);
+    expect(inspectAutomaticBuildDispatchRecoveryGeneration(target, "profile_sidecar", manifest.dispatch_id, options))
+      .toEqual(initial);
+  });
+
   it.each([false, true])("skips unpublished obsolete batches and retains pending work (partial=%s)", (partial) => {
     const { target, descriptors, plan } = fixture(16);
     const accepted = "same-accepted-descriptor-plan";

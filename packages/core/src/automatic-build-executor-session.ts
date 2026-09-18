@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { BuildExecutorInvalidArgumentsError } from "./build-executor-tool-contract";
 import {
   existsSync,
   lstatSync,
@@ -194,6 +195,7 @@ export type AutomaticBuildExecutorMcpErrorCategoryV2 =
   | "writer"
   | "internal";
 export type AutomaticBuildExecutorMcpErrorCodeV2 =
+  | "invalid_arguments"
   | "protocol_incompatible"
   | "connection_terminal"
   | "handoff_ref_mismatch"
@@ -216,6 +218,45 @@ export interface AutomaticBuildExecutorMcpErrorV2 {
   category: AutomaticBuildExecutorMcpErrorCategoryV2;
   diagnostic_code: AutomaticBuildExecutorMcpErrorCodeV2;
   phase: AutomaticBuildExecutorMcpErrorPhaseV2;
+  field?: "arguments" | "version" | "opaque_handoff_ref";
+}
+
+export interface AutomaticBuildOpenCallCorrectionV1 {
+  version: "automatic_build_open_call_correction.v1";
+  issued_handoff_ref: string;
+  attempted_handoff_ref: string;
+  request_version: "automatic_build_executor_open_request.v3";
+  field: "opaque_handoff_ref";
+  phase: "open";
+  cause: "invalid_ref" | "different_ref";
+  reported_diagnostic: AutomaticBuildExecutorMcpErrorV2;
+}
+
+export function validateAutomaticBuildOpenCallCorrection(value: unknown): AutomaticBuildOpenCallCorrectionV1 {
+  if (!isRecord(value)) throw new Error("open correction evidence is missing");
+  exactKeys(value, ["version", "issued_handoff_ref", "attempted_handoff_ref", "request_version",
+    "field", "phase", "cause", "reported_diagnostic"]);
+  const diagnostic = value.reported_diagnostic;
+  if (!isRecord(diagnostic)) throw new Error("open correction reported diagnostic is missing");
+  exactKeys(diagnostic, ["version", "status", "category", "diagnostic_code", "phase"], ["field"]);
+  if (value.version !== "automatic_build_open_call_correction.v1"
+    || value.request_version !== "automatic_build_executor_open_request.v3"
+    || value.phase !== "open" || value.field !== "opaque_handoff_ref"
+    || typeof value.attempted_handoff_ref !== "string" || value.attempted_handoff_ref.length > 1_024
+    || value.attempted_handoff_ref === value.issued_handoff_ref
+    || value.cause !== (OPAQUE_HANDOFF_REF.test(value.attempted_handoff_ref) ? "different_ref" : "invalid_ref")
+    || diagnostic.version !== "automatic_build_executor_mcp_error.v2" || diagnostic.status !== "interrupted"
+    || diagnostic.phase !== "open"
+    || !(diagnostic.diagnostic_code === "protocol_incompatible" && diagnostic.category === "bootstrap"
+      || value.cause === "different_ref" && diagnostic.diagnostic_code === "executor_internal"
+        && diagnostic.category === "internal"
+      || ["invalid_arguments", "handoff_ref_mismatch", "connection_terminal"].includes(String(diagnostic.diagnostic_code))
+        && diagnostic.category === "session")
+    || diagnostic.field !== undefined && diagnostic.field !== "opaque_handoff_ref") {
+    throw new Error("open correction requires a supported request version and actual handoff difference");
+  }
+  validateOpaqueHandoffRef(value.issued_handoff_ref);
+  return value as unknown as AutomaticBuildOpenCallCorrectionV1;
 }
 
 function hasExecutorDiagnosticCode(
@@ -257,6 +298,10 @@ export function automaticBuildExecutorMcpErrorFromSessionError(
     version: "automatic_build_executor_mcp_error.v2" as const,
     phase,
   };
+  if (error instanceof BuildExecutorInvalidArgumentsError) {
+    return { ...base, status: "interrupted", category: "session",
+      diagnostic_code: "invalid_arguments", field: error.field };
+  }
   for (const code of ["connection_terminal", "handoff_ref_mismatch"] as const) {
     if (phase === "open" && hasExecutorDiagnosticCode(error, code)) {
       return { ...base, status: "interrupted", category: "session", diagnostic_code: code };
@@ -1266,7 +1311,7 @@ function opaqueHandoffRefForV4(input: Parameters<typeof opaqueHandoffIdentityV4>
 function validateOpaqueHandoffRef(value: unknown): string {
   if (typeof value !== "string" || Buffer.byteLength(value, "utf8") > MAX_REF_BYTES
     || !OPAQUE_HANDOFF_REF.test(value)) {
-    throw new Error("opaque handoff ref is invalid");
+    throw new BuildExecutorInvalidArgumentsError("opaque_handoff_ref");
   }
   return value;
 }
@@ -2269,7 +2314,7 @@ function taskDescriptor(
       }
       if (manifest.stage === "paper_reading_guide") throw new Error("executor stage has no semantic descriptor");
       const stage = readAutomaticBuildTaskStage(target, { stage: manifest.stage, work_unit_id: workUnitId,
-        ...(task && !task.descriptor.kind.startsWith("structure_stitch") ? { parent_lid: task.parent_unit_lid } : {}) },
+        ...(task && task.parent_unit_lid !== "stitch" ? { parent_lid: task.parent_unit_lid } : {}) },
         manifest.policy_fingerprint.quality_profile);
       descriptor = stage?.work_units?.find(candidate => candidate.work_unit_id === workUnitId);
       currentBinding = stage?.task_bindings?.[workUnitId];
@@ -4271,6 +4316,26 @@ export function recordAutomaticBuildExecutorBootstrapFailure(
   const inspection = inspectAutomaticBuildDispatch(target, owner.stage, owner.dispatch_id, now, owner.dispatch_run_id);
   if (inspection.state !== "active") return;
   recordAutomaticBuildDispatchBootstrapFailure(target, owner.stage, record.recovery_identity, ref, now);
+}
+
+export function recordAutomaticBuildExecutorOpenCallCorrection(
+  correction: AutomaticBuildOpenCallCorrectionV1,
+  expectedTarget: BuildTargetRefV2,
+  now: string,
+): void {
+  const observation = validateAutomaticBuildOpenCallCorrection(correction);
+  const record = readOpaqueHandoffRecord(observation.issued_handoff_ref);
+  if (!sameTargetRef(record.target_ref, expectedTarget)) throw new Error("open correction target mismatch");
+  if (existsSync(registryFile("executor-opens", observation.issued_handoff_ref))) return;
+  // A valid different ref may belong to another child. Never recover over its durable open.
+  if (observation.cause === "different_ref"
+    && existsSync(registryFile("executor-opens", observation.attempted_handoff_ref))) {
+    throw new Error("attempted handoff already opened another work item");
+  }
+  // Retain the real tool diagnostic separately from the control-generation failure receipt.
+  const file = registryFile("executor-open-corrections", observation.issued_handoff_ref);
+  if (!existsSync(file)) writeCreateOnly(file, observation);
+  recordAutomaticBuildExecutorBootstrapFailure(observation.issued_handoff_ref, expectedTarget, now);
 }
 
 export function openAutomaticBuildExecutorSessionV3(

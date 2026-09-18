@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import path from "node:path";
 import { canonicalAutomaticBuildJson } from "./automatic-build-protocol";
 import {
+  BuildExecutorInvalidArgumentsError,
   BUILD_EXECUTOR_SERVER_NAME_V1,
   BUILD_EXECUTOR_TOOL_NAMES_V1,
   type BuildExecutorToolNameV1,
@@ -470,7 +471,9 @@ export function createBuildExecutorStdioConnectionCapability(input: {
 
     if (call.tool_name === "executor.open") {
       const requestedHandoffRef = stringField(call.request, "opaque_handoff_ref");
-      if (!requestedHandoffRef || !OPAQUE_HANDOFF_REF.test(requestedHandoffRef)) return false;
+      if (!requestedHandoffRef || !OPAQUE_HANDOFF_REF.test(requestedHandoffRef)) {
+        throw new BuildExecutorInvalidArgumentsError("opaque_handoff_ref");
+      }
       if (phase === "terminal") throw new BuildExecutorConnectionOpenError("connection_terminal");
       if (handoffRef && requestedHandoffRef !== handoffRef) {
         throw new BuildExecutorConnectionOpenError("handoff_ref_mismatch");

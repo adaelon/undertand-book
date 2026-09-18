@@ -5,6 +5,8 @@ import bookStructureFragmentPrompt from "../../agents/book-structure-fragment-ex
 import bookStructureReducerPrompt from "../../agents/book-structure-reducer.md";
 import bookStructureStitchFragmentPrompt from "../../agents/book-structure-stitch-fragment-extractor.md";
 import bookStructureStitchReducerPrompt from "../../agents/book-structure-stitch-reducer.md";
+import bookStructureRelationSelectorPrompt from "../../agents/book-structure-relation-selector.md";
+import bookStructureRelationExtractorPrompt from "../../agents/book-structure-relation-extractor.md";
 import dispatchExecutorPrompt from "../../agents/automatic-build-dispatch-executor.md";
 import canvasGeometry from "@napi-rs/canvas/geometry.js";
 import paperLexiconPrompt from "../../agents/paper-lexicon-extractor.md";
@@ -39,6 +41,8 @@ const PROMPTS: Record<string, string> = {
   "book-structure-reducer.md": bookStructureReducerPrompt,
   "book-structure-stitch-fragment-extractor.md": bookStructureStitchFragmentPrompt,
   "book-structure-stitch-reducer.md": bookStructureStitchReducerPrompt,
+  "book-structure-relation-selector.md": bookStructureRelationSelectorPrompt,
+  "book-structure-relation-extractor.md": bookStructureRelationExtractorPrompt,
   "paper-lexicon-extractor.md": paperLexiconPrompt,
   "paper-metadata-extractor.md": paperMetadataPrompt,
   "pass1-local-extractor.md": pass1Prompt,
@@ -198,6 +202,11 @@ if (command === "executor.agent-template") {
   }
   prepare("automatic-build-driver.ts", []);
   await import("./automatic-build-driver");
+} else if (command === "build.diagnose-child") {
+  const diagnosticArgs = forwardedArgs(1);
+  prepare("build-child-diagnostic.ts", diagnosticArgs);
+  const { runBuildChildDiagnostic } = await import("./build-child-diagnostic");
+  await runBuildChildDiagnostic(diagnosticArgs);
 } else if (command === "executor.mcp") {
   prepare("build-executor-mcp.ts", forwardedArgs(1));
   await import("./build-executor-mcp");
