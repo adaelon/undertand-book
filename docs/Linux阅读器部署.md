@@ -134,6 +134,21 @@ node scripts/linux/smoke-reader.mjs pdf
 
 PDF 阶段通过后，停止服务并观察 memory/session 磁盘记录，再启动服务，执行 `node scripts/linux/smoke-reader.mjs restore`。该阶段验证原书、位置、高亮、Note、画像和技术材料带读历史。脚本的 PDF 保存阶段使用真实浏览器选区和 UI 保存入口。
 
+### 移动阅读发布核对
+
+移动工作区的本地定向验证见 [MW2](performance/mobile-workspace-mw2-20260918.md)、[MW3](performance/mobile-workspace-mw3-20260918.md)、[MW7](performance/mobile-workspace-mw7-20260918.md) 与 [MW9](performance/mobile-workspace-mw9-20260918.md)；当前整体状态见 [MW8](performance/mobile-workspace-mw8-20260918.md)。部署时必须从同一 release 目录构建 Web 与 Server，记录 `git rev-parse HEAD`、systemd `WorkingDirectory/ExecStart` 和 `UNDERSTAND_BOOK_WEB_DIST`，再从真实认证入口核对页面、API、PDF 资源及 Agent 事件流。不要用本地 HEAD 推断线上版本。
+
+切换前在隔离实例完成以下核对：
+
+1. 匿名页面和匿名 `/api/desktop/status` 都返回 401；认证后两者可用，且密码不进入 URL、日志或证据文件。
+2. 页面、`/api`、原始 PDF 与 `/api/agent/runs/<turn>/events` 走同一 Nginx 入口。现有模板已关闭代理缓冲；只有真实事件流显示被缓冲时才调整对应 location，并保留 `nginx -t` 结果。
+3. 发起一次隔离问题，记录 turn id；断网期间让服务端完成，恢复后确认同一 turn 从快照/事件流接回，创建接口没有第二次 POST，终态只出现一次。
+4. 注入创建响应丢失时，页面显示“提交结果待核对”；历史无法证明接受时不得自动重提。401 与临时断网显示不同状态。
+5. 对有 PDF 的同一来源显式切换 Markdown/PDF，确认偏好仅属于当前设备与 `book_id + source_fingerprint`，旋转不自动改变选择；无映射位置只显示限制。
+6. 切换 release 后从旧桌面入口读取既有聊天、笔记、高亮、画像与 RP 现场。回滚只恢复前一源码、Web dist、Server 和代理引用，不替换 memory/private/书库目录。
+
+iPhone 复验至少记录机型、iOS/Safari、页面缩放和实际 layout/visual viewport，并完成：竖屏阅读与问答一步切换、低高度横屏紧凑栏、长按手柄选区、中文组合输入零误发送、来源打开恰好一次及返回、后台恢复。Playwright WebKit 通过不等于此项通过。当前入口仍是 HTTP Basic Auth，未提供传输加密；移动验收不改变该限制，也不为手机新增匿名接口。
+
 ## 已知限制
 
 - 单实例对应一个读者，共享当前书和会话；公网入口的一个登录账户仍对应同一读者，不提供多用户隔离。

@@ -24,7 +24,13 @@ import {
   type ProjectedNoteMarker,
 } from "../pdf-annotation-projection";
 import { resolvePdfNotePlacementTarget } from "../pdf-note-placement";
+import {
+  pdfRenderIdentity,
+  planPdfRenderResidency,
+  type PdfRenderPlanPage,
+} from "../pdf-rendering";
 import type { PdfSelectionCapture } from "../pdf-selection-draft";
+import type { PdfReadingAnchor } from "../useReadingContinuity";
 import NoteCard from "./NoteCard.vue";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
@@ -103,13 +109,20 @@ const noteMarkersVisible = ref(true);
 const zoom = ref(1);
 const notePlacementCandidate = ref<{ entry: PdfSourceMapEntry; region: PdfRegion } | null>(null);
 const notePlacementFeedback = ref<string | null>(null);
+const geometryReady = ref(false);
 let notePlacementFeedbackTimer: number | null = null;
 let loadingTask: ReturnType<typeof pdfjsLib.getDocument> | null = null;
 let observer: IntersectionObserver | null = null;
+let resizeObserver: ResizeObserver | null = null;
 let renderToken = 0;
+let renderFrame: number | null = null;
 let viewportFrame: number | null = null;
 let lastViewportFingerprint = "";
 let selectionRequestSequence = 0;
+let containerWidth = 0;
+let containerHeight = 0;
+let containerDpr = 0;
+const renderIdentities = new Map<number, string>();
 
 const activeNoteMarker = computed(() => {
   if (!noteMarkersVisible.value) return null;
@@ -255,8 +268,51 @@ function scheduleViewportChange() {
 
 function onViewportScroll() {
   notePlacementCandidate.value = null;
+  scheduleRenderResidency();
   scheduleViewportChange();
   emit("viewport-interaction");
+}
+
+async function reconcileContainerGeometry() {
+  const root = pageList.value;
+  if (!root) return;
+  const width = root.clientWidth;
+  const height = root.clientHeight;
+  const dpr = window.devicePixelRatio || 1;
+  const widthChanged = width !== containerWidth;
+  const heightChanged = height !== containerHeight;
+  const dprChanged = dpr !== containerDpr;
+  if (!widthChanged && !heightChanged && !dprChanged) return;
+  const anchor = captureZoomAnchor();
+  containerWidth = width;
+  containerHeight = height;
+  containerDpr = dpr;
+  if (width <= 0 || height <= 0) {
+    renderToken += 1;
+    geometryReady.value = false;
+    await resetRenderedPages();
+    return;
+  }
+  if (widthChanged || dprChanged) {
+    renderToken += 1;
+    const token = renderToken;
+    geometryReady.value = false;
+    emit("selection-cancel");
+    await resetRenderedPages();
+    if (token !== renderToken) return;
+    await nextTick();
+    restoreZoomAnchor(anchor);
+    observePages();
+    await reconcileRenderedPages();
+  } else {
+    scheduleRenderResidency();
+  }
+  scheduleViewportChange();
+}
+
+function onWindowResize() {
+  void reconcileContainerGeometry();
+  scheduleViewportChange();
 }
 
 function pageShellStyle(page: PdfSourceMap["pages"][number]): Record<string, string> {
@@ -552,18 +608,44 @@ async function resetRenderedPages() {
   for (const task of pageTasks) task.cancel();
   await Promise.allSettled(pageTasks.map((task) => task.promise));
   renderStates.value = {};
+  renderIdentities.clear();
   for (const task of textLayerTasks.values()) task.cancel();
   textLayerTasks.clear();
   for (const canvas of canvasEls.values()) {
     const ctx = canvas.getContext("2d");
     ctx?.clearRect(0, 0, canvas.width, canvas.height);
+    canvas.width = 0;
+    canvas.height = 0;
+    delete canvas.dataset.renderGeneration;
+    delete canvas.dataset.backingPixels;
   }
   for (const layer of textLayerEls.values()) layer.replaceChildren();
+}
+
+function releaseRenderedPage(pageIndex: number) {
+  pageRenderTasks.get(pageIndex)?.cancel();
+  pageRenderTasks.delete(pageIndex);
+  textLayerTasks.get(pageIndex)?.cancel();
+  textLayerTasks.delete(pageIndex);
+  renderIdentities.delete(pageIndex);
+  const next = { ...renderStates.value };
+  delete next[pageIndex];
+  renderStates.value = next;
+  const canvas = canvasEls.get(pageIndex);
+  if (canvas) {
+    canvas.getContext("2d")?.clearRect(0, 0, canvas.width, canvas.height);
+    canvas.width = 0;
+    canvas.height = 0;
+    delete canvas.dataset.renderGeneration;
+    delete canvas.dataset.backingPixels;
+  }
+  textLayerEls.get(pageIndex)?.replaceChildren();
 }
 
 async function loadPdfDocument() {
   renderToken += 1;
   const token = renderToken;
+  geometryReady.value = false;
   pdfDoc.value = null;
   pdfError.value = null;
   pdfLoading.value = true;
@@ -583,7 +665,7 @@ async function loadPdfDocument() {
     pdfDoc.value = doc;
     await nextTick();
     observePages();
-    await renderVisiblePages();
+    await reconcileRenderedPages();
     scheduleViewportChange();
   } catch (e) {
     if (token === renderToken) pdfError.value = e instanceof Error ? e.message : String(e);
@@ -592,43 +674,96 @@ async function loadPdfDocument() {
   }
 }
 
-function pageScale(pageIndex: number): number {
+function pageScale(pageIndex: number): number | null {
   const page = props.sourceMap?.pages.find((p) => p.pageIndex === pageIndex);
   const el = pageEls.get(pageIndex);
-  if (!page || !el) return 1;
+  if (!page || !el || el.clientWidth <= 0 || el.clientHeight <= 0) return null;
   return el.clientWidth / pdfPageVisualSize(page).width;
 }
 
-async function renderPage(pageInfo: PdfSourceMap["pages"][number], token: number) {
+function renderSourceIdentity(): string {
+  return `${props.sourceMap?.book_id ?? ""}:${props.sourceMap?.config_hash ?? ""}:${props.pdfUrl}`;
+}
+
+function currentRenderPlan() {
+  const root = pageList.value;
+  const pages = props.sourceMap?.pages ?? [];
+  if (!root || root.clientWidth <= 0 || root.clientHeight <= 0) {
+    return planPdfRenderResidency([], window.devicePixelRatio || 1);
+  }
+  const rootRect = root.getBoundingClientRect();
+  const center = rootRect.top + rootRect.height / 2;
+  return planPdfRenderResidency(pages.flatMap((page) => {
+    const element = pageEls.get(page.pageIndex);
+    if (!element || element.clientWidth <= 0 || element.clientHeight <= 0) return [];
+    const rect = element.getBoundingClientRect();
+    const distance = rootRect.height > 0 && rect.height > 0
+      ? Math.abs(rect.top + rect.height / 2 - center)
+      : page.pageIndex;
+    return [{
+      pageIndex: page.pageIndex,
+      cssWidth: element.clientWidth,
+      cssHeight: element.clientHeight,
+      distance,
+    }];
+  }), window.devicePixelRatio || 1);
+}
+
+async function renderPage(
+  pageInfo: PdfSourceMap["pages"][number],
+  token: number,
+  planPage: PdfRenderPlanPage,
+  rasterScale: number,
+) {
   if (!pdfDoc.value) return;
+  const identity = pdfRenderIdentity({
+    source: renderSourceIdentity(),
+    pageIndex: pageInfo.pageIndex,
+    cssWidth: planPage.cssWidth,
+    cssHeight: planPage.cssHeight,
+    rasterScale,
+    generation: token,
+  });
   const state = renderStates.value[pageInfo.pageIndex];
-  if (state?.rendered || state?.rendering) return;
+  if (renderIdentities.get(pageInfo.pageIndex) === identity && (state?.rendered || state?.rendering)) return;
+  if (renderIdentities.has(pageInfo.pageIndex)) releaseRenderedPage(pageInfo.pageIndex);
   const canvas = canvasEls.get(pageInfo.pageIndex);
   const textLayer = textLayerEls.get(pageInfo.pageIndex);
   if (!canvas || !textLayer) return;
+  renderIdentities.set(pageInfo.pageIndex, identity);
   setRenderState(pageInfo.pageIndex, { rendering: true, error: null });
   let renderTask: PdfRenderTask | null = null;
   try {
     const page: PdfPage = await pdfDoc.value.getPage(pageInfo.pageIndex + 1);
-    if (token !== renderToken) return;
+    if (token !== renderToken || renderIdentities.get(pageInfo.pageIndex) !== identity) return;
     const scale = pageScale(pageInfo.pageIndex);
+    if (scale === null) {
+      releaseRenderedPage(pageInfo.pageIndex);
+      return;
+    }
     const viewport = page.getViewport({ scale });
-    const dpr = window.devicePixelRatio || 1;
-    canvas.width = Math.max(1, Math.floor(viewport.width * dpr));
-    canvas.height = Math.max(1, Math.floor(viewport.height * dpr));
+    canvas.width = planPage.backingWidth;
+    canvas.height = planPage.backingHeight;
     canvas.style.width = `${viewport.width}px`;
     canvas.style.height = `${viewport.height}px`;
+    canvas.dataset.renderGeneration = String(token);
+    canvas.dataset.backingPixels = String(planPage.backingPixels);
     const ctx = canvas.getContext("2d");
     if (!ctx) throw new Error("Canvas 2D context unavailable");
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.setTransform(rasterScale, 0, 0, rasterScale, 0, 0);
     renderTask = page.render({ canvas, canvasContext: ctx, viewport });
     pageRenderTasks.set(pageInfo.pageIndex, renderTask);
     await renderTask.promise;
-    if (token !== renderToken) return;
-    await renderTextLayer(pageInfo.pageIndex, page, viewport, textLayer);
+    if (token !== renderToken || renderIdentities.get(pageInfo.pageIndex) !== identity) return;
+    await renderTextLayer(pageInfo.pageIndex, page, viewport, textLayer, token, identity);
+    if (token !== renderToken || renderIdentities.get(pageInfo.pageIndex) !== identity) return;
     setRenderState(pageInfo.pageIndex, { rendered: true, rendering: false, error: null });
   } catch (e) {
-    if (token !== renderToken || (e instanceof Error && e.name === "RenderingCancelledException")) return;
+    if (
+      token !== renderToken
+      || renderIdentities.get(pageInfo.pageIndex) !== identity
+      || (e instanceof Error && e.name === "RenderingCancelledException")
+    ) return;
     setRenderState(pageInfo.pageIndex, {
       rendering: false,
       error: e instanceof Error ? e.message : String(e),
@@ -650,12 +785,13 @@ async function setZoom(next: number) {
   zoom.value = clamped;
   renderToken += 1;
   const token = renderToken;
+  geometryReady.value = false;
   await resetRenderedPages();
   if (token !== renderToken) return;
   await nextTick();
   restoreZoomAnchor(anchor);
   observePages();
-  await renderVisiblePages();
+  await reconcileRenderedPages();
   if (token === renderToken) scheduleViewportChange();
 }
 
@@ -664,6 +800,8 @@ async function renderTextLayer(
   page: PdfPage,
   viewport: ReturnType<PdfPage["getViewport"]>,
   layer: HTMLElement,
+  token: number,
+  identity: string,
 ) {
   layer.replaceChildren();
   layer.style.setProperty("--scale-factor", String(viewport.scale));
@@ -671,7 +809,11 @@ async function renderTextLayer(
   layer.style.setProperty("--total-scale-factor", "calc(var(--scale-factor) * var(--user-unit))");
   const textLayer = new TextLayerBuilder({
     pdfPage: page,
-    onAppend: (textLayerDiv: HTMLElement) => layer.replaceChildren(textLayerDiv),
+    onAppend: (textLayerDiv: HTMLElement) => {
+      if (token === renderToken && renderIdentities.get(pageIndex) === identity) {
+        layer.replaceChildren(textLayerDiv);
+      }
+    },
   });
   layer.style.width = `${viewport.width}px`;
   layer.style.height = `${viewport.height}px`;
@@ -698,10 +840,7 @@ function observePages() {
   observer = new IntersectionObserver(
     (entries) => {
       for (const entry of entries) {
-        if (!entry.isIntersecting) continue;
-        const pageIndex = Number((entry.target as HTMLElement).dataset.pageIndex);
-        const page = props.sourceMap?.pages.find((p) => p.pageIndex === pageIndex);
-        if (page) void renderPage(page, renderToken);
+        if (entry.isIntersecting) scheduleRenderResidency();
       }
     },
     { root: pageList.value, rootMargin: "700px 0px" },
@@ -709,19 +848,68 @@ function observePages() {
   for (const el of pageEls.values()) observer.observe(el);
 }
 
-async function renderVisiblePages() {
-  const pages = props.sourceMap?.pages ?? [];
-  const visible = pages.filter((page) => {
-    const el = pageEls.get(page.pageIndex);
-    if (!el) return false;
-    const rect = el.getBoundingClientRect();
-    const root = pageList.value?.getBoundingClientRect();
-    if (!root) return false;
-    return rect.bottom >= root.top - 700 && rect.top <= root.bottom + 700;
-  });
-  for (const page of visible.length ? visible : pages.slice(0, 2)) {
-    await renderPage(page, renderToken);
+async function reconcileRenderedPages() {
+  const token = renderToken;
+  const plan = currentRenderPlan();
+  const keep = new Set(plan.pages.map((page) => page.pageIndex));
+  for (const pageIndex of [...renderIdentities.keys()]) {
+    if (!keep.has(pageIndex)) releaseRenderedPage(pageIndex);
   }
+  if (!plan.pages.length) {
+    geometryReady.value = false;
+    return;
+  }
+  const pages = new Map((props.sourceMap?.pages ?? []).map((page) => [page.pageIndex, page]));
+  for (const planned of plan.pages) {
+    const page = pages.get(planned.pageIndex);
+    if (page) await renderPage(page, token, planned, plan.rasterScale);
+  }
+  if (token === renderToken) {
+    geometryReady.value = plan.pages.every((page) => renderStates.value[page.pageIndex]?.rendered);
+  }
+}
+
+function captureReadingAnchor(): PdfReadingAnchor | null {
+  const root = pageList.value;
+  const anchor = captureZoomAnchor();
+  if (!root || !anchor || root.clientHeight <= 0) return null;
+  return {
+    surface: "pdf",
+    sourceKey: renderSourceIdentity(),
+    pageIndex: anchor.pageIndex,
+    pageRatio: anchor.pageRatio,
+    probeRatio: anchor.probeOffset / root.clientHeight,
+    horizontalRatio: anchor.horizontalRatio,
+    anchorLid: nearestMappedLid(anchor.pageIndex + anchor.pageRatio),
+  };
+}
+
+async function restoreReadingAnchor(anchor: PdfReadingAnchor): Promise<boolean> {
+  if (anchor.sourceKey !== renderSourceIdentity()) return false;
+  await nextTick();
+  const root = pageList.value;
+  const target = pageEls.get(anchor.pageIndex);
+  if (!root || !target || root.clientHeight <= 0) return false;
+  const rootRect = root.getBoundingClientRect();
+  const targetRect = target.getBoundingClientRect();
+  if (rootRect.height <= 0 || targetRect.height <= 0) return false;
+  const probeOffset = Math.max(0, Math.min(rootRect.height, anchor.probeRatio * rootRect.height));
+  const targetY = targetRect.top + targetRect.height * Math.max(0, Math.min(1, anchor.pageRatio));
+  root.scrollTop = Math.max(0, root.scrollTop + targetY - (rootRect.top + probeOffset));
+  if (anchor.horizontalRatio !== null && root.scrollWidth > root.clientWidth) {
+    root.scrollLeft = Math.max(0, anchor.horizontalRatio * root.scrollWidth - root.clientWidth / 2);
+  }
+  scheduleRenderResidency();
+  scheduleViewportChange();
+  return true;
+}
+
+function scheduleRenderResidency() {
+  if (renderFrame !== null) return;
+  renderFrame = window.requestAnimationFrame(() => {
+    renderFrame = null;
+    void reconcileRenderedPages();
+  });
 }
 
 async function scrollActiveIntoView() {
@@ -746,7 +934,7 @@ async function scrollActiveIntoView() {
       root.scrollTop = Math.max(0, root.scrollTop + targetY - (rootRect.top + probeOffset));
     }
   }
-  if (page) await renderPage(page, renderToken);
+  if (page) await reconcileRenderedPages();
 }
 
 function rectToPdfRegion(rect: DOMRect, pageIndex: number): PdfRegion | null {
@@ -837,6 +1025,8 @@ function onSelectionKeydown(event: KeyboardEvent) {
   emit("selection-cancel");
 }
 
+defineExpose({ captureReadingAnchor, restoreReadingAnchor });
+
 watch(
   () => [props.pdfUrl, props.sourceMap?.config_hash] as const,
   () => {
@@ -861,6 +1051,21 @@ watch(pageCount, async () => {
   scheduleViewportChange();
 });
 
+watch(pageList, (root) => {
+  resizeObserver?.disconnect();
+  resizeObserver = null;
+  if (!root) return;
+  containerWidth = root.clientWidth;
+  containerHeight = root.clientHeight;
+  containerDpr = window.devicePixelRatio || 1;
+  if (typeof ResizeObserver !== "undefined") {
+    resizeObserver = new ResizeObserver(() => {
+      void reconcileContainerGeometry();
+    });
+    resizeObserver.observe(root);
+  }
+}, { flush: "post" });
+
 watch(
   () => props.annotationProjection,
   () => {
@@ -877,17 +1082,19 @@ watch(
   },
 );
 
-window.addEventListener("resize", scheduleViewportChange);
+window.addEventListener("resize", onWindowResize);
 window.addEventListener("keydown", onSelectionKeydown);
 
 onBeforeUnmount(() => {
   renderToken += 1;
   clearNotePlacementFeedback();
+  if (renderFrame !== null) window.cancelAnimationFrame(renderFrame);
   if (viewportFrame !== null) window.cancelAnimationFrame(viewportFrame);
-  window.removeEventListener("resize", scheduleViewportChange);
+  window.removeEventListener("resize", onWindowResize);
   window.removeEventListener("keydown", onSelectionKeydown);
   emit("selection-cancel");
   observer?.disconnect();
+  resizeObserver?.disconnect();
   for (const task of pageRenderTasks.values()) task.cancel();
   pageRenderTasks.clear();
   for (const task of textLayerTasks.values()) task.cancel();
@@ -959,7 +1166,8 @@ onBeforeUnmount(() => {
     <div
       ref="pageList"
       class="pdf-page-list"
-      :class="{ 'is-zoomed': zoom > 1 }"
+      :class="{ 'is-zoomed': zoom > 1, 'geometry-pending': !geometryReady }"
+      :aria-busy="!geometryReady"
       @scroll.passive="onViewportScroll"
       @wheel.passive="emit('viewport-interaction')"
       @pointerdown="emit('viewport-interaction')"
@@ -1192,6 +1400,11 @@ onBeforeUnmount(() => {
 }
 .pdf-page-list.is-zoomed {
   justify-items: start;
+}
+.pdf-page-list.geometry-pending .pdf-text-layer,
+.pdf-page-list.geometry-pending .pdf-user-annotation-layer {
+  pointer-events: none;
+  user-select: none;
 }
 .pdf-page-shell {
   position: relative;

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { initialRun, reduceRun, type RunActivity, type RunEvent } from "./agent-run-state";
+import { initialRun, interruptRun, reduceRun, type RunActivity, type RunEvent } from "./agent-run-state";
 const descriptor = { book_id: "book", session_id: "session", turn_id: "turn" };
 const activity: RunActivity = { step_id: 1, parent_step_id: null, kind: "tool", name: "book.text", label: "读取原文", status: "running", started_ms: 5, duration_ms: null, error_code: null, result_count: null, usage_total_tokens: null };
 const event = (seq: number, type: string, payload: unknown): RunEvent => ({ turn_id: "turn", seq, type, payload, elapsed_ms: seq });
@@ -57,4 +57,18 @@ it("deduplicates effects and rejects older or cross-book Reader revisions", () =
   state = reduceRun(state, event(5, "reader.changed", { book_id: "other", revision: 9 }));
   expect(state.reader_state).toEqual({ book_id: "book", revision: 4 });
   expect(reduceRun(initialRun(descriptor), event(5, "run.snapshot", state))).toEqual(state);
+});
+
+it("marks an unverifiable persisted run interrupted without changing its identity or sequence", () => {
+  const running = { ...initialRun(descriptor), last_seq: 7 };
+  const interrupted = interruptRun(running, {
+    error_code: "AGENT_RUN_NOT_FOUND",
+    category: "not_found",
+    message: "Run does not exist",
+  });
+  expect(interrupted.descriptor).toEqual(descriptor);
+  expect(interrupted.last_seq).toBe(7);
+  expect(interrupted.execution_state).toBe("interrupted");
+  expect(interrupted.persistence_state).toBe("failed");
+  expect(interrupted.error?.error_code).toBe("AGENT_RUN_NOT_FOUND");
 });

@@ -21,6 +21,17 @@ export interface RunEvent { turn_id: string; seq: number; elapsed_ms: number; ty
 export function initialRun(descriptor: RunDescriptor): RunSnapshot {
   return { descriptor, last_seq: -1, execution_state: "running", persistence_state: "pending", activities: [], final_view: null, error: null };
 }
+export function interruptRun(
+  state: RunSnapshot,
+  error: NonNullable<RunSnapshot["error"]>,
+): RunSnapshot {
+  return {
+    ...state,
+    execution_state: "interrupted",
+    persistence_state: "failed",
+    error,
+  };
+}
 export function reduceRun(state: RunSnapshot, event: RunEvent): RunSnapshot {
   if (event.turn_id !== state.descriptor.turn_id || event.seq <= state.last_seq) return state;
   if (event.type === "run.snapshot" || ["run.completed", "run.failed", "run.cancelled", "run.persistence_failed"].includes(event.type)) {
@@ -68,6 +79,9 @@ export function reduceRun(state: RunSnapshot, event: RunEvent): RunSnapshot {
   return next;
 }
 export function runStatusText(snapshot: RunSnapshot, connection: string): string {
+  if (snapshot.error?.error_code === "AGENT_RUN_NOT_FOUND") return "无法核对原运行；问题不会自动重提";
+  if (connection === "authentication") return "认证已失效；请通过现有受保护入口恢复登录";
+  if (connection === "offline") return "暂时无法核对运行；问题不会自动重提";
   if (snapshot.persistence_state === "failed") return "运行已结束，但结果未保存";
   if (snapshot.execution_state === "cancelled") return "已停止";
   if (snapshot.execution_state === "failed") return "运行失败";

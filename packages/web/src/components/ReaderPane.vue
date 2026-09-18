@@ -4,6 +4,7 @@ import type { FormulaSemantics, ImageAssetManifestEntry, MemoryRecord } from "..
 import type { Manifest } from "../api";
 import NoteCard from "./NoteCard.vue";
 import { resolveMarkdownNotePlacementTarget } from "../markdown-note-placement";
+import { useReaderSelection, type ReaderSelectionSnapshot } from "../useReaderSelection";
 
 type NodeKind = Manifest["tree"][number]["kind"];
 export interface Segment {
@@ -42,7 +43,7 @@ function imageRenderSrc(asset: ImageAssetManifestEntry | null | undefined): stri
 }
 const emit = defineEmits<{
   (e: "select", lid: string): void;
-  (e: "prose-mouse-up"): void;
+  (e: "prose-selection-change", snapshot: ReaderSelectionSnapshot | null): void;
   (e: "highlight-block", lid: string): void;
   (e: "note-block", lid: string): void;
   (e: "modify-highlight", rec: MemoryRecord): void;
@@ -121,7 +122,10 @@ function markdownHeadingClass(seg: Segment): Record<string, boolean> {
 }
 
 const pane = ref<HTMLElement | null>(null);
+useReaderSelection(pane, (snapshot) => emit("prose-selection-change", snapshot));
 const placementCandidateLid = ref<string | null>(null);
+const wrappedAssetLids = ref<Set<string>>(new Set());
+const expandedAssetLid = ref<string | null>(null);
 const validPlacementLids = computed(() => new Set(props.segments.map((segment) => segment.lid)));
 const edgePx = 2;
 const preloadScreens = 2;
@@ -281,6 +285,17 @@ function onPointerUp(event: PointerEvent) {
   else emit("note-placement-invalid");
 }
 
+function toggleAssetWrap(lid: string) {
+  const next = new Set(wrappedAssetLids.value);
+  if (next.has(lid)) next.delete(lid);
+  else next.add(lid);
+  wrappedAssetLids.value = next;
+}
+
+function toggleAssetExpanded(lid: string) {
+  expandedAssetLid.value = expandedAssetLid.value === lid ? null : lid;
+}
+
 function lidElement(lid: string): HTMLElement | null {
   const el = pane.value;
   if (!el) return null;
@@ -363,7 +378,7 @@ watch(
     @pointerup="onPointerUp"
     @keydown="onKeydown"
   >
-    <article class="prose" @mouseup="emit('prose-mouse-up')">
+    <article class="prose">
       <div v-for="item in readerItems" :key="itemKey(item)" class="seg">
         <template v-if="item.type === 'flow'">
           <p class="flow-paragraph">
@@ -412,11 +427,11 @@ watch(
             </template>
           </p>
           <template v-for="seg in item.segments" :key="`meta-${seg.lid}`">
-            <div v-if="seg.lid === props.selectedLid" class="block-actions">
+            <div v-if="seg.lid === props.selectedLid" class="block-actions" data-reader-selection-ignore>
               <button @click="emit('highlight-block', seg.lid)">高亮整段</button>
               <button @click="emit('note-block', seg.lid)">记笔记</button>
             </div>
-            <div v-for="h in props.highlightCardsOf(seg.lid)" :key="h.mem_id" class="hl-card">
+            <div v-for="h in props.highlightCardsOf(seg.lid)" :key="h.mem_id" class="hl-card" data-reader-selection-ignore>
               <span class="hl-ex">{{ props.hlExcerpt(h) }}</span>
               <span class="hl-actions">
                 <button class="note-btn" title="改范围(移除后重选)" @click="emit('modify-highlight', h)">编辑</button>
@@ -424,6 +439,7 @@ watch(
               </span>
             </div>
             <NoteCard
+              data-reader-selection-ignore
               v-for="note in notesOf(seg.lid)"
               :key="note.mem_id"
               :note="note"
@@ -449,7 +465,7 @@ watch(
             @click="emit('select', item.segment.lid)"
             v-html="props.renderSeg(item.segment)"
           ></p>
-          <div v-if="item.segment.lid === props.selectedLid" class="block-actions">
+          <div v-if="item.segment.lid === props.selectedLid" class="block-actions" data-reader-selection-ignore>
             <button @click="emit('highlight-block', item.segment.lid)">高亮整段</button>
             <button @click="emit('note-block', item.segment.lid)">记笔记</button>
           </div>
@@ -464,15 +480,27 @@ watch(
             selected: item.segment.lid === props.selectedLid,
             hl: props.isHighlighted(item.segment.lid),
             'note-placement-candidate': item.segment.lid === placementCandidateLid,
+            'asset-expanded': item.segment.lid === expandedAssetLid,
           }]"
           @click="emit('select', item.segment.lid)"
         >
-          <div class="asset-head">
+          <div class="asset-head" data-reader-selection-ignore>
             <span>{{ item.segment.kind }}</span>
-            <button class="asset-jump" title="选中该 LID" @click.stop="emit('select', item.segment.lid)">定位</button>
+            <span class="asset-head-actions">
+              <button
+                v-if="item.segment.kind === 'code' || item.segment.kind === 'table'"
+                type="button"
+                :aria-pressed="wrappedAssetLids.has(item.segment.lid)"
+                @click.stop="toggleAssetWrap(item.segment.lid)"
+              >{{ wrappedAssetLids.has(item.segment.lid) ? '不换行' : '换行' }}</button>
+              <button type="button" @click.stop="toggleAssetExpanded(item.segment.lid)">
+                {{ item.segment.lid === expandedAssetLid ? '收起' : '展开' }}
+              </button>
+              <button class="asset-jump" title="选中该 LID" @click.stop="emit('select', item.segment.lid)">定位</button>
+            </span>
           </div>
-          <pre v-if="item.segment.kind === 'code'" class="asset-source asset-code"><code v-html="props.renderSeg(item.segment)"></code></pre>
-          <pre v-else-if="item.segment.kind === 'table'" class="asset-source asset-table" v-html="props.renderSeg(item.segment)"></pre>
+          <pre v-if="item.segment.kind === 'code'" class="asset-source asset-code" :class="{ 'soft-wrap': wrappedAssetLids.has(item.segment.lid) }"><code v-html="props.renderSeg(item.segment)"></code></pre>
+          <pre v-else-if="item.segment.kind === 'table'" class="asset-source asset-table" :class="{ 'soft-wrap': wrappedAssetLids.has(item.segment.lid) }" v-html="props.renderSeg(item.segment)"></pre>
           <figure v-else-if="item.segment.kind === 'image'" class="asset-image-figure">
             <img
               v-if="imageRenderSrc(props.imageAsset(item.segment.lid))"
@@ -493,14 +521,14 @@ watch(
             <figcaption>原文</figcaption>
             <pre class="asset-source" v-html="props.renderSeg(item.segment)"></pre>
           </figure>
-          <div v-if="item.segment.lid === props.selectedLid" class="block-actions asset-actions">
+          <div v-if="item.segment.lid === props.selectedLid" class="block-actions asset-actions" data-reader-selection-ignore>
             <button @click.stop="emit('highlight-block', item.segment.lid)">高亮整段</button>
             <button @click.stop="emit('note-block', item.segment.lid)">记笔记</button>
           </div>
         </section>
 
         <template v-if="item.type === 'single'">
-          <div v-for="h in props.highlightCardsOf(item.segment.lid)" :key="h.mem_id" class="hl-card">
+          <div v-for="h in props.highlightCardsOf(item.segment.lid)" :key="h.mem_id" class="hl-card" data-reader-selection-ignore>
             <span class="hl-ex">{{ props.hlExcerpt(h) }}</span>
             <span class="hl-actions">
               <button class="note-btn" title="改范围(移除后重选)" @click="emit('modify-highlight', h)">编辑</button>
@@ -508,6 +536,7 @@ watch(
             </span>
           </div>
           <NoteCard
+            data-reader-selection-ignore
             v-for="note in notesOf(item.segment.lid)"
             :key="note.mem_id"
             :note="note"

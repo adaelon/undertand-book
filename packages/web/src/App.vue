@@ -120,9 +120,20 @@ import FileDropField from "./components/FileDropField.vue";
 import LeftRail from "./components/LeftRail.vue";
 import PdfReaderPane from "./components/PdfReaderPane.vue";
 import ReaderPane from "./components/ReaderPane.vue";
+import ReaderWorkspace, { type WorkspaceAuxTab } from "./components/ReaderWorkspace.vue";
 import RightRail from "./components/RightRail.vue";
 import { useAgentRun } from "./useAgentRun";
+import { submissionWasAccepted, type UnknownSubmissionAudit } from "./agent-submission-recovery";
+import {
+  readReaderSurfacePreference,
+  resolveReaderSurface,
+  writeReaderSurfacePreference,
+  type ReaderSurface,
+} from "./reader-surface";
+import type { ReaderSelectionSnapshot } from "./useReaderSelection";
+import { createReadingContinuity, type PdfReadingAnchor, type ReadingReturnPoint } from "./useReadingContinuity";
 import { runStatusText, type RunActivity, type RunSnapshot } from "./agent-run-state";
+import type { WorkspaceLogicalState, WorkspaceProjection } from "./workspace-layout";
 
 type NodeKind = import("./api").Manifest["tree"][number]["kind"];
 type ManifestNode = import("./api").Manifest["tree"][number];
@@ -209,6 +220,19 @@ const readerPaneRef = ref<{
   captureScrollAnchor: (candidateLids: string[]) => ScrollAnchor | null;
   restoreScrollAnchor: (anchor: ScrollAnchor | null) => Promise<void>;
   scrollLidIntoView: (lid: string) => Promise<boolean>;
+} | null>(null);
+const pdfReaderPaneRef = ref<{
+  captureReadingAnchor: () => PdfReadingAnchor | null;
+  restoreReadingAnchor: (anchor: PdfReadingAnchor) => Promise<boolean>;
+} | null>(null);
+const workspaceRef = ref<{
+  showReader: () => void;
+  showAssistant: (tab?: WorkspaceAuxTab) => void;
+  toggleOutline: () => void;
+} | null>(null);
+const mobileGlobalActionsOpen = ref(false);
+const rightRailRef = ref<{
+  scrollToTurn: (turnId: string) => Promise<boolean>;
 } | null>(null);
 interface Segment {
   lid: string;
@@ -390,15 +414,36 @@ const pdfReaderAvailable = computed(() => {
     && !!pdfSourceMap.value
     && pdfCapabilityUsable(manifest.capabilities.project_lid_to_pdf?.status);
 });
+const noteSourceFingerprint = ref<string | null>(null);
+const readerSurfacePreference = ref<ReaderSurface | null>(null);
+const readerSurfaceIdentity = computed(() => {
+  const bookId = buildWorkbenchSnapshot.value?.book_id;
+  const sourceFingerprint = noteSourceFingerprint.value;
+  return bookId && sourceFingerprint ? { bookId, sourceFingerprint } : null;
+});
+const activeReaderSurface = computed<ReaderSurface>(() => resolveReaderSurface(
+  readerSurfacePreference.value,
+  pdfReaderAvailable.value,
+));
+watch(readerSurfaceIdentity, (identity) => {
+  if (!identity) {
+    readerSurfacePreference.value = null;
+    return;
+  }
+  try {
+    readerSurfacePreference.value = readReaderSurfacePreference(window.localStorage, identity);
+  } catch {
+    readerSurfacePreference.value = null;
+  }
+}, { immediate: true });
 const NOTE_PLACEMENT_CAPABILITIES = {
   markdown: true,
   pdf: true,
 } as const;
-const noteSourceFingerprint = ref<string | null>(null);
 const notePlacementController = useNotePlacementController();
 const notePlacementState = notePlacementController.state;
 type SavingNotePlacement = Extract<NotePlacementState, { phase: "saving" }>;
-const notePlacementSurface = computed<NotePlacementSurface>(() => pdfReaderAvailable.value ? "pdf" : "markdown");
+const notePlacementSurface = computed<NotePlacementSurface>(() => activeReaderSurface.value);
 const unquotedNotePlacementAvailable = computed(() =>
   notePlacementCapability(notePlacementSurface.value, NOTE_PLACEMENT_CAPABILITIES),
 );
@@ -2102,6 +2147,44 @@ async function init() {
   }
 }
 
+let workspaceRecoveryTask: Promise<void> | null = null;
+let workspaceRecoveryTimer: number | null = null;
+async function recoverWorkspaceState() {
+  if (workspaceRecoveryTask || appSurface.value !== "reader") return workspaceRecoveryTask;
+  const expectedBookId = buildWorkbenchSnapshot.value?.book_id;
+  if (!expectedBookId) return;
+  workspaceRecoveryTask = (async () => {
+    try {
+      const source = await api.sourceFingerprint();
+      if (buildWorkbenchSnapshot.value?.book_id !== expectedBookId) return;
+      if (source.book_id !== expectedBookId) {
+        residentRun.forget();
+        resetBookSessionUi();
+        await init();
+        return;
+      }
+      applyAgentHistory(await api.agentHistory());
+    } catch (error) {
+      if (error instanceof ApiError && (error.status === 401 || error.status === 403)) {
+        banner.value = "认证已失效，请通过现有受保护入口恢复登录。";
+      } else if (navigator.onLine === false) {
+        banner.value = "当前离线；恢复网络后将核对原运行，不会自动重提问题。";
+      }
+    } finally {
+      workspaceRecoveryTask = null;
+    }
+  })();
+  return workspaceRecoveryTask;
+}
+
+function scheduleWorkspaceRecovery() {
+  if (document.visibilityState === "hidden" || workspaceRecoveryTask || workspaceRecoveryTimer !== null) return;
+  workspaceRecoveryTimer = window.setTimeout(() => {
+    workspaceRecoveryTimer = null;
+    void recoverWorkspaceState();
+  }, 0);
+}
+
 async function invokeDesktop<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   if (!("__TAURI_INTERNALS__" in window)) {
     throw new Error("桌面命令仅在 Understand Book 应用中可用");
@@ -2223,8 +2306,18 @@ function codexPluginStateLabel(state: CodexPluginState): string {
     error: "需要处理",
   }[state];
 }
-onMounted(init);
+onMounted(() => {
+  void init();
+  document.addEventListener("visibilitychange", scheduleWorkspaceRecovery);
+  window.addEventListener("pageshow", scheduleWorkspaceRecovery);
+  window.addEventListener("online", scheduleWorkspaceRecovery);
+});
 onBeforeUnmount(() => {
+  document.removeEventListener("visibilitychange", scheduleWorkspaceRecovery);
+  window.removeEventListener("pageshow", scheduleWorkspaceRecovery);
+  window.removeEventListener("online", scheduleWorkspaceRecovery);
+  if (workspaceRecoveryTimer !== null) window.clearTimeout(workspaceRecoveryTimer);
+  workspaceRecoveryTimer = null;
   if (paperPositionSyncTimer !== null) window.clearTimeout(paperPositionSyncTimer);
   if (profileBackfillPollTimer !== null) window.clearTimeout(profileBackfillPollTimer);
   notePlacementController.cancel();
@@ -2260,8 +2353,8 @@ async function onScrollEdge(direction: "up" | "down") {
     edgeLoading.value = false;
   }
 }
-async function doGoto(lid: string, focusQuote?: string | null) {
-  if (!lid) return;
+async function doGoto(lid: string, focusQuote?: string | null): Promise<boolean> {
+  if (!lid) return false;
   try {
     banner.value = "";
     sourceFocus.value = focusQuote === undefined ? null : { lid, quote: focusQuote };
@@ -2271,7 +2364,7 @@ async function doGoto(lid: string, focusQuote?: string | null) {
       ?? gotoEffect.viewport.top_lid;
     await loadWindow(gotoEffect.viewport, "replace", navigationTargetLid);
     queuePaperSelection(lid);
-    if (pdfReaderAvailable.value && !hasMappedPdfNavigationTarget(
+    if (activeReaderSurface.value === "pdf" && !hasMappedPdfNavigationTarget(
       lid,
       navigationTargetLid,
       pdfMappedLids.value,
@@ -2280,9 +2373,49 @@ async function doGoto(lid: string, focusQuote?: string | null) {
     }
     await loadPaperProjectionData();
     gotoInput.value = "";
+    return true;
   } catch (e) {
     if (outlineNavigationLid.value === lid) outlineNavigationLid.value = null;
     fail(e);
+    return false;
+  }
+}
+async function selectReaderSurface(surface: ReaderSurface) {
+  if (surface === activeReaderSurface.value) return;
+  if (surface === "pdf" && !pdfReaderAvailable.value) {
+    banner.value = "当前来源没有可用的 PDF 阅读表面。";
+    return;
+  }
+  const previous = activeReaderSurface.value;
+  const markdownAnchor = previous === "markdown"
+    ? readerPaneRef.value?.captureScrollAnchor(segments.value.map((segment) => segment.lid)) ?? null
+    : null;
+  const pdfAnchor = previous === "pdf" ? pdfReaderPaneRef.value?.captureReadingAnchor() ?? null : null;
+  hlPopover.value = null;
+  window.getSelection()?.removeAllRanges();
+  cancelPdfSelectionDraftFor("reader-surface-switch");
+  readerSurfacePreference.value = surface;
+  const identity = readerSurfaceIdentity.value;
+  if (identity) {
+    try { writeReaderSurfacePreference(window.localStorage, identity, surface); } catch { /* Device preference remains in memory. */ }
+  }
+  await nextTick();
+  if (surface === "pdf") {
+    const lid = markdownAnchor?.lid ?? readingAnchorLid.value;
+    if (lid && !hasMappedPdfNavigationTarget(lid, lid, pdfMappedLids.value)) {
+      banner.value = `PDF 暂无 ${lid} 的可靠定位，已保留当前 PDF 页面。`;
+    }
+    return;
+  }
+  const lid = pdfAnchor?.anchorLid;
+  if (!lid) {
+    banner.value = "当前 PDF 位置没有可靠的 Markdown 映射，已保留此前正文读位。";
+    return;
+  }
+  if (segments.value.some((segment) => segment.lid === lid)) {
+    await readerPaneRef.value?.scrollLidIntoView(lid);
+  } else if (await doGoto(lid)) {
+    await readerPaneRef.value?.scrollLidIntoView(lid);
   }
 }
 async function focusSource(source: { lid: string; quote: string | null }) {
@@ -2397,6 +2530,7 @@ function cancelPdfSelectionDraft() {
 }
 
 function onReaderViewportInteraction() {
+  readingContinuity.cancelRestore();
   clearOutlineNavigation();
   const interaction = readerInteractionRevision;
   if (residentRun.active.value) manualReaderBoundary = api.state().then(state => { if (readerInteractionRevision === interaction) manualReaderState = state; }).catch(fail);
@@ -2475,6 +2609,7 @@ interface MarkdownSelectedRange {
   end: number;
 }
 interface MarkdownSelectionPopover {
+  contextKey: string;
   x: number;
   y: number;
   anchorLid: string;
@@ -2776,14 +2911,13 @@ function closeFormulaDialog() {
 }
 
 
-function onProseMouseUp() {
-  const sel = window.getSelection();
-  if (!sel || sel.rangeCount === 0 || sel.isCollapsed) {
+function onProseSelection(snapshot: ReaderSelectionSnapshot | null) {
+  if (!snapshot) {
     sourceFocus.value = null;
     hlPopover.value = null;
     return;
   }
-  const range = sel.getRangeAt(0);
+  const range = snapshot.range;
   const ranges = selectionRanges(range);
   if (ranges.length === 0) {
     hlPopover.value = null;
@@ -2794,8 +2928,9 @@ function onProseMouseUp() {
     hlPopover.value = null;
     return;
   }
-  const rect = range.getBoundingClientRect();
+  const rect = snapshot.rect;
   hlPopover.value = {
+    contextKey: workspaceContextKey.value,
     x: rect.left + rect.width / 2,
     y: rect.top,
     anchorLid: ranges[0].lid,
@@ -2805,7 +2940,10 @@ function onProseMouseUp() {
 }
 async function confirmHighlight() {
   const p = hlPopover.value;
-  if (!p) return;
+  if (!p || p.contextKey !== workspaceContextKey.value) {
+    hlPopover.value = null;
+    return;
+  }
   try {
     banner.value = "";
     const groupId = p.ranges.length > 1 ? newHighlightGroupId() : undefined;
@@ -2832,7 +2970,10 @@ function markdownSelectionContext(popover: MarkdownSelectionPopover): SelectionC
 }
 function noteSelection() {
   const p = hlPopover.value;
-  if (!p) return;
+  if (!p || p.contextKey !== workspaceContextKey.value) {
+    hlPopover.value = null;
+    return;
+  }
   const quote = p.text.replace(/\s+/g, " ").trim();
   selectedLid.value = p.anchorLid;
   hlPopover.value = null;
@@ -2841,7 +2982,10 @@ function noteSelection() {
 }
 function askSelection() {
   const p = hlPopover.value;
-  if (!p) return;
+  if (!p || p.contextKey !== workspaceContextKey.value) {
+    hlPopover.value = null;
+    return;
+  }
   const quote = p.text.replace(/\s+/g, " ").trim();
   if (!quote) return;
   askDraft.value = { lid: p.anchorLid, quote, ...markdownSelectionContext(p) };
@@ -2849,6 +2993,7 @@ function askSelection() {
   agentInput.value = "";
   hlPopover.value = null;
   window.getSelection()?.removeAllRanges();
+  workspaceRef.value?.showAssistant("agent");
 }
 function clearAskDraft() {
   askDraft.value = null;
@@ -2870,6 +3015,10 @@ interface ChatTurn {
   runTrace?: TraceStep[];
   runStatus?: string;
   draft?: import("./agent-run-state").AnswerDraft | null;
+  submissionUnknown?: boolean;
+}
+interface UnknownSubmissionRecord extends UnknownSubmissionAudit {
+  turn: ChatTurn;
 }
 type AskDraft = AskQuote;
 const chat = ref<ChatTurn[]>([]);
@@ -2877,6 +3026,39 @@ const chatSessions = ref<AgentChatSessionSummary[]>([]);
 const activeChatSessionId = ref("");
 const agentInput = ref("");
 const askDraft = ref<AskDraft | null>(null);
+const unknownSubmissionsBySession = new Map<string, UnknownSubmissionRecord[]>();
+const workspaceAuxTab = ref<WorkspaceAuxTab | null>(null);
+const workspaceAuxTabRevision = ref(0);
+const mobileWorkspaceEnabled = import.meta.env.VITE_MOBILE_WORKSPACE !== "0";
+const workspaceContextKey = computed(() => `${buildWorkbenchSnapshot.value?.book_id ?? "no-book"}:${activeChatSessionId.value || "no-chat"}`);
+const workspaceLogicalState = computed<WorkspaceLogicalState>(() => ({
+  contextKey: workspaceContextKey.value,
+  revision: readerLayout.value?.rev ?? 0n,
+  activePreset: readerLayout.value?.active_preset ?? null,
+  openSlots: readerLayout.value?.open_slots ?? [],
+  focusedSlot: readerLayout.value?.focused_slot ?? null,
+}));
+const readingContinuity = createReadingContinuity();
+const returnToAnswerAvailable = ref(false);
+let pendingReadingReturnPoint: ReadingReturnPoint | null = null;
+watch(workspaceContextKey, (contextKey) => {
+  hlPopover.value = null;
+  window.getSelection()?.removeAllRanges();
+  pendingReadingReturnPoint = null;
+  readingContinuity.invalidateContext(contextKey);
+  returnToAnswerAvailable.value = readingContinuity.has(contextKey);
+});
+function requestWorkspaceTab(tab: WorkspaceAuxTab) {
+  workspaceAuxTab.value = tab;
+  workspaceAuxTabRevision.value += 1;
+}
+function handleWorkspaceProjection(projection: WorkspaceProjection) {
+  if (projection.navigation === "desktop") mobileGlobalActionsOpen.value = false;
+}
+function toggleNavigationOutline() {
+  if (mobileGlobalActionsOpen.value) workspaceRef.value?.toggleOutline();
+  else leftRailOpen.value = !leftRailOpen.value;
+}
 const acceptingRun = ref(false);
 const residentRun = useAgentRun((snapshot) => { void finishResidentRun(snapshot).catch(fail); });
 const sending = computed(() => acceptingRun.value || residentRun.active.value);
@@ -3070,6 +3252,17 @@ function applyAgentHistory(history: AgentHistoryResponse) {
   activeChatSessionId.value = history.active_session_id;
   chatSessions.value = history.sessions;
   chat.value = history.current.turns.map((turn, index) => chatTurnFromHistory(turn, previousChat[index]));
+  const unknown = unknownSubmissionsBySession.get(history.current.id) ?? [];
+  const unresolved = unknown.filter((record) => !submissionWasAccepted(record, {
+    sessionId: history.current.id,
+    turns: history.current.turns.map((turn) => ({ turnId: turn.turn_id, user: turn.user })),
+  }));
+  if (unresolved.length) {
+    chat.value.push(...unresolved.map((record) => record.turn));
+    unknownSubmissionsBySession.set(history.current.id, unresolved);
+  } else {
+    unknownSubmissionsBySession.delete(history.current.id);
+  }
   handled.value = {};
   showTrace.value = {};
   const pending = history.current.turns.find(turn => turn.status === "pending_assistant");
@@ -3161,6 +3354,8 @@ async function submitAgentMessage(msg: string, displayUser: string, draft: AskDr
     questionSelection: draft ? { ...draft } : null,
     effectLabels: [],
   };
+  const submissionSessionId = activeChatSessionId.value;
+  const knownTurnIds = chat.value.flatMap((candidate) => candidate.turnId ? [candidate.turnId] : []);
   chat.value.push(turn);
   acceptingRun.value = true;
   banner.value = "";
@@ -3182,9 +3377,19 @@ async function submitAgentMessage(msg: string, displayUser: string, draft: AskDr
     }
   } catch (error) {
     turn.pending = false;
-    turn.error = error instanceof ApiError ? `[${error.category}] ${error.errorCode}: ${error.message}` : String(error);
-    // A lost creation response may already have accepted the turn. Discover it, never resubmit it.
-    try { await refreshAgentHistory(); } catch { fail(error); }
+    if (error instanceof ApiError && (error.status === 401 || error.status === 403)) {
+      turn.error = "认证已失效，本次问题未提交。请通过现有受保护入口恢复登录。";
+    } else if (error instanceof ApiError && error.status < 500) {
+      turn.error = `[${error.category}] ${error.errorCode}: ${error.message}`;
+    } else {
+      turn.submissionUnknown = true;
+      turn.error = "提交结果待核对；服务端可能已收到，本页不会自动重提。";
+      const records = unknownSubmissionsBySession.get(submissionSessionId) ?? [];
+      records.push({ sessionId: submissionSessionId, user: displayUser, knownTurnIds, turn });
+      unknownSubmissionsBySession.set(submissionSessionId, records);
+      // A lost creation response may already have accepted the turn. Discover it, never resubmit it.
+      try { applyAgentHistory(await api.agentHistory()); } catch { /* Keep the explicit unknown state. */ }
+    }
   } finally {
     acceptingRun.value = false;
   }
@@ -3395,12 +3600,63 @@ async function saveAgentSelection(turn: ChatTurn, text: string) {
   }
 }
 
+function captureAgentSourceReturnPoint(source: { turnId: string; sourceRefId: string }) {
+  const markdownAnchor = readerPaneRef.value?.captureScrollAnchor(segments.value.map((segment) => segment.lid)) ?? null;
+  pendingReadingReturnPoint = {
+    contextKey: workspaceContextKey.value,
+    turnId: source.turnId,
+    anchor: activeReaderSurface.value === "pdf"
+      ? pdfReaderPaneRef.value?.captureReadingAnchor() ?? null
+      : markdownAnchor
+        ? { surface: "markdown", ...markdownAnchor }
+        : null,
+  };
+}
+
 async function syncAfterAgentSourceOpen() {
+  const returnPoint = pendingReadingReturnPoint;
+  pendingReadingReturnPoint = null;
+  if (returnPoint?.contextKey === workspaceContextKey.value) {
+    readingContinuity.push(returnPoint);
+    returnToAnswerAvailable.value = true;
+  }
+  workspaceRef.value?.showReader();
   try {
     await syncViewport(true, true);
   } catch (error) {
     fail(error);
   }
+}
+
+async function returnToAgentAnswer() {
+  const contextKey = workspaceContextKey.value;
+  const point = readingContinuity.pop(contextKey);
+  returnToAnswerAvailable.value = readingContinuity.has(contextKey);
+  if (!point) return;
+  const token = readingContinuity.beginRestore(contextKey);
+  if (point.anchor) {
+    const restored = point.anchor.surface === "pdf"
+      ? !point.anchor.anchorLid || await doGoto(point.anchor.anchorLid)
+      : await doGoto(point.anchor.lid);
+    if (!restored) {
+      readingContinuity.push(point);
+      returnToAnswerAvailable.value = true;
+      return;
+    }
+    if (!readingContinuity.isCurrent(token) || workspaceContextKey.value !== contextKey) return;
+    const positionRestored = point.anchor.surface === "pdf"
+      ? await pdfReaderPaneRef.value?.restoreReadingAnchor(point.anchor) ?? false
+      : (await readerPaneRef.value?.restoreScrollAnchor(point.anchor), true);
+    if (!positionRestored) {
+      readingContinuity.push(point);
+      returnToAnswerAvailable.value = true;
+      return;
+    }
+  }
+  if (!readingContinuity.isCurrent(token) || workspaceContextKey.value !== contextKey) return;
+  workspaceRef.value?.showAssistant("agent");
+  await nextTick();
+  await rightRailRef.value?.scrollToTurn(point.turnId);
 }
 
 async function newChat() {
@@ -3429,6 +3685,7 @@ async function deleteChat(sessionId: string) {
   if (!sessionId) return;
   if (!window.confirm("删除这个对话历史?")) return;
   try {
+    unknownSubmissionsBySession.delete(sessionId);
     applyAgentHistory(await api.agentHistoryDelete(sessionId));
     askDraft.value = null;
     agentInput.value = "";
@@ -3565,6 +3822,7 @@ function resetBookSessionUi() {
   sourceReviewLlmBatch.value = null;
   sourceManifest.value = null;
   pdfSourceMap.value = null;
+  readerSurfacePreference.value = null;
   pdfRuntimeError.value = null;
   noteSourceFingerprint.value = null;
   outlineItems.value = [];
@@ -3609,6 +3867,7 @@ function resetBookSessionUi() {
   chat.value = [];
   chatSessions.value = [];
   activeChatSessionId.value = "";
+  unknownSubmissionsBySession.clear();
   askDraft.value = null;
   agentInput.value = "";
   handled.value = {};
@@ -3651,13 +3910,16 @@ async function submitOpenBook(dir = bookPickerDir.value) {
       :build-intent-available="!readerOnly && appSurface === 'reader'"
       :workbench-available="!readerOnly && appSurface === 'reader' && workbenchAvailable(buildWorkbenchSnapshot)"
       :desktop-host="desktopHost"
+      :mobile-collapsible="appSurface === 'reader'"
+      :mobile-open="mobileGlobalActionsOpen"
       @new-chat="newChat"
       @open-workbench="openBuildWorkbench"
       @open-book="openBook"
       @open-settings="openDesktopSettings"
-      @toggle-left-rail="leftRailOpen = !leftRailOpen"
+      @toggle-left-rail="toggleNavigationOutline"
       @open-build-intent="openBuildIntent"
       @toggle-debug="debugOpen = !debugOpen"
+      @close-mobile="mobileGlobalActionsOpen = false"
     />
 
     <AlignmentQualityBar
@@ -3958,7 +4220,24 @@ async function submitOpenBook(dir = bookPickerDir.value) {
 
     <main v-else-if="appSurface === 'loading'" class="app-loading">正在加载工作区...</main>
 
-    <div v-else-if="appSurface === 'reader'" class="workspace-grid" :class="{ 'left-collapsed': !leftRailOpen }" :style="workspaceStyle">
+    <ReaderWorkspace
+      v-else-if="appSurface === 'reader'"
+      ref="workspaceRef"
+      :logical="workspaceLogicalState"
+      :enabled="mobileWorkspaceEnabled"
+      :selection-active="!!hlPopover"
+      :left-collapsed="!leftRailOpen"
+      :return-available="returnToAnswerAvailable"
+      :reader-surface="activeReaderSurface"
+      :pdf-surface-available="pdfReaderAvailable"
+      :global-actions-open="mobileGlobalActionsOpen"
+      :style="workspaceStyle"
+      @tab-request="requestWorkspaceTab"
+      @projection-change="handleWorkspaceProjection"
+      @global-actions-request="mobileGlobalActionsOpen = !mobileGlobalActionsOpen"
+      @return="returnToAgentAnswer"
+      @reader-surface-request="selectReaderSurface"
+    >
       <LeftRail
         v-show="leftRailOpen"
         v-model:goto-input="gotoInput"
@@ -3996,7 +4275,8 @@ async function submitOpenBook(dir = bookPickerDir.value) {
       ></div>
 
       <PdfReaderPane
-        v-if="pdfReaderAvailable"
+        v-if="activeReaderSurface === 'pdf'"
+        ref="pdfReaderPaneRef"
         :source-manifest="sourceManifest"
         :source-map="pdfSourceMap"
         :pdf-url="api.pdfOriginalUrl()"
@@ -4039,7 +4319,7 @@ async function submitOpenBook(dir = bookPickerDir.value) {
         :image-meta="imageMeta"
         :image-asset="imageAssetFor"
         @select="onSelectSeg"
-        @prose-mouse-up="onProseMouseUp"
+        @prose-selection-change="onProseSelection"
         @current-lid="onCurrentLid"
         @viewport-interaction="onReaderViewportInteraction"
         @note-placement-target="onMarkdownNotePlacementTarget"
@@ -4065,6 +4345,7 @@ async function submitOpenBook(dir = bookPickerDir.value) {
       ></div>
 
       <RightRail
+        ref="rightRailRef"
         v-model:agent-input="agentInput"
         :chat="chat"
         :chat-sessions="chatSessions"
@@ -4107,6 +4388,8 @@ async function submitOpenBook(dir = bookPickerDir.value) {
         :intent-artifacts="intentArtifacts"
         :intent-artifacts-loading="intentArtifactsLoading"
         :intent-artifacts-error="intentArtifactsError"
+        :requested-tab="workspaceAuxTab"
+        :requested-tab-revision="workspaceAuxTabRevision"
         @send-agent="sendAgent"
         @presentation-follow-up="sendPresentationFollowUp"
         @new-chat="newChat"
@@ -4120,6 +4403,7 @@ async function submitOpenBook(dir = bookPickerDir.value) {
         @keep-effect="keepEffect"
         @save-answer-selection="saveAgentSelection"
         @place-note="startNotePlacement"
+        @agent-source-will-open="captureAgentSourceReturnPoint"
         @agent-source-opened="syncAfterAgentSourceOpen"
         @refresh-profile="refreshProfileSurface()"
         @mutate-profile="mutateProfile"
@@ -4131,7 +4415,7 @@ async function submitOpenBook(dir = bookPickerDir.value) {
         @open-artifacts="openIntentArtifacts"
         @artifact-cited="recordIntentUsage('artifact_cited', $event)"
       />
-    </div>
+    </ReaderWorkspace>
 
     <aside
       v-if="notePlacementState.phase !== 'idle'"

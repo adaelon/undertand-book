@@ -195,4 +195,34 @@ describe("ReaderPane Note rendering", () => {
     expect(wrapper.emitted("note-placement-invalid")).toHaveLength(1);
     wrapper.unmount();
   });
+
+  it("keeps wide code local, toggles soft wrap, and expands without changing source text", async () => {
+    const wrapper = mount(ReaderPane, {
+      props: {
+        segments: [segment("code.1", "code")],
+        viewportAnchor: null,
+        selectedLid: null,
+        renderSeg: (value) => value.text,
+        renderMarkdown: (source) => source,
+        markdownHeadingLevel: () => null,
+        isAsset: () => true,
+        isHighlighted: () => false,
+        highlightsOf: () => [],
+        highlightCardsOf: () => [],
+        visibleNotes: [],
+        hlExcerpt: () => "",
+        imageMeta: () => null,
+        imageAsset: () => null,
+      },
+    });
+    const original = wrapper.get(".asset-source.asset-code").text();
+    const actions = wrapper.findAll(".asset-head button");
+    await actions[0].trigger("click");
+    expect(wrapper.get(".asset-source.asset-code").classes()).toContain("soft-wrap");
+    expect(wrapper.get(".asset-source.asset-code").text()).toBe(original);
+    await actions[1].trigger("click");
+    expect(wrapper.get(".asset-block").classes()).toContain("asset-expanded");
+    await wrapper.findAll(".asset-head button")[1].trigger("click");
+    expect(wrapper.get(".asset-block").classes()).not.toContain("asset-expanded");
+  });
 });

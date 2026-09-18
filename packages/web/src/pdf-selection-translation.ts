@@ -16,6 +16,7 @@ export type PdfSelectionTranslationInvalidation =
   | "selection"
   | "existing-action"
   | "book-switch"
+  | "reader-surface-switch"
   | "viewport"
   | "unmount";
 

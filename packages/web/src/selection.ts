@@ -9,7 +9,9 @@
 // 注意:高亮 range 的 LID/offset 映射在 App.selectionRanges 里完成。公式已是独立 LID,
 // 那边会把公式按原子 leaf 处理,不再用 KaTeX DOM textContent 当 book.text 偏移。
 export function rangeToMarkdown(range: Range): string {
-  return normalizeMarkdown(fragmentToMarkdown(range.cloneContents()));
+  const fragment = range.cloneContents();
+  fragment.querySelectorAll?.("[data-reader-selection-ignore]").forEach((node) => node.remove());
+  return normalizeMarkdown(fragmentToMarkdown(fragment));
 }
 
 function normalizeMarkdown(value: string): string {

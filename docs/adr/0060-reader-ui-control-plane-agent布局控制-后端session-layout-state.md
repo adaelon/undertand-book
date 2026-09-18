@@ -2,6 +2,8 @@
 
 状态:已接受(2026-07-05,Profile Plugin Framework §0.5 reader layout control grill)
 
+设备侧单区/对照/wide 几何投影见 [ADR-0131](0131-mobile-reading-workspace-and-viewport-projection.md)。它只消费本 ADR 的逻辑布局，不新增后端 layout state，也不绕过 proposal revision 与权限边界。
+
 ## 背景
 Profile Plugin Framework 要让预构建、后端读时/agent、前端消费都按 `content_profile` 插拔。用户进一步要求 resident agent 能按用户任务直接调整整个阅读器页面布局,例如打开 paper structure map、聚焦 Codebook、pin 某个 evidence LID 或提议切换到 paper deep-read 工作台。现有命令面已确立 `reader.*` 是可变 UI 控制层,现有 `AgentEffect` 已支持可撤销的 `Goto/Highlight/Note`;但尚未定义 agent 如何安全操作布局。
 

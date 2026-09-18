@@ -298,6 +298,9 @@ describe("RightRail agent sources", () => {
     await flushPromises();
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(String(fetchMock.mock.calls[1][0])).toContain("/agent/source.open");
+    expect(wrapper.emitted("agent-source-will-open")).toEqual([[
+      { turnId: "turn-a", sourceRefId: "source_ref_a" },
+    ]]);
     expect(wrapper.emitted("agent-source-opened")).toHaveLength(1);
   });
 
@@ -508,6 +511,16 @@ describe("RightRail AskQuote", () => {
     expect(app).toContain("await api.agentRunCreate(msg, {");
     expect(app).not.toContain("const outbound = draft");
     expect(app).toContain("question_quote: draft ? { ...draft } : null");
+  });
+
+  it("exposes every auxiliary surface as a labelled keyboard-operable tab", async () => {
+    const wrapper = mount(RightRail, { props: baseProps });
+    const tabs = wrapper.findAll('.context-tabs > [role="tab"]');
+    expect(tabs.map((tab) => tab.text().trim())).toEqual(["问答", "成果", "画像", "轨迹", "公式", "笔记"]);
+    expect(tabs[0].attributes("aria-selected")).toBe("true");
+    await tabs[4].trigger("click");
+    expect(tabs[4].attributes("aria-selected")).toBe("true");
+    expect(wrapper.get("#reader-panel-formula").attributes("role")).toBe("tabpanel");
   });
 
   it("keeps profile updates quiet, undoable, and exposes usage only on demand", async () => {
@@ -770,5 +783,16 @@ describe("Resident activities", () => {
     expect(wrapper.find(".run-status").text()).toBe("已停止");
     expect(wrapper.findAll('.agent-activity[data-status="cancelled"]')).toHaveLength(2);
     wrapper.unmount();
+  });
+});
+
+describe("mobile input continuity", () => {
+  it("does not submit a composing IME value and keeps Ctrl+Enter for an explicit submit", async () => {
+    const wrapper = mount(RightRail, { props: { ...baseProps, agentInput: "草稿" } });
+    const input = wrapper.get(".agent-input textarea");
+    await input.trigger("keydown", { key: "Enter", ctrlKey: true, isComposing: true });
+    expect(wrapper.emitted("send-agent")).toBeUndefined();
+    await input.trigger("keydown", { key: "Enter", ctrlKey: true, isComposing: false });
+    expect(wrapper.emitted("send-agent")).toHaveLength(1);
   });
 });

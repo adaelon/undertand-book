@@ -102,6 +102,19 @@ class TestIntersectionObserver {
   unobserve() {}
 }
 
+class TestResizeObserver {
+  static instances: TestResizeObserver[] = [];
+  constructor(private readonly callback: ResizeObserverCallback) {
+    TestResizeObserver.instances.push(this);
+  }
+  observe() {}
+  disconnect() {}
+  unobserve() {}
+  trigger(target: Element) {
+    this.callback([{ target } as ResizeObserverEntry], this as unknown as ResizeObserver);
+  }
+}
+
 function annotation(memId: string, type: "highlight" | "note", lid = "1.1"): MemoryRecord {
   return {
     mem_id: memId,
@@ -117,11 +130,14 @@ function annotation(memId: string, type: "highlight" | "note", lid = "1.1"): Mem
 describe("PdfReaderPane", () => {
   beforeEach(() => {
     vi.stubGlobal("IntersectionObserver", TestIntersectionObserver);
+    vi.stubGlobal("ResizeObserver", TestResizeObserver);
+    TestResizeObserver.instances = [];
     vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue({
       clearRect: vi.fn(),
       setTransform: vi.fn(),
     } as unknown as CanvasRenderingContext2D);
     vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(600);
+    vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(800);
   });
 
   afterEach(() => {
@@ -260,10 +276,13 @@ describe("PdfReaderPane", () => {
     vi.spyOn(pages[0].element, "getBoundingClientRect").mockReturnValue(rect(-500, 300));
     vi.spyOn(pages[1].element, "getBoundingClientRect").mockReturnValue(rect(320, 1120));
 
+    await new Promise((resolve) => window.requestAnimationFrame(() => resolve(undefined)));
     const before = wrapper.emitted("viewport-change")?.length ?? 0;
+    const documentLoads = pdfMocks.legacyGetDocument.mock.calls.length;
     await wrapper.get(".pdf-page-list").trigger("scroll");
     await wrapper.get(".pdf-page-list").trigger("scroll");
     await new Promise((resolve) => window.setTimeout(resolve, 30));
+    await flushPromises();
 
     const changes = wrapper.emitted("viewport-change") ?? [];
     expect(changes).toHaveLength(before + 1);
@@ -274,6 +293,7 @@ describe("PdfReaderPane", () => {
       region_id: null,
     });
     expect((changes.at(-1)?.[0] as { center_page: number }).center_page).toBeCloseTo(1.1, 4);
+    expect(pdfMocks.legacyGetDocument).toHaveBeenCalledTimes(documentLoads);
 
     wrapper.unmount();
   });
@@ -389,6 +409,93 @@ describe("PdfReaderPane", () => {
     expect(zoomFit.text()).toContain("75%");
     expect(zoomOut.attributes()).toHaveProperty("disabled");
     expect(pdfMocks.getViewport).toHaveBeenCalledWith({ scale: 0.75 });
+
+    wrapper.unmount();
+  });
+
+  it("invalidates the old geometry on container width changes and waits through zero size", async () => {
+    const wrapper = mount(PdfReaderPane, {
+      props: {
+        sourceManifest: null,
+        sourceMap,
+        pdfUrl: "/api/book/pdf/original",
+        activeLid: null,
+        selectedLid: null,
+      },
+    });
+    await flushPromises();
+    await flushPromises();
+
+    const root = wrapper.get(".pdf-page-list").element as HTMLElement;
+    const pages = wrapper.findAll(".pdf-page-shell");
+    let pageWidth = 600;
+    const rootWidth = vi.spyOn(root, "clientWidth", "get").mockImplementation(() => pageWidth);
+    const widthSpies = pages.map((page) => vi.spyOn(page.element, "clientWidth", "get").mockImplementation(() => pageWidth));
+    const firstCanvas = wrapper.get("canvas").element as HTMLCanvasElement;
+    const initialGeneration = firstCanvas.dataset.renderGeneration;
+    const initialRenderCount = pdfMocks.textLayerBuilder.mock.calls.length;
+
+    pageWidth = 0;
+    TestResizeObserver.instances[0].trigger(root);
+    await flushPromises();
+    expect(firstCanvas.width).toBe(0);
+    expect(pdfMocks.textLayerBuilder).toHaveBeenCalledTimes(initialRenderCount);
+
+    pageWidth = 500;
+    TestResizeObserver.instances[0].trigger(root);
+    await flushPromises();
+    await flushPromises();
+    expect(firstCanvas.width).toBeGreaterThan(0);
+    expect(firstCanvas.dataset.renderGeneration).not.toBe(initialGeneration);
+    expect(pdfMocks.textLayerBuilder.mock.calls.length).toBeGreaterThan(initialRenderCount);
+
+    widthSpies.forEach((spy) => spy.mockRestore());
+    rootWidth.mockRestore();
+    wrapper.unmount();
+  });
+
+  it("captures and restores a source-bound PDF page anchor", async () => {
+    const mappedSource: PdfSourceMap = {
+      ...sourceMap,
+      entries: [{
+        lid: "1.1",
+        source_span: { start: 0, end: 10 },
+        status: "word_mapped",
+        primary_region: { pageIndex: 0, region_id: "r1", bbox: [20, 700, 120, 760] },
+        regions: [{ pageIndex: 0, region_id: "r1", bbox: [20, 700, 120, 760] }],
+        alignment: { confidence: 1 },
+      }],
+    };
+    const wrapper = mount(PdfReaderPane, {
+      props: {
+        sourceManifest: null,
+        sourceMap: mappedSource,
+        pdfUrl: "/api/book/pdf/original",
+        activeLid: null,
+        selectedLid: null,
+      },
+    });
+    await flushPromises();
+    await flushPromises();
+
+    const root = wrapper.get(".pdf-page-list").element as HTMLElement;
+    const page = wrapper.get(".pdf-page-shell").element as HTMLElement;
+    vi.spyOn(root, "clientHeight", "get").mockReturnValue(600);
+    vi.spyOn(root, "getBoundingClientRect").mockReturnValue({ top: 100, bottom: 700, height: 600, left: 0, right: 600, width: 600, x: 0, y: 100, toJSON: () => ({}) });
+    const pageRect = vi.spyOn(page, "getBoundingClientRect").mockReturnValue({ top: 0, bottom: 800, height: 800, left: 0, right: 600, width: 600, x: 0, y: 0, toJSON: () => ({}) });
+    const exposed = wrapper.vm as unknown as {
+      captureReadingAnchor: () => { sourceKey: string; pageIndex: number; anchorLid: string | null } | null;
+      restoreReadingAnchor: (anchor: unknown) => Promise<boolean>;
+    };
+    const anchor = exposed.captureReadingAnchor();
+    expect(anchor).toMatchObject({ sourceKey: "paper-a:cfg:/api/book/pdf/original", pageIndex: 0, anchorLid: "1.1" });
+    if (!anchor) throw new Error("expected PDF reading anchor");
+
+    root.scrollTop = 400;
+    pageRect.mockReturnValue({ top: -400, bottom: 400, height: 800, left: 0, right: 600, width: 600, x: 0, y: -400, toJSON: () => ({}) });
+    expect(await exposed.restoreReadingAnchor(anchor)).toBe(true);
+    expect(root.scrollTop).toBe(0);
+    expect(await exposed.restoreReadingAnchor({ ...anchor, sourceKey: "other" })).toBe(false);
 
     wrapper.unmount();
   });

@@ -780,3 +780,12 @@ Agent 围绕当前阅读问题交付、与对话关联且可继续修改的内�
 
 ## 交互教具
 AgentPresentation 用于支持观察、比较、试验、推理或构造理解的教学用途，可由当前问题现场形成并继续调整。它具有可操作对象和可观察反馈，是否形成正式学习证据由相应教学活动与用户表现决定。状态:NEW（[ADR-0130](docs/adr/0130-agent-rich-presentation-and-read-time-authoring.md)，已接受设计，2026-09-16）。
+
+## 设备侧呈现投影（device-local workspace projection）
+同一逻辑阅读工作区在当前设备可用空间中的呈现方式。它表达区域的摆放与可见方式，不改变书籍、证据、会话归属或后端逻辑布局的所有权。状态：NEW（见 [ADR-0131](docs/adr/0131-mobile-reading-workspace-and-viewport-projection.md)）。
+
+## 阅读返回点（reading return point）
+读者离开当前阅读或解释现场时保留的可返回位置，关联原文位置及发起动作的消息或内容对象。它不是新的书籍锚点或学习证据。状态：NEW（见 [ADR-0131](docs/adr/0131-mobile-reading-workspace-and-viewport-projection.md)）。
+
+## 冻结选区（frozen reading selection）
+读者对选中内容发起动作时固定的引用范围与文本上下文，不依赖之后浏览器原生选择是否仍然存在；证据有效性仍由既有范围和来源规则决定。状态：NEW（见 [ADR-0131](docs/adr/0131-mobile-reading-workspace-and-viewport-projection.md)）。

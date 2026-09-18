@@ -106,6 +106,8 @@ const props = defineProps<{
   intentArtifacts?: IntentArtifactOverlayV1 | null;
   intentArtifactsLoading?: boolean;
   intentArtifactsError?: string | null;
+  requestedTab?: ContextTab | null;
+  requestedTabRevision?: number;
 }>();
 const emit = defineEmits<{
   (e: "presentation-follow-up", message: string, receipt: import("../generated/PresentationFollowUp").PresentationFollowUp): void;
@@ -129,6 +131,7 @@ const emit = defineEmits<{
   (e: "start-profile-backfill", request: HistoricalBackfillStartRequest): void;
   (e: "mutate-profile-backfill", action: "cancel" | "retry" | "clear", request: HistoricalBackfillJobRequest): void;
   (e: "undo-profile-update", turnIndex: number, updateIndex: number, update: ProfileMemoryUpdate): void;
+  (e: "agent-source-will-open", source: { turnId: string; sourceRefId: string }): void;
   (e: "agent-source-opened"): void;
   (e: "refresh-artifacts"): void;
   (e: "open-artifacts"): void;
@@ -144,6 +147,14 @@ function trackTranscriptScroll() {
   const el = transcriptRef.value;
   if (el) followTranscript.value = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
 }
+async function scrollToTurn(turnId: string): Promise<boolean> {
+  await nextTick();
+  const turn = Array.from(transcriptRef.value?.querySelectorAll<HTMLElement>("[data-turn-id]") ?? [])
+    .find((candidate) => candidate.dataset.turnId === turnId);
+  if (!turn) return false;
+  turn.scrollIntoView({ block: "start" });
+  return true;
+}
 const latestActivities = computed(() => props.chat.at(-1)?.activities ?? []);
 const activityToolCount = computed(() => latestActivities.value.filter(a => a.kind === "tool").length);
 const agentInputRef = ref<HTMLTextAreaElement | null>(null);
@@ -155,6 +166,12 @@ const tabs: { id: ContextTab; label: string }[] = [
   { id: "formula", label: "公式" },
   { id: "notes", label: "笔记" },
 ];
+watch(
+  () => [props.requestedTab, props.requestedTabRevision] as const,
+  ([tab]) => {
+    if (tab && tabs.some((candidate) => candidate.id === tab)) selectTab(tab);
+  },
+);
 const noteCount = computed(() => props.contextNotes.length + props.contextHighlights.length);
 const profileAttentionCount = computed(() => (
   (props.profileMemory?.pending_candidates.length ?? 0)
@@ -393,6 +410,7 @@ async function openActiveAgentSourceInReader() {
   const requestSequence = sourceRequestSequence;
   popup.opening = true;
   popup.error = null;
+  emit("agent-source-will-open", { turnId: popup.turnId, sourceRefId: source.source_ref_id });
   try {
     await api.agentSourceOpen(popup.turnId, source.source_ref_id);
     if (requestSequence !== sourceRequestSequence) return;
@@ -404,6 +422,13 @@ async function openActiveAgentSourceInReader() {
     agentSourcePopup.value.error = error instanceof Error ? error.message : String(error);
   }
 }
+
+function onAgentInputKeydown(event: KeyboardEvent) {
+  if (event.isComposing || event.keyCode === 229) return;
+  if (event.ctrlKey && event.key === "Enter") emit("send-agent");
+}
+
+defineExpose({ scrollToTurn });
 
 watch(() => props.activeChatSessionId, closeAgentSourcePopup);
 watch(() => props.chat, () => {
@@ -583,12 +608,17 @@ function influenceLabel(influence: ProfileUsageTrace["influences"][number]): str
 
 <template>
   <aside class="right-rail">
-    <div class="context-tabs">
+    <div class="context-tabs" role="tablist" aria-label="辅助阅读功能">
       <button
         v-for="tab in tabs"
         :key="tab.id"
         class="tab"
         :class="{ active: activeTab === tab.id }"
+        type="button"
+        role="tab"
+        :id="`reader-tab-${tab.id}`"
+        :aria-selected="activeTab === tab.id"
+        :aria-controls="`reader-panel-${tab.id}`"
         @click="selectTab(tab.id)"
       >
         {{ tab.label }}
@@ -601,7 +631,7 @@ function influenceLabel(influence: ProfileUsageTrace["influences"][number]): str
       </button>
     </div>
 
-    <section v-show="activeTab === 'agent'" class="tab-panel agent-panel">
+    <section id="reader-panel-agent" v-show="activeTab === 'agent'" class="tab-panel agent-panel" role="tabpanel" aria-labelledby="reader-tab-agent">
       <div class="agent-head">
         <div>
           <p class="rail-kicker">阅读助手</p>
@@ -617,7 +647,7 @@ function influenceLabel(influence: ProfileUsageTrace["influences"][number]): str
       </div>
 
       <div ref="transcriptRef" class="transcript" @scroll="trackTranscriptScroll">
-        <div v-for="(turn, ti) in props.chat" :key="ti" class="turn">
+        <div v-for="(turn, ti) in props.chat" :key="turn.turnId ?? ti" class="turn" :data-turn-id="turn.turnId || undefined">
           <div v-if="turn.questionQuote" class="turn-quote">
             <div class="turn-quote-head">
               <span>{{ askQuoteLabel(turn.questionQuote) }}</span>
@@ -764,11 +794,12 @@ function influenceLabel(influence: ProfileUsageTrace["influences"][number]): str
         </div>
         <textarea
           ref="agentInputRef"
+          data-workspace-input="agent"
           :value="props.agentInput"
           rows="3"
           :placeholder="props.askDraft ? '围绕引用来源提问...' : '从当前阅读位置提问...'"
           @input="emit('update:agentInput', ($event.target as HTMLTextAreaElement).value)"
-          @keydown.ctrl.enter="emit('send-agent')"
+          @keydown="onAgentInputKeydown"
         />
         <button v-if="props.canStop" class="stop-agent" @click="emit('stop-agent')">停止</button>
         <button :disabled="props.sending || !props.agentInput.trim()" @click="emit('send-agent')">
@@ -777,7 +808,7 @@ function influenceLabel(influence: ProfileUsageTrace["influences"][number]): str
       </div>
     </section>
 
-    <section v-show="activeTab === 'artifacts'" class="tab-panel artifact-panel">
+    <section id="reader-panel-artifacts" v-show="activeTab === 'artifacts'" class="tab-panel artifact-panel" role="tabpanel" aria-labelledby="reader-tab-artifacts">
       <IntentArtifactPanel
         :overlay="props.intentArtifacts"
         :loading="props.intentArtifactsLoading"
@@ -788,7 +819,7 @@ function influenceLabel(influence: ProfileUsageTrace["influences"][number]): str
       />
     </section>
 
-    <section v-show="activeTab === 'profile'" class="tab-panel profile-panel">
+    <section id="reader-panel-profile" v-show="activeTab === 'profile'" class="tab-panel profile-panel" role="tabpanel" aria-labelledby="reader-tab-profile">
       <ProfileMemoryPanel
         :state="props.profileMemory"
         :loading="props.profileMemoryLoading"
@@ -809,7 +840,7 @@ function influenceLabel(influence: ProfileUsageTrace["influences"][number]): str
       />
     </section>
 
-    <section v-show="activeTab === 'trace'" class="tab-panel context-panel">
+    <section id="reader-panel-trace" v-show="activeTab === 'trace'" class="tab-panel context-panel" role="tabpanel" aria-labelledby="reader-tab-trace">
       <div class="panel-head">
         <p class="rail-kicker">最近工具轨迹</p>
         <h3 v-if="latestActivities.length">{{ activityToolCount }} 次工具调用 · {{ latestActivities.length }} 项活动</h3>
@@ -834,7 +865,7 @@ function influenceLabel(influence: ProfileUsageTrace["influences"][number]): str
       <p v-else-if="!latestActivities.length" class="empty panel-empty">暂无工具轨迹。</p>
     </section>
 
-    <section v-show="activeTab === 'formula'" class="tab-panel context-panel">
+    <section id="reader-panel-formula" v-show="activeTab === 'formula'" class="tab-panel context-panel" role="tabpanel" aria-labelledby="reader-tab-formula">
       <div class="panel-head">
         <p class="rail-kicker">公式剖面</p>
         <h3>{{ props.selectedFormula?.formula_lid ?? props.selectedLid ?? "未选择" }}</h3>
@@ -866,7 +897,7 @@ function influenceLabel(influence: ProfileUsageTrace["influences"][number]): str
       <p v-else class="empty panel-empty">在阅读区选择公式后查看预构建剖面。</p>
     </section>
 
-    <section v-show="activeTab === 'notes'" class="tab-panel context-panel">
+    <section id="reader-panel-notes" v-show="activeTab === 'notes'" class="tab-panel context-panel" role="tabpanel" aria-labelledby="reader-tab-notes">
       <div class="panel-head">
         <p class="rail-kicker">全部笔记</p>
         <h3>{{ noteCount }} 条</h3>
